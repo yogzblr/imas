@@ -123,12 +123,18 @@ func SendCookEventContext(ctx context.Context, tenantID, sproutID string, recipe
 		}
 		validSteps = pruned
 	}
-	return sendEnvelope(tenantID, sproutID, RecipeEnvelope{
+	env := RecipeEnvelope{
 		JobID:     JID,
 		Steps:     validSteps,
 		Test:      test,
 		InvokedBy: co.invokedBy,
-	})
+	}
+	// Stage before the push so the pull-readable copy (see stage.go) is
+	// never older than what the sprout was just sent.
+	if err := stageRecipe(ctx, tenantID, sproutID, env); err != nil {
+		return err
+	}
+	return sendEnvelope(tenantID, sproutID, env)
 }
 
 // SendStepsEvent sends steps to sproutID as one cook job under JID, the
