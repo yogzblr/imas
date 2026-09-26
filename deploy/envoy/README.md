@@ -45,14 +45,12 @@ Treat this as a reviewed starting point, not a drop-in production config.
   failure modes, not a functional end-to-end config on their own.
 - **Envoy version**: confirm the deployed Envoy build supports `EdDSA` in
   `jwt_authn` (added in a relatively recent release) — gateway JWTs are
-  Ed25519-signed, not RS256/ES256. `internal/gatewayjwt`'s own tests
-  (`mint_test.go`) validate the minted token and served JWKS against
-  `jwx` (an independent, standards-compliant Go JOSE library) as the
-  closest check achievable without a live Envoy/Keycloak instance in this
-  environment's sandboxed network — see the PR description for why an
-  actual Keycloak/Envoy run wasn't possible here, and re-run that
-  validation somewhere with normal network access before relying on this
-  config in production.
+  Ed25519-signed, not RS256/ES256. This config is tested end to end
+  against the official Envoy v1.34.1 release build (see
+  `testing/README.md`); pin that or a later version. That testing is what
+  caught the missing `requirement_map` that made every gated route answer
+  403. The Keycloak harness in `testing/` (a second, independent JWKS
+  consumer) still hasn't been run.
 - **Recipe route target**: `/files/` proxies to farmer's own
   `GET /files/<key>` (`internal/api/handlers/recipes.go`'s `GetFile`), the
   sprout-facing download path. Farmer re-verifies the forwarded gateway
