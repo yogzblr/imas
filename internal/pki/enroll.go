@@ -208,19 +208,28 @@ func verifyNKeyPossession(req EnrollRequest) error {
 			return errors.New("a signed field contains a newline")
 		}
 	}
-	skew := enrollNow().Sub(time.Unix(req.Timestamp, 0))
+	payload := EnrollSigningPayload(req.Timestamp, req.NKeyPub, req.Hostname, req.SproutPub, req.JoinToken)
+	return verifyTimestampedNKeySig(req.NKeyPub, req.Timestamp, req.NKeySig, payload)
+}
+
+// verifyTimestampedNKeySig checks that timestamp is within
+// EnrollSigMaxSkew of farmer's clock and that sigB64 (unpadded base64url)
+// is nkeyPub's signature over payload. Shared by enrollment
+// (verifyNKeyPossession) and gateway JWT refresh (RefreshSprout), which
+// sign different, domain-tagged payloads.
+func verifyTimestampedNKeySig(nkeyPub string, timestamp int64, sigB64 string, payload []byte) error {
+	skew := enrollNow().Sub(time.Unix(timestamp, 0))
 	if skew > EnrollSigMaxSkew || skew < -EnrollSigMaxSkew {
-		return errors.New("timestamp " + strconv.FormatInt(req.Timestamp, 10) + " is outside the allowed skew")
+		return errors.New("timestamp " + strconv.FormatInt(timestamp, 10) + " is outside the allowed skew")
 	}
-	sig, err := base64.RawURLEncoding.DecodeString(req.NKeySig)
+	sig, err := base64.RawURLEncoding.DecodeString(sigB64)
 	if err != nil {
 		return errors.New("nkey_sig is not unpadded base64url")
 	}
-	kp, err := nkeys.FromPublicKey(req.NKeyPub)
+	kp, err := nkeys.FromPublicKey(nkeyPub)
 	if err != nil {
 		return err
 	}
-	payload := EnrollSigningPayload(req.Timestamp, req.NKeyPub, req.Hostname, req.SproutPub, req.JoinToken)
 	if err := kp.Verify(payload, sig); err != nil {
 		return errors.New("nkey_sig does not verify against nkey_pub")
 	}
@@ -416,6 +425,19 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 // tenant SproutIDAndTenantForNKey found this sprout under, not necessarily
 // whatever tenant a caller might have guessed from context.
 func replayExistingEnrollment(ctx context.Context, tenantID, sproutID, nkeyPub string) (*EnrollResult, error) {
+	res, err := reissueExistingIdentity(ctx, tenantID, sproutID, nkeyPub)
+	if err != nil {
+		return nil, err
+	}
+	log.Infof("enroll: sprout %s replayed an existing enrollment (idempotency check)", sproutID)
+	return res, nil
+}
+
+// reissueExistingIdentity returns an accepted sprout's existing NATS User
+// JWT and the tenant X25519 public key, with a freshly minted gateway
+// JWT. Shared by the enrollment replay path and RefreshSprout; callers
+// must have verified the caller's proof of possession of nkeyPub first.
+func reissueExistingIdentity(ctx context.Context, tenantID, sproutID, nkeyPub string) (*EnrollResult, error) {
 	existingJWT, err := GetSproutUserJWTForTenant(tenantID, sproutID)
 	if err != nil {
 		log.Errorf("enroll: sprout %s has an accepted nkey but no readable JWT: %v", sproutID, err)
@@ -425,15 +447,14 @@ func replayExistingEnrollment(ctx context.Context, tenantID, sproutID, nkeyPub s
 	// (workstream J).
 	tenantPub, err := GetTenantX25519PublicKey()
 	if err != nil {
-		log.Errorf("enroll: idempotent replay for %s but failed to load tenant X25519 key: %v", sproutID, err)
+		log.Errorf("enroll: reissuing identity for %s but failed to load tenant X25519 key: %v", sproutID, err)
 		return nil, ErrEnrollmentFailed
 	}
 	gatewayJWT, err := mintGatewayJWTFor(ctx, tenantID, sproutID, nkeyPub)
 	if err != nil {
-		log.Errorf("enroll: idempotent replay for %s but failed to mint gateway JWT: %v", sproutID, err)
+		log.Errorf("enroll: reissuing identity for %s but failed to mint gateway JWT: %v", sproutID, err)
 		return nil, ErrEnrollmentFailed
 	}
-	log.Infof("enroll: sprout %s replayed an existing enrollment (idempotency check)", sproutID)
 	return &EnrollResult{SproutID: sproutID, JWT: existingJWT, GatewayJWT: gatewayJWT, TenantX25519Pub: tenantPub}, nil
 }
 

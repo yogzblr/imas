@@ -59,16 +59,102 @@ Treat this as a reviewed starting point, not a drop-in production config.
   ("Recipe storage migration") describes a dedicated, non-DMZ recipe
   service this route is meant to front instead — repoint the
   `recipe_service` cluster once that exists.
-- **Rate limiting on `/v1/enroll`**: the `local_ratelimit` filter here is
-  per-Envoy-worker and per-instance — real protection at scale (multiple
-  Envoy replicas) needs a shared/global rate-limit service, not this
-  config alone.
+- **Rate limiting on `/v1/enroll`**: the `local_ratelimit` bucket here is
+  per Envoy process: one bucket shared by all of that Envoy's worker
+  threads (Envoy's default, since `local_rate_limit_per_downstream_connection`
+  is unset), so with N replicas the fleet-wide budget is N × 20 per
+  minute. Real protection at scale needs a shared/global rate-limit
+  service, not this config alone.
+- **Rate limiting on `/v1/refresh`**: its own bucket, sized from the
+  fleet. See "Sizing the /v1/refresh bucket" below before deploying.
+
+## Sizing the /v1/refresh bucket
+
+`POST /v1/refresh` is how an enrolled sprout renews its short-lived
+gateway JWT. It gets its own route and its own `local_ratelimit` bucket,
+never `/v1/enroll`'s, because the two need opposite budgets:
+
+| Route | Authenticated by | Volume | Budget |
+|---|---|---|---|
+| `/v1/enroll` | the join token only | an Ansible rollout at a time | small and fixed (20 per 60 s per Envoy): it is what bounds join-token guessing |
+| `/v1/refresh` | NKey proof of possession, verified by farmer | every sprout, every ~⅔ of the TTL | large, sized from fleet size ÷ TTL |
+
+Both buckets are **per Envoy process** (shared by its worker threads;
+Envoy's default) and **per route** (Envoy builds a separate bucket for
+each route-level `local_ratelimit` config). `/v1/refresh` has no
+`jwt_authn` gate: a sprout that was powered off past its TTL holds only
+an expired gateway JWT and must still be able to renew it.
+
+### The math
+
+A sprout refreshes when its token is ⅔ of the way through its lifetime,
+minus up to 1/10 of the lifetime of random jitter
+(`internal/pki/enrollclient.go`, `gatewayRefreshDelay`). So the time
+between one sprout's refreshes is between 17/30 and 20/30 of the TTL.
+Size for the shortest interval, 17/30 × TTL:
+
+```
+fleet-wide refreshes/s   R = fleetSize / (17/30 × TTL)
+                           = 30 × fleetSize / (17 × TTL)
+
+per-Envoy refreshes/s    r = R × headroom / envoyReplicas
+
+tokens_per_fill          = ceil(r × fill_interval)
+max_tokens               = tokens_per_fill × (burstSeconds / fill_interval)
+```
+
+- **TTL** is farmer's `gatewayjwtttl` (`config.GatewayJWTTTL`), in
+  seconds. Halving the TTL doubles the load.
+- **headroom** (a whole number, default 2) covers uneven load balancing,
+  losing a replica, and sprouts catching up after an outage.
+- **max_tokens** is the burst Envoy absorbs before returning `429`
+  (default: 5 minutes' worth). A rate-limited sprout backs off (up to
+  5 minutes) and retries; its token expires only if refreshes keep
+  failing for roughly the last third of its lifetime (8 h at a 24 h TTL).
+  So an undersized bucket shows up as `429`s and delayed refreshes first,
+  and as expired tokens only if it stays undersized.
+
+### Worked examples (fill_interval 1 s, burst 300 s, headroom 2)
+
+| Fleet | TTL | Envoy replicas | R (fleet-wide) | tokens_per_fill (per Envoy) | max_tokens |
+|---|---|---|---|---|---|
+| 1,000,000 | 24 h | 4 | 20.4/s (1,225/min) | **11** | 3,300 |
+| 1,000,000 | 1 h | 4 | 490/s | 246 | 73,800 |
+| 100,000 | 24 h | 2 | 2.0/s | 3 | 900 |
+
+The first row is what `envoy.yaml` ships with. Compare `/v1/enroll`: 20
+per 60 s is 0.33/s per Envoy, about 1/30 of the first row.
+
+**Farmer has to keep up too.** Each refresh is a PXC lookup and an
+OpenBao Transit `sign` call. Size farmer and the Transit backend for R ×
+headroom, not just the Envoy bucket; raising the bucket past what they
+can serve only moves the `429`s to `5xx`s.
+
+### Setting it
+
+`envoy.yaml` is static. In a Helm-rendered deployment (the ops repo's
+Envoy chart, as with `deploy/saasapi/`):
+
+| File | What it is |
+|---|---|
+| `values.rate-limit.yaml` | `envoy.refreshRateLimit` values block to merge into the chart's `values.yaml` |
+| `_refresh-rate-limit.tpl` | Named templates rendering the `/v1/refresh` route and computing its bucket; include `imas.envoy.refreshRoute` in the Envoy config's route list |
+
+`tokens_per_fill` and `max_tokens` are computed from `fleetSize`,
+`gatewayJwtTtlSeconds`, `envoyReplicas`, `headroom`, `fillIntervalSeconds`
+and `burstSeconds`, unless `tokensPerFill`/`maxTokens` are set
+explicitly. Missing, zero or fractional inputs fail `helm template`
+with a message naming the value. The `/v1/enroll` bucket is deliberately
+not a value: it should not grow with the fleet.
 
 ## What this pairs with in the Go codebase
 
 - `internal/api/handlers/enroll.go` / `internal/api/routers.go` — the
   farmer-side `POST /v1/enroll` handler this config's enroll route
   proxies to.
+- `internal/api/handlers/refresh.go` / `internal/pki/refresh.go` — the
+  farmer-side `POST /v1/refresh` handler and its proof-of-possession
+  check, behind this config's refresh route.
 - `internal/pki/enroll.go` — the token validation, atomic redemption, and
   minting logic behind that handler (mints both the native NATS JWT and,
   via `internal/gatewayjwt`, the gateway JWT).

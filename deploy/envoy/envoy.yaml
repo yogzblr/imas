@@ -6,16 +6,28 @@
 # (nats-server's own decentralized-JWT auth, every later workstream) trusts
 # whatever this config lets through.
 #
-# Three routes, per the design doc's "Two gates, checking different
+# Four routes, per the design doc's "Two gates, checking different
 # things, not redundant with each other":
 #
 #   1. /v1/enroll        — NOT jwt_authn-gated (a sprout enrolling has no
-#                           JWT yet). Rate-limited instead, since it's the
-#                           one DMZ-facing route without a JWT gate
-#                           (design doc's open item, cloudxp-machine-
-#                           manager-api-design.md §3.2). Proxies straight
-#                           to farmer's existing HTTPS API
+#                           JWT yet). Rate-limited instead, on a small
+#                           budget of its own: the only credential here is
+#                           the join token, so this bucket is what bounds
+#                           join-token guessing (design doc's open item,
+#                           cloudxp-machine-manager-api-design.md §3.2).
+#                           Proxies straight to farmer's existing HTTPS API
 #                           (internal/api/handlers/enroll.go).
+#   1b. /v1/refresh      — NOT jwt_authn-gated either: an enrolled sprout
+#                           renews its gateway JWT here, possibly after it
+#                           has expired. Authenticated by farmer instead,
+#                           with an NKey proof of possession
+#                           (internal/pki/refresh.go); no join token.
+#                           Legitimately high-volume at fleet scale, so it
+#                           has its own, much larger rate-limit bucket,
+#                           sized from fleet size / gateway JWT TTL (see
+#                           README.md, "Sizing the /v1/refresh bucket").
+#                           Never shares /v1/enroll's bucket, in either
+#                           direction.
 #   2. /v1/recipes/*      — jwt_authn-gated, proxied unmodified (no
 #                           prefix_rewrite — the path matches farmer's own
 #                           route exactly) to farmer's dedicated recipe
@@ -96,14 +108,19 @@ static_resources:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
                               stat_prefix: enroll_rate_limiter
                               token_bucket:
-                                # Sized for a bulk-onboarding Ansible run
-                                # against a single Envoy worker, not a
-                                # steady-state rate — this is a coarse,
-                                # per-worker local bound (design doc's
-                                # open item: "Rate-limiting the enrollment
-                                # endpoint itself"), not a substitute for a
-                                # shared/global rate limit service in front
-                                # of many Envoy replicas.
+                                # Sized for a bulk-onboarding Ansible run,
+                                # not a steady-state rate. This bucket is
+                                # local to one Envoy process: shared by
+                                # all of its worker threads (Envoy's
+                                # default; local_rate_limit_per_downstream_connection
+                                # is unset), and separate from every other
+                                # route's bucket, /v1/refresh's included.
+                                # With N Envoy replicas the fleet-wide
+                                # budget is N x this. It is a coarse bound
+                                # (design doc's open item: "Rate-limiting
+                                # the enrollment endpoint itself"), not a
+                                # substitute for a shared/global rate
+                                # limit service.
                                 max_tokens: 20
                                 tokens_per_fill: 20
                                 fill_interval: 60s
@@ -112,6 +129,50 @@ static_resources:
                                 default_value: { numerator: 100, denominator: HUNDRED }
                               filter_enforced:
                                 runtime_key: enroll_rate_limit_enforced
+                                default_value: { numerator: 100, denominator: HUNDRED }
+
+                        # Route 1b: gateway JWT refresh. No JWT gate: a
+                        # sprout whose gateway JWT has already expired
+                        # (powered off past its TTL) must still be able to
+                        # renew it. Farmer authenticates the request with
+                        # an NKey proof of possession
+                        # (internal/api/handlers/refresh.go) and only ever
+                        # re-issues an existing, accepted identity. Its
+                        # own local_ratelimit config, so its own token
+                        # bucket (Envoy builds one per route-level config),
+                        # sized for the fleet's refresh volume rather than
+                        # enrollment's anti-guessing budget. Exact path
+                        # match, so nothing else lands in this bucket.
+                        - match: { path: "/v1/refresh" }
+                          route:
+                            cluster: farmer_api
+                            timeout: 30s
+                          typed_per_filter_config:
+                            envoy.filters.http.jwt_authn:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+                              disabled: true
+                            envoy.filters.http.local_ratelimit:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                              stat_prefix: refresh_rate_limiter
+                              token_bucket:
+                                # Per Envoy process, like /v1/enroll's.
+                                # These defaults are README.md's worked
+                                # example: 1,000,000 sprouts, 24h gateway
+                                # JWT TTL, 4 Envoy replicas, 2x headroom
+                                # -> 11 refreshes/s per Envoy, with 5
+                                # minutes of that as burst. Resize with
+                                # values.rate-limit.yaml
+                                # (envoy.refreshRateLimit) and
+                                # _refresh-rate-limit.tpl, per README.md's
+                                # "Sizing the /v1/refresh bucket".
+                                max_tokens: 3300
+                                tokens_per_fill: 11
+                                fill_interval: 1s
+                              filter_enabled:
+                                runtime_key: refresh_rate_limit_enabled
+                                default_value: { numerator: 100, denominator: HUNDRED }
+                              filter_enforced:
+                                runtime_key: refresh_rate_limit_enforced
                                 default_value: { numerator: 100, denominator: HUNDRED }
 
                         # Route 2: authenticated recipe download. Passed
@@ -179,8 +240,9 @@ static_resources:
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
                       stat_prefix: http_local_rate_limiter
-                      # Disabled globally; only the /v1/enroll route above
-                      # (typed_per_filter_config) turns this on.
+                      # Disabled globally; only the /v1/enroll and
+                      # /v1/refresh routes above (typed_per_filter_config)
+                      # turn this on, each with its own bucket.
                       filter_enabled:
                         runtime_key: local_rate_limit_enabled
                         default_value: { numerator: 0, denominator: HUNDRED }

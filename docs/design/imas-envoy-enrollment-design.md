@@ -96,6 +96,36 @@ Every credential elsewhere in this design (the JWT, the X25519 keypairs) assumes
 
 **Clock requirement.** A sprout whose clock is more than 5 minutes off farmer's cannot enroll or replay. Freshly provisioned hosts should have NTP running before the enrollment step.
 
+## Gateway JWT refresh: its own route and contract
+
+The gateway JWT is short-lived by design (`config.GatewayJWTTTL`), so every enrolled sprout renews it continuously. That is a different job from enrollment, and it gets its own endpoint rather than reusing `/v1/enroll`'s replay path.
+
+**Request shape** (`POST /v1/refresh`, JSON). There is no `join_token` field; farmer refuses a body that has one.
+
+```json
+{
+  "nkey_pub":  "U...",
+  "timestamp": 1790000000,
+  "nkey_sig":  "<unpadded base64url Ed25519 signature>"
+}
+```
+
+- `nkey_sig` is the NKey seed's signature over these bytes, joined with `\n` and with no trailing newline (`pki.RefreshSigningPayload`):
+  ```
+  imas-refresh-v1
+  <timestamp, decimal>
+  <nkey_pub>
+  ```
+  The `imas-refresh-v1` domain tag differs from `imas-enroll-v1`, so a signature made for one endpoint is never accepted by the other. The timestamp window is the same ±5 minutes.
+- Farmer verifies the signature, then looks `nkey_pub` up among **accepted** sprouts only. A found sprout gets its existing NATS User JWT, a freshly minted gateway JWT and the tenant X25519 public key back. Anything else (unknown, denied, rejected or deleted sprout, bad or stale signature) gets the same generic `enrollment_failed`. Refresh can only re-issue an existing identity. It never redeems a join token or creates a sprout, so a sprout deleted on farmer can't bring itself back from its refresh loop.
+- **Not `jwt_authn`-gated at Envoy.** A sprout powered off for longer than the TTL holds only an expired gateway JWT and must still be able to renew it; the proof of possession is the authentication.
+- **Its own rate-limit bucket.** `/v1/enroll`'s bucket stays small because the join token is its only credential, so that budget is what bounds join-token guessing. Refresh is authenticated and legitimately high-volume (every sprout, roughly every two-thirds of the TTL), so it gets a separate, much larger bucket sized from fleet size ÷ TTL. The two never share tokens. See `deploy/envoy/README.md`, "Sizing the /v1/refresh bucket".
+
+**Sprout side** (`internal/pki/enrollclient.go`):
+- The refresh is scheduled two-thirds of the way through the token's lifetime, less up to a tenth of the lifetime of random jitter, and retried with backoff (capped at 5 minutes) on failure.
+- **The tenant X25519 public key is pinned write-once at enrollment.** A refresh (or a replayed enrollment) returning a different key is refused whole: nothing from that response is persisted, and the sprout exits with an error so its service manager records a failure. This stays the rule until tenant key rotation is designed with its own authentication (workstream J). Pinned TLS only rules out an outside attacker; it doesn't cover a farmer-side bug, or the known gap that the tenant key is not yet per-tenant.
+- **The join token is deleted by the sprout itself** once enrollment is fully persisted (the NATS User JWT, written last, is on disk): it is removed from the sprout config file, which is kept at mode 0600. A token supplied by environment variable or command-line flag can't be removed by the sprout, so it logs where the token still is. The token has no use left after enrollment: every later call is a proof-of-possession replay or refresh.
+
 ## Why this is safe even crossing the DMZ bus before any payload encryption exists
 
 The only things transiting the bus during this exchange are the sprout's own generated **public** keys (NKey public key, X25519 public key) and a signature made with the NKey seed — none of them secret even if a compromised bus observes them. Observing a `nkey_pub` is not enough to obtain that sprout's identity, because every request must be signed by its seed (see "Proof of possession" above). The sprout's private key material never leaves the sprout; the tenant's private key never leaves OpenBao custody. No bootstrapping-before-security-exists problem here, by construction.
