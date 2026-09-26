@@ -100,7 +100,7 @@ func (s *GatewaySigner) PublicKeys(ctx context.Context) ([]TransitKeyVersion, er
 		if version < minVersion {
 			continue
 		}
-		pub, perr := parseEd25519PublicKeyPEM(v.PublicKey)
+		pub, perr := parseTransitEd25519PublicKey(v.PublicKey)
 		if perr != nil {
 			return nil, fmt.Errorf("gatewayjwt: Transit key %q version %d: %w", s.keyName, version, perr)
 		}
