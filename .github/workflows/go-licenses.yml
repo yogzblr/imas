@@ -4,7 +4,7 @@ on:
     paths:
       - 'go.mod'
     branches:
-      - master
+      - main
       - v1
       - v2
 

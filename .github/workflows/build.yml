@@ -1,0 +1,133 @@
+name: Build
+
+# Build-check pipeline: cross-compiles the sprout agent and the imas CLI for
+# Linux + Windows, and builds the farmer Docker image. Runs on every push/PR
+# to main to catch cross-platform breakage early. Unlike release.yml
+# (goreleaser, triggered on v* tags), this workflow never cuts a release —
+# it only pushes the farmer image to GHCR on a direct push to main, tagged
+# by branch/sha rather than version, so it never collides with a real
+# release's version/latest tags.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  GO_VERSION: "1.26.x"
+
+jobs:
+  binaries:
+    name: Build ${{ matrix.binary }} (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        binary: [sprout, imas]
+        goos: [linux, windows]
+        goarch: [amd64, arm64]
+        exclude:
+          # Windows/arm64 isn't a supported sprout target yet (see
+          # docs/design/imas-windows-parity-addendum.md) — keep windows to
+          # amd64 until that's verified.
+          - goos: windows
+            goarch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      - name: Resolve build path and output name
+        id: meta
+        shell: bash
+        run: |
+          case "${{ matrix.binary }}" in
+            sprout) echo "path=./cmd/sprout" >> "$GITHUB_OUTPUT" ;;
+            imas)   echo "path=./cmd/imas" >> "$GITHUB_OUTPUT" ;;
+            *) echo "unknown binary ${{ matrix.binary }}" >&2; exit 1 ;;
+          esac
+          ext=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
+          echo "ext=$ext" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          go build -tags no_self_update \
+            -ldflags "-X main.GitCommit=${{ steps.meta.outputs.commit }} -X main.Tag=ci" \
+            -o "dist/imas-${{ matrix.binary }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ steps.meta.outputs.ext }}" \
+            "${{ steps.meta.outputs.path }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: imas-${{ matrix.binary }}-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          retention-days: 14
+          if-no-files-found: error
+
+  farmer-docker:
+    name: Build farmer Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      - name: Build farmer binary (linux/amd64)
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p docker/build
+          GIT_COMMIT=$(git rev-parse --short HEAD)
+          go build -tags no_self_update \
+            -ldflags "-X main.GitCommit=$GIT_COMMIT -X main.Tag=ci" \
+            -o docker/build/imas-farmer \
+            ./cmd/farmer
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        # Only push from a real push to main — never from a pull_request,
+        # since a fork PR shouldn't get GHCR write access, and PRs only
+        # need the build to succeed, not to publish anything.
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (and push on main) farmer image
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/build
+          file: docker/goreleaser.farmer.dockerfile
+          push: ${{ github.event_name == 'push' }}
+          tags: |
+            ghcr.io/yogzblr/imas-farmer:main
+            ghcr.io/yogzblr/imas-farmer:sha-${{ github.sha }}
