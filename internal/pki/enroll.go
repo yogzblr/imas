@@ -5,9 +5,12 @@ package pki
 // system where a caller has no credential yet").
 //
 // FLAG FOR SECURITY REVIEW per the task brief — this is the literal front
-// door of the trust chain: possession of a valid, unexhausted join token
-// is the sole authorization check standing between an anonymous caller and
-// a signed sprout identity.
+// door of the trust chain. Every request must first prove it holds the
+// seed of the nkey_pub it presents (verifyNKeyPossession). After that, a
+// valid, unexhausted join token is the only authorization check between
+// an anonymous caller and a new signed sprout identity. For an
+// already-enrolled nkey_pub, that proof of possession is the only check
+// before its identity is replayed.
 //
 // Every failure path in Enroll returns the single generic
 // ErrEnrollmentFailed sentinel (design doc §3.4) — unknown key_id,
@@ -21,6 +24,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"strconv"
@@ -141,14 +145,98 @@ type EnrollResult struct {
 	TenantX25519Pub string
 }
 
-// Enroll implements design doc §3.3's step-by-step flow end to end: the
-// idempotency check, join-token lookup/validation, atomic redemption, and
-// minting. This repo runs farmer and the bus in one process, so there's no
+// EnrollRequest carries one POST /v1/enroll request's fields into Enroll.
+//
+// Timestamp and NKeySig are the proof-of-possession for NKeyPub
+// (docs/design/imas-envoy-enrollment-design.md, "Proof of possession"):
+// NKeySig is the sprout's NKey seed's signature (nkeys KeyPair.Sign) over
+// EnrollSigningPayload(Timestamp, NKeyPub, Hostname, SproutPub,
+// JoinToken), unpadded base64url-encoded — the same encoding NATS's own
+// CONNECT nonce signature uses.
+type EnrollRequest struct {
+	JoinToken string
+	NKeyPub   string
+	Hostname  string
+	SproutPub string
+	// Timestamp is the Unix time, in seconds, at which the sprout signed
+	// this request.
+	Timestamp int64
+	NKeySig   string
+}
+
+// enrollSigDomain prefixes every enrollment signing payload so a
+// signature made for this purpose can't be lifted from, or mistaken for,
+// anything else the same NKey signs (NATS CONNECT nonces in particular).
+// Bump its version for any change to EnrollSigningPayload's layout.
+const enrollSigDomain = "imas-enroll-v1"
+
+// EnrollSigMaxSkew bounds how far a request's Timestamp may sit from
+// farmer's clock, in either direction, and still be accepted. It is the
+// window in which a captured signed request can be resubmitted. See the
+// design doc's "Proof of possession" section for why a timestamp was
+// chosen over a server-issued nonce.
+const EnrollSigMaxSkew = 5 * time.Minute
+
+// enrollNow is time.Now, swappable in tests.
+var enrollNow = time.Now
+
+// EnrollSigningPayload returns the exact bytes a sprout signs with its
+// NKey seed to prove possession of nkeyPub: enrollSigDomain, then each
+// field, newline-separated, in this order. Every request field is covered
+// so none can be swapped under a captured signature. It is exported so a
+// Go client and the tests build byte-identical input to what Enroll
+// verifies. Enroll rejects any field containing a newline, so the
+// encoding is unambiguous.
+func EnrollSigningPayload(timestamp int64, nkeyPub, hostname, sproutPub, joinToken string) []byte {
+	return []byte(strings.Join([]string{
+		enrollSigDomain,
+		strconv.FormatInt(timestamp, 10),
+		nkeyPub,
+		hostname,
+		sproutPub,
+		joinToken,
+	}, "\n"))
+}
+
+// verifyNKeyPossession checks req.NKeySig against req.NKeyPub over
+// EnrollSigningPayload, and req.Timestamp against EnrollSigMaxSkew. The
+// error is for local logging only; Enroll collapses it to
+// ErrEnrollmentFailed.
+func verifyNKeyPossession(req EnrollRequest) error {
+	for _, f := range []string{req.NKeyPub, req.Hostname, req.SproutPub, req.JoinToken} {
+		if strings.ContainsRune(f, '\n') {
+			return errors.New("a signed field contains a newline")
+		}
+	}
+	skew := enrollNow().Sub(time.Unix(req.Timestamp, 0))
+	if skew > EnrollSigMaxSkew || skew < -EnrollSigMaxSkew {
+		return errors.New("timestamp " + strconv.FormatInt(req.Timestamp, 10) + " is outside the allowed skew")
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(req.NKeySig)
+	if err != nil {
+		return errors.New("nkey_sig is not unpadded base64url")
+	}
+	kp, err := nkeys.FromPublicKey(req.NKeyPub)
+	if err != nil {
+		return err
+	}
+	payload := EnrollSigningPayload(req.Timestamp, req.NKeyPub, req.Hostname, req.SproutPub, req.JoinToken)
+	if err := kp.Verify(payload, sig); err != nil {
+		return errors.New("nkey_sig does not verify against nkey_pub")
+	}
+	return nil
+}
+
+// Enroll implements design doc §3.3's step-by-step flow end to end:
+// proof of possession of the NKey, the idempotency check, join-token
+// lookup/validation, atomic redemption, and minting. This repo runs
+// farmer and the bus in one process, so there's no
 // internal.sprout.mint NATS hop here (cloudxp-machine-manager-api-design.md
 // §2.2's subject exists for a split SaaS-API/farmer deployment this repo
 // doesn't have yet) — farmer validates the token against saas schema
 // directly and mints the JWT itself, in one call.
-func Enroll(ctx context.Context, joinToken, nkeyPub, hostname, sproutPub string) (*EnrollResult, error) {
+func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
+	joinToken, nkeyPub, hostname, sproutPub := req.JoinToken, req.NKeyPub, req.Hostname, req.SproutPub
 	if !nkeys.IsValidPublicUserKey(nkeyPub) {
 		log.Warnf("enroll: rejected malformed nkey_pub")
 		return nil, ErrEnrollmentFailed
@@ -160,6 +248,20 @@ func Enroll(ctx context.Context, joinToken, nkeyPub, hostname, sproutPub string)
 	// ordering further down).
 	if _, err := decodeBoxPub(sproutPub); err != nil {
 		log.Warnf("enroll: rejected malformed sprout_pub: %v", err)
+		return nil, ErrEnrollmentFailed
+	}
+
+	// Proof of possession, before anything is looked up by nkey_pub (FLAG
+	// FOR SECURITY REVIEW). nkey_pub is not a secret: Envoy forwards it
+	// upstream as x-imas-sprout-nkey, and it appears in every JWT this
+	// sprout holds. Without this check, the idempotency replay below would
+	// mint a gateway JWT for an already-enrolled sprout to anyone who knew
+	// its nkey_pub. First-time enrollments are checked too: otherwise a
+	// join-token holder could register a nkey_pub whose seed they don't
+	// hold, and when the real owner later enrolls, replay would place its
+	// sprout in their tenant.
+	if err := verifyNKeyPossession(req); err != nil {
+		log.Warnf("enroll: rejected proof of possession for nkey_pub %s: %v", nkeyPub, err)
 		return nil, ErrEnrollmentFailed
 	}
 
@@ -307,6 +409,8 @@ func Enroll(ctx context.Context, joinToken, nkeyPub, hostname, sproutPub string)
 
 // replayExistingEnrollment handles design doc §3.3 step 1: an already-
 // accepted nkey_pub gets its existing identity back, no token touched.
+// Enroll only calls it after verifyNKeyPossession has passed; the caller
+// has proven it holds nkeyPub's seed, not just that it knows nkeyPub.
 // The gateway JWT is still minted fresh — see EnrollResult.GatewayJWT's
 // doc comment on why it isn't cached like the NATS JWT is. tenantID is the
 // tenant SproutIDAndTenantForNKey found this sprout under, not necessarily

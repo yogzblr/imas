@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/nats-io/nkeys"
 	"golang.org/x/crypto/nacl/box"
 
 	"github.com/yogzblr/imas/internal/config"
@@ -71,6 +73,41 @@ func generateTestBoxPub(t *testing.T) string {
 		t.Fatalf("rand.Read: %v", err)
 	}
 	return base64.StdEncoding.EncodeToString(pub[:])
+}
+
+// signedEnrollRequest builds an enrollRequest with a valid proof of
+// possession for kp's public key, as a real sprout would send it.
+func signedEnrollRequest(t *testing.T, kp nkeys.KeyPair, joinToken, hostname, sproutPub string) enrollRequest {
+	t.Helper()
+	pub, err := kp.PublicKey()
+	if err != nil {
+		t.Fatalf("public key: %v", err)
+	}
+	req := enrollRequest{JoinToken: joinToken, NKeyPub: pub, Hostname: hostname, SproutPub: sproutPub, Timestamp: time.Now().Unix()}
+	sig, err := kp.Sign(pki.EnrollSigningPayload(req.Timestamp, req.NKeyPub, req.Hostname, req.SproutPub, req.JoinToken))
+	if err != nil {
+		t.Fatalf("signing enrollment payload: %v", err)
+	}
+	req.NKeySig = base64.RawURLEncoding.EncodeToString(sig)
+	return req
+}
+
+// acceptedTestNKey creates a user NKey and registers it as the accepted
+// sprout "web-01", so a request presenting it takes the replay path.
+func acceptedTestNKey(t *testing.T) nkeys.KeyPair {
+	t.Helper()
+	kp, err := nkeys.CreateUser()
+	if err != nil {
+		t.Fatalf("create nkey: %v", err)
+	}
+	pub, _ := kp.PublicKey()
+	if err := pki.UnacceptNKey(pki.CurrentTenantID(), "web-01", pub); err != nil {
+		t.Fatalf("UnacceptNKey: %v", err)
+	}
+	if err := pki.AcceptNKey(pki.CurrentTenantID(), "web-01"); err != nil {
+		t.Fatalf("AcceptNKey: %v", err)
+	}
+	return kp
 }
 
 // fakeGatewayMinter satisfies pki's unexported gatewayJWTMinter interface
@@ -150,11 +187,54 @@ func TestEnroll_MissingSproutPub(t *testing.T) {
 	assertEnrollFailed(t, w)
 }
 
+// A request missing its proof of possession is rejected at the handler,
+// before pki.Enroll runs.
+func TestEnroll_MissingProofOfPossession(t *testing.T) {
+	setupPKIDirs(t)
+
+	kp, _ := nkeys.CreateUser()
+	for name, strip := range map[string]func(*enrollRequest){
+		"nkey_sig":  func(r *enrollRequest) { r.NKeySig = "" },
+		"timestamp": func(r *enrollRequest) { r.Timestamp = 0 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := signedEnrollRequest(t, kp, "ek_1.secret", "web-01", generateTestBoxPub(t))
+			strip(&req)
+			body, _ := json.Marshal(req)
+			w := httptest.NewRecorder()
+			Enroll(w, httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(body)))
+			assertEnrollFailed(t, w)
+		})
+	}
+}
+
+// An already-enrolled sprout's nkey_pub is public (Envoy forwards it as
+// x-imas-sprout-nkey). Presenting it with a signature from any other key
+// must get the generic failure, not the sprout's identity and a fresh
+// gateway JWT.
+func TestEnroll_ReplayWithoutValidSignatureRejected(t *testing.T) {
+	setupPKIDirs(t)
+	withFakeGatewaySigner(t)
+	withFakeTenantBoxOpenBao(t)
+	withFakeFleetKeySource(t)
+
+	victim := acceptedTestNKey(t)
+	victimPub, _ := victim.PublicKey()
+	attacker, _ := nkeys.CreateUser()
+
+	req := signedEnrollRequest(t, attacker, "irrelevant.token", "web-01", generateTestBoxPub(t))
+	req.NKeyPub = victimPub
+	body, _ := json.Marshal(req)
+	w := httptest.NewRecorder()
+	Enroll(w, httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(body)))
+	assertEnrollFailed(t, w)
+}
+
 func TestEnroll_UnknownToken(t *testing.T) {
 	setupPKIDirs(t)
 
-	nkey := generateTestUserNKey(t)
-	body, _ := json.Marshal(enrollRequest{JoinToken: "ek_nope.secret", NKeyPub: nkey, Hostname: "web-01", SproutPub: generateTestBoxPub(t)})
+	kp, _ := nkeys.CreateUser()
+	body, _ := json.Marshal(signedEnrollRequest(t, kp, "ek_nope.secret", "web-01", generateTestBoxPub(t)))
 	req := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	Enroll(w, req)
@@ -167,8 +247,9 @@ func TestEnroll_UnknownToken(t *testing.T) {
 
 // TestEnroll_IdempotentReplaySucceeds drives a full 200 response through
 // the handler without needing a real saas.enrollment_keys table: an
-// already-accepted nkey_pub takes design doc §3.3 step 1's idempotency
-// path, which never touches the enrollment-key store at all.
+// already-accepted nkey_pub, correctly signed for, takes design doc §3.3
+// step 1's idempotency path, which never touches the enrollment-key store
+// at all.
 func TestEnroll_IdempotentReplaySucceeds(t *testing.T) {
 	setupPKIDirs(t)
 	config.FarmerWSPort = "5407"
@@ -176,15 +257,10 @@ func TestEnroll_IdempotentReplaySucceeds(t *testing.T) {
 	withFakeTenantBoxOpenBao(t)
 	fleetKeys := withFakeFleetKeySource(t)
 
-	nkey := generateTestUserNKey(t)
-	if err := pki.UnacceptNKey(pki.CurrentTenantID(), "web-01", nkey); err != nil {
-		t.Fatalf("UnacceptNKey: %v", err)
-	}
-	if err := pki.AcceptNKey(pki.CurrentTenantID(), "web-01"); err != nil {
-		t.Fatalf("AcceptNKey: %v", err)
-	}
+	kp := acceptedTestNKey(t)
+	nkey, _ := kp.PublicKey()
 
-	body, _ := json.Marshal(enrollRequest{JoinToken: "irrelevant.token", NKeyPub: nkey, Hostname: "web-01", SproutPub: generateTestBoxPub(t)})
+	body, _ := json.Marshal(signedEnrollRequest(t, kp, "irrelevant.token", "web-01", generateTestBoxPub(t)))
 	req := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	Enroll(w, req)
@@ -254,14 +330,8 @@ func TestEnroll_FailsClosedWithoutFleetSigningKey(t *testing.T) {
 			SetFleetKeySource(src)
 			t.Cleanup(func() { SetFleetKeySource(nil) })
 
-			nkey := generateTestUserNKey(t)
-			if err := pki.UnacceptNKey(pki.CurrentTenantID(), "web-01", nkey); err != nil {
-				t.Fatalf("UnacceptNKey: %v", err)
-			}
-			if err := pki.AcceptNKey(pki.CurrentTenantID(), "web-01"); err != nil {
-				t.Fatalf("AcceptNKey: %v", err)
-			}
-			body, _ := json.Marshal(enrollRequest{JoinToken: "irrelevant.token", NKeyPub: nkey, Hostname: "web-01", SproutPub: generateTestBoxPub(t)})
+			kp := acceptedTestNKey(t)
+			body, _ := json.Marshal(signedEnrollRequest(t, kp, "irrelevant.token", "web-01", generateTestBoxPub(t)))
 			w := httptest.NewRecorder()
 			Enroll(w, httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(body)))
 			assertEnrollFailed(t, w)

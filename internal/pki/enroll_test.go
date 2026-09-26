@@ -81,17 +81,42 @@ func withFakeGatewayMinter(t *testing.T) *fakeGatewayMinter {
 	return f
 }
 
-func testEnrollNKey(t *testing.T) string {
+func testEnrollNKey(t *testing.T) nkeys.KeyPair {
 	t.Helper()
 	kp, err := nkeys.CreateUser()
 	if err != nil {
 		t.Fatalf("create nkey: %v", err)
 	}
+	return kp
+}
+
+func testNKeyPub(t *testing.T, kp nkeys.KeyPair) string {
+	t.Helper()
 	pub, err := kp.PublicKey()
 	if err != nil {
 		t.Fatalf("pubkey: %v", err)
 	}
 	return pub
+}
+
+// signedEnroll builds an EnrollRequest carrying a valid proof of
+// possession: kp's signature over EnrollSigningPayload at the current
+// time, exactly as a real sprout would send it.
+func signedEnroll(t *testing.T, kp nkeys.KeyPair, joinToken, hostname, sproutPub string) EnrollRequest {
+	t.Helper()
+	req := EnrollRequest{
+		JoinToken: joinToken,
+		NKeyPub:   testNKeyPub(t, kp),
+		Hostname:  hostname,
+		SproutPub: sproutPub,
+		Timestamp: time.Now().Unix(),
+	}
+	sig, err := kp.Sign(EnrollSigningPayload(req.Timestamp, req.NKeyPub, req.Hostname, req.SproutPub, req.JoinToken))
+	if err != nil {
+		t.Fatalf("signing enrollment payload: %v", err)
+	}
+	req.NKeySig = base64.RawURLEncoding.EncodeToString(sig)
+	return req
 }
 
 // testEnrollBoxPub returns a syntactically-valid, standard-base64-encoded
@@ -130,8 +155,8 @@ func TestEnroll_Success(t *testing.T) {
 		Expiry: time.Now().Add(time.Hour), MaxUses: 5, UsedCount: 0,
 	}
 
-	nkeyPub := testEnrollNKey(t)
-	result, err := Enroll(t.Context(), "ek_1.supersecret", nkeyPub, "web-01", testEnrollBoxPub(t))
+	kp := testEnrollNKey(t)
+	result, err := Enroll(t.Context(), signedEnroll(t, kp, "ek_1.supersecret", "web-01", testEnrollBoxPub(t)))
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -154,7 +179,7 @@ func TestEnroll_Success(t *testing.T) {
 		t.Errorf("expected exactly 1 gateway JWT mint call, got %d", minter.calls)
 	}
 
-	gotTenant, sproutID, err := SproutIDAndTenantForNKey(nkeyPub)
+	gotTenant, sproutID, err := SproutIDAndTenantForNKey(testNKeyPub(t, kp))
 	if err != nil || sproutID != "web-01" || gotTenant != "t_1" {
 		t.Errorf("expected sprout web-01 accepted under tenant t_1, got tenant=%q sprout=%q err=%v", gotTenant, sproutID, err)
 	}
@@ -170,7 +195,7 @@ func TestEnroll_NoGatewaySignerConfigured(t *testing.T) {
 	gatewayMinter = nil
 	t.Cleanup(func() { gatewayMinter = orig })
 
-	if _, err := Enroll(t.Context(), "ek_1.s", testEnrollNKey(t), "web-01", testEnrollBoxPub(t)); !errors.Is(err, ErrEnrollmentFailed) {
+	if _, err := Enroll(t.Context(), signedEnroll(t, testEnrollNKey(t), "ek_1.s", "web-01", testEnrollBoxPub(t))); !errors.Is(err, ErrEnrollmentFailed) {
 		t.Fatalf("expected ErrEnrollmentFailed when no gateway signer is configured, got %v", err)
 	}
 }
@@ -179,8 +204,8 @@ func TestEnroll_IdempotentReplayDoesNotConsumeToken(t *testing.T) {
 	store, minter := setupEnrollTest(t)
 	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("supersecret"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
 
-	nkeyPub := testEnrollNKey(t)
-	first, err := Enroll(t.Context(), "ek_1.supersecret", nkeyPub, "web-01", testEnrollBoxPub(t))
+	kp := testEnrollNKey(t)
+	first, err := Enroll(t.Context(), signedEnroll(t, kp, "ek_1.supersecret", "web-01", testEnrollBoxPub(t)))
 	if err != nil {
 		t.Fatalf("first Enroll: %v", err)
 	}
@@ -188,7 +213,7 @@ func TestEnroll_IdempotentReplayDoesNotConsumeToken(t *testing.T) {
 	// Retry with the same nkey_pub but a bogus token: design doc §3.3 step
 	// 1 says the idempotency check happens before the token is even
 	// looked at, so this should replay the existing identity.
-	second, err := Enroll(t.Context(), "bogus.token", nkeyPub, "web-01", testEnrollBoxPub(t))
+	second, err := Enroll(t.Context(), signedEnroll(t, kp, "bogus.token", "web-01", testEnrollBoxPub(t)))
 	if err != nil {
 		t.Fatalf("replay Enroll: %v", err)
 	}
@@ -209,7 +234,7 @@ func TestEnroll_IdempotentReplayDoesNotConsumeToken(t *testing.T) {
 func TestEnroll_UnknownKeyID(t *testing.T) {
 	setupEnrollTest(t)
 
-	if _, err := Enroll(t.Context(), "nope.secret", testEnrollNKey(t), "web-01", testEnrollBoxPub(t)); !errors.Is(err, ErrEnrollmentFailed) {
+	if _, err := Enroll(t.Context(), signedEnroll(t, testEnrollNKey(t), "nope.secret", "web-01", testEnrollBoxPub(t))); !errors.Is(err, ErrEnrollmentFailed) {
 		t.Fatalf("expected ErrEnrollmentFailed, got %v", err)
 	}
 }
@@ -218,7 +243,7 @@ func TestEnroll_WrongSecret(t *testing.T) {
 	store, _ := setupEnrollTest(t)
 	store.rows["ek_1"] = &enrollmentKeyRow{KeyHash: hashSecret("real"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
 
-	if _, err := Enroll(t.Context(), "ek_1.wrong", testEnrollNKey(t), "web-01", testEnrollBoxPub(t)); !errors.Is(err, ErrEnrollmentFailed) {
+	if _, err := Enroll(t.Context(), signedEnroll(t, testEnrollNKey(t), "ek_1.wrong", "web-01", testEnrollBoxPub(t))); !errors.Is(err, ErrEnrollmentFailed) {
 		t.Fatalf("expected ErrEnrollmentFailed, got %v", err)
 	}
 	if store.rows["ek_1"].UsedCount != 0 {
@@ -230,7 +255,7 @@ func TestEnroll_Revoked(t *testing.T) {
 	store, _ := setupEnrollTest(t)
 	store.rows["ek_1"] = &enrollmentKeyRow{KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1, Revoked: true}
 
-	if _, err := Enroll(t.Context(), "ek_1.s", testEnrollNKey(t), "web-01", testEnrollBoxPub(t)); !errors.Is(err, ErrEnrollmentFailed) {
+	if _, err := Enroll(t.Context(), signedEnroll(t, testEnrollNKey(t), "ek_1.s", "web-01", testEnrollBoxPub(t))); !errors.Is(err, ErrEnrollmentFailed) {
 		t.Fatalf("expected ErrEnrollmentFailed, got %v", err)
 	}
 }
@@ -239,7 +264,7 @@ func TestEnroll_Expired(t *testing.T) {
 	store, _ := setupEnrollTest(t)
 	store.rows["ek_1"] = &enrollmentKeyRow{KeyHash: hashSecret("s"), Expiry: time.Now().Add(-time.Hour), MaxUses: 1}
 
-	if _, err := Enroll(t.Context(), "ek_1.s", testEnrollNKey(t), "web-01", testEnrollBoxPub(t)); !errors.Is(err, ErrEnrollmentFailed) {
+	if _, err := Enroll(t.Context(), signedEnroll(t, testEnrollNKey(t), "ek_1.s", "web-01", testEnrollBoxPub(t))); !errors.Is(err, ErrEnrollmentFailed) {
 		t.Fatalf("expected ErrEnrollmentFailed, got %v", err)
 	}
 }
@@ -248,12 +273,12 @@ func TestEnroll_ExhaustedByPriorRedemption(t *testing.T) {
 	store, _ := setupEnrollTest(t)
 	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
 
-	if _, err := Enroll(t.Context(), "ek_1.s", testEnrollNKey(t), "web-01", testEnrollBoxPub(t)); err != nil {
+	if _, err := Enroll(t.Context(), signedEnroll(t, testEnrollNKey(t), "ek_1.s", "web-01", testEnrollBoxPub(t))); err != nil {
 		t.Fatalf("first enroll: %v", err)
 	}
 	// A second, different sprout (so idempotency doesn't short-circuit)
 	// presenting the same now-exhausted token must fail.
-	if _, err := Enroll(t.Context(), "ek_1.s", testEnrollNKey(t), "web-02", testEnrollBoxPub(t)); !errors.Is(err, ErrEnrollmentFailed) {
+	if _, err := Enroll(t.Context(), signedEnroll(t, testEnrollNKey(t), "ek_1.s", "web-02", testEnrollBoxPub(t))); !errors.Is(err, ErrEnrollmentFailed) {
 		t.Fatalf("expected second redemption to fail, got %v", err)
 	}
 }
@@ -262,7 +287,7 @@ func TestEnroll_MalformedToken(t *testing.T) {
 	setupEnrollTest(t)
 
 	for _, tok := range []string{"", "nodot", ".nokeyid", "keyid."} {
-		if _, err := Enroll(t.Context(), tok, testEnrollNKey(t), "web-01", testEnrollBoxPub(t)); !errors.Is(err, ErrEnrollmentFailed) {
+		if _, err := Enroll(t.Context(), signedEnroll(t, testEnrollNKey(t), tok, "web-01", testEnrollBoxPub(t))); !errors.Is(err, ErrEnrollmentFailed) {
 			t.Errorf("token %q: expected ErrEnrollmentFailed, got %v", tok, err)
 		}
 	}
@@ -271,7 +296,7 @@ func TestEnroll_MalformedToken(t *testing.T) {
 func TestEnroll_InvalidNKey(t *testing.T) {
 	setupEnrollTest(t)
 
-	if _, err := Enroll(t.Context(), "ek_1.s", "not-an-nkey", "web-01", testEnrollBoxPub(t)); !errors.Is(err, ErrEnrollmentFailed) {
+	if _, err := Enroll(t.Context(), EnrollRequest{JoinToken: "ek_1.s", NKeyPub: "not-an-nkey", Hostname: "web-01", SproutPub: testEnrollBoxPub(t), Timestamp: time.Now().Unix(), NKeySig: "x"}); !errors.Is(err, ErrEnrollmentFailed) {
 		t.Fatalf("expected ErrEnrollmentFailed, got %v", err)
 	}
 }
@@ -280,7 +305,7 @@ func TestEnroll_InvalidHostname(t *testing.T) {
 	store, _ := setupEnrollTest(t)
 	store.rows["ek_1"] = &enrollmentKeyRow{KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
 
-	if _, err := Enroll(t.Context(), "ek_1.s", testEnrollNKey(t), "###bad###", testEnrollBoxPub(t)); !errors.Is(err, ErrEnrollmentFailed) {
+	if _, err := Enroll(t.Context(), signedEnroll(t, testEnrollNKey(t), "ek_1.s", "###bad###", testEnrollBoxPub(t))); !errors.Is(err, ErrEnrollmentFailed) {
 		t.Fatalf("expected ErrEnrollmentFailed, got %v", err)
 	}
 	// A bad hostname is a client-side mistake, not a real redemption — it
@@ -296,7 +321,7 @@ func TestEnroll_InvalidSproutPub(t *testing.T) {
 	store.rows["ek_1"] = &enrollmentKeyRow{KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
 
 	for _, badPub := range []string{"", "not-base64!!!", "dG9vc2hvcnQ="} { // "tooshort" base64-decoded
-		if _, err := Enroll(t.Context(), "ek_1.s", testEnrollNKey(t), "web-01", badPub); !errors.Is(err, ErrEnrollmentFailed) {
+		if _, err := Enroll(t.Context(), signedEnroll(t, testEnrollNKey(t), "ek_1.s", "web-01", badPub)); !errors.Is(err, ErrEnrollmentFailed) {
 			t.Errorf("sprout_pub %q: expected ErrEnrollmentFailed, got %v", badPub, err)
 		}
 	}
@@ -333,7 +358,7 @@ func TestEnroll_PersistsSproutBoxKey(t *testing.T) {
 	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
 
 	sproutPub := testEnrollBoxPub(t)
-	if _, err := Enroll(t.Context(), "ek_1.s", testEnrollNKey(t), "web-01", sproutPub); err != nil {
+	if _, err := Enroll(t.Context(), signedEnroll(t, testEnrollNKey(t), "ek_1.s", "web-01", sproutPub)); err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
 
@@ -347,20 +372,195 @@ func TestEnroll_IdempotentReplayReassertsSproutBoxKey(t *testing.T) {
 	store, _ := setupEnrollTest(t)
 	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
 
-	nkeyPub := testEnrollNKey(t)
+	kp := testEnrollNKey(t)
 	sproutPub := testEnrollBoxPub(t)
-	if _, err := Enroll(t.Context(), "ek_1.s", nkeyPub, "web-01", sproutPub); err != nil {
+	if _, err := Enroll(t.Context(), signedEnroll(t, kp, "ek_1.s", "web-01", sproutPub)); err != nil {
 		t.Fatalf("first Enroll: %v", err)
 	}
 
 	// Replay presents the same sprout_pub again (the sprout only generates
 	// its keypair once) — must not error and must leave the stored key
 	// unchanged.
-	if _, err := Enroll(t.Context(), "bogus.token", nkeyPub, "web-01", sproutPub); err != nil {
+	if _, err := Enroll(t.Context(), signedEnroll(t, kp, "bogus.token", "web-01", sproutPub)); err != nil {
 		t.Fatalf("replay Enroll: %v", err)
 	}
 	active := activeBoxKeyForTenant(t, "t_1", "web-01")
 	if active != sproutPub {
 		t.Errorf("expected active box key unchanged at %q, got %q", sproutPub, active)
+	}
+}
+
+// withEnrollNow pins Enroll's clock for the duration of the test.
+func withEnrollNow(t *testing.T, now time.Time) {
+	t.Helper()
+	orig := enrollNow
+	enrollNow = func() time.Time { return now }
+	t.Cleanup(func() { enrollNow = orig })
+}
+
+// resign re-signs req with kp after a test has altered its fields, so the
+// only thing wrong with it is whatever the test altered deliberately.
+func resign(t *testing.T, kp nkeys.KeyPair, req EnrollRequest) EnrollRequest {
+	t.Helper()
+	sig, err := kp.Sign(EnrollSigningPayload(req.Timestamp, req.NKeyPub, req.Hostname, req.SproutPub, req.JoinToken))
+	if err != nil {
+		t.Fatalf("signing enrollment payload: %v", err)
+	}
+	req.NKeySig = base64.RawURLEncoding.EncodeToString(sig)
+	return req
+}
+
+// TestEnroll_ReplayRequiresProofOfPossession is the regression test for
+// the replay path handing a gateway JWT to anyone who knew an enrolled
+// sprout's nkey_pub (which is public: Envoy forwards it upstream as
+// x-imas-sprout-nkey). Each case submits the victim's real nkey_pub
+// without a valid signature from its seed, and must be rejected before
+// replayExistingEnrollment mints anything.
+func TestEnroll_ReplayRequiresProofOfPossession(t *testing.T) {
+	store, minter := setupEnrollTest(t)
+	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
+
+	victim := testEnrollNKey(t)
+	sproutPub := testEnrollBoxPub(t)
+	if _, err := Enroll(t.Context(), signedEnroll(t, victim, "ek_1.s", "web-01", sproutPub)); err != nil {
+		t.Fatalf("victim's own enrollment: %v", err)
+	}
+	mintsAfterEnroll := minter.calls
+
+	attacker := testEnrollNKey(t)
+	cases := map[string]func() EnrollRequest{
+		"no signature": func() EnrollRequest {
+			req := signedEnroll(t, victim, "bogus.token", "web-01", sproutPub)
+			req.NKeySig = ""
+			return req
+		},
+		"garbage signature": func() EnrollRequest {
+			req := signedEnroll(t, victim, "bogus.token", "web-01", sproutPub)
+			req.NKeySig = base64.RawURLEncoding.EncodeToString(make([]byte, 64))
+			return req
+		},
+		"signature not base64url": func() EnrollRequest {
+			req := signedEnroll(t, victim, "bogus.token", "web-01", sproutPub)
+			req.NKeySig = "!!!"
+			return req
+		},
+		"signed by a different nkey": func() EnrollRequest {
+			req := signedEnroll(t, attacker, "bogus.token", "web-01", sproutPub)
+			req.NKeyPub = testNKeyPub(t, victim)
+			return req
+		},
+		"victim's signature over different fields": func() EnrollRequest {
+			req := signedEnroll(t, victim, "bogus.token", "web-01", sproutPub)
+			req.Hostname = "web-02"
+			return req
+		},
+		"victim's signature under a different timestamp": func() EnrollRequest {
+			req := signedEnroll(t, victim, "bogus.token", "web-01", sproutPub)
+			req.Timestamp--
+			return req
+		},
+		"stale timestamp": func() EnrollRequest {
+			req := signedEnroll(t, victim, "bogus.token", "web-01", sproutPub)
+			req.Timestamp = time.Now().Add(-EnrollSigMaxSkew - time.Minute).Unix()
+			return resign(t, victim, req)
+		},
+		"future timestamp": func() EnrollRequest {
+			req := signedEnroll(t, victim, "bogus.token", "web-01", sproutPub)
+			req.Timestamp = time.Now().Add(EnrollSigMaxSkew + time.Minute).Unix()
+			return resign(t, victim, req)
+		},
+		"zero timestamp": func() EnrollRequest {
+			req := signedEnroll(t, victim, "bogus.token", "web-01", sproutPub)
+			req.Timestamp = 0
+			return resign(t, victim, req)
+		},
+	}
+	for name, build := range cases {
+		t.Run(name, func(t *testing.T) {
+			if res, err := Enroll(t.Context(), build()); !errors.Is(err, ErrEnrollmentFailed) {
+				t.Fatalf("expected ErrEnrollmentFailed, got result=%+v err=%v", res, err)
+			}
+		})
+	}
+	if minter.calls != mintsAfterEnroll {
+		t.Errorf("rejected replays minted %d gateway JWT(s)", minter.calls-mintsAfterEnroll)
+	}
+}
+
+// TestEnroll_ReplayWithValidSignatureSucceeds: a sprout that holds its
+// seed can still retry and get its identity back, without a valid join
+// token, with a timestamp anywhere inside the allowed skew.
+func TestEnroll_ReplayWithValidSignatureSucceeds(t *testing.T) {
+	store, minter := setupEnrollTest(t)
+	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
+
+	kp := testEnrollNKey(t)
+	sproutPub := testEnrollBoxPub(t)
+	first, err := Enroll(t.Context(), signedEnroll(t, kp, "ek_1.s", "web-01", sproutPub))
+	if err != nil {
+		t.Fatalf("first Enroll: %v", err)
+	}
+
+	// Farmer's clock sits just inside the skew window either side of the
+	// sprout's signing time.
+	for _, offset := range []time.Duration{EnrollSigMaxSkew - time.Second, -(EnrollSigMaxSkew - time.Second)} {
+		req := signedEnroll(t, kp, "bogus.token", "web-01", sproutPub)
+		withEnrollNow(t, time.Unix(req.Timestamp, 0).Add(offset))
+		replay, err := Enroll(t.Context(), req)
+		if err != nil {
+			t.Fatalf("replay with farmer clock offset %v: %v", offset, err)
+		}
+		if replay.SproutID != first.SproutID || replay.JWT != first.JWT {
+			t.Errorf("replay returned a different identity: %+v vs %+v", replay, first)
+		}
+		if replay.GatewayJWT == "" {
+			t.Error("expected replay to mint a gateway JWT")
+		}
+	}
+	if minter.calls != 3 {
+		t.Errorf("expected 3 gateway JWT mints (enroll + 2 replays), got %d", minter.calls)
+	}
+	if store.rows["ek_1"].UsedCount != 1 {
+		t.Errorf("expected replays not to consume a use, used_count=%d", store.rows["ek_1"].UsedCount)
+	}
+}
+
+// A first-time enrollment needs proof of possession too: a join-token
+// holder must not be able to register a nkey_pub whose seed they don't
+// hold (see Enroll's comment). Rejected before the token is redeemed.
+func TestEnroll_FirstEnrollmentRequiresProofOfPossession(t *testing.T) {
+	store, minter := setupEnrollTest(t)
+	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
+
+	victim, attacker := testEnrollNKey(t), testEnrollNKey(t)
+	req := signedEnroll(t, attacker, "ek_1.s", "web-01", testEnrollBoxPub(t))
+	req.NKeyPub = testNKeyPub(t, victim)
+	if _, err := Enroll(t.Context(), req); !errors.Is(err, ErrEnrollmentFailed) {
+		t.Fatalf("expected ErrEnrollmentFailed, got %v", err)
+	}
+	if store.rows["ek_1"].UsedCount != 0 {
+		t.Errorf("expected rejected enrollment not to consume a use, used_count=%d", store.rows["ek_1"].UsedCount)
+	}
+	if minter.calls != 0 {
+		t.Errorf("expected no gateway JWT minted, got %d", minter.calls)
+	}
+	if _, _, err := SproutIDAndTenantForNKey(testNKeyPub(t, victim)); err == nil {
+		t.Error("victim's nkey_pub was registered without proof of possession")
+	}
+}
+
+// Fields are newline-joined in the signed payload, so a newline inside
+// one would make the encoding ambiguous; Enroll rejects it even when the
+// signature itself is valid.
+func TestEnroll_RejectsNewlineInSignedField(t *testing.T) {
+	store, _ := setupEnrollTest(t)
+	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
+
+	kp := testEnrollNKey(t)
+	if _, err := Enroll(t.Context(), signedEnroll(t, kp, "ek_1.s\nx", "web-01", testEnrollBoxPub(t))); !errors.Is(err, ErrEnrollmentFailed) {
+		t.Fatalf("expected ErrEnrollmentFailed, got %v", err)
+	}
+	if store.rows["ek_1"].UsedCount != 0 {
+		t.Errorf("expected rejected enrollment not to consume a use, used_count=%d", store.rows["ek_1"].UsedCount)
 	}
 }
