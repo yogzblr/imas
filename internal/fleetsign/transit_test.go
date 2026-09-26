@@ -2,10 +2,8 @@ package fleetsign
 
 import (
 	"crypto/ed25519"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -15,12 +13,12 @@ import (
 	"testing"
 )
 
-// mockTransit serves Transit's GET <mount>/keys/<key> in the documented
-// response shape, the same stand-in approach as internal/gatewayjwt's
-// mockTransitServer (no real OpenBao is reachable in unit tests; see
-// cmd/fleetreleaser's env-gated TestOpenBaoEnforcesReadOnlyFleetKey for
-// the real-server check). Any other path is a 404, so a stray request
-// from this read-only client would fail the test.
+// mockTransit serves Transit's GET <mount>/keys/<key> in the response
+// shape a real server sends, the same stand-in approach as
+// internal/gatewayjwt's mockTransitServer. openbao_response_test.go
+// checks this package against captured real OpenBao responses and, when
+// IMAS_TEST_OPENBAO_ADDR is set, a live server. Any other path is a 404,
+// so a stray request from this read-only client would fail the test.
 type mockTransit struct {
 	token         string
 	keys          []PublicKey
@@ -47,9 +45,12 @@ func (m *mockTransit) start(t *testing.T) *httptest.Server {
 		m.reads.Add(1)
 		keys := map[string]any{}
 		for _, k := range m.keys {
-			der, _ := x509.MarshalPKIXPublicKey(k.Key)
+			// Real Transit returns an ed25519 public_key as standard
+			// base64 of the raw 32-byte key, not PEM. See
+			// testdata/openbao-v2.7.0/transit-keys.json.
 			keys[strconv.Itoa(k.Version)] = map[string]any{
-				"public_key": string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})),
+				"name":       "ed25519",
+				"public_key": base64.StdEncoding.EncodeToString(k.Key),
 			}
 		}
 		keyType := m.keyType

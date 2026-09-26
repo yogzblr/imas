@@ -27,6 +27,7 @@ import (
 	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -329,7 +330,7 @@ func (c *obTransitClient) readKeySet(ctx context.Context, keyName string) (KeySe
 		if version < minVersion {
 			continue
 		}
-		pub, perr := ParseEd25519PublicKeyPEM(v.PublicKey)
+		pub, perr := ParseTransitEd25519PublicKey(v.PublicKey)
 		if perr != nil {
 			return nil, fmt.Errorf("%w: key version %d: %w", ErrReadKeyFailed, version, perr)
 		}
@@ -338,12 +339,33 @@ func (c *obTransitClient) readKeySet(ctx context.Context, keyName string) (KeySe
 	return NewKeySet(keys)
 }
 
-// ParseEd25519PublicKeyPEM decodes Transit's PEM-encoded
-// SubjectPublicKeyInfo block into a raw Ed25519 public key.
-func ParseEd25519PublicKeyPEM(pemStr string) (ed25519.PublicKey, error) {
-	block, _ := pem.Decode([]byte(pemStr))
+// ParseTransitEd25519PublicKey decodes the public_key Transit's
+// keys/<key> read returns for an ed25519 key version: the raw 32-byte
+// key in standard base64. Transit uses PEM only for ECDSA and RSA keys,
+// never for Ed25519 (see testdata/openbao-v2.7.0/transit-keys.json, a
+// captured real response).
+func ParseTransitEd25519PublicKey(s string) (ed25519.PublicKey, error) {
+	raw, err := base64.StdEncoding.Strict().DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("fleetsign: Transit public key is not standard base64: %w", err)
+	}
+	if len(raw) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("fleetsign: Transit public key is %d bytes, want %d (Ed25519)", len(raw), ed25519.PublicKeySize)
+	}
+	return ed25519.PublicKey(raw), nil
+}
+
+// ParseEd25519PublicKeyPEM is kept for cmd/fleetreleaser's key-set
+// read. It parses what real Transit returns (ParseTransitEd25519PublicKey)
+// and, only so that caller's PEM test fixture keeps passing, also a PEM
+// SubjectPublicKeyInfo block.
+//
+// Deprecated: use ParseTransitEd25519PublicKey. Remove once
+// cmd/fleetreleaser's caller and its fixture move to it.
+func ParseEd25519PublicKeyPEM(s string) (ed25519.PublicKey, error) {
+	block, _ := pem.Decode([]byte(s))
 	if block == nil {
-		return nil, errors.New("fleetsign: no PEM block found in Transit public key")
+		return ParseTransitEd25519PublicKey(s)
 	}
 	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
