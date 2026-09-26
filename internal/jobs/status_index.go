@@ -92,6 +92,10 @@ type jobStatusRow struct {
 	Finished      bool      `gorm:"column:finished;not null;default:false"`
 	TimedOut      bool      `gorm:"column:timed_out;not null;default:false"`
 	UpdatedAt     time.Time `gorm:"column:updated_at;not null;index"`
+	// DispatchedAt is when farmer dispatched the job (the envelope's
+	// DispatchedAt), from its creation event. Nil for jobs created before
+	// it was recorded. shouldReconcile dates a job's start by it.
+	DispatchedAt *time.Time `gorm:"column:dispatched_at"`
 }
 
 func (jobStatusRow) TableName() string { return "job_status" }
@@ -122,12 +126,13 @@ END`
 
 // jobEvent is one event's contribution to its job's row.
 type jobEvent struct {
-	stepsTotal *int // the creation event only
-	started    bool
-	step       bool // a step's own completion (counted)
-	stepFailed bool
-	finished   bool
-	timedOut   bool
+	stepsTotal   *int       // the creation event only
+	dispatchedAt *time.Time // the creation event only
+	started      bool
+	step         bool // a step's own completion (counted)
+	stepFailed   bool
+	finished     bool
+	timedOut     bool
 }
 
 // classifyJobEvent maps a imas.cook.<sprout>.<jid> event to its index
@@ -145,9 +150,11 @@ func classifyJobEvent(jid string, step cook.StepCompletion) jobEvent {
 	return jobEvent{step: true, stepFailed: step.CompletionStatus == cook.StepFailed}
 }
 
-// indexJobCreation records a job's step count from its creation envelope.
-func indexJobCreation(tenantID, sproutID, jid string, steps int) {
-	indexJobEvent(tenantID, sproutID, jid, jobEvent{stepsTotal: &steps})
+// indexJobCreation records a job's step count and dispatch time from its
+// creation envelope.
+func indexJobCreation(tenantID, sproutID, jid string, steps int, dispatchedAt time.Time) {
+	at := dispatchedAt.UTC()
+	indexJobEvent(tenantID, sproutID, jid, jobEvent{stepsTotal: &steps, dispatchedAt: &at})
 }
 
 // indexJobEvent applies ev to the job's row and recomputes its status.
@@ -220,20 +227,24 @@ func isWriteConflict(err error) bool {
 func upsertJobEvent(ctx context.Context, d *gorm.DB, tenantID, sproutID, jid string, ev jobEvent) error {
 	now := time.Now().UTC()
 	row := jobStatusRow{
-		TenantID:   tenantID,
-		SproutID:   sproutID,
-		JID:        jid,
-		Status:     JobIndexStatusPending,
-		StepsTotal: ev.stepsTotal,
-		StepFailed: ev.stepFailed,
-		Started:    ev.started,
-		Finished:   ev.finished,
-		TimedOut:   ev.timedOut,
-		UpdatedAt:  now,
+		TenantID:     tenantID,
+		SproutID:     sproutID,
+		JID:          jid,
+		Status:       JobIndexStatusPending,
+		StepsTotal:   ev.stepsTotal,
+		DispatchedAt: ev.dispatchedAt,
+		StepFailed:   ev.stepFailed,
+		Started:      ev.started,
+		Finished:     ev.finished,
+		TimedOut:     ev.timedOut,
+		UpdatedAt:    now,
 	}
 	updates := map[string]any{"updated_at": now}
 	if ev.stepsTotal != nil {
 		updates["steps_total"] = *ev.stepsTotal
+	}
+	if ev.dispatchedAt != nil {
+		updates["dispatched_at"] = *ev.dispatchedAt
 	}
 	if ev.step {
 		row.StepsReported = 1

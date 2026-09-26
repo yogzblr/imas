@@ -23,6 +23,10 @@ var configLoaded sync.Once
 // Defaults to "/etc/imas". Tests can override via setSystemConfigRoot.
 var systemConfigRoot = "/etc/imas"
 
+// EnvJobReconcileWindow sets JobReconcileWindow on farmer when the config
+// file doesn't (e.g. from the Helm chart; see deploy/farmer).
+const EnvJobReconcileWindow = "IMAS_JOB_RECONCILE_WINDOW"
+
 // Sprout setting defaults; see GatewayJWTRefreshMargin and
 // StagedRecipeMaxAge.
 const (
@@ -151,6 +155,17 @@ var (
 	// are skipped. Non-positive values fall back to
 	// DefaultStagedRecipeMaxAge.
 	StagedRecipeMaxAge time.Duration
+
+	// JobReconcileWindow ("jobreconcilewindow" in the farmer config file,
+	// or the IMAS_JOB_RECONCILE_WINDOW environment variable when the file
+	// doesn't set it; farmer only) is how long after dispatch a job may
+	// start on its sprout and still be recorded. A job whose start is
+	// reported later (a sprout that missed the push and cooked the staged
+	// copy much later) is not reconciled: farmer drops all of its events.
+	// 0 (the default) records every job whenever it starts. Set it to at
+	// least the largest stagedrecipemaxage in the fleet, or late jobs will
+	// run on sprouts without being recorded.
+	JobReconcileWindow time.Duration
 
 	// SproutHandledJobsFile ("sprouthandledjobsfile", sprout only) lists
 	// the IDs of the recipe jobs the sprout most recently handled, pushed
@@ -361,6 +376,19 @@ func LoadConfig(binary string) {
 				if v, found := os.LookupEnv("IMAS_S3_JOB_BUCKET"); found {
 					jety.Set("s3jobbucket", v)
 				}
+			}
+			if jety.GetDuration("jobreconcilewindow") == 0 {
+				if v, found := os.LookupEnv(EnvJobReconcileWindow); found && v != "" {
+					d, err := time.ParseDuration(v)
+					if err != nil || d < 0 {
+						log.Fatalf("%s=%q: want a non-negative duration such as 2h or 90m", EnvJobReconcileWindow, v)
+					}
+					jety.Set("jobreconcilewindow", d)
+				}
+			}
+			JobReconcileWindow = jety.GetDuration("jobreconcilewindow")
+			if JobReconcileWindow < 0 {
+				log.Fatalf("jobreconcilewindow = %s: must not be negative", JobReconcileWindow)
 			}
 			if len(jety.GetStringSlice("sproutbusurls")) == 0 {
 				if v, found := os.LookupEnv("IMAS_SPROUT_BUS_URLS"); found {

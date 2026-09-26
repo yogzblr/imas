@@ -19,6 +19,8 @@ of the YAML here is applied by anything in imas.
 | `farmer-deployment-nats-seeds.patch.yaml` | Volume, mount, and env vars to add to farmer's Deployment in the ops repo (part 1) |
 | `saasapi-credential-publish-job.yaml` | The Job, its ServiceAccount, and its NetworkPolicy (part 2) |
 | `externalsecrets.yaml` | ESO wiring for the seeds and for the published JWT |
+| `values.job-reconcile.yaml` | Values block for the job reconcile window (see the last section) |
+| `deployment.env.job-reconcile.yaml` | Template fragment to paste under the farmer container's `env:` list |
 
 ## Part 1: the SYS Account seed on farmer (ops change only)
 
@@ -226,3 +228,33 @@ A failed Job, for example because OpenBao is unreachable, fails the
 Helm/Argo sync. That's intentional: saasapi might be on a stale JWT. With
 `helm upgrade --atomic` it would also roll farmer back, so don't combine
 the hook with `--atomic` unless that's what you want.
+
+## Job reconcile window (`IMAS_JOB_RECONCILE_WINDOW`)
+
+A sprout that misses a recipe push while disconnected cooks the staged
+copy when it next starts, reconnects or is nudged (`imas resync`), as long
+as the job is no older than the sprout's own `stagedrecipemaxage` setting
+(sprout config file, default `1h`). The reconcile window is farmer's side
+of that: how late a job may start and still be recorded.
+
+| Env var | Helm value | Default | Valid values |
+|---|---|---|---|
+| `IMAS_JOB_RECONCILE_WINDOW` | `jobs.reconcileWindow` | unset: every job is recorded | Go duration string, e.g. `"2h"`, `"90m"`; `"0"` also disables |
+
+- The `jobreconcilewindow` key in farmer's config file wins over the env
+  var, like the other `IMAS_*` settings.
+- It is measured from dispatch (`dispatched_at`, stamped by farmer) to
+  the job's `start` event reaching farmer. A job whose start arrives later
+  is not reconciled: farmer writes none of its events to the job store or
+  the `job_status` index, so it stays `pending` there until the job
+  reaper removes it. Each dropped event is logged at warn level.
+- A job that started within the window is recorded to the end, however
+  long it runs.
+- Jobs dispatched before this change have no `dispatched_at` and are
+  always recorded.
+- **Set it to at least the largest `stagedrecipemaxage` in the fleet.**
+  With a smaller window, sprouts will still run late jobs, but farmer
+  won't record them.
+- An invalid value (`soon`, `-1h`, `7200` without a unit) stops farmer at
+  startup with an error naming the variable. The template fragment
+  rejects a bare YAML number at render time.

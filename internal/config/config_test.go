@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -915,5 +916,116 @@ func TestLoadConfig_SproutConfigFileIs0600(t *testing.T) {
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Errorf("new sprout config mode = %o, want 600", perm)
+	}
+}
+
+// The sprout's staged-recipe and gateway JWT settings come from the
+// sprout config file ("config properties"), with defaults when unset.
+func TestLoadConfig_SproutStagedRecipeSettings(t *testing.T) {
+	t.Run("from the config file", func(t *testing.T) {
+		tmpRoot := t.TempDir()
+		content := "stagedrecipemaxage: 6h\ngatewayjwtrefreshmargin: 10m\nsprouthandledjobsfile: /tmp/imas-handled\n"
+		cfgFile := writeTempConfig(t, tmpRoot, "sprout", content)
+		resetForBinaryTest(t, tmpRoot)
+		jety.SetConfigType("yaml")
+		jety.SetConfigFile(cfgFile)
+		_ = jety.ReadInConfig()
+
+		LoadConfig("sprout")
+
+		if StagedRecipeMaxAge != 6*time.Hour {
+			t.Errorf("StagedRecipeMaxAge = %v, want 6h", StagedRecipeMaxAge)
+		}
+		if GatewayJWTRefreshMargin != 10*time.Minute {
+			t.Errorf("GatewayJWTRefreshMargin = %v, want 10m", GatewayJWTRefreshMargin)
+		}
+		if SproutHandledJobsFile != "/tmp/imas-handled" {
+			t.Errorf("SproutHandledJobsFile = %q, want /tmp/imas-handled", SproutHandledJobsFile)
+		}
+	})
+
+	t.Run("defaults, written back to the config file", func(t *testing.T) {
+		tmpRoot := t.TempDir()
+		resetForBinaryTest(t, tmpRoot)
+
+		LoadConfig("sprout")
+
+		if StagedRecipeMaxAge != DefaultStagedRecipeMaxAge {
+			t.Errorf("StagedRecipeMaxAge = %v, want %v", StagedRecipeMaxAge, DefaultStagedRecipeMaxAge)
+		}
+		if GatewayJWTRefreshMargin != DefaultGatewayJWTRefreshMargin {
+			t.Errorf("GatewayJWTRefreshMargin = %v, want %v", GatewayJWTRefreshMargin, DefaultGatewayJWTRefreshMargin)
+		}
+		if SproutHandledJobsFile != "/var/lib/imas/sprout/handled-jobs" {
+			t.Errorf("SproutHandledJobsFile = %q", SproutHandledJobsFile)
+		}
+		b, err := os.ReadFile(filepath.Join(tmpRoot, "sprout"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{"stagedrecipemaxage", "gatewayjwtrefreshmargin", "sprouthandledjobsfile"} {
+			if !strings.Contains(string(b), key) {
+				t.Errorf("sprout config file doesn't list %q, so operators can't see it:\n%s", key, b)
+			}
+		}
+	})
+}
+
+func loadFarmerWithConfig(t *testing.T, content string) {
+	t.Helper()
+	tmpRoot := t.TempDir()
+	cfgFile := writeTempConfig(t, tmpRoot, "farmer", content)
+	resetForBinaryTest(t, tmpRoot)
+	jety.SetConfigType("yaml")
+	jety.SetConfigFile(cfgFile)
+	_ = jety.ReadInConfig()
+	LoadConfig("farmer")
+}
+
+// JobReconcileWindow comes from the farmer config file or, when the file
+// doesn't set it, IMAS_JOB_RECONCILE_WINDOW (the Helm chart's route).
+func TestLoadConfig_FarmerJobReconcileWindow(t *testing.T) {
+	t.Run("unset", func(t *testing.T) {
+		t.Setenv(EnvJobReconcileWindow, "")
+		loadFarmerWithConfig(t, "")
+		if JobReconcileWindow != 0 {
+			t.Errorf("JobReconcileWindow = %v, want 0 (disabled)", JobReconcileWindow)
+		}
+	})
+	t.Run("from env", func(t *testing.T) {
+		t.Setenv(EnvJobReconcileWindow, "90m")
+		loadFarmerWithConfig(t, "")
+		if JobReconcileWindow != 90*time.Minute {
+			t.Errorf("JobReconcileWindow = %v, want 90m", JobReconcileWindow)
+		}
+	})
+	t.Run("config file wins over env", func(t *testing.T) {
+		t.Setenv(EnvJobReconcileWindow, "90m")
+		loadFarmerWithConfig(t, "jobreconcilewindow: 3h\n")
+		if JobReconcileWindow != 3*time.Hour {
+			t.Errorf("JobReconcileWindow = %v, want 3h", JobReconcileWindow)
+		}
+	})
+}
+
+// An invalid IMAS_JOB_RECONCILE_WINDOW stops farmer rather than silently
+// disabling the window. log.Fatalf exits, so this runs in a subprocess.
+func TestLoadConfig_FarmerJobReconcileWindowInvalid(t *testing.T) {
+	if v := os.Getenv("IMAS_TEST_RECONCILE_SUBPROCESS"); v != "" {
+		t.Setenv(EnvJobReconcileWindow, v)
+		loadFarmerWithConfig(t, "")
+		return
+	}
+	for _, bad := range []string{"soon", "-1h", "5"} {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestLoadConfig_FarmerJobReconcileWindowInvalid$")
+		cmd.Env = append(os.Environ(), "IMAS_TEST_RECONCILE_SUBPROCESS="+bad)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Errorf("%s=%q: farmer config loaded; want it to exit", EnvJobReconcileWindow, bad)
+			continue
+		}
+		if !strings.Contains(string(out), EnvJobReconcileWindow) {
+			t.Errorf("%s=%q: exit message doesn't name the variable:\n%s", EnvJobReconcileWindow, bad, out)
+		}
 	}
 }

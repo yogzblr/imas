@@ -110,7 +110,13 @@ func logJobCreation(tenantID string, msg *nats.Msg) {
 	// Independent of the object-store writes below, which it neither
 	// waits on nor replaces. Idempotent, so it runs even when created.jsonl
 	// already exists.
-	indexJobCreation(tenantID, sprout, envelope.JobID, len(envelope.Steps))
+	dispatchedAt := envelope.DispatchedAt
+	if dispatchedAt.IsZero() {
+		// An envelope from a farmer that predates DispatchedAt: this
+		// replica's receipt of the push is within milliseconds of it.
+		dispatchedAt = time.Now()
+	}
+	indexJobCreation(tenantID, sprout, envelope.JobID, len(envelope.Steps), dispatchedAt)
 	obj := objStore
 	if obj == nil {
 		log.Errorf("failed to record job %s for sprout %s: %v", envelope.JobID, sprout, ErrJobStoreNotConfigured)
@@ -190,6 +196,10 @@ func logJobs(tenantID string, msg *nats.Msg) {
 	}
 	if !validKeySegment(sprout) || !validKeySegment(JID) {
 		log.Errorf("refusing to record step for job %q on sprout %q: not usable as an object key segment", JID, sprout)
+		return
+	}
+	if !shouldReconcile(tenantID, sprout, JID) {
+		log.Warnf("not recording step %s of job %s on sprout %s (tenant %s): the job started more than %s after dispatch", completedStep.ID, JID, sprout, tenantID, reconcileWindow)
 		return
 	}
 	// Independent of the object-store write below; see logJobCreation.
