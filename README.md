@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logos/imas-banner.png" alt="imas — Infrastructure Management At Scale" width="100%">
+</p>
+
 # imas — Infrastructure Management At Scale
 
 [![License 0BSD](https://img.shields.io/badge/License-0BSD-pink.svg)](https://opensource.org/licenses/0BSD)

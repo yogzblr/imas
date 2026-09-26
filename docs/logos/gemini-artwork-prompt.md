@@ -60,7 +60,8 @@ and minimal — no realistic hardware, no clutter, generous negative space.
 - Once you have a mark you like, get it re-exported as clean SVG (Gemini's
   raster output will need vector tracing — Illustrator's Image Trace or an
   online PNG-to-SVG tool works for a flat geometric mark like this).
-- Replace `docs/logos/grlx.jpg` and `docs/diagrams/grlx-arch-light.png`
-  with the new artwork once it exists, and re-add the logo to the top of
-  README.md (removed during the grlx→imas rebrand since the old artwork
-  was still literally the grlx logo).
+- Done: `docs/logos/grlx.jpg` has been replaced with `imas-banner.png`,
+  `imas-logo.png`, and `imas-icon.png`, and the README header now uses
+  the banner. Still outstanding: `docs/diagrams/grlx-arch-light.png` is
+  unrelated old artwork (an architecture diagram, not a logo) and hasn't
+  been redone.
