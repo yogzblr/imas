@@ -358,10 +358,9 @@ func ParseTransitEd25519PublicKey(s string) (ed25519.PublicKey, error) {
 // ParseEd25519PublicKeyPEM is kept for cmd/fleetreleaser's key-set
 // read. It parses what real Transit returns (ParseTransitEd25519PublicKey)
 // and, only so that caller's PEM test fixture keeps passing, also a PEM
-// SubjectPublicKeyInfo block.
-//
-// Deprecated: use ParseTransitEd25519PublicKey. Remove once
-// cmd/fleetreleaser's caller and its fixture move to it.
+// SubjectPublicKeyInfo block. New code should call
+// ParseTransitEd25519PublicKey; remove this once cmd/fleetreleaser's
+// caller and its fixture move to it.
 func ParseEd25519PublicKeyPEM(s string) (ed25519.PublicKey, error) {
 	block, _ := pem.Decode([]byte(s))
 	if block == nil {
