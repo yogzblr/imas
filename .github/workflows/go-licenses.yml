@@ -8,7 +8,10 @@ on:
       - v1
       - v2
 
-  workflow_dispatch: 
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   go-licenses:
