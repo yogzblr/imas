@@ -434,8 +434,16 @@ The one moment in the whole system where a caller has no credential yet. Borrowe
 `POST https://enroll.<region>/v1/enroll` — served by farmer, deliberately **not** behind Envoy's `jwt_authn` filter (a sprout enrolling has no JWT yet), but still TLS-terminated and, per the open item carried from the original enrollment design, deserving of Envoy-level IP-based rate limiting since it's the one DMZ-facing route without a JWT gate.
 
 ```json
-// request
-{ "join_token": "ab3f9k2q.9fT...longsecret", "nkey_pub": "U...", "hostname": "web-01" }
+// request (field-by-field, including how nkey_sig is computed:
+// imas-envoy-enrollment-design.md, "Proof of possession")
+{
+  "join_token": "<key_id>.<secret>",
+  "nkey_pub":   "U...",
+  "hostname":   "web-01",
+  "sprout_pub": "<base64 X25519 public key>",
+  "timestamp":  1790000000,
+  "nkey_sig":   "<unpadded base64url Ed25519 signature by the NKey seed>"
+}
 
 // success response
 {
@@ -452,6 +460,7 @@ The one moment in the whole system where a caller has no credential yet. Borrowe
 
 ### 3.3 What farmer does, step by step
 
+0. **Proof of possession**: verify `nkey_sig` against `nkey_pub` and require `timestamp` within ±5 minutes of farmer's clock, before anything is looked up. Each signed request is also single-use: farmer records it in Valkey (`SET NX` with a TTL, shared by every farmer replica) just before issuing anything, in step 1's replay or before step 4's redemption, and refuses a request it has already recorded. See `imas-envoy-enrollment-design.md`, "Proof of possession" and "Replay cache".
 1. **Idempotency check first**: `SELECT * FROM farmer.sprouts WHERE nkey_pub = ?`. If a sprout already exists for this exact public key, return its existing JWT immediately and stop — no enrollment-key touched. This covers the ordinary case of Ansible retrying after a dropped connection: the sprout generates its keypair once, locally, before ever calling out, so a retry presents the same `nkey_pub` and gets the same identity back rather than burning a second use of a possibly single-use token.
 2. **Look up the key**: `SELECT tenant_id, key_hash, expiry, max_uses, used_count, revoked, asset_id FROM saas.enrollment_keys WHERE key_id = ?` — a plain read via farmer's existing grant into `saas`.
 3. **Validate**: unknown `key_id`, revoked, expired, or `used_count >= max_uses` all fail the same way (§3.4).

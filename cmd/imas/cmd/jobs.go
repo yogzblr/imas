@@ -410,6 +410,8 @@ func formatStatus(status jobs.JobStatus) string {
 		return color.YellowString("pending")
 	case jobs.JobPartial:
 		return color.YellowString("partial")
+	case jobs.JobExpired:
+		return color.MagentaString("expired")
 	default:
 		return "unknown"
 	}

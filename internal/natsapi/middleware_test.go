@@ -139,7 +139,7 @@ func TestViewerRoleNATSAccess(t *testing.T) {
 
 	// Write NATS methods the viewer should be denied
 	deniedMethods := []string{
-		"cook", "cmd.run", "shell.start", "test.ping",
+		"cook", "cook.resync", "cmd.run", "shell.start", "test.ping",
 		"props.set", "props.delete",
 		"jobs.cancel",
 		"pki.list", "pki.accept", "pki.reject", "pki.deny", "pki.unaccept", "pki.delete",
@@ -163,7 +163,7 @@ func TestOperatorRoleNATSAccess(t *testing.T) {
 		"jobs.list", "jobs.get", "jobs.forsprout", "jobs.cancel",
 		"props.getall", "props.get", "props.set", "props.delete",
 		"cohorts.list", "cohorts.get", "cohorts.resolve", "cohorts.refresh",
-		"cook", "cmd.run", "shell.start", "test.ping",
+		"cook", "cook.resync", "cmd.run", "shell.start", "test.ping",
 		"auth.whoami", "auth.explain",
 	}
 	for _, method := range allowedMethods {

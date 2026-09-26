@@ -2,7 +2,9 @@ package config
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -710,5 +712,320 @@ func TestStaticProps_Empty(t *testing.T) {
 	props := StaticProps()
 	if len(props) != 0 {
 		t.Errorf("StaticProps() = %v, want empty", props)
+	}
+}
+
+func TestLoadConfig_SproutEnrollmentPaths(t *testing.T) {
+	tmpRoot := t.TempDir()
+	cfgFile := writeTempConfig(t, tmpRoot, "sprout", "")
+	resetForBinaryTest(t, tmpRoot)
+	jety.SetConfigType("yaml")
+	jety.SetConfigFile(cfgFile)
+	_ = jety.ReadInConfig()
+
+	LoadConfig("sprout")
+
+	want := map[string]string{
+		"SproutUserJWTFile":         SproutUserJWTFile,
+		"SproutGatewayJWTFile":      SproutGatewayJWTFile,
+		"SproutTenantX25519PubFile": SproutTenantX25519PubFile,
+		"SproutBoxPrivFile":         SproutBoxPrivFile,
+		"SproutBoxPubFile":          SproutBoxPubFile,
+	}
+	names := map[string]string{
+		"SproutUserJWTFile":         "sprout.jwt",
+		"SproutGatewayJWTFile":      "gateway.jwt",
+		"SproutTenantX25519PubFile": "tenant-x25519.pub",
+		"SproutBoxPrivFile":         "sprout-x25519.key",
+		"SproutBoxPubFile":          "sprout-x25519.pub",
+	}
+	for field, got := range want {
+		if exp := filepath.Join(tmpRoot, "pki/sprout", names[field]); got != exp {
+			t.Errorf("%s = %q, want %q", field, got, exp)
+		}
+	}
+	if GatewayJWTTTL != 24*time.Hour {
+		t.Errorf("GatewayJWTTTL = %s, want 24h", GatewayJWTTTL)
+	}
+}
+
+func TestLoadConfig_SproutJoinToken(t *testing.T) {
+	cases := []struct {
+		name, file, env, want string
+		setEnv                bool
+		wantSrc               JoinTokenOrigin
+	}{
+		{name: "unset", want: "", wantSrc: JoinTokenFromNone},
+		{name: "from config file", file: "jointoken: ek_file.secret\n", want: "ek_file.secret", wantSrc: JoinTokenFromFile},
+		{name: "env overrides file", file: "jointoken: ek_file.secret\n", env: "ek_env.secret\n", setEnv: true, want: "ek_env.secret", wantSrc: JoinTokenFromEnv},
+		{name: "empty env falls back to file", file: "jointoken: ek_file.secret\n", env: "", setEnv: true, want: "ek_file.secret", wantSrc: JoinTokenFromFile},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.setEnv {
+				t.Setenv(EnvJoinToken, c.env)
+			} else {
+				t.Setenv(EnvJoinToken, "")
+				os.Unsetenv(EnvJoinToken)
+			}
+			tmpRoot := t.TempDir()
+			cfgFile := writeTempConfig(t, tmpRoot, "sprout", c.file)
+			resetForBinaryTest(t, tmpRoot)
+			jety.SetConfigType("yaml")
+			jety.SetConfigFile(cfgFile)
+			_ = jety.ReadInConfig()
+
+			LoadConfig("sprout")
+
+			if JoinToken != c.want {
+				t.Errorf("JoinToken = %q, want %q", JoinToken, c.want)
+			}
+			if JoinTokenSource != c.wantSrc {
+				t.Errorf("JoinTokenSource = %q, want %q", JoinTokenSource, c.wantSrc)
+			}
+			SetJoinTokenFromFlag("  ek_flag.secret\n")
+			if JoinToken != "ek_flag.secret" || JoinTokenSource != JoinTokenFromFlag {
+				t.Errorf("after SetJoinTokenFromFlag: %q from %q", JoinToken, JoinTokenSource)
+			}
+		})
+	}
+}
+
+// A join token from the environment is a secret and must not end up in
+// the config file LoadConfig rewrites.
+func TestLoadConfig_SproutJoinTokenFromEnvNotPersisted(t *testing.T) {
+	t.Setenv(EnvJoinToken, "ek_env.topsecret")
+	tmpRoot := t.TempDir()
+	cfgFile := writeTempConfig(t, tmpRoot, "sprout", "")
+	resetForBinaryTest(t, tmpRoot)
+	jety.SetConfigType("yaml")
+	jety.SetConfigFile(cfgFile)
+	_ = jety.ReadInConfig()
+
+	LoadConfig("sprout")
+
+	if JoinToken != "ek_env.topsecret" {
+		t.Fatalf("JoinToken = %q", JoinToken)
+	}
+	b, err := os.ReadFile(cfgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "topsecret") {
+		t.Errorf("join token from the environment was written to the config file:\n%s", b)
+	}
+}
+
+// loadSproutConfig writes content to a fresh sprout config file and
+// loads it, returning the file's path.
+func loadSproutConfig(t *testing.T, content string) string {
+	t.Helper()
+	tmpRoot := t.TempDir()
+	cfgFile := writeTempConfig(t, tmpRoot, "sprout", content)
+	resetForBinaryTest(t, tmpRoot)
+	jety.SetConfigType("yaml")
+	jety.SetConfigFile(cfgFile)
+	_ = jety.ReadInConfig()
+	LoadConfig("sprout")
+	return cfgFile
+}
+
+func TestClearJoinToken_RemovesItFromConfigFile(t *testing.T) {
+	t.Setenv(EnvJoinToken, "")
+	os.Unsetenv(EnvJoinToken)
+	cfgFile := loadSproutConfig(t, "jointoken: ek_file.topsecret\nsproutid: web-01\n")
+	if JoinToken != "ek_file.topsecret" {
+		t.Fatalf("JoinToken = %q", JoinToken)
+	}
+
+	src, err := ClearJoinToken()
+	if err != nil {
+		t.Fatalf("ClearJoinToken: %v", err)
+	}
+	if src != JoinTokenFromNone {
+		t.Errorf("ClearJoinToken reported %q left elsewhere, want none", src)
+	}
+	if JoinToken != "" {
+		t.Error("JoinToken still set in memory")
+	}
+	b, _ := os.ReadFile(cfgFile)
+	if strings.Contains(string(b), "topsecret") {
+		t.Errorf("join token still in the config file:\n%s", b)
+	}
+	if !strings.Contains(string(b), "web-01") {
+		t.Errorf("clearing the token lost the rest of the config:\n%s", b)
+	}
+
+	// And it stays gone on the next load.
+	configLoaded = sync.Once{}
+	LoadConfig("sprout")
+	if JoinToken != "" {
+		t.Errorf("JoinToken = %q after reload, want empty", JoinToken)
+	}
+}
+
+// A token the sprout can't remove itself is reported, so the operator
+// can be told where it is; any copy in the config file is still removed.
+func TestClearJoinToken_ReportsEnvAndFlagSources(t *testing.T) {
+	t.Setenv(EnvJoinToken, "ek_env.secret")
+	cfgFile := loadSproutConfig(t, "jointoken: ek_file.topsecret\n")
+	src, err := ClearJoinToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src != JoinTokenFromEnv {
+		t.Errorf("ClearJoinToken = %q, want the environment", src)
+	}
+	if b, _ := os.ReadFile(cfgFile); strings.Contains(string(b), "topsecret") {
+		t.Error("the config file's copy of the token was not removed")
+	}
+
+	loadSproutConfig(t, "")
+	SetJoinTokenFromFlag("ek_flag.secret")
+	if src, _ := ClearJoinToken(); src != JoinTokenFromFlag {
+		t.Errorf("ClearJoinToken = %q, want the flag", src)
+	}
+}
+
+func TestLoadConfig_SproutConfigFileIs0600(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes")
+	}
+	// An existing file left 0644 by an earlier version is tightened.
+	cfgFile := loadSproutConfig(t, "jointoken: ek_file.secret\n")
+	if err := os.Chmod(cfgFile, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configLoaded = sync.Once{}
+	LoadConfig("sprout")
+	info, err := os.Stat(cfgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("existing sprout config mode = %o, want 600", perm)
+	}
+
+	// A file LoadConfig creates itself is 0600 too.
+	tmpRoot := t.TempDir()
+	resetForBinaryTest(t, tmpRoot)
+	LoadConfig("sprout")
+	info, err = os.Stat(filepath.Join(tmpRoot, "sprout"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("new sprout config mode = %o, want 600", perm)
+	}
+}
+
+// The sprout's staged-recipe and gateway JWT settings come from the
+// sprout config file ("config properties"), with defaults when unset.
+func TestLoadConfig_SproutStagedRecipeSettings(t *testing.T) {
+	t.Run("from the config file", func(t *testing.T) {
+		tmpRoot := t.TempDir()
+		content := "stagedrecipemaxage: 6h\ngatewayjwtrefreshmargin: 10m\nsprouthandledjobsfile: /tmp/imas-handled\n"
+		cfgFile := writeTempConfig(t, tmpRoot, "sprout", content)
+		resetForBinaryTest(t, tmpRoot)
+		jety.SetConfigType("yaml")
+		jety.SetConfigFile(cfgFile)
+		_ = jety.ReadInConfig()
+
+		LoadConfig("sprout")
+
+		if StagedRecipeMaxAge != 6*time.Hour {
+			t.Errorf("StagedRecipeMaxAge = %v, want 6h", StagedRecipeMaxAge)
+		}
+		if GatewayJWTRefreshMargin != 10*time.Minute {
+			t.Errorf("GatewayJWTRefreshMargin = %v, want 10m", GatewayJWTRefreshMargin)
+		}
+		if SproutHandledJobsFile != "/tmp/imas-handled" {
+			t.Errorf("SproutHandledJobsFile = %q, want /tmp/imas-handled", SproutHandledJobsFile)
+		}
+	})
+
+	t.Run("defaults, written back to the config file", func(t *testing.T) {
+		tmpRoot := t.TempDir()
+		resetForBinaryTest(t, tmpRoot)
+
+		LoadConfig("sprout")
+
+		if StagedRecipeMaxAge != DefaultStagedRecipeMaxAge {
+			t.Errorf("StagedRecipeMaxAge = %v, want %v", StagedRecipeMaxAge, DefaultStagedRecipeMaxAge)
+		}
+		if GatewayJWTRefreshMargin != DefaultGatewayJWTRefreshMargin {
+			t.Errorf("GatewayJWTRefreshMargin = %v, want %v", GatewayJWTRefreshMargin, DefaultGatewayJWTRefreshMargin)
+		}
+		if SproutHandledJobsFile != "/var/lib/imas/sprout/handled-jobs" {
+			t.Errorf("SproutHandledJobsFile = %q", SproutHandledJobsFile)
+		}
+		b, err := os.ReadFile(filepath.Join(tmpRoot, "sprout"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{"stagedrecipemaxage", "gatewayjwtrefreshmargin", "sprouthandledjobsfile"} {
+			if !strings.Contains(string(b), key) {
+				t.Errorf("sprout config file doesn't list %q, so operators can't see it:\n%s", key, b)
+			}
+		}
+	})
+}
+
+func loadFarmerWithConfig(t *testing.T, content string) {
+	t.Helper()
+	tmpRoot := t.TempDir()
+	cfgFile := writeTempConfig(t, tmpRoot, "farmer", content)
+	resetForBinaryTest(t, tmpRoot)
+	jety.SetConfigType("yaml")
+	jety.SetConfigFile(cfgFile)
+	_ = jety.ReadInConfig()
+	LoadConfig("farmer")
+}
+
+// JobReconcileWindow comes from the farmer config file or, when the file
+// doesn't set it, IMAS_JOB_RECONCILE_WINDOW (the Helm chart's route).
+func TestLoadConfig_FarmerJobReconcileWindow(t *testing.T) {
+	t.Run("unset", func(t *testing.T) {
+		t.Setenv(EnvJobReconcileWindow, "")
+		loadFarmerWithConfig(t, "")
+		if JobReconcileWindow != 0 {
+			t.Errorf("JobReconcileWindow = %v, want 0 (disabled)", JobReconcileWindow)
+		}
+	})
+	t.Run("from env", func(t *testing.T) {
+		t.Setenv(EnvJobReconcileWindow, "90m")
+		loadFarmerWithConfig(t, "")
+		if JobReconcileWindow != 90*time.Minute {
+			t.Errorf("JobReconcileWindow = %v, want 90m", JobReconcileWindow)
+		}
+	})
+	t.Run("config file wins over env", func(t *testing.T) {
+		t.Setenv(EnvJobReconcileWindow, "90m")
+		loadFarmerWithConfig(t, "jobreconcilewindow: 3h\n")
+		if JobReconcileWindow != 3*time.Hour {
+			t.Errorf("JobReconcileWindow = %v, want 3h", JobReconcileWindow)
+		}
+	})
+}
+
+// An invalid IMAS_JOB_RECONCILE_WINDOW stops farmer rather than silently
+// disabling the window. log.Fatalf exits, so this runs in a subprocess.
+func TestLoadConfig_FarmerJobReconcileWindowInvalid(t *testing.T) {
+	if v := os.Getenv("IMAS_TEST_RECONCILE_SUBPROCESS"); v != "" {
+		t.Setenv(EnvJobReconcileWindow, v)
+		loadFarmerWithConfig(t, "")
+		return
+	}
+	for _, bad := range []string{"soon", "-1h", "5"} {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestLoadConfig_FarmerJobReconcileWindowInvalid$")
+		cmd.Env = append(os.Environ(), "IMAS_TEST_RECONCILE_SUBPROCESS="+bad)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Errorf("%s=%q: farmer config loaded; want it to exit", EnvJobReconcileWindow, bad)
+			continue
+		}
+		if !strings.Contains(string(out), EnvJobReconcileWindow) {
+			t.Errorf("%s=%q: exit message doesn't name the variable:\n%s", EnvJobReconcileWindow, bad, out)
+		}
 	}
 }

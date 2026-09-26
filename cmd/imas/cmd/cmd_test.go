@@ -75,6 +75,7 @@ func TestFormatStatus(t *testing.T) {
 		{jobs.JobRunning, "running"},
 		{jobs.JobPending, "pending"},
 		{jobs.JobPartial, "partial"},
+		{jobs.JobExpired, "expired"},
 		{jobs.JobStatus(99), "unknown"},
 	}
 	for _, tt := range statuses {
@@ -998,7 +999,7 @@ func TestConfigModelView_BlurredButton(t *testing.T) {
 
 func TestFormatStatus_AllValues(t *testing.T) {
 	// Ensure every known status produces a non-empty string
-	for _, s := range []jobs.JobStatus{jobs.JobSucceeded, jobs.JobFailed, jobs.JobRunning, jobs.JobPending, jobs.JobPartial} {
+	for _, s := range []jobs.JobStatus{jobs.JobSucceeded, jobs.JobFailed, jobs.JobRunning, jobs.JobPending, jobs.JobPartial, jobs.JobExpired} {
 		result := formatStatus(s)
 		if result == "" {
 			t.Errorf("formatStatus(%d) returned empty string", s)

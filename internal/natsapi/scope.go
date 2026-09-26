@@ -20,6 +20,7 @@ type scopeExtractor func(params json.RawMessage) ([]string, error)
 var scopeExtractors = map[string]scopeExtractor{
 	// TargetedAction methods — extract from target[].sprout_id
 	"cook":        extractTargetedSproutIDs,
+	"cook.resync": extractTargetedSproutIDs,
 	"cmd.run":     extractTargetedSproutIDs,
 	"test.ping":   extractTargetedSproutIDs,
 	"shell.start": extractShellSproutID,

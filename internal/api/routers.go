@@ -13,13 +13,18 @@ import (
 //   - Enrollment (POST /v1/enroll): the join-token-based path that mints a
 //     sprout's JWT/NKey identity in one round trip — see
 //     docs/design/imas-envoy-enrollment-design.md.
+//   - Gateway JWT refresh (POST /v1/refresh): an enrolled sprout's
+//     proof-of-possession-authenticated renewal of its short-lived
+//     gateway JWT, on the same design doc.
 //   - File serving: sprouts download recipe files via the farmer:// scheme,
 //     read from object storage (see handlers.SetRecipeStore) rather than
-//     local disk — docs/design/imas-master-plan.md Phase 1.
+//     local disk — docs/design/imas-master-plan.md Phase 1. Behind
+//     workstream H's Envoy JWT gate (deploy/envoy/envoy.yaml's /files/
+//     route); Auth accepts a sprout's gateway JWT here, scoped to that
+//     sprout's own keys (handlers.SproutFilePrefix).
 //   - Recipe browsing (GET /v1/recipes, GET /v1/recipes/{name...}): the
 //     dot-notation list/get surface used by the imas CLI and web UI,
-//     behind workstream H's Envoy JWT gate (deploy/envoy/envoy.yaml's
-//     /v1/recipes route) — replaces the old NATS-based
+//     CLI-token auth only, not routed through Envoy — replaces the old NATS-based
 //     internal/natsapi/recipes.go per
 //     docs/design/imas-fork-roadmap.md workstream I.
 //   - Health checks: unauthenticated /health (liveness) and /ready
@@ -39,6 +44,12 @@ func NewRouter(certificate string) *http.ServeMux {
 	// calling this has no JWT yet. Authorization here is the join token
 	// itself, validated inside handlers.Enroll/pki.Enroll.
 	mux.Handle("POST /v1/enroll", Logger(http.HandlerFunc(handlers.Enroll), "Enroll"))
+
+	// Gateway JWT refresh for enrolled sprouts — no auth required here
+	// either: the sprout's gateway JWT may already have expired, so the
+	// request authenticates with an NKey proof of possession, verified
+	// inside handlers.Refresh/pki.RefreshSprout. No join token.
+	mux.Handle("POST /v1/refresh", Logger(http.HandlerFunc(handlers.Refresh), "Refresh"))
 
 	// Gateway JWT JWKS (design doc §2.4 per the "Gateway JWT Companion
 	// Token" brief) — public keys only, no auth required. What Envoy's

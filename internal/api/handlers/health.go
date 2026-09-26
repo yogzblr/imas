@@ -29,7 +29,7 @@ type HealthResponse struct {
 // when restarting the process is what would fix the problem.
 //
 // The one such case is Valkey: if farmer couldn't create its Valkey client
-// at boot (cmd/farmer/main.go's initHeartbeatClient), it never retries, so
+// at boot (cmd/farmer/main.go's initValkeyClient), it never retries, so
 // the replica stays broken, and permanently not ready on GET /ready,
 // until something restarts it. Failing liveness here makes kubelet do
 // that. It checks only that the client exists, never that Valkey answers.

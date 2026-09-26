@@ -34,6 +34,15 @@ type enrollRequest struct {
 	// private half is generated and held by the sprout alone and is never
 	// part of this request.
 	SproutPub string `json:"sprout_pub"`
+	// Timestamp and NKeySig prove the caller holds the NKey seed behind
+	// NKeyPub, not just that it knows NKeyPub (which is public — Envoy
+	// forwards it upstream as x-imas-sprout-nkey). NKeySig is the seed's
+	// signature over pki.EnrollSigningPayload, unpadded base64url; see
+	// pki.EnrollRequest and the enrollment design doc's "Proof of
+	// possession" section. Required on every request, first-time and
+	// replay alike.
+	Timestamp int64  `json:"timestamp"`
+	NKeySig   string `json:"nkey_sig"`
 }
 
 // enrollSuccessResponse is design doc §3.2's success shape, plus
@@ -75,11 +84,12 @@ type enrollErrorResponse struct {
 }
 
 // Enroll handles POST /v1/enroll. Every failure path — a malformed
-// request body, a missing field, or any failure inside pki.Enroll
-// (unknown/malformed token, hash mismatch, revoked, expired, exhausted, a
-// lost redemption race) — writes the exact same status and body, by
-// design (§3.4): distinguishing them would hand an attacker a free oracle
-// for enumerating key_ids or timing a race against expiry.
+// request body, a missing field, or any failure inside pki.Enroll (a bad
+// or stale nkey_sig, unknown/malformed token, hash mismatch, revoked,
+// expired, exhausted, a lost redemption race) — writes the exact same
+// status and body, by design (§3.4): distinguishing them would hand an
+// attacker a free oracle for enumerating key_ids or timing a race against
+// expiry.
 func Enroll(w http.ResponseWriter, r *http.Request) {
 	var req enrollRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -87,7 +97,7 @@ func Enroll(w http.ResponseWriter, r *http.Request) {
 		writeEnrollFailed(w)
 		return
 	}
-	if req.JoinToken == "" || req.NKeyPub == "" || req.Hostname == "" || req.SproutPub == "" {
+	if req.JoinToken == "" || req.NKeyPub == "" || req.Hostname == "" || req.SproutPub == "" || req.Timestamp == 0 || req.NKeySig == "" {
 		log.Warnf("enroll: request missing a required field")
 		writeEnrollFailed(w)
 		return
@@ -104,7 +114,14 @@ func Enroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := pki.Enroll(r.Context(), req.JoinToken, req.NKeyPub, req.Hostname, req.SproutPub)
+	result, err := pki.Enroll(r.Context(), pki.EnrollRequest{
+		JoinToken: req.JoinToken,
+		NKeyPub:   req.NKeyPub,
+		Hostname:  req.Hostname,
+		SproutPub: req.SproutPub,
+		Timestamp: req.Timestamp,
+		NKeySig:   req.NKeySig,
+	})
 	if err != nil {
 		// pki.Enroll has already logged the specific reason; nothing more
 		// to add here.

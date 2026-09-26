@@ -29,6 +29,7 @@ var natsActionMap = map[string]rbac.Action{
 
 	// Write: scoped
 	MethodCook:        rbac.ActionCook,
+	MethodCookResync:  rbac.ActionCook,
 	MethodCmdRun:      rbac.ActionCmd,
 	MethodShellStart:  rbac.ActionShell,
 	MethodTestPing:    rbac.ActionTest,

@@ -1,3 +1,41 @@
+# Real-Envoy tests
+
+Two tests run a real Envoy binary on `../envoy.yaml`, rendered by
+`internal/envoytest` with only its deployment placeholders (listener
+port, DMZ cert paths, `farmer.internal` upstreams, admin port) pointed at
+local listeners. A placeholder that doesn't occur exactly as often as
+expected fails the test, so the shipped file is what's tested. In both,
+the sprout talks only to Envoy.
+
+- `internal/pki/envoy_e2e_test.go`: a sprout's whole life. It enrolls
+  through `/v1/enroll` (real `EnrollSprout` → `Enroll`, NKey proof of
+  possession), connects over `wss://` with `ConnectSprout`'s auth options
+  (User JWT + seed, gateway JWT header) to the real operator-mode bus's
+  websocket listener and round-trips a message, refreshes through
+  `/v1/refresh` (real `RefreshGatewayJWT` → `RefreshSprout`) and
+  reconnects with the new token, and downloads a recipe through `/files/`
+  (`FetchFarmerFile`). It also checks Envoy's own 401 for a missing,
+  expired or forged token on the upgrade.
+- `internal/api/envoy_e2e_test.go`: the staged-recipe download
+  (`cook.FetchStagedRecipe`) against farmer's real router, with `Auth` on
+  its production key source, the same signer the router's JWKS endpoint
+  serves Envoy. Envoy and farmer both verify the token. A token Envoy
+  rejects is refreshed through Envoy and retried. Bad tokens never reach
+  farmer. A validly signed token for another sprout passes Envoy and is
+  refused by farmer's scoping.
+
+OpenBao Transit is mocked (`internal/gatewayjwt/transittest`). Both tests
+are skipped unless `IMAS_TEST_ENVOY_BIN` is set:
+
+```
+curl -Lo envoy https://github.com/envoyproxy/envoy/releases/download/v1.34.1/envoy-1.34.1-linux-x86_64
+chmod +x envoy
+IMAS_TEST_ENVOY_BIN=$PWD/envoy go test ./internal/pki/ ./internal/api/ -run ThroughRealEnvoy -v
+```
+
+Set `IMAS_TEST_ENVOY_LOG_LEVEL=debug` to see Envoy's `jwt_authn`
+decisions. Validated against the official v1.34.1 release build.
+
 # Keycloak validation harness
 
 A way to confirm, using an independent, real-world OIDC implementation

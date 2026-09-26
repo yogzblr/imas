@@ -28,6 +28,7 @@ type CookOption func(*cookOptions)
 type cookOptions struct {
 	invokedBy  string
 	targetStep StepID
+	stageGuard func() error
 }
 
 // WithInvoker sets the pubkey of the user who initiated the cook.
@@ -43,6 +44,18 @@ func WithInvoker(pubkey string) CookOption {
 func WithTargetStep(id StepID) CookOption {
 	return func(o *cookOptions) {
 		o.targetStep = id
+	}
+}
+
+// WithStageGuard sets a check SendCookEventContext runs after staging the
+// recipe (see stage.go) and before pushing it. If check returns an error,
+// the staged copy is removed and nothing is pushed. The caller uses it to
+// confirm the sprout still has the identity the recipe was rendered for,
+// so a dispatch already in flight when a sprout is deleted or replaced
+// can't leave the old host's recipe readable by the new one.
+func WithStageGuard(check func() error) CookOption {
+	return func(o *cookOptions) {
+		o.stageGuard = check
 	}
 }
 
@@ -123,12 +136,27 @@ func SendCookEventContext(ctx context.Context, tenantID, sproutID string, recipe
 		}
 		validSteps = pruned
 	}
-	return sendEnvelope(tenantID, sproutID, RecipeEnvelope{
-		JobID:     JID,
-		Steps:     validSteps,
-		Test:      test,
-		InvokedBy: co.invokedBy,
-	})
+	env := RecipeEnvelope{
+		JobID:        JID,
+		Steps:        validSteps,
+		Test:         test,
+		InvokedBy:    co.invokedBy,
+		DispatchedAt: time.Now().UTC(),
+	}
+	// Stage before the push so the pull-readable copy (see stage.go) is
+	// never older than what the sprout was just sent.
+	if err := stageRecipe(ctx, tenantID, sproutID, env); err != nil {
+		return err
+	}
+	if co.stageGuard != nil {
+		if guardErr := co.stageGuard(); guardErr != nil {
+			if err := UnstageRecipe(ctx, tenantID, sproutID); err != nil {
+				return errors.Join(guardErr, fmt.Errorf("cook: removing staged recipe for %s/%s: %w", tenantID, sproutID, err))
+			}
+			return guardErr
+		}
+	}
+	return sendEnvelope(tenantID, sproutID, env)
 }
 
 // SendStepsEvent sends steps to sproutID as one cook job under JID, the
@@ -137,7 +165,7 @@ func SendCookEventContext(ctx context.Context, tenantID, sproutID string, recipe
 // internal.sprout.action's self_update (internal/natsapi/sprout_action.go),
 // whose single step is the sprout's selfupdate ingredient.
 func SendStepsEvent(tenantID, sproutID, JID string, steps []Step) error {
-	return sendEnvelope(tenantID, sproutID, RecipeEnvelope{JobID: JID, Steps: steps})
+	return sendEnvelope(tenantID, sproutID, RecipeEnvelope{JobID: JID, Steps: steps, DispatchedAt: time.Now().UTC()})
 }
 
 // sendEnvelope delivers rEnvelope to sproutID over tenantID's own

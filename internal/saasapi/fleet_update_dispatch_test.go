@@ -426,6 +426,52 @@ func TestFleetUpdate_FailedWaveHaltsRollout(t *testing.T) {
 	}
 }
 
+// An expired job (farmer's reconcile window) is terminal: its item fails
+// with job_expired and the rollout halts, rather than waiting on a job
+// farmer will never record.
+func TestFleetUpdate_ExpiredJobHaltsRollout(t *testing.T) {
+	gdb := newUpdateTestDB(t)
+	fastRollouts(t, 5*time.Second)
+	ns := startTestBus(t)
+	connectSaaSBus(t, ns)
+	tid := mustCreateActiveTenant(t, gdb)
+	mustPublishVersion(t, gdb, "v2.4.1", time.Now())
+	mustApprove(t, gdb, tid, "v2.4.1")
+	assets := mustUpdateFleet(t, gdb, tid, 5)
+	farmer := startFakeFarmer(t, ns, func(req controlplane.SproutActionRequest) any {
+		return controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
+			Status: controlplane.StatusDispatched, JID: jidFor(req.SproutID)}
+	})
+	installReader(t, &waveReader{farmer: farmer, outcome: func(ref JobRef, _ int) (JobOutcome, bool) {
+		if ref.SproutID == "upd-02" {
+			return JobOutcomeExpired, true
+		}
+		return JobOutcomeSucceeded, true
+	}})
+
+	_, resp := postUpdates(t, tid, map[string]any{"asset_ids": assets, "target_version": "v2.4.1", "batch_size": 2})
+	actionDispatches.Wait()
+	if reqs, _ := farmer.seen(); len(reqs) != 2 {
+		t.Fatalf("farmer got %d requests, want only the first wave's 2", len(reqs))
+	}
+	_, got := getUpdateBatch(t, tid, resp["batch_id"].(string))
+	want := []struct {
+		status AssetActionItemStatus
+		code   string
+	}{
+		{ActionItemSucceeded, ""}, {ActionItemFailed, errCodeJobExpired},
+		{ActionItemFailed, errCodeRolloutHalted}, {ActionItemFailed, errCodeRolloutHalted}, {ActionItemFailed, errCodeRolloutHalted},
+	}
+	for i, it := range got.Items {
+		if it.Status != want[i].status || it.Error != want[i].code || (it.Error != "" && it.Message != actionErrorMessage(it.Error)) {
+			t.Errorf("item %d = %+v, want %s %s", i, it, want[i].status, want[i].code)
+		}
+	}
+	if got.Status != actionBatchCompleted {
+		t.Fatalf("batch = %s, want completed", got.Status)
+	}
+}
+
 // A sprout that never reports its update's outcome is
 // unresponsive_after_update, not failed, and halts the rollout.
 func TestFleetUpdate_UnresponsiveAfterUpdate(t *testing.T) {

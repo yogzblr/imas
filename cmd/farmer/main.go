@@ -134,7 +134,7 @@ func main() {
 	jobStore := initJobStore()
 	initGatewaySigner()
 	initFleetKeySource()
-	initHeartbeatClient()
+	initValkeyClient()
 	props.LoadStaticProps(config.StaticProps())
 	loadCohortRegistry()
 	createConfigRoot()
@@ -272,6 +272,11 @@ func installStorage(db *gorm.DB) {
 	pki.SetDB(db)
 	rbac.SetDB(db)
 	jobs.SetDB(db)
+	// Needs the index above: a job is dated by its job_status row.
+	jobs.SetReconcileWindow(config.JobReconcileWindow)
+	if w := config.JobReconcileWindow; w > 0 {
+		log.Noticef("jobs: not recording jobs that start more than %s after dispatch (%s)", w, config.EnvJobReconcileWindow)
+	}
 	handlers.SetReadinessDB(db)
 }
 
@@ -401,18 +406,22 @@ func initFleetKeySource() {
 	log.Infof("Fleet signing key source configured (read-only, Transit key %s)", src.KeyName())
 }
 
-// initHeartbeatClient connects the Valkey client connection-state reads
-// and writes through (see internal/heartbeat). The $SYS event listener
-// itself is registered separately, by initSystemAccountListeners, once the bus
-// is reachable.
-func initHeartbeatClient() {
+// initValkeyClient connects the Valkey client that connection-state
+// heartbeats (internal/heartbeat) and the enrollment/refresh replay cache
+// (internal/pki's replaycache.go) read and write through. The $SYS event
+// listener itself is registered separately, by initSystemAccountListeners,
+// once the bus is reachable. Not fatal if Valkey is unreachable, but
+// POST /v1/enroll and /v1/refresh fail closed without it, and /health
+// reports the missing client.
+func initValkeyClient() {
 	addrs := strings.Split(config.ValkeyAddrs, ",")
 	client, err := valkey.NewClient(valkey.ClientOption{InitAddress: addrs})
 	if err != nil {
-		log.Errorf("failed to connect to Valkey at %v: %v", addrs, err)
+		log.Errorf("failed to connect to Valkey at %v (POST /v1/enroll and /v1/refresh will fail until it is reachable): %v", addrs, err)
 		return
 	}
 	heartbeat.SetClient(client)
+	pki.SetReplayCacheClient(client)
 	handlers.SetReadinessValkey(client)
 }
 

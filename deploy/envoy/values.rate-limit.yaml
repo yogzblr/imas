@@ -1,0 +1,50 @@
+# Reference Helm values for the DMZ Envoy's two local rate-limit buckets
+# (envoy.yaml's /v1/enroll and /v1/refresh routes). NOT used by anything
+# in this repo: Envoy's real Deployment and Helm chart live in the
+# separate ops repo (same situation as deploy/saasapi/ and deploy/farmer/).
+# Merge this block into that chart's values.yaml, and render the
+# /v1/refresh route from _refresh-rate-limit.tpl. See README.md,
+# "Sizing the /v1/refresh bucket".
+#
+# Both buckets are per Envoy process (shared by its worker threads) and
+# per route: the two never share tokens.
+envoy:
+  # POST /v1/refresh: authenticated (NKey proof of possession), and
+  # legitimately high-volume, so sized from the fleet rather than fixed.
+  # tokens_per_fill is computed from these unless overridden below:
+  #
+  #   per-Envoy refreshes/s = fleetSize * 30 * headroom
+  #                           / (17 * gatewayJwtTtlSeconds * envoyReplicas)
+  #
+  # 17/30 of the TTL is the shortest interval between one sprout's
+  # refreshes (see README.md). The defaults are README.md's worked
+  # example and render envoy.yaml's static values: 11 tokens every 1s,
+  # 3300 max.
+  refreshRateLimit:
+    # Enrolled sprouts behind these Envoys. Size for where the fleet is
+    # going, not where it is: an undersized bucket only shows up as 429s
+    # and delayed refreshes once the fleet grows.
+    fleetSize: 1000000
+    # Must match farmer's gatewayjwtttl (config.GatewayJWTTTL), in
+    # seconds. A shorter TTL means proportionally more refreshes.
+    gatewayJwtTtlSeconds: 86400
+    # Envoy replicas the load balancer spreads /v1/refresh across.
+    envoyReplicas: 4
+    # Whole-number multiplier over the steady-state rate: covers uneven
+    # load balancing, losing a replica, and catching up after an outage.
+    headroom: 2
+    # token_bucket.fill_interval, in whole seconds.
+    fillIntervalSeconds: 1
+    # max_tokens, as seconds' worth of the per-Envoy rate: how big a burst
+    # (e.g. sprouts catching up after a farmer outage) is absorbed before
+    # Envoy starts returning 429.
+    burstSeconds: 300
+    # Explicit overrides. null: computed from the values above.
+    tokensPerFill: null
+    maxTokens: null
+
+  # POST /v1/enroll's bucket is deliberately NOT a value here: it stays
+  # fixed in envoy.yaml (20 per 60s per Envoy). The join token is its only
+  # credential, so that small budget is what bounds join-token guessing,
+  # and it should not grow with the fleet. Refresh traffic never draws on
+  # it.

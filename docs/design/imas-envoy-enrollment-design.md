@@ -58,11 +58,90 @@ Every credential elsewhere in this design (the JWT, the X25519 keypairs) assumes
 - **Usage-capped**, ideally matched to the actual fleet size being rolled out in one Ansible run, rather than unlimited use.
 - Own PXC table: `tenant_id`, key hash (never the raw key), expiry, max/used count, revoked flag.
 - Own endpoint, deliberately **not** behind Envoy's `jwt_authn` filter — a sprout enrolling has no JWT yet, so this route validates the presented registration key by direct lookup against the PXC table above (constant-time hash comparison, check expiry/usage, decrement/mark used), not via Envoy's JWT machinery.
+- **Proof of possession on every request**: the sprout signs the request with its NKey seed, and farmer verifies that signature before anything else. See "Proof of possession" below.
 - **Response, in one round trip:** the sprout's signed NATS User JWT (from the workstream B model), its paired gateway JWT (see below, for Envoy's `jwt_authn` on the websocket and recipe routes), its NKey identity, and the tenant's X25519 public key (from workstream J's payload encryption bootstrap) — everything the sprout needs for every subsequent interaction with the platform, issued atomically at enrollment rather than across several separate exchanges.
+
+## Proof of possession: every request signs with the sprout's NKey seed
+
+`nkey_pub` is not a secret. Envoy forwards it upstream as `x-imas-sprout-nkey` on every JWT-gated request, and it is the `sub` of both tokens the sprout holds. The idempotency replay (`cloudxp-machine-manager-api-design.md` §3.3 step 1) runs before the join token is checked, so if `nkey_pub` alone were enough, anyone who had seen an enrolled sprout's `nkey_pub` could call `/v1/enroll` and get a freshly minted gateway JWT for that sprout. Every request must therefore prove it holds the NKey seed behind the `nkey_pub` it presents.
+
+**Request shape** (`POST /v1/enroll`, JSON):
+
+```json
+{
+  "join_token": "<key_id>.<secret>",
+  "nkey_pub":   "U...",
+  "hostname":   "web-01",
+  "sprout_pub": "<base64 X25519 public key>",
+  "timestamp":  1790000000,
+  "nkey_sig":   "<unpadded base64url Ed25519 signature>"
+}
+```
+
+- `timestamp` is Unix seconds at signing time.
+- `nkey_sig` is the sprout's NKey seed's signature (`nkeys` `KeyPair.Sign`) over these bytes, joined with `\n` and with no trailing newline:
+  ```
+  imas-enroll-v1
+  <timestamp, decimal>
+  <nkey_pub>
+  <hostname>
+  <sprout_pub>
+  <join_token>
+  ```
+  `pki.EnrollSigningPayload` builds this. The `imas-enroll-v1` domain tag keeps an enrollment signature from being mistaken for any other signature the same NKey makes, such as a NATS `CONNECT` nonce signature. A field containing a newline is rejected, so the encoding is unambiguous. The signature covers every field, so none can be swapped under a captured signature (for example, substituting a different `sprout_pub` on a first-time enrollment).
+- Farmer verifies the signature against `nkey_pub` and requires `timestamp` within ±5 minutes of its own clock (`pki.EnrollSigMaxSkew`). It does this before the idempotency lookup, the join-token lookup, and any redemption. A failure returns the same generic `enrollment_failed` as every other failure (§3.4).
+- **Required on first-time enrollments too, not only replays.** Without it, a join-token holder could register a `nkey_pub` whose seed they don't hold. If the real owner later enrolled against a different tenant's token, the replay would put its sprout in the first tenant. One rule for every request also keeps the wire contract to a single shape.
+
+**Why a timestamp rather than a server-issued nonce.** A nonce would need a second round trip (fetch a challenge, then enroll) and single-use nonce state shared by every farmer behind Envoy. A signed timestamp keeps enrollment to one blocking call, which is what the Ansible-driven flow above needs. On its own, a timestamp leaves a replay window: a captured signed request would verify until its timestamp left the ±5 minute window. The replay cache below closes it.
+
+**Clock requirement.** A sprout whose clock is more than 5 minutes off farmer's cannot enroll or replay. Freshly provisioned hosts should have NTP running before the enrollment step.
+
+### Replay cache: each signed request is accepted once
+
+Farmer records every signed request it accepts in Valkey and refuses one it has already recorded, on `/v1/enroll` and `/v1/refresh` alike (`internal/pki/replaycache.go`). It uses the same Valkey cluster farmer already writes sprout heartbeats to (`IMAS_VALKEY_ADDRS`).
+
+- **Shared across farmers.** Farmer runs as several replicas behind Envoy, and a resubmission routed to a different replica, or arriving after a farmer restart, must still be caught. An in-process map would catch neither.
+- **One `SET imas:replay:<digest> 1 NX EX <ttl>` per request.** `SET NX` is atomic, so of two replicas recording the same request at once, exactly one wins. Each key is a single slot, so this works unchanged on Valkey Cluster.
+- **The digest is the hex SHA-256 of the decoded signature followed by the signed payload.** It uses the decoded signature bytes, not the `nkey_sig` string: base64url decoding tolerates non-zero trailing bits, so one signature has several string forms, but Ed25519 verification accepts only one byte form. It includes the signature, not only the payload, because a refresh payload is predictable (domain tag, timestamp, public `nkey_pub`). Farmer's Valkey connection has no auth yet, so anyone able to write to Valkey could otherwise record a sprout's future payloads in advance and lock it out of refreshing. The signature needs the NKey seed. The digest is globally unique without a tenant component: the payload carries its domain tag, `nkey_pub` and timestamp.
+- **Fails closed.** A Valkey error, a round trip over 1 second, or no Valkey client at all (farmer couldn't connect at boot) rejects the request with the generic `enrollment_failed`. Enrollment and refresh are unavailable while Valkey is. That is the same trade-off as a missing gateway JWT signer, and `/health` already fails, so the pod is restarted, when farmer has no Valkey client.
+- **Recorded only after the request's credentials check out, and before anything is issued**: on the enrollment replay path once `nkey_pub` is found to be accepted; on a first-time enrollment once the join token has validated, before it is redeemed; on refresh once `nkey_pub` is found to be accepted. Anyone can make a valid signature with a freshly generated NKey, so recording straight after signature verification would let unauthenticated callers write keys. Two identical first-time requests racing past the idempotency check both reach the record step, and only one goes on to redeem.
+- **Keys expire on their own.** The TTL runs to the payload's timestamp plus 5 minutes (the end of its skew window) plus a 1-minute margin for clock differences between farmer replicas. It is computed from farmer's clock and sent as a relative `EX`, so Valkey's clock doesn't matter. A key that outlives its TTL would do no harm: its payload's timestamp already fails the skew check.
+- **Legitimate retries are unaffected.** A sprout signs every attempt afresh, and its timestamps are strictly increasing within a process (`pki.nextSigningTimestamp`), so two requests signed in the same second (the background refresher and an on-demand refresh, say) are still distinct. A request that was recorded but then failed for another reason (a database error while minting) is retried with a new signature. Recording never touches the join token, so a retry still doesn't spend one.
+- **Residual gaps.** Valkey replicates asynchronously, so a failover can lose claims written just before it, and those requests could each be resubmitted once more before their window closes. Anyone with write access to Valkey can delete claims. Both reopen at most the ±5 minute window this cache closes, and both need access to an internal service or a TLS session. Auth and TLS on farmer's Valkey connection would narrow the second.
+
+## Gateway JWT refresh: its own route and contract
+
+The gateway JWT is short-lived by design (`config.GatewayJWTTTL`), so every enrolled sprout renews it continuously. That is a different job from enrollment, and it gets its own endpoint rather than reusing `/v1/enroll`'s replay path.
+
+**Request shape** (`POST /v1/refresh`, JSON). There is no `join_token` field; farmer refuses a body that has one.
+
+```json
+{
+  "nkey_pub":  "U...",
+  "timestamp": 1790000000,
+  "nkey_sig":  "<unpadded base64url Ed25519 signature>"
+}
+```
+
+- `nkey_sig` is the NKey seed's signature over these bytes, joined with `\n` and with no trailing newline (`pki.RefreshSigningPayload`):
+  ```
+  imas-refresh-v1
+  <timestamp, decimal>
+  <nkey_pub>
+  ```
+  The `imas-refresh-v1` domain tag differs from `imas-enroll-v1`, so a signature made for one endpoint is never accepted by the other. The timestamp window is the same ±5 minutes.
+- Farmer verifies the signature, then looks `nkey_pub` up among **accepted** sprouts only, and records the request in the replay cache (see "Replay cache" above) before issuing anything. A found sprout gets its existing NATS User JWT, a freshly minted gateway JWT and the tenant X25519 public key back. Anything else (unknown, denied, rejected or deleted sprout, bad or stale signature) gets the same generic `enrollment_failed`. Refresh can only re-issue an existing identity. It never redeems a join token or creates a sprout, so a sprout deleted on farmer can't bring itself back from its refresh loop.
+- **Not `jwt_authn`-gated at Envoy.** A sprout powered off for longer than the TTL holds only an expired gateway JWT and must still be able to renew it; the proof of possession is the authentication.
+- **Its own rate-limit bucket.** `/v1/enroll`'s bucket stays small because the join token is its only credential, so that budget is what bounds join-token guessing. Refresh is authenticated and legitimately high-volume (every sprout, roughly every two-thirds of the TTL), so it gets a separate, much larger bucket sized from fleet size ÷ TTL. The two never share tokens. See `deploy/envoy/README.md`, "Sizing the /v1/refresh bucket".
+
+**Sprout side** (`internal/pki/enrollclient.go`):
+- The refresh is scheduled two-thirds of the way through the token's lifetime, less up to a tenth of the lifetime of random jitter, and retried with backoff (capped at 5 minutes) on failure.
+- **The tenant X25519 public key is pinned write-once at enrollment.** A refresh (or a replayed enrollment) returning a different key is refused whole: nothing from that response is persisted, and the sprout exits with an error so its service manager records a failure. This stays the rule until tenant key rotation is designed with its own authentication (workstream J). Pinned TLS only rules out an outside attacker; it doesn't cover a farmer-side bug, or the known gap that the tenant key is not yet per-tenant.
+- **The join token is deleted by the sprout itself** once enrollment is fully persisted (the NATS User JWT, written last, is on disk): it is removed from the sprout config file, which is kept at mode 0600. A token supplied by environment variable or command-line flag can't be removed by the sprout, so it logs where the token still is. The token has no use left after enrollment: every later call is a proof-of-possession replay or refresh.
 
 ## Why this is safe even crossing the DMZ bus before any payload encryption exists
 
-The only things transiting the bus during this exchange are the sprout's own generated **public** keys (NKey public key, X25519 public key) — not secret even if a compromised bus observes them. The sprout's private key material never leaves the sprout; the tenant's private key never leaves OpenBao custody. No bootstrapping-before-security-exists problem here, by construction.
+The only things transiting the bus during this exchange are the sprout's own generated **public** keys (NKey public key, X25519 public key) and a signature made with the NKey seed — none of them secret even if a compromised bus observes them. Observing a `nkey_pub` is not enough to obtain that sprout's identity, because every request must be signed by its seed (see "Proof of possession" above). The sprout's private key material never leaves the sprout; the tenant's private key never leaves OpenBao custody. No bootstrapping-before-security-exists problem here, by construction.
 
 ## What still needs deciding at implementation time
 

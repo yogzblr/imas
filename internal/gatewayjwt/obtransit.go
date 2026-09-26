@@ -48,7 +48,6 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -356,7 +355,7 @@ type transitKeyInfo struct {
 }
 
 // readKey calls Transit's GET /v1/<mount>/keys/<keyName>, returning every
-// key version and version metadata (public key PEM, creation time) plus
+// key version and version metadata (base64 public key, creation time) plus
 // the key's current min_encryption_version/latest_version.
 func (c *obTransitClient) readKey(ctx context.Context, keyName string) (*transitKeyInfo, error) {
 	token, err := c.currentToken(ctx)
@@ -404,20 +403,18 @@ func (c *obTransitClient) readKey(ctx context.Context, keyName string) (*transit
 	}, nil
 }
 
-// parseEd25519PublicKeyPEM decodes Transit's PEM-encoded
-// SubjectPublicKeyInfo block into a raw 32-byte Ed25519 public key.
-func parseEd25519PublicKeyPEM(pemStr string) (ed25519.PublicKey, error) {
-	block, _ := pem.Decode([]byte(pemStr))
-	if block == nil {
-		return nil, fmt.Errorf("gatewayjwt: no PEM block found in Transit public key")
-	}
-	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+// parseTransitEd25519PublicKey decodes the public_key Transit's
+// keys/<key> read returns for an ed25519 key version: the raw 32-byte
+// key in standard base64. Transit uses PEM only for ECDSA and RSA keys,
+// never for Ed25519 (see testdata/openbao-v2.7.0/transit-keys.json, a
+// captured real response).
+func parseTransitEd25519PublicKey(s string) (ed25519.PublicKey, error) {
+	raw, err := base64.StdEncoding.Strict().DecodeString(s)
 	if err != nil {
-		return nil, fmt.Errorf("gatewayjwt: parsing Transit public key: %w", err)
+		return nil, fmt.Errorf("gatewayjwt: Transit public key is not standard base64: %w", err)
 	}
-	edPub, ok := pub.(ed25519.PublicKey)
-	if !ok {
-		return nil, fmt.Errorf("gatewayjwt: Transit key is not an Ed25519 public key (got %T)", pub)
+	if len(raw) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("gatewayjwt: Transit public key is %d bytes, want %d (Ed25519)", len(raw), ed25519.PublicKeySize)
 	}
-	return edPub, nil
+	return ed25519.PublicKey(raw), nil
 }
