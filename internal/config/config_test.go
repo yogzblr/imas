@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -751,11 +752,12 @@ func TestLoadConfig_SproutJoinToken(t *testing.T) {
 	cases := []struct {
 		name, file, env, want string
 		setEnv                bool
+		wantSrc               JoinTokenOrigin
 	}{
-		{name: "unset", want: ""},
-		{name: "from config file", file: "jointoken: ek_file.secret\n", want: "ek_file.secret"},
-		{name: "env overrides file", file: "jointoken: ek_file.secret\n", env: "ek_env.secret\n", setEnv: true, want: "ek_env.secret"},
-		{name: "empty env falls back to file", file: "jointoken: ek_file.secret\n", env: "", setEnv: true, want: "ek_file.secret"},
+		{name: "unset", want: "", wantSrc: JoinTokenFromNone},
+		{name: "from config file", file: "jointoken: ek_file.secret\n", want: "ek_file.secret", wantSrc: JoinTokenFromFile},
+		{name: "env overrides file", file: "jointoken: ek_file.secret\n", env: "ek_env.secret\n", setEnv: true, want: "ek_env.secret", wantSrc: JoinTokenFromEnv},
+		{name: "empty env falls back to file", file: "jointoken: ek_file.secret\n", env: "", setEnv: true, want: "ek_file.secret", wantSrc: JoinTokenFromFile},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -776,6 +778,13 @@ func TestLoadConfig_SproutJoinToken(t *testing.T) {
 
 			if JoinToken != c.want {
 				t.Errorf("JoinToken = %q, want %q", JoinToken, c.want)
+			}
+			if JoinTokenSource != c.wantSrc {
+				t.Errorf("JoinTokenSource = %q, want %q", JoinTokenSource, c.wantSrc)
+			}
+			SetJoinTokenFromFlag("  ek_flag.secret\n")
+			if JoinToken != "ek_flag.secret" || JoinTokenSource != JoinTokenFromFlag {
+				t.Errorf("after SetJoinTokenFromFlag: %q from %q", JoinToken, JoinTokenSource)
 			}
 		})
 	}
@@ -803,5 +812,108 @@ func TestLoadConfig_SproutJoinTokenFromEnvNotPersisted(t *testing.T) {
 	}
 	if strings.Contains(string(b), "topsecret") {
 		t.Errorf("join token from the environment was written to the config file:\n%s", b)
+	}
+}
+
+// loadSproutConfig writes content to a fresh sprout config file and
+// loads it, returning the file's path.
+func loadSproutConfig(t *testing.T, content string) string {
+	t.Helper()
+	tmpRoot := t.TempDir()
+	cfgFile := writeTempConfig(t, tmpRoot, "sprout", content)
+	resetForBinaryTest(t, tmpRoot)
+	jety.SetConfigType("yaml")
+	jety.SetConfigFile(cfgFile)
+	_ = jety.ReadInConfig()
+	LoadConfig("sprout")
+	return cfgFile
+}
+
+func TestClearJoinToken_RemovesItFromConfigFile(t *testing.T) {
+	t.Setenv(EnvJoinToken, "")
+	os.Unsetenv(EnvJoinToken)
+	cfgFile := loadSproutConfig(t, "jointoken: ek_file.topsecret\nsproutid: web-01\n")
+	if JoinToken != "ek_file.topsecret" {
+		t.Fatalf("JoinToken = %q", JoinToken)
+	}
+
+	src, err := ClearJoinToken()
+	if err != nil {
+		t.Fatalf("ClearJoinToken: %v", err)
+	}
+	if src != JoinTokenFromNone {
+		t.Errorf("ClearJoinToken reported %q left elsewhere, want none", src)
+	}
+	if JoinToken != "" {
+		t.Error("JoinToken still set in memory")
+	}
+	b, _ := os.ReadFile(cfgFile)
+	if strings.Contains(string(b), "topsecret") {
+		t.Errorf("join token still in the config file:\n%s", b)
+	}
+	if !strings.Contains(string(b), "web-01") {
+		t.Errorf("clearing the token lost the rest of the config:\n%s", b)
+	}
+
+	// And it stays gone on the next load.
+	configLoaded = sync.Once{}
+	LoadConfig("sprout")
+	if JoinToken != "" {
+		t.Errorf("JoinToken = %q after reload, want empty", JoinToken)
+	}
+}
+
+// A token the sprout can't remove itself is reported, so the operator
+// can be told where it is; any copy in the config file is still removed.
+func TestClearJoinToken_ReportsEnvAndFlagSources(t *testing.T) {
+	t.Setenv(EnvJoinToken, "ek_env.secret")
+	cfgFile := loadSproutConfig(t, "jointoken: ek_file.topsecret\n")
+	src, err := ClearJoinToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src != JoinTokenFromEnv {
+		t.Errorf("ClearJoinToken = %q, want the environment", src)
+	}
+	if b, _ := os.ReadFile(cfgFile); strings.Contains(string(b), "topsecret") {
+		t.Error("the config file's copy of the token was not removed")
+	}
+
+	loadSproutConfig(t, "")
+	SetJoinTokenFromFlag("ek_flag.secret")
+	if src, _ := ClearJoinToken(); src != JoinTokenFromFlag {
+		t.Errorf("ClearJoinToken = %q, want the flag", src)
+	}
+}
+
+func TestLoadConfig_SproutConfigFileIs0600(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes")
+	}
+	// An existing file left 0644 by an earlier version is tightened.
+	cfgFile := loadSproutConfig(t, "jointoken: ek_file.secret\n")
+	if err := os.Chmod(cfgFile, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configLoaded = sync.Once{}
+	LoadConfig("sprout")
+	info, err := os.Stat(cfgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("existing sprout config mode = %o, want 600", perm)
+	}
+
+	// A file LoadConfig creates itself is 0600 too.
+	tmpRoot := t.TempDir()
+	resetForBinaryTest(t, tmpRoot)
+	LoadConfig("sprout")
+	info, err = os.Stat(filepath.Join(tmpRoot, "sprout"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("new sprout config mode = %o, want 600", perm)
 	}
 }

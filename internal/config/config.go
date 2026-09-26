@@ -94,12 +94,15 @@ var (
 	// the sprout (e.g. an Ansible playbook) picks the source: the
 	// "jointoken" key in the sprout config file, the IMAS_JOIN_TOKEN
 	// environment variable (which wins over the file), or the sprout's
-	// --join-token flag (which wins over both; cmd/sprout sets it after
-	// LoadConfig). It is a secret, so it is never written back to the
-	// config file by LoadConfig. Only needed until the sprout has enrolled
-	// once; after that the sprout authenticates with its NKey and the
-	// persisted SproutUserJWTFile, and the token can be removed.
+	// --join-token flag (which wins over both; cmd/sprout sets it with
+	// SetJoinTokenFromFlag after LoadConfig). It is a secret, so it is
+	// never written back to the config file by LoadConfig. It has no use
+	// once the sprout has enrolled (every later call is a proof-of-
+	// possession replay or refresh), so the sprout removes it from the
+	// config file itself with ClearJoinToken.
 	JoinToken string
+	// JoinTokenSource records where JoinToken came from.
+	JoinTokenSource JoinTokenOrigin
 
 	// SproutUserJWTFile, SproutGatewayJWTFile and
 	// SproutTenantX25519PubFile are where a sprout persists the NATS User
@@ -420,6 +423,17 @@ func LoadConfig(binary string) {
 
 			JobLogDir = jety.GetString("joblogdir")
 			JobLogTTL = jety.GetDuration("joblogttl")
+
+			// The sprout config file can hold the join token. os.Create
+			// (above, and in jety.WriteConfig) leaves a new file 0644
+			// under the usual umask, and WriteConfig keeps an existing
+			// file's mode, so tighten it here, before anything is written
+			// to it, on every start: that also fixes files created by
+			// earlier versions.
+			cfgFile := filepath.Join(systemConfigRoot, "sprout")
+			if err := os.Chmod(cfgFile, sproutConfigMode); err != nil && !os.IsNotExist(err) {
+				log.Errorf("failed to restrict %s to mode %o: %v", cfgFile, sproutConfigMode, err)
+			}
 		}
 		jety.WriteConfig()
 	})
@@ -481,7 +495,7 @@ func LoadConfig(binary string) {
 	SproutTenantX25519PubFile = jety.GetString("sprouttenantx25519pubfile")
 	SproutBoxPrivFile = jety.GetString("sproutboxprivfile")
 	SproutBoxPubFile = jety.GetString("sproutboxpubfile")
-	JoinToken = resolveJoinToken()
+	JoinToken, JoinTokenSource = resolveJoinToken()
 	RecipeDir = jety.GetString("recipedir")
 	if RecipeDir == "" {
 		RecipeDir = filepath.Join("/", "srv", "imas", "recipes", "prod")
@@ -497,21 +511,71 @@ func LoadConfig(binary string) {
 	SproutBusURLs = jety.GetStringSlice("sproutbusurls")
 }
 
+// JoinTokenOrigin is where a sprout's join token came from.
+type JoinTokenOrigin string
+
+const (
+	JoinTokenFromNone JoinTokenOrigin = ""
+	JoinTokenFromFile JoinTokenOrigin = "config file"
+	JoinTokenFromEnv  JoinTokenOrigin = "environment (" + EnvJoinToken + ")"
+	JoinTokenFromFlag JoinTokenOrigin = "--join-token flag"
+)
+
+// sproutConfigMode is the sprout config file's mode: it can hold the join
+// token, so only its owner (root) may read it.
+const sproutConfigMode = 0o600
+
+// SetJoinTokenFromFlag sets the join token from the sprout's
+// --join-token flag, which wins over every other source. An empty value
+// is ignored.
+func SetJoinTokenFromFlag(tok string) {
+	if tok = strings.TrimSpace(tok); tok != "" {
+		JoinToken = tok
+		JoinTokenSource = JoinTokenFromFlag
+	}
+}
+
+// ClearJoinToken forgets the join token and deletes it from the sprout
+// config file, if the file holds one, whatever source JoinToken itself
+// came from. Call it only once enrollment has been fully persisted. It
+// returns the source the in-use token came from when that source is one
+// the sprout can't change itself (the environment or the command line),
+// so the caller can tell the operator to remove it there; otherwise
+// JoinTokenFromNone.
+func ClearJoinToken() (JoinTokenOrigin, error) {
+	src := JoinTokenSource
+	JoinToken = ""
+	JoinTokenSource = JoinTokenFromNone
+	if strings.TrimSpace(jety.GetString("jointoken")) != "" {
+		jety.Set("jointoken", "")
+		if err := jety.WriteConfig(); err != nil {
+			return JoinTokenFromNone, fmt.Errorf("removing the join token from %s: %w", jety.ConfigFileUsed(), err)
+		}
+	}
+	if src == JoinTokenFromEnv || src == JoinTokenFromFlag {
+		return src, nil
+	}
+	return JoinTokenFromNone, nil
+}
+
 // EnvJoinToken is the environment variable a sprout reads its join
 // token from (see JoinToken).
 const EnvJoinToken = "IMAS_JOIN_TOKEN"
 
-// resolveJoinToken returns the join token from IMAS_JOIN_TOKEN if set,
-// else from the config file's "jointoken" key. Read straight from the
+// resolveJoinToken returns the join token and its source: from
+// IMAS_JOIN_TOKEN if set, else from the config file's "jointoken" key. Read straight from the
 // environment rather than jety.Set, which LoadConfig's WriteConfig would
 // then persist to the config file. Surrounding whitespace is trimmed, so
 // a token written to a file or variable with a trailing newline still
 // works.
-func resolveJoinToken() string {
+func resolveJoinToken() (string, JoinTokenOrigin) {
 	if v, found := os.LookupEnv(EnvJoinToken); found && strings.TrimSpace(v) != "" {
-		return strings.TrimSpace(v)
+		return strings.TrimSpace(v), JoinTokenFromEnv
 	}
-	return strings.TrimSpace(jety.GetString("jointoken"))
+	if v := strings.TrimSpace(jety.GetString("jointoken")); v != "" {
+		return v, JoinTokenFromFile
+	}
+	return "", JoinTokenFromNone
 }
 
 // BasePathValid checks that the configured recipe directory exists.

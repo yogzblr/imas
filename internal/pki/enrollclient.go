@@ -3,8 +3,7 @@ package pki
 // Sprout-side client for POST /v1/enroll
 // (docs/design/imas-envoy-enrollment-design.md,
 // cloudxp-machine-manager-api-design.md §3), and for refreshing the
-// short-lived gateway JWT through that same endpoint's idempotent-replay
-// path.
+// short-lived gateway JWT through POST /v1/refresh.
 //
 // FLAG FOR SECURITY REVIEW. This is the sprout's half of the front door of
 // the trust chain: what it sends decides which identity farmer hands out,
@@ -13,17 +12,22 @@ package pki
 //   - Key material is generated here, locally, and only public halves are
 //     sent: the NKey public key (certs.GenNKey made the seed) and the
 //     X25519 box public key (EnsureSproutBoxKey). Every request carries
-//     the NKey seed's signature over EnrollSigningPayload, the proof of
-//     possession Enroll checks before anything else.
+//     the NKey seed's signature, the proof of possession farmer checks
+//     before anything else: over EnrollSigningPayload for enrollment,
+//     over RefreshSigningPayload for refresh.
 //   - Requests go over the SproutRootCA-pinned client LoadRootCA builds,
 //     the same one PutNKey used. That root CA is itself fetched
 //     trust-on-first-use (FetchRootCA), which this file does not change.
 //   - A response is validated in full (validateEnrollResponse) before any
 //     of it touches disk, so a bad or mismatched response never leaves a
 //     partial enrollment behind.
-//   - Refreshes never send the configured join token (see
-//     refreshJoinToken): a refresh can only replay an existing
-//     enrollment, never redeem a token.
+//   - Refreshes carry no join token at all (their own contract,
+//     POST /v1/refresh), so a refresh can only re-issue an existing
+//     identity, never redeem a token or create a sprout.
+//   - The tenant X25519 public key is pinned write-once at enrollment. A
+//     response carrying a different one is refused whole, and the error
+//     (ErrTenantKeyMismatch) is fatal to the sprout, until authenticated
+//     tenant key rotation exists (workstream J).
 
 import (
 	"bytes"
@@ -53,33 +57,37 @@ import (
 	log "github.com/yogzblr/imas/internal/log"
 )
 
-// refreshJoinToken is the join_token a gateway JWT refresh sends instead
-// of the configured one. POST /v1/enroll requires a non-empty join_token
-// on every request, but Enroll only looks at it after the idempotency
-// replay lookup has missed, so for an enrolled sprout its value is never
-// read. Sending this constant rather than config.JoinToken means:
-//   - the join token can be deleted from the host after enrollment
-//     without breaking refreshes, and
-//   - a sprout an operator has deleted on farmer can't silently re-enroll
-//     itself from its refresh loop with a still-valid join token. This
-//     value has no '.', so splitJoinToken rejects it and it can never
-//     redeem anything.
-const refreshJoinToken = "imas-refresh-only"
-
-// maxEnrollResponseBytes caps how much of a /v1/enroll response is read.
+// maxEnrollResponseBytes caps how much of a /v1/enroll or /v1/refresh
+// response is read.
 // A real response is a few KB.
 const maxEnrollResponseBytes = 1 << 20
+
+// ErrTenantKeyMismatch means farmer returned a tenant X25519 public key
+// different from the one this sprout pinned at enrollment. Nothing from
+// that response is persisted. There is no authenticated tenant key
+// rotation yet (workstream J), so a change can only be a farmer-side bug
+// or something worse; "it came over pinned TLS" rules out an outside
+// attacker, not either of those. Callers treat it as fatal.
+var ErrTenantKeyMismatch = errors.New("pki: farmer returned a different tenant X25519 public key than the one pinned at enrollment; refusing it")
+
+// ErrTenantKeyNotPinned means an enrolled sprout has no pinned tenant
+// X25519 public key. PersistEnrollment writes the pin before the User
+// JWT, so this is tampered or corrupted state, not something to re-pin
+// silently from the next response. Callers treat it as fatal, like
+// ErrTenantKeyMismatch.
+var ErrTenantKeyNotPinned = errors.New("pki: sprout is enrolled but has no pinned tenant X25519 public key; refusing to accept one from a refresh")
 
 // ErrNotEnrolled is returned when the sprout has no persisted NATS User
 // JWT, i.e. it has not completed POST /v1/enroll yet.
 var ErrNotEnrolled = errors.New("pki: sprout is not enrolled")
 
-// enrollWireRequest and EnrollResponse mirror
-// internal/api/handlers/enroll.go's enrollRequest and
-// enrollSuccessResponse. They're duplicated rather than shared because
-// handlers imports this package, not the other way around; the
-// handler-level client test (internal/api/handlers/enroll_client_test.go)
-// runs this client against the real handler to keep the two in step.
+// enrollWireRequest/EnrollResponse and refreshWireRequest/RefreshResponse
+// mirror internal/api/handlers' enrollRequest/enrollSuccessResponse and
+// refreshRequest/refreshSuccessResponse. They're duplicated rather than
+// shared because handlers imports this package, not the other way
+// around; the handler-level client test
+// (internal/api/handlers/enroll_client_test.go) runs this client against
+// the real handlers to keep the two in step.
 type enrollWireRequest struct {
 	JoinToken string `json:"join_token"`
 	NKeyPub   string `json:"nkey_pub"`
@@ -98,6 +106,21 @@ type EnrollResponse struct {
 	TenantX25519Pub  string          `json:"tenant_x25519_pub"`
 	FleetSigningJWKS json.RawMessage `json:"fleet_signing_jwks"`
 	NatsURLs         []string        `json:"nats_urls"`
+}
+
+type refreshWireRequest struct {
+	NKeyPub   string `json:"nkey_pub"`
+	Timestamp int64  `json:"timestamp"`
+	NKeySig   string `json:"nkey_sig"`
+}
+
+// RefreshResponse is POST /v1/refresh's success body.
+type RefreshResponse struct {
+	SproutID        string `json:"sprout_id"`
+	JWT             string `json:"jwt"`
+	GatewayJWT      string `json:"gateway_jwt"`
+	NKeyIdentity    string `json:"nkey_identity"`
+	TenantX25519Pub string `json:"tenant_x25519_pub"`
 }
 
 // enrollClock is time.Now, swappable in tests.
@@ -196,10 +219,6 @@ func EnrollSprout(ctx context.Context, joinToken, hostname, sproutPub string) (*
 	if joinToken == "" {
 		return nil, errors.New("pki: no join token configured")
 	}
-	return enrollRequest(ctx, joinToken, hostname, sproutPub)
-}
-
-func enrollRequest(ctx context.Context, joinToken, hostname, sproutPub string) (*EnrollResponse, error) {
 	kp, err := loadSproutNKey()
 	if err != nil {
 		return nil, err
@@ -222,40 +241,9 @@ func enrollRequest(ctx context.Context, joinToken, hostname, sproutPub string) (
 	}
 	req.NKeySig = base64.RawURLEncoding.EncodeToString(sig)
 
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("pki: encoding enrollment request: %w", err)
-	}
-	nkeyClientMu.RLock()
-	client := nkeyClient
-	nkeyClientMu.RUnlock()
-	if client == nil {
-		return nil, ErrNKeyClientNotReady
-	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, config.FarmerURL+"/v1/enroll", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("pki: building enrollment request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("pki: enrollment request: %w", err)
-	}
-	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxEnrollResponseBytes))
-	if err != nil {
-		return nil, fmt.Errorf("pki: reading enrollment response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		// Farmer returns the same generic enrollment_failed for every
-		// failure (design doc §3.4); its own log has the reason.
-		return nil, fmt.Errorf("pki: enrollment rejected: HTTP %d (see farmer's log for the reason; check the join token and that this host's clock is within %s of farmer's)", resp.StatusCode, EnrollSigMaxSkew)
-	}
 	var out EnrollResponse
-	if err := json.Unmarshal(respBody, &out); err != nil {
-		return nil, fmt.Errorf("pki: decoding enrollment response: %w", err)
+	if err := postToFarmer(ctx, "/v1/enroll", req, &out); err != nil {
+		return nil, err
 	}
 	if err := validateEnrollResponse(&out, nkeyPub); err != nil {
 		return nil, err
@@ -263,30 +251,79 @@ func enrollRequest(ctx context.Context, joinToken, hostname, sproutPub string) (
 	return &out, nil
 }
 
+// postToFarmer POSTs body as JSON to path on farmer over the
+// SproutRootCA-pinned client and decodes a 200 response into out.
+func postToFarmer(ctx context.Context, path string, body, out any) error {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("pki: encoding %s request: %w", path, err)
+	}
+	nkeyClientMu.RLock()
+	client := nkeyClient
+	nkeyClientMu.RUnlock()
+	if client == nil {
+		return ErrNKeyClientNotReady
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, config.FarmerURL+path, bytes.NewReader(b))
+	if err != nil {
+		return fmt.Errorf("pki: building %s request: %w", path, err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("pki: %s request: %w", path, err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxEnrollResponseBytes))
+	if err != nil {
+		return fmt.Errorf("pki: reading %s response: %w", path, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		// Farmer returns the same generic enrollment_failed for every
+		// failure (design doc §3.4); its own log has the reason.
+		return fmt.Errorf("pki: %s rejected: HTTP %d (see farmer's log for the reason; check the join token or enrollment state, and that this host's clock is within %s of farmer's)", path, resp.StatusCode, EnrollSigMaxSkew)
+	}
+	if err := json.Unmarshal(respBody, out); err != nil {
+		return fmt.Errorf("pki: decoding %s response: %w", path, err)
+	}
+	return nil
+}
+
 // validateEnrollResponse checks that resp is complete and issued to
 // nkeyPub before any of it is persisted.
 func validateEnrollResponse(resp *EnrollResponse, nkeyPub string) error {
-	if !IsValidSproutID(resp.SproutID) {
-		return fmt.Errorf("pki: enrollment response has an invalid sprout_id %q", resp.SproutID)
-	}
-	if resp.NKeyIdentity != nkeyPub {
-		return errors.New("pki: enrollment response's nkey_identity is not this sprout's NKey")
-	}
-	uc, err := natsjwt.DecodeUserClaims(resp.JWT)
-	if err != nil {
-		return fmt.Errorf("pki: enrollment response's jwt is not a NATS User JWT: %w", err)
-	}
-	if uc.Subject != nkeyPub {
-		return errors.New("pki: enrollment response's jwt was not issued to this sprout's NKey")
-	}
-	if _, err := checkGatewayJWT(resp.GatewayJWT, nkeyPub); err != nil {
+	if err := validateIdentity(resp.SproutID, resp.NKeyIdentity, resp.JWT, resp.GatewayJWT, resp.TenantX25519Pub, nkeyPub); err != nil {
 		return err
-	}
-	if _, err := DecodeBoxPubKey(resp.TenantX25519Pub); err != nil {
-		return fmt.Errorf("pki: enrollment response's tenant_x25519_pub: %w", err)
 	}
 	if _, err := fleetsign.ParseJWKS(resp.FleetSigningJWKS); err != nil {
 		return fmt.Errorf("pki: enrollment response's fleet_signing_jwks: %w", err)
+	}
+	return nil
+}
+
+// validateIdentity checks the fields enrollment and refresh responses
+// share: that they are well-formed and issued to nkeyPub.
+func validateIdentity(sproutID, nkeyIdentity, userJWT, gatewayJWT, tenantPub, nkeyPub string) error {
+	if !IsValidSproutID(sproutID) {
+		return fmt.Errorf("pki: farmer's response has an invalid sprout_id %q", sproutID)
+	}
+	if nkeyIdentity != nkeyPub {
+		return errors.New("pki: farmer's response's nkey_identity is not this sprout's NKey")
+	}
+	uc, err := natsjwt.DecodeUserClaims(userJWT)
+	if err != nil {
+		return fmt.Errorf("pki: farmer's response's jwt is not a NATS User JWT: %w", err)
+	}
+	if uc.Subject != nkeyPub {
+		return errors.New("pki: farmer's response's jwt was not issued to this sprout's NKey")
+	}
+	if _, err := checkGatewayJWT(gatewayJWT, nkeyPub); err != nil {
+		return err
+	}
+	if _, err := DecodeBoxPubKey(tenantPub); err != nil {
+		return fmt.Errorf("pki: farmer's response's tenant_x25519_pub: %w", err)
 	}
 	return nil
 }
@@ -360,18 +397,23 @@ func EnsureEnrolled(ctx context.Context, joinToken, requestedID, sproutPub strin
 }
 
 // PersistEnrollment writes a validated enrollment response next to the
-// sprout's NKey seed and root CA: the gateway JWT and tenant X25519
-// public key first, then the fleet signing JWKS pin, and the NATS User
-// JWT last. SproutEnrolled keys off the User JWT, so a crash part-way
-// leaves the sprout un-enrolled and it enrolls again on restart, which
-// farmer answers from its idempotent replay without spending another use
-// of the join token.
+// sprout's NKey seed and root CA. The tenant X25519 public key is checked
+// against any already-pinned one before anything is written
+// (ErrTenantKeyMismatch), then the gateway JWT, the tenant key pin and the
+// fleet signing JWKS pin are written, and the NATS User JWT last.
+// SproutEnrolled keys off the User JWT, so a crash part-way leaves the
+// sprout un-enrolled and it enrolls again on restart, which farmer answers
+// from its idempotent replay without spending another use of the join
+// token.
 func PersistEnrollment(resp *EnrollResponse) error {
+	if err := checkPinnedTenantKey(resp.TenantX25519Pub); err != nil {
+		return err
+	}
 	if err := writeFileAtomic(config.SproutGatewayJWTFile, []byte(resp.GatewayJWT), 0o600); err != nil {
 		return fmt.Errorf("pki: persisting gateway JWT: %w", err)
 	}
 	setCurrentGatewayJWT(resp.GatewayJWT)
-	if err := persistTenantX25519Pub(resp.TenantX25519Pub); err != nil {
+	if err := pinTenantX25519Pub(resp.TenantX25519Pub); err != nil {
 		return err
 	}
 	if err := PinFleetSigningKeys(resp.FleetSigningJWKS); err != nil {
@@ -393,15 +435,35 @@ func PersistEnrollment(resp *EnrollResponse) error {
 	return nil
 }
 
-func persistTenantX25519Pub(pub string) error {
-	path := config.SproutTenantX25519PubFile
-	if existing, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(existing)) != pub {
-		log.Warnf("enroll: farmer returned a different tenant X25519 public key than the one on disk; replacing it")
+// checkPinnedTenantKey returns ErrTenantKeyMismatch if a tenant X25519
+// public key is already pinned and pub differs from it. No pin yet is not
+// an error.
+func checkPinnedTenantKey(pub string) error {
+	existing, err := os.ReadFile(config.SproutTenantX25519PubFile)
+	if os.IsNotExist(err) {
+		return nil
 	}
-	if err := writeFileAtomic(path, []byte(pub), 0o644); err != nil {
-		return fmt.Errorf("pki: persisting tenant X25519 public key: %w", err)
+	if err != nil {
+		return fmt.Errorf("pki: reading pinned tenant X25519 public key: %w", err)
+	}
+	if strings.TrimSpace(string(existing)) != pub {
+		return ErrTenantKeyMismatch
 	}
 	return nil
+}
+
+// pinTenantX25519Pub writes pub as the pinned tenant X25519 public key if
+// none is pinned yet. The pin is write-once: it is never replaced, and a
+// different key is ErrTenantKeyMismatch.
+func pinTenantX25519Pub(pub string) error {
+	err := writeFileOnce(config.SproutTenantX25519PubFile, []byte(pub), 0o644)
+	if err == nil {
+		return nil
+	}
+	if os.IsExist(err) {
+		return checkPinnedTenantKey(pub)
+	}
+	return fmt.Errorf("pki: pinning tenant X25519 public key: %w", err)
 }
 
 // SproutEnrolled reports whether the sprout has a persisted NATS User
@@ -469,16 +531,44 @@ func GatewayJWTHeaders() (http.Header, error) {
 	return h, nil
 }
 
-// RefreshGatewayJWT gets a fresh gateway JWT from POST /v1/enroll's
-// idempotent-replay path (Enroll's step 1, gated only by the proof of
-// possession) and persists it. It sends refreshJoinToken, never the
-// configured join token. If farmer returns a different NATS User JWT
-// than the one on disk (for instance, re-minted after a signing key
-// change), that is persisted too and picked up on the sprout's next
-// start. It returns the sprout_id farmer replayed.
-func RefreshGatewayJWT(ctx context.Context, hostname, sproutPub string) (string, error) {
-	resp, err := enrollRequest(ctx, refreshJoinToken, hostname, sproutPub)
+// RefreshGatewayJWT gets a fresh gateway JWT from POST /v1/refresh and
+// persists it. The request carries only nkey_pub and a timestamped
+// proof of possession of its seed (RefreshSigningPayload); no join token.
+// The response is validated in full, and its tenant X25519 key checked
+// against the pinned one, before anything is written: a mismatch returns
+// ErrTenantKeyMismatch (a missing pin, ErrTenantKeyNotPinned) and
+// persists nothing. If farmer returns a different
+// NATS User JWT than the one on disk (for instance, re-minted after a
+// signing key change), that is persisted too and picked up on the
+// sprout's next start. It returns the sprout_id farmer re-issued.
+func RefreshGatewayJWT(ctx context.Context) (string, error) {
+	kp, err := loadSproutNKey()
 	if err != nil {
+		return "", err
+	}
+	defer kp.Wipe()
+	nkeyPub, err := kp.PublicKey()
+	if err != nil {
+		return "", fmt.Errorf("pki: sprout NKey public key: %w", err)
+	}
+	req := refreshWireRequest{NKeyPub: nkeyPub, Timestamp: enrollClock().Unix()}
+	sig, err := kp.Sign(RefreshSigningPayload(req.Timestamp, req.NKeyPub))
+	if err != nil {
+		return "", fmt.Errorf("pki: signing refresh request: %w", err)
+	}
+	req.NKeySig = base64.RawURLEncoding.EncodeToString(sig)
+
+	var resp RefreshResponse
+	if err := postToFarmer(ctx, "/v1/refresh", req, &resp); err != nil {
+		return "", err
+	}
+	if err := validateIdentity(resp.SproutID, resp.NKeyIdentity, resp.JWT, resp.GatewayJWT, resp.TenantX25519Pub, nkeyPub); err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(config.SproutTenantX25519PubFile); os.IsNotExist(err) {
+		return "", ErrTenantKeyNotPinned
+	}
+	if err := checkPinnedTenantKey(resp.TenantX25519Pub); err != nil {
 		return "", err
 	}
 	if err := writeFileAtomic(config.SproutGatewayJWTFile, []byte(resp.GatewayJWT), 0o600); err != nil {
@@ -489,7 +579,7 @@ func RefreshGatewayJWT(ctx context.Context, hostname, sproutPub string) (string,
 		if err := writeFileAtomic(config.SproutUserJWTFile, []byte(resp.JWT), 0o600); err != nil {
 			return "", fmt.Errorf("pki: persisting refreshed NATS User JWT: %w", err)
 		}
-		log.Infof("enroll: farmer returned a new NATS User JWT; it takes effect on the next sprout restart")
+		log.Infof("refresh: farmer returned a new NATS User JWT; it takes effect on the next sprout restart")
 	}
 	return resp.SproutID, nil
 }
@@ -554,10 +644,15 @@ const maxRefreshRetryDelay = 5 * time.Minute
 // due, then calls RefreshGatewayJWT, retrying failures with exponential
 // backoff from retryDelay up to maxRefreshRetryDelay. A token that
 // already expired, as after a sprout was powered off for longer than the
-// TTL, is refreshed immediately. hostname is the sprout's current ID;
-// a refresh that replays a different one is logged, not adopted, since
+// TTL, is refreshed immediately. sproutID is the sprout's current ID; a
+// refresh that re-issues a different one is logged, not adopted, since
 // the sprout's subscriptions are already bound to its current ID.
-func RunGatewayJWTRefresher(ctx context.Context, hostname, sproutPub string, retryDelay time.Duration) {
+//
+// It returns nil when ctx is done, and ErrTenantKeyMismatch or
+// ErrTenantKeyNotPinned (without retrying, since a retry would get the
+// same answer) when farmer's tenant key can't be checked against the
+// pinned one; the caller must treat that as fatal.
+func RunGatewayJWTRefresher(ctx context.Context, sproutID string, retryDelay time.Duration) error {
 	if retryDelay <= 0 {
 		retryDelay = 5 * time.Second
 	}
@@ -569,28 +664,31 @@ func RunGatewayJWTRefresher(ctx context.Context, hostname, sproutPub string, ret
 			wait = gatewayRefreshDelay(CurrentGatewayJWT(), time.Now(), cryptoJitter)
 		}
 		if wait > 0 {
-			log.Debugf("enroll: next gateway JWT refresh in %s", wait)
+			log.Debugf("refresh: next gateway JWT refresh in %s", wait)
 		}
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-time.After(wait):
 		}
-		sproutID, err := RefreshGatewayJWT(ctx, hostname, sproutPub)
+		gotID, err := RefreshGatewayJWT(ctx)
+		if errors.Is(err, ErrTenantKeyMismatch) || errors.Is(err, ErrTenantKeyNotPinned) {
+			return err
+		}
 		if err != nil {
 			if ctx.Err() != nil {
-				return
+				return nil
 			}
-			log.Errorf("enroll: refreshing gateway JWT failed, retrying in %s: %v", backoff, err)
+			log.Errorf("refresh: refreshing gateway JWT failed, retrying in %s: %v", backoff, err)
 			failed = true
 			wait = backoff
 			backoff = min(backoff*2, maxRefreshRetryDelay)
 			continue
 		}
-		if sproutID != hostname {
-			log.Errorf("enroll: gateway JWT refresh replayed sprout_id %q, but this sprout runs as %q", sproutID, hostname)
+		if gotID != sproutID {
+			log.Errorf("refresh: farmer re-issued sprout_id %q, but this sprout runs as %q", gotID, sproutID)
 		}
-		log.Debugf("enroll: refreshed gateway JWT")
+		log.Debugf("refresh: refreshed gateway JWT")
 		failed = false
 		backoff = retryDelay
 	}
@@ -637,6 +735,9 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 // writeFileOnce is writeFileAtomic that fails with an os.IsExist error
 // instead of replacing path if it already exists.
 func writeFileOnce(path string, data []byte, perm os.FileMode) error {
+	if path == "" {
+		return errors.New("pki: no path configured")
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err

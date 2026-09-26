@@ -1,7 +1,7 @@
 package handlers
 
 // Runs the sprout's enrollment client (internal/pki/enrollclient.go)
-// against this package's real Enroll handler over TLS, through the
+// against this package's real Enroll and Refresh handlers over TLS, through the
 // SproutRootCA-pinned client pki.LoadRootCA builds, so the client's copy
 // of the wire types can't drift from the handler's. Only the replay path
 // is reachable here: first-time enrollment needs saas.enrollment_keys,
@@ -80,6 +80,7 @@ func TestEnrollClient_AgainstHandler(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/enroll", Enroll)
+	mux.HandleFunc("POST /v1/refresh", Refresh)
 	ts := httptest.NewTLSServer(mux)
 	t.Cleanup(ts.Close)
 	oldURL := config.FarmerURL
@@ -116,11 +117,11 @@ func TestEnrollClient_AgainstHandler(t *testing.T) {
 		t.Errorf("fleet signing keys not pinned: %v", err)
 	}
 
-	id, err := pki.RefreshGatewayJWT(t.Context(), "web-01", sproutPub)
+	id, err := pki.RefreshGatewayJWT(t.Context())
 	if err != nil {
 		t.Fatalf("RefreshGatewayJWT against the real handler: %v", err)
 	}
 	if id != "web-01" {
-		t.Errorf("refresh replayed sprout_id %q, want web-01", id)
+		t.Errorf("refresh re-issued sprout_id %q, want web-01", id)
 	}
 }

@@ -54,9 +54,7 @@ func main() {
 		log.Fatalf("failed to create cache directory %s: %v", config.CacheDir, err)
 	}
 	config.LoadConfig("sprout")
-	if *joinToken != "" {
-		config.JoinToken = *joinToken
-	}
+	config.SetJoinTokenFromFlag(*joinToken)
 	defer log.Flush()
 	if err := certs.GenNKey(false); err != nil {
 		log.Fatalf("failed to generate sprout NKey: %v", err)
@@ -85,11 +83,30 @@ func main() {
 		config.SetSproutID(enrolledID)
 		sproutID = enrolledID
 	}
+	// Enrollment is fully persisted (EnsureEnrolled only returns once the
+	// User JWT, written last, is on disk), so the join token has no use
+	// left: every later call is a proof-of-possession replay or refresh.
+	// This also covers a sprout that crashed between persisting and
+	// clearing on an earlier start.
+	if src, err := config.ClearJoinToken(); err != nil {
+		log.Errorf("enrolled, but failed to delete the join token from the config file: %v", err)
+	} else if src != config.JoinTokenFromNone {
+		log.Warnf("enrolled; the join token came from the %s, which the sprout can't clear itself: remove it there", src)
+	}
 	if _, err := pki.LoadGatewayJWT(); err != nil {
 		// Not fatal: the refresher below replaces a missing token first.
 		log.Warnf("no persisted gateway JWT: %v", err)
 	}
-	go pki.RunGatewayJWTRefresher(ctx, sproutID, sproutPub, enrollRetryDelay)
+	go func() {
+		// A refresher error means farmer's tenant X25519 key no longer
+		// matches the one pinned at enrollment, or the pin is missing
+		// (pki.ErrTenantKeyMismatch, pki.ErrTenantKeyNotPinned). Exit non-zero so the
+		// service manager records a failure and monitoring alerts; a log
+		// line alone would go unnoticed while the gateway JWT expires.
+		if err := pki.RunGatewayJWTRefresher(ctx, sproutID, enrollRetryDelay); err != nil {
+			log.Fatalf("gateway JWT refresh: %v", err)
+		}
+	}()
 	done := make(chan struct{})
 	go ConnectSprout(ctx, done)
 	<-ctx.Done()
