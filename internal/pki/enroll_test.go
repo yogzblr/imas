@@ -101,7 +101,10 @@ func testNKeyPub(t *testing.T, kp nkeys.KeyPair) string {
 
 // signedEnroll builds an EnrollRequest carrying a valid proof of
 // possession: kp's signature over EnrollSigningPayload at the current
-// time, exactly as a real sprout would send it.
+// time, exactly as a real sprout would send it. Its timestamp comes from
+// nextSigningTimestamp, as the real client's does, so two calls in the
+// same second build two distinct requests rather than one request the
+// replay cache would reject the second time.
 func signedEnroll(t *testing.T, kp nkeys.KeyPair, joinToken, hostname, sproutPub string) EnrollRequest {
 	t.Helper()
 	req := EnrollRequest{
@@ -109,7 +112,7 @@ func signedEnroll(t *testing.T, kp nkeys.KeyPair, joinToken, hostname, sproutPub
 		NKeyPub:   testNKeyPub(t, kp),
 		Hostname:  hostname,
 		SproutPub: sproutPub,
-		Timestamp: time.Now().Unix(),
+		Timestamp: nextSigningTimestamp(),
 	}
 	sig, err := kp.Sign(EnrollSigningPayload(req.Timestamp, req.NKeyPub, req.Hostname, req.SproutPub, req.JoinToken))
 	if err != nil {
@@ -133,14 +136,15 @@ func testEnrollBoxPub(t *testing.T) string {
 }
 
 // setupEnrollTest wires up an in-memory PKI store, an empty fake
-// enrollment-key store, a fake gateway JWT minter, and a mock OpenBao KV
-// server backing the tenant X25519 keypair (tenantbox.go no longer has a
-// local-disk fallback) — everything Enroll needs besides the test's own
-// key-store rows. Returns both fakes so tests can populate rows / assert
-// call counts.
+// enrollment-key store, a fake gateway JWT minter, a miniredis-backed
+// replay cache, and a mock OpenBao KV server backing the tenant X25519
+// keypair (tenantbox.go no longer has a local-disk fallback) — everything
+// Enroll needs besides the test's own key-store rows. Returns both fakes
+// so tests can populate rows / assert call counts.
 func setupEnrollTest(t *testing.T) (*fakeEnrollmentKeyStore, *fakeGatewayMinter) {
 	t.Helper()
 	setupTestPKI(t)
+	withTestReplayCache(t)
 	setupTenantBoxOpenBao(t, newMockKVv2Server(t))
 	store := newFakeEnrollmentKeyStore()
 	withFakeEnrollmentKeyStore(t, store)

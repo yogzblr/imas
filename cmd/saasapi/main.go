@@ -168,7 +168,7 @@ func initFleetKeySource(cfg saasapi.Config) {
 // the enrollment-key limiter uses, so heartbeat.IsOnline — which fills
 // the `connected` field of GET .../sprouts?asset_ids= (§1.4) — reads the
 // live keys farmer's heartbeat listener writes. It's the saasapi counterpart of
-// cmd/farmer's initHeartbeatClient. SAASAPI_VALKEY_ADDRS must therefore
+// cmd/farmer's initValkeyClient. SAASAPI_VALKEY_ADDRS must therefore
 // name the Valkey farmer writes heartbeats to. With it unset, vc is nil
 // and heartbeat is left unwired: IsOnline reports false for every sprout,
 // i.e. `connected: false`.

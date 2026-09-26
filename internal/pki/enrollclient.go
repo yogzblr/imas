@@ -43,6 +43,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -125,6 +126,35 @@ type RefreshResponse struct {
 
 // enrollClock is time.Now, swappable in tests.
 var enrollClock = time.Now
+
+// maxSigningTimestampLead bounds how far nextSigningTimestamp may run
+// ahead of enrollClock, in seconds. Well inside EnrollSigMaxSkew.
+const maxSigningTimestampLead = 60
+
+var (
+	signingTimestampMu   sync.Mutex
+	lastSigningTimestamp int64
+)
+
+// nextSigningTimestamp returns the timestamp for the next signed
+// /v1/enroll or /v1/refresh request: enrollClock's Unix seconds, bumped
+// past the previous one if that was the same second or later. Farmer
+// accepts each signed payload only once (replaycache.go), and a payload is
+// fully determined by its fields and this second-granularity timestamp, so
+// two requests signed in the same second (the background refresher and an
+// on-demand refresh, say) would otherwise be identical and the second
+// rejected. A previous timestamp at least maxSigningTimestampLead ahead
+// of the clock (the clock was stepped back) is not bumped past.
+func nextSigningTimestamp() int64 {
+	signingTimestampMu.Lock()
+	defer signingTimestampMu.Unlock()
+	ts := enrollClock().Unix()
+	if ts <= lastSigningTimestamp && lastSigningTimestamp-ts < maxSigningTimestampLead {
+		ts = lastSigningTimestamp + 1
+	}
+	lastSigningTimestamp = ts
+	return ts
+}
 
 // loadSproutNKey reads the sprout's NKey seed (certs.GenNKey) and returns
 // its key pair. The public key is derived from the seed rather than read
@@ -233,7 +263,7 @@ func EnrollSprout(ctx context.Context, joinToken, hostname, sproutPub string) (*
 		NKeyPub:   nkeyPub,
 		Hostname:  hostname,
 		SproutPub: sproutPub,
-		Timestamp: enrollClock().Unix(),
+		Timestamp: nextSigningTimestamp(),
 	}
 	sig, err := kp.Sign(EnrollSigningPayload(req.Timestamp, req.NKeyPub, req.Hostname, req.SproutPub, req.JoinToken))
 	if err != nil {
@@ -551,7 +581,7 @@ func RefreshGatewayJWT(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("pki: sprout NKey public key: %w", err)
 	}
-	req := refreshWireRequest{NKeyPub: nkeyPub, Timestamp: enrollClock().Unix()}
+	req := refreshWireRequest{NKeyPub: nkeyPub, Timestamp: nextSigningTimestamp()}
 	sig, err := kp.Sign(RefreshSigningPayload(req.Timestamp, req.NKeyPub))
 	if err != nil {
 		return "", fmt.Errorf("pki: signing refresh request: %w", err)
