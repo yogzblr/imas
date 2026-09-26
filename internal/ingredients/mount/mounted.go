@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 var mkdirAll = os.MkdirAll

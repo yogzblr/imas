@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 func (f File) cached(ctx context.Context, test bool) (cook.Result, error) {

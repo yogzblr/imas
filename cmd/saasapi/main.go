@@ -1,10 +1,10 @@
 // Command saasapi runs the external, customer/CloudXP-facing SaaS API
 // service described in docs/design/cloudxp-machine-manager-api-design.md.
-// It is a separate binary from farmer/sprout/grlx: it owns the `saas`
+// It is a separate binary from farmer/sprout/imas: it owns the `saas`
 // schema in the shared PXC cluster and talks to farmer only over
 // privileged internal NATS subjects (§2.2), as its own narrowly-scoped
 // User under the bus's SYS Account — see
-// docs/design/grlx-internal-api-account.md and internal/saasapi/bus.go.
+// docs/design/imas-internal-api-account.md and internal/saasapi/bus.go.
 package main
 
 import (
@@ -16,10 +16,10 @@ import (
 
 	"github.com/valkey-io/valkey-go"
 
-	"github.com/gogrlx/grlx/v2/internal/fleetsign"
-	"github.com/gogrlx/grlx/v2/internal/heartbeat"
-	log "github.com/gogrlx/grlx/v2/internal/log"
-	"github.com/gogrlx/grlx/v2/internal/saasapi"
+	"github.com/yogzblr/imas/internal/fleetsign"
+	"github.com/yogzblr/imas/internal/heartbeat"
+	log "github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/saasapi"
 )
 
 func main() {
@@ -138,18 +138,18 @@ func main() {
 // registers POST .../sprouts/updates and GET .../sprouts/updates/{batch_id}
 // only if the flag is on at that moment (SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED,
 // default off: sprout self-update is still disabled upstream,
-// gogrlx/grlx#286).
+// yogzblr/imas#286).
 func newRouter(cfg saasapi.Config) *http.ServeMux {
 	saasapi.SetFleetUpdateDispatchEnabled(cfg.FleetUpdateDispatchEnabled)
 	return saasapi.NewRouter()
 }
 
 // initFleetKeySource gives saasapi its READ-ONLY view of the
-// grlx-fleet-signing Transit key (GRLX_FLEETSIGN_OPENBAO_*, design doc
+// imas-fleet-signing Transit key (IMAS_FLEETSIGN_OPENBAO_*, design doc
 // §2.5), which POST .../sprouts/updates verifies each catalog row
 // against. Only needed with fleet update dispatch on, and fatal then: a
 // replica that accepted rollouts it couldn't verify would refuse every
-// one of them anyway. The token must carry only the grlx-fleet-verify
+// one of them anyway. The token must carry only the imas-fleet-verify
 // policy — saasapi already writes saas.fleet_versions and must never
 // also be able to sign it (deploy/fleetreleaser/README.md).
 func initFleetKeySource(cfg saasapi.Config) {

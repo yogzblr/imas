@@ -68,7 +68,7 @@ func newTask(method string, params map[string]interface{}) Task {
 
 func baseParams(overrides map[string]interface{}) map[string]interface{} {
 	p := map[string]interface{}{
-		"name":         `\grlx\backup`,
+		"name":         `\imas\backup`,
 		"command":      `C:\Windows\system32\backup.exe`,
 		"trigger_type": "once",
 		"start_date":   "2026-01-01",
@@ -235,8 +235,8 @@ func TestTaskPresentCreatesWhenAbsent(t *testing.T) {
 	if !result.Succeeded || !result.Changed {
 		t.Fatalf("result = %+v, want succeeded+changed", result)
 	}
-	if len(fb.saved) != 1 || fb.saved[0] != `\grlx\backup` {
-		t.Fatalf("saved = %v, want [\\grlx\\backup]", fb.saved)
+	if len(fb.saved) != 1 || fb.saved[0] != `\imas\backup` {
+		t.Fatalf("saved = %v, want [\\imas\\backup]", fb.saved)
 	}
 }
 
@@ -262,7 +262,7 @@ func TestTaskPresentNoopWhenMatching(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildDesiredState: %v", err)
 	}
-	fb.states[`\grlx\backup`] = desired
+	fb.states[`\imas\backup`] = desired
 
 	s := newTask(methodPresent, baseParams(nil))
 	result, err := s.Apply(context.Background())
@@ -279,7 +279,7 @@ func TestTaskPresentNoopWhenMatching(t *testing.T) {
 
 func TestTaskPresentUpdatesWhenDiffers(t *testing.T) {
 	fb := installFakeBackend(t)
-	fb.states[`\grlx\backup`] = taskState{Command: `C:\old.exe`, TriggerType: "once", StartBoundary: "2026-01-01T03:00:00", RunLevel: "limited"}
+	fb.states[`\imas\backup`] = taskState{Command: `C:\old.exe`, TriggerType: "once", StartBoundary: "2026-01-01T03:00:00", RunLevel: "limited"}
 
 	s := newTask(methodPresent, baseParams(nil))
 	result, err := s.Apply(context.Background())
@@ -289,8 +289,8 @@ func TestTaskPresentUpdatesWhenDiffers(t *testing.T) {
 	if !result.Succeeded || !result.Changed {
 		t.Fatalf("result = %+v, want succeeded+changed", result)
 	}
-	if fb.states[`\grlx\backup`].Command != `C:\Windows\system32\backup.exe` {
-		t.Errorf("Command = %q, want updated value", fb.states[`\grlx\backup`].Command)
+	if fb.states[`\imas\backup`].Command != `C:\Windows\system32\backup.exe` {
+		t.Errorf("Command = %q, want updated value", fb.states[`\imas\backup`].Command)
 	}
 }
 
@@ -300,7 +300,7 @@ func TestTaskPresentPasswordAlwaysForcesRewrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildDesiredState: %v", err)
 	}
-	fb.states[`\grlx\backup`] = desired
+	fb.states[`\imas\backup`] = desired
 
 	s := newTask(methodPresent, baseParams(map[string]interface{}{
 		"user_name": "svc_backup",
@@ -322,7 +322,7 @@ func TestTaskPresentPasswordAlwaysForcesRewrite(t *testing.T) {
 
 func TestTaskAbsentAlreadyGone(t *testing.T) {
 	installFakeBackend(t)
-	s := newTask(methodAbsent, map[string]interface{}{"name": `\grlx\backup`})
+	s := newTask(methodAbsent, map[string]interface{}{"name": `\imas\backup`})
 	result, err := s.Apply(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -334,9 +334,9 @@ func TestTaskAbsentAlreadyGone(t *testing.T) {
 
 func TestTaskAbsentRemovesExisting(t *testing.T) {
 	fb := installFakeBackend(t)
-	fb.states[`\grlx\backup`] = taskState{Command: `C:\Windows\system32\backup.exe`}
+	fb.states[`\imas\backup`] = taskState{Command: `C:\Windows\system32\backup.exe`}
 
-	s := newTask(methodAbsent, map[string]interface{}{"name": `\grlx\backup`})
+	s := newTask(methodAbsent, map[string]interface{}{"name": `\imas\backup`})
 	result, err := s.Apply(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -344,16 +344,16 @@ func TestTaskAbsentRemovesExisting(t *testing.T) {
 	if !result.Succeeded || !result.Changed {
 		t.Fatalf("result = %+v, want succeeded+changed", result)
 	}
-	if _, ok := fb.states[`\grlx\backup`]; ok {
+	if _, ok := fb.states[`\imas\backup`]; ok {
 		t.Fatal("task still present after absent")
 	}
 }
 
 func TestTaskAbsentTestModeDoesNotRemove(t *testing.T) {
 	fb := installFakeBackend(t)
-	fb.states[`\grlx\backup`] = taskState{Command: `C:\Windows\system32\backup.exe`}
+	fb.states[`\imas\backup`] = taskState{Command: `C:\Windows\system32\backup.exe`}
 
-	s := newTask(methodAbsent, map[string]interface{}{"name": `\grlx\backup`})
+	s := newTask(methodAbsent, map[string]interface{}{"name": `\imas\backup`})
 	result, err := s.Test(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

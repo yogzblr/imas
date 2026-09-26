@@ -5,13 +5,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/log"
 	"github.com/nats-io/nats.go"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/log"
 )
 
 // CLIListener subscribes to NATS job result subjects and records them
-// into a CLIStore. It is used by the grlx CLI to maintain a local
+// into a CLIStore. It is used by the imas CLI to maintain a local
 // copy of job execution data.
 type CLIListener struct {
 	store   *CLIStore
@@ -33,7 +33,7 @@ func NewCLIListener(store *CLIStore, nc *nats.Conn, userKey string) *CLIListener
 // SubscribeAll subscribes to all job completion events. This is useful for
 // background recording of all job activity visible to the current user.
 func (l *CLIListener) SubscribeAll() error {
-	sub, err := l.nc.Subscribe("grlx.cook.*.*", l.handleStepCompletion)
+	sub, err := l.nc.Subscribe("imas.cook.*.*", l.handleStepCompletion)
 	if err != nil {
 		return err
 	}
@@ -43,7 +43,7 @@ func (l *CLIListener) SubscribeAll() error {
 
 // SubscribeJob subscribes only to completion events for a specific JID.
 func (l *CLIListener) SubscribeJob(jid string) error {
-	topic := "grlx.cook.*." + jid
+	topic := "imas.cook.*." + jid
 	sub, err := l.nc.Subscribe(topic, l.handleStepCompletion)
 	if err != nil {
 		return err
@@ -77,7 +77,7 @@ func (l *CLIListener) Stop() {
 }
 
 func (l *CLIListener) handleStepCompletion(msg *nats.Msg) {
-	// Subject: grlx.cook.<sproutID>.<jid>
+	// Subject: imas.cook.<sproutID>.<jid>
 	parts := strings.Split(msg.Subject, ".")
 	if len(parts) < 4 {
 		return

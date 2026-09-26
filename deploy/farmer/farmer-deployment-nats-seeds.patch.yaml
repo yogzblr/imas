@@ -6,9 +6,9 @@
 # What it does: hands farmer the SYS Account NKey seed (and the SaaS API
 # User seed, which the design doc already sources this way) from OpenBao,
 # via the Kubernetes Secret External Secrets Operator keeps in sync
-# (externalsecrets.yaml, "grlx-farmer-nats-seeds"). No code change is
+# (externalsecrets.yaml, "imas-farmer-nats-seeds"). No code change is
 # needed: internal/pki/jwtauth.go's loadOrCreateSeed(path, "SYS_ACCOUNT",
-# nkeys.CreateAccount) already prefers GRLX_NATS_SYS_ACCOUNT_SEED_FILE over
+# nkeys.CreateAccount) already prefers IMAS_NATS_SYS_ACCOUNT_SEED_FILE over
 # {FarmerPKI}/nats-auth/sys-account.nk, and never writes an externally
 # supplied seed back to disk.
 #
@@ -20,28 +20,28 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: grlx-farmer
+  name: imas-farmer
 spec:
   template:
     spec:
       containers:
         - name: farmer
           env:
-            - name: GRLX_NATS_SYS_ACCOUNT_SEED_FILE
-              value: /var/run/secrets/grlx/nats/sys-account.nk
-            - name: GRLX_NATS_SAASAPI_USER_SEED_FILE
-              value: /var/run/secrets/grlx/nats/saasapi-user.nk
-            # Deliberately absent: every GRLX_SAASAPI_CRED_OPENBAO_* var.
+            - name: IMAS_NATS_SYS_ACCOUNT_SEED_FILE
+              value: /var/run/secrets/imas/nats/sys-account.nk
+            - name: IMAS_NATS_SAASAPI_USER_SEED_FILE
+              value: /var/run/secrets/imas/nats/saasapi-user.nk
+            # Deliberately absent: every IMAS_SAASAPI_CRED_OPENBAO_* var.
             # farmer's long-running process must never be configured with
             # (or able to log in as) the KV-write identity — see README.md.
           volumeMounts:
             - name: nats-seeds
-              mountPath: /var/run/secrets/grlx/nats
+              mountPath: /var/run/secrets/imas/nats
               readOnly: true
       volumes:
         - name: nats-seeds
           secret:
-            secretName: grlx-farmer-nats-seeds
+            secretName: imas-farmer-nats-seeds
             defaultMode: 0440
             items:
               - key: sys-account.nk

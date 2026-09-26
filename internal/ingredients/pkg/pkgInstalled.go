@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 func (p Pkg) installed(ctx context.Context, test bool) (cook.Result, error) {

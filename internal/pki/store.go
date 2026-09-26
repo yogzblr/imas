@@ -7,7 +7,7 @@ package pki
 // state — so an Accept/Deny/Reject/Unaccept call was an os.Rename, visible
 // only to whichever farmer replica had that directory on local disk. That's
 // the same cross-replica divergence class as props/store.go (see
-// docs/design/grlx-fork-roadmap.md workstream A): a sprout accepted on one
+// docs/design/imas-fork-roadmap.md workstream A): a sprout accepted on one
 // replica could still show up as unaccepted to a request served by
 // another. This file reads and writes straight through to the shared
 // `farmer` schema in PXC on every call, so every replica agrees on a given
@@ -26,7 +26,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 // nkeyRow is the `pki_nkeys` table in the farmer schema. SproutID is part
@@ -93,7 +93,7 @@ func SetDB(d *gorm.DB) { db = d }
 // process-level, boot/SIGHUP-time contexts that still don't have a real
 // per-request tenant to thread through (see ReloadNKeys/syncNatsAuth in
 // nats.go/jwtusers.go, and tenant.go's own comparisons against "the legacy
-// current tenant"). See docs/design/grlx-tenant-context-threading.md for
+// current tenant"). See docs/design/imas-tenant-context-threading.md for
 // why every per-message/per-request call site in this package now takes an
 // explicit tenantID parameter instead of calling this.
 func tenantID() string {
@@ -106,7 +106,7 @@ func tenantID() string {
 // CurrentTenantID exports tenantID for callers outside this package
 // (internal/natsapi, internal/api/handlers) that dispatch over the single
 // shared NATS connection/HTTP admin API today — see
-// docs/design/grlx-tenant-context-threading.md: until that connection is
+// docs/design/imas-tenant-context-threading.md: until that connection is
 // made genuinely multi-tenant, this legacy seam's value is the only tenant
 // actually reachable, so it's the honest value for those callers to pass
 // explicitly rather than have it read implicitly inside this package.
@@ -293,7 +293,7 @@ func setTenantAccountPub(id, accountPub string) error {
 // public key — the mapping internal/heartbeat needs to turn a
 // $SYS.ACCOUNT.*.CONNECT/DISCONNECT event's ClientInfo.Account (the
 // connecting Account's real pubkey; see docs/design/
-// grlx-tenant-context-threading.md) into a real tenant ID, instead of the
+// imas-tenant-context-threading.md) into a real tenant ID, instead of the
 // process-global tenantID() seam. Handles both the legacy single-tenant
 // Account (mat.tenantPub, which isn't itself a pki_tenants row) and every
 // dynamically-provisioned tenant (tenant.go's tenantAccountMaterial.pub,
@@ -321,7 +321,7 @@ func GetTenantAccountPub(tenantID string) (string, error) {
 // pki_tenants — every tenant besides the legacy one (CurrentTenantID(),
 // which isn't itself a pki_tenants row) that cmd/farmer/main.go's
 // ConnectFarmer needs its own dedicated NATS connection for at boot. See
-// docs/design/grlx-tenant-context-threading.md's Option A.
+// docs/design/imas-tenant-context-threading.md's Option A.
 func ListProvisionedTenantIDs() ([]string, error) {
 	var rows []tenantRow
 	if err := db.Where("deleted = ?", false).Find(&rows).Error; err != nil {

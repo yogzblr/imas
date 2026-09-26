@@ -23,8 +23,8 @@ import (
 	jwt "github.com/nats-io/jwt/v2"
 	nats "github.com/nats-io/nats.go"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/openbaokv"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/openbaokv"
 )
 
 type kvCall struct {
@@ -96,12 +96,12 @@ func TestPublishSaaSAPICredential_JobTopologyOnLiveBus(t *testing.T) {
 	// the SYS Account seed mounted from the same Secret as farmer's.
 	jobPKI := filepath.Join(t.TempDir(), "job-pki") + "/"
 	config.FarmerPKI = jobPKI
-	t.Setenv("GRLX_NATS_SYS_ACCOUNT_SEED_FILE", filepath.Join(farmerPKI, natsAuthSubdir, "sys-account.nk"))
+	t.Setenv("IMAS_NATS_SYS_ACCOUNT_SEED_FILE", filepath.Join(farmerPKI, natsAuthSubdir, "sys-account.nk"))
 
-	const kvPath = "platform/grlx/saasapi-nats-user"
+	const kvPath = "platform/imas/saasapi-nats-user"
 	calls, kvURL := startKVMock(t, "s.job-token")
 	t.Setenv(openbaokv.EnvOpenBaoAddr, kvURL)
-	t.Setenv(openbaokv.EnvOpenBaoKVMount, "grlx-kv")
+	t.Setenv(openbaokv.EnvOpenBaoKVMount, "imas-kv")
 	t.Setenv(openbaokv.EnvOpenBaoAuthMethod, openbaokv.AuthMethodToken)
 	t.Setenv(openbaokv.EnvOpenBaoToken, "s.job-token")
 	t.Setenv(openbaokv.EnvOpenBaoCACert, "")
@@ -133,7 +133,7 @@ func TestPublishSaaSAPICredential_JobTopologyOnLiveBus(t *testing.T) {
 	if len(posts) != 1 {
 		t.Fatalf("expected one KV write, got %+v", calls())
 	}
-	if want := "/v1/grlx-kv/data/" + kvPath; posts[0].path != want {
+	if want := "/v1/imas-kv/data/" + kvPath; posts[0].path != want {
 		t.Fatalf("KV write went to %s, want %s", posts[0].path, want)
 	}
 	if len(posts[0].data) != 2 || posts[0].data["public_key"] != saasPub {
@@ -199,7 +199,7 @@ func TestPublishSaaSAPICredential_JobTopologyOnLiveBus(t *testing.T) {
 	if _, err := requests.NextMsg(2 * time.Second); err != nil {
 		t.Fatalf("expected farmer to receive the request sent with the published credential: %v", err)
 	}
-	for _, subj := range []string{"$SYS.REQ.SERVER.PING", "grlx.api.health"} {
+	for _, subj := range []string{"$SYS.REQ.SERVER.PING", "imas.api.health"} {
 		_ = saas.Publish(subj, []byte(`{}`))
 		_ = saas.Flush()
 		if !perrs.waitFor(subj) {

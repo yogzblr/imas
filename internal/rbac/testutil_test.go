@@ -7,7 +7,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
-	"github.com/gogrlx/grlx/v2/internal/props"
+	"github.com/yogzblr/imas/internal/props"
 )
 
 // newTestDB opens a fresh in-memory, pure-Go (no CGO) sqlite database,

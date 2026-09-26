@@ -1,9 +1,9 @@
 package pki
 
-// Live-bus proof of the grlx.sprouts.<id>.fleetsigningkeys grant (FLAG
+// Live-bus proof of the imas.sprouts.<id>.fleetsigningkeys grant (FLAG
 // FOR SECURITY REVIEW, design doc §2.5): a sprout's NATS User JWT can
 // request the fleet signing keys on its own subject — and get farmer's
-// answer back on its own grlx.sprouts.<id>.fleetsigningkeys.reply.*
+// answer back on its own imas.sprouts.<id>.fleetsigningkeys.reply.*
 // subject, with no new Subscribe grant — but is refused, with a Permissions
 // Violation, on another sprout's. Asserting on sproutPermissions' fields
 // alone wouldn't show nats-server enforces it; this does.
@@ -19,9 +19,9 @@ import (
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/fleetkeys"
-	"github.com/gogrlx/grlx/v2/internal/fleetsign"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/fleetkeys"
+	"github.com/yogzblr/imas/internal/fleetsign"
 )
 
 type staticFleetKeys struct{ ks fleetsign.KeySet }
@@ -52,7 +52,7 @@ func acceptTestSprout(t *testing.T, sproutID string) (string, []byte) {
 func TestSproutJWT_FleetSigningKeysOwnSubjectOnly(t *testing.T) {
 	setupTestPKI(t)
 	// Farmer's own key, with its seed kept so the test can connect as
-	// farmer (allow-all grlx.>) and answer the way cmd/farmer does.
+	// farmer (allow-all imas.>) and answer the way cmd/farmer does.
 	farmerKP, err := nkeys.CreateUser()
 	if err != nil {
 		t.Fatal(err)

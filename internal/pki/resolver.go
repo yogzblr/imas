@@ -1,7 +1,7 @@
 package pki
 
 // The push-to-resolver mechanism from
-// docs/design/grlx-nats-jwt-auth-design.md: replaces pki.ReloadNKeys()'s old
+// docs/design/imas-nats-jwt-auth-design.md: replaces pki.ReloadNKeys()'s old
 // in-process NatsServer.ReloadOptions() call with an ordinary NATS
 // connection, authenticated as the SYS account, that publishes the updated
 // tenant Account JWT to the bus's "full" resolver. Unlike ReloadOptions(),
@@ -21,7 +21,7 @@ import (
 
 	nats_server "github.com/nats-io/nats-server/v2/server"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 const (
@@ -50,7 +50,7 @@ func pushAccountUpdate(mat *natsAuthMaterial, accountJWT string) error {
 // with SDK-level system-event permissions) receives those advisories —
 // and cmd/farmer/main.go also registers internal/natsapi's
 // internal.tenant.provision/deprovision handlers on that same connection
-// (docs/design/grlx-internal-api-account.md). The caller owns the returned
+// (docs/design/imas-internal-api-account.md). The caller owns the returned
 // connection and should keep it open for the life of the listener rather
 // than reconnecting per call; extra opts (e.g. nats.MaxReconnects(-1),
 // nats.RetryOnFailedConnect(true) for a connection that must outlive a

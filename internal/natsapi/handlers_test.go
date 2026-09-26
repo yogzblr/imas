@@ -8,13 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/jobs"
-	"github.com/gogrlx/grlx/v2/internal/objectstore"
-	"github.com/gogrlx/grlx/v2/internal/objectstore/objectstoretest"
-	"github.com/gogrlx/grlx/v2/internal/props"
-	"github.com/gogrlx/grlx/v2/internal/rbac"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/jobs"
+	"github.com/yogzblr/imas/internal/objectstore"
+	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
+	"github.com/yogzblr/imas/internal/props"
+	"github.com/yogzblr/imas/internal/rbac"
 )
 
 // --- Version handler tests ---

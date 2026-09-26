@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 // secretShapedToken/hashShapedToken detect log output that merely *looks*

@@ -23,7 +23,7 @@ func TestLoadADMXExampleFixture(t *testing.T) {
 	if boolPolicy.DisplayName != "Example Boolean Policy" {
 		t.Errorf("DisplayName = %q, want resolved ADML text", boolPolicy.DisplayName)
 	}
-	if boolPolicy.Key != `Software\Policies\Grlx\Example` || boolPolicy.ValueName != "EnableFeature" {
+	if boolPolicy.Key != `Software\Policies\Imas\Example` || boolPolicy.ValueName != "EnableFeature" {
 		t.Errorf("unexpected key/valueName: %q %q", boolPolicy.Key, boolPolicy.ValueName)
 	}
 	if boolPolicy.EnabledValue == nil || boolPolicy.EnabledValue.Decimal == nil || *boolPolicy.EnabledValue.Decimal != 1 {
@@ -71,7 +71,7 @@ func TestListPolicyResolution(t *testing.T) {
 		t.Fatalf("EnabledList/DisabledList = %d/%d, want 2/2", len(p.EnabledList), len(p.DisabledList))
 	}
 	for _, it := range p.EnabledList {
-		if it.Key != `Software\Policies\Grlx\Example` {
+		if it.Key != `Software\Policies\Imas\Example` {
 			t.Errorf("list item key = %q, want defaultKey to apply", it.Key)
 		}
 	}

@@ -9,11 +9,11 @@ import (
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 func TestIsValidTenantID(t *testing.T) {
-	valid := []string{"t_1", "t_8f2a", "grlx", "a", "A_b-C9"}
+	valid := []string{"t_1", "t_8f2a", "imas", "a", "A_b-C9"}
 	for _, id := range valid {
 		if !IsValidTenantID(id) {
 			t.Errorf("expected %q to be a valid tenant ID", id)

@@ -11,7 +11,7 @@ package natsapi
 // connection (cmd/farmer/main.go's initSystemAccountListeners) — not on
 // any tenant's connection, and not via Subscribe/routes, whose handlers
 // all receive a connection-bound tenantID. See
-// docs/design/grlx-internal-api-account.md for that decision. The only
+// docs/design/imas-internal-api-account.md for that decision. The only
 // identity allowed to publish these request subjects (besides farmer's
 // own SYS user) is the SaaS API's scoped SYS User
 // (pki.EnsureSaaSAPICredential), so no per-message token/RBAC check
@@ -25,10 +25,10 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/gogrlx/grlx/v2/internal/audit"
-	"github.com/gogrlx/grlx/v2/internal/controlplane"
-	log "github.com/gogrlx/grlx/v2/internal/log"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	"github.com/yogzblr/imas/internal/audit"
+	"github.com/yogzblr/imas/internal/controlplane"
+	log "github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // provisionTenant/deprovisionTenant are indirections over pki's real
@@ -49,7 +49,7 @@ const (
 
 // RegisterTenantProvisioning queue-subscribes nc — farmer's SYS listener
 // connection — to internal.tenant.provision and internal.tenant.deprovision.
-// It uses the same natsCoreQueueGroup as grlx.api.> (workstream D's
+// It uses the same natsCoreQueueGroup as imas.api.> (workstream D's
 // discipline) so that with several farmer replicas, exactly one processes
 // each request. Call once per process, not once per tenant.
 //

@@ -1,20 +1,20 @@
 {
-  "realm": "grlx-gateway-jwt-validation",
+  "realm": "imas-gateway-jwt-validation",
   "enabled": true,
   "identityProviders": [
     {
-      "alias": "grlx-gateway",
+      "alias": "imas-gateway",
       "providerId": "oidc",
       "enabled": true,
       "config": {
-        "clientId": "grlx-gateway-validation",
+        "clientId": "imas-gateway-validation",
         "clientSecret": "unused-validation-only",
         "authorizationUrl": "https://example.invalid/authorize",
         "tokenUrl": "https://example.invalid/token",
         "jwksUrl": "https://farmer.internal:5405/v1/.well-known/jwks.json",
         "useJwksUrl": "true",
         "validateSignature": "true",
-        "issuer": "grlx-gateway",
+        "issuer": "imas-gateway",
         "syncMode": "IMPORT"
       }
     }

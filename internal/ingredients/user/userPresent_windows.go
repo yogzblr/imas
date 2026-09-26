@@ -21,7 +21,7 @@ import (
 	"github.com/deploymenttheory/go-bindings-win32/bindings/win32/foundation"
 	"github.com/deploymenttheory/go-bindings-win32/bindings/win32/networkmanagement/netmanagement"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 // Selected NET_API_STATUS / Win32 error codes returned by the NetUser*/
@@ -55,7 +55,7 @@ const (
 // convenience — so this provider fails closed instead.
 var ErrWindowsPasswordHashUnsupported = errors.New(
 	"password_hash is not supported on Windows: Windows accounts require a cleartext " +
-		"password and grlx will not submit a crypt hash string as a literal account password; " +
+		"password and imas will not submit a crypt hash string as a literal account password; " +
 		"use the \"password\" property instead")
 
 func (u User) present(ctx context.Context, test bool) (cook.Result, error) {
@@ -94,7 +94,7 @@ func (u User) present(ctx context.Context, test bool) (cook.Result, error) {
 		if password == "" {
 			result.Failed = true
 			return result, errors.New(
-				"creating a Windows user requires a \"password\" property; grlx will not create an account with a blank or fabricated password")
+				"creating a Windows user requires a \"password\" property; imas will not create an account with a blank or fabricated password")
 		}
 		if test {
 			result.Succeeded = true
@@ -183,7 +183,7 @@ func netUserAdd(name, password, home, comment string) error {
 	case nerrSuccess:
 		return nil
 	case errorAccessDenied:
-		return errors.New("NetUserAdd: access denied — grlx sprout must be running elevated (Administrator/SYSTEM) to manage local accounts")
+		return errors.New("NetUserAdd: access denied — imas sprout must be running elevated (Administrator/SYSTEM) to manage local accounts")
 	case nerrUserExists:
 		return fmt.Errorf("NetUserAdd: an account named %q already exists", name)
 	default:

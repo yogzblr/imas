@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 func Cook(target string, cmdCook apitypes.CmdCook) (apitypes.CmdCook, error) {

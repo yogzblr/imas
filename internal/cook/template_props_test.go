@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/props"
+	"github.com/yogzblr/imas/internal/props"
 )
 
 func TestRenderRecipeTemplateWithProps(t *testing.T) {
@@ -103,7 +103,7 @@ func TestRenderRecipeTemplateHostname(t *testing.T) {
   set banner:
     file.content:
       - name: /etc/motd
-      - text: "Managed by grlx - {{ hostname }}"
+      - text: "Managed by imas - {{ hostname }}"
 `)
 
 	out, err := renderRecipeTemplate(testPropsTenantID, sproutID, "hostname-recipe", recipe)
@@ -116,8 +116,8 @@ func TestRenderRecipeTemplateHostname(t *testing.T) {
 	if strings.Contains(rendered, "{{ hostname }}") {
 		t.Errorf("hostname template function was not resolved, got:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, "Managed by grlx - ") {
-		t.Errorf("expected 'Managed by grlx - ' prefix in rendered output, got:\n%s", rendered)
+	if !strings.Contains(rendered, "Managed by imas - ") {
+		t.Errorf("expected 'Managed by imas - ' prefix in rendered output, got:\n%s", rendered)
 	}
 }
 
@@ -158,7 +158,7 @@ func TestPropsTemplatingEndToEnd(t *testing.T) {
   deploy app config:
     file.managed:
       - name: {{ props "config_path" }}
-      - source: grlx://configs/app.yaml
+      - source: imas://configs/app.yaml
       - user: {{ props "config_user" }}
       - mode: "644"
 `)
@@ -226,7 +226,7 @@ func TestPropsTemplatingConditionalEndToEnd(t *testing.T) {
   monitoring agent:
     file.managed:
       - name: /etc/monitoring/agent.conf
-      - source: grlx://monitoring/agent.conf
+      - source: imas://monitoring/agent.conf
       - requisites:
         - require: base app
 {{- end }}
@@ -288,7 +288,7 @@ func TestPropsTemplatingConditionalExcludedEndToEnd(t *testing.T) {
   monitoring agent:
     file.managed:
       - name: /etc/monitoring/agent.conf
-      - source: grlx://monitoring/agent.conf
+      - source: imas://monitoring/agent.conf
 {{- end }}
 `)
 
@@ -344,9 +344,9 @@ func TestRenderRecipeTemplateUndefinedFunction(t *testing.T) {
 }
 
 func TestTemplateFuncEnv(t *testing.T) {
-	t.Setenv("GRLX_TEST_VAR", "hello_world")
+	t.Setenv("IMAS_TEST_VAR", "hello_world")
 
-	recipe := []byte(`value: {{ env "GRLX_TEST_VAR" }}`)
+	recipe := []byte(`value: {{ env "IMAS_TEST_VAR" }}`)
 	out, err := renderRecipeTemplate(testPropsTenantID, "test-sprout", "env-test", recipe)
 	if err != nil {
 		t.Fatalf("renderRecipeTemplate error: %v", err)
@@ -411,17 +411,17 @@ func TestTemplateFuncPathHelpers(t *testing.T) {
 }
 
 func TestTemplateFuncDefault(t *testing.T) {
-	t.Setenv("GRLX_EMPTY", "")
-	t.Setenv("GRLX_SET", "custom")
+	t.Setenv("IMAS_EMPTY", "")
+	t.Setenv("IMAS_SET", "custom")
 
 	tests := []struct {
 		name     string
 		template string
 		expected string
 	}{
-		{"empty uses default", `{{ default "fallback" (env "GRLX_EMPTY") }}`, "fallback"},
-		{"set uses value", `{{ default "fallback" (env "GRLX_SET") }}`, "custom"},
-		{"unset uses default", `{{ default "fallback" (env "GRLX_UNSET_VAR_XYZ") }}`, "fallback"},
+		{"empty uses default", `{{ default "fallback" (env "IMAS_EMPTY") }}`, "fallback"},
+		{"set uses value", `{{ default "fallback" (env "IMAS_SET") }}`, "custom"},
+		{"unset uses default", `{{ default "fallback" (env "IMAS_UNSET_VAR_XYZ") }}`, "fallback"},
 	}
 
 	for _, tt := range tests {
@@ -489,7 +489,7 @@ func TestStaticPropsInTemplate(t *testing.T) {
   configure db:
     file.managed:
       - name: /etc/app/db.conf
-      - source: grlx://configs/db.conf
+      - source: imas://configs/db.conf
       - context:
           host: {{ props "db_host" }}
           port: {{ props "db_port" }}
@@ -675,7 +675,7 @@ func TestStaticPropsEndToEndPipeline(t *testing.T) {
   deploy config:
     file.managed:
       - name: {{ props "config_path" }}
-      - source: grlx://app/config.yml
+      - source: imas://app/config.yml
       - user: {{ props "app_user" }}
       - mode: "644"
   start service:

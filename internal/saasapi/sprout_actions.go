@@ -40,8 +40,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"gorm.io/gorm"
 
-	"github.com/gogrlx/grlx/v2/internal/controlplane"
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/controlplane"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 const (
@@ -664,7 +664,7 @@ func startBatchDispatch(batch AssetActionBatch, items []AssetActionItem) {
 // With no bus connection, every item stays queued and nothing is sent —
 // the same as publishProvisioningJob leaves a job pending. Re-dispatching
 // queued items is the outbox sweeper's job, deferred for this table as for
-// provisioning_jobs (see docs/design/grlx-internal-api-account.md).
+// provisioning_jobs (see docs/design/imas-internal-api-account.md).
 func dispatchBatch(d *gorm.DB, nc *nats.Conn, batch AssetActionBatch, items []AssetActionItem) {
 	if nc == nil {
 		log.Errorf("saasapi: not connected to the NATS bus; action batch %s (tenant %s) left queued", batch.ID, batch.TenantID)

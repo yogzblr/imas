@@ -5,7 +5,7 @@
 // Neither survived a second farmer replica: each replica had its own
 // process-local propCache and its own local JSON files, so a SetProp on
 // replica A was invisible to a GetProp answered by replica B — the
-// cross-replica divergence bug named in docs/design/grlx-fork-roadmap.md
+// cross-replica divergence bug named in docs/design/imas-fork-roadmap.md
 // workstream A. This file (plus props.go/static.go) now reads and writes
 // straight through to the shared `farmer` schema in PXC on every call, with
 // no in-memory cache layered on top, so every replica sees the same state.
@@ -25,7 +25,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 // propRow is the `props` table in the farmer schema.
@@ -55,7 +55,7 @@ func SetDB(d *gorm.DB) { db = d }
 // tenantID resolves the current tenant scope for callers with no better
 // source today (internal/natsapi's single shared connection,
 // boot/SIGHUP-time static-prop loading) — see the package doc comment
-// above and docs/design/grlx-tenant-context-threading.md.
+// above and docs/design/imas-tenant-context-threading.md.
 func tenantID() string {
 	if config.FarmerOrganization != "" {
 		return config.FarmerOrganization

@@ -8,8 +8,8 @@ import (
 	"github.com/nats-io/nkeys"
 	"github.com/taigrr/jety"
 
-	"github.com/gogrlx/grlx/v2/internal/log"
-	"github.com/gogrlx/grlx/v2/internal/rbac"
+	"github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/rbac"
 )
 
 var (
@@ -27,7 +27,7 @@ var (
 //
 // This policy has no tenant concept — one config-file-driven policy for
 // the whole farmer process, regardless of which tenant a request concerns.
-// Flagged as an open gap in docs/design/grlx-tenant-context-threading.md
+// Flagged as an open gap in docs/design/imas-tenant-context-threading.md
 // while workstream E's tenant-isolation work (PRs #28, #39-#41) was
 // landing; resolved as a deliberate non-issue, not deferred work, once
 // confirmed against this codebase's actual access model rather than
@@ -38,7 +38,7 @@ var (
 //     cloudxp-machine-manager-api-design.md's "Internal API — Farmer
 //     (SaaS API only)"). A tenant, a human, or CloudXP itself never calls
 //     farmer directly.
-//   - cmd/grlx, the only other code path that authenticates to farmer's
+//   - cmd/imas, the only other code path that authenticates to farmer's
 //     bus independently of the SaaS API (internal/api/client/nats.go
 //     dials config.FarmerBusURL directly), is never issued to anyone —
 //     confirmed, not assumed. If that ever changes — the CLI gets handed

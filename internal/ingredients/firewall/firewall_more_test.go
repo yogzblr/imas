@@ -189,7 +189,7 @@ func TestRuleAbsentPropagatesDelRuleError(t *testing.T) {
 func TestTablePresentPropagatesListAndFlushErrors(t *testing.T) {
 	conn := newFakeConn()
 	conn.listErr = errors.New("boom")
-	spec := tableSpec{name: "grlx", family: nft.TableFamilyINet}
+	spec := tableSpec{name: "imas", family: nft.TableFamilyINet}
 	if res, err := tablePresent(conn, spec, false); err == nil || !res.Failed {
 		t.Fatalf("expected list error to propagate, got res=%+v err=%v", res, err)
 	}
@@ -254,7 +254,7 @@ func TestTestDoesNotMutateAcrossAllMethods(t *testing.T) {
 	cleanup := withFakeDial(conn)
 	defer cleanup()
 
-	fw, err := (Firewall{}).Parse("id", MethodTablePresent, map[string]interface{}{"name": "grlx"})
+	fw, err := (Firewall{}).Parse("id", MethodTablePresent, map[string]interface{}{"name": "imas"})
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}

@@ -1,6 +1,6 @@
 //go:build windows
 
-// Package registry implements a grlx ingredient for managing Windows
+// Package registry implements a imas ingredient for managing Windows
 // registry keys and values via golang.org/x/sys/windows/registry.
 package registry
 
@@ -10,8 +10,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 var (
@@ -25,7 +25,7 @@ var (
 // Compile-time interface check.
 var _ cook.RecipeCooker = Registry{}
 
-// Registry is a grlx ingredient for managing Windows registry keys and
+// Registry is a imas ingredient for managing Windows registry keys and
 // values. "name" is always the fully qualified hive-and-key path, e.g.
 // `HKEY_LOCAL_MACHINE\SOFTWARE\Contoso\App` (short hive aliases such as
 // HKLM/HKCU/HKCR/HKU/HKCC are also accepted).

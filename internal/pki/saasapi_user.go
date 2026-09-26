@@ -4,7 +4,7 @@ package pki
 // Account, carrying exactly the platform-level internal.* subjects
 // internal/saasapi needs to drive tenant provisioning and sprout actions
 // through farmer. See
-// docs/design/grlx-internal-api-account.md for why SYS (rather than the
+// docs/design/imas-internal-api-account.md for why SYS (rather than the
 // legacy tenant Account, or a new dedicated one), and why these
 // permissions and nothing more.
 //
@@ -26,14 +26,14 @@ import (
 	jwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
 
-	"github.com/gogrlx/grlx/v2/internal/controlplane"
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/controlplane"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 const (
-	saasAPIUserName = "grlx-saasapi"
+	saasAPIUserName = "imas-saasapi"
 	// saasAPIUserSeedName is the loadOrCreateSeed/loadExternalSeed name,
-	// so GRLX_NATS_SAASAPI_USER_SEED_FILE / GRLX_NATS_SAASAPI_USER_SEED
+	// so IMAS_NATS_SAASAPI_USER_SEED_FILE / IMAS_NATS_SAASAPI_USER_SEED
 	// supply the seed externally (OpenBao via ESO) instead of farmer
 	// generating and persisting one.
 	saasAPIUserSeedName = "SAASAPI_USER"
@@ -62,7 +62,7 @@ func sysAccountJWTPath() string { return filepath.Join(natsAuthDir(), "sys-accou
 // requests to get replies at all. Pub on the inbox is deliberately not
 // granted: replies come from farmer.
 //
-// Deliberately absent: grlx.> (any tenant's business traffic), $SYS.>
+// Deliberately absent: imas.> (any tenant's business traffic), $SYS.>
 // (server administration), subscribe on any internal.* request subject
 // (only farmer receives requests), and the internal.sprout.* subjects
 // that have no farmer handler yet (mint, revoke, enrolled,
@@ -114,13 +114,13 @@ func saasAPIUserJWTIsCurrent(uc *jwt.UserClaims, pub, sysAccountPub string) bool
 // SaaSAPIUserJWTPath. Idempotent: call at every farmer boot.
 //
 // The User is signed directly by the SYS Account's identity key, exactly
-// like grlx-farmer-sys-push (jwtauth.go) — no Account JWT change, and so
+// like imas-farmer-sys-push (jwtauth.go) — no Account JWT change, and so
 // no resolver push, is needed for the bus to accept it; the SYS Account
 // JWT it chains to is already seeded into every bus node's resolver by
 // ConfigureNats.
 //
 // Rotation: if the seed changed since the JWT on disk was minted (a new
-// GRLX_NATS_SAASAPI_USER_SEED[_FILE] from OpenBao), the previous public
+// IMAS_NATS_SAASAPI_USER_SEED[_FILE] from OpenBao), the previous public
 // key is added to the SYS Account JWT's revocation list, which is
 // re-signed, persisted, and pushed to the bus resolver over the same
 // pushAccountUpdate path every tenant Account update uses — otherwise the

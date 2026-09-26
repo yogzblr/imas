@@ -3,7 +3,7 @@
 // Package winfirewall wraps the core of Salt's win_firewall module:
 // adding and removing Windows Firewall rules via netsh advfirewall, the
 // same CLI tool Salt itself shells out to (no PowerShell involved). See
-// G.9 in docs/design/grlx-windows-parity-addendum.md.
+// G.9 in docs/design/imas-windows-parity-addendum.md.
 //
 // This establishes the plain-text-parsing pattern the rest of the G.9
 // batch (windnsclient, winauditpol, winpowercfg, wincertutil) follows:
@@ -16,9 +16,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/winexec"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients/winexec"
 )
 
 const ingredientName = "win_firewall"

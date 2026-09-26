@@ -9,7 +9,7 @@ package handlers
 import (
 	"net/http"
 
-	"github.com/gogrlx/grlx/v2/internal/gatewayjwt"
+	"github.com/yogzblr/imas/internal/gatewayjwt"
 )
 
 // gatewaySigner is set once at startup via SetGatewaySigner

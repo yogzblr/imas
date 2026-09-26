@@ -1,7 +1,7 @@
 package saasapi
 
 // End-to-end coverage for the tenant provisioning bridge
-// (docs/design/grlx-internal-api-account.md), with nothing in the chain
+// (docs/design/imas-internal-api-account.md), with nothing in the chain
 // mocked:
 //
 //   POST /v1/tenants (real router, real two-layer Auth)
@@ -49,10 +49,10 @@ import (
 	"github.com/nats-io/nkeys"
 	"gorm.io/gorm"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/controlplane"
-	"github.com/gogrlx/grlx/v2/internal/natsapi"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/controlplane"
+	"github.com/yogzblr/imas/internal/natsapi"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // e2eEnv is one fully wired SaaS API + bus + farmer handler stack.
@@ -102,7 +102,7 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 	// `go test ./...`. -1 is nats-server's RANDOM_PORT.
 	config.FarmerBusPort = "-1"
 	config.FarmerWSPort = ""
-	config.FarmerOrganization = "grlx-e2e"
+	config.FarmerOrganization = "imas-e2e"
 	config.RootCA = filepath.Join(tmp, "rootca.pem")
 	config.CertFile = filepath.Join(tmp, "cert.pem")
 	config.KeyFile = filepath.Join(tmp, "key.pem")
@@ -511,7 +511,7 @@ func writeE2ECerts(t *testing.T, dir string) {
 	caKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	caTmpl := x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{Organization: []string{"grlx-e2e"}},
+		Subject:               pkix.Name{Organization: []string{"imas-e2e"}},
 		NotBefore:             time.Now().Add(-time.Minute),
 		NotAfter:              time.Now().Add(time.Hour),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
@@ -525,7 +525,7 @@ func writeE2ECerts(t *testing.T, dir string) {
 	leafKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	leafTmpl := x509.Certificate{
 		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{Organization: []string{"grlx-e2e"}},
+		Subject:      pkix.Name{Organization: []string{"imas-e2e"}},
 		NotBefore:    time.Now().Add(-time.Minute),
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,

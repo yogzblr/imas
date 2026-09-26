@@ -1,6 +1,6 @@
-// Command farmerbus is grlx's NATS bus process: the half of what used to be
+// Command farmerbus is imas's NATS bus process: the half of what used to be
 // a single "farmer" binary that's meant to run in the DMZ (see
-// docs/design/grlx-fork-roadmap.md workstream C). It embeds nothing but the
+// docs/design/imas-fork-roadmap.md workstream C). It embeds nothing but the
 // NATS server itself — no PXC, no object storage, no API server, no
 // sprout-facing business logic — so that a compromise of this process
 // (the one directly reachable from sprouts on the public side of the
@@ -18,11 +18,11 @@ import (
 	"syscall"
 	"time"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	log "github.com/yogzblr/imas/internal/log"
 
-	"github.com/gogrlx/grlx/v2/internal/certs"
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	"github.com/yogzblr/imas/internal/certs"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/pki"
 
 	nats_server "github.com/nats-io/nats-server/v2/server"
 )

@@ -23,9 +23,9 @@ import (
 	"github.com/nats-io/nkeys"
 	"gorm.io/gorm"
 
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // setupPKIDirs wires up an in-memory PKI store (see internal/pki/store.go)

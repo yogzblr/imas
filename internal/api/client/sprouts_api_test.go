@@ -15,7 +15,7 @@ func TestListSprouts_Success(t *testing.T) {
 			{ID: "db-01", KeyState: "unaccepted", Connected: false},
 		},
 	}
-	mockHandler(t, NatsConn, "grlx.api.sprouts.list", want)
+	mockHandler(t, NatsConn, "imas.api.sprouts.list", want)
 
 	got, err := ListSprouts()
 	if err != nil {
@@ -40,7 +40,7 @@ func TestListSprouts_Empty(t *testing.T) {
 	defer cleanup()
 
 	want := SproutListResponse{Sprouts: []SproutInfo{}}
-	mockHandler(t, NatsConn, "grlx.api.sprouts.list", want)
+	mockHandler(t, NatsConn, "imas.api.sprouts.list", want)
 
 	got, err := ListSprouts()
 	if err != nil {
@@ -55,7 +55,7 @@ func TestListSprouts_Error(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.sprouts.list", "connection refused")
+	mockErrorHandler(t, NatsConn, "imas.api.sprouts.list", "connection refused")
 
 	_, err := ListSprouts()
 	if err == nil {
@@ -73,7 +73,7 @@ func TestGetSprout_Success(t *testing.T) {
 		Connected: true,
 		NKey:      "NFOO123",
 	}
-	mockHandler(t, NatsConn, "grlx.api.sprouts.get", want)
+	mockHandler(t, NatsConn, "imas.api.sprouts.get", want)
 
 	got, err := GetSprout("web-01")
 	if err != nil {
@@ -91,7 +91,7 @@ func TestGetSprout_NotFound(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.sprouts.get", "sprout not found")
+	mockErrorHandler(t, NatsConn, "imas.api.sprouts.get", "sprout not found")
 
 	_, err := GetSprout("nonexistent")
 	if err == nil {
@@ -108,7 +108,7 @@ func TestGetSproutProps_Success(t *testing.T) {
 		"arch":     "amd64",
 		"hostname": "web-01.example.com",
 	}
-	mockHandler(t, NatsConn, "grlx.api.props.getall", want)
+	mockHandler(t, NatsConn, "imas.api.props.getall", want)
 
 	got, err := GetSproutProps("web-01")
 	if err != nil {
@@ -126,7 +126,7 @@ func TestGetSproutProps_Empty(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockHandler(t, NatsConn, "grlx.api.props.getall", map[string]interface{}{})
+	mockHandler(t, NatsConn, "imas.api.props.getall", map[string]interface{}{})
 
 	got, err := GetSproutProps("new-sprout")
 	if err != nil {
@@ -141,7 +141,7 @@ func TestGetSproutProps_Error(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.props.getall", "sprout offline")
+	mockErrorHandler(t, NatsConn, "imas.api.props.getall", "sprout offline")
 
 	_, err := GetSproutProps("offline-sprout")
 	if err == nil {

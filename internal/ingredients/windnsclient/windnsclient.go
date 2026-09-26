@@ -3,7 +3,7 @@
 // Package windnsclient wraps the core of Salt's win_dns_client module:
 // setting an interface's static DNS server list via
 // `netsh interface ip set/add dns`, the same CLI tool Salt itself shells
-// out to. See G.9 in docs/design/grlx-windows-parity-addendum.md.
+// out to. See G.9 in docs/design/imas-windows-parity-addendum.md.
 package windnsclient
 
 import (
@@ -13,9 +13,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/winexec"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients/winexec"
 )
 
 const ingredientName = "win_dns_client"

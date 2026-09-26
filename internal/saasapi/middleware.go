@@ -9,7 +9,7 @@ import (
 
 	"golang.org/x/time/rate"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 // Logger wraps a handler with request logging, matching internal/api's

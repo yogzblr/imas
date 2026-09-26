@@ -32,7 +32,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 // roleRow is the `rbac_roles` table in the farmer schema. Rules is stored

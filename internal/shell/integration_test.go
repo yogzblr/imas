@@ -256,7 +256,7 @@ func TestHandleShellStart_IOExchange(t *testing.T) {
 	defer outputSub.Unsubscribe()
 
 	// Send a command that produces known output.
-	nc.Publish(startResp.InputSubject, []byte("echo GRLX_TEST_MARKER\n"))
+	nc.Publish(startResp.InputSubject, []byte("echo IMAS_TEST_MARKER\n"))
 	nc.Flush()
 
 	// Wait for the marker to appear in output.
@@ -265,7 +265,7 @@ func TestHandleShellStart_IOExchange(t *testing.T) {
 		outputMu.Lock()
 		got := string(outputBuf)
 		outputMu.Unlock()
-		if strings.Contains(got, "GRLX_TEST_MARKER") {
+		if strings.Contains(got, "IMAS_TEST_MARKER") {
 			break
 		}
 		select {

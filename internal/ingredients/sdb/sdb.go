@@ -1,14 +1,14 @@
-// Package sdb implements grlx's SDB-equivalent secret resolution: a
+// Package sdb implements imas's SDB-equivalent secret resolution: a
 // sprout-side SecretProvider interface behind the sdb:// URI scheme, with
 // self-registering backend implementations selected by the ref's backend
 // name (the URI's host segment), following the same self-registering
-// plugin pattern used by the other grlx ingredients (see
+// plugin pattern used by the other imas ingredients (see
 // internal/ingredients/file for the closest analog).
 //
 // A ref looks like sdb://<backend>/<backend-specific-path>, e.g.
 // sdb://openbao/secret/myapp/db#password. Recipes carry these refs
 // opaquely; the sprout resolves them at execution time via Get. See
-// docs/design/grlx-sdb-secrets-design.md for the full design.
+// docs/design/imas-sdb-secrets-design.md for the full design.
 package sdb
 
 import (
@@ -18,7 +18,7 @@ import (
 	"net/url"
 	"sync"
 
-	"github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/log"
 )
 
 // SecretProvider resolves a single sdb:// ref to its secret value.

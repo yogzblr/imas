@@ -104,7 +104,7 @@ func TestPresentAppliesNewEntry(t *testing.T) {
 	if !result.Succeeded || result.Failed || !result.Changed {
 		t.Fatalf("unexpected result: %+v", result)
 	}
-	if !strings.Contains(f.store[""], "GRLX_CRON_ID:backup") {
+	if !strings.Contains(f.store[""], "IMAS_CRON_ID:backup") {
 		t.Fatalf("expected identifier marker in installed crontab, got: %q", f.store[""])
 	}
 	if !strings.Contains(f.store[""], "/usr/bin/backup.sh") {
@@ -114,7 +114,7 @@ func TestPresentAppliesNewEntry(t *testing.T) {
 
 func TestPresentIsIdempotent(t *testing.T) {
 	f := newFakeCrontab(t)
-	f.store["root"] = "# GRLX_CRON_ID:backup\n0 3 * * * /usr/bin/backup.sh\n"
+	f.store["root"] = "# IMAS_CRON_ID:backup\n0 3 * * * /usr/bin/backup.sh\n"
 	withMockCrontab(t, f)
 
 	c := Cron{id: "backup", method: "present", params: map[string]interface{}{
@@ -131,7 +131,7 @@ func TestPresentIsIdempotent(t *testing.T) {
 
 func TestPresentUpdatesChangedSchedule(t *testing.T) {
 	f := newFakeCrontab(t)
-	f.store["root"] = "# GRLX_CRON_ID:backup\n0 3 * * * /usr/bin/backup.sh\n"
+	f.store["root"] = "# IMAS_CRON_ID:backup\n0 3 * * * /usr/bin/backup.sh\n"
 	withMockCrontab(t, f)
 
 	c := Cron{id: "backup", method: "present", params: map[string]interface{}{
@@ -181,7 +181,7 @@ func TestPresentMissingCommand(t *testing.T) {
 
 func TestAbsentRemovesByIdentifier(t *testing.T) {
 	f := newFakeCrontab(t)
-	f.store[""] = "# GRLX_CRON_ID:backup\n0 3 * * * /usr/bin/backup.sh\n0 4 * * * /usr/bin/other.sh\n"
+	f.store[""] = "# IMAS_CRON_ID:backup\n0 3 * * * /usr/bin/backup.sh\n0 4 * * * /usr/bin/other.sh\n"
 	withMockCrontab(t, f)
 
 	c := Cron{id: "backup", method: "absent", params: map[string]interface{}{"name": "backup"}}
@@ -216,7 +216,7 @@ func TestAbsentAlreadyGone(t *testing.T) {
 
 func TestAbsentTestModeDoesNotMutate(t *testing.T) {
 	f := newFakeCrontab(t)
-	f.store[""] = "# GRLX_CRON_ID:backup\n0 3 * * * /usr/bin/backup.sh\n"
+	f.store[""] = "# IMAS_CRON_ID:backup\n0 3 * * * /usr/bin/backup.sh\n"
 	withMockCrontab(t, f)
 
 	c := Cron{id: "backup", method: "absent", params: map[string]interface{}{"name": "backup"}}

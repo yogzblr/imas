@@ -9,25 +9,25 @@ and the checks below more carefully than the Go code.
 Design: `docs/design/cloudxp-machine-manager-api-design.md` §2.5.
 
 These are reviewed reference files, as in `deploy/farmer/`. Nothing in
-grlx applies them. The real roles, Deployments and database users live in
+imas applies them. The real roles, Deployments and database users live in
 the ops repo.
 
 | File | What it is |
 |---|---|
-| `policies/grlx-fleet-signer.hcl` | Policy for `cmd/fleetreleaser` only: sign with `grlx-fleet-signing`, and read its public keys |
-| `policies/grlx-fleet-verify.hcl` | Policy for farmer and saasapi: read the public keys and call Transit verify. Nothing else |
+| `policies/imas-fleet-signer.hcl` | Policy for `cmd/fleetreleaser` only: sign with `imas-fleet-signing`, and read its public keys |
+| `policies/imas-fleet-verify.hcl` | Policy for farmer and saasapi: read the public keys and call Transit verify. Nothing else |
 
 ## Who holds what
 
-| Identity | OpenBao (Transit key `grlx-fleet-signing`) | PXC `saas.fleet_versions` |
+| Identity | OpenBao (Transit key `imas-fleet-signing`) | PXC `saas.fleet_versions` |
 |---|---|---|
-| `cmd/fleetreleaser` (release pipeline Job) | `grlx-fleet-signer`: **sign**, read | its own user: `SELECT`, `INSERT`, `UPDATE (signature)` |
-| saasapi | `grlx-fleet-verify`: read, verify | `saas_svc`: `ALL ON saas.*` (unchanged) |
-| farmer | `grlx-fleet-verify`: read, verify | `farmer_svc`: `SELECT ON saas.*` (unchanged) |
+| `cmd/fleetreleaser` (release pipeline Job) | `imas-fleet-signer`: **sign**, read | its own user: `SELECT`, `INSERT`, `UPDATE (signature)` |
+| saasapi | `imas-fleet-verify`: read, verify | `saas_svc`: `ALL ON saas.*` (unchanged) |
+| farmer | `imas-fleet-verify`: read, verify | `farmer_svc`: `SELECT ON saas.*` (unchanged) |
 | sprout | none. It gets the live key set from farmer over its own NATS connection; the enrollment-time key is a bootstrap fallback only | none |
 
 The rule this table enforces is that **no identity holds both Transit
-sign on `grlx-fleet-signing` and a way to change what
+sign on `imas-fleet-signing` and a way to change what
 `saas.fleet_versions` says outside fleetreleaser.** saasapi already
 writes that table, so it gets verify-only access. fleetreleaser writes
 rows, but only rows it has just signed.
@@ -36,19 +36,19 @@ rows, but only rows it has just signed.
 
 ```sh
 bao secrets enable transit   # if not already enabled
-bao write -f transit/keys/grlx-fleet-signing type=ed25519 exportable=false allow_plaintext_backup=false
+bao write -f transit/keys/imas-fleet-signing type=ed25519 exportable=false allow_plaintext_backup=false
 ```
 
-- Use a new key. Do not reuse `grlx-gateway-jwt`.
+- Use a new key. Do not reuse `imas-gateway-jwt`.
 - Never set `exportable=true` or `allow_plaintext_backup=true`.
 ### Rotating the key
 
 **The rotation step itself is safe.** Run
-`bao write -f transit/keys/grlx-fleet-signing/rotate`.
+`bao write -f transit/keys/imas-fleet-signing/rotate`.
 
 - fleetreleaser signs new releases with the new version.
 - Sprouts pick it up without re-enrolling. They verify against the key
-  set farmer serves live on `grlx.sprouts.<id>.fleetsigningkeys`. That
+  set farmer serves live on `imas.sprouts.<id>.fleetsigningkeys`. That
   set holds every version at or above `min_decryption_version`: every
   version Transit's own `/verify` still accepts.
 - Sprouts cache that set for 5 minutes. A signature by a version missing
@@ -65,7 +65,7 @@ bao write -f transit/keys/grlx-fleet-signing type=ed25519 exportable=false allow
 **Retiring a version is not automated, on purpose, and has a hard
 constraint.** You retire version N for verification by raising
 `min_decryption_version` past it (`bao write
-transit/keys/grlx-fleet-signing/config min_decryption_version=N+1`).
+transit/keys/imas-fleet-signing/config min_decryption_version=N+1`).
 Transit requires `min_encryption_version` >= `min_decryption_version`,
 so raise that first if needed.
 
@@ -84,7 +84,7 @@ so raise that first if needed.
   refused. So the only way to move an approved release onto a newer key
   version is to publish it as a new version, have tenants approve that,
   and only then retire the old key version.
-- This is an operator decision. Nothing in grlx raises either floor,
+- This is an operator decision. Nothing in imas raises either floor,
   trims key versions or retires them automatically.
 
 Note that `internal/gatewayjwt`'s JWKS floors on `min_encryption_version`.
@@ -95,30 +95,30 @@ That's a different key with different semantics; don't copy it here.
 Create one Kubernetes auth role per identity. Don't share a role or a
 token between identities.
 
-- `auth/kubernetes/role/grlx-fleetreleaser`: bound only to the release
-  Job's ServiceAccount. `token_policies=grlx-fleet-signer`. Give it a
+- `auth/kubernetes/role/imas-fleetreleaser`: bound only to the release
+  Job's ServiceAccount. `token_policies=imas-fleet-signer`. Give it a
   short `token_ttl`, for example `5m`, because a run makes about three
   Transit calls.
-- `auth/kubernetes/role/grlx-farmer-fleet-verify`: bound to farmer's
-  ServiceAccount. `token_policies=grlx-fleet-verify`.
-- `auth/kubernetes/role/grlx-saasapi-fleet-verify`: bound to saasapi's
-  ServiceAccount. `token_policies=grlx-fleet-verify`.
+- `auth/kubernetes/role/imas-farmer-fleet-verify`: bound to farmer's
+  ServiceAccount. `token_policies=imas-fleet-verify`.
+- `auth/kubernetes/role/imas-saasapi-fleet-verify`: bound to saasapi's
+  ServiceAccount. `token_policies=imas-fleet-verify`.
 
 Environment variables:
 
-- farmer and saasapi read `GRLX_FLEETSIGN_OPENBAO_*`, which is
+- farmer and saasapi read `IMAS_FLEETSIGN_OPENBAO_*`, which is
   `internal/fleetsign`'s read-only client.
-- fleetreleaser reads `GRLX_FLEETRELEASER_OPENBAO_*` and
-  `GRLX_FLEETRELEASER_DSN`.
-- Never put a `GRLX_FLEETRELEASER_*` variable in farmer's or saasapi's
+- fleetreleaser reads `IMAS_FLEETRELEASER_OPENBAO_*` and
+  `IMAS_FLEETRELEASER_DSN`.
+- Never put a `IMAS_FLEETRELEASER_*` variable in farmer's or saasapi's
   Deployment.
 
 ## Check it; don't assume it
 
 **Wildcards on other policies.** farmer's existing gateway Transit
-policy must name `transit/sign/grlx-gateway-jwt` exactly. A
+policy must name `transit/sign/imas-gateway-jwt` exactly. A
 `transit/sign/*` or `transit/sign/+` grant on farmer's gateway role
-quietly gives farmer sign on `grlx-fleet-signing` too, and this design is
+quietly gives farmer sign on `imas-fleet-signing` too, and this design is
 gone. Audit **every** policy attached to farmer's and saasapi's roles,
 including `default` and any policy inherited through identity groups.
 
@@ -126,19 +126,19 @@ including `default` and any policy inherited through identity groups.
 
 ```sh
 # farmer's and saasapi's tokens: every one of these must print "deny"
-for p in transit/sign/grlx-fleet-signing \
-         transit/sign/grlx-fleet-signing/sha2-256 \
-         transit/keys/grlx-fleet-signing/rotate \
-         transit/keys/grlx-fleet-signing/config \
-         transit/export/signing-key/grlx-fleet-signing \
-         transit/backup/grlx-fleet-signing; do
+for p in transit/sign/imas-fleet-signing \
+         transit/sign/imas-fleet-signing/sha2-256 \
+         transit/keys/imas-fleet-signing/rotate \
+         transit/keys/imas-fleet-signing/config \
+         transit/export/signing-key/imas-fleet-signing \
+         transit/backup/imas-fleet-signing; do
   bao token capabilities "$TOKEN" "$p"
 done
-bao token capabilities "$TOKEN" transit/keys/grlx-fleet-signing     # read
-bao token capabilities "$TOKEN" transit/verify/grlx-fleet-signing   # update
+bao token capabilities "$TOKEN" transit/keys/imas-fleet-signing     # read
+bao token capabilities "$TOKEN" transit/verify/imas-fleet-signing   # update
 
 # and the direct attempt must fail with 403 permission denied:
-VAULT_TOKEN="$TOKEN" bao write transit/sign/grlx-fleet-signing input=aGk=
+VAULT_TOKEN="$TOKEN" bao write transit/sign/imas-fleet-signing input=aGk=
 ```
 
 **Run the automated version against a real OpenBao.** The same checks,
@@ -147,7 +147,7 @@ policy files in this directory:
 
 ```sh
 bao server -dev -dev-root-token-id=root &
-GRLX_TEST_OPENBAO_ADDR=http://127.0.0.1:8200 GRLX_TEST_OPENBAO_TOKEN=root \
+IMAS_TEST_OPENBAO_ADDR=http://127.0.0.1:8200 IMAS_TEST_OPENBAO_TOKEN=root \
   go test ./cmd/fleetreleaser -run TestOpenBaoEnforcesReadOnlyFleetKey -v
 ```
 

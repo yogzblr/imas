@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/winexec"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients/winexec"
 )
 
 // ErrTaskNotFound is returned by taskBackend.Load when no task (or no

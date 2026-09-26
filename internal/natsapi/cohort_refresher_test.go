@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/rbac"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/rbac"
 )
 
 func TestStartCohortRefresher_DisabledOnZeroInterval(t *testing.T) {

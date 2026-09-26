@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/sys/windows/registry"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 func (r Registry) present(_ context.Context, test bool) (cook.Result, error) {

@@ -8,11 +8,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	_ "github.com/gogrlx/grlx/v2/internal/ingredients/file/hashers"
+	"github.com/yogzblr/imas/internal/config"
+	_ "github.com/yogzblr/imas/internal/ingredients/file/hashers"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 func TestCached(t *testing.T) {

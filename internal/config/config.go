@@ -9,19 +9,19 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/log"
 	"github.com/taigrr/jety"
+	"github.com/yogzblr/imas/internal/log"
 )
 
-const GrlxExt = "grlx"
+const ImasExt = "imas"
 
 var BuildInfo Version
 
 var configLoaded sync.Once
 
 // systemConfigRoot is the root directory for farmer/sprout config files.
-// Defaults to "/etc/grlx". Tests can override via setSystemConfigRoot.
-var systemConfigRoot = "/etc/grlx"
+// Defaults to "/etc/imas". Tests can override via setSystemConfigRoot.
+var systemConfigRoot = "/etc/imas"
 
 // setSystemConfigRoot overrides the config root for testing.
 func setSystemConfigRoot(root string) {
@@ -30,7 +30,7 @@ func setSystemConfigRoot(root string) {
 
 // resetSystemConfigRoot restores the default config root.
 func resetSystemConfigRoot() {
-	systemConfigRoot = "/etc/grlx"
+	systemConfigRoot = "/etc/imas"
 }
 
 var (
@@ -55,15 +55,15 @@ var (
 	FarmerBusPort string
 	// FarmerWSPort is the port for nats-server's websocket listener —
 	// what Envoy's jwt_authn-gated route proxies sprout wss:// connections
-	// to, per docs/design/grlx-envoy-enrollment-design.md. Distinct from
-	// FarmerBusPort (the plain TCP NATS listener grlx CLI/farmer-to-farmer
+	// to, per docs/design/imas-envoy-enrollment-design.md. Distinct from
+	// FarmerBusPort (the plain TCP NATS listener imas CLI/farmer-to-farmer
 	// connections still use).
 	FarmerWSPort          string
 	FarmerInterface       string
 	FarmerOrganization    string
 	FarmerPKI             string
 	FarmerURL             string
-	GrlxRootCA            string
+	ImasRootCA            string
 	CohortRefreshInterval time.Duration
 	JobLogDir             string
 	JobLogTTL             time.Duration
@@ -81,7 +81,7 @@ var (
 	SproutPKI             string
 	SproutRootCA          string
 
-	// SproutFleetSigningJWKS is where a sprout pins the grlx-fleet-signing
+	// SproutFleetSigningJWKS is where a sprout pins the imas-fleet-signing
 	// public key set it received at enrollment (POST /v1/enroll's
 	// fleet_signing_jwks, design doc §2.5) — next to SproutRootCA, with
 	// the same write-once lifecycle (pki.PinFleetSigningKeys). The
@@ -104,12 +104,12 @@ var (
 	// public key stays valid after a sprout-initiated rotation
 	// (internal/pki/boxkeys.go), so payloads already in flight when a
 	// rotation happens still decrypt correctly. See
-	// docs/design/grlx-payload-encryption-design.md's "Key rotation".
+	// docs/design/imas-payload-encryption-design.md's "Key rotation".
 	BoxKeyGraceDuration time.Duration
 
 	// SproutBusURLs are the externally-reachable wss:// addresses (fronted
 	// by Envoy's jwt_authn-gated route — see
-	// docs/design/grlx-envoy-enrollment-design.md) an enrolling sprout is
+	// docs/design/imas-envoy-enrollment-design.md) an enrolling sprout is
 	// told to connect to, returned as nats_urls in the enrollment response
 	// (cloudxp-machine-manager-api-design.md §3.2). Comma-separated in
 	// config/env; empty by default, in which case the enrollment handler
@@ -147,11 +147,11 @@ var (
 	S3JobBucket string
 )
 
-// Binary represents the type of grlx binary being configured.
+// Binary represents the type of imas binary being configured.
 type Binary string
 
 const (
-	BinaryGrlx   Binary = "grlx"
+	BinaryImas   Binary = "imas"
 	BinaryFarmer Binary = "farmer"
 	BinarySprout Binary = "sprout"
 )
@@ -160,13 +160,13 @@ func LoadConfig(binary string) {
 	configLoaded.Do(func() {
 		jety.SetConfigType("yaml")
 		switch binary {
-		case "grlx":
+		case "imas":
 			dirname, err := os.UserHomeDir()
 			if err != nil {
 				log.Fatal(err)
 			}
-			cfgPath := filepath.Join(dirname, ".config/grlx/")
-			jety.SetConfigFile(filepath.Join(cfgPath, "grlx"))
+			cfgPath := filepath.Join(dirname, ".config/imas/")
+			jety.SetConfigFile(filepath.Join(cfgPath, "imas"))
 		case "farmer":
 			jety.SetConfigFile(filepath.Join(systemConfigRoot, "farmer"))
 		case "sprout":
@@ -177,16 +177,16 @@ func LoadConfig(binary string) {
 		if errors.Is(err, jety.ErrConfigFileNotFound) || errors.Is(err, jety.ErrConfigFileEmpty) {
 			log.Println("Config file not found, will create default config")
 			switch binary {
-			case "grlx":
+			case "imas":
 				dirname, errHomeDir := os.UserHomeDir()
 				if errHomeDir != nil {
 					log.Fatal(errHomeDir)
 				}
-				cfgPath := filepath.Join(dirname, ".config/grlx/")
+				cfgPath := filepath.Join(dirname, ".config/imas/")
 				if mkErr := os.MkdirAll(cfgPath, 0o755); mkErr != nil {
 					log.Fatal(mkErr)
 				}
-				cfgFile := filepath.Join(cfgPath, "grlx")
+				cfgFile := filepath.Join(cfgPath, "imas")
 				_, err = os.Create(cfgFile)
 				if err != nil {
 					log.Fatal(err)
@@ -215,15 +215,15 @@ func LoadConfig(binary string) {
 			panic(fmt.Errorf("fatal error config file: %w", err))
 		}
 		jety.SetDefault("loglevel", "info")
-		jety.SetDefault("cachedir", "/var/cache/grlx/sprout/files/provided")
+		jety.SetDefault("cachedir", "/var/cache/imas/sprout/files/provided")
 		jety.SetDefault("configroot", systemConfigRoot+"/")
-		jety.SetDefault("recipedir", filepath.Join("/", "srv", "grlx", "recipes", "prod"))
+		jety.SetDefault("recipedir", filepath.Join("/", "srv", "imas", "recipes", "prod"))
 		jety.SetDefault("farmerinterface", "localhost")
 		jety.SetDefault("farmerapiport", "5405")
 		jety.SetDefault("farmerbusport", "5406")
 		jety.SetDefault("farmerwsport", "5407")
 		switch binary {
-		case "grlx":
+		case "imas":
 			dirname, err := os.UserHomeDir()
 			if err != nil {
 				log.Fatal(err)
@@ -232,8 +232,8 @@ func LoadConfig(binary string) {
 			if configDir == "" {
 				configDir = filepath.Join(dirname, ".config")
 			}
-			certPath := filepath.Join(configDir, "grlx/tls-rootca.pem")
-			jety.Set("grlxrootca", certPath)
+			certPath := filepath.Join(configDir, "imas/tls-rootca.pem")
+			jety.Set("imasrootca", certPath)
 		case "farmer":
 			jety.SetDefault("apiwritetimeout", 120*time.Second)
 			jety.SetDefault("apireadtimeout", 120*time.Second)
@@ -242,19 +242,19 @@ func LoadConfig(binary string) {
 			jety.SetDefault("certfile", filepath.Join(systemConfigRoot, "pki/farmer/tls-cert.pem"))
 			jety.SetDefault("farmerpki", filepath.Join(systemConfigRoot, "pki/farmer")+"/")
 			jety.SetDefault("keyfile", filepath.Join(systemConfigRoot, "pki/farmer/tls-key.pem"))
-			jety.SetDefault("auditlogdir", "/var/log/grlx/audit")
+			jety.SetDefault("auditlogdir", "/var/log/imas/audit")
 			jety.SetDefault("auditlevel", "write")
-			jety.SetDefault("joblogdir", "/var/cache/grlx/farmer/jobs")
+			jety.SetDefault("joblogdir", "/var/cache/imas/farmer/jobs")
 			jety.SetDefault("joblogttl", 30*24*time.Hour) // 30 days default
 			jety.SetDefault("cohortrefreshinterval", 5*time.Minute)
-			jety.SetDefault("propsdir", "/var/cache/grlx/farmer/props")
+			jety.SetDefault("propsdir", "/var/cache/imas/farmer/props")
 			jety.SetDefault("nkeyfarmerpubfile", filepath.Join(systemConfigRoot, "pki/farmer/farmer.nkey.pub"))
 			jety.SetDefault("nkeyfarmerprivfile", filepath.Join(systemConfigRoot, "pki/farmer/farmer.nkey"))
 			jety.SetDefault("rootca", filepath.Join(systemConfigRoot, "pki/farmer/tls-rootca.pem"))
 			jety.SetDefault("rootcapriv", filepath.Join(systemConfigRoot, "pki/farmer/tls-rootca-key.pem"))
-			jety.SetDefault("farmerorganization", "grlx farmer")
+			jety.SetDefault("farmerorganization", "imas farmer")
 			jety.SetDefault("gatewayjwtttl", 24*time.Hour)
-			jety.SetDefault("gatewaytransitkeyname", "grlx-gateway-jwt")
+			jety.SetDefault("gatewaytransitkeyname", "imas-gateway-jwt")
 			jety.SetDefault("boxkeygraceduration", 24*time.Hour)
 			jety.SetDefault("s3usessl", true)
 			JobLogDir = jety.GetString("joblogdir")
@@ -267,42 +267,42 @@ func LoadConfig(binary string) {
 			// they're read from the environment when the config file doesn't
 			// set them, rather than given a default value.
 			if jety.GetString("pxcdsn") == "" {
-				if v, found := os.LookupEnv("GRLX_PXC_DSN"); found {
+				if v, found := os.LookupEnv("IMAS_PXC_DSN"); found {
 					jety.Set("pxcdsn", v)
 				}
 			}
 			if jety.GetString("valkeyaddrs") == "" {
-				if v, found := os.LookupEnv("GRLX_VALKEY_ADDRS"); found {
+				if v, found := os.LookupEnv("IMAS_VALKEY_ADDRS"); found {
 					jety.Set("valkeyaddrs", v)
 				}
 			}
 			if jety.GetString("s3endpoint") == "" {
-				if v, found := os.LookupEnv("GRLX_S3_ENDPOINT"); found {
+				if v, found := os.LookupEnv("IMAS_S3_ENDPOINT"); found {
 					jety.Set("s3endpoint", v)
 				}
 			}
 			if jety.GetString("s3accesskeyid") == "" {
-				if v, found := os.LookupEnv("GRLX_S3_ACCESS_KEY_ID"); found {
+				if v, found := os.LookupEnv("IMAS_S3_ACCESS_KEY_ID"); found {
 					jety.Set("s3accesskeyid", v)
 				}
 			}
 			if jety.GetString("s3secretaccesskey") == "" {
-				if v, found := os.LookupEnv("GRLX_S3_SECRET_ACCESS_KEY"); found {
+				if v, found := os.LookupEnv("IMAS_S3_SECRET_ACCESS_KEY"); found {
 					jety.Set("s3secretaccesskey", v)
 				}
 			}
 			if jety.GetString("s3bucket") == "" {
-				if v, found := os.LookupEnv("GRLX_S3_BUCKET"); found {
+				if v, found := os.LookupEnv("IMAS_S3_BUCKET"); found {
 					jety.Set("s3bucket", v)
 				}
 			}
 			if jety.GetString("s3jobbucket") == "" {
-				if v, found := os.LookupEnv("GRLX_S3_JOB_BUCKET"); found {
+				if v, found := os.LookupEnv("IMAS_S3_JOB_BUCKET"); found {
 					jety.Set("s3jobbucket", v)
 				}
 			}
 			if len(jety.GetStringSlice("sproutbusurls")) == 0 {
-				if v, found := os.LookupEnv("GRLX_SPROUT_BUS_URLS"); found {
+				if v, found := os.LookupEnv("IMAS_SPROUT_BUS_URLS"); found {
 					urls := []string{}
 					for _, u := range strings.Split(v, ",") {
 						if u != "" {
@@ -353,7 +353,7 @@ func LoadConfig(binary string) {
 				}
 
 			}
-			hosts := map[string]bool{"localhost": true, "127.0.0.1": true, "farmer": true, "grlx": true}
+			hosts := map[string]bool{"localhost": true, "127.0.0.1": true, "farmer": true, "imas": true}
 			fi := jety.GetString("farmerinterface")
 			if _, ok := hosts[fi]; fi != "" && !ok {
 				hosts[fi] = true
@@ -371,10 +371,10 @@ func LoadConfig(binary string) {
 			jety.SetDefault("sproutrootca", filepath.Join(systemConfigRoot, "pki/sprout/tls-rootca.pem"))
 			jety.SetDefault("sproutfleetsigningjwks", filepath.Join(systemConfigRoot, "pki/sprout/fleet-signing-jwks.json"))
 			jety.SetDefault("nkeysproutpubfile", filepath.Join(systemConfigRoot, "pki/sprout/sprout.nkey.pub"))
-			jety.SetDefault("joblogdir", "/var/cache/grlx/sprout/jobs")
+			jety.SetDefault("joblogdir", "/var/cache/imas/sprout/jobs")
 			jety.SetDefault("joblogttl", 30*24*time.Hour) // 30 days default
 			jety.SetDefault("nkeysproutprivfile", filepath.Join(systemConfigRoot, "pki/sprout/sprout.nkey"))
-			jety.SetDefault("cachedir", "/var/cache/grlx/sprout/files/provided")
+			jety.SetDefault("cachedir", "/var/cache/imas/sprout/files/provided")
 			jety.SetDefault("rootca_retry_delay", 5*time.Second)
 			jety.SetDefault("nkey_retry_delay", 5*time.Second)
 
@@ -420,7 +420,7 @@ func LoadConfig(binary string) {
 	FarmerInterface = jety.GetString("farmerinterface")
 	FarmerPKI = jety.GetString("farmerpki")
 	FarmerURL = "https://" + jety.GetString("farmerinterface") + ":" + jety.GetString("farmerapiport")
-	GrlxRootCA = jety.GetString("grlxrootca")
+	ImasRootCA = jety.GetString("imasrootca")
 	KeyFile = jety.GetString("keyfile")
 	NKeyFarmerPrivFile = jety.GetString("nkeyfarmerprivfile")
 	NKeyFarmerPubFile = jety.GetString("nkeyfarmerpubfile")
@@ -438,7 +438,7 @@ func LoadConfig(binary string) {
 	SproutFleetSigningJWKS = jety.GetString("sproutfleetsigningjwks")
 	RecipeDir = jety.GetString("recipedir")
 	if RecipeDir == "" {
-		RecipeDir = filepath.Join("/", "srv", "grlx", "recipes", "prod")
+		RecipeDir = filepath.Join("/", "srv", "imas", "recipes", "prod")
 	}
 	PXCDSN = jety.GetString("pxcdsn")
 	ValkeyAddrs = jety.GetString("valkeyaddrs")

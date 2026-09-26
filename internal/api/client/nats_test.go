@@ -125,7 +125,7 @@ func TestNatsRequest_Success(t *testing.T) {
 	defer cleanup()
 
 	want := map[string]string{"tag": "v2.0.0"}
-	mockHandler(t, NatsConn, "grlx.api.version", want)
+	mockHandler(t, NatsConn, "imas.api.version", want)
 
 	result, err := NatsRequest("version", nil)
 	if err != nil {
@@ -145,7 +145,7 @@ func TestNatsRequest_ErrorResponse(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.fail", "something went wrong")
+	mockErrorHandler(t, NatsConn, "imas.api.fail", "something went wrong")
 
 	_, err := NatsRequest("fail", nil)
 	if err == nil {
@@ -161,7 +161,7 @@ func TestNatsRequest_WithParams(t *testing.T) {
 	defer cleanup()
 
 	// Subscribe and verify params are received correctly
-	sub, err := NatsConn.Subscribe("grlx.api.echo", func(msg *nats.Msg) {
+	sub, err := NatsConn.Subscribe("imas.api.echo", func(msg *nats.Msg) {
 		resp := natsResponse{Result: msg.Data}
 		payload, _ := json.Marshal(resp)
 		if err := msg.Respond(payload); err != nil {
@@ -209,7 +209,7 @@ func TestNatsRequest_InvalidResponse(t *testing.T) {
 	defer cleanup()
 
 	// Reply with invalid JSON
-	sub, err := NatsConn.Subscribe("grlx.api.badjson", func(msg *nats.Msg) {
+	sub, err := NatsConn.Subscribe("imas.api.badjson", func(msg *nats.Msg) {
 		if err := msg.Respond([]byte("not json")); err != nil {
 			t.Errorf("mock respond: %v", err)
 		}

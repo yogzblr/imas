@@ -1,6 +1,6 @@
 // Package openbao implements the sdb.SecretProvider for OpenBao and
 // customer-managed HashiCorp Vault, authenticating via a customer-supplied
-// client certificate (cert auth) rather than any credential grlx controls.
+// client certificate (cert auth) rather than any credential imas controls.
 //
 // The official OpenBao/Vault Go client (github.com/openbao/openbao/api,
 // github.com/hashicorp/vault/api) is MPL-2.0 licensed, which conflicts with
@@ -23,8 +23,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/ingredients/sdb"
-	"github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/ingredients/sdb"
+	"github.com/yogzblr/imas/internal/log"
 )
 
 const backendName = "openbao"
@@ -32,12 +32,12 @@ const backendName = "openbao"
 // Environment variables configuring the default, self-registered
 // provider instance. All but the address and cert/key pair are optional.
 const (
-	EnvAddr       = "GRLX_SDB_OPENBAO_ADDR"
-	EnvClientCert = "GRLX_SDB_OPENBAO_CLIENT_CERT"
-	EnvClientKey  = "GRLX_SDB_OPENBAO_CLIENT_KEY"
-	EnvCACert     = "GRLX_SDB_OPENBAO_CACERT"
-	EnvAuthMount  = "GRLX_SDB_OPENBAO_AUTH_MOUNT" // default "cert"
-	EnvAuthRole   = "GRLX_SDB_OPENBAO_ROLE"       // optional cert auth role name
+	EnvAddr       = "IMAS_SDB_OPENBAO_ADDR"
+	EnvClientCert = "IMAS_SDB_OPENBAO_CLIENT_CERT"
+	EnvClientKey  = "IMAS_SDB_OPENBAO_CLIENT_KEY"
+	EnvCACert     = "IMAS_SDB_OPENBAO_CACERT"
+	EnvAuthMount  = "IMAS_SDB_OPENBAO_AUTH_MOUNT" // default "cert"
+	EnvAuthRole   = "IMAS_SDB_OPENBAO_ROLE"       // optional cert auth role name
 )
 
 var (

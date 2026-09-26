@@ -7,7 +7,7 @@ import (
 	"github.com/valkey-io/valkey-go"
 	"golang.org/x/time/rate"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 // enrollmentKeyIssuanceRate/Burst bound how often a single tenant (see
@@ -142,10 +142,10 @@ func NewRouter() *http.ServeMux {
 
 	// Fleet update dispatch (§1.8, fleet_update_dispatch.go) is only
 	// registered with the feature flag on, which it is not by default:
-	// sprout has no working signed self-update path yet (gogrlx/grlx#286).
+	// sprout has no working signed self-update path yet (yogzblr/imas#286).
 	// With the flag off, neither route exists.
 	if fleetUpdateDispatchEnabled {
-		log.Warnf("saasapi: fleet update dispatch is ENABLED, but sprout self-update is still disabled upstream (gogrlx/grlx#286)")
+		log.Warnf("saasapi: fleet update dispatch is ENABLED, but sprout self-update is still disabled upstream (yogzblr/imas#286)")
 		routeRateLimited(mux, "POST /v1/tenants/{tenant_id}/sprouts/updates", CreateFleetUpdateBatch,
 			"CreateFleetUpdateBatch", fleetUpdateLimiter)
 		route(mux, "GET /v1/tenants/{tenant_id}/sprouts/updates/{batch_id}", GetFleetUpdateBatch, "GetFleetUpdateBatch")

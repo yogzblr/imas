@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/log"
 )
 
 // DefaultCertWatchInterval is how often a CertWatcher re-stats its cert and
@@ -18,7 +18,7 @@ const DefaultCertWatchInterval = 30 * time.Second
 // CertWatcher hot-reloads a client certificate/key pair from disk so that a
 // rotated credential is picked up without a process restart. Rotation of
 // the underlying files (e.g. a customer's Vault client cert) is entirely
-// out of grlx's control; CertWatcher only makes picking up the new files
+// out of imas's control; CertWatcher only makes picking up the new files
 // painless once they land.
 //
 // Use GetClientCertificate as a tls.Config.GetClientCertificate callback.

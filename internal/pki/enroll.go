@@ -1,6 +1,6 @@
 package pki
 
-// Sprout enrollment: docs/design/grlx-envoy-enrollment-design.md and
+// Sprout enrollment: docs/design/imas-envoy-enrollment-design.md and
 // cloudxp-machine-manager-api-design.md §3 ("the one moment in the whole
 // system where a caller has no credential yet").
 //
@@ -29,9 +29,9 @@ import (
 
 	"github.com/nats-io/nkeys"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/gatewayjwt"
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/gatewayjwt"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 // ErrEnrollmentFailed is the single error every enrollment failure mode
@@ -262,7 +262,7 @@ func Enroll(ctx context.Context, joinToken, nkeyPub, hostname, sproutPub string)
 		return nil, ErrEnrollmentFailed
 	}
 	// Bootstraps the sprout's half of the payload-encryption keypair
-	// (docs/design/grlx-payload-encryption-design.md "Bootstrap"): the
+	// (docs/design/imas-payload-encryption-design.md "Bootstrap"): the
 	// sprout generated this locally and never sends its private half.
 	//
 	// Scoped to row.TenantID (the enrollment key's real tenant), not the

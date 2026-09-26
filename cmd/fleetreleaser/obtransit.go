@@ -1,6 +1,6 @@
 package main
 
-// The sign-capable OpenBao Transit client for grlx-fleet-signing — the
+// The sign-capable OpenBao Transit client for imas-fleet-signing — the
 // only one in the repo. A copy of internal/gatewayjwt/obtransit.go's
 // hand-rolled HTTP client pattern (raw net/http, static-token or
 // Kubernetes auth, token caching with a 20% safety margin): the official
@@ -12,7 +12,7 @@ package main
 // pattern; nothing importable carries a Transit sign call for this key.
 // That is hygiene, not the security boundary: the boundary is that only
 // this binary's OpenBao identity has a policy granting
-// transit/sign/grlx-fleet-signing (deploy/fleetreleaser/).
+// transit/sign/imas-fleet-signing (deploy/fleetreleaser/).
 //
 // FLAG FOR SECURITY REVIEW.
 
@@ -33,25 +33,25 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/fleetsign"
+	"github.com/yogzblr/imas/internal/fleetsign"
 )
 
 // Environment variables for fleetreleaser's own OpenBao identity. A
-// distinct prefix from farmer's GRLX_GATEWAY_OPENBAO_* and farmer's and
-// saasapi's GRLX_FLEETSIGN_OPENBAO_*, so the signing token can't end up in
+// distinct prefix from farmer's IMAS_GATEWAY_OPENBAO_* and farmer's and
+// saasapi's IMAS_FLEETSIGN_OPENBAO_*, so the signing token can't end up in
 // either of their env blocks by copy-paste.
 const (
-	EnvOpenBaoAddr         = "GRLX_FLEETRELEASER_OPENBAO_ADDR"
-	EnvOpenBaoTransitMount = "GRLX_FLEETRELEASER_OPENBAO_TRANSIT_MOUNT" // default "transit"
-	EnvOpenBaoCACert       = "GRLX_FLEETRELEASER_OPENBAO_CACERT"
-	EnvOpenBaoAuthMethod   = "GRLX_FLEETRELEASER_OPENBAO_AUTH_METHOD" // "token" (default) or "kubernetes"
-	EnvOpenBaoToken        = "GRLX_FLEETRELEASER_OPENBAO_TOKEN"
-	EnvOpenBaoK8sRole      = "GRLX_FLEETRELEASER_OPENBAO_K8S_ROLE"
-	EnvOpenBaoK8sMount     = "GRLX_FLEETRELEASER_OPENBAO_K8S_MOUNT"    // default "kubernetes"
-	EnvOpenBaoK8sJWTPath   = "GRLX_FLEETRELEASER_OPENBAO_K8S_JWT_PATH" // default defaultK8sJWTPath
+	EnvOpenBaoAddr         = "IMAS_FLEETRELEASER_OPENBAO_ADDR"
+	EnvOpenBaoTransitMount = "IMAS_FLEETRELEASER_OPENBAO_TRANSIT_MOUNT" // default "transit"
+	EnvOpenBaoCACert       = "IMAS_FLEETRELEASER_OPENBAO_CACERT"
+	EnvOpenBaoAuthMethod   = "IMAS_FLEETRELEASER_OPENBAO_AUTH_METHOD" // "token" (default) or "kubernetes"
+	EnvOpenBaoToken        = "IMAS_FLEETRELEASER_OPENBAO_TOKEN"
+	EnvOpenBaoK8sRole      = "IMAS_FLEETRELEASER_OPENBAO_K8S_ROLE"
+	EnvOpenBaoK8sMount     = "IMAS_FLEETRELEASER_OPENBAO_K8S_MOUNT"    // default "kubernetes"
+	EnvOpenBaoK8sJWTPath   = "IMAS_FLEETRELEASER_OPENBAO_K8S_JWT_PATH" // default defaultK8sJWTPath
 
 	// EnvTransitKeyName overrides fleetsign.DefaultTransitKeyName.
-	EnvTransitKeyName = "GRLX_FLEETRELEASER_TRANSIT_KEY"
+	EnvTransitKeyName = "IMAS_FLEETRELEASER_TRANSIT_KEY"
 )
 
 const (

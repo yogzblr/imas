@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 // setupTLSConfigDir sets config globals to use a temp directory for TLS
@@ -36,7 +36,7 @@ func setupTLSConfigDir(t *testing.T) string {
 	config.CertFile = filepath.Join(dir, "cert.pem")
 	config.KeyFile = filepath.Join(dir, "key.pem")
 	config.CertHosts = []string{"localhost", "127.0.0.1"}
-	config.FarmerOrganization = "grlx-test"
+	config.FarmerOrganization = "imas-test"
 	config.CertificateValidTime = 24 * time.Hour
 	rememberLease("")
 	return dir
@@ -61,16 +61,16 @@ func setupNKeyConfigDir(t *testing.T) string {
 //	bao server -dev -dev-root-token-id=root
 //
 // and the tests will find it at http://127.0.0.1:8200 by default; point
-// them elsewhere with GRLX_CERTS_TEST_OPENBAO_ADDR /
-// GRLX_CERTS_TEST_OPENBAO_TOKEN. Each test mounts its own throwaway PKI
+// them elsewhere with IMAS_CERTS_TEST_OPENBAO_ADDR /
+// IMAS_CERTS_TEST_OPENBAO_TOKEN. Each test mounts its own throwaway PKI
 // backend (unmounted on cleanup) so tests don't interfere with each
 // other or require any pre-existing server configuration. When no dev
 // server is reachable, these tests skip rather than fail, so `go test
 // ./...` still passes in environments without OpenBao available.
 
 const (
-	testOpenBaoAddrEnv  = "GRLX_CERTS_TEST_OPENBAO_ADDR"
-	testOpenBaoTokenEnv = "GRLX_CERTS_TEST_OPENBAO_TOKEN"
+	testOpenBaoAddrEnv  = "IMAS_CERTS_TEST_OPENBAO_ADDR"
+	testOpenBaoTokenEnv = "IMAS_CERTS_TEST_OPENBAO_TOKEN"
 )
 
 func obAdminRequest(t *testing.T, addr, token, method, path string, body any) {
@@ -103,7 +103,7 @@ func obAdminRequest(t *testing.T, addr, token, method, path string, body any) {
 // resolveTestOpenBaoServer resolves the local OpenBao dev server address
 // and root token to use for integration tests (defaulting to
 // http://127.0.0.1:8200 / "root", overridable via
-// GRLX_CERTS_TEST_OPENBAO_ADDR / GRLX_CERTS_TEST_OPENBAO_TOKEN), and skips
+// IMAS_CERTS_TEST_OPENBAO_ADDR / IMAS_CERTS_TEST_OPENBAO_TOKEN), and skips
 // the calling test if no dev server is reachable there.
 func resolveTestOpenBaoServer(t *testing.T) (addr, token string) {
 	t.Helper()
@@ -128,14 +128,14 @@ func resolveTestOpenBaoServer(t *testing.T) (addr, token string) {
 
 // setupOpenBaoPKI mounts a fresh PKI secrets engine and a permissive test
 // role on a local OpenBao dev server, points the certs package at it via
-// the GRLX_CERTS_OPENBAO_* environment variables, and skips the test if
+// the IMAS_CERTS_OPENBAO_* environment variables, and skips the test if
 // no dev server is reachable.
 func setupOpenBaoPKI(t *testing.T) {
 	t.Helper()
 	addr, token := resolveTestOpenBaoServer(t)
 
-	mount := fmt.Sprintf("pki-grlx-test-%d", time.Now().UnixNano())
-	role := "grlx-test"
+	mount := fmt.Sprintf("pki-imas-test-%d", time.Now().UnixNano())
+	role := "imas-test"
 
 	obAdminRequest(t, addr, token, http.MethodPost, "/v1/sys/mounts/"+mount, map[string]string{"type": "pki"})
 	t.Cleanup(func() {
@@ -151,7 +151,7 @@ func setupOpenBaoPKI(t *testing.T) {
 	obAdminRequest(t, addr, token, http.MethodPost, "/v1/sys/mounts/"+mount+"/tune",
 		map[string]string{"max_lease_ttl": "720h"})
 	obAdminRequest(t, addr, token, http.MethodPost, "/v1/"+mount+"/root/generate/internal",
-		map[string]string{"common_name": "grlx-test-root", "ttl": "720h"})
+		map[string]string{"common_name": "imas-test-root", "ttl": "720h"})
 	// Permissive role: these tests exercise the certs package's OpenBao
 	// client, not OpenBao's own domain/IP allowlisting policy.
 	obAdminRequest(t, addr, token, http.MethodPost, "/v1/"+mount+"/roles/"+role, map[string]any{
@@ -264,11 +264,11 @@ func writeFixtureK8sJWT(t *testing.T, namespace, name, uid string) string {
 // TokenReview server (see newFakeK8sTokenReviewServer), and creates a
 // role bound to a fixture service account. It returns the auth mount and
 // role names and a path to a fixture SA JWT for that service account,
-// ready to plug into GRLX_CERTS_OPENBAO_K8S_*.
+// ready to plug into IMAS_CERTS_OPENBAO_K8S_*.
 func setupOpenBaoKubernetesAuth(t *testing.T, addr, token string) (mount, role, jwtPath string) {
 	t.Helper()
 	const namespace = "default"
-	const saName = "grlx"
+	const saName = "imas"
 	const saUID = "11111111-1111-1111-1111-111111111111"
 
 	reviewSrv := newFakeK8sTokenReviewServer(t, namespace, saName, saUID)
@@ -281,17 +281,17 @@ func setupOpenBaoKubernetesAuth(t *testing.T, addr, token string) (mount, role, 
 	// to satisfy that config-time requirement.
 	fakeCACertPEM := generateFixtureCAPEM(t)
 
-	mount = fmt.Sprintf("kubernetes-grlx-test-%d", time.Now().UnixNano())
-	role = "grlx-test"
+	mount = fmt.Sprintf("kubernetes-imas-test-%d", time.Now().UnixNano())
+	role = "imas-test"
 
-	// setupOpenBaoPKI mounts PKI backends at "pki-grlx-test-<nanotime>";
+	// setupOpenBaoPKI mounts PKI backends at "pki-imas-test-<nanotime>";
 	// grant this login's token access to that whole family of test mounts
 	// (rather than "default", which has no PKI access at all) so the
 	// resulting token can actually complete a certificate issuance, not
 	// just a login.
-	obAdminRequest(t, addr, token, http.MethodPut, "/v1/sys/policies/acl/grlx-test-pki-access", map[string]string{
+	obAdminRequest(t, addr, token, http.MethodPut, "/v1/sys/policies/acl/imas-test-pki-access", map[string]string{
 		"policy": `
-path "pki-grlx-test-*" {
+path "pki-imas-test-*" {
   capabilities = ["create", "read", "update", "list"]
 }
 path "sys/leases/renew" {
@@ -319,7 +319,7 @@ path "sys/leases/renew" {
 	obAdminRequest(t, addr, token, http.MethodPost, "/v1/auth/"+mount+"/role/"+role, map[string]any{
 		"bound_service_account_names":      []string{saName},
 		"bound_service_account_namespaces": []string{namespace},
-		"policies":                         []string{"grlx-test-pki-access"},
+		"policies":                         []string{"imas-test-pki-access"},
 		"ttl":                              "1h",
 	})
 
@@ -368,7 +368,7 @@ func TestGenCertKubernetesAuthOpenBao(t *testing.T) {
 // TokenReview call, so no fake Kubernetes API is needed for this one.
 func TestObClientKubernetesAuthInvalidRoleOpenBao(t *testing.T) {
 	addr, token := resolveTestOpenBaoServer(t)
-	mount := fmt.Sprintf("kubernetes-grlx-test-%d", time.Now().UnixNano())
+	mount := fmt.Sprintf("kubernetes-imas-test-%d", time.Now().UnixNano())
 	obAdminRequest(t, addr, token, http.MethodPost, "/v1/sys/auth/"+mount, map[string]string{"type": "kubernetes"})
 	t.Cleanup(func() {
 		req, err := http.NewRequest(http.MethodDelete, addr+"/v1/sys/auth/"+mount, nil)
@@ -380,7 +380,7 @@ func TestObClientKubernetesAuthInvalidRoleOpenBao(t *testing.T) {
 			resp.Body.Close()
 		}
 	})
-	jwtPath := writeFixtureK8sJWT(t, "default", "grlx", "11111111-1111-1111-1111-111111111111")
+	jwtPath := writeFixtureK8sJWT(t, "default", "imas", "11111111-1111-1111-1111-111111111111")
 
 	t.Setenv(EnvOpenBaoAddr, addr)
 	t.Setenv(EnvOpenBaoAuthMethod, AuthMethodKubernetes)
@@ -408,7 +408,7 @@ func TestObClientKubernetesAuthInvalidRoleOpenBao(t *testing.T) {
 // 127.0.0.1:1, so the connection is refused immediately).
 func TestObClientKubernetesAuthUnreachableK8sAPIOpenBao(t *testing.T) {
 	addr, token := resolveTestOpenBaoServer(t)
-	mount := fmt.Sprintf("kubernetes-grlx-test-%d", time.Now().UnixNano())
+	mount := fmt.Sprintf("kubernetes-imas-test-%d", time.Now().UnixNano())
 	obAdminRequest(t, addr, token, http.MethodPost, "/v1/sys/auth/"+mount, map[string]string{"type": "kubernetes"})
 	t.Cleanup(func() {
 		req, err := http.NewRequest(http.MethodDelete, addr+"/v1/sys/auth/"+mount, nil)
@@ -426,18 +426,18 @@ func TestObClientKubernetesAuthUnreachableK8sAPIOpenBao(t *testing.T) {
 		"disable_local_ca_jwt": true,
 		"kubernetes_ca_cert":   string(fakeCACertPEM),
 	})
-	obAdminRequest(t, addr, token, http.MethodPost, "/v1/auth/"+mount+"/role/grlx-test", map[string]any{
-		"bound_service_account_names":      []string{"grlx"},
+	obAdminRequest(t, addr, token, http.MethodPost, "/v1/auth/"+mount+"/role/imas-test", map[string]any{
+		"bound_service_account_names":      []string{"imas"},
 		"bound_service_account_namespaces": []string{"default"},
 		"policies":                         []string{"default"},
 		"ttl":                              "1h",
 	})
-	jwtPath := writeFixtureK8sJWT(t, "default", "grlx", "11111111-1111-1111-1111-111111111111")
+	jwtPath := writeFixtureK8sJWT(t, "default", "imas", "11111111-1111-1111-1111-111111111111")
 
 	t.Setenv(EnvOpenBaoAddr, addr)
 	t.Setenv(EnvOpenBaoAuthMethod, AuthMethodKubernetes)
 	t.Setenv(EnvOpenBaoK8sMount, mount)
-	t.Setenv(EnvOpenBaoK8sRole, "grlx-test")
+	t.Setenv(EnvOpenBaoK8sRole, "imas-test")
 	t.Setenv(EnvOpenBaoK8sJWTPath, jwtPath)
 	t.Setenv(EnvOpenBaoRole, "pki-role-unused")
 
@@ -479,7 +479,7 @@ func setupK8sAuthEnv(t *testing.T, addr, jwtPath, role string) {
 }
 
 func TestObClientKubernetesTokenCachedBetweenCalls(t *testing.T) {
-	jwtPath := writeFixtureK8sJWT(t, "default", "grlx", "uid-1")
+	jwtPath := writeFixtureK8sJWT(t, "default", "imas", "uid-1")
 	var loginCalls int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/auth/kubernetes/login", func(w http.ResponseWriter, r *http.Request) {
@@ -516,7 +516,7 @@ func TestObClientKubernetesTokenCachedBetweenCalls(t *testing.T) {
 }
 
 func TestObClientKubernetesTokenReLoginNearExpiry(t *testing.T) {
-	jwtPath := writeFixtureK8sJWT(t, "default", "grlx", "uid-1")
+	jwtPath := writeFixtureK8sJWT(t, "default", "imas", "uid-1")
 	var loginCalls int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/auth/kubernetes/login", func(w http.ResponseWriter, r *http.Request) {
@@ -590,7 +590,7 @@ func TestObClientKubernetesJWTFileEmpty(t *testing.T) {
 }
 
 func TestObClientKubernetesLoginNon200(t *testing.T) {
-	jwtPath := writeFixtureK8sJWT(t, "default", "grlx", "uid-1")
+	jwtPath := writeFixtureK8sJWT(t, "default", "imas", "uid-1")
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/auth/kubernetes/login", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
@@ -611,7 +611,7 @@ func TestObClientKubernetesLoginNon200(t *testing.T) {
 }
 
 func TestObClientKubernetesLoginMissingToken(t *testing.T) {
-	jwtPath := writeFixtureK8sJWT(t, "default", "grlx", "uid-1")
+	jwtPath := writeFixtureK8sJWT(t, "default", "imas", "uid-1")
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/auth/kubernetes/login", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"auth":null}`))
@@ -1047,7 +1047,7 @@ func generateFixtureCAPEM(t *testing.T) []byte {
 	}
 	tmpl := x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{Organization: []string{"grlx-test-fixture"}},
+		Subject:               pkix.Name{Organization: []string{"imas-test-fixture"}},
 		NotBefore:             time.Now().Add(-time.Minute),
 		NotAfter:              time.Now().Add(time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,

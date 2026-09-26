@@ -12,7 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/nats-io/nats.go"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 // mockMsg creates a nats.Msg with the given subject and data.
@@ -109,7 +109,7 @@ func TestSplitSubject(t *testing.T) {
 		input string
 		want  []string
 	}{
-		{"grlx.cook.sprout1.jid123", []string{"grlx", "cook", "sprout1", "jid123"}},
+		{"imas.cook.sprout1.jid123", []string{"imas", "cook", "sprout1", "jid123"}},
 		{"single", []string{"single"}},
 		{"a.b", []string{"a", "b"}},
 	}
@@ -363,7 +363,7 @@ func TestParseCookEvent_ValidMessage(t *testing.T) {
 	h := newTestHub()
 
 	msg := mockMsg(
-		"grlx.cook.sprout-1.jid-001",
+		"imas.cook.sprout-1.jid-001",
 		[]byte(`{
 			"id": "install-nginx",
 			"completionStatus": 2,
@@ -403,7 +403,7 @@ func TestParseCookEvent_ErrorStep(t *testing.T) {
 	// check level is correct. The actual NATS messages have Error as nil
 	// in JSON; the level determination checks step.Error != nil.
 	msg := mockMsg(
-		"grlx.cook.sprout-2.jid-002",
+		"imas.cook.sprout-2.jid-002",
 		[]byte(`{
 			"id": "bad-step",
 			"completionStatus": 3,
@@ -427,7 +427,7 @@ func TestParseCookEvent_InvalidJSON(t *testing.T) {
 	h := newTestHub()
 
 	msg := mockMsg(
-		"grlx.cook.sprout-1.jid-003",
+		"imas.cook.sprout-1.jid-003",
 		[]byte(`not json`),
 	)
 
@@ -447,7 +447,7 @@ func TestParseCookEvent_TooFewSubjectParts(t *testing.T) {
 	h := newTestHub()
 
 	msg := mockMsg(
-		"grlx.cook",
+		"imas.cook",
 		[]byte(`{}`),
 	)
 

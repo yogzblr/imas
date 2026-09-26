@@ -1,7 +1,7 @@
 {
-  "name": "grlx — Configuration Management",
-  "short_name": "grlx",
-  "description": "Web dashboard for grlx fleet configuration management. Monitor sprouts, run recipes, and manage your infrastructure.",
+  "name": "imas — Configuration Management",
+  "short_name": "imas",
+  "description": "Web dashboard for imas fleet configuration management. Monitor sprouts, run recipes, and manage your infrastructure.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#2d6a9f",

@@ -8,7 +8,7 @@ package natsapi
 // FLAG FOR SECURITY REVIEW. Like internal.tenant.*, this is a
 // platform-level control-plane subject in the SYS Account, registered
 // once per farmer process on its SYS listener connection — see
-// tenant_provision.go and docs/design/grlx-internal-api-account.md. Unlike
+// tenant_provision.go and docs/design/imas-internal-api-account.md. Unlike
 // internal.tenant.*, a request here reaches into one tenant's fleet on the
 // SaaS API's say-so, so two checks run before anything executes:
 //
@@ -24,12 +24,12 @@ package natsapi
 //     if the SaaS API's asset -> sprout resolution is wrong.
 //
 // Once both pass, the action goes through the same handleCmdRun/
-// handleCook the tenant-facing grlx.api.cmd.run/cook subjects use, bound
+// handleCook the tenant-facing imas.api.cmd.run/cook subjects use, bound
 // to the verified tenant, so it travels over that tenant's own NATS
 // connection (its own Account) to the sprout — never any other tenant's.
 //
 // self_update (design doc §1.8, §2.5) adds a third check before dispatch:
-// the release's signature must verify against the grlx-fleet-signing
+// the release's signature must verify against the imas-fleet-signing
 // public key farmer reads from OpenBao Transit with its READ-ONLY token
 // (SetFleetKeySource). The SaaS API checked it too, but it can also write
 // saas.fleet_versions, so farmer doesn't take its word for it. A release
@@ -49,13 +49,13 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/controlplane"
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/fleetsign"
-	log "github.com/gogrlx/grlx/v2/internal/log"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/controlplane"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/fleetsign"
+	log "github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // verifySproutInTenant, dispatchCmdRun, dispatchCook and triggerCook are
@@ -69,7 +69,7 @@ var (
 	dispatchSelfUpdate   = sendSelfUpdate
 )
 
-// fleetKeys is the grlx-fleet-signing public key source self_update
+// fleetKeys is the imas-fleet-signing public key source self_update
 // verifies releases against, set once at startup by SetFleetKeySource
 // (cmd/farmer). While it's nil every self_update is refused.
 var fleetKeys fleetsign.KeySetSource
@@ -87,7 +87,7 @@ const auditActionSproutAction = controlplane.SubjectSproutAction
 // EnvSproutActionConcurrency sets how many internal.sprout.action
 // requests one farmer process runs at once (see sproutActionConcurrency).
 // Read once, when RegisterSproutAction is called.
-const EnvSproutActionConcurrency = "GRLX_SPROUT_ACTION_CONCURRENCY"
+const EnvSproutActionConcurrency = "IMAS_SPROUT_ACTION_CONCURRENCY"
 
 // Bounds for EnvSproutActionConcurrency. A cmd.run holds its slot until
 // the sprout answers (up to its timeout), so handling requests serially —
@@ -233,7 +233,7 @@ func runSproutAction(req controlplane.SproutActionRequest) (controlplane.SproutA
 	return runSproutCook(req, reply)
 }
 
-// singleTargetParams builds the grlx.api.cmd.run/cook params for exactly one
+// singleTargetParams builds the imas.api.cmd.run/cook params for exactly one
 // target: the verified sprout. Nothing from the request other than the
 // sanitized action reaches the handler — in particular no "token", so no
 // RBAC identity is borrowed from the payload.
@@ -382,7 +382,7 @@ func runSproutSelfUpdate(req controlplane.SproutActionRequest, reply controlplan
 	src := fleetKeys
 	if src == nil {
 		reply.ErrorCode = controlplane.ErrorInternal
-		return reply, errors.New("self_update refused: no fleet signing key source configured (GRLX_FLEETSIGN_OPENBAO_*)")
+		return reply, errors.New("self_update refused: no fleet signing key source configured (IMAS_FLEETSIGN_OPENBAO_*)")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), selfUpdateVerifyTimeout)
 	defer cancel()

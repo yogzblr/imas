@@ -14,7 +14,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/nats-io/nats.go"
 
-	"github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/log"
 )
 
 // SproutSession manages a single interactive shell session on the sprout side.
@@ -33,7 +33,7 @@ type SproutSession struct {
 	idleResetCh chan struct{}
 }
 
-// HandleShellStart is the NATS handler for grlx.sprouts.<id>.shell.start.
+// HandleShellStart is the NATS handler for imas.sprouts.<id>.shell.start.
 // It spawns a PTY, wires up NATS I/O, and returns session subjects.
 func HandleShellStart(nc *nats.Conn, msg *nats.Msg) {
 	var req StartRequest

@@ -42,7 +42,7 @@ type DoneMessage struct {
 	Error    string `json:"error,omitempty"`
 }
 
-// CLIStartRequest is what the CLI sends to the farmer's grlx.api.shell.start.
+// CLIStartRequest is what the CLI sends to the farmer's imas.api.shell.start.
 type CLIStartRequest struct {
 	SproutID       string `json:"sprout_id"`
 	Cols           int    `json:"cols"`
@@ -53,7 +53,7 @@ type CLIStartRequest struct {
 
 // SubjectPrefix returns the NATS subject prefix for a session.
 func SubjectPrefix(sessionID string) string {
-	return fmt.Sprintf("grlx.shell.%s", sessionID)
+	return fmt.Sprintf("imas.shell.%s", sessionID)
 }
 
 // Subjects returns all NATS subjects for a given session ID.

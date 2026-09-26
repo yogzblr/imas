@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 var (
@@ -21,7 +21,7 @@ var (
 // creation and marking copied files executable.
 //
 // "direction" governs which of source/name is the read side and which is
-// the write side: grlx ingredients execute entirely on the sprout they
+// the write side: imas ingredients execute entirely on the sprout they
 // target, so both push and pull operate on paths on that same local
 // filesystem -- there is no separate controller-side filesystem for this
 // ingredient to reach across, unlike Spot's SSH-based push/pull. "push"

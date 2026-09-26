@@ -4,14 +4,14 @@ package main
 // signing split (FLAG FOR SECURITY REVIEW): against a real OpenBao, with
 // the policy files this repo ships in deploy/fleetreleaser/policies/, a
 // token carrying saasapi's (and farmer's) policy is refused a sign on
-// grlx-fleet-signing *by OpenBao*, when driven through the very same
+// imas-fleet-signing *by OpenBao*, when driven through the very same
 // sign-capable client fleetreleaser itself uses. The Go code never
 // calling sign is not what's being tested; OpenBao saying no is.
 //
 // It needs a running OpenBao (or Vault) it may configure, e.g.
 //
 //	bao server -dev -dev-root-token-id=root &
-//	GRLX_TEST_OPENBAO_ADDR=http://127.0.0.1:8200 GRLX_TEST_OPENBAO_TOKEN=root \
+//	IMAS_TEST_OPENBAO_ADDR=http://127.0.0.1:8200 IMAS_TEST_OPENBAO_TOKEN=root \
 //	  go test ./cmd/fleetreleaser -run TestOpenBaoEnforcesReadOnlyFleetKey -v
 //
 // and is skipped otherwise. It mounts Transit at a fresh, random path and
@@ -35,13 +35,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/fleetsign"
-	"github.com/gogrlx/grlx/v2/internal/saasapi"
+	"github.com/yogzblr/imas/internal/fleetsign"
+	"github.com/yogzblr/imas/internal/saasapi"
 )
 
 const (
-	envTestOpenBaoAddr  = "GRLX_TEST_OPENBAO_ADDR"
-	envTestOpenBaoToken = "GRLX_TEST_OPENBAO_TOKEN"
+	envTestOpenBaoAddr  = "IMAS_TEST_OPENBAO_ADDR"
+	envTestOpenBaoToken = "IMAS_TEST_OPENBAO_TOKEN"
 )
 
 type baoAdmin struct {
@@ -138,8 +138,8 @@ func TestOpenBaoEnforcesReadOnlyFleetKey(t *testing.T) {
 		t.Cleanup(func() { b.call(rootToken, http.MethodDelete, "sys/policies/acl/"+name, nil) })
 		return name
 	}
-	signerPolicy := policy("grlx-fleet-signer.hcl")
-	verifyPolicy := policy("grlx-fleet-verify.hcl")
+	signerPolicy := policy("imas-fleet-signer.hcl")
+	verifyPolicy := policy("imas-fleet-verify.hcl")
 
 	signerToken := b.tokenFor(signerPolicy)
 	// Two separate tokens on the same read-only policy, one per service,

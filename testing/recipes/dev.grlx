@@ -32,7 +32,7 @@ steps:
   configure conky:
     file.managed:
       - name: /home/tai/.config/conky
-      - source: grlx://conky.conf
+      - source: imas://conky.conf
       - user: tai
       - group: tai
       - mode: 644

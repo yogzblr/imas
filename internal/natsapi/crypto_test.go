@@ -17,7 +17,7 @@ import (
 
 	"golang.org/x/crypto/nacl/box"
 
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // mockTenantBoxKVServer serves a fixed, pre-seeded tenant keypair from
@@ -72,7 +72,7 @@ func setupCryptoTest(t *testing.T) *mockTenantBoxKVServer {
 	if err != nil {
 		t.Fatalf("generating mock tenant keypair: %v", err)
 	}
-	srv := &mockTenantBoxKVServer{mount: "secret", path: "grlx/tenant-x25519", token: "test-token", pub: *pub, priv: *priv}
+	srv := &mockTenantBoxKVServer{mount: "secret", path: "imas/tenant-x25519", token: "test-token", pub: *pub, priv: *priv}
 	ts := srv.start(t)
 	t.Cleanup(ts.Close)
 
@@ -150,7 +150,7 @@ func TestPublishEncryptedTo_NoConnection(t *testing.T) {
 	type payload struct {
 		Msg string `json:"msg"`
 	}
-	if err := PublishEncryptedTo(pki.CurrentTenantID(), "web-01", "grlx.sprouts.web-01.test", payload{Msg: "hi"}); err == nil {
+	if err := PublishEncryptedTo(pki.CurrentTenantID(), "web-01", "imas.sprouts.web-01.test", payload{Msg: "hi"}); err == nil {
 		t.Fatal("expected an error when no NATS connection is available")
 	}
 }
@@ -322,7 +322,7 @@ func TestOpenFromSprout_MalformedEnvelopeFails(t *testing.T) {
 // asserted one after the other, and each must only ever decrypt under its
 // own tenant's key: this is the same tenant-scoping bug class PR #28 fixed
 // once for a different call site (see
-// docs/design/grlx-tenant-context-threading.md) — asserting a single
+// docs/design/imas-tenant-context-threading.md) — asserting a single
 // tenant twice would leave a regression back to the process-global
 // tenantID() seam invisible here exactly as it was before that fix.
 func TestOpenFromSprout_TwoTenantsSameSproutID_DecryptConcurrentlyWithoutCrossing(t *testing.T) {

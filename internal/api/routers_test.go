@@ -9,8 +9,8 @@ import (
 
 	"github.com/valkey-io/valkey-go"
 
-	"github.com/gogrlx/grlx/v2/internal/api/handlers"
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/api/handlers"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 // installedValkey stands in for a Valkey client that exists. GET /health

@@ -15,10 +15,10 @@ import (
 	"github.com/nats-io/nats.go"
 	"gorm.io/gorm"
 
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
-	"github.com/gogrlx/grlx/v2/internal/config"
-	ingredtest "github.com/gogrlx/grlx/v2/internal/ingredients/test"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/config"
+	ingredtest "github.com/yogzblr/imas/internal/ingredients/test"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // setupPingTestPKI wires up an in-memory PKI store (see
@@ -90,7 +90,7 @@ func startTestNATSServer(t *testing.T) (*nats.Conn, func()) {
 
 	// HTestPing dispatches through test.FPing using pki.CurrentTenantID()
 	// (the HTTP admin API's documented ceiling — see
-	// docs/design/grlx-tenant-context-threading.md), so tests register the
+	// docs/design/imas-tenant-context-threading.md), so tests register the
 	// farmer-side connection under that same tenant.
 	ingredtest.RegisterFarmerNatsConn(pki.CurrentTenantID(), nc)
 
@@ -235,7 +235,7 @@ func TestHTestPing_SingleSproutSuccess(t *testing.T) {
 	defer cleanup()
 
 	// Mock the sprout responding to ping
-	sub, err := nc.Subscribe("grlx.sprouts.sprout1.test.ping", func(msg *nats.Msg) {
+	sub, err := nc.Subscribe("imas.sprouts.sprout1.test.ping", func(msg *nats.Msg) {
 		pong := apitypes.PingPong{Ping: false, Pong: true}
 		data, _ := json.Marshal(pong)
 		_ = msg.Respond(data)
@@ -282,7 +282,7 @@ func TestHTestPing_MultipleSproutsSuccess(t *testing.T) {
 	// Mock both sprouts responding
 	for _, id := range []string{"sprout-a", "sprout-b"} {
 		sproutID := id
-		sub, err := nc.Subscribe("grlx.sprouts."+sproutID+".test.ping", func(msg *nats.Msg) {
+		sub, err := nc.Subscribe("imas.sprouts."+sproutID+".test.ping", func(msg *nats.Msg) {
 			pong := apitypes.PingPong{Ping: false, Pong: true}
 			data, _ := json.Marshal(pong)
 			_ = msg.Respond(data)
@@ -386,7 +386,7 @@ func TestHTestPing_SproutInvalidResponseJSON(t *testing.T) {
 	defer cleanup()
 
 	// Mock sprout returns invalid JSON
-	sub, err := nc.Subscribe("grlx.sprouts.bad-json-sprout.test.ping", func(msg *nats.Msg) {
+	sub, err := nc.Subscribe("imas.sprouts.bad-json-sprout.test.ping", func(msg *nats.Msg) {
 		_ = msg.Respond([]byte("not valid json"))
 	})
 	if err != nil {
@@ -417,7 +417,7 @@ func TestHTestPing_NilAction(t *testing.T) {
 	nc, cleanup := startTestNATSServer(t)
 	defer cleanup()
 
-	sub, err := nc.Subscribe("grlx.sprouts.sprout-nil.test.ping", func(msg *nats.Msg) {
+	sub, err := nc.Subscribe("imas.sprouts.sprout-nil.test.ping", func(msg *nats.Msg) {
 		pong := apitypes.PingPong{Ping: false, Pong: true}
 		data, _ := json.Marshal(pong)
 		_ = msg.Respond(data)

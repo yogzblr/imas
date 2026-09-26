@@ -23,8 +23,8 @@ func TestUIHandler_ServesIndexHTML(t *testing.T) {
 		t.Fatalf("expected text/html content type, got %q", ct)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "grlx") {
-		t.Fatal("expected index.html to contain 'grlx'")
+	if !strings.Contains(body, "imas") {
+		t.Fatal("expected index.html to contain 'imas'")
 	}
 }
 
@@ -42,7 +42,7 @@ func TestUIHandler_SPAFallback(t *testing.T) {
 		t.Fatalf("expected 200 for SPA fallback, got %d", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "grlx") {
+	if !strings.Contains(body, "imas") {
 		t.Fatal("expected SPA fallback to serve index.html content")
 	}
 	if req.URL.Path != fallbackPath {

@@ -88,11 +88,11 @@ func TestIdgenHasNoLoggingOrSecretBearingErrors(t *testing.T) {
 	}
 
 	forbiddenImports := map[string]bool{
-		"github.com/gogrlx/grlx/v2/internal/log": true,
-		"log":                                    true,
-		"log/slog":                               true,
-		"github.com/charmbracelet/log":           true,
-		"os":                                     true,
+		"github.com/yogzblr/imas/internal/log": true,
+		"log":                                  true,
+		"log/slog":                             true,
+		"github.com/charmbracelet/log":         true,
+		"os":                                   true,
 	}
 	for _, imp := range f.Imports {
 		path, err := strconv.Unquote(imp.Path.Value)

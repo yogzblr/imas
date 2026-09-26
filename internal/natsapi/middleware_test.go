@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/rbac"
+	"github.com/yogzblr/imas/internal/rbac"
 )
 
 func TestNATSMethodAction(t *testing.T) {

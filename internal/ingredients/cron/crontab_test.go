@@ -10,7 +10,7 @@ const sampleCrontab = `# comment
 MAILTO=root
 
 0 3 * * * /usr/bin/backup.sh
-# GRLX_CRON_ID:cleanup
+# IMAS_CRON_ID:cleanup
 15 4 * * * /usr/bin/cleanup.sh --quiet
 `
 
@@ -86,7 +86,7 @@ func TestWriteCrontabRoundTrip(t *testing.T) {
 		t.Fatal("expected identifier to survive round-trip")
 	}
 	// The identifier marker must appear exactly once, not duplicated.
-	if strings.Count(written, "GRLX_CRON_ID:cleanup") != 1 {
+	if strings.Count(written, "IMAS_CRON_ID:cleanup") != 1 {
 		t.Fatalf("expected identifier marker exactly once, got:\n%s", written)
 	}
 }

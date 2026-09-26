@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/props"
+	"github.com/yogzblr/imas/internal/props"
 )
 
 func TestCohortValidate(t *testing.T) {

@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/objectstore"
-	"github.com/gogrlx/grlx/v2/internal/objectstore/objectstoretest"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/objectstore"
+	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
 )
 
 // newTestStore returns a Store backed by its own fake S3 bucket, and that

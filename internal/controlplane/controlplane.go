@@ -8,7 +8,7 @@
 // whole dependency tree.
 //
 // These subjects live in the SYS Account, not any tenant's: see
-// docs/design/grlx-internal-api-account.md for that decision and why.
+// docs/design/imas-internal-api-account.md for that decision and why.
 package controlplane
 
 import (
@@ -197,7 +197,7 @@ const (
 
 // SelfUpdateParams is a self_update action's params (design doc §2.2):
 // one saas.fleet_versions row, signature included. Farmer re-verifies
-// Signature against the grlx-fleet-signing public key before dispatching
+// Signature against the imas-fleet-signing public key before dispatching
 // (§2.5), and the sprout verifies it again against its pinned copy before
 // fetching anything; a missing or invalid signature is refused at each.
 type SelfUpdateParams struct {
@@ -218,7 +218,7 @@ type SproutActionRequest struct {
 }
 
 // SproutAction is one action to run on one sprout. Params is the action
-// payload farmer's own grlx.api.cmd.run / grlx.api.cook handlers take
+// payload farmer's own imas.api.cmd.run / imas.api.cook handlers take
 // (internal/api/types CmdRun / CmdCook, e.g. {"command": "systemctl",
 // "args": ["restart", "nginx"]} or {"recipe": "nginx.harden"}) — mapping
 // the SaaS API's external request shape onto it is the SaaS API's job.

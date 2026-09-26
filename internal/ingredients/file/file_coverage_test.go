@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 // TestTestDispatch exercises the Test method switch for all valid methods
@@ -402,7 +402,7 @@ func TestGuessProtocol(t *testing.T) {
 		{"http://example.com/file", "http"},
 		{"https://example.com/file", "https"},
 		{"s3://bucket/key", "s3"},
-		{"grlx://sprout/path", "grlx"},
+		{"imas://sprout/path", "imas"},
 		{"noprotocol", ""},
 	}
 	for _, tc := range tests {

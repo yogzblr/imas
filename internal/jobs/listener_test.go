@@ -14,10 +14,10 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/objectstore"
-	"github.com/gogrlx/grlx/v2/internal/objectstore/objectstoretest"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/objectstore"
+	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
 )
 
 // eventually polls cond until it returns true or timeout passes, and
@@ -132,7 +132,7 @@ func TestLogJobs_StepCompletion(t *testing.T) {
 	}
 	data, _ := json.Marshal(step)
 
-	if err := conn.Publish("grlx.cook.sprout-log-test.job-log-1", data); err != nil {
+	if err := conn.Publish("imas.cook.sprout-log-test.job-log-1", data); err != nil {
 		t.Fatal(err)
 	}
 	conn.Flush()
@@ -164,7 +164,7 @@ func TestLogJobs_AppendToExisting(t *testing.T) {
 			Duration:         time.Second,
 		}
 		data, _ := json.Marshal(step)
-		if err := conn.Publish("grlx.cook.sprout-append.job-append-1", data); err != nil {
+		if err := conn.Publish("imas.cook.sprout-append.job-append-1", data); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -194,7 +194,7 @@ func TestLogJobs_ExistingJobAppend(t *testing.T) {
 		Started:          time.Now(),
 		Duration:         2 * time.Second,
 	}
-	logJobs("", stepMsg(t, "grlx.cook.sprout-existing.existing-job", newStep))
+	logJobs("", stepMsg(t, "imas.cook.sprout-existing.existing-job", newStep))
 
 	summary := waitForSteps(t, obj, "sprout-existing", "existing-job", 2)
 	if summary.Steps[0].ID != "existing-step" || summary.Steps[1].ID != "new-step" {
@@ -214,7 +214,7 @@ func TestLogJobs_InvalidJSON(t *testing.T) {
 	obj := useTestObjStore(t)
 
 	// Invalid JSON — should not panic, and nothing is written.
-	logJobs("", &nats.Msg{Subject: "grlx.cook.sprout-bad.job-bad", Data: []byte("invalid json")})
+	logJobs("", &nats.Msg{Subject: "imas.cook.sprout-bad.job-bad", Data: []byte("invalid json")})
 
 	if keys := listKeys(t, obj, jobKeyPrefix); len(keys) != 0 {
 		t.Errorf("expected nothing written for invalid JSON, got %v", keys)
@@ -227,7 +227,7 @@ func TestLogJobs_ShortSubject(t *testing.T) {
 
 	// The wildcard subscription guarantees 4 tokens, but logJobs guards
 	// anyway.
-	logJobs("", stepMsg(t, "grlx.cook.only-three", step))
+	logJobs("", stepMsg(t, "imas.cook.only-three", step))
 
 	if keys := listKeys(t, obj, jobKeyPrefix); len(keys) != 0 {
 		t.Errorf("expected nothing written for a short subject, got %v", keys)
@@ -240,9 +240,9 @@ func TestLogJobs_UnsafeKeySegment(t *testing.T) {
 	obj := useTestObjStore(t)
 	step := makeStep("s1", cook.StepCompleted, time.Now(), time.Second)
 
-	logJobs("", stepMsg(t, "grlx.cook.sprout/other.job", step))
-	logJobs("", stepMsg(t, "grlx.cook.sprout.job/events", step))
-	logJobs("", stepMsg(t, "grlx.cook.sprout...", step))
+	logJobs("", stepMsg(t, "imas.cook.sprout/other.job", step))
+	logJobs("", stepMsg(t, "imas.cook.sprout.job/events", step))
+	logJobs("", stepMsg(t, "imas.cook.sprout...", step))
 
 	if keys := listKeys(t, obj, ""); len(keys) != 0 {
 		t.Errorf("expected nothing written for unsafe key segments, got %v", keys)
@@ -255,7 +255,7 @@ func TestLogJobs_NotConfigured(t *testing.T) {
 	t.Cleanup(func() { SetStore(orig) })
 
 	// Should log and drop the event, not panic.
-	logJobs("", stepMsg(t, "grlx.cook.sprout.job", makeStep("s1", cook.StepCompleted, time.Now(), time.Second)))
+	logJobs("", stepMsg(t, "imas.cook.sprout.job", makeStep("s1", cook.StepCompleted, time.Now(), time.Second)))
 }
 
 func TestLogJobs_PutError(t *testing.T) {
@@ -263,7 +263,7 @@ func TestLogJobs_PutError(t *testing.T) {
 
 	srv.FailNext(1, 403, "AccessDenied")
 	// Should log the failed Put, not panic.
-	logJobs("", stepMsg(t, "grlx.cook.sprout-err.job-err", makeStep("s1", cook.StepCompleted, time.Now(), time.Second)))
+	logJobs("", stepMsg(t, "imas.cook.sprout-err.job-err", makeStep("s1", cook.StepCompleted, time.Now(), time.Second)))
 
 	if keys := listKeys(t, obj, jobKeyPrefix); len(keys) != 0 {
 		t.Errorf("expected nothing written after a failed Put, got %v", keys)
@@ -286,7 +286,7 @@ func TestLogJobs_ConcurrentSteps(t *testing.T) {
 			Duration:         time.Millisecond,
 		}
 		data, _ := json.Marshal(step)
-		if err := conn.Publish("grlx.cook.sprout-concurrent.job-concurrent", data); err != nil {
+		if err := conn.Publish("imas.cook.sprout-concurrent.job-concurrent", data); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -314,7 +314,7 @@ func TestLogJobCreation(t *testing.T) {
 	}
 	data, _ := json.Marshal(envelope)
 
-	if err := conn.Publish("grlx.sprouts.sprout-create.cook", data); err != nil {
+	if err := conn.Publish("imas.sprouts.sprout-create.cook", data); err != nil {
 		t.Fatal(err)
 	}
 	conn.Flush()
@@ -342,12 +342,12 @@ func TestLogJobCreation(t *testing.T) {
 func TestLogJobCreation_ThenSteps(t *testing.T) {
 	obj := useTestObjStore(t)
 
-	logJobCreation("", envelopeMsg(t, "grlx.sprouts.sprout-flow.cook", cook.RecipeEnvelope{
+	logJobCreation("", envelopeMsg(t, "imas.sprouts.sprout-flow.cook", cook.RecipeEnvelope{
 		JobID: "flow-job",
 		Steps: []cook.Step{{ID: "a"}, {ID: "b"}},
 	}))
-	logJobs("", stepMsg(t, "grlx.cook.sprout-flow.flow-job", makeStep("a", cook.StepCompleted, time.Now(), time.Second)))
-	logJobs("", stepMsg(t, "grlx.cook.sprout-flow.flow-job", makeStep("b", cook.StepCompleted, time.Now(), time.Second)))
+	logJobs("", stepMsg(t, "imas.cook.sprout-flow.flow-job", makeStep("a", cook.StepCompleted, time.Now(), time.Second)))
+	logJobs("", stepMsg(t, "imas.cook.sprout-flow.flow-job", makeStep("b", cook.StepCompleted, time.Now(), time.Second)))
 
 	// Same lines, in the same order, the old local .jsonl file held:
 	// placeholders first, then events as they arrived.
@@ -369,7 +369,7 @@ func TestLogJobCreation_EmptyJobID(t *testing.T) {
 	obj := useTestObjStore(t)
 
 	// Envelope with empty JobID should be ignored.
-	logJobCreation("", envelopeMsg(t, "grlx.sprouts.sprout-empty.cook", cook.RecipeEnvelope{
+	logJobCreation("", envelopeMsg(t, "imas.sprouts.sprout-empty.cook", cook.RecipeEnvelope{
 		JobID: "",
 		Steps: []cook.Step{{ID: "step-a"}},
 	}))
@@ -383,7 +383,7 @@ func TestLogJobCreation_NoInvokedBy(t *testing.T) {
 	obj := useTestObjStore(t)
 
 	before := time.Now().UTC().Add(-time.Second)
-	logJobCreation("", envelopeMsg(t, "grlx.sprouts.sprout-noinv.cook", cook.RecipeEnvelope{
+	logJobCreation("", envelopeMsg(t, "imas.sprouts.sprout-noinv.cook", cook.RecipeEnvelope{
 		JobID: "no-invoker-job",
 		Steps: []cook.Step{{ID: "step-a"}},
 	}))
@@ -406,7 +406,7 @@ func TestLogJobCreation_NoInvokedBy(t *testing.T) {
 
 func TestLogJobCreation_DuplicateJobID(t *testing.T) {
 	obj := useTestObjStore(t)
-	msg := envelopeMsg(t, "grlx.sprouts.sprout-dup.cook", cook.RecipeEnvelope{
+	msg := envelopeMsg(t, "imas.sprouts.sprout-dup.cook", cook.RecipeEnvelope{
 		JobID: "dup-job",
 		Steps: []cook.Step{{ID: "step-a"}},
 	})
@@ -437,7 +437,7 @@ func TestLogJobCreation_DuplicateJobID(t *testing.T) {
 func TestLogJobCreation_InvalidJSON(t *testing.T) {
 	obj := useTestObjStore(t)
 
-	logJobCreation("", &nats.Msg{Subject: "grlx.sprouts.sprout-badjson.cook", Data: []byte("not json")})
+	logJobCreation("", &nats.Msg{Subject: "imas.sprouts.sprout-badjson.cook", Data: []byte("not json")})
 
 	if keys := listKeys(t, obj, jobKeyPrefix); len(keys) != 0 {
 		t.Errorf("expected no objects for invalid JSON, got %v", keys)
@@ -447,7 +447,7 @@ func TestLogJobCreation_InvalidJSON(t *testing.T) {
 func TestLogJobCreation_ShortSubject(t *testing.T) {
 	obj := useTestObjStore(t)
 
-	logJobCreation("", envelopeMsg(t, "grlx.sprouts.cook", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}}))
+	logJobCreation("", envelopeMsg(t, "imas.sprouts.cook", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}}))
 
 	if keys := listKeys(t, obj, jobKeyPrefix); len(keys) != 0 {
 		t.Errorf("expected nothing written for a short subject, got %v", keys)
@@ -457,8 +457,8 @@ func TestLogJobCreation_ShortSubject(t *testing.T) {
 func TestLogJobCreation_UnsafeKeySegment(t *testing.T) {
 	obj := useTestObjStore(t)
 
-	logJobCreation("", envelopeMsg(t, "grlx.sprouts.sprout.cook", cook.RecipeEnvelope{JobID: "../other", Steps: []cook.Step{{ID: "s"}}}))
-	logJobCreation("", envelopeMsg(t, "grlx.sprouts.a/b.cook", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}}))
+	logJobCreation("", envelopeMsg(t, "imas.sprouts.sprout.cook", cook.RecipeEnvelope{JobID: "../other", Steps: []cook.Step{{ID: "s"}}}))
+	logJobCreation("", envelopeMsg(t, "imas.sprouts.a/b.cook", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}}))
 
 	if keys := listKeys(t, obj, ""); len(keys) != 0 {
 		t.Errorf("expected nothing written for unsafe key segments, got %v", keys)
@@ -471,14 +471,14 @@ func TestLogJobCreation_NotConfigured(t *testing.T) {
 	t.Cleanup(func() { SetStore(orig) })
 
 	// Should log and drop the event, not panic.
-	logJobCreation("", envelopeMsg(t, "grlx.sprouts.sprout.cook", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}}))
+	logJobCreation("", envelopeMsg(t, "imas.sprouts.sprout.cook", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}}))
 }
 
 func TestLogJobCreation_ExistsError(t *testing.T) {
 	srv, obj := useTestObjServer(t)
 
 	srv.FailNext(1, 403, "AccessDenied")
-	logJobCreation("", envelopeMsg(t, "grlx.sprouts.sprout-err.cook", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}}))
+	logJobCreation("", envelopeMsg(t, "imas.sprouts.sprout-err.cook", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}}))
 
 	// A failed existence check doesn't risk overwriting a job: nothing is
 	// written.
@@ -488,7 +488,7 @@ func TestLogJobCreation_ExistsError(t *testing.T) {
 }
 
 // TestRegisterNatsConn_UsesQueueGroup verifies that RegisterNatsConn
-// subscribes to both job subjects as a queue-group member of "grlx-core",
+// subscribes to both job subjects as a queue-group member of "imas-core",
 // not a plain fan-out subscriber. This used to be the other way around
 // (see the function's own doc comment for why that changed): job logs
 // used to live in each replica's own local directory, so every replica
@@ -512,7 +512,7 @@ func TestRegisterNatsConn_UsesQueueGroup(t *testing.T) {
 		// Simulate a second farmer replica subscribing to the same
 		// subject in the same queue group.
 		var secondReplicaHits int64
-		sub, err := conn.QueueSubscribe("grlx.cook.*.*", natsCoreQueueGroup, func(msg *nats.Msg) {
+		sub, err := conn.QueueSubscribe("imas.cook.*.*", natsCoreQueueGroup, func(msg *nats.Msg) {
 			atomic.AddInt64(&secondReplicaHits, 1)
 		})
 		if err != nil {
@@ -529,7 +529,7 @@ func TestRegisterNatsConn_UsesQueueGroup(t *testing.T) {
 				Started:          time.Now(),
 			}
 			data, _ := json.Marshal(step)
-			if err := conn.Publish("grlx.cook.queue-sprout.queue-job", data); err != nil {
+			if err := conn.Publish("imas.cook.queue-sprout.queue-job", data); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -565,7 +565,7 @@ func TestRegisterNatsConn_UsesQueueGroup(t *testing.T) {
 		conn.Flush()
 
 		var secondReplicaHits int64
-		sub, err := conn.QueueSubscribe("grlx.sprouts.*.cook", natsCoreQueueGroup, func(msg *nats.Msg) {
+		sub, err := conn.QueueSubscribe("imas.sprouts.*.cook", natsCoreQueueGroup, func(msg *nats.Msg) {
 			atomic.AddInt64(&secondReplicaHits, 1)
 		})
 		if err != nil {
@@ -578,7 +578,7 @@ func TestRegisterNatsConn_UsesQueueGroup(t *testing.T) {
 		for i := range numEvents {
 			envelope := cook.RecipeEnvelope{JobID: fmt.Sprintf("job-%d", i), Steps: []cook.Step{{ID: "s"}}}
 			data, _ := json.Marshal(envelope)
-			if err := conn.Publish("grlx.sprouts.queue-create.cook", data); err != nil {
+			if err := conn.Publish("imas.sprouts.queue-create.cook", data); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -636,7 +636,7 @@ func TestRegisterNatsConn_TwoReplicasRecordEachEventOnce(t *testing.T) {
 	const numSteps = 30
 	envelope := cook.RecipeEnvelope{JobID: "shared-job", InvokedBy: "UADMIN", Steps: []cook.Step{{ID: "s"}}}
 	data, _ := json.Marshal(envelope)
-	if err := pub.Publish("grlx.sprouts.sprout-shared.cook", data); err != nil {
+	if err := pub.Publish("imas.sprouts.sprout-shared.cook", data); err != nil {
 		t.Fatal(err)
 	}
 	pub.Flush()
@@ -647,7 +647,7 @@ func TestRegisterNatsConn_TwoReplicasRecordEachEventOnce(t *testing.T) {
 	for i := range numSteps {
 		step := makeStep(fmt.Sprintf("step-%d", i), cook.StepCompleted, time.Now(), time.Millisecond)
 		b, _ := json.Marshal(step)
-		if err := pub.Publish("grlx.cook.sprout-shared.shared-job", b); err != nil {
+		if err := pub.Publish("imas.cook.sprout-shared.shared-job", b); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -697,7 +697,7 @@ func TestLogJobs_FailedStepWithError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := conn.Publish("grlx.cook.sprout-fail.job-fail-1", data); err != nil {
+	if err := conn.Publish("imas.cook.sprout-fail.job-fail-1", data); err != nil {
 		t.Fatal(err)
 	}
 	conn.Flush()
@@ -727,7 +727,7 @@ func TestLogJobs_LegacyEmptyObjectError(t *testing.T) {
 	RegisterNatsConn("t_test", conn)
 
 	payload := []byte(`{"ID":"timeout-job-old","CompletionStatus":3,"ChangesMade":false,"Changes":null,"started":"0001-01-01T00:00:00Z","Error":{}}`)
-	if err := conn.Publish("grlx.cook.sprout-old.job-old", payload); err != nil {
+	if err := conn.Publish("imas.cook.sprout-old.job-old", payload); err != nil {
 		t.Fatal(err)
 	}
 	conn.Flush()

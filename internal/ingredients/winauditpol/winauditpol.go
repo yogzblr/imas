@@ -3,7 +3,7 @@
 // Package winauditpol wraps Salt's win_auditpol module: getting/setting
 // per-subcategory audit policy success/failure auditing via auditpol.exe,
 // the same CLI tool Salt itself shells out to. See G.9 in
-// docs/design/grlx-windows-parity-addendum.md.
+// docs/design/imas-windows-parity-addendum.md.
 package winauditpol
 
 import (
@@ -11,9 +11,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/winexec"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients/winexec"
 )
 
 const ingredientName = "win_auditpol"

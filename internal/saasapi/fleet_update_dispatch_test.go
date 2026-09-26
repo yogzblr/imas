@@ -13,7 +13,7 @@ import (
 	"github.com/nats-io/nats-server/v2/server"
 	"gorm.io/gorm"
 
-	"github.com/gogrlx/grlx/v2/internal/controlplane"
+	"github.com/yogzblr/imas/internal/controlplane"
 )
 
 // newUpdateTestDB is newTestDBWithFarmer with an empty version catalog

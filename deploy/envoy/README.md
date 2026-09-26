@@ -1,7 +1,7 @@
 # Envoy DMZ gateway (workstream H)
 
 `envoy.yaml` is the reference config for
-`docs/design/grlx-envoy-enrollment-design.md` — Envoy sitting at the DMZ
+`docs/design/imas-envoy-enrollment-design.md` — Envoy sitting at the DMZ
 edge in front of nats-server's websocket listener and a recipe-download
 route, both gated by `jwt_authn`, plus an ungated, rate-limited
 `/v1/enroll` route. Read the file's own header comment first; this file
@@ -29,15 +29,15 @@ Treat this as a reviewed starting point, not a drop-in production config.
   /v1/.well-known/jwks.json`), but that endpoint serves whatever
   `internal/gatewayjwt` signs with — which requires an OpenBao Transit
   Ed25519 key to exist before farmer can mint or serve anything real. See
-  `internal/gatewayjwt/obtransit.go`'s `GRLX_GATEWAY_OPENBAO_*` env vars
+  `internal/gatewayjwt/obtransit.go`'s `IMAS_GATEWAY_OPENBAO_*` env vars
   and the ops prerequisite in the "Gateway JWT Companion Token"
   implementation brief this package was built from:
   ```
   vault secrets enable transit   # or: bao secrets enable transit
-  vault write -f transit/keys/grlx-gateway-jwt type=ed25519
-  vault write transit/keys/grlx-gateway-jwt/config auto_rotate_period=2160h
+  vault write -f transit/keys/imas-gateway-jwt type=ed25519
+  vault write transit/keys/imas-gateway-jwt/config auto_rotate_period=2160h
   ```
-  Until that key exists and farmer's `GRLX_GATEWAY_OPENBAO_*` env vars
+  Until that key exists and farmer's `IMAS_GATEWAY_OPENBAO_*` env vars
   are set, farmer starts fine (see `cmd/farmer/main.go`'s
   `initGatewaySigner` — deliberately non-fatal) but `POST /v1/enroll`
   fails closed with the generic `enrollment_failed` response, and the two
@@ -55,7 +55,7 @@ Treat this as a reviewed starting point, not a drop-in production config.
   config in production.
 - **Recipe route target**: `/v1/recipes` currently proxies to farmer's own
   `GET /files/` (`internal/api/handlers/recipes.go`) as the nearest
-  existing analogue. `docs/design/grlx-fork-roadmap.md` workstream I
+  existing analogue. `docs/design/imas-fork-roadmap.md` workstream I
   ("Recipe storage migration") describes a dedicated, non-DMZ recipe
   service this route is meant to front instead — repoint the
   `recipe_service` cluster once that exists.

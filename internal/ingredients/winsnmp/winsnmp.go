@@ -6,16 +6,16 @@
 // and writes the service's registry-backed community list via
 // PowerShell (Get/New/Remove-ItemProperty against
 // HKLM:\SYSTEM\CurrentControlSet\Services\SNMP\Parameters\ValidCommunities).
-// See G.8 in docs/design/grlx-windows-parity-addendum.md.
+// See G.8 in docs/design/imas-windows-parity-addendum.md.
 package winsnmp
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/winexec"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients/winexec"
 )
 
 const ingredientName = "win_snmp"

@@ -101,7 +101,7 @@ func TestPSBool(t *testing.T) {
 }
 
 func TestRunCLINonexistentBinary(t *testing.T) {
-	_, err := RunCLI(context.Background(), "grlx-definitely-not-a-real-binary", nil, 2*time.Second)
+	_, err := RunCLI(context.Background(), "imas-definitely-not-a-real-binary", nil, 2*time.Second)
 	if err == nil {
 		t.Error("expected error for nonexistent binary")
 	}

@@ -3,16 +3,16 @@
 // Package winpsget wraps Salt's win_psget module: installing/removing
 // PowerShell modules via PowerShellGet (Install-Module/Uninstall-Module),
 // the same PowerShell surface Salt itself shells out to. See G.8 in
-// docs/design/grlx-windows-parity-addendum.md.
+// docs/design/imas-windows-parity-addendum.md.
 package winpsget
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/winexec"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients/winexec"
 )
 
 const ingredientName = "win_psget"

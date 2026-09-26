@@ -3,7 +3,7 @@ package natsapi
 import (
 	"encoding/json"
 
-	"github.com/gogrlx/grlx/v2/internal/audit"
+	"github.com/yogzblr/imas/internal/audit"
 )
 
 func handleAuditList(_ string, params json.RawMessage) (any, error) {

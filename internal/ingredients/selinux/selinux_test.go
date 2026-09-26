@@ -6,7 +6,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 func TestMethods(t *testing.T) {

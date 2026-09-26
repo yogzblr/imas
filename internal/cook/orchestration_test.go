@@ -10,8 +10,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/sdb"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/ingredients/sdb"
 )
 
 // --- parsing: cond, register, secrets, on_exit ---
@@ -200,21 +200,21 @@ func TestRuntimeContextVars(t *testing.T) {
 	defer func() { config.FarmerOrganization = old }()
 
 	ctx := runtimeContextVars("sprout-123")
-	if ctx["GRLX_SPROUT_ID"] != "sprout-123" {
-		t.Errorf("GRLX_SPROUT_ID = %q, want sprout-123", ctx["GRLX_SPROUT_ID"])
+	if ctx["IMAS_SPROUT_ID"] != "sprout-123" {
+		t.Errorf("IMAS_SPROUT_ID = %q, want sprout-123", ctx["IMAS_SPROUT_ID"])
 	}
-	if ctx["GRLX_TENANT_ID"] != "acme-corp" {
-		t.Errorf("GRLX_TENANT_ID = %q, want acme-corp", ctx["GRLX_TENANT_ID"])
+	if ctx["IMAS_TENANT_ID"] != "acme-corp" {
+		t.Errorf("IMAS_TENANT_ID = %q, want acme-corp", ctx["IMAS_TENANT_ID"])
 	}
 }
 
 func TestSubstituteProperties(t *testing.T) {
 	vars := newRunVars()
 	vars.set("OUT", "resolved-value", false)
-	lookup := vars.lookup(map[string]string{"GRLX_SPROUT_ID": "s1"})
+	lookup := vars.lookup(map[string]string{"IMAS_SPROUT_ID": "s1"})
 
 	props := map[string]interface{}{
-		"name":    "use {OUT} on {GRLX_SPROUT_ID}",
+		"name":    "use {OUT} on {IMAS_SPROUT_ID}",
 		"list":    []interface{}{"a {OUT}", "b"},
 		"strs":    []string{"x {OUT}"},
 		"unknown": "keep {NOT_SET} as-is",
@@ -238,7 +238,7 @@ func TestSubstituteProperties(t *testing.T) {
 		t.Errorf("number = %v, want untouched", out["number"])
 	}
 	// original map must not be mutated
-	if props["name"] != "use {OUT} on {GRLX_SPROUT_ID}" {
+	if props["name"] != "use {OUT} on {IMAS_SPROUT_ID}" {
 		t.Errorf("substituteProperties mutated its input: %q", props["name"])
 	}
 }

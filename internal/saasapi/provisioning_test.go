@@ -20,7 +20,7 @@ import (
 	"github.com/nats-io/nkeys"
 	"gorm.io/gorm"
 
-	"github.com/gogrlx/grlx/v2/internal/controlplane"
+	"github.com/yogzblr/imas/internal/controlplane"
 )
 
 func seedTenantAndJob(t *testing.T, gdb *gorm.DB, status TenantStatus, jobType ProvisioningJobType) (Tenant, ProvisioningJob) {

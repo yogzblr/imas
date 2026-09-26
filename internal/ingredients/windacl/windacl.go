@@ -1,6 +1,6 @@
 //go:build windows
 
-// Package windacl implements grlx's win_dacl ingredient: explicit ACE
+// Package windacl implements imas's win_dacl ingredient: explicit ACE
 // (allow/deny) management and inheritance control for files and
 // registry keys.
 //
@@ -14,7 +14,7 @@
 // GetExplicitEntriesFromAclW (needed to read an object's *explicit*
 // ACEs back out, separate from whatever it inherits), so win32.go adds
 // that call the same way the library adds its own advapi32 wrappers.
-// See G.4 in docs/design/grlx-windows-parity-addendum.md.
+// See G.4 in docs/design/imas-windows-parity-addendum.md.
 //
 // FLAG FOR SECURITY REVIEW: propagation (which ACEs apply to an object
 // itself vs. its children) and inheritance (whether an object accepts
@@ -31,8 +31,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 const ingredientName = "win_dacl"

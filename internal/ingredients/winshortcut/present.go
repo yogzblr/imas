@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/winexec"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients/winexec"
 )
 
 // shortcutState is the desired or observed state of a .lnk shortcut's
@@ -30,7 +30,7 @@ type shortcutState struct {
 // fields are compared case-insensitively and with surrounding whitespace
 // trimmed: the shell is known to normalize a shortcut's stored
 // TargetPath/WorkingDirectory on save, and an exact byte comparison
-// against what grlx passed in would report a spurious "changed" on every
+// against what imas passed in would report a spurious "changed" on every
 // run.
 func (a shortcutState) Equal(b shortcutState) bool {
 	return strings.EqualFold(strings.TrimSpace(a.TargetPath), strings.TrimSpace(b.TargetPath)) &&

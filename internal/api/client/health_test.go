@@ -14,7 +14,7 @@ func TestHealth_Success(t *testing.T) {
 		UptimeMs:  5400000,
 		NATSReady: true,
 	}
-	mockHandler(t, NatsConn, "grlx.api.health", want)
+	mockHandler(t, NatsConn, "imas.api.health", want)
 
 	got, err := Health()
 	if err != nil {
@@ -44,7 +44,7 @@ func TestHealth_Degraded(t *testing.T) {
 		UptimeMs:  300000,
 		NATSReady: false,
 	}
-	mockHandler(t, NatsConn, "grlx.api.health", want)
+	mockHandler(t, NatsConn, "imas.api.health", want)
 
 	got, err := Health()
 	if err != nil {
@@ -62,7 +62,7 @@ func TestHealth_Error(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.health", "farmer unreachable")
+	mockErrorHandler(t, NatsConn, "imas.api.health", "farmer unreachable")
 
 	_, err := Health()
 	if err == nil {
@@ -74,7 +74,7 @@ func TestHealth_BadJSON(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockBadJSONHandler(t, NatsConn, "grlx.api.health")
+	mockBadJSONHandler(t, NatsConn, "imas.api.health")
 
 	_, err := Health()
 	if err == nil {

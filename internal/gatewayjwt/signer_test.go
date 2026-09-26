@@ -7,7 +7,7 @@ import (
 
 func TestNewGatewaySigner_MissingAddr(t *testing.T) {
 	t.Setenv(EnvOpenBaoAddr, "")
-	if _, err := NewGatewaySigner("grlx-gateway-jwt"); !errors.Is(err, ErrNotConfigured) {
+	if _, err := NewGatewaySigner("imas-gateway-jwt"); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("expected ErrNotConfigured, got %v", err)
 	}
 }
@@ -16,7 +16,7 @@ func TestNewGatewaySigner_MissingToken(t *testing.T) {
 	t.Setenv(EnvOpenBaoAddr, "http://127.0.0.1:1")
 	t.Setenv(EnvOpenBaoAuthMethod, AuthMethodToken)
 	t.Setenv(EnvOpenBaoToken, "")
-	if _, err := NewGatewaySigner("grlx-gateway-jwt"); !errors.Is(err, ErrNotConfigured) {
+	if _, err := NewGatewaySigner("imas-gateway-jwt"); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("expected ErrNotConfigured, got %v", err)
 	}
 }
@@ -24,7 +24,7 @@ func TestNewGatewaySigner_MissingToken(t *testing.T) {
 func TestNewGatewaySigner_UnknownAuthMethod(t *testing.T) {
 	t.Setenv(EnvOpenBaoAddr, "http://127.0.0.1:1")
 	t.Setenv(EnvOpenBaoAuthMethod, "carrier-pigeon")
-	if _, err := NewGatewaySigner("grlx-gateway-jwt"); !errors.Is(err, ErrNotConfigured) {
+	if _, err := NewGatewaySigner("imas-gateway-jwt"); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("expected ErrNotConfigured, got %v", err)
 	}
 }
@@ -39,7 +39,7 @@ func TestNewGatewaySigner_EmptyKeyName(t *testing.T) {
 }
 
 func TestGatewaySigner_Sign_WrongTokenRejected(t *testing.T) {
-	srv := newMockTransitServer(t, "grlx-gateway-jwt", 1)
+	srv := newMockTransitServer(t, "imas-gateway-jwt", 1)
 	ts := srv.start()
 	t.Cleanup(ts.Close)
 	t.Setenv(EnvOpenBaoAddr, ts.URL)
@@ -57,7 +57,7 @@ func TestGatewaySigner_Sign_WrongTokenRejected(t *testing.T) {
 }
 
 func TestGatewaySigner_PublicKeys_CachesWithinTTL(t *testing.T) {
-	srv := newMockTransitServer(t, "grlx-gateway-jwt", 1)
+	srv := newMockTransitServer(t, "imas-gateway-jwt", 1)
 	signer := newTestGatewaySigner(t, srv)
 	ctx := t.Context()
 
@@ -79,7 +79,7 @@ func TestGatewaySigner_PublicKeys_CachesWithinTTL(t *testing.T) {
 }
 
 func TestGatewaySigner_PublicKeys_FiltersBelowMinEncryptionVersion(t *testing.T) {
-	srv := newMockTransitServer(t, "grlx-gateway-jwt", 3)
+	srv := newMockTransitServer(t, "imas-gateway-jwt", 3)
 	srv.minEncryptionVersion = 2 // version 1 has aged out of the serving window
 	signer := newTestGatewaySigner(t, srv)
 

@@ -22,7 +22,7 @@ func GetStringPropFunc(sproutID string) func(string) string {
 // tenant instead of the package's current-tenant seam — used by
 // internal/rbac/cohort.go's dynamic-cohort resolution, which has a real
 // per-Registry tenant to pass. See
-// docs/design/grlx-tenant-context-threading.md.
+// docs/design/imas-tenant-context-threading.md.
 func GetStringPropFuncForTenant(tenantID, sproutID string) func(string) string {
 	return func(name string) string {
 		return getStringProp(tenantID, sproutID, name)

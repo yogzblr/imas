@@ -9,7 +9,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 func seedSprout(t *testing.T, tenantID, sproutID, state string) {
@@ -28,7 +28,7 @@ func seedTenant(t *testing.T, id string, deleted bool) {
 
 func TestVerifySproutInTenant(t *testing.T) {
 	newTestDB(t)
-	config.FarmerOrganization = "grlx-test"
+	config.FarmerOrganization = "imas-test"
 	legacy := CurrentTenantID()
 
 	seedTenant(t, "t_a", false)
@@ -84,7 +84,7 @@ func TestVerifySproutInTenant(t *testing.T) {
 // is what rejects a tenant ID that differs only in case.
 func TestVerifySproutInTenant_CaseInsensitiveCollation(t *testing.T) {
 	gdb := newTestDB(t)
-	config.FarmerOrganization = "grlx-test"
+	config.FarmerOrganization = "imas-test"
 	for _, stmt := range []string{
 		`DROP TABLE pki_nkeys`,
 		`DROP TABLE pki_tenants`,
@@ -97,7 +97,7 @@ func TestVerifySproutInTenant_CaseInsensitiveCollation(t *testing.T) {
 	}
 	seedTenant(t, "T_Case", false)
 	seedSprout(t, "T_Case", "web-01", stateAccepted)
-	seedSprout(t, "GRLX-TEST", "legacy-01", stateAccepted)
+	seedSprout(t, "IMAS-TEST", "legacy-01", stateAccepted)
 
 	// Sanity: the collation really does make the WHERE clause match.
 	var n int64
@@ -114,7 +114,7 @@ func TestVerifySproutInTenant_CaseInsensitiveCollation(t *testing.T) {
 	}
 	// The legacy tenant skips the pki_tenants lookup, so this exercises
 	// the nkey row's own tenant_id comparison.
-	if err := VerifySproutInTenant("grlx-test", "legacy-01"); !errors.Is(err, ErrSproutIDNotFound) {
+	if err := VerifySproutInTenant("imas-test", "legacy-01"); !errors.Is(err, ErrSproutIDNotFound) {
 		t.Fatalf("legacy tenant, row stored under a different-case tenant ID: got %v, want ErrSproutIDNotFound", err)
 	}
 }
@@ -123,7 +123,7 @@ func TestVerifySproutInTenant_CaseInsensitiveCollation(t *testing.T) {
 // made must not read as a clean "no" (or a "yes").
 func TestVerifySproutInTenant_DBErrorIsNotNotFound(t *testing.T) {
 	gdb := newTestDB(t)
-	config.FarmerOrganization = "grlx-test"
+	config.FarmerOrganization = "imas-test"
 	seedSprout(t, CurrentTenantID(), "legacy-01", stateAccepted)
 	seedTenant(t, "t_a", false)
 	sqlDB, _ := gdb.DB()

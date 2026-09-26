@@ -8,7 +8,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
-	"github.com/gogrlx/grlx/v2/internal/props"
+	"github.com/yogzblr/imas/internal/props"
 )
 
 func TestMain(m *testing.M) {

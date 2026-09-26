@@ -2,7 +2,7 @@
 // alg:EdDSA companion token to the NATS User JWT workstream B already
 // builds (internal/pki/jwtusers.go), signed by a single platform-wide
 // OpenBao Transit Ed25519 key rather than any tenant's Account signing
-// key. See docs/design/grlx-envoy-enrollment-design.md and the
+// key. See docs/design/imas-envoy-enrollment-design.md and the
 // "Gateway JWT Companion Token" implementation brief this package was
 // built from.
 //
@@ -62,27 +62,27 @@ import (
 
 // Environment variables configuring the OpenBao Transit client used to
 // sign gateway JWTs. Addr is always required; which of the rest matter
-// depends on AuthMethod. Named GRLX_GATEWAY_OPENBAO_* rather than reusing
-// internal/certs's GRLX_CERTS_OPENBAO_* names: this is a distinct OpenBao
+// depends on AuthMethod. Named IMAS_GATEWAY_OPENBAO_* rather than reusing
+// internal/certs's IMAS_CERTS_OPENBAO_* names: this is a distinct OpenBao
 // connection (Transit, not PKI), plausibly pointed at a different address
 // or auth role than the TLS cert client.
 const (
-	EnvOpenBaoAddr         = "GRLX_GATEWAY_OPENBAO_ADDR"
-	EnvOpenBaoTransitMount = "GRLX_GATEWAY_OPENBAO_TRANSIT_MOUNT" // default "transit"
-	EnvOpenBaoCACert       = "GRLX_GATEWAY_OPENBAO_CACERT"        // optional, verify OpenBao's own TLS
-	EnvOpenBaoAuthMethod   = "GRLX_GATEWAY_OPENBAO_AUTH_METHOD"   // "token" (default) or "kubernetes"
+	EnvOpenBaoAddr         = "IMAS_GATEWAY_OPENBAO_ADDR"
+	EnvOpenBaoTransitMount = "IMAS_GATEWAY_OPENBAO_TRANSIT_MOUNT" // default "transit"
+	EnvOpenBaoCACert       = "IMAS_GATEWAY_OPENBAO_CACERT"        // optional, verify OpenBao's own TLS
+	EnvOpenBaoAuthMethod   = "IMAS_GATEWAY_OPENBAO_AUTH_METHOD"   // "token" (default) or "kubernetes"
 
 	// EnvOpenBaoToken is the bearer token used when AuthMethod is "token" (the default).
-	EnvOpenBaoToken = "GRLX_GATEWAY_OPENBAO_TOKEN"
+	EnvOpenBaoToken = "IMAS_GATEWAY_OPENBAO_TOKEN"
 
 	// EnvOpenBaoK8sRole/EnvOpenBaoK8sMount/EnvOpenBaoK8sJWTPath configure
 	// OpenBao's kubernetes auth method, used when AuthMethod is "kubernetes".
-	EnvOpenBaoK8sRole    = "GRLX_GATEWAY_OPENBAO_K8S_ROLE"
-	EnvOpenBaoK8sMount   = "GRLX_GATEWAY_OPENBAO_K8S_MOUNT"    // default "kubernetes"
-	EnvOpenBaoK8sJWTPath = "GRLX_GATEWAY_OPENBAO_K8S_JWT_PATH" // default defaultK8sJWTPath
+	EnvOpenBaoK8sRole    = "IMAS_GATEWAY_OPENBAO_K8S_ROLE"
+	EnvOpenBaoK8sMount   = "IMAS_GATEWAY_OPENBAO_K8S_MOUNT"    // default "kubernetes"
+	EnvOpenBaoK8sJWTPath = "IMAS_GATEWAY_OPENBAO_K8S_JWT_PATH" // default defaultK8sJWTPath
 )
 
-// Recognized values for GRLX_GATEWAY_OPENBAO_AUTH_METHOD.
+// Recognized values for IMAS_GATEWAY_OPENBAO_AUTH_METHOD.
 const (
 	AuthMethodToken      = "token"
 	AuthMethodKubernetes = "kubernetes"

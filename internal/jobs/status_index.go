@@ -55,8 +55,8 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/cook"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 // Index statuses stored in job_status.status. The SaaS API reads these
@@ -130,7 +130,7 @@ type jobEvent struct {
 	timedOut   bool
 }
 
-// classifyJobEvent maps a grlx.cook.<sprout>.<jid> event to its index
+// classifyJobEvent maps a imas.cook.<sprout>.<jid> event to its index
 // update, by the step IDs cook.CookRecipeEnvelope uses for its bookend
 // events; any other ID is a step's own completion.
 func classifyJobEvent(jid string, step cook.StepCompletion) jobEvent {

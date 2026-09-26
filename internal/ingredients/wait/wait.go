@@ -1,4 +1,4 @@
-// Package wait implements grlx's wait ingredient: poll a shell command until
+// Package wait implements imas's wait ingredient: poll a shell command until
 // it succeeds (or, negated, until it fails) or a timeout elapses. It is an
 // atomic ingredient that retries internally -- it does not sequence other
 // ingredients, and gating a later step on a wait's outcome is done the same
@@ -13,8 +13,8 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 const pollMethod = "poll"

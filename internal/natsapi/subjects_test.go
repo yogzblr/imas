@@ -10,14 +10,14 @@ func TestSubjectReturnsFullSubject(t *testing.T) {
 		method string
 		want   string
 	}{
-		{MethodVersion, "grlx.api.version"},
-		{MethodSproutsList, "grlx.api.sprouts.list"},
-		{MethodPKIAccept, "grlx.api.pki.accept"},
-		{MethodJobsCancel, "grlx.api.jobs.cancel"},
-		{MethodAuthWhoAmI, "grlx.api.auth.whoami"},
-		{MethodCook, "grlx.api.cook"},
-		{MethodShellStart, "grlx.api.shell.start"},
-		{MethodAuditQuery, "grlx.api.audit.query"},
+		{MethodVersion, "imas.api.version"},
+		{MethodSproutsList, "imas.api.sprouts.list"},
+		{MethodPKIAccept, "imas.api.pki.accept"},
+		{MethodJobsCancel, "imas.api.jobs.cancel"},
+		{MethodAuthWhoAmI, "imas.api.auth.whoami"},
+		{MethodCook, "imas.api.cook"},
+		{MethodShellStart, "imas.api.shell.start"},
+		{MethodAuditQuery, "imas.api.audit.query"},
 	}
 
 	for _, tt := range tests {
@@ -32,19 +32,19 @@ func TestSubjectReturnsFullSubject(t *testing.T) {
 
 func TestSproutSubject(t *testing.T) {
 	got := SproutSubject("web-01", SproutTestPing)
-	want := "grlx.sprouts.web-01.test.ping"
+	want := "imas.sprouts.web-01.test.ping"
 	if got != want {
 		t.Errorf("SproutSubject(web-01, test.ping) = %q, want %q", got, want)
 	}
 
 	got = SproutSubject("db-02", SproutCancel)
-	want = "grlx.sprouts.db-02.cancel"
+	want = "imas.sprouts.db-02.cancel"
 	if got != want {
 		t.Errorf("SproutSubject(db-02, cancel) = %q, want %q", got, want)
 	}
 
 	got = SproutSubject("app-03", SproutShellStart)
-	want = "grlx.sprouts.app-03.shell.start"
+	want = "imas.sprouts.app-03.shell.start"
 	if got != want {
 		t.Errorf("SproutSubject(app-03, shell.start) = %q, want %q", got, want)
 	}
@@ -98,7 +98,7 @@ func TestSubjectPrefixFormat(t *testing.T) {
 func TestCookTriggerPrefix(t *testing.T) {
 	jid := "20260326-abc123"
 	got := SproutCookTriggerPrefix + jid
-	want := "grlx.farmer.cook.trigger.20260326-abc123"
+	want := "imas.farmer.cook.trigger.20260326-abc123"
 	if got != want {
 		t.Errorf("cook trigger = %q, want %q", got, want)
 	}

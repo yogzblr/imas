@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 func TestPrepend(t *testing.T) {

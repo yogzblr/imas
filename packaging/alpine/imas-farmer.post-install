@@ -1,0 +1,15 @@
+#!/bin/sh
+
+cat <<EOF
+*
+*  imas-farmer expects /srv/imas/recipes/prod to exist.
+*  This directory is not automatically created.
+*
+*  This can be corrected with the following commands:
+*    mkdir -p /srv/imas/recipes/prod
+*    chown -R farmer:farmer /srv/imas
+*
+*  Additionally, /etc/imas/pki/farmer needs to be configured before
+*  the server can be run.
+*
+EOF 

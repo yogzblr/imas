@@ -1,17 +1,17 @@
 // Package natsapi — subjects.go defines NATS subject constants and
 // typed request/reply message types for all farmer API endpoints.
 //
-// All API subjects follow the pattern: grlx.api.<domain>.<action>
-// Sprout-facing subjects use: grlx.sprouts.<sproutID>.<domain>.<action>
+// All API subjects follow the pattern: imas.api.<domain>.<action>
+// Sprout-facing subjects use: imas.sprouts.<sproutID>.<domain>.<action>
 package natsapi
 
 import (
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
-	"github.com/gogrlx/grlx/v2/internal/audit"
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/jobs"
-	"github.com/gogrlx/grlx/v2/internal/pki"
-	"github.com/gogrlx/grlx/v2/internal/shell"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/audit"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/jobs"
+	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/shell"
 )
 
 // ──────────────────────────────────────────────
@@ -19,10 +19,10 @@ import (
 // ──────────────────────────────────────────────
 
 // SubjectPrefix is the root prefix for all farmer API subjects.
-const SubjectPrefix = "grlx.api."
+const SubjectPrefix = "imas.api."
 
 // SproutSubjectPrefix is the root prefix for sprout-facing subjects.
-const SproutSubjectPrefix = "grlx.sprouts."
+const SproutSubjectPrefix = "imas.sprouts."
 
 // ──────────────────────────────────────────────
 // API method constants (suffix after SubjectPrefix)
@@ -44,7 +44,7 @@ const (
 	MethodPKIDelete   = "pki.delete"
 
 	// MethodPKIRotateBoxKey asks a sprout to rotate its payload-encryption
-	// X25519 keypair (docs/design/grlx-payload-encryption-design.md). Per
+	// X25519 keypair (docs/design/imas-payload-encryption-design.md). Per
 	// the design doc, this only ever carries an instruction — the sprout
 	// generates its own new keypair and reports back the new public key
 	// on SproutBoxKeySubmit; farmer never generates or holds a sprout's
@@ -106,7 +106,7 @@ func Subject(method string) string {
 }
 
 // SproutSubject builds a sprout-facing subject:
-// grlx.sprouts.<sproutID>.<suffix>
+// imas.sprouts.<sproutID>.<suffix>
 func SproutSubject(sproutID, suffix string) string {
 	return SproutSubjectPrefix + sproutID + "." + suffix
 }
@@ -126,8 +126,8 @@ const (
 	SproutShellStart = "shell.start"
 
 	// SproutCookTrigger is the prefix for cook trigger responses.
-	// Full subject: grlx.farmer.cook.trigger.<jid>
-	SproutCookTriggerPrefix = "grlx.farmer.cook.trigger."
+	// Full subject: imas.farmer.cook.trigger.<jid>
+	SproutCookTriggerPrefix = "imas.farmer.cook.trigger."
 
 	// SproutBoxKeyRotateCmd is the suffix for farmer's rotate-trigger
 	// instruction to a sprout (MethodPKIRotateBoxKey's handler publishes

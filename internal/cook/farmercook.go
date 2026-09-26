@@ -14,12 +14,12 @@ import (
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 
-	"github.com/gogrlx/grlx/v2/internal/log"
 	"github.com/google/uuid"
+	"github.com/yogzblr/imas/internal/log"
 	"gopkg.in/yaml.v3"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/props"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/props"
 )
 
 // CookOption configures optional parameters for SendCookEvent.
@@ -151,7 +151,7 @@ func sendEnvelope(tenantID, sproutID string, rEnvelope RecipeEnvelope) error {
 		return fmt.Errorf("cook: no NATS connection registered for tenant %s", tenantID)
 	}
 	var ack Ack
-	msg, err := farmerConn.Request("grlx.sprouts."+sproutID+".cook", b, 30*time.Second)
+	msg, err := farmerConn.Request("imas.sprouts."+sproutID+".cook", b, 30*time.Second)
 	if err != nil {
 		return err
 	}
@@ -246,9 +246,9 @@ func GenerateJobID() string {
 // ResolveRecipeFilePath resolves a dot-notation RecipeName to an object
 // key under the object-storage backend (see store.go) recipes are read
 // from — basepath is the configured key prefix (config.RecipeDir /
-// GRLX_RECIPE_DIR, see getBasePath), not a local filesystem directory.
-// The resolution rules (dot-to-slash, try "<name>/init.grlx" before
-// "<name>.grlx") are unchanged from the local-disk version; only the
+// IMAS_RECIPE_DIR, see getBasePath), not a local filesystem directory.
+// The resolution rules (dot-to-slash, try "<name>/init.imas" before
+// "<name>.imas") are unchanged from the local-disk version; only the
 // existence check moved from os.Stat to a bucket lookup. Object storage
 // has no directory concept, so the old "resolved path is a directory"
 // case (ErrRecipePathIsDirectory) can no longer happen and is gone.
@@ -264,11 +264,11 @@ func ResolveRecipeFilePath(ctx context.Context, basepath string, recipeID Recipe
 	path = filepath.Clean(path)
 	path = strings.TrimPrefix(path, basepath)
 	path = filepath.Join(basepath, path)
-	if strings.HasSuffix(path, "."+config.GrlxExt) {
+	if strings.HasSuffix(path, "."+config.ImasExt) {
 		// swap out dot notation for slashes, but preserve extension
-		path = strings.TrimSuffix(path, "."+config.GrlxExt)
+		path = strings.TrimSuffix(path, "."+config.ImasExt)
 		path = strings.ReplaceAll(path, ".", string(filepath.Separator))
-		path = path + "." + config.GrlxExt
+		path = path + "." + config.ImasExt
 
 		ok, err := recipeExists(ctx, path)
 		if err != nil {
@@ -279,19 +279,19 @@ func ResolveRecipeFilePath(ctx context.Context, basepath string, recipeID Recipe
 		}
 		return path, nil
 	}
-	// at this point, we know the path doesn't end in .grlx
+	// at this point, we know the path doesn't end in .imas
 
 	path = strings.ReplaceAll(path, ".", string(filepath.Separator))
-	// check if path is a directory and contains init.grlx
-	initFile := filepath.Join(path, "init."+config.GrlxExt)
+	// check if path is a directory and contains init.imas
+	initFile := filepath.Join(path, "init."+config.ImasExt)
 	if ok, err := recipeExists(ctx, initFile); err != nil {
 		return "", err
 	} else if ok {
 		return initFile, nil
 	}
 
-	// check if path is a valid .grlx file
-	extPath := path + "." + config.GrlxExt
+	// check if path is a valid .imas file
+	extPath := path + "." + config.ImasExt
 	ok, err := recipeExists(ctx, extPath)
 	if err != nil {
 		return "", err

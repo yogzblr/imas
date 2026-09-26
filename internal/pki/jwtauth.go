@@ -1,7 +1,7 @@
 package pki
 
 // Decentralized NATS JWT auth bootstrap: Operator -> SYSTEM account ->
-// tenant Account. See docs/design/grlx-nats-jwt-auth-design.md.
+// tenant Account. See docs/design/imas-nats-jwt-auth-design.md.
 //
 // FLAG FOR SECURITY REVIEW: this file mints and persists the root Operator
 // keypair, which is the trust anchor for every tenant's isolation on the
@@ -25,8 +25,8 @@ import (
 	jwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/config"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 const natsAuthSubdir = "nats-auth"
@@ -35,7 +35,7 @@ const natsAuthSubdir = "nats-auth"
 // for this farmer: the Operator (root trust anchor, plus a delegated
 // signing key used for day-to-day Account issuance), the SYSTEM account
 // (used only to push claims updates to the bus's resolver) and the single
-// tenant Account that sprouts, the farmer, and grlx CLI admins belong to.
+// tenant Account that sprouts, the farmer, and imas CLI admins belong to.
 //
 // Multi-tenancy (workstream E) generalizes tenantPub/tenantJWT into one
 // Account per tenant; this struct intentionally holds just one for now.
@@ -159,7 +159,7 @@ func ensureNatsAuth() (*natsAuthMaterial, error) {
 	}
 	mat.tenantName = config.FarmerOrganization
 	if mat.tenantName == "" {
-		mat.tenantName = "grlx"
+		mat.tenantName = "imas"
 	}
 
 	// Operator claims: self-signed, names the SYSTEM account and delegates
@@ -236,7 +236,7 @@ func ensureNatsAuth() (*natsAuthMaterial, error) {
 	}
 	if needSysUserJWT {
 		uc := jwt.NewUserClaims(mat.sysUserPub)
-		uc.Name = "grlx-farmer-sys-push"
+		uc.Name = "imas-farmer-sys-push"
 		signed, encErr := uc.Encode(mat.sysAccountKP)
 		if encErr != nil {
 			return nil, encErr
@@ -281,15 +281,15 @@ func ensureNatsAuth() (*natsAuthMaterial, error) {
 // before touching disk, so a seed can be handed to the farmer process by
 // whatever secrets pipeline it's deployed with (e.g. Vault via External
 // Secrets Operator, materialized as a Kubernetes Secret) instead of being
-// generated and stored locally at all. GRLX_NATS_<NAME>_SEED_FILE takes a
+// generated and stored locally at all. IMAS_NATS_<NAME>_SEED_FILE takes a
 // path — the shape an ESO-synced Secret normally takes once mounted into
-// the pod as a volume — and GRLX_NATS_<NAME>_SEED takes the raw seed value
+// the pod as a volume — and IMAS_NATS_<NAME>_SEED takes the raw seed value
 // directly, for a Secret wired in via envFrom/secretKeyRef instead. The
 // _FILE form is preferred: unlike an env var, a mounted Secret volume isn't
 // inherited by child processes or liable to end up in a crash dump.
-const externalSeedEnvPrefix = "GRLX_NATS_"
+const externalSeedEnvPrefix = "IMAS_NATS_"
 
-// loadExternalSeed checks GRLX_NATS_<name>_SEED_FILE and GRLX_NATS_<name>_SEED
+// loadExternalSeed checks IMAS_NATS_<name>_SEED_FILE and IMAS_NATS_<name>_SEED
 // for an externally-supplied seed, in that order. It returns ok=false (no
 // error) when neither is set, so callers fall back to local generation.
 func loadExternalSeed(name string) (kp nkeys.KeyPair, ok bool, err error) {

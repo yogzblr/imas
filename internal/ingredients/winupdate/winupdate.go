@@ -1,12 +1,12 @@
 //go:build windows
 
-// Package winupdate implements grlx's win_update ingredient: searching
+// Package winupdate implements imas's win_update ingredient: searching
 // for and installing Windows Update Agent (WUA) updates, matching the
 // relevant surface of Salt's win_wua module. It drives the WUA COM API
 // (Microsoft.Update.Session -> IUpdateSession/IUpdateSearcher/
 // IUpdateDownloader/IUpdateInstaller) the same way Salt's Python
 // implementation drives it through win32com.client.Dispatch. See G.6
-// in docs/design/grlx-windows-parity-addendum.md; the COM lifecycle
+// in docs/design/imas-windows-parity-addendum.md; the COM lifecycle
 // pattern (locked OS thread, single-threaded apartment, explicit
 // Release of every acquired IDispatch) follows the one the
 // winshortcut ingredient established.
@@ -39,9 +39,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/winexec"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients/winexec"
 )
 
 const ingredientName = "win_update"
@@ -56,7 +56,7 @@ var (
 // Compile-time interface check.
 var _ cook.RecipeCooker = Update{}
 
-// Update is a grlx ingredient for installing Windows Update Agent
+// Update is a imas ingredient for installing Windows Update Agent
 // updates by KB article ID.
 type Update struct {
 	id     string

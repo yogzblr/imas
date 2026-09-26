@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/fleetsign"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/fleetsign"
 )
 
 func testFleetJWKS(t *testing.T) (fleetsign.KeySet, []byte) {

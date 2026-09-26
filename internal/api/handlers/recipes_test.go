@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/objectstore/objectstoretest"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
 )
 
 func setupRecipeHandlerTest(t *testing.T) {
@@ -22,8 +22,8 @@ func setupRecipeHandlerTest(t *testing.T) {
 	t.Cleanup(func() { config.RecipeDir = origDir })
 
 	objectstoretest.Seed(t, store, map[string]string{
-		"recipes/webserver/nginx.grlx":   "pkg.installed:\n  - name: nginx\n",
-		"recipes/database/postgres.grlx": "pkg.installed:\n  - name: postgresql\n",
+		"recipes/webserver/nginx.imas":   "pkg.installed:\n  - name: nginx\n",
+		"recipes/database/postgres.imas": "pkg.installed:\n  - name: postgresql\n",
 		"recipes/README.md":              "not a recipe",
 	})
 }

@@ -8,8 +8,8 @@ import (
 
 	"github.com/taigrr/openrc"
 
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/service"
+	"github.com/yogzblr/imas/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients/service"
 )
 
 // ErrMaskNotSupported is returned when mask/unmask is attempted on OpenRC,

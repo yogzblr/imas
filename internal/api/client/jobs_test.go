@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/jobs"
+	"github.com/yogzblr/imas/internal/jobs"
 )
 
 func TestListJobs_Success(t *testing.T) {
@@ -15,7 +15,7 @@ func TestListJobs_Success(t *testing.T) {
 		{JID: "jid-001", SproutID: "web-01", Status: jobs.JobSucceeded, StartedAt: time.Now().UTC(), Total: 5, Succeeded: 5},
 		{JID: "jid-002", SproutID: "db-01", Status: jobs.JobRunning, StartedAt: time.Now().UTC(), Total: 3, Succeeded: 1},
 	}
-	mockHandler(t, NatsConn, "grlx.api.jobs.list", want)
+	mockHandler(t, NatsConn, "imas.api.jobs.list", want)
 
 	got, err := ListJobs(10, "")
 	if err != nil {
@@ -36,7 +36,7 @@ func TestListJobs_Empty(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockHandler(t, NatsConn, "grlx.api.jobs.list", []jobs.JobSummary{})
+	mockHandler(t, NatsConn, "imas.api.jobs.list", []jobs.JobSummary{})
 
 	got, err := ListJobs(10, "")
 	if err != nil {
@@ -51,7 +51,7 @@ func TestListJobs_Error(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.jobs.list", "database error")
+	mockErrorHandler(t, NatsConn, "imas.api.jobs.list", "database error")
 
 	_, err := ListJobs(10, "")
 	if err == nil {
@@ -71,7 +71,7 @@ func TestGetJob_Success(t *testing.T) {
 		Total:     3,
 		Succeeded: 3,
 	}
-	mockHandler(t, NatsConn, "grlx.api.jobs.get", want)
+	mockHandler(t, NatsConn, "imas.api.jobs.get", want)
 
 	got, err := GetJob("jid-abc")
 	if err != nil {
@@ -89,7 +89,7 @@ func TestGetJob_NotFound(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.jobs.get", "job not found")
+	mockErrorHandler(t, NatsConn, "imas.api.jobs.get", "job not found")
 
 	_, err := GetJob("nonexistent")
 	if err == nil {
@@ -104,7 +104,7 @@ func TestListJobsForSprout_Success(t *testing.T) {
 	want := []jobs.JobSummary{
 		{JID: "jid-100", SproutID: "db-01", Status: jobs.JobSucceeded, Total: 2, Succeeded: 2},
 	}
-	mockHandler(t, NatsConn, "grlx.api.jobs.forsprout", want)
+	mockHandler(t, NatsConn, "imas.api.jobs.forsprout", want)
 
 	got, err := ListJobsForSprout("db-01")
 	if err != nil {
@@ -122,7 +122,7 @@ func TestDeleteJob_Success(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockHandler(t, NatsConn, "grlx.api.jobs.delete", map[string]string{"jid": "jid-del", "message": "job deleted"})
+	mockHandler(t, NatsConn, "imas.api.jobs.delete", map[string]string{"jid": "jid-del", "message": "job deleted"})
 
 	err := DeleteJob("jid-del")
 	if err != nil {
@@ -134,7 +134,7 @@ func TestDeleteJob_Error(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.jobs.delete", "job not found")
+	mockErrorHandler(t, NatsConn, "imas.api.jobs.delete", "job not found")
 
 	err := DeleteJob("nonexistent")
 	if err == nil {
@@ -146,7 +146,7 @@ func TestCancelJob_Success(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockHandler(t, NatsConn, "grlx.api.jobs.cancel", map[string]bool{"ok": true})
+	mockHandler(t, NatsConn, "imas.api.jobs.cancel", map[string]bool{"ok": true})
 
 	err := CancelJob("jid-cancel-me")
 	if err != nil {
@@ -158,7 +158,7 @@ func TestCancelJob_Error(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.jobs.cancel", "job already completed")
+	mockErrorHandler(t, NatsConn, "imas.api.jobs.cancel", "job already completed")
 
 	err := CancelJob("jid-done")
 	if err == nil {

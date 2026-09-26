@@ -1,6 +1,6 @@
 //go:build linux
 
-// Package firewall implements the H.2 grlx-linux-parity-addendum ingredient:
+// Package firewall implements the H.2 imas-linux-parity-addendum ingredient:
 // nftables table/chain/rule management via google/nftables, a pure-Go
 // netlink client. It replaces the fragile "shell to iptables and parse
 // iptables-save/iptables -L text" pattern Salt's iptables module uses with

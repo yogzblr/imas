@@ -5,8 +5,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/log"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	"github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // StartCohortRefresher launches a background goroutine that periodically

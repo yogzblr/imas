@@ -7,12 +7,12 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // TestSubscribe_UsesQueueGroup verifies that Subscribe registers its route
-// handlers as queue subscribers under the shared "grlx-core" queue group,
+// handlers as queue subscribers under the shared "imas-core" queue group,
 // rather than plain fan-out subscribers. This is the behavior workstream D
 // depends on: when multiple farmer replicas run behind the same NATS
 // subjects, exactly one replica should handle each API request instead of
@@ -90,7 +90,7 @@ func TestSubscribe_QueueGroupIsSharedAcrossRoutes(t *testing.T) {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
-	if natsCoreQueueGroup != "grlx-core" {
-		t.Fatalf("expected queue group %q, got %q", "grlx-core", natsCoreQueueGroup)
+	if natsCoreQueueGroup != "imas-core" {
+		t.Fatalf("expected queue group %q, got %q", "imas-core", natsCoreQueueGroup)
 	}
 }

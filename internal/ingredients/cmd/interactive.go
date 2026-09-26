@@ -11,11 +11,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/log"
 	nats "github.com/nats-io/nats.go"
+	"github.com/yogzblr/imas/internal/log"
 
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // nc is the single connection a sprout process registers via
@@ -31,7 +31,7 @@ func RegisterNatsConn(conn *nats.Conn) {
 // farmerConns holds farmer's own per-tenant NATS connections — the
 // counterpart to nc above, but keyed by tenant since a single farmer
 // process now holds one connection per tenant (see
-// docs/design/grlx-tenant-context-threading.md's Option A). Only FRun
+// docs/design/imas-tenant-context-threading.md's Option A). Only FRun
 // (farmer's outbound leg) reads this; sprout never calls
 // RegisterFarmerNatsConn.
 var (
@@ -73,7 +73,7 @@ func FRun(tenantID string, target pki.KeyManager, cmdRun apitypes.CmdRun) (apity
 	if conn == nil {
 		return results, fmt.Errorf("cmd: no NATS connection registered for tenant %s", tenantID)
 	}
-	topic := "grlx.sprouts." + target.SproutID + ".cmd.run"
+	topic := "imas.sprouts." + target.SproutID + ".cmd.run"
 	b, _ := json.Marshal(cmdRun)
 	msg, err := conn.Request(topic, b, time.Second*15+cmdRun.Timeout)
 	if err != nil {

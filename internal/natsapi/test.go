@@ -6,9 +6,9 @@ import (
 	"strings"
 	"sync"
 
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/test"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/ingredients/test"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 func handleTestPing(tenantID string, params json.RawMessage) (any, error) {

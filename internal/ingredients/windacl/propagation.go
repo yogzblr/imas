@@ -11,7 +11,7 @@ import (
 // Propagation controls which of an object's descendants an ACE also
 // applies to, matching the addendum's "KEY/KEY&SUBKEYS/SUBKEYS"
 // propagation model (see G.4 in
-// docs/design/grlx-windows-parity-addendum.md, which in turn mirrors
+// docs/design/imas-windows-parity-addendum.md, which in turn mirrors
 // Salt's win_dacl propagation choices for registry keys). The same
 // three values are accepted for files, where they mean "this file or
 // folder" / "this folder, its subfolders and the files in them" /

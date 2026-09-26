@@ -2,7 +2,7 @@
 // CloudXP's release pipeline runs it once per release with the version,
 // artifact URL and SHA-256 it just published; it signs the canonical
 // string version|artifact_url|checksum_sha256 with the OpenBao Transit
-// key grlx-fleet-signing (Ed25519) and writes the row, signature
+// key imas-fleet-signing (Ed25519) and writes the row, signature
 // included, straight into saas.fleet_versions over its own database
 // credential. See docs/design/cloudxp-machine-manager-api-design.md §2.5.
 //
@@ -32,14 +32,14 @@ import (
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 
-	"github.com/gogrlx/grlx/v2/internal/fleetsign"
+	"github.com/yogzblr/imas/internal/fleetsign"
 )
 
 // EnvDSN is fleetreleaser's own GORM MySQL DSN for the saas schema. It
 // is a dedicated database user (SELECT, INSERT and UPDATE(signature) on
 // saas.fleet_versions only; see deploy/fleetreleaser/README.md), never
 // saasapi's saas_svc.
-const EnvDSN = "GRLX_FLEETRELEASER_DSN"
+const EnvDSN = "IMAS_FLEETRELEASER_DSN"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))

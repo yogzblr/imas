@@ -1,4 +1,4 @@
-// Package log provides a multiplexed logger for grlx that fans out to
+// Package log provides a multiplexed logger for imas that fans out to
 // charmbracelet/log (structured terminal output) and log-nats (NATS bus).
 // It exposes package-level functions matching the log-socket API for
 // drop-in replacement.

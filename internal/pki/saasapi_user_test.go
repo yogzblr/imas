@@ -12,7 +12,7 @@ import (
 // TestSaaSAPIUserPermissions_ExactAllowLists pins the SaaS API User's
 // entire NATS reach. It exists to fail loudly on any widening — this
 // credential lives in the SYS Account, where an over-broad allow-list
-// means server-administration reach (docs/design/grlx-internal-api-account.md).
+// means server-administration reach (docs/design/imas-internal-api-account.md).
 // If you're changing these lists, that's a security-review change: update
 // the design doc's permission table alongside this test.
 func TestSaaSAPIUserPermissions_ExactAllowLists(t *testing.T) {
@@ -130,7 +130,7 @@ func TestEnsureSaaSAPICredential_ExternalSeedIsUsedAndNeverPersisted(t *testing.
 	kp, _ := nkeys.CreateUser()
 	seed, _ := kp.Seed()
 	pub, _ := kp.PublicKey()
-	t.Setenv("GRLX_NATS_SAASAPI_USER_SEED", string(seed))
+	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED", string(seed))
 
 	userJWT, gotSeed, err := EnsureSaaSAPICredential()
 	if err != nil {
@@ -152,7 +152,7 @@ func TestEnsureSaaSAPICredential_RejectsNonUserSeed(t *testing.T) {
 	setupTestPKI(t)
 	kp, _ := nkeys.CreateAccount()
 	seed, _ := kp.Seed()
-	t.Setenv("GRLX_NATS_SAASAPI_USER_SEED", string(seed))
+	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED", string(seed))
 	if _, _, err := EnsureSaaSAPICredential(); err == nil {
 		t.Fatal("expected an Account seed to be rejected as the SaaS API's User key")
 	}

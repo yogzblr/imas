@@ -4,16 +4,16 @@
 // removing certificates from a Windows certificate store via the PKI
 // PowerShell module (Import-Certificate / Cert: drive), the same
 // PowerShell surface Salt itself shells out to. See G.8 in
-// docs/design/grlx-windows-parity-addendum.md.
+// docs/design/imas-windows-parity-addendum.md.
 package winpki
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/winexec"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients/winexec"
 )
 
 const ingredientName = "win_pki"

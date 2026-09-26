@@ -1,11 +1,11 @@
-// Package audit provides per-user audit logging for grlx farmer actions.
+// Package audit provides per-user audit logging for imas farmer actions.
 //
 // Every authenticated API action (cook, key accept, job cancel, prop changes,
 // etc.) is recorded as a JSONL entry with the user's identity, timestamp,
 // action type, and relevant targets.
 //
 // The audit log is append-only and written to a configurable directory
-// (default: /var/log/grlx/audit/). Files are rotated daily.
+// (default: /var/log/imas/audit/). Files are rotated daily.
 package audit
 
 import (

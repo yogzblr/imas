@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/fleetsign"
+	"github.com/yogzblr/imas/internal/fleetsign"
 )
 
-// transitKeys stands in for grlx-fleet-signing's versions in Transit.
+// transitKeys stands in for imas-fleet-signing's versions in Transit.
 type transitKeys struct {
 	priv map[int]ed25519.PrivateKey
 	pub  map[int]ed25519.PublicKey

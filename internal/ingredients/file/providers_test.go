@@ -92,7 +92,7 @@ func TestMain(m *testing.M) {
 	provMap["file"] = testLocalFile{}
 	provMap["http"] = testHTTPFile{}
 	provMap["https"] = testHTTPFile{}
-	provMap["grlx"] = testHTTPFile{}
+	provMap["imas"] = testHTTPFile{}
 	os.Exit(m.Run())
 }
 
@@ -100,7 +100,7 @@ func TestMain(m *testing.M) {
 var tempFile string
 
 func init() {
-	f, err := os.CreateTemp("", "grlx-test-source-*")
+	f, err := os.CreateTemp("", "imas-test-source-*")
 	if err != nil {
 		panic(err)
 	}

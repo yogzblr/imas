@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/gogrlx/grlx/v2/internal/jobs"
+	"github.com/yogzblr/imas/internal/jobs"
 )
 
 // ListJobs retrieves all recent jobs from the farmer, up to limit.

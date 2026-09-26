@@ -8,11 +8,11 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/objectstore/objectstoretest"
-	"github.com/gogrlx/grlx/v2/internal/pki"
-	"github.com/gogrlx/grlx/v2/internal/props"
-	"github.com/gogrlx/grlx/v2/internal/rbac"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
+	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/props"
+	"github.com/yogzblr/imas/internal/rbac"
 )
 
 // sharedPKIDB is the package-wide fallback PKI store installed by TestMain.
@@ -67,7 +67,7 @@ func TestMain(m *testing.M) {
 	// internal/cook (handleCook's SendCookEvent call chain reads through
 	// cook's own store). The old natsapi recipe list/get handlers that
 	// also used to share this store are gone (see
-	// docs/design/grlx-fork-roadmap.md workstream I) — that browse
+	// docs/design/imas-fork-roadmap.md workstream I) — that browse
 	// surface now lives in internal/api/handlers/recipes.go instead.
 	store, closeStore, err := objectstoretest.NewStoreForBinary()
 	if err != nil {

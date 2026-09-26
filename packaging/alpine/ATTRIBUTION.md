@@ -1,6 +1,6 @@
 # Attribution Notice
 
-The contents of this directory are sourced, with light modification, from the [official Alpine repos](https://gitlab.alpinelinux.org/alpine/aports/-/tree/master/community/grlx).
+The contents of this directory are sourced, with light modification, from the [official Alpine repos](https://gitlab.alpinelinux.org/alpine/aports/-/tree/master/community/imas).
 
 Alpine recipies and the aports respository generally are MIT-Licensed.
 

@@ -45,8 +45,8 @@ func TestUIHandlerServesEmbeddedUI(t *testing.T) {
 	if len(body) == 0 {
 		t.Fatal("expected non-empty body")
 	}
-	if !strings.Contains(body, "grlx") {
-		t.Fatal("expected embedded UI to contain 'grlx'")
+	if !strings.Contains(body, "imas") {
+		t.Fatal("expected embedded UI to contain 'imas'")
 	}
 }
 
@@ -402,7 +402,7 @@ func TestHandleOpenAPI(t *testing.T) {
 	if !strings.Contains(body, "openapi: 3.1.0") {
 		t.Fatal("expected OpenAPI 3.1 spec in response body")
 	}
-	if !strings.Contains(body, "grlx CLI API") {
+	if !strings.Contains(body, "imas CLI API") {
 		t.Fatal("expected API title in response body")
 	}
 }

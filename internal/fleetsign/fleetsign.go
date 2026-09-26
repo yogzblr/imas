@@ -1,7 +1,7 @@
 // Package fleetsign is the verify side of sprout release signing: the
 // canonical string a fleet_versions row is signed over, the signature
 // encoding stored in saas.fleet_versions.signature, Ed25519 verification
-// against a set of grlx-fleet-signing public keys, and the JWKS encoding
+// against a set of imas-fleet-signing public keys, and the JWKS encoding
 // those public keys travel in (farmer's ungated
 // /v1/.well-known/fleet-signing-jwks.json, the POST /v1/enroll response,
 // and the sprout's pinned copy on disk). See
@@ -9,7 +9,7 @@
 //
 // FLAG FOR SECURITY REVIEW. This package is imported by farmer, saasapi
 // and sprout, and deliberately contains no signing code at all: the only
-// holder of Transit sign capability on grlx-fleet-signing is
+// holder of Transit sign capability on imas-fleet-signing is
 // cmd/fleetreleaser, a separate binary with its own OpenBao identity.
 // That split is enforced by OpenBao policy (deploy/fleetreleaser/), not
 // by this package's shape — TestNoSigningCodeInPackage only keeps the
@@ -30,8 +30,8 @@ import (
 
 // DefaultTransitKeyName is the OpenBao Transit key sprout releases are
 // signed with: Ed25519, non-exportable, and distinct from
-// internal/gatewayjwt's grlx-gateway-jwt key.
-const DefaultTransitKeyName = "grlx-fleet-signing"
+// internal/gatewayjwt's imas-gateway-jwt key.
+const DefaultTransitKeyName = "imas-fleet-signing"
 
 // The one-step job farmer sends a sprout for a self_update action: the
 // sprout's selfupdate ingredient (internal/ingredients/selfupdate), method
@@ -161,13 +161,13 @@ func DecodeSignature(s string) (keyVersion int, sig []byte, err error) {
 	return keyVersion, sig, nil
 }
 
-// PublicKey is one version of the grlx-fleet-signing Transit key.
+// PublicKey is one version of the imas-fleet-signing Transit key.
 type PublicKey struct {
 	Version int
 	Key     ed25519.PublicKey
 }
 
-// KeySet is every grlx-fleet-signing key version a verifier trusts,
+// KeySet is every imas-fleet-signing key version a verifier trusts,
 // sorted by ascending Version.
 type KeySet []PublicKey
 

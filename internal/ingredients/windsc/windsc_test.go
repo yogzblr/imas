@@ -5,7 +5,7 @@ package windsc
 import (
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 func TestParseRequiresName(t *testing.T) {

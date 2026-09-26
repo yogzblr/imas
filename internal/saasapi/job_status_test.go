@@ -9,7 +9,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 
-	"github.com/gogrlx/grlx/v2/internal/jobs"
+	"github.com/yogzblr/imas/internal/jobs"
 )
 
 // mustInsertFarmerJobStatus upserts a farmer.job_status row, standing in

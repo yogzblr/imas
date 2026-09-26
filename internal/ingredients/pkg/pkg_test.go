@@ -3,8 +3,8 @@ package pkg
 import (
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
 	"github.com/gogrlx/snack"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 func TestMethods(t *testing.T) {

@@ -1,6 +1,6 @@
 package selfupdate
 
-// Which grlx-fleet-signing key versions a sprout verifies a release
+// Which imas-fleet-signing key versions a sprout verifies a release
 // against (design doc §2.5, "Key rotation").
 //
 // FLAG FOR SECURITY REVIEW. The root of trust is the sprout's existing
@@ -9,7 +9,7 @@ package selfupdate
 // enrollment. So:
 //
 //  1. Live set (authoritative). The key set is fetched from farmer over
-//     that connection (internal/fleetkeys, grlx.sprouts.<id>.fleetsigningkeys):
+//     that connection (internal/fleetkeys, imas.sprouts.<id>.fleetsigningkeys):
 //     every Transit version at or above min_decryption_version, i.e.
 //     every version Transit's own /verify still accepts, including those
 //     below min_encryption_version during a rotation grace period
@@ -34,9 +34,9 @@ package selfupdate
 // Why a live fetch is not "trust on first fetch, i.e. no pinning at all":
 // the channel itself is pinned (SproutRootCA + the sprout's JWT + a
 // Publish grant on its own subject only), and whoever can answer on it —
-// farmer, or another User in the tenant Account with the grlx.> template —
+// farmer, or another User in the tenant Account with the imas.> template —
 // can already run arbitrary commands on the sprout via
-// grlx.sprouts.<id>.cmd.run, so a forged key set gives them nothing new.
+// imas.sprouts.<id>.cmd.run, so a forged key set gives them nothing new.
 // What signing still guards against is everyone who is NOT on that
 // channel: saasapi and anything else that can write saas.fleet_versions,
 // and the artifact host. See internal/fleetkeys' package doc.
@@ -51,11 +51,11 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/fleetkeys"
-	"github.com/gogrlx/grlx/v2/internal/fleetsign"
-	log "github.com/gogrlx/grlx/v2/internal/log"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/fleetkeys"
+	"github.com/yogzblr/imas/internal/fleetsign"
+	log "github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // ErrLiveKeysUnavailable: the live key fetch failed after one had already

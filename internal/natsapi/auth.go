@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
-	intauth "github.com/gogrlx/grlx/v2/internal/auth"
-	"github.com/gogrlx/grlx/v2/internal/rbac"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
+	intauth "github.com/yogzblr/imas/internal/auth"
+	"github.com/yogzblr/imas/internal/rbac"
 )
 
 // AuthParams holds the user's auth token for identity resolution.

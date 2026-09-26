@@ -4,7 +4,7 @@
 // win_pki/certutil-backed workflow: adding/removing a certificate from a
 // Windows certificate store via certutil.exe, the same CLI tool Salt's
 // own tooling shells out to for this. See G.9 in
-// docs/design/grlx-windows-parity-addendum.md.
+// docs/design/imas-windows-parity-addendum.md.
 //
 // This is deliberately narrower than internal/ingredients/winpki (which
 // uses the PowerShell PKI module's Cert: drive): certutil.exe works
@@ -17,9 +17,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/winexec"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients/winexec"
 )
 
 const ingredientName = "win_certutil"

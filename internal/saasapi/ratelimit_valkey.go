@@ -9,13 +9,13 @@ import (
 	"github.com/valkey-io/valkey-go"
 	"golang.org/x/time/rate"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 // valkeyLimiterKeyPrefix namespaces this service's rate-limit keys, in
-// the same "grlx:<area>:" style as internal/heartbeat's keys, so the
+// the same "imas:<area>:" style as internal/heartbeat's keys, so the
 // limiter can share farmer's Valkey without colliding with anything.
-const valkeyLimiterKeyPrefix = "grlx:saasapi:ratelimit:"
+const valkeyLimiterKeyPrefix = "imas:saasapi:ratelimit:"
 
 // valkeyLimiterTimeout bounds one limiter round trip. An in-cluster
 // Valkey answers in about a millisecond; if it takes longer than this,

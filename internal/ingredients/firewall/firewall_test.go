@@ -7,8 +7,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 func TestMethodsAdvertisesAllSix(t *testing.T) {
@@ -50,7 +50,7 @@ func TestParseInvalidMethod(t *testing.T) {
 
 func TestRegisteredWithIngredientsRegistry(t *testing.T) {
 	step, err := ingredients.NewRecipeCooker("step1", "firewall", MethodTablePresent, map[string]interface{}{
-		"name": "grlx",
+		"name": "imas",
 	})
 	if err != nil {
 		t.Fatalf("NewRecipeCooker: %v", err)
@@ -113,7 +113,7 @@ func TestApplyEndToEndTableChainRule(t *testing.T) {
 }
 
 func TestPropertiesRoundTrip(t *testing.T) {
-	params := map[string]interface{}{"name": "grlx", "family": "ip"}
+	params := map[string]interface{}{"name": "imas", "family": "ip"}
 	fw, err := (Firewall{}).Parse("id", MethodTablePresent, params)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
@@ -122,8 +122,8 @@ func TestPropertiesRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Properties: %v", err)
 	}
-	if got["name"] != "grlx" {
-		t.Fatalf("Properties()[name] = %v, want grlx", got["name"])
+	if got["name"] != "imas" {
+		t.Fatalf("Properties()[name] = %v, want imas", got["name"])
 	}
 }
 

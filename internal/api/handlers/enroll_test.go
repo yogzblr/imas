@@ -14,10 +14,10 @@ import (
 
 	"golang.org/x/crypto/nacl/box"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/fleetsign"
-	"github.com/gogrlx/grlx/v2/internal/gatewayjwt"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/fleetsign"
+	"github.com/yogzblr/imas/internal/gatewayjwt"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // withFakeTenantBoxOpenBao points pki's tenant X25519 keypair custody
@@ -36,7 +36,7 @@ func withFakeTenantBoxOpenBao(t *testing.T) {
 	}
 	const token = "test-token"
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/secret/data/grlx/tenant-x25519", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/secret/data/imas/tenant-x25519", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Vault-Token") != token {
 			w.WriteHeader(http.StatusForbidden)
 			return
@@ -56,7 +56,7 @@ func withFakeTenantBoxOpenBao(t *testing.T) {
 
 	t.Setenv(pki.EnvTenantBoxOpenBaoAddr, ts.URL)
 	t.Setenv(pki.EnvTenantBoxOpenBaoKVMount, "secret")
-	t.Setenv(pki.EnvTenantBoxOpenBaoKVPath, "grlx/tenant-x25519")
+	t.Setenv(pki.EnvTenantBoxOpenBaoKVPath, "imas/tenant-x25519")
 	t.Setenv(pki.EnvTenantBoxOpenBaoAuthMethod, pki.TenantBoxAuthMethodToken)
 	t.Setenv(pki.EnvTenantBoxOpenBaoToken, token)
 }

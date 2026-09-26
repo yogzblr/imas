@@ -7,9 +7,9 @@ import (
 
 func TestParseBytesRoundTrip(t *testing.T) {
 	f := NewFile()
-	f.Upsert(Entry{Key: `Software\Policies\Grlx`, ValueName: "EnableFeature", Type: RegDWORD, Data: dwordBytes(1)})
-	f.Upsert(Entry{Key: `Software\Policies\Grlx`, ValueName: "Label", Type: RegSZ, Data: utf16leString("hello")})
-	f.Upsert(Entry{Key: `Software\Policies\Grlx`, ValueName: "", Type: RegSZ, Data: utf16leString("default value")})
+	f.Upsert(Entry{Key: `Software\Policies\Imas`, ValueName: "EnableFeature", Type: RegDWORD, Data: dwordBytes(1)})
+	f.Upsert(Entry{Key: `Software\Policies\Imas`, ValueName: "Label", Type: RegSZ, Data: utf16leString("hello")})
+	f.Upsert(Entry{Key: `Software\Policies\Imas`, ValueName: "", Type: RegSZ, Data: utf16leString("default value")})
 
 	raw := f.Bytes()
 	got, err := Parse(raw)

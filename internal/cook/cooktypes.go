@@ -204,9 +204,9 @@ func (r Requisite) Equals(other Requisite) bool {
 // so (Un)MarshalJSON can delegate to encoding/json without recursing.
 type stepCompletionFields StepCompletion
 
-// errLegacyStepError stands in for an Error that an older grlx encoded as
+// errLegacyStepError stands in for an Error that an older imas encoded as
 // `{}`, which kept that the step errored but lost the message.
-var errLegacyStepError = errors.New("step error (message not recorded by the sending grlx version)")
+var errLegacyStepError = errors.New("step error (message not recorded by the sending imas version)")
 
 // MarshalJSON encodes Error as its message string, or null when Error is
 // nil. encoding/json would otherwise write a non-nil error as `{}`, which

@@ -11,7 +11,7 @@ import (
 
 	"github.com/nats-io/nkeys"
 
-	"github.com/gogrlx/grlx/v2/internal/gatewayjwt"
+	"github.com/yogzblr/imas/internal/gatewayjwt"
 )
 
 // fakeEnrollmentKeyStore is an in-memory stand-in for mysqlEnrollmentKeyStore

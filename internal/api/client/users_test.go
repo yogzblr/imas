@@ -3,8 +3,8 @@ package client
 import (
 	"testing"
 
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
-	"github.com/gogrlx/grlx/v2/internal/rbac"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/rbac"
 )
 
 func TestWhoAmI_Success(t *testing.T) {
@@ -15,7 +15,7 @@ func TestWhoAmI_Success(t *testing.T) {
 		Pubkey:   "NKEY123ABC",
 		RoleName: "admin",
 	}
-	mockHandler(t, NatsConn, "grlx.api.auth.whoami", want)
+	mockHandler(t, NatsConn, "imas.api.auth.whoami", want)
 
 	got, err := WhoAmI()
 	if err != nil {
@@ -33,7 +33,7 @@ func TestWhoAmI_Error(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.auth.whoami", "unauthenticated")
+	mockErrorHandler(t, NatsConn, "imas.api.auth.whoami", "unauthenticated")
 
 	_, err := WhoAmI()
 	if err == nil {
@@ -54,7 +54,7 @@ func TestExplainAccess_Success(t *testing.T) {
 			{Action: rbac.ActionShell, Scope: "web-*"},
 		},
 	}
-	mockHandler(t, NatsConn, "grlx.api.auth.explain", want)
+	mockHandler(t, NatsConn, "imas.api.auth.explain", want)
 
 	got, err := ExplainAccess()
 	if err != nil {
@@ -75,7 +75,7 @@ func TestExplainAccess_Error(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.auth.explain", "not authorized")
+	mockErrorHandler(t, NatsConn, "imas.api.auth.explain", "not authorized")
 
 	_, err := ExplainAccess()
 	if err == nil {
@@ -97,7 +97,7 @@ func TestListUsers_Success(t *testing.T) {
 			{Name: "operator", Rules: []rbac.Rule{{Action: rbac.ActionCook, Scope: "*"}}},
 		},
 	}
-	mockHandler(t, NatsConn, "grlx.api.auth.users", want)
+	mockHandler(t, NatsConn, "imas.api.auth.users", want)
 
 	got, err := ListUsers()
 	if err != nil {
@@ -118,7 +118,7 @@ func TestListUsers_Error(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.auth.users", "forbidden")
+	mockErrorHandler(t, NatsConn, "imas.api.auth.users", "forbidden")
 
 	_, err := ListUsers()
 	if err == nil {
@@ -134,7 +134,7 @@ func TestAddUser_Success(t *testing.T) {
 		Success: true,
 		Message: "user added",
 	}
-	mockHandler(t, NatsConn, "grlx.api.auth.users.add", want)
+	mockHandler(t, NatsConn, "imas.api.auth.users.add", want)
 
 	got, err := AddUser("NKEY_NEW", "operator")
 	if err != nil {
@@ -152,7 +152,7 @@ func TestAddUser_Error(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.auth.users.add", "role not found")
+	mockErrorHandler(t, NatsConn, "imas.api.auth.users.add", "role not found")
 
 	_, err := AddUser("NKEY_NEW", "nonexistent-role")
 	if err == nil {
@@ -164,7 +164,7 @@ func TestAddUser_BadJSON(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockBadJSONHandler(t, NatsConn, "grlx.api.auth.users.add")
+	mockBadJSONHandler(t, NatsConn, "imas.api.auth.users.add")
 
 	_, err := AddUser("NKEY_NEW", "admin")
 	if err == nil {
@@ -180,7 +180,7 @@ func TestRemoveUser_Success(t *testing.T) {
 		Success: true,
 		Message: "user removed",
 	}
-	mockHandler(t, NatsConn, "grlx.api.auth.users.remove", want)
+	mockHandler(t, NatsConn, "imas.api.auth.users.remove", want)
 
 	got, err := RemoveUser("NKEY_OLD")
 	if err != nil {
@@ -195,7 +195,7 @@ func TestRemoveUser_Error(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.auth.users.remove", "user not found")
+	mockErrorHandler(t, NatsConn, "imas.api.auth.users.remove", "user not found")
 
 	_, err := RemoveUser("NKEY_MISSING")
 	if err == nil {
@@ -207,7 +207,7 @@ func TestRemoveUser_BadJSON(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockBadJSONHandler(t, NatsConn, "grlx.api.auth.users.remove")
+	mockBadJSONHandler(t, NatsConn, "imas.api.auth.users.remove")
 
 	_, err := RemoveUser("NKEY_OLD")
 	if err == nil {
@@ -221,7 +221,7 @@ func TestWhoAmI_BadJSON(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockBadJSONHandler(t, NatsConn, "grlx.api.auth.whoami")
+	mockBadJSONHandler(t, NatsConn, "imas.api.auth.whoami")
 
 	_, err := WhoAmI()
 	if err == nil {
@@ -233,7 +233,7 @@ func TestExplainAccess_BadJSON(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockBadJSONHandler(t, NatsConn, "grlx.api.auth.explain")
+	mockBadJSONHandler(t, NatsConn, "imas.api.auth.explain")
 
 	_, err := ExplainAccess()
 	if err == nil {
@@ -245,7 +245,7 @@ func TestListUsers_BadJSON(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockBadJSONHandler(t, NatsConn, "grlx.api.auth.users")
+	mockBadJSONHandler(t, NatsConn, "imas.api.auth.users")
 
 	_, err := ListUsers()
 	if err == nil {

@@ -1,7 +1,7 @@
 // Recipe browsing over farmer's dedicated HTTP endpoint
 // (internal/api/handlers/recipes.go's ListRecipes/GetRecipe), replacing
-// the old grlx.api.recipes.list/recipes.get NATS methods — see
-// docs/design/grlx-fork-roadmap.md workstream I. Authenticates with the
+// the old imas.api.recipes.list/recipes.get NATS methods — see
+// docs/design/imas-fork-roadmap.md workstream I. Authenticates with the
 // same signed NKey token NatsRequest injects into NATS payloads (see
 // auth.NewToken), carried here as the Authorization header
 // internal/api/middleware.go's Auth expects.
@@ -18,8 +18,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/auth"
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/auth"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 // RecipeInfo mirrors handlers.RecipeInfo for CLI/web UI unmarshaling.
@@ -41,16 +41,16 @@ type RecipeContent struct {
 const recipeHTTPTimeout = 30 * time.Second
 
 // farmerRecipeClient builds an HTTPS client trusted against the same root
-// CA NewNatsClient uses, so it works wherever pki.LoadRootCA("grlx") has
+// CA NewNatsClient uses, so it works wherever pki.LoadRootCA("imas") has
 // already run (root.go's PersistentPreRun, ahead of every CLI command).
 func farmerRecipeClient() (*http.Client, error) {
 	certPool := x509.NewCertPool()
-	rootPEM, err := os.ReadFile(config.GrlxRootCA)
+	rootPEM, err := os.ReadFile(config.ImasRootCA)
 	if err != nil || rootPEM == nil {
-		return nil, fmt.Errorf("failed to read root CA from %q: %w", config.GrlxRootCA, err)
+		return nil, fmt.Errorf("failed to read root CA from %q: %w", config.ImasRootCA, err)
 	}
 	if !certPool.AppendCertsFromPEM(rootPEM) {
-		return nil, fmt.Errorf("failed to parse root CA from %q", config.GrlxRootCA)
+		return nil, fmt.Errorf("failed to parse root CA from %q", config.ImasRootCA)
 	}
 	tlsCfg := &tls.Config{
 		ServerName: config.FarmerInterface,

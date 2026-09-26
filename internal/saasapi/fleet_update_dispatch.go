@@ -45,7 +45,7 @@
 // The rollout runs in a background goroutine in the process that accepted
 // the POST, like §1.5's dispatch. If that process exits, unsent items stay
 // queued until the outbox sweeper exists (deferred, see
-// docs/design/grlx-internal-api-account.md).
+// docs/design/imas-internal-api-account.md).
 package saasapi
 
 import (
@@ -62,9 +62,9 @@ import (
 	"github.com/nats-io/nats.go"
 	"gorm.io/gorm"
 
-	"github.com/gogrlx/grlx/v2/internal/controlplane"
-	"github.com/gogrlx/grlx/v2/internal/fleetsign"
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/controlplane"
+	"github.com/yogzblr/imas/internal/fleetsign"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 // fleetUpdateDispatchEnabled is the feature flag. It defaults to false.
@@ -76,7 +76,7 @@ var fleetUpdateDispatchEnabled bool
 // only if the flag is on at that point.
 //
 // Don't turn it on in a deployment until sprout has a real signed
-// self-update path (gogrlx/grlx#286; design doc §1.8, §6).
+// self-update path (yogzblr/imas#286; design doc §1.8, §6).
 func SetFleetUpdateDispatchEnabled(enabled bool) { fleetUpdateDispatchEnabled = enabled }
 
 // Rollout gates. A gate decides when a wave counts as passed, so the next
@@ -154,14 +154,14 @@ type fleetUpdateRequest struct {
 // in the shape design doc §2.2 gives, signature included (§2.5).
 type farmerSelfUpdate = controlplane.SelfUpdateParams
 
-// fleetKeys is the READ-ONLY grlx-fleet-signing key source catalog rows
+// fleetKeys is the READ-ONLY imas-fleet-signing key source catalog rows
 // are verified against before a rollout is created (§2.5). Set once at
 // startup by SetFleetKeySource; while nil, every rollout is refused.
 var fleetKeys fleetsign.KeySetSource
 
 // SetFleetKeySource installs the key source. Like SetDB, call it once at
-// startup. The OpenBao token behind it (GRLX_FLEETSIGN_OPENBAO_*) must
-// carry only the read-only grlx-fleet-verify policy: saasapi can write
+// startup. The OpenBao token behind it (IMAS_FLEETSIGN_OPENBAO_*) must
+// carry only the read-only imas-fleet-verify policy: saasapi can write
 // saas.fleet_versions, so it must never also be able to sign rows
 // (deploy/fleetreleaser/README.md).
 func SetFleetKeySource(src fleetsign.KeySetSource) { fleetKeys = src }
@@ -333,7 +333,7 @@ func parseUpdateGate(w http.ResponseWriter, gate string) (string, bool) {
 // selfUpdateParams builds the farmer params for v. The catalog is written
 // by cmd/fleetreleaser, not by a tenant, but an entry that a sprout
 // couldn't use safely (no https artifact URL, a malformed checksum) or
-// whose signature doesn't verify against the grlx-fleet-signing key — an
+// whose signature doesn't verify against the imas-fleet-signing key — an
 // un-migrated row with no signature included — is refused here rather
 // than sent to a whole fleet. Farmer and the sprout each verify it again;
 // this is the early, whole-batch refusal, not the only one.

@@ -15,10 +15,10 @@ import (
 	"github.com/nats-io/nats.go"
 	"gorm.io/gorm"
 
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
-	"github.com/gogrlx/grlx/v2/internal/config"
-	icmd "github.com/gogrlx/grlx/v2/internal/ingredients/cmd"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/config"
+	icmd "github.com/yogzblr/imas/internal/ingredients/cmd"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // setupCmdTestPKI wires up an in-memory PKI store (see
@@ -89,7 +89,7 @@ func startCmdTestNATS(t *testing.T) (*nats.Conn, func()) {
 	}
 	// HCmdRun dispatches through cmd.FRun using pki.CurrentTenantID() (the
 	// HTTP admin API's documented ceiling — see
-	// docs/design/grlx-tenant-context-threading.md), so tests register the
+	// docs/design/imas-tenant-context-threading.md), so tests register the
 	// farmer-side connection under that same tenant.
 	tenantID := pki.CurrentTenantID()
 	icmd.RegisterFarmerNatsConn(tenantID, conn)
@@ -220,7 +220,7 @@ func TestHCmdRun_SingleSproutSuccess(t *testing.T) {
 		ErrCode: 0,
 	}
 	respBytes, _ := json.Marshal(mockResp)
-	sub, err := conn.Subscribe("grlx.sprouts.sprout1.cmd.run", func(msg *nats.Msg) {
+	sub, err := conn.Subscribe("imas.sprouts.sprout1.cmd.run", func(msg *nats.Msg) {
 		_ = msg.Respond(respBytes)
 	})
 	if err != nil {
@@ -271,8 +271,8 @@ func TestHCmdRun_MultipleSproutsSuccess(t *testing.T) {
 	}
 	respBytes, _ := json.Marshal(mockResp)
 	for _, topic := range []string{
-		"grlx.sprouts.sprout1.cmd.run",
-		"grlx.sprouts.sprout2.cmd.run",
+		"imas.sprouts.sprout1.cmd.run",
+		"imas.sprouts.sprout2.cmd.run",
 	} {
 		sub, err := conn.Subscribe(topic, func(msg *nats.Msg) {
 			_ = msg.Respond(respBytes)
@@ -323,7 +323,7 @@ func TestHCmdRun_NATSTimeout(t *testing.T) {
 	defer cleanup()
 
 	// Subscribe but never respond — causes NATS request timeout
-	sub, err := conn.Subscribe("grlx.sprouts.slow-sprout.cmd.run", func(msg *nats.Msg) {
+	sub, err := conn.Subscribe("imas.sprouts.slow-sprout.cmd.run", func(msg *nats.Msg) {
 		// intentionally do nothing
 	})
 	if err != nil {
@@ -364,7 +364,7 @@ func TestHCmdRun_InvalidJSONResponse(t *testing.T) {
 	defer cleanup()
 
 	// Respond with garbage data
-	sub, err := conn.Subscribe("grlx.sprouts.garbled-sprout.cmd.run", func(msg *nats.Msg) {
+	sub, err := conn.Subscribe("imas.sprouts.garbled-sprout.cmd.run", func(msg *nats.Msg) {
 		_ = msg.Respond([]byte("not-json"))
 	})
 	if err != nil {
@@ -428,7 +428,7 @@ func TestHCmdRun_NilAction(t *testing.T) {
 	// still goes through the success path. The sprout mock just echoes back.
 	mockResp := apitypes.CmdRun{ErrCode: 0}
 	respBytes, _ := json.Marshal(mockResp)
-	sub, err := conn.Subscribe("grlx.sprouts.sprout1.cmd.run", func(msg *nats.Msg) {
+	sub, err := conn.Subscribe("imas.sprouts.sprout1.cmd.run", func(msg *nats.Msg) {
 		_ = msg.Respond(respBytes)
 	})
 	if err != nil {
@@ -487,7 +487,7 @@ func TestHCmdRun_SproutWithErrorResponse(t *testing.T) {
 		ErrCode: 1,
 	}
 	respBytes, _ := json.Marshal(mockResp)
-	sub, err := conn.Subscribe("grlx.sprouts.err-sprout.cmd.run", func(msg *nats.Msg) {
+	sub, err := conn.Subscribe("imas.sprouts.err-sprout.cmd.run", func(msg *nats.Msg) {
 		_ = msg.Respond(respBytes)
 	})
 	if err != nil {

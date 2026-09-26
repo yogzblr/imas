@@ -7,7 +7,7 @@ package jobs
 // Jobs will eventuall be stored in triplicate: farmer-side (the shared job
 // object store), in the jobs directory on the sprout, and in the jobs
 // directory on the cli user's machine. For now, they are only stored
-// farmer-side. Jobs can be retrieved from the farmer with the grlx job
+// farmer-side. Jobs can be retrieved from the farmer with the imas job
 // command.
 
 // Job data expiration is configurable via the joblogttl setting on both the
@@ -19,22 +19,22 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/log"
 	"github.com/nats-io/nats.go"
+	"github.com/yogzblr/imas/internal/log"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 // natsCoreQueueGroup is the queue group every farmer replica shares for
-// grlx.cook.*.* and grlx.sprouts.*.cook. It has the same well-known value
+// imas.cook.*.* and imas.sprouts.*.cook. It has the same well-known value
 // internal/natsapi/router.go's Subscribe and internal/facts's listener use;
 // the constant is unexported in both, so this package defines its own copy
 // of the same value, as internal/facts does.
-const natsCoreQueueGroup = "grlx-core"
+const natsCoreQueueGroup = "imas-core"
 
 // RegisterNatsConn subscribes to job-related subjects on conn, one of
 // farmer's per-tenant NATS connections (see
-// docs/design/grlx-tenant-context-threading.md's Option A). Called once
+// docs/design/imas-tenant-context-threading.md's Option A). Called once
 // per tenant connection by cmd/farmer/main.go, so every tenant's job/cook
 // events reach farmer, not just the legacy tenant's. Job storage itself
 // (the job object store, see SetStore) stays a single, un-partitioned
@@ -52,7 +52,7 @@ const natsCoreQueueGroup = "grlx-core"
 // the same objects whichever one received an event. That makes fan-out
 // wasted work: every replica would write its own copy of each event into
 // the same shared job, so every step would show up N times, once per
-// replica. QueueSubscribe under the shared "grlx-core" group (the same
+// replica. QueueSubscribe under the shared "imas-core" group (the same
 // group internal/natsapi/router.go and internal/facts use) has exactly one
 // replica record each event. internal/facts made the same change once
 // props moved to PXC.
@@ -63,20 +63,20 @@ const natsCoreQueueGroup = "grlx-core"
 func RegisterNatsConn(tenantID string, conn *nats.Conn) {
 	// conn is used directly below rather than stored in a package-level
 	// var, since RegisterNatsConn can now run concurrently for different
-	// tenants (docs/design/grlx-tenant-context-threading.md) — a shared var
+	// tenants (docs/design/imas-tenant-context-threading.md) — a shared var
 	// would race between one call's assignment and another's Subscribe, and
 	// nothing else in this package needs to read it back afterward.
 	//
 	// tenantID is passed to each handler for the job-status index
 	// (status_index.go), which keys every row by the tenant whose
 	// connection the event arrived on.
-	_, err := conn.QueueSubscribe("grlx.cook.*.*", natsCoreQueueGroup, func(msg *nats.Msg) {
+	_, err := conn.QueueSubscribe("imas.cook.*.*", natsCoreQueueGroup, func(msg *nats.Msg) {
 		logJobs(tenantID, msg)
 	})
 	if err != nil {
 		log.Error(err)
 	}
-	_, err = conn.QueueSubscribe("grlx.sprouts.*.cook", natsCoreQueueGroup, func(msg *nats.Msg) {
+	_, err = conn.QueueSubscribe("imas.sprouts.*.cook", natsCoreQueueGroup, func(msg *nats.Msg) {
 		logJobCreation(tenantID, msg)
 	})
 	if err != nil {
@@ -87,7 +87,7 @@ func RegisterNatsConn(tenantID string, conn *nats.Conn) {
 // logJobCreation records a new job from its recipe envelope: in the job
 // object store, and (its step count) in the job-status index for tenantID.
 func logJobCreation(tenantID string, msg *nats.Msg) {
-	// Subject: grlx.sprouts.<sproutID>.cook
+	// Subject: imas.sprouts.<sproutID>.cook
 	tComponents := strings.Split(msg.Subject, ".")
 	if len(tComponents) < 4 {
 		log.Errorf("unexpected subject format for job creation: %s", msg.Subject)
@@ -172,7 +172,7 @@ func logJobCreation(tenantID string, msg *nats.Msg) {
 // logJobs records one job event: in the job object store, and in the
 // job-status index for tenantID.
 func logJobs(tenantID string, msg *nats.Msg) {
-	// Subject: grlx.cook.<sproutID>.<jid>
+	// Subject: imas.cook.<sproutID>.<jid>
 	tComponents := strings.Split(msg.Subject, ".")
 	if len(tComponents) < 4 {
 		log.Errorf("unexpected subject format for job step: %s", msg.Subject)

@@ -10,7 +10,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 // Fleet updates, the non-dispatch half of design doc §1.8: the version
@@ -21,7 +21,7 @@ import (
 // until sprout has a real signed self-update path (§1.8's blocking
 // dependency, §6).
 //
-// The catalog is CloudXP's own, not upstream grlx's release feed. Upstream
+// The catalog is CloudXP's own, not upstream imas's release feed. Upstream
 // has each sprout poll <UpdateURL>/latest with no tenant concept, so every
 // tenant would land on whatever upstream ships, whenever it ships it.
 // Here, a version exists for a tenant only once CloudXP has published it

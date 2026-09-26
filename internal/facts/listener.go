@@ -4,23 +4,23 @@ import (
 	"encoding/json"
 	"fmt"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
 	"github.com/nats-io/nats.go"
+	log "github.com/yogzblr/imas/internal/log"
 
-	"github.com/gogrlx/grlx/v2/internal/props"
+	"github.com/yogzblr/imas/internal/props"
 )
 
 // natsCoreQueueGroup is the queue group every farmer replica shares for
-// grlx.sprouts.*.facts — the same well-known group name
+// imas.sprouts.*.facts — the same well-known group name
 // internal/natsapi/router.go's Subscribe uses for its own request/response
 // handlers (that constant is unexported there, so this package defines its
 // own copy of the same value rather than depending across packages for a
 // string literal).
-const natsCoreQueueGroup = "grlx-core"
+const natsCoreQueueGroup = "imas-core"
 
 // RegisterFarmerListener subscribes to sprout facts publications on nc —
 // one of farmer's per-tenant NATS connections (see
-// docs/design/grlx-tenant-context-threading.md's Option A; called once per
+// docs/design/imas-tenant-context-threading.md's Option A; called once per
 // tenant connection by cmd/farmer/main.go, so every tenant's facts traffic
 // reaches farmer, not just the legacy tenant's) — and stores them as props
 // on the farmer side, scoped to tenantID via props.SetPropForTenant. Before
@@ -42,11 +42,11 @@ const natsCoreQueueGroup = "grlx-core"
 // which one received a given facts event. Fan-out therefore meant every
 // replica redundantly re-processing (and racing to UPSERT) the same event,
 // exactly the class of write race the PXC migration was meant to remove.
-// QueueSubscribe under the shared "grlx-core" group (matching
+// QueueSubscribe under the shared "imas-core" group (matching
 // internal/natsapi/router.go's own request/response handlers) makes
 // exactly one replica handle each event instead.
 func RegisterFarmerListener(tenantID string, nc *nats.Conn) {
-	_, err := nc.QueueSubscribe("grlx.sprouts.*.facts", natsCoreQueueGroup, func(msg *nats.Msg) {
+	_, err := nc.QueueSubscribe("imas.sprouts.*.facts", natsCoreQueueGroup, func(msg *nats.Msg) {
 		var sf SystemFacts
 		if unmarshalErr := json.Unmarshal(msg.Data, &sf); unmarshalErr != nil {
 			log.Errorf("facts: failed to unmarshal: %v", unmarshalErr)

@@ -10,8 +10,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"golang.org/x/crypto/nacl/box"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 func TestHandlePKIRotateBoxKey_NoConnection(t *testing.T) {
@@ -139,7 +139,7 @@ func TestHandleBoxKeySubmit_GracesThePreviousKey(t *testing.T) {
 func TestHandleBoxKeySubmit_IgnoresMalformedSubject(t *testing.T) {
 	setupNatsAPIPKI(t)
 	// Fewer than 4 dot-separated components: no sprout ID to key off of.
-	msg := &nats.Msg{Subject: "grlx.sprouts.boxkey.pub", Data: mustMarshal(t, boxKeySubmitRequest{Pub: testBoxPubForNatsAPI(t)})}
+	msg := &nats.Msg{Subject: "imas.sprouts.boxkey.pub", Data: mustMarshal(t, boxKeySubmitRequest{Pub: testBoxPubForNatsAPI(t)})}
 	handleBoxKeySubmit(pki.CurrentTenantID(), msg) // must not panic
 }
 

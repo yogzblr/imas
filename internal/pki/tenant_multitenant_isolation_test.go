@@ -1,6 +1,6 @@
 package pki
 
-// End-to-end coverage for docs/design/grlx-tenant-context-threading.md's
+// End-to-end coverage for docs/design/imas-tenant-context-threading.md's
 // Option A: this is the "actual gap" test the design doc calls for —
 // provisioning two distinct tenants, establishing farmer's own dedicated
 // connection into each one's Account (exactly the shape
@@ -14,7 +14,7 @@ package pki
 //
 // TestFarmerQueueGroupLoadBalancing_IsolatedPerTenant below is the second
 // half of the design doc's testing requirement (point 6): verifying that
-// workstream D's QueueSubscribe fix (natsCoreQueueGroup = "grlx-core" in
+// workstream D's QueueSubscribe fix (natsCoreQueueGroup = "imas-core" in
 // internal/natsapi/router.go and internal/facts/listener.go) still
 // correctly load-balances across N farmer replicas per tenant connection,
 // with no cross-tenant interference, now that there is more than one
@@ -29,7 +29,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 // setupRealFarmerIdentity is useRealFarmerKey, but keeps the private seed
@@ -59,12 +59,12 @@ func setupRealFarmerIdentity(t *testing.T) []byte {
 }
 
 // TestFarmerPerTenantConnections_TransportIsolation is the test
-// docs/design/grlx-tenant-context-threading.md's own testing requirement
+// docs/design/imas-tenant-context-threading.md's own testing requirement
 // asks for: it provisions two tenants (t_a, t_b), opens one farmer
 // connection into each — using pki.FarmerUserJWTForTenant, the exact JWT
 // cmd/farmer/main.go's dialTenantBus reads to authenticate each per-tenant
 // connection — subscribes each to the same sprout-facing subject pattern
-// (grlx.sprouts.*.facts, what internal/facts.RegisterFarmerListener
+// (imas.sprouts.*.facts, what internal/facts.RegisterFarmerListener
 // actually subscribes every tenant connection to), then dials as a sprout
 // enrolled under tenant B's Account and publishes. Only farmer's tenant-B
 // connection may ever see that message; farmer's tenant-A connection must
@@ -116,13 +116,13 @@ func TestFarmerPerTenantConnections_TransportIsolation(t *testing.T) {
 	// Every tenant connection subscribes to the same sprout-facing subject
 	// pattern — internal/facts.RegisterFarmerListener's own subject,
 	// registered once per tenant connection per
-	// docs/design/grlx-tenant-context-threading.md's Option A.
+	// docs/design/imas-tenant-context-threading.md's Option A.
 	receivedA := make(chan *nats.Msg, 4)
 	receivedB := make(chan *nats.Msg, 4)
-	if _, err := ncFarmerA.Subscribe("grlx.sprouts.*.facts", func(m *nats.Msg) { receivedA <- m }); err != nil {
+	if _, err := ncFarmerA.Subscribe("imas.sprouts.*.facts", func(m *nats.Msg) { receivedA <- m }); err != nil {
 		t.Fatalf("subscribing on tenant A's connection: %v", err)
 	}
-	if _, err := ncFarmerB.Subscribe("grlx.sprouts.*.facts", func(m *nats.Msg) { receivedB <- m }); err != nil {
+	if _, err := ncFarmerB.Subscribe("imas.sprouts.*.facts", func(m *nats.Msg) { receivedB <- m }); err != nil {
 		t.Fatalf("subscribing on tenant B's connection: %v", err)
 	}
 	ncFarmerA.Flush()
@@ -130,7 +130,7 @@ func TestFarmerPerTenantConnections_TransportIsolation(t *testing.T) {
 
 	// Enroll a sprout under tenant B only, then dial as it and publish a
 	// facts event — the literal scenario docs/design/
-	// grlx-tenant-context-threading.md's Phase 1 finding says was
+	// imas-tenant-context-threading.md's Phase 1 finding says was
 	// structurally unreachable before this PR: "a sprout enrolled under
 	// tenant B's dynamically provisioned Account can authenticate to the
 	// bus, but every message it publishes ... lands in an Account
@@ -165,7 +165,7 @@ func TestFarmerPerTenantConnections_TransportIsolation(t *testing.T) {
 	defer ncSprout.Close()
 
 	payload, _ := json.Marshal(map[string]string{"os": "linux", "sprout": "web-01"})
-	if err := ncSprout.Publish("grlx.sprouts.web-01.facts", payload); err != nil {
+	if err := ncSprout.Publish("imas.sprouts.web-01.facts", payload); err != nil {
 		t.Fatalf("publishing facts from tenant B's sprout: %v", err)
 	}
 	ncSprout.Flush()
@@ -198,11 +198,11 @@ func TestFarmerPerTenantConnections_TransportIsolation(t *testing.T) {
 // package can't import natsapi (natsapi already imports pki), so the value
 // is duplicated here the same way internal/facts's own copy is (see that
 // file's doc comment on the same duplication).
-const natsCoreQueueGroupForTest = "grlx-core"
+const natsCoreQueueGroupForTest = "imas-core"
 
 // TestFarmerQueueGroupLoadBalancing_IsolatedPerTenant provisions two
 // tenants, opens two farmer "replica" connections per tenant (four
-// connections total) all queue-subscribed under the shared "grlx-core"
+// connections total) all queue-subscribed under the shared "imas-core"
 // group on the same subject pattern — exactly the shape N farmer replicas
 // produce in production, once per tenant connection. It publishes several
 // messages from each tenant's own sprout and asserts two properties at
@@ -230,7 +230,7 @@ func TestFarmerQueueGroupLoadBalancing_IsolatedPerTenant(t *testing.T) {
 	}
 
 	// connectReplicas opens n farmer connections under tenantID's Account,
-	// each queue-subscribed to subject under the shared "grlx-core" group,
+	// each queue-subscribed to subject under the shared "imas-core" group,
 	// delivering every received message onto a per-connection channel.
 	connectReplicas := func(tenantID string, n int) ([]*nats.Conn, []chan *nats.Msg) {
 		jwt, err := FarmerUserJWTForTenant(tenantID)
@@ -246,7 +246,7 @@ func TestFarmerQueueGroupLoadBalancing_IsolatedPerTenant(t *testing.T) {
 			}
 			t.Cleanup(func() { nc.Close() })
 			ch := make(chan *nats.Msg, 32)
-			if _, err := nc.QueueSubscribe("grlx.sprouts.*.facts", natsCoreQueueGroupForTest, func(m *nats.Msg) {
+			if _, err := nc.QueueSubscribe("imas.sprouts.*.facts", natsCoreQueueGroupForTest, func(m *nats.Msg) {
 				ch <- m
 			}); err != nil {
 				t.Fatalf("queue-subscribing replica %d for tenant %s: %v", i, tenantID, err)
@@ -298,10 +298,10 @@ func TestFarmerQueueGroupLoadBalancing_IsolatedPerTenant(t *testing.T) {
 
 	const messagesPerTenant = 20
 	for i := 0; i < messagesPerTenant; i++ {
-		if err := sproutA.Publish("grlx.sprouts.sprout-qa.facts", []byte("a")); err != nil {
+		if err := sproutA.Publish("imas.sprouts.sprout-qa.facts", []byte("a")); err != nil {
 			t.Fatalf("publishing from tenant A's sprout: %v", err)
 		}
-		if err := sproutB.Publish("grlx.sprouts.sprout-qb.facts", []byte("b")); err != nil {
+		if err := sproutB.Publish("imas.sprouts.sprout-qb.facts", []byte("b")); err != nil {
 			t.Fatalf("publishing from tenant B's sprout: %v", err)
 		}
 	}

@@ -16,7 +16,7 @@ func TestGetCohort_Success(t *testing.T) {
 		Resolved: []string{"web-01", "web-02"},
 		Count:    2,
 	}
-	mockHandler(t, NatsConn, "grlx.api.cohorts.get", want)
+	mockHandler(t, NatsConn, "imas.api.cohorts.get", want)
 
 	got, err := GetCohort("web-servers")
 	if err != nil {
@@ -53,7 +53,7 @@ func TestGetCohort_CompoundType(t *testing.T) {
 		Resolved: []string{"web-01"},
 		Count:    1,
 	}
-	mockHandler(t, NatsConn, "grlx.api.cohorts.get", want)
+	mockHandler(t, NatsConn, "imas.api.cohorts.get", want)
 
 	got, err := GetCohort("all-servers")
 	if err != nil {
@@ -71,7 +71,7 @@ func TestGetCohort_Error(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.cohorts.get", "cohort not found")
+	mockErrorHandler(t, NatsConn, "imas.api.cohorts.get", "cohort not found")
 
 	_, err := GetCohort("missing")
 	if err == nil {
@@ -87,7 +87,7 @@ func TestResolveCohort_Success(t *testing.T) {
 		Name:    "web-servers",
 		Sprouts: []string{"web-01", "web-02", "web-03"},
 	}
-	mockHandler(t, NatsConn, "grlx.api.cohorts.resolve", want)
+	mockHandler(t, NatsConn, "imas.api.cohorts.resolve", want)
 
 	sprouts, err := ResolveCohort("web-servers")
 	if err != nil {
@@ -109,7 +109,7 @@ func TestResolveCohort_Empty(t *testing.T) {
 		Name:    "empty-cohort",
 		Sprouts: []string{},
 	}
-	mockHandler(t, NatsConn, "grlx.api.cohorts.resolve", want)
+	mockHandler(t, NatsConn, "imas.api.cohorts.resolve", want)
 
 	_, err := ResolveCohort("empty-cohort")
 	if err == nil {
@@ -121,7 +121,7 @@ func TestResolveCohort_NATSError(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.cohorts.resolve", "access denied")
+	mockErrorHandler(t, NatsConn, "imas.api.cohorts.resolve", "access denied")
 
 	_, err := ResolveCohort("restricted")
 	if err == nil {
@@ -142,7 +142,7 @@ func TestRefreshCohort_Success(t *testing.T) {
 			},
 		},
 	}
-	mockHandler(t, NatsConn, "grlx.api.cohorts.refresh", want)
+	mockHandler(t, NatsConn, "imas.api.cohorts.refresh", want)
 
 	got, err := RefreshCohort("web-servers")
 	if err != nil {
@@ -166,7 +166,7 @@ func TestRefreshAllCohorts_Success(t *testing.T) {
 			{Name: "db-servers", Members: []string{"db-01", "db-02"}, LastRefreshed: time.Now().UTC()},
 		},
 	}
-	mockHandler(t, NatsConn, "grlx.api.cohorts.refresh", want)
+	mockHandler(t, NatsConn, "imas.api.cohorts.refresh", want)
 
 	got, err := RefreshAllCohorts()
 	if err != nil {
@@ -181,7 +181,7 @@ func TestRefreshCohort_Error(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.cohorts.refresh", "refresh failed")
+	mockErrorHandler(t, NatsConn, "imas.api.cohorts.refresh", "refresh failed")
 
 	_, err := RefreshCohort("bad")
 	if err == nil {
@@ -197,7 +197,7 @@ func TestValidateCohorts_Valid(t *testing.T) {
 		Valid:   true,
 		Cohorts: 3,
 	}
-	mockHandler(t, NatsConn, "grlx.api.cohorts.validate", want)
+	mockHandler(t, NatsConn, "imas.api.cohorts.validate", want)
 
 	got, err := ValidateCohorts()
 	if err != nil {
@@ -220,7 +220,7 @@ func TestValidateCohorts_Invalid(t *testing.T) {
 		Errors:  []string{"cohort not found: \"bad\" references unknown operand \"ghost\""},
 		Cohorts: 2,
 	}
-	mockHandler(t, NatsConn, "grlx.api.cohorts.validate", want)
+	mockHandler(t, NatsConn, "imas.api.cohorts.validate", want)
 
 	got, err := ValidateCohorts()
 	if err != nil {
@@ -238,7 +238,7 @@ func TestValidateCohorts_NATSError(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.cohorts.validate", "connection failed")
+	mockErrorHandler(t, NatsConn, "imas.api.cohorts.validate", "connection failed")
 
 	_, err := ValidateCohorts()
 	if err == nil {

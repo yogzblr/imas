@@ -49,7 +49,7 @@ func (g *gzipResponseWriter) WriteHeader(code int) {
 // a URL path segment into an error response body. That package is imported
 // only by _test.go files (internal/objectstore/objectstore_test.go,
 // internal/natsapi/testmain_test.go, internal/cook/testmain_test.go) — it
-// is never linked into the grlx serve/farmer binaries, so its handler can
+// is never linked into the imas serve/farmer binaries, so its handler can
 // never run in the same process as this middleware, let alone share a
 // request with it. There is no real call path connecting the two; this is
 // a spurious cross-function flow CodeQL's global taint analysis stitched

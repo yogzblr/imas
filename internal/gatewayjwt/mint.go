@@ -16,7 +16,7 @@ import (
 // have as its issuer for that provider. Fixed and platform-wide — see
 // the package doc's "Two corrections" on why this is never a tenant
 // Account's own identifier.
-const GatewayIssuer = "grlx-gateway"
+const GatewayIssuer = "imas-gateway"
 
 // GatewayClaims is the minimal claim set MintGatewayJWT signs. Subject is
 // the sprout's NKey public key — the same identity the NATS User JWT

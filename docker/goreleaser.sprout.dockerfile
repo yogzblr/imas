@@ -1,3 +1,3 @@
 FROM busybox
-COPY grlx-sprout* /usr/bin/grlx-sprout
-ENTRYPOINT ["/usr/bin/grlx-sprout"] 
+COPY imas-sprout* /usr/bin/imas-sprout
+ENTRYPOINT ["/usr/bin/imas-sprout"] 

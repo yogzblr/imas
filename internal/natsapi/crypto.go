@@ -1,7 +1,7 @@
 package natsapi
 
 // Shared NaCl box (X25519) encrypt/decrypt helper for
-// docs/design/grlx-payload-encryption-design.md (workstream J): "best
+// docs/design/imas-payload-encryption-design.md (workstream J): "best
 // done by building it into the shared request/response helper layer so
 // encryption is transparent to individual handlers rather than opt-in
 // per handler."
@@ -33,7 +33,7 @@ import (
 
 	"golang.org/x/crypto/nacl/box"
 
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // ErrDecryptFailed means a payload didn't open under any of a sprout's

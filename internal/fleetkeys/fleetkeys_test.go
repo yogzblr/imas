@@ -13,7 +13,7 @@ import (
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 
-	"github.com/gogrlx/grlx/v2/internal/fleetsign"
+	"github.com/yogzblr/imas/internal/fleetsign"
 )
 
 type staticKeys struct {
@@ -148,16 +148,16 @@ func TestFarmerRefusesForeignReplySubjects(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, reply := range []string{
-		"grlx.sprouts.web-02.cmd.run",
-		"grlx.sprouts.web-02.fleetsigningkeys.reply.x",
-		"grlx.sprouts.web-01.fleetsigningkeys.reply",
-		"grlx.sprouts.web-01.fleetsigningkeys.reply.a.b",
-		"grlx.sprouts.web-01.fleetsigningkeys.reply.*",
+		"imas.sprouts.web-02.cmd.run",
+		"imas.sprouts.web-02.fleetsigningkeys.reply.x",
+		"imas.sprouts.web-01.fleetsigningkeys.reply",
+		"imas.sprouts.web-01.fleetsigningkeys.reply.a.b",
+		"imas.sprouts.web-01.fleetsigningkeys.reply.*",
 		"_INBOX.abc",
 	} {
 		sub, _ := nc.SubscribeSync(reply)
 		if strings.ContainsAny(reply, "*") {
-			sub, _ = nc.SubscribeSync("grlx.sprouts.web-01.fleetsigningkeys.reply.>")
+			sub, _ = nc.SubscribeSync("imas.sprouts.web-01.fleetsigningkeys.reply.>")
 		}
 		if err := nc.PublishRequest(SproutSubject("web-01"), reply, nil); err != nil {
 			t.Fatal(err)

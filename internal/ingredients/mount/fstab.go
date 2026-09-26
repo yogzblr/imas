@@ -28,7 +28,7 @@ func readFstab() ([]Line, error) {
 
 // writeFstab atomically replaces the fstab file with the given lines.
 func writeFstab(lines []Line) error {
-	tmp := fstabPath + ".grlx-tmp"
+	tmp := fstabPath + ".imas-tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err

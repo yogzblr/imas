@@ -14,7 +14,7 @@ import (
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 // testTenantID is the tenant ID startCookTestNATS registers its connection
@@ -1051,7 +1051,7 @@ func TestCookRecipeEnvelopeSimple(t *testing.T) {
 
 	// Subscribe to completion events to verify they're published
 	completions := make(chan *nats.Msg, 10)
-	sub, err := nc.Subscribe("grlx.cook.test-sprout.>", func(msg *nats.Msg) {
+	sub, err := nc.Subscribe("imas.cook.test-sprout.>", func(msg *nats.Msg) {
 		completions <- msg
 	})
 	if err != nil {
@@ -1293,7 +1293,7 @@ func TestSendCookEvent(t *testing.T) {
 
 	// Subscribe to the cook subject for the test sprout, replying with an ack.
 	sproutID := "send-cook-sprout"
-	sub, err := nc.Subscribe("grlx.sprouts."+sproutID+".cook", func(msg *nats.Msg) {
+	sub, err := nc.Subscribe("imas.sprouts."+sproutID+".cook", func(msg *nats.Msg) {
 		var env RecipeEnvelope
 		if err := json.Unmarshal(msg.Data, &env); err != nil {
 			t.Errorf("unmarshal envelope: %v", err)
@@ -1322,7 +1322,7 @@ func TestSendCookEventTestMode(t *testing.T) {
 	defer cleanup()
 
 	sproutID := "send-cook-test-sprout"
-	sub, err := nc.Subscribe("grlx.sprouts."+sproutID+".cook", func(msg *nats.Msg) {
+	sub, err := nc.Subscribe("imas.sprouts."+sproutID+".cook", func(msg *nats.Msg) {
 		var env RecipeEnvelope
 		if err := json.Unmarshal(msg.Data, &env); err != nil {
 			t.Errorf("unmarshal: %v", err)
@@ -1351,7 +1351,7 @@ func TestSendCookEventWithInvoker(t *testing.T) {
 	defer cleanup()
 
 	sproutID := "send-cook-invoker-sprout"
-	sub, err := nc.Subscribe("grlx.sprouts."+sproutID+".cook", func(msg *nats.Msg) {
+	sub, err := nc.Subscribe("imas.sprouts."+sproutID+".cook", func(msg *nats.Msg) {
 		var env RecipeEnvelope
 		if err := json.Unmarshal(msg.Data, &env); err != nil {
 			t.Errorf("unmarshal: %v", err)
@@ -1380,7 +1380,7 @@ func TestSendCookEventNotAcknowledged(t *testing.T) {
 	defer cleanup()
 
 	sproutID := "send-cook-nack-sprout"
-	sub, err := nc.Subscribe("grlx.sprouts."+sproutID+".cook", func(msg *nats.Msg) {
+	sub, err := nc.Subscribe("imas.sprouts."+sproutID+".cook", func(msg *nats.Msg) {
 		ack := Ack{Acknowledged: false, JobID: "wrong"}
 		data, _ := json.Marshal(ack)
 		msg.Respond(data)
@@ -1401,7 +1401,7 @@ func TestSendCookEventWrongJobID(t *testing.T) {
 	defer cleanup()
 
 	sproutID := "send-cook-wrongjid-sprout"
-	sub, err := nc.Subscribe("grlx.sprouts."+sproutID+".cook", func(msg *nats.Msg) {
+	sub, err := nc.Subscribe("imas.sprouts."+sproutID+".cook", func(msg *nats.Msg) {
 		ack := Ack{Acknowledged: true, JobID: "wrong-jid"}
 		data, _ := json.Marshal(ack)
 		msg.Respond(data)
@@ -1449,18 +1449,18 @@ func TestSendCookEventInvalidRecipe(t *testing.T) {
 func TestResolveRecipeFilePathDirectory(t *testing.T) {
 	// A prefix with nothing under it — the object-storage analogue of an
 	// empty recipe directory.
-	_, err := ResolveRecipeFilePath(context.Background(), "empty-prefix", RecipeName("test.grlx"))
+	_, err := ResolveRecipeFilePath(context.Background(), "empty-prefix", RecipeName("test.imas"))
 	if !errors.Is(err, ErrNoRecipe) {
 		t.Errorf("expected ErrNoRecipe, got %v", err)
 	}
 }
 
 func TestResolveRecipeFilePathInitIsDirectory(t *testing.T) {
-	// Only a deeper key exists under "<name>/init.grlx/" — on local disk
-	// init.grlx would have been a directory; in a bucket it's simply not
+	// Only a deeper key exists under "<name>/init.imas/" — on local disk
+	// init.imas would have been a directory; in a bucket it's simply not
 	// a key.
 	recipeDir := newRecipeTestStore(t)
-	writeRecipe(t, filepath.Join(recipeDir, "myrecipe", "init.grlx", "nested.grlx"), "steps: {}\n")
+	writeRecipe(t, filepath.Join(recipeDir, "myrecipe", "init.imas", "nested.imas"), "steps: {}\n")
 
 	_, err := ResolveRecipeFilePath(context.Background(), recipeDir, RecipeName("myrecipe"))
 	if !errors.Is(err, ErrNoRecipe) {
@@ -1469,9 +1469,9 @@ func TestResolveRecipeFilePathInitIsDirectory(t *testing.T) {
 }
 
 func TestResolveRecipeFilePathExtIsDirectory(t *testing.T) {
-	// Likewise for "<name>.grlx" existing only as a prefix of deeper keys.
+	// Likewise for "<name>.imas" existing only as a prefix of deeper keys.
 	recipeDir := newRecipeTestStore(t)
-	writeRecipe(t, filepath.Join(recipeDir, "myrecipe.grlx", "nested.grlx"), "steps: {}\n")
+	writeRecipe(t, filepath.Join(recipeDir, "myrecipe.imas", "nested.imas"), "steps: {}\n")
 
 	_, err := ResolveRecipeFilePath(context.Background(), recipeDir, RecipeName("myrecipe"))
 	if !errors.Is(err, ErrNoRecipe) {

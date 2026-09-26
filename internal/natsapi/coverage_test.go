@@ -9,14 +9,14 @@ import (
 
 	"github.com/nats-io/nkeys"
 
-	"github.com/gogrlx/grlx/v2/internal/audit"
-	intauth "github.com/gogrlx/grlx/v2/internal/auth"
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/jobs"
-	"github.com/gogrlx/grlx/v2/internal/pki"
-	"github.com/gogrlx/grlx/v2/internal/rbac"
-	"github.com/gogrlx/grlx/v2/internal/shell"
 	"github.com/taigrr/jety"
+	"github.com/yogzblr/imas/internal/audit"
+	intauth "github.com/yogzblr/imas/internal/auth"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/jobs"
+	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/rbac"
+	"github.com/yogzblr/imas/internal/shell"
 )
 
 // --- jety test helpers ---
@@ -620,7 +620,7 @@ func TestSubscribeSessionDoneNilNATS(t *testing.T) {
 	info := &shell.SessionInfo{
 		SessionID:   "test-sub-nil",
 		SproutID:    "test-sprout",
-		DoneSubject: "grlx.shell.done.test",
+		DoneSubject: "imas.shell.done.test",
 	}
 
 	// Should return immediately without panic.

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/ingredients/file"
+	"github.com/yogzblr/imas/internal/ingredients/file"
 )
 
 // Compile-time interface check.
@@ -194,7 +194,7 @@ func TestParsePreservesAllFields(t *testing.T) {
 		"hashType": "sha256",
 	}
 
-	fp, err := sf.Parse("full-test", "s3://test-bucket/path/to/file.tar.gz", "/var/cache/grlx/file.tar.gz", "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890", props)
+	fp, err := sf.Parse("full-test", "s3://test-bucket/path/to/file.tar.gz", "/var/cache/imas/file.tar.gz", "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890", props)
 	if err != nil {
 		t.Fatalf("Parse error: %v", err)
 	}

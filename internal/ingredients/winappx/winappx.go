@@ -3,16 +3,16 @@
 // Package winappx wraps Salt's win_appx module: installing/removing
 // provisioned Appx (UWP/MSIX) packages via Add-AppxPackage and
 // Remove-AppxPackage, the same PowerShell surface Salt itself shells out
-// to. See G.8 in docs/design/grlx-windows-parity-addendum.md.
+// to. See G.8 in docs/design/imas-windows-parity-addendum.md.
 package winappx
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/winexec"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients/winexec"
 )
 
 const ingredientName = "win_appx"

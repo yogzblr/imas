@@ -1,6 +1,6 @@
 ---
 name: Bug Report
-about: Report a bug in grlx
+about: Report a bug in imas
 title: "[BUG]"
 labels: bug, Unlabeled
 assignees: taigrr
@@ -21,7 +21,7 @@ assignees: taigrr
 [ ] No
 
 Please note that bugfixes will only be ported to previous major versions at the request of a Sponsor, and only when applicable and possible.
-It is recommended all grlx users run the lastest stable release to take advantage of the newest features and bug fixes.
+It is recommended all imas users run the lastest stable release to take advantage of the newest features and bug fixes.
 
 **Configuration**
 

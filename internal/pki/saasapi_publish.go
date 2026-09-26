@@ -1,7 +1,7 @@
 package pki
 
 // Publishing the SaaS API's minted NATS User JWT into OpenBao — the "JWT
-// -> OpenBao hand-off" in docs/design/grlx-internal-api-account.md. Run by
+// -> OpenBao hand-off" in docs/design/imas-internal-api-account.md. Run by
 // `farmer publish-saasapi-credential` (cmd/farmer) as a Kubernetes Job,
 // never by farmer's long-running server process: the store it writes to
 // is backed by the one OpenBao identity allowed to write this secret.

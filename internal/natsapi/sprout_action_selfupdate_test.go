@@ -2,7 +2,7 @@ package natsapi
 
 // self_update on internal.sprout.action (design doc §2.5, FLAG FOR
 // SECURITY REVIEW): farmer re-verifies the release signature against the
-// grlx-fleet-signing public key before anything reaches a sprout, and
+// imas-fleet-signing public key before anything reaches a sprout, and
 // refuses — never dispatches checksum-only — when the signature is
 // missing, invalid, or can't be checked.
 
@@ -16,10 +16,10 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/gogrlx/grlx/v2/internal/controlplane"
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/fleetsign"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	"github.com/yogzblr/imas/internal/controlplane"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/fleetsign"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 const suChecksum = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
@@ -166,7 +166,7 @@ func TestSelfUpdate_ThroughRealDispatch(t *testing.T) {
 	defer SetFleetKeySource(origK)
 
 	got := make(chan cook.RecipeEnvelope, 1)
-	if _, err := nc.Subscribe("grlx.sprouts.web-01.cook", func(msg *nats.Msg) {
+	if _, err := nc.Subscribe("imas.sprouts.web-01.cook", func(msg *nats.Msg) {
 		var env cook.RecipeEnvelope
 		_ = json.Unmarshal(msg.Data, &env)
 		got <- env

@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/ingredients/file"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/file/hashers"
+	"github.com/yogzblr/imas/internal/ingredients/file"
+	"github.com/yogzblr/imas/internal/ingredients/file/hashers"
 )
 
 func TestProtocols(t *testing.T) {
@@ -98,7 +98,7 @@ func TestDownloadCopiesFile(t *testing.T) {
 	td := t.TempDir()
 	srcPath := filepath.Join(td, "source.txt")
 	dstPath := filepath.Join(td, "destination.txt")
-	content := []byte("hello grlx local provider")
+	content := []byte("hello imas local provider")
 
 	if err := os.WriteFile(srcPath, content, 0644); err != nil {
 		t.Fatal(err)

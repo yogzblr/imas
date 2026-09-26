@@ -1,4 +1,4 @@
-module github.com/gogrlx/grlx/v2
+module github.com/yogzblr/imas
 
 go 1.26.6
 

@@ -11,8 +11,8 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/gogrlx/grlx/v2/internal/fleetsign"
-	"github.com/gogrlx/grlx/v2/internal/saasapi"
+	"github.com/yogzblr/imas/internal/fleetsign"
+	"github.com/yogzblr/imas/internal/saasapi"
 )
 
 // releaseSigner is what publish needs from Transit. *obTransitClient is

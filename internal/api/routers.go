@@ -3,7 +3,7 @@ package api
 import (
 	"net/http"
 
-	"github.com/gogrlx/grlx/v2/internal/api/handlers"
+	"github.com/yogzblr/imas/internal/api/handlers"
 )
 
 // NewRouter creates an http.ServeMux for the farmer's HTTPS server.
@@ -12,16 +12,16 @@ import (
 //     certificate and register their NKey here.
 //   - Enrollment (POST /v1/enroll): the join-token-based path that mints a
 //     sprout's JWT/NKey identity in one round trip — see
-//     docs/design/grlx-envoy-enrollment-design.md.
+//     docs/design/imas-envoy-enrollment-design.md.
 //   - File serving: sprouts download recipe files via the farmer:// scheme,
 //     read from object storage (see handlers.SetRecipeStore) rather than
-//     local disk — docs/design/grlx-master-plan.md Phase 1.
+//     local disk — docs/design/imas-master-plan.md Phase 1.
 //   - Recipe browsing (GET /v1/recipes, GET /v1/recipes/{name...}): the
-//     dot-notation list/get surface used by the grlx CLI and web UI,
+//     dot-notation list/get surface used by the imas CLI and web UI,
 //     behind workstream H's Envoy JWT gate (deploy/envoy/envoy.yaml's
 //     /v1/recipes route) — replaces the old NATS-based
 //     internal/natsapi/recipes.go per
-//     docs/design/grlx-fork-roadmap.md workstream I.
+//     docs/design/imas-fork-roadmap.md workstream I.
 //   - Health checks: unauthenticated /health (liveness) and /ready
 //     (readiness) endpoints for Kubernetes probes, monitoring, and
 //     automated tooling.
@@ -33,7 +33,7 @@ func NewRouter(certificate string) *http.ServeMux {
 	mux.Handle("GET /auth/cert/", Logger(http.HandlerFunc(handlers.GetCertificate), "GetCertificate"))
 	mux.Handle("PUT /pki/putnkey", Logger(http.HandlerFunc(handlers.PutNKey), "PutNKey"))
 
-	// Sprout enrollment (docs/design/grlx-envoy-enrollment-design.md,
+	// Sprout enrollment (docs/design/imas-envoy-enrollment-design.md,
 	// cloudxp-machine-manager-api-design.md §3.2) — also no auth required,
 	// for the same reason as the PKI bootstrap routes above: a sprout
 	// calling this has no JWT yet. Authorization here is the join token
@@ -46,7 +46,7 @@ func NewRouter(certificate string) *http.ServeMux {
 	mux.Handle("GET /v1/.well-known/jwks.json", Logger(http.HandlerFunc(handlers.JWKS), "JWKS"))
 
 	// Fleet release signing key (design doc §2.5) — the public half of
-	// grlx-fleet-signing, read with farmer's read-only Transit token.
+	// imas-fleet-signing, read with farmer's read-only Transit token.
 	// Public keys only, no auth required, same as the gateway JWKS above.
 	mux.Handle("GET /v1/.well-known/fleet-signing-jwks.json", Logger(http.HandlerFunc(handlers.FleetSigningJWKS), "FleetSigningJWKS"))
 
@@ -60,8 +60,8 @@ func NewRouter(certificate string) *http.ServeMux {
 	// File server: serves recipe files over HTTPS (farmer:// scheme).
 	mux.Handle("GET /files/", Logger(Auth(http.HandlerFunc(handlers.GetFile), "FileServer"), "FileServer"))
 
-	// Recipe browsing: dot-notation list/get, used by the grlx CLI and
-	// web UI (docs/design/grlx-fork-roadmap.md workstream I).
+	// Recipe browsing: dot-notation list/get, used by the imas CLI and
+	// web UI (docs/design/imas-fork-roadmap.md workstream I).
 	mux.Handle("GET /v1/recipes", Logger(Auth(http.HandlerFunc(handlers.ListRecipes), "ListRecipes"), "ListRecipes"))
 	mux.Handle("GET /v1/recipes/{name...}", Logger(Auth(http.HandlerFunc(handlers.GetRecipe), "GetRecipe"), "GetRecipe"))
 

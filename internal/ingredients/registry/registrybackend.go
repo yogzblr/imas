@@ -9,7 +9,7 @@ import (
 
 	"golang.org/x/sys/windows/registry"
 
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 // regKey is the subset of registry.Key used by this ingredient, factored

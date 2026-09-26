@@ -25,8 +25,8 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // newTestPKIDB wires up an in-memory PKI store, plus the minimal config
@@ -74,7 +74,7 @@ func connectEventJSON(t *testing.T, accountPub, userPub string) []byte {
 
 func TestKeyFor(t *testing.T) {
 	got := keyFor("acme", "sprout-1")
-	want := "grlx:heartbeat:acme:sprout-1"
+	want := "imas:heartbeat:acme:sprout-1"
 	if got != want {
 		t.Errorf("keyFor() = %q, want %q", got, want)
 	}
@@ -182,7 +182,7 @@ func TestHandleConnectDisconnect_NilClientDoesNotPanic(t *testing.T) {
 // NKey pubkey (a real scenario: sprout IDs and even NKeys are chosen by
 // each tenant's own sprouts independently). This is the same tenant-
 // isolation bug class PR #28 fixed once for a different call site (see
-// docs/design/grlx-tenant-context-threading.md); asserting only one
+// docs/design/imas-tenant-context-threading.md); asserting only one
 // tenant here would make a regression back to the old process-global
 // tenantID() seam invisible to this test, exactly as it was before.
 func TestSproutIDFromEvent_TwoTenantsSameSproutIDAndPubkey_DoNotCrossResolve(t *testing.T) {

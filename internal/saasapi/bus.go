@@ -4,7 +4,7 @@ package saasapi
 // internal.tenant.* and internal.sprout.action control-plane subjects
 // (design doc §2.2). This service
 // connects as its own narrowly-scoped User under the bus's SYS Account;
-// see docs/design/grlx-internal-api-account.md for why, and for exactly
+// see docs/design/imas-internal-api-account.md for why, and for exactly
 // which subjects that User may use (FLAG FOR SECURITY REVIEW).
 
 import (
@@ -20,15 +20,15 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 
-	"github.com/gogrlx/grlx/v2/internal/controlplane"
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/controlplane"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 // busQueueGroup is the queue group every saasapi replica's result
 // subscriptions share, so each internal.tenant.{de,}provisioned.{job_id}
 // result is applied by exactly one replica — the same discipline farmer's
 // natsCoreQueueGroup applies to requests.
-const busQueueGroup = "grlx-saasapi"
+const busQueueGroup = "imas-saasapi"
 
 // bus is the connection dispatchProvisioning/dispatchDeprovisioning
 // publish through and dispatchBatch sends internal.sprout.action requests
@@ -100,7 +100,7 @@ func ConnectBus(cfg Config) (*nats.Conn, error) {
 		return nil, fmt.Errorf("saasapi: no certificates found in SAASAPI_NATS_CA_FILE %s", cfg.NATSCAFile)
 	}
 	nc, err := nats.Connect(cfg.NATSURL,
-		nats.Name("grlx-saasapi"),
+		nats.Name("imas-saasapi"),
 		// Request-reply (internal.sprout.action) replies arrive on this
 		// prefix: it's the only inbox this service's NATS User may
 		// subscribe to, and the only one farmer will reply on

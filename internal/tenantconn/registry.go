@@ -1,10 +1,10 @@
 // Package tenantconn tracks farmer's per-tenant NATS connections (see
-// docs/design/grlx-tenant-context-threading.md's Option A: one connection
+// docs/design/imas-tenant-context-threading.md's Option A: one connection
 // per tenant, including the legacy tenant under its own entry like any
 // other). It exists as its own package, rather than as the plain map
 // cmd/farmer/main.go used to keep, so the bookkeeping GET /ready reports
 // from (internal/api/handlers/ready.go) is unit-testable — package main
-// can't be, since its init() loads farmer's config from /etc/grlx.
+// can't be, since its init() loads farmer's config from /etc/imas.
 //
 // Besides the registered connections themselves, a Registry also tracks
 // tenants that are *wanted* but not registered yet: a tenant stuck in

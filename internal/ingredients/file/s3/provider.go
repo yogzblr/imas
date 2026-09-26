@@ -3,7 +3,7 @@ package s3
 import (
 	"context"
 
-	"github.com/gogrlx/grlx/v2/internal/ingredients/file"
+	"github.com/yogzblr/imas/internal/ingredients/file"
 )
 
 type S3File struct {

@@ -18,8 +18,8 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/gogrlx/grlx/v2/internal/heartbeat"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	"github.com/yogzblr/imas/internal/heartbeat"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 const (

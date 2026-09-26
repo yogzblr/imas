@@ -1,7 +1,7 @@
 // Package objectstore wraps the S3/MinIO client farmer uses to serve
 // recipes and (through the same client, at a different key prefix) any
 // other read-mostly, blob-shaped content that no longer belongs on a
-// single replica's local disk — see docs/design/grlx-master-plan.md
+// single replica's local disk — see docs/design/imas-master-plan.md
 // Phase 1: farmer's basepath local-disk recipe tree doesn't survive
 // horizontal scaling, since any replica needs to be able to serve any
 // recipe.

@@ -12,11 +12,11 @@ import (
 
 	"github.com/taigrr/jety"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 // setupRecipeTestServer starts a TLS test server, trusts its certificate
-// as config.GrlxRootCA, and points config.FarmerInterface/FarmerAPIPort at
+// as config.ImasRootCA, and points config.FarmerInterface/FarmerAPIPort at
 // it — mirroring how the real farmerRecipeClient() verifies a connection
 // against a pinned root CA (no InsecureSkipVerify), rather than the
 // TLS-bootstrap shortcut internal/pki/pki_test.go's FetchRootCA tests use.
@@ -36,12 +36,12 @@ func setupRecipeTestServer(t *testing.T, handler http.HandlerFunc) {
 		t.Fatalf("unexpected test server URL: %s", ts.URL)
 	}
 
-	origRootCA, origIface, origPort := config.GrlxRootCA, config.FarmerInterface, config.FarmerAPIPort
-	config.GrlxRootCA = caFile
+	origRootCA, origIface, origPort := config.ImasRootCA, config.FarmerInterface, config.FarmerAPIPort
+	config.ImasRootCA = caFile
 	config.FarmerInterface = host
 	config.FarmerAPIPort = port
 	t.Cleanup(func() {
-		config.GrlxRootCA = origRootCA
+		config.ImasRootCA = origRootCA
 		config.FarmerInterface = origIface
 		config.FarmerAPIPort = origPort
 	})
@@ -59,7 +59,7 @@ func TestListRecipes_Success(t *testing.T) {
 			t.Error("expected Authorization header to be set")
 		}
 		json.NewEncoder(w).Encode(map[string][]RecipeInfo{
-			"recipes": {{Name: "webserver.nginx", Path: "webserver/nginx.grlx", Size: 42}},
+			"recipes": {{Name: "webserver.nginx", Path: "webserver/nginx.imas", Size: 42}},
 		})
 	})
 
@@ -79,7 +79,7 @@ func TestGetRecipe_Success(t *testing.T) {
 			return
 		}
 		json.NewEncoder(w).Encode(RecipeContent{
-			Name: "webserver.nginx", Path: "webserver/nginx.grlx",
+			Name: "webserver.nginx", Path: "webserver/nginx.imas",
 			Content: "pkg.installed: nginx", Size: 21,
 		})
 	})
@@ -104,9 +104,9 @@ func TestGetRecipe_NotFound(t *testing.T) {
 }
 
 func TestListRecipes_NoRootCA(t *testing.T) {
-	origRootCA := config.GrlxRootCA
-	config.GrlxRootCA = filepath.Join(t.TempDir(), "does-not-exist.pem")
-	t.Cleanup(func() { config.GrlxRootCA = origRootCA })
+	origRootCA := config.ImasRootCA
+	config.ImasRootCA = filepath.Join(t.TempDir(), "does-not-exist.pem")
+	t.Cleanup(func() { config.ImasRootCA = origRootCA })
 
 	if _, err := ListRecipes(); err == nil {
 		t.Fatal("expected error when root CA file is missing")

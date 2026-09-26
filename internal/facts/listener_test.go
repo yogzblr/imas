@@ -9,7 +9,7 @@ import (
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 
-	"github.com/gogrlx/grlx/v2/internal/props"
+	"github.com/yogzblr/imas/internal/props"
 )
 
 func startTestNATS(t *testing.T) (*nats.Conn, func()) {
@@ -59,7 +59,7 @@ func TestRegisterFarmerListener_ValidFacts(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	if err := nc.Publish("grlx.sprouts.sprout-listener-test.facts", data); err != nil {
+	if err := nc.Publish("imas.sprouts.sprout-listener-test.facts", data); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 	nc.Flush()
@@ -95,7 +95,7 @@ func TestRegisterFarmerListener_EmptySproutID(t *testing.T) {
 	}
 
 	// Should log error and not store — no panic.
-	if err := nc.Publish("grlx.sprouts.unknown.facts", data); err != nil {
+	if err := nc.Publish("imas.sprouts.unknown.facts", data); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 	nc.Flush()
@@ -115,7 +115,7 @@ func TestRegisterFarmerListener_InvalidJSON(t *testing.T) {
 	nc.Flush()
 
 	// Publish invalid JSON — should not panic.
-	if err := nc.Publish("grlx.sprouts.bad.facts", []byte("not json")); err != nil {
+	if err := nc.Publish("imas.sprouts.bad.facts", []byte("not json")); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 	nc.Flush()
@@ -125,7 +125,7 @@ func TestRegisterFarmerListener_InvalidJSON(t *testing.T) {
 
 // TestRegisterFarmerListener_UsesQueueGroup verifies that
 // RegisterFarmerListener subscribes as a queue-group member of
-// "grlx-core", not a plain fan-out subscriber. This used to be the other
+// "imas-core", not a plain fan-out subscriber. This used to be the other
 // way around (see the function's own doc comment for why that changed):
 // props no longer holds an in-process, in-memory cache — workstream A
 // moved it to PXC-backed, read-through storage — so every farmer replica
@@ -148,7 +148,7 @@ func TestRegisterFarmerListener_UsesQueueGroup(t *testing.T) {
 	// Simulate a second farmer replica subscribing to the same subject in
 	// the same queue group.
 	var secondReplicaHits int64
-	sub, err := nc.QueueSubscribe("grlx.sprouts.*.facts", natsCoreQueueGroup, func(msg *nats.Msg) {
+	sub, err := nc.QueueSubscribe("imas.sprouts.*.facts", natsCoreQueueGroup, func(msg *nats.Msg) {
 		atomic.AddInt64(&secondReplicaHits, 1)
 	})
 	if err != nil {
@@ -166,7 +166,7 @@ func TestRegisterFarmerListener_UsesQueueGroup(t *testing.T) {
 			NumCPU:   i,
 		}
 		data, _ := json.Marshal(sf)
-		if err := nc.Publish("grlx.sprouts.sprout-queue-group-test.facts", data); err != nil {
+		if err := nc.Publish("imas.sprouts.sprout-queue-group-test.facts", data); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -218,7 +218,7 @@ func TestRegisterFarmerListener_MultipleSprouts(t *testing.T) {
 			SproutID: sprout.id,
 		}
 		data, _ := json.Marshal(sf)
-		if err := nc.Publish("grlx.sprouts."+sprout.id+".facts", data); err != nil {
+		if err := nc.Publish("imas.sprouts."+sprout.id+".facts", data); err != nil {
 			t.Fatalf("publish %s: %v", sprout.id, err)
 		}
 	}

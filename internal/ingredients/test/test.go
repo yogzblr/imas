@@ -19,7 +19,7 @@ func RegisterNatsConn(n *nats.Conn) {
 // farmerConns holds farmer's own per-tenant NATS connections — the
 // counterpart to nc above, keyed by tenant since a single farmer process
 // now holds one connection per tenant (see
-// docs/design/grlx-tenant-context-threading.md's Option A). Only FPing
+// docs/design/imas-tenant-context-threading.md's Option A). Only FPing
 // (farmer's outbound leg) reads this.
 var (
 	farmerConnMu sync.RWMutex

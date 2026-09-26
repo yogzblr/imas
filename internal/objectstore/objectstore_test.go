@@ -4,18 +4,18 @@ import (
 	"context"
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/objectstore"
-	"github.com/gogrlx/grlx/v2/internal/objectstore/objectstoretest"
+	"github.com/yogzblr/imas/internal/objectstore"
+	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
 )
 
 func TestGetPutRoundTrip(t *testing.T) {
 	store := objectstoretest.NewStore(t)
 	ctx := context.Background()
 
-	if err := store.Put(ctx, "web.nginx.grlx", []byte("hello recipe")); err != nil {
+	if err := store.Put(ctx, "web.nginx.imas", []byte("hello recipe")); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	got, err := store.Get(ctx, "web.nginx.grlx")
+	got, err := store.Get(ctx, "web.nginx.imas")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -28,7 +28,7 @@ func TestGetNotFound(t *testing.T) {
 	store := objectstoretest.NewStore(t)
 	ctx := context.Background()
 
-	_, err := store.Get(ctx, "does-not-exist.grlx")
+	_, err := store.Get(ctx, "does-not-exist.imas")
 	if err == nil {
 		t.Fatal("expected an error for a missing key")
 	}
@@ -41,7 +41,7 @@ func TestExists(t *testing.T) {
 	store := objectstoretest.NewStore(t)
 	ctx := context.Background()
 
-	ok, err := store.Exists(ctx, "web.nginx.grlx")
+	ok, err := store.Exists(ctx, "web.nginx.imas")
 	if err != nil {
 		t.Fatalf("Exists: %v", err)
 	}
@@ -49,11 +49,11 @@ func TestExists(t *testing.T) {
 		t.Error("expected Exists=false before Put")
 	}
 
-	if err := store.Put(ctx, "web.nginx.grlx", []byte("content")); err != nil {
+	if err := store.Put(ctx, "web.nginx.imas", []byte("content")); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 
-	ok, err = store.Exists(ctx, "web.nginx.grlx")
+	ok, err = store.Exists(ctx, "web.nginx.imas")
 	if err != nil {
 		t.Fatalf("Exists: %v", err)
 	}
@@ -66,10 +66,10 @@ func TestSize(t *testing.T) {
 	store := objectstoretest.NewStore(t)
 	ctx := context.Background()
 
-	if err := store.Put(ctx, "web.nginx.grlx", []byte("0123456789")); err != nil {
+	if err := store.Put(ctx, "web.nginx.imas", []byte("0123456789")); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	size, err := store.Size(ctx, "web.nginx.grlx")
+	size, err := store.Size(ctx, "web.nginx.imas")
 	if err != nil {
 		t.Fatalf("Size: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestSize(t *testing.T) {
 		t.Errorf("Size() = %d, want 10", size)
 	}
 
-	if _, err := store.Size(ctx, "does-not-exist.grlx"); err == nil {
+	if _, err := store.Size(ctx, "does-not-exist.imas"); err == nil {
 		t.Error("expected an error for a missing key")
 	}
 }
@@ -86,7 +86,7 @@ func TestList(t *testing.T) {
 	store := objectstoretest.NewStore(t)
 	ctx := context.Background()
 
-	for _, key := range []string{"web/init.grlx", "web/nginx.grlx", "db/init.grlx"} {
+	for _, key := range []string{"web/init.imas", "web/nginx.imas", "db/init.imas"} {
 		if err := store.Put(ctx, key, []byte("x")); err != nil {
 			t.Fatalf("Put(%s): %v", key, err)
 		}

@@ -9,8 +9,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 var (
@@ -21,7 +21,7 @@ var (
 	ErrLineInvalidMatch   = errors.New("file.line match is not a valid regular expression")
 )
 
-// line implements grlx's regex-based single-line file editor. It mirrors
+// line implements imas's regex-based single-line file editor. It mirrors
 // Salt's file.line/file.replace and, on the sprout-orchestration side,
 // Spot's "line" action: it was confirmed net-new against the existing file
 // ingredient (which had no line-oriented editing -- only whole-file

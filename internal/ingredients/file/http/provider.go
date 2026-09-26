@@ -12,8 +12,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/gogrlx/grlx/v2/internal/ingredients/file"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/file/hashers"
+	"github.com/yogzblr/imas/internal/ingredients/file"
+	"github.com/yogzblr/imas/internal/ingredients/file/hashers"
 )
 
 type HTTPFile struct {
@@ -24,7 +24,7 @@ type HTTPFile struct {
 	Props       map[string]interface{}
 }
 
-const downloadTempPattern = ".grlx-http-download-*"
+const downloadTempPattern = ".imas-http-download-*"
 
 // PropRootCAFile names a PEM file whose certificates become the ONLY
 // trust roots for this download, in place of the system CA pool — the

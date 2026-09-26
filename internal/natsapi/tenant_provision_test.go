@@ -17,8 +17,8 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/gogrlx/grlx/v2/internal/controlplane"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	"github.com/yogzblr/imas/internal/controlplane"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 func stubTenantProvisioning(t *testing.T, provision func(string, string) error, deprovision func(string) error) {
@@ -78,7 +78,7 @@ func TestTenantProvision_FailurePublishesFailedWithError(t *testing.T) {
 	defer cleanup()
 	// An error whose text carries internal detail (a filesystem path).
 	stubTenantProvisioning(t, func(string, string) error {
-		return errors.New("mkdir /etc/grlx/pki/nats-auth/tenants: not a directory")
+		return errors.New("mkdir /etc/imas/pki/nats-auth/tenants: not a directory")
 	}, nil)
 
 	if err := RegisterTenantProvisioning(nc); err != nil {
@@ -91,7 +91,7 @@ func TestTenantProvision_FailurePublishesFailedWithError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("waiting for result: %v", err)
 	}
-	if strings.Contains(string(msg.Data), "/etc/grlx") || strings.Contains(string(msg.Data), "not a directory") {
+	if strings.Contains(string(msg.Data), "/etc/imas") || strings.Contains(string(msg.Data), "not a directory") {
 		t.Fatalf("raw error text leaked onto the bus: %s", msg.Data)
 	}
 	var res controlplane.TenantResult
@@ -219,7 +219,7 @@ func TestTenantErrorCode(t *testing.T) {
 		{pki.ErrTenantIDInvalid, controlplane.ErrorInvalidTenantID},
 		{fmt.Errorf("wrapped: %w", pki.ErrTenantIDInvalid), controlplane.ErrorInvalidTenantID},
 		{pki.ErrTenantNotFound, controlplane.ErrorTenantNotFound},
-		{errors.New("open /var/lib/grlx/pki/nats-auth/sys-account.nk: permission denied"), controlplane.ErrorInternal},
+		{errors.New("open /var/lib/imas/pki/nats-auth/sys-account.nk: permission denied"), controlplane.ErrorInternal},
 	}
 	for _, c := range cases {
 		if got := tenantErrorCode(c.err); got != c.want {

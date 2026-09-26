@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 func TestRegisterNatsConn(t *testing.T) {
@@ -57,10 +57,10 @@ func TestSRunWithCwd(t *testing.T) {
 func TestSRunWithEnv(t *testing.T) {
 	cmd := apitypes.CmdRun{
 		Command: "/bin/sh",
-		Args:    []string{"-c", "echo $GRLX_TEST_SRUN"},
+		Args:    []string{"-c", "echo $IMAS_TEST_SRUN"},
 		Timeout: 5 * time.Second,
 		Env: apitypes.EnvVar{
-			"GRLX_TEST_SRUN": "test_value",
+			"IMAS_TEST_SRUN": "test_value",
 		},
 	}
 	result, err := SRun(cmd)
@@ -155,7 +155,7 @@ func TestSRunWithStreamTopic(t *testing.T) {
 		Args:        []string{"stream_test"},
 		Timeout:     5 * time.Second,
 		Env:         apitypes.EnvVar{},
-		StreamTopic: "grlx.test.output",
+		StreamTopic: "imas.test.output",
 	}
 	result, err := SRun(cmd)
 	if err != nil {

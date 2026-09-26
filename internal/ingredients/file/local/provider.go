@@ -6,8 +6,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/gogrlx/grlx/v2/internal/ingredients/file"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/file/hashers"
+	"github.com/yogzblr/imas/internal/ingredients/file"
+	"github.com/yogzblr/imas/internal/ingredients/file/hashers"
 )
 
 type LocalFile struct {

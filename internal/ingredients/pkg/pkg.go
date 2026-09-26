@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
 	"github.com/gogrlx/snack"
 	"github.com/gogrlx/snack/detect"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 // Compile-time interface check.

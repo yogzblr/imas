@@ -6,8 +6,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
 	"github.com/vishvananda/netlink"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 func (n Network) addressPresent(_ context.Context, test bool) (cook.Result, error) {

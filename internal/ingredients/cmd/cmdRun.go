@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 // needsShell reports whether cmd contains shell metacharacters that require

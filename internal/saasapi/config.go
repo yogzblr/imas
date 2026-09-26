@@ -14,7 +14,7 @@ import (
 )
 
 // Config holds the saasapi service's runtime configuration. Unlike
-// farmer/sprout/grlx, this is a standalone service with its own env-based
+// farmer/sprout/imas, this is a standalone service with its own env-based
 // config rather than a new binary wired into internal/config's jety
 // loader.
 //
@@ -32,7 +32,7 @@ import (
 //     BFF forwards (layer 2).
 //
 // The NATS connection to farmer (see bus.go's ConnectBus, and
-// docs/design/grlx-internal-api-account.md) is configured the same way:
+// docs/design/imas-internal-api-account.md) is configured the same way:
 //
 //   - SAASAPI_NATS_NKEY_SEED_FILE / SAASAPI_NATS_USER_JWT: this service's
 //     own NATS identity — a narrowly-scoped User under the bus's SYS
@@ -44,7 +44,7 @@ import (
 //     Secret mounted as a volume — never as a raw env var: a mounted
 //     Secret isn't inherited by child processes or captured in crash
 //     dumps/`env` output the way an environment variable is (the same
-//     preference internal/pki/jwtauth.go's GRLX_NATS_*_SEED_FILE states).
+//     preference internal/pki/jwtauth.go's IMAS_NATS_*_SEED_FILE states).
 //     The JWT isn't secret, but must travel with the seed.
 //   - SAASAPI_NATS_URL: the bus's client URL (e.g. "nats://farmerbus:4222";
 //     TLS is always required, the scheme notwithstanding).
@@ -68,7 +68,7 @@ import (
 // leave the limit somewhere the operator didn't intend.
 //
 //   - SAASAPI_VALKEY_ADDRS: comma-separated Valkey node addresses (the
-//     same format as farmer's GRLX_VALKEY_ADDRS). When set, the limit
+//     same format as farmer's IMAS_VALKEY_ADDRS). When set, the limit
 //     above is enforced across all saasapi pods (see NewValkeyLimiter)
 //     and saasapi refuses to start if it can't reach Valkey. When unset,
 //     each pod enforces it on its own, so N pods allow up to N times as
@@ -79,10 +79,10 @@ import (
 //   - SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED: "true" registers POST
 //     .../sprouts/updates and its status endpoint (design doc §1.8).
 //     Default false. Leave it off until sprout has a working signed
-//     self-update path (gogrlx/grlx#286). Any value strconv.ParseBool
+//     self-update path (yogzblr/imas#286). Any value strconv.ParseBool
 //     doesn't accept is a startup error. With it on, the read-only fleet
 //     signing key client must also be configured
-//     (GRLX_FLEETSIGN_OPENBAO_*, internal/fleetsign; design doc §2.5), or
+//     (IMAS_FLEETSIGN_OPENBAO_*, internal/fleetsign; design doc §2.5), or
 //     saasapi refuses to start.
 type Config struct {
 	// ListenAddr is the address the HTTP server binds to, e.g. ":8081".

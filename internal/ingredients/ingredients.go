@@ -6,9 +6,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/log"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 type IngredientMap map[cook.Ingredient]map[string]cook.RecipeCooker

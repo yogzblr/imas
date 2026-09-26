@@ -132,14 +132,14 @@ func TestWriteThenRead_RoundTrip(t *testing.T) {
 	c := newTestClient(t, m)
 	ctx := context.Background()
 
-	v, err := c.Write(ctx, "grlx/saasapi/nats-user", map[string]string{"jwt": "eyJ.x.y", "public_key": "UABC"})
+	v, err := c.Write(ctx, "imas/saasapi/nats-user", map[string]string{"jwt": "eyJ.x.y", "public_key": "UABC"})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	if v != 1 {
 		t.Errorf("version = %d, want 1", v)
 	}
-	got, err := c.Read(ctx, "grlx/saasapi/nats-user")
+	got, err := c.Read(ctx, "imas/saasapi/nats-user")
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -152,14 +152,14 @@ func TestWriteThenRead_RoundTrip(t *testing.T) {
 		t.Fatalf("expected 2 requests, got %d", len(reqs))
 	}
 	w := reqs[0]
-	if w.Method != http.MethodPost || w.Path != "/v1/secret/data/grlx/saasapi/nats-user" {
+	if w.Method != http.MethodPost || w.Path != "/v1/secret/data/imas/saasapi/nats-user" {
 		t.Errorf("write went to %s %s", w.Method, w.Path)
 	}
 	// KV v2 wants {"data": {...}} — not the fields at the top level.
 	if data, ok := w.Body["data"].(map[string]any); !ok || data["jwt"] != "eyJ.x.y" {
 		t.Errorf("write body = %v, want the fields nested under \"data\"", w.Body)
 	}
-	if r := reqs[1]; r.Method != http.MethodGet || r.Path != "/v1/secret/data/grlx/saasapi/nats-user" {
+	if r := reqs[1]; r.Method != http.MethodGet || r.Path != "/v1/secret/data/imas/saasapi/nats-user" {
 		t.Errorf("read went to %s %s", r.Method, r.Path)
 	}
 }
@@ -261,11 +261,11 @@ func TestPathSegmentsEscaped(t *testing.T) {
 func TestSecretAt(t *testing.T) {
 	m := newMockKV("secret")
 	c := newTestClient(t, m)
-	s, err := c.At("/grlx/saasapi/")
+	s, err := c.At("/imas/saasapi/")
 	if err != nil {
 		t.Fatalf("At: %v", err)
 	}
-	if s.Path() != "grlx/saasapi" {
+	if s.Path() != "imas/saasapi" {
 		t.Errorf("Path = %q", s.Path())
 	}
 	ctx := context.Background()
@@ -375,7 +375,7 @@ func setupK8sEnv(t *testing.T, addr, jwtPath string) {
 	t.Setenv(EnvOpenBaoAddr, addr)
 	t.Setenv(EnvOpenBaoKVMount, "secret")
 	t.Setenv(EnvOpenBaoAuthMethod, AuthMethodKubernetes)
-	t.Setenv(EnvOpenBaoK8sRole, "grlx-saasapi-cred-publisher")
+	t.Setenv(EnvOpenBaoK8sRole, "imas-saasapi-cred-publisher")
 	t.Setenv(EnvOpenBaoK8sMount, "")
 	t.Setenv(EnvOpenBaoK8sJWTPath, jwtPath)
 	t.Setenv(EnvOpenBaoCACert, "")
@@ -410,7 +410,7 @@ func TestKubernetesAuth_LoginThenWriteWithIssuedToken(t *testing.T) {
 			t.Fatalf("Write: %v", err)
 		}
 	}
-	if gotLogin["role"] != "grlx-saasapi-cred-publisher" || gotLogin["jwt"] != "sa-jwt" {
+	if gotLogin["role"] != "imas-saasapi-cred-publisher" || gotLogin["jwt"] != "sa-jwt" {
 		t.Errorf("login body = %v", gotLogin)
 	}
 	if gotWriteToken != "tok-1" {

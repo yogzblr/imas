@@ -1,7 +1,7 @@
 package saasapi
 
 // §2.5: saasapi refuses to build a rollout from a catalog row whose
-// signature is missing or doesn't verify against the grlx-fleet-signing
+// signature is missing or doesn't verify against the imas-fleet-signing
 // key (read-only). Farmer and the sprout verify again; this is the early
 // refusal that keeps a bad row from ever becoming a batch.
 
@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/fleetsign"
+	"github.com/yogzblr/imas/internal/fleetsign"
 )
 
 var (

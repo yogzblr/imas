@@ -4,9 +4,9 @@ import (
 	"errors"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/pki"
-	"github.com/gogrlx/grlx/v2/internal/rbac"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/rbac"
 )
 
 type (

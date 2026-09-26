@@ -8,8 +8,8 @@ import (
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // startTestNATS starts an embedded NATS server and returns a connection plus cleanup.
@@ -66,7 +66,7 @@ func TestFPingSuccess(t *testing.T) {
 	defer UnregisterFarmerNatsConn(tenantID)
 
 	target := pki.KeyManager{SproutID: "sprout-1"}
-	topic := "grlx.sprouts." + target.SproutID + ".test.ping"
+	topic := "imas.sprouts." + target.SproutID + ".test.ping"
 
 	// Subscribe to simulate a sprout responding to pings.
 	sub, err := conn.Subscribe(topic, func(msg *nats.Msg) {
@@ -134,7 +134,7 @@ func TestFPingInvalidResponse(t *testing.T) {
 	defer UnregisterFarmerNatsConn(tenantID)
 
 	target := pki.KeyManager{SproutID: "bad-sprout"}
-	topic := "grlx.sprouts." + target.SproutID + ".test.ping"
+	topic := "imas.sprouts." + target.SproutID + ".test.ping"
 
 	// Respond with invalid JSON.
 	sub, err := conn.Subscribe(topic, func(msg *nats.Msg) {
@@ -162,7 +162,7 @@ func TestFPingSetsFieldsCorrectly(t *testing.T) {
 	defer UnregisterFarmerNatsConn(tenantID)
 
 	target := pki.KeyManager{SproutID: "field-check"}
-	topic := "grlx.sprouts." + target.SproutID + ".test.ping"
+	topic := "imas.sprouts." + target.SproutID + ".test.ping"
 
 	// Capture the request to verify FPing sets ping=true, pong=false.
 	var received apitypes.PingPong
@@ -202,7 +202,7 @@ func TestFPingDifferentSproutIDs(t *testing.T) {
 	for _, id := range ids {
 		t.Run(id, func(t *testing.T) {
 			target := pki.KeyManager{SproutID: id}
-			topic := "grlx.sprouts." + id + ".test.ping"
+			topic := "imas.sprouts." + id + ".test.ping"
 
 			sub, err := conn.Subscribe(topic, func(msg *nats.Msg) {
 				resp, _ := json.Marshal(apitypes.PingPong{Ping: true, Pong: true})

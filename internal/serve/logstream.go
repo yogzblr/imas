@@ -10,9 +10,9 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/nats-io/nats.go"
 
-	"github.com/gogrlx/grlx/v2/internal/api/client"
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/api/client"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/log"
 )
 
 // LogEntry matches the JSON structure expected by the web UI's LogEntry type.
@@ -94,7 +94,7 @@ func (h *logHub) subscribeNATS() {
 		return
 	}
 
-	sub, err := client.NatsConn.Subscribe("grlx.cook.*.*", func(msg *nats.Msg) {
+	sub, err := client.NatsConn.Subscribe("imas.cook.*.*", func(msg *nats.Msg) {
 		entry := h.parseCookEvent(msg)
 		if entry == nil {
 			return
@@ -107,11 +107,11 @@ func (h *logHub) subscribeNATS() {
 		return
 	}
 	h.sub = sub
-	log.Printf("logstream: subscribed to grlx.cook.*.* for log streaming")
+	log.Printf("logstream: subscribed to imas.cook.*.* for log streaming")
 }
 
 // parseCookEvent converts a NATS cook message into a LogEntry.
-// Subject format: grlx.cook.<sproutID>.<jid>
+// Subject format: imas.cook.<sproutID>.<jid>
 func (h *logHub) parseCookEvent(msg *nats.Msg) *LogEntry {
 	parts := splitSubject(msg.Subject)
 	if len(parts) < 4 {

@@ -1,7 +1,7 @@
 package pki
 
 // Dynamic tenant Account provisioning — workstream E
-// (docs/design/grlx-fork-roadmap.md, docs/design/grlx-nats-jwt-auth-design.md
+// (docs/design/imas-fork-roadmap.md, docs/design/imas-nats-jwt-auth-design.md
 // "one Account per tenant"). This file is what actually makes
 // FarmerOrganization dynamic: jwtauth.go's natsAuthMaterial still holds
 // exactly one "current" tenant Account (named by the static
@@ -39,7 +39,7 @@ import (
 	jwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 var tenantIDMatcher = regexp.MustCompile(`^[0-9A-Za-z_-]{1,191}$`)
@@ -88,7 +88,7 @@ func tenantSproutJWTDir(id string) string   { return filepath.Join(tenantAuthDir
 // tenant — farmer's own connection identity under tenantID's Account, one
 // per dynamically-provisioned tenant, the counterpart to
 // sproutJWTPathForTenant above. See FarmerUserJWTForTenant and
-// docs/design/grlx-tenant-context-threading.md's Option A: farmer opens one
+// docs/design/imas-tenant-context-threading.md's Option A: farmer opens one
 // NATS connection per tenant, each authenticated with its own User JWT
 // minted under that tenant's own Account (same underlying farmer NKey
 // identity, reused across every tenant — see mintOrReuseUserJWT's doc
@@ -110,9 +110,9 @@ func sproutJWTPathForTenant(tenantID, sproutID string) string {
 
 // externalSeedNameForTenant derives an env-var-safe name for
 // loadOrCreateSeed's external-seed override (loadExternalSeed in
-// jwtauth.go), following the same GRLX_NATS_<NAME>_SEED[_FILE] convention
+// jwtauth.go), following the same IMAS_NATS_<NAME>_SEED[_FILE] convention
 // the fixed platform-wide identities use — e.g. tenant ID "t_8f2a" maps to
-// GRLX_NATS_TENANT_T_8F2A_SEED_FILE. Not expected to be set for most
+// IMAS_NATS_TENANT_T_8F2A_SEED_FILE. Not expected to be set for most
 // tenants today (this is groundwork for OpenBao/per-tenant secret custody,
 // workstream F), but keeps the override mechanism available uniformly
 // rather than only for the handful of fixed identities jwtauth.go names
@@ -242,7 +242,7 @@ func ensureTenantAccount(tenantID, nameHint string) (mat *natsAuthMaterial, tam 
 	// Notify cmd/farmer/main.go's ConnectFarmer that this tenant is newly
 	// live, so it can open a dedicated NATS connection and boot that
 	// tenant's registrations at runtime (see OnTenantProvisioned's doc
-	// comment and docs/design/grlx-tenant-context-threading.md's Option A).
+	// comment and docs/design/imas-tenant-context-threading.md's Option A).
 	// Fired outside tenantAuthMu (already released above) and in its own
 	// goroutine: the hook dials the bus over the network, which must never
 	// block an enrollment request or an explicit ProvisionTenant call
@@ -267,7 +267,7 @@ var (
 // ProvisionTenant call or ReloadNKeysForTenant's lazy first-enrollment path
 // (enroll.go's acceptEnrolledNKey). cmd/farmer/main.go uses this to open
 // that tenant's dedicated NATS connection and register its full handler
-// set at runtime (docs/design/grlx-tenant-context-threading.md's Option A),
+// set at runtime (docs/design/imas-tenant-context-threading.md's Option A),
 // instead of only ever connecting the tenants known at boot. Call once at
 // startup, before enrollment can occur; only the most recently registered
 // callback is kept — this package supports exactly one subscriber, not a
@@ -320,7 +320,7 @@ func ensureTenantAccountLocked(mat *natsAuthMaterial, tenantID, nameHint string)
 	}
 	// Record the Account pubkey on the tenant row so TenantIDForAccountPub
 	// (store.go) can reverse-map it later — see
-	// docs/design/grlx-tenant-context-threading.md. Idempotent: a tenant's
+	// docs/design/imas-tenant-context-threading.md. Idempotent: a tenant's
 	// Account keypair never changes once minted, so this is a no-op update
 	// on every call after the first.
 	if err := setTenantAccountPub(tenantID, tam.pub); err != nil {
@@ -481,7 +481,7 @@ func syncTenantSprouts(mat *natsAuthMaterial, tam *tenantAccountMaterial, tenant
 	// jwtusers.go's syncNatsAuth does the same for the legacy Account.
 	// This is farmer's connection identity for the dedicated per-tenant
 	// NATS connection cmd/farmer/main.go's ConnectFarmer opens (see
-	// FarmerUserJWTForTenant and docs/design/grlx-tenant-context-threading.md).
+	// FarmerUserJWTForTenant and docs/design/imas-tenant-context-threading.md).
 	farmerKey, err := GetPubNKey(FarmerPubNKey)
 	if err != nil {
 		return false, fmt.Errorf("pki: loading farmer's NKey: %w", err)
@@ -634,7 +634,7 @@ func GetSproutUserJWTForTenant(tenantID, sproutID string) (string, error) {
 // FarmerUserJWTForTenant is FarmerUserJWT (jwtusers.go) scoped to an
 // explicit tenant — farmer's own connection identity for the dedicated
 // per-tenant NATS connection cmd/farmer/main.go's ConnectFarmer opens (see
-// docs/design/grlx-tenant-context-threading.md's Option A). Minted by
+// docs/design/imas-tenant-context-threading.md's Option A). Minted by
 // syncTenantSprouts (via ReloadNKeysForTenant or ProvisionTenant, both of
 // which call it) into farmerUserJWTPathForTenant. Falls back to the legacy
 // flat single-tenant path (FarmerUserJWT) when tenantID is the package's

@@ -3,7 +3,7 @@ package auth
 import (
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/rbac"
+	"github.com/yogzblr/imas/internal/rbac"
 )
 
 // makeValidToken creates a signed, valid token from a fresh keypair.

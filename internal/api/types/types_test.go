@@ -44,7 +44,7 @@ func TestCmdRunJSON(t *testing.T) {
 		RunAs:       "root",
 		Env:         EnvVar{"HOME": "/root"},
 		Timeout:     10 * time.Second,
-		StreamTopic: "grlx.stream.test",
+		StreamTopic: "imas.stream.test",
 		Stdout:      "output here",
 		Stderr:      "",
 		Duration:    500 * time.Millisecond,
@@ -67,7 +67,7 @@ func TestCmdRunJSON(t *testing.T) {
 	if decoded.Env["HOME"] != "/root" {
 		t.Errorf("expected HOME=/root, got %q", decoded.Env["HOME"])
 	}
-	if decoded.StreamTopic != "grlx.stream.test" {
+	if decoded.StreamTopic != "imas.stream.test" {
 		t.Errorf("expected StreamTopic, got %q", decoded.StreamTopic)
 	}
 }

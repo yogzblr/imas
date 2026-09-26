@@ -6,16 +6,16 @@
 // same surface Salt's own module reads and writes (Salt uses
 // win32com/WMI directly; here it's exposed through
 // Get-CimInstance/Set-CimInstance in PowerShell). See G.8 in
-// docs/design/grlx-windows-parity-addendum.md.
+// docs/design/imas-windows-parity-addendum.md.
 package winsmtpserver
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/winexec"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients/winexec"
 )
 
 const ingredientName = "win_smtp_server"

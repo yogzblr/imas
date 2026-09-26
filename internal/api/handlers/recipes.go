@@ -1,6 +1,6 @@
 // Recipe file serving. This used to be http.FileServer over farmer's
 // local-disk basepath (config.RecipeDir) — see
-// docs/design/grlx-master-plan.md Phase 1: that doesn't survive
+// docs/design/imas-master-plan.md Phase 1: that doesn't survive
 // horizontal scaling, since any core replica needs to be able to serve
 // any recipe, so reads now go through object storage instead. Git
 // remains the source of truth; syncing a merged commit into the bucket
@@ -8,10 +8,10 @@
 // internal/objectstore's package doc), not something this handler does.
 //
 // ListRecipes/GetRecipe below are this endpoint's dot-notation
-// browse/introspect surface (grlx CLI's `recipes list`/`recipes show`,
+// browse/introspect surface (imas CLI's `recipes list`/`recipes show`,
 // and the web UI's /api/v1/recipes routes) — the HTTP replacement for
 // what used to be internal/natsapi/recipes.go's NATS request/reply
-// handlers, per docs/design/grlx-fork-roadmap.md workstream I. GetFile
+// handlers, per docs/design/imas-fork-roadmap.md workstream I. GetFile
 // stays the raw-bytes-by-exact-key download path sprouts use for the
 // farmer:// scheme.
 package handlers
@@ -22,8 +22,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/objectstore"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/objectstore"
 )
 
 // recipeStore is the object-storage backend GetFile reads from. Set once
@@ -103,7 +103,7 @@ func ListRecipes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	ext := "." + config.GrlxExt
+	ext := "." + config.ImasExt
 	prefix := strings.TrimSuffix(recipeDir, "/") + "/"
 
 	keys, err := recipeStore.List(ctx, prefix)
@@ -120,7 +120,7 @@ func ListRecipes(w http.ResponseWriter, r *http.Request) {
 		relPath := strings.TrimPrefix(key, prefix)
 
 		// Convert file path to dot-notation recipe name:
-		// "webserver/nginx.grlx" -> "webserver.nginx"
+		// "webserver/nginx.imas" -> "webserver.nginx"
 		name := strings.TrimSuffix(relPath, ext)
 		name = strings.ReplaceAll(name, "/", ".")
 
@@ -158,7 +158,7 @@ func GetRecipe(w http.ResponseWriter, r *http.Request) {
 	// crafted name containing ".." just names a distinct, harmless key,
 	// never a path outside the bucket — so no separate path-traversal
 	// check is needed here, same as the NATS handler this replaces.
-	relPath := strings.ReplaceAll(recipeName, ".", "/") + "." + config.GrlxExt
+	relPath := strings.ReplaceAll(recipeName, ".", "/") + "." + config.ImasExt
 	key := filepath.Join(recipeDir, relPath)
 
 	content, err := recipeStore.Get(r.Context(), key)

@@ -13,7 +13,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"gorm.io/gorm"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 // newIndexTestDB installs a fresh in-memory sqlite farmer schema holding
@@ -61,7 +61,7 @@ func stepEvent(id string, status cook.CompletionStatus) cook.StepCompletion {
 	return cook.StepCompletion{ID: cook.StepID(id), CompletionStatus: status}
 }
 
-// indexStep applies one grlx.cook event, the way logJobs does.
+// indexStep applies one imas.cook event, the way logJobs does.
 func indexStep(tenantID, sproutID, jid string, step cook.StepCompletion) {
 	indexJobEvent(tenantID, sproutID, jid, classifyJobEvent(jid, step))
 }
@@ -238,10 +238,10 @@ func TestListenerIndexesUnderRegisteredTenant(t *testing.T) {
 
 	const jid = "listener-job"
 	env, _ := json.Marshal(cook.RecipeEnvelope{JobID: jid, Steps: []cook.Step{{ID: "s1"}}})
-	logJobCreation("t_list", &nats.Msg{Subject: "grlx.sprouts.web-01.cook", Data: env})
+	logJobCreation("t_list", &nats.Msg{Subject: "imas.sprouts.web-01.cook", Data: env})
 	for _, step := range []cook.StepCompletion{stepEvent("s1", cook.StepCompleted), stepEvent("completed-"+jid, cook.StepCompleted)} {
 		b, _ := json.Marshal(step)
-		logJobs("t_list", &nats.Msg{Subject: "grlx.cook.web-01." + jid, Data: b})
+		logJobs("t_list", &nats.Msg{Subject: "imas.cook.web-01." + jid, Data: b})
 	}
 	if got := indexStatus(t, gdb, "t_list", "web-01", jid); got != JobIndexStatusSucceeded {
 		t.Fatalf("status %q, want succeeded", got)

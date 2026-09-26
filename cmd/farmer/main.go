@@ -1,7 +1,7 @@
-// Command farmer is grlx's core process: the API server, job/facts/cook
+// Command farmer is imas's core process: the API server, job/facts/cook
 // subscribers, and all sprout-facing business logic. It is one of two
 // deployables that make up what used to be a single "farmer" binary (see
-// docs/design/grlx-fork-roadmap.md workstream C) — the other is cmd/farmerbus,
+// docs/design/imas-fork-roadmap.md workstream C) — the other is cmd/farmerbus,
 // the NATS bus process meant to run in the DMZ. Core never embeds a bus of
 // its own: it dials config.FarmerBusURL like any other NATS client, the same
 // way it always has, and is meant to run outbound-only from a non-DMZ
@@ -23,31 +23,31 @@ import (
 	"syscall"
 	"time"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	log "github.com/yogzblr/imas/internal/log"
 
-	"github.com/gogrlx/grlx/v2/internal/api"
-	"github.com/gogrlx/grlx/v2/internal/api/handlers"
-	"github.com/gogrlx/grlx/v2/internal/audit"
-	"github.com/gogrlx/grlx/v2/internal/auth"
-	"github.com/gogrlx/grlx/v2/internal/certs"
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/facts"
-	"github.com/gogrlx/grlx/v2/internal/fleetkeys"
-	"github.com/gogrlx/grlx/v2/internal/fleetsign"
-	"github.com/gogrlx/grlx/v2/internal/gatewayjwt"
-	"github.com/gogrlx/grlx/v2/internal/heartbeat"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/cmd"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/test"
-	"github.com/gogrlx/grlx/v2/internal/jobs"
-	"github.com/gogrlx/grlx/v2/internal/natsapi"
-	"github.com/gogrlx/grlx/v2/internal/objectstore"
-	"github.com/gogrlx/grlx/v2/internal/pki"
-	"github.com/gogrlx/grlx/v2/internal/props"
-	"github.com/gogrlx/grlx/v2/internal/pxc"
-	"github.com/gogrlx/grlx/v2/internal/rbac"
-	"github.com/gogrlx/grlx/v2/internal/saasapicred"
-	"github.com/gogrlx/grlx/v2/internal/tenantconn"
+	"github.com/yogzblr/imas/internal/api"
+	"github.com/yogzblr/imas/internal/api/handlers"
+	"github.com/yogzblr/imas/internal/audit"
+	"github.com/yogzblr/imas/internal/auth"
+	"github.com/yogzblr/imas/internal/certs"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/facts"
+	"github.com/yogzblr/imas/internal/fleetkeys"
+	"github.com/yogzblr/imas/internal/fleetsign"
+	"github.com/yogzblr/imas/internal/gatewayjwt"
+	"github.com/yogzblr/imas/internal/heartbeat"
+	"github.com/yogzblr/imas/internal/ingredients/cmd"
+	"github.com/yogzblr/imas/internal/ingredients/test"
+	"github.com/yogzblr/imas/internal/jobs"
+	"github.com/yogzblr/imas/internal/natsapi"
+	"github.com/yogzblr/imas/internal/objectstore"
+	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/props"
+	"github.com/yogzblr/imas/internal/pxc"
+	"github.com/yogzblr/imas/internal/rbac"
+	"github.com/yogzblr/imas/internal/saasapicred"
+	"github.com/yogzblr/imas/internal/tenantconn"
 
 	nats "github.com/nats-io/nats.go"
 	valkey "github.com/valkey-io/valkey-go"
@@ -90,7 +90,7 @@ func getHeartbeatConn() *nats.Conn {
 
 // tenantConns holds every tenant's live NATS connection — one per tenant,
 // including the legacy tenant (pki.CurrentTenantID()) under its own entry
-// like any other — per docs/design/grlx-tenant-context-threading.md's
+// like any other — per docs/design/imas-tenant-context-threading.md's
 // Option A, plus every tenant still retrying its first connect. It has its
 // own lock (see internal/tenantconn), separate from srvMu above, since it's
 // read/written from ConnectFarmer's own goroutines (boot-time enumeration,
@@ -116,7 +116,7 @@ func readinessTenantStats() handlers.TenantConnStats {
 
 func main() {
 	// Loaded here rather than in init(), so this package's tests don't
-	// read or create the system farmer config (/etc/grlx/farmer).
+	// read or create the system farmer config (/etc/imas/farmer).
 	config.LoadConfig("farmer")
 	log.SetLogLevel(config.LogLevel)
 	// One-shot subcommands run before any server initialization (storage,
@@ -161,7 +161,7 @@ func main() {
 		log.Errorf("Failed to push NATS auth state to the bus: %v", err)
 	}
 	// Mint (or confirm) the SaaS API's own NATS credential — a scoped User
-	// under the SYS Account (docs/design/grlx-internal-api-account.md) —
+	// under the SYS Account (docs/design/imas-internal-api-account.md) —
 	// and persist it to pki.SaaSAPIUserJWTPath() for delivery to the
 	// saasapi Deployment. Not fatal: an error here is either a failed push
 	// of a key-rotation revocation (retried at the next boot; the new
@@ -186,7 +186,7 @@ func main() {
 	if jobStore != nil {
 		go waitForObjectStore(ctx, jobStore, "job", config.S3JobBucket)
 	}
-	// See docs/design/grlx-tenant-context-threading.md's Option A: a
+	// See docs/design/imas-tenant-context-threading.md's Option A: a
 	// newly-provisioned tenant (explicit ProvisionTenant, or enroll.go's
 	// lazy ReloadNKeysForTenant path) gets its own dedicated NATS
 	// connection and full registration set opened at runtime; a
@@ -239,7 +239,7 @@ func main() {
 // store.go) — read-through, no in-memory cache, so every farmer replica
 // agrees on the same state. This fixes the cross-replica divergence bug
 // props/store.go had under its old per-process in-memory cache (see
-// docs/design/grlx-fork-roadmap.md workstream A).
+// docs/design/imas-fork-roadmap.md workstream A).
 //
 // tenant_id scoping (workstream A.1, FLAG FOR SECURITY REVIEW): every
 // query in props/pki/rbac's stores includes tenant_id in the same WHERE
@@ -364,7 +364,7 @@ func waitForObjectStore(ctx context.Context, store *objectstore.Store, what, buc
 // token Envoy's jwt_authn validates, alongside the native NATS User JWT
 // workstream B already mints. Deliberately not fatal if unconfigured
 // (see EnvOpenBaoAddr etc. in internal/gatewayjwt/obtransit.go): existing
-// deployments/dev setups without GRLX_GATEWAY_OPENBAO_* set should still
+// deployments/dev setups without IMAS_GATEWAY_OPENBAO_* set should still
 // start farmer normally — POST /v1/enroll fails closed
 // (pki.ErrEnrollmentFailed) rather than farmer refusing to boot, until an
 // operator configures OpenBao Transit for this key.
@@ -380,13 +380,13 @@ func initGatewaySigner() {
 }
 
 // initFleetKeySource wires up farmer's READ-ONLY view of the
-// grlx-fleet-signing Transit key (internal/fleetsign, design doc §2.5):
+// imas-fleet-signing Transit key (internal/fleetsign, design doc §2.5):
 // served ungated as a JWKS, served live to sprouts on
-// grlx.sprouts.<id>.fleetsigningkeys (internal/fleetkeys — what a sprout
+// imas.sprouts.<id>.fleetsigningkeys (internal/fleetkeys — what a sprout
 // actually verifies releases against), returned in POST /v1/enroll as a
 // bootstrap-only key, and used to re-verify a release before a
-// self_update is dispatched. The token behind GRLX_FLEETSIGN_OPENBAO_* must carry only
-// deploy/fleetreleaser/policies/grlx-fleet-verify.hcl; farmer never signs
+// self_update is dispatched. The token behind IMAS_FLEETSIGN_OPENBAO_* must carry only
+// deploy/fleetreleaser/policies/imas-fleet-verify.hcl; farmer never signs
 // releases (cmd/fleetreleaser does). Not fatal if unconfigured, like
 // initGatewaySigner: POST /v1/enroll and self_update fail closed instead.
 func initFleetKeySource() {
@@ -425,7 +425,7 @@ func initHeartbeatClient() {
 //   - the SaaS API's tenant-provisioning bridge: internal.tenant.provision/
 //     deprovision (natsapi.RegisterTenantProvisioning), platform-level
 //     control-plane subjects that live in the SYS Account — see
-//     docs/design/grlx-internal-api-account.md.
+//     docs/design/imas-internal-api-account.md.
 //
 // This dials the bus over the network like any other client, so it works
 // whether the bus is a separate process/host (as it is here) or embedded
@@ -437,7 +437,7 @@ func initHeartbeatClient() {
 // once it connects.
 func initSystemAccountListeners() {
 	nc, err := pki.ConnectSystemAccount(
-		nats.Name("grlx-farmer-sys-listener"),
+		nats.Name("imas-farmer-sys-listener"),
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(5*time.Second),
@@ -469,7 +469,7 @@ func initSystemAccountListeners() {
 func initAuditLogger() {
 	auditDir := config.AuditLogDir
 	if auditDir == "" {
-		auditDir = "/var/log/grlx/audit"
+		auditDir = "/var/log/imas/audit"
 	}
 	logger, err := audit.NewLogger(auditDir)
 	if err != nil {
@@ -619,7 +619,7 @@ func handleSIGHUP(ctx context.Context, done chan<- struct{}) {
 // dialTenantBus opens one NATS connection authenticated as farmer's own
 // User identity under tenantID's Account (pki.FarmerUserJWTForTenant),
 // blocking until connected, ctx is cancelled, or every reconnect attempt is
-// exhausted. See docs/design/grlx-tenant-context-threading.md's Option A:
+// exhausted. See docs/design/imas-tenant-context-threading.md's Option A:
 // farmer holds one such connection per tenant instead of a single
 // process-global one.
 func dialTenantBus(ctx context.Context, tenantID string) (*nats.Conn, error) {
@@ -702,11 +702,11 @@ func dialTenantBus(ctx context.Context, tenantID string) (*nats.Conn, error) {
 // registerTenantHandlers boots tenantID's full registration set on nc:
 // every RegisterNatsConn-style ingredient registration plus
 // natsapi.Subscribe, each bound to tenantID (docs/design/
-// grlx-tenant-context-threading.md's Option A). Records nc in tenantConns
+// imas-tenant-context-threading.md's Option A). Records nc in tenantConns
 // on success so it can be closed later (process shutdown, or
 // disconnectTenant on deprovisioning).
 func registerTenantHandlers(nc *nats.Conn, tenantID string) error {
-	if _, err := nc.Subscribe("grlx.sprouts.announce.>", func(m *nats.Msg) {
+	if _, err := nc.Subscribe("imas.sprouts.announce.>", func(m *nats.Msg) {
 		log.Infof("Received a join event (tenant %s): %s\n", tenantID, string(m.Data))
 	}); err != nil {
 		log.Errorf("Got an error on Subscribe (tenant %s): %+v\n", tenantID, err)
@@ -732,7 +732,7 @@ func registerTenantHandlers(nc *nats.Conn, tenantID string) error {
 // connectTenantWithRetry connects tenantID's NATS connection and boots its
 // registrations, retrying with exponential backoff on failure instead of
 // blocking farmer startup or any other tenant's connection. See point 5 of
-// docs/design/grlx-tenant-context-threading.md: only the legacy tenant's
+// docs/design/imas-tenant-context-threading.md: only the legacy tenant's
 // connection is load-bearing enough to fail farmer startup outright (it's
 // what every existing single-tenant deployment, the HTTP admin API, and the
 // CLI all depend on); every dynamically-provisioned tenant instead degrades
@@ -804,7 +804,7 @@ func disconnectTenant(tenantID string) {
 // hooks (registered in main, before this is called, so a race with an
 // enrollment arriving immediately isn't possible) so tenants provisioned
 // later in this process's lifetime get connected too. See
-// docs/design/grlx-tenant-context-threading.md's Option A.
+// docs/design/imas-tenant-context-threading.md's Option A.
 func ConnectFarmer(ctx context.Context, done chan<- struct{}) {
 	defer close(done)
 

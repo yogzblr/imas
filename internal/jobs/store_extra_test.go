@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/objectstore"
-	"github.com/gogrlx/grlx/v2/internal/objectstore/objectstoretest"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/objectstore"
+	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
 )
 
 func TestNewStore_Default(t *testing.T) {
@@ -202,7 +202,7 @@ func TestDefaultCLIStorePath(t *testing.T) {
 	if path == "" {
 		t.Error("expected non-empty path")
 	}
-	// Should end with "grlx/jobs".
+	// Should end with "imas/jobs".
 	if filepath.Base(path) != "jobs" {
 		t.Errorf("expected path ending with 'jobs', got %q", path)
 	}

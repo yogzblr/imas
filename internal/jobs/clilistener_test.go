@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 func startTestNATSServer(t *testing.T) (*server.Server, *nats.Conn) {
@@ -88,7 +88,7 @@ func TestCLIListener_SubscribeAll(t *testing.T) {
 		Duration:         time.Second,
 	}
 	data, _ := json.Marshal(step)
-	if err := conn.Publish("grlx.cook.sprout-test.job-sub-all", data); err != nil {
+	if err := conn.Publish("imas.cook.sprout-test.job-sub-all", data); err != nil {
 		t.Fatal(err)
 	}
 	conn.Flush()
@@ -127,7 +127,7 @@ func TestCLIListener_SubscribeJob(t *testing.T) {
 		Duration:         2 * time.Second,
 	}
 	data, _ := json.Marshal(step)
-	if err := conn.Publish("grlx.cook.sprout-x.specific-jid", data); err != nil {
+	if err := conn.Publish("imas.cook.sprout-x.specific-jid", data); err != nil {
 		t.Fatal(err)
 	}
 	conn.Flush()
@@ -218,7 +218,7 @@ func TestCLIListener_HandleStepCompletion_BadSubject(t *testing.T) {
 	defer listener.Stop()
 
 	// Publish with valid subject but bad JSON — should be silently handled.
-	if err := conn.Publish("grlx.cook.sprout.jid", []byte("not json")); err != nil {
+	if err := conn.Publish("imas.cook.sprout.jid", []byte("not json")); err != nil {
 		t.Fatal(err)
 	}
 	conn.Flush()
@@ -256,7 +256,7 @@ func TestCLIListener_RecordsFailedStepWithError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := conn.Publish("grlx.cook.sprout-e.jid-err", data); err != nil {
+	if err := conn.Publish("imas.cook.sprout-e.jid-err", data); err != nil {
 		t.Fatal(err)
 	}
 	conn.Flush()

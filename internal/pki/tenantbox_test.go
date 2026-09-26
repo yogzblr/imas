@@ -30,7 +30,7 @@ type mockKVv2Server struct {
 
 func newMockKVv2Server(t *testing.T) *mockKVv2Server {
 	t.Helper()
-	return &mockKVv2Server{t: t, mount: "secret", path: "grlx/tenant-x25519", token: "test-token"}
+	return &mockKVv2Server{t: t, mount: "secret", path: "imas/tenant-x25519", token: "test-token"}
 }
 
 func (m *mockKVv2Server) start() *httptest.Server {

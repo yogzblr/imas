@@ -1,6 +1,6 @@
 // Package winexec provides the shared exec.Command wrappers backing the
 // PowerShell-only (G.8) and CLI-tool-only (G.9) Windows ingredient
-// batches described in docs/design/grlx-windows-parity-addendum.md.
+// batches described in docs/design/imas-windows-parity-addendum.md.
 //
 // Both batches shell out rather than bind a Win32/COM API, so this
 // package is intentionally thin: it follows the same

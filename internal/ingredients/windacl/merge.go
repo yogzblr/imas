@@ -9,7 +9,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// aceEntry is grlx's own representation of a single explicit ACE,
+// aceEntry is imas's own representation of a single explicit ACE,
 // factored out of api.ExplicitAccess so the merge/match logic below is
 // plain slice manipulation over comparable fields -- no live DACL
 // handle, security descriptor, or Win32 call involved -- and can be

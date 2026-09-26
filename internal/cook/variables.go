@@ -9,9 +9,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/sdb"
-	"github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/ingredients/sdb"
+	"github.com/yogzblr/imas/internal/log"
 )
 
 // RedactedPlaceholder replaces every occurrence of a sensitive value
@@ -91,8 +91,8 @@ func (r *runVars) lookup(runtimeCtx map[string]string) func(string) (string, boo
 // every recipe step, regardless of any register/secrets usage.
 func runtimeContextVars(sproutID string) map[string]string {
 	return map[string]string{
-		"GRLX_SPROUT_ID": sproutID,
-		"GRLX_TENANT_ID": config.FarmerOrganization,
+		"IMAS_SPROUT_ID": sproutID,
+		"IMAS_TENANT_ID": config.FarmerOrganization,
 	}
 }
 

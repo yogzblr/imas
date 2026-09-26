@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/gogrlx/grlx/v2/internal/audit"
+	"github.com/yogzblr/imas/internal/audit"
 )
 
 // ListAuditDates returns a summary of all available audit log dates.

@@ -1,0 +1,15 @@
+[Unit]
+Description=imas sprout
+Documentation=https://docs.imas.dev
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/imas-sprout
+Restart=always
+RestartSec=30
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

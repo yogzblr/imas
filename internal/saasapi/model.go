@@ -53,7 +53,7 @@ const (
 // provisioning.go's applyProvisioningResult moves a job out of "pending"
 // when farmer's internal.tenant.{de,}provisioned.{job_id} result arrives
 // (§2.2); Attempts counts dispatches, for a future re-dispatch sweeper to
-// bound on (see docs/design/grlx-internal-api-account.md).
+// bound on (see docs/design/imas-internal-api-account.md).
 type ProvisioningJob struct {
 	ID        string                `gorm:"column:id;primaryKey;size:36" json:"id"`
 	TenantID  string                `gorm:"column:tenant_id;size:32;not null;index" json:"tenant_id"`
@@ -121,14 +121,14 @@ func (AssetLink) TableName() string { return "asset_links" }
 
 // FleetVersion is the `saas.fleet_versions` table (design doc §4.3,
 // §1.8): CloudXP's own published catalog of sprout versions. It is
-// deliberately not upstream grlx's GitHub release feed — a version only
+// deliberately not upstream imas's GitHub release feed — a version only
 // becomes approvable by a tenant once CloudXP has published it here.
 //
 // The catalog is global, not per tenant: every tenant chooses from the
 // same list, and tenant_update_policy records which entry each tenant
 // has approved. Nothing in this package writes it; see fleet_updates.go.
 // Rows are written by cmd/fleetreleaser, the only holder of sign
-// capability on the grlx-fleet-signing Transit key (§2.5).
+// capability on the imas-fleet-signing Transit key (§2.5).
 type FleetVersion struct {
 	ID      string `gorm:"column:id;primaryKey;size:32" json:"-"`
 	Version string `gorm:"column:version;size:64;not null;uniqueIndex" json:"version"`

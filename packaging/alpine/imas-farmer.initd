@@ -1,0 +1,8 @@
+#!/sbin/openrc-run
+supervisor=supervise-daemon
+description="Imas Farmer"
+command="/usr/bin/imas-farmer"
+
+depend() {
+	need net
+}

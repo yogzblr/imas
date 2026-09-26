@@ -2,7 +2,7 @@ package props
 
 // Concurrent two-tenant coverage for the ForTenant call sites workstream
 // E's follow-up threads real tenant identity through (see
-// docs/design/grlx-tenant-context-threading.md). Runs two distinct
+// docs/design/imas-tenant-context-threading.md). Runs two distinct
 // tenants' Get/Set calls genuinely concurrently, against the same
 // sprout ID and property name (a real scenario — two tenants' sprouts are
 // named independently of each other), and asserts each tenant only ever

@@ -1,4 +1,4 @@
-// Package lgpo implements a grlx ingredient for managing Windows Local
+// Package lgpo implements a imas ingredient for managing Windows Local
 // Group Policy (LGPO): parsing/writing the binary registry.pol format that
 // backs Administrative Template policies, and resolving policies defined by
 // ADMX/ADML template files into the registry.pol entries that express them.

@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 
-	intauth "github.com/gogrlx/grlx/v2/internal/auth"
-	"github.com/gogrlx/grlx/v2/internal/jobs"
-	"github.com/gogrlx/grlx/v2/internal/rbac"
+	intauth "github.com/yogzblr/imas/internal/auth"
+	"github.com/yogzblr/imas/internal/jobs"
+	"github.com/yogzblr/imas/internal/rbac"
 )
 
 var jobStore *jobs.Store

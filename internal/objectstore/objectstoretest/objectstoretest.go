@@ -24,7 +24,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/objectstore"
+	"github.com/yogzblr/imas/internal/objectstore"
 )
 
 const bucket = "test-bucket"

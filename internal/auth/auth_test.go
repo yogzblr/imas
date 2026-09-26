@@ -3,7 +3,7 @@ package auth
 import (
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/rbac"
+	"github.com/yogzblr/imas/internal/rbac"
 )
 
 func TestExtractStringSlice(t *testing.T) {

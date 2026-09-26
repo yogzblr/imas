@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/ingredients/sdb"
+	"github.com/yogzblr/imas/internal/ingredients/sdb"
 )
 
 // mockVault is a minimal stand-in for an OpenBao/Vault server: it accepts

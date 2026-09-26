@@ -2,7 +2,7 @@
 
 Same precedent as `deploy/farmer/` and `deploy/envoy/`: these are reviewed
 *reference* files. **saasapi's real Deployment and Helm chart are not in
-this repo.** They live in the separate ops repo. Nothing in grlx applies
+this repo.** They live in the separate ops repo. Nothing in imas applies
 or renders the YAML here.
 
 | File | What it is |
@@ -31,10 +31,10 @@ pods together: a tenant gets `perSecond`/`burst` in total, however many
 replicas run and however the load balancer spreads its requests. Set it in
 any deployment with more than one replica (or an HPA).
 
-- **State:** one key per tenant, `grlx:saasapi:ratelimit:enrollment-keys:<tenant_id>`,
+- **State:** one key per tenant, `imas:saasapi:ratelimit:enrollment-keys:<tenant_id>`,
   holding a single integer and a TTL of at most `burst / perSecond`
   seconds. Idle tenants cost nothing. The prefix keeps it clear of
-  farmer's `grlx:heartbeat:` keys if the two share a Valkey.
+  farmer's `imas:heartbeat:` keys if the two share a Valkey.
 - **Atomic:** the check-and-update is one Lua script (GCRA), so
   concurrent requests on different pods can't both take the last token.
 - **Clock:** time comes from Valkey's `TIME`, not the pods' clocks, so

@@ -1,6 +1,6 @@
 //go:build windows
 
-// Package winshortcut implements a grlx ingredient for managing Windows
+// Package winshortcut implements a imas ingredient for managing Windows
 // shell shortcuts (.lnk files), matching the surface of Salt's
 // win_shortcut state module. It drives the Shell's WScript.Shell
 // "CreateShortcut" automation object (IWshShortcut) via COM — the same
@@ -13,9 +13,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/winexec"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients/winexec"
 )
 
 const ingredientName = "win_shortcut"
@@ -34,7 +34,7 @@ var (
 // Compile-time interface check.
 var _ cook.RecipeCooker = Shortcut{}
 
-// Shortcut is a grlx ingredient for managing Windows .lnk shell
+// Shortcut is a imas ingredient for managing Windows .lnk shell
 // shortcuts. "name" is always the full path to the shortcut file.
 type Shortcut struct {
 	id     string

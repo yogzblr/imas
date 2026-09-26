@@ -40,7 +40,7 @@ type TransitKeyVersion struct {
 // the current signing version) doesn't hammer Transit.
 const transitPublicKeyCacheTTL = 60 * time.Second
 
-// NewGatewaySigner builds a GatewaySigner from the GRLX_GATEWAY_OPENBAO_*
+// NewGatewaySigner builds a GatewaySigner from the IMAS_GATEWAY_OPENBAO_*
 // environment variables (see obtransit.go) and the given Transit key
 // name.
 func NewGatewaySigner(keyName string) (*GatewaySigner, error) {

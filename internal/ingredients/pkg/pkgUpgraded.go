@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
 	"github.com/gogrlx/snack"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 var errUpgradeNotSupported = errors.New("package manager does not support targeted package upgrades")

@@ -1,5 +1,5 @@
 // Tenant X25519 keypair custody for
-// docs/design/grlx-payload-encryption-design.md (workstream J): "one
+// docs/design/imas-payload-encryption-design.md (workstream J): "one
 // tenant keypair (farmer-side, OpenBao-custodied private key)".
 //
 // FLAG FOR SECURITY REVIEW per the task brief. This file used to be an
@@ -52,29 +52,29 @@ import (
 
 // Environment variables configuring the OpenBao KV v2 client used to
 // custody the tenant's X25519 keypair. Addr is always required; which of
-// the rest matter depends on AuthMethod. Named GRLX_TENANTBOX_OPENBAO_*
+// the rest matter depends on AuthMethod. Named IMAS_TENANTBOX_OPENBAO_*
 // rather than reusing internal/certs's or internal/gatewayjwt's prefixes:
 // this is a distinct OpenBao connection (KV, not PKI or Transit),
 // plausibly pointed at a different address, mount, or auth role.
 const (
-	EnvTenantBoxOpenBaoAddr       = "GRLX_TENANTBOX_OPENBAO_ADDR"
-	EnvTenantBoxOpenBaoKVMount    = "GRLX_TENANTBOX_OPENBAO_KV_MOUNT" // default "secret", must be KV v2
-	EnvTenantBoxOpenBaoKVPath     = "GRLX_TENANTBOX_OPENBAO_KV_PATH"  // default "grlx/tenant-x25519"
-	EnvTenantBoxOpenBaoCACert     = "GRLX_TENANTBOX_OPENBAO_CACERT"   // optional, verify OpenBao's own TLS
-	EnvTenantBoxOpenBaoAuthMethod = "GRLX_TENANTBOX_OPENBAO_AUTH_METHOD"
+	EnvTenantBoxOpenBaoAddr       = "IMAS_TENANTBOX_OPENBAO_ADDR"
+	EnvTenantBoxOpenBaoKVMount    = "IMAS_TENANTBOX_OPENBAO_KV_MOUNT" // default "secret", must be KV v2
+	EnvTenantBoxOpenBaoKVPath     = "IMAS_TENANTBOX_OPENBAO_KV_PATH"  // default "imas/tenant-x25519"
+	EnvTenantBoxOpenBaoCACert     = "IMAS_TENANTBOX_OPENBAO_CACERT"   // optional, verify OpenBao's own TLS
+	EnvTenantBoxOpenBaoAuthMethod = "IMAS_TENANTBOX_OPENBAO_AUTH_METHOD"
 
 	// EnvTenantBoxOpenBaoToken is the bearer token used when AuthMethod is
 	// "token" (the default).
-	EnvTenantBoxOpenBaoToken = "GRLX_TENANTBOX_OPENBAO_TOKEN"
+	EnvTenantBoxOpenBaoToken = "IMAS_TENANTBOX_OPENBAO_TOKEN"
 
 	// EnvTenantBoxOpenBaoK8s* configure OpenBao's kubernetes auth method,
 	// used when AuthMethod is "kubernetes".
-	EnvTenantBoxOpenBaoK8sRole    = "GRLX_TENANTBOX_OPENBAO_K8S_ROLE"
-	EnvTenantBoxOpenBaoK8sMount   = "GRLX_TENANTBOX_OPENBAO_K8S_MOUNT"    // default "kubernetes"
-	EnvTenantBoxOpenBaoK8sJWTPath = "GRLX_TENANTBOX_OPENBAO_K8S_JWT_PATH" // default defaultTenantBoxK8sJWTPath
+	EnvTenantBoxOpenBaoK8sRole    = "IMAS_TENANTBOX_OPENBAO_K8S_ROLE"
+	EnvTenantBoxOpenBaoK8sMount   = "IMAS_TENANTBOX_OPENBAO_K8S_MOUNT"    // default "kubernetes"
+	EnvTenantBoxOpenBaoK8sJWTPath = "IMAS_TENANTBOX_OPENBAO_K8S_JWT_PATH" // default defaultTenantBoxK8sJWTPath
 )
 
-// Recognized values for GRLX_TENANTBOX_OPENBAO_AUTH_METHOD.
+// Recognized values for IMAS_TENANTBOX_OPENBAO_AUTH_METHOD.
 const (
 	TenantBoxAuthMethodToken      = "token"
 	TenantBoxAuthMethodKubernetes = "kubernetes"
@@ -130,7 +130,7 @@ func newTenantBoxClientFromEnv() (*obKVClient, error) {
 	}
 	path := os.Getenv(EnvTenantBoxOpenBaoKVPath)
 	if path == "" {
-		path = "grlx/tenant-x25519"
+		path = "imas/tenant-x25519"
 	}
 	authMethod := os.Getenv(EnvTenantBoxOpenBaoAuthMethod)
 	if authMethod == "" {
@@ -477,7 +477,7 @@ func GetTenantX25519PublicKey() (string, error) {
 // GetTenantX25519KeyPair returns the tenant's raw NaCl box keypair for use
 // by internal/natsapi's shared encrypt/decrypt helper: priv to seal
 // payloads addressed to a sprout and to open payloads received from one
-// (see docs/design/grlx-payload-encryption-design.md's "one tenant key
+// (see docs/design/imas-payload-encryption-design.md's "one tenant key
 // still gives per-sprout-specific encryption").
 func GetTenantX25519KeyPair() (pub, priv *[32]byte, err error) {
 	return ensureTenantX25519Keypair()

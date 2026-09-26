@@ -1,0 +1,9 @@
+#!/sbin/openrc-run
+supervisor=supervise-daemon
+
+description="Imas Sprout"
+command="/usr/bin/imas-sprout"
+
+depend() {
+	need net
+}

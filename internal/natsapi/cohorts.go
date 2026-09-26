@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/gogrlx/grlx/v2/internal/pki"
-	"github.com/gogrlx/grlx/v2/internal/rbac"
+	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/rbac"
 )
 
 // cohortRegistry is a single, process-wide *rbac.Registry, deliberately not
@@ -17,7 +17,7 @@ import (
 // boot/SIGHUP, from a single config file (cmd/farmer/main.go's
 // loadCohortRegistry, driven by rbac.LoadCohortsFromConfig) — the same
 // "genuinely process-level, not a per-request tenant being papered over"
-// shape docs/design/grlx-tenant-context-threading.md's point 4 describes
+// shape docs/design/imas-tenant-context-threading.md's point 4 describes
 // for internal/rbac/internal/auth's policy layer, which this task's brief
 // explicitly keeps out of scope ("has no tenant concept at all and stays
 // that way"). Giving cohort definitions themselves real per-tenant config

@@ -13,9 +13,9 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/gogrlx/grlx/v2/internal/objectstore"
-	"github.com/gogrlx/grlx/v2/internal/objectstore/objectstoretest"
-	"github.com/gogrlx/grlx/v2/internal/props"
+	"github.com/yogzblr/imas/internal/objectstore"
+	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
+	"github.com/yogzblr/imas/internal/props"
 )
 
 // --- no store configured ---
@@ -30,7 +30,7 @@ func TestNoStore_FailsClearly(t *testing.T) {
 
 	checks := map[string]func() error{
 		"readRecipe": func() error {
-			_, err := readRecipe(ctx, filepath.Join(getBasePath(), "dev.grlx"))
+			_, err := readRecipe(ctx, filepath.Join(getBasePath(), "dev.imas"))
 			return err
 		},
 		"ResolveRecipeFilePath": func() error {
@@ -65,7 +65,7 @@ func TestNoStore_FailsClearly(t *testing.T) {
 func TestReadRecipe_MissingKeyIsErrNoRecipe(t *testing.T) {
 	recipeDir := newRecipeTestStore(t)
 
-	_, err := readRecipe(context.Background(), filepath.Join(recipeDir, "absent.grlx"))
+	_, err := readRecipe(context.Background(), filepath.Join(recipeDir, "absent.imas"))
 	if !errors.Is(err, ErrNoRecipe) {
 		t.Fatalf("expected ErrNoRecipe for a missing key, got %v", err)
 	}
@@ -77,7 +77,7 @@ func TestReadRecipe_MissingKeyIsErrNoRecipe(t *testing.T) {
 // the sprout.
 func TestSendCookEvent_ReadsFromStore(t *testing.T) {
 	recipeDir := newRecipeTestStore(t)
-	writeRecipe(t, filepath.Join(recipeDir, "storeonly.grlx"), `steps:
+	writeRecipe(t, filepath.Join(recipeDir, "storeonly.imas"), `steps:
   only in the bucket:
     cmd.run:
       - name: echo from-object-store
@@ -87,7 +87,7 @@ func TestSendCookEvent_ReadsFromStore(t *testing.T) {
 	defer cleanup()
 	sproutID := "store-only-sprout"
 	got := make(chan RecipeEnvelope, 1)
-	sub, err := nc.Subscribe("grlx.sprouts."+sproutID+".cook", func(msg *nats.Msg) {
+	sub, err := nc.Subscribe("imas.sprouts."+sproutID+".cook", func(msg *nats.Msg) {
 		var env RecipeEnvelope
 		if err := json.Unmarshal(msg.Data, &env); err != nil {
 			t.Errorf("unmarshal envelope: %v", err)
@@ -124,11 +124,11 @@ func TestResolveRecipeSteps_HonoursContext(t *testing.T) {
 // --- replicas ---
 
 // replicaRecipes is a small recipe tree exercising the parts of resolution
-// that read the store more than once: an init.grlx, an include and a
+// that read the store more than once: an init.imas, an include and a
 // props-templated value, so each replica does several independent
 // Get/Exists round trips.
 var replicaRecipes = map[string]string{
-	"web/init.grlx": `include:
+	"web/init.imas": `include:
   - web.common
 steps:
   install nginx:
@@ -137,7 +137,7 @@ steps:
       - requisites:
         - require: base packages
 `,
-	"web/common.grlx": `steps:
+	"web/common.imas": `steps:
   base packages:
     cmd.run:
       - name: install base
@@ -202,7 +202,7 @@ func TestReplicasResolveIdentically(t *testing.T) {
 	// A recipe update written through replica B is what replica A serves
 	// next — there's no per-replica copy to drift out of sync.
 	objectstoretest.Seed(t, replicaB, map[string]string{
-		filepath.Join(recipeDir, "web/common.grlx"): `steps:
+		filepath.Join(recipeDir, "web/common.imas"): `steps:
   base packages:
     cmd.run:
       - name: install base v2

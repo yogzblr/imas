@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/pki"
 	"github.com/nats-io/nkeys"
 	"github.com/taigrr/jety"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // --- handleSproutsList tests ---

@@ -5,7 +5,7 @@ package windacl
 import (
 	"fmt"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 // aceAbsent implements the ace_absent method: name has no explicit ACE

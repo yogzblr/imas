@@ -10,7 +10,7 @@ import (
 
 	"golang.org/x/sys/windows/registry"
 
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 // fakeNode is an in-memory registry key: a set of named values plus

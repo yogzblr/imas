@@ -19,9 +19,9 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./keycloak-realm.json:/opt/keycloak/data/import/grlx-gateway-jwt-realm.json:ro
+      - ./keycloak-realm.json:/opt/keycloak/data/import/imas-gateway-jwt-realm.json:ro
     # This harness validates the JWKS document a *running farmer* serves
-    # at GRLX_GATEWAY_.../v1/.well-known/jwks.json. Point
+    # at IMAS_GATEWAY_.../v1/.well-known/jwks.json. Point
     # keycloak-realm.json's identityProviders[0].config.jwksUrl at that
     # farmer's real, network-reachable address before starting this
     # (farmer itself isn't part of this compose file — it needs OpenBao

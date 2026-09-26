@@ -48,7 +48,7 @@ func TestPublicErrorMessage(t *testing.T) {
 	}
 	// Anything unrecognized — including text that looks like a leaked
 	// error — maps to the generic message, never echoed back.
-	leaked := ErrorCode("mkdir /etc/grlx/pki/nats-auth/tenants: not a directory")
+	leaked := ErrorCode("mkdir /etc/imas/pki/nats-auth/tenants: not a directory")
 	if got := PublicErrorMessage(leaked); got != PublicErrorMessage(ErrorInternal) {
 		t.Fatalf("PublicErrorMessage(unknown) = %q, want the internal-error message", got)
 	}
@@ -64,7 +64,7 @@ func TestPublicWarningMessage(t *testing.T) {
 	if PublicWarningMessage(WarningTenantNotProvisioned) == "" {
 		t.Fatal("no public message for WarningTenantNotProvisioned")
 	}
-	leaked := WarningCode("stat /etc/grlx/pki/nats-auth/tenants/t_1: no such file")
+	leaked := WarningCode("stat /etc/imas/pki/nats-auth/tenants/t_1: no such file")
 	if got := PublicWarningMessage(leaked); got == "" || got == string(leaked) {
 		t.Fatalf("PublicWarningMessage(unknown) = %q, want a generic message", got)
 	}
@@ -96,7 +96,7 @@ func TestValidSaaSAPIReplySubject(t *testing.T) {
 		"_INBOX.saasapi.a\tb",                   // whitespace
 		"$SYS.REQ.CLAIMS.UPDATE",                // server administration
 		"internal.tenant.provisioned.pj_forged", // a forged result
-		"grlx.api.cmd.run",
+		"imas.api.cmd.run",
 		"_INBOX.saasapi." + strings.Repeat("x", 250), // over-long
 	}
 	for _, s := range invalid {

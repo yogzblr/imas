@@ -10,8 +10,8 @@
 // net/http, following the same approach already taken by
 // internal/ingredients/sdb/openbao.
 //
-// Authentication to OpenBao is pluggable via GRLX_CERTS_OPENBAO_AUTH_METHOD:
-// a static bearer token (the default, GRLX_CERTS_OPENBAO_TOKEN) or OpenBao's
+// Authentication to OpenBao is pluggable via IMAS_CERTS_OPENBAO_AUTH_METHOD:
+// a static bearer token (the default, IMAS_CERTS_OPENBAO_TOKEN) or OpenBao's
 // native "kubernetes" auth method, which logs in with the pod's own service
 // account JWT and needs no long-lived secret placed in the environment. See
 // newClientFromEnv and (*obClient).k8sLoginLocked.
@@ -34,34 +34,34 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/config"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 // Environment variables configuring the OpenBao PKI client. Addr and Role
 // are always required; which of the rest are required depends on
 // AuthMethod (see newClientFromEnv).
 const (
-	EnvOpenBaoAddr       = "GRLX_CERTS_OPENBAO_ADDR"
-	EnvOpenBaoPKIMount   = "GRLX_CERTS_OPENBAO_PKI_MOUNT" // default "pki"
-	EnvOpenBaoRole       = "GRLX_CERTS_OPENBAO_ROLE"
-	EnvOpenBaoCACert     = "GRLX_CERTS_OPENBAO_CACERT"      // optional, verify OpenBao's own TLS
-	EnvOpenBaoAuthMethod = "GRLX_CERTS_OPENBAO_AUTH_METHOD" // "token" (default) or "kubernetes"
+	EnvOpenBaoAddr       = "IMAS_CERTS_OPENBAO_ADDR"
+	EnvOpenBaoPKIMount   = "IMAS_CERTS_OPENBAO_PKI_MOUNT" // default "pki"
+	EnvOpenBaoRole       = "IMAS_CERTS_OPENBAO_ROLE"
+	EnvOpenBaoCACert     = "IMAS_CERTS_OPENBAO_CACERT"      // optional, verify OpenBao's own TLS
+	EnvOpenBaoAuthMethod = "IMAS_CERTS_OPENBAO_AUTH_METHOD" // "token" (default) or "kubernetes"
 
 	// EnvOpenBaoToken is the bearer token used when AuthMethod is "token"
 	// (the default, for backward compatibility with existing deployments).
-	EnvOpenBaoToken = "GRLX_CERTS_OPENBAO_TOKEN"
+	EnvOpenBaoToken = "IMAS_CERTS_OPENBAO_TOKEN"
 
 	// EnvOpenBaoK8sRole, EnvOpenBaoK8sMount and EnvOpenBaoK8sJWTPath
 	// configure OpenBao's kubernetes auth method, used when AuthMethod is
 	// "kubernetes". EnvOpenBaoK8sRole is required in that case; the other
 	// two have defaults matching a standard in-cluster deployment.
-	EnvOpenBaoK8sRole    = "GRLX_CERTS_OPENBAO_K8S_ROLE"
-	EnvOpenBaoK8sMount   = "GRLX_CERTS_OPENBAO_K8S_MOUNT"    // default "kubernetes"
-	EnvOpenBaoK8sJWTPath = "GRLX_CERTS_OPENBAO_K8S_JWT_PATH" // default defaultK8sJWTPath
+	EnvOpenBaoK8sRole    = "IMAS_CERTS_OPENBAO_K8S_ROLE"
+	EnvOpenBaoK8sMount   = "IMAS_CERTS_OPENBAO_K8S_MOUNT"    // default "kubernetes"
+	EnvOpenBaoK8sJWTPath = "IMAS_CERTS_OPENBAO_K8S_JWT_PATH" // default defaultK8sJWTPath
 )
 
-// Recognized values for GRLX_CERTS_OPENBAO_AUTH_METHOD.
+// Recognized values for IMAS_CERTS_OPENBAO_AUTH_METHOD.
 const (
 	AuthMethodToken      = "token"
 	AuthMethodKubernetes = "kubernetes"
@@ -326,7 +326,7 @@ func (c *obClient) issueCert(ctx context.Context, hosts []string, ttl time.Durat
 			dnsNames = append(dnsNames, h)
 		}
 	}
-	cn := "grlx"
+	cn := "imas"
 	switch {
 	case len(dnsNames) > 0:
 		cn = dnsNames[0]

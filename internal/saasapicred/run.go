@@ -4,15 +4,15 @@
 // pki.EnsureSaaSAPICredential and writes it into OpenBao KV v2, where
 // External Secrets Operator picks it up for the saasapi Deployment. See
 // deploy/farmer/ for the reference Job and the OpenBao policy it needs,
-// and docs/design/grlx-internal-api-account.md for why this exists.
+// and docs/design/imas-internal-api-account.md for why this exists.
 //
 // It is deliberately a separate process invocation rather than something
 // farmer's server does at boot: the OpenBao identity it authenticates as
-// (GRLX_SAASAPI_CRED_OPENBAO_*) is the only one with write access to the
+// (IMAS_SAASAPI_CRED_OPENBAO_*) is the only one with write access to the
 // published secret, and farmer's long-running process must never hold it.
 //
 // This lives outside cmd/farmer only so it can be tested: cmd/farmer's
-// init() loads /etc/grlx/farmer, which a test binary can't redirect.
+// init() loads /etc/imas/farmer, which a test binary can't redirect.
 //
 // FLAG FOR SECURITY REVIEW — see deploy/farmer/README.md.
 package saasapicred
@@ -25,19 +25,19 @@ import (
 	"os"
 	"time"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
-	"github.com/gogrlx/grlx/v2/internal/openbaokv"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	log "github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/openbaokv"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // Command is the farmer subcommand name cmd/farmer dispatches on.
 const Command = "publish-saasapi-credential"
 
 // EnvKVPath names the KV v2 secret path (relative to
-// GRLX_SAASAPI_CRED_OPENBAO_KV_MOUNT) the JWT is written to. Required —
+// IMAS_SAASAPI_CRED_OPENBAO_KV_MOUNT) the JWT is written to. Required —
 // either this or -kv-path — with no built-in default, since the path is
 // what the Job's OpenBao policy is scoped to.
-const EnvKVPath = "GRLX_SAASAPI_CRED_OPENBAO_KV_PATH"
+const EnvKVPath = "IMAS_SAASAPI_CRED_OPENBAO_KV_PATH"
 
 // Run parses args (everything after the subcommand name), mints and
 // publishes the credential, and returns the process exit code: 0 on

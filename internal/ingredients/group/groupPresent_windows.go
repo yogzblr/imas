@@ -21,7 +21,7 @@ import (
 	"github.com/deploymenttheory/go-bindings-win32/bindings/win32/foundation"
 	"github.com/deploymenttheory/go-bindings-win32/bindings/win32/networkmanagement/netmanagement"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 // Selected NET_API_STATUS / Win32 error codes returned by the
@@ -125,7 +125,7 @@ func netLocalGroupAdd(name string) error {
 	case nerrSuccess:
 		return nil
 	case errorAccessDenied:
-		return errors.New("NetLocalGroupAdd: access denied — grlx sprout must be running elevated (Administrator/SYSTEM) to manage local groups")
+		return errors.New("NetLocalGroupAdd: access denied — imas sprout must be running elevated (Administrator/SYSTEM) to manage local groups")
 	case nerrGroupExists:
 		return fmt.Errorf("NetLocalGroupAdd: a group named %q already exists", name)
 	default:

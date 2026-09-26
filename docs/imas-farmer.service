@@ -1,0 +1,15 @@
+[Unit]
+Description=Imas Farmer
+After=network-online.target
+Documentation=https://imas.org
+
+[Service]
+Type=simple
+User=farmer
+Group=farmer
+ExecStart=/usr/local/bin/imas-farmer
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

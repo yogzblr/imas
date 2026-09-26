@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 var startTime time.Time

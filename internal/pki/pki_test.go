@@ -23,7 +23,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 // newTestDB opens a fresh in-memory, pure-Go (no CGO) sqlite database,
@@ -66,7 +66,7 @@ func setupTestPKI(t *testing.T) {
 	// ReloadNKeys calls ConfigureNats which needs valid TLS files.
 	config.FarmerInterface = "127.0.0.1"
 	config.FarmerBusPort = "14222"
-	config.FarmerOrganization = "grlx-test"
+	config.FarmerOrganization = "imas-test"
 	config.CertificateValidTime = 24 * 365 * time.Hour
 	config.RootCA = filepath.Join(tmpDir, "rootca.pem")
 	config.RootCAPriv = filepath.Join(tmpDir, "rootca-key.pem")
@@ -89,7 +89,7 @@ func generateTestCerts(t *testing.T, tmpDir string) {
 
 	caTemplate := x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{Organization: []string{"grlx-test"}},
+		Subject:               pkix.Name{Organization: []string{"imas-test"}},
 		NotBefore:             time.Now(),
 		NotAfter:              time.Now().Add(time.Hour),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
@@ -120,7 +120,7 @@ func generateTestCerts(t *testing.T, tmpDir string) {
 
 	leafTemplate := x509.Certificate{
 		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{Organization: []string{"grlx-test"}},
+		Subject:      pkix.Name{Organization: []string{"imas-test"}},
 		NotBefore:    time.Now(),
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
@@ -183,7 +183,7 @@ func TestIsValidSproutID(t *testing.T) {
 		{id: "test", shouldSucceed: true, testID: "simple"},
 		{id: "-test", shouldSucceed: false, testID: "leading hyphen"},
 		{id: "te_st", shouldSucceed: true, testID: "embedded underscore"},
-		{id: "grlxNode", shouldSucceed: false, testID: "capital letter"},
+		{id: "imasNode", shouldSucceed: false, testID: "capital letter"},
 		{id: "t.est", shouldSucceed: true, testID: "embedded dot"},
 		{id: strings.Repeat("a", 300), shouldSucceed: false, testID: "300 long string"},
 		{id: strings.Repeat("a", 253), shouldSucceed: true, testID: "253 long string"},
@@ -630,14 +630,14 @@ func TestSetupPKISprout(t *testing.T) {
 func TestRootCACached(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	t.Run("grlx cached", func(t *testing.T) {
-		caFile := filepath.Join(tmpDir, "grlx-rootca.pem")
+	t.Run("imas cached", func(t *testing.T) {
+		caFile := filepath.Join(tmpDir, "imas-rootca.pem")
 		if err := os.WriteFile(caFile, []byte("cert"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		config.GrlxRootCA = caFile
-		if !RootCACached("grlx") {
-			t.Error("expected RootCACached to return true for grlx")
+		config.ImasRootCA = caFile
+		if !RootCACached("imas") {
+			t.Error("expected RootCACached to return true for imas")
 		}
 	})
 
@@ -652,9 +652,9 @@ func TestRootCACached(t *testing.T) {
 		}
 	})
 
-	t.Run("grlx not cached", func(t *testing.T) {
-		config.GrlxRootCA = filepath.Join(tmpDir, "nonexistent.pem")
-		if RootCACached("grlx") {
+	t.Run("imas not cached", func(t *testing.T) {
+		config.ImasRootCA = filepath.Join(tmpDir, "nonexistent.pem")
+		if RootCACached("imas") {
 			t.Error("expected RootCACached to return false")
 		}
 	})
@@ -864,20 +864,20 @@ func TestFetchRootCA_ServerUnreachable(t *testing.T) {
 	}
 }
 
-func TestLoadRootCA_GrlxBinary(t *testing.T) {
+func TestLoadRootCA_ImasBinary(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Generate a valid CA cert PEM.
 	certPEM := generateSelfSignedCertPEM(t)
-	caFile := filepath.Join(tmpDir, "grlx-rootca.pem")
+	caFile := filepath.Join(tmpDir, "imas-rootca.pem")
 	if err := os.WriteFile(caFile, certPEM, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	config.GrlxRootCA = caFile
+	config.ImasRootCA = caFile
 
-	err := LoadRootCA("grlx")
+	err := LoadRootCA("imas")
 	if err != nil {
-		t.Fatalf("LoadRootCA(grlx) failed: %v", err)
+		t.Fatalf("LoadRootCA(imas) failed: %v", err)
 	}
 
 	// nkeyClient should be configured.
@@ -892,18 +892,18 @@ func TestLoadRootCA_InvalidPEM(t *testing.T) {
 	if err := os.WriteFile(caFile, []byte("not-a-valid-pem"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	config.GrlxRootCA = caFile
+	config.ImasRootCA = caFile
 
-	err := LoadRootCA("grlx")
+	err := LoadRootCA("imas")
 	if !errors.Is(err, ErrCannotParseRootCA) {
 		t.Errorf("expected ErrCannotParseRootCA, got: %v", err)
 	}
 }
 
 func TestLoadRootCA_MissingFile(t *testing.T) {
-	config.GrlxRootCA = "/nonexistent/rootca.pem"
+	config.ImasRootCA = "/nonexistent/rootca.pem"
 
-	err := LoadRootCA("grlx")
+	err := LoadRootCA("imas")
 	if err == nil {
 		t.Error("expected error for missing root CA file")
 	}

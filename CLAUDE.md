@@ -1,8 +1,9 @@
-# grlx SaaS Machine Manager — repo conventions
+# imas — Infrastructure Management At Scale — repo conventions
 
-Fork of gogrlx/grlx (github.com/gogrlx/grlx). See docs/design/ for the
-full architecture — read grlx-master-plan.md and grlx-fork-roadmap.md
-first, then the specific design doc named in your task.
+imas began as a fork of gogrlx/grlx (github.com/gogrlx/grlx) and has since
+diverged into its own project. See docs/design/ for the full architecture —
+read imas-master-plan.md and imas-fork-roadmap.md first, then the specific
+design doc named in your task.
 
 ## Constraints (non-negotiable)
 - Licensing: Apache-2.0 / MIT dependencies only. Flag anything else

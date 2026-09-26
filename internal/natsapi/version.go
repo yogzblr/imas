@@ -3,7 +3,7 @@ package natsapi
 import (
 	"encoding/json"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 var buildVersion config.Version

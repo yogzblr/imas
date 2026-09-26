@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
 )
 
 // WhoAmI retrieves the identity and role of the authenticated user.

@@ -2,7 +2,7 @@ package pki
 
 // Concurrent two-tenant coverage for the PKI accept/deny call sites
 // workstream E's follow-up threads real tenant identity through (see
-// docs/design/grlx-tenant-context-threading.md). PR #28 fixed this same
+// docs/design/imas-tenant-context-threading.md). PR #28 fixed this same
 // bug class once already for a different call site; asserting against a
 // single tenant twice would make a regression back to the process-global
 // tenantID() seam invisible to tests the same way it was before that fix.

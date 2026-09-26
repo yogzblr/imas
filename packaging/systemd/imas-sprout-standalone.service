@@ -1,0 +1,30 @@
+[Unit]
+Description=imas Sprout - Remote Control Agent (Standalone)
+Documentation=https://imas.dev
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/imas-sprout
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=30
+
+# Less restrictive security for self-updates
+NoNewPrivileges=false
+PrivateTmp=true
+ReadWritePaths=/usr/local/bin
+ProtectKernelTunables=true
+ProtectKernelModules=true
+
+# Working directory and environment
+WorkingDirectory=/var/cache/imas/sprout
+Environment=IMAS_CONFIG=/etc/imas/sprout
+
+[Install]
+WantedBy=multi-user.target 

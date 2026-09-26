@@ -29,34 +29,34 @@ func TestResolveRecipeFilePath(t *testing.T) {
 		filepath: "",
 		err:      ErrNoRecipe,
 	}, {
-		id:       "apache dot grlx",
-		recipe:   "apache.grlx",
+		id:       "apache dot imas",
+		recipe:   "apache.imas",
 		filepath: "",
 		err:      ErrNoRecipe,
 	}, {
-		id:       "apache dot apache dot grlx",
-		recipe:   "apache.apache.grlx",
-		filepath: filepath.Join(getBasePath(), "apache/apache.grlx"),
+		id:       "apache dot apache dot imas",
+		recipe:   "apache.apache.imas",
+		filepath: filepath.Join(getBasePath(), "apache/apache.imas"),
 		err:      nil,
 	}, {
 		id:       "apache slash path",
 		recipe:   "apache/apache",
-		filepath: filepath.Join(getBasePath(), "apache/apache.grlx"),
+		filepath: filepath.Join(getBasePath(), "apache/apache.imas"),
 		err:      nil,
 	}, {
 		id:       "apache dot path",
 		recipe:   "apache.apache",
-		filepath: filepath.Join(getBasePath(), "apache/apache.grlx"),
+		filepath: filepath.Join(getBasePath(), "apache/apache.imas"),
 		err:      nil,
 	}, {
 		id:       "dev",
 		recipe:   "dev",
-		filepath: filepath.Join(getBasePath(), "dev.grlx"),
+		filepath: filepath.Join(getBasePath(), "dev.imas"),
 		err:      nil,
 	}, {
 		id:       "apache init",
 		recipe:   "apache",
-		filepath: filepath.Join(getBasePath(), "apache/init.grlx"),
+		filepath: filepath.Join(getBasePath(), "apache/init.imas"),
 		err:      nil,
 	}}
 	for _, tc := range testCases {

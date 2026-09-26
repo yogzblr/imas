@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/log"
 	"github.com/taigrr/jety"
+	"github.com/yogzblr/imas/internal/log"
 )
 
 // resetForTest resets the sync.Once so LoadConfig can be called again,
@@ -131,13 +131,13 @@ func TestSetSproutID(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_GrlxBinary(t *testing.T) {
+func TestLoadConfig_ImasBinary(t *testing.T) {
 	tmpHome := t.TempDir()
-	cfgDir := filepath.Join(tmpHome, ".config", "grlx")
+	cfgDir := filepath.Join(tmpHome, ".config", "imas")
 	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cfgFile := filepath.Join(cfgDir, "grlx")
+	cfgFile := filepath.Join(cfgDir, "imas")
 	content := `
 farmerinterface: 10.0.0.1
 farmerapiport: "9999"
@@ -150,7 +150,7 @@ loglevel: debug
 
 	t.Setenv("HOME", tmpHome)
 	resetForTest(t, cfgFile)
-	LoadConfig("grlx")
+	LoadConfig("imas")
 
 	if FarmerInterface != "10.0.0.1" {
 		t.Errorf("FarmerInterface = %q, want 10.0.0.1", FarmerInterface)
@@ -193,19 +193,19 @@ func TestLoadConfig_LogLevels(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			tmpHome := t.TempDir()
-			cfgDir := filepath.Join(tmpHome, ".config", "grlx")
+			cfgDir := filepath.Join(tmpHome, ".config", "imas")
 			_ = os.MkdirAll(cfgDir, 0o755)
 
 			var content string
 			if tt.input != "" {
 				content = "loglevel: " + tt.input + "\n"
 			}
-			cfgFile := filepath.Join(cfgDir, "grlx")
+			cfgFile := filepath.Join(cfgDir, "imas")
 			_ = os.WriteFile(cfgFile, []byte(content), 0o644)
 
 			t.Setenv("HOME", tmpHome)
 			resetForTest(t, cfgFile)
-			LoadConfig("grlx")
+			LoadConfig("imas")
 
 			if LogLevel != tt.want {
 				t.Errorf("log.Level for %q = %v, want %v", tt.input, LogLevel, tt.want)
@@ -216,14 +216,14 @@ func TestLoadConfig_LogLevels(t *testing.T) {
 
 func TestLoadConfig_DefaultValues(t *testing.T) {
 	tmpHome := t.TempDir()
-	cfgDir := filepath.Join(tmpHome, ".config", "grlx")
+	cfgDir := filepath.Join(tmpHome, ".config", "imas")
 	_ = os.MkdirAll(cfgDir, 0o755)
-	cfgFile := filepath.Join(cfgDir, "grlx")
+	cfgFile := filepath.Join(cfgDir, "imas")
 	_ = os.WriteFile(cfgFile, []byte(""), 0o644)
 
 	t.Setenv("HOME", tmpHome)
 	resetForTest(t, cfgFile)
-	LoadConfig("grlx")
+	LoadConfig("imas")
 
 	if FarmerInterface != "localhost" {
 		t.Errorf("default FarmerInterface = %q, want localhost", FarmerInterface)
@@ -245,21 +245,21 @@ func TestLoadConfig_DefaultValues(t *testing.T) {
 	if LogLevel != log.LNotice {
 		t.Errorf("default log.Level = %v, want LNotice", LogLevel)
 	}
-	if RecipeDir != filepath.Join("/", "srv", "grlx", "recipes", "prod") {
+	if RecipeDir != filepath.Join("/", "srv", "imas", "recipes", "prod") {
 		t.Errorf("default RecipeDir = %q", RecipeDir)
 	}
 }
 
 func TestLoadConfig_CreatesConfigDirIfMissing(t *testing.T) {
 	tmpHome := t.TempDir()
-	cfgDir := filepath.Join(tmpHome, ".config", "grlx")
+	cfgDir := filepath.Join(tmpHome, ".config", "imas")
 	// Don't create cfgDir — LoadConfig should create it.
-	cfgFile := filepath.Join(cfgDir, "grlx")
+	cfgFile := filepath.Join(cfgDir, "imas")
 
 	t.Setenv("HOME", tmpHome)
 	configLoaded = sync.Once{}
 	// Don't call resetForTest — let LoadConfig handle the missing file.
-	LoadConfig("grlx")
+	LoadConfig("imas")
 
 	if _, err := os.Stat(cfgDir); os.IsNotExist(err) {
 		t.Error("LoadConfig should create the config directory")
@@ -269,58 +269,58 @@ func TestLoadConfig_CreatesConfigDirIfMissing(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_GrlxRootCA(t *testing.T) {
+func TestLoadConfig_ImasRootCA(t *testing.T) {
 	tmpHome := t.TempDir()
-	cfgDir := filepath.Join(tmpHome, ".config", "grlx")
+	cfgDir := filepath.Join(tmpHome, ".config", "imas")
 	_ = os.MkdirAll(cfgDir, 0o755)
-	cfgFile := filepath.Join(cfgDir, "grlx")
+	cfgFile := filepath.Join(cfgDir, "imas")
 	_ = os.WriteFile(cfgFile, []byte(""), 0o644)
 
 	t.Setenv("HOME", tmpHome)
 	// Ensure XDG_CONFIG_HOME is unset so LoadConfig falls back to $HOME/.config.
 	t.Setenv("XDG_CONFIG_HOME", "")
 	resetForTest(t, cfgFile)
-	LoadConfig("grlx")
+	LoadConfig("imas")
 
-	wantCA := filepath.Join(tmpHome, ".config", "grlx", "tls-rootca.pem")
+	wantCA := filepath.Join(tmpHome, ".config", "imas", "tls-rootca.pem")
 	// os.UserHomeDir() should pick up the overridden HOME.
 	// If it doesn't (cached from an earlier test), verify the path ends correctly.
-	wantSuffix := filepath.Join(".config", "grlx", "tls-rootca.pem")
-	if GrlxRootCA != wantCA && !strings.HasSuffix(GrlxRootCA, wantSuffix) {
-		t.Errorf("GrlxRootCA = %q, want %q (or suffix %q)", GrlxRootCA, wantCA, wantSuffix)
+	wantSuffix := filepath.Join(".config", "imas", "tls-rootca.pem")
+	if ImasRootCA != wantCA && !strings.HasSuffix(ImasRootCA, wantSuffix) {
+		t.Errorf("ImasRootCA = %q, want %q (or suffix %q)", ImasRootCA, wantCA, wantSuffix)
 	}
 }
 
 func TestLoadConfig_XDGConfigHome(t *testing.T) {
 	tmpHome := t.TempDir()
 	xdgDir := filepath.Join(tmpHome, "custom-config")
-	cfgDir := filepath.Join(xdgDir, "grlx")
+	cfgDir := filepath.Join(xdgDir, "imas")
 	_ = os.MkdirAll(cfgDir, 0o755)
-	cfgFile := filepath.Join(cfgDir, "grlx")
+	cfgFile := filepath.Join(cfgDir, "imas")
 	_ = os.WriteFile(cfgFile, []byte(""), 0o644)
 
 	t.Setenv("HOME", tmpHome)
 	t.Setenv("XDG_CONFIG_HOME", xdgDir)
 	resetForTest(t, cfgFile)
-	LoadConfig("grlx")
+	LoadConfig("imas")
 
-	wantCA := filepath.Join(xdgDir, "grlx", "tls-rootca.pem")
-	if GrlxRootCA != wantCA {
-		t.Errorf("GrlxRootCA = %q, want %q (with XDG_CONFIG_HOME)", GrlxRootCA, wantCA)
+	wantCA := filepath.Join(xdgDir, "imas", "tls-rootca.pem")
+	if ImasRootCA != wantCA {
+		t.Errorf("ImasRootCA = %q, want %q (with XDG_CONFIG_HOME)", ImasRootCA, wantCA)
 	}
 }
 
 func TestLoadConfig_RecipeDirFallback(t *testing.T) {
 	tmpHome := t.TempDir()
-	cfgDir := filepath.Join(tmpHome, ".config", "grlx")
+	cfgDir := filepath.Join(tmpHome, ".config", "imas")
 	_ = os.MkdirAll(cfgDir, 0o755)
-	cfgFile := writeTempConfig(t, cfgDir, "grlx", "recipedir: \"\"\n")
+	cfgFile := writeTempConfig(t, cfgDir, "imas", "recipedir: \"\"\n")
 
 	t.Setenv("HOME", tmpHome)
 	resetForTest(t, cfgFile)
-	LoadConfig("grlx")
+	LoadConfig("imas")
 
-	want := filepath.Join("/", "srv", "grlx", "recipes", "prod")
+	want := filepath.Join("/", "srv", "imas", "recipes", "prod")
 	if RecipeDir != want {
 		t.Errorf("RecipeDir = %q, want %q (fallback)", RecipeDir, want)
 	}
@@ -372,8 +372,8 @@ func TestTriggerMsg_Struct(t *testing.T) {
 }
 
 func TestBinaryConstants(t *testing.T) {
-	if BinaryGrlx != "grlx" {
-		t.Errorf("BinaryGrlx = %q", BinaryGrlx)
+	if BinaryImas != "imas" {
+		t.Errorf("BinaryImas = %q", BinaryImas)
 	}
 	if BinaryFarmer != "farmer" {
 		t.Errorf("BinaryFarmer = %q", BinaryFarmer)
@@ -400,8 +400,8 @@ func TestLoadConfig_FarmerDefaults(t *testing.T) {
 	if FarmerInterface != "localhost" {
 		t.Errorf("default FarmerInterface = %q, want localhost", FarmerInterface)
 	}
-	if FarmerOrganization != "grlx farmer" {
-		t.Errorf("FarmerOrganization = %q, want 'grlx farmer'", FarmerOrganization)
+	if FarmerOrganization != "imas farmer" {
+		t.Errorf("FarmerOrganization = %q, want 'imas farmer'", FarmerOrganization)
 	}
 	if APIWriteTimeout != 120*time.Second {
 		t.Errorf("APIWriteTimeout = %v, want 2m0s", APIWriteTimeout)
@@ -484,8 +484,8 @@ func TestLoadConfig_FarmerCertHostsDefault(t *testing.T) {
 
 	LoadConfig("farmer")
 
-	// Default cert hosts should include localhost, 127.0.0.1, farmer, grlx.
-	required := []string{"localhost", "127.0.0.1", "farmer", "grlx"}
+	// Default cert hosts should include localhost, 127.0.0.1, farmer, imas.
+	required := []string{"localhost", "127.0.0.1", "farmer", "imas"}
 	hostSet := make(map[string]bool)
 	for _, h := range CertHosts {
 		hostSet[h] = true
@@ -608,8 +608,8 @@ func TestLoadConfig_SproutDefaults(t *testing.T) {
 	if SproutRootCA != wantRootCA {
 		t.Errorf("SproutRootCA = %q, want %q", SproutRootCA, wantRootCA)
 	}
-	if JobLogDir != "/var/cache/grlx/sprout/jobs" {
-		t.Errorf("JobLogDir = %q, want /var/cache/grlx/sprout/jobs", JobLogDir)
+	if JobLogDir != "/var/cache/imas/sprout/jobs" {
+		t.Errorf("JobLogDir = %q, want /var/cache/imas/sprout/jobs", JobLogDir)
 	}
 	wantNKeyPub := filepath.Join(tmpRoot, "pki/sprout/sprout.nkey.pub")
 	if NKeySproutPubFile != wantNKeyPub {

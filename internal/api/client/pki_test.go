@@ -5,18 +5,18 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
-	"github.com/gogrlx/grlx/v2/internal/audit"
-	"github.com/gogrlx/grlx/v2/internal/jobs"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/audit"
+	"github.com/yogzblr/imas/internal/jobs"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // mockPKIHandlers sets up both pki.list and a target pki action handler.
 // listResp is the response for pki.list; actionSubject is the pki action
-// (e.g. "grlx.api.pki.accept"). The action handler replies with success.
+// (e.g. "imas.api.pki.accept"). The action handler replies with success.
 func mockPKIHandlers(t *testing.T, nc *nats.Conn, listResp pki.KeysByType, actionSubject string) {
 	t.Helper()
-	mockHandler(t, nc, "grlx.api.pki.list", listResp)
+	mockHandler(t, nc, "imas.api.pki.list", listResp)
 	mockHandler(t, nc, actionSubject, map[string]bool{"ok": true})
 }
 
@@ -59,7 +59,7 @@ func TestListKeys_Success(t *testing.T) {
 
 	want := keysWithSprout("accepted", "web-01", "web-02")
 	want.Unaccepted = pki.KeySet{Sprouts: []pki.KeyManager{{SproutID: "new-sprout"}}}
-	mockHandler(t, NatsConn, "grlx.api.pki.list", want)
+	mockHandler(t, NatsConn, "imas.api.pki.list", want)
 
 	got, err := ListKeys()
 	if err != nil {
@@ -77,7 +77,7 @@ func TestListKeys_Error(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.pki.list", "NATS error")
+	mockErrorHandler(t, NatsConn, "imas.api.pki.list", "NATS error")
 
 	_, err := ListKeys()
 	if err == nil {
@@ -90,7 +90,7 @@ func TestAcceptKey_Success(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("unaccepted", "new-sprout")
-	mockPKIHandlers(t, NatsConn, keys, "grlx.api.pki.accept")
+	mockPKIHandlers(t, NatsConn, keys, "imas.api.pki.accept")
 
 	ok, err := AcceptKey("new-sprout")
 	if err != nil {
@@ -106,7 +106,7 @@ func TestAcceptKey_AlreadyAccepted(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "web-01")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
 
 	_, err := AcceptKey("web-01")
 	if err == nil {
@@ -122,7 +122,7 @@ func TestAcceptKey_NotFound(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "web-01")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
 
 	_, err := AcceptKey("nonexistent")
 	if err == nil {
@@ -138,7 +138,7 @@ func TestAcceptKey_FromDenied(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("denied", "bad-sprout")
-	mockPKIHandlers(t, NatsConn, keys, "grlx.api.pki.accept")
+	mockPKIHandlers(t, NatsConn, keys, "imas.api.pki.accept")
 
 	ok, err := AcceptKey("bad-sprout")
 	if err != nil {
@@ -154,7 +154,7 @@ func TestUnacceptKey_Success(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "web-01")
-	mockPKIHandlers(t, NatsConn, keys, "grlx.api.pki.unaccept")
+	mockPKIHandlers(t, NatsConn, keys, "imas.api.pki.unaccept")
 
 	ok, err := UnacceptKey("web-01")
 	if err != nil {
@@ -170,7 +170,7 @@ func TestUnacceptKey_AlreadyUnaccepted(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("unaccepted", "new-sprout")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
 
 	_, err := UnacceptKey("new-sprout")
 	if err == nil {
@@ -186,7 +186,7 @@ func TestRejectKey_Success(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "compromised")
-	mockPKIHandlers(t, NatsConn, keys, "grlx.api.pki.reject")
+	mockPKIHandlers(t, NatsConn, keys, "imas.api.pki.reject")
 
 	ok, err := RejectKey("compromised")
 	if err != nil {
@@ -202,7 +202,7 @@ func TestRejectKey_AlreadyRejected(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("rejected", "old-sprout")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
 
 	_, err := RejectKey("old-sprout")
 	if err == nil {
@@ -218,7 +218,7 @@ func TestDenyKey_Success(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("unaccepted", "suspicious")
-	mockPKIHandlers(t, NatsConn, keys, "grlx.api.pki.deny")
+	mockPKIHandlers(t, NatsConn, keys, "imas.api.pki.deny")
 
 	ok, err := DenyKey("suspicious")
 	if err != nil {
@@ -234,7 +234,7 @@ func TestDenyKey_AlreadyDenied(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("denied", "bad-actor")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
 
 	_, err := DenyKey("bad-actor")
 	if err == nil {
@@ -250,7 +250,7 @@ func TestDeleteKey_Success(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("rejected", "decommissioned")
-	mockPKIHandlers(t, NatsConn, keys, "grlx.api.pki.delete")
+	mockPKIHandlers(t, NatsConn, keys, "imas.api.pki.delete")
 
 	ok, err := DeleteKey("decommissioned")
 	if err != nil {
@@ -266,7 +266,7 @@ func TestDeleteKey_NotFound(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "web-01")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
 
 	_, err := DeleteKey("ghost")
 	if err == nil {
@@ -283,7 +283,7 @@ func TestResolveTargets_Regex(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "web-01", "web-02", "db-01")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
 
 	got, err := ResolveTargets("web-.*")
 	if err != nil {
@@ -300,7 +300,7 @@ func TestResolveTargets_CommaList(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "web-01", "web-02", "db-01")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
 
 	got, err := ResolveTargets("web-01,db-01")
 	if err != nil {
@@ -317,7 +317,7 @@ func TestResolveTargets_NoMatch(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "web-01")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
 
 	got, err := ResolveTargets("db-.*")
 	if err != nil {
@@ -334,8 +334,8 @@ func TestCook_NATSError(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "web-01")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
-	mockErrorHandler(t, NatsConn, "grlx.api.cook", "recipe not found")
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
+	mockErrorHandler(t, NatsConn, "imas.api.cook", "recipe not found")
 
 	// Validate that cook propagates API errors
 	_, err := Cook("web-01", dummyCmdCook())
@@ -357,14 +357,14 @@ func TestCook_Success(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "web-01", "web-02")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
 
 	want := apitypes.CmdCook{
 		Env:    "base",
 		Recipe: "test-recipe",
 		Test:   true,
 	}
-	mockHandler(t, NatsConn, "grlx.api.cook", want)
+	mockHandler(t, NatsConn, "imas.api.cook", want)
 
 	got, err := Cook("web-.*", dummyCmdCook())
 	if err != nil {
@@ -380,7 +380,7 @@ func TestCook_ResolveError(t *testing.T) {
 	defer cleanup()
 
 	// ListKeys fails → ResolveTargets fails → Cook fails.
-	mockErrorHandler(t, NatsConn, "grlx.api.pki.list", "NATS down")
+	mockErrorHandler(t, NatsConn, "imas.api.pki.list", "NATS down")
 
 	_, err := Cook("web-.*", dummyCmdCook())
 	if err == nil {
@@ -393,8 +393,8 @@ func TestCook_BadJSON(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "web-01")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
-	mockBadJSONHandler(t, NatsConn, "grlx.api.cook")
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
+	mockBadJSONHandler(t, NatsConn, "imas.api.cook")
 
 	_, err := Cook("web-01", dummyCmdCook())
 	if err == nil {
@@ -408,7 +408,7 @@ func TestListKeys_BadJSON(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockBadJSONHandler(t, NatsConn, "grlx.api.pki.list")
+	mockBadJSONHandler(t, NatsConn, "imas.api.pki.list")
 
 	_, err := ListKeys()
 	if err == nil {
@@ -420,7 +420,7 @@ func TestListSprouts_BadJSON(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockBadJSONHandler(t, NatsConn, "grlx.api.sprouts.list")
+	mockBadJSONHandler(t, NatsConn, "imas.api.sprouts.list")
 
 	_, err := ListSprouts()
 	if err == nil {
@@ -432,7 +432,7 @@ func TestGetSprout_BadJSON(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockBadJSONHandler(t, NatsConn, "grlx.api.sprouts.get")
+	mockBadJSONHandler(t, NatsConn, "imas.api.sprouts.get")
 
 	_, err := GetSprout("web-01")
 	if err == nil {
@@ -444,7 +444,7 @@ func TestGetSproutProps_BadJSON(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockBadJSONHandler(t, NatsConn, "grlx.api.props.getall")
+	mockBadJSONHandler(t, NatsConn, "imas.api.props.getall")
 
 	_, err := GetSproutProps("web-01")
 	if err == nil {
@@ -456,7 +456,7 @@ func TestListAuditDates_BadJSON(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockBadJSONHandler(t, NatsConn, "grlx.api.audit.dates")
+	mockBadJSONHandler(t, NatsConn, "imas.api.audit.dates")
 
 	_, err := ListAuditDates()
 	if err == nil {
@@ -468,7 +468,7 @@ func TestQueryAudit_BadJSON(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockBadJSONHandler(t, NatsConn, "grlx.api.audit.query")
+	mockBadJSONHandler(t, NatsConn, "imas.api.audit.query")
 
 	_, err := QueryAudit(audit.QueryParams{Date: "2026-03-18"})
 	if err == nil {
@@ -480,7 +480,7 @@ func TestGetCohort_BadJSON(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockBadJSONHandler(t, NatsConn, "grlx.api.cohorts.get")
+	mockBadJSONHandler(t, NatsConn, "imas.api.cohorts.get")
 
 	_, err := GetCohort("web-servers")
 	if err == nil {
@@ -492,7 +492,7 @@ func TestResolveCohort_BadJSON(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockBadJSONHandler(t, NatsConn, "grlx.api.cohorts.resolve")
+	mockBadJSONHandler(t, NatsConn, "imas.api.cohorts.resolve")
 
 	_, err := ResolveCohort("web-servers")
 	if err == nil {
@@ -504,7 +504,7 @@ func TestRefreshCohort_BadJSON(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockBadJSONHandler(t, NatsConn, "grlx.api.cohorts.refresh")
+	mockBadJSONHandler(t, NatsConn, "imas.api.cohorts.refresh")
 
 	_, err := RefreshCohort("web-servers")
 	if err == nil {
@@ -516,7 +516,7 @@ func TestRefreshAllCohorts_Error(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.cohorts.refresh", "internal error")
+	mockErrorHandler(t, NatsConn, "imas.api.cohorts.refresh", "internal error")
 
 	_, err := RefreshAllCohorts()
 	if err == nil {
@@ -528,7 +528,7 @@ func TestRefreshAllCohorts_BadJSON(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockBadJSONHandler(t, NatsConn, "grlx.api.cohorts.refresh")
+	mockBadJSONHandler(t, NatsConn, "imas.api.cohorts.refresh")
 
 	_, err := RefreshAllCohorts()
 	if err == nil {
@@ -540,7 +540,7 @@ func TestGetVersion_BadJSON(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockBadJSONHandler(t, NatsConn, "grlx.api.version")
+	mockBadJSONHandler(t, NatsConn, "imas.api.version")
 
 	_, err := GetVersion()
 	if err == nil {
@@ -554,7 +554,7 @@ func TestAcceptKey_ListKeysError(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.pki.list", "NATS timeout")
+	mockErrorHandler(t, NatsConn, "imas.api.pki.list", "NATS timeout")
 
 	_, err := AcceptKey("web-01")
 	if err == nil {
@@ -567,7 +567,7 @@ func TestUnacceptKey_NotFound(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "web-01")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
 
 	_, err := UnacceptKey("ghost")
 	if err == nil {
@@ -583,7 +583,7 @@ func TestRejectKey_NotFound(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "web-01")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
 
 	_, err := RejectKey("ghost")
 	if err == nil {
@@ -599,7 +599,7 @@ func TestDenyKey_NotFound(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "web-01")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
 
 	_, err := DenyKey("ghost")
 	if err == nil {
@@ -617,7 +617,7 @@ func TestResolveTargets_InvalidRegex(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "web-01")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
 
 	_, err := ResolveTargets("[invalid")
 	if err == nil {
@@ -630,7 +630,7 @@ func TestResolveTargets_ExactMatch(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "web-01", "web-010")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
 
 	got, err := ResolveTargets("web-01")
 	if err != nil {
@@ -649,7 +649,7 @@ func TestResolveTargets_CommaSingle(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "web-01", "web-02")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
 
 	// Trailing comma forces list mode, not regex.
 	got, err := ResolveTargets("web-01,")
@@ -665,7 +665,7 @@ func TestResolveTargets_ListKeysError(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.pki.list", "auth failed")
+	mockErrorHandler(t, NatsConn, "imas.api.pki.list", "auth failed")
 
 	_, err := ResolveTargets("web-.*")
 	if err == nil {
@@ -679,7 +679,7 @@ func TestListJobs_BadJSON(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockBadJSONHandler(t, NatsConn, "grlx.api.jobs.list")
+	mockBadJSONHandler(t, NatsConn, "imas.api.jobs.list")
 
 	_, err := ListJobs(10, "")
 	if err == nil {
@@ -691,7 +691,7 @@ func TestGetJob_BadJSON(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockBadJSONHandler(t, NatsConn, "grlx.api.jobs.get")
+	mockBadJSONHandler(t, NatsConn, "imas.api.jobs.get")
 
 	_, err := GetJob("jid-001")
 	if err == nil {
@@ -703,7 +703,7 @@ func TestListJobsForSprout_BadJSON(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockBadJSONHandler(t, NatsConn, "grlx.api.jobs.forsprout")
+	mockBadJSONHandler(t, NatsConn, "imas.api.jobs.forsprout")
 
 	_, err := ListJobsForSprout("web-01")
 	if err == nil {
@@ -715,7 +715,7 @@ func TestListJobsForSprout_Error(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.jobs.forsprout", "sprout not found")
+	mockErrorHandler(t, NatsConn, "imas.api.jobs.forsprout", "sprout not found")
 
 	_, err := ListJobsForSprout("ghost")
 	if err == nil {
@@ -730,8 +730,8 @@ func TestAcceptKey_NATSActionError(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("unaccepted", "web-01")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
-	mockErrorHandler(t, NatsConn, "grlx.api.pki.accept", "storage failure")
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
+	mockErrorHandler(t, NatsConn, "imas.api.pki.accept", "storage failure")
 
 	_, err := AcceptKey("web-01")
 	if err == nil {
@@ -744,8 +744,8 @@ func TestUnacceptKey_NATSActionError(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "web-01")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
-	mockErrorHandler(t, NatsConn, "grlx.api.pki.unaccept", "storage failure")
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
+	mockErrorHandler(t, NatsConn, "imas.api.pki.unaccept", "storage failure")
 
 	_, err := UnacceptKey("web-01")
 	if err == nil {
@@ -758,8 +758,8 @@ func TestRejectKey_NATSActionError(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "web-01")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
-	mockErrorHandler(t, NatsConn, "grlx.api.pki.reject", "storage failure")
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
+	mockErrorHandler(t, NatsConn, "imas.api.pki.reject", "storage failure")
 
 	_, err := RejectKey("web-01")
 	if err == nil {
@@ -772,8 +772,8 @@ func TestDenyKey_NATSActionError(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "web-01")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
-	mockErrorHandler(t, NatsConn, "grlx.api.pki.deny", "storage failure")
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
+	mockErrorHandler(t, NatsConn, "imas.api.pki.deny", "storage failure")
 
 	_, err := DenyKey("web-01")
 	if err == nil {
@@ -786,8 +786,8 @@ func TestDeleteKey_NATSActionError(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "web-01")
-	mockHandler(t, NatsConn, "grlx.api.pki.list", keys)
-	mockErrorHandler(t, NatsConn, "grlx.api.pki.delete", "storage failure")
+	mockHandler(t, NatsConn, "imas.api.pki.list", keys)
+	mockErrorHandler(t, NatsConn, "imas.api.pki.delete", "storage failure")
 
 	_, err := DeleteKey("web-01")
 	if err == nil {
@@ -802,7 +802,7 @@ func TestAcceptKey_FromRejected(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("rejected", "old-sprout")
-	mockPKIHandlers(t, NatsConn, keys, "grlx.api.pki.accept")
+	mockPKIHandlers(t, NatsConn, keys, "imas.api.pki.accept")
 
 	ok, err := AcceptKey("old-sprout")
 	if err != nil {
@@ -818,7 +818,7 @@ func TestUnacceptKey_FromDenied(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("denied", "bad-sprout")
-	mockPKIHandlers(t, NatsConn, keys, "grlx.api.pki.unaccept")
+	mockPKIHandlers(t, NatsConn, keys, "imas.api.pki.unaccept")
 
 	ok, err := UnacceptKey("bad-sprout")
 	if err != nil {
@@ -834,7 +834,7 @@ func TestUnacceptKey_FromRejected(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("rejected", "old-sprout")
-	mockPKIHandlers(t, NatsConn, keys, "grlx.api.pki.unaccept")
+	mockPKIHandlers(t, NatsConn, keys, "imas.api.pki.unaccept")
 
 	ok, err := UnacceptKey("old-sprout")
 	if err != nil {
@@ -850,7 +850,7 @@ func TestRejectKey_FromUnaccepted(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("unaccepted", "new-sprout")
-	mockPKIHandlers(t, NatsConn, keys, "grlx.api.pki.reject")
+	mockPKIHandlers(t, NatsConn, keys, "imas.api.pki.reject")
 
 	ok, err := RejectKey("new-sprout")
 	if err != nil {
@@ -866,7 +866,7 @@ func TestRejectKey_FromDenied(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("denied", "bad-sprout")
-	mockPKIHandlers(t, NatsConn, keys, "grlx.api.pki.reject")
+	mockPKIHandlers(t, NatsConn, keys, "imas.api.pki.reject")
 
 	ok, err := RejectKey("bad-sprout")
 	if err != nil {
@@ -882,7 +882,7 @@ func TestDenyKey_FromAccepted(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "compromised")
-	mockPKIHandlers(t, NatsConn, keys, "grlx.api.pki.deny")
+	mockPKIHandlers(t, NatsConn, keys, "imas.api.pki.deny")
 
 	ok, err := DenyKey("compromised")
 	if err != nil {
@@ -898,7 +898,7 @@ func TestDenyKey_FromRejected(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("rejected", "old-sprout")
-	mockPKIHandlers(t, NatsConn, keys, "grlx.api.pki.deny")
+	mockPKIHandlers(t, NatsConn, keys, "imas.api.pki.deny")
 
 	ok, err := DenyKey("old-sprout")
 	if err != nil {
@@ -914,7 +914,7 @@ func TestDeleteKey_FromAccepted(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("accepted", "decommissioned")
-	mockPKIHandlers(t, NatsConn, keys, "grlx.api.pki.delete")
+	mockPKIHandlers(t, NatsConn, keys, "imas.api.pki.delete")
 
 	ok, err := DeleteKey("decommissioned")
 	if err != nil {
@@ -930,7 +930,7 @@ func TestDeleteKey_FromUnaccepted(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("unaccepted", "new-sprout")
-	mockPKIHandlers(t, NatsConn, keys, "grlx.api.pki.delete")
+	mockPKIHandlers(t, NatsConn, keys, "imas.api.pki.delete")
 
 	ok, err := DeleteKey("new-sprout")
 	if err != nil {
@@ -946,7 +946,7 @@ func TestDeleteKey_FromDenied(t *testing.T) {
 	defer cleanup()
 
 	keys := keysWithSprout("denied", "bad-sprout")
-	mockPKIHandlers(t, NatsConn, keys, "grlx.api.pki.delete")
+	mockPKIHandlers(t, NatsConn, keys, "imas.api.pki.delete")
 
 	ok, err := DeleteKey("bad-sprout")
 	if err != nil {
@@ -966,7 +966,7 @@ func TestListJobs_WithUser(t *testing.T) {
 	want := []jobs.JobSummary{
 		{JID: "jid-user", SproutID: "web-01", Status: jobs.JobSucceeded, Total: 1, Succeeded: 1},
 	}
-	mockHandler(t, NatsConn, "grlx.api.jobs.list", want)
+	mockHandler(t, NatsConn, "imas.api.jobs.list", want)
 
 	got, err := ListJobs(10, "NKEY_ALICE")
 	if err != nil {

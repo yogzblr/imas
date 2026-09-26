@@ -20,7 +20,7 @@ import (
 
 	nats_server "github.com/nats-io/nats-server/v2/server"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 // startTestBus builds NATS options via ConfigureNats(), starts an embedded
@@ -176,12 +176,12 @@ func TestJWTLifecycle_AcceptGrantsDenyRevokesReacceptRestores(t *testing.T) {
 	// permission template (sproutPermissions in jwtusers.go, unchanged from
 	// the original NKey allow-list) only grants Publish on a few specific
 	// subjects, of which "facts" is the one usable for a round trip here;
-	// Subscribe is allowed on the whole "grlx.sprouts.<id>.>" subtree.
-	sub, err := nc.SubscribeSync("grlx.sprouts.sprout01.facts")
+	// Subscribe is allowed on the whole "imas.sprouts.<id>.>" subtree.
+	sub, err := nc.SubscribeSync("imas.sprouts.sprout01.facts")
 	if err != nil {
 		t.Fatalf("subscribe on own subject failed: %v", err)
 	}
-	if err := nc.Publish("grlx.sprouts.sprout01.facts", []byte("hello")); err != nil {
+	if err := nc.Publish("imas.sprouts.sprout01.facts", []byte("hello")); err != nil {
 		t.Fatalf("publish on own subject failed: %v", err)
 	}
 	msg, err := sub.NextMsg(3 * time.Second)
@@ -200,7 +200,7 @@ func TestJWTLifecycle_AcceptGrantsDenyRevokesReacceptRestores(t *testing.T) {
 		default:
 		}
 	})
-	if err := nc.Publish("grlx.sprouts.other-sprout.jobs", []byte("nope")); err != nil {
+	if err := nc.Publish("imas.sprouts.other-sprout.jobs", []byte("nope")); err != nil {
 		t.Fatalf("unexpected sync error publishing to a denied subject: %v", err)
 	}
 	nc.Flush()
@@ -269,7 +269,7 @@ func TestJWTLifecycle_RejectAlsoRevokes(t *testing.T) {
 
 // TestReloadNKeys_PushesWithoutLocalNatsServerHandle covers the
 // post-bus/core-split topology described in
-// docs/design/grlx-fork-roadmap.md: once farmer's bus and core processes
+// docs/design/imas-fork-roadmap.md: once farmer's bus and core processes
 // are split, the process where Accept/Deny/API calls happen (and where
 // ReloadNKeys runs) will never hold a local *nats_server.Server handle.
 // ReloadNKeys must still push the updated tenant Account JWT to the bus

@@ -3,7 +3,7 @@ package natsapi
 import (
 	"encoding/json"
 
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 func handlePKIList(tenantID string, _ json.RawMessage) (any, error) {

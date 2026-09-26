@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 // mockCooker is a minimal RecipeCooker implementation for testing.

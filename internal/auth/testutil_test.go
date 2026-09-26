@@ -7,8 +7,8 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
-	"github.com/gogrlx/grlx/v2/internal/props"
-	"github.com/gogrlx/grlx/v2/internal/rbac"
+	"github.com/yogzblr/imas/internal/props"
+	"github.com/yogzblr/imas/internal/rbac"
 )
 
 // newTestDB wires up the in-memory PXC-backed stores internal/rbac (and,

@@ -9,7 +9,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/gogrlx/grlx/v2/internal/controlplane"
+	"github.com/yogzblr/imas/internal/controlplane"
 )
 
 func doRequest(t *testing.T, h http.HandlerFunc, method, path string, pathValues map[string]string, body any) *httptest.ResponseRecorder {

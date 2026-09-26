@@ -1,7 +1,7 @@
 package pki
 
 // Sprout X25519 box public key storage and rotation lifecycle — the
-// "sprout_pub" half of docs/design/grlx-payload-encryption-design.md
+// "sprout_pub" half of docs/design/imas-payload-encryption-design.md
 // (workstream J). Storage location matches the design doc's "Storage"
 // section: sprout_pub lives in PXC, alongside (but not inside) the
 // sprout's pki_nkeys identity row, since a sprout can hold more than one
@@ -36,7 +36,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 // sproutBoxKeyRow is the `pki_sprout_box_keys` table in the farmer schema.

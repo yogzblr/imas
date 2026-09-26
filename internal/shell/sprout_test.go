@@ -161,10 +161,10 @@ func TestStartRequest_JSONRoundTrip(t *testing.T) {
 func TestStartResponse_JSONRoundTrip(t *testing.T) {
 	resp := StartResponse{
 		SessionID:     "test-session",
-		InputSubject:  "grlx.shell.test-session.input",
-		OutputSubject: "grlx.shell.test-session.output",
-		ResizeSubject: "grlx.shell.test-session.resize",
-		DoneSubject:   "grlx.shell.test-session.done",
+		InputSubject:  "imas.shell.test-session.input",
+		OutputSubject: "imas.shell.test-session.output",
+		ResizeSubject: "imas.shell.test-session.resize",
+		DoneSubject:   "imas.shell.test-session.done",
 	}
 	data, err := json.Marshal(resp)
 	if err != nil {

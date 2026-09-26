@@ -1,9 +1,9 @@
-# CRUSH Configuration for grlx
+# CRUSH Configuration for imas
 
 ## Build Commands
-- `make all` - Build all binaries (sprout, grlx, farmer)
+- `make all` - Build all binaries (sprout, imas, farmer)
 - `make sprout` - Build sprout binary
-- `make grlx` - Build grlx CLI binary  
+- `make imas` - Build imas CLI binary  
 - `make farmer` - Build farmer binary
 - `make clean` - Clean build artifacts
 

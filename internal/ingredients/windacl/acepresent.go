@@ -5,7 +5,7 @@ package windacl
 import (
 	"fmt"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 // acePresent implements the ace_present method: name has an explicit

@@ -1,6 +1,6 @@
 // Package heartbeat replaces the old app-level sprout heartbeat
 // (internal/natsapi's probeSprout, a synchronous NATS request/reply ping
-// with a 3s worst-case timeout — see docs/design/grlx-master-plan.md
+// with a 3s worst-case timeout — see docs/design/imas-master-plan.md
 // Phase 1) with Valkey TTL keys driven directly by NATS's own connection
 // lifecycle: farmer subscribes to $SYS.ACCOUNT.*.CONNECT/DISCONNECT on its
 // bus (as the SYS account — see internal/pki.ConnectSystemAccount) and
@@ -15,7 +15,7 @@
 // each sprout's User JWT with Subject = its NKey pubkey). This package
 // reverse-looks that up via pki.SproutIDForNKey, which also acts as the
 // filter for events that aren't a sprout at all (farmer's own connection,
-// a grlx CLI admin, or the SYS push user itself) — those simply fail the
+// a imas CLI admin, or the SYS push user itself) — those simply fail the
 // lookup and are ignored.
 package heartbeat
 
@@ -27,8 +27,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/valkey-io/valkey-go"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	log "github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // TTL bounds how long a heartbeat key survives without a fresh CONNECT.
@@ -38,7 +38,7 @@ import (
 // doesn't leave every sprout looking online forever.
 const TTL = 5 * time.Minute
 
-const keyPrefix = "grlx:heartbeat:"
+const keyPrefix = "imas:heartbeat:"
 
 // client is the shared Valkey client. Nil until SetClient is called.
 var client valkey.Client
@@ -67,7 +67,7 @@ func IsOnline(ctx context.Context, tenantID, sproutID string) bool {
 // "acc") — the SYS account sees this field for every tenant's
 // connections, not just one, which is what makes CONNECT/DISCONNECT the
 // one call site in this package that can derive a real per-event tenant
-// today (see docs/design/grlx-tenant-context-threading.md).
+// today (see docs/design/imas-tenant-context-threading.md).
 type clientInfo struct {
 	User    string `json:"user"`
 	Account string `json:"acc"`

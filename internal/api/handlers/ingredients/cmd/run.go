@@ -7,11 +7,11 @@ import (
 	"strings"
 	"sync"
 
-	//. "github.com/gogrlx/grlx/v2/internal/config"
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/cmd"
-	log "github.com/gogrlx/grlx/v2/internal/log"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	//. "github.com/yogzblr/imas/internal/config"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/ingredients/cmd"
+	log "github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // TODO: add callback event for when new key is PUT to the server

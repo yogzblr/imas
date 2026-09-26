@@ -19,9 +19,9 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	log "github.com/yogzblr/imas/internal/log"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 type PubKeyType int
@@ -127,7 +127,7 @@ func IsValidSproutID(id string) bool {
 // as just another ID for ReloadNKeysForTenant would silently start
 // provisioning a *second*, separate Account under tenants/<id>/ for it,
 // orphaning every sprout the flat legacy path already manages. See
-// docs/design/grlx-tenant-context-threading.md.
+// docs/design/imas-tenant-context-threading.md.
 func reloadNKeysFor(tenantID string) error {
 	if tenantID == currentTenantID() {
 		return ReloadNKeys()
@@ -140,7 +140,7 @@ func reloadNKeysFor(tenantID string) error {
 // afterward (reloadNKeysFor) — not unconditionally the legacy
 // current-tenant seam, so accepting a sprout under a
 // dynamically-provisioned tenant reloads the right Account. See
-// docs/design/grlx-tenant-context-threading.md.
+// docs/design/imas-tenant-context-threading.md.
 func AcceptNKey(tenantID, id string) error {
 	defer func() {
 		if err := reloadNKeysFor(tenantID); err != nil {
@@ -343,8 +343,8 @@ func FetchRootCA(filename string) error {
 func RootCACached(binary string) bool {
 	var RootCA string
 	switch binary {
-	case "grlx":
-		RootCA = config.GrlxRootCA
+	case "imas":
+		RootCA = config.ImasRootCA
 	case "sprout":
 		RootCA = config.SproutRootCA
 	}
@@ -361,8 +361,8 @@ func LoadRootCA(binary string) error {
 	client := &http.Client{}
 	var RootCA string
 	switch binary {
-	case "grlx":
-		RootCA = config.GrlxRootCA
+	case "imas":
+		RootCA = config.ImasRootCA
 	case "sprout":
 		RootCA = config.SproutRootCA
 		FetchRootCA(RootCA)
@@ -441,7 +441,7 @@ func GetPubNKey(keyType PubKeyType) (string, error) {
 	case FarmerPubNKey:
 		pubFile = config.NKeyFarmerPubFile
 		// case CliPubNKey:
-		//	pubFile = config.NKeyGrlxPubFile
+		//	pubFile = config.NKeyImasPubFile
 	}
 	pubKeyBytes, err := os.ReadFile(pubFile)
 	if err != nil {

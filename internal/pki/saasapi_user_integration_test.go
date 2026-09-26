@@ -1,7 +1,7 @@
 package pki
 
 // Live-bus proof of the SaaS API credential's scoping (FLAG FOR SECURITY
-// REVIEW — see docs/design/grlx-internal-api-account.md). Asserting on the
+// REVIEW — see docs/design/imas-internal-api-account.md). Asserting on the
 // JWT's fields alone (saasapi_user_test.go) wouldn't prove that a User in
 // the SYS Account really gets no $SYS reach beyond its own allow-lists;
 // this does, against a real embedded nats-server.
@@ -18,8 +18,8 @@ import (
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/controlplane"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/controlplane"
 )
 
 // permissionErrors collects the asynchronous -ERR 'Permissions Violation'
@@ -117,7 +117,7 @@ func TestSaaSAPICredential_ScopedOnLiveBus(t *testing.T) {
 	defer farmer.Close()
 	requests, _ := farmer.SubscribeSync("internal.tenant.provision")
 	forged, _ := farmer.SubscribeSync("internal.tenant.provisioned.pj_forged")
-	grlxAPI, _ := farmer.SubscribeSync("grlx.api.>")
+	imasAPI, _ := farmer.SubscribeSync("imas.api.>")
 	if err := farmer.Flush(); err != nil {
 		t.Fatalf("farmer flush: %v", err)
 	}
@@ -159,8 +159,8 @@ func TestSaaSAPICredential_ScopedOnLiveBus(t *testing.T) {
 		"$SYS.REQ.SERVER.PING",
 		"$SYS.REQ.ACCOUNT.PING.CONNZ",
 		"$SYS.REQ.CLAIMS.UPDATE",
-		"grlx.api.health",
-		"grlx.sprouts.web-01.cmd.run",
+		"imas.api.health",
+		"imas.sprouts.web-01.cmd.run",
 		"internal.tenant.provisioned.pj_forged",
 	} {
 		_ = saas.Publish(subj, []byte(`{}`))
@@ -172,8 +172,8 @@ func TestSaaSAPICredential_ScopedOnLiveBus(t *testing.T) {
 	if _, err := forged.NextMsg(200 * time.Millisecond); err == nil {
 		t.Error("a forged result from the SaaS API credential reached farmer's subscriber")
 	}
-	if _, err := grlxAPI.NextMsg(200 * time.Millisecond); err == nil {
-		t.Error("a grlx.api publish from the SaaS API credential was delivered")
+	if _, err := imasAPI.NextMsg(200 * time.Millisecond); err == nil {
+		t.Error("a imas.api publish from the SaaS API credential was delivered")
 	}
 
 	// Denied subscribes: farmer's own request subject, cross-tenant
@@ -182,7 +182,7 @@ func TestSaaSAPICredential_ScopedOnLiveBus(t *testing.T) {
 		"internal.tenant.provision",
 		"$SYS.ACCOUNT.*.CONNECT",
 		"$SYS.>",
-		"grlx.>",
+		"imas.>",
 		"_INBOX.>",
 		">",
 	} {
@@ -200,7 +200,7 @@ func TestSaaSAPICredential_ScopedOnLiveBus(t *testing.T) {
 // internal.sprout.action grant (FLAG FOR SECURITY REVIEW): the credential
 // can make the request-reply round trip through farmer's SYS connection,
 // but only with replies on its own _INBOX.saasapi.> inboxes — it still
-// can't reach grlx.api.* or grlx.sprouts.*, can't receive farmer's
+// can't reach imas.api.* or imas.sprouts.*, can't receive farmer's
 // requests, and can't subscribe to (or publish into) any other SYS user's
 // reply inbox.
 func TestSaaSAPICredential_SproutActionScopedOnLiveBus(t *testing.T) {
@@ -222,7 +222,7 @@ func TestSaaSAPICredential_SproutActionScopedOnLiveBus(t *testing.T) {
 	defer farmer.Close()
 	var replyTo []string
 	var replyMu sync.Mutex
-	if _, err := farmer.QueueSubscribe(controlplane.SubjectSproutAction, "grlx-core", func(msg *nats.Msg) {
+	if _, err := farmer.QueueSubscribe(controlplane.SubjectSproutAction, "imas-core", func(msg *nats.Msg) {
 		replyMu.Lock()
 		replyTo = append(replyTo, msg.Reply)
 		replyMu.Unlock()
@@ -234,8 +234,8 @@ func TestSaaSAPICredential_SproutActionScopedOnLiveBus(t *testing.T) {
 	// the credential must never reach.
 	farmerInbox := farmer.NewInbox()
 	farmerReplies, _ := farmer.SubscribeSync(farmerInbox)
-	grlxAPI, _ := farmer.SubscribeSync("grlx.api.>")
-	grlxSprouts, _ := farmer.SubscribeSync("grlx.sprouts.>")
+	imasAPI, _ := farmer.SubscribeSync("imas.api.>")
+	imasSprouts, _ := farmer.SubscribeSync("imas.sprouts.>")
 	if err := farmer.Flush(); err != nil {
 		t.Fatalf("farmer flush: %v", err)
 	}
@@ -275,10 +275,10 @@ func TestSaaSAPICredential_SproutActionScopedOnLiveBus(t *testing.T) {
 	// (replies come from farmer) and, above all, farmer's, where a publish
 	// would forge a reply to one of farmer's own requests.
 	for _, subj := range []string{
-		"grlx.api.cmd.run",
-		"grlx.api.cook",
-		"grlx.sprouts.web-01.cmd.run",
-		"grlx.sprouts.web-01.cook",
+		"imas.api.cmd.run",
+		"imas.api.cook",
+		"imas.sprouts.web-01.cmd.run",
+		"imas.sprouts.web-01.cook",
 		"internal.sprout.mint",
 		"internal.sprout.revoke",
 		"internal.sprouts.list",
@@ -291,7 +291,7 @@ func TestSaaSAPICredential_SproutActionScopedOnLiveBus(t *testing.T) {
 			t.Errorf("expected publish to %q to be denied", subj)
 		}
 	}
-	for name, sub := range map[string]*nats.Subscription{"grlx.api": grlxAPI, "grlx.sprouts": grlxSprouts, "farmer inbox": farmerReplies} {
+	for name, sub := range map[string]*nats.Subscription{"imas.api": imasAPI, "imas.sprouts": imasSprouts, "farmer inbox": farmerReplies} {
 		if _, err := sub.NextMsg(200 * time.Millisecond); err == nil {
 			t.Errorf("a %s publish from the SaaS API credential was delivered", name)
 		}
@@ -309,9 +309,9 @@ func TestSaaSAPICredential_SproutActionScopedOnLiveBus(t *testing.T) {
 		"_INBOX.*.>",
 		"_INBOX.>",
 		"_INBOX.saasapix.>",
-		"grlx.api.>",
-		"grlx.sprouts.>",
-		"grlx.sprouts.*.cmd.run",
+		"imas.api.>",
+		"imas.sprouts.>",
+		"imas.sprouts.*.cmd.run",
 	} {
 		if _, err := saas.SubscribeSync(subj); err != nil {
 			t.Fatalf("SubscribeSync(%q) returned a local error: %v", subj, err)
@@ -345,7 +345,7 @@ func TestSaaSAPICredential_SproutActionScopedOnLiveBus(t *testing.T) {
 }
 
 // TestSaaSAPICredential_RotationRevokesPreviousKeyOnLiveBus proves that
-// rotating the SaaS API's seed (a new GRLX_NATS_SAASAPI_USER_SEED from
+// rotating the SaaS API's seed (a new IMAS_NATS_SAASAPI_USER_SEED from
 // OpenBao) actually cuts off the old credential at the bus, via a
 // revocation pushed on the SYS Account JWT — not just that a new JWT gets
 // written locally.
@@ -355,7 +355,7 @@ func TestSaaSAPICredential_RotationRevokesPreviousKeyOnLiveBus(t *testing.T) {
 
 	oldKP, _ := nkeys.CreateUser()
 	oldSeed, _ := oldKP.Seed()
-	t.Setenv("GRLX_NATS_SAASAPI_USER_SEED", string(oldSeed))
+	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED", string(oldSeed))
 	oldJWT, _, err := EnsureSaaSAPICredential()
 	if err != nil {
 		t.Fatalf("EnsureSaaSAPICredential (old key): %v", err)
@@ -368,7 +368,7 @@ func TestSaaSAPICredential_RotationRevokesPreviousKeyOnLiveBus(t *testing.T) {
 
 	newKP, _ := nkeys.CreateUser()
 	newSeed, _ := newKP.Seed()
-	t.Setenv("GRLX_NATS_SAASAPI_USER_SEED", string(newSeed))
+	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED", string(newSeed))
 	newJWT, _, err := EnsureSaaSAPICredential()
 	if err != nil {
 		t.Fatalf("EnsureSaaSAPICredential (rotated key): %v", err)

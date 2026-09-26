@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"time"
 
-	intauth "github.com/gogrlx/grlx/v2/internal/auth"
-	"github.com/gogrlx/grlx/v2/internal/heartbeat"
-	"github.com/gogrlx/grlx/v2/internal/pki"
-	"github.com/gogrlx/grlx/v2/internal/rbac"
+	intauth "github.com/yogzblr/imas/internal/auth"
+	"github.com/yogzblr/imas/internal/heartbeat"
+	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/rbac"
 )
 
 // SproutInfo represents a sprout with its key state and connectivity status.
@@ -128,7 +128,7 @@ func handleSproutsGet(tenantID string, params json.RawMessage) (any, error) {
 // reads a Valkey heartbeat key maintained by internal/heartbeat's
 // $SYS.ACCOUNT.*.CONNECT/DISCONNECT listener, a single fast local read
 // instead of a round trip to the sprout. See
-// docs/design/grlx-master-plan.md Phase 1.
+// docs/design/imas-master-plan.md Phase 1.
 func probeSprout(tenantID, sproutID string) bool {
 	if natsConnFor(tenantID) == nil {
 		return false

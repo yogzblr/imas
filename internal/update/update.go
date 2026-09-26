@@ -3,7 +3,7 @@
 
 // Package selfupdate is an UNWIRED, INCOMPLETE skeleton for binary
 // self-updates. It is gated behind the `self_update` build tag and is not
-// referenced by any grlx binary (the default build uses the no-op variant in
+// referenced by any imas binary (the default build uses the no-op variant in
 // noupdate.go). Do NOT enable it as-is:
 //
 //   - PerformUpdate downloads and swaps the running binary WITHOUT verifying
@@ -13,7 +13,7 @@
 // Implementing this safely requires design decisions (authoritative version
 // source, signature verification against the published checksums.txt(.sig), and
 // rollout policy). Tracked in
-// https://github.com/gogrlx/grlx/issues/286.
+// https://github.com/yogzblr/imas/issues/286.
 
 package selfupdate
 
@@ -257,7 +257,7 @@ func stageBinary(currentExe, newBinaryPath string) (string, error) {
 	}
 
 	targetDir := filepath.Dir(currentExe)
-	stagedFile, err := os.CreateTemp(targetDir, ".grlx-update-*")
+	stagedFile, err := os.CreateTemp(targetDir, ".imas-update-*")
 	if err != nil {
 		return "", fmt.Errorf("failed to stage update in executable directory: %w", err)
 	}

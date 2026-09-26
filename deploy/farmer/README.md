@@ -1,7 +1,7 @@
 # farmer: SaaS API credential hand-off (reference deploy config)
 
 This covers the last open item in
-`docs/design/grlx-internal-api-account.md`: getting the SaaS API's NATS
+`docs/design/imas-internal-api-account.md`: getting the SaaS API's NATS
 User JWT from where farmer mints it into OpenBao, so External Secrets
 Operator (ESO) can deliver it to the saasapi Deployment.
 
@@ -12,7 +12,7 @@ below needs human review more than the Go code does.
 Same precedent as `deploy/envoy/`: these are reviewed reference files.
 **farmer's real Deployment and Helm chart are not in this repo.** They
 live in the separate ops repo, which this change had no access to. None
-of the YAML here is applied by anything in grlx.
+of the YAML here is applied by anything in imas.
 
 | File | What it is |
 |---|---|
@@ -31,11 +31,11 @@ farmer's Deployment in the ops repo (the exact patch is in
 
 | What | Value |
 |---|---|
-| Volume | `nats-seeds`: `secret.secretName: grlx-farmer-nats-seeds`, `items`: `sys-account.nk` and `saasapi-user.nk`, `defaultMode: 0440` |
-| Mount | `/var/run/secrets/grlx/nats`, `readOnly: true` |
-| Env var | `GRLX_NATS_SYS_ACCOUNT_SEED_FILE=/var/run/secrets/grlx/nats/sys-account.nk` |
-| Env var (already planned in the design doc) | `GRLX_NATS_SAASAPI_USER_SEED_FILE=/var/run/secrets/grlx/nats/saasapi-user.nk` |
-| Secret source | ESO `ExternalSecret` `grlx-farmer-nats-seeds`, which reads the ops-owned seed path in OpenBao |
+| Volume | `nats-seeds`: `secret.secretName: imas-farmer-nats-seeds`, `items`: `sys-account.nk` and `saasapi-user.nk`, `defaultMode: 0440` |
+| Mount | `/var/run/secrets/imas/nats`, `readOnly: true` |
+| Env var | `IMAS_NATS_SYS_ACCOUNT_SEED_FILE=/var/run/secrets/imas/nats/sys-account.nk` |
+| Env var (already planned in the design doc) | `IMAS_NATS_SAASAPI_USER_SEED_FILE=/var/run/secrets/imas/nats/saasapi-user.nk` |
+| Secret source | ESO `ExternalSecret` `imas-farmer-nats-seeds`, which reads the ops-owned seed path in OpenBao |
 
 Two things to get right when you roll this out:
 
@@ -62,7 +62,7 @@ The Job runs farmer's own image with the subcommand
    permissions, and connection types. If the published JWT is already
    current, it writes nothing.
 3. Otherwise it writes `{"jwt": <User JWT>, "public_key": <U...>}` to
-   `<GRLX_SAASAPI_CRED_OPENBAO_KV_MOUNT>/data/<GRLX_SAASAPI_CRED_OPENBAO_KV_PATH>`
+   `<IMAS_SAASAPI_CRED_OPENBAO_KV_MOUNT>/data/<IMAS_SAASAPI_CRED_OPENBAO_KV_PATH>`
    (or the path given by `-kv-path`). The KV path has no default. **The
    seed is never published**: saasapi gets its seed from the ops-owned
    seed path, as before.
@@ -74,7 +74,7 @@ error.
 ### Why an emptyDir, not farmer's PKI volume
 
 The Job mounts the same seed Secret as farmer, with only the two keys it
-needs projected, plus an **emptyDir** at `/etc/grlx`. The subcommand
+needs projected, plus an **emptyDir** at `/etc/imas`. The subcommand
 refuses to run unless both the SYS Account key and the SaaS API key are
 supplied externally or already on disk. It will not mint under a key it
 generated itself, because saasapi would then crash-loop on its next
@@ -102,13 +102,13 @@ reference Job doesn't do this, for the reasons above.
 
 Put the published JWT at its own path, separate from the seeds. Neither
 path may be a prefix of the other. The examples below use
-`secret/platform/grlx/saasapi-nats-user`.
+`secret/platform/imas/saasapi-nats-user`.
 
-**The Job's policy, `grlx-saasapi-cred-publisher`, allows this and
+**The Job's policy, `imas-saasapi-cred-publisher`, allows this and
 nothing else:**
 
 ```hcl
-path "secret/data/platform/grlx/saasapi-nats-user" {
+path "secret/data/platform/imas/saasapi-nats-user" {
   capabilities = ["create", "update", "read"]
 }
 ```
@@ -123,11 +123,11 @@ path "secret/data/platform/grlx/saasapi-nats-user" {
   anything on `secret/delete/…`, `secret/undelete/…`, or
   `secret/destroy/…`. Do not use wildcards or `+` segments, and grant
   nothing on the seed path.
-- **Kubernetes auth role** (`auth/kubernetes/role/grlx-saasapi-cred-publisher`):
-  - `bound_service_account_names=grlx-saasapi-cred-publisher`
+- **Kubernetes auth role** (`auth/kubernetes/role/imas-saasapi-cred-publisher`):
+  - `bound_service_account_names=imas-saasapi-cred-publisher`
   - `bound_service_account_namespaces=<farmer's namespace>`
   - `audience=openbao`, matching the Job's projected token
-  - `token_policies=grlx-saasapi-cred-publisher`
+  - `token_policies=imas-saasapi-cred-publisher`
   - A short `token_ttl`, for example `5m`, and a matching `token_max_ttl`
   - `token_num_uses` can stay 0: a run makes two KV calls.
 
@@ -137,17 +137,17 @@ access:**
 - farmer's ServiceAccount must not appear in the publisher role's
   `bound_service_account_names`. The publisher policy must not be
   attached to any role farmer can log in with: its
-  `GRLX_CERTS_OPENBAO_*` PKI role or its `GRLX_GATEWAY_OPENBAO_*` Transit
+  `IMAS_CERTS_OPENBAO_*` PKI role or its `IMAS_GATEWAY_OPENBAO_*` Transit
   role.
 - farmer's policies grant no capability at all on
-  `secret/data/platform/grlx/saasapi-nats-user` or
-  `secret/metadata/platform/grlx/saasapi-nats-user`. farmer mints its own
+  `secret/data/platform/imas/saasapi-nats-user` or
+  `secret/metadata/platform/imas/saasapi-nats-user`. farmer mints its own
   copy, so it doesn't need to read the published one either. The same
   goes for any wildcard or `+` path that would match either of them.
 - To check, with a token issued to farmer's role:
-  `bao token capabilities <token> secret/data/platform/grlx/saasapi-nats-user`
+  `bao token capabilities <token> secret/data/platform/imas/saasapi-nats-user`
   must print `deny`.
-- farmer's Deployment gets none of the `GRLX_SAASAPI_CRED_OPENBAO_*` env
+- farmer's Deployment gets none of the `IMAS_SAASAPI_CRED_OPENBAO_*` env
   vars. The distinct prefix exists so they can't be shared by accident.
 
 **Kubernetes-side boundary.** The ServiceAccount token *is* the write
@@ -157,7 +157,7 @@ namespace:
 
 - create Pods or Jobs, or `pods/exec` into the Job's pod
 - create a token via `serviceaccounts/token` for
-  `grlx-saasapi-cred-publisher`
+  `imas-saasapi-cred-publisher`
 - read the publisher ServiceAccount's Secrets
 
 The reference ServiceAccount has no RBAC bindings of its own, and turns
@@ -209,13 +209,13 @@ ESO sync plus a Reloader rollout, not as a Helm or Argo deployment, so the
 hook doesn't fire. The rotation runbook is:
 
 1. Write the new SaaS API seed to the ops-owned seed path.
-2. Force-sync `grlx-farmer-nats-seeds`, for example with
-   `kubectl annotate externalsecret grlx-farmer-nats-seeds force-sync=$(date +%s) --overwrite`.
+2. Force-sync `imas-farmer-nats-seeds`, for example with
+   `kubectl annotate externalsecret imas-farmer-nats-seeds force-sync=$(date +%s) --overwrite`.
 3. Wait for farmer to restart. At boot it revokes the old key and pushes
    the revocation.
 4. Trigger the Job: a no-op `helm upgrade` re-runs the hook, or apply the
    Job manifest directly.
-5. Force-sync `grlx-saasapi-nats`.
+5. Force-sync `imas-saasapi-nats`.
 
 Between step 3 and step 5, saasapi can't reach the bus. It has either a
 revoked key or a new seed with the old JWT, so it fails closed by design.

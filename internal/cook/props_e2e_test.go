@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/props"
+	"github.com/yogzblr/imas/internal/props"
 )
 
 // TestPropsInFileBasedRecipe verifies the full file-based pipeline:
@@ -34,7 +34,7 @@ func TestPropsInFileBasedRecipe(t *testing.T) {
       - requisites:
         - require: deploy config
 `
-	recipeFile := filepath.Join(recipeDir, "deploy.grlx")
+	recipeFile := filepath.Join(recipeDir, "deploy.imas")
 	writeRecipe(t, recipeFile, recipeContent)
 
 	// Collect includes (which also renders templates).
@@ -96,10 +96,10 @@ func TestPropsInRecipeWithIncludes(t *testing.T) {
   configure db:
     file.managed:
       - name: /etc/app/db.conf
-      - source: grlx://configs/db.conf
+      - source: imas://configs/db.conf
       - user: root
 `
-	baseFile := filepath.Join(recipeDir, "base.grlx")
+	baseFile := filepath.Join(recipeDir, "base.imas")
 	writeRecipe(t, baseFile, baseContent)
 
 	// Main recipe with include and props.
@@ -110,10 +110,10 @@ steps:
   configure cache:
     file.managed:
       - name: /etc/app/cache.conf
-      - source: grlx://configs/cache.conf
+      - source: imas://configs/cache.conf
       - user: {{ props "db_host" }}
 `
-	mainFile := filepath.Join(recipeDir, "main.grlx")
+	mainFile := filepath.Join(recipeDir, "main.imas")
 	writeRecipe(t, mainFile, mainContent)
 
 	includes, err := collectAllIncludes(context.Background(), testPropsTenantID, "include-sprout", recipeDir, "main")
@@ -159,7 +159,7 @@ func TestStaticPropsInFileBasedRecipe(t *testing.T) {
     cmd.run:
       - name: "node-tagger --cluster={{ props "cluster" }} --tier={{ props "tier" }}"
 `
-	recipeFile := filepath.Join(recipeDir, "tagging.grlx")
+	recipeFile := filepath.Join(recipeDir, "tagging.imas")
 	writeRecipe(t, recipeFile, recipeContent)
 
 	f := mustReadRecipe(t, recipeFile)
@@ -202,7 +202,7 @@ func TestPropsWithHostnameAndSproutIDInFile(t *testing.T) {
       - name: /etc/motd
       - text: "Host {{ hostname }} managed by sprout {{ sproutID }}"
 `
-	recipeFile := filepath.Join(recipeDir, "banner.grlx")
+	recipeFile := filepath.Join(recipeDir, "banner.imas")
 	writeRecipe(t, recipeFile, recipeContent)
 
 	f := mustReadRecipe(t, recipeFile)
@@ -236,10 +236,10 @@ func TestPropsWithConditionalInclude(t *testing.T) {
   monitoring:
     file.managed:
       - name: /etc/monitoring.conf
-      - source: grlx://monitoring/config
+      - source: imas://monitoring/config
 {{- end }}
 `
-	recipeFile := filepath.Join(recipeDir, "conditional.grlx")
+	recipeFile := filepath.Join(recipeDir, "conditional.imas")
 	writeRecipe(t, recipeFile, recipeContent)
 
 	// Without the prop — only 1 step.
@@ -280,7 +280,7 @@ func TestPropsWithDefaultFallbackInFile(t *testing.T) {
     cmd.run:
       - name: "app --port={{ default "8080" (props "custom_port") }} --host={{ default "localhost" (props "custom_host") }}"
 `
-	recipeFile := filepath.Join(recipeDir, "defaults.grlx")
+	recipeFile := filepath.Join(recipeDir, "defaults.imas")
 	writeRecipe(t, recipeFile, recipeContent)
 
 	f := mustReadRecipe(t, recipeFile)
@@ -318,7 +318,7 @@ func TestMultiSproutSameRecipeFile(t *testing.T) {
     cmd.run:
       - name: "setup --role={{ props "role" }} --port={{ props "port" }}"
 `
-	recipeFile := filepath.Join(recipeDir, "setup.grlx")
+	recipeFile := filepath.Join(recipeDir, "setup.imas")
 	writeRecipe(t, recipeFile, recipeContent)
 
 	f := mustReadRecipe(t, recipeFile)

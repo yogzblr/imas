@@ -1,7 +1,7 @@
 package fleetsign
 
 // This file is a READ-ONLY OpenBao Transit client for the
-// grlx-fleet-signing key, used by farmer (to serve the key's public half
+// imas-fleet-signing key, used by farmer (to serve the key's public half
 // and to re-check a release's signature before dispatching a
 // self_update) and by saasapi (to check a catalog row's signature before
 // building a rollout). It is a copy of internal/gatewayjwt/obtransit.go's
@@ -17,7 +17,7 @@ package fleetsign
 // sign-capable copy of this pattern lives in cmd/fleetreleaser, a
 // separate binary with its own OpenBao identity. Whether farmer's and
 // saasapi's tokens *can* sign is decided by their OpenBao policy
-// (deploy/fleetreleaser/policies/grlx-fleet-verify.hcl), which is what
+// (deploy/fleetreleaser/policies/imas-fleet-verify.hcl), which is what
 // actually enforces the split — see cmd/fleetreleaser's
 // TestOpenBaoEnforcesReadOnlyFleetKey.
 
@@ -41,31 +41,31 @@ import (
 )
 
 // Environment variables configuring the read-only Transit client. Named
-// GRLX_FLEETSIGN_OPENBAO_* rather than reusing GRLX_GATEWAY_OPENBAO_*:
-// farmer's gateway identity holds sign capability on grlx-gateway-jwt,
+// IMAS_FLEETSIGN_OPENBAO_* rather than reusing IMAS_GATEWAY_OPENBAO_*:
+// farmer's gateway identity holds sign capability on imas-gateway-jwt,
 // and this identity must hold none on anything. Keeping the env blocks
 // apart keeps the tokens apart. cmd/fleetreleaser's signer uses its own
-// GRLX_FLEETRELEASER_OPENBAO_* block and never reads these.
+// IMAS_FLEETRELEASER_OPENBAO_* block and never reads these.
 const (
-	EnvOpenBaoAddr         = "GRLX_FLEETSIGN_OPENBAO_ADDR"
-	EnvOpenBaoTransitMount = "GRLX_FLEETSIGN_OPENBAO_TRANSIT_MOUNT" // default "transit"
-	EnvOpenBaoCACert       = "GRLX_FLEETSIGN_OPENBAO_CACERT"        // optional, verify OpenBao's own TLS
-	EnvOpenBaoAuthMethod   = "GRLX_FLEETSIGN_OPENBAO_AUTH_METHOD"   // "token" (default) or "kubernetes"
+	EnvOpenBaoAddr         = "IMAS_FLEETSIGN_OPENBAO_ADDR"
+	EnvOpenBaoTransitMount = "IMAS_FLEETSIGN_OPENBAO_TRANSIT_MOUNT" // default "transit"
+	EnvOpenBaoCACert       = "IMAS_FLEETSIGN_OPENBAO_CACERT"        // optional, verify OpenBao's own TLS
+	EnvOpenBaoAuthMethod   = "IMAS_FLEETSIGN_OPENBAO_AUTH_METHOD"   // "token" (default) or "kubernetes"
 
 	// EnvOpenBaoToken is the bearer token used when AuthMethod is "token" (the default).
-	EnvOpenBaoToken = "GRLX_FLEETSIGN_OPENBAO_TOKEN"
+	EnvOpenBaoToken = "IMAS_FLEETSIGN_OPENBAO_TOKEN"
 
 	// EnvOpenBaoK8sRole/EnvOpenBaoK8sMount/EnvOpenBaoK8sJWTPath configure
 	// OpenBao's kubernetes auth method, used when AuthMethod is "kubernetes".
-	EnvOpenBaoK8sRole    = "GRLX_FLEETSIGN_OPENBAO_K8S_ROLE"
-	EnvOpenBaoK8sMount   = "GRLX_FLEETSIGN_OPENBAO_K8S_MOUNT"    // default "kubernetes"
-	EnvOpenBaoK8sJWTPath = "GRLX_FLEETSIGN_OPENBAO_K8S_JWT_PATH" // default defaultK8sJWTPath
+	EnvOpenBaoK8sRole    = "IMAS_FLEETSIGN_OPENBAO_K8S_ROLE"
+	EnvOpenBaoK8sMount   = "IMAS_FLEETSIGN_OPENBAO_K8S_MOUNT"    // default "kubernetes"
+	EnvOpenBaoK8sJWTPath = "IMAS_FLEETSIGN_OPENBAO_K8S_JWT_PATH" // default defaultK8sJWTPath
 
 	// EnvTransitKeyName overrides DefaultTransitKeyName.
-	EnvTransitKeyName = "GRLX_FLEETSIGN_TRANSIT_KEY"
+	EnvTransitKeyName = "IMAS_FLEETSIGN_TRANSIT_KEY"
 )
 
-// Recognized values for GRLX_FLEETSIGN_OPENBAO_AUTH_METHOD.
+// Recognized values for IMAS_FLEETSIGN_OPENBAO_AUTH_METHOD.
 const (
 	AuthMethodToken      = "token"
 	AuthMethodKubernetes = "kubernetes"
@@ -270,11 +270,11 @@ type transitReadKeyResponse struct {
 //
 // Every verifier of a fleet release (farmer's self_update re-check,
 // saasapi's dispatch check, the enrollment pin, and the live key set
-// sprouts fetch on grlx.sprouts.<id>.fleetsigningkeys) uses this one
+// sprouts fetch on imas.sprouts.<id>.fleetsigningkeys) uses this one
 // selection, so they all agree on which versions are valid.
 //
 // Consequence, and an OPERATIONAL CONSTRAINT: raising
-// grlx-fleet-signing's min_decryption_version retires every version below
+// imas-fleet-signing's min_decryption_version retires every version below
 // it for verification — on every sprout, in farmer and in saasapi. Never
 // raise it past a version that signed a release still named as
 // approved_version in any tenant's saas.tenant_update_policy. (Raising
@@ -360,7 +360,7 @@ func ParseEd25519PublicKeyPEM(pemStr string) (ed25519.PublicKey, error) {
 // value and rationale as internal/gatewayjwt's transitPublicKeyCacheTTL.
 const keySetCacheTTL = 60 * time.Second
 
-// TransitKeySource serves the grlx-fleet-signing public keys from
+// TransitKeySource serves the imas-fleet-signing public keys from
 // OpenBao Transit, read-only, cached in-process for keySetCacheTTL.
 type TransitKeySource struct {
 	client  *obTransitClient
@@ -372,8 +372,8 @@ type TransitKeySource struct {
 }
 
 // NewTransitKeySourceFromEnv builds a TransitKeySource from the
-// GRLX_FLEETSIGN_OPENBAO_* environment variables. The key name is
-// GRLX_FLEETSIGN_TRANSIT_KEY, defaulting to DefaultTransitKeyName.
+// IMAS_FLEETSIGN_OPENBAO_* environment variables. The key name is
+// IMAS_FLEETSIGN_TRANSIT_KEY, defaulting to DefaultTransitKeyName.
 func NewTransitKeySourceFromEnv() (*TransitKeySource, error) {
 	client, err := newTransitClientFromEnv()
 	if err != nil {

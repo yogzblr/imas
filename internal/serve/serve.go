@@ -1,4 +1,4 @@
-// Package serve provides the local HTTP server for the grlx web UI.
+// Package serve provides the local HTTP server for the imas web UI.
 // It serves static web UI assets and proxies API requests to the
 // farmer over NATS via the CLI client.
 package serve
@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/gogrlx/grlx/v2/internal/api/client"
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/api/client"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/log"
 )
 
 // BuildInfo is set by the caller (typically the serve command) to provide
@@ -80,7 +80,7 @@ func NewMux() *http.ServeMux {
 
 	// Recipes: farmer's dedicated HTTP endpoint (GET /v1/recipes,
 	// GET /v1/recipes/{name...}), not the NATS proxy pattern the rest of
-	// this file uses — see docs/design/grlx-fork-roadmap.md workstream I.
+	// this file uses — see docs/design/imas-fork-roadmap.md workstream I.
 	mux.HandleFunc("GET /api/v1/recipes", HandleRecipesList)
 	mux.HandleFunc("GET /api/v1/recipes/{id...}", HandleRecipeGet)
 
@@ -393,7 +393,7 @@ func HandleCohortGetProxy(method string) http.HandlerFunc {
 
 // HandleRecipesList calls the farmer's dedicated recipe HTTP endpoint
 // (GET /v1/recipes) instead of going over NATS — see
-// docs/design/grlx-fork-roadmap.md workstream I.
+// docs/design/imas-fork-roadmap.md workstream I.
 func HandleRecipesList(w http.ResponseWriter, _ *http.Request) {
 	recipes, err := client.ListRecipes()
 	if err != nil {

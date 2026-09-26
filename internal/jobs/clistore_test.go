@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 func TestCLIStore_RecordJobStart(t *testing.T) {

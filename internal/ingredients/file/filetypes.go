@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/gogrlx/grlx/v2/internal/ingredients/file/hashers"
+	"github.com/yogzblr/imas/internal/ingredients/file/hashers"
 )
 
 type FileProvider interface {

@@ -3,7 +3,7 @@
 Two codebases, one trust boundary:
 
 - **SaaS API** — external, customer/CloudXP-facing. Standard Go REST service, GORM, `saas` schema.
-- **Farmer** (+ sprout) — internal, data-plane. Existing grlx NATS API, `farmer` schema. Its entire API surface is now **privileged and internal-only** — callable exclusively by the SaaS API's service credential, never directly by a tenant, a human user, or CloudXP.
+- **Farmer** (+ sprout) — internal, data-plane. Existing imas NATS API, `farmer` schema. Its entire API surface is now **privileged and internal-only** — callable exclusively by the SaaS API's service credential, never directly by a tenant, a human user, or CloudXP.
 
 Both schemas live in one shared PXC cluster. Single-writer-per-schema: farmer writes only `farmer.*`, SaaS API writes only `saas.*`; each has read-only grants into the other's schema for local joins (see §5.1).
 
@@ -179,11 +179,11 @@ no new batch/item tables — since an update rollout is just another batched
 action, tracked and audited identically to a `cmd.run` or `cook` batch
 (§1.5).
 
-**Blocking dependency, stated up front:** upstream grlx's own
+**Blocking dependency, stated up front:** upstream imas's own
 `internal/update` package is an explicitly disabled skeleton —
 `PerformUpdate()` unconditionally returns `errUnsignedUpdatesDisabled`, and
 the package header says outright "Do NOT enable it as-is" (tracked upstream
-in `gogrlx/grlx#286`). Everything in this section is a design placeholder
+in `yogzblr/imas#286`). Everything in this section is a design placeholder
 for when sprout has a real, working, signed self-update path — not
 something to wire live today. Don't expose `POST
 /tenants/{tenant_id}/sprouts/updates` publicly, even behind a feature flag,
@@ -236,9 +236,9 @@ everywhere else in this design (§4's "every query includes `tenant_id`").
 
 ## 2. Internal API — Farmer (SaaS API only)
 
-Transport: NATS subjects under `grlx.api.*` (existing) and a new `grlx.internal.*` prefix. Authenticated via a privileged internal NATS identity (system-account-scoped user or mTLS), distinct from any tenant's sprout/user credentials. Never exposed to a tenant, a sprout, or a human directly.
+Transport: NATS subjects under `imas.api.*` (existing) and a new `imas.internal.*` prefix. Authenticated via a privileged internal NATS identity (system-account-scoped user or mTLS), distinct from any tenant's sprout/user credentials. Never exposed to a tenant, a sprout, or a human directly.
 
-**Decided for `internal.tenant.*`:** a narrowly-scoped User under the SYS Account, handled on farmer's existing SYS listener connection. See `grlx-internal-api-account.md` for the reasoning and the exact permission set. The `internal.tenant.*` subjects are implemented; the `internal.sprout*` subjects below are not yet.
+**Decided for `internal.tenant.*`:** a narrowly-scoped User under the SYS Account, handled on farmer's existing SYS listener connection. See `imas-internal-api-account.md` for the reasoning and the exact permission set. The `internal.tenant.*` subjects are implemented; the `internal.sprout*` subjects below are not yet.
 
 ### 2.1 Existing subjects (unchanged shape, now tenant-scoped + internal-only)
 
@@ -281,7 +281,7 @@ Transport: NATS subjects under `grlx.api.*` (existing) and a new `grlx.internal.
   "nkey_identity": "U..."
 }
 ```
-Two tokens, one signing event, minted together every time this subject (or the enrollment flow's internal equivalent, §3.3) is invoked — including at rotation, not just first enrollment. See `grlx-envoy-enrollment-design.md` for why a single JWT can't serve both the NATS and Envoy gates.
+Two tokens, one signing event, minted together every time this subject (or the enrollment flow's internal equivalent, §3.3) is invoked — including at rotation, not just first enrollment. See `imas-envoy-enrollment-design.md` for why a single JWT can't serve both the NATS and Envoy gates.
 
 ```json
 // internal.sprouts.list request
@@ -312,7 +312,7 @@ alongside `cmd.run`/`cook` (§1.8):
 
 `artifact_url` points at **CloudXP's own object storage**, served through
 the same authenticated recipe HTTP endpoint already designed in Phase 1 of
-the master plan (`grlx-master-plan.md`) — not upstream's release CDN. This
+the master plan (`imas-master-plan.md`) — not upstream's release CDN. This
 means the artifact-serving auth model, TLS, and object-storage backing are
 all already-designed infrastructure being reused, not new plumbing.
 
@@ -331,7 +331,7 @@ farmer at all** — the failure mode is categorically worse. Before any
   exercised in testing before this ships — it's real code today, just not
   wired to anything.
 - **Staged rollout should reuse workstream L's farmer-side batch-and-gate
-  design** (`grlx-sprout-orchestration.md`'s open item: dispatch to a batch,
+  design** (`imas-sprout-orchestration.md`'s open item: dispatch to a batch,
   wait on a probe/job-status health signal, proceed to the next batch) —
   self-update is the single best-motivating use case for that mechanism,
   arguably more than ordinary recipe rollout.
@@ -345,7 +345,7 @@ farmer at all** — the failure mode is categorically worse. Before any
 
 ### 2.4 JWKS endpoint — for Envoy, not internal-only
 
-Unlike everything else in §2, this route is deliberately **not** on the privileged `grlx.internal.*`/system-NATS-identity path — it serves public key material only, so it carries no confidentiality requirement, the same trust model as any standard `/.well-known/jwks.json`.
+Unlike everything else in §2, this route is deliberately **not** on the privileged `imas.internal.*`/system-NATS-identity path — it serves public key material only, so it carries no confidentiality requirement, the same trust model as any standard `/.well-known/jwks.json`.
 
 | Method | Path | Notes |
 |---|---|---|
@@ -360,22 +360,22 @@ Unlike everything else in §2, this route is deliberately **not** on the privile
 }
 ```
 
-Contains the **gateway signing key's** public key only (see `grlx-nats-jwt-auth-design.md`'s key-custody section) — one entry, or two during the gateway key's own rotation overlap window (old + new `kid`). Never grows with tenant count: this is not a per-tenant Account-key JWKS, since Envoy's `jwt_authn` check never needs tenant granularity. Farmer already holds this public key (fetched from OpenBao alongside the signing operation itself), so this route is a pure data-transformation read, no new secret access.
+Contains the **gateway signing key's** public key only (see `imas-nats-jwt-auth-design.md`'s key-custody section) — one entry, or two during the gateway key's own rotation overlap window (old + new `kid`). Never grows with tenant count: this is not a per-tenant Account-key JWKS, since Envoy's `jwt_authn` check never needs tenant granularity. Farmer already holds this public key (fetched from OpenBao alongside the signing operation itself), so this route is a pure data-transformation read, no new secret access.
 
 ### 2.5 Fleet release signing — one signer, read-only verifiers
 
 A `saas.fleet_versions` row is trusted because it is signed, not because
 of who wrote it. The signature is Ed25519, over the canonical string
 `version|artifact_url|checksum_sha256`. It is made with the OpenBao
-Transit key `grlx-fleet-signing`, which is non-exportable and separate
+Transit key `imas-fleet-signing`, which is non-exportable and separate
 from the gateway JWT key. The row stores it as
 `signature = "v<key version>:<base64>"`.
 
-| Who | Transit access on `grlx-fleet-signing` | Does |
+| Who | Transit access on `imas-fleet-signing` | Does |
 |---|---|---|
-| `cmd/fleetreleaser` | **sign** + read public key (`grlx-fleet-signer` policy) | Run by CloudXP's release pipeline. Signs the row and writes it straight to `saas.fleet_versions` with its own DB user. It never calls the SaaS API. |
-| saasapi | read + verify only (`grlx-fleet-verify`) | Refuses to create a rollout (§1.8) from a row whose signature is missing or invalid. |
-| farmer | read + verify only (`grlx-fleet-verify`, its own role) | Serves the key's current versions live to each sprout on `grlx.sprouts.<id>.fleetsigningkeys`, queue-subscribed on each tenant connection. The set is every version at or above `min_decryption_version`: every version Transit's own `/verify` still accepts, including those below `min_encryption_version` during a rotation grace period. Also serves them ungated at `GET /v1/.well-known/fleet-signing-jwks.json`, the same trust model as §2.4. Returns a bootstrap copy as `fleet_signing_jwks` in `POST /v1/enroll`. Re-verifies before it dispatches a `self_update`. |
+| `cmd/fleetreleaser` | **sign** + read public key (`imas-fleet-signer` policy) | Run by CloudXP's release pipeline. Signs the row and writes it straight to `saas.fleet_versions` with its own DB user. It never calls the SaaS API. |
+| saasapi | read + verify only (`imas-fleet-verify`) | Refuses to create a rollout (§1.8) from a row whose signature is missing or invalid. |
+| farmer | read + verify only (`imas-fleet-verify`, its own role) | Serves the key's current versions live to each sprout on `imas.sprouts.<id>.fleetsigningkeys`, queue-subscribed on each tenant connection. The set is every version at or above `min_decryption_version`: every version Transit's own `/verify` still accepts, including those below `min_encryption_version` during a rotation grace period. Also serves them ungated at `GET /v1/.well-known/fleet-signing-jwks.json`, the same trust model as §2.4. Returns a bootstrap copy as `fleet_signing_jwks` in `POST /v1/enroll`. Re-verifies before it dispatches a `self_update`. |
 | sprout | none | Verifies against the **live** key set, fetched over its SproutRootCA-pinned NATS connection, **before** it fetches the artifact. It accepts any version in the set; the set is cached for 5 min, and a miss refetches immediately. The enrollment-time pin, stored next to `SproutRootCA`, is a bootstrap fallback only until the first live fetch succeeds. It then fetches the artifact with `SproutRootCA` as the only TLS root and checks the SHA-256 afterwards. |
 
 **Why the split.** saasapi already has PXC write access to
@@ -388,8 +388,8 @@ and two tokens:
 - **fleetreleaser is the only signer.** It is a separate binary, not a
   library farmer or saasapi imports.
 - **farmer and saasapi are read-only.** Their policy grants
-  `transit/keys/grlx-fleet-signing` (read) and
-  `transit/verify/grlx-fleet-signing` and nothing else. It is OpenBao
+  `transit/keys/imas-fleet-signing` (read) and
+  `transit/verify/imas-fleet-signing` and nothing else. It is OpenBao
   that enforces this, not the Go code: the check is
   `TestOpenBaoEnforcesReadOnlyFleetKey`, run against a real OpenBao with
   the shipped policy files.
@@ -411,7 +411,7 @@ fallback. Policies, roles, the DB grant and the manual checks are in
   `tenant_update_policy` (`deploy/fleetreleaser/README.md`, "Rotating the
   key").
 - **Trust in the live key set.** A sprout trusts whoever answers on
-  `grlx.sprouts.<id>.fleetsigningkeys`. Only farmer and grlx.>-template
+  `imas.sprouts.<id>.fleetsigningkeys`. Only farmer and imas.>-template
   Users in the tenant's Account can answer, and they can already run
   commands on the sprout (`internal/fleetkeys`). A reviewer should confirm
   that equivalence holds for every User template that exists.
@@ -427,7 +427,7 @@ The one moment in the whole system where a caller has no credential yet. Borrowe
 
 `{key_id}.{secret}` — not just one opaque blob. `key_id` is a short random public identifier (e.g. 8-char base32), stored in plaintext and used purely as an **indexed lookup key**; `secret` is a 32-byte random value whose SHA-256 hash is what's actually stored (`saas.enrollment_keys.key_hash`). This mirrors `kubeadm`'s split for exactly the same reason: without it, validating a token means scanning and hash-comparing against every live key in the table; with it, it's a single indexed `WHERE key_id = ?` followed by one constant-time hash comparison.
 
-`POST /tenants/{tenant_id}/enrollment-keys` (§1.2) returns the full `{key_id}.{secret}` string once — that's what goes into the Ansible playbook's `grlx_join_token` variable.
+`POST /tenants/{tenant_id}/enrollment-keys` (§1.2) returns the full `{key_id}.{secret}` string once — that's what goes into the Ansible playbook's `imas_join_token` variable.
 
 ### 3.2 The endpoint itself
 
@@ -442,7 +442,7 @@ The one moment in the whole system where a caller has no credential yet. Borrowe
   "sprout_id": "s_1",
   "nats_jwt": "<signed NATS User JWT>",
   "gateway_jwt": "<signed gateway JWT, presented to Envoy on the ws upgrade and the recipe endpoint>",
-  "fleet_signing_jwks": { "keys": [ /* grlx-fleet-signing public key(s), pinned by the sprout — §2.5 */ ] },
+  "fleet_signing_jwks": { "keys": [ /* imas-fleet-signing public key(s), pinned by the sprout — §2.5 */ ] },
   "nats_urls": ["wss://bus1.dmz...", "wss://bus2.dmz..."]
 }
 
@@ -530,7 +530,7 @@ already cover dispatch tracking for any `action.type`, including
 - Quota/rate-limit enforcement values and where exactly they're checked (SaaS API is the intended enforcement point, per earlier discussion, but no limits have been set).
 - Can a sprout's `tenant_id` ever change post-enrollment, or does a tenant move always mean re-enrollment? Not decided.
 - **Fleet update rollout is blocked on upstream.** `internal/update` is an
-  explicitly disabled skeleton (`gogrlx/grlx#286`); `PerformUpdate()` fails
+  explicitly disabled skeleton (`yogzblr/imas#286`); `PerformUpdate()` fails
   closed today. Release signing and CA pinning now exist (§2.5); the
   sprout's install step (§2.3) still doesn't. §1.8/§2.2/§2.3's endpoints and subjects are ready to build
   against the SaaS API and schema side whenever sprout has a real signed

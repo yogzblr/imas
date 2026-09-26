@@ -14,7 +14,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"gopkg.in/yaml.v3"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 // conn is the single connection a sprout process registers via
@@ -30,7 +30,7 @@ func RegisterNatsConn(n *nats.Conn) {
 // farmerConns holds farmer's own per-tenant NATS connections — the
 // counterpart to conn above, but keyed by tenant since a single farmer
 // process now holds one connection per tenant (see
-// docs/design/grlx-tenant-context-threading.md's Option A). Only
+// docs/design/imas-tenant-context-threading.md's Option A). Only
 // SendCookEvent (farmer's outbound leg, farmercook.go) reads this; sprout
 // never calls RegisterFarmerNatsConn.
 var (
@@ -367,7 +367,7 @@ func joinMaps(a, b map[string]interface{}) (map[string]interface{}, error) {
 
 // the basepath and strip the extension
 func pathToRecipeName(path string) (RecipeName, error) {
-	path = strings.TrimSuffix(path, "."+config.GrlxExt)
+	path = strings.TrimSuffix(path, "."+config.ImasExt)
 	path = strings.TrimPrefix(path, getBasePath()+"/")
 	return RecipeName(path), nil
 }
@@ -398,7 +398,7 @@ func relativeRecipeToAbsolute(ctx context.Context, basepath, relatedRecipePath s
 // different recipe tree — e.g. a specific git branch or tag, or a
 // per-environment tree, synced under its own prefix — without rewriting the
 // farmer config. When unset or empty, config.RecipeDir is used.
-const RecipeDirEnvVar = "GRLX_RECIPE_DIR"
+const RecipeDirEnvVar = "IMAS_RECIPE_DIR"
 
 // getBasePath returns the object-key prefix recipes resolve under in the
 // recipe store (see store.go). Despite the historical "dir" naming it is

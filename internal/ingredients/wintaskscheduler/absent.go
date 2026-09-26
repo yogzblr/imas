@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/winexec"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients/winexec"
 )
 
 func (t Task) absent(_ context.Context, test bool) (cook.Result, error) {

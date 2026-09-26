@@ -7,7 +7,7 @@ import (
 
 	nft "github.com/google/nftables"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 type chainSpec struct {

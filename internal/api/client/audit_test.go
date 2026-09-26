@@ -3,7 +3,7 @@ package client
 import (
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/audit"
+	"github.com/yogzblr/imas/internal/audit"
 )
 
 func TestListAuditDates_Success(t *testing.T) {
@@ -14,7 +14,7 @@ func TestListAuditDates_Success(t *testing.T) {
 		{Date: "2026-03-18", EntryCount: 42, SizeBytes: 8192},
 		{Date: "2026-03-17", EntryCount: 15, SizeBytes: 3072},
 	}
-	mockHandler(t, NatsConn, "grlx.api.audit.dates", want)
+	mockHandler(t, NatsConn, "imas.api.audit.dates", want)
 
 	got, err := ListAuditDates()
 	if err != nil {
@@ -35,7 +35,7 @@ func TestListAuditDates_Empty(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockHandler(t, NatsConn, "grlx.api.audit.dates", []audit.DateSummary{})
+	mockHandler(t, NatsConn, "imas.api.audit.dates", []audit.DateSummary{})
 
 	got, err := ListAuditDates()
 	if err != nil {
@@ -50,7 +50,7 @@ func TestListAuditDates_Error(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.audit.dates", "audit not configured")
+	mockErrorHandler(t, NatsConn, "imas.api.audit.dates", "audit not configured")
 
 	_, err := ListAuditDates()
 	if err == nil {
@@ -70,7 +70,7 @@ func TestQueryAudit_Success(t *testing.T) {
 			{Action: "pki.accept", Pubkey: "NKEY_B"},
 		},
 	}
-	mockHandler(t, NatsConn, "grlx.api.audit.query", want)
+	mockHandler(t, NatsConn, "imas.api.audit.query", want)
 
 	params := audit.QueryParams{Date: "2026-03-18"}
 	got, err := QueryAudit(params)
@@ -97,7 +97,7 @@ func TestQueryAudit_WithFilters(t *testing.T) {
 		Total:   1,
 		Entries: []audit.Entry{{Action: "cook", Pubkey: "NKEY_A"}},
 	}
-	mockHandler(t, NatsConn, "grlx.api.audit.query", want)
+	mockHandler(t, NatsConn, "imas.api.audit.query", want)
 
 	params := audit.QueryParams{
 		Date:   "2026-03-18",
@@ -117,7 +117,7 @@ func TestQueryAudit_Error(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.audit.query", "invalid date format")
+	mockErrorHandler(t, NatsConn, "imas.api.audit.query", "invalid date format")
 
 	params := audit.QueryParams{Date: "bad-date"}
 	_, err := QueryAudit(params)

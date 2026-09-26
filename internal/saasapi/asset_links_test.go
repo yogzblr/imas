@@ -17,8 +17,8 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 
-	"github.com/gogrlx/grlx/v2/internal/heartbeat"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	"github.com/yogzblr/imas/internal/heartbeat"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // newTestDBWithFarmer is newTestDB plus a stand-in for the farmer schema:
@@ -102,7 +102,7 @@ func newTestHeartbeat(t *testing.T) *miniredis.Miniredis {
 // making every sprout look offline.
 func markOnline(t *testing.T, mr *miniredis.Miniredis, tenantID, sproutID string) {
 	t.Helper()
-	if err := mr.Set("grlx:heartbeat:"+tenantID+":"+sproutID, "1"); err != nil {
+	if err := mr.Set("imas:heartbeat:"+tenantID+":"+sproutID, "1"); err != nil {
 		t.Fatalf("setting heartbeat key: %v", err)
 	}
 	if !heartbeat.IsOnline(context.Background(), tenantID, sproutID) {

@@ -13,8 +13,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"gorm.io/gorm"
 
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
-	"github.com/gogrlx/grlx/v2/internal/controlplane"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/controlplane"
 )
 
 // fakeFarmer stands in for farmer's internal.sprout.action handler: it
@@ -222,7 +222,7 @@ func TestCreateSproutActionBatch_Validation(t *testing.T) {
 		{"self_update not exposed", map[string]any{"asset_ids": []string{"a1"}, "action": map[string]any{"type": "self_update", "params": map[string]any{}}}, "unsupported_action"},
 		{"unknown action type", map[string]any{"asset_ids": []string{"a1"}, "action": map[string]any{"type": "shell.start", "params": map[string]any{}}}, "unsupported_action"},
 		{"cmd.run without params", map[string]any{"asset_ids": []string{"a1"}, "action": map[string]any{"type": "cmd.run"}}, "invalid_request"},
-		{"cmd.run stream_topic smuggled", map[string]any{"asset_ids": []string{"a1"}, "action": map[string]any{"type": "cmd.run", "params": map[string]any{"cmd": "ls", "stream_topic": "grlx.x"}}}, "invalid_request"},
+		{"cmd.run stream_topic smuggled", map[string]any{"asset_ids": []string{"a1"}, "action": map[string]any{"type": "cmd.run", "params": map[string]any{"cmd": "ls", "stream_topic": "imas.x"}}}, "invalid_request"},
 		{"cmd.run farmer-shaped params", map[string]any{"asset_ids": []string{"a1"}, "action": map[string]any{"type": "cmd.run", "params": map[string]any{"command": "ls"}}}, "invalid_request"},
 		{"cmd.run shell syntax", map[string]any{"asset_ids": []string{"a1"}, "action": cmdAction("ls; rm -rf /")}, "invalid_request"},
 		{"cmd.run env not accepted", map[string]any{"asset_ids": []string{"a1"}, "action": map[string]any{"type": "cmd.run", "params": map[string]any{"cmd": "ls", "env": map[string]string{"TOKEN": "s3cret"}}}}, "invalid_request"},

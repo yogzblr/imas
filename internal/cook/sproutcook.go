@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/log"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 var (
@@ -80,7 +80,7 @@ func CookRecipeEnvelope(envelope RecipeEnvelope) error {
 				log.Errorf("failed to marshal step completion: %v", marshalErr)
 			}
 
-			conn.Publish("grlx.cook."+pki.GetSproutID()+"."+envelope.JobID, b)
+			conn.Publish("imas.cook."+pki.GetSproutID()+"."+envelope.JobID, b)
 			log.Infof("Step %s completed with status %v", completion.ID, completion)
 			completed++
 			logStepResult(envelope.JobID, completion)
@@ -236,7 +236,7 @@ func CookRecipeEnvelope(envelope RecipeEnvelope) error {
 				if marshalErr != nil {
 					log.Errorf("failed to marshal step completion: %v", marshalErr)
 				}
-				conn.Publish("grlx.cook."+pki.GetSproutID()+"."+envelope.JobID, b)
+				conn.Publish("imas.cook."+pki.GetSproutID()+"."+envelope.JobID, b)
 				log.Info("All steps completed")
 				return nil
 			}
@@ -252,7 +252,7 @@ func CookRecipeEnvelope(envelope RecipeEnvelope) error {
 			if marshalErr != nil {
 				log.Errorf("failed to marshal timeout completion: %v", marshalErr)
 			}
-			conn.Publish("grlx.cook."+pki.GetSproutID()+"."+envelope.JobID, b)
+			conn.Publish("imas.cook."+pki.GetSproutID()+"."+envelope.JobID, b)
 			return ErrCookTimeout
 		}
 	}

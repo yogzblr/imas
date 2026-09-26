@@ -19,7 +19,7 @@ import (
 	"github.com/valkey-io/valkey-go"
 	"gorm.io/gorm"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 // readyCheckTimeout bounds each dependency ping, so a hung PXC or Valkey

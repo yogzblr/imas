@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 func TestPropMapToPropSet_Valid(t *testing.T) {

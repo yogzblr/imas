@@ -17,8 +17,8 @@ import (
 	"github.com/nats-io/nkeys"
 	"github.com/taigrr/jety"
 
-	"github.com/gogrlx/grlx/v2/internal/api/client"
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/api/client"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 // natsResponse mirrors the client's internal envelope.
@@ -52,7 +52,7 @@ func startTestNATS(t *testing.T) func() {
 	}
 }
 
-// mockMethod subscribes to grlx.api.<method> and replies with given data.
+// mockMethod subscribes to imas.api.<method> and replies with given data.
 func mockMethod(t *testing.T, nc *nats.Conn, method string, response any) {
 	t.Helper()
 	data, err := json.Marshal(response)
@@ -60,7 +60,7 @@ func mockMethod(t *testing.T, nc *nats.Conn, method string, response any) {
 		t.Fatalf("marshal: %v", err)
 	}
 	resp := natsResponse{Result: data}
-	sub, err := nc.Subscribe("grlx.api."+method, func(msg *nats.Msg) {
+	sub, err := nc.Subscribe("imas.api."+method, func(msg *nats.Msg) {
 		payload, _ := json.Marshal(resp)
 		msg.Respond(payload)
 	})
@@ -75,7 +75,7 @@ func mockMethod(t *testing.T, nc *nats.Conn, method string, response any) {
 func mockMethodError(t *testing.T, nc *nats.Conn, method, errMsg string) {
 	t.Helper()
 	resp := natsResponse{Error: errMsg}
-	sub, err := nc.Subscribe("grlx.api."+method, func(msg *nats.Msg) {
+	sub, err := nc.Subscribe("imas.api."+method, func(msg *nats.Msg) {
 		payload, _ := json.Marshal(resp)
 		msg.Respond(payload)
 	})
@@ -90,7 +90,7 @@ func mockMethodError(t *testing.T, nc *nats.Conn, method, errMsg string) {
 // endpoint (internal/api/handlers/recipes.go), which HandleRecipesList/
 // HandleRecipeGet call over real HTTPS via internal/api/client —
 // unlike the rest of this file's NATS-proxied routes. It trusts the test
-// server's certificate as config.GrlxRootCA and provisions a signing key
+// server's certificate as config.ImasRootCA and provisions a signing key
 // for the auth token internal/api/client attaches, mirroring
 // internal/api/client/recipes_test.go's setupRecipeTestServer.
 func startTestRecipeFarmer(t *testing.T, handler http.HandlerFunc) {
@@ -108,12 +108,12 @@ func startTestRecipeFarmer(t *testing.T, handler http.HandlerFunc) {
 		t.Fatalf("unexpected test server URL: %s", ts.URL)
 	}
 
-	origRootCA, origIface, origPort := config.GrlxRootCA, config.FarmerInterface, config.FarmerAPIPort
-	config.GrlxRootCA = caFile
+	origRootCA, origIface, origPort := config.ImasRootCA, config.FarmerInterface, config.FarmerAPIPort
+	config.ImasRootCA = caFile
 	config.FarmerInterface = host
 	config.FarmerAPIPort = port
 	t.Cleanup(func() {
-		config.GrlxRootCA = origRootCA
+		config.ImasRootCA = origRootCA
 		config.FarmerInterface = origIface
 		config.FarmerAPIPort = origPort
 	})
@@ -662,7 +662,7 @@ func TestUIHandler_AssetsCacheControl(t *testing.T) {
 		t.Fatalf("SPA fallback: expected 200, got %d", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "grlx") {
+	if !strings.Contains(body, "imas") {
 		t.Fatal("SPA fallback should serve index.html")
 	}
 }

@@ -8,8 +8,8 @@ import (
 	"net"
 	"strings"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
 	"github.com/vishvananda/netlink"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 func (n Network) link(_ context.Context, test bool) (cook.Result, error) {

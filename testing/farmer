@@ -1,24 +1,24 @@
-certfile: /etc/grlx/pki/farmer/tls-cert.pem
+certfile: /etc/imas/pki/farmer/tls-cert.pem
 certhosts:
     - localhost
     - 127.0.0.1
     - farmer
-    - grlx
+    - imas
     - 192.168.2.4
 certificatevalidtime: 8760h0m0s
-configroot: /etc/grlx/
+configroot: /etc/imas/
 farmerapiport: "5405"
 farmerbusinterface: ""
 farmerbusport: "5406"
 farmerinterface: farmer
-farmerpki: /etc/grlx/pki/farmer/
+farmerpki: /etc/imas/pki/farmer/
 farmerurl: https://farmer:5405
-keyfile: /etc/grlx/pki/farmer/tls-key.pem
-nkeyfarmerprivfile: /etc/grlx/pki/farmer/farmer.nkey
-nkeyfarmerpubfile: /etc/grlx/pki/farmer/farmer.nkey.pub
-organization: GRLX Development
+keyfile: /etc/imas/pki/farmer/tls-key.pem
+nkeyfarmerprivfile: /etc/imas/pki/farmer/farmer.nkey
+nkeyfarmerpubfile: /etc/imas/pki/farmer/farmer.nkey.pub
+organization: IMAS Development
 pubkeys:
     admin:
         - PLACEHOLDER
-rootca: /etc/grlx/pki/farmer/tls-rootca.pem
-rootcapriv: /etc/grlx/pki/farmer/tls-rootca-key.pem
+rootca: /etc/imas/pki/farmer/tls-rootca.pem
+rootcapriv: /etc/imas/pki/farmer/tls-rootca-key.pem

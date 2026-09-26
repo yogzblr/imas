@@ -7,7 +7,7 @@ import (
 func TestSubjectPrefix(t *testing.T) {
 	sessionID := "abc-123"
 	got := SubjectPrefix(sessionID)
-	want := "grlx.shell.abc-123"
+	want := "imas.shell.abc-123"
 	if got != want {
 		t.Errorf("SubjectPrefix(%q) = %q, want %q", sessionID, got, want)
 	}
@@ -20,16 +20,16 @@ func TestSubjects(t *testing.T) {
 	if s.SessionID != sessionID {
 		t.Errorf("SessionID = %q, want %q", s.SessionID, sessionID)
 	}
-	if s.InputSubject != "grlx.shell.test-session-42.input" {
+	if s.InputSubject != "imas.shell.test-session-42.input" {
 		t.Errorf("InputSubject = %q", s.InputSubject)
 	}
-	if s.OutputSubject != "grlx.shell.test-session-42.output" {
+	if s.OutputSubject != "imas.shell.test-session-42.output" {
 		t.Errorf("OutputSubject = %q", s.OutputSubject)
 	}
-	if s.ResizeSubject != "grlx.shell.test-session-42.resize" {
+	if s.ResizeSubject != "imas.shell.test-session-42.resize" {
 		t.Errorf("ResizeSubject = %q", s.ResizeSubject)
 	}
-	if s.DoneSubject != "grlx.shell.test-session-42.done" {
+	if s.DoneSubject != "imas.shell.test-session-42.done" {
 		t.Errorf("DoneSubject = %q", s.DoneSubject)
 	}
 }

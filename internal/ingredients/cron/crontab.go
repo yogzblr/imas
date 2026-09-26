@@ -7,10 +7,10 @@ import (
 	"strings"
 )
 
-// identifierPrefix marks the comment line grlx writes immediately above a
+// identifierPrefix marks the comment line imas writes immediately above a
 // managed cron entry, so the entry can be found and updated/removed later
 // without depending on the schedule or command staying the same.
-const identifierPrefix = "# GRLX_CRON_ID:"
+const identifierPrefix = "# IMAS_CRON_ID:"
 
 // Entry is a single crontab schedule line.
 type Entry struct {
@@ -19,7 +19,7 @@ type Entry struct {
 }
 
 // Line is one line of a crontab: either a parsed Entry (optionally tagged
-// with an Identifier from a preceding grlx marker comment), or a
+// with an Identifier from a preceding imas marker comment), or a
 // comment/blank/env-var line preserved verbatim.
 type Line struct {
 	Raw        string

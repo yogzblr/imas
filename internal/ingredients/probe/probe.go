@@ -1,9 +1,9 @@
-// Package probe implements grlx's probe.* ingredients: atomic, single-shot
+// Package probe implements imas's probe.* ingredients: atomic, single-shot
 // checks against an external system (an HTTP endpoint, a database query).
 // Each method makes one call and validates the response -- there is no
 // internal sequencing or retry-as-a-workflow here. Chaining several probes,
 // gating later steps on one, or polling until a condition holds is the
-// recipe/cook engine's job (see docs/design/grlx-sprout-orchestration.md),
+// recipe/cook engine's job (see docs/design/imas-sprout-orchestration.md),
 // not probe's.
 package probe
 
@@ -13,8 +13,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 var ErrProbeMethodUndefined = errors.New("probe method undefined")

@@ -10,17 +10,17 @@ import (
 	"syscall"
 	"time"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	log "github.com/yogzblr/imas/internal/log"
 
-	certs "github.com/gogrlx/grlx/v2/internal/certs"
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/cmd"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/selfupdate"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/test"
-	"github.com/gogrlx/grlx/v2/internal/jobs"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	certs "github.com/yogzblr/imas/internal/certs"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients/cmd"
+	"github.com/yogzblr/imas/internal/ingredients/selfupdate"
+	"github.com/yogzblr/imas/internal/ingredients/test"
+	"github.com/yogzblr/imas/internal/jobs"
+	"github.com/yogzblr/imas/internal/pki"
 
 	nats "github.com/nats-io/nats.go"
 
@@ -151,7 +151,7 @@ func ConnectSprout(ctx context.Context, done chan<- struct{}) {
 	test.RegisterNatsConn(nc)
 	cmd.RegisterNatsConn(nc)
 	cook.RegisterNatsConn(nc)
-	// The selfupdate ingredient fetches grlx-fleet-signing's live key set
+	// The selfupdate ingredient fetches imas-fleet-signing's live key set
 	// over this same SproutRootCA-pinned connection.
 	selfupdate.RegisterNatsConn(nc)
 	err = natsInit(nc)

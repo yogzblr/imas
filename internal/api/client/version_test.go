@@ -3,7 +3,7 @@ package client
 import (
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 func TestGetVersion_Success(t *testing.T) {
@@ -16,7 +16,7 @@ func TestGetVersion_Success(t *testing.T) {
 		GitCommit: "abc1234",
 		Tag:       "v2.1.0",
 	}
-	mockHandler(t, NatsConn, "grlx.api.version", want)
+	mockHandler(t, NatsConn, "imas.api.version", want)
 
 	got, err := GetVersion()
 	if err != nil {
@@ -37,7 +37,7 @@ func TestGetVersion_Error(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()
 
-	mockErrorHandler(t, NatsConn, "grlx.api.version", "farmer unavailable")
+	mockErrorHandler(t, NatsConn, "imas.api.version", "farmer unavailable")
 
 	_, err := GetVersion()
 	if err == nil {

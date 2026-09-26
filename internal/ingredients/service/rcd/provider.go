@@ -6,9 +6,9 @@ import (
 	"context"
 	"os"
 
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/service"
 	"github.com/taigrr/rcd"
+	"github.com/yogzblr/imas/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients/service"
 )
 
 // RCDService implements service.ServiceProvider for BSD rc.d init systems,

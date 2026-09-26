@@ -11,9 +11,9 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/gogrlx/grlx/v2/internal/auth"
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/auth"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/log"
 )
 
 // NatsConn is the shared NATS connection used by the CLI client.
@@ -36,7 +36,7 @@ func NewNatsClient() (*nats.Conn, error) {
 		return nil, err
 	}
 	auth.NewToken()
-	rootCA := config.GrlxRootCA
+	rootCA := config.ImasRootCA
 	certPool := x509.NewCertPool()
 	rootPEM, err := os.ReadFile(rootCA)
 	if err != nil || rootPEM == nil {
@@ -52,7 +52,7 @@ func NewNatsClient() (*nats.Conn, error) {
 		MinVersion: tls.VersionTLS12,
 	}
 
-	connOpts := []nats.Option{nats.Name("grlx-cli"), nats.Nkey(pubkey, auth.Sign), nats.Secure(tlsCfg)}
+	connOpts := []nats.Option{nats.Name("imas-cli"), nats.Nkey(pubkey, auth.Sign), nats.Secure(tlsCfg)}
 
 	log.Tracef("Connecting to %s", URL)
 	return nats.Connect(URL, connOpts...)
@@ -69,7 +69,7 @@ func ConnectNats() error {
 }
 
 // NatsRequest sends a request to a NATS API method and returns the result.
-// The method is appended to "grlx.api." to form the subject.
+// The method is appended to "imas.api." to form the subject.
 // params is marshaled to JSON; pass nil for no params.
 // The local user's auth token is automatically injected into the JSON
 // payload so the farmer can attribute the request to the invoking user.
@@ -78,7 +78,7 @@ func NatsRequest(method string, params any) (json.RawMessage, error) {
 		return nil, fmt.Errorf("NATS connection not established")
 	}
 
-	subject := "grlx.api." + method
+	subject := "imas.api." + method
 
 	var data []byte
 	if params != nil {

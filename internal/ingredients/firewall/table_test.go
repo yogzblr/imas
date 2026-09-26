@@ -11,7 +11,7 @@ import (
 
 func TestTablePresentCreatesOnce(t *testing.T) {
 	conn := newFakeConn()
-	spec := tableSpec{name: "grlx", family: nft.TableFamilyINet}
+	spec := tableSpec{name: "imas", family: nft.TableFamilyINet}
 
 	res, err := tablePresent(conn, spec, false)
 	if err != nil || !res.Succeeded || !res.Changed {
@@ -32,7 +32,7 @@ func TestTablePresentCreatesOnce(t *testing.T) {
 
 func TestTablePresentDryRunDoesNotMutate(t *testing.T) {
 	conn := newFakeConn()
-	spec := tableSpec{name: "grlx", family: nft.TableFamilyINet}
+	spec := tableSpec{name: "imas", family: nft.TableFamilyINet}
 
 	res, err := tablePresent(conn, spec, true)
 	if err != nil || !res.Succeeded || !res.Changed {
@@ -45,8 +45,8 @@ func TestTablePresentDryRunDoesNotMutate(t *testing.T) {
 
 func TestTableAbsentRemovesExisting(t *testing.T) {
 	conn := newFakeConn()
-	conn.AddTable(&nft.Table{Name: "grlx", Family: nft.TableFamilyINet})
-	spec := tableSpec{name: "grlx", family: nft.TableFamilyINet}
+	conn.AddTable(&nft.Table{Name: "imas", Family: nft.TableFamilyINet})
+	spec := tableSpec{name: "imas", family: nft.TableFamilyINet}
 
 	res, err := tableAbsent(conn, spec, false)
 	if err != nil || !res.Succeeded || !res.Changed {
@@ -64,8 +64,8 @@ func TestTableAbsentRemovesExisting(t *testing.T) {
 
 func TestTableAbsentDifferentFamilyIsUntouched(t *testing.T) {
 	conn := newFakeConn()
-	conn.AddTable(&nft.Table{Name: "grlx", Family: nft.TableFamilyIPv4})
-	spec := tableSpec{name: "grlx", family: nft.TableFamilyIPv6}
+	conn.AddTable(&nft.Table{Name: "imas", Family: nft.TableFamilyIPv4})
+	spec := tableSpec{name: "imas", family: nft.TableFamilyIPv6}
 
 	res, err := tableAbsent(conn, spec, false)
 	if err != nil || res.Changed {
@@ -80,7 +80,7 @@ func TestFirewallRunDialFailure(t *testing.T) {
 	cleanup := withFailingDial("permission denied")
 	defer cleanup()
 
-	fw, err := Firewall{}.Parse("t1", MethodTablePresent, map[string]interface{}{"name": "grlx"})
+	fw, err := Firewall{}.Parse("t1", MethodTablePresent, map[string]interface{}{"name": "imas"})
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}

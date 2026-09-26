@@ -1,7 +1,7 @@
 package pki
 
-// Maps grlx's accept/deny/reject/unaccept sprout lifecycle onto NATS JWT
-// issuance and revocation, per docs/design/grlx-nats-jwt-auth-design.md's
+// Maps imas's accept/deny/reject/unaccept sprout lifecycle onto NATS JWT
+// issuance and revocation, per docs/design/imas-nats-jwt-auth-design.md's
 // "Revocation semantics" open item.
 //
 // Two independent pieces of state are kept in sync here, and it's worth
@@ -25,33 +25,33 @@ import (
 	jwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
 
-	"github.com/gogrlx/grlx/v2/internal/auth"
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/auth"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 func allowAllPermissions() jwt.Permissions {
 	return jwt.Permissions{
-		Pub: jwt.Permission{Allow: jwt.StringList{"grlx.>", "_INBOX.>"}},
-		Sub: jwt.Permission{Allow: jwt.StringList{"grlx.>", "_INBOX.>"}},
+		Pub: jwt.Permission{Allow: jwt.StringList{"imas.>", "_INBOX.>"}},
+		Sub: jwt.Permission{Allow: jwt.StringList{"imas.>", "_INBOX.>"}},
 	}
 }
 
 func sproutPermissions(id string) jwt.Permissions {
 	return jwt.Permissions{
 		Pub: jwt.Permission{Allow: jwt.StringList{
-			"grlx.sprouts.announce." + id,
+			"imas.sprouts.announce." + id,
 			"_INBOX.>",
-			"grlx.cook." + id + ".>",
-			"grlx.sprouts." + id + ".facts",
-			// Request grlx-fleet-signing's current key versions from farmer
+			"imas.cook." + id + ".>",
+			"imas.sprouts." + id + ".facts",
+			// Request imas-fleet-signing's current key versions from farmer
 			// (internal/fleetkeys). The reply comes back on
-			// grlx.sprouts.<id>.fleetsigningkeys.reply.<random>, covered by
+			// imas.sprouts.<id>.fleetsigningkeys.reply.<random>, covered by
 			// the existing Sub grant below; no Sub grant on _INBOX.> (which
 			// would expose every reply in the Account to every sprout).
-			"grlx.sprouts." + id + ".fleetsigningkeys",
+			"imas.sprouts." + id + ".fleetsigningkeys",
 		}},
 		Sub: jwt.Permission{Allow: jwt.StringList{
-			"grlx.sprouts." + id + ".>",
+			"imas.sprouts." + id + ".>",
 		}},
 	}
 }
@@ -140,18 +140,18 @@ func syncNatsAuth(mat *natsAuthMaterial) (bool, error) {
 		log.Errorf("failed to mint farmer User JWT: %v", mintErr)
 	}
 
-	grlxKeys, err := auth.GetPubkeysByRole("admin")
+	imasKeys, err := auth.GetPubkeysByRole("admin")
 	if err != nil {
-		log.Errorf("Could not load the grlx cli's NKey(s), please edit the config")
+		log.Errorf("Could not load the imas cli's NKey(s), please edit the config")
 	} else {
-		log.Tracef("Loaded grlx cli's public key(s): %v", grlxKeys)
+		log.Tracef("Loaded imas cli's public key(s): %v", imasKeys)
 	}
-	for _, key := range grlxKeys {
+	for _, key := range imasKeys {
 		if ensureUserGranted(ac, key) {
 			changed = true
 		}
-		if _, mintErr := mintOrReuseUserJWT(cliUserJWTPath(key), key, "grlx-cli", allowAllPermissions(), mat.tenantPub, mat.tenantSigningKP); mintErr != nil {
-			log.Errorf("failed to mint grlx cli User JWT for %s: %v", key, mintErr)
+		if _, mintErr := mintOrReuseUserJWT(cliUserJWTPath(key), key, "imas-cli", allowAllPermissions(), mat.tenantPub, mat.tenantSigningKP); mintErr != nil {
+			log.Errorf("failed to mint imas cli User JWT for %s: %v", key, mintErr)
 		}
 	}
 
@@ -217,7 +217,7 @@ func FarmerUserJWT() (string, error) {
 
 // GetSproutUserJWT returns the signed User JWT minted for an accepted
 // sprout, if any. This is groundwork for the enrollment endpoint
-// (docs/design/grlx-envoy-enrollment-design.md, workstream H) that will
+// (docs/design/imas-envoy-enrollment-design.md, workstream H) that will
 // hand it back to the sprout; nothing in this repo serves it over the wire
 // yet.
 func GetSproutUserJWT(id string) (string, error) {

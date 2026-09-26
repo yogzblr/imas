@@ -1,5 +1,5 @@
-# Envoy DMZ gateway — docs/design/grlx-envoy-enrollment-design.md
-# (workstream H, docs/design/grlx-fork-roadmap.md).
+# Envoy DMZ gateway — docs/design/imas-envoy-enrollment-design.md
+# (workstream H, docs/design/imas-fork-roadmap.md).
 #
 # FLAG FOR SECURITY REVIEW per the task brief that produced this file —
 # this is the literal front door of the trust chain. Everything downstream
@@ -75,7 +75,7 @@ static_resources:
                 route_config:
                   name: local_route
                   virtual_hosts:
-                    - name: grlx_dmz
+                    - name: imas_dmz
                       domains: ["*"]
                       routes:
                         # Route 1: enrollment. No JWT gate (design doc
@@ -145,10 +145,10 @@ static_resources:
                       providers:
                         sprout_jwt:
                           # Must match internal/gatewayjwt's
-                          # GatewayIssuer constant ("grlx-gateway") — a
+                          # GatewayIssuer constant ("imas-gateway") — a
                           # fixed, platform-wide value, never a tenant
                           # identifier (see that package's doc comment).
-                          issuer: grlx-gateway
+                          issuer: imas-gateway
                           # Served by internal/api/handlers/jwks.go via
                           # internal/gatewayjwt.JWKSHandler — the gateway
                           # Transit key's public half(ves), RFC 7517/8037
@@ -168,7 +168,7 @@ static_resources:
                           # (nats-server, or the recipe service) can see
                           # it without re-parsing the token.
                           claim_to_headers:
-                            - header_name: x-grlx-sprout-nkey
+                            - header_name: x-imas-sprout-nkey
                               claim_name: sub
                       rules:
                         - match: { prefix: "/v1/recipes" }
@@ -229,7 +229,7 @@ static_resources:
     # Points at farmer's dedicated recipe HTTP endpoint (GET /v1/recipes,
     # GET /v1/recipes/{name...} — internal/api/handlers/recipes.go,
     # internal/api/routers.go), the "small, self-contained service"
-    # docs/design/grlx-fork-roadmap.md workstream I describes, built
+    # docs/design/imas-fork-roadmap.md workstream I describes, built
     # directly into farmer's existing HTTPS API rather than as a separate
     # deployable.
     - name: recipe_service

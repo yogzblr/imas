@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 var (
@@ -23,7 +23,7 @@ var (
 // Compile-time interface check.
 var _ cook.RecipeCooker = LGPO{}
 
-// LGPO is a grlx ingredient for managing Windows Local Group Policy
+// LGPO is a imas ingredient for managing Windows Local Group Policy
 // Administrative Template settings. "name" is the policy's ADMX <policy
 // name="..."> identifier (not its display name).
 //

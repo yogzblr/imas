@@ -6,54 +6,54 @@ services:
       context: .
       dockerfile: docker/farmer.dockerfile
     volumes:
-      - ./testing/farmer:/etc/grlx/farmer
+      - ./testing/farmer:/etc/imas/farmer
       - .:/app
       - go-modules:/go/pkg/mod
-    image: grlx/farmer:latest
+    image: imas/farmer:latest
     restart: unless-stopped
     ports:
       - "5406:5406"
       - "5405:5405"
 
   sprout_a:
-    image: grlx/sprout:latest
+    image: imas/sprout:latest
     build:
       context: .
       dockerfile: docker/sprout.dockerfile
     volumes:
-      - ./testing/sprout_a:/etc/grlx/sprout
+      - ./testing/sprout_a:/etc/imas/sprout
       - .:/app
       - go-modules:/go/pkg/mod
     depends_on:
       - farmer
   sprout_b:
     volumes:
-      - ./testing/sprout_b:/etc/grlx/sprout
-    image: grlx/sprout:latest
+      - ./testing/sprout_b:/etc/imas/sprout
+    image: imas/sprout:latest
     depends_on:
       - farmer
   sprout_c:
     volumes:
-      - ./testing/sprout_c:/etc/grlx/sprout
-    image: grlx/sprout:latest
+      - ./testing/sprout_c:/etc/imas/sprout
+    image: imas/sprout:latest
     depends_on:
       - farmer
   sprout_d:
     volumes:
-      - ./testing/sprout_d:/etc/grlx/sprout
-    image: grlx/sprout:latest
+      - ./testing/sprout_d:/etc/imas/sprout
+    image: imas/sprout:latest
     depends_on:
       - farmer
   sprout_e:
     volumes:
-      - ./testing/sprout_e:/etc/grlx/sprout
-    image: grlx/sprout:latest
+      - ./testing/sprout_e:/etc/imas/sprout
+    image: imas/sprout:latest
     depends_on:
       - farmer
   sprout_f:
     volumes:
-      - ./testing/sprout_f:/etc/grlx/sprout
-    image: grlx/sprout:latest
+      - ./testing/sprout_f:/etc/imas/sprout
+    image: imas/sprout:latest
     depends_on:
       - farmer
 volumes:

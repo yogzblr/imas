@@ -1,0 +1,25 @@
+post_install() {
+    echo "Reloading systemd daemon..."
+    systemctl daemon-reload
+    
+    echo "imas-sprout installed. To start the service:"
+    echo "  sudo systemctl enable imas-sprout.service"
+    echo "  sudo systemctl start imas-sprout.service"
+    echo ""
+    echo "Don't forget to configure /etc/imas/sprout before starting!"
+}
+
+post_upgrade() {
+    post_install
+}
+
+pre_remove() {
+    if systemctl is-active imas-sprout.service >/dev/null 2>&1; then
+        echo "Stopping imas-sprout service..."
+        systemctl stop imas-sprout.service
+    fi
+    if systemctl is-enabled imas-sprout.service >/dev/null 2>&1; then
+        echo "Disabling imas-sprout service..."
+        systemctl disable imas-sprout.service
+    fi
+} 

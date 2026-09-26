@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/djherbis/atime"
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 func TestTouch(t *testing.T) {

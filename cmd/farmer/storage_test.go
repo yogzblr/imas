@@ -11,12 +11,12 @@ import (
 	nats "github.com/nats-io/nats.go"
 	"gorm.io/gorm"
 
-	"github.com/gogrlx/grlx/v2/internal/api/handlers"
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/jobs"
-	"github.com/gogrlx/grlx/v2/internal/pki"
-	"github.com/gogrlx/grlx/v2/internal/props"
-	"github.com/gogrlx/grlx/v2/internal/rbac"
+	"github.com/yogzblr/imas/internal/api/handlers"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/jobs"
+	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/props"
+	"github.com/yogzblr/imas/internal/rbac"
 )
 
 // newStorageTestDB migrates and installs the farmer schema the way
@@ -86,7 +86,7 @@ func TestInstalledStorageIndexesCookJobs(t *testing.T) {
 	}
 
 	env, _ := json.Marshal(cook.RecipeEnvelope{JobID: jid, Steps: []cook.Step{{ID: "s1"}}})
-	if err := nc.Publish("grlx.sprouts."+sprout+".cook", env); err != nil {
+	if err := nc.Publish("imas.sprouts."+sprout+".cook", env); err != nil {
 		t.Fatalf("publishing envelope: %v", err)
 	}
 	for _, step := range []cook.StepCompletion{
@@ -95,7 +95,7 @@ func TestInstalledStorageIndexesCookJobs(t *testing.T) {
 		{ID: cook.StepID("completed-" + jid), CompletionStatus: cook.StepCompleted},
 	} {
 		b, _ := json.Marshal(step)
-		if err := nc.Publish("grlx.cook."+sprout+"."+jid, b); err != nil {
+		if err := nc.Publish("imas.cook."+sprout+"."+jid, b); err != nil {
 			t.Fatalf("publishing step: %v", err)
 		}
 	}

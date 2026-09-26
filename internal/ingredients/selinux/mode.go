@@ -8,7 +8,7 @@ import (
 
 	goselinux "github.com/opencontainers/selinux/go-selinux"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 // modeTarget maps a method name to opencontainers/selinux's mode constants.

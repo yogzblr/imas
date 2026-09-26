@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 func compareResults(t *testing.T, result cook.Result, expected cook.Result) {
@@ -328,11 +328,11 @@ func TestGroupExists(t *testing.T) {
 		},
 		{
 			name:   "nonexistent group",
-			params: map[string]interface{}{"name": "grlx-test-nonexistent-group-abc123"},
+			params: map[string]interface{}{"name": "imas-test-nonexistent-group-abc123"},
 			expected: cook.Result{
 				Succeeded: false,
 				Failed:    true,
-				Notes:     []fmt.Stringer{cook.SimpleNote("group grlx-test-nonexistent-group-abc123 does not exist")},
+				Notes:     []fmt.Stringer{cook.SimpleNote("group imas-test-nonexistent-group-abc123 does not exist")},
 			},
 		},
 		{
@@ -371,7 +371,7 @@ func TestGroupAbsentAlreadyAbsent(t *testing.T) {
 	g := Group{
 		id:     "test-absent",
 		method: "absent",
-		params: map[string]interface{}{"name": "grlx-test-nonexistent-group-abc123"},
+		params: map[string]interface{}{"name": "imas-test-nonexistent-group-abc123"},
 	}
 	result, err := g.absent(context.Background(), false)
 	if err != nil {
@@ -380,7 +380,7 @@ func TestGroupAbsentAlreadyAbsent(t *testing.T) {
 	expected := cook.Result{
 		Succeeded: true,
 		Failed:    false,
-		Notes:     []fmt.Stringer{cook.SimpleNote("group grlx-test-nonexistent-group-abc123 already absent, nothing to do")},
+		Notes:     []fmt.Stringer{cook.SimpleNote("group imas-test-nonexistent-group-abc123 already absent, nothing to do")},
 	}
 	compareResults(t, result, expected)
 }
@@ -611,7 +611,7 @@ func TestGroupPresentTestModeSystemGroup(t *testing.T) {
 		id:     "test-present-system",
 		method: "present",
 		params: map[string]interface{}{
-			"name":   "grlx-test-sysgroup",
+			"name":   "imas-test-sysgroup",
 			"system": true,
 		},
 	}

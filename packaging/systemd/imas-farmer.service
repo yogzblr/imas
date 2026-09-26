@@ -1,0 +1,33 @@
+[Unit]
+Description=imas Farmer - Control Plane Service
+Documentation=https://imas.dev
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=farmer
+Group=farmer
+ExecStart=/usr/bin/imas-farmer
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=30
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/cache/imas/farmer /etc/imas/pki/farmer
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# Working directory and environment
+WorkingDirectory=/var/cache/imas/farmer
+Environment=IMAS_CONFIG=/etc/imas/farmer
+
+[Install]
+WantedBy=multi-user.target 

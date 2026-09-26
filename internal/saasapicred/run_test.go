@@ -16,8 +16,8 @@ import (
 	jwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/openbaokv"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/openbaokv"
 )
 
 const testToken = "s.publisher"
@@ -102,7 +102,7 @@ type jobEnv struct {
 func setupJobEnv(t *testing.T, openbaoURL string) jobEnv {
 	t.Helper()
 	config.FarmerPKI = filepath.Join(t.TempDir(), "pki") + "/"
-	config.FarmerOrganization = "grlx-test"
+	config.FarmerOrganization = "imas-test"
 
 	seedDir := t.TempDir()
 	sysKP, _ := nkeys.CreateAccount()
@@ -120,11 +120,11 @@ func setupJobEnv(t *testing.T, openbaoURL string) jobEnv {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"OPERATOR", "OPERATOR_SIGNING", "SYS_ACCOUNT", "SYS_USER", "TENANT", "TENANT_SIGNING", "SAASAPI_USER"} {
-		t.Setenv("GRLX_NATS_"+name+"_SEED", "")
-		t.Setenv("GRLX_NATS_"+name+"_SEED_FILE", "")
+		t.Setenv("IMAS_NATS_"+name+"_SEED", "")
+		t.Setenv("IMAS_NATS_"+name+"_SEED_FILE", "")
 	}
-	t.Setenv("GRLX_NATS_SYS_ACCOUNT_SEED_FILE", sysFile)
-	t.Setenv("GRLX_NATS_SAASAPI_USER_SEED_FILE", saasFile)
+	t.Setenv("IMAS_NATS_SYS_ACCOUNT_SEED_FILE", sysFile)
+	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED_FILE", saasFile)
 
 	t.Setenv(openbaokv.EnvOpenBaoAddr, openbaoURL)
 	t.Setenv(openbaokv.EnvOpenBaoKVMount, "")
@@ -140,7 +140,7 @@ func TestRun_MintsAndPublishesToConfiguredPath(t *testing.T) {
 	env := setupJobEnv(t, ts.URL)
 
 	var stderr bytes.Buffer
-	if code := Run([]string{"-kv-path", "grlx/saasapi/nats-user"}, &stderr); code != 0 {
+	if code := Run([]string{"-kv-path", "imas/saasapi/nats-user"}, &stderr); code != 0 {
 		t.Fatalf("Run = %d, stderr: %s", code, stderr.String())
 	}
 
@@ -148,7 +148,7 @@ func TestRun_MintsAndPublishesToConfiguredPath(t *testing.T) {
 	if len(posts) != 1 {
 		t.Fatalf("expected exactly one write, got %d (%v)", len(posts), m.requests())
 	}
-	if posts[0].Path != "/v1/secret/data/grlx/saasapi/nats-user" {
+	if posts[0].Path != "/v1/secret/data/imas/saasapi/nats-user" {
 		t.Fatalf("wrote to %s, want the configured path", posts[0].Path)
 	}
 	data, _ := posts[0].Body["data"].(map[string]any)
@@ -179,7 +179,7 @@ func TestRun_MintsAndPublishesToConfiguredPath(t *testing.T) {
 	// nothing is written — the property the post-deploy hook relies on.
 	config.FarmerPKI = filepath.Join(t.TempDir(), "pki") + "/"
 	stderr.Reset()
-	if code := Run([]string{"-kv-path", "grlx/saasapi/nats-user"}, &stderr); code != 0 {
+	if code := Run([]string{"-kv-path", "imas/saasapi/nats-user"}, &stderr); code != 0 {
 		t.Fatalf("second Run = %d, stderr: %s", code, stderr.String())
 	}
 	if n := len(m.posts()); n != 1 {
@@ -235,13 +235,13 @@ func TestRun_UsageErrors(t *testing.T) {
 func TestRun_MissingSYSSeedFailsClosed(t *testing.T) {
 	m, ts := startMockOpenBao(t)
 	setupJobEnv(t, ts.URL)
-	t.Setenv("GRLX_NATS_SYS_ACCOUNT_SEED_FILE", "")
+	t.Setenv("IMAS_NATS_SYS_ACCOUNT_SEED_FILE", "")
 
 	var stderr bytes.Buffer
 	if code := Run([]string{"-kv-path", "p"}, &stderr); code != 1 {
 		t.Fatalf("Run = %d, want 1", code)
 	}
-	if !strings.Contains(stderr.String(), "GRLX_NATS_SYS_ACCOUNT_SEED_FILE") {
+	if !strings.Contains(stderr.String(), "IMAS_NATS_SYS_ACCOUNT_SEED_FILE") {
 		t.Errorf("expected the error to name the missing mount's env var, got: %s", stderr.String())
 	}
 	if n := len(m.requests()); n != 0 {

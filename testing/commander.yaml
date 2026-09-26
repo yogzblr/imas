@@ -8,84 +8,84 @@ tests:
     exit-code: 0
     stdout:
       contains: 
-        - 'grlx/sprout:latest'
-        - 'grlx/farmer:latest'
+        - 'imas/sprout:latest'
+        - 'imas/farmer:latest'
 
   001 - Validate CLI Bin and Accept TLS Cert:
-    command: 'yes | ./grlx version'
+    command: 'yes | ./imas version'
     exit-code: 0
     stdout:
       json:
-        package: "grlx"
+        package: "imas"
 
   002 - List All Keys:
-    command: './grlx keys list --out json'
+    command: './imas keys list --out json'
     exit-code: 0
     stdout:
       json:
         accepted.sprouts: "[]"
   003 - Accept sprout-a:
-    command: './grlx keys accept sprout-a --no-confirm --out json'
+    command: './imas keys accept sprout-a --no-confirm --out json'
     exit-code: 0
     stdout:
       json:
         accepted.sprouts: "[map[id:sprout-a]]"
 
   004 - List Unaccepted Keys (sprout-a missing):
-    command: './grlx keys list --out json'
+    command: './imas keys list --out json'
     exit-code: 0
     stdout:
       json:
         unaccepted.sprouts: '[map[id:sprout-b] map[id:sprout-c] map[id:sprout-d] map[id:sprout-e] map[id:sprout-f]]'
 
   005 - List Accepted Keys (confirm sprout-a accepted):
-    command: './grlx keys list --out json'
+    command: './imas keys list --out json'
     exit-code: 0
     stdout:
       json:
         accepted.sprouts: '[map[id:sprout-a]]'
 
   006 - Accept All Keys:
-    command: './grlx keys accept -A --no-confirm --out json'
+    command: './imas keys accept -A --no-confirm --out json'
     exit-code: 0
     stdout:
       json:
         accepted.sprouts: '[map[id:sprout-b] map[id:sprout-c] map[id:sprout-d] map[id:sprout-e] map[id:sprout-f]]'
 
   007 - List Accepted Keys (confirm all added):
-    command: './grlx keys list --out json'
+    command: './imas keys list --out json'
     exit-code: 0
     stdout:
       json:
         accepted.sprouts: '[map[id:sprout-a] map[id:sprout-b] map[id:sprout-c] map[id:sprout-d] map[id:sprout-e] map[id:sprout-f]]'
 
   008 - List Unaccepted Keys (confirm no leftover keys):
-    command: './grlx keys list --out json'
+    command: './imas keys list --out json'
     exit-code: 0
     stdout:
       json:
         unaccepted.sprouts: '[]'
 
   009 - Accept Invalid Key:
-    command: './grlx keys accept invalid-key --no-confirm --out json'
+    command: './imas keys accept invalid-key --no-confirm --out json'
     exit-code: 1
     stdout:
       json:
         error: "An invalid key was specified: `invalid-key`"
 
   010 - Delete Invalid Key:
-    command: "./grlx keys delete invalid-key"
+    command: "./imas keys delete invalid-key"
     exit-code: 1
 
   011 - Delete Valid Key (sprout-a):
-    command: './grlx keys --noconfirm delete sprout-a --out json'
+    command: './imas keys --noconfirm delete sprout-a --out json'
     exit-code: 0
     stdout:
       json:
         deleted: "[sprout-a]"
 
   012 - Re-accept All Keys:
-    command: './grlx --noconfirm keys accept -A --out json'
+    command: './imas --noconfirm keys accept -A --out json'
     exit-code: 0
     stdout:
       json:
@@ -95,7 +95,7 @@ tests:
       interval: 1s
       
   013 - Run whoami on all Sprouts:
-    command: './grlx -T ".*" --out json cmd run -- whoami'
+    command: './imas -T ".*" --out json cmd run -- whoami'
     exit-code: 0
     stdout:
       json:

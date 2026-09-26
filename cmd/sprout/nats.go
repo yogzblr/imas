@@ -5,16 +5,16 @@ import (
 	"encoding/json"
 	"runtime"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	log "github.com/yogzblr/imas/internal/log"
 
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/facts"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/cmd"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/test"
-	"github.com/gogrlx/grlx/v2/internal/pki"
-	"github.com/gogrlx/grlx/v2/internal/shell"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/facts"
+	"github.com/yogzblr/imas/internal/ingredients/cmd"
+	"github.com/yogzblr/imas/internal/ingredients/test"
+	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/shell"
 
 	nats "github.com/nats-io/nats.go"
 )
@@ -32,7 +32,7 @@ func natsInit(nc *nats.Conn) error {
 	startup.Version.GitCommit = GitCommit
 	startup.Version.Tag = Tag
 	startup.SproutID = sproutID
-	startupEvent := "grlx.sprouts.announce." + sproutID
+	startupEvent := "imas.sprouts.announce." + sproutID
 	b, _ := json.Marshal(startup)
 	err := nc.Publish(startupEvent, b)
 	if err != nil {
@@ -48,12 +48,12 @@ func natsInit(nc *nats.Conn) error {
 	sysFacts := facts.Collect()
 	sysFacts.SproutID = sproutID
 	factsB, _ := json.Marshal(sysFacts)
-	if pubErr := nc.Publish("grlx.sprouts."+sproutID+".facts", factsB); pubErr != nil {
+	if pubErr := nc.Publish("imas.sprouts."+sproutID+".facts", factsB); pubErr != nil {
 		log.Errorf("failed to publish system facts: %v", pubErr)
 	}
 
 	// Respond to on-demand facts requests from the farmer.
-	_, err = nc.Subscribe("grlx.sprouts."+sproutID+".facts.request", func(m *nats.Msg) {
+	_, err = nc.Subscribe("imas.sprouts."+sproutID+".facts.request", func(m *nats.Msg) {
 		fresh := facts.Collect()
 		fresh.SproutID = sproutID
 		b, _ := json.Marshal(fresh)
@@ -63,7 +63,7 @@ func natsInit(nc *nats.Conn) error {
 		return err
 	}
 
-	_, err = nc.Subscribe("grlx.sprouts."+sproutID+".cmd.run", func(m *nats.Msg) {
+	_, err = nc.Subscribe("imas.sprouts."+sproutID+".cmd.run", func(m *nats.Msg) {
 		var cmdRun apitypes.CmdRun
 		json.NewDecoder(bytes.NewBuffer(m.Data)).Decode(&cmdRun)
 		log.Trace(cmdRun)
@@ -80,7 +80,7 @@ func natsInit(nc *nats.Conn) error {
 	if err != nil {
 		return err
 	}
-	_, err = nc.Subscribe("grlx.sprouts."+sproutID+".test.ping", func(m *nats.Msg) {
+	_, err = nc.Subscribe("imas.sprouts."+sproutID+".test.ping", func(m *nats.Msg) {
 		var ping apitypes.PingPong
 		json.NewDecoder(bytes.NewBuffer(m.Data)).Decode(&ping)
 		log.Trace(ping)
@@ -91,7 +91,7 @@ func natsInit(nc *nats.Conn) error {
 	if err != nil {
 		return err
 	}
-	_, err = nc.Subscribe("grlx.sprouts."+sproutID+".cook", func(m *nats.Msg) {
+	_, err = nc.Subscribe("imas.sprouts."+sproutID+".cook", func(m *nats.Msg) {
 		var rEnvelope cook.RecipeEnvelope
 		json.NewDecoder(bytes.NewBuffer(m.Data)).Decode(&rEnvelope)
 		log.Trace(rEnvelope)
@@ -108,7 +108,7 @@ func natsInit(nc *nats.Conn) error {
 	}
 
 	// Interactive shell sessions.
-	_, err = nc.Subscribe("grlx.sprouts."+sproutID+".shell.start", func(m *nats.Msg) {
+	_, err = nc.Subscribe("imas.sprouts."+sproutID+".shell.start", func(m *nats.Msg) {
 		shell.HandleShellStart(nc, m)
 	})
 	if err != nil {

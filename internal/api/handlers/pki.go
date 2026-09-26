@@ -6,12 +6,12 @@ import (
 	"strconv"
 	"strings"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
 	"github.com/nats-io/nkeys"
+	log "github.com/yogzblr/imas/internal/log"
 
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // PutNKey handles NKey registration from sprouts during PKI bootstrap.
@@ -52,7 +52,7 @@ func PutNKey(w http.ResponseWriter, r *http.Request) {
 
 	// PutNKey is the legacy pre-enrollment bootstrap path, scoped to the
 	// single connection-level tenant reachable today — see
-	// docs/design/grlx-tenant-context-threading.md.
+	// docs/design/imas-tenant-context-threading.md.
 	tenantID := pki.CurrentTenantID()
 
 	registered, matches := pki.NKeyExists(tenantID, submission.SproutID, submission.NKey)

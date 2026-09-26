@@ -1,13 +1,13 @@
 //go:build windows
 
-// Package wintaskscheduler implements grlx's win_task ingredient:
+// Package wintaskscheduler implements imas's win_task ingredient:
 // declarative management of Windows Task Scheduler tasks (create,
 // update, delete), matching the relevant surface of Salt's win_task
 // state module. It drives the Task Scheduler 2.0 COM API
 // (Schedule.Service -> ITaskService/ITaskFolder/ITaskDefinition) the
 // same way Salt's Python implementation drives it through
 // win32com.client.Dispatch("Schedule.Service"). See G.6 in
-// docs/design/grlx-windows-parity-addendum.md; the COM lifecycle
+// docs/design/imas-windows-parity-addendum.md; the COM lifecycle
 // pattern (single-threaded apartment bound to a locked OS thread,
 // paired CoInitializeEx/CoUninitialize, explicit Release of every
 // acquired IDispatch) follows the one the winshortcut ingredient
@@ -35,9 +35,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/winexec"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients/winexec"
 )
 
 const ingredientName = "win_task"
@@ -61,8 +61,8 @@ var (
 // Compile-time interface check.
 var _ cook.RecipeCooker = Task{}
 
-// Task is a grlx ingredient for managing Windows Task Scheduler tasks.
-// "name" is always the full Task Scheduler path, e.g. `\grlx\backup`.
+// Task is a imas ingredient for managing Windows Task Scheduler tasks.
+// "name" is always the full Task Scheduler path, e.g. `\imas\backup`.
 type Task struct {
 	id     string
 	method string
@@ -133,7 +133,7 @@ func (t Task) PropertiesForMethod(method string) (map[string]string, error) {
 	switch method {
 	case methodPresent:
 		return ingredients.MethodPropsSet{
-			ingredients.MethodProps{Key: "name", Type: "string", IsReq: true, Description: `full Task Scheduler path, e.g. \grlx\backup`},
+			ingredients.MethodProps{Key: "name", Type: "string", IsReq: true, Description: `full Task Scheduler path, e.g. \imas\backup`},
 			ingredients.MethodProps{Key: "command", Type: "string", IsReq: true, Description: "executable the task runs"},
 			ingredients.MethodProps{Key: "trigger_type", Type: "string", IsReq: true, Description: "one of once, daily, weekly, on_logon, on_startup, on_idle"},
 			ingredients.MethodProps{Key: "arguments", Type: "string", IsReq: false, Description: "command-line arguments passed to command"},
@@ -152,7 +152,7 @@ func (t Task) PropertiesForMethod(method string) (map[string]string, error) {
 		}.ToMap(), nil
 	case methodAbsent:
 		return ingredients.MethodPropsSet{
-			ingredients.MethodProps{Key: "name", Type: "string", IsReq: true, Description: `full Task Scheduler path, e.g. \grlx\backup`},
+			ingredients.MethodProps{Key: "name", Type: "string", IsReq: true, Description: `full Task Scheduler path, e.g. \imas\backup`},
 		}.ToMap(), nil
 	default:
 		return nil, errors.Join(ErrTaskMethodUndefined, fmt.Errorf("method %s undefined", method))

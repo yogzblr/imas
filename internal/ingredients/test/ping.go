@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // FPing sends a ping to a single resolved sprout and waits for the pong.
@@ -20,7 +20,7 @@ func FPing(tenantID string, target pki.KeyManager, ping apitypes.PingPong) (apit
 	if conn == nil {
 		return pong, fmt.Errorf("test: no NATS connection registered for tenant %s", tenantID)
 	}
-	topic := "grlx.sprouts." + target.SproutID + ".test.ping"
+	topic := "imas.sprouts." + target.SproutID + ".test.ping"
 	ping.Ping = true
 	ping.Pong = false
 	b, _ := json.Marshal(ping)

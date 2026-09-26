@@ -8,7 +8,7 @@
 
 ## Reporting a Vulnerability
 
-Contact security@grlx.dev with any relevant info including:
+Contact security@imas.dev with any relevant info including:
 
  - criticality
  - a summary
@@ -25,13 +25,13 @@ this time, if you desire.
 
 ## Release Signatures
 
-All grlx releases are cryptographically signed with GPG to ensure authenticity and integrity.
+All imas releases are cryptographically signed with GPG to ensure authenticity and integrity.
 
 ### GPG Key Information
 
 - **Key ID**: `33DCE4DD`
 - **Fingerprint**: `3F62 7C68 8B72 ACC6 BC4C  A9A7 1E0B 7A1D 33DC E4DD`
-- **Owner**: grlx signing key <security@grlx.dev>
+- **Owner**: imas signing key <security@imas.dev>
 
 ### Importing the Public Key
 
@@ -40,7 +40,7 @@ All grlx releases are cryptographically signed with GPG to ensure authenticity a
 gpg --keyserver keyserver.ubuntu.com --recv-keys 33DCE4DD
 
 # Method 2: From this repository
-curl -s https://raw.githubusercontent.com/gogrlx/grlx/master/gpg-public-key.asc | gpg --import
+curl -s https://raw.githubusercontent.com/yogzblr/imas/master/gpg-public-key.asc | gpg --import
 
 # Method 3: Manual import
 gpg --import gpg-public-key.asc
@@ -51,8 +51,8 @@ gpg --import gpg-public-key.asc
 #### GitHub Releases
 ```bash
 # Download the files
-curl -LO https://github.com/gogrlx/grlx/releases/download/v1.0.0/checksums.txt
-curl -LO https://github.com/gogrlx/grlx/releases/download/v1.0.0/checksums.txt.sig
+curl -LO https://github.com/yogzblr/imas/releases/download/v1.0.0/checksums.txt
+curl -LO https://github.com/yogzblr/imas/releases/download/v1.0.0/checksums.txt.sig
 
 # Verify signature
 gpg --verify checksums.txt.sig checksums.txt
@@ -64,9 +64,9 @@ sha256sum -c checksums.txt --ignore-missing
 #### S3 Artifacts
 ```bash
 # Download from S3
-curl -LO https://artifacts.grlx.dev/linux/amd64/latest/grlx
-curl -LO https://artifacts.grlx.dev/linux/amd64/latest/checksums.txt
-curl -LO https://artifacts.grlx.dev/linux/amd64/latest/checksums.txt.sig
+curl -LO https://artifacts.imas.dev/linux/amd64/latest/imas
+curl -LO https://artifacts.imas.dev/linux/amd64/latest/checksums.txt
+curl -LO https://artifacts.imas.dev/linux/amd64/latest/checksums.txt.sig
 
 # Verify signature and checksum
 gpg --verify checksums.txt.sig checksums.txt
@@ -85,6 +85,6 @@ Expected output:
 ```
 pub   ed25519 2025-06-08 [SC]
       3F62 7C68 8B72 ACC6 BC4C  A9A7 1E0B 7A1D 33DC E4DD
-uid           grlx signing key <security@grlx.dev>
+uid           imas signing key <security@imas.dev>
 sub   cv25519 2025-06-08 [E]
 ```

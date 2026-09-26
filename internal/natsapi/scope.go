@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 
-	intauth "github.com/gogrlx/grlx/v2/internal/auth"
-	"github.com/gogrlx/grlx/v2/internal/pki"
-	"github.com/gogrlx/grlx/v2/internal/rbac"
+	intauth "github.com/yogzblr/imas/internal/auth"
+	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/rbac"
 )
 
 // scopeExtractor extracts target sprout IDs from NATS API params.
@@ -112,7 +112,7 @@ func extractSproutsGetID(params json.RawMessage) ([]string, error) {
 
 // allAcceptedSproutIDs returns all accepted sprout IDs from the PKI store,
 // within tenantID — the connection's own tenant (see docs/design/
-// grlx-tenant-context-threading.md). This is used by the cohort resolver
+// imas-tenant-context-threading.md). This is used by the cohort resolver
 // to evaluate dynamic cohorts.
 func allAcceptedSproutIDs(tenantID string) []string {
 	allKeys := pki.ListNKeysByType(tenantID)

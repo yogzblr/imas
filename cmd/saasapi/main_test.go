@@ -9,8 +9,8 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/valkey-io/valkey-go"
 
-	"github.com/gogrlx/grlx/v2/internal/heartbeat"
-	"github.com/gogrlx/grlx/v2/internal/saasapi"
+	"github.com/yogzblr/imas/internal/heartbeat"
+	"github.com/yogzblr/imas/internal/saasapi"
 )
 
 // newOnlineSproutStore returns a miniredis holding the heartbeat key farmer's
@@ -20,7 +20,7 @@ import (
 func newOnlineSproutStore(t *testing.T, tenantID, sproutID string) *miniredis.Miniredis {
 	t.Helper()
 	mr := miniredis.RunT(t)
-	if err := mr.Set("grlx:heartbeat:"+tenantID+":"+sproutID, "1"); err != nil {
+	if err := mr.Set("imas:heartbeat:"+tenantID+":"+sproutID, "1"); err != nil {
 		t.Fatalf("setting heartbeat key: %v", err)
 	}
 	return mr

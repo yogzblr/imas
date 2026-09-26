@@ -9,8 +9,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"gorm.io/gorm"
 
-	"github.com/gogrlx/grlx/v2/internal/controlplane"
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/controlplane"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 // enqueueProvisioningJob writes an outbox row for an async tenant
@@ -43,7 +43,7 @@ func enqueueProvisioningJob(tx *gorm.DB, tenantID string, jobType ProvisioningJo
 // Fire-and-forget over NATS core: a publish that fails (or a request
 // farmer never receives) leaves the job pending with its attempt counted.
 // Re-dispatching stale pending jobs is the outbox sweeper's job — deferred,
-// see docs/design/grlx-internal-api-account.md.
+// see docs/design/imas-internal-api-account.md.
 func dispatchProvisioning(_ context.Context, job *ProvisioningJob, tenantName string) {
 	publishProvisioningJob(job, controlplane.SubjectTenantProvision, controlplane.TenantProvisionRequest{
 		JobID:    job.ID,

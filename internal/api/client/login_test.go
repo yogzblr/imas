@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
 )
 
 func TestLoginResponseUnmarshal(t *testing.T) {

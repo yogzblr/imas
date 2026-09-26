@@ -2,7 +2,7 @@ package handlers
 
 // POST /v1/enroll: design doc §3.2
 // (docs/design/cloudxp-machine-manager-api-design.md,
-// docs/design/grlx-envoy-enrollment-design.md). FLAG FOR SECURITY REVIEW
+// docs/design/imas-envoy-enrollment-design.md). FLAG FOR SECURITY REVIEW
 // per the task brief — see internal/pki/enroll.go's doc comment for why
 // every failure here, at every layer, collapses to the same generic
 // response.
@@ -18,10 +18,10 @@ import (
 	"errors"
 	"net/http"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	log "github.com/yogzblr/imas/internal/log"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 type enrollRequest struct {
@@ -30,7 +30,7 @@ type enrollRequest struct {
 	Hostname  string `json:"hostname"`
 	// SproutPub is the sprout's locally-generated X25519 box public key
 	// (standard base64, 32 bytes) — see
-	// docs/design/grlx-payload-encryption-design.md's "Bootstrap". Its
+	// docs/design/imas-payload-encryption-design.md's "Bootstrap". Its
 	// private half is generated and held by the sprout alone and is never
 	// part of this request.
 	SproutPub string `json:"sprout_pub"`
@@ -38,7 +38,7 @@ type enrollRequest struct {
 
 // enrollSuccessResponse is design doc §3.2's success shape, plus
 // nkey_identity and tenant_x25519_pub per
-// grlx-envoy-enrollment-design.md's "Response, in one round trip" —
+// imas-envoy-enrollment-design.md's "Response, in one round trip" —
 // everything the sprout needs for every subsequent interaction, issued
 // atomically here rather than across several separate exchanges.
 //
@@ -49,12 +49,12 @@ type enrollRequest struct {
 // Envoy's jwt_authn-gated wss:// and recipe-download routes, since
 // Envoy — unlike nats-server — can't be taught NATS's own JWT dialect.
 //
-// fleet_signing_jwks is the grlx-fleet-signing public key set (design doc
+// fleet_signing_jwks is the imas-fleet-signing public key set (design doc
 // §2.5) as a JWKS document, which the sprout pins next to its root CA
 // (pki.PinFleetSigningKeys). It is ADVISORY, a bootstrap fallback only:
 // the sprout verifies releases against the key set it fetches live from
 // farmer over its SproutRootCA-pinned NATS connection
-// (grlx.sprouts.<id>.fleetsigningkeys, internal/fleetkeys), so Transit key
+// (imas.sprouts.<id>.fleetsigningkeys, internal/fleetkeys), so Transit key
 // rotations reach it. This enrollment-time copy is used only for a
 // sprout's very first update if it has never yet completed a live fetch,
 // and is superseded permanently by the first live fetch that succeeds
@@ -130,7 +130,7 @@ func Enroll(w http.ResponseWriter, r *http.Request) {
 
 // enrollFleetSigningJWKS returns the fleet signing key set as a JWKS
 // document, or an error if no key source is configured
-// (GRLX_FLEETSIGN_OPENBAO_*) or Transit can't be read.
+// (IMAS_FLEETSIGN_OPENBAO_*) or Transit can't be read.
 func enrollFleetSigningJWKS(r *http.Request) (json.RawMessage, error) {
 	if fleetKeySource == nil {
 		return nil, errors.New("no fleet signing key source configured")

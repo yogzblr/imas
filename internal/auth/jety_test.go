@@ -9,7 +9,7 @@ import (
 	"github.com/nats-io/nkeys"
 	"github.com/taigrr/jety"
 
-	"github.com/gogrlx/grlx/v2/internal/rbac"
+	"github.com/yogzblr/imas/internal/rbac"
 )
 
 // setupJetyForTest points jety at a temp config file (needed for WriteConfig)

@@ -1,4 +1,4 @@
-// Package rbac provides role-based access control for grlx.
+// Package rbac provides role-based access control for imas.
 //
 // Permissions are defined as (action, scope) pairs. Actions describe what
 // a user can do (view, cook, cmd, pki, etc.) and scopes restrict which

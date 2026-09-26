@@ -3,7 +3,7 @@
 // internal.sprout.action self_update. Its single method, apply:
 //
 //  1. verifies the release's Ed25519 signature over
-//     version|artifact_url|checksum_sha256 against grlx-fleet-signing's
+//     version|artifact_url|checksum_sha256 against imas-fleet-signing's
 //     current key versions, fetched live from farmer over the sprout's
 //     SproutRootCA-pinned NATS connection (keys.go; the enrollment-time
 //     pin is only a bootstrap fallback until the first live fetch
@@ -35,11 +35,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/fleetsign"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
-	fhttp "github.com/gogrlx/grlx/v2/internal/ingredients/file/http"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/fleetsign"
+	"github.com/yogzblr/imas/internal/ingredients"
+	fhttp "github.com/yogzblr/imas/internal/ingredients/file/http"
 )
 
 var (
@@ -50,7 +50,7 @@ var (
 	ErrChecksumMismatch = errors.New("selfupdate: artifact checksum does not match the signed checksum_sha256")
 	// ErrInstallNotImplemented: the artifact is verified and staged, but
 	// installing it is §2.3's work, not this package's.
-	ErrInstallNotImplemented = errors.New("selfupdate: installing a verified artifact is not implemented yet (design doc §2.3, gogrlx/grlx#286)")
+	ErrInstallNotImplemented = errors.New("selfupdate: installing a verified artifact is not implemented yet (design doc §2.3, yogzblr/imas#286)")
 )
 
 // install receives a staged artifact whose signature and checksum have

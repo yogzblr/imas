@@ -9,7 +9,7 @@ import (
 
 	"github.com/taigrr/openrc"
 
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 // stubState tracks calls made to stubbed openrc functions.

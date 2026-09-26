@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
 	"github.com/vishvananda/netlink"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 func TestCheckConnectivityTCPDial(t *testing.T) {

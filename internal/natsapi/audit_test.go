@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/audit"
+	"github.com/yogzblr/imas/internal/audit"
 )
 
 func TestHandleAuditListNoLogger(t *testing.T) {

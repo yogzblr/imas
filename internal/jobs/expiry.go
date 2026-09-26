@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
-	"github.com/gogrlx/grlx/v2/internal/objectstore"
+	log "github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/objectstore"
 )
 
 // StartReaper launches a background goroutine that periodically removes jobs

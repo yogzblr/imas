@@ -6,9 +6,9 @@ import (
 	"os"
 	"strconv"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	log "github.com/yogzblr/imas/internal/log"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/config"
 
 	jwt "github.com/nats-io/jwt/v2"
 	nats_server "github.com/nats-io/nats-server/v2/server"
@@ -22,7 +22,7 @@ var (
 )
 
 // ConfigureNats builds the NATS server options for this farmer's bus node.
-// Auth is decentralized JWT (see docs/design/grlx-nats-jwt-auth-design.md):
+// Auth is decentralized JWT (see docs/design/imas-nats-jwt-auth-design.md):
 // the Operator is the trust anchor, the SYSTEM account is used only to
 // receive claims-update pushes (see resolver.go), and a "full" resolver
 // (every node holds every Account JWT, appropriate at the near-term tenant
@@ -74,7 +74,7 @@ func ConfigureNats() nats_server.Options {
 	NatsConfig.TLSConfig = &tlsConfig
 
 	// Websocket listener: what Envoy's jwt_authn-gated wss:// route
-	// (docs/design/grlx-envoy-enrollment-design.md) terminates onto.
+	// (docs/design/imas-envoy-enrollment-design.md) terminates onto.
 	// Reuses the same server certificate as the plain TCP listener above.
 	// Auth here is still the ordinary decentralized JWT/NKey CONNECT-time
 	// check (AccountResolver, set below) — Envoy's JWT validation happens

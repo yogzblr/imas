@@ -40,9 +40,9 @@ import (
 	"github.com/nats-io/nkeys"
 	"gorm.io/gorm"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/pki"
-	"github.com/gogrlx/grlx/v2/internal/props"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/props"
 )
 
 // setupTenantIsolationPKI wires up an in-memory pki store plus the TLS/NKey
@@ -71,7 +71,7 @@ func setupTenantIsolationPKI(t *testing.T) {
 	config.NKeyFarmerPubFile = filepath.Join(tmpDir, "farmer.pub")
 	config.FarmerInterface = "127.0.0.1"
 	config.FarmerBusPort = "0"
-	config.FarmerOrganization = "grlx-facts-test"
+	config.FarmerOrganization = "imas-facts-test"
 	config.CertificateValidTime = 24 * 365 * time.Hour
 	config.RootCA = filepath.Join(tmpDir, "rootca.pem")
 	config.RootCAPriv = filepath.Join(tmpDir, "rootca-key.pem")
@@ -94,7 +94,7 @@ func generateFactsTestCerts(t *testing.T, tmpDir string) {
 	}
 	caTemplate := x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{Organization: []string{"grlx-facts-test"}},
+		Subject:               pkix.Name{Organization: []string{"imas-facts-test"}},
 		NotBefore:             time.Now(),
 		NotAfter:              time.Now().Add(time.Hour),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
@@ -119,7 +119,7 @@ func generateFactsTestCerts(t *testing.T, tmpDir string) {
 	}
 	leafTemplate := x509.Certificate{
 		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{Organization: []string{"grlx-facts-test"}},
+		Subject:      pkix.Name{Organization: []string{"imas-facts-test"}},
 		NotBefore:    time.Now(),
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
@@ -251,7 +251,7 @@ func enrollTenantIsolationSprout(t *testing.T, tenantID, sproutID string) (jwt s
 // legacy-tenant-scoped props.SetProp regardless of which tenant connection
 // RegisterFarmerListener received them on — inert while farmer had a
 // single shared connection, but a live cross-tenant leak once each tenant
-// got its own (docs/design/grlx-tenant-context-threading.md's Option A,
+// got its own (docs/design/imas-tenant-context-threading.md's Option A,
 // landed in a prior PR). It provisions two tenants, opens a real farmer
 // connection into each Account, registers RegisterFarmerListener on each
 // exactly as cmd/farmer/main.go does per tenant connection, enrolls a real
@@ -329,7 +329,7 @@ func TestStoreFacts_TwoTenantsIsolated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal tenant A facts: %v", err)
 	}
-	if err := ncSproutA.Publish("grlx.sprouts."+sproutA+".facts", dataA); err != nil {
+	if err := ncSproutA.Publish("imas.sprouts."+sproutA+".facts", dataA); err != nil {
 		t.Fatalf("publishing tenant A facts: %v", err)
 	}
 	ncSproutA.Flush()
@@ -339,7 +339,7 @@ func TestStoreFacts_TwoTenantsIsolated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal tenant B facts: %v", err)
 	}
-	if err := ncSproutB.Publish("grlx.sprouts."+sproutB+".facts", dataB); err != nil {
+	if err := ncSproutB.Publish("imas.sprouts."+sproutB+".facts", dataB); err != nil {
 		t.Fatalf("publishing tenant B facts: %v", err)
 	}
 	ncSproutB.Flush()

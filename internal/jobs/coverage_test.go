@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 // --- StartReaper / reap edge cases ---
@@ -42,7 +42,7 @@ func TestLogJobCreation_ThreeSteps(t *testing.T) {
 		Steps:     []cook.Step{{ID: "s1"}, {ID: "s2"}, {ID: "s3"}},
 	}
 	data, _ := json.Marshal(envelope)
-	if err := conn.Publish("grlx.sprouts.sprout-sub.cook", data); err != nil {
+	if err := conn.Publish("imas.sprouts.sprout-sub.cook", data); err != nil {
 		t.Fatal(err)
 	}
 	conn.Flush()
@@ -267,7 +267,7 @@ func TestDefaultCLIStorePath_WithXDG(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := filepath.Join(dir, "grlx", "jobs")
+	expected := filepath.Join(dir, "imas", "jobs")
 	if path != expected {
 		t.Errorf("expected %q, got %q", expected, path)
 	}
@@ -325,7 +325,7 @@ func TestCLIListener_HandleStepCompletion_RecordError(t *testing.T) {
 		Duration:         time.Second,
 	}
 	data, _ := json.Marshal(step)
-	if err := conn.Publish("grlx.cook.sprout-err.job-err", data); err != nil {
+	if err := conn.Publish("imas.cook.sprout-err.job-err", data); err != nil {
 		t.Fatal(err)
 	}
 	conn.Flush()
@@ -515,7 +515,7 @@ func TestLogJobCreation_ManySteps(t *testing.T) {
 	}
 	data, _ := json.Marshal(envelope)
 
-	if err := conn.Publish("grlx.sprouts.sprout-many.cook", data); err != nil {
+	if err := conn.Publish("imas.sprouts.sprout-many.cook", data); err != nil {
 		t.Fatal(err)
 	}
 	conn.Flush()
@@ -627,7 +627,7 @@ func TestLogJobs_NewSprout(t *testing.T) {
 
 	// Publish for a sprout and job with no objects yet: the event alone
 	// creates the job.
-	if err := conn.Publish("grlx.cook.brand-new-sprout.new-job", data); err != nil {
+	if err := conn.Publish("imas.cook.brand-new-sprout.new-job", data); err != nil {
 		t.Fatal(err)
 	}
 	conn.Flush()
@@ -647,7 +647,7 @@ func TestLogJobCreation_PutError(t *testing.T) {
 	// created.jsonl Put fail.
 	srv.FailNext(1, 404, "NoSuchKey")
 	srv.FailNext(2, 403, "AccessDenied")
-	logJobCreation("", envelopeMsg(t, "grlx.sprouts.sprout-fail.cook", cook.RecipeEnvelope{JobID: "fail-create", Steps: []cook.Step{{ID: "s1"}}}))
+	logJobCreation("", envelopeMsg(t, "imas.sprouts.sprout-fail.cook", cook.RecipeEnvelope{JobID: "fail-create", Steps: []cook.Step{{ID: "s1"}}}))
 
 	// Should not panic, and no half-created job is visible.
 	store := NewStoreWithObjectStore(obj)
@@ -798,7 +798,7 @@ func TestDefaultCLIStorePath_WithoutXDG(t *testing.T) {
 		t.Fatal(err)
 	}
 	home, _ := os.UserHomeDir()
-	expected := filepath.Join(home, ".config", "grlx", "jobs")
+	expected := filepath.Join(home, ".config", "imas", "jobs")
 	if path != expected {
 		t.Errorf("expected %q, got %q", expected, path)
 	}

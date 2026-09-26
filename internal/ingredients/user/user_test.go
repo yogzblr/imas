@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 func compareResults(t *testing.T, result cook.Result, expected cook.Result) {
@@ -249,11 +249,11 @@ func TestUserExists(t *testing.T) {
 		},
 		{
 			name:   "nonexistent user",
-			params: map[string]interface{}{"name": "grlx-test-nonexistent-user-abc123"},
+			params: map[string]interface{}{"name": "imas-test-nonexistent-user-abc123"},
 			expected: cook.Result{
 				Succeeded: false,
 				Failed:    true,
-				Notes:     []fmt.Stringer{cook.SimpleNote("user grlx-test-nonexistent-user-abc123 does not exist")},
+				Notes:     []fmt.Stringer{cook.SimpleNote("user imas-test-nonexistent-user-abc123 does not exist")},
 			},
 		},
 		{
@@ -288,7 +288,7 @@ func TestUserAbsentAlreadyAbsent(t *testing.T) {
 	u := User{
 		id:     "test-absent",
 		method: "absent",
-		params: map[string]interface{}{"name": "grlx-test-nonexistent-user-abc123"},
+		params: map[string]interface{}{"name": "imas-test-nonexistent-user-abc123"},
 	}
 	result, err := u.absent(context.Background(), false)
 	if err != nil {
@@ -297,7 +297,7 @@ func TestUserAbsentAlreadyAbsent(t *testing.T) {
 	expected := cook.Result{
 		Succeeded: true,
 		Failed:    false,
-		Notes:     []fmt.Stringer{cook.SimpleNote("user grlx-test-nonexistent-user-abc123 already absent, nothing to do")},
+		Notes:     []fmt.Stringer{cook.SimpleNote("user imas-test-nonexistent-user-abc123 already absent, nothing to do")},
 	}
 	compareResults(t, result, expected)
 }
@@ -361,9 +361,9 @@ func TestUserPresentTestModeNewUser(t *testing.T) {
 		id:     "test-present-new",
 		method: "present",
 		params: map[string]interface{}{
-			"name":  "grlx-test-nonexistent-user-abc123",
+			"name":  "imas-test-nonexistent-user-abc123",
 			"shell": "/bin/bash",
-			"home":  "/home/grlx-test",
+			"home":  "/home/imas-test",
 		},
 	}
 	result, err := u.present(context.Background(), true)
@@ -409,11 +409,11 @@ func TestUserPresentTestModeWithAllOptions(t *testing.T) {
 		id:     "test-present-all",
 		method: "present",
 		params: map[string]interface{}{
-			"name":       "grlx-test-nonexistent-user-abc123",
+			"name":       "imas-test-nonexistent-user-abc123",
 			"uid":        "9999",
 			"gid":        "9999",
 			"shell":      "/bin/zsh",
-			"home":       "/home/grlx-test",
+			"home":       "/home/imas-test",
 			"comment":    "Test User",
 			"groups":     []interface{}{"wheel", "docker"},
 			"createhome": true,
@@ -437,7 +437,7 @@ func TestUserPresentTestModeSystemUser(t *testing.T) {
 		id:     "test-present-system",
 		method: "present",
 		params: map[string]interface{}{
-			"name":       "grlx-test-svc",
+			"name":       "imas-test-svc",
 			"system":     true,
 			"createhome": false,
 			"shell":      "/usr/sbin/nologin",
@@ -462,7 +462,7 @@ func TestUserTestDispatch(t *testing.T) {
 		wantErr bool
 	}{
 		{method: "exists", params: map[string]interface{}{"name": "root"}},
-		{method: "absent", params: map[string]interface{}{"name": "grlx-test-nonexistent-user-abc123"}},
+		{method: "absent", params: map[string]interface{}{"name": "imas-test-nonexistent-user-abc123"}},
 		{method: "present", params: map[string]interface{}{"name": "root"}},
 	}
 
@@ -807,7 +807,7 @@ func TestUserPresentInvalidPasswordHash(t *testing.T) {
 		id:     "test-present-bad-hash",
 		method: "present",
 		params: map[string]interface{}{
-			"name":          "grlx-test-nonexistent-user-abc123",
+			"name":          "imas-test-nonexistent-user-abc123",
 			"password_hash": "plaintext-not-a-hash",
 		},
 	}
@@ -825,7 +825,7 @@ func TestUserPresentTestModeWithPasswordHash(t *testing.T) {
 		id:     "test-present-hash",
 		method: "present",
 		params: map[string]interface{}{
-			"name":          "grlx-test-nonexistent-user-abc123",
+			"name":          "imas-test-nonexistent-user-abc123",
 			"password_hash": "$6$rounds=5000$salt$hashvalue",
 		},
 	}

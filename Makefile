@@ -9,7 +9,7 @@ TYPE:=$(BITBUCKET_BUILD_NUMBER)
 endif
 
 
-all:  sprout grlx farmer
+all:  sprout imas farmer
 
 sprout: cmd/sprout/*.go
 ifeq ($(GOOS),)
@@ -23,11 +23,11 @@ endif
 	export CGO_ENABLED=0;\
 	export GitCommit=`git rev-parse HEAD | cut -c -7`;\
 	export GitTag=$$(TAG=`git tag --contains $$(git rev-parse HEAD) | sort -R | tr '\n' ' '`; if [ "$$(printf "$$TAG")" ]; then printf "$$TAG"; else printf "undefined"; fi);\
-	go build -ldflags "-X main.GitCommit=$$GitCommit -X main.Tag=$$GitTag" -o "bin/grlx-sprout" ./cmd/sprout/*.go
+	go build -ldflags "-X main.GitCommit=$$GitCommit -X main.Tag=$$GitTag" -o "bin/imas-sprout" ./cmd/sprout/*.go
 	@printf "\e[32mSuccess!\e[39m\n"
 
 
-grlx: cmd/grlx/*.go
+imas: cmd/imas/*.go
 ifeq ($(GOOS),)
 	@printf "OS not specified, defaulting to: \e[33m$(UNAME)\e[39m\n"
 else
@@ -40,7 +40,7 @@ endif
 	export GitCommit=`git rev-parse HEAD | cut -c -7`;\
 	export BuildTime=`date -u +%Y%m%d.%H%M%S`;\
 	export GitTag=$$(TAG=`git tag --contains $$(git rev-parse HEAD) | sort -R | tr '\n' ' '`; if [ "$$(printf "$$TAG")" ]; then printf "$$TAG"; else printf "undefined"; fi);\
-	go build -ldflags "-X main.GitCommit=$$GitCommit -X main.Tag=$$GitTag" -o "bin/grlx" ./cmd/grlx/main.go
+	go build -ldflags "-X main.GitCommit=$$GitCommit -X main.Tag=$$GitTag" -o "bin/imas" ./cmd/imas/main.go
 	@printf "\e[32mSuccess!\e[39m\n"
 
 
@@ -57,7 +57,7 @@ endif
 	export GitCommit=`git rev-parse HEAD | cut -c -7`;\
 	export BuildTime=`date -u +%Y%m%d.%H%M%S`;\
 	export GitTag=$$(TAG=`git tag --contains $$(git rev-parse HEAD) | sort -R | tr '\n' ' '`; if [ "$$(printf "$$TAG")" ]; then printf "$$TAG"; else printf "undefined"; fi);\
-	go build -ldflags "-X main.GitCommit=$$GitCommit -X main.Tag=$$GitTag" -o "bin/grlx-farmer" ./cmd/farmer/main.go
+	go build -ldflags "-X main.GitCommit=$$GitCommit -X main.Tag=$$GitTag" -o "bin/imas-farmer" ./cmd/farmer/main.go
 	@printf "\e[32mSuccess!\e[39m\n"
 
 all-arches-farmer: farmer
@@ -70,10 +70,10 @@ all-arches-farmer: farmer
 		export GitCommit=`git rev-parse HEAD | cut -c -7`;\
 		export BuildTime=`date -u +%Y%m%d.%H%M%S`;\
 		export GitTag=$$(TAG=`git tag --contains $$(git rev-parse HEAD) | sort -R | tr '\n' ' '`; if [ "$$(printf "$$TAG")" ]; then printf "$$TAG"; else printf "undefined"; fi);\
-		go build -ldflags "-X main.GitCommit=$$GitCommit -X main.Tag=$$GitTag" -o "bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/"$$(printf $$GitTag)"/grlx-farmer" ./cmd/farmer/main.go &&\
+		go build -ldflags "-X main.GitCommit=$$GitCommit -X main.Tag=$$GitTag" -o "bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/"$$(printf $$GitTag)"/imas-farmer" ./cmd/farmer/main.go &&\
 		printf "\e[32mSuccess!\e[39m\n" ;\
 		mkdir -p bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/latest ;\
-		cp bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/"$$(printf $$GitTag)"/grlx-farmer bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/latest/grlx-farmer ;\
+		cp bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/"$$(printf $$GitTag)"/imas-farmer bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/latest/imas-farmer ;\
 	done
 
 all-arches-sprout: sprout
@@ -86,13 +86,13 @@ all-arches-sprout: sprout
 		export GitCommit=`git rev-parse HEAD | cut -c -7`;\
 		export BuildTime=`date -u +%Y%m%d.%H%M%S`;\
 		export GitTag=$$(TAG=`git tag --contains $$(git rev-parse HEAD) | sort -R | tr '\n' ' '`; if [ "$$(printf "$$TAG")" ]; then printf "$$TAG"; else printf "undefined"; fi);\
-		go build -ldflags "-X main.GitCommit=$$GitCommit -X main.Tag=$$GitTag" -o "bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/"$$(printf $$GitTag)"/grlx-sprout" ./cmd/sprout/*.go &&\
+		go build -ldflags "-X main.GitCommit=$$GitCommit -X main.Tag=$$GitTag" -o "bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/"$$(printf $$GitTag)"/imas-sprout" ./cmd/sprout/*.go &&\
 		printf "\e[32mSuccess!\e[39m\n" ;\
 		mkdir -p bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/latest ;\
-		cp bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/"$$(printf $$GitTag)"/grlx-sprout bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/latest/grlx-sprout ;\
+		cp bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/"$$(printf $$GitTag)"/imas-sprout bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/latest/imas-sprout ;\
 	done
 
-all-arches-grlx: grlx
+all-arches-imas: imas
 	@mkdir -p bin/arches
 	for arch in amd64 386 arm arm64 ; do \
 			export GOOS=linux; \
@@ -102,10 +102,10 @@ all-arches-grlx: grlx
 			export GitCommit=`git rev-parse HEAD | cut -c -7`;\
 			export BuildTime=`date -u +%Y%m%d.%H%M%S`;\
 			export GitTag=$$(TAG=`git tag --contains $$(git rev-parse HEAD) | sort -R | tr '\n' ' '`; if [ "$$(printf "$$TAG")" ]; then printf "$$TAG"; else printf "undefined"; fi);\
-			go build -ldflags "-X main.GitCommit=$$GitCommit -X main.Tag=$$GitTag" -o "bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/"$$(printf $$GitTag)"/grlx" ./cmd/grlx/main.go &&\
+			go build -ldflags "-X main.GitCommit=$$GitCommit -X main.Tag=$$GitTag" -o "bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/"$$(printf $$GitTag)"/imas" ./cmd/imas/main.go &&\
 			printf "\e[32mSuccess!\e[39m\n" ;\
 			mkdir -p bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/latest ;\
-			cp bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/"$$(printf $$GitTag)"/grlx bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/latest/grlx ;\
+			cp bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/"$$(printf $$GitTag)"/imas bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/latest/imas ;\
 	done
 	for arch in amd64 arm64 ; do \
 			export GOOS=darwin; \
@@ -115,41 +115,41 @@ all-arches-grlx: grlx
 			export GitCommit=`git rev-parse HEAD | cut -c -7`;\
 			export BuildTime=`date -u +%Y%m%d.%H%M%S`;\
 			export GitTag=$$(TAG=`git tag --contains $$(git rev-parse HEAD) | sort -R | tr '\n' ' '`; if [ "$$(printf "$$TAG")" ]; then printf "$$TAG"; else printf "undefined"; fi);\
-			go build -ldflags "-X main.GitCommit=$$GitCommit -X main.Tag=$$GitTag" -o "bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/"$$(printf $$GitTag)"/grlx" ./cmd/grlx/main.go &&\
+			go build -ldflags "-X main.GitCommit=$$GitCommit -X main.Tag=$$GitTag" -o "bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/"$$(printf $$GitTag)"/imas" ./cmd/imas/main.go &&\
 			printf "\e[32mSuccess!\e[39m\n" ;\
 			mkdir -p bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/latest ;\
-			cp bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/"$$(printf $$GitTag)"/grlx bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/latest/grlx ;\
+			cp bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/"$$(printf $$GitTag)"/imas bin/arches/"$$(printf $$GOOS)"/"$$(printf $$GOARCH)"/latest/imas ;\
 	done
 
-github: all-arches-farmer all-arches-sprout all-arches-grlx
+github: all-arches-farmer all-arches-sprout all-arches-imas
 	@printf "Creating GitHub release...\n"
 	mkdir -p bin/github
 	for arch in amd64 386 arm arm64 ; do \
 		export GitTag=$$(TAG=`git tag --contains $$(git rev-parse HEAD) | sort -R | tr '\n' ' '`; if [ "$$(printf "$$TAG")" ]; then printf "$$TAG"; else printf "undefined"; fi);\
-		cp bin/arches/linux/$$arch/$$(printf $$GitTag)/grlx-farmer bin/github/grlx-farmer-$$(printf $$GitTag)-linux-$$(printf $$arch);\
-		tar -czf bin/github/grlx-farmer-$$(printf $$GitTag)-linux-$$(printf $$arch).tar.gz \
-	      -C bin/arches/linux/$$arch/$$(printf $$GitTag) grlx-farmer;\
+		cp bin/arches/linux/$$arch/$$(printf $$GitTag)/imas-farmer bin/github/imas-farmer-$$(printf $$GitTag)-linux-$$(printf $$arch);\
+		tar -czf bin/github/imas-farmer-$$(printf $$GitTag)-linux-$$(printf $$arch).tar.gz \
+	      -C bin/arches/linux/$$arch/$$(printf $$GitTag) imas-farmer;\
 	done
 	for arch in amd64 386 arm arm64 ; do \
 		export GitTag=$$(TAG=`git tag --contains $$(git rev-parse HEAD) | sort -R | tr '\n' ' '`; if [ "$$(printf "$$TAG")" ]; then printf "$$TAG"; else printf "undefined"; fi);\
-		cp bin/arches/linux/$$arch/$$(printf $$GitTag)/grlx-sprout bin/github/grlx-sprout-$$(printf $$GitTag)-linux-$$(printf $$arch);\
-		tar -czf bin/github/grlx-sprout-$$(printf $$GitTag)-linux-$$(printf $$arch).tar.gz \
-			-C bin/arches/linux/$$arch/$$(printf $$GitTag) grlx-sprout;\
+		cp bin/arches/linux/$$arch/$$(printf $$GitTag)/imas-sprout bin/github/imas-sprout-$$(printf $$GitTag)-linux-$$(printf $$arch);\
+		tar -czf bin/github/imas-sprout-$$(printf $$GitTag)-linux-$$(printf $$arch).tar.gz \
+			-C bin/arches/linux/$$arch/$$(printf $$GitTag) imas-sprout;\
 	done
 	for arch in amd64 arm64 ; do \
 		export GitTag=$$(TAG=`git tag --contains $$(git rev-parse HEAD) | sort -R | tr '\n' ' '`; if [ "$$(printf "$$TAG")" ]; then printf "$$TAG"; else printf "undefined"; fi);\
-		cp bin/arches/darwin/$$arch/$$(printf $$GitTag)/grlx bin/github/grlx-$$(printf $$GitTag)-darwin-$$(printf $$arch);\
-		tar -czf bin/github/grlx-$$(printf $$GitTag)-darwin-$$(printf $$arch).tar.gz \
-			-C bin/arches/darwin/$$arch/$$(printf $$GitTag) grlx;\
+		cp bin/arches/darwin/$$arch/$$(printf $$GitTag)/imas bin/github/imas-$$(printf $$GitTag)-darwin-$$(printf $$arch);\
+		tar -czf bin/github/imas-$$(printf $$GitTag)-darwin-$$(printf $$arch).tar.gz \
+			-C bin/arches/darwin/$$arch/$$(printf $$GitTag) imas;\
 	done
 	for arch in amd64 386 arm arm64 ; do \
 		export GitTag=$$(TAG=`git tag --contains $$(git rev-parse HEAD) | sort -R | tr '\n' ' '`; if [ "$$(printf "$$TAG")" ]; then printf "$$TAG"; else printf "undefined"; fi);\
-		cp bin/arches/linux/$$arch/$$(printf $$GitTag)/grlx bin/github/grlx-$$(printf $$GitTag)-linux-$$(printf $$arch);\
-		tar -czf bin/github/grlx-$$(printf $$GitTag)-linux-$$(printf $$arch).tar.gz \
-			-C bin/arches/linux/$$arch/$$(printf $$GitTag) grlx;\
+		cp bin/arches/linux/$$arch/$$(printf $$GitTag)/imas bin/github/imas-$$(printf $$GitTag)-linux-$$(printf $$arch);\
+		tar -czf bin/github/imas-$$(printf $$GitTag)-linux-$$(printf $$arch).tar.gz \
+			-C bin/arches/linux/$$arch/$$(printf $$GitTag) imas;\
 	done
 	
-release: all-arches-farmer all-arches-sprout all-arches-grlx github
+release: all-arches-farmer all-arches-sprout all-arches-imas github
 	@printf "\e[32mSuccess!\e[39m\n"
 
 
@@ -158,23 +158,23 @@ clean:
 	@printf "Cleaning up \e[32mmain\e[39m...\n"
 	docker-compose down || true
 	yes| docker-compose rm || true
-	docker rmi grlx/sprout:latest || true
-	docker rmi grlx/farmer:latest || true
-	rm -f ~/.config/grlx/tls-rootca.pem
-	rm -f main bin/grlx bin/grlx-farmer bin/grlx-sprout
+	docker rmi imas/sprout:latest || true
+	docker rmi imas/farmer:latest || true
+	rm -f ~/.config/imas/tls-rootca.pem
+	rm -f main bin/imas bin/imas-farmer bin/imas-sprout
 	rm -r bin/arches bin/github || true
 
 install: clean all
-	mv bin/grlx bin/grlx-farmer bin/grlx-sprout "$$GOPATH/bin/"
+	mv bin/imas bin/imas-farmer bin/imas-sprout "$$GOPATH/bin/"
 
 docker:
-	docker build -t grlx/farmer . -f docker/farmer.dockerfile
-	docker build -t grlx/sprout . -f docker/sprout.dockerfile
+	docker build -t imas/farmer . -f docker/farmer.dockerfile
+	docker build -t imas/sprout . -f docker/sprout.dockerfile
 
 dcu:
 	docker-compose down || true
 	docker-compose rm
-	rm -f ~/.config/grlx/tls-rootca.pem
+	rm -f ~/.config/imas/tls-rootca.pem
 	docker-compose up
 
 test: clean 

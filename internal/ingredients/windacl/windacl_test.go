@@ -9,7 +9,7 @@ import (
 	"github.com/hectane/go-acl/api"
 	"golang.org/x/sys/windows"
 
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 // Well-known SIDs that resolve without touching any live object, used

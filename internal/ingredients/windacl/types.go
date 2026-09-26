@@ -55,7 +55,7 @@ var registryHiveSecurityNames = map[string]string{
 // resolveObjectName translates the ingredient's "name" property into
 // the object name string GetNamedSecurityInfo/SetNamedSecurityInfo
 // expect for the given object type. File names pass through unchanged;
-// registry names are rewritten from their grlx hive alias to the
+// registry names are rewritten from their imas hive alias to the
 // security APIs' own predefined-key form (see
 // registryHiveSecurityNames).
 func resolveObjectName(objType, name string) (string, error) {
@@ -80,7 +80,7 @@ const (
 
 // parseAccessMode maps the ingredient's access_mode property to the
 // ACCESS_MODE SetEntriesInAcl expects. GRANT_ACCESS/DENY_ACCESS are
-// the only two grlx exposes: SET_ACCESS and REVOKE_ACCESS have
+// the only two imas exposes: SET_ACCESS and REVOKE_ACCESS have
 // different (and easy to misuse) merge semantics that Salt's own
 // ALLOW/DENY model doesn't need.
 func parseAccessMode(s string) (int32, error) {
@@ -103,7 +103,7 @@ func accessModeVerb(mode int32) string {
 	return accessModeAllow
 }
 
-// namedRights maps grlx's named rights to the standard Win32 generic
+// namedRights maps imas's named rights to the standard Win32 generic
 // access rights. Generic rights (rather than object-specific masks
 // such as FILE_GENERIC_READ or the registry's KEY_READ) are used
 // deliberately: SetNamedSecurityInfo stores them as-is in the ACE, and
@@ -112,7 +112,7 @@ func accessModeVerb(mode int32) string {
 // manager's own generic mapping -- the same mechanism, and the same
 // GENERIC_ALL/GENERIC_READ/GENERIC_WRITE/GENERIC_EXECUTE rights, the
 // canonical MSDN SetNamedSecurityInfo/BuildExplicitAccessWithName
-// examples use. That avoids grlx hand-rolling a specific-rights bitmask
+// examples use. That avoids imas hand-rolling a specific-rights bitmask
 // per object type that can't be verified without a Windows host.
 var namedRights = map[string]uint32{
 	"read":         windows.GENERIC_READ,

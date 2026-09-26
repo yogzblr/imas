@@ -21,8 +21,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/ingredients/sdb"
-	"github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/ingredients/sdb"
+	"github.com/yogzblr/imas/internal/log"
 )
 
 const backendName = "azurekv"

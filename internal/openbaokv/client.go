@@ -3,7 +3,7 @@
 // Its one consumer today is `farmer publish-saasapi-credential`
 // (cmd/farmer), which pushes the SaaS API's freshly-minted NATS User JWT
 // into OpenBao for External Secrets Operator to deliver to the saasapi
-// Deployment. See docs/design/grlx-internal-api-account.md's "JWT ->
+// Deployment. See docs/design/imas-internal-api-account.md's "JWT ->
 // OpenBao hand-off".
 //
 // FLAG FOR SECURITY REVIEW: this is the only code in the repo that
@@ -51,28 +51,28 @@ import (
 
 // Environment variables configuring the OpenBao KV v2 client. Addr is
 // always required; which of the rest matter depends on AuthMethod. Named
-// GRLX_SAASAPI_CRED_OPENBAO_* rather than reusing internal/certs's
-// GRLX_CERTS_OPENBAO_* or internal/gatewayjwt's GRLX_GATEWAY_OPENBAO_*:
+// IMAS_SAASAPI_CRED_OPENBAO_* rather than reusing internal/certs's
+// IMAS_CERTS_OPENBAO_* or internal/gatewayjwt's IMAS_GATEWAY_OPENBAO_*:
 // this is a distinct OpenBao identity (the only one with KV write access)
 // and must never share an env block — or an auth role — with farmer's
 // long-running process.
 const (
-	EnvOpenBaoAddr       = "GRLX_SAASAPI_CRED_OPENBAO_ADDR"
-	EnvOpenBaoKVMount    = "GRLX_SAASAPI_CRED_OPENBAO_KV_MOUNT" // default "secret"
-	EnvOpenBaoCACert     = "GRLX_SAASAPI_CRED_OPENBAO_CACERT"   // optional, verify OpenBao's own TLS
-	EnvOpenBaoAuthMethod = "GRLX_SAASAPI_CRED_OPENBAO_AUTH_METHOD"
+	EnvOpenBaoAddr       = "IMAS_SAASAPI_CRED_OPENBAO_ADDR"
+	EnvOpenBaoKVMount    = "IMAS_SAASAPI_CRED_OPENBAO_KV_MOUNT" // default "secret"
+	EnvOpenBaoCACert     = "IMAS_SAASAPI_CRED_OPENBAO_CACERT"   // optional, verify OpenBao's own TLS
+	EnvOpenBaoAuthMethod = "IMAS_SAASAPI_CRED_OPENBAO_AUTH_METHOD"
 
 	// EnvOpenBaoToken is the bearer token used when AuthMethod is "token" (the default).
-	EnvOpenBaoToken = "GRLX_SAASAPI_CRED_OPENBAO_TOKEN"
+	EnvOpenBaoToken = "IMAS_SAASAPI_CRED_OPENBAO_TOKEN"
 
 	// EnvOpenBaoK8sRole/EnvOpenBaoK8sMount/EnvOpenBaoK8sJWTPath configure
 	// OpenBao's kubernetes auth method, used when AuthMethod is "kubernetes".
-	EnvOpenBaoK8sRole    = "GRLX_SAASAPI_CRED_OPENBAO_K8S_ROLE"
-	EnvOpenBaoK8sMount   = "GRLX_SAASAPI_CRED_OPENBAO_K8S_MOUNT"    // default "kubernetes"
-	EnvOpenBaoK8sJWTPath = "GRLX_SAASAPI_CRED_OPENBAO_K8S_JWT_PATH" // default defaultK8sJWTPath
+	EnvOpenBaoK8sRole    = "IMAS_SAASAPI_CRED_OPENBAO_K8S_ROLE"
+	EnvOpenBaoK8sMount   = "IMAS_SAASAPI_CRED_OPENBAO_K8S_MOUNT"    // default "kubernetes"
+	EnvOpenBaoK8sJWTPath = "IMAS_SAASAPI_CRED_OPENBAO_K8S_JWT_PATH" // default defaultK8sJWTPath
 )
 
-// Recognized values for GRLX_SAASAPI_CRED_OPENBAO_AUTH_METHOD.
+// Recognized values for IMAS_SAASAPI_CRED_OPENBAO_AUTH_METHOD.
 const (
 	AuthMethodToken      = "token"
 	AuthMethodKubernetes = "kubernetes"

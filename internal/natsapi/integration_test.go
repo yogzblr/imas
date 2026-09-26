@@ -8,13 +8,13 @@ import (
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
-	"github.com/gogrlx/grlx/v2/internal/audit"
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/pki"
-	"github.com/gogrlx/grlx/v2/internal/rbac"
-	"github.com/gogrlx/grlx/v2/internal/shell"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/audit"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/rbac"
+	"github.com/yogzblr/imas/internal/shell"
 )
 
 // startEmbeddedNATS starts an embedded NATS server for integration tests.
@@ -65,9 +65,9 @@ func TestSubscribeRegistersAllRoutes(t *testing.T) {
 	SetBuildVersion(config.Version{Tag: "v1.0.0-test"})
 	defer SetBuildVersion(config.Version{})
 
-	msg, err := nc.Request("grlx.api.version", nil, 2*time.Second)
+	msg, err := nc.Request("imas.api.version", nil, 2*time.Second)
 	if err != nil {
-		t.Fatalf("request to grlx.api.version: %v", err)
+		t.Fatalf("request to imas.api.version: %v", err)
 	}
 
 	var resp response
@@ -107,9 +107,9 @@ func TestSubscribeTestPingRoute(t *testing.T) {
 		Action: apitypes.PingPong{Ping: true},
 	})
 
-	msg, err := nc.Request("grlx.api.test.ping", params, 2*time.Second)
+	msg, err := nc.Request("imas.api.test.ping", params, 2*time.Second)
 	if err != nil {
-		t.Fatalf("request to grlx.api.test.ping: %v", err)
+		t.Fatalf("request to imas.api.test.ping: %v", err)
 	}
 
 	var resp response
@@ -136,9 +136,9 @@ func TestSubscribeJobsListRoute(t *testing.T) {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
-	msg, err := nc.Request("grlx.api.jobs.list", nil, 2*time.Second)
+	msg, err := nc.Request("imas.api.jobs.list", nil, 2*time.Second)
 	if err != nil {
-		t.Fatalf("request to grlx.api.jobs.list: %v", err)
+		t.Fatalf("request to imas.api.jobs.list: %v", err)
 	}
 
 	var resp response
@@ -168,7 +168,7 @@ func TestSubscribePropsSetGetRoute(t *testing.T) {
 		Name:     "env",
 		Value:    "testing",
 	})
-	msg, err := nc.Request("grlx.api.props.set", setParams, 2*time.Second)
+	msg, err := nc.Request("imas.api.props.set", setParams, 2*time.Second)
 	if err != nil {
 		t.Fatalf("props.set request: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestSubscribePropsSetGetRoute(t *testing.T) {
 		SproutID: "integration-sprout",
 		Name:     "env",
 	})
-	msg, err = nc.Request("grlx.api.props.get", getParams, 2*time.Second)
+	msg, err = nc.Request("imas.api.props.get", getParams, 2*time.Second)
 	if err != nil {
 		t.Fatalf("props.get request: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestSubscribeHandlerError(t *testing.T) {
 
 	// Request a nonexistent job — should return error in response envelope.
 	params, _ := json.Marshal(JobsGetParams{JID: "nonexistent-jid"})
-	msg, err := nc.Request("grlx.api.jobs.get", params, 2*time.Second)
+	msg, err := nc.Request("imas.api.jobs.get", params, 2*time.Second)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestSubscribeWithAuditLogging(t *testing.T) {
 	SetBuildVersion(config.Version{Tag: "audit-test"})
 	defer SetBuildVersion(config.Version{})
 
-	msg, err := nc.Request("grlx.api.version", nil, 2*time.Second)
+	msg, err := nc.Request("imas.api.version", nil, 2*time.Second)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestSubscribeWithAuditLogging(t *testing.T) {
 // probeSprout used to be a synchronous NATS request/reply ping to the
 // sprout itself; it now reads a Valkey heartbeat key maintained by
 // internal/heartbeat's $SYS.ACCOUNT.*.CONNECT/DISCONNECT listener (see
-// docs/design/grlx-master-plan.md Phase 1), so a live NATS connection to a
+// docs/design/imas-master-plan.md Phase 1), so a live NATS connection to a
 // mock sprout no longer drives it either way. internal/heartbeat's own
 // test suite covers the event-to-sprout-ID mapping logic; a genuine
 // online/offline round trip needs a live Valkey backend, which this
@@ -486,15 +486,15 @@ func TestHandleShellStartSuccess(t *testing.T) {
 	defer jetyCleanup()
 
 	// Subscribe a mock sprout that responds to shell.start.
-	nc.Subscribe("grlx.sprouts.sprout-shell-int.shell.start", func(msg *nats.Msg) {
+	nc.Subscribe("imas.sprouts.sprout-shell-int.shell.start", func(msg *nats.Msg) {
 		var req shell.StartRequest
 		json.Unmarshal(msg.Data, &req)
 
 		resp := shell.StartResponse{
 			SessionID:     req.SessionID,
-			InputSubject:  "grlx.shell." + req.SessionID + ".input",
-			OutputSubject: "grlx.shell." + req.SessionID + ".output",
-			DoneSubject:   "grlx.shell." + req.SessionID + ".done",
+			InputSubject:  "imas.shell." + req.SessionID + ".input",
+			OutputSubject: "imas.shell." + req.SessionID + ".output",
+			DoneSubject:   "imas.shell." + req.SessionID + ".done",
 		}
 		data, _ := json.Marshal(resp)
 		msg.Respond(data)
@@ -556,7 +556,7 @@ func TestHandleShellStartSproutError(t *testing.T) {
 	defer jetyCleanup()
 
 	// Mock sprout that returns an error.
-	nc.Subscribe("grlx.sprouts.sprout-shell-err.shell.start", func(msg *nats.Msg) {
+	nc.Subscribe("imas.sprouts.sprout-shell-err.shell.start", func(msg *nats.Msg) {
 		resp, _ := json.Marshal(map[string]string{"error": "shell not available"})
 		msg.Respond(resp)
 	})
@@ -662,7 +662,7 @@ func TestSubscribeSessionDoneReceivesMessage(t *testing.T) {
 		RoleName:    "admin",
 		Shell:       "/bin/bash",
 		StartedAt:   time.Now().Add(-2 * time.Minute),
-		DoneSubject: "grlx.shell.int-sess-done.done",
+		DoneSubject: "imas.shell.int-sess-done.done",
 	}
 	sessionTracker.Add(info)
 
@@ -710,7 +710,7 @@ func TestSubscribeSessionDoneWithError(t *testing.T) {
 		Pubkey:      "UTESTERR",
 		RoleName:    "operator",
 		StartedAt:   time.Now().Add(-1 * time.Minute),
-		DoneSubject: "grlx.shell.int-sess-err.done",
+		DoneSubject: "imas.shell.int-sess-err.done",
 	}
 	sessionTracker.Add(info)
 
@@ -827,7 +827,7 @@ func TestHandleJobsCancelWithNATS(t *testing.T) {
 
 	// Subscribe to capture the cancel message.
 	cancelReceived := make(chan bool, 1)
-	nc.Subscribe("grlx.sprouts.sprout-cancel-int.cancel", func(msg *nats.Msg) {
+	nc.Subscribe("imas.sprouts.sprout-cancel-int.cancel", func(msg *nats.Msg) {
 		cancelReceived <- true
 	})
 	nc.Flush()
@@ -884,7 +884,7 @@ func TestHandleCookTriggerAndSendEvents(t *testing.T) {
 	json.Unmarshal(b, &cmd)
 
 	// Simulate the trigger message arriving (normally from the farmer's cook subsystem).
-	triggerSubject := "grlx.farmer.cook.trigger." + cmd.JID
+	triggerSubject := "imas.farmer.cook.trigger." + cmd.JID
 	msg, err := nc.Request(triggerSubject, nil, 5*time.Second)
 	if err != nil {
 		t.Fatalf("trigger request: %v", err)
@@ -911,7 +911,7 @@ func TestSubscribeSessionDoneUntrackedSession(t *testing.T) {
 	info := &shell.SessionInfo{
 		SessionID:   "test-done-untracked",
 		SproutID:    "test-sprout",
-		DoneSubject: "grlx.shell.test-done-untracked.done",
+		DoneSubject: "imas.shell.test-done-untracked.done",
 	}
 	// Do NOT add to tracker — simulates an already-removed session.
 

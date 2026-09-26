@@ -17,8 +17,8 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // setupNatsAPIPKI wires up an in-memory PKI store (see
@@ -64,7 +64,7 @@ func setupNatsAPIPKI(t *testing.T) string {
 	// TLS config for ConfigureNats inside ReloadNKeys.
 	config.FarmerInterface = "127.0.0.1"
 	config.FarmerBusPort = "14222"
-	config.FarmerOrganization = "grlx-test"
+	config.FarmerOrganization = "imas-test"
 	config.CertificateValidTime = 24 * 365 * time.Hour
 	config.RootCA = filepath.Join(tmpDir, "rootca.pem")
 	config.RootCAPriv = filepath.Join(tmpDir, "rootca-key.pem")
@@ -87,7 +87,7 @@ func generateNatsAPICerts(t *testing.T, tmpDir string) {
 
 	caTemplate := x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{Organization: []string{"grlx-test"}},
+		Subject:               pkix.Name{Organization: []string{"imas-test"}},
 		NotBefore:             time.Now(),
 		NotAfter:              time.Now().Add(time.Hour),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
@@ -115,7 +115,7 @@ func generateNatsAPICerts(t *testing.T, tmpDir string) {
 
 	leafTemplate := x509.Certificate{
 		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{Organization: []string{"grlx-test"}},
+		Subject:      pkix.Name{Organization: []string{"imas-test"}},
 		NotBefore:    time.Now(),
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,

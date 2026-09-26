@@ -1,3 +1,3 @@
 FROM scratch
-COPY grlx-farmer* /farmer
+COPY imas-farmer* /farmer
 ENTRYPOINT ["/farmer"] 

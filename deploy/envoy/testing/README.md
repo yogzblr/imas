@@ -32,14 +32,14 @@ maintained by neither this repo nor jwx's author.
 1. Stand up farmer with a real (or `vault server -dev`) OpenBao Transit
    instance configured — see `../README.md`'s "OpenBao Transit key"
    section for the exact `vault write` commands and the
-   `GRLX_GATEWAY_OPENBAO_*` env vars farmer needs.
+   `IMAS_GATEWAY_OPENBAO_*` env vars farmer needs.
 2. Edit `keycloak-realm.json`'s `identityProviders[0].config.jwksUrl` to
    point at that farmer's actual, network-reachable
    `/v1/.well-known/jwks.json` address.
 3. `docker compose -f docker-compose.keycloak.yml up`
 4. Open the Keycloak admin console (`http://localhost:8080`, `admin` /
-   `admin` from the compose file) → the `grlx-gateway-jwt-validation`
-   realm → Identity Providers → `grlx-gateway`. Keycloak fetches and
+   `admin` from the compose file) → the `imas-gateway-jwt-validation`
+   realm → Identity Providers → `imas-gateway`. Keycloak fetches and
    parses the JWKS at startup (via `import-realm`); if the document were
    malformed, this page will show an error rather than the imported
    config.

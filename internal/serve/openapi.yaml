@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
-  title: grlx CLI API
+  title: imas CLI API
   description: |
-    Local HTTP API served by `grlx serve`. Proxies requests to the grlx
+    Local HTTP API served by `imas serve`. Proxies requests to the imas
     farmer over NATS and serves the embedded web UI.
 
     This API is intended for local use only (default: localhost:7505).
@@ -30,12 +30,12 @@ info:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
   contact:
-    name: grlx
-    url: https://github.com/gogrlx/grlx
+    name: imas
+    url: https://github.com/yogzblr/imas
 
 servers:
   - url: http://localhost:7505
-    description: Default local grlx serve address
+    description: Default local imas serve address
 
 paths:
   /api/v1/health:
@@ -971,10 +971,10 @@ paths:
                     result:
                       recipes:
                         - name: base.webserver
-                          path: base/webserver.grlx
+                          path: base/webserver.imas
                           size: 1234
                         - name: monitoring.prometheus
-                          path: monitoring/prometheus.grlx
+                          path: monitoring/prometheus.imas
                           size: 2048
         "502":
           $ref: "#/components/responses/NATSError"
@@ -1008,7 +1008,7 @@ paths:
                   value:
                     result:
                       name: base.webserver
-                      path: base/webserver.grlx
+                      path: base/webserver.imas
                       content: |
                         nginx:
                           pkg.installed:
@@ -1572,7 +1572,7 @@ components:
         path:
           type: string
           description: Relative file path from recipe root
-          example: base/webserver.grlx
+          example: base/webserver.imas
         size:
           type: integer
           format: int64

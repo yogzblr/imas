@@ -1,6 +1,6 @@
 // Package natsapi provides a NATS-based API for the farmer.
 // Authenticated users connect to the NATS bus and send requests to
-// grlx.api.<method> subjects. The farmer subscribes to these subjects
+// imas.api.<method> subjects. The farmer subscribes to these subjects
 // and dispatches to the appropriate handler.
 //
 // Request/response follows a simple JSON-RPC-like pattern:
@@ -15,14 +15,14 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/gogrlx/grlx/v2/internal/audit"
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/audit"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 // handler is a function that processes a NATS API request. It receives the
 // tenant ID of the connection the request arrived on — connection-level
 // metadata captured by Subscribe's closure, per
-// docs/design/grlx-tenant-context-threading.md's Option A — and the raw
+// docs/design/imas-tenant-context-threading.md's Option A — and the raw
 // JSON params, and returns a result or error.
 type handler func(tenantID string, params json.RawMessage) (any, error)
 
@@ -32,7 +32,7 @@ type response struct {
 	Error  string `json:"error,omitempty"`
 }
 
-// routes maps subject suffixes (after "grlx.api.") to handlers.
+// routes maps subject suffixes (after "imas.api.") to handlers.
 var routes = map[string]handler{
 	// Health
 	MethodHealth: handleHealth,
@@ -99,17 +99,17 @@ var routes = map[string]handler{
 }
 
 // natsCoreQueueGroup is the NATS queue group shared by all farmer replicas
-// for grlx.api.> request handling. Queue-subscribing (rather than plain
+// for imas.api.> request handling. Queue-subscribing (rather than plain
 // Subscribe) ensures that when multiple farmer replicas run behind the same
 // NATS subject, exactly one replica processes each API request instead of
 // every replica processing it and racing to reply / duplicating side
 // effects (e.g. running a cmd twice, deleting a job twice).
-const natsCoreQueueGroup = "grlx-core"
+const natsCoreQueueGroup = "imas-core"
 
 // Subscribe registers all NATS API handlers on the given connection,
 // scoped to tenantID — the connection's own tenant identity, per
-// docs/design/grlx-tenant-context-threading.md's Option A. It subscribes
-// to "grlx.api.>" and dispatches based on subject suffix. Each handler is
+// docs/design/imas-tenant-context-threading.md's Option A. It subscribes
+// to "imas.api.>" and dispatches based on subject suffix. Each handler is
 // wrapped with RBAC enforcement middleware that checks the caller's token
 // before dispatching. Called once per tenant connection: farmer opens one
 // NATS connection per tenant (cmd/farmer/main.go's ConnectFarmer), and

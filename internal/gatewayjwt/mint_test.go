@@ -159,7 +159,7 @@ func newTestGatewaySigner(t *testing.T, srv *mockTransitServer) *GatewaySigner {
 // encoding, or signature were subtly wrong, this fails the same way a
 // real external validator (Envoy's jwt_authn, Keycloak) would reject it.
 func TestMintGatewayJWT_RoundTripsThroughJWX(t *testing.T) {
-	srv := newMockTransitServer(t, "grlx-gateway-jwt", 1)
+	srv := newMockTransitServer(t, "imas-gateway-jwt", 1)
 	signer := newTestGatewaySigner(t, srv)
 	ctx := t.Context()
 
@@ -210,7 +210,7 @@ func TestMintGatewayJWT_RoundTripsThroughJWX(t *testing.T) {
 // rejects a gateway JWT whose payload was altered after signing —
 // Envoy's jwt_authn would reject the same token the same way.
 func TestMintGatewayJWT_TamperedSignatureFailsVerification(t *testing.T) {
-	srv := newMockTransitServer(t, "grlx-gateway-jwt", 1)
+	srv := newMockTransitServer(t, "imas-gateway-jwt", 1)
 	signer := newTestGatewaySigner(t, srv)
 	ctx := t.Context()
 
@@ -232,7 +232,7 @@ func TestMintGatewayJWT_TamperedSignatureFailsVerification(t *testing.T) {
 // (which jwt.Parse runs by default) rejects an already-expired gateway
 // JWT.
 func TestMintGatewayJWT_ExpiredTokenFailsValidation(t *testing.T) {
-	srv := newMockTransitServer(t, "grlx-gateway-jwt", 1)
+	srv := newMockTransitServer(t, "imas-gateway-jwt", 1)
 	signer := newTestGatewaySigner(t, srv)
 	ctx := t.Context()
 
@@ -256,7 +256,7 @@ func TestMintGatewayJWT_ExpiredTokenFailsValidation(t *testing.T) {
 // acceptance criterion "gateway JWTs signed under the outgoing key
 // continue to validate during that window."
 func TestMintGatewayJWT_RotationOverlap(t *testing.T) {
-	srv := newMockTransitServer(t, "grlx-gateway-jwt", 2)
+	srv := newMockTransitServer(t, "imas-gateway-jwt", 2)
 	srv.minEncryptionVersion = 1 // both versions still valid for verification
 	signer := newTestGatewaySigner(t, srv)
 

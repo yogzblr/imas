@@ -3,7 +3,7 @@ package jobs
 // Farmer-side job storage lives in object storage (S3/MinIO, through
 // internal/objectstore), not under config.JobLogDir on local disk: with more
 // than one farmer replica, a job-status query can land on any of them, so
-// they all need to read the same job data (docs/design/grlx-master-plan.md,
+// they all need to read the same job data (docs/design/imas-master-plan.md,
 // "Job logs → object storage"). config.JobLogDir is now only the sprout's
 // own local log directory (internal/cook/sproutcook.go's logStepResult,
 // StartSproutReaper); the CLI's CLIStore stays on the user's own disk too.
@@ -15,8 +15,8 @@ package jobs
 // a job's event stream looks like and to who writes it.
 //
 // Volume. Cooking an N-step recipe makes one creation event on
-// grlx.sprouts.<sprout>.cook (N "not started" placeholders, written by
-// logJobCreation) and N+2 events on grlx.cook.<sprout>.<jid>: a seeded
+// imas.sprouts.<sprout>.cook (N "not started" placeholders, written by
+// logJobCreation) and N+2 events on imas.cook.<sprout>.<jid>: a seeded
 // "start-<jid>", one terminal completion per step (sproutcook.go publishes
 // no separate in-progress event), and a final "completed-<jid>" or
 // "timeout-<jid>". Each event is one cook.StepCompletion of a few hundred
@@ -77,8 +77,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
-	"github.com/gogrlx/grlx/v2/internal/objectstore"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/objectstore"
 )
 
 var (

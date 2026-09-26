@@ -203,8 +203,8 @@ func setBoolProp(disp *ole.IDispatch, name string, value bool) error {
 	return nil
 }
 
-// splitTaskPath splits a Task Scheduler path like `\grlx\backup` into
-// its containing folder (`\grlx`) and task name (`backup`).
+// splitTaskPath splits a Task Scheduler path like `\imas\backup` into
+// its containing folder (`\imas`) and task name (`backup`).
 func splitTaskPath(path string) (folder, name string) {
 	idx := strings.LastIndex(path, `\`)
 	if idx < 0 {

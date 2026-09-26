@@ -8,7 +8,7 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 // JWKSHandler serves the gateway key's public keys as a standard JWKS
@@ -17,7 +17,7 @@ import (
 // validator such as Keycloak's OIDC identity-provider JWKS import — the
 // point of using a real, standard alg:EdDSA JWS (unlike the native NATS
 // User JWT) is that any spec-compliant consumer can validate against
-// this document, not just code written specifically for grlx.
+// this document, not just code written specifically for imas.
 //
 // Deliberately not wrapped in any auth middleware at the route-
 // registration call site (see internal/api/routers.go) — a JWKS document

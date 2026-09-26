@@ -12,7 +12,7 @@ import (
 )
 
 func TestJWKSHandler_ShapeMatchesRFC7517AndRFC8037(t *testing.T) {
-	srv := newMockTransitServer(t, "grlx-gateway-jwt", 1)
+	srv := newMockTransitServer(t, "imas-gateway-jwt", 1)
 	signer := newTestGatewaySigner(t, srv)
 
 	rec := httptest.NewRecorder()
@@ -76,7 +76,7 @@ func TestJWKSHandler_NoAuthRequired(t *testing.T) {
 	// it's registered in internal/api/routers.go (no Auth() wrapper).
 	// This test just documents/pins that the handler function has no
 	// such check baked in, independent of routing.
-	srv := newMockTransitServer(t, "grlx-gateway-jwt", 1)
+	srv := newMockTransitServer(t, "imas-gateway-jwt", 1)
 	signer := newTestGatewaySigner(t, srv)
 
 	rec := httptest.NewRecorder()

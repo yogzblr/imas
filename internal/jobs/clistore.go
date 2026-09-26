@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 // CLIJobMeta holds per-job metadata tracked on the CLI side,
@@ -30,7 +30,7 @@ var (
 )
 
 // CLIStore provides local job storage on the CLI user's machine.
-// Job data is stored under ~/.config/grlx/jobs/<sproutID>/<jid>.jsonl
+// Job data is stored under ~/.config/imas/jobs/<sproutID>/<jid>.jsonl
 // with a companion .meta.json file for per-user tracking.
 type CLIStore struct {
 	mu     sync.RWMutex
@@ -38,7 +38,7 @@ type CLIStore struct {
 }
 
 // NewCLIStore creates a CLIStore using the given base directory.
-// Typically this is ~/.config/grlx/jobs/.
+// Typically this is ~/.config/imas/jobs/.
 func NewCLIStore(dir string) (*CLIStore, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("creating CLI job store dir: %w", err)
@@ -56,7 +56,7 @@ func DefaultCLIStorePath() (string, error) {
 	if configDir == "" {
 		configDir = filepath.Join(home, ".config")
 	}
-	return filepath.Join(configDir, "grlx", "jobs"), nil
+	return filepath.Join(configDir, "imas", "jobs"), nil
 }
 
 // RecordJobStart creates the initial job files: a .meta.json with user

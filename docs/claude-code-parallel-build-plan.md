@@ -1,7 +1,7 @@
-# grlx SaaS Machine Manager — Claude Code Parallel Build Plan
+# imas SaaS Machine Manager — Claude Code Parallel Build Plan
 
 This is a working playbook for building the CloudXP machine-manager fork of
-`gogrlx/grlx` using Claude Code cloud agents (`claude --cloud`), running
+`yogzblr/imas` using Claude Code cloud agents (`claude --cloud`), running
 workstreams in parallel where the roadmap allows it and gating the rest on
 the dependencies already identified in the design docs.
 
@@ -14,16 +14,16 @@ the dependencies already identified in the design docs.
    authenticated against it.
 2. **Commit the design docs into the repo** under `docs/design/` — cloud
    sessions only see what's in git, not this chat. Copy in:
-   - `grlx-master-plan.md`
-   - `grlx-fork-roadmap.md`
-   - `grlx-nats-jwt-auth-design.md`
-   - `grlx-envoy-enrollment-design.md`
-   - `grlx-payload-encryption-design.md`
-   - `grlx-sdb-secrets-design.md`
-   - `grlx-1m-scale-plan.md`
-   - `grlx-windows-parity-addendum.md`
-   - `grlx-linux-parity-addendum.md`
-   - `grlx-tls-entropy-caution.md`
+   - `imas-master-plan.md`
+   - `imas-fork-roadmap.md`
+   - `imas-nats-jwt-auth-design.md`
+   - `imas-envoy-enrollment-design.md`
+   - `imas-payload-encryption-design.md`
+   - `imas-sdb-secrets-design.md`
+   - `imas-1m-scale-plan.md`
+   - `imas-windows-parity-addendum.md`
+   - `imas-linux-parity-addendum.md`
+   - `imas-tls-entropy-caution.md`
    - `cloudxp-machine-manager-api-design.md`
    - `requirements.md` (the original numbered requirements list)
 3. **Add a root `CLAUDE.md`** (template below) so every cloud session
@@ -38,10 +38,10 @@ the dependencies already identified in the design docs.
 ### Root `CLAUDE.md` template
 
 ```markdown
-# grlx SaaS Machine Manager — repo conventions
+# imas SaaS Machine Manager — repo conventions
 
-Fork of gogrlx/grlx (github.com/gogrlx/grlx). See docs/design/ for the
-full architecture — read grlx-master-plan.md and grlx-fork-roadmap.md
+Fork of yogzblr/imas (github.com/yogzblr/imas). See docs/design/ for the
+full architecture — read imas-master-plan.md and imas-fork-roadmap.md
 first, then the specific design doc named in your task.
 
 ## Constraints (non-negotiable)
@@ -79,10 +79,10 @@ tracks all nine).
 
 **1. Workstream B — NATS JWT auth**
 ```
-claude --cloud "Implement workstream B from docs/design/grlx-fork-roadmap.md:
-replace grlx's custom NKey allow-list with NATS decentralized JWT auth
+claude --cloud "Implement workstream B from docs/design/imas-fork-roadmap.md:
+replace imas's custom NKey allow-list with NATS decentralized JWT auth
 (Operator -> Account-per-tenant -> User-per-sprout). Full design in
-docs/design/grlx-nats-jwt-auth-design.md. Build: Operator/SystemAccount
+docs/design/imas-nats-jwt-auth-design.md. Build: Operator/SystemAccount
 keypair bootstrap, 'full' resolver config, JWT minting via nats-io/jwt/v2
 + the existing nkeys dependency, and a push-to-resolver mechanism over a
 NATS system-account connection that replaces pki.ReloadNKeys()'s
@@ -95,8 +95,8 @@ is the trust-chain root."
 
 **2. Workstream D — queue-group fix**
 ```
-claude --cloud "Implement workstream D from docs/design/grlx-fork-roadmap.md:
-change nc.Subscribe(...) to nc.QueueSubscribe(subject, \"grlx-core\", ...)
+claude --cloud "Implement workstream D from docs/design/imas-fork-roadmap.md:
+change nc.Subscribe(...) to nc.QueueSubscribe(subject, \"imas-core\", ...)
 in internal/natsapi/router.go. Also review internal/jobs/listener.go and
 internal/facts/listener.go (currently plain Subscribe) and decide, with
 reasoning in the PR, whether they should be queue-grouped too or whether
@@ -106,7 +106,7 @@ covering the subscription pattern."
 
 **3. Workstream F — OpenBao TLS**
 ```
-claude --cloud "Implement workstream F from docs/design/grlx-fork-roadmap.md:
+claude --cloud "Implement workstream F from docs/design/imas-fork-roadmap.md:
 replace internal/certs/tls.go's self-signed local CA (genCACert, GenCert,
 RotateTLSCerts, forceRegenCert) with calls to OpenBao's PKI secrets
 engine, writing results to the same CertFile/KeyFile/RootCA paths that
@@ -118,7 +118,7 @@ FLAG FOR SECURITY REVIEW — this is certificate/key-handling code."
 
 **4. Workstream G.1 + G.3 — Windows service provider + registry ingredient**
 ```
-claude --cloud "Implement G.1 and G.3 from docs/design/grlx-windows-parity-addendum.md:
+claude --cloud "Implement G.1 and G.3 from docs/design/imas-windows-parity-addendum.md:
 (1) a Windows SCM-backed service provider matching the create/start/
 stop/delete/status surface of the existing systemd/openrc/rcd providers
 in internal/ingredients/service/, using golang.org/x/sys/windows/svc/mgr.
@@ -131,7 +131,7 @@ be runtime-validated outside a real Windows host."
 
 **5. Workstream G.5 + G.8 + G.9 — Windows facts + PowerShell/CLI module batch**
 ```
-claude --cloud "Implement G.5, G.8, and G.9 from docs/design/grlx-windows-parity-addendum.md:
+claude --cloud "Implement G.5, G.8, and G.9 from docs/design/imas-windows-parity-addendum.md:
 (1) hardware/BIOS facts via the SMBIOS route described (prefer
 digitalocean/go-smbios or jaypipes/ghw's SMBIOS reader over WMI/COM for
 this subset), wired into the existing facts collection path. (2) the
@@ -147,7 +147,7 @@ GOOS=windows; flag that none of this is runtime-verified."
 
 **6. Workstream H.4 + H.5 — Linux mount/fstab + cron ingredients**
 ```
-claude --cloud "Implement H.4 and H.5 from docs/design/grlx-linux-parity-addendum.md:
+claude --cloud "Implement H.4 and H.5 from docs/design/imas-linux-parity-addendum.md:
 (1) a mount/fstab ingredient using golang.org/x/sys/unix's Mount/Unmount
 syscalls plus a plain parser/writer for /etc/fstab — keep a cmd-based
 fallback path for NFS/CIFS mount types, since raw mount(2) doesn't
@@ -160,7 +160,7 @@ Write tests."
 
 **7. Workstream L — sprout ingredients + cook-engine primitives**
 ```
-claude --cloud "Implement workstream L from docs/design/grlx-sprout-orchestration.md:
+claude --cloud "Implement workstream L from docs/design/imas-sprout-orchestration.md:
 new atomic ingredients probe.http, probe.database, wait, file.sync,
 file.line (check existing file ingredient coverage first before treating
 these as net-new), and a file.copy enrichment (bidirectional push/pull,
@@ -169,7 +169,7 @@ primitives that apply to any ingredient: conditional step execution
 (cond, with negation — confirm nothing equivalent exists first),
 deferred/on_exit actions, variable registration/passing between steps
 with a sensitive:true flag, and runtime context variables
-({GRLX_SPROUT_ID}, {GRLX_TENANT_ID}). Do not build a probe-internal
+({IMAS_SPROUT_ID}, {IMAS_TENANT_ID}). Do not build a probe-internal
 workflow engine or a separate probe-only secrets mechanism — probe is
 atomic ingredients only, and secret injection should reference the
 sdb:// interface by name (stub the interface if workstream K isn't
@@ -181,7 +181,7 @@ FOR SECURITY REVIEW on the sensitive-value redaction path only."
 
 **8. Workstream K — SDB secret resolution (v1 tier)**
 ```
-claude --cloud "Implement the v1 tier of docs/design/grlx-sdb-secrets-design.md:
+claude --cloud "Implement the v1 tier of docs/design/imas-sdb-secrets-design.md:
 a sprout-side SecretProvider interface (Get(ctx, ref) (value, error))
 behind the sdb:// URI scheme, with self-registering implementations for
 OpenBao/customer Vault (certificate-based auth, file-watched/hot-reloaded
@@ -217,8 +217,8 @@ hashing/lookup logic specifically."
 in parallel with B, since it touches different files — include it there if
 you have capacity):
 ```
-claude --cloud "Implement workstream A from docs/design/grlx-fork-roadmap.md
-and grlx-master-plan.md Phase 1: move PKI, props/facts, and RBAC to
+claude --cloud "Implement workstream A from docs/design/imas-fork-roadmap.md
+and imas-master-plan.md Phase 1: move PKI, props/facts, and RBAC to
 Percona XtraDB Cluster with read-through and no in-memory cache (fixes
 the cross-replica divergence bug in props/store.go directly). Move
 connection-state/heartbeat to Valkey TTL keys driven by NATS's own
@@ -235,7 +235,7 @@ specifically (workstream A.1)."
 
 **Workstream C — DMZ split** (needs B settled):
 ```
-claude --cloud "Implement workstream C from docs/design/grlx-fork-roadmap.md:
+claude --cloud "Implement workstream C from docs/design/imas-fork-roadmap.md:
 split cmd/farmer/main.go into two deployables — a bus process
 (RunNATSServer() + TLS/NKey config) for the DMZ, and a core process
 (ConnectFarmer() + all registered subscribers) for non-DMZ, outbound-only
@@ -246,8 +246,8 @@ each binary."
 
 **Workstream H — Envoy gateway + enrollment subsystem** (needs B):
 ```
-claude --cloud "Implement workstream H from docs/design/grlx-fork-roadmap.md
-and docs/design/grlx-envoy-enrollment-design.md: Envoy config in front of
+claude --cloud "Implement workstream H from docs/design/imas-fork-roadmap.md
+and docs/design/imas-envoy-enrollment-design.md: Envoy config in front of
 NATS's websocket listener validating each sprout's JWT via a jwt_authn
 filter against JWKS before the connection reaches nats-server, plus a
 second Envoy route proxying authenticated recipe-download requests to
@@ -281,8 +281,8 @@ doesn't need a `claude --cloud` session — it's a local verification step.
 
 **Workstream E — multi-tenancy:**
 ```
-claude --cloud "Implement workstream E from docs/design/grlx-fork-roadmap.md,
-using the simplification from grlx-nats-jwt-auth-design.md: one NATS
+claude --cloud "Implement workstream E from docs/design/imas-fork-roadmap.md,
+using the simplification from imas-nats-jwt-auth-design.md: one NATS
 Account per tenant means internal/natsapi/subjects.go's subject strings
 can stay unchanged, since isolation is enforced by which Account a
 connection authenticated into. Re-key internal/pki/pki.go's storage by
@@ -306,8 +306,8 @@ removed in favor of it."
 **Workstream J — payload encryption + rotation** (H is merged; note the gap
 its enrollment work left open — see below):
 ```
-claude --cloud "Implement workstream J from docs/design/grlx-fork-roadmap.md
-and docs/design/grlx-payload-encryption-design.md: NaCl box (X25519)
+claude --cloud "Implement workstream J from docs/design/imas-fork-roadmap.md
+and docs/design/imas-payload-encryption-design.md: NaCl box (X25519)
 encryption of NATS payloads. One tenant keypair (farmer-side,
 OpenBao-custodied private key via internal/certs's existing hand-rolled
 OpenBao client pattern — do not add the OpenBao/Vault SDK, it's MPL-2.0
@@ -361,7 +361,7 @@ write race workstream A's PXC migration was meant to eliminate at the
 storage layer, not reintroduce at the listener layer.
 
 Change RegisterFarmerListener to nc.QueueSubscribe(subject,
-natsCoreQueueGroup, ...) under the same 'grlx-core' queue group
+natsCoreQueueGroup, ...) under the same 'imas-core' queue group
 internal/natsapi/router.go already uses for its route handlers, matching
 that package's existing queue-grouping pattern. Update the function's
 doc comment to explain the correction (not just delete the old reasoning —
@@ -380,7 +380,7 @@ the old (now-wrong) fan-out behavior and will fail once this is fixed.
 Replace it with a test verifying queue-group load balancing, mirroring
 internal/natsapi/router_test.go's TestSubscribe_UsesQueueGroup pattern:
 simulate a second farmer replica via a second QueueSubscribe on the same
-subject and 'grlx-core' group, publish a batch of facts events, and assert
+subject and 'imas-core' group, publish a batch of facts events, and assert
 the simulated replica receives some but not all of them (not zero, not
 every one — if it receives all of them, the fix didn't take; if the real
 listener were queue-grouped incorrectly against a different group name,
@@ -393,43 +393,43 @@ E/I/J work, safe to land independently and immediately."
 
 ```
 claude --cloud "Implement G.2 (Windows user/group provider) from
-docs/design/grlx-windows-parity-addendum.md using
+docs/design/imas-windows-parity-addendum.md using
 deploymenttheory/go-bindings-win32's netmanagement package. FLAG FOR
 SECURITY REVIEW — user/group creation, and the dependency itself is
 young (v0.2.x) so note that in the PR."
 
 claude --cloud "Implement G.4 (Windows DACL/ACL ingredient) from
-docs/design/grlx-windows-parity-addendum.md using hectane/go-acl for
+docs/design/imas-windows-parity-addendum.md using hectane/go-acl for
 file ACLs first, then extend to registry-key ACLs (SE_REGISTRY_KEY).
 FLAG FOR SECURITY REVIEW — propagation/inheritance semantics are a
 security-relevant bug class, not just functional."
 
 claude --cloud "Implement G.6 (Task Scheduler, Windows Update, Shortcut
-COM ingredients) from docs/design/grlx-windows-parity-addendum.md using
+COM ingredients) from docs/design/imas-windows-parity-addendum.md using
 go-ole/go-ole. Start with the Shortcut ingredient (IShellLink, smallest
 scope) to prove the COM lifecycle pattern before Task Scheduler and WUA.
 FLAG FOR SECURITY REVIEW — COM lifecycle bugs (missed Release, wrong
 apartment threading) are easy to miss in review."
 
 claude --cloud "Scope and implement a v1 subset of G.7 (LGPO) from
-docs/design/grlx-windows-parity-addendum.md — parse registry.pol
+docs/design/imas-windows-parity-addendum.md — parse registry.pol
 (encoding/binary) and ADMX/ADML (encoding/xml), and propose in the PR
 description which policy subset to cover for a first pass rather than
 attempting full Salt win_lgpo parity."
 
 claude --cloud "Implement H.1 (network/route management) from
-docs/design/grlx-linux-parity-addendum.md using vishvananda/netlink.
+docs/design/imas-linux-parity-addendum.md using vishvananda/netlink.
 Include a 'verify connectivity survives the change, or roll back'
 pattern in the ingredient itself, since a bad route/interface change can
 cut off the sprout's own connectivity to farmer."
 
 claude --cloud "Implement H.2 (nftables firewall ingredient) from
-docs/design/grlx-linux-parity-addendum.md using google/nftables.
+docs/design/imas-linux-parity-addendum.md using google/nftables.
 FLAG FOR SECURITY REVIEW — a firewall ingredient can lock out or expose
 a host; treat with the same discipline as the auth workstreams."
 
 claude --cloud "Implement H.3 (SELinux ingredient) from
-docs/design/grlx-linux-parity-addendum.md using opencontainers/selinux.
+docs/design/imas-linux-parity-addendum.md using opencontainers/selinux.
 FLAG FOR SECURITY REVIEW — CERT-In/DPDP-relevant: silently degrading to
 permissive is a compliance-visible failure, not just a bug."
 ```
@@ -444,9 +444,9 @@ instead of running the nine commands above by hand. Run it as a **local**
 `claude --cloud`), or as a Claude Code **Project**.
 
 ```
-You are coordinating the Wave 0 buildout of the grlx SaaS Machine Manager
-fork. Read docs/design/grlx-master-plan.md and
-docs/design/grlx-fork-roadmap.md for context first.
+You are coordinating the Wave 0 buildout of the imas SaaS Machine Manager
+fork. Read docs/design/imas-master-plan.md and
+docs/design/imas-fork-roadmap.md for context first.
 
 Create docs/BUILD-STATUS.md with a table of these nine workstreams:
 B, D, F, G.1+G.3, G.5+G.8+G.9, H.4+H.5, L, K, SaaS-API-scaffold.

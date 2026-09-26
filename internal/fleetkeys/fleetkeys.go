@@ -1,6 +1,6 @@
-// Package fleetkeys serves grlx-fleet-signing's current valid public key
+// Package fleetkeys serves imas-fleet-signing's current valid public key
 // versions to sprouts over their own NATS connection, on
-// grlx.sprouts.<id>.fleetsigningkeys (design doc §2.5, "Key rotation").
+// imas.sprouts.<id>.fleetsigningkeys (design doc §2.5, "Key rotation").
 //
 // Why live, not only pinned: the release signing key rotates in OpenBao
 // Transit, and a sprout that only ever trusted the key set it pinned at
@@ -11,22 +11,22 @@
 // way Envoy re-reads internal/gatewayjwt's JWKS on rotation.
 //
 // FLAG FOR SECURITY REVIEW. Who can answer a sprout's request on this
-// subject: whoever may subscribe to grlx.sprouts.<id>.fleetsigningkeys in
+// subject: whoever may subscribe to imas.sprouts.<id>.fleetsigningkeys in
 // that tenant's Account — farmer, and any other User with the
-// grlx.> allow-all template (the grlx CLI in the legacy tenant). Each of
-// those can already publish grlx.sprouts.<id>.cmd.run to the sprout, i.e.
+// imas.> allow-all template (the imas CLI in the legacy tenant). Each of
+// those can already publish imas.sprouts.<id>.cmd.run to the sprout, i.e.
 // run arbitrary commands on it, so being able to hand it a key set gives
 // them nothing new. Other sprouts can't answer: their Sub grant is their
-// own grlx.sprouts.<their id>.> only. What release signing still protects
+// own imas.sprouts.<their id>.> only. What release signing still protects
 // against is everyone outside that channel — saasapi and anyone else who
 // can write saas.fleet_versions, and the artifact host — none of whom can
 // reach this subject. See internal/ingredients/selfupdate for how the
 // sprout uses the answer.
 //
 // That equivalence is CONDITIONAL on today's sprout: cmd/sprout executes a
-// plaintext grlx.sprouts.<id>.cmd.run from anyone allowed to publish it.
+// plaintext imas.sprouts.<id>.cmd.run from anyone allowed to publish it.
 // If command payloads are ever authenticated beyond the NATS layer (e.g.
-// workstream J's NaCl box, docs/design/grlx-payload-encryption-design.md),
+// workstream J's NaCl box, docs/design/imas-payload-encryption-design.md),
 // the set of Users who can answer here becomes larger than the set who
 // can command the sprout, and this reply must be authenticated the same
 // way before that ships — otherwise this subject becomes the weakest way
@@ -45,21 +45,21 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/gogrlx/grlx/v2/internal/fleetsign"
-	log "github.com/gogrlx/grlx/v2/internal/log"
+	"github.com/yogzblr/imas/internal/fleetsign"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 // SubjectToken is the last token of the request subject. The full
-// subject is grlx.sprouts.<sprout id>.fleetsigningkeys; the sprout's NATS
+// subject is imas.sprouts.<sprout id>.fleetsigningkeys; the sprout's NATS
 // User JWT grants Publish on its own copy only (internal/pki/jwtusers.go,
 // sproutPermissions).
 //
 // The reply does NOT come back on an _INBOX.> subject: a sprout's JWT
 // grants Publish on _INBOX.> (to answer farmer's requests) but Subscribe
-// only on its own grlx.sprouts.<id>.>, and granting it Subscribe on
+// only on its own imas.sprouts.<id>.>, and granting it Subscribe on
 // _INBOX.> would let every sprout read every reply in the tenant Account.
 // So the sprout names a reply subject under its own tree,
-// grlx.sprouts.<id>.fleetsigningkeys.reply.<random> (ReplyPrefix), which
+// imas.sprouts.<id>.fleetsigningkeys.reply.<random> (ReplyPrefix), which
 // its existing Subscribe grant already covers, and farmer refuses any
 // other reply subject.
 const SubjectToken = "fleetsigningkeys"
@@ -68,20 +68,20 @@ const SubjectToken = "fleetsigningkeys"
 const replyToken = "reply"
 
 // farmerSubject is what farmer queue-subscribes to on each tenant
-// connection, as internal/facts does for grlx.sprouts.*.facts.
-const farmerSubject = "grlx.sprouts.*." + SubjectToken
+// connection, as internal/facts does for imas.sprouts.*.facts.
+const farmerSubject = "imas.sprouts.*." + SubjectToken
 
 // natsCoreQueueGroup matches internal/facts' and internal/jobs' queue
 // group, so exactly one farmer replica answers each request.
-const natsCoreQueueGroup = "grlx-core"
+const natsCoreQueueGroup = "imas-core"
 
 // SproutSubject is the subject sproutID sends its request on.
 func SproutSubject(sproutID string) string {
-	return "grlx.sprouts." + sproutID + "." + SubjectToken
+	return "imas.sprouts." + sproutID + "." + SubjectToken
 }
 
 // ReplyPrefix is the prefix of every reply subject sproutID may ask farmer
-// to answer on: grlx.sprouts.<id>.fleetsigningkeys.reply. A reply subject
+// to answer on: imas.sprouts.<id>.fleetsigningkeys.reply. A reply subject
 // is this plus exactly one more token.
 func ReplyPrefix(sproutID string) string {
 	return SproutSubject(sproutID) + "." + replyToken
@@ -89,9 +89,9 @@ func ReplyPrefix(sproutID string) string {
 
 // validReplySubject reports whether reply is one literal token under
 // sproutID's own ReplyPrefix. Farmer answers from a User with Publish on
-// all of grlx.>, and NATS doesn't check a requester's reply subject
+// all of imas.>, and NATS doesn't check a requester's reply subject
 // against its own permissions — so without this a sprout could name
-// another sprout's grlx.sprouts.<other>.cmd.run as its "reply" and have
+// another sprout's imas.sprouts.<other>.cmd.run as its "reply" and have
 // farmer publish there for it (the same confused-deputy shape
 // controlplane.ValidSaaSAPIReplySubject closes for internal.sprout.action).
 func validReplySubject(sproutID, reply string) bool {
@@ -99,7 +99,7 @@ func validReplySubject(sproutID, reply string) bool {
 	return ok && tok != "" && !strings.ContainsAny(tok, ".*> \t\r\n") && len(reply) <= 255
 }
 
-// KeyVersion is one grlx-fleet-signing key version, in the same shape as
+// KeyVersion is one imas-fleet-signing key version, in the same shape as
 // internal/gatewayjwt's TransitKeyVersion (what PublicKeys returns):
 // the Transit version number and the raw 32-byte Ed25519 public key
 // (standard base64 in JSON).
@@ -121,7 +121,7 @@ type Response struct {
 // set (no key source configured, or Transit unreachable/refusing).
 const errorUnavailable = "unavailable"
 
-// keySource is farmer's read-only Transit view of grlx-fleet-signing, set
+// keySource is farmer's read-only Transit view of imas-fleet-signing, set
 // once at startup (cmd/farmer's initFleetKeySource). Nil means every
 // request is answered with errorUnavailable.
 var keySource fleetsign.KeySetSource
@@ -135,7 +135,7 @@ func SetKeySource(src fleetsign.KeySetSource) { keySource = src }
 const farmerReadTimeout = 10 * time.Second
 
 // RegisterFarmerListener queue-subscribes nc — farmer's connection for
-// tenantID — to grlx.sprouts.*.fleetsigningkeys. The tenant is the
+// tenantID — to imas.sprouts.*.fleetsigningkeys. The tenant is the
 // connection's; the sprout is the subject's wildcard token. Nothing in the
 // request payload is read.
 func RegisterFarmerListener(tenantID string, nc *nats.Conn) error {

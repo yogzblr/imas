@@ -146,7 +146,7 @@ func TestExtractIncludes(t *testing.T) {
 			id:          "apache slash init",
 			sprout:      "testSprout",
 			basepath:    getBasePath(),
-			recipe:      "apache.init.grlx",
+			recipe:      "apache.init.imas",
 			mapContents: []string{"apache"},
 		},
 	}
@@ -241,7 +241,7 @@ func TestRelativeRecipeToAbsolute(t *testing.T) {
 		recipe:          ".missing",
 		filepath:        "missing",
 		err:             nil,
-		relatedFilepath: filepath.Join(getBasePath(), "dev.grlx"),
+		relatedFilepath: filepath.Join(getBasePath(), "dev.imas"),
 	}}
 	for _, tc := range testCases {
 		t.Run(tc.id, func(t *testing.T) {

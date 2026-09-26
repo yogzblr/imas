@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/ingredients/sdb"
+	"github.com/yogzblr/imas/internal/ingredients/sdb"
 )
 
 type mockAWS struct {

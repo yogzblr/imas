@@ -10,7 +10,7 @@ import (
 	jwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 // fakeCredStore is an in-memory SaaSAPICredentialStore.
@@ -47,7 +47,7 @@ func (f *fakeCredStore) Write(_ context.Context, data map[string]string) error {
 }
 
 // useExternalSaaSAPISeed hands the SaaS API seed to pki the way ESO does
-// in production (a mounted file named by GRLX_NATS_SAASAPI_USER_SEED_FILE)
+// in production (a mounted file named by IMAS_NATS_SAASAPI_USER_SEED_FILE)
 // and returns its public key.
 func useExternalSaaSAPISeed(t *testing.T) (pub string, seed []byte) {
 	t.Helper()
@@ -61,8 +61,8 @@ func useExternalSaaSAPISeed(t *testing.T) (pub string, seed []byte) {
 	if err := os.WriteFile(p, seed, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GRLX_NATS_SAASAPI_USER_SEED", "")
-	t.Setenv("GRLX_NATS_SAASAPI_USER_SEED_FILE", p)
+	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED", "")
+	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED_FILE", p)
 	return pub, seed
 }
 

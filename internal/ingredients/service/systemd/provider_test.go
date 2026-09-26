@@ -10,7 +10,7 @@ import (
 
 	"github.com/taigrr/systemctl"
 
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 // stubState tracks calls made to stubbed systemctl functions.

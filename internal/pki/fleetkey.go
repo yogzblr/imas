@@ -1,6 +1,6 @@
 package pki
 
-// Sprout-side storage of the enrollment-time grlx-fleet-signing public key
+// Sprout-side storage of the enrollment-time imas-fleet-signing public key
 // set (design doc §2.5). The sprout receives it once, in POST /v1/enroll's
 // fleet_signing_jwks, and keeps it next to its root CA
 // (config.SproutRootCA) with the same lifecycle: written the first time,
@@ -21,8 +21,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	"github.com/gogrlx/grlx/v2/internal/fleetsign"
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/fleetsign"
 )
 
 // ErrFleetKeyAlreadyPinned is returned when a different fleet signing key

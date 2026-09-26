@@ -1,4 +1,4 @@
-// Package rbac provides role-based access control for grlx, including
+// Package rbac provides role-based access control for imas, including
 // cohort definitions that group sprouts by static membership, dynamic
 // property matching, or boolean combinations of other cohorts.
 package rbac
@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gogrlx/grlx/v2/internal/props"
+	"github.com/yogzblr/imas/internal/props"
 )
 
 // CohortType distinguishes how a cohort's membership is determined.
@@ -65,7 +65,7 @@ type CompoundExpr struct {
 	Operands []string `json:"operands" yaml:"operands"`
 }
 
-// Cohort is the primary unit of sprout grouping in grlx RBAC.
+// Cohort is the primary unit of sprout grouping in imas RBAC.
 //
 // TenantID identifies which tenant this cohort belongs to — see Role's
 // TenantID doc comment (role.go) for the same zero-value-means-"current
@@ -422,7 +422,7 @@ func resolveStatic(c *Cohort) map[string]bool {
 // own tenant (see Registry.tenantID), not props' package-global seam. A
 // Registry explicitly constructed for tenant A must never resolve
 // membership against tenant B's (or the legacy tenant's) prop values; see
-// docs/design/grlx-tenant-context-threading.md.
+// docs/design/imas-tenant-context-threading.md.
 func resolveDynamic(tenantID string, c *Cohort, allSproutIDs []string) map[string]bool {
 	result := make(map[string]bool)
 	for _, sproutID := range allSproutIDs {

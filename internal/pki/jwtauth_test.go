@@ -8,7 +8,7 @@ import (
 	jwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 func TestEnsureNatsAuth_BootstrapsAndIsIdempotent(t *testing.T) {
@@ -81,7 +81,7 @@ func TestLoadOrCreateSeed_ExternalSeedFile(t *testing.T) {
 	if err := os.WriteFile(seedFile, seed, 0o600); err != nil {
 		t.Fatalf("failed to write seed file: %v", err)
 	}
-	t.Setenv("GRLX_NATS_OPERATOR_SEED_FILE", seedFile)
+	t.Setenv("IMAS_NATS_OPERATOR_SEED_FILE", seedFile)
 
 	localPath := filepath.Join(t.TempDir(), "operator.nk")
 	got, err := loadOrCreateSeed(localPath, "OPERATOR", nkeys.CreateOperator)
@@ -106,7 +106,7 @@ func TestLoadOrCreateSeed_ExternalSeedEnvVar(t *testing.T) {
 	}
 	wantPub, _ := kp.PublicKey()
 	seed, _ := kp.Seed()
-	t.Setenv("GRLX_NATS_TENANT_SEED", string(seed))
+	t.Setenv("IMAS_NATS_TENANT_SEED", string(seed))
 
 	localPath := filepath.Join(t.TempDir(), "tenant.nk")
 	got, err := loadOrCreateSeed(localPath, "TENANT", nkeys.CreateAccount)
@@ -136,8 +136,8 @@ func TestLoadOrCreateSeed_SeedFileTakesPrecedenceOverEnvVar(t *testing.T) {
 	envKP, _ := nkeys.CreateUser()
 	envSeed, _ := envKP.Seed()
 
-	t.Setenv("GRLX_NATS_SYS_USER_SEED_FILE", seedFile)
-	t.Setenv("GRLX_NATS_SYS_USER_SEED", string(envSeed))
+	t.Setenv("IMAS_NATS_SYS_USER_SEED_FILE", seedFile)
+	t.Setenv("IMAS_NATS_SYS_USER_SEED", string(envSeed))
 
 	got, err := loadOrCreateSeed(filepath.Join(t.TempDir(), "sys-user.nk"), "SYS_USER", nkeys.CreateUser)
 	if err != nil {
@@ -157,8 +157,8 @@ func TestEnsureNatsAuth_DefaultTenantName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensureNatsAuth failed: %v", err)
 	}
-	if mat.tenantName != "grlx" {
-		t.Errorf("expected default tenant name %q, got %q", "grlx", mat.tenantName)
+	if mat.tenantName != "imas" {
+		t.Errorf("expected default tenant name %q, got %q", "imas", mat.tenantName)
 	}
 }
 
@@ -228,7 +228,7 @@ func TestMintOrReuseUserJWT(t *testing.T) {
 	if uc.IssuerAccount != mat.tenantPub {
 		t.Errorf("minted JWT IssuerAccount = %q, want %q", uc.IssuerAccount, mat.tenantPub)
 	}
-	if !uc.Permissions.Sub.Allow.Contains("grlx.sprouts.sprout01.>") {
+	if !uc.Permissions.Sub.Allow.Contains("imas.sprouts.sprout01.>") {
 		t.Errorf("minted JWT missing expected subscribe permission: %+v", uc.Permissions)
 	}
 

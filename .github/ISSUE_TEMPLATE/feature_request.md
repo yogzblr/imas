@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Suggest an idea for grlx
+about: Suggest an idea for imas
 title: "[FEAT]"
 labels: enhancement, Unlabeled
 assignees: taigrr

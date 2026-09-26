@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/ingredients"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 func newLGPO(method string, params map[string]interface{}) LGPO {
@@ -111,7 +111,7 @@ func TestPresentEnablesPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readPolFile() error: %v", err)
 	}
-	e, ok := f.Find(`Software\Policies\Grlx\Example`, "EnableFeature")
+	e, ok := f.Find(`Software\Policies\Imas\Example`, "EnableFeature")
 	if !ok {
 		t.Fatal("expected the value to be present in registry.pol")
 	}
@@ -169,7 +169,7 @@ func TestPresentTogglingEnabledToDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readPolFile() error: %v", err)
 	}
-	e, _ := f.Find(`Software\Policies\Grlx\Example`, "EnableFeature")
+	e, _ := f.Find(`Software\Policies\Imas\Example`, "EnableFeature")
 	if e.Data[0] != 0 {
 		t.Errorf("expected dword 0 after disabling, got %v", e.Data)
 	}

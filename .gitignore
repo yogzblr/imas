@@ -11,10 +11,10 @@ local/
 dist/
 !internal/serve/dist/
 cmd/farmer/farmer
-cmd/grlx/grlx
+cmd/imas/imas
 cmd/sprout/sprout
 *.log
 
 /farmer
-/grlx
+/imas
 /sprout

@@ -18,10 +18,10 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	apitypes "github.com/gogrlx/grlx/v2/internal/api/types"
-	"github.com/gogrlx/grlx/v2/internal/controlplane"
-	"github.com/gogrlx/grlx/v2/internal/ingredients/cmd"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/controlplane"
+	"github.com/yogzblr/imas/internal/ingredients/cmd"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 type dispatchCall struct {
@@ -164,7 +164,7 @@ func TestSproutAction_RefusesUnscopedReplySubjects(t *testing.T) {
 		"_INBOX.saasapi",                        // the prefix alone
 		"internal.tenant.provisioned.pj_forged", // a forged provisioning result
 		"$SYS.REQ.SERVER.PING",
-		"grlx.sprouts.web-01.cmd.run",
+		"imas.sprouts.web-01.cmd.run",
 	} {
 		if err := nc.PublishRequest(controlplane.SubjectSproutAction, reply, data); err != nil {
 			t.Fatalf("publish with reply %q: %v", reply, err)
@@ -313,7 +313,7 @@ func TestSproutAction_RejectsBeforeDispatch(t *testing.T) {
 		{"sprout ID with underscore", mustJSON(t, controlplane.SproutActionRequest{TenantID: "t_1", SproutID: "web_01", Action: action("cmd.run", `{"command":"uptime"}`)}), controlplane.ErrorInvalidRequest},
 		{"cmd.run params not an object", mustJSON(t, controlplane.SproutActionRequest{TenantID: "t_1", SproutID: "web-01", Action: action("cmd.run", `"uptime"`)}), controlplane.ErrorInvalidRequest},
 		{"cmd.run without command", mustJSON(t, controlplane.SproutActionRequest{TenantID: "t_1", SproutID: "web-01", Action: action("cmd.run", `{}`)}), controlplane.ErrorInvalidRequest},
-		{"cmd.run with stream_topic", mustJSON(t, controlplane.SproutActionRequest{TenantID: "t_1", SproutID: "web-01", Action: action("cmd.run", `{"command":"uptime","stream_topic":"grlx.sprouts.db-01.cmd.run"}`)}), controlplane.ErrorInvalidRequest},
+		{"cmd.run with stream_topic", mustJSON(t, controlplane.SproutActionRequest{TenantID: "t_1", SproutID: "web-01", Action: action("cmd.run", `{"command":"uptime","stream_topic":"imas.sprouts.db-01.cmd.run"}`)}), controlplane.ErrorInvalidRequest},
 		{"cmd.run timeout too long", mustJSON(t, controlplane.SproutActionRequest{TenantID: "t_1", SproutID: "web-01", Action: action("cmd.run", `{"command":"uptime","timeout":36000000000000}`)}), controlplane.ErrorInvalidRequest},
 		{"cmd.run negative timeout", mustJSON(t, controlplane.SproutActionRequest{TenantID: "t_1", SproutID: "web-01", Action: action("cmd.run", `{"command":"uptime","timeout":-1}`)}), controlplane.ErrorInvalidRequest},
 		{"cook without recipe", mustJSON(t, controlplane.SproutActionRequest{TenantID: "t_1", SproutID: "web-01", Action: action("cook", `{}`)}), controlplane.ErrorInvalidRequest},
@@ -334,7 +334,7 @@ func TestSproutAction_RejectsBeforeDispatch(t *testing.T) {
 // TestSproutAction_ErrorsNeverCarryText mirrors the tenant-provisioning
 // rule: a pki or dispatch error's text (paths, SQL) stays in farmer's log.
 func TestSproutAction_ErrorsNeverCarryText(t *testing.T) {
-	leaky := errors.New(`pki: looking up sprout "web-01" in tenant "t_1": dial tcp 10.0.0.7:3306: /var/lib/grlx/pki broke`)
+	leaky := errors.New(`pki: looking up sprout "web-01" in tenant "t_1": dial tcp 10.0.0.7:3306: /var/lib/imas/pki broke`)
 	stubSproutActionDispatch(t, func(string, string) error { return leaky })
 	data := handleSproutActionJSON(t, cmdRunRequest("t_1", "web-01"))
 	if strings.Contains(data, "10.0.0.7") || strings.Contains(data, "/var/lib") {
@@ -368,7 +368,7 @@ func TestSproutAction_CmdRunThroughRealHandler(t *testing.T) {
 
 	var got apitypes.CmdRun
 	var gotMu sync.Mutex
-	if _, err := nc.Subscribe("grlx.sprouts.web-01.cmd.run", func(msg *nats.Msg) {
+	if _, err := nc.Subscribe("imas.sprouts.web-01.cmd.run", func(msg *nats.Msg) {
 		gotMu.Lock()
 		_ = json.Unmarshal(msg.Data, &got)
 		gotMu.Unlock()

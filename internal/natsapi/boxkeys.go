@@ -1,7 +1,7 @@
 package natsapi
 
 // Sprout-initiated payload-encryption key rotation
-// (docs/design/grlx-payload-encryption-design.md's "Key rotation"):
+// (docs/design/imas-payload-encryption-design.md's "Key rotation"):
 // farmer may *trigger* a rotation (handlePKIRotateBoxKey, below) but the
 // instruction carries no key material; the sprout generates a new
 // keypair locally and reports back only the new public key
@@ -19,9 +19,9 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/gogrlx/grlx/v2/internal/config"
-	log "github.com/gogrlx/grlx/v2/internal/log"
-	"github.com/gogrlx/grlx/v2/internal/pki"
+	"github.com/yogzblr/imas/internal/config"
+	log "github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // handlePKIRotateBoxKey publishes a rotate instruction to a sprout. It
@@ -52,7 +52,7 @@ func handlePKIRotateBoxKey(tenantID string, params json.RawMessage) (any, error)
 }
 
 // boxKeySubmitRequest is what a sprout publishes on
-// grlx.sprouts.<id>.boxkey.pub, whether at first enrollment's follow-up
+// imas.sprouts.<id>.boxkey.pub, whether at first enrollment's follow-up
 // traffic or after a rotation (self-initiated or farmer-triggered).
 type boxKeySubmitRequest struct {
 	Pub string `json:"pub"`
@@ -90,7 +90,7 @@ func handleBoxKeySubmit(tenantID string, msg *nats.Msg) {
 
 // registerBoxKeySubmitListener subscribes to sprout key-rotation
 // submissions on nc, scoped to tenantID (nc's own tenant — see
-// docs/design/grlx-tenant-context-threading.md). handleBoxKeySubmit is a
+// docs/design/imas-tenant-context-threading.md). handleBoxKeySubmit is a
 // plain nats.MsgHandler, not a `handler`-shaped route, so tenantID is
 // captured directly in the subscription closure below rather than threaded
 // through the routes map/authMiddleware machinery. QueueSubscribe under the

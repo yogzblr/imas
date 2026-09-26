@@ -159,22 +159,22 @@ func TestChecksumNameUsesExplicitConfig(t *testing.T) {
 	t.Parallel()
 
 	updater := NewUpdater(UpdateConfig{
-		BinaryName:   "/usr/local/bin/grlx",
-		ChecksumName: "grlx-v1.2.3-linux-amd64",
+		BinaryName:   "/usr/local/bin/imas",
+		ChecksumName: "imas-v1.2.3-linux-amd64",
 	})
 
-	if got := updater.checksumName(); got != "grlx-v1.2.3-linux-amd64" {
-		t.Fatalf("checksumName() = %q, want grlx-v1.2.3-linux-amd64", got)
+	if got := updater.checksumName(); got != "imas-v1.2.3-linux-amd64" {
+		t.Fatalf("checksumName() = %q, want imas-v1.2.3-linux-amd64", got)
 	}
 }
 
 func TestChecksumNameDefaultsToBinaryBase(t *testing.T) {
 	t.Parallel()
 
-	updater := NewUpdater(UpdateConfig{BinaryName: "/usr/local/bin/grlx"})
+	updater := NewUpdater(UpdateConfig{BinaryName: "/usr/local/bin/imas"})
 
-	if got := updater.checksumName(); got != "grlx" {
-		t.Fatalf("checksumName() = %q, want grlx", got)
+	if got := updater.checksumName(); got != "imas" {
+		t.Fatalf("checksumName() = %q, want imas", got)
 	}
 }
 
@@ -183,9 +183,9 @@ func TestVerifyArtifactChecksumAcceptsMatchingChecksum(t *testing.T) {
 
 	artifact := "new binary"
 	checksum := sha256.Sum256([]byte(artifact))
-	manifest := fmt.Sprintf("%x  dist/grlx-v1.2.3-linux-amd64\n", checksum)
+	manifest := fmt.Sprintf("%x  dist/imas-v1.2.3-linux-amd64\n", checksum)
 
-	err := verifyArtifactChecksum(strings.NewReader(manifest), strings.NewReader(artifact), "grlx-v1.2.3-linux-amd64")
+	err := verifyArtifactChecksum(strings.NewReader(manifest), strings.NewReader(artifact), "imas-v1.2.3-linux-amd64")
 	if err != nil {
 		t.Fatalf("verifyArtifactChecksum returned error: %v", err)
 	}
@@ -195,9 +195,9 @@ func TestVerifyArtifactChecksumRejectsMismatch(t *testing.T) {
 	t.Parallel()
 
 	checksum := sha256.Sum256([]byte("expected binary"))
-	manifest := fmt.Sprintf("%x  grlx-v1.2.3-linux-amd64\n", checksum)
+	manifest := fmt.Sprintf("%x  imas-v1.2.3-linux-amd64\n", checksum)
 
-	err := verifyArtifactChecksum(strings.NewReader(manifest), strings.NewReader("different binary"), "grlx-v1.2.3-linux-amd64")
+	err := verifyArtifactChecksum(strings.NewReader(manifest), strings.NewReader("different binary"), "imas-v1.2.3-linux-amd64")
 	if err == nil {
 		t.Fatal("verifyArtifactChecksum returned nil error for mismatched artifact")
 	}
@@ -219,9 +219,9 @@ func TestChecksumForArtifactRejectsMissingChecksum(t *testing.T) {
 	t.Parallel()
 
 	checksum := sha256.Sum256([]byte("other binary"))
-	manifest := fmt.Sprintf("%x  grlx-v1.2.3-darwin-amd64\n", checksum)
+	manifest := fmt.Sprintf("%x  imas-v1.2.3-darwin-amd64\n", checksum)
 
-	_, err := checksumForArtifact(strings.NewReader(manifest), "grlx-v1.2.3-linux-amd64")
+	_, err := checksumForArtifact(strings.NewReader(manifest), "imas-v1.2.3-linux-amd64")
 	if err == nil {
 		t.Fatal("checksumForArtifact returned nil error for missing checksum")
 	}
@@ -235,9 +235,9 @@ func TestChecksumForArtifactIgnoresMalformedEntries(t *testing.T) {
 
 	artifact := "new binary"
 	checksum := sha256.Sum256([]byte(artifact))
-	manifest := fmt.Sprintf("not-a-checksum  grlx-v1.2.3-linux-amd64\n%x  *grlx-v1.2.3-linux-amd64\n", checksum)
+	manifest := fmt.Sprintf("not-a-checksum  imas-v1.2.3-linux-amd64\n%x  *imas-v1.2.3-linux-amd64\n", checksum)
 
-	got, err := checksumForArtifact(strings.NewReader(manifest), "grlx-v1.2.3-linux-amd64")
+	got, err := checksumForArtifact(strings.NewReader(manifest), "imas-v1.2.3-linux-amd64")
 	if err != nil {
 		t.Fatalf("checksumForArtifact returned error: %v", err)
 	}
@@ -274,8 +274,8 @@ func TestStageBinaryUsesExecutableDirectory(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
-	currentExe := filepath.Join(tempDir, "grlx")
-	newBinaryPath := filepath.Join(t.TempDir(), "new-grlx")
+	currentExe := filepath.Join(tempDir, "imas")
+	newBinaryPath := filepath.Join(t.TempDir(), "new-imas")
 
 	if err := os.WriteFile(currentExe, []byte("old"), 0o755); err != nil {
 		t.Fatal(err)
@@ -317,8 +317,8 @@ func TestCommitBinaryUpdateReplacesCurrentBinary(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
-	currentExe := filepath.Join(tempDir, "grlx")
-	stagedPath := filepath.Join(tempDir, ".grlx-update-test")
+	currentExe := filepath.Join(tempDir, "imas")
+	stagedPath := filepath.Join(tempDir, ".imas-update-test")
 
 	if err := os.WriteFile(currentExe, []byte("old"), 0o755); err != nil {
 		t.Fatal(err)
@@ -352,7 +352,7 @@ func TestCommitBinaryUpdateRestoresBackupOnInstallFailure(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
-	currentExe := filepath.Join(tempDir, "grlx")
+	currentExe := filepath.Join(tempDir, "imas")
 	missingStagedPath := filepath.Join(tempDir, ".missing-update")
 
 	if err := os.WriteFile(currentExe, []byte("old"), 0o755); err != nil {
@@ -388,7 +388,7 @@ func TestCommitBinaryUpdateDoesNotClobberExistingBackup(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
-	currentExe := filepath.Join(tempDir, "grlx")
+	currentExe := filepath.Join(tempDir, "imas")
 	existingBackup := currentExe + ".backup"
 	missingStagedPath := filepath.Join(tempDir, ".missing-update")
 

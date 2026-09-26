@@ -1,7 +1,7 @@
 package handlers
 
 // GET /v1/.well-known/fleet-signing-jwks.json — design doc §2.5. Serves
-// the public half of the grlx-fleet-signing OpenBao Transit key sprout
+// the public half of the imas-fleet-signing OpenBao Transit key sprout
 // releases are signed with, read through farmer's READ-ONLY Transit
 // token (internal/fleetsign). Same trust model as jwks.go's gateway JWKS:
 // public keys only, no auth. A sprout pins this key set at enrollment
@@ -11,7 +11,7 @@ package handlers
 import (
 	"net/http"
 
-	"github.com/gogrlx/grlx/v2/internal/fleetsign"
+	"github.com/yogzblr/imas/internal/fleetsign"
 )
 
 // fleetKeySource is set once at startup via SetFleetKeySource

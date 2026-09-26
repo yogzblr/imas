@@ -160,8 +160,8 @@ func TestEdgeCwd(t *testing.T) {
 }
 
 func TestEdgeEnvVars(t *testing.T) {
-	out, ok, err := runCmd(t, "env | grep GRLX_TEST_VAR", map[string]interface{}{
-		"env": []string{"GRLX_TEST_VAR=hello123"},
+	out, ok, err := runCmd(t, "env | grep IMAS_TEST_VAR", map[string]interface{}{
+		"env": []string{"IMAS_TEST_VAR=hello123"},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -169,7 +169,7 @@ func TestEdgeEnvVars(t *testing.T) {
 	if !ok {
 		t.Fatal("expected success")
 	}
-	if !strings.Contains(out, "GRLX_TEST_VAR=hello123") {
+	if !strings.Contains(out, "IMAS_TEST_VAR=hello123") {
 		t.Errorf("expected env var in output, got %q", out)
 	}
 }

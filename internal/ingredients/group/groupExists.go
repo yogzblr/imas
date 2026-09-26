@@ -5,11 +5,11 @@ import (
 	"errors"
 	"os/user"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 // lookupGroup is a test-overridable wrapper around user.LookupGroup. It is
-// implemented by the stdlib os/user package on every OS grlx targets, so
+// implemented by the stdlib os/user package on every OS imas targets, so
 // it is shared between the Unix and Windows providers rather than
 // reimplemented per platform.
 var lookupGroup = user.LookupGroup

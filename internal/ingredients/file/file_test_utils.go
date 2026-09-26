@@ -3,7 +3,7 @@ package file
 import (
 	"testing"
 
-	"github.com/gogrlx/grlx/v2/internal/cook"
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 func compareResults(t *testing.T, result cook.Result, expected cook.Result) {

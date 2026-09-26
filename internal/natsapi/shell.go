@@ -9,11 +9,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 
-	"github.com/gogrlx/grlx/v2/internal/audit"
-	intauth "github.com/gogrlx/grlx/v2/internal/auth"
-	"github.com/gogrlx/grlx/v2/internal/log"
-	"github.com/gogrlx/grlx/v2/internal/pki"
-	"github.com/gogrlx/grlx/v2/internal/shell"
+	"github.com/yogzblr/imas/internal/audit"
+	intauth "github.com/yogzblr/imas/internal/auth"
+	"github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/shell"
 )
 
 // sessionTracker tracks active shell sessions on the farmer for audit logging.

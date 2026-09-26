@@ -3,9 +3,9 @@ package natsapi
 import (
 	"encoding/json"
 
-	intauth "github.com/gogrlx/grlx/v2/internal/auth"
-	log "github.com/gogrlx/grlx/v2/internal/log"
-	"github.com/gogrlx/grlx/v2/internal/rbac"
+	intauth "github.com/yogzblr/imas/internal/auth"
+	log "github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/rbac"
 )
 
 // natsActionMap maps NATS API method names to RBAC actions.
