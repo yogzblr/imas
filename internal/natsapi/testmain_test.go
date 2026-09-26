@@ -75,6 +75,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	cook.SetStore(store)
+	testRecipeStore = store
 
 	code := m.Run()
 	closeStore()

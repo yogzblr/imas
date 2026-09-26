@@ -3,6 +3,7 @@ package cook
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"path/filepath"
 	"testing"
@@ -293,5 +294,36 @@ func TestStageRecipe_NoStore(t *testing.T) {
 	}
 	if err := UnstageRecipe(context.Background(), testTenantID, "w"); err != ErrRecipeStoreNotConfigured {
 		t.Errorf("UnstageRecipe: got %v, want ErrRecipeStoreNotConfigured", err)
+	}
+}
+
+// TestSendCookEvent_StageGuardFailure: when the stage guard fails, the
+// just-staged copy is removed and nothing is pushed.
+func TestSendCookEvent_StageGuardFailure(t *testing.T) {
+	newStageTestStore(t)
+	nc, cleanup := startCookTestNATS(t)
+	defer cleanup()
+	sproutID := "guarded-sprout"
+	pushed := ackCooks(t, nc, sproutID, true)
+
+	guardErr := errors.New("sprout replaced")
+	err := SendCookEvent(testTenantID, sproutID, "first", GenerateJobID(), false,
+		WithStageGuard(func() error {
+			// The copy is in place when the guard runs.
+			if ok, _ := store.Exists(context.Background(), mustStagedKey(t, testTenantID, sproutID)); !ok {
+				t.Error("guard ran before the recipe was staged")
+			}
+			return guardErr
+		}))
+	if !errors.Is(err, guardErr) {
+		t.Fatalf("SendCookEvent: got %v, want the guard's error", err)
+	}
+	if ok, _ := store.Exists(context.Background(), mustStagedKey(t, testTenantID, sproutID)); ok {
+		t.Error("staged copy left in place after the guard failed")
+	}
+	select {
+	case <-pushed:
+		t.Error("recipe was pushed although the guard failed")
+	default:
 	}
 }

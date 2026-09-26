@@ -107,8 +107,9 @@ func stageRecipe(ctx context.Context, tenantID, sproutID string, env RecipeEnvel
 }
 
 // UnstageRecipe removes sproutID's staged recipe, if any. Deleting a key
-// that doesn't exist is not an error. Call it when a sprout is deleted:
-// sprout IDs come from hostnames and are reused, so a new host enrolling
+// that doesn't exist is not an error. internal/natsapi's PKI handlers
+// call it when a sprout is deleted or its sprout ID is handed to a new
+// host: sprout IDs come from hostnames and are reused, so the next host
 // under the same (tenant_id, sprout_id) would otherwise be able to read
 // the recipe staged for the old one.
 func UnstageRecipe(ctx context.Context, tenantID, sproutID string) error {
