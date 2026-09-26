@@ -12,6 +12,9 @@ package pki
 // own route and rate-limit bucket, sized for the fleet's refresh volume,
 // so refreshes and first-time enrollments never compete for one budget.
 //
+// Each signed refresh request is single-use (claimSignedPayload,
+// replaycache.go), the same as an enrollment request.
+//
 // Every failure returns the same generic ErrEnrollmentFailed as Enroll
 // (design doc §3.4), for the same reason: no oracle distinguishing an
 // unknown nkey_pub from a bad signature or a stale timestamp.
@@ -56,7 +59,8 @@ func RefreshSigningPayload(timestamp int64, nkeyPub string) []byte {
 // RefreshSprout verifies req's proof of possession and, for an accepted
 // sprout, returns its existing NATS User JWT, a freshly minted gateway
 // JWT and the tenant X25519 public key. An unknown, denied, rejected or
-// deleted nkey_pub fails like every other failure.
+// deleted nkey_pub fails like every other failure, and so does a
+// resubmission of an earlier request.
 func RefreshSprout(ctx context.Context, req RefreshRequest) (*EnrollResult, error) {
 	if !nkeys.IsValidPublicUserKey(req.NKeyPub) {
 		log.Warnf("refresh: rejected malformed nkey_pub")
@@ -70,6 +74,12 @@ func RefreshSprout(ctx context.Context, req RefreshRequest) (*EnrollResult, erro
 	tenantID, sproutID, err := SproutIDAndTenantForNKey(req.NKeyPub)
 	if err != nil {
 		log.Warnf("refresh: nkey_pub %s is not an accepted sprout", req.NKeyPub)
+		return nil, ErrEnrollmentFailed
+	}
+	// Claimed only once the nkey_pub is known to be an accepted sprout's,
+	// so a caller signing with a throwaway NKey can't write rows.
+	if err := claimSignedPayload(payload, req.Timestamp); err != nil {
+		log.Warnf("refresh: rejected resubmitted or unrecordable signed request for nkey_pub %s: %v", req.NKeyPub, err)
 		return nil, ErrEnrollmentFailed
 	}
 	res, err := reissueExistingIdentity(ctx, tenantID, sproutID, req.NKeyPub)

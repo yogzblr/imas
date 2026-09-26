@@ -101,7 +101,10 @@ func testNKeyPub(t *testing.T, kp nkeys.KeyPair) string {
 
 // signedEnroll builds an EnrollRequest carrying a valid proof of
 // possession: kp's signature over EnrollSigningPayload at the current
-// time, exactly as a real sprout would send it.
+// time, exactly as a real sprout would send it. Its timestamp comes from
+// nextSigningTimestamp, as the real client's does, so two calls in the
+// same second build two distinct requests rather than one request the
+// replay cache would reject the second time.
 func signedEnroll(t *testing.T, kp nkeys.KeyPair, joinToken, hostname, sproutPub string) EnrollRequest {
 	t.Helper()
 	req := EnrollRequest{
@@ -109,7 +112,7 @@ func signedEnroll(t *testing.T, kp nkeys.KeyPair, joinToken, hostname, sproutPub
 		NKeyPub:   testNKeyPub(t, kp),
 		Hostname:  hostname,
 		SproutPub: sproutPub,
-		Timestamp: time.Now().Unix(),
+		Timestamp: nextSigningTimestamp(),
 	}
 	sig, err := kp.Sign(EnrollSigningPayload(req.Timestamp, req.NKeyPub, req.Hostname, req.SproutPub, req.JoinToken))
 	if err != nil {

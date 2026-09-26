@@ -10,10 +10,11 @@ import (
 )
 
 // signedRefresh builds a RefreshRequest with a valid proof of possession
-// for kp at the current time.
+// for kp at the current time, with a distinct timestamp per call (see
+// signedEnroll).
 func signedRefresh(t *testing.T, kp nkeys.KeyPair) RefreshRequest {
 	t.Helper()
-	req := RefreshRequest{NKeyPub: testNKeyPub(t, kp), Timestamp: time.Now().Unix()}
+	req := RefreshRequest{NKeyPub: testNKeyPub(t, kp), Timestamp: nextSigningTimestamp()}
 	sig, err := kp.Sign(RefreshSigningPayload(req.Timestamp, req.NKeyPub))
 	if err != nil {
 		t.Fatal(err)

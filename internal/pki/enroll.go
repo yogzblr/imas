@@ -10,7 +10,9 @@ package pki
 // valid, unexhausted join token is the only authorization check between
 // an anonymous caller and a new signed sprout identity. For an
 // already-enrolled nkey_pub, that proof of possession is the only check
-// before its identity is replayed.
+// before its identity is replayed. Each signed request is single-use
+// (claimSignedPayload, replaycache.go), so a captured one can't be
+// resubmitted while its timestamp is still inside the skew window.
 //
 // Every failure path in Enroll returns the single generic
 // ErrEnrollmentFailed sentinel (design doc §3.4) — unknown key_id,
@@ -199,17 +201,20 @@ func EnrollSigningPayload(timestamp int64, nkeyPub, hostname, sproutPub, joinTok
 }
 
 // verifyNKeyPossession checks req.NKeySig against req.NKeyPub over
-// EnrollSigningPayload, and req.Timestamp against EnrollSigMaxSkew. The
-// error is for local logging only; Enroll collapses it to
-// ErrEnrollmentFailed.
-func verifyNKeyPossession(req EnrollRequest) error {
+// EnrollSigningPayload, and req.Timestamp against EnrollSigMaxSkew, and
+// returns the verified payload for claimSignedPayload. The error is for
+// local logging only; Enroll collapses it to ErrEnrollmentFailed.
+func verifyNKeyPossession(req EnrollRequest) ([]byte, error) {
 	for _, f := range []string{req.NKeyPub, req.Hostname, req.SproutPub, req.JoinToken} {
 		if strings.ContainsRune(f, '\n') {
-			return errors.New("a signed field contains a newline")
+			return nil, errors.New("a signed field contains a newline")
 		}
 	}
 	payload := EnrollSigningPayload(req.Timestamp, req.NKeyPub, req.Hostname, req.SproutPub, req.JoinToken)
-	return verifyTimestampedNKeySig(req.NKeyPub, req.Timestamp, req.NKeySig, payload)
+	if err := verifyTimestampedNKeySig(req.NKeyPub, req.Timestamp, req.NKeySig, payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
 }
 
 // verifyTimestampedNKeySig checks that timestamp is within
@@ -269,7 +274,8 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 	// join-token holder could register a nkey_pub whose seed they don't
 	// hold, and when the real owner later enrolls, replay would place its
 	// sprout in their tenant.
-	if err := verifyNKeyPossession(req); err != nil {
+	signedPayload, err := verifyNKeyPossession(req)
+	if err != nil {
 		log.Warnf("enroll: rejected proof of possession for nkey_pub %s: %v", nkeyPub, err)
 		return nil, ErrEnrollmentFailed
 	}
@@ -286,6 +292,10 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 	// unambiguously identifies both the sprout and its tenant if it's been
 	// accepted before.
 	if replayTenantID, sproutID, err := SproutIDAndTenantForNKey(nkeyPub); err == nil {
+		if err := claimSignedPayload(signedPayload, req.Timestamp); err != nil {
+			log.Warnf("enroll: rejected resubmitted or unrecordable signed request for nkey_pub %s: %v", nkeyPub, err)
+			return nil, ErrEnrollmentFailed
+		}
 		return replayExistingEnrollment(ctx, replayTenantID, sproutID, nkeyPub)
 	}
 
@@ -358,6 +368,18 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 	// seam every admin/CLI-driven lifecycle function (AcceptNKey and
 	// friends) still uses — see store.go's tenantID() doc comment for why
 	// that placeholder remains elsewhere.
+	//
+	// The signed request is claimed first, so that of two identical
+	// requests racing past the idempotency check above, only one goes on
+	// to redeem and mint; a later resubmission of it takes the replay path
+	// above and fails its claim there. Claimed here, only after the join
+	// token has checked out, rather than straight after
+	// verifyNKeyPossession: anyone can sign with a freshly generated NKey,
+	// so claiming earlier would let unauthenticated callers write rows.
+	if err := claimSignedPayload(signedPayload, req.Timestamp); err != nil {
+		log.Warnf("enroll: rejected resubmitted or unrecordable signed request for nkey_pub %s: %v", nkeyPub, err)
+		return nil, ErrEnrollmentFailed
+	}
 	redeemed, err := enrollKeyStore.redeem(keyID)
 	if err != nil {
 		log.Errorf("enroll: redeeming key_id %s: %v", keyID, err)
@@ -418,8 +440,10 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 
 // replayExistingEnrollment handles design doc §3.3 step 1: an already-
 // accepted nkey_pub gets its existing identity back, no token touched.
-// Enroll only calls it after verifyNKeyPossession has passed; the caller
-// has proven it holds nkeyPub's seed, not just that it knows nkeyPub.
+// Enroll only calls it after verifyNKeyPossession has passed and the
+// signed request has been claimed; the caller has proven it holds
+// nkeyPub's seed, not just that it knows nkeyPub, and isn't resubmitting
+// an earlier request.
 // The gateway JWT is still minted fresh — see EnrollResult.GatewayJWT's
 // doc comment on why it isn't cached like the NATS JWT is. tenantID is the
 // tenant SproutIDAndTenantForNKey found this sprout under, not necessarily
@@ -436,7 +460,8 @@ func replayExistingEnrollment(ctx context.Context, tenantID, sproutID, nkeyPub s
 // reissueExistingIdentity returns an accepted sprout's existing NATS User
 // JWT and the tenant X25519 public key, with a freshly minted gateway
 // JWT. Shared by the enrollment replay path and RefreshSprout; callers
-// must have verified the caller's proof of possession of nkeyPub first.
+// must have verified the caller's proof of possession of nkeyPub, and
+// claimed its signed payload (claimSignedPayload), first.
 func reissueExistingIdentity(ctx context.Context, tenantID, sproutID, nkeyPub string) (*EnrollResult, error) {
 	existingJWT, err := GetSproutUserJWTForTenant(tenantID, sproutID)
 	if err != nil {
