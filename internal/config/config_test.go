@@ -712,3 +712,96 @@ func TestStaticProps_Empty(t *testing.T) {
 		t.Errorf("StaticProps() = %v, want empty", props)
 	}
 }
+
+func TestLoadConfig_SproutEnrollmentPaths(t *testing.T) {
+	tmpRoot := t.TempDir()
+	cfgFile := writeTempConfig(t, tmpRoot, "sprout", "")
+	resetForBinaryTest(t, tmpRoot)
+	jety.SetConfigType("yaml")
+	jety.SetConfigFile(cfgFile)
+	_ = jety.ReadInConfig()
+
+	LoadConfig("sprout")
+
+	want := map[string]string{
+		"SproutUserJWTFile":         SproutUserJWTFile,
+		"SproutGatewayJWTFile":      SproutGatewayJWTFile,
+		"SproutTenantX25519PubFile": SproutTenantX25519PubFile,
+		"SproutBoxPrivFile":         SproutBoxPrivFile,
+		"SproutBoxPubFile":          SproutBoxPubFile,
+	}
+	names := map[string]string{
+		"SproutUserJWTFile":         "sprout.jwt",
+		"SproutGatewayJWTFile":      "gateway.jwt",
+		"SproutTenantX25519PubFile": "tenant-x25519.pub",
+		"SproutBoxPrivFile":         "sprout-x25519.key",
+		"SproutBoxPubFile":          "sprout-x25519.pub",
+	}
+	for field, got := range want {
+		if exp := filepath.Join(tmpRoot, "pki/sprout", names[field]); got != exp {
+			t.Errorf("%s = %q, want %q", field, got, exp)
+		}
+	}
+	if GatewayJWTTTL != 24*time.Hour {
+		t.Errorf("GatewayJWTTTL = %s, want 24h", GatewayJWTTTL)
+	}
+}
+
+func TestLoadConfig_SproutJoinToken(t *testing.T) {
+	cases := []struct {
+		name, file, env, want string
+		setEnv                bool
+	}{
+		{name: "unset", want: ""},
+		{name: "from config file", file: "jointoken: ek_file.secret\n", want: "ek_file.secret"},
+		{name: "env overrides file", file: "jointoken: ek_file.secret\n", env: "ek_env.secret\n", setEnv: true, want: "ek_env.secret"},
+		{name: "empty env falls back to file", file: "jointoken: ek_file.secret\n", env: "", setEnv: true, want: "ek_file.secret"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.setEnv {
+				t.Setenv(EnvJoinToken, c.env)
+			} else {
+				t.Setenv(EnvJoinToken, "")
+				os.Unsetenv(EnvJoinToken)
+			}
+			tmpRoot := t.TempDir()
+			cfgFile := writeTempConfig(t, tmpRoot, "sprout", c.file)
+			resetForBinaryTest(t, tmpRoot)
+			jety.SetConfigType("yaml")
+			jety.SetConfigFile(cfgFile)
+			_ = jety.ReadInConfig()
+
+			LoadConfig("sprout")
+
+			if JoinToken != c.want {
+				t.Errorf("JoinToken = %q, want %q", JoinToken, c.want)
+			}
+		})
+	}
+}
+
+// A join token from the environment is a secret and must not end up in
+// the config file LoadConfig rewrites.
+func TestLoadConfig_SproutJoinTokenFromEnvNotPersisted(t *testing.T) {
+	t.Setenv(EnvJoinToken, "ek_env.topsecret")
+	tmpRoot := t.TempDir()
+	cfgFile := writeTempConfig(t, tmpRoot, "sprout", "")
+	resetForBinaryTest(t, tmpRoot)
+	jety.SetConfigType("yaml")
+	jety.SetConfigFile(cfgFile)
+	_ = jety.ReadInConfig()
+
+	LoadConfig("sprout")
+
+	if JoinToken != "ek_env.topsecret" {
+		t.Fatalf("JoinToken = %q", JoinToken)
+	}
+	b, err := os.ReadFile(cfgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "topsecret") {
+		t.Errorf("join token from the environment was written to the config file:\n%s", b)
+	}
+}

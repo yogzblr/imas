@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"flag"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -44,26 +46,50 @@ var (
 )
 
 func main() {
+	joinToken := flag.String("join-token", "",
+		"join token for first-time enrollment; overrides "+config.EnvJoinToken+" and the config file's jointoken. "+
+			"Visible to other local users in the process list, so prefer the environment variable or config file")
+	flag.Parse()
 	if err := os.MkdirAll(config.CacheDir, 0o755); err != nil {
 		log.Fatalf("failed to create cache directory %s: %v", config.CacheDir, err)
 	}
 	config.LoadConfig("sprout")
+	if *joinToken != "" {
+		config.JoinToken = *joinToken
+	}
 	defer log.Flush()
 	if err := certs.GenNKey(false); err != nil {
 		log.Fatalf("failed to generate sprout NKey: %v", err)
 	}
+	sproutPub, err := pki.EnsureSproutBoxKey()
+	if err != nil {
+		log.Fatalf("failed to generate sprout X25519 key: %v", err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 	rootCARetryDelay := jety.GetDuration("rootca_retry_delay")
 	for err := pki.LoadRootCA("sprout"); err != nil; err = pki.LoadRootCA("sprout") {
 		log.Debugf("Error with RootCA: %v", err)
 		time.Sleep(rootCARetryDelay)
 	}
-	nkeyRetryDelay := jety.GetDuration("nkey_retry_delay")
-	for err := pki.PutNKey(sproutID); err != nil; err = pki.PutNKey(sproutID) {
-		log.Debugf("Error submitting NKey: %v", err)
-		time.Sleep(nkeyRetryDelay)
+	enrollRetryDelay := jety.GetDuration("enroll_retry_delay")
+	enrolledID, err := pki.EnsureEnrolled(ctx, config.JoinToken, sproutID, sproutPub, enrollRetryDelay)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		log.Fatalf("enrollment: %v", err)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	if enrolledID != sproutID {
+		log.Noticef("farmer assigned sprout ID %q (requested %q)", enrolledID, sproutID)
+		config.SetSproutID(enrolledID)
+		sproutID = enrolledID
+	}
+	if _, err := pki.LoadGatewayJWT(); err != nil {
+		// Not fatal: the refresher below replaces a missing token first.
+		log.Warnf("no persisted gateway JWT: %v", err)
+	}
+	go pki.RunGatewayJWTRefresher(ctx, sproutID, sproutPub, enrollRetryDelay)
 	done := make(chan struct{})
 	go ConnectSprout(ctx, done)
 	<-ctx.Done()
@@ -103,10 +129,21 @@ func ConnectSprout(ctx context.Context, done chan<- struct{}) {
 	// config package identifier.
 	jobLogDir := config.JobLogDir
 	jobLogTTL := config.JobLogTTL
-	opt, err := nats.NkeyOptionFromSeed(config.NKeySproutPrivFile)
+	// Operator-mode nats-server needs the NATS User JWT from enrollment
+	// alongside the NKey seed that signs the CONNECT nonce, the same
+	// pairing the repo's bus integration tests connect with.
+	userJWT, err := pki.LoadSproutUserJWT()
+	if err != nil {
+		log.Panicf("failed to load NATS User JWT: %v", err)
+	}
+	seed, err := os.ReadFile(config.NKeySproutPrivFile)
 	if err != nil {
 		log.Panicf("failed to load NKey seed: %v", err)
 	}
+	opt := nats.UserJWTAndSeed(userJWT, strings.TrimSpace(string(seed)))
+	// Presents the current gateway JWT to Envoy's jwt_authn on each
+	// websocket handshake. Only consulted when the bus URL is ws(s)://.
+	wsAuth := nats.WebSocketConnectionHeadersHandler(pki.GatewayJWTHeaders)
 	certPool := x509.NewCertPool()
 	rootPEM, err := os.ReadFile(SproutRootCA)
 	if err != nil || rootPEM == nil {
@@ -121,7 +158,7 @@ func ConnectSprout(ctx context.Context, done chan<- struct{}) {
 		RootCAs:    certPool,
 		MinVersion: tls.VersionTLS12,
 	}
-	nc, err := nats.Connect(FarmerBusURL, nats.Secure(config), opt,
+	nc, err := nats.Connect(FarmerBusURL, nats.Secure(config), opt, wsAuth,
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(time.Second*15),
 		nats.DisconnectHandler(func(_ *nats.Conn) {
@@ -134,7 +171,7 @@ func ConnectSprout(ctx context.Context, done chan<- struct{}) {
 			return
 		case <-time.After(time.Second * 15):
 		}
-		nc, err = nats.Connect(FarmerBusURL, nats.Secure(config), opt,
+		nc, err = nats.Connect(FarmerBusURL, nats.Secure(config), opt, wsAuth,
 			nats.MaxReconnects(-1),
 			nats.ReconnectWait(time.Second*15),
 			nats.DisconnectHandler(func(_ *nats.Conn) {

@@ -88,6 +88,36 @@ var (
 	// selfupdate ingredient verifies every release against it.
 	SproutFleetSigningJWKS string
 
+	// JoinToken is the "{key_id}.{secret}" enrollment key a sprout
+	// presents to POST /v1/enroll the first time it enrolls
+	// (docs/design/imas-envoy-enrollment-design.md). Whoever provisions
+	// the sprout (e.g. an Ansible playbook) picks the source: the
+	// "jointoken" key in the sprout config file, the IMAS_JOIN_TOKEN
+	// environment variable (which wins over the file), or the sprout's
+	// --join-token flag (which wins over both; cmd/sprout sets it after
+	// LoadConfig). It is a secret, so it is never written back to the
+	// config file by LoadConfig. Only needed until the sprout has enrolled
+	// once; after that the sprout authenticates with its NKey and the
+	// persisted SproutUserJWTFile, and the token can be removed.
+	JoinToken string
+
+	// SproutUserJWTFile, SproutGatewayJWTFile and
+	// SproutTenantX25519PubFile are where a sprout persists the NATS User
+	// JWT, the gateway JWT and the tenant's X25519 box public key from
+	// POST /v1/enroll's response — next to NKeySproutPrivFile and
+	// SproutRootCA (pki.PersistEnrollment). SproutUserJWTFile is written
+	// last, so its presence is what marks the sprout as enrolled.
+	SproutUserJWTFile         string
+	SproutGatewayJWTFile      string
+	SproutTenantX25519PubFile string
+
+	// SproutBoxPrivFile/SproutBoxPubFile hold the sprout's own X25519
+	// box keypair (docs/design/imas-payload-encryption-design.md,
+	// "Bootstrap"), generated locally and once (pki.EnsureSproutBoxKey).
+	// The private half never leaves the sprout.
+	SproutBoxPrivFile string
+	SproutBoxPubFile  string
+
 	// GatewayJWTTTL bounds how long a minted gateway JWT
 	// (internal/gatewayjwt) stays valid. Short by design: Envoy's
 	// jwt_authn has no live revocation check of its own, so this expiry
@@ -375,8 +405,18 @@ func LoadConfig(binary string) {
 			jety.SetDefault("joblogttl", 30*24*time.Hour) // 30 days default
 			jety.SetDefault("nkeysproutprivfile", filepath.Join(systemConfigRoot, "pki/sprout/sprout.nkey"))
 			jety.SetDefault("cachedir", "/var/cache/imas/sprout/files/provided")
+			jety.SetDefault("sproutuserjwtfile", filepath.Join(systemConfigRoot, "pki/sprout/sprout.jwt"))
+			jety.SetDefault("sproutgatewayjwtfile", filepath.Join(systemConfigRoot, "pki/sprout/gateway.jwt"))
+			jety.SetDefault("sprouttenantx25519pubfile", filepath.Join(systemConfigRoot, "pki/sprout/tenant-x25519.pub"))
+			jety.SetDefault("sproutboxprivfile", filepath.Join(systemConfigRoot, "pki/sprout/sprout-x25519.key"))
+			jety.SetDefault("sproutboxpubfile", filepath.Join(systemConfigRoot, "pki/sprout/sprout-x25519.pub"))
+			// Farmer's default; a sprout schedules gateway JWT refreshes
+			// from each token's own iat/exp and only falls back to this
+			// when a token doesn't carry them.
+			jety.SetDefault("gatewayjwtttl", 24*time.Hour)
 			jety.SetDefault("rootca_retry_delay", 5*time.Second)
 			jety.SetDefault("nkey_retry_delay", 5*time.Second)
+			jety.SetDefault("enroll_retry_delay", 5*time.Second)
 
 			JobLogDir = jety.GetString("joblogdir")
 			JobLogTTL = jety.GetDuration("joblogttl")
@@ -436,6 +476,12 @@ func LoadConfig(binary string) {
 	SproutPKI = jety.GetString("sproutpki")
 	SproutRootCA = jety.GetString("sproutrootca")
 	SproutFleetSigningJWKS = jety.GetString("sproutfleetsigningjwks")
+	SproutUserJWTFile = jety.GetString("sproutuserjwtfile")
+	SproutGatewayJWTFile = jety.GetString("sproutgatewayjwtfile")
+	SproutTenantX25519PubFile = jety.GetString("sprouttenantx25519pubfile")
+	SproutBoxPrivFile = jety.GetString("sproutboxprivfile")
+	SproutBoxPubFile = jety.GetString("sproutboxpubfile")
+	JoinToken = resolveJoinToken()
 	RecipeDir = jety.GetString("recipedir")
 	if RecipeDir == "" {
 		RecipeDir = filepath.Join("/", "srv", "imas", "recipes", "prod")
@@ -449,6 +495,23 @@ func LoadConfig(binary string) {
 	S3Bucket = jety.GetString("s3bucket")
 	S3JobBucket = jety.GetString("s3jobbucket")
 	SproutBusURLs = jety.GetStringSlice("sproutbusurls")
+}
+
+// EnvJoinToken is the environment variable a sprout reads its join
+// token from (see JoinToken).
+const EnvJoinToken = "IMAS_JOIN_TOKEN"
+
+// resolveJoinToken returns the join token from IMAS_JOIN_TOKEN if set,
+// else from the config file's "jointoken" key. Read straight from the
+// environment rather than jety.Set, which LoadConfig's WriteConfig would
+// then persist to the config file. Surrounding whitespace is trimmed, so
+// a token written to a file or variable with a trailing newline still
+// works.
+func resolveJoinToken() string {
+	if v, found := os.LookupEnv(EnvJoinToken); found && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	return strings.TrimSpace(jety.GetString("jointoken"))
 }
 
 // BasePathValid checks that the configured recipe directory exists.
