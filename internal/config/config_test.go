@@ -1029,3 +1029,40 @@ func TestLoadConfig_FarmerJobReconcileWindowInvalid(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadConfig_SproutBusURLs(t *testing.T) {
+	cases := map[string]struct {
+		content string
+		want    []string
+	}{
+		"unset":        {"sproutid: s1\n", nil},
+		"yaml list":    {"busurls:\n  - wss://edge1:8443\n  - \" wss://edge2:8443 \"\n", []string{"wss://edge1:8443", "wss://edge2:8443"}},
+		"comma string": {"busurls: \"wss://edge1:8443, wss://edge2:8443,\"\n", []string{"wss://edge1:8443", "wss://edge2:8443"}},
+		"empty list":   {"busurls: []\n", nil},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			tmpRoot := t.TempDir()
+			cfgFile := writeTempConfig(t, tmpRoot, "sprout", tc.content)
+			resetForBinaryTest(t, tmpRoot)
+			jety.SetConfigType("yaml")
+			jety.SetConfigFile(cfgFile)
+			_ = jety.ReadInConfig()
+			BusURLs = nil
+
+			LoadConfig("sprout")
+
+			if len(BusURLs) != len(tc.want) {
+				t.Fatalf("BusURLs = %q, want %q", BusURLs, tc.want)
+			}
+			for i := range tc.want {
+				if BusURLs[i] != tc.want[i] {
+					t.Fatalf("BusURLs = %q, want %q", BusURLs, tc.want)
+				}
+			}
+			if want := filepath.Join(tmpRoot, "pki/sprout/bus-urls.json"); SproutBusURLsFile != want {
+				t.Errorf("SproutBusURLsFile = %q, want %q", SproutBusURLsFile, want)
+			}
+		})
+	}
+}

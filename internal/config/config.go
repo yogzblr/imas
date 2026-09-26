@@ -125,6 +125,21 @@ var (
 	SproutGatewayJWTFile      string
 	SproutTenantX25519PubFile string
 
+	// SproutBusURLsFile ("sproutbusurlsfile", sprout only) is where a
+	// sprout persists POST /v1/enroll's nats_urls, the bus addresses
+	// farmer told it to connect to (farmer's SproutBusURLs), next to the
+	// User JWT and gateway JWT (pki.PersistEnrollment). pki.LoadSproutBus
+	// connects to them in preference to FarmerBusURL.
+	SproutBusURLsFile string
+
+	// BusURLs ("busurls" in the sprout config file, sprout only) pins the
+	// bus addresses a sprout connects to, overriding both the enrolled
+	// nats_urls (SproutBusURLsFile) and the legacy FarmerBusURL: for
+	// installs that don't want the address farmer hands out at
+	// enrollment, or that enrolled before farmer handed one out. A YAML
+	// list or a comma-separated string. Empty by default.
+	BusURLs []string
+
 	// SproutBoxPrivFile/SproutBoxPubFile hold the sprout's own X25519
 	// box keypair (docs/design/imas-payload-encryption-design.md,
 	// "Bootstrap"), generated locally and once (pki.EnsureSproutBoxKey).
@@ -468,6 +483,7 @@ func LoadConfig(binary string) {
 			jety.SetDefault("sproutuserjwtfile", filepath.Join(systemConfigRoot, "pki/sprout/sprout.jwt"))
 			jety.SetDefault("sproutgatewayjwtfile", filepath.Join(systemConfigRoot, "pki/sprout/gateway.jwt"))
 			jety.SetDefault("sprouttenantx25519pubfile", filepath.Join(systemConfigRoot, "pki/sprout/tenant-x25519.pub"))
+			jety.SetDefault("sproutbusurlsfile", filepath.Join(systemConfigRoot, "pki/sprout/bus-urls.json"))
 			jety.SetDefault("sproutboxprivfile", filepath.Join(systemConfigRoot, "pki/sprout/sprout-x25519.key"))
 			jety.SetDefault("sproutboxpubfile", filepath.Join(systemConfigRoot, "pki/sprout/sprout-x25519.pub"))
 			// Farmer's default; a sprout schedules gateway JWT refreshes
@@ -486,6 +502,7 @@ func LoadConfig(binary string) {
 			GatewayJWTRefreshMargin = jety.GetDuration("gatewayjwtrefreshmargin")
 			StagedRecipeMaxAge = jety.GetDuration("stagedrecipemaxage")
 			SproutHandledJobsFile = jety.GetString("sprouthandledjobsfile")
+			BusURLs = stringList(jety.Get("busurls"))
 
 			// The sprout config file can hold the join token. os.Create
 			// (above, and in jety.WriteConfig) leaves a new file 0644
@@ -556,6 +573,7 @@ func LoadConfig(binary string) {
 	SproutUserJWTFile = jety.GetString("sproutuserjwtfile")
 	SproutGatewayJWTFile = jety.GetString("sproutgatewayjwtfile")
 	SproutTenantX25519PubFile = jety.GetString("sprouttenantx25519pubfile")
+	SproutBusURLsFile = jety.GetString("sproutbusurlsfile")
 	SproutBoxPrivFile = jety.GetString("sproutboxprivfile")
 	SproutBoxPubFile = jety.GetString("sproutboxpubfile")
 	JoinToken, JoinTokenSource = resolveJoinToken()
@@ -572,6 +590,32 @@ func LoadConfig(binary string) {
 	S3Bucket = jety.GetString("s3bucket")
 	S3JobBucket = jety.GetString("s3jobbucket")
 	SproutBusURLs = jety.GetStringSlice("sproutbusurls")
+}
+
+// stringList reads a config value that may be written as a YAML list or
+// as a comma-separated string, trimming entries and dropping empty ones.
+// Anything else (unset, a number, a map) is an empty list.
+func stringList(v any) []string {
+	var list []string
+	switch v := v.(type) {
+	case string:
+		list = strings.Split(v, ",")
+	case []string:
+		list = v
+	case []any:
+		for _, e := range v {
+			if s, ok := e.(string); ok {
+				list = append(list, s)
+			}
+		}
+	}
+	var out []string
+	for _, s := range list {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // JoinTokenOrigin is where a sprout's join token came from.

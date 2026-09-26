@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -68,6 +69,7 @@ func TestEnrollClient_AgainstHandler(t *testing.T) {
 		&config.SproutBoxPrivFile:         "sprout-x25519.key",
 		&config.SproutBoxPubFile:          "sprout-x25519.pub",
 		&config.SproutFleetSigningJWKS:    "fleet-signing-jwks.json",
+		&config.SproutBusURLsFile:         "bus-urls.json",
 	}
 	for p, name := range paths {
 		old := *p
@@ -115,6 +117,11 @@ func TestEnrollClient_AgainstHandler(t *testing.T) {
 	}
 	if _, err := pki.LoadPinnedFleetSigningKeys(); err != nil {
 		t.Errorf("fleet signing keys not pinned: %v", err)
+	}
+	// The handler's nats_urls pass the client's validation and are what
+	// the sprout's bus connection dials.
+	if urls, src, err := pki.ResolveSproutBusURLs(); err != nil || src != pki.BusURLsFromEnrollment || !slices.Equal(urls, resp.NatsURLs) {
+		t.Errorf("persisted nats_urls: %q from %q (%v), want %q", urls, src, err, resp.NatsURLs)
 	}
 
 	id, err := pki.RefreshGatewayJWT(t.Context())
