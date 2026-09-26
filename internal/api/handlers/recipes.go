@@ -38,8 +38,12 @@ func SetRecipeStore(s *objectstore.Store) { recipeStore = s }
 // client-side provider — a bearer token in the Authorization header (see
 // Auth in middleware.go), a GET request, and the raw bytes back — for the
 // route sprouts already know as the farmer:// scheme's read path.
+//
+// A sprout authenticating with its gateway JWT (rather than a CLI token)
+// may only read keys under SproutFilePrefix for its own (tenant_id,
+// sprout_id) — enforced by Auth before this handler runs.
 func GetFile(w http.ResponseWriter, r *http.Request) {
-	key := strings.TrimPrefix(r.URL.Path, "/files/")
+	key := FileKey(r)
 	if key == "" || strings.HasSuffix(r.URL.Path, "/") {
 		http.NotFound(w, r)
 		return
@@ -62,6 +66,26 @@ func GetFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.WriteHeader(http.StatusOK)
 	w.Write(data)
+}
+
+// FileKey returns the object key a GET /files/<key> request names. Auth
+// and GetFile both derive the key through this, so the key Auth
+// authorizes is exactly the key GetFile reads.
+func FileKey(r *http.Request) string {
+	return strings.TrimPrefix(r.URL.Path, "/files/")
+}
+
+// sproutFileRoot is the top-level key prefix under which each sprout's
+// own files live, one subtree per (tenant_id, sprout_id).
+const sproutFileRoot = "sprouts/"
+
+// SproutFilePrefix returns the key prefix a sprout's gateway JWT
+// grants read access to: sprouts/<tenant_id>/<sprout_id>/. Keyed on the
+// (tenant_id, sprout_id) pair, never sprout_id alone, since a sprout_id
+// is only unique within its tenant. The trailing slash keeps "web-01"
+// from also matching "web-010".
+func SproutFilePrefix(tenantID, sproutID string) string {
+	return sproutFileRoot + tenantID + "/" + sproutID + "/"
 }
 
 // RecipeInfo represents a recipe file in the listing.

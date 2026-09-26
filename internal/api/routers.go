@@ -18,11 +18,13 @@ import (
 //     gateway JWT, on the same design doc.
 //   - File serving: sprouts download recipe files via the farmer:// scheme,
 //     read from object storage (see handlers.SetRecipeStore) rather than
-//     local disk — docs/design/imas-master-plan.md Phase 1.
+//     local disk — docs/design/imas-master-plan.md Phase 1. Behind
+//     workstream H's Envoy JWT gate (deploy/envoy/envoy.yaml's /files/
+//     route); Auth accepts a sprout's gateway JWT here, scoped to that
+//     sprout's own keys (handlers.SproutFilePrefix).
 //   - Recipe browsing (GET /v1/recipes, GET /v1/recipes/{name...}): the
 //     dot-notation list/get surface used by the imas CLI and web UI,
-//     behind workstream H's Envoy JWT gate (deploy/envoy/envoy.yaml's
-//     /v1/recipes route) — replaces the old NATS-based
+//     CLI-token auth only, not routed through Envoy — replaces the old NATS-based
 //     internal/natsapi/recipes.go per
 //     docs/design/imas-fork-roadmap.md workstream I.
 //   - Health checks: unauthenticated /health (liveness) and /ready
