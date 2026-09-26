@@ -1,10 +1,16 @@
 name: Snapshot Build
 
+# Manual-only for now: this needs GPG_PRIVATE_KEY/GPG_PASSPHRASE/GORELEASER_KEY
+# (goreleaser-pro) configured as repo secrets, which don't exist yet on the
+# new imas repo (they lived on the original project's infra, not this fork's).
+# Re-enable the push/pull_request triggers below once those secrets are set
+# on yogzblr/imas.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
+  # push:
+  #   branches: [main]
+  # pull_request:
+  #   branches: [main]
 
 jobs:
   snapshot:
