@@ -6,6 +6,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -306,38 +308,115 @@ func NKeyExists(tenantID, id string, nkey string) (Registered bool, Matches bool
 	return NKeyExistsInTenant(tenantID, id, nkey)
 }
 
+// maxRootCABytes caps how much of a /auth/cert/ response FetchRootCA reads.
+// A root CA bundle is a few KiB; anything past this is not one.
+const maxRootCABytes = 1 << 20
+
+// FetchRootCA pins the farmer's root CA at filename by trust on first use:
+// it fetches https://<FarmerInterface>:<FarmerAPIPort>/auth/cert/ without
+// verifying the server, since there is no trusted certificate to verify
+// against yet. If filename already exists it is kept as is and nothing is
+// fetched, so whatever lands here is what every later connection trusts.
+//
+// The response is therefore only written when it is a 200 whose body is
+// one or more PEM certificates and nothing else (validateRootCAPEM). It
+// goes to a temporary file in the same directory first and is then linked
+// into place (writeFileOnce), so a failed request, an error page (e.g. a
+// DMZ proxy's "401 Jwt is missing") or a truncated body never becomes the
+// pinned CA, and an existing file is never replaced. On any failure
+// filename is left absent and the next call fetches again.
 func FetchRootCA(filename string) error {
-	RootCA := filename
-	_, err := os.Stat(RootCA)
+	_, err := os.Stat(filename)
 	if err == nil {
-		return err
+		return nil
 	}
 	if !os.IsNotExist(err) {
 		return err
 	}
-	file, err := os.Create(RootCA)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
 	// InsecureSkipVerify is intentional: this is the TLS bootstrap path where
 	// the sprout fetches the farmer's root CA for the first time. There is no
 	// trusted certificate to verify against yet.
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // TLS bootstrap
 	}
-	client := &http.Client{Transport: tr, Timeout: time.Second * 10}
-	r, err := client.Get(fmt.Sprintf("https://%s:%s/auth/cert/", config.FarmerInterface, config.FarmerAPIPort))
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   time.Second * 10,
+		// A redirect would only move the unverified fetch somewhere else;
+		// surface it as a non-200 instead of following it.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	certURL := fmt.Sprintf("https://%s:%s/auth/cert/", config.FarmerInterface, config.FarmerAPIPort)
+	r, err := client.Get(certURL)
 	if err != nil {
-		os.Remove(RootCA)
 		return err
 	}
 	defer r.Body.Close()
-	_, err = io.Copy(file, r.Body)
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxRootCABytes+1))
 	if err != nil {
-		os.Remove(RootCA)
+		return fmt.Errorf("%w: reading %s: %w", ErrRootCAFetch, certURL, err)
 	}
-	return err
+	if r.StatusCode != http.StatusOK {
+		return fmt.Errorf("%w: %s returned %s: %q", ErrRootCAFetch, certURL, r.Status, snippet(body))
+	}
+	if len(body) > maxRootCABytes {
+		return fmt.Errorf("%w: %s returned more than %d bytes", ErrRootCAFetch, certURL, maxRootCABytes)
+	}
+	if err := validateRootCAPEM(body); err != nil {
+		return fmt.Errorf("%w: %s: %w", ErrRootCAFetch, certURL, err)
+	}
+	// writeFileOnce never replaces an existing file, so a CA provisioned
+	// out of band (or by a concurrent fetch) while this one was in flight
+	// is kept rather than overwritten.
+	if err := writeFileOnce(filename, body, 0o644); err != nil && !os.IsExist(err) {
+		return err
+	}
+	return nil
+}
+
+// validateRootCAPEM reports whether data is one or more PEM CERTIFICATE
+// blocks that each parse as X.509, separated only by whitespace. pem.Decode
+// on its own skips any text before a block, so that is checked explicitly:
+// a body with anything else in it is not a CA bundle and must not be
+// pinned.
+func validateRootCAPEM(data []byte) error {
+	rest := data
+	n := 0
+	for {
+		rest = bytes.TrimLeft(rest, " \t\r\n")
+		if len(rest) == 0 {
+			break
+		}
+		if !bytes.HasPrefix(rest, []byte("-----BEGIN ")) {
+			return fmt.Errorf("unexpected non-PEM content: %q", snippet(rest))
+		}
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			return errors.New("malformed PEM block")
+		}
+		if block.Type != "CERTIFICATE" {
+			return fmt.Errorf("unexpected PEM block type %q", block.Type)
+		}
+		if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+			return fmt.Errorf("certificate %d: %w", n+1, err)
+		}
+		n++
+	}
+	if n == 0 {
+		return errors.New("no PEM certificate in response")
+	}
+	return nil
+}
+
+// snippet returns the start of b, for quoting an unexpected response in an
+// error without copying an arbitrarily large body into the log.
+func snippet(b []byte) string {
+	const limit = 128
+	if len(b) > limit {
+		return string(b[:limit]) + "..."
+	}
+	return string(b)
 }
 
 func RootCACached(binary string) bool {
@@ -365,7 +444,9 @@ func LoadRootCA(binary string) error {
 		RootCA = config.ImasRootCA
 	case "sprout":
 		RootCA = config.SproutRootCA
-		FetchRootCA(RootCA)
+		if err := FetchRootCA(RootCA); err != nil {
+			return err
+		}
 	}
 	certPool := x509.NewCertPool()
 	rootPEM, err := os.ReadFile(RootCA)
@@ -375,7 +456,11 @@ func LoadRootCA(binary string) error {
 	ok := certPool.AppendCertsFromPEM(rootPEM)
 	if !ok {
 		log.Errorf("nats: failed to parse root certificate from %q", RootCA)
-		return ErrCannotParseRootCA
+		// Not re-fetched automatically: the file may have been provisioned
+		// out of band, and replacing it with a trust-on-first-use fetch
+		// would silently downgrade that pin. An operator has to fix it.
+		return fmt.Errorf("%w: %s holds no usable PEM certificate; replace it, or delete it to fetch it again",
+			ErrCannotParseRootCA, RootCA)
 	}
 	var nkeyTransport http.RoundTripper = &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
