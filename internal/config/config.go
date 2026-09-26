@@ -202,7 +202,8 @@ var (
 
 	// ValkeyAddrs is the comma-separated list of Valkey node addresses
 	// (host:port) backing the connection-state heartbeat (see
-	// internal/heartbeat).
+	// internal/heartbeat) and the enrollment/refresh replay cache (see
+	// internal/pki/replaycache.go).
 	ValkeyAddrs string
 
 	// S3Endpoint/S3AccessKeyID/S3SecretAccessKey/S3UseSSL/S3Bucket

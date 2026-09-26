@@ -67,7 +67,8 @@ func RefreshSprout(ctx context.Context, req RefreshRequest) (*EnrollResult, erro
 		return nil, ErrEnrollmentFailed
 	}
 	payload := RefreshSigningPayload(req.Timestamp, req.NKeyPub)
-	if err := verifyTimestampedNKeySig(req.NKeyPub, req.Timestamp, req.NKeySig, payload); err != nil {
+	sig, err := verifyTimestampedNKeySig(req.NKeyPub, req.Timestamp, req.NKeySig, payload)
+	if err != nil {
 		log.Warnf("refresh: rejected proof of possession for nkey_pub %s: %v", req.NKeyPub, err)
 		return nil, ErrEnrollmentFailed
 	}
@@ -77,8 +78,8 @@ func RefreshSprout(ctx context.Context, req RefreshRequest) (*EnrollResult, erro
 		return nil, ErrEnrollmentFailed
 	}
 	// Claimed only once the nkey_pub is known to be an accepted sprout's,
-	// so a caller signing with a throwaway NKey can't write rows.
-	if err := claimSignedPayload(payload, req.Timestamp); err != nil {
+	// so a caller signing with a throwaway NKey can't write keys.
+	if err := claimSignedPayload(ctx, payload, sig, req.Timestamp); err != nil {
 		log.Warnf("refresh: rejected resubmitted or unrecordable signed request for nkey_pub %s: %v", req.NKeyPub, err)
 		return nil, ErrEnrollmentFailed
 	}

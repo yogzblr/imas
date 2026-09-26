@@ -77,7 +77,7 @@ func TestGetHealth(t *testing.T) {
 	}
 }
 
-// With no Valkey client (initHeartbeatClient failed at boot and never
+// With no Valkey client (initValkeyClient failed at boot and never
 // retries), liveness fails so kubelet restarts the pod.
 func TestGetHealth_NoValkeyClient(t *testing.T) {
 	orig := valkeyPing

@@ -19,8 +19,10 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/glebarez/sqlite"
 	"github.com/nats-io/nkeys"
+	"github.com/valkey-io/valkey-go"
 	"gorm.io/gorm"
 
 	apitypes "github.com/yogzblr/imas/internal/api/types"
@@ -29,7 +31,9 @@ import (
 )
 
 // setupPKIDirs wires up an in-memory PKI store (see internal/pki/store.go)
-// for testing and sets config.FarmerPKI. It also creates a fake farmer
+// and a miniredis-backed enrollment/refresh replay cache (see
+// internal/pki/replaycache.go) for testing and sets config.FarmerPKI. It
+// also creates a fake farmer
 // NKey pub file so that pki.ReloadNKeys() (called by defer in AcceptNKey,
 // DenyNKey, etc.) doesn't log.Fatal.
 func setupPKIDirs(t *testing.T) string {
@@ -45,6 +49,15 @@ func setupPKIDirs(t *testing.T) string {
 	}
 	pki.SetDB(gdb)
 	t.Cleanup(func() { pki.SetDB(nil) })
+
+	mr := miniredis.RunT(t)
+	vc, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{mr.Addr()}, DisableCache: true})
+	if err != nil {
+		t.Fatalf("connecting to miniredis: %v", err)
+	}
+	t.Cleanup(vc.Close)
+	pki.SetReplayCacheClient(vc)
+	t.Cleanup(func() { pki.SetReplayCacheClient(nil) })
 
 	dir := t.TempDir()
 	config.FarmerPKI = dir + "/"

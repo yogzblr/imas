@@ -5,17 +5,39 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/valkey-io/valkey-go"
 )
 
-func countSeenSignatures(t *testing.T) int64 {
+// withTestReplayCache installs a replay cache backed by miniredis, an
+// in-process Valkey stand-in, and returns it so tests can inspect keys,
+// move its clock, or make it fail.
+func withTestReplayCache(t *testing.T) *miniredis.Miniredis {
 	t.Helper()
-	var n int64
-	if err := db.Model(&seenSignatureRow{}).Count(&n).Error; err != nil {
-		t.Fatalf("counting pki_seen_signatures: %v", err)
+	mr := miniredis.RunT(t)
+	client, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{mr.Addr()}, DisableCache: true})
+	if err != nil {
+		t.Fatalf("connecting to miniredis: %v", err)
 	}
-	return n
+	t.Cleanup(client.Close)
+	orig := replayClient
+	SetReplayCacheClient(client)
+	t.Cleanup(func() { SetReplayCacheClient(orig) })
+	return mr
+}
+
+func replayKeys(mr *miniredis.Miniredis) []string {
+	var out []string
+	for _, k := range mr.Keys() {
+		if strings.HasPrefix(k, replayKeyPrefix) {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // A captured first-time enrollment request, resubmitted verbatim while its
@@ -66,7 +88,7 @@ func TestEnroll_ResubmittedReplayRejected(t *testing.T) {
 	}
 }
 
-// The cache is keyed on the signed payload, not the nkey_sig string:
+// The cache is keyed on the decoded signature, not the nkey_sig string:
 // base64url decoding ignores a final character's unused low bits, so the
 // same signature re-encoded with different trailing bits must still be
 // caught.
@@ -122,9 +144,10 @@ func TestRefreshSprout_ResubmittedRequestRejected(t *testing.T) {
 
 // Requests that fail before their credential checks pass (a throwaway
 // NKey with no valid join token, or not an accepted sprout) must not
-// write rows: anyone can produce a valid signature with a fresh NKey.
+// write keys: anyone can produce a valid signature with a fresh NKey.
 func TestReplayCache_UnauthenticatedRequestsWriteNothing(t *testing.T) {
 	store, _ := setupEnrollTest(t)
+	mr := withTestReplayCache(t)
 	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
 
 	stranger := testEnrollNKey(t)
@@ -136,106 +159,115 @@ func TestReplayCache_UnauthenticatedRequestsWriteNothing(t *testing.T) {
 	if _, err := RefreshSprout(t.Context(), signedRefresh(t, stranger)); !errors.Is(err, ErrEnrollmentFailed) {
 		t.Fatalf("RefreshSprout for a stranger = %v, want ErrEnrollmentFailed", err)
 	}
-	if n := countSeenSignatures(t); n != 0 {
-		t.Errorf("pki_seen_signatures has %d row(s), want 0", n)
+	if keys := replayKeys(mr); len(keys) != 0 {
+		t.Errorf("replay cache has %d key(s), want 0: %v", len(keys), keys)
 	}
 }
 
-// If the claim can't be recorded, the request is rejected rather than
-// let through unrecorded.
-func TestReplayCache_FailsClosedWhenUnrecordable(t *testing.T) {
-	kp, _, minter := enrolledForRefresh(t)
-	if err := db.Migrator().DropTable(&seenSignatureRow{}); err != nil {
-		t.Fatalf("dropping pki_seen_signatures: %v", err)
+// If the claim can't be recorded (Valkey erroring, unreachable, or never
+// configured), the request is rejected rather than let through
+// unrecorded, and no join-token use is spent.
+func TestReplayCache_FailsClosed(t *testing.T) {
+	cases := map[string]func(t *testing.T, mr *miniredis.Miniredis){
+		"valkey error":       func(_ *testing.T, mr *miniredis.Miniredis) { mr.SetError("ERR injected") },
+		"valkey unreachable": func(_ *testing.T, mr *miniredis.Miniredis) { mr.Close() },
+		"no client":          func(t *testing.T, _ *miniredis.Miniredis) { SetReplayCacheClient(nil) },
 	}
-	if _, err := RefreshSprout(t.Context(), signedRefresh(t, kp)); !errors.Is(err, ErrEnrollmentFailed) {
-		t.Fatalf("RefreshSprout without a replay cache = %v, want ErrEnrollmentFailed", err)
-	}
-	if minter.calls != 1 {
-		t.Errorf("gateway JWT mints = %d, want 1 (enroll only)", minter.calls)
+	for name, breakCache := range cases {
+		t.Run(name, func(t *testing.T) {
+			kp, store, minter := enrolledForRefresh(t)
+			store.rows["ek_2"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
+			breakCache(t, withTestReplayCache(t))
+
+			if _, err := RefreshSprout(t.Context(), signedRefresh(t, kp)); !errors.Is(err, ErrEnrollmentFailed) {
+				t.Errorf("RefreshSprout = %v, want ErrEnrollmentFailed", err)
+			}
+			if _, err := Enroll(t.Context(), signedEnroll(t, kp, "bogus.token", "web-01", testEnrollBoxPub(t))); !errors.Is(err, ErrEnrollmentFailed) {
+				t.Errorf("replayed Enroll = %v, want ErrEnrollmentFailed", err)
+			}
+			if _, err := Enroll(t.Context(), signedEnroll(t, testEnrollNKey(t), "ek_2.s", "web-02", testEnrollBoxPub(t))); !errors.Is(err, ErrEnrollmentFailed) {
+				t.Errorf("first-time Enroll = %v, want ErrEnrollmentFailed", err)
+			}
+			if minter.calls != 1 {
+				t.Errorf("gateway JWT mints = %d, want 1 (the setup enrollment only)", minter.calls)
+			}
+			if store.rows["ek_2"].UsedCount != 0 {
+				t.Errorf("used_count = %d, want 0: a failed claim must not spend a join-token use", store.rows["ek_2"].UsedCount)
+			}
+		})
 	}
 }
 
 func TestClaimSignedPayload(t *testing.T) {
-	setupTestPKI(t)
-	ts := time.Now().Unix()
-	if err := claimSignedPayload([]byte("payload-a"), ts); err != nil {
+	mr := withTestReplayCache(t)
+	now := time.Now()
+	withEnrollNow(t, now)
+	ts := now.Unix()
+	sig := make([]byte, 64)
+
+	if err := claimSignedPayload(t.Context(), []byte("payload-a"), sig, ts); err != nil {
 		t.Fatalf("first claim: %v", err)
 	}
-	if err := claimSignedPayload([]byte("payload-a"), ts); err == nil {
-		t.Fatal("second claim of the same payload succeeded")
+	if err := claimSignedPayload(t.Context(), []byte("payload-a"), sig, ts); !errors.Is(err, errSignatureReplayed) {
+		t.Fatalf("second claim of the same request = %v, want errSignatureReplayed", err)
 	}
-	if err := claimSignedPayload([]byte("payload-b"), ts); err != nil {
+	if err := claimSignedPayload(t.Context(), []byte("payload-b"), sig, ts); err != nil {
 		t.Fatalf("claim of a different payload: %v", err)
 	}
-
-	var row seenSignatureRow
-	if err := db.First(&row).Error; err != nil {
-		t.Fatal(err)
+	otherSig := make([]byte, 64)
+	otherSig[0] = 1
+	if err := claimSignedPayload(t.Context(), []byte("payload-a"), otherSig, ts); err != nil {
+		t.Fatalf("claim of the same payload under a different signature: %v", err)
 	}
-	if want := ts + int64((EnrollSigMaxSkew+replayCacheClockMargin)/time.Second); row.ExpiresAt != want {
-		t.Errorf("expires_at = %d, want %d", row.ExpiresAt, want)
+
+	// The key lives until the end of the timestamp's skew window plus the
+	// clock margin, then Valkey expires it.
+	key := replayKey([]byte("payload-a"), sig)
+	want := EnrollSigMaxSkew + replayCacheClockMargin
+	if got := mr.TTL(key); got != want {
+		t.Errorf("TTL = %v, want %v", got, want)
+	}
+	mr.FastForward(want)
+	if mr.Exists(key) {
+		t.Error("claim still present after its TTL")
 	}
 }
 
-// Concurrent claims of one payload: at most one may win. (SQLite may
-// also refuse some losers with a lock error rather than a duplicate key;
-// either way they fail, which is what matters.)
-func TestClaimSignedPayload_ConcurrentClaimsAtMostOneWins(t *testing.T) {
-	setupTestPKI(t)
+// A request signed near the end of its skew window still gets a TTL that
+// covers the rest of the window plus the clock margin.
+func TestClaimSignedPayload_TTLFromFarmerClock(t *testing.T) {
+	mr := withTestReplayCache(t)
+	now := time.Now()
+	withEnrollNow(t, now)
+	ts := now.Add(-EnrollSigMaxSkew + 30*time.Second).Unix()
+	if err := claimSignedPayload(t.Context(), []byte("p"), make([]byte, 64), ts); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := mr.TTL(replayKey([]byte("p"), make([]byte, 64))), 30*time.Second+replayCacheClockMargin; got != want {
+		t.Errorf("TTL = %v, want %v", got, want)
+	}
+}
+
+// Concurrent claims of one request: exactly one wins.
+func TestClaimSignedPayload_ConcurrentClaimsExactlyOneWins(t *testing.T) {
+	withTestReplayCache(t)
 	ts := time.Now().Unix()
 	var (
 		wg   sync.WaitGroup
-		mu   sync.Mutex
-		wins int
+		wins atomic.Int32
 	)
 	for range 16 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if claimSignedPayload([]byte("same-payload"), ts) == nil {
-				mu.Lock()
-				wins++
-				mu.Unlock()
+			if claimSignedPayload(t.Context(), []byte("same-payload"), make([]byte, 64), ts) == nil {
+				wins.Add(1)
 			}
 		}()
 	}
 	wg.Wait()
-	if wins > 1 {
-		t.Fatalf("%d concurrent claims of one payload succeeded, want at most 1", wins)
-	}
-}
-
-func TestSweepExpiredSignatures(t *testing.T) {
-	setupTestPKI(t)
-	now := time.Now()
-	withEnrollNow(t, now)
-	orig := lastReplaySweep.Load()
-	t.Cleanup(func() { lastReplaySweep.Store(orig) })
-
-	rows := []seenSignatureRow{
-		{Digest: "expired", ExpiresAt: now.Add(-time.Second).Unix()},
-		{Digest: "live", ExpiresAt: now.Add(time.Minute).Unix()},
-	}
-	if err := db.Create(&rows).Error; err != nil {
-		t.Fatal(err)
-	}
-
-	// Swept recently: nothing is deleted yet.
-	lastReplaySweep.Store(now.Unix())
-	sweepExpiredSignatures(now)
-	if n := countSeenSignatures(t); n != 2 {
-		t.Fatalf("rows after a rate-limited sweep = %d, want 2", n)
-	}
-
-	lastReplaySweep.Store(now.Add(-replaySweepInterval).Unix())
-	sweepExpiredSignatures(now)
-	var left []seenSignatureRow
-	if err := db.Find(&left).Error; err != nil {
-		t.Fatal(err)
-	}
-	if len(left) != 1 || left[0].Digest != "live" {
-		t.Errorf("rows after sweep = %+v, want only \"live\"", left)
+	if n := wins.Load(); n != 1 {
+		t.Fatalf("%d concurrent claims of one request succeeded, want exactly 1", n)
 	}
 }
 
@@ -268,7 +300,7 @@ func TestNextSigningTimestamp(t *testing.T) {
 		t.Errorf("after the clock advanced: %d, want %d", got, now.Unix())
 	}
 
-	// The clock is stepped back further than maxSigningTimestampLead: follow
+	// The clock is stepped back by at least maxSigningTimestampLead: follow
 	// it rather than run ahead of it past farmer's skew window.
 	now = now.Add(-time.Hour)
 	if got := nextSigningTimestamp(); got != now.Unix() {

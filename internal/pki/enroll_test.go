@@ -136,14 +136,15 @@ func testEnrollBoxPub(t *testing.T) string {
 }
 
 // setupEnrollTest wires up an in-memory PKI store, an empty fake
-// enrollment-key store, a fake gateway JWT minter, and a mock OpenBao KV
-// server backing the tenant X25519 keypair (tenantbox.go no longer has a
-// local-disk fallback) — everything Enroll needs besides the test's own
-// key-store rows. Returns both fakes so tests can populate rows / assert
-// call counts.
+// enrollment-key store, a fake gateway JWT minter, a miniredis-backed
+// replay cache, and a mock OpenBao KV server backing the tenant X25519
+// keypair (tenantbox.go no longer has a local-disk fallback) — everything
+// Enroll needs besides the test's own key-store rows. Returns both fakes
+// so tests can populate rows / assert call counts.
 func setupEnrollTest(t *testing.T) (*fakeEnrollmentKeyStore, *fakeGatewayMinter) {
 	t.Helper()
 	setupTestPKI(t)
+	withTestReplayCache(t)
 	setupTenantBoxOpenBao(t, newMockKVv2Server(t))
 	store := newFakeEnrollmentKeyStore()
 	withFakeEnrollmentKeyStore(t, store)
