@@ -1,8 +1,15 @@
 name: Release
 
+# Manual-only for now: this needs GPG_PRIVATE_KEY/GPG_PASSPHRASE/GORELEASER_KEY
+# (goreleaser-pro) plus AWS/Cloudsmith/Docker Hub/AUR credentials configured
+# as repo secrets, none of which exist yet on the new imas repo (they lived
+# on the original project's infra, not this fork's). Re-enable the tags
+# trigger below once all of those secrets are set on yogzblr/imas — until
+# then, pushing a v* tag would just fail at the first login/import step.
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
+  # push:
+  #   tags: ["v*"]
 
 permissions:
   contents: write
