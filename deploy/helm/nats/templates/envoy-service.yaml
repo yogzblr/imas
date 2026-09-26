@@ -1,0 +1,32 @@
+{{- if .Values.envoy.enabled }}
+{{- $s := .Values.envoy.service -}}
+# The DMZ edge: the only thing in this chart sprouts connect to.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "imas-nats.envoy.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-nats.labels" . | nindent 4 }}
+    app.kubernetes.io/component: envoy
+  {{- with $s.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $s.type }}
+  {{- if and $s.externalTrafficPolicy (has $s.type (list "LoadBalancer" "NodePort")) }}
+  externalTrafficPolicy: {{ $s.externalTrafficPolicy }}
+  {{- end }}
+  {{- if and $s.loadBalancerSourceRanges (eq $s.type "LoadBalancer") }}
+  loadBalancerSourceRanges:
+    {{- toYaml $s.loadBalancerSourceRanges | nindent 4 }}
+  {{- end }}
+  selector:
+    {{- include "imas-nats.envoy.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: https
+      port: {{ $s.port }}
+      targetPort: https
+      protocol: TCP
+{{- end }}

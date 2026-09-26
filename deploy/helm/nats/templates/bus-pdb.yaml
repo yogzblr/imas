@@ -1,0 +1,15 @@
+{{- if and .Values.bus.pdb.enabled (gt (int .Values.bus.replicaCount) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "imas-nats.bus.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-nats.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bus
+spec:
+  maxUnavailable: {{ .Values.bus.pdb.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "imas-nats.bus.selectorLabels" . | nindent 6 }}
+{{- end }}

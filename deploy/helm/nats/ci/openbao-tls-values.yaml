@@ -1,0 +1,18 @@
+# chart-testing: bus cert issued from OpenBao PKI (kubernetes auth), local
+# JWKS, upstream TLS verification on.
+bus:
+  tls:
+    mode: openbao
+envoy:
+  jwtAuthn:
+    jwks:
+      source: local
+      local:
+        inline: '{"keys":[{"kty":"OKP","crv":"Ed25519","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo","kid":"1","use":"sig","alg":"EdDSA"}]}'
+  upstreamTLS:
+    caSecretName: imas-core-ca
+networkPolicy:
+  envoyIngress:
+    from:
+      - ipBlock:
+          cidr: 203.0.113.0/24

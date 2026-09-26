@@ -1,0 +1,180 @@
+{{- if .Values.envoy.enabled }}
+{{- include "imas-nats.validate" . -}}
+{{- $e := .Values.envoy -}}
+{{- $j := $e.jwtAuthn -}}
+{{- $localJWKS := eq $j.jwks.source "local" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "imas-nats.envoy.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-nats.labels" . | nindent 4 }}
+    app.kubernetes.io/component: envoy
+spec:
+  replicas: {{ $e.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "imas-nats.envoy.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "imas-nats.labels" . | nindent 8 }}
+        app.kubernetes.io/component: envoy
+        {{- with $e.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/envoy-configmap.yaml") . | sha256sum }}
+        {{- with $e.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "imas-nats.envoy.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with $e.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $e.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ $e.terminationGracePeriodSeconds }}
+      {{- with $e.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $e.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $e.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        {{- if $e.affinity }}
+        {{- toYaml $e.affinity | nindent 8 }}
+        {{- else }}
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "imas-nats.envoy.selectorLabels" . | nindent 20 }}
+        {{- end }}
+      {{- with $e.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: envoy
+          image: {{ include "imas-nats.image" (dict "image" $e.image "appVersion" .Chart.AppVersion) | quote }}
+          imagePullPolicy: {{ $e.image.pullPolicy }}
+          command: ["envoy"]
+          args:
+            - --config-path
+            - /etc/envoy/envoy.yaml
+            - --log-level
+            - {{ $e.logLevel | quote }}
+            # One Envoy per pod: no hot-restart shared memory needed, which
+            # also keeps /dev/shm out of a read-only root filesystem.
+            - --disable-hot-restart
+            {{- with $e.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: https
+              containerPort: {{ $e.listenerPort }}
+              protocol: TCP
+          {{- with $e.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $e.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $e.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $e.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $e.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/envoy/envoy.yaml
+              subPath: envoy.yaml
+              readOnly: true
+            - name: tls
+              mountPath: /etc/envoy/tls
+              readOnly: true
+            {{- if include "imas-nats.envoy.verifyUpstream" . }}
+            - name: upstream-ca
+              mountPath: /etc/envoy/upstream-ca
+              readOnly: true
+            {{- end }}
+            {{- if $localJWKS }}
+            - name: jwks
+              mountPath: /etc/envoy/jwks
+              readOnly: true
+            {{- end }}
+            - name: tmp
+              mountPath: /tmp
+            {{- with $e.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "imas-nats.envoy.fullname" . }}
+            items:
+              - { key: envoy.yaml, path: envoy.yaml }
+        - name: tls
+          secret:
+            secretName: {{ $e.tls.secretName }}
+            items:
+              - { key: tls.crt, path: tls.crt }
+              - { key: tls.key, path: tls.key }
+        {{- if $e.upstreamTLS.caSecretName }}
+        - name: upstream-ca
+          secret:
+            secretName: {{ $e.upstreamTLS.caSecretName }}
+            items:
+              - { key: {{ $e.upstreamTLS.caKey | quote }}, path: {{ $e.upstreamTLS.caKey | quote }} }
+        {{- else if $e.upstreamTLS.caConfigMapName }}
+        - name: upstream-ca
+          configMap:
+            name: {{ $e.upstreamTLS.caConfigMapName }}
+            items:
+              - { key: {{ $e.upstreamTLS.caKey | quote }}, path: {{ $e.upstreamTLS.caKey | quote }} }
+        {{- end }}
+        {{- if $localJWKS }}
+        - name: jwks
+          configMap:
+            {{- if $j.jwks.local.configMapName }}
+            name: {{ $j.jwks.local.configMapName }}
+            items:
+              - { key: {{ $j.jwks.local.configMapKey | quote }}, path: {{ $j.jwks.local.configMapKey | quote }} }
+            {{- else }}
+            name: {{ include "imas-nats.envoy.fullname" . }}
+            items:
+              - { key: jwks.json, path: jwks.json }
+            {{- end }}
+        {{- end }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi
+        {{- with $e.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+{{- end }}

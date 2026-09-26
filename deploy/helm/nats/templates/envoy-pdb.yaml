@@ -1,0 +1,15 @@
+{{- if and .Values.envoy.enabled .Values.envoy.pdb.enabled (gt (int .Values.envoy.replicaCount) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "imas-nats.envoy.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-nats.labels" . | nindent 4 }}
+    app.kubernetes.io/component: envoy
+spec:
+  maxUnavailable: {{ .Values.envoy.pdb.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "imas-nats.envoy.selectorLabels" . | nindent 6 }}
+{{- end }}
