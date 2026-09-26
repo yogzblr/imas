@@ -244,6 +244,18 @@ static_resources:
                           claim_to_headers:
                             - header_name: x-imas-sprout-nkey
                               claim_name: sub
+                      # What the routes' PerRouteConfig requirement_name
+                      # refers to. It names an entry in this map, not a
+                      # provider: without it Envoy answers every gated
+                      # request 403 "Wrong requirement_name", valid token
+                      # or not (caught by the real-Envoy tests,
+                      # internal/pki and internal/api envoy_e2e_test.go).
+                      requirement_map:
+                        sprout_jwt:
+                          provider_name: sprout_jwt
+                      # Only consulted for a route WITHOUT a PerRouteConfig
+                      # (every route above has one). Kept so a route added
+                      # later without one still requires a JWT by default.
                       rules:
                         - match: { prefix: "/files/" }
                           requires: { provider_name: sprout_jwt }
