@@ -53,12 +53,16 @@ Treat this as a reviewed starting point, not a drop-in production config.
   actual Keycloak/Envoy run wasn't possible here, and re-run that
   validation somewhere with normal network access before relying on this
   config in production.
-- **Recipe route target**: `/v1/recipes` currently proxies to farmer's own
-  `GET /files/` (`internal/api/handlers/recipes.go`) as the nearest
-  existing analogue. `docs/design/imas-fork-roadmap.md` workstream I
-  ("Recipe storage migration") describes a dedicated, non-DMZ recipe
-  service this route is meant to front instead — repoint the
-  `recipe_service` cluster once that exists.
+- **Recipe route target**: `/files/` proxies to farmer's own
+  `GET /files/<key>` (`internal/api/handlers/recipes.go`'s `GetFile`), the
+  sprout-facing download path. Farmer re-verifies the forwarded gateway
+  JWT and serves only keys under that sprout's own
+  `sprouts/<tenant_id>/<sprout_id>/` prefix. `/v1/recipes` (the CLI and
+  web UI browse endpoints) is deliberately not routed: it accepts only the
+  CLI's RBAC token, never a gateway JWT. `docs/design/imas-fork-roadmap.md`
+  workstream I describes a dedicated, non-DMZ recipe service this route
+  is meant to front instead. Repoint the `recipe_service` cluster once that
+  exists.
 - **Rate limiting on `/v1/enroll`**: the `local_ratelimit` bucket here is
   per Envoy process: one bucket shared by all of that Envoy's worker
   threads (Envoy's default, since `local_rate_limit_per_downstream_connection`

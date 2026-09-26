@@ -19,6 +19,16 @@ var gatewaySigner *gatewayjwt.GatewaySigner
 // SetGatewaySigner installs the signer JWKS serves public keys for.
 func SetGatewaySigner(s *gatewayjwt.GatewaySigner) { gatewaySigner = s }
 
+// GatewayKeySource returns the key source gateway JWTs are verified
+// against (Auth's sprout path on GET /files/), or nil when no gateway
+// signer is configured — in which case that path fails closed.
+func GatewayKeySource() gatewayjwt.PublicKeySource {
+	if gatewaySigner == nil {
+		return nil
+	}
+	return gatewaySigner
+}
+
 // JWKS handles GET /v1/.well-known/jwks.json. Deliberately not wrapped
 // in Auth (see routers.go) — a JWKS document contains only public keys.
 func JWKS(w http.ResponseWriter, r *http.Request) {

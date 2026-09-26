@@ -28,17 +28,28 @@
 #                           README.md, "Sizing the /v1/refresh bucket").
 #                           Never shares /v1/enroll's bucket, in either
 #                           direction.
-#   2. /v1/recipes/*      — jwt_authn-gated, proxied unmodified (no
+#   2. /files/*           — jwt_authn-gated, proxied unmodified (no
 #                           prefix_rewrite — the path matches farmer's own
-#                           route exactly) to farmer's dedicated recipe
-#                           HTTP endpoint (internal/api/handlers/
-#                           recipes.go's ListRecipes/GetRecipe, registered
-#                           in internal/api/routers.go), which reads
+#                           route exactly) to farmer's sprout-facing
+#                           recipe download, GET /files/<key>
+#                           (internal/api/handlers/recipes.go's GetFile,
+#                           the farmer:// scheme's read path), which reads
 #                           through object storage rather than local disk
-#                           — workstream I ("Recipe storage migration"),
-#                           replacing the old NATS-based
-#                           internal/natsapi/recipes.go. See the
-#                           recipe_service cluster below.
+#                           — workstream I ("Recipe storage migration").
+#                           Farmer re-verifies the forwarded gateway JWT
+#                           itself (internal/api/middleware.go's Auth)
+#                           and serves only keys under that sprout's own
+#                           sprouts/<tenant_id>/<sprout_id>/ prefix. See
+#                           the recipe_service cluster below.
+#
+#                           Deliberately NOT /v1/recipes: ListRecipes/
+#                           GetRecipe are the imas CLI's and web UI's
+#                           browse endpoints, authenticated with the
+#                           CLI's NKey-signed RBAC token only, which a
+#                           sprout doesn't hold — a gateway JWT there is
+#                           always rejected. Requests for /v1/recipes fall
+#                           through to route 3 and never reach farmer's
+#                           HTTP API.
 #   3. everything else    — the sprout's wss:// NATS connection, jwt_authn-
 #                           gated, proxied to nats-server's websocket
 #                           listener (internal/pki/nats.go's
@@ -176,9 +187,11 @@ static_resources:
                                 default_value: { numerator: 100, denominator: HUNDRED }
 
                         # Route 2: authenticated recipe download. Passed
-                        # through unmodified to farmer's own /v1/recipes
+                        # through unmodified to farmer's own GET /files/
                         # endpoint — see the recipe_service cluster below.
-                        - match: { prefix: "/v1/recipes" }
+                        # The trailing slash keeps e.g. "/filesystem"
+                        # from matching.
+                        - match: { prefix: "/files/" }
                           route:
                             cluster: recipe_service
                             timeout: 60s
@@ -232,7 +245,7 @@ static_resources:
                             - header_name: x-imas-sprout-nkey
                               claim_name: sub
                       rules:
-                        - match: { prefix: "/v1/recipes" }
+                        - match: { prefix: "/files/" }
                           requires: { provider_name: sprout_jwt }
                         - match: { prefix: "/" }
                           requires: { provider_name: sprout_jwt }
@@ -288,8 +301,8 @@ static_resources:
         typed_config:
           "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
 
-    # Points at farmer's dedicated recipe HTTP endpoint (GET /v1/recipes,
-    # GET /v1/recipes/{name...} — internal/api/handlers/recipes.go,
+    # Points at farmer's sprout-facing recipe download (GET /files/<key> —
+    # internal/api/handlers/recipes.go's GetFile, registered in
     # internal/api/routers.go), the "small, self-contained service"
     # docs/design/imas-fork-roadmap.md workstream I describes, built
     # directly into farmer's existing HTTPS API rather than as a separate
