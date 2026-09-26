@@ -3,21 +3,19 @@ package gatewayjwt
 // Validates this package against jwx's own, independent JOSE
 // implementation rather than only its own code — the "round trips
 // through a standard JOSE library's own verifier" step from the
-// implementation brief. A real OpenBao Transit instance isn't reachable
-// in this sandbox (network policy blocks the container registries a
-// Transit/Keycloak instance would come from — see the PR description),
-// so mockTransitServer stands in for it: a small httptest.Server
+// implementation brief. Unit tests can't assume a real OpenBao, so
+// mockTransitServer stands in for it: a small httptest.Server
 // implementing the same request/response shapes as Transit's
-// sign/<key> and keys/<key> endpoints (mirroring the real API as
-// documented, not this package's own encoding of it), so
-// obtransit.go's HTTP client code is exercised for real, not bypassed.
+// sign/<key> and keys/<key> endpoints, so obtransit.go's HTTP client
+// code is exercised for real, not bypassed. Its response shapes must
+// match what a real server sends; openbao_response_test.go checks this
+// package against captured real OpenBao responses and, when
+// IMAS_TEST_OPENBAO_ADDR is set, a live server.
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -114,14 +112,13 @@ func (m *mockTransitServer) handleReadKey(w http.ResponseWriter, r *http.Request
 	}
 	keys := map[string]any{}
 	for _, v := range m.versions {
-		der, err := x509.MarshalPKIXPublicKey(v.pub)
-		if err != nil {
-			m.t.Fatalf("marshaling mock public key: %v", err)
-		}
-		pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+		// Real Transit returns an ed25519 public_key as standard base64
+		// of the raw 32-byte key, not PEM (PEM is ECDSA/RSA only). See
+		// testdata/openbao-v2.7.0/transit-keys.json.
 		keys[strconv.Itoa(v.version)] = map[string]any{
-			"public_key":    string(pemBytes),
-			"creation_time": time.Now().UTC().Format(time.RFC3339),
+			"name":          "ed25519",
+			"public_key":    base64.StdEncoding.EncodeToString(v.pub),
+			"creation_time": time.Now().UTC().Format(time.RFC3339Nano),
 		}
 	}
 	resp := map[string]any{
