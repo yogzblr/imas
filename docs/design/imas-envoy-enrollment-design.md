@@ -69,7 +69,7 @@ Every credential elsewhere in this design (the JWT, the X25519 keypairs) assumes
 
 ```json
 {
-  "join_token": "ab3f9k2q.9fT...longsecret",
+  "join_token": "<key_id>.<secret>",
   "nkey_pub":   "U...",
   "hostname":   "web-01",
   "sprout_pub": "<base64 X25519 public key>",
