@@ -60,7 +60,8 @@ var routes = map[string]handler{
 	MethodCmdRun: handleCmdRun,
 
 	// Cook
-	MethodCook: handleCook,
+	MethodCook:       handleCook,
+	MethodCookResync: handleCookResync,
 
 	// Jobs
 	MethodJobsList:      handleJobsList,

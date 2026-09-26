@@ -23,6 +23,10 @@ const farmerJobStatusTable = "farmer.job_status"
 const (
 	farmerJobSucceeded = "succeeded"
 	farmerJobFailed    = "failed"
+	// farmerJobExpired: the job started on its sprout later than farmer's
+	// reconcile window allows, so farmer recorded none of its steps. It
+	// may or may not have run; farmer won't record anything more for it.
+	farmerJobExpired = "expired"
 )
 
 // farmerJobStatusReader implements JobStatusReader over farmer.job_status.
@@ -66,6 +70,8 @@ func (farmerJobStatusReader) JobOutcomes(ctx context.Context, tenantID string, j
 			outcome = JobOutcomeSucceeded
 		case farmerJobFailed:
 			outcome = JobOutcomeFailed
+		case farmerJobExpired:
+			outcome = JobOutcomeExpired
 		}
 		out[JobRef{SproutID: r.SproutID, JID: r.JID}] = outcome
 	}

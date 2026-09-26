@@ -50,6 +50,13 @@ type (
 	TargetedResults struct {
 		Results map[string]interface{} `json:"results,omitempty"`
 	}
+	// ResyncResult is one sprout's result of a cook.resync nudge: Nudged
+	// means the sprout acknowledged and will pull its staged recipe, not
+	// that it cooked anything.
+	ResyncResult struct {
+		Nudged bool   `json:"nudged"`
+		Error  string `json:"error,omitempty"`
+	}
 	Inline struct {
 		Success bool  `json:"success"`
 		Error   error `json:"error"`

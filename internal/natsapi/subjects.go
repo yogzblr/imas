@@ -63,6 +63,9 @@ const (
 
 	// Cook
 	MethodCook = "cook"
+	// MethodCookResync nudges sprouts to pull their staged recipe and
+	// cook it if they missed its push (cook.NudgeSprout).
+	MethodCookResync = "cook.resync"
 
 	// Jobs
 	MethodJobsList      = "jobs.list"
@@ -293,7 +296,7 @@ func AllMethods() []string {
 		MethodSproutsList, MethodSproutsGet,
 		MethodTestPing,
 		MethodCmdRun,
-		MethodCook,
+		MethodCook, MethodCookResync,
 		MethodJobsList, MethodJobsGet, MethodJobsDelete, MethodJobsCancel, MethodJobsForSprout,
 		MethodPropsGetAll, MethodPropsGet, MethodPropsSet, MethodPropsDelete,
 		MethodCohortsList, MethodCohortsGet, MethodCohortsResolve, MethodCohortsRefresh, MethodCohortsValidate,

@@ -272,6 +272,11 @@ func installStorage(db *gorm.DB) {
 	pki.SetDB(db)
 	rbac.SetDB(db)
 	jobs.SetDB(db)
+	// Needs the index above: a job is dated by its job_status row.
+	jobs.SetReconcileWindow(config.JobReconcileWindow)
+	if w := config.JobReconcileWindow; w > 0 {
+		log.Noticef("jobs: not recording jobs that start more than %s after dispatch (%s)", w, config.EnvJobReconcileWindow)
+	}
 	handlers.SetReadinessDB(db)
 }
 

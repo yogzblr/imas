@@ -24,4 +24,14 @@ type (
 		InvokedBy string    `json:"invoked_by,omitempty"`
 		CreatedAt time.Time `json:"created_at"`
 	}
+
+	// ExpiredMarker is jobs/<sprout>/<jid>/expired.json: written once when
+	// farmer finds the job started later than its reconcile window allows,
+	// and dropped its events (see reconcile.go).
+	ExpiredMarker struct {
+		JID          string        `json:"jid"`
+		DispatchedAt time.Time     `json:"dispatched_at"`
+		ExpiredAt    time.Time     `json:"expired_at"`
+		Window       time.Duration `json:"window_ns"`
+	}
 )

@@ -118,6 +118,10 @@ const (
 	errCodeCommandFailed = "command_failed"
 	// errCodeJobFailed: a cook's job finished unsuccessfully.
 	errCodeJobFailed = "job_failed"
+	// errCodeJobExpired: the sprout started the job too long after it was
+	// dispatched (farmer's IMAS_JOB_RECONCILE_WINDOW), so its result was
+	// not recorded. It may still have run.
+	errCodeJobExpired = "job_expired"
 	// errCodeDispatchOutcomeUnknown: the request reached farmer (or may
 	// have), but no usable reply came back — it timed out, or the reply
 	// was unreadable. The action may or may not have run.
@@ -138,6 +142,7 @@ var actionErrorMessages = map[string]string{
 	errCodeSproutNotAccepted:      "the sprout's key is not accepted, so the action was not sent",
 	errCodeCommandFailed:          "the command exited with a non-zero status",
 	errCodeJobFailed:              "the job finished unsuccessfully",
+	errCodeJobExpired:             "the sprout started the job too long after it was sent, so its result was not recorded; it may still have run",
 	errCodeDispatchOutcomeUnknown: "no reply was received for the action; it may or may not have run",
 
 	// Fleet update rollouts (fleet_update_dispatch.go).
@@ -830,6 +835,9 @@ const (
 	JobOutcomeRunning   JobOutcome = "running"
 	JobOutcomeSucceeded JobOutcome = "succeeded"
 	JobOutcomeFailed    JobOutcome = "failed"
+	// JobOutcomeExpired: farmer stopped tracking the job because it
+	// started too long after dispatch. Terminal, and not a success.
+	JobOutcomeExpired JobOutcome = "expired"
 )
 
 // JobStatusReader is the local, no-NATS read §1.5 polls running items
@@ -894,6 +902,8 @@ func refreshItems(ctx context.Context, d *gorm.DB, reader JobStatusReader, tenan
 			update = map[string]any{"status": ActionItemSucceeded}
 		case JobOutcomeFailed:
 			update = failedUpdate(errCodeJobFailed)
+		case JobOutcomeExpired:
+			update = failedUpdate(errCodeJobExpired)
 		default:
 			continue
 		}

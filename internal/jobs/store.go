@@ -52,6 +52,7 @@ package jobs
 //	jobs/<sprout>/<jid>/created.jsonl               placeholders from logJobCreation
 //	jobs/<sprout>/<jid>/meta.json                   JobMeta (invoker, creation time)
 //	jobs/<sprout>/<jid>/events/<unixnano>-<rand>.jsonl  one step event
+//	jobs/<sprout>/<jid>/expired.json               ExpiredMarker, if the job expired
 //
 // A job exists once it has created.jsonl or at least one event.
 // created.jsonl followed by events/ in key order holds the same lines the
@@ -111,6 +112,7 @@ const (
 	jobKeyPrefix  = "jobs/"
 	createdObject = "created.jsonl"
 	metaObject    = "meta.json"
+	expiredObject = "expired.json"
 	eventsDir     = "events/"
 	logExt        = ".jsonl"
 )
@@ -124,6 +126,9 @@ const (
 	JobSucceeded                  // All steps completed successfully
 	JobFailed                     // At least one step failed
 	JobPartial                    // Mix of completed and not-started steps
+	// JobExpired: the job started later than farmer's reconcile window
+	// allows, so its steps were not recorded (see reconcile.go).
+	JobExpired
 )
 
 func (s JobStatus) String() string {
@@ -138,6 +143,8 @@ func (s JobStatus) String() string {
 		return "failed"
 	case JobPartial:
 		return "partial"
+	case JobExpired:
+		return "expired"
 	default:
 		return "unknown"
 	}
@@ -165,6 +172,8 @@ func (s *JobStatus) UnmarshalJSON(data []byte) error {
 		*s = JobFailed
 	case "partial":
 		*s = JobPartial
+	case "expired":
+		*s = JobExpired
 	default:
 		return fmt.Errorf("unknown job status: %s", str)
 	}
@@ -417,6 +426,10 @@ func metaKey(sproutID, jid string) string {
 	return jobPrefix(sproutID, jid) + metaObject
 }
 
+func expiredKey(sproutID, jid string) string {
+	return jobPrefix(sproutID, jid) + expiredObject
+}
+
 // eventKey names the object for one job event received at the given
 // time. The zero-padded UnixNano sorts lexically in time order; the random
 // suffix keeps two events received in the same nanosecond (on different
@@ -451,13 +464,15 @@ type jobRef struct {
 type jobObjects struct {
 	created bool
 	meta    bool
+	expired bool
 	events  []string // full keys, sorted
 }
 
-// hasLog reports whether the job has any step data. A meta.json alone
-// (say, logJobCreation's second Put failed) doesn't make a job.
+// hasLog reports whether the job has any step data, or was marked
+// expired. A meta.json alone (say, logJobCreation's second Put failed)
+// doesn't make a job.
 func (o *jobObjects) hasLog() bool {
-	return o.created || len(o.events) > 0
+	return o.created || len(o.events) > 0 || o.expired
 }
 
 // indexJobs groups object keys under jobKeyPrefix by job. Keys that don't
@@ -484,6 +499,8 @@ func indexJobs(keys []string) map[jobRef]*jobObjects {
 			objs.created = true
 		case name == metaObject:
 			objs.meta = true
+		case name == expiredObject:
+			objs.expired = true
 		case strings.HasPrefix(name, eventsDir) && strings.HasSuffix(name, logExt) && !strings.Contains(name[len(eventsDir):], "/"):
 			objs.events = append(objs.events, key)
 		default:
@@ -548,6 +565,9 @@ func loadJob(ctx context.Context, obj *objectstore.Store, ref jobRef, objs *jobO
 	}
 
 	summary := buildSummary(ref.jid, ref.sproutID, steps)
+	if objs.expired {
+		summary.Status = JobExpired
+	}
 	if objs.meta {
 		if meta, err := readJobMeta(ctx, obj, ref); err == nil {
 			summary.InvokedBy = meta.InvokedBy
@@ -607,6 +627,9 @@ func deleteJobObjects(ctx context.Context, obj *objectstore.Store, ref jobRef, o
 		if err := obj.Delete(ctx, key); err != nil {
 			return fmt.Errorf("deleting job: %w", err)
 		}
+	}
+	if objs.expired {
+		obj.Delete(ctx, expiredKey(ref.sproutID, ref.jid))
 	}
 	if objs.meta {
 		obj.Delete(ctx, metaKey(ref.sproutID, ref.jid))

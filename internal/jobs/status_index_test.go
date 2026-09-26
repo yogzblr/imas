@@ -74,7 +74,7 @@ func TestJobStatusIndex_InOrder(t *testing.T) {
 		apply func()
 		want  string
 	}{
-		{func() { indexJobCreation(tenant, sprout, jid, 2) }, JobIndexStatusPending},
+		{func() { indexJobCreation(tenant, sprout, jid, 2, time.Now()) }, JobIndexStatusPending},
 		{func() { indexStep(tenant, sprout, jid, stepEvent("start-"+jid, cook.StepCompleted)) }, JobIndexStatusRunning},
 		{func() { indexStep(tenant, sprout, jid, stepEvent("s1", cook.StepCompleted)) }, JobIndexStatusRunning},
 		{func() { indexStep(tenant, sprout, jid, stepEvent("s2", cook.StepSkipped)) }, JobIndexStatusRunning},
@@ -124,7 +124,7 @@ func TestJobStatusIndex_AnyEventOrder(t *testing.T) {
 				s2 = cook.StepFailed
 			}
 			events := []func(){
-				func() { indexJobCreation(tenant, sprout, jid, 2) },
+				func() { indexJobCreation(tenant, sprout, jid, 2, time.Now()) },
 				func() { indexStep(tenant, sprout, jid, stepEvent("start-"+jid, cook.StepCompleted)) },
 				func() { indexStep(tenant, sprout, jid, stepEvent("s1", cook.StepCompleted)) },
 				func() { indexStep(tenant, sprout, jid, stepEvent("s2", s2)) },
@@ -159,7 +159,7 @@ func TestJobStatusIndex_ConcurrentWriters(t *testing.T) {
 
 	var wg sync.WaitGroup
 	run := func(f func()) { wg.Add(1); go func() { defer wg.Done(); f() }() }
-	run(func() { indexJobCreation(tenant, sprout, jid, nSteps) })
+	run(func() { indexJobCreation(tenant, sprout, jid, nSteps, time.Now()) })
 	run(func() { indexStep(tenant, sprout, jid, stepEvent("start-"+jid, cook.StepCompleted)) })
 	run(func() { indexStep(tenant, sprout, jid, stepEvent("completed-"+jid, cook.StepCompleted)) })
 	for i := range nSteps {
@@ -180,7 +180,7 @@ func TestJobStatusIndex_ConcurrentWriters(t *testing.T) {
 func TestJobStatusIndex_TimeoutFailsImmediately(t *testing.T) {
 	gdb := newIndexTestDB(t)
 	const tenant, sprout, jid = "t_a", "web-01", "timeout-job"
-	indexJobCreation(tenant, sprout, jid, 3)
+	indexJobCreation(tenant, sprout, jid, 3, time.Now())
 	indexStep(tenant, sprout, jid, stepEvent("s1", cook.StepCompleted))
 	indexStep(tenant, sprout, jid, stepEvent("timeout-"+jid, cook.StepFailed))
 	if got := indexStatus(t, gdb, tenant, sprout, jid); got != JobIndexStatusFailed {
@@ -193,10 +193,10 @@ func TestJobStatusIndex_TimeoutFailsImmediately(t *testing.T) {
 func TestJobStatusIndex_TenantScoped(t *testing.T) {
 	gdb := newIndexTestDB(t)
 	const sprout, jid = "web-01", "shared-jid"
-	indexJobCreation("t_a", sprout, jid, 1)
+	indexJobCreation("t_a", sprout, jid, 1, time.Now())
 	indexStep("t_a", sprout, jid, stepEvent("s1", cook.StepCompleted))
 	indexStep("t_a", sprout, jid, stepEvent("completed-"+jid, cook.StepCompleted))
-	indexJobCreation("t_b", sprout, jid, 1)
+	indexJobCreation("t_b", sprout, jid, 1, time.Now())
 	indexStep("t_b", sprout, jid, stepEvent("s1", cook.StepFailed))
 
 	if got := indexStatus(t, gdb, "t_a", sprout, jid); got != JobIndexStatusSucceeded {
@@ -209,7 +209,7 @@ func TestJobStatusIndex_TenantScoped(t *testing.T) {
 
 func TestJobStatusIndex_DisabledOrInvalidIsANoOp(t *testing.T) {
 	SetDB(nil)
-	indexJobCreation("t_a", "web-01", "j", 1) // must not panic
+	indexJobCreation("t_a", "web-01", "j", 1, time.Now()) // must not panic
 
 	gdb := newIndexTestDB(t)
 	for _, c := range []struct{ tenant, sprout, jid string }{
@@ -218,7 +218,7 @@ func TestJobStatusIndex_DisabledOrInvalidIsANoOp(t *testing.T) {
 		{"t_a", "web-01", ""},
 		{"t_a", "web-01", string(make([]byte, maxIndexJIDLen+1))},
 	} {
-		indexJobCreation(c.tenant, c.sprout, c.jid, 1)
+		indexJobCreation(c.tenant, c.sprout, c.jid, 1, time.Now())
 	}
 	var n int64
 	gdb.Model(&jobStatusRow{}).Count(&n)
@@ -250,8 +250,8 @@ func TestListenerIndexesUnderRegisteredTenant(t *testing.T) {
 
 func TestReapJobStatusIndex(t *testing.T) {
 	gdb := newIndexTestDB(t)
-	indexJobCreation("t_a", "web-01", "old", 1)
-	indexJobCreation("t_a", "web-01", "new", 1)
+	indexJobCreation("t_a", "web-01", "old", 1, time.Now())
+	indexJobCreation("t_a", "web-01", "new", 1, time.Now())
 	gdb.Model(&jobStatusRow{}).Where("jid = ?", "old").Update("updated_at", time.Now().Add(-48*time.Hour))
 
 	reapJobStatusIndex(time.Now().Add(-24 * time.Hour))

@@ -19,6 +19,8 @@ of the YAML here is applied by anything in imas.
 | `farmer-deployment-nats-seeds.patch.yaml` | Volume, mount, and env vars to add to farmer's Deployment in the ops repo (part 1) |
 | `saasapi-credential-publish-job.yaml` | The Job, its ServiceAccount, and its NetworkPolicy (part 2) |
 | `externalsecrets.yaml` | ESO wiring for the seeds and for the published JWT |
+| `values.job-reconcile.yaml` | Values block for the job reconcile window (see the last section) |
+| `deployment.env.job-reconcile.yaml` | Template fragment to paste under the farmer container's `env:` list |
 
 ## Part 1: the SYS Account seed on farmer (ops change only)
 
@@ -226,3 +228,40 @@ A failed Job, for example because OpenBao is unreachable, fails the
 Helm/Argo sync. That's intentional: saasapi might be on a stale JWT. With
 `helm upgrade --atomic` it would also roll farmer back, so don't combine
 the hook with `--atomic` unless that's what you want.
+
+## Job reconcile window (`IMAS_JOB_RECONCILE_WINDOW`)
+
+A sprout that misses a recipe push while disconnected cooks the staged
+copy when it next starts, reconnects or is nudged (`imas resync`), as long
+as the job is no older than the sprout's own `stagedrecipemaxage` setting
+(sprout config file, default `1h`). The reconcile window is farmer's side
+of that: how late a job may start and still be recorded.
+
+| Env var | Helm value | Default | Valid values |
+|---|---|---|---|
+| `IMAS_JOB_RECONCILE_WINDOW` | `jobs.reconcileWindow` | `"2h"` in the chart; unset (every job recorded) if the value is null or `""`, or without the chart | Go duration string, e.g. `"2h"`, `"90m"`; `"0"` disables |
+
+- The `jobreconcilewindow` key in farmer's config file wins over the env
+  var, like the other `IMAS_*` settings.
+- It is measured from dispatch (`dispatched_at`, stamped by farmer) to
+  the job's `start` event reaching farmer. A job whose start arrives later
+  is not reconciled: farmer writes none of its events to the job store or
+  the `job_status` index, and marks the job `expired` in both (an
+  `expired.json` marker in the job store, the `expired` flag and status
+  in `job_status`). `imas jobs` shows it as `expired`; the SaaS API
+  reports its action item as failed with error code `job_expired`, so a
+  fleet-update rollout treats it as not succeeded and halts. Marking a
+  job expired is logged once at warn level; its later dropped events at
+  debug. Once expired, a job stays expired even if the window is raised.
+  The job reaper removes it like any other job.
+- A job that started within the window is recorded to the end, however
+  long it runs.
+- Jobs dispatched before this change have no `dispatched_at` and are
+  always recorded.
+- **Keep it at least the largest `stagedrecipemaxage` in the fleet.** The
+  chart's `2h` covers the sprout default of `1h`. With a smaller window,
+  sprouts will still run late jobs, but farmer marks them expired instead
+  of recording their results.
+- An invalid value (`soon`, `-1h`, `7200` without a unit) stops farmer at
+  startup with an error naming the variable. The template fragment
+  rejects a bare YAML number at render time.
