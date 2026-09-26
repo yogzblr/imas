@@ -39,7 +39,7 @@ require (
 	github.com/taigrr/systemctl v1.2.0
 	github.com/valkey-io/valkey-go v1.0.78
 	github.com/vishvananda/netlink v1.3.1
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 	golang.org/x/mod v0.40.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
