@@ -28,14 +28,19 @@ func handleCook(tenantID string, params json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("invalid cook command: %w", err)
 	}
 
+	// Each target's NKey as of now, so each dispatch can check the sprout
+	// still has this identity once its recipe is staged (see
+	// sproutIdentityGuard).
+	nkeys := make(map[string]string, len(ta.Target))
 	for _, target := range ta.Target {
 		if !pki.IsValidSproutID(target.SproutID) || strings.Contains(target.SproutID, "_") {
 			return nil, fmt.Errorf("invalid sprout ID: %s", target.SproutID)
 		}
-		registered, _ := pki.NKeyExists(tenantID, target.SproutID, "")
-		if !registered {
+		nkey, err := pki.GetNKey(tenantID, target.SproutID)
+		if err != nil {
 			return nil, fmt.Errorf("unknown sprout: %s", target.SproutID)
 		}
+		nkeys[target.SproutID] = nkey
 	}
 
 	natsConn := natsConnFor(tenantID)
@@ -89,7 +94,10 @@ func handleCook(tenantID string, params json.RawMessage) (any, error) {
 		for _, target := range ta.Target {
 			go func(t pki.KeyManager) {
 				defer wg.Done()
-				cookOpts := []cook.CookOption{cook.WithInvoker(invokerPubkey)}
+				cookOpts := []cook.CookOption{
+					cook.WithInvoker(invokerPubkey),
+					cook.WithStageGuard(sproutIdentityGuard(tenantID, t.SproutID, nkeys[t.SproutID])),
+				}
 				if command.State != "" {
 					cookOpts = append(cookOpts, cook.WithTargetStep(cook.StepID(command.State)))
 				}
@@ -109,4 +117,18 @@ func handleCook(tenantID string, params json.RawMessage) (any, error) {
 
 	command.JID = jid
 	return command, nil
+}
+
+// sproutIdentityGuard returns a cook.WithStageGuard check that fails once
+// sproutID in tenantID no longer holds nkey: deleted, or replaced by a new
+// host under the same sprout ID (see handlePKIAccept). The PKI handlers
+// remove the staged recipe after such a change; this check catches a
+// dispatch that staged its recipe after that removal ran.
+func sproutIdentityGuard(tenantID, sproutID, nkey string) func() error {
+	return func() error {
+		if _, matches := pki.NKeyExists(tenantID, sproutID, nkey); !matches {
+			return fmt.Errorf("sprout %s in tenant %s was deleted or replaced during dispatch", sproutID, tenantID)
+		}
+		return nil
+	}
 }
