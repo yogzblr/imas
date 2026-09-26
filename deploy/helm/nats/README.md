@@ -13,9 +13,11 @@ It deploys:
   → User-per-sprout (`docs/design/imas-nats-jwt-auth-design.md`).
 - **The gateway.** Envoy runs as a Deployment, configured from
   `deploy/envoy/envoy.yaml` (`docs/design/imas-envoy-enrollment-design.md`):
-  - `/v1/enroll` is rate-limited and has no JWT check.
-  - `/v1/recipes` and the `wss://` NATS route are both gated by
-    `jwt_authn` on the EdDSA gateway JWT.
+  - `/v1/enroll` (join token) and `/v1/refresh` (NKey proof of
+    possession, checked by farmer) have no JWT check. Each has its own
+    rate-limit bucket.
+  - `/files/` (recipe download) and the `wss://` NATS route are both
+    gated by `jwt_authn` on the EdDSA gateway JWT.
 - **NetworkPolicies** for both, limited to the documented ports.
 
 It does **not** deploy farmer (core) or saasapi. Those belong to the
@@ -26,7 +28,8 @@ separate `deploy/helm/farmer` chart.
                               │                     ▲
                               └─https:5405──▶ farmer (core, other namespace)
                                   /v1/enroll,        │
-                                  /v1/recipes, JWKS  └─tls:5406 (core dials out)
+                                  /v1/refresh,       │
+                                  /files/, JWKS      └─tls:5406 (core dials out)
 ```
 
 ## Before you install
@@ -161,17 +164,44 @@ the `IMAS_BUS_CLUSTER_*` variables. The expected contract:
 ## Envoy and `jwt_authn`
 
 The Envoy config (`templates/envoy-configmap.yaml`) matches
-`deploy/envoy/envoy.yaml` route for route, with these differences:
+`deploy/envoy/envoy.yaml` route for route:
 
-- **`requirement_map` added.** The routes' `requirement_name:
-  sprout_jwt` is looked up in `requirement_map`, not in `providers`.
-  `deploy/envoy/envoy.yaml` has no map. Against real Envoy 1.35.3, every
-  request on a gated route then gets `403 Failed JWT authentication:
-  Wrong requirement_name: sprout_jwt. It should be one of []`. That fails
-  closed, but no sprout can ever connect.
+| Route | Gate | Rate limit | Upstream |
+|---|---|---|---|
+| `/v1/enroll` (prefix) | none; the join token is checked by farmer | fixed 20 per 60s per Envoy | `farmer_api` |
+| `/v1/refresh` (exact path) | none; farmer checks an NKey proof of possession | `envoy.refreshRateLimit`, sized from the fleet | `farmer_api` |
+| `/files/` (prefix) | `jwt_authn` | none | `recipe_service` |
+| `/` (everything else) | `jwt_authn` | none | `nats_websocket` (the bus) |
+
+`chart_test.go`'s `TestRoutesMatchReferenceEnvoyConfig` fails if the
+routes, their gates, clusters or buckets drift from the reference file,
+or if `requirement_map` or `rules` do.
+
+**`/v1/enroll`'s bucket is deliberately not a value.** The join token is
+its only credential, so the small budget is what bounds join-token
+guessing, and it should not grow with the fleet.
+
+**`/v1/refresh`'s bucket** uses the formula and values shape from
+`deploy/envoy/_refresh-rate-limit.tpl` and `values.rate-limit.yaml`, so
+an ops values block merges as-is:
+
+```
+tokens_per_fill = ceil(fleetSize * 30 * headroom * fillIntervalSeconds
+                       / (17 * gatewayJwtTtlSeconds * envoyReplicas))
+max_tokens      = tokens_per_fill * (burstSeconds / fillIntervalSeconds)
+```
+
+`envoyReplicas: null` (the default) uses `envoy.replicaCount`. With the
+defaults (1M sprouts, 24h TTL, 2 replicas, headroom 2) that renders 21
+per second and 6,300 max. With 4 replicas it renders the reference's 11
+and 3,300. See `deploy/envoy/README.md`, "Sizing the /v1/refresh
+bucket". Keep `gatewayJwtTtlSeconds` equal to farmer's `gatewayjwtttl`.
+
+Where the chart adds to the reference:
+
 - **Early header stripping.** Client-supplied copies of the
   `claim_to_headers` headers (`x-imas-sprout-nkey`) are removed before
-  any filter runs, including on `/v1/enroll`.
+  any filter runs, including on the two un-gated routes.
 - **Optional upstream TLS verification** through
   `envoy.upstreamTLS.caSecretName`/`caConfigMapName`. It checks the SAN
   against each upstream's SNI. The reference file doesn't verify
@@ -190,31 +220,39 @@ The JWKS source is a value:
 
 ### Verification status
 
-Everything below ran on 2026-09-26 against real binaries. It used this
-chart's rendered Envoy config and the bus container spec exactly as
-templated: read-only root, UID 65532, seeds only from `_SEED_FILE`. The
-stack was `envoyproxy/envoy:v1.35.3`, OpenBao 2.4.1 (dev) for PKI and
-Transit, MySQL 8.4, and farmer plus farmerbus built from this branch.
+Revalidated on 2026-09-26 against `main` after PRs #5–#13, with no
+patches. Everything ran against real binaries: `envoyproxy/envoy:v1.35.3`,
+OpenBao 2.4.1 (dev) for PKI and Transit, MySQL 8.4, Valkey 8.1, and
+farmer, farmerbus and sprout built from this branch.
 
-- **One real enrollment through Envoy: `POST /v1/enroll` → 200.** The
-  gateway JWT header was `{"alg":"EdDSA","kid":"1","typ":"JWT"}`, signed
-  by an OpenBao Transit Ed25519 key.
-- **Envoy's `jwt_authn` on `/v1/recipes`**, fetching the JWKS remotely
-  from farmer:
-  - The real gateway JWT was accepted and forwarded to farmer.
-  - No token → `401 Jwt is missing`.
-  - A tampered signature → `401 Jwt verification fails`.
-  - The native NATS User JWT → `401 Jwt header [alg] is not supported`.
-- **`wss://` NATS through Envoy to the bus:**
-  - With the gateway JWT plus the NATS User JWT, it connected. The
-    lazily provisioned tenant's Account had reached the bus through
-    core's resolver push.
-  - With no token or a tampered token, it was rejected at the upgrade.
+- **The repo's own real-Envoy e2e suites pass through this chart's
+  rendered Envoy config.** These are
+  `internal/pki` `TestSproutLifecycle_ThroughRealEnvoy` and
+  `internal/api` `TestSproutDownloadsStagedRecipe_ThroughRealEnvoy`.
+  They cover:
+  - enroll, then `wss://` to the bus;
+  - upgrade refused with no token, an expired token or a bad signature
+    (`401`);
+  - `/v1/refresh`, then reconnecting with the new token;
+  - `/files/` download, including a validly signed token for another
+    sprout, which Envoy passes and farmer refuses.
+
+  To run them this way, the rendered config replaced
+  `deploy/envoy/envoy.yaml` in a scratch copy of the repo. They also pass
+  against the reference file on Envoy 1.35.3. These suites stub OpenBao
+  Transit.
+- **Full stack with real OpenBao.** farmer served its JWKS from the real
+  OpenBao Ed25519 Transit key (PR #5's fix), and Envoy fetched it.
+- **The real `cmd/sprout` binary enrolled through the chart's Envoy**
+  (`POST /v1/enroll`), with the NKey proof of possession and the Valkey
+  replay cache. It then fetched `/files/` through `jwt_authn`. It still
+  can't reach the bus; see [Known gaps](#known-gaps-outside-this-chart)
+  (1) and (2).
+- **The bus container ran exactly as templated:** read-only root, UID
+  65532, seeds only from `_SEED_FILE`, and no seed written to its
+  volume. Core joined it over TLS on 5406.
 - **`envoy --mode validate` passes** for every `ci/*-values.yaml`
-  variant and for the remote-JWKS-on-its-own-cluster variant.
-
-**Caveat:** the run used a lab-only patch to farmer, not committed. See
-[Known gaps](#known-gaps-outside-this-chart) (1).
+  variant.
 
 ## NetworkPolicy
 
@@ -360,10 +398,10 @@ regardless of policy. Check yours.
 | `envoy.jwtAuthn.jwks.local.inline` | `""` | Inline JWKS JSON, stored in the chart's ConfigMap. |
 | `envoy.jwtAuthn.jwks.local.configMapName` | `""` | Or an existing ConfigMap with the JWKS. |
 | `envoy.jwtAuthn.jwks.local.configMapKey` | `jwks.json` | Key in that ConfigMap. |
-| `envoy.upstreams.farmerAPI.host` | `farmer.imas-core.svc.cluster.local` | farmer's HTTPS API (enroll, JWKS). |
+| `envoy.upstreams.farmerAPI.host` | `farmer.imas-core.svc.cluster.local` | farmer's HTTPS API (`/v1/enroll`, `/v1/refresh`, JWKS). |
 | `envoy.upstreams.farmerAPI.port` | `5405` | Its port. |
 | `envoy.upstreams.farmerAPI.sni` | `""` | SNI and verified SAN. Empty uses the host. |
-| `envoy.upstreams.recipeService.host` | `""` | `/v1/recipes` upstream. Empty uses `farmerAPI.host`. |
+| `envoy.upstreams.recipeService.host` | `""` | `/files/` upstream. Empty uses `farmerAPI.host`. |
 | `envoy.upstreams.recipeService.port` | `5405` | Its port. |
 | `envoy.upstreams.recipeService.sni` | `""` | SNI and verified SAN. Empty uses the host. |
 | `envoy.upstreams.natsWebsocket.host` | `""` | Bus websocket upstream. Empty uses this release's bus Service FQDN. |
@@ -376,11 +414,17 @@ regardless of policy. Check yours.
 | `envoy.upstreamTLS.caConfigMapName` | `""` | Same, from a ConfigMap. Set only one of the two. |
 | `envoy.upstreamTLS.caKey` | `ca.crt` | Key holding the CA. |
 | `envoy.routes.enrollTimeout` | `30s` | `/v1/enroll` timeout. |
-| `envoy.routes.recipesTimeout` | `60s` | `/v1/recipes` timeout. |
+| `envoy.routes.refreshTimeout` | `30s` | `/v1/refresh` timeout. |
+| `envoy.routes.filesTimeout` | `60s` | `/files/` timeout. |
 | `envoy.routes.websocketIdleTimeout` | `0s` | Websocket route idle timeout. `0s` means none. |
-| `envoy.enrollRateLimit.maxTokens` | `20` | `/v1/enroll` token bucket size, per Envoy worker. |
-| `envoy.enrollRateLimit.tokensPerFill` | `20` | Tokens per fill. |
-| `envoy.enrollRateLimit.fillInterval` | `60s` | Fill interval. |
+| `envoy.refreshRateLimit.fleetSize` | `1000000` | Enrolled sprouts behind these Envoys. Size for where the fleet is going. |
+| `envoy.refreshRateLimit.gatewayJwtTtlSeconds` | `86400` | Must match farmer's `gatewayjwtttl`, in seconds. |
+| `envoy.refreshRateLimit.envoyReplicas` | `null` | Envoys sharing `/v1/refresh`. `null` uses `envoy.replicaCount`. |
+| `envoy.refreshRateLimit.headroom` | `2` | Whole-number multiplier over the steady-state rate. |
+| `envoy.refreshRateLimit.fillIntervalSeconds` | `1` | `fill_interval`, in whole seconds. |
+| `envoy.refreshRateLimit.burstSeconds` | `300` | `max_tokens` as seconds' worth of the per-Envoy rate. Must be at least `fillIntervalSeconds`. |
+| `envoy.refreshRateLimit.tokensPerFill` | `null` | Explicit `tokens_per_fill`. `null` computes it. |
+| `envoy.refreshRateLimit.maxTokens` | `null` | Explicit `max_tokens`, at least `tokensPerFill`. `null` computes it. |
 | `envoy.configOverride` | `""` | Full `envoy.yaml` replacement. Bypasses every setting above. |
 | `envoy.resources` | 100m CPU and 128Mi requests, 512Mi limit | Container resources. |
 | `envoy.podSecurityContext` | non-root 101, RuntimeDefault seccomp | Pod securityContext. |
@@ -436,48 +480,45 @@ go test ./deploy/helm/nats/   # renders with the helm CLI; skips if helm isn't o
 
 ## Known gaps outside this chart
 
-These came out of the live run. Each is outside this chart's file scope
-and none is fixed here.
+Still open after PRs #5–#13. Each is outside this chart's file scope.
 
-1. **Gateway and fleet signing can't read real OpenBao Ed25519 keys.**
-   `internal/gatewayjwt/obtransit.go` (`parseEd25519PublicKeyPEM`) and
-   `internal/fleetsign/obtransit.go` expect Transit's Ed25519
-   `public_key` as PEM. OpenBao 2.4.1 returns raw base64 (32 bytes). So
-   against a real OpenBao:
-   - farmer's JWKS returns 503.
-   - Every `POST /v1/enroll` fails closed.
-
-   The unit tests mock a PEM response, which is why this wasn't caught.
-   The live run above used a lab-only build that also accepts raw base64.
-2. **The reference config's routes can never pass.**
-   `deploy/envoy/envoy.yaml` lacks `requirement_map` (see above).
-3. **The Keycloak harness doesn't start on current Keycloak.**
-   `deploy/envoy/testing/docker-compose.keycloak.yml`:
-   - It pulls from quay.io.
-   - It mounts the realm as `imas-gateway-jwt-realm.json`. Keycloak 26
-     refuses that, because the file must be named
-     `imas-gateway-jwt-validation-realm.json`.
-
-   With both fixed, Keycloak 26.3 imported the realm. In a token
-   exchange, it rejected a gateway JWT with a tampered signature
-   (`invalid token`). The real one got past signature verification and
-   then hit a non-crypto rule (`token type not supported`: gateway JWTs
-   carry no `typ` claim Keycloak accepts). So the harness's step 5
-   brokered exchange can't complete as written.
-4. **Sprouts don't send the gateway JWT yet.** Nothing in `cmd/sprout`
-   sends it. A real sprout's `wss://` connect through this gateway would
-   get a 401 at the upgrade until it sets
-   `Authorization: Bearer <gateway_jwt>`, for example with nats.go's
-   `WebSocketConnectionHeaders`.
-5. **`cmd/farmerbus` has no cluster routes.** See [Clustering](#clustering).
-6. **farmer's default tenant ID is invalid.** `config.go` defaults
+1. **The real sprout can't reach the bus through Envoy.** `ConnectSprout`
+   (`cmd/sprout/main.go`) dials `config.FarmerBusURL`, which is always
+   `farmerinterface:farmerbusport` with no scheme, so plain `nats://`
+   TCP. The `nats_urls` (`wss://…`) from the enrollment response is
+   parsed but never used.
+   - Live, Envoy counted 0 websocket upgrades. The sprout's attempts
+     never completed a TLS handshake, because each side waits for the
+     other to speak first.
+   - The e2e suites don't catch this: they call `nats.Connect(env.BusURL)`
+     with a `wss://` URL themselves.
+2. **The root CA bootstrap fails through Envoy.** `FetchRootCA`
+   (`internal/pki/pki.go`) fetches `https://<farmerinterface>:<farmerapiport>/auth/cert/`.
+   - Envoy doesn't route `/auth/cert/`, so it lands on the JWT-gated
+     default route and gets `401 Jwt is missing`.
+   - `FetchRootCA` doesn't check the status. It writes that body into
+     `tls-rootca.pem`, and because the file now exists, it never
+     re-fetches. The sprout loops on "cannot load the RootCA" until the
+     file is deleted.
+   - Pre-provisioning the CA (e.g. from Ansible) works around it. Adding
+     an un-gated `/auth/cert/` route would be a trust-bootstrap design
+     decision, so this chart doesn't.
+3. **`cmd/farmerbus` has no cluster routes, and there's no farmerbus
+   image.** See [Clustering](#clustering).
+4. **farmer's default tenant ID is invalid.** `config.go` still defaults
    `farmerorganization` to `"imas farmer"`, which fails
    `IsValidTenantID`, so core exits at boot unless it's overridden.
-7. **core can't be configured with the bus's address.** It uses one
-   `farmerinterface` as its API bind address, its bus URL host and its
-   TLS ServerName for the bus. In Kubernetes it can't bind `0.0.0.0` and
-   dial the bus Service at the same time. The farmer chart needs a way
-   around this.
+5. **core can't be configured with the bus's address.** It still uses
+   one `farmerinterface` as its API bind address, its bus URL host and
+   its TLS ServerName for the bus.
+6. **The Keycloak harness still doesn't start on current Keycloak.**
+   `deploy/envoy/testing/docker-compose.keycloak.yml` still pulls from
+   quay.io and mounts the realm under a file name Keycloak 26 refuses
+   (it must be `imas-gateway-jwt-validation-realm.json`).
+
+Fixed by PRs #5–#13 and verified above: Ed25519 Transit key parsing
+(#5), `requirement_map` in `deploy/envoy/envoy.yaml` (#6), and sprouts
+sending the gateway JWT on `wss://` and `/files/` (#8, #12).
 
 ## Security review notes
 
@@ -492,8 +533,8 @@ and none is fixed here.
   sensitive object in the deployment. Restrict who can read it.
 - Upstream TLS verification is **off by default**, matching the
   reference config. Set `envoy.upstreamTLS.*` for anything real.
-- `/v1/enroll`'s rate limit is per Envoy worker and per replica, not
-  global.
+- The `/v1/enroll` and `/v1/refresh` rate limits are per Envoy process
+  and per replica, not global.
 - The gateway JWT has no `aud`. Envoy checks only `iss`, the signature
   and `exp`. Adding an audience needs a change to `internal/gatewayjwt`
   plus `envoy.jwtAuthn.audiences`.

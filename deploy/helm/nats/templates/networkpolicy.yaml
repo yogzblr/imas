@@ -83,7 +83,7 @@ spec:
 # Envoy (DMZ edge). Allowed, and nothing else:
 #   in:  envoyIngress.from (default: anyone) -> listener port
 #   out: bus pods  -> websocket port
-#   out: core (cmd/farmer) -> farmer API port(s): /v1/enroll, /v1/recipes,
+#   out: core (cmd/farmer) -> farmer API port(s): /v1/enroll, /v1/refresh, /files/,
 #        and the remote JWKS fetch
 #   out: DNS
 # The admin port is bound to 127.0.0.1 and needs no rule.

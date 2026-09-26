@@ -210,7 +210,7 @@ explanation rather than deploying something that silently can't work.
 {{- fail "envoy.jwtAuthn.issuer is required (internal/gatewayjwt's GatewayIssuer, \"imas-gateway\")" -}}
 {{- end -}}
 {{- if not $e.upstreams.farmerAPI.host -}}
-{{- fail "envoy.upstreams.farmerAPI.host is required (/v1/enroll and /v1/recipes proxy to it)" -}}
+{{- fail "envoy.upstreams.farmerAPI.host is required (/v1/enroll, /v1/refresh and /files/ proxy to it)" -}}
 {{- end -}}
 {{- $src := $e.jwtAuthn.jwks.source -}}
 {{- if not (has $src (list "remote" "local")) -}}
@@ -266,4 +266,72 @@ transport_socket:
           - san_type: DNS
             matcher: { exact: {{ .sni | quote }} }
     {{- end }}
+{{- end }}
+
+{{/*
+/v1/refresh bucket, ported from deploy/envoy/_refresh-rate-limit.tpl
+(same values shape as deploy/envoy/values.rate-limit.yaml, so an ops
+values block merges as-is). tokens_per_fill defaults to
+  ceil(fleetSize * 30 * headroom * fillInterval / (17 * ttl * replicas))
+— 17/30 of the TTL is the shortest gap between one sprout's refreshes.
+envoyReplicas null means envoy.replicaCount. See deploy/envoy/README.md,
+"Sizing the /v1/refresh bucket".
+*/}}
+{{- define "imas-nats.envoy.refreshReplicas" -}}
+{{- $r := .Values.envoy.refreshRateLimit -}}
+{{- if kindIs "invalid" $r.envoyReplicas -}}{{- int64 .Values.envoy.replicaCount -}}{{- else -}}{{- int64 $r.envoyReplicas -}}{{- end -}}
+{{- end }}
+
+{{- define "imas-nats.envoy.refreshTokensPerFill" -}}
+{{- $r := .Values.envoy.refreshRateLimit -}}
+{{- if not (kindIs "invalid" $r.tokensPerFill) -}}
+{{- if lt (int64 $r.tokensPerFill) 1 -}}{{- fail "envoy.refreshRateLimit.tokensPerFill must be >= 1" -}}{{- end -}}
+{{- int64 $r.tokensPerFill -}}
+{{- else -}}
+{{- $in := dict "fleetSize" $r.fleetSize "gatewayJwtTtlSeconds" $r.gatewayJwtTtlSeconds "envoyReplicas" (include "imas-nats.envoy.refreshReplicas" . | int64) "headroom" $r.headroom "fillIntervalSeconds" $r.fillIntervalSeconds -}}
+{{- range $k := list "fleetSize" "gatewayJwtTtlSeconds" "envoyReplicas" "headroom" "fillIntervalSeconds" -}}
+{{- $v := index $in $k -}}
+{{- if or (kindIs "invalid" $v) (lt (float64 $v) 1.0) -}}{{- fail (printf "envoy.refreshRateLimit.%s must be set and >= 1" $k) -}}{{- end -}}
+{{- if ne (float64 $v) (float64 (int64 $v)) -}}{{- fail (printf "envoy.refreshRateLimit.%s must be a whole number" $k) -}}{{- end -}}
+{{- end -}}
+{{- $num := mul (int64 $in.fleetSize) 30 (int64 $in.headroom) (int64 $in.fillIntervalSeconds) -}}
+{{- $den := mul 17 (int64 $in.gatewayJwtTtlSeconds) (int64 $in.envoyReplicas) -}}
+{{- div (sub (add $num $den) 1) $den -}}
+{{- end -}}
+{{- end }}
+
+{{- define "imas-nats.envoy.refreshMaxTokens" -}}
+{{- $r := .Values.envoy.refreshRateLimit -}}
+{{- $perFill := include "imas-nats.envoy.refreshTokensPerFill" . | int64 -}}
+{{- if not (kindIs "invalid" $r.maxTokens) -}}
+{{- if lt (int64 $r.maxTokens) $perFill -}}{{- fail "envoy.refreshRateLimit.maxTokens must be >= tokensPerFill" -}}{{- end -}}
+{{- int64 $r.maxTokens -}}
+{{- else -}}
+{{- if or (kindIs "invalid" $r.burstSeconds) (lt (int64 $r.burstSeconds) (int64 $r.fillIntervalSeconds)) -}}{{- fail "envoy.refreshRateLimit.burstSeconds must be >= fillIntervalSeconds" -}}{{- end -}}
+{{- mul $perFill (div (int64 $r.burstSeconds) (int64 $r.fillIntervalSeconds)) -}}
+{{- end -}}
+{{- end }}
+
+{{- define "imas-nats.envoy.refreshRoute" -}}
+- match: { path: "/v1/refresh" }
+  route:
+    cluster: farmer_api
+    timeout: {{ .Values.envoy.routes.refreshTimeout }}
+  typed_per_filter_config:
+    envoy.filters.http.jwt_authn:
+      "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+      disabled: true
+    envoy.filters.http.local_ratelimit:
+      "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+      stat_prefix: refresh_rate_limiter
+      token_bucket:
+        max_tokens: {{ include "imas-nats.envoy.refreshMaxTokens" . }}
+        tokens_per_fill: {{ include "imas-nats.envoy.refreshTokensPerFill" . }}
+        fill_interval: {{ int64 .Values.envoy.refreshRateLimit.fillIntervalSeconds }}s
+      filter_enabled:
+        runtime_key: refresh_rate_limit_enabled
+        default_value: { numerator: 100, denominator: HUNDRED }
+      filter_enforced:
+        runtime_key: refresh_rate_limit_enforced
+        default_value: { numerator: 100, denominator: HUNDRED }
 {{- end }}

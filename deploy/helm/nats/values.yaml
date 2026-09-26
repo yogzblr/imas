@@ -303,7 +303,7 @@ envoy:
       # -- SNI and SAN to verify. Empty = host.
       sni: ""
     recipeService:
-      # -- Recipe HTTP endpoint (/v1/recipes). Empty host = farmerAPI's.
+      # -- Recipe download upstream (/files/). Empty host = farmerAPI's.
       host: ""
       port: 5405
       sni: ""
@@ -332,16 +332,39 @@ envoy:
   routes:
     # -- Timeout for /v1/enroll.
     enrollTimeout: 30s
-    # -- Timeout for /v1/recipes.
-    recipesTimeout: 60s
+    # -- Timeout for /v1/refresh.
+    refreshTimeout: 30s
+    # -- Timeout for /files/ (recipe download).
+    filesTimeout: 60s
     # -- Idle timeout for the long-lived websocket route (0s = none).
     websocketIdleTimeout: 0s
 
-  enrollRateLimit:
-    # -- Token bucket for the un-gated /v1/enroll route, per Envoy worker.
-    maxTokens: 20
-    tokensPerFill: 20
-    fillInterval: 60s
+  # /v1/enroll's bucket is deliberately not a value (20 per 60s per Envoy,
+  # as in deploy/envoy/envoy.yaml): the join token is its only credential,
+  # so this small budget is what bounds join-token guessing.
+
+  # /v1/refresh's own bucket, sized from the fleet. Same shape as
+  # deploy/envoy/values.rate-limit.yaml. tokens_per_fill defaults to
+  #   ceil(fleetSize * 30 * headroom * fillIntervalSeconds
+  #        / (17 * gatewayJwtTtlSeconds * envoyReplicas))
+  # See deploy/envoy/README.md, "Sizing the /v1/refresh bucket".
+  refreshRateLimit:
+    # -- Enrolled sprouts behind these Envoys. Size for where the fleet is going.
+    fleetSize: 1000000
+    # -- Must match farmer's gatewayjwtttl, in seconds.
+    gatewayJwtTtlSeconds: 86400
+    # -- Envoy replicas sharing the load. null = envoy.replicaCount.
+    envoyReplicas: null
+    # -- Whole-number multiplier over the steady-state rate.
+    headroom: 2
+    # -- token_bucket.fill_interval, whole seconds.
+    fillIntervalSeconds: 1
+    # -- max_tokens as seconds' worth of the per-Envoy rate.
+    burstSeconds: 300
+    # -- Explicit tokens_per_fill. null = computed.
+    tokensPerFill: null
+    # -- Explicit max_tokens. null = computed.
+    maxTokens: null
 
   # -- Rendered verbatim over the generated envoy.yaml when non-empty
   # (escape hatch; bypasses every templated setting above).

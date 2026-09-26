@@ -87,11 +87,15 @@ data:
                                   "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
                                   stat_prefix: enroll_rate_limiter
                                   token_bucket:
-                                    # Per Envoy worker and per replica, not
-                                    # global: see deploy/envoy/README.md.
-                                    max_tokens: {{ $e.enrollRateLimit.maxTokens }}
-                                    tokens_per_fill: {{ $e.enrollRateLimit.tokensPerFill }}
-                                    fill_interval: {{ $e.enrollRateLimit.fillInterval }}
+                                    # Fixed on purpose, not a value: the join
+                                    # token is this route's only credential,
+                                    # so this small budget bounds join-token
+                                    # guessing and must not grow with the
+                                    # fleet. Per Envoy process (shared by its
+                                    # workers), so N replicas allow N x this.
+                                    max_tokens: 20
+                                    tokens_per_fill: 20
+                                    fill_interval: 60s
                                   filter_enabled:
                                     runtime_key: enroll_rate_limit_enabled
                                     default_value: { numerator: 100, denominator: HUNDRED }
@@ -99,11 +103,22 @@ data:
                                     runtime_key: enroll_rate_limit_enforced
                                     default_value: { numerator: 100, denominator: HUNDRED }
 
-                            # Route 2: authenticated recipe download.
-                            - match: { prefix: "/v1/recipes" }
+                            # Route 1b: gateway JWT refresh. No JWT gate
+                            # (an expired gateway JWT must still renew);
+                            # farmer checks an NKey proof of possession.
+                            # Its own bucket, sized from the fleet
+                            # (envoy.refreshRateLimit), never /v1/enroll's.
+                            {{- include "imas-nats.envoy.refreshRoute" . | nindent 28 }}
+
+                            # Route 2: authenticated recipe download, farmer's
+                            # GET /files/<key> (the trailing slash keeps e.g.
+                            # "/filesystem" out). /v1/recipes is the CLI's
+                            # RBAC-token API and is deliberately not routed:
+                            # it falls through to route 3.
+                            - match: { prefix: "/files/" }
                               route:
                                 cluster: recipe_service
-                                timeout: {{ $e.routes.recipesTimeout }}
+                                timeout: {{ $e.routes.filesTimeout }}
                               typed_per_filter_config:
                                 envoy.filters.http.jwt_authn:
                                   "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
@@ -172,7 +187,7 @@ data:
                           # Fallback for any route without a per-route
                           # config: require the JWT.
                           rules:
-                            - match: { prefix: "/v1/recipes" }
+                            - match: { prefix: "/files/" }
                               requires: { provider_name: {{ $j.providerName }} }
                             - match: { prefix: "/" }
                               requires: { provider_name: {{ $j.providerName }} }
@@ -180,7 +195,8 @@ data:
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
                           stat_prefix: http_local_rate_limiter
-                          # Disabled globally; only /v1/enroll turns it on.
+                          # Disabled globally; only /v1/enroll and
+                          # /v1/refresh turn it on, each with its own bucket.
                           filter_enabled:
                             runtime_key: local_rate_limit_enabled
                             default_value: { numerator: 0, denominator: HUNDRED }
@@ -192,7 +208,8 @@ data:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
 
       clusters:
-        # farmer's HTTPS API (core network): /v1/enroll and the JWKS fetch.
+        # farmer's HTTPS API (core network): /v1/enroll, /v1/refresh and
+        # the JWKS fetch.
         - name: farmer_api
           type: STRICT_DNS
           lb_policy: ROUND_ROBIN
@@ -218,7 +235,9 @@ data:
                         socket_address: { address: {{ $wsHost | quote }}, port_value: {{ $wsPort }} }
           {{- include "imas-nats.envoy.upstreamTLS" (dict "root" . "sni" $wsSNI) | nindent 10 }}
 
-        # farmer's recipe endpoint (GET /v1/recipes...), workstream I.
+        # farmer's sprout-facing recipe download (GET /files/<key>),
+        # workstream I. Farmer re-verifies the forwarded gateway JWT and
+        # serves only that sprout's own sprouts/<tenant>/<sprout>/ keys.
         - name: recipe_service
           type: STRICT_DNS
           lb_policy: ROUND_ROBIN

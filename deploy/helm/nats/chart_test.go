@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -252,6 +253,10 @@ func TestValidationFailures(t *testing.T) {
 		{"local jwks empty", "needs jwks.local.inline or", []string{"--set", "envoy.jwtAuthn.jwks.source=local"}},
 		{"local jwks not json", "must be a JSON JWKS", []string{"--set", "envoy.jwtAuthn.jwks.source=local", "--set", "envoy.jwtAuthn.jwks.local.inline=nope"}},
 		{"jwks cluster without host", "upstreams.jwks.host is required", []string{"--set", "envoy.jwtAuthn.jwks.remote.cluster=jwks"}},
+		{"refresh fleet size zero", "refreshRateLimit.fleetSize must be set and >= 1", []string{"--set", "envoy.refreshRateLimit.fleetSize=0"}},
+		{"refresh fractional headroom", "refreshRateLimit.headroom must be a whole number", []string{"--set", "envoy.refreshRateLimit.headroom=1.5"}},
+		{"refresh burst below interval", "burstSeconds must be >= fillIntervalSeconds", []string{"--set", "envoy.refreshRateLimit.fillIntervalSeconds=10", "--set", "envoy.refreshRateLimit.burstSeconds=5"}},
+		{"refresh max below per-fill", "maxTokens must be >= tokensPerFill", []string{"--set", "envoy.refreshRateLimit.tokensPerFill=50", "--set", "envoy.refreshRateLimit.maxTokens=10"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) { mustFail(t, tc.want, tc.args...) })
@@ -366,8 +371,8 @@ func TestEnvoyJWTAuthn(t *testing.T) {
 	}
 
 	// Regression: every per-route requirement_name must exist in
-	// requirement_map. deploy/envoy/envoy.yaml omits the map, and real
-	// Envoy then answers every gated request with 403 "Wrong
+	// requirement_map. Without the map (deploy/envoy/envoy.yaml before
+	// PR #6) real Envoy answers every gated request with 403 "Wrong
 	// requirement_name".
 	reqMap, _ := ja["requirement_map"].(obj)
 	routes := get(httpConnManager(cfg), "route_config", "virtual_hosts", 0, "routes").([]any)
@@ -379,8 +384,8 @@ func TestEnvoyJWTAuthn(t *testing.T) {
 			continue
 		}
 		if pr["disabled"] == true {
-			if get(r, "match", "prefix") != "/v1/enroll" {
-				t.Errorf("jwt_authn disabled on %v; only /v1/enroll may be un-gated", get(r, "match"))
+			if get(r, "match", "prefix") != "/v1/enroll" && get(r, "match", "path") != "/v1/refresh" {
+				t.Errorf("jwt_authn disabled on %v; only /v1/enroll and /v1/refresh may be un-gated", get(r, "match"))
 			}
 			continue
 		}
@@ -391,7 +396,7 @@ func TestEnvoyJWTAuthn(t *testing.T) {
 		gated++
 	}
 	if gated != 2 {
-		t.Errorf("gated routes = %d, want 2 (/v1/recipes and /)", gated)
+		t.Errorf("gated routes = %d, want 2 (/files/ and /)", gated)
 	}
 
 	// Client-supplied claim headers are stripped before any filter runs.
@@ -462,5 +467,101 @@ func TestEnvoyDisabled(t *testing.T) {
 	}
 	if n := len(get(find(t, docs, "NetworkPolicy", "-bus"), "spec", "ingress").([]any)); n != 1 {
 		t.Errorf("bus ingress rules = %d, want 1 (core only)", n)
+	}
+}
+
+// routesByMatch indexes a rendered route list by its match (prefix or
+// exact path).
+func routesByMatch(routes []any) map[string]obj {
+	m := map[string]obj{}
+	for _, r := range routes {
+		key, _ := get(r, "match", "prefix").(string)
+		if p, ok := get(r, "match", "path").(string); ok {
+			key = "path:" + p
+		}
+		m[key] = r.(obj)
+	}
+	return m
+}
+
+func routeBucket(r obj) any {
+	return get(r, "typed_per_filter_config", "envoy.filters.http.local_ratelimit", "token_bucket")
+}
+
+// The chart's /v1/refresh bucket reproduces deploy/envoy/README.md's
+// worked examples (fill 1s, burst 300s, headroom 2).
+func TestRefreshRateLimit(t *testing.T) {
+	cases := []struct {
+		fleet, ttl, replicas string
+		perFill, max         int
+	}{
+		{"1000000", "86400", "4", 11, 3300},
+		{"1000000", "3600", "4", 246, 73800},
+		{"100000", "86400", "2", 3, 900},
+	}
+	for _, tc := range cases {
+		docs := mustRender(t, "--set", "envoy.refreshRateLimit.fleetSize="+tc.fleet,
+			"--set", "envoy.refreshRateLimit.gatewayJwtTtlSeconds="+tc.ttl,
+			"--set", "envoy.refreshRateLimit.envoyReplicas="+tc.replicas)
+		routes := get(httpConnManager(envoyConfig(t, docs)), "route_config", "virtual_hosts", 0, "routes").([]any)
+		b := routeBucket(routesByMatch(routes)["path:/v1/refresh"])
+		if get(b, "tokens_per_fill") != tc.perFill || get(b, "max_tokens") != tc.max || get(b, "fill_interval") != "1s" {
+			t.Errorf("fleet %s ttl %s replicas %s: bucket %v, want %d/%d", tc.fleet, tc.ttl, tc.replicas, b, tc.perFill, tc.max)
+		}
+	}
+	// envoyReplicas null follows envoy.replicaCount.
+	docs := mustRender(t, "--set", "envoy.replicaCount=4")
+	routes := get(httpConnManager(envoyConfig(t, docs)), "route_config", "virtual_hosts", 0, "routes").([]any)
+	if b := routeBucket(routesByMatch(routes)["path:/v1/refresh"]); get(b, "tokens_per_fill") != 11 {
+		t.Errorf("envoyReplicas null with replicaCount=4: bucket %v, want 11 per fill", b)
+	}
+	// Explicit overrides win.
+	docs = mustRender(t, "--set", "envoy.refreshRateLimit.tokensPerFill=7", "--set", "envoy.refreshRateLimit.maxTokens=70")
+	routes = get(httpConnManager(envoyConfig(t, docs)), "route_config", "virtual_hosts", 0, "routes").([]any)
+	if b := routeBucket(routesByMatch(routes)["path:/v1/refresh"]); get(b, "tokens_per_fill") != 7 || get(b, "max_tokens") != 70 {
+		t.Errorf("overrides: bucket %v", b)
+	}
+}
+
+// The chart's routes must stay in step with the reviewed reference config
+// deploy/envoy/envoy.yaml: same matches, in the same order, same jwt_authn
+// gate per route, same cluster, and the same fixed /v1/enroll bucket.
+// Rendered with the reference's own worked-example sizing (4 replicas), so
+// the /v1/refresh bucket must match too.
+func TestRoutesMatchReferenceEnvoyConfig(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(chartDir(t), "..", "..", "envoy", "envoy.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ref obj
+	if err := yaml.Unmarshal(raw, &ref); err != nil {
+		t.Fatal(err)
+	}
+	refRoutes := get(httpConnManager(ref), "route_config", "virtual_hosts", 0, "routes").([]any)
+	docs := mustRender(t, "--set", "envoy.refreshRateLimit.envoyReplicas=4")
+	gotRoutes := get(httpConnManager(envoyConfig(t, docs)), "route_config", "virtual_hosts", 0, "routes").([]any)
+	if len(gotRoutes) != len(refRoutes) {
+		t.Fatalf("chart has %d routes, reference has %d", len(gotRoutes), len(refRoutes))
+	}
+	for i := range refRoutes {
+		want, got := refRoutes[i].(obj), gotRoutes[i].(obj)
+		for _, path := range [][]any{
+			{"match"},
+			{"route", "cluster"},
+			{"typed_per_filter_config", "envoy.filters.http.jwt_authn", "disabled"},
+			{"typed_per_filter_config", "envoy.filters.http.jwt_authn", "requirement_name"},
+			{"typed_per_filter_config", "envoy.filters.http.local_ratelimit", "token_bucket"},
+		} {
+			w, g := get(want, path...), get(got, path...)
+			if !reflect.DeepEqual(w, g) {
+				t.Errorf("route %d %v: chart %v, reference %v", i, path, g, w)
+			}
+		}
+	}
+	refJA, gotJA := jwtAuthn(ref), jwtAuthn(envoyConfig(t, docs))
+	for _, k := range []string{"requirement_map", "rules"} {
+		if !reflect.DeepEqual(refJA[k], gotJA[k]) {
+			t.Errorf("jwt_authn %s: chart %v, reference %v", k, gotJA[k], refJA[k])
+		}
 	}
 }
