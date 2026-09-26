@@ -161,10 +161,10 @@ var (
 	// doesn't set it; farmer only) is how long after dispatch a job may
 	// start on its sprout and still be recorded. A job whose start is
 	// reported later (a sprout that missed the push and cooked the staged
-	// copy much later) is not reconciled: farmer drops all of its events.
-	// 0 (the default) records every job whenever it starts. Set it to at
-	// least the largest stagedrecipemaxage in the fleet, or late jobs will
-	// run on sprouts without being recorded.
+	// copy much later) is not reconciled: farmer drops all of its events
+	// and marks it "expired". 0 (the default) records every job whenever
+	// it starts. Set it to at least the largest stagedrecipemaxage in the
+	// fleet, or late jobs will run on sprouts without being recorded.
 	JobReconcileWindow time.Duration
 
 	// SproutHandledJobsFile ("sprouthandledjobsfile", sprout only) lists

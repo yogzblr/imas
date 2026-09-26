@@ -100,18 +100,84 @@ func TestReconcileWindow_OnTimeJobRecorded(t *testing.T) {
 }
 
 // A job whose start arrives later than the window after dispatch is not
-// reconciled: none of its events touch the index or the job store.
-func TestReconcileWindow_LateJobNotRecorded(t *testing.T) {
+// reconciled: none of its events are recorded, and it is marked expired in
+// the index and the job store.
+func TestReconcileWindow_LateJobExpired(t *testing.T) {
 	h := newReconcileHarness(t, time.Hour)
-	h.dispatch("j", h.now.Add(-2*time.Hour))
+	dispatched := h.now.Add(-2 * time.Hour)
+	h.dispatch("j", dispatched)
 	h.runJob("j")
 
 	row, _ := indexRow(t, db, reconcileTenant, reconcileSprout, "j")
-	if row.Started || row.Finished || row.StepsReported != 0 || row.Status != JobIndexStatusPending {
-		t.Errorf("late job's row was updated: %+v", row)
+	if !row.Expired || row.Status != JobIndexStatusExpired {
+		t.Errorf("row expired = %v, status = %q; want true, %q", row.Expired, row.Status, JobIndexStatusExpired)
+	}
+	if row.Started || row.Finished || row.StepsReported != 0 {
+		t.Errorf("late job's events were recorded: %+v", row)
 	}
 	if n := h.eventObjects("j"); n != 0 {
 		t.Errorf("event objects = %d, want 0", n)
+	}
+
+	data, err := objStore.Get(t.Context(), expiredKey(reconcileSprout, "j"))
+	if err != nil {
+		t.Fatalf("expired marker: %v", err)
+	}
+	var marker ExpiredMarker
+	if err := json.Unmarshal(data, &marker); err != nil {
+		t.Fatal(err)
+	}
+	if marker.JID != "j" || !marker.DispatchedAt.Equal(dispatched) || marker.Window != time.Hour || !marker.ExpiredAt.Equal(h.now) {
+		t.Errorf("marker = %+v", marker)
+	}
+
+	summary, err := NewStoreWithObjectStore(objStore).GetJob(reconcileSprout, "j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Status != JobExpired {
+		t.Errorf("job listing status = %s, want expired", summary.Status)
+	}
+}
+
+// Once expired, a job stays expired: raising the window later doesn't
+// start recording its events.
+func TestReconcileWindow_ExpiredIsFinal(t *testing.T) {
+	h := newReconcileHarness(t, time.Hour)
+	h.dispatch("j", h.now.Add(-2*time.Hour))
+	h.event("j", "start-j")
+	SetReconcileWindow(24 * time.Hour)
+	h.event("j", "s1")
+	h.event("j", "completed-j")
+	if got := indexStatus(t, db, reconcileTenant, reconcileSprout, "j"); got != JobIndexStatusExpired {
+		t.Errorf("status = %q, want expired", got)
+	}
+	if n := h.eventObjects("j"); n != 0 {
+		t.Errorf("event objects = %d, want 0", n)
+	}
+}
+
+// Deleting (or reaping) an expired job removes its marker too.
+func TestReconcileWindow_DeleteRemovesMarker(t *testing.T) {
+	h := newReconcileHarness(t, time.Hour)
+	h.dispatch("j", h.now.Add(-2*time.Hour))
+	h.runJob("j")
+	if err := NewStoreWithObjectStore(objStore).DeleteJob("j"); err != nil {
+		t.Fatal(err)
+	}
+	if keys := listKeys(t, objStore, jobPrefix(reconcileSprout, "j")); len(keys) != 0 {
+		t.Errorf("objects left after delete: %v", keys)
+	}
+}
+
+func TestJobStatus_ExpiredJSON(t *testing.T) {
+	b, err := json.Marshal(JobExpired)
+	if err != nil || string(b) != `"expired"` {
+		t.Fatalf("Marshal(JobExpired) = %s, %v", b, err)
+	}
+	var s JobStatus
+	if err := json.Unmarshal(b, &s); err != nil || s != JobExpired {
+		t.Errorf("Unmarshal(%s) = %v, %v", b, s, err)
 	}
 }
 
@@ -124,8 +190,8 @@ func TestReconcileWindow_Boundary(t *testing.T) {
 	if got := indexStatus(t, db, reconcileTenant, reconcileSprout, "exact"); got != JobIndexStatusSucceeded {
 		t.Errorf("job starting exactly at the window: status %q, want succeeded", got)
 	}
-	if got := indexStatus(t, db, reconcileTenant, reconcileSprout, "over"); got != JobIndexStatusPending {
-		t.Errorf("job starting past the window: status %q, want pending (unrecorded)", got)
+	if got := indexStatus(t, db, reconcileTenant, reconcileSprout, "over"); got != JobIndexStatusExpired {
+		t.Errorf("job starting past the window: status %q, want expired", got)
 	}
 }
 
@@ -166,11 +232,15 @@ func TestReconcileWindow_PerTenant(t *testing.T) {
 	logJobCreation("t_b", &nats.Msg{Subject: "imas.sprouts." + reconcileSprout + ".cook", Data: b})
 	start, _ := json.Marshal(cook.StepCompletion{ID: "start-j"})
 	logJobs("t_b", &nats.Msg{Subject: "imas.cook." + reconcileSprout + ".j", Data: start})
+	h.event("j", "start-j") // t_a's late start
 
 	if row, _ := indexRow(t, db, "t_b", reconcileSprout, "j"); !row.Started {
 		t.Error("t_b's on-time job was not recorded")
 	}
-	if row, _ := indexRow(t, db, reconcileTenant, reconcileSprout, "j"); row.Started {
-		t.Error("t_a's late job was recorded")
+	if row, _ := indexRow(t, db, reconcileTenant, reconcileSprout, "j"); row.Started || !row.Expired {
+		t.Errorf("t_a's late job: started %v, expired %v; want false, true", row.Started, row.Expired)
+	}
+	if row, _ := indexRow(t, db, "t_b", reconcileSprout, "j"); row.Expired {
+		t.Error("t_b's job was marked expired by t_a's")
 	}
 }

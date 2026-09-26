@@ -67,6 +67,10 @@ const (
 	JobIndexStatusRunning   = "running"
 	JobIndexStatusSucceeded = "succeeded"
 	JobIndexStatusFailed    = "failed"
+	// JobIndexStatusExpired: the job started on its sprout later than the
+	// reconcile window allows (config.JobReconcileWindow), so none of its
+	// events were recorded. Terminal. See reconcile.go.
+	JobIndexStatusExpired = "expired"
 )
 
 // Column sizes. tenant_id and sprout_id match internal/pki's pki_nkeys;
@@ -92,6 +96,9 @@ type jobStatusRow struct {
 	Finished      bool      `gorm:"column:finished;not null;default:false"`
 	TimedOut      bool      `gorm:"column:timed_out;not null;default:false"`
 	UpdatedAt     time.Time `gorm:"column:updated_at;not null;index"`
+	// Expired is set once the job is found to have started later than
+	// the reconcile window allows (markJobExpired). Never cleared.
+	Expired bool `gorm:"column:expired;not null;default:false"`
 	// DispatchedAt is when farmer dispatched the job (the envelope's
 	// DispatchedAt), from its creation event. Nil for jobs created before
 	// it was recorded. shouldReconcile dates a job's start by it.
@@ -117,6 +124,7 @@ func SetDB(d *gorm.DB) { db = d }
 // reads only columns, so it gives the same answer whichever order the
 // events were applied in.
 const jobStatusExpr = `CASE
+	WHEN expired THEN '` + JobIndexStatusExpired + `'
 	WHEN timed_out THEN '` + JobIndexStatusFailed + `'
 	WHEN finished AND steps_total IS NOT NULL AND steps_reported >= steps_total THEN
 		CASE WHEN step_failed THEN '` + JobIndexStatusFailed + `' ELSE '` + JobIndexStatusSucceeded + `' END
@@ -133,6 +141,7 @@ type jobEvent struct {
 	stepFailed   bool
 	finished     bool
 	timedOut     bool
+	expired      bool // markJobExpired only
 }
 
 // classifyJobEvent maps a imas.cook.<sprout>.<jid> event to its index
@@ -237,6 +246,7 @@ func upsertJobEvent(ctx context.Context, d *gorm.DB, tenantID, sproutID, jid str
 		Started:      ev.started,
 		Finished:     ev.finished,
 		TimedOut:     ev.timedOut,
+		Expired:      ev.expired,
 		UpdatedAt:    now,
 	}
 	updates := map[string]any{"updated_at": now}
@@ -250,7 +260,7 @@ func upsertJobEvent(ctx context.Context, d *gorm.DB, tenantID, sproutID, jid str
 		row.StepsReported = 1
 		updates["steps_reported"] = gorm.Expr("steps_reported + 1")
 	}
-	for col, set := range map[string]bool{"step_failed": ev.stepFailed, "started": ev.started, "finished": ev.finished, "timed_out": ev.timedOut} {
+	for col, set := range map[string]bool{"step_failed": ev.stepFailed, "started": ev.started, "finished": ev.finished, "timed_out": ev.timedOut, "expired": ev.expired} {
 		if set {
 			updates[col] = true
 		}

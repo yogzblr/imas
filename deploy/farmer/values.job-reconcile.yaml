@@ -7,15 +7,14 @@ jobs:
   # How long after dispatch a job may start on its sprout and still be
   # recorded (IMAS_JOB_RECONCILE_WINDOW). A job whose start is reported
   # later, e.g. a sprout that missed the push and cooked the staged copy
-  # long afterwards, is not reconciled: farmer drops all of its events, so
-  # it stays "pending" in job listings.
+  # long afterwards, is not reconciled: farmer drops its events and marks
+  # it "expired" in job listings and in farmer.job_status.
   #
-  # A Go duration string: "2h", "90m". null or "" emits no env var, which
-  # keeps farmer's default of recording every job whenever it starts.
+  # A quoted Go duration string: "2h", "90m". null or "" emits no env var,
+  # which falls back to farmer's compiled-in default of recording every
+  # job whenever it starts.
   #
-  # Set it to at least the largest stagedrecipemaxage any sprout uses
+  # Keep it at least the largest stagedrecipemaxage any sprout uses
   # (sprout default 1h). Otherwise sprouts will run late jobs that farmer
-  # never records.
-  reconcileWindow: null
-  # e.g.
-  # reconcileWindow: "2h"
+  # marks expired instead of recording.
+  reconcileWindow: "2h"

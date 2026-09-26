@@ -198,8 +198,13 @@ func logJobs(tenantID string, msg *nats.Msg) {
 		log.Errorf("refusing to record step for job %q on sprout %q: not usable as an object key segment", JID, sprout)
 		return
 	}
-	if !shouldReconcile(tenantID, sprout, JID) {
-		log.Warnf("not recording step %s of job %s on sprout %s (tenant %s): the job started more than %s after dispatch", completedStep.ID, JID, sprout, tenantID, reconcileWindow)
+	switch verdict, dispatchedAt := reconcileCheck(tenantID, sprout, JID); verdict {
+	case reconcileExpire:
+		log.Warnf("job %s on sprout %s (tenant %s) started more than %s after dispatch: marking it expired and not recording its steps", JID, sprout, tenantID, reconcileWindow)
+		markJobExpired(tenantID, sprout, JID, *dispatchedAt)
+		return
+	case reconcileDrop:
+		log.Debugf("not recording step %s of expired job %s on sprout %s (tenant %s)", completedStep.ID, JID, sprout, tenantID)
 		return
 	}
 	// Independent of the object-store write below; see logJobCreation.
