@@ -40,6 +40,7 @@ func NewMux() *http.ServeMux {
 
 	// Cook
 	mux.HandleFunc("POST /api/v1/cook", HandleNATSProxyWithBody("cook"))
+	mux.HandleFunc("POST /api/v1/cook/resync", HandleNATSProxyWithBody("cook.resync"))
 
 	// Props
 	mux.HandleFunc("GET /api/v1/props/{id}", HandlePropsAllProxy("props.getall"))

@@ -23,6 +23,13 @@ var configLoaded sync.Once
 // Defaults to "/etc/imas". Tests can override via setSystemConfigRoot.
 var systemConfigRoot = "/etc/imas"
 
+// Sprout setting defaults; see GatewayJWTRefreshMargin and
+// StagedRecipeMaxAge.
+const (
+	DefaultGatewayJWTRefreshMargin = 5 * time.Minute
+	DefaultStagedRecipeMaxAge      = time.Hour
+)
+
 // setSystemConfigRoot overrides the config root for testing.
 func setSystemConfigRoot(root string) {
 	systemConfigRoot = root
@@ -128,6 +135,27 @@ var (
 	// ongoing per-connection authorization is nats-server's Account/User
 	// JWT model's job, not Envoy's.
 	GatewayJWTTTL time.Duration
+
+	// GatewayJWTRefreshMargin ("gatewayjwtrefreshmargin", sprout only) is
+	// how much lifetime a sprout's gateway JWT must have left for it to be
+	// sent on a GET /files/ download as is; with less, the sprout refreshes
+	// it first (pki.FetchFarmerFile). Non-positive values fall back to
+	// DefaultGatewayJWTRefreshMargin. A margin at or above the token's TTL
+	// makes every download refresh.
+	GatewayJWTRefreshMargin time.Duration
+
+	// StagedRecipeMaxAge ("stagedrecipemaxage", sprout only) is how old a
+	// staged recipe a sprout pulls (on startup, reconnect or a farmer
+	// resync nudge) may be, measured from farmer's dispatch time, for the
+	// sprout to still cook it when it missed the original push. Older ones
+	// are skipped. Non-positive values fall back to
+	// DefaultStagedRecipeMaxAge.
+	StagedRecipeMaxAge time.Duration
+
+	// SproutHandledJobsFile ("sprouthandledjobsfile", sprout only) lists
+	// the IDs of the recipe jobs the sprout most recently handled, pushed
+	// or pulled, so a pull never cooks a job twice, across restarts too.
+	SproutHandledJobsFile string
 
 	// GatewayTransitKeyName is the OpenBao Transit key name
 	// internal/gatewayjwt signs gateway JWTs with.
@@ -417,12 +445,18 @@ func LoadConfig(binary string) {
 			// from each token's own iat/exp and only falls back to this
 			// when a token doesn't carry them.
 			jety.SetDefault("gatewayjwtttl", 24*time.Hour)
+			jety.SetDefault("gatewayjwtrefreshmargin", DefaultGatewayJWTRefreshMargin)
+			jety.SetDefault("stagedrecipemaxage", DefaultStagedRecipeMaxAge)
+			jety.SetDefault("sprouthandledjobsfile", "/var/lib/imas/sprout/handled-jobs")
 			jety.SetDefault("rootca_retry_delay", 5*time.Second)
 			jety.SetDefault("nkey_retry_delay", 5*time.Second)
 			jety.SetDefault("enroll_retry_delay", 5*time.Second)
 
 			JobLogDir = jety.GetString("joblogdir")
 			JobLogTTL = jety.GetDuration("joblogttl")
+			GatewayJWTRefreshMargin = jety.GetDuration("gatewayjwtrefreshmargin")
+			StagedRecipeMaxAge = jety.GetDuration("stagedrecipemaxage")
+			SproutHandledJobsFile = jety.GetString("sprouthandledjobsfile")
 
 			// The sprout config file can hold the join token. os.Create
 			// (above, and in jety.WriteConfig) leaves a new file 0644

@@ -6,11 +6,12 @@ package pki
 // (and Envoy's jwt_authn in front of it) checks on that route.
 //
 // The gateway JWT is short-lived. A token that has expired, or is within
-// gatewayJWTMinRemaining of expiring, is refreshed through the same
+// gatewayJWTMinRemaining() of expiring, is refreshed through the same
 // RefreshGatewayJWT the background refresher (RunGatewayJWTRefresher)
 // uses, before the request is sent, rather than failing the download. A
 // token farmer rejects anyway (clock skew between sprout and gateway, a
-// retired verification key) gets one refresh-and-retry.
+// retired verification key) is refreshed and the download retried, up to
+// maxFileAuthRetries times.
 //
 // The token only ever goes to config.FarmerURL, over the
 // SproutRootCA-pinned client LoadRootCA builds, and redirects are not
@@ -34,10 +35,36 @@ import (
 )
 
 // gatewayJWTMinRemaining is how much lifetime a gateway JWT must have
-// left to be sent as is. Less than that and it is refreshed first, so it
-// can't expire between being read here and being checked at the gateway.
-// Clock skew beyond this is covered by the refresh-and-retry on a 401/403.
-const gatewayJWTMinRemaining = 2 * time.Minute
+// left to be sent as is: config.GatewayJWTRefreshMargin
+// ("gatewayjwtrefreshmargin", default 5m). Less than that and it is
+// refreshed first, so it can't expire between being read here and being
+// checked at the gateway. Clock skew beyond this is covered by the
+// refresh-and-retry on a 401/403.
+func gatewayJWTMinRemaining() time.Duration {
+	if m := config.GatewayJWTRefreshMargin; m > 0 {
+		return m
+	}
+	return config.DefaultGatewayJWTRefreshMargin
+}
+
+// maxFileAuthRetries is how many times a download farmer rejects the
+// gateway JWT for (401/403) is retried, each time with a freshly
+// refreshed token. Retries after the first wait fileRetryBackoff,
+// doubling each time.
+const maxFileAuthRetries = 3
+
+// fileRetryBackoff is the wait before the second auth retry. A variable
+// so tests can shorten it.
+var fileRetryBackoff = time.Second
+
+// rejectedToken reports whether status is farmer (or Envoy) refusing the
+// gateway JWT: 401 from Envoy's jwt_authn or a missing header, 403 from
+// farmer's Auth. Auth also answers 403 for a key outside the token's
+// prefix, which a refresh can't fix; this client only builds in-scope
+// keys, so that costs at most the retries, never a wrong result.
+func rejectedToken(status int) bool {
+	return status == http.StatusUnauthorized || status == http.StatusForbidden
+}
 
 // maxFarmerFileBytes caps how much of a GET /files/ response is read.
 const maxFarmerFileBytes = 32 << 20
@@ -71,8 +98,17 @@ func FetchFarmerFile(ctx context.Context, key string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if status == http.StatusUnauthorized || status == http.StatusForbidden {
-		log.Warnf("files: farmer rejected the gateway JWT for %s (HTTP %d); refreshing it and retrying once", key, status)
+	backoff := fileRetryBackoff
+	for retry := 1; retry <= maxFileAuthRetries && rejectedToken(status); retry++ {
+		log.Warnf("files: farmer rejected the gateway JWT for %s (HTTP %d); refreshing it and retrying (%d/%d)", key, status, retry, maxFileAuthRetries)
+		if retry > 1 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+		}
 		if tok, err = refreshGatewayJWTFrom(ctx, tok); err != nil {
 			return nil, err
 		}
@@ -123,7 +159,7 @@ func claimString(tok jwxjwt.Token, name string) (string, bool) {
 
 // usableGatewayJWT returns the gateway JWT to send: the one in memory
 // (loaded from disk if nothing is), or a freshly refreshed one if that is
-// missing, expired, or expiring within gatewayJWTMinRemaining.
+// missing, expired, or expiring within gatewayJWTMinRemaining().
 func usableGatewayJWT(ctx context.Context) (string, error) {
 	if !SproutEnrolled() {
 		return "", ErrNotEnrolled
@@ -144,7 +180,7 @@ func usableGatewayJWT(ctx context.Context) (string, error) {
 }
 
 // gatewayJWTFresh reports whether tok parses and has more than
-// gatewayJWTMinRemaining left before it expires.
+// gatewayJWTMinRemaining() left before it expires.
 func gatewayJWTFresh(tok string, now time.Time) bool {
 	if tok == "" {
 		return false
@@ -154,7 +190,7 @@ func gatewayJWTFresh(tok string, now time.Time) bool {
 		return false
 	}
 	exp := parsed.Expiration()
-	return !exp.IsZero() && exp.Sub(now) > gatewayJWTMinRemaining
+	return !exp.IsZero() && exp.Sub(now) > gatewayJWTMinRemaining()
 }
 
 // refreshGatewayJWTFrom replaces stale, the token the caller found

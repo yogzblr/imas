@@ -1,6 +1,7 @@
 package pki
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -162,7 +163,7 @@ func TestFetchFarmerFile_LoadsPersistedToken(t *testing.T) {
 func TestFetchFarmerFile_RefreshesStaleTokenFirst(t *testing.T) {
 	for name, exp := range map[string]time.Duration{
 		"expired":         -time.Minute,
-		"expiring soon":   gatewayJWTMinRemaining / 2,
+		"expiring soon":   config.DefaultGatewayJWTRefreshMargin / 2,
 		"no token loaded": 0,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -224,8 +225,44 @@ func TestFetchFarmerFile_RetriesOnceAfterRejection(t *testing.T) {
 	}
 }
 
-// A second rejection is final: one refresh, two requests, an error.
-func TestFetchFarmerFile_GivesUpAfterSecondRejection(t *testing.T) {
+// shortRetryBackoff makes the waits between auth retries negligible.
+func shortRetryBackoff(t *testing.T) {
+	t.Helper()
+	old := fileRetryBackoff
+	fileRetryBackoff = time.Millisecond
+	t.Cleanup(func() { fileRetryBackoff = old })
+}
+
+// Rejections are retried, each with a newly refreshed token, until one is
+// accepted.
+func TestFetchFarmerFile_RetriesUntilAccepted(t *testing.T) {
+	shortRetryBackoff(t)
+	enroll, _, _ := enrollForTest(t)
+	files := startFileServer(t, map[string]string{testFileKey: "recipe"})
+	var mu sync.Mutex
+	rejections := 0
+	files.reject = func(string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		rejections++
+		return rejections <= 3
+	}
+	refreshesBefore := enroll.refreshCount()
+
+	if _, err := FetchFarmerFile(t.Context(), testFileKey); err != nil {
+		t.Fatalf("FetchFarmerFile: %v", err)
+	}
+	if n := enroll.refreshCount() - refreshesBefore; n != 3 {
+		t.Errorf("refreshes = %d, want 3", n)
+	}
+	if n := len(files.sent()); n != 4 {
+		t.Errorf("requests = %d, want 4 (the original and 3 retries)", n)
+	}
+}
+
+// After maxFileAuthRetries rejected retries the download fails.
+func TestFetchFarmerFile_GivesUpAfterMaxRetries(t *testing.T) {
+	shortRetryBackoff(t)
 	enroll, _, _ := enrollForTest(t)
 	files := startFileServer(t, map[string]string{testFileKey: "recipe"})
 	files.reject = func(string) bool { return true }
@@ -234,11 +271,38 @@ func TestFetchFarmerFile_GivesUpAfterSecondRejection(t *testing.T) {
 	if _, err := FetchFarmerFile(t.Context(), testFileKey); err == nil || !strings.Contains(err.Error(), "403") {
 		t.Fatalf("FetchFarmerFile = %v, want an HTTP 403 error", err)
 	}
-	if n := enroll.refreshCount() - refreshesBefore; n != 1 {
-		t.Errorf("refreshes = %d, want 1", n)
+	if n := enroll.refreshCount() - refreshesBefore; n != maxFileAuthRetries {
+		t.Errorf("refreshes = %d, want %d", n, maxFileAuthRetries)
 	}
-	if n := len(files.sent()); n != 2 {
-		t.Errorf("requests = %d, want 2", n)
+	if n := len(files.sent()); n != maxFileAuthRetries+1 {
+		t.Errorf("requests = %d, want %d", n, maxFileAuthRetries+1)
+	}
+}
+
+// A cancelled context stops the retries during the backoff.
+func TestFetchFarmerFile_RetryBackoffHonoursContext(t *testing.T) {
+	enrollForTest(t)
+	files := startFileServer(t, map[string]string{testFileKey: "recipe"})
+	old := fileRetryBackoff
+	fileRetryBackoff = time.Hour
+	t.Cleanup(func() { fileRetryBackoff = old })
+	ctx, cancel := context.WithCancel(t.Context())
+	files.reject = func(string) bool {
+		if len(files.sent()) >= 2 {
+			cancel()
+		}
+		return true
+	}
+
+	done := make(chan error, 1)
+	go func() { _, err := FetchFarmerFile(ctx, testFileKey); done <- err }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("FetchFarmerFile = %v, want context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("FetchFarmerFile kept waiting after its context was cancelled")
 	}
 }
 
@@ -374,18 +438,30 @@ func TestGatewayJWTIdentity(t *testing.T) {
 func TestGatewayJWTFresh(t *testing.T) {
 	_, minter, _ := enrollForTest(t)
 	now := time.Now()
-	for name, tc := range map[string]struct {
-		exp  time.Duration
-		want bool
-	}{
-		"plenty left":           {time.Hour, true},
-		"just over the margin":  {gatewayJWTMinRemaining + time.Second, true},
-		"just under the margin": {gatewayJWTMinRemaining - time.Second, false},
-		"expired":               {-time.Second, false},
-	} {
-		tok := installGatewayJWT(t, minter, now.Add(tc.exp))
-		if got := gatewayJWTFresh(tok, now); got != tc.want {
-			t.Errorf("%s: gatewayJWTFresh = %v, want %v", name, got, tc.want)
+	for _, margin := range []time.Duration{0, 10 * time.Minute} {
+		old := config.GatewayJWTRefreshMargin
+		config.GatewayJWTRefreshMargin = margin
+		t.Cleanup(func() { config.GatewayJWTRefreshMargin = old })
+		want := margin
+		if margin == 0 {
+			want = config.DefaultGatewayJWTRefreshMargin
+		}
+		if got := gatewayJWTMinRemaining(); got != want {
+			t.Errorf("margin setting %s: gatewayJWTMinRemaining = %s, want %s", margin, got, want)
+		}
+		for name, tc := range map[string]struct {
+			exp  time.Duration
+			want bool
+		}{
+			"plenty left":           {time.Hour, true},
+			"just over the margin":  {want + time.Second, true},
+			"just under the margin": {want - time.Second, false},
+			"expired":               {-time.Second, false},
+		} {
+			tok := installGatewayJWT(t, minter, now.Add(tc.exp))
+			if got := gatewayJWTFresh(tok, now); got != tc.want {
+				t.Errorf("margin setting %s, %s: gatewayJWTFresh = %v, want %v", margin, name, got, tc.want)
+			}
 		}
 	}
 	if gatewayJWTFresh("", now) || gatewayJWTFresh("not a jwt", now) {

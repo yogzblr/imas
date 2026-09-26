@@ -175,26 +175,27 @@ func ConnectSprout(ctx context.Context, done chan<- struct{}) {
 		RootCAs:    certPool,
 		MinVersion: tls.VersionTLS12,
 	}
-	nc, err := nats.Connect(FarmerBusURL, nats.Secure(config), opt, wsAuth,
+	connectOpts := []nats.Option{
+		nats.Secure(config), opt, wsAuth,
 		nats.MaxReconnects(-1),
-		nats.ReconnectWait(time.Second*15),
+		nats.ReconnectWait(time.Second * 15),
 		nats.DisconnectHandler(func(_ *nats.Conn) {
 			log.Debugf("Reconnecting to Farmer, attempt: %d\n", connectionAttempts.Add(1))
 		}),
-	)
+		// A push sent while disconnected is lost; catch up from the
+		// staged copy (cook.SyncStagedRecipe).
+		nats.ReconnectHandler(func(_ *nats.Conn) {
+			go syncStagedRecipe(ctx, cook.SyncOnReconnect)
+		}),
+	}
+	nc, err := nats.Connect(FarmerBusURL, connectOpts...)
 	for err != nil {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(time.Second * 15):
 		}
-		nc, err = nats.Connect(FarmerBusURL, nats.Secure(config), opt, wsAuth,
-			nats.MaxReconnects(-1),
-			nats.ReconnectWait(time.Second*15),
-			nats.DisconnectHandler(func(_ *nats.Conn) {
-				log.Debugf("Reconnecting to Farmer, attempt: %d\n", connectionAttempts.Add(1))
-			}),
-		)
+		nc, err = nats.Connect(FarmerBusURL, connectOpts...)
 	}
 	log.Debugf("Successfully connected to the Farmer")
 
@@ -208,10 +209,13 @@ func ConnectSprout(ctx context.Context, done chan<- struct{}) {
 	// The selfupdate ingredient fetches imas-fleet-signing's live key set
 	// over this same SproutRootCA-pinned connection.
 	selfupdate.RegisterNatsConn(nc)
-	err = natsInit(nc)
+	err = natsInit(ctx, nc)
 	if err != nil {
 		log.Panicf("Error with natsInit: %v", err)
 	}
+	// After natsInit's subscriptions, so a push arriving during the pull
+	// is seen and wins over it.
+	go syncStagedRecipe(ctx, cook.SyncOnStartup)
 	// Expire old local job logs written by cook runs on this sprout.
 	jobs.StartSproutReaper(ctx, jobLogDir, jobLogTTL)
 	<-ctx.Done()

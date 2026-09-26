@@ -137,10 +137,11 @@ func SendCookEventContext(ctx context.Context, tenantID, sproutID string, recipe
 		validSteps = pruned
 	}
 	env := RecipeEnvelope{
-		JobID:     JID,
-		Steps:     validSteps,
-		Test:      test,
-		InvokedBy: co.invokedBy,
+		JobID:        JID,
+		Steps:        validSteps,
+		Test:         test,
+		InvokedBy:    co.invokedBy,
+		DispatchedAt: time.Now().UTC(),
 	}
 	// Stage before the push so the pull-readable copy (see stage.go) is
 	// never older than what the sprout was just sent.
@@ -164,7 +165,7 @@ func SendCookEventContext(ctx context.Context, tenantID, sproutID string, recipe
 // internal.sprout.action's self_update (internal/natsapi/sprout_action.go),
 // whose single step is the sprout's selfupdate ingredient.
 func SendStepsEvent(tenantID, sproutID, JID string, steps []Step) error {
-	return sendEnvelope(tenantID, sproutID, RecipeEnvelope{JobID: JID, Steps: steps})
+	return sendEnvelope(tenantID, sproutID, RecipeEnvelope{JobID: JID, Steps: steps, DispatchedAt: time.Now().UTC()})
 }
 
 // sendEnvelope delivers rEnvelope to sproutID over tenantID's own

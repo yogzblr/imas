@@ -58,6 +58,10 @@ type (
 		Steps     []Step
 		Test      bool
 		InvokedBy string `json:"invoked_by,omitempty"`
+		// DispatchedAt is when farmer dispatched the job. A sprout that
+		// pulls a staged recipe it missed (SyncStagedRecipe) uses it to
+		// skip one older than config.StagedRecipeMaxAge.
+		DispatchedAt time.Time `json:"dispatched_at,omitzero"`
 	}
 	Ack struct {
 		Acknowledged bool

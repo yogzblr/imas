@@ -223,6 +223,9 @@ func checkEnvelope(t *testing.T, env cook.RecipeEnvelope, jobID, sproutID string
 	if env.JobID != jobID || len(env.Steps) != 1 || env.Steps[0].Properties["name"] != "echo "+sproutID {
 		t.Errorf("downloaded recipe is not %s's dispatch %s: %+v", sproutID, jobID, env)
 	}
+	if age := time.Since(env.DispatchedAt); env.DispatchedAt.IsZero() || age < 0 || age > time.Minute {
+		t.Errorf("downloaded recipe's DispatchedAt = %v, want farmer's dispatch time", env.DispatchedAt)
+	}
 }
 
 func TestSproutDownloadsStagedRecipe(t *testing.T) {
