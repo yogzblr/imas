@@ -57,19 +57,24 @@ func main() {
 		"join token for first-time enrollment; overrides "+config.EnvJoinToken+" and the config file's jointoken. "+
 			"Visible to other local users in the process list, so prefer the environment variable or config file")
 	flag.Parse()
-	run := func(parent context.Context) { runSprout(parent, *joinToken) }
-	// Under the Windows SCM, run is driven by the service handler: the
-	// SCM's Stop/Shutdown cancels parent. See service_windows.go.
-	if runAsService(run) {
+	// Under the Windows SCM, the service handler drives the loop: the
+	// SCM's Stop/Shutdown cancels its context. See service_windows.go.
+	if runAsService(func(ctx context.Context) { runSprout(ctx, *joinToken, false) }) {
 		return
 	}
-	run(context.Background())
+	runSprout(context.Background(), *joinToken, true)
 }
 
 // runSprout is the sprout's main loop. It returns once parent is cancelled
-// or on SIGINT/SIGTERM, after waiting up to 10s for the NATS connection to
-// close. Fatal errors still exit the process.
-func runSprout(parent context.Context, joinToken string) {
+// or, if handleSignals, on SIGINT/SIGTERM, after waiting up to 10s for the
+// NATS connection to close. Fatal errors still exit the process.
+//
+// A Windows service must not handle signals: Go turns CTRL_LOGOFF_EVENT,
+// which Windows sends to services whenever any user logs off, into
+// SIGTERM for a process that listens for it, so the sprout would stop
+// (cleanly, so the SCM's failure actions wouldn't restart it) on every
+// logoff. The SCM's Stop and Shutdown controls cover it instead.
+func runSprout(parent context.Context, joinToken string, handleSignals bool) {
 	if err := os.MkdirAll(config.CacheDir, 0o755); err != nil {
 		log.Fatalf("failed to create cache directory %s: %v", config.CacheDir, err)
 	}
@@ -83,7 +88,13 @@ func runSprout(parent context.Context, joinToken string) {
 	if err != nil {
 		log.Fatalf("failed to generate sprout X25519 key: %v", err)
 	}
-	ctx, stop := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
+	var ctx context.Context
+	var stop context.CancelFunc
+	if handleSignals {
+		ctx, stop = signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
+	} else {
+		ctx, stop = context.WithCancel(parent)
+	}
 	defer stop()
 	rootCARetryDelay := jety.GetDuration("rootca_retry_delay")
 	// Retried rather than fatal: a DMZ install's CA may be provisioned
