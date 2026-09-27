@@ -23,6 +23,12 @@ argument_specs:
       imas_verify_config_file:
         type: str
         description: The sprout's config file. Empty for the OS default.
+      imas_verify_bus_status_file:
+        type: str
+        description:
+          - Where the sprout records its bus connection state. Empty for the OS default.
+          - Without it (a sprout too old to record it), the role checks for an established
+            TCP connection to a bus address instead.
       imas_verify_log_lines:
         type: int
         description: Log lines to show on failure.

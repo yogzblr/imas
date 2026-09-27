@@ -8,17 +8,28 @@ DOCUMENTATION = r"""
 module: imas_sprout_bus_status
 short_description: Report whether imas-sprout is enrolled and connected to the bus
 description:
-  - The sprout keeps no record of its bus connection, so this looks at what it
-    leaves behind. It is enrolled when its NATS User JWT is on disk (what
-    C(pki.SproutEnrolled) checks). It is connected when the service's main
-    process has an established TCP connection to one of the bus addresses it
-    connects to, and the same connection is still established I(hold) seconds
-    later, so a connection attempt the bus then rejects doesn't count.
+  - The sprout is enrolled when its NATS User JWT is on disk (what
+    C(pki.SproutEnrolled) checks).
+  - Whether it is connected comes from the state the sprout records in
+    I(status_file) (C(internal/busstatus)), when the service's main process
+    wrote it: it is connected when that state is C(connected), and still is,
+    since the same moment, I(hold) seconds later.
+  - Otherwise (a sprout too old to record it, or one that has just started),
+    it falls back to the sprout's sockets. It is connected when the service's
+    main process has an established TCP connection to one of the bus
+    addresses it connects to, and the same connection is still established
+    I(hold) seconds later, so a connection attempt the bus then rejects
+    doesn't count. That can mistake the enrollment client's HTTPS keep-alive
+    for the bus when both share a host and port; the status file can't.
   - The bus addresses are resolved the way the sprout does
     (C(pki.ResolveSproutBusURLs)): the C(busurls) pin, else the C(nats_urls)
     saved at enrollment, else C(farmerinterface:farmerbusport).
   - Linux only; reads C(/proc) and C(systemctl). Never changes anything.
 options:
+  status_file:
+    description: Where the sprout records its bus state (C(config.SproutBusStatusFile)).
+    type: path
+    default: /var/lib/imas/sprout/bus-status.json
   service:
     description: systemd unit of the sprout.
     type: str
@@ -53,8 +64,10 @@ pid: {description: The service's main PID (0 if not running)., type: int, return
 bus_urls: {description: The bus addresses the sprout connects to., type: list, returned: always}
 bus_urls_source: {description: Where they came from (config, enrollment, legacy)., type: str, returned: always}
 endpoints: {description: Those addresses as host and port., type: list, returned: always}
-connections: {description: The main process's established TCP connections., type: list, returned: always}
-connected: {description: One of them is to a bus endpoint and stayed up for hold seconds., type: bool, returned: always}
+connections: {description: The main process's established TCP connections (the fallback only)., type: list, returned: always}
+connected: {description: The sprout was connected to the bus for hold seconds., type: bool, returned: always}
+status_source: {description: How connected was decided (status_file, tcp) or none if it wasn't checked., type: str, returned: always}
+bus_status: {description: The status file's content (state, server, since, pid, error), if any., type: dict, returned: always}
 """
 
 import ipaddress
@@ -184,6 +197,42 @@ def bus_connections(conns, endpoints, ips):
     return out
 
 
+def read_status_file(path):
+    """The state the sprout recorded (internal/busstatus), or None."""
+    try:
+        with open(path) as f:
+            status = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(status, dict) or not isinstance(status.get("state"), str):
+        return None
+    return status
+
+
+def recorded_connection(path, pid, hold, sleep=time.sleep):
+    """Check the sprout's status file: (usable, connected, status).
+
+    usable is false unless the file was written by pid, the service's main
+    process: a sprout that died leaves its last state behind, and one too
+    old to record it leaves none. connected needs the "connected" state to
+    hold, unchanged (same since), for hold seconds.
+    """
+    status = read_status_file(path)
+    if status is None or not pid or status.get("pid") != pid:
+        return False, False, status
+    if status["state"] != "connected":
+        return True, False, status
+    sleep(max(hold, 0))
+    later = read_status_file(path)
+    connected = (
+        later is not None
+        and later.get("pid") == pid
+        and later["state"] == "connected"
+        and later.get("since") == status.get("since")
+    )
+    return True, connected, later
+
+
 def service_state(service):
     """(active, main pid) of a systemd unit."""
     try:
@@ -197,9 +246,46 @@ def service_state(service):
     return props.get("ActiveState") == "active", int(props.get("MainPID") or 0)
 
 
+def check(p, service_state=service_state, established=established, sleep=time.sleep):
+    """The module's result for params p, without changed."""
+    enrolled = os.path.exists(p["user_jwt_file"])
+    active, pid = service_state(p["service"])
+    urls, urls_source = resolve_bus_urls(p["bus_urls"], p["bus_urls_file"], p["legacy_bus_url"])
+    endpoints = [e for e in (endpoint(u) for u in urls) if e]
+    ips = {host: resolve_ips(host) for host, _ in endpoints}
+
+    conns, connected, status_source, status = {}, False, "none", read_status_file(p["status_file"])
+    if enrolled and active and pid:
+        usable, connected, status = recorded_connection(p["status_file"], pid, p["hold"], sleep=sleep)
+        if usable:
+            status_source = "status_file"
+        elif endpoints:
+            status_source = "tcp"
+            conns = established(pid)
+            first = bus_connections(conns, endpoints, ips)
+            if first:
+                sleep(max(p["hold"], 0))
+                later = bus_connections(established(pid), endpoints, ips)
+                connected = bool(first & later)
+
+    return dict(
+        enrolled=enrolled,
+        active=active,
+        pid=pid,
+        bus_urls=urls,
+        bus_urls_source=urls_source,
+        endpoints=[{"host": h, "port": port} for h, port in endpoints],
+        connections=[{"ip": str(ip), "port": port} for ip, port in conns.values()],
+        connected=connected,
+        status_source=status_source,
+        bus_status=status,
+    )
+
+
 def main():
     module = AnsibleModule(
         argument_spec=dict(
+            status_file=dict(type="path", default="/var/lib/imas/sprout/bus-status.json"),
             service=dict(type="str", default="imas-sprout"),
             user_jwt_file=dict(type="path", required=True),
             bus_urls_file=dict(type="path", required=True),
@@ -209,33 +295,7 @@ def main():
         ),
         supports_check_mode=True,
     )
-    p = module.params
-    enrolled = os.path.exists(p["user_jwt_file"])
-    active, pid = service_state(p["service"])
-    urls, source = resolve_bus_urls(p["bus_urls"], p["bus_urls_file"], p["legacy_bus_url"])
-    endpoints = [e for e in (endpoint(u) for u in urls) if e]
-    ips = {host: resolve_ips(host) for host, _ in endpoints}
-
-    conns, connected = {}, False
-    if enrolled and active and pid and endpoints:
-        conns = established(pid)
-        first = bus_connections(conns, endpoints, ips)
-        if first:
-            time.sleep(max(p["hold"], 0))
-            later = bus_connections(established(pid), endpoints, ips)
-            connected = bool(first & later)
-
-    module.exit_json(
-        changed=False,
-        enrolled=enrolled,
-        active=active,
-        pid=pid,
-        bus_urls=urls,
-        bus_urls_source=source,
-        endpoints=[{"host": h, "port": port} for h, port in endpoints],
-        connections=[{"ip": str(ip), "port": port} for ip, port in conns.values()],
-        connected=connected,
-    )
+    module.exit_json(changed=False, **check(module.params))
 
 
 if __name__ == "__main__":

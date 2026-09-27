@@ -192,12 +192,30 @@ log lines (from `journalctl -u imas-sprout`, or
   in the message, or the bus rejects it. Look for TLS or authorization
   errors in the log.
 
-The sprout doesn't report whether it is connected. `imas_verify` checks
-instead for an established TCP connection from the sprout's process to one
-of its bus addresses that stays open for `imas_verify_hold` seconds. There
-is one blind spot: when the enrollment endpoint and the bus share the same
-host and port (both behind the DMZ edge on 443), the enrollment request's
-own connection can look like a bus connection for up to 90 seconds.
+The sprout records its bus connection state in
+`/var/lib/imas/sprout/bus-status.json`
+(`%ProgramData%\imas\state\sprout\bus-status.json` on Windows):
+`starting`, `connected`, `disconnected` (with the error) or `stopped`, the
+bus server, since when, and its PID. `imas_verify` uses that state when the
+running service's process wrote it, and counts the sprout as connected once
+it has stayed `connected` for `imas_verify_hold` seconds. On failure it
+shows the recorded state, so the message says why, for example
+`disconnected since …: tls: failed to verify certificate`.
+
+The same state is available on the host:
+
+- Linux: `imas-sprout status`. Exit code 0 if connected, 3 if not, 4 if the
+  sprout has recorded nothing yet.
+- Windows: `imas-sprout status` from an elevated prompt adds a `bus:` line
+  to the service status. The exit code still reflects the service state.
+
+A sprout too old to record its state doesn't have this file. For those,
+`imas_verify` falls back to checking for an established TCP connection from
+the sprout's process to one of its bus addresses that stays open for
+`imas_verify_hold` seconds. That check has a blind spot: when the enrollment
+endpoint and the bus share the same host and port (both behind the DMZ edge
+on 443), the enrollment request's own connection can look like a bus
+connection for up to 90 seconds.
 
 ## Windows
 

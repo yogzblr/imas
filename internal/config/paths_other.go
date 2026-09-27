@@ -13,6 +13,12 @@ func defaultSproutJobLogDir() string { return "/var/cache/imas/sprout/jobs" }
 
 func defaultSproutHandledJobsFile() string { return "/var/lib/imas/sprout/handled-jobs" }
 
+// SproutBusStatusFile is where the sprout records its bus connection state
+// (internal/busstatus). It isn't a config setting, so readers
+// (`imas-sprout status`, the imas_verify Ansible role, monitoring) find it
+// without parsing the sprout's config file.
+func SproutBusStatusFile() string { return "/var/lib/imas/sprout/bus-status.json" }
+
 // SecureSproutConfigRoot is a no-op outside Windows: the packages create
 // /etc/imas and the sprout tightens its config file's mode itself (see
 // sproutConfigMode).

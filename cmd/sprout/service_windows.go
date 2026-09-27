@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	log "github.com/yogzblr/imas/internal/log"
 
 	"github.com/yogzblr/imas/cmd/sprout/internal/winservice"
+	"github.com/yogzblr/imas/internal/busstatus"
 	"github.com/yogzblr/imas/internal/config"
 )
 
@@ -65,8 +67,10 @@ const serviceCommandsHelp = `Service commands (all but status need an elevated p
              the MSI instead.
   start      start the service and wait until it is running.
   stop       stop the service and wait until it has stopped.
-  status     show the service's state and settings. Exit code 0 if it is
-             running, 3 if it is not, 4 if it is not installed.
+  status     show the service's state and settings, and whether it is
+             connected to the bus (needs an elevated prompt). Exit code 0
+             if the service is running, 3 if it is not, 4 if it is not
+             installed, whatever its bus connection.
 `
 
 // runServiceCommand runs one of serviceCommands and returns the exit code.
@@ -133,5 +137,11 @@ func statusCommand() int {
 		return serviceCommandFailed("status", err)
 	}
 	fmt.Print(st.Format(serviceName, serviceLogPath()))
+	// The exit code stays the service's: scripts already rely on it.
+	path := config.SproutBusStatusFile()
+	bus, err := busstatus.Read(path)
+	isSprout := func(pid int) bool { return st.ExitCode() == winservice.StatusRunning && pid == int(st.PID) }
+	text, _ := describeBusStatus(bus, err, path, isSprout, time.Now())
+	fmt.Printf("  %-11s %s\n", "bus:", text)
 	return st.ExitCode()
 }

@@ -48,6 +48,7 @@ func TestWindowsDefaultPaths(t *testing.T) {
 		{"cachedir", defaultSproutCacheDir(), `E:\PD\imas\cache\sprout\files\provided`},
 		{"joblogdir", defaultSproutJobLogDir(), `E:\PD\imas\cache\sprout\jobs`},
 		{"handled jobs", defaultSproutHandledJobsFile(), `E:\PD\imas\state\sprout\handled-jobs`},
+		{"bus status", SproutBusStatusFile(), `E:\PD\imas\state\sprout\bus-status.json`},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)

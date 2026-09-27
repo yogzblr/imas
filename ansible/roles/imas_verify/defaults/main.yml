@@ -12,5 +12,10 @@ imas_verify_service_name: imas-sprout
 # The sprout's config file. Empty: the OS default (/etc/imas/sprout, or
 # %ProgramData%\imas\sprout).
 imas_verify_config_file: ""
+# Where the sprout records its bus connection state. Empty: the OS default
+# (/var/lib/imas/sprout/bus-status.json, or
+# %ProgramData%\imas\state\sprout\bus-status.json). A sprout too old to
+# record it is checked through its TCP connections instead.
+imas_verify_bus_status_file: ""
 # Log lines to show when the sprout doesn't connect.
 imas_verify_log_lines: 40

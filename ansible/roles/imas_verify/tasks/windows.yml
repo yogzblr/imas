@@ -4,6 +4,7 @@
 - name: Wait for the sprout to enroll and connect to the bus
   ansible.windows.win_powershell:
     parameters:
+      StatusFile: "{{ _imas_verify_bus_status_file }}"
       Service: "{{ imas_verify_service_name }}"
       UserJwtFile: "{{ _imas_verify_user_jwt_file }}"
       BusUrlsFile: "{{ _imas_verify_bus_urls_file }}"
@@ -12,7 +13,7 @@
       Hold: "{{ imas_verify_hold | int }}"
     script: |
       [CmdletBinding()]
-      param([string]$Service, [string]$UserJwtFile, [string]$BusUrlsFile, [string[]]$BusUrls = @(),
+      param([string]$StatusFile, [string]$Service, [string]$UserJwtFile, [string]$BusUrlsFile, [string[]]$BusUrls = @(),
             [string]$LegacyBusUrl, [int]$Hold)
       $ErrorActionPreference = 'Stop'
       $Ansible.Changed = $false
@@ -58,15 +59,50 @@
           } | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort)>$($_.RemoteAddress):$($_.RemotePort)" })
       }
 
+      # The state the sprout records (internal/busstatus), or $null. Opened
+      # with FILE_SHARE_DELETE so the sprout can replace it meanwhile.
+      function Read-BusStatus {
+        try {
+          $fs = [IO.File]::Open($StatusFile, 'Open', 'Read', [IO.FileShare]'ReadWrite, Delete')
+          try { $text = (New-Object IO.StreamReader($fs)).ReadToEnd() } finally { $fs.Dispose() }
+          $s = $text | ConvertFrom-Json
+          if ($s -and $s.state -is [string]) {
+            # "since" as recorded: PowerShell 7's ConvertFrom-Json would
+            # turn it into a DateTime.
+            $since = if ($text -match '"since"\s*:\s*"([^"]*)"') { $Matches[1] } else { '' }
+            return [pscustomobject]@{ state = $s.state; server = "$($s.server)"; since = $since
+                                      pid = [int]$s.pid; error = "$($s.error)" }
+          }
+        } catch { }
+        return $null
+      }
+
       $conns = @()
       $connected = $false
-      if ($enrolled -and $active -and $procId -and $endpoints.Count) {
-        $first = Get-BusConnections
-        $conns = $first
-        if ($first.Count) {
-          Start-Sleep -Seconds ([Math]::Max($Hold, 0))
-          $later = Get-BusConnections
-          $connected = @($first | Where-Object { $later -contains $_ }).Count -gt 0
+      $statusSource = 'none'
+      $status = Read-BusStatus
+      if ($enrolled -and $active -and $procId) {
+        # Only a state this service process recorded counts: a sprout that
+        # died leaves its last one behind, and one too old to record it
+        # leaves none; then fall back to its TCP connections.
+        if ($status -and $status.pid -eq $procId) {
+          $statusSource = 'status_file'
+          if ($status.state -eq 'connected') {
+            Start-Sleep -Seconds ([Math]::Max($Hold, 0))
+            $later = Read-BusStatus
+            $connected = [bool]($later -and $later.pid -eq $procId -and $later.state -eq 'connected' -and
+                                $later.since -eq $status.since)
+            $status = $later
+          }
+        } elseif ($endpoints.Count) {
+          $statusSource = 'tcp'
+          $first = Get-BusConnections
+          $conns = $first
+          if ($first.Count) {
+            Start-Sleep -Seconds ([Math]::Max($Hold, 0))
+            $later = Get-BusConnections
+            $connected = @($first | Where-Object { $later -contains $_ }).Count -gt 0
+          }
         }
       }
 
@@ -75,6 +111,9 @@
         bus_urls = $urls; bus_urls_source = $source
         endpoints = @($endpoints | ForEach-Object { @{ host = $_.host; port = $_.port } })
         connections = $conns; connected = $connected
+        status_source = $statusSource
+        bus_status = if ($status) { @{ state = $status.state; server = $status.server; since = $status.since
+                                       pid = $status.pid; error = $status.error } } else { $null }
       }
   register: _imas_verify_ps
   until: _imas_verify_ps.result.connected | default(false)
