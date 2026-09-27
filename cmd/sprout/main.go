@@ -28,6 +28,11 @@ import (
 )
 
 func init() {
+	// Before LoadConfig writes the config file (it can hold the join
+	// token): a no-op outside Windows.
+	if err := config.SecureSproutConfigRoot(); err != nil {
+		log.Fatalf("failed to secure the config directory: %v", err)
+	}
 	config.LoadConfig("sprout")
 	log.SetLogLevel(config.LogLevel)
 	sproutID = pki.GetSproutID()
@@ -48,11 +53,24 @@ func main() {
 		"join token for first-time enrollment; overrides "+config.EnvJoinToken+" and the config file's jointoken. "+
 			"Visible to other local users in the process list, so prefer the environment variable or config file")
 	flag.Parse()
+	run := func(parent context.Context) { runSprout(parent, *joinToken) }
+	// Under the Windows SCM, run is driven by the service handler: the
+	// SCM's Stop/Shutdown cancels parent. See service_windows.go.
+	if runAsService(run) {
+		return
+	}
+	run(context.Background())
+}
+
+// runSprout is the sprout's main loop. It returns once parent is cancelled
+// or on SIGINT/SIGTERM, after waiting up to 10s for the NATS connection to
+// close. Fatal errors still exit the process.
+func runSprout(parent context.Context, joinToken string) {
 	if err := os.MkdirAll(config.CacheDir, 0o755); err != nil {
 		log.Fatalf("failed to create cache directory %s: %v", config.CacheDir, err)
 	}
 	config.LoadConfig("sprout")
-	config.SetJoinTokenFromFlag(*joinToken)
+	config.SetJoinTokenFromFlag(joinToken)
 	defer log.Flush()
 	if err := certs.GenNKey(false); err != nil {
 		log.Fatalf("failed to generate sprout NKey: %v", err)
@@ -61,7 +79,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to generate sprout X25519 key: %v", err)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	rootCARetryDelay := jety.GetDuration("rootca_retry_delay")
 	// Retried rather than fatal: a DMZ install's CA may be provisioned
