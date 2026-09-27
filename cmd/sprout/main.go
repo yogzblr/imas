@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"flag"
 	"os"
 	"os/signal"
@@ -138,45 +136,17 @@ func createConfigRoot() {
 func ConnectSprout(ctx context.Context, done chan<- struct{}) {
 	defer close(done)
 	var connectionAttempts atomic.Int64
-	var err error
-	SproutRootCA := config.SproutRootCA
-	FarmerInterface := config.FarmerInterface
-	FarmerBusURL := config.FarmerBusURL
-	// Capture job-log settings before the local tls.Config below shadows the
-	// config package identifier.
 	jobLogDir := config.JobLogDir
 	jobLogTTL := config.JobLogTTL
-	// Operator-mode nats-server needs the NATS User JWT from enrollment
-	// alongside the NKey seed that signs the CONNECT nonce, the same
-	// pairing the repo's bus integration tests connect with.
-	userJWT, err := pki.LoadSproutUserJWT()
+	// The enrolled nats_urls (or the busurls pin, or the legacy
+	// FarmerBusURL), with the User JWT + NKey seed, SproutRootCA-pinned
+	// TLS and gateway JWT options. See pki.LoadSproutBus.
+	bus, err := pki.LoadSproutBus()
 	if err != nil {
-		log.Panicf("failed to load NATS User JWT: %v", err)
+		log.Panicf("failed to load bus connection settings: %v", err)
 	}
-	seed, err := os.ReadFile(config.NKeySproutPrivFile)
-	if err != nil {
-		log.Panicf("failed to load NKey seed: %v", err)
-	}
-	opt := nats.UserJWTAndSeed(userJWT, strings.TrimSpace(string(seed)))
-	// Presents the current gateway JWT to Envoy's jwt_authn on each
-	// websocket handshake. Only consulted when the bus URL is ws(s)://.
-	wsAuth := nats.WebSocketConnectionHeadersHandler(pki.GatewayJWTHeaders)
-	certPool := x509.NewCertPool()
-	rootPEM, err := os.ReadFile(SproutRootCA)
-	if err != nil || rootPEM == nil {
-		log.Panicf("nats: error loading or parsing rootCA file: %v", err)
-	}
-	ok := certPool.AppendCertsFromPEM(rootPEM)
-	if !ok {
-		log.Errorf("nats: failed to parse root certificate from %q", SproutRootCA)
-	}
-	config := &tls.Config{
-		ServerName: FarmerInterface,
-		RootCAs:    certPool,
-		MinVersion: tls.VersionTLS12,
-	}
+	log.Infof("connecting to the bus at %s (from %s)", strings.Join(bus.Servers, ", "), bus.Source)
 	connectOpts := []nats.Option{
-		nats.Secure(config), opt, wsAuth,
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(time.Second * 15),
 		nats.DisconnectHandler(func(_ *nats.Conn) {
@@ -188,18 +158,19 @@ func ConnectSprout(ctx context.Context, done chan<- struct{}) {
 			go syncStagedRecipe(ctx, cook.SyncOnReconnect)
 		}),
 	}
-	nc, err := nats.Connect(FarmerBusURL, connectOpts...)
+	nc, err := bus.Connect(connectOpts...)
 	for err != nil {
+		log.Warnf("bus connect failed, retrying in 15s: %v", err)
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(time.Second * 15):
 		}
-		nc, err = nats.Connect(FarmerBusURL, connectOpts...)
+		nc, err = bus.Connect(connectOpts...)
 	}
 	log.Debugf("Successfully connected to the Farmer")
 
-	if err := log.ConnectNATS(FarmerBusURL); err != nil {
+	if err := log.ConnectNATS(config.FarmerBusURL); err != nil {
 		log.Errorf("Failed to connect log-nats backend: %v", err)
 	}
 

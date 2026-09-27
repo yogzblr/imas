@@ -36,17 +36,22 @@ func setupSproutFiles(t *testing.T) nkeys.KeyPair {
 	saved := []*string{
 		&config.NKeySproutPrivFile, &config.SproutUserJWTFile, &config.SproutGatewayJWTFile,
 		&config.SproutTenantX25519PubFile, &config.SproutBoxPrivFile, &config.SproutBoxPubFile,
-		&config.SproutFleetSigningJWKS, &config.FarmerURL,
+		&config.SproutFleetSigningJWKS, &config.FarmerURL, &config.SproutBusURLsFile,
+		&config.SproutRootCA,
 	}
 	old := make([]string, len(saved))
 	for i, p := range saved {
 		old[i] = *p
 	}
+	oldBusURLs := config.BusURLs
 	t.Cleanup(func() {
 		for i, p := range saved {
 			*p = old[i]
 		}
+		config.BusURLs = oldBusURLs
 	})
+	config.BusURLs = nil
+	config.SproutBusURLsFile = filepath.Join(dir, "bus-urls.json")
 	config.NKeySproutPrivFile = filepath.Join(dir, "sprout.nkey")
 	config.SproutUserJWTFile = filepath.Join(dir, "sprout.jwt")
 	config.SproutGatewayJWTFile = filepath.Join(dir, "gateway.jwt")
@@ -121,6 +126,16 @@ type enrollServer struct {
 	// can check which fields the client actually sent.
 	refreshBodies []map[string]any
 	jwks          json.RawMessage
+	// natsURLs is what POST /v1/enroll returns as nats_urls.
+	natsURLs []string
+}
+
+// setNatsURLs changes what later POST /v1/enroll responses carry as
+// nats_urls.
+func (s *enrollServer) setNatsURLs(urls ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.natsURLs = urls
 }
 
 func (s *enrollServer) refreshCount() int {
@@ -143,7 +158,7 @@ func (s *enrollServer) lastRequest() enrollWireRequest {
 
 func startEnrollServer(t *testing.T) *enrollServer {
 	t.Helper()
-	s := &enrollServer{jwks: fleetJWKS(t)}
+	s := &enrollServer{jwks: fleetJWKS(t), natsURLs: []string{"wss://127.0.0.1:5407"}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/enroll", func(w http.ResponseWriter, r *http.Request) {
 		var req enrollWireRequest
@@ -153,6 +168,7 @@ func startEnrollServer(t *testing.T) *enrollServer {
 		}
 		s.mu.Lock()
 		s.requests = append(s.requests, req)
+		natsURLs := s.natsURLs
 		s.mu.Unlock()
 		res, err := Enroll(r.Context(), EnrollRequest(req))
 		if err != nil {
@@ -163,7 +179,7 @@ func startEnrollServer(t *testing.T) *enrollServer {
 		_ = json.NewEncoder(w).Encode(EnrollResponse{
 			SproutID: res.SproutID, JWT: res.JWT, GatewayJWT: res.GatewayJWT,
 			NKeyIdentity: req.NKeyPub, TenantX25519Pub: res.TenantX25519Pub,
-			FleetSigningJWKS: s.jwks, NatsURLs: []string{"wss://127.0.0.1:5407"},
+			FleetSigningJWKS: s.jwks, NatsURLs: natsURLs,
 		})
 	})
 	mux.HandleFunc("POST /v1/refresh", func(w http.ResponseWriter, r *http.Request) {
@@ -310,6 +326,9 @@ func TestEnrollSprout_EnrollPersistAndRefresh(t *testing.T) {
 	uc, err := natsjwt.DecodeUserClaims(userJWT)
 	if err != nil || uc.Subject != nkeyPub {
 		t.Fatalf("persisted User JWT isn't for this sprout: %v", err)
+	}
+	if urls, src, err := ResolveSproutBusURLs(); err != nil || src != BusURLsFromEnrollment || len(urls) != 1 || urls[0] != "wss://127.0.0.1:5407" {
+		t.Errorf("persisted nats_urls: %q from %q (%v)", urls, src, err)
 	}
 	if gw, err := LoadGatewayJWT(); err != nil || gw != resp.GatewayJWT {
 		t.Fatalf("LoadGatewayJWT = %q, %v", gw, err)
