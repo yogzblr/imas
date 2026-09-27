@@ -48,6 +48,44 @@
       vars:
         _config: "{{ _config_raw.content | b64decode | from_yaml }}"
 
+    # What imas_verify reads first (internal/busstatus).
+    - name: Read the bus state the sprout records
+      ansible.builtin.slurp:
+        src: /var/lib/imas/sprout/bus-status.json
+      register: _bus_status_raw
+
+    - name: Ask the sprout for its bus state
+      ansible.builtin.command:
+        cmd: imas-sprout status
+      register: _sprout_status
+      changed_when: false
+      failed_when: false
+
+    - name: Check the sprout records that it is connected
+      ansible.builtin.assert:
+        that:
+          - _bus_status.state == 'connected'
+          - _bus_status.pid | int == _service.status.MainPID | int
+          - _bus_status.server | length > 0
+          - _sprout_status.rc == 0
+          - "_sprout_status.stdout is search('^imas-sprout bus: connected to ')"
+        fail_msg: "{{ _bus_status }} / {{ _sprout_status.stdout }}"
+        quiet: true
+      vars:
+        _bus_status: "{{ _bus_status_raw.content | b64decode | from_json }}"
+
+    - name: Run imas_verify on its own
+      ansible.builtin.include_role:
+        name: imas_verify
+
+    # Not the TCP fallback, which can't tell the bus from the enrollment
+    # client's keep-alive.
+    - name: Check imas_verify went by the recorded state
+      ansible.builtin.assert:
+        that: _imas_verify_status.status_source == 'status_file'
+        fail_msg: "{{ _imas_verify_status | to_json }}"
+        quiet: true
+
     - name: Keep the NKey for the farmer-side check
       ansible.builtin.set_fact:
         sprout_nkey: "{{ _nkey.content | b64decode | trim }}"
@@ -125,6 +163,7 @@
               - ansible_failed_task.name == 'Fail with the reason the sprout isn\'t connected'
               - ansible_failed_result.msg[0] is search('enrolled and running, but has held no connection to its bus')
               - ansible_failed_result.msg[1] is search('tls://imas-farmer:5999')
+              - ansible_failed_result.msg[2] is search('The sprout reports .*[)]. disconnected since ')
             quiet: true
       always:
         # Also removes the pin, so the sprout goes back to its enrolled address.

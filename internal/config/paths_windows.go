@@ -21,6 +21,7 @@ import (
 //	%ProgramData%\imas\cache\sprout\files\provided   cachedir
 //	%ProgramData%\imas\cache\sprout\jobs             joblogdir
 //	%ProgramData%\imas\state\sprout\handled-jobs     (/var/lib/imas/sprout)
+//	%ProgramData%\imas\state\sprout\bus-status.json  bus connection state
 //	%ProgramData%\imas\logs\sprout.log               service log (the sprout creates it)
 //
 // The Unix paths would otherwise resolve against the current drive, and a
@@ -56,6 +57,15 @@ func defaultSproutJobLogDir() string {
 
 func defaultSproutHandledJobsFile() string {
 	return filepath.Join(imasDataRoot(), "state", "sprout", "handled-jobs")
+}
+
+// SproutBusStatusFile is where the sprout records its bus connection state
+// (internal/busstatus). It isn't a config setting, so readers
+// (`imas-sprout status`, the imas_verify Ansible role, monitoring) find it
+// without parsing the sprout's config file, which only SYSTEM and
+// Administrators can read.
+func SproutBusStatusFile() string {
+	return filepath.Join(imasDataRoot(), "state", "sprout", "bus-status.json")
 }
 
 // SproutServiceLogDir is where the sprout writes its logs when it runs

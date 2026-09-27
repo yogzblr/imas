@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	log "github.com/yogzblr/imas/internal/log"
 
+	"github.com/yogzblr/imas/internal/busstatus"
 	certs "github.com/yogzblr/imas/internal/certs"
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
@@ -121,6 +123,13 @@ func runSprout(parent context.Context, joinToken string, handleSignals bool) {
 	config.LoadConfig("sprout")
 	config.SetJoinTokenFromFlag(joinToken)
 	defer log.Flush()
+	// Before enrollment, replacing whatever a previous process recorded:
+	// until ConnectSprout connects, this process is not on the bus, even
+	// if its enrollment client's HTTPS keep-alive shares the bus's
+	// host:port (both on 443 behind the DMZ Envoy).
+	busStatus := busstatus.NewRecorder(config.SproutBusStatusFile())
+	busStatus.Starting()
+	defer busStatus.Stopped()
 	if err := certs.GenNKey(false); err != nil {
 		log.Fatalf("failed to generate sprout NKey: %v", err)
 	}
@@ -192,7 +201,7 @@ func runSprout(parent context.Context, joinToken string, handleSignals bool) {
 		}
 	}()
 	done := make(chan struct{})
-	go ConnectSprout(ctx, done)
+	go ConnectSprout(ctx, done, busStatus)
 	<-ctx.Done()
 	stop()
 	log.Info("Shutdown signal received, stopping sprout...")
@@ -219,9 +228,12 @@ func createConfigRoot() {
 	}
 }
 
-func ConnectSprout(ctx context.Context, done chan<- struct{}) {
+// ConnectSprout connects to the bus and serves it until ctx is done,
+// recording the connection's state in busStatus as it changes.
+func ConnectSprout(ctx context.Context, done chan<- struct{}, busStatus *busstatus.Recorder) {
 	defer close(done)
-	var connectionAttempts atomic.Int64
+	// Before done is closed, so runSprout's wait covers it.
+	defer busStatus.Stopped()
 	jobLogDir := config.JobLogDir
 	jobLogTTL := config.JobLogTTL
 	// The enrolled nats_urls (or the busurls pin, or the legacy
@@ -232,20 +244,13 @@ func ConnectSprout(ctx context.Context, done chan<- struct{}) {
 		log.Panicf("failed to load bus connection settings: %v", err)
 	}
 	log.Infof("connecting to the bus at %s (from %s)", strings.Join(bus.Servers, ", "), bus.Source)
-	connectOpts := []nats.Option{
-		nats.MaxReconnects(-1),
-		nats.ReconnectWait(time.Second * 15),
-		nats.DisconnectHandler(func(_ *nats.Conn) {
-			log.Debugf("Reconnecting to Farmer, attempt: %d\n", connectionAttempts.Add(1))
-		}),
-		// A push sent while disconnected is lost; catch up from the
-		// staged copy (cook.SyncStagedRecipe).
-		nats.ReconnectHandler(func(_ *nats.Conn) {
-			go syncStagedRecipe(ctx, cook.SyncOnReconnect)
-		}),
-	}
+	// A push sent while disconnected is lost; catch up from the staged
+	// copy (cook.SyncStagedRecipe).
+	connectOpts := append(busConnectOptions(busStatus, func() { go syncStagedRecipe(ctx, cook.SyncOnReconnect) }),
+		nats.ReconnectWait(time.Second*15))
 	nc, err := bus.Connect(connectOpts...)
 	for err != nil {
+		busStatus.Disconnected(err)
 		log.Warnf("bus connect failed, retrying in 15s: %v", err)
 		select {
 		case <-ctx.Done():
@@ -280,5 +285,35 @@ func ConnectSprout(ctx context.Context, done chan<- struct{}) {
 	// Expire old local job logs written by cook runs on this sprout.
 	jobs.StartSproutReaper(ctx, jobLogDir, jobLogTTL)
 	<-ctx.Done()
+	busStatus.Stopped()
 	nc.Close()
+}
+
+// busConnectOptions are ConnectSprout's nats.go options: reconnect forever,
+// record every change of the connection's state in busStatus, and call
+// onReconnect after each reconnection.
+func busConnectOptions(busStatus *busstatus.Recorder, onReconnect func()) []nats.Option {
+	var connectionAttempts atomic.Int64
+	return []nats.Option{
+		nats.MaxReconnects(-1),
+		// nats.go runs these handlers on one goroutine, in the order the
+		// events happened, so busStatus sees them in order too.
+		nats.ConnectHandler(func(nc *nats.Conn) {
+			busStatus.Connected(nc.ConnectedUrlRedacted())
+		}),
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+			busStatus.Disconnected(err)
+			log.Debugf("Reconnecting to Farmer, attempt: %d\n", connectionAttempts.Add(1))
+		}),
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			busStatus.Connected(nc.ConnectedUrlRedacted())
+			onReconnect()
+		}),
+		// With MaxReconnects(-1), only nc.Close closes the connection,
+		// and ConnectSprout records that as Stopped first; this covers
+		// anything else.
+		nats.ClosedHandler(func(_ *nats.Conn) {
+			busStatus.Disconnected(errors.New("the bus connection was closed"))
+		}),
+	}
 }

@@ -92,3 +92,140 @@ def test_bus_connections_matches_port_and_address():
     assert m.bus_connections(conns, endpoints, {"bus.example.com": {ip("10.0.0.9")}}) == {"1"}
     # A host that doesn't resolve here matches on port alone.
     assert m.bus_connections(conns, endpoints, {"bus.example.com": set()}) == {"1", "3"}
+
+
+def write_status(path, **status):
+    path.write_text(json.dumps(status))
+
+
+CONNECTED = {"state": "connected", "server": "tls://bus:443", "since": "2026-09-27T10:00:00Z", "pid": 42}
+
+
+def test_read_status_file(tmp_path):
+    path = tmp_path / "bus-status.json"
+    assert m.read_status_file(str(path)) is None
+    for bad in ("not json", "[]", '{"pid": 42}', '{"state": 1}'):
+        path.write_text(bad)
+        assert m.read_status_file(str(path)) is None, bad
+    write_status(path, **CONNECTED)
+    assert m.read_status_file(str(path)) == CONNECTED
+
+
+def test_recorded_connection_connected(tmp_path):
+    path = tmp_path / "bus-status.json"
+    write_status(path, **CONNECTED)
+    slept = []
+    assert m.recorded_connection(str(path), 42, 5, sleep=slept.append) == (True, True, CONNECTED)
+    assert slept == [5]
+
+
+@pytest.mark.parametrize("pid", [0, 7])
+def test_recorded_connection_ignores_another_process(tmp_path, pid):
+    # A sprout that died (or pid 0: the service isn't running) left
+    # "connected" behind: not usable, so the caller falls back.
+    path = tmp_path / "bus-status.json"
+    write_status(path, **CONNECTED)
+    assert m.recorded_connection(str(path), pid, 5, sleep=pytest.fail) == (False, False, CONNECTED)
+
+
+def test_recorded_connection_missing_file(tmp_path):
+    assert m.recorded_connection(str(tmp_path / "none"), 42, 5, sleep=pytest.fail) == (False, False, None)
+
+
+@pytest.mark.parametrize("state", ["starting", "disconnected", "stopped"])
+def test_recorded_connection_not_connected(tmp_path, state):
+    # Usable, so the caller must not fall back to the TCP check: that is
+    # what would mistake the enrollment keep-alive for the bus.
+    path = tmp_path / "bus-status.json"
+    status = dict(CONNECTED, state=state, error="EOF")
+    write_status(path, **status)
+    assert m.recorded_connection(str(path), 42, 5, sleep=pytest.fail) == (True, False, status)
+
+
+@pytest.mark.parametrize("later", [
+    dict(CONNECTED, state="disconnected"),
+    # Reconnected within hold: it didn't stay up.
+    dict(CONNECTED, since="2026-09-27T10:00:03Z"),
+    # The sprout restarted within hold.
+    dict(CONNECTED, pid=43),
+    None,
+])
+def test_recorded_connection_must_hold(tmp_path, later):
+    path = tmp_path / "bus-status.json"
+    write_status(path, **CONNECTED)
+
+    def change(_):
+        if later is None:
+            path.unlink()
+        else:
+            write_status(path, **later)
+
+    usable, connected, status = m.recorded_connection(str(path), 42, 5, sleep=change)
+    assert (usable, connected, status) == (True, False, later)
+
+
+def check_params(tmp_path, **over):
+    jwt = tmp_path / "sprout.jwt"
+    jwt.write_text("jwt")
+    p = dict(
+        status_file=str(tmp_path / "bus-status.json"),
+        service="imas-sprout",
+        user_jwt_file=str(jwt),
+        bus_urls_file=str(tmp_path / "bus-urls.json"),
+        bus_urls=["tls://127.0.0.1:443"],
+        legacy_bus_url="farmer:5406",
+        hold=5,
+    )
+    p.update(over)
+    return p
+
+
+# The enrollment client's HTTPS keep-alive to the same host:port as the bus:
+# what the TCP check alone takes for a bus connection.
+KEEPALIVE = {"9": (ipaddress.ip_address("127.0.0.1"), 443)}
+
+
+def test_check_uses_the_status_file(tmp_path):
+    write_status(tmp_path / "bus-status.json", **CONNECTED)
+    r = m.check(check_params(tmp_path), service_state=lambda _: (True, 42),
+                established=pytest.fail, sleep=lambda _: None)
+    assert r["connected"] and r["status_source"] == "status_file"
+    assert r["bus_status"] == CONNECTED
+    assert (r["bus_urls"], r["bus_urls_source"]) == (["tls://127.0.0.1:443"], "config")
+
+
+def test_check_status_file_beats_the_keepalive(tmp_path):
+    # Still enrolling (starting), with the keep-alive open: not connected,
+    # and the sockets aren't even looked at.
+    write_status(tmp_path / "bus-status.json", **dict(CONNECTED, state="starting"))
+    r = m.check(check_params(tmp_path), service_state=lambda _: (True, 42),
+                established=lambda _: KEEPALIVE, sleep=lambda _: None)
+    assert not r["connected"] and r["status_source"] == "status_file"
+    assert r["connections"] == []
+
+
+@pytest.mark.parametrize("status", [None, dict(CONNECTED, pid=7)])
+def test_check_falls_back_to_tcp(tmp_path, status):
+    # No status file (an older sprout), or one another process left.
+    if status:
+        write_status(tmp_path / "bus-status.json", **status)
+    r = m.check(check_params(tmp_path), service_state=lambda _: (True, 42),
+                established=lambda _: KEEPALIVE, sleep=lambda _: None)
+    assert r["connected"] and r["status_source"] == "tcp"
+    assert r["connections"] == [{"ip": "127.0.0.1", "port": 443}]
+    assert r["bus_status"] == status
+
+
+def test_check_service_not_running(tmp_path):
+    write_status(tmp_path / "bus-status.json", **dict(CONNECTED, state="stopped"))
+    r = m.check(check_params(tmp_path), service_state=lambda _: (False, 0),
+                established=pytest.fail, sleep=pytest.fail)
+    assert not r["connected"] and r["status_source"] == "none"
+    assert r["bus_status"]["state"] == "stopped"
+
+
+def test_check_not_enrolled(tmp_path):
+    p = check_params(tmp_path, user_jwt_file=str(tmp_path / "missing"))
+    write_status(tmp_path / "bus-status.json", **CONNECTED)
+    r = m.check(p, service_state=lambda _: (True, 42), established=pytest.fail, sleep=pytest.fail)
+    assert not r["enrolled"] and not r["connected"] and r["status_source"] == "none"

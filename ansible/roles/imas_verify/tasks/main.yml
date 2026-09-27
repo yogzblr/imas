@@ -12,6 +12,11 @@
          else (_windows_root ~ _sep ~ 'sprout' if _windows else '/etc/imas/sprout') }}
     _imas_verify_pki_dir: >-
       {{ _windows_root ~ _sep ~ 'pki' ~ _sep ~ 'sprout' if _windows else '/etc/imas/pki/sprout' }}
+    # config.SproutBusStatusFile: not a config setting.
+    _imas_verify_bus_status_file: >-
+      {{ imas_verify_bus_status_file if imas_verify_bus_status_file | length > 0
+         else (_windows_root ~ _sep ~ 'state' ~ _sep ~ 'sprout' ~ _sep ~ 'bus-status.json' if _windows
+               else '/var/lib/imas/sprout/bus-status.json') }}
   vars:
     _windows: "{{ ansible_os_family == 'Windows' }}"
     _sep: "{{ _imas_verify_backslash if ansible_os_family == 'Windows' else '/' }}"
@@ -66,6 +71,18 @@
       ] }}
       {%- elif not _s.active | default(false) -%}
       {{ ['imas-sprout is enrolled but its service (' ~ imas_verify_service_name ~ ') is not running; see its log below.'] }}
+      {%- elif _s.status_source | default('') == 'status_file' -%}
+      {%- set b = _s.bus_status | default({}, true) -%}
+      {{ [
+        'imas-sprout is enrolled and running, but has held no connection to its bus for '
+          ~ imas_verify_hold ~ 's within ' ~ imas_verify_timeout ~ 's.',
+        'Bus addresses (from ' ~ _s.bus_urls_source ~ '): ' ~ _s.bus_urls | join(', '),
+        'The sprout reports (' ~ _imas_verify_bus_status_file ~ '): ' ~ b.state | default('unknown')
+          ~ ' since ' ~ b.since | default('?')
+          ~ (', from ' ~ b.server if b.server | default('') | length > 0 else '')
+          ~ (': ' ~ b.error if b.error | default('') | length > 0 else ''),
+        'Check that this host reaches the bus, and the sprout log for TLS or authorization errors.'
+      ] }}
       {%- elif _s.bus_urls | default([]) | length == 0 -%}
       {{ ['imas-sprout is enrolled and running but has no bus address: set imas_farmer_bus_urls.'] }}
       {%- else -%}

@@ -1,6 +1,7 @@
 ---
 - name: Wait for the sprout to enroll and connect to the bus
   imas_sprout_bus_status:
+    status_file: "{{ _imas_verify_bus_status_file }}"
     service: "{{ imas_verify_service_name }}"
     user_jwt_file: "{{ _imas_verify_user_jwt_file }}"
     bus_urls_file: "{{ _imas_verify_bus_urls_file }}"

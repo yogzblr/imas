@@ -16,6 +16,7 @@ func TestUnixDefaultPaths(t *testing.T) {
 		{"cachedir", defaultSproutCacheDir(), "/var/cache/imas/sprout/files/provided"},
 		{"joblogdir", defaultSproutJobLogDir(), "/var/cache/imas/sprout/jobs"},
 		{"handled jobs", defaultSproutHandledJobsFile(), "/var/lib/imas/sprout/handled-jobs"},
+		{"bus status", SproutBusStatusFile(), "/var/lib/imas/sprout/bus-status.json"},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
