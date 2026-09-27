@@ -22,8 +22,10 @@ var BuildInfo Version
 var configLoaded sync.Once
 
 // systemConfigRoot is the root directory for farmer/sprout config files.
-// Defaults to "/etc/imas". Tests can override via setSystemConfigRoot.
-var systemConfigRoot = "/etc/imas"
+// Defaults to defaultSystemConfigRoot(): "/etc/imas", or
+// %ProgramData%\imas on Windows (paths_windows.go). Tests can override
+// via setSystemConfigRoot.
+var systemConfigRoot = defaultSystemConfigRoot()
 
 // EnvJobReconcileWindow sets JobReconcileWindow on farmer when the config
 // file doesn't (e.g. from the Helm chart; see deploy/farmer).
@@ -43,7 +45,7 @@ func setSystemConfigRoot(root string) {
 
 // resetSystemConfigRoot restores the default config root.
 func resetSystemConfigRoot() {
-	systemConfigRoot = "/etc/imas"
+	systemConfigRoot = defaultSystemConfigRoot()
 }
 
 var (
@@ -339,18 +341,21 @@ func LoadConfig(binary string) {
 					log.Fatal(mkErr)
 				}
 				cfgFile := filepath.Join(systemConfigRoot, "sprout")
-				_, err = os.Create(cfgFile)
+				f, err := os.Create(cfgFile)
 				if err != nil {
 					log.Fatal(err)
 				}
+				// Close it: on Windows an open handle blocks rewriting or
+				// deleting the file.
+				f.Close()
 			}
 		} else if err != nil {
 			log.Printf("%T\n", err)
 			panic(fmt.Errorf("fatal error config file: %w", err))
 		}
 		jety.SetDefault("loglevel", "info")
-		jety.SetDefault("cachedir", "/var/cache/imas/sprout/files/provided")
-		jety.SetDefault("configroot", systemConfigRoot+"/")
+		jety.SetDefault("cachedir", defaultSproutCacheDir())
+		jety.SetDefault("configroot", systemConfigRoot+string(filepath.Separator))
 		jety.SetDefault("recipedir", filepath.Join("/", "srv", "imas", "recipes", "prod"))
 		jety.SetDefault("farmerinterface", "localhost")
 		jety.SetDefault("farmerapiport", "5405")
@@ -514,15 +519,15 @@ func LoadConfig(binary string) {
 
 		case "sprout":
 			jety.SetDefault("sproutid", "")
-			jety.SetDefault("sproutpki", filepath.Join(systemConfigRoot, "pki/sprout")+"/")
+			jety.SetDefault("sproutpki", filepath.Join(systemConfigRoot, "pki/sprout")+string(filepath.Separator))
 			jety.SetDefault("sproutrootca", filepath.Join(systemConfigRoot, "pki/sprout/tls-rootca.pem"))
 			jety.SetDefault("sproutrootcatofu", true)
 			jety.SetDefault("sproutfleetsigningjwks", filepath.Join(systemConfigRoot, "pki/sprout/fleet-signing-jwks.json"))
 			jety.SetDefault("nkeysproutpubfile", filepath.Join(systemConfigRoot, "pki/sprout/sprout.nkey.pub"))
-			jety.SetDefault("joblogdir", "/var/cache/imas/sprout/jobs")
+			jety.SetDefault("joblogdir", defaultSproutJobLogDir())
 			jety.SetDefault("joblogttl", 30*24*time.Hour) // 30 days default
 			jety.SetDefault("nkeysproutprivfile", filepath.Join(systemConfigRoot, "pki/sprout/sprout.nkey"))
-			jety.SetDefault("cachedir", "/var/cache/imas/sprout/files/provided")
+			jety.SetDefault("cachedir", defaultSproutCacheDir())
 			jety.SetDefault("sproutuserjwtfile", filepath.Join(systemConfigRoot, "pki/sprout/sprout.jwt"))
 			jety.SetDefault("sproutgatewayjwtfile", filepath.Join(systemConfigRoot, "pki/sprout/gateway.jwt"))
 			jety.SetDefault("sprouttenantx25519pubfile", filepath.Join(systemConfigRoot, "pki/sprout/tenant-x25519.pub"))
@@ -535,7 +540,7 @@ func LoadConfig(binary string) {
 			jety.SetDefault("gatewayjwtttl", 24*time.Hour)
 			jety.SetDefault("gatewayjwtrefreshmargin", DefaultGatewayJWTRefreshMargin)
 			jety.SetDefault("stagedrecipemaxage", DefaultStagedRecipeMaxAge)
-			jety.SetDefault("sprouthandledjobsfile", "/var/lib/imas/sprout/handled-jobs")
+			jety.SetDefault("sprouthandledjobsfile", defaultSproutHandledJobsFile())
 			jety.SetDefault("rootca_retry_delay", 5*time.Second)
 			jety.SetDefault("nkey_retry_delay", 5*time.Second)
 			jety.SetDefault("enroll_retry_delay", 5*time.Second)

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 	"strings"
@@ -27,7 +28,19 @@ import (
 	"github.com/taigrr/jety"
 )
 
-func init() {
+// setupSprout prepares the config, PKI and logging for runSprout. It used
+// to be init(); it runs from main so the service commands, which don't
+// need it, don't write the config directory and can run unelevated.
+func setupSprout() {
+	// Before LoadConfig writes the config file (it can hold the join
+	// token): a no-op outside Windows.
+	secureErr := config.SecureSproutConfigRoot()
+	// Under the Windows SCM, which discards stderr, log to a file below
+	// the config root from here on, so a failure above is recorded too.
+	startServiceLog()
+	if secureErr != nil {
+		log.Fatalf("failed to secure the config directory: %v", secureErr)
+	}
 	config.LoadConfig("sprout")
 	log.SetLogLevel(config.LogLevel)
 	sproutID = pki.GetSproutID()
@@ -47,12 +60,66 @@ func main() {
 	joinToken := flag.String("join-token", "",
 		"join token for first-time enrollment; overrides "+config.EnvJoinToken+" and the config file's jointoken. "+
 			"Visible to other local users in the process list, so prefer the environment variable or config file")
+	flag.Usage = usage
 	flag.Parse()
+	if cmd := flag.Arg(0); serviceCommands[cmd] {
+		os.Exit(serviceCommand(cmd, *joinToken))
+	}
+	setupSprout()
+	// Under the Windows SCM, the service handler drives the loop: the
+	// SCM's Stop/Shutdown cancels its context. See service_windows.go.
+	if runAsService(func(ctx context.Context) { runSprout(ctx, *joinToken, false) }) {
+		return
+	}
+	runSprout(context.Background(), *joinToken, true)
+}
+
+// serviceCommands manage the Windows service (service_windows.go). Other
+// positional arguments are ignored, as before.
+var serviceCommands = map[string]bool{"install": true, "uninstall": true, "start": true, "stop": true, "status": true}
+
+func usage() {
+	out := flag.CommandLine.Output()
+	fmt.Fprintf(out, "Usage: %s [flags] [install|uninstall|start|stop|status]\n\n", os.Args[0])
+	fmt.Fprint(out, serviceCommandsHelp)
+	fmt.Fprint(out, "\nFlags:\n")
+	flag.PrintDefaults()
+}
+
+// serviceCommand runs one of serviceCommands and returns the exit code.
+func serviceCommand(cmd, joinToken string) int {
+	if flag.NArg() > 1 {
+		return serviceCommandFailed(cmd, fmt.Errorf("unexpected arguments %q", flag.Args()[1:]))
+	}
+	if joinToken != "" {
+		// A service is started without it, and saving it in the
+		// service's command line would expose it.
+		return serviceCommandFailed(cmd, fmt.Errorf("-join-token only applies to a sprout started from this "+
+			"command line; for the service, set jointoken in the config file or %s", config.EnvJoinToken))
+	}
+	return runServiceCommand(cmd)
+}
+
+func serviceCommandFailed(cmd string, err error) int {
+	fmt.Fprintf(os.Stderr, "imas-sprout %s: %v\n", cmd, err)
+	return 1
+}
+
+// runSprout is the sprout's main loop. It returns once parent is cancelled
+// or, if handleSignals, on SIGINT/SIGTERM, after waiting up to 10s for the
+// NATS connection to close. Fatal errors still exit the process.
+//
+// A Windows service must not handle signals: Go turns CTRL_LOGOFF_EVENT,
+// which Windows sends to services whenever any user logs off, into
+// SIGTERM for a process that listens for it, so the sprout would stop
+// (cleanly, so the SCM's failure actions wouldn't restart it) on every
+// logoff. The SCM's Stop and Shutdown controls cover it instead.
+func runSprout(parent context.Context, joinToken string, handleSignals bool) {
 	if err := os.MkdirAll(config.CacheDir, 0o755); err != nil {
 		log.Fatalf("failed to create cache directory %s: %v", config.CacheDir, err)
 	}
 	config.LoadConfig("sprout")
-	config.SetJoinTokenFromFlag(*joinToken)
+	config.SetJoinTokenFromFlag(joinToken)
 	defer log.Flush()
 	if err := certs.GenNKey(false); err != nil {
 		log.Fatalf("failed to generate sprout NKey: %v", err)
@@ -61,7 +128,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to generate sprout X25519 key: %v", err)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	var ctx context.Context
+	var stop context.CancelFunc
+	if handleSignals {
+		ctx, stop = signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
+	} else {
+		ctx, stop = context.WithCancel(parent)
+	}
 	defer stop()
 	rootCARetryDelay := jety.GetDuration("rootca_retry_delay")
 	// Retried rather than fatal: a DMZ install's CA may be provisioned

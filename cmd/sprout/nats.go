@@ -15,16 +15,10 @@ import (
 	"github.com/yogzblr/imas/internal/facts"
 	"github.com/yogzblr/imas/internal/ingredients/cmd"
 	"github.com/yogzblr/imas/internal/ingredients/test"
-	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/shell"
 
 	nats "github.com/nats-io/nats.go"
 )
-
-func init() {
-	createConfigRoot()
-	pki.SetupPKISprout()
-}
 
 func natsInit(ctx context.Context, nc *nats.Conn) error {
 	log.Debugf("Announcing on Farmer...")
