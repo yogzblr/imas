@@ -30,7 +30,11 @@ type refreshRequest struct {
 // refreshSuccessResponse carries what a refresh can change. jwt is the
 // sprout's existing NATS User JWT (re-sent so a re-minted one reaches
 // it); tenant_x25519_pub is re-sent so the sprout can check it against
-// the one it pinned at enrollment. The fleet signing keys and bus URLs
+// the one it pinned. After a tenant key rotation,
+// tenant_x25519_continuity carries pki.TenantKeyContinuity's proof that
+// the new key succeeds the one the sprout pinned, which is how a sprout
+// re-pins (pki.RefreshGatewayJWT); a sprout that predates it ignores the
+// field and exits on the mismatch. The fleet signing keys and bus URLs
 // are enrollment-only.
 type refreshSuccessResponse struct {
 	SproutID        string `json:"sprout_id"`
@@ -38,6 +42,8 @@ type refreshSuccessResponse struct {
 	GatewayJWT      string `json:"gateway_jwt"`
 	NKeyIdentity    string `json:"nkey_identity"`
 	TenantX25519Pub string `json:"tenant_x25519_pub"`
+
+	TenantX25519Continuity json.RawMessage `json:"tenant_x25519_continuity,omitempty"`
 }
 
 // Refresh handles POST /v1/refresh. Every failure writes the same generic
@@ -75,6 +81,8 @@ func Refresh(w http.ResponseWriter, r *http.Request) {
 		GatewayJWT:      result.GatewayJWT,
 		NKeyIdentity:    req.NKeyPub,
 		TenantX25519Pub: result.TenantX25519Pub,
+
+		TenantX25519Continuity: result.TenantX25519Continuity,
 	}); err != nil {
 		log.Errorf("refresh: writing success response: %v", err)
 	}

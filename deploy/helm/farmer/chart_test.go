@@ -628,13 +628,16 @@ func policyStatements(hcl string) string {
 }
 
 // The farmer-only policies: exact paths, no wildcards, nothing on the
-// fleet signing key's sign path or the publisher's KV path.
+// fleet signing key's sign path or the publisher's KV path. The one
+// exception is the tenantbox policy's per-tenant path, whose last
+// segment is the tenant ID: a single "+" (exactly one segment), never
+// "*", and only there.
 func TestFarmerPoliciesAreExact(t *testing.T) {
 	cm := find(t, mustRender(t, "--set", "openbaoBootstrap.farmerbus.enabled=true",
 		"--set", "openbaoBootstrap.farmerbus.serviceAccountName=imas-dmz-nats-bus"), "ConfigMap", "t-farmer-openbao-policies")
 	want := map[string][]string{
 		"imas-farmer-gateway.hcl":   {`path "transit/sign/imas-gateway-jwt"`, `path "transit/keys/imas-gateway-jwt"`},
-		"imas-farmer-tenantbox.hcl": {`path "secret/data/imas/tenant-x25519"`},
+		"imas-farmer-tenantbox.hcl": {`path "secret/data/imas/tenant-x25519"`, `path "secret/data/imas/tenant-x25519/tenants/+"`},
 		"imas-farmer-certs.hcl":     {`path "pki/issue/imas-farmer"`},
 		"imas-farmerbus-certs.hcl":  {`path "pki/issue/imas-farmerbus"`},
 	}
@@ -653,7 +656,11 @@ func TestFarmerPoliciesAreExact(t *testing.T) {
 		if !slices.Equal(got, paths) {
 			t.Errorf("%s paths %v, want %v", name, got, paths)
 		}
-		if strings.ContainsAny(policyStatements(body), "*+") {
+		stmts := policyStatements(body)
+		if name == "imas-farmer-tenantbox.hcl" {
+			stmts = strings.Replace(stmts, `imas/tenant-x25519/tenants/+"`, `imas/tenant-x25519/tenants/TENANT"`, 1)
+		}
+		if strings.ContainsAny(stmts, "*+") {
 			t.Errorf("%s has a wildcard", name)
 		}
 	}

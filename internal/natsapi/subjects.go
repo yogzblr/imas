@@ -51,6 +51,13 @@ const (
 	// private key.
 	MethodPKIRotateBoxKey = "pki.rotatebox"
 
+	// MethodPKIRotateTenantBoxKey rotates the calling tenant's own
+	// payload-encryption X25519 keypair in OpenBao
+	// (pki.RotateTenantX25519Keypair): the design doc's accepted
+	// mitigation for static keys having no forward secrecy. Params:
+	// {"sever": bool}, sever for suspected exposure.
+	MethodPKIRotateTenantBoxKey = "pki.rotatetenantbox"
+
 	// Sprouts
 	MethodSproutsList = "sprouts.list"
 	MethodSproutsGet  = "sprouts.get"
@@ -292,7 +299,7 @@ func AllMethods() []string {
 		MethodHealth,
 		MethodVersion,
 		MethodPKIList, MethodPKIAccept, MethodPKIReject,
-		MethodPKIDeny, MethodPKIUnaccept, MethodPKIDelete, MethodPKIRotateBoxKey,
+		MethodPKIDeny, MethodPKIUnaccept, MethodPKIDelete, MethodPKIRotateBoxKey, MethodPKIRotateTenantBoxKey,
 		MethodSproutsList, MethodSproutsGet,
 		MethodTestPing,
 		MethodCmdRun,

@@ -27,10 +27,13 @@ package pki
 //   - nats_urls, the bus addresses the sprout will send its User JWT and
 //     gateway JWT to, must pass ValidateBusURLs (TLS schemes only, no
 //     credentials) or the whole response is refused; see busconnect.go.
-//   - The tenant X25519 public key is pinned write-once at enrollment. A
-//     response carrying a different one is refused whole, and the error
-//     (ErrTenantKeyMismatch) is fatal to the sprout, until authenticated
-//     tenant key rotation exists (workstream J).
+//   - The tenant X25519 public key is pinned at enrollment. A response
+//     carrying a different one is refused whole, and the error
+//     (ErrTenantKeyMismatch) is fatal to the sprout, unless the response
+//     also carries a continuity proof sealed under the pinned key's
+//     private half that names the new key (authenticated tenant key
+//     rotation, sproutbox.go's reconcileTenantKeyPin); then the pin
+//     moves to the new key.
 
 import (
 	"bytes"
@@ -67,11 +70,12 @@ import (
 const maxEnrollResponseBytes = 1 << 20
 
 // ErrTenantKeyMismatch means farmer returned a tenant X25519 public key
-// different from the one this sprout pinned at enrollment. Nothing from
-// that response is persisted. There is no authenticated tenant key
-// rotation yet (workstream J), so a change can only be a farmer-side bug
-// or something worse; "it came over pinned TLS" rules out an outside
-// attacker, not either of those. Callers treat it as fatal.
+// different from the one this sprout has pinned, without a continuity
+// proof from the pinned key that verifies (a rotation farmer severed, a
+// sprout offline past every retained key version, a farmer-side bug, or
+// something worse; "it came over pinned TLS" rules out an outside
+// attacker, not those). Nothing from that response is persisted. Callers
+// treat it as fatal: the sprout has to be re-enrolled.
 var ErrTenantKeyMismatch = errors.New("pki: farmer returned a different tenant X25519 public key than the one pinned at enrollment; refusing it")
 
 // ErrTenantKeyNotPinned means an enrolled sprout has no pinned tenant
@@ -110,6 +114,9 @@ type EnrollResponse struct {
 	TenantX25519Pub  string          `json:"tenant_x25519_pub"`
 	FleetSigningJWKS json.RawMessage `json:"fleet_signing_jwks"`
 	NatsURLs         []string        `json:"nats_urls"`
+	// TenantX25519Continuity is set after a tenant key rotation; see
+	// reconcileTenantKeyPin.
+	TenantX25519Continuity json.RawMessage `json:"tenant_x25519_continuity,omitempty"`
 }
 
 type refreshWireRequest struct {
@@ -125,6 +132,9 @@ type RefreshResponse struct {
 	GatewayJWT      string `json:"gateway_jwt"`
 	NKeyIdentity    string `json:"nkey_identity"`
 	TenantX25519Pub string `json:"tenant_x25519_pub"`
+	// TenantX25519Continuity is set after a tenant key rotation; see
+	// reconcileTenantKeyPin.
+	TenantX25519Continuity json.RawMessage `json:"tenant_x25519_continuity,omitempty"`
 }
 
 // enrollClock is time.Now, swappable in tests.
@@ -436,8 +446,9 @@ func EnsureEnrolled(ctx context.Context, joinToken, requestedID, sproutPub strin
 
 // PersistEnrollment writes a validated enrollment response next to the
 // sprout's NKey seed and root CA. The tenant X25519 public key is checked
-// against any already-pinned one before anything is written
-// (ErrTenantKeyMismatch), then the gateway JWT, the tenant key pin, the
+// against any already-pinned one before anything else is written
+// (reconcileTenantKeyPin: ErrTenantKeyMismatch, unless a continuity proof
+// moves the pin), then the gateway JWT, the tenant key pin, the
 // fleet signing JWKS pin and the bus URLs (nats_urls, which
 // LoadSproutBus connects to) are written, and the NATS User JWT last.
 // SproutEnrolled keys off the User JWT, so a crash part-way leaves the
@@ -445,7 +456,7 @@ func EnsureEnrolled(ctx context.Context, joinToken, requestedID, sproutPub strin
 // from its idempotent replay without spending another use of the join
 // token.
 func PersistEnrollment(resp *EnrollResponse) error {
-	if err := checkPinnedTenantKey(resp.TenantX25519Pub); err != nil {
+	if err := reconcileTenantKeyPin(resp.SproutID, resp.TenantX25519Pub, resp.TenantX25519Continuity); err != nil {
 		return err
 	}
 	if err := writeFileAtomic(config.SproutGatewayJWTFile, []byte(resp.GatewayJWT), 0o600); err != nil {
@@ -497,8 +508,9 @@ func checkPinnedTenantKey(pub string) error {
 }
 
 // pinTenantX25519Pub writes pub as the pinned tenant X25519 public key if
-// none is pinned yet. The pin is write-once: it is never replaced, and a
-// different key is ErrTenantKeyMismatch.
+// none is pinned yet. It never replaces a pin, and a different key is
+// ErrTenantKeyMismatch; the only way a pin moves is
+// reconcileTenantKeyPin's verified continuity proof.
 func pinTenantX25519Pub(pub string) error {
 	err := writeFileOnce(config.SproutTenantX25519PubFile, []byte(pub), 0o644)
 	if err == nil {
@@ -579,9 +591,10 @@ func GatewayJWTHeaders() (http.Header, error) {
 // persists it. The request carries only nkey_pub and a timestamped
 // proof of possession of its seed (RefreshSigningPayload); no join token.
 // The response is validated in full, and its tenant X25519 key checked
-// against the pinned one, before anything is written: a mismatch returns
-// ErrTenantKeyMismatch (a missing pin, ErrTenantKeyNotPinned) and
-// persists nothing. If farmer returns a different
+// against the pinned one, before anything is written: a different key
+// re-pins only with a continuity proof that verifies
+// (reconcileTenantKeyPin); otherwise it returns ErrTenantKeyMismatch (a
+// missing pin, ErrTenantKeyNotPinned) and persists nothing. If farmer returns a different
 // NATS User JWT than the one on disk (for instance, re-minted after a
 // signing key change), that is persisted too and picked up on the
 // sprout's next start. It returns the sprout_id farmer re-issued.
@@ -612,7 +625,7 @@ func RefreshGatewayJWT(ctx context.Context) (string, error) {
 	if _, err := os.Stat(config.SproutTenantX25519PubFile); os.IsNotExist(err) {
 		return "", ErrTenantKeyNotPinned
 	}
-	if err := checkPinnedTenantKey(resp.TenantX25519Pub); err != nil {
+	if err := reconcileTenantKeyPin(resp.SproutID, resp.TenantX25519Pub, resp.TenantX25519Continuity); err != nil {
 		return "", err
 	}
 	if err := writeFileAtomic(config.SproutGatewayJWTFile, []byte(resp.GatewayJWT), 0o600); err != nil {

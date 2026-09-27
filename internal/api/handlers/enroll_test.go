@@ -14,53 +14,24 @@ import (
 	"time"
 
 	"github.com/nats-io/nkeys"
-	"golang.org/x/crypto/nacl/box"
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/fleetsign"
 	"github.com/yogzblr/imas/internal/gatewayjwt"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 )
 
 // withFakeTenantBoxOpenBao points pki's tenant X25519 keypair custody
-// (internal/pki/tenantbox.go) at a mock OpenBao KV v2 server for the
-// duration of the test, pre-seeded with a freshly-generated keypair so a
-// GET always succeeds — these handler-level tests don't need to exercise
-// tenantbox.go's bootstrap-race handling, only that Enroll can reach a
-// tenant_x25519_pub at all. See internal/pki/tenantbox_test.go's
-// mockKVv2Server for the same shape, duplicated here since that type is
-// unexported in a different package.
+// (internal/pki/tenantbox.go) at a mock OpenBao KV v2 server
+// (internal/pki/tenantboxtest) for the duration of the test, and drops the
+// test tenant from pki's in-process key cache before and after, so a key
+// cached from an earlier test's mock never leaks into this one.
 func withFakeTenantBoxOpenBao(t *testing.T) {
 	t.Helper()
-	pub, priv, err := box.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generating mock tenant keypair: %v", err)
-	}
-	const token = "test-token"
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/secret/data/imas/tenant-x25519", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Vault-Token") != token {
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"data": map[string]any{
-				"data": map[string]string{
-					"pub":  base64.StdEncoding.EncodeToString(pub[:]),
-					"priv": base64.StdEncoding.EncodeToString(priv[:]),
-				},
-			},
-		})
-	})
-	ts := httptest.NewServer(mux)
-	t.Cleanup(ts.Close)
-
-	t.Setenv(pki.EnvTenantBoxOpenBaoAddr, ts.URL)
-	t.Setenv(pki.EnvTenantBoxOpenBaoKVMount, "secret")
-	t.Setenv(pki.EnvTenantBoxOpenBaoKVPath, "imas/tenant-x25519")
-	t.Setenv(pki.EnvTenantBoxOpenBaoAuthMethod, pki.TenantBoxAuthMethodToken)
-	t.Setenv(pki.EnvTenantBoxOpenBaoToken, token)
+	tenantboxtest.Start(t)
+	pki.InvalidateTenantBoxKeys(pki.CurrentTenantID())
+	t.Cleanup(func() { pki.InvalidateTenantBoxKeys(pki.CurrentTenantID()) })
 }
 
 // generateTestBoxPub returns a syntactically-valid, standard-base64-encoded

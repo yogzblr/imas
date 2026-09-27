@@ -49,6 +49,8 @@ var routes = map[string]handler{
 	MethodPKIDelete:       handlePKIDelete,
 	MethodPKIRotateBoxKey: handlePKIRotateBoxKey,
 
+	MethodPKIRotateTenantBoxKey: handlePKIRotateTenantBoxKey,
+
 	// Sprouts
 	MethodSproutsList: handleSproutsList,
 	MethodSproutsGet:  handleSproutsGet,

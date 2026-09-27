@@ -59,19 +59,12 @@ func natsInit(ctx context.Context, nc *nats.Conn) error {
 		return err
 	}
 
+	// Sealed end to end (workstream J): see internal/ingredients/cmd's
+	// sealed.go for what this accepts and what it refuses.
 	_, err = nc.Subscribe("imas.sprouts."+sproutID+".cmd.run", func(m *nats.Msg) {
-		var cmdRun apitypes.CmdRun
-		json.NewDecoder(bytes.NewBuffer(m.Data)).Decode(&cmdRun)
-		log.Trace(cmdRun)
-		results, err := cmd.SRun(cmdRun)
-		if err != nil {
-			log.Error(err)
+		if err := m.RespondMsg(cmd.RespondCmdRun(sproutID, m)); err != nil {
+			log.Errorf("cmd.run: sending reply: %v", err)
 		}
-		resultsB, err := json.Marshal(results)
-		if err != nil {
-			log.Error(err)
-		}
-		m.Respond(resultsB)
 	})
 	if err != nil {
 		return err
