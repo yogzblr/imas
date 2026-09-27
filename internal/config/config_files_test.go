@@ -14,43 +14,61 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// TestPackagedConfigKeysAreRead checks that every top-level key in the
-// sample configs shipped by the OS packages (packaging/etc/*.conf) is a key
-// some non-test code in the module reads through jety. A key nothing reads
-// is silently ignored, so a typo there (e.g. "farmeripoprt") only appears
-// to work while its value happens to equal the default.
-func TestPackagedConfigKeysAreRead(t *testing.T) {
+// configFileGlobs are the YAML configs the repo ships or runs: the samples
+// the OS packages install (packaging/etc/*.conf) and the ones
+// docker-compose.yml mounts into its farmer and sprout containers
+// (testing/farmer, testing/sprout_*). Each glob must match at least one
+// file, so a rename can't silently drop a file from the check.
+var configFileGlobs = []string{
+	"packaging/etc/*.conf",
+	"testing/farmer",
+	"testing/sprout_*",
+}
+
+// TestConfigFileKeysAreRead checks that every top-level key in the config
+// files matched by configFileGlobs is a key some non-test code in the
+// module reads through jety. A key nothing reads is silently ignored, so a
+// typo there (e.g. "farmeripoprt") only appears to work while its value
+// happens to equal the default.
+func TestConfigFileKeysAreRead(t *testing.T) {
 	root := moduleRoot(t)
 	known := jetyKeys(t, root)
 
-	confs, err := filepath.Glob(filepath.Join(root, "packaging", "etc", "*.conf"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(confs) == 0 {
-		t.Fatal("no packaging/etc/*.conf files found")
-	}
-	for _, conf := range confs {
-		t.Run(filepath.Base(conf), func(t *testing.T) {
-			data, err := os.ReadFile(conf)
+	for _, pattern := range configFileGlobs {
+		confs, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(pattern)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(confs) == 0 {
+			t.Errorf("no files match %s", pattern)
+			continue
+		}
+		for _, conf := range confs {
+			rel, err := filepath.Rel(root, conf)
 			if err != nil {
 				t.Fatal(err)
 			}
-			var m map[string]any
-			if err := yaml.Unmarshal(data, &m); err != nil {
-				t.Fatalf("not valid YAML: %v", err)
-			}
-			for key := range m {
-				if !known[strings.ToLower(key)] {
-					t.Errorf("key %q is not read by any code (typo?)", key)
+			t.Run(filepath.ToSlash(rel), func(t *testing.T) {
+				data, err := os.ReadFile(conf)
+				if err != nil {
+					t.Fatal(err)
 				}
-			}
-		})
+				var m map[string]any
+				if err := yaml.Unmarshal(data, &m); err != nil {
+					t.Fatalf("not valid YAML: %v", err)
+				}
+				for key := range m {
+					if !known[strings.ToLower(key)] {
+						t.Errorf("key %q is not read by any code (typo?)", key)
+					}
+				}
+			})
+		}
 	}
 }
 
 // TestJetyKeysFindsKnownKeys guards the source scan itself: if it stopped
-// finding keys, TestPackagedConfigKeysAreRead would fail for the wrong
+// finding keys, TestConfigFileKeysAreRead would fail for the wrong
 // reason, or pass vacuously if the configs were emptied.
 func TestJetyKeysFindsKnownKeys(t *testing.T) {
 	known := jetyKeys(t, moduleRoot(t))
