@@ -192,8 +192,10 @@ SECURITY REVIEW).** What it changes:
   legacy secret can be deleted.
 - **No scheduled rotation** in farmer itself; run
   `imas keys rotate-tenant-key` from a scheduler (e.g. a CronJob).
-- **Sprout-initiated box key rotation** has a farmer side but no sprout
-  side, so a sprout's own box key never rotates yet.
+- ~~**Sprout-initiated box key rotation** has a farmer side but no sprout
+  side, so a sprout's own box key never rotates yet.~~ **Closed, PR #34.**
+  See "Post-rebrand work" below and `docs/design/imas-payload-encryption-design.md`'s
+  "Sprout-side rotation, farmer-triggered only."
 - **Rollout order:** upgrade farmer before sprouts. Sprouts built between
   J and this follow-up can't open sealed `cmd.run` (farmer reports
   `ErrReplyNotSealed`) and exit on any tenant key rotation. Upgrade them
@@ -254,7 +256,11 @@ directly in this session instead.
 | **Workstream M.4** — customer-run Ansible playbooks | `ansible/roles/imas_sprout` (adds the Buildkite apt/yum/zypper repo or does `win_package`, merges enrollment settings into the sprout's existing config file via drift-detection rather than overwriting it — the sprout itself writes back `sproutid` and empties `jointoken` post-enroll — `no_log` + mode `0600` on the join token) + `ansible/roles/imas_verify` (polls a custom `imas_sprout_bus_status` module for connected state, fails clearly on timeout). Molecule scenario (`ansible/molecule/default/`, a stub farmer + Rocky/Debian/openSUSE Leap 15.6 containers) wired into CI (`.github/workflows/molecule.yml`: `ansible-lint`, `pytest`, `molecule test`). Along the way, caught and fixed two real packaging bugs found while building the playbooks: `packaging/etc/imas-sprout.conf` had `farmerapiport` misspelled `farmeripoprt` (silently ignored, masked by the value matching the default), and `packaging/etc/imas-farmer.conf` had a tab-indented `pubkeys` list (invalid YAML, `LoadConfig` would panic) plus a stale `organization:` key (farmer reads `farmerorganization`) — a new regression test, `internal/config/config_files_test.go`, now statically checks every packaged/testing config's keys against what the code actually reads via `jety`. | **merged** — PR #24 (`0ea6384`), PR #25 (`7377ba9`, `ef36998`, `6c630b7`, `7d3a70e`, `930f191`, `7356668`), PR #26 (`edca7ac`), PR #28 |
 | **New: Terraform UAT gate** | Provision per-OS VMs, install a tagged release's actual Buildkite-published packages via the M.4 playbooks, smoke-test enrollment/recipe-run/reboot survival. Not in the original roadmap; added as a release-quality gate. Task brief drafted in `docs/claude-code-parallel-build-plan.md` §4a (item 5), including an explicit flag that its default compute-provider choice (libvirt/KVM) needs a human sign-off, not just green tests. | **open, unblocked** — M.4 (its dependency) is now merged; not yet dispatched |
 | J follow-up: per-tenant tenant keypairs, tenant key rotation with authenticated re-pin, `cmd.run` sealed end to end, box key submissions sealed | See "J follow-up" under Wave 2. FLAG FOR SECURITY REVIEW | **in review** (`claude/tender-cerf-kudmy3`) |
-| Docs refresh (architecture diagram, SaaS API reference, `INSTALL.md`, this file, `packaging/systemd/*.service` vs `docs/*.service` dedup) | Done on branch `claude/sweet-sagan-yklpu8`: `docs/diagrams/imas-architecture.svg` replaces `grlx-arch-light.png`; `docs/api/saasapi.md` + `docs/api/saasapi-openapi.yaml` (all 18 `NewRouter` routes, the 2 dispatch routes marked off by default); `INSTALL.md` rewritten for tenants, enrollment keys, the SaaS API and Envoy; `docs/imas-{farmer,sprout}.service` removed in favour of `packaging/systemd/` | **in review** |
+| Docs refresh (architecture diagram, SaaS API reference, `INSTALL.md`, this file, `packaging/systemd/*.service` vs `docs/*.service` dedup) | Done on branch `claude/sweet-sagan-yklpu8`: `docs/diagrams/imas-architecture.svg` replaces `grlx-arch-light.png`; `docs/api/saasapi.md` + `docs/api/saasapi-openapi.yaml` (all 18 `NewRouter` routes, the 2 dispatch routes marked off by default); `INSTALL.md` rewritten for tenants, enrollment keys, the SaaS API and Envoy; `docs/imas-{farmer,sprout}.service` removed in favour of `packaging/systemd/` | merged — PR #23 |
+| J: seal `cook` dispatch and resync nudge end to end | See "As built (J follow-up)" under Wave 2. Closes the highest-priority item on the "still plaintext" list: a compromised bus can no longer inject either a command (`cmd.run`) or a recipe (`cook`) onto a box-ready sprout. Also moved farmer's job-creation recording off the (now sealed) plaintext dispatch onto an explicit hook (`cook.SetDispatchRecorder`). FLAG FOR SECURITY REVIEW | merged — PR #32 (`d2692c8`, `6f1ac36`, `bf5956c`) |
+| H: sprout outbound proxy support for the bus connection (requirements.md item 8) | New sprout config key `busproxyurl` (`http://` HTTP CONNECT or `socks5://`); `pki.LoadSproutBus` wires it as nats.go's `CustomDialer`, covering `wss://`, `tls://` and `nats://` alike, with `nats.SkipHostLookup` so the proxy resolves the bus host. The sprout's HTTP clients already covered this via `ProxyFromEnvironment`; this closes the one real gap (the bus connection itself) | merged — PR #33 (`924e9dc`, `ac523c1`) |
+| J: sprout side of farmer-triggered box key rotation (requirements.md item 15) | Closes "sprout-initiated box key rotation has a farmer side but no sprout side." Farmer-triggered only, no sprout-side scheduling. New key held `pending` until confirmed by the first farmer payload that opens under it; replaced key kept `previous` for `sproutboxkeyprevgrace` (default 15m, floored at `2×DefaultMaxSkew`). Along the way, found and fixed a real gap: `sproutPermissions` never granted the `boxkey.pub` publish subject at all, so every submission was refused as a Permissions Violation until this PR added it (existing sprouts pick it up via JWT re-mint on next refresh). See `docs/design/imas-payload-encryption-design.md`'s "Sprout-side rotation, farmer-triggered only." FLAG FOR SECURITY REVIEW | merged — PR #34 (`8eb23da`, `8384084`, `7b9d80d`) |
+| Ansible + packaging: expose `busproxyurl` and `sproutboxkeyprevgrace` | `ansible/roles/imas_sprout` variables `imas_sprout_bus_proxy_url` (drift-managed the same way as `busurls`: set when non-empty, removed when emptied) and `imas_sprout_boxkey_prev_grace` (set when non-empty, but deliberately never removed — see below), `packaging/etc/imas-sprout.conf` commented examples, `ansible/README.md` variable table. Found and fixed a Molecule idempotence failure along the way: `sproutboxkeyprevgrace` is the only one of the two with a `jety.SetDefault` in `internal/config/config.go`, so the sprout rewrites it into the config file with a concrete default value on any other save (enrolling, clearing its join token). Managing it the same "remove when empty" way as `busurls`/`busproxyurl` fought that write-back every run — molecule's idempotence check caught it: `imas_sprout : Write the enrollment settings...` and the restart handler both fired non-idempotently on all three containers. Fixed by only ever adding an explicit override for this key and never trying to force it absent. | **done, this pass** (docs/ansible only, no application code) |
 
 ## Notes
 
@@ -333,8 +339,21 @@ directly in this session instead.
   (`go.mod` requires it) because `proxy.golang.org` isn't on the egress
   allowlist here — so the new config-key test is verified by reading it,
   not by executing it.
-- **Still genuinely open, in priority order:** J's payload-encryption
-  wiring and per-tenant key (security-relevant), the Terraform UAT gate
-  (M.4, its one dependency, is now merged — this can be dispatched), and,
-  as a nice-to-have, running the Keycloak JWKS harness somewhere with a
-  Docker daemon.
+- **2026-09-27, later same day: `cook` sealing, sprout bus proxy support,
+  and farmer-triggered sprout box key rotation merged (PRs #32–#34)**, plus
+  the ansible/packaging follow-up exposing the two new sprout config keys
+  (`busproxyurl`, `sproutboxkeyprevgrace`) as role variables. Requirements
+  RAG (requirements.md; tracked in chat, not yet a doc in this repo):
+  item 8 (sprout proxy support) and item 15 (sprout key rotation) both
+  close out; item 14 (payload encryption) narrows to `shell.*` as the
+  highest-remaining-priority plaintext boundary (an interactive PTY from a
+  plaintext request), everything else on the "still plaintext" list above
+  being lower severity by design (read by the UI/CLI, which hold no
+  tenant key) or already accepted (the `boxkey.rotate` trigger itself).
+- **Still genuinely open, in priority order:** `shell.*` sealing (now the
+  most security-relevant remaining payload-encryption gap), the Terraform
+  UAT gate (M.4, its one dependency, is now merged — this can be
+  dispatched), scale/latency validation against `imas-1m-scale-plan.md`
+  and the master plan's <300ms SLA (requirements.md items 1 and 10 — no
+  load test has ever run), and, as a nice-to-have, running the Keycloak
+  JWKS harness somewhere with a Docker daemon.
