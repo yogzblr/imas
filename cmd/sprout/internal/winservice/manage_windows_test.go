@@ -266,20 +266,39 @@ func TestSCMCommandsE2E(t *testing.T) {
 	s.Close()
 	m.Disconnect()
 
+	// checkStatus asserts QueryStatus's state (and a PID while running).
+	checkStatus := func(step string, want svc.State) {
+		t.Helper()
+		st, err := QueryStatus(name)
+		if err != nil {
+			t.Fatalf("status after %s: %v", step, err)
+		}
+		if st.State != want || (want == svc.Running) != (st.PID != 0) || st.StartType != mgr.StartAutomatic {
+			t.Errorf("status after %s = %+v, want %s", step, st, stateName(want))
+		}
+	}
+	checkStatus("install", svc.Stopped)
 	for _, step := range []struct {
 		name string
 		f    func(string) error
+		want svc.State
 	}{
-		{"stop (already stopped)", Stop},
-		{"start", Start},
-		{"start (already running)", Start},
-		{"stop", Stop},
-		{"start again", Start},
-		{"uninstall (running)", Uninstall},
+		{"stop (already stopped)", Stop, svc.Stopped},
+		{"start", Start, svc.Running},
+		{"start (already running)", Start, svc.Running},
+		{"stop", Stop, svc.Stopped},
+		{"start again", Start, svc.Running},
 	} {
 		if err := step.f(name); err != nil {
 			t.Fatalf("%s: %v", step.name, err)
 		}
+		checkStatus(step.name, step.want)
+	}
+	if err := Uninstall(name); err != nil {
+		t.Fatalf("uninstall (running): %v", err)
+	}
+	if _, err := QueryStatus(name); !errors.Is(err, ErrNotInstalled) {
+		t.Errorf("status after uninstall = %v, want ErrNotInstalled", err)
 	}
 	if err := Start(name); !errors.Is(err, ErrNotInstalled) {
 		t.Errorf("start after uninstall = %v, want ErrNotInstalled", err)

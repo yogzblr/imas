@@ -15,8 +15,8 @@ func runAsService(func(context.Context)) bool { return false }
 // collects stderr itself.
 func startServiceLog() {}
 
-const serviceCommandsHelp = `install, uninstall, start and stop manage the Windows service. On this
-system, use the service manager: systemctl (or rc-service) start imas-sprout.
+const serviceCommandsHelp = `install, uninstall, start, stop and status manage the Windows service. On
+this system, use the service manager: systemctl (or rc-service) start imas-sprout.
 `
 
 // runServiceCommand fails: the service commands are Windows-only.

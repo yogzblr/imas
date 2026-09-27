@@ -28,7 +28,10 @@ import (
 	"github.com/taigrr/jety"
 )
 
-func init() {
+// setupSprout prepares the config, PKI and logging for runSprout. It used
+// to be init(); it runs from main so the service commands, which don't
+// need it, don't write the config directory and can run unelevated.
+func setupSprout() {
 	// Before LoadConfig writes the config file (it can hold the join
 	// token): a no-op outside Windows.
 	secureErr := config.SecureSproutConfigRoot()
@@ -62,6 +65,7 @@ func main() {
 	if cmd := flag.Arg(0); serviceCommands[cmd] {
 		os.Exit(serviceCommand(cmd, *joinToken))
 	}
+	setupSprout()
 	// Under the Windows SCM, the service handler drives the loop: the
 	// SCM's Stop/Shutdown cancels its context. See service_windows.go.
 	if runAsService(func(ctx context.Context) { runSprout(ctx, *joinToken, false) }) {
@@ -72,11 +76,11 @@ func main() {
 
 // serviceCommands manage the Windows service (service_windows.go). Other
 // positional arguments are ignored, as before.
-var serviceCommands = map[string]bool{"install": true, "uninstall": true, "start": true, "stop": true}
+var serviceCommands = map[string]bool{"install": true, "uninstall": true, "start": true, "stop": true, "status": true}
 
 func usage() {
 	out := flag.CommandLine.Output()
-	fmt.Fprintf(out, "Usage: %s [flags] [install|uninstall|start|stop]\n\n", os.Args[0])
+	fmt.Fprintf(out, "Usage: %s [flags] [install|uninstall|start|stop|status]\n\n", os.Args[0])
 	fmt.Fprint(out, serviceCommandsHelp)
 	fmt.Fprint(out, "\nFlags:\n")
 	flag.PrintDefaults()

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 
@@ -29,7 +30,11 @@ func startServiceLog() {
 	if isServiceErr != nil || !isService {
 		return
 	}
-	_, _ = winservice.LogToFile(filepath.Join(config.SproutServiceLogDir(), "sprout.log"))
+	_, _ = winservice.LogToFile(serviceLogPath())
+}
+
+func serviceLogPath() string {
+	return filepath.Join(config.SproutServiceLogDir(), "sprout.log")
 }
 
 // runAsService runs run under the SCM and reports true when the process
@@ -51,7 +56,7 @@ func runAsService(run func(context.Context)) bool {
 	return true
 }
 
-const serviceCommandsHelp = `Service commands (run from an elevated prompt):
+const serviceCommandsHelp = `Service commands (all but status need an elevated prompt):
   install    register this binary as the imas-sprout service (automatic
              start, LocalSystem, restart 5s after a failure), as the MSI
              does; it is not started. Refused if a non-administrator can
@@ -60,10 +65,15 @@ const serviceCommandsHelp = `Service commands (run from an elevated prompt):
              the MSI instead.
   start      start the service and wait until it is running.
   stop       stop the service and wait until it has stopped.
+  status     show the service's state and settings. Exit code 0 if it is
+             running, 3 if it is not, 4 if it is not installed.
 `
 
 // runServiceCommand runs one of serviceCommands and returns the exit code.
 func runServiceCommand(cmd string) int {
+	if cmd == "status" {
+		return statusCommand()
+	}
 	if err := doServiceCommand(cmd); err != nil {
 		return serviceCommandFailed(cmd, err)
 	}
@@ -108,4 +118,20 @@ func doServiceCommand(cmd string) error {
 		return fmt.Errorf("unknown command %q", cmd)
 	}
 	return nil
+}
+
+// statusCommand prints the service's status and returns
+// winservice.Status*: 0 running, 3 not running, 4 not installed; 1 if it
+// can't be read.
+func statusCommand() int {
+	st, err := winservice.QueryStatus(serviceName)
+	if errors.Is(err, winservice.ErrNotInstalled) {
+		fmt.Printf("%s: not installed\n", serviceName)
+		return winservice.StatusNotInstalled
+	}
+	if err != nil {
+		return serviceCommandFailed("status", err)
+	}
+	fmt.Print(st.Format(serviceName, serviceLogPath()))
+	return st.ExitCode()
 }
