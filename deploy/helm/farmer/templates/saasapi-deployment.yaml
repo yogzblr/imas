@@ -1,0 +1,284 @@
+{{- if .Values.saasapi.enabled }}
+{{- include "imas-farmer.validate" . -}}
+{{- $s := .Values.saasapi -}}
+{{- $fetchCA := include "imas-farmer.saasapi.fetchCA" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "imas-farmer.saasapi.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: saasapi
+spec:
+  replicas: {{ $s.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "imas-farmer.saasapi.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "imas-farmer.labels" . | nindent 8 }}
+        app.kubernetes.io/component: saasapi
+        {{- with $s.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $s.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "imas-farmer.saasapi.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with $s.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $s.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ $s.terminationGracePeriodSeconds }}
+      {{- with $s.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $s.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $s.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        {{- if $s.affinity }}
+        {{- toYaml $s.affinity | nindent 8 }}
+        {{- else }}
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "imas-farmer.saasapi.selectorLabels" . | nindent 20 }}
+        {{- end }}
+      {{- with $s.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $fetchCA }}
+      initContainers:
+        # tls.mode=openbao: the bus certificate is issued from OpenBao PKI,
+        # and farmer fetches that CA itself at boot. saasapi needs the same
+        # CA as a file, so fetch it here (an unauthenticated read of
+        # <pki>/cert/ca, verified against openbaoClient.caConfigMap when set).
+        - name: fetch-bus-ca
+          image: {{ include "imas-farmer.image" (dict "image" .Values.openbaoTools.image "appVersion" "") | quote }}
+          imagePullPolicy: {{ .Values.openbaoTools.image.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - bao read -field=certificate "$PKI_MOUNT/cert/ca" > /var/run/imas/bus-ca/ca.crt
+          env:
+            - name: BAO_ADDR
+              value: {{ include "imas-farmer.openbaoAddr" . | quote }}
+            {{- if .Values.openbaoClient.caConfigMap }}
+            - name: BAO_CACERT
+              value: /var/run/secrets/openbao-ca/{{ .Values.openbaoClient.caKey }}
+            {{- end }}
+            - name: PKI_MOUNT
+              value: {{ .Values.tls.openbao.pkiMount | quote }}
+            - name: HOME
+              value: /tmp
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+          {{- with $s.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: bus-ca
+              mountPath: /var/run/imas/bus-ca
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.openbaoClient.caConfigMap }}
+            - name: openbao-ca
+              mountPath: /var/run/secrets/openbao-ca
+              readOnly: true
+            {{- end }}
+      {{- end }}
+      containers:
+        - name: saasapi
+          image: {{ include "imas-farmer.image" (dict "image" $s.image "appVersion" .Chart.AppVersion) | quote }}
+          imagePullPolicy: {{ $s.image.pullPolicy }}
+          {{- with $s.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $s.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $s.port }}
+              protocol: TCP
+          env:
+            - name: SAASAPI_LISTEN_ADDR
+              value: {{ printf ":%v" $s.port | quote }}
+            # The saas schema; same PXC as farmer.
+            - name: SAASAPI_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "imas-farmer.dbSecretName" . }}
+                  key: {{ .Values.database.existingSecretKeys.saasapiDSN }}
+            - name: INTERNAL_AUTH_SECRET_CURRENT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $s.internalAuthSecret.secretName }}
+                  key: {{ $s.internalAuthSecret.currentKey }}
+            - name: INTERNAL_AUTH_SECRET_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $s.internalAuthSecret.secretName }}
+                  key: {{ $s.internalAuthSecret.previousKey }}
+                  optional: true
+            - name: SAASAPI_KEYCLOAK_JWKS_URL
+              value: {{ $s.jwt.keycloakJWKSURL | quote }}
+            - name: SAASAPI_JWT_ISSUER
+              value: {{ $s.jwt.issuer | quote }}
+            - name: SAASAPI_JWT_AUDIENCE
+              value: {{ $s.jwt.audience | quote }}
+            # The bus, by its FQDN (a SAN on the nats chart's default bus
+            # certificate). saasapi's dial has no farmerinterface
+            # coupling, so it needs no relay.
+            - name: SAASAPI_NATS_URL
+              value: {{ printf "tls://%s:%v" (include "imas-farmer.busFQDN" .) .Values.bus.port | quote }}
+            - name: SAASAPI_NATS_CA_FILE
+              value: /var/run/imas/bus-ca/ca.crt
+            # Its NATS identity (deploy/farmer/externalsecrets.yaml,
+            # imas-saasapi-nats): the seed as a file only, the JWT (not
+            # secret, but it travels with the seed) as a value.
+            - name: SAASAPI_NATS_NKEY_SEED_FILE
+              value: /var/run/secrets/imas/nats/{{ $s.natsCredentials.seedKey }}
+            - name: SAASAPI_NATS_USER_JWT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $s.natsCredentials.secretName }}
+                  key: {{ $s.natsCredentials.jwtKey }}
+            {{- /*
+            deploy/saasapi/deployment.env.rate-limit.yaml, with the same
+            semantics: null emits nothing (the compiled-in default), burst
+            goes through int so 1000000 isn't "1e+06" (a fractional burst
+            fails the render in validate), perSecond doesn't (0.5 must stay
+            0.5). SAASAPI_VALKEY_ADDRS names the same Valkey farmer writes
+            heartbeats to: saasapi reads them for `connected`.
+            */}}
+            {{- with include "imas-farmer.valkeyAddrs" . }}
+            - name: SAASAPI_VALKEY_ADDRS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with $s.enrollmentKeys.rateLimit }}
+            {{- if not (kindIs "invalid" .perSecond) }}
+            - name: SAASAPI_ENROLLMENT_KEY_RATE_LIMIT
+              value: {{ .perSecond | quote }}
+            {{- end }}
+            {{- if not (kindIs "invalid" .burst) }}
+            - name: SAASAPI_ENROLLMENT_KEY_RATE_BURST
+              value: {{ .burst | int | quote }}
+            {{- end }}
+            {{- end }}
+            - name: SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED
+              value: {{ $s.fleetUpdateDispatch.enabled | toString | quote }}
+            {{- if $s.fleetUpdateDispatch.enabled }}
+            # Fleet signing key, READ-ONLY (imas-fleet-verify). saasapi
+            # writes saas.fleet_versions, so it must never hold sign.
+            {{- include "imas-farmer.openbaoEnv" (dict "root" $ "prefix" "IMAS_FLEETSIGN_OPENBAO" "k8sRole" $s.openbao.fleetSign.k8sRole "tokenKey" $s.openbao.fleetSign.tokenSecretKey) | nindent 12 }}
+            - name: IMAS_FLEETSIGN_OPENBAO_TRANSIT_MOUNT
+              value: {{ $s.openbao.fleetSign.transitMount | quote }}
+            - name: IMAS_FLEETSIGN_TRANSIT_KEY
+              value: {{ $s.openbao.fleetSign.keyName | quote }}
+            {{- end }}
+            {{- with $s.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with $s.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $s.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $s.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $s.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: nats-credentials
+              mountPath: /var/run/secrets/imas/nats
+              readOnly: true
+            - name: bus-ca
+              mountPath: /var/run/imas/bus-ca
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            {{- if $s.fleetUpdateDispatch.enabled }}
+            {{- include "imas-farmer.openbaoVolumeMounts" . | trim | nindent 12 }}
+            {{- end }}
+            {{- with $s.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        # Only the seed: the JWT arrives as an env var from the same Secret.
+        - name: nats-credentials
+          secret:
+            secretName: {{ $s.natsCredentials.secretName }}
+            defaultMode: 0440
+            items:
+              - key: {{ $s.natsCredentials.seedKey | quote }}
+                path: {{ $s.natsCredentials.seedKey | quote }}
+        - name: bus-ca
+          {{- if .Values.bus.ca.secretName }}
+          secret:
+            secretName: {{ .Values.bus.ca.secretName }}
+            items:
+              - { key: {{ .Values.bus.ca.key | quote }}, path: ca.crt }
+          {{- else if .Values.bus.ca.configMapName }}
+          configMap:
+            name: {{ .Values.bus.ca.configMapName }}
+            items:
+              - { key: {{ .Values.bus.ca.key | quote }}, path: ca.crt }
+          {{- else if eq .Values.tls.mode "secret" }}
+          # tls.secretName's ca.crt only; saasapi gets none of farmer's key.
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+            items:
+              - { key: ca.crt, path: ca.crt }
+          {{- else }}
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+          {{- end }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi
+        {{- if or $s.fleetUpdateDispatch.enabled (and $fetchCA .Values.openbaoClient.caConfigMap) }}
+        {{- if $s.fleetUpdateDispatch.enabled }}
+        {{- include "imas-farmer.openbaoVolumes" . | trim | nindent 8 }}
+        {{- else }}
+        - name: openbao-ca
+          configMap:
+            name: {{ .Values.openbaoClient.caConfigMap }}
+        {{- end }}
+        {{- end }}
+        {{- with $s.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+{{- end }}

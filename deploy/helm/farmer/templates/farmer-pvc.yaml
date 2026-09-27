@@ -1,0 +1,25 @@
+{{- if and .Values.farmer.persistence.enabled (not .Values.farmer.persistence.existingClaim) }}
+# FarmerPKI: NATS JWTs and resolver state under nats-auth/, the SaaS API
+# credential and its rotation state, farmer's own NKey, plus audit logs.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "imas-farmer.fullname" . }}-data
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: farmer
+  {{- if .Values.farmer.persistence.keep }}
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.farmer.persistence.accessModes | nindent 4 }}
+  {{- with .Values.farmer.persistence.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.farmer.persistence.size }}
+{{- end }}

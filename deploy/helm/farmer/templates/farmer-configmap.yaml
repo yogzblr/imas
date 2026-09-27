@@ -1,0 +1,55 @@
+{{- include "imas-farmer.validate" . -}}
+{{- $tlsDir := include "imas-farmer.tlsDir" . -}}
+{{- $pki := "/var/lib/imas/farmer/pki" -}}
+{{- $managed := dict
+  "loglevel" .Values.farmer.logLevel
+  "farmerinterface" (include "imas-farmer.busAlias" .)
+  "farmerapiport" (toString .Values.farmer.apiPort)
+  "farmerbusport" (toString .Values.bus.port)
+  "farmerorganization" .Values.organization
+  "configroot" "/etc/imas/"
+  "farmerpki" (printf "%s/" $pki)
+  "nkeyfarmerpubfile" (printf "%s/farmer.nkey.pub" $pki)
+  "nkeyfarmerprivfile" (printf "%s/farmer.nkey" $pki)
+  "auditlogdir" "/var/lib/imas/farmer/audit"
+  "joblogdir" "/var/cache/imas/farmer/jobs"
+  "propsdir" "/var/cache/imas/farmer/props"
+  "gatewaytransitkeyname" .Values.farmer.openbao.gateway.keyName
+  "gatewayjwtttl" .Values.farmer.gatewayJWTTTL
+  "sproutbusurls" .Values.bus.sproutBusURLs
+  "s3usessl" .Values.objectStore.useSSL
+-}}
+{{- if eq .Values.tls.mode "secret" }}
+{{- $_ := set $managed "certfile" (printf "%s/tls.crt" $tlsDir) }}
+{{- $_ := set $managed "keyfile" (printf "%s/tls.key" $tlsDir) }}
+{{- $_ := set $managed "rootca" (printf "%s/ca.crt" $tlsDir) }}
+{{- else }}
+{{- $_ := set $managed "certfile" (printf "%s/tls-cert.pem" $tlsDir) }}
+{{- $_ := set $managed "keyfile" (printf "%s/tls-key.pem" $tlsDir) }}
+{{- $_ := set $managed "rootca" (printf "%s/tls-rootca.pem" $tlsDir) }}
+{{- $_ := set $managed "certhosts" (default (fromYamlArray (include "imas-farmer.defaultCertHosts" .)) .Values.tls.certHosts) }}
+{{- end }}
+{{- with .Values.farmer.adminPubKeys }}
+{{- $_ := set $managed "pubkeys" (dict "admin" .) }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "imas-farmer.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: farmer
+data:
+  # /etc/imas/farmer, read by config.LoadConfig("farmer"). Mounted
+  # read-only on purpose: LoadConfig ends with jety.WriteConfig(), which
+  # would otherwise write every environment variable of the process
+  # (IMAS_PXC_DSN included) back into this file.
+  #
+  # farmerinterface is the bus's "<svc>.<ns>.svc" name, which the pod
+  # pins to 0.0.0.0 (see the Deployment's hostAliases and README.md,
+  # "Reaching the bus"). Connection strings are not here: they come from
+  # the environment (IMAS_PXC_DSN, IMAS_VALKEY_ADDRS, IMAS_S3_*), and
+  # these keys would override them if set.
+  farmer: |
+    {{- merge $managed (deepCopy .Values.farmer.extraConfig) | toYaml | nindent 4 }}

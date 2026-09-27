@@ -1,0 +1,43 @@
+{{- include "imas-farmer.validate" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "imas-farmer.fullname" . }}-bus-relay
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: farmer
+data:
+  # Plain TCP relay from 127.0.0.1:<bus.port> to the bus. farmer dials
+  # "<svc>.<ns>.svc:<bus.port>", which its hostAliases pin to 0.0.0.0, so
+  # the dial lands here. The relay doesn't terminate TLS: farmer's
+  # certificate check against the bus is end to end. It resolves the bus
+  # by its FQDN, a different name from the pinned alias, so it can't
+  # resolve to itself. No admin listener. See README.md, "Reaching the bus".
+  envoy.yaml: |
+    static_resources:
+      listeners:
+        - name: bus
+          address:
+            socket_address: { address: 127.0.0.1, port_value: {{ .Values.bus.port }} }
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.tcp_proxy
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+                    stat_prefix: bus
+                    cluster: bus
+      clusters:
+        - name: bus
+          type: STRICT_DNS
+          connect_timeout: {{ .Values.bus.relay.connectTimeout }}
+          dns_lookup_family: V4_PREFERRED
+          load_assignment:
+            cluster_name: bus
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: {{ include "imas-farmer.busFQDN" . }}
+                          port_value: {{ .Values.bus.port }}

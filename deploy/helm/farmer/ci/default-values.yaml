@@ -1,0 +1,11 @@
+# chart-testing: the self-contained eval install (bundled OpenBao dev mode,
+# one-node PXC, standalone Valkey), plus the values the chart can't guess.
+bus:
+  serviceName: imas-dmz-nats-bus
+  sproutBusURLs:
+    - wss://bus.imas.example.com:443/
+saasapi:
+  jwt:
+    keycloakJWKSURL: https://keycloak.example.com/realms/cloudxp/protocol/openid-connect/certs
+    issuer: https://keycloak.example.com/realms/cloudxp
+    audience: imas-saasapi

@@ -1,0 +1,62 @@
+apiVersion: v2
+name: farmer
+description: >-
+  imas's non-DMZ core: cmd/farmer (ConnectFarmer(); API, job/facts/cook
+  subscribers, tenant provisioning) and the customer-facing SaaS API
+  (cmd/saasapi), sharing one PXC cluster (farmer.* and saas.* schemas) and
+  one Valkey. OpenBao, PXC and Valkey are optional subcharts: on for a
+  self-contained eval install, off to point at externally managed
+  instances. The DMZ bus and Envoy are the separate deploy/helm/nats chart.
+type: application
+version: 0.1.0
+# The farmer and saasapi image tags default to this when *.image.tag is empty.
+appVersion: "0.1.0"
+kubeVersion: ">=1.30.0-0"
+home: https://github.com/yogzblr/imas
+sources:
+  - https://github.com/yogzblr/imas
+keywords:
+  - imas
+  - farmer
+  - saasapi
+  - pxc
+  - openbao
+  - valkey
+annotations:
+  # FLAG FOR SECURITY REVIEW: this chart carries the OpenBao write policy
+  # for the SaaS API credential hand-off (deploy/farmer/README.md) and the
+  # fleet signing policies (deploy/fleetreleaser/policies). See README.md,
+  # "Security review notes".
+  imas.io/security-review: required
+  # Subchart licenses. CLAUDE.md's default is Apache-2.0/MIT only; these
+  # are the recorded exceptions (README.md, "Licensing").
+  #   openbao   chart MPL-2.0, server MPL-2.0 (docs/design/imas-master-plan.md)
+  #   pxc-db, pxc-operator  charts Apache-2.0, PXC server GPLv2 (same)
+  #   valkey    chart BSD-3-Clause (valkey-io/valkey-helm), server BSD-3-Clause
+  imas.io/dependency-licenses: "openbao=MPL-2.0; pxc-db=Apache-2.0 (PXC GPLv2); pxc-operator=Apache-2.0; valkey=BSD-3-Clause"
+dependencies:
+  # Eval OpenBao (dev mode by default). Off in production: point
+  # openbaoClient.addr at the real one.
+  - name: openbao
+    version: 0.29.6
+    repository: https://openbao.github.io/openbao-helm
+    condition: openbao.enabled
+  # The Percona operator. Follows pxc.enabled unless pxc-operator.enabled
+  # is set explicitly (e.g. false when the cluster already runs it). Not
+  # aliased: an alias becomes the chart name in its resource names, which
+  # must be lowercase.
+  - name: pxc-operator
+    version: 1.20.1
+    repository: https://percona.github.io/percona-helm-charts
+    condition: pxc-operator.enabled,pxc.enabled
+  # The PerconaXtraDBCluster holding both schemas. Aliased so the toggle
+  # is pxc.enabled.
+  - name: pxc-db
+    alias: pxc
+    version: 1.20.0
+    repository: https://percona.github.io/percona-helm-charts
+    condition: pxc.enabled
+  - name: valkey
+    version: 0.12.0
+    repository: https://valkey.io/valkey-helm/
+    condition: valkey.enabled

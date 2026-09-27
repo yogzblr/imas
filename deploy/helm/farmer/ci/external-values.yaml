@@ -1,0 +1,55 @@
+# chart-testing: production shape. No subcharts: OpenBao, PXC and Valkey
+# are external; seeds and saasapi's credential come from ESO; farmer's
+# certificate from cert-manager.
+bus:
+  serviceName: imas-dmz-nats-bus
+  sproutBusURLs:
+    - wss://bus.imas.example.com:443/
+    - wss://bus2.imas.example.com:443/
+tls:
+  mode: secret
+  secretName: imas-farmer-tls
+openbao:
+  enabled: false
+openbaoClient:
+  addr: https://openbao.openbao.svc:8200
+  caConfigMap: openbao-ca
+pxc:
+  enabled: false
+database:
+  host: pxc-cluster-haproxy.pxc.svc.cluster.local
+  existingSecret: imas-core-db
+valkey:
+  enabled: false
+  addrs:
+    - valkey-0.valkey.valkey.svc.cluster.local:6379
+    - valkey-1.valkey.valkey.svc.cluster.local:6379
+objectStore:
+  endpoint: s3.example.com
+  bucket: imas-recipes
+  jobBucket: imas-jobs
+  credentialsSecret: imas-s3
+externalSecrets:
+  enabled: true
+networkPolicy:
+  external:
+    pxc:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: pxc
+    valkey:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: valkey
+  farmerExtraEgress:
+    - to:
+        - ipBlock:
+            cidr: 198.51.100.0/24
+      ports:
+        - { protocol: TCP, port: 443 }
+saasapi:
+  replicaCount: 3
+  jwt:
+    keycloakJWKSURL: https://keycloak.example.com/realms/cloudxp/protocol/openid-connect/certs
+    issuer: https://keycloak.example.com/realms/cloudxp
+    audience: imas-saasapi

@@ -1,0 +1,21 @@
+# chart-testing: OpenBao token auth (one token per client), fleet update
+# dispatch on, the publisher's token in its own Secret.
+bus:
+  serviceName: imas-dmz-nats-bus
+  sproutBusURLs:
+    - wss://bus.imas.example.com:443/
+openbao:
+  enabled: false
+openbaoClient:
+  addr: https://openbao.example.com:8200
+  authMethod: token
+  tokenSecretName: imas-core-openbao-tokens
+credentialPublisher:
+  tokenSecretName: imas-publisher-openbao-token
+saasapi:
+  fleetUpdateDispatch:
+    enabled: true
+  jwt:
+    keycloakJWKSURL: https://keycloak.example.com/realms/cloudxp/protocol/openid-connect/certs
+    issuer: https://keycloak.example.com/realms/cloudxp
+    audience: imas-saasapi

@@ -1,0 +1,238 @@
+{{- if and .Values.openbao.enabled .Values.openbaoBootstrap.enabled }}
+{{- include "imas-farmer.validate" . -}}
+{{- $bs := .Values.openbaoBootstrap -}}
+{{- $dev := and .Values.openbao.server .Values.openbao.server.dev .Values.openbao.server.dev.enabled -}}
+{{- if and (not $bs.tokenSecretName) (not $dev) -}}
+{{- fail "openbaoBootstrap.tokenSecretName is required unless openbao.server.dev.enabled: a non-dev OpenBao must be initialized and unsealed by an operator, who then hands the bootstrap a token" -}}
+{{- end -}}
+{{- /*
+The reviewed policy files name fixed paths. Refuse values that would
+leave a client pointed somewhere its policy doesn't cover, rather than
+silently editing a reviewed policy.
+*/ -}}
+{{- $p := .Values.credentialPublisher -}}
+{{- if and $p.enabled (or (ne $p.kvMount "secret") (ne (trimAll "/" $p.kvPath) "platform/imas/saasapi-nats-user")) -}}
+{{- fail "openbaoBootstrap writes files/openbao-policies/imas-saasapi-cred-publisher.hcl, which grants secret/data/platform/imas/saasapi-nats-user only. Keep credentialPublisher.kvMount=secret and kvPath=platform/imas/saasapi-nats-user, or change the policy (and its review) together with them." -}}
+{{- end -}}
+{{- range $fs := list .Values.farmer.openbao.fleetSign .Values.saasapi.openbao.fleetSign -}}
+{{- if or (ne $fs.transitMount "transit") (ne $fs.keyName "imas-fleet-signing") -}}
+{{- fail "openbaoBootstrap writes the reviewed imas-fleet-verify.hcl, which names transit/keys/imas-fleet-signing. Keep *.openbao.fleetSign.transitMount=transit and keyName=imas-fleet-signing." -}}
+{{- end -}}
+{{- end -}}
+{{- $ns := .Release.Namespace -}}
+{{- $farmerSA := include "imas-farmer.farmer.serviceAccountName" . -}}
+{{- $ob := .Values.farmer.openbao -}}
+{{- $pki := .Values.tls.openbao.pkiMount -}}
+{{- $needPKI := or (eq .Values.tls.mode "openbao") $bs.farmerbus.enabled -}}
+{{- $kvMounts := uniq (list $ob.tenantBox.kvMount $p.kvMount) -}}
+{{- $busNames := $bs.farmerbus.allowedNames -}}
+{{- if not $busNames -}}
+{{- $svc := .Values.bus.serviceName -}}
+{{- $bns := .Values.bus.namespace -}}
+{{- $busNames = list $svc (printf "%s.%s" $svc $bns) (printf "%s.%s.svc" $svc $bns) (printf "%s.%s.svc.%s" $svc $bns .Values.clusterDomain) (printf "*.%s-headless.%s.svc.%s" $svc $bns .Values.clusterDomain) -}}
+{{- end -}}
+{{- if and $bs.farmerbus.enabled (not $bs.farmerbus.serviceAccountName) -}}
+{{- fail "openbaoBootstrap.farmerbus.serviceAccountName is required: the nats chart's bus ServiceAccount (<release>-nats-bus)" -}}
+{{- end -}}
+{{- if not $bs.tokenSecretName }}
+# The dev server's root token, which is already in values
+# (openbao.server.dev.devRootToken). Eval only.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "imas-farmer.fullname" . }}-openbao-bootstrap
+  namespace: {{ $ns }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: openbao-bootstrap
+type: Opaque
+stringData:
+  token: {{ .Values.openbao.server.dev.devRootToken | quote }}
+---
+{{- end }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-openbao-bootstrap" (include "imas-farmer.fullname" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: openbao-bootstrap
+  annotations:
+    # Before the publish Job (weight 10), which logs in with a role made here.
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: {{ $bs.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "imas-farmer.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: openbao-bootstrap
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: bootstrap
+          image: {{ include "imas-farmer.image" (dict "image" .Values.openbaoTools.image "appVersion" "") | quote }}
+          imagePullPolicy: {{ .Values.openbaoTools.image.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              # Idempotent: every step checks before it creates, so each
+              # upgrade re-applies policies and roles. Never writes NATS
+              # seeds: those are imported by ops, never generated.
+              until bao status >/dev/null 2>&1; do echo "waiting for OpenBao at $BAO_ADDR"; sleep 3; done
+
+              has_mount() { bao secrets list | grep -q "^$1/ "; }
+              has_mount transit || bao secrets enable -path=transit transit
+              # Gateway JWT key (farmer signs), and the fleet signing key
+              # (only cmd/fleetreleaser signs; farmer and saasapi verify).
+              bao read transit/keys/{{ $ob.gateway.keyName }} >/dev/null 2>&1 \
+                || bao write -f transit/keys/{{ $ob.gateway.keyName }} type=ed25519
+              bao read transit/keys/imas-fleet-signing >/dev/null 2>&1 \
+                || bao write -f transit/keys/imas-fleet-signing type=ed25519 exportable=false allow_plaintext_backup=false
+              {{- range $kvMounts }}
+              has_mount {{ . }} || bao secrets enable -path={{ . }} -version=2 kv
+              {{- end }}
+              {{- if $needPKI }}
+
+              has_mount {{ $pki }} || bao secrets enable -path={{ $pki }} pki
+              bao secrets tune -max-lease-ttl=87600h {{ $pki }}
+              if ! bao read -field=certificate {{ $pki }}/cert/ca 2>/dev/null | grep -q 'BEGIN CERTIFICATE'; then
+                bao write -field=certificate {{ $pki }}/root/generate/internal \
+                  common_name="imas eval root CA ({{ .Release.Name }})" ttl=87600h >/dev/null
+              fi
+              {{- if eq .Values.tls.mode "openbao" }}
+              # farmer's API certificate: its own Service names only.
+              bao write {{ $pki }}/roles/{{ .Values.tls.openbao.role }} \
+                allowed_domains="{{ join "," (default (fromYamlArray (include "imas-farmer.defaultCertHosts" .)) .Values.tls.certHosts) }}" \
+                allow_bare_domains=true allow_subdomains=false allow_localhost=false \
+                allow_ip_sans=false server_flag=true client_flag=false max_ttl=8760h
+              {{- end }}
+              {{- if $bs.farmerbus.enabled }}
+              # The nats chart's bus (bus.tls.mode=openbao, role imas-farmerbus).
+              bao write {{ $pki }}/roles/imas-farmerbus \
+                allowed_domains="{{ join "," $busNames }}" \
+                allow_bare_domains=true allow_glob_domains=true allow_subdomains=false \
+                allow_localhost=false allow_ip_sans=false server_flag=true client_flag=true max_ttl=8760h
+              {{- end }}
+              {{- end }}
+
+              bao auth list | grep -q "^{{ .Values.openbaoClient.k8sMount }}/ " \
+                || bao auth enable -path={{ .Values.openbaoClient.k8sMount }} kubernetes
+              bao write auth/{{ .Values.openbaoClient.k8sMount }}/config kubernetes_host=https://kubernetes.default.svc
+
+              for f in /policies/*.hcl; do
+                bao policy write "$(basename "$f" .hcl)" "$f"
+              done
+
+              # One role per client, one policy per role, no "default"
+              # policy. Never bind the publisher's role to anything else.
+              role() {
+                bao write "auth/{{ .Values.openbaoClient.k8sMount }}/role/$1" \
+                  bound_service_account_names="$2" bound_service_account_namespaces="$3" \
+                  audience="{{ .Values.openbaoClient.k8sAudience }}" token_policies="$4" \
+                  token_no_default_policy=true token_ttl="$5" token_max_ttl="$6"
+              }
+              {{- if eq .Values.tls.mode "openbao" }}
+              role {{ .Values.tls.openbao.k8sRole }} {{ $farmerSA }} {{ $ns }} imas-farmer-certs {{ $bs.tokenTTL }} {{ $bs.tokenMaxTTL }}
+              {{- end }}
+              role {{ $ob.gateway.k8sRole }} {{ $farmerSA }} {{ $ns }} imas-farmer-gateway {{ $bs.tokenTTL }} {{ $bs.tokenMaxTTL }}
+              role {{ $ob.fleetSign.k8sRole }} {{ $farmerSA }} {{ $ns }} imas-fleet-verify {{ $bs.tokenTTL }} {{ $bs.tokenMaxTTL }}
+              role {{ $ob.tenantBox.k8sRole }} {{ $farmerSA }} {{ $ns }} imas-farmer-tenantbox {{ $bs.tokenTTL }} {{ $bs.tokenMaxTTL }}
+              {{- if and .Values.saasapi.enabled .Values.saasapi.fleetUpdateDispatch.enabled }}
+              role {{ .Values.saasapi.openbao.fleetSign.k8sRole }} {{ include "imas-farmer.saasapi.serviceAccountName" . }} {{ $ns }} imas-fleet-verify {{ $bs.tokenTTL }} {{ $bs.tokenMaxTTL }}
+              {{- end }}
+              {{- if $p.enabled }}
+              # deploy/farmer/README.md: a run makes two KV calls; 5m is plenty.
+              role {{ $p.k8sRole }} {{ $p.serviceAccountName }} {{ $ns }} imas-saasapi-cred-publisher 5m 5m
+              {{- end }}
+              {{- if $bs.farmerbus.enabled }}
+              role imas-farmerbus {{ $bs.farmerbus.serviceAccountName }} {{ .Values.bus.namespace }} imas-farmerbus-certs {{ $bs.tokenTTL }} {{ $bs.tokenMaxTTL }}
+              {{- end }}
+              # imas-fleet-signer is written for cmd/fleetreleaser, which this
+              # chart doesn't deploy: no role here binds it.
+              echo "OpenBao bootstrap complete"
+          env:
+            - name: BAO_ADDR
+              value: {{ include "imas-farmer.openbaoAddr" . | quote }}
+            - name: BAO_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (printf "%s-openbao-bootstrap" (include "imas-farmer.fullname" .)) $bs.tokenSecretName }}
+                  key: {{ $bs.tokenSecretKey }}
+            {{- if .Values.openbaoClient.caConfigMap }}
+            - name: BAO_CACERT
+              value: /var/run/secrets/openbao-ca/{{ .Values.openbaoClient.caKey }}
+            {{- end }}
+            - name: HOME
+              value: /tmp
+          {{- with $bs.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: policies
+              mountPath: /policies
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.openbaoClient.caConfigMap }}
+            - name: openbao-ca
+              mountPath: /var/run/secrets/openbao-ca
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: policies
+          configMap:
+            name: {{ include "imas-farmer.fullname" . }}-openbao-policies
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        {{- if .Values.openbaoClient.caConfigMap }}
+        - name: openbao-ca
+          configMap:
+            name: {{ .Values.openbaoClient.caConfigMap }}
+        {{- end }}
+{{- if .Values.networkPolicy.enabled }}
+---
+# openbao-bootstrap talks to OpenBao and DNS only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "imas-farmer.fullname" . }}-openbao-bootstrap
+  namespace: {{ $ns }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: openbao-bootstrap
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: openbao-bootstrap
+  policyTypes: ["Ingress", "Egress"]
+  ingress: []
+  egress:
+    {{- include "imas-farmer.openbaoEgress" . | nindent 4 }}
+    {{- include "imas-farmer.dnsEgress" . | nindent 4 }}
+{{- end }}
+{{- end }}
