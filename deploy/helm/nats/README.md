@@ -47,7 +47,15 @@ separate `deploy/helm/farmer` chart.
 5. **Core-side settings**, in the farmer chart, not here:
    - farmer's `farmerorganization` must equal `bus.organization`.
    - farmer must dial the bus at
-     `tls://<release>-nats-bus.<ns>.svc.cluster.local:5406`.
+     `tls://<release>-nats-bus.<ns>.svc.cluster.local:5406`. Set that
+     as farmer's `farmerbusurl` (env `FARMERBUSURL`). Keep
+     `farmerinterface` as farmer's own bind address (`0.0.0.0`); it
+     no longer decides where farmer dials the bus or which name it
+     checks the bus cert against.
+   - farmer verifies the bus certificate against the host of
+     `farmerbusurl`, the Service FQDN above. Set
+     `farmerbustlsservername` (env `FARMERBUSTLSSERVERNAME`) only if
+     the cert carries a different name than the host farmer dials.
    - farmer must mount the same seed Secret.
    - farmer's `IMAS_SPROUT_BUS_URLS` must list Envoy's external `wss://`
      address.
@@ -130,8 +138,10 @@ file. For the same reason the pods set `enableServiceLinks: false`.
   nothing.
   - The SANs must cover what Envoy dials: `envoy.upstreams.natsWebsocket.sni`,
     which defaults to the bus Service FQDN.
-  - They must also cover what core dials. core uses its own
-    `farmerinterface` as the TLS ServerName.
+  - They must also cover the name core verifies:
+    `farmerbustlsservername` if core sets it, otherwise the host of
+    core's `farmerbusurl` (normally the bus Service FQDN, which the
+    first bullet already covers).
 - **`bus.tls.mode: openbao`** issues a cert from OpenBao PKI at startup
   through `IMAS_CERTS_OPENBAO_*`, into a memory `emptyDir`. The SANs are
   `bus.tls.certHosts` or the Service and per-pod DNS names.
@@ -520,10 +530,7 @@ Still open. Each is outside this chart's file scope.
 2. **farmer's default tenant ID is invalid.** `config.go` still defaults
    `farmerorganization` to `"imas farmer"`, which fails
    `IsValidTenantID`, so core exits at boot unless it's overridden.
-3. **core can't be configured with the bus's address.** It still uses
-   one `farmerinterface` as its API bind address, its bus URL host and
-   its TLS ServerName for the bus.
-4. **The Keycloak harness still doesn't start on current Keycloak.**
+3. **The Keycloak harness still doesn't start on current Keycloak.**
    `deploy/envoy/testing/docker-compose.keycloak.yml` still pulls from
    quay.io and mounts the realm under a file name Keycloak 26 refuses
    (it must be `imas-gateway-jwt-validation-realm.json`).
@@ -537,6 +544,16 @@ Fixed on `main` and verified above:
 - The root CA bootstrap never pinning a bad response, with DMZ sprouts
   using a pre-provisioned CA (#14).
 - Bus log shipping over each process's authenticated connection (#16).
+
+Fixed since that revalidation. Covered by unit tests, but not yet
+revalidated end to end with the chart:
+
+- core's bus address and bus TLS ServerName are separate from its bind
+  address. `farmerinterface` is only the bind address on farmer and
+  farmerbus. core dials `farmerbusurl` and verifies the bus cert against
+  `farmerbustlsservername`, or the host of `farmerbusurl` when that's
+  unset. Before this, core used `farmerinterface` for all three, so it
+  couldn't reach a bus in a separate Service.
 
 ## Security review notes
 
