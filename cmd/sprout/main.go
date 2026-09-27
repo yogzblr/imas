@@ -183,8 +183,12 @@ func ConnectSprout(ctx context.Context, done chan<- struct{}) {
 	}
 	log.Debugf("Successfully connected to the Farmer")
 
-	if err := log.ConnectNATS(config.FarmerBusURL); err != nil {
-		log.Errorf("Failed to connect log-nats backend: %v", err)
+	// Ship logs over this same authenticated connection: a separate dial to
+	// FarmerBusURL has neither the User JWT nor the enrolled addresses.
+	if !pki.SproutUserJWTGrantsLogs(bus.UserJWT, sproutID) {
+		log.Warnf("not shipping logs to the bus: this sprout's User JWT has no grant for %s.>; farmer re-mints it, and it takes effect after the next refresh and restart", pki.SproutLogSubjectPrefix(sproutID))
+	} else if err := log.UseNATSConn(nc, pki.SproutLogSubjectPrefix(sproutID)); err != nil {
+		log.Errorf("Failed to attach log-nats backend to the bus connection: %v", err)
 	}
 
 	test.RegisterNatsConn(nc)
