@@ -72,7 +72,7 @@ func TestConfigFileKeysAreRead(t *testing.T) {
 // reason, or pass vacuously if the configs were emptied.
 func TestJetyKeysFindsKnownKeys(t *testing.T) {
 	known := jetyKeys(t, moduleRoot(t))
-	for _, key := range []string{"farmerapiport", "farmerinterface", "pubkeys", "props"} {
+	for _, key := range []string{"farmerapiport", "farmerinterface", "pubkeys", "props", "busproxyurl"} {
 		if !known[key] {
 			t.Errorf("source scan did not find key %q", key)
 		}

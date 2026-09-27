@@ -30,18 +30,37 @@ package pki
 //     CONNECT nonce, and on ws(s):// the gateway JWT as a bearer token on
 //     each websocket handshake (GatewayJWTHeaders), which Envoy's
 //     jwt_authn checks.
+//   - With the sprout config's "busproxyurl" (config.BusProxyURL) set,
+//     every bus address is dialled through that proxy (busProxyDialer):
+//     an HTTP CONNECT tunnel or SOCKS5. nats.go dials every transport
+//     (wss://, tls://, nats://) through its CustomDialer and layers TLS
+//     and the websocket upgrade on the conn it returns, so the proxy
+//     only relays bytes and never sees plaintext bus traffic; TLS is
+//     still verified against SproutRootCA and the URL's host. The
+//     proxy's own credentials, if any, are the URL's userinfo, sent only
+//     to the proxy (Proxy-Authorization or SOCKS5 username/password).
+//     HTTP_PROXY/HTTPS_PROXY/NO_PROXY, which the sprout's HTTP clients
+//     honour, do not apply to the bus.
 
 import (
+	"bufio"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	nats "github.com/nats-io/nats.go"
+	"golang.org/x/net/proxy"
 
 	"github.com/yogzblr/imas/internal/config"
 )
@@ -124,6 +143,198 @@ func redactURL(u *url.URL) string {
 	return c.String()
 }
 
+// Bounds on a bus proxy URL. maxProxyCredentialLength is SOCKS5's
+// (RFC 1929) limit on each of the username and password, applied to
+// http:// too.
+const (
+	maxBusProxyURLLength     = 2048
+	maxProxyCredentialLength = 255
+)
+
+// ValidateBusProxyURL checks the "busproxyurl" a sprout dials the bus
+// through and returns it parsed, or nil for an empty one. It must be an
+// http:// (HTTP CONNECT) or socks5:// URL with a host and an explicit
+// port, and no path, query or fragment. Userinfo is allowed, since both
+// schemes define it as the proxy's own credentials (HTTP Basic, SOCKS5
+// username/password), but must have a username; error messages never
+// echo it.
+func ValidateBusProxyURL(raw string) (*url.URL, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return nil, nil
+	}
+	if len(s) > maxBusProxyURLLength {
+		return nil, fmt.Errorf("pki: bus proxy URL longer than %d bytes", maxBusProxyURLLength)
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		// url.Error quotes the input, which may carry a password.
+		return nil, errors.New("pki: bus proxy URL is not a valid URL")
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	switch u.Scheme {
+	case "http", "socks5":
+	default:
+		return nil, fmt.Errorf("pki: bus proxy URL %q: scheme must be http or socks5", redactURL(u))
+	}
+	if u.Opaque != "" || u.Hostname() == "" {
+		return nil, fmt.Errorf("pki: bus proxy URL %q has no host", redactURL(u))
+	}
+	if port, err := strconv.Atoi(u.Port()); err != nil || port < 1 || port > 65535 {
+		return nil, fmt.Errorf("pki: bus proxy URL %q must have a port", redactURL(u))
+	}
+	if u.Path != "" && u.Path != "/" {
+		return nil, fmt.Errorf("pki: bus proxy URL %q must not have a path", redactURL(u))
+	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return nil, fmt.Errorf("pki: bus proxy URL %q must not have a query or fragment", redactURL(u))
+	}
+	if u.User != nil {
+		user := u.User.Username()
+		pass, _ := u.User.Password()
+		switch {
+		case user == "":
+			return nil, fmt.Errorf("pki: bus proxy URL %q: credentials without a username", redactURL(u))
+		case strings.Contains(user, ":"):
+			// HTTP Basic can't carry it: the first ':' ends the username.
+			return nil, fmt.Errorf("pki: bus proxy URL %q: username contains ':'", redactURL(u))
+		case len(user) > maxProxyCredentialLength || len(pass) > maxProxyCredentialLength:
+			return nil, fmt.Errorf("pki: bus proxy URL %q: username or password longer than %d bytes", redactURL(u), maxProxyCredentialLength)
+		}
+	}
+	u.Path = ""
+	return u, nil
+}
+
+// busProxyDialer is the nats.CustomDialer a sprout dials the bus with when
+// busproxyurl is set. nats.go hands it "host:port" of the bus URL it is
+// connecting to (unresolved, see nats.SkipHostLookup in LoadSproutBus)
+// and then runs TLS, and for wss:// the websocket upgrade, over the conn
+// it returns, so the proxy sees only the target address and ciphertext.
+type busProxyDialer struct {
+	proxy *url.URL
+	// timeout bounds the whole dial, proxy handshake included. SproutBus.
+	// Connect sets it to the connection's nats.Timeout.
+	timeout time.Duration
+}
+
+var _ nats.CustomDialer = (*busProxyDialer)(nil)
+
+func (d *busProxyDialer) Dial(network, addr string) (net.Conn, error) {
+	ctx := context.Background()
+	if d.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, d.timeout)
+		defer cancel()
+	}
+	var (
+		conn net.Conn
+		err  error
+	)
+	switch d.proxy.Scheme {
+	case "socks5":
+		conn, err = d.dialSOCKS5(ctx, network, addr)
+	case "http":
+		conn, err = d.dialHTTPConnect(ctx, network, addr)
+	default:
+		err = fmt.Errorf("unsupported scheme %q", d.proxy.Scheme)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("pki: dialling %s through bus proxy %s: %w", addr, redactURL(d.proxy), err)
+	}
+	return conn, nil
+}
+
+func (d *busProxyDialer) dialSOCKS5(ctx context.Context, network, addr string) (net.Conn, error) {
+	var auth *proxy.Auth
+	if d.proxy.User != nil {
+		pass, _ := d.proxy.User.Password()
+		auth = &proxy.Auth{User: d.proxy.User.Username(), Password: pass}
+	}
+	// A hostname addr is sent to the proxy as a domain name, so the proxy
+	// resolves it.
+	s, err := proxy.SOCKS5("tcp", d.proxy.Host, auth, &net.Dialer{})
+	if err != nil {
+		return nil, err
+	}
+	cd, ok := s.(proxy.ContextDialer)
+	if !ok {
+		return nil, errors.New("SOCKS5 dialer does not take a context")
+	}
+	return cd.DialContext(ctx, network, addr)
+}
+
+func (d *busProxyDialer) dialHTTPConnect(ctx context.Context, network, addr string) (net.Conn, error) {
+	var nd net.Dialer
+	conn, err := nd.DialContext(ctx, network, d.proxy.Host)
+	if err != nil {
+		return nil, err
+	}
+	// Unblock the handshake below when ctx ends, not just at its deadline.
+	stop := context.AfterFunc(ctx, func() { conn.SetDeadline(time.Unix(1, 0)) })
+	defer stop()
+	if deadline, ok := ctx.Deadline(); ok {
+		conn.SetDeadline(deadline)
+	}
+	req := &http.Request{
+		Method: http.MethodConnect,
+		URL:    &url.URL{Opaque: addr},
+		Host:   addr,
+		Header: make(http.Header),
+	}
+	if u := d.proxy.User; u != nil {
+		pass, _ := u.Password()
+		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(u.Username()+":"+pass)))
+	}
+	if err := req.Write(conn); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, req)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("reading CONNECT response: %w", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		conn.Close()
+		return nil, fmt.Errorf("proxy refused CONNECT: %s", resp.Status)
+	}
+	if !stop() {
+		conn.Close()
+		return nil, ctx.Err()
+	}
+	conn.SetDeadline(time.Time{})
+	if br.Buffered() > 0 {
+		// The bus spoke first (a tls:// or nats:// server's INFO) and
+		// its bytes arrived with the proxy's response: keep them.
+		return &bufferedConn{Conn: conn, r: br}, nil
+	}
+	return conn, nil
+}
+
+// bufferedConn reads what an HTTP CONNECT exchange had already buffered
+// before reading the tunnel itself.
+type bufferedConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (c *bufferedConn) Read(p []byte) (int, error) { return c.r.Read(p) }
+
+// busProxyTimeout is appended after every caller option in
+// SproutBus.Connect, so the proxy dialer's timeout is the connection's
+// final nats.Timeout (nats.go only applies that to its own *net.Dialer).
+func busProxyTimeout(o *nats.Options) error {
+	if d, ok := o.CustomDialer.(*busProxyDialer); ok {
+		c := *d
+		c.timeout = o.Timeout
+		o.CustomDialer = &c
+	}
+	return nil
+}
+
 // persistBusURLs writes enrollment's nats_urls to config.SproutBusURLsFile,
 // or removes that file when farmer returned none, so what is on disk is
 // always what the last enrollment said. urls must already have passed
@@ -202,7 +413,11 @@ func ResolveSproutBusURLs() ([]string, BusURLSource, error) {
 type SproutBus struct {
 	Servers []string
 	Source  BusURLSource
-	// Options are the TLS and auth options; Connect appends its callers'.
+	// Proxy is the busproxyurl every server is dialled through, without
+	// its credentials, or empty when the sprout dials directly.
+	Proxy string
+	// Options are the TLS, auth and proxy options; Connect appends its
+	// callers'.
 	Options []nats.Option
 	// UserJWT is the NATS User JWT in Options, so callers can check its
 	// grants (e.g. SproutUserJWTGrantsLogs) against the one actually sent,
@@ -212,11 +427,16 @@ type SproutBus struct {
 
 // LoadSproutBus resolves the sprout's bus addresses
 // (ResolveSproutBusURLs) and builds its connection options from the
-// persisted NATS User JWT, the NKey seed and SproutRootCA.
+// persisted NATS User JWT, the NKey seed and SproutRootCA, dialling
+// through config.BusProxyURL when it is set.
 func LoadSproutBus() (*SproutBus, error) {
 	servers, source, err := ResolveSproutBusURLs()
 	if err != nil {
 		return nil, err
+	}
+	proxyURL, err := ValidateBusProxyURL(config.BusProxyURL)
+	if err != nil {
+		return nil, fmt.Errorf("pki: sprout config busproxyurl: %w", err)
 	}
 	// Operator-mode nats-server needs the NATS User JWT from enrollment
 	// alongside the NKey seed that signs the CONNECT nonce.
@@ -252,11 +472,24 @@ func LoadSproutBus() (*SproutBus, error) {
 	if source != BusURLsFromLegacy {
 		opts = append(opts, nats.IgnoreDiscoveredServers())
 	}
-	return &SproutBus{Servers: servers, Source: source, Options: opts, UserJWT: userJWT}, nil
+	bus := &SproutBus{Servers: servers, Source: source, Options: opts, UserJWT: userJWT}
+	if proxyURL != nil {
+		bus.Proxy = redactURL(proxyURL)
+		bus.Options = append(bus.Options,
+			nats.SetCustomDialer(&busProxyDialer{proxy: proxyURL}),
+			// Hand the dialer the bus hostname rather than addresses
+			// resolved here: the proxy resolves it, as a sprout behind
+			// one may have no DNS for the bus, and an HTTP proxy's
+			// allowlist usually names hosts.
+			nats.SkipHostLookup(),
+		)
+	}
+	return bus, nil
 }
 
 // Connect dials b.Servers with b.Options followed by extra.
 func (b *SproutBus) Connect(extra ...nats.Option) (*nats.Conn, error) {
 	opts := append(append([]nats.Option{}, b.Options...), extra...)
+	opts = append(opts, busProxyTimeout)
 	return nats.Connect(strings.Join(b.Servers, ","), opts...)
 }

@@ -184,6 +184,16 @@ var (
 	// list or a comma-separated string. Empty by default.
 	BusURLs []string
 
+	// BusProxyURL ("busproxyurl" in the sprout config file, sprout only)
+	// is an outbound proxy the sprout dials every bus address through
+	// (pki.LoadSproutBus): an http:// URL for an HTTP CONNECT proxy or a
+	// socks5:// URL, with an explicit port and optionally the proxy's own
+	// user:password, validated by pki.ValidateBusProxyURL. For installs
+	// whose only way out is a proxy; the sprout's HTTP clients already
+	// follow HTTP_PROXY/HTTPS_PROXY/NO_PROXY, which the bus does not.
+	// Empty by default: dial directly.
+	BusProxyURL string
+
 	// SproutBoxPrivFile/SproutBoxPubFile hold the sprout's own X25519
 	// box keypair (docs/design/imas-payload-encryption-design.md,
 	// "Bootstrap"), generated locally and once (pki.EnsureSproutBoxKey).
@@ -552,6 +562,7 @@ func LoadConfig(binary string) {
 			SproutHandledJobsFile = jety.GetString("sprouthandledjobsfile")
 			SproutRootCATOFU = jety.GetBool("sproutrootcatofu")
 			BusURLs = stringList(jety.Get("busurls"))
+			BusProxyURL = strings.TrimSpace(jety.GetString("busproxyurl"))
 
 			// The sprout config file can hold the join token. os.Create
 			// (above, and in jety.WriteConfig) leaves a new file 0644
