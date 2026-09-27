@@ -1,11 +1,20 @@
 package pki
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -168,6 +177,9 @@ func TestLoadSproutBus_Options(t *testing.T) {
 	if o.IgnoreDiscoveredServers {
 		t.Error("legacy FarmerBusURL should keep using discovered servers")
 	}
+	if o.CustomDialer != nil || o.SkipHostLookup || b.Proxy != "" {
+		t.Error("no busproxyurl, yet the bus options dial through a proxy")
+	}
 
 	if err := persistBusURLs([]string{"wss://edge:8443"}); err != nil {
 		t.Fatal(err)
@@ -288,10 +300,457 @@ func TestSproutBus_ConnectsToEnrolledURLs(t *testing.T) {
 		defer func() { config.BusURLs = nil }()
 		connect(t, BusURLsFromConfig, "tls")
 	})
+	// Both transports through each kind of proxy: the proxy sees one
+	// tunnel per connection, to the bus address itself.
+	for _, scheme := range []string{"http", "socks5"} {
+		for _, auth := range []bool{false, true} {
+			name := "through " + scheme + " proxy"
+			if auth {
+				name += " with credentials"
+			}
+			t.Run(name, func(t *testing.T) {
+				p := startTestProxy(t, scheme, auth)
+				setBusProxyURL(t, p.URL())
+				connect(t, BusURLsFromEnrollment, "wss")
+				config.BusURLs = []string{"tls://" + config.FarmerBusURL}
+				defer func() { config.BusURLs = nil }()
+				connect(t, BusURLsFromConfig, "tls")
+				want := []string{strings.TrimPrefix(wsURL, "wss://"), config.FarmerBusURL}
+				if got := p.targets(); !reflect.DeepEqual(got, want) {
+					t.Errorf("proxy tunnelled to %q, want %q", got, want)
+				}
+			})
+		}
+	}
 	t.Run("legacy FarmerBusURL without enrolled URLs", func(t *testing.T) {
 		if err := os.Remove(config.SproutBusURLsFile); err != nil {
 			t.Fatal(err)
 		}
 		connect(t, BusURLsFromLegacy, "tls")
 	})
+}
+
+func TestValidateBusProxyURL(t *testing.T) {
+	ok := map[string]string{
+		"":                                 "",
+		"  ":                               "",
+		"http://proxy:3128":                "http://proxy:3128",
+		" HTTP://proxy.example.com:3128/ ": "http://proxy.example.com:3128",
+		"socks5://127.0.0.1:1080":          "socks5://127.0.0.1:1080",
+		"SOCKS5://[::1]:1080":              "socks5://[::1]:1080",
+		"http://user:pass@proxy:3128":      "http://user:pass@proxy:3128",
+		"socks5://user@proxy:1080":         "socks5://user@proxy:1080",
+		"http://u%40x:p%3Ass@proxy:3128":   "http://u%40x:p%3Ass@proxy:3128",
+	}
+	for in, want := range ok {
+		u, err := ValidateBusProxyURL(in)
+		if err != nil {
+			t.Errorf("ValidateBusProxyURL(%q): %v", in, err)
+			continue
+		}
+		got := ""
+		if u != nil {
+			got = u.String()
+		}
+		if got != want {
+			t.Errorf("ValidateBusProxyURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	bad := map[string]string{
+		"https proxy":        "https://proxy:3128",
+		"socks5h":            "socks5h://proxy:1080",
+		"socks4":             "socks4://proxy:1080",
+		"websocket":          "ws://proxy:3128",
+		"file":               "file:///etc/passwd",
+		"no scheme":          "proxy:3128",
+		"no port":            "http://proxy",
+		"port zero":          "http://proxy:0",
+		"port out of range":  "socks5://proxy:65536",
+		"no host":            "http://:3128",
+		"path":               "http://proxy:3128/connect",
+		"query":              "http://proxy:3128/?x=1",
+		"empty query":        "http://proxy:3128/?",
+		"fragment":           "http://proxy:3128#x",
+		"password only":      "http://:pw@proxy:3128",
+		"colon in username":  "http://u%3Ax:pw@proxy:3128",
+		"long username":      "socks5://" + strings.Repeat("u", maxProxyCredentialLength+1) + "@proxy:1080",
+		"long password":      "socks5://u:" + strings.Repeat("p", maxProxyCredentialLength+1) + "@proxy:1080",
+		"too long":           "http://" + strings.Repeat("a", maxBusProxyURLLength) + ":1",
+		"unparseable":        "http://pro xy:3128",
+		"bad percent escape": "http://u:%zz@proxy:3128",
+	}
+	for name, in := range bad {
+		if _, err := ValidateBusProxyURL(in); err == nil {
+			t.Errorf("%s: ValidateBusProxyURL(%q) accepted", name, in)
+		}
+	}
+
+	// No error echoes the proxy password, whatever the reason.
+	for _, in := range []string{
+		"http://u:secretpw@proxy",
+		"ftp://u:secretpw@proxy:21",
+		"http://u:secretpw@proxy:3128/path",
+		"http://u:secretpw@pro xy:3128",
+		"http://u:secretpw%zz@proxy:3128",
+	} {
+		if _, err := ValidateBusProxyURL(in); err == nil || strings.Contains(err.Error(), "secretpw") {
+			t.Errorf("ValidateBusProxyURL(%q): error should not echo the password: %v", in, err)
+		}
+	}
+}
+
+func setBusProxyURL(t *testing.T, u string) {
+	t.Helper()
+	old := config.BusProxyURL
+	t.Cleanup(func() { config.BusProxyURL = old })
+	config.BusProxyURL = u
+}
+
+func TestLoadSproutBus_Proxy(t *testing.T) {
+	setupTestPKI(t)
+	setupSproutFiles(t)
+	config.SproutRootCA = config.RootCA
+	if err := os.WriteFile(config.SproutUserJWTFile, []byte("user.jwt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	busPort := envoytest.FreePort(t) // nothing listens there
+	config.BusURLs = []string{"tls://localhost:" + strconv.Itoa(busPort)}
+
+	setBusProxyURL(t, "ftp://proxy:21")
+	if _, err := LoadSproutBus(); err == nil || !strings.Contains(err.Error(), "busproxyurl") {
+		t.Fatalf("invalid busproxyurl: err = %v", err)
+	}
+
+	p := startTestProxy(t, "socks5", true)
+	setBusProxyURL(t, p.URL())
+	b, err := LoadSproutBus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Proxy != "socks5://"+p.ln.Addr().String() {
+		t.Errorf("Proxy = %q, want the proxy URL without credentials", b.Proxy)
+	}
+	o := appliedOptions(t, b)
+	if _, ok := o.CustomDialer.(*busProxyDialer); !ok || !o.SkipHostLookup {
+		t.Fatalf("CustomDialer %T, SkipHostLookup %v: want the proxy dialer and no local lookup", o.CustomDialer, o.SkipHostLookup)
+	}
+	if !o.Secure || o.TLSConfig == nil || o.TLSConfig.RootCAs == nil || !o.IgnoreDiscoveredServers {
+		t.Error("the proxy replaced the bus's TLS or discovery options instead of adding to them")
+	}
+
+	// The proxy is handed the bus hostname as configured, not addresses
+	// resolved on the sprout. (Nothing listens on busPort, so the
+	// proxy's own dial fails.)
+	if nc, err := b.Connect(nats.NoReconnect(), nats.Timeout(5*time.Second)); err == nil {
+		nc.Close()
+		t.Fatal("connected to a bus that isn't there")
+	} else if strings.Contains(err.Error(), p.pass) {
+		t.Errorf("connect error echoes the proxy password: %v", err)
+	}
+	if got, want := p.targets(), []string{"localhost:" + strconv.Itoa(busPort)}; !reflect.DeepEqual(got, want) {
+		t.Errorf("proxy asked for %q, want %q", got, want)
+	}
+}
+
+func TestBusProxyTimeout(t *testing.T) {
+	d := &busProxyDialer{proxy: &url.URL{Scheme: "http", Host: "proxy:3128"}}
+	o := nats.GetDefaultOptions()
+	for _, opt := range []nats.Option{nats.SetCustomDialer(d), nats.Timeout(7 * time.Second), busProxyTimeout} {
+		if err := opt(&o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, ok := o.CustomDialer.(*busProxyDialer)
+	if !ok || got.timeout != 7*time.Second {
+		t.Fatalf("dialer %#v: want the connection's 7s timeout", o.CustomDialer)
+	}
+	if d.timeout != 0 {
+		t.Error("busProxyTimeout modified the SproutBus's shared dialer")
+	}
+
+	// A caller's own dialer is left alone.
+	o.CustomDialer = &net.Dialer{}
+	if err := busProxyTimeout(&o); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := o.CustomDialer.(*net.Dialer); !ok {
+		t.Error("busProxyTimeout replaced a dialer that isn't the bus proxy's")
+	}
+}
+
+func TestBusProxyDialer_Rejected(t *testing.T) {
+	for _, scheme := range []string{"http", "socks5"} {
+		t.Run(scheme, func(t *testing.T) {
+			p := startTestProxy(t, scheme, true)
+			target := p.ln.Addr().String() // anything; the proxy refuses first
+			for name, user := range map[string]*url.Userinfo{
+				"no credentials": nil,
+				"wrong password": url.UserPassword(p.user, "wrongpw"),
+			} {
+				u := &url.URL{Scheme: scheme, Host: p.ln.Addr().String(), User: user}
+				d := &busProxyDialer{proxy: u, timeout: 5 * time.Second}
+				conn, err := d.Dial("tcp", target)
+				if err == nil {
+					conn.Close()
+					t.Errorf("%s: proxy accepted", name)
+					continue
+				}
+				if strings.Contains(err.Error(), "wrongpw") {
+					t.Errorf("%s: error echoes the password: %v", name, err)
+				}
+			}
+			if got := p.targets(); len(got) != 0 {
+				t.Errorf("proxy tunnelled to %q without valid credentials", got)
+			}
+
+			// Right credentials, but the proxy can't reach the target.
+			u := &url.URL{Scheme: scheme, Host: p.ln.Addr().String(), User: url.UserPassword(p.user, p.pass)}
+			d := &busProxyDialer{proxy: u, timeout: 5 * time.Second}
+			if conn, err := d.Dial("tcp", "127.0.0.1:"+strconv.Itoa(envoytest.FreePort(t))); err == nil {
+				conn.Close()
+				t.Error("dial to an unreachable target succeeded")
+			}
+		})
+	}
+}
+
+func TestBusProxyDialer_Timeout(t *testing.T) {
+	for _, scheme := range []string{"http", "socks5"} {
+		t.Run(scheme, func(t *testing.T) {
+			// A proxy that accepts and never answers.
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { ln.Close() })
+			go func() {
+				for {
+					c, err := ln.Accept()
+					if err != nil {
+						return
+					}
+					t.Cleanup(func() { c.Close() })
+				}
+			}()
+			d := &busProxyDialer{proxy: &url.URL{Scheme: scheme, Host: ln.Addr().String()}, timeout: 200 * time.Millisecond}
+			start := time.Now()
+			if conn, err := d.Dial("tcp", "bus:4222"); err == nil {
+				conn.Close()
+				t.Fatal("dial through a silent proxy succeeded")
+			}
+			if elapsed := time.Since(start); elapsed > 3*time.Second {
+				t.Errorf("dial took %v, want about the 200ms timeout", elapsed)
+			}
+		})
+	}
+}
+
+// A tls:// or nats:// bus sends INFO before the client says anything, so
+// its first bytes can arrive in the same read as the proxy's CONNECT
+// response; they must not be lost.
+func TestBusProxyDialer_HTTPKeepsBytesAfterResponse(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		if _, err := http.ReadRequest(bufio.NewReader(c)); err != nil {
+			return
+		}
+		c.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\nINFO {}\r\n"))
+		io.Copy(io.Discard, c)
+	}()
+	d := &busProxyDialer{proxy: &url.URL{Scheme: "http", Host: ln.Addr().String()}, timeout: 5 * time.Second}
+	conn, err := d.Dial("tcp", "bus:4222")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil || got != "INFO {}\r\n" {
+		t.Fatalf("first read through the tunnel: %q, %v", got, err)
+	}
+}
+
+// testProxy is a minimal in-process HTTP CONNECT or SOCKS5 (RFC 1928,
+// with RFC 1929 username/password when auth is set) proxy that records
+// the target of each tunnel it opens.
+type testProxy struct {
+	ln         net.Listener
+	scheme     string
+	user, pass string
+
+	mu   sync.Mutex
+	seen []string
+}
+
+func startTestProxy(t *testing.T, scheme string, auth bool) *testProxy {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &testProxy{ln: ln, scheme: scheme}
+	if auth {
+		p.user, p.pass = "sprout", "pr0xy-secret"
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go p.serve(c)
+		}
+	}()
+	return p
+}
+
+// URL is the proxy's busproxyurl, with its credentials if it wants them.
+func (p *testProxy) URL() string {
+	u := url.URL{Scheme: p.scheme, Host: p.ln.Addr().String()}
+	if p.user != "" {
+		u.User = url.UserPassword(p.user, p.pass)
+	}
+	return u.String()
+}
+
+func (p *testProxy) targets() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.seen...)
+}
+
+func (p *testProxy) serve(c net.Conn) {
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(10 * time.Second))
+	br := bufio.NewReader(c)
+	var up net.Conn
+	if p.scheme == "http" {
+		up = p.handshakeHTTP(c, br)
+	} else {
+		up = p.handshakeSOCKS5(c, br)
+	}
+	if up == nil {
+		return
+	}
+	defer up.Close()
+	c.SetDeadline(time.Time{})
+	go func() {
+		io.Copy(up, br)
+		up.Close()
+	}()
+	io.Copy(c, up)
+}
+
+func (p *testProxy) dialTarget(target string) net.Conn {
+	p.mu.Lock()
+	p.seen = append(p.seen, target)
+	p.mu.Unlock()
+	up, err := net.DialTimeout("tcp", target, 5*time.Second)
+	if err != nil {
+		return nil
+	}
+	return up
+}
+
+func (p *testProxy) handshakeHTTP(c net.Conn, br *bufio.Reader) net.Conn {
+	req, err := http.ReadRequest(br)
+	if err != nil || req.Method != http.MethodConnect {
+		return nil
+	}
+	if p.user != "" {
+		want := "Basic " + base64.StdEncoding.EncodeToString([]byte(p.user+":"+p.pass))
+		if req.Header.Get("Proxy-Authorization") != want {
+			io.WriteString(c, "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic\r\nContent-Length: 0\r\n\r\n")
+			return nil
+		}
+	}
+	up := p.dialTarget(req.Host)
+	if up == nil {
+		io.WriteString(c, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+		return nil
+	}
+	io.WriteString(c, "HTTP/1.1 200 Connection established\r\n\r\n")
+	return up
+}
+
+func (p *testProxy) handshakeSOCKS5(c net.Conn, br *bufio.Reader) net.Conn {
+	readN := func(n int) []byte {
+		b := make([]byte, n)
+		if _, err := io.ReadFull(br, b); err != nil {
+			return nil
+		}
+		return b
+	}
+	hdr := readN(2)
+	if hdr == nil || hdr[0] != 5 {
+		return nil
+	}
+	methods := readN(int(hdr[1]))
+	method := byte(0x00)
+	if p.user != "" {
+		method = 0x02
+	}
+	if !bytes.Contains(methods, []byte{method}) {
+		c.Write([]byte{5, 0xff})
+		return nil
+	}
+	c.Write([]byte{5, method})
+	if method == 0x02 {
+		v := readN(2)
+		if v == nil || v[0] != 1 {
+			return nil
+		}
+		user := readN(int(v[1]))
+		plen := readN(1)
+		if user == nil || plen == nil {
+			return nil
+		}
+		pass := readN(int(plen[0]))
+		if string(user) != p.user || string(pass) != p.pass {
+			c.Write([]byte{1, 1})
+			return nil
+		}
+		c.Write([]byte{1, 0})
+	}
+	req := readN(4)
+	if req == nil || req[0] != 5 || req[1] != 1 { // CONNECT only
+		return nil
+	}
+	var host string
+	switch req[3] {
+	case 1:
+		host = net.IP(readN(4)).String()
+	case 3:
+		l := readN(1)
+		if l == nil {
+			return nil
+		}
+		host = string(readN(int(l[0])))
+	case 4:
+		host = net.IP(readN(16)).String()
+	default:
+		return nil
+	}
+	port := readN(2)
+	if port == nil {
+		return nil
+	}
+	up := p.dialTarget(net.JoinHostPort(host, strconv.Itoa(int(binary.BigEndian.Uint16(port)))))
+	if up == nil {
+		c.Write([]byte{5, 5, 0, 1, 0, 0, 0, 0, 0, 0}) // connection refused
+		return nil
+	}
+	c.Write([]byte{5, 0, 0, 1, 0, 0, 0, 0, 0, 0})
+	return up
 }
