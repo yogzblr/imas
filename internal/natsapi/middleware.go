@@ -47,6 +47,8 @@ var natsActionMap = map[string]rbac.Action{
 	MethodPKIDelete:       rbac.ActionPKI,
 	MethodPKIRotateBoxKey: rbac.ActionPKI,
 
+	MethodPKIRotateTenantBoxKey: rbac.ActionPKI,
+
 	// Auth
 	MethodAuthLogin:      rbac.ActionUserRead,
 	MethodAuthWhoAmI:     rbac.ActionUserRead,

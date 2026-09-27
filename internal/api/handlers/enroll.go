@@ -68,6 +68,12 @@ type enrollRequest struct {
 // sprout's very first update if it has never yet completed a live fetch,
 // and is superseded permanently by the first live fetch that succeeds
 // (internal/ingredients/selfupdate, keys.go).
+//
+// tenant_x25519_continuity, present only after the tenant's X25519 key
+// has been rotated, is pki.TenantKeyContinuity's proof (sealed to the
+// sprout's box key under the tenant keys it may have pinned before) that
+// tenant_x25519_pub succeeds them; a sprout re-enrolling with an older
+// key pinned verifies it and re-pins. Older sprouts ignore it.
 type enrollSuccessResponse struct {
 	SproutID         string          `json:"sprout_id"`
 	JWT              string          `json:"jwt"`
@@ -76,6 +82,8 @@ type enrollSuccessResponse struct {
 	TenantX25519Pub  string          `json:"tenant_x25519_pub"`
 	FleetSigningJWKS json.RawMessage `json:"fleet_signing_jwks"`
 	NatsURLs         []string        `json:"nats_urls"`
+
+	TenantX25519Continuity json.RawMessage `json:"tenant_x25519_continuity,omitempty"`
 }
 
 // enrollErrorResponse is design doc §3.4's single generic failure shape.
@@ -137,6 +145,8 @@ func Enroll(w http.ResponseWriter, r *http.Request) {
 		TenantX25519Pub:  result.TenantX25519Pub,
 		FleetSigningJWKS: fleetJWKS,
 		NatsURLs:         enrollBusURLs(),
+
+		TenantX25519Continuity: result.TenantX25519Continuity,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

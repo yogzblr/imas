@@ -1,182 +1,194 @@
 package pki
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+	"errors"
 	"sync"
 	"testing"
+	"time"
+
+	"golang.org/x/crypto/nacl/box"
+
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/payloadbox"
+	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 )
 
-// mockKVv2Server serves the subset of OpenBao/Vault KV v2's HTTP API
-// tenantbox.go's obKVClient uses: GET/PUT <mount>/data/<path>, including
-// PUT's check-and-set semantics (cas: 0 means "only create, fail if a
-// version already exists") — mirroring the real API as documented, not
-// this package's own encoding of it, so obKVClient's HTTP client code is
-// exercised for real. See internal/gatewayjwt/mint_test.go's
-// mockTransitServer for the same pattern applied to Transit.
-type mockKVv2Server struct {
-	t       *testing.T
-	mount   string
-	path    string
-	token   string
-	writeMu sync.Mutex
-
-	data    map[string]string // nil until first successful write
-	version int
-	casHits int // number of PUTs rejected by the cas guard
-}
-
-func newMockKVv2Server(t *testing.T) *mockKVv2Server {
+// setupTenantBoxOpenBao points the package at a mock OpenBao KV v2
+// server for the duration of the test, and clears the in-process key
+// cache both before and after (so cache state never leaks between tests).
+func setupTenantBoxOpenBao(t *testing.T) *tenantboxtest.Server {
 	t.Helper()
-	return &mockKVv2Server{t: t, mount: "secret", path: "imas/tenant-x25519", token: "test-token"}
-}
-
-func (m *mockKVv2Server) start() *httptest.Server {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/"+m.mount+"/data/"+m.path, m.handleData)
-	return httptest.NewServer(mux)
-}
-
-func (m *mockKVv2Server) handleData(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("X-Vault-Token") != m.token {
-		w.WriteHeader(http.StatusForbidden)
-		return
-	}
-	switch r.Method {
-	case http.MethodGet:
-		m.handleGet(w)
-	case http.MethodPut:
-		m.handlePut(w, r)
-	default:
-		w.WriteHeader(http.StatusMethodNotAllowed)
-	}
-}
-
-func (m *mockKVv2Server) handleGet(w http.ResponseWriter) {
-	m.writeMu.Lock()
-	defer m.writeMu.Unlock()
-	if m.data == nil {
-		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]any{"errors": []string{}})
-		return
-	}
-	resp := map[string]any{
-		"data": map[string]any{
-			"data": m.data,
-		},
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-}
-
-func (m *mockKVv2Server) handlePut(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Options struct {
-			Cas *int `json:"cas"`
-		} `json:"options"`
-		Data map[string]string `json:"data"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	m.writeMu.Lock()
-	defer m.writeMu.Unlock()
-
-	if req.Options.Cas != nil && *req.Options.Cas == 0 && m.data != nil {
-		m.casHits++
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]any{"errors": []string{"check-and-set parameter did not match the current version"}})
-		return
-	}
-	m.data = req.Data
-	m.version++
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"version": m.version}})
-}
-
-// setupTenantBoxOpenBao points the package at a mock OpenBao KV v2 server
-// for the duration of the test, and clears the in-process keypair cache
-// both before and after (so cache state never leaks between tests).
-func setupTenantBoxOpenBao(t *testing.T, srv *mockKVv2Server) *httptest.Server {
-	t.Helper()
-	ts := srv.start()
-	t.Cleanup(ts.Close)
-	t.Setenv(EnvTenantBoxOpenBaoAddr, ts.URL)
-	t.Setenv(EnvTenantBoxOpenBaoKVMount, srv.mount)
-	t.Setenv(EnvTenantBoxOpenBaoKVPath, srv.path)
-	t.Setenv(EnvTenantBoxOpenBaoAuthMethod, TenantBoxAuthMethodToken)
-	t.Setenv(EnvTenantBoxOpenBaoToken, srv.token)
+	srv := tenantboxtest.Start(t)
 	resetTenantX25519KeypairCache()
 	t.Cleanup(resetTenantX25519KeypairCache)
-	return ts
+	return srv
 }
+
+// withTenantBoxGrace sets the config values tenantBoxGrace derives from.
+func withTenantBoxGrace(t *testing.T, d time.Duration) {
+	t.Helper()
+	origBox, origTTL := config.BoxKeyGraceDuration, config.GatewayJWTTTL
+	config.BoxKeyGraceDuration, config.GatewayJWTTTL = d, 0
+	t.Cleanup(func() { config.BoxKeyGraceDuration, config.GatewayJWTTTL = origBox, origTTL })
+}
+
+// stubTenantHasSproutBoxKeys replaces the adoption check's store lookup.
+func stubTenantHasSproutBoxKeys(t *testing.T, fn func(string) (bool, error)) {
+	t.Helper()
+	orig := tenantHasSproutBoxKeys
+	tenantHasSproutBoxKeys = fn
+	t.Cleanup(func() { tenantHasSproutBoxKeys = orig })
+}
+
+func noEnrolledSprouts(string) (bool, error) { return false, nil }
+
+func b64(k *[32]byte) string { return base64.StdEncoding.EncodeToString(k[:]) }
 
 func TestGetTenantX25519PublicKey_NotConfigured(t *testing.T) {
 	t.Setenv(EnvTenantBoxOpenBaoAddr, "")
 	resetTenantX25519KeypairCache()
 	t.Cleanup(resetTenantX25519KeypairCache)
 
-	if _, err := GetTenantX25519PublicKey(); err == nil {
-		t.Fatal("expected an error when OpenBao is not configured")
+	if _, err := GetTenantX25519PublicKey("t_1"); !errors.Is(err, ErrTenantBoxNotConfigured) {
+		t.Fatalf("expected ErrTenantBoxNotConfigured, got %v", err)
 	}
 }
 
-func TestGetTenantX25519PublicKey_GeneratesAndPersists(t *testing.T) {
-	srv := newMockKVv2Server(t)
-	setupTenantBoxOpenBao(t, srv)
+func TestGetTenantX25519PublicKey_RejectsInvalidTenantID(t *testing.T) {
+	setupTenantBoxOpenBao(t)
+	for _, id := range []string{"", "../other", "a/b", "t.1"} {
+		if _, err := GetTenantX25519PublicKey(id); err == nil {
+			t.Errorf("tenant id %q accepted", id)
+		}
+	}
+}
 
-	pub1, err := GetTenantX25519PublicKey()
+func TestGetTenantX25519PublicKey_GeneratesAndPersistsPerTenant(t *testing.T) {
+	srv := setupTenantBoxOpenBao(t)
+	stubTenantHasSproutBoxKeys(t, noEnrolledSprouts)
+
+	pubA, err := GetTenantX25519PublicKey("t_a")
 	if err != nil {
-		t.Fatalf("GetTenantX25519PublicKey: %v", err)
+		t.Fatalf("GetTenantX25519PublicKey(t_a): %v", err)
 	}
-	if pub1 == "" {
-		t.Fatal("expected non-empty public key")
+	pubB, err := GetTenantX25519PublicKey("t_b")
+	if err != nil {
+		t.Fatalf("GetTenantX25519PublicKey(t_b): %v", err)
 	}
-	if srv.data == nil {
-		t.Fatal("expected the keypair to be persisted to OpenBao")
+	if pubA == pubB {
+		t.Fatal("two tenants were given the same keypair")
+	}
+	for tenant, pub := range map[string]string{"t_a": pubA, "t_b": pubB} {
+		vs := srv.Versions(tenantboxtest.TenantPath(tenant))
+		if len(vs) != 1 || vs[0].Data["pub"] != pub || vs[0].Data["origin"] != tenantBoxOriginGenerated {
+			t.Errorf("tenant %s stored %+v, want one generated version with pub %s", tenant, vs, pub)
+		}
+	}
+	if len(srv.Versions(tenantboxtest.BasePath)) != 0 {
+		t.Error("the legacy path was written")
 	}
 
-	// A second call, with the cache cleared, must load the same keypair
-	// back from OpenBao rather than generating a new one.
+	// With the cache cleared, the same keypair is read back, not
+	// regenerated.
 	resetTenantX25519KeypairCache()
-	pub2, err := GetTenantX25519PublicKey()
-	if err != nil {
-		t.Fatalf("GetTenantX25519PublicKey (reload): %v", err)
-	}
-	if pub1 != pub2 {
-		t.Errorf("expected stable public key across reload, got %q then %q", pub1, pub2)
+	again, err := GetTenantX25519PublicKey("t_a")
+	if err != nil || again != pubA {
+		t.Errorf("reload returned %q, %v; want %q", again, err, pubA)
 	}
 }
 
-func TestGetTenantX25519PublicKey_CachedWithoutOpenBaoRoundtrip(t *testing.T) {
-	srv := newMockKVv2Server(t)
-	ts := setupTenantBoxOpenBao(t, srv)
+// A tenant whose sprouts enrolled against the one-per-deployment keypair
+// keeps it (adopted into its own secret); a tenant without any gets its
+// own.
+func TestGetTenantX25519PublicKey_AdoptsLegacyOnlyForTenantsWithSprouts(t *testing.T) {
+	srv := setupTenantBoxOpenBao(t)
+	legacyPub, _ := srv.SeedKeypair(t, tenantboxtest.BasePath, nil)
+	stubTenantHasSproutBoxKeys(t, func(id string) (bool, error) { return id == "t_old", nil })
 
-	pub1, err := GetTenantX25519PublicKey()
+	old, err := GetTenantX25519PublicKey("t_old")
 	if err != nil {
-		t.Fatalf("GetTenantX25519PublicKey: %v", err)
+		t.Fatal(err)
+	}
+	if old != b64(legacyPub) {
+		t.Errorf("tenant with enrolled sprouts got %s, want the legacy key %s", old, b64(legacyPub))
+	}
+	if got := srv.Versions(tenantboxtest.TenantPath("t_old"))[0].Data["origin"]; got != tenantBoxOriginAdoptedLegacy {
+		t.Errorf("origin %q, want %q", got, tenantBoxOriginAdoptedLegacy)
+	}
+	fresh, err := GetTenantX25519PublicKey("t_new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh == b64(legacyPub) {
+		t.Error("tenant without sprouts adopted the shared legacy key")
+	}
+}
+
+func TestGetTenantX25519PublicKey_AdoptionCheckFailureFailsClosed(t *testing.T) {
+	srv := setupTenantBoxOpenBao(t)
+	srv.SeedKeypair(t, tenantboxtest.BasePath, nil)
+	stubTenantHasSproutBoxKeys(t, func(string) (bool, error) { return false, errors.New("db down") })
+
+	if _, err := GetTenantX25519PublicKey("t_1"); err == nil {
+		t.Fatal("expected an error when the adoption check can't run")
+	}
+	if len(srv.Versions(tenantboxtest.TenantPath("t_1"))) != 0 {
+		t.Error("a keypair was written despite the failed adoption check")
+	}
+}
+
+// The real store lookup: a tenant counts as having sprouts once one of
+// them has a box key row, and only that tenant.
+func TestTenantHasSproutBoxKeys(t *testing.T) {
+	setupTestPKI(t)
+	if err := RotateSproutBoxKey("t_a", "web-01", testEnrollBoxPub(t), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	for tenant, want := range map[string]bool{"t_a": true, "t_b": false} {
+		got, err := tenantHasSproutBoxKeys(tenant)
+		if err != nil || got != want {
+			t.Errorf("tenantHasSproutBoxKeys(%s) = %v, %v; want %v", tenant, got, err, want)
+		}
+	}
+}
+
+func TestLoadTenantKeySet_CacheAndStaleLimit(t *testing.T) {
+	srv := setupTenantBoxOpenBao(t)
+	stubTenantHasSproutBoxKeys(t, noEnrolledSprouts)
+
+	pub1, err := GetTenantX25519PublicKey("t_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reads := srv.Reads
+	if _, err := GetTenantX25519PublicKey("t_1"); err != nil {
+		t.Fatal(err)
+	}
+	if srv.Reads != reads {
+		t.Error("a cached call went back to OpenBao")
 	}
 
-	// Close the server without clearing the in-process cache: a cached
-	// call must still succeed and return the same key.
-	ts.Close()
-
-	pub2, err := GetTenantX25519PublicKey()
-	if err != nil {
-		t.Fatalf("GetTenantX25519PublicKey (cached): %v", err)
+	srv.Close()
+	// Past the TTL but inside the stale limit, the cached set is served.
+	origTTL, origStale := tenantBoxCacheTTL, tenantBoxStaleLimit
+	t.Cleanup(func() { tenantBoxCacheTTL, tenantBoxStaleLimit = origTTL, origStale })
+	tenantBoxCacheTTL = 0
+	if pub2, err := GetTenantX25519PublicKey("t_1"); err != nil || pub2 != pub1 {
+		t.Fatalf("stale-but-usable cache: %q, %v", pub2, err)
 	}
-	if pub1 != pub2 {
-		t.Errorf("expected cached call to return the same key, got %q then %q", pub1, pub2)
+	// Past the stale limit, OpenBao being down is an error.
+	tenantBoxStaleLimit = 0
+	if _, err := GetTenantX25519PublicKey("t_1"); err == nil {
+		t.Fatal("expected an error once the cached set is past the stale limit")
 	}
 }
 
 func TestGetTenantX25519PublicKey_ConcurrentBootstrapAgreesOnOneKey(t *testing.T) {
-	srv := newMockKVv2Server(t)
-	setupTenantBoxOpenBao(t, srv)
+	setupTenantBoxOpenBao(t)
+	stubTenantHasSproutBoxKeys(t, noEnrolledSprouts)
 
 	const n = 8
 	results := make([]string, n)
@@ -186,12 +198,22 @@ func TestGetTenantX25519PublicKey_ConcurrentBootstrapAgreesOnOneKey(t *testing.T
 	for i := range n {
 		go func(i int) {
 			defer wg.Done()
-			resetKeypairCacheRacy() // simulate n separate processes: no shared in-process cache
-			results[i], errs[i] = GetTenantX25519PublicKey()
+			// Simulate n separate processes: no shared in-process cache,
+			// so each goes through OpenBao's check-and-set create.
+			client, err := newTenantBoxClientFromEnv()
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			set, err := client.ensureTenantKeySet(t.Context(), "t_1")
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			results[i] = b64(set.current.pub)
 		}(i)
 	}
 	wg.Wait()
-
 	for i, err := range errs {
 		if err != nil {
 			t.Fatalf("goroutine %d: %v", i, err)
@@ -199,117 +221,214 @@ func TestGetTenantX25519PublicKey_ConcurrentBootstrapAgreesOnOneKey(t *testing.T
 	}
 	for i := 1; i < n; i++ {
 		if results[i] != results[0] {
-			t.Errorf("expected every concurrent bootstrap to agree on one key, got %q and %q", results[0], results[i])
+			t.Errorf("concurrent bootstraps disagreed: %q and %q", results[0], results[i])
 		}
 	}
 }
 
-// resetKeypairCacheRacy clears the cache without the mutex a real
-// concurrent-process scenario wouldn't share either — used only to force
-// TestGetTenantX25519PublicKey_ConcurrentBootstrapAgreesOnOneKey's
-// goroutines through the OpenBao create-race path instead of just hitting
-// the in-process cache after the first winner populates it.
-func resetKeypairCacheRacy() {
-	tenantBoxMu.Lock()
-	tenantBoxPub, tenantBoxPriv = nil, nil
-	tenantBoxMu.Unlock()
-}
-
 func TestGetTenantX25519PublicKey_CorruptStoredDataErrors(t *testing.T) {
-	srv := newMockKVv2Server(t)
-	setupTenantBoxOpenBao(t, srv)
-	srv.data = map[string]string{"pub": "not-valid-base64!!", "priv": "also-not-valid!!"}
-	srv.version = 1
-
-	if _, err := GetTenantX25519PublicKey(); err == nil {
-		t.Fatal("expected an error for corrupt stored key material")
+	pub, priv, _ := box.GenerateKey(rand.Reader)
+	otherPub, _, _ := box.GenerateKey(rand.Reader)
+	for name, data := range map[string]map[string]string{
+		"bad encoding":       {"pub": "not-valid-base64!!", "priv": "also-not-valid!!"},
+		"missing priv":       {"pub": b64(pub)},
+		"pub not priv's own": {"pub": b64(otherPub), "priv": b64(priv)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := setupTenantBoxOpenBao(t)
+			srv.Put(tenantboxtest.TenantPath("t_1"), data)
+			if _, err := GetTenantX25519PublicKey("t_1"); !errors.Is(err, ErrTenantBoxReadFailed) {
+				t.Fatalf("expected ErrTenantBoxReadFailed, got %v", err)
+			}
+		})
 	}
 }
 
-func TestGetTenantX25519PublicKey_MissingFieldsErrors(t *testing.T) {
-	srv := newMockKVv2Server(t)
-	setupTenantBoxOpenBao(t, srv)
-	srv.data = map[string]string{"pub": "onlyPubHere"}
-	srv.version = 1
-
-	if _, err := GetTenantX25519PublicKey(); err == nil {
-		t.Fatal("expected an error when the stored secret is missing priv")
-	}
-}
-
-// TestObKVClient_WriteKeypairIfAbsent_CASGuardRejectsSecondCreate exercises
-// the check-and-set race-safety obKVClient.writeKeypairIfAbsent relies on
-// directly, deterministically rather than via goroutine timing: a second
-// cas:0 write against a path that already has data must be rejected
-// (created=false, no error), and a subsequent read must return the first
-// write's keypair, not the second's.
-func TestObKVClient_WriteKeypairIfAbsent_CASGuardRejectsSecondCreate(t *testing.T) {
-	srv := newMockKVv2Server(t)
-	ts := srv.start()
-	t.Cleanup(ts.Close)
-	t.Setenv(EnvTenantBoxOpenBaoAddr, ts.URL)
-	t.Setenv(EnvTenantBoxOpenBaoKVMount, srv.mount)
-	t.Setenv(EnvTenantBoxOpenBaoKVPath, srv.path)
-	t.Setenv(EnvTenantBoxOpenBaoAuthMethod, TenantBoxAuthMethodToken)
-	t.Setenv(EnvTenantBoxOpenBaoToken, srv.token)
-
+func TestWriteKeypair_CASGuard(t *testing.T) {
+	srv := setupTenantBoxOpenBao(t)
 	client, err := newTenantBoxClientFromEnv()
 	if err != nil {
-		t.Fatalf("newTenantBoxClientFromEnv: %v", err)
+		t.Fatal(err)
 	}
-	ctx := t.Context()
+	path := client.tenantPath("t_1")
+	pub1, priv1, _ := box.GenerateKey(rand.Reader)
+	pub2, priv2, _ := box.GenerateKey(rand.Reader)
 
-	var pub1, priv1, pub2, priv2 [32]byte
-	pub1[0], priv1[0] = 1, 1
-	pub2[0], priv2[0] = 2, 2
-
-	created, err := client.writeKeypairIfAbsent(ctx, &pub1, &priv1)
-	if err != nil {
-		t.Fatalf("first write: %v", err)
+	if ok, err := client.writeKeypair(t.Context(), path, pub1, priv1, 0, nil); err != nil || !ok {
+		t.Fatalf("first create: %v, %v", ok, err)
 	}
-	if !created {
-		t.Fatal("expected the first write to succeed")
+	if ok, err := client.writeKeypair(t.Context(), path, pub2, priv2, 0, nil); err != nil || ok {
+		t.Fatalf("second create: %v, %v; want rejected", ok, err)
 	}
-
-	created, err = client.writeKeypairIfAbsent(ctx, &pub2, &priv2)
-	if err != nil {
-		t.Fatalf("second write: %v", err)
+	// A rotation that read version 0 (stale) is rejected too.
+	if ok, _ := client.writeKeypair(t.Context(), path, pub2, priv2, 0, nil); ok {
+		t.Fatal("stale rotation written")
 	}
-	if created {
-		t.Fatal("expected the second cas:0 write to be rejected")
+	if srv.CASRejects != 2 {
+		t.Errorf("CASRejects = %d, want 2", srv.CASRejects)
 	}
-	if srv.casHits != 1 {
-		t.Errorf("expected exactly 1 cas rejection, got %d", srv.casHits)
-	}
-
-	gotPub, gotPriv, found, err := client.readKeypair(ctx)
-	if err != nil {
-		t.Fatalf("readKeypair: %v", err)
-	}
-	if !found {
-		t.Fatal("expected a keypair to be found")
-	}
-	if *gotPub != pub1 || *gotPriv != priv1 {
-		t.Error("expected the read-back keypair to be the first write's, not the second's")
+	got, found, err := client.readKeypair(t.Context(), path, 0)
+	if err != nil || !found || *got.pub != *pub1 || got.version != 1 {
+		t.Errorf("read back %+v, %v, %v; want version 1 of the first write", got, found, err)
 	}
 }
 
-func TestGetTenantX25519KeyPair_MatchesPublicKey(t *testing.T) {
-	srv := newMockKVv2Server(t)
-	setupTenantBoxOpenBao(t, srv)
+// openContinuity opens a continuity proof the way a sprout pinned to
+// pinnedTenantPub would, and returns the key it names.
+func openContinuity(t *testing.T, proof []byte, pinnedTenantPub, sproutPriv *[32]byte, sproutID string) (string, error) {
+	t.Helper()
+	msg, err := payloadbox.Open(proof, []payloadbox.KeyPair{{PeerPub: pinnedTenantPub, Priv: sproutPriv}},
+		payloadbox.Expect{Purpose: payloadbox.PurposeTenantKeyContinuity, SproutID: sproutID})
+	if err != nil {
+		return "", err
+	}
+	var body tenantKeyContinuityBody
+	if err := json.Unmarshal(msg.Body, &body); err != nil {
+		return "", err
+	}
+	return body.To, nil
+}
 
-	pubB64, err := GetTenantX25519PublicKey()
+func TestRotateTenantX25519Keypair_GraceAndContinuity(t *testing.T) {
+	srv := setupTenantBoxOpenBao(t)
+	stubTenantHasSproutBoxKeys(t, noEnrolledSprouts)
+	withTenantBoxGrace(t, time.Hour)
+	sproutPub, sproutPriv, _ := box.GenerateKey(rand.Reader)
+
+	v1, err := GetTenantX25519PublicKey("t_1")
 	if err != nil {
-		t.Fatalf("GetTenantX25519PublicKey: %v", err)
+		t.Fatal(err)
 	}
-	pub, priv, err := GetTenantX25519KeyPair()
+	if proof, err := TenantKeyContinuity("t_1", "web-01", b64(sproutPub)); err != nil || proof != nil {
+		t.Fatalf("continuity before any rotation: %s, %v; want none", proof, err)
+	}
+
+	rot, err := RotateTenantX25519Keypair("t_1", false)
 	if err != nil {
-		t.Fatalf("GetTenantX25519KeyPair: %v", err)
+		t.Fatalf("RotateTenantX25519Keypair: %v", err)
 	}
-	if priv == nil {
-		t.Fatal("expected a non-nil private key")
+	if rot.PreviousVersion != 1 || rot.Version != 2 || rot.Pub == v1 || rot.Severed {
+		t.Errorf("rotation result %+v", rot)
 	}
-	if got := base64.StdEncoding.EncodeToString(pub[:]); got != pubB64 {
-		t.Errorf("expected GetTenantX25519KeyPair's pub to match GetTenantX25519PublicKey, got %q vs %q", got, pubB64)
+	if cur, _ := GetTenantX25519PublicKey("t_1"); cur != rot.Pub {
+		t.Errorf("current key after rotation is %s, want %s (cache not dropped?)", cur, rot.Pub)
+	}
+
+	// Inside the grace window, both keys seal and open.
+	keys, err := TenantBoxKeys("t_1")
+	if err != nil || len(keys) != 2 || b64(keys[0].Pub) != rot.Pub || b64(keys[1].Pub) != v1 {
+		t.Fatalf("TenantBoxKeys in grace = %+v, %v; want [v2, v1]", keys, err)
+	}
+
+	// A sprout pinned to v1 opens the proof with v1 and learns v2; one
+	// pinned to v2 (or anything else) can't open it.
+	proof, err := TenantKeyContinuity("t_1", "web-01", b64(sproutPub))
+	if err != nil || proof == nil {
+		t.Fatalf("TenantKeyContinuity: %s, %v", proof, err)
+	}
+	v1Pub, _ := DecodeBoxPubKey(v1)
+	if to, err := openContinuity(t, proof, v1Pub, sproutPriv, "web-01"); err != nil || to != rot.Pub {
+		t.Errorf("proof opened under v1 says %q, %v; want %q", to, err, rot.Pub)
+	}
+	v2Pub, _ := DecodeBoxPubKey(rot.Pub)
+	if _, err := openContinuity(t, proof, v2Pub, sproutPriv, "web-01"); err == nil {
+		t.Error("proof opened under the new key it names")
+	}
+	if _, err := openContinuity(t, proof, v1Pub, sproutPriv, "web-02"); err == nil {
+		t.Error("proof opened for another sprout id")
+	}
+
+	// Past the grace window, only the current key seals and opens, but
+	// v1 still signs continuity (for sprouts that were offline).
+	srv.SetCreated(tenantboxtest.TenantPath("t_1"), 2, time.Now().Add(-2*time.Hour))
+	resetTenantX25519KeypairCache()
+	keys, err = TenantBoxKeys("t_1")
+	if err != nil || len(keys) != 1 || b64(keys[0].Pub) != rot.Pub {
+		t.Fatalf("TenantBoxKeys after grace = %+v, %v; want [v2]", keys, err)
+	}
+	proof, _ = TenantKeyContinuity("t_1", "web-01", b64(sproutPub))
+	if to, err := openContinuity(t, proof, v1Pub, sproutPriv, "web-01"); err != nil || to != rot.Pub {
+		t.Errorf("continuity from v1 after grace: %q, %v", to, err)
+	}
+}
+
+func TestRotateTenantX25519Keypair_SeverCutsGraceAndContinuity(t *testing.T) {
+	srv := setupTenantBoxOpenBao(t)
+	stubTenantHasSproutBoxKeys(t, noEnrolledSprouts)
+	withTenantBoxGrace(t, time.Hour)
+	sproutPub, sproutPriv, _ := box.GenerateKey(rand.Reader)
+
+	v1, _ := GetTenantX25519PublicKey("t_1")
+	severed, err := RotateTenantX25519Keypair("t_1", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srv.Versions(tenantboxtest.TenantPath("t_1"))[1].Data["severed"] != "true" {
+		t.Error("severing rotation didn't mark its version")
+	}
+	keys, _ := TenantBoxKeys("t_1")
+	if len(keys) != 1 || b64(keys[0].Pub) != severed.Pub {
+		t.Errorf("TenantBoxKeys after sever = %+v, want only the new key", keys)
+	}
+	if proof, err := TenantKeyContinuity("t_1", "web-01", b64(sproutPub)); err != nil || proof != nil {
+		t.Errorf("continuity after sever: %s, %v; want none", proof, err)
+	}
+
+	// A later ordinary rotation continues from the severed version, but
+	// never from before it.
+	v3, err := RotateTenantX25519Keypair("t_1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, _ := TenantKeyContinuity("t_1", "web-01", b64(sproutPub))
+	v2Pub, _ := DecodeBoxPubKey(severed.Pub)
+	if to, err := openContinuity(t, proof, v2Pub, sproutPriv, "web-01"); err != nil || to != v3.Pub {
+		t.Errorf("continuity from the severed version: %q, %v", to, err)
+	}
+	v1Pub, _ := DecodeBoxPubKey(v1)
+	if _, err := openContinuity(t, proof, v1Pub, sproutPriv, "web-01"); err == nil {
+		t.Error("continuity reached back past a severing rotation")
+	}
+}
+
+// Deleting a version in OpenBao retires it: no continuity from it.
+func TestTenantKeyContinuity_SkipsDeletedVersions(t *testing.T) {
+	srv := setupTenantBoxOpenBao(t)
+	stubTenantHasSproutBoxKeys(t, noEnrolledSprouts)
+	sproutPub, sproutPriv, _ := box.GenerateKey(rand.Reader)
+
+	v1, _ := GetTenantX25519PublicKey("t_1")
+	v2, _ := RotateTenantX25519Keypair("t_1", false)
+	v3, _ := RotateTenantX25519Keypair("t_1", false)
+	srv.Delete(tenantboxtest.TenantPath("t_1"), 2)
+	resetTenantX25519KeypairCache()
+
+	proof, err := TenantKeyContinuity("t_1", "web-01", b64(sproutPub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1Pub, _ := DecodeBoxPubKey(v1)
+	if to, err := openContinuity(t, proof, v1Pub, sproutPriv, "web-01"); err != nil || to != v3.Pub {
+		t.Errorf("continuity from v1 past a deleted v2: %q, %v", to, err)
+	}
+	v2Pub, _ := DecodeBoxPubKey(v2.Pub)
+	if _, err := openContinuity(t, proof, v2Pub, sproutPriv, "web-01"); err == nil {
+		t.Error("continuity from a deleted version")
+	}
+}
+
+func TestRotateTenantX25519Keypair_Isolated(t *testing.T) {
+	setupTenantBoxOpenBao(t)
+	stubTenantHasSproutBoxKeys(t, noEnrolledSprouts)
+	a1, _ := GetTenantX25519PublicKey("t_a")
+	b1, _ := GetTenantX25519PublicKey("t_b")
+	if _, err := RotateTenantX25519Keypair("t_a", false); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := GetTenantX25519PublicKey("t_b"); b != b1 {
+		t.Error("rotating one tenant changed another's key")
+	}
+	if a, _ := GetTenantX25519PublicKey("t_a"); a == a1 {
+		t.Error("rotation didn't change the rotated tenant's key")
 	}
 }

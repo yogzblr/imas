@@ -3,7 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -67,20 +67,13 @@ var envMutex sync.Mutex
 // FRun runs a command on target's sprout, over tenantID's dedicated NATS
 // connection (see RegisterFarmerNatsConn) — the sprout's own tenant, not
 // necessarily whichever tenant happens to be "current" for the process.
+// The request and its reply are sealed (sealed.go).
 func FRun(tenantID string, target pki.KeyManager, cmdRun apitypes.CmdRun) (apitypes.CmdRun, error) {
-	var results apitypes.CmdRun
 	conn := farmerConnFor(tenantID)
 	if conn == nil {
-		return results, fmt.Errorf("cmd: no NATS connection registered for tenant %s", tenantID)
+		return apitypes.CmdRun{}, fmt.Errorf("cmd: no NATS connection registered for tenant %s", tenantID)
 	}
-	topic := "imas.sprouts." + target.SproutID + ".cmd.run"
-	b, _ := json.Marshal(cmdRun)
-	msg, err := conn.Request(topic, b, time.Second*15+cmdRun.Timeout)
-	if err != nil {
-		return results, err
-	}
-	err = json.Unmarshal(msg.Data, &results)
-	return results, err
+	return frun(conn, tenantID, target, cmdRun)
 }
 
 func SRun(cmd apitypes.CmdRun) (apitypes.CmdRun, error) {
@@ -142,7 +135,15 @@ func SRun(cmd apitypes.CmdRun) (apitypes.CmdRun, error) {
 	err := command.Run()
 	cmd.Duration = time.Since(timer)
 	if err != nil {
-		log.Errorf("cmd.Run() failed with %s\n", err)
+		// Not err itself: a start error names the command, and the
+		// sprout's log is shipped over the bus in plaintext while the
+		// command itself travels sealed (sealed.go).
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			log.Errorf("cmd.Run() failed with exit code %d", exitErr.ExitCode())
+		} else {
+			log.Errorf("cmd.Run() failed to start the command")
+		}
 	}
 	cmd.Stdout = stdoutBuf.String()
 	cmd.Stderr = stderrBuf.String()

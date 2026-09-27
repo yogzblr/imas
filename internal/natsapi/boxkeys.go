@@ -16,11 +16,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/nats-io/nats.go"
 
 	"github.com/yogzblr/imas/internal/config"
 	log "github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
@@ -51,6 +53,27 @@ func handlePKIRotateBoxKey(tenantID string, params json.RawMessage) (any, error)
 	return map[string]bool{"success": true}, nil
 }
 
+// rotateTenantBoxKeyRequest is MethodPKIRotateTenantBoxKey's params.
+type rotateTenantBoxKeyRequest struct {
+	// Sever cuts the old keys off at once, for suspected exposure: no
+	// grace window and no continuity proofs, so the tenant's sprouts
+	// must be re-enrolled. See pki.RotateTenantX25519Keypair.
+	Sever bool `json:"sever"`
+}
+
+// handlePKIRotateTenantBoxKey rotates tenantID's own X25519 keypair —
+// tenantID being the tenant whose connection the request arrived on, so
+// one tenant can never rotate another's.
+func handlePKIRotateTenantBoxKey(tenantID string, params json.RawMessage) (any, error) {
+	var req rotateTenantBoxKeyRequest
+	if len(params) > 0 && string(params) != "null" {
+		if err := json.Unmarshal(params, &req); err != nil {
+			return nil, fmt.Errorf("invalid request: %w", err)
+		}
+	}
+	return pki.RotateTenantX25519Keypair(tenantID, req.Sever)
+}
+
 // boxKeySubmitRequest is what a sprout publishes on
 // imas.sprouts.<id>.boxkey.pub, whether at first enrollment's follow-up
 // traffic or after a rotation (self-initiated or farmer-triggered).
@@ -60,10 +83,22 @@ type boxKeySubmitRequest struct {
 
 // handleBoxKeySubmit records a sprout's new payload-encryption public
 // key. The sprout ID comes from the subject, not the message body — the
-// same trust model internal/facts's listener uses (the connection's own
-// authenticated identity, enforced by NATS permissions on which subjects
-// a given sprout connection may publish to, not by anything checked
-// here).
+// same trust model internal/facts's listener uses.
+//
+// That trust model is not enough here, though: this subject decides
+// which key farmer seals every later payload to, and the threat this
+// workstream exists for is a compromised bus, which can publish anything
+// on any subject. A plaintext submission would let it swap in its own key
+// and read everything farmer sends that sprout from then on. So a
+// submission must be sealed (purpose s2f.boxkey.pub) under a key the
+// sprout already holds, i.e. one of its currently valid box keys: only
+// the holder of that private key could have sealed it. It must also be
+// fresh (payloadbox.DefaultMaxSkew), and pki.RotateSproutBoxKey never
+// re-activates a key that has been superseded, so a replayed submission
+// can't roll a sprout back to an older key.
+//
+// Nothing on the sprout side submits yet (sprout-initiated box key
+// rotation is a follow-up); until then this only ever refuses.
 func handleBoxKeySubmit(tenantID string, msg *nats.Msg) {
 	parts := strings.Split(msg.Subject, ".")
 	if len(parts) < 4 {
@@ -72,9 +107,19 @@ func handleBoxKeySubmit(tenantID string, msg *nats.Msg) {
 	}
 	sproutID := parts[2]
 
+	if msg.Header.Get(payloadbox.Header) != payloadbox.HeaderBox1 {
+		log.Warnf("boxkeys: refusing an unsealed box key submission for %s", sproutID)
+		return
+	}
 	var req boxKeySubmitRequest
-	if err := json.Unmarshal(msg.Data, &req); err != nil {
-		log.Errorf("boxkeys: failed to unmarshal submission from %s: %v", sproutID, err)
+	opened, err := DecryptEncryptedFrom(tenantID, sproutID, payloadbox.PurposeBoxKeySubmit, msg.Data, &req)
+	if err != nil {
+		log.Warnf("boxkeys: refusing a box key submission for %s that doesn't open under its current keys: %v", sproutID, err)
+		return
+	}
+	issued := time.Unix(opened.IssuedAt, 0)
+	if d := time.Since(issued); d > payloadbox.DefaultMaxSkew || d < -payloadbox.DefaultMaxSkew {
+		log.Warnf("boxkeys: refusing a stale box key submission for %s (issued %s)", sproutID, issued.UTC().Format(time.RFC3339))
 		return
 	}
 	if req.Pub == "" {

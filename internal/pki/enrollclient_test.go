@@ -180,6 +180,7 @@ func startEnrollServer(t *testing.T) *enrollServer {
 			SproutID: res.SproutID, JWT: res.JWT, GatewayJWT: res.GatewayJWT,
 			NKeyIdentity: req.NKeyPub, TenantX25519Pub: res.TenantX25519Pub,
 			FleetSigningJWKS: s.jwks, NatsURLs: natsURLs,
+			TenantX25519Continuity: res.TenantX25519Continuity,
 		})
 	})
 	mux.HandleFunc("POST /v1/refresh", func(w http.ResponseWriter, r *http.Request) {
@@ -203,6 +204,7 @@ func startEnrollServer(t *testing.T) *enrollServer {
 		_ = json.NewEncoder(w).Encode(RefreshResponse{
 			SproutID: res.SproutID, JWT: res.JWT, GatewayJWT: res.GatewayJWT,
 			NKeyIdentity: req.NKeyPub, TenantX25519Pub: res.TenantX25519Pub,
+			TenantX25519Continuity: res.TenantX25519Continuity,
 		})
 	})
 	ts := httptest.NewTLSServer(mux)
