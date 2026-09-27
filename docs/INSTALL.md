@@ -54,7 +54,7 @@ The core needs these before farmer can enroll a single sprout:
 | Service | Used by | Required? |
 |---|---|---|
 | **PXC** (Percona XtraDB Cluster / MySQL 8) with a `farmer` and a `saas` schema | farmer (`IMAS_PXC_DSN`), saasapi (`SAASAPI_DSN`) | farmer exits at startup without it. The grants are design doc §5.1; see [`deploy/helm/farmer/README.md`](../deploy/helm/farmer/README.md), "PXC". |
-| **OpenBao** | farmer: PKI (API certificate), Transit `imas-gateway-jwt` (gateway JWTs), Transit `imas-fleet-signing` (read-only), KV v2 `secret/imas/tenant-x25519` (tenant box key) | farmer starts without the Transit keys, but `POST /v1/enroll` fails closed until both are configured. Without OpenBao PKI you must place farmer's certificate and key yourself. |
+| **OpenBao** | farmer: PKI (API certificate), Transit `imas-gateway-jwt` (gateway JWTs), Transit `imas-fleet-signing` (read-only), KV v2 `secret/imas/tenant-x25519/tenants/<tenant>` (one payload-encryption keypair per tenant; `secret/imas/tenant-x25519` itself is the legacy shared keypair, read only for migration) | farmer starts without the Transit keys, but `POST /v1/enroll` fails closed until both are configured. Without OpenBao PKI you must place farmer's certificate and key yourself. |
 | **Valkey** | farmer (heartbeats, enrollment replay cache), saasapi (rate limits, `connected`) | `/v1/enroll` and `/v1/refresh` fail closed without it. Give farmer and saasapi the same address list. |
 | **S3-compatible object storage** | farmer: recipes and job logs, in two different buckets | recipe and job requests fail until it's configured. |
 | **Keycloak** | saasapi verifies the end-user JWTs the BFF forwards | saasapi won't authenticate anything without it. |
