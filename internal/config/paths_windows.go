@@ -21,6 +21,7 @@ import (
 //	%ProgramData%\imas\cache\sprout\files\provided   cachedir
 //	%ProgramData%\imas\cache\sprout\jobs             joblogdir
 //	%ProgramData%\imas\state\sprout\handled-jobs     (/var/lib/imas/sprout)
+//	%ProgramData%\imas\logs\sprout.log               service log (the sprout creates it)
 //
 // The Unix paths would otherwise resolve against the current drive, and a
 // service's working directory is C:\Windows\System32, so /etc/imas would
@@ -56,6 +57,11 @@ func defaultSproutJobLogDir() string {
 func defaultSproutHandledJobsFile() string {
 	return filepath.Join(imasDataRoot(), "state", "sprout", "handled-jobs")
 }
+
+// SproutServiceLogDir is where the sprout writes its logs when it runs
+// under the SCM, which discards stderr: %ProgramData%\imas\logs, below the
+// config root so it gets the same DACL (SecureSproutConfigRoot).
+func SproutServiceLogDir() string { return filepath.Join(systemConfigRoot, "logs") }
 
 // sproutConfigRootSDDL is the config root's DACL: full control for SYSTEM
 // and Administrators only, inherited by every file and directory below it

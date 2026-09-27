@@ -30,8 +30,12 @@ import (
 func init() {
 	// Before LoadConfig writes the config file (it can hold the join
 	// token): a no-op outside Windows.
-	if err := config.SecureSproutConfigRoot(); err != nil {
-		log.Fatalf("failed to secure the config directory: %v", err)
+	secureErr := config.SecureSproutConfigRoot()
+	// Under the Windows SCM, which discards stderr, log to a file below
+	// the config root from here on, so a failure above is recorded too.
+	startServiceLog()
+	if secureErr != nil {
+		log.Fatalf("failed to secure the config directory: %v", secureErr)
 	}
 	config.LoadConfig("sprout")
 	log.SetLogLevel(config.LogLevel)
