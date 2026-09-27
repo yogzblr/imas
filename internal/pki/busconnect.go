@@ -204,6 +204,10 @@ type SproutBus struct {
 	Source  BusURLSource
 	// Options are the TLS and auth options; Connect appends its callers'.
 	Options []nats.Option
+	// UserJWT is the NATS User JWT in Options, so callers can check its
+	// grants (e.g. SproutUserJWTGrantsLogs) against the one actually sent,
+	// not a newer one a refresh has since written to disk.
+	UserJWT string
 }
 
 // LoadSproutBus resolves the sprout's bus addresses
@@ -248,7 +252,7 @@ func LoadSproutBus() (*SproutBus, error) {
 	if source != BusURLsFromLegacy {
 		opts = append(opts, nats.IgnoreDiscoveredServers())
 	}
-	return &SproutBus{Servers: servers, Source: source, Options: opts}, nil
+	return &SproutBus{Servers: servers, Source: source, Options: opts, UserJWT: userJWT}, nil
 }
 
 // Connect dials b.Servers with b.Options followed by extra.

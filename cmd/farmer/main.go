@@ -425,6 +425,10 @@ func initValkeyClient() {
 	handlers.SetReadinessValkey(client)
 }
 
+// farmerLogSubject is the SYS Account subject prefix farmer publishes its
+// log entries under, one subject per level: imas.logs.farmer.<LEVEL>.
+const farmerLogSubject = "imas.logs.farmer"
+
 // initSystemAccountListeners opens farmer's one persistent SYS-account
 // connection (pki.ConnectSystemAccount) and registers everything that
 // listens on it:
@@ -434,7 +438,13 @@ func initValkeyClient() {
 //   - the SaaS API's tenant-provisioning bridge: internal.tenant.provision/
 //     deprovision (natsapi.RegisterTenantProvisioning), platform-level
 //     control-plane subjects that live in the SYS Account — see
-//     docs/design/imas-internal-api-account.md.
+//     docs/design/imas-internal-api-account.md;
+//   - farmer's own log shipping (log.UseNATSConn), on farmerLogSubject.
+//
+// Farmer's logs go to the SYS Account, not a tenant's: they are
+// process-wide and name every tenant's sprouts, so publishing them into
+// any one tenant Account (the legacy tenant's connection included) would
+// show that tenant's admins every other tenant's activity.
 //
 // This dials the bus over the network like any other client, so it works
 // whether the bus is a separate process/host (as it is here) or embedded
@@ -473,6 +483,9 @@ func initSystemAccountListeners() {
 	}
 	setHeartbeatConn(nc)
 	log.Info("SYS listeners registered (heartbeat, tenant provisioning)")
+	if err := log.UseNATSConn(nc, farmerLogSubject); err != nil {
+		log.Errorf("Failed to attach log-nats backend to the SYS connection: %v", err)
+	}
 }
 
 func initAuditLogger() {
@@ -816,10 +829,6 @@ func disconnectTenant(tenantID string) {
 // docs/design/imas-tenant-context-threading.md's Option A.
 func ConnectFarmer(ctx context.Context, done chan<- struct{}) {
 	defer close(done)
-
-	if err := log.ConnectNATS(config.FarmerBusURL); err != nil {
-		log.Errorf("Failed to connect log-nats backend: %v", err)
-	}
 
 	// Set version info once, process-wide — not tenant-scoped.
 	natsapi.SetBuildVersion(config.Version{
