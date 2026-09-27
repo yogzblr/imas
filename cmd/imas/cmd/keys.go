@@ -16,6 +16,7 @@ import (
 var (
 	targetAll bool
 	noConfirm bool
+	severKeys bool
 )
 
 // keysCmd represents the keys command
@@ -32,12 +33,15 @@ func init() {
 	keysCmd.InheritedFlags().Set("target", "_")
 	keysCmd.PersistentFlags().BoolVar(&noConfirm, "no-confirm", false, "Do not prompt for confirmation")
 	keysAccept.Flags().BoolVarP(&targetAll, "all", "A", false, "Accept all unaccepted keys")
+	keysRotateTenant.Flags().BoolVar(&severKeys, "sever", false,
+		"Cut the old keys off at once (suspected exposure): every sprout of the tenant must then be re-enrolled")
 	keysCmd.AddCommand(keysAccept,
 		keysDeny,
 		keysReject,
 		keysUnaccept,
 		keysDelete,
-		keysList)
+		keysList,
+		keysRotateTenant)
 	rootCmd.AddCommand(keysCmd)
 }
 
@@ -161,6 +165,52 @@ var keysList = &cobra.Command{
 				color.Yellow(key.SproutID)
 			}
 			return
+		}
+	},
+}
+
+var keysRotateTenant = &cobra.Command{
+	Use:   "rotate-tenant-key",
+	Short: "Rotate this tenant's payload-encryption keypair.",
+	Long: `Generates a new X25519 keypair for this tenant's sealed farmer<->sprout
+payloads (docs/design/imas-payload-encryption-design.md) and makes it current.
+
+Sprouts move to the new key on their next gateway JWT refresh, verifying a
+proof sealed under the key they had pinned; until then the previous key keeps
+working. Sprouts built before tenant key rotation exit on that refresh
+instead: upgrade them first.
+
+With --sever the old keys stop working immediately and prove nothing, so
+every sprout of the tenant fails its next refresh and must be re-enrolled.
+Use it only when the old private key may have been exposed.`,
+	Args: cobra.NoArgs,
+	Run: func(cmd *cobra.Command, args []string) {
+		if !noConfirm {
+			if severKeys {
+				fmt.Printf("Rotate and SEVER this tenant's payload-encryption key? Every sprout will need re-enrolling. ")
+			} else {
+				fmt.Printf("Rotate this tenant's payload-encryption key? ")
+			}
+			confirm, err := util.UserConfirmWithDefault(!severKeys)
+			for err != nil {
+				confirm, err = util.UserConfirmWithDefault(!severKeys)
+			}
+			if !confirm {
+				return
+			}
+		}
+		rot, err := gpki.RotateTenantBoxKey(severKeys)
+		if err != nil {
+			util.OutputError(err, outputMode)
+			return
+		}
+		switch outputMode {
+		case "json":
+			jw, _ := json.Marshal(rot)
+			fmt.Println(string(jw))
+		case "", "text":
+			fmt.Printf("Tenant %s payload-encryption key rotated: version %d -> %d (severed: %t)\n",
+				rot.TenantID, rot.PreviousVersion, rot.Version, rot.Severed)
 		}
 	},
 }

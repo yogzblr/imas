@@ -131,4 +131,22 @@ func TestEnrollClient_AgainstHandler(t *testing.T) {
 	if id != "web-01" {
 		t.Errorf("refresh re-issued sprout_id %q, want web-01", id)
 	}
+
+	// A tenant key rotation reaches the sprout through the real refresh
+	// handler's tenant_x25519_continuity, and the sprout re-pins. (This
+	// sprout was accepted directly rather than enrolled, so record its box
+	// key the way enrollment would have.)
+	if err := pki.RotateSproutBoxKey(pki.CurrentTenantID(), "web-01", sproutPub, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	rot, err := pki.RotateTenantX25519Keypair(pki.CurrentTenantID(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pki.RefreshGatewayJWT(t.Context()); err != nil {
+		t.Fatalf("RefreshGatewayJWT after a tenant key rotation: %v", err)
+	}
+	if pinned, _ := os.ReadFile(config.SproutTenantX25519PubFile); string(pinned) != rot.Pub {
+		t.Errorf("pinned tenant key %q after rotation, want %q", pinned, rot.Pub)
+	}
 }

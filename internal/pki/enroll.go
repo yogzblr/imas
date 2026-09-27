@@ -28,6 +28,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -142,9 +143,15 @@ type EnrollResult struct {
 	// short-lived (config.GatewayJWTTTL), unlike the cached-to-disk NATS
 	// JWT above.
 	GatewayJWT string
-	// TenantX25519Pub is the tenant's NaCl box public key, backed by
-	// OpenBao custody of the private half (see tenantbox.go).
+	// TenantX25519Pub is the sprout's tenant's current NaCl box public
+	// key, backed by OpenBao custody of the private half (see
+	// tenantbox.go).
 	TenantX25519Pub string
+	// TenantX25519Continuity is TenantKeyContinuity's proof, sealed to
+	// this sprout's box key, that TenantX25519Pub succeeds the tenant
+	// keys the sprout may have pinned before a rotation; nil if the
+	// tenant has never rotated.
+	TenantX25519Continuity json.RawMessage
 }
 
 // EnrollRequest carries one POST /v1/enroll request's fields into Enroll.
@@ -396,6 +403,17 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 		log.Errorf("enroll: accepting sprout %s for tenant %s: %v", sproutID, row.TenantID, err)
 		return nil, ErrEnrollmentFailed
 	}
+	// The tenant's X25519 key is read (and, for a tenant's first
+	// enrollment, created) before this sprout's box key is recorded:
+	// tenantbox.go decides whether a brand new tenant secret adopts the
+	// legacy shared keypair by whether the tenant already has sprout box
+	// keys on record, and this sprout, which will pin whatever is
+	// returned here, must not count towards that.
+	tenantPub, err := GetTenantX25519PublicKey(row.TenantID)
+	if err != nil {
+		log.Errorf("enroll: sprout %s accepted but failed to load tenant %s X25519 key: %v", sproutID, row.TenantID, err)
+		return nil, ErrEnrollmentFailed
+	}
 	// Bootstraps the sprout's half of the payload-encryption keypair
 	// (docs/design/imas-payload-encryption-design.md "Bootstrap"): the
 	// sprout generated this locally and never sends its private half.
@@ -417,17 +435,11 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 		log.Errorf("enroll: sprout %s accepted but no readable JWT: %v", sproutID, err)
 		return nil, ErrEnrollmentFailed
 	}
-	// TenantX25519Pub is not yet re-keyed per tenant (workstream J, not
-	// this workstream's scope — see tenantbox.go's own doc comment): every
-	// tenant on this farmer currently gets the same NaCl box public key
-	// back. Nothing in this repo uses the corresponding private key to
-	// encrypt anything yet, so this is inert scaffolding rather than a live
-	// cross-tenant confidentiality leak today, but it will need the same
-	// per-tenant treatment this file gives the NATS Account material
-	// before workstream J wires up real payload encryption.
-	tenantPub, err := GetTenantX25519PublicKey()
+	// A sprout re-enrolling after an interrupted first attempt may
+	// already have pinned an earlier tenant key; see reissueExistingIdentity.
+	continuity, err := TenantKeyContinuity(row.TenantID, sproutID, sproutPub)
 	if err != nil {
-		log.Errorf("enroll: sprout %s enrolled but failed to load tenant X25519 key: %v", sproutID, err)
+		log.Errorf("enroll: sprout %s enrolled but failed to build tenant key continuity proof: %v", sproutID, err)
 		return nil, ErrEnrollmentFailed
 	}
 	gatewayJWT, err := mintGatewayJWTFor(ctx, row.TenantID, sproutID, nkeyPub)
@@ -437,7 +449,7 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 	}
 
 	log.Infof("enroll: sprout %s enrolled via key_id %s", sproutID, keyID)
-	return &EnrollResult{SproutID: sproutID, JWT: signedJWT, GatewayJWT: gatewayJWT, TenantX25519Pub: tenantPub}, nil
+	return &EnrollResult{SproutID: sproutID, JWT: signedJWT, GatewayJWT: gatewayJWT, TenantX25519Pub: tenantPub, TenantX25519Continuity: continuity}, nil
 }
 
 // replayExistingEnrollment handles design doc §3.3 step 1: an already-
@@ -470,11 +482,14 @@ func reissueExistingIdentity(ctx context.Context, tenantID, sproutID, nkeyPub st
 		log.Errorf("enroll: sprout %s has an accepted nkey but no readable JWT: %v", sproutID, err)
 		return nil, ErrEnrollmentFailed
 	}
-	// See Enroll's own TenantX25519Pub comment: not yet tenant-scoped
-	// (workstream J).
-	tenantPub, err := GetTenantX25519PublicKey()
+	tenantPub, err := GetTenantX25519PublicKey(tenantID)
 	if err != nil {
-		log.Errorf("enroll: reissuing identity for %s but failed to load tenant X25519 key: %v", sproutID, err)
+		log.Errorf("enroll: reissuing identity for %s but failed to load tenant %s X25519 key: %v", sproutID, tenantID, err)
+		return nil, ErrEnrollmentFailed
+	}
+	continuity, err := sproutTenantKeyContinuity(tenantID, sproutID)
+	if err != nil {
+		log.Errorf("enroll: reissuing identity for %s but failed to build tenant key continuity proof: %v", sproutID, err)
 		return nil, ErrEnrollmentFailed
 	}
 	gatewayJWT, err := mintGatewayJWTFor(ctx, tenantID, sproutID, nkeyPub)
@@ -482,7 +497,21 @@ func reissueExistingIdentity(ctx context.Context, tenantID, sproutID, nkeyPub st
 		log.Errorf("enroll: reissuing identity for %s but failed to mint gateway JWT: %v", sproutID, err)
 		return nil, ErrEnrollmentFailed
 	}
-	return &EnrollResult{SproutID: sproutID, JWT: existingJWT, GatewayJWT: gatewayJWT, TenantX25519Pub: tenantPub}, nil
+	return &EnrollResult{SproutID: sproutID, JWT: existingJWT, GatewayJWT: gatewayJWT, TenantX25519Pub: tenantPub, TenantX25519Continuity: continuity}, nil
+}
+
+// sproutTenantKeyContinuity is TenantKeyContinuity sealed to the
+// sprout's active box public key on record. A sprout with none (enrolled
+// before workstream J) has no tenant key pinned either, so nil.
+func sproutTenantKeyContinuity(tenantID, sproutID string) (json.RawMessage, error) {
+	active, _, err := ValidSproutBoxKeys(tenantID, sproutID)
+	if errors.Is(err, ErrNoActiveBoxKey) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return TenantKeyContinuity(tenantID, sproutID, active)
 }
 
 // mintGatewayJWTFor builds this sprout's gateway-JWT claims and mints it

@@ -65,6 +65,10 @@ const (
 // graces the old one) it was left keyless.
 var ErrNoActiveBoxKey = fmt.Errorf("pki: sprout has no active box public key")
 
+// ErrBoxKeySuperseded means a rotation named a box key this sprout
+// already rotated away from.
+var ErrBoxKeySuperseded = fmt.Errorf("pki: box public key was already superseded and can't be made active again")
+
 // decodeBoxPub validates and decodes a standard-base64-encoded 32-byte
 // X25519 public key, as submitted both at enrollment (enroll.go's
 // sproutPub parameter) and at rotation (RotateSproutBoxKey).
@@ -124,21 +128,31 @@ func upsertSproutBoxKeyActive(tenantID, sproutID, pub string) error {
 // outright, so messages already encrypted under it and still in flight
 // keep decrypting correctly until the window closes. Idempotent: rotating
 // to a key that is already active is a no-op, so a sprout retrying a
-// dropped rotation confirmation doesn't grace its own current key.
+// dropped rotation confirmation doesn't grace its own current key. A key
+// that has been superseded (grace or revoked) is never made active
+// again (ErrBoxKeySuperseded), so replaying an old submission can't roll
+// a sprout back to it.
 func RotateSproutBoxKey(tenantID, sproutID, newPub string, graceDuration time.Duration) error {
 	if _, err := decodeBoxPub(newPub); err != nil {
 		return err
 	}
 	return db.Transaction(func(tx *gorm.DB) error {
+		var existing []sproutBoxKeyRow
+		if err := tx.Where("tenant_id = ? AND sprout_id = ? AND pub = ?", tenantID, sproutID, newPub).
+			Find(&existing).Error; err != nil {
+			return err
+		}
+		// (tenant_id, sprout_id, pub) is the primary key: at most one row.
+		if len(existing) > 0 {
+			if existing[0].State == boxKeyStateActive {
+				return nil
+			}
+			return ErrBoxKeySuperseded
+		}
 		var rows []sproutBoxKeyRow
 		if err := tx.Where("tenant_id = ? AND sprout_id = ? AND state = ?", tenantID, sproutID, boxKeyStateActive).
 			Find(&rows).Error; err != nil {
 			return err
-		}
-		for _, r := range rows {
-			if r.Pub == newPub {
-				return nil
-			}
 		}
 		graceUntil := time.Now().UTC().Add(graceDuration)
 		for _, r := range rows {

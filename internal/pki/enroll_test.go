@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"github.com/nats-io/nkeys"
+	"golang.org/x/crypto/nacl/box"
 
 	"github.com/yogzblr/imas/internal/gatewayjwt"
+	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 )
 
 // fakeEnrollmentKeyStore is an in-memory stand-in for mysqlEnrollmentKeyStore
@@ -145,7 +147,7 @@ func setupEnrollTest(t *testing.T) (*fakeEnrollmentKeyStore, *fakeGatewayMinter)
 	t.Helper()
 	setupTestPKI(t)
 	withTestReplayCache(t)
-	setupTenantBoxOpenBao(t, newMockKVv2Server(t))
+	setupTenantBoxOpenBao(t)
 	store := newFakeEnrollmentKeyStore()
 	withFakeEnrollmentKeyStore(t, store)
 	minter := withFakeGatewayMinter(t)
@@ -566,5 +568,74 @@ func TestEnroll_RejectsNewlineInSignedField(t *testing.T) {
 	}
 	if store.rows["ek_1"].UsedCount != 0 {
 		t.Errorf("expected rejected enrollment not to consume a use, used_count=%d", store.rows["ek_1"].UsedCount)
+	}
+}
+
+// Each tenant gets its own tenant X25519 key. A tenant whose sprouts
+// enrolled against the old one-per-deployment keypair keeps that keypair
+// (adopted into its own secret) so their pins still match, and a tenant's
+// first enrollment never counts itself towards that: Enroll reads the
+// tenant key before recording the sprout's box key.
+func TestEnroll_TenantKeysArePerTenantAndAdoptLegacyOnlyForExistingSprouts(t *testing.T) {
+	store, _ := setupEnrollTest(t)
+	srv := setupTenantBoxOpenBao(t)
+	legacyPub, _ := srv.SeedKeypair(t, tenantboxtest.BasePath, nil)
+	// A sprout of t_old enrolled before the upgrade, against the legacy key.
+	if err := upsertSproutBoxKeyActive("t_old", "pre-upgrade", testEnrollBoxPub(t)); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"t_old", "t_new"} {
+		store.rows["ek_"+id] = &enrollmentKeyRow{TenantID: id, KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 5}
+	}
+	enroll := func(tenant, host string) string {
+		t.Helper()
+		res, err := Enroll(t.Context(), signedEnroll(t, testEnrollNKey(t), "ek_"+tenant+".s", host, testEnrollBoxPub(t)))
+		if err != nil {
+			t.Fatalf("Enroll %s/%s: %v", tenant, host, err)
+		}
+		return res.TenantX25519Pub
+	}
+	if got := enroll("t_old", "web-01"); got != b64(legacyPub) {
+		t.Errorf("existing tenant got %s, want the legacy key it's pinned to", got)
+	}
+	first := enroll("t_new", "web-01")
+	if first == b64(legacyPub) {
+		t.Error("a new tenant's first enrollment adopted the shared legacy key")
+	}
+	if second := enroll("t_new", "web-02"); second != first {
+		t.Errorf("second sprout of t_new got %s, want %s", second, first)
+	}
+}
+
+// After a tenant key rotation, re-issuing an identity carries a
+// continuity proof sealed to the sprout's box key under the key it had
+// pinned.
+func TestEnroll_ReplayAfterRotationCarriesContinuity(t *testing.T) {
+	store, _ := setupEnrollTest(t)
+	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
+	sproutPub, sproutPriv, _ := box.GenerateKey(rand.Reader)
+
+	kp := testEnrollNKey(t)
+	first, err := Enroll(t.Context(), signedEnroll(t, kp, "ek_1.s", "web-01", b64(sproutPub)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.TenantX25519Continuity != nil {
+		t.Errorf("continuity proof before any rotation: %s", first.TenantX25519Continuity)
+	}
+	rot, err := RotateTenantX25519Keypair("t_1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := Enroll(t.Context(), signedEnroll(t, kp, "bogus.token", "web-01", b64(sproutPub)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replay.TenantX25519Pub != rot.Pub {
+		t.Errorf("replay returned tenant key %s, want the rotated %s", replay.TenantX25519Pub, rot.Pub)
+	}
+	pinned, _ := DecodeBoxPubKey(first.TenantX25519Pub)
+	if to, err := openContinuity(t, replay.TenantX25519Continuity, pinned, sproutPriv, "web-01"); err != nil || to != rot.Pub {
+		t.Errorf("continuity proof: %q, %v; want %q", to, err, rot.Pub)
 	}
 }

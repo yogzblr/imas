@@ -199,3 +199,16 @@ func DeleteKey(id string) (bool, error) {
 	}
 	return true, nil
 }
+
+// RotateTenantBoxKey rotates the calling tenant's payload-encryption
+// X25519 keypair (natsapi's pki.rotatetenantbox). With sever, the old
+// keys stop working at once and the tenant's sprouts must be re-enrolled.
+func RotateTenantBoxKey(sever bool) (pki.TenantKeyRotation, error) {
+	var rot pki.TenantKeyRotation
+	resp, err := NatsRequest("pki.rotatetenantbox", map[string]bool{"sever": sever})
+	if err != nil {
+		return rot, err
+	}
+	err = json.Unmarshal(resp, &rot)
+	return rot, err
+}

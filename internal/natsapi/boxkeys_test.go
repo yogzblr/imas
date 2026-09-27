@@ -10,7 +10,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"golang.org/x/crypto/nacl/box"
 
-	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
@@ -86,70 +86,151 @@ func TestHandlePKIRotateBoxKey_PublishesInstructionOnly(t *testing.T) {
 	}
 }
 
-func TestHandleBoxKeySubmit_RecordsNewActiveKey(t *testing.T) {
-	setupNatsAPIPKI(t)
-	pub := testBoxPubForNatsAPI(t)
+// sealedSubmission is a box key submission as a real sprout would send
+// it: sealed under its current key (signer) and pinned tenant key.
+func sealedSubmission(t *testing.T, signer sproutKeypair, sproutID, newPub string) *nats.Msg {
+	t.Helper()
+	msg := nats.NewMsg(SproutSubject(sproutID, "boxkey.pub"))
+	msg.Header.Set(payloadbox.Header, payloadbox.HeaderBox1)
+	msg.Data = sealAsSprout(t, signer, pinnedTenantPub(t, pki.CurrentTenantID()), sproutID,
+		payloadbox.PurposeBoxKeySubmit, boxKeySubmitRequest{Pub: newPub})
+	return msg
+}
 
-	msg := &nats.Msg{
-		Subject: SproutSubject("web-01", "boxkey.pub"),
-		Data:    mustMarshal(t, boxKeySubmitRequest{Pub: pub}),
-	}
-	handleBoxKeySubmit(pki.CurrentTenantID(), msg)
-
-	active, _, err := pki.ValidSproutBoxKeys(pki.CurrentTenantID(), "web-01")
+func activeAndGrace(t *testing.T, sproutID string) (string, []string) {
+	t.Helper()
+	active, grace, err := pki.ValidSproutBoxKeys(pki.CurrentTenantID(), sproutID)
 	if err != nil {
 		t.Fatalf("ValidSproutBoxKeys: %v", err)
 	}
-	if active != pub {
-		t.Errorf("expected active key %q, got %q", pub, active)
+	return active, grace
+}
+
+func TestHandleBoxKeySubmit_SealedUnderCurrentKeyRotates(t *testing.T) {
+	setupCryptoTest(t)
+	current, next := newSproutKeypair(t), newSproutKeypair(t)
+	enrollSprout(t, pki.CurrentTenantID(), "web-01", current)
+
+	handleBoxKeySubmit(pki.CurrentTenantID(), sealedSubmission(t, current, "web-01", next.pubB64()))
+
+	active, grace := activeAndGrace(t, "web-01")
+	if active != next.pubB64() {
+		t.Errorf("expected active key %q, got %q", next.pubB64(), active)
+	}
+	if len(grace) != 1 || grace[0] != current.pubB64() {
+		t.Errorf("expected the old key in grace, got %v", grace)
 	}
 }
 
-func TestHandleBoxKeySubmit_GracesThePreviousKey(t *testing.T) {
-	setupNatsAPIPKI(t)
-	origGrace := config.BoxKeyGraceDuration
-	config.BoxKeyGraceDuration = time.Hour
-	t.Cleanup(func() { config.BoxKeyGraceDuration = origGrace })
+// What a compromised bus would try: substitute its own key, so farmer
+// seals everything for that sprout to it from then on.
+func TestHandleBoxKeySubmit_RefusesKeySubstitution(t *testing.T) {
+	setupCryptoTest(t)
+	current, attacker := newSproutKeypair(t), newSproutKeypair(t)
+	enrollSprout(t, pki.CurrentTenantID(), "web-01", current)
 
-	oldPub := testBoxPubForNatsAPI(t)
-	newPub := testBoxPubForNatsAPI(t)
-
-	if err := pki.RotateSproutBoxKey(pki.CurrentTenantID(), "web-01", oldPub, time.Hour); err != nil {
-		t.Fatalf("seeding initial key: %v", err)
-	}
-
-	msg := &nats.Msg{
+	plaintext := &nats.Msg{
 		Subject: SproutSubject("web-01", "boxkey.pub"),
-		Data:    mustMarshal(t, boxKeySubmitRequest{Pub: newPub}),
+		Data:    mustMarshal(t, boxKeySubmitRequest{Pub: attacker.pubB64()}),
 	}
-	handleBoxKeySubmit(pki.CurrentTenantID(), msg)
+	cases := map[string]*nats.Msg{
+		"plaintext": plaintext,
+		// Marked sealed, but sealed under the attacker's own key, which
+		// farmer has no record of.
+		"sealed under an unknown key": sealedSubmission(t, attacker, "web-01", attacker.pubB64()),
+	}
+	for name, msg := range cases {
+		t.Run(name, func(t *testing.T) {
+			handleBoxKeySubmit(pki.CurrentTenantID(), msg)
+			if active, _ := activeAndGrace(t, "web-01"); active != current.pubB64() {
+				t.Fatalf("active key changed to %q", active)
+			}
+		})
+	}
+}
 
-	active, grace, err := pki.ValidSproutBoxKeys(pki.CurrentTenantID(), "web-01")
+func TestHandleBoxKeySubmit_RefusesStaleSubmission(t *testing.T) {
+	setupCryptoTest(t)
+	current, next := newSproutKeypair(t), newSproutKeypair(t)
+	enrollSprout(t, pki.CurrentTenantID(), "web-01", current)
+
+	body := mustMarshal(t, boxKeySubmitRequest{Pub: next.pubB64()})
+	stale := payloadbox.Message{V: payloadbox.Version, Purpose: payloadbox.PurposeBoxKeySubmit, SproutID: "web-01",
+		ID: "stale", IssuedAt: time.Now().Add(-time.Hour).Unix(), Body: body}
+	data, err := payloadbox.Seal(stale, []payloadbox.KeyPair{{PeerPub: pinnedTenantPub(t, pki.CurrentTenantID()), Priv: current.priv}})
 	if err != nil {
-		t.Fatalf("ValidSproutBoxKeys: %v", err)
+		t.Fatal(err)
 	}
-	if active != newPub {
-		t.Errorf("expected active key %q, got %q", newPub, active)
+	msg := nats.NewMsg(SproutSubject("web-01", "boxkey.pub"))
+	msg.Header.Set(payloadbox.Header, payloadbox.HeaderBox1)
+	msg.Data = data
+	handleBoxKeySubmit(pki.CurrentTenantID(), msg)
+	if active, _ := activeAndGrace(t, "web-01"); active != current.pubB64() {
+		t.Fatalf("a stale submission changed the active key to %q", active)
 	}
-	if len(grace) != 1 || grace[0] != oldPub {
-		t.Errorf("expected old key %q in grace, got %v", oldPub, grace)
+}
+
+// Replaying an earlier, genuine submission while its signing key is
+// still in grace must not roll the sprout back to a key it already left.
+func TestHandleBoxKeySubmit_RefusesRollback(t *testing.T) {
+	setupCryptoTest(t)
+	k1, k2, k3 := newSproutKeypair(t), newSproutKeypair(t), newSproutKeypair(t)
+	enrollSprout(t, pki.CurrentTenantID(), "web-01", k1)
+	toK2 := sealedSubmission(t, k1, "web-01", k2.pubB64())
+	handleBoxKeySubmit(pki.CurrentTenantID(), toK2)
+	handleBoxKeySubmit(pki.CurrentTenantID(), sealedSubmission(t, k2, "web-01", k3.pubB64()))
+	// k1 and k2 are both still in grace; replay k1's submission of k2.
+	handleBoxKeySubmit(pki.CurrentTenantID(), toK2)
+	if active, _ := activeAndGrace(t, "web-01"); active != k3.pubB64() {
+		t.Fatalf("replayed submission rolled the active key back to %q", active)
 	}
 }
 
 func TestHandleBoxKeySubmit_IgnoresMalformedSubject(t *testing.T) {
-	setupNatsAPIPKI(t)
+	setupCryptoTest(t)
 	// Fewer than 4 dot-separated components: no sprout ID to key off of.
 	msg := &nats.Msg{Subject: "imas.sprouts.boxkey.pub", Data: mustMarshal(t, boxKeySubmitRequest{Pub: testBoxPubForNatsAPI(t)})}
 	handleBoxKeySubmit(pki.CurrentTenantID(), msg) // must not panic
 }
 
 func TestHandleBoxKeySubmit_IgnoresEmptyPub(t *testing.T) {
-	setupNatsAPIPKI(t)
-	msg := &nats.Msg{Subject: SproutSubject("web-01", "boxkey.pub"), Data: mustMarshal(t, boxKeySubmitRequest{Pub: ""})}
-	handleBoxKeySubmit(pki.CurrentTenantID(), msg)
+	setupCryptoTest(t)
+	current := newSproutKeypair(t)
+	enrollSprout(t, pki.CurrentTenantID(), "web-01", current)
+	handleBoxKeySubmit(pki.CurrentTenantID(), sealedSubmission(t, current, "web-01", ""))
+	if active, _ := activeAndGrace(t, "web-01"); active != current.pubB64() {
+		t.Fatalf("an empty submission changed the active key to %q", active)
+	}
+}
 
-	if _, _, err := pki.ValidSproutBoxKeys(pki.CurrentTenantID(), "web-01"); err == nil {
-		t.Fatal("expected no box key to be recorded for an empty pub")
+// Rotating the tenant key over the API rotates the calling tenant's key,
+// and only that tenant's.
+func TestHandlePKIRotateTenantBoxKey(t *testing.T) {
+	setupCryptoTest(t)
+	beforeA, _ := pki.GetTenantX25519PublicKey("t_a")
+	beforeB, _ := pki.GetTenantX25519PublicKey("t_b")
+
+	result, err := handlePKIRotateTenantBoxKey("t_a", json.RawMessage(`{"token":"ignored"}`))
+	if err != nil {
+		t.Fatalf("handlePKIRotateTenantBoxKey: %v", err)
+	}
+	rot, ok := result.(*pki.TenantKeyRotation)
+	if !ok || rot.TenantID != "t_a" || rot.Severed || rot.Version != 2 {
+		t.Fatalf("result %#v", result)
+	}
+	if afterA, _ := pki.GetTenantX25519PublicKey("t_a"); afterA == beforeA || afterA != rot.Pub {
+		t.Errorf("t_a key %q after rotation, want %q", afterA, rot.Pub)
+	}
+	if afterB, _ := pki.GetTenantX25519PublicKey("t_b"); afterB != beforeB {
+		t.Error("rotating t_a changed t_b's key")
+	}
+
+	result, err = handlePKIRotateTenantBoxKey("t_a", json.RawMessage(`{"sever":true}`))
+	if err != nil || !result.(*pki.TenantKeyRotation).Severed {
+		t.Fatalf("severing rotation: %#v, %v", result, err)
+	}
+	if _, err := handlePKIRotateTenantBoxKey("t_a", json.RawMessage(`{bad`)); err == nil {
+		t.Error("expected an error for invalid JSON")
 	}
 }
 

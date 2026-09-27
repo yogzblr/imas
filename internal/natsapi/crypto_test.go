@@ -1,87 +1,47 @@
 package natsapi
 
-// Round-trips crypto.go's shared encrypt/decrypt helper against real NaCl
-// box operations on both ends: the "sprout" side in these tests uses its
-// own real X25519 keypair directly (golang.org/x/crypto/nacl/box), not
-// this package's helper, so a round trip here exercises the same wire
-// format and key-lookup logic a real farmer<->sprout exchange would.
+// Round-trips crypto.go's helpers against a stand-in sprout that uses its
+// own real X25519 keypair with internal/payloadbox directly (not
+// internal/pki's farmer-side lookups), so a round trip here exercises the
+// same wire format and key-lookup logic a real farmer<->sprout exchange
+// would.
 import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/nacl/box"
 
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 )
 
-// mockTenantBoxKVServer serves a fixed, pre-seeded tenant keypair from
-// OpenBao's KV v2 read endpoint — enough for pki.GetTenantX25519KeyPair
-// to succeed without ever needing to write (this package doesn't need to
-// exercise tenantbox.go's bootstrap-race handling; internal/pki's own
-// tests already cover that). See internal/pki/tenantbox_test.go's
-// mockKVv2Server for the same shape, duplicated here since that type is
-// unexported in a different package.
-type mockTenantBoxKVServer struct {
-	mount, path, token string
-	pub, priv          [32]byte
-}
-
-func (m *mockTenantBoxKVServer) start(t *testing.T) *httptest.Server {
-	t.Helper()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/"+m.mount+"/data/"+m.path, func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Vault-Token") != m.token {
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		if r.Method != http.MethodGet {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"data": map[string]any{
-				"data": map[string]string{
-					"pub":  base64.StdEncoding.EncodeToString(m.pub[:]),
-					"priv": base64.StdEncoding.EncodeToString(m.priv[:]),
-				},
-			},
-		})
-	})
-	return httptest.NewServer(mux)
-}
-
 // setupCryptoTest wires up an isolated PKI store (setupNatsAPIPKI,
-// pki_handlers_test.go) plus a mock OpenBao KV server backing the tenant
-// keypair. Only the first test in this package to reach
-// pki.GetTenantX25519KeyPair actually needs the server to be live — once
-// bootstrapped, the keypair is cached in-process for the rest of the test
-// binary (see tenantbox.go) — but every test sets it up the same way so
-// none of them depend on run order.
-func setupCryptoTest(t *testing.T) *mockTenantBoxKVServer {
+// pki_handlers_test.go) plus a mock OpenBao KV v2 server backing tenant
+// keypairs, with every tenant these tests use dropped from pki's
+// in-process key cache before and after.
+func setupCryptoTest(t *testing.T) *tenantboxtest.Server {
 	t.Helper()
 	setupNatsAPIPKI(t)
-
-	pub, priv, err := box.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generating mock tenant keypair: %v", err)
+	srv := tenantboxtest.Start(t)
+	tenants := []string{pki.CurrentTenantID(), "t_a", "t_b"}
+	for _, id := range tenants {
+		pki.InvalidateTenantBoxKeys(id)
 	}
-	srv := &mockTenantBoxKVServer{mount: "secret", path: "imas/tenant-x25519", token: "test-token", pub: *pub, priv: *priv}
-	ts := srv.start(t)
-	t.Cleanup(ts.Close)
-
-	t.Setenv(pki.EnvTenantBoxOpenBaoAddr, ts.URL)
-	t.Setenv(pki.EnvTenantBoxOpenBaoKVMount, srv.mount)
-	t.Setenv(pki.EnvTenantBoxOpenBaoKVPath, srv.path)
-	t.Setenv(pki.EnvTenantBoxOpenBaoAuthMethod, pki.TenantBoxAuthMethodToken)
-	t.Setenv(pki.EnvTenantBoxOpenBaoToken, srv.token)
-
+	t.Cleanup(func() {
+		for _, id := range tenants {
+			pki.InvalidateTenantBoxKeys(id)
+		}
+	})
+	orig := config.BoxKeyGraceDuration
+	config.BoxKeyGraceDuration = time.Hour
+	t.Cleanup(func() { config.BoxKeyGraceDuration = orig })
 	return srv
 }
 
@@ -104,247 +64,207 @@ func (k sproutKeypair) pubB64() string {
 	return base64.StdEncoding.EncodeToString(k.pub[:])
 }
 
-// sealAsSprout seals plaintext the way a real sprout would: under its own
-// private key and the tenant's public key, using the same
-// EncryptedEnvelope wire shape crypto.go defines.
-func sealAsSprout(t *testing.T, sprout sproutKeypair, tenantPub *[32]byte, plaintext []byte) []byte {
+// enrollSprout records sprout as sproutID's active box key under tenantID.
+func enrollSprout(t *testing.T, tenantID, sproutID string, sprout sproutKeypair) {
 	t.Helper()
-	var nonce [24]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		t.Fatalf("generating nonce: %v", err)
+	if err := pki.RotateSproutBoxKey(tenantID, sproutID, sprout.pubB64(), time.Hour); err != nil {
+		t.Fatalf("seeding %s/%s box key: %v", tenantID, sproutID, err)
 	}
-	sealed := box.Seal(nil, plaintext, &nonce, tenantPub, sprout.priv)
-	data, err := json.Marshal(EncryptedEnvelope{Nonce: nonce[:], Ciphertext: sealed})
+}
+
+// pinnedTenantPub is the tenant public key a sprout of tenantID pins.
+func pinnedTenantPub(t *testing.T, tenantID string) *[32]byte {
+	t.Helper()
+	b64, err := pki.GetTenantX25519PublicKey(tenantID)
 	if err != nil {
-		t.Fatalf("marshaling envelope: %v", err)
+		t.Fatalf("GetTenantX25519PublicKey(%s): %v", tenantID, err)
+	}
+	pub, err := pki.DecodeBoxPubKey(b64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pub
+}
+
+// sealAsSprout seals body the way a real sprout would: under its own
+// private key and its pinned tenant public key.
+func sealAsSprout(t *testing.T, sprout sproutKeypair, tenantPub *[32]byte, sproutID, purpose string, body any) []byte {
+	t.Helper()
+	msg, err := payloadbox.NewMessage(purpose, sproutID, "", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := payloadbox.Seal(msg, []payloadbox.KeyPair{{PeerPub: tenantPub, Priv: sprout.priv}})
+	if err != nil {
+		t.Fatal(err)
 	}
 	return data
 }
 
-// openAsSprout opens data the way a real sprout would: under its own
-// private key and the tenant's public key.
-func openAsSprout(t *testing.T, sprout sproutKeypair, tenantPub *[32]byte, data []byte) ([]byte, bool) {
-	t.Helper()
-	var env EncryptedEnvelope
-	if err := json.Unmarshal(data, &env); err != nil {
-		t.Fatalf("unmarshaling envelope: %v", err)
-	}
-	var nonce [24]byte
-	copy(nonce[:], env.Nonce)
-	return box.Open(nil, env.Ciphertext, &nonce, tenantPub, sprout.priv)
+// openAsSprout opens data the way a real sprout would.
+func openAsSprout(sprout sproutKeypair, tenantPub *[32]byte, sproutID, purpose string, data []byte) (*payloadbox.Message, error) {
+	return payloadbox.Open(data, []payloadbox.KeyPair{{PeerPub: tenantPub, Priv: sprout.priv}},
+		payloadbox.Expect{Purpose: purpose, SproutID: sproutID})
 }
 
-// TestPublishEncryptedTo_NoConnection covers PublishEncryptedTo's own
-// guard; the actual sealing logic it delegates to is exercised directly
-// (without needing a live NATS connection) by
-// TestSealForSprout_RoundTripsWithSprout below.
 func TestPublishEncryptedTo_NoConnection(t *testing.T) {
 	setupCryptoTest(t)
-	sprout := newSproutKeypair(t)
-	if err := pki.RotateSproutBoxKey(pki.CurrentTenantID(), "web-01", sprout.pubB64(), time.Hour); err != nil {
-		t.Fatalf("seeding sprout box key: %v", err)
-	}
-
+	enrollSprout(t, pki.CurrentTenantID(), "web-01", newSproutKeypair(t))
 	ClearNatsConn(pki.CurrentTenantID())
 
-	type payload struct {
-		Msg string `json:"msg"`
-	}
-	if err := PublishEncryptedTo(pki.CurrentTenantID(), "web-01", "imas.sprouts.web-01.test", payload{Msg: "hi"}); err == nil {
+	if err := PublishEncryptedTo(pki.CurrentTenantID(), "web-01", "imas.sprouts.web-01.test", payloadbox.PurposeCmdRunRequest, map[string]string{"msg": "hi"}); err == nil {
 		t.Fatal("expected an error when no NATS connection is available")
 	}
 }
 
-func TestSealForSprout_RoundTripsWithSprout(t *testing.T) {
+func TestPublishEncryptedTo_SproutOpensIt(t *testing.T) {
 	setupCryptoTest(t)
+	tenantID := pki.CurrentTenantID()
 	sprout := newSproutKeypair(t)
-	if err := pki.RotateSproutBoxKey(pki.CurrentTenantID(), "web-01", sprout.pubB64(), time.Hour); err != nil {
-		t.Fatalf("seeding sprout box key: %v", err)
-	}
-	tenantPub, _, err := pki.GetTenantX25519KeyPair()
+	enrollSprout(t, tenantID, "web-01", sprout)
+
+	nc, cleanup := startEmbeddedNATS(t)
+	t.Cleanup(cleanup)
+	SetNatsConn(tenantID, nc)
+	t.Cleanup(func() { ClearNatsConn(tenantID) })
+	sub, err := nc.SubscribeSync("imas.sprouts.web-01.test")
 	if err != nil {
-		t.Fatalf("GetTenantX25519KeyPair: %v", err)
+		t.Fatal(err)
 	}
 
-	sealed, err := sealForSprout(pki.CurrentTenantID(), "web-01", []byte(`{"cmd":"reboot"}`))
+	if err := PublishEncryptedTo(tenantID, "web-01", "imas.sprouts.web-01.test", payloadbox.PurposeCmdRunRequest, map[string]string{"cmd": "reboot"}); err != nil {
+		t.Fatalf("PublishEncryptedTo: %v", err)
+	}
+	m, err := sub.NextMsg(2 * time.Second)
 	if err != nil {
-		t.Fatalf("sealForSprout: %v", err)
+		t.Fatal(err)
 	}
-
-	plaintext, ok := openAsSprout(t, sprout, tenantPub, sealed)
-	if !ok {
-		t.Fatal("expected the sprout to be able to open the sealed payload")
+	if m.Header.Get(payloadbox.Header) != payloadbox.HeaderBox1 {
+		t.Error("published message isn't marked sealed")
 	}
-	if string(plaintext) != `{"cmd":"reboot"}` {
-		t.Errorf("unexpected plaintext: %s", plaintext)
+	msg, err := openAsSprout(sprout, pinnedTenantPub(t, tenantID), "web-01", payloadbox.PurposeCmdRunRequest, m.Data)
+	if err != nil {
+		t.Fatalf("sprout couldn't open it: %v", err)
+	}
+	if string(msg.Body) != `{"cmd":"reboot"}` {
+		t.Errorf("unexpected body: %s", msg.Body)
 	}
 }
 
-func TestOpenFromSprout_DecryptsRealSproutPayload(t *testing.T) {
+func TestDecryptEncryptedFrom_DecryptsRealSproutPayload(t *testing.T) {
 	setupCryptoTest(t)
 	sprout := newSproutKeypair(t)
-	if err := pki.RotateSproutBoxKey(pki.CurrentTenantID(), "web-01", sprout.pubB64(), time.Hour); err != nil {
-		t.Fatalf("seeding sprout box key: %v", err)
-	}
-	tenantPub, _, err := pki.GetTenantX25519KeyPair()
-	if err != nil {
-		t.Fatalf("GetTenantX25519KeyPair: %v", err)
-	}
+	enrollSprout(t, pki.CurrentTenantID(), "web-01", sprout)
 
-	sealed := sealAsSprout(t, sprout, tenantPub, []byte(`{"os":"linux"}`))
-
+	sealed := sealAsSprout(t, sprout, pinnedTenantPub(t, pki.CurrentTenantID()), "web-01", payloadbox.PurposeCmdRunResponse, map[string]string{"os": "linux"})
 	var out struct {
 		OS string `json:"os"`
 	}
-	if err := DecryptEncryptedFrom(pki.CurrentTenantID(), "web-01", sealed, &out); err != nil {
+	if _, err := DecryptEncryptedFrom(pki.CurrentTenantID(), "web-01", payloadbox.PurposeCmdRunResponse, sealed, &out); err != nil {
 		t.Fatalf("DecryptEncryptedFrom: %v", err)
 	}
 	if out.OS != "linux" {
 		t.Errorf("expected os=linux, got %q", out.OS)
 	}
+	// The same bytes, expected as another boundary's payload, don't open.
+	if _, err := DecryptEncryptedFrom(pki.CurrentTenantID(), "web-01", payloadbox.PurposeBoxKeySubmit, sealed, nil); !errors.Is(err, ErrDecryptFailed) {
+		t.Errorf("opened under the wrong purpose: %v", err)
+	}
 }
 
-func TestOpenFromSprout_GracePeriodStillDecrypts(t *testing.T) {
+func TestDecryptEncryptedFrom_SproutKeyGracePeriod(t *testing.T) {
 	setupCryptoTest(t)
-	oldSprout := newSproutKeypair(t)
-	newSprout := newSproutKeypair(t)
-	if err := pki.RotateSproutBoxKey(pki.CurrentTenantID(), "web-01", oldSprout.pubB64(), time.Hour); err != nil {
-		t.Fatalf("seeding initial sprout box key: %v", err)
-	}
-	// Rotate to a new key; the old one should remain valid for the grace
-	// window per the design doc's "Key rotation".
-	if err := pki.RotateSproutBoxKey(pki.CurrentTenantID(), "web-01", newSprout.pubB64(), time.Hour); err != nil {
-		t.Fatalf("rotating sprout box key: %v", err)
-	}
-	tenantPub, _, err := pki.GetTenantX25519KeyPair()
-	if err != nil {
-		t.Fatalf("GetTenantX25519KeyPair: %v", err)
-	}
+	tenantID := pki.CurrentTenantID()
+	oldSprout, newSprout, expiredSprout := newSproutKeypair(t), newSproutKeypair(t), newSproutKeypair(t)
+	tenantPub := pinnedTenantPub(t, tenantID)
 
-	// A message still in flight, encrypted under the now-graced old key,
-	// must still decrypt.
-	sealed := sealAsSprout(t, oldSprout, tenantPub, []byte(`{"still":"valid"}`))
-	var out map[string]string
-	if err := DecryptEncryptedFrom(pki.CurrentTenantID(), "web-01", sealed, &out); err != nil {
+	enrollSprout(t, tenantID, "web-01", oldSprout)
+	enrollSprout(t, tenantID, "web-01", newSprout) // old key now in grace
+	sealed := sealAsSprout(t, oldSprout, tenantPub, "web-01", payloadbox.PurposeCmdRunResponse, "in flight")
+	if _, err := DecryptEncryptedFrom(tenantID, "web-01", payloadbox.PurposeCmdRunResponse, sealed, nil); err != nil {
 		t.Fatalf("expected the graced old key to still decrypt, got: %v", err)
 	}
-	if out["still"] != "valid" {
-		t.Errorf("unexpected plaintext: %v", out)
-	}
-}
 
-func TestOpenFromSprout_ExpiredGraceKeyFailsToDecrypt(t *testing.T) {
-	setupCryptoTest(t)
-	oldSprout := newSproutKeypair(t)
-	newSprout := newSproutKeypair(t)
-	if err := pki.RotateSproutBoxKey(pki.CurrentTenantID(), "web-01", oldSprout.pubB64(), time.Hour); err != nil {
-		t.Fatalf("seeding initial sprout box key: %v", err)
+	enrollSprout(t, tenantID, "web-02", expiredSprout)
+	// A negative grace duration: the old key's window has already closed.
+	if err := pki.RotateSproutBoxKey(tenantID, "web-02", newSproutKeypair(t).pubB64(), -time.Hour); err != nil {
+		t.Fatal(err)
 	}
-	// A negative grace duration means the old key's grace window has
-	// already closed by the time we try to use it.
-	if err := pki.RotateSproutBoxKey(pki.CurrentTenantID(), "web-01", newSprout.pubB64(), -time.Hour); err != nil {
-		t.Fatalf("rotating sprout box key: %v", err)
-	}
-	tenantPub, _, err := pki.GetTenantX25519KeyPair()
-	if err != nil {
-		t.Fatalf("GetTenantX25519KeyPair: %v", err)
-	}
-
-	sealed := sealAsSprout(t, oldSprout, tenantPub, []byte(`{"expired":"key"}`))
-	if err := DecryptEncryptedFrom(pki.CurrentTenantID(), "web-01", sealed, new(map[string]string)); err == nil {
+	sealed = sealAsSprout(t, expiredSprout, tenantPub, "web-02", payloadbox.PurposeCmdRunResponse, "late")
+	if _, err := DecryptEncryptedFrom(tenantID, "web-02", payloadbox.PurposeCmdRunResponse, sealed, nil); err == nil {
 		t.Fatal("expected decryption under an expired grace-period key to fail")
 	}
 }
 
-func TestOpenFromSprout_WrongSproutFailsToDecrypt(t *testing.T) {
+// A sprout that hasn't re-pinned since a tenant key rotation still seals
+// under the old tenant key; farmer opens it inside the grace window.
+func TestDecryptEncryptedFrom_TenantKeyGracePeriod(t *testing.T) {
 	setupCryptoTest(t)
-	sproutA := newSproutKeypair(t)
-	sproutB := newSproutKeypair(t)
-	if err := pki.RotateSproutBoxKey(pki.CurrentTenantID(), "web-a", sproutA.pubB64(), time.Hour); err != nil {
-		t.Fatalf("seeding sprout a box key: %v", err)
-	}
-	if err := pki.RotateSproutBoxKey(pki.CurrentTenantID(), "web-b", sproutB.pubB64(), time.Hour); err != nil {
-		t.Fatalf("seeding sprout b box key: %v", err)
-	}
-	tenantPub, _, err := pki.GetTenantX25519KeyPair()
-	if err != nil {
-		t.Fatalf("GetTenantX25519KeyPair: %v", err)
-	}
-
-	// Sealed as sprout A, but the farmer is told to decrypt it as if it
-	// came from sprout B (wrong key on the decrypt side).
-	sealed := sealAsSprout(t, sproutA, tenantPub, []byte(`{"x":"y"}`))
-	if err := DecryptEncryptedFrom(pki.CurrentTenantID(), "web-b", sealed, new(map[string]string)); err == nil {
-		t.Fatal("expected decryption against the wrong sprout's key to fail")
-	}
-}
-
-func TestOpenFromSprout_TamperedCiphertextFails(t *testing.T) {
-	setupCryptoTest(t)
+	tenantID := pki.CurrentTenantID()
 	sprout := newSproutKeypair(t)
-	if err := pki.RotateSproutBoxKey(pki.CurrentTenantID(), "web-01", sprout.pubB64(), time.Hour); err != nil {
-		t.Fatalf("seeding sprout box key: %v", err)
+	enrollSprout(t, tenantID, "web-01", sprout)
+	oldTenantPub := pinnedTenantPub(t, tenantID)
+	if _, err := pki.RotateTenantX25519Keypair(tenantID, false); err != nil {
+		t.Fatal(err)
 	}
-	tenantPub, _, err := pki.GetTenantX25519KeyPair()
-	if err != nil {
-		t.Fatalf("GetTenantX25519KeyPair: %v", err)
-	}
-
-	sealed := sealAsSprout(t, sprout, tenantPub, []byte(`{"a":"b"}`))
-	var env EncryptedEnvelope
-	if err := json.Unmarshal(sealed, &env); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	env.Ciphertext[0] ^= 0xFF // flip a bit
-	tampered, _ := json.Marshal(env)
-
-	if err := DecryptEncryptedFrom(pki.CurrentTenantID(), "web-01", tampered, new(map[string]string)); err == nil {
-		t.Fatal("expected tampered ciphertext to fail authentication")
+	sealed := sealAsSprout(t, sprout, oldTenantPub, "web-01", payloadbox.PurposeCmdRunResponse, "not re-pinned yet")
+	if _, err := DecryptEncryptedFrom(tenantID, "web-01", payloadbox.PurposeCmdRunResponse, sealed, nil); err != nil {
+		t.Fatalf("payload under the previous tenant key, inside grace: %v", err)
 	}
 }
 
-func TestOpenFromSprout_MalformedEnvelopeFails(t *testing.T) {
+func TestDecryptEncryptedFrom_WrongSproutTamperedAndMalformedFail(t *testing.T) {
 	setupCryptoTest(t)
-	if err := DecryptEncryptedFrom(pki.CurrentTenantID(), "web-01", []byte("not json"), new(map[string]string)); err == nil {
-		t.Fatal("expected malformed envelope JSON to fail")
+	tenantID := pki.CurrentTenantID()
+	sproutA, sproutB := newSproutKeypair(t), newSproutKeypair(t)
+	enrollSprout(t, tenantID, "web-a", sproutA)
+	enrollSprout(t, tenantID, "web-b", sproutB)
+	tenantPub := pinnedTenantPub(t, tenantID)
+
+	// Sealed as sprout A, but farmer is told it came from sprout B.
+	sealed := sealAsSprout(t, sproutA, tenantPub, "web-a", payloadbox.PurposeCmdRunResponse, "x")
+	if _, err := DecryptEncryptedFrom(tenantID, "web-b", payloadbox.PurposeCmdRunResponse, sealed, nil); !errors.Is(err, ErrDecryptFailed) {
+		t.Errorf("wrong sprout: %v", err)
 	}
-	if err := DecryptEncryptedFrom(pki.CurrentTenantID(), "web-01", []byte(`{"n":"aGk=","c":"aGk="}`), new(map[string]string)); err == nil {
-		t.Fatal("expected a too-short nonce to fail")
+
+	var env payloadbox.Envelope
+	json.Unmarshal(sealed, &env)
+	env.Copies[0].Box[0] ^= 0xFF
+	tampered, _ := json.Marshal(env)
+	if _, err := DecryptEncryptedFrom(tenantID, "web-a", payloadbox.PurposeCmdRunResponse, tampered, nil); !errors.Is(err, ErrDecryptFailed) {
+		t.Errorf("tampered: %v", err)
+	}
+	for _, bad := range []string{"not json", `{"n":"aGk=","c":"aGk="}`} {
+		if _, err := DecryptEncryptedFrom(tenantID, "web-a", payloadbox.PurposeCmdRunResponse, []byte(bad), nil); !errors.Is(err, ErrDecryptFailed) {
+			t.Errorf("malformed %q: %v", bad, err)
+		}
+	}
+	// A sprout farmer has no box key for.
+	if _, err := DecryptEncryptedFrom(tenantID, "web-unknown", payloadbox.PurposeCmdRunResponse, sealed, nil); !errors.Is(err, ErrDecryptFailed) {
+		t.Errorf("unknown sprout: %v", err)
 	}
 }
 
-// TestOpenFromSprout_TwoTenantsSameSproutID_DecryptConcurrentlyWithoutCrossing
-// exercises the box-key decrypt path (openFromSprout/ValidSproutBoxKeys)
-// against two distinct tenants that both happen to have accepted a sprout
-// under the exact same sprout ID ("web-01") with their own, different box
-// keys — a real scenario, since sprout IDs are chosen per tenant
-// independently. Both tenants' payloads are decrypted concurrently, not
-// asserted one after the other, and each must only ever decrypt under its
-// own tenant's key: this is the same tenant-scoping bug class PR #28 fixed
-// once for a different call site (see
-// docs/design/imas-tenant-context-threading.md) — asserting a single
-// tenant twice would leave a regression back to the process-global
-// tenantID() seam invisible here exactly as it was before that fix.
-func TestOpenFromSprout_TwoTenantsSameSproutID_DecryptConcurrentlyWithoutCrossing(t *testing.T) {
+// TestDecryptEncryptedFrom_TwoTenantsSameSproutID_DecryptConcurrentlyWithoutCrossing
+// exercises the decrypt path against two distinct tenants that both have
+// a sprout named "web-01", each with its own box key and now each with
+// its own tenant key too. Both tenants' payloads are decrypted
+// concurrently, and each must only ever decrypt under its own tenant's
+// keys: sprout_id is only unique per tenant (CLAUDE.md, "Tenant safety"),
+// so any lookup keyed on sprout_id alone would show up here.
+func TestDecryptEncryptedFrom_TwoTenantsSameSproutID_DecryptConcurrentlyWithoutCrossing(t *testing.T) {
 	setupCryptoTest(t)
 	const sproutID = "web-01"
-
-	sproutA := newSproutKeypair(t)
-	sproutB := newSproutKeypair(t)
-	if err := pki.RotateSproutBoxKey("t_a", sproutID, sproutA.pubB64(), time.Hour); err != nil {
-		t.Fatalf("seeding t_a's sprout box key: %v", err)
-	}
-	if err := pki.RotateSproutBoxKey("t_b", sproutID, sproutB.pubB64(), time.Hour); err != nil {
-		t.Fatalf("seeding t_b's sprout box key: %v", err)
+	sproutA, sproutB := newSproutKeypair(t), newSproutKeypair(t)
+	enrollSprout(t, "t_a", sproutID, sproutA)
+	enrollSprout(t, "t_b", sproutID, sproutB)
+	pubA, pubB := pinnedTenantPub(t, "t_a"), pinnedTenantPub(t, "t_b")
+	if *pubA == *pubB {
+		t.Fatal("two tenants share a tenant key")
 	}
 
-	tenantPub, _, err := pki.GetTenantX25519KeyPair()
-	if err != nil {
-		t.Fatalf("GetTenantX25519KeyPair: %v", err)
-	}
-
-	sealedA := sealAsSprout(t, sproutA, tenantPub, []byte(`{"tenant":"a"}`))
-	sealedB := sealAsSprout(t, sproutB, tenantPub, []byte(`{"tenant":"b"}`))
+	sealedA := sealAsSprout(t, sproutA, pubA, sproutID, payloadbox.PurposeCmdRunResponse, map[string]string{"tenant": "a"})
+	sealedB := sealAsSprout(t, sproutB, pubB, sproutID, payloadbox.PurposeCmdRunResponse, map[string]string{"tenant": "b"})
 
 	type result struct {
 		tenant string
@@ -353,38 +273,30 @@ func TestOpenFromSprout_TwoTenantsSameSproutID_DecryptConcurrentlyWithoutCrossin
 	}
 	results := make(chan result, 2)
 	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		var out map[string]string
-		err := DecryptEncryptedFrom("t_a", sproutID, sealedA, &out)
-		results <- result{"t_a", out, err}
-	}()
-	go func() {
-		defer wg.Done()
-		var out map[string]string
-		err := DecryptEncryptedFrom("t_b", sproutID, sealedB, &out)
-		results <- result{"t_b", out, err}
-	}()
+	for tenant, sealed := range map[string][]byte{"t_a": sealedA, "t_b": sealedB} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var out map[string]string
+			_, err := DecryptEncryptedFrom(tenant, sproutID, payloadbox.PurposeCmdRunResponse, sealed, &out)
+			results <- result{tenant, out, err}
+		}()
+	}
 	wg.Wait()
 	close(results)
-
 	for r := range results {
 		if r.err != nil {
 			t.Fatalf("DecryptEncryptedFrom(%s) failed: %v", r.tenant, r.err)
 		}
-		want := map[string]string{"tenant": r.tenant[len(r.tenant)-1:]}
-		if r.out["tenant"] != want["tenant"] {
-			t.Errorf("%s decrypted %v, want %v", r.tenant, r.out, want)
+		if r.out["tenant"] != r.tenant[len(r.tenant)-1:] {
+			t.Errorf("%s decrypted %v", r.tenant, r.out)
 		}
 	}
 
-	// Cross-tenant decryption must fail: t_a's ciphertext under t_b's key
-	// lookup, and vice versa.
-	if err := DecryptEncryptedFrom("t_b", sproutID, sealedA, new(map[string]string)); err == nil {
-		t.Error("expected t_a's payload to fail decryption under t_b's box key")
+	if _, err := DecryptEncryptedFrom("t_b", sproutID, payloadbox.PurposeCmdRunResponse, sealedA, nil); err == nil {
+		t.Error("t_a's payload decrypted as t_b's")
 	}
-	if err := DecryptEncryptedFrom("t_a", sproutID, sealedB, new(map[string]string)); err == nil {
-		t.Error("expected t_b's payload to fail decryption under t_a's box key")
+	if _, err := DecryptEncryptedFrom("t_a", sproutID, payloadbox.PurposeCmdRunResponse, sealedB, nil); err == nil {
+		t.Error("t_b's payload decrypted as t_a's")
 	}
 }
