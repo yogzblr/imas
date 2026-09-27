@@ -9,7 +9,7 @@ package pki
 // alone wouldn't show nats-server enforces it; this does.
 
 import (
-	"context"
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"os"
@@ -20,13 +20,16 @@ import (
 	"github.com/nats-io/nkeys"
 
 	"github.com/yogzblr/imas/internal/config"
-	"github.com/yogzblr/imas/internal/fleetkeys"
-	"github.com/yogzblr/imas/internal/fleetsign"
 )
 
-type staticFleetKeys struct{ ks fleetsign.KeySet }
-
-func (s staticFleetKeys) KeySet(context.Context) (fleetsign.KeySet, error) { return s.ks, nil }
+// The subjects internal/fleetkeys uses (SproutSubject, ReplyPrefix).
+// Spelled out rather than imported: fleetkeys imports this package to
+// seal its reply, so importing it here would be a cycle.
+const (
+	signingSubject01 = "imas.sprouts.sprout01.fleetsigningkeys"
+	signingSubject02 = "imas.sprouts.sprout02.fleetsigningkeys"
+	signingReply01   = signingSubject01 + ".reply.x"
+)
 
 // acceptTestSprout registers and accepts sproutID, returning its User JWT
 // and seed.
@@ -77,15 +80,16 @@ func TestSproutJWT_FleetSigningKeysOwnSubjectOnly(t *testing.T) {
 	}
 	defer farmer.Close()
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
-	ks, _ := fleetsign.NewKeySet([]fleetsign.PublicKey{{Version: 1, Key: pub}})
-	fleetkeys.SetKeySource(staticFleetKeys{ks: ks})
-	defer fleetkeys.SetKeySource(nil)
-	if err := fleetkeys.RegisterFarmerListener(currentTenantID(), farmer); err != nil {
+	// Farmer's side, subscribed the way fleetkeys.RegisterFarmerListener
+	// is; what it answers is fleetkeys' business, not this test's.
+	if _, err := farmer.QueueSubscribe("imas.sprouts.*.fleetsigningkeys", "imas-core", func(m *nats.Msg) {
+		_ = m.Respond(pub)
+	}); err != nil {
 		t.Fatal(err)
 	}
 	// Watches sprout02's subject, to prove nothing sprout01 sends there
 	// is delivered.
-	other, _ := farmer.SubscribeSync(fleetkeys.SproutSubject("sprout02"))
+	other, _ := farmer.SubscribeSync(signingSubject02)
 	if err := farmer.Flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -97,22 +101,27 @@ func TestSproutJWT_FleetSigningKeysOwnSubjectOnly(t *testing.T) {
 	}
 	defer nc.Close()
 
-	// Allowed: its own subject, full round trip through farmer's listener.
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	got, err := fleetkeys.Fetch(ctx, nc, "sprout01")
+	// Allowed: its own subject, answered on its own reply subtree.
+	sub, err := nc.SubscribeSync(signingReply01)
 	if err != nil {
-		t.Fatalf("sprout01 fetching on its own subject: %v (permission errors: %v)", err, perrs.any())
+		t.Fatal(err)
 	}
-	if len(got) != 1 || !got[0].Key.Equal(pub) {
-		t.Fatalf("sprout01 got %+v", got)
+	if err := nc.PublishRequest(signingSubject01, signingReply01, nil); err != nil {
+		t.Fatal(err)
+	}
+	msg, err := sub.NextMsg(5 * time.Second)
+	if err != nil {
+		t.Fatalf("sprout01 requesting on its own subject: %v (permission errors: %v)", err, perrs.any())
+	}
+	if !bytes.Equal(msg.Data, pub) {
+		t.Fatalf("sprout01 got %x", msg.Data)
 	}
 	if errs := perrs.any(); len(errs) != 0 {
 		t.Fatalf("permission errors on the allowed request: %v", errs)
 	}
 
 	// Refused: another sprout's subject.
-	subj := fleetkeys.SproutSubject("sprout02")
+	subj := signingSubject02
 	_ = nc.Publish(subj, nil)
 	_ = nc.Flush()
 	if !perrs.waitForOp("Publish", subj) {
