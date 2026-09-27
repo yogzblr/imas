@@ -1,12 +1,16 @@
 package client
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
+
+	"github.com/yogzblr/imas/internal/config"
 )
 
 // startTestNATS starts an embedded NATS server and connects NatsConn to it.
@@ -223,5 +227,44 @@ func TestNatsRequest_InvalidResponse(t *testing.T) {
 	_, err = NatsRequest("badjson", nil)
 	if err == nil {
 		t.Fatal("expected unmarshal error")
+	}
+}
+
+// The CLI verifies the bus cert against config.BusTLSServerName(), not
+// config.FarmerInterface: with farmerbusurl pointing at a separate bus
+// Service, farmerinterface is not a name the bus cert carries.
+func TestBusTLSConfig_ServerName(t *testing.T) {
+	origIface, origURL, origName := config.FarmerInterface, config.FarmerBusURL, config.FarmerBusTLSServerName
+	t.Cleanup(func() {
+		config.FarmerInterface, config.FarmerBusURL, config.FarmerBusTLSServerName = origIface, origURL, origName
+	})
+
+	tests := []struct {
+		name, iface, busURL, serverName, want string
+	}{
+		{"default farmerinterface:port", "farmer.example.com", "farmer.example.com:5406", "", "farmer.example.com"},
+		{"wildcard single host", "0.0.0.0", "0.0.0.0:5406", "", "localhost"},
+		{"farmerbusurl elsewhere", "farmer.example.com", "tls://imas-nats-bus.imas.svc.cluster.local:5406", "", "imas-nats-bus.imas.svc.cluster.local"},
+		{"explicit server name", "farmer.example.com", "tls://10.0.0.5:5406", "bus.example.test", "bus.example.test"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config.FarmerInterface = tt.iface
+			config.FarmerBusURL = tt.busURL
+			config.FarmerBusTLSServerName = tt.serverName
+			pool := x509.NewCertPool()
+
+			cfg := busTLSConfig(pool)
+
+			if cfg.ServerName != tt.want {
+				t.Errorf("ServerName = %q, want %q", cfg.ServerName, tt.want)
+			}
+			if cfg.RootCAs != pool {
+				t.Error("RootCAs is not the pool passed in")
+			}
+			if cfg.MinVersion != tls.VersionTLS12 {
+				t.Errorf("MinVersion = %#x, want TLS 1.2", cfg.MinVersion)
+			}
+		})
 	}
 }
