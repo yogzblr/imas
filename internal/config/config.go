@@ -92,6 +92,17 @@ var (
 	SproutPKI             string
 	SproutRootCA          string
 
+	// SproutRootCATOFU is whether a sprout with no SproutRootCA file may
+	// fetch one by trust on first use (pki.FetchRootCA, an unverified
+	// GET of farmer's /auth/cert/). True by default for sprouts that
+	// reach farmer directly. A sprout behind the DMZ Envoy sets
+	// "sproutrootcatofu: false": its enrollment tooling (e.g. the
+	// Ansible playbook that also delivers the join token) pre-provisions
+	// SproutRootCA with the CA that issued Envoy's DMZ edge certificate,
+	// and a missing file is then an error rather than a reason to trust
+	// whatever answers first. See docs/design/imas-envoy-enrollment-design.md.
+	SproutRootCATOFU bool
+
 	// SproutFleetSigningJWKS is where a sprout pins the imas-fleet-signing
 	// public key set it received at enrollment (POST /v1/enroll's
 	// fleet_signing_jwks, design doc §2.5) — next to SproutRootCA, with
@@ -459,6 +470,7 @@ func LoadConfig(binary string) {
 			jety.SetDefault("sproutid", "")
 			jety.SetDefault("sproutpki", filepath.Join(systemConfigRoot, "pki/sprout")+"/")
 			jety.SetDefault("sproutrootca", filepath.Join(systemConfigRoot, "pki/sprout/tls-rootca.pem"))
+			jety.SetDefault("sproutrootcatofu", true)
 			jety.SetDefault("sproutfleetsigningjwks", filepath.Join(systemConfigRoot, "pki/sprout/fleet-signing-jwks.json"))
 			jety.SetDefault("nkeysproutpubfile", filepath.Join(systemConfigRoot, "pki/sprout/sprout.nkey.pub"))
 			jety.SetDefault("joblogdir", "/var/cache/imas/sprout/jobs")
@@ -486,6 +498,7 @@ func LoadConfig(binary string) {
 			GatewayJWTRefreshMargin = jety.GetDuration("gatewayjwtrefreshmargin")
 			StagedRecipeMaxAge = jety.GetDuration("stagedrecipemaxage")
 			SproutHandledJobsFile = jety.GetString("sprouthandledjobsfile")
+			SproutRootCATOFU = jety.GetBool("sproutrootcatofu")
 
 			// The sprout config file can hold the join token. os.Create
 			// (above, and in jety.WriteConfig) leaves a new file 0644

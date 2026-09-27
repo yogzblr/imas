@@ -444,12 +444,20 @@ func LoadRootCA(binary string) error {
 		RootCA = config.ImasRootCA
 	case "sprout":
 		RootCA = config.SproutRootCA
-		if err := FetchRootCA(RootCA); err != nil {
-			return err
+		// With TOFU off (a DMZ install), the CA must have been provisioned
+		// out of band; a missing file fails below instead of being fetched.
+		if config.SproutRootCATOFU {
+			if err := FetchRootCA(RootCA); err != nil {
+				return err
+			}
 		}
 	}
 	certPool := x509.NewCertPool()
 	rootPEM, err := os.ReadFile(RootCA)
+	if binary == "sprout" && !config.SproutRootCATOFU && os.IsNotExist(err) {
+		return fmt.Errorf("%w: %s does not exist and sproutrootcatofu is false; provision it with the CA that issued the farmer's (or DMZ edge's) TLS certificate",
+			ErrRootCANotProvisioned, RootCA)
+	}
 	if err != nil || rootPEM == nil {
 		return err
 	}

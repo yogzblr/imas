@@ -66,9 +66,22 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	rootCARetryDelay := jety.GetDuration("rootca_retry_delay")
+	// Retried rather than fatal: a DMZ install's CA may be provisioned
+	// after the service starts. Each distinct error is logged at Warn so
+	// a sprout stuck here is visible; repeats of it drop to Debug.
+	var lastRootCAErr string
 	for err := pki.LoadRootCA("sprout"); err != nil; err = pki.LoadRootCA("sprout") {
-		log.Debugf("Error with RootCA: %v", err)
-		time.Sleep(rootCARetryDelay)
+		if msg := err.Error(); msg != lastRootCAErr {
+			log.Warnf("cannot load the root CA, retrying every %s: %v", rootCARetryDelay, err)
+			lastRootCAErr = msg
+		} else {
+			log.Debugf("cannot load the root CA: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(rootCARetryDelay):
+		}
 	}
 	enrollRetryDelay := jety.GetDuration("enroll_retry_delay")
 	enrolledID, err := pki.EnsureEnrolled(ctx, config.JoinToken, sproutID, sproutPub, enrollRetryDelay)

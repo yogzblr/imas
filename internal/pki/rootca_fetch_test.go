@@ -37,6 +37,15 @@ func serveRootCA(t *testing.T, handler http.HandlerFunc) *atomic.Int64 {
 	return &hits
 }
 
+// useSproutRootCA points config.SproutRootCA at path and sets
+// config.SproutRootCATOFU, restoring both afterwards.
+func useSproutRootCA(t *testing.T, path string, tofu bool) {
+	t.Helper()
+	oldCA, oldTOFU := config.SproutRootCA, config.SproutRootCATOFU
+	config.SproutRootCA, config.SproutRootCATOFU = path, tofu
+	t.Cleanup(func() { config.SproutRootCA, config.SproutRootCATOFU = oldCA, oldTOFU })
+}
+
 // assertNothingPinned fails unless dir is empty: no CA file and no
 // leftover temporary file.
 func assertNothingPinned(t *testing.T, dir string) {
@@ -204,9 +213,7 @@ func TestLoadRootCA_SproutFetchFailureIsReported(t *testing.T) {
 		http.Error(w, "Jwt is missing", http.StatusUnauthorized)
 	})
 	dir := t.TempDir()
-	oldCA := config.SproutRootCA
-	config.SproutRootCA = filepath.Join(dir, "tls-rootca.pem")
-	t.Cleanup(func() { config.SproutRootCA = oldCA })
+	useSproutRootCA(t, filepath.Join(dir, "tls-rootca.pem"), true)
 
 	if err := LoadRootCA("sprout"); !errors.Is(err, ErrRootCAFetch) {
 		t.Fatalf("LoadRootCA error = %v, want ErrRootCAFetch", err)
@@ -225,9 +232,7 @@ func TestLoadRootCA_UnusablePinnedFileIsKept(t *testing.T) {
 	if err := os.WriteFile(caFile, []byte("Jwt is missing"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	oldCA := config.SproutRootCA
-	config.SproutRootCA = caFile
-	t.Cleanup(func() { config.SproutRootCA = oldCA })
+	useSproutRootCA(t, caFile, true)
 
 	err := LoadRootCA("sprout")
 	if !errors.Is(err, ErrCannotParseRootCA) {
@@ -241,5 +246,62 @@ func TestLoadRootCA_UnusablePinnedFileIsKept(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(caFile); string(got) != "Jwt is missing" {
 		t.Error("existing CA file was modified")
+	}
+}
+
+// A DMZ install (sproutrootcatofu: false) with no provisioned CA fails
+// closed: nothing is fetched, nothing is written, and the error says what
+// to provision.
+func TestLoadRootCA_TOFUDisabledMissingFileFailsClosed(t *testing.T) {
+	hits := serveRootCA(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(generateSelfSignedCertPEM(t))
+	})
+	dir := t.TempDir()
+	caFile := filepath.Join(dir, "tls-rootca.pem")
+	useSproutRootCA(t, caFile, false)
+
+	err := LoadRootCA("sprout")
+	if !errors.Is(err, ErrRootCANotProvisioned) {
+		t.Fatalf("LoadRootCA error = %v, want ErrRootCANotProvisioned", err)
+	}
+	if !strings.Contains(err.Error(), caFile) || !strings.Contains(err.Error(), "sproutrootcatofu") {
+		t.Errorf("error should name the file and the setting, got: %v", err)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("server saw %d requests, want 0", n)
+	}
+	assertNothingPinned(t, dir)
+}
+
+// With TOFU disabled, a CA provisioned out of band is loaded as is.
+func TestLoadRootCA_TOFUDisabledUsesProvisionedFile(t *testing.T) {
+	hits := serveRootCA(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(generateSelfSignedCertPEM(t))
+	})
+	caFile := filepath.Join(t.TempDir(), "tls-rootca.pem")
+	if err := os.WriteFile(caFile, generateSelfSignedCertPEM(t), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	useSproutRootCA(t, caFile, false)
+
+	if err := LoadRootCA("sprout"); err != nil {
+		t.Fatalf("LoadRootCA: %v", err)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("server saw %d requests, want 0", n)
+	}
+}
+
+// sproutrootcatofu only governs the sprout; the imas CLI's missing-file
+// error is unchanged.
+func TestLoadRootCA_TOFUSettingIgnoredForImas(t *testing.T) {
+	oldCA, oldTOFU := config.ImasRootCA, config.SproutRootCATOFU
+	config.ImasRootCA = filepath.Join(t.TempDir(), "imas-rootca.pem")
+	config.SproutRootCATOFU = false
+	t.Cleanup(func() { config.ImasRootCA, config.SproutRootCATOFU = oldCA, oldTOFU })
+
+	err := LoadRootCA("imas")
+	if !os.IsNotExist(err) || errors.Is(err, ErrRootCANotProvisioned) {
+		t.Fatalf("LoadRootCA(imas) error = %v, want a plain not-exist error", err)
 	}
 }
