@@ -4,8 +4,13 @@ name: Release
 # (goreleaser-pro) plus AWS/Cloudsmith/Docker Hub/AUR credentials configured
 # as repo secrets, none of which exist yet on the new imas repo (they lived
 # on the original project's infra, not this fork's). Re-enable the tags
-# trigger below once all of those secrets are set on yogzblr/imas — until
+# trigger below once all of those are set on yogzblr/imas (the "Check
+# release secrets" step fails fast, naming whatever is missing) — until
 # then, pushing a v* tag would just fail at the first login/import step.
+#
+# This creates a draft GitHub release. Publishing that release (a
+# maintainer's review step) is what uploads the OS packages to the Buildkite
+# Package Registries: see publish-packages.yml.
 on:
   workflow_dispatch:
   # push:
@@ -33,6 +38,38 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: stable
+
+      # Every secret this workflow uses, checked up front so a missing one
+      # fails here with its name instead of halfway through a publish.
+      - name: Check release secrets
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+          CLOUDSMITH_REPOSITORY: ${{ secrets.CLOUDSMITH_REPOSITORY }}
+          AUR_KEY: ${{ secrets.AUR_KEY }}
+        run: |
+          missing=()
+          for name in GPG_PRIVATE_KEY GPG_PASSPHRASE GORELEASER_KEY \
+                      DOCKER_USERNAME DOCKER_PASSWORD \
+                      AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY \
+                      CLOUDSMITH_API_KEY CLOUDSMITH_REPOSITORY AUR_KEY; do
+            [ -n "${!name}" ] || missing+=("$name")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::missing repo/environment secrets: ${missing[*]}"
+            exit 1
+          fi
+
+      # goreleaser's msi pipe builds the imas-sprout MSI with msitools' wixl;
+      # packaging/windows/msi-postprocess.sh uses msibuild/msiinfo from msitools.
+      - name: Install msitools
+        run: sudo apt-get update -q && sudo apt-get install -y -q wixl msitools
 
       - name: Import GPG key
         id: import_gpg

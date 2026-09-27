@@ -1,0 +1,40 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.10.0.schema.json
+# Rendered by packaging/windows/winget/build-winget-nupkg.sh; do not edit the output.
+PackageIdentifier: @PACKAGE_IDENTIFIER@
+PackageVersion: @PACKAGE_VERSION@
+MinimumOSVersion: 10.0.0.0
+# The download is the @INSTALLER_ID@ .nupkg from the public imasnget
+# NuGet feed: a zip holding the WiX-authored MSI
+# (packaging/windows/imas-sprout.wxs). winget extracts it and runs the MSI.
+# The MSI installs the imas-sprout Windows service (automatic start) and
+# starts it only on an upgrade: a fresh install has no farmer address or
+# join token yet.
+InstallerType: zip
+NestedInstallerType: wix
+NestedInstallerFiles:
+  - RelativeFilePath: @MSI_NAME@
+Scope: machine
+InstallModes:
+  - silent
+  - silentWithProgress
+InstallerSwitches:
+  Silent: /quiet /norestart
+  SilentWithProgress: /passive /norestart
+UpgradeBehavior: install
+ElevationRequirement: elevationRequired
+ProductCode: "@PRODUCT_CODE@"
+AppsAndFeaturesEntries:
+  - DisplayName: imas sprout
+    Publisher: imas
+    DisplayVersion: "@MSI_VERSION@"
+    ProductCode: "@PRODUCT_CODE@"
+    UpgradeCode: "@UPGRADE_CODE@"
+    InstallerType: wix
+InstallationMetadata:
+  DefaultInstallLocation: '%ProgramFiles%\imas'
+Installers:
+  - Architecture: x64
+    InstallerUrl: @INSTALLER_URL@
+    InstallerSha256: @INSTALLER_SHA256@
+ManifestType: installer
+ManifestVersion: 1.10.0

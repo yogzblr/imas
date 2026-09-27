@@ -1,0 +1,180 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<!--
+  imas-sprout MSI (WiX v3 schema). goreleaser-pro's `msi` pipe templates this
+  file and, on Linux, builds it with msitools' wixl, which supports only a
+  subset of the v3 schema: no WixUtilExtension, no <Permission>/<PermissionEx>,
+  no <ServiceConfig>, and it silently ignores Component/@Permanent,
+  Component/@NeverOverwrite and Package/@Platform (the arch comes from
+  `wixl -a`); it also rejects Component/Condition and ignores
+  Property/@Secure. packaging/windows/msi-postprocess.sh (goreleaser msi
+  after-hook) fixes up the built MSI with msibuild: it sets the component
+  attributes and the start condition described below, marks START_SERVICE
+  secure, and adds the directory ACL and the service's failure actions as
+  MSI 5.0 tables. Keep the attributes here anyway so a WiX build on Windows
+  honours them without the post-process step.
+
+  Layout:
+    %ProgramFiles%\imas\imas-sprout.exe       binary
+    %ProgramData%\imas\                       config root (SYSTEM + Administrators only)
+    %ProgramData%\imas\sprout                 config file (same name as /etc/imas/sprout)
+    %ProgramData%\imas\cache\sprout\          cache (as /var/cache/imas/sprout)
+  The sprout creates the rest of %ProgramData%\imas (pki\, state\, logs\)
+  itself; see internal/config/paths_windows.go, which must agree with this.
+
+  The service is named imas-sprout, like the systemd/OpenRC unit, so the same
+  `service` ingredient recipe (internal/ingredients/service/windows on this
+  platform) manages it everywhere.
+
+  The service starts automatically at boot. The installer itself starts it
+  (SproutServiceStart below) only when:
+    - this install upgrades an earlier imas-sprout (WIX_UPGRADE_DETECTED,
+      or WIX_SAME_VERSION_UPGRADE_DETECTED for a same-version upgrade such
+      as 1.2.3-rc.1 -> 1.2.3): the upgrade stopped it, so bring it back on
+      the new binary; or
+    - START_SERVICE=1 is passed, for a host whose config (farmer address,
+      join token) was provisioned before the install.
+  A plain fresh install leaves it stopped, like the rpm/deb postinstall
+  (enable, don't start): write the config, then `imas-sprout start` or
+  `Start-Service imas-sprout`. The start waits for the service to report
+  Running; if it can't, the install fails and an upgrade rolls back to the
+  previous version.
+
+  Only amd64 is built today; the Win64/ProgramFiles64Folder choice below keeps
+  a 386 build possible later.
+-->
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+  {{ if eq .MsiArch "x64" }}
+  <?define Win64 = "yes" ?>
+  <?define PlatformProgramFilesFolder = "ProgramFiles64Folder" ?>
+  {{ else }}
+  <?define Win64 = "no" ?>
+  <?define PlatformProgramFilesFolder = "ProgramFilesFolder" ?>
+  {{ end }}
+  <!-- Product Id='*': a new ProductCode per build, which MajorUpgrade needs.
+       UpgradeCode must never change: it is how an installed imas-sprout is
+       found and replaced on upgrade. MSI ProductVersion is numeric-only, so
+       prerelease/snapshot suffixes are dropped here. -->
+  <Product
+    Name='imas sprout'
+    Id='*'
+    UpgradeCode='50B3F4FF-D163-4EDD-84B9-330F966FFF8F'
+    Language='1033'
+    Codepage='1252'
+    Version='{{ .Major }}.{{ .Minor }}.{{ .Patch }}'
+    Manufacturer='imas'>
+
+    <Package
+      Id='*'
+      Keywords='Installer'
+      Description='imas sprout {{ .Version }} (remote control agent)'
+      Manufacturer='imas'
+      InstallerVersion='500'
+      InstallScope='perMachine'
+      Languages='1033'
+      Compressed='yes'
+      SummaryCodepage='1252' />
+
+    <!-- AllowSameVersionUpgrades: ProductVersion drops prerelease suffixes,
+         so 1.2.3-rc.1 and 1.2.3 are both 1.2.3; without it installing one
+         over the other would leave two products (and one service between
+         them). wixl detects that case as WIX_SAME_VERSION_UPGRADE_DETECTED;
+         WiX folds it into WIX_UPGRADE_DETECTED. -->
+    <MajorUpgrade
+      AllowSameVersionUpgrades='yes'
+      DowngradeErrorMessage='A newer version of imas sprout is already installed.' />
+
+    <Media Id='1' Cabinet='sprout.cab' EmbedCab='yes' />
+
+    <Property Id='ARPURLINFOABOUT' Value='https://github.com/yogzblr/imas' />
+    <Property Id='ARPNOMODIFY' Value='1' />
+    <!-- msiexec /i imas-sprout.msi START_SERVICE=1: start the service at the
+         end of a fresh install. Unset by default. msi-postprocess.sh adds it
+         to SecureCustomProperties, since wixl ignores Secure. -->
+    <Property Id='START_SERVICE' Secure='yes' />
+
+    <Directory Id='TARGETDIR' Name='SourceDir'>
+      <Directory Id='$(var.PlatformProgramFilesFolder)'>
+        <Directory Id='INSTALLDIR' Name='imas'>
+          <Component Id='SproutExecutable' Guid='5A7C63D1-3B0E-4D4A-9E0B-6F2B8C1D4E01' Win64='$(var.Win64)'>
+            <File
+              Id='SproutExe'
+              Name='imas-sprout.exe'
+              DiskId='1'
+              Source='{{ .Binary }}.exe'
+              KeyPath='yes' />
+            <ServiceInstall
+              Id='SproutServiceInstall'
+              Name='imas-sprout'
+              DisplayName='imas Sprout'
+              Description='imas remote control agent'
+              Type='ownProcess'
+              Start='auto'
+              ErrorControl='normal'
+              Account='LocalSystem'
+              Vital='yes' />
+            <!-- Stop before files are replaced (upgrade) or removed, delete the
+                 service on uninstall. No Start: see the header comment. -->
+            <ServiceControl
+              Id='SproutServiceControl'
+              Name='imas-sprout'
+              Stop='both'
+              Remove='uninstall'
+              Wait='yes' />
+          </Component>
+          <!-- Starts the service at the end of the install, when its
+               condition holds (see the header comment). wixl rejects
+               <Condition> here, so on Linux msi-postprocess.sh sets the same
+               condition in the Component table; a WiX build on Windows gets
+               the element. Keep the two in sync. The registry value is just a
+               key path; it records where the sprout is installed. -->
+          <Component Id='SproutServiceStart' Guid='7B3D9E21-5C4A-4F8B-9D2E-1A6C3F5B8E05' Win64='$(var.Win64)'>
+            {{ if eq .Runtime.Goos "windows" }}<Condition><![CDATA[WIX_UPGRADE_DETECTED OR WIX_SAME_VERSION_UPGRADE_DETECTED OR START_SERVICE = "1"]]></Condition>{{ end }}
+            <RegistryValue Root='HKLM' Key='SOFTWARE\imas\sprout' Name='InstallDir' Type='string' Value='[INSTALLDIR]' KeyPath='yes' />
+            <ServiceControl
+              Id='SproutServiceStartControl'
+              Name='imas-sprout'
+              Start='install'
+              Wait='yes' />
+          </Component>
+        </Directory>
+      </Directory>
+
+      <Directory Id='CommonAppDataFolder'>
+        <Directory Id='IMASDATADIR' Name='imas'>
+          <!-- Permanent: enrollment state (NKey seed, X25519 key, JWTs) lives
+               under here and must survive uninstall/reinstall and upgrades,
+               as /etc/imas does with rpm/deb. -->
+          <Component Id='SproutDataDir' Guid='9D2E4F10-7A61-4C3B-8F5E-2B1A0C9D8E02' Permanent='yes' Win64='$(var.Win64)'>
+            <CreateFolder />
+          </Component>
+          <!-- NeverOverwrite + Permanent: the config is the admin's (farmer
+               address, join token); an upgrade must not reset it and an
+               uninstall leaves it behind, like an rpm %config(noreplace). -->
+          <Component Id='SproutConfig' Guid='1E6B8A2C-4D3F-4B7E-A9C0-3F5D2E1B7A03' NeverOverwrite='yes' Permanent='yes' Win64='$(var.Win64)'>
+            <File
+              Id='SproutConfigFile'
+              Name='sprout'
+              DiskId='1'
+              Source='packaging/etc/imas-sprout.conf'
+              KeyPath='yes' />
+          </Component>
+          <Directory Id='IMASCACHEDIR' Name='cache'>
+            <Directory Id='SPROUTCACHEDIR' Name='sprout'>
+              <Component Id='SproutCacheDir' Guid='C4F1A7B3-6E2D-4A9F-B1C8-5D3E7F2A9B04' Permanent='yes' Win64='$(var.Win64)'>
+                <CreateFolder />
+              </Component>
+            </Directory>
+          </Directory>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id='Complete' Level='1'>
+      <ComponentRef Id='SproutExecutable' />
+      <ComponentRef Id='SproutServiceStart' />
+      <ComponentRef Id='SproutDataDir' />
+      <ComponentRef Id='SproutConfig' />
+      <ComponentRef Id='SproutCacheDir' />
+    </Feature>
+  </Product>
+</Wix>

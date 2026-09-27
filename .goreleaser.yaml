@@ -56,6 +56,23 @@ builds:
       - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
     tags:
       - no_self_update
+  # Windows sprout, packaged as an MSI (see the msi section) that installs
+  # the imas-sprout Windows service. Package-managed like the -pkg builds
+  # above, so no self-update. A fixed binary name keeps the .wxs template's
+  # {{ .Binary }} predictable.
+  - main: ./cmd/sprout/
+    id: "sprout-windows-pkg"
+    binary: "{{.ProjectName}}-sprout"
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+    ldflags:
+      - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
+    tags:
+      - no_self_update
 
   # Standalone builds (with self-update)
   - main: ./cmd/sprout/
@@ -127,6 +144,30 @@ archives:
     format_overrides:
       - goos: windows
         formats: zip
+
+# Windows installer for imas-sprout: installs the imas-sprout service. Built
+# with msitools' wixl on Linux (install wixl + msitools on the runner), then
+# fixed up by msi-postprocess.sh for what wixl can't express (directory ACL,
+# service failure actions, Permanent/NeverOverwrite). See
+# packaging/windows/imas-sprout.wxs and packaging/README.md.
+msi:
+  - id: imas-sprout-msi
+    name: "{{.ProjectName}}-sprout-{{.Version}}-windows-{{.MsiArch}}"
+    wxs: ./packaging/windows/imas-sprout.wxs
+    # Build IDs, whatever the goreleaser docs say ("IDs of the archives"):
+    # verified with goreleaser-pro v2.18.2, an archive ID matches nothing and
+    # the pipe silently produces no MSI.
+    ids:
+      - sprout-windows-pkg
+    # Copied to the same relative path next to the .wxs (not flattened).
+    extra_files:
+      - packaging/etc/imas-sprout.conf
+    version: v3
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    hooks:
+      after:
+        - cmd: ./packaging/windows/msi-postprocess.sh "{{ .ArtifactPath }}"
+          output: true
 
 nfpms:
   - id: imas
@@ -383,11 +424,18 @@ release:
   github:
     owner: yogzblr
     name: imas
+  # IDs of everything uploaded to the release. The nfpm IDs are listed so
+  # the imas-farmer/imas-sprout rpm/deb/apk packages are release assets:
+  # .github/workflows/publish-packages.yml publishes the release's assets
+  # to Buildkite. ("imas" covers both the CLI archives and its nfpm entry.)
   ids:
     - imas-universal
     - imas
     - farmer
     - sprout
+    - imas-farmer
+    - imas-sprout
+    - imas-sprout-msi
   draft: true
   # Support for nightlies
   prerelease: auto

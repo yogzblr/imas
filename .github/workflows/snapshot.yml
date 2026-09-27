@@ -38,6 +38,11 @@ jobs:
         with:
           gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
           passphrase: ${{ secrets.GPG_PASSPHRASE }}    
+
+      # The msi pipe (imas-sprout Windows installer) needs msitools' wixl,
+      # and its after-hook msibuild/msiinfo.
+      - name: Install msitools
+        run: sudo apt-get update -q && sudo apt-get install -y -q wixl msitools
       
       - name: Test GoReleaser
         uses: goreleaser/goreleaser-action@v7
