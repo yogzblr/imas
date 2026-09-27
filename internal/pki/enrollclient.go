@@ -24,6 +24,9 @@ package pki
 //   - Refreshes carry no join token at all (their own contract,
 //     POST /v1/refresh), so a refresh can only re-issue an existing
 //     identity, never redeem a token or create a sprout.
+//   - nats_urls, the bus addresses the sprout will send its User JWT and
+//     gateway JWT to, must pass ValidateBusURLs (TLS schemes only, no
+//     credentials) or the whole response is refused; see busconnect.go.
 //   - The tenant X25519 public key is pinned write-once at enrollment. A
 //     response carrying a different one is refused whole, and the error
 //     (ErrTenantKeyMismatch) is fatal to the sprout, until authenticated
@@ -330,6 +333,11 @@ func validateEnrollResponse(resp *EnrollResponse, nkeyPub string) error {
 	if _, err := fleetsign.ParseJWKS(resp.FleetSigningJWKS); err != nil {
 		return fmt.Errorf("pki: enrollment response's fleet_signing_jwks: %w", err)
 	}
+	urls, err := ValidateBusURLs(resp.NatsURLs)
+	if err != nil {
+		return fmt.Errorf("pki: enrollment response's nats_urls: %w", err)
+	}
+	resp.NatsURLs = urls
 	return nil
 }
 
@@ -429,8 +437,9 @@ func EnsureEnrolled(ctx context.Context, joinToken, requestedID, sproutPub strin
 // PersistEnrollment writes a validated enrollment response next to the
 // sprout's NKey seed and root CA. The tenant X25519 public key is checked
 // against any already-pinned one before anything is written
-// (ErrTenantKeyMismatch), then the gateway JWT, the tenant key pin and the
-// fleet signing JWKS pin are written, and the NATS User JWT last.
+// (ErrTenantKeyMismatch), then the gateway JWT, the tenant key pin, the
+// fleet signing JWKS pin and the bus URLs (nats_urls, which
+// LoadSproutBus connects to) are written, and the NATS User JWT last.
 // SproutEnrolled keys off the User JWT, so a crash part-way leaves the
 // sprout un-enrolled and it enrolls again on restart, which farmer answers
 // from its idempotent replay without spending another use of the join
@@ -456,6 +465,11 @@ func PersistEnrollment(resp *EnrollResponse) error {
 			return fmt.Errorf("pki: pinning fleet signing keys: %w", err)
 		}
 		log.Warnf("enroll: keeping the already-pinned fleet signing key set; farmer returned a different one")
+	}
+	// Not a pin: every enrollment replaces it (or removes it, when farmer
+	// sent none, which falls back to FarmerBusURL).
+	if err := persistBusURLs(resp.NatsURLs); err != nil {
+		return err
 	}
 	// Not a secret without the NKey seed, but there's no reason for
 	// anything but the sprout to read it.

@@ -16,7 +16,12 @@ Treat this as a reviewed starting point, not a drop-in production config.
   placeholder paths for the DMZ edge's own downstream certificate (what
   sprouts' `wss://` connections terminate against) — not farmer's own
   cert (`config.CertFile`/`KeyFile`), which is used for the *upstream*
-  hop to farmer/nats-server instead.
+  hop to farmer/nats-server instead. Sprouts behind this Envoy pin the CA
+  that issued `dmz-cert.pem`: the enrollment tooling writes it to each
+  sprout's `sproutrootca` path and sets `sproutrootcatofu: false`. There
+  is deliberately no `/auth/cert/` route here for sprouts to fetch it by
+  trust on first use (see "Root CA" in
+  `docs/design/imas-envoy-enrollment-design.md`).
 - **Upstream hostnames**: `farmer.internal` throughout the `clusters:`
   section is a placeholder. Point it at wherever farmer/nats-server
   actually run relative to this Envoy instance.

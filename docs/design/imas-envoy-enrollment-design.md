@@ -61,6 +61,17 @@ Every credential elsewhere in this design (the JWT, the X25519 keypairs) assumes
 - **Proof of possession on every request**: the sprout signs the request with its NKey seed, and farmer verifies that signature before anything else. See "Proof of possession" below.
 - **Response, in one round trip:** the sprout's signed NATS User JWT (from the workstream B model), its paired gateway JWT (see below, for Envoy's `jwt_authn` on the websocket and recipe routes), its NKey identity, and the tenant's X25519 public key (from workstream J's payload encryption bootstrap) — everything the sprout needs for every subsequent interaction with the platform, issued atomically at enrollment rather than across several separate exchanges.
 
+### Root CA: pre-provisioned, not fetched, for sprouts behind the DMZ
+
+A sprout needs a trusted TLS root before it can make any of the calls above, and the join token is sent on the very first one (`/v1/enroll`). A sprout that reaches farmer directly bootstraps that root by trust on first use: `pki.FetchRootCA` does an unverified `GET /auth/cert/` and pins a 200 response that parses as PEM certificates. A sprout behind the DMZ does **not**. Envoy has no `/auth/cert/` route (the request falls to the JWT-gated default route), and none will be added:
+
+- **Which CA to pin.** Envoy terminates TLS, so every connection a DMZ sprout makes (`/v1/enroll`, `/v1/refresh`, `/files/`, `wss://`) is checked against **the CA that issued Envoy's DMZ edge certificate** (`dmz-cert.pem` in `deploy/envoy/envoy.yaml`), not farmer's internal `config.RootCA`. The two need not be the same PKI.
+- **How it gets there.** The enrollment tooling (the Ansible playbook that already delivers the join token over its own authenticated SSH/WinRM channel) writes that CA to the sprout's `sproutrootca` path (default `/etc/imas/pki/sprout/tls-rootca.pem`) before the sprout starts, and sets `sproutrootcatofu: false` in the sprout config file.
+- **Fail closed.** With `sproutrootcatofu: false`, a sprout never fetches a root CA. If the file is missing it logs `root CA has not been provisioned` at Warn and retries until the file appears; if the file is present but not a PEM certificate it reports the path and does not replace it.
+- **Why not TOFU through Envoy.** An unverified first fetch across the DMZ would let anyone on the path hand the sprout their own CA, which it would then pin permanently and use to send the join token straight to them. It would also expose farmer's internal CA at the edge and add another unauthenticated DMZ route.
+
+`sproutrootcatofu` defaults to `true`, so existing direct-to-farmer installs are unchanged. Rotating the DMZ edge certificate onto a different CA means re-provisioning `sproutrootca` on every sprout first.
+
 ## Proof of possession: every request signs with the sprout's NKey seed
 
 `nkey_pub` is not a secret. Envoy forwards it upstream as `x-imas-sprout-nkey` on every JWT-gated request, and it is the `sub` of both tokens the sprout holds. The idempotency replay (`cloudxp-machine-manager-api-design.md` §3.3 step 1) runs before the join token is checked, so if `nkey_pub` alone were enough, anyone who had seen an enrolled sprout's `nkey_pub` could call `/v1/enroll` and get a freshly minted gateway JWT for that sprout. Every request must therefore prove it holds the NKey seed behind the `nkey_pub` it presents.

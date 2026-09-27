@@ -129,6 +129,9 @@ func TestSproutAction_RegisteredWithTenantProvisioning(t *testing.T) {
 	if err := RegisterTenantProvisioning(nc); err != nil {
 		t.Fatalf("RegisterTenantProvisioning: %v", err)
 	}
+	if err := nc.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 	reply := requestSproutAction(t, dialSaaSAPI(t, nc), cmdRunRequest("t_1", "web-01"))
 	if reply.Status != controlplane.StatusCompleted {
 		t.Fatalf("unexpected reply %+v", reply)
@@ -206,6 +209,9 @@ func TestSproutAction_PointOfEffectCheckAgainstRealStore(t *testing.T) {
 	rec := stubSproutActionDispatch(t, nil) // real verifySproutInTenant
 	if err := RegisterSproutAction(nc); err != nil {
 		t.Fatalf("RegisterSproutAction: %v", err)
+	}
+	if err := nc.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
 	}
 	saas := dialSaaSAPI(t, nc)
 
@@ -380,6 +386,9 @@ func TestSproutAction_CmdRunThroughRealHandler(t *testing.T) {
 	if err := RegisterSproutAction(nc); err != nil {
 		t.Fatalf("RegisterSproutAction: %v", err)
 	}
+	if err := nc.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 	saas := dialSaaSAPI(t, nc)
 
 	req := cmdRunRequest(legacy, "web-01")
@@ -418,6 +427,9 @@ func TestSproutAction_CookThroughRealHandler(t *testing.T) {
 
 	if err := RegisterSproutAction(nc); err != nil {
 		t.Fatalf("RegisterSproutAction: %v", err)
+	}
+	if err := nc.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
 	}
 	reply := requestSproutAction(t, dialSaaSAPI(t, nc), controlplane.SproutActionRequest{
 		TenantID: legacy,
@@ -507,6 +519,9 @@ func TestSproutAction_ConcurrencyLimitIsEnforced(t *testing.T) {
 			}
 			if err := RegisterSproutAction(nc); err != nil {
 				t.Fatalf("RegisterSproutAction: %v", err)
+			}
+			if err := nc.Flush(); err != nil {
+				t.Fatalf("flush: %v", err)
 			}
 			saas := dialSaaSAPI(t, nc)
 

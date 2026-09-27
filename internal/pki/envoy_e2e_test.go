@@ -11,8 +11,10 @@ package pki
 // RefreshGatewayJWT -> RefreshSprout, both with NKey proof of
 // possession); gateway JWTs minted and served as a JWKS by
 // internal/gatewayjwt's production code; the operator-mode bus
-// (ConfigureNats) with its websocket listener; ConnectSprout's auth
-// options (UserJWTAndSeed + GatewayJWTHeaders); FetchFarmerFile. Stubbed:
+// (ConfigureNats) with its websocket listener; the bus connection
+// ConnectSprout makes (LoadSproutBus: the nats_urls persisted at
+// enrollment, SproutRootCA-pinned TLS, UserJWTAndSeed +
+// GatewayJWTHeaders); FetchFarmerFile. Stubbed:
 // OpenBao Transit (internal/gatewayjwt/transittest), and
 // farmer's GET /files/ handler, which here only records what Envoy
 // forwarded; internal/api's envoy_e2e_test.go runs the real one.
@@ -27,6 +29,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -66,7 +69,7 @@ func TestSproutLifecycle_ThroughRealEnvoy(t *testing.T) {
 	}
 	sproutKP := setupSproutFiles(t)
 	sproutNKey, _ := sproutKP.PublicKey()
-	startEnrollServer(t)
+	enrollSrv := startEnrollServer(t)
 
 	// farmer as Envoy sees it: one TLS upstream for farmer_api and
 	// recipe_service. JWKS and /files/ here; /v1/enroll and /v1/refresh
@@ -97,11 +100,18 @@ func TestSproutLifecycle_ThroughRealEnvoy(t *testing.T) {
 		FarmerAPI:     farmer.Listener.Addr().String(),
 		NATSWebsocket: "127.0.0.1:" + strconv.Itoa(wsPort),
 	})
-	// From here on the sprout only ever talks to Envoy.
+	// From here on the sprout only ever talks to Envoy: farmer's
+	// sproutbusurls (IMAS_SPROUT_BUS_URLS) name Envoy's wss:// address,
+	// and Envoy's certificate is the sprout's pinned root CA.
 	config.FarmerURL = env.URL
 	nkeyClientMu.Lock()
 	nkeyClient = env.HTTPClient()
 	nkeyClientMu.Unlock()
+	enrollSrv.setNatsURLs(env.BusURL)
+	config.SproutRootCA = filepath.Join(t.TempDir(), "tls-rootca.pem")
+	if err := os.WriteFile(config.SproutRootCA, env.CertPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	// Enroll: POST /v1/enroll through Envoy's ungated, rate-limited route.
 	boxPub, err := EnsureSproutBoxKey()
@@ -117,28 +127,26 @@ func TestSproutLifecycle_ThroughRealEnvoy(t *testing.T) {
 	}
 	sproutID := resp.SproutID
 
-	connect := func() (*nats.Conn, error) {
-		userJWT, err := LoadSproutUserJWT()
+	// ConnectSprout's connection, minus its reconnect tuning.
+	connect := func(t *testing.T) (*SproutBus, *nats.Conn, error) {
+		t.Helper()
+		bus, err := LoadSproutBus()
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("LoadSproutBus: %v", err)
 		}
-		seed, err := os.ReadFile(config.NKeySproutPrivFile)
-		if err != nil {
-			t.Fatal(err)
-		}
-		// ConnectSprout's auth options, minus its reconnect tuning.
-		return nats.Connect(env.BusURL, nats.Secure(env.TLSConfig()),
-			nats.UserJWTAndSeed(userJWT, strings.TrimSpace(string(seed))),
-			nats.WebSocketConnectionHeadersHandler(GatewayJWTHeaders),
-			nats.NoReconnect(), nats.Timeout(5*time.Second))
+		nc, err := bus.Connect(nats.NoReconnect(), nats.Timeout(5*time.Second))
+		return bus, nc, err
 	}
 	roundTrip := func(t *testing.T) {
 		t.Helper()
-		nc, err := connect()
+		bus, nc, err := connect(t)
 		if err != nil {
-			t.Fatalf("wss:// connect through Envoy: %v", err)
+			t.Fatalf("connect to %q (from %s) through Envoy: %v", bus.Servers, bus.Source, err)
 		}
 		defer nc.Close()
+		if bus.Source != BusURLsFromEnrollment || nc.ConnectedUrl() != env.BusURL {
+			t.Fatalf("connected to %q from %s, want Envoy's %q from enrollment", nc.ConnectedUrl(), bus.Source, env.BusURL)
+		}
 		subj := "imas.sprouts." + sproutID + ".facts"
 		sub, err := nc.SubscribeSync(subj)
 		if err != nil {
@@ -186,6 +194,41 @@ func TestSproutLifecycle_ThroughRealEnvoy(t *testing.T) {
 	}
 
 	t.Run("enrolled sprout connects over wss and the bus works", roundTrip)
+
+	t.Run("without the enrolled nats_urls, FarmerBusURL can't reach the bus through Envoy", func(t *testing.T) {
+		// The bug the persisted nats_urls fix: a bare host:port is
+		// dialled as TLS NATS, which waits for the server's INFO while
+		// Envoy's HTTPS listener waits for a ClientHello.
+		saved, err := os.ReadFile(config.SproutBusURLsFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(config.SproutBusURLsFile); err != nil {
+			t.Fatal(err)
+		}
+		// What config.LoadConfig derives from farmerinterface and
+		// farmerbusport when both point at Envoy. Only for this subtest:
+		// farmer's side of this test pushes Account JWTs over it too.
+		origBus := config.FarmerBusURL
+		config.FarmerBusURL = strings.TrimPrefix(env.BusURL, "wss://")
+		defer func() {
+			config.FarmerBusURL = origBus
+			if err := os.WriteFile(config.SproutBusURLsFile, saved, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}()
+		bus, err := LoadSproutBus()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bus.Source != BusURLsFromLegacy {
+			t.Fatalf("source %s, want the legacy FarmerBusURL", bus.Source)
+		}
+		if nc, err := bus.Connect(nats.NoReconnect(), nats.Timeout(2*time.Second)); err == nil {
+			nc.Close()
+			t.Fatal("plain NATS-over-TLS connected through Envoy's HTTPS listener")
+		}
+	})
 
 	t.Run("Envoy refuses the upgrade without a valid gateway JWT", func(t *testing.T) {
 		// Expiry well past jwt_authn's default 60s clock_skew_seconds.

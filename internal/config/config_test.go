@@ -623,6 +623,26 @@ func TestLoadConfig_SproutDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_SproutRootCATOFU(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"default on", "", true},
+		{"disabled for a DMZ install", "sproutrootcatofu: false\n", false},
+		{"explicitly on", "sproutrootcatofu: true\n", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			loadSproutConfig(t, c.content)
+			if SproutRootCATOFU != c.want {
+				t.Errorf("SproutRootCATOFU = %v, want %v", SproutRootCATOFU, c.want)
+			}
+		})
+	}
+}
+
 func TestLoadConfig_SproutWithCustomID(t *testing.T) {
 	tmpRoot := t.TempDir()
 	content := "sproutid: my-custom-sprout\nloglevel: warn\n"
@@ -1027,5 +1047,42 @@ func TestLoadConfig_FarmerJobReconcileWindowInvalid(t *testing.T) {
 		if !strings.Contains(string(out), EnvJobReconcileWindow) {
 			t.Errorf("%s=%q: exit message doesn't name the variable:\n%s", EnvJobReconcileWindow, bad, out)
 		}
+	}
+}
+
+func TestLoadConfig_SproutBusURLs(t *testing.T) {
+	cases := map[string]struct {
+		content string
+		want    []string
+	}{
+		"unset":        {"sproutid: s1\n", nil},
+		"yaml list":    {"busurls:\n  - wss://edge1:8443\n  - \" wss://edge2:8443 \"\n", []string{"wss://edge1:8443", "wss://edge2:8443"}},
+		"comma string": {"busurls: \"wss://edge1:8443, wss://edge2:8443,\"\n", []string{"wss://edge1:8443", "wss://edge2:8443"}},
+		"empty list":   {"busurls: []\n", nil},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			tmpRoot := t.TempDir()
+			cfgFile := writeTempConfig(t, tmpRoot, "sprout", tc.content)
+			resetForBinaryTest(t, tmpRoot)
+			jety.SetConfigType("yaml")
+			jety.SetConfigFile(cfgFile)
+			_ = jety.ReadInConfig()
+			BusURLs = nil
+
+			LoadConfig("sprout")
+
+			if len(BusURLs) != len(tc.want) {
+				t.Fatalf("BusURLs = %q, want %q", BusURLs, tc.want)
+			}
+			for i := range tc.want {
+				if BusURLs[i] != tc.want[i] {
+					t.Fatalf("BusURLs = %q, want %q", BusURLs, tc.want)
+				}
+			}
+			if want := filepath.Join(tmpRoot, "pki/sprout/bus-urls.json"); SproutBusURLsFile != want {
+				t.Errorf("SproutBusURLsFile = %q, want %q", SproutBusURLsFile, want)
+			}
+		})
 	}
 }
