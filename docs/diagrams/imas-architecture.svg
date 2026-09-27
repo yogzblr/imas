@@ -4,6 +4,7 @@
     Source of truth for every field and route below is the code, not the
     design docs: internal/api/handlers/enroll.go (enrollSuccessResponse),
     internal/pki/enroll.go, internal/pki/tenantbox.go,
+    internal/payloadbox, internal/ingredients/cmd/sealed.go,
     internal/natsapi/crypto.go, deploy/envoy/envoy.yaml,
     internal/saasapi/router.go. Hand-written SVG so it diffs in review;
     edit it as text.
@@ -115,9 +116,9 @@
   <text x="358" y="623" class="small" font-weight="700">Listeners</text>
   <text x="358" y="640" class="mono">:5407</text><text x="400" y="640" class="mono">websocket</text><text x="480" y="640" class="mono">sprouts, only via Envoy</text>
   <text x="358" y="657" class="mono">:5406</text><text x="400" y="657" class="mono">TLS NATS</text><text x="480" y="657" class="mono">core (farmer, saasapi) dials in</text>
-  <text x="358" y="681" class="small">Payloads cross the bus inside TLS only today: the</text>
-  <text x="358" y="696" class="small">NaCl-box envelope exists but isn't wired to any</text>
-  <text x="358" y="711" class="small">subject yet (see "Payload encryption" below).</text>
+  <text x="358" y="681" class="small">cmd.run crosses the bus NaCl-box sealed, so the bus</text>
+  <text x="358" y="696" class="small">sees only ciphertext; other payloads are still plaintext</text>
+  <text x="358" y="711" class="small">inside TLS (see "Payload encryption" below).</text>
 
   <!-- ============================ CORE ============================ -->
   <rect x="816" y="118" width="250" height="78" rx="6" class="caller"/>
@@ -140,7 +141,7 @@
   <text x="828" y="364" class="small">Tenant provisioning (internal.tenant.*) and</text>
   <text x="828" y="379" class="small">internal.sprout.action, both from saasapi</text>
   <text x="828" y="401" class="small">Mints NATS Accounts/User JWTs, gateway JWTs;</text>
-  <text x="828" y="416" class="small">holds the tenant X25519 private key in memory</text>
+  <text x="828" y="416" class="small">holds tenant X25519 private keys in memory</text>
 
   <rect x="1200" y="232" width="360" height="206" rx="6" class="box"/>
   <text x="1212" y="254" class="h">saasapi</text>
@@ -187,8 +188,8 @@
   <text x="1292" y="628" class="small" font-weight="700">Transit imas-fleet-signing</text>
   <text x="1292" y="643" class="small">read-only for farmer and saasapi (verify);</text>
   <text x="1292" y="658" class="small">only cmd/fleetreleaser signs</text>
-  <text x="1292" y="680" class="small" font-weight="700">KV v2 secret/imas/tenant-x25519</text>
-  <text x="1292" y="695" class="small">tenant X25519 keypair (IMAS_TENANTBOX_*)</text>
+  <text x="1292" y="680" class="small" font-weight="700">KV v2 …/tenant-x25519/tenants/+</text>
+  <text x="1292" y="695" class="small">X25519 keypair per tenant (IMAS_TENANTBOX_*)</text>
   <text x="1292" y="717" class="small" font-weight="700">KV: SaaS API NATS credential</text>
   <text x="1292" y="732" class="small">written by the publish Job, synced to</text>
   <text x="1292" y="747" class="small">saasapi by External Secrets</text>
@@ -315,7 +316,7 @@
   <text x="30" y="1506" class="small">the existing identity (fresh gateway JWT) without spending another use of the token. Then the sprout dials nats_urls (1→2→3).</text>
 
   <!-- EnrollResponse table -->
-  <rect x="30" y="1520" width="932" height="192" rx="6" class="box"/>
+  <rect x="30" y="1520" width="932" height="210" rx="6" class="box"/>
   <text x="42" y="1540" class="h">enrollSuccessResponse (internal/api/handlers/enroll.go)</text>
   <g class="mono">
     <text x="42" y="1562" font-weight="700">Go field</text><text x="190" y="1562" font-weight="700">JSON</text><text x="362" y="1562" font-weight="700">What it is</text>
@@ -326,60 +327,66 @@
     <text x="42" y="1652">TenantX25519Pub</text><text x="190" y="1652">tenant_x25519_pub</text><text x="362" y="1652">standard-base64 X25519 box public key; the sprout pins it</text>
     <text x="42" y="1670">FleetSigningJWKS</text><text x="190" y="1670">fleet_signing_jwks</text><text x="362" y="1670">imas-fleet-signing public keys; bootstrap copy, superseded by live fetch</text>
     <text x="42" y="1688">NatsURLs</text><text x="190" y="1688">nats_urls</text><text x="362" y="1688">wss:// bus addresses (sproutbusurls / IMAS_SPROUT_BUS_URLS)</text>
+    <text x="42" y="1706">…Continuity</text><text x="190" y="1706">tenant_x25519_continuity</text><text x="362" y="1706">after a tenant key rotation only; also on /v1/refresh (see right)</text>
   </g>
 
   <!-- ============================ PAYLOAD ENCRYPTION ============================ -->
   <rect x="992" y="1002" width="592" height="722" rx="8" class="panel"/>
   <text x="1006" y="1026" class="h2">Payload encryption (NaCl box, X25519)</text>
-  <text x="1006" y="1044" class="small">docs/design/imas-payload-encryption-design.md · internal/pki/tenantbox.go,</text>
-  <text x="1006" y="1058" class="small">boxkeys.go · internal/natsapi/crypto.go</text>
+  <text x="1006" y="1044" class="small">docs/design/imas-payload-encryption-design.md · internal/payloadbox ·</text>
+  <text x="1006" y="1058" class="small">internal/pki tenantbox.go, farmerbox.go, sproutbox.go · cmd/sealed.go</text>
 
-  <rect x="1006" y="1074" width="270" height="118" rx="6" class="store"/>
-  <text x="1018" y="1094" class="h">OpenBao KV v2</text>
-  <text x="1018" y="1110" class="mono">secret/imas/tenant-x25519</text>
-  <text x="1018" y="1128" class="small">tenant_priv + tenant_pub, created on</text>
-  <text x="1018" y="1143" class="small">first use (check-and-set). farmer reads</text>
-  <text x="1018" y="1158" class="small">it into memory and caches it. Transit has</text>
-  <text x="1018" y="1173" class="small">no X25519 DH, hence KV, not Transit.</text>
+  <rect x="1006" y="1074" width="270" height="124" rx="6" class="store"/>
+  <text x="1018" y="1094" class="h">OpenBao KV v2, one per tenant</text>
+  <text x="1018" y="1110" class="mono">…/tenant-x25519/tenants/&lt;tenant_id&gt;</text>
+  <text x="1018" y="1128" class="small">Each rotation is a new KV version</text>
+  <text x="1018" y="1143" class="small">(check-and-set). The legacy shared key</text>
+  <text x="1018" y="1158" class="small">(…/tenant-x25519) is adopted only by tenants</text>
+  <text x="1018" y="1173" class="small">that already have enrolled sprouts.</text>
+  <text x="1018" y="1188" class="small">Transit has no X25519 DH, hence KV.</text>
 
-  <rect x="1300" y="1074" width="270" height="118" rx="6" class="store"/>
+  <rect x="1300" y="1074" width="270" height="124" rx="6" class="store"/>
   <text x="1312" y="1094" class="h">farmer.pki_sprout_box_keys</text>
   <text x="1312" y="1110" class="mono">key (tenant_id, sprout_id)</text>
   <text x="1312" y="1128" class="small">sprout_pub from /v1/enroll: one active</text>
-  <text x="1312" y="1143" class="small">key plus former keys inside their grace</text>
-  <text x="1312" y="1158" class="small">window (RotateSproutBoxKey), so opens</text>
-  <text x="1312" y="1173" class="small">still work during a rotation.</text>
+  <text x="1312" y="1143" class="small">key plus former keys in their grace</text>
+  <text x="1312" y="1158" class="small">window. Over the bus, only a submission</text>
+  <text x="1312" y="1173" class="small">sealed under a current key changes it;</text>
+  <text x="1312" y="1188" class="small">a superseded key never comes back.</text>
 
-  <rect x="1006" y="1226" width="564" height="94" rx="6" class="box"/>
-  <text x="1018" y="1246" class="h">farmer: sealForSprout / openFromSprout</text>
-  <text x="1018" y="1264" class="mono">box.Seal(msg, nonce, sprout_pub(active), tenant_priv)</text>
-  <text x="1018" y="1280" class="mono">  → EncryptedEnvelope{nonce, ciphertext} → farmerbus</text>
-  <text x="1018" y="1296" class="mono">box.Open tries the active sprout_pub, then grace keys</text>
-  <text x="1018" y="1311" class="small">Exported as PublishEncryptedTo / DecryptEncryptedFrom.</text>
+  <line x1="1140" y1="1198" x2="1140" y2="1228" class="line" marker-end="url(#arr)"/>
+  <line x1="1434" y1="1198" x2="1434" y2="1228" class="line" marker-end="url(#arr)"/>
 
-  <line x1="1140" y1="1192" x2="1140" y2="1224" class="line" marker-end="url(#arr)"/>
-  <line x1="1434" y1="1192" x2="1434" y2="1224" class="line" marker-end="url(#arr)"/>
+  <rect x="1006" y="1230" width="564" height="104" rx="6" class="box"/>
+  <text x="1018" y="1250" class="h">farmer: pki.SealToSprout / pki.OpenFromSprout</text>
+  <text x="1018" y="1267" class="mono">seal: one copy per tenant key in use (current, + previous in</text>
+  <text x="1018" y="1281" class="mono">      grace) to the sprout's active sprout_pub</text>
+  <text x="1018" y="1295" class="mono">open: tenant keys in use × sprout_pub (active + grace)</text>
+  <text x="1018" y="1312" class="small">Inside: payloadbox.Message{purpose, sprout_id, id, re, iat}. Purpose binds</text>
+  <text x="1018" y="1326" class="small">direction (no reflection); a reply names its request; the sprout drops replays.</text>
 
-  <rect x="1006" y="1356" width="564" height="80" rx="6" class="box"/>
-  <text x="1018" y="1376" class="h">sprout disk</text>
-  <text x="1018" y="1393" class="small">X25519 private key (SproutBoxPrivFile), generated once, never sent;</text>
-  <text x="1018" y="1408" class="small">tenant_x25519_pub pinned at enrollment. The gateway-JWT refresher</text>
-  <text x="1018" y="1423" class="small">exits the sprout if farmer's key stops matching the pin.</text>
-  <path d="M1288,1320 L1288,1354" class="dline" marker-end="url(#arrg)"/>
-  <text x="1296" y="1342" class="small" fill="#666">not wired yet (see below)</text>
+  <path d="M1288,1334 L1288,1370" class="line" marker-start="url(#arr)" marker-end="url(#arr)"/>
+  <text x="1296" y="1356" class="small">cmd.run, both ways, header Imas-Payload: box1</text>
 
-  <rect x="1006" y="1454" width="564" height="256" rx="6" class="warn"/>
-  <text x="1018" y="1476" class="warn-h">Status as merged: keys are exchanged, payloads are not encrypted yet</text>
-  <text x="1018" y="1497" class="small">• PublishEncryptedTo / DecryptEncryptedFrom have no callers outside their</text>
-  <text x="1018" y="1512" class="small">   tests, and the sprout has no NaCl-box code. Every bus payload is still</text>
-  <text x="1018" y="1527" class="small">   plaintext inside TLS, so the DMZ bus can read it. The design's goal</text>
-  <text x="1018" y="1542" class="small">   (defending against a compromised DMZ bus) is not met yet.</text>
-  <text x="1018" y="1566" class="small">• One keypair per farmer deployment, not per tenant: tenantbox.go reads a</text>
-  <text x="1018" y="1581" class="small">   single KV path, so every tenant gets the same tenant_x25519_pub. The</text>
-  <text x="1018" y="1596" class="small">   design doc calls for one per tenant. Each (tenant key, sprout key) pair</text>
-  <text x="1018" y="1611" class="small">   still derives a distinct shared secret, but one key compromise exposes</text>
-  <text x="1018" y="1626" class="small">   every tenant, and it can't be rotated per tenant.</text>
-  <text x="1018" y="1650" class="small">• No forward secrecy (accepted in the design); the mitigation is</text>
-  <text x="1018" y="1665" class="small">   scheduled rotation of the tenant keypair, which has no tooling yet.</text>
-  <text x="1018" y="1689" class="small">Tracked as open in docs/BUILD-STATUS.md.</text>
+  <rect x="1006" y="1372" width="564" height="80" rx="6" class="box"/>
+  <text x="1018" y="1392" class="h">sprout: pki.SproutOpenFromFarmer / SproutSealForFarmer</text>
+  <text x="1018" y="1409" class="small">X25519 private key on disk, never sent; tenant_x25519_pub pinned. Refuses a</text>
+  <text x="1018" y="1424" class="small">plaintext cmd.run. Re-pins only on a continuity proof that opens under the</text>
+  <text x="1018" y="1439" class="small">pinned key; otherwise the refresher exits (ErrTenantKeyMismatch).</text>
+
+  <rect x="1006" y="1464" width="564" height="98" rx="6" class="box"/>
+  <text x="1018" y="1484" class="h">Tenant key rotation: imas keys rotate-tenant-key [--sever]</text>
+  <text x="1018" y="1501" class="small">New KV version. The previous key keeps sealing and opening for</text>
+  <text x="1018" y="1516" class="small">max(boxkeygraceduration, gatewayjwtttl); every retained older version signs a</text>
+  <text x="1018" y="1531" class="small">continuity proof in /v1/refresh and /v1/enroll, and sprouts re-pin on their next refresh.</text>
+  <text x="1018" y="1546" class="small">--sever (suspected exposure): no grace, no proofs; sprouts must re-enroll.</text>
+
+  <rect x="1006" y="1574" width="564" height="138" rx="6" class="warn"/>
+  <text x="1018" y="1594" class="warn-h">Status: cmd.run is sealed; other boundaries are still plaintext</text>
+  <text x="1018" y="1614" class="small">• Sealed: cmd.run (request and reply) and box key submissions.</text>
+  <text x="1018" y="1632" class="small">• Plaintext inside TLS: cook, test.ping, shell, facts, job results,</text>
+  <text x="1018" y="1647" class="small">   cancel, sprout log shipping, fleetsigningkeys. See BUILD-STATUS.md.</text>
+  <text x="1018" y="1665" class="small">• Adopted-legacy tenants share one private key until their first rotation.</text>
+  <text x="1018" y="1683" class="small">• No forward secrecy (accepted in the design): exposure is bounded by</text>
+  <text x="1018" y="1698" class="small">   how often the tenant key is rotated.</text>
 </svg>

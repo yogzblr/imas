@@ -106,33 +106,86 @@ resolve merge fallout against J's box-key tenant scoping.
 |---|---|---|---|---|
 | E | Multi-tenancy: NATS Account-per-tenant (subjects unchanged), re-key `internal/pki/pki.go` by `(tenant_id, sprout_id)`, tenant field on `internal/rbac` cohort/role maps, dynamic `FarmerOrganization` | session_01SwBEMgMkSFan2X3fUC3pkz | merged — PR #28 (`c13d290`, `aeec2b8`) | y — tenant isolation correctness |
 | I | Finish recipe storage migration: confirm A's recipe HTTP endpoint is served behind H's Envoy JWT-gated route, remove `internal/natsapi/recipes.go`'s old NATS-based delivery | session_01QKGaTno21cXoZGp7hrbjbM | merged — PR #25 (`e59eb65`) | n |
-| J | Payload encryption + rotation: NaCl `box` (X25519), tenant keypair via OpenBao (replacing `internal/pki/tenantbox.go`'s interim local-disk custody), sprout keypair generated at enrollment. Must first add a `sprout_pub` field to the enrollment request/`Enroll()` (confirmed missing) | session_01AivbiHCYGgL1ywzyTViaK2 | merged — PR #27 (`f5a947d`), **but see the two open gaps below**: no payload is encrypted yet, and the "tenant" keypair is one per deployment | y — cryptographic code defending against a compromised DMZ bus |
+| J | Payload encryption + rotation: NaCl `box` (X25519), tenant keypair via OpenBao (replacing `internal/pki/tenantbox.go`'s interim local-disk custody), sprout keypair generated at enrollment. Must first add a `sprout_pub` field to the enrollment request/`Enroll()` (confirmed missing) | session_01AivbiHCYGgL1ywzyTViaK2 | merged — PR #27 (`f5a947d`); the three gaps below are closed by the J follow-up on `claude/tender-cerf-kudmy3` (**in review**), which leaves the open items listed under it | y — cryptographic code defending against a compromised DMZ bus |
 
-**Open gaps in J as merged (found by the docs-refresh pass, 2026-09-27,
-by reading the code; not fixed there, which was docs-only):**
+**Gaps in J as merged (found by the docs-refresh pass, 2026-09-27, by
+reading the code):** no payload was encrypted (`PublishEncryptedTo` /
+`DecryptEncryptedFrom` had no callers, and the sprout had no NaCl-box
+code); the "tenant" keypair was one per deployment (`tenantbox.go` read a
+single KV path and `pki.Enroll` handed every tenant the same
+`tenant_x25519_pub`); and there was no tenant key rotation tooling, the
+design's accepted mitigation for having no forward secrecy.
 
-- **No payload is encrypted yet.** The keys are exchanged end to end: the
-  sprout sends `sprout_pub` at enrollment, farmer stores it in
-  `farmer.pki_sprout_box_keys` keyed by `(tenant_id, sprout_id)` with
-  rotation grace keys, and the sprout pins `tenant_x25519_pub`. But
-  `internal/natsapi/crypto.go`'s `PublishEncryptedTo` /
-  `DecryptEncryptedFrom` have no callers outside `crypto_test.go`, and no
-  sprout-side code imports `nacl/box` (only `internal/pki/tenantbox.go` and
-  `internal/natsapi/crypto.go` do). Every farmer↔sprout payload still
-  crosses the DMZ bus as plaintext inside TLS, so the design's stated goal,
-  defending against a compromised DMZ bus, is not met yet. Wiring each
-  boundary needs both sides changed together (see `crypto.go`'s header).
-- **One keypair per deployment, not per tenant.** `tenantbox.go`'s
-  `ensureTenantX25519Keypair` reads and caches a single keypair at one KV
-  path (`IMAS_TENANTBOX_OPENBAO_KV_PATH`, default `imas/tenant-x25519`), and
-  `pki.Enroll` hands every tenant the same `tenant_x25519_pub`.
-  `imas-payload-encryption-design.md` calls for one per tenant. Each
-  (tenant key, sprout key) pair still derives a distinct shared secret, but
-  one key compromise exposes every tenant, and a tenant's key can't be
-  rotated on its own. `pki/enroll.go`'s own comment already flags this as
-  not yet re-keyed per tenant.
-- **No rotation tooling for the tenant keypair**, which the design names
-  as the accepted mitigation for having no forward secrecy.
+**J follow-up (branch `claude/tender-cerf-kudmy3`, in review, FLAG FOR
+SECURITY REVIEW).** What it changes:
+
+- **One keypair per tenant.** `internal/pki/tenantbox.go` keeps each
+  tenant's keypair in its own KV v2 secret,
+  `<IMAS_TENANTBOX_OPENBAO_KV_PATH>/tenants/<tenant_id>`, and each
+  rotation is a new KV version of it. Migration: the first time a tenant's
+  secret is needed, it *adopts* the legacy shared keypair (still at
+  `<KV_PATH>` itself, now read-only) if the tenant already has sprout box
+  keys on record, i.e. sprouts pinned to the shared key; every other
+  tenant gets a fresh keypair. `Enroll` reads the tenant key before
+  recording the enrolling sprout's box key, so a new tenant's first sprout
+  never counts. The Helm policy grants `…/tenants/+` (one segment) and
+  read-only on the legacy path.
+- **Rotation with authenticated re-pin.** `imas keys rotate-tenant-key
+  [--sever]` (NATS `pki.rotatetenantbox`, RBAC `pki`, the caller's own
+  tenant only) writes a new version. `/v1/refresh` and `/v1/enroll` now
+  carry `tenant_x25519_continuity`: the new public key sealed to the
+  sprout's box key under each retained earlier tenant key. A sprout whose
+  pin differs re-pins only if that proof opens under its pinned key and
+  names exactly the new key; otherwise `ErrTenantKeyMismatch`, fatal as
+  before. The previous key keeps sealing and opening for
+  `max(boxkeygraceduration, gatewayjwtttl)`. `--sever` (suspected
+  exposure) gives no grace and no proof, so the tenant's sprouts must be
+  re-enrolled.
+- **`cmd.run` sealed end to end**, both directions
+  (`internal/ingredients/cmd/sealed.go`, `internal/payloadbox`). Each
+  message has a purpose (so a reflected message is refused), a sprout ID,
+  a random ID and a timestamp. Replies name their request; the sprout
+  refuses replays and stale messages, and refuses plaintext `cmd.run` once
+  it has keys. Farmer refuses a plaintext reply to a sealed request (no
+  downgrade). Only a sprout with no box key on record, i.e. enrolled
+  before J, still gets plaintext, with a warning.
+- **Box key substitution closed.** `imas.sprouts.*.boxkey.pub` used to
+  accept a plaintext new key from anything on the bus, which would have let
+  a compromised bus swap in its own key and read everything farmer sealed
+  for that sprout. Farmer now only accepts a submission sealed under one of
+  the sprout's current keys, and fresh; a superseded key is never made
+  active again.
+
+**Still open in J after the follow-up:**
+
+- **Every other boundary is still plaintext inside TLS**: `cook` (and its
+  resync nudge), `test.ping`, `shell.*`, facts, job results/step events,
+  `cancel`, the `boxkey.rotate` trigger, sprout log shipping
+  (`imas.sprouts.<id>.logs`), and `fleetsigningkeys`. `cook` matters most:
+  a compromised bus can still inject a plaintext cook envelope, so the
+  sprout refusing plaintext `cmd.run` doesn't yet stop command injection
+  overall. When the last command boundary is sealed,
+  `internal/fleetkeys`'s reply must be authenticated in the same change
+  (its header comment explains why).
+- **Adopted tenants still share the legacy private key** until each is
+  rotated. Rotate them once their sprouts run this build; the `origin`
+  field in each tenant's secret (`adopted-legacy`) shows which. Then the
+  legacy secret can be deleted.
+- **No scheduled rotation** in farmer itself; run
+  `imas keys rotate-tenant-key` from a scheduler (e.g. a CronJob).
+- **Sprout-initiated box key rotation** has a farmer side but no sprout
+  side, so a sprout's own box key never rotates yet.
+- **Rollout order:** upgrade farmer before sprouts. Sprouts built between
+  J and this follow-up can't open sealed `cmd.run` (farmer reports
+  `ErrReplyNotSealed`) and exit on any tenant key rotation. Upgrade them
+  before rotating. A new sprout against an old farmer has its `cmd.run`
+  refused, because the old farmer sends plaintext.
+- **Live `cmd.run` output streaming** (`stream_topic`) is dropped for
+  sealed requests: it publishes in plaintext to a subject the CLI reads
+  directly without a tenant key. The full output still comes back in the
+  sealed reply.
+- `tenant_priv` is still read into farmer's memory (OpenBao Transit has
+  no X25519 DH), as before.
 
 ## Ongoing / fully parallel (no gating)
 
@@ -176,6 +229,7 @@ directly in this session instead.
 | **Workstream M.3** — SUSE rpm validation | `zypper`-specific check on the existing `nfpm`-built rpm packaging | merged — folded into PR #21 (`1c6a2a5`'s "SUSE RPM check") |
 | **Workstream M.4** — customer-run Ansible playbooks | Not started. Task brief drafted in `docs/claude-code-parallel-build-plan.md` §4a (item 4) but not yet dispatched. | **open** |
 | **New: Terraform UAT gate** | Provision per-OS VMs, install a tagged release's actual Buildkite-published packages via the M.4 playbooks, smoke-test enrollment/recipe-run/reboot survival. Not in the original roadmap; added as a release-quality gate. Task brief drafted in `docs/claude-code-parallel-build-plan.md` §4a (item 5), including an explicit flag that its default compute-provider choice (libvirt/KVM) needs a human sign-off, not just green tests. | **open** — depends on M.4 |
+| J follow-up: per-tenant tenant keypairs, tenant key rotation with authenticated re-pin, `cmd.run` sealed end to end, box key submissions sealed | See "J follow-up" under Wave 2. FLAG FOR SECURITY REVIEW | **in review** (`claude/tender-cerf-kudmy3`) |
 | Docs refresh (architecture diagram, SaaS API reference, `INSTALL.md`, this file, `packaging/systemd/*.service` vs `docs/*.service` dedup) | Done on branch `claude/sweet-sagan-yklpu8`: `docs/diagrams/imas-architecture.svg` replaces `grlx-arch-light.png`; `docs/api/saasapi.md` + `docs/api/saasapi-openapi.yaml` (all 18 `NewRouter` routes, the 2 dispatch routes marked off by default); `INSTALL.md` rewritten for tenants, enrollment keys, the SaaS API and Envoy; `docs/imas-{farmer,sprout}.service` removed in favour of `packaging/systemd/` | **in review** |
 
 ## Notes
