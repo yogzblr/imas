@@ -53,6 +53,18 @@ separate `deploy/helm/farmer` chart.
      address.
    - farmer's namespace needs its own NetworkPolicy: egress to the bus on
      5406, and ingress from this chart's Envoy on 5405.
+6. **Sprout-side settings**, in your enrollment tooling (e.g. Ansible):
+   - Write the CA that issued `envoy.tls.secretName`'s certificate to
+     each sprout's `sproutrootca` path (default
+     `/etc/imas/pki/sprout/tls-rootca.pem`).
+   - Set `sproutrootcatofu: false`. This chart routes no `/auth/cert/`,
+     so trust on first use can't work through it. With TOFU off, a
+     sprout missing the CA fails closed with a clear message instead of
+     retrying.
+   - Point `farmerinterface`/`farmerapiport` at Envoy's external address.
+     After enrollment the sprout dials the `wss://` `nats_urls` it was
+     given (persisted in `sproutbusurlsfile`), or `busurls` if you pin
+     them in the sprout config.
 
 ```sh
 helm install imas-dmz deploy/helm/nats -n imas-dmz \
@@ -220,39 +232,50 @@ The JWKS source is a value:
 
 ### Verification status
 
-Revalidated on 2026-09-26 against `main` after PRs #5–#13, with no
+Revalidated on 2026-09-27 against `main` after PRs #14 and #15, with no
 patches. Everything ran against real binaries: `envoyproxy/envoy:v1.35.3`,
 OpenBao 2.4.1 (dev) for PKI and Transit, MySQL 8.4, Valkey 8.1, and
 farmer, farmerbus and sprout built from this branch.
 
-- **The repo's own real-Envoy e2e suites pass through this chart's
-  rendered Envoy config.** These are
-  `internal/pki` `TestSproutLifecycle_ThroughRealEnvoy` and
-  `internal/api` `TestSproutDownloadsStagedRecipe_ThroughRealEnvoy`.
-  They cover:
-  - enroll, then `wss://` to the bus;
-  - upgrade refused with no token, an expired token or a bad signature
-    (`401`);
+- **The repo's real-Envoy e2e suites pass through this chart's rendered
+  Envoy config** (swapped in for `deploy/envoy/envoy.yaml` in a scratch
+  copy), and against the reference file. These are `internal/pki`
+  `TestSproutLifecycle_ThroughRealEnvoy` (all 5 subtests) and
+  `internal/api` `TestSproutDownloadsStagedRecipe_ThroughRealEnvoy`
+  (all 4). They cover:
+  - enroll, then connect through `pki.LoadSproutBus` (the production
+    path, using the enrolled `nats_urls`);
+  - the legacy `FarmerBusURL` not reaching the bus through Envoy;
+  - the upgrade refused with no, expired or badly signed tokens;
   - `/v1/refresh`, then reconnecting with the new token;
-  - `/files/` download, including a validly signed token for another
-    sprout, which Envoy passes and farmer refuses.
+  - `/files/`, including a validly signed token for another sprout
+    (Envoy passes it, farmer refuses it).
 
-  To run them this way, the rendered config replaced
-  `deploy/envoy/envoy.yaml` in a scratch copy of the repo. They also pass
-  against the reference file on Envoy 1.35.3. These suites stub OpenBao
-  Transit.
-- **Full stack with real OpenBao.** farmer served its JWKS from the real
-  OpenBao Ed25519 Transit key (PR #5's fix), and Envoy fetched it.
-- **The real `cmd/sprout` binary enrolled through the chart's Envoy**
-  (`POST /v1/enroll`), with the NKey proof of possession and the Valkey
-  replay cache. It then fetched `/files/` through `jwt_authn`. It still
-  can't reach the bus; see [Known gaps](#known-gaps-outside-this-chart)
-  (1) and (2).
+  These suites stub OpenBao Transit.
+- **The real `cmd/sprout` binary, end to end through the chart's Envoy**,
+  with real OpenBao behind farmer:
+  - It was configured as a DMZ sprout: CA pre-provisioned,
+    `sproutrootcatofu: false`.
+  - It enrolled (NKey proof of possession, Valkey replay cache, an
+    OpenBao-signed EdDSA gateway JWT).
+  - It dialed `wss://` from its persisted `nats_urls`, connected to the
+    bus and published its announce.
+  - It synced `/files/` through `jwt_authn`.
+  - Envoy counted 1 websocket upgrade and 3 `jwt_authn` allows with 0
+    denies. farmer opened its connection for the sprout's lazily
+    provisioned tenant.
+- **Root CA bootstrap fails closed** in both misconfigurations, and no
+  `tls-rootca.pem` is written in either:
+  - With TOFU off and no CA file: "root CA has not been provisioned".
+  - With TOFU on, where Envoy answers `/auth/cert/` with 401: "farmer did
+    not return a usable root CA certificate".
 - **The bus container ran exactly as templated:** read-only root, UID
   65532, seeds only from `_SEED_FILE`, and no seed written to its
   volume. Core joined it over TLS on 5406.
-- **`envoy --mode validate` passes** for every `ci/*-values.yaml`
-  variant.
+- **Static checks:** `helm lint`, `kubeconform -strict`, `envoy --mode
+  validate` for every `ci/*-values.yaml` variant, and
+  `go test ./deploy/helm/nats/` (including the reference-parity test) all
+  pass.
 
 ## NetworkPolicy
 
@@ -480,45 +503,37 @@ go test ./deploy/helm/nats/   # renders with the helm CLI; skips if helm isn't o
 
 ## Known gaps outside this chart
 
-Still open after PRs #5–#13. Each is outside this chart's file scope.
+Still open. Each is outside this chart's file scope.
 
-1. **The real sprout can't reach the bus through Envoy.** `ConnectSprout`
-   (`cmd/sprout/main.go`) dials `config.FarmerBusURL`, which is always
-   `farmerinterface:farmerbusport` with no scheme, so plain `nats://`
-   TCP. The `nats_urls` (`wss://…`) from the enrollment response is
-   parsed but never used.
-   - Live, Envoy counted 0 websocket upgrades. The sprout's attempts
-     never completed a TLS handshake, because each side waits for the
-     other to speak first.
-   - The e2e suites don't catch this: they call `nats.Connect(env.BusURL)`
-     with a `wss://` URL themselves.
-2. **The root CA bootstrap fails through Envoy.** `FetchRootCA`
-   (`internal/pki/pki.go`) fetches `https://<farmerinterface>:<farmerapiport>/auth/cert/`.
-   - Envoy doesn't route `/auth/cert/`, so it lands on the JWT-gated
-     default route and gets `401 Jwt is missing`.
-   - `FetchRootCA` doesn't check the status. It writes that body into
-     `tls-rootca.pem`, and because the file now exists, it never
-     re-fetches. The sprout loops on "cannot load the RootCA" until the
-     file is deleted.
-   - Pre-provisioning the CA (e.g. from Ansible) works around it. Adding
-     an un-gated `/auth/cert/` route would be a trust-bootstrap design
-     decision, so this chart doesn't.
-3. **`cmd/farmerbus` has no cluster routes, and there's no farmerbus
+1. **`cmd/farmerbus` has no cluster routes, and there's no farmerbus
    image.** See [Clustering](#clustering).
-4. **farmer's default tenant ID is invalid.** `config.go` still defaults
+2. **Log shipping over the bus doesn't work behind Envoy.** Both
+   `cmd/sprout` (`log.ConnectNATS(config.FarmerBusURL)`) and `cmd/farmer`
+   connect their log-nats backend separately from their authenticated
+   bus connection.
+   - A DMZ sprout's attempt times out against Envoy's HTTPS listener.
+   - farmer's fails TLS verification.
+
+   Both are logged and non-fatal; logs still go to the local output.
+3. **farmer's default tenant ID is invalid.** `config.go` still defaults
    `farmerorganization` to `"imas farmer"`, which fails
    `IsValidTenantID`, so core exits at boot unless it's overridden.
-5. **core can't be configured with the bus's address.** It still uses
+4. **core can't be configured with the bus's address.** It still uses
    one `farmerinterface` as its API bind address, its bus URL host and
    its TLS ServerName for the bus.
-6. **The Keycloak harness still doesn't start on current Keycloak.**
+5. **The Keycloak harness still doesn't start on current Keycloak.**
    `deploy/envoy/testing/docker-compose.keycloak.yml` still pulls from
    quay.io and mounts the realm under a file name Keycloak 26 refuses
    (it must be `imas-gateway-jwt-validation-realm.json`).
 
-Fixed by PRs #5–#13 and verified above: Ed25519 Transit key parsing
-(#5), `requirement_map` in `deploy/envoy/envoy.yaml` (#6), and sprouts
-sending the gateway JWT on `wss://` and `/files/` (#8, #12).
+Fixed on `main` and verified above:
+
+- Ed25519 Transit key parsing (#5).
+- `requirement_map` in `deploy/envoy/envoy.yaml` (#6).
+- The gateway JWT sent on `wss://` and `/files/` (#8, #12).
+- Sprouts dialing the enrolled `nats_urls` (#15).
+- The root CA bootstrap never pinning a bad response, with DMZ sprouts
+  using a pre-provisioned CA (#14).
 
 ## Security review notes
 

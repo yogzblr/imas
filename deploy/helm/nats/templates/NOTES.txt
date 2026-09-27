@@ -9,7 +9,12 @@ Core (cmd/farmer) must be configured to dial the bus at:
 
 Sprouts connect only to Envoy:
   wss://<{{ include "imas-nats.envoy.fullname" . }} external address>:{{ .Values.envoy.service.port }}/
-  (farmer's IMAS_SPROUT_BUS_URLS should list this address)
+  (farmer's IMAS_SPROUT_BUS_URLS should list this address; sprouts dial
+  the nats_urls they get at enrollment)
+
+Sprouts must pin the CA that issued Secret "{{ .Values.envoy.tls.secretName }}"
+(pre-provisioned at their sproutrootca path, with sproutrootcatofu: false):
+this release deliberately routes no /auth/cert/ for trust on first use.
 {{- end }}
 
 Seeds are read from Secret "{{ .Values.natsSeeds.secretName }}" and must be
