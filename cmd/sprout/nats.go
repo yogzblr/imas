@@ -116,6 +116,11 @@ func natsInit(ctx context.Context, nc *nats.Conn) error {
 		return err
 	}
 
+	// Farmer-triggered payload-encryption key rotation: see boxkey.go.
+	if err = subscribeBoxKeyRotate(nc, sproutID); err != nil {
+		return err
+	}
+
 	// Interactive shell sessions.
 	_, err = nc.Subscribe("imas.sprouts."+sproutID+".shell.start", func(m *nats.Msg) {
 		shell.HandleShellStart(nc, m)

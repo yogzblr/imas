@@ -31,11 +31,12 @@ var systemConfigRoot = defaultSystemConfigRoot()
 // file doesn't (e.g. from the Helm chart; see deploy/farmer).
 const EnvJobReconcileWindow = "IMAS_JOB_RECONCILE_WINDOW"
 
-// Sprout setting defaults; see GatewayJWTRefreshMargin and
-// StagedRecipeMaxAge.
+// Sprout setting defaults; see GatewayJWTRefreshMargin,
+// StagedRecipeMaxAge and SproutBoxKeyPrevGrace.
 const (
 	DefaultGatewayJWTRefreshMargin = 5 * time.Minute
 	DefaultStagedRecipeMaxAge      = time.Hour
+	DefaultSproutBoxKeyPrevGrace   = 15 * time.Minute
 )
 
 // setSystemConfigRoot overrides the config root for testing.
@@ -224,6 +225,17 @@ var (
 	// are skipped. Non-positive values fall back to
 	// DefaultStagedRecipeMaxAge.
 	StagedRecipeMaxAge time.Duration
+
+	// SproutBoxKeyPrevGrace ("sproutboxkeyprevgrace", sprout only) is how
+	// long a sprout keeps the X25519 private key a box key rotation
+	// replaced, so farmer payloads sealed to it just before the switch
+	// still open (internal/pki's sproutbox.go, "Box key rotation"). A
+	// rotation triggered while it is kept is refused, so this is also the
+	// shortest interval between two rotations. Non-positive values fall
+	// back to DefaultSproutBoxKeyPrevGrace; values below
+	// pki.MinSproutBoxKeyPrevGrace are raised to it. Longer keeps a
+	// private key the rotation meant to retire on disk for longer.
+	SproutBoxKeyPrevGrace time.Duration
 
 	// JobReconcileWindow ("jobreconcilewindow" in the farmer config file,
 	// or the IMAS_JOB_RECONCILE_WINDOW environment variable when the file
@@ -550,6 +562,7 @@ func LoadConfig(binary string) {
 			jety.SetDefault("gatewayjwtttl", 24*time.Hour)
 			jety.SetDefault("gatewayjwtrefreshmargin", DefaultGatewayJWTRefreshMargin)
 			jety.SetDefault("stagedrecipemaxage", DefaultStagedRecipeMaxAge)
+			jety.SetDefault("sproutboxkeyprevgrace", DefaultSproutBoxKeyPrevGrace)
 			jety.SetDefault("sprouthandledjobsfile", defaultSproutHandledJobsFile())
 			jety.SetDefault("rootca_retry_delay", 5*time.Second)
 			jety.SetDefault("nkey_retry_delay", 5*time.Second)
@@ -559,6 +572,7 @@ func LoadConfig(binary string) {
 			JobLogTTL = jety.GetDuration("joblogttl")
 			GatewayJWTRefreshMargin = jety.GetDuration("gatewayjwtrefreshmargin")
 			StagedRecipeMaxAge = jety.GetDuration("stagedrecipemaxage")
+			SproutBoxKeyPrevGrace = jety.GetDuration("sproutboxkeyprevgrace")
 			SproutHandledJobsFile = jety.GetString("sprouthandledjobsfile")
 			SproutRootCATOFU = jety.GetBool("sproutrootcatofu")
 			BusURLs = stringList(jety.Get("busurls"))

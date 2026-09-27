@@ -128,6 +128,9 @@ func runSprout(parent context.Context, joinToken string, handleSignals bool) {
 	if err != nil {
 		log.Fatalf("failed to generate sprout X25519 key: %v", err)
 	}
+	if g := config.SproutBoxKeyPrevGrace; g > 0 && g < pki.MinSproutBoxKeyPrevGrace {
+		log.Warnf("sproutboxkeyprevgrace %s is shorter than a farmer payload can stay in flight; using %s", g, pki.MinSproutBoxKeyPrevGrace)
+	}
 	var ctx context.Context
 	var stop context.CancelFunc
 	if handleSignals {
@@ -262,6 +265,12 @@ func ConnectSprout(ctx context.Context, done chan<- struct{}) {
 		log.Warnf("not shipping logs to the bus: this sprout's User JWT has no grant for %s.>; farmer re-mints it, and it takes effect after the next refresh and restart", pki.SproutLogSubjectPrefix(sproutID))
 	} else if err := log.UseNATSConn(nc, pki.SproutLogSubjectPrefix(sproutID)); err != nil {
 		log.Errorf("Failed to attach log-nats backend to the bus connection: %v", err)
+	}
+	// A User JWT minted before sproutPermissions carried the grant: until
+	// then nats-server drops the submission, and a rotation farmer
+	// triggers never completes (harmlessly; see boxkey.go).
+	if submit := pki.SproutBoxKeySubmitSubject(sproutID); bus.UserJWT != "" && !userJWTGrantsPub(bus.UserJWT, submit) {
+		log.Warnf("farmer-triggered payload-encryption key rotation can't complete: this sprout's User JWT has no publish grant for %s; farmer re-mints it, and it takes effect after the next refresh and restart", submit)
 	}
 
 	test.RegisterNatsConn(nc)

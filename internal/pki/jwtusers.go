@@ -50,6 +50,13 @@ func sproutPermissions(id string) jwt.Permissions {
 			// the existing Sub grant below; no Sub grant on _INBOX.> (which
 			// would expose every reply in the Account to every sprout).
 			"imas.sprouts." + id + ".fleetsigningkeys",
+			// Submit a new payload-encryption public key after farmer
+			// triggers a box key rotation (cmd/sprout's boxkey.go).
+			// Farmer only records a submission sealed under one of this
+			// sprout's current box keys (internal/natsapi's
+			// handleBoxKeySubmit), so the grant lets the sprout submit;
+			// what it submits still has to open.
+			SproutBoxKeySubmitSubject(id),
 			// Ship this sprout's own log entries over its bus connection
 			// (internal/log.UseNATSConn), one subject per level. Outside
 			// imas.sprouts.<id>.>, so the sprout never receives its own
@@ -66,6 +73,12 @@ func sproutPermissions(id string) jwt.Permissions {
 // entries under: imas.logs.sprouts.<id>.<LEVEL>, in its tenant's Account.
 func SproutLogSubjectPrefix(id string) string {
 	return "imas.logs.sprouts." + id
+}
+
+// SproutBoxKeySubmitSubject is where sprout id submits a new box public
+// key (internal/natsapi's SproutBoxKeySubmitPattern).
+func SproutBoxKeySubmitSubject(id string) string {
+	return "imas.sprouts." + id + ".boxkey.pub"
 }
 
 func sproutLogPublishGrant(id string) string {
