@@ -232,8 +232,8 @@ The JWKS source is a value:
 
 ### Verification status
 
-Revalidated on 2026-09-27 against `main` after PRs #14 and #15, with no
-patches. Everything ran against real binaries: `envoyproxy/envoy:v1.35.3`,
+Revalidated on 2026-09-27 against `main` after PRs #14, #15 and #16,
+with no patches. Everything ran against real binaries: `envoyproxy/envoy:v1.35.3`,
 OpenBao 2.4.1 (dev) for PKI and Transit, MySQL 8.4, Valkey 8.1, and
 farmer, farmerbus and sprout built from this branch.
 
@@ -264,6 +264,16 @@ farmer, farmerbus and sprout built from this branch.
   - Envoy counted 1 websocket upgrade and 3 `jwt_authn` allows with 0
     denies. farmer opened its connection for the sprout's lazily
     provisioned tenant.
+- **Bus log shipping works (PR #16).** Subscribers connected straight to
+  the bus observed:
+  - farmer's entries on `imas.logs.farmer.<LEVEL>` in the SYS Account
+    (49 in 20s);
+  - the DMZ sprout's entries on `imas.logs.sprouts.lab-sprout-a.<LEVEL>`
+    in its own tenant Account, carried over its `wss://` connection
+    through the chart's Envoy.
+
+  A subscriber in another tenant's Account saw 0 of the sprout's
+  entries, and the bus logged no permission violations.
 - **Root CA bootstrap fails closed** in both misconfigurations, and no
   `tls-rootca.pem` is written in either:
   - With TOFU off and no CA file: "root CA has not been provisioned".
@@ -507,21 +517,13 @@ Still open. Each is outside this chart's file scope.
 
 1. **`cmd/farmerbus` has no cluster routes, and there's no farmerbus
    image.** See [Clustering](#clustering).
-2. **Log shipping over the bus doesn't work behind Envoy.** Both
-   `cmd/sprout` (`log.ConnectNATS(config.FarmerBusURL)`) and `cmd/farmer`
-   connect their log-nats backend separately from their authenticated
-   bus connection.
-   - A DMZ sprout's attempt times out against Envoy's HTTPS listener.
-   - farmer's fails TLS verification.
-
-   Both are logged and non-fatal; logs still go to the local output.
-3. **farmer's default tenant ID is invalid.** `config.go` still defaults
+2. **farmer's default tenant ID is invalid.** `config.go` still defaults
    `farmerorganization` to `"imas farmer"`, which fails
    `IsValidTenantID`, so core exits at boot unless it's overridden.
-4. **core can't be configured with the bus's address.** It still uses
+3. **core can't be configured with the bus's address.** It still uses
    one `farmerinterface` as its API bind address, its bus URL host and
    its TLS ServerName for the bus.
-5. **The Keycloak harness still doesn't start on current Keycloak.**
+4. **The Keycloak harness still doesn't start on current Keycloak.**
    `deploy/envoy/testing/docker-compose.keycloak.yml` still pulls from
    quay.io and mounts the realm under a file name Keycloak 26 refuses
    (it must be `imas-gateway-jwt-validation-realm.json`).
@@ -534,6 +536,7 @@ Fixed on `main` and verified above:
 - Sprouts dialing the enrolled `nats_urls` (#15).
 - The root CA bootstrap never pinning a bad response, with DMZ sprouts
   using a pre-provisioned CA (#14).
+- Bus log shipping over each process's authenticated connection (#16).
 
 ## Security review notes
 
