@@ -1,0 +1,38 @@
+{{- if and .Values.openbao.enabled .Values.openbaoBootstrap.enabled }}
+{{- include "imas-farmer.validate" . -}}
+# The OpenBao ACL policies the bootstrap Job writes, one file per policy
+# (the file name is the policy name).
+#
+# FLAG FOR SECURITY REVIEW. These three are verbatim copies of reviewed
+# sources, and chart_test.go fails if they drift:
+#   imas-fleet-signer.hcl, imas-fleet-verify.hcl
+#       deploy/fleetreleaser/policies/
+#   imas-saasapi-cred-publisher.hcl
+#       deploy/farmer/README.md, "OpenBao policy" (the only KV-write grant)
+# The imas-farmer-* ones are rendered from the values they name.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "imas-farmer.fullname" . }}-openbao-policies
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: openbao-bootstrap
+data:
+  {{- range $path, $_ := .Files.Glob "files/openbao-policies/*.hcl" }}
+  {{ base $path }}: |
+    {{- $.Files.Get $path | trimSuffix "\n" | nindent 4 }}
+  {{- end }}
+  imas-farmer-gateway.hcl: |
+    {{- include "imas-farmer.policy.farmerGateway" . | nindent 4 }}
+  imas-farmer-tenantbox.hcl: |
+    {{- include "imas-farmer.policy.farmerTenantBox" . | nindent 4 }}
+  {{- if eq .Values.tls.mode "openbao" }}
+  imas-farmer-certs.hcl: |
+    {{- include "imas-farmer.policy.farmerCerts" . | nindent 4 }}
+  {{- end }}
+  {{- if .Values.openbaoBootstrap.farmerbus.enabled }}
+  imas-farmerbus-certs.hcl: |
+    {{- include "imas-farmer.policy.farmerbusCerts" . | nindent 4 }}
+  {{- end }}
+{{- end }}

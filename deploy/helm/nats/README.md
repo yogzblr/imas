@@ -44,23 +44,27 @@ separate `deploy/helm/farmer` chart.
    and `.goreleaser.yaml` only have farmer and sprout targets. Build one
    from `./cmd/farmerbus` with `CGO_ENABLED=0`, on the same pattern as
    `docker/farmer.dockerfile`, and set `bus.image.*`.
-5. **Core-side settings**, in the farmer chart, not here:
-   - farmer's `farmerorganization` must equal `bus.organization`.
-   - farmer must dial the bus at
-     `tls://<release>-nats-bus.<ns>.svc.cluster.local:5406`. Set that
-     as farmer's `farmerbusurl` (env `FARMERBUSURL`). Keep
-     `farmerinterface` as farmer's own bind address (`0.0.0.0`); it
-     no longer decides where farmer dials the bus or which name it
-     checks the bus cert against.
-   - farmer verifies the bus certificate against the host of
-     `farmerbusurl`, the Service FQDN above. Set
-     `farmerbustlsservername` (env `FARMERBUSTLSSERVERNAME`) only if
-     the cert carries a different name than the host farmer dials.
-   - farmer must mount the same seed Secret.
-   - farmer's `IMAS_SPROUT_BUS_URLS` must list Envoy's external `wss://`
-     address.
-   - farmer's namespace needs its own NetworkPolicy: egress to the bus on
-     5406, and ingress from this chart's Envoy on 5405.
+5. **Core-side settings**, in `deploy/helm/farmer`, not here. Its
+   `TestContractWithNatsChart` renders both charts side by side and
+   fails if any of these stop lining up:
+
+   | Requirement | `deploy/helm/farmer` value |
+   |---|---|
+   | farmer's `farmerorganization` equals `bus.organization` | `organization` |
+   | farmer dials this bus at `tls://<release>-nats-bus.<ns>.svc.cluster.local:5406` (farmer's `farmerbusurl`) | `bus.serviceName` (`<release>-nats-bus`), `bus.namespace`, `bus.port` |
+   | the bus certificate carries the name farmer verifies (the host of `farmerbusurl`, or `farmerbustlsservername`) | `bus.tlsServerName` (empty: the FQDN, which the default SANs cover) |
+   | the same seed Secret, key for key | `natsSeeds.*` |
+   | `IMAS_SPROUT_BUS_URLS` lists Envoy's external `wss://` address | `bus.sproutBusURLs` |
+   | core's NetworkPolicy: egress to the bus on 5406, ingress from this chart's Envoy on 5405 | `networkPolicy.dmz.*` (rendered by that chart) |
+   | Envoy's `farmer_api` upstream is farmer's Service | here: `envoy.upstreams.farmerAPI.host=<core release>-farmer.<core ns>.svc.cluster.local` |
+   | this chart admits the core namespace | here: `networkPolicy.core.namespaceSelector` |
+
+   farmer keeps `farmerinterface` as its own bind address (`0.0.0.0`); it
+   no longer decides where farmer dials the bus or which name it checks
+   the bus certificate against. With `bus.tls.mode=openbao` against the
+   farmer chart's eval OpenBao, set that chart's
+   `openbaoBootstrap.farmerbus.*` (it creates the `imas-farmerbus` roles)
+   and point `networkPolicy.openbao` here at its namespace.
 6. **Sprout-side settings**, in your enrollment tooling (e.g. Ansible):
    - Write the CA that issued `envoy.tls.secretName`'s certificate to
      each sprout's `sproutrootca` path (default
@@ -530,6 +534,8 @@ Still open. Each is outside this chart's file scope.
 2. **farmer's default tenant ID is invalid.** `config.go` still defaults
    `farmerorganization` to `"imas farmer"`, which fails
    `IsValidTenantID`, so core exits at boot unless it's overridden.
+   `deploy/helm/farmer` always overrides it (`organization`, validated
+   at render time); the code default is still wrong.
 3. **The Keycloak harness still doesn't start on current Keycloak.**
    `deploy/envoy/testing/docker-compose.keycloak.yml` still pulls from
    quay.io and mounts the realm under a file name Keycloak 26 refuses
@@ -545,8 +551,9 @@ Fixed on `main` and verified above:
   using a pre-provisioned CA (#14).
 - Bus log shipping over each process's authenticated connection (#16).
 
-Fixed since that revalidation. Covered by unit tests, but not yet
-revalidated end to end with the chart:
+Fixed since that revalidation. Covered by unit tests, and revalidated
+with `deploy/helm/farmer` against a real `farmerbus` run from this chart's
+rendered openbao-mode config (that chart's README, "Verification status"):
 
 - core's bus address and bus TLS ServerName are separate from its bind
   address. `farmerinterface` is only the bind address on farmer and

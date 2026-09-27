@@ -1,0 +1,247 @@
+{{- include "imas-farmer.validate" . -}}
+{{- $seeds := fromYaml (include "imas-farmer.seeds" .) -}}
+{{- $tlsDir := include "imas-farmer.tlsDir" . -}}
+{{- $ob := .Values.farmer.openbao -}}
+{{- $os := .Values.objectStore -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "imas-farmer.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: farmer
+spec:
+  # Always 1 (see the validation in _helpers.tpl), and Recreate: FarmerPKI
+  # is a ReadWriteOnce volume, and two farmers must never mint from it at
+  # once.
+  replicas: {{ .Values.farmer.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "imas-farmer.farmer.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "imas-farmer.labels" . | nindent 8 }}
+        app.kubernetes.io/component: farmer
+        {{- with .Values.farmer.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/farmer-configmap.yaml") . | sha256sum }}
+        {{- with .Values.farmer.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "imas-farmer.farmer.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      # config.LoadConfig folds every env var into the config; don't let
+      # Kubernetes inject one per Service in the namespace.
+      enableServiceLinks: false
+      {{- with .Values.farmer.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.farmer.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.farmer.terminationGracePeriodSeconds }}
+      {{- with .Values.farmer.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.farmer.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.farmer.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.farmer.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: farmer
+          image: {{ include "imas-farmer.farmer.image" . | quote }}
+          imagePullPolicy: {{ .Values.farmer.image.pullPolicy }}
+          ports:
+            - name: api
+              containerPort: {{ .Values.farmer.apiPort }}
+              protocol: TCP
+          env:
+            # Seeds: one IMAS_NATS_<NAME>_SEED_FILE per mounted key, the
+            # _FILE form only (deploy/farmer/farmer-deployment-nats-seeds.patch.yaml).
+            # !! On an existing install these must be farmer's CURRENT
+            # {FarmerPKI}/nats-auth seeds imported into OpenBao, never new
+            # ones: a new SYS seed re-mints operator.jwt and every bus node
+            # stops trusting it (deploy/farmer/README.md).
+            {{- range $name, $key := $seeds }}
+            - name: IMAS_NATS_{{ $name }}_SEED_FILE
+              value: {{ printf "%s/%s" $.Values.natsSeeds.mountPath $key | quote }}
+            {{- end }}
+            # Deliberately absent: every IMAS_SAASAPI_CRED_OPENBAO_* var.
+            # farmer's long-running process must never be configured with
+            # (or able to log in as) the KV-write identity.
+            - name: IMAS_PXC_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "imas-farmer.dbSecretName" . }}
+                  key: {{ .Values.database.existingSecretKeys.farmerDSN }}
+            {{- with include "imas-farmer.valkeyAddrs" . }}
+            - name: IMAS_VALKEY_ADDRS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with $os.endpoint }}
+            - name: IMAS_S3_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with $os.bucket }}
+            - name: IMAS_S3_BUCKET
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with $os.jobBucket }}
+            - name: IMAS_S3_JOB_BUCKET
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if $os.credentialsSecret }}
+            - name: IMAS_S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $os.credentialsSecret }}
+                  key: {{ $os.accessKeyIdKey }}
+            - name: IMAS_S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $os.credentialsSecret }}
+                  key: {{ $os.secretAccessKeyKey }}
+            {{- end }}
+            {{- /* deploy/farmer/deployment.env.job-reconcile.yaml: absent,
+            null or "" emits nothing; the type is checked in validate. */}}
+            {{- with .Values.farmer.jobs.reconcileWindow }}
+            - name: IMAS_JOB_RECONCILE_WINDOW
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if eq .Values.tls.mode "openbao" }}
+            # API certificate from OpenBao PKI (internal/certs).
+            {{- include "imas-farmer.openbaoEnv" (dict "root" $ "prefix" "IMAS_CERTS_OPENBAO" "k8sRole" .Values.tls.openbao.k8sRole "tokenKey" .Values.tls.openbao.tokenSecretKey) | nindent 12 }}
+            - name: IMAS_CERTS_OPENBAO_PKI_MOUNT
+              value: {{ .Values.tls.openbao.pkiMount | quote }}
+            - name: IMAS_CERTS_OPENBAO_ROLE
+              value: {{ .Values.tls.openbao.role | quote }}
+            {{- end }}
+            # Gateway JWT signer: Transit sign on {{ $ob.gateway.keyName }} only.
+            {{- include "imas-farmer.openbaoEnv" (dict "root" $ "prefix" "IMAS_GATEWAY_OPENBAO" "k8sRole" $ob.gateway.k8sRole "tokenKey" $ob.gateway.tokenSecretKey) | nindent 12 }}
+            - name: IMAS_GATEWAY_OPENBAO_TRANSIT_MOUNT
+              value: {{ $ob.gateway.transitMount | quote }}
+            # Fleet signing key, READ-ONLY (imas-fleet-verify). Never an
+            # IMAS_FLEETRELEASER_* variable here.
+            {{- include "imas-farmer.openbaoEnv" (dict "root" $ "prefix" "IMAS_FLEETSIGN_OPENBAO" "k8sRole" $ob.fleetSign.k8sRole "tokenKey" $ob.fleetSign.tokenSecretKey) | nindent 12 }}
+            - name: IMAS_FLEETSIGN_OPENBAO_TRANSIT_MOUNT
+              value: {{ $ob.fleetSign.transitMount | quote }}
+            - name: IMAS_FLEETSIGN_TRANSIT_KEY
+              value: {{ $ob.fleetSign.keyName | quote }}
+            # Tenant X25519 keypair (KV v2).
+            {{- include "imas-farmer.openbaoEnv" (dict "root" $ "prefix" "IMAS_TENANTBOX_OPENBAO" "k8sRole" $ob.tenantBox.k8sRole "tokenKey" $ob.tenantBox.tokenSecretKey) | nindent 12 }}
+            - name: IMAS_TENANTBOX_OPENBAO_KV_MOUNT
+              value: {{ $ob.tenantBox.kvMount | quote }}
+            - name: IMAS_TENANTBOX_OPENBAO_KV_PATH
+              value: {{ $ob.tenantBox.kvPath | quote }}
+            {{- with .Values.farmer.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.farmer.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.farmer.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.farmer.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.farmer.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.farmer.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/imas/farmer
+              subPath: farmer
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/imas/farmer
+            - name: cache
+              mountPath: /var/cache/imas/farmer
+            - name: tmp
+              mountPath: /tmp
+            - name: nats-seeds
+              mountPath: {{ .Values.natsSeeds.mountPath }}
+              readOnly: true
+            - name: tls
+              mountPath: {{ $tlsDir }}
+              {{- if eq .Values.tls.mode "secret" }}
+              readOnly: true
+              {{- end }}
+            {{- include "imas-farmer.openbaoVolumeMounts" . | trim | nindent 12 }}
+            {{- with .Values.farmer.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "imas-farmer.fullname" . }}
+        - name: data
+          {{- if .Values.farmer.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-data" (include "imas-farmer.fullname" .)) .Values.farmer.persistence.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: cache
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: nats-seeds
+          secret:
+            secretName: {{ .Values.natsSeeds.secretName }}
+            defaultMode: 0440
+            # Only the listed keys, even if the Secret carries others.
+            items:
+              {{- range $name, $key := $seeds }}
+              - key: {{ $key | quote }}
+                path: {{ $key | quote }}
+              {{- end }}
+        {{- if eq .Values.tls.mode "secret" }}
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+            defaultMode: 0440
+            items:
+              - { key: tls.crt, path: tls.crt }
+              - { key: tls.key, path: tls.key }
+              - { key: ca.crt, path: ca.crt }
+        {{- else }}
+        # Issued from OpenBao PKI at every start (internal/certs.GenCert);
+        # nothing rotates it while farmer runs, so a restart is the
+        # rotation.
+        - name: tls
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        {{- end }}
+        {{- include "imas-farmer.openbaoVolumes" . | trim | nindent 8 }}
+        {{- with .Values.farmer.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

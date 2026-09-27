@@ -1,8 +1,7 @@
-# Reference Helm values for farmer's job reconcile window. NOT used by
-# anything in this repo: farmer's real Deployment and Helm chart live in
-# the separate ops repo (see README.md). Merge this block into that
-# chart's values.yaml, and deployment.env.job-reconcile.yaml into its
-# Deployment template.
+# Reference Helm values for farmer's job reconcile window.
+# deploy/helm/farmer has this block as farmer.jobs.reconcileWindow and
+# renders deployment.env.job-reconcile.yaml's logic in its farmer
+# Deployment (TestReconcileWindow in its chart_test.go).
 jobs:
   # How long after dispatch a job may start on its sprout and still be
   # recorded (IMAS_JOB_RECONCILE_WINDOW). A job whose start is reported

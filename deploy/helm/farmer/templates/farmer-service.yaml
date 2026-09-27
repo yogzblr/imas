@@ -1,0 +1,25 @@
+{{- include "imas-farmer.validate" . -}}
+# farmer's HTTPS API: /v1/enroll, /v1/refresh, /files/ and the JWKS, all
+# reached through the nats chart's Envoy (set its
+# envoy.upstreams.farmerAPI.host to this Service's FQDN).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "imas-farmer.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: farmer
+  {{- with .Values.farmer.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.farmer.service.type }}
+  selector:
+    {{- include "imas-farmer.farmer.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: api
+      port: {{ .Values.farmer.apiPort }}
+      targetPort: api
+      protocol: TCP

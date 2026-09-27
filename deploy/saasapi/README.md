@@ -1,14 +1,17 @@
 # saasapi deployment reference: enrollment-key rate limit
 
-Same precedent as `deploy/farmer/` and `deploy/envoy/`: these are reviewed
-*reference* files. **saasapi's real Deployment and Helm chart are not in
-this repo.** They live in the separate ops repo. Nothing in imas applies
-or renders the YAML here.
+Same precedent as `deploy/farmer/`: these are the reviewed *reference*
+files. **The chart that deploys saasapi is `deploy/helm/farmer`**, which
+runs it next to farmer on the same Valkey. The chart takes these values
+under `saasapi.` (`saasapi.enrollmentKeys.rateLimit.*`; `valkey.addrs`
+keeps its name and is used for an external Valkey), and ports the env
+fragment with the same semantics.
+`TestSaasapiRateLimitEnv` in its `chart_test.go` pins them together.
 
 | File | What it is |
 |---|---|
-| `values.rate-limit.yaml` | Values block to merge into the chart's `values.yaml` |
-| `deployment.env.rate-limit.yaml` | Template fragment to paste under the saasapi container's `env:` list |
+| `values.rate-limit.yaml` | The values block (`enrollmentKeys` is `saasapi.enrollmentKeys` in `deploy/helm/farmer`) |
+| `deployment.env.rate-limit.yaml` | The env fragment, as ported into `deploy/helm/farmer/templates/saasapi-deployment.yaml` |
 
 ## What it configures
 

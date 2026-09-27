@@ -1,0 +1,15 @@
+{{- if and .Values.saasapi.enabled .Values.saasapi.pdb.enabled (gt (int .Values.saasapi.replicaCount) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "imas-farmer.saasapi.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: saasapi
+spec:
+  maxUnavailable: {{ .Values.saasapi.pdb.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "imas-farmer.saasapi.selectorLabels" . | nindent 6 }}
+{{- end }}

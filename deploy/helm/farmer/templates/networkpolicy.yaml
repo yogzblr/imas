@@ -1,0 +1,97 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- include "imas-farmer.validate" . -}}
+{{- $np := .Values.networkPolicy -}}
+{{- $pxc := dict "bundled" .Values.pxc.enabled "peers" $np.external.pxc "port" .Values.database.port -}}
+{{- $valkey := dict "bundled" .Values.valkey.enabled "peers" $np.external.valkey "port" $np.external.valkeyPort -}}
+{{- $hasValkey := include "imas-farmer.valkeyAddrs" . -}}
+# farmer (core). Allowed, and nothing else:
+#   in:  the nats chart's Envoy -> API port (/v1/enroll, /v1/refresh, /files/, JWKS)
+#   out: the bus (client port, farmerbusurl), PXC, Valkey, OpenBao, DNS,
+#        plus networkPolicy.farmerExtraEgress (object storage)
+# Core only ever dials out to the DMZ; the bus never dials in.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "imas-farmer.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: farmer
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "imas-farmer.farmer.selectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            {{- toYaml $np.dmz.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml $np.dmz.envoyPodSelector | nindent 12 }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.farmer.apiPort }} }
+  egress:
+    - to:
+        - namespaceSelector:
+            {{- toYaml $np.dmz.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml $np.dmz.busPodSelector | nindent 12 }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.bus.port }} }
+    {{- include "imas-farmer.depEgress" $pxc | nindent 4 }}
+    {{- if $hasValkey }}
+    {{- include "imas-farmer.depEgress" $valkey | nindent 4 }}
+    {{- end }}
+    {{- include "imas-farmer.openbaoEgress" . | nindent 4 }}
+    {{- include "imas-farmer.dnsEgress" . | nindent 4 }}
+    {{- with $np.farmerExtraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- if .Values.saasapi.enabled }}
+---
+# saasapi. Allowed, and nothing else:
+#   in:  networkPolicy.saasapiIngress.from (default: anyone) -> its port
+#   out: the bus (client port), PXC, Valkey, DNS; OpenBao only for fleet
+#        dispatch or the bus CA fetch; plus networkPolicy.saasapiExtraEgress
+#        (default: HTTPS anywhere, for the Keycloak JWKS)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "imas-farmer.saasapi.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: saasapi
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "imas-farmer.saasapi.selectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: {{ .Values.saasapi.port }} }
+      {{- with $np.saasapiIngress.from }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  egress:
+    - to:
+        - namespaceSelector:
+            {{- toYaml $np.dmz.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml $np.dmz.busPodSelector | nindent 12 }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.bus.port }} }
+    {{- include "imas-farmer.depEgress" $pxc | nindent 4 }}
+    {{- if $hasValkey }}
+    {{- include "imas-farmer.depEgress" $valkey | nindent 4 }}
+    {{- end }}
+    {{- if include "imas-farmer.saasapi.needsOpenBao" . }}
+    {{- include "imas-farmer.openbaoEgress" . | nindent 4 }}
+    {{- end }}
+    {{- include "imas-farmer.dnsEgress" . | nindent 4 }}
+    {{- with $np.saasapiExtraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
+{{- end }}

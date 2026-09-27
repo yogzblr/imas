@@ -1,8 +1,8 @@
 # Reference Helm values for saasapi's per-tenant enrollment-key rate
-# limit. NOT used by anything in this repo: saasapi's real Deployment and
-# Helm chart live in the separate ops repo (same situation as
-# deploy/farmer/). Merge this block into that chart's values.yaml, and
-# deployment.env.rate-limit.yaml into its Deployment template.
+# limit. deploy/helm/farmer takes this block under saasapi.
+# (saasapi.enrollmentKeys; valkey.addrs as is) and ports
+# deployment.env.rate-limit.yaml into its saasapi Deployment
+# (TestSaasapiRateLimitEnv in its chart_test.go).
 #
 # These are the compiled-in defaults (internal/saasapi/router.go). Setting
 # a value to null (or leaving the block out) emits no env var, which also

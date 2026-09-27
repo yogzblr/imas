@@ -1,0 +1,164 @@
+{{- if and .Values.pxc.enabled (not .Values.database.existingSecret) .Values.database.bootstrap.enabled }}
+{{- include "imas-farmer.validate" . -}}
+{{- $db := .Values.database -}}
+{{- range $v := list $db.farmer.name $db.farmer.user $db.saasapi.name $db.saasapi.user -}}
+{{- if not (regexMatch "^[A-Za-z0-9_]{1,32}$" (toString $v)) -}}
+{{- fail (printf "database schema/user name %q must match ^[A-Za-z0-9_]{1,32}$ (it is written into the bootstrap SQL)" $v) -}}
+{{- end -}}
+{{- end -}}
+{{- $spec := include "imas-farmer.dbBootstrap.podTemplate" . -}}
+{{- /*
+A plain Job, not a hook: it waits for PXC and then for saasapi's first
+migration, and neither may block `helm install`. Named by a hash of its
+pod template, so an unchanged spec is a no-op on upgrade (and an Argo CD
+sync), and a changed one is a new Job instead of an immutable-field
+error. To re-run it as is, delete the Job and `helm upgrade`.
+*/ -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-db-bootstrap-%s" (include "imas-farmer.fullname" . | trunc 41 | trimSuffix "-") ($spec | sha256sum | trunc 8) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-bootstrap
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: {{ $db.bootstrap.activeDeadlineSeconds }}
+  template:
+    {{- $spec | nindent 4 }}
+{{- if .Values.networkPolicy.enabled }}
+---
+# db-bootstrap talks to PXC and DNS only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "imas-farmer.fullname" . }}-db-bootstrap
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-bootstrap
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: db-bootstrap
+  policyTypes: ["Ingress", "Egress"]
+  ingress: []
+  egress:
+    - to:
+        - podSelector: {}
+      ports:
+        - { protocol: TCP, port: {{ $db.port }} }
+    {{- include "imas-farmer.dnsEgress" . | nindent 4 }}
+{{- end }}
+{{- end }}
+
+{{- define "imas-farmer.dbBootstrap.podTemplate" -}}
+{{- $db := .Values.database -}}
+{{- $pxcImg := .Values.pxc.pxc.image -}}
+{{- $rootSecret := default (default (printf "%s-secrets" (include "imas-farmer.pxc.clusterName" .)) .Values.pxc.pxc.clusterSecretName) $db.bootstrap.rootPasswordSecret -}}
+metadata:
+  labels:
+    app.kubernetes.io/name: {{ include "imas-farmer.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: db-bootstrap
+spec:
+  restartPolicy: OnFailure
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+    - name: bootstrap
+      # The PXC image this release runs, for its mysql client.
+      image: {{ printf "%s:%s" $pxcImg.repository (toString $pxcImg.tag) | quote }}
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/bash", "-ec"]
+      args:
+        - |
+          # The root password goes into an option file, never argv.
+          printf '[client]\nuser=root\npassword="%s"\nhost=%s\nport=%s\n' \
+            "$ROOT_PASSWORD" "$DB_HOST" "$DB_PORT" > /tmp/root.cnf
+          sql() { mysql --defaults-extra-file=/tmp/root.cnf --batch --skip-column-names "$@"; }
+
+          until sql -e 'SELECT 1' >/dev/null 2>&1; do
+            echo "waiting for PXC at $DB_HOST:$DB_PORT"; sleep 10
+          done
+
+          # docs/design/cloudxp-machine-manager-api-design.md §5.1:
+          # single writer per schema, read-only into the other's.
+          sql <<SQL
+          CREATE DATABASE IF NOT EXISTS \`$FARMER_DB\`;
+          CREATE DATABASE IF NOT EXISTS \`$SAAS_DB\`;
+          CREATE USER IF NOT EXISTS '$FARMER_USER'@'%' IDENTIFIED BY '$FARMER_PASSWORD';
+          ALTER USER '$FARMER_USER'@'%' IDENTIFIED BY '$FARMER_PASSWORD';
+          CREATE USER IF NOT EXISTS '$SAAS_USER'@'%' IDENTIFIED BY '$SAAS_PASSWORD';
+          ALTER USER '$SAAS_USER'@'%' IDENTIFIED BY '$SAAS_PASSWORD';
+          GRANT ALL    ON \`$FARMER_DB\`.* TO '$FARMER_USER'@'%';
+          GRANT SELECT ON \`$SAAS_DB\`.*   TO '$FARMER_USER'@'%';
+          GRANT ALL    ON \`$SAAS_DB\`.*   TO '$SAAS_USER'@'%';
+          GRANT SELECT ON \`$FARMER_DB\`.* TO '$SAAS_USER'@'%';
+          SQL
+          echo "schemas, users and schema grants applied"
+
+          # The one exception to single-writer (§4.1/§3.3): farmer redeems
+          # enrollment keys. A column grant needs the table, which
+          # saasapi's AutoMigrate creates on its first start.
+          until [ "$(sql -e "SELECT COUNT(*) FROM information_schema.COLUMNS
+                   WHERE TABLE_SCHEMA='$SAAS_DB' AND TABLE_NAME='enrollment_keys'
+                   AND COLUMN_NAME IN ('used_count','last_used_at')")" = 2 ]; do
+            echo "waiting for saasapi to create $SAAS_DB.enrollment_keys"; sleep 15
+          done
+          sql -e "GRANT UPDATE (used_count, last_used_at) ON \`$SAAS_DB\`.\`enrollment_keys\` TO '$FARMER_USER'@'%';"
+          echo "farmer's enrollment_keys column grant applied"
+      env:
+        - name: DB_HOST
+          value: {{ include "imas-farmer.dbHost" . | quote }}
+        - name: DB_PORT
+          value: {{ $db.port | quote }}
+        - name: FARMER_DB
+          value: {{ $db.farmer.name | quote }}
+        - name: FARMER_USER
+          value: {{ $db.farmer.user | quote }}
+        - name: SAAS_DB
+          value: {{ $db.saasapi.name | quote }}
+        - name: SAAS_USER
+          value: {{ $db.saasapi.user | quote }}
+        - name: ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ $rootSecret }}
+              key: {{ $db.bootstrap.rootPasswordKey }}
+        - name: FARMER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "imas-farmer.fullname" . }}-db
+              key: farmer-password
+        - name: SAAS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "imas-farmer.fullname" . }}-db
+              key: saasapi-password
+        - name: HOME
+          value: /tmp
+      {{- with $db.bootstrap.resources }}
+      resources:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir:
+        medium: Memory
+        sizeLimit: 1Mi
+{{- end }}

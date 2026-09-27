@@ -1,0 +1,25 @@
+{{- if .Values.saasapi.enabled }}
+{{- include "imas-farmer.validate" . -}}
+# Plain HTTP: TLS terminates at the gateway in front of saasapi.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "imas-farmer.saasapi.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: saasapi
+  {{- with .Values.saasapi.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.saasapi.service.type }}
+  selector:
+    {{- include "imas-farmer.saasapi.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.saasapi.service.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

@@ -1,7 +1,8 @@
 # Reference strategic-merge patch for farmer's Deployment (and, for the
-# SYS seed, farmerbus's — see README.md). NOT applied by anything in this
-# repo: farmer's real Deployment/Helm chart lives in the separate ops repo.
-# This file is the exact volume / mount / env-var set to add there.
+# SYS seed, farmerbus's — see README.md). Not applied as is:
+# deploy/helm/farmer renders the same volume / mount / env-var set from
+# natsSeeds, and its chart_test.go (TestFarmerMatchesSeedPatch) fails if
+# the two drift. Apply this by hand only outside that chart.
 #
 # What it does: hands farmer the SYS Account NKey seed (and the SaaS API
 # User seed, which the design doc already sources this way) from OpenBao,

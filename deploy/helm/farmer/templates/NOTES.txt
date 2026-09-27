@@ -1,0 +1,39 @@
+imas core: farmer (1 replica){{ if .Values.saasapi.enabled }} and saasapi ({{ .Values.saasapi.replicaCount }} replica(s)){{ end }}.
+
+FLAG FOR SECURITY REVIEW: this release carries the OpenBao write policy for
+the SaaS API credential hand-off. See the chart README's "Security review
+notes" before pointing it at anything real.
+{{- if or .Values.openbao.enabled .Values.pxc.enabled .Values.valkey.enabled }}
+
+EVAL DEPENDENCIES deployed by this release:
+{{- if .Values.openbao.enabled }}
+  - OpenBao{{ if .Values.openbao.server.dev.enabled }} in DEV MODE: in memory, unsealed, root token in values. A restart
+    of its pod wipes keys, policies and roles; `helm upgrade` re-runs the bootstrap,
+    but the gateway and fleet keys (and the eval CA) are new ones{{ end }}.
+{{- end }}
+{{- if .Values.pxc.enabled }}
+  - PXC ({{ .Values.pxc.pxc.size }} node(s)). Schemas, users and grants: Job {{ include "imas-farmer.fullname" . }}-db-bootstrap-*
+    (it waits for saasapi's first migration before farmer's enrollment_keys grant).
+{{- end }}
+{{- if .Values.valkey.enabled }}
+  - Valkey (standalone, no auth or TLS).
+{{- end }}
+{{- end }}
+
+Point the nats chart (deploy/helm/nats) at this release:
+  envoy.upstreams.farmerAPI.host={{ include "imas-farmer.farmer.serviceFQDN" . }}
+  envoy.upstreams.farmerAPI.port={{ .Values.farmer.apiPort }}
+  networkPolicy.core.namespaceSelector.matchLabels."kubernetes\.io/metadata\.name"={{ .Release.Namespace }}
+  bus.organization={{ .Values.organization }}
+
+farmer (farmerbusurl) and saasapi dial the bus at {{ include "imas-farmer.busURL" . }};
+the bus certificate must carry {{ default (include "imas-farmer.busFQDN" .) .Values.bus.tlsServerName }} as a SAN.
+
+Before farmer can start, Secret "{{ .Values.natsSeeds.secretName }}" must exist in {{ .Release.Namespace }}
+with the same seeds the nats chart mounts. This chart never generates one.
+{{- if .Values.saasapi.enabled }}
+
+saasapi starts once Secret "{{ .Values.saasapi.natsCredentials.secretName }}" exists
+({{ if .Values.externalSecrets.enabled }}ESO syncs it{{ else }}externalSecrets.enabled=false: create it by hand{{ end }} from its seed and the JWT the publish Job
+wrote to {{ .Values.credentialPublisher.kvMount }}/{{ .Values.credentialPublisher.kvPath }}, field "jwt").
+{{- end }}
