@@ -26,8 +26,8 @@ Point the nats chart (deploy/helm/nats) at this release:
   networkPolicy.core.namespaceSelector.matchLabels."kubernetes\.io/metadata\.name"={{ .Release.Namespace }}
   bus.organization={{ .Values.organization }}
 
-farmer reaches the bus at tls://{{ include "imas-farmer.busAlias" . }}:{{ .Values.bus.port }} through its in-pod relay;
-the bus certificate must carry {{ include "imas-farmer.busAlias" . }} and {{ include "imas-farmer.busFQDN" . }} as SANs.
+farmer (farmerbusurl) and saasapi dial the bus at {{ include "imas-farmer.busURL" . }};
+the bus certificate must carry {{ default (include "imas-farmer.busFQDN" .) .Values.bus.tlsServerName }} as a SAN.
 
 Before farmer can start, Secret "{{ .Values.natsSeeds.secretName }}" must exist in {{ .Release.Namespace }}
 with the same seeds the nats chart mounts. This chart never generates one.

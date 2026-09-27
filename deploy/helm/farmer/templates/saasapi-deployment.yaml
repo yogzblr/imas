@@ -151,11 +151,11 @@ spec:
               value: {{ $s.jwt.issuer | quote }}
             - name: SAASAPI_JWT_AUDIENCE
               value: {{ $s.jwt.audience | quote }}
-            # The bus, by its FQDN (a SAN on the nats chart's default bus
-            # certificate). saasapi's dial has no farmerinterface
-            # coupling, so it needs no relay.
+            # The same URL as farmer's farmerbusurl. saasapi verifies the
+            # bus certificate against its host, the Service FQDN (a SAN on
+            # the nats chart's default bus certificate).
             - name: SAASAPI_NATS_URL
-              value: {{ printf "tls://%s:%v" (include "imas-farmer.busFQDN" .) .Values.bus.port | quote }}
+              value: {{ include "imas-farmer.busURL" . | quote }}
             - name: SAASAPI_NATS_CA_FILE
               value: /var/run/imas/bus-ca/ca.crt
             # Its NATS identity (deploy/farmer/externalsecrets.yaml,

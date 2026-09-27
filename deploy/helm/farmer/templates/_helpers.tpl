@@ -101,20 +101,18 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-The bus, by two names that the nats chart's default certificate SANs both
-cover (deploy/helm/nats, imas-nats.bus.defaultCertHosts):
-- busAlias, "<svc>.<ns>.svc": farmer's farmerinterface, pinned to 0.0.0.0
-  in farmer's pod (hostAliases). farmer binds its API to it, dials the bus
-  at it (landing on the relay) and verifies the bus certificate against it.
-- busFQDN, "<svc>.<ns>.svc.<domain>": what the relay and saasapi dial. It
-  must differ from busAlias, or the relay would resolve it to 0.0.0.0 too.
+The bus Service FQDN, "<svc>.<ns>.svc.<domain>", and the URL farmer
+(farmerbusurl) and saasapi (SAASAPI_NATS_URL) dial it at. The nats chart's
+default certificate SANs cover the FQDN (deploy/helm/nats,
+imas-nats.bus.defaultCertHosts), and it is what both processes verify the
+bus certificate against unless bus.tlsServerName says otherwise.
 */}}
-{{- define "imas-farmer.busAlias" -}}
-{{- printf "%s.%s.svc" .Values.bus.serviceName .Values.bus.namespace }}
-{{- end }}
-
 {{- define "imas-farmer.busFQDN" -}}
 {{- printf "%s.%s.svc.%s" .Values.bus.serviceName .Values.bus.namespace .Values.clusterDomain }}
+{{- end }}
+
+{{- define "imas-farmer.busURL" -}}
+{{- printf "tls://%s:%v" (include "imas-farmer.busFQDN" .) .Values.bus.port }}
 {{- end }}
 
 {{/*
@@ -383,6 +381,11 @@ explanation rather than deploying something that silently can't work.
 {{- range .Values.bus.sproutBusURLs -}}
 {{- if not (hasPrefix "wss://" (toString .)) -}}
 {{- fail (printf "bus.sproutBusURLs entry %q must be a wss:// URL (sprouts reach the bus only through Envoy's websocket route)" .) -}}
+{{- end -}}
+{{- end -}}
+{{- with .Values.bus.tlsServerName -}}
+{{- if not (regexMatch "^[A-Za-z0-9]([-A-Za-z0-9.]*[A-Za-z0-9])?$" (toString .)) -}}
+{{- fail (printf "bus.tlsServerName %q must be a DNS name (farmerbustlsservername is a TLS ServerName, not a URL or host:port)" .) -}}
 {{- end -}}
 {{- end -}}
 {{- if and .Values.bus.ca.secretName .Values.bus.ca.configMapName -}}

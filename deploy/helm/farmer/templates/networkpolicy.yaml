@@ -6,7 +6,7 @@
 {{- $hasValkey := include "imas-farmer.valkeyAddrs" . -}}
 # farmer (core). Allowed, and nothing else:
 #   in:  the nats chart's Envoy -> API port (/v1/enroll, /v1/refresh, /files/, JWKS)
-#   out: the bus (client port, via the in-pod relay), PXC, Valkey, OpenBao, DNS,
+#   out: the bus (client port, farmerbusurl), PXC, Valkey, OpenBao, DNS,
 #        plus networkPolicy.farmerExtraEgress (object storage)
 # Core only ever dials out to the DMZ; the bus never dials in.
 apiVersion: networking.k8s.io/v1

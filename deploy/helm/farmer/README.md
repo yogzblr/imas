@@ -39,7 +39,7 @@ It does **not** deploy the DMZ bus or Envoy. Those are `deploy/helm/nats`.
  sprouts ─▶ Envoy ──https:5405──────────────────▶ farmer ─┬─▶ PXC (farmer.*, reads saas.*)
               │                                     │     ├─▶ Valkey
               └─wss─▶ farmerbus ◀──tls:5406─────────┘     ├─▶ OpenBao (4 roles)
-                          ▲    (via farmer's in-pod relay) └─▶ object storage
+                          ▲    (farmerbusurl)             └─▶ object storage
                           └──────tls:5406──────── saasapi ─┬─▶ PXC (saas.*, reads farmer.*)
                                                            └─▶ Valkey (same one)
 ```
@@ -122,44 +122,28 @@ The OpenBao policies and roles are then the ops repo's job. See
 
 ## Reaching the bus
 
-`cmd/farmer` uses one setting, `farmerinterface`, for three things:
+Since yogzblr/imas#18, farmer keeps its bind address and its bus address
+apart (`internal/config`):
 
-- its API bind address;
-- the bus host it dials (`FarmerBusURL = farmerinterface:farmerbusport`);
-- the TLS server name it expects on the bus.
+| farmer setting | The chart sets it to | What it does |
+|---|---|---|
+| `farmerinterface` | `0.0.0.0` | The API's bind address, and nothing else |
+| `farmerbusurl` | `tls://<bus.serviceName>.<bus.namespace>.svc.<clusterDomain>:<bus.port>` | Where farmer dials the bus: its tenant connections, its SYS connection and its resolver pushes |
+| `farmerbustlsservername` | `bus.tlsServerName`, when set | The name farmer verifies the bus certificate against. Unset (the default), it is the host of `farmerbusurl`, the bus Service FQDN (`config.BusTLSServerName()`). |
 
-It therefore can't bind locally and dial a bus in another namespace (the
-nats chart's README, "Known gaps" item 3). Until farmer gets a separate
-bus URL setting, the chart works around it without code changes:
+saasapi dials the same URL (`SAASAPI_NATS_URL`) and verifies the same
+FQDN. The nats chart's default bus SANs cover it. In its
+`bus.tls.mode=secret`, or if you set `bus.tlsServerName`, make sure the bus
+certificate carries the name farmer verifies.
 
-1. `farmerinterface` is set to the bus's `<svc>.<ns>.svc` name. That name
-   is a SAN on the nats chart's default bus certificate.
-2. The farmer pod pins that name to `0.0.0.0` with `hostAliases`. The image
-   is `FROM scratch`, so it has no `nsswitch.conf`, and Go's resolver reads
-   `/etc/hosts` before DNS (`net/conf.go`). As a result:
-   - the API binds every interface;
-   - the bus dial goes to the local host.
-3. A **relay sidecar** (Envoy `tcp_proxy`, same pin as the nats chart)
-   listens on `127.0.0.1:<bus.port>` and forwards to the bus's
-   `<svc>.<ns>.svc.<clusterDomain>` name. That's a different name, so it
-   can't resolve to `0.0.0.0` itself.
-4. The relay doesn't terminate TLS. farmer verifies the bus certificate
-   end to end:
-   - tenant connections set `ServerName` to `farmerinterface`;
-   - the SYS connection derives it from the URL host, which is the same
-     name.
+There is no sidecar and no `hostAliases`. Before #18, this chart pinned
+the bus name to `0.0.0.0` and ran a loopback TCP relay to work around
+`farmerinterface` doing all three jobs; that workaround is gone.
 
-saasapi has no such coupling. It dials `tls://<svc>.<ns>.svc.<domain>:<port>`
-directly.
-
-**The bus certificate must carry both names.** The nats chart's default
-SANs do. In `bus.tls.mode=secret`, add them yourself.
-
-This was checked end to end against the real `farmerbus` (see
-[Verification status](#verification-status)), and `TestContractWithNatsChart`
-keeps the names, ports, SANs, seeds and NetworkPolicy selectors in step
-with `deploy/helm/nats`. Retire the relay once farmer can be given a bus
-URL separately from its bind address.
+This was checked against the real `farmerbus` with farmer's own config and
+bus code (see [Verification status](#verification-status)).
+`TestContractWithNatsChart` keeps the URL, the verified name, the SANs,
+the seeds and the NetworkPolicy selectors in step with `deploy/helm/nats`.
 
 ## Seeds
 
@@ -332,7 +316,7 @@ state moved off local disk first.
 | Pods | Direction | Peer | Port |
 |---|---|---|---|
 | farmer | in | the nats chart's Envoy (`networkPolicy.dmz.*`) | `farmer.apiPort` (5405) |
-| farmer | out | the nats chart's bus pods | `bus.port` (5406), via the relay |
+| farmer | out | the nats chart's bus pods | `bus.port` (5406), at `farmerbusurl` |
 | farmer, saasapi | out | PXC / Valkey | 3306 / 6379 |
 | farmer | out | OpenBao | 8200 |
 | saasapi | out | OpenBao, only for fleet dispatch or the bus CA fetch | 8200 |
@@ -363,10 +347,10 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `organization` | `imas` | `farmerorganization`. Must equal the nats chart's `bus.organization`. |
 | `clusterDomain` | `cluster.local` | For the FQDNs the chart builds. |
 | `bus.serviceName` / `bus.namespace` | `""` / `imas-dmz` | The nats chart's bus client Service. Required. |
-| `bus.port` | `5406` | Bus client port. The relay listens on the same port. |
+| `bus.port` | `5406` | Bus client port, in `farmerbusurl` and `SAASAPI_NATS_URL`. |
 | `bus.sproutBusURLs` | `[]` | `IMAS_SPROUT_BUS_URLS`, Envoy's external `wss://` addresses. Required. |
 | `bus.ca.secretName` / `configMapName` / `key` | `""` / `""` / `ca.crt` | saasapi's bus CA. Empty: `tls.secretName`'s `ca.crt`, or fetched from OpenBao PKI in openbao mode. |
-| `bus.relay.*` | Envoy `v1.35.3` | The in-pod relay. See [Reaching the bus](#reaching-the-bus). |
+| `bus.tlsServerName` | `""` | `farmerbustlsservername`. Empty: the bus Service FQDN. See [Reaching the bus](#reaching-the-bus). |
 | `natsSeeds.secretName` | `imas-farmer-nats-seeds` | The seed Secret. Required. |
 | `natsSeeds.seeds` | the six above | `NAME: key` pairs. All six are required. |
 | `natsSeeds.extraSeeds` | `{}` | More seeds, e.g. per-tenant Account seeds. |
@@ -461,61 +445,60 @@ registry.
   - a second run from a fresh config root wrote nothing, and the KV stayed
     at version 1;
   - it was refused on the seed path.
-- **The bus relay layout**, with the repo's nats-server and nats.go and a
-  TCP relay standing in for Envoy:
-  - the API bound `0.0.0.0`;
-  - tenant-style and SYS-style TLS connections reached the bus only through
-    the relay, verified against the pinned name;
-  - a wrong server name was refused;
-  - with the relay down, connects failed.
 - **The `db-bootstrap` script**, run against a stub `mysql`: it sent
   exactly the §5.1 SQL above, and waited for `saas.enrollment_keys` before
   the column grant.
 
-**Revalidated on 2026-09-27 against `main` at `4d81cc4`** (PRs #4, #15
-and #16 included; no `main` change gives farmer a bus URL separate from
-`farmerinterface`, so the relay stays):
+**Revalidated on 2026-09-27 against `main` at `84f352b`** (PRs #4, #15,
+#16 and #18 included; #18 gave farmer `farmerbusurl`, so the relay is
+gone):
 
 - **`Chart.lock`** was written by `helm dependency update` from the four
   projects' published repo indexes. All four pins are published, and each
   is the newest release. `helm dependency build` from a clean copy
   accepts it, and it rejects a `Chart.yaml` edited out of step.
-- **The real `farmerbus`** (built from `main`) ran with the nats chart's
-  rendered config and env in `bus.tls.mode=openbao`. It got its
+- **The real `farmerbus`**, built from that `main`, ran with the nats
+  chart's rendered config and env in `bus.tls.mode=openbao`. It got its
   certificate from this chart's `imas-farmerbus` PKI role in a real
   OpenBao, set up by this chart's bootstrap, using a token scoped to that
   role's policy. The certificate carried exactly the nats chart's SANs,
-  including the per-pod headless name. Then, authenticated as the bus's
-  own SYS user with the CA fetched the way saasapi's init container
-  fetches it:
-  - farmer-style tenant and SYS connections reached it through the
-    relay layout, and each got a `$SYS` ping reply;
-  - a saasapi-style connection to the FQDN reached it directly, bypassing
-    the relay;
-  - a client trusting another CA was refused.
+  including the per-pod headless name.
+- **farmer's own code, fed this chart's rendered `/etc/imas/farmer`** and
+  the same seeds, with the bus FQDN resolving to the bus (as cluster DNS
+  would) and nothing pinned:
+  - `config.LoadConfig("farmer")` gave `FarmerBusURL =
+    tls://imas-dmz-nats-bus.imas-dmz.svc.cluster.local:5406`,
+    `BusTLSServerName()` = that FQDN, and an API bind on `0.0.0.0:5405`;
+  - farmer's real `pki.ConnectSystemAccount` (its SYS connection) reached
+    the bus, verified it against the OpenBao PKI CA and got a `$SYS` ping
+    reply;
+  - a tenant connection as farmer's own User JWT for tenant `imas`, with
+    the TLS config `dialTenantBus` builds (`ServerName =
+    BusTLSServerName()`), connected.
+- **Earlier on the same day** (against `4d81cc4`, with the relay): a
+  saasapi-style connection to the FQDN reached the same bus directly, and
+  a client trusting another CA was refused. saasapi's URL is unchanged
+  since.
 - **`TestContractWithNatsChart`** was checked by mutation. Each of six
   deliberate breakages made it fail: the nats chart's core pod selector,
-  the bus port, the organization, a seed key, the gateway JWT TTL, and
-  the bus SANs.
+  the bus port, the organization, a seed key, the bus SANs, and a
+  `bus.tlsServerName` the bus certificate doesn't carry (plus the gateway
+  JWT TTL, in the earlier run).
 
 **Not verified:**
 
 - A real install. There was no cluster, so none of this was tested:
-  - the PXC operator, Valkey or Envoy relay pods;
-  - farmer booting against PXC;
+  - the PXC operator or Valkey pods;
+  - farmer booting against PXC, including `pki.ReloadNKeys`, which needs
+    PXC;
   - the Kubernetes auth login itself;
   - the SQL against a real MySQL server.
-- The Envoy relay config itself (`envoy --mode validate`). There was no
-  Envoy binary.
 
 ## Known gaps
 
-1. **farmer has no separate bus URL setting.** The relay works around it
-   (see [Reaching the bus](#reaching-the-bus)). The fix is a code change in
-   `internal/config`.
-2. **No published farmer or saasapi images.**
-3. **Horizontal farmer scaling** needs FarmerPKI off local disk.
-4. **saasapi runs in the release namespace.** The reference put its
+1. **No published farmer or saasapi images.**
+2. **Horizontal farmer scaling** needs FarmerPKI off local disk.
+3. **saasapi runs in the release namespace.** The reference put its
    ExternalSecret in a separate `saasapi` namespace. Here saasapi shares a
    namespace with farmer's seed Secret, but it mounts only its own
    credential Secret. Whoever can create pods in this namespace could
@@ -552,9 +535,6 @@ exceptions, all subcharts and none of them Go dependencies:
   bundled OpenBao, saasapi fetches the bus CA over plain HTTP. With an
   external OpenBao, set `openbaoClient.caConfigMap` so that fetch, and
   every client, verifies OpenBao.
-- **The relay** listens on loopback only, has no admin listener, and
-  passes TLS through. It doesn't widen farmer's egress: the NetworkPolicy
-  still allows only the bus pods on the bus port.
 - **Credentials in the environment.** `IMAS_PXC_DSN` holds a password in
   farmer's environment, as farmer's config requires. farmer's config file
   is mounted read-only, and `enableServiceLinks` is off, so jety can't

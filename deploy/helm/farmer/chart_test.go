@@ -318,7 +318,7 @@ func TestDefaultsRender(t *testing.T) {
 	docs := mustRender(t, "-f", ciValues(t, "default-values.yaml"))
 	for _, want := range []struct{ kind, name string }{
 		{"Deployment", "t-farmer"}, {"Service", "t-farmer"}, {"ConfigMap", "t-farmer"},
-		{"ConfigMap", "t-farmer-bus-relay"}, {"ServiceAccount", "t-farmer"},
+		{"ServiceAccount", "t-farmer"},
 		{"PersistentVolumeClaim", "t-farmer-data"},
 		{"Deployment", "t-farmer-saasapi"}, {"Service", "t-farmer-saasapi"},
 		{"ServiceAccount", "t-farmer-saasapi"}, {"PodDisruptionBudget", "t-farmer-saasapi"},
@@ -810,45 +810,41 @@ func TestLongReleaseName(t *testing.T) {
 	}
 }
 
-// Reaching the bus: farmerinterface is the bus's "<svc>.<ns>.svc" name,
-// pinned to 0.0.0.0, and the relay dials the FQDN, which must differ from
-// it (else the relay would resolve to itself). saasapi dials the FQDN.
-func TestBusRelay(t *testing.T) {
+// Reaching the bus (#18): farmerinterface is only farmer's bind address;
+// farmer dials farmerbusurl, the bus Service FQDN, and verifies the bus
+// certificate against its host unless bus.tlsServerName names another.
+// saasapi dials the same URL. No relay, no hostAliases.
+func TestBusAddress(t *testing.T) {
 	docs := mustRender(t, "--set", "bus.namespace=dmz", "--set", "bus.port=7422")
-	alias, fqdn := "imas-dmz-nats-bus.dmz.svc", "imas-dmz-nats-bus.dmz.svc.cluster.local"
+	url := "tls://imas-dmz-nats-bus.dmz.svc.cluster.local:7422"
 	cfg := farmerConfig(t, docs)
-	if cfg["farmerinterface"] != alias || cfg["farmerbusport"] != "7422" {
-		t.Errorf("farmerinterface/busport = %v/%v", cfg["farmerinterface"], cfg["farmerbusport"])
+	if cfg["farmerinterface"] != "0.0.0.0" || cfg["farmerbusurl"] != url || cfg["farmerbusport"] != "7422" {
+		t.Errorf("farmerinterface/farmerbusurl/farmerbusport = %v/%v/%v", cfg["farmerinterface"], cfg["farmerbusurl"], cfg["farmerbusport"])
+	}
+	if _, ok := cfg["farmerbustlsservername"]; ok {
+		t.Error("farmerbustlsservername set by default; it should follow farmerbusurl's host")
 	}
 	d := farmerDeploy(t, docs)
-	ha := get(podSpec(d), "hostAliases", 0).(obj)
-	if ha["ip"] != "0.0.0.0" || !slices.Equal(ha["hostnames"].([]any), []any{alias}) {
-		t.Errorf("hostAliases = %v", ha)
+	if podSpec(d)["hostAliases"] != nil {
+		t.Error("farmer still pins a host with hostAliases")
 	}
-	var relay obj
-	if err := yaml.Unmarshal([]byte(get(find(t, docs, "ConfigMap", "t-farmer-bus-relay"), "data", "envoy.yaml").(string)), &relay); err != nil {
-		t.Fatal(err)
+	if n := len(podSpec(d)["containers"].([]any)); n != 1 {
+		t.Errorf("farmer pod has %d containers; the bus relay sidecar is gone", n)
 	}
-	l := get(relay, "static_resources", "listeners", 0, "address", "socket_address").(obj)
-	if l["address"] != "127.0.0.1" || l["port_value"] != 7422 {
-		t.Errorf("relay listener %v: must be loopback on the bus port", l)
+	for _, doc := range docs {
+		if n, _ := get(doc, "metadata", "name").(string); strings.Contains(n, "relay") {
+			t.Errorf("%v %s still rendered", doc["kind"], n)
+		}
 	}
-	up := get(relay, "static_resources", "clusters", 0, "load_assignment", "endpoints", 0, "lb_endpoints", 0, "endpoint", "address", "socket_address").(obj)
-	if up["address"] != fqdn || up["port_value"] != 7422 || up["address"] == alias {
-		t.Errorf("relay upstream %v", up)
+	if env := envValues(container(t, find(t, docs, "Deployment", "t-farmer-saasapi"), "saasapi")); env["SAASAPI_NATS_URL"] != url {
+		t.Errorf("SAASAPI_NATS_URL = %q, want farmer's %s", env["SAASAPI_NATS_URL"], url)
 	}
-	if relay["admin"] != nil {
-		t.Error("relay has an admin listener")
+
+	cfg = farmerConfig(t, mustRender(t, "--set", "bus.tlsServerName=bus.example.internal"))
+	if cfg["farmerbustlsservername"] != "bus.example.internal" {
+		t.Errorf("farmerbustlsservername = %v", cfg["farmerbustlsservername"])
 	}
-	if tp := get(relay, "static_resources", "listeners", 0, "filter_chains", 0, "filters", 0, "name"); tp != "envoy.filters.network.tcp_proxy" {
-		t.Errorf("relay filter %v: must be a plain TCP proxy (TLS stays end to end)", tp)
-	}
-	if env := envValues(container(t, find(t, docs, "Deployment", "t-farmer-saasapi"), "saasapi")); env["SAASAPI_NATS_URL"] != "tls://"+fqdn+":7422" {
-		t.Errorf("SAASAPI_NATS_URL = %q", env["SAASAPI_NATS_URL"])
-	}
-	if podSpec(find(t, docs, "Deployment", "t-farmer-saasapi"))["hostAliases"] != nil {
-		t.Error("saasapi has hostAliases; only farmer needs the pin")
-	}
+	mustFail(t, "must be a DNS name", "--set", "bus.tlsServerName=tls://bus:5406")
 }
 
 func TestFarmerConfigFile(t *testing.T) {
@@ -1324,25 +1320,33 @@ func TestContractWithNatsChart(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(get(find(t, core, "ConfigMap", "imas-core-farmer"), "data", "farmer").(string)), &coreCfg); err != nil {
 		t.Fatal(err)
 	}
-	alias, fqdn := "imas-dmz-nats-bus.imas-dmz.svc", "imas-dmz-nats-bus.imas-dmz.svc.cluster.local"
+	// The nats chart's bus Service, by FQDN.
+	fqdn := fmt.Sprintf("%s.%s.svc.cluster.local", get(busSvc, "metadata", "name"), get(busSvc, "metadata", "namespace"))
 
-	// Addressing: farmer's bus host/port and saasapi's URL name the nats
-	// chart's bus Service and its client port.
+	// Addressing: farmer's farmerbusurl and saasapi's URL name the nats
+	// chart's bus Service and its client port; farmer still binds 0.0.0.0.
 	busPort := 0
 	for _, p := range get(busSvc, "spec", "ports").([]any) {
 		if get(p, "name") == "client" {
 			busPort = get(p, "port").(int)
 		}
 	}
-	if coreCfg["farmerinterface"] != alias || coreCfg["farmerbusport"] != fmt.Sprint(busPort) {
-		t.Errorf("farmer dials %v:%v, bus Service client port is %d", coreCfg["farmerinterface"], coreCfg["farmerbusport"], busPort)
+	busURL := fmt.Sprintf("tls://%s:%d", fqdn, busPort)
+	if coreCfg["farmerbusurl"] != busURL || coreCfg["farmerinterface"] != "0.0.0.0" {
+		t.Errorf("farmer dials %v (binds %v); the bus is %s", coreCfg["farmerbusurl"], coreCfg["farmerinterface"], busURL)
 	}
-	if env := envValues(container(t, saasapi, "saasapi")); env["SAASAPI_NATS_URL"] != fmt.Sprintf("tls://%s:%d", fqdn, busPort) {
-		t.Errorf("SAASAPI_NATS_URL = %s", env["SAASAPI_NATS_URL"])
+	if env := envValues(container(t, saasapi, "saasapi")); env["SAASAPI_NATS_URL"] != busURL {
+		t.Errorf("SAASAPI_NATS_URL = %s, want %s", env["SAASAPI_NATS_URL"], busURL)
 	}
-	// TLS: the bus certificate covers both names farmer and saasapi verify.
+	// TLS: the bus certificate covers the name farmer verifies (config.
+	// BusTLSServerName: farmerbustlsservername, else farmerbusurl's host)
+	// and the one saasapi verifies (its URL's host).
+	farmerName := fqdn
+	if n, ok := coreCfg["farmerbustlsservername"].(string); ok && n != "" {
+		farmerName = n
+	}
 	hosts, _ := busCfg["certhosts"].([]any)
-	for _, n := range []string{alias, fqdn} {
+	for _, n := range []string{farmerName, fqdn} {
 		if !slices.Contains(hosts, any(n)) {
 			t.Errorf("bus certhosts %v lack %s", hosts, n)
 		}

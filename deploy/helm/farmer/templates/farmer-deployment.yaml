@@ -31,7 +31,6 @@ spec:
         {{- end }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/farmer-configmap.yaml") . | sha256sum }}
-        checksum/bus-relay: {{ include (print $.Template.BasePath "/farmer-bus-relay-configmap.yaml") . | sha256sum }}
         {{- with .Values.farmer.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -41,15 +40,6 @@ spec:
       # config.LoadConfig folds every env var into the config; don't let
       # Kubernetes inject one per Service in the namespace.
       enableServiceLinks: false
-      # farmerinterface is the bus's "<svc>.<ns>.svc" name. Pinned to
-      # 0.0.0.0 here (the image is FROM scratch, so Go's resolver reads
-      # /etc/hosts before DNS): the API binds every interface, and the bus
-      # dial lands on the relay's loopback listener. See README.md,
-      # "Reaching the bus".
-      hostAliases:
-        - ip: 0.0.0.0
-          hostnames:
-            - {{ include "imas-farmer.busAlias" . }}
       {{- with .Values.farmer.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -206,37 +196,10 @@ spec:
             {{- with .Values.farmer.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-        - name: bus-relay
-          image: {{ include "imas-farmer.image" (dict "image" .Values.bus.relay.image "appVersion" "") | quote }}
-          imagePullPolicy: {{ .Values.bus.relay.image.pullPolicy }}
-          args:
-            - --config-path
-            - /etc/envoy/envoy.yaml
-            - --disable-hot-restart
-            - --log-level
-            - warn
-          {{- with .Values.bus.relay.resources }}
-          resources:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
-          securityContext:
-            runAsNonRoot: true
-            runAsUser: 101
-            runAsGroup: 101
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            capabilities: { drop: ["ALL"] }
-          volumeMounts:
-            - name: bus-relay
-              mountPath: /etc/envoy
-              readOnly: true
       volumes:
         - name: config
           configMap:
             name: {{ include "imas-farmer.fullname" . }}
-        - name: bus-relay
-          configMap:
-            name: {{ include "imas-farmer.fullname" . }}-bus-relay
         - name: data
           {{- if .Values.farmer.persistence.enabled }}
           persistentVolumeClaim:
