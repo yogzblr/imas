@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,14 +64,42 @@ var (
 	// happens over the NATS bus.
 	FarmerAPIPort string
 
+	// FarmerBusURL is the bus address cmd/farmer, the imas CLI and
+	// (as a last resort, see pki.ResolveSproutBusURLs) sprouts dial:
+	// farmerinterface:farmerbusport, except that farmer reads
+	// "farmerbusurl" (or the FARMERBUSURL environment variable) first.
+	// Farmer sets it whenever farmerinterface is a bind address that isn't
+	// also where the bus is reachable — e.g. in Kubernetes, where core
+	// binds 0.0.0.0 and the bus is a separate Service such as
+	// "tls://imas-dmz-nats-bus.imas-dmz.svc.cluster.local:5406". It may
+	// carry a scheme (nats://, tls://) or be a bare host:port. Sprouts
+	// ignore it: they pin bus addresses with the validated "busurls"
+	// instead (see BusURLs).
 	FarmerBusURL  string
 	FarmerBusPort string
+	// FarmerBusTLSServerName ("farmerbustlsservername", or the
+	// FARMERBUSTLSSERVERNAME environment variable; farmer only) is the
+	// name cmd/farmer
+	// verifies the bus's TLS certificate against when it dials
+	// FarmerBusURL. It is deliberately separate from FarmerInterface,
+	// which is a bind address (0.0.0.0 or a pod IP in Kubernetes) and so
+	// never a name a certificate carries. Empty means "derive it from
+	// FarmerBusURL": use BusTLSServerName for the effective value.
+	FarmerBusTLSServerName string
 	// FarmerWSPort is the port for nats-server's websocket listener —
 	// what Envoy's jwt_authn-gated route proxies sprout wss:// connections
 	// to, per docs/design/imas-envoy-enrollment-design.md. Distinct from
 	// FarmerBusPort (the plain TCP NATS listener imas CLI/farmer-to-farmer
 	// connections still use).
-	FarmerWSPort          string
+	FarmerWSPort string
+	// FarmerInterface ("farmerinterface") is, on farmer and farmerbus,
+	// the address their listeners bind: farmer's HTTPS API
+	// (cmd/farmer's StartAPIServer) and the bus's NATS and websocket
+	// listeners (pki.ConfigureNats). On sprouts and the imas CLI, which
+	// bind nothing, it is the farmer host they reach. It is also the
+	// default host of FarmerBusURL and FarmerURL. It is NOT the TLS
+	// ServerName farmer verifies the bus against; that is
+	// FarmerBusTLSServerName.
 	FarmerInterface       string
 	FarmerOrganization    string
 	FarmerPKI             string
@@ -561,7 +591,15 @@ func LoadConfig(binary string) {
 	CertificateValidTime = jety.GetDuration("certificatevalidtime")
 	ConfigRoot = jety.GetString("configroot")
 	FarmerAPIPort = jety.GetString("farmerapiport")
-	FarmerBusURL = jety.GetString("farmerinterface") + ":" + jety.GetString("farmerbusport")
+	FarmerBusURL = ""
+	FarmerBusTLSServerName = ""
+	if binary == string(BinaryFarmer) {
+		FarmerBusURL = strings.TrimSpace(jety.GetString("farmerbusurl"))
+		FarmerBusTLSServerName = strings.TrimSpace(jety.GetString("farmerbustlsservername"))
+	}
+	if FarmerBusURL == "" {
+		FarmerBusURL = jety.GetString("farmerinterface") + ":" + jety.GetString("farmerbusport")
+	}
 	FarmerBusPort = jety.GetString("farmerbusport")
 	FarmerWSPort = jety.GetString("farmerwsport")
 	FarmerInterface = jety.GetString("farmerinterface")
@@ -603,6 +641,45 @@ func LoadConfig(binary string) {
 	S3Bucket = jety.GetString("s3bucket")
 	S3JobBucket = jety.GetString("s3jobbucket")
 	SproutBusURLs = jety.GetStringSlice("sproutbusurls")
+}
+
+// BusTLSServerName returns the TLS ServerName to verify the bus's
+// certificate against when dialing FarmerBusURL: FarmerBusTLSServerName
+// if set, else the host of FarmerBusURL (the first one, if it lists
+// several). An unspecified address there (0.0.0.0, ::) — farmerinterface
+// used as a bind address on a single-host install, where the bus is on
+// the same host — becomes "localhost", which farmer's default certhosts
+// cover. In Kubernetes, set farmerbusurl to the bus Service's DNS name
+// (and the bus certificate's SANs to cover it) rather than relying on
+// that.
+func BusTLSServerName() string {
+	if FarmerBusTLSServerName != "" {
+		return FarmerBusTLSServerName
+	}
+	return busURLHost(FarmerBusURL)
+}
+
+// busURLHost returns the host of the first address in a NATS server
+// list (comma-separated, each "scheme://host:port" or bare "host:port"),
+// with an unspecified address mapped to "localhost". It is "" when
+// busURL has no host.
+func busURLHost(busURL string) string {
+	first, _, _ := strings.Cut(busURL, ",")
+	first = strings.TrimSpace(first)
+	var host string
+	if strings.Contains(first, "://") {
+		if u, err := url.Parse(first); err == nil {
+			host = u.Hostname()
+		}
+	} else if h, _, err := net.SplitHostPort(first); err == nil {
+		host = h
+	} else {
+		host = strings.Trim(first, "[]")
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		return "localhost"
+	}
+	return host
 }
 
 // stringList reads a config value that may be written as a YAML list or

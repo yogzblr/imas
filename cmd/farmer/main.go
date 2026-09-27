@@ -650,10 +650,10 @@ func dialTenantBus(ctx context.Context, tenantID string) (*nats.Conn, error) {
 	maxFarmerReconnect := 30
 	RootCA := config.RootCA
 	BusURL := config.FarmerBusURL
-	FarmerInterface := config.FarmerInterface
-	if FarmerInterface == "0.0.0.0" {
-		FarmerInterface = "localhost"
-	}
+	// Not config.FarmerInterface: that is this process's API bind
+	// address, which in Kubernetes is 0.0.0.0 or a pod IP, while the bus
+	// is a separate Service whose certificate carries its DNS name.
+	busServerName := config.BusTLSServerName()
 	// Authenticate as the User identity this tenant's Account granted farmer
 	// (see internal/pki/jwtauth-design.md): the User JWT minted by
 	// ReloadNKeys/ReloadNKeysForTenant/ProvisionTenant, plus this farmer's
@@ -682,7 +682,7 @@ func dialTenantBus(ctx context.Context, tenantID string) (*nats.Conn, error) {
 	}
 
 	tlsCfg := &tls.Config{
-		ServerName: FarmerInterface,
+		ServerName: busServerName,
 		RootCAs:    certPool,
 		MinVersion: tls.VersionTLS12,
 	}
