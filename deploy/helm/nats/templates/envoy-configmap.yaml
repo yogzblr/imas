@@ -1,0 +1,272 @@
+{{- if .Values.envoy.enabled }}
+{{- include "imas-nats.validate" . -}}
+{{- $e := .Values.envoy -}}
+{{- $j := $e.jwtAuthn -}}
+{{- $farmerSNI := default $e.upstreams.farmerAPI.host $e.upstreams.farmerAPI.sni -}}
+{{- $recipeHost := default $e.upstreams.farmerAPI.host $e.upstreams.recipeService.host -}}
+{{- $recipeSNI := default $recipeHost $e.upstreams.recipeService.sni -}}
+{{- $wsHost := default (include "imas-nats.bus.serviceFQDN" .) $e.upstreams.natsWebsocket.host -}}
+{{- $wsPort := default .Values.bus.ports.websocket $e.upstreams.natsWebsocket.port -}}
+{{- $wsSNI := default $wsHost $e.upstreams.natsWebsocket.sni -}}
+{{- $jwksURI := default (printf "https://%s:%v/v1/.well-known/jwks.json" $e.upstreams.farmerAPI.host $e.upstreams.farmerAPI.port) $j.jwks.remote.uri -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "imas-nats.envoy.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-nats.labels" . | nindent 4 }}
+    app.kubernetes.io/component: envoy
+data:
+  {{- if and (eq $j.jwks.source "local") $j.jwks.local.inline }}
+  jwks.json: {{ $j.jwks.local.inline | quote }}
+  {{- end }}
+  envoy.yaml: |
+  {{- if $e.configOverride }}
+    {{- $e.configOverride | nindent 4 }}
+  {{- else }}
+    # Rendered by deploy/helm/nats from deploy/envoy/envoy.yaml (workstream
+    # H). FLAG FOR SECURITY REVIEW: this is the front door of the trust
+    # chain. Read that file's header for the route-by-route rationale; the
+    # structure here is the same, with hosts, ports, TLS and the JWKS
+    # source taken from values.
+    static_resources:
+      listeners:
+        - name: dmz_gateway
+          address:
+            socket_address: { address: 0.0.0.0, port_value: {{ $e.listenerPort }} }
+          filter_chains:
+            - transport_socket:
+                name: envoy.transport_sockets.tls
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+                  common_tls_context:
+                    tls_params:
+                      tls_minimum_protocol_version: TLSv1_2
+                    tls_certificates:
+                      - certificate_chain: { filename: "/etc/envoy/tls/tls.crt" }
+                        private_key: { filename: "/etc/envoy/tls/tls.key" }
+              filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: dmz_gateway
+                    {{- with $j.claimToHeaders }}
+                    # Strip client-supplied copies of the claim headers
+                    # before any filter runs, so only jwt_authn's
+                    # claim_to_headers can set them — including on
+                    # /v1/enroll, where jwt_authn is disabled.
+                    early_header_mutation_extensions:
+                      - name: envoy.http.early_header_mutation.header_mutation
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.http.early_header_mutation.header_mutation.v3.HeaderMutation
+                          mutations:
+                            {{- range . }}
+                            - remove: {{ .headerName | lower | quote }}
+                            {{- end }}
+                    {{- end }}
+                    upgrade_configs:
+                      - upgrade_type: websocket
+                    route_config:
+                      name: local_route
+                      virtual_hosts:
+                        - name: imas_dmz
+                          domains: ["*"]
+                          routes:
+                            # Route 1: enrollment. No JWT gate (a sprout
+                            # enrolling has none yet); rate-limited instead.
+                            - match: { prefix: "/v1/enroll" }
+                              route:
+                                cluster: farmer_api
+                                timeout: {{ $e.routes.enrollTimeout }}
+                              typed_per_filter_config:
+                                envoy.filters.http.jwt_authn:
+                                  "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+                                  disabled: true
+                                envoy.filters.http.local_ratelimit:
+                                  "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                                  stat_prefix: enroll_rate_limiter
+                                  token_bucket:
+                                    # Fixed on purpose, not a value: the join
+                                    # token is this route's only credential,
+                                    # so this small budget bounds join-token
+                                    # guessing and must not grow with the
+                                    # fleet. Per Envoy process (shared by its
+                                    # workers), so N replicas allow N x this.
+                                    max_tokens: 20
+                                    tokens_per_fill: 20
+                                    fill_interval: 60s
+                                  filter_enabled:
+                                    runtime_key: enroll_rate_limit_enabled
+                                    default_value: { numerator: 100, denominator: HUNDRED }
+                                  filter_enforced:
+                                    runtime_key: enroll_rate_limit_enforced
+                                    default_value: { numerator: 100, denominator: HUNDRED }
+
+                            # Route 1b: gateway JWT refresh. No JWT gate
+                            # (an expired gateway JWT must still renew);
+                            # farmer checks an NKey proof of possession.
+                            # Its own bucket, sized from the fleet
+                            # (envoy.refreshRateLimit), never /v1/enroll's.
+                            {{- include "imas-nats.envoy.refreshRoute" . | nindent 28 }}
+
+                            # Route 2: authenticated recipe download, farmer's
+                            # GET /files/<key> (the trailing slash keeps e.g.
+                            # "/filesystem" out). /v1/recipes is the CLI's
+                            # RBAC-token API and is deliberately not routed:
+                            # it falls through to route 3.
+                            - match: { prefix: "/files/" }
+                              route:
+                                cluster: recipe_service
+                                timeout: {{ $e.routes.filesTimeout }}
+                              typed_per_filter_config:
+                                envoy.filters.http.jwt_authn:
+                                  "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+                                  requirement_name: {{ $j.providerName }}
+
+                            # Route 3 (default): the sprout's wss:// NATS
+                            # connection to the bus's websocket listener.
+                            - match: { prefix: "/" }
+                              route:
+                                cluster: nats_websocket
+                                timeout: 0s # long-lived websocket connection
+                                idle_timeout: {{ $e.routes.websocketIdleTimeout }}
+                                upgrade_configs:
+                                  - upgrade_type: websocket
+                              typed_per_filter_config:
+                                envoy.filters.http.jwt_authn:
+                                  "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+                                  requirement_name: {{ $j.providerName }}
+                    http_filters:
+                      - name: envoy.filters.http.jwt_authn
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
+                          providers:
+                            {{ $j.providerName }}:
+                              # internal/gatewayjwt's GatewayIssuer: fixed,
+                              # platform-wide, never a tenant identifier.
+                              issuer: {{ $j.issuer | quote }}
+                              {{- with $j.audiences }}
+                              audiences:
+                                {{- toYaml . | nindent 32 }}
+                              {{- end }}
+                              clock_skew_seconds: {{ $j.clockSkewSeconds }}
+                              {{- if eq $j.jwks.source "remote" }}
+                              # Gateway signing key(s) as a JWKS (kty OKP,
+                              # crv Ed25519), served by farmer's
+                              # internal/api/handlers/jwks.go.
+                              remote_jwks:
+                                http_uri:
+                                  uri: {{ $jwksURI | quote }}
+                                  cluster: {{ $j.jwks.remote.cluster }}
+                                  timeout: {{ $j.jwks.remote.timeout }}
+                                cache_duration: {{ $j.jwks.remote.cacheDuration }}
+                                {{- if $j.jwks.remote.asyncFetch.enabled }}
+                                async_fetch:
+                                  fast_listener: {{ $j.jwks.remote.asyncFetch.fastListener }}
+                                {{- end }}
+                              {{- else }}
+                              # Static JWKS: a gateway-key rotation needs a
+                              # new document here (and an Envoy restart).
+                              local_jwks:
+                                filename: /etc/envoy/jwks/{{ if $j.jwks.local.configMapName }}{{ $j.jwks.local.configMapKey }}{{ else }}jwks.json{{ end }}
+                              {{- end }}
+                              forward: {{ $j.forward }}
+                              {{- with $j.claimToHeaders }}
+                              claim_to_headers:
+                                {{- range . }}
+                                - header_name: {{ .headerName }}
+                                  claim_name: {{ .claimName }}
+                                {{- end }}
+                              {{- end }}
+                          # PerRouteConfig.requirement_name above looks
+                          # names up here, not in providers.
+                          requirement_map:
+                            {{ $j.providerName }}:
+                              provider_name: {{ $j.providerName }}
+                          # Fallback for any route without a per-route
+                          # config: require the JWT.
+                          rules:
+                            - match: { prefix: "/files/" }
+                              requires: { provider_name: {{ $j.providerName }} }
+                            - match: { prefix: "/" }
+                              requires: { provider_name: {{ $j.providerName }} }
+                      - name: envoy.filters.http.local_ratelimit
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                          stat_prefix: http_local_rate_limiter
+                          # Disabled globally; only /v1/enroll and
+                          # /v1/refresh turn it on, each with its own bucket.
+                          filter_enabled:
+                            runtime_key: local_rate_limit_enabled
+                            default_value: { numerator: 0, denominator: HUNDRED }
+                          filter_enforced:
+                            runtime_key: local_rate_limit_enforced
+                            default_value: { numerator: 0, denominator: HUNDRED }
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+      clusters:
+        # farmer's HTTPS API (core network): /v1/enroll, /v1/refresh and
+        # the JWKS fetch.
+        - name: farmer_api
+          type: STRICT_DNS
+          lb_policy: ROUND_ROBIN
+          load_assignment:
+            cluster_name: farmer_api
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address: { address: {{ $e.upstreams.farmerAPI.host | quote }}, port_value: {{ $e.upstreams.farmerAPI.port }} }
+          {{- include "imas-nats.envoy.upstreamTLS" (dict "root" . "sni" $farmerSNI) | nindent 10 }}
+
+        # The bus's websocket listener (internal/pki/nats.go, FarmerWSPort).
+        - name: nats_websocket
+          type: STRICT_DNS
+          lb_policy: ROUND_ROBIN
+          load_assignment:
+            cluster_name: nats_websocket
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address: { address: {{ $wsHost | quote }}, port_value: {{ $wsPort }} }
+          {{- include "imas-nats.envoy.upstreamTLS" (dict "root" . "sni" $wsSNI) | nindent 10 }}
+
+        # farmer's sprout-facing recipe download (GET /files/<key>),
+        # workstream I. Farmer re-verifies the forwarded gateway JWT and
+        # serves only that sprout's own sprouts/<tenant>/<sprout>/ keys.
+        - name: recipe_service
+          type: STRICT_DNS
+          lb_policy: ROUND_ROBIN
+          load_assignment:
+            cluster_name: recipe_service
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address: { address: {{ $recipeHost | quote }}, port_value: {{ $e.upstreams.recipeService.port }} }
+          {{- include "imas-nats.envoy.upstreamTLS" (dict "root" . "sni" $recipeSNI) | nindent 10 }}
+        {{- if and (eq $j.jwks.source "remote") (eq $j.jwks.remote.cluster "jwks") }}
+
+        # Separate JWKS host (envoy.upstreams.jwks).
+        - name: jwks
+          type: STRICT_DNS
+          lb_policy: ROUND_ROBIN
+          load_assignment:
+            cluster_name: jwks
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address: { address: {{ $e.upstreams.jwks.host | quote }}, port_value: {{ $e.upstreams.jwks.port }} }
+          {{- include "imas-nats.envoy.upstreamTLS" (dict "root" . "sni" (default $e.upstreams.jwks.host $e.upstreams.jwks.sni)) | nindent 10 }}
+        {{- end }}
+
+    admin:
+      address:
+        socket_address: { address: 127.0.0.1, port_value: {{ $e.adminPort }} }
+  {{- end }}
+{{- end }}

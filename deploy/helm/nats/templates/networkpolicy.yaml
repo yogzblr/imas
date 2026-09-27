@@ -1,0 +1,138 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.networkPolicy -}}
+{{- $clustered := gt (int .Values.bus.replicaCount) 1 -}}
+# DMZ bus. Allowed, and nothing else:
+#   in:  core (cmd/farmer)  -> client port   (NATS over TLS; core dials out)
+#   in:  this chart's Envoy -> websocket port (sprouts' wss://, post-jwt_authn)
+#   in/out: bus <-> bus     -> cluster port   (only when replicaCount > 1)
+#   out: DNS; OpenBao only in bus.tls.mode=openbao
+# The bus never opens a connection into the core network.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "imas-nats.bus.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-nats.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bus
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "imas-nats.bus.selectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            {{- toYaml $np.core.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml $np.core.podSelector | nindent 12 }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.bus.ports.client }} }
+    {{- if .Values.envoy.enabled }}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "imas-nats.envoy.selectorLabels" . | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.bus.ports.websocket }} }
+    {{- end }}
+    {{- if $clustered }}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "imas-nats.bus.selectorLabels" . | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.bus.cluster.port }} }
+    {{- end }}
+  egress:
+    - to:
+        - namespaceSelector:
+            {{- toYaml $np.dns.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml $np.dns.podSelector | nindent 12 }}
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    {{- if $clustered }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "imas-nats.bus.selectorLabels" . | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.bus.cluster.port }} }
+    {{- end }}
+    {{- if eq .Values.bus.tls.mode "openbao" }}
+    - to:
+        - namespaceSelector:
+            {{- toYaml $np.openbao.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml $np.openbao.podSelector | nindent 12 }}
+      ports:
+        - { protocol: TCP, port: {{ $np.openbao.port }} }
+    {{- end }}
+    {{- with $np.busExtraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- if .Values.envoy.enabled }}
+{{- $e := .Values.envoy -}}
+{{- $corePorts := list (int $e.upstreams.farmerAPI.port) -}}
+{{- if not (has (int $e.upstreams.recipeService.port) $corePorts) }}
+{{- $corePorts = append $corePorts (int $e.upstreams.recipeService.port) -}}
+{{- end }}
+---
+# Envoy (DMZ edge). Allowed, and nothing else:
+#   in:  envoyIngress.from (default: anyone) -> listener port
+#   out: bus pods  -> websocket port
+#   out: core (cmd/farmer) -> farmer API port(s): /v1/enroll, /v1/refresh, /files/,
+#        and the remote JWKS fetch
+#   out: DNS
+# The admin port is bound to 127.0.0.1 and needs no rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "imas-nats.envoy.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-nats.labels" . | nindent 4 }}
+    app.kubernetes.io/component: envoy
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "imas-nats.envoy.selectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: {{ $e.listenerPort }} }
+      {{- with $np.envoyIngress.from }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "imas-nats.bus.selectorLabels" . | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.bus.ports.websocket }} }
+    - to:
+        - namespaceSelector:
+            {{- toYaml $np.core.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml $np.core.podSelector | nindent 12 }}
+      ports:
+        {{- range $corePorts }}
+        - { protocol: TCP, port: {{ . }} }
+        {{- end }}
+    - to:
+        - namespaceSelector:
+            {{- toYaml $np.dns.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml $np.dns.podSelector | nindent 12 }}
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    {{- with $np.envoyExtraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,36 @@
+{{- include "imas-nats.validate" . -}}
+{{- $tlsDir := include "imas-nats.bus.tlsDir" . -}}
+{{- $managed := dict
+  "loglevel" .Values.bus.logLevel
+  "farmerinterface" "0.0.0.0"
+  "farmerbusport" (toString .Values.bus.ports.client)
+  "farmerwsport" (toString .Values.bus.ports.websocket)
+  "farmerorganization" .Values.bus.organization
+  "configroot" "/etc/imas/"
+  "farmerpki" "/var/lib/imas/farmerbus/pki/"
+-}}
+{{- if eq .Values.bus.tls.mode "secret" }}
+{{- $_ := set $managed "certfile" (printf "%s/tls.crt" $tlsDir) }}
+{{- $_ := set $managed "keyfile" (printf "%s/tls.key" $tlsDir) }}
+{{- $_ := set $managed "rootca" (printf "%s/ca.crt" $tlsDir) }}
+{{- else }}
+{{- $_ := set $managed "certfile" (printf "%s/tls-cert.pem" $tlsDir) }}
+{{- $_ := set $managed "keyfile" (printf "%s/tls-key.pem" $tlsDir) }}
+{{- $_ := set $managed "rootca" (printf "%s/tls-rootca.pem" $tlsDir) }}
+{{- $_ := set $managed "certhosts" (default (fromYamlArray (include "imas-nats.bus.defaultCertHosts" .)) .Values.bus.tls.certHosts) }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "imas-nats.bus.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-nats.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bus
+data:
+  # /etc/imas/farmer, read by config.LoadConfig("farmer"). Mounted
+  # read-only on purpose: LoadConfig ends with jety.WriteConfig(), which
+  # would otherwise write every environment variable of the process back
+  # into this file.
+  farmer: |
+    {{- merge $managed (deepCopy .Values.bus.extraConfig) | toYaml | nindent 4 }}

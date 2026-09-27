@@ -1,0 +1,54 @@
+# Client Service: core (cmd/farmer) dials the TCP port, Envoy dials the
+# websocket port. Sprouts never reach this Service directly.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "imas-nats.bus.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-nats.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bus
+  {{- with .Values.bus.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.bus.service.type }}
+  selector:
+    {{- include "imas-nats.bus.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: client
+      port: {{ .Values.bus.ports.client }}
+      targetPort: client
+      protocol: TCP
+    - name: websocket
+      port: {{ .Values.bus.ports.websocket }}
+      targetPort: websocket
+      protocol: TCP
+---
+# Headless Service: stable per-pod DNS for the StatefulSet (and, when
+# clustered, for the NATS routes between bus nodes).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "imas-nats.bus.headless" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-nats.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bus
+spec:
+  clusterIP: None
+  # Routes must resolve before a peer is Ready, or a fresh cluster can't
+  # form.
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "imas-nats.bus.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: client
+      port: {{ .Values.bus.ports.client }}
+      targetPort: client
+    {{- if gt (int .Values.bus.replicaCount) 1 }}
+    - name: cluster
+      port: {{ .Values.bus.cluster.port }}
+      targetPort: cluster
+    {{- end }}

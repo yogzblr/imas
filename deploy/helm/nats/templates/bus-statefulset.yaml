@@ -1,0 +1,284 @@
+{{- include "imas-nats.validate" . -}}
+{{- $seeds := fromYaml (include "imas-nats.seeds" .) -}}
+{{- $tlsDir := include "imas-nats.bus.tlsDir" . -}}
+{{- $ob := .Values.bus.tls.openbao -}}
+{{- $clustered := gt (int .Values.bus.replicaCount) 1 -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "imas-nats.bus.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-nats.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bus
+spec:
+  serviceName: {{ include "imas-nats.bus.headless" . }}
+  replicas: {{ .Values.bus.replicaCount }}
+  podManagementPolicy: {{ .Values.bus.podManagementPolicy }}
+  {{- with .Values.bus.updateStrategy }}
+  updateStrategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "imas-nats.bus.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "imas-nats.labels" . | nindent 8 }}
+        app.kubernetes.io/component: bus
+        {{- with .Values.bus.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/bus-configmap.yaml") . | sha256sum }}
+        {{- with .Values.bus.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "imas-nats.bus.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      # config.LoadConfig folds every env var into the config; don't let
+      # Kubernetes inject one per Service in the namespace.
+      enableServiceLinks: false
+      {{- with .Values.bus.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.bus.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.bus.terminationGracePeriodSeconds }}
+      {{- with .Values.bus.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.bus.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.bus.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        {{- if .Values.bus.affinity }}
+        {{- toYaml .Values.bus.affinity | nindent 8 }}
+        {{- else }}
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "imas-nats.bus.selectorLabels" . | nindent 20 }}
+        {{- end }}
+      {{- with .Values.bus.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: farmerbus
+          image: {{ include "imas-nats.image" (dict "image" .Values.bus.image "appVersion" .Chart.AppVersion) | quote }}
+          imagePullPolicy: {{ .Values.bus.image.pullPolicy }}
+          {{- with .Values.bus.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.bus.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # ConfigureNats sets LogFile: "nats.log" (relative); keep the
+          # working directory on writable storage.
+          workingDir: /var/lib/imas/farmerbus
+          ports:
+            - name: client
+              containerPort: {{ .Values.bus.ports.client }}
+              protocol: TCP
+            - name: websocket
+              containerPort: {{ .Values.bus.ports.websocket }}
+              protocol: TCP
+            {{- if $clustered }}
+            - name: cluster
+              containerPort: {{ .Values.bus.cluster.port }}
+              protocol: TCP
+            {{- end }}
+          env:
+            # Seeds: one IMAS_NATS_<NAME>_SEED_FILE per mounted key. The
+            # _FILE form only: a raw IMAS_NATS_<NAME>_SEED env var would be
+            # folded into the jety config and is inherited by children.
+            {{- range $name, $key := $seeds }}
+            - name: IMAS_NATS_{{ $name }}_SEED_FILE
+              value: {{ printf "%s/%s" $.Values.natsSeeds.mountPath $key | quote }}
+            {{- end }}
+            {{- if $clustered }}
+            # Consumed by cmd/farmerbus once it supports routes (see
+            # README.md, "Clustering"). Route TLS reuses the node cert.
+            - name: IMAS_BUS_CLUSTER_NAME
+              value: {{ .Values.bus.cluster.name | quote }}
+            - name: IMAS_BUS_CLUSTER_PORT
+              value: {{ .Values.bus.cluster.port | quote }}
+            - name: IMAS_BUS_CLUSTER_ROUTES
+              value: {{ include "imas-nats.bus.routes" . | quote }}
+            {{- end }}
+            {{- if eq .Values.bus.tls.mode "openbao" }}
+            - name: IMAS_CERTS_OPENBAO_ADDR
+              value: {{ $ob.addr | quote }}
+            - name: IMAS_CERTS_OPENBAO_PKI_MOUNT
+              value: {{ $ob.pkiMount | quote }}
+            - name: IMAS_CERTS_OPENBAO_ROLE
+              value: {{ $ob.role | quote }}
+            - name: IMAS_CERTS_OPENBAO_AUTH_METHOD
+              value: {{ $ob.authMethod | quote }}
+            {{- if $ob.caConfigMap }}
+            - name: IMAS_CERTS_OPENBAO_CACERT
+              value: /var/run/secrets/openbao-ca/ca.crt
+            {{- end }}
+            {{- if eq $ob.authMethod "kubernetes" }}
+            - name: IMAS_CERTS_OPENBAO_K8S_ROLE
+              value: {{ $ob.k8sRole | quote }}
+            - name: IMAS_CERTS_OPENBAO_K8S_MOUNT
+              value: {{ $ob.k8sMount | quote }}
+            - name: IMAS_CERTS_OPENBAO_K8S_JWT_PATH
+              value: /var/run/secrets/openbao-auth/token
+            {{- else }}
+            - name: IMAS_CERTS_OPENBAO_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $ob.tokenSecretName }}
+                  key: {{ $ob.tokenSecretKey }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.bus.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.bus.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.bus.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.bus.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.bus.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.bus.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/imas/farmer
+              subPath: farmer
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/imas/farmerbus
+            - name: nats-seeds
+              mountPath: {{ .Values.natsSeeds.mountPath }}
+              readOnly: true
+            {{- if eq .Values.bus.tls.mode "secret" }}
+            - name: tls
+              mountPath: {{ $tlsDir }}
+              readOnly: true
+            {{- else }}
+            - name: tls
+              mountPath: {{ $tlsDir }}
+            {{- if $ob.caConfigMap }}
+            - name: openbao-ca
+              mountPath: /var/run/secrets/openbao-ca
+              readOnly: true
+            {{- end }}
+            {{- if eq $ob.authMethod "kubernetes" }}
+            - name: openbao-auth
+              mountPath: /var/run/secrets/openbao-auth
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- with .Values.bus.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "imas-nats.bus.fullname" . }}
+        - name: nats-seeds
+          secret:
+            secretName: {{ .Values.natsSeeds.secretName }}
+            defaultMode: 0440
+            # Only the listed keys, even if the Secret carries others (e.g.
+            # saasapi-user.nk, which the bus has no use for).
+            items:
+              {{- range $name, $key := $seeds }}
+              - key: {{ $key | quote }}
+                path: {{ $key | quote }}
+              {{- end }}
+        {{- if eq .Values.bus.tls.mode "secret" }}
+        - name: tls
+          secret:
+            secretName: {{ .Values.bus.tls.secretName }}
+            defaultMode: 0440
+            items:
+              - { key: tls.crt, path: tls.crt }
+              - { key: tls.key, path: tls.key }
+              - { key: ca.crt, path: ca.crt }
+        {{- else }}
+        # Issued from OpenBao PKI at every start (internal/certs.GenCert);
+        # nothing in farmerbus rotates it while running, so a restart is
+        # the rotation. See README.md.
+        - name: tls
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        {{- if $ob.caConfigMap }}
+        - name: openbao-ca
+          configMap:
+            name: {{ $ob.caConfigMap }}
+        {{- end }}
+        {{- if eq $ob.authMethod "kubernetes" }}
+        - name: openbao-auth
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: {{ $ob.k8sAudience | quote }}
+                  expirationSeconds: 600
+        {{- end }}
+        {{- end }}
+        {{- if not .Values.bus.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+        {{- with .Values.bus.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+  {{- if .Values.bus.persistence.enabled }}
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "imas-nats.bus.selectorLabels" . | nindent 10 }}
+        {{- with .Values.bus.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.bus.persistence.accessModes | nindent 10 }}
+        {{- with .Values.bus.persistence.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.bus.persistence.size }}
+  {{- end }}

@@ -1,0 +1,11 @@
+# chart-testing: 3-node bus. Needs cmd/farmerbus route support first; see
+# README.md, "Clustering".
+bus:
+  replicaCount: 3
+  cluster:
+    routesSupported: true
+  tls:
+    mode: openbao
+    openbao:
+      authMethod: token
+      tokenSecretName: farmerbus-openbao-token

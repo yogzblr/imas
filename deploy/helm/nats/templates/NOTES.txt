@@ -1,0 +1,21 @@
+imas DMZ bus: {{ .Values.bus.replicaCount }} farmerbus node(s){{ if .Values.envoy.enabled }} behind {{ .Values.envoy.replicaCount }} Envoy replica(s){{ end }}.
+
+FLAG FOR SECURITY REVIEW: this release is the front door of imas's trust
+chain. See the chart README's "Security review notes" before exposing it.
+
+Core (cmd/farmer) must be configured to dial the bus at:
+  tls://{{ include "imas-nats.bus.serviceFQDN" . }}:{{ .Values.bus.ports.client }}
+{{- if .Values.envoy.enabled }}
+
+Sprouts connect only to Envoy:
+  wss://<{{ include "imas-nats.envoy.fullname" . }} external address>:{{ .Values.envoy.service.port }}/
+  (farmer's IMAS_SPROUT_BUS_URLS should list this address; sprouts dial
+  the nats_urls they get at enrollment)
+
+Sprouts must pin the CA that issued Secret "{{ .Values.envoy.tls.secretName }}"
+(pre-provisioned at their sproutrootca path, with sproutrootcatofu: false):
+this release deliberately routes no /auth/cert/ for trust on first use.
+{{- end }}
+
+Seeds are read from Secret "{{ .Values.natsSeeds.secretName }}" and must be
+byte-identical to cmd/farmer's. This chart never generates one.

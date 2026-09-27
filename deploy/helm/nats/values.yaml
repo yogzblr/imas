@@ -1,0 +1,468 @@
+# Default values for the imas DMZ bus chart (deploy/helm/nats).
+#
+# These defaults are for non-production use: one bus replica, ClusterIP
+# services, small resource requests. README.md documents every value and
+# lists what to change before production. Read its "Security review notes"
+# first.
+
+# -- Override the chart name part of resource names.
+nameOverride: ""
+# -- Override the full resource name prefix (default: <release>-<chart>).
+fullnameOverride: ""
+# -- Labels added to every resource the chart renders.
+commonLabels: {}
+
+# NKey seeds for the decentralized-JWT trust chain.
+#
+# The chart NEVER generates a seed. It only mounts keys from an existing
+# Secret, which is normally synced from OpenBao by External Secrets Operator
+# (same shape as deploy/farmer/externalsecrets.yaml, target
+# "imas-farmer-nats-seeds"). Each entry below becomes one file in the
+# mounted volume and one IMAS_NATS_<NAME>_SEED_FILE env var, which
+# internal/pki/jwtauth.go's loadExternalSeed() reads in preference to
+# anything on disk. An externally supplied seed is never written back to
+# disk.
+natsSeeds:
+  # -- Name of the existing Secret holding the seeds. Required.
+  secretName: imas-farmer-nats-seeds
+  # -- Where the seed files are mounted in the bus container.
+  mountPath: /var/run/secrets/imas/nats
+  # -- Seed name -> key in the Secret. All five are required and must be
+  # byte-identical to the seeds cmd/farmer uses (see README.md, "Seeds").
+  # The <NAME> part is the suffix of IMAS_NATS_<NAME>_SEED_FILE.
+  seeds:
+    OPERATOR: operator.nk
+    OPERATOR_SIGNING: operator-signing.nk
+    SYS_ACCOUNT: sys-account.nk
+    TENANT: tenant.nk
+    TENANT_SIGNING: tenant-signing.nk
+  # -- Additional seeds, same shape (e.g. a per-tenant Account seed:
+  # TENANT_T_8F2A: tenant-t-8f2a.nk). Keys are env-var suffixes.
+  extraSeeds: {}
+
+bus:
+  image:
+    # -- farmerbus image. This repo does not publish one yet (no farmerbus
+    # target in docker/ or .goreleaser.yaml); see README.md.
+    repository: ghcr.io/yogzblr/imas-farmerbus
+    # -- Image tag. Defaults to the chart's appVersion.
+    tag: ""
+    # -- Image digest (sha256:...). Takes precedence over tag when set.
+    digest: ""
+    pullPolicy: IfNotPresent
+  # -- imagePullSecrets for the bus pods.
+  imagePullSecrets: []
+  # -- Container command. Empty uses the image ENTRYPOINT (expected: /farmerbus).
+  command: []
+  # -- Container args.
+  args: []
+
+  # -- Number of bus nodes. Values above 1 need cluster.routesSupported
+  # (see README.md, "Clustering"); rendering fails otherwise.
+  replicaCount: 1
+  # -- StatefulSet podManagementPolicy. Parallel lets all nodes start at
+  # once, which a full-mesh cluster needs.
+  podManagementPolicy: Parallel
+  # -- StatefulSet updateStrategy.
+  updateStrategy:
+    type: RollingUpdate
+
+  # -- farmerbus log level (loglevel in /etc/imas/farmer).
+  logLevel: info
+  # -- farmerorganization: the legacy tenant's ID. Must match cmd/farmer's
+  # value and be a valid tenant ID (^[0-9A-Za-z_-]{1,191}$). Do not use
+  # config.go's built-in default "imas farmer": it fails IsValidTenantID.
+  organization: imas
+
+  ports:
+    # -- Plain TCP NATS listener (config.FarmerBusPort). Core (cmd/farmer)
+    # connects here.
+    client: 5406
+    # -- NATS websocket listener (config.FarmerWSPort). Only Envoy connects here.
+    websocket: 5407
+
+  cluster:
+    # -- NATS cluster name, used when replicaCount > 1.
+    name: imas-bus
+    # -- NATS route (cluster) port, used when replicaCount > 1.
+    port: 6222
+    # -- Set to true only once cmd/farmerbus reads the IMAS_BUS_CLUSTER_*
+    # env vars this chart renders. The current binary builds no Cluster
+    # options, so extra replicas would be independent, un-meshed servers.
+    routesSupported: false
+
+  # -- Extra keys merged into /etc/imas/farmer (YAML). Keys the chart
+  # manages (ports, paths, TLS files) win over these.
+  extraConfig: {}
+  # -- Extra env vars for the bus container.
+  extraEnv: []
+  # -- Extra volumes for the bus pod.
+  extraVolumes: []
+  # -- Extra volumeMounts for the bus container.
+  extraVolumeMounts: []
+
+  tls:
+    # -- Where the bus's TLS cert comes from: "secret" (an existing
+    # kubernetes.io/tls Secret, e.g. from cert-manager) or "openbao"
+    # (issued at startup by internal/certs from OpenBao PKI).
+    mode: secret
+    # -- secret mode: Secret with tls.crt, tls.key and ca.crt. Include
+    # every name Envoy and core dial (see README.md) in the SANs.
+    secretName: imas-farmerbus-tls
+    # -- openbao mode: SANs to request (certhosts). Empty = the bus
+    # Service and per-pod headless DNS names.
+    certHosts: []
+    openbao:
+      # -- IMAS_CERTS_OPENBAO_ADDR.
+      addr: https://openbao.openbao.svc:8200
+      # -- IMAS_CERTS_OPENBAO_PKI_MOUNT.
+      pkiMount: pki
+      # -- IMAS_CERTS_OPENBAO_ROLE (PKI role). Required in openbao mode.
+      role: imas-farmerbus
+      # -- ConfigMap with OpenBao's CA as ca.crt (IMAS_CERTS_OPENBAO_CACERT).
+      # Empty skips it (OpenBao TLS verified against system roots).
+      caConfigMap: openbao-ca
+      # -- IMAS_CERTS_OPENBAO_AUTH_METHOD: "kubernetes" or "token".
+      authMethod: kubernetes
+      # -- IMAS_CERTS_OPENBAO_K8S_ROLE (kubernetes auth).
+      k8sRole: imas-farmerbus
+      # -- IMAS_CERTS_OPENBAO_K8S_MOUNT (kubernetes auth).
+      k8sMount: kubernetes
+      # -- Audience of the projected ServiceAccount token (kubernetes auth).
+      k8sAudience: openbao
+      # -- token auth: existing Secret holding the token.
+      tokenSecretName: ""
+      # -- token auth: key in tokenSecretName.
+      tokenSecretKey: token
+
+  persistence:
+    # -- Persist FarmerPKI (resolver JWT store, bus-local JWTs) per node.
+    # Without it, pushed Account JWTs are lost on restart until core
+    # pushes again.
+    enabled: true
+    # -- PVC size per bus node.
+    size: 1Gi
+    # -- StorageClass. Empty uses the cluster default.
+    storageClassName: ""
+    accessModes:
+      - ReadWriteOnce
+    # -- Extra annotations on the volumeClaimTemplate.
+    annotations: {}
+
+  # -- Resource requests/limits for the bus container.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+  # -- Pod-level securityContext.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  # -- Container securityContext.
+  securityContext:
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+
+  # -- Seconds to wait for graceful NATS shutdown (lame-duck + drain).
+  terminationGracePeriodSeconds: 60
+
+  startupProbe:
+    tcpSocket:
+      port: client
+    periodSeconds: 5
+    failureThreshold: 24
+  readinessProbe:
+    tcpSocket:
+      port: client
+    periodSeconds: 10
+    failureThreshold: 3
+  livenessProbe:
+    tcpSocket:
+      port: client
+    periodSeconds: 20
+    failureThreshold: 3
+
+  # -- Extra pod annotations (e.g. reloader.stakater.com/auto: "true" to
+  # roll the bus when the TLS or seed Secret changes).
+  podAnnotations: {}
+  # -- Extra pod labels.
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  # -- Affinity. Empty renders a soft anti-affinity across nodes.
+  affinity: {}
+  topologySpreadConstraints: []
+  priorityClassName: ""
+
+  service:
+    # -- Type of the bus client Service (core and Envoy). Keep ClusterIP:
+    # sprouts reach the bus only through Envoy.
+    type: ClusterIP
+    annotations: {}
+
+  serviceAccount:
+    # -- Create a ServiceAccount for the bus.
+    create: true
+    # -- Name. Empty = <fullname>-bus.
+    name: ""
+    annotations: {}
+
+  pdb:
+    # -- Render a PodDisruptionBudget (only when replicaCount > 1).
+    enabled: true
+    # -- maxUnavailable for the bus PDB.
+    maxUnavailable: 1
+
+envoy:
+  # -- Deploy the Envoy gateway.
+  enabled: true
+  image:
+    # -- Envoy image. Pin a version whose jwt_authn supports EdDSA
+    # (Ed25519): gateway JWTs are alg EdDSA.
+    repository: envoyproxy/envoy
+    tag: v1.35.3
+    digest: ""
+    pullPolicy: IfNotPresent
+  imagePullSecrets: []
+  # -- Envoy replicas.
+  replicaCount: 2
+  # -- Envoy --log-level.
+  logLevel: info
+  # -- Extra Envoy CLI args.
+  extraArgs: []
+
+  # -- Downstream (sprout-facing) listener port.
+  listenerPort: 8443
+  # -- Admin interface port. Always bound to 127.0.0.1.
+  adminPort: 9901
+
+  tls:
+    # -- kubernetes.io/tls Secret for the DMZ edge certificate (what
+    # sprouts' wss:// and HTTPS connections terminate against).
+    secretName: imas-envoy-dmz-tls
+
+  jwtAuthn:
+    # -- Provider name referenced by the routes' requirement_name.
+    providerName: sprout_jwt
+    # -- Required iss. Must match internal/gatewayjwt's GatewayIssuer.
+    issuer: imas-gateway
+    # -- Allowed aud values. Empty = aud not checked (matches envoy.yaml).
+    audiences: []
+    # -- Forward the JWT to the upstream after validation.
+    forward: true
+    # -- Clock skew allowance for exp/nbf.
+    clockSkewSeconds: 60
+    # -- Claims copied into request headers after validation.
+    claimToHeaders:
+      - headerName: x-imas-sprout-nkey
+        claimName: sub
+    jwks:
+      # -- Where Envoy gets the gateway signing key(s): "remote" (fetch
+      # a JWKS URL, refreshed periodically — handles key rotation without
+      # an Envoy restart) or "local" (a JWKS document from a ConfigMap or
+      # inline).
+      source: remote
+      remote:
+        # -- JWKS URL. Empty = https://<upstreams.farmerAPI.host>:<port>/v1/.well-known/jwks.json.
+        uri: ""
+        # -- Envoy cluster used for the fetch: farmer_api or jwks
+        # (the latter uses upstreams.jwks).
+        cluster: farmer_api
+        # -- Fetch timeout.
+        timeout: 5s
+        # -- How long a fetched JWKS is cached.
+        cacheDuration: 300s
+        asyncFetch:
+          # -- Fetch the JWKS at startup and in the background.
+          enabled: true
+          # -- Start the listener before the first fetch completes.
+          fastListener: false
+      local:
+        # -- Inline JWKS JSON. Rendered into the chart's ConfigMap.
+        inline: ""
+        # -- Or an existing ConfigMap holding the JWKS document.
+        configMapName: ""
+        # -- Key in that ConfigMap.
+        configMapKey: jwks.json
+
+  upstreams:
+    farmerAPI:
+      # -- farmer's HTTPS API (enroll, JWKS). Lives in the core network.
+      host: farmer.imas-core.svc.cluster.local
+      port: 5405
+      # -- SNI and SAN to verify. Empty = host.
+      sni: ""
+    recipeService:
+      # -- Recipe download upstream (/files/). Empty host = farmerAPI's.
+      host: ""
+      port: 5405
+      sni: ""
+    natsWebsocket:
+      # -- Bus websocket upstream. Empty host = this release's bus Service.
+      host: ""
+      # -- Empty = bus.ports.websocket.
+      port: ""
+      sni: ""
+    jwks:
+      # -- Only used when jwks.remote.cluster is "jwks".
+      host: ""
+      port: 443
+      sni: ""
+
+  upstreamTLS:
+    # -- Existing Secret or ConfigMap key with the CA that signed the
+    # upstream certs. When set, Envoy verifies every upstream's cert
+    # against it and checks the SAN matches the upstream's sni/host.
+    # Empty = no upstream verification (the envoy.yaml reference
+    # behavior, NOT acceptable for production).
+    caSecretName: ""
+    caConfigMapName: ""
+    caKey: ca.crt
+
+  routes:
+    # -- Timeout for /v1/enroll.
+    enrollTimeout: 30s
+    # -- Timeout for /v1/refresh.
+    refreshTimeout: 30s
+    # -- Timeout for /files/ (recipe download).
+    filesTimeout: 60s
+    # -- Idle timeout for the long-lived websocket route (0s = none).
+    websocketIdleTimeout: 0s
+
+  # /v1/enroll's bucket is deliberately not a value (20 per 60s per Envoy,
+  # as in deploy/envoy/envoy.yaml): the join token is its only credential,
+  # so this small budget is what bounds join-token guessing.
+
+  # /v1/refresh's own bucket, sized from the fleet. Same shape as
+  # deploy/envoy/values.rate-limit.yaml. tokens_per_fill defaults to
+  #   ceil(fleetSize * 30 * headroom * fillIntervalSeconds
+  #        / (17 * gatewayJwtTtlSeconds * envoyReplicas))
+  # See deploy/envoy/README.md, "Sizing the /v1/refresh bucket".
+  refreshRateLimit:
+    # -- Enrolled sprouts behind these Envoys. Size for where the fleet is going.
+    fleetSize: 1000000
+    # -- Must match farmer's gatewayjwtttl, in seconds.
+    gatewayJwtTtlSeconds: 86400
+    # -- Envoy replicas sharing the load. null = envoy.replicaCount.
+    envoyReplicas: null
+    # -- Whole-number multiplier over the steady-state rate.
+    headroom: 2
+    # -- token_bucket.fill_interval, whole seconds.
+    fillIntervalSeconds: 1
+    # -- max_tokens as seconds' worth of the per-Envoy rate.
+    burstSeconds: 300
+    # -- Explicit tokens_per_fill. null = computed.
+    tokensPerFill: null
+    # -- Explicit max_tokens. null = computed.
+    maxTokens: null
+
+  # -- Rendered verbatim over the generated envoy.yaml when non-empty
+  # (escape hatch; bypasses every templated setting above).
+  configOverride: ""
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 101
+    runAsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+  terminationGracePeriodSeconds: 30
+
+  readinessProbe:
+    tcpSocket:
+      port: https
+    periodSeconds: 10
+  livenessProbe:
+    tcpSocket:
+      port: https
+    periodSeconds: 20
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  # -- Affinity. Empty renders a soft anti-affinity across nodes.
+  affinity: {}
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+
+  service:
+    # -- Envoy Service type. Production DMZ edges usually use LoadBalancer.
+    type: ClusterIP
+    # -- Service port sprouts connect to.
+    port: 443
+    annotations: {}
+    # -- externalTrafficPolicy (LoadBalancer/NodePort only). Local keeps
+    # client source IPs, which the enroll rate limit and logs rely on.
+    externalTrafficPolicy: ""
+    loadBalancerSourceRanges: []
+
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+
+  pdb:
+    enabled: true
+    maxUnavailable: 1
+
+networkPolicy:
+  # -- Render NetworkPolicies for the bus and Envoy pods.
+  enabled: true
+  core:
+    # -- Namespace selector for the non-DMZ core (cmd/farmer) pods.
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: imas-core
+    # -- Pod selector for the core pods within that namespace.
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/name: farmer
+  envoyIngress:
+    # -- Peers allowed to reach Envoy's listener. Empty = any source on the
+    # listener port only (a public DMZ edge).
+    from: []
+  dns:
+    # -- Namespace selector for cluster DNS.
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    # -- Pod selector for cluster DNS.
+    podSelector:
+      matchLabels:
+        k8s-app: kube-dns
+  openbao:
+    # -- Where OpenBao runs (egress allowed only when bus.tls.mode=openbao).
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: openbao
+    podSelector: {}
+    port: 8200
+  # -- Extra egress rules for the bus pods.
+  busExtraEgress: []
+  # -- Extra egress rules for the Envoy pods (e.g. an external JWKS host).
+  envoyExtraEgress: []
