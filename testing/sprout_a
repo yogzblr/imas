@@ -1,10 +1,8 @@
 cachedir: /var/cache/imas/sprout/files/provided
 configroot: /etc/imas/
 farmerapiport: "5405"
-farmerbusinterface: ""
 farmerbusport: "5406"
 farmerinterface: farmer
-farmerurl: https://farmer:5405
 nkeysproutprivfile: /etc/imas/pki/sprout/sprout.nkey
 nkeysproutpubfile: /etc/imas/pki/sprout/sprout.nkey.pub
 sproutid: sprout-a

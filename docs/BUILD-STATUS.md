@@ -225,7 +225,8 @@ directly in this session instead.
   - `packaging/etc/imas-farmer.conf` uses `organization:`, but farmer reads
     `farmerorganization`. *(Fixed in yogzblr/imas#25, along with a tab that
     made the file invalid YAML; `internal/config` now tests that every key
-    in `packaging/etc/*.conf` is one the code reads.)*
+    in `packaging/etc/*.conf` is one the code reads; the docker-compose
+    fixtures under `testing/` are covered too.)*
   - `packaging/systemd/imas-{farmer,sprout}-standalone.service` aren't
     referenced by `.goreleaser.yaml` or anything else.
   - `router.go` and `fleet_update_dispatch.go` cite `yogzblr/imas#286` for
