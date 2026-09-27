@@ -623,6 +623,26 @@ func TestLoadConfig_SproutDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_SproutRootCATOFU(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"default on", "", true},
+		{"disabled for a DMZ install", "sproutrootcatofu: false\n", false},
+		{"explicitly on", "sproutrootcatofu: true\n", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			loadSproutConfig(t, c.content)
+			if SproutRootCATOFU != c.want {
+				t.Errorf("SproutRootCATOFU = %v, want %v", SproutRootCATOFU, c.want)
+			}
+		})
+	}
+}
+
 func TestLoadConfig_SproutWithCustomID(t *testing.T) {
 	tmpRoot := t.TempDir()
 	content := "sproutid: my-custom-sprout\nloglevel: warn\n"

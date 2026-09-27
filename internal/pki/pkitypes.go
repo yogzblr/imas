@@ -27,6 +27,8 @@ var (
 	ErrAlreadyRejected          = errors.New("this Sprout ID was already rejected")
 	ErrAlreadyUnaccepted        = errors.New("this Sprout ID was already unaccepted")
 	ErrCannotParseRootCA        = errors.New("cannot load the RootCA certificate")
+	ErrRootCAFetch              = errors.New("farmer did not return a usable root CA certificate")
+	ErrRootCANotProvisioned     = errors.New("root CA has not been provisioned")
 	ErrSproutIDFound            = errors.New("a Sprout ID matching that system has already been recorded")
 	ErrSproutIDInvalid          = errors.New("bad user input: invalid SproutID received")
 	ErrSproutIDNotFound         = errors.New("a Sprout ID matching that system cannot be found")

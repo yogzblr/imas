@@ -139,7 +139,8 @@ var errSproutActionInvalid = errors.New("invalid internal.sprout.action request"
 // connection — to internal.sprout.action, in the same natsCoreQueueGroup
 // as everything else, so exactly one farmer replica handles each request.
 // Call once per process, not once per tenant. RegisterTenantProvisioning
-// calls it, so it is registered wherever the tenant subjects are.
+// calls it, so it is registered wherever the tenant subjects are. It
+// returns only once the server has the subscription.
 func RegisterSproutAction(nc *nats.Conn) error {
 	concurrency := sproutActionConcurrency()
 	slots := make(chan struct{}, concurrency)
@@ -167,6 +168,15 @@ func RegisterSproutAction(nc *nats.Conn) error {
 		}()
 	}); err != nil {
 		return fmt.Errorf("natsapi: failed to subscribe to %s: %w", controlplane.SubjectSproutAction, err)
+	}
+	// Subscribe only buffers the SUB; Flush waits for the server to
+	// acknowledge it, so the handler is live once this returns. Without
+	// it, a request sent right after on another connection (the SaaS
+	// API's) can reach the server first and get "no responders". This
+	// also covers RegisterTenantProvisioning's subscriptions, made
+	// earlier on the same connection.
+	if err := nc.Flush(); err != nil {
+		return fmt.Errorf("natsapi: failed to confirm subscription to %s: %w", controlplane.SubjectSproutAction, err)
 	}
 	log.Infof("natsapi: registered sprout action handler (SYS account, concurrency %d)", concurrency)
 	return nil
