@@ -87,6 +87,17 @@ const (
 const (
 	PurposeCmdRunRequest  = "f2s.cmd.run"
 	PurposeCmdRunResponse = "s2f.cmd.run"
+	// PurposeCookRequest is farmer's recipe dispatch on
+	// imas.sprouts.<id>.cook, and PurposeCookResponse the sprout's Ack
+	// (internal/cook's sealed.go).
+	PurposeCookRequest  = "f2s.cook"
+	PurposeCookResponse = "s2f.cook"
+	// PurposeCookNudgeRequest is farmer's resync nudge on
+	// imas.sprouts.<id>.recipe.nudge, and PurposeCookNudgeResponse the
+	// sprout's Ack. A pair of its own, not the cook pair: a nudge must
+	// never be accepted as a dispatch, or a dispatch as a nudge.
+	PurposeCookNudgeRequest  = "f2s.cook.nudge"
+	PurposeCookNudgeResponse = "s2f.cook.nudge"
 	// PurposeFleetSigningResponse is farmer's reply on a sprout's
 	// imas.sprouts.<id>.fleetsigningkeys request (internal/fleetkeys).
 	PurposeFleetSigningResponse = "f2s.fleetsigning"

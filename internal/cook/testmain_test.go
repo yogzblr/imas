@@ -14,6 +14,7 @@ import (
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/objectstore"
 	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
+	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/props"
 )
 
@@ -50,6 +51,16 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	props.SetDB(gdb)
+	// Dispatch seals to the sprout's box key (sealed.go), so it looks one
+	// up in pki's store. Nothing enrolls a box key here, so every sprout
+	// these tests dispatch to is one enrolled before workstream J and gets
+	// plaintext, as their stub sprouts expect; sealed_test.go installs
+	// keys of its own.
+	if err := gdb.AutoMigrate(pki.Models()...); err != nil {
+		fmt.Println("migrating pki test db:", err)
+		os.Exit(1)
+	}
+	pki.SetDB(gdb)
 
 	// Recipes now read through internal/objectstore (see store.go) instead
 	// of local disk — seed a fake S3 backend with the same testing/recipes

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -213,5 +214,27 @@ func TestReplayGuardCapacity(t *testing.T) {
 	m = mustMessage(t, PurposeCmdRunRequest, "web-01", "", 4)
 	if err := g.Accept(&m); err != nil {
 		t.Fatalf("after expiry: %v", err)
+	}
+}
+
+// Every boundary has its own purpose pair (the purpose is what stops a
+// message sealed for one boundary being accepted on another), and each
+// purpose names its direction.
+func TestPurposesAreDistinctAndDirected(t *testing.T) {
+	purposes := []string{
+		PurposeCmdRunRequest, PurposeCmdRunResponse,
+		PurposeCookRequest, PurposeCookResponse,
+		PurposeCookNudgeRequest, PurposeCookNudgeResponse,
+		PurposeFleetSigningResponse, PurposeBoxKeySubmit, PurposeTenantKeyContinuity,
+	}
+	seen := map[string]bool{}
+	for _, p := range purposes {
+		if seen[p] {
+			t.Errorf("purpose %q is used twice", p)
+		}
+		seen[p] = true
+		if !strings.HasPrefix(p, "f2s.") && !strings.HasPrefix(p, "s2f.") {
+			t.Errorf("purpose %q doesn't name its direction", p)
+		}
 	}
 }

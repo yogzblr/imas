@@ -43,3 +43,9 @@ Before this decision, three separate things could each have ended up implementin
 ## Open item carried from earlier discussion
 
 Farmer-side rolling/staged rollout with health-gating (Spot's `--concurrent` + `wait` combination, translated to fleet scope) remains a real, separate gap worth its own design pass — dispatch to a batch of sprouts, gate on a probe/job-status success signal, proceed to the next batch. Natural to sequence alongside this work since it consumes probe's results, but it is farmer logic, not a sprout-side ingredient or recipe-engine primitive.
+
+## As built: cook's wire format
+
+Farmer dispatches a recipe to a sprout as a `RecipeEnvelope` (job ID, rendered steps, test flag, `invoked_by`, `dispatched_at`), sent as a NATS request on `imas.sprouts.<id>.cook` and answered by an `Ack` (acknowledged, job ID). An operator's resync nudge is a request on `imas.sprouts.<id>.recipe.nudge`, also answered by an `Ack`, after which the sprout pulls its staged copy of the envelope over HTTPS. Both requests and both Acks are sealed end to end (workstream J, `internal/cook/sealed.go`; wire format in `docs/design/imas-payload-encryption-design.md`). The purposes are `f2s.cook`/`s2f.cook` for the dispatch and `f2s.cook.nudge`/`s2f.cook.nudge` for the nudge, and each Ack names the request it answers. A sprout with payload-encryption keys refuses a plaintext dispatch or nudge. Only a sprout enrolled before J, with no box key on record, still gets plaintext.
+
+The step events a sprout publishes while cooking (`imas.cook.<id>.<jid>`: `start-<jid>`, one `StepCompletion` per step, then `completed-<jid>` or `timeout-<jid>`) are still plaintext inside TLS. They are fire-and-forget publishes, read by farmer's job store, the web UI's log stream and the imas CLI, which holds no tenant key. See `docs/BUILD-STATUS.md`.

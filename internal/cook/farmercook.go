@@ -2,12 +2,12 @@ package cook
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 
@@ -168,22 +168,56 @@ func SendStepsEvent(tenantID, sproutID, JID string, steps []Step) error {
 	return sendEnvelope(tenantID, sproutID, RecipeEnvelope{JobID: JID, Steps: steps, DispatchedAt: time.Now().UTC()})
 }
 
+// DispatchRecorder records a job farmer is about to dispatch: tenantID's
+// sproutID is sent env. internal/jobs installs one (SetDispatchRecorder)
+// to write the job's creation record, which it used to read off the bus
+// before cook dispatches were sealed (sealed.go).
+type DispatchRecorder func(tenantID, sproutID string, env RecipeEnvelope)
+
+var (
+	dispatchRecorderMu sync.RWMutex
+	dispatchRecorder   DispatchRecorder
+)
+
+// SetDispatchRecorder installs fn as the DispatchRecorder every dispatch
+// calls; nil removes it.
+func SetDispatchRecorder(fn DispatchRecorder) {
+	dispatchRecorderMu.Lock()
+	defer dispatchRecorderMu.Unlock()
+	dispatchRecorder = fn
+}
+
+func recordDispatch(tenantID, sproutID string, env RecipeEnvelope) {
+	dispatchRecorderMu.RLock()
+	fn := dispatchRecorder
+	dispatchRecorderMu.RUnlock()
+	if fn != nil {
+		fn(tenantID, sproutID, env)
+	}
+}
+
 // sendEnvelope delivers rEnvelope to sproutID over tenantID's own
-// connection and waits for the sprout's acknowledgement.
+// connection, sealed to the sprout (sealed.go), and waits for the
+// sprout's acknowledgement. The job is recorded (DispatchRecorder) once
+// the request is ready to send, before it is sent, so its creation record
+// is in place before the sprout's first step event.
 func sendEnvelope(tenantID, sproutID string, rEnvelope RecipeEnvelope) error {
 	JID := rEnvelope.JobID
-	b, _ := json.Marshal(rEnvelope)
 	log.Noticef("cooking sprout %s: %s", sproutID, JID)
 	farmerConn := farmerConnFor(tenantID)
 	if farmerConn == nil {
 		return fmt.Errorf("cook: no NATS connection registered for tenant %s", tenantID)
 	}
-	var ack Ack
-	msg, err := farmerConn.Request("imas.sprouts."+sproutID+".cook", b, 30*time.Second)
+	req, reqID, err := cookBoundary.request(tenantID, sproutID, rEnvelope)
 	if err != nil {
 		return err
 	}
-	err = json.Unmarshal(msg.Data, &ack)
+	recordDispatch(tenantID, sproutID, rEnvelope)
+	msg, err := farmerConn.RequestMsg(req, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	ack, err := cookBoundary.ack(tenantID, sproutID, reqID, msg)
 	if err != nil {
 		return err
 	}

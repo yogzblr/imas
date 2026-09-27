@@ -158,15 +158,34 @@ SECURITY REVIEW).** What it changes:
 
 **Still open in J after the follow-up:**
 
-- **Every other boundary is still plaintext inside TLS**: `cook` (and its
-  resync nudge), `test.ping`, `shell.*`, facts, job results/step events,
-  `cancel`, the `boxkey.rotate` trigger, sprout log shipping
-  (`imas.sprouts.<id>.logs`), and `fleetsigningkeys`. `cook` matters most:
-  a compromised bus can still inject a plaintext cook envelope, so the
-  sprout refusing plaintext `cmd.run` doesn't yet stop command injection
-  overall. When the last command boundary is sealed,
-  `internal/fleetkeys`'s reply must be authenticated in the same change
-  (its header comment explains why).
+- **`cook` is sealed end to end** (`internal/cook/sealed.go`): the
+  dispatch on `imas.sprouts.<id>.cook` and its Ack, and the resync nudge
+  and its Ack, with the same rules as `cmd.run` (own purpose pairs,
+  ReplyTo binding, box-ready sprouts refuse plaintext, plaintext only for
+  a sprout with no box key on record). A compromised bus can no longer
+  inject a cook envelope into a box-ready sprout. Farmer's job-creation
+  record, which `internal/jobs` used to read off the plaintext dispatch,
+  is now written by the dispatching replica (`cook.SetDispatchRecorder`).
+  The `fleetsigningkeys` reply was sealed earlier, in PR #31
+  (`internal/fleetkeys`).
+- **Every other boundary is still plaintext inside TLS**: cook's step
+  events (`imas.cook.<id>.<jid>`), `test.ping`, `shell.*`, facts,
+  `cancel`, the `boxkey.rotate` trigger, and sprout log shipping
+  (`imas.sprouts.<id>.logs`). **`shell.*` now matters most**:
+  `imas.sprouts.<id>.shell.start` spawns a PTY running the request's
+  `shell` (default `/bin/sh`) from a plaintext request
+  (`internal/shell/sprout.go`), so a compromised bus can still get an
+  interactive shell on any Unix sprout. Sealing `cmd.run` and `cook`
+  doesn't close command injection until it is sealed too. Cook's step
+  events carry results, not commands, but
+  they include each step's change notes and errors (secrets registered
+  `sensitive` are already redacted). They are fire-and-forget publishes,
+  not request/reply, and they are read in plaintext by
+  `internal/jobs/listener.go` and `clilistener.go`,
+  `internal/serve/logstream.go` and the imas CLI
+  (`cmd/imas/cmd/cook.go`), which holds no tenant key. So sealing them
+  needs its own design, e.g. farmer opening each event and re-publishing
+  it for the CLI.
 - **Adopted tenants still share the legacy private key** until each is
   rotated. Rotate them once their sprouts run this build; the `origin`
   field in each tenant's secret (`adopted-legacy`) shows which. Then the
@@ -179,7 +198,12 @@ SECURITY REVIEW).** What it changes:
   J and this follow-up can't open sealed `cmd.run` (farmer reports
   `ErrReplyNotSealed`) and exit on any tenant key rotation. Upgrade them
   before rotating. A new sprout against an old farmer has its `cmd.run`
-  refused, because the old farmer sends plaintext.
+  refused, because the old farmer sends plaintext. Sealed `cook` behaves
+  the same way: a box-ready sprout built before it can't read a sealed
+  dispatch (farmer reports `ErrReplyNotSealed` and the sprout cooks
+  nothing), and a sprout built with it refuses an old farmer's plaintext
+  dispatch and nudge. Until both sides are upgraded, those sprouts still
+  catch up on reconnect by pulling their staged recipe over HTTPS.
 - **Live `cmd.run` output streaming** (`stream_topic`) is dropped for
   sealed requests: it publishes in plaintext to a subject the CLI reads
   directly without a tenant key. The full output still comes back in the

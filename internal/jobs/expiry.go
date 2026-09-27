@@ -50,7 +50,7 @@ func (s *Store) StartReaperCtx(ctx context.Context, ttl time.Duration) {
 // storage has no modification time to go by the way the local-disk reaper
 // used file mtimes, so a job's last activity is the receive time of its
 // newest event (encoded in the event key), or its meta.json CreatedAt if
-// no events have arrived. logJobCreation always writes meta.json, so every
+// no events have arrived. recordJobCreation always writes meta.json, so every
 // job can be dated. A job with neither is left alone.
 func (s *Store) reap(ttl time.Duration) {
 	// The job-status index expires by its own clock (status_index.go),

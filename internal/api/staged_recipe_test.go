@@ -9,13 +9,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/glebarez/sqlite"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
+	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/api/handlers"
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // TestStagedRecipeKey_UnderGatewayPrefix: the key cook stages a sprout's
@@ -37,9 +40,20 @@ func TestStagedRecipeKey_UnderGatewayPrefix(t *testing.T) {
 // store (the staging write side) and GetFile's (the read side), the way
 // cmd/farmer does, seeds one recipe, and registers an embedded NATS
 // server as farmer's connection for each of tenants. Every sprout on it
-// acks every cook.
+// acks every cook. No sprout has a box key on record in the pki store it
+// installs, so dispatches go out in plaintext (internal/cook's
+// sealed.go), which these stub sprouts read.
 func newStagingTestServer(t *testing.T, tenants ...string) *httptest.Server {
 	t.Helper()
+	gdb, err := gorm.Open(sqlite.Open("file:"+strings.ReplaceAll(t.Name(), "/", "_")+"_pki?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.AutoMigrate(pki.Models()...); err != nil {
+		t.Fatal(err)
+	}
+	pki.SetDB(gdb)
+	t.Cleanup(func() { pki.SetDB(nil) })
 	store := objectstoretest.NewStore(t)
 	objectstoretest.Seed(t, store, map[string]string{
 		"recipes/webserver.imas": "steps:\n  install nginx:\n    cmd.run:\n      - name: echo {{ sproutID }}\n",

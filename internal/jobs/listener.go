@@ -26,7 +26,7 @@ import (
 )
 
 // natsCoreQueueGroup is the queue group every farmer replica shares for
-// imas.cook.*.* and imas.sprouts.*.cook. It has the same well-known value
+// imas.cook.*.*. It has the same well-known value
 // internal/natsapi/router.go's Subscribe and internal/facts's listener use;
 // the constant is unexported in both, so this package defines its own copy
 // of the same value, as internal/facts does.
@@ -76,30 +76,20 @@ func RegisterNatsConn(tenantID string, conn *nats.Conn) {
 	if err != nil {
 		log.Error(err)
 	}
-	_, err = conn.QueueSubscribe("imas.sprouts.*.cook", natsCoreQueueGroup, func(msg *nats.Msg) {
-		logJobCreation(tenantID, msg)
-	})
-	if err != nil {
-		log.Error(err)
-	}
+	// A job's creation is recorded by the replica that dispatches it
+	// (cook.SetDispatchRecorder), not read off imas.sprouts.*.cook: cook
+	// dispatches are sealed to the sprout (internal/cook's sealed.go), so
+	// the bus carries only ciphertext there. Installing the recorder here
+	// ties it to the same per-tenant setup; it is the same function for
+	// every tenant, so installing it once per connection is harmless.
+	cook.SetDispatchRecorder(recordJobCreation)
 }
 
-// logJobCreation records a new job from its recipe envelope: in the job
-// object store, and (its step count) in the job-status index for tenantID.
-func logJobCreation(tenantID string, msg *nats.Msg) {
-	// Subject: imas.sprouts.<sproutID>.cook
-	tComponents := strings.Split(msg.Subject, ".")
-	if len(tComponents) < 4 {
-		log.Errorf("unexpected subject format for job creation: %s", msg.Subject)
-		return
-	}
-	sprout := tComponents[2]
-
-	var envelope cook.RecipeEnvelope
-	if err := json.Unmarshal(msg.Data, &envelope); err != nil {
-		log.Errorf("failed to unmarshal recipe envelope: %v", err)
-		return
-	}
+// recordJobCreation records a new job, dispatched to tenantID's sproutID,
+// from its recipe envelope: in the job object store, and (its step count)
+// in the job-status index for tenantID. It is the cook.DispatchRecorder
+// RegisterNatsConn installs.
+func recordJobCreation(tenantID, sprout string, envelope cook.RecipeEnvelope) {
 	if envelope.JobID == "" {
 		return
 	}
@@ -112,8 +102,8 @@ func logJobCreation(tenantID string, msg *nats.Msg) {
 	// already exists.
 	dispatchedAt := envelope.DispatchedAt
 	if dispatchedAt.IsZero() {
-		// An envelope from a farmer that predates DispatchedAt: this
-		// replica's receipt of the push is within milliseconds of it.
+		// sendEnvelope always stamps DispatchedAt; this is the dispatching
+		// replica, moments before the push, so now is as good.
 		dispatchedAt = time.Now()
 	}
 	indexJobCreation(tenantID, sprout, envelope.JobID, len(envelope.Steps), dispatchedAt)
@@ -207,7 +197,7 @@ func logJobs(tenantID string, msg *nats.Msg) {
 		log.Debugf("not recording step %s of expired job %s on sprout %s (tenant %s)", completedStep.ID, JID, sprout, tenantID)
 		return
 	}
-	// Independent of the object-store write below; see logJobCreation.
+	// Independent of the object-store write below; see recordJobCreation.
 	indexJobEvent(tenantID, sprout, JID, classifyJobEvent(JID, completedStep))
 	b, err := json.Marshal(completedStep)
 	if err != nil {
