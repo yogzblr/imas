@@ -1,0 +1,116 @@
+name: Publish packages
+
+# Uploads a release's OS packages to the Buildkite Package Registries:
+#   .rpm (imas, imas-farmer, imas-sprout)  -> imasrpm   (RHEL and SUSE)
+#   .deb (imas, imas-farmer, imas-sprout)  -> imasdeb
+#   imas-sprout for winget                  -> imasnget  (public NuGet feed)
+#     imas.sprout.windows.msi   the MSI, which winget downloads anonymously
+#     imas.sprout.windows       the winget manifests pointing at it
+#
+# Runs when a maintainer publishes the draft release that release.yml
+# (goreleaser) creates, so nothing reaches the registries before that
+# review. Prereleases are skipped (their MSI version equals the final
+# release's, and winget would offer them as the newest version); publish one
+# deliberately with workflow_dispatch. workflow_dispatch also re-runs a
+# failed publish for a tag. Packages are taken from the release's assets and
+# checked against its checksums.txt.
+#
+# Needs (repo, or the "goreleaser" environment):
+#   secret   BUILDKITE_PACKAGES_TOKEN     Buildkite API access token with the
+#                                         Read Packages and Write Packages scopes
+#   variable BUILDKITE_ORGANIZATION_SLUG  org owning imasrpm/imasdeb/imasnget
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, e.g. v1.2.3"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-packages-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.repository == 'yogzblr/imas' &&
+      (github.event_name == 'workflow_dispatch' || !github.event.release.prerelease)
+    environment: goreleaser
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Check publish secrets
+        env:
+          BUILDKITE_PACKAGES_TOKEN: ${{ secrets.BUILDKITE_PACKAGES_TOKEN }}
+          BUILDKITE_ORGANIZATION_SLUG: ${{ vars.BUILDKITE_ORGANIZATION_SLUG }}
+        run: |
+          missing=()
+          [ -n "$BUILDKITE_PACKAGES_TOKEN" ] || missing+=("secret BUILDKITE_PACKAGES_TOKEN")
+          [ -n "$BUILDKITE_ORGANIZATION_SLUG" ] || missing+=("variable BUILDKITE_ORGANIZATION_SLUG")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::missing: ${missing[*]}"
+            exit 1
+          fi
+          case "$TAG" in
+            v[0-9]*) ;;
+            *) echo "::error::'$TAG' is not a release tag (want vX.Y.Z)"; exit 1 ;;
+          esac
+
+      # The packaging scripts as of the release being published.
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dist \
+            --pattern '*.rpm' --pattern '*.deb' --pattern '*.msi' --pattern checksums.txt
+          (cd dist && sha256sum --check --ignore-missing --strict checksums.txt)
+          # --ignore-missing passes on an empty directory: make sure every
+          # downloaded package was actually listed. (A missing package type
+          # is caught by publish-packages.sh.)
+          shopt -s nullglob
+          for f in dist/*.rpm dist/*.deb dist/*.msi; do
+            grep -q "  $(basename "$f")\$" dist/checksums.txt || { echo "::error::$f is not in checksums.txt"; exit 1; }
+          done
+
+      - name: Install msitools
+        run: sudo apt-get update -q && sudo apt-get install -y -q msitools zip
+
+      - name: Set up .NET (dotnet nuget push)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build winget NuGet packages
+        env:
+          BUILDKITE_ORGANIZATION_SLUG: ${{ vars.BUILDKITE_ORGANIZATION_SLUG }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          msis=(dist/*.msi)
+          [ "${#msis[@]}" -eq 1 ] || { echo "::error::expected one MSI in the release, found ${#msis[@]}"; exit 1; }
+          # The public feed's NuGet v3 PackageBaseAddress (flat container),
+          # where winget will download the installer package from.
+          index="https://packages.buildkite.com/${BUILDKITE_ORGANIZATION_SLUG}/imasnget/nuget/index.json"
+          base="$(curl -sSfL "$index" | jq -r '[.resources[] | select((."@type" | tostring) | startswith("PackageBaseAddress")) | ."@id"][0] // empty')"
+          [ -n "$base" ] || { echo "::error::no PackageBaseAddress in $index (is imasnget public?)"; exit 1; }
+          ./packaging/windows/winget/build-winget-nupkg.sh \
+            --msi "${msis[0]}" --version "$TAG" --package-base-address "$base" --out dist/winget
+
+      - name: Publish to Buildkite Packages
+        env:
+          BUILDKITE_PACKAGES_TOKEN: ${{ secrets.BUILDKITE_PACKAGES_TOKEN }}
+          BUILDKITE_ORGANIZATION_SLUG: ${{ vars.BUILDKITE_ORGANIZATION_SLUG }}
+        run: ./packaging/buildkite/publish-packages.sh dist dist/winget

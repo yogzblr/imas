@@ -16,7 +16,14 @@
 #      inherited by everything the installer and the sprout create below it.
 #   3. MsiServiceConfigFailureActions (MSI 5.0). The SCM equivalent of the
 #      systemd unit's Restart=always/RestartSec=5: restart the service 5s
-#      after it dies (e.g. the log.Fatalf paths in cmd/sprout/main.go).
+#      after it dies (e.g. the log.Fatalf paths in cmd/sprout/main.go). The
+#      same settings as `imas-sprout install` (cmd/sprout/internal/winservice).
+#   4. The SproutServiceStart component's condition (wixl rejects
+#      <Condition> in a component): start the service at the end of the
+#      install only on an upgrade (including a same-version one) or with
+#      START_SERVICE=1. And add
+#      START_SERVICE to SecureCustomProperties (wixl ignores Secure='yes'),
+#      so a value given to msiexec reaches the elevated install.
 #
 # Usage: msi-postprocess.sh path/to/imas-sprout.msi
 set -euo pipefail
@@ -29,7 +36,7 @@ command -v msibuild >/dev/null || { echo "msi-postprocess: msibuild (msitools) n
 # Keep it if present so this also works for a future 386 build.
 attr_base() {
 	local a
-	a=$(msiinfo export "$msi" Component | awk -F'\t' -v c="$1" '$1 == c { print $4 }')
+	a=$(msiinfo export "$msi" Component | tr -d '\r' | awk -F'\t' -v c="$1" '$1 == c { print $4 }')
 	[[ -n "$a" ]] || { echo "msi-postprocess: component $1 not found in $msi" >&2; exit 1; }
 	echo $(( a & 256 ))
 }
@@ -60,5 +67,18 @@ msibuild "$msi" -q "INSERT INTO \`MsiServiceConfigFailureActions\` (\`MsiService
 # MsiConfigureServices runs the table above; standard slot is between
 # InstallServices (5800) and StartServices (5900).
 msibuild "$msi" -q "INSERT INTO \`InstallExecuteSequence\` (\`Action\`, \`Condition\`, \`Sequence\`) VALUES ('MsiConfigureServices', 'VersionNT >= 601', 5850)"
+
+# Keep in sync with the <Condition> in imas-sprout.wxs.
+readonly START_CONDITION='WIX_UPGRADE_DETECTED OR WIX_SAME_VERSION_UPGRADE_DETECTED OR START_SERVICE = "1"'
+msibuild "$msi" -q "UPDATE \`Component\` SET \`Condition\` = '$START_CONDITION' WHERE \`Component\` = 'SproutServiceStart'"
+[[ "$(msiinfo export "$msi" Component | tr -d '\r' | awk -F'\t' '$1 == "SproutServiceStart" { print $5 }')" == "$START_CONDITION" ]] ||
+	{ echo "msi-postprocess: component SproutServiceStart not found in $msi" >&2; exit 1; }
+
+secure=$(msiinfo export "$msi" Property | tr -d '\r' | awk -F'\t' '$1 == "SecureCustomProperties" { print $2 }')
+if [[ -z "$secure" ]]; then
+	msibuild "$msi" -q "INSERT INTO \`Property\` (\`Property\`, \`Value\`) VALUES ('SecureCustomProperties', 'START_SERVICE')"
+elif [[ ";$secure;" != *";START_SERVICE;"* ]]; then
+	msibuild "$msi" -q "UPDATE \`Property\` SET \`Value\` = '$secure;START_SERVICE' WHERE \`Property\` = 'SecureCustomProperties'"
+fi
 
 echo "msi-postprocess: patched $msi"

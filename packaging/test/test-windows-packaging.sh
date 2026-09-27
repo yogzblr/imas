@@ -5,10 +5,11 @@
 #   - packaging/windows/imas-sprout.wxs builds with wixl (as goreleaser's msi
 #     pipe does) into an MSI with the imas-sprout service, stop/remove
 #     control and the expected directory layout;
-#   - packaging/windows/msi-postprocess.sh sets the attributes wixl drops and
-#     adds the ACL and failure-action tables;
-#   - packaging/windows/winget/build-winget-nupkg.sh renders manifests that
-#     match the MSI (hash, ProductCode) and packs a well-formed .nupkg, and
+#   - packaging/windows/msi-postprocess.sh sets the attributes and the
+#     start condition wixl drops, and adds the ACL and failure-action tables;
+#   - packaging/windows/winget/build-winget-nupkg.sh packs the MSI into an
+#     installer .nupkg and renders manifests that point at it (URL, hash) and
+#     match the MSI (ProductCode), packs those into a second .nupkg, and
 #     rejects bad input.
 #
 # Needs: go, wixl + msitools, zip/unzip, python3. Optional: python3 with
@@ -47,6 +48,8 @@ import re, sys
 s = open(sys.argv[1]).read()
 s = s.replace('{{ if eq .MsiArch "x64" }}', '')
 s = re.sub(r'\{\{ else \}\}.*?\{\{ end \}\}', '', s, flags=re.S)
+# .Runtime.Goos is linux here: drop the Windows-only (WiX) blocks.
+s = re.sub(r'\{\{ if eq \.Runtime\.Goos "windows" \}\}.*?\{\{ end \}\}', '', s, flags=re.S)
 for k, v in {'{{ .Major }}': '1', '{{ .Minor }}': '2', '{{ .Patch }}': '3',
              '{{ .Version }}': '1.2.3-rc.1', '{{ .MsiArch }}': 'x64',
              '{{ .Binary }}': 'imas-sprout'}.items():
@@ -75,7 +78,10 @@ check "service imas-sprout: own process, auto start, LocalSystem" \
 # ServiceControl Event 162 = stop on install (2) | stop on uninstall (32) |
 # delete on uninstall (128); no start bits (1/16), matching rpm/deb.
 check "service control: stop both, remove on uninstall, no start" \
-	awk -F'\t' '$2=="imas-sprout" && $3==162 {f=1} END {exit !f}' <<<"$(table "$msi" ServiceControl)"
+	awk -F'\t' '$1=="SproutServiceControl" && $2=="imas-sprout" && $3==162 && $6=="SproutExecutable" {f=1} END {exit !f}' <<<"$(table "$msi" ServiceControl)"
+# Event 1 = start on install, on its own component so a condition can gate it.
+check "service start on install lives on SproutServiceStart" \
+	awk -F'\t' '$1=="SproutServiceStartControl" && $2=="imas-sprout" && $3==1 && $6=="SproutServiceStart" {f=1} END {exit !f}' <<<"$(table "$msi" ServiceControl)"
 
 dirs="$(table "$msi" Directory)"
 check "binary dir is ProgramFiles64Folder\\imas" awk -F'\t' '$1=="INSTALLDIR" && $2=="ProgramFiles64Folder" && $3=="imas" {f=1} END {exit !f}' <<<"$dirs"
@@ -85,6 +91,10 @@ check "installs imas-sprout.exe" awk -F'\t' '$3=="imas-sprout.exe" {f=1} END {ex
 check "installs the config as 'sprout'" awk -F'\t' '$1=="SproutConfigFile" && $3=="sprout" {f=1} END {exit !f}' <<<"$files"
 check "MajorUpgrade present (FindRelatedProducts + RemoveExistingProducts)" \
 	bash -c "msiinfo export '$msi' InstallExecuteSequence | grep -q RemoveExistingProducts && msiinfo export '$msi' Upgrade | grep -q WIX_UPGRADE_DETECTED"
+# Attributes 769 = MigrateFeatures | VersionMinInclusive | VersionMaxInclusive,
+# not OnlyDetect (2): a same-version product is found and removed.
+check "same-version upgrades (1.2.3-rc.1 -> 1.2.3) replace the old product" \
+	awk -F'\t' '$2=="1.2.3" && $3=="1.2.3" && $5==769 && $7=="WIX_SAME_VERSION_UPGRADE_DETECTED" {f=1} END {exit !f}' <<<"$(table "$msi" Upgrade)"
 
 # --- post-process ----------------------------------------------------------
 "$repo/packaging/windows/msi-postprocess.sh" "$msi" >/dev/null
@@ -94,6 +104,13 @@ check "config: 64-bit|Permanent|NeverOverwrite (400)" test "$(attr SproutConfig)
 check "data dir: 64-bit|Permanent (272)" test "$(attr SproutDataDir)" = 272
 check "cache dir: 64-bit|Permanent (272)" test "$(attr SproutCacheDir)" = 272
 check "binary: untouched (256)" test "$(attr SproutExecutable)" = 256
+cond() { awk -F'\t' -v c="$1" '$1==c {print $5}' <<<"$comp"; }
+check "service start only on upgrade or START_SERVICE=1" \
+	test "$(cond SproutServiceStart)" = 'WIX_UPGRADE_DETECTED OR WIX_SAME_VERSION_UPGRADE_DETECTED OR START_SERVICE = "1"'
+check "start condition matches the WiX <Condition> in the .wxs" \
+	grep -qF "<![CDATA[$(cond SproutServiceStart)]]>" "$repo/packaging/windows/imas-sprout.wxs"
+check "START_SERVICE is a secure property; upgrade properties kept" \
+	awk -F'\t' '$1=="SecureCustomProperties" && (";"$2";") ~ /;START_SERVICE;/ && (";"$2";") ~ /;WIX_UPGRADE_DETECTED;/ && (";"$2";") ~ /;WIX_SAME_VERSION_UPGRADE_DETECTED;/ {f=1} END {exit !f}' <<<"$(table "$msi" Property)"
 check "config root locked to SYSTEM + Administrators" \
 	awk -F'\t' '$2=="IMASDATADIR" && $3=="CreateFolder" && $4=="D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" {f=1} END {exit !f}' <<<"$(table "$msi" MsiLockPermissionsEx)"
 check "failure actions: restart x3 after 5s, on the service component" \
@@ -104,41 +121,68 @@ check "post-process rejects a missing file" bash -c "! '$repo/packaging/windows/
 
 # --- winget + nupkg --------------------------------------------------------
 wg="$repo/packaging/windows/winget/build-winget-nupkg.sh"
-url="https://example.invalid/releases/v1.2.3-rc.1/$(basename "$msi")"
+base="https://pkgs.example.invalid/org/imasnget/nuget/v3/flat/"
 out="$work/winget"
-"$wg" --msi "$msi" --version v1.2.3-rc.1 --installer-url "$url" --out "$out" >/dev/null
-mdir="$out/manifests/i/Imas/Sprout/1.2.3-rc.1"
+"$wg" --msi "$msi" --version v1.2.3-rc.1 --package-base-address "$base" --out "$out" >/dev/null
+msi_name="$(basename "$msi")"
+
+installer_nupkg="$out/imas.sprout.windows.msi.1.2.3-rc.1.nupkg"
+check "installer nupkg written" test -s "$installer_nupkg"
+ilist="$(unzip -Z1 "$installer_nupkg")"
+for entry in '[Content_Types].xml' '_rels/.rels' 'imas.sprout.windows.msi.nuspec' "$msi_name"; do
+	check "installer nupkg contains $entry" grep -qxF "$entry" <<<"$ilist"
+done
+check "installer nupkg holds the MSI byte for byte" \
+	test "$(unzip -p "$installer_nupkg" "$msi_name" | sha256sum)" = "$(sha256sum <"$msi")"
+check "installer nuspec id/version" \
+	bash -c "unzip -p '$installer_nupkg' imas.sprout.windows.msi.nuspec | grep -q '<id>imas.sprout.windows.msi</id>' && unzip -p '$installer_nupkg' imas.sprout.windows.msi.nuspec | grep -q '<version>1.2.3-rc.1</version>'"
+
+mdir="$out/manifests/i/imas/sprout/windows/1.2.3-rc.1"
 check "three manifests in the winget-pkgs layout" \
-	test -f "$mdir/Imas.Sprout.yaml" -a -f "$mdir/Imas.Sprout.installer.yaml" -a -f "$mdir/Imas.Sprout.locale.en-US.yaml"
-inst="$mdir/Imas.Sprout.installer.yaml"
-sha="$(sha256sum "$msi" | awk '{print toupper($1)}')"
+	test -f "$mdir/imas.sprout.windows.yaml" -a -f "$mdir/imas.sprout.windows.installer.yaml" -a -f "$mdir/imas.sprout.windows.locale.en-US.yaml"
+inst="$mdir/imas.sprout.windows.installer.yaml"
+url="${base}imas.sprout.windows.msi/1.2.3-rc.1/imas.sprout.windows.msi.1.2.3-rc.1.nupkg"
+sha="$(sha256sum "$installer_nupkg" | awk '{print toupper($1)}')"
 pc="$(table "$msi" Property | awk -F'\t' '$1=="ProductCode"{print $2}')"
-check "InstallerSha256 matches the MSI" grep -q "InstallerSha256: $sha" "$inst"
+check "PackageIdentifier imas.sprout.windows" grep -qx "PackageIdentifier: imas.sprout.windows" "$inst"
+check "InstallerUrl is the installer package's flat-container URL" grep -qxF "    InstallerUrl: $url" "$inst"
+check "InstallerSha256 is the installer package's hash" grep -qx "    InstallerSha256: $sha" "$inst"
+check "zip installer, nested wix MSI at the package root" \
+	bash -c "grep -qx 'InstallerType: zip' '$inst' && grep -qx 'NestedInstallerType: wix' '$inst' && grep -qxF '  - RelativeFilePath: $msi_name' '$inst'"
 check "ProductCode matches the MSI" grep -q "ProductCode: \"$pc\"" "$inst"
-check "InstallerUrl as given" grep -qF "InstallerUrl: $url" "$inst"
 check "silent switches" grep -q "Silent: /quiet /norestart" "$inst"
 check "no unrendered placeholders" bash -c "! grep -rq '@[A-Z_]*@' '$out/manifests'"
+check "winget-installer.env records URL and hash" \
+	bash -c "grep -qxF 'INSTALLER_URL=$url' '$out/winget-installer.env' && grep -qx 'INSTALLER_SHA256=$sha' '$out/winget-installer.env'"
 
-nupkg="$out/Imas.Sprout.1.2.3-rc.1.nupkg"
-check "nupkg written" test -s "$nupkg"
+nupkg="$out/imas.sprout.windows.1.2.3-rc.1.nupkg"
+check "manifest nupkg written" test -s "$nupkg"
 listing="$(unzip -Z1 "$nupkg")"
-for entry in '[Content_Types].xml' '_rels/.rels' 'Imas.Sprout.nuspec' \
-	'manifests/i/Imas/Sprout/1.2.3-rc.1/Imas.Sprout.installer.yaml' "installer/$(basename "$msi")"; do
-	check "nupkg contains $entry" grep -qxF "$entry" <<<"$listing"
+for entry in '[Content_Types].xml' '_rels/.rels' 'imas.sprout.windows.nuspec' \
+	'manifests/i/imas/sprout/windows/1.2.3-rc.1/imas.sprout.windows.installer.yaml'; do
+	check "manifest nupkg contains $entry" grep -qxF "$entry" <<<"$listing"
 done
-nuspec="$(unzip -p "$nupkg" Imas.Sprout.nuspec)"
-check "nuspec id/version" bash -c "grep -q '<id>Imas.Sprout</id>' <<<'$nuspec' && grep -q '<version>1.2.3-rc.1</version>' <<<'$nuspec'"
-check "nuspec is well-formed XML" python3 -c "import sys, xml.dom.minidom as m; m.parseString(sys.stdin.read())" <<<"$nuspec"
+check "manifest nupkg doesn't carry the MSI" bash -c "! grep -q '\.msi\$' <<<'$listing'"
+check "packed manifests are the rendered ones" \
+	test "$(unzip -p "$nupkg" manifests/i/imas/sprout/windows/1.2.3-rc.1/imas.sprout.windows.installer.yaml | sha256sum)" = "$(sha256sum <"$inst")"
+nuspec="$(unzip -p "$nupkg" imas.sprout.windows.nuspec)"
+check "manifest nuspec id/version" bash -c "grep -q '<id>imas.sprout.windows</id>' <<<'$nuspec' && grep -q '<version>1.2.3-rc.1</version>' <<<'$nuspec'"
+for n in "$nuspec" "$(unzip -p "$installer_nupkg" imas.sprout.windows.msi.nuspec)"; do
+	check "nuspec is well-formed XML" python3 -c "import sys, xml.dom.minidom as m; m.parseString(sys.stdin.read())" <<<"$n"
+done
 
-"$wg" --msi "$msi" --version 1.2.3 --installer-url "$url" --package-identifier Contoso.Imas.Sprout --out "$work/wg2" >/dev/null
+"$wg" --msi "$msi" --version 1.2.3 --package-base-address "$base" --package-identifier Contoso.Imas.Sprout --out "$work/wg2" >/dev/null
 check "multi-segment identifier maps to nested dirs" test -f "$work/wg2/manifests/c/Contoso/Imas/Sprout/1.2.3/Contoso.Imas.Sprout.installer.yaml"
+check "installer URL is lower-cased, as NuGet flat containers are" \
+	grep -qF "InstallerUrl: ${base}contoso.imas.sprout.msi/1.2.3/contoso.imas.sprout.msi.1.2.3.nupkg" "$work/wg2/manifests/c/Contoso/Imas/Sprout/1.2.3/Contoso.Imas.Sprout.installer.yaml"
 
 rejects() { ! "$wg" "$@" --out "$work/rej" >/dev/null 2>&1; }
-check "rejects http:// installer URL" rejects --msi "$msi" --version 1.2.3 --installer-url "http://x/y.msi"
-check "rejects a non-semver version" rejects --msi "$msi" --version latest --installer-url "$url"
-check "rejects a one-segment identifier" rejects --msi "$msi" --version 1.2.3 --installer-url "$url" --package-identifier Sprout
-check "rejects a URL with a quote" rejects --msi "$msi" --version 1.2.3 --installer-url "https://x/a\"b.msi"
-check "rejects a missing MSI" rejects --msi "$work/nope.msi" --version 1.2.3 --installer-url "$url"
+check "rejects an http:// base address" rejects --msi "$msi" --version 1.2.3 --package-base-address "http://x/flat/"
+check "rejects a missing base address" rejects --msi "$msi" --version 1.2.3
+check "rejects a non-semver version" rejects --msi "$msi" --version latest --package-base-address "$base"
+check "rejects a one-segment identifier" rejects --msi "$msi" --version 1.2.3 --package-base-address "$base" --package-identifier Sprout
+check "rejects a base address with a quote" rejects --msi "$msi" --version 1.2.3 --package-base-address "https://x/a\"b/"
+check "rejects a missing MSI" rejects --msi "$work/nope.msi" --version 1.2.3 --package-base-address "$base"
 
 if [[ -n "${WINGET_SCHEMA_DIR:-}" ]]; then
 	check "manifests validate against the winget 1.10.0 schemas" python3 - "$WINGET_SCHEMA_DIR" "$mdir" <<'EOF'

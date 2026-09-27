@@ -3,12 +3,14 @@ name: Release
 # Manual-only for now: this needs GPG_PRIVATE_KEY/GPG_PASSPHRASE/GORELEASER_KEY
 # (goreleaser-pro) plus AWS/Cloudsmith/Docker Hub/AUR credentials configured
 # as repo secrets, none of which exist yet on the new imas repo (they lived
-# on the original project's infra, not this fork's), and the Buildkite
-# Packages publish job below needs the BUILDKITE_PACKAGES_TOKEN secret and the
-# BUILDKITE_ORGANIZATION_SLUG variable. Re-enable the tags trigger below once
-# all of those are set on yogzblr/imas (the "Check release secrets" step
-# fails fast, naming whatever is missing) — until then, pushing a v* tag
-# would just fail at the first login/import step.
+# on the original project's infra, not this fork's). Re-enable the tags
+# trigger below once all of those are set on yogzblr/imas (the "Check
+# release secrets" step fails fast, naming whatever is missing) — until
+# then, pushing a v* tag would just fail at the first login/import step.
+#
+# This creates a draft GitHub release. Publishing that release (a
+# maintainer's review step) is what uploads the OS packages to the Buildkite
+# Package Registries: see publish-packages.yml.
 on:
   workflow_dispatch:
   # push:
@@ -51,20 +53,16 @@ jobs:
           CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
           CLOUDSMITH_REPOSITORY: ${{ secrets.CLOUDSMITH_REPOSITORY }}
           AUR_KEY: ${{ secrets.AUR_KEY }}
-          BUILDKITE_PACKAGES_TOKEN: ${{ secrets.BUILDKITE_PACKAGES_TOKEN }}
-          # A repo variable, not a secret: it isn't sensitive.
-          BUILDKITE_ORGANIZATION_SLUG: ${{ vars.BUILDKITE_ORGANIZATION_SLUG }}
         run: |
           missing=()
           for name in GPG_PRIVATE_KEY GPG_PASSPHRASE GORELEASER_KEY \
                       DOCKER_USERNAME DOCKER_PASSWORD \
                       AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY \
-                      CLOUDSMITH_API_KEY CLOUDSMITH_REPOSITORY AUR_KEY \
-                      BUILDKITE_PACKAGES_TOKEN BUILDKITE_ORGANIZATION_SLUG; do
+                      CLOUDSMITH_API_KEY CLOUDSMITH_REPOSITORY AUR_KEY; do
             [ -n "${!name}" ] || missing+=("$name")
           done
           if [ "${#missing[@]}" -gt 0 ]; then
-            echo "::error::missing repo/environment secrets or variables: ${missing[*]}"
+            echo "::error::missing repo/environment secrets: ${missing[*]}"
             exit 1
           fi
 
@@ -111,74 +109,3 @@ jobs:
           AUR_KEY: ${{ secrets.AUR_KEY }}
           GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}
           GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
-
-      # Hand the OS packages to the publish job. The MSI lands under
-      # dist/msi/<name>/ (goreleaser's layout), the rest at the top level.
-      - name: Upload packages for publishing
-        uses: actions/upload-artifact@v4
-        with:
-          name: os-packages
-          if-no-files-found: error
-          retention-days: 7
-          path: |
-            dist/*.rpm
-            dist/*.deb
-            dist/msi/*/*.msi
-            dist/metadata.json
-
-  # Upload .rpm/.deb and the winget NuGet package to the Buildkite Packages
-  # registries imasrpm, imasdeb and imasnget. Needs (repo or "goreleaser"
-  # environment):
-  #   secret   BUILDKITE_PACKAGES_TOKEN     API access token, Read + Write Packages scopes
-  #   variable BUILDKITE_ORGANIZATION_SLUG  org owning the three registries
-  # Optional repo variables:
-  #   WINGET_INSTALLER_BASE_URL    where winget clients download the MSI from
-  #                                (default: this release's GitHub assets)
-  #   WINGET_PACKAGE_IDENTIFIER    default Imas.Sprout
-  publish-buildkite:
-    needs: goreleaser
-    if: github.repository == 'yogzblr/imas'
-    environment: goreleaser
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Download packages
-        uses: actions/download-artifact@v4
-        with:
-          name: os-packages
-          path: dist
-
-      - name: Install msitools
-        run: sudo apt-get update -q && sudo apt-get install -y -q msitools zip
-
-      - name: Set up .NET (dotnet nuget push)
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 8.0.x
-
-      - name: Build winget NuGet package
-        env:
-          WINGET_INSTALLER_BASE_URL: ${{ vars.WINGET_INSTALLER_BASE_URL }}
-          WINGET_PACKAGE_IDENTIFIER: ${{ vars.WINGET_PACKAGE_IDENTIFIER }}
-        run: |
-          set -euo pipefail
-          tag="$(jq -r .tag dist/metadata.json)"
-          version="$(jq -r .version dist/metadata.json)"
-          shopt -s nullglob
-          msis=(dist/msi/*/*.msi)
-          [ "${#msis[@]}" -eq 1 ] || { echo "::error::expected one MSI, found ${#msis[@]}"; exit 1; }
-          msi="${msis[0]}"
-          base="${WINGET_INSTALLER_BASE_URL:-https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}}"
-          args=(--msi "$msi" --version "$version" --installer-url "${base%/}/$(basename "$msi")" --out dist/winget)
-          [ -z "${WINGET_PACKAGE_IDENTIFIER:-}" ] || args+=(--package-identifier "$WINGET_PACKAGE_IDENTIFIER")
-          ./packaging/windows/winget/build-winget-nupkg.sh "${args[@]}"
-
-      - name: Publish to Buildkite Packages
-        env:
-          BUILDKITE_PACKAGES_TOKEN: ${{ secrets.BUILDKITE_PACKAGES_TOKEN }}
-          BUILDKITE_ORGANIZATION_SLUG: ${{ vars.BUILDKITE_ORGANIZATION_SLUG }}
-        run: ./packaging/buildkite/publish-packages.sh dist dist/winget

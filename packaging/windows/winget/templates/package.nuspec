@@ -5,7 +5,7 @@
     <version>@NUGET_VERSION@</version>
     <title>imas sprout (winget manifests)</title>
     <authors>imas</authors>
-    <description>winget manifests (and the MSI they describe) for imas sprout @PACKAGE_VERSION@. The manifests are under manifests/, in the winget-pkgs directory layout; the MSI is under installer/.</description>
+    <description>winget manifests for imas sprout @PACKAGE_VERSION@, under manifests/ in the winget-pkgs layout. The installer they point at is the @INSTALLER_ID@ package in this feed.</description>
     <license type="expression">0BSD</license>
     <projectUrl>https://github.com/yogzblr/imas</projectUrl>
     <tags>winget imas imas-sprout</tags>

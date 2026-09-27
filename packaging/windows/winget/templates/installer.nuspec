@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+  <metadata>
+    <id>@INSTALLER_ID@</id>
+    <version>@NUGET_VERSION@</version>
+    <title>imas sprout MSI</title>
+    <authors>imas</authors>
+    <description>The imas sprout @PACKAGE_VERSION@ MSI (@MSI_NAME@), for winget. This package is the installer the @PACKAGE_IDENTIFIER@ winget manifests download (InstallerType zip, nested wix); it is not meant to be referenced from a .NET project.</description>
+    <license type="expression">0BSD</license>
+    <projectUrl>https://github.com/yogzblr/imas</projectUrl>
+    <tags>winget imas imas-sprout msi</tags>
+  </metadata>
+</package>

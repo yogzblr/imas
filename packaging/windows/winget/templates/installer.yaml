@@ -3,10 +3,16 @@
 PackageIdentifier: @PACKAGE_IDENTIFIER@
 PackageVersion: @PACKAGE_VERSION@
 MinimumOSVersion: 10.0.0.0
-# WiX-authored MSI (packaging/windows/imas-sprout.wxs). Installs the
-# imas-sprout Windows service with automatic start; the installer does not
-# start it, since a fresh install has no farmer address or join token yet.
-InstallerType: wix
+# The download is the @INSTALLER_ID@ .nupkg from the public imasnget
+# NuGet feed: a zip holding the WiX-authored MSI
+# (packaging/windows/imas-sprout.wxs). winget extracts it and runs the MSI.
+# The MSI installs the imas-sprout Windows service (automatic start) and
+# starts it only on an upgrade: a fresh install has no farmer address or
+# join token yet.
+InstallerType: zip
+NestedInstallerType: wix
+NestedInstallerFiles:
+  - RelativeFilePath: @MSI_NAME@
 Scope: machine
 InstallModes:
   - silent

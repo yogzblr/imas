@@ -424,11 +424,17 @@ release:
   github:
     owner: yogzblr
     name: imas
+  # IDs of everything uploaded to the release. The nfpm IDs are listed so
+  # the imas-farmer/imas-sprout rpm/deb/apk packages are release assets:
+  # .github/workflows/publish-packages.yml publishes the release's assets
+  # to Buildkite. ("imas" covers both the CLI archives and its nfpm entry.)
   ids:
     - imas-universal
     - imas
     - farmer
     - sprout
+    - imas-farmer
+    - imas-sprout
     - imas-sprout-msi
   draft: true
   # Support for nightlies

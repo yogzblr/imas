@@ -4,9 +4,17 @@
 #   .rpm    -> $BUILDKITE_RPM_REGISTRY   (default imasrpm,  Red Hat registry;
 #                                          serves RHEL/Rocky/Alma and SUSE)
 #   .deb    -> $BUILDKITE_DEB_REGISTRY   (default imasdeb,  Debian registry)
-#   .nupkg  -> $BUILDKITE_NUGET_REGISTRY (default imasnget, NuGet registry;
-#                                          the winget feed, see
+#   .nupkg  -> $BUILDKITE_NUGET_REGISTRY (default imasnget, NuGet registry,
+#                                          public; the winget feed, see
 #                                          packaging/windows/winget/)
+#
+# The winget installer package (*.msi.*.nupkg) goes up before the manifest
+# package, since the manifests point at it. If <nupkg-dir> has the
+# winget-installer.env that build-winget-nupkg.sh writes, the installer is
+# then downloaded anonymously from INSTALLER_URL (retrying while the feed
+# indexes it) and its SHA-256 compared with INSTALLER_SHA256, before any
+# manifest is published: a manifest winget clients can't install from is
+# worse than none.
 #
 # Usage: publish-packages.sh <dist-dir> [<nupkg-dir>]
 #   <dist-dir>   goreleaser's dist/: the top-level *.rpm and *.deb are taken.
@@ -20,6 +28,7 @@
 #   DRY_RUN=1                    list what would be uploaded, upload nothing.
 #   BUILDKITE_API_URL            default https://api.buildkite.com
 #   BUILDKITE_PACKAGES_URL       default https://packages.buildkite.com
+#   VERIFY_ATTEMPTS, VERIFY_DELAY  installer check retries (default 30 x 10s)
 #
 # rpm/deb go through the REST API (POST .../registries/{slug}/packages,
 # multipart "file"); NuGet through `dotnet nuget push`, which is what
@@ -88,8 +97,40 @@ nuget_upload() {
 		|| die "NuGet push of $file to $nuget_registry failed"
 }
 
+# verify_installer: fetch INSTALLER_URL with no credentials and compare its
+# hash, retrying while the feed catches up.
+verify_installer() {
+	local env_file="$nupkg_dir/winget-installer.env" url sha got tmp i
+	[[ -f "$env_file" ]] || { echo "publish-packages: no $env_file; not checking the installer download"; return 0; }
+	url="$(sed -n 's/^INSTALLER_URL=//p' "$env_file")"
+	sha="$(sed -n 's/^INSTALLER_SHA256=//p' "$env_file")"
+	[[ -n "$url" && -n "$sha" ]] || die "$env_file lacks INSTALLER_URL or INSTALLER_SHA256"
+	echo "publish-packages: checking $url"
+	[[ -z "$dry_run" ]] || return 0
+	tmp="$(mktemp)"
+	for ((i = 1; i <= ${VERIFY_ATTEMPTS:-30}; i++)); do
+		if curl -sSfL -o "$tmp" "$url" 2>/dev/null; then
+			got="$(sha256sum "$tmp" | awk '{ print toupper($1) }')"
+			rm -f "$tmp"
+			[[ "$got" == "${sha^^}" ]] || die "$url has SHA-256 $got, the manifests say $sha"
+			echo "publish-packages: installer downloadable anonymously, hash matches"
+			return 0
+		fi
+		sleep "${VERIFY_DELAY:-10}"
+	done
+	rm -f "$tmp"
+	die "$url not downloadable anonymously after ${VERIFY_ATTEMPTS:-30} attempts; is $nuget_registry public? Not publishing the winget manifests"
+}
+
+installer_nupkgs=() other_nupkgs=()
+for f in "${nupkgs[@]}"; do
+	if [[ "$(basename "$f")" == *.msi.*.nupkg ]]; then installer_nupkgs+=("$f"); else other_nupkgs+=("$f"); fi
+done
+
 for f in "${rpms[@]}"; do rest_upload "$rpm_registry" "$f"; done
 for f in "${debs[@]}"; do rest_upload "$deb_registry" "$f"; done
-for f in "${nupkgs[@]}"; do nuget_upload "$f"; done
+for f in "${installer_nupkgs[@]}"; do nuget_upload "$f"; done
+if (( ${#installer_nupkgs[@]} )); then verify_installer; fi
+for f in "${other_nupkgs[@]}"; do nuget_upload "$f"; done
 
 echo "publish-packages: done (${#rpms[@]} rpm, ${#debs[@]} deb, ${#nupkgs[@]} nupkg)${dry_run:+ [dry run]}"

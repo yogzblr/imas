@@ -14,7 +14,8 @@ Description: |-
   This package installs imas-sprout.exe under %ProgramFiles%\imas and registers
   the imas-sprout Windows service (automatic start, LocalSystem). Configuration
   lives in %ProgramData%\imas\sprout; set the farmer address and join token
-  there, then run Start-Service imas-sprout.
+  there, then run imas-sprout start (or Start-Service imas-sprout). An
+  upgrade restarts the service by itself.
 Moniker: imas-sprout
 Tags:
   - agent
