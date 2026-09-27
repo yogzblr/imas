@@ -608,47 +608,105 @@ func TestLoadConfig_FarmerBusSettingsFromEnv(t *testing.T) {
 	}
 }
 
-// farmerbusurl/farmerbustlsservername are farmer settings. A sprout
-// pins bus addresses with the validated busurls instead, so its legacy
-// FarmerBusURL fallback (pki.ResolveSproutBusURLs) stays
-// farmerinterface:farmerbusport; the imas CLI's likewise.
-func TestLoadConfig_FarmerBusURLIgnoredOutsideFarmer(t *testing.T) {
+// farmerbusurl/farmerbustlsservername are farmer and imas CLI settings.
+// A sprout pins bus addresses with the validated busurls instead, so its
+// legacy FarmerBusURL fallback (pki.ResolveSproutBusURLs) stays
+// farmerinterface:farmerbusport.
+func TestLoadConfig_FarmerBusURLIgnoredBySprout(t *testing.T) {
 	const content = "farmerinterface: farmer.example.com\nfarmerbusurl: tls://elsewhere.example.com:5406\nfarmerbustlsservername: elsewhere.example.com\n"
-	t.Run("sprout", func(t *testing.T) {
-		tmpRoot := t.TempDir()
-		cfgFile := writeTempConfig(t, tmpRoot, "sprout", content)
-		resetForBinaryTest(t, tmpRoot)
-		jety.SetConfigType("yaml")
-		jety.SetConfigFile(cfgFile)
-		_ = jety.ReadInConfig()
+	tmpRoot := t.TempDir()
+	cfgFile := writeTempConfig(t, tmpRoot, "sprout", content)
+	resetForBinaryTest(t, tmpRoot)
+	jety.SetConfigType("yaml")
+	jety.SetConfigFile(cfgFile)
+	_ = jety.ReadInConfig()
 
-		LoadConfig("sprout")
+	LoadConfig("sprout")
 
-		if FarmerBusURL != "farmer.example.com:5406" {
-			t.Errorf("FarmerBusURL = %q, want farmer.example.com:5406", FarmerBusURL)
+	if FarmerBusURL != "farmer.example.com:5406" {
+		t.Errorf("FarmerBusURL = %q, want farmer.example.com:5406", FarmerBusURL)
+	}
+	if FarmerBusTLSServerName != "" {
+		t.Errorf("FarmerBusTLSServerName = %q, want empty", FarmerBusTLSServerName)
+	}
+	if got := BusTLSServerName(); got != "farmer.example.com" {
+		t.Errorf("BusTLSServerName() = %q, want farmer.example.com", got)
+	}
+}
+
+// loadImasConfig points HOME at a fresh directory holding content as the
+// imas CLI's config file and runs LoadConfig("imas").
+func loadImasConfig(t *testing.T, content string) {
+	t.Helper()
+	tmpHome := t.TempDir()
+	cfgDir := filepath.Join(tmpHome, ".config", "imas")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgFile := writeTempConfig(t, cfgDir, "imas", content)
+	t.Setenv("HOME", tmpHome)
+	resetForBinaryTest(t, t.TempDir())
+	resetForTest(t, cfgFile)
+
+	LoadConfig("imas")
+}
+
+// The imas CLI dials the bus too (internal/api/client.NewNatsClient), so
+// it reads the same keys farmer does.
+func TestLoadConfig_ImasReadsFarmerBusSettings(t *testing.T) {
+	const svc = "imas-nats-bus.imas.svc.cluster.local"
+	t.Run("farmerbusurl only", func(t *testing.T) {
+		loadImasConfig(t, "farmerinterface: farmer.example.com\nfarmerbusurl: tls://"+svc+":5406\n")
+
+		if FarmerInterface != "farmer.example.com" {
+			t.Errorf("FarmerInterface = %q, want farmer.example.com", FarmerInterface)
+		}
+		if FarmerBusURL != "tls://"+svc+":5406" {
+			t.Errorf("FarmerBusURL = %q, want the farmerbusurl value", FarmerBusURL)
 		}
 		if FarmerBusTLSServerName != "" {
 			t.Errorf("FarmerBusTLSServerName = %q, want empty", FarmerBusTLSServerName)
+		}
+		if got := BusTLSServerName(); got != svc {
+			t.Errorf("BusTLSServerName() = %q, want %q", got, svc)
 		}
 	})
-	t.Run("imas", func(t *testing.T) {
-		tmpHome := t.TempDir()
-		cfgDir := filepath.Join(tmpHome, ".config", "imas")
-		if err := os.MkdirAll(cfgDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		cfgFile := writeTempConfig(t, cfgDir, "imas", content)
-		t.Setenv("HOME", tmpHome)
-		resetForBinaryTest(t, t.TempDir())
-		resetForTest(t, cfgFile)
+	t.Run("explicit server name", func(t *testing.T) {
+		loadImasConfig(t, "farmerinterface: farmer.example.com\nfarmerbusurl: tls://10.0.0.5:5406\nfarmerbustlsservername: bus.example.test\n")
 
-		LoadConfig("imas")
+		if FarmerBusURL != "tls://10.0.0.5:5406" {
+			t.Errorf("FarmerBusURL = %q, want tls://10.0.0.5:5406", FarmerBusURL)
+		}
+		if FarmerBusTLSServerName != "bus.example.test" {
+			t.Errorf("FarmerBusTLSServerName = %q, want bus.example.test", FarmerBusTLSServerName)
+		}
+		if got := BusTLSServerName(); got != "bus.example.test" {
+			t.Errorf("BusTLSServerName() = %q, want bus.example.test", got)
+		}
+	})
+	t.Run("unset keeps farmerinterface", func(t *testing.T) {
+		loadImasConfig(t, "farmerinterface: farmer.example.com\n")
 
 		if FarmerBusURL != "farmer.example.com:5406" {
 			t.Errorf("FarmerBusURL = %q, want farmer.example.com:5406", FarmerBusURL)
 		}
-		if FarmerBusTLSServerName != "" {
-			t.Errorf("FarmerBusTLSServerName = %q, want empty", FarmerBusTLSServerName)
+		if got := BusTLSServerName(); got != "farmer.example.com" {
+			t.Errorf("BusTLSServerName() = %q, want farmer.example.com", got)
+		}
+	})
+	t.Run("from env", func(t *testing.T) {
+		// Registered before t.Setenv, so it runs after the environment is
+		// restored (see TestLoadConfig_FarmerBusSettingsFromEnv).
+		t.Cleanup(func() { resetJety(t) })
+		t.Setenv("FARMERBUSURL", "tls://"+svc+":5406")
+		t.Setenv("FARMERBUSTLSSERVERNAME", "bus.example.test")
+		loadImasConfig(t, "farmerinterface: farmer.example.com\n")
+
+		if FarmerBusURL != "tls://"+svc+":5406" {
+			t.Errorf("FarmerBusURL = %q, want the FARMERBUSURL value", FarmerBusURL)
+		}
+		if got := BusTLSServerName(); got != "bus.example.test" {
+			t.Errorf("BusTLSServerName() = %q, want bus.example.test", got)
 		}
 	})
 }
