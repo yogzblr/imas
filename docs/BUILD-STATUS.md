@@ -174,8 +174,8 @@ directly in this session instead.
 | **Workstream M.1** — Windows SCM service wrapper for the sprout binary | `golang.org/x/sys/windows/svc` lifecycle hooks so `imas-sprout.exe` itself runs under the Windows SCM (install/uninstall/start/stop/status via `svc/mgr`, no SIGINT/SIGTERM handling under the SCM, rotating file log) — distinct from G.1's *ingredient* for managing other Windows services | merged — PR #22 (`cfdb73f`, `54d70f4`, `f2fa7fa`, `8b9b388`, `718928e`) |
 | **Workstream M.2** — MSI installer + winget package | MSI via `wixl`/`msitools`, winget NuGet package published to the public `imasnget` Buildkite feed on release, sprout starts itself post-upgrade | merged — PR #21 (`1c6a2a5`, `65bc985`) |
 | **Workstream M.3** — SUSE rpm validation | `zypper`-specific check on the existing `nfpm`-built rpm packaging | merged — folded into PR #21 (`1c6a2a5`'s "SUSE RPM check") |
-| **Workstream M.4** — customer-run Ansible playbooks | Not started. Task brief drafted in `docs/claude-code-parallel-build-plan.md` §4a (item 4) but not yet dispatched. | **open** |
-| **New: Terraform UAT gate** | Provision per-OS VMs, install a tagged release's actual Buildkite-published packages via the M.4 playbooks, smoke-test enrollment/recipe-run/reboot survival. Not in the original roadmap; added as a release-quality gate. Task brief drafted in `docs/claude-code-parallel-build-plan.md` §4a (item 5), including an explicit flag that its default compute-provider choice (libvirt/KVM) needs a human sign-off, not just green tests. | **open** — depends on M.4 |
+| **Workstream M.4** — customer-run Ansible playbooks | `ansible/roles/imas_sprout` (adds the Buildkite apt/yum/zypper repo or does `win_package`, merges enrollment settings into the sprout's existing config file via drift-detection rather than overwriting it — the sprout itself writes back `sproutid` and empties `jointoken` post-enroll — `no_log` + mode `0600` on the join token) + `ansible/roles/imas_verify` (polls a custom `imas_sprout_bus_status` module for connected state, fails clearly on timeout). Molecule scenario (`ansible/molecule/default/`, a stub farmer + Rocky/Debian/openSUSE Leap 15.6 containers) wired into CI (`.github/workflows/molecule.yml`: `ansible-lint`, `pytest`, `molecule test`). Along the way, caught and fixed two real packaging bugs found while building the playbooks: `packaging/etc/imas-sprout.conf` had `farmerapiport` misspelled `farmeripoprt` (silently ignored, masked by the value matching the default), and `packaging/etc/imas-farmer.conf` had a tab-indented `pubkeys` list (invalid YAML, `LoadConfig` would panic) plus a stale `organization:` key (farmer reads `farmerorganization`) — a new regression test, `internal/config/config_files_test.go`, now statically checks every packaged/testing config's keys against what the code actually reads via `jety`. | **merged** — PR #24 (`0ea6384`), PR #25 (`7377ba9`, `ef36998`, `6c630b7`, `7d3a70e`, `930f191`, `7356668`), PR #26 (`edca7ac`), PR #28 |
+| **New: Terraform UAT gate** | Provision per-OS VMs, install a tagged release's actual Buildkite-published packages via the M.4 playbooks, smoke-test enrollment/recipe-run/reboot survival. Not in the original roadmap; added as a release-quality gate. Task brief drafted in `docs/claude-code-parallel-build-plan.md` §4a (item 5), including an explicit flag that its default compute-provider choice (libvirt/KVM) needs a human sign-off, not just green tests. | **open, unblocked** — M.4 (its dependency) is now merged; not yet dispatched |
 | Docs refresh (architecture diagram, SaaS API reference, `INSTALL.md`, this file, `packaging/systemd/*.service` vs `docs/*.service` dedup) | Done on branch `claude/sweet-sagan-yklpu8`: `docs/diagrams/imas-architecture.svg` replaces `grlx-arch-light.png`; `docs/api/saasapi.md` + `docs/api/saasapi-openapi.yaml` (all 18 `NewRouter` routes, the 2 dispatch routes marked off by default); `INSTALL.md` rewritten for tenants, enrollment keys, the SaaS API and Envoy; `docs/imas-{farmer,sprout}.service` removed in favour of `packaging/systemd/` | **in review** |
 
 ## Notes
@@ -237,7 +237,26 @@ directly in this session instead.
     image; `INSTALL.md` says so.
   - `README.md`'s "Architecture" and "Batteries Included" prose still
     describe a farmer with an embedded bus. Only its diagram link was fixed.
+- **2026-09-27, later same day: M.4 merged.** Workstream M.4 (customer-run
+  Ansible playbooks) landed across PR #24, #25, #26, and #28, after the
+  docs-refresh pass above had already run — that's why the "Post-rebrand
+  work" table's M.4 row above and the two "still open" lists elsewhere in
+  this file were briefly stale. Spot-checked directly (not just taken on
+  faith): `ansible/roles/imas_sprout`'s config-merge task does drift
+  detection against the sprout's own live config rather than overwriting it
+  wholesale (the sprout writes back `sproutid` and empties `jointoken` after
+  enrolling), keeps the join token out of logs and behind file mode `0600`,
+  and PR #25's fixes were real bugs (a misspelled `farmerapiport` key and
+  invalid-YAML tab indentation in the shipped packaging configs, both now
+  covered by a new static regression test). The Molecule scenario is wired
+  into CI (`.github/workflows/molecule.yml`) rather than left as a
+  local-only check. `go test ./internal/config/...` was **not** run in this
+  validation pass — this sandbox's Go toolchain can't fetch `go1.26.6`
+  (`go.mod` requires it) because `proxy.golang.org` isn't on the egress
+  allowlist here — so the new config-key test is verified by reading it,
+  not by executing it.
 - **Still genuinely open, in priority order:** J's payload-encryption
-  wiring and per-tenant key (security-relevant), workstream M.4 (Ansible
-  playbooks), the Terraform UAT gate (after M.4), and, as a nice-to-have,
-  running the Keycloak JWKS harness somewhere with a Docker daemon.
+  wiring and per-tenant key (security-relevant), the Terraform UAT gate
+  (M.4, its one dependency, is now merged — this can be dispatched), and,
+  as a nice-to-have, running the Keycloak JWKS harness somewhere with a
+  Docker daemon.
