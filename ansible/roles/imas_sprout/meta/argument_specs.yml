@@ -45,8 +45,11 @@ argument_specs:
         description:
           - How long the sprout keeps the private key a farmer-triggered box key
             rotation replaced (config key C(sproutboxkeyprevgrace)), and so the
-            shortest interval between rotations. Empty uses the sprout's own default
-            (15m). A Go duration string, e.g. C(30m).
+            shortest interval between rotations. A Go duration string, e.g. C(30m).
+          - Empty leaves this key alone rather than clearing it, since the sprout
+            writes its own default value into the config file on other saves
+            (enrolling, clearing its join token). This role only ever adds an
+            explicit override and never tries to remove one.
       imas_buildkite_org:
         type: str
         description:
