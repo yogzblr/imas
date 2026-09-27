@@ -21,6 +21,7 @@ package pki
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 
 	jwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
@@ -49,11 +50,40 @@ func sproutPermissions(id string) jwt.Permissions {
 			// the existing Sub grant below; no Sub grant on _INBOX.> (which
 			// would expose every reply in the Account to every sprout).
 			"imas.sprouts." + id + ".fleetsigningkeys",
+			// Ship this sprout's own log entries over its bus connection
+			// (internal/log.UseNATSConn), one subject per level. Outside
+			// imas.sprouts.<id>.>, so the sprout never receives its own
+			// logs back through its Sub grant.
+			sproutLogPublishGrant(id),
 		}},
 		Sub: jwt.Permission{Allow: jwt.StringList{
 			"imas.sprouts." + id + ".>",
 		}},
 	}
+}
+
+// SproutLogSubjectPrefix is the subject prefix sprout id publishes its log
+// entries under: imas.logs.sprouts.<id>.<LEVEL>, in its tenant's Account.
+func SproutLogSubjectPrefix(id string) string {
+	return "imas.logs.sprouts." + id
+}
+
+func sproutLogPublishGrant(id string) string {
+	return SproutLogSubjectPrefix(id) + ".>"
+}
+
+// SproutUserJWTGrantsLogs reports whether userJWT lets sprout id publish
+// its log entries. A sprout whose User JWT was minted before
+// sproutPermissions carried the grant keeps using it until a refresh
+// fetches the re-minted one and the sprout restarts; until then shipping
+// logs would draw a permissions violation for every entry.
+func SproutUserJWTGrantsLogs(userJWT, id string) bool {
+	uc, err := jwt.DecodeUserClaims(userJWT)
+	if err != nil {
+		return false
+	}
+	grant := sproutLogPublishGrant(id)
+	return uc.Pub.Allow.Contains(grant) && !uc.Pub.Deny.Contains(grant)
 }
 
 // ensureUserGranted clears any revocation entry for pubkey in ac. It
@@ -80,7 +110,11 @@ func ensureUserRevoked(ac *jwt.AccountClaims, pubkey string) bool {
 // mintOrReuseUserJWT (re)mints a signed User JWT for pubkey under the
 // Account identified by issuerAccountPub/signingKP and persists it to
 // path, unless a JWT already on disk at path is still current (same
-// subject pubkey). Returns whether a new JWT was written.
+// subject pubkey and permissions). Returns whether a new JWT was written.
+//
+// Comparing the permissions is what makes a change to sproutPermissions or
+// allowAllPermissions reach JWTs minted before it, on the next sync; a
+// sprout picks its re-minted JWT up through /v1/refresh.
 //
 // Parameterized by the issuing Account rather than a *natsAuthMaterial so
 // this same function serves both the legacy single "current tenant" Account
@@ -91,7 +125,8 @@ func ensureUserRevoked(ac *jwt.AccountClaims, pubkey string) bool {
 // up which Account a given sprout's User JWT gets issued under.
 func mintOrReuseUserJWT(path, pubkey, name string, perms jwt.Permissions, issuerAccountPub string, signingKP nkeys.KeyPair) (bool, error) {
 	if b, err := os.ReadFile(path); err == nil {
-		if existing, derr := jwt.DecodeUserClaims(string(b)); derr == nil && existing.Subject == pubkey {
+		if existing, derr := jwt.DecodeUserClaims(string(b)); derr == nil && existing.Subject == pubkey &&
+			reflect.DeepEqual(existing.Permissions, perms) {
 			return false, nil
 		}
 	} else if !os.IsNotExist(err) {

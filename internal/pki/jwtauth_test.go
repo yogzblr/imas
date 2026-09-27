@@ -253,6 +253,46 @@ func TestMintOrReuseUserJWT(t *testing.T) {
 	}
 }
 
+// A JWT minted before a change to its permissions template (here, one
+// predating the imas.logs.sprouts.<id>.> grant) must be re-minted, not
+// reused, or the change never reaches already-enrolled sprouts.
+func TestMintOrReuseUserJWT_RemintsOnPermissionDrift(t *testing.T) {
+	setupTestPKI(t)
+	mat, err := ensureNatsAuth()
+	if err != nil {
+		t.Fatalf("ensureNatsAuth failed: %v", err)
+	}
+	ukp, _ := nkeys.CreateUser()
+	upub, _ := ukp.PublicKey()
+	path := filepath.Join(t.TempDir(), "sprout.jwt")
+
+	old := sproutPermissions("sprout01")
+	old.Pub.Allow.Remove(sproutLogPublishGrant("sprout01"))
+	if _, err := mintOrReuseUserJWT(path, upub, "sprout01", old, mat.tenantPub, mat.tenantSigningKP); err != nil {
+		t.Fatalf("mintOrReuseUserJWT (old permissions) failed: %v", err)
+	}
+	if SproutUserJWTGrantsLogs(mustReadFile(t, path), "sprout01") {
+		t.Fatal("JWT minted without the log grant reports it")
+	}
+
+	minted, err := mintOrReuseUserJWT(path, upub, "sprout01", sproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
+	if err != nil {
+		t.Fatalf("mintOrReuseUserJWT (current permissions) failed: %v", err)
+	}
+	if !minted {
+		t.Fatal("expected a re-mint when the permissions changed")
+	}
+	if !SproutUserJWTGrantsLogs(mustReadFile(t, path), "sprout01") {
+		t.Fatal("re-minted JWT is missing the log grant")
+	}
+}
+
+func TestSproutUserJWTGrantsLogs_Malformed(t *testing.T) {
+	if SproutUserJWTGrantsLogs("not-a-jwt", "sprout01") {
+		t.Fatal("a malformed JWT must not report the log grant")
+	}
+}
+
 func TestGetSproutUserJWT(t *testing.T) {
 	setupTestPKI(t)
 	mat, err := ensureNatsAuth()
