@@ -33,6 +33,20 @@ argument_specs:
         description:
           - PEM CA certificate(s) to pre-provision as the sprout's root CA. Also sets
             C(sproutrootcatofu=false). Required for a sprout behind the DMZ Envoy.
+      imas_sprout_bus_proxy_url:
+        type: str
+        description:
+          - Outbound proxy for the bus connection only (config key C(busproxyurl)),
+            C(http://host:port) (HTTP CONNECT) or C(socks5://host:port), optionally
+            with C(user:password@). Empty dials directly. The sprout's HTTP requests
+            already follow C(HTTP_PROXY)/C(HTTPS_PROXY)/C(NO_PROXY) and don't need this.
+      imas_sprout_boxkey_prev_grace:
+        type: str
+        description:
+          - How long the sprout keeps the private key a farmer-triggered box key
+            rotation replaced (config key C(sproutboxkeyprevgrace)), and so the
+            shortest interval between rotations. Empty uses the sprout's own default
+            (15m). A Go duration string, e.g. C(30m).
       imas_buildkite_org:
         type: str
         description:

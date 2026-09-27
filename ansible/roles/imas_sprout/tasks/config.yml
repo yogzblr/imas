@@ -27,10 +27,19 @@
         {'farmerinterface': imas_farmer_host, 'farmerapiport': imas_farmer_api_port | string}
         | combine({'busurls': imas_farmer_bus_urls} if imas_farmer_bus_urls | length > 0 else {})
         | combine({'sproutrootcatofu': false} if imas_sprout_root_ca | length > 0 else {})
+        | combine({'busproxyurl': imas_sprout_bus_proxy_url} if imas_sprout_bus_proxy_url | length > 0 else {})
+        | combine({'sproutboxkeyprevgrace': imas_sprout_boxkey_prev_grace} if imas_sprout_boxkey_prev_grace | length > 0 else {})
         | combine({'jointoken': imas_join_token} if not _imas_sprout_enrolled | bool else {})
       }}
-    # An empty imas_farmer_bus_urls removes a busurls pin set earlier.
-    _imas_sprout_unmanaged: "{{ ['busurls'] if imas_farmer_bus_urls | length == 0 else [] }}"
+    # An empty imas_farmer_bus_urls removes a busurls pin set earlier; same
+    # for imas_sprout_bus_proxy_url/imas_sprout_boxkey_prev_grace, which fall
+    # back to dialling directly / the sprout's own default grace.
+    _imas_sprout_unmanaged: >-
+      {{
+        (['busurls'] if imas_farmer_bus_urls | length == 0 else [])
+        + (['busproxyurl'] if imas_sprout_bus_proxy_url | length == 0 else [])
+        + (['sproutboxkeyprevgrace'] if imas_sprout_boxkey_prev_grace | length == 0 else [])
+      }}
   no_log: true
 
 # Compared as strings, since the sprout rewrites the file with its own YAML

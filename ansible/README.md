@@ -131,11 +131,12 @@ For each host, the playbook:
      identified by its ProductCode, so an installed build isn't reinstalled.
 2. **Writes the enrollment settings** into the config file the sprout already
    reads (`/etc/imas/sprout`, or `%ProgramData%\imas\sprout` on Windows):
-   `farmerinterface`, `farmerapiport`, `busurls` if set, and `jointoken` if
-   the host isn't enrolled yet. It changes only those keys and leaves the
-   rest of the file alone, including what the sprout writes itself. If you
-   set `imas_sprout_root_ca`, it also writes that CA to the sprout's
-   root-CA path and sets `sproutrootcatofu: false`.
+   `farmerinterface`, `farmerapiport`, `busurls` if set, `busproxyurl` if
+   set, `sproutboxkeyprevgrace` if set, and `jointoken` if the host isn't
+   enrolled yet. It changes only those keys and leaves the rest of the file
+   alone, including what the sprout writes itself. If you set
+   `imas_sprout_root_ca`, it also writes that CA to the sprout's root-CA
+   path and sets `sproutrootcatofu: false`.
 3. **Starts the service** (systemd `imas-sprout`, or the Windows service
    `imas-sprout`), enables it at boot, and restarts it if its package or
    settings changed.
@@ -163,6 +164,8 @@ Set these in `group_vars`/`host_vars`. `roles/*/defaults/main.yml` and
 | `imas_farmer_api_port` | `5405` | Port of the enrollment endpoint (`443` behind the DMZ edge). |
 | `imas_farmer_bus_urls` | `[]` | Bus addresses to pin, e.g. `["wss://bus.example.com:443"]`. Empty: the sprout uses the addresses farmer returns at enrollment. |
 | `imas_sprout_root_ca` | `""` | PEM of the CA that issued the enrollment endpoint's certificate. **Required behind the DMZ edge.** Without it, the sprout trusts the first certificate it sees. |
+| `imas_sprout_bus_proxy_url` | `""` | Outbound proxy for the bus connection only: `http://host:port` (HTTP CONNECT) or `socks5://host:port`, optionally with `user:password@`. Empty dials directly. The sprout's HTTP requests (enroll, refresh, recipes) already follow `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` from the environment and don't need this. |
+| `imas_sprout_boxkey_prev_grace` | `""` | How long the sprout keeps the private key a farmer-triggered payload-encryption key rotation replaced, and so the shortest interval between rotations. Empty uses the sprout's own default (15m). A Go duration string, e.g. `30m`. |
 | `imas_buildkite_org` | required | Buildkite organization that publishes the packages. |
 | `imas_sprout_version` | `""` | Pin a version. Linux: the package version as the repository lists it (`1.2.3+git`). Windows: the release (`1.2.3`). |
 | `imas_sprout_package_state` | `present` | Linux: `latest` upgrades to the newest version on every run. |
