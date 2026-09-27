@@ -126,7 +126,7 @@ Settings that differ from the pre-SaaS install:
 farmerinterface: 0.0.0.0              # bind address only
 farmerapiport: 5405
 farmerbusurl: tls://bus.example.internal:5406   # where farmer dials farmerbus
-farmerorganization: <your org>         # must match the bus's; the template's `organization:` key isn't read
+farmerorganization: <your org>         # must match the bus's
 pxcdsn: farmer_svc:<pw>@tcp(pxc:3306)/farmer?parseTime=true
 valkeyaddrs: valkey:6379
 s3endpoint: s3.example.internal
