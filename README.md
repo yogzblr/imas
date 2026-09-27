@@ -84,7 +84,7 @@ The `farmer` binary runs as a daemon on a management server (referred to as the 
 The `sprout` binary should be installed as a daemon on systems that are to be managed.
 Managed systems are referred to as 'sprouts.'
 
-<p align="center"><img src="docs/diagrams/imas-arch-light.png" width="100%" alt="architecture diagram"></p>
+<p align="center"><img src="docs/diagrams/imas-architecture.svg" width="100%" alt="imas architecture: sprouts, the DMZ (farmerbus, Envoy) and the non-DMZ core (farmer, saasapi, PXC, Valkey, OpenBao), with the enrollment and payload-encryption flows"></p>
 
 ## Batteries Included
 

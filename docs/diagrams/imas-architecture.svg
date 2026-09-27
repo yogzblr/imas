@@ -1,0 +1,385 @@
+<svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" width="1600" height="1740" viewBox="0 0 1600 1740" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12">
+  <!--
+    imas architecture, as merged on main (2026-09-27).
+    Source of truth for every field and route below is the code, not the
+    design docs: internal/api/handlers/enroll.go (enrollSuccessResponse),
+    internal/pki/enroll.go, internal/pki/tenantbox.go,
+    internal/natsapi/crypto.go, deploy/envoy/envoy.yaml,
+    internal/saasapi/router.go. Hand-written SVG so it diffs in review;
+    edit it as text.
+  -->
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#333"/>
+    </marker>
+    <marker id="arrg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#888"/>
+    </marker>
+    <style>
+      text { white-space: pre; }
+      .zone-label { font-size: 15px; font-weight: 700; }
+      .title { font-size: 22px; font-weight: 700; }
+      .sub { font-size: 13px; fill: #444; }
+      .h { font-size: 14px; font-weight: 700; }
+      .h2 { font-size: 16px; font-weight: 700; }
+      .mono { font-family: 'SFMono-Regular', Menlo, Consolas, monospace; font-size: 11px; }
+      .small { font-size: 11px; fill: #333; }
+      .box { fill: #ffffff; stroke: #555; stroke-width: 1.2; }
+      .store { fill: #fbfbfd; stroke: #6a6a8a; stroke-width: 1.2; }
+      .caller { fill: #ffffff; stroke: #555; stroke-width: 1.2; stroke-dasharray: 5 3; }
+      .line { stroke: #333; stroke-width: 1.6; fill: none; }
+      .dline { stroke: #888; stroke-width: 1.4; fill: none; stroke-dasharray: 6 4; }
+      .badge { fill: #1f5fbf; }
+      .badge-t { fill: #fff; font-size: 11px; font-weight: 700; }
+      .warn { fill: #fff3f0; stroke: #c0392b; stroke-width: 1.2; }
+      .warn-h { font-size: 12px; font-weight: 700; fill: #a02a1d; }
+      .lane { stroke: #bbb; stroke-width: 1; stroke-dasharray: 3 3; }
+      .panel { fill: #fafafa; stroke: #999; stroke-width: 1; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1600" height="1740" fill="#ffffff"/>
+
+  <text x="24" y="38" class="title">imas architecture — as merged on main (2026-09-27)</text>
+  <text x="24" y="60" class="sub">Sprouts only ever reach the DMZ. Core never accepts a connection from the DMZ bus: it dials out to farmerbus, and its only inbound path is Envoy's forwarded HTTPS on :5405.</text>
+
+  <!-- ============================ ZONES ============================ -->
+  <rect x="16" y="80" width="278" height="700" rx="10" fill="#eef3fb" stroke="#7a95c4"/>
+  <text x="30" y="104" class="zone-label" fill="#2b4f8f">Sprouts (customer hosts)</text>
+
+  <rect x="326" y="80" width="436" height="700" rx="10" fill="#fff4e3" stroke="#d49a3a"/>
+  <text x="340" y="104" class="zone-label" fill="#8a5a00">DMZ  —  deploy/helm/nats</text>
+
+  <rect x="796" y="80" width="788" height="700" rx="10" fill="#edf7ee" stroke="#5f9f67"/>
+  <text x="810" y="104" class="zone-label" fill="#2e6b36">Non-DMZ core  —  deploy/helm/farmer</text>
+
+  <!-- ============================ SPROUTS ============================ -->
+  <rect x="52" y="140" width="230" height="262" rx="6" class="box" opacity="0.5"/>
+  <rect x="46" y="146" width="230" height="262" rx="6" class="box" opacity="0.7"/>
+  <rect x="40" y="152" width="230" height="262" rx="6" class="box"/>
+  <text x="52" y="174" class="h">imas-sprout</text>
+  <text x="52" y="192" class="small">cmd/sprout, runs as root (systemd,</text>
+  <text x="52" y="207" class="small">Windows SCM). Many per tenant.</text>
+  <text x="52" y="230" class="small" font-weight="700">Generated locally, never sent:</text>
+  <text x="52" y="247" class="small">• NKey seed (SU…) → nkey_pub (U…)</text>
+  <text x="52" y="263" class="small">• X25519 box private key → sprout_pub</text>
+  <text x="52" y="286" class="small" font-weight="700">Persisted from POST /v1/enroll:</text>
+  <text x="52" y="303" class="small">• NATS User JWT (marks "enrolled")</text>
+  <text x="52" y="319" class="small">• gateway JWT (refreshed via /v1/refresh)</text>
+  <text x="52" y="335" class="small">• nats_urls (sproutbusurlsfile)</text>
+  <text x="52" y="351" class="small">• tenant_x25519_pub (pinned; refresher</text>
+  <text x="52" y="366" class="small">   exits on mismatch)</text>
+  <text x="52" y="382" class="small">• fleet_signing_jwks (bootstrap only)</text>
+  <text x="52" y="398" class="small">Root CA pre-provisioned (TOFU off)</text>
+
+  <rect x="40" y="440" width="230" height="118" rx="6" class="box"/>
+  <text x="52" y="462" class="h">Join token</text>
+  <text x="52" y="480" class="mono">{key_id}.{secret}</text>
+  <text x="52" y="498" class="small">from --join-token, IMAS_JOIN_TOKEN</text>
+  <text x="52" y="513" class="small">or "jointoken" in /etc/imas/sprout.</text>
+  <text x="52" y="530" class="small">Required for first enrollment; the</text>
+  <text x="52" y="545" class="small">sprout clears it from its config after.</text>
+
+  <rect x="40" y="584" width="230" height="96" rx="6" class="box"/>
+  <text x="52" y="606" class="h">Packaging</text>
+  <text x="52" y="624" class="small">deb/rpm/apk with packaging/systemd/</text>
+  <text x="52" y="639" class="mono">imas-sprout.service</text>
+  <text x="52" y="656" class="small">Windows: MSI + winget (imasnget feed)</text>
+  <text x="52" y="671" class="small">Linux/Windows ingredient plugins</text>
+
+  <!-- ============================ DMZ ============================ -->
+  <rect x="346" y="130" width="398" height="286" rx="6" class="box"/>
+  <text x="358" y="152" class="h">Envoy gateway</text>
+  <text x="358" y="170" class="small">deploy/envoy/envoy.yaml · Helm pins envoyproxy/envoy:v1.35.3</text>
+  <text x="358" y="187" class="small">listener :8443, DMZ edge TLS; jwt_authn copies sub to x-imas-sprout-nkey</text>
+  <text x="358" y="212" class="small" font-weight="700">Route</text><text x="450" y="212" class="small" font-weight="700">Upstream</text><text x="570" y="212" class="small" font-weight="700">Gate</text>
+  <text x="358" y="232" class="mono">/v1/enroll</text><text x="450" y="232" class="mono">farmer_api</text><text x="570" y="232" class="mono">no JWT, own rate bucket</text>
+  <text x="358" y="250" class="mono">/v1/refresh</text><text x="450" y="250" class="mono">farmer_api</text><text x="570" y="250" class="mono">no JWT, own rate bucket</text>
+  <text x="358" y="268" class="mono">/files/</text><text x="450" y="268" class="mono">recipe_service</text><text x="570" y="268" class="mono">jwt_authn (EdDSA)</text>
+  <text x="358" y="286" class="mono">/  (wss)</text><text x="450" y="286" class="mono">nats_websocket</text><text x="570" y="286" class="mono">jwt_authn (EdDSA)</text>
+  <text x="358" y="312" class="small">jwt_authn verifies the gateway JWT (alg:EdDSA)</text>
+  <text x="358" y="327" class="small">against farmer's JWKS, /v1/.well-known/jwks.json.</text>
+  <text x="358" y="350" class="small">Enroll is gated in farmer by the join token + NKey</text>
+  <text x="358" y="365" class="small">proof of possession; refresh by NKey PoP only.</text>
+  <text x="358" y="388" class="small">Verified against real Envoy v1.35.3 by the</text>
+  <text x="358" y="403" class="small">*_ThroughRealEnvoy e2e tests (IMAS_TEST_ENVOY_BIN).</text>
+
+  <rect x="346" y="470" width="398" height="286" rx="6" class="box"/>
+  <text x="358" y="492" class="h">farmerbus</text>
+  <text x="358" y="510" class="small">cmd/farmerbus: embedded nats-server, operator mode.</text>
+  <text x="358" y="526" class="small">No PXC, no object storage, no API, no business logic.</text>
+  <text x="358" y="550" class="small" font-weight="700">Decentralized JWT auth (docs/design/imas-nats-jwt-auth-design.md)</text>
+  <text x="358" y="567" class="small">Operator → Account per tenant → User per sprout</text>
+  <text x="358" y="583" class="small">SYS Account: farmer's and saasapi's own Users</text>
+  <text x="358" y="599" class="small">Tenant Accounts minted by farmer, pushed via resolver</text>
+  <text x="358" y="623" class="small" font-weight="700">Listeners</text>
+  <text x="358" y="640" class="mono">:5407</text><text x="400" y="640" class="mono">websocket</text><text x="480" y="640" class="mono">sprouts, only via Envoy</text>
+  <text x="358" y="657" class="mono">:5406</text><text x="400" y="657" class="mono">TLS NATS</text><text x="480" y="657" class="mono">core (farmer, saasapi) dials in</text>
+  <text x="358" y="681" class="small">Payloads cross the bus inside TLS only today: the</text>
+  <text x="358" y="696" class="small">NaCl-box envelope exists but isn't wired to any</text>
+  <text x="358" y="711" class="small">subject yet (see "Payload encryption" below).</text>
+
+  <!-- ============================ CORE ============================ -->
+  <rect x="816" y="118" width="250" height="78" rx="6" class="caller"/>
+  <text x="828" y="140" class="h">imas CLI (operator)</text>
+  <text x="828" y="158" class="small">farmer API :5405 + bus via farmerbusurl;</text>
+  <text x="828" y="174" class="small">RBAC by CLI pubkey (pubkeys: in farmer config)</text>
+
+  <rect x="1250" y="118" width="310" height="78" rx="6" class="caller"/>
+  <text x="1262" y="140" class="h">CloudXP BFF</text>
+  <text x="1262" y="158" class="small">X-Internal-Auth shared secret + the user's</text>
+  <text x="1262" y="174" class="small">Keycloak JWT; organization.id must = {tenant_id}</text>
+
+  <rect x="816" y="232" width="344" height="206" rx="6" class="box"/>
+  <text x="828" y="254" class="h">farmer (core)</text>
+  <text x="828" y="272" class="small">cmd/farmer, ConnectFarmer(); one replica on a PVC</text>
+  <text x="828" y="294" class="mono">:5405 HTTPS API</text>
+  <text x="828" y="311" class="small">POST /v1/enroll, POST /v1/refresh, JWKS, /files/,</text>
+  <text x="828" y="326" class="small">CLI API (auth by CLI pubkey)</text>
+  <text x="828" y="348" class="small">Job/facts/cook subscribers (queue group imas-core)</text>
+  <text x="828" y="364" class="small">Tenant provisioning (internal.tenant.*) and</text>
+  <text x="828" y="379" class="small">internal.sprout.action, both from saasapi</text>
+  <text x="828" y="401" class="small">Mints NATS Accounts/User JWTs, gateway JWTs;</text>
+  <text x="828" y="416" class="small">holds the tenant X25519 private key in memory</text>
+
+  <rect x="1200" y="232" width="360" height="206" rx="6" class="box"/>
+  <text x="1212" y="254" class="h">saasapi</text>
+  <text x="1212" y="272" class="small">cmd/saasapi · plain HTTP :8081 (TLS terminated in front)</text>
+  <text x="1212" y="294" class="mono">/v1/tenants, /v1/versions,</text>
+  <text x="1212" y="310" class="mono">/v1/tenants/{tenant_id}/enrollment-keys,</text>
+  <text x="1212" y="326" class="mono">  …/sprouts, …/sprouts/{id}/asset-link,</text>
+  <text x="1212" y="342" class="mono">  …/sprouts/actions, …/update-policy</text>
+  <text x="1212" y="358" class="mono">  …/sprouts/updates  (flag, off by default)</text>
+  <text x="1212" y="382" class="small">Talks to farmer only over the bus, as a SYS-Account</text>
+  <text x="1212" y="397" class="small">User (SAASAPI_NATS_*). Never writes farmer.*.</text>
+  <text x="1212" y="419" class="small">API reference: docs/api/saasapi.md</text>
+
+  <!-- stores -->
+  <rect x="816" y="490" width="262" height="178" rx="6" class="store"/>
+  <text x="828" y="512" class="h">PXC (one cluster, two schemas)</text>
+  <text x="828" y="532" class="small" font-weight="700">farmer.*</text>
+  <text x="828" y="548" class="small">pki_nkeys (tenant_id, sprout_id),</text>
+  <text x="828" y="563" class="small">pki_sprout_box_keys, job_status, props…</text>
+  <text x="828" y="585" class="small" font-weight="700">saas.*</text>
+  <text x="828" y="601" class="small">tenants, enrollment_keys (SHA-256 only),</text>
+  <text x="828" y="616" class="small">asset_links, asset_action_*, fleet_*</text>
+  <text x="828" y="638" class="small">farmer: ALL farmer.*, SELECT saas.*, UPDATE</text>
+  <text x="828" y="653" class="small">(used_count, last_used_at) on enrollment_keys</text>
+
+  <rect x="1092" y="490" width="174" height="178" rx="6" class="store"/>
+  <text x="1104" y="512" class="h">Valkey</text>
+  <text x="1104" y="532" class="small">farmer: sprout heartbeats,</text>
+  <text x="1104" y="547" class="small">enroll/refresh replay cache</text>
+  <text x="1104" y="569" class="small">saasapi: enrollment-key</text>
+  <text x="1104" y="584" class="small">rate limit across pods,</text>
+  <text x="1104" y="599" class="small">reads heartbeats for</text>
+  <text x="1104" y="614" class="small">"connected"</text>
+  <text x="1104" y="636" class="small">No auth/TLS in either</text>
+  <text x="1104" y="651" class="small">client yet</text>
+
+  <rect x="1280" y="490" width="280" height="274" rx="6" class="store"/>
+  <text x="1292" y="512" class="h">OpenBao</text>
+  <text x="1292" y="532" class="small">One role and one policy per client:</text>
+  <text x="1292" y="554" class="small" font-weight="700">PKI</text>
+  <text x="1292" y="569" class="small">farmer API certificate (IMAS_CERTS_*)</text>
+  <text x="1292" y="591" class="small" font-weight="700">Transit imas-gateway-jwt</text>
+  <text x="1292" y="606" class="small">farmer signs gateway JWTs (IMAS_GATEWAY_*)</text>
+  <text x="1292" y="628" class="small" font-weight="700">Transit imas-fleet-signing</text>
+  <text x="1292" y="643" class="small">read-only for farmer and saasapi (verify);</text>
+  <text x="1292" y="658" class="small">only cmd/fleetreleaser signs</text>
+  <text x="1292" y="680" class="small" font-weight="700">KV v2 secret/imas/tenant-x25519</text>
+  <text x="1292" y="695" class="small">tenant X25519 keypair (IMAS_TENANTBOX_*)</text>
+  <text x="1292" y="717" class="small" font-weight="700">KV: SaaS API NATS credential</text>
+  <text x="1292" y="732" class="small">written by the publish Job, synced to</text>
+  <text x="1292" y="747" class="small">saasapi by External Secrets</text>
+
+  <rect x="816" y="684" width="450" height="80" rx="6" class="store"/>
+  <text x="828" y="706" class="h">Object storage (S3-compatible)</text>
+  <text x="828" y="724" class="small">farmer only: recipes (IMAS_S3_BUCKET, served via /files/) and job logs</text>
+  <text x="828" y="740" class="small">in a separate bucket (IMAS_S3_JOB_BUCKET). Never reachable from the DMZ.</text>
+
+  <!-- ============================ CONNECTIONS ============================ -->
+  <!-- 1: sprout -> Envoy, enroll/refresh -->
+  <line x1="270" y1="206" x2="344" y2="206" class="line" marker-end="url(#arr)"/>
+  <circle cx="306" cy="206" r="10" class="badge"/><text x="306" y="210" text-anchor="middle" class="badge-t">1</text>
+  <!-- 2: sprout -> Envoy, wss + /files/ -->
+  <line x1="270" y1="286" x2="344" y2="286" class="line" marker-end="url(#arr)"/>
+  <circle cx="306" cy="286" r="10" class="badge"/><text x="306" y="290" text-anchor="middle" class="badge-t">2</text>
+  <!-- 3: Envoy -> farmerbus wss -->
+  <line x1="545" y1="416" x2="545" y2="468" class="line" marker-end="url(#arr)"/>
+  <circle cx="545" cy="442" r="10" class="badge"/><text x="545" y="446" text-anchor="middle" class="badge-t">3</text>
+  <!-- 4: Envoy -> farmer :5405 -->
+  <line x1="744" y1="286" x2="814" y2="286" class="line" marker-end="url(#arr)"/>
+  <circle cx="779" cy="286" r="10" class="badge"/><text x="779" y="290" text-anchor="middle" class="badge-t">4</text>
+  <!-- 5: farmer -> farmerbus :5406 -->
+  <path d="M816,396 L780,396 L780,600 L746,600" class="line" marker-end="url(#arr)"/>
+  <circle cx="780" cy="500" r="10" class="badge"/><text x="780" y="504" text-anchor="middle" class="badge-t">5</text>
+  <!-- 6: saasapi -> farmerbus :5406 -->
+  <path d="M1200,428 L1180,428 L1180,458 L790,458 L790,690 L746,690" class="line" marker-end="url(#arr)"/>
+  <circle cx="990" cy="458" r="10" class="badge"/><text x="990" y="462" text-anchor="middle" class="badge-t">6</text>
+  <!-- 7: CLI -> farmer -->
+  <line x1="940" y1="196" x2="940" y2="230" class="line" marker-end="url(#arr)"/>
+  <circle cx="940" cy="213" r="10" class="badge"/><text x="940" y="217" text-anchor="middle" class="badge-t">7</text>
+  <!-- 8: BFF -> saasapi -->
+  <line x1="1405" y1="196" x2="1405" y2="230" class="line" marker-end="url(#arr)"/>
+  <circle cx="1405" cy="213" r="10" class="badge"/><text x="1405" y="217" text-anchor="middle" class="badge-t">8</text>
+
+  <!-- ============================ CONNECTION KEY ============================ -->
+  <rect x="16" y="796" width="1568" height="190" rx="8" class="panel"/>
+  <text x="30" y="820" class="h2">Connections (numbers match the badges above)</text>
+  <g class="small">
+    <circle cx="38" cy="842" r="9" class="badge"/><text x="38" y="846" text-anchor="middle" class="badge-t">1</text>
+    <text x="54" y="846">sprout → Envoy :8443 HTTPS: POST /v1/enroll and POST /v1/refresh. No JWT at Envoy; each route has its own local rate-limit bucket.</text>
+    <circle cx="38" cy="866" r="9" class="badge"/><text x="38" y="870" text-anchor="middle" class="badge-t">2</text>
+    <text x="54" y="870">sprout → Envoy :8443 WSS/HTTPS: the bus websocket (route "/") and GET /files/ (recipes). jwt_authn checks the alg:EdDSA gateway JWT.</text>
+    <circle cx="38" cy="890" r="9" class="badge"/><text x="38" y="894" text-anchor="middle" class="badge-t">3</text>
+    <text x="54" y="894">Envoy → farmerbus :5407 WSS: nats-server then validates the sprout's native NATS User JWT (alg ed25519-nkey) against its tenant's Account.</text>
+    <circle cx="38" cy="914" r="9" class="badge"/><text x="38" y="918" text-anchor="middle" class="badge-t">4</text>
+    <text x="54" y="918">Envoy → farmer :5405 HTTPS (farmer_api, recipe_service): /v1/enroll, /v1/refresh, the JWKS, /files/. The only path from the DMZ into core.</text>
+    <circle cx="38" cy="938" r="9" class="badge"/><text x="38" y="942" text-anchor="middle" class="badge-t">5</text>
+    <text x="54" y="942">farmer → farmerbus :5406 TLS, dialed outbound from core (farmerbusurl): per-tenant connections, the SYS connection, Account JWT resolver pushes.</text>
+    <circle cx="38" cy="962" r="9" class="badge"/><text x="38" y="966" text-anchor="middle" class="badge-t">6</text>
+    <text x="54" y="966">saasapi → farmerbus :5406 TLS as a SYS-Account User: internal.tenant.provision / .deprovision (results on internal.tenant.[de]provisioned.&lt;job_id&gt;) and internal.sprout.action.</text>
+    <circle cx="1070" cy="842" r="9" class="badge"/><text x="1070" y="846" text-anchor="middle" class="badge-t">7</text>
+    <text x="1086" y="846">imas CLI → farmer :5405 (and the bus via farmerbusurl).</text>
+    <circle cx="1070" cy="866" r="9" class="badge"/><text x="1070" y="870" text-anchor="middle" class="badge-t">8</text>
+    <text x="1086" y="870">BFF → saasapi :8081 /v1/…: shared secret + Keycloak JWT.</text>
+    <text x="1070" y="902" fill="#555">Stores are listed by client inside each box rather than</text>
+    <text x="1070" y="918" fill="#555">drawn as edges. Everything in core is reached only from</text>
+    <text x="1070" y="934" fill="#555">core; NetworkPolicies in both charts enforce the ports.</text>
+  </g>
+
+  <!-- ============================ ENROLLMENT SEQUENCE ============================ -->
+  <rect x="16" y="1002" width="960" height="722" rx="8" class="panel"/>
+  <text x="30" y="1026" class="h2">Enrollment flow (internal/pki/enroll.go, internal/api/handlers/enroll.go)</text>
+
+  <!-- lane heads -->
+  <g class="small" font-weight="700" text-anchor="middle">
+    <rect x="34" y="1040" width="104" height="26" rx="4" class="caller"/><text x="86" y="1057">BFF / operator</text>
+    <rect x="160" y="1040" width="104" height="26" rx="4" class="box"/><text x="212" y="1057">saasapi</text>
+    <rect x="290" y="1040" width="104" height="26" rx="4" class="box"/><text x="342" y="1057">sprout</text>
+    <rect x="420" y="1040" width="104" height="26" rx="4" class="box"/><text x="472" y="1057">Envoy</text>
+    <rect x="550" y="1040" width="104" height="26" rx="4" class="box"/><text x="602" y="1057">farmer</text>
+    <rect x="680" y="1040" width="104" height="26" rx="4" class="store"/><text x="732" y="1057">PXC</text>
+    <rect x="810" y="1040" width="140" height="26" rx="4" class="store"/><text x="880" y="1057">Valkey / OpenBao</text>
+  </g>
+  <line x1="86" y1="1066" x2="86" y2="1458" class="lane"/>
+  <line x1="212" y1="1066" x2="212" y2="1458" class="lane"/>
+  <line x1="342" y1="1066" x2="342" y2="1458" class="lane"/>
+  <line x1="472" y1="1066" x2="472" y2="1458" class="lane"/>
+  <line x1="602" y1="1066" x2="602" y2="1458" class="lane"/>
+  <line x1="732" y1="1066" x2="732" y2="1458" class="lane"/>
+  <line x1="880" y1="1066" x2="880" y2="1458" class="lane"/>
+
+  <!-- s1 -->
+  <line x1="86" y1="1090" x2="210" y2="1090" class="line" marker-end="url(#arr)"/>
+  <text x="92" y="1084" class="mono">1 POST /v1/tenants</text>
+  <line x1="212" y1="1110" x2="600" y2="1110" class="dline" marker-end="url(#arrg)"/>
+  <text x="218" y="1105" class="mono">2 internal.tenant.provision (via farmerbus) → tenant active</text>
+  <!-- s3 -->
+  <line x1="86" y1="1140" x2="210" y2="1140" class="line" marker-end="url(#arr)"/>
+  <text x="92" y="1134" class="mono">3 POST …/enrollment-keys</text>
+  <line x1="212" y1="1160" x2="730" y2="1160" class="line" marker-end="url(#arr)"/>
+  <text x="218" y="1155" class="mono">4 INSERT saas.enrollment_keys (key_id, SHA-256(secret), expiry, max_uses)</text>
+  <line x1="212" y1="1184" x2="88" y2="1184" class="line" marker-end="url(#arr)"/>
+  <text x="92" y="1200" class="mono">5 200 {key_id, registration_key,</text>
+  <text x="92" y="1213" class="mono">   expires_at, max_uses} (once)</text>
+  <!-- s6 -->
+  <line x1="86" y1="1236" x2="340" y2="1236" class="dline" marker-end="url(#arrg)"/>
+  <text x="92" y="1230" class="mono">6 join token, out of band (Ansible…)</text>
+  <!-- s7 self -->
+  <path d="M342,1252 L372,1252 L372,1270 L344,1270" class="line" marker-end="url(#arr)"/>
+  <text x="378" y="1258" class="mono">7 generate NKey + X25519 keypair; sign, with the NKey seed,</text>
+  <text x="378" y="1271" class="mono">  imas-enroll-v1, ts, nkey_pub, hostname, sprout_pub, join_token</text>
+  <!-- s8 -->
+  <line x1="342" y1="1296" x2="470" y2="1296" class="line" marker-end="url(#arr)"/>
+  <line x1="472" y1="1296" x2="600" y2="1296" class="line" marker-end="url(#arr)"/>
+  <text x="348" y="1290" class="mono">8 POST /v1/enroll {join_token, nkey_pub, hostname,</text>
+  <text x="348" y="1312" class="mono">  sprout_pub, timestamp, nkey_sig}</text>
+  <!-- s9 -->
+  <line x1="602" y1="1334" x2="878" y2="1334" class="line" marker-end="url(#arr)"/>
+  <text x="608" y="1329" class="mono">9 claim signed payload (Valkey)</text>
+  <line x1="602" y1="1358" x2="730" y2="1358" class="line" marker-end="url(#arr)"/>
+  <text x="608" y="1353" class="mono">10 redeem key</text>
+  <text x="608" y="1372" class="small">lookup key_id, constant-time hash compare,</text>
+  <text x="608" y="1386" class="small">atomic used_count++; accept nkey under the</text>
+  <text x="608" y="1400" class="small">key's tenant_id; store sprout_pub</text>
+  <line x1="602" y1="1422" x2="878" y2="1422" class="line" marker-end="url(#arr)"/>
+  <text x="742" y="1417" class="mono">11 sign/read keys</text>
+  <!-- s12 response -->
+  <line x1="602" y1="1446" x2="344" y2="1446" class="line" marker-end="url(#arr)"/>
+  <text x="352" y="1441" class="mono">12 200 EnrollResponse (below)</text>
+
+  <text x="30" y="1476" class="small">Every failure (bad signature, stale timestamp, replay, unknown/revoked/expired/exhausted key, lost redemption race, missing</text>
+  <text x="30" y="1491" class="small">signer or fleet key) returns the same <tspan class="mono">401 {"error":"enrollment_failed"}</tspan>. A retry with an already-enrolled nkey_pub replays</text>
+  <text x="30" y="1506" class="small">the existing identity (fresh gateway JWT) without spending another use of the token. Then the sprout dials nats_urls (1→2→3).</text>
+
+  <!-- EnrollResponse table -->
+  <rect x="30" y="1520" width="932" height="192" rx="6" class="box"/>
+  <text x="42" y="1540" class="h">enrollSuccessResponse (internal/api/handlers/enroll.go)</text>
+  <g class="mono">
+    <text x="42" y="1562" font-weight="700">Go field</text><text x="190" y="1562" font-weight="700">JSON</text><text x="362" y="1562" font-weight="700">What it is</text>
+    <text x="42" y="1580">SproutID</text><text x="190" y="1580">sprout_id</text><text x="362" y="1580">farmer-assigned; suffixed _1, _2… on a hostname collision within the tenant</text>
+    <text x="42" y="1598">JWT</text><text x="190" y="1598">jwt</text><text x="362" y="1598">native NATS User JWT (ed25519-nkey), validated by nats-server</text>
+    <text x="42" y="1616">GatewayJWT</text><text x="190" y="1616">gateway_jwt</text><text x="362" y="1616">alg:EdDSA JWS via Transit imas-gateway-jwt; short-lived, for jwt_authn</text>
+    <text x="42" y="1634">NKeyIdentity</text><text x="190" y="1634">nkey_identity</text><text x="362" y="1634">the request's nkey_pub, echoed back</text>
+    <text x="42" y="1652">TenantX25519Pub</text><text x="190" y="1652">tenant_x25519_pub</text><text x="362" y="1652">standard-base64 X25519 box public key; the sprout pins it</text>
+    <text x="42" y="1670">FleetSigningJWKS</text><text x="190" y="1670">fleet_signing_jwks</text><text x="362" y="1670">imas-fleet-signing public keys; bootstrap copy, superseded by live fetch</text>
+    <text x="42" y="1688">NatsURLs</text><text x="190" y="1688">nats_urls</text><text x="362" y="1688">wss:// bus addresses (sproutbusurls / IMAS_SPROUT_BUS_URLS)</text>
+  </g>
+
+  <!-- ============================ PAYLOAD ENCRYPTION ============================ -->
+  <rect x="992" y="1002" width="592" height="722" rx="8" class="panel"/>
+  <text x="1006" y="1026" class="h2">Payload encryption (NaCl box, X25519)</text>
+  <text x="1006" y="1044" class="small">docs/design/imas-payload-encryption-design.md · internal/pki/tenantbox.go,</text>
+  <text x="1006" y="1058" class="small">boxkeys.go · internal/natsapi/crypto.go</text>
+
+  <rect x="1006" y="1074" width="270" height="118" rx="6" class="store"/>
+  <text x="1018" y="1094" class="h">OpenBao KV v2</text>
+  <text x="1018" y="1110" class="mono">secret/imas/tenant-x25519</text>
+  <text x="1018" y="1128" class="small">tenant_priv + tenant_pub, created on</text>
+  <text x="1018" y="1143" class="small">first use (check-and-set). farmer reads</text>
+  <text x="1018" y="1158" class="small">it into memory and caches it. Transit has</text>
+  <text x="1018" y="1173" class="small">no X25519 DH, hence KV, not Transit.</text>
+
+  <rect x="1300" y="1074" width="270" height="118" rx="6" class="store"/>
+  <text x="1312" y="1094" class="h">farmer.pki_sprout_box_keys</text>
+  <text x="1312" y="1110" class="mono">key (tenant_id, sprout_id)</text>
+  <text x="1312" y="1128" class="small">sprout_pub from /v1/enroll: one active</text>
+  <text x="1312" y="1143" class="small">key plus former keys inside their grace</text>
+  <text x="1312" y="1158" class="small">window (RotateSproutBoxKey), so opens</text>
+  <text x="1312" y="1173" class="small">still work during a rotation.</text>
+
+  <rect x="1006" y="1226" width="564" height="94" rx="6" class="box"/>
+  <text x="1018" y="1246" class="h">farmer: sealForSprout / openFromSprout</text>
+  <text x="1018" y="1264" class="mono">box.Seal(msg, nonce, sprout_pub(active), tenant_priv)</text>
+  <text x="1018" y="1280" class="mono">  → EncryptedEnvelope{nonce, ciphertext} → farmerbus</text>
+  <text x="1018" y="1296" class="mono">box.Open tries the active sprout_pub, then grace keys</text>
+  <text x="1018" y="1311" class="small">Exported as PublishEncryptedTo / DecryptEncryptedFrom.</text>
+
+  <line x1="1140" y1="1192" x2="1140" y2="1224" class="line" marker-end="url(#arr)"/>
+  <line x1="1434" y1="1192" x2="1434" y2="1224" class="line" marker-end="url(#arr)"/>
+
+  <rect x="1006" y="1356" width="564" height="80" rx="6" class="box"/>
+  <text x="1018" y="1376" class="h">sprout disk</text>
+  <text x="1018" y="1393" class="small">X25519 private key (SproutBoxPrivFile), generated once, never sent;</text>
+  <text x="1018" y="1408" class="small">tenant_x25519_pub pinned at enrollment. The gateway-JWT refresher</text>
+  <text x="1018" y="1423" class="small">exits the sprout if farmer's key stops matching the pin.</text>
+  <path d="M1288,1320 L1288,1354" class="dline" marker-end="url(#arrg)"/>
+  <text x="1296" y="1342" class="small" fill="#666">not wired yet (see below)</text>
+
+  <rect x="1006" y="1454" width="564" height="256" rx="6" class="warn"/>
+  <text x="1018" y="1476" class="warn-h">Status as merged: keys are exchanged, payloads are not encrypted yet</text>
+  <text x="1018" y="1497" class="small">• PublishEncryptedTo / DecryptEncryptedFrom have no callers outside their</text>
+  <text x="1018" y="1512" class="small">   tests, and the sprout has no NaCl-box code. Every bus payload is still</text>
+  <text x="1018" y="1527" class="small">   plaintext inside TLS, so the DMZ bus can read it. The design's goal</text>
+  <text x="1018" y="1542" class="small">   (defending against a compromised DMZ bus) is not met yet.</text>
+  <text x="1018" y="1566" class="small">• One keypair per farmer deployment, not per tenant: tenantbox.go reads a</text>
+  <text x="1018" y="1581" class="small">   single KV path, so every tenant gets the same tenant_x25519_pub. The</text>
+  <text x="1018" y="1596" class="small">   design doc calls for one per tenant. Each (tenant key, sprout key) pair</text>
+  <text x="1018" y="1611" class="small">   still derives a distinct shared secret, but one key compromise exposes</text>
+  <text x="1018" y="1626" class="small">   every tenant, and it can't be rotated per tenant.</text>
+  <text x="1018" y="1650" class="small">• No forward secrecy (accepted in the design); the mitigation is</text>
+  <text x="1018" y="1665" class="small">   scheduled rotation of the tenant keypair, which has no tooling yet.</text>
+  <text x="1018" y="1689" class="small">Tracked as open in docs/BUILD-STATUS.md.</text>
+</svg>

@@ -1,0 +1,1024 @@
+# OpenAPI description of the imas SaaS API (cmd/saasapi), written from the
+# handler code, not from the design doc:
+#   internal/saasapi/router.go (NewRouter: the route table)
+#   internal/saasapi/tenants.go, enrollment_keys.go, asset_links.go,
+#   sprout_actions.go, fleet_updates.go, fleet_update_dispatch.go
+#   internal/saasapi/middleware.go (Auth, RateLimit), errors.go
+# Narrative and caveats: docs/api/saasapi.md.
+#
+# Keep this in step with NewRouter. Every path below must be a route
+# NewRouter registers, and vice versa; the two update-dispatch routes are
+# registered only when SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=true.
+openapi: 3.1.0
+info:
+  title: imas SaaS API
+  version: "v1 (main, 2026-09-27)"
+  summary: Tenant, enrollment-key, asset-link, batch-action and fleet-update API for CloudXP's BFF.
+  description: |
+    The customer-facing API served by `cmd/saasapi`. It owns the `saas`
+    schema in the shared PXC cluster, reads `farmer.*`, and reaches farmer
+    only over the NATS bus. Its one intended caller is CloudXP's BFF.
+
+    **Auth.** Every route requires both the `X-Internal-Auth` shared secret
+    and a Keycloak-issued user JWT in `Authorization: Bearer`. On a route
+    with `{tenant_id}` in the path, the token's `organization.id` claim
+    must equal `{tenant_id}`, or the response is 403. `POST /v1/tenants`
+    and `GET /v1/versions` have no `{tenant_id}`, so any caller that
+    passes both layers may call them.
+
+    **Errors.** Every error this service writes itself is
+    `{"error": "<code>", "message": "<text>", "details": {...}}`, with
+    `details` only on some 400s. Two responses come from Go's
+    `http.ServeMux` instead, as plain text: 404 for a path that isn't
+    registered and 405 for a registered path with the wrong method.
+
+    **Fleet update dispatch.** `POST /v1/tenants/{tenant_id}/sprouts/updates`
+    and its status route exist only when saasapi starts with
+    `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=true`. That is off by default,
+    and must stay off: sprout's self-update path is still disabled
+    upstream. See the tag description.
+servers:
+  - url: http://saasapi:8081
+    description: |
+      saasapi serves plain HTTP (default SAASAPI_LISTEN_ADDR ":8081"). TLS
+      is terminated by whatever sits in front of it; the DMZ Envoy in
+      deploy/envoy has no route to saasapi.
+security:
+  - internalAuth: []
+    keycloakBearer: []
+tags:
+  - name: tenants
+    description: Tenant lifecycle (design doc §1.1). Create and delete are asynchronous.
+  - name: enrollment-keys
+    description: Join tokens for `POST /v1/enroll` on farmer (§1.2, §3.1).
+  - name: asset-links
+    description: Linking CloudXP asset_ids to sprouts, and resolving them (§1.3, §1.4).
+  - name: sprout-actions
+    description: Batch `cmd.run` and `cook` against a tenant's sprouts by asset_id (§1.5).
+  - name: fleet-updates
+    description: The version catalog and each tenant's update policy (§1.8). Nothing here sends anything to a sprout.
+  - name: fleet-update-dispatch
+    description: |
+      **Not generally available. Off by default.** These two routes are
+      registered only when `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=true`
+      (`SetFleetUpdateDispatchEnabled` before `NewRouter`). With the flag
+      off, which is the default, neither route exists and both paths
+      return the ServeMux's plain-text 404. The flag must not be turned on
+      in a deployment: the sprout can verify and stage a signed release
+      but cannot install it yet (design doc §2.3 backup/restore), so every
+      self_update ends failed. `router.go` cites this as `yogzblr/imas#286`,
+      a reference carried over from before the repo was renamed that does
+      not resolve on `yogzblr/imas`.
+      With the flag on, saasapi also needs the read-only fleet signing key
+      (`IMAS_FLEETSIGN_OPENBAO_*`) or it refuses to start.
+
+paths:
+  /v1/tenants:
+    post:
+      tags: [tenants]
+      operationId: CreateTenant
+      summary: Create a tenant (asynchronous)
+      description: |
+        Writes the tenant with status `pending` and a provisioning outbox
+        job in one transaction, then publishes `internal.tenant.provision`
+        to farmer over the bus. The tenant becomes `active` or `failed`
+        when farmer's result arrives; poll `GET .../status`. Unknown
+        fields in the body are ignored. There is no `{tenant_id}` in the
+        path, so the organization check does not apply.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateTenantRequest" }
+      responses:
+        "202":
+          description: Accepted; provisioning has started.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TenantStatusResponse" }
+              example: { tenant_id: t_mfrggzdfmztwq2lk, status: pending }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/tenants/{tenant_id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [tenants]
+      operationId: GetTenant
+      summary: Get a tenant
+      responses:
+        "200":
+          description: The tenant.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tenant" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/TenantNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    patch:
+      tags: [tenants]
+      operationId: PatchTenant
+      summary: Update a tenant's name or plan
+      description: |
+        Only `name` and `plan_id` can change; there is no metadata field.
+        At least one must be present. Unknown fields are ignored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PatchTenantRequest" }
+      responses:
+        "200":
+          description: The updated tenant.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tenant" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/TenantNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    delete:
+      tags: [tenants]
+      operationId: DeleteTenant
+      summary: Offboard a tenant (asynchronous)
+      description: |
+        Only an `active` or `failed` tenant can be offboarded. Its status
+        becomes `offboarding` and `internal.tenant.deprovision` goes to
+        farmer; poll `GET .../status` for `offboarded`.
+      responses:
+        "202":
+          description: Accepted; offboarding has started.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TenantStatusResponse" }
+              example: { tenant_id: t_mfrggzdfmztwq2lk, status: offboarding }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/TenantNotFound" }
+        "409":
+          description: |
+            `offboarding_in_progress` (already offboarding or offboarded),
+            `provisioning_in_progress` (status pending, or a provision job
+            still pending; retry once it completes), or
+            `tenant_state_changed` (status changed concurrently; retry).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/tenants/{tenant_id}/status:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [tenants]
+      operationId: GetTenantStatus
+      summary: Poll a tenant's lifecycle status
+      description: |
+        `last_error` is set when the newest provisioning job failed and the
+        tenant is `failed` or `offboarding`. `warning` is set when the
+        newest job succeeded with a warning (for example, offboarding a
+        tenant farmer never provisioned). Both are fixed, caller-safe
+        messages.
+      responses:
+        "200":
+          description: Current status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TenantStatusResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/TenantNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/tenants/{tenant_id}/enrollment-keys:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    post:
+      tags: [enrollment-keys]
+      operationId: CreateEnrollmentKey
+      summary: Mint an enrollment key (join token)
+      description: |
+        Generates a random `key_id` and a separate 32-byte secret, stores
+        only the secret's SHA-256 hash, and returns the full
+        `{key_id}.{secret}` token as `registration_key`. This response is
+        the only time the secret is ever returned. Status is 200, not 201.
+
+        Rate-limited per tenant (the token's `organization.id`): 1
+        request/second sustained, burst 5, by default
+        (`SAASAPI_ENROLLMENT_KEY_RATE_LIMIT` / `_BURST`). Shared across
+        pods through Valkey when `SAASAPI_VALKEY_ADDRS` is set, otherwise
+        per pod.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateEnrollmentKeyRequest" }
+      responses:
+        "200":
+          description: The new key, with its secret, returned once.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreateEnrollmentKeyResponse" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/TenantNotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    get:
+      tags: [enrollment-keys]
+      operationId: ListEnrollmentKeys
+      summary: List a tenant's enrollment keys
+      description: Newest first. Not paginated. Never includes the secret or its hash.
+      responses:
+        "200":
+          description: The tenant's keys.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enrollment_keys]
+                properties:
+                  enrollment_keys:
+                    type: array
+                    items: { $ref: "#/components/schemas/EnrollmentKeyListItem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/TenantNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/tenants/{tenant_id}/enrollment-keys/{key_id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - name: key_id
+        in: path
+        required: true
+        schema: { type: string, examples: [ek_nbswy3dpeb3w64tm] }
+    delete:
+      tags: [enrollment-keys]
+      operationId: DeleteEnrollmentKey
+      summary: Revoke an enrollment key
+      description: |
+        Sets `revoked`; the row is kept. Revoking an already-revoked key
+        returns 200 again. The lookup is by `(tenant_id, key_id)`, so
+        another tenant's key and a missing tenant both give
+        `enrollment_key_not_found`. Revocation does not affect sprouts
+        that already enrolled with the key.
+      responses:
+        "200":
+          description: Revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key_id, revoked]
+                properties:
+                  key_id: { type: string }
+                  revoked: { type: boolean, const: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: "`enrollment_key_not_found`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/tenants/{tenant_id}/sprouts/{sprout_id}/asset-link:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/SproutID"
+    post:
+      tags: [asset-links]
+      operationId: LinkAsset
+      summary: Link a CloudXP asset_id to one of the tenant's sprouts
+      description: |
+        The sprout must exist under this tenant in `farmer.pki_nkeys`, in
+        any key state. A sprout carries at most one asset_id, and an
+        asset_id is globally unique. Re-linking the identical pair is
+        idempotent (200 with the existing link).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [asset_id]
+              properties:
+                asset_id:
+                  type: string
+                  maxLength: 191
+                  description: Trimmed; must be non-empty.
+      responses:
+        "201":
+          description: Linked.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssetLink" }
+        "200":
+          description: This exact link already existed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssetLink" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: |
+            `tenant_not_found`, or `sprout_not_found` for a sprout that
+            doesn't exist or belongs to another tenant (indistinguishable).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: |
+            `asset_link_conflict`: this sprout already has a different
+            asset_id, or this asset_id is linked to another sprout
+            (possibly in another tenant). One fixed body for all cases.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    delete:
+      tags: [asset-links]
+      operationId: UnlinkAsset
+      summary: Remove a sprout's asset link
+      responses:
+        "200":
+          description: Unlinked.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sprout_id, unlinked]
+                properties:
+                  sprout_id: { type: string }
+                  unlinked: { type: boolean, const: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: "`tenant_not_found`, or `asset_link_not_found` (no link, or another tenant's)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/tenants/{tenant_id}/sprouts:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [asset-links]
+      operationId: ListSproutsByAssetIDs
+      summary: Resolve asset_ids to the tenant's sprouts
+      description: |
+        This is a lookup by asset_id, not a sprout listing: `asset_ids` is
+        required. It may be comma-separated, repeated, or both. At most
+        100 ids are counted before de-duplication. Results come back in
+        request order. An id that doesn't resolve in this tenant goes into
+        `unresolved`, for any reason (never linked, linked elsewhere, or its
+        sprout is gone), with no way to tell which.
+
+        `connected` is read from farmer's Valkey heartbeat keys, only for
+        `accepted` sprouts, and is `false` whenever Valkey is unset or
+        unreachable.
+      parameters:
+        - name: asset_ids
+          in: query
+          required: true
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string, maxLength: 191 }
+          description: "e.g. `?asset_ids=a1,a2&asset_ids=a3`"
+      responses:
+        "200":
+          description: Resolution results.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SproutsByAssetResponse" }
+        "400":
+          description: "`invalid_request` (missing, empty or over-long ids) or `too_many_asset_ids` (`details.max` = 100)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/TenantNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/tenants/{tenant_id}/sprouts/actions:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    post:
+      tags: [sprout-actions]
+      operationId: CreateSproutActionBatch
+      summary: Run cmd.run or cook on sprouts, by asset_id (asynchronous)
+      description: |
+        The tenant must be `active`. The body is decoded strictly (unknown
+        fields are 400) and capped at 64 KiB. The batch and one item per
+        de-duplicated asset_id are written before the 202; queued items
+        are then dispatched to farmer's `internal.sprout.action` in the
+        background. Items for unresolved asset_ids are `unresolved`, and
+        sprouts whose key isn't accepted are `failed` with
+        `sprout_not_accepted`; neither is dispatched. Nothing is retried
+        automatically.
+
+        Rate-limited per tenant: 1 request/second, burst 5, per pod (no
+        config or Valkey sharing for this limit yet).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SproutActionRequest" }
+            examples:
+              cmd_run:
+                value:
+                  asset_ids: [vm-001, vm-002]
+                  action:
+                    type: cmd.run
+                    params: { cmd: "systemctl restart nginx", timeout_seconds: 30 }
+              cook:
+                value:
+                  asset_ids: [vm-001]
+                  action: { type: cook, params: { recipe: webserver } }
+      responses:
+        "202":
+          description: Batch created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreateBatchResponse" }
+        "400":
+          description: "`invalid_request`, `unsupported_action` (type other than cmd.run or cook), or `too_many_asset_ids`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/TenantNotFound" }
+        "409": { $ref: "#/components/responses/TenantNotActive" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/tenants/{tenant_id}/sprouts/actions/{batch_id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/BatchID"
+    get:
+      tags: [sprout-actions]
+      operationId: GetSproutActionBatch
+      summary: Get a batch's per-item status
+      description: |
+        Reads item status from the database; items `running` a cook are
+        refreshed from farmer's job-status index. The batch is
+        `in_progress` while any item is queued, dispatching or running.
+        This route also finds a fleet-update batch (same tables), in which
+        case `rollout` is set.
+      responses:
+        "200":
+          description: The batch.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActionBatch" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/BatchOrTenantNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/versions:
+    get:
+      tags: [fleet-updates]
+      operationId: ListFleetVersions
+      summary: List CloudXP's published sprout versions
+      description: |
+        Newest first, not paginated. The same catalog for every tenant, so
+        there is no organization check. Rows are written only by
+        `cmd/fleetreleaser`. `artifact_url` and the signature are not
+        exposed.
+      responses:
+        "200":
+          description: The catalog.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [versions]
+                properties:
+                  versions:
+                    type: array
+                    items: { $ref: "#/components/schemas/FleetVersion" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/tenants/{tenant_id}/update-policy:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [fleet-updates]
+      operationId: GetUpdatePolicy
+      summary: Get the tenant's update policy
+      description: A tenant that never set one gets the default (nothing approved, auto_update off, no updated_at), not a 404.
+      responses:
+        "200":
+          description: The policy.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UpdatePolicy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/TenantNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    patch:
+      tags: [fleet-updates]
+      operationId: PatchUpdatePolicy
+      summary: Approve a version, set the rollout window, toggle auto_update
+      description: |
+        Absent fields are left unchanged; `null` clears `approved_version`
+        or a window bound. Checked against the merged policy:
+        `approved_version` must be in the catalog (`unknown_version`);
+        `auto_update: true` needs an approved version (clearing the
+        version while auto_update is on is rejected); both window bounds
+        are set together and end is after start. Storing the policy is all
+        this does: nothing is dispatched, and with dispatch off (the
+        default) `auto_update` has no effect.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PatchUpdatePolicyRequest" }
+      responses:
+        "200":
+          description: The merged policy.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UpdatePolicy" }
+        "400":
+          description: "`invalid_request` or `unknown_version`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/TenantNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/tenants/{tenant_id}/sprouts/updates:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    post:
+      tags: [fleet-update-dispatch]
+      operationId: CreateFleetUpdateBatch
+      summary: "FEATURE-FLAGGED, OFF BY DEFAULT: start a self_update rollout"
+      x-imas-registered-only-when: SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=true
+      x-imas-default: not registered (plain-text 404)
+      description: |
+        **Not registered unless `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=true`,
+        which is off by default and should stay off until sprout can
+        install a signed release** (see the tag). Documented so the
+        contract is recorded, not because it is usable.
+
+        Checks, in order, before anything is written: tenant active; body
+        valid (strict decode, 64 KiB cap); `target_version` in the catalog
+        and its row's https URL, checksum and Ed25519 signature valid
+        against `imas-fleet-signing`; it is the tenant's
+        `approved_version`; now is inside the rollout window, if one is
+        set. Items then go out in waves of `batch_size`, each wave gated by
+        `gate`. Approval and window are re-checked before every wave. A
+        sprout with an unfinished self_update in another batch is failed
+        with `update_already_in_progress`.
+
+        Rate-limited per tenant: one request every 10 seconds, burst 2,
+        per pod.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FleetUpdateRequest" }
+      responses:
+        "202":
+          description: Rollout batch created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreateBatchResponse" }
+        "400":
+          description: "`invalid_request`, `too_many_asset_ids`, `unsupported_gate` (including `probe`, which isn't built), or `unknown_version`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: "`tenant_not_found`; or, with the flag off, the ServeMux's plain-text 404 because the route isn't registered."
+        "409":
+          description: "`tenant_not_active`, `version_not_approved`, or `outside_rollout_window`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500":
+          description: "`internal_error`, including a catalog entry that fails URL, checksum or signature checks."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/tenants/{tenant_id}/sprouts/updates/{batch_id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/BatchID"
+    get:
+      tags: [fleet-update-dispatch]
+      operationId: GetFleetUpdateBatch
+      summary: "FEATURE-FLAGGED, OFF BY DEFAULT: get a rollout's status"
+      x-imas-registered-only-when: SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=true
+      x-imas-default: not registered (plain-text 404)
+      description: |
+        Same response as `GET .../sprouts/actions/{batch_id}`, but only
+        self_update batches are found; a §1.5 batch id is 404. Not
+        registered unless the dispatch flag is on (see the tag).
+      responses:
+        "200":
+          description: The rollout batch, with `rollout` set.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActionBatch" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/BatchOrTenantNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+components:
+  securitySchemes:
+    internalAuth:
+      type: apiKey
+      in: header
+      name: X-Internal-Auth
+      description: |
+        The BFF's pre-shared service secret, compared in constant time
+        against INTERNAL_AUTH_SECRET_CURRENT and, during a rotation,
+        INTERNAL_AUTH_SECRET_PREVIOUS. Checked first.
+    keycloakBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        The end user's Keycloak JWT, forwarded by the BFF. Signature,
+        issuer (SAASAPI_JWT_ISSUER), audience (SAASAPI_JWT_AUDIENCE) and
+        expiry are verified against SAASAPI_KEYCLOAK_JWKS_URL. Its
+        `organization` claim (`{"id": ...}`) must have `id` equal to the
+        path's `{tenant_id}` on every tenant-scoped route.
+
+  parameters:
+    TenantID:
+      name: tenant_id
+      in: path
+      required: true
+      description: A saasapi-generated id, `t_` plus 16 lowercase base32 characters.
+      schema: { type: string, pattern: "^t_[a-z2-7]{16}$", examples: [t_mfrggzdfmztwq2lk] }
+    SproutID:
+      name: sprout_id
+      in: path
+      required: true
+      description: The sprout id farmer assigned at enrollment (unique within the tenant only).
+      schema: { type: string, maxLength: 253 }
+    BatchID:
+      name: batch_id
+      in: path
+      required: true
+      description: "`b_` plus 16 lowercase base32 characters. Ids over 32 characters are 404 without a lookup."
+      schema: { type: string, maxLength: 32 }
+
+  responses:
+    InvalidRequest:
+      description: "`invalid_request`: malformed JSON, or a field missing or out of range."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: |
+        `unauthorized`: missing or wrong X-Internal-Auth, or a missing,
+        malformed, badly signed, wrong-issuer, wrong-audience or expired
+        bearer token. The body never says which.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: unauthorized, message: unauthorized }
+    Forbidden:
+      description: "`forbidden`: a valid token whose organization.id doesn't match {tenant_id}, or has no organization claim."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: forbidden, message: forbidden }
+    TenantNotFound:
+      description: "`tenant_not_found`."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: tenant_not_found, message: no such tenant }
+    TenantNotActive:
+      description: "`tenant_not_active`: actions run only for an active tenant."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BatchOrTenantNotFound:
+      description: "`tenant_not_found`, or `batch_not_found` (including another tenant's batch)."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: "`rate_limited`: the tenant's bucket for this route is empty."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: rate_limited, message: "too many requests, slow down and retry later" }
+    InternalError:
+      description: "`internal_error`."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error: { type: string, description: snake_case error code }
+        message: { type: string }
+        details: { type: object, additionalProperties: true }
+
+    TenantStatus:
+      type: string
+      enum: [pending, active, failed, offboarding, offboarded]
+
+    CreateTenantRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, description: "Trimmed; must be non-empty. Column limit 255: the handler doesn't check length, so a longer value fails at the database (500, under MySQL's default strict SQL mode)." }
+        plan_id: { type: string, description: "Column limit 64, not checked by the handler (a longer value is a 500)." }
+
+    PatchTenantRequest:
+      type: object
+      minProperties: 1
+      properties:
+        name: { type: string, description: "Trimmed; must be non-empty if present. Column limit 255, as for create." }
+        plan_id: { type: string, description: "Column limit 64, as for create. An empty string clears it." }
+
+    Tenant:
+      type: object
+      required: [tenant_id, name, status, created_at, updated_at]
+      properties:
+        tenant_id: { type: string }
+        name: { type: string }
+        status: { $ref: "#/components/schemas/TenantStatus" }
+        plan_id: { type: string, description: Omitted when empty. }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    TenantStatusResponse:
+      type: object
+      required: [tenant_id, status]
+      properties:
+        tenant_id: { type: string }
+        status: { $ref: "#/components/schemas/TenantStatus" }
+        last_error: { type: string }
+        warning: { type: string }
+
+    CreateEnrollmentKeyRequest:
+      type: object
+      required: [expires_in_hours, max_uses]
+      properties:
+        expires_in_hours: { type: integer, minimum: 1, maximum: 720 }
+        max_uses: { type: integer, minimum: 1, maximum: 10000 }
+
+    CreateEnrollmentKeyResponse:
+      type: object
+      required: [key_id, registration_key, expires_at, max_uses]
+      properties:
+        key_id: { type: string, examples: [ek_nbswy3dpeb3w64tm] }
+        registration_key:
+          type: string
+          description: |
+            The join token, `{key_id}.{secret}` (secret: 32 random bytes,
+            unpadded base64url). Give it to the sprout as `jointoken`,
+            IMAS_JOIN_TOKEN or `--join-token`. Returned only here.
+        expires_at: { type: string, format: date-time }
+        max_uses: { type: integer }
+
+    EnrollmentKeyListItem:
+      type: object
+      required: [key_id, state, expires_at, max_uses, used_count, created_at]
+      properties:
+        key_id: { type: string }
+        state:
+          type: string
+          enum: [active, revoked, expired, exhausted]
+          description: Evaluated in that order of precedence (revoked beats expired beats exhausted).
+        expires_at: { type: string, format: date-time }
+        max_uses: { type: integer }
+        used_count: { type: integer }
+        created_at: { type: string, format: date-time }
+
+    AssetLink:
+      type: object
+      required: [sprout_id, asset_id, linked_at]
+      properties:
+        sprout_id: { type: string }
+        asset_id: { type: string }
+        linked_at: { type: string, format: date-time }
+
+    SproutsByAssetResponse:
+      type: object
+      required: [results, unresolved]
+      properties:
+        results:
+          type: array
+          items:
+            type: object
+            required: [sprout_id, asset_id, key_state, connected]
+            properties:
+              sprout_id: { type: string }
+              asset_id: { type: string }
+              key_state: { type: string, enum: [unaccepted, accepted, denied, rejected] }
+              connected: { type: boolean }
+        unresolved:
+          type: array
+          items: { type: string }
+
+    SproutActionRequest:
+      type: object
+      additionalProperties: false
+      required: [asset_ids, action]
+      properties:
+        asset_ids:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: { type: string, minLength: 1, maxLength: 191 }
+          description: Trimmed and de-duplicated in order; empty strings are rejected.
+        action:
+          type: object
+          additionalProperties: false
+          required: [type, params]
+          properties:
+            type: { type: string, enum: [cmd.run, cook] }
+            params:
+              oneOf:
+                - $ref: "#/components/schemas/CmdRunParams"
+                - $ref: "#/components/schemas/CookParams"
+
+    CmdRunParams:
+      type: object
+      additionalProperties: false
+      required: [cmd]
+      description: |
+        Nothing runs through a shell. Without `args`, `cmd` is split on
+        whitespace into the executable and its arguments, and quoting,
+        escapes and shell operators (`"'\`$|&;<>(){}*?[]~` and newlines)
+        are rejected. With `args`, `cmd` is the executable verbatim. There
+        is no `env`: environment variables are rejected as an unknown field
+        because the batch persists its params.
+      properties:
+        cmd: { type: string, maxLength: 4096 }
+        args:
+          type: array
+          maxItems: 256
+          items: { type: string, maxLength: 4096 }
+        cwd: { type: string, maxLength: 4096 }
+        run_as: { type: string, maxLength: 255 }
+        timeout_seconds:
+          type: integer
+          minimum: 0
+          maximum: 600
+          description: 0 or omitted means 60.
+
+    CookParams:
+      type: object
+      additionalProperties: false
+      required: [recipe]
+      properties:
+        recipe:
+          type: string
+          maxLength: 255
+          description: Recipe name, no whitespace or NUL. Resolved and validated by farmer.
+        test: { type: boolean, default: false }
+
+    CreateBatchResponse:
+      type: object
+      required: [batch_id]
+      properties:
+        batch_id: { type: string, examples: [b_gezdgnbvgy3tqojq] }
+
+    ActionItemStatus:
+      type: string
+      enum: [unresolved, queued, dispatching, running, succeeded, failed, unresponsive_after_update]
+      description: |
+        Terminal: unresolved, succeeded, failed, unresponsive_after_update.
+        `dispatching` means the request was sent to farmer and no reply was
+        recorded; it is never re-sent blindly.
+
+    ActionBatch:
+      type: object
+      required: [batch_id, status, action_type, created_at, items]
+      properties:
+        batch_id: { type: string }
+        status: { type: string, enum: [in_progress, completed] }
+        action_type: { type: string, enum: [cmd.run, cook, self_update] }
+        created_at: { type: string, format: date-time }
+        rollout:
+          description: Set only for a fleet-update (self_update) batch.
+          type: object
+          required: [target_version, batch_size, gate]
+          properties:
+            target_version: { type: string }
+            batch_size: { type: integer }
+            gate: { type: string, enum: [job_status, dispatch] }
+        items:
+          type: array
+          description: In request order.
+          items:
+            type: object
+            required: [asset_id, status]
+            properties:
+              asset_id: { type: string }
+              sprout_id: { type: string }
+              status: { $ref: "#/components/schemas/ActionItemStatus" }
+              jid: { type: string, description: Set for a cook once farmer accepted it. }
+              exit_code: { type: integer, description: Set only for a completed cmd.run. }
+              error:
+                type: string
+                description: A fixed code, never error text.
+                enum:
+                  - invalid_request
+                  - unsupported_action
+                  - sprout_not_found
+                  - sprout_unreachable
+                  - internal_error
+                  - sprout_not_accepted
+                  - command_failed
+                  - job_failed
+                  - job_expired
+                  - dispatch_outcome_unknown
+                  - rollout_halted
+                  - rollout_window_closed
+                  - version_approval_withdrawn
+                  - update_already_in_progress
+                  - unresponsive_after_update
+              message: { type: string, description: The fixed message for `error`. }
+
+    FleetVersion:
+      type: object
+      required: [version, checksum_sha256, released_at]
+      properties:
+        version: { type: string, maxLength: 64 }
+        checksum_sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        released_at: { type: string, format: date-time }
+        notes: { type: string }
+
+    UpdatePolicy:
+      type: object
+      required: [tenant_id, approved_version, auto_update, rollout_window_start, rollout_window_end]
+      properties:
+        tenant_id: { type: string }
+        approved_version: { type: [string, "null"] }
+        auto_update: { type: boolean }
+        rollout_window_start: { type: [string, "null"], format: date-time }
+        rollout_window_end: { type: [string, "null"], format: date-time }
+        updated_at:
+          type: string
+          format: date-time
+          description: Omitted for a tenant that has never set a policy.
+
+    PatchUpdatePolicyRequest:
+      type: object
+      minProperties: 1
+      properties:
+        approved_version: { type: [string, "null"], maxLength: 64, description: "null clears it; an empty string is rejected." }
+        auto_update: { type: boolean, description: "null is rejected." }
+        rollout_window_start: { type: [string, "null"], format: date-time }
+        rollout_window_end: { type: [string, "null"], format: date-time }
+
+    FleetUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [asset_ids, target_version]
+      properties:
+        asset_ids:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: { type: string, minLength: 1, maxLength: 191 }
+        target_version: { type: string, maxLength: 64 }
+        batch_size: { type: integer, minimum: 1, maximum: 25, default: 5, description: "Wave size; an explicit 0 is rejected." }
+        gate:
+          type: string
+          enum: [job_status, dispatch]
+          default: job_status
+          description: |
+            job_status: every item in the wave succeeded (30 min wave
+            timeout, then unresponsive_after_update and halt). dispatch:
+            farmer accepted every item. `probe` is rejected as
+            unsupported_gate.

@@ -62,6 +62,6 @@ and minimal — no realistic hardware, no clutter, generous negative space.
   online PNG-to-SVG tool works for a flat geometric mark like this).
 - Done: `docs/logos/grlx.jpg` has been replaced with `imas-banner.png`,
   `imas-logo.png`, and `imas-icon.png`, and the README header now uses
-  the banner. Still outstanding: `docs/diagrams/grlx-arch-light.png` is
-  unrelated old artwork (an architecture diagram, not a logo) and hasn't
-  been redone.
+  the banner. The old architecture diagram (`docs/diagrams/grlx-arch-light.png`,
+  not a logo) has since been replaced by a hand-written
+  `docs/diagrams/imas-architecture.svg`.
