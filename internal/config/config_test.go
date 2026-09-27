@@ -1216,7 +1216,7 @@ func TestLoadConfig_SproutConfigFileIs0600(t *testing.T) {
 func TestLoadConfig_SproutStagedRecipeSettings(t *testing.T) {
 	t.Run("from the config file", func(t *testing.T) {
 		tmpRoot := t.TempDir()
-		content := "stagedrecipemaxage: 6h\ngatewayjwtrefreshmargin: 10m\nsprouthandledjobsfile: /tmp/imas-handled\n"
+		content := "stagedrecipemaxage: 6h\ngatewayjwtrefreshmargin: 10m\nsprouthandledjobsfile: /tmp/imas-handled\nsproutboxkeyprevgrace: 1h\n"
 		cfgFile := writeTempConfig(t, tmpRoot, "sprout", content)
 		resetForBinaryTest(t, tmpRoot)
 		jety.SetConfigType("yaml")
@@ -1234,6 +1234,9 @@ func TestLoadConfig_SproutStagedRecipeSettings(t *testing.T) {
 		if SproutHandledJobsFile != "/tmp/imas-handled" {
 			t.Errorf("SproutHandledJobsFile = %q, want /tmp/imas-handled", SproutHandledJobsFile)
 		}
+		if SproutBoxKeyPrevGrace != time.Hour {
+			t.Errorf("SproutBoxKeyPrevGrace = %v, want 1h", SproutBoxKeyPrevGrace)
+		}
 	})
 
 	t.Run("defaults, written back to the config file", func(t *testing.T) {
@@ -1248,6 +1251,9 @@ func TestLoadConfig_SproutStagedRecipeSettings(t *testing.T) {
 		if GatewayJWTRefreshMargin != DefaultGatewayJWTRefreshMargin {
 			t.Errorf("GatewayJWTRefreshMargin = %v, want %v", GatewayJWTRefreshMargin, DefaultGatewayJWTRefreshMargin)
 		}
+		if SproutBoxKeyPrevGrace != DefaultSproutBoxKeyPrevGrace {
+			t.Errorf("SproutBoxKeyPrevGrace = %v, want %v", SproutBoxKeyPrevGrace, DefaultSproutBoxKeyPrevGrace)
+		}
 		if SproutHandledJobsFile != "/var/lib/imas/sprout/handled-jobs" {
 			t.Errorf("SproutHandledJobsFile = %q", SproutHandledJobsFile)
 		}
@@ -1255,7 +1261,7 @@ func TestLoadConfig_SproutStagedRecipeSettings(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, key := range []string{"stagedrecipemaxage", "gatewayjwtrefreshmargin", "sprouthandledjobsfile"} {
+		for _, key := range []string{"stagedrecipemaxage", "gatewayjwtrefreshmargin", "sprouthandledjobsfile", "sproutboxkeyprevgrace"} {
 			if !strings.Contains(string(b), key) {
 				t.Errorf("sprout config file doesn't list %q, so operators can't see it:\n%s", key, b)
 			}

@@ -128,6 +128,9 @@ func runSprout(parent context.Context, joinToken string, handleSignals bool) {
 	if err != nil {
 		log.Fatalf("failed to generate sprout X25519 key: %v", err)
 	}
+	if g := config.SproutBoxKeyPrevGrace; g > 0 && g < pki.MinSproutBoxKeyPrevGrace {
+		log.Warnf("sproutboxkeyprevgrace %s is shorter than a farmer payload can stay in flight; using %s", g, pki.MinSproutBoxKeyPrevGrace)
+	}
 	var ctx context.Context
 	var stop context.CancelFunc
 	if handleSignals {

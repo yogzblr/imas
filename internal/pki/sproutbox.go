@@ -52,7 +52,7 @@ package pki
 //     generating another, so a lost submission is retried by triggering
 //     again and never leaves more than one unconfirmed key behind.
 //   - previous (sproutPrevBoxPrivFile): the key current replaced, kept
-//     sproutPrevBoxKeyGrace after the switch and then deleted.
+//     SproutBoxKeyPrevGrace after the switch and then deleted.
 //
 // The switch happens when a farmer payload opens under the pending key
 // (promoteSproutBoxKey). That is the confirmation the submission has no
@@ -69,7 +69,7 @@ package pki
 // one, arriving after one sealed to the new key has promoted it: without
 // it, that payload would never open. The mirror of farmer's
 // own active+grace model, with a much shorter window: see
-// sproutPrevBoxKeyGrace.
+// MinSproutBoxKeyPrevGrace.
 
 import (
 	"crypto/rand"
@@ -95,29 +95,43 @@ import (
 var ErrSproutBoxNotReady = errors.New("pki: sprout has no payload-encryption keys (box key or pinned tenant key)")
 
 // ErrSproutBoxKeyRotationTooSoon means a rotation was triggered while the
-// key the last one replaced is still inside sproutPrevBoxKeyGrace.
+// key the last one replaced is still inside SproutBoxKeyPrevGrace.
 // Refused rather than overwriting that key, which a payload still in
 // flight may need; the trigger can be sent again once the window closes.
 var ErrSproutBoxKeyRotationTooSoon = errors.New("pki: the previous box key rotation's grace window is still open")
 
-// sproutPrevBoxKeyGrace is how long the sprout keeps the key a rotation
-// replaced. Everything opened with it is a farmer payload sealed before
+// MinSproutBoxKeyPrevGrace is the shortest time the sprout keeps the key
+// a rotation replaced (config.SproutBoxKeyPrevGrace is raised to it).
+// Everything opened with that key is a farmer payload sealed before
 // farmer recorded the new key, and a payload is refused once its
-// IssuedAt is payloadbox.DefaultMaxSkew old (sproutReplayGuard).
-// The one that promoted the new key was issued after farmer recorded it
-// and at most DefaultMaxSkew ahead of the sprout's clock at promotion, so
+// IssuedAt is payloadbox.DefaultMaxSkew old (sproutReplayGuard). The one
+// that promoted the new key was issued after farmer recorded it and at
+// most DefaultMaxSkew ahead of the sprout's clock at promotion, so
 // anything sealed to the old key is stale within 2*DefaultMaxSkew of
-// promotion; one more DefaultMaxSkew is margin for farmer replicas'
-// clocks disagreeing with each other. (A continuity proof in a refresh
-// response carries no IssuedAt, but is opened as soon as the HTTP
-// response arrives.)
+// promotion. (A continuity proof in a refresh response carries no
+// IssuedAt, but is opened as soon as the HTTP response arrives.)
 //
-// Deliberately far shorter than farmer's config.BoxKeyGraceDuration:
-// farmer's grace keeps a public key, which costs nothing, whereas this
-// keeps a private key on disk, and deleting the old private key is what
-// a rotation is for (a host compromise after this window can't decrypt
-// traffic captured under it).
-const sproutPrevBoxKeyGrace = 3 * payloadbox.DefaultMaxSkew
+// The default, config.DefaultSproutBoxKeyPrevGrace, is one more
+// DefaultMaxSkew, as margin for farmer replicas' clocks disagreeing with
+// each other. Both are deliberately far shorter than farmer's
+// config.BoxKeyGraceDuration: farmer's grace keeps a public key, which
+// costs nothing, whereas this keeps a private key on disk, and deleting
+// the old private key is what a rotation is for (a host compromise after
+// this window can't decrypt traffic captured under it).
+const MinSproutBoxKeyPrevGrace = 2 * payloadbox.DefaultMaxSkew
+
+// SproutBoxKeyPrevGrace is how long the sprout keeps the key a rotation
+// replaced: config.SproutBoxKeyPrevGrace, or its default if unset, and
+// never less than MinSproutBoxKeyPrevGrace. Read on every use, and
+// measured from when the key was replaced, so a change applies to a key
+// already being kept.
+func SproutBoxKeyPrevGrace() time.Duration {
+	g := config.SproutBoxKeyPrevGrace
+	if g <= 0 {
+		g = config.DefaultSproutBoxKeyPrevGrace
+	}
+	return max(g, MinSproutBoxKeyPrevGrace)
+}
 
 // sproutPendingBoxPrivFile and sproutPrevBoxPrivFile sit next to
 // config.SproutBoxPrivFile, so they share its directory's permissions.
@@ -164,7 +178,7 @@ type sproutBoxKeys struct {
 	// pending is nil unless a rotation is in progress.
 	pending *[32]byte
 	// previous is nil unless a rotation promoted a key within
-	// sproutPrevBoxKeyGrace.
+	// SproutBoxKeyPrevGrace.
 	previous *[32]byte
 }
 
@@ -200,7 +214,7 @@ func loadSproutBoxKeysLocked() (*sproutBoxKeys, error) {
 	}
 	prevPath := sproutPrevBoxPrivFile()
 	// The file's mtime is when promoteSproutBoxKey wrote it.
-	if fi, statErr := os.Stat(prevPath); statErr == nil && time.Since(fi.ModTime()) > sproutPrevBoxKeyGrace {
+	if fi, statErr := os.Stat(prevPath); statErr == nil && time.Since(fi.ModTime()) > SproutBoxKeyPrevGrace() {
 		if err := os.Remove(prevPath); err != nil && !os.IsNotExist(err) {
 			k.wipe()
 			return nil, fmt.Errorf("pki: deleting the previous sprout X25519 key: %w", err)
@@ -320,7 +334,7 @@ func promoteSproutBoxKey(pendingPub string) error {
 			log.Warnf("pki: writing sprout X25519 public key: %v", err)
 		}
 	}
-	log.Noticef("pki: farmer is sealing to the new payload-encryption key %s; it is now current, and the one it replaced is kept for %s", pub, sproutPrevBoxKeyGrace)
+	log.Noticef("pki: farmer is sealing to the new payload-encryption key %s; it is now current, and the one it replaced is kept for %s", pub, SproutBoxKeyPrevGrace())
 	return nil
 }
 

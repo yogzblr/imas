@@ -412,7 +412,7 @@ func TestSproutBoxKeyRotation_PreviousKeyGraceWindow(t *testing.T) {
 		t.Fatal("a refused rotation left a pending key")
 	}
 
-	past := time.Now().Add(-sproutPrevBoxKeyGrace - time.Minute)
+	past := time.Now().Add(-SproutBoxKeyPrevGrace() - time.Minute)
 	if err := os.Chtimes(sproutPrevBoxPrivFile(), past, past); err != nil {
 		t.Fatal(err)
 	}
@@ -546,5 +546,58 @@ func TestSproutBoxKeyRotation_ConcurrentOpensDuringPromotion(t *testing.T) {
 	}
 	if got := sproutCurrentPub(t); got != newPub {
 		t.Fatalf("current key is %s, want %s", got, newPub)
+	}
+}
+
+// The previous key's grace window follows config.SproutBoxKeyPrevGrace:
+// unset means the default, anything shorter than
+// MinSproutBoxKeyPrevGrace is raised to it.
+func TestSproutBoxKeyPrevGrace(t *testing.T) {
+	orig := config.SproutBoxKeyPrevGrace
+	t.Cleanup(func() { config.SproutBoxKeyPrevGrace = orig })
+	for _, tc := range []struct{ set, want time.Duration }{
+		{0, config.DefaultSproutBoxKeyPrevGrace},
+		{-time.Minute, config.DefaultSproutBoxKeyPrevGrace},
+		{time.Minute, MinSproutBoxKeyPrevGrace},
+		{time.Hour, time.Hour},
+	} {
+		config.SproutBoxKeyPrevGrace = tc.set
+		if got := SproutBoxKeyPrevGrace(); got != tc.want {
+			t.Errorf("SproutBoxKeyPrevGrace() with %v configured = %v, want %v", tc.set, got, tc.want)
+		}
+	}
+	// The default is the documented 3*DefaultMaxSkew.
+	if config.DefaultSproutBoxKeyPrevGrace != 3*payloadbox.DefaultMaxSkew {
+		t.Errorf("DefaultSproutBoxKeyPrevGrace = %v, want 3*DefaultMaxSkew", config.DefaultSproutBoxKeyPrevGrace)
+	}
+}
+
+// A configured longer grace window keeps the previous key, and refuses
+// another rotation, for that long.
+func TestSproutBoxKeyRotation_ConfiguredGraceWindow(t *testing.T) {
+	enrollForTest(t)
+	orig := config.SproutBoxKeyPrevGrace
+	t.Cleanup(func() { config.SproutBoxKeyPrevGrace = orig })
+	config.SproutBoxKeyPrevGrace = time.Hour
+
+	inFlight := farmerSeals(t)
+	submission, _, err := BeginSproutBoxKeyRotation("web-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	farmerAcceptsSubmission(t, submission)
+	sproutOpens(t, farmerSeals(t))
+
+	// Past the default window, inside the configured one.
+	replaced := time.Now().Add(-30 * time.Minute)
+	if err := os.Chtimes(sproutPrevBoxPrivFile(), replaced, replaced); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := BeginSproutBoxKeyRotation("web-01"); !errors.Is(err, ErrSproutBoxKeyRotationTooSoon) {
+		t.Fatalf("rotation inside the configured window = %v, want ErrSproutBoxKeyRotationTooSoon", err)
+	}
+	sproutOpens(t, inFlight)
+	if !fileExists(sproutPrevBoxPrivFile()) {
+		t.Fatal("previous key deleted inside the configured window")
 	}
 }
