@@ -44,15 +44,26 @@ separate `deploy/helm/farmer` chart.
    and `.goreleaser.yaml` only have farmer and sprout targets. Build one
    from `./cmd/farmerbus` with `CGO_ENABLED=0`, on the same pattern as
    `docker/farmer.dockerfile`, and set `bus.image.*`.
-5. **Core-side settings**, in the farmer chart, not here:
-   - farmer's `farmerorganization` must equal `bus.organization`.
-   - farmer must dial the bus at
-     `tls://<release>-nats-bus.<ns>.svc.cluster.local:5406`.
-   - farmer must mount the same seed Secret.
-   - farmer's `IMAS_SPROUT_BUS_URLS` must list Envoy's external `wss://`
-     address.
-   - farmer's namespace needs its own NetworkPolicy: egress to the bus on
-     5406, and ingress from this chart's Envoy on 5405.
+5. **Core-side settings**, in `deploy/helm/farmer`, not here. Its
+   `TestContractWithNatsChart` renders both charts side by side and
+   fails if any of these stop lining up:
+
+   | Requirement | `deploy/helm/farmer` value |
+   |---|---|
+   | farmer's `farmerorganization` equals `bus.organization` | `organization` |
+   | farmer dials this bus on its client port | `bus.serviceName` (`<release>-nats-bus`), `bus.namespace`, `bus.port` |
+   | the same seed Secret, key for key | `natsSeeds.*` |
+   | `IMAS_SPROUT_BUS_URLS` lists Envoy's external `wss://` address | `bus.sproutBusURLs` |
+   | core's NetworkPolicy: egress to the bus on 5406, ingress from this chart's Envoy on 5405 | `networkPolicy.dmz.*` (rendered by that chart) |
+   | Envoy's `farmer_api` upstream is farmer's Service | here: `envoy.upstreams.farmerAPI.host=<core release>-farmer.<core ns>.svc.cluster.local` |
+   | this chart admits the core namespace | here: `networkPolicy.core.namespaceSelector` |
+
+   farmer reaches the bus through an in-pod relay (gap 3 below), so the
+   bus certificate must carry both `<release>-nats-bus.<ns>.svc` and the
+   `.svc.cluster.local` FQDN. The default SANs do. With `bus.tls.mode=openbao`
+   against the farmer chart's eval OpenBao, set that chart's
+   `openbaoBootstrap.farmerbus.*` (it creates the `imas-farmerbus` roles)
+   and point `networkPolicy.openbao` here at its namespace.
 6. **Sprout-side settings**, in your enrollment tooling (e.g. Ansible):
    - Write the CA that issued `envoy.tls.secretName`'s certificate to
      each sprout's `sproutrootca` path (default
@@ -520,9 +531,16 @@ Still open. Each is outside this chart's file scope.
 2. **farmer's default tenant ID is invalid.** `config.go` still defaults
    `farmerorganization` to `"imas farmer"`, which fails
    `IsValidTenantID`, so core exits at boot unless it's overridden.
+   `deploy/helm/farmer` always overrides it (`organization`, validated
+   at render time); the code default is still wrong.
 3. **core can't be configured with the bus's address.** It still uses
    one `farmerinterface` as its API bind address, its bus URL host and
-   its TLS ServerName for the bus.
+   its TLS ServerName for the bus. `deploy/helm/farmer` works around it
+   without a code change: `farmerinterface` is the bus's
+   `<svc>.<ns>.svc` name, pinned to `0.0.0.0` in farmer's pod, and a
+   loopback TCP relay forwards to the bus FQDN with TLS end to end (that
+   chart's README, "Reaching the bus"). The code fix, a bus URL setting
+   separate from the bind address, is still open.
 4. **The Keycloak harness still doesn't start on current Keycloak.**
    `deploy/envoy/testing/docker-compose.keycloak.yml` still pulls from
    quay.io and mounts the realm under a file name Keycloak 26 refuses

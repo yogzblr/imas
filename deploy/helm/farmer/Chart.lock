@@ -1,0 +1,15 @@
+dependencies:
+- name: openbao
+  repository: https://openbao.github.io/openbao-helm
+  version: 0.29.6
+- name: pxc-operator
+  repository: https://percona.github.io/percona-helm-charts
+  version: 1.20.1
+- name: pxc-db
+  repository: https://percona.github.io/percona-helm-charts
+  version: 1.20.0
+- name: valkey
+  repository: https://valkey.io/valkey-helm/
+  version: 0.12.0
+digest: sha256:c8153464db521bcdc83b80f5899b287a8527f010f9e32d5b22a9ceff13e8fdeb
+generated: "2026-09-27T04:42:18.625211331Z"

@@ -15,6 +15,7 @@ package farmerchart
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -24,6 +25,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -114,8 +116,14 @@ func strippedChart(t *testing.T) string {
 
 func runHelm(t *testing.T, chart string, args ...string) ([]obj, error) {
 	t.Helper()
-	cmd := exec.Command(helmBin(t), append([]string{"template", "t", chart,
-		"--namespace", "imas-core", "--kube-version", "1.30.0"}, args...)...)
+	return renderAs(t, "t", "imas-core", chart, args...)
+}
+
+// renderAs runs `helm template` for any chart, release and namespace.
+func renderAs(t *testing.T, release, namespace, chart string, args ...string) ([]obj, error) {
+	t.Helper()
+	cmd := exec.Command(helmBin(t), append([]string{"template", release, chart,
+		"--namespace", namespace, "--kube-version", "1.30.0"}, args...)...)
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
 	if err := cmd.Run(); err != nil {
@@ -655,7 +663,12 @@ func TestFarmerPoliciesAreExact(t *testing.T) {
 // <policy> <ttl> <maxttl>` lines.
 func bootstrapRoles(t *testing.T, docs []obj) map[string][]string {
 	t.Helper()
-	job := find(t, docs, "Job", "t-farmer-openbao-bootstrap")
+	return bootstrapRolesFor(t, docs, "t-farmer-openbao-bootstrap")
+}
+
+func bootstrapRolesFor(t *testing.T, docs []obj, jobName string) map[string][]string {
+	t.Helper()
+	job := find(t, docs, "Job", jobName)
 	script := get(container(t, job, "bootstrap"), "args", 0).(string)
 	roles := map[string][]string{}
 	for _, l := range strings.Split(script, "\n") {
@@ -1188,6 +1201,246 @@ func TestSubchartsRender(t *testing.T) {
 			if has(docs, kind, name) != want {
 				t.Errorf("%v: %s present = %v, want %v", tc.args, kn, !want, want)
 			}
+		}
+	}
+}
+
+// Chart.lock (written by `helm dependency update`) pins exactly the
+// dependencies Chart.yaml declares. helm itself refuses a lock whose digest
+// is stale; this catches the drift in `go test`, before anyone runs helm.
+func TestChartLockMatchesChartYaml(t *testing.T) {
+	var chart, lock struct {
+		Dependencies []struct{ Name, Version, Repository string }
+		Digest       string
+	}
+	for _, f := range []struct {
+		name string
+		into any
+	}{{"Chart.yaml", &chart}, {"Chart.lock", &lock}} {
+		b, err := os.ReadFile(filepath.Join(chartDir(t), f.name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := yaml.Unmarshal(b, f.into); err != nil {
+			t.Fatalf("%s: %v", f.name, err)
+		}
+	}
+	if !strings.HasPrefix(lock.Digest, "sha256:") {
+		t.Errorf("Chart.lock digest %q", lock.Digest)
+	}
+	if len(chart.Dependencies) != len(lock.Dependencies) {
+		t.Fatalf("Chart.yaml has %d dependencies, Chart.lock %d", len(chart.Dependencies), len(lock.Dependencies))
+	}
+	for i, d := range chart.Dependencies {
+		if l := lock.Dependencies[i]; l != d {
+			t.Errorf("dependency %d: Chart.yaml %+v, Chart.lock %+v", i, d, l)
+		}
+	}
+}
+
+// matches reports whether a LabelSelector's matchLabels all appear in labels.
+func matches(selector any, labels map[string]any) bool {
+	ml, _ := get(selector, "matchLabels").(obj)
+	if len(ml) == 0 {
+		return false
+	}
+	for k, v := range ml {
+		if labels[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func podLabels(w obj) map[string]any { return get(w, "spec", "template", "metadata", "labels").(obj) }
+
+func nsLabels(ns string) map[string]any { return obj{"kubernetes.io/metadata.name": ns} }
+
+// allows reports whether a NetworkPolicy rule list ("ingress" peers under
+// "from", "egress" under "to") admits pods with podLbls in namespace ns
+// (or in the policy's own namespace when a peer has no namespaceSelector)
+// on port.
+func allows(np obj, direction string, ns string, podLbls map[string]any, port int) bool {
+	peersKey := map[string]string{"ingress": "from", "egress": "to"}[direction]
+	own := get(np, "metadata", "namespace")
+	for _, r := range get(np, "spec", direction).([]any) {
+		portOK := false
+		for _, p := range get(r, "ports").([]any) {
+			if get(p, "port") == port {
+				portOK = true
+			}
+		}
+		if !portOK {
+			continue
+		}
+		peers, _ := get(r, peersKey).([]any)
+		if len(peers) == 0 {
+			return true
+		}
+		for _, p := range peers {
+			nsSel, podSel := get(p, "namespaceSelector"), get(p, "podSelector")
+			nsOK := (nsSel == nil && own == ns) || (nsSel != nil && matches(nsSel, nsLabels(ns)))
+			// No podSelector, or an empty one ({}), selects every pod.
+			podML, _ := get(podSel, "matchLabels").(obj)
+			podOK := len(podML) == 0 || matches(podSel, podLbls)
+			if nsOK && podOK {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// The contract with deploy/helm/nats as it is on this branch: both charts
+// rendered side by side (DMZ release imas-dmz in imas-dmz, core release
+// imas-core in imas-core, the bus certificate from this chart's OpenBao
+// PKI) must agree on every name, port, selector, seed and SAN the other
+// one relies on.
+func TestContractWithNatsChart(t *testing.T) {
+	helmBin(t)
+	farmerFQDN := "imas-core-farmer.imas-core.svc.cluster.local"
+	dmz, err := renderAs(t, "imas-dmz", "imas-dmz", filepath.Join(chartDir(t), "..", "nats"),
+		"--set", "bus.tls.mode=openbao", "--set", "envoy.upstreams.farmerAPI.host="+farmerFQDN)
+	if err != nil {
+		t.Fatalf("nats chart: %v", err)
+	}
+	core, err := renderAs(t, "imas-core", "imas-core", strippedChart(t), append(slices.Clone(required),
+		"--set", "openbaoBootstrap.farmerbus.enabled=true",
+		"--set", "openbaoBootstrap.farmerbus.serviceAccountName=imas-dmz-nats-bus")...)
+	if err != nil {
+		t.Fatalf("farmer chart: %v", err)
+	}
+
+	bus := find(t, dmz, "StatefulSet", "imas-dmz-nats-bus")
+	busSvc := find(t, dmz, "Service", "imas-dmz-nats-bus")
+	envoy := find(t, dmz, "Deployment", "imas-dmz-nats-envoy")
+	var busCfg obj
+	if err := yaml.Unmarshal([]byte(get(find(t, dmz, "ConfigMap", "imas-dmz-nats-bus"), "data", "farmer").(string)), &busCfg); err != nil {
+		t.Fatal(err)
+	}
+	farmer := find(t, core, "Deployment", "imas-core-farmer")
+	saasapi := find(t, core, "Deployment", "imas-core-farmer-saasapi")
+	var coreCfg obj
+	if err := yaml.Unmarshal([]byte(get(find(t, core, "ConfigMap", "imas-core-farmer"), "data", "farmer").(string)), &coreCfg); err != nil {
+		t.Fatal(err)
+	}
+	alias, fqdn := "imas-dmz-nats-bus.imas-dmz.svc", "imas-dmz-nats-bus.imas-dmz.svc.cluster.local"
+
+	// Addressing: farmer's bus host/port and saasapi's URL name the nats
+	// chart's bus Service and its client port.
+	busPort := 0
+	for _, p := range get(busSvc, "spec", "ports").([]any) {
+		if get(p, "name") == "client" {
+			busPort = get(p, "port").(int)
+		}
+	}
+	if coreCfg["farmerinterface"] != alias || coreCfg["farmerbusport"] != fmt.Sprint(busPort) {
+		t.Errorf("farmer dials %v:%v, bus Service client port is %d", coreCfg["farmerinterface"], coreCfg["farmerbusport"], busPort)
+	}
+	if env := envValues(container(t, saasapi, "saasapi")); env["SAASAPI_NATS_URL"] != fmt.Sprintf("tls://%s:%d", fqdn, busPort) {
+		t.Errorf("SAASAPI_NATS_URL = %s", env["SAASAPI_NATS_URL"])
+	}
+	// TLS: the bus certificate covers both names farmer and saasapi verify.
+	hosts, _ := busCfg["certhosts"].([]any)
+	for _, n := range []string{alias, fqdn} {
+		if !slices.Contains(hosts, any(n)) {
+			t.Errorf("bus certhosts %v lack %s", hosts, n)
+		}
+	}
+	// Trust chain: same organization, same seed Secret, same NAME -> key
+	// for every seed the bus mounts.
+	if busCfg["farmerorganization"] != coreCfg["farmerorganization"] {
+		t.Errorf("farmerorganization: bus %v, core %v", busCfg["farmerorganization"], coreCfg["farmerorganization"])
+	}
+	busVols, farmerVols := byName(podSpec(bus)["volumes"]), byName(podSpec(farmer)["volumes"])
+	if get(busVols["nats-seeds"], "secret", "secretName") != get(farmerVols["nats-seeds"], "secret", "secretName") {
+		t.Error("the charts mount different seed Secrets")
+	}
+	busEnv, farmerEnv := envValues(container(t, bus, "farmerbus")), envValues(container(t, farmer, "farmer"))
+	for k, v := range busEnv {
+		if strings.HasSuffix(k, "_SEED_FILE") && farmerEnv[k] != v {
+			t.Errorf("%s: bus %q, farmer %q", k, v, farmerEnv[k])
+		}
+	}
+	// Network: each side's policy admits the other on the right port.
+	dmzBusNP := find(t, dmz, "NetworkPolicy", "imas-dmz-nats-bus")
+	dmzEnvoyNP := find(t, dmz, "NetworkPolicy", "imas-dmz-nats-envoy")
+	coreFarmerNP := find(t, core, "NetworkPolicy", "imas-core-farmer")
+	coreSaasNP := find(t, core, "NetworkPolicy", "imas-core-farmer-saasapi")
+	for _, c := range []struct {
+		name string
+		ok   bool
+	}{
+		{"bus admits farmer on the client port", allows(dmzBusNP, "ingress", "imas-core", podLabels(farmer), busPort)},
+		{"bus admits saasapi on the client port", allows(dmzBusNP, "ingress", "imas-core", podLabels(saasapi), busPort)},
+		{"farmer may dial the bus", allows(coreFarmerNP, "egress", "imas-dmz", podLabels(bus), busPort)},
+		{"saasapi may dial the bus", allows(coreSaasNP, "egress", "imas-dmz", podLabels(bus), busPort)},
+		{"farmer admits Envoy on its API port", allows(coreFarmerNP, "ingress", "imas-dmz", podLabels(envoy), 5405)},
+		{"Envoy may dial farmer's API port", allows(dmzEnvoyNP, "egress", "imas-core", podLabels(farmer), 5405)},
+	} {
+		if !c.ok {
+			t.Errorf("NetworkPolicy: %s", c.name)
+		}
+	}
+	// Envoy's upstream is this chart's farmer Service.
+	var envoyCfg obj
+	if err := yaml.Unmarshal([]byte(get(find(t, dmz, "ConfigMap", "imas-dmz-nats-envoy"), "data", "envoy.yaml").(string)), &envoyCfg); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range get(envoyCfg, "static_resources", "clusters").([]any) {
+		if get(c, "name") == "farmer_api" {
+			a := get(c, "load_assignment", "endpoints", 0, "lb_endpoints", 0, "endpoint", "address", "socket_address").(obj)
+			found = a["address"] == farmerFQDN && a["port_value"] == get(find(t, core, "Service", "imas-core-farmer"), "spec", "ports", 0, "port")
+		}
+	}
+	if !found {
+		t.Error("the nats chart's farmer_api cluster doesn't point at this chart's farmer Service and port")
+	}
+	// Gateway JWT lifetime: the nats chart sizes Envoy's /v1/refresh bucket
+	// from gatewayJwtTtlSeconds, which must equal farmer's gatewayjwtttl.
+	var natsValues obj
+	if err := yaml.Unmarshal(repoFile(t, "deploy/helm/nats/values.yaml"), &natsValues); err != nil {
+		t.Fatal(err)
+	}
+	ttl, err := time.ParseDuration(fmt.Sprint(coreCfg["gatewayjwtttl"]))
+	if err != nil || get(natsValues, "envoy", "refreshRateLimit", "gatewayJwtTtlSeconds") != int(ttl.Seconds()) {
+		t.Errorf("gatewayjwtttl %v, nats chart gatewayJwtTtlSeconds %v", coreCfg["gatewayjwtttl"], get(natsValues, "envoy", "refreshRateLimit", "gatewayJwtTtlSeconds"))
+	}
+	// OpenBao: the bus logs in with, and issues from, exactly the roles
+	// this chart's bootstrap creates.
+	var projAudience any
+	for _, v := range podSpec(bus)["volumes"].([]any) {
+		if get(v, "name") == "openbao-auth" {
+			projAudience = get(v, "projected", "sources", 0, "serviceAccountToken", "audience")
+		}
+	}
+	roles := bootstrapRolesFor(t, core, "imas-core-farmer-openbao-bootstrap")
+	br := roles[busEnv["IMAS_CERTS_OPENBAO_K8S_ROLE"]]
+	if !slices.Equal(br[:3], []string{get(podSpec(bus), "serviceAccountName").(string), "imas-dmz", "imas-farmerbus-certs"}) {
+		t.Errorf("bus login role %s = %v", busEnv["IMAS_CERTS_OPENBAO_K8S_ROLE"], br)
+	}
+	job := find(t, core, "Job", "imas-core-farmer-openbao-bootstrap")
+	script := get(container(t, job, "bootstrap"), "args", 0).(string)
+	if !strings.Contains(script, busEnv["IMAS_CERTS_OPENBAO_PKI_MOUNT"]+"/roles/"+busEnv["IMAS_CERTS_OPENBAO_ROLE"]) {
+		t.Errorf("bootstrap doesn't create the PKI role %s/%s the bus issues from", busEnv["IMAS_CERTS_OPENBAO_PKI_MOUNT"], busEnv["IMAS_CERTS_OPENBAO_ROLE"])
+	}
+	if !strings.Contains(script, `audience="`+fmt.Sprint(projAudience)+`"`) {
+		t.Errorf("roles' audience doesn't match the bus's projected token audience %v", projAudience)
+	}
+	m := regexp.MustCompile(`imas-farmerbus \\\n\s+allowed_domains="([^"]+)"`).FindStringSubmatch(script)
+	if m == nil {
+		t.Fatal("no allowed_domains for imas-farmerbus")
+	}
+	for _, h := range hosts {
+		ok := false
+		for _, d := range strings.Split(m[1], ",") {
+			if d == h || strings.HasPrefix(d, "*.") && strings.HasSuffix(h.(string), d[1:]) {
+				ok = true
+			}
+		}
+		if !ok {
+			t.Errorf("PKI role imas-farmerbus can't issue the bus's SAN %v", h)
 		}
 	}
 }

@@ -8,9 +8,15 @@ and the checks below more carefully than the Go code.
 
 Design: `docs/design/cloudxp-machine-manager-api-design.md` §2.5.
 
-These are reviewed reference files, as in `deploy/farmer/`. Nothing in
-imas applies them. The real roles, Deployments and database users live in
-the ops repo.
+These are reviewed reference files, as in `deploy/farmer/`.
+
+- `deploy/helm/farmer` carries byte copies of both policies, and
+  `TestPoliciesMatchReference` fails if they drift. Its eval-only OpenBao
+  bootstrap writes them to the bundled OpenBao and binds `imas-fleet-verify`
+  to farmer's role (and to saasapi's, with fleet update dispatch on).
+- It deploys no fleetreleaser, so no role binds `imas-fleet-signer`.
+- For a production OpenBao, the roles, the fleetreleaser Job and its
+  database user are set up outside imas, as described below.
 
 | File | What it is |
 |---|---|

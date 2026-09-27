@@ -9,27 +9,39 @@ Operator (ESO) can deliver it to the saasapi Deployment.
 new delivery path for a privileged NATS credential. The policy boundary
 below needs human review more than the Go code does.
 
-Same precedent as `deploy/envoy/`: these are reviewed reference files.
-**farmer's real Deployment and Helm chart are not in this repo.** They
-live in the separate ops repo, which this change had no access to. None
-of the YAML here is applied by anything in imas.
+These are the reviewed reference files, the source of truth for this
+hand-off. **The chart that deploys them is `deploy/helm/farmer`.** It
+renders every file here from its values, and its `chart_test.go` fails if
+the chart drifts from them:
+
+| This file | In the chart | Test |
+|---|---|---|
+| `farmer-deployment-nats-seeds.patch.yaml` | the farmer Deployment's seed env, mount and volume | `TestFarmerMatchesSeedPatch` |
+| `saasapi-credential-publish-job.yaml` | the publish hook Job, ServiceAccount and NetworkPolicy | `TestPublishJobMatchesReference` |
+| `externalsecrets.yaml` | `externalSecrets.enabled` | `TestExternalSecretsMatchReference` |
+| the job reconcile files | `farmer.jobs.reconcileWindow` | `TestReconcileWindow` |
+| the publisher policy below | `files/openbao-policies/imas-saasapi-cred-publisher.hcl` | `TestPoliciesMatchReference` |
+
+Change a file here and the chart together. Deployments that don't use the
+chart can still apply these by hand, as before.
 
 | File | What it is |
 |---|---|
-| `farmer-deployment-nats-seeds.patch.yaml` | Volume, mount, and env vars to add to farmer's Deployment in the ops repo (part 1) |
+| `farmer-deployment-nats-seeds.patch.yaml` | Volume, mount, and env vars for farmer's Deployment (part 1) |
 | `saasapi-credential-publish-job.yaml` | The Job, its ServiceAccount, and its NetworkPolicy (part 2) |
 | `externalsecrets.yaml` | ESO wiring for the seeds and for the published JWT |
 | `values.job-reconcile.yaml` | Values block for the job reconcile window (see the last section) |
 | `deployment.env.job-reconcile.yaml` | Template fragment to paste under the farmer container's `env:` list |
 
-## Part 1: the SYS Account seed on farmer (ops change only)
+## Part 1: the SYS Account seed on farmer (deploy config only)
 
 No code change is needed. `ensureNatsAuth` loads the SYS Account key with
 `loadOrCreateSeed(path, "SYS_ACCOUNT", nkeys.CreateAccount)`, the same way
 it loads every other key. That function already prefers an externally
-supplied seed and never writes one back to disk. Add the following to
-farmer's Deployment in the ops repo (the exact patch is in
-`farmer-deployment-nats-seeds.patch.yaml`):
+supplied seed and never writes one back to disk. farmer's Deployment needs
+the following (the exact patch is in
+`farmer-deployment-nats-seeds.patch.yaml`; `deploy/helm/farmer` renders it
+from `natsSeeds`):
 
 | What | Value |
 |---|---|
@@ -100,7 +112,12 @@ Running the subcommand against farmer's real PKI directory also works: it
 behaves exactly like farmer's boot call, including the push. The
 reference Job doesn't do this, for the reasons above.
 
-### OpenBao policy (for whoever writes it in the ops repo)
+### OpenBao policy
+
+`deploy/helm/farmer` carries this policy as
+`files/openbao-policies/imas-saasapi-cred-publisher.hcl`. Its eval-only
+OpenBao bootstrap writes it and the role below. Against a production
+OpenBao, whoever manages OpenBao writes both, as described here.
 
 Put the published JWT at its own path, separate from the seeds. Neither
 path may be a prefix of the other. The examples below use
@@ -239,7 +256,7 @@ of that: how late a job may start and still be recorded.
 
 | Env var | Helm value | Default | Valid values |
 |---|---|---|---|
-| `IMAS_JOB_RECONCILE_WINDOW` | `jobs.reconcileWindow` | `"2h"` in the chart; unset (every job recorded) if the value is null or `""`, or without the chart | Go duration string, e.g. `"2h"`, `"90m"`; `"0"` disables |
+| `IMAS_JOB_RECONCILE_WINDOW` | `jobs.reconcileWindow` (`farmer.jobs.reconcileWindow` in `deploy/helm/farmer`) | `"2h"` in the chart; unset (every job recorded) if the value is null or `""`, or without the chart | Go duration string, e.g. `"2h"`, `"90m"`; `"0"` disables |
 
 - The `jobreconcilewindow` key in farmer's config file wins over the env
   var, like the other `IMAS_*` settings.

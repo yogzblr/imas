@@ -259,13 +259,12 @@ the way an environment variable is. This matches `jwtauth.go`'s preference
 for the `IMAS_NATS_*_SEED_FILE` form. The JWT isn't secret and stays an
 environment variable.
 
-**Not in this repo:** the real OpenBao KV paths and policies, the
-`ExternalSecret` manifests, the Reloader annotation, and farmer's own
-Deployment/Helm chart. They belong in the separate ops/infra repo, which
-this change doesn't have access to. That's the same situation as the
-gatewayjwt Envoy wiring. `deploy/farmer/` holds reviewed *reference*
-versions of the parts this design depends on (see below). The intended
-production flow is:
+**Deployment:** `deploy/helm/farmer` deploys farmer and saasapi with this
+design's pieces: the seed mounts, the publish Job, the `ExternalSecret`
+manifests (`externalSecrets.enabled`), the Reloader annotation and the
+OpenBao policies. `deploy/farmer/` holds the reviewed *reference* versions
+the chart is tested against (see below). The real OpenBao KV paths are
+still an operator choice. The intended production flow is:
 
 1. Ops generates the SaaS API's NKey seed and stores it in OpenBao KV.
 2. ESO syncs it to farmer as `IMAS_NATS_SAASAPI_USER_SEED_FILE`, so farmer

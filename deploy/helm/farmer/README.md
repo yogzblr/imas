@@ -46,9 +46,9 @@ It does **not** deploy the DMZ bus or Envoy. Those are `deploy/helm/nats`.
 
 ## Before you install
 
-1. **Fetch the subcharts:** run `helm dependency update deploy/helm/farmer`.
-   They are not vendored: `charts/` is gitignored and there is no
-   `Chart.lock` yet (see [Known gaps](#known-gaps)).
+1. **Fetch the subcharts:** run `helm dependency build deploy/helm/farmer`.
+   `Chart.lock` pins the exact versions; `charts/` is gitignored. Use
+   `helm dependency update` only to move a pin, and commit the new lock.
 2. **The seed Secret** (`natsSeeds.secretName`, default
    `imas-farmer-nats-seeds`) must exist in the release namespace. The chart
    never generates seeds. See [Seeds](#seeds).
@@ -81,7 +81,7 @@ kubectl -n imas-core create secret generic imas-farmer-nats-seeds \
 kubectl -n imas-core create secret generic imas-saasapi-internal-auth \
   --from-literal=current="$(openssl rand -hex 32)"
 
-helm dependency update deploy/helm/farmer
+helm dependency build deploy/helm/farmer
 helm install imas-core deploy/helm/farmer -n imas-core -f deploy/helm/farmer/ci/default-values.yaml \
   --set farmer.image.repository=<registry>/imas-farmer --set saasapi.image.repository=<registry>/imas-saasapi
 ```
@@ -155,9 +155,11 @@ directly.
 **The bus certificate must carry both names.** The nats chart's default
 SANs do. In `bus.tls.mode=secret`, add them yourself.
 
-This was checked end to end with the repo's own nats-server and nats.go
-(see [Verification status](#verification-status)). Retire the relay once
-farmer can be given a bus URL separately from its bind address.
+This was checked end to end against the real `farmerbus` (see
+[Verification status](#verification-status)), and `TestContractWithNatsChart`
+keeps the names, ports, SANs, seeds and NetworkPolicy selectors in step
+with `deploy/helm/nats`. Retire the relay once farmer can be given a bus
+URL separately from its bind address.
 
 ## Seeds
 
@@ -417,6 +419,12 @@ go test ./deploy/helm/farmer/   # renders with the helm CLI; skips if helm isn't
     reconcile-window fragment;
   - `deploy/fleetreleaser/policies/*.hcl`, and the publisher policy in
     `deploy/farmer/README.md`.
+- **The pairing with `deploy/helm/nats`.** `TestContractWithNatsChart`
+  renders both charts side by side and checks every name, port, SAN,
+  seed, NetworkPolicy selector and OpenBao role each relies on from the
+  other.
+- **`Chart.lock`.** `TestChartLockMatchesChartYaml` fails if the lock and
+  `Chart.yaml` disagree.
 - **Chart-testing values.** `ci/*-values.yaml` follow the chart-testing
   convention: eval defaults, external production, and token auth.
 
@@ -464,6 +472,32 @@ registry.
   exactly the §5.1 SQL above, and waited for `saas.enrollment_keys` before
   the column grant.
 
+**Revalidated on 2026-09-27 against `main` at `4d81cc4`** (PRs #4, #15
+and #16 included; no `main` change gives farmer a bus URL separate from
+`farmerinterface`, so the relay stays):
+
+- **`Chart.lock`** was written by `helm dependency update` from the four
+  projects' published repo indexes. All four pins are published, and each
+  is the newest release. `helm dependency build` from a clean copy
+  accepts it, and it rejects a `Chart.yaml` edited out of step.
+- **The real `farmerbus`** (built from `main`) ran with the nats chart's
+  rendered config and env in `bus.tls.mode=openbao`. It got its
+  certificate from this chart's `imas-farmerbus` PKI role in a real
+  OpenBao, set up by this chart's bootstrap, using a token scoped to that
+  role's policy. The certificate carried exactly the nats chart's SANs,
+  including the per-pod headless name. Then, authenticated as the bus's
+  own SYS user with the CA fetched the way saasapi's init container
+  fetches it:
+  - farmer-style tenant and SYS connections reached it through the
+    relay layout, and each got a `$SYS` ping reply;
+  - a saasapi-style connection to the FQDN reached it directly, bypassing
+    the relay;
+  - a client trusting another CA was refused.
+- **`TestContractWithNatsChart`** was checked by mutation. Each of six
+  deliberate breakages made it fail: the nats chart's core pod selector,
+  the bus port, the organization, a seed key, the gateway JWT TTL, and
+  the bus SANs.
+
 **Not verified:**
 
 - A real install. There was no cluster, so none of this was tested:
@@ -476,22 +510,16 @@ registry.
 
 ## Known gaps
 
-1. **No `Chart.lock`.** The chart repos weren't reachable from where this
-   was built. Run `helm dependency update` once and commit the lock.
-2. **farmer has no separate bus URL setting.** The relay works around it
+1. **farmer has no separate bus URL setting.** The relay works around it
    (see [Reaching the bus](#reaching-the-bus)). The fix is a code change in
    `internal/config`.
-3. **No published farmer or saasapi images.**
-4. **Horizontal farmer scaling** needs FarmerPKI off local disk.
-5. **saasapi runs in the release namespace.** The reference put its
+2. **No published farmer or saasapi images.**
+3. **Horizontal farmer scaling** needs FarmerPKI off local disk.
+4. **saasapi runs in the release namespace.** The reference put its
    ExternalSecret in a separate `saasapi` namespace. Here saasapi shares a
    namespace with farmer's seed Secret, but it mounts only its own
    credential Secret. Whoever can create pods in this namespace could
    mount either one.
-6. **Stale statements elsewhere.** `deploy/farmer/README.md` and
-   `deploy/saasapi/README.md` still say the real chart lives only in the
-   ops repo. `deploy/helm/nats/README.md`'s gap 3 is now worked around
-   here. All three are outside this chart's file scope.
 
 ## Licensing
 
