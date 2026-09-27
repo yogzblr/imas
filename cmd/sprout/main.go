@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 	"strings"
@@ -56,13 +57,48 @@ func main() {
 	joinToken := flag.String("join-token", "",
 		"join token for first-time enrollment; overrides "+config.EnvJoinToken+" and the config file's jointoken. "+
 			"Visible to other local users in the process list, so prefer the environment variable or config file")
+	flag.Usage = usage
 	flag.Parse()
+	if cmd := flag.Arg(0); serviceCommands[cmd] {
+		os.Exit(serviceCommand(cmd, *joinToken))
+	}
 	// Under the Windows SCM, the service handler drives the loop: the
 	// SCM's Stop/Shutdown cancels its context. See service_windows.go.
 	if runAsService(func(ctx context.Context) { runSprout(ctx, *joinToken, false) }) {
 		return
 	}
 	runSprout(context.Background(), *joinToken, true)
+}
+
+// serviceCommands manage the Windows service (service_windows.go). Other
+// positional arguments are ignored, as before.
+var serviceCommands = map[string]bool{"install": true, "uninstall": true, "start": true, "stop": true}
+
+func usage() {
+	out := flag.CommandLine.Output()
+	fmt.Fprintf(out, "Usage: %s [flags] [install|uninstall|start|stop]\n\n", os.Args[0])
+	fmt.Fprint(out, serviceCommandsHelp)
+	fmt.Fprint(out, "\nFlags:\n")
+	flag.PrintDefaults()
+}
+
+// serviceCommand runs one of serviceCommands and returns the exit code.
+func serviceCommand(cmd, joinToken string) int {
+	if flag.NArg() > 1 {
+		return serviceCommandFailed(cmd, fmt.Errorf("unexpected arguments %q", flag.Args()[1:]))
+	}
+	if joinToken != "" {
+		// A service is started without it, and saving it in the
+		// service's command line would expose it.
+		return serviceCommandFailed(cmd, fmt.Errorf("-join-token only applies to a sprout started from this "+
+			"command line; for the service, set jointoken in the config file or %s", config.EnvJoinToken))
+	}
+	return runServiceCommand(cmd)
+}
+
+func serviceCommandFailed(cmd string, err error) int {
+	fmt.Fprintf(os.Stderr, "imas-sprout %s: %v\n", cmd, err)
+	return 1
 }
 
 // runSprout is the sprout's main loop. It returns once parent is cancelled

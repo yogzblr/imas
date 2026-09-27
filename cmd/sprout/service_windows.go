@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 
 	log "github.com/yogzblr/imas/internal/log"
@@ -48,4 +49,63 @@ func runAsService(run func(context.Context)) bool {
 		log.Fatalf("running as the %s service: %v", serviceName, err)
 	}
 	return true
+}
+
+const serviceCommandsHelp = `Service commands (run from an elevated prompt):
+  install    register this binary as the imas-sprout service (automatic
+             start, LocalSystem, restart 5s after a failure), as the MSI
+             does; it is not started. Refused if a non-administrator can
+             modify the binary or its directory.
+  uninstall  stop the service and remove it. For an MSI install, uninstall
+             the MSI instead.
+  start      start the service and wait until it is running.
+  stop       stop the service and wait until it has stopped.
+`
+
+// runServiceCommand runs one of serviceCommands and returns the exit code.
+func runServiceCommand(cmd string) int {
+	if err := doServiceCommand(cmd); err != nil {
+		return serviceCommandFailed(cmd, err)
+	}
+	return 0
+}
+
+func doServiceCommand(cmd string) error {
+	if isService {
+		return fmt.Errorf("not available while running as the service")
+	}
+	switch cmd {
+	case "install":
+		exe, err := winservice.ExePath()
+		if err != nil {
+			return err
+		}
+		if err := winservice.Install(winservice.Config{
+			Name:        serviceName,
+			DisplayName: "imas Sprout",
+			Description: "imas remote control agent",
+		}, exe); err != nil {
+			return err
+		}
+		fmt.Printf("installed the %s service (%s). Set the farmer address and join token in the "+
+			"sprout config, then run: imas-sprout start\n", serviceName, exe)
+	case "uninstall":
+		if err := winservice.Uninstall(serviceName); err != nil {
+			return err
+		}
+		fmt.Printf("removed the %s service\n", serviceName)
+	case "start":
+		if err := winservice.Start(serviceName); err != nil {
+			return err
+		}
+		fmt.Printf("%s is running\n", serviceName)
+	case "stop":
+		if err := winservice.Stop(serviceName); err != nil {
+			return err
+		}
+		fmt.Printf("%s is stopped\n", serviceName)
+	default:
+		return fmt.Errorf("unknown command %q", cmd)
+	}
+	return nil
 }
