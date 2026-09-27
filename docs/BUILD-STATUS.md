@@ -1,8 +1,29 @@
 # Build Status
 
 Tracks Wave 0 (the nine workstreams from `docs/claude-code-parallel-build-plan.md`
-section 1, task briefs 1.1–1.9) and Wave 1 (section 2, dispatched once B and A
-were confirmed merged to `master`).
+section 1, task briefs 1.1–1.9), Wave 1 (section 2), Wave 2 (section 3), the
+"ongoing" Windows/Linux ingredient batch (section 4), and everything merged
+since — the repo rebrand, CI setup, the Helm charts, and workstream M
+(Windows packaging + Ansible). Refreshed 2026-09-27 against `git log` on
+`main`; see "Notes" at the bottom for what changed in this pass. Refreshed
+again later the same day by the docs-refresh pass (architecture diagram,
+SaaS API reference, `INSTALL.md`), which closed the Envoy/EdDSA gap and
+recorded two payload-encryption gaps it found; see "Docs-refresh pass" in
+the Notes.
+
+**Repository-history note, read before trusting a PR number below:** this
+repo (`yogzblr/imas`) was created by detaching from `yogzblr/grlx` while
+keeping full commit history (see the `Rebrand: grlx -> imas` commit,
+`b4a0195`, 2026-09-26). GitHub PR numbers are per-repo counters, so every PR
+number cited for work merged **before** `b4a0195` (all of Wave 0, Wave 1,
+Wave 2, and the ongoing ingredient batch below) refers to a PR on the old,
+superseded `yogzblr/grlx` repo — those numbers do not resolve on
+`yogzblr/imas` and may collide with an unrelated, real PR number here (e.g.
+old "#20"/"#21"/"#22" below are different PRs from the current, real
+`yogzblr/imas` #20/#21/#22 in the Workstream M section). The commit hashes
+in backticks are stable across the rename and are the reliable way to find
+this work; PR numbers for anything merged **after** `b4a0195` are real,
+live `yogzblr/imas` links.
 
 ## Wave 0
 
@@ -38,19 +59,39 @@ JWT and updated the design docs).
 | C | Split `cmd/farmer/main.go` into two deployables — DMZ bus process (`farmerbus`, `RunNATSServer()`) and non-DMZ core process (`farmer`, `ConnectFarmer()`), wired to workstream B's JWT push mechanism | session_01JLfTEGP4UW6hZpPADc8ftD | merged — PR #20 (`629e4bc`) | n |
 | H | Envoy JWT-gated gateway (`deploy/envoy/`) in front of NATS + recipe-download route, plus the enrollment endpoint (`POST /v1/enroll`, token redemption against `saas.enrollment_keys`, issuing JWT + NKey + tenant X25519 pubkey + gateway JWT) | session_01CGL1nDaq9RrXK2nAttjwf3 | merged — PR #21 (`373c844`, `f2a6fe7`, `1b81abc`, `de0958a`) | y — literal front door of the trust chain |
 
-**Open verification gap left by H's merge (not a code task, and not gated on
-anything):** the sandbox H was built in had no network access to run a live
-Envoy instance, so `jwt_authn`'s EdDSA/Ed25519 support was only checked
-against `jwx`'s library-level round-trip, never against real Envoy. Someone
-with normal network access (and a Docker daemon) needs to pin an Envoy image
-version confirmed to support EdDSA in `jwt_authn` and run one real enrollment
-against `deploy/envoy/testing/docker-compose.keycloak.yml` before relying on
-`deploy/envoy/` in any real environment. **I attempted this myself and could
-not** — this coordinator session has network access but no Docker daemon
-(`/var/run/docker.sock` doesn't exist here). This still needs to happen
-somewhere before Wave 1/2's Envoy config is trusted in production, but it
-does not block Wave 2's code being written, since E/I/J don't depend on the
-JWT signing algorithm choice itself.
+**Verification gap left by H's merge: closed (2026-09-27).** H's sandbox
+had no network, so `jwt_authn`'s EdDSA support was first checked only
+against `jwx`'s library-level round-trip. It has since been checked against
+real Envoy three times:
+
+1. **In this docs-refresh session**, against the official Envoy **v1.35.3**
+   release binary (`envoy-1.35.3-linux-x86_64` from the GitHub release,
+   sha256 `241c1702f0ed1c0dba31339abaab422906a4295cc92640f5b832c131ee385767`,
+   `envoy --version`: `ff3fe7f0…/1.35.3/Clean/RELEASE/BoringSSL`), which
+   is the version `deploy/helm/nats/values.yaml` pins:
+   `IMAS_TEST_ENVOY_BIN=<that binary> go test ./internal/pki/ ./internal/api/ -run ThroughRealEnvoy -v`.
+   Both suites passed: `TestSproutLifecycle_ThroughRealEnvoy` (5/5
+   subtests) and `TestSproutDownloadsStagedRecipe_ThroughRealEnvoy` (4/4).
+   They run the shipped `deploy/envoy/envoy.yaml` and cover a real
+   `POST /v1/enroll` through Envoy (NKey proof of possession), the `wss://`
+   upgrade accepted with a valid EdDSA gateway JWT and refused with a
+   missing, expired or forged one, `/v1/refresh`, and `/files/`. OpenBao
+   Transit is stubbed in these suites; the Ed25519 signatures and JWKS are
+   real.
+2. `deploy/envoy/testing/README.md` records the same suites passing on
+   v1.34.1 and v1.35.3.
+3. `deploy/helm/nats/README.md` ("Verification status") records the real
+   `cmd/sprout` binary enrolling through the chart's `envoyproxy/envoy:v1.35.3`
+   with **real** OpenBao signing the EdDSA gateway JWT: 1 websocket upgrade
+   and 3 `jwt_authn` allows, 0 denies.
+
+What this does **not** cover: `deploy/envoy/testing/docker-compose.keycloak.yml`
+is not an Envoy test. It's a separate harness that checks farmer's JWKS
+against Keycloak as a second, independent JOSE consumer, and it has still
+never been run. The docs-refresh session has the Docker CLI but no running
+daemon, and starting one there wasn't permitted, so it couldn't run it
+either. The Envoy question is settled without it; the Keycloak cross-check
+remains open as a nice-to-have (see Notes).
 
 ## Wave 2
 
@@ -65,20 +106,46 @@ resolve merge fallout against J's box-key tenant scoping.
 |---|---|---|---|---|
 | E | Multi-tenancy: NATS Account-per-tenant (subjects unchanged), re-key `internal/pki/pki.go` by `(tenant_id, sprout_id)`, tenant field on `internal/rbac` cohort/role maps, dynamic `FarmerOrganization` | session_01SwBEMgMkSFan2X3fUC3pkz | merged — PR #28 (`c13d290`, `aeec2b8`) | y — tenant isolation correctness |
 | I | Finish recipe storage migration: confirm A's recipe HTTP endpoint is served behind H's Envoy JWT-gated route, remove `internal/natsapi/recipes.go`'s old NATS-based delivery | session_01QKGaTno21cXoZGp7hrbjbM | merged — PR #25 (`e59eb65`) | n |
-| J | Payload encryption + rotation: NaCl `box` (X25519), tenant keypair via OpenBao (replacing `internal/pki/tenantbox.go`'s interim local-disk custody), sprout keypair generated at enrollment. Must first add a `sprout_pub` field to the enrollment request/`Enroll()` (confirmed missing) | session_01AivbiHCYGgL1ywzyTViaK2 | merged — PR #27 (`f5a947d`) | y — cryptographic code defending against a compromised DMZ bus |
+| J | Payload encryption + rotation: NaCl `box` (X25519), tenant keypair via OpenBao (replacing `internal/pki/tenantbox.go`'s interim local-disk custody), sprout keypair generated at enrollment. Must first add a `sprout_pub` field to the enrollment request/`Enroll()` (confirmed missing) | session_01AivbiHCYGgL1ywzyTViaK2 | merged — PR #27 (`f5a947d`), **but see the two open gaps below**: no payload is encrypted yet, and the "tenant" keypair is one per deployment | y — cryptographic code defending against a compromised DMZ bus |
+
+**Open gaps in J as merged (found by the docs-refresh pass, 2026-09-27,
+by reading the code; not fixed there, which was docs-only):**
+
+- **No payload is encrypted yet.** The keys are exchanged end to end: the
+  sprout sends `sprout_pub` at enrollment, farmer stores it in
+  `farmer.pki_sprout_box_keys` keyed by `(tenant_id, sprout_id)` with
+  rotation grace keys, and the sprout pins `tenant_x25519_pub`. But
+  `internal/natsapi/crypto.go`'s `PublishEncryptedTo` /
+  `DecryptEncryptedFrom` have no callers outside `crypto_test.go`, and no
+  sprout-side code imports `nacl/box` (only `internal/pki/tenantbox.go` and
+  `internal/natsapi/crypto.go` do). Every farmer↔sprout payload still
+  crosses the DMZ bus as plaintext inside TLS, so the design's stated goal,
+  defending against a compromised DMZ bus, is not met yet. Wiring each
+  boundary needs both sides changed together (see `crypto.go`'s header).
+- **One keypair per deployment, not per tenant.** `tenantbox.go`'s
+  `ensureTenantX25519Keypair` reads and caches a single keypair at one KV
+  path (`IMAS_TENANTBOX_OPENBAO_KV_PATH`, default `imas/tenant-x25519`), and
+  `pki.Enroll` hands every tenant the same `tenant_x25519_pub`.
+  `imas-payload-encryption-design.md` calls for one per tenant. Each
+  (tenant key, sprout key) pair still derives a distinct shared secret, but
+  one key compromise exposes every tenant, and a tenant's key can't be
+  rotated on its own. `pki/enroll.go`'s own comment already flags this as
+  not yet re-keyed per tenant.
+- **No rotation tooling for the tenant keypair**, which the design names
+  as the accepted mitigation for having no forward secrecy.
 
 ## Ongoing / fully parallel (no gating)
 
 | Item | Description | Cloud session ID | Status | Needs security review |
 |---|---|---|---|---|
-| D (facts listener) | `internal/facts/listener.go`'s `RegisterFarmerListener` still used plain fan-out `Subscribe`, justified by a stale comment from before workstream A removed `props/store.go`'s in-memory cache; queue-grouped it under `imas-core` to stop every replica double-writing the same PXC row on every fact update | not dispatched by this coordinator — found already merged | merged — PR #24 (`e9aa2ea`) | n |
-| G.2 | Windows user/group provider using `deploymenttheory/go-bindings-win32`'s netmanagement package | session_01ArigyXKLB5a2gV449zBGZB | dispatched | y — user/group creation, and the dependency is young (v0.2.x) |
-| G.4 | Windows DACL/ACL ingredient using `hectane/go-acl` for file ACLs, extended to registry-key ACLs (`SE_REGISTRY_KEY`) | session_01BVU6xoX7h7tzkscFYUTY8U | dispatched | y — propagation/inheritance semantics are a security-relevant bug class |
-| G.6 | Task Scheduler, Windows Update, and Shortcut COM ingredients using `go-ole/go-ole`, starting with Shortcut (IShellLink) to prove the COM lifecycle pattern | session_01GXJ5vf5Fdo9fMxdoFAe5rE | dispatched | y — COM lifecycle bugs (missed Release, wrong apartment threading) |
-| G.7 | v1 subset of LGPO — parse `registry.pol` (`encoding/binary`) and ADMX/ADML (`encoding/xml`); PR proposes which policy subset to cover for a first pass | session_01XYVPKvrCssvaGQTd9MbEs3 | dispatched | n |
-| H.1 | Linux network/route management using `vishvananda/netlink`, with a verify-connectivity-or-roll-back pattern in the ingredient itself | session_01Q9NMvFaiFykjHmvCpqSn36 | dispatched | n |
-| H.2 | nftables firewall ingredient using `google/nftables` | session_015pQ7NBWmSxJFht6DQyrrbs | dispatched | y — a firewall ingredient can lock out or expose a host |
-| H.3 | SELinux ingredient using `opencontainers/selinux` | session_012DtUVSVbEHb11Uz4KzW4Tt | dispatched | y — CERT-In/DPDP-relevant: silently degrading to permissive is compliance-visible |
+| D (facts listener) | `internal/facts/listener.go`'s `RegisterFarmerListener` still used plain fan-out `Subscribe`, justified by a stale comment from before workstream A removed `props/store.go`'s in-memory cache; queue-grouped it under `imas-core` to stop every replica double-writing the same PXC row on every fact update | not dispatched by this coordinator — found already merged | merged — PR #24, old-repo numbering (`e9aa2ea`) | n |
+| G.2 | Windows user/group provider using `deploymenttheory/go-bindings-win32`'s netmanagement package | session_01ArigyXKLB5a2gV449zBGZB | **merged** — PR #32, old-repo numbering (`20a6ac5`) | y — user/group creation, and the dependency is young (v0.2.x) |
+| G.4 | Windows DACL/ACL ingredient using `hectane/go-acl` for file ACLs, extended to registry-key ACLs (`SE_REGISTRY_KEY`) | session_01BVU6xoX7h7tzkscFYUTY8U | **merged** — `internal/ingredients/windacl/`, `hectane/go-acl` in `go.mod` | y — propagation/inheritance semantics are a security-relevant bug class |
+| G.6 | Task Scheduler, Windows Update, and Shortcut COM ingredients using `go-ole/go-ole`, starting with Shortcut (IShellLink) to prove the COM lifecycle pattern | session_01GXJ5vf5Fdo9fMxdoFAe5rE | **merged** — `internal/ingredients/wintaskscheduler/`, `winupdate/`, `winshortcut/`, `go-ole/go-ole` in `go.mod` (`a49361a`, `cbd1fe0`) | y — COM lifecycle bugs (missed Release, wrong apartment threading) |
+| G.7 | v1 subset of LGPO — parse `registry.pol` (`encoding/binary`) and ADMX/ADML (`encoding/xml`); PR proposes which policy subset to cover for a first pass | session_01XYVPKvrCssvaGQTd9MbEs3 | **merged** — `internal/ingredients/lgpo/` | n |
+| H.1 | Linux network/route management using `vishvananda/netlink`, with a verify-connectivity-or-roll-back pattern in the ingredient itself | session_01Q9NMvFaiFykjHmvCpqSn36 | **merged** — `internal/ingredients/network/`, `vishvananda/netlink` in `go.mod` | n |
+| H.2 | nftables firewall ingredient using `google/nftables` | session_015pQ7NBWmSxJFht6DQyrrbs | **merged** — `internal/ingredients/firewall/` (build-tagged `linux`, doc comment confirms this is the H.2 nftables ingredient, distinct from G.9's `winfirewall`), `google/nftables` in `go.mod` | y — a firewall ingredient can lock out or expose a host |
+| H.3 | SELinux ingredient using `opencontainers/selinux` | session_012DtUVSVbEHb11Uz4KzW4Tt | **merged** — `internal/ingredients/selinux/`, `opencontainers/selinux` in `go.mod` | y — CERT-In/DPDP-relevant: silently degrading to permissive is compliance-visible |
 
 Before dispatching, validated against `master` that none of the seven were
 already implemented: no ACL/DACL, Task Scheduler/WUA/Shortcut, LGPO,
@@ -87,7 +154,29 @@ named dependencies (`go-bindings-win32`, `hectane/go-acl`, `go-ole/go-ole`,
 `vishvananda/netlink`, `google/nftables`, `opencontainers/selinux`) were in
 `go.mod`. The existing `winfirewall` ingredient is G.9's already-merged
 `netsh advfirewall` wrapper, not H.2's Linux nftables ingredient — confirmed
-by reading its imports before ruling H.2 not done.
+by reading its imports before ruling H.2 not done. **All seven are now
+confirmed merged** (re-verified 2026-09-27: every listed package/ingredient
+directory and `go.mod` dependency is present on `main`) — the "dispatched"
+status this table originally recorded was stale.
+
+## Post-rebrand work (not part of the original Wave 0–2 plan)
+
+Everything below merged to `main` after `b4a0195` (the `grlx` → `imas`
+rebrand), on real, current `yogzblr/imas` PR numbers. None of it was
+dispatched from `claude-code-parallel-build-plan.md` — it was tracked
+directly in this session instead.
+
+| Item | Description | Status |
+|---|---|---|
+| Rebrand + CI setup | `Rebrand: grlx -> imas` (`b4a0195`); added `build.yml` (Linux/Windows cross-compile + farmer Docker); made `snapshot.yml`/`release.yml` manual-only until publish secrets exist on the new repo; `govulncheck`/`go-licenses` CI fixes | merged (`b4a0195`, `e7c8860`, `65e59e1`, `0d1b975`) |
+| Helm charts | Chart for farmer (core) and saasapi, with optional PXC/OpenBao/Valkey subcharts | merged — PR #17 (`b5a418d`) |
+| Farmer bus/CLI separation | Separated farmer's bus address from its API interface address (`farmerinterface`); `imas` CLI now reads `farmerbusurl` and verifies the bus via `BusTLSServerName` instead of assuming they're the same host | merged — PR #18 (`f30b9dd`), PR #19 (`01b4013`) |
+| **Workstream M.1** — Windows SCM service wrapper for the sprout binary | `golang.org/x/sys/windows/svc` lifecycle hooks so `imas-sprout.exe` itself runs under the Windows SCM (install/uninstall/start/stop/status via `svc/mgr`, no SIGINT/SIGTERM handling under the SCM, rotating file log) — distinct from G.1's *ingredient* for managing other Windows services | merged — PR #22 (`cfdb73f`, `54d70f4`, `f2fa7fa`, `8b9b388`, `718928e`) |
+| **Workstream M.2** — MSI installer + winget package | MSI via `wixl`/`msitools`, winget NuGet package published to the public `imasnget` Buildkite feed on release, sprout starts itself post-upgrade | merged — PR #21 (`1c6a2a5`, `65bc985`) |
+| **Workstream M.3** — SUSE rpm validation | `zypper`-specific check on the existing `nfpm`-built rpm packaging | merged — folded into PR #21 (`1c6a2a5`'s "SUSE RPM check") |
+| **Workstream M.4** — customer-run Ansible playbooks | Not started. Task brief drafted in `docs/claude-code-parallel-build-plan.md` §4a (item 4) but not yet dispatched. | **open** |
+| **New: Terraform UAT gate** | Provision per-OS VMs, install a tagged release's actual Buildkite-published packages via the M.4 playbooks, smoke-test enrollment/recipe-run/reboot survival. Not in the original roadmap; added as a release-quality gate. Task brief drafted in `docs/claude-code-parallel-build-plan.md` §4a (item 5), including an explicit flag that its default compute-provider choice (libvirt/KVM) needs a human sign-off, not just green tests. | **open** — depends on M.4 |
+| Docs refresh (architecture diagram, SaaS API reference, `INSTALL.md`, this file, `packaging/systemd/*.service` vs `docs/*.service` dedup) | Done on branch `claude/sweet-sagan-yklpu8`: `docs/diagrams/imas-architecture.svg` replaces `grlx-arch-light.png`; `docs/api/saasapi.md` + `docs/api/saasapi-openapi.yaml` (all 18 `NewRouter` routes, the 2 dispatch routes marked off by default); `INSTALL.md` rewritten for tenants, enrollment keys, the SaaS API and Envoy; `docs/imas-{farmer,sprout}.service` removed in favour of `packaging/systemd/` | **in review** |
 
 ## Notes
 
@@ -99,11 +188,53 @@ by reading its imports before ruling H.2 not done.
 - The six pre-existing Wave 0 workstreams were confirmed directly against the
   repo (code present, tests present, commits/PRs identified in `git log`)
   rather than re-run, per instruction to skip work already done.
-- All of Wave 0, Wave 1, and Wave 2 are now merged. Everything in
-  `docs/claude-code-parallel-build-plan.md` sections 1–3 is done. The
-  Envoy/EdDSA verification gap noted above under Wave 1 is still open and
-  needs a human or a docker-capable environment — it was never gated on
-  Wave 2 and remains the one unresolved item from the plan as dispatched.
-  Section 4's remaining "ongoing / fully parallel" Windows/Linux ingredient
-  workstreams (G.2, G.4, G.6, G.7, H.1, H.2, H.3) have now been dispatched
-  as well, since they have no dependency on anything else in the plan.
+- All of Wave 0, Wave 1, Wave 2, and the "ongoing" G.2/G.4/G.6/G.7/H.1/H.2/H.3
+  batch are now confirmed **merged** — every workstream from
+  `docs/claude-code-parallel-build-plan.md` sections 1–4 is merged. The
+  Envoy/EdDSA verification gap noted under Wave 1 is now closed (see
+  there). "Merged" isn't "complete" for J, though: see its open gaps
+  under Wave 2.
+- **2026-09-27 refresh:** this file had drifted since the `grlx` → `imas`
+  rebrand (`b4a0195`) — it hadn't been touched since the ongoing batch was
+  *dispatched*, and never recorded that batch actually landing, nor any of
+  the post-rebrand work (CI setup, Helm charts, the farmer bus/CLI split,
+  or workstream M's Windows packaging). This pass: (1) re-verified all seven
+  ongoing-batch items against `go.mod` and `internal/ingredients/` and
+  flipped them from "dispatched" to "merged"; (2) added the
+  repository-history note at the top, since PR numbers before the rebrand
+  are on the old, superseded `yogzblr/grlx` repo and can numerically collide
+  with real, current `yogzblr/imas` PR numbers; (3) added the "Post-rebrand
+  work" section above documenting the rebrand/CI setup, the Helm charts, the
+  farmer bus/CLI split, and workstream M (M.1–M.3 merged, M.4 and the new
+  Terraform UAT gate still open); (4) recorded the docs-refresh task
+  (architecture diagram, SaaS API reference, `INSTALL.md` rewrite, this
+  file, `*.service` dedup) as drafted but not yet dispatched.
+- ~~Still genuinely open, in priority order: the Envoy/EdDSA-against-real-Envoy
+  verification (Wave 1, needs Docker), workstream M.4 (Ansible playbooks),
+  the Terraform UAT gate, and the docs refresh.~~ Superseded by the
+  docs-refresh pass below.
+- **Docs-refresh pass (2026-09-27).** Closed: the Envoy/EdDSA verification
+  (see Wave 1; run against the real v1.35.3 binary, which needed no
+  Docker), and the docs refresh itself (in review). Newly recorded as open,
+  from reading the code while documenting it: J's two gaps (payloads not
+  yet encrypted; one tenant keypair per deployment). Minor inconsistencies
+  it found and left alone, since they're outside a docs change:
+  - `packaging/systemd/imas-{farmer,sprout}.service` set
+    `Environment=IMAS_CONFIG=…`, which no code reads: the config paths are
+    fixed (`internal/config.LoadConfig`).
+  - `packaging/etc/imas-farmer.conf` uses `organization:`, but farmer reads
+    `farmerorganization`.
+  - `packaging/systemd/imas-{farmer,sprout}-standalone.service` aren't
+    referenced by `.goreleaser.yaml` or anything else.
+  - `router.go` and `fleet_update_dispatch.go` cite `yogzblr/imas#286` for
+    the disabled sprout self-update path. That number predates the rename
+    and returns 404 on `yogzblr/imas`; the underlying blocker (design doc
+    §2.3 backup/restore) is still open, and dispatch stays off by default.
+  - farmerbus and saasapi have no OS package, systemd unit or published
+    image; `INSTALL.md` says so.
+  - `README.md`'s "Architecture" and "Batteries Included" prose still
+    describe a farmer with an embedded bus. Only its diagram link was fixed.
+- **Still genuinely open, in priority order:** J's payload-encryption
+  wiring and per-tenant key (security-relevant), workstream M.4 (Ansible
+  playbooks), the Terraform UAT gate (after M.4), and, as a nice-to-have,
+  running the Keycloak JWKS harness somewhere with a Docker daemon.
