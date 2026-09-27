@@ -142,8 +142,9 @@ func RotateSproutBoxKey(tenantID, sproutID, newPub string, graceDuration time.Du
 			Find(&existing).Error; err != nil {
 			return err
 		}
-		for _, r := range existing {
-			if r.State == boxKeyStateActive {
+		// (tenant_id, sprout_id, pub) is the primary key: at most one row.
+		if len(existing) > 0 {
+			if existing[0].State == boxKeyStateActive {
 				return nil
 			}
 			return ErrBoxKeySuperseded
