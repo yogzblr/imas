@@ -66,11 +66,11 @@ var (
 
 	// FarmerBusURL is the bus address cmd/farmer, the imas CLI and
 	// (as a last resort, see pki.ResolveSproutBusURLs) sprouts dial:
-	// farmerinterface:farmerbusport, except that farmer reads
-	// "farmerbusurl" (or the FARMERBUSURL environment variable) first.
-	// Farmer sets it whenever farmerinterface is a bind address that isn't
-	// also where the bus is reachable — e.g. in Kubernetes, where core
-	// binds 0.0.0.0 and the bus is a separate Service such as
+	// farmerinterface:farmerbusport, except that farmer and the imas CLI
+	// read "farmerbusurl" (or the FARMERBUSURL environment variable)
+	// first. Set it whenever farmerinterface isn't where the bus is
+	// reachable — e.g. in Kubernetes, where core binds 0.0.0.0 and the
+	// bus is a separate Service such as
 	// "tls://imas-dmz-nats-bus.imas-dmz.svc.cluster.local:5406". It may
 	// carry a scheme (nats://, tls://) or be a bare host:port. Sprouts
 	// ignore it: they pin bus addresses with the validated "busurls"
@@ -78,10 +78,11 @@ var (
 	FarmerBusURL  string
 	FarmerBusPort string
 	// FarmerBusTLSServerName ("farmerbustlsservername", or the
-	// FARMERBUSTLSSERVERNAME environment variable; farmer only) is the
-	// name cmd/farmer
-	// verifies the bus's TLS certificate against when it dials
-	// FarmerBusURL. It is deliberately separate from FarmerInterface,
+	// FARMERBUSTLSSERVERNAME environment variable; farmer and the imas
+	// CLI only) is the name cmd/farmer and the imas CLI's bus client
+	// (internal/api/client.NewNatsClient) verify the bus's TLS
+	// certificate against when they dial FarmerBusURL. It is
+	// deliberately separate from FarmerInterface,
 	// which is a bind address (0.0.0.0 or a pod IP in Kubernetes) and so
 	// never a name a certificate carries. Empty means "derive it from
 	// FarmerBusURL": use BusTLSServerName for the effective value.
@@ -98,7 +99,7 @@ var (
 	// listeners (pki.ConfigureNats). On sprouts and the imas CLI, which
 	// bind nothing, it is the farmer host they reach. It is also the
 	// default host of FarmerBusURL and FarmerURL. It is NOT the TLS
-	// ServerName farmer verifies the bus against; that is
+	// ServerName farmer or the imas CLI verifies the bus against; that is
 	// FarmerBusTLSServerName.
 	FarmerInterface       string
 	FarmerOrganization    string
@@ -593,7 +594,11 @@ func LoadConfig(binary string) {
 	FarmerAPIPort = jety.GetString("farmerapiport")
 	FarmerBusURL = ""
 	FarmerBusTLSServerName = ""
-	if binary == string(BinaryFarmer) {
+	// Farmer and the imas CLI read the bus settings; sprouts don't. A
+	// sprout pins bus addresses with the validated "busurls", and its
+	// legacy FarmerBusURL fallback (pki.ResolveSproutBusURLs) skips that
+	// validation, so it must not be redirectable by these keys.
+	if binary == string(BinaryFarmer) || binary == string(BinaryImas) {
 		FarmerBusURL = strings.TrimSpace(jety.GetString("farmerbusurl"))
 		FarmerBusTLSServerName = strings.TrimSpace(jety.GetString("farmerbustlsservername"))
 	}

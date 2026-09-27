@@ -46,16 +46,23 @@ func NewNatsClient() (*nats.Conn, error) {
 	if !ok {
 		log.Errorf("nats: failed to parse root certificate from %q", rootCA)
 	}
-	tlsCfg := &tls.Config{
-		ServerName: config.FarmerInterface,
-		RootCAs:    certPool,
-		MinVersion: tls.VersionTLS12,
-	}
-
-	connOpts := []nats.Option{nats.Name("imas-cli"), nats.Nkey(pubkey, auth.Sign), nats.Secure(tlsCfg)}
+	connOpts := []nats.Option{nats.Name("imas-cli"), nats.Nkey(pubkey, auth.Sign), nats.Secure(busTLSConfig(certPool))}
 
 	log.Tracef("Connecting to %s", URL)
 	return nats.Connect(URL, connOpts...)
+}
+
+// busTLSConfig is the TLS config the CLI dials the bus with. It verifies
+// the bus certificate against config.BusTLSServerName() — the explicit
+// farmerbustlsservername, else the host of config.FarmerBusURL — not
+// config.FarmerInterface, which need not be a name the bus cert carries
+// once farmerbusurl points somewhere else.
+func busTLSConfig(rootCAs *x509.CertPool) *tls.Config {
+	return &tls.Config{
+		ServerName: config.BusTLSServerName(),
+		RootCAs:    rootCAs,
+		MinVersion: tls.VersionTLS12,
+	}
 }
 
 // ConnectNats establishes the shared NATS connection for the CLI.
