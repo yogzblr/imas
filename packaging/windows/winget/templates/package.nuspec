@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+  <metadata>
+    <id>@PACKAGE_IDENTIFIER@</id>
+    <version>@NUGET_VERSION@</version>
+    <title>imas sprout (winget manifests)</title>
+    <authors>imas</authors>
+    <description>winget manifests (and the MSI they describe) for imas sprout @PACKAGE_VERSION@. The manifests are under manifests/, in the winget-pkgs directory layout; the MSI is under installer/.</description>
+    <license type="expression">0BSD</license>
+    <projectUrl>https://github.com/yogzblr/imas</projectUrl>
+    <tags>winget imas imas-sprout</tags>
+  </metadata>
+</package>

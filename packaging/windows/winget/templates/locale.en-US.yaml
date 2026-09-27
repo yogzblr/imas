@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.10.0.schema.json
+# Rendered by packaging/windows/winget/build-winget-nupkg.sh; do not edit the output.
+PackageIdentifier: @PACKAGE_IDENTIFIER@
+PackageVersion: @PACKAGE_VERSION@
+PackageLocale: en-US
+Publisher: imas
+PackageName: imas sprout
+PackageUrl: https://github.com/yogzblr/imas
+License: 0BSD
+LicenseUrl: https://github.com/yogzblr/imas/blob/main/LICENSE
+ShortDescription: imas remote control agent (sprout), installed as the imas-sprout Windows service.
+Description: |-
+  imas sprout is the agent side of imas (Infrastructure Management At Scale).
+  This package installs imas-sprout.exe under %ProgramFiles%\imas and registers
+  the imas-sprout Windows service (automatic start, LocalSystem). Configuration
+  lives in %ProgramData%\imas\sprout; set the farmer address and join token
+  there, then run Start-Service imas-sprout.
+Moniker: imas-sprout
+Tags:
+  - agent
+  - configuration-management
+ManifestType: defaultLocale
+ManifestVersion: 1.10.0

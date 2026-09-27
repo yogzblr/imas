@@ -1,0 +1,141 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<!--
+  imas-sprout MSI (WiX v3 schema). goreleaser-pro's `msi` pipe templates this
+  file and, on Linux, builds it with msitools' wixl, which supports only a
+  subset of the v3 schema: no WixUtilExtension, no <Permission>/<PermissionEx>,
+  no <ServiceConfig>, and it silently ignores Component/@Permanent,
+  Component/@NeverOverwrite and Package/@Platform (the arch comes from
+  `wixl -a`). packaging/windows/msi-postprocess.sh (goreleaser msi after-hook)
+  fixes up the built MSI with msibuild: it sets the component attributes
+  declared below, and adds the directory ACL and the service's failure
+  actions as MSI 5.0 tables. Keep the attributes here anyway so a WiX build
+  on Windows honours them without the post-process step.
+
+  Layout:
+    %ProgramFiles%\imas\imas-sprout.exe       binary
+    %ProgramData%\imas\                       config root (SYSTEM + Administrators only)
+    %ProgramData%\imas\sprout                 config file (same name as /etc/imas/sprout)
+    %ProgramData%\imas\cache\sprout\          cache (as /var/cache/imas/sprout)
+
+  The service is named imas-sprout, like the systemd/OpenRC unit, so the same
+  `service` ingredient recipe (internal/ingredients/service/windows on this
+  platform) manages it everywhere.
+
+  The service is installed with automatic start but not started by the
+  installer, matching the rpm/deb postinstall scripts (enable, don't start):
+  a fresh install has no farmer address or join token yet. Write the config,
+  then `Start-Service imas-sprout` (or reboot).
+
+  Only amd64 is built today; the Win64/ProgramFiles64Folder choice below keeps
+  a 386 build possible later.
+-->
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+  {{ if eq .MsiArch "x64" }}
+  <?define Win64 = "yes" ?>
+  <?define PlatformProgramFilesFolder = "ProgramFiles64Folder" ?>
+  {{ else }}
+  <?define Win64 = "no" ?>
+  <?define PlatformProgramFilesFolder = "ProgramFilesFolder" ?>
+  {{ end }}
+  <!-- Product Id='*': a new ProductCode per build, which MajorUpgrade needs.
+       UpgradeCode must never change: it is how an installed imas-sprout is
+       found and replaced on upgrade. MSI ProductVersion is numeric-only, so
+       prerelease/snapshot suffixes are dropped here. -->
+  <Product
+    Name='imas sprout'
+    Id='*'
+    UpgradeCode='50B3F4FF-D163-4EDD-84B9-330F966FFF8F'
+    Language='1033'
+    Codepage='1252'
+    Version='{{ .Major }}.{{ .Minor }}.{{ .Patch }}'
+    Manufacturer='imas'>
+
+    <Package
+      Id='*'
+      Keywords='Installer'
+      Description='imas sprout {{ .Version }} (remote control agent)'
+      Manufacturer='imas'
+      InstallerVersion='500'
+      InstallScope='perMachine'
+      Languages='1033'
+      Compressed='yes'
+      SummaryCodepage='1252' />
+
+    <MajorUpgrade
+      DowngradeErrorMessage='A newer version of imas sprout is already installed.' />
+
+    <Media Id='1' Cabinet='sprout.cab' EmbedCab='yes' />
+
+    <Property Id='ARPURLINFOABOUT' Value='https://github.com/yogzblr/imas' />
+    <Property Id='ARPNOMODIFY' Value='1' />
+
+    <Directory Id='TARGETDIR' Name='SourceDir'>
+      <Directory Id='$(var.PlatformProgramFilesFolder)'>
+        <Directory Id='INSTALLDIR' Name='imas'>
+          <Component Id='SproutExecutable' Guid='5A7C63D1-3B0E-4D4A-9E0B-6F2B8C1D4E01' Win64='$(var.Win64)'>
+            <File
+              Id='SproutExe'
+              Name='imas-sprout.exe'
+              DiskId='1'
+              Source='{{ .Binary }}.exe'
+              KeyPath='yes' />
+            <ServiceInstall
+              Id='SproutServiceInstall'
+              Name='imas-sprout'
+              DisplayName='imas Sprout'
+              Description='imas remote control agent'
+              Type='ownProcess'
+              Start='auto'
+              ErrorControl='normal'
+              Account='LocalSystem'
+              Vital='yes' />
+            <!-- Stop before files are replaced (upgrade) or removed, delete the
+                 service on uninstall. No Start: see the header comment. -->
+            <ServiceControl
+              Id='SproutServiceControl'
+              Name='imas-sprout'
+              Stop='both'
+              Remove='uninstall'
+              Wait='yes' />
+          </Component>
+        </Directory>
+      </Directory>
+
+      <Directory Id='CommonAppDataFolder'>
+        <Directory Id='IMASDATADIR' Name='imas'>
+          <!-- Permanent: enrollment state (NKey seed, X25519 key, JWTs) lives
+               under here and must survive uninstall/reinstall and upgrades,
+               as /etc/imas does with rpm/deb. -->
+          <Component Id='SproutDataDir' Guid='9D2E4F10-7A61-4C3B-8F5E-2B1A0C9D8E02' Permanent='yes' Win64='$(var.Win64)'>
+            <CreateFolder />
+          </Component>
+          <!-- NeverOverwrite + Permanent: the config is the admin's (farmer
+               address, join token); an upgrade must not reset it and an
+               uninstall leaves it behind, like an rpm %config(noreplace). -->
+          <Component Id='SproutConfig' Guid='1E6B8A2C-4D3F-4B7E-A9C0-3F5D2E1B7A03' NeverOverwrite='yes' Permanent='yes' Win64='$(var.Win64)'>
+            <File
+              Id='SproutConfigFile'
+              Name='sprout'
+              DiskId='1'
+              Source='packaging/etc/imas-sprout.conf'
+              KeyPath='yes' />
+          </Component>
+          <Directory Id='IMASCACHEDIR' Name='cache'>
+            <Directory Id='SPROUTCACHEDIR' Name='sprout'>
+              <Component Id='SproutCacheDir' Guid='C4F1A7B3-6E2D-4A9F-B1C8-5D3E7F2A9B04' Permanent='yes' Win64='$(var.Win64)'>
+                <CreateFolder />
+              </Component>
+            </Directory>
+          </Directory>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id='Complete' Level='1'>
+      <ComponentRef Id='SproutExecutable' />
+      <ComponentRef Id='SproutDataDir' />
+      <ComponentRef Id='SproutConfig' />
+      <ComponentRef Id='SproutCacheDir' />
+    </Feature>
+  </Product>
+</Wix>
