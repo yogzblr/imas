@@ -1,0 +1,17 @@
+---
+# Also starts a stopped sprout: after a fresh install, the first start is
+# this restart, once its settings are in place.
+- name: Restart imas-sprout (Linux)
+  ansible.builtin.systemd_service:
+    name: "{{ imas_sprout_service_name }}"
+    state: restarted
+    daemon_reload: true
+  when: ansible_os_family != 'Windows'
+  listen: Restart imas-sprout
+
+- name: Restart imas-sprout (Windows)
+  ansible.windows.win_service:
+    name: "{{ imas_sprout_service_name }}"
+    state: restarted
+  when: ansible_os_family == 'Windows'
+  listen: Restart imas-sprout

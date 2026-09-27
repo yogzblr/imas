@@ -1,0 +1,171 @@
+---
+- name: Check each sprout's local state
+  hosts: sprouts
+  gather_facts: false
+  tasks:
+    - name: Read the sprout's config file
+      ansible.builtin.slurp:
+        src: /etc/imas/sprout
+      register: _config_raw
+
+    - name: Stat the sprout's files
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /etc/imas/sprout
+        - /etc/imas/pki/sprout/sprout.jwt
+        - /etc/imas/pki/sprout/tls-rootca.pem
+      register: _files
+
+    - name: Read the pinned root CA
+      ansible.builtin.slurp:
+        src: /etc/imas/pki/sprout/tls-rootca.pem
+      register: _root_ca
+
+    - name: Read the sprout's NKey
+      ansible.builtin.slurp:
+        src: /etc/imas/pki/sprout/sprout.nkey.pub
+      register: _nkey
+
+    - name: Read the service state
+      ansible.builtin.systemd_service:
+        name: imas-sprout
+      register: _service
+
+    - name: Check the sprout enrolled, cleared its join token, and runs at boot
+      ansible.builtin.assert:
+        that:
+          - _files.results[0].stat.mode == '0600'
+          - _files.results[1].stat.exists
+          - _config.jointoken | default('') == ''
+          - _config.farmerinterface == 'imas-farmer'
+          - _config.sproutrootcatofu == false
+          - (_config.busurls | default([])) == (imas_farmer_bus_urls | default([]))
+          - _root_ca.content | b64decode | trim == imas_sprout_root_ca | trim
+          - _service.status.ActiveState == 'active'
+          - _service.status.UnitFileState == 'enabled'
+        quiet: true
+      vars:
+        _config: "{{ _config_raw.content | b64decode | from_yaml }}"
+
+    - name: Keep the NKey for the farmer-side check
+      ansible.builtin.set_fact:
+        sprout_nkey: "{{ _nkey.content | b64decode | trim }}"
+
+    # A host that is already enrolled must not need the key any more.
+    - name: Re-run the role without a join token
+      ansible.builtin.include_role:
+        name: imas_sprout
+      vars:
+        imas_join_token: ""
+
+    - name: Re-read the config file
+      ansible.builtin.slurp:
+        src: /etc/imas/sprout
+      register: _config_again
+
+    - name: Check that run didn't touch the config
+      ansible.builtin.assert:
+        that: _config_again.content == _config_raw.content
+        quiet: true
+
+- name: Check imas_verify reports a stopped sprout
+  hosts: imas-debian12
+  gather_facts: false
+  tasks:
+    - name: Stop the sprout
+      ansible.builtin.systemd_service:
+        name: imas-sprout
+        state: stopped
+
+    - name: Run imas_verify against it
+      block:
+        - name: Verify
+          ansible.builtin.include_role:
+            name: imas_verify
+          vars:
+            imas_verify_timeout: 5
+            imas_verify_interval: 5
+        - name: Should not get here
+          ansible.builtin.fail:
+            msg: imas_verify passed with the sprout stopped
+      rescue:
+        - name: Check the failure names the cause
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_task.name == 'Fail with the reason the sprout isn\'t connected'
+              - ansible_failed_result.msg[0] is search('enrolled but its service .* is not running')
+            quiet: true
+      always:
+        - name: Start the sprout again
+          ansible.builtin.systemd_service:
+            name: imas-sprout
+            state: started
+
+- name: Check imas_verify reports a sprout that can't reach its bus
+  hosts: imas-leap15
+  gather_facts: false
+  tasks:
+    - name: Pin a bus address nothing listens on
+      block:
+        - name: Apply it
+          ansible.builtin.include_role:
+            name: imas_sprout
+          vars:
+            imas_farmer_bus_urls: [tls://imas-farmer:5999]
+            imas_verify_timeout: 15
+            imas_verify_interval: 5
+        - name: Should not get here
+          ansible.builtin.fail:
+            msg: imas_verify passed with no bus to connect to
+      rescue:
+        - name: Check the failure names the cause
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_task.name == 'Fail with the reason the sprout isn\'t connected'
+              - ansible_failed_result.msg[0] is search('enrolled and running, but has held no connection to its bus')
+              - ansible_failed_result.msg[1] is search('tls://imas-farmer:5999')
+            quiet: true
+      always:
+        # Also removes the pin, so the sprout goes back to its enrolled address.
+        - name: Put the settings back
+          ansible.builtin.include_role:
+            name: imas_sprout
+
+- name: Check from the farmer's side
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Find the stub farmer's address
+      ansible.builtin.command:
+        cmd: docker inspect --format json imas-farmer
+      register: _inspect
+      changed_when: false
+
+    - name: Wait for every sprout to be back on the bus
+      ansible.builtin.uri:
+        url: "https://{{ _ip }}:5405/_stub/state"
+        # Its certificate names imas-farmer, which only resolves on the
+        # Docker network. It's the tests' own stub.
+        validate_certs: false
+        # Straight to the Docker network, never through an HTTP(S) proxy.
+        use_proxy: false
+        return_content: true
+      register: _state
+      until: >-
+        groups['sprouts'] | map('extract', hostvars, 'sprout_nkey')
+        | difference(_state.json.connected | default([])) | length == 0
+      retries: 12
+      delay: 5
+      vars:
+        _ip: "{{ (_inspect.stdout | from_json)[0].NetworkSettings.Networks['imas-molecule'].IPAddress }}"
+
+    - name: Check every sprout enrolled exactly once
+      ansible.builtin.assert:
+        that:
+          # One use of the key per host, across converge, idempotence and
+          # the re-runs above: an enrolled sprout never enrolled again.
+          - _state.json.redemptions == groups['sprouts'] | length
+          - _state.json.enroll_requests == groups['sprouts'] | length
+          - _state.json.sprouts | length == groups['sprouts'] | length
+        fail_msg: "{{ _state.json | to_json }}"

@@ -1,0 +1,9 @@
+---
+# ansible-galaxy collection install -r requirements.yml
+collections:
+  # Windows hosts: win_package, win_service, win_powershell, ...
+  - name: ansible.windows
+    version: ">=2.0.0"
+  # SUSE hosts: zypper_repository.
+  - name: community.general
+    version: ">=8.0.0"

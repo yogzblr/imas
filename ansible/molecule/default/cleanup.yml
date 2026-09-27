@@ -1,0 +1,11 @@
+---
+- name: Stop the stub farmer
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Remove the stub farmer container
+      ansible.builtin.command:
+        cmd: docker rm -f imas-farmer
+      register: _rm
+      changed_when: _rm.rc == 0
+      failed_when: false

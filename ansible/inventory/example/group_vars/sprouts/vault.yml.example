@@ -1,0 +1,5 @@
+---
+# Copy to vault.yml, put your key in, then encrypt it before anything else:
+#   ansible-vault encrypt inventory/<yours>/group_vars/sprouts/vault.yml
+# Never commit this file unencrypted.
+vault_imas_join_token: "REPLACE-WITH-THE-registration_key-FROM-THE-API"

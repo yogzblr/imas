@@ -1,0 +1,81 @@
+---
+# Merges the settings this role manages into the sprout's config file,
+# keeping everything else in it: the sprout writes to the same file itself
+# (its defaults on every start, the farmer-assigned sproutid, and an emptied
+# jointoken once enrolled), and rewriting it wholesale would lose those.
+#
+# Expects _imas_sprout_config (the parsed file), _imas_sprout_config_file and
+# _imas_sprout_enrolled.
+
+- name: Check the join token
+  ansible.builtin.assert:
+    that:
+      - imas_join_token is defined
+      - imas_join_token is match('^[^.\s]+\.\S+$')
+    fail_msg: >-
+      {{ inventory_hostname }} isn't enrolled yet, and imas_join_token is not
+      set or isn't a {key_id}.{secret} enrollment key. Create one with
+      POST /tenants/{tenant_id}/enrollment-keys and supply it through
+      ansible-vault (see ansible/README.md).
+    quiet: true
+  when: not _imas_sprout_enrolled | bool
+
+- name: Work out the managed settings
+  ansible.builtin.set_fact:
+    _imas_sprout_managed: >-
+      {{
+        {'farmerinterface': imas_farmer_host, 'farmerapiport': imas_farmer_api_port | string}
+        | combine({'busurls': imas_farmer_bus_urls} if imas_farmer_bus_urls | length > 0 else {})
+        | combine({'sproutrootcatofu': false} if imas_sprout_root_ca | length > 0 else {})
+        | combine({'jointoken': imas_join_token} if not _imas_sprout_enrolled | bool else {})
+      }}
+    # An empty imas_farmer_bus_urls removes a busurls pin set earlier.
+    _imas_sprout_unmanaged: "{{ ['busurls'] if imas_farmer_bus_urls | length == 0 else [] }}"
+  no_log: true
+
+# Compared as strings, since the sprout rewrites the file with its own YAML
+# encoder (a port may come back as 5405 or "5405").
+- name: Compare them with the config file
+  ansible.builtin.set_fact:
+    _imas_sprout_config_drift: >-
+      {%- set ns = namespace(drift=false) -%}
+      {%- for key, value in _imas_sprout_managed.items() -%}
+      {%-   if key not in _imas_sprout_config or (_imas_sprout_config[key] | string) != (value | string) -%}
+      {%-     set ns.drift = true -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- for key in _imas_sprout_unmanaged -%}
+      {%-   if _imas_sprout_config[key] | default(none) not in [none, '', []] -%}
+      {%-     set ns.drift = true -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ ns.drift }}
+    _imas_sprout_config_new: >-
+      {{
+        _imas_sprout_config | combine(_imas_sprout_managed)
+        | dict2items | rejectattr('key', 'in', _imas_sprout_unmanaged) | items2dict
+      }}
+  no_log: true
+
+- name: Write the enrollment settings to the sprout's config file
+  ansible.builtin.copy:
+    content: "{{ _imas_sprout_config_new | to_nice_yaml(indent=2) }}"
+    dest: "{{ _imas_sprout_config_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when:
+    - _imas_sprout_config_drift | bool
+    - ansible_os_family != 'Windows'
+  notify: Restart imas-sprout
+  no_log: true
+
+- name: Write the enrollment settings to the sprout's config file (Windows)
+  ansible.windows.win_copy:
+    content: "{{ _imas_sprout_config_new | to_nice_yaml(indent=2) }}"
+    dest: "{{ _imas_sprout_config_file }}"
+  when:
+    - _imas_sprout_config_drift | bool
+    - ansible_os_family == 'Windows'
+  notify: Restart imas-sprout
+  no_log: true

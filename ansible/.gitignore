@@ -1,0 +1,8 @@
+# Your own inventory, and its vaulted enrollment key, belong in your own
+# repository: copy inventory/example there.
+/inventory/*
+!/inventory/example/
+
+# Test caches.
+__pycache__/
+.pytest_cache/

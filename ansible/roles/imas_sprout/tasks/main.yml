@@ -1,0 +1,31 @@
+---
+- name: Gather the facts the role needs
+  ansible.builtin.setup:
+    gather_subset: [min]
+  when: ansible_os_family is not defined or ansible_env is not defined
+
+- name: Check the farmer settings
+  ansible.builtin.assert:
+    that:
+      - imas_farmer_host | length > 0
+      - imas_farmer_host is not search('://|/|\s')
+    fail_msg: >-
+      imas_farmer_host must be the farmer's (or DMZ edge's) host name or IP,
+      with no scheme or path; got '{{ imas_farmer_host }}'.
+    quiet: true
+
+- name: Install and enroll on Linux
+  ansible.builtin.include_tasks: linux.yml
+  when: ansible_os_family != 'Windows'
+
+- name: Install and enroll on Windows
+  ansible.builtin.include_tasks: windows.yml
+  when: ansible_os_family == 'Windows'
+
+- name: Wait for the sprout to connect to the bus
+  ansible.builtin.include_role:
+    name: imas_verify
+  vars:
+    imas_verify_config_file: "{{ _imas_sprout_config_file }}"
+    imas_verify_service_name: "{{ imas_sprout_service_name }}"
+  when: imas_sprout_verify | bool

@@ -1,0 +1,78 @@
+---
+- name: Gather the facts the role needs
+  ansible.builtin.setup:
+    gather_subset: [min]
+  when: ansible_os_family is not defined or ansible_env is not defined
+
+- name: Work out the sprout's default paths
+  ansible.builtin.set_fact:
+    _imas_verify_sep: "{{ _sep }}"
+    _imas_verify_config_file: >-
+      {{ imas_verify_config_file if imas_verify_config_file | length > 0
+         else (_windows_root ~ _sep ~ 'sprout' if _windows else '/etc/imas/sprout') }}
+    _imas_verify_pki_dir: >-
+      {{ _windows_root ~ _sep ~ 'pki' ~ _sep ~ 'sprout' if _windows else '/etc/imas/pki/sprout' }}
+  vars:
+    _windows: "{{ ansible_os_family == 'Windows' }}"
+    _sep: "{{ _imas_verify_backslash if ansible_os_family == 'Windows' else '/' }}"
+    _windows_root: "{{ (ansible_env.ProgramData | default(_imas_verify_program_data_fallback)) ~ _sep ~ 'imas' }}"
+
+# It may still hold the join token if the sprout hasn't enrolled.
+- name: Read the sprout's config file
+  ansible.builtin.slurp:
+    src: "{{ _imas_verify_config_file }}"
+  register: _imas_verify_config_raw
+  no_log: true
+
+# The same settings, and defaults, the sprout reads
+# (internal/config/config.go, pki.ResolveSproutBusURLs).
+- name: Read the sprout's enrollment and bus settings
+  ansible.builtin.set_fact:
+    _imas_verify_user_jwt_file: "{{ _cfg.sproutuserjwtfile | default(_imas_verify_pki_dir ~ _imas_verify_sep ~ 'sprout.jwt', true) }}"
+    _imas_verify_bus_urls_file: "{{ _cfg.sproutbusurlsfile | default(_imas_verify_pki_dir ~ _imas_verify_sep ~ 'bus-urls.json', true) }}"
+    # busurls is a YAML list or a comma-separated string.
+    _imas_verify_bus_urls_pin: "{{ (_pin.split(',') if _pin is string else _pin) | map('trim') | select | list }}"
+    _imas_verify_legacy_bus_url: >-
+      {{ _cfg.farmerinterface | default('localhost', true) }}:{{ _cfg.farmerbusport | default('5406', true) }}
+    _imas_verify_enroll_url: >-
+      https://{{ _cfg.farmerinterface | default('localhost', true) }}:{{ _cfg.farmerapiport | default('5405', true) }}/v1/enroll
+  vars:
+    _cfg: "{{ _imas_verify_config_raw.content | b64decode | from_yaml | default({}, true) }}"
+    _pin: "{{ _cfg.busurls | default([], true) }}"
+
+- name: Wait for the sprout on Linux
+  ansible.builtin.include_tasks: linux.yml
+  when: ansible_os_family != 'Windows'
+
+- name: Wait for the sprout on Windows
+  ansible.builtin.include_tasks: windows.yml
+  when: ansible_os_family == 'Windows'
+
+- name: Fail with the reason the sprout isn't connected
+  ansible.builtin.fail:
+    msg: "{{ _imas_verify_reason + ['--- last ' ~ imas_verify_log_lines ~ ' lines of the sprout log ---'] + _imas_verify_log }}"
+  when: not _imas_verify_status.connected | default(false)
+  vars:
+    _s: "{{ _imas_verify_status }}"
+    _imas_verify_reason: >-
+      {%- if not _s.enrolled | default(false) -%}
+      {{ [
+        'imas-sprout has not enrolled after ' ~ imas_verify_timeout ~ 's (no ' ~ _imas_verify_user_jwt_file ~ ').',
+        'Farmer answers every rejected enrollment with the same "enrollment_failed", so check each of:',
+        '  the join token: not expired, revoked, or used up (max_uses);',
+        '  that this host reaches ' ~ _imas_verify_enroll_url ~ ' and trusts its certificate (imas_sprout_root_ca);',
+        '  that this host clock is within 5 minutes of farmer.',
+        'Once the cause is fixed, re-run the playbook with a fresh enrollment key if the old one is spent.'
+      ] }}
+      {%- elif not _s.active | default(false) -%}
+      {{ ['imas-sprout is enrolled but its service (' ~ imas_verify_service_name ~ ') is not running; see its log below.'] }}
+      {%- elif _s.bus_urls | default([]) | length == 0 -%}
+      {{ ['imas-sprout is enrolled and running but has no bus address: set imas_farmer_bus_urls.'] }}
+      {%- else -%}
+      {{ [
+        'imas-sprout is enrolled and running, but has held no connection to its bus for '
+          ~ imas_verify_hold ~ 's within ' ~ imas_verify_timeout ~ 's.',
+        'Bus addresses (from ' ~ _s.bus_urls_source ~ '): ' ~ _s.bus_urls | join(', '),
+        'Check that this host reaches them, and the sprout log for TLS or authorization errors.'
+      ] }}
+      {%- endif -%}

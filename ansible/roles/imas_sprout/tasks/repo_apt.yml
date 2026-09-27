@@ -1,0 +1,47 @@
+---
+# The imasdeb registry, the way Buildkite Package Registries documents a
+# Debian source: the registry's signing key, then
+#   deb [signed-by=<key>] <registry>/any/ any main
+- name: Create the apt keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download the imas apt repository's signing key
+  ansible.builtin.get_url:
+    url: "{{ imas_sprout_apt_gpg_key_url }}"
+    dest: "{{ _imas_sprout_apt_key }}"
+    owner: root
+    group: root
+    mode: "0644"
+    url_username: "{{ 'buildkite' if imas_sprout_repo_token | length > 0 else omit }}"
+    url_password: "{{ imas_sprout_repo_token if imas_sprout_repo_token | length > 0 else omit }}"
+    force_basic_auth: "{{ imas_sprout_repo_token | length > 0 }}"
+  no_log: "{{ imas_sprout_repo_token | length > 0 }}"
+
+# apt reads credentials from auth.conf.d rather than the source line, which
+# every local user can read.
+- name: Give apt the registry token
+  ansible.builtin.copy:
+    content: |
+      machine {{ imas_sprout_apt_repo_url | regex_replace('^https?://', '') }}
+      login buildkite
+      password {{ imas_sprout_repo_token }}
+    dest: "/etc/apt/auth.conf.d/imas-{{ imas_sprout_deb_registry }}.conf"
+    owner: root
+    group: root
+    mode: "0600"
+  when: imas_sprout_repo_token | length > 0
+  no_log: true
+
+- name: Add the imas apt repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by={{ _imas_sprout_apt_key }}]
+      {{ imas_sprout_apt_repo_url }} {{ imas_sprout_apt_repo_suite }} {{ imas_sprout_apt_repo_component }}
+    filename: "imas-{{ imas_sprout_deb_registry }}"
+    state: present
+    update_cache: true

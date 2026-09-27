@@ -1,0 +1,28 @@
+---
+argument_specs:
+  main:
+    short_description: Wait until imas-sprout is enrolled and connected to the bus.
+    description:
+      - Polls until the sprout has enrolled and holds an established connection to one of
+        its bus addresses, and fails the host with the reason (not enrolled, service not
+        running, or no bus connection) and the sprout's recent log if it doesn't within
+        imas_verify_timeout.
+    options:
+      imas_verify_timeout:
+        type: int
+        description: Seconds to wait.
+      imas_verify_interval:
+        type: int
+        description: Seconds between checks.
+      imas_verify_hold:
+        type: int
+        description: Seconds the bus connection must stay established to count.
+      imas_verify_service_name:
+        type: str
+        description: Service name of the sprout.
+      imas_verify_config_file:
+        type: str
+        description: The sprout's config file. Empty for the OS default.
+      imas_verify_log_lines:
+        type: int
+        description: Log lines to show on failure.

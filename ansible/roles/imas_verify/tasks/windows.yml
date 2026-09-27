@@ -1,0 +1,108 @@
+---
+# The Windows counterpart of library/imas_sprout_bus_status.py: see its
+# documentation for what counts as enrolled and connected.
+- name: Wait for the sprout to enroll and connect to the bus
+  ansible.windows.win_powershell:
+    parameters:
+      Service: "{{ imas_verify_service_name }}"
+      UserJwtFile: "{{ _imas_verify_user_jwt_file }}"
+      BusUrlsFile: "{{ _imas_verify_bus_urls_file }}"
+      BusUrls: "{{ _imas_verify_bus_urls_pin }}"
+      LegacyBusUrl: "{{ _imas_verify_legacy_bus_url }}"
+      Hold: "{{ imas_verify_hold | int }}"
+    script: |
+      [CmdletBinding()]
+      param([string]$Service, [string]$UserJwtFile, [string]$BusUrlsFile, [string[]]$BusUrls = @(),
+            [string]$LegacyBusUrl, [int]$Hold)
+      $ErrorActionPreference = 'Stop'
+      $Ansible.Changed = $false
+      $defaultPorts = @{ nats = 4222; tls = 4222; wss = 443; ws = 80 }
+
+      # pki.ResolveSproutBusURLs: the busurls pin, else the nats_urls saved
+      # at enrollment, else farmerinterface:farmerbusport.
+      $urls = @($BusUrls | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() })
+      $source = 'config'
+      if ($urls.Count -eq 0) {
+        $source = 'enrollment'
+        if (Test-Path -LiteralPath $BusUrlsFile) {
+          try { $urls = @(Get-Content -Raw -LiteralPath $BusUrlsFile | ConvertFrom-Json | Where-Object { $_ }) } catch { $urls = @() }
+        }
+      }
+      if ($urls.Count -eq 0 -and $LegacyBusUrl.Trim(':')) { $urls = @($LegacyBusUrl); $source = 'legacy' }
+      if ($urls.Count -eq 0) { $source = 'none' }
+
+      $endpoints = @(foreach ($u in $urls) {
+        $s = if ($u -match '://') { $u } else { "nats://$u" }
+        $uri = $null
+        if ([Uri]::TryCreate($s, [UriKind]::Absolute, [ref]$uri) -and $uri.Host) {
+          $port = if ($uri.Port -gt 0) { $uri.Port } else { $defaultPorts[$uri.Scheme.ToLowerInvariant()] }
+          if ($port) {
+            $ips = @(try { [Net.Dns]::GetHostAddresses($uri.Host) | ForEach-Object { $_.ToString() } } catch { })
+            [pscustomobject]@{ host = $uri.Host; port = [int]$port; ips = $ips }
+          }
+        }
+      })
+
+      $enrolled = Test-Path -LiteralPath $UserJwtFile
+      $svc = Get-CimInstance Win32_Service -Filter "Name='$Service'"
+      $active = [bool]($svc -and $svc.State -eq 'Running')
+      $procId = if ($svc) { [int]$svc.ProcessId } else { 0 }
+
+      function Get-BusConnections {
+        @(Get-NetTCPConnection -OwningProcess $procId -State Established -ErrorAction SilentlyContinue |
+          Where-Object {
+            $c = $_
+            @($endpoints | Where-Object {
+              $c.RemotePort -eq $_.port -and ($_.ips.Count -eq 0 -or $_.ips -contains ($c.RemoteAddress -replace '^::ffff:', ''))
+            }).Count -gt 0
+          } | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort)>$($_.RemoteAddress):$($_.RemotePort)" })
+      }
+
+      $conns = @()
+      $connected = $false
+      if ($enrolled -and $active -and $procId -and $endpoints.Count) {
+        $first = Get-BusConnections
+        $conns = $first
+        if ($first.Count) {
+          Start-Sleep -Seconds ([Math]::Max($Hold, 0))
+          $later = Get-BusConnections
+          $connected = @($first | Where-Object { $later -contains $_ }).Count -gt 0
+        }
+      }
+
+      $Ansible.Result = @{
+        enrolled = $enrolled; active = $active; pid = $procId
+        bus_urls = $urls; bus_urls_source = $source
+        endpoints = @($endpoints | ForEach-Object { @{ host = $_.host; port = $_.port } })
+        connections = $conns; connected = $connected
+      }
+  register: _imas_verify_ps
+  until: _imas_verify_ps.result.connected | default(false)
+  retries: "{{ (imas_verify_timeout | int / imas_verify_interval | int) | round(0, 'ceil') | int }}"
+  delay: "{{ imas_verify_interval }}"
+  # Reported by the fail task in main.yml, with the reason.
+  failed_when: false
+
+- name: Keep the result for the report
+  ansible.builtin.set_fact:
+    _imas_verify_status: "{{ _imas_verify_ps.result | default({}) }}"
+
+# Under the service manager the sprout logs to a file, not stderr
+# (config.SproutServiceLogDir).
+- name: Read the sprout's recent log
+  ansible.windows.win_powershell:
+    parameters:
+      Log: "{{ _imas_verify_pki_dir | win_dirname | win_dirname }}\\logs\\sprout.log"
+      Lines: "{{ imas_verify_log_lines | int }}"
+    script: |
+      [CmdletBinding()]
+      param([string]$Log, [int]$Lines)
+      $Ansible.Changed = $false
+      $Ansible.Result = if (Test-Path -LiteralPath $Log) { @(Get-Content -LiteralPath $Log -Tail $Lines) } else { @("(no log at $Log)") }
+  register: _imas_verify_winlog
+  failed_when: false
+  when: not _imas_verify_status.connected | default(false)
+
+- name: Keep the log for the report
+  ansible.builtin.set_fact:
+    _imas_verify_log: "{{ _imas_verify_winlog.result | default([]) }}"

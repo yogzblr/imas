@@ -1,0 +1,34 @@
+# imas-sprout's .deb/.rpm, as .goreleaser.yaml's "imas-sprout" nfpm entry
+# builds them (fields, contents, scripts), for the {{ imas_pkg_format }} format.
+# Keep the two in step.
+name: imas-sprout
+arch: amd64
+platform: linux
+version: "{{ imas_pkg_version }}"
+version_metadata: git
+maintainer: imas molecule tests
+description: IMAS remote control agent
+license: 0BSD
+homepage: https://imas.dev
+vendor: imas
+contents:
+  - src: "{{ imas_work }}/bin/imas-sprout"
+    dst: /usr/bin/imas-sprout
+    file_info:
+      mode: 0755
+  - src: "{{ imas_repo_root }}/packaging/etc/imas-sprout.conf"
+    dst: /etc/imas/sprout
+    type: config
+    file_info:
+      mode: 0644
+  - dst: /var/cache/imas/sprout
+    type: dir
+    file_info:
+      mode: 0755
+  - src: "{{ imas_repo_root }}/packaging/systemd/imas-sprout.service"
+    dst: "{{ '/lib/systemd/system/imas-sprout.service' if imas_pkg_format == 'deb' else '/usr/lib/systemd/system/imas-sprout.service' }}"
+    type: config
+    file_info:
+      mode: 0644
+scripts:
+  postinstall: "{{ imas_repo_root }}/packaging/scripts/imas-sprout-{{ imas_pkg_format }}-postinstall.sh"

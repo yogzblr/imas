@@ -1,0 +1,9 @@
+---
+# The roles share the imas_* variables a customer sets once for the whole
+# inventory (imas_join_token is the name the API design doc gives it,
+# cloudxp-machine-manager-api-design.md §3.1), so they don't carry the
+# role-name prefix.
+skip_list:
+  - var-naming[no-role-prefix]
+exclude_paths:
+  - molecule/stubfarmer/

@@ -1,0 +1,98 @@
+---
+# Linux path of imas_sprout/imas_verify, end to end, against Docker:
+#
+#   - prepare.yml builds imas-sprout from this checkout, packages it with
+#     nfpm the way .goreleaser.yaml's nfpms section does, and publishes the
+#     .deb/.rpm to signed apt and rpm repositories laid out like the
+#     Buildkite registries. It starts ../stubfarmer (enrollment API + an
+#     operator-mode nats-server) in an "imas-farmer" container that also
+#     serves those repositories.
+#   - converge.yml runs site.yml's role against a systemd container per
+#     package manager: apt (Debian 12), dnf (Rocky 9) and zypper (Leap 15.6).
+#   - idempotence re-runs it: nothing may change, and no sprout may enroll
+#     again (verify.yml checks the stub's redemption count).
+#
+# Run from ansible/:  molecule test
+# Needs Docker (privileged containers, for systemd), Go, and network access
+# to Docker Hub, the Go module proxy and the distros' mirrors.
+dependency:
+  name: galaxy
+  enabled: false
+driver:
+  name: docker
+platforms:
+  - name: imas-debian12
+    image: geerlingguy/docker-debian12-ansible:latest
+    pre_build_image: true
+    command: ""
+    privileged: true
+    cgroupns_mode: host
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    networks:
+      - name: imas-molecule
+    groups: [sprouts]
+  - name: imas-rocky9
+    image: geerlingguy/docker-rockylinux9-ansible:latest
+    pre_build_image: true
+    command: ""
+    privileged: true
+    cgroupns_mode: host
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    networks:
+      - name: imas-molecule
+    groups: [sprouts]
+  - name: imas-leap15
+    image: imas-molecule/leap15-systemd:latest
+    dockerfile: leap15.Dockerfile
+    pre_build_image: false
+    command: /usr/lib/systemd/systemd
+    privileged: true
+    cgroupns_mode: host
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    networks:
+      - name: imas-molecule
+    groups: [sprouts]
+provisioner:
+  name: ansible
+  env:
+    ANSIBLE_ROLES_PATH: ${MOLECULE_PROJECT_DIRECTORY}/roles
+  inventory:
+    group_vars:
+      sprouts:
+        # What prepare.yml's stub farmer accepts: one key, three uses, one
+        # per platform. A second enrollment of any of them would exhaust it.
+        imas_join_token: ek_molecule.c3R1YmZhcm1lci1qb2luLXRva2Vu
+        imas_farmer_host: imas-farmer
+        imas_farmer_api_port: 5405
+        # The stub's certificate is from a CA it generates: pre-provisioned,
+        # the DMZ way (sproutrootcatofu: false).
+        imas_sprout_root_ca: >-
+          {{ lookup('ansible.builtin.file', lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') ~ '/imas/state/ca.pem') }}
+        imas_sprout_version: 0.0.1+git
+        imas_sprout_apt_repo_url: http://imas-farmer:8080/deb/any/
+        imas_sprout_apt_gpg_key_url: http://imas-farmer:8080/gpgkey
+        imas_sprout_rpm_repo_url: http://imas-farmer:8080/rpm/$$basearch
+        imas_sprout_rpm_gpg_key_url: http://imas-farmer:8080/gpgkey
+        imas_verify_timeout: 120
+        imas_verify_interval: 5
+    host_vars:
+      # One host pins the bus address; the others use the nats_urls the
+      # stub returns at enrollment.
+      imas-rocky9:
+        imas_farmer_bus_urls: [tls://imas-farmer:5406]
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - verify
+    - cleanup
+    - destroy
