@@ -1,10 +1,12 @@
 package pki
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -234,4 +236,315 @@ func newTestBoxKeyPair(t *testing.T) testBoxKeyPair {
 		t.Fatal(err)
 	}
 	return testBoxKeyPair{pub, priv}
+}
+
+// Box key rotation, the sprout's side (BeginSproutBoxKeyRotation and the
+// pending/current/previous key files). farmerAcceptsSubmission stands in
+// for internal/natsapi's handleBoxKeySubmit, which this package can't
+// import; cmd/sprout's round-trip test runs the real one.
+
+func farmerAcceptsSubmission(t *testing.T, submission []byte) string {
+	t.Helper()
+	msg, err := OpenFromSprout("t_1", "web-01", payloadbox.PurposeBoxKeySubmit, submission)
+	if err != nil {
+		t.Fatalf("farmer can't open the submission: %v", err)
+	}
+	var body sproutBoxKeySubmitBody
+	if err := json.Unmarshal(msg.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if err := RotateSproutBoxKey("t_1", "web-01", body.Pub, time.Hour); err != nil {
+		t.Fatalf("RotateSproutBoxKey: %v", err)
+	}
+	return body.Pub
+}
+
+func farmerSeals(t *testing.T) []byte {
+	t.Helper()
+	data, _, err := SealToSprout("t_1", "web-01", payloadbox.PurposeCmdRunRequest, "", "uptime")
+	if err != nil {
+		t.Fatalf("SealToSprout: %v", err)
+	}
+	return data
+}
+
+func sproutOpens(t *testing.T, data []byte) {
+	t.Helper()
+	if _, err := SproutOpenFromFarmer("web-01", payloadbox.PurposeCmdRunRequest, data); err != nil {
+		t.Fatalf("SproutOpenFromFarmer: %v", err)
+	}
+}
+
+// farmerOpensReply checks farmer opens what the sprout seals now.
+func farmerOpensReply(t *testing.T) {
+	t.Helper()
+	reply, err := SproutSealForFarmer("web-01", payloadbox.PurposeCmdRunResponse, "", "ok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenFromSprout("t_1", "web-01", payloadbox.PurposeCmdRunResponse, reply); err != nil {
+		t.Fatalf("farmer can't open the sprout's reply: %v", err)
+	}
+}
+
+func sproutCurrentPub(t *testing.T) string {
+	t.Helper()
+	priv, err := readBoxPrivKeyFile(config.SproutBoxPrivFile, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := boxPubFromPriv(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pub
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func farmerActive(t *testing.T) (string, []string) {
+	t.Helper()
+	active, grace, err := ValidSproutBoxKeys("t_1", "web-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return active, grace
+}
+
+// The window the grace design is for: farmer seals a payload to the old
+// key, records the new one, seals the next payload to it, and the two
+// arrive in the opposite order. The first promotes the new key; the
+// second, still under the old one, opens under the kept previous key.
+func TestSproutBoxKeyRotation_InFlightPayloadDuringRotation(t *testing.T) {
+	enrollForTest(t)
+	oldPub := sproutCurrentPub(t)
+
+	inFlight := farmerSeals(t) // sealed to the old key
+	submission, newPub, err := BeginSproutBoxKeyRotation("web-01")
+	if err != nil {
+		t.Fatalf("BeginSproutBoxKeyRotation: %v", err)
+	}
+	if newPub == oldPub {
+		t.Fatal("the rotation reused the current key")
+	}
+	// Nothing the sprout uses has changed yet.
+	if got := sproutCurrentPub(t); got != oldPub {
+		t.Fatalf("current key changed to %s before farmer confirmed the new one", got)
+	}
+	if got := farmerAcceptsSubmission(t, submission); got != newPub {
+		t.Fatalf("submission names %s, want %s", got, newPub)
+	}
+	if active, grace := farmerActive(t); active != newPub || len(grace) != 1 || grace[0] != oldPub {
+		t.Fatalf("farmer has active %s, grace %v", active, grace)
+	}
+	// Farmer's grace keeps the sprout's old key valid for its replies
+	// until the sprout learns of the switch.
+	farmerOpensReply(t)
+
+	sproutOpens(t, farmerSeals(t)) // sealed to the new key: promotes it
+	if got := sproutCurrentPub(t); got != newPub {
+		t.Fatalf("current key is %s after farmer sealed to the new one, want %s", got, newPub)
+	}
+	if fileExists(sproutPendingBoxPrivFile()) {
+		t.Error("pending key file left behind after promotion")
+	}
+	if pub, _ := os.ReadFile(config.SproutBoxPubFile); string(pub) != newPub {
+		t.Errorf("public key file holds %q, want %s", pub, newPub)
+	}
+	sproutOpens(t, inFlight) // the old key's payload, arriving late
+	farmerOpensReply(t)
+}
+
+// A submission that never reaches farmer (dropped by the bus, or refused)
+// costs nothing: the sprout keeps its current key, and triggering again
+// resubmits the same pending key rather than stacking another.
+func TestSproutBoxKeyRotation_LostSubmission(t *testing.T) {
+	enrollForTest(t)
+	oldPub := sproutCurrentPub(t)
+	first, pending, err := BeginSproutBoxKeyRotation("web-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = first // lost
+
+	sproutOpens(t, farmerSeals(t))
+	farmerOpensReply(t)
+	if got := sproutCurrentPub(t); got != oldPub {
+		t.Fatalf("current key moved to %s without farmer confirming it", got)
+	}
+
+	retry, again, err := BeginSproutBoxKeyRotation("web-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != pending {
+		t.Fatalf("second trigger submitted %s, want the pending %s", again, pending)
+	}
+	if bytes.Equal(retry, first) {
+		t.Error("resubmission reused the first envelope; it must be freshly sealed")
+	}
+	farmerAcceptsSubmission(t, retry)
+	sproutOpens(t, farmerSeals(t))
+	if got := sproutCurrentPub(t); got != pending {
+		t.Fatalf("current key is %s, want %s", got, pending)
+	}
+}
+
+// The previous key is deleted once its grace window closes, and a
+// rotation isn't started while it's open.
+func TestSproutBoxKeyRotation_PreviousKeyGraceWindow(t *testing.T) {
+	enrollForTest(t)
+	inFlight := farmerSeals(t)
+	submission, _, err := BeginSproutBoxKeyRotation("web-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	farmerAcceptsSubmission(t, submission)
+	sproutOpens(t, farmerSeals(t))
+
+	if _, _, err := BeginSproutBoxKeyRotation("web-01"); !errors.Is(err, ErrSproutBoxKeyRotationTooSoon) {
+		t.Fatalf("rotation inside the grace window = %v, want ErrSproutBoxKeyRotationTooSoon", err)
+	}
+	if fileExists(sproutPendingBoxPrivFile()) {
+		t.Fatal("a refused rotation left a pending key")
+	}
+
+	past := time.Now().Add(-sproutPrevBoxKeyGrace - time.Minute)
+	if err := os.Chtimes(sproutPrevBoxPrivFile(), past, past); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SproutOpenFromFarmer("web-01", payloadbox.PurposeCmdRunRequest, inFlight); !errors.Is(err, payloadbox.ErrOpen) {
+		t.Fatalf("old-key payload after the grace window = %v, want ErrOpen", err)
+	}
+	if fileExists(sproutPrevBoxPrivFile()) {
+		t.Fatal("previous key not deleted after its grace window")
+	}
+	if _, _, err := BeginSproutBoxKeyRotation("web-01"); err != nil {
+		t.Fatalf("rotation after the grace window: %v", err)
+	}
+}
+
+// Only farmer can promote the pending key: a payload sealed to it by
+// anyone without a tenant private key doesn't open, so a bus that saw the
+// (public) pending key in the submission can't switch the sprout over.
+func TestSproutBoxKeyRotation_ForgedPayloadDoesNotPromote(t *testing.T) {
+	enrollForTest(t)
+	oldPub := sproutCurrentPub(t)
+	_, pendingB64, err := BeginSproutBoxKeyRotation("web-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := DecodeBoxPubKey(pendingB64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attacker := newTestBoxKeyPair(t)
+	msg, err := payloadbox.NewMessage(payloadbox.PurposeCmdRunRequest, "web-01", "", "rm -rf /")
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged, err := payloadbox.Seal(msg, []payloadbox.KeyPair{{PeerPub: pending, Priv: attacker.priv}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SproutOpenFromFarmer("web-01", payloadbox.PurposeCmdRunRequest, forged); !errors.Is(err, payloadbox.ErrOpen) {
+		t.Fatalf("forged payload = %v, want ErrOpen", err)
+	}
+	if got := sproutCurrentPub(t); got != oldPub || !fileExists(sproutPendingBoxPrivFile()) {
+		t.Fatal("a forged payload promoted the pending key")
+	}
+}
+
+// A crash between writing the previous key and renaming the pending one
+// over the current one leaves previous a copy of current; the next
+// payload sealed to the pending key finishes the promotion.
+func TestSproutBoxKeyRotation_RecoversFromInterruptedPromotion(t *testing.T) {
+	enrollForTest(t)
+	oldPub := sproutCurrentPub(t)
+	submission, newPub, err := BeginSproutBoxKeyRotation("web-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	farmerAcceptsSubmission(t, submission)
+	current, err := os.ReadFile(config.SproutBoxPrivFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sproutPrevBoxPrivFile(), current, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sproutOpens(t, farmerSeals(t))
+	if got := sproutCurrentPub(t); got != newPub {
+		t.Fatalf("current key is %s, want %s", got, newPub)
+	}
+	prev, err := readBoxPrivKeyFile(sproutPrevBoxPrivFile(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pub, _ := boxPubFromPriv(prev); pub != oldPub {
+		t.Fatalf("previous key is %s, want %s", pub, oldPub)
+	}
+}
+
+// A sprout that sees no farmer payload between farmer recording its new
+// key and the next tenant key rotation learns of the switch from the
+// refresh's continuity proof, which farmer seals to the active key.
+func TestSproutBoxKeyRotation_ContinuityProofPromotes(t *testing.T) {
+	enrollForTest(t)
+	submission, newPub, err := BeginSproutBoxKeyRotation("web-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	farmerAcceptsSubmission(t, submission)
+	rot, err := RotateTenantX25519Keypair("t_1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RefreshGatewayJWT(t.Context()); err != nil {
+		t.Fatalf("RefreshGatewayJWT: %v", err)
+	}
+	if got := pinnedTenantKey(t); got != rot.Pub {
+		t.Errorf("pin is %s, want %s", got, rot.Pub)
+	}
+	if got := sproutCurrentPub(t); got != newPub {
+		t.Fatalf("current key is %s, want %s", got, newPub)
+	}
+}
+
+// Payloads opened concurrently while the new key is promoted all open,
+// whichever key each was sealed to (run with -race).
+func TestSproutBoxKeyRotation_ConcurrentOpensDuringPromotion(t *testing.T) {
+	enrollForTest(t)
+	var payloads [][]byte
+	for range 8 {
+		payloads = append(payloads, farmerSeals(t))
+	}
+	submission, newPub, err := BeginSproutBoxKeyRotation("web-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	farmerAcceptsSubmission(t, submission)
+	for range 8 {
+		payloads = append(payloads, farmerSeals(t))
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, len(payloads))
+	for _, p := range payloads {
+		wg.Go(func() {
+			if _, err := SproutOpenFromFarmer("web-01", payloadbox.PurposeCmdRunRequest, p); err != nil {
+				errs <- err
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("SproutOpenFromFarmer: %v", err)
+	}
+	if got := sproutCurrentPub(t); got != newPub {
+		t.Fatalf("current key is %s, want %s", got, newPub)
+	}
 }

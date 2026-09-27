@@ -121,7 +121,9 @@ func upsertSproutBoxKeyActive(tenantID, sproutID, pub string) error {
 // even now, not even encrypted) and submits only the new public key here.
 // Farmer may trigger a rotation (see internal/natsapi's rotate-trigger
 // handler), but that only asks the sprout to do this — it never supplies
-// or receives key material of its own.
+// or receives key material of its own. The sprout's side is
+// sproutbox.go's BeginSproutBoxKeyRotation; the sprout keeps sealing with
+// its old key until farmer seals something to the new one.
 //
 // The previously active key moves to a grace-period overlap window
 // (graceDuration, config.BoxKeyGraceDuration) rather than being revoked
