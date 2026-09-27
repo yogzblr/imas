@@ -1,0 +1,27 @@
+---
+- name: Wait for the sprout to enroll and connect to the bus
+  imas_sprout_bus_status:
+    service: "{{ imas_verify_service_name }}"
+    user_jwt_file: "{{ _imas_verify_user_jwt_file }}"
+    bus_urls_file: "{{ _imas_verify_bus_urls_file }}"
+    bus_urls: "{{ _imas_verify_bus_urls_pin }}"
+    legacy_bus_url: "{{ _imas_verify_legacy_bus_url }}"
+    hold: "{{ imas_verify_hold }}"
+  register: _imas_verify_status
+  until: _imas_verify_status.connected
+  retries: "{{ (imas_verify_timeout | int / imas_verify_interval | int) | round(0, 'ceil') | int }}"
+  delay: "{{ imas_verify_interval }}"
+  # Reported by the fail task in main.yml, with the reason.
+  failed_when: false
+
+- name: Read the sprout's recent log
+  ansible.builtin.command:
+    cmd: journalctl --unit {{ imas_verify_service_name }} --lines {{ imas_verify_log_lines }} --no-pager --output short-iso
+  register: _imas_verify_journal
+  changed_when: false
+  failed_when: false
+  when: not _imas_verify_status.connected
+
+- name: Keep the log for the report
+  ansible.builtin.set_fact:
+    _imas_verify_log: "{{ _imas_verify_journal.stdout_lines | default([]) }}"

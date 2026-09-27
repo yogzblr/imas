@@ -1,0 +1,119 @@
+---
+# Builds what the sprouts install from and enroll with (see molecule.yml).
+- name: Build the packages and start the stub farmer
+  hosts: localhost
+  gather_facts: false
+  vars:
+    imas_repo_root: "{{ (playbook_dir ~ '/../../..') | realpath }}"
+    imas_work: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/imas"
+    imas_pkg_version: 0.0.1
+    imas_nfpm: github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+    imas_join_token: "{{ hostvars[groups['sprouts'][0]]['imas_join_token'] }}"
+  tasks:
+    - name: Create the work directories
+      ansible.builtin.file:
+        path: "{{ imas_work }}/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: [bin, pkg, state, nfpm]
+
+    # Static, so one binary runs on every distro under test.
+    - name: Build imas-sprout and the stub farmer
+      ansible.builtin.command:
+        cmd: >-
+          go build -trimpath -o {{ imas_work }}/bin/{{ item.out }} {{ item.flags }} {{ item.pkg }}
+        chdir: "{{ imas_repo_root }}"
+      environment:
+        CGO_ENABLED: "0"
+      loop:
+        - out: imas-sprout
+          pkg: ./cmd/sprout
+          flags: -tags no_self_update -ldflags "-X main.Tag=v{{ imas_pkg_version }}"
+        - out: stubfarmer
+          pkg: ./ansible/molecule/stubfarmer
+          flags: ""
+      changed_when: true
+
+    - name: Write the nfpm configs
+      ansible.builtin.template:
+        src: templates/nfpm.yaml.j2
+        dest: "{{ imas_work }}/nfpm/{{ imas_pkg_format }}.yaml"
+        mode: "0644"
+      loop: [deb, rpm]
+      loop_control:
+        loop_var: imas_pkg_format
+
+    - name: Package imas-sprout
+      ansible.builtin.command:
+        cmd: go run {{ imas_nfpm }} package --config {{ imas_work }}/nfpm/{{ item }}.yaml --packager {{ item }} --target {{ imas_work }}/pkg/
+        # Outside the repo, so `go run pkg@version` doesn't touch go.mod.
+        chdir: "{{ imas_work }}"
+      loop: [deb, rpm]
+      changed_when: true
+
+    - name: Publish the packages to signed apt and rpm repositories
+      ansible.builtin.command:
+        cmd: >-
+          docker run --rm -v {{ imas_work }}:/work -v {{ playbook_dir }}/files/build-repos.sh:/build-repos.sh:ro
+          ubuntu:24.04 bash /build-repos.sh
+      changed_when: true
+
+    # A run that stopped before cleanup.yml leaves one behind.
+    - name: Remove a stub farmer left over from an earlier run
+      ansible.builtin.command:
+        cmd: docker rm -f imas-farmer
+      register: _rm
+      changed_when: _rm.rc == 0
+      failed_when: false
+
+    - name: Start the stub farmer
+      ansible.builtin.command:
+        cmd: >-
+          docker run -d --name imas-farmer --network imas-molecule -v {{ imas_work }}:/work:ro
+          -v {{ imas_work }}/state:/state debian:12 /work/bin/stubfarmer
+          -addr :5405 -nats-port 5406 -hosts imas-farmer
+          -nats-urls tls://imas-farmer:5406
+          -join-token {{ imas_join_token }} -max-uses {{ groups['sprouts'] | length }}
+          -state-dir /state -static-dir /work/repo -static-addr :8080
+      changed_when: true
+
+    - name: Wait for the stub farmer's CA
+      ansible.builtin.wait_for:
+        path: "{{ imas_work }}/state/ca.pem"
+        timeout: 30
+
+# Hermetic: the sprouts install only from the test repositories above, so a
+# distro mirror being slow or unreachable can't fail the test. imas-sprout
+# has no package dependencies.
+- name: Disable the distros' own repositories
+  hosts: sprouts
+  gather_facts: true
+  tasks:
+    - name: Disable apt sources
+      ansible.builtin.shell:
+        cmd: >-
+          set -e; mkdir -p /etc/apt/disabled;
+          for f in /etc/apt/sources.list /etc/apt/sources.list.d/*; do [ -e "$f" ] && mv "$f" /etc/apt/disabled/; done; true
+      when: ansible_pkg_mgr == 'apt'
+      changed_when: true
+
+    - name: Find the yum repositories
+      ansible.builtin.find:
+        paths: /etc/yum.repos.d
+        patterns: "*.repo"
+      register: _repos
+      when: ansible_pkg_mgr in ['dnf', 'dnf5', 'yum']
+
+    - name: Disable yum repositories
+      ansible.builtin.replace:
+        path: "{{ item.path }}"
+        regexp: "^enabled=.*"
+        replace: enabled=0
+      loop: "{{ _repos.files | default([]) }}"
+      when: ansible_pkg_mgr in ['dnf', 'dnf5', 'yum']
+
+    - name: Disable zypper repositories
+      ansible.builtin.command:
+        cmd: zypper --non-interactive modifyrepo --disable --all
+      when: ansible_pkg_mgr == 'zypper'
+      changed_when: true

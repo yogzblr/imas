@@ -1,0 +1,87 @@
+---
+# Every variable is documented in meta/argument_specs.yml, which Ansible
+# also validates them against before the role runs.
+
+# --- Enrollment: where the sprout enrolls, and with what ---------------------
+
+# The "{key_id}.{secret}" one-time enrollment key from
+# POST /tenants/{tenant_id}/enrollment-keys. A secret: supply it from
+# ansible-vault or your runner's secret store, never a committed file.
+# Only written to a host that isn't enrolled yet; the sprout deletes it from
+# its config file itself once it has enrolled.
+imas_join_token: ""
+
+# Host the sprout enrolls with (config key "farmerinterface"): it calls
+# https://<imas_farmer_host>:<imas_farmer_api_port>/v1/enroll.
+imas_farmer_host: ""
+imas_farmer_api_port: 5405
+
+# Bus addresses to pin (config key "busurls"), e.g.
+# ["wss://bus.example.com:443"] or ["tls://farmer.example.com:5406"].
+# Empty: the sprout connects to the nats_urls farmer returns at enrollment,
+# and the role removes any busurls pin it set before.
+imas_farmer_bus_urls: []
+
+# PEM of the CA that issued the farmer's (or, behind the DMZ, Envoy's edge)
+# TLS certificate. When set, it is written to the sprout's root CA path and
+# trust-on-first-use is turned off ("sproutrootcatofu: false"), as a sprout
+# behind the DMZ requires (docs/design/imas-envoy-enrollment-design.md).
+# The sprout never replaces a root CA file it already has, and neither does
+# this role: to rotate it, delete the file on the host first.
+imas_sprout_root_ca: ""
+
+# --- Package ------------------------------------------------------------------
+
+# Buildkite organization that owns the imasdeb/imasrpm/imasnget registries.
+imas_buildkite_org: ""
+
+# "" installs whatever the repo's newest version is, once. Set a version to
+# pin it: on Linux, the package version exactly as the repository lists it,
+# which for the release packages is "<release>+git" (e.g. "1.2.3+git":
+# .goreleaser.yaml's nfpm version_metadata). On Windows, the release
+# ("1.2.3"); "" there means the newest non-prerelease version on the NuGet
+# feed, checked on every run.
+imas_sprout_version: ""
+
+# present: install if missing (upgrades come from your normal patching of
+# the repo). latest: also upgrade to the repo's newest on every run.
+# Ignored on Windows, where imas_sprout_version decides.
+imas_sprout_package_state: present
+
+# Token for a private Buildkite registry (Read Packages). Leave empty for a
+# public one. Linux only: the Windows feed must be public (winget sends no
+# credentials, and publish-packages.yml checks the feed serves it anonymously).
+imas_sprout_repo_token: ""
+
+imas_sprout_registry_base_url: "https://packages.buildkite.com/{{ imas_buildkite_org }}"
+imas_sprout_deb_registry: imasdeb
+imas_sprout_rpm_registry: imasrpm
+imas_sprout_nuget_registry: imasnget
+
+# Repository URLs, in Buildkite Package Registries' layout. Override them to
+# install from a mirror.
+imas_sprout_apt_repo_url: "{{ imas_sprout_registry_base_url }}/{{ imas_sprout_deb_registry }}/any/"
+imas_sprout_apt_repo_suite: any
+imas_sprout_apt_repo_component: main
+imas_sprout_apt_gpg_key_url: "{{ imas_sprout_registry_base_url }}/{{ imas_sprout_deb_registry }}/gpgkey"
+imas_sprout_rpm_repo_url: "{{ imas_sprout_registry_base_url }}/{{ imas_sprout_rpm_registry }}/rpm_any/rpm_any/$basearch"
+imas_sprout_rpm_gpg_key_url: "{{ imas_sprout_registry_base_url }}/{{ imas_sprout_rpm_registry }}/gpgkey"
+imas_sprout_nuget_index_url: "{{ imas_sprout_registry_base_url }}/{{ imas_sprout_nuget_registry }}/nuget/index.json"
+
+# Windows: the NuGet package carrying the MSI (build-winget-nupkg.sh's
+# installer package).
+imas_sprout_windows_nuget_id: imas.sprout.windows.msi
+# Windows: a direct MSI URL instead of the NuGet feed, e.g. the GitHub
+# release asset or an internal mirror. Downloaded once per URL.
+imas_sprout_windows_msi_url: ""
+# Windows: SHA-256 of the file downloaded (the .nupkg, or the MSI when
+# imas_sprout_windows_msi_url is set). Only meaningful with a pinned version.
+imas_sprout_windows_checksum: ""
+
+# --- Behaviour ------------------------------------------------------------------
+
+imas_sprout_service_name: imas-sprout
+
+# Run imas_verify after enrolling: wait until the sprout is connected to the
+# bus, and fail the play if it isn't within imas_verify_timeout.
+imas_sprout_verify: true

@@ -1,0 +1,16 @@
+---
+# How long to wait for the sprout to enroll and connect to the bus, and how
+# often to check. Enrollment retries back off (5s doubling), so a transient
+# enrollment failure can take a minute or two to recover.
+imas_verify_timeout: 300
+imas_verify_interval: 10
+# Seconds the bus connection has to stay established to count, so an
+# attempt the bus rejects (a wrong or revoked User JWT) doesn't pass.
+imas_verify_hold: 5
+
+imas_verify_service_name: imas-sprout
+# The sprout's config file. Empty: the OS default (/etc/imas/sprout, or
+# %ProgramData%\imas\sprout).
+imas_verify_config_file: ""
+# Log lines to show when the sprout doesn't connect.
+imas_verify_log_lines: 40

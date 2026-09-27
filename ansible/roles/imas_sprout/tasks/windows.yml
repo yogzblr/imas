@@ -1,0 +1,160 @@
+---
+# Paths are the MSI's (packaging/windows/imas-sprout.wxs) and the sprout's
+# (internal/config/paths_windows.go): everything below %ProgramData%\imas,
+# whose ACL the MSI restricts to SYSTEM and Administrators.
+- name: Set the sprout's Windows paths
+  ansible.builtin.set_fact:
+    _imas_sprout_config_file: "{{ _imas_sprout_data_dir }}\\sprout"
+    _imas_sprout_default_user_jwt: "{{ _imas_sprout_data_dir }}\\pki\\sprout\\sprout.jwt"
+    _imas_sprout_default_root_ca: "{{ _imas_sprout_data_dir }}\\pki\\sprout\\tls-rootca.pem"
+    # Installers aren't secret, so they're kept outside that directory,
+    # which only the MSI should create.
+    _imas_sprout_installer_dir: "{{ _imas_sprout_program_data }}\\imas-installers"
+  vars:
+    _imas_sprout_program_data: "{{ ansible_env.ProgramData | default(_imas_sprout_program_data_fallback) }}"
+    _imas_sprout_data_dir: "{{ _imas_sprout_program_data }}\\imas"
+
+# The public imasnget feed serves the MSI inside a NuGet package
+# (imas.sprout.windows.msi, built by build-winget-nupkg.sh): the same file
+# the winget manifest's InstallerUrl points at.
+- name: Find the imas-sprout MSI on the NuGet feed
+  ansible.windows.win_powershell:
+    parameters:
+      IndexUrl: "{{ imas_sprout_nuget_index_url }}"
+      PackageId: "{{ imas_sprout_windows_nuget_id }}"
+      Version: "{{ imas_sprout_version }}"
+    script: |
+      [CmdletBinding()]
+      param([string]$IndexUrl, [string]$PackageId, [string]$Version)
+      $ErrorActionPreference = 'Stop'
+      $Ansible.Changed = $false
+      [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+      $index = Invoke-RestMethod -Uri $IndexUrl -UseBasicParsing
+      $base = @($index.resources | Where-Object { "$($_.'@type')" -like 'PackageBaseAddress*' })[0].'@id'
+      if (-not $base) { throw "no PackageBaseAddress in $IndexUrl: is the feed public?" }
+      $base = $base.TrimEnd('/') + '/'
+      $id = $PackageId.ToLowerInvariant()
+      if (-not $Version) {
+        # NuGet's flat container lists every version; take the newest release.
+        $versions = (Invoke-RestMethod -Uri "$base$id/index.json" -UseBasicParsing).versions
+        $releases = @($versions | Where-Object { $_ -notmatch '-' } | Sort-Object { [version]($_ -replace '\+.*$', '') })
+        if ($releases.Count -eq 0) { throw "no release of $PackageId on $IndexUrl" }
+        $Version = $releases[-1]
+      }
+      $v = ($Version.TrimStart('v') -replace '\+.*$', '').ToLowerInvariant()
+      $Ansible.Result = @{ version = $v; url = "$base$id/$v/$id.$v.nupkg"; file = "$id.$v.nupkg" }
+  register: _imas_sprout_nuget
+  when: imas_sprout_windows_msi_url | length == 0
+
+- name: Work out which installer to download
+  ansible.builtin.set_fact:
+    _imas_sprout_download_url: "{{ imas_sprout_windows_msi_url if _imas_sprout_direct else _imas_sprout_nuget.result.url }}"
+    _imas_sprout_download_file: >-
+      {{ _imas_sprout_installer_dir }}\{{ (imas_sprout_windows_msi_url | urlsplit('path') | basename)
+      if _imas_sprout_direct else _imas_sprout_nuget.result.file }}
+    _imas_sprout_msi: >-
+      {{ _imas_sprout_installer_dir }}\{{ (imas_sprout_windows_msi_url | urlsplit('path') | basename)
+      if _imas_sprout_direct else ('imas-sprout-' ~ _imas_sprout_nuget.result.version ~ '.msi') }}
+  vars:
+    _imas_sprout_direct: "{{ imas_sprout_windows_msi_url | length > 0 }}"
+
+- name: Create the installer cache directory
+  ansible.windows.win_file:
+    path: "{{ _imas_sprout_installer_dir }}"
+    state: directory
+
+# Downloaded once per version: an existing file is kept.
+- name: Download the imas-sprout installer
+  ansible.windows.win_get_url:
+    url: "{{ _imas_sprout_download_url }}"
+    dest: "{{ _imas_sprout_download_file }}"
+    force: false
+    checksum: "{{ imas_sprout_windows_checksum if imas_sprout_windows_checksum | length > 0 else omit }}"
+    checksum_algorithm: sha256
+
+- name: Extract the MSI from the NuGet package
+  ansible.windows.win_powershell:
+    parameters:
+      Package: "{{ _imas_sprout_download_file }}"
+      Msi: "{{ _imas_sprout_msi }}"
+    script: |
+      [CmdletBinding()]
+      param([string]$Package, [string]$Msi)
+      $ErrorActionPreference = 'Stop'
+      $Ansible.Changed = $false
+      if (Test-Path -LiteralPath $Msi) { return }
+      Add-Type -AssemblyName System.IO.Compression.FileSystem
+      $zip = [IO.Compression.ZipFile]::OpenRead($Package)
+      try {
+        # build-winget-nupkg.sh puts the MSI at the package root.
+        $entry = @($zip.Entries | Where-Object { $_.FullName -notmatch '/' -and $_.Name -like '*.msi' })
+        if ($entry.Count -ne 1) { throw "expected one MSI at the root of $Package, found $($entry.Count)" }
+        [IO.Compression.ZipFileExtensions]::ExtractToFile($entry[0], "$Msi.partial", $true)
+      } finally {
+        $zip.Dispose()
+      }
+      Move-Item -LiteralPath "$Msi.partial" -Destination $Msi
+      $Ansible.Changed = $true
+  when: imas_sprout_windows_msi_url | length == 0
+
+# win_package reads the ProductCode from a local MSI, so this is a no-op when
+# that build is already installed. A fresh install leaves the service
+# stopped (the .wxs start condition); an upgrade restarts it itself.
+- name: Install imas-sprout
+  ansible.windows.win_package:
+    path: "{{ _imas_sprout_msi }}"
+    state: present
+    arguments: /norestart
+    expected_return_code: [0, 3010]
+
+- name: Read the sprout's config file
+  ansible.builtin.slurp:
+    src: "{{ _imas_sprout_config_file }}"
+  register: _imas_sprout_config_raw
+  no_log: true
+
+- name: Parse the sprout's config file
+  ansible.builtin.set_fact:
+    _imas_sprout_config: "{{ _imas_sprout_config_raw.content | b64decode | from_yaml | default({}, true) }}"
+  no_log: true
+
+# pki.SproutEnrolled: the NATS User JWT is written last, so its presence is
+# what marks a completed enrollment.
+- name: Check whether the sprout is already enrolled
+  ansible.windows.win_stat:
+    path: "{{ _imas_sprout_config.sproutuserjwtfile | default(_imas_sprout_default_user_jwt, true) }}"
+    get_checksum: false
+  register: _imas_sprout_jwt
+
+- name: Pre-provision the root CA
+  when: imas_sprout_root_ca | length > 0
+  vars:
+    _imas_sprout_root_ca_file: "{{ _imas_sprout_config.sproutrootca | default(_imas_sprout_default_root_ca, true) }}"
+  block:
+    - name: Create the sprout's PKI directory
+      ansible.windows.win_file:
+        path: "{{ _imas_sprout_root_ca_file | win_dirname }}"
+        state: directory
+
+    # force: false, like the sprout itself: an existing root CA is a pin,
+    # never replaced silently.
+    - name: Write the root CA
+      ansible.windows.win_copy:
+        content: "{{ imas_sprout_root_ca | trim }}\n"
+        dest: "{{ _imas_sprout_root_ca_file }}"
+        force: false
+      notify: Restart imas-sprout
+
+- name: Write the enrollment settings
+  ansible.builtin.include_tasks: config.yml
+  vars:
+    _imas_sprout_enrolled: "{{ _imas_sprout_jwt.stat.exists }}"
+
+- name: Restart the sprout if its settings changed
+  ansible.builtin.meta: flush_handlers
+
+- name: Start imas-sprout and start it at boot
+  ansible.windows.win_service:
+    name: "{{ imas_sprout_service_name }}"
+    start_mode: auto
+    state: started

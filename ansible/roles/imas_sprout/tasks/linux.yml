@@ -1,0 +1,92 @@
+---
+# Paths are the packages' (packaging/etc, .goreleaser.yaml nfpms) and the
+# sprout's defaults (internal/config/config.go, paths_other.go).
+- name: Set the sprout's Linux paths
+  ansible.builtin.set_fact:
+    _imas_sprout_config_file: /etc/imas/sprout
+    _imas_sprout_pki_dir: /etc/imas/pki/sprout
+
+- name: Check this host is supported
+  ansible.builtin.assert:
+    that:
+      - ansible_service_mgr == 'systemd'
+      - ansible_pkg_mgr in _imas_sprout_repo_tasks
+    fail_msg: >-
+      imas_sprout supports systemd hosts with apt, dnf/yum or zypper; this host
+      has {{ ansible_service_mgr }} and {{ ansible_pkg_mgr }}.
+    quiet: true
+  vars:
+    _imas_sprout_repo_tasks: [apt, dnf, dnf5, yum, zypper]
+
+- name: Add the imas package repository
+  ansible.builtin.include_tasks: "repo_{{ 'yum' if ansible_pkg_mgr in ['dnf', 'dnf5'] else ansible_pkg_mgr }}.yml"
+
+# The rpm/deb postinstall only enables the unit, and an upgrade doesn't
+# restart a running sprout (packaging/README.md, "SUSE and the shared RPM
+# scripts"), so any package change restarts it here.
+- name: Install imas-sprout
+  ansible.builtin.package:
+    name: "{{ _imas_sprout_package_spec }}"
+    state: "{{ 'present' if imas_sprout_version | length > 0 else imas_sprout_package_state }}"
+  vars:
+    _imas_sprout_package_spec: >-
+      {{ 'imas-sprout' if imas_sprout_version | length == 0
+         else ('imas-sprout-' if ansible_pkg_mgr in ['dnf', 'dnf5', 'yum'] else 'imas-sprout=') ~ imas_sprout_version }}
+  notify: Restart imas-sprout
+
+- name: Read the sprout's config file
+  ansible.builtin.slurp:
+    src: "{{ _imas_sprout_config_file }}"
+  register: _imas_sprout_config_raw
+  no_log: true
+
+- name: Parse the sprout's config file
+  ansible.builtin.set_fact:
+    _imas_sprout_config: "{{ _imas_sprout_config_raw.content | b64decode | from_yaml | default({}, true) }}"
+  no_log: true
+
+# pki.SproutEnrolled: the NATS User JWT is written last, so its presence is
+# what marks a completed enrollment.
+- name: Check whether the sprout is already enrolled
+  ansible.builtin.stat:
+    path: "{{ _imas_sprout_config.sproutuserjwtfile | default(_imas_sprout_pki_dir ~ '/sprout.jwt', true) }}"
+  register: _imas_sprout_jwt
+
+- name: Pre-provision the root CA
+  when: imas_sprout_root_ca | length > 0
+  vars:
+    _imas_sprout_root_ca_file: "{{ _imas_sprout_config.sproutrootca | default(_imas_sprout_pki_dir ~ '/tls-rootca.pem', true) }}"
+  block:
+    - name: Create the sprout's PKI directory
+      ansible.builtin.file:
+        path: "{{ _imas_sprout_root_ca_file | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # force: false, like the sprout itself: an existing root CA is a pin,
+    # never replaced silently.
+    - name: Write the root CA
+      ansible.builtin.copy:
+        content: "{{ imas_sprout_root_ca | trim }}\n"
+        dest: "{{ _imas_sprout_root_ca_file }}"
+        force: false
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart imas-sprout
+
+- name: Write the enrollment settings
+  ansible.builtin.include_tasks: config.yml
+  vars:
+    _imas_sprout_enrolled: "{{ _imas_sprout_jwt.stat.exists }}"
+
+- name: Restart the sprout if its package or settings changed
+  ansible.builtin.meta: flush_handlers
+
+- name: Start imas-sprout and start it at boot
+  ansible.builtin.systemd_service:
+    name: "{{ imas_sprout_service_name }}"
+    enabled: true
+    state: started

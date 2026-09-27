@@ -1,0 +1,15 @@
+# Extends gitleaks' default rules (the Gitleaks workflow picks this file up
+# from the checkout). The allowlist covers only the dummy enrollment keys the
+# Ansible Molecule scenario and the stub farmer's tests use: their secret
+# halves are base64 for "stubfarmer-join-token" and "secret". Add a real
+# fixture here by its exact value, never by path.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Dummy enrollment keys used by ansible/molecule (not credentials)"
+regexTarget = "match"
+regexes = [
+  '''ek_molecule\.c3R1YmZhcm1lci1qb2luLXRva2Vu''',
+  '''ek91cd2a\.c2VjcmV0''',
+]

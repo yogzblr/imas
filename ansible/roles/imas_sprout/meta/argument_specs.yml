@@ -1,0 +1,101 @@
+---
+argument_specs:
+  main:
+    short_description: Install imas-sprout from the imas package repositories and enroll it.
+    description:
+      - Adds the imas apt/yum/zypper repository and installs imas-sprout through the
+        package manager (Linux), or installs the imas-sprout MSI (Windows).
+      - Writes the enrollment settings into the sprout's own config file, starts the
+        service, and (imas_sprout_verify) waits until the sprout is connected to the bus.
+      - A host that is already enrolled is never given the join token again.
+    options:
+      imas_join_token:
+        type: str
+        description:
+          - One-time enrollment key, C({key_id}.{secret}), from
+            POST /tenants/{tenant_id}/enrollment-keys. Required for a host that isn't enrolled.
+          - Supply it with ansible-vault or a secret store; never commit it.
+      imas_farmer_host:
+        type: str
+        required: true
+        description: Host the sprout enrolls with (config key C(farmerinterface)).
+      imas_farmer_api_port:
+        type: int
+        description: Port of the enrollment API (config key C(farmerapiport)).
+      imas_farmer_bus_urls:
+        type: list
+        elements: str
+        description:
+          - Bus addresses to pin (config key C(busurls)), each C(wss://), C(tls://) or C(nats://).
+          - Empty uses the addresses farmer returns at enrollment.
+      imas_sprout_root_ca:
+        type: str
+        description:
+          - PEM CA certificate(s) to pre-provision as the sprout's root CA. Also sets
+            C(sproutrootcatofu=false). Required for a sprout behind the DMZ Envoy.
+      imas_buildkite_org:
+        type: str
+        description:
+          - Buildkite organization owning the imas package registries. Required unless
+            every repository URL is overridden.
+      imas_sprout_version:
+        type: str
+        description:
+          - Version to pin. Empty for the newest.
+          - Linux, the package version as the repository lists it, e.g. C(1.2.3+git).
+            Windows, the release, e.g. C(1.2.3).
+      imas_sprout_package_state:
+        type: str
+        choices: [present, latest]
+        description: Linux package state. C(latest) upgrades on every run.
+      imas_sprout_repo_token:
+        type: str
+        description: Buildkite registry token, for private Linux registries.
+      imas_sprout_registry_base_url:
+        type: str
+        description: Base URL of the package registries.
+      imas_sprout_deb_registry:
+        type: str
+        description: Debian registry name.
+      imas_sprout_rpm_registry:
+        type: str
+        description: RPM registry name (RHEL family and SUSE).
+      imas_sprout_nuget_registry:
+        type: str
+        description: NuGet registry name (Windows).
+      imas_sprout_apt_repo_url:
+        type: str
+        description: apt repository URL.
+      imas_sprout_apt_repo_suite:
+        type: str
+        description: apt repository suite.
+      imas_sprout_apt_repo_component:
+        type: str
+        description: apt repository component.
+      imas_sprout_apt_gpg_key_url:
+        type: str
+        description: URL of the key the apt repository's metadata is signed with.
+      imas_sprout_rpm_repo_url:
+        type: str
+        description: yum/zypper repository base URL (may contain C($basearch)).
+      imas_sprout_rpm_gpg_key_url:
+        type: str
+        description: URL of the key the rpm repository's metadata is signed with.
+      imas_sprout_nuget_index_url:
+        type: str
+        description: NuGet v3 service index of the Windows feed.
+      imas_sprout_windows_nuget_id:
+        type: str
+        description: NuGet package id carrying the MSI.
+      imas_sprout_windows_msi_url:
+        type: str
+        description: Direct MSI URL, used instead of the NuGet feed.
+      imas_sprout_windows_checksum:
+        type: str
+        description: SHA-256 of the downloaded Windows installer file.
+      imas_sprout_service_name:
+        type: str
+        description: Service name (systemd unit / Windows service).
+      imas_sprout_verify:
+        type: bool
+        description: Wait for the sprout to connect to the bus (role imas_verify).

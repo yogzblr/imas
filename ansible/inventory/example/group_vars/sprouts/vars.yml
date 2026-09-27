@@ -1,0 +1,24 @@
+---
+# Settings every sprout in this inventory shares. Anything here can also be
+# set per host (host_vars/<host>.yml) or per child group.
+
+# Buildkite organization that publishes the imas packages.
+imas_buildkite_org: your-buildkite-org
+
+# Where sprouts enroll: https://<imas_farmer_host>:<imas_farmer_api_port>/v1/enroll.
+imas_farmer_host: enroll.eu1.imas.example.com
+imas_farmer_api_port: 443
+
+# Bus addresses to pin. Leave empty to use the ones farmer returns at
+# enrollment (recommended, if your farmer returns them).
+imas_farmer_bus_urls:
+  - wss://bus.eu1.imas.example.com:443
+
+# Behind the DMZ edge, pre-provision the CA that issued its certificate.
+# The sprout then never trusts a CA it fetched itself.
+# imas_sprout_root_ca: "{{ lookup('ansible.builtin.file', 'files/imas-edge-ca.pem') }}"
+
+# The enrollment key comes from vault.yml, next to this file, which must be
+# encrypted with ansible-vault (see README.md). An enrolled sprout doesn't
+# need it, so it may be removed once every host has enrolled.
+imas_join_token: "{{ vault_imas_join_token | default('') }}"

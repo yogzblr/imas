@@ -1,0 +1,4 @@
+---
+_imas_sprout_apt_key: "/etc/apt/keyrings/imas-{{ imas_sprout_deb_registry }}.asc"
+_imas_sprout_rpm_key: "/etc/pki/rpm-gpg/RPM-GPG-KEY-imas-{{ imas_sprout_rpm_registry }}"
+_imas_sprout_program_data_fallback: 'C:\ProgramData'

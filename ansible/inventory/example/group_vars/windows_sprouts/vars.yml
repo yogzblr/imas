@@ -1,0 +1,7 @@
+---
+# The role needs an administrator: it installs an MSI and writes below
+# %ProgramData%\imas, which only SYSTEM and Administrators can read.
+ansible_connection: psrp
+ansible_user: Administrator
+ansible_psrp_auth: negotiate
+# ansible_password: "{{ vault_windows_admin_password }}"

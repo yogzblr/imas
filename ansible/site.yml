@@ -1,0 +1,14 @@
+---
+# Bootstraps every host in the `sprouts` group onto imas: installs
+# imas-sprout from the imas package repositories, enrolls it with the
+# tenant's one-time enrollment key, and waits until it is connected to the
+# bus. Safe to re-run: an enrolled sprout is never enrolled again.
+#
+#   ansible-playbook -i inventory/<yours> site.yml --ask-vault-pass
+#
+# See README.md.
+- name: Install and enroll imas sprouts
+  hosts: sprouts
+  gather_facts: true
+  roles:
+    - role: imas_sprout

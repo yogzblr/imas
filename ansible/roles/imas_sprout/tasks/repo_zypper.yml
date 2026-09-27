@@ -1,0 +1,55 @@
+---
+# The same imasrpm registry as repo_yum.yml: SUSE installs the same RPM
+# (packaging/README.md, "SUSE and the shared RPM scripts"). zypper checks
+# repository metadata against the keys in the rpm database, so the signing
+# key is imported there instead of being auto-imported on first refresh.
+- name: Create the rpm key directory
+  ansible.builtin.file:
+    path: /etc/pki/rpm-gpg
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download the imas rpm repository's signing key
+  ansible.builtin.get_url:
+    url: "{{ imas_sprout_rpm_gpg_key_url }}"
+    dest: "{{ _imas_sprout_rpm_key }}"
+    owner: root
+    group: root
+    mode: "0644"
+    url_username: "{{ 'buildkite' if imas_sprout_repo_token | length > 0 else omit }}"
+    url_password: "{{ imas_sprout_repo_token if imas_sprout_repo_token | length > 0 else omit }}"
+    force_basic_auth: "{{ imas_sprout_repo_token | length > 0 }}"
+  no_log: "{{ imas_sprout_repo_token | length > 0 }}"
+
+- name: Trust the imas rpm repository's signing key
+  ansible.builtin.rpm_key:
+    key: "{{ _imas_sprout_rpm_key }}"
+    state: present
+
+# zypper keeps credentials in a root-only file the repo URL names, rather
+# than in the world-readable .repo file.
+- name: Give zypper the registry token
+  ansible.builtin.copy:
+    content: |
+      username=buildkite
+      password={{ imas_sprout_repo_token }}
+    dest: "/etc/zypp/credentials.d/imas-{{ imas_sprout_rpm_registry }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when: imas_sprout_repo_token | length > 0
+  no_log: true
+
+- name: Add the imas zypper repository
+  community.general.zypper_repository:
+    name: "imas-{{ imas_sprout_rpm_registry }}"
+    description: imas packages ({{ imas_sprout_rpm_registry }})
+    repo: >-
+      {{ imas_sprout_rpm_repo_url }}{{ ('?credentials=imas-' ~ imas_sprout_rpm_registry)
+      if imas_sprout_repo_token | length > 0 else '' }}
+    autorefresh: true
+    auto_import_keys: false
+    runrefresh: true
+    state: present
