@@ -39,14 +39,17 @@ Each host needs:
 ## 1. Get an enrollment key
 
 Enrollment keys are issued per tenant by the SaaS API
-(`POST /v1/tenants/{tenant_id}/enrollment-keys`,
+(`POST /v1/tenants/{tenant_id}/enrollment-keys`; see
+[docs/api/saasapi.md](../docs/api/saasapi.md) and
 [API design §1.2](../docs/design/cloudxp-machine-manager-api-design.md)).
 Normally you create one from the CloudXP portal. Calling the API directly
-looks like this, with the credentials your portal uses:
+takes the same two credentials the portal's backend sends (the
+`X-Internal-Auth` shared secret and your user's bearer token):
 
 ```sh
 curl -sS -X POST "https://<saas-api>/v1/tenants/<tenant_id>/enrollment-keys" \
-  -H "Authorization: Bearer <your token>" \
+  -H "X-Internal-Auth: $INTERNAL_SECRET" \
+  -H "Authorization: Bearer $USER_JWT" \
   -H "Content-Type: application/json" \
   -d '{"expires_in_hours": 24, "max_uses": 50}'
 ```
