@@ -74,20 +74,32 @@ func TestStorageModelsIncludeJobStatus(t *testing.T) {
 }
 
 // With the farmer schema installed as initStorage installs it, a cook
-// job's events arriving on a tenant's connection land in job_status under
-// that tenant.
+// job dispatched to a tenant's sprout, and its events arriving on that
+// tenant's connection, land in job_status under that tenant.
 func TestInstalledStorageIndexesCookJobs(t *testing.T) {
 	gdb := newStorageTestDB(t)
 	nc := startTestNATS(t)
 	const tenant, sprout, jid = "t_farmer", "web-01", "22222222-2222-2222-2222-222222222222"
 	jobs.RegisterNatsConn(tenant, nc)
+	t.Cleanup(func() { cook.SetDispatchRecorder(nil) })
+	cook.RegisterFarmerNatsConn(tenant, nc)
+	t.Cleanup(func() { cook.UnregisterFarmerNatsConn(tenant) })
+	// The sprout has no box key on record, so the dispatch is plaintext
+	// and a stub can acknowledge it.
+	if _, err := nc.Subscribe(cook.CookSubject(sprout), func(m *nats.Msg) {
+		var env cook.RecipeEnvelope
+		json.Unmarshal(m.Data, &env)
+		b, _ := json.Marshal(cook.Ack{Acknowledged: true, JobID: env.JobID})
+		m.Respond(b)
+	}); err != nil {
+		t.Fatalf("subscribing stub sprout: %v", err)
+	}
 	if err := nc.Flush(); err != nil {
 		t.Fatalf("flushing subscriptions: %v", err)
 	}
 
-	env, _ := json.Marshal(cook.RecipeEnvelope{JobID: jid, Steps: []cook.Step{{ID: "s1"}}})
-	if err := nc.Publish("imas.sprouts."+sprout+".cook", env); err != nil {
-		t.Fatalf("publishing envelope: %v", err)
+	if err := cook.SendStepsEvent(tenant, sprout, jid, []cook.Step{{ID: "s1"}}); err != nil {
+		t.Fatalf("dispatching: %v", err)
 	}
 	for _, step := range []cook.StepCompletion{
 		{ID: cook.StepID("start-" + jid), CompletionStatus: cook.StepCompleted},

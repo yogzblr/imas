@@ -9,7 +9,7 @@ package jobs
 // keys, and the SaaS API has no access to it.
 //
 // The index is written alongside the object-store writes in listener.go
-// (logJobCreation, logJobs), not instead of them: the object store stays
+// (recordJobCreation, logJobs), not instead of them: the object store stays
 // the job log and the source of truth for everything else in this package.
 // A failed index write is logged and never stops the object-store write,
 // and with no database installed (SetDB never called) indexing is off.

@@ -12,12 +12,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/glebarez/sqlite"
 	"github.com/nats-io/nats.go"
+	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/objectstore"
 	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // eventually polls cond until it returns true or timeout passes, and
@@ -298,11 +301,8 @@ func TestLogJobs_ConcurrentSteps(t *testing.T) {
 	}
 }
 
-func TestLogJobCreation(t *testing.T) {
+func TestRecordJobCreation(t *testing.T) {
 	obj := useTestObjStore(t)
-
-	_, conn := startTestNATSServer(t)
-	RegisterNatsConn("t_test", conn)
 
 	envelope := cook.RecipeEnvelope{
 		JobID:     "creation-job-1",
@@ -312,12 +312,7 @@ func TestLogJobCreation(t *testing.T) {
 			{ID: "step-b"},
 		},
 	}
-	data, _ := json.Marshal(envelope)
-
-	if err := conn.Publish("imas.sprouts.sprout-create.cook", data); err != nil {
-		t.Fatal(err)
-	}
-	conn.Flush()
+	recordJobCreation("t_test", "sprout-create", envelope)
 
 	// Verify the job was created with placeholder steps.
 	summary := waitForSteps(t, obj, "sprout-create", "creation-job-1", 2)
@@ -339,13 +334,13 @@ func TestLogJobCreation(t *testing.T) {
 	}
 }
 
-func TestLogJobCreation_ThenSteps(t *testing.T) {
+func TestRecordJobCreation_ThenSteps(t *testing.T) {
 	obj := useTestObjStore(t)
 
-	logJobCreation("", envelopeMsg(t, "imas.sprouts.sprout-flow.cook", cook.RecipeEnvelope{
+	recordJobCreation("", "sprout-flow", cook.RecipeEnvelope{
 		JobID: "flow-job",
 		Steps: []cook.Step{{ID: "a"}, {ID: "b"}},
-	}))
+	})
 	logJobs("", stepMsg(t, "imas.cook.sprout-flow.flow-job", makeStep("a", cook.StepCompleted, time.Now(), time.Second)))
 	logJobs("", stepMsg(t, "imas.cook.sprout-flow.flow-job", makeStep("b", cook.StepCompleted, time.Now(), time.Second)))
 
@@ -365,28 +360,28 @@ func TestLogJobCreation_ThenSteps(t *testing.T) {
 	}
 }
 
-func TestLogJobCreation_EmptyJobID(t *testing.T) {
+func TestRecordJobCreation_EmptyJobID(t *testing.T) {
 	obj := useTestObjStore(t)
 
 	// Envelope with empty JobID should be ignored.
-	logJobCreation("", envelopeMsg(t, "imas.sprouts.sprout-empty.cook", cook.RecipeEnvelope{
+	recordJobCreation("", "sprout-empty", cook.RecipeEnvelope{
 		JobID: "",
 		Steps: []cook.Step{{ID: "step-a"}},
-	}))
+	})
 
 	if keys := listKeys(t, obj, jobKeyPrefix); len(keys) != 0 {
 		t.Errorf("expected no objects for empty job ID envelope, got %v", keys)
 	}
 }
 
-func TestLogJobCreation_NoInvokedBy(t *testing.T) {
+func TestRecordJobCreation_NoInvokedBy(t *testing.T) {
 	obj := useTestObjStore(t)
 
 	before := time.Now().UTC().Add(-time.Second)
-	logJobCreation("", envelopeMsg(t, "imas.sprouts.sprout-noinv.cook", cook.RecipeEnvelope{
+	recordJobCreation("", "sprout-noinv", cook.RecipeEnvelope{
 		JobID: "no-invoker-job",
 		Steps: []cook.Step{{ID: "step-a"}},
-	}))
+	})
 
 	summary := waitForSteps(t, obj, "sprout-noinv", "no-invoker-job", 1)
 	if summary.InvokedBy != "" {
@@ -404,15 +399,15 @@ func TestLogJobCreation_NoInvokedBy(t *testing.T) {
 	}
 }
 
-func TestLogJobCreation_DuplicateJobID(t *testing.T) {
+func TestRecordJobCreation_DuplicateJobID(t *testing.T) {
 	obj := useTestObjStore(t)
-	msg := envelopeMsg(t, "imas.sprouts.sprout-dup.cook", cook.RecipeEnvelope{
+	env := cook.RecipeEnvelope{
 		JobID: "dup-job",
 		Steps: []cook.Step{{ID: "step-a"}},
-	})
+	}
 
 	// First creation.
-	logJobCreation("", msg)
+	recordJobCreation("", "sprout-dup", env)
 	key := createdKey("sprout-dup", "dup-job")
 	originalContent, err := obj.Get(context.Background(), key)
 	if err != nil {
@@ -423,7 +418,7 @@ func TestLogJobCreation_DuplicateJobID(t *testing.T) {
 	// already exists (the placeholders carry a fresh Started time, so a
 	// rewrite would change the content).
 	time.Sleep(time.Millisecond)
-	logJobCreation("", msg)
+	recordJobCreation("", "sprout-dup", env)
 
 	afterContent, err := obj.Get(context.Background(), key)
 	if err != nil {
@@ -434,51 +429,41 @@ func TestLogJobCreation_DuplicateJobID(t *testing.T) {
 	}
 }
 
-func TestLogJobCreation_InvalidJSON(t *testing.T) {
+func TestRecordJobCreation_EmptySproutID(t *testing.T) {
 	obj := useTestObjStore(t)
 
-	logJobCreation("", &nats.Msg{Subject: "imas.sprouts.sprout-badjson.cook", Data: []byte("not json")})
+	recordJobCreation("", "", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}})
 
 	if keys := listKeys(t, obj, jobKeyPrefix); len(keys) != 0 {
-		t.Errorf("expected no objects for invalid JSON, got %v", keys)
+		t.Errorf("expected nothing written for an empty sprout ID, got %v", keys)
 	}
 }
 
-func TestLogJobCreation_ShortSubject(t *testing.T) {
+func TestRecordJobCreation_UnsafeKeySegment(t *testing.T) {
 	obj := useTestObjStore(t)
 
-	logJobCreation("", envelopeMsg(t, "imas.sprouts.cook", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}}))
-
-	if keys := listKeys(t, obj, jobKeyPrefix); len(keys) != 0 {
-		t.Errorf("expected nothing written for a short subject, got %v", keys)
-	}
-}
-
-func TestLogJobCreation_UnsafeKeySegment(t *testing.T) {
-	obj := useTestObjStore(t)
-
-	logJobCreation("", envelopeMsg(t, "imas.sprouts.sprout.cook", cook.RecipeEnvelope{JobID: "../other", Steps: []cook.Step{{ID: "s"}}}))
-	logJobCreation("", envelopeMsg(t, "imas.sprouts.a/b.cook", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}}))
+	recordJobCreation("", "sprout", cook.RecipeEnvelope{JobID: "../other", Steps: []cook.Step{{ID: "s"}}})
+	recordJobCreation("", "a/b", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}})
 
 	if keys := listKeys(t, obj, ""); len(keys) != 0 {
 		t.Errorf("expected nothing written for unsafe key segments, got %v", keys)
 	}
 }
 
-func TestLogJobCreation_NotConfigured(t *testing.T) {
+func TestRecordJobCreation_NotConfigured(t *testing.T) {
 	orig := objStore
 	SetStore(nil)
 	t.Cleanup(func() { SetStore(orig) })
 
 	// Should log and drop the event, not panic.
-	logJobCreation("", envelopeMsg(t, "imas.sprouts.sprout.cook", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}}))
+	recordJobCreation("", "sprout", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}})
 }
 
-func TestLogJobCreation_ExistsError(t *testing.T) {
+func TestRecordJobCreation_ExistsError(t *testing.T) {
 	srv, obj := useTestObjServer(t)
 
 	srv.FailNext(1, 403, "AccessDenied")
-	logJobCreation("", envelopeMsg(t, "imas.sprouts.sprout-err.cook", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}}))
+	recordJobCreation("", "sprout-err", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}})
 
 	// A failed existence check doesn't risk overwriting a job: nothing is
 	// written.
@@ -488,7 +473,7 @@ func TestLogJobCreation_ExistsError(t *testing.T) {
 }
 
 // TestRegisterNatsConn_UsesQueueGroup verifies that RegisterNatsConn
-// subscribes to both job subjects as a queue-group member of "imas-core",
+// subscribes to imas.cook.*.* as a queue-group member of "imas-core",
 // not a plain fan-out subscriber. This used to be the other way around
 // (see the function's own doc comment for why that changed): job logs
 // used to live in each replica's own local directory, so every replica
@@ -557,52 +542,47 @@ func TestRegisterNatsConn_UsesQueueGroup(t *testing.T) {
 			t.Errorf("expected events to be load-balanced across queue members, but second replica received all %d (fan-out, not queue-grouped)", hits)
 		}
 	})
+}
 
-	t.Run("job creation", func(t *testing.T) {
-		obj := useTestObjStore(t)
-		_, conn := startTestNATSServer(t)
-		RegisterNatsConn("t_test", conn)
-		conn.Flush()
+// A job is recorded by the replica that dispatches it: RegisterNatsConn
+// installs recordJobCreation as cook's DispatchRecorder, since the
+// dispatch itself is sealed to the sprout and can't be read off the bus.
+func TestRegisterNatsConn_RecordsDispatchedJobs(t *testing.T) {
+	obj := useTestObjStore(t)
+	gdb, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.AutoMigrate(pki.Models()...); err != nil {
+		t.Fatal(err)
+	}
+	pki.SetDB(gdb)
+	t.Cleanup(func() { pki.SetDB(nil) })
 
-		var secondReplicaHits int64
-		sub, err := conn.QueueSubscribe("imas.sprouts.*.cook", natsCoreQueueGroup, func(msg *nats.Msg) {
-			atomic.AddInt64(&secondReplicaHits, 1)
-		})
-		if err != nil {
-			t.Fatalf("simulate second replica subscribe: %v", err)
-		}
-		defer sub.Unsubscribe()
-		conn.Flush()
+	_, conn := startTestNATSServer(t)
+	RegisterNatsConn("t_test", conn)
+	t.Cleanup(func() { cook.SetDispatchRecorder(nil) })
+	cook.RegisterFarmerNatsConn("t_test", conn)
+	t.Cleanup(func() { cook.UnregisterFarmerNatsConn("t_test") })
+	// A sprout with no box key on record, so the dispatch is plaintext
+	// and a stub can acknowledge it.
+	if _, err := conn.Subscribe(cook.CookSubject("sprout-dispatch"), func(m *nats.Msg) {
+		var env cook.RecipeEnvelope
+		json.Unmarshal(m.Data, &env)
+		b, _ := json.Marshal(cook.Ack{Acknowledged: true, JobID: env.JobID})
+		m.Respond(b)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	conn.Flush()
 
-		const numEvents = 20
-		for i := range numEvents {
-			envelope := cook.RecipeEnvelope{JobID: fmt.Sprintf("job-%d", i), Steps: []cook.Step{{ID: "s"}}}
-			data, _ := json.Marshal(envelope)
-			if err := conn.Publish("imas.sprouts.queue-create.cook", data); err != nil {
-				t.Fatal(err)
-			}
-		}
-		conn.Flush()
-
-		store := NewStoreWithObjectStore(obj)
-		countJobs := func() int {
-			n, _ := store.CountJobsForSprout("queue-create")
-			return n
-		}
-		ok := eventually(5*time.Second, func() bool {
-			return int64(countJobs())+atomic.LoadInt64(&secondReplicaHits) == numEvents
-		})
-		hits := atomic.LoadInt64(&secondReplicaHits)
-		if !ok {
-			t.Fatalf("expected created (%d) + second replica (%d) = %d jobs", countJobs(), hits, numEvents)
-		}
-		if hits == 0 {
-			t.Error("expected second replica to receive at least some creations via queue-group load balancing")
-		}
-		if hits >= numEvents {
-			t.Errorf("expected creations to be load-balanced, but second replica received all %d (fan-out, not queue-grouped)", hits)
-		}
-	})
+	if err := cook.SendStepsEvent("t_test", "sprout-dispatch", "dispatch-job", []cook.Step{{ID: "s1"}, {ID: "s2"}}); err != nil {
+		t.Fatalf("SendStepsEvent: %v", err)
+	}
+	summary := waitForSteps(t, obj, "sprout-dispatch", "dispatch-job", 2)
+	if len(summary.Steps) != 2 {
+		t.Errorf("expected 2 placeholder steps, got %d", len(summary.Steps))
+	}
 }
 
 // TestRegisterNatsConn_TwoReplicasRecordEachEventOnce runs two farmer
@@ -635,11 +615,9 @@ func TestRegisterNatsConn_TwoReplicasRecordEachEventOnce(t *testing.T) {
 
 	const numSteps = 30
 	envelope := cook.RecipeEnvelope{JobID: "shared-job", InvokedBy: "UADMIN", Steps: []cook.Step{{ID: "s"}}}
-	data, _ := json.Marshal(envelope)
-	if err := pub.Publish("imas.sprouts.sprout-shared.cook", data); err != nil {
-		t.Fatal(err)
-	}
-	pub.Flush()
+	// Recorded by whichever replica dispatched it (cook's
+	// DispatchRecorder), once.
+	recordJobCreation("t_test", "sprout-shared", envelope)
 	// Let the creation land first so its existence check can't race the
 	// events below (it would still be correct either way; this just keeps
 	// the expected count exact).

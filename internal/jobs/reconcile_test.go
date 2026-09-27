@@ -16,7 +16,7 @@ const (
 	reconcileSprout = "web-01"
 )
 
-// reconcileHarness wires logJobCreation/logJobs to a test index and job
+// reconcileHarness wires recordJobCreation/logJobs to a test index and job
 // store, with a fixed clock and the given reconcile window.
 type reconcileHarness struct {
 	t   *testing.T
@@ -37,8 +37,7 @@ func newReconcileHarness(t *testing.T, window time.Duration) *reconcileHarness {
 
 // dispatch records jid's creation, dispatched at `at`.
 func (h *reconcileHarness) dispatch(jid string, at time.Time) {
-	b, _ := json.Marshal(cook.RecipeEnvelope{JobID: jid, Steps: []cook.Step{{ID: "s1"}}, DispatchedAt: at})
-	logJobCreation(reconcileTenant, &nats.Msg{Subject: "imas.sprouts." + reconcileSprout + ".cook", Data: b})
+	recordJobCreation(reconcileTenant, reconcileSprout, cook.RecipeEnvelope{JobID: jid, Steps: []cook.Step{{ID: "s1"}}, DispatchedAt: at})
 }
 
 // event delivers one step event of jid at the harness's current time.
@@ -228,8 +227,7 @@ func TestReconcileWindow_FailsOpen(t *testing.T) {
 func TestReconcileWindow_PerTenant(t *testing.T) {
 	h := newReconcileHarness(t, time.Hour)
 	h.dispatch("j", h.now.Add(-2*time.Hour)) // t_a: late
-	b, _ := json.Marshal(cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s1"}}, DispatchedAt: h.now})
-	logJobCreation("t_b", &nats.Msg{Subject: "imas.sprouts." + reconcileSprout + ".cook", Data: b})
+	recordJobCreation("t_b", reconcileSprout, cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s1"}}, DispatchedAt: h.now})
 	start, _ := json.Marshal(cook.StepCompletion{ID: "start-j"})
 	logJobs("t_b", &nats.Msg{Subject: "imas.cook." + reconcileSprout + ".j", Data: start})
 	h.event("j", "start-j") // t_a's late start

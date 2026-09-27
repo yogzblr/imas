@@ -80,17 +80,19 @@ func natsInit(ctx context.Context, nc *nats.Conn) error {
 	if err != nil {
 		return err
 	}
-	_, err = nc.Subscribe("imas.sprouts."+sproutID+".cook", func(m *nats.Msg) {
-		var rEnvelope cook.RecipeEnvelope
-		json.NewDecoder(bytes.NewBuffer(m.Data)).Decode(&rEnvelope)
-		log.Trace(rEnvelope)
-		// Before cooking, so a pull of this job's staged copy (on reconnect
-		// or a nudge) never cooks it a second time.
-		cook.NotePushedEnvelope(rEnvelope.JobID)
-		ackB, _ := json.Marshal(cook.Ack{Acknowledged: true, JobID: rEnvelope.JobID})
-		m.Respond(ackB)
+	// Cook dispatches and resync nudges are sealed end to end
+	// (workstream J): see internal/cook's sealed.go for what these accept
+	// and what they refuse.
+	_, err = nc.Subscribe(cook.CookSubject(sproutID), func(m *nats.Msg) {
+		reply, rEnvelope := cook.RespondCook(sproutID, m)
+		if err := m.RespondMsg(reply); err != nil {
+			log.Errorf("cook: sending reply: %v", err)
+		}
+		if rEnvelope == nil {
+			return
+		}
 		go func() {
-			if cookErr := cook.CookRecipeEnvelope(rEnvelope); cookErr != nil {
+			if cookErr := cook.CookRecipeEnvelope(*rEnvelope); cookErr != nil {
 				log.Error(cookErr)
 			}
 		}()
@@ -102,9 +104,13 @@ func natsInit(ctx context.Context, nc *nats.Conn) error {
 	// Operator-triggered resync (farmer's cook.NudgeSprout): acknowledge,
 	// then pull the staged recipe and cook it if this sprout missed it.
 	_, err = nc.Subscribe(cook.NudgeSubject(sproutID), func(m *nats.Msg) {
-		ackB, _ := json.Marshal(cook.Ack{Acknowledged: true})
-		m.Respond(ackB)
-		go syncStagedRecipe(ctx, cook.SyncOnNudge)
+		reply, accepted := cook.RespondNudge(sproutID, m)
+		if err := m.RespondMsg(reply); err != nil {
+			log.Errorf("recipe nudge: sending reply: %v", err)
+		}
+		if accepted {
+			go syncStagedRecipe(ctx, cook.SyncOnNudge)
+		}
 	})
 	if err != nil {
 		return err

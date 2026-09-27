@@ -237,8 +237,7 @@ func TestListenerIndexesUnderRegisteredTenant(t *testing.T) {
 	t.Cleanup(func() { objStore = prev })
 
 	const jid = "listener-job"
-	env, _ := json.Marshal(cook.RecipeEnvelope{JobID: jid, Steps: []cook.Step{{ID: "s1"}}})
-	logJobCreation("t_list", &nats.Msg{Subject: "imas.sprouts.web-01.cook", Data: env})
+	recordJobCreation("t_list", "web-01", cook.RecipeEnvelope{JobID: jid, Steps: []cook.Step{{ID: "s1"}}})
 	for _, step := range []cook.StepCompletion{stepEvent("s1", cook.StepCompleted), stepEvent("completed-"+jid, cook.StepCompleted)} {
 		b, _ := json.Marshal(step)
 		logJobs("t_list", &nats.Msg{Subject: "imas.cook.web-01." + jid, Data: b})

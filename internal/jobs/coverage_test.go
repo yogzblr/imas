@@ -30,22 +30,15 @@ func TestStartReaper_NegativeTTL(t *testing.T) {
 
 // --- logJobs edge cases ---
 
-func TestLogJobCreation_ThreeSteps(t *testing.T) {
+func TestRecordJobCreation_ThreeSteps(t *testing.T) {
 	obj := useTestObjStore(t)
-
-	_, conn := startTestNATSServer(t)
-	RegisterNatsConn("t_test", conn)
 
 	envelope := cook.RecipeEnvelope{
 		JobID:     "sub-test",
 		InvokedBy: "UTEST",
 		Steps:     []cook.Step{{ID: "s1"}, {ID: "s2"}, {ID: "s3"}},
 	}
-	data, _ := json.Marshal(envelope)
-	if err := conn.Publish("imas.sprouts.sprout-sub.cook", data); err != nil {
-		t.Fatal(err)
-	}
-	conn.Flush()
+	recordJobCreation("t_test", "sprout-sub", envelope)
 
 	// Verify 3 steps written.
 	summary := waitForSteps(t, obj, "sprout-sub", "sub-test", 3)
@@ -495,13 +488,10 @@ func TestFindJob_MultipleSprouts(t *testing.T) {
 	}
 }
 
-// --- logJobCreation with marshal error in steps (unlikely but safe) ---
+// --- recordJobCreation with marshal error in steps (unlikely but safe) ---
 
-func TestLogJobCreation_ManySteps(t *testing.T) {
+func TestRecordJobCreation_ManySteps(t *testing.T) {
 	obj := useTestObjStore(t)
-
-	_, conn := startTestNATSServer(t)
-	RegisterNatsConn("t_test", conn)
 
 	// Create envelope with many steps.
 	steps := make([]cook.Step, 50)
@@ -513,12 +503,7 @@ func TestLogJobCreation_ManySteps(t *testing.T) {
 		InvokedBy: "UMANY",
 		Steps:     steps,
 	}
-	data, _ := json.Marshal(envelope)
-
-	if err := conn.Publish("imas.sprouts.sprout-many.cook", data); err != nil {
-		t.Fatal(err)
-	}
-	conn.Flush()
+	recordJobCreation("t_test", "sprout-many", envelope)
 
 	summary := waitForSteps(t, obj, "sprout-many", "many-steps-job", 50)
 	if len(summary.Steps) != 50 {
@@ -638,16 +623,16 @@ func TestLogJobs_NewSprout(t *testing.T) {
 	}
 }
 
-// --- logJobCreation: read-only dir (MkdirAll fails) ---
+// --- recordJobCreation: read-only dir (MkdirAll fails) ---
 
-func TestLogJobCreation_PutError(t *testing.T) {
+func TestRecordJobCreation_PutError(t *testing.T) {
 	srv, obj := useTestObjServer(t)
 
 	// The existence check finds nothing; then both the meta.json and the
 	// created.jsonl Put fail.
 	srv.FailNext(1, 404, "NoSuchKey")
 	srv.FailNext(2, 403, "AccessDenied")
-	logJobCreation("", envelopeMsg(t, "imas.sprouts.sprout-fail.cook", cook.RecipeEnvelope{JobID: "fail-create", Steps: []cook.Step{{ID: "s1"}}}))
+	recordJobCreation("", "sprout-fail", cook.RecipeEnvelope{JobID: "fail-create", Steps: []cook.Step{{ID: "s1"}}})
 
 	// Should not panic, and no half-created job is visible.
 	store := NewStoreWithObjectStore(obj)
@@ -784,7 +769,7 @@ func TestCLIStore_GetJob_AcrossSprouts(t *testing.T) {
 	}
 }
 
-// --- logJobCreation: create file error (dir is a file) ---
+// --- recordJobCreation: create file error (dir is a file) ---
 
 // --- logJobs: file is read-only (OpenFile append fails) ---
 

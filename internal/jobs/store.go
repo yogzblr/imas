@@ -14,9 +14,9 @@ package jobs
 // event as it arrived. The choice among the alternatives came down to what
 // a job's event stream looks like and to who writes it.
 //
-// Volume. Cooking an N-step recipe makes one creation event on
-// imas.sprouts.<sprout>.cook (N "not started" placeholders, written by
-// logJobCreation) and N+2 events on imas.cook.<sprout>.<jid>: a seeded
+// Volume. Cooking an N-step recipe makes one creation record when farmer
+// dispatches it (N "not started" placeholders, written by
+// recordJobCreation) and N+2 events on imas.cook.<sprout>.<jid>: a seeded
 // "start-<jid>", one terminal completion per step (sproutcook.go publishes
 // no separate in-progress event), and a final "completed-<jid>" or
 // "timeout-<jid>". Each event is one cook.StepCompletion of a few hundred
@@ -49,7 +49,7 @@ package jobs
 // the recipe bucket, because GET /files/ serves any key in that bucket to
 // any authenticated caller.
 //
-//	jobs/<sprout>/<jid>/created.jsonl               placeholders from logJobCreation
+//	jobs/<sprout>/<jid>/created.jsonl               placeholders from recordJobCreation
 //	jobs/<sprout>/<jid>/meta.json                   JobMeta (invoker, creation time)
 //	jobs/<sprout>/<jid>/events/<unixnano>-<rand>.jsonl  one step event
 //	jobs/<sprout>/<jid>/expired.json               ExpiredMarker, if the job expired
@@ -469,7 +469,7 @@ type jobObjects struct {
 }
 
 // hasLog reports whether the job has any step data, or was marked
-// expired. A meta.json alone (say, logJobCreation's second Put failed)
+// expired. A meta.json alone (say, recordJobCreation's second Put failed)
 // doesn't make a job.
 func (o *jobObjects) hasLog() bool {
 	return o.created || len(o.events) > 0 || o.expired
