@@ -5,7 +5,9 @@
 #   /work/repo/gpgkey                  the signing key (ASCII armour)
 #   /work/repo/deb/any/                apt: "deb <url>/deb/any/ any main"
 #   /work/repo/rpm/x86_64/             yum/zypper: "<url>/rpm/$basearch"
-# Runs in a throwaway ubuntu:24.04 container (see prepare.yml).
+# Runs in a throwaway ubuntu:24.04 container (see prepare.yml), as root:
+# the tree it writes is handed back to /work's owner at the end, so a
+# non-root Molecule (a CI runner) can prune its ephemeral directory.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
@@ -32,3 +34,4 @@ cp /work/pkg/*.rpm /work/repo/rpm/x86_64/
 createrepo_c --quiet /work/repo/rpm/x86_64
 gpg --batch --yes --armor --detach-sign -o /work/repo/rpm/x86_64/repodata/repomd.xml.asc /work/repo/rpm/x86_64/repodata/repomd.xml
 chmod -R a+rX /work/repo
+chown -R "$(stat -c %u:%g /work)" /work/repo
