@@ -1,0 +1,77 @@
+name: Ansible
+
+# Lints and tests the customer-run Ansible under ansible/ (M.4):
+# ansible-lint, the imas_verify module's pytest unit tests, and the
+# molecule/default scenario, which builds imas-sprout from this checkout,
+# packages it with nfpm, publishes it to signed local apt/rpm repositories,
+# starts the stub farmer (ansible/molecule/stubfarmer), and converges the
+# imas_sprout and imas_verify roles on Debian 12, Rocky 9 and openSUSE Leap
+# 15.6 systemd containers (see ansible/molecule/default/molecule.yml).
+#
+# Only runs when something the scenario installs or exercises changes: the
+# roles themselves, the packaging, and the sprout's enrollment path.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "ansible/**"
+      - "packaging/**"
+      - "cmd/sprout/**"
+      - "internal/pki/**"
+      - "internal/config/**"
+      - ".github/workflows/molecule.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ansible-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  molecule:
+    name: ansible-lint, pytest, molecule test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Colour in the job log.
+      PY_COLORS: "1"
+      ANSIBLE_FORCE_COLOR: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # prepare.yml builds imas-sprout and the stub farmer, and runs nfpm
+      # with `go run`.
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # The Molecule docker driver rsyncs the scenario directory into its
+      # build context (ansible.posix.synchronize) to build leap15.Dockerfile.
+      - name: Ensure rsync is installed
+        run: command -v rsync || (sudo apt-get update -q && sudo apt-get install -y -q rsync)
+
+      # The ansible package bundles the collections the roles and the docker
+      # driver use (ansible.windows, community.general, community.docker,
+      # ansible.posix), so requirements.yml needs no galaxy install here.
+      - name: Install Ansible, Molecule and test tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install ansible molecule 'molecule-plugins[docker]' pytest ansible-lint
+          ansible --version
+          molecule --version
+
+      # The systemd platforms run privileged with cgroupns=host and the host's
+      # /sys/fs/cgroup mounted (molecule.yml), which the hosted runner allows.
+      - name: ansible-lint, pytest, molecule test
+        working-directory: ansible
+        run: ansible-lint && python -m pytest tests/unit && molecule test
