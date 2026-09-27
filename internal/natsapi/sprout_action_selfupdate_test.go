@@ -178,6 +178,11 @@ func TestSelfUpdate_ThroughRealDispatch(t *testing.T) {
 	if err := RegisterSproutAction(nc); err != nil {
 		t.Fatal(err)
 	}
+	// The handler's SUB must reach the server before the SaaS API
+	// connection's request does.
+	if err := nc.Flush(); err != nil {
+		t.Fatal(err)
+	}
 	reply := requestSproutAction(t, dialSaaSAPI(t, nc), controlplane.SproutActionRequest{
 		TenantID: legacy, SproutID: "web-01",
 		Action: controlplane.SproutAction{Type: controlplane.ActionSelfUpdate, Params: mustJSON(t, p)},

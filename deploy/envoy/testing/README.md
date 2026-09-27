@@ -9,9 +9,12 @@ the sprout talks only to Envoy.
 
 - `internal/pki/envoy_e2e_test.go`: a sprout's whole life. It enrolls
   through `/v1/enroll` (real `EnrollSprout` → `Enroll`, NKey proof of
-  possession), connects over `wss://` with `ConnectSprout`'s auth options
-  (User JWT + seed, gateway JWT header) to the real operator-mode bus's
-  websocket listener and round-trips a message, refreshes through
+  possession), connects through `pki.LoadSproutBus` (what `ConnectSprout`
+  uses: the `nats_urls` persisted at enrollment, here Envoy's `wss://`
+  address, with SproutRootCA-pinned TLS, User JWT + seed and the gateway
+  JWT header) to the real operator-mode bus's websocket listener and
+  round-trips a message, checks that the legacy `FarmerBusURL` (TLS NATS
+  to Envoy's HTTPS listener) does not connect, refreshes through
   `/v1/refresh` (real `RefreshGatewayJWT` → `RefreshSprout`) and
   reconnects with the new token, and downloads a recipe through `/files/`
   (`FetchFarmerFile`). It also checks Envoy's own 401 for a missing,
@@ -34,7 +37,8 @@ IMAS_TEST_ENVOY_BIN=$PWD/envoy go test ./internal/pki/ ./internal/api/ -run Thro
 ```
 
 Set `IMAS_TEST_ENVOY_LOG_LEVEL=debug` to see Envoy's `jwt_authn`
-decisions. Validated against the official v1.34.1 release build.
+decisions. Validated against the official v1.34.1 and v1.35.3 release
+builds.
 
 # Keycloak validation harness
 
