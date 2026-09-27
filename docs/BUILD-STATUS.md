@@ -1,8 +1,25 @@
 # Build Status
 
 Tracks Wave 0 (the nine workstreams from `docs/claude-code-parallel-build-plan.md`
-section 1, task briefs 1.1–1.9) and Wave 1 (section 2, dispatched once B and A
-were confirmed merged to `master`).
+section 1, task briefs 1.1–1.9), Wave 1 (section 2), Wave 2 (section 3), the
+"ongoing" Windows/Linux ingredient batch (section 4), and everything merged
+since — the repo rebrand, CI setup, the Helm charts, and workstream M
+(Windows packaging + Ansible). Refreshed 2026-09-27 against `git log` on
+`main`; see "Notes" at the bottom for what changed in this pass.
+
+**Repository-history note, read before trusting a PR number below:** this
+repo (`yogzblr/imas`) was created by detaching from `yogzblr/grlx` while
+keeping full commit history (see the `Rebrand: grlx -> imas` commit,
+`b4a0195`, 2026-09-26). GitHub PR numbers are per-repo counters, so every PR
+number cited for work merged **before** `b4a0195` (all of Wave 0, Wave 1,
+Wave 2, and the ongoing ingredient batch below) refers to a PR on the old,
+superseded `yogzblr/grlx` repo — those numbers do not resolve on
+`yogzblr/imas` and may collide with an unrelated, real PR number here (e.g.
+old "#20"/"#21"/"#22" below are different PRs from the current, real
+`yogzblr/imas` #20/#21/#22 in the Workstream M section). The commit hashes
+in backticks are stable across the rename and are the reliable way to find
+this work; PR numbers for anything merged **after** `b4a0195` are real,
+live `yogzblr/imas` links.
 
 ## Wave 0
 
@@ -71,14 +88,14 @@ resolve merge fallout against J's box-key tenant scoping.
 
 | Item | Description | Cloud session ID | Status | Needs security review |
 |---|---|---|---|---|
-| D (facts listener) | `internal/facts/listener.go`'s `RegisterFarmerListener` still used plain fan-out `Subscribe`, justified by a stale comment from before workstream A removed `props/store.go`'s in-memory cache; queue-grouped it under `imas-core` to stop every replica double-writing the same PXC row on every fact update | not dispatched by this coordinator — found already merged | merged — PR #24 (`e9aa2ea`) | n |
-| G.2 | Windows user/group provider using `deploymenttheory/go-bindings-win32`'s netmanagement package | session_01ArigyXKLB5a2gV449zBGZB | dispatched | y — user/group creation, and the dependency is young (v0.2.x) |
-| G.4 | Windows DACL/ACL ingredient using `hectane/go-acl` for file ACLs, extended to registry-key ACLs (`SE_REGISTRY_KEY`) | session_01BVU6xoX7h7tzkscFYUTY8U | dispatched | y — propagation/inheritance semantics are a security-relevant bug class |
-| G.6 | Task Scheduler, Windows Update, and Shortcut COM ingredients using `go-ole/go-ole`, starting with Shortcut (IShellLink) to prove the COM lifecycle pattern | session_01GXJ5vf5Fdo9fMxdoFAe5rE | dispatched | y — COM lifecycle bugs (missed Release, wrong apartment threading) |
-| G.7 | v1 subset of LGPO — parse `registry.pol` (`encoding/binary`) and ADMX/ADML (`encoding/xml`); PR proposes which policy subset to cover for a first pass | session_01XYVPKvrCssvaGQTd9MbEs3 | dispatched | n |
-| H.1 | Linux network/route management using `vishvananda/netlink`, with a verify-connectivity-or-roll-back pattern in the ingredient itself | session_01Q9NMvFaiFykjHmvCpqSn36 | dispatched | n |
-| H.2 | nftables firewall ingredient using `google/nftables` | session_015pQ7NBWmSxJFht6DQyrrbs | dispatched | y — a firewall ingredient can lock out or expose a host |
-| H.3 | SELinux ingredient using `opencontainers/selinux` | session_012DtUVSVbEHb11Uz4KzW4Tt | dispatched | y — CERT-In/DPDP-relevant: silently degrading to permissive is compliance-visible |
+| D (facts listener) | `internal/facts/listener.go`'s `RegisterFarmerListener` still used plain fan-out `Subscribe`, justified by a stale comment from before workstream A removed `props/store.go`'s in-memory cache; queue-grouped it under `imas-core` to stop every replica double-writing the same PXC row on every fact update | not dispatched by this coordinator — found already merged | merged — PR #24, old-repo numbering (`e9aa2ea`) | n |
+| G.2 | Windows user/group provider using `deploymenttheory/go-bindings-win32`'s netmanagement package | session_01ArigyXKLB5a2gV449zBGZB | **merged** — PR #32, old-repo numbering (`20a6ac5`) | y — user/group creation, and the dependency is young (v0.2.x) |
+| G.4 | Windows DACL/ACL ingredient using `hectane/go-acl` for file ACLs, extended to registry-key ACLs (`SE_REGISTRY_KEY`) | session_01BVU6xoX7h7tzkscFYUTY8U | **merged** — `internal/ingredients/windacl/`, `hectane/go-acl` in `go.mod` | y — propagation/inheritance semantics are a security-relevant bug class |
+| G.6 | Task Scheduler, Windows Update, and Shortcut COM ingredients using `go-ole/go-ole`, starting with Shortcut (IShellLink) to prove the COM lifecycle pattern | session_01GXJ5vf5Fdo9fMxdoFAe5rE | **merged** — `internal/ingredients/wintaskscheduler/`, `winupdate/`, `winshortcut/`, `go-ole/go-ole` in `go.mod` (`a49361a`, `cbd1fe0`) | y — COM lifecycle bugs (missed Release, wrong apartment threading) |
+| G.7 | v1 subset of LGPO — parse `registry.pol` (`encoding/binary`) and ADMX/ADML (`encoding/xml`); PR proposes which policy subset to cover for a first pass | session_01XYVPKvrCssvaGQTd9MbEs3 | **merged** — `internal/ingredients/lgpo/` | n |
+| H.1 | Linux network/route management using `vishvananda/netlink`, with a verify-connectivity-or-roll-back pattern in the ingredient itself | session_01Q9NMvFaiFykjHmvCpqSn36 | **merged** — `internal/ingredients/network/`, `vishvananda/netlink` in `go.mod` | n |
+| H.2 | nftables firewall ingredient using `google/nftables` | session_015pQ7NBWmSxJFht6DQyrrbs | **merged** — `internal/ingredients/firewall/` (build-tagged `linux`, doc comment confirms this is the H.2 nftables ingredient, distinct from G.9's `winfirewall`), `google/nftables` in `go.mod` | y — a firewall ingredient can lock out or expose a host |
+| H.3 | SELinux ingredient using `opencontainers/selinux` | session_012DtUVSVbEHb11Uz4KzW4Tt | **merged** — `internal/ingredients/selinux/`, `opencontainers/selinux` in `go.mod` | y — CERT-In/DPDP-relevant: silently degrading to permissive is compliance-visible |
 
 Before dispatching, validated against `master` that none of the seven were
 already implemented: no ACL/DACL, Task Scheduler/WUA/Shortcut, LGPO,
@@ -87,7 +104,29 @@ named dependencies (`go-bindings-win32`, `hectane/go-acl`, `go-ole/go-ole`,
 `vishvananda/netlink`, `google/nftables`, `opencontainers/selinux`) were in
 `go.mod`. The existing `winfirewall` ingredient is G.9's already-merged
 `netsh advfirewall` wrapper, not H.2's Linux nftables ingredient — confirmed
-by reading its imports before ruling H.2 not done.
+by reading its imports before ruling H.2 not done. **All seven are now
+confirmed merged** (re-verified 2026-09-27: every listed package/ingredient
+directory and `go.mod` dependency is present on `main`) — the "dispatched"
+status this table originally recorded was stale.
+
+## Post-rebrand work (not part of the original Wave 0–2 plan)
+
+Everything below merged to `main` after `b4a0195` (the `grlx` → `imas`
+rebrand), on real, current `yogzblr/imas` PR numbers. None of it was
+dispatched from `claude-code-parallel-build-plan.md` — it was tracked
+directly in this session instead.
+
+| Item | Description | Status |
+|---|---|---|
+| Rebrand + CI setup | `Rebrand: grlx -> imas` (`b4a0195`); added `build.yml` (Linux/Windows cross-compile + farmer Docker); made `snapshot.yml`/`release.yml` manual-only until publish secrets exist on the new repo; `govulncheck`/`go-licenses` CI fixes | merged (`b4a0195`, `e7c8860`, `65e59e1`, `0d1b975`) |
+| Helm charts | Chart for farmer (core) and saasapi, with optional PXC/OpenBao/Valkey subcharts | merged — PR #17 (`b5a418d`) |
+| Farmer bus/CLI separation | Separated farmer's bus address from its API interface address (`farmerinterface`); `imas` CLI now reads `farmerbusurl` and verifies the bus via `BusTLSServerName` instead of assuming they're the same host | merged — PR #18 (`f30b9dd`), PR #19 (`01b4013`) |
+| **Workstream M.1** — Windows SCM service wrapper for the sprout binary | `golang.org/x/sys/windows/svc` lifecycle hooks so `imas-sprout.exe` itself runs under the Windows SCM (install/uninstall/start/stop/status via `svc/mgr`, no SIGINT/SIGTERM handling under the SCM, rotating file log) — distinct from G.1's *ingredient* for managing other Windows services | merged — PR #22 (`cfdb73f`, `54d70f4`, `f2fa7fa`, `8b9b388`, `718928e`) |
+| **Workstream M.2** — MSI installer + winget package | MSI via `wixl`/`msitools`, winget NuGet package published to the public `imasnget` Buildkite feed on release, sprout starts itself post-upgrade | merged — PR #21 (`1c6a2a5`, `65bc985`) |
+| **Workstream M.3** — SUSE rpm validation | `zypper`-specific check on the existing `nfpm`-built rpm packaging | merged — folded into PR #21 (`1c6a2a5`'s "SUSE RPM check") |
+| **Workstream M.4** — customer-run Ansible playbooks | Not started. Task brief drafted in `docs/claude-code-parallel-build-plan.md` §4a (item 4) but not yet dispatched. | **open** |
+| **New: Terraform UAT gate** | Provision per-OS VMs, install a tagged release's actual Buildkite-published packages via the M.4 playbooks, smoke-test enrollment/recipe-run/reboot survival. Not in the original roadmap; added as a release-quality gate. Task brief drafted in `docs/claude-code-parallel-build-plan.md` §4a (item 5), including an explicit flag that its default compute-provider choice (libvirt/KVM) needs a human sign-off, not just green tests. | **open** — depends on M.4 |
+| Docs refresh (architecture diagram, SaaS API reference, `INSTALL.md`, this file, `packaging/systemd/*.service` vs `docs/*.service` dedup) | Drafted as a `claude --cloud` prompt (see conversation), not yet dispatched | **open** |
 
 ## Notes
 
@@ -99,11 +138,28 @@ by reading its imports before ruling H.2 not done.
 - The six pre-existing Wave 0 workstreams were confirmed directly against the
   repo (code present, tests present, commits/PRs identified in `git log`)
   rather than re-run, per instruction to skip work already done.
-- All of Wave 0, Wave 1, and Wave 2 are now merged. Everything in
-  `docs/claude-code-parallel-build-plan.md` sections 1–3 is done. The
+- All of Wave 0, Wave 1, Wave 2, and the "ongoing" G.2/G.4/G.6/G.7/H.1/H.2/H.3
+  batch are now confirmed **merged** — every workstream from
+  `docs/claude-code-parallel-build-plan.md` sections 1–4 is done. The
   Envoy/EdDSA verification gap noted above under Wave 1 is still open and
   needs a human or a docker-capable environment — it was never gated on
-  Wave 2 and remains the one unresolved item from the plan as dispatched.
-  Section 4's remaining "ongoing / fully parallel" Windows/Linux ingredient
-  workstreams (G.2, G.4, G.6, G.7, H.1, H.2, H.3) have now been dispatched
-  as well, since they have no dependency on anything else in the plan.
+  anything else and remains the one unresolved item from the original plan.
+- **2026-09-27 refresh:** this file had drifted since the `grlx` → `imas`
+  rebrand (`b4a0195`) — it hadn't been touched since the ongoing batch was
+  *dispatched*, and never recorded that batch actually landing, nor any of
+  the post-rebrand work (CI setup, Helm charts, the farmer bus/CLI split,
+  or workstream M's Windows packaging). This pass: (1) re-verified all seven
+  ongoing-batch items against `go.mod` and `internal/ingredients/` and
+  flipped them from "dispatched" to "merged"; (2) added the
+  repository-history note at the top, since PR numbers before the rebrand
+  are on the old, superseded `yogzblr/grlx` repo and can numerically collide
+  with real, current `yogzblr/imas` PR numbers; (3) added the "Post-rebrand
+  work" section above documenting the rebrand/CI setup, the Helm charts, the
+  farmer bus/CLI split, and workstream M (M.1–M.3 merged, M.4 and the new
+  Terraform UAT gate still open); (4) recorded the docs-refresh task
+  (architecture diagram, SaaS API reference, `INSTALL.md` rewrite, this
+  file, `*.service` dedup) as drafted but not yet dispatched.
+- Still genuinely open, in priority order: the Envoy/EdDSA-against-real-Envoy
+  verification (Wave 1, needs Docker), workstream M.4 (Ansible playbooks),
+  the Terraform UAT gate, and the docs refresh — the last two are sequenced
+  after M.4 since both consume its output.
