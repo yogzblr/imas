@@ -436,6 +436,124 @@ permissive is a compliance-visible failure, not just a bug."
 
 ---
 
+## 4a. Wave 3 — workstream M follow-through (Ansible + release UAT gate)
+
+Sub-items M.1–M.3 (Windows SCM service wrapper, MSI+winget installer,
+zypper/SUSE rpm validation) are merged — see `packaging/windows/`,
+`packaging/buildkite/publish-packages.sh`, and `.github/workflows/
+publish-packages.yml`. What's left in M is M.4 (customer-run Ansible
+playbooks), plus a new gate the roadmap didn't originally call out: a
+Terraform-provisioned UAT pass that actually installs a tagged release
+from the Buildkite registries and exercises it end to end before anyone
+calls that release verified. M.4 gates the UAT item below, since UAT
+drives the same playbooks a customer would run.
+
+**4. Workstream M.4 — customer-run Ansible playbooks**
+```
+claude --cloud "Implement M.4 from docs/design/imas-fork-roadmap.md and
+imas-windows-parity-addendum.md: Ansible playbooks a customer runs to
+bootstrap a host onto imas, consuming workstream H's one-time enrollment
+key ({key_id}.{secret}, per docs/design/imas-envoy-enrollment-design.md
+§3 and cloudxp-machine-manager-api-design.md §3.1).
+
+Add under ansible/ (new top-level dir, alongside deploy/):
+- roles/imas_sprout: installs the imas-sprout package for the target OS
+  and enrolls it.
+  - Linux: add the Buildkite-hosted apt/yum/zypper repo (imasdeb/imasrpm,
+    per publish-packages.yml's registry names) via the distro's native
+    repo module (apt_repository / yum_repositoryzypper_repository), then
+    install imas-sprout through the normal package module — do not
+    download .deb/.rpm files directly, the point is customers get repo-
+    managed updates.
+  - Windows: install via win_package pointing at the release's MSI (the
+    URL Buildkite's NuGet flat-container serves, same one
+    packaging/windows/winget/build-winget-nupkg.sh resolves) — check
+    whether community.windows.win_winget against the public imasnget
+    feed is a cleaner fit than a direct win_package URL and justify
+    whichever you pick in the PR.
+  - After install, write the enrollment key and farmer bus URL to
+    whatever config path imas-sprout already reads on each OS (check
+    packaging/ for the installed config location — don't invent a new
+    one), then start the service via the OS-native service module
+    (systemd/win_service, matching the providers workstream G/M.1
+    built) and idempotently detect 'already enrolled' by checking the
+    sprout's own local state before re-running enrollment, since re-
+    enrolling a healthy sprout should not happen on every playbook run.
+  - roles/imas_verify (or a post_task in imas_sprout): poll the sprout's
+    local status until it reports connected to farmer, fail the play
+    with a clear message if it doesn't within a timeout.
+- An inventory-driven playbook (site.yml or similar) applying
+  imas_sprout to a `sprouts` group, with per-host or per-group vars for
+  the enrollment key and farmer bus URL (document that the key is
+  meant to be supplied via ansible-vault or the runner's secret store,
+  never committed).
+- A README under ansible/ walking a customer through: get an enrollment
+  key from the SaaS API (POST /tenants/{tenant_id}/enrollment-keys, per
+  cloudxp-machine-manager-api-design.md §1.2), put it in inventory
+  (vaulted), run the playbook.
+
+Test what you can with Molecule against Docker for the Linux path (a
+local nats-server + the enrollment endpoint stubbed or run for real if
+workstream H is merged). Flag in the PR that the Windows path can't be
+molecule-tested from this sandbox the same way workstreams G/M's other
+Windows pieces couldn't."
+```
+
+**5. New workstream — Terraform UAT gate for published releases**
+```
+claude --cloud "Add a Terraform-driven UAT (user-acceptance test) pass
+that runs against a real tagged release after publish-packages.yml has
+pushed its packages to the Buildkite registries (imasrpm/imasdeb/
+imasnget), to catch what a green `go test ./...` can't: that the actual
+published packages install and enroll cleanly on real target OSes.
+
+Scope:
+- New terraform/uat/ directory. Provision one VM per target OS this
+  project claims to support today per the packaging matrix
+  (.goreleaser.yaml's nfpm targets plus the MSI): at minimum an apt-
+  based distro, an rpm-based distro, SUSE (zypper), and Windows.
+- Make the compute provider swappable via a Terraform variable/module
+  boundary rather than hard-wiring one cloud — default to a libvirt/KVM
+  provider (dmacvicar/terraform-provider-libvirt or similar) so the UAT
+  can run on a self-hosted runner without requiring new cloud
+  credentials as a prerequisite, and leave clearly-marked module stubs
+  for AWS/Azure/GCP equivalents. This default-provider choice is an
+  infra decision with real cost/ownership implications beyond what an
+  agent should decide unattended — say explicitly in the PR that it's a
+  first draft default, not a final decision, and flag it for a human
+  call on which provider(s) this actually runs against in production
+  CI.
+- After the VMs are up, run the Wave-3 M.4 Ansible playbooks
+  (ansible/site.yml) against them using a real enrollment key obtained
+  from a UAT tenant (stub/mock the SaaS API call if it isn't reachable
+  from CI yet; say so in the PR rather than hand-waving it), pinning the
+  package version/repo channel to the release tag under test rather
+  than 'latest'.
+- Smoke-test assertions after enrollment: the sprout shows as connected
+  from farmer's side (a facts/status query over the imas CLI or API),
+  a trivial recipe runs successfully on it (e.g. a fileManaged +
+  cmd.run round trip), and the service survives a host reboot (systemd/
+  win_service auto-start). Fail the run clearly naming which OS/step
+  failed.
+- Wire this as a new .github/workflows/uat.yml, modeled on
+  publish-packages.yml's structure (a 'check secrets up front' step
+  naming what's missing, a concurrency group per tag): trigger on
+  workflow_dispatch with a required release-tag input, and optionally
+  on release published as a follow-on to publish-packages.yml — but
+  make that second trigger opt-in behind a repo variable for now, since
+  it needs real provider credentials that don't exist on this repo yet
+  (same posture as release.yml's 'manual-only until secrets exist').
+- Always terraform destroy at the end of the job (including on
+  failure), and say in the PR whether teardown-on-failure was actually
+  verified or just written.
+
+Do not change publish-packages.yml or release.yml's existing gating —
+this is a new, separate pass that runs after a release is already
+published, not a precondition for publishing it."
+```
+
+---
+
 ## 5. Orchestrator prompt — paste into one lead Claude Code session
 
 Use this if you'd rather have Claude dispatch and track Wave 0 for you
