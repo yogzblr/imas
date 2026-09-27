@@ -6,6 +6,7 @@ package log
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -45,6 +46,14 @@ func SetLogLevel(l Level) {
 	mu.Lock()
 	defer mu.Unlock()
 	charm.SetLevel(toCharmLevel(l))
+}
+
+// SetOutput sends the terminal logger's output, stderr by default, to w
+// (nil restores stderr). The NATS backend is unaffected.
+func SetOutput(w io.Writer) {
+	mu.Lock()
+	defer mu.Unlock()
+	charm.SetOutput(w)
 }
 
 // ConnectNATS dials url and connects the NATS logger backend over that
