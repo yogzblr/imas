@@ -95,15 +95,6 @@ func stepMsg(t *testing.T, subject string, step cook.StepCompletion) *nats.Msg {
 	return &nats.Msg{Subject: subject, Data: data}
 }
 
-func envelopeMsg(t *testing.T, subject string, envelope cook.RecipeEnvelope) *nats.Msg {
-	t.Helper()
-	data, err := json.Marshal(envelope)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &nats.Msg{Subject: subject, Data: data}
-}
-
 // TestRegisterNatsConn_NoLocalDir verifies farmer no longer creates
 // config.JobLogDir: job logs live in the object store.
 func TestRegisterNatsConn_NoLocalDir(t *testing.T) {
