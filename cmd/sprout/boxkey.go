@@ -38,10 +38,6 @@ import (
 // (internal/natsapi's SproutBoxKeyRotateCmd).
 func boxKeyRotateSubject(id string) string { return "imas.sprouts." + id + ".boxkey.rotate" }
 
-// boxKeySubmitSubject is where the sprout submits its new public key
-// (internal/natsapi's SproutBoxKeySubmitPattern).
-func boxKeySubmitSubject(id string) string { return "imas.sprouts." + id + ".boxkey.pub" }
-
 // subscribeBoxKeyRotate rotates this sprout's box key each time farmer's
 // trigger arrives on nc. Triggers are handled one at a time, in order.
 func subscribeBoxKeyRotate(nc *nats.Conn, sproutID string) error {
@@ -67,7 +63,7 @@ func rotateBoxKey(nc *nats.Conn, sproutID string) {
 		log.Errorf("box key rotation: %v", err)
 		return
 	}
-	msg := nats.NewMsg(boxKeySubmitSubject(sproutID))
+	msg := nats.NewMsg(pki.SproutBoxKeySubmitSubject(sproutID))
 	msg.Header.Set(payloadbox.Header, payloadbox.HeaderBox1)
 	msg.Data = submission
 	if err := nc.PublishMsg(msg); err != nil {

@@ -215,7 +215,7 @@ func TestBoxKeySubjectsMatchFarmer(t *testing.T) {
 	if got, want := boxKeyRotateSubject("web-01"), natsapi.SproutSubject("web-01", natsapi.SproutBoxKeyRotateCmd); got != want {
 		t.Errorf("rotate subject %q, farmer publishes %q", got, want)
 	}
-	if got, want := boxKeySubmitSubject("web-01"), strings.Replace(natsapi.SproutBoxKeySubmitPattern, "*", "web-01", 1); got != want {
+	if got, want := pki.SproutBoxKeySubmitSubject("web-01"), strings.Replace(natsapi.SproutBoxKeySubmitPattern, "*", "web-01", 1); got != want {
 		t.Errorf("submit subject %q, farmer subscribes %q", got, want)
 	}
 }
@@ -268,7 +268,7 @@ func TestBoxKeyRotation_RogueTrigger(t *testing.T) {
 
 	var mu sync.Mutex
 	var seen []*nats.Msg
-	if _, err := rogue.Subscribe(boxKeySubmitSubject(e.sproutID), func(m *nats.Msg) {
+	if _, err := rogue.Subscribe(pki.SproutBoxKeySubmitSubject(e.sproutID), func(m *nats.Msg) {
 		mu.Lock()
 		seen = append(seen, m)
 		mu.Unlock()
@@ -326,7 +326,7 @@ func TestBoxKeyRotation_RogueTrigger(t *testing.T) {
 
 	// What the rogue can't do: substitute its own key.
 	attacker := boxPubForTest(t)
-	if err := rogue.Publish(boxKeySubmitSubject(e.sproutID), []byte(`{"pub":"`+attacker+`"}`)); err != nil {
+	if err := rogue.Publish(pki.SproutBoxKeySubmitSubject(e.sproutID), []byte(`{"pub":"`+attacker+`"}`)); err != nil {
 		t.Fatal(err)
 	}
 	flush(t, rogue, e.farmer)
@@ -371,7 +371,7 @@ func TestUserJWTGrantsPub(t *testing.T) {
 		}
 		return s
 	}
-	subject := boxKeySubmitSubject("web-01")
+	subject := pki.SproutBoxKeySubmitSubject("web-01")
 	if !userJWTGrantsPub(mint("imas.sprouts.web-01.facts", subject), subject) {
 		t.Error("grant not found")
 	}
