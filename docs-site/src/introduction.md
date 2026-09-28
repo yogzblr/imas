@@ -24,8 +24,12 @@ nginx-installed:
 
 This site covers:
 
+- **[Architecture](./architecture.md)** — components, tenancy/identity model,
+  and storage, with the current architecture diagram.
 - **[Installation](./installation.md)** — deploying farmer, the SaaS API,
   and enrolling sprouts.
+- **[SaaS API reference](./api-reference.md)** — every `/v1` route, auth,
+  and error shape, checked against the router code.
 - **[Ingredient reference](./ingredients/index.md)** — every ingredient a
   recipe can use: its methods and their parameters, generated directly from
   `internal/ingredients/` so it never drifts from the code.
