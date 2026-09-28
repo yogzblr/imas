@@ -1,0 +1,15 @@
+[book]
+title = "imas"
+description = "Infrastructure Management At Scale — a Go/NATS multi-tenant fleet management platform for VMs and bare metal."
+authors = ["imas contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/yogzblr/imas"
+edit-url-template = "https://github.com/yogzblr/imas/edit/main/docs-site/{path}"
+site-url = "/imas/"
+
+[output.html.fold]
+enable = true
+level = 1

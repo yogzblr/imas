@@ -177,14 +177,30 @@ dcu:
 	rm -f ~/.config/imas/tls-rootca.pem
 	docker-compose up
 
-test: clean 
+test: clean
 	docker-compose build
 	docker-compose up -d
 	@printf "\e[31mNo tests defined!\e[39m\n"
 	docker compose down
 	@exit 1
 
+# gendocs regenerates docs-site/src/ingredients/*.md from internal/ingredients/
+# (see tools/gendocs) -- it's a separate Go module so it never needs this
+# repo's go.mod toolchain version. Those generated files are gitignored;
+# `make docs` (needs mdbook: https://rust-lang.github.io/mdBook/guide/installation.html)
+# regenerates them and builds the site into docs-site/book/.
+gendocs:
+	cd tools/gendocs && go run . -src ../../internal/ingredients -out ../../docs-site/src/ingredients
 
+docs: gendocs
+	mdbook build docs-site
+
+docs-serve: gendocs
+	mdbook serve docs-site --open
+
+.PHONY: gendocs
+.PHONY: docs
+.PHONY: docs-serve
 .PHONY: all
 .PHONY: clean
 .PHONY: docker
