@@ -262,6 +262,44 @@ directly in this session instead.
 | J: sprout side of farmer-triggered box key rotation (requirements.md item 15) | Closes "sprout-initiated box key rotation has a farmer side but no sprout side." Farmer-triggered only, no sprout-side scheduling. New key held `pending` until confirmed by the first farmer payload that opens under it; replaced key kept `previous` for `sproutboxkeyprevgrace` (default 15m, floored at `2×DefaultMaxSkew`). Along the way, found and fixed a real gap: `sproutPermissions` never granted the `boxkey.pub` publish subject at all, so every submission was refused as a Permissions Violation until this PR added it (existing sprouts pick it up via JWT re-mint on next refresh). See `docs/design/imas-payload-encryption-design.md`'s "Sprout-side rotation, farmer-triggered only." FLAG FOR SECURITY REVIEW | merged — PR #34 (`8eb23da`, `8384084`, `7b9d80d`) |
 | Ansible + packaging: expose `busproxyurl` and `sproutboxkeyprevgrace` | `ansible/roles/imas_sprout` variables `imas_sprout_bus_proxy_url` (drift-managed the same way as `busurls`: set when non-empty, removed when emptied) and `imas_sprout_boxkey_prev_grace` (set when non-empty, but deliberately never removed — see below), `packaging/etc/imas-sprout.conf` commented examples, `ansible/README.md` variable table. Found and fixed a Molecule idempotence failure along the way: `sproutboxkeyprevgrace` is the only one of the two with a `jety.SetDefault` in `internal/config/config.go`, so the sprout rewrites it into the config file with a concrete default value on any other save (enrolling, clearing its join token). Managing it the same "remove when empty" way as `busurls`/`busproxyurl` fought that write-back every run — molecule's idempotence check caught it: `imas_sprout : Write the enrollment settings...` and the restart handler both fired non-idempotently on all three containers. Fixed by only ever adding an explicit override for this key and never trying to force it absent. | **done, this pass** (docs/ansible only, no application code) |
 
+## Fleet updates and DB migrations (re-scoped 2026-09-29, designed, not built)
+
+Decisions recorded in `docs/design/requirements.md` (items 20, 21) and
+`docs/design/cloudxp-machine-manager-api-design.md` (§1.8, §2.2, §2.3,
+§2.5, §2.6, §4.1a). Sprout updates now install from the repository
+configured **in the sprout**, the same per-OS repos the Ansible role
+`imas_sprout` sets up; imas controls only the signed manifest. This
+**supersedes** the earlier signed-row-with-artifact-URL flow: the
+`selfupdate` ingredient's "stage the artifact, then `ErrInstallNotImplemented`"
+path, `internal/update`'s backup/rename/restore scaffolding, `fleetreleaser`
+writing `saas.fleet_versions` directly, and the live key-set fetch on
+`imas.sprouts.<id>.fleetsigningkeys` for fleet keys. What already exists and
+carries over: the Transit key `imas-fleet-signing` and its policies, the
+read-only verify roles, the wave/gate dispatch in
+`internal/saasapi/fleet_update_dispatch.go`, and the
+`SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` flag (default off).
+
+| Item | Description | Status |
+|---|---|---|
+| FU.1 Manifest endpoint | Farmer serves `GET /v1/sprout/update-manifest` on the recipe HTTP endpoint (sprout JWT), read-only from `saas.fleet_versions` + `saas.tenant_update_policy`; approved versions only | not started |
+| FU.2 Sprout manifest fetch + verify + install | Sprout fetches its OS/arch row, verifies the Ed25519 signature against a keyring shipped in the package, downloads from its configured repo (OS trust store, proxy, optional repo token, no JWT), checks SHA-256, installs from the local file (`dpkg -i` / `rpm -U` / `msiexec`), refuses downgrades. FLAG FOR SECURITY REVIEW | not started |
+| FU.3 Release registration | saasapi operator-plane endpoint validates and stores signed rows, one per OS/arch, idempotent on same checksums; revoke-version call | not started |
+| FU.4 `fleetreleaser` as signing API | Stateless, sole holder of Transit sign, callable only by saasapi, no DB access; drop its direct DB write and grant. FLAG FOR SECURITY REVIEW | not started (today: CLI that writes the row) |
+| FU.5 Helm release hook | Farmer chart carries `sprout.release` (version, per-OS/arch file names and sha256); `post-install`/`post-upgrade` hook Job calls FU.3. No CI call | not started |
+| FU.6 Rollout gates | Health-based wave gate (sprout reconnects on the new version), per-tenant version floor, `min_sprout_version`, mixed OS/arch batches; `unresponsive_after_update` already exists | partly built (job_status/dispatch gates, wave sizes) |
+| DB.1 goose migrations | `cmd/migrate` (MIT goose, embedded SQL, no CGO): baseline `CREATE TABLE IF NOT EXISTS`, forward-only, backward compatible for one version; remove GORM `AutoMigrate` from `OpenDB` and saasapi startup; farmer/saasapi check schema version and retry | not started |
+| DB.2 Migration hook Job | Single pod replaces `db-bootstrap`: waits for PXC, root creates schemas/users/grants, migrates `farmer` and `saas` with each owner's credentials, then the `enrollment_keys` column grant (no wait for saasapi). `pre-upgrade`/`pre-rollback`, `post-install` with bundled PXC; rollback only checks schema version | not started |
+
+Decided 2026-09-29: `helm rollback` leaves the sprout release registered
+(withdrawn only by explicit revoke); one `cmd/migrate` binary; sprout
+private-repo token is Linux only for now, as in the Ansible role. Atlas was
+considered; goose chosen (MIT).
+
+Licensing: MPL-2.0 dependencies are now accepted generally (requirement 21),
+including the OpenBao Go client, so the OpenBao client consolidation is
+unblocked. `CLAUDE.md` still says Apache/MIT only and is to be reworded in
+the next docs pass.
+
 ## Notes
 
 - "Needs security review" reflects only workstreams whose task brief in
@@ -315,8 +353,9 @@ directly in this session instead.
     referenced by `.goreleaser.yaml` or anything else.
   - `router.go` and `fleet_update_dispatch.go` cite `yogzblr/imas#286` for
     the disabled sprout self-update path. That number predates the rename
-    and returns 404 on `yogzblr/imas`; the underlying blocker (design doc
-    §2.3 backup/restore) is still open, and dispatch stays off by default.
+    and returns 404 on `yogzblr/imas`. Superseded 2026-09-29: the upstream
+    dependency no longer applies; the sprout-side install is imas's own work
+    (FU.2 above) and dispatch stays off by default until it lands.
   - farmerbus and saasapi have no OS package, systemd unit or published
     image; `INSTALL.md` says so.
   - `README.md`'s "Architecture" and "Batteries Included" prose still
@@ -343,7 +382,7 @@ directly in this session instead.
   and farmer-triggered sprout box key rotation merged (PRs #32–#34)**, plus
   the ansible/packaging follow-up exposing the two new sprout config keys
   (`busproxyurl`, `sproutboxkeyprevgrace`) as role variables. Requirements
-  RAG (requirements.md; tracked in chat, not yet a doc in this repo):
+  RAG (`docs/design/requirements.md`, updated 2026-09-29):
   item 8 (sprout proxy support) and item 15 (sprout key rotation) both
   close out; item 14 (payload encryption) narrows to `shell.*` as the
   highest-remaining-priority plaintext boundary (an interactive PTY from a
@@ -357,3 +396,11 @@ directly in this session instead.
   and the master plan's <300ms SLA (requirements.md items 1 and 10 — no
   load test has ever run), and, as a nice-to-have, running the Keycloak
   JWKS harness somewhere with a Docker daemon.
+- **2026-09-29: fleet updates and migrations re-scoped.** Doc-by-doc
+  review (requirements, design, this file, `CLAUDE.md`), each approved
+  before changing. Recorded above: updates from the sprout-configured repo,
+  manifest signed by `fleetreleaser` and registered from the farmer Helm
+  release, goose migrations in a single hook Job, MPL-2.0 accepted. No code
+  changed in this pass; FU.1–FU.6 and DB.1–DB.2 are the new open work and
+  join the "still genuinely open" list above, ahead of the Terraform UAT
+  gate for anything that touches updates.
