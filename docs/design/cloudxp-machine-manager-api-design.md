@@ -179,19 +179,42 @@ no new batch/item tables — since an update rollout is just another batched
 action, tracked and audited identically to a `cmd.run` or `cook` batch
 (§1.5).
 
-**Blocking dependency, stated up front:** upstream imas's own
-`internal/update` package is an explicitly disabled skeleton —
-`PerformUpdate()` unconditionally returns `errUnsignedUpdatesDisabled`, and
-the package header says outright "Do NOT enable it as-is" (tracked upstream
-in `yogzblr/imas#286`). Everything in this section is a design placeholder
-for when sprout has a real, working, signed self-update path — not
-something to wire live today. Don't expose `POST
-/tenants/{tenant_id}/sprouts/updates` publicly, even behind a feature flag,
-until that dependency resolves (also see §6).
+**Update model (decided).** Sprout updates come from the repository
+configured **in the sprout**, exactly as the Ansible role `imas_sprout`
+installs them (apt / rpm / zypper repositories, or the Windows feed or MSI
+URL; requirement 20). imas does not host or serve artifacts and an update
+command never carries an artifact URL. What imas controls is the
+**manifest**: which versions exist, their per-OS/arch file names and
+checksums, and which version each tenant may run. The sprout:
+
+1. asks farmer for the update manifest for its own OS/arch over the
+   authenticated recipe HTTP endpoint (JWT, `SproutRootCA`-pinned), §2.6;
+2. verifies the manifest signature against the public keyring shipped with
+   the sprout package (§2.5);
+3. downloads the named file from its **configured repo** over ordinary
+   HTTPS using the OS trust store (`SproutRootCA` is *not* used for this
+   hop; the repo is an external host) and its configured proxy, with no
+   JWT and, for private repos, the same repo token the Ansible role
+   supports;
+4. checks the file's SHA-256 against the signed manifest and only then
+   installs it from that local file (`dpkg -i`, `rpm -U`, `msiexec`), so
+   the installed bytes are exactly what imas signed. Repo package
+   signatures (GPG) are checked in addition, not instead.
+
+Release registration is wired into the **farmer Helm release** (§2.5): the
+chart carries the sprout release (version, per-OS/arch file names and
+checksums), so the farmer and sprout versions ship together. There is no
+CI call into saasapi.
+
+**Status.** The sprout-side install (item 4) and the manifest endpoint
+(§2.6) are not built yet; `POST /tenants/{tenant_id}/sprouts/updates`
+stays behind `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` (default off) until
+they are. Upstream's `internal/update` skeleton (`yogzblr/imas#286`) is no
+longer the dependency: the sprout-side work is imas's own (§2.3).
 
 | Method | Path | Notes |
 |---|---|---|
-| `GET` | `/versions` | List available sprout versions. **CloudXP's own published catalog**, not upstream's GitHub release feed — see rationale below. |
+| `GET` | `/versions` | List registered sprout versions (`saas.fleet_versions`, one row per OS/arch). **CloudXP's own signed catalog**, not upstream's GitHub release feed — see rationale below. |
 | `GET` | `/tenants/{tenant_id}/update-policy` | Fetch the tenant's approved version and rollout window. |
 | `PATCH` | `/tenants/{tenant_id}/update-policy` | Set the approved/pinned version and rollout window. No sprout updates automatically without a tenant explicitly approving a version — this is opt-in, not upstream's ambient "check `/latest` every N minutes" model. |
 | `POST` | `/tenants/{tenant_id}/sprouts/updates` | Trigger a staged update batch. Same request/response shape as §1.5's `/sprouts/actions`, with rollout-specific fields (below). |
@@ -218,9 +241,13 @@ until that dependency resolves (also see §6).
 // 202 response
 { "batch_id": "b_456" }
 ```
-`batch_size`/`gate` default conservatively smaller and stricter than an
-ordinary `cmd.run`/`cook` batch (§1.5) — see §2.3, Rollout safety, for why
-a bad update is a worse failure mode than a bad recipe step.
+`target_version` is the only update parameter. It must equal a version the
+tenant has approved (`tenant_update_policy`); saasapi rejects anything else.
+`gate` accepts `job_status` and `dispatch` (the `probe` gate is rejected
+until it is implemented). `batch_size` and `gate` default conservatively
+smaller and stricter than an ordinary `cmd.run`/`cook` batch (§1.5) — see
+§2.3, Rollout safety, for why a bad update is a worse failure mode than a
+bad recipe step.
 
 **Why CloudXP's own version catalog, not upstream's release feed.**
 Upstream's skeleton polls `<UpdateURL>/latest` directly from each sprout,
@@ -300,21 +327,16 @@ alongside `cmd.run`/`cook` (§1.8):
   "sprout_id": "s_1",
   "action": {
     "type": "self_update",
-    "params": {
-      "version": "v2.4.1",
-      "artifact_url": "https://<farmer-recipe-endpoint>/artifacts/sprout-v2.4.1-linux-amd64",
-      "checksum_sha256": "…",
-      "signature": "v1:<base64 Ed25519 signature, §2.5>"
-    }
+    "params": { "target_version": "v2.4.1" }
   }
 }
 ```
 
-`artifact_url` points at **CloudXP's own object storage**, served through
-the same authenticated recipe HTTP endpoint already designed in Phase 1 of
-the master plan (`imas-master-plan.md`) — not upstream's release CDN. This
-means the artifact-serving auth model, TLS, and object-storage backing are
-all already-designed infrastructure being reused, not new plumbing.
+The command is sealed like other dispatches (`box1`, purpose-bound) and
+carries **no** artifact URL, checksum or signature. The sprout resolves
+those itself from the signed manifest (§2.6) and its own configured repo
+(§1.8). Farmer still checks the sprout's stored `tenant_id` against the
+caller's before dispatch.
 
 ### 2.3 Rollout safety — fleet updates
 
@@ -324,22 +346,29 @@ farmer at all** — the failure mode is categorically worse. Before any
 `self_update` action type is enabled, at minimum:
 
 - **Smaller default batch size and stricter default gate** than §1.5's
-  ordinary actions — don't inherit the general-purpose defaults.
-- **The backup/restore-on-failure behavior sprout's own `internal/update`
-  package already scaffolds** (`commitBinaryUpdate`'s rename-to-backup,
-  swap-in-new, restore-on-failure sequence) must actually work and be
-  exercised in testing before this ships — it's real code today, just not
-  wired to anything.
-- **Staged rollout should reuse workstream L's farmer-side batch-and-gate
-  design** (`imas-sprout-orchestration.md`'s open item: dispatch to a batch,
-  wait on a probe/job-status health signal, proceed to the next batch) —
-  self-update is the single best-motivating use case for that mechanism,
-  arguably more than ordinary recipe rollout.
-- A sprout that goes dark mid-update should be distinguishable, in
-  `asset_action_items` status, from a sprout that failed for an unrelated
-  reason — "unresponsive after update" deserves its own status value, not
-  a generic `failed`, since the operational response differs (the
-  backup/restore path may have already self-healed it).
+  ordinary actions (default wave 5, max 25) — don't inherit the
+  general-purpose defaults.
+- **Install goes through the OS installer, from a verified local file.**
+  The sprout verifies the manifest signature and the file SHA-256 first,
+  then installs (`dpkg -i`, `rpm -U`, `msiexec`). The package manager,
+  not custom swap code, owns replacement, service restart and file
+  placement, so `internal/update`'s backup/rename/restore scaffolding is
+  retired rather than finished. Windows relies on the MSI's own
+  in-use-file handling.
+- **Downgrade and replay protection.** The sprout refuses any version
+  lower than the one it runs unless the signed manifest carries an
+  explicit, signed `allow_downgrade` for that version. Each manifest also
+  carries `min_sprout_version`, the oldest sprout the current farmer still
+  supports.
+- **Health-based gating.** A wave is complete only when each sprout
+  reconnects and reports the *new* version (from facts), not merely when
+  the command was acked. Waves reuse the batch-and-gate mechanism
+  (`imas-sprout-orchestration.md`).
+- A sprout that goes dark mid-update is distinguishable in
+  `asset_action_items` status: `unresponsive_after_update` is its own
+  status, not a generic `failed`.
+- **Mixed OS/arch fleets.** A batch may span OS/arch; each sprout resolves
+  its own manifest row, so one `target_version` covers all of them.
 
 ---
 
@@ -362,66 +391,72 @@ Unlike everything else in §2, this route is deliberately **not** on the privile
 
 Contains the **gateway signing key's** public key only (see `imas-nats-jwt-auth-design.md`'s key-custody section) — one entry, or two during the gateway key's own rotation overlap window (old + new `kid`). Never grows with tenant count: this is not a per-tenant Account-key JWKS, since Envoy's `jwt_authn` check never needs tenant granularity. Farmer already holds this public key (fetched from OpenBao alongside the signing operation itself), so this route is a pure data-transformation read, no new secret access.
 
-### 2.5 Fleet release signing — one signer, read-only verifiers
+### 2.5 Fleet release signing — one signer, Helm-driven registration
 
 A `saas.fleet_versions` row is trusted because it is signed, not because
-of who wrote it. The signature is Ed25519, over the canonical string
-`version|artifact_url|checksum_sha256`. It is made with the OpenBao
-Transit key `imas-fleet-signing`, which is non-exportable and separate
-from the gateway JWT key. The row stores it as
-`signature = "v<key version>:<base64>"`.
+of who wrote it. The signature is Ed25519 over the canonical string
+`version|os|arch|file_name|checksum_sha256` — deliberately **not** the
+URL, which comes from the sprout's own repo config. It is made with the
+OpenBao Transit key `imas-fleet-signing` (non-exportable, separate from
+the gateway JWT key) and stored as `signature = "v<key version>:<base64>"`.
+
+**Registration flow.** The farmer Helm chart carries the sprout release
+(`sprout.release`: version, channel, and per-OS/arch package name, file
+name, sha256 — from the goreleaser `checksums.txt` of that release).
+
+1. A `post-upgrade` (and `post-install`) Helm hook Job calls saasapi's
+   operator-plane release-registration endpoint. It is not tenant-facing
+   and uses an operator credential.
+2. saasapi validates the entry (well-formed, version above the floor, and
+   optionally that the file in the configured repo matches the checksum).
+3. saasapi calls `fleetreleaser` to sign.
+4. saasapi writes the signed rows to `saas.fleet_versions`; saasapi is the
+   only writer of the `saas` schema.
+5. Registering the same version with the same checksums is a no-op (so
+   `helm upgrade` re-runs are safe); the same version with different
+   checksums is rejected.
 
 | Who | Transit access on `imas-fleet-signing` | Does |
 |---|---|---|
-| `cmd/fleetreleaser` | **sign** + read public key (`imas-fleet-signer` policy) | Run by CloudXP's release pipeline. Signs the row and writes it straight to `saas.fleet_versions` with its own DB user. It never calls the SaaS API. |
-| saasapi | read + verify only (`imas-fleet-verify`) | Refuses to create a rollout (§1.8) from a row whose signature is missing or invalid. |
-| farmer | read + verify only (`imas-fleet-verify`, its own role) | Serves the key's current versions live to each sprout on `imas.sprouts.<id>.fleetsigningkeys`, queue-subscribed on each tenant connection. The set is every version at or above `min_decryption_version`: every version Transit's own `/verify` still accepts, including those below `min_encryption_version` during a rotation grace period. Also serves them ungated at `GET /v1/.well-known/fleet-signing-jwks.json`, the same trust model as §2.4. Returns a bootstrap copy as `fleet_signing_jwks` in `POST /v1/enroll`. Re-verifies before it dispatches a `self_update`. |
-| sprout | none | Verifies against the **live** key set, fetched over its SproutRootCA-pinned NATS connection, **before** it fetches the artifact. It accepts any version in the set; the set is cached for 5 min, and a miss refetches immediately. The enrollment-time pin, stored next to `SproutRootCA`, is a bootstrap fallback only until the first live fetch succeeds. It then fetches the artifact with `SproutRootCA` as the only TLS root and checks the SHA-256 afterwards. |
+| `cmd/fleetreleaser` | **sign** + read public key (`imas-fleet-signer`) | A stateless internal signing API. Only saasapi may call it (mTLS or a service token). It has **no DB access**. It signs a canonical manifest entry and enforces format and version-floor rules. |
+| saasapi | read + verify only (`imas-fleet-verify`) | Calls the signer, stores the result, and refuses to create a rollout (§1.8) from a row whose signature is missing or invalid. |
+| farmer | read + verify only (`imas-fleet-verify`, its own role) | Serves the manifest to sprouts (§2.6) read-only from `saas.fleet_versions`; re-verifies before it dispatches a `self_update`. |
+| sprout | none | Verifies manifests against the public keyring **shipped in its package/config** (a key ID list), not fetched over NATS. |
 
-**Why the split.** saasapi already has PXC write access to
-`saas.fleet_versions` (§4.1). If the same identity could also sign with
-Transit, one compromised saasapi process or credential could publish a
-"release" that every sprout in every tenant would install. So writing a
-row and signing it are two trust boundaries, with two OpenBao policies
-and two tokens:
+**Why the split.** saasapi has PXC write access to `saas.fleet_versions`
+(§4.1). If the same identity could also sign with Transit, one compromised
+saasapi process could publish a "release" every sprout would install. So
+writing a row and signing it stay two trust boundaries with two OpenBao
+policies and two tokens: fleetreleaser is the only signer and is a separate
+binary; saasapi and farmer are read-only, enforced by OpenBao
+(`TestOpenBaoEnforcesReadOnlyFleetKey`). A missing signature is always a
+refusal, at every hop, with no checksum-only fallback.
 
-- **fleetreleaser is the only signer.** It is a separate binary, not a
-  library farmer or saasapi imports.
-- **farmer and saasapi are read-only.** Their policy grants
-  `transit/keys/imas-fleet-signing` (read) and
-  `transit/verify/imas-fleet-signing` and nothing else. It is OpenBao
-  that enforces this, not the Go code: the check is
-  `TestOpenBaoEnforcesReadOnlyFleetKey`, run against a real OpenBao with
-  the shipped policy files.
+**Key rotation.** The keyring shipped with the sprout is the trust root, so
+a new key version is added to the keyring in a sprout release signed by the
+old key, and retired only after no approved tenant version depends on it
+(`deploy/fleetreleaser/README.md`, "Rotating the key"). The previous live
+key-set fetch over `imas.sprouts.<id>.fleetsigningkeys` and the JWKS-style
+endpoint are dropped for fleet keys, which removes the bus from the trust
+chain.
 
-A missing signature is always a refusal, at every hop. That includes a
-row written before the column existed. There is no checksum-only
-fallback. Policies, roles, the DB grant and the manual checks are in
-`deploy/fleetreleaser/README.md`.
+**Withdrawing a version.** `helm rollback` does not unregister a sprout
+version; sprouts already on it keep it because they refuse downgrades. A bad
+version is withdrawn with an explicit operator "revoke version" call to
+saasapi, which marks the rows revoked so no manifest is served for them.
 
-**Still open.**
+### 2.6 Update manifest endpoint
 
-- **Install.** The sprout's `selfupdate` step verifies and stages the
-  artifact, then fails with "install not implemented". Installing is
-  §2.3's backup/restore work.
-- **Key retirement stays manual.** Rotation is handled by the live fetch.
-  Retiring a version means raising `min_decryption_version`, and that is
-  an operator decision under one constraint: never retire a version that
-  signed a release still approved in any tenant's
-  `tenant_update_policy` (`deploy/fleetreleaser/README.md`, "Rotating the
-  key").
-- **Trust in the live key set.** A sprout trusts whoever answers on
-  `imas.sprouts.<id>.fleetsigningkeys`. Only farmer and imas.>-template
-  Users in the tenant's Account can answer, and they can already run
-  commands on the sprout (`internal/fleetkeys`). A reviewer should confirm
-  that equivalence holds for every User template that exists.
-- **Downgrade and replay.** Any validly signed row, old versions
-  included, is accepted. Nothing binds a signature to the tenant's
-  approved version or orders versions yet.
+Served by farmer on the same dedicated HTTP endpoint sprouts already use
+for recipes (requirement 9): `GET /v1/sprout/update-manifest?os=&arch=&version=`
+authenticated with the sprout JWT (requirement 11). Farmer reads
+`saas.fleet_versions` and `saas.tenant_update_policy` (read-only grants,
+§4.1) and returns the row for the caller's tenant, OS and arch, only for a
+version the tenant has approved. Response: `version`, `os`, `arch`,
+`file_name`, `checksum_sha256`, `min_sprout_version`, `signature`. There is
+no URL; the sprout builds it from its configured repo and `file_name`.
 
 ## 3. Sprout enrollment flow
-
-The one moment in the whole system where a caller has no credential yet. Borrowed deliberately from `kubeadm`'s join-token model, and it's the one place worth a genuine security review before trusting it in production — everything downstream assumes whatever identity this issues is real.
 
 ### 3.1 Token format
 
@@ -508,6 +543,26 @@ One narrow, deliberate exception to single-writer: farmer also gets `GRANT UPDAT
 
 No cross-schema foreign keys — `tenant_id`/`sprout_id` are enforced by convention at the application layer, to avoid adding Galera certification overhead across schemas at 1M-sprout scale.
 
+### 4.1a Migrations
+
+Schema changes are versioned goose migrations (MIT, embedded SQL, no CGO),
+replacing GORM `AutoMigrate` at startup and the `db-bootstrap` Job. A
+single Helm-hook Job runs one pod, `cmd/migrate`, which in order: waits for
+PXC; using the PXC root secret (mounted only in this pod) creates the
+schemas and users and applies §4.1's grants; migrates `farmer` as the
+farmer user and `saas` as the saasapi user (single writer per schema
+holds); then applies the `enrollment_keys` column grant. Hooks:
+`pre-upgrade` and `pre-rollback`; on install `post-install`, since the
+bundled PXC does not exist at `pre-install` (`pre-install` when PXC is
+external). Farmer and saasapi check that the schema version they expect is
+present and retry until it is. Migrations are forward-only and backward
+compatible for one version (expand, then contract); there is no automatic
+`down`. On rollback the pod only verifies the schema version is within the
+supported range. Migrations are idempotent because MySQL DDL is not
+transactional. A baseline migration (`CREATE TABLE IF NOT EXISTS`) covers
+existing installs. PXC DDL is total-order-isolation, so large alters are
+scheduled deliberately.
+
 ### 4.2 `saas` schema tables (new)
 ```sql
 tenants               (id, name, status, plan_id, created_at, updated_at)
@@ -520,8 +575,10 @@ asset_action_items    (batch_id, asset_id, sprout_id, jid, status)
 
 ### 4.3 Fleet update tables (new)
 ```sql
-fleet_versions        (id, version, artifact_url, checksum_sha256, signature, released_at, notes)
-                        -- signature: written only by cmd/fleetreleaser (§2.5)
+fleet_versions        (id, version, os, arch, package_type, file_name, checksum_sha256,
+                        min_sprout_version, signature, revoked, released_at, notes)
+                        -- one row per OS/arch; UNIQUE(version, os, arch)
+                        -- signature: produced only by cmd/fleetreleaser, stored by saasapi (§2.5)
 tenant_update_policy  (tenant_id PK, approved_version, auto_update BOOLEAN,
                         rollout_window_start, rollout_window_end, updated_at)
 ```
@@ -538,13 +595,14 @@ already cover dispatch tracking for any `action.type`, including
 - Billing/metering integration specifics — §1.7.
 - Quota/rate-limit enforcement values and where exactly they're checked (SaaS API is the intended enforcement point, per earlier discussion, but no limits have been set).
 - Can a sprout's `tenant_id` ever change post-enrollment, or does a tenant move always mean re-enrollment? Not decided.
-- **Fleet update rollout is blocked on upstream.** `internal/update` is an
-  explicitly disabled skeleton (`yogzblr/imas#286`); `PerformUpdate()` fails
-  closed today. Release signing and CA pinning now exist (§2.5); the
-  sprout's install step (§2.3) still doesn't. §1.8/§2.2/§2.3's endpoints and subjects are ready to build
-  against the SaaS API and schema side whenever sprout has a real signed
-  update path — but don't expose `POST
-  /tenants/{tenant_id}/sprouts/updates` publicly, even behind a feature
-  flag, until that dependency resolves. Building the API surface now and
-  the sprout-side capability later (blocked on upstream) are intentionally
-  decoupled work.
+- **Fleet update rollout (§1.8, §2.3, §2.5, §2.6).** Design is settled;
+  build remaining: sprout manifest fetch and verify, install from the
+  verified local file, farmer manifest endpoint, saasapi registration
+  endpoint, `fleetreleaser` as a signing API (dropping its direct DB
+  write), Helm release hook, per-OS/arch `fleet_versions`, version floor,
+  health-based gate. Keep `POST /tenants/{tenant_id}/sprouts/updates`
+  behind `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` until then.
+- Open, needs confirmation: `helm rollback` leaves the sprout release
+  registered (withdrawn only by explicit revoke); one `cmd/migrate` binary
+  vs two per-schema containers; private-repo token support on Windows
+  (Linux only today).

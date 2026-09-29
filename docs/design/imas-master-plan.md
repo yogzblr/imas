@@ -9,7 +9,7 @@ Supersedes the phase structure in `imas-1m-scale-plan.md`. Companion detail docs
 - **Gateway:** Envoy in front of NATS, gateway-JWT validation before traffic reaches nats-server — mitigates the 2026 pre-auth websocket CVE class as a side effect, not just an auth convenience.
 - **Storage:** PXC (durable metadata — PKI, RBAC, tenant accounts, sprout X25519 public keys), Valkey Cluster (heartbeat/connection-state, fed from NATS connection lifecycle events, no tenant hash-tagging), object storage (job logs, recipes). No etcd, no Kine.
 - **Secrets custody (CloudXP's own):** OpenBao — operator/account signing keys, TLS cert issuance, per-tenant X25519 private keys.
-- **Licensing:** PXC (GPLv2, under commercial Percona agreement) and OpenBao (MPL-2.0) accepted as exceptions to the Apache/MIT default.
+- **Licensing:** PXC (GPLv2, under commercial Percona agreement) and MPL-2.0 dependencies generally (OpenBao server and its Go client, go-sql-driver/mysql) accepted as exceptions to the Apache/MIT default; MPL code is used unmodified or changes are shared (requirement 21).
 - **Platform:** Kubernetes for NATS, Valkey, farmer, PXC — separate DMZ and non-DMZ node pools/namespaces, not one flat cluster.
 
 ---
