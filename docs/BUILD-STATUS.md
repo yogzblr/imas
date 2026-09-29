@@ -290,11 +290,10 @@ read-only verify roles, the wave/gate dispatch in
 | DB.1 goose migrations | `cmd/migrate` (MIT goose, embedded SQL, no CGO): baseline `CREATE TABLE IF NOT EXISTS`, forward-only, backward compatible for one version; remove GORM `AutoMigrate` from `OpenDB` and saasapi startup; farmer/saasapi check schema version and retry | not started |
 | DB.2 Migration hook Job | Single pod replaces `db-bootstrap`: waits for PXC, root creates schemas/users/grants, migrates `farmer` and `saas` with each owner's credentials, then the `enrollment_keys` column grant (no wait for saasapi). `pre-upgrade`/`pre-rollback`, `post-install` with bundled PXC; rollback only checks schema version | not started |
 
-Open, needs confirmation: `helm rollback` leaves the sprout release
-registered (withdrawn only by explicit revoke); one `cmd/migrate` binary vs
-two per-schema containers; private-repo token support on Windows (Linux only
-in the Ansible role today); which Atlas features, if any, would matter
-(goose chosen, MIT).
+Decided 2026-09-29: `helm rollback` leaves the sprout release registered
+(withdrawn only by explicit revoke); one `cmd/migrate` binary; sprout
+private-repo token is Linux only for now, as in the Ansible role. Atlas was
+considered; goose chosen (MIT).
 
 Licensing: MPL-2.0 dependencies are now accepted generally (requirement 21),
 including the OpenBao Go client, so the OpenBao client consolidation is
