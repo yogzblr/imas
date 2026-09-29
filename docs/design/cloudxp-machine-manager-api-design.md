@@ -602,7 +602,7 @@ already cover dispatch tracking for any `action.type`, including
   write), Helm release hook, per-OS/arch `fleet_versions`, version floor,
   health-based gate. Keep `POST /tenants/{tenant_id}/sprouts/updates`
   behind `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` until then.
-- Open, needs confirmation: `helm rollback` leaves the sprout release
+- Decided 2026-09-29: `helm rollback` leaves the sprout release
   registered (withdrawn only by explicit revoke); one `cmd/migrate` binary
-  vs two per-schema containers; private-repo token support on Windows
-  (Linux only today).
+  runs both schemas' migrations; private-repo tokens for sprouts are Linux
+  only, as in the Ansible role today.
