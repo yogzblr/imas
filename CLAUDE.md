@@ -6,8 +6,15 @@ read imas-master-plan.md and imas-fork-roadmap.md first, then the specific
 design doc named in your task.
 
 ## Constraints (non-negotiable)
-- Licensing: Apache-2.0 / MIT dependencies only. Flag anything else
-  before adding it as a dependency, don't just add it.
+- Licensing: Apache-2.0 / MIT dependencies by default. Recorded
+  exceptions: Percona XtraDB Cluster (GPLv2, commercial arrangement) and
+  MPL-2.0 dependencies generally, including OpenBao and its Go client,
+  used unmodified or with changes shared (docs/design/requirements.md
+  item 21). Flag any other license before adding it as a dependency,
+  don't just add it.
+- Sprout updates install from the repository configured in the sprout,
+  like the Ansible role `imas_sprout`; an update command never carries an
+  artifact URL (docs/design/requirements.md item 20, API design §1.8).
 - Go, existing module layout. Don't introduce a second language/runtime
   without flagging it first.
 - No CGO (blocks a CGO-free build target elsewhere in the plan).
