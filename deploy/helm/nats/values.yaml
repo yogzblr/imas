@@ -42,8 +42,7 @@ natsSeeds:
 
 bus:
   image:
-    # -- farmerbus image. This repo does not publish one yet (no farmerbus
-    # target in docker/ or .goreleaser.yaml); see README.md.
+    # -- farmerbus image, published per release (signed, multi-arch) to GHCR.
     repository: ghcr.io/yogzblr/imas-farmerbus
     # -- Image tag. Defaults to the chart's appVersion.
     tag: ""

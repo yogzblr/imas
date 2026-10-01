@@ -40,10 +40,10 @@ separate `deploy/helm/farmer` chart.
    `ca.crt`, or OpenBao PKI. See [Bus TLS](#bus-tls).
 3. **A DMZ edge certificate** for Envoy (`envoy.tls.secretName`). This is
    what sprouts' `wss://` connections terminate against.
-4. **A farmerbus image.** This repo doesn't publish one yet: `docker/`
-   and `.goreleaser.yaml` only have farmer and sprout targets. Build one
-   from `./cmd/farmerbus` with `CGO_ENABLED=0`, on the same pattern as
-   `docker/farmer.dockerfile`, and set `bus.image.*`.
+4. **A farmerbus image.** Each release publishes a signed multi-arch one
+   to `ghcr.io/yogzblr/imas-farmerbus` (see `.goreleaser.yaml`), tagged with
+   the chart's `appVersion`, which is the default. Only set `bus.image.*` to
+   use your own build or mirror.
 5. **Core-side settings**, in `deploy/helm/farmer`, not here. Its
    `TestContractWithNatsChart` renders both charts side by side and
    fails if any of these stop lining up:

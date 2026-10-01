@@ -59,10 +59,10 @@ It does **not** deploy the DMZ bus or Envoy. Those are `deploy/helm/nats`.
    - the Keycloak realm (`saasapi.jwt.*`);
    - the BFF shared-secret Secret (`saasapi.internalAuthSecret.secretName`,
      key `current`, and optionally `previous`).
-5. **Images.** The repo doesn't publish a farmer or saasapi image to a
-   registry yet. Build them with `CGO_ENABLED=0`, following
-   `docker/farmer.dockerfile` (`FROM scratch`), and set `farmer.image.*`
-   and `saasapi.image.*`.
+5. **Images.** Each release publishes signed multi-arch farmer and saasapi
+   images to `ghcr.io/yogzblr/imas-farmer` and `imas-saasapi`; the chart
+   defaults to the tag equal to its `appVersion`. Set `farmer.image.*` and
+   `saasapi.image.*` only to use your own build or mirror.
 
 ### Eval install (everything bundled)
 
@@ -496,9 +496,8 @@ gone):
 
 ## Known gaps
 
-1. **No published farmer or saasapi images.**
-2. **Horizontal farmer scaling** needs FarmerPKI off local disk.
-3. **saasapi runs in the release namespace.** The reference put its
+1. **Horizontal farmer scaling** needs FarmerPKI off local disk.
+2. **saasapi runs in the release namespace.** The reference put its
    ExternalSecret in a separate `saasapi` namespace. Here saasapi shares a
    namespace with farmer's seed Secret, but it mounts only its own
    credential Secret. Whoever can create pods in this namespace could

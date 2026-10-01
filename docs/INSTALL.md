@@ -38,10 +38,12 @@ If you have questions, [open an issue](https://github.com/yogzblr/imas/issues/ne
 | `imas-sprout` | `cmd/sprout` | managed hosts | deb/rpm/apk with [`packaging/systemd/imas-sprout.service`](../packaging/systemd/imas-sprout.service); Windows MSI and winget |
 | `imas` CLI | `cmd/imas` | operator machine | release archives |
 
-No farmer, saasapi or farmerbus container image is published yet. Build them
-with `CGO_ENABLED=0` following `docker/farmer.dockerfile`
-([`deploy/helm/farmer/README.md`](../deploy/helm/farmer/README.md),
-"Before you install").
+Each release publishes signed multi-arch (amd64, arm64) container images to
+GHCR: `ghcr.io/yogzblr/imas-{farmer,sprout,saasapi,farmerbus,fleetreleaser}`,
+tagged with the release version (no leading `v`) and `latest`. The Helm charts
+(`farmer`, `nats`) are published to the Buildkite Helm registry `imashelm`
+with the same version, and default to the matching image tag. Verify
+signatures as described in [`SECURITY.md`](../SECURITY.md).
 
 To build every binary from source, run `make` on Linux (or `GOOS=linux make`
 elsewhere); binaries land in `bin/`. You need a Go toolchain
