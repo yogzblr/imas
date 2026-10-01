@@ -554,6 +554,221 @@ published, not a precondition for publishing it."
 
 ---
 
+## 4b. Wave 4 — fleet updates and DB migrations
+
+Re-scoped 2026-09-29 (requirements 20–21; API design §1.8, §2.2, §2.3, §2.5,
+§2.6, §4.1a; `docs/BUILD-STATUS.md`, "Fleet updates and DB migrations").
+Sprout updates install from the repo configured in the sprout, like the
+Ansible role; imas controls a signed manifest, registered from the farmer
+Helm release. The farmer and sprout ship under one tag (`docs/RELEASING.md`).
+
+Sub-waves, each held until the one before is merged to `main`:
+
+| Wave | Briefs (run in parallel) | Why this order |
+|---|---|---|
+| 4A | DB.1, FU.0 | Disjoint scopes. DB.1 owns schema, FU.0 owns the signed-manifest format. |
+| 4B | DB.2, FU.34 | FU.34 adds the `fleet_versions` columns as a goose migration, so it needs DB.1. DB.2 needs DB.1. |
+| 4C | FU.1, FU.2, FU.5 | FU.1 and FU.2 code against FU.0's manifest and FU.34's table. FU.5 needs DB.2 and FU.34. |
+| 4D | FU.6, then the Terraform UAT gate | Gates and floors sit on the finished path; UAT proves it on real hosts. |
+
+Every brief below inherits `CLAUDE.md`. IDs match BUILD-STATUS (FU.3 and
+FU.4 are one brief, FU.34, because they share one signing contract).
+
+**DB.1 — goose migrations (Go side)**
+```
+claude --cloud "Implement DB.1 from docs/BUILD-STATUS.md ('Fleet updates and
+DB migrations') per docs/design/cloudxp-machine-manager-api-design.md §4.1a.
+Add cmd/migrate: a CGO-free binary using pressly/goose (MIT) as a library
+with embedded SQL (embed.FS), one migration set for the farmer schema and
+one for the saas schema, each run with that schema owner's own DSN (single
+writer per schema must hold). It also does the root-credential step first,
+idempotently: create the two schemas and users and apply the schema-level
+grants in §4.1; after both migration sets, apply farmer's column grant
+UPDATE (used_count, last_used_at) on saas.enrollment_keys. Read the root
+password from a file or env, never argv; never log DSNs or passwords.
+Baseline migration 00001 per schema is CREATE TABLE IF NOT EXISTS generated
+from the current GORM models, so existing installs are a no-op. Migrations
+are forward-only, idempotent (MySQL DDL is not transactional) and written
+backward compatible for one version; no automatic down. Subcommands:
+migrate up, migrate check (exit non-zero unless the schema version is within
+the range this binary supports, without changing anything; this is what a
+helm rollback runs). Guard against two concurrent runs with a row-based
+lock (GET_LOCK is node-local on Galera, do not use it). Then remove GORM
+AutoMigrate from internal/pxc/db.go OpenDB and internal/saasapi/db.go, and
+make cmd/farmer and cmd/saasapi check at startup that the schema version
+they need is present, retrying with backoff until it is. Scope: cmd/migrate/,
+internal/migrations/ (new), internal/pxc/, internal/saasapi/db.go,
+cmd/farmer/main.go, cmd/saasapi/main.go, go.mod/go.sum. Do not touch Helm
+or .goreleaser.yaml (that is DB.2). Tests: run the migrations against a
+real MySQL-compatible server where the repo already does so, plus unit tests
+for the version check and lock. Confirm goose and its dependencies are
+MIT/Apache and say so in the PR. FLAG FOR SECURITY REVIEW: this binary
+holds PXC root credentials and defines the single-writer grants."
+```
+
+**FU.0 — signed manifest format (fleetsign)**
+```
+claude --cloud "Implement FU.0 from docs/BUILD-STATUS.md per API design §2.5
+and §2.6. In internal/fleetsign, move the signed message from
+version|artifact_url|checksum_sha256 to the canonical
+version|os|arch|file_name|checksum_sha256 (no URL anywhere). Define the
+Manifest type served to sprouts (version, os, arch, file_name,
+checksum_sha256, min_sprout_version, signature) and a strict canonical
+encoder shared by signer and verifiers (reject separators and control
+characters in fields). Add a Keyring type: a set of Ed25519 public keys by
+key id, loaded from a file shipped with the sprout package, and Verify(
+manifest) that accepts any key in the ring; no network fetch and no JWKS.
+Keep the 'v<key version>:<base64>' signature form. Keep the Transit signer
+and verifier code that fleetreleaser and saasapi use compiling, adapted to
+the new message. Scope: internal/fleetsign/ only, plus the minimum edits to
+callers so the repo builds (list them in the PR); do not change behaviour
+of those callers beyond the new message. Tests: round-trip, tamper of every
+field, wrong key, key-id rotation (two keys in the ring), downgrade of
+min_sprout_version. FLAG FOR SECURITY REVIEW: this is the release trust
+root."
+```
+
+**DB.2 — migration hook Job (Helm and release wiring)**
+```
+claude --cloud "Implement DB.2 from docs/BUILD-STATUS.md per API design
+§4.1a. In deploy/helm/farmer replace templates/db-bootstrap-job.yaml with one
+Helm-hook Job running cmd/migrate (image ghcr.io/yogzblr/imas-migrate, tag =
+appVersion): hooks pre-upgrade and pre-rollback, post-install when
+pxc.enabled (the bundled PXC does not exist at pre-install), pre-install when
+the database is external; hook-delete-policy before-hook-creation,
+hook-succeeded; backoffLimit and activeDeadlineSeconds from values; the PXC
+root Secret mounted only in this pod; NetworkPolicy to PXC and DNS only;
+restricted securityContext like the existing Job. pre-rollback runs
+'migrate check', everything else 'migrate up'. Farmer and saasapi
+Deployments must not need the root Secret. Update chart_test.go, values.yaml,
+the README (drop the wait-for-saasapi text). Also add the cmd/migrate build,
+a distroless docker/goreleaser.migrate.dockerfile, and the image to
+.goreleaser.yaml (dockers, docker_manifests, services archive ids) and to
+the image list in .github/workflows/publish-packages.yml, following the
+other four services. Scope: deploy/helm/farmer/, .goreleaser.yaml, docker/,
+.github/workflows/publish-packages.yml. Needs DB.1 merged. FLAG FOR
+SECURITY REVIEW: root-credential Job."
+```
+
+**FU.34 — release registration and signing API (saasapi + fleetreleaser)**
+```
+claude --cloud "Implement FU.3 and FU.4 from docs/BUILD-STATUS.md per API
+design §2.5 (needs DB.1 and FU.0 merged). (1) cmd/fleetreleaser becomes a
+stateless HTTP signing service: POST /v1/sign takes one manifest entry,
+validates it with internal/fleetsign, signs with the Transit key
+imas-fleet-signing and returns {signature}. It has no database access: remove
+its direct write to saas.fleet_versions and its DB grant and config. Callers
+authenticate with mTLS or a bearer token from a mounted Secret (pick one,
+justify in the PR); only saasapi may call it; it refuses a version at or below
+the current floor it is configured with. (2) saasapi gets an operator-plane
+endpoint POST /v1/operator/fleet-releases (not tenant-facing; separate
+credential, not the tenant API-key or BFF path) taking {version, channel,
+min_sprout_version, packages:[{os, arch, package_type, file_name,
+checksum_sha256}]}. It validates, calls fleetreleaser per package, and
+upserts saas.fleet_versions rows in one transaction. Idempotent: same
+version and same checksums is a 200 no-op; same version with different
+checksums is 409. POST /v1/operator/fleet-releases/{version}/revoke marks
+rows revoked. (3) A goose migration (from DB.1) gives fleet_versions the
+columns os, arch, package_type, file_name, min_sprout_version, revoked and
+UNIQUE(version, os, arch), and drops artifact_url. (4) Update the OpenBao
+policies and deploy/fleetreleaser/README.md for the service shape.
+Scope: cmd/fleetreleaser/, internal/saasapi/ (fleet registration, model,
+router, tests), internal/migrations/ (new migration only),
+deploy/fleetreleaser/, docs/api/. Do not touch the Helm hook (FU.5) or the
+farmer manifest endpoint (FU.1). Tests: idempotence, 409, revoke, no DB
+access in fleetreleaser, auth refusal, and the existing OpenBao read-only
+test must still pass. FLAG FOR SECURITY REVIEW: sole signer and the
+registration trust boundary."
+```
+
+**FU.1 — farmer manifest endpoint**
+```
+claude --cloud "Implement FU.1 from docs/BUILD-STATUS.md per API design §2.6.
+In farmer add GET /v1/sprout/update-manifest?os=&arch=&version= on the
+existing recipe HTTP endpoint, behind the same sprout JWT Auth as
+/v1/recipes (internal/api/routers.go, internal/api/handlers/). It reads
+saas.fleet_versions and saas.tenant_update_policy through farmer's existing
+read-only saas grant and returns the internal/fleetsign Manifest for the
+caller's own tenant, os and arch, only for a version that tenant has
+approved and that is not revoked; anything else is 404 with a generic body
+(do not distinguish unapproved, revoked and unknown). The tenant comes from
+the verified JWT, never from a query parameter. Rate-limit per sprout and
+cache briefly per (tenant_id, os, arch, version) — key every cache and map on
+(tenant_id, sprout_id/tenant_id), never sprout_id alone. Scope:
+internal/api/ and internal/api/handlers/, tests, docs/api/. Tests: cross-
+tenant isolation, unapproved and revoked versions, missing arch, bad JWT,
+no URL ever in the response. Needs FU.0 and FU.34 merged."
+```
+
+**FU.2 — sprout fetch, verify, install**
+```
+claude --cloud "Implement FU.2 from docs/BUILD-STATUS.md per API design
+§1.8 and §2.3. Rewrite internal/ingredients/selfupdate: the self_update
+action carries only target_version (internal/saasapi and the sealed cmd are
+unchanged). The sprout (1) GETs its manifest from the farmer recipe endpoint
+with its JWT (SproutRootCA-pinned) for its own os/arch and target_version;
+(2) verifies it with internal/fleetsign.Keyring loaded from a keyring file
+shipped in the package (packaging/etc/fleet-signing-keys.json: key id to
+base64 Ed25519 public key; ship it in the nfpm contents and the MSI, and
+document that rotation adds a key in a release signed by the old one);
+(3) refuses any version lower than the running one, and any manifest whose
+min_sprout_version is above the running version; (4) builds the download URL
+from the repo already configured in the sprout (the same per-OS repo the
+Ansible role sets: apt/rpm base URL or the Windows feed/MSI URL, plus
+file_name; add the config key(s) if missing and expose them in ansible/ and
+packaging/etc), downloads over HTTPS with the OS trust store, the sprout's
+proxy settings and the optional repo token, and NO sprout JWT and NOT
+SproutRootCA; (5) checks the SHA-256 against the signed manifest before
+anything else; (6) installs from that local file: dpkg -i, rpm -U (zypper
+on SUSE), msiexec /i /qn on Windows, run so the service restarts onto the new
+version, and reports the outcome. Remove ErrInstallNotImplemented and retire
+internal/update's backup/rename scaffolding if nothing else uses it (say what
+you removed). Scope: internal/ingredients/selfupdate/, internal/update/,
+internal/config/, packaging/etc/, packaging/windows/, .goreleaser.yaml
+(nfpm contents only), ansible/roles/imas_sprout/ (new variables only).
+Tests: table tests for every refusal above, a local HTTPS server standing in
+for the repo, hash mismatch, downgrade, Windows install path mocked. Needs
+FU.0 and FU.34 merged and FU.1's contract. FLAG FOR SECURITY REVIEW: this
+installs code as root/SYSTEM."
+```
+
+**FU.5 — Helm release registration hook**
+```
+claude --cloud "Implement FU.5 from docs/BUILD-STATUS.md per API design §2.5.
+In deploy/helm/farmer add a post-install/post-upgrade hook Job that reads
+files/sprout-release.json (written at release time by
+packaging/helm/stamp-sprout-release.sh) and POSTs it, with the chart's
+min_sprout_version value, to saasapi's operator-plane
+/v1/operator/fleet-releases using a dedicated operator credential from a
+Secret (new ServiceAccount, no other access). It runs after the app
+rollout, retries with backoff, treats 200 (idempotent re-run) as success and
+409 as a hard failure that fails the release and prints the mismatch. If
+files/sprout-release.json is absent (a dev install from source) the hook is
+skipped with a NOTES.txt line. Add a revoke runbook to the README. Scope:
+deploy/helm/farmer/ and the stamp script's output shape if the Job needs a
+field (packaging/helm/). Tests in chart_test.go: hook annotations and
+weights, skipped without the file, Secret wiring, NetworkPolicy to saasapi
+only. Needs DB.2 and FU.34 merged. FLAG FOR SECURITY REVIEW: operator
+credential."
+```
+
+**FU.6 — rollout gates and floors**
+```
+claude --cloud "Implement FU.6 from docs/BUILD-STATUS.md per API design
+§2.3. In internal/saasapi/fleet_update_dispatch.go and fleet_updates.go: a
+wave completes only when each sprout reconnects and reports the NEW version
+(from facts), not when the command is acked; unresponsive_after_update stays
+its own status; target_version must equal the tenant's approved version and a
+non-revoked registered version; per-tenant concurrency of one in-progress
+update (close the check-then-act race with a transactional claim); mixed
+os/arch in one batch resolves per sprout; the probe gate stays rejected. Keep
+SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED default off. Scope: internal/saasapi/
+fleet_*.go and tests, docs/api/. Needs FU.1, FU.2, FU.5 merged. Do not enable
+the flag by default; the Terraform UAT gate decides that."
+```
+
+---
+
 ## 5. Orchestrator prompt — paste into one lead Claude Code session
 
 Use this if you'd rather have Claude dispatch and track Wave 0 for you
