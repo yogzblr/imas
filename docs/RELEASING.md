@@ -61,9 +61,10 @@ that branch and release from the tag as above. Forward-merge the fix to
 
 ## Compatibility
 
-Each farmer chart release states `min_sprout_version`, the oldest sprout it
-still supports; the sprout refuses a manifest above its own version only for
-that floor and never installs a version lower than the one it runs. Database
+Each release states `min_sprout_version`, the oldest sprout that can be
+updated directly to it. A sprout older than that refuses the manifest and
+must step through an intermediate release first. A sprout never installs a
+version lower than the one it runs. Database
 migrations are forward-only and compatible with one prior version, so
 `helm rollback` is safe for the farmer; it does not unregister a sprout
 release. To pull a bad sprout version, revoke it:
