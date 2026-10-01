@@ -119,6 +119,46 @@ builds:
     tags:
       - self_update
 
+  # Service binary: container image + release archive
+  - main: ./cmd/saasapi/
+    id: "saasapi"
+    binary: "{{.ProjectName}}-saasapi"
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
+  # Service binary: container image + release archive
+  - main: ./cmd/farmerbus/
+    id: "farmerbus"
+    binary: "{{.ProjectName}}-farmerbus"
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
+  # Service binary: container image + release archive
+  - main: ./cmd/fleetreleaser/
+    id: "fleetreleaser"
+    binary: "{{.ProjectName}}-fleetreleaser"
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
+
 # generates macOS universal binaries
 # name would be: imas-v1.0.0-darwin-universal
 universal_binaries:
@@ -130,7 +170,8 @@ universal_binaries:
 
 # generates archives for the CLI (standalone binaries with self-update)
 archives:
-  - formats: tar.gz
+  - id: cli
+    formats: [tar.gz]
     # This allows for us to handle the universal binaries
     allow_different_binary_count: true
     # This puts all the standalone binaries for a given system into one archive
@@ -144,6 +185,15 @@ archives:
     format_overrides:
       - goos: windows
         formats: zip
+  # Service binaries (not for CLI/sprout users): one archive per arch.
+  - id: services
+    formats: [tar.gz]
+    ids:
+      - saasapi
+      - farmerbus
+      - fleetreleaser
+    name_template: "{{.ProjectName}}-services-{{.Version}}-{{.Os}}-{{.Arch}}"
+
 
 # Windows installer for imas-sprout: installs the imas-sprout service. Built
 # with msitools' wixl on Linux (install wixl + msitools on the runner), then
@@ -293,131 +343,227 @@ nfpms:
         scripts:
           postinstall: ./packaging/scripts/imas-sprout-rpm-postinstall.sh
 
-# Cloudsmith publishing
-publishers:
-  - name: cloudsmith
-    # Only publish for tagged releases (not snapshots/nightlies)
-    disable: "{{ .IsSnapshot }}"
-    cmd: cloudsmith push {{ if .IsSnapshot }}raw{{ else }}{{ .ArtifactExt }}{{ end }} {{ .Env.CLOUDSMITH_REPOSITORY }} {{ .ArtifactPath }}
-    env:
-      - CLOUDSMITH_API_KEY={{ .Env.CLOUDSMITH_API_KEY }}
-
-# Docker images
+# Container images: GHCR only, linux/amd64 + linux/arm64, one multi-arch
+# manifest per image, signed keyless with cosign (docker_signs below).
+# Images use the package-managed (no_self_update) builds: a container is
+# replaced, never self-updated. saasapi, farmerbus and fleetreleaser have
+# their own builds above.
 dockers:
-  # Docker Hub
-  - image_templates:
-      - "imas/farmer:{{ .Version }}"
-      - "imas/farmer:latest"
+  - id: farmer-amd64
+    goos: linux
+    goarch: amd64
+    ids: [farmer-pkg]
+    image_templates:
+      - "ghcr.io/yogzblr/imas-farmer:{{ .Version }}-amd64"
     dockerfile: docker/goreleaser.farmer.dockerfile
+    use: buildx
     build_flag_templates:
       - "--platform=linux/amd64"
-    ids:
-      - farmer
+      - "--label=org.opencontainers.image.source=https://github.com/yogzblr/imas"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
     # Only push for tagged releases
     skip_push: "{{ .IsSnapshot }}"
-
-  - image_templates:
-      - "imas/sprout:{{ .Version }}"
-      - "imas/sprout:latest"
-    dockerfile: docker/goreleaser.sprout.dockerfile
-    build_flag_templates:
-      - "--platform=linux/amd64"
-    ids:
-      - sprout
-    # Only push for tagged releases
-    skip_push: "{{ .IsSnapshot }}"
-
-  # GitHub Container Registry
-  - image_templates:
-      - "ghcr.io/yogzblr/imas-farmer:{{ .Version }}"
-      - "ghcr.io/yogzblr/imas-farmer:latest"
+  - id: farmer-arm64
+    goos: linux
+    goarch: arm64
+    ids: [farmer-pkg]
+    image_templates:
+      - "ghcr.io/yogzblr/imas-farmer:{{ .Version }}-arm64"
     dockerfile: docker/goreleaser.farmer.dockerfile
+    use: buildx
     build_flag_templates:
-      - "--platform=linux/amd64"
-    ids:
-      - farmer
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.source=https://github.com/yogzblr/imas"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
     # Only push for tagged releases
     skip_push: "{{ .IsSnapshot }}"
-
-  - image_templates:
-      - "ghcr.io/yogzblr/imas-sprout:{{ .Version }}"
-      - "ghcr.io/yogzblr/imas-sprout:latest"
+  - id: sprout-amd64
+    goos: linux
+    goarch: amd64
+    ids: [sprout-pkg]
+    image_templates:
+      - "ghcr.io/yogzblr/imas-sprout:{{ .Version }}-amd64"
     dockerfile: docker/goreleaser.sprout.dockerfile
+    use: buildx
     build_flag_templates:
       - "--platform=linux/amd64"
-    ids:
-      - sprout
+      - "--label=org.opencontainers.image.source=https://github.com/yogzblr/imas"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+    # Only push for tagged releases
+    skip_push: "{{ .IsSnapshot }}"
+  - id: sprout-arm64
+    goos: linux
+    goarch: arm64
+    ids: [sprout-pkg]
+    image_templates:
+      - "ghcr.io/yogzblr/imas-sprout:{{ .Version }}-arm64"
+    dockerfile: docker/goreleaser.sprout.dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.source=https://github.com/yogzblr/imas"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+    # Only push for tagged releases
+    skip_push: "{{ .IsSnapshot }}"
+  - id: saasapi-amd64
+    goos: linux
+    goarch: amd64
+    ids: [saasapi]
+    image_templates:
+      - "ghcr.io/yogzblr/imas-saasapi:{{ .Version }}-amd64"
+    dockerfile: docker/goreleaser.saasapi.dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.source=https://github.com/yogzblr/imas"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+    # Only push for tagged releases
+    skip_push: "{{ .IsSnapshot }}"
+  - id: saasapi-arm64
+    goos: linux
+    goarch: arm64
+    ids: [saasapi]
+    image_templates:
+      - "ghcr.io/yogzblr/imas-saasapi:{{ .Version }}-arm64"
+    dockerfile: docker/goreleaser.saasapi.dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.source=https://github.com/yogzblr/imas"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+    # Only push for tagged releases
+    skip_push: "{{ .IsSnapshot }}"
+  - id: farmerbus-amd64
+    goos: linux
+    goarch: amd64
+    ids: [farmerbus]
+    image_templates:
+      - "ghcr.io/yogzblr/imas-farmerbus:{{ .Version }}-amd64"
+    dockerfile: docker/goreleaser.farmerbus.dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.source=https://github.com/yogzblr/imas"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+    # Only push for tagged releases
+    skip_push: "{{ .IsSnapshot }}"
+  - id: farmerbus-arm64
+    goos: linux
+    goarch: arm64
+    ids: [farmerbus]
+    image_templates:
+      - "ghcr.io/yogzblr/imas-farmerbus:{{ .Version }}-arm64"
+    dockerfile: docker/goreleaser.farmerbus.dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.source=https://github.com/yogzblr/imas"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+    # Only push for tagged releases
+    skip_push: "{{ .IsSnapshot }}"
+  - id: fleetreleaser-amd64
+    goos: linux
+    goarch: amd64
+    ids: [fleetreleaser]
+    image_templates:
+      - "ghcr.io/yogzblr/imas-fleetreleaser:{{ .Version }}-amd64"
+    dockerfile: docker/goreleaser.fleetreleaser.dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.source=https://github.com/yogzblr/imas"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+    # Only push for tagged releases
+    skip_push: "{{ .IsSnapshot }}"
+  - id: fleetreleaser-arm64
+    goos: linux
+    goarch: arm64
+    ids: [fleetreleaser]
+    image_templates:
+      - "ghcr.io/yogzblr/imas-fleetreleaser:{{ .Version }}-arm64"
+    dockerfile: docker/goreleaser.fleetreleaser.dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.source=https://github.com/yogzblr/imas"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
     # Only push for tagged releases
     skip_push: "{{ .IsSnapshot }}"
 
-# S3 artifact publishing for standalone binaries
-blobs:
-  - provider: s3
-    region: us-east-1
-    bucket: artifacts.imas.dev
-    # Only upload for tagged releases (not snapshots/nightlies)
-    disable: "{{ .IsSnapshot }}"
-    ids:
-      - imas # standalone builds only
-      - farmer
-      - sprout
-    # Upload with version in path: s3://artifacts.imas.dev/linux/amd64/v1.0.0/imas
-    extra_files:
-      - glob: "./dist/imas-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
-        name_template: "{{ .Os }}/{{ .Arch }}/{{ .Tag }}/imas"
-      - glob: "./dist/imas-farmer-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
-        name_template: "{{ .Os }}/{{ .Arch }}/{{ .Tag }}/farmer"
-      - glob: "./dist/imas-sprout-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
-        name_template: "{{ .Os }}/{{ .Arch }}/{{ .Tag }}/sprout"
-      # Upload checksums and signatures for this version
-      - glob: "./dist/checksums.txt"
-        name_template: "{{ .Os }}/{{ .Arch }}/{{ .Tag }}/checksums.txt"
-      - glob: "./dist/checksums.txt.sig"
-        name_template: "{{ .Os }}/{{ .Arch }}/{{ .Tag }}/checksums.txt.sig"
+docker_manifests:
+  - name_template: "ghcr.io/yogzblr/imas-farmer:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/yogzblr/imas-farmer:{{ .Version }}-amd64"
+      - "ghcr.io/yogzblr/imas-farmer:{{ .Version }}-arm64"
+    skip_push: "{{ .IsSnapshot }}"
+  - name_template: "ghcr.io/yogzblr/imas-farmer:latest"
+    image_templates:
+      - "ghcr.io/yogzblr/imas-farmer:{{ .Version }}-amd64"
+      - "ghcr.io/yogzblr/imas-farmer:{{ .Version }}-arm64"
+    skip_push: "{{ or .IsSnapshot .IsPrerelease }}"
+  - name_template: "ghcr.io/yogzblr/imas-sprout:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/yogzblr/imas-sprout:{{ .Version }}-amd64"
+      - "ghcr.io/yogzblr/imas-sprout:{{ .Version }}-arm64"
+    skip_push: "{{ .IsSnapshot }}"
+  - name_template: "ghcr.io/yogzblr/imas-sprout:latest"
+    image_templates:
+      - "ghcr.io/yogzblr/imas-sprout:{{ .Version }}-amd64"
+      - "ghcr.io/yogzblr/imas-sprout:{{ .Version }}-arm64"
+    skip_push: "{{ or .IsSnapshot .IsPrerelease }}"
+  - name_template: "ghcr.io/yogzblr/imas-saasapi:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/yogzblr/imas-saasapi:{{ .Version }}-amd64"
+      - "ghcr.io/yogzblr/imas-saasapi:{{ .Version }}-arm64"
+    skip_push: "{{ .IsSnapshot }}"
+  - name_template: "ghcr.io/yogzblr/imas-saasapi:latest"
+    image_templates:
+      - "ghcr.io/yogzblr/imas-saasapi:{{ .Version }}-amd64"
+      - "ghcr.io/yogzblr/imas-saasapi:{{ .Version }}-arm64"
+    skip_push: "{{ or .IsSnapshot .IsPrerelease }}"
+  - name_template: "ghcr.io/yogzblr/imas-farmerbus:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/yogzblr/imas-farmerbus:{{ .Version }}-amd64"
+      - "ghcr.io/yogzblr/imas-farmerbus:{{ .Version }}-arm64"
+    skip_push: "{{ .IsSnapshot }}"
+  - name_template: "ghcr.io/yogzblr/imas-farmerbus:latest"
+    image_templates:
+      - "ghcr.io/yogzblr/imas-farmerbus:{{ .Version }}-amd64"
+      - "ghcr.io/yogzblr/imas-farmerbus:{{ .Version }}-arm64"
+    skip_push: "{{ or .IsSnapshot .IsPrerelease }}"
+  - name_template: "ghcr.io/yogzblr/imas-fleetreleaser:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/yogzblr/imas-fleetreleaser:{{ .Version }}-amd64"
+      - "ghcr.io/yogzblr/imas-fleetreleaser:{{ .Version }}-arm64"
+    skip_push: "{{ .IsSnapshot }}"
+  - name_template: "ghcr.io/yogzblr/imas-fleetreleaser:latest"
+    image_templates:
+      - "ghcr.io/yogzblr/imas-fleetreleaser:{{ .Version }}-amd64"
+      - "ghcr.io/yogzblr/imas-fleetreleaser:{{ .Version }}-arm64"
+    skip_push: "{{ or .IsSnapshot .IsPrerelease }}"
 
-  - provider: s3
-    region: us-east-1
-    bucket: artifacts.imas.dev
-    # Only upload for tagged releases (not snapshots/nightlies)
-    disable: "{{ .IsSnapshot }}"
-    ids:
-      - imas # standalone builds only
-      - farmer
-      - sprout
-    # Also upload to "latest" path: s3://artifacts.imas.dev/linux/amd64/latest/imas
-    extra_files:
-      - glob: "./dist/imas-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
-        name_template: "{{ .Os }}/{{ .Arch }}/latest/imas"
-      - glob: "./dist/imas-farmer-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
-        name_template: "{{ .Os }}/{{ .Arch }}/latest/farmer"
-      - glob: "./dist/imas-sprout-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
-        name_template: "{{ .Os }}/{{ .Arch }}/latest/sprout"
-      # Upload checksums and signatures for latest
-      - glob: "./dist/checksums.txt"
-        name_template: "{{ .Os }}/{{ .Arch }}/latest/checksums.txt"
-      - glob: "./dist/checksums.txt.sig"
-        name_template: "{{ .Os }}/{{ .Arch }}/latest/checksums.txt.sig"
-
-  # Upload global manifests (version-specific and latest)
-  - provider: s3
-    region: us-east-1
-    bucket: artifacts.imas.dev
-    disable: "{{ .IsSnapshot }}"
-    extra_files:
-      # Version-specific manifests
-      - glob: "./dist/checksums.txt"
-        name_template: "{{ .Tag }}/checksums.txt"
-      - glob: "./dist/checksums.txt.sig"
-        name_template: "{{ .Tag }}/checksums.txt.sig"
-      - glob: "./dist/artifacts.json"
-        name_template: "{{ .Tag }}/artifacts.json"
-      # Latest manifests
-      - glob: "./dist/checksums.txt"
-        name_template: "latest/checksums.txt"
-      - glob: "./dist/checksums.txt.sig"
-        name_template: "latest/checksums.txt.sig"
-      - glob: "./dist/artifacts.json"
-        name_template: "latest/artifacts.json"
+# Keyless cosign signatures (Sigstore OIDC from the GitHub Actions run; no
+# key to manage). Verified before the chart is published, see
+# .github/workflows/publish-packages.yml and SECURITY.md.
+docker_signs:
+  - id: cosign-images
+    cmd: cosign
+    artifacts: manifests
+    output: true
+    args:
+      - "sign"
+      - "--yes"
+      - "${artifact}@${digest}"
 
 # Creates a draft github release for maintainer review
 release:
@@ -436,13 +582,17 @@ release:
     - imas-farmer
     - imas-sprout
     - imas-sprout-msi
+    - services
   draft: true
   # Support for nightlies
   prerelease: auto
 
-# Sign checksums and artifacts
+# Sign the checksums file twice. GPG (detached .sig) stays for apt/rpm users
+# and the existing SECURITY.md flow. Keyless cosign (.sigstore.json bundle) is
+# what the publish workflow verifies against this repo's release workflow.
 signs:
-  - cmd: gpg2
+  - id: gpg
+    cmd: gpg2
     args:
       - "--batch"
       - "-u"
@@ -450,6 +600,16 @@ signs:
       - "--output"
       - "${signature}"
       - "--detach-sign"
+      - "${artifact}"
+    artifacts: checksum
+    output: true
+  - id: cosign
+    cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args:
+      - "sign-blob"
+      - "--yes"
+      - "--bundle=${signature}"
       - "${artifact}"
     artifacts: checksum
     output: true
@@ -486,119 +646,3 @@ changelog:
       order: 5
     - title: Others
       order: 999
-
-# AUR publishing
-aurs:
-  # IMAS CLI tool
-  - name: imas
-    ids: [imas-pkg]
-    disable: "{{ or .IsSnapshot .IsPrerelease }}"
-    homepage: https://imas.dev
-    description: "imas: effective fleet configuration management CLI"
-    maintainers:
-      - "Tai Groot <tai@taigrr.com>"
-    license: 0BSD
-    private_key: "{{ .Env.AUR_KEY }}"
-    git_url: "ssh://aur@aur.archlinux.org/imas-bin.git"
-    provides:
-      - imas
-    conflicts:
-      - imas
-      - imas-git
-    commit_author:
-      name: imas-bot
-      email: bot@imas.dev
-    commit_msg_template: "Update to {{ .Tag }}"
-    package: |-
-      # CLI binary
-      install -Dm755 "./imas" "${pkgdir}/usr/bin/imas"
-
-      # license
-      install -Dm644 "./LICENSE" "${pkgdir}/usr/share/licenses/imas-bin/LICENSE"
-
-  # imas Farmer (Control Plane)
-  - name: imas-farmer-bin
-    ids: [farmer-pkg]
-    disable: "{{ or .IsSnapshot .IsPrerelease }}"
-    homepage: https://imas.dev
-    description: "imas control plane service"
-    maintainers:
-      - "Tai Groot <tai@taigrr.com>"
-    license: 0BSD
-    private_key: "{{ .Env.AUR_KEY }}"
-    git_url: "ssh://aur@aur.archlinux.org/imas-farmer-bin.git"
-    provides:
-      - imas-farmer
-    conflicts:
-      - imas-farmer
-      - imas-farmer-git
-      - imas-farmer-bin
-    backup:
-      - etc/imas/farmer
-    commit_author:
-      name: imas-bot
-      email: bot@imas.dev
-    commit_msg_template: "Update to {{ .Tag }}"
-    install: ./packaging/aur/imas-farmer.install
-    package: |-
-      # farmer binary
-      install -Dm755 "./imas-farmer" "${pkgdir}/usr/bin/imas-farmer"
-
-      # systemd service file
-      install -Dm644 "./packaging/systemd/imas-farmer.service" "${pkgdir}/usr/lib/systemd/system/imas-farmer.service"
-
-      # config file
-      install -Dm644 "./packaging/etc/imas-farmer.conf" "${pkgdir}/etc/imas/farmer"
-
-      # license
-      install -Dm644 "./LICENSE" "${pkgdir}/usr/share/licenses/imas-farmer-bin/LICENSE"
-
-      # directories
-      install -dm755 "${pkgdir}/etc/imas/pki/farmer"
-      install -dm755 "${pkgdir}/var/cache/imas/farmer"
-
-  # imas Sprout (Agent)
-  - name: imas-sprout-bin
-    ids: [sprout-pkg]
-    disable: "{{ or .IsSnapshot .IsPrerelease }}"
-    homepage: https://imas.dev
-    description: "imas remote control agent"
-    maintainers:
-      - "Tai Groot <tai@taigrr.com>"
-    license: 0BSD
-    private_key: "{{ .Env.AUR_KEY }}"
-    git_url: "ssh://aur@aur.archlinux.org/imas-sprout-bin.git"
-    provides:
-      - imas-sprout
-    conflicts:
-      - imas-sprout
-      - imas-sprout-git
-      - imas-sprout-bin
-    backup:
-      - etc/imas/sprout
-    commit_author:
-      name: imas-bot
-      email: bot@imas.dev
-    commit_msg_template: "Update to {{ .Tag }}"
-    install: ./packaging/aur/imas-sprout.install
-    package: |-
-      # sprout binary
-      install -Dm755 "./imas-sprout" "${pkgdir}/usr/bin/imas-sprout"
-
-      # systemd service file
-      install -Dm644 "./packaging/systemd/imas-sprout.service" "${pkgdir}/usr/lib/systemd/system/imas-sprout.service"
-
-      # config file
-      install -Dm644 "./packaging/etc/imas-sprout.conf" "${pkgdir}/etc/imas/sprout"
-
-      # license
-      install -Dm644 "./LICENSE" "${pkgdir}/usr/share/licenses/imas-sprout-bin/LICENSE"
-
-      # directory
-      install -dm755 "${pkgdir}/var/cache/imas/sprout"
-
-# Announce releases
-announce:
-  discord:
-    enabled: "{{ not .IsSnapshot }}"
-    message_template: "imas {{ .Tag }} is out! Check it out at {{ .ReleaseURL }}"

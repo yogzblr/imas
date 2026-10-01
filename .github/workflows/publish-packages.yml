@@ -7,6 +7,17 @@ name: Publish packages
 #     imas.sprout.windows.msi   the MSI, which winget downloads anonymously
 #     imas.sprout.windows       the winget manifests pointing at it
 #
+# After the packages are up (so the sprout repos already hold the release),
+# it also packages the Helm charts and uploads them to the Buildkite Helm
+# registry (imashelm):
+#   farmer  deploy/helm/farmer   with files/sprout-release.json (the sprout
+#                                release the chart registers, API design §2.5)
+#   nats    deploy/helm/nats
+# Chart version and appVersion are the release version, which is also the
+# tag of the GHCR images the charts default to. Before anything is published
+# the keyless cosign signatures are verified: the checksums bundle and each
+# imas-* image on GHCR must have been signed by release.yml on a v* tag.
+#
 # Runs when a maintainer publishes the draft release that release.yml
 # (goreleaser) creates, so nothing reaches the registries before that
 # review. Prereleases are skipped (their MSI version equals the final
@@ -18,7 +29,7 @@ name: Publish packages
 # Needs (repo, or the "goreleaser" environment):
 #   secret   BUILDKITE_PACKAGES_TOKEN     Buildkite API access token with the
 #                                         Read Packages and Write Packages scopes
-#   variable BUILDKITE_ORGANIZATION_SLUG  org owning imasrpm/imasdeb/imasnget
+#   variable BUILDKITE_ORGANIZATION_SLUG  org owning imasrpm/imasdeb/imasnget/imashelm
 on:
   release:
     types: [published]
@@ -31,6 +42,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 concurrency:
   group: publish-packages-${{ github.event.release.tag_name || inputs.tag }}
@@ -75,7 +87,8 @@ jobs:
         run: |
           set -euo pipefail
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dist \
-            --pattern '*.rpm' --pattern '*.deb' --pattern '*.msi' --pattern checksums.txt
+            --pattern '*.rpm' --pattern '*.deb' --pattern '*.msi' --pattern checksums.txt \
+            --pattern 'checksums.txt.sigstore.json'
           (cd dist && sha256sum --check --ignore-missing --strict checksums.txt)
           # --ignore-missing passes on an empty directory: make sure every
           # downloaded package was actually listed. (A missing package type
@@ -83,6 +96,29 @@ jobs:
           shopt -s nullglob
           for f in dist/*.rpm dist/*.deb dist/*.msi; do
             grep -q "  $(basename "$f")\$" dist/checksums.txt || { echo "::error::$f is not in checksums.txt"; exit 1; }
+          done
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # Keyless: the signer must be release.yml in this repo, run on a v* tag,
+      # via GitHub's OIDC issuer. Nothing is published if any check fails.
+      - name: Verify cosign signatures (checksums and images)
+        env:
+          IDENTITY: ^https://github\.com/yogzblr/imas/\.github/workflows/release\.yml@refs/tags/v[0-9].*$
+          ISSUER: https://token.actions.githubusercontent.com
+          GH_ACTOR: ${{ github.actor }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cosign verify-blob --bundle dist/checksums.txt.sigstore.json \
+            --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" \
+            dist/checksums.txt
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
+          for img in farmer sprout saasapi farmerbus fleetreleaser; do
+            cosign verify "ghcr.io/yogzblr/imas-${img}:${TAG#v}" \
+              --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" >/dev/null
+            echo "verified imas-${img}:${TAG#v}"
           done
 
       - name: Install msitools
@@ -114,3 +150,26 @@ jobs:
           BUILDKITE_PACKAGES_TOKEN: ${{ secrets.BUILDKITE_PACKAGES_TOKEN }}
           BUILDKITE_ORGANIZATION_SLUG: ${{ vars.BUILDKITE_ORGANIZATION_SLUG }}
         run: ./packaging/buildkite/publish-packages.sh dist dist/winget
+
+      # Last, so every sprout package is already in the sprout repos by the
+      # time a farmer chart carrying this release can register it.
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Package Helm charts
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          ./packaging/helm/stamp-sprout-release.sh dist "$TAG" deploy/helm/farmer/files/sprout-release.json
+          mkdir -p dist/charts
+          for chart in deploy/helm/farmer deploy/helm/nats; do
+            if [ -f "$chart/Chart.lock" ]; then helm dependency build "$chart"; fi
+            helm lint "$chart"
+            helm package "$chart" --version "$version" --app-version "$version" --destination dist/charts
+          done
+
+      - name: Publish Helm charts to Buildkite Packages
+        env:
+          BUILDKITE_PACKAGES_TOKEN: ${{ secrets.BUILDKITE_PACKAGES_TOKEN }}
+          BUILDKITE_ORGANIZATION_SLUG: ${{ vars.BUILDKITE_ORGANIZATION_SLUG }}
+        run: ./packaging/buildkite/publish-helm.sh dist/charts

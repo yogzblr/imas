@@ -61,16 +61,22 @@ gpg --verify checksums.txt.sig checksums.txt
 sha256sum -c checksums.txt --ignore-missing
 ```
 
-#### S3 Artifacts
+#### Cosign (keyless)
+Release checksums and container images are also signed keylessly with
+[cosign](https://docs.sigstore.dev/), by the `release.yml` workflow of this
+repository on a `v*` tag. No key to fetch: you verify the signer's identity.
 ```bash
-# Download from S3
-curl -LO https://artifacts.imas.dev/linux/amd64/latest/imas
-curl -LO https://artifacts.imas.dev/linux/amd64/latest/checksums.txt
-curl -LO https://artifacts.imas.dev/linux/amd64/latest/checksums.txt.sig
+IDENTITY='^https://github\.com/yogzblr/imas/\.github/workflows/release\.yml@refs/tags/v[0-9].*$'
+ISSUER=https://token.actions.githubusercontent.com
 
-# Verify signature and checksum
-gpg --verify checksums.txt.sig checksums.txt
-sha256sum -c checksums.txt --ignore-missing
+# The release checksums (then check your download against them as above)
+curl -LO https://github.com/yogzblr/imas/releases/download/v1.0.0/checksums.txt.sigstore.json
+cosign verify-blob --bundle checksums.txt.sigstore.json \
+  --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" checksums.txt
+
+# A container image (farmer, sprout, saasapi, farmerbus, fleetreleaser)
+cosign verify ghcr.io/yogzblr/imas-farmer:1.0.0 \
+  --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER"
 ```
 
 ### Trust Verification
