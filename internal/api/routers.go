@@ -27,6 +27,11 @@ import (
 //     CLI-token auth only, not routed through Envoy — replaces the old NATS-based
 //     internal/natsapi/recipes.go per
 //     docs/design/imas-fork-roadmap.md workstream I.
+//   - Sprout update manifest (GET /v1/sprout/update-manifest): the
+//     signed fleetsign.Manifest of the caller's tenant's approved sprout
+//     version for one OS/arch (cloudxp-machine-manager-api-design.md
+//     §2.6). Gateway JWT only; the tenant is the token's, never a
+//     parameter. See handlers.GetSproutUpdateManifest.
 //   - Health checks: unauthenticated /health (liveness) and /ready
 //     (readiness) endpoints for Kubernetes probes, monitoring, and
 //     automated tooling.
@@ -75,6 +80,11 @@ func NewRouter(certificate string) *http.ServeMux {
 	// web UI (docs/design/imas-fork-roadmap.md workstream I).
 	mux.Handle("GET /v1/recipes", Logger(Auth(http.HandlerFunc(handlers.ListRecipes), "ListRecipes"), "ListRecipes"))
 	mux.Handle("GET /v1/recipes/{name...}", Logger(Auth(http.HandlerFunc(handlers.GetRecipe), "GetRecipe"), "GetRecipe"))
+
+	// Sprout update manifest (design doc §2.6): gateway JWT only, which
+	// Auth verifies and turns into the (tenant_id, sprout_id) the handler
+	// serves — never a CLI token, never a tenant from the query.
+	mux.Handle("GET /v1/sprout/update-manifest", Logger(Auth(http.HandlerFunc(handlers.GetSproutUpdateManifest), "SproutUpdateManifest"), "SproutUpdateManifest"))
 
 	return mux
 }
