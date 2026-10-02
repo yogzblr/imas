@@ -19,13 +19,15 @@
 //  4. refuses a manifest whose signed min_sprout_version is above the
 //     running version, and a file_name that isn't this platform's package
 //     type (.deb, .rpm, .msi);
-//  5. downloads <sproutupdaterepourl>/<file_name> from the repository
-//     configured in the sprout itself — the same per-OS repository the
-//     Ansible role imas_sprout installs from — over HTTPS verified against
-//     the OS trust store (not SproutRootCA), through the environment's
-//     proxy, with the optional repo token and without the sprout JWT;
-//  6. checks the file's SHA-256 against the signed checksum before
-//     anything else touches it;
+//  5. finds the package in the repository configured in the sprout
+//     itself — the same apt, rpm or NuGet repository the Ansible role
+//     imas_sprout installs from — by reading that repository's own index
+//     for the entry with the signed SHA-256 (repo.go), and downloads it
+//     over HTTPS verified against the OS trust store (not SproutRootCA),
+//     through the environment's proxy, with the optional repo token and
+//     without the sprout JWT;
+//  6. checks the file's SHA-256 against the signed checksum (for an MSI,
+//     the MSI inside the NuGet package) before anything else touches it;
 //  7. installs from that local file with the OS installer (dpkg -i,
 //     rpm -U, zypper on SUSE, msiexec /i /qn on Windows) and restarts the
 //     service onto the new version (install.go).
@@ -48,7 +50,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/nats-io/nats.go"
 	"golang.org/x/mod/semver"
 
 	"github.com/yogzblr/imas/internal/config"
@@ -79,7 +80,8 @@ var (
 	// ErrPackageTypeMismatch: the signed file_name isn't this platform's
 	// package type.
 	ErrPackageTypeMismatch = errors.New("selfupdate: manifest file_name is not this platform's package type")
-	// ErrRepoNotConfigured: sproutupdaterepourl is unset or invalid.
+	// ErrRepoNotConfigured: the update repository settings
+	// (sproutupdaterepourl and friends) are unset or invalid.
 	ErrRepoNotConfigured = errors.New("selfupdate: no valid update repository configured (sproutupdaterepourl)")
 	// ErrChecksumMismatch: the downloaded file's SHA-256 isn't the signed
 	// checksum_sha256.
@@ -113,12 +115,6 @@ var (
 
 // installedHold is how long installed refuses further updates.
 const installedHold = 30 * time.Minute
-
-// RegisterNatsConn is a no-op. The previous selfupdate fetched fleet
-// signing keys from farmer over the bus; the keyring now ships in the
-// package. Kept only so cmd/sprout's existing call compiles until it is
-// removed there.
-func RegisterNatsConn(*nats.Conn) {}
 
 // Compile-time interface check.
 var _ cook.RecipeCooker = SelfUpdate{}
@@ -167,8 +163,8 @@ type plan struct {
 	// upToDate: the target is the running version; nothing to do.
 	upToDate bool
 	platform platform
+	repo     repo
 	manifest fleetsign.Manifest
-	url      string
 }
 
 // prepare runs every check that needs no download: steps 1–4 of the
@@ -196,6 +192,9 @@ func (s SelfUpdate) prepare(ctx context.Context) (plan, error) {
 	if err := pl.platform.preflight(); err != nil {
 		return pl, err
 	}
+	if pl.repo, err = configuredRepo(pl.platform); err != nil {
+		return pl, err
+	}
 	// The keyring is read before anything is fetched: without a trust
 	// root there is nothing to verify against.
 	keyring, err := fleetsign.LoadKeyring(config.SproutFleetSigningKeyring)
@@ -216,9 +215,6 @@ func (s SelfUpdate) prepare(ctx context.Context) (plan, error) {
 	}
 	if filepath.Ext(pl.manifest.FileName) != "."+pl.platform.pkgType {
 		return pl, fmt.Errorf("%w: %s is not a .%s for %s", ErrPackageTypeMismatch, pl.manifest.FileName, pl.platform.pkgType, pl.platform)
-	}
-	if pl.url, err = repoFileURL(config.SproutUpdateRepoURL, pl.manifest.FileName); err != nil {
-		return pl, err
 	}
 	return pl, nil
 }
@@ -258,11 +254,12 @@ func (s SelfUpdate) apply(ctx context.Context) (cook.Result, error) {
 	// The signed, validated file name: one plain path component.
 	file := filepath.Join(stage, pl.manifest.FileName)
 
-	if err := download(ctx, pl.url, config.SproutUpdateRepoToken, file, pl.manifest.ChecksumSHA256); err != nil {
+	from, err := pl.repo.fetchPackage(ctx, pl.manifest, stage, file)
+	if err != nil {
 		os.RemoveAll(stage)
 		return failed(err, verified)
 	}
-	downloaded := cook.Snprintf("%s downloaded from %s; sha256 %s matches the signed manifest", pl.manifest.FileName, redact(pl.url), pl.manifest.ChecksumSHA256)
+	downloaded := cook.Snprintf("%s downloaded from %s; sha256 %s matches the signed manifest", pl.manifest.FileName, redact(from), pl.manifest.ChecksumSHA256)
 
 	notes, err := installPackage(ctx, pl.platform, file, pl.target, filepath.Join(stage, "msiexec.log"))
 	notes = append([]fmt.Stringer{verified, downloaded}, notes...)
@@ -296,8 +293,8 @@ func (s SelfUpdate) Test(ctx context.Context) (cook.Result, error) {
 		return cook.Result{Succeeded: true, Notes: []fmt.Stringer{cook.Snprintf("already running %s", pl.running)}}, nil
 	}
 	return cook.Result{Succeeded: true, Changed: true, Notes: []fmt.Stringer{
-		cook.Snprintf("%s for %s: manifest signature verified; would download %s, check sha256 %s and install it with %s (running %s)",
-			pl.target, pl.platform, redact(pl.url), pl.manifest.ChecksumSHA256, pl.platform.installer, pl.running),
+		cook.Snprintf("%s for %s: manifest signature verified; would fetch %s from the %s, check sha256 %s and install it with %s (running %s)",
+			pl.target, pl.platform, pl.manifest.FileName, pl.repo, pl.manifest.ChecksumSHA256, pl.platform.installer, pl.running),
 	}}, nil
 }
 

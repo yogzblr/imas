@@ -76,7 +76,8 @@ func farmerClient() (*http.Client, error) {
 }
 
 // fetchManifest asks farmer for the signed manifest for version on p's
-// OS and arch. It checks only that the response is a well-formed manifest
+// OS, arch and package type (one linux/amd64 binary ships as both a .deb
+// and an .rpm). It checks only that the response is a well-formed manifest
 // for exactly what was asked (fleetsign.ParseManifest plus field
 // equality); the caller verifies the signature. Farmer answers 404 for
 // every reason it has nothing to serve (not approved for this tenant,
@@ -92,7 +93,7 @@ func fetchManifest(ctx context.Context, p platform, version string) (fleetsign.M
 	}
 	u.Path = strings.TrimSuffix(u.Path, "/") + manifestPath
 	u.RawPath = ""
-	u.RawQuery = url.Values{"os": {p.os}, "arch": {p.arch}, "version": {version}}.Encode()
+	u.RawQuery = url.Values{"os": {p.os}, "arch": {p.arch}, "package_type": {p.pkgType}, "version": {version}}.Encode()
 
 	tok, err := gatewayJWT(ctx)
 	if err != nil {
@@ -111,8 +112,8 @@ func fetchManifest(ctx context.Context, p platform, version string) (fleetsign.M
 	switch status {
 	case http.StatusOK:
 	case http.StatusNotFound:
-		return fleetsign.Manifest{}, fmt.Errorf("%w for %s on %s/%s (not approved for this tenant, revoked, or not released for this platform)",
-			ErrNoManifest, version, p.os, p.arch)
+		return fleetsign.Manifest{}, fmt.Errorf("%w for %s on %s/%s %s (not approved for this tenant, revoked, or not released for this platform)",
+			ErrNoManifest, version, p.os, p.arch, p.pkgType)
 	default:
 		return fleetsign.Manifest{}, fmt.Errorf("selfupdate: GET %s: HTTP %d", manifestPath, status)
 	}

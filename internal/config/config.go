@@ -156,15 +156,42 @@ var (
 	SproutFleetSigningKeyring string
 
 	// SproutUpdateRepoURL ("sproutupdaterepourl", sprout only) is the
-	// https base URL of the repository this sprout installs its own
-	// updates from (requirement 20, design doc §1.8): the package file a
-	// signed update manifest names is downloaded from
-	// <SproutUpdateRepoURL>/<file_name>. It is the same per-OS repository
-	// the Ansible role imas_sprout installs the sprout from (apt or rpm
-	// repository, or the directory of the Windows MSI URL), or a mirror of
-	// it. An update command never carries a URL. Empty by default: the
-	// sprout refuses every self_update until it is set.
+	// https URL of the repository this sprout installs its own updates
+	// from (requirement 20, design doc §1.8): the same per-OS repository
+	// the Ansible role imas_sprout installs the sprout from, or a mirror.
+	// An update command never carries a URL. What it points at depends on
+	// SproutUpdateRepoFormat:
+	//
+	//   - apt: the apt repository URL of the sources.list line
+	//     (https://packages.buildkite.com/<org>/imasdeb/any/);
+	//   - rpm: the rpm repository's baseurl, "$basearch" filled in or left
+	//     for the sprout to fill
+	//     (https://packages.buildkite.com/<org>/imasrpm/rpm_any/rpm_any/$basearch);
+	//   - nuget: the NuGet v3 feed's service index
+	//     (https://packages.buildkite.com/<org>/imasnget/nuget/index.json);
+	//   - flat: a directory serving each package file under its own name.
+	//
+	// Empty by default: the sprout refuses every self_update until it is
+	// set.
 	SproutUpdateRepoURL string
+
+	// SproutUpdateRepoFormat ("sproutupdaterepoformat", sprout only) is how
+	// the sprout finds the package file in SproutUpdateRepoURL: "apt",
+	// "rpm", "nuget" or "flat". Empty (the default) means the format of
+	// the sprout's own package: apt for a .deb, rpm for an .rpm, nuget for
+	// an MSI.
+	SproutUpdateRepoFormat string
+
+	// SproutUpdateRepoDist ("sproutupdaterepodist", sprout only) is the
+	// apt suite and component, "<suite> <component>" as in a sources.list
+	// line. Empty (the default) means "any main", Buildkite's layout.
+	SproutUpdateRepoDist string
+
+	// SproutUpdateRepoPackageID ("sproutupdaterepopackageid", sprout
+	// only) is the NuGet package carrying the MSI. Empty (the default)
+	// means "imas.sprout.windows.msi", the installer package
+	// packaging/windows/winget/build-winget-nupkg.sh builds.
+	SproutUpdateRepoPackageID string
 
 	// SproutUpdateRepoToken ("sproutupdaterepotoken", sprout only) is the
 	// optional read token for a private SproutUpdateRepoURL, sent as HTTP
@@ -611,6 +638,9 @@ func LoadConfig(binary string) {
 			SproutFleetSigningKeyring = jety.GetString("sproutfleetsigningkeyring")
 			SproutUpdateRepoURL = strings.TrimSpace(jety.GetString("sproutupdaterepourl"))
 			SproutUpdateRepoToken = strings.TrimSpace(jety.GetString("sproutupdaterepotoken"))
+			SproutUpdateRepoFormat = strings.TrimSpace(jety.GetString("sproutupdaterepoformat"))
+			SproutUpdateRepoDist = strings.TrimSpace(jety.GetString("sproutupdaterepodist"))
+			SproutUpdateRepoPackageID = strings.TrimSpace(jety.GetString("sproutupdaterepopackageid"))
 
 			// The sprout config file can hold the join token. os.Create
 			// (above, and in jety.WriteConfig) leaves a new file 0644
