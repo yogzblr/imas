@@ -4,11 +4,12 @@
 {{- $o := .Values.saasapi.operator -}}
 {{- /*
 Sprout release registration (docs/design/cloudxp-machine-manager-api-design.md
-§2.5, FU.5): POSTs files/sprout-release.json, with this chart's channel and
-min_sprout_version, to saasapi's operator plane. saasapi has fleetreleaser
-sign each new OS/arch package and stores the rows. Rendered only when the
-chart carries a stamped release and saasapi's operator plane is on; NOTES
-says why otherwise.
+§2.5, FU.5): `farmer register-sprout-release` (internal/sproutrelease), in
+farmer's own image, POSTs files/sprout-release.json (version and
+min_sprout_version stamped at release time), with this chart's channel, to
+saasapi's operator plane. saasapi has fleetreleaser sign each new OS/arch
+package and stores the rows. Rendered only when the chart carries a stamped
+release and saasapi's operator plane is on; NOTES says why otherwise.
 
 FLAG FOR SECURITY REVIEW: this Job's pod presents the operator token. With
 it, anyone can get any well-formed release above fleetreleaser's floor
@@ -28,8 +29,8 @@ metadata:
 # No Role/RoleBinding and no token: the Job needs no Kubernetes API access.
 automountServiceAccountToken: false
 ---
-# Not a secret: the release, and the script that sends it. An ordinary
-# resource, so it is updated before the post-upgrade hook runs.
+# Not a secret: the request body. An ordinary resource, so it is updated
+# before the post-upgrade hook runs.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -41,8 +42,6 @@ metadata:
 data:
   request.json: |
     {{- include "imas-farmer.sproutRelease.request" . | nindent 4 }}
-  register.sh: |
-    {{- .Files.Get "files/register-sprout-release.sh" | nindent 4 }}
 ---
 apiVersion: batch/v1
 kind: Job
@@ -71,7 +70,8 @@ spec:
   backoffLimit: {{ $r.backoffLimit }}
   activeDeadlineSeconds: {{ $r.activeDeadlineSeconds }}
   ttlSecondsAfterFinished: {{ $r.ttlSecondsAfterFinished }}
-  # Exit 2 is a final refusal (409, other 4xx, TLS): fail now, no new pod.
+  # Exit 2 is final (409, other 4xx, TLS, configuration; internal/
+  # sproutrelease): fail now, no new pod.
   podFailurePolicy:
     rules:
       - action: FailJob
@@ -88,6 +88,10 @@ spec:
       serviceAccountName: {{ $r.serviceAccountName }}
       automountServiceAccountToken: false
       enableServiceLinks: false
+      {{- with .Values.farmer.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -97,28 +101,28 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: register
-          image: {{ include "imas-farmer.image" (dict "image" $r.image "appVersion" "") | quote }}
-          imagePullPolicy: {{ $r.image.pullPolicy }}
-          command: ["/bin/sh", "/etc/imas/sprout-release/register.sh"]
+          # The same image, same tag, as the farmer Deployment. It touches
+          # no farmer config or PKI directory (it runs before LoadConfig).
+          image: {{ include "imas-farmer.farmer.image" . | quote }}
+          imagePullPolicy: {{ .Values.farmer.image.pullPolicy }}
+          args: ["register-sprout-release"] # ENTRYPOINT is /farmer
           env:
-            - name: REGISTER_URL
-              value: {{ printf "https://%s:%v/v1/operator/fleet-releases" (include "imas-farmer.saasapi.operatorFQDN" .) $o.port | quote }}
-            - name: REQUEST_FILE
+            - name: IMAS_SPROUT_RELEASE_SAASAPI_URL
+              value: {{ printf "https://%s:%v" (include "imas-farmer.saasapi.operatorFQDN" .) $o.port | quote }}
+            - name: IMAS_SPROUT_RELEASE_REQUEST_FILE
               value: /etc/imas/sprout-release/request.json
-            - name: TOKEN_FILE
+            - name: IMAS_SPROUT_RELEASE_TOKEN_FILE
               value: /var/run/secrets/imas/operator-token/token
-            - name: CA_FILE
+            - name: IMAS_SPROUT_RELEASE_CA_FILE
               value: /var/run/secrets/imas/saasapi-operator-ca/ca.crt
-            - name: RETRY_ATTEMPTS
+            - name: IMAS_SPROUT_RELEASE_ATTEMPTS
               value: {{ $r.retry.attempts | int | quote }}
-            - name: RETRY_INITIAL_DELAY_SECONDS
-              value: {{ $r.retry.initialDelaySeconds | int | quote }}
-            - name: RETRY_MAX_DELAY_SECONDS
-              value: {{ $r.retry.maxDelaySeconds | int | quote }}
-            - name: REQUEST_TIMEOUT_SECONDS
-              value: {{ $r.requestTimeoutSeconds | int | quote }}
-            - name: TMPDIR
-              value: /tmp
+            - name: IMAS_SPROUT_RELEASE_INITIAL_BACKOFF
+              value: {{ printf "%ds" ($r.retry.initialDelaySeconds | int) | quote }}
+            - name: IMAS_SPROUT_RELEASE_MAX_BACKOFF
+              value: {{ printf "%ds" ($r.retry.maxDelaySeconds | int) | quote }}
+            - name: IMAS_SPROUT_RELEASE_REQUEST_TIMEOUT
+              value: {{ printf "%ds" ($r.requestTimeoutSeconds | int) | quote }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -137,8 +141,6 @@ spec:
             - name: saasapi-operator-ca
               mountPath: /var/run/secrets/imas/saasapi-operator-ca
               readOnly: true
-            - name: tmp
-              mountPath: /tmp
       volumes:
         - name: release
           configMap:
@@ -157,10 +159,6 @@ spec:
             secretName: {{ $o.tls.secretName }}
             items:
               - { key: ca.crt, path: ca.crt }
-        - name: tmp
-          emptyDir:
-            medium: Memory
-            sizeLimit: 2Mi
 ---
 # saasapi's operator port and DNS, nothing else, no ingress. Rendered with
 # the Job whatever networkPolicy.enabled says: it is part of the reviewed

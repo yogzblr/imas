@@ -14,19 +14,9 @@ package farmerchart
 
 import (
 	"bytes"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
-	"net"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1680,9 +1670,9 @@ var operatorArgs = []string{
 	"--set", "saasapi.operator.fleetReleaser.tokenSecretName=saasapi-fleetreleaser-token",
 }
 
-// registerArgs is operatorArgs plus the one sproutRelease value with no
-// default.
-var registerArgs = append(slices.Clone(operatorArgs), "--set", "sproutRelease.minSproutVersion=v0.1.0")
+// registerArgs turns the hook on: with a stamped release, the operator
+// plane is all it needs.
+var registerArgs = operatorArgs
 
 // testRelease is what packaging/helm/stamp-sprout-release.sh writes, for
 // the chart's own appVersion.
@@ -1691,6 +1681,7 @@ func testRelease(t *testing.T) string {
 	v := chartAppVersion(t)
 	return fmt.Sprintf(`{
   "version": "v%[1]s",
+  "min_sprout_version": "v0.1.0",
   "packages": [
     {"os": "linux", "arch": "amd64", "package_type": "deb", "file_name": "imas-sprout_%[1]s_linux_amd64.deb", "checksum_sha256": "%[2]s"},
     {"os": "linux", "arch": "amd64", "package_type": "rpm", "file_name": "imas-sprout_%[1]s_linux_amd64.rpm", "checksum_sha256": "%[3]s"},
@@ -1792,7 +1783,6 @@ func TestSproutReleaseSkippedWithoutFile(t *testing.T) {
 		}
 	}
 	// The published chart's default: the file, the operator plane off.
-	// minSproutVersion is only required once there is a hook to run.
 	if _, err := renderRelease(t, testRelease(t)); err != nil {
 		t.Errorf("a stamped chart with the defaults must render: %v", err)
 	}
@@ -1855,12 +1845,28 @@ func TestSproutReleaseRegisterJob(t *testing.T) {
 		t.Errorf("pod name label %v: must not be the chart's, which the bus admits", l["app.kubernetes.io/name"])
 	}
 	c := container(t, job, "register")
-	if c["image"] != "curlimages/curl@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777" {
-		t.Errorf("image %v: want the pinned digest", c["image"])
+	if c["image"] != "ghcr.io/yogzblr/imas-farmer:"+chartAppVersion(t) || c["command"] != nil ||
+		yamlString(t, c["args"]) != yamlString(t, []string{"register-sprout-release"}) {
+		t.Errorf("image %v, command %v, args %v: want farmer's image running register-sprout-release", c["image"], c["command"], c["args"])
 	}
 	env := envValues(c)
-	if env["REGISTER_URL"] != "https://t-farmer-saasapi-operator.imas-core.svc.cluster.local:8443/v1/operator/fleet-releases" {
-		t.Errorf("REGISTER_URL %q", env["REGISTER_URL"])
+	for k, v := range map[string]string{
+		"IMAS_SPROUT_RELEASE_SAASAPI_URL":     "https://t-farmer-saasapi-operator.imas-core.svc.cluster.local:8443",
+		"IMAS_SPROUT_RELEASE_REQUEST_FILE":    "/etc/imas/sprout-release/request.json",
+		"IMAS_SPROUT_RELEASE_ATTEMPTS":        "8",
+		"IMAS_SPROUT_RELEASE_INITIAL_BACKOFF": "5s",
+		"IMAS_SPROUT_RELEASE_MAX_BACKOFF":     "60s",
+		"IMAS_SPROUT_RELEASE_REQUEST_TIMEOUT": "600s",
+	} {
+		if env[k] != v {
+			t.Errorf("%s = %q, want %q", k, env[k], v)
+		}
+	}
+	if len(env) != 8 {
+		t.Errorf("env %v: want exactly the IMAS_SPROUT_RELEASE_* settings", env)
+	}
+	if get(byName(c["volumeMounts"])["release"], "mountPath") != "/etc/imas/sprout-release" {
+		t.Errorf("release mount %v", c["volumeMounts"])
 	}
 
 	// The body: the stamped release verbatim, plus channel and
@@ -1873,12 +1879,12 @@ func TestSproutReleaseRegisterJob(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(testRelease(t)), &stamped); err != nil {
 		t.Fatal(err)
 	}
-	stamped["channel"], stamped["min_sprout_version"] = "stable", "v0.1.0"
+	stamped["channel"] = "stable"
 	if yamlString(t, body) != yamlString(t, stamped) {
 		t.Errorf("request body:\n%s\nwant:\n%s", yamlString(t, body), yamlString(t, stamped))
 	}
-	if get(cm, "data", "register.sh") != string(repoFile(t, "deploy/helm/farmer/files/register-sprout-release.sh")) {
-		t.Error("register.sh is not files/register-sprout-release.sh")
+	if len(get(cm, "data").(obj)) != 1 {
+		t.Errorf("ConfigMap data %v: want request.json only", get(cm, "data"))
 	}
 	if !strings.Contains(notes(t, docs), "registers sprout release v"+chartAppVersion(t)+" (min_sprout_version v0.1.0, 3 package(s))") {
 		t.Errorf("NOTES:\n%s", notes(t, docs))
@@ -1903,23 +1909,27 @@ func TestSproutReleaseRegisterJob(t *testing.T) {
 			"--set", "sproutRelease.retry.attempts=3", "--set", "sproutRelease.retry.initialDelaySeconds=2",
 			"--set", "sproutRelease.retry.maxDelaySeconds=9", "--set", "sproutRelease.requestTimeoutSeconds=77",
 			"--set", "sproutRelease.backoffLimit=0", "--set", "sproutRelease.activeDeadlineSeconds=99",
-			"--set", "sproutRelease.argoCDHooks=false", "--set", "sproutRelease.image.digest=",
+			"--set", "sproutRelease.argoCDHooks=false", "--set", "farmer.image.tag=9.9.9",
+			"--set", "farmer.imagePullSecrets[0].name=regcred",
 			"--set", "saasapi.operator.port=9443")...), "Job", registerJob)
 		env := envValues(container(t, job, "register"))
-		for k, v := range map[string]string{"RETRY_ATTEMPTS": "3", "RETRY_INITIAL_DELAY_SECONDS": "2", "RETRY_MAX_DELAY_SECONDS": "9", "REQUEST_TIMEOUT_SECONDS": "77"} {
+		for k, v := range map[string]string{"IMAS_SPROUT_RELEASE_ATTEMPTS": "3", "IMAS_SPROUT_RELEASE_INITIAL_BACKOFF": "2s", "IMAS_SPROUT_RELEASE_MAX_BACKOFF": "9s", "IMAS_SPROUT_RELEASE_REQUEST_TIMEOUT": "77s"} {
 			if env[k] != v {
 				t.Errorf("%s = %q, want %s", k, env[k], v)
 			}
 		}
-		if !strings.HasSuffix(env["REGISTER_URL"], ":9443/v1/operator/fleet-releases") {
-			t.Errorf("REGISTER_URL %q", env["REGISTER_URL"])
+		if !strings.HasSuffix(env["IMAS_SPROUT_RELEASE_SAASAPI_URL"], ":9443") {
+			t.Errorf("IMAS_SPROUT_RELEASE_SAASAPI_URL %q", env["IMAS_SPROUT_RELEASE_SAASAPI_URL"])
+		}
+		if get(podSpec(job), "imagePullSecrets", 0, "name") != "regcred" {
+			t.Errorf("imagePullSecrets %v: want farmer's", get(podSpec(job), "imagePullSecrets"))
 		}
 		if get(job, "spec", "backoffLimit") != 0 || get(job, "spec", "activeDeadlineSeconds") != 99 ||
 			get(job, "metadata", "annotations", "argocd.argoproj.io/hook") != nil {
 			t.Errorf("spec %v, annotations %v", get(job, "spec"), get(job, "metadata", "annotations"))
 		}
-		if img := container(t, job, "register")["image"]; img != "curlimages/curl:8.22.0" {
-			t.Errorf("image %v", img)
+		if img := container(t, job, "register")["image"]; img != "ghcr.io/yogzblr/imas-farmer:9.9.9" {
+			t.Errorf("image %v: want farmer's", img)
 		}
 	})
 }
@@ -1963,9 +1973,13 @@ func TestSproutReleaseSecretWiring(t *testing.T) {
 	}
 	mounts := byName(c["volumeMounts"])
 	env := envValues(c)
-	if !strings.HasPrefix(env["TOKEN_FILE"], get(mounts["operator-token"], "mountPath").(string)+"/") ||
-		!strings.HasPrefix(env["CA_FILE"], get(mounts["saasapi-operator-ca"], "mountPath").(string)+"/") {
-		t.Errorf("TOKEN_FILE %q / CA_FILE %q outside their mounts %v", env["TOKEN_FILE"], env["CA_FILE"], mounts)
+	if !strings.HasPrefix(env["IMAS_SPROUT_RELEASE_TOKEN_FILE"], get(mounts["operator-token"], "mountPath").(string)+"/") ||
+		!strings.HasPrefix(env["IMAS_SPROUT_RELEASE_CA_FILE"], get(mounts["saasapi-operator-ca"], "mountPath").(string)+"/") {
+		t.Errorf("token %q / CA %q outside their mounts %v", env["IMAS_SPROUT_RELEASE_TOKEN_FILE"], env["IMAS_SPROUT_RELEASE_CA_FILE"], mounts)
+	}
+	// Nothing of farmer's own: no config, PKI, seeds or data volume.
+	if len(vols) != 3 || len(mounts) != 3 {
+		t.Errorf("volumes %v / mounts %v: want release, operator-token and saasapi-operator-ca only", vols, mounts)
 	}
 	sa := find(t, docs, "ServiceAccount", "imas-sprout-release-registrar")
 	if sa["automountServiceAccountToken"] != false {
@@ -2123,14 +2137,16 @@ func TestSproutReleaseValidation(t *testing.T) {
 		name, want, release string
 		args                []string
 	}{
-		{"no minSproutVersion", "sproutRelease.minSproutVersion is required", rel, operatorArgs},
-		{"minSproutVersion not canonical", "is not a canonical", rel, append(slices.Clone(operatorArgs), "--set", "sproutRelease.minSproutVersion=0.1.0")},
-		{"minSproutVersion above version", "is above the release's version", rel, append(slices.Clone(operatorArgs), "--set", "sproutRelease.minSproutVersion=v99.0.0")},
+		{"no min_sprout_version", "min_sprout_version \"\" is missing or not a canonical", strings.Replace(rel, `"min_sprout_version": "v0.1.0",`, "", 1), registerArgs},
+		{"min_sprout_version not canonical", "is missing or not a canonical", strings.Replace(rel, `"min_sprout_version": "v0.1.0"`, `"min_sprout_version": "0.1.0"`, 1), registerArgs},
+		{"min_sprout_version above version", "is above the release's version", strings.Replace(rel, `"min_sprout_version": "v0.1.0"`, `"min_sprout_version": "v99.0.0"`, 1), registerArgs},
+		{"removed minSproutVersion value", "sproutRelease.minSproutVersion was removed", "", []string{"--set", "sproutRelease.minSproutVersion=v0.1.0"}},
+		{"removed image value", "sproutRelease.image was removed", rel, append(slices.Clone(registerArgs), "--set", "sproutRelease.image.repository=curlimages/curl")},
 		{"bad channel", "sproutRelease.channel", rel, append(slices.Clone(registerArgs), "--set", "sproutRelease.channel=Stable")},
-		{"version without v", "re-stamp it", strings.Replace(rel, `"v`+v, `"`+v, 1), registerArgs},
-		{"version not the chart's", "ship under one tag", strings.Replace(rel, `"v`+v, `"v`+v+"-rc.1", 1), registerArgs},
+		{"version without v", "re-stamp it", strings.Replace(rel, `"version": "v`+v, `"version": "`+v, 1), registerArgs},
+		{"version not the chart's", "ship under one tag", strings.Replace(rel, `"version": "v`+v, `"version": "v`+v+"-rc.1", 1), registerArgs},
 		{"unknown field", `unexpected field "channel"`, strings.Replace(rel, `"packages"`, `"channel": "x", "packages"`, 1), registerArgs},
-		{"no packages", "has no packages", fmt.Sprintf(`{"version": "v%s", "packages": []}`, v), registerArgs},
+		{"no packages", "has no packages", fmt.Sprintf(`{"version": "v%s", "min_sprout_version": "v0.1.0", "packages": []}`, v), registerArgs},
 		{"not JSON", "is not a JSON object", "version: v" + v, registerArgs},
 		{"SA is the publisher's", "another workload's ServiceAccount", rel, append(slices.Clone(registerArgs), "--set", "sproutRelease.serviceAccountName=imas-saasapi-cred-publisher")},
 		{"SA is saasapi's", "another workload's ServiceAccount", rel, append(slices.Clone(registerArgs), "--set", "sproutRelease.serviceAccountName=t-farmer-saasapi")},
@@ -2157,14 +2173,12 @@ func TestSproutReleaseValidation(t *testing.T) {
 			}
 		})
 	}
-	// A final chart never registers a prerelease sprout release.
-	if _, err := renderRelease(t, strings.Replace(rel, `"v`+v, `"v`+v+"-rc.1", 1), append(slices.Clone(registerArgs), "--set", "sproutRelease.minSproutVersion=v"+v+"-rc.1")...); err == nil {
-		t.Error("a sprout release that isn't the chart's appVersion rendered")
-	}
 }
 
 // packaging/helm/stamp-sprout-release.sh's output is what the chart
-// registers: its version keeps the tag's "v" and renders as is.
+// registers: both versions keep their "v", min_sprout_version comes from
+// packaging/helm/min-sprout-version and is at most the version by semver
+// precedence, and the result renders as is.
 func TestStampedReleaseRenders(t *testing.T) {
 	helmBin(t)
 	for _, tool := range []string{"bash", "jq", "sha256sum"} {
@@ -2172,214 +2186,135 @@ func TestStampedReleaseRenders(t *testing.T) {
 			t.Skipf("%s not on PATH", tool)
 		}
 	}
+	stampScript := filepath.Join(chartDir(t), "..", "..", "..", "packaging", "helm", "stamp-sprout-release.sh")
+	// dist writes a release's packages and checksums.txt for version (no "v").
+	dist := func(t *testing.T, version string) string {
+		dir := t.TempDir()
+		var sums strings.Builder
+		for _, name := range []string{
+			"imas-sprout_" + version + "_linux_amd64.deb", "imas-sprout_" + version + "_linux_amd64.rpm",
+			"imas-sprout_" + version + "_linux_arm64.rpm", "imas-sprout-" + version + "-windows-x64.msi",
+		} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			out, err := exec.Command("sha256sum", filepath.Join(dir, name)).Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			fmt.Fprintf(&sums, "%s  %s\n", strings.Fields(string(out))[0], name)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "checksums.txt"), []byte(sums.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	// stamp runs the script; minFile "" means the repo's own.
+	stamp := func(t *testing.T, tag, minFile string) (string, error) {
+		out := filepath.Join(t.TempDir(), "sprout-release.json")
+		args := []string{stampScript, dist(t, strings.TrimPrefix(tag, "v")), tag, out}
+		if minFile != "" {
+			args = append(args, minFile)
+		}
+		if b, err := exec.Command("bash", args...).CombinedOutput(); err != nil {
+			return "", fmt.Errorf("%v: %s", err, b)
+		}
+		b, err := os.ReadFile(out)
+		return string(b), err
+	}
+	minFile := func(t *testing.T, content string) string {
+		p := filepath.Join(t.TempDir(), "min-sprout-version")
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	// The repo's floor, end to end.
+	var repoMin string
+	for _, l := range strings.Split(string(repoFile(t, "packaging/helm/min-sprout-version")), "\n") {
+		if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "#") {
+			repoMin = l
+		}
+	}
 	v := chartAppVersion(t)
-	dist := t.TempDir()
-	var sums strings.Builder
-	for _, name := range []string{
-		"imas-sprout_" + v + "_linux_amd64.deb", "imas-sprout_" + v + "_linux_amd64.rpm",
-		"imas-sprout_" + v + "_linux_arm64.rpm", "imas-sprout-" + v + "-windows-x64.msi",
-	} {
-		if err := os.WriteFile(filepath.Join(dist, name), []byte(name), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		out, err := exec.Command("sha256sum", filepath.Join(dist, name)).Output()
-		if err != nil {
-			t.Fatal(err)
-		}
-		fmt.Fprintf(&sums, "%s  %s\n", strings.Fields(string(out))[0], name)
-	}
-	if err := os.WriteFile(filepath.Join(dist, "checksums.txt"), []byte(sums.String()), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	stamp := filepath.Join(chartDir(t), "..", "..", "..", "packaging", "helm", "stamp-sprout-release.sh")
-	outFile := filepath.Join(t.TempDir(), "sprout-release.json")
-	if out, err := exec.Command("bash", stamp, dist, "v"+v, outFile).CombinedOutput(); err != nil {
-		t.Fatalf("stamp: %v\n%s", err, out)
-	}
-	for _, bad := range []string{"v" + v + "+build.1", "v0" + v, v} {
-		if out, err := exec.Command("bash", stamp, dist, bad, filepath.Join(t.TempDir(), "x.json")).CombinedOutput(); err == nil {
-			t.Errorf("stamp accepted the non-canonical tag %q:\n%s", bad, out)
-		}
-	}
-	stamped, err := os.ReadFile(outFile)
+	stamped, err := stamp(t, "v"+v, "")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("stamp with the repo's packaging/helm/min-sprout-version: %v", err)
 	}
-	docs := mustRenderRelease(t, string(stamped), registerArgs...)
+	var file struct {
+		Version          string `yaml:"version"`
+		MinSproutVersion string `yaml:"min_sprout_version"`
+	}
+	if err := yaml.Unmarshal([]byte(stamped), &file); err != nil || file.Version != "v"+v || file.MinSproutVersion != repoMin {
+		t.Errorf("stamped %+v (%v), want version v%s and min_sprout_version %q", file, err, v, repoMin)
+	}
+	docs := mustRenderRelease(t, stamped, registerArgs...)
 	var body struct {
-		Version  string           `yaml:"version"`
-		Packages []map[string]any `yaml:"packages"`
+		Version          string           `yaml:"version"`
+		MinSproutVersion string           `yaml:"min_sprout_version"`
+		Packages         []map[string]any `yaml:"packages"`
 	}
 	if err := yaml.Unmarshal([]byte(get(find(t, docs, "ConfigMap", "t-farmer-sprout-release"), "data", "request.json").(string)), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Version != "v"+v || len(body.Packages) != 4 {
-		t.Errorf("request version %q, %d packages", body.Version, len(body.Packages))
+	if body.Version != "v"+v || body.MinSproutVersion != repoMin || len(body.Packages) != 4 {
+		t.Errorf("request version %q, min_sprout_version %q, %d packages", body.Version, body.MinSproutVersion, len(body.Packages))
 	}
 	for _, p := range body.Packages {
 		if p["os"] == "windows" && (p["arch"] != "amd64" || p["package_type"] != "msi") {
 			t.Errorf("windows package %v", p)
 		}
 	}
-}
 
-// files/register-sprout-release.sh against a local HTTPS server standing
-// in for saasapi's operator plane, with the real curl and sh.
-func TestRegisterScript(t *testing.T) {
-	for _, tool := range []string{"sh", "curl"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			t.Skipf("%s not on PATH", tool)
+	for _, bad := range []string{"v" + v + "+build.1", "v0" + v, v} {
+		if _, err := stamp(t, bad, ""); err == nil {
+			t.Errorf("stamp accepted the non-canonical tag %q", bad)
 		}
 	}
-	script := filepath.Join(chartDir(t), "files", "register-sprout-release.sh")
-	dir := t.TempDir()
-	const token = "operator-token-0123456789abcdef0123456789abcdef"
-	request := `{"version":"v1.2.3","channel":"stable","min_sprout_version":"v1.0.0","packages":[]}`
-	write := func(name, content string) string {
-		p := filepath.Join(dir, name)
-		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		return p
-	}
-	reqFile, tokFile := write("request.json", request), write("token", token+"\n")
-
-	type answer struct {
-		code int
-		body string
-	}
-	serve := func(t *testing.T, answers ...answer) (url, ca string, calls *int) {
-		n := 0
-		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			a := answers[min(n, len(answers)-1)]
-			n++
-			b, _ := io.ReadAll(r.Body)
-			if r.Method != http.MethodPost || r.URL.Path != "/v1/operator/fleet-releases" ||
-				r.Header.Get("Authorization") != "Bearer "+token || r.Header.Get("Content-Type") != "application/json" || string(b) != request {
-				t.Errorf("request %s %s, Authorization %q, Content-Type %q, body %q", r.Method, r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("Content-Type"), b)
-			}
-			w.WriteHeader(a.code)
-			io.WriteString(w, a.body)
-		}))
-		t.Cleanup(srv.Close)
-		ca = filepath.Join(t.TempDir(), "ca.crt")
-		if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return srv.URL + "/v1/operator/fleet-releases", ca, &n
-	}
-	run := func(t *testing.T, url, ca string, extra ...string) (code int, stdout, stderr string) {
-		cmd := exec.Command("sh", script)
-		// A clean environment: no proxy settings, nothing inherited.
-		cmd.Env = append([]string{
-			"PATH=" + os.Getenv("PATH"), "TMPDIR=" + t.TempDir(),
-			"REGISTER_URL=" + url, "REQUEST_FILE=" + reqFile, "TOKEN_FILE=" + tokFile, "CA_FILE=" + ca,
-			"RETRY_ATTEMPTS=3", "RETRY_INITIAL_DELAY_SECONDS=1", "RETRY_MAX_DELAY_SECONDS=1", "REQUEST_TIMEOUT_SECONDS=10",
-		}, extra...)
-		var o, e bytes.Buffer
-		cmd.Stdout, cmd.Stderr = &o, &e
-		err := cmd.Run()
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			code = ee.ExitCode()
-		} else if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(o.String()+e.String(), token) {
-			t.Error("the operator token was printed")
-		}
-		return code, o.String(), e.String()
-	}
-
-	conflict := `{"error":"release_conflict","message":"version v1.2.3 is registered for linux/amd64/deb with a different file_name or checksum_sha256; releases are immutable, register a new version"}`
+	// Semver precedence, prereleases included: a floor above the tag is
+	// refused, anything at or below it is stamped verbatim.
 	for _, tc := range []struct {
-		name     string
-		answers  []answer
-		code     int
-		calls    int
-		inStderr []string
-		inStdout string
+		tag, min string
+		ok       bool
 	}{
-		{"registered", []answer{{201, `{"created":3}`}}, 0, 1, []string{"sprout release registered"}, `{"created":3}`},
-		{"idempotent re-run", []answer{{200, `{"created":0}`}}, 0, 1, []string{"already registered with these contents"}, `{"created":0}`},
-		{"conflict is final and prints the mismatch", []answer{{409, conflict}}, 2, 1, []string{"REFUSED (409)", conflict, `"min_sprout_version":"v1.0.0"`}, ""},
-		{"revoked", []answer{{409, `{"error":"version_revoked"}`}}, 2, 1, []string{"REFUSED (409)", "version_revoked"}, ""},
-		{"bad request is final", []answer{{400, `{"error":"invalid_release"}`}}, 2, 1, []string{"REFUSED (HTTP 400)", "invalid_release"}, ""},
-		{"unauthorized is final", []answer{{401, `{"error":"unauthorized"}`}}, 2, 1, []string{"REFUSED (HTTP 401)"}, ""},
-		{"signing refused is final", []answer{{422, `{"error":"signing_refused"}`}}, 2, 1, []string{"REFUSED (HTTP 422)"}, ""},
-		{"retries 5xx then succeeds", []answer{{503, `{"error":"signing_unavailable"}`}, {502, "bad gateway"}, {201, `{}`}}, 0, 3, []string{"attempt 1/3: HTTP 503", "attempt 2/3: HTTP 502", "sprout release registered"}, ""},
-		{"retries 429", []answer{{429, ""}, {200, `{}`}}, 0, 2, []string{"attempt 1/3: HTTP 429"}, ""},
-		{"gives up", []answer{{500, `{"error":"internal_error"}`}}, 1, 3, []string{"giving up after 3 attempts"}, ""},
+		{"v1.0.0-rc.1", "v1.0.0", false},
+		{"v1.0.0-rc.1", "v1.0.0-rc.2", false},
+		{"v1.0.0-rc.1", "v1.0.0-rc.1", true},
+		{"v1.0.0-rc.1", "v1.0.0-beta.11", true},
+		{"v1.0.0-beta.11", "v1.0.0-beta.2", true},
+		{"v1.0.0-beta.2", "v1.0.0-beta.11", false},
+		{"v1.0.0-alpha.1", "v1.0.0-alpha.beta", false},
+		{"v1.0.0-alpha", "v1.0.0-alpha.1", false},
+		{"v1.0.0", "v1.0.0-rc.1", true},
+		{"v0.10.0", "v0.9.9", true},
+		{"v0.9.9", "v0.10.0", false},
+		{"v2.0.0", "v1.99.0", true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			url, ca, calls := serve(t, tc.answers...)
-			code, stdout, stderr := run(t, url, ca)
-			if code != tc.code || *calls != tc.calls {
-				t.Errorf("exit %d after %d calls, want %d after %d\nstderr:\n%s", code, *calls, tc.code, tc.calls, stderr)
-			}
-			for _, s := range tc.inStderr {
-				if !strings.Contains(stderr, s) {
-					t.Errorf("stderr lacks %q:\n%s", s, stderr)
-				}
-			}
-			if !strings.Contains(stdout, tc.inStdout) {
-				t.Errorf("stdout %q lacks %q", stdout, tc.inStdout)
-			}
-		})
+		out, err := stamp(t, tc.tag, minFile(t, "# floor\n\n"+tc.min+"\n"))
+		if tc.ok != (err == nil) {
+			t.Errorf("tag %s, floor %s: ok=%v, want %v (%v)", tc.tag, tc.min, err == nil, tc.ok, err)
+			continue
+		}
+		if tc.ok && !strings.Contains(out, `"min_sprout_version": "`+tc.min+`"`) {
+			t.Errorf("tag %s, floor %s: stamped\n%s", tc.tag, tc.min, out)
+		}
+		if !tc.ok && !strings.Contains(err.Error(), "is above the release's version") {
+			t.Errorf("tag %s, floor %s: %v", tc.tag, tc.min, err)
+		}
 	}
-
-	t.Run("unreachable is retried", func(t *testing.T) {
-		_, ca, _ := serve(t, answer{201, ""})
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
+	for _, tc := range []struct{ content, want string }{
+		{"1.0.0\n", "not canonical semver"},
+		{"v1.0\n", "not canonical semver"},
+		{"v01.0.0\n", "not canonical semver"},
+		{"v0.1.0\nv0.2.0\n", "exactly one version line"},
+		{"# nothing\n", "exactly one version line"},
+	} {
+		if _, err := stamp(t, "v"+v, minFile(t, tc.content)); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("floor file %q: %v, want %q", tc.content, err, tc.want)
 		}
-		dead := "https://" + ln.Addr().String() + "/v1/operator/fleet-releases"
-		ln.Close()
-		code, _, stderr := run(t, dead, ca)
-		if code != 1 || !strings.Contains(stderr, "saasapi not reachable (curl exit 7)") || !strings.Contains(stderr, "giving up after 3 attempts") {
-			t.Errorf("exit %d:\n%s", code, stderr)
-		}
-	})
-	t.Run("untrusted certificate is final", func(t *testing.T) {
-		url, _, calls := serve(t, answer{201, ""})
-		// Every httptest server has the same certificate: make another.
-		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		if err != nil {
-			t.Fatal(err)
-		}
-		tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "other CA"},
-			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
-			IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
-		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-		if err != nil {
-			t.Fatal(err)
-		}
-		wrongCA := filepath.Join(t.TempDir(), "ca.crt")
-		if err := os.WriteFile(wrongCA, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		code, _, stderr := run(t, url, wrongCA)
-		if code != 2 || *calls != 0 || !strings.Contains(stderr, "not retrying") {
-			t.Errorf("exit %d after %d calls:\n%s", code, *calls, stderr)
-		}
-	})
-	t.Run("plain http is refused", func(t *testing.T) {
-		srv := httptest.NewServer(http.NotFoundHandler())
-		defer srv.Close()
-		_, ca, _ := serve(t, answer{201, ""})
-		if code, _, stderr := run(t, srv.URL+"/v1/operator/fleet-releases", ca); code != 2 || !strings.Contains(stderr, "not retrying") {
-			t.Errorf("exit %d over http:\n%s", code, stderr)
-		}
-	})
-	t.Run("bad token file", func(t *testing.T) {
-		url, ca, calls := serve(t, answer{201, ""})
-		for _, tok := range []string{"", "has space", "tab\there"} {
-			p := write("bad-token", tok)
-			code, _, stderr := run(t, url, ca, "TOKEN_FILE="+p)
-			if code != 2 || *calls != 0 || !strings.Contains(stderr, "empty or contains whitespace") {
-				t.Errorf("token %q: exit %d after %d calls:\n%s", tok, code, *calls, stderr)
-			}
-		}
-	})
+	}
+	if _, err := stamp(t, "v"+v, filepath.Join(t.TempDir(), "missing")); err == nil || !strings.Contains(err.Error(), "no ") {
+		t.Errorf("missing floor file: %v", err)
+	}
 }

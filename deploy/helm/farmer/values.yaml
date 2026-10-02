@@ -472,10 +472,11 @@ credentialPublisher:
 
 # ---------------------------------------------------------------------------
 # Sprout release registration (API design §2.5, README.md "Sprout release
-# registration"): a post-install/post-upgrade hook Job that POSTs the
-# sprout release this chart carries (files/sprout-release.json, stamped at
-# release time by packaging/helm/stamp-sprout-release.sh) to saasapi's
-# operator plane. Renders only when that file is present AND
+# registration"): a post-install/post-upgrade hook Job (`farmer
+# register-sprout-release`, farmer's image) that POSTs the sprout release
+# this chart carries (files/sprout-release.json: version, min_sprout_version
+# from packaging/helm/min-sprout-version, packages; stamped at release time
+# by packaging/helm/stamp-sprout-release.sh) to saasapi's operator plane. Renders only when that file is present AND
 # saasapi.operator.enabled: a chart from a source checkout has no release
 # to register, and NOTES says why it was skipped.
 # A 200 (already registered, same contents) is success; a 409 (this
@@ -488,23 +489,9 @@ sproutRelease:
   register: true
   # Validated and logged by saasapi; not stored.
   channel: stable
-  # The oldest sprout that may update straight to this release
-  # (docs/RELEASING.md, "Compatibility"). Required to register; signed into
-  # every manifest, at most the release's version, and immutable once the
-  # version is registered (a different value is a 409).
-  minSproutVersion: ""
   # Fixed name, no RBAC, no OpenBao role, no API token. Must not be any
   # other workload's ServiceAccount.
   serviceAccountName: imas-sprout-release-registrar
-  # curl + a POSIX shell (files/register-sprout-release.sh). Pinned by
-  # digest: this pod presents the operator token. The digest wins over the
-  # tag, so change both (or clear digest) to move it. curl is under the
-  # curl license (MIT-style); README.md, "Licensing".
-  image:
-    repository: curlimages/curl
-    tag: "8.22.0"
-    digest: "sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777"
-    pullPolicy: IfNotPresent
   # In-pod retries for an unreachable saasapi (still rolling out), 408,
   # 429 and 5xx, with exponential backoff. Any other answer is final.
   retry:
@@ -521,8 +508,8 @@ sproutRelease:
   ttlSecondsAfterFinished: 3600
   argoCDHooks: true
   resources:
-    requests: { cpu: 10m, memory: 16Mi }
-    limits: { memory: 64Mi }
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { memory: 128Mi }
 
 # ---------------------------------------------------------------------------
 # External Secrets Operator wiring (deploy/farmer/externalsecrets.yaml).

@@ -347,17 +347,19 @@ there (`docs/design/cloudxp-machine-manager-api-design.md` §4.1a).
 **FLAG FOR SECURITY REVIEW: the operator credential.** A published farmer
 chart carries the sprout release it was tested with,
 `files/sprout-release.json`, which `packaging/helm/stamp-sprout-release.sh`
-writes at release time: the version (the tag, `vX.Y.Z`) and, for each
-OS/arch/package type, the package file name and SHA-256. A
-`post-install`/`post-upgrade` hook Job registers it with saasapi's operator
-plane (`POST /v1/operator/fleet-releases`, API design §2.5,
+writes at release time: the version (the tag, `vX.Y.Z`), its
+`min_sprout_version`, and, for each OS/arch/package type, the package file
+name and SHA-256. A `post-install`/`post-upgrade` hook Job,
+`farmer register-sprout-release` (`internal/sproutrelease`) in farmer's own
+image, registers it with saasapi's operator plane (`POST /v1/operator/fleet-releases`, API design §2.5,
 `docs/api/saasapi-operator-openapi.yaml`). saasapi has `cmd/fleetreleaser`
 sign each new package and stores the rows; only then can tenants approve
 and roll it out. There is no CI call.
 
 ```
 helm upgrade ──▶ hook Job ──operator token, https──▶ saasapi operator plane ──▶ fleetreleaser (sign)
-                (curl)        <release>-saasapi-operator:8443        └──▶ saas.fleet_versions
+           (farmer register-     <release>-saasapi-operator:8443     └──▶ saas.fleet_versions
+            sprout-release)
 ```
 
 **When it runs.** The Job renders only when all of these hold; otherwise
@@ -370,14 +372,25 @@ NOTES says which one is missing and nothing is registered:
   [Known gaps](#known-gaps)).
 
 **What it sends.** The stamped release verbatim, plus
-`sproutRelease.channel` (default `stable`) and
-`sproutRelease.minSproutVersion`, the oldest sprout that may update straight
-to this release. `minSproutVersion` has no default: the render fails
-without it once the hook is on. The render also fails if the file's version
-isn't the canonical `v`+`appVersion` (the farmer chart and the sprout
-release ship under one tag), if `minSproutVersion` is above it, or if the
-file has fields beyond `version` and `packages`. Nothing is rewritten to
-pass: saasapi refuses non-canonical values, and so does the chart.
+`sproutRelease.channel` (default `stable`).
+
+- **`min_sprout_version` is set at release time**, not per install: the
+  stamp script reads it from `packaging/helm/min-sprout-version` (one
+  version line, `#` comments), so the floor is reviewed in a PR and ships
+  under the tag with everything else (`docs/RELEASING.md`,
+  "Compatibility"). It is the oldest sprout that may update straight to
+  this release, signed into every manifest, and immutable once the version
+  is registered. The script refuses a floor that isn't canonical semver or
+  is above the tag by semver precedence (so `v1.0.0` can't be the floor of
+  `v1.0.0-rc.1`).
+- The render fails if the file's version isn't the canonical
+  `v`+`appVersion` (the farmer chart and the sprout release ship under one
+  tag), if `min_sprout_version` is missing, not canonical or above the
+  version, or if the file has fields beyond `version`,
+  `min_sprout_version` and `packages`. Setting the removed
+  `sproutRelease.minSproutVersion` value fails the render rather than being
+  ignored. Nothing is rewritten to pass: saasapi refuses non-canonical
+  values, and so does the chart.
 
 **Outcome.**
 
@@ -386,7 +399,7 @@ pass: saasapi refuses non-canonical values, and so does the chart.
 | 201: registered | succeeds | succeeds |
 | 200: already registered with the same contents (every later `helm upgrade`) | succeeds | succeeds |
 | 409 `release_conflict`: this version is registered with different contents (or another `min_sprout_version`) | prints saasapi's message and the request it sent; fails at once (exit 2, `podFailurePolicy` `FailJob`) | **fails** |
-| 409 `version_revoked`, any other 4xx (400, 401, 422 `signing_refused`), a TLS verification failure | prints why; fails at once | **fails** |
+| 409 `version_revoked`, any other 4xx or a 3xx (400, 401, 422 `signing_refused`; redirects are never followed), a certificate that doesn't verify, a local configuration error (bad token or request file) | prints why; fails at once | **fails** |
 | no answer (saasapi still rolling out), 408, 429, 5xx | retries with exponential backoff (`sproutRelease.retry`: 8 attempts, 5s doubling to 60s), then fails; the Job then gets `backoffLimit` (1) more pods | fails if every attempt does |
 
 Releases are immutable. A 409 means the version was already registered
@@ -413,15 +426,23 @@ release registered, and sprouts already on it keep it.
   (`saasapi.operator.token.secretName`/`currentKey`), as a 0440 file. Never
   the previous one. From the operator TLS Secret, `ca.crt` only, to verify
   saasapi; never the key.
-- The token is read by the shell and handed to curl on stdin
-  (`--header @-`), so it is never in argv, the environment or a file, and
-  is never printed. https only (`--proto =https`), TLS 1.2+.
+- The token is read from that file by `farmer register-sprout-release`
+  and sent only in the `Authorization` header to saasapi's operator
+  listener: never in argv or the environment, never printed. https only,
+  TLS 1.2+, trusting only the mounted `ca.crt` (not the system roots); proxy
+  settings are ignored and redirects are not followed. The subcommand
+  checks the token the way saasapi does (32+ characters, no whitespace)
+  before sending anything.
+- It runs before farmer loads its config: no `/etc/imas`, no PKI
+  directory, no seeds, no database, bus or OpenBao. The pod mounts the
+  request ConfigMap and the two Secret items, nothing else.
 - Egress to saasapi's pods on the operator port, and DNS. No ingress. The
   policy is rendered whatever `networkPolicy.enabled` says. Its pods carry
   `app.kubernetes.io/name: imas-sprout-release-registrar`, so the nats
   chart's bus policy never admits them.
-- Pod Security `restricted`, read-only root, `/tmp` an in-memory emptyDir.
-  The image, `curlimages/curl`, is pinned by digest.
+- Pod Security `restricted`, read-only root. The image is farmer's
+  (`farmer.image`, `FROM scratch`: no shell), at the same tag as the farmer
+  Deployment, with farmer's `imagePullSecrets`.
 
 ### saasapi's operator plane
 
@@ -629,9 +650,8 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `saasapi.enrollmentKeys.rateLimit.*` | `1` / `5` | `deploy/saasapi/values.rate-limit.yaml`. `null` emits no env var. |
 | `credentialPublisher.*` | enabled, `platform/imas/saasapi-nats-user` | The publish Job. |
 | `sproutRelease.register` | `true` | Register `files/sprout-release.json` when the chart has it and the operator plane is on. |
-| `sproutRelease.channel` / `minSproutVersion` | `stable` / `""` | Sent with the release. `minSproutVersion` is required once the hook renders. |
-| `sproutRelease.serviceAccountName` | `imas-sprout-release-registrar` | The hook Job's own ServiceAccount. |
-| `sproutRelease.image.*` | `curlimages/curl:8.22.0`, pinned by digest | curl and a POSIX shell. |
+| `sproutRelease.channel` | `stable` | Sent with the release. `min_sprout_version` is not a value: it is stamped at release time from `packaging/helm/min-sprout-version`. |
+| `sproutRelease.serviceAccountName` | `imas-sprout-release-registrar` | The hook Job's own ServiceAccount. It runs `farmer register-sprout-release` in `farmer.image`. |
 | `sproutRelease.retry.*` / `requestTimeoutSeconds` | `8`, `5`s doubling to `60`s / `600` | In-pod retries for no answer, 408, 429 and 5xx. |
 | `sproutRelease.backoffLimit` / `activeDeadlineSeconds` / `ttlSecondsAfterFinished` | `1` / `1500` / `3600` | Keep `helm --timeout` above the deadline. |
 | `sproutRelease.argoCDHooks` | `true` | `PostSync`, sync-wave 1. |
@@ -739,17 +759,17 @@ gone):
 **Sprout release registration (FU.5), 2026-10-02**, with helm v3.16 built
 from source and no cluster:
 
-- `files/register-sprout-release.sh` ran against a local HTTPS server
-  standing in for saasapi (`TestRegisterScript`), with the host's curl
-  under both dash and busybox 1.36 ash (the image's shell; `printf` is a
-  builtin there, so the token is in no argv). Every outcome in the table
-  above behaved as described, and the token was never printed.
-- `packaging/helm/stamp-sprout-release.sh`'s real output renders into the
-  request body (`TestStampedReleaseRenders`).
-- The image's digest was checked against Docker Hub: a multi-arch index
-  whose linux/amd64 entry is the published `8.22.0` image. Pulling it to
-  run the script under the image's own curl was blocked by Docker Hub's
-  rate limit.
+- `farmer register-sprout-release` (`internal/sproutrelease` tests) ran
+  against a local HTTPS server standing in for saasapi: every outcome in
+  the table above, the backoff sequence, an untrusted CA and a wrong host
+  name (final, nothing sent), proxy settings ignored, a redirect not
+  followed, and every local configuration error refused before sending.
+  The token was never printed. The built `farmer` binary dispatches the
+  subcommand without creating `/etc/imas`.
+- `packaging/helm/stamp-sprout-release.sh`'s real output, with the repo's
+  `min-sprout-version`, renders into the request body; the semver
+  precedence check was run over the spec's ordering examples, prereleases
+  included (`TestStampedReleaseRenders`).
 
 **Not verified:**
 
@@ -793,12 +813,6 @@ exceptions, all subcharts and none of them Go dependencies:
   as is the server. It was chosen over Bitnami's Apache-2.0 chart, whose
   free images are no longer published. The project owner signed off on
   this choice when it was flagged.
-- **curl (`curlimages/curl`), flagged, not yet signed off:** the sprout
-  release hook's image. curl is under the curl license, an MIT/X
-  derivative; the image is Alpine-based (busybox GPL-2.0, musl MIT), like
-  the `quay.io/openbao/openbao` image this chart already runs. It is run as
-  a tool, not linked or redistributed. The alternative is a `farmer`
-  subcommand in the farmer image, outside this chart.
 
 ## Security review notes
 
@@ -838,8 +852,8 @@ exceptions, all subcharts and none of them Go dependencies:
   one Secret key, with no ServiceAccount token, RBAC or OpenBao role, and
   egress to saasapi's operator port only). The tests pin that:
   `TestSproutReleaseSecretWiring` fails if any other manifest names the
-  token Secret, and `TestRegisterScript` runs the script against a local
-  HTTPS server and fails if the token is ever printed. What the chart can't
+  token Secret, and `internal/sproutrelease`'s tests fail if the token is
+  ever printed. What the chart can't
   enforce, the cluster must:
   - the namespace-access rule above, again: whoever can create pods here,
     read Secrets, or `port-forward` to saasapi (NetworkPolicy doesn't see a

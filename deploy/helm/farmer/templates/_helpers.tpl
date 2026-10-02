@@ -403,10 +403,10 @@ app.kubernetes.io/component: sprout-release-registrar
 
 {{/*
 The request body for POST /v1/operator/fleet-releases: the stamped
-release (version, packages) plus this chart's channel and
-min_sprout_version, validated here so a bad value fails the render rather
-than the hook. saasapi validates every package field again, and never
-normalizes; neither does this.
+release (version, min_sprout_version, packages; both versions set at
+release time) plus this chart's channel, validated here so a bad value
+fails the render rather than the hook. saasapi validates every package
+field again, and never normalizes; neither does this.
 */}}
 {{- define "imas-farmer.sproutRelease.request" -}}
 {{- $r := .Values.sproutRelease -}}
@@ -415,8 +415,8 @@ normalizes; neither does this.
 {{- fail (printf "files/sprout-release.json is not a JSON object: %v" (get $rel "Error")) -}}
 {{- end -}}
 {{- range $k, $_ := $rel -}}
-{{- if not (has $k (list "version" "packages")) -}}
-{{- fail (printf "files/sprout-release.json has an unexpected field %q: it holds exactly version and packages (packaging/helm/stamp-sprout-release.sh)" $k) -}}
+{{- if not (has $k (list "version" "min_sprout_version" "packages")) -}}
+{{- fail (printf "files/sprout-release.json has an unexpected field %q: it holds exactly version, min_sprout_version and packages (packaging/helm/stamp-sprout-release.sh)" $k) -}}
 {{- end -}}
 {{- end -}}
 {{- $semver := "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$" -}}
@@ -431,15 +431,12 @@ normalizes; neither does this.
 {{- if or (not (kindIs "slice" $pkgs)) (not $pkgs) -}}
 {{- fail "files/sprout-release.json has no packages" -}}
 {{- end -}}
-{{- $min := toString $r.minSproutVersion -}}
-{{- if not $min -}}
-{{- fail (printf "sproutRelease.minSproutVersion is required to register sprout release %s: the oldest sprout that may update straight to it, e.g. v0.1.0 (docs/RELEASING.md, \"Compatibility\"). It is signed into every manifest, and a registered version can't change it." $version) -}}
-{{- end -}}
+{{- $min := toString (get $rel "min_sprout_version") -}}
 {{- if not (regexMatch $semver $min) -}}
-{{- fail (printf "sproutRelease.minSproutVersion %q is not a canonical vMAJOR.MINOR.PATCH[-PRERELEASE] version" $min) -}}
+{{- fail (printf "files/sprout-release.json min_sprout_version %q is missing or not a canonical vMAJOR.MINOR.PATCH[-PRERELEASE] version; re-stamp it (packaging/helm/min-sprout-version)" $min) -}}
 {{- end -}}
 {{- if gt ((semver $min).Compare (semver $version)) 0 -}}
-{{- fail (printf "sproutRelease.minSproutVersion %s is above the release's version %s" $min $version) -}}
+{{- fail (printf "files/sprout-release.json min_sprout_version %s is above the release's version %s" $min $version) -}}
 {{- end -}}
 {{- if not (regexMatch "^[a-z][a-z0-9_-]{0,31}$" (toString $r.channel)) -}}
 {{- fail (printf "sproutRelease.channel %q must match ^[a-z][a-z0-9_-]{0,31}$" (toString $r.channel)) -}}
@@ -608,6 +605,9 @@ explanation rather than deploying something that silently can't work.
 {{- if .Values.credentialPublisher.enabled -}}
 {{- include "imas-farmer.publisher.validate" . -}}
 {{- end -}}
+{{- if hasKey .Values.sproutRelease "minSproutVersion" -}}
+{{- fail "sproutRelease.minSproutVersion was removed: min_sprout_version is set at release time, from packaging/helm/min-sprout-version, and stamped into files/sprout-release.json with the version" -}}
+{{- end -}}
 {{- if include "imas-farmer.sproutRelease.registers" . -}}
 {{- include "imas-farmer.registrar.validate" . -}}
 {{- end -}}
@@ -669,6 +669,9 @@ explanation rather than deploying something that silently can't work.
 
 {{- define "imas-farmer.registrar.validate" -}}
 {{- $r := .Values.sproutRelease -}}
+{{- if hasKey $r "image" -}}
+{{- fail "sproutRelease.image was removed: the hook runs `farmer register-sprout-release` in farmer's own image (farmer.image)" -}}
+{{- end -}}
 {{- $_ := include "imas-farmer.sproutRelease.request" . -}}
 {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" (toString $r.serviceAccountName)) -}}
 {{- fail (printf "sproutRelease.serviceAccountName %q is not a valid ServiceAccount name" (toString $r.serviceAccountName)) -}}

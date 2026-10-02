@@ -55,7 +55,7 @@ install from source); published charts carry it (packaging/helm/stamp-sprout-rel
 {{- if include "imas-farmer.sproutRelease.registers" . }}
 
 Sprout release registration: hook Job {{ printf "%s-sprout-release-register" (include "imas-farmer.fullname" .) | trunc 63 | trimSuffix "-" }} (post-install, post-upgrade)
-registers sprout release {{ get $rel "version" }} (min_sprout_version {{ .Values.sproutRelease.minSproutVersion }}, {{ len (get $rel "packages") }} package(s)) with
+registers sprout release {{ get $rel "version" }} (min_sprout_version {{ get $rel "min_sprout_version" }}, {{ len (get $rel "packages") }} package(s)) with
 saasapi's operator plane at https://{{ include "imas-farmer.saasapi.operatorFQDN" . }}:{{ .Values.saasapi.operator.port }}, whose
 certificate must carry that name. If it fails, so does the release; a 409 means the version is
 already registered with different contents (releases are immutable: cut a new version). Withdraw
