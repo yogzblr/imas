@@ -438,6 +438,11 @@ permissive is a compliance-visible failure, not just a bug."
 
 ## 4a. Wave 3 — workstream M follow-through (Ansible + release UAT gate)
 
+**Status (2026-10-02):** M.4 (Ansible) is merged. The Terraform UAT gate
+(item 5) is **not started**: there are no `.tf` files in the repo. Its
+dependencies are all merged, and it should now also cover one self-update
+cycle per OS (FU.2).
+
 Sub-items M.1–M.3 (Windows SCM service wrapper, MSI+winget installer,
 zypper/SUSE rpm validation) are merged — see `packaging/windows/`,
 `packaging/buildkite/publish-packages.sh`, and `.github/workflows/
@@ -555,6 +560,12 @@ published, not a precondition for publishing it."
 ---
 
 ## 4b. Wave 4 — fleet updates and DB migrations
+
+**Status (2026-10-02): every brief in this wave is merged** (DB.1, DB.2, FU.0,
+FU.1, FU.2, FU.3/FU.4, FU.5, FU.6, FU.6b, plus FU.7 and the release flow), as
+recorded in `docs/BUILD-STATUS.md`. The briefs below are kept as the record of
+what was asked; do not re-dispatch them. The only brief in this file still to
+dispatch is the Terraform UAT gate in §4a.
 
 Re-scoped 2026-09-29 (requirements 20–21; API design §1.8, §2.2, §2.3, §2.5,
 §2.6, §4.1a; `docs/BUILD-STATUS.md`, "Fleet updates and DB migrations").

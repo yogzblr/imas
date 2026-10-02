@@ -1,5 +1,12 @@
 # imas: Phase-Wise Plan for 1 Million Endpoints
 
+> **Status (2026-10-02):** see `docs/BUILD-STATUS.md`. Not built from this
+> plan: sprout reconnect jitter (`nats.CustomReconnectDelay`; the sprout
+> still uses a fixed 15 s wait) and a clustered bus (`cmd/farmerbus` has no
+> route support, so `replicaCount > 1` is blocked in the chart). No load or
+> chaos test has run, so the 1M-endpoint and under-300 ms requirements remain
+> unvalidated.
+
 Companion to `imas-fork-roadmap.md` and `imas-nats-jwt-auth-design.md`. Those documents describe *what* to build; this one sequences it against a concrete scale target and names the parts that only become problems at real scale — several of which don't show up until Phase 3 below.
 
 ## Assumptions (confirm before treating numbers as final)

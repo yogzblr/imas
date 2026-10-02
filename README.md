@@ -88,9 +88,9 @@ Managed systems are referred to as 'sprouts.'
 
 ## Batteries Included
 
-`farmer` contains an embedded messaging Pub-Sub server ([NATS](https://github.com/nats-io/nats-server)), and an api server.
-Nodes running `sprout` subscribe to messages over the bus.
-Both the API server and the messaging bus use TLS encryption (elliptic curve by default), and sprouts authenticate using public-key cryptography.
+imas is split into a DMZ tier and a core tier. `farmerbus` runs the messaging Pub-Sub server ([NATS](https://github.com/nats-io/nats-server)) behind an Envoy gateway in the DMZ; `farmer` (the core, with its API server) and `saasapi` (the multi-tenant control plane) run outside the DMZ and connect to the bus outbound only.
+Nodes running `sprout` enroll once with a one-time key, then connect to the bus with their own JWT.
+The API server and the bus use TLS, and message payloads are encrypted with per-tenant and per-sprout keys. See [docs/INSTALL.md](docs/INSTALL.md) and [docs/diagrams/imas-architecture.svg](docs/diagrams/imas-architecture.svg).
 
 Jobs can be created with the `imas` command-line interface and typically come in the form of stateful targets called 'recipes'.
 Recipes are yaml documents which describe the desired state of a sprout after the recipe is applied (`cook`ed).
