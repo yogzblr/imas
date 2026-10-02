@@ -149,8 +149,12 @@ var actionErrorMessages = map[string]string{
 	errCodeRolloutHalted:           "an earlier wave of this rollout did not fully succeed, so the update was not sent to this sprout",
 	errCodeRolloutWindowClosed:     "the tenant's rollout window closed before the update was sent to this sprout",
 	errCodeApprovalWithdrawn:       "the tenant's approved version changed before the update was sent to this sprout",
+	errCodeVersionRevoked:          "the target version was revoked before the update was sent to this sprout",
 	errCodeUpdateInProgress:        "the sprout already has an update in progress, so this update was not sent",
-	errCodeUnresponsiveAfterUpdate: "the sprout did not report the update's outcome in time; it may be unreachable, or may have restored its previous version",
+	errCodeUnresponsiveAfterUpdate: "the sprout did not reconnect and report the new version in time; it may be unreachable, or may have kept or restored its previous version",
+	errCodeNoReleaseForPlatform:    "the target version has no package for this sprout's OS and architecture, so the update was not sent",
+	errCodeBelowMinSproutVersion:   "this sprout's version is older than the target version supports updating from, so the update was not sent",
+	errCodeSproutNewerThanTarget:   "this sprout already runs a newer version than the target, and sprouts refuse downgrades, so the update was not sent",
 }
 
 func actionErrorMessage(code string) string {
@@ -355,7 +359,13 @@ func writeBatchStatus(w http.ResponseWriter, r *http.Request, actionType string)
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to look up action batch items")
 		return
 	}
-	refreshRunningItems(r.Context(), tenantID, items)
+	if batch.ActionType == controlplane.ActionSelfUpdate {
+		// A self_update item succeeds when its sprout reports the new
+		// version, not when its job does (fleet_update_dispatch.go).
+		refreshUpdateItems(r.Context(), db, jobStatusReader, sproutFactsReader, batch, items)
+	} else {
+		refreshRunningItems(r.Context(), tenantID, items)
+	}
 
 	resp := actionBatchResponse{
 		BatchID:    batch.ID,
@@ -570,14 +580,17 @@ func createActionBatch(tenantID string, assetIDs []string, action controlplane.S
 		TenantID:     tenantID,
 		ActionType:   action.Type,
 		ActionParams: string(action.Params),
-	}, assetIDs, resolved, nil)
+	}, assetIDs, resolved, nil, nil)
 }
 
 // createBatch writes batch (its ID and RequestedAssetIDs are filled in
 // here) and one item per asset_id in one transaction, and returns the
 // queued items in request order. blocked maps a resolved, accepted
-// sprout_id to the error code its item fails with instead of being queued.
-func createBatch(batch AssetActionBatch, assetIDs []string, resolved []sproutByAssetItem, blocked map[string]string) (AssetActionBatch, []AssetActionItem, error) {
+// sprout to the error code its item fails with instead of being queued.
+// claim, if set, runs first inside the same transaction; an error from it
+// rolls everything back and is returned as is.
+func createBatch(batch AssetActionBatch, assetIDs []string, resolved []sproutByAssetItem,
+	blocked map[SproutRef]string, claim func(tx *gorm.DB) error) (AssetActionBatch, []AssetActionItem, error) {
 	id, err := newID(actionBatchIDPrefix)
 	if err != nil {
 		return AssetActionBatch{}, nil, err
@@ -606,10 +619,10 @@ func createBatch(batch AssetActionBatch, assetIDs []string, resolved []sproutByA
 			item.SproutID = row.SproutID
 			item.Status = ActionItemFailed
 			item.ErrorCode = errCodeSproutNotAccepted
-		case blocked[row.SproutID] != "":
+		case blocked[SproutRef{TenantID: tenantID, SproutID: row.SproutID}] != "":
 			item.SproutID = row.SproutID
 			item.Status = ActionItemFailed
-			item.ErrorCode = blocked[row.SproutID]
+			item.ErrorCode = blocked[SproutRef{TenantID: tenantID, SproutID: row.SproutID}]
 		default:
 			item.SproutID = row.SproutID
 			item.Status = ActionItemQueued
@@ -618,6 +631,11 @@ func createBatch(batch AssetActionBatch, assetIDs []string, resolved []sproutByA
 	}
 
 	err = db.Transaction(func(tx *gorm.DB) error {
+		if claim != nil {
+			if err := claim(tx); err != nil {
+				return err
+			}
+		}
 		if err := tx.Create(&batch).Error; err != nil {
 			return err
 		}
