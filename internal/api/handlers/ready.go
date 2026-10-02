@@ -64,7 +64,13 @@ var (
 
 // SetReadinessDB installs the PXC handle GET /ready pings — the same
 // *gorm.DB pxc.OpenDB returned and props/pki/rbac read through.
+//
+// It is also the one place this package receives that handle, so it
+// installs GET /v1/sprout/update-manifest's read of saas.fleet_versions
+// and saas.tenant_update_policy (update_manifest.go) over the same handle
+// and farmer's read-only saas grant.
 func SetReadinessDB(db *gorm.DB) {
+	setUpdateManifestDB(db)
 	if db == nil {
 		pxcPing = nil
 		return

@@ -32,13 +32,21 @@ func Logger(inner http.Handler, name string) http.Handler {
 // are allowed without authentication.
 //
 // FileServer (GET /files/) additionally accepts a sprout's gateway JWT
-// — see sproutFileAccess. Every other route, ListRecipes/GetRecipe
+// — see sproutFileAccess. SproutUpdateManifest (GET
+// /v1/sprout/update-manifest) accepts only a gateway JWT — see
+// sproutIdentityAuth. Every other route, ListRecipes/GetRecipe
 // included, accepts only the CLI's NKey-signed RBAC token.
 func Auth(inner http.Handler, name string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch name {
 		case "GetCertificate", "PutNKey":
 			inner.ServeHTTP(w, r)
+			return
+		case "SproutUpdateManifest":
+			// Before the dangerously_allow_root bypass: the handler's
+			// tenant is the JWT's, so there is nothing to serve without
+			// one.
+			sproutIdentityAuth(inner, w, r)
 			return
 		}
 
@@ -117,6 +125,46 @@ func sproutFileAccess(r *http.Request, token string) bool {
 		return false
 	}
 	return true
+}
+
+// sproutIdentityAuth serves r through inner only if it carries a valid
+// gateway JWT ("Authorization: Bearer <jws>"), with the token's verified
+// (tenant_id, sprout_id) on the request context
+// (handlers.WithSproutIdentity) — the only place the handler gets a
+// tenant from. No CLI token, no dangerously_allow_root bypass, and no
+// header Envoy derived from the token: farmer's API port is reachable
+// without passing through Envoy, so the token is verified here.
+//
+// A missing or non-bearer Authorization header is 401; a bearer token
+// that does not verify, or whose tenant_id/sprout_id is unusable, is 403.
+func sproutIdentityAuth(inner http.Handler, w http.ResponseWriter, r *http.Request) {
+	jws, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok || jws == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	keys := gatewayKeys()
+	if keys == nil {
+		log.Warnf("SproutUpdateManifest: gateway JWT presented but no gateway signer is configured")
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	claims, err := gatewayjwt.VerifyGatewayJWT(r.Context(), keys, jws)
+	if err != nil {
+		log.Warnf("SproutUpdateManifest: rejecting gateway JWT: %v", err)
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	if !isKeySegment(claims.TenantID) || !isKeySegment(claims.SproutID) {
+		log.Warnf("SproutUpdateManifest: gateway JWT tenant_id/sprout_id unusable")
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	ctx := handlers.WithSproutIdentity(r.Context(), handlers.SproutIdentity{
+		TenantID: claims.TenantID,
+		SproutID: claims.SproutID,
+	})
+	inner.ServeHTTP(w, r.WithContext(ctx))
 }
 
 // isKeySegment reports whether s can stand as one "/"-delimited segment
