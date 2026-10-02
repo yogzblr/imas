@@ -132,8 +132,10 @@ For each host, the playbook:
 2. **Writes the enrollment settings** into the config file the sprout already
    reads (`/etc/imas/sprout`, or `%ProgramData%\imas\sprout` on Windows):
    `farmerinterface`, `farmerapiport`, `busurls` if set, `busproxyurl` if
-   set, `sproutboxkeyprevgrace` if set, `sproutupdaterepourl` and
-   `sproutupdaterepotoken` (self-update) if set, and `jointoken` if the host isn't
+   set, `sproutboxkeyprevgrace` if set, the self-update repository settings
+   (`sproutupdaterepourl`, `sproutupdaterepoformat`, `sproutupdaterepodist`,
+   `sproutupdaterepopackageid`, `sproutupdaterepotoken`) if set, and
+   `jointoken` if the host isn't
    enrolled yet. It changes only those keys and leaves the rest of the file
    alone, including what the sprout writes itself. If you set
    `imas_sprout_root_ca`, it also writes that CA to the sprout's root-CA
@@ -167,12 +169,14 @@ Set these in `group_vars`/`host_vars`. `roles/*/defaults/main.yml` and
 | `imas_sprout_root_ca` | `""` | PEM of the CA that issued the enrollment endpoint's certificate. **Required behind the DMZ edge.** Without it, the sprout trusts the first certificate it sees. |
 | `imas_sprout_bus_proxy_url` | `""` | Outbound proxy for the bus connection only: `http://host:port` (HTTP CONNECT) or `socks5://host:port`, optionally with `user:password@`. Empty dials directly. The sprout's HTTP requests (enroll, refresh, recipes) already follow `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` from the environment and don't need this. |
 | `imas_sprout_boxkey_prev_grace` | `""` | How long the sprout keeps the private key a farmer-triggered payload-encryption key rotation replaced, and so the shortest interval between rotations. A Go duration string, e.g. `30m`, writes that value. Empty leaves this key alone rather than clearing it — the sprout writes its own default into the config file on other saves, so this role only ever adds an explicit override, never removes one. |
-| `imas_buildkite_org` | required | Buildkite organization that publishes the packages. |
+| `imas_buildkite_org` | `yogzblr` | Buildkite organization that publishes the packages (`https://packages.buildkite.com/yogzblr/imasdeb`, `imasrpm`, `imasnget`). |
 | `imas_sprout_version` | `""` | Pin a version. Linux: the package version as the repository lists it (`1.2.3+git`). Windows: the release (`1.2.3`). |
 | `imas_sprout_package_state` | `present` | Linux: `latest` upgrades to the newest version on every run. |
 | `imas_sprout_repo_token` | `""` | Registry token, if your Linux registries are private. Stored in root-only files on the host. |
 | `imas_sprout_windows_msi_url` | `""` | Install this MSI (for example from an internal mirror) instead of using the NuGet feed. |
-| `imas_sprout_update_repo_url` | the repository this role installs from | Base URL a `self_update` downloads the signed manifest's package file from (`<url>/<file name>`, `sproutupdaterepourl`). Defaults to the apt repository URL, the rpm repository URL with `$basearch` filled in, or on Windows the directory of `imas_sprout_windows_msi_url` (empty with the NuGet feed). Use a mirror that serves the release's package files by name if your repository lays them out differently. Empty: the sprout refuses every `self_update`. |
+| `imas_sprout_update_repo_url` | the repository this role installs from | Repository a `self_update` installs from (`sproutupdaterepourl`). The sprout reads its index the way its package manager does (apt `Packages`, rpm `repodata`, NuGet flat container), takes the entry with the SHA-256 the signed update manifest names, and checks the download against it. Defaults to the apt repository URL, the rpm baseurl with `$basearch` filled in, or on Windows the NuGet `index.json` (or the directory of `imas_sprout_windows_msi_url`). Empty: the sprout refuses every `self_update`. |
+| `imas_sprout_update_repo_format` | `""` (`flat` with `imas_sprout_windows_msi_url`) | How the sprout reads that repository (`sproutupdaterepoformat`): `apt`, `rpm`, `nuget`, or `flat` for a directory serving package files by name. Empty: the sprout's own package format. |
+| `imas_sprout_update_repo_dist` | `imas_sprout_apt_repo_suite imas_sprout_apt_repo_component` | apt suite and component (`sproutupdaterepodist`), written on apt hosts only. |
 | `imas_sprout_update_repo_token` | `imas_sprout_repo_token` (Linux), `""` (Windows) | Read token the sprout sends (basic auth, user `buildkite`) to `imas_sprout_update_repo_url` only (`sproutupdaterepotoken`), stored in the sprout's mode-0600 config file. |
 | `imas_sprout_verify` | `true` | Wait for the bus connection after installing. |
 | `imas_verify_timeout` | `300` | Seconds to wait for it. |
