@@ -615,11 +615,15 @@ paths:
         `gate`. Approval, revocation and window are re-checked before every
         wave. An item succeeds only when its sprout reconnects and reports
         `target_version` in its facts, in a report written after the item
-        was dispatched (30 seconds' clock skew allowed); a succeeded job
-        alone, or an older row naming the target, leaves it running. A
-        sprout that already reported the target when the rollout was
-        planned passes on that report. 30 minutes after its wave's
-        dispatch, an item still running is `unresponsive_after_update`.
+        was dispatched (30 seconds' clock skew allowed by default,
+        `SAASAPI_FLEET_UPDATE_CLOCK_SKEW`); a succeeded job alone, or an
+        older row naming the target, leaves it running, and a report dated
+        too far ahead of saasapi's clock fails it with `facts_clock_skew`.
+        A sprout that already reported the target when the rollout was
+        planned passes once its update job succeeds ("already running")
+        while its report still names the target. 30 minutes after its
+        wave's dispatch, an item still running is
+        `unresponsive_after_update`.
 
         Rate-limited per tenant: one request every 10 seconds, burst 2,
         per pod.
@@ -1003,6 +1007,7 @@ components:
                   - no_release_for_platform
                   - below_min_sprout_version
                   - sprout_newer_than_target
+                  - facts_clock_skew
               message: { type: string, description: The fixed message for `error`. }
 
     FleetVersion:

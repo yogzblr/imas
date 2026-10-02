@@ -199,6 +199,10 @@ spec:
             {{- end }}
             - name: SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED
               value: {{ $s.fleetUpdateDispatch.enabled | toString | quote }}
+            {{- with $s.fleetUpdateDispatch.clockSkew }}
+            - name: SAASAPI_FLEET_UPDATE_CLOCK_SKEW
+              value: {{ . | toString | quote }}
+            {{- end }}
             {{- if $fleetVerify }}
             # Fleet signing key, READ-ONLY (imas-fleet-verify). saasapi
             # writes saas.fleet_versions, so it must never hold sign. Fleet

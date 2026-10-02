@@ -344,6 +344,11 @@ saasapi:
   # path (yogzblr/imas#286). On needs the fleetSign client below.
   fleetUpdateDispatch:
     enabled: false
+    # SAASAPI_FLEET_UPDATE_CLOCK_SKEW: how far saasapi's and farmer's
+    # clocks may differ when a wave checks that a sprout's report postdates
+    # its update (a Go duration, above 0 and at most 5m). Empty keeps
+    # saasapi's default, 30s. Widen only for nodes without NTP.
+    clockSkew: ""
   # The operator plane (internal/saasapi NewOperatorServer, API design
   # §2.5): sprout release registration and revoke, on its own HTTPS
   # listener and its own Service (<release>-saasapi-operator), never the

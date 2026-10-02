@@ -52,10 +52,13 @@
 //     (refreshUpdateItems). The report must also have been written after
 //     the item was dispatched (reportFresh, within rolloutClockSkew): a
 //     leftover row naming the target, from an earlier attempt or a package
-//     an administrator reinstalled, is not proof. The one exception is a
-//     sprout that already reported the target when the rollout was
-//     planned; it answers "already running" and never reports again. A
-//     job that fails or expires fails the item.
+//     an administrator reinstalled, is not proof. A sprout that already
+//     reported the target when the rollout was planned answers "already
+//     running" and never reports again; it passes only once its update
+//     job succeeds (the sprout's own check of its running version) while
+//     its report still names the target. A report dated beyond saasapi's
+//     clock by more than the margin fails the item with facts_clock_skew.
+//     A job that fails or expires fails the item.
 //   - A sprout that doesn't come back on the target version before its
 //     wave's deadline gets its own status, unresponsive_after_update, not a
 //     plain failed. The operator's response is different: the sprout may be
@@ -147,17 +150,42 @@ var (
 	rolloutNow = time.Now
 )
 
-// rolloutClockSkew is how far apart saasapi's clock and the clock of the
-// farmer node that wrote a sprout's facts may be, for reportFresh. A
-// sprout_version report counts as proof of an update if farmer's write
-// time is later than the item's dispatch time (saasapi's clock) minus this
-// margin, and not later than now plus it. A stale row written within the
-// margin before dispatch is the accepted cost: an update's own report
-// comes after a download, an install and a restart, so it is normally
-// well clear of it. Nodes are expected to run NTP; a skew larger than
-// this fails closed (items end unresponsive_after_update, halting the
-// rollout) rather than admitting stale rows.
-const rolloutClockSkew = 30 * time.Second
+// Clock skew between saasapi and the farmer node that wrote a sprout's
+// facts, for reportFresh. A sprout_version report counts as proof of an
+// update if farmer's write time is later than the item's dispatch time
+// (saasapi's clock) minus rolloutClockSkew, and not later than now plus
+// it. A stale row written within the margin before dispatch is the
+// accepted cost: an update's own report comes after a download, an
+// install and a restart, so it is normally well clear of it. Nodes are
+// expected to run NTP, which keeps them within milliseconds; a larger skew
+// fails closed rather than admitting stale rows. A farmer clock that runs
+// behind looks like a stale row (unresponsive_after_update at the
+// deadline); one that runs ahead fails the item with facts_clock_skew.
+const (
+	// defaultRolloutClockSkew is the margin unless
+	// SAASAPI_FLEET_UPDATE_CLOCK_SKEW sets another.
+	defaultRolloutClockSkew = 30 * time.Second
+	// maxRolloutClockSkew caps the margin: every second of it is a second
+	// before dispatch in which a stale row still counts.
+	maxRolloutClockSkew = 5 * time.Minute
+)
+
+// rolloutClockSkew is the margin in use (SetFleetUpdateClockSkew).
+var rolloutClockSkew = defaultRolloutClockSkew
+
+// FleetUpdateClockSkew returns the margin in use.
+func FleetUpdateClockSkew() time.Duration { return rolloutClockSkew }
+
+// SetFleetUpdateClockSkew sets the margin (Config.FleetUpdateClockSkew,
+// SAASAPI_FLEET_UPDATE_CLOCK_SKEW). Like SetFleetUpdateDispatchEnabled,
+// call it once at startup, before NewRouter. A value outside
+// (0, maxRolloutClockSkew], which LoadConfig refuses, leaves the default.
+func SetFleetUpdateClockSkew(d time.Duration) {
+	if d <= 0 || d > maxRolloutClockSkew {
+		d = defaultRolloutClockSkew
+	}
+	rolloutClockSkew = d
+}
 
 // Item error codes for rollouts, in addition to sprout_actions.go's.
 const (
@@ -196,6 +224,11 @@ const (
 	// newer than the target. Sprouts refuse downgrades, so it was never
 	// sent the update.
 	errCodeSproutNewerThanTarget = "sprout_newer_than_target"
+	// errCodeFactsClockSkew: the sprout reported the target version in a
+	// row the farmer node dated more than rolloutClockSkew ahead of
+	// saasapi's clock, so the report can't be shown to postdate the
+	// dispatch. The sprout may well have updated; a node clock is wrong.
+	errCodeFactsClockSkew = "facts_clock_skew"
 )
 
 // fleetUpdateRequest is POST .../sprouts/updates' body (design doc §1.8).
@@ -607,8 +640,8 @@ func updateInProgress(d *gorm.DB, tenantID string) (string, error) {
 //
 // It also returns the sprouts that already report the target version.
 // They are sent the update like any other and answer "already running",
-// so they never write a new report; the wave gate accepts their existing
-// one (rolloutProofs).
+// so they never write a new report; the wave gate accepts their update
+// job's success instead (rolloutProofs, judgeUpdateItem).
 func planUpdateItems(ctx context.Context, reader SproutFactsReader, tenantID string, rows []sproutByAssetItem, catalog []FleetVersion) (blocked map[SproutRef]string, atTarget map[SproutRef]bool, err error) {
 	blocked = make(map[SproutRef]string)
 	atTarget = make(map[SproutRef]bool)
@@ -687,10 +720,11 @@ func startRollout(batch AssetActionBatch, queued []AssetActionItem, version stri
 
 // updateProof is what counts as proof that one item's update landed: a
 // report of the target version written after dispatched (reportFresh), or,
-// with anyReport, any report of it at all.
+// with jobSuffices, the update job's success while the sprout's report
+// still names the target (judgeUpdateItem).
 type updateProof struct {
-	dispatched time.Time
-	anyReport  bool
+	dispatched  time.Time
+	jobSuffices bool
 }
 
 // sentWave is one wave that was dispatched, the deadline by which its
@@ -807,11 +841,13 @@ func dispatchWave(d *gorm.DB, nc *nats.Conn, batch AssetActionBatch, items []Ass
 	return dispatched
 }
 
-// rolloutProofs is each wave item's updateProof: a fresh report, unless
-// its sprout already reported the target version when the rollout was
-// planned (atTarget), in which case its existing report stands, as it
-// always has: such a sprout answers "already running" and writes nothing
-// new. An item without a dispatch time gets no proof at all.
+// rolloutProofs is each wave item's updateProof: a fresh report, or, for
+// a sprout that already reported the target version when the rollout was
+// planned (atTarget), its update job's success. Such a sprout answers
+// "already running" and writes nothing new; that answer is the sprout
+// comparing the target with the version it is running (selfupdate,
+// prepare), not a database row. An item without a dispatch time gets no
+// proof at all.
 func rolloutProofs(batch AssetActionBatch, items []AssetActionItem, dispatched map[string]time.Time, atTarget map[SproutRef]bool) map[string]updateProof {
 	proofs := make(map[string]updateProof, len(items))
 	for _, it := range items {
@@ -820,8 +856,8 @@ func rolloutProofs(batch AssetActionBatch, items []AssetActionItem, dispatched m
 			continue
 		}
 		proofs[it.AssetID] = updateProof{
-			dispatched: at,
-			anyReport:  atTarget[SproutRef{TenantID: batch.TenantID, SproutID: it.SproutID}],
+			dispatched:  at,
+			jobSuffices: atTarget[SproutRef{TenantID: batch.TenantID, SproutID: it.SproutID}],
 		}
 	}
 	return proofs
@@ -917,13 +953,37 @@ func reportFresh(written, dispatched, now time.Time) bool {
 		!written.After(now.Add(rolloutClockSkew))
 }
 
-// itemProof judges whether f, what an item's sprout last reported, proves
-// its update to target landed under p.
-func itemProof(f TimedSproutFacts, target string, p updateProof, now time.Time) bool {
-	if f.Version != target {
-		return false
+// judgeUpdateItem decides a running self_update item's outcome from what
+// its sprout last reported (f), its job's outcome (job, "" if unknown),
+// and what proves its update landed (p; haveProof false means nothing
+// does). It returns the update to record, or nil to leave it running:
+//
+//  1. the sprout reports target in a fresh row (reportFresh): succeeded;
+//  2. the job failed or expired: failed, job_failed or job_expired;
+//  3. the sprout reports target in a row dated more than rolloutClockSkew
+//     ahead of now: failed, facts_clock_skew;
+//  4. p.jobSuffices (the sprout was on the target at planning), the job
+//     succeeded, and the report still names target: succeeded. The job
+//     table doesn't say whether the sprout found itself already running
+//     the target or installed it with a restart pending, so a sprout whose
+//     report has since named another version doesn't pass on its job;
+//  5. anything else: still running. A succeeded job alone is not the
+//     sprout back on the new version.
+func judgeUpdateItem(f TimedSproutFacts, target string, p updateProof, haveProof bool, job JobOutcome, now time.Time) map[string]any {
+	reportsTarget := target != "" && f.Version == target
+	switch {
+	case reportsTarget && haveProof && reportFresh(f.Written.Version, p.dispatched, now):
+		return map[string]any{"status": ActionItemSucceeded}
+	case job == JobOutcomeFailed:
+		return failedUpdate(errCodeJobFailed)
+	case job == JobOutcomeExpired:
+		return failedUpdate(errCodeJobExpired)
+	case reportsTarget && f.Written.Version.After(now.Add(rolloutClockSkew)):
+		return failedUpdate(errCodeFactsClockSkew)
+	case reportsTarget && haveProof && p.jobSuffices && job == JobOutcomeSucceeded:
+		return map[string]any{"status": ActionItemSucceeded}
 	}
-	return p.anyReport || reportFresh(f.Written.Version, p.dispatched, now)
+	return nil
 }
 
 // refreshUpdateItems is refreshItems for a self_update batch, as both
@@ -934,7 +994,8 @@ func refreshUpdateItems(ctx context.Context, d *gorm.DB, jobs JobStatusReader, f
 }
 
 // runningSinceProof is the GETs' proofFunc. A GET has no rollout state, so
-// it takes a running item's updated_at as its dispatch time. That is when
+// it takes a running item's updated_at as its dispatch time, and never
+// lets a job's success stand in for a report (jobSuffices is false). That is when
 // dispatchItem recorded farmer's reply (nothing else writes a running
 // item), on the clock of the saasapi pod that dispatched it, so it is
 // never earlier than the dispatch. A GET's check is therefore at least as
@@ -951,22 +1012,29 @@ func runningSinceProof(it AssetActionItem) (updateProof, bool) {
 
 // refreshUpdateItemsWith is refreshItems for a self_update batch, used by
 // the rollout (with its own record of each item's dispatch, sentWave.proof)
-// and by both batch-status GETs (refreshUpdateItems). A running item:
+// and by both batch-status GETs (refreshUpdateItems). It reads every
+// running item's job outcome and its sprout's last report, with write
+// times, and records what judgeUpdateItem decides. In short, a running
+// item:
 //
-//   - succeeds once its sprout reports the batch's target version in its
-//     facts (it restarted on the new release and reconnected), whatever
-//     its job reads, provided proof accepts that report: written after
-//     the item's dispatch (reportFresh), unless the sprout was already on
-//     the target when the rollout was planned. A report of the target
-//     that isn't fresh leaves the item running, and so, once its wave's
+//   - succeeds once its sprout reports the batch's target version in a
+//     row written after the item's dispatch (reportFresh): it restarted
+//     on the new release and reconnected. A report of the target that
+//     isn't fresh leaves the item running, and so, once its wave's
 //     deadline passes, unresponsive_after_update;
-//   - fails with job_failed or job_expired if its job did;
+//   - for a sprout already on the target when the rollout was planned,
+//     also succeeds once its job succeeds ("already running") while its
+//     report still names the target;
+//   - fails with job_failed or job_expired if its job did, and with
+//     facts_clock_skew if its report of the target is dated too far in
+//     saasapi's future (the measured skew is logged);
 //   - otherwise stays running, including once its job has succeeded: on
 //     Linux that means the installer finished and a restart is pending, on
 //     Windows only that the MSI is scheduled. Neither is the sprout back.
 //
 // Updates are conditional on the item still being running, so concurrent
-// callers record each outcome once. A reader error leaves items as stored.
+// callers record each outcome once. A reader error is logged and treated
+// as nothing read: no item passes on what wasn't read.
 func refreshUpdateItemsWith(ctx context.Context, d *gorm.DB, jobs JobStatusReader, facts SproutFactsReader, batch AssetActionBatch, items []AssetActionItem, proof proofFunc) {
 	var running []int
 	for i, it := range items {
@@ -979,65 +1047,67 @@ func refreshUpdateItemsWith(ctx context.Context, d *gorm.DB, jobs JobStatusReade
 	}
 	ctx, cancel := context.WithTimeout(ctx, jobRefreshTimeout)
 	defer cancel()
-	record := func(it *AssetActionItem, update map[string]any) {
-		if ok, err := updateItem(d, *it, ActionItemRunning, update); err != nil || !ok {
-			if err != nil {
-				log.Errorf("saasapi: recording update outcome for batch %s asset %s: %v", it.BatchID, it.AssetID, err)
+
+	// Job outcomes first, then facts: the report judged is then never
+	// older than the job outcome it is judged with, so a sprout whose
+	// report changed before its job finished is judged on the change.
+	var outcomes map[JobRef]JobOutcome
+	if jobs != nil {
+		var refs []JobRef
+		for _, i := range running {
+			if it := items[i]; it.JID != "" {
+				refs = append(refs, JobRef{SproutID: it.SproutID, JID: it.JID})
 			}
-			return
 		}
-		it.Status = update["status"].(AssetActionItemStatus)
-		if code, ok := update["error_code"].(string); ok {
-			it.ErrorCode = code
+		if len(refs) > 0 {
+			var err error
+			if outcomes, err = jobs.JobOutcomes(ctx, batch.TenantID, refs); err != nil {
+				log.Warnf("saasapi: refreshing %d update jobs for batch %s (tenant %s): %v", len(refs), batch.ID, batch.TenantID, err)
+				outcomes = nil
+			}
 		}
 	}
 
-	if target := selfUpdateTarget(batch); facts != nil && target != "" {
+	target := selfUpdateTarget(batch)
+	var reported map[SproutRef]TimedSproutFacts
+	if facts != nil && target != "" {
 		ids := make([]string, 0, len(running))
 		for _, i := range running {
 			ids = append(ids, items[i].SproutID)
 		}
-		reported, err := facts.SproutFactsWithWriteTimes(ctx, batch.TenantID, ids)
-		if err != nil {
+		var err error
+		if reported, err = facts.SproutFactsWithWriteTimes(ctx, batch.TenantID, ids); err != nil {
 			log.Warnf("saasapi: reading sprout facts for update batch %s (tenant %s): %v", batch.ID, batch.TenantID, err)
-		}
-		now := rolloutNow()
-		for _, i := range running {
-			it := &items[i]
-			p, ok := proof(*it)
-			if ok && itemProof(reported[SproutRef{TenantID: batch.TenantID, SproutID: it.SproutID}], target, p, now) {
-				record(it, map[string]any{"status": ActionItemSucceeded})
-			}
+			reported = nil
 		}
 	}
 
-	if jobs == nil {
-		return
-	}
-	var refs []JobRef
-	for _, i := range running {
-		if it := items[i]; it.Status == ActionItemRunning && it.JID != "" {
-			refs = append(refs, JobRef{SproutID: it.SproutID, JID: it.JID})
-		}
-	}
-	if len(refs) == 0 {
-		return
-	}
-	outcomes, err := jobs.JobOutcomes(ctx, batch.TenantID, refs)
-	if err != nil {
-		log.Warnf("saasapi: refreshing %d update jobs for batch %s (tenant %s): %v", len(refs), batch.ID, batch.TenantID, err)
-		return
-	}
+	now := rolloutNow()
 	for _, i := range running {
 		it := &items[i]
-		if it.Status != ActionItemRunning || it.JID == "" {
+		f := reported[SproutRef{TenantID: batch.TenantID, SproutID: it.SproutID}]
+		var job JobOutcome
+		if it.JID != "" {
+			job = outcomes[JobRef{SproutID: it.SproutID, JID: it.JID}]
+		}
+		p, ok := proof(*it)
+		update := judgeUpdateItem(f, target, p, ok, job, now)
+		if update == nil {
 			continue
 		}
-		switch outcomes[JobRef{SproutID: it.SproutID, JID: it.JID}] {
-		case JobOutcomeFailed:
-			record(it, failedUpdate(errCodeJobFailed))
-		case JobOutcomeExpired:
-			record(it, failedUpdate(errCodeJobExpired))
+		if code, _ := update["error_code"].(string); code == errCodeFactsClockSkew {
+			log.Warnf("saasapi: update batch %s (tenant %s): sprout %s reported %s in a row its farmer node dated %s ahead of saasapi's clock (margin %s); failing it with %s",
+				batch.ID, batch.TenantID, it.SproutID, target, f.Written.Version.Sub(now).Round(time.Millisecond), rolloutClockSkew, errCodeFactsClockSkew)
+		}
+		if ok, err := updateItem(d, *it, ActionItemRunning, update); err != nil || !ok {
+			if err != nil {
+				log.Errorf("saasapi: recording update outcome for batch %s asset %s: %v", it.BatchID, it.AssetID, err)
+			}
+			continue
+		}
+		it.Status = update["status"].(AssetActionItemStatus)
+		if code, ok := update["error_code"].(string); ok {
+			it.ErrorCode = code
 		}
 	}
 }

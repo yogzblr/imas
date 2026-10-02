@@ -159,9 +159,11 @@ func main() {
 // fleet update dispatch flag must be set before saasapi.NewRouter, which
 // registers POST .../sprouts/updates and GET .../sprouts/updates/{batch_id}
 // only if the flag is on at that moment (SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED,
-// default off).
+// default off). The wave gate's clock-skew margin is set with it
+// (SAASAPI_FLEET_UPDATE_CLOCK_SKEW, default 30s).
 func newRouter(cfg saasapi.Config) *http.ServeMux {
 	saasapi.SetFleetUpdateDispatchEnabled(cfg.FleetUpdateDispatchEnabled)
+	saasapi.SetFleetUpdateClockSkew(cfg.FleetUpdateClockSkew)
 	return saasapi.NewRouter()
 }
 

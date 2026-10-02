@@ -271,6 +271,8 @@ Each OpenBao client runs under its own role and gets exactly one policy.
   - `pxc.enabled`: the host is `<cluster>-haproxy`. Passwords are generated
     once (kept across upgrades with `lookup`) into `<release>-farmer-db`.
   - External: `database.existingSecret` holds both full DSNs.
+  - saasapi refuses to start unless its DSN sets `parseTime=true` (the
+    `database.params` default does), and warns if `loc` isn't UTC.
 - **Schemas, users and grants** are the migrate Job's; see
   [Migrations](#migrations).
 - **Declarative `users` isn't used.** The operator's `users` field applies
@@ -646,6 +648,7 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `saasapi.internalAuthSecret.*` | `imas-saasapi-internal-auth` | `INTERNAL_AUTH_SECRET_CURRENT`/`_PREVIOUS`. |
 | `saasapi.natsCredentials.*` | `imas-saasapi-nats` | The seed (as a file) and the JWT. |
 | `saasapi.fleetUpdateDispatch.enabled` | `false` | Also turns on saasapi's verify-only OpenBao client. |
+| `saasapi.fleetUpdateDispatch.clockSkew` | `""` (30s) | `SAASAPI_FLEET_UPDATE_CLOCK_SKEW`: clock-skew margin of the rollout wave gate, a Go duration up to `5m`. Empty emits no env var. |
 | `saasapi.operator.*` | off, port `8443` | The operator plane: TLS Secret, token Secret, fleetreleaser client. See [saasapi's operator plane](#saasapis-operator-plane). |
 | `saasapi.enrollmentKeys.rateLimit.*` | `1` / `5` | `deploy/saasapi/values.rate-limit.yaml`. `null` emits no env var. |
 | `credentialPublisher.*` | enabled, `platform/imas/saasapi-nats-user` | The publish Job. |

@@ -289,18 +289,32 @@ so the contract is on record for when it's enabled. With the flag on:
   is not proof, so the item stays `running` and, at the wave deadline,
   becomes `unresponsive_after_update`. The write time is the prop's
   `expiry` minus farmer's prop TTL (five minutes), on the clock of the
-  farmer node that stored it; the dispatch time is saasapi's. They may
-  differ by up to 30 seconds: a report written up to 30 seconds before
-  the dispatch still counts, and one apparently written more than 30
-  seconds in saasapi's future doesn't (nor does a static prop from
-  farmer's config). Keep the nodes on NTP: a larger skew fails items
-  rather than passing them. The exception is a sprout that already
-  reported the target when the rollout was planned: it answers "already
-  running", never reports again, and passes on its existing report, as
-  before. The GETs, which don't hold the rollout's record of dispatch
-  times, judge against the item's own last update (when farmer's reply
-  was recorded): never looser than the rollout, so a GET may show such an
-  item `running` until the rollout's next poll records it.
+  farmer node that stored it; the dispatch time is saasapi's. The two
+  clocks may differ by a margin, 30 seconds unless
+  `SAASAPI_FLEET_UPDATE_CLOCK_SKEW` sets another (a Go duration above 0
+  and at most `5m`; Helm `saasapi.fleetUpdateDispatch.clockSkew`): a report
+  written up to the margin before the dispatch still counts. A static prop
+  from farmer's config never counts.
+- **Clock skew is its own failure.** A report of the target dated more
+  than the margin ahead of saasapi's clock can't be shown to postdate the
+  dispatch: the item fails with `facts_clock_skew`, and saasapi logs the
+  sprout and the measured skew. Keep the nodes on NTP. A farmer clock
+  running behind by more than the margin looks like a stale report instead
+  (`unresponsive_after_update`).
+- **Sprouts already on the target.** A sprout that reported the target
+  when the rollout was planned is still sent the update; it compares the
+  target with the version it is running and answers "already running"
+  without reporting again. Its item succeeds only when that update job
+  succeeds while its last report still names the target, and fails with
+  `job_failed` or `job_expired` if the job does. Its old report alone is
+  not proof. (`farmer.job_status` doesn't record whether the job found the
+  sprout already up to date or installed a package, hence the report check.)
+- The batch-status GETs don't hold the rollout's record of dispatch times
+  or of which sprouts were on the target at planning. They judge a report
+  against the item's own last update (when farmer's reply was recorded)
+  and never pass an item on its job alone: never looser than the rollout,
+  so a GET may show an item `running` until the rollout's next poll
+  records it.
 - Items go out in waves, and approval, revocation and the window are
   re-checked before every wave. With the default `job_status` gate, the
   next wave goes out only once every item of this one has succeeded; with

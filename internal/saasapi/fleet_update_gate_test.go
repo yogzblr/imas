@@ -160,8 +160,25 @@ func TestReportFreshBoundaries(t *testing.T) {
 	}
 }
 
-// The gate end to end over farmer.props rows, at the skew margin's
-// boundaries, on a fixed saasapi clock.
+// jobsBySprout is a JobStatusReader answering from a fixed outcome per
+// sprout_id, for one tenant.
+type jobsBySprout struct {
+	tenant   string
+	outcomes map[string]JobOutcome
+}
+
+func (r jobsBySprout) JobOutcomes(_ context.Context, tenantID string, jobs []JobRef) (map[JobRef]JobOutcome, error) {
+	out := map[JobRef]JobOutcome{}
+	for _, j := range jobs {
+		if o, ok := r.outcomes[j.SproutID]; ok && tenantID == r.tenant {
+			out[j] = o
+		}
+	}
+	return out, nil
+}
+
+// The gate end to end over farmer.props rows and job outcomes, at the skew
+// margin's boundaries, on a fixed saasapi clock.
 func TestRefreshUpdateItems_FreshnessBoundaries(t *testing.T) {
 	gdb := newUpdateTestDB(t)
 	dispatched := time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)
@@ -178,36 +195,59 @@ func TestRefreshUpdateItems_FreshnessBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	ms := time.Millisecond
+	fresh := &updateProof{dispatched: dispatched}
+	atTarget := &updateProof{dispatched: dispatched, jobSuffices: true}
+	ok := ActionItemSucceeded
+	run := ActionItemRunning
+	fail := ActionItemFailed
 	cases := []struct {
-		sprout   string
-		value    string
-		written  time.Time
-		proof    *updateProof // nil: the rollout has no record of it
-		succeeds bool
+		sprout  string
+		value   string
+		written time.Time
+		job     JobOutcome
+		proof   *updateProof // nil: the rollout has no record of it
+		status  AssetActionItemStatus
+		code    string
 	}{
-		{"g-margin", "v2.4.1", dispatched.Add(-rolloutClockSkew), &updateProof{dispatched: dispatched}, false},
-		{"g-inside", "v2.4.1", dispatched.Add(-rolloutClockSkew + ms), &updateProof{dispatched: dispatched}, true},
-		{"g-after", "v2.4.1", dispatched.Add(20 * time.Second), &updateProof{dispatched: dispatched}, true},
-		{"g-future-edge", "v2.4.1", now.Add(rolloutClockSkew), &updateProof{dispatched: dispatched}, true},
-		{"g-future", "v2.4.1", now.Add(rolloutClockSkew + ms), &updateProof{dispatched: dispatched}, false},
-		{"g-old-version", oldSproutVersion, dispatched.Add(20 * time.Second), &updateProof{dispatched: dispatched}, false},
-		{"g-stale", "v2.4.1", dispatched.Add(-time.Hour), &updateProof{dispatched: dispatched}, false},
-		// Already on the target at planning: its existing report stands.
-		{"g-already", "v2.4.1", dispatched.Add(-time.Hour), &updateProof{dispatched: dispatched, anyReport: true}, true},
-		{"g-already-old", oldSproutVersion, dispatched.Add(-time.Hour), &updateProof{dispatched: dispatched, anyReport: true}, false},
+		{"g-margin", "v2.4.1", dispatched.Add(-rolloutClockSkew), JobOutcomeSucceeded, fresh, run, ""},
+		{"g-inside", "v2.4.1", dispatched.Add(-rolloutClockSkew + ms), "", fresh, ok, ""},
+		{"g-after", "v2.4.1", dispatched.Add(20 * time.Second), JobOutcomeRunning, fresh, ok, ""},
+		// A fresh report wins over a job that failed afterwards (as before).
+		{"g-after-failed-job", "v2.4.1", dispatched.Add(20 * time.Second), JobOutcomeFailed, fresh, ok, ""},
+		{"g-future-edge", "v2.4.1", now.Add(rolloutClockSkew), "", fresh, ok, ""},
+		{"g-future", "v2.4.1", now.Add(rolloutClockSkew + ms), "", fresh, fail, errCodeFactsClockSkew},
+		{"g-future-at-target", "v2.4.1", now.Add(time.Hour), JobOutcomeSucceeded, atTarget, fail, errCodeFactsClockSkew},
+		// A failed job is the more direct signal than a skewed clock.
+		{"g-future-failed-job", "v2.4.1", now.Add(time.Hour), JobOutcomeFailed, fresh, fail, errCodeJobFailed},
+		{"g-future-old-version", oldSproutVersion, now.Add(time.Hour), "", fresh, run, ""},
+		{"g-old-version", oldSproutVersion, dispatched.Add(20 * time.Second), "", fresh, run, ""},
+		{"g-stale", "v2.4.1", dispatched.Add(-time.Hour), JobOutcomeSucceeded, fresh, run, ""},
+		{"g-stale-expired", "v2.4.1", dispatched.Add(-time.Hour), JobOutcomeExpired, fresh, fail, errCodeJobExpired},
+		// On the target at planning: its job's success, while its report
+		// still names the target, is the proof; the report alone isn't.
+		{"g-already", "v2.4.1", dispatched.Add(-time.Hour), JobOutcomeSucceeded, atTarget, ok, ""},
+		{"g-already-pending", "v2.4.1", dispatched.Add(-time.Hour), JobOutcomeRunning, atTarget, run, ""},
+		{"g-already-no-job", "v2.4.1", dispatched.Add(-time.Hour), "", atTarget, run, ""},
+		{"g-already-failed", "v2.4.1", dispatched.Add(-time.Hour), JobOutcomeFailed, atTarget, fail, errCodeJobFailed},
+		{"g-already-expired", "v2.4.1", dispatched.Add(-time.Hour), JobOutcomeExpired, atTarget, fail, errCodeJobExpired},
+		{"g-already-now-old", oldSproutVersion, dispatched.Add(20 * time.Second), JobOutcomeSucceeded, atTarget, run, ""},
 		// No dispatch on record: nothing passes it, however fresh.
-		{"g-unknown", "v2.4.1", dispatched.Add(20 * time.Second), nil, false},
+		{"g-unknown", "v2.4.1", dispatched.Add(20 * time.Second), JobOutcomeSucceeded, nil, run, ""},
 		// Another tenant's fresh report of the target, for the same
 		// sprout_id: this tenant's sprout has reported nothing.
-		{"g-elsewhere", "", time.Time{}, &updateProof{dispatched: dispatched}, false},
+		{"g-elsewhere", "", time.Time{}, "", fresh, run, ""},
 	}
 	var items []AssetActionItem
 	proofs := map[string]updateProof{}
+	jobs := jobsBySprout{tenant: tid, outcomes: map[string]JobOutcome{}}
 	for i, c := range cases {
 		items = append(items, AssetActionItem{BatchID: batch.ID, AssetID: "a-" + c.sprout, TenantID: tid, Position: i,
 			SproutID: c.sprout, Status: ActionItemRunning, JID: jidFor("upd-01")})
 		if c.proof != nil {
 			proofs["a-"+c.sprout] = *c.proof
+		}
+		if c.job != "" {
+			jobs.outcomes[c.sprout] = c.job
 		}
 		if c.value != "" {
 			if err := reportFactWrittenAt(gdb, tid, c.sprout, farmerPropSproutVersion, c.value, c.written); err != nil {
@@ -223,19 +263,118 @@ func TestRefreshUpdateItems_FreshnessBoundaries(t *testing.T) {
 	}
 
 	w := sentWave{items: items, proofs: proofs}
-	refreshUpdateItemsWith(context.Background(), gdb, nil, farmerSproutFactsReader{}, batch, items, w.proof)
+	refreshUpdateItemsWith(context.Background(), gdb, jobs, farmerSproutFactsReader{}, batch, items, w.proof)
 
 	stored, err := loadWaveItems(gdb, batch, items)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i, c := range cases {
-		want := ActionItemRunning
-		if c.succeeds {
-			want = ActionItemSucceeded
+		if stored[i].Status != c.status || stored[i].ErrorCode != c.code || items[i].Status != c.status {
+			t.Errorf("%s: stored %s %q, in memory %s, want %s %q", c.sprout, stored[i].Status, stored[i].ErrorCode, items[i].Status, c.status, c.code)
 		}
-		if stored[i].Status != want || items[i].Status != want {
-			t.Errorf("%s: stored %s, in memory %s, want %s", c.sprout, stored[i].Status, items[i].Status, want)
+	}
+}
+
+// facts_clock_skew is diagnosable: the log names the sprout and the
+// measured skew, and the item's error has a message of its own, not
+// unresponsive_after_update's.
+func TestRefreshUpdateItems_ClockSkewLogged(t *testing.T) {
+	gdb := newUpdateTestDB(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	prevNow := rolloutNow
+	rolloutNow = func() time.Time { return now }
+	t.Cleanup(func() { rolloutNow = prevNow })
+	tid := mustCreateActiveTenant(t, gdb)
+	batch := AssetActionBatch{ID: "b_skew_" + tid, TenantID: tid, ActionType: controlplane.ActionSelfUpdate,
+		ActionParams: `{"version":"v2.4.1"}`, RequestedAssetIDs: `[]`, RolloutBatchSize: 25, RolloutGate: gateJobStatus}
+	items := []AssetActionItem{{BatchID: batch.ID, AssetID: "a1", TenantID: tid, SproutID: "web-ahead", Status: ActionItemRunning}}
+	if err := gdb.Create(&batch).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Create(&items).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := reportFactWrittenAt(gdb, tid, "web-ahead", farmerPropSproutVersion, "v2.4.1", now.Add(90*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	w := sentWave{items: items, proofs: map[string]updateProof{"a1": {dispatched: now.Add(-time.Minute)}}}
+	logged := captureStderr(t, func() {
+		refreshUpdateItemsWith(context.Background(), gdb, nil, farmerSproutFactsReader{}, batch, items, w.proof)
+	})
+	if items[0].Status != ActionItemFailed || items[0].ErrorCode != errCodeFactsClockSkew {
+		t.Fatalf("item = %+v", items[0])
+	}
+	if !strings.Contains(logged, "sprout web-ahead reported v2.4.1 in a row its farmer node dated 1m30s ahead of saasapi's clock (margin 30s)") {
+		t.Fatalf("skew log:\n%s", logged)
+	}
+	msg := actionErrorMessage(errCodeFactsClockSkew)
+	if msg == actionErrorMessage("no such code") || msg == actionErrorMessage(errCodeUnresponsiveAfterUpdate) {
+		t.Fatalf("facts_clock_skew message = %q", msg)
+	}
+}
+
+// judgeUpdateItem's order, for what the table above can't set up: a
+// report from the future with no write-time bound at all fails, and no
+// target (not a self_update batch) never passes anything.
+func TestJudgeUpdateItem(t *testing.T) {
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	p := updateProof{dispatched: now.Add(-time.Minute)}
+	f := TimedSproutFacts{SproutFacts: SproutFacts{Version: "v2.4.1"}}
+	f.Written.Version = now
+	if u := judgeUpdateItem(f, "", p, true, JobOutcomeSucceeded, now); u != nil {
+		t.Fatalf("no target: %v", u)
+	}
+	if u := judgeUpdateItem(f, "v2.4.1", p, false, JobOutcomeSucceeded, now); u != nil {
+		t.Fatalf("no proof: %v", u)
+	}
+	if u := judgeUpdateItem(f, "v2.4.1", p, true, "", now); u["status"] != ActionItemSucceeded {
+		t.Fatalf("fresh: %v", u)
+	}
+	f.Written.Version = time.Time{} // a static prop: no write time
+	if u := judgeUpdateItem(f, "v2.4.1", p, true, JobOutcomeSucceeded, now); u != nil {
+		t.Fatalf("static prop: %v", u)
+	}
+}
+
+// The margin is configurable: SetFleetUpdateClockSkew moves reportFresh's
+// bounds, and a value LoadConfig would refuse leaves the default.
+func TestSetFleetUpdateClockSkew(t *testing.T) {
+	t.Cleanup(func() { SetFleetUpdateClockSkew(defaultRolloutClockSkew) })
+	dispatched := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	now := dispatched.Add(time.Minute)
+	written := dispatched.Add(-45 * time.Second)
+	if reportFresh(written, dispatched, now) {
+		t.Fatal("45s before dispatch is fresh at the default margin")
+	}
+	SetFleetUpdateClockSkew(time.Minute)
+	if FleetUpdateClockSkew() != time.Minute || !reportFresh(written, dispatched, now) {
+		t.Fatalf("margin %s: 45s before dispatch not fresh", FleetUpdateClockSkew())
+	}
+	for _, d := range []time.Duration{0, -time.Second, maxRolloutClockSkew + time.Nanosecond} {
+		SetFleetUpdateClockSkew(d)
+		if FleetUpdateClockSkew() != defaultRolloutClockSkew {
+			t.Fatalf("SetFleetUpdateClockSkew(%s) left %s, want the default", d, FleetUpdateClockSkew())
+		}
+	}
+}
+
+func TestLoadConfigFleetUpdateClockSkew(t *testing.T) {
+	t.Setenv("SAASAPI_FLEET_UPDATE_CLOCK_SKEW", "")
+	cfg, err := LoadConfig()
+	if err != nil || cfg.FleetUpdateClockSkew != 30*time.Second {
+		t.Fatalf("default: %s, %v", cfg.FleetUpdateClockSkew, err)
+	}
+	for v, want := range map[string]time.Duration{"45s": 45 * time.Second, "2m": 2 * time.Minute, "5m": 5 * time.Minute, "500ms": 500 * time.Millisecond} {
+		t.Setenv("SAASAPI_FLEET_UPDATE_CLOCK_SKEW", v)
+		if cfg, err := LoadConfig(); err != nil || cfg.FleetUpdateClockSkew != want {
+			t.Errorf("%q: %s, %v", v, cfg.FleetUpdateClockSkew, err)
+		}
+	}
+	for _, v := range []string{"30", "0s", "-5s", "5m1s", "1h", "soon"} {
+		t.Setenv("SAASAPI_FLEET_UPDATE_CLOCK_SKEW", v)
+		if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "SAASAPI_FLEET_UPDATE_CLOCK_SKEW") {
+			t.Errorf("%q: %v, want a startup error", v, err)
 		}
 	}
 }
@@ -310,40 +449,68 @@ func TestFleetUpdate_StaleTargetReportDoesNotPassGate(t *testing.T) {
 }
 
 // A sprout that already reported the target version when the rollout was
-// planned is sent the update, answers "already running", and never writes
-// a new report. Its existing one still passes the wave, as before FU.6b.
-func TestFleetUpdate_AlreadyAtTargetPassesOnItsReport(t *testing.T) {
-	gdb := newUpdateTestDB(t)
-	fastRollouts(t, 5*time.Second)
-	ns := startTestBus(t)
-	connectSaaSBus(t, ns)
-	tid := mustCreateActiveTenant(t, gdb)
-	mustPublishVersion(t, gdb, "v2.4.1", time.Now())
-	mustApprove(t, gdb, tid, "v2.4.1")
-	assets := mustUpdateFleet(t, gdb, tid, 3)
-	// upd-02 reported v2.4.1 an hour ago.
-	mustReportFacts(t, gdb, tid, "upd-02", "linux", "amd64", "v2.4.1")
-	farmer := startFakeFarmer(t, ns, func(req controlplane.SproutActionRequest) any {
-		return controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
-			Status: controlplane.StatusDispatched, JID: jidFor(req.SproutID)}
-	})
-	installReader(t, &waveReader{farmer: farmer, outcome: func(ref JobRef, _ int) (JobOutcome, bool) {
-		if ref.SproutID != "upd-02" {
-			_ = reportFact(gdb, tid, ref.SproutID, farmerPropSproutVersion, "v2.4.1")
-		}
-		return JobOutcomeSucceeded, true
-	}})
+// planned is sent the update and answers "already running" (the sprout
+// compares the target with its own running version), writing no new
+// report. It passes once that job succeeds, while its report still names
+// the target, and not on the report alone.
+func TestFleetUpdate_AlreadyAtTargetNeedsItsJob(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// job is upd-02's job outcome ("" never shows up); nowOld makes it
+		// report the old version again (fresh) once asked about.
+		job    JobOutcome
+		nowOld bool
+		status AssetActionItemStatus
+		code   string
+		sent   int
+	}{
+		{"job succeeded", JobOutcomeSucceeded, false, ActionItemSucceeded, "", 3},
+		{"job never finishes", "", false, ActionItemUnresponsiveAfterUpdate, errCodeUnresponsiveAfterUpdate, 2},
+		{"job still running", JobOutcomeRunning, false, ActionItemUnresponsiveAfterUpdate, errCodeUnresponsiveAfterUpdate, 2},
+		{"job failed", JobOutcomeFailed, false, ActionItemFailed, errCodeJobFailed, 2},
+		{"job expired", JobOutcomeExpired, false, ActionItemFailed, errCodeJobExpired, 2},
+		{"reports another version since", JobOutcomeSucceeded, true, ActionItemUnresponsiveAfterUpdate, errCodeUnresponsiveAfterUpdate, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gdb := newUpdateTestDB(t)
+			fastRollouts(t, 300*time.Millisecond)
+			ns := startTestBus(t)
+			connectSaaSBus(t, ns)
+			tid := mustCreateActiveTenant(t, gdb)
+			mustPublishVersion(t, gdb, "v2.4.1", time.Now())
+			mustApprove(t, gdb, tid, "v2.4.1")
+			assets := mustUpdateFleet(t, gdb, tid, 3)
+			// upd-02 reported v2.4.1 an hour ago.
+			mustReportFacts(t, gdb, tid, "upd-02", "linux", "amd64", "v2.4.1")
+			farmer := startFakeFarmer(t, ns, func(req controlplane.SproutActionRequest) any {
+				return controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
+					Status: controlplane.StatusDispatched, JID: jidFor(req.SproutID)}
+			})
+			installReader(t, &waveReader{farmer: farmer, outcome: func(ref JobRef, _ int) (JobOutcome, bool) {
+				if ref.SproutID != "upd-02" {
+					_ = reportFact(gdb, tid, ref.SproutID, farmerPropSproutVersion, "v2.4.1")
+					return JobOutcomeSucceeded, true
+				}
+				if tc.nowOld {
+					_ = reportFact(gdb, tid, ref.SproutID, farmerPropSproutVersion, oldSproutVersion)
+				}
+				return tc.job, tc.job != ""
+			}})
 
-	_, resp := postUpdates(t, tid, map[string]any{"asset_ids": assets, "target_version": "v2.4.1", "batch_size": 2})
-	actionDispatches.Wait()
-	if reqs, _ := farmer.seen(); len(reqs) != 3 {
-		t.Fatalf("farmer got %d requests, want 3 (wave 1 passed)", len(reqs))
-	}
-	_, got := getUpdateBatch(t, tid, resp["batch_id"].(string))
-	for _, it := range got.Items {
-		if it.Status != ActionItemSucceeded {
-			t.Errorf("item = %+v, want succeeded", it)
-		}
+			_, resp := postUpdates(t, tid, map[string]any{"asset_ids": assets, "target_version": "v2.4.1", "batch_size": 2})
+			actionDispatches.Wait()
+			if reqs, _ := farmer.seen(); len(reqs) != tc.sent {
+				t.Fatalf("farmer got %d requests, want %d", len(reqs), tc.sent)
+			}
+			_, got := getUpdateBatch(t, tid, resp["batch_id"].(string))
+			items := itemsByAsset(got)
+			if it := items[assets[0]]; it.Status != ActionItemSucceeded {
+				t.Errorf("upd-01 = %+v, want succeeded", it)
+			}
+			if it := items[assets[1]]; it.Status != tc.status || it.Error != tc.code {
+				t.Errorf("upd-02 = %+v, want %s %s", it, tc.status, tc.code)
+			}
+		})
 	}
 }
 
@@ -360,11 +527,11 @@ func TestRolloutProofs(t *testing.T) {
 	}
 	proofs := rolloutProofs(batch, items, map[string]time.Time{"a1": at, "a2": at},
 		map[SproutRef]bool{{TenantID: "t_a", SproutID: "web-02"}: true, {TenantID: "t_b", SproutID: "web-01"}: true})
-	if p := proofs["a1"]; !p.dispatched.Equal(at) || p.anyReport {
+	if p := proofs["a1"]; !p.dispatched.Equal(at) || p.jobSuffices {
 		t.Errorf("a1 = %+v, want a fresh report after %s", p, at)
 	}
-	if p := proofs["a2"]; !p.dispatched.Equal(at) || !p.anyReport {
-		t.Errorf("a2 = %+v, want its existing report to count", p)
+	if p := proofs["a2"]; !p.dispatched.Equal(at) || !p.jobSuffices {
+		t.Errorf("a2 = %+v, want its job's success to count", p)
 	}
 	if _, ok := (sentWave{proofs: proofs}).proof(items[2]); ok {
 		t.Error("a3 was never dispatched, but has a proof")
@@ -535,7 +702,7 @@ func TestRunningSinceProofIsTheRunningTransition(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, ok := runningSinceProof(stored)
-	if !ok || p.anyReport || p.dispatched.Before(before) {
+	if !ok || p.jobSuffices || p.dispatched.Before(before) {
 		t.Fatalf("runningSinceProof = %+v %t, want a fresh-report bound no earlier than %s", p, ok, before)
 	}
 	if _, ok := runningSinceProof(AssetActionItem{}); ok {
