@@ -12,12 +12,19 @@ EVAL DEPENDENCIES deployed by this release:
     but the gateway and fleet keys (and the eval CA) are new ones{{ end }}.
 {{- end }}
 {{- if .Values.pxc.enabled }}
-  - PXC ({{ .Values.pxc.pxc.size }} node(s)). Schemas, users and grants: Job {{ include "imas-farmer.fullname" . }}-db-bootstrap-*
-    (it waits for saasapi's first migration before farmer's enrollment_keys grant).
+  - PXC ({{ .Values.pxc.pxc.size }} node(s)).
 {{- end }}
 {{- if .Values.valkey.enabled }}
   - Valkey (standalone, no auth or TLS).
 {{- end }}
+{{- end }}
+
+Schemas, users, grants and migrations: hook Job {{ include "imas-farmer.migrate.namePrefix" . }}-db-migrate
+({{ ternary "post-install" "pre-install" .Values.pxc.enabled }} and pre-upgrade; {{ include "imas-farmer.migrate.namePrefix" . }}-db-migrate-check on rollback).
+{{- if not (include "imas-farmer.migrate.rootSecret" .) }}
+No PXC root Secret is configured, so it runs `migrate up --skip-root`: the schemas,
+users and grants, including farmer's UPDATE (used_count, last_used_at) on
+{{ .Values.database.saasapi.name }}.enrollment_keys, are yours to create.
 {{- end }}
 
 Point the nats chart (deploy/helm/nats) at this release:

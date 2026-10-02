@@ -17,6 +17,8 @@ It deploys imas's non-DMZ core:
 - **The SaaS API credential hand-off**: the `farmer publish-saasapi-credential`
   Job, its ServiceAccount and its NetworkPolicy, from
   `deploy/farmer/saasapi-credential-publish-job.yaml`.
+- **Schema migrations**: `cmd/migrate` as Helm hook Jobs (see
+  [Migrations](#migrations)).
 - **Optional subcharts**, each behind its own toggle. With all three on,
   the chart is self-contained for an eval install. With them off, it points
   at externally managed instances.
@@ -83,7 +85,9 @@ kubectl -n imas-core create secret generic imas-saasapi-internal-auth \
 
 helm dependency build deploy/helm/farmer
 helm install imas-core deploy/helm/farmer -n imas-core -f deploy/helm/farmer/ci/default-values.yaml \
-  --set farmer.image.repository=<registry>/imas-farmer --set saasapi.image.repository=<registry>/imas-saasapi
+  --timeout 30m \
+  --set farmer.image.repository=<registry>/imas-farmer --set saasapi.image.repository=<registry>/imas-saasapi \
+  --set database.migrate.image.repository=<registry>/imas-migrate
 ```
 
 Then, because the eval install has no ESO, deliver saasapi's credential by
@@ -98,10 +102,13 @@ kubectl -n imas-core create secret generic imas-saasapi-nats \
 
 What to expect on first install:
 
-- PXC takes a few minutes to come up. farmer and saasapi crash-loop until
-  the `db-bootstrap` Job has created their users.
-- The OpenBao bootstrap and publish Jobs are hooks. Helm waits for them,
-  so `helm install` needs the seed Secret in place, or it times out.
+- PXC takes a few minutes to come up. The migrate Job is a post-install
+  hook that waits for it, so `helm install` doesn't return until PXC is up
+  and both schemas are migrated: give it a `--timeout` of at least
+  `database.migrate.activeDeadlineSeconds` (Helm's default, 5m, is too
+  short). Until then farmer and saasapi wait for their schema.
+- The OpenBao bootstrap and publish Jobs are hooks too. Helm waits for
+  them, so `helm install` needs the seed Secret in place, or it times out.
 - **Dev-mode OpenBao is in memory.** If its pod restarts, the keys, the
   eval CA, the policies and the roles are gone. `helm upgrade` re-runs the
   bootstrap, but it mints *new* gateway and fleet keys and a new CA.
@@ -112,7 +119,8 @@ What to expect on first install:
 
 - `openbao.enabled=false` and `openbaoClient.addr`/`caConfigMap`;
 - `pxc.enabled=false`, `database.host` and `database.existingSecret` (both
-  full DSNs);
+  full DSNs). The migrate Job runs at pre-install; see
+  [Migrations](#migrations) for who creates the users and grants;
 - `valkey.enabled=false` and `valkey.addrs`;
 - `tls.mode=secret` (e.g. cert-manager);
 - `externalSecrets.enabled=true`.
@@ -259,28 +267,76 @@ Each OpenBao client runs under its own role and gets exactly one policy.
   - `pxc.enabled`: the host is `<cluster>-haproxy`. Passwords are generated
     once (kept across upgrades with `lookup`) into `<release>-farmer-db`.
   - External: `database.existingSecret` holds both full DSNs.
-- **`db-bootstrap`** (only with `pxc.enabled` and the generated Secret)
-  creates both schemas and users, then applies §5.1:
+- **Schemas, users and grants** are the migrate Job's; see
+  [Migrations](#migrations).
+- **Declarative `users` isn't used.** The operator's `users` field applies
+  one grant list to every listed schema, which can't express §5.1's split
+  or the column grant.
+
+## Migrations
+
+Schema changes are versioned goose migrations compiled into `cmd/migrate`
+(image `ghcr.io/yogzblr/imas-migrate`, tag defaulting to the chart's
+`appVersion`), run by Helm hook Jobs. farmer and saasapi no longer
+migrate on startup; each waits until the schema version it needs is
+there (`docs/design/cloudxp-machine-manager-api-design.md` §4.1a).
+
+| Job | Hooks | Runs | Root password |
+|---|---|---|---|
+| `<release>-farmer-db-migrate` | `post-install` with `pxc.enabled`, else `pre-install`; `pre-upgrade` | `migrate up` | mounted, unless the root step is skipped |
+| `<release>-farmer-db-migrate-check` | `pre-rollback` | `migrate check` | never |
+
+- **`migrate up`**, in one pod: waits for PXC; as PXC root creates both
+  schemas and users and applies §4.1:
 
   ```sql
   GRANT ALL    ON farmer.* TO farmer_svc;   GRANT SELECT ON saas.*   TO farmer_svc;
   GRANT ALL    ON saas.*   TO saas_svc;     GRANT SELECT ON farmer.* TO saas_svc;
-  GRANT UPDATE (used_count, last_used_at) ON saas.enrollment_keys TO farmer_svc;
   ```
 
-  - **The last grant waits for saasapi's first migration.** A column grant
-    needs the table, and saasapi's AutoMigrate creates it.
-  - **It is a plain Job, not a hook.** Waiting on saasapi, which itself
-    waits on its NATS credential, must not block `helm install`.
-  - **It is named by a hash of its pod template.** An unchanged spec is a
-    no-op on upgrade and on Argo CD sync; a changed one is a new Job
-    rather than an immutable-field error.
-  - To re-run it as is, delete the Job and `helm upgrade`.
-  - The root password comes from the operator's `<cluster>-secrets`, via
-    an option file, never argv.
-- **Declarative `users` isn't used.** The operator's `users` field applies
-  one grant list to every listed schema, which can't express §5.1's split
-  or the column grant.
+  then migrates `farmer` as `farmer_svc` and `saas` as `saas_svc` (single
+  writer per schema), and last grants
+  `UPDATE (used_count, last_used_at) ON saas.enrollment_keys` to
+  `farmer_svc`. The migration creates that table, so nothing waits for
+  saasapi any more.
+- **Install.** The bundled PXC doesn't exist at `pre-install`, so with
+  `pxc.enabled` the Job is `post-install`. With an external PXC it is
+  `pre-install`, and farmer and saasapi start on a migrated schema.
+- **Rollback.** `helm rollback` runs the *target* revision's
+  `pre-rollback` hook: that release's binary checks that the schema the
+  newer one left is within the range it supports, and changes nothing.
+  Migrations are forward-only and backward compatible for one version, so
+  a one-version rollback passes. A rollback to a revision older than this
+  chart has no check.
+- **The root step** runs whenever the chart knows a root password:
+  - `pxc.enabled`: the operator's `<cluster>-secrets` (or
+    `pxc.pxc.clusterSecretName`), key `root`, unless
+    `database.migrate.rootPasswordSecret` names another;
+  - external PXC: only with `database.migrate.rootPasswordSecret` (and
+    `rootPasswordKey`, `rootUser`). Without it the Job runs
+    `migrate up --skip-root`: the schemas, users, the grants above and the
+    `enrollment_keys` column grant must already exist, and the column
+    grant can only be given once the first migration has created the
+    table.
+
+  The users and passwords come from the two DSNs (the generated
+  `<release>-farmer-db` or `database.existingSecret`), so the root step
+  also works with `pxc.enabled` and your own DSN Secret.
+- **Credentials are files.** The root password and both DSNs are mounted
+  from their Secrets (`IMAS_MIGRATE_*_FILE`); none is in the Job's env,
+  args or spec, and `cmd/migrate` never logs one.
+- **Hook lifecycle.** `before-hook-creation,hook-succeeded`: a successful
+  run is deleted, a failed one is kept for its logs until the next run
+  replaces it. `backoffLimit` and `activeDeadlineSeconds` come from
+  `database.migrate`. Keep `helm --timeout` above the deadline.
+- **Argo CD** has no install/upgrade split and no rollback hook. With
+  `database.migrate.argoCDHooks` (on) the `up` Job is a `Sync` hook with
+  the bundled PXC (the cluster is created in the same phase) and
+  `PreSync` with an external one; the check Job never runs under Argo CD.
+- **Renaming a user or schema** (`database.farmer.*`, `database.saasapi.*`)
+  on upgrade: the `pre-upgrade` Job still reads the previous DSN Secret,
+  so the new user is only created by the following upgrade. Don't rename
+  in place.
 
 ## Valkey
 
@@ -324,9 +380,16 @@ state moved off local disk first.
 | saasapi | out | the bus pods | `bus.port` |
 | saasapi | out | `saasapiExtraEgress`, default HTTPS anywhere (the Keycloak JWKS). **Narrow it.** | 443 |
 | publish Job | out | OpenBao, DNS; nothing else, no ingress | 8200, 53 |
-| db-bootstrap / openbao-bootstrap | out | PXC / OpenBao, DNS | 3306 / 8200, 53 |
+| migrate Jobs | out | PXC, DNS; nothing else, no ingress | 3306, 53 |
+| openbao-bootstrap | out | OpenBao, DNS | 8200, 53 |
 | all | out | DNS | 53 |
 
+- **The migrate Jobs' policy** is a hook itself, created before them at
+  every event (at `pre-install` and `pre-upgrade` the release's own
+  resources aren't applied yet), and rendered whatever
+  `networkPolicy.enabled` says. Their pods carry
+  `app.kubernetes.io/name: imas-migrate`, not the chart's name, so the
+  nats chart's bus policy never admits them.
 - **Peers.** A bundled dependency's peer is this namespace's pods. An
   external one uses `networkPolicy.external.<dep>`. An empty list means any
   destination, on that port only. OpenBao defaults to the reference's
@@ -364,7 +427,10 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `database.host` / `port` / `params` | `""` / `3306` / `parseTime=true&charset=utf8mb4&loc=UTC` | PXC. Empty host with `pxc.enabled`: its HAProxy Service. |
 | `database.farmer.*` / `database.saasapi.*` | `farmer`/`farmer_svc`, `saas`/`saas_svc` | Schemas and users. |
 | `database.existingSecret` | `""` | Both DSNs (`existingSecretKeys`). Required without `pxc.enabled`. |
-| `database.bootstrap.*` | on | The `db-bootstrap` Job. |
+| `database.migrate.image.*` | `ghcr.io/yogzblr/imas-migrate`, tag `appVersion` | `cmd/migrate`. Keep it at farmer's and saasapi's version. |
+| `database.migrate.rootPasswordSecret` / `rootPasswordKey` / `rootUser` | `""` / `root` / `root` | PXC root, for the root step. Empty: the operator's Secret with `pxc.enabled`, `--skip-root` otherwise. |
+| `database.migrate.wait` / `backoffLimit` / `activeDeadlineSeconds` | `15m` / `2` / `1800` | How long to wait for PXC; the Job's retry and time budget. |
+| `database.migrate.argoCDHooks` | `true` | Argo CD hook annotations. See [Migrations](#migrations). |
 | `objectStore.*` | empty | `IMAS_S3_*`. `jobBucket` must differ from `bucket`. |
 | `farmer.image.*` | `ghcr.io/yogzblr/imas-farmer` | Also the publish Job's image. |
 | `farmer.replicaCount` | `1` | Must be 1. |
@@ -445,9 +511,6 @@ registry.
   - a second run from a fresh config root wrote nothing, and the KV stayed
     at version 1;
   - it was refused on the seed path.
-- **The `db-bootstrap` script**, run against a stub `mysql`: it sent
-  exactly the §5.1 SQL above, and waited for `saas.enrollment_keys` before
-  the column grant.
 
 **Revalidated on 2026-09-27 against `main` at `84f352b`** (PRs #4, #15,
 #16 and #18 included; #18 gave farmer `farmerbusurl`, so the relay is
@@ -492,7 +555,9 @@ gone):
   - farmer booting against PXC, including `pki.ReloadNKeys`, which needs
     PXC;
   - the Kubernetes auth login itself;
-  - the SQL against a real MySQL server.
+  - the SQL against a real MySQL server;
+  - the migrate hook Jobs (rendering and `go test` only; `cmd/migrate`
+    itself has its own tests against MySQL in `internal/migrations`).
 
 ## Known gaps
 
@@ -534,6 +599,13 @@ exceptions, all subcharts and none of them Go dependencies:
   bundled OpenBao, saasapi fetches the bus CA over plain HTTP. With an
   external OpenBao, set `openbaoClient.caConfigMap` so that fetch, and
   every client, verifies OpenBao.
+- **The migrate Job holds PXC's root password.** Only the `up` Job's pod
+  mounts it, one key, as a file; farmer, saasapi and the rollback check
+  never see it, and `TestRootSecretOnlyInMigrateJob` fails the build if
+  any other manifest names that Secret. The pod has no ServiceAccount
+  token and reaches only PXC and DNS. Whoever can create pods in this
+  namespace can still mount the operator's root Secret: the same
+  namespace-access rule as the publisher's applies.
 - **Credentials in the environment.** `IMAS_PXC_DSN` holds a password in
   farmer's environment, as farmer's config requires. farmer's config file
   is mounted read-only, and `enableServiceLinks` is off, so jety can't

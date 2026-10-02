@@ -201,20 +201,6 @@ func find(t *testing.T, docs []obj, kind, name string) obj {
 	return hits[0]
 }
 
-func findPrefix(t *testing.T, docs []obj, kind, prefix string) obj {
-	t.Helper()
-	var hits []obj
-	for _, d := range docs {
-		if n, _ := get(d, "metadata", "name").(string); d["kind"] == kind && strings.HasPrefix(n, prefix) {
-			hits = append(hits, d)
-		}
-	}
-	if len(hits) != 1 {
-		t.Fatalf("want exactly one %s %s*, got %d", kind, prefix, len(hits))
-	}
-	return hits[0]
-}
-
 func has(docs []obj, kind, name string) bool {
 	for _, d := range docs {
 		if d["kind"] == kind && get(d, "metadata", "name") == name {
@@ -326,13 +312,13 @@ func TestDefaultsRender(t *testing.T) {
 		{"NetworkPolicy", "imas-saasapi-cred-publisher"},
 		{"NetworkPolicy", "t-farmer"}, {"NetworkPolicy", "t-farmer-saasapi"},
 		{"Secret", "t-farmer-db"}, {"Job", "t-farmer-openbao-bootstrap"},
+		{"Job", "t-farmer-db-migrate"}, {"Job", "t-farmer-db-migrate-check"}, {"NetworkPolicy", "t-farmer-db-migrate"},
 		{"ConfigMap", "t-farmer-openbao-policies"}, {"Secret", "t-farmer-openbao-bootstrap"},
 	} {
 		if !has(docs, want.kind, want.name) {
 			t.Errorf("missing %s %s", want.kind, want.name)
 		}
 	}
-	findPrefix(t, docs, "Job", "t-farmer-db-bootstrap-")
 	if has(docs, "ExternalSecret", "imas-farmer-nats-seeds") {
 		t.Error("ExternalSecrets rendered with externalSecrets.enabled=false")
 	}
@@ -374,6 +360,11 @@ func TestValidationFailures(t *testing.T) {
 		{"no keycloak", "saasapi.jwt.keycloakJWKSURL is required", []string{"--set", "saasapi.jwt.keycloakJWKSURL="}},
 		{"no saasapi creds", "natsCredentials.secretName is required", []string{"--set", "saasapi.natsCredentials.secretName="}},
 		{"bad db identifier", "must match ^[A-Za-z0-9_]{1,32}$", []string{"--set", "database.farmer.user=farmer'--"}},
+		{"one user for both schemas", "must name different schemas and different users", []string{"--set", "database.saasapi.user=farmer_svc"}},
+		{"one schema for both", "must name different schemas and different users", []string{"--set", "database.saasapi.name=farmer"}},
+		{"old bootstrap values", "database.bootstrap.* was replaced by database.migrate.*", []string{"--set", "database.bootstrap.enabled=false"}},
+		{"bad migrate wait", "database.migrate.wait", []string{"--set", "database.migrate.wait=10"}},
+		{"bad root user", "database.migrate.rootUser", []string{"--set", "database.migrate.rootUser=root@%"}},
 
 		// The publisher's boundary (deploy/farmer/README.md, "OpenBao policy").
 		{"publisher path equals seed path", "must be different", []string{"--set", "credentialPublisher.kvPath=platform/imas/nats-seeds"}},
@@ -978,8 +969,11 @@ func TestSharedDependencies(t *testing.T) {
 	t.Run("external", func(t *testing.T) {
 		docs := mustRender(t, "-f", ciValues(t, "external-values.yaml"))
 		check(t, docs, "imas-core-db", "valkey-0.valkey.valkey.svc.cluster.local:6379,valkey-1.valkey.valkey.svc.cluster.local:6379")
+		// No generated Secret and no eval OpenBao bootstrap; the schemas
+		// are still migrated (TestDBMigrateJobs).
+		jobs := map[any]bool{"t-farmer-saasapi-credential-publish": true, "t-farmer-db-migrate": true, "t-farmer-db-migrate-check": true}
 		for _, d := range docs {
-			if d["kind"] == "Secret" || d["kind"] == "Job" && d["metadata"].(obj)["name"] != "t-farmer-saasapi-credential-publish" {
+			if d["kind"] == "Secret" || d["kind"] == "Job" && !jobs[get(d, "metadata", "name")] {
 				t.Errorf("external mode rendered %s %v", d["kind"], get(d, "metadata", "name"))
 			}
 		}
@@ -1010,48 +1004,253 @@ func TestSharedDependencies(t *testing.T) {
 	})
 }
 
-// The db-bootstrap Job is named by a hash of its pod template: stable
-// across renders (so an upgrade with nothing changed is a no-op, even
-// though the generated passwords aren't in it), new when the spec changes.
-func TestDBBootstrapJob(t *testing.T) {
-	name := func(args ...string) string {
-		return get(findPrefix(t, mustRender(t, args...), "Job", "t-farmer-db-bootstrap-"), "metadata", "name").(string)
-	}
-	a, b := name(), name()
-	if a != b {
-		t.Errorf("db-bootstrap name not stable across renders: %s / %s", a, b)
-	}
-	if c := name("--set", "database.saasapi.user=saas2"); c == a {
-		t.Error("db-bootstrap name unchanged after a spec change")
-	}
-	job := findPrefix(t, mustRender(t), "Job", "t-farmer-db-bootstrap-")
-	if get(job, "metadata", "annotations", "helm.sh/hook") != nil {
-		t.Error("db-bootstrap must not be a hook: it waits on saasapi, which would block helm install")
-	}
-	c := container(t, job, "bootstrap")
-	script := get(c, "args", 0).(string)
-	for _, want := range []string{
-		"GRANT ALL    ON \\`$FARMER_DB\\`.* TO '$FARMER_USER'@'%';",
-		"GRANT SELECT ON \\`$SAAS_DB\\`.*   TO '$FARMER_USER'@'%';",
-		"GRANT ALL    ON \\`$SAAS_DB\\`.*   TO '$SAAS_USER'@'%';",
-		"GRANT SELECT ON \\`$FARMER_DB\\`.* TO '$SAAS_USER'@'%';",
-		"GRANT UPDATE (used_count, last_used_at) ON \\`$SAAS_DB\\`.\\`enrollment_keys\\` TO '$FARMER_USER'@'%';",
+// The migrate hook Jobs (API design §4.1a): `up` on install and upgrade,
+// `check` on rollback, each one pod running cmd/migrate.
+func TestDBMigrateJobs(t *testing.T) {
+	docs := mustRender(t, "--set", "database.migrate.backoffLimit=4", "--set", "database.migrate.activeDeadlineSeconds=1234")
+	up, chk := find(t, docs, "Job", "t-farmer-db-migrate"), find(t, docs, "Job", "t-farmer-db-migrate-check")
+	for _, tc := range []struct {
+		job   obj
+		hooks string
+		args  []string
+	}{
+		// The bundled PXC doesn't exist at pre-install.
+		{up, "post-install,pre-upgrade", []string{"up", "--wait=15m"}},
+		{chk, "pre-rollback", []string{"check", "--wait=15m"}},
 	} {
-		if !strings.Contains(script, want) {
-			t.Errorf("bootstrap SQL lacks %s", want)
+		name := get(tc.job, "metadata", "name")
+		if got := get(tc.job, "metadata", "annotations", "helm.sh/hook"); got != tc.hooks {
+			t.Errorf("%s hooks %v, want %s", name, got, tc.hooks)
+		}
+		if got := get(tc.job, "metadata", "annotations", "helm.sh/hook-delete-policy"); got != "before-hook-creation,hook-succeeded" {
+			t.Errorf("%s hook-delete-policy %v", name, got)
+		}
+		if get(tc.job, "spec", "backoffLimit") != 4 || get(tc.job, "spec", "activeDeadlineSeconds") != 1234 {
+			t.Errorf("%s backoffLimit/activeDeadlineSeconds not from values: %v %v", name, get(tc.job, "spec", "backoffLimit"), get(tc.job, "spec", "activeDeadlineSeconds"))
+		}
+		c := container(t, tc.job, "migrate")
+		if c["image"] != "ghcr.io/yogzblr/imas-migrate:"+chartAppVersion(t) {
+			t.Errorf("%s image %v, want the chart's appVersion", name, c["image"])
+		}
+		if yamlString(t, c["args"]) != yamlString(t, tc.args) {
+			t.Errorf("%s args %v, want %v", name, c["args"], tc.args)
+		}
+		checkRestricted(t, tc.job)
+		// The bus admits core pods by app.kubernetes.io/name; these must
+		// not be among them.
+		if l := get(tc.job, "spec", "template", "metadata", "labels", "app.kubernetes.io/name"); l != "imas-migrate" {
+			t.Errorf("%s pod name label %v", name, l)
+		}
+		// Every credential is a file from a Secret volume: no secret env,
+		// nothing in args.
+		for _, e := range c["env"].([]any) {
+			if get(e, "valueFrom") != nil {
+				t.Errorf("%s env %v comes from a Secret; use the *_FILE form", name, get(e, "name"))
+			}
+		}
+		db := byName(podSpec(tc.job)["volumes"])["db"]
+		if get(db, "secret", "secretName") != "t-farmer-db" || get(db, "secret", "items", 0, "key") != "farmer-dsn" || get(db, "secret", "items", 1, "key") != "saasapi-dsn" {
+			t.Errorf("%s DSN volume %v", name, db)
 		}
 	}
-	env := envMap(c)
-	if get(env["ROOT_PASSWORD"], "valueFrom", "secretKeyRef", "name") != "t-pxc-secrets" {
-		t.Errorf("root password Secret %v", env["ROOT_PASSWORD"])
+	if got := rootSecretOf(t, up); got != "t-pxc-secrets/root" {
+		t.Errorf("up root Secret %q, want the operator's t-pxc-secrets/root", got)
 	}
-	if strings.Contains(yamlString(t, job), "stringData") || strings.Contains(script, "--password") || strings.Contains(script, "MYSQL_PWD") {
-		t.Error("a password may reach the Job spec or argv")
+	if env := envValues(container(t, up, "migrate")); env["IMAS_MIGRATE_ROOT_PASSWORD_FILE"] != "/var/run/secrets/imas/pxc-root/password" || env["IMAS_MIGRATE_ROOT_USER"] != "root" ||
+		env["IMAS_MIGRATE_FARMER_DSN_FILE"] != "/var/run/secrets/imas/db/farmer-dsn" || env["IMAS_MIGRATE_SAAS_DSN_FILE"] != "/var/run/secrets/imas/db/saasapi-dsn" {
+		t.Errorf("up env %v", env)
 	}
-	// No bootstrap with externally supplied DSNs: the chart can't know the passwords.
-	for _, d := range mustRender(t, "--set", "database.existingSecret=mine") {
-		if n, _ := get(d, "metadata", "name").(string); strings.HasPrefix(n, "t-farmer-db") {
-			t.Errorf("rendered %s with database.existingSecret", n)
+	// Rollback only reads: no root password.
+	if got := rootSecretOf(t, chk); got != "" {
+		t.Errorf("check mounts the root Secret %s", got)
+	}
+	if _, ok := envMap(container(t, chk, "migrate"))["IMAS_MIGRATE_ROOT_PASSWORD_FILE"]; ok {
+		t.Error("check is given a root password")
+	}
+	if get(up, "metadata", "annotations", "argocd.argoproj.io/hook") != "Sync" {
+		t.Errorf("Argo CD hook with the bundled PXC %v, want Sync", get(up, "metadata", "annotations", "argocd.argoproj.io/hook"))
+	}
+	if get(chk, "metadata", "annotations", "argocd.argoproj.io/hook") != nil {
+		t.Error("the check Job must not become an Argo CD sync hook")
+	}
+
+	t.Run("operator secret name", func(t *testing.T) {
+		if got := rootSecretOf(t, find(t, mustRender(t, "--set", "pxc.pxc.clusterSecretName=pxc-root"), "Job", "t-farmer-db-migrate")); got != "pxc-root/root" {
+			t.Errorf("root Secret %q", got)
+		}
+	})
+	t.Run("bundled PXC, own DSN secret", func(t *testing.T) {
+		// cmd/migrate takes both accounts from the DSNs, so the root step
+		// works with any DSN source.
+		up := find(t, mustRender(t, "--set", "database.existingSecret=mine"), "Job", "t-farmer-db-migrate")
+		if rootSecretOf(t, up) != "t-pxc-secrets/root" || get(byName(podSpec(up)["volumes"])["db"], "secret", "secretName") != "mine" {
+			t.Errorf("root %q, DSNs %v", rootSecretOf(t, up), byName(podSpec(up)["volumes"])["db"])
+		}
+	})
+	t.Run("external PXC", func(t *testing.T) {
+		docs := mustRender(t, "-f", ciValues(t, "external-values.yaml"))
+		up := find(t, docs, "Job", "t-farmer-db-migrate")
+		if got := get(up, "metadata", "annotations", "helm.sh/hook"); got != "pre-install,pre-upgrade" {
+			t.Errorf("hooks %v", got)
+		}
+		if get(up, "metadata", "annotations", "argocd.argoproj.io/hook") != "PreSync" {
+			t.Errorf("Argo CD hook %v", get(up, "metadata", "annotations", "argocd.argoproj.io/hook"))
+		}
+		// No root Secret known: ops own the accounts and grants.
+		if got := container(t, up, "migrate")["args"]; yamlString(t, got) != yamlString(t, []string{"up", "--wait=15m", "--skip-root"}) {
+			t.Errorf("args %v", got)
+		}
+		if got := rootSecretOf(t, up); got != "" {
+			t.Errorf("root Secret %q mounted with --skip-root", got)
+		}
+		if get(byName(podSpec(up)["volumes"])["db"], "secret", "secretName") != "imas-core-db" {
+			t.Error("DSNs not from database.existingSecret")
+		}
+		np := find(t, docs, "NetworkPolicy", "t-farmer-db-migrate")
+		if get(np, "metadata", "annotations", "helm.sh/hook") != "pre-install,pre-upgrade,pre-rollback" ||
+			get(np, "spec", "egress", 0, "to", 0, "namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") != "pxc" {
+			t.Errorf("external NetworkPolicy %v", np)
+		}
+
+		up = find(t, mustRender(t, "-f", ciValues(t, "external-values.yaml"),
+			"--set", "database.migrate.rootPasswordSecret=pxc-admin", "--set", "database.migrate.rootPasswordKey=pw",
+			"--set", "database.migrate.rootUser=imas_admin"), "Job", "t-farmer-db-migrate")
+		if got := rootSecretOf(t, up); got != "pxc-admin/pw" {
+			t.Errorf("root Secret %q", got)
+		}
+		if strings.Contains(yamlString(t, container(t, up, "migrate")["args"]), "skip-root") || envValues(container(t, up, "migrate"))["IMAS_MIGRATE_ROOT_USER"] != "imas_admin" {
+			t.Error("root step skipped, or wrong user, with a root Secret given")
+		}
+	})
+	t.Run("digest and tag", func(t *testing.T) {
+		img := func(args ...string) any {
+			return container(t, find(t, mustRender(t, args...), "Job", "t-farmer-db-migrate"), "migrate")["image"]
+		}
+		if got := img("--set", "database.migrate.image.tag=1.2.3"); got != "ghcr.io/yogzblr/imas-migrate:1.2.3" {
+			t.Errorf("image %v", got)
+		}
+		if got := img("--set", "database.migrate.image.digest=sha256:abc"); got != "ghcr.io/yogzblr/imas-migrate@sha256:abc" {
+			t.Errorf("image %v", got)
+		}
+	})
+	t.Run("long release name", func(t *testing.T) {
+		docs, err := renderAs(t, strings.Repeat("r", 53), "imas-core", strippedChart(t), required...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, d := range docs {
+			if get(d, "metadata", "labels", "app.kubernetes.io/component") == "db-migrate" && d["kind"] == "Job" {
+				names = append(names, get(d, "metadata", "name").(string))
+			}
+		}
+		if len(names) != 2 || names[0] == names[1] {
+			t.Errorf("migrate Job names %v: want two distinct", names)
+		}
+	})
+}
+
+// PXC's root password reaches the `up` pod and no other: farmer and
+// saasapi run without it.
+func TestRootSecretOnlyInMigrateJob(t *testing.T) {
+	for _, args := range [][]string{nil, {"-f", ciValues(t, "external-values.yaml"), "--set", "database.migrate.rootPasswordSecret=pxc-admin"}} {
+		docs := mustRender(t, args...)
+		root, _, _ := strings.Cut(rootSecretOf(t, find(t, docs, "Job", "t-farmer-db-migrate")), "/")
+		if root == "" {
+			t.Fatalf("%v: no root Secret", args)
+		}
+		for _, d := range docs {
+			if d["kind"] == "Job" && get(d, "metadata", "name") == "t-farmer-db-migrate" {
+				continue
+			}
+			if strings.Contains(yamlString(t, d), root) {
+				t.Errorf("%v: %v %v references the root Secret %s", args, d["kind"], get(d, "metadata", "name"), root)
+			}
+		}
+	}
+}
+
+// The migrate pods reach PXC and DNS only, take no ingress, and their
+// policy exists before they do: a hook at a lower weight, whatever
+// networkPolicy.enabled says.
+func TestDBMigrateNetworkPolicy(t *testing.T) {
+	for _, args := range [][]string{nil, {"--set", "networkPolicy.enabled=false"}} {
+		docs := mustRender(t, args...)
+		np := find(t, docs, "NetworkPolicy", "t-farmer-db-migrate")
+		if got := egressPorts(np); !slices.Equal(got, []int{3306, 53, 53}) {
+			t.Errorf("%v: egress ports %v", args, got)
+		}
+		if l, ok := get(np, "spec", "ingress").([]any); !ok || len(l) != 0 {
+			t.Errorf("%v: ingress %v", args, get(np, "spec", "ingress"))
+		}
+		if pt := get(np, "spec", "policyTypes"); yamlString(t, pt) != yamlString(t, []string{"Ingress", "Egress"}) {
+			t.Errorf("%v: policyTypes %v", args, pt)
+		}
+		if got := get(np, "metadata", "annotations", "helm.sh/hook"); got != "post-install,pre-upgrade,pre-rollback" {
+			t.Errorf("%v: hooks %v", args, got)
+		}
+		if get(np, "metadata", "annotations", "helm.sh/hook-weight") != "-10" ||
+			get(find(t, docs, "Job", "t-farmer-db-migrate"), "metadata", "annotations", "helm.sh/hook-weight") != "-5" {
+			t.Errorf("%v: the policy must be created before the Job", args)
+		}
+		sel := get(np, "spec", "podSelector", "matchLabels").(obj)
+		for _, job := range []string{"t-farmer-db-migrate", "t-farmer-db-migrate-check"} {
+			labels := get(find(t, docs, "Job", job), "spec", "template", "metadata", "labels").(obj)
+			for k, v := range sel {
+				if labels[k] != v {
+					t.Errorf("%v: policy selector %v doesn't select %s's pods (%v)", args, sel, job, labels)
+				}
+			}
+		}
+	}
+}
+
+func chartAppVersion(t *testing.T) string {
+	t.Helper()
+	var c struct {
+		AppVersion string `yaml:"appVersion"`
+	}
+	b, err := os.ReadFile(filepath.Join(chartDir(t), "Chart.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(b, &c); err != nil || c.AppVersion == "" {
+		t.Fatalf("Chart.yaml appVersion: %v", err)
+	}
+	return c.AppVersion
+}
+
+// rootSecretOf returns "secret/key" of a migrate Job's pxc-root volume, or
+// "" if it has none.
+func rootSecretOf(t *testing.T, job obj) string {
+	t.Helper()
+	v := byName(podSpec(job)["volumes"])["pxc-root"]
+	if v == nil {
+		return ""
+	}
+	if n := len(get(v, "secret", "items").([]any)); n != 1 || get(v, "secret", "items", 0, "path") != "password" {
+		t.Errorf("pxc-root volume must project exactly the one key: %v", v)
+	}
+	return fmt.Sprintf("%v/%v", get(v, "secret", "secretName"), get(v, "secret", "items", 0, "key"))
+}
+
+// checkRestricted asserts the Pod Security "restricted" settings the
+// chart's Jobs share, plus no ServiceAccount token.
+func checkRestricted(t *testing.T, job obj) {
+	t.Helper()
+	ps := podSpec(job)
+	name := get(job, "metadata", "name")
+	if ps["automountServiceAccountToken"] != false || ps["restartPolicy"] != "Never" {
+		t.Errorf("%s automountServiceAccountToken %v, restartPolicy %v", name, ps["automountServiceAccountToken"], ps["restartPolicy"])
+	}
+	if get(ps, "securityContext", "runAsNonRoot") != true || get(ps, "securityContext", "seccompProfile", "type") != "RuntimeDefault" {
+		t.Errorf("%s pod securityContext %v", name, ps["securityContext"])
+	}
+	for _, c := range ps["containers"].([]any) {
+		sc := get(c, "securityContext")
+		if get(sc, "readOnlyRootFilesystem") != true || get(sc, "allowPrivilegeEscalation") != false ||
+			yamlString(t, get(sc, "capabilities", "drop")) != yamlString(t, []string{"ALL"}) {
+			t.Errorf("%s container securityContext %v", name, sc)
 		}
 	}
 }
@@ -1179,7 +1378,7 @@ func TestSubchartsRender(t *testing.T) {
 		t.Error("HAProxy off: t-pxc-haproxy wouldn't exist")
 	}
 	if get(pxc, "spec", "secretsName") != "t-pxc-secrets" {
-		t.Errorf("PXC secretsName %v: db-bootstrap reads the root password from t-pxc-secrets", get(pxc, "spec", "secretsName"))
+		t.Errorf("PXC secretsName %v: the migrate Job reads the root password from t-pxc-secrets", get(pxc, "spec", "secretsName"))
 	}
 
 	// The toggles: each subchart follows its own enabled flag, and the

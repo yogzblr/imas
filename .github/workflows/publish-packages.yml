@@ -115,7 +115,7 @@ jobs:
             --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" \
             dist/checksums.txt
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
-          for img in farmer sprout saasapi farmerbus fleetreleaser; do
+          for img in farmer sprout saasapi farmerbus fleetreleaser migrate; do
             cosign verify "ghcr.io/yogzblr/imas-${img}:${TAG#v}" \
               --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" >/dev/null
             echo "verified imas-${img}:${TAG#v}"
