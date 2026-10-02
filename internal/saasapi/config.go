@@ -78,10 +78,9 @@ import (
 //
 //   - SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED: "true" registers POST
 //     .../sprouts/updates and its status endpoint (design doc §1.8).
-//     Default false. Leave it off until sprout has a working signed
-//     self-update path (yogzblr/imas#286). Any value strconv.ParseBool
-//     doesn't accept is a startup error. With it on, the read-only fleet
-//     signing key client must also be configured
+//     Default false; turning it on is a deployment decision. Any value
+//     strconv.ParseBool doesn't accept is a startup error. With it on, the
+//     read-only fleet signing key client must also be configured
 //     (IMAS_FLEETSIGN_OPENBAO_*, internal/fleetsign; design doc §2.5), or
 //     saasapi refuses to start.
 //

@@ -142,10 +142,10 @@ func NewRouter() *http.ServeMux {
 
 	// Fleet update dispatch (§1.8, fleet_update_dispatch.go) is only
 	// registered with the feature flag on, which it is not by default:
-	// sprout has no working signed self-update path yet (yogzblr/imas#286).
-	// With the flag off, neither route exists.
+	// turning it on is a deployment decision. With the flag off, neither
+	// route exists.
 	if fleetUpdateDispatchEnabled {
-		log.Warnf("saasapi: fleet update dispatch is ENABLED, but sprout self-update is still disabled upstream (yogzblr/imas#286)")
+		log.Warnf("saasapi: fleet update dispatch is ENABLED (SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED): tenants with an approved version can roll sprout self-updates out")
 		routeRateLimited(mux, "POST /v1/tenants/{tenant_id}/sprouts/updates", CreateFleetUpdateBatch,
 			"CreateFleetUpdateBatch", fleetUpdateLimiter)
 		route(mux, "GET /v1/tenants/{tenant_id}/sprouts/updates/{batch_id}", GetFleetUpdateBatch, "GetFleetUpdateBatch")

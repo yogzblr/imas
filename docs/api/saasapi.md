@@ -229,14 +229,14 @@ Storing a policy dispatches nothing. With dispatch off, which is the default,
 > `NewRouter`). With the default, neither route exists and both paths return
 > the ServeMux's plain-text 404.
 >
-> The reason is that the sprout side doesn't exist yet: the farmer manifest
-> endpoint (design doc §2.6, FU.1) and the sprout's manifest fetch, verify
-> and install (FU.2). saasapi now sends farmer only the target version for a
-> `self_update`, while farmer's handler still expects the pre-FU.3 params
-> (an artifact URL and one row's signature), so farmer refuses every item.
-> `router.go` and `fleet_update_dispatch.go` also cite `yogzblr/imas#286`.
-> That number is from before the repo was renamed and doesn't resolve on
-> `yogzblr/imas`.
+> The path behind it is complete: saasapi sends farmer only the target
+> version for a `self_update`; farmer re-verifies that version against the
+> release catalog (approved by the tenant, registered, not revoked, every
+> row signed) and sends the sprout a one-step job carrying only the
+> version (FU.7); the sprout fetches its own signed manifest from farmer
+> (design doc §2.6, FU.1) and installs from its configured repository
+> (FU.2). Turning the flag on is a deployment decision; saasapi logs a
+> warning at startup when it is on.
 
 It is documented here, and in the spec under the `fleet-update-dispatch` tag,
 so the contract is on record for when it's enabled. With the flag on:
