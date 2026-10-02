@@ -15,6 +15,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/controlplane"
+	"github.com/yogzblr/imas/internal/props"
 )
 
 // newUpdateTestDB is newTestDBWithFarmer with an empty version catalog
@@ -46,16 +47,24 @@ func newUpdateTestDB(t *testing.T) *gorm.DB {
 }
 
 // reportFact stores one fact for tenantID's sproutID the way farmer's facts
-// listener does (internal/facts, storeFacts), with an expiry already in
-// the past: a rollout reads a sprout's last report, expired or not.
+// listener does (props.SetPropForTenant), written now: expiry is the write
+// time plus props.DefaultPropTTL (TestPropWriteTimeMatchesProps).
 func reportFact(gdb *gorm.DB, tenantID, sproutID, name, value string) error {
-	return gdb.Exec(`INSERT INTO farmer.props (tenant_id, sprout_id, name, value, static, expiry)
-VALUES (?, ?, ?, ?, 0, ?)
-ON CONFLICT (tenant_id, sprout_id, name) DO UPDATE SET value = excluded.value, expiry = excluded.expiry`,
-		tenantID, sproutID, name, value, time.Now().Add(-time.Hour).UTC()).Error
+	return reportFactWrittenAt(gdb, tenantID, sproutID, name, value, time.Now())
 }
 
-// mustReportFacts stores a sprout's os, arch and (if set) sprout_version.
+// reportFactWrittenAt is reportFact as if farmer had written the row at
+// written.
+func reportFactWrittenAt(gdb *gorm.DB, tenantID, sproutID, name, value string, written time.Time) error {
+	return gdb.Exec(`INSERT INTO farmer.props (tenant_id, sprout_id, name, value, static, expiry)
+VALUES (?, ?, ?, ?, 0, ?)
+ON CONFLICT (tenant_id, sprout_id, name) DO UPDATE SET value = excluded.value, static = excluded.static, expiry = excluded.expiry`,
+		tenantID, sproutID, name, value, written.Add(props.DefaultPropTTL).UTC()).Error
+}
+
+// mustReportFacts stores a sprout's os, arch and (if set) sprout_version,
+// written an hour ago: long expired, which planning ignores, and long
+// before any dispatch in the test, so never proof of an update.
 func mustReportFacts(t *testing.T, gdb *gorm.DB, tenantID, sproutID, osName, arch, version string) {
 	t.Helper()
 	facts := map[string]string{farmerPropOS: osName, farmerPropArch: arch}
@@ -63,7 +72,7 @@ func mustReportFacts(t *testing.T, gdb *gorm.DB, tenantID, sproutID, osName, arc
 		facts[farmerPropSproutVersion] = version
 	}
 	for name, value := range facts {
-		if err := reportFact(gdb, tenantID, sproutID, name, value); err != nil {
+		if err := reportFactWrittenAt(gdb, tenantID, sproutID, name, value, time.Now().Add(-time.Hour)); err != nil {
 			t.Fatalf("reporting %s for %s/%s: %v", name, tenantID, sproutID, err)
 		}
 	}
@@ -844,10 +853,12 @@ func TestFleetUpdate_OneRolloutPerTenant(t *testing.T) {
 	}
 
 	// The claim wrote the policy row (so Galera would certify two claims
-	// against each other).
+	// against each other), in rollout_claimed_at. updated_at, which says
+	// when the policy last changed, didn't move.
 	var after TenantUpdatePolicy
 	gdb.First(&after, "tenant_id = ?", tid)
-	if !after.UpdatedAt.After(before.UpdatedAt) || *after.ApprovedVersion != "v2.4.1" {
+	if before.RolloutClaimedAt != nil || after.RolloutClaimedAt == nil || !after.UpdatedAt.Equal(before.UpdatedAt) ||
+		*after.ApprovedVersion != "v2.4.1" {
 		t.Fatalf("policy after claim = %+v (before %+v)", after, before)
 	}
 
@@ -858,6 +869,11 @@ func TestFleetUpdate_OneRolloutPerTenant(t *testing.T) {
 	// Once the first rollout is over, the tenant can start another.
 	if code, resp := postUpdates(t, tid, map[string]any{"asset_ids": assets[1:], "target_version": "v2.4.1"}); code != 202 {
 		t.Fatalf("POST after the first rollout ended: %d %v", code, resp)
+	}
+	var again TenantUpdatePolicy
+	gdb.First(&again, "tenant_id = ?", tid)
+	if again.RolloutClaimedAt == nil || !again.RolloutClaimedAt.After(*after.RolloutClaimedAt) || !again.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Fatalf("policy after the second claim = %+v (after the first %+v)", again, after)
 	}
 }
 
@@ -871,6 +887,8 @@ func TestFleetUpdate_ConcurrentPostsClaimOnce(t *testing.T) {
 	mustApprove(t, gdb, tid, "v2.4.1")
 	assets := mustUpdateFleet(t, gdb, tid, 1)
 	SetBus(nil) // items stay queued: the first rollout stays in progress
+	var before TenantUpdatePolicy
+	gdb.First(&before, "tenant_id = ?", tid)
 
 	const n = 8
 	codes := make(chan int, n)
@@ -897,6 +915,12 @@ func TestFleetUpdate_ConcurrentPostsClaimOnce(t *testing.T) {
 	gdb.Model(&AssetActionBatch{}).Where("tenant_id = ? AND action_type = ?", tid, controlplane.ActionSelfUpdate).Count(&batches)
 	if batches != 1 {
 		t.Fatalf("%d update batches written, want 1", batches)
+	}
+	// The one claim that won is in rollout_claimed_at, not updated_at.
+	var after TenantUpdatePolicy
+	gdb.First(&after, "tenant_id = ?", tid)
+	if after.RolloutClaimedAt == nil || !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Fatalf("policy after the claims = %+v (before %+v)", after, before)
 	}
 }
 

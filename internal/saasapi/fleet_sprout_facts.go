@@ -10,12 +10,15 @@ package saasapi
 
 import (
 	"context"
+	"time"
 
 	"golang.org/x/mod/semver"
+
+	"github.com/yogzblr/imas/internal/props"
 )
 
 // farmerPropsTable is internal/props' propRow table. Only its tenant_id,
-// sprout_id, name and value columns are read
+// sprout_id, name, value, static and expiry columns are read
 // (TestFarmerSproutFactsColumnContract pins them against props.Models()).
 const farmerPropsTable = "farmer.props"
 
@@ -44,11 +47,32 @@ type SproutFacts struct {
 	Version string
 }
 
+// SproutFactWriteTimes is when farmer stored each of a sprout's facts, in
+// UTC. A zero time means unknown: the fact wasn't reported, or it is a
+// static prop from farmer's config, which no sprout wrote.
+type SproutFactWriteTimes struct {
+	OS      time.Time
+	Arch    time.Time
+	Version time.Time
+}
+
+// TimedSproutFacts is SproutFacts plus when each fact was written.
+type TimedSproutFacts struct {
+	SproutFacts
+	Written SproutFactWriteTimes
+}
+
 // SproutFactsReader reads what sprouts last reported. Implementations must
 // scope every lookup by tenantID as well as sprout_id, key the result on
 // both, and simply omit sprouts they know nothing about.
 type SproutFactsReader interface {
+	// SproutFacts is what each sprout last reported, however long ago:
+	// what planning a rollout needs.
 	SproutFacts(ctx context.Context, tenantID string, sproutIDs []string) (map[SproutRef]SproutFacts, error)
+	// SproutFactsWithWriteTimes is SproutFacts plus when each fact was
+	// written: what a rollout's wave gate needs, since only a report
+	// written after an item's dispatch is proof the update landed.
+	SproutFactsWithWriteTimes(ctx context.Context, tenantID string, sproutIDs []string) (map[SproutRef]TimedSproutFacts, error)
 }
 
 // sproutFactsReader defaults to the farmer.props reader.
@@ -75,12 +99,27 @@ type farmerSproutFactsReader struct{}
 // overwrites them. That last report is what a rollout needs: a sprout that
 // was already on the target version, and is sent an update it answers
 // with "already running", reports nothing new.
-func (farmerSproutFactsReader) SproutFacts(ctx context.Context, tenantID string, sproutIDs []string) (map[SproutRef]SproutFacts, error) {
+func (r farmerSproutFactsReader) SproutFacts(ctx context.Context, tenantID string, sproutIDs []string) (map[SproutRef]SproutFacts, error) {
+	timed, err := r.SproutFactsWithWriteTimes(ctx, tenantID, sproutIDs)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[SproutRef]SproutFacts, len(timed))
+	for ref, f := range timed {
+		out[ref] = f.SproutFacts
+	}
+	return out, nil
+}
+
+// SproutFactsWithWriteTimes is SproutFacts, from the same single query,
+// plus each fact's write time. Expiry is still not applied as a filter: it
+// is read to recover the write time (propWriteTime).
+func (farmerSproutFactsReader) SproutFactsWithWriteTimes(ctx context.Context, tenantID string, sproutIDs []string) (map[SproutRef]TimedSproutFacts, error) {
 	d := db
 	if d == nil {
 		return nil, errNoDB
 	}
-	out := make(map[SproutRef]SproutFacts, len(sproutIDs))
+	out := make(map[SproutRef]TimedSproutFacts, len(sproutIDs))
 	if len(sproutIDs) == 0 {
 		return out, nil
 	}
@@ -88,9 +127,11 @@ func (farmerSproutFactsReader) SproutFacts(ctx context.Context, tenantID string,
 		SproutID string
 		Name     string
 		Value    string
+		Static   bool
+		Expiry   time.Time
 	}
 	err := d.WithContext(ctx).Table(farmerPropsTable).
-		Select("sprout_id", "name", "value").
+		Select("sprout_id", "name", "value", "static", "expiry").
 		Where("tenant_id = ? AND sprout_id IN ? AND name IN ?", tenantID, sproutIDs,
 			[]string{farmerPropOS, farmerPropArch, farmerPropSproutVersion}).
 		Scan(&rows).Error
@@ -100,17 +141,35 @@ func (farmerSproutFactsReader) SproutFacts(ctx context.Context, tenantID string,
 	for _, r := range rows {
 		ref := SproutRef{TenantID: tenantID, SproutID: r.SproutID}
 		f := out[ref]
+		written := propWriteTime(r.Expiry, r.Static)
 		switch r.Name {
 		case farmerPropOS:
-			f.OS = r.Value
+			f.OS, f.Written.OS = r.Value, written
 		case farmerPropArch:
-			f.Arch = r.Value
+			f.Arch, f.Written.Arch = r.Value, written
 		case farmerPropSproutVersion:
-			f.Version = canonicalReportedVersion(r.Value)
+			f.Version, f.Written.Version = canonicalReportedVersion(r.Value), written
 		}
 		out[ref] = f
 	}
 	return out, nil
+}
+
+// propWriteTime recovers when farmer wrote a prop row from its expiry.
+// Farmer's facts listener stores every fact with props.SetPropForTenant,
+// which sets expiry to the write time plus props.DefaultPropTTL, on the
+// clock of the farmer node that wrote it; there is no write-time column.
+// TestPropWriteTimeMatchesProps pins this against internal/props itself,
+// so a change there breaks a test rather than quietly moving the gate.
+//
+// A static row (farmer config's props.static, written with
+// props.StaticPropTTL at load) was never written by a sprout, and its
+// expiry would put the "write" a century ahead. It has no write time.
+func propWriteTime(expiry time.Time, static bool) time.Time {
+	if static || expiry.IsZero() {
+		return time.Time{}
+	}
+	return expiry.Add(-props.DefaultPropTTL).UTC()
 }
 
 // canonicalReportedVersion is v as canonical semver, without build

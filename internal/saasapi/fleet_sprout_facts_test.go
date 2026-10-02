@@ -3,6 +3,7 @@ package saasapi
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -31,10 +32,15 @@ func TestFarmerSproutFactsColumnContract(t *testing.T) {
 	if found == nil {
 		t.Fatalf("no props model has table %q", strings.TrimPrefix(farmerPropsTable, "farmer."))
 	}
-	for _, col := range []string{"tenant_id", "sprout_id", "name", "value"} {
+	for _, col := range []string{"tenant_id", "sprout_id", "name", "value", "static", "expiry"} {
 		if found.LookUpField(col) == nil {
 			t.Fatalf("props has no %q column", col)
 		}
+	}
+	// The wave gate derives a fact's write time from expiry
+	// (propWriteTime): it must be a time, set on every row.
+	if f := found.LookUpField("expiry"); f.FieldType != reflect.TypeOf(time.Time{}) || !f.NotNull {
+		t.Fatalf("props expiry is %v (not null %t), want a NOT NULL time.Time", f.FieldType, f.NotNull)
 	}
 	var pk []string
 	for _, f := range found.PrimaryFields {
@@ -132,7 +138,16 @@ func TestGetUpdateBatch_ItemSucceedsOnReportedVersion(t *testing.T) {
 		t.Fatalf("failed job: %+v", it)
 	}
 
+	// A row naming the target, written before the item was dispatched (an
+	// hour ago), is not proof: GET leaves the item running.
 	mustReportFacts(t, gdb, tid, "web-01", "linux", "amd64", "v2.4.1")
+	if _, got = getUpdateBatch(t, tid, batch.ID); got.Items[0].Status != ActionItemRunning {
+		t.Fatalf("stale report of the target version: %+v", got.Items[0])
+	}
+
+	if err := reportFact(gdb, tid, "web-01", farmerPropSproutVersion, "v2.4.1"); err != nil {
+		t.Fatal(err)
+	}
 	// §1.5's GET finds the update batch too, and judges it the same way.
 	_, got = getBatch(t, tid, batch.ID)
 	if got.Status != actionBatchCompleted || got.Items[0].Status != ActionItemSucceeded {
