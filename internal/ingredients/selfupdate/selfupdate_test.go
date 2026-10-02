@@ -2,6 +2,7 @@ package selfupdate
 
 import (
 	"archive/zip"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/ecdsa"
@@ -32,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"golang.org/x/mod/semver"
 
 	"github.com/yogzblr/imas/internal/config"
@@ -89,6 +91,11 @@ type fixture struct {
 	nupkgEntry string
 	// aptPlainOnly serves the apt index only uncompressed.
 	aptPlainOnly bool
+	// rpmPrimaryExt is the rpm primary index's compression: ".gz"
+	// (default), ".zst", ".xz" or "" (plain XML).
+	rpmPrimaryExt *string
+	// rpmPrimaryRaw, if set, is served as the primary index verbatim.
+	rpmPrimaryRaw []byte
 	// aptFilename overrides the Filename the apt index gives.
 	aptFilename string
 
@@ -232,16 +239,30 @@ func (f *fixture) serveRepo(w http.ResponseWriter, r *http.Request) {
 		"/flat/" + name:
 		w.Write(f.repoBody)
 	case "/imasrpm/rpm_any/x86_64/repodata/repomd.xml":
-		fmt.Fprint(w, `<?xml version="1.0"?><repomd xmlns="http://linux.duke.edu/metadata/repo">`+
+		fmt.Fprintf(w, `<?xml version="1.0"?><repomd xmlns="http://linux.duke.edu/metadata/repo">`+
 			`<data type="other"><location href="repodata/x-other.xml.gz"/></data>`+
-			`<data type="primary"><location href="repodata/abc-primary.xml.gz"/></data></repomd>`)
-	case "/imasrpm/rpm_any/x86_64/repodata/abc-primary.xml.gz":
-		gz := gzip.NewWriter(w)
-		fmt.Fprintf(gz, `<?xml version="1.0"?><metadata xmlns="http://linux.duke.edu/metadata/common" packages="2">`+
+			`<data type="primary"><location href="repodata/abc-primary.xml%s"/></data></repomd>`, f.primaryExt())
+	case "/imasrpm/rpm_any/x86_64/repodata/abc-primary.xml" + f.primaryExt():
+		if f.rpmPrimaryRaw != nil {
+			w.Write(f.rpmPrimaryRaw)
+			return
+		}
+		xmlIndex := fmt.Sprintf(`<?xml version="1.0"?><metadata xmlns="http://linux.duke.edu/metadata/common" packages="2">`+
 			`<package type="rpm"><name>other</name><checksum type="sha256" pkgid="YES">%s</checksum><location href="Packages/o/other.rpm"/></package>`+
 			`<package type="rpm"><name>imas-sprout</name><checksum type="sha256" pkgid="YES">%s</checksum><location href="Packages/i/%s"/></package>`+
 			`</metadata>`, strings.Repeat("2", 64), sum, name)
-		gz.Close()
+		switch f.primaryExt() {
+		case ".gz":
+			gz := gzip.NewWriter(w)
+			io.WriteString(gz, xmlIndex)
+			gz.Close()
+		case ".zst":
+			zw, _ := zstd.NewWriter(w)
+			io.WriteString(zw, xmlIndex)
+			zw.Close()
+		default: // "" and ".xz": plain bytes (.xz is refused before reading)
+			io.WriteString(w, xmlIndex)
+		}
 	case "/imasnget/nuget/index.json":
 		fmt.Fprintf(w, `{"version":"3.0.0","resources":[{"@id":"%s/imasnget/nuget/query","@type":"SearchQueryService"},`+
 			`{"@id":"%s/imasnget/nuget/flat/","@type":"PackageBaseAddress/3.0.0"}]}`, f.repo.URL, f.repo.URL)
@@ -259,6 +280,13 @@ func (f *fixture) serveRepo(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (f *fixture) primaryExt() string {
+	if f.rpmPrimaryExt == nil {
+		return ".gz"
+	}
+	return *f.rpmPrimaryExt
 }
 
 // packageReq is the request that downloaded the package itself (or the
@@ -1294,5 +1322,65 @@ func TestAptFilenameFor(t *testing.T) {
 	}
 	if got, err := aptFilenameFor(strings.NewReader(index), strings.Repeat("e", 64)); err != nil || got != "" {
 		t.Fatalf("missing sum: %q %v", got, err)
+	}
+}
+
+// TestApply_RPMPrimaryIndexCompression: the rpm primary index is read
+// gzip-, zstd- (createrepo_c's default since 1.0) or un-compressed; other
+// compressions and a corrupt zstd stream are refused, and nothing is
+// installed.
+func TestApply_RPMPrimaryIndexCompression(t *testing.T) {
+	var corruptZstd bytes.Buffer
+	zw, _ := zstd.NewWriter(&corruptZstd)
+	zw.Write(bytes.Repeat([]byte("<metadata>"), 1000))
+	zw.Close()
+	corrupt := corruptZstd.Bytes()
+	corrupt[len(corrupt)/2] ^= 0xff
+
+	// A valid frame whose header declares a 1 GiB window (Window_Descriptor
+	// exponent 20: 2^(10+20)), over maxZstdWindow: refused before the
+	// decoder allocates it. One raw, last block holds the content.
+	content := []byte("<metadata/>")
+	hugeWindow := []byte{0x28, 0xb5, 0x2f, 0xfd, 0x00, 20 << 3}
+	bh := 1 | len(content)<<3
+	hugeWindow = append(hugeWindow, byte(bh), byte(bh>>8), byte(bh>>16))
+	hugeWindow = append(hugeWindow, content...)
+
+	cases := []struct {
+		name, ext string
+		raw       []byte
+		ok        bool
+		wantErr   string
+	}{
+		{name: "gzip", ext: ".gz", ok: true},
+		{name: "zstd", ext: ".zst", ok: true},
+		{name: "plain", ext: "", ok: true},
+		{name: "xz unsupported", ext: ".xz", wantErr: "unsupported index compression .xz"},
+		{name: "corrupt zstd", ext: ".zst", raw: corrupt, wantErr: "rpm primary index"},
+		{name: "zstd window over the limit", ext: ".zst", raw: hugeWindow, wantErr: "window size exceeded"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.useRepo("rpm")
+			ext := tc.ext
+			f.rpmPrimaryExt, f.rpmPrimaryRaw = &ext, tc.raw
+			_, err := step(t, target(testTarget)).Apply(context.Background())
+			if tc.ok {
+				if err != nil {
+					t.Fatalf("Apply: %v", err)
+				}
+				if f.packageReq() == nil {
+					t.Error("package not fetched")
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Apply error = %v, want %q", err, tc.wantErr)
+			}
+			if _, _, installs := f.counts(); installs != 0 || f.packageReq() != nil {
+				t.Errorf("installs %d, package fetched %v", installs, f.packageReq() != nil)
+			}
+		})
 	}
 }

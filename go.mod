@@ -24,6 +24,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/hectane/go-acl v1.0.0
+	github.com/klauspost/compress v1.19.2
 	github.com/lestrrat-go/jwx/v2 v2.1.7
 	github.com/minio/minio-go/v7 v7.3.0
 	github.com/nats-io/jwt/v2 v2.8.2
@@ -95,7 +96,6 @@ require (
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
 	github.com/kevinburke/ssh_config v1.6.0 // indirect
-	github.com/klauspost/compress v1.19.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/klauspost/crc32 v1.3.0 // indirect
 	github.com/lestrrat-go/blackmagic v1.0.4 // indirect

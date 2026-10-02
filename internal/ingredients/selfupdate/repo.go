@@ -16,6 +16,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/klauspost/compress/zstd"
+
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/fleetsign"
 )
@@ -31,7 +33,8 @@ import (
 //   - apt: dists/<suite>/<component>/binary-<arch>/Packages(.gz), the
 //     stanza whose SHA256 is the checksum; its Filename, under the
 //     repository URL.
-//   - rpm: repodata/repomd.xml's primary index, the package whose sha256
+//   - rpm: repodata/repomd.xml's primary index (gzip, bzip2, zstd or
+//     uncompressed), the package whose sha256
 //     checksum is the checksum; its location href, under the baseurl.
 //   - nuget: the service index's PackageBaseAddress (flat container),
 //     <id>/<version>/<id>.<version>.nupkg, which holds the MSI at its root
@@ -54,6 +57,9 @@ const (
 	defaultNuGetPackageID = "imas.sprout.windows.msi"
 	// maxIndexBytes caps a repository index, compressed or not.
 	maxIndexBytes = 256 << 20
+	// maxZstdWindow caps a zstd frame's window size (zstd's own default
+	// limit is 512 MiB). createrepo_c writes 8 MiB windows or smaller.
+	maxZstdWindow = 64 << 20
 )
 
 var (
@@ -223,6 +229,7 @@ func (r repo) fetchIndex(ctx context.Context, base *url.URL, rel string) (io.Rea
 		return nil, err
 	}
 	body := io.Reader(io.LimitReader(resp.Body, maxIndexBytes))
+	closer := io.Closer(resp.Body)
 	switch path.Ext(u.Path) {
 	case ".gz":
 		zr, err := gzip.NewReader(body)
@@ -233,17 +240,42 @@ func (r repo) fetchIndex(ctx context.Context, base *url.URL, rel string) (io.Rea
 		body = zr
 	case ".bz2":
 		body = bzip2.NewReader(body)
+	case ".zst":
+		// createrepo_c's default for repodata since 1.0. One goroutine,
+		// and a window and memory bound well under maxIndexBytes, so a
+		// hostile frame header can't make the decoder allocate more.
+		zr, err := zstd.NewReader(body,
+			zstd.WithDecoderConcurrency(1),
+			zstd.WithDecoderMaxWindow(maxZstdWindow),
+			zstd.WithDecoderMaxMemory(maxIndexBytes))
+		if err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("selfupdate: %s: %w", redact(u), err)
+		}
+		body = zr
+		closer = closers{zr.IOReadCloser(), resp.Body}
 	case ".xml", ".json", "":
 	default:
 		resp.Body.Close()
-		return nil, fmt.Errorf("selfupdate: %s: unsupported index compression %s (gzip, bzip2 or none)", redact(u), path.Ext(u.Path))
+		return nil, fmt.Errorf("selfupdate: %s: unsupported index compression %s (gzip, bzip2, zstd or none)", redact(u), path.Ext(u.Path))
 	}
-	return readCloser{io.LimitReader(body, maxIndexBytes), resp.Body}, nil
+	return readCloser{io.LimitReader(body, maxIndexBytes), closer}, nil
 }
 
 type readCloser struct {
 	io.Reader
 	io.Closer
+}
+
+// closers closes each of its members, in order.
+type closers []io.Closer
+
+func (c closers) Close() error {
+	var errs []error
+	for _, cl := range c {
+		errs = append(errs, cl.Close())
+	}
+	return errors.Join(errs...)
 }
 
 // locateApt reads the repository's Packages index for this sprout's
