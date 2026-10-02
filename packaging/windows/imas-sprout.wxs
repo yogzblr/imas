@@ -17,6 +17,7 @@
     %ProgramFiles%\imas\imas-sprout.exe       binary
     %ProgramData%\imas\                       config root (SYSTEM + Administrators only)
     %ProgramData%\imas\sprout                 config file (same name as /etc/imas/sprout)
+    %ProgramData%\imas\fleet-signing-keys.json  update signing keyring (as /etc/imas/fleet-signing-keys.json)
     %ProgramData%\imas\cache\sprout\          cache (as /var/cache/imas/sprout)
   The sprout creates the rest of %ProgramData%\imas (pki\, state\, logs\)
   itself; see internal/config/paths_windows.go, which must agree with this.
@@ -158,6 +159,21 @@
               Source='packaging/etc/imas-sprout.conf'
               KeyPath='yes' />
           </Component>
+          <!-- The self_update trust root (packaging/etc/fleet-signing-keys.md):
+               the public keys update manifests are verified against. Neither
+               NeverOverwrite nor Permanent, unlike the config: every upgrade
+               replaces it, which is how a signing key rotation reaches the
+               fleet. It inherits IMASDATADIR's SYSTEM/Administrators-only
+               DACL, so only an administrator can change what the sprout
+               trusts. -->
+          <Component Id='SproutFleetKeyring' Guid='650D322E-19F1-4427-AEE8-5F1CC29A7BA3' Win64='$(var.Win64)'>
+            <File
+              Id='SproutFleetKeyringFile'
+              Name='fleet-signing-keys.json'
+              DiskId='1'
+              Source='packaging/etc/fleet-signing-keys.json'
+              KeyPath='yes' />
+          </Component>
           <Directory Id='IMASCACHEDIR' Name='cache'>
             <Directory Id='SPROUTCACHEDIR' Name='sprout'>
               <Component Id='SproutCacheDir' Guid='C4F1A7B3-6E2D-4A9F-B1C8-5D3E7F2A9B04' Permanent='yes' Win64='$(var.Win64)'>
@@ -174,6 +190,7 @@
       <ComponentRef Id='SproutServiceStart' />
       <ComponentRef Id='SproutDataDir' />
       <ComponentRef Id='SproutConfig' />
+      <ComponentRef Id='SproutFleetKeyring' />
       <ComponentRef Id='SproutCacheDir' />
     </Feature>
   </Product>
