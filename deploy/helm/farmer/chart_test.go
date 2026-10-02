@@ -201,20 +201,6 @@ func find(t *testing.T, docs []obj, kind, name string) obj {
 	return hits[0]
 }
 
-func findPrefix(t *testing.T, docs []obj, kind, prefix string) obj {
-	t.Helper()
-	var hits []obj
-	for _, d := range docs {
-		if n, _ := get(d, "metadata", "name").(string); d["kind"] == kind && strings.HasPrefix(n, prefix) {
-			hits = append(hits, d)
-		}
-	}
-	if len(hits) != 1 {
-		t.Fatalf("want exactly one %s %s*, got %d", kind, prefix, len(hits))
-	}
-	return hits[0]
-}
-
 func has(docs []obj, kind, name string) bool {
 	for _, d := range docs {
 		if d["kind"] == kind && get(d, "metadata", "name") == name {
