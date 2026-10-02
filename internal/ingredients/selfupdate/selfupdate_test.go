@@ -67,8 +67,12 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatalf("pinning: %v", err)
 	}
 
+	origFields := manifestFields
+	manifestFields = testManifestFields
+	t.Cleanup(func() { manifestFields = origFields })
+
 	origInstall := install
-	install = func(_ context.Context, _ fleetsign.Release, staged string) error {
+	install = func(_ context.Context, _ stepRelease, staged string) error {
 		f.installs = append(f.installs, staged)
 		return nil
 	}
@@ -84,25 +88,31 @@ func newFixture(t *testing.T) *fixture {
 	return f
 }
 
-func (f *fixture) release() fleetsign.Release {
-	sum := sha256.Sum256(artifact)
-	return fleetsign.Release{Version: "v2.4.1", ArtifactURL: f.ts.URL + "/sprout-v2.4.1", ChecksumSHA256: hex.EncodeToString(sum[:])}
+// testManifestFields stands in for the signed manifest fields a step
+// doesn't carry yet (manifestFields).
+func testManifestFields() (osName, arch, fileName, minSproutVersion string) {
+	return "linux", "amd64", "imas-sprout_2.4.1_amd64.deb", "v2.0.0"
 }
 
-func (f *fixture) sign(t *testing.T, rel fleetsign.Release) string {
+func (f *fixture) release() stepRelease {
+	sum := sha256.Sum256(artifact)
+	return stepRelease{Version: "v2.4.1", ArtifactURL: f.ts.URL + "/sprout-v2.4.1", ChecksumSHA256: hex.EncodeToString(sum[:])}
+}
+
+func (f *fixture) sign(t *testing.T, rel stepRelease) string {
 	t.Helper()
-	msg, err := rel.Message()
+	msg, err := rel.manifest("").Message()
 	if err != nil {
 		t.Fatal(err)
 	}
 	return fleetsign.EncodeSignature(1, ed25519.Sign(f.priv, msg))
 }
 
-func step(t *testing.T, rel fleetsign.Release, sig string) cook.RecipeCooker {
+func step(t *testing.T, rel stepRelease, sig string) cook.RecipeCooker {
 	t.Helper()
 	props := map[string]interface{}{
 		fleetsign.PropVersion:        rel.Version,
-		fleetsign.PropArtifactURL:    rel.ArtifactURL,
+		propArtifactURL:              rel.ArtifactURL,
 		fleetsign.PropChecksumSHA256: rel.ChecksumSHA256,
 		fleetsign.PropSignature:      sig,
 	}
@@ -137,7 +147,7 @@ func TestApply_TamperedRowValidHashInvalidSignature(t *testing.T) {
 	f := newFixture(t)
 	rel := f.release()
 	signedFor := rel
-	signedFor.ArtifactURL = "https://artifacts.example.com/sprout-v2.4.1"
+	signedFor.Version = "v2.4.0"
 	res, err := step(t, rel, f.sign(t, signedFor)).Apply(context.Background())
 	if !errors.Is(err, fleetsign.ErrInvalidSignature) || res.Succeeded {
 		t.Fatalf("Apply = %+v, %v; want ErrInvalidSignature", res, err)
@@ -156,8 +166,8 @@ func TestApply_MissingSignatureRefused(t *testing.T) {
 	f := newFixture(t)
 	rel := f.release()
 	for name, props := range map[string]map[string]interface{}{
-		"empty signature": {fleetsign.PropVersion: rel.Version, fleetsign.PropArtifactURL: rel.ArtifactURL, fleetsign.PropChecksumSHA256: rel.ChecksumSHA256, fleetsign.PropSignature: ""},
-		"no signature":    {fleetsign.PropVersion: rel.Version, fleetsign.PropArtifactURL: rel.ArtifactURL, fleetsign.PropChecksumSHA256: rel.ChecksumSHA256},
+		"empty signature": {fleetsign.PropVersion: rel.Version, propArtifactURL: rel.ArtifactURL, fleetsign.PropChecksumSHA256: rel.ChecksumSHA256, fleetsign.PropSignature: ""},
+		"no signature":    {fleetsign.PropVersion: rel.Version, propArtifactURL: rel.ArtifactURL, fleetsign.PropChecksumSHA256: rel.ChecksumSHA256},
 	} {
 		rc, err := SelfUpdate{}.Parse("s", fleetsign.SelfUpdateMethod, props)
 		if err != nil {
@@ -230,7 +240,7 @@ func TestApply_ChecksumCheckedAfterDownload(t *testing.T) {
 // never a success a rollout gate would advance on.
 func TestApply_DefaultInstallFailsClosed(t *testing.T) {
 	f := newFixture(t)
-	install = func(ctx context.Context, rel fleetsign.Release, staged string) error {
+	install = func(ctx context.Context, rel stepRelease, staged string) error {
 		return ErrInstallNotImplemented
 	}
 	rel := f.release()
@@ -251,6 +261,39 @@ func TestTest_VerifiesWithoutFetching(t *testing.T) {
 	bad.Version = "v6.6.6"
 	if _, err := step(t, bad, f.sign(t, rel)).Test(context.Background()); !errors.Is(err, fleetsign.ErrInvalidSignature) {
 		t.Fatalf("Test with bad signature = %v", err)
+	}
+}
+
+// Until FU.2 a step can't supply the manifest's os, arch, file_name and
+// min_sprout_version, so every release is refused — before any key read
+// or download — even one whose signature would verify with them filled
+// in.
+func TestApply_FailsClosedWithoutManifestFields(t *testing.T) {
+	f := newFixture(t)
+	rel := f.release()
+	sig := f.sign(t, rel)
+	manifestFields = func() (string, string, string, string) { return "", "", "", "" }
+	res, err := step(t, rel, sig).Apply(context.Background())
+	if !errors.Is(err, fleetsign.ErrInvalidManifest) || res.Succeeded {
+		t.Fatalf("Apply = %+v, %v; want ErrInvalidManifest", res, err)
+	}
+	if _, err := step(t, rel, sig).Test(context.Background()); !errors.Is(err, fleetsign.ErrInvalidManifest) {
+		t.Fatalf("Test = %v; want ErrInvalidManifest", err)
+	}
+	if f.requests.Load() != 0 || len(f.installs) != 0 {
+		t.Fatalf("requests %d, installs %d; want none", f.requests.Load(), len(f.installs))
+	}
+}
+
+func TestApply_RefusesNonHTTPSArtifactURL(t *testing.T) {
+	f := newFixture(t)
+	rel := f.release()
+	rel.ArtifactURL = "http" + rel.ArtifactURL[len("https"):]
+	if _, err := step(t, rel, f.sign(t, rel)).Apply(context.Background()); !errors.Is(err, fleetsign.ErrInvalidManifest) {
+		t.Fatalf("Apply = %v; want ErrInvalidManifest", err)
+	}
+	if f.requests.Load() != 0 {
+		t.Fatal("artifact host contacted over a refused URL")
 	}
 }
 

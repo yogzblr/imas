@@ -430,12 +430,12 @@ func (s *TransitKeySource) KeySet(ctx context.Context) (KeySet, error) {
 	return ks, nil
 }
 
-// Verify checks r's signature against the key set Transit currently
+// Verify checks m's signature against the key set Transit currently
 // serves.
-func (s *TransitKeySource) Verify(ctx context.Context, r Release, signature string) error {
+func (s *TransitKeySource) Verify(ctx context.Context, m Manifest) error {
 	ks, err := s.KeySet(ctx)
 	if err != nil {
 		return err
 	}
-	return ks.Verify(r, signature)
+	return ks.Verify(m)
 }

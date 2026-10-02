@@ -226,7 +226,7 @@ func TestOpenBaoEnforcesReadOnlyFleetKey(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := src.Verify(t.Context(), rel, row.Signature); err != nil {
+			if err := src.Verify(t.Context(), rel.withSignature(row.Signature)); err != nil {
 				t.Fatalf("%s verifying the published row via Transit public key: %v", service, err)
 			}
 			msg, _ := rel.Message()

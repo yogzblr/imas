@@ -88,7 +88,7 @@ func TestTransitKeySource_ReadsAndCaches(t *testing.T) {
 	if len(ks) != 2 || !ks[0].Key.Equal(k1.Key) || !ks[1].Key.Equal(k2.Key) {
 		t.Fatalf("KeySet = %+v", ks)
 	}
-	if err := src.Verify(t.Context(), testRelease(), signForTest(t, priv1, 1, testRelease())); err != nil {
+	if err := src.Verify(t.Context(), signForTest(t, priv1, 1, testManifest())); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
 	if got := m.reads.Load(); got != 1 {
@@ -104,7 +104,7 @@ func TestTransitKeySource_ReadsAndCaches(t *testing.T) {
 // (min_encryption_version=3), but Transit still verifies v1 and v2
 // (min_decryption_version=1). Every version down to min_decryption_version
 // must be served, including the ones below min_encryption_version, and a
-// release signed by v1 during the grace period must still verify.
+// manifest signed by v1 during the grace period must still verify.
 func TestTransitKeySource_RotationGracePeriodServesBelowMinEncryption(t *testing.T) {
 	k1, priv1 := newTestKey(t, 1)
 	k2, priv2 := newTestKey(t, 2)
@@ -123,7 +123,7 @@ func TestTransitKeySource_RotationGracePeriodServesBelowMinEncryption(t *testing
 		t.Fatalf("KeySet versions = %+v, want 1, 2, 3 (down to min_decryption_version, not min_encryption_version)", ks)
 	}
 	for v, priv := range map[int]ed25519.PrivateKey{1: priv1, 2: priv2, 3: priv3} {
-		if err := src.Verify(t.Context(), testRelease(), signForTest(t, priv, v, testRelease())); err != nil {
+		if err := src.Verify(t.Context(), signForTest(t, priv, v, testManifest())); err != nil {
 			t.Errorf("v%d signature during the grace period: %v", v, err)
 		}
 	}
@@ -141,7 +141,7 @@ func TestTransitKeySource_HonorsMinDecryptionVersion(t *testing.T) {
 	if err != nil || len(ks) != 2 || ks[0].Version != 2 || ks[1].Version != 3 {
 		t.Fatalf("KeySet = %+v, %v; want versions 2, 3", ks, err)
 	}
-	err = src.Verify(t.Context(), testRelease(), signForTest(t, priv1, 1, testRelease()))
+	err = src.Verify(t.Context(), signForTest(t, priv1, 1, testManifest()))
 	if !errors.Is(err, ErrUnknownKeyVersion) {
 		t.Fatalf("Verify with retired v1 = %v, want ErrUnknownKeyVersion", err)
 	}

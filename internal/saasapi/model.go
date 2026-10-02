@@ -140,9 +140,12 @@ type FleetVersion struct {
 	ChecksumSHA256 string    `gorm:"column:checksum_sha256;size:64;not null" json:"checksum_sha256"`
 	ReleasedAt     time.Time `gorm:"column:released_at;not null;index" json:"released_at"`
 	Notes          string    `gorm:"column:notes;type:text" json:"notes,omitempty"`
-	// Signature is cmd/fleetreleaser's Ed25519 signature over
-	// version|artifact_url|checksum_sha256, in fleetsign.EncodeSignature's
-	// "v<key version>:<base64>" format (§2.5). A row written before this
+	// Signature is cmd/fleetreleaser's Ed25519 signature over the
+	// fleetsign.Manifest canonical message (imas-fleet-manifest-v1|
+	// version|os|arch|file_name|checksum_sha256|min_sprout_version), in
+	// fleetsign.EncodeSignature's "v<key version>:<base64>" format (§2.5).
+	// This table can't hold os, arch, file_name or min_sprout_version yet
+	// (FU.3), so no row verifies and dispatch refuses them all. A row written before this
 	// column existed gets "" from AutoMigrate's default, and "" is always
 	// refused for dispatch — by saasapi here, by farmer, and by the
 	// sprout — never treated as checksum-only trust. Not part of GET

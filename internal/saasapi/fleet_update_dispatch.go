@@ -358,10 +358,33 @@ func selfUpdateParams(ctx context.Context, v FleetVersion) (json.RawMessage, err
 	if err != nil {
 		return nil, fmt.Errorf("reading fleet signing keys: %w", err)
 	}
-	if err := ks.Verify(fleetsign.Release{Version: p.Version, ArtifactURL: p.ArtifactURL, ChecksumSHA256: p.ChecksumSHA256}, p.Signature); err != nil {
+	osName, arch, fileName, minSproutVersion := fleetVersionManifestColumns(v)
+	m := fleetsign.Manifest{
+		Version:          p.Version,
+		OS:               osName,
+		Arch:             arch,
+		FileName:         fileName,
+		ChecksumSHA256:   p.ChecksumSHA256,
+		MinSproutVersion: minSproutVersion,
+		Signature:        p.Signature,
+	}
+	if err := ks.Verify(m); err != nil {
 		return nil, fmt.Errorf("signature: %w", err)
 	}
 	return json.Marshal(p)
+}
+
+// fleetVersionManifestColumns returns the signed manifest fields (§2.5)
+// that saas.fleet_versions has no column for yet: os, arch, file_name and
+// min_sprout_version arrive with FU.3's migration. Until then it returns
+// empty strings, so fleetsign refuses every row's manifest as
+// ErrInvalidManifest and no self_update rollout can be created: a row
+// signed over the old version|artifact_url|checksum_sha256 message must
+// not verify, and there is nothing yet to verify a new one against. A
+// variable only so tests can supply the columns and exercise the rest of
+// the dispatch path against a real signature.
+var fleetVersionManifestColumns = func(FleetVersion) (osName, arch, fileName, minSproutVersion string) {
+	return "", "", "", ""
 }
 
 // rolloutPolicyCheck compares the tenant's update policy with a rollout of

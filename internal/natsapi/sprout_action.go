@@ -42,6 +42,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -384,8 +385,21 @@ func runSproutSelfUpdate(req controlplane.SproutActionRequest, reply controlplan
 		reply.ErrorCode = controlplane.ErrorInvalidRequest
 		return reply, fmt.Errorf("%w: self_update params: %v", errSproutActionInvalid, err)
 	}
-	rel := fleetsign.Release{Version: in.Version, ArtifactURL: in.ArtifactURL, ChecksumSHA256: in.ChecksumSHA256}
-	if _, err := rel.Message(); err != nil {
+	osName, arch, fileName, minSproutVersion := selfUpdateManifestFields(in)
+	m := fleetsign.Manifest{
+		Version:          in.Version,
+		OS:               osName,
+		Arch:             arch,
+		FileName:         fileName,
+		ChecksumSHA256:   in.ChecksumSHA256,
+		MinSproutVersion: minSproutVersion,
+		Signature:        in.Signature,
+	}
+	if err := m.Validate(); err != nil {
+		reply.ErrorCode = controlplane.ErrorInvalidRequest
+		return reply, fmt.Errorf("%w: self_update: %w", errSproutActionInvalid, err)
+	}
+	if err := validArtifactURL(in.ArtifactURL); err != nil {
 		reply.ErrorCode = controlplane.ErrorInvalidRequest
 		return reply, fmt.Errorf("%w: self_update: %w", errSproutActionInvalid, err)
 	}
@@ -401,7 +415,7 @@ func runSproutSelfUpdate(req controlplane.SproutActionRequest, reply controlplan
 		reply.ErrorCode = controlplane.ErrorInternal
 		return reply, fmt.Errorf("self_update refused: reading fleet signing keys: %w", err)
 	}
-	if err := ks.Verify(rel, in.Signature); err != nil {
+	if err := ks.Verify(m); err != nil {
 		reply.ErrorCode = controlplane.ErrorInvalidRequest
 		return reply, fmt.Errorf("%w: self_update %s refused: %w", errSproutActionInvalid, in.Version, err)
 	}
@@ -419,6 +433,35 @@ func runSproutSelfUpdate(req controlplane.SproutActionRequest, reply controlplan
 	return reply, nil
 }
 
+// selfUpdateManifestFields returns the signed manifest fields (§2.5) a
+// self_update request doesn't carry: os, arch, file_name and
+// min_sprout_version. Until the sprout resolves its own manifest (FU.2) it
+// returns empty strings, so the manifest built from a request never
+// validates and every self_update is refused as invalid_request: a
+// request signed over the old version|artifact_url|checksum_sha256
+// message must not be dispatched. A variable only so tests can supply the
+// fields and exercise the rest of the path against a real signature.
+var selfUpdateManifestFields = func(controlplane.SelfUpdateParams) (osName, arch, fileName, minSproutVersion string) {
+	return "", "", "", ""
+}
+
+// propArtifactURL is the selfupdate step property carrying the download
+// URL (internal/ingredients/selfupdate reads the same name). It is not
+// part of the signed manifest, which has no URL; FU.2 removes it.
+const propArtifactURL = "artifact_url"
+
+// validArtifactURL keeps the check fleetsign made on artifact_url while it
+// was signed: an absolute https URL without userinfo, at most 2048
+// characters, no control characters.
+func validArtifactURL(s string) error {
+	u, err := url.Parse(s)
+	if err != nil || len(s) > 2048 || u.Scheme != "https" || u.Host == "" || u.User != nil ||
+		strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return errors.New("artifact_url is not an https URL")
+	}
+	return nil
+}
+
 // sendSelfUpdate sends p to sproutID as a one-step cook job — the
 // sprout's selfupdate ingredient — over tenantID's own connection, and
 // returns its JID. The SaaS API follows the job through farmer.job_status
@@ -431,7 +474,7 @@ func sendSelfUpdate(tenantID, sproutID string, p controlplane.SelfUpdateParams) 
 		ID:         cook.StepID(fleetsign.SelfUpdateStepIDPrefix + p.Version),
 		Properties: map[string]interface{}{
 			fleetsign.PropVersion:        p.Version,
-			fleetsign.PropArtifactURL:    p.ArtifactURL,
+			propArtifactURL:              p.ArtifactURL,
 			fleetsign.PropChecksumSHA256: p.ChecksumSHA256,
 			fleetsign.PropSignature:      p.Signature,
 		},

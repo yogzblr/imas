@@ -357,9 +357,10 @@ farmer at all** — the failure mode is categorically worse. Before any
   in-use-file handling.
 - **Downgrade and replay protection.** The sprout refuses any version
   lower than the one it runs unless the signed manifest carries an
-  explicit, signed `allow_downgrade` for that version. Each manifest also
-  carries `min_sprout_version`, the oldest sprout the current farmer still
-  supports.
+  explicit, signed `allow_downgrade` for that version. `allow_downgrade`
+  is not in the manifest format yet; adding it means a new message tag
+  (§2.5). Each manifest also carries a signed `min_sprout_version`
+  (§2.5), the oldest sprout the current farmer still supports.
 - **Health-based gating.** A wave is complete only when each sprout
   reconnects and reports the *new* version (from facts), not merely when
   the command was acked. Waves reuse the batch-and-gate mechanism
@@ -395,10 +396,39 @@ Contains the **gateway signing key's** public key only (see `imas-nats-jwt-auth-
 
 A `saas.fleet_versions` row is trusted because it is signed, not because
 of who wrote it. The signature is Ed25519 over the canonical string
-`version|os|arch|file_name|checksum_sha256` — deliberately **not** the
-URL, which comes from the sprout's own repo config. It is made with the
-OpenBao Transit key `imas-fleet-signing` (non-exportable, separate from
-the gateway JWT key) and stored as `signature = "v<key version>:<base64>"`.
+
+```
+imas-fleet-manifest-v1|version|os|arch|file_name|checksum_sha256|min_sprout_version
+```
+
+built by `internal/fleetsign` (`Manifest.Message`), the one encoder shared
+by the signer and every verifier.
+
+- **Six signed fields, every manifest field but the signature.**
+  `min_sprout_version` is signed so that nobody between fleetreleaser and
+  the sprout (farmer included) can lower the floor and let a sprout too
+  old for a release take it, or raise it to strand sprouts.
+- **Deliberately no URL.** The URL comes from the sprout's own repo
+  config.
+- **A domain-separation tag** (`imas-fleet-manifest-v1`) comes first.
+  Nothing else signed with this key, including the earlier
+  `version|artifact_url|checksum_sha256` message, can verify as a
+  manifest. A format change gets a new tag.
+- **Strict validation, never normalization.** Each field is validated
+  before signing or verifying:
+  - no field may be empty or contain `|` or a control character;
+  - `version` and `min_sprout_version` are canonical semver with a
+    leading `v`, and `min_sprout_version` ≤ `version`;
+  - `os` and `arch` are lowercase `[a-z0-9_]`;
+  - `file_name` is a single plain file name;
+  - `checksum_sha256` is 64 lowercase hex characters.
+
+  A value is never rewritten to make it pass (an uppercase checksum is
+  refused, not lowercased).
+
+The signature is made with the OpenBao Transit key `imas-fleet-signing`
+(non-exportable, separate from the gateway JWT key) and stored as
+`signature = "v<key version>:<base64>"`.
 
 **Registration flow.** The farmer Helm chart carries the sprout release
 (`sprout.release`: version, channel, and per-OS/arch package name, file

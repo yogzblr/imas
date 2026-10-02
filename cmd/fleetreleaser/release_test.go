@@ -26,11 +26,17 @@ import (
 
 const testChecksum = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 
-func testRelease() fleetsign.Release {
-	return fleetsign.Release{
-		Version:        "v2.4.1",
-		ArtifactURL:    "https://artifacts.example.com/sprout-v2.4.1-linux-amd64",
-		ChecksumSHA256: testChecksum,
+func testRelease() release {
+	return release{
+		Manifest: fleetsign.Manifest{
+			Version:          "v2.4.1",
+			OS:               "linux",
+			Arch:             "amd64",
+			FileName:         "imas-sprout_2.4.1_amd64.deb",
+			ChecksumSHA256:   testChecksum,
+			MinSproutVersion: "v2.0.0",
+		},
+		ArtifactURL: "https://artifacts.example.com/sprout-v2.4.1-linux-amd64",
 	}
 }
 
@@ -173,7 +179,7 @@ func TestPublish_InsertsSignedRow(t *testing.T) {
 	// The stored signature verifies with nothing but the public key — what
 	// farmer, saasapi and the sprout each do.
 	ks, _ := fleetsign.NewKeySet([]fleetsign.PublicKey{{Version: 1, Key: m.pub}})
-	if err := ks.Verify(testRelease(), row.Signature); err != nil {
+	if err := ks.Verify(testRelease().withSignature(row.Signature)); err != nil {
 		t.Fatalf("stored signature does not verify: %v", err)
 	}
 
@@ -202,7 +208,7 @@ func TestPublish_BackfillsUnmigratedRow(t *testing.T) {
 	var row saasapi.FleetVersion
 	db.First(&row, "id = ?", "fv_old")
 	ks, _ := fleetsign.NewKeySet([]fleetsign.PublicKey{{Version: 1, Key: m.pub}})
-	if err := ks.Verify(rel, row.Signature); err != nil {
+	if err := ks.Verify(rel.withSignature(row.Signature)); err != nil {
 		t.Fatalf("backfilled signature does not verify: %v", err)
 	}
 }
@@ -276,19 +282,70 @@ func TestPublish_RejectsInvalidRelease(t *testing.T) {
 	signer := newSigner(t, m, "signer")
 	rel := testRelease()
 	rel.ArtifactURL = "http://artifacts.example.com/x"
-	if _, err := publish(context.Background(), newTestDB(t), signer, rel, "", time.Now()); !errors.Is(err, fleetsign.ErrInvalidRelease) {
-		t.Fatalf("publish = %v, want ErrInvalidRelease", err)
+	if _, err := publish(context.Background(), newTestDB(t), signer, rel, "", time.Now()); !errors.Is(err, errInvalidArtifactURL) {
+		t.Fatalf("publish = %v, want errInvalidArtifactURL", err)
+	}
+	rel = testRelease()
+	rel.FileName = "../imas-sprout.deb"
+	if _, err := publish(context.Background(), newTestDB(t), signer, rel, "", time.Now()); !errors.Is(err, fleetsign.ErrInvalidManifest) {
+		t.Fatalf("publish = %v, want ErrInvalidManifest", err)
+	}
+	if m.signs != 0 {
+		t.Fatalf("Transit was asked to sign %d invalid release(s)", m.signs)
+	}
+}
+
+// What fleetreleaser signs is the fleetsign.Manifest canonical message,
+// byte for byte, with no URL in it.
+func TestPublish_SignsManifestMessage(t *testing.T) {
+	m := newMockTransit(t)
+	signer := newSigner(t, m, "signer")
+	db := newTestDB(t)
+	rel := testRelease()
+	if _, err := publish(t.Context(), db, signer, rel, "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var row saasapi.FleetVersion
+	db.First(&row, "version = ?", rel.Version)
+	_, sig, err := fleetsign.DecodeSignature(row.Signature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "imas-fleet-manifest-v1|v2.4.1|linux|amd64|imas-sprout_2.4.1_amd64.deb|" + testChecksum + "|v2.0.0"
+	if !ed25519.Verify(m.pub, []byte(want), sig) {
+		t.Fatalf("stored signature is not over %q", want)
 	}
 }
 
 func TestRun_UsageErrors(t *testing.T) {
 	var stdout, stderr bytes.Buffer
+	valid := []string{"-version", "v1.0.0", "-os", "linux", "-arch", "amd64", "-file-name", "imas-sprout_1.0.0_amd64.deb",
+		"-min-sprout-version", "v1.0.0", "-artifact-url", "https://a.example.com/x", "-checksum-sha256", testChecksum}
+	with := func(extra ...string) []string { return append(append([]string(nil), valid...), extra...) }
+	without := func(flag string) []string {
+		var out []string
+		for i := 0; i < len(valid); i += 2 {
+			if valid[i] != flag {
+				out = append(out, valid[i], valid[i+1])
+			}
+		}
+		return out
+	}
 	cases := [][]string{
 		{},
-		{"-version", "v1", "-artifact-url", "https://a.example.com/x"},
-		{"-version", "v1", "-artifact-url", "http://a.example.com/x", "-checksum-sha256", testChecksum},
-		{"-version", "v1", "-artifact-url", "https://a.example.com/x", "-checksum-sha256", testChecksum, "extra"},
-		{"-version", "v1", "-artifact-url", "https://a.example.com/x", "-checksum-sha256", testChecksum, "-released-at", "yesterday"},
+		{"-version", "v1.0.0", "-artifact-url", "https://a.example.com/x"},
+		without("-os"),
+		without("-arch"),
+		without("-file-name"),
+		without("-min-sprout-version"),
+		without("-checksum-sha256"),
+		without("-artifact-url"),
+		with("-artifact-url", "http://a.example.com/x"),
+		with("-version", "v1"),
+		with("-min-sprout-version", "v9.0.0"),
+		with("-file-name", "pool/imas.deb"),
+		with("extra"),
+		with("-released-at", "yesterday"),
 	}
 	t.Setenv(EnvOpenBaoAddr, "")
 	for i, args := range cases {
@@ -299,7 +356,7 @@ func TestRun_UsageErrors(t *testing.T) {
 	// Valid flags, missing DSN.
 	setSignerEnv(t, "http://127.0.0.1:1", "x")
 	t.Setenv(EnvDSN, "")
-	if code := run([]string{"-version", "v1", "-artifact-url", "https://a.example.com/x", "-checksum-sha256", strings.ToUpper(testChecksum)}, &stdout, &stderr); code != 2 {
+	if code := run(with("-checksum-sha256", strings.ToUpper(testChecksum)), &stdout, &stderr); code != 2 {
 		t.Errorf("missing DSN: exit %d, want 2", code)
 	}
 }

@@ -14,11 +14,17 @@ package fleetsign
 //	bao write -f transit/keys/imas-fleet-signing type=ed25519
 //	bao write -f transit/keys/imas-fleet-signing/rotate
 //	curl -H "X-Vault-Token: root" $BAO_ADDR/v1/transit/keys/imas-fleet-signing > transit-keys.json
-//	curl -H "X-Vault-Token: root" -d '{"input":"<b64 testRelease().Message()>","key_version":N}' \
+//	curl -H "X-Vault-Token: root" -d '{"input":"<b64 capturedSignInput>","key_version":N}' \
 //	  $BAO_ADDR/v1/transit/sign/imas-fleet-signing > transit-sign-vN.json
 //
 // Don't regenerate them from Go code or edit them by hand; recapture
-// them from a real server.
+// them from a real server. The sign fixtures were captured over the
+// pre-FU.0 message (capturedSignInput), not over a Manifest: they prove
+// Transit's key and signature encodings round-trip through
+// ParseTransitEd25519PublicKey and EncodeSignature, which the message
+// change doesn't touch. Recapture them over testManifest().Message()
+// when a v2.7.0 server is to hand; TestOpenBaoLive_TransitKeySource
+// already signs a Manifest live.
 
 import (
 	"bytes"
@@ -27,6 +33,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -37,6 +44,11 @@ import (
 )
 
 const realTransitDir = "testdata/openbao-v2.7.0"
+
+// capturedSignInput is the exact input transit-sign-v{1,2}.json were
+// signed over: the version|artifact_url|checksum_sha256 message fleetsign
+// used before FU.0. It is a fixture, not a format anything accepts.
+const capturedSignInput = "v2.4.1|https://artifacts.example.com/sprout-v2.4.1-linux-amd64|" + testChecksum
 
 func readRealTransitFixture(t *testing.T, name string) []byte {
 	t.Helper()
@@ -69,7 +81,7 @@ func transitSignatureToRelease(t *testing.T, body []byte) string {
 }
 
 // The regression test: a TransitKeySource reading a real OpenBao key
-// response must verify releases that same OpenBao signed, and the JWKS
+// response must verify signatures that same OpenBao made, and the JWKS
 // handler must serve 200.
 func TestTransitKeySource_RealOpenBaoResponse(t *testing.T) {
 	body := readRealTransitFixture(t, "transit-keys.json")
@@ -101,8 +113,15 @@ func TestTransitKeySource_RealOpenBaoResponse(t *testing.T) {
 	}
 	for _, name := range []string{"transit-sign-v1.json", "transit-sign-v2.json"} {
 		sig := transitSignatureToRelease(t, readRealTransitFixture(t, name))
-		if err := ks.Verify(testRelease(), sig); err != nil {
-			t.Errorf("%s: OpenBao's own signature over testRelease() doesn't verify: %v", name, err)
+		if err := ks.verifyMessage([]byte(capturedSignInput), sig); err != nil {
+			t.Errorf("%s: OpenBao's own signature doesn't verify: %v", name, err)
+		}
+		// The same signature is not valid for any Manifest: the old
+		// message is not accepted in any form.
+		m := testManifest()
+		m.Signature = sig
+		if err := ks.Verify(m); !errors.Is(err, ErrInvalidSignature) {
+			t.Errorf("%s: pre-FU.0 signature accepted for a Manifest: %v", name, err)
 		}
 	}
 
@@ -217,11 +236,12 @@ func TestOpenBaoLive_TransitKeySource(t *testing.T) {
 	admin(http.MethodPost, mount+"/keys/"+DefaultTransitKeyName, map[string]any{"type": "ed25519"})
 	admin(http.MethodPost, mount+"/keys/"+DefaultTransitKeyName+"/rotate", nil)
 
-	msg, err := testRelease().Message()
+	m := testManifest()
+	msg, err := m.Message()
 	if err != nil {
 		t.Fatal(err)
 	}
-	sig := transitSignatureToRelease(t, admin(http.MethodPost, mount+"/sign/"+DefaultTransitKeyName,
+	m.Signature = transitSignatureToRelease(t, admin(http.MethodPost, mount+"/sign/"+DefaultTransitKeyName,
 		map[string]any{"input": base64.StdEncoding.EncodeToString(msg)}))
 
 	t.Setenv(EnvOpenBaoAddr, addr)
@@ -233,8 +253,8 @@ func TestOpenBaoLive_TransitKeySource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewTransitKeySourceFromEnv: %v", err)
 	}
-	if err := src.Verify(t.Context(), testRelease(), sig); err != nil {
-		t.Fatalf("release signed by real Transit doesn't verify: %v", err)
+	if err := src.Verify(t.Context(), m); err != nil {
+		t.Fatalf("manifest signed by real Transit doesn't verify: %v", err)
 	}
 
 	rec := httptest.NewRecorder()
