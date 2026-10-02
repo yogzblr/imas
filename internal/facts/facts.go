@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"sync/atomic"
 )
 
 // SystemFacts holds auto-collected system properties.
@@ -18,7 +19,19 @@ type SystemFacts struct {
 	KernelArch  string         `json:"kernel_arch"`
 	SproutID    string         `json:"sprout_id,omitempty"`
 	Hardware    *HardwareFacts `json:"hardware,omitempty"`
+	// SproutVersion is the running sprout's release tag (cmd/sprout's
+	// main.Tag, "v<version>"; SetSproutVersion). A fleet update rollout's
+	// wave passes only once each sprout reports its new version here
+	// (design doc §2.3). Empty for a build without a release tag.
+	SproutVersion string `json:"sprout_version,omitempty"`
 }
+
+// sproutVersion is what Collect reports as SproutVersion.
+var sproutVersion atomic.Pointer[string]
+
+// SetSproutVersion records the running sprout's release tag for Collect
+// to report. cmd/sprout calls it once at startup.
+func SetSproutVersion(tag string) { sproutVersion.Store(&tag) }
 
 // Collect gathers system facts from the local machine.
 func Collect() SystemFacts {
@@ -34,6 +47,9 @@ func Collect() SystemFacts {
 	}
 	if hw := CollectHardware(); !hw.IsZero() {
 		sf.Hardware = &hw
+	}
+	if v := sproutVersion.Load(); v != nil {
+		sf.SproutVersion = *v
 	}
 	return sf
 }

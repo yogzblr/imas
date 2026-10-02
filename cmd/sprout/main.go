@@ -16,6 +16,7 @@ import (
 	certs "github.com/yogzblr/imas/internal/certs"
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/facts"
 	"github.com/yogzblr/imas/internal/ingredients"
 	"github.com/yogzblr/imas/internal/ingredients/cmd"
 	"github.com/yogzblr/imas/internal/ingredients/selfupdate"
@@ -125,6 +126,9 @@ func runSprout(parent context.Context, joinToken string, handleSignals bool) {
 	// version the selfupdate ingredient refuses downgrades and
 	// min_sprout_version against.
 	selfupdate.SetRunningVersion(Tag)
+	// Reported in facts, which a fleet update's wave gate reads to see
+	// this sprout back on its new version (design doc §2.3).
+	facts.SetSproutVersion(Tag)
 	if err := certs.GenNKey(false); err != nil {
 		log.Fatalf("failed to generate sprout NKey: %v", err)
 	}
