@@ -2,8 +2,9 @@
 // (design doc §1.8, §2.2, §2.5): the one-step job farmer sends for an
 // internal.sprout.action self_update. Its single method, apply:
 //
-//  1. verifies the release's Ed25519 signature over
-//     version|artifact_url|checksum_sha256 against imas-fleet-signing's
+//  1. verifies the release's Ed25519 signature over its
+//     fleetsign.Manifest (version|os|arch|file_name|checksum_sha256|
+//     min_sprout_version) against imas-fleet-signing's
 //     current key versions, fetched live from farmer over the sprout's
 //     SproutRootCA-pinned NATS connection (keys.go; the enrollment-time
 //     pin is only a bootstrap fallback until the first live fetch
@@ -25,6 +26,11 @@
 // (with the artifact verified and staged) rather than claiming success a
 // rollout gate would act on. Any tenant recipe can name this ingredient,
 // but it can only ever act on a release CloudXP's fleetreleaser signed.
+//
+// Since FU.0 a step carries only version, artifact_url, checksum_sha256
+// and signature, not the manifest's os, arch, file_name and
+// min_sprout_version (manifestFields), so step 1 refuses every release
+// until FU.2 rewrites this package to fetch the sprout's own manifest.
 package selfupdate
 
 import (
@@ -32,8 +38,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
@@ -56,16 +64,66 @@ var (
 // install receives a staged artifact whose signature and checksum have
 // both been verified. A seam for tests; see the package doc.
 var (
-	install = func(_ context.Context, _ fleetsign.Release, stagedPath string) error {
+	install = func(_ context.Context, _ stepRelease, stagedPath string) error {
 		return fmt.Errorf("%w; verified artifact left at %s", ErrInstallNotImplemented, stagedPath)
 	}
 )
 
+// manifestFields returns the signed manifest fields (fleetsign.Manifest)
+// a selfupdate step doesn't carry: os, arch, file_name and
+// min_sprout_version. Until FU.2 it returns empty strings, so the
+// manifest never validates and every release is refused before any key
+// read or download: a step signed over the old
+// version|artifact_url|checksum_sha256 message must not install. A
+// variable only so tests can supply the fields and exercise the rest of
+// the path against a real signature.
+var manifestFields = func() (osName, arch, fileName, minSproutVersion string) {
+	return "", "", "", ""
+}
+
+// propArtifactURL is the step property carrying the download URL
+// (internal/natsapi sends the same name). It is not part of the signed
+// manifest, which has no URL; FU.2 removes it.
+const propArtifactURL = "artifact_url"
+
 var applyProps = ingredients.MethodPropsSet{
 	{Key: fleetsign.PropVersion, Type: "string", IsReq: true, Description: "release version"},
-	{Key: fleetsign.PropArtifactURL, Type: "string", IsReq: true, Description: "https URL of the release binary"},
+	{Key: propArtifactURL, Type: "string", IsReq: true, Description: "https URL of the release binary (not signed)"},
 	{Key: fleetsign.PropChecksumSHA256, Type: "string", IsReq: true, Description: "hex SHA-256 of the release binary"},
-	{Key: fleetsign.PropSignature, Type: "string", IsReq: true, Description: "fleetreleaser's signature over version|artifact_url|checksum_sha256"},
+	{Key: fleetsign.PropSignature, Type: "string", IsReq: true, Description: "fleetreleaser's signature over the release's fleetsign.Manifest"},
+}
+
+// stepRelease is what a selfupdate step carries.
+type stepRelease struct {
+	Version        string
+	ArtifactURL    string
+	ChecksumSHA256 string
+}
+
+// manifest is the signed manifest for r, with signature sig.
+func (r stepRelease) manifest(sig string) fleetsign.Manifest {
+	osName, arch, fileName, minSproutVersion := manifestFields()
+	return fleetsign.Manifest{
+		Version:          r.Version,
+		OS:               osName,
+		Arch:             arch,
+		FileName:         fileName,
+		ChecksumSHA256:   r.ChecksumSHA256,
+		MinSproutVersion: minSproutVersion,
+		Signature:        sig,
+	}
+}
+
+// validArtifactURL keeps the check fleetsign made on artifact_url while it
+// was signed: an absolute https URL without userinfo, at most 2048
+// characters, no control characters.
+func validArtifactURL(s string) error {
+	u, err := url.Parse(s)
+	if err != nil || len(s) > 2048 || u.Scheme != "https" || u.Host == "" || u.User != nil ||
+		strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return fmt.Errorf("%w: artifact_url is not an https URL", fleetsign.ErrInvalidManifest)
+	}
+	return nil
 }
 
 // Compile-time interface check.
@@ -92,7 +150,7 @@ func (s SelfUpdate) Parse(id, method string, params map[string]interface{}) (coo
 }
 
 // release reads the four string properties.
-func (s SelfUpdate) release() (fleetsign.Release, string, error) {
+func (s SelfUpdate) release() (stepRelease, string, error) {
 	get := func(key string) (string, error) {
 		v, ok := s.params[key].(string)
 		if !ok {
@@ -101,14 +159,14 @@ func (s SelfUpdate) release() (fleetsign.Release, string, error) {
 		return v, nil
 	}
 	var (
-		rel fleetsign.Release
+		rel stepRelease
 		sig string
 		err error
 	)
 	if rel.Version, err = get(fleetsign.PropVersion); err != nil {
 		return rel, "", err
 	}
-	if rel.ArtifactURL, err = get(fleetsign.PropArtifactURL); err != nil {
+	if rel.ArtifactURL, err = get(propArtifactURL); err != nil {
 		return rel, "", err
 	}
 	if rel.ChecksumSHA256, err = get(fleetsign.PropChecksumSHA256); err != nil {
@@ -128,12 +186,19 @@ func failed(err error, notes ...fmt.Stringer) (cook.Result, error) {
 // verify checks the release's signature against the trusted key set
 // (keys.go). Its only network traffic is the key fetch from farmer; the
 // artifact host is never contacted.
-func (s SelfUpdate) verify(ctx context.Context) (fleetsign.Release, keySource, error) {
+func (s SelfUpdate) verify(ctx context.Context) (stepRelease, keySource, error) {
 	rel, sig, err := s.release()
 	if err != nil {
 		return rel, "", err
 	}
-	src, err := verifyRelease(ctx, rel, sig)
+	m := rel.manifest(sig)
+	if err := m.Validate(); err != nil {
+		return rel, "", fmt.Errorf("selfupdate: refusing %s: %w", rel.Version, err)
+	}
+	if err := validArtifactURL(rel.ArtifactURL); err != nil {
+		return rel, "", fmt.Errorf("selfupdate: refusing %s: %w", rel.Version, err)
+	}
+	src, err := verifyManifest(ctx, m)
 	if err != nil {
 		return rel, "", fmt.Errorf("selfupdate: refusing %s: %w", rel.Version, err)
 	}

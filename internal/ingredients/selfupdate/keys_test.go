@@ -46,9 +46,9 @@ func (tk *transitKeys) set(t *testing.T, versions ...int) fleetsign.KeySet {
 	return ks
 }
 
-func (tk *transitKeys) sign(t *testing.T, version int, rel fleetsign.Release) string {
+func (tk *transitKeys) sign(t *testing.T, version int, rel stepRelease) string {
 	t.Helper()
-	msg, err := rel.Message()
+	msg, err := rel.manifest("").Message()
 	if err != nil {
 		t.Fatal(err)
 	}

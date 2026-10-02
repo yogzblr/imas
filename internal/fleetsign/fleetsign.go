@@ -1,11 +1,18 @@
-// Package fleetsign is the verify side of sprout release signing: the
-// canonical string a fleet_versions row is signed over, the signature
-// encoding stored in saas.fleet_versions.signature, Ed25519 verification
-// against a set of imas-fleet-signing public keys, and the JWKS encoding
-// those public keys travel in (farmer's ungated
-// /v1/.well-known/fleet-signing-jwks.json, the POST /v1/enroll response,
-// and the sprout's pinned copy on disk). See
-// docs/design/cloudxp-machine-manager-api-design.md §2.5.
+// Package fleetsign is the sprout release trust root: the Manifest a
+// sprout installs from, the one canonical string it is signed over
+// (Manifest.Message), the signature encoding stored in
+// saas.fleet_versions.signature, and Ed25519 verification against either
+// the Keyring shipped in the sprout package (what a sprout trusts) or the
+// imas-fleet-signing key versions read from OpenBao Transit (what farmer,
+// saasapi and fleetreleaser check against). See
+// docs/design/cloudxp-machine-manager-api-design.md §2.5 and §2.6.
+//
+// The signed message is
+//
+//	version|os|arch|file_name|checksum_sha256|min_sprout_version
+//
+// and contains no URL: the sprout downloads FileName from the repository
+// configured in the sprout itself (requirement 20).
 //
 // FLAG FOR SECURITY REVIEW. This package is imported by farmer, saasapi
 // and sprout, and deliberately contains no signing code at all: the only
@@ -14,15 +21,18 @@
 // That split is enforced by OpenBao policy (deploy/fleetreleaser/), not
 // by this package's shape — TestNoSigningCodeInPackage only keeps the
 // shape honest.
+//
+// The JWKS encoding (jwks.go) and JWKSHandler remain for the existing
+// enrollment pin and live key fetch only; §2.5 drops both for fleet keys
+// and the selfupdate rewrite (FU.2) retires them. Keyring never reads a
+// JWKS and never touches the network.
 package fleetsign
 
 import (
 	"crypto/ed25519"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,100 +45,35 @@ const DefaultTransitKeyName = "imas-fleet-signing"
 
 // The one-step job farmer sends a sprout for a self_update action: the
 // sprout's selfupdate ingredient (internal/ingredients/selfupdate), method
-// apply, with the release fields and signature as its properties. Shared
+// apply, with the manifest fields and signature as its properties. Shared
 // here so farmer doesn't import the ingredient package to name it.
 const (
 	SelfUpdateIngredient   = "selfupdate"
 	SelfUpdateMethod       = "apply"
 	PropVersion            = "version"
-	PropArtifactURL        = "artifact_url"
 	PropChecksumSHA256     = "checksum_sha256"
 	PropSignature          = "signature"
 	SelfUpdateStepIDPrefix = "selfupdate-"
 )
 
-// Field limits, matching saas.fleet_versions' column sizes
-// (internal/saasapi/model.go's FleetVersion).
-const (
-	maxVersionLen     = 64
-	maxArtifactURLLen = 2048
-)
-
 var (
-	// ErrInvalidRelease: a field can't be part of a canonical message, so
-	// it can be neither signed nor verified.
-	ErrInvalidRelease = errors.New("fleetsign: invalid release fields")
+	// ErrInvalidManifest: a field can't be part of a canonical message, so
+	// the manifest can be neither signed nor verified.
+	ErrInvalidManifest = errors.New("fleetsign: invalid manifest fields")
 	// ErrMissingSignature: the row has no signature (for example a
 	// fleet_versions row written before the signature column existed).
 	// Always a refusal, never a fallback to checksum-only trust.
-	ErrMissingSignature = errors.New("fleetsign: release has no signature")
+	ErrMissingSignature = errors.New("fleetsign: manifest has no signature")
 	// ErrMalformedSignature: the signature isn't "v<version>:<base64>".
 	ErrMalformedSignature = errors.New("fleetsign: malformed signature")
 	// ErrUnknownKeyVersion: the signature names a key version the key set
-	// doesn't hold (not fetched or pinned, or retired by min_decryption_version).
+	// or keyring doesn't hold (not shipped, or retired).
 	ErrUnknownKeyVersion = errors.New("fleetsign: signature key version not in key set")
 	// ErrInvalidSignature: the signature doesn't verify.
 	ErrInvalidSignature = errors.New("fleetsign: signature verification failed")
 	// ErrNoKeys: the key set is empty.
 	ErrNoKeys = errors.New("fleetsign: no fleet signing keys")
 )
-
-// Release is the signed content of one saas.fleet_versions row.
-type Release struct {
-	Version        string
-	ArtifactURL    string
-	ChecksumSHA256 string
-}
-
-// Message returns the canonical bytes a release is signed over:
-// version|artifact_url|checksum_sha256.
-//
-// The fields are validated first, and the same rules apply when signing
-// and when verifying, so the encoding is unambiguous: no field may be
-// empty or contain '|' or a control character, the artifact URL must be
-// an absolute https URL without userinfo, and the checksum must be exactly
-// 64 lowercase hex characters (callers lowercase it before signing; a
-// verifier never normalizes, so an uppercase checksum is refused rather
-// than silently matched).
-func (r Release) Message() ([]byte, error) {
-	if err := r.validate(); err != nil {
-		return nil, err
-	}
-	return []byte(r.Version + "|" + r.ArtifactURL + "|" + r.ChecksumSHA256), nil
-}
-
-func (r Release) validate() error {
-	for name, v := range map[string]string{
-		"version": r.Version, "artifact_url": r.ArtifactURL, "checksum_sha256": r.ChecksumSHA256,
-	} {
-		if v == "" {
-			return fmt.Errorf("%w: %s is empty", ErrInvalidRelease, name)
-		}
-		if strings.ContainsRune(v, '|') {
-			return fmt.Errorf("%w: %s contains '|'", ErrInvalidRelease, name)
-		}
-		for _, c := range v {
-			if c < 0x20 || c == 0x7f {
-				return fmt.Errorf("%w: %s contains a control character", ErrInvalidRelease, name)
-			}
-		}
-	}
-	if len(r.Version) > maxVersionLen {
-		return fmt.Errorf("%w: version is longer than %d characters", ErrInvalidRelease, maxVersionLen)
-	}
-	if len(r.ArtifactURL) > maxArtifactURLLen {
-		return fmt.Errorf("%w: artifact_url is longer than %d characters", ErrInvalidRelease, maxArtifactURLLen)
-	}
-	u, err := url.Parse(r.ArtifactURL)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
-		return fmt.Errorf("%w: artifact_url is not an https URL", ErrInvalidRelease)
-	}
-	if sum, err := hex.DecodeString(r.ChecksumSHA256); err != nil || len(sum) != 32 ||
-		r.ChecksumSHA256 != strings.ToLower(r.ChecksumSHA256) {
-		return fmt.Errorf("%w: checksum_sha256 is not 64 lowercase hex characters", ErrInvalidRelease)
-	}
-	return nil
-}
 
 // EncodeSignature renders a raw Ed25519 signature made by Transit key
 // version keyVersion as stored in saas.fleet_versions.signature:
@@ -172,8 +117,8 @@ type PublicKey struct {
 type KeySet []PublicKey
 
 // NewKeySet validates keys and returns them as a sorted KeySet. It
-// rejects an empty set, a non-positive or duplicate version, and a key
-// that isn't ed25519.PublicKeySize bytes.
+// rejects an empty set, a non-positive or duplicate version, a key that
+// isn't ed25519.PublicKeySize bytes, and a weak key (checkPublicKey).
 func NewKeySet(keys []PublicKey) (KeySet, error) {
 	if len(keys) == 0 {
 		return nil, ErrNoKeys
@@ -190,6 +135,9 @@ func NewKeySet(keys []PublicKey) (KeySet, error) {
 		if len(k.Key) != ed25519.PublicKeySize {
 			return nil, fmt.Errorf("fleetsign: key version %d is %d bytes, want %d", k.Version, len(k.Key), ed25519.PublicKeySize)
 		}
+		if err := checkPublicKey(k.Key); err != nil {
+			return nil, fmt.Errorf("fleetsign: key version %d: %w", k.Version, err)
+		}
 		seen[k.Version] = true
 		ks = append(ks, PublicKey{Version: k.Version, Key: append(ed25519.PublicKey(nil), k.Key...)})
 	}
@@ -197,17 +145,27 @@ func NewKeySet(keys []PublicKey) (KeySet, error) {
 	return ks, nil
 }
 
-// Verify checks signature (EncodeSignature's format) over r's canonical
-// message against the key version it names. Every failure is an error:
-// there is no path on which a missing or bad signature is accepted.
-func (ks KeySet) Verify(r Release, signature string) error {
+// Verify checks m.Signature (EncodeSignature's format) over m's
+// canonical message (Manifest.Message) against the key version the
+// signature names. Every failure is an error: there is no path on which a
+// missing or bad signature, or an invalid field, is accepted.
+func (ks KeySet) Verify(m Manifest) error {
 	if len(ks) == 0 {
 		return ErrNoKeys
 	}
-	msg, err := r.Message()
+	msg, err := m.Message()
 	if err != nil {
 		return err
 	}
+	return ks.verifyMessage(msg, m.Signature)
+}
+
+// verifyMessage is the one signature check behind KeySet.Verify and
+// Keyring.Verify: decode the signature, pick the key it names, verify.
+// Callers build msg with Manifest.Message; it is separate only so the
+// captured real-OpenBao signatures (openbao_response_test.go) can be
+// checked over the exact bytes they were made over.
+func (ks KeySet) verifyMessage(msg []byte, signature string) error {
 	keyVersion, sig, err := DecodeSignature(signature)
 	if err != nil {
 		return err

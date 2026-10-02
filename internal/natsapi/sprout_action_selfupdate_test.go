@@ -31,10 +31,24 @@ type staticKeys struct {
 
 func (s staticKeys) KeySet(context.Context) (fleetsign.KeySet, error) { return s.ks, s.err }
 
+// withTestManifestFields stands in for the manifest fields a self_update
+// request doesn't carry yet (selfUpdateManifestFields).
+func withTestManifestFields(t *testing.T) {
+	t.Helper()
+	orig := selfUpdateManifestFields
+	selfUpdateManifestFields = testManifestFields
+	t.Cleanup(func() { selfUpdateManifestFields = orig })
+}
+
+func testManifestFields(controlplane.SelfUpdateParams) (osName, arch, fileName, minSproutVersion string) {
+	return "linux", "amd64", "imas-sprout_2.4.1_amd64.deb", "v2.0.0"
+}
+
 // signedSelfUpdate returns a release signed with a fresh key, and a key
-// source holding that key.
+// source holding that key, with the test manifest fields installed.
 func signedSelfUpdate(t *testing.T) (controlplane.SelfUpdateParams, staticKeys, ed25519.PrivateKey) {
 	t.Helper()
+	withTestManifestFields(t)
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -51,7 +65,9 @@ func signedSelfUpdate(t *testing.T) (controlplane.SelfUpdateParams, staticKeys, 
 
 func signParams(t *testing.T, priv ed25519.PrivateKey, p controlplane.SelfUpdateParams) string {
 	t.Helper()
-	msg, err := fleetsign.Release{Version: p.Version, ArtifactURL: p.ArtifactURL, ChecksumSHA256: p.ChecksumSHA256}.Message()
+	osName, arch, fileName, minSproutVersion := testManifestFields(p)
+	msg, err := fleetsign.Manifest{Version: p.Version, OS: osName, Arch: arch, FileName: fileName,
+		ChecksumSHA256: p.ChecksumSHA256, MinSproutVersion: minSproutVersion}.Message()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,10 +105,10 @@ func TestSelfUpdate_RefusedBeforeDispatch(t *testing.T) {
 	otherKeys, _ := fleetsign.NewKeySet([]fleetsign.PublicKey{{Version: 1, Key: otherPub}})
 
 	tampered := good
-	tampered.ArtifactURL = "https://evil.example.com/sprout" // hash still well-formed, signature now wrong
+	tampered.ChecksumSHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" // hash still well-formed, signature now wrong
 
-	resignedForOtherURL := good
-	resignedForOtherURL.Signature = signParams(t, priv, tampered) // valid signature, but over a different row
+	resignedForOtherRow := good
+	resignedForOtherRow.Signature = signParams(t, priv, tampered) // valid signature, but over a different row
 
 	unsigned := good
 	unsigned.Signature = "" // an un-migrated fleet_versions row
@@ -104,7 +120,7 @@ func TestSelfUpdate_RefusedBeforeDispatch(t *testing.T) {
 		want controlplane.ErrorCode
 	}{
 		{"tampered row, valid hash, invalid signature", tampered, keys, controlplane.ErrorInvalidRequest},
-		{"signature for a different row", resignedForOtherURL, keys, controlplane.ErrorInvalidRequest},
+		{"signature for a different row", resignedForOtherRow, keys, controlplane.ErrorInvalidRequest},
 		{"missing signature (un-migrated row)", unsigned, keys, controlplane.ErrorInvalidRequest},
 		{"malformed signature", func() controlplane.SelfUpdateParams { p := good; p.Signature = "vault:v1:xx"; return p }(), keys, controlplane.ErrorInvalidRequest},
 		{"signed by a key farmer doesn't trust", good, staticKeys{ks: otherKeys}, controlplane.ErrorInvalidRequest},
@@ -127,6 +143,24 @@ func TestSelfUpdate_RefusedBeforeDispatch(t *testing.T) {
 				t.Fatalf("refused release was dispatched: %+v", calls)
 			}
 		})
+	}
+}
+
+// Until the sprout resolves its own manifest (FU.2), a self_update
+// request can't supply the signed os, arch, file_name and
+// min_sprout_version, so farmer refuses every one before reading keys or
+// dispatching, even one whose signature would verify with them filled in.
+func TestSelfUpdate_FailsClosedWithoutManifestFields(t *testing.T) {
+	p, keys, _ := signedSelfUpdate(t)
+	selfUpdateManifestFields = func(controlplane.SelfUpdateParams) (string, string, string, string) { return "", "", "", "" }
+	rec := stubSproutActionDispatch(t, func(string, string) error { return nil })
+	SetFleetKeySource(keys)
+	reply := handleSproutAction(selfUpdateRequest(t, "t_1", "web-01", p))
+	if reply.Status != controlplane.StatusFailed || reply.ErrorCode != controlplane.ErrorInvalidRequest {
+		t.Fatalf("reply = %+v, want failed/invalid_request", reply)
+	}
+	if calls := rec.all(); len(calls) != 0 {
+		t.Fatalf("dispatched without a complete manifest: %+v", calls)
 	}
 }
 
@@ -196,7 +230,7 @@ func TestSelfUpdate_ThroughRealDispatch(t *testing.T) {
 	}
 	step := env.Steps[0]
 	if step.Ingredient != fleetsign.SelfUpdateIngredient || step.Method != fleetsign.SelfUpdateMethod ||
-		step.Properties[fleetsign.PropSignature] != p.Signature || step.Properties[fleetsign.PropArtifactURL] != p.ArtifactURL ||
+		step.Properties[fleetsign.PropSignature] != p.Signature || step.Properties[propArtifactURL] != p.ArtifactURL ||
 		step.Properties[fleetsign.PropChecksumSHA256] != p.ChecksumSHA256 || step.Properties[fleetsign.PropVersion] != p.Version {
 		t.Fatalf("step = %+v", step)
 	}

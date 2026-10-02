@@ -1,10 +1,13 @@
 // Command fleetreleaser is the only process that signs sprout releases.
-// CloudXP's release pipeline runs it once per release with the version,
-// artifact URL and SHA-256 it just published; it signs the canonical
-// string version|artifact_url|checksum_sha256 with the OpenBao Transit
-// key imas-fleet-signing (Ed25519) and writes the row, signature
-// included, straight into saas.fleet_versions over its own database
-// credential. See docs/design/cloudxp-machine-manager-api-design.md §2.5.
+// CloudXP's release pipeline runs it once per release package with the
+// version, OS, arch, file name, SHA-256 and minimum sprout version; it
+// signs that fleetsign.Manifest's canonical string
+// version|os|arch|file_name|checksum_sha256|min_sprout_version with the
+// OpenBao Transit key imas-fleet-signing (Ed25519) and writes the row,
+// signature and (unsigned) artifact URL included, straight into
+// saas.fleet_versions over its own database credential. See
+// docs/design/cloudxp-machine-manager-api-design.md §2.5. FU.34 turns it
+// into a stateless signing service with no database access.
 //
 // Why a separate binary rather than a saasapi endpoint or a library:
 // saasapi already has write access to saas.fleet_versions. If the same
@@ -52,13 +55,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("fleetreleaser", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	version := fs.String("version", "", "sprout release version, e.g. v2.4.1 (required)")
-	artifactURL := fs.String("artifact-url", "", "https URL the release binary was published to (required)")
+	osName := fs.String("os", "", "package OS, e.g. linux (required)")
+	arch := fs.String("arch", "", "package architecture, e.g. amd64 (required)")
+	fileName := fs.String("file-name", "", "package file name in the sprout repository (required)")
+	minSproutVersion := fs.String("min-sprout-version", "", "oldest sprout version that may update to this release, e.g. v2.0.0 (required)")
+	artifactURL := fs.String("artifact-url", "", "https URL the release binary was published to, stored unsigned (required)")
 	checksum := fs.String("checksum-sha256", "", "hex SHA-256 of the release binary (required)")
 	notes := fs.String("notes", "", "release notes for GET /versions")
 	releasedAtStr := fs.String("released-at", "", "RFC 3339 release time (default now)")
 	timeout := fs.Duration("timeout", 2*time.Minute, "overall deadline")
 	fs.Usage = func() {
-		fmt.Fprintf(stderr, "Usage: fleetreleaser -version V -artifact-url URL -checksum-sha256 HEX [flags]\n\n")
+		fmt.Fprintf(stderr, "Usage: fleetreleaser -version V -os OS -arch ARCH -file-name NAME -min-sprout-version V -artifact-url URL -checksum-sha256 HEX [flags]\n\n")
 		fmt.Fprintf(stderr, "Signs a sprout release with OpenBao Transit key %q and writes it to saas.fleet_versions.\n",
 			fleetsign.DefaultTransitKeyName)
 		fmt.Fprintf(stderr, "Database: %s. OpenBao: %s, %s, %s, ...\n\n", EnvDSN, EnvOpenBaoAddr, EnvOpenBaoAuthMethod, EnvOpenBaoK8sRole)
@@ -72,12 +79,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	rel := fleetsign.Release{
-		Version:        strings.TrimSpace(*version),
-		ArtifactURL:    strings.TrimSpace(*artifactURL),
-		ChecksumSHA256: strings.ToLower(strings.TrimSpace(*checksum)),
+	rel := release{
+		Manifest: fleetsign.Manifest{
+			Version:          strings.TrimSpace(*version),
+			OS:               strings.TrimSpace(*osName),
+			Arch:             strings.TrimSpace(*arch),
+			FileName:         strings.TrimSpace(*fileName),
+			ChecksumSHA256:   strings.ToLower(strings.TrimSpace(*checksum)),
+			MinSproutVersion: strings.TrimSpace(*minSproutVersion),
+		},
+		ArtifactURL: strings.TrimSpace(*artifactURL),
 	}
-	if _, err := rel.Message(); err != nil {
+	if err := rel.validate(); err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return 2
 	}

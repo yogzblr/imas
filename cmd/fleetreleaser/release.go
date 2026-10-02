@@ -6,6 +6,7 @@ import (
 	"encoding/base32"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -20,6 +21,44 @@ import (
 type releaseSigner interface {
 	sign(ctx context.Context, input []byte) (sig []byte, keyVersion int, err error)
 	keySet(ctx context.Context) (fleetsign.KeySet, error)
+}
+
+// release is one fleetreleaser run: the fleetsign.Manifest entry it
+// signs, and the artifact URL the current saas.fleet_versions row still
+// stores. The URL is not signed (the manifest has none); FU.34 drops it,
+// and this row write, when fleetreleaser becomes a stateless signing
+// service. Until then the row has no os, arch, file_name or
+// min_sprout_version columns, so the signature written can only be
+// checked by someone who knows those fields, as this run does.
+type release struct {
+	fleetsign.Manifest
+	ArtifactURL string
+}
+
+// errInvalidArtifactURL: the artifact URL is not one the row may store.
+var errInvalidArtifactURL = errors.New("fleetreleaser: artifact_url is not an https URL")
+
+// validate checks the manifest (fleetsign's canonical-message rules) and
+// keeps the check fleetsign made on the artifact URL while it was signed:
+// an absolute https URL without userinfo, at most 2048 characters (the
+// column size), no control characters.
+func (r release) validate() error {
+	if err := r.Manifest.Validate(); err != nil {
+		return err
+	}
+	u, err := url.Parse(r.ArtifactURL)
+	if err != nil || len(r.ArtifactURL) > 2048 || u.Scheme != "https" || u.Host == "" || u.User != nil ||
+		strings.ContainsFunc(r.ArtifactURL, func(c rune) bool { return c < 0x20 || c == 0x7f }) {
+		return errInvalidArtifactURL
+	}
+	return nil
+}
+
+// withSignature returns the manifest with signature set, for verifying.
+func (r release) withSignature(signature string) fleetsign.Manifest {
+	m := r.Manifest
+	m.Signature = signature
+	return m
 }
 
 // outcome is what publish did.
@@ -56,7 +95,10 @@ var (
 // Every signature is verified against the key set Transit reports before
 // it's written, so a canonicalization or key-type mistake fails here
 // rather than on every sprout.
-func publish(ctx context.Context, db *gorm.DB, s releaseSigner, rel fleetsign.Release, notes string, releasedAt time.Time) (outcome, error) {
+func publish(ctx context.Context, db *gorm.DB, s releaseSigner, rel release, notes string, releasedAt time.Time) (outcome, error) {
+	if err := rel.validate(); err != nil {
+		return "", err
+	}
 	msg, err := rel.Message()
 	if err != nil {
 		return "", err
@@ -76,7 +118,7 @@ func publish(ctx context.Context, db *gorm.DB, s releaseSigner, rel fleetsign.Re
 			if err != nil {
 				return "", err
 			}
-			if err := ks.Verify(rel, row.Signature); err != nil {
+			if err := ks.Verify(rel.withSignature(row.Signature)); err != nil {
 				return "", fmt.Errorf("%w: %s: %w", errExistingSignatureInvalid, rel.Version, err)
 			}
 			return outcomeUnchanged, nil
@@ -124,7 +166,7 @@ func publish(ctx context.Context, db *gorm.DB, s releaseSigner, rel fleetsign.Re
 	return outcomeInserted, nil
 }
 
-func signAndVerify(ctx context.Context, s releaseSigner, rel fleetsign.Release, msg []byte) (string, error) {
+func signAndVerify(ctx context.Context, s releaseSigner, rel release, msg []byte) (string, error) {
 	sig, keyVersion, err := s.sign(ctx, msg)
 	if err != nil {
 		return "", err
@@ -134,7 +176,7 @@ func signAndVerify(ctx context.Context, s releaseSigner, rel fleetsign.Release, 
 	if err != nil {
 		return "", err
 	}
-	if err := ks.Verify(rel, signature); err != nil {
+	if err := ks.Verify(rel.withSignature(signature)); err != nil {
 		return "", fmt.Errorf("fleetreleaser: Transit's signature for %s does not verify against its own key set: %w", rel.Version, err)
 	}
 	return signature, nil

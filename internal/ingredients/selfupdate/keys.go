@@ -181,20 +181,20 @@ func keysForVerify(ctx context.Context, refresh bool) (fleetsign.KeySet, keySour
 	return pinned, sourceBootstrap, nil
 }
 
-// verifyRelease checks sig over rel against the trusted key set, with one
-// forced refetch if a cached live set doesn't hold the signature's key
+// verifyManifest checks m's signature against the trusted key set, with
+// one forced refetch if a cached live set doesn't hold the signature's key
 // version (a release signed after a rotation the cache predates).
-func verifyRelease(ctx context.Context, rel fleetsign.Release, sig string) (keySource, error) {
+func verifyManifest(ctx context.Context, m fleetsign.Manifest) (keySource, error) {
 	ks, src, err := keysForVerify(ctx, false)
 	if err != nil {
 		return "", err
 	}
-	err = ks.Verify(rel, sig)
+	err = ks.Verify(m)
 	if errors.Is(err, fleetsign.ErrUnknownKeyVersion) && src == sourceCache {
 		if ks, src, err = keysForVerify(ctx, true); err != nil {
 			return "", err
 		}
-		err = ks.Verify(rel, sig)
+		err = ks.Verify(m)
 	}
 	return src, err
 }
