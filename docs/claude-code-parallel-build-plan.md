@@ -568,8 +568,8 @@ Sub-waves, each held until the one before is merged to `main`:
 |---|---|---|
 | 4A | DB.1, FU.0 | Disjoint scopes. DB.1 owns schema, FU.0 owns the signed-manifest format. |
 | 4B | DB.2, FU.34 | FU.34 adds the `fleet_versions` columns as a goose migration, so it needs DB.1. DB.2 needs DB.1. |
-| 4C | FU.1, FU.2, FU.5 | FU.1 and FU.2 code against FU.0's manifest and FU.34's table. FU.5 needs DB.2 and FU.34. |
-| 4D | FU.6, then the Terraform UAT gate | Gates and floors sit on the finished path; UAT proves it on real hosts. |
+| 4C | FU.1, FU.2, FU.5 (FU.7 may run alongside, it only touches farmer's dispatch) | FU.1 and FU.2 code against FU.0's manifest and FU.34's table. FU.5 needs DB.2 and FU.34. |
+| 4D | FU.6, FU.7, then the Terraform UAT gate | Gates and floors sit on the finished path; UAT proves it on real hosts. |
 
 Every brief below inherits `CLAUDE.md`. IDs match BUILD-STATUS (FU.3 and
 FU.4 are one brief, FU.34, because they share one signing contract).
@@ -750,6 +750,50 @@ field (packaging/helm/). Tests in chart_test.go: hook annotations and
 weights, skipped without the file, Secret wiring, NetworkPolicy to saasapi
 only. Needs DB.2 and FU.34 merged. FLAG FOR SECURITY REVIEW: operator
 credential."
+```
+
+**FU.7 — farmer self_update dispatch sends only {version}**
+
+Found while building FU.2: saasapi already sends `{"version": ...}` (since
+FU.34), but farmer's real dispatch (`internal/natsapi/sprout_action.go`,
+`runSproutSelfUpdate`/`sendSelfUpdate`) still expects the pre-FU.0 params and
+refuses every item, and the shared `controlplane.SelfUpdateParams` type still
+carries `artifact_url`, `checksum_sha256` and `signature`. Updates from a
+real farmer stay off until this lands.
+```
+claude --cloud "Implement FU.7 from docs/BUILD-STATUS.md per API design §2.2
+and §2.5. Make farmer's real self_update dispatch carry only the version end
+to end. (1) internal/controlplane: SelfUpdateParams becomes {Version string
+`json:\"version\"`}; unknown fields in the request are rejected, so a stale
+caller sending artifact_url/checksum/signature gets invalid_request instead of
+being half-honoured. (2) internal/natsapi/sprout_action.go: delete
+selfUpdateManifestFields, propArtifactURL and validArtifactURL, and the
+single-row Manifest built from the request. Farmer still re-verifies at the
+point of effect, now against the catalog: read-only from saas.fleet_versions
+and saas.tenant_update_policy (reuse the read path FU.1 added in
+internal/api/handlers/update_manifest.go rather than a second query; move it
+to a shared package if needed), require that the version is registered, not
+revoked, equals the sprout's tenant's approved_version, and that EVERY row of
+that version verifies against the read-only fleet key set; otherwise refuse
+as invalid_request with the reason only in farmer's log (generic body). The
+tenant comes from the sprout's stored tenant_id, never from the request
+alone; keep the existing tenant-mismatch check. (3) sendSelfUpdate sends a
+one-step cook job whose properties are only {version}; the step ID keeps its
+prefix+version. (4) Update the selfupdate ingredient's property list ONLY to
+the extent needed for the shared constants to compile (the ingredient itself
+is FU.2's; if FU.2 is not yet merged say so in the PR and keep the old
+properties readable, ignored). (5) Remove the 'refuses every item' note from
+internal/saasapi/fleet_update_dispatch.go and the stale text in the natsapi
+file header. Scope: internal/controlplane/, internal/natsapi/,
+internal/api/handlers/update_manifest.go (extract only), internal/saasapi/
+fleet_update_dispatch.go (comments), tests. Do not enable
+SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED. Tests: dispatch sends exactly
+{version}; extra fields rejected; unregistered, revoked, unapproved, and
+other-tenant approved versions refused; one bad row among several refuses;
+the existing TestSelfUpdate_ThroughRealDispatch rewritten around a real
+signed catalog instead of the testManifestFields stub; cross-tenant
+isolation. FLAG FOR SECURITY REVIEW: point-of-effect check before code is
+pushed to a fleet."
 ```
 
 **FU.6 — rollout gates and floors**
