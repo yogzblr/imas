@@ -266,10 +266,16 @@ for it, on its own listener (`SAASAPI_OPERATOR_LISTEN_ADDR`), with its own
 credential. The tenant API has no `/v1/operator/...` routes, and the
 operator listener has no tenant routes.
 
-> **Not started by `cmd/saasapi` yet.** `NewOperatorServer` and its
-> configuration are in `internal/saasapi`; wiring it into `cmd/saasapi`'s
-> `main` (and the Helm chart) is a follow-up. Until then nothing serves
-> these routes.
+`cmd/saasapi` starts it when `SAASAPI_OPERATOR_LISTEN_ADDR` is set, after
+`SetDB` and `SetFleetKeySource`, and serves it with TLS next to the tenant
+API. The read-only fleet key (`IMAS_FLEETSIGN_OPENBAO_*`) is then required,
+as with the dispatch flag on. Any operator setting it can't use (a missing
+or unreadable certificate or token file, a non-https fleetreleaser URL, an
+operator token equal to another credential) stops saasapi at startup. If
+either listener fails, both are shut down and saasapi exits non-zero; on
+SIGTERM both are shut down together, with 15 seconds for in-flight requests.
+A registration cut off by that is safe to retry: its rows are written in
+one transaction, and re-registering a stored release is a 200 no-op.
 
 | Method | Path | Handler | Notes |
 |---|---|---|---|
@@ -364,6 +370,7 @@ error, never a silent default.
 | `SAASAPI_FLEETRELEASER_URL` | — | `cmd/fleetreleaser`'s `https://host:port` |
 | `SAASAPI_FLEETRELEASER_TOKEN_FILE` | — | the token saasapi presents to fleetreleaser, as a file |
 | `SAASAPI_FLEETRELEASER_CA_FILE` | system roots | CA bundle for fleetreleaser's certificate |
+| `IMAS_FLEETSIGN_OPENBAO_*`, `IMAS_FLEETSIGN_TRANSIT_KEY` | — | read-only view of the fleet signing key (`internal/fleetsign`); required with the dispatch flag on or the operator plane on |
 
 saasapi exits at startup if it can't connect to the bus or, when configured,
 to Valkey. The Helm chart in [`deploy/helm/farmer`](../../deploy/helm/farmer/README.md)

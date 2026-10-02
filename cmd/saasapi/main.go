@@ -9,8 +9,12 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"os/signal"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -102,11 +106,21 @@ func main() {
 	saasapi.SetBus(nc)
 	log.Infof("saasapi: connected to the NATS bus at %s", nc.ConnectedUrl())
 
+	// Before NewOperatorServer, whose registration handler verifies every
+	// signature against this key source.
+	keys, err := fleetKeySource(cfg)
+	if err != nil {
+		log.Fatalf("saasapi: %v", err)
+	}
+	if keys != nil {
+		saasapi.SetFleetKeySource(keys)
+		log.Infof("saasapi: fleet signing key source configured (read-only, Transit key %s)", keys.KeyName())
+	}
+
 	// Plain HTTP: TLS termination is assumed to happen at the gateway
 	// (Envoy, workstream H) in front of this service, consistent with the
 	// design doc's architecture diagram (§0) showing CloudXP/tenants
 	// reaching the SaaS API over REST without this binary owning certs.
-	initFleetKeySource(cfg)
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,
 		Handler:      newRouter(cfg),
@@ -114,27 +128,19 @@ func main() {
 		WriteTimeout: cfg.WriteTimeout,
 		IdleTimeout:  cfg.IdleTimeout,
 	}
+	// The operator plane is the exception: its own HTTPS listener, never
+	// behind the gateway (design doc §2.5). Nil when it's off.
+	opSrv, err := newOperatorServer(cfg)
+	if err != nil {
+		log.Fatalf("saasapi: failed to start the operator plane: %v", err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-
-	go func() {
-		log.Infof("saasapi: listening on %s", cfg.ListenAddr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("saasapi: server failed: %v", err)
-		}
-	}()
-
-	<-ctx.Done()
+	serveErr := serve(ctx, srv, opSrv, 15*time.Second)
 	stop()
-	log.Info("saasapi: shutdown signal received")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Errorf("saasapi: shutdown error: %v", err)
-	}
-	// After the HTTP server has stopped (no more dispatches): Drain flushes
+	// After both HTTP servers have stopped (no more dispatches): Drain flushes
 	// any buffered publishes and lets in-flight result handlers finish
 	// before closing. It's asynchronous, so wait (bounded) for the close.
 	if err := nc.Drain(); err != nil {
@@ -142,6 +148,9 @@ func main() {
 	}
 	for deadline := time.Now().Add(5 * time.Second); !nc.IsClosed() && time.Now().Before(deadline); {
 		time.Sleep(50 * time.Millisecond)
+	}
+	if serveErr != nil {
+		log.Fatalf("saasapi: %v", serveErr)
 	}
 	log.Info("saasapi: stopped")
 }
@@ -156,24 +165,90 @@ func newRouter(cfg saasapi.Config) *http.ServeMux {
 	return saasapi.NewRouter()
 }
 
-// initFleetKeySource gives saasapi its READ-ONLY view of the
+// fleetKeySource builds saasapi's READ-ONLY view of the
 // imas-fleet-signing Transit key (IMAS_FLEETSIGN_OPENBAO_*, design doc
-// §2.5), which POST .../sprouts/updates verifies each catalog row
-// against. Only needed with fleet update dispatch on, and fatal then: a
-// replica that accepted rollouts it couldn't verify would refuse every
-// one of them anyway. The token must carry only the imas-fleet-verify
-// policy — saasapi already writes saas.fleet_versions and must never
-// also be able to sign it (deploy/fleetreleaser/README.md).
-func initFleetKeySource(cfg saasapi.Config) {
-	if !cfg.FleetUpdateDispatchEnabled {
-		return
+// §2.5). POST .../sprouts/updates verifies each catalog row against it,
+// and the operator plane's release registration verifies every signature
+// fleetreleaser returns against it before storing one. It is nil when
+// neither fleet update dispatch nor the operator plane is on, and an
+// error when either is on but it isn't configured: a replica that
+// accepted rollouts or registrations it couldn't verify would refuse
+// every one of them anyway. The token must carry only the
+// imas-fleet-verify policy — saasapi already writes saas.fleet_versions
+// and must never also be able to sign it (deploy/fleetreleaser/README.md).
+func fleetKeySource(cfg saasapi.Config) (*fleetsign.TransitKeySource, error) {
+	var needs []string
+	if cfg.FleetUpdateDispatchEnabled {
+		needs = append(needs, "fleet update dispatch")
+	}
+	if cfg.OperatorListenAddr != "" {
+		needs = append(needs, "the operator plane")
+	}
+	if len(needs) == 0 {
+		return nil, nil
 	}
 	src, err := fleetsign.NewTransitKeySourceFromEnv()
 	if err != nil {
-		log.Fatalf("saasapi: fleet update dispatch is enabled but the fleet signing key isn't configured: %v", err)
+		return nil, fmt.Errorf("%s is enabled but the fleet signing key isn't configured: %w", strings.Join(needs, " and "), err)
 	}
-	saasapi.SetFleetKeySource(src)
-	log.Infof("saasapi: fleet signing key source configured (read-only, Transit key %s)", src.KeyName())
+	return src, nil
+}
+
+// newOperatorServer builds the operator-plane HTTPS server (release
+// registration, design doc §2.5) when SAASAPI_OPERATOR_LISTEN_ADDR is
+// set, and returns nil when it isn't. Call it after saasapi.SetDB and
+// saasapi.SetFleetKeySource: its handlers use both.
+func newOperatorServer(cfg saasapi.Config) (*http.Server, error) {
+	if cfg.OperatorListenAddr == "" {
+		return nil, nil
+	}
+	return saasapi.NewOperatorServer(cfg)
+}
+
+// serve runs the tenant API server and, if operator isn't nil, the
+// operator-plane server next to it, until ctx is done or either one
+// fails (a listener that can't bind, say). Then it shuts both down
+// together, giving in-flight requests up to shutdownTimeout, and returns
+// the failure, or nil after a clean shutdown.
+func serve(ctx context.Context, tenant, operator *http.Server, shutdownTimeout time.Duration) error {
+	errc := make(chan error, 2)
+	go func() {
+		log.Infof("saasapi: listening on %s", tenant.Addr)
+		if err := tenant.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			errc <- fmt.Errorf("server failed: %w", err)
+		}
+	}()
+	servers := []*http.Server{tenant}
+	if operator != nil {
+		servers = append(servers, operator)
+		go func() {
+			log.Infof("saasapi: operator plane listening on %s (HTTPS)", operator.Addr)
+			// The certificate is already in operator.TLSConfig.
+			if err := operator.ListenAndServeTLS("", ""); !errors.Is(err, http.ErrServerClosed) {
+				errc <- fmt.Errorf("operator plane server failed: %w", err)
+			}
+		}()
+	}
+
+	var err error
+	select {
+	case <-ctx.Done():
+		log.Info("saasapi: shutdown signal received")
+	case err = <-errc:
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, s := range servers {
+		wg.Go(func() {
+			if err := s.Shutdown(shutdownCtx); err != nil {
+				log.Errorf("saasapi: shutting down the server on %s: %v", s.Addr, err)
+			}
+		})
+	}
+	wg.Wait()
+	return err
 }
 
 // initHeartbeatClient points internal/heartbeat at the same Valkey client
