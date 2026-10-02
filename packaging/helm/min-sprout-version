@@ -1,0 +1,14 @@
+# The oldest sprout that may update straight to the release cut from this
+# commit: min_sprout_version, which packaging/helm/stamp-sprout-release.sh
+# writes into the farmer chart's files/sprout-release.json and fleetreleaser
+# signs into every manifest (API design §2.5, docs/RELEASING.md
+# "Compatibility"). A sprout older than this refuses the release and must
+# step through an intermediate one.
+#
+# Raise it, in the PR that makes it true, when a release can no longer be
+# reached directly from older sprouts. Canonical semver with a leading v,
+# at most the release's own version (so not above a prerelease tag you
+# mean to cut). Once a version is registered its floor can't change.
+#
+# v0.0.0: no floor yet. No sprout release predates self-update.
+v0.0.0
