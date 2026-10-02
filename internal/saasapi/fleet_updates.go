@@ -24,46 +24,60 @@ import (
 // The catalog is CloudXP's own, not upstream imas's release feed. Upstream
 // has each sprout poll <UpdateURL>/latest with no tenant concept, so every
 // tenant would land on whatever upstream ships, whenever it ships it.
-// Here, a version exists for a tenant only once CloudXP has published it
-// to saas.fleet_versions, and a tenant's sprouts are eligible for it only
-// once that tenant has approved it in saas.tenant_update_policy.
+// Here, a version exists for a tenant only once CloudXP has registered it
+// in saas.fleet_versions (the operator plane, fleet_releases.go), and a
+// tenant's sprouts are eligible for it only once that tenant has approved
+// it in saas.tenant_update_policy.
 
 // maxFleetVersionLen matches FleetVersion's version column size (and
 // TenantUpdatePolicy's approved_version). A longer string can't be in the
 // catalog, so it's rejected before any query.
 const maxFleetVersionLen = 64
 
-// fleetVersionItem is one GET /versions entry. It leaves out
-// artifact_url: the catalog tells a tenant what it can approve, and the
-// artifact location is for the dispatch path, not the tenant. Adding the
-// field later is compatible; removing it from a public response isn't.
+// fleetVersionItem is one GET /versions entry: one registered package of
+// a version, for one OS and arch. It leaves out the signature, which is
+// for farmer and the sprout (§2.6), not the tenant choosing a version.
 type fleetVersionItem struct {
-	Version        string    `json:"version"`
-	ChecksumSHA256 string    `json:"checksum_sha256"`
-	ReleasedAt     time.Time `json:"released_at"`
-	Notes          string    `json:"notes,omitempty"`
+	Version          string    `json:"version"`
+	OS               string    `json:"os"`
+	Arch             string    `json:"arch"`
+	PackageType      string    `json:"package_type"`
+	FileName         string    `json:"file_name"`
+	ChecksumSHA256   string    `json:"checksum_sha256"`
+	MinSproutVersion string    `json:"min_sprout_version"`
+	Revoked          bool      `json:"revoked"`
+	ReleasedAt       time.Time `json:"released_at"`
+	Notes            string    `json:"notes,omitempty"`
 }
 
 // ListFleetVersions handles GET /versions (design doc §1.8): CloudXP's
-// published sprout version catalog, newest first.
+// registered sprout release catalog, one entry per version, OS and arch,
+// newest first. Revoked versions are listed, marked revoked, so a tenant
+// can see why one is no longer approvable.
 //
 // The route has no {tenant_id}, so Auth skips its organization check (see
 // middleware.go): the catalog is the same for every tenant. Not
-// paginated: the catalog grows by one row per CloudXP release, not with
+// paginated: the catalog grows by a few rows per CloudXP release, not with
 // any tenant's fleet.
 func ListFleetVersions(w http.ResponseWriter, r *http.Request) {
 	var versions []FleetVersion
-	if err := db.Order("released_at DESC").Order("version DESC").Find(&versions).Error; err != nil {
+	if err := db.Order("released_at DESC").Order("version DESC").Order("os").Order("arch").Find(&versions).Error; err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to list versions")
 		return
 	}
 	items := make([]fleetVersionItem, 0, len(versions))
 	for _, v := range versions {
 		items = append(items, fleetVersionItem{
-			Version:        v.Version,
-			ChecksumSHA256: v.ChecksumSHA256,
-			ReleasedAt:     v.ReleasedAt,
-			Notes:          v.Notes,
+			Version:          v.Version,
+			OS:               v.OS,
+			Arch:             v.Arch,
+			PackageType:      v.PackageType,
+			FileName:         v.FileName,
+			ChecksumSHA256:   v.ChecksumSHA256,
+			MinSproutVersion: v.MinSproutVersion,
+			Revoked:          v.Revoked,
+			ReleasedAt:       v.ReleasedAt,
+			Notes:            v.Notes,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"versions": items})
@@ -149,7 +163,9 @@ func GetUpdatePolicy(w http.ResponseWriter, r *http.Request) {
 //
 // Rules, checked against the policy as it will be after this PATCH:
 //   - approved_version must be in CloudXP's catalog (saas.fleet_versions);
-//     anything else is 400 unknown_version.
+//     anything else is 400 unknown_version. A revoked version is 409
+//     version_revoked: it can't be newly approved (a tenant that already
+//     approved it keeps the row, but no rollout of it is created).
 //   - auto_update needs an approved_version. Updates are opt-in: nothing
 //     updates automatically unless the tenant has approved a version,
 //     and clearing the approved version while auto_update is on is
@@ -191,13 +207,17 @@ func PatchUpdatePolicy(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid_request", "approved_version is too long")
 			return
 		}
-		known, err := fleetVersionExists(v)
+		known, revoked, err := fleetVersionStatus(v)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal_error", "failed to look up version")
 			return
 		}
 		if !known {
 			writeError(w, http.StatusBadRequest, "unknown_version", "approved_version is not in the version catalog")
+			return
+		}
+		if revoked {
+			writeError(w, http.StatusConflict, "version_revoked", "approved_version has been revoked")
 			return
 		}
 		approvedVersion = &v
@@ -269,10 +289,18 @@ func validateUpdatePolicy(p TenantUpdatePolicy) error {
 	return nil
 }
 
-func fleetVersionExists(version string) (bool, error) {
-	var count int64
-	err := db.Model(&FleetVersion{}).Where("version = ?", version).Count(&count).Error
-	return count > 0, err
+// fleetVersionStatus reports whether version has any row in the catalog,
+// and whether it has been revoked (revocation covers every row of a
+// version).
+func fleetVersionStatus(version string) (known, revoked bool, err error) {
+	var rows []FleetVersion
+	if err := db.Select("revoked").Where("version = ?", version).Find(&rows).Error; err != nil {
+		return false, false, err
+	}
+	for _, r := range rows {
+		revoked = revoked || r.Revoked
+	}
+	return len(rows) > 0, revoked, nil
 }
 
 func utcPtr(t *time.Time) *time.Time {

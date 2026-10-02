@@ -1,6 +1,10 @@
 package saasapi
 
-import "time"
+import (
+	"time"
+
+	"github.com/yogzblr/imas/internal/fleetsign"
+)
 
 // TenantStatus is the tenant lifecycle state exposed by GET
 // /tenants/{tenant_id}/status (design doc §1.1).
@@ -120,37 +124,64 @@ type AssetLink struct {
 func (AssetLink) TableName() string { return "asset_links" }
 
 // FleetVersion is the `saas.fleet_versions` table (design doc §4.3,
-// §1.8): CloudXP's own published catalog of sprout versions. It is
-// deliberately not upstream imas's GitHub release feed — a version only
-// becomes approvable by a tenant once CloudXP has published it here.
+// §1.8, §2.5): CloudXP's own catalog of sprout releases, one row per
+// version, OS and arch. It is deliberately not upstream imas's GitHub
+// release feed — a version only becomes approvable by a tenant once
+// CloudXP has registered it here.
 //
 // The catalog is global, not per tenant: every tenant chooses from the
-// same list, and tenant_update_policy records which entry each tenant
-// has approved. Nothing in this package writes it; see fleet_updates.go.
-// Rows are written by cmd/fleetreleaser, the only holder of sign
-// capability on the imas-fleet-signing Transit key (§2.5).
+// same list, and tenant_update_policy records which version each tenant
+// has approved. Rows are written only by the operator-plane release
+// registration (fleet_releases.go): saasapi validates the entry, has
+// cmd/fleetreleaser — the only holder of sign capability on the
+// imas-fleet-signing Transit key — sign each row, checks the signature
+// against the read-only key set, and stores it. A registered row is never
+// changed afterwards except to revoke it.
+//
+// Version, OS, Arch, FileName, ChecksumSHA256 and MinSproutVersion are
+// exactly the six signed fields of fleetsign.Manifest. There is no URL:
+// the sprout downloads FileName from the repository configured in the
+// sprout itself (requirement 20).
 type FleetVersion struct {
 	ID      string `gorm:"column:id;primaryKey;size:32" json:"-"`
-	Version string `gorm:"column:version;size:64;not null;uniqueIndex" json:"version"`
-	// ArtifactURL is where the release pipeline published the sprout
-	// binary, for the dispatch path (fleet_update_dispatch.go) to hand to
-	// a sprout.
-	// Not part of GET /versions' response; see fleetVersionItem.
-	ArtifactURL    string    `gorm:"column:artifact_url;size:2048;not null" json:"-"`
-	ChecksumSHA256 string    `gorm:"column:checksum_sha256;size:64;not null" json:"checksum_sha256"`
-	ReleasedAt     time.Time `gorm:"column:released_at;not null;index" json:"released_at"`
-	Notes          string    `gorm:"column:notes;type:text" json:"notes,omitempty"`
+	Version string `gorm:"column:version;size:64;not null;uniqueIndex:idx_fleet_versions_version_os_arch,priority:1" json:"version"`
+	OS      string `gorm:"column:os;size:32;not null;uniqueIndex:idx_fleet_versions_version_os_arch,priority:2" json:"os"`
+	Arch    string `gorm:"column:arch;size:32;not null;uniqueIndex:idx_fleet_versions_version_os_arch,priority:3" json:"arch"`
+	// PackageType is the installer the sprout uses for FileName: deb,
+	// rpm or msi. Not signed: the sprout picks its installer from its own
+	// OS, and the signed FileName and checksum decide what is installed.
+	PackageType      string `gorm:"column:package_type;size:16;not null" json:"package_type"`
+	FileName         string `gorm:"column:file_name;size:255;not null" json:"file_name"`
+	ChecksumSHA256   string `gorm:"column:checksum_sha256;size:64;not null" json:"checksum_sha256"`
+	MinSproutVersion string `gorm:"column:min_sprout_version;size:64;not null" json:"min_sprout_version"`
 	// Signature is cmd/fleetreleaser's Ed25519 signature over the
 	// fleetsign.Manifest canonical message (imas-fleet-manifest-v1|
 	// version|os|arch|file_name|checksum_sha256|min_sprout_version), in
 	// fleetsign.EncodeSignature's "v<key version>:<base64>" format (§2.5).
-	// This table can't hold os, arch, file_name or min_sprout_version yet
-	// (FU.3), so no row verifies and dispatch refuses them all. A row written before this
-	// column existed gets "" from AutoMigrate's default, and "" is always
-	// refused for dispatch — by saasapi here, by farmer, and by the
-	// sprout — never treated as checksum-only trust. Not part of GET
-	// /versions' response.
+	// "" is always refused — by saasapi, by farmer, and by the sprout —
+	// never treated as checksum-only trust. Not part of GET /versions'
+	// response.
 	Signature string `gorm:"column:signature;size:128;not null;default:''" json:"-"`
+	// Revoked withdraws the version (every row of it at once, POST
+	// /v1/operator/fleet-releases/{version}/revoke): no manifest is served
+	// for it, no rollout is created for it, and no tenant can newly
+	// approve it. It is never cleared.
+	Revoked    bool      `gorm:"column:revoked;not null;default:false" json:"revoked"`
+	ReleasedAt time.Time `gorm:"column:released_at;not null;index" json:"released_at"`
+	Notes      string    `gorm:"column:notes;type:text" json:"notes,omitempty"`
+}
+
+// Manifest returns r's signed manifest entry, signature included.
+func (r FleetVersion) Manifest() fleetsign.Manifest {
+	return fleetsign.Manifest{
+		Version:          r.Version,
+		OS:               r.OS,
+		Arch:             r.Arch,
+		FileName:         r.FileName,
+		ChecksumSHA256:   r.ChecksumSHA256,
+		MinSproutVersion: r.MinSproutVersion,
+		Signature:        r.Signature,
+	}
 }
 
 func (FleetVersion) TableName() string { return "fleet_versions" }

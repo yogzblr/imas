@@ -265,15 +265,21 @@ func TestCreateFleetUpdateBatch_Validation(t *testing.T) {
 func TestCreateFleetUpdateBatch_UnusableCatalogEntry(t *testing.T) {
 	gdb := newUpdateTestDB(t)
 	tid := mustCreateActiveTenant(t, gdb)
+	// Rows that could only be in the table by a write that skipped
+	// registration: a malformed checksum, and a file name with a path.
 	for _, v := range []FleetVersion{
-		{ID: "fv_http", Version: "v-http", ArtifactURL: "http://artifacts.test/sprout", ChecksumSHA256: strings.Repeat("ab", 32)},
-		{ID: "fv_sum", Version: "v-sum", ArtifactURL: "https://artifacts.test/sprout", ChecksumSHA256: "abc"},
+		{ID: "fv_sum", Version: "v8.0.1", OS: "linux", Arch: "amd64", PackageType: "deb", FileName: "imas-sprout_8.0.1_amd64.deb",
+			ChecksumSHA256: "abc", MinSproutVersion: "v0.0.0", Signature: "v1:" + strings.Repeat("A", 86) + "=="},
+		{ID: "fv_path", Version: "v8.0.2", OS: "linux", Arch: "amd64", PackageType: "deb", FileName: "../imas-sprout.deb",
+			ChecksumSHA256: strings.Repeat("ab", 32), MinSproutVersion: "v0.0.0", Signature: "v1:" + strings.Repeat("A", 86) + "=="},
 	} {
 		v.ReleasedAt = time.Now()
-		gdb.Create(&v)
+		if err := gdb.Create(&v).Error; err != nil {
+			t.Fatal(err)
+		}
 		mustApprove(t, gdb, tid, v.Version)
 		code, resp := postUpdates(t, tid, map[string]any{"asset_ids": []string{"a1"}, "target_version": v.Version})
-		if code != 500 || resp["error"] != "internal_error" || strings.Contains(fmt.Sprint(resp), "artifacts.test") {
+		if code != 500 || resp["error"] != "internal_error" || strings.Contains(fmt.Sprint(resp), "imas-sprout") {
 			t.Fatalf("%s: %d %v", v.Version, code, resp)
 		}
 	}
@@ -281,14 +287,16 @@ func TestCreateFleetUpdateBatch_UnusableCatalogEntry(t *testing.T) {
 
 // The main path, with the default job_status gate: waves of batch_size go
 // out in request order, each only after the previous one's jobs have all
-// succeeded, carrying the catalog's params.
+// succeeded, carrying only the target version (each sprout resolves its
+// own OS/arch manifest).
 func TestFleetUpdate_JobStatusGateRollsOutInWaves(t *testing.T) {
 	gdb := newUpdateTestDB(t)
 	fastRollouts(t, 5*time.Second)
 	ns := startTestBus(t)
 	connectSaaSBus(t, ns)
 	tid := mustCreateActiveTenant(t, gdb)
-	v := mustPublishVersion(t, gdb, "v2.4.1", time.Now())
+	mustPublishVersion(t, gdb, "v2.4.1", time.Now())
+	mustPublishVersionFor(t, gdb, "v2.4.1", "windows", "amd64", time.Now())
 	mustApprove(t, gdb, tid, "v2.4.1")
 	assets := mustUpdateFleet(t, gdb, tid, 7)
 
@@ -324,8 +332,7 @@ func TestFleetUpdate_JobStatusGateRollsOutInWaves(t *testing.T) {
 		dec := json.NewDecoder(strings.NewReader(string(req.Action.Params)))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&p); err != nil || req.Action.Type != controlplane.ActionSelfUpdate || req.TenantID != tid ||
-			p.Version != "v2.4.1" || p.ArtifactURL != v.ArtifactURL || p.ChecksumSHA256 != v.ChecksumSHA256 ||
-			p.Signature == "" || p.Signature != v.Signature {
+			p != (farmerSelfUpdate{Version: "v2.4.1"}) {
 			t.Fatalf("request %d = %+v %s (%v)", i, req, req.Action.Params, err)
 		}
 	}
@@ -353,8 +360,8 @@ func TestFleetUpdate_JobStatusGateRollsOutInWaves(t *testing.T) {
 			t.Fatalf("item = %+v", it)
 		}
 	}
-	if body, _ := json.Marshal(got); strings.Contains(string(body), "artifacts.internal.test") {
-		t.Fatalf("GET leaks the artifact URL: %s", body)
+	if body, _ := json.Marshal(got); strings.Contains(string(body), "imas-sprout_") || strings.Contains(string(body), "signature") {
+		t.Fatalf("GET leaks catalog details: %s", body)
 	}
 }
 

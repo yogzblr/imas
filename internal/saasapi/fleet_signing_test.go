@@ -25,9 +25,12 @@ var (
 )
 
 // testFleetKey is the key the test catalog is signed with, standing in
-// for cmd/fleetreleaser's Transit key.
+// for cmd/fleetreleaser's Transit key. t may be nil (for the fake signers,
+// which have none).
 func testFleetKey(t *testing.T) (ed25519.PrivateKey, fleetsign.KeySet) {
-	t.Helper()
+	if t != nil {
+		t.Helper()
+	}
 	testFleetKeyOnce.Do(func() {
 		pub, priv, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {
@@ -47,36 +50,19 @@ type staticFleetKeys struct {
 func (s staticFleetKeys) KeySet(context.Context) (fleetsign.KeySet, error) { return s.ks, s.err }
 
 // withTestFleetKeys installs the test key set as saasapi's fleet key
-// source, and test values for the manifest columns saas.fleet_versions
-// doesn't have yet, for the duration of the test.
+// source for the duration of the test.
 func withTestFleetKeys(t *testing.T) {
 	t.Helper()
 	_, ks := testFleetKey(t)
 	SetFleetKeySource(staticFleetKeys{ks: ks})
 	t.Cleanup(func() { SetFleetKeySource(nil) })
-	withTestManifestColumns(t)
-}
-
-// withTestManifestColumns stands in for the os, arch, file_name and
-// min_sprout_version columns FU.3 adds to saas.fleet_versions.
-func withTestManifestColumns(t *testing.T) {
-	t.Helper()
-	orig := fleetVersionManifestColumns
-	fleetVersionManifestColumns = testManifestColumns
-	t.Cleanup(func() { fleetVersionManifestColumns = orig })
-}
-
-func testManifestColumns(v FleetVersion) (osName, arch, fileName, minSproutVersion string) {
-	return "linux", "amd64", "imas-sprout_" + strings.TrimPrefix(v.Version, "v") + "_amd64.deb", "v0.0.0"
 }
 
 // signTestRelease signs v's manifest the way cmd/fleetreleaser does.
 func signTestRelease(t *testing.T, v FleetVersion) string {
 	t.Helper()
 	priv, _ := testFleetKey(t)
-	osName, arch, fileName, minSproutVersion := testManifestColumns(v)
-	msg, err := fleetsign.Manifest{Version: v.Version, OS: osName, Arch: arch, FileName: fileName,
-		ChecksumSHA256: strings.ToLower(v.ChecksumSHA256), MinSproutVersion: minSproutVersion}.Message()
+	msg, err := v.Manifest().Message()
 	if err != nil {
 		t.Fatalf("signing test release %s: %v", v.Version, err)
 	}
@@ -88,15 +74,22 @@ func TestCreateFleetUpdateBatch_RefusesUnverifiableCatalogRow(t *testing.T) {
 	tid := mustCreateActiveTenant(t, gdb)
 	good := mustPublishVersion(t, gdb, "v9.0.0", time.Now())
 
-	unsigned := FleetVersion{ID: "fv_unsigned", Version: "v9.0.1", ArtifactURL: "https://artifacts.internal.test/sprout/u",
-		ChecksumSHA256: strings.Repeat("cd", 32), ReleasedAt: time.Now()} // an un-migrated row: signature ""
-	tampered := FleetVersion{ID: "fv_tampered", Version: "v9.0.2", ArtifactURL: "https://artifacts.internal.test/sprout/t",
-		ChecksumSHA256: strings.Repeat("cd", 32), ReleasedAt: time.Now()}
+	row := func(id, version string) FleetVersion {
+		return FleetVersion{ID: id, Version: version, OS: "linux", Arch: "amd64", PackageType: "deb",
+			FileName:       "imas-sprout_" + strings.TrimPrefix(version, "v") + "_amd64.deb",
+			ChecksumSHA256: strings.Repeat("cd", 32), MinSproutVersion: "v0.0.0", ReleasedAt: time.Now()}
+	}
+	unsigned := row("fv_unsigned", "v9.0.1") // signature ""
+	tampered := row("fv_tampered", "v9.0.2")
 	tampered.Signature = signTestRelease(t, tampered)
 	tampered.ChecksumSHA256 = strings.Repeat("ef", 32) // valid hash, signature now over different fields
-	forged := FleetVersion{ID: "fv_forged", Version: "v9.0.3", ArtifactURL: "https://artifacts.internal.test/sprout/f",
-		ChecksumSHA256: strings.Repeat("cd", 32), ReleasedAt: time.Now(), Signature: good.Signature} // another row's signature
-	for _, v := range []FleetVersion{unsigned, tampered, forged} {
+	forged := row("fv_forged", "v9.0.3")
+	forged.Signature = good.Signature // another row's signature
+	floorLowered := row("fv_floor", "v9.0.4")
+	floorLowered.MinSproutVersion = "v1.0.0"
+	floorLowered.Signature = signTestRelease(t, floorLowered)
+	floorLowered.MinSproutVersion = "v0.0.0" // the signed floor, lowered
+	for _, v := range []FleetVersion{unsigned, tampered, forged, floorLowered} {
 		if err := gdb.Create(&v).Error; err != nil {
 			t.Fatal(err)
 		}
@@ -106,6 +99,20 @@ func TestCreateFleetUpdateBatch_RefusesUnverifiableCatalogRow(t *testing.T) {
 			t.Fatalf("%s: %d %v", v.Version, code, resp)
 		}
 	}
+
+	// One bad OS/arch row refuses the whole version, even with a good one
+	// beside it.
+	mixed := mustPublishVersion(t, gdb, "v9.1.0", time.Now())
+	bad := row("fv_mixed_bad", mixed.Version)
+	bad.OS, bad.PackageType, bad.FileName = "windows", "msi", "imas-sprout_9.1.0_amd64.msi"
+	if err := gdb.Create(&bad).Error; err != nil {
+		t.Fatal(err)
+	}
+	mustApprove(t, gdb, tid, mixed.Version)
+	if code, resp := postUpdates(t, tid, map[string]any{"asset_ids": []string{"a1"}, "target_version": mixed.Version}); code != 500 {
+		t.Fatalf("mixed: %d %v", code, resp)
+	}
+
 	var n int64
 	gdb.Model(&AssetActionBatch{}).Count(&n)
 	if n != 0 {
@@ -113,45 +120,47 @@ func TestCreateFleetUpdateBatch_RefusesUnverifiableCatalogRow(t *testing.T) {
 	}
 }
 
-func TestSelfUpdateParams_KeySourceFailuresRefuse(t *testing.T) {
+func TestSelfUpdateParams(t *testing.T) {
 	_, ks := testFleetKey(t)
-	v := FleetVersion{Version: "v1.0.0", ArtifactURL: "https://a.test/s", ChecksumSHA256: strings.Repeat("ab", 32)}
+	v := FleetVersion{Version: "v1.0.0", OS: "linux", Arch: "amd64", PackageType: "deb", FileName: "imas-sprout_1.0.0_amd64.deb",
+		ChecksumSHA256: strings.Repeat("ab", 32), MinSproutVersion: "v0.0.0"}
 	v.Signature = signTestRelease(t, v)
+	w := v
+	w.OS, w.PackageType, w.FileName = "windows", "msi", "imas-sprout_1.0.0_amd64.msi"
+	w.Signature = signTestRelease(t, w)
 
-	withTestManifestColumns(t)
 	SetFleetKeySource(staticFleetKeys{ks: ks})
 	defer SetFleetKeySource(nil)
-	if _, err := selfUpdateParams(t.Context(), v); err != nil {
-		t.Fatalf("valid row refused: %v", err)
+	params, err := selfUpdateParams(t.Context(), []FleetVersion{v, w})
+	if err != nil {
+		t.Fatalf("valid rows refused: %v", err)
 	}
+	// Only the version: no URL, file name, checksum or signature.
+	if string(params) != `{"version":"v1.0.0","artifact_url":"","checksum_sha256":"","signature":""}` {
+		t.Fatalf("params = %s", params)
+	}
+	if _, err := selfUpdateParams(t.Context(), nil); err == nil {
+		t.Fatal("params built from no rows")
+	}
+	other := w
+	other.Version = "v1.0.1"
+	if _, err := selfUpdateParams(t.Context(), []FleetVersion{v, other}); err == nil {
+		t.Fatal("params built from rows of two versions")
+	}
+	// The stored checksum is used exactly as stored: an uppercase one (it
+	// could only get there by bypassing registration) doesn't verify.
+	up := v
+	up.ChecksumSHA256 = strings.ToUpper(v.ChecksumSHA256)
+	if _, err := selfUpdateParams(t.Context(), []FleetVersion{up}); !errors.Is(err, fleetsign.ErrInvalidManifest) {
+		t.Fatalf("uppercase checksum row = %v, want ErrInvalidManifest", err)
+	}
+
 	SetFleetKeySource(nil)
-	if _, err := selfUpdateParams(t.Context(), v); err == nil {
+	if _, err := selfUpdateParams(t.Context(), []FleetVersion{v}); err == nil {
 		t.Fatal("dispatched with no key source")
 	}
 	SetFleetKeySource(staticFleetKeys{err: errors.New("403 permission denied")})
-	if _, err := selfUpdateParams(t.Context(), v); err == nil {
+	if _, err := selfUpdateParams(t.Context(), []FleetVersion{v}); err == nil {
 		t.Fatal("dispatched when the key couldn't be read")
-	}
-	// Uppercase checksum in the row: saasapi lowercases it before
-	// verifying, matching what fleetreleaser signed.
-	up := v
-	up.ChecksumSHA256 = strings.ToUpper(v.ChecksumSHA256)
-	SetFleetKeySource(staticFleetKeys{ks: ks})
-	if _, err := selfUpdateParams(t.Context(), up); err != nil {
-		t.Fatalf("uppercase checksum row refused: %v", err)
-	}
-}
-
-// Until saas.fleet_versions has the manifest columns (FU.3), no row can
-// be verified, so every self_update rollout is refused, including one
-// whose signature would verify with the columns filled in.
-func TestSelfUpdateParams_FailsClosedWithoutManifestColumns(t *testing.T) {
-	_, ks := testFleetKey(t)
-	v := FleetVersion{Version: "v1.0.0", ArtifactURL: "https://a.test/s", ChecksumSHA256: strings.Repeat("ab", 32)}
-	v.Signature = signTestRelease(t, v)
-	SetFleetKeySource(staticFleetKeys{ks: ks})
-	defer SetFleetKeySource(nil)
-	if _, err := selfUpdateParams(t.Context(), v); !errors.Is(err, fleetsign.ErrInvalidManifest) {
-		t.Fatalf("selfUpdateParams = %v, want ErrInvalidManifest", err)
 	}
 }
