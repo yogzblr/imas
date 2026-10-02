@@ -151,6 +151,11 @@ func NewRouter() *http.ServeMux {
 		route(mux, "GET /v1/tenants/{tenant_id}/sprouts/updates/{batch_id}", GetFleetUpdateBatch, "GetFleetUpdateBatch")
 	}
 
+	// Fleet release registration (§2.5) is deliberately not on this mux:
+	// it is the operator plane, with its own listener and credential
+	// (NewOperatorServer, fleet_releases.go). The BFF's credentials never
+	// reach it.
+
 	return mux
 }
 
