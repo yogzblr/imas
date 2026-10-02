@@ -61,7 +61,12 @@ func TestLoadKeyring_RoundTrip(t *testing.T) {
 }
 
 func TestParseKeyring_Strict(t *testing.T) {
+	// A key whose standard base64 has a '+' or '/', so its URL-safe
+	// encoding really differs (about one random key in four has neither).
 	pub, _ := newTestKey(t, 1)
+	for !strings.ContainsAny(base64.StdEncoding.EncodeToString(pub.Key), "+/") {
+		pub, _ = newTestKey(t, 1)
+	}
 	b64 := base64.StdEncoding.EncodeToString(pub.Key)
 	cases := map[string]string{
 		"empty file":         ``,

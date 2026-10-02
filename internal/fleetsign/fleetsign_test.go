@@ -55,7 +55,7 @@ func TestMessage_Canonical(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Message: %v", err)
 	}
-	want := "v2.4.1|linux|amd64|imas-sprout_2.4.1_amd64.deb|" + testChecksum + "|v2.0.0"
+	want := "imas-fleet-manifest-v1|v2.4.1|linux|amd64|imas-sprout_2.4.1_amd64.deb|" + testChecksum + "|v2.0.0"
 	if string(msg) != want {
 		t.Fatalf("Message = %q, want %q", msg, want)
 	}
@@ -64,6 +64,24 @@ func TestMessage_Canonical(t *testing.T) {
 	m.Signature = EncodeSignature(1, make([]byte, ed25519.SignatureSize))
 	if again, _ := m.Message(); string(again) != want {
 		t.Fatalf("Message with a signature set = %q", again)
+	}
+}
+
+// The domain tag is part of what is signed: a signature over the same
+// fields without it (or under another tag) is refused.
+func TestVerify_DomainTagRequired(t *testing.T) {
+	pub, priv := newTestKey(t, 1)
+	ring, _ := NewKeyring([]PublicKey{pub})
+	full, _ := testManifest().Message()
+	for _, signed := range []string{
+		strings.TrimPrefix(string(full), MessageDomain+"|"),
+		strings.Replace(string(full), MessageDomain, "imas-fleet-manifest-v2", 1),
+	} {
+		m := testManifest()
+		m.Signature = EncodeSignature(1, ed25519.Sign(priv, []byte(signed)))
+		if err := ring.Verify(m); !errors.Is(err, ErrInvalidSignature) {
+			t.Errorf("signature over %q: Verify = %v, want ErrInvalidSignature", signed, err)
+		}
 	}
 }
 

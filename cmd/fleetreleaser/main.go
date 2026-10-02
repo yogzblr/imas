@@ -1,8 +1,9 @@
 // Command fleetreleaser is the only process that signs sprout releases.
 // CloudXP's release pipeline runs it once per release package with the
 // version, OS, arch, file name, SHA-256 and minimum sprout version; it
-// signs that fleetsign.Manifest's canonical string
-// version|os|arch|file_name|checksum_sha256|min_sprout_version with the
+// signs that fleetsign.Manifest's canonical string (the
+// fleetsign.MessageDomain tag, then
+// version|os|arch|file_name|checksum_sha256|min_sprout_version) with the
 // OpenBao Transit key imas-fleet-signing (Ed25519) and writes the row,
 // signature and (unsigned) artifact URL included, straight into
 // saas.fleet_versions over its own database credential. See

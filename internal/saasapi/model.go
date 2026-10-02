@@ -141,8 +141,8 @@ type FleetVersion struct {
 	ReleasedAt     time.Time `gorm:"column:released_at;not null;index" json:"released_at"`
 	Notes          string    `gorm:"column:notes;type:text" json:"notes,omitempty"`
 	// Signature is cmd/fleetreleaser's Ed25519 signature over the
-	// fleetsign.Manifest canonical message
-	// version|os|arch|file_name|checksum_sha256|min_sprout_version, in
+	// fleetsign.Manifest canonical message (imas-fleet-manifest-v1|
+	// version|os|arch|file_name|checksum_sha256|min_sprout_version), in
 	// fleetsign.EncodeSignature's "v<key version>:<base64>" format (§2.5).
 	// This table can't hold os, arch, file_name or min_sprout_version yet
 	// (FU.3), so no row verifies and dispatch refuses them all. A row written before this

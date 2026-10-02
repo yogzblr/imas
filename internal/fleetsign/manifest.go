@@ -33,6 +33,10 @@ type Manifest struct {
 	Signature string `json:"signature"`
 }
 
+// MessageDomain is the domain-separation tag every manifest message
+// starts with (Message).
+const MessageDomain = "imas-fleet-manifest-v1"
+
 // Field limits. Version sizes match saas.fleet_versions.version.
 const (
 	maxVersionLen  = 64
@@ -71,7 +75,14 @@ func (m Manifest) fields() [6]struct{ name, value string } {
 
 // Message returns the canonical bytes a manifest is signed over:
 //
-//	version|os|arch|file_name|checksum_sha256|min_sprout_version
+//	imas-fleet-manifest-v1|version|os|arch|file_name|checksum_sha256|min_sprout_version
+//
+// The leading MessageDomain is a fixed domain-separation tag: it binds
+// the signature to this purpose and format version, so bytes signed with
+// imas-fleet-signing for anything else (including the pre-FU.0
+// version|artifact_url|checksum_sha256 message) can never verify as a
+// manifest. A future format change gets a new tag, not a reinterpretation
+// of this one.
 //
 // It is the one encoder shared by the signer (cmd/fleetreleaser) and
 // every verifier (KeySet.Verify, Keyring.Verify). Fields are validated
@@ -88,9 +99,10 @@ func (m Manifest) Message() ([]byte, error) {
 		return nil, err
 	}
 	f := m.fields()
-	parts := make([]string, len(f))
-	for i, kv := range f {
-		parts[i] = kv.value
+	parts := make([]string, 0, len(f)+1)
+	parts = append(parts, MessageDomain)
+	for _, kv := range f {
+		parts = append(parts, kv.value)
 	}
 	return []byte(strings.Join(parts, "|")), nil
 }

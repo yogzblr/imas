@@ -311,7 +311,7 @@ func TestPublish_SignsManifestMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "v2.4.1|linux|amd64|imas-sprout_2.4.1_amd64.deb|" + testChecksum + "|v2.0.0"
+	want := "imas-fleet-manifest-v1|v2.4.1|linux|amd64|imas-sprout_2.4.1_amd64.deb|" + testChecksum + "|v2.0.0"
 	if !ed25519.Verify(m.pub, []byte(want), sig) {
 		t.Fatalf("stored signature is not over %q", want)
 	}

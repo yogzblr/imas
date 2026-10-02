@@ -9,9 +9,9 @@
 //
 // The signed message is
 //
-//	version|os|arch|file_name|checksum_sha256|min_sprout_version
+//	imas-fleet-manifest-v1|version|os|arch|file_name|checksum_sha256|min_sprout_version
 //
-// and contains no URL: the sprout downloads FileName from the repository
+// (a domain-separation tag, then the fields) and contains no URL: the sprout downloads FileName from the repository
 // configured in the sprout itself (requirement 20).
 //
 // FLAG FOR SECURITY REVIEW. This package is imported by farmer, saasapi
