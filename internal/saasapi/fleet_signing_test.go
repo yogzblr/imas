@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yogzblr/imas/internal/controlplane"
 	"github.com/yogzblr/imas/internal/fleetsign"
 )
 
@@ -136,8 +137,12 @@ func TestSelfUpdateParams(t *testing.T) {
 		t.Fatalf("valid rows refused: %v", err)
 	}
 	// Only the version: no URL, file name, checksum or signature.
-	if string(params) != `{"version":"v1.0.0","artifact_url":"","checksum_sha256":"","signature":""}` {
+	if string(params) != `{"version":"v1.0.0"}` {
 		t.Fatalf("params = %s", params)
+	}
+	// And it is exactly what farmer accepts.
+	if p, err := controlplane.DecodeSelfUpdateParams(params); err != nil || p.Version != "v1.0.0" {
+		t.Fatalf("farmer's decoder refuses saasapi's params %s: %v", params, err)
 	}
 	if _, err := selfUpdateParams(t.Context(), nil); err == nil {
 		t.Fatal("params built from no rows")

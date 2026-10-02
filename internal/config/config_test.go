@@ -1364,3 +1364,45 @@ func TestLoadConfig_SproutBusURLs(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadConfig_SproutUpdateRepoSettings(t *testing.T) {
+	cases := map[string]struct {
+		content            string
+		wantURL, wantToken string
+	}{
+		"unset": {"sproutid: s1\n", "", ""},
+		"set": {"sproutupdaterepourl: \" https://packages.example.com/org/imasdeb/any/ \"\nsproutupdaterepotoken: \" tok \"\n" +
+			"sproutupdaterepoformat: apt\nsproutupdaterepodist: \"stable main\"\nsproutupdaterepopackageid: my.msi\n",
+			"https://packages.example.com/org/imasdeb/any/", "tok"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			tmpRoot := t.TempDir()
+			cfgFile := writeTempConfig(t, tmpRoot, "sprout", tc.content)
+			resetForBinaryTest(t, tmpRoot)
+			jety.SetConfigType("yaml")
+			jety.SetConfigFile(cfgFile)
+			_ = jety.ReadInConfig()
+			SproutUpdateRepoURL, SproutUpdateRepoToken, SproutFleetSigningKeyring = "stale", "stale", "stale"
+			SproutUpdateRepoFormat, SproutUpdateRepoDist, SproutUpdateRepoPackageID = "stale", "stale", "stale"
+
+			LoadConfig("sprout")
+
+			if SproutUpdateRepoURL != tc.wantURL {
+				t.Errorf("SproutUpdateRepoURL = %q, want %q", SproutUpdateRepoURL, tc.wantURL)
+			}
+			if SproutUpdateRepoToken != tc.wantToken {
+				t.Errorf("SproutUpdateRepoToken = %q, want %q", SproutUpdateRepoToken, tc.wantToken)
+			}
+			if name == "set" && (SproutUpdateRepoFormat != "apt" || SproutUpdateRepoDist != "stable main" || SproutUpdateRepoPackageID != "my.msi") {
+				t.Errorf("format, dist, package id = %q, %q, %q", SproutUpdateRepoFormat, SproutUpdateRepoDist, SproutUpdateRepoPackageID)
+			}
+			if name == "unset" && SproutUpdateRepoFormat+SproutUpdateRepoDist+SproutUpdateRepoPackageID != "" {
+				t.Errorf("unset: format, dist, package id = %q, %q, %q", SproutUpdateRepoFormat, SproutUpdateRepoDist, SproutUpdateRepoPackageID)
+			}
+			if want := filepath.Join(tmpRoot, "fleet-signing-keys.json"); SproutFleetSigningKeyring != want {
+				t.Errorf("SproutFleetSigningKeyring = %q, want %q", SproutFleetSigningKeyring, want)
+			}
+		})
+	}
+}

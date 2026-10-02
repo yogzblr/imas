@@ -61,7 +61,7 @@ type fleetVersionItem struct {
 // any tenant's fleet.
 func ListFleetVersions(w http.ResponseWriter, r *http.Request) {
 	var versions []FleetVersion
-	if err := db.Order("released_at DESC").Order("version DESC").Order("os").Order("arch").Find(&versions).Error; err != nil {
+	if err := db.Order("released_at DESC").Order("version DESC").Order("os").Order("arch").Order("package_type").Find(&versions).Error; err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to list versions")
 		return
 	}

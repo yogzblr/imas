@@ -179,16 +179,23 @@ func TestListFleetVersionsPerOSArchAndRevoked(t *testing.T) {
 	}
 }
 
-// UNIQUE(version, os, arch): one row per OS/arch of a version.
-func TestFleetVersionUniqueVersionOSArch(t *testing.T) {
+// UNIQUE(version, os, arch, package_type): one row per package of a
+// version; a .deb and an .rpm of the same OS/arch are two rows.
+func TestFleetVersionUniqueVersionOSArchPackageType(t *testing.T) {
 	gdb := newFleetTestDB(t)
 	mustPublishVersion(t, gdb, "v2.4.1", time.Now())
 	mustPublishVersionFor(t, gdb, "v2.4.1", "linux", "arm64", time.Now())
 	mustPublishVersionFor(t, gdb, "v2.4.2", "linux", "amd64", time.Now())
-	dup := FleetVersion{ID: "fv_dup", Version: "v2.4.1", OS: "linux", Arch: "amd64", PackageType: "rpm",
+	quiet := gdb.Session(&gorm.Session{Logger: gdb.Logger.LogMode(gormlogger.Silent)})
+	rpm := FleetVersion{ID: "fv_rpm", Version: "v2.4.1", OS: "linux", Arch: "amd64", PackageType: "rpm",
 		FileName: "x.rpm", ChecksumSHA256: "y", MinSproutVersion: "v0.0.0", ReleasedAt: time.Now()}
-	if err := gdb.Session(&gorm.Session{Logger: gdb.Logger.LogMode(gormlogger.Silent)}).Create(&dup).Error; err == nil {
-		t.Fatal("fleet_versions accepted a second row for the same version, os and arch")
+	if err := quiet.Create(&rpm).Error; err != nil {
+		t.Fatalf("fleet_versions refused an rpm beside the deb of the same version, os and arch: %v", err)
+	}
+	dup := rpm
+	dup.ID, dup.FileName = "fv_dup", "z.rpm"
+	if err := quiet.Create(&dup).Error; err == nil {
+		t.Fatal("fleet_versions accepted a second row for the same version, os, arch and package_type")
 	}
 }
 

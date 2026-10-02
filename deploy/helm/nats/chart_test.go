@@ -395,8 +395,8 @@ func TestEnvoyJWTAuthn(t *testing.T) {
 		}
 		gated++
 	}
-	if gated != 2 {
-		t.Errorf("gated routes = %d, want 2 (/files/ and /)", gated)
+	if gated != 3 {
+		t.Errorf("gated routes = %d, want 3 (/files/, /v1/sprout/update-manifest and /)", gated)
 	}
 
 	// Client-supplied claim headers are stripped before any filter runs.

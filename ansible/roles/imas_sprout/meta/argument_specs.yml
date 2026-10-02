@@ -53,8 +53,8 @@ argument_specs:
       imas_buildkite_org:
         type: str
         description:
-          - Buildkite organization owning the imas package registries. Required unless
-            every repository URL is overridden.
+          - Buildkite organization owning the imas package registries (default
+            C(yogzblr)). Override it, or every repository URL, to install from your own.
       imas_sprout_version:
         type: str
         description:
@@ -65,6 +65,32 @@ argument_specs:
         type: str
         choices: [present, latest]
         description: Linux package state. C(latest) upgrades on every run.
+      imas_sprout_update_repo_url:
+        type: str
+        description:
+          - Repository a self_update installs from (config key C(sproutupdaterepourl)),
+            C(https://) only. The sprout reads its index and fetches the entry with the
+            signed SHA-256.
+          - Defaults to the repository this role installs from (apt URL, rpm baseurl,
+            NuGet index.json, or the directory of imas_sprout_windows_msi_url); empty
+            removes the key and the sprout refuses every self_update.
+      imas_sprout_update_repo_format:
+        type: str
+        choices: ["", apt, rpm, nuget, flat]
+        description:
+          - How the sprout reads imas_sprout_update_repo_url (config key
+            C(sproutupdaterepoformat)). Empty means the sprout's own package format.
+      imas_sprout_update_repo_dist:
+        type: str
+        description:
+          - apt suite and component (config key C(sproutupdaterepodist)). Defaults to
+            imas_sprout_apt_repo_suite and imas_sprout_apt_repo_component.
+      imas_sprout_update_repo_token:
+        type: str
+        description:
+          - Read token for imas_sprout_update_repo_url (config key C(sproutupdaterepotoken)),
+            sent as basic auth with user C(buildkite). Defaults to imas_sprout_repo_token on
+            Linux and empty on Windows.
       imas_sprout_repo_token:
         type: str
         description: Buildkite registry token, for private Linux registries.

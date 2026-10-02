@@ -3,7 +3,7 @@
 # set per host (host_vars/<host>.yml) or per child group.
 
 # Buildkite organization that publishes the imas packages.
-imas_buildkite_org: your-buildkite-org
+imas_buildkite_org: yogzblr
 
 # Where sprouts enroll: https://<imas_farmer_host>:<imas_farmer_api_port>/v1/enroll.
 imas_farmer_host: enroll.eu1.imas.example.com

@@ -229,14 +229,14 @@ Storing a policy dispatches nothing. With dispatch off, which is the default,
 > `NewRouter`). With the default, neither route exists and both paths return
 > the ServeMux's plain-text 404.
 >
-> The reason is that the sprout side doesn't exist yet: the farmer manifest
-> endpoint (design doc §2.6, FU.1) and the sprout's manifest fetch, verify
-> and install (FU.2). saasapi now sends farmer only the target version for a
-> `self_update`, while farmer's handler still expects the pre-FU.3 params
-> (an artifact URL and one row's signature), so farmer refuses every item.
-> `router.go` and `fleet_update_dispatch.go` also cite `yogzblr/imas#286`.
-> That number is from before the repo was renamed and doesn't resolve on
-> `yogzblr/imas`.
+> The path behind it is complete: saasapi sends farmer only the target
+> version for a `self_update`; farmer re-verifies that version against the
+> release catalog (approved by the tenant, registered, not revoked, every
+> row signed) and sends the sprout a one-step job carrying only the
+> version (FU.7); the sprout fetches its own signed manifest from farmer
+> (design doc §2.6, FU.1) and installs from its configured repository
+> (FU.2). Turning the flag on is a deployment decision; saasapi logs a
+> warning at startup when it is on.
 
 It is documented here, and in the spec under the `fleet-update-dispatch` tag,
 so the contract is on record for when it's enabled. With the flag on:
@@ -306,15 +306,16 @@ post-install/post-upgrade hook Job (FU.5).
   `min_sprout_version` ≤ `version`, lowercase `os`/`arch`, a plain file
   name, 64 lowercase hex checksum), with no normalization; `package_type` is
   `deb` or `rpm` (`os: linux`) or `msi` (`os: windows`) and `file_name` ends
-  in `.<package_type>`; at most one package per `os`/`arch`, 1 to 16 of
+  in `.<package_type>`; at most one package per `os`/`arch`/`package_type`
+  (a linux/amd64 release has both a `deb` and an `rpm`), 1 to 16 of
   them; `channel` is `[a-z][a-z0-9_-]{0,31}`. Unknown fields are refused.
-- Releases are immutable. If an `os`/`arch` is already registered for the
-  version with a different `package_type`, `file_name` or
+- Releases are immutable. If an `os`/`arch`/`package_type` is already
+  registered for the version with a different `file_name` or
   `checksum_sha256`, or the version has a different `min_sprout_version`,
   the request is `409 release_conflict` and nothing changes.
 - Same version, same contents: `200` with `"created": 0`, without calling
   fleetreleaser. Re-running the hook is always safe.
-- Packages for an `os`/`arch` the version doesn't have yet are signed by
+- Packages for an `os`/`arch`/`package_type` the version doesn't have yet are signed by
   `cmd/fleetreleaser` (one call each), every signature is checked against
   the read-only `imas-fleet-signing` key set, and the new rows are written in
   one transaction: `201`. Any failure stores nothing: fleetreleaser

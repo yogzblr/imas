@@ -144,13 +144,16 @@ func (AssetLink) TableName() string { return "asset_links" }
 // sprout itself (requirement 20).
 type FleetVersion struct {
 	ID      string `gorm:"column:id;primaryKey;size:32" json:"-"`
-	Version string `gorm:"column:version;size:64;not null;uniqueIndex:idx_fleet_versions_version_os_arch,priority:1" json:"version"`
-	OS      string `gorm:"column:os;size:32;not null;uniqueIndex:idx_fleet_versions_version_os_arch,priority:2" json:"os"`
-	Arch    string `gorm:"column:arch;size:32;not null;uniqueIndex:idx_fleet_versions_version_os_arch,priority:3" json:"arch"`
+	Version string `gorm:"column:version;size:64;not null;uniqueIndex:idx_fleet_versions_version_os_arch_type,priority:1" json:"version"`
+	OS      string `gorm:"column:os;size:32;not null;uniqueIndex:idx_fleet_versions_version_os_arch_type,priority:2" json:"os"`
+	Arch    string `gorm:"column:arch;size:32;not null;uniqueIndex:idx_fleet_versions_version_os_arch_type,priority:3" json:"arch"`
 	// PackageType is the installer the sprout uses for FileName: deb,
-	// rpm or msi. Not signed: the sprout picks its installer from its own
-	// OS, and the signed FileName and checksum decide what is installed.
-	PackageType      string `gorm:"column:package_type;size:16;not null" json:"package_type"`
+	// rpm or msi. Part of the row's key, since one linux/amd64 binary
+	// ships as both a .deb and an .rpm; a sprout asks for its own type.
+	// Not signed: the sprout picks its installer from its own OS, refuses
+	// a FileName that isn't its own type, and the signed FileName and
+	// checksum decide what is installed.
+	PackageType      string `gorm:"column:package_type;size:16;not null;uniqueIndex:idx_fleet_versions_version_os_arch_type,priority:4" json:"package_type"`
 	FileName         string `gorm:"column:file_name;size:255;not null" json:"file_name"`
 	ChecksumSHA256   string `gorm:"column:checksum_sha256;size:64;not null" json:"checksum_sha256"`
 	MinSproutVersion string `gorm:"column:min_sprout_version;size:64;not null" json:"min_sprout_version"`
@@ -169,6 +172,12 @@ type FleetVersion struct {
 	Revoked    bool      `gorm:"column:revoked;not null;default:false" json:"revoked"`
 	ReleasedAt time.Time `gorm:"column:released_at;not null;index" json:"released_at"`
 	Notes      string    `gorm:"column:notes;type:text" json:"notes,omitempty"`
+}
+
+// releaseKey is r's identity within a version: os/arch/package_type,
+// the unique key of saas.fleet_versions besides the version.
+func (r FleetVersion) releaseKey() string {
+	return r.OS + "/" + r.Arch + "/" + r.PackageType
 }
 
 // Manifest returns r's signed manifest entry, signature included.

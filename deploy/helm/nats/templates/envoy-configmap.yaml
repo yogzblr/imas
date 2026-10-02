@@ -124,6 +124,20 @@ data:
                                   "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
                                   requirement_name: {{ $j.providerName }}
 
+                            # Route 2b: signed sprout update manifest,
+                            # farmer's GET /v1/sprout/update-manifest. Exact
+                            # path match (the query string isn't part of
+                            # it): any other /v1/sprout/... path still falls
+                            # through to route 3.
+                            - match: { path: "/v1/sprout/update-manifest" }
+                              route:
+                                cluster: recipe_service
+                                timeout: 10s
+                              typed_per_filter_config:
+                                envoy.filters.http.jwt_authn:
+                                  "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+                                  requirement_name: {{ $j.providerName }}
+
                             # Route 3 (default): the sprout's wss:// NATS
                             # connection to the bus's websocket listener.
                             - match: { prefix: "/" }
@@ -188,6 +202,8 @@ data:
                           # config: require the JWT.
                           rules:
                             - match: { prefix: "/files/" }
+                              requires: { provider_name: {{ $j.providerName }} }
+                            - match: { path: "/v1/sprout/update-manifest" }
                               requires: { provider_name: {{ $j.providerName }} }
                             - match: { prefix: "/" }
                               requires: { provider_name: {{ $j.providerName }} }

@@ -15,6 +15,7 @@
 //   - POST /v1/refresh: a fresh gateway JWT for an enrolled nkey_pub.
 //   - GET /_stub/state: what the tests assert on (join token redemptions,
 //     enrollments, and the NKeys connected to the bus).
+//   - the fleet update endpoints in fleet.go, for testing/selfupdate-e2e.
 //
 // With -static-dir, it also serves that directory over plain HTTP on
 // -static-addr: the tests' signed apt and rpm repositories.
@@ -43,6 +44,8 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -56,7 +59,9 @@ import (
 	jwxjwt "github.com/lestrrat-go/jwx/v2/jwt"
 	natsjwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-server/v2/server"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
+	"golang.org/x/crypto/nacl/box"
 
 	"github.com/yogzblr/imas/internal/pki"
 )
@@ -105,13 +110,20 @@ type farmer struct {
 	gatewayKey  ed25519.PrivateKey
 	fleetJWKS   json.RawMessage
 	tenantBoxPK string
-	now         func() time.Time
-	connected   func() []string
+	// tenantBoxPriv is the tenant X25519 key cook dispatches are sealed
+	// under (fleet.go); tenantBoxPK is its public half.
+	tenantBoxPriv *[32]byte
+	fleet         *fleetState
+	// nc is the stub's own bus connection, for sealed cook dispatch.
+	nc        *nats.Conn
+	now       func() time.Time
+	connected func() []string
 
 	mu             sync.Mutex
 	redemptions    int
 	enrollRequests int
-	sprouts        map[string]string // nkey_pub -> sprout ID
+	sprouts        map[string]string    // nkey_pub -> sprout ID
+	sproutBox      map[string]*[32]byte // sprout ID -> its X25519 box public key
 	seenSigs       map[string]bool
 }
 
@@ -124,7 +136,7 @@ func newFarmer(joinToken string, maxUses int, natsURLs []string) (*farmer, error
 	if err != nil {
 		return nil, err
 	}
-	fleetPub, _, err := ed25519.GenerateKey(rand.Reader)
+	fleetPub, fleetPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
 	}
@@ -132,22 +144,29 @@ func newFarmer(joinToken string, maxUses int, natsURLs []string) (*farmer, error
 	if err != nil {
 		return nil, err
 	}
-	var box [32]byte
-	if _, err := rand.Read(box[:]); err != nil {
+	fleet, err := newFleetState(fleetPriv)
+	if err != nil {
+		return nil, err
+	}
+	boxPub, boxPriv, err := box.GenerateKey(rand.Reader)
+	if err != nil {
 		return nil, err
 	}
 	return &farmer{
-		joinToken:   joinToken,
-		maxUses:     maxUses,
-		natsURLs:    natsURLs,
-		account:     account,
-		gatewayKey:  gatewayKey,
-		fleetJWKS:   fleetJWKS,
-		tenantBoxPK: base64.StdEncoding.EncodeToString(box[:]),
-		now:         time.Now,
-		connected:   func() []string { return nil },
-		sprouts:     map[string]string{},
-		seenSigs:    map[string]bool{},
+		tenantBoxPriv: boxPriv,
+		fleet:         fleet,
+		sproutBox:     map[string]*[32]byte{},
+		joinToken:     joinToken,
+		maxUses:       maxUses,
+		natsURLs:      natsURLs,
+		account:       account,
+		gatewayKey:    gatewayKey,
+		fleetJWKS:     fleetJWKS,
+		tenantBoxPK:   base64.StdEncoding.EncodeToString(boxPub[:]),
+		now:           time.Now,
+		connected:     func() []string { return nil },
+		sprouts:       map[string]string{},
+		seenSigs:      map[string]bool{},
 	}, nil
 }
 
@@ -175,6 +194,10 @@ func (f *farmer) routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/enroll", f.enroll)
 	mux.HandleFunc("POST /v1/refresh", f.refresh)
 	mux.HandleFunc("GET /_stub/state", f.state)
+	mux.HandleFunc("GET /v1/sprout/update-manifest", f.updateManifest)
+	mux.HandleFunc("POST /_stub/release", f.release)
+	mux.HandleFunc("POST /_stub/selfupdate", f.selfUpdate)
+	mux.HandleFunc("GET /_stub/fleet", f.fleetReport)
 	return mux
 }
 
@@ -222,7 +245,8 @@ func (f *farmer) enroll(w http.ResponseWriter, r *http.Request) {
 		enrollmentFailed(w, "malformed nkey_pub")
 		return
 	}
-	if _, err := pki.DecodeBoxPubKey(req.SproutPub); err != nil {
+	sproutBoxPub, err := pki.DecodeBoxPubKey(req.SproutPub)
+	if err != nil {
 		enrollmentFailed(w, "malformed sprout_pub")
 		return
 	}
@@ -252,6 +276,7 @@ func (f *farmer) enroll(w http.ResponseWriter, r *http.Request) {
 	} else {
 		log.Printf("enroll: replayed sprout %s", sproutID)
 	}
+	f.sproutBox[sproutID] = sproutBoxPub
 	userJWT, gatewayJWT, err := f.mint(req.NKeyPub, sproutID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -495,6 +520,9 @@ func main() {
 	stateDir := flag.String("state-dir", ".", "where ca.pem is written")
 	staticDir := flag.String("static-dir", "", "directory to serve over plain HTTP (empty: none)")
 	staticAddr := flag.String("static-addr", ":8080", "listen address for -static-dir")
+	repoProxyTo := flag.String("repo-proxy-to", "", "package repository to front with TLS (e.g. http://nexus:8081; empty: none)")
+	repoProxyAddr := flag.String("repo-proxy-addr", ":8443", "HTTPS listen address for -repo-proxy-to")
+	repoHosts := flag.String("repo-hosts", "localhost", "comma-separated names/IPs the repository proxy's certificate covers")
 	flag.Parse()
 	if *joinToken == "" {
 		log.Fatal("-join-token is required")
@@ -525,6 +553,20 @@ func main() {
 		log.Fatal(err)
 	}
 	f.connected = func() []string { return connectedNKeys(bus) }
+	if err := os.WriteFile(filepath.Join(*stateDir, "fleet-signing-keys.json"), f.fleet.keyringJSON(), 0o644); err != nil {
+		log.Fatal(err)
+	}
+	if f.nc, err = f.connectBus(strings.Split(*hosts, ",")[0], *natsPort, tm); err != nil {
+		log.Fatal(err)
+	}
+	if err := f.watchBus(f.nc); err != nil {
+		log.Fatal(err)
+	}
+	if *repoProxyTo != "" {
+		if err := startRepoProxy(*repoProxyTo, *repoProxyAddr, strings.Split(*repoHosts, ","), *stateDir); err != nil {
+			log.Fatal(err)
+		}
+	}
 	srv := &http.Server{
 		Addr:              *addr,
 		Handler:           f.routes(),
@@ -550,5 +592,77 @@ func main() {
 	defer stop()
 	<-ctx.Done()
 	_ = srv.Shutdown(context.Background())
+	f.nc.Close()
 	bus.Shutdown()
+}
+
+// connectBus connects the stub itself to its bus as a User in the tenant
+// account, over TLS verified against its own CA.
+func (f *farmer) connectBus(serverName string, port int, tm *tlsMaterial) (*nats.Conn, error) {
+	user, err := nkeys.CreateUser()
+	if err != nil {
+		return nil, err
+	}
+	userPub, _ := user.PublicKey()
+	uc := natsjwt.NewUserClaims(userPub)
+	uc.Name = "stubfarmer"
+	userJWT, err := uc.Encode(f.account)
+	if err != nil {
+		return nil, err
+	}
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(tm.caPEM)
+	return nats.Connect(fmt.Sprintf("tls://127.0.0.1:%d", port),
+		nats.UserJWT(func() (string, error) { return userJWT, nil }, func(nonce []byte) ([]byte, error) { return user.Sign(nonce) }),
+		nats.Secure(&tls.Config{RootCAs: pool, ServerName: serverName, MinVersion: tls.VersionTLS12}),
+		nats.MaxReconnects(-1))
+}
+
+// startRepoProxy fronts target with TLS from a new CA, written to
+// stateDir/repo-ca.pem.
+func startRepoProxy(target, addr string, hosts []string, stateDir string) error {
+	u, err := url.Parse(target)
+	if err != nil {
+		return err
+	}
+	tm, err := newTLSMaterial(hosts)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "repo-ca.pem"), tm.caPEM, 0o644); err != nil {
+		return err
+	}
+	proxy := httputil.NewSingleHostReverseProxy(u)
+	srv := &http.Server{
+		Addr: addr,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			log.Printf("repo: %s %s (auth: %s)", r.Method, r.URL.Path, authSummary(r))
+			proxy.ServeHTTP(w, r)
+		}),
+		TLSConfig:         &tls.Config{Certificates: []tls.Certificate{tm.cert}, MinVersion: tls.VersionTLS12},
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		log.Printf("stubfarmer: TLS proxy for %s on %s", target, addr)
+		if err := srv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal(err)
+		}
+	}()
+	return nil
+}
+
+// authSummary names a request's credentials without revealing them:
+// "none", "basic:<user>", "bearer", or "other".
+func authSummary(r *http.Request) string {
+	h := r.Header.Get("Authorization")
+	switch {
+	case h == "":
+		return "none"
+	case strings.HasPrefix(h, "Bearer "):
+		return "bearer"
+	}
+	if user, _, ok := r.BasicAuth(); ok {
+		return "basic:" + user
+	}
+	return "other"
 }

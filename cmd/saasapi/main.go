@@ -150,8 +150,7 @@ func main() {
 // fleet update dispatch flag must be set before saasapi.NewRouter, which
 // registers POST .../sprouts/updates and GET .../sprouts/updates/{batch_id}
 // only if the flag is on at that moment (SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED,
-// default off: sprout self-update is still disabled upstream,
-// yogzblr/imas#286).
+// default off).
 func newRouter(cfg saasapi.Config) *http.ServeMux {
 	saasapi.SetFleetUpdateDispatchEnabled(cfg.FleetUpdateDispatchEnabled)
 	return saasapi.NewRouter()

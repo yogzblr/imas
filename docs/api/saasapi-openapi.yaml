@@ -65,15 +65,12 @@ tags:
       registered only when `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=true`
       (`SetFleetUpdateDispatchEnabled` before `NewRouter`). With the flag
       off, which is the default, neither route exists and both paths
-      return the ServeMux's plain-text 404. The flag must not be turned on
-      in a deployment: the farmer manifest endpoint (design doc §2.6) and
-      the sprout's manifest fetch, verify and install don't exist yet, and
-      farmer's self_update handler still expects the pre-FU.3 params
-      (artifact URL and one row's signature) rather than the target
-      version saasapi now sends, so farmer refuses every item.
-      `router.go` also cites `yogzblr/imas#286`, a reference carried over
-      from before the repo was renamed that does not resolve on
-      `yogzblr/imas`.
+      return the ServeMux's plain-text 404. Turning it on is a deployment
+      decision: saasapi sends farmer only the target version, farmer
+      re-verifies it against the release catalog before dispatching, and
+      the sprout fetches its own signed manifest (design doc §2.6) and
+      installs from its configured repository. saasapi logs a warning at
+      startup when the flag is on.
       With the flag on, saasapi also needs the read-only fleet signing key
       (`IMAS_FLEETSIGN_OPENBAO_*`) or it refuses to start.
 

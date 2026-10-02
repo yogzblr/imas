@@ -60,8 +60,10 @@ imas_sprout_boxkey_prev_grace: ""
 
 # --- Package ------------------------------------------------------------------
 
-# Buildkite organization that owns the imasdeb/imasrpm/imasnget registries.
-imas_buildkite_org: ""
+# Buildkite organization that owns the imasdeb/imasrpm/imasnget registries
+# (https://packages.buildkite.com/yogzblr/imasdeb, .../imasrpm,
+# .../imasnget; Helm charts are in .../imashelm).
+imas_buildkite_org: yogzblr
 
 # "" installs whatever the repo's newest version is, once. Set a version to
 # pin it: on Linux, the package version exactly as the repository lists it,
@@ -105,6 +107,49 @@ imas_sprout_windows_msi_url: ""
 # Windows: SHA-256 of the file downloaded (the .nupkg, or the MSI when
 # imas_sprout_windows_msi_url is set). Only meaningful with a pinned version.
 imas_sprout_windows_checksum: ""
+
+# --- Self-update ----------------------------------------------------------------
+
+# The repository a self_update installs from (config key
+# "sproutupdaterepourl"). The sprout reads that repository's own index, the
+# way its package manager does, finds the entry whose SHA-256 is the one in
+# the signed update manifest, downloads it over HTTPS (OS trust store,
+# HTTPS_PROXY/NO_PROXY), checks it against the signed SHA-256 and installs
+# it with dpkg, rpm, zypper or msiexec. By default the same repository this
+# role installs from:
+#   - Debian family: the apt repository URL (read as an apt repository);
+#   - RHEL family and SUSE: the rpm baseurl, $basearch filled in;
+#   - Windows: the NuGet feed's index.json, or, with
+#     imas_sprout_windows_msi_url, the directory holding that MSI (read as a
+#     flat directory of package files).
+# "": the key is removed and the sprout refuses every self_update.
+#
+# Facts are read with default(''): the role validates its arguments (and
+# so renders these) before it has gathered facts, e.g. when included from
+# a play with gather_facts: false. By the time a value is used, they are
+# there.
+imas_sprout_update_repo_url: >-
+  {{ (imas_sprout_windows_msi_url | regex_replace('[^/]*$', '')
+        if imas_sprout_windows_msi_url | length > 0 else imas_sprout_nuget_index_url)
+     if ansible_os_family | default('') == 'Windows'
+     else imas_sprout_apt_repo_url if ansible_pkg_mgr | default('') == 'apt'
+     else imas_sprout_rpm_repo_url | replace('$basearch', ansible_architecture | default('x86_64')) }}
+
+# How the sprout reads imas_sprout_update_repo_url (config key
+# "sproutupdaterepoformat"): apt, rpm, nuget or flat (a directory serving each
+# package file under its own name). "" means the sprout's own package
+# format: apt for a .deb, rpm for an .rpm, nuget for the MSI.
+imas_sprout_update_repo_format: "{{ 'flat' if ansible_os_family | default('') == 'Windows' and imas_sprout_windows_msi_url | length > 0 else '' }}"
+
+# The apt suite and component (config key "sproutupdaterepodist"), as in the
+# role's sources.list line. Only written on apt hosts.
+imas_sprout_update_repo_dist: "{{ imas_sprout_apt_repo_suite }} {{ imas_sprout_apt_repo_component }}"
+
+# Read token the sprout sends (HTTP basic auth, user "buildkite") to the
+# repository's own host only (config key "sproutupdaterepotoken"). A secret,
+# written only to the sprout's mode-0600 config file. Defaults to
+# imas_sprout_repo_token on Linux; "" on Windows, like the repo token.
+imas_sprout_update_repo_token: "{{ '' if ansible_os_family | default('') == 'Windows' else imas_sprout_repo_token }}"
 
 # --- Behaviour ------------------------------------------------------------------
 

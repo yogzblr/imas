@@ -226,6 +226,33 @@ func TestRegisterFleetRelease_SameReleaseIsNoOp(t *testing.T) {
 	}
 }
 
+// One linux/amd64 binary ships as a .deb and an .rpm: both register, as
+// two rows signed separately, and re-registering either is a no-op.
+func TestRegisterFleetRelease_DebAndRPMForOneOSArch(t *testing.T) {
+	signer := &fakeSigner{}
+	gdb, h := newOperatorTest(t, signer)
+	rpm := fleetReleasePackage{OS: "linux", Arch: "amd64", PackageType: "rpm", FileName: "imas-sprout_2.4.1_linux_amd64.rpm", ChecksumSHA256: sumB}
+	if code, resp := register(t, h, releaseBody("v2.4.1", "v2.0.0", debPkg("amd64", sumA), rpm)); code != http.StatusCreated || resp["created"] != float64(2) {
+		t.Fatalf("register = %d %v", code, resp)
+	}
+	rows := releaseRows(t, gdb, "v2.4.1")
+	if len(rows) != 2 || rows[0].PackageType != "deb" || rows[1].PackageType != "rpm" ||
+		rows[0].Signature == "" || rows[1].Signature == "" || rows[0].Signature == rows[1].Signature {
+		t.Fatalf("rows = %+v", rows)
+	}
+	if code, resp := register(t, h, releaseBody("v2.4.1", "v2.0.0", rpm)); code != http.StatusOK || resp["created"] != float64(0) {
+		t.Fatalf("re-register rpm = %d %v", code, resp)
+	}
+	changed := rpm
+	changed.ChecksumSHA256 = sumC
+	if code, resp := register(t, h, releaseBody("v2.4.1", "v2.0.0", changed)); code != http.StatusConflict {
+		t.Fatalf("rpm with another checksum = %d %v, want 409", code, resp)
+	}
+	if signer.n() != 2 {
+		t.Fatalf("fleetreleaser called %d times, want 2", signer.n())
+	}
+}
+
 // Same version with different contents is 409, and nothing changes.
 func TestRegisterFleetRelease_ConflictIs409(t *testing.T) {
 	signer := &fakeSigner{}
@@ -237,12 +264,10 @@ func TestRegisterFleetRelease_ConflictIs409(t *testing.T) {
 
 	renamed := debPkg("amd64", sumA)
 	renamed.FileName = "imas-sprout_2.4.1-1_amd64.deb"
-	asRPM := fleetReleasePackage{OS: "linux", Arch: "amd64", PackageType: "rpm", FileName: "imas-sprout-2.4.1.x86_64.rpm", ChecksumSHA256: sumA}
 	for name, body := range map[string]fleetReleaseRequest{
 		"different checksum":           releaseBody("v2.4.1", "v2.0.0", debPkg("amd64", sumB)),
 		"different checksum, plus new": releaseBody("v2.4.1", "v2.0.0", debPkg("amd64", sumB), msiPkg(sumC)),
 		"different file_name":          releaseBody("v2.4.1", "v2.0.0", renamed),
-		"different package_type":       releaseBody("v2.4.1", "v2.0.0", asRPM),
 		"different min_sprout_version": releaseBody("v2.4.1", "v1.0.0", debPkg("amd64", sumA)),
 		"new package, different floor": releaseBody("v2.4.1", "v1.0.0", msiPkg(sumC)),
 	} {
@@ -300,31 +325,31 @@ func TestRegisterFleetRelease_Validation(t *testing.T) {
 		many[i] = debPkg("arch"+string(rune('a'+i)), sumA)
 	}
 	cases := map[string]any{
-		"not JSON":                    "nope",
-		"array":                       "[]",
-		"unknown field":               `{"version":"v2.4.1","channel":"stable","min_sprout_version":"v2.0.0","packages":[],"artifact_url":"https://evil.test/x"}`,
-		"unknown package field":       `{"version":"v2.4.1","channel":"stable","min_sprout_version":"v2.0.0","packages":[{"os":"linux","arch":"amd64","package_type":"deb","file_name":"a.deb","checksum_sha256":"` + sumA + `","signature":"v1:x"}]}`,
-		"trailing data":               `{"version":"v2.4.1","channel":"stable","min_sprout_version":"v2.0.0","packages":[]} {}`,
-		"no packages":                 with(func(r *fleetReleaseRequest) { r.Packages = nil }),
-		"too many packages":           with(func(r *fleetReleaseRequest) { r.Packages = many }),
-		"no channel":                  with(func(r *fleetReleaseRequest) { r.Channel = "" }),
-		"bad channel":                 with(func(r *fleetReleaseRequest) { r.Channel = "Stable Channel" }),
-		"no version":                  with(func(r *fleetReleaseRequest) { r.Version = "" }),
-		"non-canonical version":       with(func(r *fleetReleaseRequest) { r.Version = "2.4.1" }),
-		"min above version":           with(func(r *fleetReleaseRequest) { r.MinSproutVersion = "v3.0.0" }),
-		"uppercase checksum":          pkg(func(p *fleetReleasePackage) { p.ChecksumSHA256 = strings.ToUpper(sumA) }),
-		"short checksum":              pkg(func(p *fleetReleasePackage) { p.ChecksumSHA256 = "abc" }),
-		"path in file_name":           pkg(func(p *fleetReleasePackage) { p.FileName = "pool/main/imas-sprout.deb" }),
-		"dot-dot file_name":           pkg(func(p *fleetReleasePackage) { p.FileName = "../imas-sprout.deb" }),
-		"url as file_name":            pkg(func(p *fleetReleasePackage) { p.FileName = "https://evil.test/imas-sprout.deb" }),
-		"uppercase os":                pkg(func(p *fleetReleasePackage) { p.OS = "Linux" }),
-		"unknown package_type":        pkg(func(p *fleetReleasePackage) { p.PackageType = "apk"; p.FileName = "imas-sprout.apk" }),
-		"msi on linux":                pkg(func(p *fleetReleasePackage) { p.PackageType = "msi"; p.FileName = "imas-sprout.msi" }),
-		"deb on windows":              pkg(func(p *fleetReleasePackage) { p.OS = "windows" }),
-		"file_name not .deb":          pkg(func(p *fleetReleasePackage) { p.FileName = "imas-sprout_2.4.1_amd64.rpm" }),
-		"darwin":                      pkg(func(p *fleetReleasePackage) { p.OS = "darwin" }),
-		"duplicate os/arch":           with(func(r *fleetReleaseRequest) { r.Packages = append(r.Packages, debPkg("amd64", sumB)) }),
-		"duplicate os/arch, same pkg": with(func(r *fleetReleaseRequest) { r.Packages = append(r.Packages, r.Packages[0]) }),
+		"not JSON":               "nope",
+		"array":                  "[]",
+		"unknown field":          `{"version":"v2.4.1","channel":"stable","min_sprout_version":"v2.0.0","packages":[],"artifact_url":"https://evil.test/x"}`,
+		"unknown package field":  `{"version":"v2.4.1","channel":"stable","min_sprout_version":"v2.0.0","packages":[{"os":"linux","arch":"amd64","package_type":"deb","file_name":"a.deb","checksum_sha256":"` + sumA + `","signature":"v1:x"}]}`,
+		"trailing data":          `{"version":"v2.4.1","channel":"stable","min_sprout_version":"v2.0.0","packages":[]} {}`,
+		"no packages":            with(func(r *fleetReleaseRequest) { r.Packages = nil }),
+		"too many packages":      with(func(r *fleetReleaseRequest) { r.Packages = many }),
+		"no channel":             with(func(r *fleetReleaseRequest) { r.Channel = "" }),
+		"bad channel":            with(func(r *fleetReleaseRequest) { r.Channel = "Stable Channel" }),
+		"no version":             with(func(r *fleetReleaseRequest) { r.Version = "" }),
+		"non-canonical version":  with(func(r *fleetReleaseRequest) { r.Version = "2.4.1" }),
+		"min above version":      with(func(r *fleetReleaseRequest) { r.MinSproutVersion = "v3.0.0" }),
+		"uppercase checksum":     pkg(func(p *fleetReleasePackage) { p.ChecksumSHA256 = strings.ToUpper(sumA) }),
+		"short checksum":         pkg(func(p *fleetReleasePackage) { p.ChecksumSHA256 = "abc" }),
+		"path in file_name":      pkg(func(p *fleetReleasePackage) { p.FileName = "pool/main/imas-sprout.deb" }),
+		"dot-dot file_name":      pkg(func(p *fleetReleasePackage) { p.FileName = "../imas-sprout.deb" }),
+		"url as file_name":       pkg(func(p *fleetReleasePackage) { p.FileName = "https://evil.test/imas-sprout.deb" }),
+		"uppercase os":           pkg(func(p *fleetReleasePackage) { p.OS = "Linux" }),
+		"unknown package_type":   pkg(func(p *fleetReleasePackage) { p.PackageType = "apk"; p.FileName = "imas-sprout.apk" }),
+		"msi on linux":           pkg(func(p *fleetReleasePackage) { p.PackageType = "msi"; p.FileName = "imas-sprout.msi" }),
+		"deb on windows":         pkg(func(p *fleetReleasePackage) { p.OS = "windows" }),
+		"file_name not .deb":     pkg(func(p *fleetReleasePackage) { p.FileName = "imas-sprout_2.4.1_amd64.rpm" }),
+		"darwin":                 pkg(func(p *fleetReleasePackage) { p.OS = "darwin" }),
+		"duplicate os/arch/type": with(func(r *fleetReleaseRequest) { r.Packages = append(r.Packages, debPkg("amd64", sumB)) }),
+		"duplicate, same pkg":    with(func(r *fleetReleaseRequest) { r.Packages = append(r.Packages, r.Packages[0]) }),
 	}
 	for name, body := range cases {
 		code, resp := register(t, h, body)

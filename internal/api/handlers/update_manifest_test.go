@@ -41,7 +41,7 @@ func signedManifest(t *testing.T, priv ed25519.PrivateKey, version, os, arch str
 		Version:          version,
 		OS:               os,
 		Arch:             arch,
-		FileName:         "imas-sprout_" + strings.TrimPrefix(version, "v") + "_" + os + "_" + arch + ".pkg",
+		FileName:         "imas-sprout_" + strings.TrimPrefix(version, "v") + "_" + os + "_" + arch + ".deb",
 		ChecksumSHA256:   strings.Repeat("ab", 32),
 		MinSproutVersion: "v1.0.0",
 	}
@@ -54,15 +54,15 @@ func signedManifest(t *testing.T, priv ed25519.PrivateKey, version, os, arch str
 }
 
 // fakeManifestStore answers from rows keyed the same way the SQL does:
-// tenant approval first, then (version, os, arch).
+// tenant approval first, then (version, os, arch, package_type).
 type fakeManifestStore struct {
 	approved map[string]string // tenant_id -> approved_version
-	rows     map[[3]string]fleetsign.Manifest
+	rows     map[[4]string]fleetsign.Manifest
 	err      error
 	calls    int
 }
 
-func (f *fakeManifestStore) ApprovedManifest(_ context.Context, tenantID, os, arch, version string) (fleetsign.Manifest, bool, error) {
+func (f *fakeManifestStore) ApprovedManifest(_ context.Context, tenantID, os, arch, packageType, version string) (fleetsign.Manifest, bool, error) {
 	f.calls++
 	if f.err != nil {
 		return fleetsign.Manifest{}, false, f.err
@@ -70,7 +70,7 @@ func (f *fakeManifestStore) ApprovedManifest(_ context.Context, tenantID, os, ar
 	if f.approved[tenantID] != version {
 		return fleetsign.Manifest{}, false, nil
 	}
-	m, ok := f.rows[[3]string{version, os, arch}]
+	m, ok := f.rows[[4]string{version, os, arch, packageType}]
 	return m, ok, nil
 }
 
@@ -93,7 +93,7 @@ func manifestRequest(t *testing.T, id *SproutIdentity, query string) *httptest.R
 
 var acmeWeb01 = SproutIdentity{TenantID: "t_acme", SproutID: "web-01"}
 
-const acmeQuery = "os=linux&arch=amd64&version=v2.4.1"
+const acmeQuery = "os=linux&arch=amd64&package_type=deb&version=v2.4.1"
 
 // --- handler ---
 
@@ -102,7 +102,7 @@ func TestUpdateManifest_ServesApprovedSignedRow(t *testing.T) {
 	want := signedManifest(t, priv, "v2.4.1", "linux", "amd64")
 	installStore(t, &fakeManifestStore{
 		approved: map[string]string{"t_acme": "v2.4.1"},
-		rows:     map[[3]string]fleetsign.Manifest{{"v2.4.1", "linux", "amd64"}: want},
+		rows:     map[[4]string]fleetsign.Manifest{{"v2.4.1", "linux", "amd64", "deb"}: want},
 	})
 
 	rec := manifestRequest(t, &acmeWeb01, acmeQuery)
@@ -142,19 +142,27 @@ func TestUpdateManifest_RefusesRowsThatFailChecks(t *testing.T) {
 	wrongArch := signedManifest(t, priv, "v2.4.1", "linux", "arm64")
 	invalid := good
 	invalid.FileName = "../evil"
+	// Signed and otherwise valid, but an .rpm stored under package_type
+	// deb: package_type isn't signed, so the file name must agree with it.
+	rpmAsDeb := good
+	rpmAsDeb.FileName = "imas-sprout_2.4.1_linux_amd64.rpm"
+	if msg, err := rpmAsDeb.Message(); err == nil {
+		rpmAsDeb.Signature = fleetsign.EncodeSignature(1, ed25519.Sign(priv, msg))
+	}
 
 	for name, row := range map[string]fleetsign.Manifest{
-		"unsigned":                 unsigned,
-		"tampered checksum":        tampered,
-		"signed by another key":    wrongKey,
-		"row for another arch":     wrongArch,
-		"invalid field":            invalid,
-		"malformed signature form": func() fleetsign.Manifest { m := good; m.Signature = "garbage"; return m }(),
+		"unsigned":                     unsigned,
+		"tampered checksum":            tampered,
+		"signed by another key":        wrongKey,
+		"row for another arch":         wrongArch,
+		"invalid field":                invalid,
+		"file of another package type": rpmAsDeb,
+		"malformed signature form":     func() fleetsign.Manifest { m := good; m.Signature = "garbage"; return m }(),
 	} {
 		t.Run(name, func(t *testing.T) {
 			installStore(t, &fakeManifestStore{
 				approved: map[string]string{"t_acme": "v2.4.1"},
-				rows:     map[[3]string]fleetsign.Manifest{{"v2.4.1", "linux", "amd64"}: row},
+				rows:     map[[4]string]fleetsign.Manifest{{"v2.4.1", "linux", "amd64", "deb"}: row},
 			})
 			rec := manifestRequest(t, &acmeWeb01, acmeQuery)
 			assertGenericNotFound(t, rec)
@@ -176,7 +184,7 @@ func TestUpdateManifest_UnavailableIsNotCached(t *testing.T) {
 	priv := installFleetKey(t)
 	store := &fakeManifestStore{
 		approved: map[string]string{"t_acme": "v2.4.1"},
-		rows:     map[[3]string]fleetsign.Manifest{{"v2.4.1", "linux", "amd64"}: signedManifest(t, priv, "v2.4.1", "linux", "amd64")},
+		rows:     map[[4]string]fleetsign.Manifest{{"v2.4.1", "linux", "amd64", "deb"}: signedManifest(t, priv, "v2.4.1", "linux", "amd64")},
 		err:      errors.New("pxc down"),
 	}
 	installStore(t, store)
@@ -202,7 +210,7 @@ func TestUpdateManifest_FailsClosedWithoutStoreOrKeys(t *testing.T) {
 		priv := installFleetKey(t)
 		installStore(t, &fakeManifestStore{
 			approved: map[string]string{"t_acme": "v2.4.1"},
-			rows:     map[[3]string]fleetsign.Manifest{{"v2.4.1", "linux", "amd64"}: signedManifest(t, priv, "v2.4.1", "linux", "amd64")},
+			rows:     map[[4]string]fleetsign.Manifest{{"v2.4.1", "linux", "amd64", "deb"}: signedManifest(t, priv, "v2.4.1", "linux", "amd64")},
 		})
 		SetFleetKeySource(nil)
 		if rec := manifestRequest(t, &acmeWeb01, acmeQuery); rec.Code != http.StatusServiceUnavailable {
@@ -213,7 +221,7 @@ func TestUpdateManifest_FailsClosedWithoutStoreOrKeys(t *testing.T) {
 		priv := installFleetKey(t)
 		installStore(t, &fakeManifestStore{
 			approved: map[string]string{"t_acme": "v2.4.1"},
-			rows:     map[[3]string]fleetsign.Manifest{{"v2.4.1", "linux", "amd64"}: signedManifest(t, priv, "v2.4.1", "linux", "amd64")},
+			rows:     map[[4]string]fleetsign.Manifest{{"v2.4.1", "linux", "amd64", "deb"}: signedManifest(t, priv, "v2.4.1", "linux", "amd64")},
 		})
 		SetFleetKeySource(staticFleetKeys{err: errors.New("transit down")})
 		if rec := manifestRequest(t, &acmeWeb01, acmeQuery); rec.Code != http.StatusServiceUnavailable {
@@ -244,18 +252,22 @@ func TestUpdateManifest_BadQuery(t *testing.T) {
 	store := &fakeManifestStore{}
 	installStore(t, store)
 	for _, q := range []string{
-		"os=linux&version=v2.4.1",                       // missing arch
-		"arch=amd64&version=v2.4.1",                     // missing os
-		"os=linux&arch=amd64",                           // missing version
-		"os=linux&arch=&version=v2.4.1",                 // empty arch
-		"os=linux&arch=amd64&arch=arm64&version=v2.4.1", // repeated
-		"os=Linux&arch=amd64&version=v2.4.1",            // not lowercase
-		"os=linux&arch=amd64%2F..&version=v2.4.1",       // separator
-		"os=linux&arch=amd64&version=2.4.1",             // no leading v
-		"os=linux&arch=amd64&version=v2.4",              // not canonical
-		"os=linux&arch=amd64&version=v2.4.1%2Bbuild",    // build metadata
-		"os=linux&arch=amd64&version=v2.4.1%7Cx",        // separator
-		"os=linux&arch=" + strings.Repeat("a", 33) + "&version=v2.4.1",
+		"os=linux&package_type=deb&version=v2.4.1",                       // missing arch
+		"arch=amd64&version=v2.4.1",                                      // missing os
+		"os=linux&arch=amd64&package_type=deb",                           // missing version
+		"os=linux&arch=&package_type=deb&version=v2.4.1",                 // empty arch
+		"os=linux&arch=amd64&arch=arm64&package_type=deb&version=v2.4.1", // repeated
+		"os=Linux&arch=amd64&package_type=deb&version=v2.4.1",            // not lowercase
+		"os=linux&arch=amd64%2F..&package_type=deb&version=v2.4.1",       // separator
+		"os=linux&arch=amd64&package_type=deb&version=2.4.1",             // no leading v
+		"os=linux&arch=amd64&package_type=deb&version=v2.4",              // not canonical
+		"os=linux&arch=amd64&package_type=deb&version=v2.4.1%2Bbuild",    // build metadata
+		"os=linux&arch=amd64&package_type=deb&version=v2.4.1%7Cx",        // separator
+		"os=linux&arch=" + strings.Repeat("a", 33) + "&package_type=deb&version=v2.4.1",
+		"os=linux&arch=amd64&version=v2.4.1",                                   // missing package_type
+		"os=linux&arch=amd64&package_type=apk&version=v2.4.1",                  // unknown package_type
+		"os=linux&arch=amd64&package_type=DEB&version=v2.4.1",                  // not lowercase
+		"os=linux&arch=amd64&package_type=deb&package_type=rpm&version=v2.4.1", // repeated
 	} {
 		t.Run(q, func(t *testing.T) {
 			// One sprout per case, so the per-sprout limit doesn't answer
@@ -277,7 +289,7 @@ func TestUpdateManifest_CachesPerTenant(t *testing.T) {
 	row := signedManifest(t, priv, "v2.4.1", "linux", "amd64")
 	store := &fakeManifestStore{
 		approved: map[string]string{"t_acme": "v2.4.1"},
-		rows:     map[[3]string]fleetsign.Manifest{{"v2.4.1", "linux", "amd64"}: row},
+		rows:     map[[4]string]fleetsign.Manifest{{"v2.4.1", "linux", "amd64", "deb"}: row},
 	}
 	installStore(t, store)
 
@@ -381,7 +393,7 @@ func TestUpdateManifest_RateLimited(t *testing.T) {
 	priv := installFleetKey(t)
 	store := &fakeManifestStore{
 		approved: map[string]string{"t_acme": "v2.4.1"},
-		rows:     map[[3]string]fleetsign.Manifest{{"v2.4.1", "linux", "amd64"}: signedManifest(t, priv, "v2.4.1", "linux", "amd64")},
+		rows:     map[[4]string]fleetsign.Manifest{{"v2.4.1", "linux", "amd64", "deb"}: signedManifest(t, priv, "v2.4.1", "linux", "amd64")},
 	}
 	installStore(t, store)
 

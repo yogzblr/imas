@@ -478,13 +478,18 @@ saasapi, which marks the rows revoked so no manifest is served for them.
 ### 2.6 Update manifest endpoint
 
 Served by farmer on the same dedicated HTTP endpoint sprouts already use
-for recipes (requirement 9): `GET /v1/sprout/update-manifest?os=&arch=&version=`
+for recipes (requirement 9):
+`GET /v1/sprout/update-manifest?os=&arch=&package_type=&version=`
 authenticated with the sprout JWT (requirement 11). Farmer reads
 `saas.fleet_versions` and `saas.tenant_update_policy` (read-only grants,
-§4.1) and returns the row for the caller's tenant, OS and arch, only for a
-version the tenant has approved. Response: `version`, `os`, `arch`,
+§4.1) and returns the row for the caller's tenant, OS, arch and package
+type (`deb`, `rpm` or `msi`; one linux/amd64 binary ships as both a .deb
+and an .rpm, so a release has one row per OS, arch and package type), only
+for a version the tenant has approved. Response: `version`, `os`, `arch`,
 `file_name`, `checksum_sha256`, `min_sprout_version`, `signature`. There is
-no URL; the sprout builds it from its configured repo and `file_name`.
+no URL; the sprout finds the package in its configured repository by
+reading that repository's own index (apt `Packages`, rpm `repodata`, NuGet
+flat container) for the entry with the signed `checksum_sha256`.
 
 ## 3. Sprout enrollment flow
 
@@ -607,7 +612,7 @@ asset_action_items    (batch_id, asset_id, sprout_id, jid, status)
 ```sql
 fleet_versions        (id, version, os, arch, package_type, file_name, checksum_sha256,
                         min_sprout_version, signature, revoked, released_at, notes)
-                        -- one row per OS/arch; UNIQUE(version, os, arch)
+                        -- one row per OS/arch/package type; UNIQUE(version, os, arch, package_type)
                         -- signature: produced only by cmd/fleetreleaser, stored by saasapi (§2.5)
 tenant_update_policy  (tenant_id PK, approved_version, auto_update BOOLEAN,
                         rollout_window_start, rollout_window_end, updated_at)

@@ -227,6 +227,7 @@ msi:
     # Copied to the same relative path next to the .wxs (not flattened).
     extra_files:
       - packaging/etc/imas-sprout.conf
+      - packaging/etc/fleet-signing-keys.json
     version: v3
     mod_timestamp: "{{ .CommitTimestamp }}"
     hooks:
@@ -320,9 +321,20 @@ nfpms:
     vendor: Adatomic, Inc.
     version_metadata: git
     contents:
+      # noreplace: the sprout writes its own state (sproutid, an emptied
+      # jointoken) and the admin's settings into this file, so an upgrade,
+      # including a self_update's rpm -U, must keep it (.rpmnew beside it)
+      # rather than move it to .rpmsave. dpkg keeps it via --force-confold.
       - src: ./packaging/etc/imas-sprout.conf
         dst: /etc/imas/sprout
-        type: config
+        type: config|noreplace
+        file_info:
+          mode: 0644
+      # The self_update trust root (packaging/etc/fleet-signing-keys.md).
+      # Deliberately not a config file: every upgrade replaces it, which is
+      # how a signing key rotation reaches the fleet.
+      - src: ./packaging/etc/fleet-signing-keys.json
+        dst: /etc/imas/fleet-signing-keys.json
         file_info:
           mode: 0644
       - dst: /var/cache/imas/sprout
