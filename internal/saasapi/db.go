@@ -17,11 +17,11 @@ var db *gorm.DB
 // after OpenDB.
 func SetDB(d *gorm.DB) { db = d }
 
-// OpenDB opens a GORM connection to the `saas` schema and migrates the
-// tables this package owns (tenants, provisioning_jobs, enrollment_keys,
-// asset_links, asset_action_batches, asset_action_items — design doc
-// §4.2; fleet_versions, tenant_update_policy — §4.3). It never writes to
-// the `farmer` schema; asset_links.go and sprout_actions.go only read
+// OpenDB opens a GORM connection to the `saas` schema. It creates and
+// changes nothing: cmd/migrate owns the schema (internal/migrations,
+// design doc §4.1a), and cmd/saasapi waits for the version it needs
+// (migrations.WaitForSchema) before serving. This package never writes
+// to the `farmer` schema; asset_links.go and sprout_actions.go only read
 // farmer.pki_nkeys, through the saas service account's SELECT grant
 // (§4.1).
 func OpenDB(dsn string) (*gorm.DB, error) {
@@ -34,43 +34,21 @@ func OpenDB(dsn string) (*gorm.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("saasapi: opening saas schema: %w", err)
 	}
-	if err := migrateSchema(db); err != nil {
-		return nil, fmt.Errorf("saasapi: migrating saas schema: %w", err)
-	}
 	return db, nil
 }
 
-// legacyAssetLinkIndexes are indexes that asset_links' earlier GORM tags
-// created and its current ones don't. AutoMigrate only ever adds indexes,
-// so these would otherwise survive on any database first migrated from
-// the older model:
-//   - idx_asset_links_sprout_id: a single-column UNIQUE on sprout_id.
-//     That's a defect: sprout_id is only unique within a tenant
-//     (pki_nkeys' (tenant_id, sprout_id) primary key, pki's
-//     resolveEnrollSproutID, heartbeat's (tenant, sproutID) keys), so it
-//     would stop a second tenant linking its own same-named sprout.
-//     idx_asset_links_tenant_sprout replaces it.
-//   - idx_asset_links_tenant_id: a plain index on tenant_id, redundant now
-//     that idx_asset_links_tenant_sprout leads with tenant_id.
-var legacyAssetLinkIndexes = []string{"idx_asset_links_sprout_id", "idx_asset_links_tenant_id"}
-
-// migrateSchema migrates every table this package owns, then drops
-// legacyAssetLinkIndexes where present. Idempotent: on a fresh or
-// already-migrated database the drop step finds nothing to do.
-func migrateSchema(d *gorm.DB) error {
-	if err := d.AutoMigrate(&Tenant{}, &ProvisioningJob{}, &EnrollmentKey{}, &AssetLink{},
+// Models is every table this package owns (tenants, provisioning_jobs,
+// enrollment_keys, asset_links, asset_action_batches, asset_action_items
+// — design doc §4.2; fleet_versions, tenant_update_policy — §4.3). The
+// schema itself comes from internal/migrations' saas set; this list is
+// what that set's baseline is checked against (internal/migrations'
+// tests).
+func Models() []any {
+	return []any{&Tenant{}, &ProvisioningJob{}, &EnrollmentKey{}, &AssetLink{},
 		&AssetActionBatch{}, &AssetActionItem{},
-		&FleetVersion{}, &TenantUpdatePolicy{}); err != nil {
-		return err
-	}
-	m := d.Migrator()
-	for _, name := range legacyAssetLinkIndexes {
-		if !m.HasIndex(&AssetLink{}, name) {
-			continue
-		}
-		if err := m.DropIndex(&AssetLink{}, name); err != nil {
-			return fmt.Errorf("dropping legacy index %s: %w", name, err)
-		}
-	}
-	return nil
+		&FleetVersion{}, &TenantUpdatePolicy{}}
 }
+
+// migrateSchema creates Models' tables in a test's sqlite database. Tests
+// only: production schema changes are internal/migrations'.
+func migrateSchema(d *gorm.DB) error { return d.AutoMigrate(Models()...) }

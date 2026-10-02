@@ -19,6 +19,7 @@ import (
 	"github.com/yogzblr/imas/internal/fleetsign"
 	"github.com/yogzblr/imas/internal/heartbeat"
 	log "github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/migrations"
 	"github.com/yogzblr/imas/internal/saasapi"
 )
 
@@ -32,6 +33,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("saasapi: failed to open saas schema: %v", err)
 	}
+	// cmd/migrate owns the schema (design doc §4.1a). Wait, retrying with
+	// backoff, until it's at the version this build needs: on install the
+	// migration Job runs after this pod starts, and during an upgrade a
+	// pod can start before the hook finishes.
+	sqlDB, err := db.DB()
+	if err != nil {
+		log.Fatalf("saasapi: failed to open saas schema: %v", err)
+	}
+	if err := migrations.WaitForSchema(context.Background(), sqlDB, migrations.Saas, log.Warnf); err != nil {
+		log.Fatalf("saasapi: saas schema: %v", err)
+	}
+	log.Infof("saasapi: saas schema is at the version this build needs (%d)", migrations.Saas.Latest())
 	saasapi.SetDB(db)
 
 	// Fail closed on Valkey when it's configured: a pod that silently

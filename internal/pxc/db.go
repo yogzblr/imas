@@ -7,6 +7,10 @@
 // the injection pattern internal/saasapi/db.go already uses for the
 // `saas` schema — so each package reads through it on every call, with no
 // in-memory cache layered on top by any caller.
+//
+// Nothing here creates or changes a table: cmd/migrate owns the schema
+// (internal/migrations, design doc §4.1a), and cmd/farmer waits for the
+// version it needs (migrations.WaitForSchema) before using the handle.
 package pxc
 
 import (
@@ -15,13 +19,15 @@ import (
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
+
+	"github.com/yogzblr/imas/internal/jobs"
+	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/props"
+	"github.com/yogzblr/imas/internal/rbac"
 )
 
-// OpenDB opens a GORM connection to the farmer schema and migrates the
-// given models. Every farmer-schema owning package (props, pki, rbac)
-// passes its own models so a single call from cmd/farmer/main.go can
-// migrate the whole schema through one connection.
-func OpenDB(dsn string, models ...any) (*gorm.DB, error) {
+// OpenDB opens a GORM connection to the farmer schema.
+func OpenDB(dsn string) (*gorm.DB, error) {
 	if dsn == "" {
 		return nil, fmt.Errorf("pxc: empty DSN")
 	}
@@ -31,10 +37,15 @@ func OpenDB(dsn string, models ...any) (*gorm.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pxc: opening farmer schema: %w", err)
 	}
-	if len(models) > 0 {
-		if err := d.AutoMigrate(models...); err != nil {
-			return nil, fmt.Errorf("pxc: migrating farmer schema: %w", err)
-		}
-	}
 	return d, nil
+}
+
+// Models is every GORM model in the farmer schema, from each package that
+// owns a part of it. The schema itself comes from internal/migrations'
+// farmer set; this list is what that set's baseline is checked against
+// (internal/migrations' tests) and what farmer's tests AutoMigrate into
+// their sqlite databases.
+func Models() []any {
+	models := append(append(props.Models(), pki.Models()...), rbac.Models()...)
+	return append(models, jobs.Models()...)
 }
