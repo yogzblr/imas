@@ -19,8 +19,8 @@ info:
     post-upgrade hook Job, which registers the sprout release the chart
     carries (`sprout.release`). There is no CI call.
 
-    **Not started by `cmd/saasapi` yet**: `NewOperatorServer` exists in
-    `internal/saasapi`, and wiring it into `main` is a follow-up.
+    `cmd/saasapi` starts this listener when SAASAPI_OPERATOR_LISTEN_ADDR
+    is set (the farmer chart's `saasapi.operator.enabled`).
 
     **Auth.** `Authorization: Bearer <operator token>`, the content of the
     mounted Secret file `SAASAPI_OPERATOR_TOKEN_FILE` (or, during a
