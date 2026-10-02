@@ -121,6 +121,10 @@ func runSprout(parent context.Context, joinToken string, handleSignals bool) {
 	config.LoadConfig("sprout")
 	config.SetJoinTokenFromFlag(joinToken)
 	defer log.Flush()
+	// The release tag goreleaser links in (-X main.Tag=v<version>): the
+	// version the selfupdate ingredient refuses downgrades and
+	// min_sprout_version against.
+	selfupdate.SetRunningVersion(Tag)
 	if err := certs.GenNKey(false); err != nil {
 		log.Fatalf("failed to generate sprout NKey: %v", err)
 	}
@@ -276,9 +280,6 @@ func ConnectSprout(ctx context.Context, done chan<- struct{}) {
 	test.RegisterNatsConn(nc)
 	cmd.RegisterNatsConn(nc)
 	cook.RegisterNatsConn(nc)
-	// The selfupdate ingredient fetches imas-fleet-signing's live key set
-	// over this same SproutRootCA-pinned connection.
-	selfupdate.RegisterNatsConn(nc)
 	err = natsInit(ctx, nc)
 	if err != nil {
 		log.Panicf("Error with natsInit: %v", err)
