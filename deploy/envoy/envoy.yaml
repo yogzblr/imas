@@ -6,7 +6,7 @@
 # (nats-server's own decentralized-JWT auth, every later workstream) trusts
 # whatever this config lets through.
 #
-# Four routes, per the design doc's "Two gates, checking different
+# Five routes, per the design doc's "Two gates, checking different
 # things, not redundant with each other":
 #
 #   1. /v1/enroll        — NOT jwt_authn-gated (a sprout enrolling has no
@@ -50,6 +50,16 @@
 #                           always rejected. Requests for /v1/recipes fall
 #                           through to route 3 and never reach farmer's
 #                           HTTP API.
+#   2b. /v1/sprout/update-manifest
+#                         — jwt_authn-gated, exact path, proxied unmodified
+#                           to farmer's GET /v1/sprout/update-manifest
+#                           (internal/api/handlers/update_manifest.go,
+#                           cloudxp-machine-manager-api-design.md §2.6):
+#                           the signed manifest of the sprout's tenant's
+#                           approved sprout version. Same recipe_service
+#                           cluster and same gate as /files/; farmer
+#                           re-verifies the gateway JWT and takes the
+#                           tenant from it, never from the query.
 #   3. everything else    — the sprout's wss:// NATS connection, jwt_authn-
 #                           gated, proxied to nats-server's websocket
 #                           listener (internal/pki/nats.go's
@@ -200,6 +210,22 @@ static_resources:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
                               requirement_name: sprout_jwt
 
+                        # Route 2b: signed sprout update manifest. Exact
+                        # path match (the query string isn't part of it),
+                        # so only this one endpoint reaches farmer; any
+                        # other /v1/sprout/... path still falls through to
+                        # route 3. The response is a small JSON document
+                        # farmer serves from cache or one PXC read, hence
+                        # the short timeout.
+                        - match: { path: "/v1/sprout/update-manifest" }
+                          route:
+                            cluster: recipe_service
+                            timeout: 10s
+                          typed_per_filter_config:
+                            envoy.filters.http.jwt_authn:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+                              requirement_name: sprout_jwt
+
                         # Route 3 (default): the sprout's wss:// NATS
                         # connection.
                         - match: { prefix: "/" }
@@ -259,6 +285,8 @@ static_resources:
                       rules:
                         - match: { prefix: "/files/" }
                           requires: { provider_name: sprout_jwt }
+                        - match: { path: "/v1/sprout/update-manifest" }
+                          requires: { provider_name: sprout_jwt }
                         - match: { prefix: "/" }
                           requires: { provider_name: sprout_jwt }
                   - name: envoy.filters.http.local_ratelimit
@@ -315,7 +343,8 @@ static_resources:
 
     # Points at farmer's sprout-facing recipe download (GET /files/<key> —
     # internal/api/handlers/recipes.go's GetFile, registered in
-    # internal/api/routers.go), the "small, self-contained service"
+    # internal/api/routers.go) and its sprout update manifest
+    # (GET /v1/sprout/update-manifest), the "small, self-contained service"
     # docs/design/imas-fork-roadmap.md workstream I describes, built
     # directly into farmer's existing HTTPS API rather than as a separate
     # deployable.
