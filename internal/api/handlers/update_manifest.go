@@ -25,7 +25,6 @@ package handlers
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -39,6 +38,7 @@ import (
 	"golang.org/x/time/rate"
 	"gorm.io/gorm"
 
+	"github.com/yogzblr/imas/internal/fleetcatalog"
 	"github.com/yogzblr/imas/internal/fleetsign"
 	log "github.com/yogzblr/imas/internal/log"
 )
@@ -77,35 +77,8 @@ type UpdateManifestStore interface {
 	ApprovedManifest(ctx context.Context, tenantID, os, arch, packageType, version string) (m fleetsign.Manifest, found bool, err error)
 }
 
-// mysqlUpdateManifestStore reads saas.* through farmer's own PXC handle,
-// which holds a read-only grant on saas (design doc §4.1), the same way
-// internal/pki reads saas.enrollment_keys.
-type mysqlUpdateManifestStore struct{ db *gorm.DB }
-
-// approvedManifestQuery selects the row in one statement, with tenant_id
-// in the same WHERE as the caller-supplied version, os, arch and package
-// type (§4
-// "Tenant safety"): the policy join is what restricts a tenant to the
-// one version it approved.
-const approvedManifestQuery = `SELECT fv.version, fv.os, fv.arch, fv.file_name,
-       fv.checksum_sha256, fv.min_sprout_version, fv.signature
-  FROM saas.fleet_versions fv
-  JOIN saas.tenant_update_policy p ON p.approved_version = fv.version
- WHERE p.tenant_id = ? AND fv.version = ? AND fv.os = ? AND fv.arch = ?
-   AND fv.package_type = ? AND fv.revoked = FALSE`
-
-func (s mysqlUpdateManifestStore) ApprovedManifest(ctx context.Context, tenantID, os, arch, packageType, version string) (fleetsign.Manifest, bool, error) {
-	var m fleetsign.Manifest
-	err := s.db.WithContext(ctx).Raw(approvedManifestQuery, tenantID, version, os, arch, packageType).Row().
-		Scan(&m.Version, &m.OS, &m.Arch, &m.FileName, &m.ChecksumSHA256, &m.MinSproutVersion, &m.Signature)
-	if errors.Is(err, sql.ErrNoRows) {
-		return fleetsign.Manifest{}, false, nil
-	}
-	if err != nil {
-		return fleetsign.Manifest{}, false, err
-	}
-	return m, true, nil
-}
+// The PXC-backed store is fleetcatalog.SQL: the catalog read shared with
+// farmer's self_update dispatch (internal/natsapi).
 
 var (
 	manifestStoreMu sync.RWMutex
@@ -124,14 +97,18 @@ func SetUpdateManifestStore(s UpdateManifestStore) {
 	updateManifestLimiter.reset()
 }
 
-// setUpdateManifestDB installs the PXC-backed store over db, or none for
-// a nil db.
+// setUpdateManifestDB installs the PXC-backed catalog over db, or none for
+// a nil db: as this endpoint's store, and as fleetcatalog's installed
+// catalog, which farmer's self_update dispatch re-verifies against.
 func setUpdateManifestDB(db *gorm.DB) {
 	if db == nil {
+		fleetcatalog.Install(nil)
 		SetUpdateManifestStore(nil)
 		return
 	}
-	SetUpdateManifestStore(mysqlUpdateManifestStore{db: db})
+	cat := fleetcatalog.New(db)
+	fleetcatalog.Install(cat)
+	SetUpdateManifestStore(cat)
 }
 
 func currentManifestStore() UpdateManifestStore {
