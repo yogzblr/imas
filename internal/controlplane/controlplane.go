@@ -12,7 +12,11 @@
 package controlplane
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"time"
 )
@@ -195,16 +199,35 @@ const (
 	ActionSelfUpdate = "self_update"
 )
 
-// SelfUpdateParams is a self_update action's params (design doc §2.2):
-// one saas.fleet_versions row, signature included. Farmer re-verifies
-// Signature against the imas-fleet-signing public key before dispatching
-// (§2.5), and the sprout verifies it again against its pinned copy before
-// fetching anything; a missing or invalid signature is refused at each.
+// SelfUpdateParams is a self_update action's params (design doc §1.8,
+// §2.2): the target version, and nothing else. The release's file names,
+// checksums and signatures stay in saas.fleet_versions: farmer re-verifies
+// the version against that catalog before dispatching, and the sprout
+// fetches and verifies its own OS/arch row from farmer's manifest endpoint
+// (§2.6). Decode it with DecodeSelfUpdateParams, which refuses any other
+// field, so a caller still sending the pre-FU.7 artifact_url, checksum or
+// signature is told so instead of having them silently dropped.
 type SelfUpdateParams struct {
-	Version        string `json:"version"`
-	ArtifactURL    string `json:"artifact_url"`
-	ChecksumSHA256 string `json:"checksum_sha256"`
-	Signature      string `json:"signature"`
+	Version string `json:"version"`
+}
+
+// ErrSelfUpdateParams: self_update params that aren't exactly one JSON
+// object {"version": "<string>"}.
+var ErrSelfUpdateParams = errors.New("controlplane: self_update params must be exactly {\"version\": \"...\"}")
+
+// DecodeSelfUpdateParams decodes raw strictly: one JSON object, no field
+// but "version", nothing after it.
+func DecodeSelfUpdateParams(raw []byte) (SelfUpdateParams, error) {
+	var p SelfUpdateParams
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return SelfUpdateParams{}, fmt.Errorf("%w: %v", ErrSelfUpdateParams, err)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return SelfUpdateParams{}, fmt.Errorf("%w: trailing data", ErrSelfUpdateParams)
+	}
+	return p, nil
 }
 
 // SproutActionRequest is the internal.sprout.action payload. TenantID is

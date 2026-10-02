@@ -77,8 +77,8 @@ func stubSproutActionDispatch(t *testing.T, verify func(string, string) error) *
 		return apitypes.CmdCook{JID: "jid-1"}, nil
 	}
 	triggerCook = func(string, string) error { return nil }
-	dispatchSelfUpdate = func(tenantID, _ string, p controlplane.SelfUpdateParams) (string, error) {
-		rec.record(tenantID, mustJSON(t, p))
+	dispatchSelfUpdate = func(tenantID, _, version string) (string, error) {
+		rec.record(tenantID, mustJSON(t, controlplane.SelfUpdateParams{Version: version}))
 		return "jid-su", nil
 	}
 	return rec

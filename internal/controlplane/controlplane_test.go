@@ -1,6 +1,8 @@
 package controlplane
 
 import (
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -117,5 +119,32 @@ func TestPublicErrorMessage_SproutActionCodesHaveFixedMessages(t *testing.T) {
 		if PublicErrorMessage(code) == PublicErrorMessage(ErrorInternal) {
 			t.Errorf("code %q has no message of its own", code)
 		}
+	}
+}
+
+// TestDecodeSelfUpdateParams: exactly {"version": ...}. A caller still
+// sending the pre-FU.7 artifact_url, checksum_sha256 or signature is
+// refused rather than having them dropped.
+func TestDecodeSelfUpdateParams(t *testing.T) {
+	if p, err := DecodeSelfUpdateParams([]byte(`{"version":"v2.4.1"}`)); err != nil || p.Version != "v2.4.1" {
+		t.Fatalf("valid params: %+v, %v", p, err)
+	}
+	for _, raw := range []string{
+		`{"version":"v2.4.1","artifact_url":""}`,
+		`{"version":"v2.4.1","checksum_sha256":"","signature":""}`,
+		`{"version":"v2.4.1","Version2":"x"}`,
+		`{"version":2}`,
+		`{"version":"v2.4.1"} {}`,
+		`{"version":"v2.4.1"}x`,
+		`["v2.4.1"]`,
+		``,
+	} {
+		if p, err := DecodeSelfUpdateParams([]byte(raw)); !errors.Is(err, ErrSelfUpdateParams) {
+			t.Errorf("DecodeSelfUpdateParams(%s) = %+v, %v; want ErrSelfUpdateParams", raw, p, err)
+		}
+	}
+	b, _ := json.Marshal(SelfUpdateParams{Version: "v2.4.1"})
+	if string(b) != `{"version":"v2.4.1"}` {
+		t.Errorf("encodes as %s", b)
 	}
 }
