@@ -154,7 +154,7 @@ spec:
               role {{ $ob.gateway.k8sRole }} {{ $farmerSA }} {{ $ns }} imas-farmer-gateway {{ $bs.tokenTTL }} {{ $bs.tokenMaxTTL }}
               role {{ $ob.fleetSign.k8sRole }} {{ $farmerSA }} {{ $ns }} imas-fleet-verify {{ $bs.tokenTTL }} {{ $bs.tokenMaxTTL }}
               role {{ $ob.tenantBox.k8sRole }} {{ $farmerSA }} {{ $ns }} imas-farmer-tenantbox {{ $bs.tokenTTL }} {{ $bs.tokenMaxTTL }}
-              {{- if and .Values.saasapi.enabled .Values.saasapi.fleetUpdateDispatch.enabled }}
+              {{- if include "imas-farmer.saasapi.fleetVerify" . }}
               role {{ .Values.saasapi.openbao.fleetSign.k8sRole }} {{ include "imas-farmer.saasapi.serviceAccountName" . }} {{ $ns }} imas-fleet-verify {{ $bs.tokenTTL }} {{ $bs.tokenMaxTTL }}
               {{- end }}
               {{- if $p.enabled }}

@@ -344,6 +344,44 @@ saasapi:
   # path (yogzblr/imas#286). On needs the fleetSign client below.
   fleetUpdateDispatch:
     enabled: false
+  # The operator plane (internal/saasapi NewOperatorServer, API design
+  # §2.5): sprout release registration and revoke, on its own HTTPS
+  # listener and its own Service (<release>-saasapi-operator), never the
+  # one the gateway routes to. The sprout release hook Job (sproutRelease
+  # below) is its only in-cluster caller. On also turns on the fleetSign
+  # client below. NOTE: cmd/saasapi does not start this listener yet
+  # (README.md, "Known gaps"); leave it off until it does.
+  # FLAG FOR SECURITY REVIEW: the operator token can get any well-formed
+  # release above fleetreleaser's floor signed.
+  operator:
+    enabled: false
+    port: 8443
+    # kubernetes.io/tls Secret: tls.crt/tls.key for the listener, and
+    # ca.crt, which the hook Job verifies the listener with (it mounts only
+    # that key). SANs: the operator Service's FQDN (NOTES prints it).
+    tls:
+      secretName: ""
+    # Existing Secret with the operator bearer token (at least 32
+    # characters, no whitespace): SAASAPI_OPERATOR_TOKEN_FILE, and the
+    # token the hook Job presents. A Secret of its own. previousKey: set
+    # only during a rotation (SAASAPI_OPERATOR_TOKEN_PREVIOUS_FILE; README,
+    # "Rotating the operator token").
+    token:
+      secretName: ""
+      currentKey: current
+      previousKey: ""
+    # cmd/fleetreleaser, the only signer (deploy/fleetreleaser/README.md).
+    fleetReleaser:
+      # SAASAPI_FLEETRELEASER_URL: https://host[:port], no path.
+      url: ""
+      # SAASAPI_FLEETRELEASER_TOKEN_FILE: the caller token saasapi presents.
+      tokenSecretName: ""
+      tokenKey: token
+      # Optional ConfigMap with fleetreleaser's CA (system roots otherwise).
+      caConfigMap: ""
+      caKey: ca.crt
+    service:
+      annotations: {}
   openbao:
     fleetSign:
       transitMount: transit
@@ -428,6 +466,47 @@ credentialPublisher:
   backoffLimit: 3
   activeDeadlineSeconds: 300
   ttlSecondsAfterFinished: 3600
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { memory: 128Mi }
+
+# ---------------------------------------------------------------------------
+# Sprout release registration (API design §2.5, README.md "Sprout release
+# registration"): a post-install/post-upgrade hook Job (`farmer
+# register-sprout-release`, farmer's image) that POSTs the sprout release
+# this chart carries (files/sprout-release.json: version, min_sprout_version
+# from packaging/helm/min-sprout-version, packages; stamped at release time
+# by packaging/helm/stamp-sprout-release.sh) to saasapi's operator plane. Renders only when that file is present AND
+# saasapi.operator.enabled: a chart from a source checkout has no release
+# to register, and NOTES says why it was skipped.
+# A 200 (already registered, same contents) is success; a 409 (this
+# version is registered with different contents) fails the release.
+# FLAG FOR SECURITY REVIEW: the Job holds the operator token.
+# ---------------------------------------------------------------------------
+sproutRelease:
+  # false: never register, even from a stamped chart with the operator
+  # plane on (NOTES says so).
+  register: true
+  # Validated and logged by saasapi; not stored.
+  channel: stable
+  # Fixed name, no RBAC, no OpenBao role, no API token. Must not be any
+  # other workload's ServiceAccount.
+  serviceAccountName: imas-sprout-release-registrar
+  # In-pod retries for an unreachable saasapi (still rolling out), 408,
+  # 429 and 5xx, with exponential backoff. Any other answer is final.
+  retry:
+    attempts: 8
+    initialDelaySeconds: 5
+    maxDelaySeconds: 60
+  # Per request. One registration makes up to 16 fleetreleaser calls.
+  requestTimeoutSeconds: 600
+  # Pod retries after the in-pod ones run out. A 409 or other refusal
+  # fails the Job at once (podFailurePolicy), whatever this says.
+  backoffLimit: 1
+  # `helm install/upgrade --timeout` must be at least this long.
+  activeDeadlineSeconds: 1500
+  ttlSecondsAfterFinished: 3600
+  argoCDHooks: true
   resources:
     requests: { cpu: 10m, memory: 32Mi }
     limits: { memory: 128Mi }
@@ -525,6 +604,15 @@ networkPolicy:
   # saasapi's listener. Empty: anyone, on that port only.
   saasapiIngress:
     from: []
+  # saasapi's operator listener (saasapi.operator). The sprout release
+  # hook Job's pods always; these peers too (e.g. an operations bastion
+  # for the revoke call). Empty: the hook Job only.
+  saasapiOperatorIngress:
+    from: []
+  # saasapi -> cmd/fleetreleaser, on saasapi.operator.fleetReleaser.url's
+  # port. Empty: any destination, on that port only.
+  fleetreleaser:
+    to: []
   # Extra egress rules. saasapi's default allows HTTPS anywhere for the
   # Keycloak JWKS fetch; narrow it to your Keycloak.
   farmerExtraEgress: []

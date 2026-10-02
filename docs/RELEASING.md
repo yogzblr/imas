@@ -28,7 +28,10 @@ sprout release it was tested with (API design §2.5).
 
 ## Steps
 
-1. `main` is green: CI, build, molecule, govulncheck, go-licenses.
+1. `main` is green: CI, build, molecule, govulncheck, go-licenses, and
+   `packaging/helm/min-sprout-version` states this release's floor (see
+   [Compatibility](#compatibility)). It is read from the tagged commit, so
+   change it by PR before tagging.
 2. Tag the commit on `main`:
    `git tag -a v0.2.0 -m "imas v0.2.0" && git push origin v0.2.0`
    (use `git tag -s` if you sign tags).
@@ -43,7 +46,8 @@ sprout release it was tested with (API design §2.5).
 5. **Publish the release.** `publish-packages.yml` then verifies the cosign
    signatures, uploads rpm/deb/winget to Buildkite, and last packages and
    uploads the `farmer` and `nats` charts to `imashelm`, with the sprout
-   release stamped into the farmer chart.
+   release (version, `min_sprout_version`, packages) stamped into the
+   farmer chart. The stamp fails if the floor is above the tag.
 6. Run the Terraform UAT gate against that tag (installs the published
    packages with the Ansible role on real hosts).
 7. Roll out: `helm upgrade` the farmer chart. Its post-upgrade hook registers
@@ -62,8 +66,13 @@ that branch and release from the tag as above. Forward-merge the fix to
 ## Compatibility
 
 Each release states `min_sprout_version`, the oldest sprout that can be
-updated directly to it. A sprout older than that refuses the manifest and
-must step through an intermediate release first. A sprout never installs a
+updated directly to it, in `packaging/helm/min-sprout-version`: one
+canonical `vX.Y.Z[-PRERELEASE]` line, at most the tag by semver precedence
+(so not `v1.0.0` for `v1.0.0-rc.1`). Raise it in the PR that makes older
+sprouts unable to take the release directly. It is signed into every
+manifest and can't change once the version is registered (re-registering
+with another floor is a 409). A sprout older than that refuses the manifest
+and must step through an intermediate release first. A sprout never installs a
 version lower than the one it runs. Database
 migrations are forward-only and compatible with one prior version, so
 `helm rollback` is safe for the farmer; it does not unregister a sprout

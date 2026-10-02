@@ -1,0 +1,188 @@
+{{- if include "imas-farmer.sproutRelease.registers" . }}
+{{- include "imas-farmer.validate" . -}}
+{{- $r := .Values.sproutRelease -}}
+{{- $o := .Values.saasapi.operator -}}
+{{- /*
+Sprout release registration (docs/design/cloudxp-machine-manager-api-design.md
+§2.5, FU.5): `farmer register-sprout-release` (internal/sproutrelease), in
+farmer's own image, POSTs files/sprout-release.json (version and
+min_sprout_version stamped at release time), with this chart's channel, to
+saasapi's operator plane. saasapi has fleetreleaser sign each new OS/arch
+package and stores the rows. Rendered only when the chart carries a stamped
+release and saasapi's operator plane is on; NOTES says why otherwise.
+
+FLAG FOR SECURITY REVIEW: this Job's pod presents the operator token. With
+it, anyone can get any well-formed release above fleetreleaser's floor
+signed (deploy/fleetreleaser/README.md, "What the split does not stop").
+So the pod gets that one Secret key and nothing else: a ServiceAccount of
+its own with no RBAC, no API token, no OpenBao role; only ca.crt from the
+operator TLS Secret; egress to saasapi's operator port and DNS only.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $r.serviceAccountName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sprout-release-registrar
+# No Role/RoleBinding and no token: the Job needs no Kubernetes API access.
+automountServiceAccountToken: false
+---
+# Not a secret: the request body. An ordinary resource, so it is updated
+# before the post-upgrade hook runs.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-sprout-release" (include "imas-farmer.fullname" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sprout-release-registrar
+data:
+  request.json: |
+    {{- include "imas-farmer.sproutRelease.request" . | nindent 4 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-sprout-release-register" (include "imas-farmer.fullname" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sprout-release-registrar
+  annotations:
+    # After the app rollout, and after the publish Job (weight 10): saasapi
+    # starts only once the JWT that Job writes reaches it. Not on rollback:
+    # `helm rollback` leaves a registered release registered (withdraw one
+    # with the revoke call, README.md "Revoking a sprout release").
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "20"
+    # A failed run is kept for its logs (the 409 mismatch) until the next
+    # one replaces it, or ttlSecondsAfterFinished.
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    {{- if $r.argoCDHooks }}
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    {{- end }}
+spec:
+  backoffLimit: {{ $r.backoffLimit }}
+  activeDeadlineSeconds: {{ $r.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ $r.ttlSecondsAfterFinished }}
+  # Exit 2 is final (409, other 4xx, TLS, configuration; internal/
+  # sproutrelease): fail now, no new pod.
+  podFailurePolicy:
+    rules:
+      - action: FailJob
+        onExitCodes:
+          containerName: register
+          operator: In
+          values: [2]
+  template:
+    metadata:
+      labels:
+        {{- include "imas-farmer.registrar.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ $r.serviceAccountName }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with .Values.farmer.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # The token file is 0440: readable through this group only.
+        fsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: register
+          # The same image, same tag, as the farmer Deployment. It touches
+          # no farmer config or PKI directory (it runs before LoadConfig).
+          image: {{ include "imas-farmer.farmer.image" . | quote }}
+          imagePullPolicy: {{ .Values.farmer.image.pullPolicy }}
+          args: ["register-sprout-release"] # ENTRYPOINT is /farmer
+          env:
+            - name: IMAS_SPROUT_RELEASE_SAASAPI_URL
+              value: {{ printf "https://%s:%v" (include "imas-farmer.saasapi.operatorFQDN" .) $o.port | quote }}
+            - name: IMAS_SPROUT_RELEASE_REQUEST_FILE
+              value: /etc/imas/sprout-release/request.json
+            - name: IMAS_SPROUT_RELEASE_TOKEN_FILE
+              value: /var/run/secrets/imas/operator-token/token
+            - name: IMAS_SPROUT_RELEASE_CA_FILE
+              value: /var/run/secrets/imas/saasapi-operator-ca/ca.crt
+            - name: IMAS_SPROUT_RELEASE_ATTEMPTS
+              value: {{ $r.retry.attempts | int | quote }}
+            - name: IMAS_SPROUT_RELEASE_INITIAL_BACKOFF
+              value: {{ printf "%ds" ($r.retry.initialDelaySeconds | int) | quote }}
+            - name: IMAS_SPROUT_RELEASE_MAX_BACKOFF
+              value: {{ printf "%ds" ($r.retry.maxDelaySeconds | int) | quote }}
+            - name: IMAS_SPROUT_RELEASE_REQUEST_TIMEOUT
+              value: {{ printf "%ds" ($r.requestTimeoutSeconds | int) | quote }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          {{- with $r.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: release
+              mountPath: /etc/imas/sprout-release
+              readOnly: true
+            - name: operator-token
+              mountPath: /var/run/secrets/imas/operator-token
+              readOnly: true
+            - name: saasapi-operator-ca
+              mountPath: /var/run/secrets/imas/saasapi-operator-ca
+              readOnly: true
+      volumes:
+        - name: release
+          configMap:
+            name: {{ printf "%s-sprout-release" (include "imas-farmer.fullname" .) | trunc 63 | trimSuffix "-" }}
+        # The current operator token, the one key. Never the previous one:
+        # that is for saasapi to keep accepting during a rotation.
+        - name: operator-token
+          secret:
+            secretName: {{ $o.token.secretName }}
+            defaultMode: 0440
+            items:
+              - { key: {{ $o.token.currentKey | quote }}, path: token }
+        # ca.crt only: never the operator listener's key.
+        - name: saasapi-operator-ca
+          secret:
+            secretName: {{ $o.tls.secretName }}
+            items:
+              - { key: ca.crt, path: ca.crt }
+---
+# saasapi's operator port and DNS, nothing else, no ingress. Rendered with
+# the Job whatever networkPolicy.enabled says: it is part of the reviewed
+# boundary. An ordinary resource, so it exists before the hook's pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $r.serviceAccountName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sprout-release-registrar
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "imas-farmer.registrar.selectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress: []
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "imas-farmer.saasapi.selectorLabels" . | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: {{ $o.port }} }
+    {{- include "imas-farmer.dnsEgress" . | nindent 4 }}
+{{- end }}

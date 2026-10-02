@@ -48,6 +48,7 @@ import (
 	"github.com/yogzblr/imas/internal/pxc"
 	"github.com/yogzblr/imas/internal/rbac"
 	"github.com/yogzblr/imas/internal/saasapicred"
+	"github.com/yogzblr/imas/internal/sproutrelease"
 	"github.com/yogzblr/imas/internal/tenantconn"
 
 	nats "github.com/nats-io/nats.go"
@@ -116,6 +117,13 @@ func readinessTenantStats() handlers.TenantConnStats {
 }
 
 func main() {
+	// `farmer register-sprout-release` (the Helm chart's sprout release
+	// hook) needs no farmer config, PKI directory or log setup: it runs
+	// before LoadConfig, which would create /etc/imas on the Job's
+	// read-only root. See internal/sproutrelease.
+	if len(os.Args) > 1 && os.Args[1] == sproutrelease.Command {
+		os.Exit(sproutrelease.Run(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	// Loaded here rather than in init(), so this package's tests don't
 	// read or create the system farmer config (/etc/imas/farmer).
 	config.LoadConfig("farmer")

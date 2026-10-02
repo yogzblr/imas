@@ -23,6 +23,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1652,5 +1653,668 @@ func TestContractWithNatsChart(t *testing.T) {
 		if !ok {
 			t.Errorf("PKI role imas-farmerbus can't issue the bus's SAN %v", h)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Sprout release registration (FU.5, API design §2.5)
+// ---------------------------------------------------------------------------
+
+// operatorArgs turns on saasapi's operator plane with every value it
+// requires.
+var operatorArgs = []string{
+	"--set", "saasapi.operator.enabled=true",
+	"--set", "saasapi.operator.tls.secretName=saasapi-operator-tls",
+	"--set", "saasapi.operator.token.secretName=saasapi-operator-token",
+	"--set", "saasapi.operator.fleetReleaser.url=https://fleetreleaser.imas-signer.svc:9443",
+	"--set", "saasapi.operator.fleetReleaser.tokenSecretName=saasapi-fleetreleaser-token",
+}
+
+// registerArgs turns the hook on: with a stamped release, the operator
+// plane is all it needs.
+var registerArgs = operatorArgs
+
+// testRelease is what packaging/helm/stamp-sprout-release.sh writes, for
+// the chart's own appVersion.
+func testRelease(t *testing.T) string {
+	t.Helper()
+	v := chartAppVersion(t)
+	return fmt.Sprintf(`{
+  "version": "v%[1]s",
+  "min_sprout_version": "v0.1.0",
+  "packages": [
+    {"os": "linux", "arch": "amd64", "package_type": "deb", "file_name": "imas-sprout_%[1]s_linux_amd64.deb", "checksum_sha256": "%[2]s"},
+    {"os": "linux", "arch": "amd64", "package_type": "rpm", "file_name": "imas-sprout_%[1]s_linux_amd64.rpm", "checksum_sha256": "%[3]s"},
+    {"os": "windows", "arch": "amd64", "package_type": "msi", "file_name": "imas-sprout-%[1]s-windows-x64.msi", "checksum_sha256": "%[4]s"}
+  ]
+}
+`, v, strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64))
+}
+
+// releaseChart is strippedChart with files/sprout-release.json set to
+// release ("" removes it, whatever a local stamp run left behind), and
+// NOTES.txt also rendered as ConfigMap notes-under-test: `helm template`
+// doesn't render NOTES, so it goes through tpl.
+func releaseChart(t *testing.T, release string) string {
+	t.Helper()
+	dir := strippedChart(t)
+	f := filepath.Join(dir, "files", "sprout-release.json")
+	if release == "" {
+		if err := os.Remove(f); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	} else if err := os.WriteFile(f, []byte(release), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	notes, err := os.ReadFile(filepath.Join(dir, "templates", "NOTES.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "files", "notes-under-test.txt"), notes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cm := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: notes-under-test\ndata:\n  notes: {{ tpl (.Files.Get \"files/notes-under-test.txt\") . | quote }}\n"
+	if err := os.WriteFile(filepath.Join(dir, "templates", "notes-under-test.yaml"), []byte(cm), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func renderRelease(t *testing.T, release string, args ...string) ([]obj, error) {
+	t.Helper()
+	helmBin(t)
+	return runHelm(t, releaseChart(t, release), append(slices.Clone(required), args...)...)
+}
+
+func mustRenderRelease(t *testing.T, release string, args ...string) []obj {
+	t.Helper()
+	docs, err := renderRelease(t, release, args...)
+	if err != nil {
+		t.Fatalf("helm template failed: %v", err)
+	}
+	return docs
+}
+
+func notes(t *testing.T, docs []obj) string {
+	t.Helper()
+	return get(find(t, docs, "ConfigMap", "notes-under-test"), "data", "notes").(string)
+}
+
+const registerJob = "t-farmer-sprout-release-register"
+
+func registrarResources(docs []obj) []string {
+	var got []string
+	for _, d := range docs {
+		if get(d, "metadata", "labels", "app.kubernetes.io/component") == "sprout-release-registrar" {
+			got = append(got, fmt.Sprintf("%v/%v", d["kind"], get(d, "metadata", "name")))
+		}
+	}
+	return got
+}
+
+// No files/sprout-release.json (a dev install from source): nothing of
+// the hook renders, even with the operator plane on, and NOTES says so.
+// With the file but without the operator plane, nothing renders either,
+// and NOTES says the release is not registered and why.
+func TestSproutReleaseSkippedWithoutFile(t *testing.T) {
+	for _, args := range [][]string{nil, registerArgs} {
+		docs := mustRenderRelease(t, "", args...)
+		if got := registrarResources(docs); len(got) != 0 {
+			t.Errorf("%v: rendered %v without files/sprout-release.json", args, got)
+		}
+		if n := notes(t, docs); !strings.Contains(n, "Sprout release registration: skipped. This chart has no files/sprout-release.json") {
+			t.Errorf("%v: NOTES don't say the hook was skipped:\n%s", args, n)
+		}
+	}
+	for _, tc := range []struct {
+		why  string
+		args []string
+	}{
+		{"saasapi.operator.enabled=false", nil},
+		{"sproutRelease.register=false", append(slices.Clone(registerArgs), "--set", "sproutRelease.register=false")},
+		{"saasapi.enabled=false", append(slices.Clone(registerArgs), "--set", "saasapi.enabled=false")},
+	} {
+		docs := mustRenderRelease(t, testRelease(t), tc.args...)
+		if got := registrarResources(docs); len(got) != 0 {
+			t.Errorf("%s: rendered %v", tc.why, got)
+		}
+		if n := notes(t, docs); !strings.Contains(n, "NOT registered") || !strings.Contains(n, tc.why) {
+			t.Errorf("%s: NOTES don't say why:\n%s", tc.why, n)
+		}
+	}
+	// The published chart's default: the file, the operator plane off.
+	if _, err := renderRelease(t, testRelease(t)); err != nil {
+		t.Errorf("a stamped chart with the defaults must render: %v", err)
+	}
+}
+
+// Hook annotations and weights, the request body, and the pod's
+// restrictions.
+func TestSproutReleaseRegisterJob(t *testing.T) {
+	docs := mustRenderRelease(t, testRelease(t), registerArgs...)
+	if got := registrarResources(docs); !slices.Equal(got, []string{
+		"NetworkPolicy/imas-sprout-release-registrar", "ServiceAccount/imas-sprout-release-registrar",
+		"ConfigMap/t-farmer-sprout-release", "Job/" + registerJob,
+	}) {
+		t.Errorf("registrar resources %v", got)
+	}
+	job := find(t, docs, "Job", registerJob)
+	ann := get(job, "metadata", "annotations").(obj)
+	if ann["helm.sh/hook"] != "post-install,post-upgrade" {
+		t.Errorf("hook %v: want post-install,post-upgrade (and never rollback: it doesn't unregister)", ann["helm.sh/hook"])
+	}
+	if ann["helm.sh/hook-delete-policy"] != "before-hook-creation,hook-succeeded" {
+		t.Errorf("hook-delete-policy %v: a failed run must be kept for its logs", ann["helm.sh/hook-delete-policy"])
+	}
+	if ann["argocd.argoproj.io/hook"] != "PostSync" || ann["argocd.argoproj.io/hook-delete-policy"] != "BeforeHookCreation" {
+		t.Errorf("Argo CD annotations %v", ann)
+	}
+	// After every other post-install/post-upgrade hook: saasapi needs the
+	// publish Job's JWT before it can serve.
+	weight := func(d obj) int {
+		w, err := strconv.Atoi(fmt.Sprint(get(d, "metadata", "annotations", "helm.sh/hook-weight")))
+		if err != nil {
+			t.Fatalf("%v hook-weight: %v", get(d, "metadata", "name"), err)
+		}
+		return w
+	}
+	for _, d := range docs {
+		hooks, _ := get(d, "metadata", "annotations", "helm.sh/hook").(string)
+		if d["kind"] == "Job" && get(d, "metadata", "name") != registerJob && strings.Contains(hooks, "post-") && weight(d) >= weight(job) {
+			t.Errorf("hook %v (weight %d) runs no earlier than the registration (weight %d)", get(d, "metadata", "name"), weight(d), weight(job))
+		}
+	}
+	if weight(job) <= weight(find(t, docs, "Job", "t-farmer-saasapi-credential-publish")) {
+		t.Error("registration must run after the publish Job")
+	}
+	if a, b := get(job, "metadata", "annotations", "argocd.argoproj.io/sync-wave"), get(find(t, docs, "Job", "t-farmer-saasapi-credential-publish"), "metadata", "annotations", "argocd.argoproj.io/sync-wave"); a != "1" || b != nil {
+		t.Errorf("Argo CD sync-waves: registration %v, publisher %v", a, b)
+	}
+	// A 409 (exit 2) fails the Job, and so the release, without a retry.
+	if pfp := get(job, "spec", "podFailurePolicy", "rules", 0); get(pfp, "action") != "FailJob" ||
+		get(pfp, "onExitCodes", "containerName") != "register" || get(pfp, "onExitCodes", "operator") != "In" ||
+		yamlString(t, get(pfp, "onExitCodes", "values")) != yamlString(t, []int{2}) {
+		t.Errorf("podFailurePolicy %v", get(job, "spec", "podFailurePolicy"))
+	}
+	checkRestricted(t, job)
+	ps := podSpec(job)
+	if ps["serviceAccountName"] != "imas-sprout-release-registrar" || ps["enableServiceLinks"] != false {
+		t.Errorf("pod serviceAccountName %v, enableServiceLinks %v", ps["serviceAccountName"], ps["enableServiceLinks"])
+	}
+	if l := podLabels(job); l["app.kubernetes.io/name"] != "imas-sprout-release-registrar" {
+		t.Errorf("pod name label %v: must not be the chart's, which the bus admits", l["app.kubernetes.io/name"])
+	}
+	c := container(t, job, "register")
+	if c["image"] != "ghcr.io/yogzblr/imas-farmer:"+chartAppVersion(t) || c["command"] != nil ||
+		yamlString(t, c["args"]) != yamlString(t, []string{"register-sprout-release"}) {
+		t.Errorf("image %v, command %v, args %v: want farmer's image running register-sprout-release", c["image"], c["command"], c["args"])
+	}
+	env := envValues(c)
+	for k, v := range map[string]string{
+		"IMAS_SPROUT_RELEASE_SAASAPI_URL":     "https://t-farmer-saasapi-operator.imas-core.svc.cluster.local:8443",
+		"IMAS_SPROUT_RELEASE_REQUEST_FILE":    "/etc/imas/sprout-release/request.json",
+		"IMAS_SPROUT_RELEASE_ATTEMPTS":        "8",
+		"IMAS_SPROUT_RELEASE_INITIAL_BACKOFF": "5s",
+		"IMAS_SPROUT_RELEASE_MAX_BACKOFF":     "60s",
+		"IMAS_SPROUT_RELEASE_REQUEST_TIMEOUT": "600s",
+	} {
+		if env[k] != v {
+			t.Errorf("%s = %q, want %q", k, env[k], v)
+		}
+	}
+	if len(env) != 8 {
+		t.Errorf("env %v: want exactly the IMAS_SPROUT_RELEASE_* settings", env)
+	}
+	if get(byName(c["volumeMounts"])["release"], "mountPath") != "/etc/imas/sprout-release" {
+		t.Errorf("release mount %v", c["volumeMounts"])
+	}
+
+	// The body: the stamped release verbatim, plus channel and
+	// min_sprout_version, and nothing else.
+	cm := find(t, docs, "ConfigMap", "t-farmer-sprout-release")
+	var body, stamped map[string]any
+	if err := yaml.Unmarshal([]byte(get(cm, "data", "request.json").(string)), &body); err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal([]byte(testRelease(t)), &stamped); err != nil {
+		t.Fatal(err)
+	}
+	stamped["channel"] = "stable"
+	if yamlString(t, body) != yamlString(t, stamped) {
+		t.Errorf("request body:\n%s\nwant:\n%s", yamlString(t, body), yamlString(t, stamped))
+	}
+	if len(get(cm, "data").(obj)) != 1 {
+		t.Errorf("ConfigMap data %v: want request.json only", get(cm, "data"))
+	}
+	if !strings.Contains(notes(t, docs), "registers sprout release v"+chartAppVersion(t)+" (min_sprout_version v0.1.0, 3 package(s))") {
+		t.Errorf("NOTES:\n%s", notes(t, docs))
+	}
+
+	// The operator Service fronts saasapi's operator port, not its API port.
+	svc := find(t, docs, "Service", "t-farmer-saasapi-operator")
+	if get(svc, "spec", "ports", 0, "port") != 8443 || get(svc, "spec", "ports", 0, "targetPort") != "operator" ||
+		!matches(obj{"matchLabels": get(svc, "spec", "selector")}, podLabels(find(t, docs, "Deployment", "t-farmer-saasapi"))) {
+		t.Errorf("operator Service %v", get(svc, "spec"))
+	}
+	ports := byName(container(t, find(t, docs, "Deployment", "t-farmer-saasapi"), "saasapi")["ports"])
+	if get(ports["operator"], "containerPort") != 8443 || get(ports["http"], "containerPort") != 8081 {
+		t.Errorf("saasapi ports %v", ports)
+	}
+	if strings.Contains(yamlString(t, find(t, docs, "Service", "t-farmer-saasapi")), "8443") {
+		t.Error("the gateway's saasapi Service exposes the operator port")
+	}
+
+	t.Run("values", func(t *testing.T) {
+		job := find(t, mustRenderRelease(t, testRelease(t), append(slices.Clone(registerArgs),
+			"--set", "sproutRelease.retry.attempts=3", "--set", "sproutRelease.retry.initialDelaySeconds=2",
+			"--set", "sproutRelease.retry.maxDelaySeconds=9", "--set", "sproutRelease.requestTimeoutSeconds=77",
+			"--set", "sproutRelease.backoffLimit=0", "--set", "sproutRelease.activeDeadlineSeconds=99",
+			"--set", "sproutRelease.argoCDHooks=false", "--set", "farmer.image.tag=9.9.9",
+			"--set", "farmer.imagePullSecrets[0].name=regcred",
+			"--set", "saasapi.operator.port=9443")...), "Job", registerJob)
+		env := envValues(container(t, job, "register"))
+		for k, v := range map[string]string{"IMAS_SPROUT_RELEASE_ATTEMPTS": "3", "IMAS_SPROUT_RELEASE_INITIAL_BACKOFF": "2s", "IMAS_SPROUT_RELEASE_MAX_BACKOFF": "9s", "IMAS_SPROUT_RELEASE_REQUEST_TIMEOUT": "77s"} {
+			if env[k] != v {
+				t.Errorf("%s = %q, want %s", k, env[k], v)
+			}
+		}
+		if !strings.HasSuffix(env["IMAS_SPROUT_RELEASE_SAASAPI_URL"], ":9443") {
+			t.Errorf("IMAS_SPROUT_RELEASE_SAASAPI_URL %q", env["IMAS_SPROUT_RELEASE_SAASAPI_URL"])
+		}
+		if get(podSpec(job), "imagePullSecrets", 0, "name") != "regcred" {
+			t.Errorf("imagePullSecrets %v: want farmer's", get(podSpec(job), "imagePullSecrets"))
+		}
+		if get(job, "spec", "backoffLimit") != 0 || get(job, "spec", "activeDeadlineSeconds") != 99 ||
+			get(job, "metadata", "annotations", "argocd.argoproj.io/hook") != nil {
+			t.Errorf("spec %v, annotations %v", get(job, "spec"), get(job, "metadata", "annotations"))
+		}
+		if img := container(t, job, "register")["image"]; img != "ghcr.io/yogzblr/imas-farmer:9.9.9" {
+			t.Errorf("image %v: want farmer's", img)
+		}
+	})
+}
+
+// The operator token reaches exactly two pods: the hook Job, which mounts
+// the current key and nothing else of any Secret but the operator CA, and
+// saasapi, which checks it.
+func TestSproutReleaseSecretWiring(t *testing.T) {
+	docs := mustRenderRelease(t, testRelease(t), registerArgs...)
+	job := find(t, docs, "Job", registerJob)
+	ps := podSpec(job)
+	vols := byName(ps["volumes"])
+	var secrets []string
+	for name, v := range vols {
+		if s := get(v, "secret"); s != nil {
+			secrets = append(secrets, fmt.Sprintf("%s=%v:%s", name, get(s, "secretName"), yamlString(t, get(s, "items"))))
+		}
+		if get(v, "projected") != nil {
+			t.Errorf("projected volume %s: the Job holds no ServiceAccount token", name)
+		}
+	}
+	slices.Sort(secrets)
+	want := []string{
+		"operator-token=saasapi-operator-token:" + yamlString(t, []obj{{"key": "current", "path": "token"}}),
+		"saasapi-operator-ca=saasapi-operator-tls:" + yamlString(t, []obj{{"key": "ca.crt", "path": "ca.crt"}}),
+	}
+	if !slices.Equal(secrets, want) {
+		t.Errorf("Secret volumes:\n%v\nwant:\n%v", secrets, want)
+	}
+	if get(vols["operator-token"], "secret", "defaultMode") != 0o440 {
+		t.Errorf("token defaultMode %v", get(vols["operator-token"], "secret", "defaultMode"))
+	}
+	if get(ps, "securityContext", "fsGroup") != 65532 {
+		t.Error("without fsGroup the non-root pod can't read the 0440 token file")
+	}
+	c := container(t, job, "register")
+	for _, e := range c["env"].([]any) {
+		if get(e, "valueFrom") != nil {
+			t.Errorf("env %v comes from a Secret: the token is a file only", get(e, "name"))
+		}
+	}
+	mounts := byName(c["volumeMounts"])
+	env := envValues(c)
+	if !strings.HasPrefix(env["IMAS_SPROUT_RELEASE_TOKEN_FILE"], get(mounts["operator-token"], "mountPath").(string)+"/") ||
+		!strings.HasPrefix(env["IMAS_SPROUT_RELEASE_CA_FILE"], get(mounts["saasapi-operator-ca"], "mountPath").(string)+"/") {
+		t.Errorf("token %q / CA %q outside their mounts %v", env["IMAS_SPROUT_RELEASE_TOKEN_FILE"], env["IMAS_SPROUT_RELEASE_CA_FILE"], mounts)
+	}
+	// Nothing of farmer's own: no config, PKI, seeds or data volume.
+	if len(vols) != 3 || len(mounts) != 3 {
+		t.Errorf("volumes %v / mounts %v: want release, operator-token and saasapi-operator-ca only", vols, mounts)
+	}
+	sa := find(t, docs, "ServiceAccount", "imas-sprout-release-registrar")
+	if sa["automountServiceAccountToken"] != false {
+		t.Error("registrar ServiceAccount automounts its token")
+	}
+	for _, d := range docs {
+		if strings.HasSuffix(fmt.Sprint(d["kind"]), "RoleBinding") && strings.Contains(yamlString(t, d), "imas-sprout-release-registrar") {
+			t.Errorf("%s grants the registrar RBAC", d["kind"])
+		}
+	}
+	if strings.Contains(yamlString(t, find(t, docs, "Job", "t-farmer-openbao-bootstrap")), "imas-sprout-release-registrar") {
+		t.Error("the registrar's ServiceAccount is bound to an OpenBao role")
+	}
+
+	// saasapi: the listener's key pair (not ca.crt), the token, and the
+	// fleetreleaser client.
+	sd := find(t, docs, "Deployment", "t-farmer-saasapi")
+	sc := container(t, sd, "saasapi")
+	senv := envValues(sc)
+	for k, v := range map[string]string{
+		"SAASAPI_OPERATOR_LISTEN_ADDR":     ":8443",
+		"SAASAPI_OPERATOR_TLS_CERT_FILE":   "/var/run/secrets/imas/operator-tls/tls.crt",
+		"SAASAPI_OPERATOR_TLS_KEY_FILE":    "/var/run/secrets/imas/operator-tls/tls.key",
+		"SAASAPI_OPERATOR_TOKEN_FILE":      "/var/run/secrets/imas/operator-token/current",
+		"SAASAPI_FLEETRELEASER_URL":        "https://fleetreleaser.imas-signer.svc:9443",
+		"SAASAPI_FLEETRELEASER_TOKEN_FILE": "/var/run/secrets/imas/fleetreleaser/token",
+		"IMAS_FLEETSIGN_OPENBAO_K8S_ROLE":  "imas-saasapi-fleet-verify",
+	} {
+		if senv[k] != v {
+			t.Errorf("saasapi %s = %q, want %q", k, senv[k], v)
+		}
+	}
+	for _, k := range []string{"SAASAPI_OPERATOR_TOKEN_PREVIOUS_FILE", "SAASAPI_FLEETRELEASER_CA_FILE"} {
+		if _, ok := senv[k]; ok {
+			t.Errorf("%s set without its value", k)
+		}
+	}
+	svols := byName(podSpec(sd)["volumes"])
+	if got := yamlString(t, get(svols["operator-tls"], "secret", "items")); got != yamlString(t, []obj{{"key": "tls.crt", "path": "tls.crt"}, {"key": "tls.key", "path": "tls.key"}}) {
+		t.Errorf("saasapi operator-tls items %s", got)
+	}
+	if got := yamlString(t, get(svols["operator-token"], "secret", "items")); got != yamlString(t, []obj{{"key": "current", "path": "current"}}) {
+		t.Errorf("saasapi operator-token items %s", got)
+	}
+	// Only the hook Job and saasapi name the operator token Secret.
+	for _, d := range docs {
+		n := get(d, "metadata", "name")
+		if (d["kind"] == "Job" && n == registerJob) || (d["kind"] == "Deployment" && n == "t-farmer-saasapi") {
+			continue
+		}
+		if strings.Contains(yamlString(t, d), "saasapi-operator-token") {
+			t.Errorf("%v %v references the operator token Secret", d["kind"], n)
+		}
+	}
+	// The verify-only role follows the operator plane.
+	if roles := bootstrapRoles(t, docs); roles["imas-saasapi-fleet-verify"] == nil {
+		t.Error("no imas-saasapi-fleet-verify role for the operator plane's key client")
+	}
+
+	t.Run("rotation and fleetreleaser CA", func(t *testing.T) {
+		sd := find(t, mustRenderRelease(t, testRelease(t), append(slices.Clone(registerArgs),
+			"--set", "saasapi.operator.token.previousKey=previous",
+			"--set", "saasapi.operator.fleetReleaser.caConfigMap=fleetreleaser-ca")...), "Deployment", "t-farmer-saasapi")
+		senv := envValues(container(t, sd, "saasapi"))
+		if senv["SAASAPI_OPERATOR_TOKEN_PREVIOUS_FILE"] != "/var/run/secrets/imas/operator-token/previous" ||
+			senv["SAASAPI_FLEETRELEASER_CA_FILE"] != "/var/run/secrets/imas/fleetreleaser-ca/ca.crt" {
+			t.Errorf("env %v", senv)
+		}
+		vols := byName(podSpec(sd)["volumes"])
+		if got := yamlString(t, get(vols["operator-token"], "secret", "items")); got != yamlString(t, []obj{{"key": "current", "path": "current"}, {"key": "previous", "path": "previous"}}) {
+			t.Errorf("operator-token items %s", got)
+		}
+		if get(vols["fleetreleaser-ca"], "configMap", "name") != "fleetreleaser-ca" {
+			t.Errorf("fleetreleaser-ca volume %v", vols["fleetreleaser-ca"])
+		}
+	})
+}
+
+// The hook pod reaches saasapi's operator port and DNS, nothing else,
+// whatever networkPolicy.enabled says; saasapi's operator port admits the
+// hook pod (and the configured extra peers) only.
+func TestSproutReleaseNetworkPolicy(t *testing.T) {
+	ns := "imas-core"
+	registrar := obj{"app.kubernetes.io/name": "imas-sprout-release-registrar", "app.kubernetes.io/instance": "t", "app.kubernetes.io/component": "sprout-release-registrar"}
+	saasapi := obj{"app.kubernetes.io/name": "farmer", "app.kubernetes.io/instance": "t", "app.kubernetes.io/component": "saasapi"}
+	farmer := obj{"app.kubernetes.io/name": "farmer", "app.kubernetes.io/instance": "t", "app.kubernetes.io/component": "farmer"}
+	for _, args := range [][]string{nil, {"--set", "networkPolicy.enabled=false"}} {
+		docs := mustRenderRelease(t, testRelease(t), append(slices.Clone(registerArgs), args...)...)
+		np := find(t, docs, "NetworkPolicy", "imas-sprout-release-registrar")
+		if !matches(get(np, "spec", "podSelector"), podLabels(find(t, docs, "Job", registerJob))) {
+			t.Errorf("%v: policy doesn't select the Job's pods", args)
+		}
+		if l, ok := get(np, "spec", "ingress").([]any); !ok || len(l) != 0 {
+			t.Errorf("%v: ingress %v", args, get(np, "spec", "ingress"))
+		}
+		if pt := get(np, "spec", "policyTypes"); yamlString(t, pt) != yamlString(t, []string{"Ingress", "Egress"}) {
+			t.Errorf("%v: policyTypes %v", args, pt)
+		}
+		if got := egressPorts(np); !slices.Equal(got, []int{8443, 53, 53}) {
+			t.Errorf("%v: egress ports %v", args, got)
+		}
+		if !allows(np, "egress", ns, saasapi, 8443) {
+			t.Errorf("%v: no egress to saasapi's operator port", args)
+		}
+		for _, c := range []struct {
+			what string
+			ns   string
+			pod  obj
+			port int
+		}{
+			{"farmer", ns, farmer, 8443},
+			{"saasapi's API port", ns, saasapi, 8081},
+			{"saasapi in another namespace", "elsewhere", saasapi, 8443},
+			{"OpenBao", "openbao", obj{"app.kubernetes.io/name": "openbao"}, 8200},
+			{"the bus", "imas-dmz", obj{"app.kubernetes.io/name": "nats", "app.kubernetes.io/component": "bus"}, 5406},
+			{"fleetreleaser", "imas-signer", obj{"app.kubernetes.io/name": "fleetreleaser"}, 9443},
+		} {
+			if allows(np, "egress", c.ns, c.pod, c.port) {
+				t.Errorf("%v: egress allowed to %s", args, c.what)
+			}
+		}
+	}
+
+	docs := mustRenderRelease(t, testRelease(t), append(slices.Clone(registerArgs),
+		"--set", "networkPolicy.saasapiOperatorIngress.from[0].namespaceSelector.matchLabels.kubernetes\\.io/metadata\\.name=ops")...)
+	snp := find(t, docs, "NetworkPolicy", "t-farmer-saasapi")
+	if !allows(snp, "ingress", ns, registrar, 8443) || !allows(snp, "ingress", "ops", obj{"any": "pod"}, 8443) {
+		t.Error("saasapi's operator port doesn't admit the hook Job or the configured peer")
+	}
+	for _, c := range []struct {
+		what string
+		ns   string
+		pod  obj
+	}{{"farmer", ns, farmer}, {"another namespace", "imas-dmz", registrar}, {"saasapi itself", ns, saasapi}} {
+		if allows(snp, "ingress", c.ns, c.pod, 8443) {
+			t.Errorf("saasapi's operator port admits %s", c.what)
+		}
+	}
+	if !allows(snp, "ingress", "anywhere", obj{"any": "pod"}, 8081) {
+		t.Error("saasapi's API port lost its default ingress")
+	}
+	// saasapi -> fleetreleaser, on the URL's port.
+	if got := egressPorts(snp); !slices.Contains(got, 9443) {
+		t.Errorf("saasapi egress ports %v: no fleetreleaser", got)
+	}
+	if allows(snp, "egress", "anywhere", obj{"any": "pod"}, 8443) {
+		t.Error("saasapi egress opened on the operator port")
+	}
+}
+
+func TestSproutReleaseValidation(t *testing.T) {
+	v := chartAppVersion(t)
+	rel := testRelease(t)
+	cases := []struct {
+		name, want, release string
+		args                []string
+	}{
+		{"no min_sprout_version", "min_sprout_version \"\" is missing or not a canonical", strings.Replace(rel, `"min_sprout_version": "v0.1.0",`, "", 1), registerArgs},
+		{"min_sprout_version not canonical", "is missing or not a canonical", strings.Replace(rel, `"min_sprout_version": "v0.1.0"`, `"min_sprout_version": "0.1.0"`, 1), registerArgs},
+		{"min_sprout_version above version", "is above the release's version", strings.Replace(rel, `"min_sprout_version": "v0.1.0"`, `"min_sprout_version": "v99.0.0"`, 1), registerArgs},
+		{"removed minSproutVersion value", "sproutRelease.minSproutVersion was removed", "", []string{"--set", "sproutRelease.minSproutVersion=v0.1.0"}},
+		{"removed image value", "sproutRelease.image was removed", rel, append(slices.Clone(registerArgs), "--set", "sproutRelease.image.repository=curlimages/curl")},
+		{"bad channel", "sproutRelease.channel", rel, append(slices.Clone(registerArgs), "--set", "sproutRelease.channel=Stable")},
+		{"version without v", "re-stamp it", strings.Replace(rel, `"version": "v`+v, `"version": "`+v, 1), registerArgs},
+		{"version not the chart's", "ship under one tag", strings.Replace(rel, `"version": "v`+v, `"version": "v`+v+"-rc.1", 1), registerArgs},
+		{"unknown field", `unexpected field "channel"`, strings.Replace(rel, `"packages"`, `"channel": "x", "packages"`, 1), registerArgs},
+		{"no packages", "has no packages", fmt.Sprintf(`{"version": "v%s", "min_sprout_version": "v0.1.0", "packages": []}`, v), registerArgs},
+		{"not JSON", "is not a JSON object", "version: v" + v, registerArgs},
+		{"SA is the publisher's", "another workload's ServiceAccount", rel, append(slices.Clone(registerArgs), "--set", "sproutRelease.serviceAccountName=imas-saasapi-cred-publisher")},
+		{"SA is saasapi's", "another workload's ServiceAccount", rel, append(slices.Clone(registerArgs), "--set", "sproutRelease.serviceAccountName=t-farmer-saasapi")},
+		{"zero attempts", "sproutRelease.retry.attempts", rel, append(slices.Clone(registerArgs), "--set", "sproutRelease.retry.attempts=0")},
+		// The operator plane's own settings, file or no file.
+		{"no operator TLS", "saasapi.operator.tls.secretName is required", "", append(slices.Clone(operatorArgs), "--set", "saasapi.operator.tls.secretName=")},
+		{"no operator token", "saasapi.operator.token.secretName is required", "", append(slices.Clone(operatorArgs), "--set", "saasapi.operator.token.secretName=")},
+		{"token Secret is the BFF's", "must be a Secret of its own", "", append(slices.Clone(operatorArgs), "--set", "saasapi.operator.token.secretName=imas-saasapi-internal-auth")},
+		{"token Secret is fleetreleaser's", "must be a Secret of its own", "", append(slices.Clone(operatorArgs), "--set", "saasapi.operator.token.secretName=saasapi-fleetreleaser-token")},
+		{"previousKey equals currentKey", "previousKey must differ", "", append(slices.Clone(operatorArgs), "--set", "saasapi.operator.token.previousKey=current")},
+		{"http fleetreleaser", "must be https://host[:port]", "", append(slices.Clone(operatorArgs), "--set", "saasapi.operator.fleetReleaser.url=http://fleetreleaser:8443")},
+		{"fleetreleaser path", "must be https://host[:port]", "", append(slices.Clone(operatorArgs), "--set", "saasapi.operator.fleetReleaser.url=https://fleetreleaser:8443/v1/sign")},
+		{"no fleetreleaser token", "fleetReleaser.tokenSecretName is required", "", append(slices.Clone(operatorArgs), "--set", "saasapi.operator.fleetReleaser.tokenSecretName=")},
+		{"operator port is the API port", "must differ from saasapi.port", "", append(slices.Clone(operatorArgs), "--set", "saasapi.operator.port=8081")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := renderRelease(t, tc.release, tc.args...)
+			if err == nil {
+				t.Fatalf("expected the render to fail with %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("render failed, but not with %q:\n%v", tc.want, err)
+			}
+		})
+	}
+}
+
+// packaging/helm/stamp-sprout-release.sh's output is what the chart
+// registers: both versions keep their "v", min_sprout_version comes from
+// packaging/helm/min-sprout-version and is at most the version by semver
+// precedence, and the result renders as is.
+func TestStampedReleaseRenders(t *testing.T) {
+	helmBin(t)
+	for _, tool := range []string{"bash", "jq", "sha256sum"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not on PATH", tool)
+		}
+	}
+	stampScript := filepath.Join(chartDir(t), "..", "..", "..", "packaging", "helm", "stamp-sprout-release.sh")
+	// dist writes a release's packages and checksums.txt for version (no "v").
+	dist := func(t *testing.T, version string) string {
+		dir := t.TempDir()
+		var sums strings.Builder
+		for _, name := range []string{
+			"imas-sprout_" + version + "_linux_amd64.deb", "imas-sprout_" + version + "_linux_amd64.rpm",
+			"imas-sprout_" + version + "_linux_arm64.rpm", "imas-sprout-" + version + "-windows-x64.msi",
+		} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			out, err := exec.Command("sha256sum", filepath.Join(dir, name)).Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			fmt.Fprintf(&sums, "%s  %s\n", strings.Fields(string(out))[0], name)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "checksums.txt"), []byte(sums.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	// stamp runs the script; minFile "" means the repo's own.
+	stamp := func(t *testing.T, tag, minFile string) (string, error) {
+		out := filepath.Join(t.TempDir(), "sprout-release.json")
+		args := []string{stampScript, dist(t, strings.TrimPrefix(tag, "v")), tag, out}
+		if minFile != "" {
+			args = append(args, minFile)
+		}
+		if b, err := exec.Command("bash", args...).CombinedOutput(); err != nil {
+			return "", fmt.Errorf("%v: %s", err, b)
+		}
+		b, err := os.ReadFile(out)
+		return string(b), err
+	}
+	minFile := func(t *testing.T, content string) string {
+		p := filepath.Join(t.TempDir(), "min-sprout-version")
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	// The repo's floor, end to end.
+	var repoMin string
+	for _, l := range strings.Split(string(repoFile(t, "packaging/helm/min-sprout-version")), "\n") {
+		if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "#") {
+			repoMin = l
+		}
+	}
+	v := chartAppVersion(t)
+	stamped, err := stamp(t, "v"+v, "")
+	if err != nil {
+		t.Fatalf("stamp with the repo's packaging/helm/min-sprout-version: %v", err)
+	}
+	var file struct {
+		Version          string `yaml:"version"`
+		MinSproutVersion string `yaml:"min_sprout_version"`
+	}
+	if err := yaml.Unmarshal([]byte(stamped), &file); err != nil || file.Version != "v"+v || file.MinSproutVersion != repoMin {
+		t.Errorf("stamped %+v (%v), want version v%s and min_sprout_version %q", file, err, v, repoMin)
+	}
+	docs := mustRenderRelease(t, stamped, registerArgs...)
+	var body struct {
+		Version          string           `yaml:"version"`
+		MinSproutVersion string           `yaml:"min_sprout_version"`
+		Packages         []map[string]any `yaml:"packages"`
+	}
+	if err := yaml.Unmarshal([]byte(get(find(t, docs, "ConfigMap", "t-farmer-sprout-release"), "data", "request.json").(string)), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Version != "v"+v || body.MinSproutVersion != repoMin || len(body.Packages) != 4 {
+		t.Errorf("request version %q, min_sprout_version %q, %d packages", body.Version, body.MinSproutVersion, len(body.Packages))
+	}
+	for _, p := range body.Packages {
+		if p["os"] == "windows" && (p["arch"] != "amd64" || p["package_type"] != "msi") {
+			t.Errorf("windows package %v", p)
+		}
+	}
+
+	for _, bad := range []string{"v" + v + "+build.1", "v0" + v, v} {
+		if _, err := stamp(t, bad, ""); err == nil {
+			t.Errorf("stamp accepted the non-canonical tag %q", bad)
+		}
+	}
+	// Semver precedence, prereleases included: a floor above the tag is
+	// refused, anything at or below it is stamped verbatim.
+	for _, tc := range []struct {
+		tag, min string
+		ok       bool
+	}{
+		{"v1.0.0-rc.1", "v1.0.0", false},
+		{"v1.0.0-rc.1", "v1.0.0-rc.2", false},
+		{"v1.0.0-rc.1", "v1.0.0-rc.1", true},
+		{"v1.0.0-rc.1", "v1.0.0-beta.11", true},
+		{"v1.0.0-beta.11", "v1.0.0-beta.2", true},
+		{"v1.0.0-beta.2", "v1.0.0-beta.11", false},
+		{"v1.0.0-alpha.1", "v1.0.0-alpha.beta", false},
+		{"v1.0.0-alpha", "v1.0.0-alpha.1", false},
+		{"v1.0.0", "v1.0.0-rc.1", true},
+		{"v0.10.0", "v0.9.9", true},
+		{"v0.9.9", "v0.10.0", false},
+		{"v2.0.0", "v1.99.0", true},
+	} {
+		out, err := stamp(t, tc.tag, minFile(t, "# floor\n\n"+tc.min+"\n"))
+		if tc.ok != (err == nil) {
+			t.Errorf("tag %s, floor %s: ok=%v, want %v (%v)", tc.tag, tc.min, err == nil, tc.ok, err)
+			continue
+		}
+		if tc.ok && !strings.Contains(out, `"min_sprout_version": "`+tc.min+`"`) {
+			t.Errorf("tag %s, floor %s: stamped\n%s", tc.tag, tc.min, out)
+		}
+		if !tc.ok && !strings.Contains(err.Error(), "is above the release's version") {
+			t.Errorf("tag %s, floor %s: %v", tc.tag, tc.min, err)
+		}
+	}
+	for _, tc := range []struct{ content, want string }{
+		{"1.0.0\n", "not canonical semver"},
+		{"v1.0\n", "not canonical semver"},
+		{"v01.0.0\n", "not canonical semver"},
+		{"v0.1.0\nv0.2.0\n", "exactly one version line"},
+		{"# nothing\n", "exactly one version line"},
+	} {
+		if _, err := stamp(t, "v"+v, minFile(t, tc.content)); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("floor file %q: %v, want %q", tc.content, err, tc.want)
+		}
+	}
+	if _, err := stamp(t, "v"+v, filepath.Join(t.TempDir(), "missing")); err == nil || !strings.Contains(err.Error(), "no ") {
+		t.Errorf("missing floor file: %v", err)
 	}
 }

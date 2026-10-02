@@ -1,0 +1,27 @@
+{{- if and .Values.saasapi.enabled .Values.saasapi.operator.enabled }}
+{{- include "imas-farmer.validate" . -}}
+# saasapi's operator plane (API design §2.5): HTTPS, its own Service so the
+# gateway's route to <release>-saasapi never reaches it. The sprout release
+# hook Job is its only in-cluster caller (NetworkPolicy).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "imas-farmer.saasapi.operatorFullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: saasapi
+  {{- with .Values.saasapi.operator.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "imas-farmer.saasapi.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: https
+      port: {{ .Values.saasapi.operator.port }}
+      targetPort: operator
+      protocol: TCP
+{{- end }}
