@@ -106,6 +106,31 @@ imas_sprout_windows_msi_url: ""
 # imas_sprout_windows_msi_url is set). Only meaningful with a pinned version.
 imas_sprout_windows_checksum: ""
 
+# --- Self-update ----------------------------------------------------------------
+
+# Base URL the sprout downloads its own updates from (config key
+# "sproutupdaterepourl"): a self_update fetches <this>/<file name from the
+# signed update manifest> over HTTPS (OS trust store, HTTPS_PROXY/NO_PROXY),
+# checks it against the signed SHA-256 and installs it with dpkg, rpm,
+# zypper or msiexec. By default the same repository this role installs from:
+# the apt repository URL, the rpm repository URL with $basearch filled in,
+# or on Windows the directory of imas_sprout_windows_msi_url ("" with the
+# NuGet feed, which doesn't serve an MSI by file name). Point it at a mirror
+# that serves the release's package files by name if your repository lays
+# files out differently. "": the key is removed and the sprout refuses
+# every self_update.
+imas_sprout_update_repo_url: >-
+  {{ (imas_sprout_windows_msi_url | regex_replace('[^/]*$', ''))
+     if ansible_os_family == 'Windows'
+     else imas_sprout_apt_repo_url if ansible_pkg_mgr | default('') == 'apt'
+     else imas_sprout_rpm_repo_url | replace('$basearch', ansible_architecture | default('x86_64')) }}
+
+# Read token the sprout sends (HTTP basic auth, user "buildkite") to
+# imas_sprout_update_repo_url only (config key "sproutupdaterepotoken"). A
+# secret, written only to the sprout's mode-0600 config file. Defaults to
+# imas_sprout_repo_token on Linux; "" on Windows, like the repo token.
+imas_sprout_update_repo_token: "{{ '' if ansible_os_family == 'Windows' else imas_sprout_repo_token }}"
+
 # --- Behaviour ------------------------------------------------------------------
 
 imas_sprout_service_name: imas-sprout

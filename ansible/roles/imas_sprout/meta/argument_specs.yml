@@ -65,6 +65,19 @@ argument_specs:
         type: str
         choices: [present, latest]
         description: Linux package state. C(latest) upgrades on every run.
+      imas_sprout_update_repo_url:
+        type: str
+        description:
+          - Base URL a self_update downloads the package file the signed update manifest
+            names from (config key C(sproutupdaterepourl)), C(https://) only.
+          - Defaults to the repository this role installs from; empty removes the key and
+            the sprout refuses every self_update.
+      imas_sprout_update_repo_token:
+        type: str
+        description:
+          - Read token for imas_sprout_update_repo_url (config key C(sproutupdaterepotoken)),
+            sent as basic auth with user C(buildkite). Defaults to imas_sprout_repo_token on
+            Linux and empty on Windows.
       imas_sprout_repo_token:
         type: str
         description: Buildkite registry token, for private Linux registries.

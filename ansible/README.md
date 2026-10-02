@@ -132,7 +132,8 @@ For each host, the playbook:
 2. **Writes the enrollment settings** into the config file the sprout already
    reads (`/etc/imas/sprout`, or `%ProgramData%\imas\sprout` on Windows):
    `farmerinterface`, `farmerapiport`, `busurls` if set, `busproxyurl` if
-   set, `sproutboxkeyprevgrace` if set, and `jointoken` if the host isn't
+   set, `sproutboxkeyprevgrace` if set, `sproutupdaterepourl` and
+   `sproutupdaterepotoken` (self-update) if set, and `jointoken` if the host isn't
    enrolled yet. It changes only those keys and leaves the rest of the file
    alone, including what the sprout writes itself. If you set
    `imas_sprout_root_ca`, it also writes that CA to the sprout's root-CA
@@ -171,6 +172,8 @@ Set these in `group_vars`/`host_vars`. `roles/*/defaults/main.yml` and
 | `imas_sprout_package_state` | `present` | Linux: `latest` upgrades to the newest version on every run. |
 | `imas_sprout_repo_token` | `""` | Registry token, if your Linux registries are private. Stored in root-only files on the host. |
 | `imas_sprout_windows_msi_url` | `""` | Install this MSI (for example from an internal mirror) instead of using the NuGet feed. |
+| `imas_sprout_update_repo_url` | the repository this role installs from | Base URL a `self_update` downloads the signed manifest's package file from (`<url>/<file name>`, `sproutupdaterepourl`). Defaults to the apt repository URL, the rpm repository URL with `$basearch` filled in, or on Windows the directory of `imas_sprout_windows_msi_url` (empty with the NuGet feed). Use a mirror that serves the release's package files by name if your repository lays them out differently. Empty: the sprout refuses every `self_update`. |
+| `imas_sprout_update_repo_token` | `imas_sprout_repo_token` (Linux), `""` (Windows) | Read token the sprout sends (basic auth, user `buildkite`) to `imas_sprout_update_repo_url` only (`sproutupdaterepotoken`), stored in the sprout's mode-0600 config file. |
 | `imas_sprout_verify` | `true` | Wait for the bus connection after installing. |
 | `imas_verify_timeout` | `300` | Seconds to wait for it. |
 
