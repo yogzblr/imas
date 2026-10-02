@@ -1,36 +1,40 @@
 // Package selfupdate implements the sprout side of a fleet update
-// (design doc §1.8, §2.2, §2.5): the one-step job farmer sends for an
-// internal.sprout.action self_update. Its single method, apply:
+// (design doc §1.8, §2.3, §2.5, §2.6; requirement 20): the one-step job
+// farmer sends for an internal.sprout.action self_update. The step
+// carries one thing, the target version; everything else the sprout uses
+// comes from a manifest fleetreleaser signed and from the sprout's own
+// configuration. Its single method, apply:
 //
-//  1. verifies the release's Ed25519 signature over its
-//     fleetsign.Manifest (version|os|arch|file_name|checksum_sha256|
-//     min_sprout_version) against imas-fleet-signing's
-//     current key versions, fetched live from farmer over the sprout's
-//     SproutRootCA-pinned NATS connection (keys.go; the enrollment-time
-//     pin is only a bootstrap fallback until the first live fetch
-//     succeeds) — BEFORE any request to the artifact host. A missing
-//     signature, an invalid one, or no usable key set is a refusal; there
-//     is no checksum-only fallback;
-//  2. downloads the artifact with internal/ingredients/file/http's
-//     provider, trusting only config.SproutRootCA for the artifact host's
-//     TLS certificate (the same root the sprout's farmer/NATS connection
-//     pins), never the system CA pool;
-//  3. checks the downloaded file's SHA-256 against checksum_sha256, as a
-//     second, independent check;
-//  4. hands the verified, staged binary to the install step.
+//  1. checks the target against the running version: lower is refused
+//     (no downgrades: allow_downgrade isn't in the signed manifest
+//     format), equal is success with nothing to do;
+//  2. GETs the manifest for its own OS/arch and the target version from
+//     farmer's recipe endpoint (GET /v1/sprout/update-manifest), with its
+//     gateway JWT, over a client that trusts only SproutRootCA;
+//  3. verifies the manifest's Ed25519 signature against the keyring
+//     shipped in the sprout package (config.SproutFleetSigningKeyring,
+//     fleetsign.LoadKeyring), never a key fetched from farmer or the bus.
+//     A missing or bad signature, or a key id the keyring doesn't hold, is
+//     a refusal; there is no checksum-only fallback;
+//  4. refuses a manifest whose signed min_sprout_version is above the
+//     running version, and a file_name that isn't this platform's package
+//     type (.deb, .rpm, .msi);
+//  5. downloads <sproutupdaterepourl>/<file_name> from the repository
+//     configured in the sprout itself — the same per-OS repository the
+//     Ansible role imas_sprout installs from — over HTTPS verified against
+//     the OS trust store (not SproutRootCA), through the environment's
+//     proxy, with the optional repo token and without the sprout JWT;
+//  6. checks the file's SHA-256 against the signed checksum before
+//     anything else touches it;
+//  7. installs from that local file with the OS installer (dpkg -i,
+//     rpm -U, zypper on SUSE, msiexec /i /qn on Windows) and restarts the
+//     service onto the new version (install.go).
 //
-// FLAG FOR SECURITY REVIEW. The install step itself — swapping the
-// running binary with backup/restore-on-failure and restarting — is §2.3's
-// rollout-safety work and is NOT implemented here: install defaults to
-// refusing with ErrInstallNotImplemented, so a self_update job ends failed
-// (with the artifact verified and staged) rather than claiming success a
-// rollout gate would act on. Any tenant recipe can name this ingredient,
-// but it can only ever act on a release CloudXP's fleetreleaser signed.
-//
-// Since FU.0 a step carries only version, artifact_url, checksum_sha256
-// and signature, not the manifest's os, arch, file_name and
-// min_sprout_version (manifestFields), so step 1 refuses every release
-// until FU.2 rewrites this package to fetch the sprout's own manifest.
+// FLAG FOR SECURITY REVIEW: this installs code as root/SYSTEM. Any tenant
+// recipe can name this ingredient, but it can only ever install bytes
+// whose SHA-256 a key in the shipped keyring signed, for a version farmer
+// serves this sprout's tenant (that tenant approved it), from the
+// repository the sprout's own administrator configured.
 package selfupdate
 
 import (
@@ -38,93 +42,83 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/nats-io/nats.go"
+	"golang.org/x/mod/semver"
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/fleetsign"
 	"github.com/yogzblr/imas/internal/ingredients"
-	fhttp "github.com/yogzblr/imas/internal/ingredients/file/http"
 )
 
 var (
 	ErrMethodUndefined = errors.New("selfupdate method undefined")
 	ErrMissingProperty = errors.New("selfupdate: missing or non-string property")
-	// ErrChecksumMismatch: the downloaded artifact's SHA-256 isn't the
-	// signed checksum_sha256.
-	ErrChecksumMismatch = errors.New("selfupdate: artifact checksum does not match the signed checksum_sha256")
-	// ErrInstallNotImplemented: the artifact is verified and staged, but
-	// installing it is §2.3's work, not this package's.
-	ErrInstallNotImplemented = errors.New("selfupdate: installing a verified artifact is not implemented yet (design doc §2.3, yogzblr/imas#286)")
+	// ErrInvalidTargetVersion: the step's version isn't canonical semver.
+	ErrInvalidTargetVersion = errors.New("selfupdate: target version is not a canonical semver version (vMAJOR.MINOR.PATCH[-PRERELEASE])")
+	// ErrUnknownRunningVersion: the sprout can't tell which version it
+	// runs, so it can't rule out a downgrade.
+	ErrUnknownRunningVersion = errors.New("selfupdate: running version unknown")
+	// ErrDowngrade: the target is lower than the running version.
+	ErrDowngrade = errors.New("selfupdate: refusing to downgrade")
+	// ErrBelowMinSproutVersion: the running version is below the signed
+	// manifest's min_sprout_version.
+	ErrBelowMinSproutVersion = errors.New("selfupdate: running version is below the release's min_sprout_version")
+	// ErrNoManifest: farmer serves no manifest for this target and
+	// platform.
+	ErrNoManifest = errors.New("selfupdate: no update manifest")
+	// ErrManifestMismatch: farmer served a manifest for a different
+	// version, OS or arch than asked.
+	ErrManifestMismatch = errors.New("selfupdate: manifest does not match the request")
+	// ErrPackageTypeMismatch: the signed file_name isn't this platform's
+	// package type.
+	ErrPackageTypeMismatch = errors.New("selfupdate: manifest file_name is not this platform's package type")
+	// ErrRepoNotConfigured: sproutupdaterepourl is unset or invalid.
+	ErrRepoNotConfigured = errors.New("selfupdate: no valid update repository configured (sproutupdaterepourl)")
+	// ErrChecksumMismatch: the downloaded file's SHA-256 isn't the signed
+	// checksum_sha256.
+	ErrChecksumMismatch = errors.New("selfupdate: package checksum does not match the signed checksum_sha256")
+	// ErrUnsupportedPlatform: no installer for this OS, or the sprout
+	// couldn't restart onto the new version here.
+	ErrUnsupportedPlatform = errors.New("selfupdate: self-update not supported on this platform")
+	// ErrInstallFailed: the OS installer failed.
+	ErrInstallFailed = errors.New("selfupdate: install failed")
+	// ErrUpdateInProgress: another self_update is running, or one has
+	// installed and the service hasn't restarted onto it yet.
+	ErrUpdateInProgress = errors.New("selfupdate: another update is in progress or awaiting restart")
 )
-
-// install receives a staged artifact whose signature and checksum have
-// both been verified. A seam for tests; see the package doc.
-var (
-	install = func(_ context.Context, _ stepRelease, stagedPath string) error {
-		return fmt.Errorf("%w; verified artifact left at %s", ErrInstallNotImplemented, stagedPath)
-	}
-)
-
-// manifestFields returns the signed manifest fields (fleetsign.Manifest)
-// a selfupdate step doesn't carry: os, arch, file_name and
-// min_sprout_version. Until FU.2 it returns empty strings, so the
-// manifest never validates and every release is refused before any key
-// read or download: a step signed over the old
-// version|artifact_url|checksum_sha256 message must not install. A
-// variable only so tests can supply the fields and exercise the rest of
-// the path against a real signature.
-var manifestFields = func() (osName, arch, fileName, minSproutVersion string) {
-	return "", "", "", ""
-}
-
-// propArtifactURL is the step property carrying the download URL
-// (internal/natsapi sends the same name). It is not part of the signed
-// manifest, which has no URL; FU.2 removes it.
-const propArtifactURL = "artifact_url"
 
 var applyProps = ingredients.MethodPropsSet{
-	{Key: fleetsign.PropVersion, Type: "string", IsReq: true, Description: "release version"},
-	{Key: propArtifactURL, Type: "string", IsReq: true, Description: "https URL of the release binary (not signed)"},
-	{Key: fleetsign.PropChecksumSHA256, Type: "string", IsReq: true, Description: "hex SHA-256 of the release binary"},
-	{Key: fleetsign.PropSignature, Type: "string", IsReq: true, Description: "fleetreleaser's signature over the release's fleetsign.Manifest"},
+	{Key: fleetsign.PropVersion, Type: "string", IsReq: true, Description: "target sprout version (canonical semver, e.g. v2.4.1); the file, checksum and signature come from farmer's signed manifest"},
 }
 
-// stepRelease is what a selfupdate step carries.
-type stepRelease struct {
-	Version        string
-	ArtifactURL    string
-	ChecksumSHA256 string
-}
+// stageDirName is the directory under config.CacheDir that holds
+// downloads; it is emptied at the start of every update.
+const stageDirName = "selfupdate"
 
-// manifest is the signed manifest for r, with signature sig.
-func (r stepRelease) manifest(sig string) fleetsign.Manifest {
-	osName, arch, fileName, minSproutVersion := manifestFields()
-	return fleetsign.Manifest{
-		Version:          r.Version,
-		OS:               osName,
-		Arch:             arch,
-		FileName:         fileName,
-		ChecksumSHA256:   r.ChecksumSHA256,
-		MinSproutVersion: minSproutVersion,
-		Signature:        sig,
-	}
-}
+var (
+	// updateMu admits one update at a time.
+	updateMu sync.Mutex
+	// installed is set once a package has been installed (or, on
+	// Windows, scheduled): this process is about to be replaced, so it
+	// refuses to start another update.
+	installed atomic.Bool
+)
 
-// validArtifactURL keeps the check fleetsign made on artifact_url while it
-// was signed: an absolute https URL without userinfo, at most 2048
-// characters, no control characters.
-func validArtifactURL(s string) error {
-	u, err := url.Parse(s)
-	if err != nil || len(s) > 2048 || u.Scheme != "https" || u.Host == "" || u.User != nil ||
-		strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
-		return fmt.Errorf("%w: artifact_url is not an https URL", fleetsign.ErrInvalidManifest)
-	}
-	return nil
-}
+// installedHold is how long installed refuses further updates.
+const installedHold = 30 * time.Minute
+
+// RegisterNatsConn is a no-op. The previous selfupdate fetched fleet
+// signing keys from farmer over the bus; the keyring now ships in the
+// package. Kept only so cmd/sprout's existing call compiles until it is
+// removed there.
+func RegisterNatsConn(*nats.Conn) {}
 
 // Compile-time interface check.
 var _ cook.RecipeCooker = SelfUpdate{}
@@ -143,128 +137,167 @@ func (s SelfUpdate) Parse(id, method string, params map[string]interface{}) (coo
 	if _, err := parsed.PropertiesForMethod(method); err != nil {
 		return nil, err
 	}
-	if _, _, err := parsed.release(); err != nil {
+	if _, err := parsed.target(); err != nil {
 		return nil, err
 	}
 	return parsed, nil
 }
 
-// release reads the four string properties.
-func (s SelfUpdate) release() (stepRelease, string, error) {
-	get := func(key string) (string, error) {
-		v, ok := s.params[key].(string)
-		if !ok {
-			return "", fmt.Errorf("%w: %s", ErrMissingProperty, key)
-		}
-		return v, nil
+// target returns the step's target version. Any other property (farmer's
+// dispatch still sends the pre-FU.2 artifact_url, checksum_sha256 and
+// signature) is never read: none of it is signed.
+func (s SelfUpdate) target() (string, error) {
+	v, ok := s.params[fleetsign.PropVersion].(string)
+	if !ok {
+		return "", fmt.Errorf("%w: %s", ErrMissingProperty, fleetsign.PropVersion)
 	}
-	var (
-		rel stepRelease
-		sig string
-		err error
-	)
-	if rel.Version, err = get(fleetsign.PropVersion); err != nil {
-		return rel, "", err
+	if len(v) > 64 || !semver.IsValid(v) || semver.Canonical(v) != v {
+		return "", fmt.Errorf("%w: %q", ErrInvalidTargetVersion, v)
 	}
-	if rel.ArtifactURL, err = get(propArtifactURL); err != nil {
-		return rel, "", err
-	}
-	if rel.ChecksumSHA256, err = get(fleetsign.PropChecksumSHA256); err != nil {
-		return rel, "", err
-	}
-	// A missing signature property is read as "" so it reaches Verify and
-	// is refused there as ErrMissingSignature, the same as an
-	// un-migrated row's empty signature.
-	sig, _ = s.params[fleetsign.PropSignature].(string)
-	return rel, sig, nil
+	return v, nil
 }
 
 func failed(err error, notes ...fmt.Stringer) (cook.Result, error) {
 	return cook.Result{Succeeded: false, Failed: true, Notes: notes}, err
 }
 
-// verify checks the release's signature against the trusted key set
-// (keys.go). Its only network traffic is the key fetch from farmer; the
-// artifact host is never contacted.
-func (s SelfUpdate) verify(ctx context.Context) (stepRelease, keySource, error) {
-	rel, sig, err := s.release()
+// plan is a verified update, ready to download.
+type plan struct {
+	target, running string
+	// upToDate: the target is the running version; nothing to do.
+	upToDate bool
+	platform platform
+	manifest fleetsign.Manifest
+	url      string
+}
+
+// prepare runs every check that needs no download: steps 1–4 of the
+// package doc, plus the platform preflight and the repository URL. Its
+// only network traffic is the manifest request to farmer.
+func (s SelfUpdate) prepare(ctx context.Context) (plan, error) {
+	var pl plan
+	var err error
+	if pl.target, err = s.target(); err != nil {
+		return pl, err
+	}
+	if pl.running, err = runningVersion(); err != nil {
+		return pl, err
+	}
+	switch c := semver.Compare(pl.target, pl.running); {
+	case c < 0:
+		return pl, fmt.Errorf("%w: target %s is lower than the running %s", ErrDowngrade, pl.target, pl.running)
+	case c == 0:
+		pl.upToDate = true
+		return pl, nil
+	}
+	if pl.platform, err = detectPlatform(); err != nil {
+		return pl, err
+	}
+	if err := pl.platform.preflight(); err != nil {
+		return pl, err
+	}
+	// The keyring is read before anything is fetched: without a trust
+	// root there is nothing to verify against.
+	keyring, err := fleetsign.LoadKeyring(config.SproutFleetSigningKeyring)
 	if err != nil {
-		return rel, "", err
+		return pl, fmt.Errorf("selfupdate: fleet signing keyring: %w", err)
 	}
-	m := rel.manifest(sig)
-	if err := m.Validate(); err != nil {
-		return rel, "", fmt.Errorf("selfupdate: refusing %s: %w", rel.Version, err)
+	if pl.manifest, err = fetchManifest(ctx, pl.platform, pl.target); err != nil {
+		return pl, err
 	}
-	if err := validArtifactURL(rel.ArtifactURL); err != nil {
-		return rel, "", fmt.Errorf("selfupdate: refusing %s: %w", rel.Version, err)
+	if err := keyring.Verify(pl.manifest); err != nil {
+		return pl, fmt.Errorf("selfupdate: refusing %s: %w", pl.target, err)
 	}
-	src, err := verifyManifest(ctx, m)
-	if err != nil {
-		return rel, "", fmt.Errorf("selfupdate: refusing %s: %w", rel.Version, err)
+	// Signed, so these are fleetreleaser's values. ParseManifest already
+	// refused min_sprout_version > version.
+	if semver.Compare(pl.manifest.MinSproutVersion, pl.running) > 0 {
+		return pl, fmt.Errorf("%w: %s needs at least %s, this sprout runs %s",
+			ErrBelowMinSproutVersion, pl.target, pl.manifest.MinSproutVersion, pl.running)
 	}
-	return rel, src, nil
+	if filepath.Ext(pl.manifest.FileName) != "."+pl.platform.pkgType {
+		return pl, fmt.Errorf("%w: %s is not a .%s for %s", ErrPackageTypeMismatch, pl.manifest.FileName, pl.platform.pkgType, pl.platform)
+	}
+	if pl.url, err = repoFileURL(config.SproutUpdateRepoURL, pl.manifest.FileName); err != nil {
+		return pl, err
+	}
+	return pl, nil
 }
 
 func (s SelfUpdate) apply(ctx context.Context) (cook.Result, error) {
-	// 1. Signature first: nothing is fetched for a release that isn't
-	// signed by a trusted key version.
-	rel, src, err := s.verify(ctx)
+	if !updateMu.TryLock() {
+		return failed(ErrUpdateInProgress)
+	}
+	defer updateMu.Unlock()
+	if installed.Load() {
+		return failed(ErrUpdateInProgress)
+	}
+
+	pl, err := s.prepare(ctx)
 	if err != nil {
 		return failed(err)
 	}
-
-	// 2. Fetch, trusting only SproutRootCA.
-	stageDir := filepath.Join(config.CacheDir, "selfupdate")
-	if err := os.MkdirAll(stageDir, 0o700); err != nil {
-		return failed(fmt.Errorf("selfupdate: creating %s: %w", stageDir, err))
+	if pl.upToDate {
+		return cook.Result{Succeeded: true, Notes: []fmt.Stringer{cook.Snprintf("already running %s", pl.running)}}, nil
 	}
-	// Named by the signed checksum: hex only, so no path from the release
-	// fields reaches the filesystem.
-	staged := filepath.Join(stageDir, "sprout-"+rel.ChecksumSHA256)
-	provider, err := fhttp.HTTPFile{}.Parse(s.id, rel.ArtifactURL, staged, rel.ChecksumSHA256, map[string]interface{}{
-		fhttp.PropRootCAFile: config.SproutRootCA,
-		"hashType":           "sha256",
-	})
+	verified := cook.Snprintf("%s for %s: manifest signature verified against the keyring at %s; running %s, min_sprout_version %s",
+		pl.target, pl.platform, config.SproutFleetSigningKeyring, pl.running, pl.manifest.MinSproutVersion)
+
+	// A fresh, private directory per update: nothing left from an earlier
+	// attempt, and nobody else can have placed a file in it.
+	stageRoot := filepath.Join(config.CacheDir, stageDirName)
+	if err := os.RemoveAll(stageRoot); err != nil {
+		return failed(fmt.Errorf("selfupdate: clearing %s: %w", stageRoot, err), verified)
+	}
+	if err := os.MkdirAll(stageRoot, 0o700); err != nil {
+		return failed(fmt.Errorf("selfupdate: creating %s: %w", stageRoot, err), verified)
+	}
+	stage, err := os.MkdirTemp(stageRoot, "update-")
 	if err != nil {
-		return failed(err)
+		return failed(fmt.Errorf("selfupdate: creating a staging directory: %w", err), verified)
 	}
-	if err := provider.Download(ctx); err != nil {
-		os.Remove(staged)
-		return failed(fmt.Errorf("selfupdate: downloading %s: %w", rel.Version, err))
-	}
+	// The signed, validated file name: one plain path component.
+	file := filepath.Join(stage, pl.manifest.FileName)
 
-	// 3. Independent second check: the bytes are the signed checksum.
-	ok, err := provider.Verify(ctx)
-	if err != nil || !ok {
-		os.Remove(staged)
-		return failed(errors.Join(ErrChecksumMismatch, err))
-	}
-	if err := os.Chmod(staged, 0o700); err != nil {
-		os.Remove(staged)
-		return failed(err)
-	}
-
-	// 4. Install.
-	verified := cook.Snprintf("%s: signature (against the %s) and sha256 verified, staged at %s", rel.Version, src, staged)
-	if err := install(ctx, rel, staged); err != nil {
+	if err := download(ctx, pl.url, config.SproutUpdateRepoToken, file, pl.manifest.ChecksumSHA256); err != nil {
+		os.RemoveAll(stage)
 		return failed(err, verified)
 	}
-	return cook.Result{Succeeded: true, Changed: true, Notes: []fmt.Stringer{verified, cook.Snprintf("%s installed", rel.Version)}}, nil
+	downloaded := cook.Snprintf("%s downloaded from %s; sha256 %s matches the signed manifest", pl.manifest.FileName, redact(pl.url), pl.manifest.ChecksumSHA256)
+
+	notes, err := installPackage(ctx, pl.platform, file, pl.target, filepath.Join(stage, "msiexec.log"))
+	notes = append([]fmt.Stringer{verified, downloaded}, notes...)
+	if err != nil {
+		os.RemoveAll(stage)
+		return failed(err, notes...)
+	}
+	if pl.platform.installer != installMsiexec {
+		// Installed; msiexec, on Windows, reads the file after this returns.
+		os.RemoveAll(stage)
+	}
+	installed.Store(true)
+	// If the restart never comes (systemctl failed, msiexec failed before
+	// stopping the service), allow a retry eventually.
+	time.AfterFunc(installedHold, func() { installed.Store(false) })
+	return cook.Result{Succeeded: true, Changed: true, Notes: notes}, nil
 }
 
-// Test is the dry run: it checks the signature against the pinned key
-// (no network) and reports what apply would fetch.
+// Test is the dry run: every check apply makes before downloading,
+// including fetching and verifying the manifest, and what apply would
+// fetch and install.
 func (s SelfUpdate) Test(ctx context.Context) (cook.Result, error) {
 	if s.method != fleetsign.SelfUpdateMethod {
 		return failed(errors.Join(ErrMethodUndefined, fmt.Errorf("method %s undefined", s.method)))
 	}
-	rel, src, err := s.verify(ctx)
+	pl, err := s.prepare(ctx)
 	if err != nil {
 		return failed(err)
 	}
-	return cook.Result{Succeeded: true, Notes: []fmt.Stringer{
-		cook.Snprintf("signature verified against the %s; would download %s from %s (trusting only %s) and check sha256 %s",
-			src, rel.Version, rel.ArtifactURL, config.SproutRootCA, rel.ChecksumSHA256),
+	if pl.upToDate {
+		return cook.Result{Succeeded: true, Notes: []fmt.Stringer{cook.Snprintf("already running %s", pl.running)}}, nil
+	}
+	return cook.Result{Succeeded: true, Changed: true, Notes: []fmt.Stringer{
+		cook.Snprintf("%s for %s: manifest signature verified; would download %s, check sha256 %s and install it with %s (running %s)",
+			pl.target, pl.platform, redact(pl.url), pl.manifest.ChecksumSHA256, pl.platform.installer, pl.running),
 	}}, nil
 }
 
