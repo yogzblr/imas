@@ -101,10 +101,8 @@ var methodMetaOverride = map[string][]methodDoc{
 	"selfupdate": {{
 		Method: "apply",
 		Props: []prop{
-			{Key: "version", Type: "string", IsReq: true, Description: "release version"},
-			{Key: "artifact_url", Type: "string", IsReq: true, Description: "https URL of the release binary"},
-			{Key: "checksum_sha256", Type: "string", IsReq: true, Description: "hex SHA-256 of the release binary"},
-			{Key: "signature", Type: "string", IsReq: true, Description: "fleetreleaser's signature over version|artifact_url|checksum_sha256"},
+			// Keep in step with applyProps in internal/ingredients/selfupdate.
+			{Key: "version", Type: "string", IsReq: true, Description: "target sprout version (canonical semver, e.g. v2.4.1); the file, checksum and signature come from farmer's signed manifest"},
 		},
 	}},
 	"service": {}, // service takes only the implicit "name" (the service to target); no method-specific params
