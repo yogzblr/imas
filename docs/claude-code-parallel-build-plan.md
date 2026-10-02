@@ -767,6 +767,69 @@ fleet_*.go and tests, docs/api/. Needs FU.1, FU.2, FU.5 merged. Do not enable
 the flag by default; the Terraform UAT gate decides that."
 ```
 
+**FU.6b — gate freshness and the rollout claim column**
+
+Follow-up to FU.6's open PR questions 2 and 3. Question 1 (a target built
+before FU.6 cannot report its version) is not addressed: no sprout is in
+production. Question 4 (on-demand `facts.request`) is deferred: an update
+restarts the sprout, which republishes its facts on connect, and saasapi has
+no path to the tenant bus connections.
+```
+claude --cloud "Implement FU.6b from docs/BUILD-STATUS.md, answering two open
+questions left on FU.6 (internal/saasapi/fleet_update_dispatch.go,
+fleet_sprout_facts.go, model.go). Rebase on main first.
+
+(A) Gate freshness. SproutFacts deliberately ignores farmer.props.expiry,
+which is right for planning (a sprout's last report is what planUpdateItems
+needs). For the rollout GATE a row only counts as proof if it was written
+after the item's dispatch: otherwise a leftover row naming the target version
+(an earlier attempt, or a package reinstalled by an administrator) would pass
+the wave without evidence. A prop's write time is expiry minus
+props.DefaultPropTTL; do not add a column or a second query, and import the
+constant rather than copying 5 minutes (TestFarmerSproutFactsColumnContract-
+style tests must pin that the expiry column and the TTL relationship still
+hold, so a props change breaks a test instead of silently loosening the
+gate). Extend the facts reader with a second method that also returns each
+fact's write time (keep SproutFacts' signature and its ignore-expiry
+behaviour for planning), and make the wave check treat a sprout as
+succeeded only when its sprout_version equals the target AND the
+sprout_version row's write time is after that item's dispatch time (record
+the dispatch time per item in the rollout state; use the saasapi clock, and
+allow a small documented clock-skew margin, 30s, between saasapi and the
+farmer node that wrote the row). A sprout that reports the target version
+only with an older write time stays running until the wave deadline, then
+unresponsive_after_update as today. Items that were 'already running' at
+planning are unchanged.
+
+(B) Dedicated rollout claim column. claimRollout currently writes
+tenant_update_policy.updated_at to make Galera certification refuse one of
+two claims committed on different nodes, so updated_at moves when a rollout
+starts and GET update-policy reports a policy change that never happened.
+Add column rollout_claimed_at (nullable, millisecond precision like
+updated_at) to saas.tenant_update_policy with a goose migration in
+internal/migrations/saas (next number; forward-only, idempotent, backward
+compatible for one version: the old binary ignores the column) and the model
+field. claimRollout writes rollout_claimed_at instead, with the same
+always-later-than-stored rule (claimTimestamp) so the write is never a no-op
+MySQL would skip, and no longer touches updated_at. PATCH update-policy and
+GET keep their meaning: updated_at changes only when the policy does. Do not
+expose rollout_claimed_at in the API unless a test or doc already needs it.
+Update the comments on claimRollout, the fleet_update_dispatch.go header and
+docs/api to say so.
+
+Scope: internal/saasapi/ (fleet_update_dispatch.go, fleet_sprout_facts.go,
+model.go, tests), internal/migrations/saas/ (one new migration and its
+test), docs/api/. Do not change farmer, the sprout, props, or the update
+flag. Tests: a stale row naming the target version does not pass the gate;
+a fresh one does; skew margin boundaries; two concurrent claims on one
+tenant still produce exactly one rollout (reuse the existing concurrency
+test against the new column); updated_at is unchanged by a rollout start
+and still changes on PATCH; the migration is a no-op on a re-run and the
+old model still loads with the column present. State in the PR what you
+deferred and any open question. FLAG FOR SECURITY REVIEW: the gate is what
+decides a fleet update succeeded."
+```
+
 ---
 
 ## 5. Orchestrator prompt — paste into one lead Claude Code session
