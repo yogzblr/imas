@@ -162,8 +162,8 @@ type selfUpdateRequest struct {
 }
 
 // selfUpdate sends sproutID the selfupdate job farmer's dispatch builds
-// (internal/natsapi's sendSelfUpdate, minus the pre-FU.2 properties),
-// sealed under the stub's tenant key to the sprout's box key.
+// (internal/natsapi's sendSelfUpdate: one step, properties only
+// {version}), sealed under the stub's tenant key to the sprout's box key.
 func (f *farmer) selfUpdate(w http.ResponseWriter, r *http.Request) {
 	var req selfUpdateRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {

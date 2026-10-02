@@ -139,9 +139,9 @@ func (s SelfUpdate) Parse(id, method string, params map[string]interface{}) (coo
 	return parsed, nil
 }
 
-// target returns the step's target version. Any other property (farmer's
-// dispatch still sends the pre-FU.2 artifact_url, checksum_sha256 and
-// signature) is never read: none of it is signed.
+// target returns the step's target version. Farmer's dispatch sends only
+// the version (internal/natsapi's sendSelfUpdate); any other property a
+// tenant recipe sets is never read, since none of it is signed.
 func (s SelfUpdate) target() (string, error) {
 	v, ok := s.params[fleetsign.PropVersion].(string)
 	if !ok {

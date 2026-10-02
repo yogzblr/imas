@@ -1,19 +1,17 @@
 // Fleet update dispatch, the dispatch half of design doc §1.8: POST
 // /tenants/{tenant_id}/sprouts/updates and GET .../sprouts/updates/{batch_id}.
 //
-// OFF BY DEFAULT. Release signing and registration exist (§2.5):
-// cmd/fleetreleaser signs each saas.fleet_versions row, one per OS/arch, and
-// saasapi (selfUpdateParams) verifies every row of the target version
-// before creating a rollout. But the sprout-side manifest fetch and install
-// (§2.6, FU.1/FU.2) don't exist yet, and farmer's self_update handler still
-// expects the pre-FU.3 params (an artifact URL and one row's signature),
-// which saasapi no longer sends, so farmer refuses every item. §1.8 and §6
-// say not to expose this endpoint until that's resolved. So both routes are
-// registered only when SetFleetUpdateDispatchEnabled(true) has been called
-// before NewRouter
+// OFF BY DEFAULT. Both routes are registered only when
+// SetFleetUpdateDispatchEnabled(true) has been called before NewRouter
 // (Config.FleetUpdateDispatchEnabled, SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED),
 // and the handlers check the flag again themselves. With the flag off,
-// neither route exists.
+// neither route exists. The path behind it is complete: cmd/fleetreleaser
+// signs each saas.fleet_versions row (§2.5); saasapi (selfUpdateParams)
+// verifies every row of the target version before creating a rollout and
+// sends farmer only {version}; farmer re-verifies that version against the
+// catalog before dispatching it (internal/natsapi, checkSelfUpdateRelease);
+// and the sprout fetches, verifies and installs its own OS/arch row (§2.6,
+// internal/ingredients/selfupdate). Turning it on is a deployment decision.
 //
 // An update rollout is an ordinary §1.5 batch whose action.type is
 // self_update. It uses the same saas.asset_action_batches/asset_action_items
@@ -78,8 +76,8 @@ var fleetUpdateDispatchEnabled bool
 // call it once at startup, before NewRouter: NewRouter registers the routes
 // only if the flag is on at that point.
 //
-// Don't turn it on in a deployment until sprout has a real signed
-// self-update path (yogzblr/imas#286; design doc §1.8, §6).
+// It is off by default; turning it on is a deployment decision (design
+// doc §1.8, §2.3).
 func SetFleetUpdateDispatchEnabled(enabled bool) { fleetUpdateDispatchEnabled = enabled }
 
 // Rollout gates. A gate decides when a wave counts as passed, so the next
@@ -157,8 +155,8 @@ type fleetUpdateRequest struct {
 	Gate          string   `json:"gate"`
 }
 
-// farmerSelfUpdate is the params of a self_update internal.sprout.action,
-// in the shape design doc §2.2 gives, signature included (§2.5).
+// farmerSelfUpdate is the params of a self_update internal.sprout.action:
+// only the version (design doc §1.8). Farmer refuses any other field.
 type farmerSelfUpdate = controlplane.SelfUpdateParams
 
 // fleetKeys is the READ-ONLY imas-fleet-signing key source catalog rows
