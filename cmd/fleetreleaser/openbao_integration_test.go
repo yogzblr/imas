@@ -33,10 +33,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/yogzblr/imas/internal/fleetsign"
-	"github.com/yogzblr/imas/internal/saasapi"
 )
 
 const (
@@ -160,29 +158,33 @@ func TestOpenBaoEnforcesReadOnlyFleetKey(t *testing.T) {
 		return c
 	}
 
-	// 1. The signer publishes a release for real.
-	db := newTestDB(t)
-	rel := testRelease()
-	if out, err := publish(t.Context(), db, signerEnv(signerToken), rel, "", time.Now()); err != nil || out != outcomeInserted {
-		t.Fatalf("publish with the signer's token = %q, %v", out, err)
-	}
-	var row saasapi.FleetVersion
-	if err := db.First(&row, "version = ?", rel.Version).Error; err != nil {
-		t.Fatal(err)
+	// service is the signing API as saasapi calls it, over a Transit
+	// client holding token.
+	service := func(token string) http.Handler {
+		return (&signService{signer: signerEnv(token), tokens: [][]byte{[]byte(testCallerToken)}, floor: testFloor}).handler()
 	}
 
-	for service, token := range readOnly {
-		t.Run(service, func(t *testing.T) {
+	// 1. The signing service, holding the signer's token, signs a
+	// manifest entry for real.
+	rel := testManifest()
+	code, out := postSign(t, service(signerToken), bearer(testCallerToken), signBody(rel))
+	if code != http.StatusOK || out["signature"] == "" {
+		t.Fatalf("POST /v1/sign with the signer's token = %d %v", code, out)
+	}
+	rel.Signature = out["signature"]
+
+	for svcName, token := range readOnly {
+		t.Run(svcName, func(t *testing.T) {
 			// 2. The read-only token, driven through fleetreleaser's own
 			// sign-capable client, is refused by OpenBao.
 			_, _, err := signerEnv(token).sign(t.Context(), []byte("v6.6.6|https://evil.example.com/x|"+testChecksum))
 			if !errors.Is(err, errSignFailed) || !strings.Contains(err.Error(), "403") || !strings.Contains(err.Error(), "permission denied") {
-				t.Fatalf("sign with %s's token = %v, want an OpenBao 403 permission denied", service, err)
+				t.Fatalf("sign with %s's token = %v, want an OpenBao 403 permission denied", svcName, err)
 			}
-			// ...and publish with it writes nothing.
-			db2 := newTestDB(t)
-			if _, err := publish(t.Context(), db2, signerEnv(token), rel, "", time.Now()); !errors.Is(err, errSignFailed) {
-				t.Fatalf("publish with %s's token = %v, want errSignFailed", service, err)
+			// ...and the signing service running on it hands back no
+			// signature.
+			if code, out := postSign(t, service(token), bearer(testCallerToken), signBody(testManifest())); code != http.StatusBadGateway || out["signature"] != "" {
+				t.Fatalf("POST /v1/sign over %s's token = %d %v, want 502 and no signature", svcName, code, out)
 			}
 
 			// 3. OpenBao's own view of the token: no capability on any
@@ -199,7 +201,7 @@ func TestOpenBaoEnforcesReadOnlyFleetKey(t *testing.T) {
 				mount + "/keys/some-other-key",
 			} {
 				if caps := b.capabilities(token, p); len(caps) != 1 || caps[0] != "deny" {
-					t.Errorf("%s token capabilities on %s = %v, want [deny]", service, p, caps)
+					t.Errorf("%s token capabilities on %s = %v, want [deny]", svcName, p, caps)
 				}
 			}
 			for _, raw := range []struct{ method, path string }{
@@ -209,13 +211,13 @@ func TestOpenBaoEnforcesReadOnlyFleetKey(t *testing.T) {
 				{http.MethodPost, mount + "/keys/" + key},
 			} {
 				if status, _ := b.call(token, raw.method, raw.path, map[string]any{}); status != http.StatusForbidden {
-					t.Errorf("%s %s %s with %s's token: status %d, want 403", raw.method, raw.path, service, service, status)
+					t.Errorf("%s %s %s with %s's token: status %d, want 403", raw.method, raw.path, svcName, svcName, status)
 				}
 			}
 
 			// 4. What it may do: read the public key and verify.
 			if caps := b.capabilities(token, mount+"/keys/"+key); len(caps) != 1 || caps[0] != "read" {
-				t.Errorf("%s token capabilities on keys/%s = %v, want [read]", service, key, caps)
+				t.Errorf("%s token capabilities on keys/%s = %v, want [read]", svcName, key, caps)
 			}
 			t.Setenv(fleetsign.EnvOpenBaoAddr, b.addr)
 			t.Setenv(fleetsign.EnvOpenBaoTransitMount, mount)
@@ -226,18 +228,18 @@ func TestOpenBaoEnforcesReadOnlyFleetKey(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := src.Verify(t.Context(), rel.withSignature(row.Signature)); err != nil {
-				t.Fatalf("%s verifying the published row via Transit public key: %v", service, err)
+			if err := src.Verify(t.Context(), rel); err != nil {
+				t.Fatalf("%s verifying the signed manifest via Transit public key: %v", svcName, err)
 			}
 			msg, _ := rel.Message()
-			_, rawSig, _ := fleetsign.DecodeSignature(row.Signature)
+			_, rawSig, _ := fleetsign.DecodeSignature(rel.Signature)
 			status, out := b.call(token, http.MethodPost, mount+"/verify/"+key, map[string]any{
 				"input":     base64.StdEncoding.EncodeToString(msg),
 				"signature": "vault:v1:" + base64.StdEncoding.EncodeToString(rawSig),
 			})
 			data, _ := out["data"].(map[string]any)
 			if status != http.StatusOK || data["valid"] != true {
-				t.Fatalf("Transit verify with %s's token: status %d, %v", service, status, out)
+				t.Fatalf("Transit verify with %s's token: status %d, %v", svcName, status, out)
 			}
 		})
 	}

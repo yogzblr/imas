@@ -1,135 +1,183 @@
 // Command fleetreleaser is the only process that signs sprout releases.
-// CloudXP's release pipeline runs it once per release package with the
-// version, OS, arch, file name, SHA-256 and minimum sprout version; it
-// signs that fleetsign.Manifest's canonical string (the
-// fleetsign.MessageDomain tag, then
-// version|os|arch|file_name|checksum_sha256|min_sprout_version) with the
-// OpenBao Transit key imas-fleet-signing (Ed25519) and writes the row,
-// signature and (unsigned) artifact URL included, straight into
-// saas.fleet_versions over its own database credential. See
-// docs/design/cloudxp-machine-manager-api-design.md §2.5. FU.34 turns it
-// into a stateless signing service with no database access.
+// It is a stateless internal HTTPS service: POST /v1/sign takes one
+// manifest entry (version, OS, arch, file name, SHA-256 and minimum
+// sprout version), validates it with internal/fleetsign, refuses a
+// version at or below its configured floor, signs the
+// fleetsign.Manifest canonical string (the fleetsign.MessageDomain tag,
+// then version|os|arch|file_name|checksum_sha256|min_sprout_version) with
+// the OpenBao Transit key imas-fleet-signing (Ed25519), and returns
+// {"signature": "v<key version>:<base64>"}. See
+// docs/design/cloudxp-machine-manager-api-design.md §2.5.
+//
+// It has no database access. Its only caller is saasapi's operator-plane
+// release registration (POST /v1/operator/fleet-releases), which stores
+// the signed rows in saas.fleet_versions; saasapi is the only writer of
+// the saas schema.
 //
 // Why a separate binary rather than a saasapi endpoint or a library:
-// saasapi already has write access to saas.fleet_versions. If the same
-// process could also sign, anyone who got code execution in saasapi (or
-// its credentials) could mint a release every sprout would install. Here
-// the two powers sit with different identities: saasapi and farmer get
-// read-only Transit access to the key (verify, read public key), and
-// this binary gets sign. The SaaS API's request path is never in the
-// signing loop.
+// saasapi writes saas.fleet_versions. If the same process could also
+// sign, anyone who got code execution in saasapi (or its OpenBao
+// credentials) could mint a release every sprout would install with no
+// further check. Here the two powers sit with different identities:
+// saasapi and farmer get read-only Transit access to the key (verify,
+// read public key), and this binary gets sign, behind its own format and
+// version-floor rules.
 //
-// FLAG FOR SECURITY REVIEW — the split is only as good as the OpenBao
-// policies in deploy/fleetreleaser/.
+// Callers authenticate with a bearer token read from a mounted Secret
+// file (IMAS_FLEETRELEASER_CALLER_TOKEN_FILE, plus an optional previous
+// token during rotation). The listener is TLS only. See
+// deploy/fleetreleaser/README.md for why a token rather than mTLS.
+//
+// FLAG FOR SECURITY REVIEW: the split is only as good as the OpenBao
+// policies in deploy/fleetreleaser/ and the custody of the caller token.
 package main
 
 import (
 	"context"
-	"flag"
+	"crypto/tls"
+	"errors"
 	"fmt"
-	"io"
+	"net/http"
 	"os"
-	"strings"
+	"os/signal"
+	"syscall"
 	"time"
 
-	"gorm.io/driver/mysql"
-	"gorm.io/gorm"
-	gormlogger "gorm.io/gorm/logger"
-
-	"github.com/yogzblr/imas/internal/fleetsign"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
-// EnvDSN is fleetreleaser's own GORM MySQL DSN for the saas schema. It
-// is a dedicated database user (SELECT, INSERT and UPDATE(signature) on
-// saas.fleet_versions only; see deploy/fleetreleaser/README.md), never
-// saasapi's saas_svc.
-const EnvDSN = "IMAS_FLEETRELEASER_DSN"
+// Service configuration, all read once at startup. A change (a rotated
+// token, a new certificate, a raised floor) takes effect on restart, as
+// with saasapi's own secrets (Reloader rolls the Deployment).
+const (
+	// EnvListenAddr is the HTTPS listen address. Default ":8443".
+	EnvListenAddr = "IMAS_FLEETRELEASER_LISTEN_ADDR"
+	// EnvTLSCertFile and EnvTLSKeyFile are the listener's certificate
+	// chain and key (PEM). Both required: there is no plain-HTTP mode.
+	EnvTLSCertFile = "IMAS_FLEETRELEASER_TLS_CERT_FILE"
+	EnvTLSKeyFile  = "IMAS_FLEETRELEASER_TLS_KEY_FILE"
+	// EnvCallerTokenFile is the path of the mounted Secret file holding
+	// the bearer token saasapi presents. Required.
+	EnvCallerTokenFile = "IMAS_FLEETRELEASER_CALLER_TOKEN_FILE"
+	// EnvCallerTokenPreviousFile optionally names the previous token,
+	// still accepted while saasapi's replicas pick up a rotation.
+	EnvCallerTokenPreviousFile = "IMAS_FLEETRELEASER_CALLER_TOKEN_PREVIOUS_FILE"
+	// EnvVersionFloor is the version at or below which nothing is
+	// signed, canonical semver with a leading 'v' (e.g. "v2.4.0").
+	// Required; "v0.0.0" allows every valid version.
+	EnvVersionFloor = "IMAS_FLEETRELEASER_VERSION_FLOOR"
+)
+
+const defaultListenAddr = ":8443"
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(run(os.Getenv))
 }
 
-// run returns the process exit code: 0 when the release is in
-// saas.fleet_versions, signed (inserted, backfilled, or already there);
-// 1 when signing or writing failed; 2 for a usage or configuration error.
-func run(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("fleetreleaser", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	version := fs.String("version", "", "sprout release version, e.g. v2.4.1 (required)")
-	osName := fs.String("os", "", "package OS, e.g. linux (required)")
-	arch := fs.String("arch", "", "package architecture, e.g. amd64 (required)")
-	fileName := fs.String("file-name", "", "package file name in the sprout repository (required)")
-	minSproutVersion := fs.String("min-sprout-version", "", "oldest sprout version that may update to this release, e.g. v2.0.0 (required)")
-	artifactURL := fs.String("artifact-url", "", "https URL the release binary was published to, stored unsigned (required)")
-	checksum := fs.String("checksum-sha256", "", "hex SHA-256 of the release binary (required)")
-	notes := fs.String("notes", "", "release notes for GET /versions")
-	releasedAtStr := fs.String("released-at", "", "RFC 3339 release time (default now)")
-	timeout := fs.Duration("timeout", 2*time.Minute, "overall deadline")
-	fs.Usage = func() {
-		fmt.Fprintf(stderr, "Usage: fleetreleaser -version V -os OS -arch ARCH -file-name NAME -min-sprout-version V -artifact-url URL -checksum-sha256 HEX [flags]\n\n")
-		fmt.Fprintf(stderr, "Signs a sprout release with OpenBao Transit key %q and writes it to saas.fleet_versions.\n",
-			fleetsign.DefaultTransitKeyName)
-		fmt.Fprintf(stderr, "Database: %s. OpenBao: %s, %s, %s, ...\n\n", EnvDSN, EnvOpenBaoAddr, EnvOpenBaoAuthMethod, EnvOpenBaoK8sRole)
-		fs.PrintDefaults()
-	}
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if fs.NArg() != 0 {
-		fmt.Fprintf(stderr, "unexpected arguments: %v\n", fs.Args())
-		return 2
-	}
+// config is the service's configuration from the environment.
+type config struct {
+	listenAddr string
+	certFile   string
+	keyFile    string
+	tokens     [][]byte
+	floor      string
+}
 
-	rel := release{
-		Manifest: fleetsign.Manifest{
-			Version:          strings.TrimSpace(*version),
-			OS:               strings.TrimSpace(*osName),
-			Arch:             strings.TrimSpace(*arch),
-			FileName:         strings.TrimSpace(*fileName),
-			ChecksumSHA256:   strings.ToLower(strings.TrimSpace(*checksum)),
-			MinSproutVersion: strings.TrimSpace(*minSproutVersion),
-		},
-		ArtifactURL: strings.TrimSpace(*artifactURL),
+func loadConfig(getenv func(string) string) (config, error) {
+	c := config{
+		listenAddr: getenv(EnvListenAddr),
+		certFile:   getenv(EnvTLSCertFile),
+		keyFile:    getenv(EnvTLSKeyFile),
+		floor:      getenv(EnvVersionFloor),
 	}
-	if err := rel.validate(); err != nil {
-		fmt.Fprintf(stderr, "%v\n", err)
-		return 2
+	if c.listenAddr == "" {
+		c.listenAddr = defaultListenAddr
 	}
-	releasedAt := time.Now()
-	if *releasedAtStr != "" {
-		t, err := time.Parse(time.RFC3339, *releasedAtStr)
+	if c.certFile == "" || c.keyFile == "" {
+		return config{}, fmt.Errorf("%s and %s are required: fleetreleaser serves TLS only", EnvTLSCertFile, EnvTLSKeyFile)
+	}
+	if !validFloor(c.floor) {
+		return config{}, fmt.Errorf("%s=%q: want a canonical semver version with a leading 'v', e.g. v2.4.0", EnvVersionFloor, c.floor)
+	}
+	path := getenv(EnvCallerTokenFile)
+	if path == "" {
+		return config{}, fmt.Errorf("%s is required", EnvCallerTokenFile)
+	}
+	tok, err := readCallerToken(path)
+	if err != nil {
+		return config{}, err
+	}
+	c.tokens = append(c.tokens, tok)
+	if path := getenv(EnvCallerTokenPreviousFile); path != "" {
+		prev, err := readCallerToken(path)
 		if err != nil {
-			fmt.Fprintf(stderr, "-released-at: %v\n", err)
-			return 2
+			return config{}, err
 		}
-		releasedAt = t
+		c.tokens = append(c.tokens, prev)
 	}
+	return c, nil
+}
 
+// run returns the process exit code: 2 for a configuration error, 1 when
+// the server fails, 0 after a clean shutdown on SIGINT/SIGTERM.
+func run(getenv func(string) string) int {
+	cfg, err := loadConfig(getenv)
+	if err != nil {
+		log.Errorf("fleetreleaser: %v", err)
+		return 2
+	}
 	signer, err := newTransitClientFromEnv()
 	if err != nil {
-		fmt.Fprintf(stderr, "%v\n", err)
+		log.Errorf("%v", err)
 		return 2
 	}
-	dsn := os.Getenv(EnvDSN)
-	if dsn == "" {
-		fmt.Fprintf(stderr, "%s is required\n", EnvDSN)
-		return 2
-	}
-	// No AutoMigrate: saasapi owns the saas schema. If the signature
-	// column isn't there yet, the insert fails and nothing is written.
-	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{Logger: gormlogger.Default.LogMode(gormlogger.Warn)})
+	cert, err := tls.LoadX509KeyPair(cfg.certFile, cfg.keyFile)
 	if err != nil {
-		fmt.Fprintf(stderr, "fleetreleaser: opening saas schema: %v\n", err)
+		log.Errorf("fleetreleaser: loading TLS certificate: %v", err)
+		return 2
+	}
+
+	// Fail fast on an OpenBao identity that can't read the key, or a key
+	// that isn't Ed25519. (Whether it can sign shows on the first request:
+	// Transit has no dry-run sign.)
+	startCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	_, err = signer.keySet(startCtx)
+	cancel()
+	if err != nil {
+		log.Errorf("fleetreleaser: reading Transit key %s: %v", signer.keyName, err)
 		return 1
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
-	out, err := publish(ctx, db, signer, rel, *notes, releasedAt)
-	if err != nil {
-		fmt.Fprintf(stderr, "%v\n", err)
-		return 1
+	svc := &signService{signer: signer, tokens: cfg.tokens, floor: cfg.floor}
+	srv := &http.Server{
+		Addr:              cfg.listenAddr,
+		Handler:           svc.handler(),
+		TLSConfig:         &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
-	fmt.Fprintf(stdout, "fleetreleaser: %s %s (key %s)\n", rel.Version, out, signer.keyName)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	errc := make(chan error, 1)
+	go func() {
+		log.Infof("fleetreleaser: signing with Transit key %s, version floor %s, listening on %s (TLS)",
+			signer.keyName, cfg.floor, cfg.listenAddr)
+		errc <- srv.ListenAndServeTLS("", "")
+	}()
+	select {
+	case err := <-errc:
+		log.Errorf("fleetreleaser: server failed: %v", err)
+		return 1
+	case <-ctx.Done():
+	}
+	log.Info("fleetreleaser: shutdown signal received")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Errorf("fleetreleaser: shutdown: %v", err)
+	}
 	return 0
 }
