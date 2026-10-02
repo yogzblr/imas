@@ -144,6 +144,36 @@ var (
 	// selfupdate ingredient verifies every release against it.
 	SproutFleetSigningJWKS string
 
+	// SproutFleetSigningKeyring ("sproutfleetsigningkeyring", sprout only)
+	// is the imas-fleet-signing public keyring the selfupdate ingredient
+	// verifies every update manifest against (fleetsign.LoadKeyring,
+	// design doc §2.5): a JSON object of key id to base64 Ed25519 public
+	// key, shipped in the sprout package (packaging/etc/
+	// fleet-signing-keys.json) and replaced by every package upgrade.
+	// Default: fleet-signing-keys.json in the config root
+	// (/etc/imas/fleet-signing-keys.json, %ProgramData%\imas\
+	// fleet-signing-keys.json on Windows).
+	SproutFleetSigningKeyring string
+
+	// SproutUpdateRepoURL ("sproutupdaterepourl", sprout only) is the
+	// https base URL of the repository this sprout installs its own
+	// updates from (requirement 20, design doc §1.8): the package file a
+	// signed update manifest names is downloaded from
+	// <SproutUpdateRepoURL>/<file_name>. It is the same per-OS repository
+	// the Ansible role imas_sprout installs the sprout from (apt or rpm
+	// repository, or the directory of the Windows MSI URL), or a mirror of
+	// it. An update command never carries a URL. Empty by default: the
+	// sprout refuses every self_update until it is set.
+	SproutUpdateRepoURL string
+
+	// SproutUpdateRepoToken ("sproutupdaterepotoken", sprout only) is the
+	// optional read token for a private SproutUpdateRepoURL, sent as HTTP
+	// basic auth (user "buildkite", like the Ansible role's apt/yum/zypper
+	// credentials) to the repository host only. A secret: it lives in the
+	// sprout config file, which the sprout keeps at mode 0600. Empty by
+	// default.
+	SproutUpdateRepoToken string
+
 	// JoinToken is the "{key_id}.{secret}" enrollment key a sprout
 	// presents to POST /v1/enroll the first time it enrolls
 	// (docs/design/imas-envoy-enrollment-design.md). Whoever provisions
@@ -545,6 +575,7 @@ func LoadConfig(binary string) {
 			jety.SetDefault("sproutrootca", filepath.Join(systemConfigRoot, "pki/sprout/tls-rootca.pem"))
 			jety.SetDefault("sproutrootcatofu", true)
 			jety.SetDefault("sproutfleetsigningjwks", filepath.Join(systemConfigRoot, "pki/sprout/fleet-signing-jwks.json"))
+			jety.SetDefault("sproutfleetsigningkeyring", filepath.Join(systemConfigRoot, "fleet-signing-keys.json"))
 			jety.SetDefault("nkeysproutpubfile", filepath.Join(systemConfigRoot, "pki/sprout/sprout.nkey.pub"))
 			jety.SetDefault("joblogdir", defaultSproutJobLogDir())
 			jety.SetDefault("joblogttl", 30*24*time.Hour) // 30 days default
@@ -577,6 +608,9 @@ func LoadConfig(binary string) {
 			SproutRootCATOFU = jety.GetBool("sproutrootcatofu")
 			BusURLs = stringList(jety.Get("busurls"))
 			BusProxyURL = strings.TrimSpace(jety.GetString("busproxyurl"))
+			SproutFleetSigningKeyring = jety.GetString("sproutfleetsigningkeyring")
+			SproutUpdateRepoURL = strings.TrimSpace(jety.GetString("sproutupdaterepourl"))
+			SproutUpdateRepoToken = strings.TrimSpace(jety.GetString("sproutupdaterepotoken"))
 
 			// The sprout config file can hold the join token. os.Create
 			// (above, and in jety.WriteConfig) leaves a new file 0644
