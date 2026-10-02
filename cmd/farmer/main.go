@@ -40,6 +40,7 @@ import (
 	"github.com/yogzblr/imas/internal/ingredients/cmd"
 	"github.com/yogzblr/imas/internal/ingredients/test"
 	"github.com/yogzblr/imas/internal/jobs"
+	"github.com/yogzblr/imas/internal/migrations"
 	"github.com/yogzblr/imas/internal/natsapi"
 	"github.com/yogzblr/imas/internal/objectstore"
 	"github.com/yogzblr/imas/internal/pki"
@@ -249,23 +250,34 @@ func main() {
 //
 // jobs owns farmer.job_status, the tenant-keyed cook job-status index the
 // SaaS API polls (internal/jobs/status_index.go). Indexing is off until
-// jobs.SetDB is called, so it's migrated and installed here with the rest.
+// jobs.SetDB is called, so it's installed here with the rest.
+//
+// The schema is cmd/migrate's (internal/migrations, design doc §4.1a);
+// farmer never creates or alters a table. It waits here, retrying with
+// backoff, until the schema is at the version this build needs: on
+// install the migration Job runs after farmer starts, and during an
+// upgrade a pod can start before the hook finishes.
 func initStorage() {
-	db, err := pxc.OpenDB(config.PXCDSN, storageModels()...)
+	db, err := pxc.OpenDB(config.PXCDSN)
 	if err != nil {
 		log.Fatalf("failed to open PXC farmer schema: %v", err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		log.Fatalf("failed to open PXC farmer schema: %v", err)
+	}
+	if err := migrations.WaitForSchema(context.Background(), sqlDB, migrations.Farmer, log.Warnf); err != nil {
+		log.Fatalf("farmer schema: %v", err)
+	}
+	log.Noticef("farmer schema is at the version this build needs (%d)", migrations.Farmer.Latest())
 	installStorage(db)
 }
 
-// storageModels is every GORM model in the farmer schema, migrated in one
-// AutoMigrate call by initStorage.
-func storageModels() []any {
-	models := append(append(props.Models(), pki.Models()...), rbac.Models()...)
-	return append(models, jobs.Models()...)
-}
+// storageModels is every GORM model in the farmer schema, for this
+// package's tests to create in sqlite. PXC's schema comes from cmd/migrate.
+func storageModels() []any { return pxc.Models() }
 
-// installStorage hands the migrated farmer-schema handle to every package
+// installStorage hands the farmer-schema handle to every package
 // that reads or writes through it.
 func installStorage(db *gorm.DB) {
 	props.SetDB(db)
