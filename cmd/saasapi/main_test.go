@@ -128,6 +128,24 @@ func TestNewRouterFleetUpdateRoutes(t *testing.T) {
 	}
 }
 
+// TestNewRouterFleetUpdateClockSkew: SAASAPI_FLEET_UPDATE_CLOCK_SKEW
+// reaches the wave gate through the same LoadConfig → newRouter path main
+// uses, and an unset one leaves 30s.
+func TestNewRouterFleetUpdateClockSkew(t *testing.T) {
+	t.Cleanup(func() { saasapi.SetFleetUpdateClockSkew(30 * time.Second) })
+	for env, want := range map[string]time.Duration{"": 30 * time.Second, "45s": 45 * time.Second, "2m": 2 * time.Minute} {
+		t.Setenv("SAASAPI_FLEET_UPDATE_CLOCK_SKEW", env)
+		cfg, err := saasapi.LoadConfig()
+		if err != nil {
+			t.Fatalf("LoadConfig(%q): %v", env, err)
+		}
+		newRouter(cfg)
+		if got := saasapi.FleetUpdateClockSkew(); got != want {
+			t.Errorf("SAASAPI_FLEET_UPDATE_CLOCK_SKEW=%q: margin %s, want %s", env, got, want)
+		}
+	}
+}
+
 // clearFleetSignEnv unsets the IMAS_FLEETSIGN_* settings for the test, so
 // the developer's environment can't configure a key source behind its back.
 func clearFleetSignEnv(t *testing.T) {

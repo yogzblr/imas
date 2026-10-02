@@ -604,8 +604,9 @@ paths:
         already newer than the target is failed up front and sent nothing.
 
         A tenant has one rollout in progress at a time: in one transaction
-        that locks and writes the tenant's update-policy row (so its
-        `updated_at` moves), the policy checks are repeated, any
+        that locks and writes the tenant's update-policy row (a claim
+        column the API doesn't return; `updated_at` doesn't move), the
+        policy checks are repeated, any
         `self_update` batch with a queued, dispatching or running item
         refuses the request with `409 update_in_progress`, and the batch is
         written.
@@ -613,9 +614,16 @@ paths:
         Items then go out in waves of `batch_size`, each wave gated by
         `gate`. Approval, revocation and window are re-checked before every
         wave. An item succeeds only when its sprout reconnects and reports
-        `target_version` in its facts; a succeeded job alone leaves it
-        running. 30 minutes after its wave's dispatch, an item still
-        running is `unresponsive_after_update`.
+        `target_version` in its facts, in a report written after the item
+        was dispatched (30 seconds' clock skew allowed by default,
+        `SAASAPI_FLEET_UPDATE_CLOCK_SKEW`); a succeeded job alone, or an
+        older row naming the target, leaves it running, and a report dated
+        too far ahead of saasapi's clock fails it with `facts_clock_skew`.
+        A sprout that already reported the target when the rollout was
+        planned passes once its update job succeeds ("already running")
+        while its report still names the target. 30 minutes after its
+        wave's dispatch, an item still running is
+        `unresponsive_after_update`.
 
         Rate-limited per tenant: one request every 10 seconds, burst 2,
         per pod.
@@ -999,6 +1007,7 @@ components:
                   - no_release_for_platform
                   - below_min_sprout_version
                   - sprout_newer_than_target
+                  - facts_clock_skew
               message: { type: string, description: The fixed message for `error`. }
 
     FleetVersion:
@@ -1029,7 +1038,7 @@ components:
         updated_at:
           type: string
           format: date-time
-          description: Omitted for a tenant that has never set a policy. Also moves when an update rollout starts, which claims the tenant's one rollout slot by writing this row.
+          description: When the policy last changed (PATCH). Omitted for a tenant that has never set a policy. Starting an update rollout doesn't move it.
 
     PatchUpdatePolicyRequest:
       type: object

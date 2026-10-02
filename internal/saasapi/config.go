@@ -83,6 +83,12 @@ import (
 //     read-only fleet signing key client must also be configured
 //     (IMAS_FLEETSIGN_OPENBAO_*, internal/fleetsign; design doc §2.5), or
 //     saasapi refuses to start.
+//   - SAASAPI_FLEET_UPDATE_CLOCK_SKEW: how far saasapi's clock and a
+//     farmer node's may differ when the rollout's wave gate judges whether
+//     a sprout's report postdates its update's dispatch (rolloutClockSkew),
+//     as a Go duration ("45s", "2m"). Default 30s; must be above 0 and at
+//     most 5m, since a wider margin lets older rows count as proof. An
+//     invalid value is a startup error.
 //
 // The operator plane (fleet_releases.go, design doc §2.5): release
 // registration and revocation, served on its own HTTPS listener and never
@@ -109,7 +115,10 @@ type Config struct {
 	// ListenAddr is the address the HTTP server binds to, e.g. ":8081".
 	ListenAddr string
 	// DSN is the GORM MySQL DSN for the shared PXC cluster's `saas` schema,
-	// e.g. "saas_svc:pass@tcp(pxc-cluster:3306)/saas?parseTime=true".
+	// e.g. "saas_svc:pass@tcp(pxc-cluster:3306)/saas?parseTime=true&loc=UTC".
+	// parseTime=true is required: OpenDB refuses a DSN without it, since
+	// every DATETIME column would otherwise fail to scan into time.Time.
+	// loc should be UTC (the driver's default); OpenDB warns otherwise.
 	DSN string
 
 	ReadTimeout  time.Duration
@@ -158,6 +167,9 @@ type Config struct {
 	// FleetUpdateDispatchEnabled is the fleet update dispatch feature
 	// flag, passed to SetFleetUpdateDispatchEnabled before NewRouter.
 	FleetUpdateDispatchEnabled bool
+	// FleetUpdateClockSkew is the wave gate's clock-skew margin, passed to
+	// SetFleetUpdateClockSkew before NewRouter.
+	FleetUpdateClockSkew time.Duration
 
 	// OperatorListenAddr enables the operator plane (NewOperatorServer)
 	// on this address. Empty means it is off.
@@ -174,7 +186,8 @@ type Config struct {
 // LoadConfig reads the saasapi service's configuration from environment
 // variables, applying sane defaults where possible. It returns an error
 // only for a value that is set but invalid (the enrollment-key rate-limit
-// settings and the fleet update dispatch flag).
+// settings, the fleet update dispatch flag and clock-skew margin, and the
+// operator plane's settings).
 func LoadConfig() (Config, error) {
 	cfg := Config{
 		ListenAddr:   envOrDefault("SAASAPI_LISTEN_ADDR", ":8081"),
@@ -199,6 +212,8 @@ func LoadConfig() (Config, error) {
 		EnrollmentKeyRateBurst: enrollmentKeyIssuanceBurst,
 
 		ValkeyAddrs: splitAddrs(os.Getenv("SAASAPI_VALKEY_ADDRS")),
+
+		FleetUpdateClockSkew: defaultRolloutClockSkew,
 
 		OperatorListenAddr:        os.Getenv("SAASAPI_OPERATOR_LISTEN_ADDR"),
 		OperatorTLSCertFile:       os.Getenv("SAASAPI_OPERATOR_TLS_CERT_FILE"),
@@ -233,6 +248,13 @@ func LoadConfig() (Config, error) {
 			return Config{}, fmt.Errorf("saasapi: SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=%q: not a boolean", v)
 		}
 		cfg.FleetUpdateDispatchEnabled = b
+	}
+	if v := os.Getenv("SAASAPI_FLEET_UPDATE_CLOCK_SKEW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 || d > maxRolloutClockSkew {
+			return Config{}, fmt.Errorf("saasapi: SAASAPI_FLEET_UPDATE_CLOCK_SKEW=%q: want a duration above 0 and at most %s", v, maxRolloutClockSkew)
+		}
+		cfg.FleetUpdateClockSkew = d
 	}
 	if cfg.OperatorListenAddr != "" {
 		if err := cfg.validateOperator(); err != nil {

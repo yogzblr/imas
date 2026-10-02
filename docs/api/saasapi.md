@@ -213,6 +213,8 @@ The version must be in the catalog (`unknown_version` otherwise) and not
 revoked (`409 version_revoked`), `auto_update` requires an approved version,
 and the window needs both bounds with end after start. A tenant with no
 policy gets the default (nothing approved, `auto_update: false`), not a 404.
+`updated_at` is when the policy itself last changed: only `PATCH` moves it.
+Starting an update rollout doesn't (FU.6b).
 Revoking a version a tenant has already approved leaves the policy row as it
 is; no rollout of that version is created.
 
@@ -255,8 +257,11 @@ so the contract is on record for when it's enabled. With the flag on:
   is `409 update_in_progress`, with `details.batch_id` naming that batch.
   The check, a repeat of the policy checks, and the write of the new batch
   happen in one transaction that locks and writes the tenant's
-  `update-policy` row, so concurrent POSTs can't both pass it. Writing the
-  row means the policy's `updated_at` also moves when a rollout starts.
+  `update-policy` row, so concurrent POSTs can't both pass it (on PXC,
+  Galera certification refuses one of two claims committed on different
+  nodes). The claim writes a column of its own, `rollout_claimed_at`
+  (migration `saas/00005`), which the API never returns; the policy's
+  `updated_at` doesn't move when a rollout starts.
   A rollout whose pod dies keeps its `queued` items, and so the tenant's
   slot, until the outbox sweeper exists.
 - **Mixed OS/arch.** One batch may span OS and arch; `target_version` is
@@ -278,6 +283,38 @@ so the contract is on record for when it's enabled. With the flag on:
   not `failed`. Both batch-status GETs apply this rule. A target version
   must be a release whose sprouts report `sprout_version` (FU.6 onward), or
   none of its sprouts can ever pass.
+- **Only a fresh report counts (FU.6b).** The `sprout_version` report must
+  have been written after the item was dispatched: a leftover row naming
+  the target (an earlier attempt, a package an administrator reinstalled)
+  is not proof, so the item stays `running` and, at the wave deadline,
+  becomes `unresponsive_after_update`. The write time is the prop's
+  `expiry` minus farmer's prop TTL (five minutes), on the clock of the
+  farmer node that stored it; the dispatch time is saasapi's. The two
+  clocks may differ by a margin, 30 seconds unless
+  `SAASAPI_FLEET_UPDATE_CLOCK_SKEW` sets another (a Go duration above 0
+  and at most `5m`; Helm `saasapi.fleetUpdateDispatch.clockSkew`): a report
+  written up to the margin before the dispatch still counts. A static prop
+  from farmer's config never counts.
+- **Clock skew is its own failure.** A report of the target dated more
+  than the margin ahead of saasapi's clock can't be shown to postdate the
+  dispatch: the item fails with `facts_clock_skew`, and saasapi logs the
+  sprout and the measured skew. Keep the nodes on NTP. A farmer clock
+  running behind by more than the margin looks like a stale report instead
+  (`unresponsive_after_update`).
+- **Sprouts already on the target.** A sprout that reported the target
+  when the rollout was planned is still sent the update; it compares the
+  target with the version it is running and answers "already running"
+  without reporting again. Its item succeeds only when that update job
+  succeeds while its last report still names the target, and fails with
+  `job_failed` or `job_expired` if the job does. Its old report alone is
+  not proof. (`farmer.job_status` doesn't record whether the job found the
+  sprout already up to date or installed a package, hence the report check.)
+- The batch-status GETs don't hold the rollout's record of dispatch times
+  or of which sprouts were on the target at planning. They judge a report
+  against the item's own last update (when farmer's reply was recorded)
+  and never pass an item on its job alone: never looser than the rollout,
+  so a GET may show an item `running` until the rollout's next poll
+  records it.
 - Items go out in waves, and approval, revocation and the window are
   re-checked before every wave. With the default `job_status` gate, the
   next wave goes out only once every item of this one has succeeded; with

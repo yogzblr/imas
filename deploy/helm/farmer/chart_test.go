@@ -936,6 +936,27 @@ func TestSaasapiRateLimitEnv(t *testing.T) {
 	}
 }
 
+// The wave gate's clock-skew margin is emitted only when set, so saasapi's
+// own default (30s) applies otherwise.
+func TestSaasapiFleetUpdateClockSkewEnv(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{nil, ""},
+		{[]string{"--set", "saasapi.fleetUpdateDispatch.clockSkew=45s"}, "45s"},
+	} {
+		env := envMap(container(t, find(t, mustRender(t, tc.args...), "Deployment", "t-farmer-saasapi"), "saasapi"))
+		e, ok := env["SAASAPI_FLEET_UPDATE_CLOCK_SKEW"]
+		if tc.want == "" && ok {
+			t.Errorf("%v: SAASAPI_FLEET_UPDATE_CLOCK_SKEW rendered unset: %v", tc.args, e)
+		}
+		if tc.want != "" && (!ok || e["value"] != tc.want) {
+			t.Errorf("%v: SAASAPI_FLEET_UPDATE_CLOCK_SKEW = %v, want %s", tc.args, e, tc.want)
+		}
+	}
+}
+
 // farmer and saasapi share PXC and Valkey: both DSNs point at the same
 // host, both Valkey lists are identical (saasapi reads farmer's heartbeat
 // keys).

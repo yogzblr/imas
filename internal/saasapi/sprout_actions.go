@@ -155,6 +155,7 @@ var actionErrorMessages = map[string]string{
 	errCodeNoReleaseForPlatform:    "the target version has no package for this sprout's OS and architecture, so the update was not sent",
 	errCodeBelowMinSproutVersion:   "this sprout's version is older than the target version supports updating from, so the update was not sent",
 	errCodeSproutNewerThanTarget:   "this sprout already runs a newer version than the target, and sprouts refuse downgrades, so the update was not sent",
+	errCodeFactsClockSkew:          "the sprout reported the target version, but the time its report was stored is too far ahead of the SaaS API's clock to show it came after this update; check the clocks (NTP) of the farmer nodes",
 }
 
 func actionErrorMessage(code string) string {

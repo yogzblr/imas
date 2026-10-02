@@ -203,6 +203,13 @@ func (FleetVersion) TableName() string { return "fleet_versions" }
 //
 // ApprovedVersion, when set, names a FleetVersion.Version. The rollout
 // window is a pair of absolute UTC instants, both set or both NULL.
+//
+// UpdatedAt moves only when the policy itself is written (PATCH
+// .../update-policy). RolloutClaimedAt is written by claimRollout when an
+// update rollout starts, and by nothing else: it exists so that two claims
+// committed on different PXC nodes write the same row and Galera
+// certification refuses one (fleet_update_dispatch.go). It is never part
+// of the API (migration saas/00005).
 type TenantUpdatePolicy struct {
 	TenantID           string     `gorm:"column:tenant_id;primaryKey;size:32" json:"tenant_id"`
 	ApprovedVersion    *string    `gorm:"column:approved_version;size:64" json:"approved_version"`
@@ -210,6 +217,7 @@ type TenantUpdatePolicy struct {
 	RolloutWindowStart *time.Time `gorm:"column:rollout_window_start" json:"rollout_window_start"`
 	RolloutWindowEnd   *time.Time `gorm:"column:rollout_window_end" json:"rollout_window_end"`
 	UpdatedAt          time.Time  `gorm:"column:updated_at" json:"updated_at"`
+	RolloutClaimedAt   *time.Time `gorm:"column:rollout_claimed_at" json:"-"`
 }
 
 func (TenantUpdatePolicy) TableName() string { return "tenant_update_policy" }

@@ -2,6 +2,7 @@ package saasapi
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,6 +75,50 @@ func TestAssetLinkModelIndexes(t *testing.T) {
 	} {
 		if err := gdb.Create(&dup).Error; err == nil {
 			t.Fatalf("%s: schema accepted a duplicate", name)
+		}
+	}
+}
+
+// OpenDB refuses a DSN without parseTime=true before connecting to
+// anything, and never echoes the DSN (it holds the password). A loc other
+// than UTC is accepted with a warning.
+func TestCheckDSN(t *testing.T) {
+	const secret = "s3cr3t-pw"
+	for _, dsn := range []string{
+		"saas_svc:" + secret + "@tcp(pxc:3306)/saas",
+		"saas_svc:" + secret + "@tcp(pxc:3306)/saas?parseTime=false&loc=UTC",
+		"saas_svc:" + secret + "@tcp(pxc:3306)/saas?charset=utf8mb4",
+		"saas_svc:" + secret + "@tcp(pxc:3306)saas?parseTime=true", // no slash before the schema
+	} {
+		_, err := OpenDB(dsn)
+		if err == nil {
+			t.Errorf("OpenDB accepted %q", dsn)
+			continue
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("error for a bad DSN carries the password: %v", err)
+		}
+	}
+	if _, err := OpenDB("saas_svc:" + secret + "@tcp(pxc:3306)/saas"); err == nil || !strings.Contains(err.Error(), "parseTime=true") {
+		t.Errorf("missing parseTime: %v, want an error naming parseTime=true", err)
+	}
+
+	for dsn, warn := range map[string]bool{
+		"saas_svc:" + secret + "@tcp(pxc:3306)/saas?parseTime=true":                               false,
+		"saas_svc:" + secret + "@tcp(pxc:3306)/saas?parseTime=true&charset=utf8mb4&loc=UTC":       false,
+		"saas_svc:" + secret + "@tcp(pxc:3306)/saas?parseTime=true&loc=Europe%2FLondon":           true,
+		"saas_svc:" + secret + "@tcp(pxc:3306)/saas?parseTime=true&loc=Local&charset=utf8mb4&x=1": true,
+	} {
+		var err error
+		logged := captureStderr(t, func() { err = checkDSN(dsn) })
+		if err != nil {
+			t.Errorf("checkDSN(%q) = %v", dsn, err)
+		}
+		if got := strings.Contains(logged, "SAASAPI_DSN sets loc="); got != warn {
+			t.Errorf("checkDSN(%q) warned %t, want %t (log %q)", dsn, got, warn, logged)
+		}
+		if strings.Contains(logged, secret) {
+			t.Errorf("checkDSN(%q) logged the password", dsn)
 		}
 	}
 }
