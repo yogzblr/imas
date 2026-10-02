@@ -1,6 +1,6 @@
 # Farmer: sprout update manifest
 
-`GET /v1/sprout/update-manifest?os=&arch=&version=` — served by farmer on
+`GET /v1/sprout/update-manifest?os=&arch=&package_type=&version=` — served by farmer on
 the same HTTPS listener as the sprout recipe download (`GET /files/`),
 registered in [`internal/api/routers.go`](../../internal/api/routers.go),
 handled by `GetSproutUpdateManifest` in
@@ -9,12 +9,13 @@ Design: [API design §2.6](../design/cloudxp-machine-manager-api-design.md#26-up
 with the manifest format and signing in §2.5.
 
 A sprout calls it to learn what to install for a `self_update`: the signed
-manifest of the sprout version **its own tenant has approved**, for its OS
-and architecture. Where the package comes from is not in the response: the
-sprout downloads `file_name` from the repository configured in the sprout
-itself (requirement 20, §1.8), checks `checksum_sha256`, and verifies
-`signature` against the keyring shipped in its package. FU.2 is that
-client side.
+manifest of the sprout version **its own tenant has approved**, for its OS,
+architecture and package type. Where the package comes from is not in the
+response: the sprout verifies `signature` against the keyring shipped in
+its package, finds the entry with `checksum_sha256` in the repository
+configured in the sprout itself (requirement 20, §1.8), and checks the
+download against it. FU.2 is that client side
+(`internal/ingredients/selfupdate`).
 
 ## Authentication
 
@@ -26,7 +27,7 @@ behind Envoy, because farmer's API port is reachable without Envoy.
 
 - The tenant and sprout are the token's `tenant_id` and `sprout_id`
   claims. There is no tenant parameter; any query parameter other than
-  `os`, `arch` and `version` is ignored.
+  `os`, `arch`, `package_type` and `version` is ignored.
 - The CLI's RBAC token is not accepted, and `dangerously_allow_root` does
   not open this route: without a verified JWT there is no tenant to answer
   for.
@@ -43,6 +44,7 @@ behind Envoy, because farmer's API port is reachable without Envoy.
 |---|---|
 | `os` | required, exactly once, lowercase `[a-z0-9_]`, starting with a letter or digit, at most 32 characters (e.g. `linux`, `windows`) |
 | `arch` | same rules as `os` (e.g. `amd64`, `arm64`) |
+| `package_type` | required, exactly once, `deb`, `rpm` or `msi`: the installer the sprout uses. One linux/amd64 binary ships as both a `.deb` and an `.rpm`, registered as two rows. It is not signed; farmer serves a row only if its signed `file_name` ends in `.<package_type>`, and the sprout checks the same |
 | `version` | required, exactly once, canonical semver with a leading `v` and no build metadata, at most 64 characters (e.g. `v2.4.1`, `v2.5.0-rc.1`) |
 
 These are `fleetsign.Manifest.Validate`'s rules, so a value that could never

@@ -323,9 +323,9 @@ func (p *operatorPlane) registerFleetRelease(w http.ResponseWriter, r *http.Requ
 			return err
 		}
 		for _, row := range toCreate {
-			sig, ok := signed[row.OS+"/"+row.Arch]
+			sig, ok := signed[row.releaseKey()]
 			if !ok {
-				return fmt.Errorf("no signature for %s/%s", row.OS, row.Arch)
+				return fmt.Errorf("no signature for %s", row.releaseKey())
 			}
 			if row.ID, err = newID("fv_"); err != nil {
 				return err
@@ -396,23 +396,23 @@ func (p *operatorPlane) signRelease(ctx context.Context, w http.ResponseWriter, 
 		var refused *signRefusedError
 		switch {
 		case errors.As(err, &refused):
-			log.Warnf("saasapi: fleetreleaser refused %s %s/%s: %s: %s", row.Version, row.OS, row.Arch, refused.Code, refused.Message)
+			log.Warnf("saasapi: fleetreleaser refused %s %s: %s: %s", row.Version, row.releaseKey(), refused.Code, refused.Message)
 			writeErrorDetails(w, http.StatusUnprocessableEntity, "signing_refused",
-				fmt.Sprintf("fleetreleaser refused to sign %s %s/%s", row.Version, row.OS, row.Arch),
+				fmt.Sprintf("fleetreleaser refused to sign %s %s", row.Version, row.releaseKey()),
 				map[string]any{"signer_error": refused.Code, "signer_message": refused.Message})
 			return nil, false
 		case err != nil:
-			log.Errorf("saasapi: signing %s %s/%s: %v", row.Version, row.OS, row.Arch, err)
+			log.Errorf("saasapi: signing %s %s: %v", row.Version, row.releaseKey(), err)
 			writeError(w, http.StatusBadGateway, "signer_unavailable", "fleetreleaser could not sign the release")
 			return nil, false
 		}
 		m.Signature = sig
 		if err := ks.Verify(m); err != nil {
-			log.Errorf("saasapi: fleetreleaser's signature for %s %s/%s does not verify: %v", row.Version, row.OS, row.Arch, err)
+			log.Errorf("saasapi: fleetreleaser's signature for %s %s does not verify: %v", row.Version, row.releaseKey(), err)
 			writeError(w, http.StatusBadGateway, "signer_unavailable", "fleetreleaser returned a signature that does not verify")
 			return nil, false
 		}
-		signed[row.OS+"/"+row.Arch] = sig
+		signed[row.releaseKey()] = sig
 	}
 	return signed, true
 }
@@ -463,7 +463,7 @@ func validateRelease(req fleetReleaseRequest) ([]FleetVersion, error) {
 		case !strings.HasSuffix(pkg.FileName, "."+pkg.PackageType):
 			return nil, fmt.Errorf("packages[%d]: file_name must end in .%s", i, pkg.PackageType)
 		}
-		key := pkg.OS + "/" + pkg.Arch
+		key := row.releaseKey()
 		if seen[key] {
 			return nil, fmt.Errorf("packages[%d]: more than one package for %s", i, key)
 		}
@@ -480,7 +480,7 @@ func planRelease(requested, existing []FleetVersion) ([]FleetVersion, error) {
 	byKey := make(map[string]FleetVersion, len(existing))
 	revoked := false
 	for _, row := range existing {
-		byKey[row.OS+"/"+row.Arch] = row
+		byKey[row.releaseKey()] = row
 		revoked = revoked || row.Revoked
 	}
 	var create []FleetVersion
@@ -490,16 +490,16 @@ func planRelease(requested, existing []FleetVersion) ([]FleetVersion, error) {
 				"version %s is registered with min_sprout_version %s; releases are immutable, register a new version",
 				want.Version, existing[0].MinSproutVersion)}
 		}
-		have, ok := byKey[want.OS+"/"+want.Arch]
+		have, ok := byKey[want.releaseKey()]
 		if !ok {
 			create = append(create, want)
 			continue
 		}
-		if have.PackageType != want.PackageType || have.FileName != want.FileName ||
+		if have.FileName != want.FileName ||
 			have.ChecksumSHA256 != want.ChecksumSHA256 || have.MinSproutVersion != want.MinSproutVersion {
 			return nil, &releaseConflict{"release_conflict", fmt.Sprintf(
-				"version %s is registered for %s/%s with a different package_type, file_name or checksum_sha256; releases are immutable, register a new version",
-				want.Version, want.OS, want.Arch)}
+				"version %s is registered for %s with a different file_name or checksum_sha256; releases are immutable, register a new version",
+				want.Version, want.releaseKey())}
 		}
 	}
 	if revoked && len(create) > 0 {
@@ -512,7 +512,7 @@ func planRelease(requested, existing []FleetVersion) ([]FleetVersion, error) {
 // loadReleaseRows reads version's rows, ordered by OS and arch, locking
 // them when lock is set (inside a transaction).
 func loadReleaseRows(d *gorm.DB, version string, lock bool) ([]FleetVersion, error) {
-	q := d.Where("version = ?", version).Order("os").Order("arch")
+	q := d.Where("version = ?", version).Order("os").Order("arch").Order("package_type")
 	if lock {
 		q = q.Clauses(clause.Locking{Strength: "UPDATE"})
 	}

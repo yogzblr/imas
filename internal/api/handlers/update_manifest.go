@@ -1,10 +1,12 @@
 package handlers
 
-// GET /v1/sprout/update-manifest?os=&arch=&version= — design doc §2.6.
-// Serves a sprout the signed fleetsign.Manifest for its own tenant's
-// approved sprout version, for one OS and arch. Authenticated with the
-// sprout's gateway JWT by Auth (internal/api/middleware.go), which puts
-// the verified (tenant_id, sprout_id) on the request context
+// GET /v1/sprout/update-manifest?os=&arch=&package_type=&version= —
+// design doc §2.6. Serves a sprout the signed fleetsign.Manifest for its
+// own tenant's approved sprout version, for one OS, arch and package type
+// (deb, rpm or msi: one linux/amd64 binary ships as both a .deb and an
+// .rpm). Authenticated with the sprout's gateway JWT by Auth
+// (internal/api/middleware.go), which puts the verified (tenant_id,
+// sprout_id) on the request context
 // (WithSproutIdentity); the tenant is never read from the request.
 //
 // The manifest has no URL (fleetsign.Manifest, requirement 20): the
@@ -29,6 +31,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,11 +69,12 @@ func sproutIdentityFrom(ctx context.Context) (SproutIdentity, bool) {
 // UpdateManifestStore reads the manifest a tenant may be served.
 type UpdateManifestStore interface {
 	// ApprovedManifest returns the saas.fleet_versions row for (version,
-	// os, arch), signature included, only if it is not revoked and
+	// os, arch, packageType), signature included, only if it is not
+	// revoked and
 	// version is the approved_version in tenantID's
 	// saas.tenant_update_policy row. found is false for every other
 	// case; err is only for a failed read.
-	ApprovedManifest(ctx context.Context, tenantID, os, arch, version string) (m fleetsign.Manifest, found bool, err error)
+	ApprovedManifest(ctx context.Context, tenantID, os, arch, packageType, version string) (m fleetsign.Manifest, found bool, err error)
 }
 
 // mysqlUpdateManifestStore reads saas.* through farmer's own PXC handle,
@@ -79,7 +83,8 @@ type UpdateManifestStore interface {
 type mysqlUpdateManifestStore struct{ db *gorm.DB }
 
 // approvedManifestQuery selects the row in one statement, with tenant_id
-// in the same WHERE as the caller-supplied version, os and arch (§4
+// in the same WHERE as the caller-supplied version, os, arch and package
+// type (§4
 // "Tenant safety"): the policy join is what restricts a tenant to the
 // one version it approved.
 const approvedManifestQuery = `SELECT fv.version, fv.os, fv.arch, fv.file_name,
@@ -87,11 +92,11 @@ const approvedManifestQuery = `SELECT fv.version, fv.os, fv.arch, fv.file_name,
   FROM saas.fleet_versions fv
   JOIN saas.tenant_update_policy p ON p.approved_version = fv.version
  WHERE p.tenant_id = ? AND fv.version = ? AND fv.os = ? AND fv.arch = ?
-   AND fv.revoked = FALSE`
+   AND fv.package_type = ? AND fv.revoked = FALSE`
 
-func (s mysqlUpdateManifestStore) ApprovedManifest(ctx context.Context, tenantID, os, arch, version string) (fleetsign.Manifest, bool, error) {
+func (s mysqlUpdateManifestStore) ApprovedManifest(ctx context.Context, tenantID, os, arch, packageType, version string) (fleetsign.Manifest, bool, error) {
 	var m fleetsign.Manifest
-	err := s.db.WithContext(ctx).Raw(approvedManifestQuery, tenantID, version, os, arch).Row().
+	err := s.db.WithContext(ctx).Raw(approvedManifestQuery, tenantID, version, os, arch, packageType).Row().
 		Scan(&m.Version, &m.OS, &m.Arch, &m.FileName, &m.ChecksumSHA256, &m.MinSproutVersion, &m.Signature)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fleetsign.Manifest{}, false, nil
@@ -159,13 +164,13 @@ func GetSproutUpdateManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	osName, arch, version, ok := manifestQuery(r)
+	osName, arch, pkgType, version, ok := manifestQuery(r)
 	if !ok {
 		writeManifestError(w, http.StatusBadRequest, "bad_request")
 		return
 	}
 
-	key := manifestCacheKey{tenantID: id.TenantID, os: osName, arch: arch, version: version}
+	key := manifestCacheKey{tenantID: id.TenantID, os: osName, arch: arch, packageType: pkgType, version: version}
 	m, found, ok := updateManifests.get(key, time.Now())
 	if !ok {
 		var err error
@@ -196,10 +201,15 @@ func GetSproutUpdateManifest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// manifestQuery returns the os, arch and version parameters, each
-// present exactly once and well-formed. Other parameters are ignored —
-// in particular there is no tenant parameter; the tenant is the JWT's.
-func manifestQuery(r *http.Request) (osName, arch, version string, ok bool) {
+// manifestPackageTypes are the package_type values a sprout may ask for:
+// the installer it uses (saasapi's packageTypeOS).
+var manifestPackageTypes = map[string]bool{"deb": true, "rpm": true, "msi": true}
+
+// manifestQuery returns the os, arch, package_type and version
+// parameters, each present exactly once and well-formed. Other parameters
+// are ignored — in particular there is no tenant parameter; the tenant is
+// the JWT's.
+func manifestQuery(r *http.Request) (osName, arch, pkgType, version string, ok bool) {
 	q := r.URL.Query()
 	one := func(name string) (string, bool) {
 		v := q[name]
@@ -209,20 +219,24 @@ func manifestQuery(r *http.Request) (osName, arch, version string, ok bool) {
 		return v[0], true
 	}
 	if osName, ok = one("os"); !ok || !reManifestOSArch.MatchString(osName) {
-		return "", "", "", false
+		return "", "", "", "", false
 	}
 	if arch, ok = one("arch"); !ok || !reManifestOSArch.MatchString(arch) {
-		return "", "", "", false
+		return "", "", "", "", false
+	}
+	if pkgType, ok = one("package_type"); !ok || !manifestPackageTypes[pkgType] {
+		return "", "", "", "", false
 	}
 	if version, ok = one("version"); !ok || len(version) > maxManifestVersionLen ||
 		!semver.IsValid(version) || semver.Canonical(version) != version {
-		return "", "", "", false
+		return "", "", "", "", false
 	}
-	return osName, arch, version, true
+	return osName, arch, pkgType, version, true
 }
 
 // lookupApprovedManifest reads key's row and checks it before it may be
-// served: well-formed, for exactly the os/arch/version asked, carrying a
+// served: well-formed, for exactly the os/arch/version asked, a file_name
+// of the package type asked (package_type itself isn't signed), carrying a
 // signature, and verifying against farmer's read-only view of the
 // imas-fleet-signing key. A row that fails any check is logged and
 // reported as not found; an unsigned row is never served. err is
@@ -233,12 +247,14 @@ func lookupApprovedManifest(ctx context.Context, key manifestCacheKey) (fleetsig
 	if store == nil {
 		return fleetsign.Manifest{}, false, errors.New("update manifest store not configured")
 	}
-	m, found, err := store.ApprovedManifest(ctx, key.tenantID, key.os, key.arch, key.version)
+	m, found, err := store.ApprovedManifest(ctx, key.tenantID, key.os, key.arch, key.packageType, key.version)
 	if err != nil || !found {
 		return fleetsign.Manifest{}, false, err
 	}
-	if m.Version != key.version || m.OS != key.os || m.Arch != key.arch {
-		log.Errorf("update-manifest: store returned %s %s/%s for %s %s/%s; refusing", m.Version, m.OS, m.Arch, key.version, key.os, key.arch)
+	if m.Version != key.version || m.OS != key.os || m.Arch != key.arch ||
+		!strings.HasSuffix(m.FileName, "."+key.packageType) {
+		log.Errorf("update-manifest: store returned %s %s/%s %s for %s %s/%s %s; refusing",
+			m.Version, m.OS, m.Arch, m.FileName, key.version, key.os, key.arch, key.packageType)
 		return fleetsign.Manifest{}, false, nil
 	}
 	if err := m.Validate(); err != nil {
@@ -287,10 +303,10 @@ var (
 )
 
 // manifestCacheKey is per tenant: two tenants asking for the same
-// version, os and arch never share an entry, since whether a row is
-// served depends on each tenant's own approval.
+// version, os, arch and package type never share an entry, since whether
+// a row is served depends on each tenant's own approval.
 type manifestCacheKey struct {
-	tenantID, os, arch, version string
+	tenantID, os, arch, packageType, version string
 }
 
 type manifestCacheEntry struct {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -60,13 +62,14 @@ func newManifestFixture(t *testing.T) *manifestFixture {
 
 	db := newSaasTestDB(t)
 	f := &manifestFixture{gw: gw, rows: map[string]fleetsign.Manifest{}}
-	insert := func(version, os, arch string, revoked bool) {
+	insertPkg := func(version, os, arch, pkg string, revoked bool) {
+		sum := sha256.Sum256([]byte(version + os + arch + pkg))
 		m := fleetsign.Manifest{
 			Version:          version,
 			OS:               os,
 			Arch:             arch,
-			FileName:         fmt.Sprintf("imas-sprout_%s_%s_%s.pkg", strings.TrimPrefix(version, "v"), os, arch),
-			ChecksumSHA256:   strings.Repeat("0123456789abcdef", 4),
+			FileName:         fmt.Sprintf("imas-sprout_%s_%s_%s.%s", strings.TrimPrefix(version, "v"), os, arch, pkg),
+			ChecksumSHA256:   hex.EncodeToString(sum[:]),
 			MinSproutVersion: "v1.0.0",
 		}
 		msg, err := m.Message()
@@ -76,11 +79,16 @@ func newManifestFixture(t *testing.T) *manifestFixture {
 		m.Signature = fleetsign.EncodeSignature(1, ed25519.Sign(priv, msg))
 		exec(t, db, `INSERT INTO saas.fleet_versions
 			(id, version, os, arch, package_type, file_name, checksum_sha256, min_sprout_version, signature, revoked, released_at)
-			VALUES (?, ?, ?, ?, 'deb', ?, ?, ?, ?, ?, ?)`,
-			version+os+arch, m.Version, m.OS, m.Arch, m.FileName, m.ChecksumSHA256, m.MinSproutVersion, m.Signature, revoked, time.Now())
-		f.rows[version+" "+os+" "+arch] = m
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			version+os+arch+pkg, m.Version, m.OS, m.Arch, pkg, m.FileName, m.ChecksumSHA256, m.MinSproutVersion, m.Signature, revoked, time.Now())
+		f.rows[version+" "+os+" "+arch+" "+pkg] = m
+	}
+	insert := func(version, os, arch string, revoked bool) {
+		insertPkg(version, os, arch, defaultPackageType(os), revoked)
 	}
 	insert("v2.4.1", "linux", "amd64", false)
+	// The same linux/amd64 release as an .rpm, beside the .deb.
+	insertPkg("v2.4.1", "linux", "amd64", "rpm", false)
 	insert("v2.4.1", "linux", "arm64", false)
 	insert("v2.4.1", "windows", "amd64", false)
 	insert("v2.5.0", "linux", "amd64", false)
@@ -131,7 +139,7 @@ func newSaasTestDB(t *testing.T) *gorm.DB {
 		revoked tinyint(1) NOT NULL DEFAULT 0,
 		released_at datetime NOT NULL,
 		notes text,
-		UNIQUE (version, os, arch))`)
+		UNIQUE (version, os, arch, package_type))`)
 	exec(t, db, `CREATE TABLE saas.tenant_update_policy (
 		tenant_id varchar(32) PRIMARY KEY,
 		approved_version varchar(64) DEFAULT NULL,
@@ -154,9 +162,26 @@ func (f *manifestFixture) bearer(t *testing.T, tenantID, sproutID string) string
 	return "Bearer " + mint(t, f.gw.priv, tenantID, sproutID, time.Now().Add(time.Hour))
 }
 
+// defaultPackageType is the package a sprout on os asks for in these
+// tests: msi on Windows, deb on Linux.
+func defaultPackageType(os string) string {
+	if os == "windows" {
+		return "msi"
+	}
+	return "deb"
+}
+
 func (f *manifestFixture) get(t *testing.T, authz, os, arch, version string) (int, string) {
 	t.Helper()
+	return f.getPkg(t, authz, os, arch, defaultPackageType(os), version)
+}
+
+func (f *manifestFixture) getPkg(t *testing.T, authz, os, arch, pkg, version string) (int, string) {
+	t.Helper()
 	q := url.Values{}
+	if pkg != "" {
+		q.Set("package_type", pkg)
+	}
 	if os != "" {
 		q.Set("os", os)
 	}
@@ -186,9 +211,32 @@ func TestUpdateManifestRoute_ServesOwnTenantsApprovedRow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s/%s: not a strict manifest: %v", c.os, c.arch, err)
 		}
-		if want := f.rows["v2.4.1 "+c.os+" "+c.arch]; got != want {
+		if want := f.rows["v2.4.1 "+c.os+" "+c.arch+" "+defaultPackageType(c.os)]; got != want {
 			t.Errorf("%s/%s: got %+v, want %+v", c.os, c.arch, got, want)
 		}
+	}
+}
+
+// TestUpdateManifestRoute_PackageTypeSelectsRow: one linux/amd64 release
+// registered as a .deb and an .rpm; each sprout gets its own package.
+func TestUpdateManifestRoute_PackageTypeSelectsRow(t *testing.T) {
+	f := newManifestFixture(t)
+	for i, pkg := range []string{"deb", "rpm"} {
+		code, body := f.getPkg(t, f.bearer(t, "t_acme", fmt.Sprintf("pt-%d", i)), "linux", "amd64", pkg, "v2.4.1")
+		if code != http.StatusOK {
+			t.Fatalf("%s: got %d %s", pkg, code, body)
+		}
+		got, err := fleetsign.ParseManifest([]byte(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := f.rows["v2.4.1 linux amd64 "+pkg]; got != want || !strings.HasSuffix(got.FileName, "."+pkg) {
+			t.Errorf("%s: got %+v, want %+v", pkg, got, want)
+		}
+	}
+	// No msi is registered for linux.
+	if code, body := f.getPkg(t, f.bearer(t, "t_acme", "pt-msi"), "linux", "amd64", "msi", "v2.4.1"); code != http.StatusNotFound || body != genericNotFound {
+		t.Errorf("msi for linux: got %d %s, want generic 404", code, body)
 	}
 }
 
@@ -235,7 +283,7 @@ func TestUpdateManifestRoute_CrossTenantIsolation(t *testing.T) {
 	// The tenant is the JWT's: query parameters naming another tenant are
 	// ignored.
 	for _, param := range []string{"tenant_id", "tenant", "tenantId"} {
-		u := f.srv.URL + "/v1/sprout/update-manifest?os=linux&arch=amd64&version=v2.5.0&" + param + "=t_other"
+		u := f.srv.URL + "/v1/sprout/update-manifest?os=linux&arch=amd64&package_type=deb&version=v2.5.0&" + param + "=t_other"
 		if code, body := get(t, u, f.bearer(t, "t_acme", "web-02")); code != http.StatusNotFound || body != genericNotFound {
 			t.Errorf("t_acme with %s=t_other: got %d %s, want generic 404", param, code, body)
 		}
@@ -285,6 +333,12 @@ func TestUpdateManifestRoute_MissingParameter(t *testing.T) {
 			}
 		})
 	}
+	t.Run("missing package_type", func(t *testing.T) {
+		code, _ := f.getPkg(t, f.bearer(t, "t_acme", "p-pkg"), "linux", "amd64", "", "v2.4.1")
+		if code != http.StatusBadRequest {
+			t.Errorf("got %d, want 400", code)
+		}
+	})
 }
 
 func TestUpdateManifestRoute_BadJWT(t *testing.T) {

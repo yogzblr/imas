@@ -183,7 +183,7 @@ func TestSproutUpdateManifest_ThroughRealEnvoy(t *testing.T) {
 	}
 	const tenantID, sproutID = "t_acme", "web-01"
 	const manifestPath = "/v1/sprout/update-manifest"
-	const query = "?os=linux&arch=amd64&version=v2.4.1"
+	const query = "?os=linux&arch=amd64&package_type=deb&version=v2.4.1"
 
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
