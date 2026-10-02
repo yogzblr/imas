@@ -65,9 +65,12 @@ jobs:
           install-go: false
 
       - name: Check formatting
+        # dependencies/ is third-party source saved by go-licenses
+        # (.github/workflows/go-licenses.yml), not ours to format.
         run: |
           go install golang.org/x/tools/cmd/goimports@latest
-          test -z "$(goimports -l .)" || (goimports -d . && exit 1)
+          files=$(git ls-files -- '*.go' ':!:dependencies/')
+          test -z "$(goimports -l $files)" || (goimports -d $files && exit 1)
 
       - name: Vet
         run: go vet ./...
