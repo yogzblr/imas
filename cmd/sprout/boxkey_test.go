@@ -41,15 +41,26 @@ func setupBoxKeyEnv(t *testing.T) *boxKeyEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// One connection. Farmer's submit handler (pki.RotateSproutBoxKey's
+	// read-then-write transaction) and waitForActive's polling
+	// (pki.ValidSproutBoxKeys, whose grace sweep is an UPDATE) run on
+	// different goroutines. With a second shared-cache connection the
+	// poll's UPDATE can start between the transaction's SELECT and its
+	// UPDATE; each then needs a lock the other holds, and sqlite fails the
+	// transaction at once with SQLITE_LOCKED ("database is deadlocked"),
+	// which no busy timeout retries. The submission is dropped and
+	// waitForActive times out. Farmer runs on PXC, not sqlite, so this is
+	// the test database's locking, not the rotation's.
+	sqlDB, err := gdb.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	t.Cleanup(func() { sqlDB.Close() })
 	if err := gdb.AutoMigrate(pki.Models()...); err != nil {
 		t.Fatal(err)
 	}
 	pki.SetDB(gdb)
-	t.Cleanup(func() {
-		if sqlDB, err := gdb.DB(); err == nil {
-			sqlDB.Close()
-		}
-	})
 	tenantboxtest.Start(t)
 	e := &boxKeyEnv{tenant: pki.CurrentTenantID(), sproutID: "web-01"}
 	pki.InvalidateTenantBoxKeys(e.tenant)
