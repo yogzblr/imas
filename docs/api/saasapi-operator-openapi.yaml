@@ -1,0 +1,246 @@
+# OpenAPI description of the SaaS API's operator plane: fleet release
+# registration (design doc §2.5), written from the handler code:
+#   internal/saasapi/fleet_releases.go (operatorPlane.router: the route
+#   table, auth, both handlers), errors.go
+# Narrative and caveats: docs/api/saasapi.md, "Operator plane".
+#
+# Keep this in step with operatorPlane.router. It is a separate listener
+# (NewOperatorServer, SAASAPI_OPERATOR_LISTEN_ADDR) with a separate
+# credential, so it is a separate spec from saasapi-openapi.yaml, whose
+# paths match NewRouter one for one.
+openapi: 3.1.0
+info:
+  title: imas SaaS API — operator plane
+  version: "v1 (FU.3)"
+  summary: Sprout release registration and revocation. Not tenant-facing.
+  description: |
+    Served by saasapi's operator listener only, never by the tenant API.
+    The intended caller is the farmer Helm release's post-install and
+    post-upgrade hook Job, which registers the sprout release the chart
+    carries (`sprout.release`). There is no CI call.
+
+    **Not started by `cmd/saasapi` yet**: `NewOperatorServer` exists in
+    `internal/saasapi`, and wiring it into `main` is a follow-up.
+
+    **Auth.** `Authorization: Bearer <operator token>`, the content of the
+    mounted Secret file `SAASAPI_OPERATOR_TOKEN_FILE` (or, during a
+    rotation, `SAASAPI_OPERATOR_TOKEN_PREVIOUS_FILE`), compared in
+    constant time. The BFF's `X-Internal-Auth` secret and Keycloak JWTs
+    are not accepted. Every failure is the same 401.
+
+    **Signing.** saasapi never signs. For each package not yet registered
+    it calls `cmd/fleetreleaser` (`POST /v1/sign`), the only holder of
+    Transit sign on `imas-fleet-signing`, which validates the entry,
+    refuses a version at or below its configured floor, and returns the
+    signature. saasapi verifies every signature against the read-only key
+    set before writing anything.
+
+    **Errors.** `{"error": "<code>", "message": "<text>", "details": {...}}`.
+    404 for an unregistered path and 405 for a wrong method come from Go's
+    `http.ServeMux`, as plain text.
+servers:
+  - url: https://saasapi-operator:8443
+    description: |
+      HTTPS only (SAASAPI_OPERATOR_TLS_CERT_FILE / _KEY_FILE). Keep it off
+      the gateway's routes.
+security:
+  - operatorBearer: []
+
+paths:
+  /v1/operator/fleet-releases:
+    post:
+      operationId: RegisterFleetRelease
+      summary: Register a sprout release (idempotent)
+      description: |
+        Validates the release, compares it with what is registered for the
+        version, has fleetreleaser sign each new OS/arch package, verifies
+        each signature, and writes the new rows in one transaction.
+
+        - Releases are immutable: an OS/arch already registered with a
+          different `package_type`, `file_name` or `checksum_sha256`, or a
+          different `min_sprout_version` for the version, is 409
+          `release_conflict`, and nothing changes.
+        - The same contents again is a 200 no-op that doesn't call
+          fleetreleaser, so re-running the hook (helm upgrade, helm
+          rollback) is always safe.
+        - Packages for an OS/arch the version doesn't have yet are added
+          (201). Registered rows absent from the request are left alone.
+        - A revoked version takes no new packages (409 `version_revoked`);
+          re-registering its existing contents is a 200 no-op that leaves
+          it revoked.
+        - Any signing failure stores nothing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FleetReleaseRequest" }
+      responses:
+        "200":
+          description: Already registered with these contents; nothing changed (`created` is 0).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FleetReleaseResponse" }
+        "201":
+          description: One or more packages registered (`created` > 0).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FleetReleaseResponse" }
+        "400":
+          description: "`invalid_request` (not one JSON object of the right shape, unknown field) or `invalid_release` (a field fails validation)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: "`release_conflict` or `version_revoked`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: |
+            `signing_refused`: fleetreleaser declined to sign, e.g. a
+            version at or below its floor. `details.signer_error` and
+            `details.signer_message` carry its code and message.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "502":
+          description: "`signer_unavailable`: fleetreleaser failed, or returned a signature that doesn't verify."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: "`signing_unavailable`: the read-only fleet signing key source isn't configured or can't be read."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/operator/fleet-releases/{version}/revoke:
+    parameters:
+      - name: version
+        in: path
+        required: true
+        description: Canonical semver with a leading `v`.
+        schema: { type: string, maxLength: 64, examples: [v2.4.1] }
+    post:
+      operationId: RevokeFleetRelease
+      summary: Withdraw a version (permanent, idempotent)
+      description: |
+        Marks every row of the version revoked. No rollout of it is
+        created or continued, no tenant can newly approve it, and no
+        manifest is served for it. Sprouts already running it keep it
+        (they refuse downgrades). There is no un-revoke: a fixed build is
+        a new version. `helm rollback` does not revoke.
+      responses:
+        "200":
+          description: Revoked (or already revoked).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version, revoked, packages, already_revoked]
+                properties:
+                  version: { type: string }
+                  revoked: { type: boolean, const: true }
+                  packages: { type: integer, description: Rows of the version. }
+                  already_revoked: { type: boolean }
+        "400":
+          description: "`invalid_request`: not a canonical version."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: "`not_found`: no release is registered for this version."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+components:
+  securitySchemes:
+    operatorBearer:
+      type: http
+      scheme: bearer
+      description: |
+        The operator token from a mounted Secret file. Distinct from the
+        BFF's shared secret (saasapi refuses to start the operator plane
+        if they are equal) and from saasapi's fleetreleaser token.
+
+  responses:
+    Unauthorized:
+      description: "`unauthorized`: missing or wrong operator token. The body never says which."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: unauthorized, message: unauthorized }
+    InternalError:
+      description: "`internal_error`."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error: { type: string }
+        message: { type: string }
+        details: { type: object }
+
+    FleetReleaseRequest:
+      type: object
+      additionalProperties: false
+      required: [version, channel, min_sprout_version, packages]
+      properties:
+        version: { type: string, maxLength: 64, description: "Canonical semver with a leading v, e.g. v2.4.1 or v2.5.0-rc.1." }
+        channel:
+          type: string
+          pattern: "^[a-z][a-z0-9_-]{0,31}$"
+          description: Validated and logged; not stored (saas.fleet_versions has no column for it).
+        min_sprout_version: { type: string, maxLength: 64, description: "The oldest sprout that may update to this release; at most version. Signed." }
+        packages:
+          type: array
+          minItems: 1
+          maxItems: 16
+          description: At most one package per os/arch.
+          items: { $ref: "#/components/schemas/FleetReleasePackage" }
+
+    FleetReleasePackage:
+      type: object
+      additionalProperties: false
+      required: [os, arch, package_type, file_name, checksum_sha256]
+      description: |
+        `deb` and `rpm` are for `os: linux`, `msi` for `os: windows`, and
+        `file_name` must end in `.<package_type>`. Values are never
+        normalized: an uppercase checksum is refused, not lowercased.
+      properties:
+        os: { type: string, maxLength: 32, pattern: "^[a-z0-9][a-z0-9_]*$" }
+        arch: { type: string, maxLength: 32, pattern: "^[a-z0-9][a-z0-9_]*$" }
+        package_type: { type: string, enum: [deb, rpm, msi] }
+        file_name: { type: string, maxLength: 255, pattern: "^[A-Za-z0-9][A-Za-z0-9._+~-]*$" }
+        checksum_sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+
+    FleetReleaseResponse:
+      type: object
+      required: [version, min_sprout_version, revoked, created, packages]
+      description: Every registered row of the version after the request, not only the new ones.
+      properties:
+        version: { type: string }
+        min_sprout_version: { type: string }
+        revoked: { type: boolean }
+        created: { type: integer, description: Rows this request added. }
+        packages:
+          type: array
+          items:
+            type: object
+            required: [os, arch, package_type, file_name, checksum_sha256, signature]
+            properties:
+              os: { type: string }
+              arch: { type: string }
+              package_type: { type: string }
+              file_name: { type: string }
+              checksum_sha256: { type: string }
+              signature: { type: string, description: "fleetreleaser's v<key version>:<base64> Ed25519 signature." }
