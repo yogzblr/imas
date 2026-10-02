@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
 # Write the sprout release manifest the farmer chart carries (API design
 # §2.5): version plus, per OS/arch, the package file name and SHA-256 of
-# every imas-sprout package in the release. The chart's release hook sends
-# it to saasapi to be signed and registered; the sprout later installs the
-# named file from its own configured repo and checks it against this hash.
+# every imas-sprout package in the release. The chart's release hook
+# (deploy/helm/farmer, templates/sprout-release-register-job.yaml) sends
+# it, with the chart's channel and min_sprout_version, to saasapi to be
+# signed and registered; the sprout later installs the named file from its
+# own configured repo and checks it against this hash.
+#
+# Output: {"version": "vX.Y.Z", "packages": [{os, arch, package_type,
+# file_name, checksum_sha256}, ...]}. "version" keeps the tag's "v": it is
+# the canonical semver saasapi and internal/fleetsign require, verbatim
+# (they never normalize). Package file names carry the version without it.
 #
 # Usage: stamp-sprout-release.sh <dist-dir> <tag> <out-file>
 #   <dist-dir>  directory holding the release's *.rpm, *.deb, *.msi and the
 #               checksums.txt they were verified against
-#   <tag>       release tag, vX.Y.Z (the "v" is dropped from "version")
+#   <tag>       release tag, vX.Y.Z or vX.Y.Z-PRERELEASE (canonical semver: no
+#               build metadata, no leading zeros)
 #   <out-file>  e.g. deploy/helm/farmer/files/sprout-release.json
 #
 # Only imas-sprout packages are listed. A file name this script does not
@@ -22,7 +30,7 @@ out="${3:?usage: $0 <dist-dir> <tag> <out-file>}"
 
 die() { echo "stamp-sprout-release: $*" >&2; exit 1; }
 
-[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$ ]] || die "'$tag' is not a release tag (want vX.Y.Z)"
+[[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]] || die "'$tag' is not a canonical release tag (want vX.Y.Z or vX.Y.Z-PRERELEASE)"
 version="${tag#v}"
 [[ -f "$dist/checksums.txt" ]] || die "no $dist/checksums.txt"
 command -v jq >/dev/null || die "jq not found"
@@ -57,5 +65,5 @@ for t in deb rpm msi; do
 done
 
 mkdir -p "$(dirname "$out")"
-printf '%s\n' "${entries[@]}" | jq -s --arg v "$version" '{version: $v, packages: (. | sort_by(.os, .arch, .package_type))}' > "$out"
+printf '%s\n' "${entries[@]}" | jq -s --arg v "$tag" '{version: $v, packages: (. | sort_by(.os, .arch, .package_type))}' > "$out"
 echo "stamp-sprout-release: ${#entries[@]} packages -> $out"
