@@ -35,7 +35,7 @@
         | combine({'sproutupdaterepodist': imas_sprout_update_repo_dist}
                   if ansible_pkg_mgr | default('') == 'apt' and imas_sprout_update_repo_dist | trim | length > 0 else {})
         | combine({'sproutupdaterepopackageid': imas_sprout_windows_nuget_id}
-                  if ansible_os_family == 'Windows' and imas_sprout_windows_nuget_id | length > 0 else {})
+                  if ansible_os_family | default('') == 'Windows' and imas_sprout_windows_nuget_id | length > 0 else {})
         | combine({'jointoken': imas_join_token} if not _imas_sprout_enrolled | bool else {})
       }}
     # An empty imas_farmer_bus_urls removes a busurls pin set earlier; same
