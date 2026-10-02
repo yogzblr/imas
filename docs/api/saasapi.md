@@ -235,7 +235,8 @@ Storing a policy dispatches nothing. With dispatch off, which is the default,
 > row signed) and sends the sprout a one-step job carrying only the
 > version (FU.7); the sprout fetches its own signed manifest from farmer
 > (design doc §2.6, FU.1) and installs from its configured repository
-> (FU.2). Turning the flag on is a deployment decision; saasapi logs a
+> (FU.2). Waves are health-gated (FU.6, below). Turning the flag on is a
+> deployment decision, made by the Terraform UAT gate; saasapi logs a
 > warning at startup when it is on.
 
 It is documented here, and in the spec under the `fleet-update-dispatch` tag,
@@ -249,11 +250,41 @@ so the contract is on record for when it's enabled. With the flag on:
   signature valid (`500` otherwise), be the tenant's `approved_version`
   (`409 version_not_approved`), not be revoked (`409 version_revoked`), and
   now must be inside the rollout window (`409 outside_rollout_window`).
+- **One rollout in progress per tenant.** While any `self_update` batch of
+  the tenant has a `queued`, `dispatching` or `running` item, another POST
+  is `409 update_in_progress`, with `details.batch_id` naming that batch.
+  The check, a repeat of the policy checks, and the write of the new batch
+  happen in one transaction that locks and writes the tenant's
+  `update-policy` row, so concurrent POSTs can't both pass it. Writing the
+  row means the policy's `updated_at` also moves when a rollout starts.
+  A rollout whose pod dies keeps its `queued` items, and so the tenant's
+  slot, until the outbox sweeper exists.
+- **Mixed OS/arch.** One batch may span OS and arch; `target_version` is
+  the only parameter and each sprout resolves its own catalog row. Using
+  what each sprout last reported in its facts, saasapi fails up front,
+  without sending anything: a sprout whose OS/arch has no row
+  (`no_release_for_platform`), one older than the release's
+  `min_sprout_version` (`below_min_sprout_version`), and one already newer
+  than the target (`sprout_newer_than_target`; sprouts refuse downgrades).
+  A sprout that has reported none of this is sent the update and resolves
+  it itself.
+- **Health-based completion.** A `self_update` item is `succeeded` only when
+  its sprout reconnects and reports `target_version` in its facts (the
+  `sprout_version` fact, stored by farmer in `farmer.props`). Farmer
+  accepting the command, or the sprout's update job succeeding, leaves it
+  `running`. A failed or expired job fails it (`job_failed`,
+  `job_expired`). A sprout that hasn't come back on the target version
+  within 30 minutes of its wave's dispatch is `unresponsive_after_update`,
+  not `failed`. Both batch-status GETs apply this rule. A target version
+  must be a release whose sprouts report `sprout_version` (FU.6 onward), or
+  none of its sprouts can ever pass.
 - Items go out in waves, and approval, revocation and the window are
-  re-checked before every wave. One failed wave halts the rest
-  (`rollout_halted`). A sprout
-  that doesn't report back within 30 minutes becomes
-  `unresponsive_after_update`.
+  re-checked before every wave. With the default `job_status` gate, the
+  next wave goes out only once every item of this one has succeeded; with
+  `dispatch`, once farmer has accepted every item, as long as no item
+  already sent has failed or gone unresponsive. Either way, a wave that
+  fails its gate halts the rest (`rollout_halted`), and every item that was
+  sent is still followed to its outcome.
 - saasapi also needs `IMAS_FLEETSIGN_OPENBAO_*` (read-only fleet key) with the
   flag on, or it refuses to start.
 - Rate limit: one request per 10 seconds, burst 2, per pod.

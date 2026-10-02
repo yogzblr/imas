@@ -598,11 +598,24 @@ paths:
         `imas-fleet-signing`; it is the tenant's `approved_version`; it is
         not revoked; now is inside the rollout window, if one is set. The
         farmer params carry only the version: each sprout resolves its own
-        OS/arch manifest. Items then go out in waves of `batch_size`, each
-        wave gated by `gate`. Approval, revocation and window are
-        re-checked before every wave. A
-        sprout with an unfinished self_update in another batch is failed
-        with `update_already_in_progress`.
+        OS/arch manifest, so one batch may span OS and arch. From each
+        sprout's last-reported facts, a sprout whose OS/arch has no catalog
+        row, that is below the release's `min_sprout_version`, or that is
+        already newer than the target is failed up front and sent nothing.
+
+        A tenant has one rollout in progress at a time: in one transaction
+        that locks and writes the tenant's update-policy row (so its
+        `updated_at` moves), the policy checks are repeated, any
+        `self_update` batch with a queued, dispatching or running item
+        refuses the request with `409 update_in_progress`, and the batch is
+        written.
+
+        Items then go out in waves of `batch_size`, each wave gated by
+        `gate`. Approval, revocation and window are re-checked before every
+        wave. An item succeeds only when its sprout reconnects and reports
+        `target_version` in its facts; a succeeded job alone leaves it
+        running. 30 minutes after its wave's dispatch, an item still
+        running is `unresponsive_after_update`.
 
         Rate-limited per tenant: one request every 10 seconds, burst 2,
         per pod.
@@ -627,13 +640,13 @@ paths:
         "404":
           description: "`tenant_not_found`; or, with the flag off, the ServeMux's plain-text 404 because the route isn't registered."
         "409":
-          description: "`tenant_not_active`, `version_not_approved`, `version_revoked`, or `outside_rollout_window`."
+          description: "`tenant_not_active`, `version_not_approved`, `version_revoked`, `outside_rollout_window`, or `update_in_progress` (with `details.batch_id`, the tenant's rollout still in progress)."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500":
-          description: "`internal_error`, including a catalog entry whose rows fail the manifest or signature checks."
+          description: "`internal_error`, including a catalog entry whose rows fail the manifest or signature checks, or sprout facts that couldn't be read."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -931,7 +944,9 @@ components:
       description: |
         Terminal: unresolved, succeeded, failed, unresponsive_after_update.
         `dispatching` means the request was sent to farmer and no reply was
-        recorded; it is never re-sent blindly.
+        recorded; it is never re-sent blindly. A self_update item is
+        `succeeded` only once its sprout reports the target version in its
+        facts; until then it is `running`, even after its job succeeded.
 
     ActionBatch:
       type: object
@@ -981,6 +996,9 @@ components:
                   - version_revoked
                   - update_already_in_progress
                   - unresponsive_after_update
+                  - no_release_for_platform
+                  - below_min_sprout_version
+                  - sprout_newer_than_target
               message: { type: string, description: The fixed message for `error`. }
 
     FleetVersion:
@@ -1011,7 +1029,7 @@ components:
         updated_at:
           type: string
           format: date-time
-          description: Omitted for a tenant that has never set a policy.
+          description: Omitted for a tenant that has never set a policy. Also moves when an update rollout starts, which claims the tenant's one rollout slot by writing this row.
 
     PatchUpdatePolicyRequest:
       type: object
@@ -1039,7 +1057,11 @@ components:
           enum: [job_status, dispatch]
           default: job_status
           description: |
-            job_status: every item in the wave succeeded (30 min wave
+            When the next wave may be sent. job_status: every item in the
+            wave succeeded, meaning its sprout reconnected and reported the
+            target version (a failed job halts at once; 30 min wave
             timeout, then unresponsive_after_update and halt). dispatch:
-            farmer accepted every item. `probe` is rejected as
+            farmer accepted every item and no item already sent has failed
+            or gone unresponsive. Under either gate every item sent is
+            followed to its outcome. `probe` is rejected as
             unsupported_gate.

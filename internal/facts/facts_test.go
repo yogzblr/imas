@@ -238,3 +238,37 @@ func TestStoreFactsOverwrite(t *testing.T) {
 		t.Errorf("updated num_cpu: expected 8, got %q", got)
 	}
 }
+
+// Collect reports the release tag SetSproutVersion recorded, and the
+// listener stores it as PropSproutVersion: saasapi's rollout wave gate
+// reads it back from farmer.props.
+func TestSproutVersionFact(t *testing.T) {
+	t.Cleanup(func() { SetSproutVersion("") })
+	SetSproutVersion("v2.4.1")
+	sf := Collect()
+	if sf.SproutVersion != "v2.4.1" {
+		t.Fatalf("Collect().SproutVersion = %q, want v2.4.1", sf.SproutVersion)
+	}
+	data, err := json.Marshal(sf)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil || raw["sprout_version"] != "v2.4.1" {
+		t.Fatalf("JSON sprout_version = %v (%v)", raw["sprout_version"], err)
+	}
+
+	sf.SproutID = "sprout-version-fact"
+	storeFacts(testTenantID, sf)
+	if got := props.GetStringProp(sf.SproutID, PropSproutVersion); got != "v2.4.1" {
+		t.Fatalf("stored %s = %q, want v2.4.1", PropSproutVersion, got)
+	}
+
+	// A report without a version (a build without a release tag) clears
+	// the stored one rather than leaving the older report in place.
+	sf.SproutVersion = ""
+	storeFacts(testTenantID, sf)
+	if got := props.GetStringProp(sf.SproutID, PropSproutVersion); got != "" {
+		t.Fatalf("after a report with no version, %s = %q, want none", PropSproutVersion, got)
+	}
+}

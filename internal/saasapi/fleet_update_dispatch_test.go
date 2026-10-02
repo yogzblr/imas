@@ -3,6 +3,7 @@ package saasapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"strings"
@@ -25,10 +26,52 @@ func newUpdateTestDB(t *testing.T) *gorm.DB {
 	empty := func() { gdb.Where("1 = 1").Delete(&FleetVersion{}) }
 	empty()
 	t.Cleanup(empty)
+	// internal/props' table, where farmer's facts listener stores what each
+	// sprout reports (fleet_sprout_facts.go reads it);
+	// TestFarmerSproutFactsColumnContract pins the columns read.
+	if err := gdb.Exec(`CREATE TABLE IF NOT EXISTS farmer.props (
+		tenant_id TEXT NOT NULL,
+		sprout_id TEXT NOT NULL,
+		name      TEXT NOT NULL,
+		value     TEXT,
+		static    BOOLEAN NOT NULL DEFAULT 0,
+		expiry    DATETIME NOT NULL,
+		PRIMARY KEY (tenant_id, sprout_id, name)
+	)`).Error; err != nil {
+		t.Fatalf("creating farmer.props: %v", err)
+	}
 	enableFleetUpdateDispatch(t)
 	withTestFleetKeys(t)
 	return gdb
 }
+
+// reportFact stores one fact for tenantID's sproutID the way farmer's facts
+// listener does (internal/facts, storeFacts), with an expiry already in
+// the past: a rollout reads a sprout's last report, expired or not.
+func reportFact(gdb *gorm.DB, tenantID, sproutID, name, value string) error {
+	return gdb.Exec(`INSERT INTO farmer.props (tenant_id, sprout_id, name, value, static, expiry)
+VALUES (?, ?, ?, ?, 0, ?)
+ON CONFLICT (tenant_id, sprout_id, name) DO UPDATE SET value = excluded.value, expiry = excluded.expiry`,
+		tenantID, sproutID, name, value, time.Now().Add(-time.Hour).UTC()).Error
+}
+
+// mustReportFacts stores a sprout's os, arch and (if set) sprout_version.
+func mustReportFacts(t *testing.T, gdb *gorm.DB, tenantID, sproutID, osName, arch, version string) {
+	t.Helper()
+	facts := map[string]string{farmerPropOS: osName, farmerPropArch: arch}
+	if version != "" {
+		facts[farmerPropSproutVersion] = version
+	}
+	for name, value := range facts {
+		if err := reportFact(gdb, tenantID, sproutID, name, value); err != nil {
+			t.Fatalf("reporting %s for %s/%s: %v", name, tenantID, sproutID, err)
+		}
+	}
+}
+
+// oldSproutVersion is what mustUpdateFleet's sprouts report before they
+// are updated.
+const oldSproutVersion = "v2.4.0"
 
 func enableFleetUpdateDispatch(t *testing.T) {
 	t.Helper()
@@ -60,7 +103,8 @@ func mustApprove(t *testing.T, gdb *gorm.DB, tenantID, version string, window ..
 }
 
 // mustUpdateFleet sets up tenant tid with n accepted, linked sprouts
-// (upd-01 → asset u1, ...) and returns the asset ids in order.
+// (upd-01 → asset u1, ...), each reporting linux/amd64 and
+// oldSproutVersion, and returns the asset ids in order.
 func mustUpdateFleet(t *testing.T, gdb *gorm.DB, tid string, n int) []string {
 	t.Helper()
 	assets := make([]string, n)
@@ -69,6 +113,7 @@ func mustUpdateFleet(t *testing.T, gdb *gorm.DB, tid string, n int) []string {
 		assets[i] = fmt.Sprintf("u%d-%s", i+1, tid)
 		mustInsertFarmerSprout(t, gdb, tid, sprout, "accepted")
 		mustLinkAsset(t, tid, sprout, assets[i])
+		mustReportFacts(t, gdb, tid, sprout, "linux", "amd64", oldSproutVersion)
 	}
 	return assets
 }
@@ -99,13 +144,20 @@ func jidFor(sprout string) string {
 // waveReader is a JobStatusReader whose answer for each job is decided by
 // outcome, and which records how many farmer requests had been seen each
 // time it was asked, so tests can check waves never overlap.
+//
+// With reconnect set, a sprout whose job it reports succeeded then
+// "restarts on the new release": it reports reconnect as its
+// sprout_version in gdb's farmer.props, which the rollout sees on its next
+// poll. Without it, a succeeded job is all the rollout ever sees.
 type waveReader struct {
-	mu       sync.Mutex
-	farmer   *fakeFarmer
-	outcome  func(ref JobRef, call int) (JobOutcome, bool)
-	calls    int
-	seenAtOK []int
-	tenants  map[string]bool
+	mu        sync.Mutex
+	farmer    *fakeFarmer
+	outcome   func(ref JobRef, call int) (JobOutcome, bool)
+	gdb       *gorm.DB
+	reconnect string
+	calls     int
+	seenAtOK  []int
+	tenants   map[string]bool
 }
 
 func (r *waveReader) JobOutcomes(_ context.Context, tenantID string, jobs []JobRef) (map[JobRef]JobOutcome, error) {
@@ -116,12 +168,19 @@ func (r *waveReader) JobOutcomes(_ context.Context, tenantID string, jobs []JobR
 		r.tenants = map[string]bool{}
 	}
 	r.tenants[tenantID] = true
-	reqs, _ := r.farmer.seen()
-	r.seenAtOK = append(r.seenAtOK, len(reqs))
+	if r.farmer != nil {
+		reqs, _ := r.farmer.seen()
+		r.seenAtOK = append(r.seenAtOK, len(reqs))
+	}
 	out := map[JobRef]JobOutcome{}
 	for _, j := range jobs {
 		if o, ok := r.outcome(j, r.calls); ok {
 			out[j] = o
+			if o == JobOutcomeSucceeded && r.reconnect != "" {
+				if err := reportFact(r.gdb, tenantID, j.SproutID, farmerPropSproutVersion, r.reconnect); err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 	return out, nil
@@ -255,8 +314,10 @@ func TestCreateFleetUpdateBatch_Validation(t *testing.T) {
 		t.Fatalf("pending tenant: %d %v", code, resp)
 	}
 
+	// Scoped to this test's tenants: the sqlite test database is shared
+	// across the package's tests.
 	var n int64
-	gdb.Model(&AssetActionBatch{}).Count(&n)
+	gdb.Model(&AssetActionBatch{}).Where("tenant_id IN ?", []string{tid, other, windowed, pending}).Count(&n)
 	if n != 0 {
 		t.Fatalf("%d batches written for rejected requests", n)
 	}
@@ -307,7 +368,7 @@ func TestFleetUpdate_JobStatusGateRollsOutInWaves(t *testing.T) {
 	// Each job reads as running the first time it's asked about, then
 	// succeeded: every wave has to be polled at least twice.
 	asked := map[JobRef]bool{}
-	reader := &waveReader{farmer: farmer, outcome: func(ref JobRef, _ int) (JobOutcome, bool) {
+	reader := &waveReader{farmer: farmer, gdb: gdb, reconnect: "v2.4.1", outcome: func(ref JobRef, _ int) (JobOutcome, bool) {
 		if !asked[ref] {
 			asked[ref] = true
 			return JobOutcomeRunning, true
@@ -403,7 +464,7 @@ func TestFleetUpdate_FailedWaveHaltsRollout(t *testing.T) {
 		return controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
 			Status: controlplane.StatusDispatched, JID: jidFor(req.SproutID)}
 	})
-	installReader(t, &waveReader{farmer: farmer, outcome: func(ref JobRef, _ int) (JobOutcome, bool) {
+	installReader(t, &waveReader{farmer: farmer, gdb: gdb, reconnect: "v2.4.1", outcome: func(ref JobRef, _ int) (JobOutcome, bool) {
 		if ref.SproutID == "upd-02" {
 			return JobOutcomeFailed, true
 		}
@@ -449,7 +510,7 @@ func TestFleetUpdate_ExpiredJobHaltsRollout(t *testing.T) {
 		return controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
 			Status: controlplane.StatusDispatched, JID: jidFor(req.SproutID)}
 	})
-	installReader(t, &waveReader{farmer: farmer, outcome: func(ref JobRef, _ int) (JobOutcome, bool) {
+	installReader(t, &waveReader{farmer: farmer, gdb: gdb, reconnect: "v2.4.1", outcome: func(ref JobRef, _ int) (JobOutcome, bool) {
 		if ref.SproutID == "upd-02" {
 			return JobOutcomeExpired, true
 		}
@@ -494,7 +555,7 @@ func TestFleetUpdate_UnresponsiveAfterUpdate(t *testing.T) {
 		return controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
 			Status: controlplane.StatusDispatched, JID: jidFor(req.SproutID)}
 	})
-	installReader(t, &waveReader{farmer: farmer, outcome: func(ref JobRef, _ int) (JobOutcome, bool) {
+	installReader(t, &waveReader{farmer: farmer, gdb: gdb, reconnect: "v2.4.1", outcome: func(ref JobRef, _ int) (JobOutcome, bool) {
 		if ref.SproutID == "upd-01" {
 			return JobOutcomeSucceeded, true
 		}
@@ -555,7 +616,7 @@ func TestFleetUpdate_PolicyRecheckedBeforeEachWave(t *testing.T) {
 					Status: controlplane.StatusDispatched, JID: jidFor(req.SproutID)}
 			})
 			// The policy changes while the first wave is being waited on.
-			installReader(t, &waveReader{farmer: farmer, outcome: func(ref JobRef, call int) (JobOutcome, bool) {
+			installReader(t, &waveReader{farmer: farmer, gdb: gdb, reconnect: "v2.4.1", outcome: func(ref JobRef, call int) (JobOutcome, bool) {
 				if call == 1 {
 					tc.change(gdb, tid)
 				}
@@ -580,8 +641,10 @@ func TestFleetUpdate_PolicyRecheckedBeforeEachWave(t *testing.T) {
 	}
 }
 
-// The looser dispatch gate proceeds once farmer has accepted a wave,
-// without waiting for jobs, but still halts if farmer refuses one.
+// The looser dispatch gate sends the next wave once farmer has accepted
+// this one, without waiting for its sprouts to come back, and halts if
+// farmer refuses one. Every item sent is still followed to an outcome:
+// sprouts that reconnect on the target version succeed.
 func TestFleetUpdate_DispatchGate(t *testing.T) {
 	gdb := newUpdateTestDB(t)
 	fastRollouts(t, 5*time.Second)
@@ -599,35 +662,154 @@ func TestFleetUpdate_DispatchGate(t *testing.T) {
 		return controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
 			Status: controlplane.StatusDispatched, JID: jidFor(req.SproutID)}
 	})
-	reader := &waveReader{farmer: farmer, outcome: func(JobRef, int) (JobOutcome, bool) { return "", false }}
-	installReader(t, reader)
+	// No job outcome is ever recorded; each sprout that took the update
+	// reconnects on it.
+	installReader(t, &waveReader{farmer: farmer, outcome: func(ref JobRef, _ int) (JobOutcome, bool) {
+		_ = reportFact(gdb, tid, ref.SproutID, farmerPropSproutVersion, "v2.4.1")
+		return "", false
+	}})
 
 	_, resp := postUpdates(t, tid, map[string]any{"asset_ids": assets, "target_version": "v2.4.1", "batch_size": 2, "gate": "dispatch"})
 	actionDispatches.Wait()
 	if reqs, _ := farmer.seen(); len(reqs) != 4 {
 		t.Fatalf("farmer got %d requests, want 4 (waves 1 and 2)", len(reqs))
 	}
-	if reader.calls != 0 {
-		t.Fatalf("dispatch gate polled job status %d times", reader.calls)
+	_, got := getUpdateBatch(t, tid, resp["batch_id"].(string))
+	want := []struct {
+		status AssetActionItemStatus
+		code   string
+	}{
+		{ActionItemSucceeded, ""}, {ActionItemSucceeded, ""},
+		{ActionItemSucceeded, ""}, {ActionItemFailed, string(controlplane.ErrorSproutUnreachable)},
+		{ActionItemFailed, errCodeRolloutHalted},
 	}
-	var rows []AssetActionItem
-	gdb.Where("batch_id = ?", resp["batch_id"]).Order("position").Find(&rows)
-	want := []AssetActionItemStatus{ActionItemRunning, ActionItemRunning, ActionItemRunning, ActionItemFailed, ActionItemFailed}
-	for i, r := range rows {
-		if r.Status != want[i] {
-			t.Errorf("item %d = %s/%s, want %s", i, r.Status, r.ErrorCode, want[i])
+	for i, it := range got.Items {
+		if it.Status != want[i].status || it.Error != want[i].code {
+			t.Errorf("item %d = %+v, want %s %s", i, it, want[i].status, want[i].code)
 		}
-	}
-	if rows[4].ErrorCode != errCodeRolloutHalted {
-		t.Errorf("item 5 error = %q, want rollout_halted", rows[4].ErrorCode)
 	}
 }
 
-// A sprout with an unfinished update elsewhere isn't sent another one;
-// the same sprout_id in another tenant is a different sprout.
-func TestFleetUpdate_UpdateAlreadyInProgress(t *testing.T) {
+// With the dispatch gate the waves don't wait for sprouts to come back,
+// but a sprout that never does still ends unresponsive_after_update, not
+// succeeded: farmer accepting the command is not the update landing.
+func TestFleetUpdate_DispatchGateStillFollowsSprouts(t *testing.T) {
+	gdb := newUpdateTestDB(t)
+	fastRollouts(t, 100*time.Millisecond)
+	ns := startTestBus(t)
+	connectSaaSBus(t, ns)
+	tid := mustCreateActiveTenant(t, gdb)
+	mustPublishVersion(t, gdb, "v2.4.1", time.Now())
+	mustApprove(t, gdb, tid, "v2.4.1")
+	assets := mustUpdateFleet(t, gdb, tid, 3)
+	farmer := startFakeFarmer(t, ns, func(req controlplane.SproutActionRequest) any {
+		return controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
+			Status: controlplane.StatusDispatched, JID: jidFor(req.SproutID)}
+	})
+	// Every job succeeds, and no sprout ever reports the new version.
+	installReader(t, &waveReader{farmer: farmer, outcome: func(JobRef, int) (JobOutcome, bool) { return JobOutcomeSucceeded, true }})
+
+	_, resp := postUpdates(t, tid, map[string]any{"asset_ids": assets, "target_version": "v2.4.1", "batch_size": 1, "gate": "dispatch"})
+	actionDispatches.Wait()
+	if reqs, _ := farmer.seen(); len(reqs) != 3 {
+		t.Fatalf("farmer got %d requests, want 3: the dispatch gate doesn't wait for sprouts", len(reqs))
+	}
+	_, got := getUpdateBatch(t, tid, resp["batch_id"].(string))
+	for _, it := range got.Items {
+		if it.Status != ActionItemUnresponsiveAfterUpdate || it.Error != errCodeUnresponsiveAfterUpdate {
+			t.Errorf("item = %+v, want unresponsive_after_update", it)
+		}
+	}
+	if got.Status != actionBatchCompleted {
+		t.Fatalf("batch = %s, want completed", got.Status)
+	}
+}
+
+// With the dispatch gate, no wave goes out once an item already sent has
+// failed.
+func TestFleetUpdate_DispatchGateHaltsOnEarlierFailure(t *testing.T) {
 	gdb := newUpdateTestDB(t)
 	fastRollouts(t, 5*time.Second)
+	ns := startTestBus(t)
+	connectSaaSBus(t, ns)
+	tid := mustCreateActiveTenant(t, gdb)
+	mustPublishVersion(t, gdb, "v2.4.1", time.Now())
+	mustApprove(t, gdb, tid, "v2.4.1")
+	assets := mustUpdateFleet(t, gdb, tid, 3)
+	farmer := startFakeFarmer(t, ns, func(req controlplane.SproutActionRequest) any {
+		return controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
+			Status: controlplane.StatusDispatched, JID: jidFor(req.SproutID)}
+	})
+	installReader(t, &waveReader{farmer: farmer, outcome: func(JobRef, int) (JobOutcome, bool) { return JobOutcomeFailed, true }})
+
+	_, resp := postUpdates(t, tid, map[string]any{"asset_ids": assets, "target_version": "v2.4.1", "batch_size": 1, "gate": "dispatch"})
+	actionDispatches.Wait()
+	if reqs, _ := farmer.seen(); len(reqs) != 1 {
+		t.Fatalf("farmer got %d requests, want only wave 1's", len(reqs))
+	}
+	_, got := getUpdateBatch(t, tid, resp["batch_id"].(string))
+	if it := got.Items[0]; it.Status != ActionItemFailed || it.Error != errCodeJobFailed {
+		t.Errorf("wave 1 item = %+v, want failed job_failed", it)
+	}
+	for _, it := range got.Items[1:] {
+		if it.Status != ActionItemFailed || it.Error != errCodeRolloutHalted {
+			t.Errorf("unsent item = %+v, want failed rollout_halted", it)
+		}
+	}
+}
+
+// The core of the health gate (design doc §2.3): a wave whose jobs all
+// succeed, but whose sprouts never reconnect and report the new version,
+// doesn't pass. Its items end unresponsive_after_update and the next wave
+// is never sent.
+func TestFleetUpdate_JobSuccessAloneDoesNotPassWave(t *testing.T) {
+	gdb := newUpdateTestDB(t)
+	fastRollouts(t, 100*time.Millisecond)
+	ns := startTestBus(t)
+	connectSaaSBus(t, ns)
+	tid := mustCreateActiveTenant(t, gdb)
+	mustPublishVersion(t, gdb, "v2.4.1", time.Now())
+	mustApprove(t, gdb, tid, "v2.4.1")
+	assets := mustUpdateFleet(t, gdb, tid, 4)
+	farmer := startFakeFarmer(t, ns, func(req controlplane.SproutActionRequest) any {
+		return controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
+			Status: controlplane.StatusDispatched, JID: jidFor(req.SproutID)}
+	})
+	// upd-01 comes back on the new version; upd-02's job succeeds, but it
+	// keeps reporting the old one (say, the restart never happened).
+	installReader(t, &waveReader{farmer: farmer, outcome: func(ref JobRef, _ int) (JobOutcome, bool) {
+		if ref.SproutID == "upd-01" {
+			_ = reportFact(gdb, tid, ref.SproutID, farmerPropSproutVersion, "v2.4.1")
+		}
+		return JobOutcomeSucceeded, true
+	}})
+
+	_, resp := postUpdates(t, tid, map[string]any{"asset_ids": assets, "target_version": "v2.4.1", "batch_size": 2})
+	actionDispatches.Wait()
+	if reqs, _ := farmer.seen(); len(reqs) != 2 {
+		t.Fatalf("farmer got %d requests, want only wave 1's 2", len(reqs))
+	}
+	_, got := getUpdateBatch(t, tid, resp["batch_id"].(string))
+	want := []struct {
+		status AssetActionItemStatus
+		code   string
+	}{
+		{ActionItemSucceeded, ""}, {ActionItemUnresponsiveAfterUpdate, errCodeUnresponsiveAfterUpdate},
+		{ActionItemFailed, errCodeRolloutHalted}, {ActionItemFailed, errCodeRolloutHalted},
+	}
+	for i, it := range got.Items {
+		if it.Status != want[i].status || it.Error != want[i].code {
+			t.Errorf("item %d = %+v, want %s %s", i, it, want[i].status, want[i].code)
+		}
+	}
+}
+
+// A tenant has one update rollout in progress at a time: a second POST is
+// 409 update_in_progress, naming the first, until every item of the first
+// has an outcome. Another tenant (with the same sprout_ids) is unaffected.
+func TestFleetUpdate_OneRolloutPerTenant(t *testing.T) {
+	gdb := newUpdateTestDB(t)
+	fastRollouts(t, 200*time.Millisecond)
 	ns := startTestBus(t)
 	connectSaaSBus(t, ns)
 	tid := mustCreateActiveTenant(t, gdb)
@@ -637,42 +819,229 @@ func TestFleetUpdate_UpdateAlreadyInProgress(t *testing.T) {
 	mustApprove(t, gdb, other, "v2.4.1")
 	assets := mustUpdateFleet(t, gdb, tid, 2)
 	otherAssets := mustUpdateFleet(t, gdb, other, 1) // also upd-01
-	farmer := startFakeFarmer(t, ns, func(req controlplane.SproutActionRequest) any {
+	startFakeFarmer(t, ns, func(req controlplane.SproutActionRequest) any {
 		return controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
 			Status: controlplane.StatusDispatched, JID: jidFor(req.SproutID)}
 	})
-	installReader(t, &waveReader{farmer: farmer, outcome: func(JobRef, int) (JobOutcome, bool) { return "", false }})
+	installReader(t, &waveReader{farmer: nil, outcome: func(JobRef, int) (JobOutcome, bool) { return "", false }})
 
-	// First rollout: upd-01 accepted by farmer and left running.
-	_, first := postUpdates(t, tid, map[string]any{"asset_ids": assets[:1], "target_version": "v2.4.1", "gate": "dispatch"})
+	var before TenantUpdatePolicy
+	gdb.First(&before, "tenant_id = ?", tid)
+
+	code, first := postUpdates(t, tid, map[string]any{"asset_ids": assets[:1], "target_version": "v2.4.1"})
+	if code != 202 {
+		t.Fatalf("first POST: %d %v", code, first)
+	}
+	// The first rollout's sprout never comes back, so it's in progress
+	// until its wave's deadline.
+	code, second := postUpdates(t, tid, map[string]any{"asset_ids": assets[1:], "target_version": "v2.4.1"})
+	details, _ := second["details"].(map[string]any)
+	if code != 409 || second["error"] != "update_in_progress" || details["batch_id"] != first["batch_id"] {
+		t.Fatalf("second POST: %d %v", code, second)
+	}
+	if code, resp := postUpdates(t, other, map[string]any{"asset_ids": otherAssets, "target_version": "v2.4.1"}); code != 202 {
+		t.Fatalf("other tenant's POST: %d %v", code, resp)
+	}
+
+	// The claim wrote the policy row (so Galera would certify two claims
+	// against each other).
+	var after TenantUpdatePolicy
+	gdb.First(&after, "tenant_id = ?", tid)
+	if !after.UpdatedAt.After(before.UpdatedAt) || *after.ApprovedVersion != "v2.4.1" {
+		t.Fatalf("policy after claim = %+v (before %+v)", after, before)
+	}
+
 	actionDispatches.Wait()
+	if _, got := getUpdateBatch(t, tid, first["batch_id"].(string)); got.Items[0].Status != ActionItemUnresponsiveAfterUpdate {
+		t.Fatalf("first rollout's item = %+v", got.Items[0])
+	}
+	// Once the first rollout is over, the tenant can start another.
+	if code, resp := postUpdates(t, tid, map[string]any{"asset_ids": assets[1:], "target_version": "v2.4.1"}); code != 202 {
+		t.Fatalf("POST after the first rollout ended: %d %v", code, resp)
+	}
+}
 
-	_, second := postUpdates(t, tid, map[string]any{"asset_ids": assets, "target_version": "v2.4.1", "gate": "dispatch"})
-	_, third := postUpdates(t, other, map[string]any{"asset_ids": otherAssets, "target_version": "v2.4.1", "gate": "dispatch"})
+// Concurrent POSTs for one tenant: exactly one creates a rollout. The
+// in-progress check runs inside the transaction that writes the batch,
+// so there is no window between checking and acting.
+func TestFleetUpdate_ConcurrentPostsClaimOnce(t *testing.T) {
+	gdb := newUpdateTestDB(t)
+	tid := mustCreateActiveTenant(t, gdb)
+	mustPublishVersion(t, gdb, "v2.4.1", time.Now())
+	mustApprove(t, gdb, tid, "v2.4.1")
+	assets := mustUpdateFleet(t, gdb, tid, 1)
+	SetBus(nil) // items stay queued: the first rollout stays in progress
+
+	const n = 8
+	codes := make(chan int, n)
+	var wg sync.WaitGroup
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			code, _ := postUpdates(t, tid, map[string]any{"asset_ids": assets, "target_version": "v2.4.1"})
+			codes <- code
+		}()
+	}
+	wg.Wait()
 	actionDispatches.Wait()
+	close(codes)
+	count := map[int]int{}
+	for c := range codes {
+		count[c]++
+	}
+	if count[202] != 1 || count[409] != n-1 {
+		t.Fatalf("status counts = %v, want one 202 and %d 409s", count, n-1)
+	}
+	var batches int64
+	gdb.Model(&AssetActionBatch{}).Where("tenant_id = ? AND action_type = ?", tid, controlplane.ActionSelfUpdate).Count(&batches)
+	if batches != 1 {
+		t.Fatalf("%d update batches written, want 1", batches)
+	}
+}
 
-	if first["batch_id"] == nil || second["batch_id"] == nil || third["batch_id"] == nil {
-		t.Fatalf("POSTs: %v %v %v", first, second, third)
+// claimRollout repeats the policy checks against the row it has locked,
+// so a policy that changed after the handler's early check still refuses
+// the rollout, and nothing is written.
+func TestClaimRolloutRechecksPolicy(t *testing.T) {
+	gdb := newUpdateTestDB(t)
+	now := time.Now()
+	for _, tc := range []struct {
+		name  string
+		setup func(tid string)
+		code  string
+	}{
+		{"no policy", func(string) {}, errCodeApprovalWithdrawn},
+		{"other version approved", func(tid string) { mustApprove(t, gdb, tid, "v2.5.0") }, errCodeApprovalWithdrawn},
+		{"window closed", func(tid string) { mustApprove(t, gdb, tid, "v2.4.1", now.Add(-2*time.Hour), now.Add(-time.Hour)) }, errCodeRolloutWindowClosed},
+		{"revoked", func(tid string) {
+			mustApprove(t, gdb, tid, "v2.4.1")
+			gdb.Model(&FleetVersion{}).Where("version = ?", "v2.4.1").Update("revoked", true)
+		}, errCodeVersionRevoked},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gdb.Where("1 = 1").Delete(&FleetVersion{})
+			mustPublishVersion(t, gdb, "v2.4.1", now)
+			mustPublishVersion(t, gdb, "v2.5.0", now)
+			tid := mustCreateActiveTenant(t, gdb)
+			tc.setup(tid)
+			err := gdb.Transaction(claimRollout(tid, "v2.4.1", now))
+			var refused rolloutRefused
+			if !errors.As(err, &refused) || refused.code != tc.code {
+				t.Fatalf("claim: %v, want refusal %s", err, tc.code)
+			}
+		})
 	}
-	_, got := getUpdateBatch(t, tid, second["batch_id"].(string))
-	items := itemsByAsset(got)
-	if it := items[assets[0]]; it.Status != ActionItemFailed || it.Error != errCodeUpdateInProgress || it.SproutID != "upd-01" {
-		t.Errorf("busy sprout = %+v", it)
+}
+
+func TestClaimTimestamp(t *testing.T) {
+	base := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		now, prev, want time.Time
+	}{
+		{base.Add(time.Second), base, base.Add(time.Second)},
+		{base.Add(1500 * time.Microsecond), base, base.Add(time.Millisecond)},
+		// Same millisecond as the stored value, or behind it (clock skew
+		// between pods): one millisecond past the stored value.
+		{base.Add(300 * time.Microsecond), base, base.Add(time.Millisecond)},
+		{base.Add(-time.Minute), base, base.Add(time.Millisecond)},
+	} {
+		if got := claimTimestamp(tc.now, tc.prev); !got.Equal(tc.want) {
+			t.Errorf("claimTimestamp(%s, %s) = %s, want %s", tc.now, tc.prev, got, tc.want)
+		}
 	}
-	if it := items[assets[1]]; it.Status != ActionItemRunning {
-		t.Errorf("free sprout = %+v", it)
+}
+
+// One batch across OS and arch: each sprout is resolved against the
+// target's rows for its own OS and arch, from what it last reported.
+// Sprouts that would refuse the update, or have no package, are failed up
+// front with their own code and never sent anything.
+func TestFleetUpdate_MixedPlatformsResolvePerSprout(t *testing.T) {
+	gdb := newUpdateTestDB(t)
+	fastRollouts(t, 5*time.Second)
+	ns := startTestBus(t)
+	connectSaaSBus(t, ns)
+	tid := mustCreateActiveTenant(t, gdb)
+	for _, p := range [][3]string{{"linux", "amd64", "deb"}, {"linux", "arm64", "deb"}, {"windows", "amd64", "msi"}} {
+		mustPublishRelease(t, gdb, FleetVersion{Version: "v2.4.1", OS: p[0], Arch: p[1], PackageType: p[2], MinSproutVersion: "v2.0.0"})
 	}
-	_, got = getUpdateBatch(t, other, third["batch_id"].(string))
-	if it := got.Items[0]; it.Status != ActionItemRunning {
-		t.Errorf("other tenant's upd-01 = %+v, want running", it)
+	mustApprove(t, gdb, tid, "v2.4.1")
+
+	sprouts := []struct {
+		id, os, arch, version string
+		sent                  bool
+		code                  string
+	}{
+		{"mix-linux", "linux", "amd64", "v2.3.0", true, ""},
+		{"mix-arm", "linux", "arm64", "v2.3.0", true, ""},
+		{"mix-win", "windows", "amd64", "v2.3.0", true, ""},
+		{"mix-already", "linux", "amd64", "v2.4.1", true, ""},
+		{"mix-unknown", "", "", "", true, ""},
+		{"mix-darwin", "darwin", "arm64", "v2.3.0", false, errCodeNoReleaseForPlatform},
+		{"mix-old", "linux", "amd64", "v1.9.0", false, errCodeBelowMinSproutVersion},
+		{"mix-newer", "windows", "amd64", "v2.5.0", false, errCodeSproutNewerThanTarget},
 	}
+	var assets []string
+	for _, s := range sprouts {
+		mustInsertFarmerSprout(t, gdb, tid, s.id, "accepted")
+		mustLinkAsset(t, tid, s.id, "a-"+s.id)
+		assets = append(assets, "a-"+s.id)
+		if s.os != "" {
+			mustReportFacts(t, gdb, tid, s.id, s.os, s.arch, s.version)
+		}
+	}
+	farmer := startFakeFarmer(t, ns, func(req controlplane.SproutActionRequest) any {
+		return controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
+			Status: controlplane.StatusDispatched, JID: "00000000-0000-0000-0000-0000000000aa"}
+	})
+	installReader(t, &waveReader{farmer: farmer, gdb: gdb, reconnect: "v2.4.1",
+		outcome: func(JobRef, int) (JobOutcome, bool) { return JobOutcomeSucceeded, true }})
+
+	code, resp := postUpdates(t, tid, map[string]any{"asset_ids": assets, "target_version": "v2.4.1", "batch_size": 25})
+	if code != 202 {
+		t.Fatalf("POST: %d %v", code, resp)
+	}
+	actionDispatches.Wait()
 	reqs, _ := farmer.seen()
-	count := map[string]int{}
+	sent := map[string]bool{}
 	for _, r := range reqs {
-		count[r.TenantID+"/"+r.SproutID]++
+		var p farmerSelfUpdate
+		if err := json.Unmarshal(r.Action.Params, &p); err != nil || p.Version != "v2.4.1" {
+			t.Fatalf("request params %s (%v): one target_version covers every platform", r.Action.Params, err)
+		}
+		sent[r.SproutID] = true
 	}
-	if count[tid+"/upd-01"] != 1 || count[tid+"/upd-02"] != 1 || count[other+"/upd-01"] != 1 {
-		t.Fatalf("farmer requests per sprout = %v", count)
+	_, got := getUpdateBatch(t, tid, resp["batch_id"].(string))
+	items := itemsByAsset(got)
+	for _, s := range sprouts {
+		it := items["a-"+s.id]
+		if sent[s.id] != s.sent {
+			t.Errorf("%s sent = %t, want %t", s.id, sent[s.id], s.sent)
+		}
+		if s.sent && it.Status != ActionItemSucceeded {
+			t.Errorf("%s = %+v, want succeeded", s.id, it)
+		}
+		if !s.sent && (it.Status != ActionItemFailed || it.Error != s.code || it.Message != actionErrorMessage(s.code)) {
+			t.Errorf("%s = %+v, want failed %s", s.id, it, s.code)
+		}
+	}
+}
+
+// mustPublishRelease registers v (Version, OS, Arch, PackageType and
+// MinSproutVersion set by the caller) signed with the test fleet key.
+func mustPublishRelease(t *testing.T, gdb *gorm.DB, v FleetVersion) {
+	t.Helper()
+	id, err := newID("fv_")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.ID = id
+	v.FileName = "imas-sprout_" + strings.TrimPrefix(v.Version, "v") + "_" + v.OS + "_" + v.Arch + "." + v.PackageType
+	v.ChecksumSHA256 = strings.Repeat("cd", 32)
+	v.ReleasedAt = time.Now().UTC()
+	v.Signature = signTestRelease(t, v)
+	if err := gdb.Create(&v).Error; err != nil {
+		t.Fatalf("registering %s %s: %v", v.Version, v.releaseKey(), err)
 	}
 }
 
@@ -783,23 +1152,35 @@ func TestLoadConfigFleetUpdateDispatchFlag(t *testing.T) {
 // indexingFarmer answers every self_update with dispatched and jidFor's
 // jid, and writes the job's farmer.job_status row the way farmer's jobs
 // index (wired into farmer's startup by cmd/farmer's installStorage) would:
-// status(sprout) for the sprout, under indexTenant(request tenant).
+// status(sprout) for the sprout, under indexTenant(request tenant). For a
+// succeeded job it also stores the sprout's v2.4.1 sprout_version fact,
+// under the same tenant, as the sprout reconnecting would.
 func indexingFarmer(t *testing.T, ns *server.Server, gdb *gorm.DB,
 	indexTenant func(string) string, status func(sprout string) string) *fakeFarmer {
 	t.Helper()
 	return startFakeFarmer(t, ns, func(req controlplane.SproutActionRequest) any {
+		st := status(req.SproutID)
 		if err := gdb.Exec(`INSERT INTO farmer.job_status (tenant_id, sprout_id, jid, status, updated_at)
-VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)`, indexTenant(req.TenantID), req.SproutID, jidFor(req.SproutID), status(req.SproutID)).Error; err != nil {
+VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)`, indexTenant(req.TenantID), req.SproutID, jidFor(req.SproutID), st).Error; err != nil {
 			t.Errorf("indexing job for %s: %v", req.SproutID, err)
+		}
+		// A sprout whose update succeeded restarts on it and reports the
+		// new version, which farmer's facts listener stores under the
+		// same tenant.
+		if st == "succeeded" {
+			if err := reportFact(gdb, indexTenant(req.TenantID), req.SproutID, farmerPropSproutVersion, "v2.4.1"); err != nil {
+				t.Errorf("reporting version for %s: %v", req.SproutID, err)
+			}
 		}
 		return controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
 			Status: controlplane.StatusDispatched, JID: jidFor(req.SproutID)}
 	})
 }
 
-// The default job_status gate, end to end through the production reader
-// (farmerJobStatusReader over farmer.job_status) rather than a fake: waves
-// pass on succeeded rows and a failed row halts the rollout.
+// The default job_status gate, end to end through the production readers
+// (farmerJobStatusReader over farmer.job_status, farmerSproutFactsReader
+// over farmer.props) rather than fakes: waves pass once sprouts report the
+// new version and a failed job halts the rollout.
 func TestFleetUpdate_JobStatusGateWithFarmerIndex(t *testing.T) {
 	gdb := newUpdateTestDB(t)
 	fastRollouts(t, 5*time.Second)
@@ -838,8 +1219,9 @@ func TestFleetUpdate_JobStatusGateWithFarmerIndex(t *testing.T) {
 	}
 }
 
-// Another tenant's farmer.job_status row for the same sprout_id and jid
-// never passes this tenant's wave: sprout_id is only unique per tenant.
+// Another tenant's farmer.job_status row, and sprout_version fact, for the
+// same sprout_id never pass this tenant's wave: sprout_id is only unique
+// per tenant.
 func TestFleetUpdate_JobStatusGateIgnoresOtherTenantsIndexRows(t *testing.T) {
 	gdb := newUpdateTestDB(t)
 	fastRollouts(t, 50*time.Millisecond)

@@ -74,11 +74,33 @@ func storeFacts(tenantID string, sf SystemFacts) {
 	props.SetPropForTenant(tenantID, sid, "hostname", sf.Hostname)
 	props.SetPropForTenant(tenantID, sid, "go_version", sf.GoVersion)
 	props.SetPropForTenant(tenantID, sid, "num_cpu", fmt.Sprintf("%d", sf.NumCPU))
+	storeSproutVersion(tenantID, sid, sf.SproutVersion)
 	if len(sf.IPAddresses) > 0 {
 		ipsJSON, _ := json.Marshal(sf.IPAddresses)
 		props.SetPropForTenant(tenantID, sid, "ip_addresses", string(ipsJSON))
 	}
 	storeHardwareFacts(tenantID, sid, sf.Hardware)
+}
+
+// PropSproutVersion is the prop a sprout's reported release tag is stored
+// under. saasapi reads it from farmer.props to decide when a fleet update
+// rollout's wave has passed (design doc §2.3), so the name is a contract
+// (pinned by saasapi's TestFarmerSproutVersionPropContract).
+const PropSproutVersion = "sprout_version"
+
+// storeSproutVersion records the version a sprout reported, or deletes the
+// stored one when it reported none (a build without a release tag), so an
+// older report never stands in for the running sprout's version.
+func storeSproutVersion(tenantID, sid, version string) {
+	if version == "" {
+		if err := props.DeletePropForTenant(tenantID, sid, PropSproutVersion); err != nil {
+			log.Errorf("facts: clearing %s for %s: %v", PropSproutVersion, sid, err)
+		}
+		return
+	}
+	if err := props.SetPropForTenant(tenantID, sid, PropSproutVersion, version); err != nil {
+		log.Errorf("facts: storing %s for %s: %v", PropSproutVersion, sid, err)
+	}
 }
 
 // storeHardwareFacts writes non-empty hardware/BIOS facts into the props

@@ -115,7 +115,7 @@ func TestCreateFleetUpdateBatch_RefusesUnverifiableCatalogRow(t *testing.T) {
 	}
 
 	var n int64
-	gdb.Model(&AssetActionBatch{}).Count(&n)
+	gdb.Model(&AssetActionBatch{}).Where("tenant_id = ?", tid).Count(&n)
 	if n != 0 {
 		t.Fatalf("%d batch(es) created from unverifiable rows", n)
 	}
