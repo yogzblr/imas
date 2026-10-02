@@ -19,10 +19,12 @@ import (
 	"crypto/rand"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +32,7 @@ import (
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/envoytest"
+	"github.com/yogzblr/imas/internal/fleetsign"
 	"github.com/yogzblr/imas/internal/gatewayjwt/transittest"
 	"github.com/yogzblr/imas/internal/pki"
 )
@@ -164,6 +167,167 @@ func TestSproutDownloadsStagedRecipe_ThroughRealEnvoy(t *testing.T) {
 		}
 		if after, _ := farmer.snapshot(); len(after)-len(before) != 2 {
 			t.Errorf("%d requests reached farmer, want both (Envoy should pass validly signed tokens)", len(after)-len(before))
+		}
+	})
+}
+
+// GET /v1/sprout/update-manifest through the shipped envoy.yaml: Envoy
+// must route it to farmer (recipe_service), not let it fall through to
+// the NATS websocket catch-all, and gate it on the gateway JWT exactly
+// like /files/. Farmer runs its real router with Auth on its production
+// key source, the production manifest SQL over an attached SQLite saas
+// schema, and a fleet key set that verifies the stored row.
+func TestSproutUpdateManifest_ThroughRealEnvoy(t *testing.T) {
+	if os.Getenv(envoytest.EnvBin) == "" {
+		t.Skipf("%s not set; skipping real-Envoy test", envoytest.EnvBin)
+	}
+	const tenantID, sproutID = "t_acme", "web-01"
+	const manifestPath = "/v1/sprout/update-manifest"
+	const query = "?os=linux&arch=amd64&version=v2.4.1"
+
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handlers.SetGatewaySigner(transittest.NewSigner(t, priv))
+	t.Cleanup(func() { handlers.SetGatewaySigner(nil) })
+
+	fleetPub, fleetPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ks, err := fleetsign.NewKeySet([]fleetsign.PublicKey{{Version: 1, Key: fleetPub}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handlers.SetFleetKeySource(fleetKeys(ks))
+	t.Cleanup(func() { handlers.SetFleetKeySource(nil) })
+
+	want := fleetsign.Manifest{
+		Version:          "v2.4.1",
+		OS:               "linux",
+		Arch:             "amd64",
+		FileName:         "imas-sprout_2.4.1_linux_amd64.deb",
+		ChecksumSHA256:   strings.Repeat("0123456789abcdef", 4),
+		MinSproutVersion: "v1.0.0",
+	}
+	msg, err := want.Message()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want.Signature = fleetsign.EncodeSignature(1, ed25519.Sign(fleetPriv, msg))
+	db := newSaasTestDB(t)
+	exec(t, db, `INSERT INTO saas.fleet_versions
+		(id, version, os, arch, package_type, file_name, checksum_sha256, min_sprout_version, signature, revoked, released_at)
+		VALUES ('r1', ?, ?, ?, 'deb', ?, ?, ?, ?, 0, ?)`,
+		want.Version, want.OS, want.Arch, want.FileName, want.ChecksumSHA256, want.MinSproutVersion, want.Signature, time.Now())
+	exec(t, db, `INSERT INTO saas.tenant_update_policy (tenant_id, approved_version, auto_update) VALUES (?, 'v2.4.1', 0)`, tenantID)
+	handlers.SetReadinessDB(db)
+	t.Cleanup(func() { handlers.SetReadinessDB(nil) })
+
+	// farmer records every manifest request that reaches it; natsWS
+	// stands in for nats-server's websocket listener behind the
+	// catch-all route and records anything that lands there.
+	var mu sync.Mutex
+	var reached []recordedDownload
+	var fellThrough []string
+	router := NewRouter("")
+	farmer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == manifestPath {
+			mu.Lock()
+			reached = append(reached, recordedDownload{r.URL.RequestURI(), r.Header.Get("Authorization")})
+			mu.Unlock()
+		}
+		router.ServeHTTP(w, r)
+	}))
+	t.Cleanup(farmer.Close)
+	natsWS := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		fellThrough = append(fellThrough, r.URL.RequestURI())
+		mu.Unlock()
+		http.Error(w, "nats websocket listener", http.StatusTeapot)
+	}))
+	t.Cleanup(natsWS.Close)
+	snapshot := func() ([]recordedDownload, []string) {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]recordedDownload(nil), reached...), append([]string(nil), fellThrough...)
+	}
+
+	env := envoytest.Start(t, envoytest.Upstreams{
+		FarmerAPI:     strings.TrimPrefix(farmer.URL, "https://"),
+		NATSWebsocket: strings.TrimPrefix(natsWS.URL, "https://"),
+	})
+	get := func(t *testing.T, authz string) (int, string) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, env.URL+manifestPath+query, nil)
+		if authz != "" {
+			req.Header.Set("Authorization", authz)
+		}
+		resp, err := env.HTTPClient().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, strings.TrimSpace(string(body))
+	}
+
+	t.Run("valid gateway JWT: routed to farmer, signed manifest served", func(t *testing.T) {
+		before, wsBefore := snapshot()
+		tok := mint(t, priv, tenantID, sproutID, time.Now().Add(time.Hour))
+		code, body := get(t, "Bearer "+tok)
+		if code != http.StatusOK {
+			t.Fatalf("GET %s through Envoy: %d %q, want 200 from farmer", manifestPath, code, body)
+		}
+		got, err := fleetsign.ParseManifest([]byte(body))
+		if err != nil {
+			t.Fatalf("ParseManifest(%q): %v", body, err)
+		}
+		if got != want {
+			t.Errorf("manifest = %+v, want %+v", got, want)
+		}
+		after, wsAfter := snapshot()
+		if newReqs := after[len(before):]; len(newReqs) != 1 || newReqs[0] != (recordedDownload{manifestPath + query, "Bearer " + tok}) {
+			t.Errorf("requests reaching farmer = %+v, want one for %s carrying the gateway JWT", newReqs, manifestPath+query)
+		}
+		if len(wsAfter) != len(wsBefore) {
+			t.Errorf("requests reaching the NATS websocket upstream = %v, want none", wsAfter[len(wsBefore):])
+		}
+	})
+
+	t.Run("no or bad token: Envoy answers 401 and farmer never sees it", func(t *testing.T) {
+		before, wsBefore := snapshot()
+		_, otherPriv, _ := ed25519.GenerateKey(rand.Reader)
+		for name, authz := range map[string]string{
+			"missing": "",
+			"expired": "Bearer " + mint(t, priv, tenantID, sproutID, time.Now().Add(-10*time.Minute)),
+			"forged":  "Bearer " + mint(t, otherPriv, tenantID, sproutID, time.Now().Add(time.Hour)),
+		} {
+			if code, body := get(t, authz); code != http.StatusUnauthorized {
+				t.Errorf("%s token: %d %q, want 401 from jwt_authn", name, code, body)
+			}
+		}
+		after, wsAfter := snapshot()
+		if len(after) != len(before) {
+			t.Errorf("%d requests reached farmer, want none", len(after)-len(before))
+		}
+		if len(wsAfter) != len(wsBefore) {
+			t.Errorf("requests reaching the NATS websocket upstream = %v, want none", wsAfter[len(wsBefore):])
+		}
+	})
+
+	// Envoy only checks the signature, issuer and expiry; which tenant's
+	// approved version is served is farmer's job, from the token's own
+	// tenant_id, and has to survive the hop through Envoy.
+	t.Run("validly signed token for another tenant: Envoy passes it, farmer serves nothing", func(t *testing.T) {
+		before, _ := snapshot()
+		tok := mint(t, priv, "t_other", sproutID, time.Now().Add(time.Hour))
+		if code, body := get(t, "Bearer "+tok); code != http.StatusNotFound || body != `{"error":"not_found"}` {
+			t.Errorf("t_other's token: %d %q, want farmer's generic 404", code, body)
+		}
+		if after, _ := snapshot(); len(after)-len(before) != 1 {
+			t.Errorf("%d requests reached farmer, want 1 (Envoy should pass a validly signed token)", len(after)-len(before))
 		}
 	})
 }
