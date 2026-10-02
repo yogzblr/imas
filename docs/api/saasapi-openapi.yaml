@@ -8,7 +8,9 @@
 #
 # Keep this in step with NewRouter. Every path below must be a route
 # NewRouter registers, and vice versa; the two update-dispatch routes are
-# registered only when SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=true.
+# registered only when SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=true. The
+# operator plane (release registration, NewOperatorServer) is a separate
+# listener with a separate credential: saasapi-operator-openapi.yaml.
 openapi: 3.1.0
 info:
   title: imas SaaS API
@@ -35,8 +37,8 @@ info:
     **Fleet update dispatch.** `POST /v1/tenants/{tenant_id}/sprouts/updates`
     and its status route exist only when saasapi starts with
     `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=true`. That is off by default,
-    and must stay off: sprout's self-update path is still disabled
-    upstream. See the tag description.
+    and must stay off: the sprout-side manifest fetch and install don't
+    exist yet. See the tag description.
 servers:
   - url: http://saasapi:8081
     description: |
@@ -64,11 +66,14 @@ tags:
       (`SetFleetUpdateDispatchEnabled` before `NewRouter`). With the flag
       off, which is the default, neither route exists and both paths
       return the ServeMux's plain-text 404. The flag must not be turned on
-      in a deployment: the sprout can verify and stage a signed release
-      but cannot install it yet (design doc §2.3 backup/restore), so every
-      self_update ends failed. `router.go` cites this as `yogzblr/imas#286`,
-      a reference carried over from before the repo was renamed that does
-      not resolve on `yogzblr/imas`.
+      in a deployment: the farmer manifest endpoint (design doc §2.6) and
+      the sprout's manifest fetch, verify and install don't exist yet, and
+      farmer's self_update handler still expects the pre-FU.3 params
+      (artifact URL and one row's signature) rather than the target
+      version saasapi now sends, so farmer refuses every item.
+      `router.go` also cites `yogzblr/imas#286`, a reference carried over
+      from before the repo was renamed that does not resolve on
+      `yogzblr/imas`.
       With the flag on, saasapi also needs the read-only fleet signing key
       (`IMAS_FLEETSIGN_OPENBAO_*`) or it refuses to start.
 
@@ -493,12 +498,15 @@ paths:
     get:
       tags: [fleet-updates]
       operationId: ListFleetVersions
-      summary: List CloudXP's published sprout versions
+      summary: List CloudXP's registered sprout releases
       description: |
-        Newest first, not paginated. The same catalog for every tenant, so
-        there is no organization check. Rows are written only by
-        `cmd/fleetreleaser`. `artifact_url` and the signature are not
-        exposed.
+        One entry per version, OS and arch, newest first, not paginated.
+        The same catalog for every tenant, so there is no organization
+        check. Rows are written only by the operator plane's release
+        registration, each signed by `cmd/fleetreleaser`. The signature is
+        not exposed, and there is no URL: a sprout downloads `file_name`
+        from its own configured repository. Revoked versions are listed
+        with `revoked: true`.
       responses:
         "200":
           description: The catalog.
@@ -539,7 +547,8 @@ paths:
       description: |
         Absent fields are left unchanged; `null` clears `approved_version`
         or a window bound. Checked against the merged policy:
-        `approved_version` must be in the catalog (`unknown_version`);
+        `approved_version` must be in the catalog (`unknown_version`) and
+        not revoked (`version_revoked`);
         `auto_update: true` needs an approved version (clearing the
         version while auto_update is on is rejected); both window bounds
         are set together and end is after start. Storing the policy is all
@@ -564,6 +573,11 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/TenantNotFound" }
+        "409":
+          description: "`version_revoked`: the version was withdrawn and can't be newly approved."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "500": { $ref: "#/components/responses/InternalError" }
 
   /v1/tenants/{tenant_id}/sprouts/updates:
@@ -577,17 +591,19 @@ paths:
       x-imas-default: not registered (plain-text 404)
       description: |
         **Not registered unless `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=true`,
-        which is off by default and should stay off until sprout can
-        install a signed release** (see the tag). Documented so the
+        which is off by default and should stay off until the sprout side
+        of updates exists** (see the tag). Documented so the
         contract is recorded, not because it is usable.
 
         Checks, in order, before anything is written: tenant active; body
         valid (strict decode, 64 KiB cap); `target_version` in the catalog
-        and its row's https URL, checksum and Ed25519 signature valid
-        against `imas-fleet-signing`; it is the tenant's
-        `approved_version`; now is inside the rollout window, if one is
-        set. Items then go out in waves of `batch_size`, each wave gated by
-        `gate`. Approval and window are re-checked before every wave. A
+        with every OS/arch row's Ed25519 signature valid against
+        `imas-fleet-signing`; it is the tenant's `approved_version`; it is
+        not revoked; now is inside the rollout window, if one is set. The
+        farmer params carry only the version: each sprout resolves its own
+        OS/arch manifest. Items then go out in waves of `batch_size`, each
+        wave gated by `gate`. Approval, revocation and window are
+        re-checked before every wave. A
         sprout with an unfinished self_update in another batch is failed
         with `update_already_in_progress`.
 
@@ -614,13 +630,13 @@ paths:
         "404":
           description: "`tenant_not_found`; or, with the flag off, the ServeMux's plain-text 404 because the route isn't registered."
         "409":
-          description: "`tenant_not_active`, `version_not_approved`, or `outside_rollout_window`."
+          description: "`tenant_not_active`, `version_not_approved`, `version_revoked`, or `outside_rollout_window`."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500":
-          description: "`internal_error`, including a catalog entry that fails URL, checksum or signature checks."
+          description: "`internal_error`, including a catalog entry whose rows fail the manifest or signature checks."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -965,16 +981,24 @@ components:
                   - rollout_halted
                   - rollout_window_closed
                   - version_approval_withdrawn
+                  - version_revoked
                   - update_already_in_progress
                   - unresponsive_after_update
               message: { type: string, description: The fixed message for `error`. }
 
     FleetVersion:
       type: object
-      required: [version, checksum_sha256, released_at]
+      description: One registered package of a sprout release, for one OS and arch.
+      required: [version, os, arch, package_type, file_name, checksum_sha256, min_sprout_version, revoked, released_at]
       properties:
-        version: { type: string, maxLength: 64 }
+        version: { type: string, maxLength: 64, description: "Canonical semver with a leading v." }
+        os: { type: string, maxLength: 32, pattern: "^[a-z0-9][a-z0-9_]*$" }
+        arch: { type: string, maxLength: 32, pattern: "^[a-z0-9][a-z0-9_]*$" }
+        package_type: { type: string, enum: [deb, rpm, msi] }
+        file_name: { type: string, maxLength: 255, description: "A plain file name in the sprout's configured repository." }
         checksum_sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        min_sprout_version: { type: string, maxLength: 64, description: "The oldest sprout that may update to this release." }
+        revoked: { type: boolean }
         released_at: { type: string, format: date-time }
         notes: { type: string }
 

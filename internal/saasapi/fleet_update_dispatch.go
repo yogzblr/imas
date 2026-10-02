@@ -1,14 +1,16 @@
 // Fleet update dispatch, the dispatch half of design doc §1.8: POST
 // /tenants/{tenant_id}/sprouts/updates and GET .../sprouts/updates/{batch_id}.
 //
-// OFF BY DEFAULT. Release signing now exists (§2.5): cmd/fleetreleaser signs
-// each saas.fleet_versions row, and saasapi (selfUpdateParams), farmer and
-// the sprout's selfupdate ingredient each verify it. But the sprout still
-// can't install a verified release — that's §2.3's backup/restore work —
-// so its selfupdate step ends failed after verifying and staging the
-// artifact. §1.8 and §6 say not to expose this endpoint until that's
-// resolved. So both routes are registered only when
-// SetFleetUpdateDispatchEnabled(true) has been called before NewRouter
+// OFF BY DEFAULT. Release signing and registration exist (§2.5):
+// cmd/fleetreleaser signs each saas.fleet_versions row, one per OS/arch, and
+// saasapi (selfUpdateParams) verifies every row of the target version
+// before creating a rollout. But the sprout-side manifest fetch and install
+// (§2.6, FU.1/FU.2) don't exist yet, and farmer's self_update handler still
+// expects the pre-FU.3 params (an artifact URL and one row's signature),
+// which saasapi no longer sends, so farmer refuses every item. §1.8 and §6
+// say not to expose this endpoint until that's resolved. So both routes are
+// registered only when SetFleetUpdateDispatchEnabled(true) has been called
+// before NewRouter
 // (Config.FleetUpdateDispatchEnabled, SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED),
 // and the handlers check the flag again themselves. With the flag off,
 // neither route exists.
@@ -19,15 +21,18 @@
 // sprout_actions.go, and the same tenant-safety rules listed at the top of
 // that file. Differences, all for rollout safety (§2.3):
 //
-//   - The caller names a target_version, not action params. The farmer
-//     params (version, artifact_url, checksum_sha256, §2.2) come from
-//     CloudXP's own catalog (saas.fleet_versions). The caller can't supply
-//     an artifact URL or checksum.
+//   - The caller names a target_version, not action params. The version
+//     must be in CloudXP's own catalog (saas.fleet_versions), not
+//     revoked, and every one of its OS/arch rows must carry a signature
+//     that verifies. The farmer params carry only the version: each sprout
+//     resolves and verifies its own OS/arch manifest (§2.3, §2.6). The
+//     caller can't supply a URL, file name or checksum.
 //   - The version must be the tenant's approved_version
 //     (saas.tenant_update_policy), and now must be inside the tenant's
-//     rollout window if one is set. Both are checked again before every
-//     wave, so withdrawing approval or reaching the end of the window stops
-//     the rollout.
+//     rollout window if one is set. Both, and that the version hasn't been
+//     revoked, are checked again before every wave, so withdrawing
+//     approval, revoking the version or reaching the end of the window
+//     stops the rollout.
 //   - Items go out in waves of batch_size, not all at once, and each wave
 //     must pass its gate before the next is sent. The defaults are a small
 //     wave (defaultUpdateBatchSize) and the strict job_status gate. A §1.5
@@ -50,12 +55,10 @@ package saasapi
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -132,6 +135,10 @@ const (
 	// this rollout's target before this item's wave was due, so it was
 	// never sent.
 	errCodeApprovalWithdrawn = "version_approval_withdrawn"
+	// errCodeVersionRevoked: the target version was revoked (POST
+	// /v1/operator/fleet-releases/{version}/revoke) before this item's wave
+	// was due, so it was never sent.
+	errCodeVersionRevoked = "version_revoked"
 	// errCodeUpdateInProgress: the sprout already had an unfinished update
 	// in another batch, so this item was never sent.
 	errCodeUpdateInProgress = "update_already_in_progress"
@@ -179,11 +186,12 @@ type rolloutResponse struct {
 //
 // The request is checked in this order, and nothing is written until all of
 // it passes: the tenant is active; the body is valid; target_version is in
-// the catalog (else 400 unknown_version); it's the tenant's approved_version
-// (else 409 version_not_approved); now is inside the tenant's rollout window
-// if one is set (else 409 outside_rollout_window). Then the batch and its
-// items are written as in §1.5, the 202 is sent, and runRollout starts in
-// the background.
+// the catalog (else 400 unknown_version) with every row's signature valid
+// (else 500); it's the tenant's approved_version (else 409
+// version_not_approved); it isn't revoked (else 409 version_revoked); now is
+// inside the tenant's rollout window if one is set (else 409
+// outside_rollout_window). Then the batch and its items are written as in
+// §1.5, the 202 is sent, and runRollout starts in the background.
 //
 // Rate-limited per tenant (see router.go).
 func CreateFleetUpdateBatch(w http.ResponseWriter, r *http.Request) {
@@ -228,7 +236,7 @@ func CreateFleetUpdateBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var versions []FleetVersion
-	if err := db.Where("version = ?", version).Limit(1).Find(&versions).Error; err != nil {
+	if err := db.Where("version = ?", version).Order("os").Order("arch").Find(&versions).Error; err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to look up version")
 		return
 	}
@@ -236,7 +244,7 @@ func CreateFleetUpdateBatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "unknown_version", "target_version is not in the version catalog")
 		return
 	}
-	params, err := selfUpdateParams(r.Context(), versions[0])
+	params, err := selfUpdateParams(r.Context(), versions)
 	if err != nil {
 		log.Errorf("saasapi: fleet_versions entry %s is unusable for dispatch: %v", version, err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "the catalog entry for this version is invalid; contact support")
@@ -250,6 +258,9 @@ func CreateFleetUpdateBatch(w http.ResponseWriter, r *http.Request) {
 	case code == errCodeApprovalWithdrawn:
 		writeError(w, http.StatusConflict, "version_not_approved",
 			"target_version is not the tenant's approved version; approve it with PATCH .../update-policy first")
+		return
+	case code == errCodeVersionRevoked:
+		writeError(w, http.StatusConflict, "version_revoked", "target_version has been revoked")
 		return
 	case code == errCodeRolloutWindowClosed:
 		writeError(w, http.StatusConflict, "outside_rollout_window", "now is outside the tenant's rollout window")
@@ -330,26 +341,21 @@ func parseUpdateGate(w http.ResponseWriter, gate string) (string, bool) {
 	return "", false
 }
 
-// selfUpdateParams builds the farmer params for v. The catalog is written
-// by cmd/fleetreleaser, not by a tenant, but an entry that a sprout
-// couldn't use safely (no https artifact URL, a malformed checksum) or
-// whose signature doesn't verify against the imas-fleet-signing key — an
-// un-migrated row with no signature included — is refused here rather
-// than sent to a whole fleet. Farmer and the sprout each verify it again;
-// this is the early, whole-batch refusal, not the only one.
-func selfUpdateParams(ctx context.Context, v FleetVersion) (json.RawMessage, error) {
-	u, err := url.Parse(v.ArtifactURL)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
-		return nil, errors.New("artifact_url is not an https URL")
-	}
-	if sum, err := hex.DecodeString(v.ChecksumSHA256); err != nil || len(sum) != 32 {
-		return nil, errors.New("checksum_sha256 is not 64 hex characters")
-	}
-	p := farmerSelfUpdate{
-		Version:        v.Version,
-		ArtifactURL:    v.ArtifactURL,
-		ChecksumSHA256: strings.ToLower(v.ChecksumSHA256),
-		Signature:      v.Signature,
+// selfUpdateParams builds the farmer params for a rollout to one version,
+// given all of its saas.fleet_versions rows (one per OS/arch). Every row must
+// carry a signature that verifies against the imas-fleet-signing key
+// (read-only) over its own manifest fields; one that doesn't, an empty
+// signature included, refuses the whole rollout rather than sending it to
+// part of a fleet. Revocation is rolloutPolicyCheck's to report. Farmer
+// and the sprout each verify again; this is the early, whole-batch
+// refusal, not the only one.
+//
+// The params carry the version only: each sprout fetches and verifies
+// the manifest for its own OS and arch (§2.6), so no URL, file name,
+// checksum or signature travels in the command.
+func selfUpdateParams(ctx context.Context, rows []FleetVersion) (json.RawMessage, error) {
+	if len(rows) == 0 {
+		return nil, errors.New("no catalog rows")
 	}
 	if fleetKeys == nil {
 		return nil, errors.New("no fleet signing key source configured; refusing to dispatch unverified releases")
@@ -358,41 +364,31 @@ func selfUpdateParams(ctx context.Context, v FleetVersion) (json.RawMessage, err
 	if err != nil {
 		return nil, fmt.Errorf("reading fleet signing keys: %w", err)
 	}
-	osName, arch, fileName, minSproutVersion := fleetVersionManifestColumns(v)
-	m := fleetsign.Manifest{
-		Version:          p.Version,
-		OS:               osName,
-		Arch:             arch,
-		FileName:         fileName,
-		ChecksumSHA256:   p.ChecksumSHA256,
-		MinSproutVersion: minSproutVersion,
-		Signature:        p.Signature,
+	for _, row := range rows {
+		if row.Version != rows[0].Version {
+			return nil, fmt.Errorf("rows of different versions (%s, %s)", rows[0].Version, row.Version)
+		}
+		if err := ks.Verify(row.Manifest()); err != nil {
+			return nil, fmt.Errorf("%s/%s signature: %w", row.OS, row.Arch, err)
+		}
 	}
-	if err := ks.Verify(m); err != nil {
-		return nil, fmt.Errorf("signature: %w", err)
-	}
-	return json.Marshal(p)
+	return json.Marshal(farmerSelfUpdate{Version: rows[0].Version})
 }
 
-// fleetVersionManifestColumns returns the signed manifest fields (§2.5)
-// that saas.fleet_versions has no column for yet: os, arch, file_name and
-// min_sprout_version arrive with FU.3's migration. Until then it returns
-// empty strings, so fleetsign refuses every row's manifest as
-// ErrInvalidManifest and no self_update rollout can be created: a row
-// signed over the old version|artifact_url|checksum_sha256 message must
-// not verify, and there is nothing yet to verify a new one against. A
-// variable only so tests can supply the columns and exercise the rest of
-// the dispatch path against a real signature.
-var fleetVersionManifestColumns = func(FleetVersion) (osName, arch, fileName, minSproutVersion string) {
-	return "", "", "", ""
-}
-
-// rolloutPolicyCheck compares the tenant's update policy with a rollout of
-// version at now. It returns "" if the rollout may go ahead,
-// errCodeApprovalWithdrawn if version isn't the approved_version (including
-// when there's no policy row), and errCodeRolloutWindowClosed if a window is
-// set and now is outside [start, end).
+// rolloutPolicyCheck compares the tenant's update policy and the catalog
+// with a rollout of version at now. It returns "" if the rollout may go
+// ahead, errCodeApprovalWithdrawn if version isn't the approved_version
+// (including when there's no policy row), errCodeVersionRevoked if version
+// has been revoked, and errCodeRolloutWindowClosed if a window is set and
+// now is outside [start, end).
 func rolloutPolicyCheck(d *gorm.DB, tenantID, version string, now time.Time) (string, error) {
+	var revoked int64
+	if err := d.Model(&FleetVersion{}).Where("version = ? AND revoked = ?", version, true).Count(&revoked).Error; err != nil {
+		return "", err
+	}
+	if revoked > 0 {
+		return errCodeVersionRevoked, nil
+	}
 	var policies []TenantUpdatePolicy
 	if err := d.Where("tenant_id = ?", tenantID).Limit(1).Find(&policies).Error; err != nil {
 		return "", err

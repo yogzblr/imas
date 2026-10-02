@@ -84,6 +84,28 @@ import (
 //     signing key client must also be configured
 //     (IMAS_FLEETSIGN_OPENBAO_*, internal/fleetsign; design doc §2.5), or
 //     saasapi refuses to start.
+//
+// The operator plane (fleet_releases.go, design doc §2.5): release
+// registration and revocation, served on its own HTTPS listener and never
+// on the tenant API's. Off unless SAASAPI_OPERATOR_LISTEN_ADDR is set;
+// with it set, every other setting below except the *_PREVIOUS_FILE and
+// CA ones is required, and so is the read-only fleet signing key client
+// (IMAS_FLEETSIGN_OPENBAO_*). Secrets are taken only as paths to mounted
+// Secret files, read once at startup, like the NATS seed:
+//
+//   - SAASAPI_OPERATOR_LISTEN_ADDR: e.g. ":8443". Keep it off the
+//     gateway's routes; only the farmer Helm release's hook Job calls it.
+//   - SAASAPI_OPERATOR_TLS_CERT_FILE / SAASAPI_OPERATOR_TLS_KEY_FILE: the
+//     operator listener's certificate and key (PEM). TLS only.
+//   - SAASAPI_OPERATOR_TOKEN_FILE / SAASAPI_OPERATOR_TOKEN_PREVIOUS_FILE:
+//     the operator bearer token, and the previous one during a rotation.
+//     Must differ from the BFF's INTERNAL_AUTH_SECRET_* values.
+//   - SAASAPI_FLEETRELEASER_URL: cmd/fleetreleaser's base URL, https only,
+//     e.g. "https://fleetreleaser.imas.svc:8443".
+//   - SAASAPI_FLEETRELEASER_TOKEN_FILE: the bearer token saasapi presents
+//     to fleetreleaser.
+//   - SAASAPI_FLEETRELEASER_CA_FILE: optional PEM bundle for
+//     fleetreleaser's certificate; the system roots otherwise.
 type Config struct {
 	// ListenAddr is the address the HTTP server binds to, e.g. ":8081".
 	ListenAddr string
@@ -137,6 +159,17 @@ type Config struct {
 	// FleetUpdateDispatchEnabled is the fleet update dispatch feature
 	// flag, passed to SetFleetUpdateDispatchEnabled before NewRouter.
 	FleetUpdateDispatchEnabled bool
+
+	// OperatorListenAddr enables the operator plane (NewOperatorServer)
+	// on this address. Empty means it is off.
+	OperatorListenAddr        string
+	OperatorTLSCertFile       string
+	OperatorTLSKeyFile        string
+	OperatorTokenFile         string
+	OperatorTokenPreviousFile string
+	FleetReleaserURL          string
+	FleetReleaserTokenFile    string
+	FleetReleaserCAFile       string
 }
 
 // LoadConfig reads the saasapi service's configuration from environment
@@ -167,6 +200,15 @@ func LoadConfig() (Config, error) {
 		EnrollmentKeyRateBurst: enrollmentKeyIssuanceBurst,
 
 		ValkeyAddrs: splitAddrs(os.Getenv("SAASAPI_VALKEY_ADDRS")),
+
+		OperatorListenAddr:        os.Getenv("SAASAPI_OPERATOR_LISTEN_ADDR"),
+		OperatorTLSCertFile:       os.Getenv("SAASAPI_OPERATOR_TLS_CERT_FILE"),
+		OperatorTLSKeyFile:        os.Getenv("SAASAPI_OPERATOR_TLS_KEY_FILE"),
+		OperatorTokenFile:         os.Getenv("SAASAPI_OPERATOR_TOKEN_FILE"),
+		OperatorTokenPreviousFile: os.Getenv("SAASAPI_OPERATOR_TOKEN_PREVIOUS_FILE"),
+		FleetReleaserURL:          os.Getenv("SAASAPI_FLEETRELEASER_URL"),
+		FleetReleaserTokenFile:    os.Getenv("SAASAPI_FLEETRELEASER_TOKEN_FILE"),
+		FleetReleaserCAFile:       os.Getenv("SAASAPI_FLEETRELEASER_CA_FILE"),
 	}
 
 	if v := os.Getenv("SAASAPI_ENROLLMENT_KEY_RATE_LIMIT"); v != "" {
@@ -193,7 +235,30 @@ func LoadConfig() (Config, error) {
 		}
 		cfg.FleetUpdateDispatchEnabled = b
 	}
+	if cfg.OperatorListenAddr != "" {
+		if err := cfg.validateOperator(); err != nil {
+			return Config{}, err
+		}
+	}
 	return cfg, nil
+}
+
+// validateOperator checks that every required operator-plane setting is
+// present and the fleetreleaser URL is https. Files are read later, by
+// NewOperatorServer.
+func (c Config) validateOperator() error {
+	for name, v := range map[string]string{
+		"SAASAPI_OPERATOR_TLS_CERT_FILE":   c.OperatorTLSCertFile,
+		"SAASAPI_OPERATOR_TLS_KEY_FILE":    c.OperatorTLSKeyFile,
+		"SAASAPI_OPERATOR_TOKEN_FILE":      c.OperatorTokenFile,
+		"SAASAPI_FLEETRELEASER_URL":        c.FleetReleaserURL,
+		"SAASAPI_FLEETRELEASER_TOKEN_FILE": c.FleetReleaserTokenFile,
+	} {
+		if v == "" {
+			return fmt.Errorf("saasapi: %s is required when SAASAPI_OPERATOR_LISTEN_ADDR is set", name)
+		}
+	}
+	return validFleetReleaserURL(c.FleetReleaserURL)
 }
 
 // validateRateLimit rejects settings that would silently disable or

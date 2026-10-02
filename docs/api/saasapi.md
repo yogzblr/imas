@@ -11,7 +11,10 @@ where the two differ, the code wins, and this page follows the code.
   passes `openapi-spec-validator`, and its paths, methods and
   `operationId`s match `NewRouter` in
   [`internal/saasapi/router.go`](../../internal/saasapi/router.go) one for
-  one. Update both together.
+  one. Update both together. The operator plane has its own spec,
+  [`saasapi-operator-openapi.yaml`](saasapi-operator-openapi.yaml), matching
+  `operatorPlane.router` in
+  [`internal/saasapi/fleet_releases.go`](../../internal/saasapi/fleet_releases.go).
 - **Where it sits:** see [`docs/diagrams/imas-architecture.svg`](../diagrams/imas-architecture.svg).
   saasapi runs in the non-DMZ core next to farmer, owns the `saas` schema in
   PXC, reads `farmer.*`, and reaches farmer only over the NATS bus.
@@ -44,6 +47,9 @@ that is off by default:
 
 There is no bare `/tenants` route, and the batch GETs take a `{batch_id}`:
 there is no route that lists a tenant's batches.
+
+Two more routes, the operator plane, are not on `NewRouter` at all; see
+[Operator plane](#operator-plane-fleet-release-registration) below.
 
 ## Authentication
 
@@ -192,17 +198,23 @@ built yet ([`imas-internal-api-account.md`](../design/imas-internal-api-account.
 
 ### Fleet versions and update policy
 
-`GET /v1/versions` lists CloudXP's own published sprout versions (newest
-first: `version`, `checksum_sha256`, `released_at`, `notes`). Rows are
-written only by `cmd/fleetreleaser`, which signs each one with the
+`GET /v1/versions` lists CloudXP's registered sprout releases, one entry per
+version, OS and arch, newest first: `version`, `os`, `arch`,
+`package_type`, `file_name`, `checksum_sha256`, `min_sprout_version`,
+`revoked`, `released_at`, `notes`. There is no URL: a sprout downloads
+`file_name` from the repository configured in the sprout itself. The
+signature is not returned. Rows are written only by the operator plane
+(below), and each is signed by `cmd/fleetreleaser` with the
 `imas-fleet-signing` Transit key ([`deploy/fleetreleaser/README.md`](../../deploy/fleetreleaser/README.md)).
 
 `GET`/`PATCH .../update-policy` read and set the tenant's
 `approved_version`, `auto_update` and rollout window. `null` clears a field.
-The version must be in the catalog (`unknown_version` otherwise),
-`auto_update` requires an approved version, and the window needs both bounds
-with end after start. A tenant with no policy gets the default (nothing
-approved, `auto_update: false`), not a 404.
+The version must be in the catalog (`unknown_version` otherwise) and not
+revoked (`409 version_revoked`), `auto_update` requires an approved version,
+and the window needs both bounds with end after start. A tenant with no
+policy gets the default (nothing approved, `auto_update: false`), not a 404.
+Revoking a version a tenant has already approved leaves the policy row as it
+is; no rollout of that version is created.
 
 Storing a policy dispatches nothing. With dispatch off, which is the default,
 `auto_update` has no effect.
@@ -217,12 +229,14 @@ Storing a policy dispatches nothing. With dispatch off, which is the default,
 > `NewRouter`). With the default, neither route exists and both paths return
 > the ServeMux's plain-text 404.
 >
-> The reason is that sprout's self-update path is still disabled upstream.
-> A sprout verifies and stages a signed release, then the `selfupdate` step
-> ends `failed`, because installing it needs the backup/restore work in
-> design doc §2.3. `router.go` and `fleet_update_dispatch.go` cite this as
-> `yogzblr/imas#286`. That number is from before the repo was renamed and
-> doesn't resolve on `yogzblr/imas`.
+> The reason is that the sprout side doesn't exist yet: the farmer manifest
+> endpoint (design doc §2.6, FU.1) and the sprout's manifest fetch, verify
+> and install (FU.2). saasapi now sends farmer only the target version for a
+> `self_update`, while farmer's handler still expects the pre-FU.3 params
+> (an artifact URL and one row's signature), so farmer refuses every item.
+> `router.go` and `fleet_update_dispatch.go` also cite `yogzblr/imas#286`.
+> That number is from before the repo was renamed and doesn't resolve on
+> `yogzblr/imas`.
 
 It is documented here, and in the spec under the `fleet-update-dispatch` tag,
 so the contract is on record for when it's enabled. With the flag on:
@@ -231,17 +245,100 @@ so the contract is on record for when it's enabled. With the flag on:
   is 1–25 and defaults to 5. `gate` is `job_status` (the default) or
   `dispatch`. `probe` is rejected, because the probe health signal it needs
   doesn't exist yet.
-- `target_version` must be in the catalog, pass the https/checksum/Ed25519
-  signature check, be the tenant's `approved_version`
-  (`409 version_not_approved`), and now must be inside the rollout window
-  (`409 outside_rollout_window`).
-- Items go out in waves, and approval and the window are re-checked before
-  every wave. One failed wave halts the rest (`rollout_halted`). A sprout
+- `target_version` must be in the catalog with every OS/arch row's Ed25519
+  signature valid (`500` otherwise), be the tenant's `approved_version`
+  (`409 version_not_approved`), not be revoked (`409 version_revoked`), and
+  now must be inside the rollout window (`409 outside_rollout_window`).
+- Items go out in waves, and approval, revocation and the window are
+  re-checked before every wave. One failed wave halts the rest
+  (`rollout_halted`). A sprout
   that doesn't report back within 30 minutes becomes
   `unresponsive_after_update`.
 - saasapi also needs `IMAS_FLEETSIGN_OPENBAO_*` (read-only fleet key) with the
   flag on, or it refuses to start.
 - Rate limit: one request per 10 seconds, burst 2, per pod.
+
+## Operator plane: fleet release registration
+
+Release registration (design doc §2.5) is not tenant-facing and is not
+served by `NewRouter`. `NewOperatorServer` builds a separate HTTPS server
+for it, on its own listener (`SAASAPI_OPERATOR_LISTEN_ADDR`), with its own
+credential. The tenant API has no `/v1/operator/...` routes, and the
+operator listener has no tenant routes.
+
+> **Not started by `cmd/saasapi` yet.** `NewOperatorServer` and its
+> configuration are in `internal/saasapi`; wiring it into `cmd/saasapi`'s
+> `main` (and the Helm chart) is a follow-up. Until then nothing serves
+> these routes.
+
+| Method | Path | Handler | Notes |
+|---|---|---|---|
+| POST | `/v1/operator/fleet-releases` | `RegisterFleetRelease` | 201 created, 200 no-op |
+| POST | `/v1/operator/fleet-releases/{version}/revoke` | `RevokeFleetRelease` | idempotent |
+
+**Authentication.** `Authorization: Bearer <operator token>`, compared in
+constant time with the token in `SAASAPI_OPERATOR_TOKEN_FILE` and, during a
+rotation, `SAASAPI_OPERATOR_TOKEN_PREVIOUS_FILE`. Nothing else is
+accepted: not the BFF's `X-Internal-Auth` secret, not a Keycloak JWT.
+saasapi refuses to start the operator plane if the operator token equals the
+BFF secret or its own fleetreleaser token. Every failure is the same
+`401 unauthorized`. The intended caller is the farmer Helm release's
+post-install/post-upgrade hook Job (FU.5).
+
+**`POST /v1/operator/fleet-releases`**
+
+```json
+{
+  "version": "v2.4.1",
+  "channel": "stable",
+  "min_sprout_version": "v2.0.0",
+  "packages": [
+    { "os": "linux",   "arch": "amd64", "package_type": "deb",
+      "file_name": "imas-sprout_2.4.1_amd64.deb", "checksum_sha256": "<64 lowercase hex>" },
+    { "os": "windows", "arch": "amd64", "package_type": "msi",
+      "file_name": "imas-sprout_2.4.1_amd64.msi", "checksum_sha256": "<64 lowercase hex>" }
+  ]
+}
+```
+
+- Validation (`400 invalid_release` / `invalid_request`): every package
+  passes `internal/fleetsign`'s manifest rules (canonical `v`-semver,
+  `min_sprout_version` ≤ `version`, lowercase `os`/`arch`, a plain file
+  name, 64 lowercase hex checksum), with no normalization; `package_type` is
+  `deb` or `rpm` (`os: linux`) or `msi` (`os: windows`) and `file_name` ends
+  in `.<package_type>`; at most one package per `os`/`arch`, 1 to 16 of
+  them; `channel` is `[a-z][a-z0-9_-]{0,31}`. Unknown fields are refused.
+- Releases are immutable. If an `os`/`arch` is already registered for the
+  version with a different `package_type`, `file_name` or
+  `checksum_sha256`, or the version has a different `min_sprout_version`,
+  the request is `409 release_conflict` and nothing changes.
+- Same version, same contents: `200` with `"created": 0`, without calling
+  fleetreleaser. Re-running the hook is always safe.
+- Packages for an `os`/`arch` the version doesn't have yet are signed by
+  `cmd/fleetreleaser` (one call each), every signature is checked against
+  the read-only `imas-fleet-signing` key set, and the new rows are written in
+  one transaction: `201`. Any failure stores nothing: fleetreleaser
+  declining (for example a version at or below its floor) is
+  `422 signing_refused` with its code in `details.signer_error`; a signer
+  error or a signature that doesn't verify is `502 signer_unavailable`; no
+  read-only key source is `503 signing_unavailable`.
+- A revoked version takes no new packages (`409 version_revoked`);
+  re-registering its existing contents is a `200` no-op that leaves it
+  revoked.
+- `channel` is validated and logged. `saas.fleet_versions` has no column for
+  it.
+
+The response describes every row of the version after the request:
+`version`, `min_sprout_version`, `revoked`, `created` and `packages`
+(each with its `signature`).
+
+**`POST /v1/operator/fleet-releases/{version}/revoke`** marks every row of the
+version revoked: no rollout of it is created or continued, no tenant can
+newly approve it, and (once FU.1 exists) no manifest is served for it.
+Sprouts already running it keep it, since they refuse downgrades. It is
+permanent; a fixed build is a new version. The response is
+`{version, revoked: true, packages, already_revoked}`. An unknown version is
+`404`, a non-canonical one `400`.
 
 ## Configuration
 
@@ -260,6 +357,12 @@ error, never a silent default.
 | `SAASAPI_VALKEY_ADDRS` | empty | Valkey farmer writes heartbeats to; also shares the key rate limit across pods |
 | `SAASAPI_ENROLLMENT_KEY_RATE_LIMIT` / `_BURST` | `1` / `5` | per-tenant limit on minting keys |
 | `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` | `false` | registers the dispatch routes; leave it off |
+| `SAASAPI_OPERATOR_LISTEN_ADDR` | empty (off) | operator plane HTTPS listener; with it set, the next five are required |
+| `SAASAPI_OPERATOR_TLS_CERT_FILE` / `_KEY_FILE` | — | the operator listener's certificate and key |
+| `SAASAPI_OPERATOR_TOKEN_FILE` / `_PREVIOUS_FILE` | — / empty | operator bearer token(s), as mounted Secret files |
+| `SAASAPI_FLEETRELEASER_URL` | — | `cmd/fleetreleaser`'s `https://host:port` |
+| `SAASAPI_FLEETRELEASER_TOKEN_FILE` | — | the token saasapi presents to fleetreleaser, as a file |
+| `SAASAPI_FLEETRELEASER_CA_FILE` | system roots | CA bundle for fleetreleaser's certificate |
 
 saasapi exits at startup if it can't connect to the bus or, when configured,
 to Valkey. The Helm chart in [`deploy/helm/farmer`](../../deploy/helm/farmer/README.md)

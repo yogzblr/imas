@@ -3,6 +3,7 @@ package saasapi
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,21 +31,36 @@ func newFleetTestDB(t *testing.T) *gorm.DB {
 
 func mustPublishVersion(t *testing.T, gdb *gorm.DB, version string, releasedAt time.Time) FleetVersion {
 	t.Helper()
+	return mustPublishVersionFor(t, gdb, version, "linux", "amd64", releasedAt)
+}
+
+// mustPublishVersionFor registers version's package for osName/arch, signed
+// with the test fleet key, as the operator plane would.
+func mustPublishVersionFor(t *testing.T, gdb *gorm.DB, version, osName, arch string, releasedAt time.Time) FleetVersion {
+	t.Helper()
 	id, err := newID("fv_")
 	if err != nil {
 		t.Fatalf("generating fleet version id: %v", err)
 	}
+	pkgType := "deb"
+	if osName == "windows" {
+		pkgType = "msi"
+	}
 	v := FleetVersion{
-		ID:             id,
-		Version:        version,
-		ArtifactURL:    "https://artifacts.internal.test/sprout/" + version + "/sprout",
-		ChecksumSHA256: strings.Repeat("ab", 32),
-		ReleasedAt:     releasedAt.UTC(),
-		Notes:          "notes for " + version,
+		ID:               id,
+		Version:          version,
+		OS:               osName,
+		Arch:             arch,
+		PackageType:      pkgType,
+		FileName:         "imas-sprout_" + strings.TrimPrefix(version, "v") + "_" + arch + "." + pkgType,
+		ChecksumSHA256:   strings.Repeat("ab", 32),
+		MinSproutVersion: "v0.0.0",
+		ReleasedAt:       releasedAt.UTC(),
+		Notes:            "notes for " + version,
 	}
 	v.Signature = signTestRelease(t, v)
 	if err := gdb.Create(&v).Error; err != nil {
-		t.Fatalf("publishing %s: %v", version, err)
+		t.Fatalf("publishing %s %s/%s: %v", version, osName, arch, err)
 	}
 	return v
 }
@@ -100,7 +116,7 @@ func TestListFleetVersionsEmpty(t *testing.T) {
 	}
 }
 
-func TestListFleetVersionsNewestFirstWithoutArtifactURL(t *testing.T) {
+func TestListFleetVersionsNewestFirstWithoutSignature(t *testing.T) {
 	gdb := newFleetTestDB(t)
 	base := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	mustPublishVersion(t, gdb, "v2.4.0", base)
@@ -111,7 +127,7 @@ func TestListFleetVersionsNewestFirstWithoutArtifactURL(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
 	}
-	for _, leaked := range []string{"artifact_url", "artifacts.internal.test", `"id"`, "fv_"} {
+	for _, leaked := range []string{"artifact_url", "signature", `"id"`, "fv_"} {
 		if strings.Contains(w.Body.String(), leaked) {
 			t.Fatalf("response contains %q: %s", leaked, w.Body.String())
 		}
@@ -131,18 +147,48 @@ func TestListFleetVersionsNewestFirstWithoutArtifactURL(t *testing.T) {
 		t.Fatalf("versions = %v, want newest first", got)
 	}
 	first := resp.Versions[0]
-	if first.ChecksumSHA256 != strings.Repeat("ab", 32) || first.Notes != "notes for v2.4.2" ||
-		!first.ReleasedAt.Equal(base.Add(48*time.Hour)) {
+	if first != (fleetVersionItem{Version: "v2.4.2", OS: "linux", Arch: "amd64", PackageType: "deb",
+		FileName: "imas-sprout_2.4.2_amd64.deb", ChecksumSHA256: strings.Repeat("ab", 32), MinSproutVersion: "v0.0.0",
+		ReleasedAt: first.ReleasedAt, Notes: "notes for v2.4.2"}) || !first.ReleasedAt.Equal(base.Add(48*time.Hour)) {
 		t.Fatalf("unexpected entry %+v", first)
 	}
 }
 
-func TestFleetVersionUniqueVersion(t *testing.T) {
+// One entry per OS/arch, and a revoked version is listed as revoked.
+func TestListFleetVersionsPerOSArchAndRevoked(t *testing.T) {
+	gdb := newFleetTestDB(t)
+	at := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	mustPublishVersion(t, gdb, "v2.4.1", at)
+	mustPublishVersionFor(t, gdb, "v2.4.1", "linux", "arm64", at)
+	mustPublishVersionFor(t, gdb, "v2.4.1", "windows", "amd64", at)
+	gdb.Model(&FleetVersion{}).Where("version = ?", "v2.4.1").Update("revoked", true)
+
+	w := doRequest(t, ListFleetVersions, "GET", "/v1/versions", nil, nil)
+	var resp struct {
+		Versions []fleetVersionItem `json:"versions"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, v := range resp.Versions {
+		got = append(got, v.OS+"/"+v.Arch+"/"+v.PackageType+"/"+strconv.FormatBool(v.Revoked))
+	}
+	if strings.Join(got, ",") != "linux/amd64/deb/true,linux/arm64/deb/true,windows/amd64/msi/true" {
+		t.Fatalf("entries = %v", got)
+	}
+}
+
+// UNIQUE(version, os, arch): one row per OS/arch of a version.
+func TestFleetVersionUniqueVersionOSArch(t *testing.T) {
 	gdb := newFleetTestDB(t)
 	mustPublishVersion(t, gdb, "v2.4.1", time.Now())
-	dup := FleetVersion{ID: "fv_dup", Version: "v2.4.1", ArtifactURL: "x", ChecksumSHA256: "y", ReleasedAt: time.Now()}
+	mustPublishVersionFor(t, gdb, "v2.4.1", "linux", "arm64", time.Now())
+	mustPublishVersionFor(t, gdb, "v2.4.2", "linux", "amd64", time.Now())
+	dup := FleetVersion{ID: "fv_dup", Version: "v2.4.1", OS: "linux", Arch: "amd64", PackageType: "rpm",
+		FileName: "x.rpm", ChecksumSHA256: "y", MinSproutVersion: "v0.0.0", ReleasedAt: time.Now()}
 	if err := gdb.Session(&gorm.Session{Logger: gdb.Logger.LogMode(gormlogger.Silent)}).Create(&dup).Error; err == nil {
-		t.Fatal("fleet_versions accepted a duplicate version")
+		t.Fatal("fleet_versions accepted a second row for the same version, os and arch")
 	}
 }
 

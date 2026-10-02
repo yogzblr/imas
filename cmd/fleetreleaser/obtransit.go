@@ -265,9 +265,9 @@ func (c *obTransitClient) sign(ctx context.Context, input []byte) ([]byte, int, 
 }
 
 // keySet calls GET /v1/<mount>/keys/<key>, for verifying a signature
-// right after Transit produced it (and before anything is written), and
-// for judging an existing row's signature (publish's unchanged/refuse
-// decision).
+// right after Transit produced it and before it is returned
+// (signAndVerify), and once at startup to fail fast on a key this
+// identity can't read or that isn't Ed25519.
 func (c *obTransitClient) keySet(ctx context.Context) (fleetsign.KeySet, error) {
 	token, err := c.currentToken(ctx)
 	if err != nil {
@@ -297,13 +297,10 @@ func (c *obTransitClient) keySet(ctx context.Context) (fleetsign.KeySet, error) 
 	}
 	// Same floor as every verifier (fleetsign's readKeySet):
 	// min_decryption_version, the floor Transit's own /verify honors, with
-	// 0 meaning unrestricted. So publish judges an existing row's signature
-	// exactly as farmer, saasapi and the sprouts will: during a rotation
-	// grace period, a row signed by a version below min_encryption_version
-	// but at or above min_decryption_version is still valid, not a
-	// conflict. A signature Transit has just produced is always by a
-	// version >= min_encryption_version >= min_decryption_version, so the
-	// post-sign self-verify is unaffected.
+	// 0 meaning unrestricted. A signature Transit has just produced is
+	// always by a version >= min_encryption_version >=
+	// min_decryption_version, so the post-sign self-verify always finds
+	// its key.
 	minVersion := rr.Data.MinDecryptionVersion
 	if minVersion < 1 {
 		minVersion = 1
