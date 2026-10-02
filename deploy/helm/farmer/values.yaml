@@ -150,23 +150,41 @@ database:
   existingSecretKeys:
     farmerDSN: farmer-dsn
     saasapiDSN: saasapi-dsn
-  # pxc.enabled with the chart-generated Secret only: a Job that creates
-  # both schemas and users and applies the §5.1 grants, then waits for
-  # saasapi's migration to create saas.enrollment_keys and applies
-  # farmer's column grant on it. A plain Job named by a hash of its spec
-  # (not a hook), so it never blocks `helm install` while PXC starts or
-  # saasapi waits for its NATS credential.
-  bootstrap:
-    enabled: true
-    # Secret/key with PXC's root password. Empty: the operator's
-    # <cluster>-secrets (or pxc.pxc.clusterSecretName), key root.
+  # cmd/migrate, as Helm hook Jobs (README.md, "Migrations"). `migrate up`
+  # on install (post-install with pxc.enabled, pre-install otherwise) and
+  # on pre-upgrade; `migrate check` on pre-rollback. farmer and saasapi
+  # don't migrate their own schemas: they wait for the version they need.
+  # FLAG FOR SECURITY REVIEW: the `up` pod holds PXC's root password.
+  migrate:
+    image:
+      repository: ghcr.io/yogzblr/imas-migrate
+      # Empty: the chart's appVersion. Keep it at farmer's and saasapi's
+      # version: the migrations are compiled into the binary.
+      tag: ""
+      digest: ""
+      pullPolicy: IfNotPresent
+    # Secret/key with PXC root's password, mounted in the `up` pod only.
+    # Empty with pxc.enabled: the operator's <cluster>-secrets (or
+    # pxc.pxc.clusterSecretName). Empty with an external PXC: the root
+    # step is skipped (--skip-root), and the schemas, users, §4.1 grants
+    # and farmer's enrollment_keys column grant are ops' job.
     rootPasswordSecret: ""
     rootPasswordKey: root
-    # Overall budget: PXC coming up, then saasapi's first migration.
-    activeDeadlineSeconds: 3600
+    rootUser: root
+    # How long cmd/migrate waits for PXC (--wait). Covers the bundled
+    # cluster coming up on first install.
+    wait: 15m
+    backoffLimit: 2
+    # Overall budget: PXC coming up, another run's migration lock, the
+    # migrations themselves. `helm install/upgrade --timeout` must be at
+    # least this long, or Helm gives up on the hook first.
+    activeDeadlineSeconds: 1800
+    # Emit Argo CD hook annotations (Sync with the bundled PXC, PreSync
+    # with an external one) instead of letting Argo CD map Helm's.
+    argoCDHooks: true
     resources:
-      requests: { cpu: 10m, memory: 64Mi }
-      limits: { memory: 256Mi }
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { memory: 128Mi }
 
 # ---------------------------------------------------------------------------
 # Object storage for recipes and job logs (not bundled). farmer starts
@@ -546,8 +564,8 @@ pxc:
     proxySize: true
   pxc:
     size: 1
-    # Pinned here (the pxc-db 1.20.0 default) because the db-bootstrap Job
-    # runs its mysql client from the same image.
+    # Pinned here (the pxc-db 1.20.0 default), so an upgrade of the
+    # subchart never changes the server version unannounced.
     image:
       repository: percona/percona-xtradb-cluster
       tag: 8.4.8-8.1

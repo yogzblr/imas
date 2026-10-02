@@ -158,6 +158,20 @@ builds:
       - arm64
     ldflags:
       - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
+  # Service binary: container image + release archive. The Helm chart's
+  # schema migration hook Job (deploy/helm/farmer, "Migrations").
+  - main: ./cmd/migrate/
+    id: "migrate"
+    binary: "{{.ProjectName}}-migrate"
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
 
 # generates macOS universal binaries
 # name would be: imas-v1.0.0-darwin-universal
@@ -192,6 +206,7 @@ archives:
       - saasapi
       - farmerbus
       - fleetreleaser
+      - migrate
     name_template: "{{.ProjectName}}-services-{{.Version}}-{{.Os}}-{{.Arch}}"
 
 
@@ -346,8 +361,8 @@ nfpms:
 # Container images: GHCR only, linux/amd64 + linux/arm64, one multi-arch
 # manifest per image, signed keyless with cosign (docker_signs below).
 # Images use the package-managed (no_self_update) builds: a container is
-# replaced, never self-updated. saasapi, farmerbus and fleetreleaser have
-# their own builds above.
+# replaced, never self-updated. saasapi, farmerbus, fleetreleaser and
+# migrate have their own builds above.
 dockers:
   - id: farmer-amd64
     goos: linux
@@ -499,6 +514,36 @@ dockers:
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
     # Only push for tagged releases
     skip_push: "{{ .IsSnapshot }}"
+  - id: migrate-amd64
+    goos: linux
+    goarch: amd64
+    ids: [migrate]
+    image_templates:
+      - "ghcr.io/yogzblr/imas-migrate:{{ .Version }}-amd64"
+    dockerfile: docker/goreleaser.migrate.dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.source=https://github.com/yogzblr/imas"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+    # Only push for tagged releases
+    skip_push: "{{ .IsSnapshot }}"
+  - id: migrate-arm64
+    goos: linux
+    goarch: arm64
+    ids: [migrate]
+    image_templates:
+      - "ghcr.io/yogzblr/imas-migrate:{{ .Version }}-arm64"
+    dockerfile: docker/goreleaser.migrate.dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.source=https://github.com/yogzblr/imas"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+    # Only push for tagged releases
+    skip_push: "{{ .IsSnapshot }}"
 
 docker_manifests:
   - name_template: "ghcr.io/yogzblr/imas-farmer:{{ .Version }}"
@@ -550,6 +595,16 @@ docker_manifests:
     image_templates:
       - "ghcr.io/yogzblr/imas-fleetreleaser:{{ .Version }}-amd64"
       - "ghcr.io/yogzblr/imas-fleetreleaser:{{ .Version }}-arm64"
+    skip_push: "{{ or .IsSnapshot .IsPrerelease }}"
+  - name_template: "ghcr.io/yogzblr/imas-migrate:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/yogzblr/imas-migrate:{{ .Version }}-amd64"
+      - "ghcr.io/yogzblr/imas-migrate:{{ .Version }}-arm64"
+    skip_push: "{{ .IsSnapshot }}"
+  - name_template: "ghcr.io/yogzblr/imas-migrate:latest"
+    image_templates:
+      - "ghcr.io/yogzblr/imas-migrate:{{ .Version }}-amd64"
+      - "ghcr.io/yogzblr/imas-migrate:{{ .Version }}-arm64"
     skip_push: "{{ or .IsSnapshot .IsPrerelease }}"
 
 # Keyless cosign signatures (Sigstore OIDC from the GitHub Actions run; no

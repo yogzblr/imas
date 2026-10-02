@@ -1,0 +1,163 @@
+{{- include "imas-farmer.validate" . -}}
+{{- $m := .Values.database.migrate -}}
+{{- $root := include "imas-farmer.migrate.rootSecret" . -}}
+{{- /*
+cmd/migrate as Helm hooks (docs/design/cloudxp-machine-manager-api-design.md
+§4.1a). One pod per run: it waits for PXC; as PXC root creates both
+schemas and users and applies §4.1's grants; migrates `farmer` as farmer's
+user and `saas` as saasapi's; then grants farmer UPDATE (used_count,
+last_used_at) on saas.enrollment_keys. farmer and saasapi wait for the
+schema version they expect, and need neither this Job nor the root Secret.
+
+Two manifests, because a hook Job's args can't depend on the event that
+runs it: `up` on install and upgrade, `check` (writes nothing, no root
+Secret) on rollback. `helm rollback` runs the target revision's
+pre-rollback hook, so it is that release's binary judging whether the
+schema the newer one left is still within its supported range.
+
+Install: post-install with the bundled PXC, which doesn't exist at
+pre-install; pre-install with an external one, so farmer and saasapi
+start on a migrated schema.
+
+FLAG FOR SECURITY REVIEW: the `up` pod is the only one that mounts PXC's
+root password, and only when it runs the root step (see
+imas-farmer.migrate.rootSecret). The password and both DSNs are files,
+never env or argv. Its NetworkPolicy (below) allows PXC and DNS only and
+is rendered whatever networkPolicy.enabled says.
+*/ -}}
+{{- $installHook := ternary "post-install" "pre-install" .Values.pxc.enabled -}}
+{{- $upArgs := list "up" (printf "--wait=%s" $m.wait) -}}
+{{- if not $root }}{{ $upArgs = append $upArgs "--skip-root" }}{{ end -}}
+{{- range $run := list
+    (dict "name" "db-migrate" "hooks" (printf "%s,pre-upgrade" $installHook) "args" $upArgs "root" $root)
+    (dict "name" "db-migrate-check" "hooks" "pre-rollback" "args" (list "check" (printf "--wait=%s" $m.wait)) "root" "") }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-%s" (include "imas-farmer.migrate.namePrefix" $) $run.name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: db-migrate
+  annotations:
+    helm.sh/hook: {{ $run.hooks }}
+    helm.sh/hook-weight: "-5"
+    # A failed run is kept for its logs until the next one replaces it.
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    {{- if and $m.argoCDHooks (eq $run.name "db-migrate") }}
+    # Argo CD has no install/upgrade split and no rollback hook. With the
+    # bundled PXC, Sync (the cluster is created in the same phase); with
+    # an external one, PreSync. The check Job has only pre-rollback, which
+    # Argo CD never runs.
+    argocd.argoproj.io/hook: {{ ternary "Sync" "PreSync" $.Values.pxc.enabled }}
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    {{- end }}
+spec:
+  backoffLimit: {{ $m.backoffLimit }}
+  activeDeadlineSeconds: {{ $m.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "imas-farmer.migrate.selectorLabels" $ | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with $.Values.farmer.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: migrate
+          image: {{ include "imas-farmer.image" (dict "image" $m.image "appVersion" $.Chart.AppVersion) | quote }}
+          imagePullPolicy: {{ $m.image.pullPolicy }}
+          args: {{ toJson $run.args }} # ENTRYPOINT is /migrate
+          env:
+            - name: IMAS_MIGRATE_FARMER_DSN_FILE
+              value: /var/run/secrets/imas/db/farmer-dsn
+            - name: IMAS_MIGRATE_SAAS_DSN_FILE
+              value: /var/run/secrets/imas/db/saasapi-dsn
+            {{- if $run.root }}
+            - name: IMAS_MIGRATE_ROOT_PASSWORD_FILE
+              value: /var/run/secrets/imas/pxc-root/password
+            - name: IMAS_MIGRATE_ROOT_USER
+              value: {{ $m.rootUser | quote }}
+            {{- end }}
+          {{- with $m.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: db
+              mountPath: /var/run/secrets/imas/db
+              readOnly: true
+            {{- if $run.root }}
+            - name: pxc-root
+              mountPath: /var/run/secrets/imas/pxc-root
+              readOnly: true
+            {{- end }}
+      volumes:
+        # Both DSNs: the generated <release>-farmer-db or
+        # database.existingSecret, the same Secret farmer and saasapi use.
+        - name: db
+          secret:
+            secretName: {{ include "imas-farmer.dbSecretName" $ }}
+            defaultMode: 0440
+            items:
+              - key: {{ $.Values.database.existingSecretKeys.farmerDSN | quote }}
+                path: farmer-dsn
+              - key: {{ $.Values.database.existingSecretKeys.saasapiDSN | quote }}
+                path: saasapi-dsn
+        {{- if $run.root }}
+        # PXC root's password, the one key; mounted in no other pod.
+        - name: pxc-root
+          secret:
+            secretName: {{ $run.root }}
+            defaultMode: 0440
+            items:
+              - key: {{ $m.rootPasswordKey | quote }}
+                path: password
+        {{- end }}
+{{- end }}
+---
+# The migrate pods talk to PXC and DNS, nothing else, and take no
+# ingress. A hook itself (lower weight), so it is in place before the Job
+# at pre-install and pre-upgrade too, when the release's own resources
+# aren't applied yet.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-db-migrate" (include "imas-farmer.migrate.namePrefix" .) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-migrate
+  annotations:
+    helm.sh/hook: {{ $installHook }},pre-upgrade,pre-rollback
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    {{- if $m.argoCDHooks }}
+    argocd.argoproj.io/hook: {{ ternary "Sync" "PreSync" .Values.pxc.enabled }}
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    {{- end }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "imas-farmer.migrate.selectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress: []
+  egress:
+    {{- include "imas-farmer.depEgress" (dict "bundled" .Values.pxc.enabled "peers" .Values.networkPolicy.external.pxc "port" .Values.database.port) | nindent 4 }}
+    {{- include "imas-farmer.dnsEgress" . | nindent 4 }}

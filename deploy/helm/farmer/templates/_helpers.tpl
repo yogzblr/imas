@@ -65,6 +65,39 @@ app.kubernetes.io/name: imas-saasapi-cred-publisher
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
+{{/*
+The migrate Job's pods. Their own name label, like the publisher's: the
+nats chart's bus NetworkPolicy admits core by app.kubernetes.io/name, and
+a pod holding PXC's root password must never reach the bus.
+*/}}
+{{- define "imas-farmer.migrate.selectorLabels" -}}
+app.kubernetes.io/name: imas-migrate
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: db-migrate
+{{- end }}
+
+{{/* Short enough that "<prefix>-db-migrate-check" fits 63 characters
+and stays distinct from "<prefix>-db-migrate". */}}
+{{- define "imas-farmer.migrate.namePrefix" -}}
+{{- include "imas-farmer.fullname" . | trunc 46 | trimSuffix "-" -}}
+{{- end }}
+
+{{/*
+The Secret holding PXC root's password for the migrate Job's root step,
+or "" when the step is skipped (`migrate up --skip-root`):
+database.migrate.rootPasswordSecret if set; else, with the bundled PXC,
+the operator's <cluster>-secrets (or pxc.pxc.clusterSecretName); else
+nothing, and the external PXC's schemas, users and grants are ops' job.
+*/}}
+{{- define "imas-farmer.migrate.rootSecret" -}}
+{{- $m := .Values.database.migrate -}}
+{{- if $m.rootPasswordSecret -}}
+{{- $m.rootPasswordSecret -}}
+{{- else if .Values.pxc.enabled -}}
+{{- default (printf "%s-secrets" (include "imas-farmer.pxc.clusterName" .)) .Values.pxc.pxc.clusterSecretName -}}
+{{- end -}}
+{{- end }}
+
 {{- define "imas-farmer.farmer.serviceAccountName" -}}
 {{- if .Values.farmer.serviceAccount.create }}
 {{- default (include "imas-farmer.fullname" .) .Values.farmer.serviceAccount.name }}
@@ -433,6 +466,27 @@ explanation rather than deploying something that silently can't work.
 {{- end -}}
 {{- if not (include "imas-farmer.dbHost" .) -}}
 {{- fail "database.host is required when pxc.enabled=false" -}}
+{{- end -}}
+{{- if hasKey .Values.database "bootstrap" -}}
+{{- fail "database.bootstrap.* was replaced by database.migrate.* (the cmd/migrate hook Job, docs/design/cloudxp-machine-manager-api-design.md §4.1a): rootPasswordSecret, rootPasswordKey, activeDeadlineSeconds and resources moved there. There is no enabled toggle: farmer and saasapi no longer migrate their own schemas." -}}
+{{- end -}}
+{{- $mig := .Values.database.migrate -}}
+{{- if not (regexMatch "^[1-9][0-9]*(s|m|h)$" (toString $mig.wait)) -}}
+{{- fail (printf "database.migrate.wait %q must be a whole number of s, m or h, such as \"15m\"" (toString $mig.wait)) -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9_.-]{1,32}$" (toString $mig.rootUser)) -}}
+{{- fail (printf "database.migrate.rootUser %q is not a MySQL user name" (toString $mig.rootUser)) -}}
+{{- end -}}
+{{- if and .Values.pxc.enabled (not .Values.database.existingSecret) -}}
+{{- $db := .Values.database -}}
+{{- range $v := list $db.farmer.name $db.farmer.user $db.saasapi.name $db.saasapi.user -}}
+{{- if not (regexMatch "^[A-Za-z0-9_]{1,32}$" (toString $v)) -}}
+{{- fail (printf "database schema/user name %q must match ^[A-Za-z0-9_]{1,32}$ (it goes into the generated DSNs, and cmd/migrate writes it into DDL)" $v) -}}
+{{- end -}}
+{{- end -}}
+{{- if or (eq (toString $db.farmer.name) (toString $db.saasapi.name)) (eq (toString $db.farmer.user) (toString $db.saasapi.user)) -}}
+{{- fail "database.farmer and database.saasapi must name different schemas and different users: single writer per schema (§4.1)" -}}
+{{- end -}}
 {{- end -}}
 {{- if and (not .Values.pxc.enabled) (not .Values.database.existingSecret) -}}
 {{- fail "database.existingSecret is required when pxc.enabled=false: an existing Secret with farmer's and saasapi's full DSNs (database.existingSecretKeys). The chart only generates credentials for the PXC it deploys." -}}
