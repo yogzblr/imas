@@ -44,3 +44,29 @@ saasapi starts once Secret "{{ .Values.saasapi.natsCredentials.secretName }}" ex
 ({{ if .Values.externalSecrets.enabled }}ESO syncs it{{ else }}externalSecrets.enabled=false: create it by hand{{ end }} from its seed and the JWT the publish Job
 wrote to {{ .Values.credentialPublisher.kvMount }}/{{ .Values.credentialPublisher.kvPath }}, field "jwt").
 {{- end }}
+
+{{- $relFile := include "imas-farmer.sproutRelease.file" . }}
+{{- if not $relFile }}
+
+Sprout release registration: skipped. This chart has no files/sprout-release.json (a dev
+install from source); published charts carry it (packaging/helm/stamp-sprout-release.sh).
+{{- else }}
+{{- $rel := $relFile | fromJson }}
+{{- if include "imas-farmer.sproutRelease.registers" . }}
+
+Sprout release registration: hook Job {{ printf "%s-sprout-release-register" (include "imas-farmer.fullname" .) | trunc 63 | trimSuffix "-" }} (post-install, post-upgrade)
+registers sprout release {{ get $rel "version" }} (min_sprout_version {{ .Values.sproutRelease.minSproutVersion }}, {{ len (get $rel "packages") }} package(s)) with
+saasapi's operator plane at https://{{ include "imas-farmer.saasapi.operatorFQDN" . }}:{{ .Values.saasapi.operator.port }}, whose
+certificate must carry that name. If it fails, so does the release; a 409 means the version is
+already registered with different contents (releases are immutable: cut a new version). Withdraw
+a version with the revoke call (README, "Revoking a sprout release"); `helm rollback` doesn't.
+{{- else }}
+
+Sprout release registration: NOT registered. This chart carries sprout release {{ get $rel "version" }}, but
+{{- if not .Values.sproutRelease.register }} sproutRelease.register=false.
+{{- else if not .Values.saasapi.enabled }} saasapi.enabled=false.
+{{- else }} saasapi.operator.enabled=false (saasapi's operator plane is off).
+{{- end }}
+No sprout can be offered it until it is registered (README, "Sprout release registration").
+{{- end }}
+{{- end }}

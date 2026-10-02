@@ -2,6 +2,8 @@
 {{- include "imas-farmer.validate" . -}}
 {{- $s := .Values.saasapi -}}
 {{- $fetchCA := include "imas-farmer.saasapi.fetchCA" . -}}
+{{- $fleetVerify := include "imas-farmer.saasapi.fleetVerify" . -}}
+{{- $op := $s.operator -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -125,6 +127,11 @@ spec:
             - name: http
               containerPort: {{ $s.port }}
               protocol: TCP
+            {{- if $op.enabled }}
+            - name: operator
+              containerPort: {{ $op.port }}
+              protocol: TCP
+            {{- end }}
           env:
             - name: SAASAPI_LISTEN_ADDR
               value: {{ printf ":%v" $s.port | quote }}
@@ -192,14 +199,39 @@ spec:
             {{- end }}
             - name: SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED
               value: {{ $s.fleetUpdateDispatch.enabled | toString | quote }}
-            {{- if $s.fleetUpdateDispatch.enabled }}
+            {{- if $fleetVerify }}
             # Fleet signing key, READ-ONLY (imas-fleet-verify). saasapi
-            # writes saas.fleet_versions, so it must never hold sign.
+            # writes saas.fleet_versions, so it must never hold sign. Fleet
+            # dispatch and the operator plane both refuse to start without it.
             {{- include "imas-farmer.openbaoEnv" (dict "root" $ "prefix" "IMAS_FLEETSIGN_OPENBAO" "k8sRole" $s.openbao.fleetSign.k8sRole "tokenKey" $s.openbao.fleetSign.tokenSecretKey) | nindent 12 }}
             - name: IMAS_FLEETSIGN_OPENBAO_TRANSIT_MOUNT
               value: {{ $s.openbao.fleetSign.transitMount | quote }}
             - name: IMAS_FLEETSIGN_TRANSIT_KEY
               value: {{ $s.openbao.fleetSign.keyName | quote }}
+            {{- end }}
+            {{- if $op.enabled }}
+            # The operator plane (fleet_releases.go): its own HTTPS listener
+            # and bearer token. Every secret is a file, read once at start.
+            - name: SAASAPI_OPERATOR_LISTEN_ADDR
+              value: {{ printf ":%v" $op.port | quote }}
+            - name: SAASAPI_OPERATOR_TLS_CERT_FILE
+              value: /var/run/secrets/imas/operator-tls/tls.crt
+            - name: SAASAPI_OPERATOR_TLS_KEY_FILE
+              value: /var/run/secrets/imas/operator-tls/tls.key
+            - name: SAASAPI_OPERATOR_TOKEN_FILE
+              value: /var/run/secrets/imas/operator-token/current
+            {{- if $op.token.previousKey }}
+            - name: SAASAPI_OPERATOR_TOKEN_PREVIOUS_FILE
+              value: /var/run/secrets/imas/operator-token/previous
+            {{- end }}
+            - name: SAASAPI_FLEETRELEASER_URL
+              value: {{ $op.fleetReleaser.url | quote }}
+            - name: SAASAPI_FLEETRELEASER_TOKEN_FILE
+              value: /var/run/secrets/imas/fleetreleaser/token
+            {{- if $op.fleetReleaser.caConfigMap }}
+            - name: SAASAPI_FLEETRELEASER_CA_FILE
+              value: /var/run/secrets/imas/fleetreleaser-ca/ca.crt
+            {{- end }}
             {{- end }}
             {{- with $s.extraEnv }}
             {{- toYaml . | nindent 12 }}
@@ -229,8 +261,24 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
-            {{- if $s.fleetUpdateDispatch.enabled }}
+            {{- if $fleetVerify }}
             {{- include "imas-farmer.openbaoVolumeMounts" . | trim | nindent 12 }}
+            {{- end }}
+            {{- if $op.enabled }}
+            - name: operator-tls
+              mountPath: /var/run/secrets/imas/operator-tls
+              readOnly: true
+            - name: operator-token
+              mountPath: /var/run/secrets/imas/operator-token
+              readOnly: true
+            - name: fleetreleaser-token
+              mountPath: /var/run/secrets/imas/fleetreleaser
+              readOnly: true
+            {{- if $op.fleetReleaser.caConfigMap }}
+            - name: fleetreleaser-ca
+              mountPath: /var/run/secrets/imas/fleetreleaser-ca
+              readOnly: true
+            {{- end }}
             {{- end }}
             {{- with $s.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
@@ -269,13 +317,46 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: 16Mi
-        {{- if or $s.fleetUpdateDispatch.enabled (and $fetchCA .Values.openbaoClient.caConfigMap) }}
-        {{- if $s.fleetUpdateDispatch.enabled }}
+        {{- if or $fleetVerify (and $fetchCA .Values.openbaoClient.caConfigMap) }}
+        {{- if $fleetVerify }}
         {{- include "imas-farmer.openbaoVolumes" . | trim | nindent 8 }}
         {{- else }}
         - name: openbao-ca
           configMap:
             name: {{ .Values.openbaoClient.caConfigMap }}
+        {{- end }}
+        {{- end }}
+        {{- if $op.enabled }}
+        # The listener's certificate and key; not ca.crt, which is the hook
+        # Job's.
+        - name: operator-tls
+          secret:
+            secretName: {{ $op.tls.secretName }}
+            defaultMode: 0440
+            items:
+              - { key: tls.crt, path: tls.crt }
+              - { key: tls.key, path: tls.key }
+        - name: operator-token
+          secret:
+            secretName: {{ $op.token.secretName }}
+            defaultMode: 0440
+            items:
+              - { key: {{ $op.token.currentKey | quote }}, path: current }
+              {{- if $op.token.previousKey }}
+              - { key: {{ $op.token.previousKey | quote }}, path: previous }
+              {{- end }}
+        - name: fleetreleaser-token
+          secret:
+            secretName: {{ $op.fleetReleaser.tokenSecretName }}
+            defaultMode: 0440
+            items:
+              - { key: {{ $op.fleetReleaser.tokenKey | quote }}, path: token }
+        {{- if $op.fleetReleaser.caConfigMap }}
+        - name: fleetreleaser-ca
+          configMap:
+            name: {{ $op.fleetReleaser.caConfigMap }}
+            items:
+              - { key: {{ $op.fleetReleaser.caKey | quote }}, path: ca.crt }
         {{- end }}
         {{- end }}
         {{- with $s.extraVolumes }}

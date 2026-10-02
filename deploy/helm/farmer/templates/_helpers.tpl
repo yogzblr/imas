@@ -342,10 +342,109 @@ explicit bus.ca source, and the CA lives in OpenBao (tls.mode=openbao).
 {{- if and (not .Values.bus.ca.secretName) (not .Values.bus.ca.configMapName) (eq .Values.tls.mode "openbao") -}}true{{- end -}}
 {{- end }}
 
-{{/* True (non-empty) when saasapi talks to OpenBao at all: fleet
-dispatch's verify client, or the bus CA fetch. */}}
+{{/* True (non-empty) when saasapi runs its read-only fleet key client
+(IMAS_FLEETSIGN_OPENBAO_*): fleet dispatch and the operator plane each
+refuse to start without it. */}}
+{{- define "imas-farmer.saasapi.fleetVerify" -}}
+{{- if and .Values.saasapi.enabled (or .Values.saasapi.fleetUpdateDispatch.enabled .Values.saasapi.operator.enabled) -}}true{{- end -}}
+{{- end }}
+
+{{/* True (non-empty) when saasapi talks to OpenBao at all: the fleet key
+client, or the bus CA fetch. */}}
 {{- define "imas-farmer.saasapi.needsOpenBao" -}}
-{{- if or .Values.saasapi.fleetUpdateDispatch.enabled (include "imas-farmer.saasapi.fetchCA" .) -}}true{{- end -}}
+{{- if or (include "imas-farmer.saasapi.fleetVerify" .) (include "imas-farmer.saasapi.fetchCA" .) -}}true{{- end -}}
+{{- end }}
+
+{{/*
+saasapi's operator plane (internal/saasapi NewOperatorServer, API design
+§2.5): its own Service, never the one the gateway routes to.
+*/}}
+{{- define "imas-farmer.saasapi.operatorFullname" -}}
+{{- printf "%s-operator" (include "imas-farmer.saasapi.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "imas-farmer.saasapi.operatorFQDN" -}}
+{{- printf "%s.%s.svc.%s" (include "imas-farmer.saasapi.operatorFullname" .) .Release.Namespace .Values.clusterDomain }}
+{{- end }}
+
+{{/* The port in saasapi.operator.fleetReleaser.url (443 when it has none),
+for saasapi's egress rule. */}}
+{{- define "imas-farmer.saasapi.fleetReleaserPort" -}}
+{{- $host := (urlParse .Values.saasapi.operator.fleetReleaser.url).host -}}
+{{- default "443" (regexFind ":[0-9]+$" $host | trimPrefix ":") -}}
+{{- end }}
+
+{{/*
+The sprout release this chart carries: files/sprout-release.json, written
+at release time by packaging/helm/stamp-sprout-release.sh and absent from a
+source checkout. "" when absent.
+*/}}
+{{- define "imas-farmer.sproutRelease.file" -}}
+{{- .Files.Get "files/sprout-release.json" -}}
+{{- end }}
+
+{{/* True (non-empty) when the registration hook Job renders: the chart
+carries a sprout release, registration is on, and this release runs
+saasapi with its operator plane. */}}
+{{- define "imas-farmer.sproutRelease.registers" -}}
+{{- if and (include "imas-farmer.sproutRelease.file" .) .Values.sproutRelease.register .Values.saasapi.enabled .Values.saasapi.operator.enabled -}}true{{- end -}}
+{{- end }}
+
+{{/*
+The registration Job's pods. Their own name label, like the publisher's:
+the nats chart's bus NetworkPolicy admits core by app.kubernetes.io/name,
+and a pod holding the operator token must never reach the bus.
+*/}}
+{{- define "imas-farmer.registrar.selectorLabels" -}}
+app.kubernetes.io/name: imas-sprout-release-registrar
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: sprout-release-registrar
+{{- end }}
+
+{{/*
+The request body for POST /v1/operator/fleet-releases: the stamped
+release (version, packages) plus this chart's channel and
+min_sprout_version, validated here so a bad value fails the render rather
+than the hook. saasapi validates every package field again, and never
+normalizes; neither does this.
+*/}}
+{{- define "imas-farmer.sproutRelease.request" -}}
+{{- $r := .Values.sproutRelease -}}
+{{- $rel := include "imas-farmer.sproutRelease.file" . | fromJson -}}
+{{- if or (hasKey $rel "Error") (not (kindIs "map" $rel)) -}}
+{{- fail (printf "files/sprout-release.json is not a JSON object: %v" (get $rel "Error")) -}}
+{{- end -}}
+{{- range $k, $_ := $rel -}}
+{{- if not (has $k (list "version" "packages")) -}}
+{{- fail (printf "files/sprout-release.json has an unexpected field %q: it holds exactly version and packages (packaging/helm/stamp-sprout-release.sh)" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- $semver := "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$" -}}
+{{- $version := toString (get $rel "version") -}}
+{{- if not (regexMatch $semver $version) -}}
+{{- fail (printf "files/sprout-release.json version %q is not a canonical vMAJOR.MINOR.PATCH[-PRERELEASE] version; re-stamp it with packaging/helm/stamp-sprout-release.sh (saasapi refuses anything else, and nothing here rewrites it)" $version) -}}
+{{- end -}}
+{{- if ne $version (printf "v%s" .Chart.AppVersion) -}}
+{{- fail (printf "files/sprout-release.json is sprout release %s, but this chart is appVersion %s: the farmer chart and the sprout release it registers ship under one tag (docs/RELEASING.md)" $version .Chart.AppVersion) -}}
+{{- end -}}
+{{- $pkgs := get $rel "packages" -}}
+{{- if or (not (kindIs "slice" $pkgs)) (not $pkgs) -}}
+{{- fail "files/sprout-release.json has no packages" -}}
+{{- end -}}
+{{- $min := toString $r.minSproutVersion -}}
+{{- if not $min -}}
+{{- fail (printf "sproutRelease.minSproutVersion is required to register sprout release %s: the oldest sprout that may update straight to it, e.g. v0.1.0 (docs/RELEASING.md, \"Compatibility\"). It is signed into every manifest, and a registered version can't change it." $version) -}}
+{{- end -}}
+{{- if not (regexMatch $semver $min) -}}
+{{- fail (printf "sproutRelease.minSproutVersion %q is not a canonical vMAJOR.MINOR.PATCH[-PRERELEASE] version" $min) -}}
+{{- end -}}
+{{- if gt ((semver $min).Compare (semver $version)) 0 -}}
+{{- fail (printf "sproutRelease.minSproutVersion %s is above the release's version %s" $min $version) -}}
+{{- end -}}
+{{- if not (regexMatch "^[a-z][a-z0-9_-]{0,31}$" (toString $r.channel)) -}}
+{{- fail (printf "sproutRelease.channel %q must match ^[a-z][a-z0-9_-]{0,31}$" (toString $r.channel)) -}}
+{{- end -}}
+{{- toPrettyJson (dict "version" $version "channel" $r.channel "min_sprout_version" $min "packages" $pkgs) -}}
 {{- end }}
 
 {{/*
@@ -509,6 +608,9 @@ explanation rather than deploying something that silently can't work.
 {{- if .Values.credentialPublisher.enabled -}}
 {{- include "imas-farmer.publisher.validate" . -}}
 {{- end -}}
+{{- if include "imas-farmer.sproutRelease.registers" . -}}
+{{- include "imas-farmer.registrar.validate" . -}}
+{{- end -}}
 {{- end }}
 
 {{- define "imas-farmer.saasapi.validate" -}}
@@ -531,6 +633,58 @@ explanation rather than deploying something that silently can't work.
 {{- end -}}
 {{- if lt (int $s.replicaCount) 1 -}}
 {{- fail "saasapi.replicaCount must be at least 1" -}}
+{{- end -}}
+{{- if $s.operator.enabled -}}
+{{- include "imas-farmer.saasapi.operator.validate" . -}}
+{{- end -}}
+{{- end }}
+
+{{- define "imas-farmer.saasapi.operator.validate" -}}
+{{- $s := .Values.saasapi -}}
+{{- $o := $s.operator -}}
+{{- if not $o.tls.secretName -}}
+{{- fail (printf "saasapi.operator.tls.secretName is required with saasapi.operator.enabled: a kubernetes.io/tls Secret (tls.crt, tls.key, and the ca.crt the registration Job verifies it with) for %s" (include "imas-farmer.saasapi.operatorFQDN" .)) -}}
+{{- end -}}
+{{- if not $o.token.secretName -}}
+{{- fail "saasapi.operator.token.secretName is required with saasapi.operator.enabled: the Secret holding the operator bearer token (SAASAPI_OPERATOR_TOKEN_FILE)" -}}
+{{- end -}}
+{{- if and $o.token.previousKey (eq (toString $o.token.previousKey) (toString $o.token.currentKey)) -}}
+{{- fail "saasapi.operator.token.previousKey must differ from currentKey" -}}
+{{- end -}}
+{{- range $other := list $s.internalAuthSecret.secretName $s.natsCredentials.secretName $o.fleetReleaser.tokenSecretName $o.tls.secretName .Values.natsSeeds.secretName -}}
+{{- if eq (toString $o.token.secretName) (toString $other) -}}
+{{- fail (printf "saasapi.operator.token.secretName %q must be a Secret of its own: the registration Job mounts it, and must never be able to mount another credential with it (saasapi also refuses an operator token equal to the BFF's or its fleetreleaser token)" $o.token.secretName) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (regexMatch "^https://[^/?#@]+/?$" (toString $o.fleetReleaser.url)) -}}
+{{- fail (printf "saasapi.operator.fleetReleaser.url %q must be https://host[:port], no path, query or credentials (SAASAPI_FLEETRELEASER_URL): cmd/fleetreleaser, the only signer" (toString $o.fleetReleaser.url)) -}}
+{{- end -}}
+{{- if not $o.fleetReleaser.tokenSecretName -}}
+{{- fail "saasapi.operator.fleetReleaser.tokenSecretName is required with saasapi.operator.enabled (SAASAPI_FLEETRELEASER_TOKEN_FILE)" -}}
+{{- end -}}
+{{- if eq (int $o.port) (int $s.port) -}}
+{{- fail "saasapi.operator.port must differ from saasapi.port: the operator plane is its own listener" -}}
+{{- end -}}
+{{- end }}
+
+{{- define "imas-farmer.registrar.validate" -}}
+{{- $r := .Values.sproutRelease -}}
+{{- $_ := include "imas-farmer.sproutRelease.request" . -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" (toString $r.serviceAccountName)) -}}
+{{- fail (printf "sproutRelease.serviceAccountName %q is not a valid ServiceAccount name" (toString $r.serviceAccountName)) -}}
+{{- end -}}
+{{- range $sa := list (include "imas-farmer.farmer.serviceAccountName" .) (include "imas-farmer.saasapi.serviceAccountName" .) .Values.credentialPublisher.serviceAccountName -}}
+{{- if eq (toString $r.serviceAccountName) $sa -}}
+{{- fail (printf "sproutRelease.serviceAccountName %q is another workload's ServiceAccount: the registration Job gets one of its own, with no RBAC and no OpenBao role" $sa) -}}
+{{- end -}}
+{{- end -}}
+{{- range $k := list "attempts" "initialDelaySeconds" "maxDelaySeconds" -}}
+{{- if lt (int (get $r.retry $k)) 1 -}}
+{{- fail (printf "sproutRelease.retry.%s must be at least 1" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- if lt (int $r.requestTimeoutSeconds) 1 -}}
+{{- fail "sproutRelease.requestTimeoutSeconds must be at least 1" -}}
 {{- end -}}
 {{- end }}
 

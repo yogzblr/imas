@@ -24,9 +24,10 @@ keywords:
   - valkey
 annotations:
   # FLAG FOR SECURITY REVIEW: this chart carries the OpenBao write policy
-  # for the SaaS API credential hand-off (deploy/farmer/README.md) and the
-  # fleet signing policies (deploy/fleetreleaser/policies). See README.md,
-  # "Security review notes".
+  # for the SaaS API credential hand-off (deploy/farmer/README.md), the
+  # fleet signing policies (deploy/fleetreleaser/policies) and the sprout
+  # release hook's operator credential. See README.md, "Security review
+  # notes".
   imas.io/security-review: required
   # Subchart licenses. CLAUDE.md's default is Apache-2.0/MIT only; these
   # are the recorded exceptions (README.md, "Licensing").

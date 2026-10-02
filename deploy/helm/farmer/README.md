@@ -4,7 +4,8 @@
 policy for the SaaS API credential hand-off, which `deploy/farmer/README.md`
 flags as needing human review. Carrying it into a chart doesn't reduce that
 need. The same goes for the fleet signing policies from
-`deploy/fleetreleaser/policies/`. Read
+`deploy/fleetreleaser/policies/`, and for the operator credential the
+sprout release hook presents to saasapi. Read
 [Security review notes](#security-review-notes) first. The defaults are a
 non-production eval install.
 
@@ -19,6 +20,9 @@ It deploys imas's non-DMZ core:
   `deploy/farmer/saasapi-credential-publish-job.yaml`.
 - **Schema migrations**: `cmd/migrate` as Helm hook Jobs (see
   [Migrations](#migrations)).
+- **Sprout release registration**: a hook Job that registers the sprout
+  release a published chart carries with saasapi's operator plane (see
+  [Sprout release registration](#sprout-release-registration)).
 - **Optional subcharts**, each behind its own toggle. With all three on,
   the chart is self-contained for an eval install. With them off, it points
   at externally managed instances.
@@ -221,7 +225,7 @@ Each OpenBao client runs under its own role and gets exactly one policy.
 | farmer, gateway JWT signer | `IMAS_GATEWAY_OPENBAO_*` | `imas-farmer-gateway` | `imas-farmer-gateway`: sign and read on `transit/*/imas-gateway-jwt` only |
 | farmer, fleet key (read-only) | `IMAS_FLEETSIGN_OPENBAO_*` | `imas-farmer-fleet-verify` | `imas-fleet-verify` (reviewed copy) |
 | farmer, tenant box keypairs | `IMAS_TENANTBOX_OPENBAO_*` | `imas-farmer-tenantbox` | `imas-farmer-tenantbox`: KV v2 read/write on `secret/data/imas/tenant-x25519/tenants/+` (one secret per tenant), read-only on the legacy `secret/data/imas/tenant-x25519` |
-| saasapi, fleet key (only with `fleetUpdateDispatch`) | `IMAS_FLEETSIGN_OPENBAO_*` | `imas-saasapi-fleet-verify` | `imas-fleet-verify` |
+| saasapi, fleet key (only with `fleetUpdateDispatch` or `operator`) | `IMAS_FLEETSIGN_OPENBAO_*` | `imas-saasapi-fleet-verify` | `imas-fleet-verify` |
 | the publish Job | `IMAS_SAASAPI_CRED_OPENBAO_*` | `imas-saasapi-cred-publisher` | `imas-saasapi-cred-publisher` (reviewed copy) |
 
 - **Shared connection settings.** `openbaoClient.addr`, `caConfigMap` and
@@ -338,6 +342,179 @@ there (`docs/design/cloudxp-machine-manager-api-design.md` §4.1a).
   so the new user is only created by the following upgrade. Don't rename
   in place.
 
+## Sprout release registration
+
+**FLAG FOR SECURITY REVIEW: the operator credential.** A published farmer
+chart carries the sprout release it was tested with,
+`files/sprout-release.json`, which `packaging/helm/stamp-sprout-release.sh`
+writes at release time: the version (the tag, `vX.Y.Z`) and, for each
+OS/arch/package type, the package file name and SHA-256. A
+`post-install`/`post-upgrade` hook Job registers it with saasapi's operator
+plane (`POST /v1/operator/fleet-releases`, API design §2.5,
+`docs/api/saasapi-operator-openapi.yaml`). saasapi has `cmd/fleetreleaser`
+sign each new package and stores the rows; only then can tenants approve
+and roll it out. There is no CI call.
+
+```
+helm upgrade ──▶ hook Job ──operator token, https──▶ saasapi operator plane ──▶ fleetreleaser (sign)
+                (curl)        <release>-saasapi-operator:8443        └──▶ saas.fleet_versions
+```
+
+**When it runs.** The Job renders only when all of these hold; otherwise
+NOTES says which one is missing and nothing is registered:
+
+- the chart has `files/sprout-release.json` (a chart from a source
+  checkout doesn't, so a dev install skips the hook);
+- `sproutRelease.register` (default on);
+- `saasapi.enabled` and `saasapi.operator.enabled` (default off: see
+  [Known gaps](#known-gaps)).
+
+**What it sends.** The stamped release verbatim, plus
+`sproutRelease.channel` (default `stable`) and
+`sproutRelease.minSproutVersion`, the oldest sprout that may update straight
+to this release. `minSproutVersion` has no default: the render fails
+without it once the hook is on. The render also fails if the file's version
+isn't the canonical `v`+`appVersion` (the farmer chart and the sprout
+release ship under one tag), if `minSproutVersion` is above it, or if the
+file has fields beyond `version` and `packages`. Nothing is rewritten to
+pass: saasapi refuses non-canonical values, and so does the chart.
+
+**Outcome.**
+
+| saasapi answers | The Job | The release |
+|---|---|---|
+| 201: registered | succeeds | succeeds |
+| 200: already registered with the same contents (every later `helm upgrade`) | succeeds | succeeds |
+| 409 `release_conflict`: this version is registered with different contents (or another `min_sprout_version`) | prints saasapi's message and the request it sent; fails at once (exit 2, `podFailurePolicy` `FailJob`) | **fails** |
+| 409 `version_revoked`, any other 4xx (400, 401, 422 `signing_refused`), a TLS verification failure | prints why; fails at once | **fails** |
+| no answer (saasapi still rolling out), 408, 429, 5xx | retries with exponential backoff (`sproutRelease.retry`: 8 attempts, 5s doubling to 60s), then fails; the Job then gets `backoffLimit` (1) more pods | fails if every attempt does |
+
+Releases are immutable. A 409 means the version was already registered
+with other contents: don't re-stamp it, cut a new version. The failed Job
+is kept for its logs (`kubectl logs job/<release>-farmer-sprout-release-register`)
+until the next run or `ttlSecondsAfterFinished`.
+
+**Ordering.** Hook weight 20: after the OpenBao bootstrap (0) and the
+publish Job (10), because saasapi only starts once the JWT the publish Job
+writes has reached it. Helm doesn't wait for Deployments before
+`post-*` hooks unless you pass `--wait`; without it the in-pod retries cover
+saasapi coming up. Under Argo CD it is a `PostSync` hook (sync-wave 1), so
+it runs once the sync is healthy. `helm install/upgrade --timeout` must
+cover `sproutRelease.activeDeadlineSeconds` (1500), as for the migrate Job.
+There is no `post-rollback` hook: `helm rollback` leaves a registered
+release registered, and sprouts already on it keep it.
+
+**The Job's boundary.**
+
+- Its own ServiceAccount (`sproutRelease.serviceAccountName`,
+  `imas-sprout-release-registrar`): no RBAC, no API token, no OpenBao role.
+  The render fails if it names farmer's, saasapi's or the publisher's.
+- One Secret key: the current operator token
+  (`saasapi.operator.token.secretName`/`currentKey`), as a 0440 file. Never
+  the previous one. From the operator TLS Secret, `ca.crt` only, to verify
+  saasapi; never the key.
+- The token is read by the shell and handed to curl on stdin
+  (`--header @-`), so it is never in argv, the environment or a file, and
+  is never printed. https only (`--proto =https`), TLS 1.2+.
+- Egress to saasapi's pods on the operator port, and DNS. No ingress. The
+  policy is rendered whatever `networkPolicy.enabled` says. Its pods carry
+  `app.kubernetes.io/name: imas-sprout-release-registrar`, so the nats
+  chart's bus policy never admits them.
+- Pod Security `restricted`, read-only root, `/tmp` an in-memory emptyDir.
+  The image, `curlimages/curl`, is pinned by digest.
+
+### saasapi's operator plane
+
+`saasapi.operator.enabled` configures saasapi's second listener
+(`internal/saasapi` `NewOperatorServer`) and a Service of its own,
+`<release>-saasapi-operator` (port `saasapi.operator.port`, 8443), which
+the gateway's route to `<release>-saasapi` never reaches.
+
+| Value | saasapi gets | Notes |
+|---|---|---|
+| `saasapi.operator.tls.secretName` | `SAASAPI_OPERATOR_TLS_CERT_FILE`/`_KEY_FILE` (`tls.crt`, `tls.key`) | A `kubernetes.io/tls` Secret whose `ca.crt` the hook Job verifies against. SAN: the operator Service FQDN, `<release>-saasapi-operator.<ns>.svc.<clusterDomain>` (NOTES prints it). cert-manager writes all three keys. |
+| `saasapi.operator.token.secretName` / `currentKey` / `previousKey` | `SAASAPI_OPERATOR_TOKEN_FILE` / `_PREVIOUS_FILE` | A Secret of its own: the render fails if it is the BFF's, the NATS credential's, the seeds', fleetreleaser's or the TLS Secret. At least 32 characters, no whitespace. `previousKey` only during a rotation. |
+| `saasapi.operator.fleetReleaser.url` | `SAASAPI_FLEETRELEASER_URL` | `https://host[:port]`, no path. saasapi's egress opens on its port (`networkPolicy.fleetreleaser.to`; empty: any destination). |
+| `saasapi.operator.fleetReleaser.tokenSecretName` / `tokenKey` | `SAASAPI_FLEETRELEASER_TOKEN_FILE` | The caller token fleetreleaser checks (`deploy/fleetreleaser/README.md`). |
+| `saasapi.operator.fleetReleaser.caConfigMap` / `caKey` | `SAASAPI_FLEETRELEASER_CA_FILE` | Optional; the system roots otherwise. |
+
+It also turns on saasapi's read-only fleet key client
+(`IMAS_FLEETSIGN_OPENBAO_*`, role `imas-saasapi-fleet-verify`), which the
+operator plane needs to check fleetreleaser's signatures; the bootstrap
+creates that role. saasapi's operator port admits the hook Job's pods, plus
+`networkPolicy.saasapiOperatorIngress.from` (empty by default), and nothing
+else.
+
+Generate the token with at least 32 random bytes, e.g.
+`openssl rand -base64 48 | tr -d '\n='`, and keep it in OpenBao/ESO like the
+BFF secret. Whoever holds it can get any well-formed release above
+fleetreleaser's floor signed and offered to tenants for approval
+(`deploy/fleetreleaser/README.md`, "What the split does not stop").
+
+### Rotating the operator token
+
+saasapi reads the token once, at start. The hook Job is its only
+in-cluster presenter and runs only during `helm install/upgrade`, so a
+rotation between upgrades needs no overlap:
+
+1. Write the new token to the Secret's `currentKey`.
+2. Make sure saasapi has restarted onto it: Reloader does this on the
+   Secret change (`saasapi.podAnnotations`); without Reloader,
+   `kubectl -n <ns> rollout restart deploy/<release>-farmer-saasapi`. Wait
+   for the rollout. A hook that reaches a pod still holding the old token
+   gets a 401, which fails the release.
+3. The next `helm upgrade` presents the new token.
+
+If other tooling (the revoke runbook's operators, say) still holds the old
+token while you roll the new one out, keep both for a while: put the old
+one under another key and `helm upgrade` with
+`saasapi.operator.token.previousKey=<that key>`; saasapi then accepts both.
+Remove the key and set `previousKey=""` again afterwards.
+
+### Revoking a sprout release
+
+A bad sprout version is withdrawn with the revoke call, not with
+`helm rollback`. It is permanent: no rollout of the version is created or
+continued, no tenant can newly approve it, and farmer serves no manifest
+for it. Sprouts already running it keep it, because they refuse downgrades;
+ship the fix as a new version, which they can update to.
+
+1. Confirm the version: `helm get values` and
+   `kubectl -n <ns> get configmap <release>-farmer-sprout-release -o jsonpath='{.data.request\.json}'`.
+2. Reach the operator listener. It is not on the gateway, and its
+   NetworkPolicy admits only the hook Job and
+   `networkPolicy.saasapiOperatorIngress.from`. From an admitted
+   operations host, or through a port-forward (which NetworkPolicy doesn't
+   see, so `pods/portforward` on saasapi is access to the listener; the
+   token is still required):
+
+   ```sh
+   NS=imas-core; REL=imas-core; VERSION=v2.4.1
+   SVC=$REL-farmer-saasapi-operator
+   kubectl -n $NS port-forward svc/$SVC 8443:8443 &
+   kubectl -n $NS get secret <saasapi.operator.tls.secretName> -o jsonpath='{.data.ca\.crt}' | base64 -d > /tmp/operator-ca.crt
+   ```
+
+3. Call revoke, with the token read from its Secret straight into curl's
+   stdin, never onto a command line or into shell history:
+
+   ```sh
+   kubectl -n $NS get secret <saasapi.operator.token.secretName> -o jsonpath='{.data.current}' | base64 -d \
+     | sed 's/^/Authorization: Bearer /' \
+     | curl -sS --fail-with-body --proto '=https' --cacert /tmp/operator-ca.crt \
+         --resolve "$SVC.$NS.svc.cluster.local:8443:127.0.0.1" \
+         -X POST -H @- "https://$SVC.$NS.svc.cluster.local:8443/v1/operator/fleet-releases/$VERSION/revoke"
+   ```
+
+   `200 {"version": ..., "revoked": true, "packages": N, "already_revoked": false}`.
+   Repeating it is a 200 with `already_revoked: true`. A 404 means the
+   version was never registered.
+4. Stop the port-forward and delete `/tmp/operator-ca.crt`. Record the
+   revoke in the release log.
+
+There is no un-revoke. A later `helm upgrade` of a chart carrying the
+revoked version gets a 200 no-op (same contents) and leaves it revoked.
+
 ## Valkey
 
 farmer (`IMAS_VALKEY_ADDRS`) and saasapi (`SAASAPI_VALKEY_ADDRS`) get the
@@ -375,12 +552,15 @@ state moved off local disk first.
 | farmer | out | the nats chart's bus pods | `bus.port` (5406), at `farmerbusurl` |
 | farmer, saasapi | out | PXC / Valkey | 3306 / 6379 |
 | farmer | out | OpenBao | 8200 |
-| saasapi | out | OpenBao, only for fleet dispatch or the bus CA fetch | 8200 |
+| saasapi | out | OpenBao, only for the fleet key client (fleet dispatch, operator plane) or the bus CA fetch | 8200 |
 | saasapi | in | `networkPolicy.saasapiIngress.from` (default: anyone) | `saasapi.port` (8081) |
+| saasapi | in | with `saasapi.operator`: the sprout release hook Job's pods, plus `networkPolicy.saasapiOperatorIngress.from` (default: none) | `saasapi.operator.port` (8443) |
+| saasapi | out | with `saasapi.operator`: fleetreleaser (`networkPolicy.fleetreleaser.to`, default any destination) | `fleetReleaser.url`'s port |
 | saasapi | out | the bus pods | `bus.port` |
 | saasapi | out | `saasapiExtraEgress`, default HTTPS anywhere (the Keycloak JWKS). **Narrow it.** | 443 |
 | publish Job | out | OpenBao, DNS; nothing else, no ingress | 8200, 53 |
 | migrate Jobs | out | PXC, DNS; nothing else, no ingress | 3306, 53 |
+| sprout release hook Job | out | saasapi's pods on the operator port, DNS; nothing else, no ingress | 8443, 53 |
 | openbao-bootstrap | out | OpenBao, DNS | 8200, 53 |
 | all | out | DNS | 53 |
 
@@ -445,11 +625,19 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `saasapi.internalAuthSecret.*` | `imas-saasapi-internal-auth` | `INTERNAL_AUTH_SECRET_CURRENT`/`_PREVIOUS`. |
 | `saasapi.natsCredentials.*` | `imas-saasapi-nats` | The seed (as a file) and the JWT. |
 | `saasapi.fleetUpdateDispatch.enabled` | `false` | Also turns on saasapi's verify-only OpenBao client. |
+| `saasapi.operator.*` | off, port `8443` | The operator plane: TLS Secret, token Secret, fleetreleaser client. See [saasapi's operator plane](#saasapis-operator-plane). |
 | `saasapi.enrollmentKeys.rateLimit.*` | `1` / `5` | `deploy/saasapi/values.rate-limit.yaml`. `null` emits no env var. |
 | `credentialPublisher.*` | enabled, `platform/imas/saasapi-nats-user` | The publish Job. |
+| `sproutRelease.register` | `true` | Register `files/sprout-release.json` when the chart has it and the operator plane is on. |
+| `sproutRelease.channel` / `minSproutVersion` | `stable` / `""` | Sent with the release. `minSproutVersion` is required once the hook renders. |
+| `sproutRelease.serviceAccountName` | `imas-sprout-release-registrar` | The hook Job's own ServiceAccount. |
+| `sproutRelease.image.*` | `curlimages/curl:8.22.0`, pinned by digest | curl and a POSIX shell. |
+| `sproutRelease.retry.*` / `requestTimeoutSeconds` | `8`, `5`s doubling to `60`s / `600` | In-pod retries for no answer, 408, 429 and 5xx. |
+| `sproutRelease.backoffLimit` / `activeDeadlineSeconds` / `ttlSecondsAfterFinished` | `1` / `1500` / `3600` | Keep `helm --timeout` above the deadline. |
+| `sproutRelease.argoCDHooks` | `true` | `PostSync`, sync-wave 1. |
 | `externalSecrets.*` | off | ESO wiring. |
 | `openbaoBootstrap.*` | on | The bundled OpenBao's setup Job. |
-| `networkPolicy.*` | on | See above. |
+| `networkPolicy.*` | on | See above. `saasapiOperatorIngress.from` and `fleetreleaser.to` are the operator plane's peers. |
 
 ## Testing the chart
 
@@ -548,6 +736,21 @@ gone):
   `bus.tlsServerName` the bus certificate doesn't carry (plus the gateway
   JWT TTL, in the earlier run).
 
+**Sprout release registration (FU.5), 2026-10-02**, with helm v3.16 built
+from source and no cluster:
+
+- `files/register-sprout-release.sh` ran against a local HTTPS server
+  standing in for saasapi (`TestRegisterScript`), with the host's curl
+  under both dash and busybox 1.36 ash (the image's shell; `printf` is a
+  builtin there, so the token is in no argv). Every outcome in the table
+  above behaved as described, and the token was never printed.
+- `packaging/helm/stamp-sprout-release.sh`'s real output renders into the
+  request body (`TestStampedReleaseRenders`).
+- The image's digest was checked against Docker Hub: a multi-arch index
+  whose linux/amd64 entry is the published `8.22.0` image. Pulling it to
+  run the script under the image's own curl was blocked by Docker Hub's
+  rate limit.
+
 **Not verified:**
 
 - A real install. There was no cluster, so none of this was tested:
@@ -557,12 +760,22 @@ gone):
   - the Kubernetes auth login itself;
   - the SQL against a real MySQL server;
   - the migrate hook Jobs (rendering and `go test` only; `cmd/migrate`
-    itself has its own tests against MySQL in `internal/migrations`).
+    itself has its own tests against MySQL in `internal/migrations`);
+  - the sprout release hook against a real saasapi, which can't serve the
+    operator plane yet (Known gaps), and `podFailurePolicy` failing the Job
+    on exit 2.
 
 ## Known gaps
 
-1. **Horizontal farmer scaling** needs FarmerPKI off local disk.
-2. **saasapi runs in the release namespace.** The reference put its
+1. **`cmd/saasapi` doesn't start the operator plane yet.**
+   `NewOperatorServer` and its configuration exist in `internal/saasapi`,
+   but `main` never calls it (`docs/api/saasapi.md`, "Operator plane"). Until
+   it does, `saasapi.operator.enabled=true` configures a listener nothing
+   serves, and the sprout release hook fails its release after its retries
+   (saasapi not reachable). So both stay off by default, and a published
+   chart says in NOTES that its sprout release was not registered.
+2. **Horizontal farmer scaling** needs FarmerPKI off local disk.
+3. **saasapi runs in the release namespace.** The reference put its
    ExternalSecret in a separate `saasapi` namespace. Here saasapi shares a
    namespace with farmer's seed Secret, but it mounts only its own
    credential Secret. Whoever can create pods in this namespace could
@@ -580,6 +793,12 @@ exceptions, all subcharts and none of them Go dependencies:
   as is the server. It was chosen over Bitnami's Apache-2.0 chart, whose
   free images are no longer published. The project owner signed off on
   this choice when it was flagged.
+- **curl (`curlimages/curl`), flagged, not yet signed off:** the sprout
+  release hook's image. curl is under the curl license, an MIT/X
+  derivative; the image is Alpine-based (busybox GPL-2.0, musl MIT), like
+  the `quay.io/openbao/openbao` image this chart already runs. It is run as
+  a tool, not linked or redistributed. The alternative is a `farmer`
+  subcommand in the farmer image, outside this chart.
 
 ## Security review notes
 
@@ -612,3 +831,19 @@ exceptions, all subcharts and none of them Go dependencies:
   write it back to disk.
 - **saasapi's default egress** includes HTTPS to anywhere, for the Keycloak
   JWKS. Narrow `networkPolicy.saasapiExtraEgress`.
+- **The operator credential** ([Sprout release registration](#sprout-release-registration)).
+  Whoever holds the operator token can get any well-formed release above
+  fleetreleaser's floor signed and offered to tenants. Only two pods get
+  it: saasapi (which checks it) and the hook Job (which presents it, from
+  one Secret key, with no ServiceAccount token, RBAC or OpenBao role, and
+  egress to saasapi's operator port only). The tests pin that:
+  `TestSproutReleaseSecretWiring` fails if any other manifest names the
+  token Secret, and `TestRegisterScript` runs the script against a local
+  HTTPS server and fails if the token is ever printed. What the chart can't
+  enforce, the cluster must:
+  - the namespace-access rule above, again: whoever can create pods here,
+    read Secrets, or `port-forward` to saasapi (NetworkPolicy doesn't see a
+    port-forward) can use the token or reach the listener;
+  - the operator listener's certificate must carry the operator Service's
+    FQDN, from a CA you control (its `ca.crt` is what the Job trusts);
+  - the operator Service must stay off the gateway's routes.
