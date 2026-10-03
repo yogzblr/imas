@@ -957,6 +957,38 @@ func TestSaasapiFleetUpdateClockSkewEnv(t *testing.T) {
 	}
 }
 
+// The outbox sweeper is on unless turned off, and its tuning is emitted
+// only when set, so saasapi's own defaults apply otherwise.
+func TestSaasapiOutboxSweeperEnv(t *testing.T) {
+	names := []string{"SAASAPI_OUTBOX_SWEEP_INTERVAL", "SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER",
+		"SAASAPI_OUTBOX_ACTION_STALE_AFTER", "SAASAPI_OUTBOX_MAX_ATTEMPTS", "SAASAPI_OUTBOX_LEASE_TTL"}
+	for _, tc := range []struct {
+		args    []string
+		enabled string
+		want    []string
+	}{
+		{nil, "true", []string{"", "", "", "", ""}},
+		{[]string{"--set", "saasapi.outboxSweeper.enabled=false"}, "false", []string{"", "", "", "", ""}},
+		{[]string{"--set", "saasapi.outboxSweeper.interval=10s", "--set", "saasapi.outboxSweeper.provisioningStaleAfter=5m",
+			"--set", "saasapi.outboxSweeper.actionStaleAfter=90s", "--set", "saasapi.outboxSweeper.maxAttempts=3",
+			"--set", "saasapi.outboxSweeper.leaseTTL=1m"}, "true", []string{"10s", "5m", "90s", "3", "1m"}},
+	} {
+		env := envMap(container(t, find(t, mustRender(t, tc.args...), "Deployment", "t-farmer-saasapi"), "saasapi"))
+		if e := env["SAASAPI_OUTBOX_SWEEPER_ENABLED"]; e == nil || e["value"] != tc.enabled {
+			t.Errorf("%v: SAASAPI_OUTBOX_SWEEPER_ENABLED = %v, want %s", tc.args, e, tc.enabled)
+		}
+		for i, name := range names {
+			e, ok := env[name]
+			if tc.want[i] == "" && ok {
+				t.Errorf("%v: %s rendered unset: %v", tc.args, name, e)
+			}
+			if tc.want[i] != "" && (!ok || e["value"] != tc.want[i]) {
+				t.Errorf("%v: %s = %v, want %s", tc.args, name, e, tc.want[i])
+			}
+		}
+	}
+}
+
 // farmer and saasapi share PXC and Valkey: both DSNs point at the same
 // host, both Valkey lists are identical (saasapi reads farmer's heartbeat
 // keys).

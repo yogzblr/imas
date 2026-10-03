@@ -299,14 +299,15 @@ so:
   other tenant would be isolated from the failure by degrading instead.
 - **Degrading silently would be worse than not starting.** A replica that
   accepts `POST /tenants` with no bus connection would write a `pending`
-  tenant and return 202, and nothing would ever move that tenant forward:
-  the outbox re-dispatch sweeper is deferred (see below). Crash-looping
-  surfaces the misconfiguration in the rollout, where Kubernetes' own
-  restart backoff does the retrying.
+  tenant and return 202, and only another replica's outbox sweeper would
+  ever move that tenant forward (see "Outbox re-dispatch sweeper" below).
+  Crash-looping surfaces the misconfiguration in the rollout, where
+  Kubernetes' own restart backoff does the retrying.
 - **After boot, reconnect forever.** Once connected,
   `nats.MaxReconnects(-1)` rides out bus restarts. Publishes during a
   reconnect are buffered by nats.go. If one fails outright, the job stays
-  `pending` with its attempt counted, which is the outbox's job.
+  `pending` with its attempt counted, and the outbox sweeper publishes it
+  again. A sweep on a replica that is between reconnects is skipped.
 
 ## Error handling: no internal detail crosses the boundary
 
@@ -405,23 +406,186 @@ REVIEW:** this adds the repo's first OpenBao *write* policy.
   Seed rotation isn't a deployment, so the rotation runbook also triggers
   the Job explicitly.
 
+## Outbox re-dispatch sweeper (CL.3, built)
+
+**FLAG FOR SECURITY REVIEW.** NATS core gives no redelivery guarantee
+(design doc §4), and every async operation (tenant provisioning, §1.5
+batch actions, §1.8 update rollouts) is dispatched by goroutines of the
+process that accepted the request. Before CL.3, a pod that died, or had no
+bus connection, left tenant jobs `pending`, batch items `queued` forever,
+and an update rollout stopped with its tenant's one rollout slot taken for
+good. `internal/saasapi/sweeper.go` is the sweeper; it runs on every
+replica (`SAASAPI_OUTBOX_SWEEPER_ENABLED`, default on), every
+`SAASAPI_OUTBOX_SWEEP_INTERVAL` (30s), and skips a sweep when the replica
+has no bus connection.
+
+**Row leases, not `GET_LOCK`** (`internal/saasapi/outbox_lease.go`,
+migration `saas/00006`). `GET_LOCK` is local to one PXC node. A lease is
+two columns on the row whose work it guards, `lease_owner` (a token: the
+pod name plus a random suffix per claim) and `lease_until`:
+
+- *Claim*: one conditional `UPDATE ... SET lease_owner = <new token>,
+  lease_until = now + TTL WHERE <row key incl. tenant_id> AND (lease_until
+  IS NULL OR lease_until < now) AND <row-specific conditions>`. The caller
+  owns the row only if the `UPDATE` affected it. Two claims on one node
+  serialize on InnoDB's row lock and the second matches nothing; on two PXC
+  nodes both write the same row and Galera certification refuses one, which
+  sees an error. An error is never taken as a claim.
+- *Renew*: `UPDATE lease_until WHERE lease_owner = <token>`, every third of
+  `SAASAPI_OUTBOX_LEASE_TTL` (2m). The new value is always later than the
+  stored one, so MySQL (which reports changed rows, not matched ones) never
+  reports a renewal as zero rows. Zero rows means another holder took it:
+  the lease is lost at once.
+- *Hold*: work under a lease checks it before every send (each item, each
+  wave) and stops once it is lost or has expired on its own clock. A holder
+  that can't reach the database stops sending before anyone can claim the
+  row. Leases are never released; they lapse, so `lease_until IS NULL`
+  keeps meaning "written by the previous release, never leased".
+- Clocks: lease times are each replica's own clock. Replicas are assumed to
+  agree to well within the TTL (NTP); a replica whose clock runs ahead by
+  more could claim a row early. Every individual send is still guarded by
+  the row-level claim each job already uses (below), so the worst case is
+  pacing (two holders working one rollout's waves), never one item sent
+  twice.
+
+Everything is keyed on the existing composite keys with `tenant_id`
+(`provisioning_jobs` by id and tenant, batches by id and tenant, items by
+batch, asset and tenant); nothing is keyed on `sprout_id` alone.
+
+**Job 1: provisioning jobs.** A `pending` job whose backoff has passed
+since its last publish (`last_dispatched_at`, or creation if it was never
+published) is published again: `SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER`
+(2m), doubling per attempt, capped at 64×. The claim is the same `UPDATE`
+that counts the attempt (`WHERE status = 'pending' AND attempts = <read>`),
+so two sweepers can't both publish one attempt. After
+`SAASAPI_OUTBOX_MAX_ATTEMPTS` (5) publishes and one more backoff with no
+result, the job is failed with a fixed `last_error` ("no result was
+received ... (reference pj_…)") and, for a provision job, the tenant moves
+`pending` → `failed` so it can be deleted. A result that arrives later is
+ignored like any duplicate.
+
+*Farmer and a repeated `job_id` (checked for CL.3).* Harmless on its own:
+`handleTenantProvision` calls `pki.ProvisionTenant`, which finds the
+existing `pki_tenants` row, re-confirms the Account material and re-pushes
+it (idempotent by design); `handleTenantDeprovision` calls
+`pki.DeprovisionTenant`, which finds the row already deleted and returns
+nil, so farmer reports `offboarded` again. Each copy publishes a result on
+`internal.tenant.{de,}provisioned.<job_id>`; `applyProvisioningResult`
+applies the first (conditional on `status = 'pending'`) and ignores the
+rest. A provision request for a tenant already deprovisioned is refused by
+`ensureTenantAccountLocked` ("tenant was deprovisioned"), so a late copy
+can't recreate a deleted tenant row. **The one hazard** is a late copy of a
+provision request still *running* on one farmer replica while a
+deprovision of the same tenant runs on another: `ProvisionTenant` reads the
+Account JWT before the deprovision locks it out and pushes it afterwards,
+outside `tenantAuthMu`. The bus's full resolver keeps the JWT with the later
+`iat`, so the stale push loses unless `syncTenantSprouts` re-signed the
+JWT during the race, but that isn't a guarantee. Without the sweeper this
+can't happen (DELETE requires the provision result first, and there is one
+copy). With it, saasapi now refuses `DELETE` with
+`409 provisioning_in_progress` for `SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER`
+after the last publish of a provision job that was published more than
+once, which far outlasts the seconds farmer's handler takes. The farmer
+side fix belongs in `internal/pki`, outside CL.3's scope, and is listed as
+an open question below.
+
+**Job 2: §1.5 action items.** A batch is written already leased to the
+process that accepted it (`createBatch`), which renews the lease while it
+dispatches. Once the lease has lapsed, the sweeper claims the batch and
+re-dispatches its `queued` items, from the batch's stored
+`action_params`, once each item's backoff has passed
+(`SAASAPI_OUTBOX_ACTION_STALE_AFTER`, from the item's last change, doubling
+per attempt). Every send still goes through `dispatchItem`'s
+`queued → dispatching` claim, so a dispatcher that outlived its lease and a
+sweeper can't both send one item. What is and isn't re-sent:
+
+- `queued`: re-sent. A queued item has provably never reached farmer: it
+  was never claimed, or its claim ended in "no responders" (no farmer
+  subscribed), which `dispatchItem` moves back to `queued` with
+  `dispatched_at` cleared.
+- `dispatching`: **never re-sent.** Its request went out and no reply was
+  recorded; `cmd.run` isn't idempotent. Its status is left exactly as it
+  is (open question below).
+- `queued` past `SAASAPI_OUTBOX_MAX_ATTEMPTS`: failed with
+  `dispatch_not_delivered`, unsent. `queued` whose tenant is no longer
+  `active`: failed with `tenant_not_active`, unsent.
+- `self_update` batches are never re-dispatched by this job (job 3).
+
+**Job 3: update rollouts** (only with
+`SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=true`). `runRollout` now renews the
+batch's lease, checks it before every wave and before halting, and stops
+without halting once it is lost. A `self_update` batch with `queued` or
+`running` items whose lease has lapsed is taken over: the lease claim and a
+rewrite of the tenant's `tenant_update_policy.rollout_claimed_at` (the
+tenant's rollout claim, `claimRollout`) happen in one transaction, so on
+PXC the takeover certifies against any other claim on the tenant. The
+resumed run (`resumeRollout`) rebuilds its state from the rows:
+
+- Wave size, gate and target version: the batch's `rollout_batch_size`,
+  `rollout_gate` and `action_params`, as created.
+- Which items were sent, and when: the new `asset_action_items.dispatched_at`
+  (set by `dispatchItem`'s claim, cleared on "no responders"). Items that
+  existed before had no dispatch time anywhere: `updated_at` is the reply
+  time, not the dispatch time. Rows from before the migration fall back to
+  their status and error code, and to `updated_at` for the time (stricter,
+  as `runningSinceProof` already is).
+- Which items may pass on their job's success: the new
+  `asset_action_items.planned_at_target` (`planUpdateItems`' `atTarget`),
+  which was only in the dead process's memory. Without it, a sprout already
+  on the target would never write a fresh report and would always end
+  `unresponsive_after_update`, wrongly halting the rollout.
+
+Every item already sent forms one wave, each with its own deadline
+(`dispatched_at` + 30m) and proof; it must pass the batch's gate before
+anything else is sent (`job_status`: all succeeded; `dispatch`: all
+accepted, none failed). An item left in `dispatching` holds the gate until
+its deadline and then fails it, halting the rest; it is never re-sent. Then
+the `queued` items go out in request order, in waves of the original size,
+exactly as `runRollout` sends them. Before every resumed wave the tenant's
+policy and window and the version's revocation are checked
+(`rolloutPolicyCheck`, failing unsent items with the same codes as a live
+rollout: `version_revoked`, `version_approval_withdrawn`,
+`rollout_window_closed`), and also that the tenant is still `active`
+(`tenant_not_active`) and the version is still registered with every
+row's signature verifying and building the batch's exact params
+(`rollout_halted`), mirroring `CreateFleetUpdateBatch` and farmer's FU.7
+re-verification. A batch with no lease at all (written by the previous
+release, whose process may still be running it) is taken over only once
+none of its items has changed for longer than any live wave goes without a
+write (wave timeout + reply wait + lease TTL).
+
 ## Deferred / open questions
 
-- **Outbox re-dispatch sweeper.** NATS core gives no redelivery guarantee
-  (design doc §4). If farmer is down when a provision request is
-  published, or saasapi is down when the result comes back, the job stays
-  `pending`. `ProvisionTenant` and `DeprovisionTenant` are idempotent, so
-  a periodic re-publish of stale `pending` jobs is safe. That's the
-  natural follow-up and isn't built here. `attempts` is incremented on
-  every dispatch so the sweeper has something to bound on.
+- **Items stuck in `dispatching`** (CL.3). An item whose process died
+  between sending and recording the reply stays `dispatching` forever: the
+  sweeper never re-sends it (cmd.run isn't idempotent) and doesn't change
+  its status. For a §1.5 batch this keeps the batch `in_progress`; for an
+  update rollout it fails the resumed gate at its deadline (halting the
+  rest), but because `updateInProgress` counts `dispatching`, **it keeps the
+  tenant's rollout slot taken for good**. Options for a follow-up: move it
+  to `failed`/`dispatch_outcome_unknown` after the reply timeout plus a
+  margin (what `dispatchItem` does when it sees no reply itself), or ask
+  farmer (`farmer.job_status` by tenant, sprout and a request id we don't
+  carry today) whether it ran. Needs a decision, not built.
+- **Farmer-side provision/deprovision race.** See job 1 above.
+  `pki.ProvisionTenant` should re-check `deleted` after its resolver push
+  (under `tenantAuthMu`) and re-push the locked-out JWT if a deprovision won
+  the race, and `pki.DeprovisionTenant` should re-push the locked-out JWT
+  even when the row is already deleted, so a retried deprovision repairs the
+  bus. `internal/pki` was outside CL.3's file scope; saasapi's DELETE wait
+  is the mitigation until then.
+- **No maximum age for a queued §1.5 item.** The sweeper re-sends a queued
+  item however long ago it was accepted (a bus outage longer than a day,
+  say, would send day-old commands when it ends). The attempt limit only
+  counts dispatches that reached the bus. A `SAASAPI_OUTBOX_ACTION_MAX_AGE`
+  after which queued items fail unsent may be wanted.
 - **`internal.sprout.*` permissions.** Added when those handlers land (see
   above). `internal.sprout.mint`, `.revoke`, `.action`, and
   `internal.sprouts.list` are request-reply, so that change also has to
   grant a *scoped* inbox. Use `nats.CustomInboxPrefix` with, for example,
   `_INBOX.saasapi.>` rather than a bare `_INBOX.>`, so the SaaS API can't
   subscribe to other SYS users' reply inboxes.
-- **A tenant stuck `pending` can't be deleted.** Because of the DELETE
-  guard above, a tenant whose provision request was lost (farmer down at
-  dispatch time) stays `pending` and undeletable until the outbox sweeper
-  exists to re-dispatch it. That's one more reason the sweeper is the
-  next piece of work.
+- **A tenant stuck `pending` can't be deleted: resolved by CL.3.** The
+  sweeper re-publishes a lost provision request and, after
+  `SAASAPI_OUTBOX_MAX_ATTEMPTS`, fails the job and moves the tenant to
+  `failed`, which can be deleted.

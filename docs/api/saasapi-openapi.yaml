@@ -165,7 +165,9 @@ paths:
           description: |
             `offboarding_in_progress` (already offboarding or offboarded),
             `provisioning_in_progress` (status pending, or a provision job
-            still pending; retry once it completes), or
+            still pending; retry once it completes; also, for the outbox
+            sweeper's stale threshold after it, a provision job the sweeper
+            published more than once), or
             `tenant_state_changed` (status changed concurrently; retry).
           content:
             application/json:
@@ -998,6 +1000,8 @@ components:
                   - job_failed
                   - job_expired
                   - dispatch_outcome_unknown
+                  - dispatch_not_delivered
+                  - tenant_not_active
                   - rollout_halted
                   - rollout_window_closed
                   - version_approval_withdrawn
