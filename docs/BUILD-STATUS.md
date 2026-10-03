@@ -87,7 +87,7 @@ released.
 | # | Item | RAG | Next step |
 |---|---|---|---|
 | 1 | Terraform UAT gate, and the first release it needs | **Red** | Tag `v0.1.0-rc.1`, run Release on it, publish the Buildkite packages by hand with `publish-packages.yml` (pre-releases are skipped), then choose the provider and dispatch the gate. |
-| 2 | `shell.*` unsealed | **Red** | Design and brief for sealing the shell channel. |
+| 2 | `shell.*` unsealed | **Red** | Design written, awaiting security review ("Sealing `shell.*`" in `imas-payload-encryption-design.md`). Then decide its open questions and dispatch the implementation brief. |
 | 3 | Scale and latency (jitter, clustered bus, load tests) | **Red** | Briefs for jitter and farmerbus routes; a load harness. |
 | 4 | Security review of the flagged work | **Amber** | Hold the review and record its outcome here before dispatch is turned on. |
 | 5 | `go-licenses` workflow failing; `dependencies/` stale | **Amber** | Separate task card: fix the save step and decide on BSD-3. |
@@ -642,7 +642,24 @@ this file can be checked against the repository's history.
 2. **`shell.*` is not sealed** (requirement 14). An interactive PTY is started
    from a plaintext request on `imas.sprouts.<id>.shell.start`; a compromised
    bus can still get a shell on any Unix sprout, which undoes the value of
-   sealing `cmd.run` and `cook`.
+   sealing `cmd.run` and `cook`. **Design written, not built:** "Sealing
+   `shell.*`" in `docs/design/imas-payload-encryption-design.md` (flagged for
+   security review). It makes farmer a sealing relay with both legs sealed:
+   the CLI pins its tenant's box public key and signs its open request with
+   its NKey. Each leg is a `payloadbox` handshake, then a numbered stream
+   under ephemeral keys. A box-ready sprout refuses plaintext shell, and
+   sprouts with no box key are refused rather than downgraded. Windows keeps
+   refusing. The design's open questions need an owner's decision before the
+   brief is dispatched. Writing it turned up two further problems:
+   - Shell does not work today for a sprout with a per-sprout JWT, because
+     `sproutPermissions` grants no `imas.shell.>` subject. This was checked
+     against a live embedded bus. A start still spawns the PTY, but no input
+     or output can flow.
+   - `imas.api.*` bearer tokens, and `internal.sprout.action` requests, can be
+     replayed or forged by a compromised bus to have farmer run a sealed
+     `cmd.run` or `cook` on any sprout. This needs its own item and design
+     (the design's Open question 1). Until both are fixed, requirement 14
+     stays Red.
 3. **Scale and latency (requirements 1, 7, 10):** no load or chaos test has
    ever run. Two scale-plan items are also unbuilt: jittered sprout reconnect
    (still a fixed 15 s `ReconnectWait`) and a clustered bus (`cmd/farmerbus`

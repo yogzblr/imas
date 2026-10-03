@@ -67,3 +67,181 @@ What the code does today, and where it departs from, or adds to, the sections ab
 **Cook job records.** Farmer's job store used to record a job's creation (placeholder steps, `invoked_by`, the status index's step count and dispatch time) by queue-subscribing to `imas.sprouts.*.cook` and reading the plaintext envelope. That subject now carries only ciphertext, so the replica that dispatches a job records it directly (`cook.SetDispatchRecorder`, installed by `internal/jobs`), after the request is sealed and before it is sent. A dispatch that can't be sealed is neither sent nor recorded.
 
 **Still plaintext inside TLS:** cook's step events (`imas.cook.<id>.<jid>`), which the imas CLI reads directly without a tenant key, and every other boundary listed in `docs/BUILD-STATUS.md`.
+
+## Sealing `shell.*` (design, not built)
+
+**FLAG FOR SECURITY REVIEW.** This section is a design and has not been built. It is ready for review, not approved. It closes `docs/BUILD-STATUS.md` Open item 2 (requirement 14). It reuses `internal/payloadbox` for every handshake message, along with its purposes, its ±5 minute freshness window, its single-use message IDs and its `ReplyTo` binding. It adds one thing `payloadbox` doesn't have: a sealed stream of numbered frames for the life of a session.
+
+### What is wrong today
+
+Read from `main` at `a38becb`:
+
+- `imas ssh` (`cmd/imas/cmd/ssh.go`) calls `imas.api.shell.start` over the CLI's own bus connection, with the bearer token `injectToken` adds to every request. Farmer (`internal/natsapi/shell.go`) checks RBAC and forwards a **plaintext** `StartRequest` to `imas.sprouts.<id>.shell.start`. The sprout (`internal/shell/sprout.go`) runs `exec.Command(req.Shell)` under a PTY. `req.Shell` is any path the request names (default `/bin/sh`). The sprout then relays raw keystrokes and output, unauthenticated and in plaintext, on `imas.shell.<session>.{input,output,resize,done}`. The CLI and the sprout talk to each other directly. Farmer only watches `done` for its audit entry.
+- So a compromised bus can (a) publish its own `shell.start` to any Unix sprout and get a root shell, (b) read every keystroke and every byte of output of a legitimate session, and (c) inject input into it. The bus is the nats-server that enforces subject permissions, so a compromised one ignores them. Any CLI admin can do (a) as well, without farmer's RBAC or audit: CLI admins are tenant Users with `imas.>`.
+- **Shell doesn't work for a sprout with a per-sprout JWT.** `sproutPermissions` (`internal/pki/jwtusers.go`) grants no `imas.shell.>` subject. I checked this against a live embedded bus with the repo's JWT test harness (`startTestBus`, `acceptTestSprout`), in a throwaway test that I didn't commit. A sprout User is refused both the `imas.shell.<sid>.input` subscription and the `imas.shell.<sid>.output` publish (Permissions Violation). `shell.start` sits inside the sprout's `imas.sprouts.<id>.>` grant, so it still arrives and still spawns the PTY. After that, nothing flows. The shell also stays running unless an idle timeout was requested, and the default is none. `internal/shell/integration_test.go` uses an unauthenticated server, which is why nothing caught this. The redesign has to fix the subject grants anyway (see "Subjects and grants").
+- **Finding beyond `shell.*`, which this design must not inherit.** The CLI's leg to farmer runs over the same bus. Its `token` is a bearer token: an NKey signature over an expiry time alone (`internal/auth/sign.go`), valid for 5 minutes and not bound to the request. A compromised bus sees every token in every `imas.api.*` request. It can replay one, with parameters of its choosing, to any farmer replica for up to 5 minutes. Farmer then seals that `cmd.run` or `cook` to the sprout correctly. `internal.sprout.action` (`internal/natsapi/sprout_action.go`) is weaker still. It trusts that a message arrived on the SYS-account subject, plus the shape of its reply subject. A compromised bus can forge both. Sealing farmer↔sprout stops the bus from injecting **directly** into a sprout. It does not stop the bus from asking **farmer** to do it. The shell design below avoids this: a session can't be opened with a bearer token. The same gap in `cmd.run`, `cook` and the SaaS API path needs its own design (see Open questions 1).
+
+### Decision 1: who seals
+
+The CLI holds no tenant private key and must not get one. Four shapes were considered:
+
+| | Shape | How it works | Verdict |
+|---|---|---|---|
+| A | CLI seals for the sprout | The CLI is given a tenant key. | **Rejected.** It hands every admin laptop a key that can command every sprout in the tenant. |
+| B | CLI → farmer over HTTPS or WebSocket, farmer seals to the sprout | A new authenticated endpoint on farmer's HTTP API (behind Envoy) carries the terminal. Farmer relays sealed frames over the bus. | **Not chosen.** It protects against the bus only. Envoy, also in the DMZ, terminates the CLI's TLS and would see every keystroke. The CLI has no HTTP login today, and farmer core would gain a new inbound, human-facing surface. |
+| C | **Farmer relays, both legs sealed, over the existing bus** | The CLI pins its tenant's box **public** key and seals its open request with it. It authenticates with a signature over that request from its NKey. Farmer verifies, then runs one sealed, numbered stream to the CLI and another to the sprout, and copies between them. | **Recommended.** |
+| D | End to end, CLI ↔ sprout, with farmer as authoriser only | Farmer vouches for the CLI's ephemeral key to the sprout, and for the sprout's ephemeral key to the CLI. Frames go CLI ↔ sprout without passing through farmer. | Credible runner-up. |
+
+**Why C over D.** C and D need the same trust anchors. In both, the CLI pins a farmer-side public key and signs its request with its NKey. In D, farmer still has to vouch for the sprout's ephemeral key to the CLI. Without that, a bus could substitute its own key on the farmer→CLI leg and pose as the shell to harvest typed passwords, even though it can't reach the real sprout. So D saves no trust-anchor work. What C adds is one point of enforcement. Farmer can end a session the moment the user's role is revoked or the tenant key is severed. It knows why every session ended, for the audit log. It is also the only place a transcript could later be recorded (Decision 5) without trusting the sprout's root user to leave the recording alone. C's costs: farmer sees plaintext keystrokes, and each session is pinned to the farmer replica that opened it. Farmer already holds `tenant_priv`, so it can always open a shell itself, and this adds no access it didn't have. Shell sessions are rare and low-volume compared with fleet traffic, so relaying them doesn't weigh on requirement 7.
+
+**Why C over B.** C defends against the whole DMZ (bus and Envoy), not just the nats-server process. It also needs no new transport or login in the CLI: the CLI keeps the bus connection it already has.
+
+**The CLI's pinned key** is its tenant's existing box public key, `tenant_pub` (not secret). It is set in the CLI config as `tenantboxpub` (base64, shown with a fingerprint). It is copied out of band the same way the bus root CA and the CLI's NKey registration already are, never fetched over the bus. A tenant key rotation reaches the CLI through the mechanism sprouts already use. Farmer's open reply carries a continuity proof sealed to the CLI's ephemeral key, once under each retained earlier tenant key. A CLI pinned to one of them re-pins to exactly the key named, and `--sever` cuts the chain, as it does for sprouts. The proof gets its own purpose (`f2c.tenantkey.continuity`), so it can't be confused with a sprout's.
+
+### Decision 2: the protocol
+
+Two legs, each set up by a `payloadbox` handshake and then carried as a sealed, numbered stream under ephemeral keys:
+
+```
+CLI                              farmer (owning replica)                 sprout
+ |-- c2f.shell.open (payloadbox) -->|                                       |
+ |   sealed cli_eph -> tenant_pub   | open; replay guard; verify NKey sig;  |
+ |   body signed with CLI NKey      | RBAC (shell, scope, tenant)           |
+ |<- f2c.shell.open (payloadbox) ---| session_id, farmer_eph1, limits,      |
+ |   ReplyTo = open's id            | continuity proof if pin is old        |
+ |== c2f frame 0: HELLO ===========>| key confirmation: only the real CLI   |
+ |                                  | can produce it                         |
+ |                                  |-- f2s.shell.start (payloadbox) ------>|
+ |                                  |   session_id, farmer_eph2, cols/rows, | open; replay guard;
+ |                                  |   shell, idle, max duration, user     | local policy; spawn PTY
+ |                                  |<- s2f.shell.start (payloadbox) -------|
+ |                                  |   sprout_eph, ReplyTo = start's id    |
+ |<= f2c frame 0: READY ============|                                       |
+ |<=========== DATA / RESIZE / ACK / HEARTBEAT / CLOSE frames ============>|
+         leg 1 (c2f / f2c)                     leg 2 (f2s / s2f)
+```
+
+**Handshake messages are `payloadbox` messages with new purposes:** `c2f.shell.open`, `f2c.shell.open`, `f2s.shell.start`, `s2f.shell.start` and `f2c.tenantkey.continuity`. `c2f`/`f2c` are new direction prefixes, for CLI→farmer and farmer→CLI. `Message.SproutID` is the target sprout on both legs, so leg 1 is bound to one sprout as well.
+
+- **`c2f.shell.open`.** The CLI generates an ephemeral X25519 key, `cli_eph`, using `crypto/ecdh` from the standard library. It seals with `KeyPair{PeerPub: pinned tenant_pub, Priv: cli_eph}` and sends `cli_eph`'s public half in the clear in an `Imas-Shell-Eph` header, which farmer needs in order to open. The body is `{sprout_id, cols, rows, shell, idle_timeout_sec, cli_eph_pub, user_pubkey, pinned_tenant_key_fpr, sig}`. `sig` is the CLI's NKey (Ed25519) signature over the domain-separated string `"imas-shell-open-v1\x00"`, followed by the canonical encoding of every other body field and the message's `id` and `iat`. The box hides the request from the bus and means only the real farmer can open it. The signature is what authenticates the user: anyone can make an ephemeral key, but only the user can sign with their NKey. **No bearer token is accepted on this path.**
+- **Farmer, on `c2f.shell.open`.** Farmer opens it under every key `TenantBoxKeys` returns, so a CLI still pinned to the previous key works during the grace window. It applies the `payloadbox.ReplayGuard` rules (a farmer-side guard for `c2f`, ±5 minutes, each ID once). It refuses a `cli_eph_pub` that is a low-order point or equal to `tenant_pub`. It checks `sig` against `user_pubkey`, and that `user_pubkey` is a registered user whose role grants `shell` scoped to `sprout_id`. This is the same check `checkScopedAccess` makes, but keyed on the verified key, not a token. It checks that the sprout belongs to this tenant (`(tenant_id, sprout_id)`, never `sprout_id` alone) and has a box key. Then it picks `session_id` (128 random bits, `payloadbox.NewID`) and its own ephemeral `farmer_eph1`. It replies sealed under `(tenant_priv, cli_eph_pub)`, one copy per tenant key, with `ReplyTo` set to the open's ID. Every refusal is one fixed `Imas-Payload-Error` code, as today, and the reason stays in farmer's log.
+- **Key confirmation before anything runs.** Farmer contacts the sprout only after the CLI's first leg-1 frame (`HELLO`, seq 0) opens. A bus replaying a captured `c2f.shell.open` (to this replica or another) gets a reply it can't use, because it lacks `cli_eph`. It can't produce `HELLO`, so no PTY is ever spawned. Farmer drops a session that hasn't sent `HELLO` within 10 seconds. The per-replica replay guard is defence in depth. Key confirmation is what makes a replay to another replica harmless.
+- **`f2s.shell.start` / `s2f.shell.start`.** This is request and reply on `imas.sprouts.<id>.shell.start`, under the same rules as sealed `cmd.run`: `pki.SealToSprout` and `pki.SproutOpenFromFarmer` (which already runs the sprout's `ReplayGuard`), the reply bound by `ReplyTo`, and farmer refusing a plaintext reply to a sealed start. The body is `{session_id, farmer_eph2_pub, cols, rows, shell, idle_timeout_sec, max_duration_sec, user {pubkey, name}}`. The `user` field is there so the sprout can log who opened the session locally. The sprout checks local policy before spawning: `disableshell`, the shell allow-list, and its concurrent-session cap. It then generates `sprout_eph`, spawns the PTY and replies `{sprout_eph_pub}`. A policy refusal goes back as a **sealed** reply body carrying a fixed code (`shell-disabled`, `shell-not-allowed`, `too-many-sessions`, `unsupported`, `spawn-failed`), so the bus learns nothing. Only a failure to open uses the `Imas-Payload-Error` header.
+
+**Session keys.** Each leg runs X25519 between its two ephemeral keys (`crypto/ecdh` rejects an all-zero shared secret). That secret goes through HKDF-SHA256 (`crypto/hkdf`, standard library, Go 1.24 and later; `go.mod` is on 1.26). The salt is SHA-256 over the handshake transcript: both ephemeral public keys, `session_id`, `tenant_id`, `sprout_id`, `user_pubkey`, the leg label and the IDs of the two handshake messages. HKDF derives one key per direction: `c2f`/`f2c` on leg 1 and `f2s`/`s2f` on leg 2. The static tenant and sprout keys only authenticate the handshake. So:
+
+- No two sessions, and no two directions, ever share a key.
+- **Recorded shell traffic stays unreadable even if `tenant_priv` later leaks.** This is a forward-secrecy property the rest of this design explicitly gave up ("Forward secrecy — accepted tradeoff"). Shell sessions get it almost for free because they are stateful anyway. They carry the most sensitive traffic in the system: passwords typed at `sudo` prompts.
+
+**Frames.** Each NATS message carries one frame, with the header `Imas-Payload: shell1` (a hint, never a security decision, like `box1`). The wire format is `version (1 byte) | seq (uint64, big-endian) | ciphertext`. The AEAD is ChaCha20-Poly1305 from `golang.org/x/crypto/chacha20poly1305`. `golang.org/x/crypto` is already a dependency (`nacl/box`), so no new module and no new licence. It is constant-time on sprouts without AES instructions. The nonce is 4 zero bytes followed by `seq`. The key differs per direction and `seq` never repeats within one, so a (key, nonce) pair is never reused. The associated data is `"imas-shell-v1" | direction | session_id | version | seq`. The plaintext is `type (1 byte) | payload`. The frame type is inside the ciphertext, so the bus sees only sizes and timing.
+
+| Type | Direction | Payload | Notes |
+|---|---|---|---|
+| `HELLO` | c2f, seq 0 | cols, rows | Key confirmation (above). |
+| `READY` | f2c, seq 0 | none | The sprout spawned the PTY. |
+| `DATA` | all | bytes | Input toward the sprout, output toward the CLI. At most 16 KiB of plaintext. The sprout reads the PTY in chunks of up to 16 KiB and flushes after 10 ms without output, to keep the message rate down. |
+| `RESIZE` | c2f, f2s | cols, rows (uint16 each) | Bounds-checked: 1 to 1000. |
+| `ACK` | all | highest contiguous seq received | Flow control (below). |
+| `HEARTBEAT` | all | none | Sent after 15 s with nothing else sent. |
+| `CLOSE` | all | reason code, exit code, last seq sent | The final frame in each direction. Farmer forwards the sprout's `CLOSE` to the CLI, and the CLI's to the sprout. |
+
+**Receiving rules, which fail closed.** A receiver tracks the next expected `seq` per direction. If `seq` equals the expected value and the frame opens, the receiver accepts it. Anything else ends the session: a lower `seq` (replay or duplicate), a higher one (a dropped frame), or a frame that doesn't open (tampering, wrong session, wrong direction). The receiver sends `CLOSE` with reason `integrity`, and the sprout kills the PTY. There is no resynchronisation. A single dropped keystroke can change what a command line does (`rm -rf /tmp/x` with characters missing), so a session that can't prove it received everything stops. A sender stops at 2^32 frames in one direction, which no real session reaches.
+
+**Flow control** keeps an ordinary `cat` of a large file from turning into a NATS slow-consumer drop. Under the rule above, a drop now ends the session instead of quietly corrupting the screen. Each receiver sends `ACK` every 64 KiB or 250 ms. A sender with more than 512 KiB unacknowledged stops reading its source: the sprout stops reading the PTY, and farmer stops reading the other leg. Farmer keeps a window on each leg separately.
+
+**Timeouts.**
+
+- **Heartbeat.** If either end of a leg hears nothing for 45 s, it closes with reason `peer-lost`. This bounds how long a bus can black-hole a session without the user seeing it.
+- **Idle timeout.** Measured on CLI `DATA` frames, as today. The sprout enforces it, using the value in the sealed start capped by a sprout-local maximum, and so does farmer. The default changes from "none" to a farmer policy value (Open question 3). The CLI may only ask for something shorter.
+- **Maximum session duration** (new). A farmer policy value carried in the sealed start and enforced by both farmer and the sprout.
+- **Close reasons** are fixed codes: `exit`, `client-close`, `idle`, `max-duration`, `peer-lost`, `integrity`, `revoked`, `key-severed`, `farmer-shutdown`, `spawn-failed`. They are shown to the user and written to the audit log.
+
+**Subjects and grants.** Nothing secret goes in a subject: `session_id` is routing metadata.
+
+- Leg 1: `imas.api.shell.open` (request and reply, queue group, like every `imas.api.*` method). Then `imas.shell.cli.<session_id>.c2f` and `imas.shell.cli.<session_id>.f2c`. The owning replica subscribes to its own session subjects without a queue group, as it does for `done` today.
+- Leg 2: `imas.sprouts.<id>.shell.start` (request and reply). Then `imas.sprouts.<id>.shell.<session_id>.f2s`, which is already inside the sprout's `imas.sprouts.<id>.>` subscribe grant. And `imas.shell.sprout.<id>.<session_id>.s2f`, which needs a **new publish grant** `imas.shell.sprout.<id>.>` in `sproutPermissions`. It sits outside `imas.sprouts.<id>.>` so the sprout doesn't receive its own frames, for the same reason the log grant does. Already-enrolled sprouts pick the grant up through the `mintOrReuseUserJWT` re-mint on their next refresh and restart, as the `boxkey.pub` and log grants did.
+- `imas.api.shell.start` and the `imas.shell.<session>.{input,output,resize,done}` subjects are **removed**. Leaving the bearer-token start in place would leave a path the bus can forge (above). An old CLI gets a fixed error naming the version it needs.
+
+**State.**
+
+- **Farmer** keeps sessions in memory on the owning replica, keyed `(tenant_id, session_id)`. Each record holds `sprout_id`, user, role, the tenant key version used for leg 2, per-direction keys and counters, windows and timers. `shell.Tracker`, keyed on `session_id` alone today, moves to that key, per the tenant-safety rule in `CLAUDE.md`. A replica that restarts or shuts down sends `CLOSE farmer-shutdown` on both legs. Sessions don't migrate between replicas.
+- **The sprout** keys sessions on `session_id` (a sprout belongs to one tenant). It starts the shell in its own session and process group (`Setsid`), with `Pdeathsig: SIGKILL` on Linux, and kills the whole group on close. Today `cleanup` kills only the direct child, and nothing kills it if the sprout process exits.
+
+### Decision 3: what a compromised bus can still do
+
+| A compromised bus (or anything else between the endpoints, Envoy included) | After this design |
+|---|---|
+| Starts a shell on a sprout | **No.** A box-ready sprout acts only on a `f2s.shell.start` that opens under its tenant key and is fresh and unseen. Farmer sends one only for a `c2f.shell.open` carrying a valid NKey signature from a user with the `shell` permission, and only after key confirmation. A captured open can be replayed but never confirmed. |
+| Reads input or output | **No.** Frames are encrypted under per-session keys derived from ephemeral X25519. They stay unreadable even if `tenant_priv` or a sprout key leaks later. |
+| Injects, alters, replays or reorders input or output | **No.** Every frame is authenticated, and its nonce is its sequence number in its direction. A frame from another session, another direction or another position doesn't open. |
+| Drops frames silently | **No:** dropping is possible, silence isn't. A gap ends the session (`integrity`). Dropping everything ends it within 45 s (`peer-lost`). Cutting off the tail is visible because `CLOSE` is authenticated and carries the last seq sent. A session never appears to end normally when it didn't. |
+| Poses as the shell to the user to collect typed passwords | **No.** The CLI accepts only an `f2c.shell.open` sealed under its pinned tenant key. |
+| Denies service | **Yes.** It can drop the open or the start, drop or delay frames until the session closes, or flood session subjects with garbage. Each garbage frame costs the receiver one AEAD check, and the first one that fails to open ends that session. That is the accepted cost of failing closed. |
+| Learns metadata | **Yes.** Which CLI connection opened a session to which sprout, when, for how long, and the size and timing of every frame. **Keystroke timing** is the notable leak: typing rhythm can hint at what was typed, including passwords typed at a no-echo prompt. OpenSSH has added keystroke-timing obfuscation for this reason. Not mitigated in v1 (Open question 5). |
+| Spawns a PTY on a sprout that hasn't upgraded | **Yes, until that sprout upgrades.** An old build accepts a plaintext `shell.start` from anyone, whatever farmer does (see Decision 4). |
+
+Not in scope: a compromised farmer (it holds `tenant_priv` and can always open a shell), a compromised CLI host or stolen NKey seed (that *is* the user), and the sprout's own root user.
+
+### Decision 4: rollout
+
+- **A sprout with no box key** (enrolled before workstream J) can't open a sealed start. `cmd.run` falls back to plaintext for such sprouts. Shell does **not**: farmer refuses with "re-enroll this sprout". Shell is the boundary where a downgrade costs most. A farmer setting `shellallowplaintextsprouts` (default `false`) can re-enable the old path during a migration. It is logged on every use, and can be removed once no tenant has such a sprout. This setting changes only what farmer sends. A pre-J sprout stays exposed to a bus injecting a start directly until it is re-enrolled.
+- **A box-ready sprout running the new build** refuses a plaintext `shell.start` (`encryption-required`) without spawning anything, as `RespondCmdRun` does. It answers a sealed start with `no-keys` if it has lost its keys.
+- **A box-ready sprout still on an old build** gets the sealed start, can't parse it, and answers in plaintext (today it would say "session_id is required"). Farmer treats any plaintext reply to a sealed start as "this sprout needs upgrading", as `ErrReplyNotSealed` does for `cmd.run`. Farmer **never** retries in plaintext.
+- **Order.**
+  1. `internal/payloadbox`: purposes and the frame codec. No change in behaviour.
+  2. The sprout build: the sealed handler, plaintext refused when box-ready, local policy, process-group kill, the Windows handler.
+  3. Farmer: the grant and re-mint, `imas.api.shell.open`, the relay, removal of `imas.api.shell.start`.
+  4. The CLI: `imas ssh` over `shell.open`, and `tenantboxpub` with continuity re-pinning.
+
+  Steps 2 to 4 ship in one release. Farmer and the CLI upgrade together, centrally. Sprouts follow by package upgrade or fleet update, and fleet-update dispatch is still off by default (requirement 20). Until a sprout upgrades, shell to it is unavailable, which is the safe failure. **The security gain arrives per sprout, with that sprout's upgrade.** An old sprout build accepts a plaintext start from the bus, and nothing farmer does changes that. Treat requirement 14 as met only once the fleet runs the new sprout build. Reporting can use the sprout version farmer already has from facts.
+- **A sprout-local `disableshell`** (sprout config, exposed by the Ansible role `imas_sprout`) refuses every start before anything else is checked. It gives a customer a per-host off switch that doesn't depend on farmer. Default: Open question 3.
+- **Windows** (`internal/shell/sprout_windows.go`) has no PTY and keeps refusing. It still follows the same rules, so its answers leak nothing and can't be used for a downgrade:
+  - a sealed start is opened and answered with a sealed `unsupported`;
+  - a plaintext start on a box-ready sprout gets `encryption-required`;
+  - anything else gets today's "not supported" message.
+
+  Real Windows shells would need ConPTY (`CreatePseudoConsole` through `golang.org/x/sys/windows`, no CGO). ConPTY exists only on Windows Server 2019 and Windows 10 1809 or later, and the stated floor is Server 2016. That is a separate design (Open question 9). It would reuse this protocol unchanged.
+
+### Decision 5: RBAC, audit, transcripts, rotation
+
+- **Who may open a shell.** A registered user whose role grants the existing scoped `shell` action (`rbac.ActionShell`) for that sprout's cohort or ID, in that tenant, proved by an NKey signature over the request. `cmd` doesn't imply `shell`. `dangerously_allow_root` (dev only) may skip the role check but never the signature or the sealing. The SaaS API (`internal.sprout.action`) gets **no** shell action in this design. `translateAction` already rejects unknown actions, and a browser shell would need its own leg 1. Limits come from farmer policy: concurrent sessions per user, per tenant and per replica. The built-in `operator` role grants `shell` today (Open question 4).
+- **Revocation while a session runs.** Every 60 s the owning replica re-checks that the user still exists and still has `shell` on that sprout. If not, it closes the session with `revoked`.
+- **Audit (farmer, `internal/audit`).**
+  - `shell.open`: user, role, tenant, sprout, `session_id`, shell, outcome, and the fixed refusal code if refused.
+  - `shell.end`: duration, exit code, close reason, bytes and frames each way.
+
+  Both are written by the handler. The router's generic entry for `imas.api.shell.open` stays, with the signature removed from the parameters the way `token` is today. The sprout logs `session_id`, user and close reason locally, and never content. The sprout's log is shipped over the bus in plaintext (Decision 6), so the sprout log must never carry frame content or error text containing secrets.
+- **Transcripts: none in v1.** Output can't be redacted reliably: a terminal stream has no structure to redact on, farmer doesn't know the secret values a sprout fetched (`sdb://`), and `sensitive` redaction applies only to cook variables. Input can't be recorded at all, because it contains passwords typed at no-echo prompts. Because farmer is the relay (Decision 1), a later opt-in **output-only** recording can be added there without touching the protocol: off by default, per tenant, stored encrypted with a retention limit. Whether one is needed (CERT-In, DPDP) is Open question 2.
+- **Tenant key rotation while a session runs.**
+  - A normal rotation doesn't affect running sessions. After the handshake, a session depends only on its ephemeral keys. New opens use the new key, and CLIs re-pin through the continuity proof.
+  - **`--sever`, or deleting a key version,** means that key may be in someone else's hands, and whoever holds it could have opened sessions. Each farmer replica re-reads the tenant's key set at least every 60 s. It closes, with `key-severed`, every session whose leg 2 handshake used a version no longer in the set. This needs no bus signal that could be forged. A severed sprout fails its next pin check and exits, and the process-group kill takes its shells with it.
+  - A sprout box key rotation doesn't affect running sessions either.
+
+### Decision 6: the other plaintext boundaries
+
+| Boundary | Direction | What a compromised bus gains today | Seal? | Why |
+|---|---|---|---|---|
+| Cook step events, `imas.cook.<id>.<jid>` | s2f | Reads each step's change notes and errors (`sensitive` values already redacted). **Forges results**, so a failed or skipped step reports success in job records and the UI. | **Yes, next after shell** | Integrity matters as much as confidentiality. Readers that hold no tenant key (`internal/jobs` listeners aside, also `internal/serve/logstream.go` and the CLI) would get events from farmer over a sealed leg like leg 1 here. Sealing only the sprout side would just move the plaintext to a farmer re-publish. |
+| `test.ping` | f2s and reply | Forges a pong (says a sprout is up) or drops one. | **No** | It carries nothing, and the bus can always lie about or block liveness. The `$SYS` connect events farmer uses for heartbeat come from the bus as well. |
+| Facts, `imas.sprouts.<id>.facts` | s2f | Reads host inventory (names, addresses, OS, hardware). **Forges facts**, which can move a sprout into or out of a fact-based cohort and so change which hosts a cook or shell scope covers. It still can't change what runs. | **Yes, medium priority** | Integrity of targeting, plus inventory confidentiality. Fire-and-forget, sealed with a new `s2f.facts` purpose and checked by farmer's facts listener against a timestamp window. |
+| `cancel` | f2s | Forges a cancel (stops a job half-way) or drops one. | **Yes, low priority** | Both are denial of service, which the bus can already cause. Sealing it buys a simple invariant: **a box-ready sprout acts on no plaintext command at all**. That is easier to review and test than a list of exceptions. |
+| `boxkey.rotate` trigger | f2s | Forces a nuisance rotation, rate-limited by the previous key's grace window. It can't substitute a key. | **Yes, low priority, same invariant** | Already documented above as an accepted, low-severity gap. Sealing removes it for one more purpose pair. |
+| Log shipping, `imas.logs.sprouts.<id>.<LEVEL>` | s2f | Reads sprout logs and forges log lines. | **Not now** | High volume, so per-message boxes would need batching. The sealed handlers already keep secrets and error text out of the log. Keep that rule, and revisit if logs ever need to be evidence. |
+| `imas.api.*` (CLI ↔ farmer) and `internal.sprout.action` (SaaS API → farmer) | control plane → farmer | **Replays a CLI bearer token, or forges a SaaS API request, to have farmer run a sealed `cmd.run` or `cook` on any sprout.** | **Yes, before claiming requirement 14 Green** | The finding in "What is wrong today". It needs its own design. The likely shape is leg 1 here, generalised: CLI requests signed and sealed to the tenant key, and SaaS API requests signed by a key farmer pins. |
+
+### Open questions
+
+1. **The control-plane gap.** Bearer tokens on `imas.api.*` and forgeable `internal.sprout.action` requests let a compromised bus have farmer run sealed `cmd.run` or `cook`. Should that design come before shell, alongside it, or after? Its fix overlaps leg 1 here.
+2. **Transcripts.** Do CERT-In, DPDP or customer contracts require session recording? If so: output only, per tenant, where it is stored, under what key, and for how long?
+3. **Defaults:**
+   - farmer's default and maximum idle timeout (proposed 15 min and 60 min);
+   - maximum session duration (proposed 8 h);
+   - whether sprout `disableshell` defaults to `true` for new installs (proposed: `false` for now, exposed in the Ansible role);
+   - the sprout shell allow-list (proposed: `/etc/shells`, overridable in sprout config).
+4. **Should the built-in `operator` role keep `shell`,** or should `shell` need an explicit grant? Proposed: drop it from `operator`.
+5. **Keystroke timing.** Should v1 send input on a fixed tick with chaff frames, as OpenSSH does, or accept the leak as a recorded residual risk?
+6. **Pinning `tenantboxpub` in the CLI.** Explicit config only (proposed), or trust on first use with a fingerprint prompt?
+7. **Sessions die with their farmer replica.** Is that acceptable, and is an admin `imas shell list` / `imas shell kill` across replicas (a Valkey registry keyed `(tenant_id, session_id)`) needed in v1?
+8. **Pre-J sprouts.** Confirm no deployment depends on plaintext shell to sprouts without a box key, so `shellallowplaintextsprouts` can ship defaulting to `false` and be removed later.
+9. **Windows shells.** ConPTY rules out the Server 2016 floor. Build for Server 2019 and later only, or not at all?
+10. **Leg 1 for a browser.** Should the SaaS API or web UI ever offer a shell? It would need its own leg 1, since a browser has an OIDC session, not an NKey.
