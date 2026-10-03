@@ -7,12 +7,32 @@ name: Snapshot Build
 # yogzblr/imas. It runs GoReleaser OSS (MIT), so no licence key is needed.
 # The secret-free check of the release config, MSI and checksums for pull
 # requests is goreleaser-check.yml.
+#
+# What a snapshot run does: builds everything release.yml builds (binaries,
+# archives, rpm/deb/apk, the imas-sprout MSI, checksums.txt and the
+# linux/amd64 + linux/arm64 images, loaded into the runner's Docker only) and
+# signs checksums.txt the way the release does, with GPG and keyless cosign.
+# --skip=publish skips GoReleaser's whole publish stage: no GitHub release, no
+# image or manifest push, and so no docker_signs either (they are part of
+# that stage, and there is nothing pushed for them to sign).
+#
+# Keyless cosign is not private: signing checksums.txt here writes a public
+# entry to the Sigstore Rekor transparency log, with a certificate naming
+# this workflow (.github/workflows/snapshot.yml) and the ref it ran on.
+# publish-packages.yml only accepts signatures from release.yml on
+# refs/tags/v*, so a snapshot signature can't pass for a release one.
 on:
   workflow_dispatch:
   # push:
   #   branches: [main]
   # pull_request:
   #   branches: [main]
+
+permissions:
+  contents: read
+  # Keyless cosign: the run's OIDC token is exchanged with Sigstore for a
+  # short-lived signing certificate.
+  id-token: write
 
 jobs:
   snapshot:
@@ -30,25 +50,39 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          
+
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
           go-version: stable
-      
+
       - name: Import GPG key
         id: import_gpg
         uses: crazy-max/ghaction-import-gpg@v7
         with:
           gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
-          passphrase: ${{ secrets.GPG_PASSPHRASE }}    
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
 
       # The sprout-windows-pkg build hook (packaging/windows/build-msi.sh)
       # builds the imas-sprout MSI with msitools' wixl, and its
       # post-process step uses msibuild/msiinfo.
       - name: Install msitools
         run: sudo apt-get update -q && sudo apt-get install -y -q wixl msitools
-      
+
+      # The dockers entries build with buildx, half of them for linux/arm64.
+      # Set up the same builder as release.yml so the snapshot builds the
+      # images the way the release does.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # For the cosign entry in .goreleaser.yaml's signs (keyless, over
+      # checksums.txt).
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
       - name: Test GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
