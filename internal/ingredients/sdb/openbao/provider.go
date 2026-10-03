@@ -22,7 +22,8 @@
 //     VAULT_NAMESPACE meant for other tools never reaches this provider;
 //   - a 30 second timeout and no retries;
 //   - the sdb://openbao/<mount>/<path>[#field] syntax, read as KV v2 and,
-//     when that path isn't KV v2, as KV v1.
+//     when that path isn't KV v2 (a 404 included), as KV v1. A failed
+//     read names each path tried and what it returned.
 //
 // HTTP(S)_PROXY and NO_PROXY apply (http.ProxyFromEnvironment), as for
 // the sprout's other HTTP clients.
@@ -281,46 +282,93 @@ func splitMountAndPath(uriPath string) (mount, secretPath string, err error) {
 	return parts[0], parts[1], nil
 }
 
+// readKV reads the secret as KV v2 and, when that path doesn't answer
+// as KV v2 (a 404, or a 2xx without KV v2's data.data), as KV v1. A
+// failure names every path tried and what each returned, so an absent
+// secret whose KV v1 fallback is refused doesn't read as only
+// "permission denied".
 func (p *Provider) readKV(ctx context.Context, token, mount, secretPath string) (map[string]string, error) {
-	fields, err := p.readKVv2(ctx, token, mount, secretPath)
+	v2 := kvAttempt{kind: "KV v2", path: mount + "/data/" + secretPath}
+	fields, err := p.readKVv2(ctx, token, v2.path)
 	if err == nil {
 		return fields, nil
 	}
+	v2.err = err
 	if !errors.Is(err, errNotKVv2) {
-		return nil, err
+		return nil, &readError{attempts: []kvAttempt{v2}}
 	}
-	return p.readKVv1(ctx, token, mount, secretPath)
+	v1 := kvAttempt{kind: "KV v1", path: mount + "/" + secretPath}
+	fields, err = p.readKVv1(ctx, token, v1.path)
+	if err == nil {
+		return fields, nil
+	}
+	v1.err = err
+	return nil, &readError{attempts: []kvAttempt{v2, v1}}
 }
 
-var errNotKVv2 = errors.New("not a kv-v2 mount")
+// errNotKVv2 marks a KV v2 read whose answer means "try KV v1". It
+// always wraps what the server returned, for readError's message.
+var errNotKVv2 = errors.New("not a kv-v2 secret")
 
-func (p *Provider) readKVv2(ctx context.Context, token, mount, secretPath string) (map[string]string, error) {
-	secret, err := p.request(ctx, token, http.MethodGet, mount+"/data/"+secretPath, nil)
+func (p *Provider) readKVv2(ctx context.Context, token, path string) (map[string]string, error) {
+	secret, err := p.request(ctx, token, http.MethodGet, path, nil)
 	if statusCode(err) == http.StatusNotFound {
-		return nil, errNotKVv2
+		return nil, fmt.Errorf("%w: %w", errNotKVv2, err)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrReadFailed, err)
+		return nil, err
 	}
 	if secret == nil || secret.Data == nil {
-		return nil, errNotKVv2
+		return nil, fmt.Errorf("%w: %s", errNotKVv2, joinWarnings(secret))
 	}
 	data, ok := secret.Data["data"].(map[string]any)
 	if !ok {
-		return nil, errNotKVv2
+		return nil, fmt.Errorf("%w: no data.data in the response", errNotKVv2)
 	}
 	return stringify(data), nil
 }
 
-func (p *Provider) readKVv1(ctx context.Context, token, mount, secretPath string) (map[string]string, error) {
-	secret, err := p.request(ctx, token, http.MethodGet, mount+"/"+secretPath, nil)
+func (p *Provider) readKVv1(ctx context.Context, token, path string) (map[string]string, error) {
+	secret, err := p.request(ctx, token, http.MethodGet, path, nil)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrReadFailed, err)
+		return nil, err
 	}
 	if secret == nil || secret.Data == nil {
-		return nil, fmt.Errorf("%w: %s", ErrReadFailed, joinWarnings(secret))
+		return nil, errors.New(joinWarnings(secret))
 	}
 	return stringify(secret.Data), nil
+}
+
+// kvAttempt is one read readKV made: the API path (no address, no
+// token), which KV version it was read as, and what came back.
+type kvAttempt struct {
+	kind, path string
+	err        error
+}
+
+// readError is a failed secret read. It is ErrReadFailed, and it wraps
+// the last attempt's error, so statusCode reports the status that
+// decided the outcome (a 403 on the KV v1 fallback still drops the
+// cached token, as before). Its message lists every attempt, built only
+// from paths, statuses and OpenBao's own "errors" and "warnings".
+type readError struct {
+	attempts []kvAttempt
+}
+
+func (e *readError) Error() string {
+	parts := make([]string, len(e.attempts))
+	for i, a := range e.attempts {
+		msg := a.err.Error()
+		if errors.Is(a.err, errNotKVv2) {
+			msg = strings.TrimPrefix(msg, errNotKVv2.Error()+": ")
+		}
+		parts[i] = fmt.Sprintf("%s (%s): %s", a.path, a.kind, msg)
+	}
+	return fmt.Sprintf("%s: tried %s", ErrReadFailed, strings.Join(parts, "; then "))
+}
+
+func (e *readError) Unwrap() []error {
+	return []error{ErrReadFailed, e.attempts[len(e.attempts)-1].err}
 }
 
 // request sends method /v1/<path> as token ("" for none) with body, if
@@ -364,10 +412,14 @@ type statusError struct {
 }
 
 func (e *statusError) Error() string {
-	if len(e.errors) == 0 {
-		return fmt.Sprintf("status %d", e.code)
+	status := fmt.Sprintf("status %d", e.code)
+	if text := http.StatusText(e.code); text != "" {
+		status += " (" + strings.ToLower(text) + ")"
 	}
-	return fmt.Sprintf("status %d: %s", e.code, strings.Join(e.errors, "; "))
+	if len(e.errors) == 0 {
+		return status
+	}
+	return status + ": " + strings.Join(e.errors, "; ")
 }
 
 func responseError(err error) error {

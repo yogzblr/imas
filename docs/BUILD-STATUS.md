@@ -700,13 +700,37 @@ this file can be checked against the repository's history.
       builds and `sha256sum --check` on a real release are untested; the MSI is
       not byte-reproducible.
     - **Enrollment (#62):** `docs/diagrams/imas-architecture.svg` still shows
-      `fleet_signing_jwks` and `fleetsigningkeys`; `fleetsign`'s JWKS encoding
-      and `JWKSHandler` have no production caller; enrolled sprouts keep the
-      unused `fleetsigningkeys` Publish grant until their JWT is re-minted.
-    - **OpenBao client (#66, #67):** the real-server test (`TestRealServer`) is
-      not wired into CI; an absent KV v2 secret still falls back to KV v1, so
-      the error can read "permission denied" instead of "not found"; Vault
-      Enterprise namespaces are not supported on the sprout side; the Helm
+      `fleet_signing_jwks` and `fleetsigningkeys`. CL.4 deleted `fleetsign`'s
+      JWKS encoding (`MarshalJWKS`, `ParseJWKS`) and `JWKSHandler`, which had
+      no caller. Sprouts enrolled before CL.1 keep the unused
+      `fleetsigningkeys` Publish grant (nothing subscribes to that subject).
+      CL.4 checked the re-mint path but did not change it. Farmer already
+      re-mints a sprout's User JWT whenever its permissions differ from
+      `sproutPermissions` (`mintOrReuseUserJWT` compares them), but only when a
+      sync runs. For the legacy tenant that is every farmer start or SIGHUP. For
+      a per-tenant Account it is only an enrollment, accept, unaccept, deny,
+      reject, delete or provisioning in that tenant; farmer start does not
+      sync those.
+      `/v1/refresh` hands out whatever JWT is on disk. The sprout saves a
+      changed one and uses it after its next restart. Re-minting inside
+      `/v1/refresh` would be cheap: one decode and compare per refresh, and
+      one Ed25519 signature and file write per stale JWT. It would also be
+      safe for privileges, since it only removes a grant. But it needs the
+      tenant signing key under `tenantAuthMu` on the refresh path and an
+      atomic write (`mintOrReuseUserJWT` uses `os.WriteFile`, so a concurrent
+      refresh could read a half-written file). It also leaves the old JWT
+      valid: it has no expiry and is not revoked. The simpler fix is to run
+      `syncTenantSprouts` for every provisioned tenant at farmer start.
+    - **OpenBao client (#66, #67):** CL.4 added a CI workflow for the
+      real-server test (`TestRealServer`):
+      `.github/workflows/sdb-openbao-realserver.yml`. It runs against an
+      OpenBao v2.7.1 dev server on TLS (release binary, pinned sha256), and
+      only OpenBao: no HashiCorp Vault job, for licensing reasons. An absent
+      KV v2 secret still falls back to KV v1 (same lookup order), but the
+      error now names each path tried and what each returned, for example
+      `kv/data/app (KV v2): status 404 (not found); then kv/app (KV v1):
+      status 403 (forbidden): permission denied`. Vault Enterprise
+      namespaces are not supported on the sprout side; the Helm
       chart READMEs do not mention the new optional `*_NAMESPACE` variables
       (they default to unset and `docs/INSTALL.md` documents them);
       `INSTALL.md` should say that a sprout behind an environment proxy needs
