@@ -3,15 +3,19 @@
 Tracks every workstream against the numbered requirements in
 `docs/design/requirements.md`: Wave 0, Wave 1, Wave 2, the "ongoing"
 Windows/Linux ingredient batch, the post-rebrand work (CI, Helm charts,
-workstream M), and Wave 4 (fleet updates and DB migrations). Refreshed
-2026-10-02 against `main` at `1098b47` (PR #59): every item that was
-"designed, not built" on 2026-09-29 has since merged except the Terraform UAT
-gate, which has not been started. See "Requirements traceability" for the
-requirement-by-requirement view and "Notes" for what changed in this pass.
+workstream M), Wave 4 (fleet updates and DB migrations) and Wave 5 (the Wave 4
+clean-ups and REL.1). Refreshed 2026-10-03 against `main` at `1419c18`
+(PR #67): everything in the build plan has merged except the Terraform UAT
+gate, which has not been started, and no release has been cut. Start with the
+"RAG summary" below; "Requirements traceability" has the evidence behind each
+requirement's colour and "Notes" records what changed in each pass.
 
 **How this was verified.** By reading the code on `main` (packages, routes,
 migrations, Helm templates, tests) and the merge history, and by CI results:
-CI, Build, govulncheck, Docs, CodeQL and Gitleaks all passed on `1098b47`.
+CI (tests and lint), Build, CodeQL, govulncheck, Docs and Gitleaks passed on
+`7cd586d` (PR #66); on `1419c18` (PR #67) govulncheck, Gitleaks and Docs had
+passed and the rest were still running when this was written. `go-licenses`
+fails on `main` (see Open items, 5).
 The Go toolchain this was written from can't fetch `go1.26.6`, so no test was
 run locally; "merged" means reviewed and green in CI, not exercised on real
 hosts. Nothing here has run against production-shaped infrastructure: that is
@@ -23,35 +27,105 @@ Everything that depends on a published artifact (the Buildkite registries the
 Ansible role installs from, the signed GHCR images, the Helm charts in
 `imashelm`, the stamped sprout release) is written and reviewed but untried.
 
+## RAG summary
+
+**Legend.** **Green**: built, merged, and its tests pass in CI, with no known
+gap against the requirement. **Amber**: built, but not yet validated beyond
+unit tests, off by default, or with a gap that doesn't defeat the requirement.
+**Red**: not built, or a known gap that defeats what the requirement is for.
+This is a delivery judgement made from the code and CI on `main` at `1419c18`;
+none of it has run on real hosts or a real cluster, so Green does not mean
+"proven in production".
+
+**Overall: 21 requirements: 11 Green, 8 Amber, 2 Red.** Everything in the
+build plan has merged except the Terraform UAT gate, and nothing has been
+released.
+
+### Requirements (`docs/design/requirements.md`)
+
+| # | Requirement | RAG | What it would take to turn it Green |
+|---|---|---|---|
+| 1 | 1M endpoints | **Red** | Jittered sprout reconnect; farmerbus cluster routes; a load and chaos harness that has run. |
+| 2 | DMZ / non-DMZ split | **Green** | |
+| 3 | Windows and Unix | **Amber** | A real Windows Server host run (UAT gate). Server 2016 is the stated floor and nothing has installed the MSI. |
+| 4 | Ansible deployment | **Green** | (Linux is validated by Molecule; the Windows `win_package` path is not.) |
+| 5 | JWT auth to the NATS websocket | **Green** | |
+| 6 | Per-sprout JWT | **Green** | |
+| 7 | Horizontally scalable farmer | **Amber** | A load test. The bus tier stays single-node until requirement 1's routes land. |
+| 8 | Sprout via proxies | **Green** | |
+| 9 | Recipe download from an HTTP endpoint | **Green** | |
+| 10 | NATS response under 300 ms | **Amber** | A latency measurement. The design removes the slow probe loop but nothing has been timed. |
+| 11 | Recipe download uses the same JWT | **Green** | |
+| 12 | Envoy with JWT validation | **Green** | |
+| 13 | Backend on Kubernetes | **Amber** | Install the charts on a real cluster (UAT gate). No Terraform exists. |
+| 14 | Payload encryption | **Red** | Seal `shell.*`: a compromised bus can still open a shell on a Unix sprout. |
+| 15 | Key rotation for sprout keys | **Amber** | Reword `requirements.md` to match the built design (the private key is never sent). |
+| 16 | SDB-equivalent secrets | **Green** | |
+| 17 | Probe capability | **Green** | |
+| 18 | Installers: yum, apt, zypper, MSI | **Amber** | Cut a first release so the packages are published and installed once. |
+| 19 | Ansible with one-time key | **Green** | |
+| 20 | Fleet updates from the sprout's repo | **Amber** | Security review, then the UAT gate's self-update cycle, then switch dispatch on. |
+| 21 | Licensing | **Amber** | Fix the `go-licenses` workflow and record the BSD-3 `modernc.org` licences under item 21 (or drop them). |
+
+### Build plan (`docs/claude-code-parallel-build-plan.md`)
+
+| Wave / item | RAG | Status |
+|---|---|---|
+| Wave 0 (B, D, F, G.1/G.3, G.5/G.8/G.9, H.4/H.5, L, K, SaaS-API scaffold) | **Green** | All merged. |
+| Wave 1 (C, H) | **Green** | Merged; checked against real Envoy v1.35.3. |
+| Wave 2 (E, I, J) | **Amber** | Merged, but J's sealing stops at `cmd.run` and `cook` (requirement 14). |
+| Ongoing batch (G.2, G.4, G.6, G.7, H.1, H.2, H.3) | **Green** | All merged. |
+| Post-rebrand work (M.1 to M.4, Helm charts, proxy support, box-key rotation) | **Green** | Merged. Windows paths are unit-tested only. |
+| Wave 4 (DB.1, DB.2, FU.0 to FU.7, FU.6b) | **Amber** | Merged. Dispatch is off by default and the Windows install is mock-tested only. |
+| Wave 5: CL.1, CL.2a, CL.2b, CL.3 (PR #62, #66, #67, #63) | **Green** | Merged. Follow-ups are in Open items (5, 6). |
+| Wave 5: REL.1 (PR #64, #65) | **Green** | Merged: GoReleaser OSS, MSI from `build-msi.sh`, secret-free `goreleaser-check.yml`. No real tag has exercised it. |
+| First release (`release.yml`, `publish-packages.yml`) | **Red** | Never run. The secrets are set but no tag exists. |
+| Terraform UAT gate | **Red** | Not started. Needs a first release and a compute-provider decision. |
+
+### Open items (numbered as in "Open items" below)
+
+| # | Item | RAG | Next step |
+|---|---|---|---|
+| 1 | Terraform UAT gate, and the first release it needs | **Red** | Tag `v0.1.0-rc.1`, run Release on it, publish the Buildkite packages by hand with `publish-packages.yml` (pre-releases are skipped), then choose the provider and dispatch the gate. |
+| 2 | `shell.*` unsealed | **Red** | Design and brief for sealing the shell channel. |
+| 3 | Scale and latency (jitter, clustered bus, load tests) | **Red** | Briefs for jitter and farmerbus routes; a load harness. |
+| 4 | Security review of the flagged work | **Amber** | Hold the review and record its outcome here before dispatch is turned on. |
+| 5 | `go-licenses` workflow failing; `dependencies/` stale | **Amber** | Separate task card: fix the save step and decide on BSD-3. |
+| 6 | `internal/pki` provision/deprovision race | **Amber** | Brief for the `ProvisionTenant`/`DeprovisionTenant` fix, then remove saasapi's 409 wait. |
+| 7 | SaaS API section 1.7 (API keys, teams, webhooks, billing) | **Red** | Never designed; needs a design pass. |
+| 8 | Docs wording (requirement 15, README embedded bus) | **Amber** | Small docs change. |
+| 9 | Nice-to-haves (Keycloak harness, rotation scheduler, CERT-In/DPDP review) | **Amber** | Unowned. |
+| 10 | Leftovers from PR #62 to #67 (release pipeline, stale diagram, OpenBao client follow-ups) | **Amber** | Fold into one clean-up brief after the first release shows what the pipeline really needs. |
+
 ## Requirements traceability
 
 Status against `docs/design/requirements.md`. "Built" means the code is on
 `main` and its tests pass in CI; "validated" means exercised somewhere
 beyond unit tests (real Envoy, Molecule containers, real OpenBao).
 
-| # | Requirement | Status | Evidence / gap |
-|---|---|---|---|
-| 1 | 1M endpoints | **Not validated; two scale-plan items not built** | Storage (PXC, Valkey, object storage) and queue-grouped core are built. Not built: (a) **reconnect jitter**: the sprout still uses a fixed `ReconnectWait(15s)` with unlimited retries (`cmd/sprout/main.go`), and `nats.CustomReconnectDelay` appears nowhere; at 1M sprouts a bus restart is a thundering herd, which Phase 2 of the scale plan called out; (b) **a clustered bus**: `cmd/farmerbus` does not read cluster routes, so the nats chart refuses `bus.replicaCount > 1` unless `bus.cluster.routesSupported` is set, and nothing sets it truthfully yet. No load or chaos test has ever run and no harness is in the repo. |
-| 2 | DMZ / non-DMZ split | Built | `cmd/farmerbus` (DMZ) vs `cmd/farmer` (core, outbound only); Helm charts `deploy/helm/nats` and `deploy/helm/farmer`, with NetworkPolicies. |
-| 3 | Windows and Unix | Built, **not validated on Windows hosts** | Full G.1–G.9 ingredient set, SCM service wrapper, MSI. Windows paths are cross-compiled and unit-tested; the self-update MSI path is tested with `msiexec` mocked. The Terraform UAT gate would be the first real-host run. |
-| 4 | Deployment automation with Ansible | Built, validated | `ansible/roles/imas_sprout` and `imas_verify`, Molecule CI on Rocky, Debian and openSUSE Leap. |
-| 5 | JWT auth to the NATS websocket; enrollment key only to bootstrap | Built, validated | NATS User JWT plus gateway EdDSA JWT; `POST /v1/enroll`; run through real Envoy v1.35.3. |
-| 6 | Per-sprout JWT | Built, validated | Paired JWTs minted at enrollment and refresh. |
-| 7 | Farmer horizontally scalable | Built, not load-tested | Core is stateless: `QueueSubscribe` on `imas-core`, PXC read-through, Valkey heartbeat, object-store recipes. The bus tier is single-node until farmerbus supports routes (see 1). |
-| 8 | Sprout via proxies | Built | `busproxyurl` (HTTP CONNECT / SOCKS5) for the bus connection; HTTP clients use `ProxyFromEnvironment` (the `sdb://openbao` provider only since CL.2b: before it, it connected directly). Ansible variable exposed. |
-| 9 | Recipe download from a configured HTTP endpoint | Built, validated | `/files/` behind Envoy; `TestSproutDownloadsStagedRecipe_ThroughRealEnvoy`. |
-| 10 | NATS response under 300 ms | **Not validated** | Design removes the synchronous probe loop; no latency measurement has been taken. |
-| 11 | Recipe download uses the same JWT | Built, validated | Same gateway JWT, same Envoy gate. |
-| 12 | Envoy with JWT validation in front of NATS | Built, validated | `deploy/envoy/envoy.yaml`, `jwt_authn` with remote JWKS; checked against real Envoy. Keycloak JWKS cross-check harness has never been run (nice-to-have). |
-| 13 | Backend on Kubernetes (NATS, Valkey, farmer, Percona) | Built | Helm charts with optional PXC/OpenBao/Valkey subcharts; single migration hook Job; sprout-release hook Job. Chart tests render them; no gate has installed them on a real cluster. **No Terraform exists yet** (see the UAT gate row). |
-| 14 | Payload encryption, key pair per sprout and per tenant | **Partly built** | Per-tenant and per-sprout X25519 keys; `cmd.run`, `cook` and box-key submissions are sealed end to end. **`shell.*` (interactive PTY) is still plaintext inside TLS**, as are cook step events, `test.ping`, facts, `cancel`, the rotate trigger and log shipping. `shell.*` is the one that matters: a compromised bus can still open a shell on a Unix sprout. |
-| 15 | Key rotation for sprout keys | Built, **deliberately differs from the wording** | The requirement text says the new private key is sent encrypted over NATS. The built design never transmits a private key: the sprout generates the new pair and submits only the public key, farmer-triggered. See `imas-payload-encryption-design.md`. `requirements.md` should be reworded to match (see "Open items"). |
-| 16 | SDB-equivalent secrets in the sprout | Built (v1 tier) | `internal/ingredients/sdb`: OpenBao/Vault (hot-reloaded client cert, official OpenBao client since CL.2b, tested against OpenBao 2.4.1 and Vault 1.20.4), Azure Key Vault, AWS Secrets Manager, GCP Secret Manager. CyberArk and Delinea (Tier 2) not built, by design. |
-| 17 | Probe capability (database, HTTP) as a sprout task | Built | `probe.http`, `probe.database`, plus `wait`, `cond`, `on_exit`, registered variables with `sensitive` redaction. |
-| 18 | Installers: yum, apt, zypper, MSI | Built, **never published** | nfpm deb/rpm/apk, SUSE rpm check, MSI and winget package, and the workflow that uploads them to the Buildkite registries. No release has ever been cut (see "Release flow" below), so the registries hold no imas packages and nothing has exercised the upload. |
-| 19 | Ansible with one-time key | Built, validated | Join token handled `no_log`, mode `0600`, removed by the sprout after enrollment. |
-| 20 | Fleet updates from the sprout's configured repo | Built, **dispatch off by default** | FU.0–FU.7, FU.6b merged (below). `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` stays `false`, in the Helm chart too, until security review and the UAT gate. Linux path has an end-to-end test against a real repository (Nexus); Windows is mock-tested only. |
-| 21 | Licensing | Built | Apache/MIT default; PXC and MPL-2.0 exceptions recorded; goose (MIT) added; dependency licence files refreshed by the `go-licenses` workflow. |
+| # | Requirement | RAG | Status | Evidence / gap |
+|---|---|---|---|---|
+| 1 | 1M endpoints | **Red** | **Not validated; two scale-plan items not built** | Storage (PXC, Valkey, object storage) and queue-grouped core are built. Not built: (a) **reconnect jitter**: the sprout still uses a fixed `ReconnectWait(15s)` with unlimited retries (`cmd/sprout/main.go`), and `nats.CustomReconnectDelay` appears nowhere; at 1M sprouts a bus restart is a thundering herd, which Phase 2 of the scale plan called out; (b) **a clustered bus**: `cmd/farmerbus` does not read cluster routes, so the nats chart refuses `bus.replicaCount > 1` unless `bus.cluster.routesSupported` is set, and nothing sets it truthfully yet. No load or chaos test has ever run and no harness is in the repo. |
+| 2 | DMZ / non-DMZ split | **Green** | Built | `cmd/farmerbus` (DMZ) vs `cmd/farmer` (core, outbound only); Helm charts `deploy/helm/nats` and `deploy/helm/farmer`, with NetworkPolicies. |
+| 3 | Windows and Unix | **Amber** | Built, **not validated on Windows hosts** | Full G.1–G.9 ingredient set, SCM service wrapper, MSI. Windows paths are cross-compiled and unit-tested; the self-update MSI path is tested with `msiexec` mocked. The Terraform UAT gate would be the first real-host run. |
+| 4 | Deployment automation with Ansible | **Green** | Built, validated | `ansible/roles/imas_sprout` and `imas_verify`, Molecule CI on Rocky, Debian and openSUSE Leap. |
+| 5 | JWT auth to the NATS websocket; enrollment key only to bootstrap | **Green** | Built, validated | NATS User JWT plus gateway EdDSA JWT; `POST /v1/enroll`; run through real Envoy v1.35.3. |
+| 6 | Per-sprout JWT | **Green** | Built, validated | Paired JWTs minted at enrollment and refresh. |
+| 7 | Farmer horizontally scalable | **Amber** | Built, not load-tested | Core is stateless: `QueueSubscribe` on `imas-core`, PXC read-through, Valkey heartbeat, object-store recipes. The bus tier is single-node until farmerbus supports routes (see 1). |
+| 8 | Sprout via proxies | **Green** | Built | `busproxyurl` (HTTP CONNECT / SOCKS5) for the bus connection; HTTP clients use `ProxyFromEnvironment` (the `sdb://openbao` provider only since CL.2b: before it, it connected directly). Ansible variable exposed. |
+| 9 | Recipe download from a configured HTTP endpoint | **Green** | Built, validated | `/files/` behind Envoy; `TestSproutDownloadsStagedRecipe_ThroughRealEnvoy`. |
+| 10 | NATS response under 300 ms | **Amber** | **Not validated** | Design removes the synchronous probe loop; no latency measurement has been taken. |
+| 11 | Recipe download uses the same JWT | **Green** | Built, validated | Same gateway JWT, same Envoy gate. |
+| 12 | Envoy with JWT validation in front of NATS | **Green** | Built, validated | `deploy/envoy/envoy.yaml`, `jwt_authn` with remote JWKS; checked against real Envoy. Keycloak JWKS cross-check harness has never been run (nice-to-have). |
+| 13 | Backend on Kubernetes (NATS, Valkey, farmer, Percona) | **Amber** | Built | Helm charts with optional PXC/OpenBao/Valkey subcharts; single migration hook Job; sprout-release hook Job. Chart tests render them; no gate has installed them on a real cluster. **No Terraform exists yet** (see the UAT gate row). |
+| 14 | Payload encryption, key pair per sprout and per tenant | **Red** | **Partly built** | Per-tenant and per-sprout X25519 keys; `cmd.run`, `cook` and box-key submissions are sealed end to end. **`shell.*` (interactive PTY) is still plaintext inside TLS**, as are cook step events, `test.ping`, facts, `cancel`, the rotate trigger and log shipping. `shell.*` is the one that matters: a compromised bus can still open a shell on a Unix sprout. |
+| 15 | Key rotation for sprout keys | **Amber** | Built, **deliberately differs from the wording** | The requirement text says the new private key is sent encrypted over NATS. The built design never transmits a private key: the sprout generates the new pair and submits only the public key, farmer-triggered. See `imas-payload-encryption-design.md`. `requirements.md` should be reworded to match (see "Open items"). |
+| 16 | SDB-equivalent secrets in the sprout | **Green** | Built (v1 tier) | `internal/ingredients/sdb`: OpenBao/Vault (hot-reloaded client cert, official OpenBao client since CL.2b, tested against OpenBao 2.4.1 and Vault 1.20.4), Azure Key Vault, AWS Secrets Manager, GCP Secret Manager. CyberArk and Delinea (Tier 2) not built, by design. |
+| 17 | Probe capability (database, HTTP) as a sprout task | **Green** | Built | `probe.http`, `probe.database`, plus `wait`, `cond`, `on_exit`, registered variables with `sensitive` redaction. |
+| 18 | Installers: yum, apt, zypper, MSI | **Amber** | Built, **never published** | nfpm deb/rpm/apk, SUSE rpm check, MSI and winget package, and the workflow that uploads them to the Buildkite registries. No release has ever been cut (see "Release flow" below), so the registries hold no imas packages and nothing has exercised the upload. |
+| 19 | Ansible with one-time key | **Green** | Built, validated | Join token handled `no_log`, mode `0600`, removed by the sprout after enrollment. |
+| 20 | Fleet updates from the sprout's configured repo | **Amber** | Built, **dispatch off by default** | FU.0–FU.7, FU.6b merged (below). `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` stays `false`, in the Helm chart too, until security review and the UAT gate. Linux path has an end-to-end test against a real repository (Nexus); Windows is mock-tested only. |
+| 21 | Licensing | **Amber** | Built, **licence refresh broken** | Apache/MIT default; PXC and MPL-2.0 exceptions recorded; goose (MIT) added. The `go-licenses` workflow fails on `main` (`modernc.org/mathutil` licence not identified), so `dependencies/` has not been refreshed since glebarez/sqlite arrived; CL.2a/CL.2b committed only their own licence folders. |
 
 **Repository-history note, read before trusting a PR number below:** this
 repo (`yogzblr/imas`) was created by detaching from `yogzblr/grlx` while
@@ -304,7 +378,7 @@ directly in this session instead.
 | J: sprout side of farmer-triggered box key rotation (requirements.md item 15) | Closes "sprout-initiated box key rotation has a farmer side but no sprout side." Farmer-triggered only, no sprout-side scheduling. New key held `pending` until confirmed by the first farmer payload that opens under it; replaced key kept `previous` for `sproutboxkeyprevgrace` (default 15m, floored at `2×DefaultMaxSkew`). Along the way, found and fixed a real gap: `sproutPermissions` never granted the `boxkey.pub` publish subject at all, so every submission was refused as a Permissions Violation until this PR added it (existing sprouts pick it up via JWT re-mint on next refresh). See `docs/design/imas-payload-encryption-design.md`'s "Sprout-side rotation, farmer-triggered only." FLAG FOR SECURITY REVIEW | merged — PR #34 (`8eb23da`, `8384084`, `7b9d80d`) |
 | Ansible + packaging: expose `busproxyurl` and `sproutboxkeyprevgrace` | `ansible/roles/imas_sprout` variables `imas_sprout_bus_proxy_url` (drift-managed the same way as `busurls`: set when non-empty, removed when emptied) and `imas_sprout_boxkey_prev_grace` (set when non-empty, but deliberately never removed — see below), `packaging/etc/imas-sprout.conf` commented examples, `ansible/README.md` variable table. Found and fixed a Molecule idempotence failure along the way: `sproutboxkeyprevgrace` is the only one of the two with a `jety.SetDefault` in `internal/config/config.go`, so the sprout rewrites it into the config file with a concrete default value on any other save (enrolling, clearing its join token). Managing it the same "remove when empty" way as `busurls`/`busproxyurl` fought that write-back every run — molecule's idempotence check caught it: `imas_sprout : Write the enrollment settings...` and the restart handler both fired non-idempotently on all three containers. Fixed by only ever adding an explicit override for this key and never trying to force it absent. | **done, this pass** (docs/ansible only, no application code) |
 
-## Fleet updates and DB migrations (Wave 4, merged 2026-10-01 to 2026-10-02)
+## Fleet updates and DB migrations (Wave 4, merged 2026-10-01 to 2026-10-02) and the Wave 5 clean-ups (merged 2026-10-03)
 
 Decisions recorded in `docs/design/requirements.md` (items 20, 21) and
 `docs/design/cloudxp-machine-manager-api-design.md` (§1.8, §2.2, §2.3,
@@ -319,7 +393,7 @@ key set fetched over the bus. Release/rollout flow: see `docs/RELEASING.md`.
 
 | Item | What shipped | Status |
 |---|---|---|
-| Release flow (`docs/RELEASING.md`), **never run** | One `vMAJOR.MINOR.PATCH` tag releases everything: five GHCR images (keyless cosign), binaries and checksums on GitHub releases, rpm/deb/winget to the Buildkite registries, `farmer` and `nats` charts to `imashelm`. Stale upstream publishers (Docker Hub, Cloudsmith, S3, AUR) removed. `release.yml` is manual-only until the repo secrets `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE` exist, and `publish-packages.yml` needs the Buildkite organisation variable and token. GoReleaser OSS since brief REL.1: the Windows MSI comes from `packaging/windows/build-msi.sh` (`wixl`) as a build hook instead of goreleaser-pro's `msi` pipe, so no `GORELEASER_KEY`; `goreleaser-check.yml` runs a secret-free snapshot on pull requests and checks the MSI is in `checksums.txt`. No tag exists and neither release workflow has a run. | merged — PR #43 (`c3f6f65`), #44; REL.1 ready for review |
+| Release flow (`docs/RELEASING.md`), **never run** | One `vMAJOR.MINOR.PATCH` tag releases everything: five GHCR images (keyless cosign), binaries and checksums on GitHub releases, rpm/deb/winget to the Buildkite registries, `farmer` and `nats` charts to `imashelm`. Stale upstream publishers (Docker Hub, Cloudsmith, S3, AUR) removed. `release.yml` is manual-only until the repo secrets `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE` exist (set 2026-10-03), and `publish-packages.yml` needs the Buildkite organisation variable and token. GoReleaser OSS since brief REL.1: the Windows MSI comes from `packaging/windows/build-msi.sh` (`wixl`) as a build hook instead of goreleaser-pro's `msi` pipe, so no `GORELEASER_KEY`; `goreleaser-check.yml` runs a secret-free snapshot on pull requests and checks the MSI is in `checksums.txt`. No tag exists and neither release workflow has a run. | merged — PR #43 (`c3f6f65`), #44; REL.1 merged — PR #64, #65 |
 | DB.1 goose migrations | `cmd/migrate` and `internal/migrations` (goose, embedded SQL, no CGO): baseline per schema, row-based run lock (not `GET_LOCK`, which is node-local on Galera), `up` and `check`; GORM `AutoMigrate` removed from `internal/pxc` and saasapi; services check the schema version at startup. `saas` migrations 00001–00005 and `farmer` 00001 are on `main`. | merged — PR #46 (`1e56315`) |
 | DB.2 Migration hook Job | `db-migrate-job.yaml` replaces `db-bootstrap-job.yaml`: one pod, `pre-upgrade`/`pre-rollback`, `post-install` with the bundled PXC; `imas-migrate` image shipped; chart tests extended | merged — PR #48 (`691a1bc`) |
 | FU.0 Signed manifest | URL-free manifest (`imas-fleet-manifest-v1|version|os|arch|file_name|checksum_sha256|min_sprout_version`) signed with the Transit key, verified against a keyring; `selfupdate` and `sprout_action` reworked. FLAG FOR SECURITY REVIEW | merged — PR #45 (`c5ecebe`) |
@@ -327,8 +401,12 @@ key set fetched over the bus. Release/rollout flow: see `docs/RELEASING.md`.
 | FU.1 Manifest endpoint | Farmer serves `GET /v1/sprout/update-manifest` (sprout JWT), read-only from the release catalog; routed through Envoy and tested against real Envoy | merged — PR #51 (`e44b1a6`), #52 (`c23fce5`) |
 | FU.2 Sprout fetch, verify, install | Sprout reads its repository's own index (apt, rpm incl. zstd, NuGet flat container), verifies signature and SHA-256, installs with `dpkg -i`, `rpm -U`, `zypper` or `msiexec`, refuses downgrades; keyring shipped in deb/rpm/MSI; Ansible variables for repo URL and token; `testing/selfupdate-e2e` drives a real cycle against Nexus on Debian and Rocky. FLAG FOR SECURITY REVIEW | merged — PR #53 (`f3d035d`) |
 | FU.7 Farmer dispatch | Farmer dispatches `self_update` as `{version}` only and re-verifies it against the catalog (`internal/fleetcatalog`) before sending | merged — PR #53 |
-| CL.1 Remove the dead live fleet-key path | Deleted `internal/fleetkeys` and its farmer wiring, `payloadbox.PurposeFleetSigningResponse`, the `imas.sprouts.<id>.fleetsigningkeys` grant in sprout JWTs, `fleet_signing_jwks` in `POST /v1/enroll` (farmer and sprout client), `GET /v1/.well-known/fleet-signing-jwks.json`, the sprout's enrollment pin (`internal/pki/fleetkey.go`) and the `sproutfleetsigningjwks` setting. Enrollment no longer needs the fleet key source. A sprout built before this refuses to enrol against a farmer built after it: upgrade sprouts first, or re-enrol. FLAG FOR SECURITY REVIEW | ready for review — PR #62 |
-| CL.3 Outbox sweeper | `internal/saasapi/sweeper.go`, on every saasapi replica (`SAASAPI_OUTBOX_*`, Helm `saasapi.outboxSweeper.*`). Row leases (`lease_owner`/`lease_until`, claimed by one conditional `UPDATE` that must affect the row; not `GET_LOCK`), migration `saas/00006`, which also adds `provisioning_jobs.last_dispatched_at`, `asset_action_items.dispatched_at` and `planned_at_target` (what a resumed rollout needs and wasn't stored) and an index on `asset_action_items.status`. Re-publishes pending provisioning jobs with exponential backoff, failing them after `SAASAPI_OUTBOX_MAX_ATTEMPTS`; re-sends §1.5 items still `queued` (failing them `expired_not_sent` past `SAASAPI_OUTBOX_ACTION_MAX_AGE`, 15m), never ones in `dispatching`, which it fails `dispatch_outcome_unknown` once their dead dispatcher would have given up (nothing downstream deduplicates a re-send, and nothing downstream rejects an old command: the envelope's ±5m window counts from farmer's seal time); with dispatch enabled, takes over an update rollout whose lease lapsed and resumes it from the database, gating already-sent items on deadlines from their dispatch time and re-checking approval, revocation, registration and the tenant before every wave, reporting the same item codes as a live rollout; a stuck `dispatching` item halts it and frees the tenant's rollout slot. Farmer's handling of a repeated `job_id` checked: harmless on its own; the one race (a late provision copy against a deprovision) is mitigated in saasapi by `DELETE` waiting out a re-published provision job, with the `internal/pki` fix left open (out of scope; Open items, 6). Tested with sqlite and against MySQL 8. FLAG FOR SECURITY REVIEW | ready for review — PR #63 |
+| CL.1 Remove the dead live fleet-key path | Deleted `internal/fleetkeys` and its farmer wiring, `payloadbox.PurposeFleetSigningResponse`, the `imas.sprouts.<id>.fleetsigningkeys` grant in sprout JWTs, `fleet_signing_jwks` in `POST /v1/enroll` (farmer and sprout client), `GET /v1/.well-known/fleet-signing-jwks.json`, the sprout's enrollment pin (`internal/pki/fleetkey.go`) and the `sproutfleetsigningjwks` setting. Enrollment no longer needs the fleet key source. A sprout built before this refuses to enrol against a farmer built after it: upgrade sprouts first, or re-enrol. `POST /v1/enroll` no longer reads the fleet signing key, so a farmer without `IMAS_FLEETSIGN_OPENBAO_*` now enrols sprouts instead of failing closed (the manifest endpoint and `self_update` dispatch still fail closed without it). FLAG FOR SECURITY REVIEW | merged — PR #62 (`ec4f10d`) |
+| CL.3 Outbox sweeper | `internal/saasapi/sweeper.go`, on every saasapi replica (`SAASAPI_OUTBOX_*`, Helm `saasapi.outboxSweeper.*`). Row leases (`lease_owner`/`lease_until`, claimed by one conditional `UPDATE` that must affect the row; not `GET_LOCK`), migration `saas/00006`, which also adds `provisioning_jobs.last_dispatched_at`, `asset_action_items.dispatched_at` and `planned_at_target` (what a resumed rollout needs and wasn't stored) and an index on `asset_action_items.status`. Re-publishes pending provisioning jobs with exponential backoff, failing them after `SAASAPI_OUTBOX_MAX_ATTEMPTS`; re-sends §1.5 items still `queued` (failing them `expired_not_sent` past `SAASAPI_OUTBOX_ACTION_MAX_AGE`, 15m), never ones in `dispatching`, which it fails `dispatch_outcome_unknown` once their dead dispatcher would have given up (nothing downstream deduplicates a re-send, and nothing downstream rejects an old command: the envelope's ±5m window counts from farmer's seal time); with dispatch enabled, takes over an update rollout whose lease lapsed and resumes it from the database, gating already-sent items on deadlines from their dispatch time and re-checking approval, revocation, registration and the tenant before every wave, reporting the same item codes as a live rollout; a stuck `dispatching` item halts it and frees the tenant's rollout slot. Farmer's handling of a repeated `job_id` checked: harmless on its own; the one race (a late provision copy against a deprovision) is mitigated in saasapi by `DELETE` waiting out a re-published provision job, with the `internal/pki` fix left open (out of scope; Open items, 6). Tested with sqlite and against MySQL 8. FLAG FOR SECURITY REVIEW | merged — PR #63 (`abca45d`) |
+| REL.1 GoReleaser OSS and a `wixl` MSI hook | The release no longer needs GoReleaser Pro or `GORELEASER_KEY`. `packaging/windows/build-msi.sh` (version, binary and tool checks; refuses to leave a partial MSI) renders the `.wxs`, runs `wixl -a x64` and `msi-postprocess.sh`; a post hook on the `sprout-windows-pkg` build calls it; the MSI is in `checksum.extra_files` and `release.extra_files`, so both signatures (gpg and keyless cosign) cover it. Added `checksum.name_template: checksums.txt` (GoReleaser's default name is `imas_<version>_checksums.txt`, which `publish-packages.yml` would not have found). New secret-free `goreleaser-check.yml` runs a snapshot on pull requests and checks that `dist` has exactly one MSI that `checksums.txt` lists once. The MSI's tables match a build from the parent commit apart from the always-new ProductCode and PackageCode; it is not byte-reproducible (those GUIDs and a wixl build timestamp), though the cabinet is. `test-windows-packaging.sh` had been failing on `main` since FU.2 added `fleet-signing-keys.json` and now passes through `build-msi.sh`. Oldest supported Windows is Server 2016 (Windows Installer 5.0; no winget there, Ansible `win_package` installs the MSI). Not compared against a real Pro `msi` build, and no Windows host has installed the MSI. FLAG FOR SECURITY REVIEW | merged — PR #64 (`579c830`) |
+| REL.1 follow-up: `snapshot.yml` keyless signing | `snapshot.yml` gets `id-token: write`, `cosign-installer`, QEMU and Buildx so the snapshot's cosign `signs` entry can run (it signs under snapshot.yml's own identity, which `publish-packages.yml` rejects, and writes a public Rekor entry). The workflow has never run: the OIDC-to-Rekor path and the image builds are untested. FLAG FOR SECURITY REVIEW | merged — PR #65 (`ecc18f3`) |
+| CL.2a Official OpenBao client, server side | New `internal/openbao` on `github.com/openbao/openbao/api/v2` v2.7.1 (MPL-2.0, unmodified): static-token and kubernetes auth, re-login at 80% of the lease, CA bundle, 30 s timeout, no retries, optional `<prefix>NAMESPACE`, never `BAO_*`/`VAULT_*`. `internal/openbaokv`, `fleetsign`, `gatewayjwt`, `certs`, `pki` (tenant box keys) and `cmd/fleetreleaser` now use it, with their variables, defaults, methods and errors unchanged; six copies of the HTTP code removed. Deliberate differences: the environment proxy is honoured even with a CA bundle, at most one redirect (never https to http), HTTP/2 always, an extra `X-Vault-Request` header, a malformed address fails at construction (fleetreleaser exits 2, not 1). Two bugs found and fixed on the way (a refused login's status read as the request's; HTTP/2 lost with a CA bundle). Also fixed, outside the brief's scope and at the owner's request: a flaky `TestUpdateManifestRoute_NoURLInResponse` (its check matched random signature bytes) and both CodeQL workflows now build Go by hand so the third-party copies under `dependencies/` stay out of the scan. FLAG FOR SECURITY REVIEW | merged — PR #66 (`7cd586d`) |
+| CL.2b Official OpenBao client, sprout side | `internal/ingredients/sdb/openbao` calls the same client directly (customer client certificate, hot-reloaded; cached login token renewed at 90%; `sdb://openbao/<mount>/<path>[#field]` and the KV v2 then v1 read unchanged). Changed: the environment proxy now applies, error strings no longer quote non-JSON bodies, a 403 drops the cached token, numbers read back as written, one redirect at most. Tested against OpenBao 2.4.1 and Vault 1.20.4 (cert rotation under a running provider over HTTP/1.1 and HTTP/2) with `TestRealServer`, which CI does not run. The sprout grew by 1.74 MiB (linux/amd64) and 1.78 MiB (windows/amd64), not the little expected. FLAG FOR SECURITY REVIEW | merged — PR #67 (`1419c18`) |
 | FU.5 Helm release hook | `sprout-release-register-job.yaml` (post-install/post-upgrade) runs `farmer register-sprout-release`; `min_sprout_version` stamped at release time (`packaging/helm/`) | merged — PR #55 (`6815306`) |
 | FU.6 Rollout gates | Health-gated waves (a sprout counts when it reports the new version), one rollout per tenant, per-sprout OS/arch/package-type resolution, sprouts report their release as the `sprout_version` fact | merged — PR #57 (`ec21992`) |
 | FU.6b Gate freshness | Gate counts only reports written after dispatch; dedicated `rollout_claimed_at` column (migration 00005). FLAG FOR SECURITY REVIEW | merged — PR #58 (`507554d`) |
@@ -371,7 +449,7 @@ timeout with no retries, and an optional `<prefix>NAMESPACE`.
 `internal/openbaokv`, `internal/fleetsign`, `internal/gatewayjwt`,
 `internal/certs`, `internal/pki` (tenant box keys) and `cmd/fleetreleaser`
 use it; their variable names, defaults, HTTP methods and errors are
-unchanged. CL.2b (ready for review in PR #67, FLAG FOR SECURITY REVIEW) moves
+unchanged. CL.2b (merged, PR #67, FLAG FOR SECURITY REVIEW) moves
 `internal/ingredients/sdb/openbao`, the sprout's `sdb://openbao` provider,
 onto the same client directly rather than through `internal/openbao`, whose
 identities are configured from `IMAS_*_OPENBAO_*` blocks and authenticate
@@ -399,7 +477,10 @@ set. The sprout grows by 1.74 MiB (linux/amd64, 30,990,943 → 32,812,111
 bytes) and 1.78 MiB (windows/amd64, 25,717,760 → 27,588,096), within the
 5 MB limit: before CL.2b the sprout linked little of the client, and the
 request path brings `golang.org/x/net/http2`, `go-retryablehttp` and both
-`mapstructure` modules into the binary (no new modules).
+`mapstructure` modules into the binary (no new modules). More MPL-2.0 code
+now ships in the customer-distributed sprout binary than before; the
+obligations are the same as for the part that already shipped
+(`DEPENDENCIES.md`).
 
 ## Docs, CI and tooling merged alongside
 
@@ -409,6 +490,33 @@ request path brings `golang.org/x/net/http2`, `go-retryablehttp` and both
 | Requirements, API design, BUILD-STATUS and `CLAUDE.md` rewritten for sprout repo updates and the MPL-2.0 exception | merged — PR #38–#42 |
 | CI: goimports check skips `dependencies/`; dependency licence files refreshed | merged — PR #47 |
 | J follow-up: box-key round-trip test no longer deadlocks on sqlite | merged — PR #50 |
+
+## Merged pull requests, 2026-09-28 to 2026-10-03
+
+Every PR merged to `main` in this window (#36 to #67; #54 was not merged), so
+this file can be checked against the repository's history.
+
+| PR | Merged | What | Recorded in |
+|---|---|---|---|
+| #36, #37 | 09-28, 09-29 | Ingredient reference generator, mdBook site, architecture and SaaS API chapters | Docs, CI and tooling |
+| #38 to #42 | 09-29 | Requirements 20 and 21, sprout updates from the configured repo, `CLAUDE.md` licensing exceptions, confirmed decisions | Docs, CI and tooling; Fleet updates |
+| #43, #44 | 10-01 | Release flow (GHCR-only signed images, Buildkite packages and charts), Wave 4 briefs, `RELEASING.md` | Release flow row |
+| #45 | 10-02 | FU.0 signed URL-free manifest | FU.0 |
+| #46, #48 | 10-02 | DB.1 goose migrations, DB.2 hook Job and `imas-migrate` image | DB.1, DB.2 |
+| #47 | 10-02 | CI: goimports check skips `dependencies/` | Docs, CI and tooling |
+| #49, #56 | 10-02 | FU.3/FU.4 release signing and registration; operator plane in `cmd/saasapi` | FU.3 + FU.4 |
+| #50 | 10-02 | Box-key round-trip test deadlock on sqlite | Docs, CI and tooling |
+| #51, #52 | 10-02 | FU.1 farmer manifest endpoint, routed through Envoy | FU.1 |
+| #53 | 10-02 | FU.2 sprout self-update and FU.7 farmer dispatch | FU.2, FU.7 |
+| #55 | 10-02 | FU.5 Helm release hook | FU.5 |
+| #57, #58 | 10-02 | FU.6 rollout waves, FU.6b gate freshness | FU.6, FU.6b |
+| #59 | 10-02 | FU.6b brief | (docs only) |
+| #60, #61 | 10-03 | BUILD-STATUS and design-doc refresh and re-evaluation | Notes; Re-evaluation |
+| #62 | 10-03 | CL.1 remove the dead live fleet-key path | CL.1 |
+| #63 | 10-03 | CL.3 outbox sweeper | CL.3 |
+| #64, #65 | 10-03 | REL.1 GoReleaser OSS, `wixl` MSI hook; `snapshot.yml` keyless signing | REL.1 rows |
+| #66 | 10-03 | CL.2a official OpenBao client, server side (plus the flaky-test and CodeQL fixes) | CL.2a; Licensing follow-through |
+| #67 | 10-03 | CL.2b official OpenBao client in the sprout's `sdb://` provider | CL.2b; Licensing follow-through |
 
 ## Notes
 
@@ -511,7 +619,7 @@ request path brings `golang.org/x/net/http2`, `go-retryablehttp` and both
   **Update 2026-10-02:** every item from that note has since merged (see
   "Fleet updates and DB migrations").
 
-## Open items (as of 2026-10-02, in priority order)
+## Open items (as of 2026-10-03, in priority order)
 
 1. **Terraform UAT gate: not started.** No Terraform exists in the repo. It
    is the release-quality gate (provision VMs per OS, install the published
@@ -521,14 +629,15 @@ request path brings `golang.org/x/net/http2`, `go-retryablehttp` and both
    infrastructure. Brief: `docs/claude-code-parallel-build-plan.md` §4a.
    Needs a human decision on the compute provider before dispatch.
    **Prerequisite: a first release.** The gate installs *published*
-   packages, and none exist. Someone must set the release secrets, tag a
+   packages, and none exist. Someone must tag a
    pre-release (for example `v0.1.0-rc.1`), run **Release** on that tag, review
    the draft and publish it, and fix whatever the first real run of the
    pipeline turns up (cosign verification, the Buildkite uploads, the chart
    stamp, the MSI build hook). Brief REL.1 (plan §4c) removes the paid
    GoReleaser Pro key from the secrets (GoReleaser OSS, MSI from a `wixl`
-   build hook); it is ready for review and should merge before the first
-   tag. Nothing has installed the MSI on a Windows host yet (oldest
+   build hook); it has merged (PR #64, #65), and the release secrets are
+   now set, so the first tag is unblocked. A pre-release is skipped by
+   `publish-packages.yml`, so publish it deliberately with `workflow_dispatch`. Nothing has installed the MSI on a Windows host yet (oldest
    supported: Windows Server 2016). Do this before dispatching the UAT brief.
 2. **`shell.*` is not sealed** (requirement 14). An interactive PTY is started
    from a plaintext request on `imas.sprouts.<id>.shell.start`; a compromised
@@ -539,17 +648,18 @@ request path brings `golang.org/x/net/http2`, `go-retryablehttp` and both
    (still a fixed 15 s `ReconnectWait`) and a clustered bus (`cmd/farmerbus`
    has no route support, so the chart blocks more than one bus replica).
 4. **Security review of the flagged work**, including FU.0/FU.2/FU.3/FU.4/
-   FU.6b, CL.2a, CL.2b, CL.3 and the J follow-ups, before `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED`
+   FU.6b, CL.1, CL.2a, CL.2b, CL.3 and the J follow-ups. All have merged, but
+   this file does not record that a separate security review was held; record
+   its outcome here before `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED`
    is turned on anywhere.
 5. **Clean-ups left by Wave 4** (briefs in
    `docs/claude-code-parallel-build-plan.md` §4c; CL.1, removing
-   `internal/fleetkeys` and its permission, is ready for review in PR #62;
-   CL.3, the outbox sweeper that resumes batches and rollouts after a pod
-   restart, is ready for review in PR #63): replace the hand-rolled OpenBao
-   HTTP clients with the official Go client as decided on 2026-09-29.
-   **CL.2a** (server side) is merged (PR #66) and **CL.2b** (the sprout's
-   `sdb://openbao` provider) is ready for review in PR #67 (see "Licensing
-   follow-through" for both). CL.2b added 1.74 MiB (linux/amd64) and
+   `internal/fleetkeys` and its permission, merged in PR #62; CL.3, the
+   outbox sweeper that resumes batches and rollouts after a pod restart,
+   merged in PR #63): the hand-rolled OpenBao HTTP clients are replaced
+   by the official Go client, as decided on 2026-09-29. **CL.2a** (server
+   side) merged in PR #66 and **CL.2b** (the sprout's `sdb://openbao`
+   provider) in PR #67 (see "Licensing follow-through" for both). CL.2b added 1.74 MiB (linux/amd64) and
    1.78 MiB (windows/amd64) to the sprout, not the "little" expected: the
    sprout had linked only a sliver of the client. Also found by CL.2a: the `go-licenses` workflow's
    `save` step fails on `main` (`modernc.org/mathutil` reports an unknown
@@ -580,6 +690,28 @@ request path brings `golang.org/x/net/http2`, `go-retryablehttp` and both
    daemon; tenant key rotation has no scheduler inside farmer (run
    `imas keys rotate-tenant-key` from a CronJob); CERT-In/DPDP/data
    sovereignty review is still unowned.
+10. **Leftovers from PR #62 to #67.** Small, none blocking:
+    - **Release pipeline (#64, #65):** `snapshot.yml` has no "Check release
+      secrets" step; the `go mod tidy` before-hook rewrites `go.mod` on a clean
+      checkout (`filippo.io/edwards25519` indirect to direct), so GoReleaser
+      builds a tree that is not exactly the commit; decide whether snapshot
+      runs should sign into the public Rekor log at all or use `--skip=sign`
+      and rely on `goreleaser-check.yml`; the OIDC-to-Rekor path, the image
+      builds and `sha256sum --check` on a real release are untested; the MSI is
+      not byte-reproducible.
+    - **Enrollment (#62):** `docs/diagrams/imas-architecture.svg` still shows
+      `fleet_signing_jwks` and `fleetsigningkeys`; `fleetsign`'s JWKS encoding
+      and `JWKSHandler` have no production caller; enrolled sprouts keep the
+      unused `fleetsigningkeys` Publish grant until their JWT is re-minted.
+    - **OpenBao client (#66, #67):** the real-server test (`TestRealServer`) is
+      not wired into CI; an absent KV v2 secret still falls back to KV v1, so
+      the error can read "permission denied" instead of "not found"; Vault
+      Enterprise namespaces are not supported on the sprout side; the Helm
+      chart READMEs do not mention the new optional `*_NAMESPACE` variables
+      (they default to unset and `docs/INSTALL.md` documents them);
+      `INSTALL.md` should say that a sprout behind an environment proxy needs
+      `NO_PROXY` for a customer server reachable only directly, and that the
+      platform's own OpenBao address may need it where a proxy is set.
 
 Known accepted gaps, unchanged: JWT permission re-mint does not apply to
 already-enrolled sprouts (harmless pre-production), and
@@ -601,3 +733,12 @@ sits in a non-test file); dispatch defaults off in the chart; all 18 `saasapi`
 routes (16 unconditional, 2 behind the flag); Envoy uses remote JWKS; key
 rotation never transmits a private key; the sdb Tier 2 gap is by design; the
 scale plan did call out reconnect-storm hardening.
+
+## Re-evaluation, 2026-10-03 (evening): RAG pass
+
+After PR #62 to #67 merged (CL.1, CL.3, REL.1, CL.2a, CL.2b), this file got a
+RAG summary and the rows that still said "ready for review" were corrected.
+Colours were assigned from the code on `main` and CI at the time: the
+two Reds in the requirements are the unbuilt scale items (1) and unsealed
+`shell.*` (14); the first release and the Terraform UAT gate are Red because
+neither has started. CI was still running on `1419c18` when this was written.
