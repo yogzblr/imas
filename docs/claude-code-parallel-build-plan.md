@@ -1112,6 +1112,11 @@ pipe, the msi.ids note), the header comment in packaging/windows/
 imas-sprout.wxs, docs/RELEASING.md (remove GORELEASER_KEY from the status
 banner and say GoReleaser OSS is used), docs/BUILD-STATUS.md (the release flow
 row and the first-release prerequisite).
+The oldest supported Windows is Windows Server 2016 (decided 2026-10-03; no
+client Windows). Do not add anything to the MSI that needs a newer Windows
+Installer than 5.0, say in packaging/README.md that 2016 is the floor and
+that winget is not present on it (Ansible win_package installs the MSI there),
+and note in the PR that no 2016 host has installed it yet.
 Do not change what the MSI contains or does. Compare the table dumps of the
 old build (the msi pipe, or the existing test script's build at the parent
 commit) and the new one: msiinfo export of Property, Component, File,
