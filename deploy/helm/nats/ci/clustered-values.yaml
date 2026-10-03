@@ -1,9 +1,10 @@
-# chart-testing: 3-node bus. Needs cmd/farmerbus route support first; see
-# README.md, "Clustering".
+# chart-testing: 3-node bus with authenticated routes. The route password
+# Secret must exist in the test namespace (see README.md, "Clustering").
 bus:
   replicaCount: 3
   cluster:
-    routesSupported: true
+    auth:
+      secretName: farmerbus-route-auth
   tls:
     mode: openbao
     openbao:
