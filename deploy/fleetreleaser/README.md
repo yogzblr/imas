@@ -68,7 +68,7 @@ not withdraw anything.
 | saasapi | `imas-fleet-verify`: read, verify | `saas_svc`: `ALL ON saas.*` (sole writer) | the caller token (to present it), the operator token (to check it) |
 | farmer | `imas-fleet-verify`: read, verify | `farmer_svc`: `SELECT ON saas.*` | — |
 | farmer Helm hook Job | none | none | the operator token |
-| sprout | none. It gets the live key set from farmer over its own NATS connection; the enrollment-time key is a bootstrap fallback only | none | — |
+| sprout | none. It verifies against the keyring shipped in its package (`packaging/etc/fleet-signing-keys.md`); farmer never sends it a key | none | — |
 
 The rule this table enforces is that **no identity holds both Transit
 sign on `imas-fleet-signing` and a way to write `saas.fleet_versions`.**
@@ -171,13 +171,15 @@ bao write -f transit/keys/imas-fleet-signing type=ed25519 exportable=false allow
 **The rotation step itself is safe.** Run
 `bao write -f transit/keys/imas-fleet-signing/rotate`.
 
-- fleetreleaser signs new releases with the new version.
-- Sprouts pick it up without re-enrolling. They verify against the key
-  set farmer serves live on `imas.sprouts.<id>.fleetsigningkeys`. That
-  set holds every version at or above `min_decryption_version`: every
-  version Transit's own `/verify` still accepts.
-- Sprouts cache that set for 5 minutes. A signature by a version missing
-  from the cache triggers an immediate refetch.
+- Farmer and saasapi verify against every version at or above
+  `min_decryption_version` (every version Transit's own `/verify` still
+  accepts), so they accept the new version at once.
+- **Sprouts do not.** A sprout verifies against the keyring shipped in its
+  package, and learns a new key version only by installing a release
+  signed by a version it already holds. Leave `min_encryption_version` at
+  the old version until the fleet runs a release whose keyring holds the
+  new one. The full procedure is in `packaging/etc/fleet-signing-keys.md`,
+  "Rotating the signing key".
 
 **The two floors do different things.**
 
@@ -194,13 +196,14 @@ transit/keys/imas-fleet-signing/config min_decryption_version=N+1`).
 Transit requires `min_encryption_version` >= `min_decryption_version`,
 so raise that first if needed.
 
-- That removes N from the live set, so every sprout stops accepting
-  signatures made with N within about 5 minutes. Farmer's pre-dispatch
-  check and saasapi's rollout check stop accepting them too.
+- That removes N from what farmer and saasapi verify against: farmer's
+  update manifest endpoint stops serving releases signed with N, and
+  farmer's pre-dispatch check and saasapi's rollout check refuse them.
+  Sprouts keep trusting N until a release drops it from their keyring.
 - **Never raise `min_decryption_version` past a version that signed a
   release still named as `approved_version` in any tenant's
   `saas.tenant_update_policy`.** That tenant's approved release would
-  stop verifying fleet-wide, and its rollouts would fail.
+  stop verifying in farmer and saasapi, and its rollouts would fail.
 - Before raising it, check that every approved version was signed at or
   above the new floor. The key version is the `v<N>:` prefix of
   `saas.fleet_versions.signature`.

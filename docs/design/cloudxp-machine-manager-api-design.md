@@ -471,10 +471,11 @@ refusal, at every hop, with no checksum-only fallback.
 **Key rotation.** The keyring shipped with the sprout is the trust root, so
 a new key version is added to the keyring in a sprout release signed by the
 old key, and retired only after no approved tenant version depends on it
-(`deploy/fleetreleaser/README.md`, "Rotating the key"). The previous live
-key-set fetch over `imas.sprouts.<id>.fleetsigningkeys` and the JWKS-style
-endpoint are dropped for fleet keys, which removes the bus from the trust
-chain.
+(`deploy/fleetreleaser/README.md`, "Rotating the key"). Farmer never hands
+a sprout a fleet signing key: there is no key-set request over NATS, no
+`fleet_signing_jwks` in the enrollment response (§3.2) and no fleet-signing
+JWKS endpoint (all removed in CL.1), which keeps the bus and farmer out of
+the sprout's trust chain for releases.
 
 **Withdrawing a version.** `helm rollback` does not unregister a sprout
 version; sprouts already on it keep it because they refuse downgrades. A bad
@@ -526,7 +527,6 @@ flat container) for the entry with the signed `checksum_sha256`.
   "sprout_id": "s_1",
   "nats_jwt": "<signed NATS User JWT>",
   "gateway_jwt": "<signed gateway JWT, presented to Envoy on the ws upgrade and the recipe endpoint>",
-  "fleet_signing_jwks": { "keys": [ /* imas-fleet-signing public key(s), pinned by the sprout — §2.5 */ ] },
   "nats_urls": ["wss://bus1.dmz...", "wss://bus2.dmz..."]
 }
 
@@ -640,11 +640,11 @@ already cover dispatch tracking for any `action.type`, including
   What remains is operational, not design: security review of the flagged
   pieces, the Terraform UAT gate (including a self-update cycle per OS, and
   the Windows install path on a real host), then turning
-  `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` on. Also open: removing the live
-  key-set fetch on `imas.sprouts.<id>.fleetsigningkeys` and, if the sprout no
-  longer reads it, the `fleet_signing_jwks` field of the enrollment response
-  (§3), both superseded by the shipped keyring; and the outbox sweeper that
-  resumes batches and rollouts after a pod restart.
+  `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` on. Also open: the outbox sweeper
+  that resumes batches and rollouts after a pod restart. (The live key-set
+  fetch on `imas.sprouts.<id>.fleetsigningkeys` and the `fleet_signing_jwks`
+  enrollment field, both superseded by the shipped keyring, were removed in
+  CL.1.)
 - Decided 2026-09-29: `helm rollback` leaves the sprout release
   registered (withdrawn only by explicit revoke); one `cmd/migrate` binary
   runs both schemas' migrations; private-repo tokens for sprouts are Linux

@@ -22,10 +22,10 @@
 // by this package's shape — TestNoSigningCodeInPackage only keeps the
 // shape honest.
 //
-// The JWKS encoding (jwks.go) and JWKSHandler remain for the existing
-// enrollment pin and live key fetch only; §2.5 drops both for fleet keys
-// and the selfupdate rewrite (FU.2) retires them. Keyring never reads a
-// JWKS and never touches the network.
+// The JWKS encoding (jwks.go) and JWKSHandler have no production caller
+// since CL.1 removed the enrollment pin, the live key fetch and farmer's
+// fleet-signing JWKS route (§2.5); they and their tests are left for a
+// follow-up. Keyring never reads a JWKS and never touches the network.
 package fleetsign
 
 import (
