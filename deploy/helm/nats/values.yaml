@@ -56,8 +56,10 @@ bus:
   # -- Container args.
   args: []
 
-  # -- Number of bus nodes. Values above 1 need cluster.routesSupported
-  # (see README.md, "Clustering"); rendering fails otherwise.
+  # -- Number of bus nodes. 1, or an odd number of 3 or more for a
+  # cluster (see README.md, "Clustering"). A clustered node only serves
+  # clients while it can route to a majority, so 2 nodes would stop
+  # serving entirely when either one is down; the chart refuses 2.
   replicaCount: 1
   # -- StatefulSet podManagementPolicy. Parallel lets all nodes start at
   # once, which a full-mesh cluster needs.
@@ -79,16 +81,34 @@ bus:
     client: 5406
     # -- NATS websocket listener (config.FarmerWSPort). Only Envoy connects here.
     websocket: 5407
+    # -- Probe listener (IMAS_BUS_HEALTH_PORT): /healthz and /readyz only.
+    # /readyz is 503 while a clustered node is fenced. No NetworkPolicy
+    # rule opens it; kubelet probes reach it the same way they reach the
+    # client port.
+    health: 8080
 
   cluster:
     # -- NATS cluster name, used when replicaCount > 1.
     name: imas-bus
-    # -- NATS route (cluster) port, used when replicaCount > 1.
+    # -- NATS route (cluster) port, used when replicaCount > 1. Mutual TLS
+    # with the bus certificate plus the route credentials below; only
+    # other bus pods can reach it (see README.md, "Clustering").
     port: 6222
-    # -- Set to true only once cmd/farmerbus reads the IMAS_BUS_CLUSTER_*
-    # env vars this chart renders. The current binary builds no Cluster
-    # options, so extra replicas would be independent, un-meshed servers.
-    routesSupported: false
+    # -- Whether the farmerbus image reads IMAS_BUS_CLUSTER_* and meshes.
+    # True for this chart's appVersion. Set false only when pinning an
+    # older image that does not; replicaCount > 1 then fails to render.
+    routesSupported: true
+    auth:
+      # -- Existing Secret with the shared route password (at least 32
+      # characters, no ':', '@', '/' or whitespace; e.g. openssl rand -hex
+      # 32). Required when replicaCount > 1. The chart never generates it.
+      secretName: ""
+      # -- Key holding the password in that Secret.
+      passwordKey: route-password
+      # -- Route user name (IMAS_BUS_CLUSTER_ROUTE_USER).
+      user: imas-bus-route
+      # -- Where the password file is mounted.
+      mountPath: /var/run/secrets/imas/bus-route
 
   # -- Extra keys merged into /etc/imas/farmer (YAML). Keys the chart
   # manages (ports, paths, TLS files) win over these.
@@ -137,7 +157,8 @@ bus:
   persistence:
     # -- Persist FarmerPKI (resolver JWT store, bus-local JWTs) per node.
     # Without it, pushed Account JWTs are lost on restart until core
-    # pushes again.
+    # pushes again. Required when replicaCount > 1 (see README.md,
+    # "Clustering").
     enabled: true
     # -- PVC size per bus node.
     size: 1Gi
@@ -180,11 +201,15 @@ bus:
       port: client
     periodSeconds: 5
     failureThreshold: 24
+  # -- Readiness follows the fence: a clustered node that has lost its
+  # majority, sits on a partial mesh, or has not yet synced its resolver
+  # from its peers is taken out of the Service.
   readinessProbe:
-    tcpSocket:
-      port: client
-    periodSeconds: 10
-    failureThreshold: 3
+    httpGet:
+      path: /readyz
+      port: health
+    periodSeconds: 5
+    failureThreshold: 2
   livenessProbe:
     tcpSocket:
       port: client

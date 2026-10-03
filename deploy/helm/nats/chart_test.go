@@ -245,7 +245,11 @@ func TestValidationFailures(t *testing.T) {
 		{"missing tenant signing seed", "natsSeeds.seeds.TENANT_SIGNING is required", []string{"--set", "natsSeeds.seeds.TENANT_SIGNING="}},
 		{"bad seed name", "must match", []string{"--set", "natsSeeds.extraSeeds.bad-name=x.nk"}},
 		{"bad tenant id", "not a valid tenant ID", []string{"--set", "bus.organization=imas farmer"}},
-		{"unmeshed replicas", "cmd/farmerbus does not configure yet", []string{"--set", "bus.replicaCount=3"}},
+		{"cluster without route credentials", "bus.cluster.auth.secretName is required", []string{"--set", "bus.replicaCount=3"}},
+		{"two-node cluster", "bus.replicaCount=2 is refused", []string{"--set", "bus.replicaCount=2", "--set", "bus.cluster.auth.secretName=r"}},
+		{"cluster on an image without routes", "routesSupported=false", []string{"--set", "bus.replicaCount=3", "--set", "bus.cluster.auth.secretName=r", "--set", "bus.cluster.routesSupported=false"}},
+		{"cluster without persistence", "bus.persistence.enabled must be true", []string{"--set", "bus.replicaCount=3", "--set", "bus.cluster.auth.secretName=r", "--set", "bus.persistence.enabled=false"}},
+		{"bad route password key", "passwordKey", []string{"--set", "bus.replicaCount=3", "--set", "bus.cluster.auth.secretName=r", "--set", "bus.cluster.auth.passwordKey=a/b"}},
 		{"bad tls mode", "bus.tls.mode must be", []string{"--set", "bus.tls.mode=selfsigned"}},
 		{"openbao token without secret", "tokenSecretName is required", []string{"--set", "bus.tls.mode=openbao", "--set", "bus.tls.openbao.authMethod=token"}},
 		{"envoy without tls", "envoy.tls.secretName is required", []string{"--set", "envoy.tls.secretName="}},
@@ -287,22 +291,167 @@ func TestBusConfigFile(t *testing.T) {
 	}
 }
 
+var clusteredArgs = []string{"--set", "bus.replicaCount=3", "--set", "bus.cluster.auth.secretName=farmerbus-route-auth"}
+
 func TestClustered(t *testing.T) {
-	docs := mustRender(t, "--set", "bus.replicaCount=3", "--set", "bus.cluster.routesSupported=true")
-	env := envMap(container(t, find(t, docs, "StatefulSet", "-bus")))
+	docs := mustRender(t, clusteredArgs...)
+	sts := find(t, docs, "StatefulSet", "-bus")
+	if get(sts, "spec", "replicas") != 3 || get(sts, "spec", "serviceName") != "t-nats-bus-headless" {
+		t.Errorf("statefulset replicas/serviceName: %v / %v", get(sts, "spec", "replicas"), get(sts, "spec", "serviceName"))
+	}
+	c := container(t, sts)
+	env := envMap(c)
 	routes := strings.Split(env["IMAS_BUS_CLUSTER_ROUTES"], ",")
 	if len(routes) != 3 || routes[2] != "tls://t-nats-bus-2.t-nats-bus-headless.imas-dmz.svc.cluster.local:6222" {
 		t.Errorf("IMAS_BUS_CLUSTER_ROUTES = %v", routes)
 	}
-	if env["IMAS_BUS_CLUSTER_NAME"] != "imas-bus" || env["IMAS_BUS_CLUSTER_PORT"] != "6222" {
-		t.Errorf("cluster env: %v", env)
+	for k, want := range map[string]string{
+		"IMAS_BUS_CLUSTER_NAME":                "imas-bus",
+		"IMAS_BUS_CLUSTER_PORT":                "6222",
+		"IMAS_BUS_CLUSTER_ROUTE_USER":          "imas-bus-route",
+		"IMAS_BUS_CLUSTER_ROUTE_PASSWORD_FILE": "/var/run/secrets/imas/bus-route/route-password",
+		"IMAS_BUS_CLUSTER_ADVERTISE":           "$(POD_NAME).t-nats-bus-headless.imas-dmz.svc.cluster.local:6222",
+		"IMAS_BUS_SERVER_NAME":                 "$(POD_NAME)",
+		"IMAS_BUS_HEALTH_PORT":                 "8080",
+	} {
+		if env[k] != want {
+			t.Errorf("%s = %q, want %q", k, env[k], want)
+		}
+	}
+	// $(POD_NAME) only expands if POD_NAME is defined earlier in the list.
+	var order []string
+	for _, e := range c["env"].([]any) {
+		order = append(order, e.(obj)["name"].(string))
+	}
+	if i := slices.Index(order, "POD_NAME"); i < 0 || i > slices.Index(order, "IMAS_BUS_CLUSTER_ADVERTISE") || i > slices.Index(order, "IMAS_BUS_SERVER_NAME") {
+		t.Errorf("POD_NAME must precede its references: %v", order)
+	}
+	for k := range env {
+		if strings.Contains(k, "PASSWORD") && !strings.HasSuffix(k, "_FILE") {
+			t.Errorf("route password passed as env var %s; only a _FILE path is allowed", k)
+		}
+	}
+	var auth obj
+	for _, v := range get(sts, "spec", "template", "spec", "volumes").([]any) {
+		if v.(obj)["name"] == "route-auth" {
+			auth = v.(obj)
+		}
+	}
+	if get(auth, "secret", "secretName") != "farmerbus-route-auth" || len(get(auth, "secret", "items").([]any)) != 1 ||
+		get(auth, "secret", "items", 0, "key") != "route-password" {
+		t.Errorf("route-auth volume: %v", auth)
+	}
+	if !slices.Contains(containerPorts(c), 6222) {
+		t.Error("no cluster containerPort")
+	}
+	for _, d := range docs {
+		if d["kind"] == "Secret" {
+			t.Fatalf("chart rendered a Secret (%v); route credentials come from bus.cluster.auth.secretName only", get(d, "metadata", "name"))
+		}
 	}
 	if !has(docs, "PodDisruptionBudget", "-bus") {
 		t.Error("no bus PDB for a 3-node cluster")
 	}
-	np := find(t, docs, "NetworkPolicy", "-bus")
-	if !slices.Contains(policyPorts(np, "ingress"), 6222) || !slices.Contains(policyPorts(np, "egress"), 6222) {
-		t.Error("bus NetworkPolicy missing bus<->bus cluster port")
+}
+
+func containerPorts(c obj) []int {
+	var ports []int
+	for _, p := range c["ports"].([]any) {
+		ports = append(ports, get(p, "containerPort").(int))
+	}
+	return ports
+}
+
+func servicePorts(svc obj) []int {
+	var ports []int
+	for _, p := range get(svc, "spec", "ports").([]any) {
+		ports = append(ports, get(p, "port").(int))
+	}
+	return ports
+}
+
+// The headless Service gives each pod the stable name its peers dial for
+// routes; it carries the route port only when clustered. The client
+// Service (core) and the Envoy Service (the DMZ edge) never do.
+func TestClusteredServices(t *testing.T) {
+	docs := mustRender(t, clusteredArgs...)
+	hl := find(t, docs, "Service", "-bus-headless")
+	if get(hl, "spec", "clusterIP") != "None" || get(hl, "spec", "publishNotReadyAddresses") != true {
+		t.Errorf("headless Service: clusterIP=%v publishNotReadyAddresses=%v", get(hl, "spec", "clusterIP"), get(hl, "spec", "publishNotReadyAddresses"))
+	}
+	if !slices.Contains(servicePorts(hl), 6222) {
+		t.Errorf("headless Service ports = %v, want the route port", servicePorts(hl))
+	}
+	if get(hl, "spec", "selector", "app.kubernetes.io/component") != "bus" {
+		t.Errorf("headless Service selects %v", get(hl, "spec", "selector"))
+	}
+	if got := servicePorts(find(t, docs, "Service", "-bus")); slices.Contains(got, 6222) {
+		t.Errorf("client Service exposes the route port: %v", got)
+	}
+	if got := servicePorts(find(t, docs, "Service", "-envoy")); slices.Contains(got, 6222) {
+		t.Errorf("Envoy Service exposes the route port: %v", got)
+	}
+
+	single := mustRender(t)
+	if got := servicePorts(find(t, single, "Service", "-bus-headless")); slices.Contains(got, 6222) {
+		t.Errorf("single-node headless Service has a route port: %v", got)
+	}
+}
+
+// Route traffic stays between bus pods: one dedicated policy opens the
+// route port, in and out, to this StatefulSet's pods only; no other
+// policy mentions it, and Envoy cannot egress to it.
+func TestRoutesNetworkPolicy(t *testing.T) {
+	docs := mustRender(t, clusteredArgs...)
+	np := find(t, docs, "NetworkPolicy", "-bus-routes")
+	if get(np, "spec", "podSelector", "matchLabels", "app.kubernetes.io/component") != "bus" {
+		t.Errorf("routes policy selects %v", get(np, "spec", "podSelector"))
+	}
+	if pt := get(np, "spec", "policyTypes").([]any); len(pt) != 2 {
+		t.Errorf("routes policy types = %v, want Ingress and Egress", pt)
+	}
+	for _, dir := range []struct{ rules, peer string }{{"ingress", "from"}, {"egress", "to"}} {
+		rules := get(np, "spec", dir.rules).([]any)
+		if len(rules) != 1 {
+			t.Fatalf("routes policy %s rules = %d, want 1", dir.rules, len(rules))
+		}
+		peers := get(rules[0], dir.peer).([]any)
+		if len(peers) != 1 || get(peers[0], "namespaceSelector") != nil || get(peers[0], "ipBlock") != nil {
+			t.Errorf("routes policy %s peer must be a same-namespace podSelector only: %v", dir.rules, peers)
+		}
+		sel := get(peers[0], "podSelector", "matchLabels").(obj)
+		if sel["app.kubernetes.io/component"] != "bus" || sel["app.kubernetes.io/instance"] != "t" {
+			t.Errorf("routes policy %s peer selects %v", dir.rules, sel)
+		}
+		if got := policyPorts(np, dir.rules); !slices.Equal(got, []int{6222}) {
+			t.Errorf("routes policy %s ports = %v", dir.rules, got)
+		}
+	}
+	for _, name := range []string{"-bus", "-envoy"} {
+		p := find(t, docs, "NetworkPolicy", name)
+		for _, dir := range []string{"ingress", "egress"} {
+			if slices.Contains(policyPorts(p, dir), 6222) {
+				t.Errorf("NetworkPolicy *%s %s mentions the route port", name, dir)
+			}
+		}
+	}
+	// Single node: no route policy at all.
+	if has(mustRender(t), "NetworkPolicy", "-bus-routes") {
+		t.Error("routes NetworkPolicy rendered for replicaCount=1")
+	}
+}
+
+// Readiness follows the fence (/readyz on the health port), clustered or
+// not, and the probe port exists.
+func TestBusHealthProbe(t *testing.T) {
+	for _, args := range [][]string{nil, clusteredArgs} {
+		c := container(t, find(t, mustRender(t, args...), "StatefulSet", "-bus"))
+		if get(c, "readinessProbe", "httpGet", "path") != "/readyz" || get(c, "readinessProbe", "httpGet", "port") != "health" {
+			t.Errorf("readinessProbe = %v", c["readinessProbe"])
+		}
+		if !slices.Contains(containerPorts(c), 8080) || envMap(c)["IMAS_BUS_HEALTH_PORT"] != "8080" {
+			t.Errorf("health port not wired: ports %v", containerPorts(c))
+		}
 	}
 }
 

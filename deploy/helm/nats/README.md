@@ -157,37 +157,133 @@ In openbao mode, a restart is the rotation.
 
 ## Clustering
 
-`bus.replicaCount` sets the StatefulSet size. When it's above 1, the
-chart renders:
+`bus.replicaCount` sets the StatefulSet size: `1` (the default), or an odd
+number of 3 or more. `2` is refused, because a clustered node only serves
+clients while it routes to a majority of the cluster, so losing either of
+two nodes would stop both. When `replicaCount > 1` the chart renders:
 
-- a cluster port on the pods and the headless Service,
-- bus↔bus NetworkPolicy rules and a PDB,
-- `IMAS_BUS_CLUSTER_NAME`, `IMAS_BUS_CLUSTER_PORT` and
-  `IMAS_BUS_CLUSTER_ROUTES` (comma-separated
-  `tls://<pod>.<headless>.<ns>.svc.cluster.local:<port>`).
+- a `cluster` port on the pods and on the headless Service, which governs
+  the StatefulSet and gives each pod the stable
+  `<pod>.<release>-nats-bus-headless.<ns>.svc.cluster.local` name its
+  peers dial,
+- a dedicated `<release>-nats-bus-routes` NetworkPolicy (see
+  [NetworkPolicy](#networkpolicy)) and a PDB,
+- the `IMAS_BUS_CLUSTER_*` variables `cmd/farmerbus/cluster.go` reads:
+  `NAME`, `PORT`, `ROUTES` (every node, this one included, as
+  `tls://<pod>.<headless>.<ns>.svc.cluster.local:<port>`), `ADVERTISE`
+  (this pod's own headless name), `ROUTE_USER` and
+  `ROUTE_PASSWORD_FILE`, plus `IMAS_BUS_SERVER_NAME` (the pod name).
 
-That shape follows `docs/design/imas-1m-scale-plan.md` Phase 2: a
-full-mesh core-NATS cluster, and a "full" resolver that syncs Account
-JWTs between nodes.
+The shape follows `docs/design/imas-1m-scale-plan.md` Phase 2: a
+full-mesh core-NATS cluster with the "full" account resolver. Nothing
+here claims a throughput or connection figure; none has been measured.
 
-**`cmd/farmerbus` does not support this yet.** `ConfigureNats` sets no
-`Cluster` options, so extra replicas would be unconnected servers:
+### Before you set `replicaCount > 1`
 
-- A claims push from core (one TCP connection, one pod) would reach one
-  node only.
-- A message published on one node would never reach subscribers on
-  another.
+1. **Route password Secret.** Create a Secret with a random password of
+   at least 32 characters with no `:`, `@`, `/` or whitespace, and set
+   `bus.cluster.auth.secretName`. The chart never generates it:
 
-The chart therefore refuses `replicaCount > 1` unless you set
-`bus.cluster.routesSupported: true`. Only set that once farmerbus reads
-the `IMAS_BUS_CLUSTER_*` variables. The expected contract:
+   ```sh
+   kubectl -n imas-dmz create secret generic farmerbus-route-auth \
+     --from-literal=route-password="$(openssl rand -hex 32)"
+   ```
 
-- a route listener on `IMAS_BUS_CLUSTER_PORT`,
-- `Routes` parsed from `IMAS_BUS_CLUSTER_ROUTES`,
-- route TLS with the node cert, verified against the root CA (so the
-  cert also needs client-auth usage).
+   It reaches farmerbus only as a mounted file. To rotate it, update the
+   Secret and roll the StatefulSet: a restarted node can't route to the
+   nodes still on the old password and stays fenced until enough of them
+   have restarted too, so expect reduced capacity during the roll.
+2. **Certificate.** Routes use the bus certificate for mutual TLS in
+   both directions, so it needs **both** `serverAuth` and `clientAuth`
+   extended key usage (farmerbus refuses to start clustered otherwise),
+   and it must name every pod's headless DNS name. In `openbao` mode the
+   default `certHosts` already list them and OpenBao PKI roles set
+   `client_flag` by default; check yours. In `secret` mode, add the
+   per-pod names to the cert-manager `Certificate`.
+3. **Persistence** must stay on (render fails otherwise). See "Stale
+   bus-local claims" below.
 
-## Envoy and `jwt_authn`
+### How routes are authenticated
+
+A peer becomes a route only if **all** of these hold
+(`cmd/farmerbus/cluster.go`):
+
+- **Mutual TLS** against the same root CA as the client port. The
+  listener requires and verifies a client certificate; the dialer
+  verifies the listener's certificate against the route URL's host.
+- The peer certificate names one of the configured route hosts, so a
+  certificate the CA issued for something else is not enough.
+- The route user and password, compared in constant time.
+
+There is no plaintext or unauthenticated route listener: clustering with
+routes but without a password file, or without TLS, is a startup error.
+Pod IPs are not gossiped to clients (`NoAdvertise`): core reaches the bus
+through its Service and sprouts through Envoy.
+
+### How an Account JWT reaches every node
+
+Core pushes each Account JWT once, to `$SYS.REQ.CLAIMS.UPDATE` on
+whichever bus node its SYS connection landed on (`internal/pki/resolver.go`).
+Every node subscribes to that subject, so the push reaches that node and
+every node it has a **direct** route to; NATS routes don't forward a
+second hop. In a healthy full mesh that is every node. A node that missed
+a push catches up through:
+
+- the **fence pull** (below): on start, and whenever the fence lifts or a
+  peer rejoins, farmerbus lists every Account each peer holds and merges
+  the newest of each;
+- the resolver's own sync, every minute;
+- for an Account it has never seen, a lookup to its peers at connect
+  time.
+
+### The fence: a node that may be stale serves nobody
+
+A clustered node keeps its client and websocket listeners shut, failing
+every TLS handshake, and disconnects every client it holds, unless all of
+these hold:
+
+1. it routes directly to a strict majority of the configured nodes,
+   itself included;
+2. no peer reports a route to a node it doesn't route to itself (a
+   partial mesh, where a push landing on that node would miss this one),
+   sustained beyond a 3 s grace;
+3. since it last fenced, it has pulled every Account JWT from every
+   direct peer.
+
+`/readyz` on `bus.ports.health` is 503 while fenced, so the Service also
+stops sending traffic there. The fenced node also refuses core's SYS
+connection, so a claims push can't land on a node whose peers won't
+see it. Core's push then goes to a healthy node, or fails and is retried.
+
+What that means for a tenant:
+
+| Event | Outcome |
+|---|---|
+| Provisioned while a node is down | Pushed to the live nodes. The returning node is fenced until its pull brings the Account in. |
+| Locked out while a node is down | Same. The returning node starts from its PVC, which still holds the live Account JWT, and serves nobody until its pull merged the lock-out. Merging closes the tenant's connections at once. |
+| Provisioned or locked out while one node is cut off | The cut-off node lost its majority and is fenced: it dropped its clients and refuses new ones, including the push. The majority side applies the push. On heal the node pulls before it serves. |
+| Locked out during a partial mesh (two nodes lost their link but both still reach a third) | The two that lost each other fence after the grace. Only the node that sees everyone serves and takes the push. |
+| Locked out while no node can take the push (all down or all fenced) | The push fails and `DeprovisionTenant` returns an error. Retrying it re-pushes the stored lock-out (it used to return early once the tenant was marked deleted, leaving it live). |
+
+Merges are fail-closed on ties: if two JWTs for one Account carry the
+same issued-at, the locked-out one wins. Lock-outs are also signed at a
+strictly later second than the JWT they replace, because the resolver
+treats two JWTs with the same `jti` as identical, and the `jti` doesn't
+cover limits or revocations.
+
+**What is still open.** A partition that forms in the second or so
+before a push (the fence's 1 s tick plus the 3 s partial-mesh grace) can
+let that one push miss a node until the next pull. A lock-out is still
+applied cluster-wide once a pull runs. **Stale bus-local claims:**
+farmerbus mints its own copy of the legacy tenant's Account JWT
+(`bus.organization`) the first time it starts on an empty PVC. That copy
+has a newer issued-at than anything core pushed before then, so it wins
+the resolver sync and drops core's revocations until core next pushes
+that Account. This also affects a single node, but a cluster spreads the
+copy. Persistence is required for that reason; a lost PVC needs core to
+re-push.
+
+## Envoy and `jwt_authn`## Envoy and `jwt_authn`
 
 The Envoy config (`templates/envoy-configmap.yaml`) matches
 `deploy/envoy/envoy.yaml` route for route:
@@ -309,7 +405,7 @@ Only these flows are allowed:
 |---|---|---|---|
 | bus | in | core (`networkPolicy.core.*`) | `bus.ports.client` (5406) |
 | bus | in | this release's Envoy | `bus.ports.websocket` (5407) |
-| bus | in/out | other bus pods (only if `replicaCount > 1`) | `bus.cluster.port` (6222) |
+| bus | in/out | other pods of this bus StatefulSet, same namespace, via the separate `-routes` policy (only if `replicaCount > 1`) | `bus.cluster.port` (6222) |
 | bus | out | DNS | 53/UDP+TCP |
 | bus | out | OpenBao (only in `bus.tls.mode=openbao`) | `networkPolicy.openbao.port` |
 | Envoy | in | `networkPolicy.envoyIngress.from` (default: anyone) | `envoy.listenerPort` (8443) |
@@ -318,12 +414,17 @@ Only these flows are allowed:
 | Envoy | out | DNS | 53/UDP+TCP |
 
 - The bus never opens a connection into the core network.
+- The route port is in no policy but `-routes`. Neither Envoy nor core
+  can reach it, and neither the bus client Service nor the Envoy Service
+  exposes it. NetworkPolicies are additive, so another policy in the
+  namespace that selects the bus pods could still widen this. Keep the
+  DMZ namespace's policies to this chart's.
 - The Envoy admin port is bound to 127.0.0.1.
 - If `jwks.remote.cluster=jwks` points outside the cluster, add a rule
   through `networkPolicy.envoyExtraEgress`.
 
-Kubelet TCP probes originate from the node. Most CNIs allow them
-regardless of policy. Check yours.
+Kubelet probes (TCP on `client`, HTTP on `health`) originate from the
+node. Most CNIs allow them regardless of policy. Check yours.
 
 ## Values
 
@@ -359,16 +460,21 @@ regardless of policy. Check yours.
 | `bus.imagePullSecrets` | `[]` | Pull secrets. |
 | `bus.command` | `[]` | Container command. Empty uses the image ENTRYPOINT, which is expected to be `/farmerbus`. |
 | `bus.args` | `[]` | Container args. |
-| `bus.replicaCount` | `1` | Bus nodes. Values above 1 need `bus.cluster.routesSupported`. |
+| `bus.replicaCount` | `1` | Bus nodes: 1, or an odd number of 3 or more. See [Clustering](#clustering). |
 | `bus.podManagementPolicy` | `Parallel` | StatefulSet pod management. |
 | `bus.updateStrategy` | `{type: RollingUpdate}` | StatefulSet update strategy. |
 | `bus.logLevel` | `info` | `loglevel` in `/etc/imas/farmer`. |
 | `bus.organization` | `imas` | `farmerorganization`, the legacy tenant ID. Must match core and `^[0-9A-Za-z_-]{1,191}$`. farmer's built-in default `"imas farmer"` is not a valid tenant ID. |
 | `bus.ports.client` | `5406` | TCP NATS listener (`farmerbusport`), used by core. |
 | `bus.ports.websocket` | `5407` | NATS websocket listener (`farmerwsport`), used by Envoy. |
+| `bus.ports.health` | `8080` | Probe listener (`IMAS_BUS_HEALTH_PORT`): `/healthz`, and `/readyz` (503 while fenced). |
 | `bus.cluster.name` | `imas-bus` | `IMAS_BUS_CLUSTER_NAME` when clustered. |
 | `bus.cluster.port` | `6222` | Route port when clustered. |
-| `bus.cluster.routesSupported` | `false` | Allows `replicaCount > 1`. See [Clustering](#clustering). |
+| `bus.cluster.routesSupported` | `true` | The image reads `IMAS_BUS_CLUSTER_*`. Set `false` only to pin an older image; `replicaCount > 1` then fails to render. |
+| `bus.cluster.auth.secretName` | `""` | Existing Secret with the route password. Required when `replicaCount > 1`. |
+| `bus.cluster.auth.passwordKey` | `route-password` | Key in that Secret. |
+| `bus.cluster.auth.user` | `imas-bus-route` | Route user name. |
+| `bus.cluster.auth.mountPath` | `/var/run/secrets/imas/bus-route` | Where the password file is mounted. |
 | `bus.extraConfig` | `{}` | Extra `/etc/imas/farmer` keys. Chart-managed keys win. |
 | `bus.extraEnv` | `[]` | Extra env vars. Never put a raw `IMAS_NATS_*_SEED` here. |
 | `bus.extraVolumes` | `[]` | Extra pod volumes. |
@@ -386,7 +492,7 @@ regardless of policy. Check yours.
 | `bus.tls.openbao.k8sAudience` | `openbao` | Audience of the projected ServiceAccount token (10-minute expiry). |
 | `bus.tls.openbao.tokenSecretName` | `""` | token auth: the Secret holding the token. |
 | `bus.tls.openbao.tokenSecretKey` | `token` | token auth: the key in that Secret. |
-| `bus.persistence.enabled` | `true` | Keep FarmerPKI (resolver store) on a PVC per node. Off uses `emptyDir`, so pushed Account JWTs are lost on restart. |
+| `bus.persistence.enabled` | `true` | Keep FarmerPKI (resolver store) on a PVC per node. Off uses `emptyDir`, so pushed Account JWTs are lost on restart. Required when `replicaCount > 1`. |
 | `bus.persistence.size` | `1Gi` | PVC size. |
 | `bus.persistence.storageClassName` | `""` | StorageClass. Empty uses the default. |
 | `bus.persistence.accessModes` | `[ReadWriteOnce]` | PVC access modes. |
@@ -396,7 +502,7 @@ regardless of policy. Check yours.
 | `bus.securityContext` | read-only root, no privilege escalation, drop ALL | Container securityContext. |
 | `bus.terminationGracePeriodSeconds` | `60` | Grace period. |
 | `bus.startupProbe` | TCP on `client`, 5s × 24 | Startup probe. |
-| `bus.readinessProbe` | TCP on `client`, every 10s | Readiness probe. |
+| `bus.readinessProbe` | HTTP `/readyz` on `health`, every 5s | Readiness probe. Follows the fence. |
 | `bus.livenessProbe` | TCP on `client`, every 20s | Liveness probe. |
 | `bus.podAnnotations` | `{}` | Pod annotations. |
 | `bus.podLabels` | `{}` | Pod labels. |
@@ -573,6 +679,12 @@ rendered openbao-mode config (that chart's README, "Verification status"):
   pre-minted `operator.jwt` and the SYS Account's public key instead of
   seeds. Until then, the seed Secret in the DMZ namespace is the most
   sensitive object in the deployment. Restrict who can read it.
+- **Cluster routes** (`replicaCount > 1`) carry every tenant's traffic
+  and the SYS account's claims updates. They need mutual TLS, a
+  certificate naming a route host, and the route password. They are
+  confined to bus pods by the `-routes` NetworkPolicy. The fence keeps a
+  node that may hold stale claims from serving anyone. See
+  [Clustering](#clustering), including its "What is still open" list.
 - Upstream TLS verification is **off by default**, matching the
   reference config. Set `envoy.upstreamTLS.*` for anything real.
 - The `/v1/enroll` and `/v1/refresh` rate limits are per Envoy process

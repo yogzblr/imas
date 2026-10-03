@@ -173,8 +173,22 @@ explanation rather than deploying something that silently can't work.
 {{- if lt (int .Values.bus.replicaCount) 1 -}}
 {{- fail "bus.replicaCount must be at least 1" -}}
 {{- end -}}
-{{- if and (gt (int .Values.bus.replicaCount) 1) (not .Values.bus.cluster.routesSupported) -}}
-{{- fail "bus.replicaCount > 1 needs NATS cluster routes, which cmd/farmerbus does not configure yet (internal/pki/nats.go's ConfigureNats sets no Cluster options). Extra replicas would be un-meshed servers: a claims push or a publish reaching one node would never reach the others. Set bus.cluster.routesSupported=true only once farmerbus reads IMAS_BUS_CLUSTER_* (see README.md, \"Clustering\")." -}}
+{{- if gt (int .Values.bus.replicaCount) 1 -}}
+{{- if not .Values.bus.cluster.routesSupported -}}
+{{- fail "bus.replicaCount > 1 needs a farmerbus image that reads IMAS_BUS_CLUSTER_* and meshes, and bus.cluster.routesSupported=false says this one doesn't. Extra replicas would be un-meshed servers: a claims push or a publish reaching one node would never reach the others (see README.md, \"Clustering\")." -}}
+{{- end -}}
+{{- if eq (int .Values.bus.replicaCount) 2 -}}
+{{- fail "bus.replicaCount=2 is refused: a clustered node serves clients only while it routes to a majority of the cluster, so with 2 nodes losing either one stops both. Use 1, or an odd number of 3 or more (see README.md, \"Clustering\")." -}}
+{{- end -}}
+{{- if not .Values.bus.cluster.auth.secretName -}}
+{{- fail "bus.cluster.auth.secretName is required when bus.replicaCount > 1: farmerbus never runs a route listener without credentials, and this chart never generates them (see README.md, \"Clustering\")." -}}
+{{- end -}}
+{{- if not (regexMatch "^[-._a-zA-Z0-9]+$" (toString .Values.bus.cluster.auth.passwordKey)) -}}
+{{- fail (printf "bus.cluster.auth.passwordKey %q is not a valid Secret key" .Values.bus.cluster.auth.passwordKey) -}}
+{{- end -}}
+{{- if not .Values.bus.persistence.enabled -}}
+{{- fail "bus.persistence.enabled must be true when bus.replicaCount > 1: without a PVC every restart re-mints the bus-local legacy tenant Account JWT with a fresh issued-at, which then outranks core's pushed one (and its revocations) on every node through the resolver sync (see README.md, \"Clustering\")." -}}
+{{- end -}}
 {{- end -}}
 {{- if not (has .Values.bus.tls.mode (list "secret" "openbao")) -}}
 {{- fail (printf "bus.tls.mode must be \"secret\" or \"openbao\", got %q" .Values.bus.tls.mode) -}}
