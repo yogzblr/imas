@@ -206,11 +206,17 @@ chart carries the sprout release (version, per-OS/arch file names and
 checksums), so the farmer and sprout versions ship together. There is no
 CI call into saasapi.
 
-**Status.** The sprout-side install (item 4) and the manifest endpoint
-(§2.6) are not built yet; `POST /tenants/{tenant_id}/sprouts/updates`
-stays behind `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` (default off) until
-they are. Upstream's `internal/update` skeleton (`yogzblr/imas#286`) is no
-longer the dependency: the sprout-side work is imas's own (§2.3).
+**Status (2026-10-02).** Built and merged: the sprout-side fetch, verify and
+install (items 1–4, Linux paths tested end to end against a real
+repository; the Windows MSI path is tested with `msiexec` mocked), farmer's
+manifest endpoint (§2.6), release registration and `fleetreleaser` as a
+signing service (§2.5), the Helm release hook, per-OS/arch `fleet_versions`,
+the version floor, and the health-gated waves (§2.3). The dispatch routes
+below, `POST /tenants/{tenant_id}/sprouts/updates` and its poll endpoint,
+are **still behind `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` (default off)**
+until the flagged security review is done and the Terraform UAT gate has
+exercised the published packages on real hosts. The upstream `internal/update`
+skeleton is deleted; this is imas's own work (§2.3).
 
 | Method | Path | Notes |
 |---|---|---|
@@ -630,13 +636,15 @@ already cover dispatch tracking for any `action.type`, including
 - Billing/metering integration specifics — §1.7.
 - Quota/rate-limit enforcement values and where exactly they're checked (SaaS API is the intended enforcement point, per earlier discussion, but no limits have been set).
 - Can a sprout's `tenant_id` ever change post-enrollment, or does a tenant move always mean re-enrollment? Not decided.
-- **Fleet update rollout (§1.8, §2.3, §2.5, §2.6).** Design is settled;
-  build remaining: sprout manifest fetch and verify, install from the
-  verified local file, farmer manifest endpoint, saasapi registration
-  endpoint, `fleetreleaser` as a signing API (dropping its direct DB
-  write), Helm release hook, per-OS/arch `fleet_versions`, version floor,
-  health-based gate. Keep `POST /tenants/{tenant_id}/sprouts/updates`
-  behind `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` until then.
+- **Fleet update rollout (§1.8, §2.3, §2.5, §2.6): built, not enabled.**
+  What remains is operational, not design: security review of the flagged
+  pieces, the Terraform UAT gate (including a self-update cycle per OS, and
+  the Windows install path on a real host), then turning
+  `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` on. Also open: removing the live
+  key-set fetch on `imas.sprouts.<id>.fleetsigningkeys` and, if the sprout no
+  longer reads it, the `fleet_signing_jwks` field of the enrollment response
+  (§3), both superseded by the shipped keyring; and the outbox sweeper that
+  resumes batches and rollouts after a pod restart.
 - Decided 2026-09-29: `helm rollback` leaves the sprout release
   registered (withdrawn only by explicit revoke); one `cmd/migrate` binary
   runs both schemas' migrations; private-repo tokens for sprouts are Linux

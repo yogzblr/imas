@@ -438,6 +438,11 @@ permissive is a compliance-visible failure, not just a bug."
 
 ## 4a. Wave 3 — workstream M follow-through (Ansible + release UAT gate)
 
+**Status (2026-10-02):** M.4 (Ansible) is merged. The Terraform UAT gate
+(item 5) is **not started**: there are no `.tf` files in the repo. Its
+dependencies are all merged, and it should now also cover one self-update
+cycle per OS (FU.2).
+
 Sub-items M.1–M.3 (Windows SCM service wrapper, MSI+winget installer,
 zypper/SUSE rpm validation) are merged — see `packaging/windows/`,
 `packaging/buildkite/publish-packages.sh`, and `.github/workflows/
@@ -555,6 +560,12 @@ published, not a precondition for publishing it."
 ---
 
 ## 4b. Wave 4 — fleet updates and DB migrations
+
+**Status (2026-10-02): every brief in this wave is merged** (DB.1, DB.2, FU.0,
+FU.1, FU.2, FU.3/FU.4, FU.5, FU.6, FU.6b, plus FU.7 and the release flow), as
+recorded in `docs/BUILD-STATUS.md`. The briefs below are kept as the record of
+what was asked; do not re-dispatch them. The only brief in this file still to
+dispatch is the Terraform UAT gate in §4a.
 
 Re-scoped 2026-09-29 (requirements 20–21; API design §1.8, §2.2, §2.3, §2.5,
 §2.6, §4.1a; `docs/BUILD-STATUS.md`, "Fleet updates and DB migrations").
@@ -831,6 +842,212 @@ decides a fleet update succeeded."
 ```
 
 ---
+
+## 4c. Wave 5: Wave 4 clean-ups
+
+Added 2026-10-03 from the "Open items" list in `docs/BUILD-STATUS.md`
+(item 5). These are the leftovers Wave 4 knowingly left behind. None of
+them blocks the Terraform UAT gate, but CL.1 removes attack surface and CL.3
+closes the restart gap that keeps a tenant's one rollout slot taken. Not in
+this wave: `shell.*` sealing, sprout reconnect jitter and a clustered bus
+(separate, larger items), and the `requirements.md` item 15 wording.
+
+Sub-waves, each held until the one before is merged to `main`:
+
+| Wave | Briefs (run in parallel) | Why this order |
+|---|---|---|
+| 5A | CL.1, CL.3 | Disjoint scopes: CL.1 is farmer, pki and the sprout enrollment client; CL.3 is `internal/saasapi`. |
+| 5B | CL.2a, then CL.2b | CL.2a touches `cmd/farmer/main.go` and files CL.1 edits, so it waits for CL.1. CL.2b follows CL.2a so it reuses the shared package CL.2a creates. |
+
+Every brief below inherits `CLAUDE.md`. The prompts avoid backticks, double
+quotes and dollar signs so they survive being pasted inside a shell string.
+
+**CL.1: remove the dead live fleet-key-set path**
+```
+claude --cloud "Implement CL.1 from docs/BUILD-STATUS.md ('Open items',
+item 5, first clean-up). FLAG FOR SECURITY REVIEW.
+Background: since FU.2 the sprout verifies fleet manifests against the
+keyring shipped in its package (internal/fleetsign keyring, packaging/etc/
+fleet-signing-keys.json). The design (docs/design/cloudxp-machine-manager-
+api-design.md section 2.5, Key rotation) drops the live key-set fetch on
+imas.sprouts.<id>.fleetsigningkeys and the enrollment-time pin. The code
+was never removed. Verified on main: nothing outside tests calls
+pki.LoadPinnedFleetSigningKeys, and no sprout code calls the fleetkeys
+request function, but farmer still subscribes to the subject, still grants
+it in each sprout JWT, still returns fleet_signing_jwks from POST /v1/enroll,
+and the sprout still requires and pins that field.
+Remove, in this order, one commit each: (1) farmer side: delete
+internal/fleetkeys, its wiring in cmd/farmer/main.go (the fleetkeys.
+SetKeySource call and RegisterFarmerListener call; keep the rest of
+initFleetKeySource, because farmer still serves the signed manifest and
+re-verifies a release before dispatching a self_update from the same
+read-only key source), payloadbox.PurposeFleetSigningResponse and its entry
+in payloadbox_test.go; (2) the NATS grant for imas.sprouts.<id>.
+fleetsigningkeys and its reply subjects in internal/pki/jwtusers.go, and
+internal/pki/fleetsigningkeys_integration_test.go (keep a test proving a
+sprout JWT still cannot publish or subscribe to other sprouts subjects);
+(3) enrollment: stop returning fleet_signing_jwks from handlers/enroll.go,
+delete handlers/fleetjwks.go and the GET /v1/.well-known/fleet-signing-
+jwks.json route in internal/api/routers.go with its test, and drop the
+field from the sprout enrollment client (internal/pki/enrollclient.go: the
+struct field, the ParseJWKS validation, the PinFleetSigningKeys call);
+delete internal/pki/fleetkey.go and its tests; (4) config: remove
+SproutFleetSigningJWKS and the sproutfleetsigningjwks key from
+internal/config (config.go, paths_windows_test.go), packaging/etc and the
+ansible role if present, and the Molecule stub farmer
+(ansible/molecule/stubfarmer main.go and main_test.go); config_files_test.go
+must still pass; (5) docs: deploy/fleetreleaser/README.md, the API design
+doc (sections 2.5 and 3, and the section 6 open item), docs/api, and
+docs/design/imas-payload-encryption-design.md (its Boundaries sealed so far
+paragraph mentions the fleetsigningkeys reply), then BUILD-STATUS.
+Do not remove anything fleetsign still uses for the shipped keyring, the
+manifest endpoint or FU.7 re-verification; if the Envoy config or the
+Helm NetworkPolicies mention the removed route or subject, remove that too
+and say so. Wire compatibility: a sprout built before this change refuses to
+enrol against a farmer built after it (it requires the field). That is
+acceptable pre-production; state it in the PR with the upgrade order
+(sprouts first, then farmer, or re-enrol). Enrolled sprouts keep the unused
+JWT grant until their next re-mint; that is harmless, say so in the PR.
+Scope: cmd/farmer/main.go, internal/fleetkeys/, internal/pki/, internal/
+payloadbox/, internal/api/, internal/config/, internal/fleetsign (comments
+only), packaging/etc/, ansible/ (role and molecule stub), deploy/envoy/
+and deploy/helm/ only if they reference the removed route or subject, and
+the docs named above. Tests: go test ./... must pass, and the real-Envoy
+suites (IMAS_TEST_ENVOY_BIN, see docs/BUILD-STATUS.md) must still pass if
+you can run them. PR: list every symbol and file removed, the wire
+compatibility note, and anything you left because something still uses it."
+```
+
+**CL.3: outbox sweeper**
+```
+claude --cloud "Implement CL.3 from docs/BUILD-STATUS.md ('Open items',
+item 5, outbox sweeper) per docs/design/imas-internal-api-account.md
+('Outbox re-dispatch sweeper', currently deferred) and the comments in
+internal/saasapi/provisioning.go, sprout_actions.go and
+fleet_update_dispatch.go. FLAG FOR SECURITY REVIEW.
+Problem: provisioning, action-batch and update-rollout dispatch run in
+goroutines of the process that accepted the request. If that pod restarts or
+has no bus connection, tenant provisioning jobs stay pending, queued batch
+items are never sent, and an update rollout stops with its tenant's one
+rollout slot (rollout_claimed_at) held forever.
+Add a sweeper to saasapi, safe with several replicas. Use a row-based lease,
+not GET_LOCK (node-local on Galera): new columns on the rows it sweeps (for
+example lease_owner and lease_until, plus the last-dispatch time it needs
+to back off), added by a new goose migration in internal/migrations/saas
+(next number after 00005; forward-only, idempotent, backward compatible for
+one version), claimed with a conditional UPDATE that checks rows affected.
+Never run two sweepers on the same row. Key everything on (tenant_id,
+sprout_id) or the existing composite keys, never sprout_id alone.
+Three jobs, each its own commit with tests: (1) provisioning_jobs: re-publish
+jobs still pending after a threshold, bounded by the existing attempts
+column with exponential backoff, then mark the job failed with a clear
+error; first read farmer's handler for internal.tenant.provision and
+deprovision and confirm a repeated job_id is harmless, and fix farmer if
+it is not; (2) action batch items that are still queued (a queued item has
+provably never reached farmer): re-dispatch from the batch action_params.
+Items in dispatching must NEVER be re-sent, because cmd.run is not
+idempotent (see the comment on AssetActionItemStatus). Do not change what
+happens to a stuck dispatching item; list it as an open question in the PR;
+(3) self_update rollouts: resume a rollout whose process died. Rebuild
+wave state from the database, take over the tenant's claim only after its
+lease expires, continue with the unsent queued items using the batch's
+original wave size and gate, and judge items already sent with the gate's
+deadline measured from their recorded dispatch time. Before every resumed
+wave re-check that the version is still approved by the tenant, registered
+and not revoked (the same checks CreateFleetUpdateBatch and farmer's FU.7
+re-verification make), and halt with rollout_halted if not. If wave state
+cannot be rebuilt from existing columns, add what is missing in the same
+migration and explain it in the PR. Resume only runs when
+SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED is true.
+Configuration: SAASAPI_OUTBOX_SWEEPER_ENABLED (default true),
+SAASAPI_OUTBOX_SWEEP_INTERVAL, the staleness thresholds and attempt limit,
+documented in docs/api/saasapi.md and read in internal/saasapi/config.go.
+Never log command lines, action params or tokens. Skip a sweep cleanly when
+there is no bus connection. Tests: simulate a crash (dispatch with a nil bus,
+then sweep with a bus and check exactly one send per item); two sweepers on
+one database never double-send; a dispatching item is never re-sent; a
+revoked version halts a resumed rollout; an expired lease is taken over and a
+live one is not. Include a MySQL-backed test where the existing migration
+tests already have one. Update docs/design/imas-internal-api-account.md,
+the API design doc open items, and BUILD-STATUS. Scope: internal/saasapi/,
+internal/migrations/saas/, cmd/saasapi/, internal/natsapi/ and
+internal/controlplane/ only if farmer's idempotency needs a fix, deploy/
+helm/farmer/ for the new environment variables, docs/. PR: state the lease
+design, what is and is not re-sent, and the open question on stuck
+dispatching items."
+```
+
+**CL.2a: official OpenBao Go client (farmer, fleetreleaser, certs, tenant keys)**
+```
+claude --cloud "Implement CL.2a from docs/BUILD-STATUS.md ('Open items',
+item 5, OpenBao client). Decision of 2026-09-29, now in docs/design/
+requirements.md item 21: MPL-2.0 dependencies are accepted, including the
+OpenBao Go client, so imas's hand-rolled OpenBao HTTP code is to be replaced
+by it. Verify the module path and licence first (it should be
+github.com/openbao/openbao/api/v2, MPL-2.0; read its go.mod and licence on
+GitHub). If any dependency it pulls in is not Apache-2.0, MIT, BSD, ISC or
+MPL-2.0, or if it needs CGO, stop and report instead of adding it.
+Hand-rolled call sites on main today (all use X-Vault-Token over net/http):
+internal/openbaokv/client.go, internal/fleetsign/obtransit.go, internal/
+gatewayjwt/obtransit.go, internal/certs/tls.go, internal/pki/tenantbox.go,
+cmd/fleetreleaser/obtransit.go, and the test helpers internal/gatewayjwt/
+transittest and internal/pki/tenantboxtest. Do NOT touch internal/
+ingredients/sdb/openbao (that is CL.2b, it runs on customer sprouts).
+Design: first add one small internal package (for example internal/openbao)
+that builds the client from the existing IMAS_*_OPENBAO_* environment
+variables and owns auth (static token, and the kubernetes login that
+internal/openbaokv does today), token renewal or re-login before expiry, the
+optional CA certificate, timeouts and the namespace header if one is set.
+Then migrate each call site in its own commit. Keep every environment
+variable name, default and failure mode as it is today (farmer must still
+start without the Transit keys and fail closed on POST /v1/enroll). Keep the
+regression tests that encode past bugs: internal/fleetsign/openbao_response_
+test.go and internal/gatewayjwt/openbao_response_test.go (the PEM and base64
+public key format mismatch against real OpenBao responses), and
+TestOpenBaoEnforcesReadOnlyFleetKey, which proves fleetreleaser alone can
+sign and farmer and saasapi cannot. The existing httptest stubs should keep
+working by pointing the client at them; if a stub has to change, say why.
+fleetreleaser must stay a stateless signer with no database access. No new
+long-lived goroutines without a shutdown path. After migrating, delete the
+duplicated request, header and error-handling code, and confirm nothing in
+the repo still sets X-Vault-Token outside the shared package and the sdb
+provider. Run go-licenses (the go-licenses workflow) and report new
+dependencies and their licences in the PR; update DEPENDENCIES.md and the
+dependencies directory the way that workflow does. Scope: the files above,
+go.mod and go.sum, DEPENDENCIES.md, dependencies/, docs. Tests: go test
+./... must pass, plus the real-OpenBao tests if you can run them. FLAG FOR
+SECURITY REVIEW. PR: list each call site migrated, the behaviour kept, the
+dependency and licence diff, and the resulting binary size change for
+farmer, saasapi and fleetreleaser."
+```
+
+**CL.2b: OpenBao client in the sprout sdb provider**
+```
+claude --cloud "Implement CL.2b from docs/BUILD-STATUS.md ('Open items',
+item 5, OpenBao client), after CL.2a is merged. Read CL.2a's shared package
+and PR first. Migrate internal/ingredients/sdb/openbao/provider.go (the
+sprout-side sdb:// provider for OpenBao and customer Vault) to it, or to the
+official client directly if the shared package carries server-only
+assumptions.
+This code runs on every customer sprout against the customer's own server,
+so check what a server-side swap would not: (1) binary size: build cmd/sprout
+for linux amd64 and windows amd64 before and after (no CGO) and report both
+sizes; if the sprout grows by more than 5 MB, stop before merging the
+change and report the numbers; (2) the provider authenticates with a client
+certificate that internal/ingredients/sdb/certwatch.go reloads when the file
+changes, and with a token cache (tokencache.go): keep both behaviours,
+including no restart after a certificate rotation; (3) the customer server
+may be HashiCorp Vault, not OpenBao: keep working against KV v2 and the
+cert auth method on both, and say in the PR which you tested; (4) the
+sprout proxy settings (ProxyFromEnvironment) and the sdb:// path syntax stay
+as they are; (5) secrets must never appear in logs or error strings, and
+sensitive registered variables stay redacted. Keep the existing tests
+passing and add a test that rotates the client certificate while the provider
+is running. If the official client cannot meet (2) or (3) cleanly, do not
+force it: leave the provider as it is, and write up why in the PR and in
+BUILD-STATUS (Open items, item 5). Scope: internal/ingredients/sdb/, go.mod,
+go.sum, DEPENDENCIES.md, dependencies/, docs. FLAG FOR SECURITY REVIEW."
+```
 
 ## 5. Orchestrator prompt — paste into one lead Claude Code session
 

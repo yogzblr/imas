@@ -78,6 +78,14 @@ READMEs are the full reference; this is the order to do things in.
    `ci/external-values.yaml` is the production one. Set `bus.serviceName`,
    `bus.namespace`, and `bus.sproutBusURLs` (Envoy's external `wss://`
    address, which farmer hands to sprouts as `nats_urls`).
+   Database schemas are created and migrated by the chart itself: a single
+   hook Job (`imas-migrate`, goose migrations) runs before upgrades and
+   rollbacks, and after install when PXC is bundled, and farmer and saasapi
+   wait until the schema version they need is present. Nothing creates tables
+   at service startup any more, so do not run the services against a
+   database the Job has not reached. A second hook Job registers the sprout
+   release that belongs to this chart version with saasapi (see
+   [`RELEASING.md`](RELEASING.md)).
 3. **Deliver saasapi's NATS credential.** A post-install Job has farmer mint
    saasapi's SYS-Account User JWT and write it to OpenBao. External Secrets
    syncs it into saasapi's Secret; without ESO (the eval), copy it by hand as
@@ -294,6 +302,24 @@ curl -s "${H[@]}" -X POST \
 curl -s "${H[@]}" "https://saasapi.example.internal/v1/tenants/t_mfrggzdfmztwq2lk/sprouts?asset_ids=vm-001"
 # {"results":[{"sprout_id":"web-01","asset_id":"vm-001","key_state":"accepted","connected":true}],"unresolved":[]}
 ```
+
+## Update sprouts
+
+A sprout updates itself from the package repository it was installed from,
+the same one the Ansible role configures, so there is nothing to host for
+updates beyond the registries you already use. imas publishes only a signed
+manifest (version, OS and architecture, file name, checksum); the sprout
+verifies it against the keyring shipped in its package, downloads the
+package from its own repository, checks the SHA-256, and installs it with
+`dpkg`, `rpm`, `zypper` or `msiexec`. It never installs a lower version.
+Set the repository with `imas_sprout_update_repo_url` and friends
+(`ansible/README.md`).
+
+Tenants approve a version with `PATCH /v1/tenants/{tenant_id}/update-policy`
+and roll it out in health-gated waves. **The dispatch endpoints are off by
+default** (`SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=false`) and should stay off
+until the security review and the release UAT gate are done; see
+[`BUILD-STATUS.md`](BUILD-STATUS.md).
 
 ## The imas CLI
 
