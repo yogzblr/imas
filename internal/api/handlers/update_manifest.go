@@ -43,6 +43,16 @@ import (
 	log "github.com/yogzblr/imas/internal/log"
 )
 
+// fleetKeySource is farmer's read-only view of the imas-fleet-signing
+// Transit key, set once at startup via SetFleetKeySource
+// (cmd/farmer/main.go), mirroring SetGatewaySigner. A stored row is
+// re-verified against it before it is served.
+var fleetKeySource fleetsign.KeySetSource
+
+// SetFleetKeySource installs the read-only fleet signing key source the
+// update manifest handler verifies rows against.
+func SetFleetKeySource(s fleetsign.KeySetSource) { fleetKeySource = s }
+
 // SproutIdentity is the verified identity of the sprout making a request:
 // the tenant_id and sprout_id claims of its gateway JWT. sprout_id is
 // unique per tenant only, so the pair is the identity; never key

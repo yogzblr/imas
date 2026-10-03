@@ -404,17 +404,20 @@ func initGatewaySigner() {
 }
 
 // initFleetKeySource wires up farmer's READ-ONLY view of the
-// imas-fleet-signing Transit key (internal/fleetsign, design doc §2.5):
-// served ungated as a JWKS, returned in POST /v1/enroll as a
-// bootstrap-only key, and used to re-verify a release before a
-// self_update is dispatched. The token behind IMAS_FLEETSIGN_OPENBAO_* must carry only
+// imas-fleet-signing Transit key (internal/fleetsign, design doc §2.5),
+// used to re-verify a stored release before GET
+// /v1/sprout/update-manifest serves it and before a self_update is
+// dispatched. Sprouts never receive this key set: they verify against the
+// keyring shipped in their package. The token behind
+// IMAS_FLEETSIGN_OPENBAO_* must carry only
 // deploy/fleetreleaser/policies/imas-fleet-verify.hcl; farmer never signs
 // releases (cmd/fleetreleaser does). Not fatal if unconfigured, like
-// initGatewaySigner: POST /v1/enroll and self_update fail closed instead.
+// initGatewaySigner: the update manifest endpoint and self_update fail
+// closed instead.
 func initFleetKeySource() {
 	src, err := fleetsign.NewTransitKeySourceFromEnv()
 	if err != nil {
-		log.Errorf("fleet signing key not configured (POST /v1/enroll and self_update will fail until it is): %v", err)
+		log.Errorf("fleet signing key not configured (GET /v1/sprout/update-manifest and self_update will fail until it is): %v", err)
 		return
 	}
 	handlers.SetFleetKeySource(src)

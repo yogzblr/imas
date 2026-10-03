@@ -55,7 +55,6 @@ import (
 	"time"
 
 	"github.com/lestrrat-go/jwx/v2/jwa"
-	"github.com/lestrrat-go/jwx/v2/jwk"
 	jwxjwt "github.com/lestrrat-go/jwx/v2/jwt"
 	natsjwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-server/v2/server"
@@ -108,7 +107,6 @@ type farmer struct {
 
 	account     nkeys.KeyPair
 	gatewayKey  ed25519.PrivateKey
-	fleetJWKS   json.RawMessage
 	tenantBoxPK string
 	// tenantBoxPriv is the tenant X25519 key cook dispatches are sealed
 	// under (fleet.go); tenantBoxPK is its public half.
@@ -136,11 +134,7 @@ func newFarmer(joinToken string, maxUses int, natsURLs []string) (*farmer, error
 	if err != nil {
 		return nil, err
 	}
-	fleetPub, fleetPriv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-	fleetJWKS, err := jwksFor(fleetPub)
+	_, fleetPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
 	}
@@ -161,32 +155,12 @@ func newFarmer(joinToken string, maxUses int, natsURLs []string) (*farmer, error
 		natsURLs:      natsURLs,
 		account:       account,
 		gatewayKey:    gatewayKey,
-		fleetJWKS:     fleetJWKS,
 		tenantBoxPK:   base64.StdEncoding.EncodeToString(boxPub[:]),
 		now:           time.Now,
 		connected:     func() []string { return nil },
 		sprouts:       map[string]string{},
 		seenSigs:      map[string]bool{},
 	}, nil
-}
-
-// jwksFor is an imas-fleet-signing key set (fleetsign.ParseJWKS) holding
-// pub as key version 1.
-func jwksFor(pub ed25519.PublicKey) (json.RawMessage, error) {
-	key, err := jwk.FromRaw(pub)
-	if err != nil {
-		return nil, err
-	}
-	for k, v := range map[string]any{jwk.KeyIDKey: "1", jwk.KeyUsageKey: "sig", jwk.AlgorithmKey: jwa.EdDSA} {
-		if err := key.Set(k, v); err != nil {
-			return nil, err
-		}
-	}
-	set := jwk.NewSet()
-	if err := set.AddKey(key); err != nil {
-		return nil, err
-	}
-	return json.Marshal(set)
 }
 
 func (f *farmer) routes() *http.ServeMux {
@@ -283,13 +257,12 @@ func (f *farmer) enroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, pki.EnrollResponse{
-		SproutID:         sproutID,
-		JWT:              userJWT,
-		GatewayJWT:       gatewayJWT,
-		NKeyIdentity:     req.NKeyPub,
-		TenantX25519Pub:  f.tenantBoxPK,
-		FleetSigningJWKS: f.fleetJWKS,
-		NatsURLs:         f.natsURLs,
+		SproutID:        sproutID,
+		JWT:             userJWT,
+		GatewayJWT:      gatewayJWT,
+		NKeyIdentity:    req.NKeyPub,
+		TenantX25519Pub: f.tenantBoxPK,
+		NatsURLs:        f.natsURLs,
 	})
 }
 
