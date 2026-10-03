@@ -34,13 +34,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/yogzblr/imas/internal/openbao/openbaotest"
 )
 
 const realTransitDir = "testdata/openbao-v2.7.0"
@@ -205,34 +206,10 @@ func TestOpenBaoLive_TransitKeySource(t *testing.T) {
 	rand.Read(suffix)
 	mount := "fleetsigntest-" + hex.EncodeToString(suffix)
 
-	admin := func(method, path string, body any) []byte {
-		t.Helper()
-		var r io.Reader
-		if body != nil {
-			data, _ := json.Marshal(body)
-			r = bytes.NewReader(data)
-		}
-		req, _ := http.NewRequest(method, addr+"/v1/"+path, r)
-		req.Header.Set("X-Vault-Token", rootToken)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("%s %s: %v", method, path, err)
-		}
-		defer resp.Body.Close()
-		out, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode/100 != 2 {
-			t.Fatalf("%s %s: status %d: %s", method, path, resp.StatusCode, out)
-		}
-		return out
-	}
+	bao := openbaotest.NewAdmin(t, addr, rootToken)
+	admin := bao.Must
 	admin(http.MethodPost, "sys/mounts/"+mount, map[string]any{"type": "transit"})
-	t.Cleanup(func() {
-		req, _ := http.NewRequest(http.MethodDelete, addr+"/v1/sys/mounts/"+mount, nil)
-		req.Header.Set("X-Vault-Token", rootToken)
-		if resp, err := http.DefaultClient.Do(req); err == nil {
-			resp.Body.Close()
-		}
-	})
+	t.Cleanup(func() { bao.Delete("sys/mounts/" + mount) })
 	admin(http.MethodPost, mount+"/keys/"+DefaultTransitKeyName, map[string]any{"type": "ed25519"})
 	admin(http.MethodPost, mount+"/keys/"+DefaultTransitKeyName+"/rotate", nil)
 
