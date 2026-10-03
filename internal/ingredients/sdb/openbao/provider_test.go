@@ -19,6 +19,8 @@ type mockVault struct {
 	kvv1       bool
 	secretData map[string]any
 	loginRole  string // observed "name" field of the last login request, if any
+	// leaseSeconds is the login token's lease_duration; 0 means 3600.
+	leaseSeconds int
 }
 
 func (m *mockVault) handler() http.HandlerFunc {
@@ -29,11 +31,15 @@ func (m *mockVault) handler() http.HandlerFunc {
 			var body map[string]string
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			m.loginRole = body["name"]
+			lease := m.leaseSeconds
+			if lease == 0 {
+				lease = 3600
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"auth": map[string]any{
 					"client_token":   "test-token",
-					"lease_duration": 3600,
+					"lease_duration": lease,
 				},
 			})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/secret/"):
@@ -149,16 +155,14 @@ func TestGet_TokenIsCachedAcrossCalls(t *testing.T) {
 }
 
 func TestGet_ReloginAfterTokenExpiry(t *testing.T) {
-	m := &mockVault{secretData: map[string]any{"password": "hunter2"}}
+	// A 1s lease is cached for 0.9s (renewed at 90%).
+	m := &mockVault{secretData: map[string]any{"password": "hunter2"}, leaseSeconds: 1}
 	p, _ := newTestProvider(t, m)
 
 	if _, err := p.Get(t.Context(), "sdb://openbao/secret/myapp/db"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Force the cached token to look expired.
-	p.tokenMu.Lock()
-	p.tokenExpiry = time.Now().Add(-time.Second)
-	p.tokenMu.Unlock()
+	time.Sleep(time.Second)
 
 	if _, err := p.Get(t.Context(), "sdb://openbao/secret/myapp/db"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
