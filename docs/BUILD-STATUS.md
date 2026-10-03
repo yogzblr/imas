@@ -702,7 +702,7 @@ this file can be checked against the repository's history.
       `GORELEASER_CURRENT_TAG`; `release.yml` also refuses a non-tag ref).
       `docs/RELEASING.md` has a First release checklist. Still open: the
       owner's decision on whether snapshot runs should sign into the public
-      Rekor log or use `--skip=sign` (options in the REL.2 PR); re-enabling
+      Rekor log or use `--skip=sign` (options in PR #75); re-enabling
       `release.yml`'s tag trigger after the first release; `SECURITY.md`'s
       GPG fingerprint and key link may not match the key in the secrets
       (checklist step 2); the nfpm packages carry a literal `+git` version
