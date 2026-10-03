@@ -1,11 +1,24 @@
 # imas: Phase-Wise Plan for 1 Million Endpoints
 
-> **Status (2026-10-02):** see `docs/BUILD-STATUS.md`. Not built from this
+> **Status (2026-10-03):** see `docs/BUILD-STATUS.md`. Not built from this
 > plan: sprout reconnect jitter (`nats.CustomReconnectDelay`; the sprout
-> still uses a fixed 15 s wait) and a clustered bus (`cmd/farmerbus` has no
-> route support, so `replicaCount > 1` is blocked in the chart). No load or
-> chaos test has run, so the 1M-endpoint and under-300 ms requirements remain
-> unvalidated.
+> still uses a fixed 15 s wait). No load or chaos test has run, so the
+> 1M-endpoint and under-300 ms requirements remain unvalidated.
+>
+> **Phase 2 clustered bus (SCALE.2): built, not load-tested.**
+> `cmd/farmerbus` forms a full-mesh core-NATS cluster from
+> `IMAS_BUS_CLUSTER_*` (rendered by `deploy/helm/nats` for `replicaCount`
+> 1 or an odd number ≥ 3, default 1). Routes need mutual TLS against the
+> bus root CA, a certificate naming a route host, and a route password,
+> and only bus pods can reach the route port. Account JWTs keep the "full"
+> resolver: core's push reaches the node it lands on and that node's direct
+> peers; NATS routes do not forward further. So `cmd/farmerbus/fence.go`
+> keeps a node from serving any client unless it routes to a majority, no
+> peer sees a node it doesn't, and it has pulled every peer's Account JWTs
+> since it last fenced. A tenant locked out while a node is down or cut
+> off is therefore never live on that node. The chart README's
+> "Clustering" section lists what is left open. No connection count or
+> throughput figure has been measured.
 
 Companion to `imas-fork-roadmap.md` and `imas-nats-jwt-auth-design.md`. Those documents describe *what* to build; this one sequences it against a concrete scale target and names the parts that only become problems at real scale — several of which don't show up until Phase 3 below.
 
