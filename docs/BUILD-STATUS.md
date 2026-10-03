@@ -621,6 +621,11 @@ this file can be checked against the repository's history.
 
 ## Open items (as of 2026-10-03, in priority order)
 
+Briefs for items 2 (design), 3, 4, 5, 6, 8 and 10 are in
+`docs/claude-code-parallel-build-plan.md` section 4d (Wave 6: SEC.1, SCALE.1 to
+SCALE.3, SEC.2, LIC.1, PKI.1, DOC.1, REL.2, CL.4). Item 1 (first release and
+the Terraform UAT gate) is deliberately last.
+
 1. **Terraform UAT gate: not started.** No Terraform exists in the repo. It
    is the release-quality gate (provision VMs per OS, install the published
    packages with the Ansible role, smoke-test enrollment, a recipe run,

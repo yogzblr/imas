@@ -1136,6 +1136,345 @@ go test ./... and packaging/test/test-windows-packaging.sh must pass. PR:
 state exactly what was run and what was not."
 ```
 
+## 4d. Wave 6: dangling issues
+
+Added 2026-10-03 from the "Open items" list in `docs/BUILD-STATUS.md` (items
+2, 3, 4, 5, 6, 8 and 10) after PR #62 to #67 merged. The Terraform UAT gate
+(§4a item 5) is deliberately left for last. Item 7 (SaaS API §1.7) needs a
+design pass first and has no brief here.
+
+Sub-waves:
+
+| Wave | Briefs (run in parallel) | Why this order |
+|---|---|---|
+| 6A | SEC.1, SCALE.1, SCALE.2, LIC.1, PKI.1, DOC.1, REL.2, CL.4 | Disjoint file scopes. Each edits only its own rows of `docs/BUILD-STATUS.md`; the second PR to merge rebases onto the first. SEC.1 is design only. |
+| 6B | SCALE.3 | The harness measures what SCALE.1 and SCALE.2 build, so it follows them. |
+| 6C | SEC.2 | A read-only review of the final state, so it runs after everything above has merged. It feeds the human security review (Open items 4) and does not replace it. |
+
+SEC.1 produces a design; the build brief for sealing `shell.*` is written from
+it once the owner has approved the design. Every brief inherits `CLAUDE.md`;
+the prompts avoid backticks, double quotes and dollar signs.
+
+**SEC.1: design for sealing shell.* (design only)**
+```
+claude --cloud "Write the design for sealing shell.* from docs/BUILD-STATUS.md
+('Open items', item 2; requirement 14). Design only: change no Go code.
+FLAG FOR SECURITY REVIEW.
+Background: imas.sprouts.<id>.shell.start spawns a PTY from a plaintext
+request (internal/shell/sprout.go), so a compromised bus can get a shell on
+any Unix sprout, which undoes the sealing of cmd.run
+(internal/ingredients/cmd/sealed.go) and cook (internal/cook/sealed.go). Read
+docs/design/imas-payload-encryption-design.md and the sealed cmd.run and cook
+code first, and reuse internal/payloadbox purposes plus its replay and
+staleness rules.
+Settle these in the design: (1) who seals: the imas CLI holds no tenant key,
+so work out how an interactive session is carried (for example CLI to farmer
+over the authenticated API, then sealed frames from farmer to the sprout),
+compare at least two alternatives and recommend one; (2) a long-lived stream,
+not request and reply: per-session ID and key, per-frame sealing, a monotonic
+sequence number so frames cannot be replayed, reordered or silently dropped,
+and start, resize, data, close and idle timeout; (3) exactly what a
+compromised bus can still do (deny service, drop frames) and that it can no
+longer start a session or read or inject input or output; (4) rollout:
+sprouts with no box key, refusing plaintext shell once a sprout is box-ready
+as cmd.run does, and the Windows sprout (internal/shell/sprout_windows.go);
+(5) RBAC and audit: who may open a shell, whether transcripts are logged and
+with what redaction, and what a tenant key rotation does to a running
+session; (6) a short table of the other plaintext boundaries (cook step
+events, test.ping, facts, cancel, the boxkey.rotate trigger, log shipping)
+saying for each whether to seal it and why.
+Deliver: a new section in docs/design/imas-payload-encryption-design.md; the
+open questions listed at its end; and a proposed implementation brief (scope,
+tests, rollout order) in the PR description. Scope:
+docs/design/imas-payload-encryption-design.md and docs/BUILD-STATUS.md (Open
+items 2 only). PR: state what you decided, what you left open, and what you
+could not verify."
+```
+
+**SCALE.1: jittered sprout reconnect**
+```
+claude --cloud "Implement SCALE.1 from docs/BUILD-STATUS.md ('Open items',
+item 3) and docs/design/imas-1m-scale-plan.md (Phase 2, reconnect-storm
+hardening). The sprout (cmd/sprout/main.go) uses nats.MaxReconnects(-1) with a
+fixed 15 second ReconnectWait, so at 1M sprouts a bus restart is a thundering
+herd.
+Do: replace the fixed wait with nats.CustomReconnectDelay: exponential backoff
+from a base (default 2 seconds) to a cap (default 5 minutes) with full jitter
+(a random wait between 0 and the current ceiling), reset after a successful
+connection. Put the delay function in a small testable package (for example
+internal/natsretry) with an injectable random source. Make the base and cap
+config keys with those defaults: internal/config, a commented example in
+packaging/etc/imas-sprout.conf, and Ansible role variables as the busproxyurl
+work did. Mind the Molecule idempotence trap recorded in BUILD-STATUS (the
+Ansible and packaging row): only add overrides for keys the sprout writes back
+with defaults, never try to force them absent; the config key test in
+internal/config must still pass.
+Keep MaxReconnects at -1 and leave the rest of the bus connection unchanged
+(proxy dialer, TLS, JWT handling). Check how a reconnect interacts with the
+gateway JWT refresh path and an expired JWT, and say in the PR whether a
+reconnect with an expired JWT can loop or stall. Windows and Unix share this
+code: confirm both still cross-compile.
+Tests: delays stay within bounds for attempts 1 to 50 over many samples, never
+exceed the cap, grow on average and reset after success; and a test that 2000
+simulated sprouts spread their first retry across the base window (no more
+than 15 percent of them in any 10 percent slice). Report, but do not change,
+the fixed reconnect waits in cmd/farmer/main.go.
+Scope: cmd/sprout, internal/natsretry (new), internal/config,
+packaging/etc/imas-sprout.conf, ansible/roles/imas_sprout, ansible/README.md,
+docs/BUILD-STATUS.md (Open items 3 and the requirement 1 row only). Tests:
+go test ./... and the Molecule scenario if you can run it. PR: state what you
+built, what you deferred, and any open question."
+```
+
+**SCALE.2: cluster routes in farmerbus**
+```
+claude --cloud "Implement SCALE.2 from docs/BUILD-STATUS.md ('Open items',
+item 3) and docs/design/imas-1m-scale-plan.md (Phase 2): cluster routes in
+cmd/farmerbus so the bus can run as more than one node. FLAG FOR SECURITY
+REVIEW.
+Today cmd/farmerbus has no route support, so deploy/helm/nats refuses
+bus.replicaCount above 1 unless bus.cluster.routesSupported is set (see
+values.yaml and the chart README, Clustering). Read the chart, farmerbus
+main.go, the scale plan and docs/design/imas-nats-jwt-auth-design.md (the
+operator and account-per-tenant JWT model and the resolver push) first.
+Do: (1) read the IMAS_BUS_CLUSTER_* settings the chart names (cluster name,
+route port, routes) and configure the embedded nats-server cluster. (2) The
+route port must authenticate and encrypt: TLS with the same CA story as the
+client port plus cluster route credentials; no unauthenticated route
+listener. Route traffic must stay between bus pods: check the Service and
+NetworkPolicies, add a headless Service and a policy for the route port, and
+make sure the DMZ ingress side cannot reach it. (3) Work out how a tenant's
+account JWT, pushed by farmer, reaches every node of a cluster, and what
+happens to a tenant provisioned or locked out (deprovisioned) while a node is
+down or a route is partitioned. Document the answer, and make a lock-out fail
+closed: a locked-out account must not stay live on a node that missed the
+push. (4) Set routesSupported truthfully in the chart and keep the default
+replicaCount at 1. (5) Chart tests for the rendered workload, the headless
+Service and the policies.
+Tests: a Go test that starts three in-process bus nodes, connects a client to
+each with a valid sprout JWT, publishes on one and receives on another, stops
+a node and checks its clients reconnect to the others; and a test for the
+lock-out case. Do not claim any throughput or a 1M figure.
+Scope: cmd/farmerbus, internal/pki only if the resolver push needs it (say
+exactly why), deploy/helm/nats, docs/design/imas-1m-scale-plan.md (a status
+note), docs/BUILD-STATUS.md (Open items 3 and the requirement 1 and 7 rows
+only). Tests: go test ./... must pass. PR: state what you built, what you
+deferred, and any open question."
+```
+
+**LIC.1: fix go-licenses and settle the licence record**
+```
+claude --cloud "Implement LIC.1 from docs/BUILD-STATUS.md ('Open items', item
+5): fix the go-licenses workflow and settle the licence record. The save step
+in .github/workflows/go-licenses.yml has failed on main since glebarez/sqlite
+arrived, because go-licenses cannot identify the licence of
+modernc.org/mathutil, so dependencies/ has not been refreshed.
+Do: (1) reproduce it locally with the workflow's own commands, find out why
+(licence file name or text), and fix it without hiding it: pin go-licenses to
+a released version instead of latest, and handle the module by a supported
+means (an ignore or override explained in a comment, naming the licence the
+module really carries, which you confirm from its LICENSE file). (2)
+Regenerate dependencies/ so every module in the build is present; commit
+licence files, and source only for MPL-2.0 modules as before. (3) Add a table
+to DEPENDENCIES.md of every module whose licence is not Apache-2.0 or MIT
+(BSD-2, BSD-3, ISC, MPL-2.0 and anything else): module, licence, and which
+binaries link it (sprout, farmer, saasapi, farmerbus, fleetreleaser, migrate,
+imas CLI). CLAUDE.md says to flag any licence outside Apache-2.0, MIT and the
+recorded exceptions (Percona XtraDB Cluster, and MPL-2.0 generally), so list
+each such licence as an open question in the PR with a recommendation. Do not
+edit docs/design/requirements.md item 21 yourself. (4) Keep the check that
+fails on forbidden and restricted types, and add a pull request job that runs
+go-licenses check without saving, so a break is caught before main. (5) Make
+sure the workflow also triggers on go.sum changes.
+Scope: .github/workflows/go-licenses.yml, dependencies/, DEPENDENCIES.md,
+docs/BUILD-STATUS.md (Open items 5 and the requirement 21 row only). Tests:
+go test ./... must pass; show the go-licenses check output. PR: state what you
+built, what you deferred, and the licence questions."
+```
+
+**PKI.1: close the provision and deprovision race**
+```
+claude --cloud "Implement PKI.1 from docs/BUILD-STATUS.md ('Open items', item
+6): close the provision and deprovision race in internal/pki. FLAG FOR
+SECURITY REVIEW.
+Background: with the CL.3 outbox sweeper re-publishing a lost provision
+request, a late copy can still be running on one farmer replica while a
+deprovision of the same tenant runs on another, and push the tenant's live
+Account JWT after the locked-out one, leaving a deleted tenant live on the
+bus. Fix: ProvisionTenant re-checks the deleted state under tenantAuthMu after
+its resolver push and re-pushes the locked-out JWT if a deprovision won;
+DeprovisionTenant re-pushes the locked-out JWT even when the row is already
+deleted, so a retried deprovision repairs the bus. Note that tenantAuthMu is
+local to one process while the two copies run on different replicas: the
+re-check must read the deleted state from the database (the source of truth)
+after the push, and the PR must say what ordering guarantee that gives across
+replicas.
+Then remove saasapi's mitigation (DELETE /tenants/{id} returning 409
+provisioning_in_progress for SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER after a
+provision job that was published more than once), with its setting, tests and
+Helm value, but only if your tests prove the race closed; otherwise keep it
+and say why. Update 'Outbox re-dispatch sweeper' in
+docs/design/imas-internal-api-account.md.
+Tests: deterministic interleaving tests (hooks or channels, no sleeps) for
+both orders of provision and deprovision, including a retried deprovision of
+an already deleted tenant, run with -race; and a test with two pki instances
+sharing one database if the existing helpers allow it. Keep every table and
+map keyed on tenant_id and sprout_id together, never sprout_id alone.
+Scope: internal/pki, internal/saasapi, deploy/helm/farmer (only the stale
+after value, if the chart carries it), docs/design/imas-internal-api-account.md,
+docs/BUILD-STATUS.md (Open items 6 only). Tests: go test ./... must pass. PR:
+state what you built, what you deferred, and any open question."
+```
+
+**DOC.1: documentation fixes**
+```
+claude --cloud "Implement DOC.1 from docs/BUILD-STATUS.md ('Open items', item
+8 and the documentation bullets of item 10): documentation fixes only, no Go
+code. Check every claim you write against the code; do not describe behaviour
+you have not found.
+(1) docs/design/requirements.md item 15 says the new private key is sent
+encrypted over NATS. The built and designed behaviour (docs/design/
+imas-payload-encryption-design.md, Sprout-side rotation, farmer-triggered
+only) is that the sprout generates the new pair and submits only the public
+key. Reword the item to match, show the old and new wording side by side in
+the PR for the owner's approval, and change nothing else in requirements.md.
+(2) README.md: Batteries Included and any other prose that still describes a
+farmer with an embedded bus; match the DMZ farmerbus and core farmer split
+that Architecture already describes. (3) docs/INSTALL.md: add NO_PROXY notes.
+A sprout behind an environment proxy that reaches a customer Vault or OpenBao
+only directly needs that host in NO_PROXY (the sdb provider honours HTTPS_PROXY
+since CL.2b; busproxyurl is for the bus connection only). The platform's own
+OpenBao address may need NO_PROXY where a proxy is set for farmer, saasapi or
+fleetreleaser. Read internal/openbao and internal/ingredients/sdb/openbao
+first. (4) The Helm chart READMEs (deploy/helm/farmer, deploy/helm/nats and
+deploy/fleetreleaser if it has one): document the optional OpenBao NAMESPACE
+variables, which default to unset; take the real names from internal/openbao
+and docs/INSTALL.md. (5) docs/diagrams/imas-architecture.svg still shows
+fleet_signing_jwks and fleetsigningkeys, which CL.1 removed: edit the SVG
+source to remove them, render it to check it still reads correctly, and attach
+before and after images to the PR; fix docs-site/src too if it repeats them.
+(6) docs/claude-code-parallel-build-plan.md: fix anything that still calls the
+CL.1, CL.2a, CL.2b, CL.3 or REL.1 briefs unmerged.
+Scope: docs/, README.md, docs-site/, deploy/helm/*/README.md,
+deploy/fleetreleaser/README.md. PR: state what you changed, what you left, and
+anything you could not verify."
+```
+
+**REL.2: release pipeline leftovers and first-release checklist**
+```
+claude --cloud "Implement REL.2 from docs/BUILD-STATUS.md ('Open items', item
+10, release pipeline bullet): small fixes found in the REL.1 reviews, and a
+checklist for the first tag.
+(1) The before hooks in .goreleaser.yaml run go mod tidy, which rewrites go.mod
+on a clean checkout (it moves filippo.io/edwards25519 from indirect to direct),
+so the tree GoReleaser builds is not the commit. Commit the tidy go.mod and
+replace the hook with a check that fails if go mod tidy would change anything
+(run go mod tidy, then git diff --exit-code go.mod go.sum); add the same check
+to ci.yml if it is not already there. (2) Add to snapshot.yml the same
+fail-fast Check release secrets step that release.yml has, for GPG_PRIVATE_KEY
+and GPG_PASSPHRASE only. (3) Do NOT change signing behaviour. Whether snapshot
+runs should sign into the public Rekor log is an open question for the owner:
+write down the two options (keep signing, or use --skip=sign and rely on
+goreleaser-check.yml), their costs and your recommendation in the PR. (4) Read
+release.yml, publish-packages.yml and docs/RELEASING.md against each other
+once more for the first tag: the tag trigger, the environment name, secret and
+variable names, the checksums.txt name, the cosign identity regex, and the
+pre-release skip in publish-packages.yml (a pre-release tag such as
+v0.1.0-rc.1 publishes nothing to Buildkite unless workflow_dispatch is used).
+Fix any mismatch, and add a First release checklist to docs/RELEASING.md with
+exact steps and what to look for after each one. (5) If you can install
+GoReleaser OSS, run goreleaser check and the goreleaser-check.yml steps
+locally; say if you cannot.
+Scope: .goreleaser.yaml, go.mod, go.sum, .github/workflows/snapshot.yml,
+.github/workflows/ci.yml, release.yml and publish-packages.yml (comments and
+mismatches only), docs/RELEASING.md, docs/BUILD-STATUS.md (Open items 10,
+release pipeline bullet only). Tests: go test ./... must pass. PR: state what
+you built, what you deferred, and any open question."
+```
+
+**CL.4: dead code and test wiring left by CL.1 and CL.2b**
+```
+claude --cloud "Implement CL.4 from docs/BUILD-STATUS.md ('Open items', item
+10, enrollment and OpenBao client bullets): dead code and test wiring left by
+CL.1 and CL.2b.
+(1) internal/fleetsign: MarshalJWKS, ParseJWKS, JWKSHandler and their tests
+have no production caller since CL.1. Confirm that with a search across cmd,
+internal, tools and testing, then delete them; keep KeySetSource and anything
+still used. (2) The sprout's sdb OpenBao provider
+(internal/ingredients/sdb/openbao): an absent KV v2 secret falls back to KV v1,
+so the error can read permission denied instead of not found. Make the error
+say which paths were tried and what each returned, without secret values,
+tokens, or response bodies that are not OpenBao JSON (TestErrorsCarryNoSecrets
+must still pass), and keep the lookup order. (3) Wire TestRealServer (it needs
+IMAS_TEST_SDB_OPENBAO_ADDR, _TOKEN and _CACERT) into CI as a new workflow that
+starts an OpenBao dev server with TLS (a service container or a release binary
+from an allowed source, with a pinned version and checksum), creates the cert
+auth role and the KV mounts the test needs, and runs it. Test OpenBao only:
+recent HashiCorp Vault releases are not under a licence this project accepts
+by default, so do not add a Vault service to CI; say so in the PR. (4) Sprouts
+enrolled before CL.1 keep the unused Publish grant on
+imas.sprouts.<id>.fleetsigningkeys in their User JWT until it is re-minted:
+report whether a re-mint at the next refresh is cheap and safe, but do not
+implement it.
+Scope: internal/fleetsign, internal/ingredients/sdb/openbao,
+.github/workflows (one new file), docs/BUILD-STATUS.md (Open items 10, the
+enrollment and OpenBao client bullets only). Tests: go test ./... must pass.
+PR: state what you built, what you deferred, and any open question."
+```
+
+**SCALE.3: load and latency harness (after SCALE.1 and SCALE.2)**
+```
+claude --cloud "Implement SCALE.3 from docs/BUILD-STATUS.md ('Open items',
+item 3; requirements 1, 7 and 10): a load and latency harness, so those
+requirements can be measured. Build it as a Go tool (tools/loadtest, its own
+main package, no CGO, Apache-2.0 or MIT dependencies only) that opens N
+simulated sprout connections to a bus and: (a) holds them and reports connect
+rate and failures; (b) measures request and reply round trip on the lightest
+registered sprout subject, as p50, p95 and p99, against the 300 ms of
+requirement 10; (c) restarts a bus node (the whole bus when there is one
+node) mid-run and reports time to full reconnect and the peak reconnect rate,
+which is the Phase 2 exit criterion in docs/design/imas-1m-scale-plan.md; (d)
+reports bus and core memory and CPU from the metrics available. Decide how the
+simulated sprouts authenticate (real enrollment through POST /v1/enroll is
+heavy above about 10000 connections, so a documented fixture path that mints
+the same JWTs may be needed) and say what you chose and what it does not test.
+Add a smoke mode (N of 200) that runs in CI on pull requests touching the
+tool, finishes in under 3 minutes, and has generous documented thresholds.
+Write docs/loadtest.md: how to run at 10k and 100k, how to use several load
+generators, what resources are needed, and what the results do and do not
+prove. Do not run at 1M, and do not copy laptop numbers into BUILD-STATUS as
+validation: record only that the harness exists and what the smoke run showed.
+Scope: tools/loadtest (new), one new workflow file under .github/workflows,
+docs/loadtest.md, docs/BUILD-STATUS.md (Open items 3 only). Tests: go test
+./... must pass and the smoke mode must pass in CI. PR: state what you built,
+what you deferred, and any open question."
+```
+
+**SEC.2: read-only security review of the flagged work (last)**
+```
+claude --cloud "Do a read-only security review of the flagged work and record
+the findings. Change no code. This produces input for the human security
+review in docs/BUILD-STATUS.md ('Open items', item 4) and does not replace it.
+FLAG FOR SECURITY REVIEW.
+Review in this order, asking attack questions for each: FU.0, FU.2, FU.3 and
+FU.4 (manifest signing, the shipped keyring, the sprout install path); FU.6,
+FU.6b, FU.7 and CL.3 (dispatch, rollout gates, re-verification, resume); CL.1
+(enrollment); CL.2a and CL.2b (OpenBao client, proxy, redirects); PKI.1 and
+SCALE.2 if merged; the J follow-ups (sealed cmd.run and cook, tenant key
+rotation, box key submissions). For each, answer: what is trusted; what a
+compromised bus can do; what a hostile tenant can do; what a malicious
+update repository can do (a sprout installs from its configured repository,
+never from an imas URL); whether every map, table, index and cache is keyed on
+tenant_id and sprout_id together; whether secrets can reach logs, errors or
+job results; and where a failure opens instead of closing.
+Write docs/security-review-2026-10.md: findings ranked by severity, each with
+file and line, a concrete failure scenario and a proposed fix, and a clear
+mark on anything you could not confirm. Do not repeat gaps BUILD-STATUS
+already lists except to rank them. Scope: docs/security-review-2026-10.md
+(new) and docs/BUILD-STATUS.md (Open items 4 only). PR: describe the findings
+as ready for review, not as a clean bill of health."
+```
+
 ## 5. Orchestrator prompt — paste into one lead Claude Code session
 
 Use this if you'd rather have Claude dispatch and track Wave 0 for you
