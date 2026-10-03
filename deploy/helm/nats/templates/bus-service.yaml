@@ -26,8 +26,12 @@ spec:
       targetPort: websocket
       protocol: TCP
 ---
-# Headless Service: stable per-pod DNS for the StatefulSet (and, when
-# clustered, for the NATS routes between bus nodes).
+# Headless Service: the StatefulSet's governing Service, so every pod gets
+# a stable <pod>.<this>.<ns>.svc name. Clustered nodes dial each other's
+# route port by those names (IMAS_BUS_CLUSTER_ROUTES) and the bus cert
+# carries them. It allocates no virtual IP and is never a client entry
+# point: core and Envoy use the client Service above, which has no route
+# port. Who may reach the route port is the "-routes" NetworkPolicy's job.
 apiVersion: v1
 kind: Service
 metadata:
