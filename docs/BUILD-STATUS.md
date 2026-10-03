@@ -386,7 +386,12 @@ honours `HTTP(S)_PROXY`/`NO_PROXY` (`ProxyFromEnvironment`), which it did
 not before; errors no longer quote a response body that isn't OpenBao's JSON
 (a proxy error page could echo the request and its token); a 403 drops the
 cached token so the next read logs in again; a number in a secret reads back
-as written (`1.0` stays `1.0`). Tested against OpenBao 2.4.1 and HashiCorp
+as written (`1.0` stays `1.0`); the client follows one redirect, never
+https to http, where `net/http` had followed up to ten. Decided on review
+(2026-10-03): the environment proxy is always respected and is assumed to
+allow every URL a sprout needs (cloud metadata included); `busproxyurl` is
+for the bus connection only; the single redirect stays, as the Vault CLI
+does. Tested against OpenBao 2.4.1 and HashiCorp
 Vault 1.20.4 dev servers on TLS (cert auth, KV v2 and v1, a client
 certificate rotated under the running provider);
 `TestRealServer` in that package runs it when `IMAS_TEST_SDB_OPENBAO_*` is
