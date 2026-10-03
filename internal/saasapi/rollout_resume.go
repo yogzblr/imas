@@ -45,6 +45,7 @@ var neverSentCodes = map[string]bool{
 	errCodeApprovalWithdrawn:     true,
 	errCodeVersionRevoked:        true,
 	errCodeNotDelivered:          true,
+	errCodeTenantNotActive:       true,
 }
 
 // wasSent reports whether it was ever handed to farmer. An item sent by
@@ -75,14 +76,30 @@ func dispatchTimeOf(it AssetActionItem) time.Time {
 	return it.UpdatedAt
 }
 
+// tenantIsActive reports whether tenantID's status is active.
+func tenantIsActive(d *gorm.DB, tenantID string) (bool, error) {
+	var n int64
+	err := d.Model(&Tenant{}).Where("id = ? AND status = ?", tenantID, TenantStatusActive).Count(&n).Error
+	return n > 0, err
+}
+
 // rolloutRegistrationCheck is a resumed rollout's extra check before each
-// wave: the target version still has catalog rows, every one of them
-// verifies against the fleet signing key (selfUpdateParams), and they
-// still build exactly the params the batch was created with. Revocation
-// and the tenant's policy are rolloutPolicyCheck's. It returns "" to go
-// ahead, rollout_halted if the version fails a check, or internal_error if
-// the catalog can't be read.
+// wave: the tenant is still active (the POST required it; it may have
+// started offboarding since), the target version still has catalog rows,
+// every one of them verifies against the fleet signing key
+// (selfUpdateParams), and they still build exactly the params the batch
+// was created with. Revocation and the tenant's policy are
+// rolloutPolicyCheck's. It returns "" to go ahead, tenant_not_active or
+// rollout_halted if a check fails, or internal_error if the tenant or the
+// catalog can't be read.
 func rolloutRegistrationCheck(d *gorm.DB, batch AssetActionBatch, version string) string {
+	if active, err := tenantIsActive(d, batch.TenantID); err != nil {
+		log.Errorf("saasapi: update batch %s (tenant %s): reading the tenant: %v; halting", batch.ID, batch.TenantID, err)
+		return string(controlplane.ErrorInternal)
+	} else if !active {
+		log.Warnf("saasapi: update batch %s (tenant %s): the tenant is no longer active; halting", batch.ID, batch.TenantID)
+		return errCodeTenantNotActive
+	}
 	var rows []FleetVersion
 	if err := d.Where("version = ?", version).Order("os").Order("arch").Order("package_type").Find(&rows).Error; err != nil {
 		log.Errorf("saasapi: update batch %s (tenant %s): reading the catalog rows of %s: %v; halting", batch.ID, batch.TenantID, version, err)

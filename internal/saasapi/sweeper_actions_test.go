@@ -267,3 +267,31 @@ func TestDispatchBatch_StopsWhenLeaseLost(t *testing.T) {
 		t.Fatalf("a dispatcher without its lease sent %d requests", len(reqs))
 	}
 }
+
+// A batch whose tenant has started offboarding since it was accepted gets
+// nothing more sent: its queued items fail with tenant_not_active.
+func TestSweepActionBatches_TenantNoLongerActive(t *testing.T) {
+	gdb := newTestDBWithFarmer(t)
+	clearOutbox(t, gdb)
+	clock := useTestClock(t)
+	tid := mustCreateActiveTenant(t, gdb)
+	assets := mustActionFleet(t, gdb, tid, 2)
+	SetBus(nil)
+	_, resp := postActions(t, tid, map[string]any{"asset_ids": assets, "action": cmdAction("uptime")})
+	actionDispatches.Wait()
+	gdb.Model(&Tenant{}).Where("id = ?", tid).Update("status", TenantStatusOffboarding)
+
+	ns := startTestBus(t)
+	nc := connectSaaSBus(t, ns)
+	farmer := startFakeFarmer(t, ns, completingFarmer)
+	clock.Advance(time.Hour)
+	sweepConcurrently(testSweeper(gdb, nc))
+	if reqs, _ := farmer.seen(); len(reqs) != 0 {
+		t.Fatalf("sent %d requests for an offboarding tenant", len(reqs))
+	}
+	for _, it := range batchItems(t, gdb, resp["batch_id"].(string)) {
+		if it.Status != ActionItemFailed || it.ErrorCode != errCodeTenantNotActive || it.Attempts != 0 {
+			t.Fatalf("item = %+v", it)
+		}
+	}
+}

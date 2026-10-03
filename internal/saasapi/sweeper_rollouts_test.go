@@ -233,6 +233,9 @@ func TestSweepRollouts_RecheckedBeforeResumedWave(t *testing.T) {
 			mustPublishVersion(t, f.gdb, "v2.5.0", time.Now())
 			mustApprove(t, f.gdb, f.tid, "v2.5.0")
 		}, errCodeApprovalWithdrawn},
+		{"tenant offboarding", func(f rolloutFixture) {
+			f.gdb.Model(&Tenant{}).Where("id = ?", f.tid).Update("status", TenantStatusOffboarding)
+		}, errCodeTenantNotActive},
 		{"no longer registered", func(f rolloutFixture) {
 			f.gdb.Where("version = ?", "v2.4.1").Delete(&FleetVersion{})
 		}, errCodeRolloutHalted},

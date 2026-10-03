@@ -198,7 +198,8 @@ func (sw *sweeper) sweep() {
 //
 // A due item that has already been dispatched SAASAPI_OUTBOX_MAX_ATTEMPTS
 // times (each time back to queued: no farmer was listening) is failed with
-// dispatch_not_delivered instead.
+// dispatch_not_delivered instead. If the batch's tenant is no longer
+// active, its due items are failed with tenant_not_active, unsent.
 func (sw *sweeper) sweepActionBatches() {
 	now := dbTime(outboxNow())
 	type ref struct{ BatchID, TenantID string }
@@ -256,6 +257,23 @@ func (sw *sweeper) redispatchBatch(batchID, tenantID string, now time.Time) {
 	}
 	if lease == nil {
 		return // another replica has it, or its dispatcher renewed in time
+	}
+	// The POST required an active tenant. One that has since started
+	// offboarding gets nothing more sent: its due items fail unsent.
+	active, err := tenantIsActive(sw.d, batch.TenantID)
+	if err != nil {
+		log.Errorf("saasapi: outbox sweep: reading tenant %s of batch %s: %v", batch.TenantID, batch.ID, err)
+		return
+	}
+	if !active {
+		for _, it := range append(due, exhausted...) {
+			if _, err := updateItem(sw.d, it, ActionItemQueued, failedUpdate(errCodeTenantNotActive)); err != nil {
+				log.Errorf("saasapi: outbox sweep: failing batch %s asset %s: %v", batch.ID, it.AssetID, err)
+			}
+		}
+		log.Warnf("saasapi: outbox sweep: tenant %s is no longer active; failed %d queued items of batch %s unsent",
+			batch.TenantID, len(due)+len(exhausted), batch.ID)
+		return
 	}
 	for _, it := range exhausted {
 		if ok, err := updateItem(sw.d, it, ActionItemQueued, failedUpdate(errCodeNotDelivered)); err != nil {

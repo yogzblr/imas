@@ -130,6 +130,10 @@ const (
 	// attempt the outbox sweeper allows (SAASAPI_OUTBOX_MAX_ATTEMPTS). A
 	// queued item never reached farmer, so the action did not run.
 	errCodeNotDelivered = "dispatch_not_delivered"
+	// errCodeTenantNotActive: the outbox sweeper found the batch's tenant
+	// no longer active (offboarding, say) when the item was due to be sent
+	// again, so it was failed unsent.
+	errCodeTenantNotActive = "tenant_not_active"
 )
 
 // actionErrorMessages is the only text ever shown for an item's error
@@ -149,6 +153,7 @@ var actionErrorMessages = map[string]string{
 	errCodeJobExpired:             "the sprout started the job too long after it was sent, so its result was not recorded; it may still have run",
 	errCodeDispatchOutcomeUnknown: "no reply was received for the action; it may or may not have run",
 	errCodeNotDelivered:           "the action could not be delivered after repeated attempts, so it was not run",
+	errCodeTenantNotActive:        "the tenant was no longer active when the action was due to be sent, so it was not sent",
 
 	// Fleet update rollouts (fleet_update_dispatch.go).
 	errCodeRolloutHalted:           "an earlier wave of this rollout did not fully succeed, so the update was not sent to this sprout",
