@@ -9,7 +9,9 @@
 //
 // The response shapes match captured real OpenBao responses (see
 // internal/gatewayjwt/testdata): an Ed25519 public_key is standard base64
-// of the raw 32 bytes, and a signature is "vault:v1:<base64>".
+// of the raw 32 bytes, and a signature is "vault:v1:<base64>". The
+// signer reaches it through internal/openbao like a real server: the mock
+// only checks the X-Vault-Token the official client sends.
 package transittest
 
 import (
