@@ -36,7 +36,6 @@ package openbao
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
@@ -219,7 +218,9 @@ func NewFromEnv(env Env, errs Errors) (*Client, error) {
 		if !pool.AppendCertsFromPEM(pemBytes) {
 			return nil, fmt.Errorf("no certificates found in OpenBao CA bundle %s", caFile)
 		}
-		cfg.HttpClient.Transport.(*http.Transport).TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+		// Only RootCAs: NewConfig's TLS config already has MinVersion
+		// TLS 1.2 and the HTTP/2 ALPN protocols.
+		cfg.HttpClient.Transport.(*http.Transport).TLSClientConfig.RootCAs = pool
 	}
 
 	client, err := api.NewClient(cfg)

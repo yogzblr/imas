@@ -165,9 +165,13 @@ func TestNewFromEnv_CACert(t *testing.T) {
 // checked against: the stub's certificate is refused without it and
 // accepted with it.
 func TestCACertVerifiesTLS(t *testing.T) {
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var proto atomic.Value
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proto.Store(r.Proto)
 		w.Write([]byte(`{"data":{"ok":true}}`))
 	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
 	defer srv.Close()
 
 	setTokenEnv(t, srv.URL, "tok")
@@ -195,6 +199,9 @@ func TestCACertVerifiesTLS(t *testing.T) {
 	}
 	if secret.Data["ok"] != true {
 		t.Fatalf("unexpected data %v", secret.Data)
+	}
+	if p, _ := proto.Load().(string); p != "HTTP/2.0" {
+		t.Errorf("negotiated %q; the CA bundle must keep NewConfig's TLS settings (HTTP/2 ALPN)", p)
 	}
 }
 
