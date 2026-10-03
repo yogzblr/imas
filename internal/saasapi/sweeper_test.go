@@ -381,38 +381,22 @@ func TestSweep_SkipsWithoutBus(t *testing.T) {
 	}
 }
 
-// DELETE waits out a provision job the sweeper re-published, since farmer
-// may still be running an earlier copy; a job published once doesn't hold
-// it up.
-func TestDeleteTenant_WaitsOutRepublishedProvisionJob(t *testing.T) {
+// DELETE doesn't wait out a provision job the sweeper re-published: a
+// copy still running on farmer can no longer leave the tenant live on the
+// bus (internal/pki's TestProvisionDeprovisionRace_* tests), so offboarding
+// goes ahead at once, however recently the job was last published.
+func TestDeleteTenant_DoesNotWaitOutRepublishedProvisionJob(t *testing.T) {
 	gdb := newTestDB(t)
 	clearOutbox(t, gdb)
 	clock := useTestClock(t)
 	SetBus(nil)
-	del := func(tenantID string) int {
-		return doRequest(t, DeleteTenant, "DELETE", "/v1/tenants/"+tenantID, map[string]string{"tenant_id": tenantID}, nil).Code
+	tenant, job := seedTenantAndJob(t, gdb, TenantStatusActive, ProvisioningJobProvision)
+	if err := gdb.Model(&ProvisioningJob{}).Where("id = ?", job.ID).Updates(map[string]any{
+		"status": ProvisioningJobSucceeded, "attempts": 3, "last_dispatched_at": dbTime(clock.Now())}).Error; err != nil {
+		t.Fatal(err)
 	}
-	seed := func(attempts int) string {
-		tenant, job := seedTenantAndJob(t, gdb, TenantStatusActive, ProvisioningJobProvision)
-		last := dbTime(clock.Now())
-		if err := gdb.Model(&ProvisioningJob{}).Where("id = ?", job.ID).Updates(map[string]any{
-			"status": ProvisioningJobSucceeded, "attempts": attempts, "last_dispatched_at": last}).Error; err != nil {
-			t.Fatal(err)
-		}
-		return tenant.ID
-	}
-
-	once := seed(1)
-	if code := del(once); code != 202 {
-		t.Fatalf("DELETE after a single publish: %d", code)
-	}
-	twice := seed(2)
-	if code := del(twice); code != 409 {
-		t.Fatalf("DELETE right after a re-publish: %d, want 409", code)
-	}
-	clock.Advance(defaultProvisioningStaleAfter + time.Millisecond)
-	if code := del(twice); code != 202 {
-		t.Fatalf("DELETE after the stale threshold: %d", code)
+	if code := doRequest(t, DeleteTenant, "DELETE", "/v1/tenants/"+tenant.ID, map[string]string{"tenant_id": tenant.ID}, nil).Code; code != 202 {
+		t.Fatalf("DELETE right after a re-publish: %d, want 202", code)
 	}
 }
 
