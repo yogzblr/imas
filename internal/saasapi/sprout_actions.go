@@ -126,6 +126,10 @@ const (
 	// have), but no usable reply came back — it timed out, or the reply
 	// was unreadable. The action may or may not have run.
 	errCodeDispatchOutcomeUnknown = "dispatch_outcome_unknown"
+	// errCodeNotDelivered: the item stayed queued through every dispatch
+	// attempt the outbox sweeper allows (SAASAPI_OUTBOX_MAX_ATTEMPTS). A
+	// queued item never reached farmer, so the action did not run.
+	errCodeNotDelivered = "dispatch_not_delivered"
 )
 
 // actionErrorMessages is the only text ever shown for an item's error
@@ -144,6 +148,7 @@ var actionErrorMessages = map[string]string{
 	errCodeJobFailed:              "the job finished unsuccessfully",
 	errCodeJobExpired:             "the sprout started the job too long after it was sent, so its result was not recorded; it may still have run",
 	errCodeDispatchOutcomeUnknown: "no reply was received for the action; it may or may not have run",
+	errCodeNotDelivered:           "the action could not be delivered after repeated attempts, so it was not run",
 
 	// Fleet update rollouts (fleet_update_dispatch.go).
 	errCodeRolloutHalted:           "an earlier wave of this rollout did not fully succeed, so the update was not sent to this sprout",
@@ -267,7 +272,9 @@ type actionItemResponse struct {
 // asset_id §1.4's join doesn't resolve, `failed`/sprout_not_accepted for
 // one resolving to a sprout whose key isn't accepted, `queued` for the
 // rest. Only after the commit is the 202 sent and the queued items handed
-// to dispatchBatch, which runs in the background.
+// to dispatchBatch, which runs in the background under the batch's lease.
+// If this process dies first, or has no bus, the outbox sweeper of any
+// replica re-dispatches the items still queued (sweepActionBatches).
 //
 // Rate-limited per tenant (see router.go): every call can trigger up to
 // maxAssetIDsPerLookup executions and writes as many rows.
@@ -584,9 +591,11 @@ func createActionBatch(tenantID string, assetIDs []string, action controlplane.S
 	}, assetIDs, resolved, nil, nil)
 }
 
-// createBatch writes batch (its ID and RequestedAssetIDs are filled in
-// here) and one item per asset_id in one transaction, and returns the
-// queued items in request order. blocked maps a resolved, accepted
+// createBatch writes batch (its ID, RequestedAssetIDs and lease are filled
+// in here) and one item per asset_id in one transaction, and returns the
+// queued items in request order. The batch is written already leased to
+// this process for outboxSettings.LeaseTTL (outbox_lease.go), so the
+// sweeper leaves it alone while this process dispatches it. blocked maps a resolved, accepted
 // sprout to the error code its item fails with instead of being queued.
 // claim, if set, runs first inside the same transaction; an error from it
 // rolls everything back and is returned as is.
@@ -600,8 +609,14 @@ func createBatch(batch AssetActionBatch, assetIDs []string, resolved []sproutByA
 	if err != nil {
 		return AssetActionBatch{}, nil, err
 	}
+	token, err := newLeaseToken()
+	if err != nil {
+		return AssetActionBatch{}, nil, err
+	}
+	until := dbTime(outboxNow()).Add(outboxSettings.LeaseTTL)
 	batch.ID = id
 	batch.RequestedAssetIDs = string(requested)
+	batch.LeaseOwner, batch.LeaseUntil = token, &until
 	tenantID := batch.TenantID
 
 	byAsset := make(map[string]sproutByAssetItem, len(resolved))
@@ -667,8 +682,9 @@ var (
 )
 
 // startBatchDispatch sends a new batch's queued items to farmer in the
-// background. The database and bus handles are captured now, so the
-// goroutine never sees them change under it.
+// background, renewing the lease createBatch wrote while it does. The
+// database and bus handles are captured now, so the goroutine never sees
+// them change under it.
 func startBatchDispatch(batch AssetActionBatch, items []AssetActionItem) {
 	if len(items) == 0 {
 		return
@@ -677,19 +693,24 @@ func startBatchDispatch(batch AssetActionBatch, items []AssetActionItem) {
 	actionDispatches.Add(1)
 	go func() {
 		defer actionDispatches.Done()
-		dispatchBatch(d, nc, batch, items)
+		lease := batchLeaseOf(d, batch)
+		lease.keepAlive()
+		defer lease.stopKeepAlive()
+		dispatchBatch(d, nc, batch, items, lease)
 	}()
 }
 
 // dispatchBatch sends one internal.sprout.action request per item, at most
 // maxConcurrentActionDispatches at a time process-wide, and returns once
-// every item has been answered or given up on.
+// every item has been answered or given up on. It stops starting new items
+// once lease (the batch's, nil for none) is no longer held: whoever took it
+// over sends the rest.
 //
 // With no bus connection, every item stays queued and nothing is sent —
-// the same as publishProvisioningJob leaves a job pending. Re-dispatching
-// queued items is the outbox sweeper's job, deferred for this table as for
-// provisioning_jobs (see docs/design/imas-internal-api-account.md).
-func dispatchBatch(d *gorm.DB, nc *nats.Conn, batch AssetActionBatch, items []AssetActionItem) {
+// the same as publishProvisioningJob leaves a job pending. The outbox
+// sweeper re-dispatches queued items once the batch's lease has lapsed
+// (sweepActionBatches).
+func dispatchBatch(d *gorm.DB, nc *nats.Conn, batch AssetActionBatch, items []AssetActionItem, lease *rowLease) {
 	if nc == nil {
 		log.Errorf("saasapi: not connected to the NATS bus; action batch %s (tenant %s) left queued", batch.ID, batch.TenantID)
 		return
@@ -697,6 +718,12 @@ func dispatchBatch(d *gorm.DB, nc *nats.Conn, batch AssetActionBatch, items []As
 	var wg sync.WaitGroup
 	for _, item := range items {
 		actionDispatchSlots <- struct{}{}
+		if !lease.held() {
+			<-actionDispatchSlots
+			log.Warnf("saasapi: no longer holding the lease on action batch %s (tenant %s); leaving its remaining items queued",
+				batch.ID, batch.TenantID)
+			break
+		}
 		wg.Add(1)
 		go func(item AssetActionItem) {
 			defer wg.Done()
@@ -740,11 +767,12 @@ func updateItem(d *gorm.DB, item AssetActionItem, from AssetActionItemStatus, up
 // records the outcome.
 //
 // The item is claimed first by moving it queued -> dispatching (counting
-// the attempt); if that doesn't apply, someone else already owns it and
-// nothing is sent. From then on:
+// the attempt and recording dispatched_at); if that doesn't apply, someone
+// else already owns it and nothing is sent. From then on:
 //
 //   - no responders: no farmer was subscribed, so the request provably
-//     went nowhere — back to queued, safe to send again.
+//     went nowhere — back to queued, safe to send again, with
+//     dispatched_at cleared (it was never delivered).
 //   - any other request error (timeout, connection lost mid-request), an
 //     unreadable reply, or one naming a different tenant or sprout:
 //     failed/dispatch_outcome_unknown. The action may have run, so the
@@ -763,8 +791,9 @@ func dispatchItem(d *gorm.DB, nc *nats.Conn, batch AssetActionBatch, item AssetA
 	}
 
 	claimed, err := updateItem(d, item, ActionItemQueued, map[string]any{
-		"status":   ActionItemDispatching,
-		"attempts": gorm.Expr("attempts + 1"),
+		"status":        ActionItemDispatching,
+		"attempts":      gorm.Expr("attempts + 1"),
+		"dispatched_at": dbTime(rolloutNow()),
 	})
 	if err != nil || !claimed {
 		if err != nil {
@@ -781,7 +810,7 @@ func dispatchItem(d *gorm.DB, nc *nats.Conn, batch AssetActionBatch, item AssetA
 	switch {
 	case errors.Is(err, nats.ErrNoResponders):
 		log.Errorf("saasapi: no farmer subscribed to %s; batch %s asset %s left queued", controlplane.SubjectSproutAction, batch.ID, item.AssetID)
-		update = map[string]any{"status": ActionItemQueued}
+		update = map[string]any{"status": ActionItemQueued, "dispatched_at": nil}
 	case err != nil:
 		log.Errorf("saasapi: %s for batch %s asset %s (tenant %s, sprout %s) got no reply: %v — outcome unknown",
 			controlplane.SubjectSproutAction, batch.ID, item.AssetID, batch.TenantID, item.SproutID, err)

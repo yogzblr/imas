@@ -32,6 +32,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"gorm.io/gorm"
 
+	"github.com/yogzblr/imas/internal/controlplane"
 	log "github.com/yogzblr/imas/internal/log"
 )
 
@@ -175,4 +176,103 @@ func (sw *sweeper) sweep() {
 		return
 	}
 	sw.sweepProvisioningJobs()
+	sw.sweepActionBatches()
+}
+
+// sweepActionBatches is the outbox sweeper's §1.5 job. It finds batches
+// (not update rollouts: sweepRollouts resumes those) with queued items
+// whose lease has lapsed or was never set, and for each one whose queued
+// items include one due again (backoff from the item's last change,
+// counting its attempts), claims the batch's lease and dispatches the due
+// items in the background under it, from the batch's stored action_params,
+// exactly as the original dispatch would have (dispatchBatch).
+//
+// Only queued items are ever sent: a queued item has provably never
+// reached farmer. An item in dispatching was sent, and is left exactly as
+// it is, however long it has been there: cmd.run isn't idempotent, so
+// re-sending one could run a command twice. dispatchItem's queued ->
+// dispatching claim still guards every send, so even a live dispatcher
+// that outlived its lease can't send an item the sweeper also sends.
+//
+// A due item that has already been dispatched SAASAPI_OUTBOX_MAX_ATTEMPTS
+// times (each time back to queued: no farmer was listening) is failed with
+// dispatch_not_delivered instead.
+func (sw *sweeper) sweepActionBatches() {
+	now := dbTime(outboxNow())
+	type ref struct{ BatchID, TenantID string }
+	var refs []ref
+	if err := sw.d.Table(AssetActionItem{}.TableName()+" AS i").
+		Joins("JOIN "+AssetActionBatch{}.TableName()+" AS b ON b.id = i.batch_id AND b.tenant_id = i.tenant_id").
+		Where("i.status = ? AND i.updated_at <= ? AND b.action_type <> ?",
+			ActionItemQueued, now.Add(-sw.s.ActionStaleAfter), controlplane.ActionSelfUpdate).
+		Where("(b.lease_until IS NULL OR b.lease_until < ?)", now).
+		Distinct("i.batch_id", "i.tenant_id").Order("i.batch_id").Limit(sweepBatchLimit).
+		Scan(&refs).Error; err != nil {
+		log.Errorf("saasapi: outbox sweep: finding queued action items: %v", err)
+		return
+	}
+	for _, r := range refs {
+		sw.redispatchBatch(r.BatchID, r.TenantID, now)
+	}
+}
+
+// redispatchBatch is sweepActionBatches for one batch.
+func (sw *sweeper) redispatchBatch(batchID, tenantID string, now time.Time) {
+	var batch AssetActionBatch
+	if err := sw.d.Where("id = ? AND tenant_id = ?", batchID, tenantID).First(&batch).Error; err != nil {
+		log.Errorf("saasapi: outbox sweep: reading action batch %s (tenant %s): %v", batchID, tenantID, err)
+		return
+	}
+	if batch.ActionType == controlplane.ActionSelfUpdate {
+		return
+	}
+	var queued []AssetActionItem
+	if err := sw.d.Where("batch_id = ? AND tenant_id = ? AND status = ?", batch.ID, batch.TenantID, ActionItemQueued).
+		Order("position").Find(&queued).Error; err != nil {
+		log.Errorf("saasapi: outbox sweep: reading queued items of batch %s (tenant %s): %v", batch.ID, batch.TenantID, err)
+		return
+	}
+	var due, exhausted []AssetActionItem
+	for _, it := range queued {
+		if now.Before(it.UpdatedAt.Add(backoff(sw.s.ActionStaleAfter, it.Attempts))) {
+			continue
+		}
+		if it.Attempts >= sw.s.MaxAttempts {
+			exhausted = append(exhausted, it)
+		} else {
+			due = append(due, it)
+		}
+	}
+	if len(due) == 0 && len(exhausted) == 0 {
+		return
+	}
+	lease, err := claimRowLease(sw.d, batch.TableName(), batchLeaseKey, []any{batch.ID, batch.TenantID},
+		"action_type <> ?", []any{controlplane.ActionSelfUpdate}, nil, sw.s.LeaseTTL)
+	if err != nil {
+		log.Errorf("saasapi: outbox sweep: claiming action batch %s (tenant %s): %v", batch.ID, batch.TenantID, err)
+		return
+	}
+	if lease == nil {
+		return // another replica has it, or its dispatcher renewed in time
+	}
+	for _, it := range exhausted {
+		if ok, err := updateItem(sw.d, it, ActionItemQueued, failedUpdate(errCodeNotDelivered)); err != nil {
+			log.Errorf("saasapi: outbox sweep: failing batch %s asset %s: %v", batch.ID, it.AssetID, err)
+		} else if ok {
+			log.Warnf("saasapi: outbox sweep: batch %s (tenant %s) asset %s was never delivered in %d attempts; failed with %s",
+				batch.ID, batch.TenantID, it.AssetID, it.Attempts, errCodeNotDelivered)
+		}
+	}
+	if len(due) == 0 {
+		return
+	}
+	log.Warnf("saasapi: outbox sweep: re-dispatching %d queued items of action batch %s (tenant %s, %s)",
+		len(due), batch.ID, batch.TenantID, batch.ActionType)
+	actionDispatches.Add(1)
+	go func() {
+		defer actionDispatches.Done()
+		lease.keepAlive()
+		defer lease.stopKeepAlive()
+		dispatchBatch(sw.d, sw.nc, batch, due, lease)
+	}()
 }

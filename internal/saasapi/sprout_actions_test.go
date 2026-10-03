@@ -628,8 +628,8 @@ func TestDispatchItem_OnlySendsQueuedItems(t *testing.T) {
 	if err != nil || len(queued) != 1 {
 		t.Fatalf("createActionBatch: %v, %d queued", err, len(queued))
 	}
-	dispatchBatch(gdb, nc, batch, queued)
-	dispatchBatch(gdb, nc, batch, queued)
+	dispatchBatch(gdb, nc, batch, queued, nil)
+	dispatchBatch(gdb, nc, batch, queued, nil)
 	if reqs, _ := farmer.seen(); len(reqs) != 1 {
 		t.Fatalf("farmer got %d requests, want 1", len(reqs))
 	}

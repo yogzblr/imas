@@ -13,6 +13,8 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -23,6 +25,7 @@ import (
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 
+	"github.com/yogzblr/imas/internal/controlplane"
 	"github.com/yogzblr/imas/internal/migrations"
 )
 
@@ -172,5 +175,51 @@ func TestMySQLSweepProvisioningJobs_TwoReplicas(t *testing.T) {
 	var stored ProvisioningJob
 	if err := g2.First(&stored, "id = ?", job.ID).Error; err != nil || stored.Attempts != 3 || stored.LastDispatchedAt == nil {
 		t.Fatalf("stored job %+v, %v", stored, err)
+	}
+}
+
+// The action batch crash case on MySQL, with two replicas' sweepers on
+// separate connection pools sweeping repeatedly: every queued item is
+// sent exactly once, and a dispatching item never.
+func TestMySQLSweepActionBatches_TwoReplicas(t *testing.T) {
+	g1, g2 := newMySQLSaasSchema(t)
+	clock := useTestClock(t)
+	ns := startTestBus(t)
+	nc := connectSaaSBus(t, ns)
+	farmer := startFakeFarmer(t, ns, completingFarmer)
+
+	params, _ := json.Marshal(farmerCmdRun{Command: "uptime", Timeout: time.Minute})
+	expired := dbTime(clock.Now().Add(-time.Minute))
+	batch := AssetActionBatch{ID: "b_mysql_sweep", TenantID: "t_mysql", ActionType: controlplane.ActionCmdRun,
+		ActionParams: string(params), RequestedAssetIDs: "[]", LeaseOwner: "dead-pod/x", LeaseUntil: &expired}
+	if err := g1.Create(&batch).Error; err != nil {
+		t.Fatal(err)
+	}
+	sent := dbTime(clock.Now().Add(-time.Hour))
+	items := []AssetActionItem{{BatchID: batch.ID, AssetID: "stuck", TenantID: batch.TenantID, SproutID: "web-stuck",
+		Status: ActionItemDispatching, Attempts: 1, DispatchedAt: &sent}}
+	for i := range 8 {
+		items = append(items, AssetActionItem{BatchID: batch.ID, AssetID: fmt.Sprintf("q%d", i), TenantID: batch.TenantID,
+			Position: i + 1, SproutID: fmt.Sprintf("web-%d", i), Status: ActionItemQueued})
+	}
+	if err := g1.Create(&items).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	clock.Advance(time.Hour)
+	a, b := testSweeper(g1, nc), testSweeper(g2, nc)
+	sweepConcurrently(a, b, a, b, a, b)
+	sends := sendsPerSprout(farmer)
+	if len(sends) != 8 || sends[SproutRef{TenantID: batch.TenantID, SproutID: "web-stuck"}] != 0 {
+		t.Fatalf("sends = %v", sends)
+	}
+	for ref, n := range sends {
+		if n != 1 {
+			t.Fatalf("%v sent %d times", ref, n)
+		}
+	}
+	var stuck AssetActionItem
+	if err := g2.First(&stuck, "batch_id = ? AND asset_id = ?", batch.ID, "stuck").Error; err != nil || stuck.Status != ActionItemDispatching {
+		t.Fatalf("dispatching item = %+v, %v", stuck, err)
 	}
 }
