@@ -3,32 +3,21 @@
 // config.CertFile/KeyFile/RootCA paths that internal/pki/nats.go and the
 // API server already consume.
 //
-// The official OpenBao/Vault Go client (github.com/openbao/openbao/api,
-// github.com/hashicorp/vault/api) is MPL-2.0 licensed, which conflicts with
-// this repo's Apache-2.0/MIT-only dependency constraint (see CLAUDE.md).
-// This package therefore talks to OpenBao's HTTP API directly with
-// net/http, following the same approach already taken by
-// internal/ingredients/sdb/openbao.
-//
-// Authentication to OpenBao is pluggable via IMAS_CERTS_OPENBAO_AUTH_METHOD:
+// The client is internal/openbao (the official OpenBao Go client), which
+// owns auth, TLS and error decoding for every server-side OpenBao
+// identity. Authentication is pluggable via IMAS_CERTS_OPENBAO_AUTH_METHOD:
 // a static bearer token (the default, IMAS_CERTS_OPENBAO_TOKEN) or OpenBao's
 // native "kubernetes" auth method, which logs in with the pod's own service
-// account JWT and needs no long-lived secret placed in the environment. See
-// newClientFromEnv and (*obClient).k8sLoginLocked.
+// account JWT and needs no long-lived secret placed in the environment.
 package certs
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"net"
-	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -36,6 +25,7 @@ import (
 
 	"github.com/yogzblr/imas/internal/config"
 	log "github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/openbao"
 )
 
 // Environment variables configuring the OpenBao PKI client. Addr and Role
@@ -58,25 +48,28 @@ const (
 	// two have defaults matching a standard in-cluster deployment.
 	EnvOpenBaoK8sRole    = "IMAS_CERTS_OPENBAO_K8S_ROLE"
 	EnvOpenBaoK8sMount   = "IMAS_CERTS_OPENBAO_K8S_MOUNT"    // default "kubernetes"
-	EnvOpenBaoK8sJWTPath = "IMAS_CERTS_OPENBAO_K8S_JWT_PATH" // default defaultK8sJWTPath
+	EnvOpenBaoK8sJWTPath = "IMAS_CERTS_OPENBAO_K8S_JWT_PATH" // default openbao.DefaultK8sJWTPath
+
+	// EnvOpenBaoNamespace optionally sets the X-Vault-Namespace header.
+	EnvOpenBaoNamespace = "IMAS_CERTS_OPENBAO_NAMESPACE"
 )
 
 // Recognized values for IMAS_CERTS_OPENBAO_AUTH_METHOD.
 const (
-	AuthMethodToken      = "token"
-	AuthMethodKubernetes = "kubernetes"
+	AuthMethodToken      = openbao.AuthMethodToken
+	AuthMethodKubernetes = openbao.AuthMethodKubernetes
 )
 
-// defaultK8sJWTPath is where Kubernetes projects a pod's service account
-// token by default; see
-// https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/.
-const defaultK8sJWTPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
-
-// authTokenSafetyMargin is the fraction of a kubernetes-auth login's
-// lease_duration reserved as a safety margin: currentToken re-logs-in once
-// less than this fraction of the lease remains, rather than waiting until
-// the token is already expired.
-const authTokenSafetyMargin = 5 // 1/5 = 20%
+var openBaoEnv = openbao.Env{
+	Addr:       EnvOpenBaoAddr,
+	CACert:     EnvOpenBaoCACert,
+	AuthMethod: EnvOpenBaoAuthMethod,
+	Token:      EnvOpenBaoToken,
+	K8sRole:    EnvOpenBaoK8sRole,
+	K8sMount:   EnvOpenBaoK8sMount,
+	K8sJWTPath: EnvOpenBaoK8sJWTPath,
+	Namespace:  EnvOpenBaoNamespace,
+}
 
 var (
 	ErrNotConfigured = errors.New("openbao PKI client not configured")
@@ -97,194 +90,52 @@ var (
 	ErrK8sAuthFailed = errors.New("openbao kubernetes auth login failed")
 )
 
-// obClient is a minimal client for the subset of OpenBao's HTTP API this
-// package needs: the PKI secrets engine's issue/ca endpoints,
-// sys/leases/renew, and (when using kubernetes auth) auth/<mount>/login.
+// obClient is a client for the subset of OpenBao's HTTP API this
+// package needs: the PKI secrets engine's issue and ca endpoints, and
+// sys/leases/renew.
 type obClient struct {
-	addr       string
-	mount      string // PKI secrets engine mount
-	role       string // PKI role
-	httpClient *http.Client
-
-	authMethod string
-
-	// AuthMethodToken
-	staticToken string
-
-	// AuthMethodKubernetes
-	k8sRole    string
-	k8sMount   string
-	k8sJWTPath string
-
-	authMu     sync.Mutex
-	authToken  string
-	authExpiry time.Time
+	ob    *openbao.Client
+	mount string // PKI secrets engine mount
+	role  string // PKI role
 }
 
 // newClientFromEnv builds an obClient from the Env* variables above. It is
 // called fresh on every operation (rather than cached at package init)
 // so that changes to the environment -- as tests make routinely, pointing
-// at a local OpenBao dev server -- take effect immediately.
+// at a local OpenBao dev server -- take effect immediately. Callers
+// Close it when the operation is done.
 func newClientFromEnv() (*obClient, error) {
 	addr := os.Getenv(EnvOpenBaoAddr)
 	role := os.Getenv(EnvOpenBaoRole)
 	if addr == "" || role == "" {
 		return nil, fmt.Errorf("%w: %s and %s are required", ErrNotConfigured, EnvOpenBaoAddr, EnvOpenBaoRole)
 	}
+	ob, err := openbao.NewFromEnv(openBaoEnv, openbao.Errors{
+		NotConfigured:     ErrNotConfigured,
+		K8sJWTUnavailable: ErrK8sJWTUnavailable,
+		K8sAuthFailed:     ErrK8sAuthFailed,
+	})
+	if err != nil {
+		return nil, err
+	}
 	mount := os.Getenv(EnvOpenBaoPKIMount)
 	if mount == "" {
 		mount = "pki"
 	}
-	authMethod := os.Getenv(EnvOpenBaoAuthMethod)
-	if authMethod == "" {
-		authMethod = AuthMethodToken
-	}
-
-	c := &obClient{
-		addr:       strings.TrimRight(addr, "/"),
-		mount:      mount,
-		role:       role,
-		authMethod: authMethod,
-	}
-
-	switch authMethod {
-	case AuthMethodToken:
-		token := os.Getenv(EnvOpenBaoToken)
-		if token == "" {
-			return nil, fmt.Errorf("%w: %s is required when %s=%s (or unset)",
-				ErrNotConfigured, EnvOpenBaoToken, EnvOpenBaoAuthMethod, AuthMethodToken)
-		}
-		c.staticToken = token
-	case AuthMethodKubernetes:
-		k8sRole := os.Getenv(EnvOpenBaoK8sRole)
-		if k8sRole == "" {
-			return nil, fmt.Errorf("%w: %s is required when %s=%s",
-				ErrNotConfigured, EnvOpenBaoK8sRole, EnvOpenBaoAuthMethod, AuthMethodKubernetes)
-		}
-		c.k8sRole = k8sRole
-		c.k8sMount = os.Getenv(EnvOpenBaoK8sMount)
-		if c.k8sMount == "" {
-			c.k8sMount = "kubernetes"
-		}
-		c.k8sJWTPath = os.Getenv(EnvOpenBaoK8sJWTPath)
-		if c.k8sJWTPath == "" {
-			c.k8sJWTPath = defaultK8sJWTPath
-		}
-	default:
-		// Deliberately not falling back to token auth here: an explicit,
-		// unrecognized AUTH_METHOD is a configuration mistake, and silently
-		// running with a different auth method than the deployer asked for
-		// would be a worse failure mode than refusing to start.
-		return nil, fmt.Errorf("%w: unknown %s %q (want %q or %q)",
-			ErrNotConfigured, EnvOpenBaoAuthMethod, authMethod, AuthMethodToken, AuthMethodKubernetes)
-	}
-
-	var transport http.RoundTripper = http.DefaultTransport
-	if caFile := os.Getenv(EnvOpenBaoCACert); caFile != "" {
-		pemBytes, err := os.ReadFile(caFile)
-		if err != nil {
-			return nil, fmt.Errorf("reading OpenBao CA bundle: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pemBytes) {
-			return nil, fmt.Errorf("no certificates found in OpenBao CA bundle %s", caFile)
-		}
-		transport = &http.Transport{
-			TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
-		}
-	}
-	c.httpClient = &http.Client{Transport: transport, Timeout: 30 * time.Second}
-	return c, nil
+	return &obClient{ob: ob, mount: mount, role: role}, nil
 }
 
-// currentToken returns a currently-valid OpenBao token, per the client's
-// configured auth method. For AuthMethodToken this is just the static
-// token; for AuthMethodKubernetes it logs in (or re-logs-in, if the
-// previously cached token is within its safety margin of expiry) via
-// k8sLoginLocked. Every request this package makes to OpenBao (issueCert,
-// fetchCACertPEM, renewLease) calls this first, so a request made right
-// after a long idle period always gets a fresh-enough token rather than
-// firing on one that expired while nothing was happening.
-func (c *obClient) currentToken(ctx context.Context) (string, error) {
-	if c.authMethod == AuthMethodToken {
-		return c.staticToken, nil
-	}
+// Close releases the client's idle connections.
+func (c *obClient) Close() { c.ob.Close() }
 
-	c.authMu.Lock()
-	defer c.authMu.Unlock()
-	if c.authToken != "" && time.Now().Before(c.authExpiry) {
-		return c.authToken, nil
+// requestErr wraps a failed request in sentinel, except a kubernetes
+// login failure, which is returned as is (ErrK8sAuthFailed or
+// ErrK8sJWTUnavailable alone, as before the shared client).
+func requestErr(sentinel, err error) error {
+	if errors.Is(err, ErrK8sAuthFailed) || errors.Is(err, ErrK8sJWTUnavailable) {
+		return err
 	}
-	return c.k8sLoginLocked(ctx)
-}
-
-type k8sLoginAuth struct {
-	ClientToken   string `json:"client_token"`
-	LeaseDuration int    `json:"lease_duration"`
-	Renewable     bool   `json:"renewable"`
-}
-
-type k8sLoginResponse struct {
-	Auth   *k8sLoginAuth `json:"auth"`
-	Errors []string      `json:"errors"`
-}
-
-// k8sLoginLocked reads this process's service account JWT and logs in to
-// OpenBao's kubernetes auth method (POST /v1/auth/<mount>/login with
-// {"role": ..., "jwt": ...}; see
-// https://openbao.org/api-docs/auth/kubernetes/#login and
-// internal/builtin/credential/kubernetes/path_login.go in the OpenBao
-// source, which this was checked against directly rather than assumed).
-// The resulting token is cached until shortly before its lease expires.
-//
-// Callers must hold c.authMu; the name says "Locked" to make that
-// requirement hard to miss at call sites, following the stdlib's own
-// convention for this (e.g. (*sync.Cond).Wait callers holding L).
-func (c *obClient) k8sLoginLocked(ctx context.Context) (string, error) {
-	jwtBytes, err := os.ReadFile(c.k8sJWTPath)
-	if err != nil {
-		return "", fmt.Errorf("%w: reading %s: %w", ErrK8sJWTUnavailable, c.k8sJWTPath, err)
-	}
-	jwt := strings.TrimSpace(string(jwtBytes))
-	if jwt == "" {
-		return "", fmt.Errorf("%w: %s is empty", ErrK8sJWTUnavailable, c.k8sJWTPath)
-	}
-
-	reqBody, err := json.Marshal(map[string]string{"role": c.k8sRole, "jwt": jwt})
-	if err != nil {
-		return "", fmt.Errorf("%w: encoding request: %w", ErrK8sAuthFailed, err)
-	}
-	reqURL := fmt.Sprintf("%s/v1/auth/%s/login", c.addr, c.k8sMount)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(reqBody))
-	if err != nil {
-		return "", fmt.Errorf("%w: %w", ErrK8sAuthFailed, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("%w: %w", ErrK8sAuthFailed, err)
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("%w: reading response: %w", ErrK8sAuthFailed, err)
-	}
-	var lr k8sLoginResponse
-	if resp.StatusCode != http.StatusOK {
-		_ = json.Unmarshal(data, &lr)
-		return "", fmt.Errorf("%w: status %d: %s", ErrK8sAuthFailed, resp.StatusCode, strings.Join(lr.Errors, "; "))
-	}
-	if err := json.Unmarshal(data, &lr); err != nil {
-		return "", fmt.Errorf("%w: decoding response: %w", ErrK8sAuthFailed, err)
-	}
-	if lr.Auth == nil || lr.Auth.ClientToken == "" {
-		return "", fmt.Errorf("%w: response had no auth.client_token: %s", ErrK8sAuthFailed, strings.Join(lr.Errors, "; "))
-	}
-
-	c.authToken = lr.Auth.ClientToken
-	margin := time.Duration(lr.Auth.LeaseDuration) * time.Second / authTokenSafetyMargin
-	c.authExpiry = time.Now().Add(time.Duration(lr.Auth.LeaseDuration)*time.Second - margin)
-	return c.authToken, nil
+	return fmt.Errorf("%w: %w", sentinel, err)
 }
 
 type issueRequest struct {
@@ -310,7 +161,6 @@ type issueResponse struct {
 	LeaseDuration int       `json:"lease_duration"`
 	Renewable     bool      `json:"renewable"`
 	Data          issueData `json:"data"`
-	Errors        []string  `json:"errors"`
 }
 
 // issueCert requests a new leaf certificate for hosts from the configured
@@ -342,69 +192,30 @@ func (c *obClient) issueCert(ctx context.Context, hosts []string, ttl time.Durat
 	if ttl > 0 {
 		reqBody.TTL = ttl.String()
 	}
-	body, err := json.Marshal(reqBody)
+	secret, err := c.ob.Post(ctx, c.mount+"/issue/"+c.role, reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("%w: encoding request: %w", ErrIssueFailed, err)
+		return nil, requestErr(ErrIssueFailed, err)
 	}
-	reqURL := fmt.Sprintf("%s/v1/%s/issue/%s", c.addr, c.mount, c.role)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))
-	if err != nil {
+	if secret == nil {
+		return nil, fmt.Errorf("%w: empty response", ErrIssueFailed)
+	}
+	ir := &issueResponse{LeaseID: secret.LeaseID, LeaseDuration: secret.LeaseDuration, Renewable: secret.Renewable}
+	if err := openbao.DecodeData(secret, &ir.Data); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrIssueFailed, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	token, err := c.currentToken(ctx)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("X-Vault-Token", token)
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrIssueFailed, err)
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("%w: reading response: %w", ErrIssueFailed, err)
-	}
-	var ir issueResponse
-	if resp.StatusCode != http.StatusOK {
-		_ = json.Unmarshal(data, &ir)
-		return nil, fmt.Errorf("%w: status %d: %s", ErrIssueFailed, resp.StatusCode, strings.Join(ir.Errors, "; "))
-	}
-	if err := json.Unmarshal(data, &ir); err != nil {
-		return nil, fmt.Errorf("%w: decoding response: %w", ErrIssueFailed, err)
 	}
 	if ir.Data.Certificate == "" || ir.Data.PrivateKey == "" {
-		return nil, fmt.Errorf("%w: response had no certificate/private_key: %s", ErrIssueFailed, strings.Join(ir.Errors, "; "))
+		return nil, fmt.Errorf("%w: response had no certificate/private_key", ErrIssueFailed)
 	}
-	return &ir, nil
+	return ir, nil
 }
 
 // fetchCACertPEM fetches the PKI mount's current CA certificate. Unlike
 // the issue endpoint, ca/pem returns the raw PEM bytes directly rather
 // than a JSON envelope.
 func (c *obClient) fetchCACertPEM(ctx context.Context) ([]byte, error) {
-	reqURL := fmt.Sprintf("%s/v1/%s/ca/pem", c.addr, c.mount)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	data, err := c.ob.ReadRaw(ctx, c.mount+"/ca/pem")
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrCAFetchFailed, err)
-	}
-	token, err := c.currentToken(ctx)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("X-Vault-Token", token)
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrCAFetchFailed, err)
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("%w: reading response: %w", ErrCAFetchFailed, err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%w: status %d: %s", ErrCAFetchFailed, resp.StatusCode, string(data))
+		return nil, requestErr(ErrCAFetchFailed, err)
 	}
 	if len(data) == 0 {
 		return nil, fmt.Errorf("%w: empty CA certificate returned", ErrCAFetchFailed)
@@ -418,10 +229,9 @@ type renewRequest struct {
 }
 
 type renewResponse struct {
-	LeaseID       string   `json:"lease_id"`
-	LeaseDuration int      `json:"lease_duration"`
-	Renewable     bool     `json:"renewable"`
-	Errors        []string `json:"errors"`
+	LeaseID       string
+	LeaseDuration int
+	Renewable     bool
 }
 
 // renewLease asks OpenBao to renew leaseID by increment.
@@ -442,39 +252,14 @@ func (c *obClient) renewLease(ctx context.Context, leaseID string, increment tim
 	if increment > 0 {
 		reqBody.Increment = int(increment.Seconds())
 	}
-	body, err := json.Marshal(reqBody)
+	secret, err := c.ob.Put(ctx, "sys/leases/renew", reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("%w: encoding request: %w", ErrRenewFailed, err)
+		return nil, requestErr(ErrRenewFailed, err)
 	}
-	reqURL := fmt.Sprintf("%s/v1/sys/leases/renew", c.addr)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrRenewFailed, err)
+	if secret == nil {
+		return nil, fmt.Errorf("%w: empty response", ErrRenewFailed)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	token, err := c.currentToken(ctx)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("X-Vault-Token", token)
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrRenewFailed, err)
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("%w: reading response: %w", ErrRenewFailed, err)
-	}
-	var rr renewResponse
-	if resp.StatusCode != http.StatusOK {
-		_ = json.Unmarshal(data, &rr)
-		return nil, fmt.Errorf("%w: status %d: %s", ErrRenewFailed, resp.StatusCode, strings.Join(rr.Errors, "; "))
-	}
-	if err := json.Unmarshal(data, &rr); err != nil {
-		return nil, fmt.Errorf("%w: decoding response: %w", ErrRenewFailed, err)
-	}
-	return &rr, nil
+	return &renewResponse{LeaseID: secret.LeaseID, LeaseDuration: secret.LeaseDuration, Renewable: secret.Renewable}, nil
 }
 
 // leaseID tracks the most recently issued certificate's OpenBao lease for
@@ -521,6 +306,7 @@ func genCACert() error {
 	if err != nil {
 		return err
 	}
+	defer client.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	caPEM, err := client.fetchCACertPEM(ctx)
@@ -545,6 +331,7 @@ func issueAndWrite() error {
 	if err != nil {
 		return err
 	}
+	defer client.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -644,6 +431,7 @@ func RotateTLSCerts(threshold time.Duration) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	rr, renewErr := client.renewLease(ctx, leaseID, config.CertificateValidTime)
 	cancel()
+	client.Close()
 	if renewErr != nil {
 		log.Infof("openbao lease %s could not be renewed (%v), reissuing certificate", leaseID, renewErr)
 		return forceRegenCert()

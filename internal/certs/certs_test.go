@@ -13,7 +13,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -25,6 +24,7 @@ import (
 	"time"
 
 	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/openbao/openbaotest"
 )
 
 // setupTLSConfigDir sets config globals to use a temp directory for TLS
@@ -75,29 +75,13 @@ const (
 
 func obAdminRequest(t *testing.T, addr, token, method, path string, body any) {
 	t.Helper()
-	var reader io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			t.Fatalf("marshal openbao admin request body: %v", err)
-		}
-		reader = bytes.NewReader(b)
-	}
-	req, err := http.NewRequest(method, addr+path, reader)
-	if err != nil {
-		t.Fatalf("build openbao admin request: %v", err)
-	}
-	req.Header.Set("X-Vault-Token", token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("openbao admin request %s %s: %v", method, path, err)
-	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 300 {
-		t.Fatalf("openbao admin request %s %s failed: status %d: %s", method, path, resp.StatusCode, string(data))
-	}
+	openbaotest.NewAdmin(t, addr, token).Must(method, strings.TrimPrefix(path, "/v1/"), body)
+}
+
+// obAdminDelete removes path ("/v1/..."), ignoring the outcome; for
+// t.Cleanup.
+func obAdminDelete(t *testing.T, addr, token, path string) {
+	openbaotest.NewAdmin(t, addr, token).Delete(strings.TrimPrefix(path, "/v1/"))
 }
 
 // resolveTestOpenBaoServer resolves the local OpenBao dev server address
@@ -138,16 +122,7 @@ func setupOpenBaoPKI(t *testing.T) {
 	role := "imas-test"
 
 	obAdminRequest(t, addr, token, http.MethodPost, "/v1/sys/mounts/"+mount, map[string]string{"type": "pki"})
-	t.Cleanup(func() {
-		req, err := http.NewRequest(http.MethodDelete, addr+"/v1/sys/mounts/"+mount, nil)
-		if err != nil {
-			return
-		}
-		req.Header.Set("X-Vault-Token", token)
-		if resp, err := http.DefaultClient.Do(req); err == nil {
-			resp.Body.Close()
-		}
-	})
+	t.Cleanup(func() { obAdminDelete(t, addr, token, "/v1/sys/mounts/"+mount) })
 	obAdminRequest(t, addr, token, http.MethodPost, "/v1/sys/mounts/"+mount+"/tune",
 		map[string]string{"max_lease_ttl": "720h"})
 	obAdminRequest(t, addr, token, http.MethodPost, "/v1/"+mount+"/root/generate/internal",
@@ -301,16 +276,7 @@ path "sys/leases/renew" {
 	})
 
 	obAdminRequest(t, addr, token, http.MethodPost, "/v1/sys/auth/"+mount, map[string]string{"type": "kubernetes"})
-	t.Cleanup(func() {
-		req, err := http.NewRequest(http.MethodDelete, addr+"/v1/sys/auth/"+mount, nil)
-		if err != nil {
-			return
-		}
-		req.Header.Set("X-Vault-Token", token)
-		if resp, err := http.DefaultClient.Do(req); err == nil {
-			resp.Body.Close()
-		}
-	})
+	t.Cleanup(func() { obAdminDelete(t, addr, token, "/v1/sys/auth/"+mount) })
 	obAdminRequest(t, addr, token, http.MethodPost, "/v1/auth/"+mount+"/config", map[string]any{
 		"kubernetes_host":      reviewSrv.URL,
 		"disable_local_ca_jwt": true,
@@ -370,16 +336,7 @@ func TestObClientKubernetesAuthInvalidRoleOpenBao(t *testing.T) {
 	addr, token := resolveTestOpenBaoServer(t)
 	mount := fmt.Sprintf("kubernetes-imas-test-%d", time.Now().UnixNano())
 	obAdminRequest(t, addr, token, http.MethodPost, "/v1/sys/auth/"+mount, map[string]string{"type": "kubernetes"})
-	t.Cleanup(func() {
-		req, err := http.NewRequest(http.MethodDelete, addr+"/v1/sys/auth/"+mount, nil)
-		if err != nil {
-			return
-		}
-		req.Header.Set("X-Vault-Token", token)
-		if resp, err := http.DefaultClient.Do(req); err == nil {
-			resp.Body.Close()
-		}
-	})
+	t.Cleanup(func() { obAdminDelete(t, addr, token, "/v1/sys/auth/"+mount) })
 	jwtPath := writeFixtureK8sJWT(t, "default", "imas", "11111111-1111-1111-1111-111111111111")
 
 	t.Setenv(EnvOpenBaoAddr, addr)
@@ -393,7 +350,7 @@ func TestObClientKubernetesAuthInvalidRoleOpenBao(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newClientFromEnv: %v", err)
 	}
-	_, err = client.currentToken(context.Background())
+	_, err = client.ob.Token(context.Background())
 	if !errors.Is(err, ErrK8sAuthFailed) {
 		t.Fatalf("expected ErrK8sAuthFailed, got %v", err)
 	}
@@ -410,16 +367,7 @@ func TestObClientKubernetesAuthUnreachableK8sAPIOpenBao(t *testing.T) {
 	addr, token := resolveTestOpenBaoServer(t)
 	mount := fmt.Sprintf("kubernetes-imas-test-%d", time.Now().UnixNano())
 	obAdminRequest(t, addr, token, http.MethodPost, "/v1/sys/auth/"+mount, map[string]string{"type": "kubernetes"})
-	t.Cleanup(func() {
-		req, err := http.NewRequest(http.MethodDelete, addr+"/v1/sys/auth/"+mount, nil)
-		if err != nil {
-			return
-		}
-		req.Header.Set("X-Vault-Token", token)
-		if resp, err := http.DefaultClient.Do(req); err == nil {
-			resp.Body.Close()
-		}
-	})
+	t.Cleanup(func() { obAdminDelete(t, addr, token, "/v1/sys/auth/"+mount) })
 	fakeCACertPEM := generateFixtureCAPEM(t)
 	obAdminRequest(t, addr, token, http.MethodPost, "/v1/auth/"+mount+"/config", map[string]any{
 		"kubernetes_host":      "http://127.0.0.1:1",
@@ -445,7 +393,7 @@ func TestObClientKubernetesAuthUnreachableK8sAPIOpenBao(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newClientFromEnv: %v", err)
 	}
-	_, err = client.currentToken(context.Background())
+	_, err = client.ob.Token(context.Background())
 	if !errors.Is(err, ErrK8sAuthFailed) {
 		t.Fatalf("expected ErrK8sAuthFailed, got %v", err)
 	}
@@ -496,14 +444,14 @@ func TestObClientKubernetesTokenCachedBetweenCalls(t *testing.T) {
 		t.Fatalf("newClientFromEnv: %v", err)
 	}
 	ctx := context.Background()
-	tok1, err := client.currentToken(ctx)
+	tok1, err := client.ob.Token(ctx)
 	if err != nil {
 		t.Fatalf("first currentToken: %v", err)
 	}
 	if tok1 != "tok-1" {
 		t.Fatalf("expected tok-1, got %q", tok1)
 	}
-	tok2, err := client.currentToken(ctx)
+	tok2, err := client.ob.Token(ctx)
 	if err != nil {
 		t.Fatalf("second currentToken: %v", err)
 	}
@@ -515,49 +463,8 @@ func TestObClientKubernetesTokenCachedBetweenCalls(t *testing.T) {
 	}
 }
 
-func TestObClientKubernetesTokenReLoginNearExpiry(t *testing.T) {
-	jwtPath := writeFixtureK8sJWT(t, "default", "imas", "uid-1")
-	var loginCalls int32
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/auth/kubernetes/login", func(w http.ResponseWriter, r *http.Request) {
-		n := atomic.AddInt32(&loginCalls, 1)
-		fmt.Fprintf(w, `{"auth":{"client_token":"tok-%d","lease_duration":3600,"renewable":true}}`, n)
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	setupK8sAuthEnv(t, srv.URL, jwtPath, "test-role")
-
-	client, err := newClientFromEnv()
-	if err != nil {
-		t.Fatalf("newClientFromEnv: %v", err)
-	}
-	ctx := context.Background()
-	tok1, err := client.currentToken(ctx)
-	if err != nil {
-		t.Fatalf("first currentToken: %v", err)
-	}
-	if tok1 != "tok-1" {
-		t.Fatalf("expected tok-1, got %q", tok1)
-	}
-
-	// Simulate the cached token having fallen within its safety margin,
-	// without waiting a real hour for a 3600s lease to run down.
-	client.authMu.Lock()
-	client.authExpiry = time.Now().Add(-time.Second)
-	client.authMu.Unlock()
-
-	tok2, err := client.currentToken(ctx)
-	if err != nil {
-		t.Fatalf("second currentToken: %v", err)
-	}
-	if tok2 != "tok-2" {
-		t.Fatalf("expected a fresh token (tok-2) after simulated near-expiry, got %q", tok2)
-	}
-	if calls := atomic.LoadInt32(&loginCalls); calls != 2 {
-		t.Fatalf("expected exactly 2 login calls, got %d", calls)
-	}
-}
+// Re-login once a cached token is inside its safety margin is
+// internal/openbao's, tested there (TestKubernetesAuth_ReLoginNearExpiry).
 
 func TestObClientKubernetesJWTFileMissing(t *testing.T) {
 	setupK8sAuthEnv(t, "http://127.0.0.1:0", filepath.Join(t.TempDir(), "does-not-exist"), "test-role")
@@ -566,7 +473,7 @@ func TestObClientKubernetesJWTFileMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newClientFromEnv: %v", err)
 	}
-	_, err = client.currentToken(context.Background())
+	_, err = client.ob.Token(context.Background())
 	if !errors.Is(err, ErrK8sJWTUnavailable) {
 		t.Fatalf("expected ErrK8sJWTUnavailable, got %v", err)
 	}
@@ -583,7 +490,7 @@ func TestObClientKubernetesJWTFileEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newClientFromEnv: %v", err)
 	}
-	_, err = client.currentToken(context.Background())
+	_, err = client.ob.Token(context.Background())
 	if !errors.Is(err, ErrK8sJWTUnavailable) {
 		t.Fatalf("expected ErrK8sJWTUnavailable, got %v", err)
 	}
@@ -604,7 +511,7 @@ func TestObClientKubernetesLoginNon200(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newClientFromEnv: %v", err)
 	}
-	_, err = client.currentToken(context.Background())
+	_, err = client.ob.Token(context.Background())
 	if !errors.Is(err, ErrK8sAuthFailed) {
 		t.Fatalf("expected ErrK8sAuthFailed, got %v", err)
 	}
@@ -624,7 +531,7 @@ func TestObClientKubernetesLoginMissingToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newClientFromEnv: %v", err)
 	}
-	_, err = client.currentToken(context.Background())
+	_, err = client.ob.Token(context.Background())
 	if !errors.Is(err, ErrK8sAuthFailed) {
 		t.Fatalf("expected ErrK8sAuthFailed, got %v", err)
 	}
