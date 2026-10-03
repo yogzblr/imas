@@ -38,7 +38,7 @@ beyond unit tests (real Envoy, Molecule containers, real OpenBao).
 | 5 | JWT auth to the NATS websocket; enrollment key only to bootstrap | Built, validated | NATS User JWT plus gateway EdDSA JWT; `POST /v1/enroll`; run through real Envoy v1.35.3. |
 | 6 | Per-sprout JWT | Built, validated | Paired JWTs minted at enrollment and refresh. |
 | 7 | Farmer horizontally scalable | Built, not load-tested | Core is stateless: `QueueSubscribe` on `imas-core`, PXC read-through, Valkey heartbeat, object-store recipes. The bus tier is single-node until farmerbus supports routes (see 1). |
-| 8 | Sprout via proxies | Built | `busproxyurl` (HTTP CONNECT / SOCKS5) for the bus connection; HTTP clients use `ProxyFromEnvironment`. Ansible variable exposed. |
+| 8 | Sprout via proxies | Built | `busproxyurl` (HTTP CONNECT / SOCKS5) for the bus connection; HTTP clients use `ProxyFromEnvironment` (the `sdb://openbao` provider only since CL.2b: before it, it connected directly). Ansible variable exposed. |
 | 9 | Recipe download from a configured HTTP endpoint | Built, validated | `/files/` behind Envoy; `TestSproutDownloadsStagedRecipe_ThroughRealEnvoy`. |
 | 10 | NATS response under 300 ms | **Not validated** | Design removes the synchronous probe loop; no latency measurement has been taken. |
 | 11 | Recipe download uses the same JWT | Built, validated | Same gateway JWT, same Envoy gate. |
@@ -46,7 +46,7 @@ beyond unit tests (real Envoy, Molecule containers, real OpenBao).
 | 13 | Backend on Kubernetes (NATS, Valkey, farmer, Percona) | Built | Helm charts with optional PXC/OpenBao/Valkey subcharts; single migration hook Job; sprout-release hook Job. Chart tests render them; no gate has installed them on a real cluster. **No Terraform exists yet** (see the UAT gate row). |
 | 14 | Payload encryption, key pair per sprout and per tenant | **Partly built** | Per-tenant and per-sprout X25519 keys; `cmd.run`, `cook` and box-key submissions are sealed end to end. **`shell.*` (interactive PTY) is still plaintext inside TLS**, as are cook step events, `test.ping`, facts, `cancel`, the rotate trigger and log shipping. `shell.*` is the one that matters: a compromised bus can still open a shell on a Unix sprout. |
 | 15 | Key rotation for sprout keys | Built, **deliberately differs from the wording** | The requirement text says the new private key is sent encrypted over NATS. The built design never transmits a private key: the sprout generates the new pair and submits only the public key, farmer-triggered. See `imas-payload-encryption-design.md`. `requirements.md` should be reworded to match (see "Open items"). |
-| 16 | SDB-equivalent secrets in the sprout | Built (v1 tier) | `internal/ingredients/sdb`: OpenBao/Vault (hot-reloaded client cert), Azure Key Vault, AWS Secrets Manager, GCP Secret Manager. CyberArk and Delinea (Tier 2) not built, by design. |
+| 16 | SDB-equivalent secrets in the sprout | Built (v1 tier) | `internal/ingredients/sdb`: OpenBao/Vault (hot-reloaded client cert, official OpenBao client since CL.2b, tested against OpenBao 2.4.1 and Vault 1.20.4), Azure Key Vault, AWS Secrets Manager, GCP Secret Manager. CyberArk and Delinea (Tier 2) not built, by design. |
 | 17 | Probe capability (database, HTTP) as a sprout task | Built | `probe.http`, `probe.database`, plus `wait`, `cond`, `on_exit`, registered variables with `sensitive` redaction. |
 | 18 | Installers: yum, apt, zypper, MSI | Built, **never published** | nfpm deb/rpm/apk, SUSE rpm check, MSI and winget package, and the workflow that uploads them to the Buildkite registries. No release has ever been cut (see "Release flow" below), so the registries hold no imas packages and nothing has exercised the upload. |
 | 19 | Ansible with one-time key | Built, validated | Join token handled `no_log`, mode `0600`, removed by the sprout after enrollment. |
@@ -361,7 +361,7 @@ private-repo token is Linux only for now, as in the Ansible role. Atlas was
 considered; goose chosen (MIT).
 
 **Licensing follow-through.** MPL-2.0 is accepted generally (requirement 21)
-and `CLAUDE.md` now says so (PR #41). CL.2a (ready for review in PR #66, FLAG FOR
+and `CLAUDE.md` now says so (PR #41). CL.2a (merged, PR #66, FLAG FOR
 SECURITY REVIEW) acts on the decision to use the official OpenBao Go client
 for every server-side identity: `internal/openbao` builds
 `github.com/openbao/openbao/api/v2` (MPL-2.0) from each identity's own
@@ -371,8 +371,30 @@ timeout with no retries, and an optional `<prefix>NAMESPACE`.
 `internal/openbaokv`, `internal/fleetsign`, `internal/gatewayjwt`,
 `internal/certs`, `internal/pki` (tenant box keys) and `cmd/fleetreleaser`
 use it; their variable names, defaults, HTTP methods and errors are
-unchanged. Only `internal/ingredients/sdb/openbao` (CL.2b, on sprouts) still
-speaks HTTP directly.
+unchanged. CL.2b (ready for review, FLAG FOR SECURITY REVIEW) moves
+`internal/ingredients/sdb/openbao`, the sprout's `sdb://openbao` provider,
+onto the same client directly rather than through `internal/openbao`, whose
+identities are configured from `IMAS_*_OPENBAO_*` blocks and authenticate
+with a static token or kubernetes auth; the sprout's provider uses the
+customer's client certificate against the customer's own server. Kept: the
+`IMAS_SDB_OPENBAO_*` variables, the `sdb://openbao/<mount>/<path>[#field]`
+syntax with its KV v2 then KV v1 read, the hot-reloaded client certificate
+(`sdb.CertWatcher`, keep-alives off) and a cached login token (now
+`sdb.TokenCache`, renewed at 90% of the lease as before), no retries, a 30 s
+timeout, and no `BAO_*`/`VAULT_*` variable read. Changed: the provider now
+honours `HTTP(S)_PROXY`/`NO_PROXY` (`ProxyFromEnvironment`), which it did
+not before; errors no longer quote a response body that isn't OpenBao's JSON
+(a proxy error page could echo the request and its token); a 403 drops the
+cached token so the next read logs in again; a number in a secret reads back
+as written (`1.0` stays `1.0`). Tested against OpenBao 2.4.1 and HashiCorp
+Vault 1.20.4 dev servers on TLS (cert auth, KV v2 and v1, a client
+certificate rotated under the running provider);
+`TestRealServer` in that package runs it when `IMAS_TEST_SDB_OPENBAO_*` is
+set. The sprout grows by 1.74 MiB (linux/amd64, 30,990,943 → 32,812,111
+bytes) and 1.78 MiB (windows/amd64, 25,717,760 → 27,588,096), within the
+5 MB limit: before CL.2b the sprout linked little of the client, and the
+request path brings `golang.org/x/net/http2`, `go-retryablehttp` and both
+`mapstructure` modules into the binary (no new modules).
 
 ## Docs, CI and tooling merged alongside
 
@@ -512,7 +534,7 @@ speaks HTTP directly.
    (still a fixed 15 s `ReconnectWait`) and a clustered bus (`cmd/farmerbus`
    has no route support, so the chart blocks more than one bus replica).
 4. **Security review of the flagged work**, including FU.0/FU.2/FU.3/FU.4/
-   FU.6b, CL.2a, CL.3 and the J follow-ups, before `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED`
+   FU.6b, CL.2a, CL.2b, CL.3 and the J follow-ups, before `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED`
    is turned on anywhere.
 5. **Clean-ups left by Wave 4** (briefs in
    `docs/claude-code-parallel-build-plan.md` §4c; CL.1, removing
@@ -520,12 +542,11 @@ speaks HTTP directly.
    CL.3, the outbox sweeper that resumes batches and rollouts after a pod
    restart, is ready for review in PR #63): replace the hand-rolled OpenBao
    HTTP clients with the official Go client as decided on 2026-09-29.
-   **CL.2a** (server side) is ready for review in PR #66 (see "Licensing
-   follow-through"). **CL.2b**, the sprout's `sdb://` provider, is not
-   started; the sprout already links the official client through
-   `internal/fleetsign`, `internal/certs`, `internal/pki` and
-   `internal/gatewayjwt` (+0.22 MiB on linux and windows amd64), so CL.2b
-   should add little size. Also found by CL.2a: the `go-licenses` workflow's
+   **CL.2a** (server side) is merged (PR #66) and **CL.2b** (the sprout's
+   `sdb://openbao` provider) is ready for review (see "Licensing
+   follow-through" for both). CL.2b added 1.74 MiB (linux/amd64) and
+   1.78 MiB (windows/amd64) to the sprout, not the "little" expected: the
+   sprout had linked only a sliver of the client. Also found by CL.2a: the `go-licenses` workflow's
    `save` step fails on `main` (`modernc.org/mathutil` reports an unknown
    licence), so `dependencies/` has not been refreshed since glebarez/sqlite
    arrived.
