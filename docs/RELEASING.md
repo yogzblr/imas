@@ -38,15 +38,15 @@ sprout release it was tested with (API design §2.5).
 
 ## Settings
 
-All three release workflows (`release.yml`, `snapshot.yml`,
-`publish-packages.yml`) run in the GitHub environment **`goreleaser`**, so
-each secret or variable below can be set on the repository or on that
-environment.
+`release.yml` and `publish-packages.yml` run in the GitHub environment
+**`goreleaser`**, so each secret or variable below can be set on the
+repository or on that environment. `snapshot.yml` needs none of them: it
+neither signs (`--skip=sign`) nor publishes.
 
 | Name | Kind | Used by |
 |---|---|---|
-| `GPG_PRIVATE_KEY` | secret | `release.yml`, `snapshot.yml` (signs `checksums.txt`) |
-| `GPG_PASSPHRASE` | secret | `release.yml`, `snapshot.yml` |
+| `GPG_PRIVATE_KEY` | secret | `release.yml` (signs `checksums.txt`) |
+| `GPG_PASSPHRASE` | secret | `release.yml` |
 | `BUILDKITE_PACKAGES_TOKEN` | secret | `publish-packages.yml`; Buildkite API token with Read Packages and Write Packages |
 | `BUILDKITE_ORGANIZATION_SLUG` | variable | `publish-packages.yml`; the org owning the registries below |
 
@@ -119,21 +119,20 @@ step's result differs from "look for", stop and fix by PR before going on.
    `v*` tags and `main`.
    *Look for:* nothing to fix. A missing name otherwise fails a later step
    with `missing ...`.
-2. **The GPG key.** Compare the key in `GPG_PRIVATE_KEY` with
-   `SECURITY.md`, which gives fingerprint `3F62 7C68 … E4DD` and links a
-   `gpg-public-key.asc` that is not in the repository (on a `master`
-   branch, which does not exist).
-   *Look for:* the fingerprint of the key you set. If it differs, fix
-   `SECURITY.md` and commit the public key by PR before the final release.
-   An rc can go out without it, but users cannot check its `.sig` until then.
+2. **The GPG public key.** Commit the public half of the key in
+   `GPG_PRIVATE_KEY` to the repository and make `SECURITY.md` match it:
+   today it gives fingerprint `3F62 7C68 … E4DD` and links
+   `https://raw.githubusercontent.com/yogzblr/imas/master/gpg-public-key.asc`
+   (no such file yet, and the branch is `main`).
+   *Look for:* `gpg --show-keys <file>` on the committed key prints the
+   fingerprint `SECURITY.md` gives, and the link in `SECURITY.md` downloads
+   it. An rc can go out before this, but users cannot check its `.sig`
+   until then.
 3. **Optional pre-flight: Actions, Snapshot Build, Run workflow on `main`.**
-   This imports the real GPG key and signs with keyless cosign, so a bad
-   secret shows up here instead of in the release. It also writes a public
-   Rekor entry naming `snapshot.yml@refs/heads/main` (an open question in
-   `docs/BUILD-STATUS.md`, Open items 10: skip this step if that is
-   unwanted). *Look for:* `Check release secrets` and `Import GPG key` pass
-   (the fingerprint is printed), `signing` for both `gpg` and `cosign`, six
-   images built (amd64 and arm64), `release succeeded`.
+   Builds everything the release builds, images included, without signing
+   or publishing and without secrets. *Look for:* six images built (amd64
+   and arm64), the MSI hook output, `release succeeded`. The GPG secrets and
+   cosign signing are first exercised in step 6.
 4. **`main` is green on the commit you tag**, including the `go.mod and
    go.sum are tidy` step in CI: the release's before hook fails the release
    on an untidy `go.mod` instead of tidying it. (The `go-licenses` workflow's
@@ -146,7 +145,8 @@ step's result differs from "look for", stop and fix by PR before going on.
    tags` trigger in `release.yml` is still off.
 6. **Actions, Release, Run workflow, Use workflow from: tag
    `v0.1.0-rc.1`.**
-   *Look for:* `Check the ref` and `Check release secrets` pass; GoReleaser
+   *Look for:* `Check the ref` and `Check release secrets` pass; `Import GPG
+   key` prints the fingerprint from step 2; GoReleaser
    logs `using tags ... current=v0.1.0-rc.1` (pinned from the ref through
    `GORELEASER_CURRENT_TAG`), the before hook passes, the
    `sprout-windows-pkg` hook prints the MSI it wrote, `signing` runs for
