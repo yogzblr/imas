@@ -56,10 +56,17 @@ builds:
       - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
     tags:
       - no_self_update
-  # Windows sprout, packaged as an MSI (see the msi section) that installs
-  # the imas-sprout Windows service. Package-managed like the -pkg builds
-  # above, so no self-update. A fixed binary name keeps the .wxs template's
-  # {{ .Binary }} predictable.
+  # Windows sprout, packaged as an MSI that installs the imas-sprout Windows
+  # service. Package-managed like the -pkg builds above, so no self-update.
+  # The post hook builds dist/imas-sprout-<Version>-windows-x64.msi from
+  # packaging/windows/imas-sprout.wxs with msitools' wixl (install wixl +
+  # msitools on the runner), then fixes it up with msi-postprocess.sh for
+  # what wixl can't express (directory ACL, service failure actions,
+  # Permanent/NeverOverwrite). This replaces goreleaser-pro's msi pipe, so
+  # GoReleaser OSS is enough. The MSI is not a build artifact: checksum and
+  # release pick it up through extra_files below. Hook commands run from
+  # the project root, so --out dist is the dist directory. See
+  # packaging/windows/build-msi.sh and packaging/README.md.
   - main: ./cmd/sprout/
     id: "sprout-windows-pkg"
     binary: "{{.ProjectName}}-sprout"
@@ -73,6 +80,10 @@ builds:
       - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
     tags:
       - no_self_update
+    hooks:
+      post:
+        - cmd: ./packaging/windows/build-msi.sh --binary "{{ .Path }}" --version "{{ .Version }}" --out dist --timestamp "{{ .CommitTimestamp }}"
+          output: true
 
   # Standalone builds (with self-update)
   - main: ./cmd/sprout/
@@ -209,31 +220,6 @@ archives:
       - migrate
     name_template: "{{.ProjectName}}-services-{{.Version}}-{{.Os}}-{{.Arch}}"
 
-
-# Windows installer for imas-sprout: installs the imas-sprout service. Built
-# with msitools' wixl on Linux (install wixl + msitools on the runner), then
-# fixed up by msi-postprocess.sh for what wixl can't express (directory ACL,
-# service failure actions, Permanent/NeverOverwrite). See
-# packaging/windows/imas-sprout.wxs and packaging/README.md.
-msi:
-  - id: imas-sprout-msi
-    name: "{{.ProjectName}}-sprout-{{.Version}}-windows-{{.MsiArch}}"
-    wxs: ./packaging/windows/imas-sprout.wxs
-    # Build IDs, whatever the goreleaser docs say ("IDs of the archives"):
-    # verified with goreleaser-pro v2.18.2, an archive ID matches nothing and
-    # the pipe silently produces no MSI.
-    ids:
-      - sprout-windows-pkg
-    # Copied to the same relative path next to the .wxs (not flattened).
-    extra_files:
-      - packaging/etc/imas-sprout.conf
-      - packaging/etc/fleet-signing-keys.json
-    version: v3
-    mod_timestamp: "{{ .CommitTimestamp }}"
-    hooks:
-      after:
-        - cmd: ./packaging/windows/msi-postprocess.sh "{{ .ArtifactPath }}"
-          output: true
 
 nfpms:
   - id: imas
@@ -648,11 +634,26 @@ release:
     - sprout
     - imas-farmer
     - imas-sprout
-    - imas-sprout-msi
     - services
+  # The imas-sprout MSI, written by the sprout-windows-pkg post hook. Not an
+  # artifact goreleaser knows by ID, so it is attached here. The publish
+  # workflow packs it into the winget packages.
+  extra_files:
+    - glob: ./dist/imas-sprout-*-windows-x64.msi
   draft: true
   # Support for nightlies
   prerelease: auto
+
+# checksums.txt covers the archives and packages, and the imas-sprout MSI
+# through extra_files: the MSI is written by a build hook, and checksums are
+# computed after all builds, so it exists by then. goreleaser-check.yml (on
+# pull requests, from a snapshot) and publish-packages.yml (on the release)
+# check that checksums.txt lists it. The name is fixed: publish-packages.yml
+# downloads checksums.txt by name.
+checksum:
+  name_template: checksums.txt
+  extra_files:
+    - glob: ./dist/imas-sprout-*-windows-x64.msi
 
 # Sign the checksums file twice. GPG (detached .sig) stays for apt/rpm users
 # and the existing SECURITY.md flow. Keyless cosign (.sigstore.json bundle) is
