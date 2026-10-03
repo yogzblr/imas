@@ -350,6 +350,34 @@ saasapi:
     # its update (a Go duration, above 0 and at most 5m). Empty keeps
     # saasapi's default, 30s. Widen only for nodes without NTP.
     clockSkew: ""
+  # The outbox sweeper (internal/saasapi/sweeper.go, CL.3): re-publishes
+  # tenant provisioning jobs left pending, re-sends §1.5 action items left
+  # queued (never ones already sent), and resumes update rollouts whose pod
+  # died (only with fleetUpdateDispatch on). Safe on every replica: work is
+  # claimed with a row lease in the saas schema. Empty or null keeps
+  # saasapi's default and emits no env var. Durations are Go durations.
+  outboxSweeper:
+    # SAASAPI_OUTBOX_SWEEPER_ENABLED.
+    enabled: true
+    # SAASAPI_OUTBOX_SWEEP_INTERVAL: default 30s, 1s..1h.
+    interval: ""
+    # SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER: a pending provisioning job is
+    # published again this long after its last publish, doubling per
+    # attempt. Default 2m, 10s..24h.
+    provisioningStaleAfter: ""
+    # SAASAPI_OUTBOX_ACTION_STALE_AFTER: the same for a queued action item.
+    # Default 2m, 10s..24h.
+    actionStaleAfter: ""
+    # SAASAPI_OUTBOX_ACTION_MAX_AGE: a queued action item not sent this long
+    # after it was accepted fails as expired_not_sent instead of being sent
+    # late. Default 15m, 1m..1h.
+    actionMaxAge: ""
+    # SAASAPI_OUTBOX_MAX_ATTEMPTS: dispatches before a job or item is
+    # failed. Default 5, 1..50.
+    maxAttempts: null
+    # SAASAPI_OUTBOX_LEASE_TTL: how soon a dead pod's batch or rollout is
+    # taken over. Default 2m, 15s..1h.
+    leaseTTL: ""
   # The operator plane (internal/saasapi NewOperatorServer, API design
   # §2.5): sprout release registration and revoke, on its own HTTPS
   # listener and its own Service (<release>-saasapi-operator), never the

@@ -137,8 +137,14 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// After SetDB, SetBus and newRouter (which installed the sweeper's
+	// settings): the outbox sweeper re-dispatches work no live process is
+	// dispatching, on every replica, under row leases
+	// (SAASAPI_OUTBOX_*, internal/saasapi/sweeper.go).
+	waitSweeper := saasapi.StartOutboxSweeper(ctx)
 	serveErr := serve(ctx, srv, opSrv, 15*time.Second)
 	stop()
+	waitSweeper()
 
 	// After both HTTP servers have stopped (no more dispatches): Drain flushes
 	// any buffered publishes and lets in-flight result handlers finish
@@ -160,10 +166,13 @@ func main() {
 // registers POST .../sprouts/updates and GET .../sprouts/updates/{batch_id}
 // only if the flag is on at that moment (SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED,
 // default off). The wave gate's clock-skew margin is set with it
-// (SAASAPI_FLEET_UPDATE_CLOCK_SKEW, default 30s).
+// (SAASAPI_FLEET_UPDATE_CLOCK_SKEW, default 30s), and so are the outbox
+// settings whose lease TTL every dispatch the handlers start uses
+// (SAASAPI_OUTBOX_*).
 func newRouter(cfg saasapi.Config) *http.ServeMux {
 	saasapi.SetFleetUpdateDispatchEnabled(cfg.FleetUpdateDispatchEnabled)
 	saasapi.SetFleetUpdateClockSkew(cfg.FleetUpdateClockSkew)
+	saasapi.SetOutboxSweeperSettings(cfg.OutboxSweeper)
 	return saasapi.NewRouter()
 }
 

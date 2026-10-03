@@ -67,10 +67,15 @@
 //     rollout_halted and is never sent.
 //
 // The rollout runs in a background goroutine in the process that accepted
-// the POST, like §1.5's dispatch. If that process exits, unsent items stay
-// queued until the outbox sweeper exists (deferred, see
-// docs/design/imas-internal-api-account.md), and until then they also keep
-// the tenant's one rollout slot taken.
+// the POST, like §1.5's dispatch, under the batch's row lease, which it
+// renews while it runs. If that process exits, the lease lapses and the
+// outbox sweeper of any replica takes the rollout over and resumes it from
+// what the database records (sweepRollouts, resumeRollout): the same waves
+// of the same size and gate, the policy and the catalog checked again
+// before each one. Only items still queued are ever sent; an item a dead
+// process left in dispatching is never re-sent: once its dispatcher would
+// have given up on the reply it fails with dispatch_outcome_unknown, which
+// halts the rollout and frees the tenant's rollout slot.
 package saasapi
 
 import (
@@ -367,7 +372,7 @@ func CreateFleetUpdateBatch(w http.ResponseWriter, r *http.Request) {
 		ActionParams:     string(params),
 		RolloutBatchSize: batchSize,
 		RolloutGate:      gate,
-	}, assetIDs, rows, blocked, claimRollout(tenantID, version, rolloutNow()))
+	}, assetIDs, rows, blocked, atTarget, claimRollout(tenantID, version, rolloutNow()))
 	var refused rolloutRefused
 	switch {
 	case errors.As(err, &refused):
@@ -702,10 +707,11 @@ type rolloutReaders struct {
 	facts SproutFactsReader
 }
 
-// startRollout runs a new update batch's rollout in the background. It
-// captures the database, bus and readers when it starts, like
-// startBatchDispatch, and uses the same WaitGroup, so tests can wait for it.
-// atTarget is planUpdateItems': the sprouts already on the target version.
+// startRollout runs a new update batch's rollout in the background, renewing
+// the lease createBatch wrote while it runs. It captures the database, bus
+// and readers when it starts, like startBatchDispatch, and uses the same
+// WaitGroup, so tests can wait for it. atTarget is planUpdateItems': the
+// sprouts already on the target version.
 func startRollout(batch AssetActionBatch, queued []AssetActionItem, version string, atTarget map[SproutRef]bool) {
 	if len(queued) == 0 {
 		return
@@ -714,7 +720,10 @@ func startRollout(batch AssetActionBatch, queued []AssetActionItem, version stri
 	actionDispatches.Add(1)
 	go func() {
 		defer actionDispatches.Done()
-		runRollout(d, nc, readers, batch, queued, version, atTarget)
+		lease := batchLeaseOf(d, batch)
+		lease.keepAlive()
+		defer lease.stopKeepAlive()
+		runRollout(d, nc, readers, batch, queued, version, atTarget, lease)
 	}()
 }
 
@@ -730,10 +739,25 @@ type updateProof struct {
 // sentWave is one wave that was dispatched, the deadline by which its
 // sprouts must be back on the target version, and what proves each of its
 // items (by asset_id, the item's key within its batch) succeeded.
+//
+// A resumed rollout (resumeRollout) gathers every item its dead
+// predecessor sent into one sentWave whose deadlines are per item, each
+// measured from the item's recorded dispatch time; deadlines is nil for a
+// wave this process sent, whose items share deadline.
 type sentWave struct {
-	items    []AssetActionItem
-	proofs   map[string]updateProof
-	deadline time.Time
+	items     []AssetActionItem
+	proofs    map[string]updateProof
+	deadline  time.Time
+	deadlines map[string]time.Time
+}
+
+// deadlineOf is when the sprout of item it must be back on the target
+// version.
+func (w sentWave) deadlineOf(it AssetActionItem) time.Time {
+	if d, ok := w.deadlines[it.AssetID]; ok {
+		return d
+	}
+	return w.deadline
 }
 
 // proof is the rollout's proofFunc for w: an item it has no record of
@@ -751,40 +775,85 @@ func (w sentWave) proof(it AssetActionItem) (updateProof, bool) {
 // followed until each of its items has an outcome: its sprout reported the
 // target version, its job failed, or the wave's deadline passed.
 //
+// lease is the batch's (nil for none): before each wave, and before
+// halting, the rollout checks it still holds it, and if not stops at once,
+// leaving the batch to whoever took it over (outbox_lease.go).
+//
 // With no bus connection nothing is sent and every item stays queued, the
 // same as dispatchBatch. Without a SproutFactsReader no wave could ever
 // pass, and with the job_status gate and no JobStatusReader a failed update
 // could only ever show as a timeout, so in both cases the rollout halts
 // without sending anything.
-func runRollout(d *gorm.DB, nc *nats.Conn, readers rolloutReaders, batch AssetActionBatch, queued []AssetActionItem, version string, atTarget map[SproutRef]bool) {
+func runRollout(d *gorm.DB, nc *nats.Conn, readers rolloutReaders, batch AssetActionBatch, queued []AssetActionItem,
+	version string, atTarget map[SproutRef]bool, lease *rowLease) {
 	if nc == nil {
 		log.Errorf("saasapi: not connected to the NATS bus; update batch %s (tenant %s) left queued", batch.ID, batch.TenantID)
 		return
 	}
-	if readers.facts == nil || (batch.RolloutGate == gateJobStatus && readers.jobs == nil) {
+	if !readersUsable(readers, batch) {
 		log.Errorf("saasapi: no sprout facts or job status reader for update batch %s (tenant %s); halting before any wave", batch.ID, batch.TenantID)
-		haltRollout(d, batch, string(controlplane.ErrorInternal))
+		if lease.held() {
+			haltRollout(d, batch, string(controlplane.ErrorInternal))
+		}
 		return
 	}
+	r := &rolloutRun{d: d, nc: nc, readers: readers, batch: batch, version: version, lease: lease}
+	r.sendWaves(queued, atTarget)
+}
+
+// readersUsable reports whether readers can judge batch's waves at all.
+func readersUsable(readers rolloutReaders, batch AssetActionBatch) bool {
+	return readers.facts != nil && (batch.RolloutGate != gateJobStatus || readers.jobs != nil)
+}
+
+// rolloutRun is one process's run of a rollout: a new one (runRollout) or
+// one resumed from the database (resumeRollout).
+type rolloutRun struct {
+	d       *gorm.DB
+	nc      *nats.Conn
+	readers rolloutReaders
+	batch   AssetActionBatch
+	version string
+	lease   *rowLease
+	// resumed: before each wave, also check that the target version is
+	// still registered and verifies (rolloutRegistrationCheck), as the
+	// POST did before the original process started.
+	resumed bool
+	// sent is every wave sent so far, a resumed run's predecessor's
+	// included.
+	sent []sentWave
+}
+
+// lostLease reports, and logs, that r no longer holds the batch's lease.
+func (r *rolloutRun) lostLease() bool {
+	if r.lease.held() {
+		return false
+	}
+	log.Warnf("saasapi: update batch %s (tenant %s): no longer holding its lease; leaving the rollout to its new holder",
+		r.batch.ID, r.batch.TenantID)
+	return true
+}
+
+// sendWaves sends queued out in waves, then halts or finishes (finish).
+func (r *rolloutRun) sendWaves(queued []AssetActionItem, atTarget map[SproutRef]bool) {
+	batch := r.batch
 	size := batch.RolloutBatchSize
 	if size < 1 {
 		size = 1
 	}
-	var sent []sentWave
 	halted := ""
 	for start := 0; start < len(queued) && halted == ""; start += size {
 		n := start/size + 1
-		code, err := rolloutPolicyCheck(d, batch.TenantID, version, rolloutNow())
-		if err != nil {
-			log.Errorf("saasapi: update batch %s (tenant %s): checking update policy: %v; halting", batch.ID, batch.TenantID, err)
-			code = string(controlplane.ErrorInternal)
+		if r.lostLease() {
+			return
 		}
+		code := r.preWaveCheck()
 		if code != "" {
 			log.Warnf("saasapi: update batch %s (tenant %s) halted before wave %d: %s", batch.ID, batch.TenantID, n, code)
 			halted = code
 			break
 		}
-		if batch.RolloutGate == gateDispatch && anyWaveFailed(d, readers, batch, sent) {
+		if batch.RolloutGate == gateDispatch && anyWaveFailed(r.d, r.readers, batch, r.sent) {
 			log.Warnf("saasapi: update batch %s (tenant %s): an earlier wave has a failed or unresponsive sprout; halting before wave %d",
 				batch.ID, batch.TenantID, n)
 			halted = errCodeRolloutHalted
@@ -792,16 +861,19 @@ func runRollout(d *gorm.DB, nc *nats.Conn, readers rolloutReaders, batch AssetAc
 		}
 
 		wave := sentWave{items: queued[start:min(start+size, len(queued))]}
-		wave.proofs = rolloutProofs(batch, wave.items, dispatchWave(d, nc, batch, wave.items), atTarget)
+		wave.proofs = rolloutProofs(batch, wave.items, dispatchWave(r.d, r.nc, batch, wave.items), atTarget)
 		wave.deadline = rolloutNow().Add(rolloutWaveTimeout)
-		sent = append(sent, wave)
+		r.sent = append(r.sent, wave)
 
 		passed := false
 		switch batch.RolloutGate {
 		case gateDispatch:
-			passed = waveAccepted(d, batch, wave)
+			passed = waveAccepted(r.d, batch, wave)
 		default:
-			passed = awaitWave(d, readers, batch, wave, true)
+			passed = awaitWave(r.d, r.readers, batch, wave, true, r.lease)
+		}
+		if r.lostLease() {
+			return
 		}
 		if !passed {
 			log.Warnf("saasapi: update batch %s (tenant %s): wave %d did not pass the %s gate; halting",
@@ -809,14 +881,43 @@ func runRollout(d *gorm.DB, nc *nats.Conn, readers rolloutReaders, batch AssetAc
 			halted = errCodeRolloutHalted
 		}
 	}
-	if halted != "" {
-		haltRollout(d, batch, halted)
+	r.finish(halted)
+}
+
+// preWaveCheck is the check before every wave: the tenant's policy and
+// the version's revocation (rolloutPolicyCheck), and for a resumed run the
+// version's registration too. It returns "" to go ahead, or the code the
+// unsent items are failed with.
+func (r *rolloutRun) preWaveCheck() string {
+	code, err := rolloutPolicyCheck(r.d, r.batch.TenantID, r.version, rolloutNow())
+	if err != nil {
+		log.Errorf("saasapi: update batch %s (tenant %s): checking update policy: %v; halting", r.batch.ID, r.batch.TenantID, err)
+		return string(controlplane.ErrorInternal)
 	}
-	for _, w := range sent {
-		awaitWave(d, readers, batch, w, false)
+	if code != "" || !r.resumed {
+		return code
+	}
+	return rolloutRegistrationCheck(r.d, r.batch, r.version)
+}
+
+// finish fails every unsent item with halted, if set, and then follows
+// every sent wave until each of its items has an outcome. It stops,
+// without halting, once the lease is lost.
+func (r *rolloutRun) finish(halted string) {
+	if halted != "" {
+		if r.lostLease() {
+			return
+		}
+		haltRollout(r.d, r.batch, halted)
+	}
+	for _, w := range r.sent {
+		awaitWave(r.d, r.readers, r.batch, w, false, r.lease)
+		if r.lostLease() {
+			return
+		}
 	}
 	if halted == "" {
-		log.Infof("saasapi: update batch %s (tenant %s): all waves sent and followed to an outcome", batch.ID, batch.TenantID)
+		log.Infof("saasapi: update batch %s (tenant %s): all waves sent and followed to an outcome", r.batch.ID, r.batch.TenantID)
 	}
 }
 
@@ -865,9 +966,14 @@ func rolloutProofs(batch AssetActionBatch, items []AssetActionItem, dispatched m
 
 // awaitWave polls w until every item has an outcome and reports whether
 // they all succeeded. With failFast, it returns false as soon as any item
-// has failed, without waiting for the rest.
-func awaitWave(d *gorm.DB, readers rolloutReaders, batch AssetActionBatch, w sentWave, failFast bool) bool {
+// has failed, without waiting for the rest. It also returns false as soon
+// as lease (nil for none) is no longer held; the caller checks the lease
+// before acting on that.
+func awaitWave(d *gorm.DB, readers rolloutReaders, batch AssetActionBatch, w sentWave, failFast bool, lease *rowLease) bool {
 	for {
+		if !lease.held() {
+			return false
+		}
 		settled, failed := pollWave(d, readers, batch, w)
 		if settled || (failed && failFast) {
 			return !failed
@@ -889,8 +995,13 @@ func anyWaveFailed(d *gorm.DB, readers rolloutReaders, batch AssetActionBatch, s
 
 // pollWave re-reads w's items, records any outcome refreshUpdateItems
 // finds, and reports whether every item has an outcome (settled) and
-// whether any of them isn't success (failed). Once w's deadline has
-// passed, items still running are marked unresponsive_after_update.
+// whether any of them isn't success (failed). An item still running or
+// dispatching once its deadline (deadlineOf) has passed is settled as a
+// failure: a running one is marked unresponsive_after_update, a
+// dispatching one (its request went out, or may have, and no reply was
+// ever recorded) is failed with dispatch_outcome_unknown and never re-sent
+// (stuckDispatching). Either way it is terminal, so it no longer holds the
+// tenant's rollout slot (updateInProgress).
 //
 // An item still queued after dispatchBatch had no farmer to take it. It
 // can't succeed, so it counts as failed, and haltRollout fails it.
@@ -902,19 +1013,23 @@ func pollWave(d *gorm.DB, readers rolloutReaders, batch AssetActionBatch, w sent
 	}
 	refreshUpdateItemsWith(context.Background(), d, readers.jobs, readers.facts, batch, items, w.proof)
 	settled = true
+	now := rolloutNow()
+	var overdue []AssetActionItem
 	for _, it := range items {
 		switch it.Status {
 		case ActionItemRunning, ActionItemDispatching:
-			settled = false
+			if now.Before(w.deadlineOf(it)) {
+				settled = false
+			} else {
+				overdue = append(overdue, it)
+				failed = true
+			}
 		case ActionItemSucceeded:
 		default:
 			failed = true
 		}
 	}
-	if !settled && !rolloutNow().Before(w.deadline) {
-		markUnresponsive(d, items)
-		return true, true
-	}
+	markOverdue(d, batch, overdue)
 	return settled, failed
 }
 
@@ -1124,11 +1239,17 @@ func loadWaveItems(d *gorm.DB, batch AssetActionBatch, wave []AssetActionItem) (
 	return items, err
 }
 
-// markUnresponsive moves every item still running to
-// unresponsive_after_update. The update is conditional on the item still
-// being running, so an outcome a concurrent GET has just recorded wins.
-func markUnresponsive(d *gorm.DB, items []AssetActionItem) {
+// markOverdue settles items past their wave deadline: a running one
+// becomes unresponsive_after_update, a dispatching one fails with
+// dispatch_outcome_unknown (failStuckDispatching). Each update is
+// conditional on the item's status, so an outcome a concurrent GET has
+// just recorded wins.
+func markOverdue(d *gorm.DB, batch AssetActionBatch, items []AssetActionItem) {
 	for _, it := range items {
+		if it.Status == ActionItemDispatching {
+			failStuckDispatching(d, batch, it)
+			continue
+		}
 		if it.Status != ActionItemRunning {
 			continue
 		}

@@ -90,6 +90,34 @@ import (
 //     most 5m, since a wider margin lets older rows count as proof. An
 //     invalid value is a startup error.
 //
+// The outbox sweeper (sweeper.go), which re-dispatches provisioning jobs
+// and action items no live process is dispatching and resumes update
+// rollouts whose process died. Safe to run on every replica: work is
+// claimed with a row lease (outbox_lease.go). Durations are Go durations
+// ("30s", "2m"); an invalid or out-of-range value is a startup error:
+//
+//   - SAASAPI_OUTBOX_SWEEPER_ENABLED: default true. Off, dispatchers still
+//     take leases, so nothing else changes.
+//   - SAASAPI_OUTBOX_SWEEP_INTERVAL: time between sweeps, default 30s,
+//     1s..1h.
+//   - SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER: how long a tenant
+//     provisioning job may stay pending after it was last published before
+//     it is published again, doubling per attempt; default 2m, 10s..24h.
+//     Also how long DELETE /tenants/{id} waits after a re-published
+//     provision job before it offboards the tenant.
+//   - SAASAPI_OUTBOX_ACTION_STALE_AFTER: the same for a queued action
+//     item, from its last change; default 2m, 10s..24h.
+//   - SAASAPI_OUTBOX_ACTION_MAX_AGE: how long after it was accepted a
+//     queued action item may still be sent; past it the item fails with
+//     expired_not_sent, never sent. Default 15m, 1m..1h. The only age
+//     limit on the path: farmer and the sprout never reject a command on
+//     its acceptance time.
+//   - SAASAPI_OUTBOX_MAX_ATTEMPTS: dispatches of one job or item, the first
+//     included, before it is failed; default 5, 1..50.
+//   - SAASAPI_OUTBOX_LEASE_TTL: how long a lease lasts unrenewed, and so how
+//     soon a dead process's batch or rollout is taken over; default 2m,
+//     15s..1h.
+//
 // The operator plane (fleet_releases.go, design doc §2.5): release
 // registration and revocation, served on its own HTTPS listener and never
 // on the tenant API's. Off unless SAASAPI_OPERATOR_LISTEN_ADDR is set;
@@ -171,6 +199,10 @@ type Config struct {
 	// SetFleetUpdateClockSkew before NewRouter.
 	FleetUpdateClockSkew time.Duration
 
+	// OutboxSweeper configures the outbox sweeper and the leases every
+	// dispatcher takes, passed to SetOutboxSweeperSettings before NewRouter.
+	OutboxSweeper OutboxSweeperSettings
+
 	// OperatorListenAddr enables the operator plane (NewOperatorServer)
 	// on this address. Empty means it is off.
 	OperatorListenAddr        string
@@ -186,8 +218,8 @@ type Config struct {
 // LoadConfig reads the saasapi service's configuration from environment
 // variables, applying sane defaults where possible. It returns an error
 // only for a value that is set but invalid (the enrollment-key rate-limit
-// settings, the fleet update dispatch flag and clock-skew margin, and the
-// operator plane's settings).
+// settings, the fleet update dispatch flag and clock-skew margin, the
+// outbox sweeper's settings, and the operator plane's settings).
 func LoadConfig() (Config, error) {
 	cfg := Config{
 		ListenAddr:   envOrDefault("SAASAPI_LISTEN_ADDR", ":8081"),
@@ -214,6 +246,8 @@ func LoadConfig() (Config, error) {
 		ValkeyAddrs: splitAddrs(os.Getenv("SAASAPI_VALKEY_ADDRS")),
 
 		FleetUpdateClockSkew: defaultRolloutClockSkew,
+
+		OutboxSweeper: DefaultOutboxSweeperSettings(),
 
 		OperatorListenAddr:        os.Getenv("SAASAPI_OPERATOR_LISTEN_ADDR"),
 		OperatorTLSCertFile:       os.Getenv("SAASAPI_OPERATOR_TLS_CERT_FILE"),
@@ -256,12 +290,57 @@ func LoadConfig() (Config, error) {
 		}
 		cfg.FleetUpdateClockSkew = d
 	}
+	if err := loadOutboxSweeperSettings(&cfg.OutboxSweeper); err != nil {
+		return Config{}, err
+	}
 	if cfg.OperatorListenAddr != "" {
 		if err := cfg.validateOperator(); err != nil {
 			return Config{}, err
 		}
 	}
 	return cfg, nil
+}
+
+// loadOutboxSweeperSettings overrides s's defaults with whichever
+// SAASAPI_OUTBOX_* variables are set, refusing a value that doesn't parse
+// or is out of range.
+func loadOutboxSweeperSettings(s *OutboxSweeperSettings) error {
+	if v := os.Getenv("SAASAPI_OUTBOX_SWEEPER_ENABLED"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("saasapi: SAASAPI_OUTBOX_SWEEPER_ENABLED=%q: not a boolean", v)
+		}
+		s.Enabled = b
+	}
+	for _, d := range []struct {
+		name     string
+		dst      *time.Duration
+		min, max time.Duration
+	}{
+		{"SAASAPI_OUTBOX_SWEEP_INTERVAL", &s.Interval, minOutboxSweepInterval, maxOutboxSweepInterval},
+		{"SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER", &s.ProvisioningStaleAfter, minOutboxStaleAfter, maxOutboxStaleAfter},
+		{"SAASAPI_OUTBOX_ACTION_STALE_AFTER", &s.ActionStaleAfter, minOutboxStaleAfter, maxOutboxStaleAfter},
+		{"SAASAPI_OUTBOX_ACTION_MAX_AGE", &s.ActionMaxAge, minActionMaxAge, maxActionMaxAge},
+		{"SAASAPI_OUTBOX_LEASE_TTL", &s.LeaseTTL, minOutboxLeaseTTL, maxOutboxLeaseTTL},
+	} {
+		v := os.Getenv(d.name)
+		if v == "" {
+			continue
+		}
+		parsed, err := time.ParseDuration(v)
+		if err != nil || parsed < d.min || parsed > d.max {
+			return fmt.Errorf("saasapi: %s=%q: want a duration from %s to %s", d.name, v, d.min, d.max)
+		}
+		*d.dst = parsed
+	}
+	if v := os.Getenv("SAASAPI_OUTBOX_MAX_ATTEMPTS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > maxOutboxMaxAttempts {
+			return fmt.Errorf("saasapi: SAASAPI_OUTBOX_MAX_ATTEMPTS=%q: want an integer from 1 to %d", v, maxOutboxMaxAttempts)
+		}
+		s.MaxAttempts = n
+	}
+	return nil
 }
 
 // validateOperator checks that every required operator-plane setting is

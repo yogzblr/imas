@@ -145,7 +145,10 @@ var (
 //
 // A tenant whose provisioning is still in flight (status pending, or any
 // provision job still pending) can't be deleted yet: 409
-// provisioning_in_progress, retry once GET .../status leaves pending.
+// provisioning_in_progress, retry once GET .../status leaves pending. The
+// same applies, for SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER after it was
+// last published, to a provision job the outbox sweeper re-published:
+// farmer may still be running an earlier copy of it.
 // Allowing it would race the provision and deprovision requests against
 // each other on farmer (its queue group can hand them to different
 // replicas), which could end with a live NATS Account for a tenant the
@@ -172,6 +175,19 @@ func DeleteTenant(w http.ResponseWriter, r *http.Request) {
 		var inFlight int64
 		if err := tx.Model(&ProvisioningJob{}).
 			Where("tenant_id = ? AND type = ? AND status = ?", tenant.ID, ProvisioningJobProvision, ProvisioningJobPending).
+			Count(&inFlight).Error; err != nil {
+			return err
+		}
+		if inFlight > 0 {
+			return errProvisioningInProgress
+		}
+		// A provision job the outbox sweeper published more than once can
+		// still have a copy in flight on farmer after the first result came
+		// back. Offboarding while one is running could race it there, so
+		// wait out the sweeper's stale threshold after the last copy.
+		if err := tx.Model(&ProvisioningJob{}).
+			Where("tenant_id = ? AND type = ? AND attempts > 1 AND last_dispatched_at > ?",
+				tenant.ID, ProvisioningJobProvision, dbTime(outboxNow()).Add(-outboxSettings.ProvisioningStaleAfter)).
 			Count(&inFlight).Error; err != nil {
 			return err
 		}

@@ -29,7 +29,7 @@ import (
 
 const rolloutClaimedAtFile = "00005_tenant_update_policy_rollout_claimed_at.sql"
 
-// The migration is in the embedded saas set, is its newest, and is guarded
+// The migration is in the embedded saas set and is guarded
 // so a re-run changes nothing: the ALTER is prepared only when
 // information_schema has no such column.
 func TestRolloutClaimedAtMigrationShape(t *testing.T) {
@@ -37,8 +37,8 @@ func TestRolloutClaimedAtMigrationShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s is not in the embedded saas set: %v", rolloutClaimedAtFile, err)
 	}
-	if migrations.Saas.Latest() != 5 {
-		t.Fatalf("saas Latest = %d, want 5", migrations.Saas.Latest())
+	if migrations.Saas.Latest() < 5 {
+		t.Fatalf("saas Latest = %d, want at least 5", migrations.Saas.Latest())
 	}
 	body := string(b)
 	for _, want := range []string{
@@ -124,11 +124,13 @@ func TestMySQLRolloutClaimedAt(t *testing.T) {
 		t.Fatalf("rollout_claimed_at is %q, want %q", got, want)
 	}
 
-	if _, err := db.ExecContext(ctx, "DELETE FROM `"+migrations.VersionTable+"` WHERE version_id = 5"); err != nil {
+	// goose refuses a gap below the recorded version, so 5 and every later
+	// migration are forgotten and re-run together; each is idempotent.
+	if _, err := db.ExecContext(ctx, "DELETE FROM `"+migrations.VersionTable+"` WHERE version_id >= 5"); err != nil {
 		t.Fatal(err)
 	}
 	res, err := migrations.Up(ctx, db, migrations.Saas, t.Logf)
-	if err != nil || len(res.Applied) != 1 || res.Applied[0] != 5 {
+	if err != nil || len(res.Applied) != int(migrations.Saas.Latest())-4 || res.Applied[0] != 5 {
 		t.Fatalf("re-run: %+v, %v", res, err)
 	}
 	if got := column(); got != want {

@@ -640,8 +640,13 @@ already cover dispatch tracking for any `action.type`, including
   What remains is operational, not design: security review of the flagged
   pieces, the Terraform UAT gate (including a self-update cycle per OS, and
   the Windows install path on a real host), then turning
-  `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` on. Also open: the outbox sweeper
-  that resumes batches and rollouts after a pod restart. (The live key-set
+  `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` on. The outbox sweeper that
+  resumes batches and rollouts after a pod restart is built (CL.3, ready
+  for review; `docs/design/imas-internal-api-account.md`, "Outbox
+  re-dispatch sweeper"). Still open from it: `internal/pki`'s
+  provision/deprovision race on a re-published provision request,
+  mitigated in saasapi by DELETE waiting it out (BUILD-STATUS "Open
+  items", 6). (The live key-set
   fetch on `imas.sprouts.<id>.fleetsigningkeys` and the `fleet_signing_jwks`
   enrollment field, both superseded by the shipped keyring, were removed in
   CL.1.)

@@ -146,6 +146,23 @@ func TestNewRouterFleetUpdateClockSkew(t *testing.T) {
 	}
 }
 
+// TestNewRouterOutboxSettings: SAASAPI_OUTBOX_* reach the sweeper and the
+// handlers' leases through the same LoadConfig → newRouter path main uses.
+func TestNewRouterOutboxSettings(t *testing.T) {
+	t.Cleanup(func() { saasapi.SetOutboxSweeperSettings(saasapi.DefaultOutboxSweeperSettings()) })
+	t.Setenv("SAASAPI_OUTBOX_LEASE_TTL", "45s")
+	t.Setenv("SAASAPI_OUTBOX_MAX_ATTEMPTS", "7")
+	cfg, err := saasapi.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	newRouter(cfg)
+	got := saasapi.CurrentOutboxSweeperSettings()
+	if got.LeaseTTL != 45*time.Second || got.MaxAttempts != 7 || !got.Enabled {
+		t.Fatalf("settings in use = %+v", got)
+	}
+}
+
 // clearFleetSignEnv unsets the IMAS_FLEETSIGN_* settings for the test, so
 // the developer's environment can't configure a key source behind its back.
 func clearFleetSignEnv(t *testing.T) {
