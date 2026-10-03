@@ -2,9 +2,11 @@
 # The single-quoted $N in this file are awk fields, not shell expansions.
 # shellcheck disable=SC2016
 # Tests for the Windows packaging, runnable on Linux:
-#   - packaging/windows/imas-sprout.wxs builds with wixl (as goreleaser's msi
-#     pipe does) into an MSI with the imas-sprout service, stop/remove
-#     control and the expected directory layout;
+#   - packaging/windows/build-msi.sh (the goreleaser build hook) renders
+#     packaging/windows/imas-sprout.wxs and builds it with wixl into an MSI
+#     with the imas-sprout service, stop/remove control and the expected
+#     directory layout, rejects bad input and unhandled template actions,
+#     and leaves no MSI behind when a step fails;
 #   - packaging/windows/msi-postprocess.sh sets the attributes and the
 #     start condition wixl drops, and adds the ACL and failure-action tables;
 #   - packaging/windows/winget/build-winget-nupkg.sh packs the MSI into an
@@ -32,37 +34,86 @@ check() { local desc="$1"; shift; if "$@"; then pass "$desc"; else fail "$desc";
 # msiinfo export writes IDT: three header lines, CRLF line endings.
 table() { msiinfo export "$1" "$2" | tail -n +4 | tr -d '\r'; }
 
-for tool in go wixl msiinfo msibuild zip unzip python3; do
+for tool in go wixl msiinfo msibuild msiextract zip unzip python3; do
 	command -v "$tool" >/dev/null || { echo "missing tool: $tool" >&2; exit 2; }
 done
 
 # --- MSI -------------------------------------------------------------------
 echo "# building imas-sprout.exe (windows/amd64, CGO off)"
 (cd "$repo" && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -tags no_self_update -o "$work/imas-sprout.exe" ./cmd/sprout)
-mkdir -p "$work/packaging/etc"
-cp "$repo/packaging/etc/imas-sprout.conf" "$work/packaging/etc/"
 
-# Stand-in for goreleaser's templating of the few fields the .wxs uses.
-python3 - "$repo/packaging/windows/imas-sprout.wxs" "$work/app.wxs" <<'EOF'
-import re, sys
-s = open(sys.argv[1]).read()
-s = s.replace('{{ if eq .MsiArch "x64" }}', '')
-s = re.sub(r'\{\{ else \}\}.*?\{\{ end \}\}', '', s, flags=re.S)
-# .Runtime.Goos is linux here: drop the Windows-only (WiX) blocks.
-s = re.sub(r'\{\{ if eq \.Runtime\.Goos "windows" \}\}.*?\{\{ end \}\}', '', s, flags=re.S)
-for k, v in {'{{ .Major }}': '1', '{{ .Minor }}': '2', '{{ .Patch }}': '3',
-             '{{ .Version }}': '1.2.3-rc.1', '{{ .MsiArch }}': 'x64',
-             '{{ .Binary }}': 'imas-sprout'}.items():
-    s = s.replace(k, v)
-left = re.findall(r'\{\{.*?\}\}', s)
-if left:
-    sys.exit('unhandled template actions in .wxs: %s' % left)
-open(sys.argv[2], 'w').write(s)
-EOF
+bm="$repo/packaging/windows/build-msi.sh"
+msi="$work/msi/imas-sprout-1.2.3-rc.1-windows-x64.msi"
+"$bm" --binary "$work/imas-sprout.exe" --version 1.2.3-rc.1 --out "$work/msi" --timestamp 1700000000 >/dev/null
+check "build-msi.sh builds the MSI" test -s "$msi"
+check "out dir holds just the MSI" test "$(ls -A "$work/msi")" = "$(basename "$msi")"
+check "MSI mtime is the --timestamp" test "$(stat -c %Y "$msi")" = 1700000000
+check "package description carries the full version" bash -c "msiinfo suminfo '$msi' | grep -qx 'Subject: imas sprout 1.2.3-rc.1 (remote control agent)'"
+# Windows Server 2016, the oldest supported Windows, has Windows Installer 5.0.
+check "needs Windows Installer 5.0, no newer" bash -c "msiinfo suminfo '$msi' | grep -qx 'Version: 500 (1f4)'"
+check "installs the fleet signing keyring" \
+	awk -F'\t' '$1=="SproutFleetKeyringFile" && $3=="fleet-signing-keys.json" {f=1} END {exit !f}' <<<"$(table "$msi" File)"
+check "the MSI's files are the inputs" bash -c "msiextract -C '$work/x' '$msi' >/dev/null &&
+	cmp -s '$work/x/imas/imas-sprout.exe' '$work/imas-sprout.exe' &&
+	cmp -s '$work/x/imas/sprout' '$repo/packaging/etc/imas-sprout.conf' &&
+	cmp -s '$work/x/imas/fleet-signing-keys.json' '$repo/packaging/etc/fleet-signing-keys.json'"
+"$bm" --binary "$work/imas-sprout.exe" --version 1.2.3-rc.1 --out "$work/msi2" --timestamp 1700000000 >/dev/null
+check "same inputs and --timestamp: identical cabinet" \
+	test "$(msiinfo extract "$msi" sprout.cab | sha256sum)" = "$(msiinfo extract "$work/msi2/$(basename "$msi")" sprout.cab | sha256sum)"
+"$bm" --binary "$work/imas-sprout.exe" --version 0.0.1-next --out "$work/msi3" >/dev/null
+check "snapshot version 0.0.1-next -> ProductVersion 0.0.1" \
+	test "$(table "$work/msi3/imas-sprout-0.0.1-next-windows-x64.msi" Property | awk -F'\t' '$1=="ProductVersion"{print $2}')" = "0.0.1"
 
-msi="$work/imas-sprout-1.2.3-rc.1-windows-x64.msi"
-(cd "$work" && wixl -a x64 -o "$msi" app.wxs 2>/dev/null)
-check "wixl builds the MSI" test -s "$msi"
+bm_rejects() { ! "$bm" "$@" >/dev/null 2>&1 && ! compgen -G "$work/rej/*.msi" >/dev/null; }
+check "build-msi rejects a leading v" bm_rejects --binary "$work/imas-sprout.exe" --version v1.2.3 --out "$work/rej"
+check "build-msi rejects a non-semver version" bm_rejects --binary "$work/imas-sprout.exe" --version 1.2 --out "$work/rej"
+check "build-msi rejects XML in the version" bm_rejects --binary "$work/imas-sprout.exe" --version "1.2.3-a'b" --out "$work/rej"
+check "build-msi rejects a version past MSI limits" bm_rejects --binary "$work/imas-sprout.exe" --version 256.0.0 --out "$work/rej"
+check "build-msi rejects a missing binary" bm_rejects --binary "$work/nope.exe" --version 1.2.3 --out "$work/rej"
+check "build-msi rejects a non-PE binary" bm_rejects --binary "$repo/packaging/etc/imas-sprout.conf" --version 1.2.3 --out "$work/rej"
+check "build-msi rejects a bad --timestamp" bm_rejects --binary "$work/imas-sprout.exe" --version 1.2.3 --out "$work/rej" --timestamp yesterday
+check "build-msi rejects a missing --out" bm_rejects --binary "$work/imas-sprout.exe" --version 1.2.3
+
+# A PATH holding everything but one tool, to check the missing-tool errors.
+without() {
+	local d="$work/path-without-$1" f
+	mkdir -p "$d"
+	for f in /usr/local/sbin/* /usr/local/bin/* /usr/sbin/* /usr/bin/* /sbin/* /bin/*; do
+		[[ -x "$f" && "$(basename "$f")" != "$1" && ! -e "$d/$(basename "$f")" ]] && ln -s "$f" "$d/"
+	done
+	echo "$d:$(dirname "$(command -v go)")"
+}
+for tool in wixl msibuild msiinfo; do
+	check "build-msi names a missing $tool" bash -c "PATH='$(without "$tool")' '$bm' --binary '$work/imas-sprout.exe' --version 1.2.3 --out '$work/rej' 2>&1 >/dev/null | grep -q '^build-msi: $tool not found'"
+done
+check "no MSI left by the rejected runs" bash -c "! compgen -G '$work/rej/*.msi' && ! compgen -G '$work/rej/.*.msi.*'"
+
+# Failing wixl (after writing a partial file) or post-process: no MSI in OUT.
+mkdir -p "$work/fake"
+printf '#!/bin/sh\nfor a; do case "$prev" in -o) echo partial >"$a";; esac; prev="$a"; done\necho "wixl: boom" >&2\nexit 1\n' >"$work/fake/wixl"
+printf '#!/bin/sh\necho "msibuild: boom" >&2\nexit 1\n' >"$work/fake/msibuild"
+chmod +x "$work/fake/wixl" "$work/fake/msibuild"
+mkdir -p "$work/fake-wixl" "$work/fake-msibuild"
+ln -s "$work/fake/wixl" "$work/fake-wixl/wixl"
+ln -s "$work/fake/msibuild" "$work/fake-msibuild/msibuild"
+check "a failing wixl leaves no MSI and shows its output" bash -c "
+	err=\$(PATH='$work/fake-wixl:$PATH' '$bm' --binary '$work/imas-sprout.exe' --version 1.2.3 --out '$work/fail1' 2>&1 >/dev/null) && exit 1
+	grep -q 'wixl: boom' <<<\"\$err\" && [ -z \"\$(ls -A '$work/fail1')\" ]"
+check "a failing post-process leaves no MSI" bash -c "
+	! PATH='$work/fake-msibuild:$PATH' '$bm' --binary '$work/imas-sprout.exe' --version 1.2.3 --out '$work/fail2' >/dev/null 2>&1 &&
+	[ -z \"\$(ls -A '$work/fail2')\" ]"
+
+# An unhandled template action in the .wxs fails the render: run a copy of
+# the packaging tree with one added.
+mkdir -p "$work/tree/packaging/windows" "$work/tree/packaging/etc"
+cp "$repo/packaging/windows/build-msi.sh" "$repo/packaging/windows/msi-postprocess.sh" "$work/tree/packaging/windows/"
+cp "$repo/packaging/etc/imas-sprout.conf" "$repo/packaging/etc/fleet-signing-keys.json" "$work/tree/packaging/etc/"
+sed 's/Manufacturer=.imas.>/Manufacturer="{{ .Env.VENDOR }}">/' "$repo/packaging/windows/imas-sprout.wxs" >"$work/tree/packaging/windows/imas-sprout.wxs"
+check "test .wxs has the extra action" grep -q '{{ .Env.VENDOR }}' "$work/tree/packaging/windows/imas-sprout.wxs"
+check "build-msi rejects an unhandled template action" bash -c "
+	err=\$('$work/tree/packaging/windows/build-msi.sh' --binary '$work/imas-sprout.exe' --version 1.2.3 --out '$work/fail3' 2>&1 >/dev/null) && exit 1
+	grep -q 'unhandled template actions.*Env.VENDOR' <<<\"\$err\" && [ -z \"\$(ls -A '$work/fail3')\" ]"
+
 
 check "ProductVersion is numeric-only" \
 	test "$(table "$msi" Property | awk -F'\t' '$1=="ProductVersion"{print $2}')" = "1.2.3"
@@ -96,8 +147,7 @@ check "MajorUpgrade present (FindRelatedProducts + RemoveExistingProducts)" \
 check "same-version upgrades (1.2.3-rc.1 -> 1.2.3) replace the old product" \
 	awk -F'\t' '$2=="1.2.3" && $3=="1.2.3" && $5==769 && $7=="WIX_SAME_VERSION_UPGRADE_DETECTED" {f=1} END {exit !f}' <<<"$(table "$msi" Upgrade)"
 
-# --- post-process ----------------------------------------------------------
-"$repo/packaging/windows/msi-postprocess.sh" "$msi" >/dev/null
+# --- post-process (build-msi.sh ran msi-postprocess.sh) ---------------------
 comp="$(table "$msi" Component)"
 attr() { awk -F'\t' -v c="$1" '$1==c {print $4}' <<<"$comp"; }
 check "config: 64-bit|Permanent|NeverOverwrite (400)" test "$(attr SproutConfig)" = 400
