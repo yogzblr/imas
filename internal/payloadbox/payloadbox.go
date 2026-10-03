@@ -98,9 +98,6 @@ const (
 	// never be accepted as a dispatch, or a dispatch as a nudge.
 	PurposeCookNudgeRequest  = "f2s.cook.nudge"
 	PurposeCookNudgeResponse = "s2f.cook.nudge"
-	// PurposeFleetSigningResponse is farmer's reply on a sprout's
-	// imas.sprouts.<id>.fleetsigningkeys request (internal/fleetkeys).
-	PurposeFleetSigningResponse = "f2s.fleetsigning"
 	// PurposeBoxKeySubmit is a sprout reporting a new box public key of
 	// its own, sealed under its current (still valid) key.
 	PurposeBoxKeySubmit = "s2f.boxkey.pub"

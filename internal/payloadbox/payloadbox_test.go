@@ -225,7 +225,7 @@ func TestPurposesAreDistinctAndDirected(t *testing.T) {
 		PurposeCmdRunRequest, PurposeCmdRunResponse,
 		PurposeCookRequest, PurposeCookResponse,
 		PurposeCookNudgeRequest, PurposeCookNudgeResponse,
-		PurposeFleetSigningResponse, PurposeBoxKeySubmit, PurposeTenantKeyContinuity,
+		PurposeBoxKeySubmit, PurposeTenantKeyContinuity,
 	}
 	seen := map[string]bool{}
 	for _, p := range purposes {
