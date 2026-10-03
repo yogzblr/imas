@@ -847,11 +847,12 @@ decides a fleet update succeeded."
 
 Added 2026-10-03 from the "Open items" list in `docs/BUILD-STATUS.md`
 (item 5), plus REL.1 (replace GoReleaser Pro with a wixl build hook, a
-first-release prerequisite). These are the leftovers Wave 4 knowingly left behind. None of
-them blocks the Terraform UAT gate, but CL.1 removes attack surface and CL.3
-closes the restart gap that keeps a tenant's one rollout slot taken. Not in
+first-release prerequisite). These were the leftovers Wave 4 knowingly left behind. None of
+them blocked the Terraform UAT gate, but CL.1 removed attack surface and CL.3
+closed the restart gap that kept a tenant's one rollout slot taken. Not in
 this wave: `shell.*` sealing, sprout reconnect jitter and a clustered bus
-(separate, larger items), and the `requirements.md` item 15 wording.
+(separate, larger items), and the `requirements.md` item 15 wording (a
+separate docs change, DOC.1).
 
 Sub-waves, each held until the one before is merged to `main`:
 
@@ -862,8 +863,9 @@ Sub-waves, each held until the one before is merged to `main`:
 | 5B | CL.2a, then CL.2b | CL.2a touches `cmd/farmer/main.go` and files CL.1 edits, so it waits for CL.1. CL.2b follows CL.2a so it reuses the shared package CL.2a creates. |
 
 **Status, 2026-10-03:** CL.1 (PR #62), CL.3 (PR #63), REL.1 (PR #64, #65),
-CL.2a (PR #66) and CL.2b (PR #67) are all merged. Follow-ups they left are in
-`docs/BUILD-STATUS.md` Open items (5, 6).
+CL.2a (PR #66) and CL.2b (PR #67) are all merged; the briefs below are kept
+as the record of what was asked, do not re-dispatch them. Follow-ups they
+left are in `docs/BUILD-STATUS.md` Open items 5, 6 and 10.
 
 Every brief below inherits `CLAUDE.md`. The prompts avoid backticks, double
 quotes and dollar signs so they survive being pasted inside a shell string.

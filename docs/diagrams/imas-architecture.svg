@@ -8,6 +8,10 @@
     internal/natsapi/crypto.go, deploy/envoy/envoy.yaml,
     internal/saasapi/router.go. Hand-written SVG so it diffs in review;
     edit it as text.
+    2026-10-03: only the enrollment response, the enrollment failure text
+    and the sealing status were re-checked, after CL.1 removed the fleet
+    signing key set from enrollment and the bus, and J sealed cook
+    (internal/cook/sealed.go). The rest is as of the date above.
   -->
   <defs>
     <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -55,9 +59,9 @@
   <text x="810" y="104" class="zone-label" fill="#2e6b36">Non-DMZ core  —  deploy/helm/farmer</text>
 
   <!-- ============================ SPROUTS ============================ -->
-  <rect x="52" y="140" width="230" height="262" rx="6" class="box" opacity="0.5"/>
-  <rect x="46" y="146" width="230" height="262" rx="6" class="box" opacity="0.7"/>
-  <rect x="40" y="152" width="230" height="262" rx="6" class="box"/>
+  <rect x="52" y="140" width="230" height="246" rx="6" class="box" opacity="0.5"/>
+  <rect x="46" y="146" width="230" height="246" rx="6" class="box" opacity="0.7"/>
+  <rect x="40" y="152" width="230" height="246" rx="6" class="box"/>
   <text x="52" y="174" class="h">imas-sprout</text>
   <text x="52" y="192" class="small">cmd/sprout, runs as root (systemd,</text>
   <text x="52" y="207" class="small">Windows SCM). Many per tenant.</text>
@@ -70,8 +74,7 @@
   <text x="52" y="335" class="small">• nats_urls (sproutbusurlsfile)</text>
   <text x="52" y="351" class="small">• tenant_x25519_pub (pinned; refresher</text>
   <text x="52" y="366" class="small">   exits on mismatch)</text>
-  <text x="52" y="382" class="small">• fleet_signing_jwks (bootstrap only)</text>
-  <text x="52" y="398" class="small">Root CA pre-provisioned (TOFU off)</text>
+  <text x="52" y="382" class="small">Root CA pre-provisioned (TOFU off)</text>
 
   <rect x="40" y="440" width="230" height="118" rx="6" class="box"/>
   <text x="52" y="462" class="h">Join token</text>
@@ -116,7 +119,7 @@
   <text x="358" y="623" class="small" font-weight="700">Listeners</text>
   <text x="358" y="640" class="mono">:5407</text><text x="400" y="640" class="mono">websocket</text><text x="480" y="640" class="mono">sprouts, only via Envoy</text>
   <text x="358" y="657" class="mono">:5406</text><text x="400" y="657" class="mono">TLS NATS</text><text x="480" y="657" class="mono">core (farmer, saasapi) dials in</text>
-  <text x="358" y="681" class="small">cmd.run crosses the bus NaCl-box sealed, so the bus</text>
+  <text x="358" y="681" class="small">cmd.run and cook cross the bus NaCl-box sealed, so the bus</text>
   <text x="358" y="696" class="small">sees only ciphertext; other payloads are still plaintext</text>
   <text x="358" y="711" class="small">inside TLS (see "Payload encryption" below).</text>
 
@@ -312,11 +315,11 @@
   <text x="352" y="1441" class="mono">12 200 EnrollResponse (below)</text>
 
   <text x="30" y="1476" class="small">Every failure (bad signature, stale timestamp, replay, unknown/revoked/expired/exhausted key, lost redemption race, missing</text>
-  <text x="30" y="1491" class="small">signer or fleet key) returns the same <tspan class="mono">401 {"error":"enrollment_failed"}</tspan>. A retry with an already-enrolled nkey_pub replays</text>
+  <text x="30" y="1491" class="small">gateway JWT signer) returns the same <tspan class="mono">401 {"error":"enrollment_failed"}</tspan>. A retry with an already-enrolled nkey_pub replays</text>
   <text x="30" y="1506" class="small">the existing identity (fresh gateway JWT) without spending another use of the token. Then the sprout dials nats_urls (1→2→3).</text>
 
   <!-- EnrollResponse table -->
-  <rect x="30" y="1520" width="932" height="210" rx="6" class="box"/>
+  <rect x="30" y="1520" width="932" height="192" rx="6" class="box"/>
   <text x="42" y="1540" class="h">enrollSuccessResponse (internal/api/handlers/enroll.go)</text>
   <g class="mono">
     <text x="42" y="1562" font-weight="700">Go field</text><text x="190" y="1562" font-weight="700">JSON</text><text x="362" y="1562" font-weight="700">What it is</text>
@@ -325,9 +328,8 @@
     <text x="42" y="1616">GatewayJWT</text><text x="190" y="1616">gateway_jwt</text><text x="362" y="1616">alg:EdDSA JWS via Transit imas-gateway-jwt; short-lived, for jwt_authn</text>
     <text x="42" y="1634">NKeyIdentity</text><text x="190" y="1634">nkey_identity</text><text x="362" y="1634">the request's nkey_pub, echoed back</text>
     <text x="42" y="1652">TenantX25519Pub</text><text x="190" y="1652">tenant_x25519_pub</text><text x="362" y="1652">standard-base64 X25519 box public key; the sprout pins it</text>
-    <text x="42" y="1670">FleetSigningJWKS</text><text x="190" y="1670">fleet_signing_jwks</text><text x="362" y="1670">imas-fleet-signing public keys; bootstrap copy, superseded by live fetch</text>
-    <text x="42" y="1688">NatsURLs</text><text x="190" y="1688">nats_urls</text><text x="362" y="1688">wss:// bus addresses (sproutbusurls / IMAS_SPROUT_BUS_URLS)</text>
-    <text x="42" y="1706">…Continuity</text><text x="190" y="1706">tenant_x25519_continuity</text><text x="362" y="1706">after a tenant key rotation only; also on /v1/refresh (see right)</text>
+    <text x="42" y="1670">NatsURLs</text><text x="190" y="1670">nats_urls</text><text x="362" y="1670">wss:// bus addresses (sproutbusurls / IMAS_SPROUT_BUS_URLS)</text>
+    <text x="42" y="1688">…Continuity</text><text x="190" y="1688">tenant_x25519_continuity</text><text x="362" y="1688">after a tenant key rotation only; also on /v1/refresh (see right)</text>
   </g>
 
   <!-- ============================ PAYLOAD ENCRYPTION ============================ -->
@@ -366,7 +368,7 @@
   <text x="1018" y="1326" class="small">direction (no reflection); a reply names its request; the sprout drops replays.</text>
 
   <path d="M1288,1334 L1288,1370" class="line" marker-start="url(#arr)" marker-end="url(#arr)"/>
-  <text x="1296" y="1356" class="small">cmd.run, both ways, header Imas-Payload: box1</text>
+  <text x="1296" y="1356" class="small">cmd.run + cook, both ways, Imas-Payload: box1</text>
 
   <rect x="1006" y="1372" width="564" height="80" rx="6" class="box"/>
   <text x="1018" y="1392" class="h">sprout: pki.SproutOpenFromFarmer / SproutSealForFarmer</text>
@@ -382,10 +384,10 @@
   <text x="1018" y="1546" class="small">--sever (suspected exposure): no grace, no proofs; sprouts must re-enroll.</text>
 
   <rect x="1006" y="1574" width="564" height="138" rx="6" class="warn"/>
-  <text x="1018" y="1594" class="warn-h">Status: cmd.run is sealed; other boundaries are still plaintext</text>
-  <text x="1018" y="1614" class="small">• Sealed: cmd.run (request and reply) and box key submissions.</text>
-  <text x="1018" y="1632" class="small">• Plaintext inside TLS: cook, test.ping, shell, facts, job results,</text>
-  <text x="1018" y="1647" class="small">   cancel, sprout log shipping, fleetsigningkeys. See BUILD-STATUS.md.</text>
+  <text x="1018" y="1594" class="warn-h">Status: cmd.run and cook are sealed; other boundaries are still plaintext</text>
+  <text x="1018" y="1614" class="small">• Sealed: cmd.run, cook dispatch and nudge (request and reply), box key submissions.</text>
+  <text x="1018" y="1632" class="small">• Plaintext inside TLS: cook step events (job results), test.ping, shell, facts,</text>
+  <text x="1018" y="1647" class="small">   cancel, the box key rotate trigger, sprout log shipping. See BUILD-STATUS.md.</text>
   <text x="1018" y="1665" class="small">• Adopted-legacy tenants share one private key until their first rotation.</text>
   <text x="1018" y="1683" class="small">• No forward secrecy (accepted in the design): exposure is bounded by</text>
   <text x="1018" y="1698" class="small">   how often the tenant key is rotated.</text>

@@ -16,55 +16,22 @@ imas is a pure-[Go](http://golang.org) DevOps automation engine designed to use 
 
 ## Quick Start
 
-Want to get up and running as quickly as possible to see what all the fuss is about?
-Use our bootstrap scripts!
+imas no longer installs as a single `farmer` with an embedded bus, so the
+old bootstrap-script quick start (one control server, sprouts dialing it
+directly, `imas keys accept` to approve them) doesn't apply any more.
+[docs/INSTALL.md](docs/INSTALL.md) is the install guide. In outline:
 
-1. Download and initialize the command line utility from our releases to your dev machine.
-
-```bash
-# replace 'linux' with darwin if you're on macOS
-curl -L https://releases.imas.dev/linux/amd64/latest/imas > imas && chmod +x imas
-./imas init
-```
-
-You'll be asked some questions, such as which interface the `farmer` is listening on, and which ports to use for communication.
-Set the interface to the domain name or IP address of the `farmer`.
-Once configured, the CLI prints out your administrator public key, which you'll need for the next step!
-It's recommended you now add `imas` somewhere in your `$PATH`.
-
-2. On your control server, you'll need to install the `farmer`.
-
-```bash
-# or, just run as root instead of sudo
-curl -L https://bootstrap.imas.dev/latest/farmer | sudo bash
-```
-
-You'll be asked several questions about the interface to listen on, which ports to use, etc.
-For the quick start, it's recommended to use the default ports (make sure there's no firewall in the way!).
-You'll be prompted for an admin public key, which you should have gotten from the prior step, and a certificate host name(s).
-Make sure the certificate host name matches the external-facing interface (a domain or IP address) as it will be used for TLS validation!
-
-3. On all of your fleet nodes, you'll need to install the `sprout`.
-
-```bash
-# or, just run as root instead of sudo
-# FARMER_BUS_PORT and FARMER_API_PORT variables are available in case you chose
-# to use different ports.
-curl -L https://bootstrap.imas.dev/latest/sprout | FARMERINTERFACE=localhost sudo -E bash
-```
-
-Once the sprout is up and running, return to the CLI.
-
-4. If all is well, you're ready to `cook`! Accept the TLS cert and the `sprout` keys when prompted.
-
-```bash
-imas version
-imas keys accept -A
-sleep 15;
-imas -T \* test ping
-imas -T \* cmd run whoami
-imas -T \* cmd run --out json -- uname -a
-```
+1. Build the binaries with `make` (they land in `bin/`), or use the
+   release images and packages once a release has been cut. None has been
+   yet; see [docs/BUILD-STATUS.md](docs/BUILD-STATUS.md).
+2. Install the core Helm chart, [`deploy/helm/farmer`](deploy/helm/farmer/README.md)
+   (`farmer` and `saasapi`, with PXC, OpenBao and Valkey either bundled for
+   an eval or external), then the DMZ chart,
+   [`deploy/helm/nats`](deploy/helm/nats/README.md) (`farmerbus` and Envoy).
+3. Create a tenant and mint a one-time enrollment key through the SaaS API.
+4. Install `imas-sprout` on each managed host with that key as its join
+   token. It enrolls through Envoy and connects to the bus with its own JWT.
+   The Ansible role [`imas_sprout`](ansible/README.md) does this for a fleet.
 
 ## Documentation
 
@@ -78,11 +45,13 @@ Many systems struggle with installing Python dependencies properly, and with so 
 
 ## Architecture
 
-imas is made up of three components: the `farmer`, one or many `sprout`s, and a CLI utility, `imas`.
-The `farmer` binary runs as a daemon on a management server (referred to as the 'farmer'), and is controlled via the `imas` cli.
-`imas` can be run both locally on the management server or remotely over a secure-by-default, TLS-encrypted API.
-The `sprout` binary should be installed as a daemon on systems that are to be managed.
-Managed systems are referred to as 'sprouts.'
+imas runs in two tiers, with the managed hosts outside both:
+
+- **DMZ:** `farmerbus` (the NATS bus) behind an Envoy gateway. These are the only things sprouts ever connect to.
+- **Core (non-DMZ):** `farmer` (the API, job dispatch and tenant provisioning), `saasapi` (the multi-tenant control-plane API) and `fleetreleaser` (signs sprout update manifests), with PXC, Valkey, OpenBao and object storage. The core connects out to the bus; the bus never connects in.
+- **Sprouts:** the `sprout` daemon on each managed system (a 'sprout'), enrolled into one tenant.
+
+The `imas` CLI is optional: it talks to farmer's TLS API and to the bus.
 
 <p align="center"><img src="docs/diagrams/imas-architecture.svg" width="100%" alt="imas architecture: sprouts, the DMZ (farmerbus, Envoy) and the non-DMZ core (farmer, saasapi, PXC, Valkey, OpenBao), with the enrollment and payload-encryption flows"></p>
 
