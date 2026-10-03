@@ -1,13 +1,16 @@
 <?xml version='1.0' encoding='windows-1252'?>
 <!--
-  imas-sprout MSI (WiX v3 schema). goreleaser-pro's `msi` pipe templates this
-  file and, on Linux, builds it with msitools' wixl, which supports only a
-  subset of the v3 schema: no WixUtilExtension, no <Permission>/<PermissionEx>,
+  imas-sprout MSI (WiX v3 schema). packaging/windows/build-msi.sh (a post
+  hook of the sprout-windows-pkg build in .goreleaser.yaml) renders the
+  goreleaser-style template fields in this file (Major, Minor, Patch,
+  Version, MsiArch, Binary, and the two if blocks; any other template action
+  fails the build) and, on Linux, builds it with msitools' wixl, which
+  supports only a subset of the v3 schema: no WixUtilExtension, no <Permission>/<PermissionEx>,
   no <ServiceConfig>, and it silently ignores Component/@Permanent,
   Component/@NeverOverwrite and Package/@Platform (the arch comes from
   `wixl -a`); it also rejects Component/Condition and ignores
-  Property/@Secure. packaging/windows/msi-postprocess.sh (goreleaser msi
-  after-hook) fixes up the built MSI with msibuild: it sets the component
+  Property/@Secure. packaging/windows/msi-postprocess.sh (run by
+  build-msi.sh) fixes up the built MSI with msibuild: it sets the component
   attributes and the start condition described below, marks START_SERVICE
   secure, and adds the directory ACL and the service's failure actions as
   MSI 5.0 tables. Keep the attributes here anyway so a WiX build on Windows
@@ -42,6 +45,10 @@
 
   Only amd64 is built today; the Win64/ProgramFiles64Folder choice below keeps
   a 386 build possible later.
+
+  The oldest supported Windows is Windows Server 2016, which has Windows
+  Installer 5.0: keep InstallerVersion at 500 and use nothing that needs a
+  newer Windows Installer.
 -->
 <Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
   {{ if eq .MsiArch "x64" }}
