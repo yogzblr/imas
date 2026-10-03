@@ -3,9 +3,14 @@
 
 version: 2
 
+# Fail if go.mod/go.sum are not tidy, instead of tidying them here: a tidy
+# that rewrote them would build a tree that is not the tagged commit. Fix it
+# by committing the output of `go mod tidy`; ci.yml runs the same check on
+# every pull request. (The hook runs after GoReleaser's dirty-tree check, so
+# only this diff would catch it.)
 before:
   hooks:
-    - go mod tidy
+    - sh -c 'go mod tidy && git diff --exit-code -- go.mod go.sum'
 
 # Support for nightlies and proper versioning
 snapshot:
@@ -623,18 +628,27 @@ release:
   github:
     owner: yogzblr
     name: imas
-  # IDs of everything uploaded to the release. The nfpm IDs are listed so
-  # the imas-farmer/imas-sprout rpm/deb/apk packages are release assets:
-  # .github/workflows/publish-packages.yml publishes the release's assets
-  # to Buildkite. ("imas" covers both the CLI archives and its nfpm entry.)
+  # IDs of everything uploaded to the release. GoReleaser filters every
+  # artifact except checksums and extra_files by these, using the ID of the
+  # config entry that made it, so each kind of asset needs its own entry:
+  #   cli, services                    the archives (archives[].id)
+  #   imas, imas-farmer, imas-sprout   the rpm/deb/apk packages (nfpms[].id);
+  #                                    publish-packages.yml publishes them
+  #                                    to Buildkite
+  #   gpg, cosign                      the signatures over checksums.txt
+  #                                    (signs[].id): checksums.txt.sig and
+  #                                    checksums.txt.sigstore.json, which
+  #                                    publish-packages.yml verifies
+  # Build IDs match nothing here (only a `formats: [binary]` archive uploads
+  # a bare binary), so none are listed.
   ids:
-    - imas-universal
+    - cli
+    - services
     - imas
-    - farmer
-    - sprout
     - imas-farmer
     - imas-sprout
-    - services
+    - gpg
+    - cosign
   # The imas-sprout MSI, written by the sprout-windows-pkg post hook. Not an
   # artifact goreleaser knows by ID, so it is attached here. The publish
   # workflow packs it into the winget packages.

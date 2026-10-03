@@ -1,10 +1,11 @@
 name: Snapshot Build
 
-# Manual-only for now: this needs GPG_PRIVATE_KEY/GPG_PASSPHRASE configured
-# as repo secrets, which don't exist yet on the new imas repo (they lived on
-# the original project's infra, not this fork's). Re-enable the
-# push/pull_request triggers below once those secrets are set on
-# yogzblr/imas. It runs GoReleaser OSS (MIT), so no licence key is needed.
+# Manual-only for now. It needs GPG_PRIVATE_KEY/GPG_PASSPHRASE (repo or
+# "goreleaser" environment secrets, set on 2026-10-03; "Check release
+# secrets" names any that are missing). The push/pull_request triggers below
+# stay off until the owner decides whether snapshot runs should sign into
+# the public Rekor log at all (see below, and docs/BUILD-STATUS.md, Open
+# items 10). It runs GoReleaser OSS (MIT), so no licence key is needed.
 # The secret-free check of the release config, MSI and checksums for pull
 # requests is goreleaser-check.yml.
 #
@@ -55,6 +56,22 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: stable
+
+      # The secrets this workflow uses, checked up front so a missing one
+      # fails here with its name, as in release.yml.
+      - name: Check release secrets
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          missing=()
+          for name in GPG_PRIVATE_KEY GPG_PASSPHRASE; do
+            [ -n "${!name}" ] || missing+=("$name")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::missing repo/environment secrets: ${missing[*]}"
+            exit 1
+          fi
 
       - name: Import GPG key
         id: import_gpg

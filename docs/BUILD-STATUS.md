@@ -691,14 +691,24 @@ this file can be checked against the repository's history.
    `imas keys rotate-tenant-key` from a CronJob); CERT-In/DPDP/data
    sovereignty review is still unowned.
 10. **Leftovers from PR #62 to #67.** Small, none blocking:
-    - **Release pipeline (#64, #65):** `snapshot.yml` has no "Check release
-      secrets" step; the `go mod tidy` before-hook rewrites `go.mod` on a clean
-      checkout (`filippo.io/edwards25519` indirect to direct), so GoReleaser
-      builds a tree that is not exactly the commit; decide whether snapshot
-      runs should sign into the public Rekor log at all or use `--skip=sign`
-      and rely on `goreleaser-check.yml`; the OIDC-to-Rekor path, the image
-      builds and `sha256sum --check` on a real release are untested; the MSI is
-      not byte-reproducible.
+    - **Release pipeline (#64, #65; REL.2):** REL.2 made the before hook
+      fail on an untidy `go.mod`/`go.sum` instead of tidying (CI checks the
+      same; `go.mod` was already tidy on `main` since CL.2a), gave
+      `snapshot.yml` the "Check release secrets" step, and fixed two
+      first-release blockers: `release.ids` left the CLI archives and both
+      `checksums.txt` signatures off the release (`publish-packages.yml`
+      needs the `.sigstore.json`), and a final tagged on its rc's commit
+      would have been built as the rc (now pinned to the ref with
+      `GORELEASER_CURRENT_TAG`; `release.yml` also refuses a non-tag ref).
+      `docs/RELEASING.md` has a First release checklist. Still open: the
+      owner's decision on whether snapshot runs should sign into the public
+      Rekor log or use `--skip=sign` (options in the REL.2 PR); re-enabling
+      `release.yml`'s tag trigger after the first release; `SECURITY.md`'s
+      GPG fingerprint and key link may not match the key in the secrets
+      (checklist step 2); the nfpm packages carry a literal `+git` version
+      suffix (`version_metadata: git`). The OIDC-to-Rekor path, the image
+      builds and `sha256sum --check` on a real release are untested; the
+      MSI is not byte-reproducible.
     - **Enrollment (#62):** `docs/diagrams/imas-architecture.svg` still shows
       `fleet_signing_jwks` and `fleetsigningkeys`; `fleetsign`'s JWKS encoding
       and `JWKSHandler` have no production caller; enrolled sprouts keep the
