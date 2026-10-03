@@ -58,7 +58,7 @@ released.
 | 11 | Recipe download uses the same JWT | **Green** | |
 | 12 | Envoy with JWT validation | **Green** | |
 | 13 | Backend on Kubernetes | **Amber** | Install the charts on a real cluster (UAT gate). No Terraform exists. |
-| 14 | Payload encryption | **Red** | Seal `shell.*`: a compromised bus can still open a shell on a Unix sprout. |
+| 14 | Payload encryption | **Red** | Seal `shell.*` (Open item 2) and the control plane (Open item 11): a compromised bus can still open a shell on a Unix sprout, mint CLI tokens and refresh as a sprout. |
 | 15 | Key rotation for sprout keys | **Amber** | Reword `requirements.md` to match the built design (the private key is never sent). |
 | 16 | SDB-equivalent secrets | **Green** | |
 | 17 | Probe capability | **Green** | |
@@ -96,6 +96,7 @@ released.
 | 8 | Docs wording (requirement 15, README embedded bus) | **Amber** | Small docs change. |
 | 9 | Nice-to-haves (Keycloak harness, rotation scheduler, CERT-In/DPDP review) | **Amber** | Unowned. |
 | 10 | Leftovers from PR #62 to #67 (release pipeline, stale diagram, OpenBao client follow-ups) | **Amber** | Fold into one clean-up brief after the first release shows what the pipeline really needs. |
+| 11 | Control plane forgeable by a compromised bus (CLI tokens, sprout refresh, `internal.*`) | **Red** | Design written, awaiting security review ("Sealing the control plane" in `imas-payload-encryption-design.md`). Ship the token-lifetime stopgap now. |
 
 ## Requirements traceability
 
@@ -645,21 +646,18 @@ this file can be checked against the repository's history.
    sealing `cmd.run` and `cook`. **Design written, not built:** "Sealing
    `shell.*`" in `docs/design/imas-payload-encryption-design.md` (flagged for
    security review). It makes farmer a sealing relay with both legs sealed:
-   the CLI pins its tenant's box public key and signs its open request with
-   its NKey. Each leg is a `payloadbox` handshake, then a numbered stream
+   the CLI pins its tenant's box public key and seals its open request to it
+   with its own registered CLI box key. Each leg is a `payloadbox` handshake, then a numbered stream
    under ephemeral keys. A box-ready sprout refuses plaintext shell, and
    sprouts with no box key are refused rather than downgraded. Windows keeps
    refusing. The design's open questions need an owner's decision before the
-   brief is dispatched. Writing it turned up two further problems:
-   - Shell does not work today for a sprout with a per-sprout JWT, because
-     `sproutPermissions` grants no `imas.shell.>` subject. This was checked
-     against a live embedded bus. A start still spawns the PTY, but no input
-     or output can flow.
-   - `imas.api.*` bearer tokens, and `internal.sprout.action` requests, can be
-     replayed or forged by a compromised bus to have farmer run a sealed
-     `cmd.run` or `cook` on any sprout. This needs its own item and design
-     (the design's Open question 1). Until both are fixed, requirement 14
-     stays Red.
+   brief is dispatched. Leg 1 authenticates with the CLI box key from the
+   control-plane design (Open item 11), so shell ships after it. Writing the
+   design also found that shell does not work today for a sprout with a
+   per-sprout JWT, because `sproutPermissions` grants no `imas.shell.>`
+   subject. This was checked against a live embedded bus. A start still
+   spawns the PTY, but no input or output can flow. Requirement 14 stays Red
+   until this item and Open item 11 are both done.
 3. **Scale and latency (requirements 1, 7, 10):** no load or chaos test has
    ever run. Two scale-plan items are also unbuilt: jittered sprout reconnect
    (still a fixed 15 s `ReconnectWait`) and a clustered bus (`cmd/farmerbus`
@@ -729,6 +727,34 @@ this file can be checked against the repository's history.
       `INSTALL.md` should say that a sprout behind an environment proxy needs
       `NO_PROXY` for a customer server reachable only directly, and that the
       platform's own OpenBao address may need it where a proxy is set.
+11. **The control plane can be forged by a compromised bus** (requirement 14).
+    Sealing farmer ↔ sprout stops the bus injecting commands *into a sprout*,
+    but not asking *farmer* to send them. Verified with throwaway tests
+    against `main`:
+    - The CLI's NKey signs the bus's `CONNECT` nonce, and an API token is
+      only a signature over an expiry time, with no upper bound. One CLI
+      connection is enough for the bus to mint a token valid until 2099. With
+      an admin's token, `auth.users.add` gives it permanent admin access.
+    - The sprout's NKey signs both the `CONNECT` nonce and its `/v1/refresh`
+      proof. The bus can refresh as any sprout and read its staged rendered
+      recipe, secrets included, from `/files/`.
+    - Captured tokens can be replayed for 5 minutes.
+    - `internal.*` (SaaS API ↔ farmer) trusts the bus's account permissions,
+      so a compromised bus can forge provisioning, deprovisioning, sprout
+      actions and their results.
+
+    **Design written, not built:** "Sealing the control plane" in
+    `docs/design/imas-payload-encryption-design.md` (flagged for security
+    review):
+    - NKeys sign bus nonces only.
+    - Every `imas.api.*` and `internal.*` request and reply becomes a
+      `payloadbox` message under a CLI box key, or under a SaaS API box key
+      and a platform key.
+    - Box-ready sprouts refresh with a sealed proof, with a ratchet per
+      sprout.
+
+    A stopgap that caps token lifetime at 5 minutes can ship ahead of the
+    design.
 
 Known accepted gaps, unchanged: JWT permission re-mint does not apply to
 already-enrolled sprouts (harmless pre-production), and
