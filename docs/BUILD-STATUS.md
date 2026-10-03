@@ -361,11 +361,18 @@ private-repo token is Linux only for now, as in the Ansible role. Atlas was
 considered; goose chosen (MIT).
 
 **Licensing follow-through.** MPL-2.0 is accepted generally (requirement 21)
-and `CLAUDE.md` now says so (PR #41). The decision to replace imas's
-hand-rolled OpenBao HTTP clients with the official Go client has **not** been
-acted on: `go.mod` has no OpenBao client, and `internal/openbaokv`,
-`internal/fleetsign`, `internal/gatewayjwt` and `internal/certs` still speak
-HTTP directly.
+and `CLAUDE.md` now says so (PR #41). CL.2a (ready for review, FLAG FOR
+SECURITY REVIEW) acts on the decision to use the official OpenBao Go client
+for every server-side identity: `internal/openbao` builds
+`github.com/openbao/openbao/api/v2` (MPL-2.0) from each identity's own
+`IMAS_*_OPENBAO_*` block (never `BAO_*`/`VAULT_*`) and owns static-token and
+kubernetes auth, re-login before 80% of the lease, the CA bundle, the 30 s
+timeout with no retries, and an optional `<prefix>NAMESPACE`.
+`internal/openbaokv`, `internal/fleetsign`, `internal/gatewayjwt`,
+`internal/certs`, `internal/pki` (tenant box keys) and `cmd/fleetreleaser`
+use it; their variable names, defaults, HTTP methods and errors are
+unchanged. Only `internal/ingredients/sdb/openbao` (CL.2b, on sprouts) still
+speaks HTTP directly.
 
 ## Docs, CI and tooling merged alongside
 
@@ -505,15 +512,23 @@ HTTP directly.
    (still a fixed 15 s `ReconnectWait`) and a clustered bus (`cmd/farmerbus`
    has no route support, so the chart blocks more than one bus replica).
 4. **Security review of the flagged work**, including FU.0/FU.2/FU.3/FU.4/
-   FU.6b, CL.3 and the J follow-ups, before `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED`
+   FU.6b, CL.2a, CL.3 and the J follow-ups, before `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED`
    is turned on anywhere.
-5. **Clean-ups left by Wave 4** (briefs CL.2a and CL.2b are in
-   `docs/claude-code-parallel-build-plan.md` §4c, not yet dispatched; CL.1,
-   removing `internal/fleetkeys` and its permission, is ready for review in PR #62;
+5. **Clean-ups left by Wave 4** (briefs in
+   `docs/claude-code-parallel-build-plan.md` §4c; CL.1, removing
+   `internal/fleetkeys` and its permission, is ready for review in PR #62;
    CL.3, the outbox sweeper that resumes batches and rollouts after a pod
-   restart, is ready for review in PR #63):
-   replace the hand-rolled OpenBao HTTP clients with the official Go client
-   as decided on 2026-09-29.
+   restart, is ready for review in PR #63): replace the hand-rolled OpenBao
+   HTTP clients with the official Go client as decided on 2026-09-29.
+   **CL.2a** (server side) is ready for review (see "Licensing
+   follow-through"). **CL.2b**, the sprout's `sdb://` provider, is not
+   started; the sprout already links the official client through
+   `internal/fleetsign`, `internal/certs`, `internal/pki` and
+   `internal/gatewayjwt` (+0.22 MiB on linux and windows amd64), so CL.2b
+   should add little size. Also found by CL.2a: the `go-licenses` workflow's
+   `save` step fails on `main` (`modernc.org/mathutil` reports an unknown
+   licence), so `dependencies/` has not been refreshed since glebarez/sqlite
+   arrived.
 6. **`internal/pki`: close the provision/deprovision race (follow-up to
    CL.3).** With the outbox sweeper re-publishing a lost provision request,
    a late copy can still be running on one farmer replica while a

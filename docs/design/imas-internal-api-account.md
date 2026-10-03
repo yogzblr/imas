@@ -385,8 +385,8 @@ REVIEW:** this adds the repo's first OpenBao *write* policy.
   `farmer publish-saasapi-credential` (`internal/saasapicred`) runs
   `pki.EnsureSaaSAPICredential()` and then `pki.PublishSaaSAPICredential`.
   That writes `{jwt, public_key}` (never the seed) to a configurable
-  KV v2 path through a hand-rolled client (`internal/openbaokv`; the
-  OpenBao SDK is MPL-2.0). It writes nothing when the published JWT is
+  KV v2 path through `internal/openbaokv`, on the official OpenBao Go
+  client (`internal/openbao`). It writes nothing when the published JWT is
   already current by claims. The reference Job
   (`deploy/farmer/saasapi-credential-publish-job.yaml`) runs farmer's image
   with the same seed Secret and an emptyDir PKI directory. That means it

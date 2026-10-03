@@ -6,7 +6,7 @@ Companion to `imas-nats-jwt-auth-design.md`. Covers Phase 0 of `imas-master-plan
 
 **Gateway JWT construction + JWKS serving:** `github.com/lestrrat-go/jwx/v2` (MIT). Its `jws` package supports detached signing — build the signing input, get a signature from wherever (here, OpenBao Transit), assemble the compact token — rather than insisting on holding a local private key, which fits the Transit-based custody model directly. Its `jwk` package builds a correct OKP/Ed25519 JWK (`jwk.FromRaw()`) for the JWKS response without hand-rolling base64url encoding.
 
-**OpenBao client:** `github.com/openbao/openbao/api` (MPL-2.0, same accepted licensing exception already carved out for OpenBao itself) — handles token renewal, retries, and TLS against OpenBao's Transit `sign` endpoint, rather than hand-written HTTP calls.
+**OpenBao client:** `github.com/openbao/openbao/api/v2` (MPL-2.0, same accepted licensing exception already carved out for OpenBao itself), through `internal/openbao` — TLS, auth (static token, or kubernetes login repeated before the lease runs out) and error decoding against OpenBao's Transit `sign` endpoint, rather than hand-written HTTP calls. As built (CL.2a), requests are not retried, as before the switch.
 
 **Libraries evaluated and rejected for this role:**
 - `golang-jwt/jwt/v5` (MIT) — fine for parsing/verifying, but its `SigningMethodEdDSA` type-asserts on a concrete local `ed25519.PrivateKey`; no detached-signing path, so it fights the Transit custody model rather than fitting it.
