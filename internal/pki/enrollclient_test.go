@@ -36,7 +36,7 @@ func setupSproutFiles(t *testing.T) nkeys.KeyPair {
 	saved := []*string{
 		&config.NKeySproutPrivFile, &config.SproutUserJWTFile, &config.SproutGatewayJWTFile,
 		&config.SproutTenantX25519PubFile, &config.SproutBoxPrivFile, &config.SproutBoxPubFile,
-		&config.SproutFleetSigningJWKS, &config.FarmerURL, &config.SproutBusURLsFile,
+		&config.FarmerURL, &config.SproutBusURLsFile,
 		&config.SproutRootCA,
 	}
 	old := make([]string, len(saved))
@@ -58,7 +58,6 @@ func setupSproutFiles(t *testing.T) nkeys.KeyPair {
 	config.SproutTenantX25519PubFile = filepath.Join(dir, "tenant-x25519.pub")
 	config.SproutBoxPrivFile = filepath.Join(dir, "sprout-x25519.key")
 	config.SproutBoxPubFile = filepath.Join(dir, "sprout-x25519.pub")
-	config.SproutFleetSigningJWKS = filepath.Join(dir, "fleet-signing-jwks.json")
 
 	kp, err := nkeys.CreateUser()
 	if err != nil {

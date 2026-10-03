@@ -83,7 +83,6 @@ func TestLoadConfig_SproutWindowsDefaults(t *testing.T) {
 		{"SproutHandledJobsFile", SproutHandledJobsFile, filepath.Join(root, "state", "sprout", "handled-jobs")},
 		{"SproutPKI", SproutPKI, pki + `\`},
 		{"SproutRootCA", SproutRootCA, filepath.Join(pki, "tls-rootca.pem")},
-		{"SproutFleetSigningJWKS", SproutFleetSigningJWKS, filepath.Join(pki, "fleet-signing-jwks.json")},
 		{"NKeySproutPubFile", NKeySproutPubFile, filepath.Join(pki, "sprout.nkey.pub")},
 		{"NKeySproutPrivFile", NKeySproutPrivFile, filepath.Join(pki, "sprout.nkey")},
 		{"SproutUserJWTFile", SproutUserJWTFile, filepath.Join(pki, "sprout.jwt")},
