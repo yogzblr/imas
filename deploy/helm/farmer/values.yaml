@@ -340,8 +340,9 @@ saasapi:
     secretName: imas-saasapi-nats
     seedKey: nats-user.nk
     jwtKey: SAASAPI_NATS_USER_JWT
-  # POST .../sprouts/updates. Off until sprout has a signed self-update
-  # path (yogzblr/imas#286). On needs the fleetSign client below.
+  # POST .../sprouts/updates. The sprout-side update path is built, but
+  # leave this off until the security review and the release UAT gate are
+  # done (docs/BUILD-STATUS.md). On needs the fleetSign client below.
   fleetUpdateDispatch:
     enabled: false
     # SAASAPI_FLEET_UPDATE_CLOCK_SKEW: how far saasapi's and farmer's

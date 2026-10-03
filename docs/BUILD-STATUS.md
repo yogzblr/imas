@@ -17,6 +17,12 @@ run locally; "merged" means reviewed and green in CI, not exercised on real
 hosts. Nothing here has run against production-shaped infrastructure: that is
 what the Terraform UAT gate and the load tests below are for.
 
+**No release has ever been cut.** `yogzblr/imas` has no tag and no GitHub
+release, and neither `release.yml` nor `publish-packages.yml` has run once.
+Everything that depends on a published artifact (the Buildkite registries the
+Ansible role installs from, the signed GHCR images, the Helm charts in
+`imashelm`, the stamped sprout release) is written and reviewed but untried.
+
 ## Requirements traceability
 
 Status against `docs/design/requirements.md`. "Built" means the code is on
@@ -29,7 +35,7 @@ beyond unit tests (real Envoy, Molecule containers, real OpenBao).
 | 2 | DMZ / non-DMZ split | Built | `cmd/farmerbus` (DMZ) vs `cmd/farmer` (core, outbound only); Helm charts `deploy/helm/nats` and `deploy/helm/farmer`, with NetworkPolicies. |
 | 3 | Windows and Unix | Built, **not validated on Windows hosts** | Full G.1–G.9 ingredient set, SCM service wrapper, MSI. Windows paths are cross-compiled and unit-tested; the self-update MSI path is tested with `msiexec` mocked. The Terraform UAT gate would be the first real-host run. |
 | 4 | Deployment automation with Ansible | Built, validated | `ansible/roles/imas_sprout` and `imas_verify`, Molecule CI on Rocky, Debian and openSUSE Leap. |
-| 5 | JWT auth to the NATS websocket; enrollment key only to bootstrap | Built, validated | NATS User JWT plus gateway EdDSA JWT; `POST /v1/enroll`; run through real Envoy v1.35.3. Note: the original wording said "API key based"; `requirements.md` now states the JWT model. |
+| 5 | JWT auth to the NATS websocket; enrollment key only to bootstrap | Built, validated | NATS User JWT plus gateway EdDSA JWT; `POST /v1/enroll`; run through real Envoy v1.35.3. |
 | 6 | Per-sprout JWT | Built, validated | Paired JWTs minted at enrollment and refresh. |
 | 7 | Farmer horizontally scalable | Built, not load-tested | Core is stateless: `QueueSubscribe` on `imas-core`, PXC read-through, Valkey heartbeat, object-store recipes. The bus tier is single-node until farmerbus supports routes (see 1). |
 | 8 | Sprout via proxies | Built | `busproxyurl` (HTTP CONNECT / SOCKS5) for the bus connection; HTTP clients use `ProxyFromEnvironment`. Ansible variable exposed. |
@@ -37,14 +43,14 @@ beyond unit tests (real Envoy, Molecule containers, real OpenBao).
 | 10 | NATS response under 300 ms | **Not validated** | Design removes the synchronous probe loop; no latency measurement has been taken. |
 | 11 | Recipe download uses the same JWT | Built, validated | Same gateway JWT, same Envoy gate. |
 | 12 | Envoy with JWT validation in front of NATS | Built, validated | `deploy/envoy/envoy.yaml`, `jwt_authn` with remote JWKS; checked against real Envoy. Keycloak JWKS cross-check harness has never been run (nice-to-have). |
-| 13 | Backend on Kubernetes (NATS, Valkey, farmer, Percona) | Built | Helm charts with optional PXC/OpenBao/Valkey subcharts; single migration hook Job; sprout-release hook Job. Chart tests and CI render them; no gate has installed them on a real cluster. **No Terraform exists yet** (see the UAT gate row). |
+| 13 | Backend on Kubernetes (NATS, Valkey, farmer, Percona) | Built | Helm charts with optional PXC/OpenBao/Valkey subcharts; single migration hook Job; sprout-release hook Job. Chart tests render them; no gate has installed them on a real cluster. **No Terraform exists yet** (see the UAT gate row). |
 | 14 | Payload encryption, key pair per sprout and per tenant | **Partly built** | Per-tenant and per-sprout X25519 keys; `cmd.run`, `cook` and box-key submissions are sealed end to end. **`shell.*` (interactive PTY) is still plaintext inside TLS**, as are cook step events, `test.ping`, facts, `cancel`, the rotate trigger and log shipping. `shell.*` is the one that matters: a compromised bus can still open a shell on a Unix sprout. |
 | 15 | Key rotation for sprout keys | Built, **deliberately differs from the wording** | The requirement text says the new private key is sent encrypted over NATS. The built design never transmits a private key: the sprout generates the new pair and submits only the public key, farmer-triggered. See `imas-payload-encryption-design.md`. `requirements.md` should be reworded to match (see "Open items"). |
 | 16 | SDB-equivalent secrets in the sprout | Built (v1 tier) | `internal/ingredients/sdb`: OpenBao/Vault (hot-reloaded client cert), Azure Key Vault, AWS Secrets Manager, GCP Secret Manager. CyberArk and Delinea (Tier 2) not built, by design. |
 | 17 | Probe capability (database, HTTP) as a sprout task | Built | `probe.http`, `probe.database`, plus `wait`, `cond`, `on_exit`, registered variables with `sensitive` redaction. |
-| 18 | Installers: yum, apt, zypper, MSI | Built | nfpm deb/rpm/apk, SUSE rpm check, MSI and winget package, published to the Buildkite registries. |
+| 18 | Installers: yum, apt, zypper, MSI | Built, **never published** | nfpm deb/rpm/apk, SUSE rpm check, MSI and winget package, and the workflow that uploads them to the Buildkite registries. No release has ever been cut (see "Release flow" below), so the registries hold no imas packages and nothing has exercised the upload. |
 | 19 | Ansible with one-time key | Built, validated | Join token handled `no_log`, mode `0600`, removed by the sprout after enrollment. |
-| 20 | Fleet updates from the sprout's configured repo | Built, **dispatch off by default** | FU.0–FU.7, FU.6b merged (below). `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` stays `false` until security review and the UAT gate. Linux path has an end-to-end test against a real repository (Nexus); Windows is mock-tested only. |
+| 20 | Fleet updates from the sprout's configured repo | Built, **dispatch off by default** | FU.0–FU.7, FU.6b merged (below). `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` stays `false`, in the Helm chart too, until security review and the UAT gate. Linux path has an end-to-end test against a real repository (Nexus); Windows is mock-tested only. |
 | 21 | Licensing | Built | Apache/MIT default; PXC and MPL-2.0 exceptions recorded; goose (MIT) added; dependency licence files refreshed by the `go-licenses` workflow. |
 
 **Repository-history note, read before trusting a PR number below:** this
@@ -313,7 +319,7 @@ key set fetched over the bus. Release/rollout flow: see `docs/RELEASING.md`.
 
 | Item | What shipped | Status |
 |---|---|---|
-| Release flow (`docs/RELEASING.md`) | One `vMAJOR.MINOR.PATCH` tag releases everything: five GHCR images (keyless cosign), binaries and checksums on GitHub releases, rpm/deb/winget to the Buildkite registries, `farmer` and `nats` charts to `imashelm`. Stale upstream publishers (Docker Hub, Cloudsmith, S3, AUR) removed. | merged — PR #43 (`c3f6f65`), #44 |
+| Release flow (`docs/RELEASING.md`), **never run** | One `vMAJOR.MINOR.PATCH` tag releases everything: five GHCR images (keyless cosign), binaries and checksums on GitHub releases, rpm/deb/winget to the Buildkite registries, `farmer` and `nats` charts to `imashelm`. Stale upstream publishers (Docker Hub, Cloudsmith, S3, AUR) removed. `release.yml` is manual-only until the repo secrets `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE` and `GORELEASER_KEY` (goreleaser-pro, a paid licence; brief REL.1 in plan §4c replaces it with GoReleaser OSS and a `wixl` build hook, after which the key is not needed) exist, and `publish-packages.yml` needs the Buildkite organisation variable and token. No tag exists and neither workflow has a run. | merged — PR #43 (`c3f6f65`), #44 |
 | DB.1 goose migrations | `cmd/migrate` and `internal/migrations` (goose, embedded SQL, no CGO): baseline per schema, row-based run lock (not `GET_LOCK`, which is node-local on Galera), `up` and `check`; GORM `AutoMigrate` removed from `internal/pxc` and saasapi; services check the schema version at startup. `saas` migrations 00001–00005 and `farmer` 00001 are on `main`. | merged — PR #46 (`1e56315`) |
 | DB.2 Migration hook Job | `db-migrate-job.yaml` replaces `db-bootstrap-job.yaml`: one pod, `pre-upgrade`/`pre-rollback`, `post-install` with the bundled PXC; `imas-migrate` image shipped; chart tests extended | merged — PR #48 (`691a1bc`) |
 | FU.0 Signed manifest | URL-free manifest (`imas-fleet-manifest-v1|version|os|arch|file_name|checksum_sha256|min_sprout_version`) signed with the Transit key, verified against a keyring; `selfupdate` and `sprout_action` reworked. FLAG FOR SECURITY REVIEW | merged — PR #45 (`c5ecebe`) |
@@ -479,6 +485,13 @@ HTTP directly.
    the Windows paths, the Helm charts and the Buildkite packages on real
    infrastructure. Brief: `docs/claude-code-parallel-build-plan.md` §4a.
    Needs a human decision on the compute provider before dispatch.
+   **Prerequisite: a first release.** The gate installs *published*
+   packages, and none exist. Someone must set the release secrets, tag a
+   pre-release (for example `v0.1.0-rc.1`), run **Release** on that tag, review
+   the draft and publish it, and fix whatever the first real run of the
+   pipeline turns up (cosign verification, the Buildkite uploads, the chart
+   stamp). Dispatch brief REL.1 (plan §4c) first so the paid
+   GoReleaser Pro key is not one of the secrets. Do this before dispatching the UAT brief.
 2. **`shell.*` is not sealed** (requirement 14). An interactive PTY is started
    from a plaintext request on `imas.sprouts.<id>.shell.start`; a compromised
    bus can still get a shell on any Unix sprout, which undoes the value of
@@ -510,3 +523,19 @@ Known accepted gaps, unchanged: JWT permission re-mint does not apply to
 already-enrolled sprouts (harmless pre-production), and
 `internal/natsapi/router.go`'s tenant-facing subjects do not validate
 `msg.Reply` (inherited from upstream grlx).
+
+## Re-evaluation, 2026-10-03
+
+A second pass over the 2026-10-02 refresh, checking its claims against `main`
+(no code had changed in between). Corrected: the release flow and installers
+were described as published when nothing has ever been released; a note on
+requirement 5 about "original wording" that could not be supported was removed;
+`README.md` said message payloads are encrypted with per-tenant and per-sprout
+keys without saying only `cmd.run`, `cook` and box-key submissions are;
+`deploy/helm/farmer/values.yaml` still cited the dead `imas#286`;
+`docs-site/src/architecture.md` omitted `fleetreleaser` and the migration Job. Confirmed as written: no AutoMigrate on production paths
+(`migrateSchema` in `internal/saasapi/db.go` is used only by tests, though it
+sits in a non-test file); dispatch defaults off in the chart; all 18 `saasapi`
+routes (16 unconditional, 2 behind the flag); Envoy uses remote JWKS; key
+rotation never transmits a private key; the sdb Tier 2 gap is by design; the
+scale plan did call out reconnect-storm hardening.
