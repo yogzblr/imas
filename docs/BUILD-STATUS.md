@@ -490,7 +490,8 @@ HTTP directly.
 4. **Security review of the flagged work**, including FU.0/FU.2/FU.3/FU.4/
    FU.6b and the J follow-ups, before `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED`
    is turned on anywhere.
-5. **Clean-ups left by Wave 4:** remove `internal/fleetkeys` and its
+5. **Clean-ups left by Wave 4** (briefs CL.1, CL.2a, CL.2b and CL.3 are in
+   `docs/claude-code-parallel-build-plan.md` §4c, not yet dispatched): remove `internal/fleetkeys` and its
    permission (dead for fleet keys); replace the hand-rolled OpenBao HTTP
    clients with the official Go client as decided on 2026-09-29; the outbox
    sweeper that resumes batches and rollouts after a pod restart.
