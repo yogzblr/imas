@@ -361,7 +361,7 @@ private-repo token is Linux only for now, as in the Ansible role. Atlas was
 considered; goose chosen (MIT).
 
 **Licensing follow-through.** MPL-2.0 is accepted generally (requirement 21)
-and `CLAUDE.md` now says so (PR #41). CL.2a (ready for review, FLAG FOR
+and `CLAUDE.md` now says so (PR #41). CL.2a (ready for review in PR #66, FLAG FOR
 SECURITY REVIEW) acts on the decision to use the official OpenBao Go client
 for every server-side identity: `internal/openbao` builds
 `github.com/openbao/openbao/api/v2` (MPL-2.0) from each identity's own
@@ -520,7 +520,7 @@ speaks HTTP directly.
    CL.3, the outbox sweeper that resumes batches and rollouts after a pod
    restart, is ready for review in PR #63): replace the hand-rolled OpenBao
    HTTP clients with the official Go client as decided on 2026-09-29.
-   **CL.2a** (server side) is ready for review (see "Licensing
+   **CL.2a** (server side) is ready for review in PR #66 (see "Licensing
    follow-through"). **CL.2b**, the sprout's `sdb://` provider, is not
    started; the sprout already links the official client through
    `internal/fleetsign`, `internal/certs`, `internal/pki` and
