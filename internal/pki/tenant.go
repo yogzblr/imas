@@ -371,6 +371,13 @@ func ProvisionTenant(tenantID, name string) error {
 // delete on-disk key material or sprout state — only ProvisionTenant
 // re-establishing trust can bring a deprovisioned tenant back,
 // deliberately (see ensureTenantAccount).
+//
+// Calling it again for an already-deprovisioned tenant re-pushes the
+// stored locked-out Account JWT. That is what makes a failed push
+// retryable: the tenant is marked deleted before the push, so if no bus
+// node took the push (all down, or all fenced by cmd/farmerbus during a
+// partition), returning early on the retry would leave the tenant live on
+// the bus with nothing left to lock it out.
 func DeprovisionTenant(tenantID string) error {
 	if !IsValidTenantID(tenantID) {
 		return ErrTenantIDInvalid
@@ -386,14 +393,15 @@ func DeprovisionTenant(tenantID string) error {
 	if err != nil {
 		return err
 	}
-	if alreadyDeleted {
-		return nil
-	}
 	if err := pushAccountUpdate(mat, signedJWT); err != nil {
 		log.Errorf("failed to push tenant %q's locked-out Account JWT to the bus resolver: %v", tenantID, err)
 		return err
 	}
-	log.Infof("Deprovisioned tenant %q: locked-out Account JWT pushed to the bus resolver.", tenantID)
+	if alreadyDeleted {
+		log.Infof("Tenant %q was already deprovisioned: re-pushed its locked-out Account JWT to the bus resolver.", tenantID)
+	} else {
+		log.Infof("Deprovisioned tenant %q: locked-out Account JWT pushed to the bus resolver.", tenantID)
+	}
 	// See OnTenantDeprovisioned's doc comment: lets cmd/farmer/main.go close
 	// this tenant's NATS connection and unregister its handlers.
 	if tenantDeprovisionedHook != nil {
@@ -405,7 +413,10 @@ func DeprovisionTenant(tenantID string) error {
 // deprovisionTenantLocked is DeprovisionTenant's tenantAuthMu-guarded body:
 // it marks tenantID deleted and re-signs its Account JWT locked out (see
 // lockOutAccount), but leaves the actual bus push to the caller (network
-// I/O shouldn't happen while holding this lock).
+// I/O shouldn't happen while holding this lock). For a tenant already
+// marked deleted it returns the stored locked-out JWT (re-locking it if
+// the stored one somehow isn't), with alreadyDeleted true, so the caller
+// can push it again.
 func deprovisionTenantLocked(mat *natsAuthMaterial, tenantID string) (signedJWT string, alreadyDeleted bool, err error) {
 	tenantAuthMu.Lock()
 	defer tenantAuthMu.Unlock()
@@ -414,21 +425,38 @@ func deprovisionTenantLocked(mat *natsAuthMaterial, tenantID string) (signedJWT 
 	if err != nil {
 		return "", false, err
 	}
+	var current string
 	if row.Deleted {
-		return "", true, nil
+		b, err := os.ReadFile(tenantAccountJWTPath(tenantID))
+		if err != nil {
+			return "", true, fmt.Errorf("pki: reading deprovisioned tenant %q's Account JWT: %w", tenantID, err)
+		}
+		current = string(b)
+	} else {
+		tam, _, err := ensureTenantAccountMaterial(mat, tenantID, row.Name)
+		if err != nil {
+			return "", false, err
+		}
+		current = tam.jwt
 	}
-	tam, _, err := ensureTenantAccountMaterial(mat, tenantID, row.Name)
+	ac, err := jwt.DecodeAccountClaims(current)
 	if err != nil {
-		return "", false, err
+		return "", row.Deleted, fmt.Errorf("pki: decoding tenant %q's Account JWT: %w", tenantID, err)
 	}
-	ac, err := jwt.DecodeAccountClaims(tam.jwt)
-	if err != nil {
-		return "", false, fmt.Errorf("pki: decoding tenant %q's Account JWT: %w", tenantID, err)
+	if row.Deleted && isLockedOut(ac) {
+		return current, true, nil
 	}
+	waitPastIssuedAt(ac.IssuedAt)
 	lockOutAccount(ac, time.Now())
 	signed, err := ac.Encode(mat.operatorSigningKP)
 	if err != nil {
-		return "", false, fmt.Errorf("pki: re-signing tenant %q's Account JWT locked out: %w", tenantID, err)
+		return "", row.Deleted, fmt.Errorf("pki: re-signing tenant %q's Account JWT locked out: %w", tenantID, err)
+	}
+	if row.Deleted {
+		if err := os.WriteFile(tenantAccountJWTPath(tenantID), []byte(signed), 0o600); err != nil {
+			return "", true, err
+		}
+		return signed, true, nil
 	}
 	if err := os.WriteFile(tenantAccountJWTPath(tenantID), []byte(signed), 0o600); err != nil {
 		return "", false, err
@@ -461,6 +489,28 @@ func lockOutAccount(ac *jwt.AccountClaims, now time.Time) {
 	ac.RevokeAt(jwt.All, now)
 	ac.Limits.Conn = 0
 	ac.Limits.LeafNodeConn = 0
+}
+
+// isLockedOut reports whether ac carries lockOutAccount's lock-out.
+func isLockedOut(ac *jwt.AccountClaims) bool {
+	return ac.Limits.Conn == 0 && ac.Limits.LeafNodeConn == 0 && ac.Revocations[jwt.All] > 0
+}
+
+// waitPastIssuedAt sleeps, at most about a second, until the wall clock is
+// in a later second than prevIssuedAt, so the JWT signed next gets a
+// strictly newer iat than the one it replaces.
+//
+// The bus resolver syncs Account JWTs between nodes by "newest iat wins",
+// and treats two JWTs with the same jti as the same JWT. jwt/v2 derives
+// the jti from the generic claims only (subject, issuer, name, iat), not
+// from limits or revocations, so a lock-out signed in the same second as
+// the live JWT before it has the same jti, and a cluster node holding the
+// live one would never take the lock-out from its peers (see
+// cmd/farmerbus/fence.go).
+func waitPastIssuedAt(prevIssuedAt int64) {
+	if d := time.Until(time.Unix(prevIssuedAt+1, 0)); d > 0 {
+		time.Sleep(d)
+	}
 }
 
 // syncTenantSprouts is syncNatsAuth (jwtusers.go) parameterized by an
