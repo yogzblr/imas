@@ -2,32 +2,59 @@
 // customer-managed HashiCorp Vault, authenticating via a customer-supplied
 // client certificate (cert auth) rather than any credential imas controls.
 //
-// The official OpenBao/Vault Go client (github.com/openbao/openbao/api,
-// github.com/hashicorp/vault/api) is MPL-2.0 licensed, which conflicts with
-// this repo's Apache-2.0/MIT-only dependency constraint (see CLAUDE.md).
-// This package therefore talks to Vault's HTTP API directly with net/http
-// instead of depending on either SDK.
+// Requests go through the official OpenBao Go client,
+// github.com/openbao/openbao/api/v2 (MPL-2.0, used unmodified; accepted by
+// docs/design/requirements.md item 21), which speaks the same HTTP API as
+// HashiCorp Vault. It does not use internal/openbao, the server-side
+// wrapper: that package configures an identity from an
+// IMAS_<NAME>_OPENBAO_* block and authenticates with a static token or
+// kubernetes auth, while this provider runs on customer sprouts against
+// the customer's own server with a client certificate. What it keeps from
+// before the migration:
+//
+//   - the client certificate is presented through an sdb.CertWatcher, and
+//     keep-alives are off, so a rotated certificate is used from the next
+//     request on without a sprout restart;
+//   - the cert-auth login token is cached in an sdb.TokenCache until 90%
+//     of its lease has passed;
+//   - no BAO_* or VAULT_* variable is read (api.NewConfig, never
+//     api.DefaultConfig), so a customer's VAULT_TOKEN, VAULT_SKIP_VERIFY or
+//     VAULT_NAMESPACE meant for other tools never reaches this provider;
+//   - a 30 second timeout and no retries;
+//   - the sdb://openbao/<mount>/<path>[#field] syntax, read as KV v2 and,
+//     when that path isn't KV v2, as KV v1.
+//
+// HTTP(S)_PROXY and NO_PROXY apply (http.ProxyFromEnvironment), as for
+// the sprout's other HTTP clients.
+//
+// Errors carry OpenBao's own "errors" strings and HTTP status, never a
+// token, a secret value or a response body that isn't OpenBao's JSON.
+//
+// FLAG FOR SECURITY REVIEW: every customer secret resolved on a sprout
+// passes through here.
 package openbao
 
 import (
 	"context"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"time"
+
+	api "github.com/openbao/openbao/api/v2"
 
 	"github.com/yogzblr/imas/internal/ingredients/sdb"
 	"github.com/yogzblr/imas/internal/log"
 )
 
 const backendName = "openbao"
+
+// requestTimeout bounds every request, login included.
+const requestTimeout = 30 * time.Second
 
 // Environment variables configuring the default, self-registered
 // provider instance. All but the address and cert/key pair are optional.
@@ -49,14 +76,13 @@ var (
 // Provider is the sdb.SecretProvider implementation for OpenBao/Vault
 // cert-authenticated access.
 type Provider struct {
-	Addr       string
-	AuthMount  string // e.g. "cert", mounted path of the cert auth method
-	AuthRole   string // optional named role for auth/<mount>/login
-	httpClient *http.Client
+	Addr      string
+	AuthMount string // e.g. "cert", mounted path of the cert auth method
+	AuthRole  string // optional named role for auth/<mount>/login
 
-	tokenMu     sync.Mutex
-	token       string
-	tokenExpiry time.Time
+	client  *api.Client // never holds a token: each request carries its own
+	tokens  sdb.TokenCache
+	watcher *sdb.CertWatcher // nil when built with newWithTransport
 }
 
 // Compile-time interface check.
@@ -67,47 +93,105 @@ var _ sdb.SecretProvider = (*Provider)(nil)
 // is picked up without a restart) and, optionally, verifies the server
 // against caCertFile instead of the system trust store.
 func New(addr, certFile, keyFile, caCertFile, authMount, authRole string) (*Provider, error) {
+	return newWithCertWatch(addr, certFile, keyFile, caCertFile, authMount, authRole, 0)
+}
+
+// newWithCertWatch is New with the CertWatcher's polling interval (0 for
+// sdb.DefaultCertWatchInterval), so tests can rotate a cert quickly.
+func newWithCertWatch(addr, certFile, keyFile, caCertFile, authMount, authRole string, interval time.Duration) (*Provider, error) {
 	if addr == "" || certFile == "" || keyFile == "" {
 		return nil, ErrNotConfigured
 	}
-	if authMount == "" {
-		authMount = "cert"
-	}
-	watcher, err := sdb.NewCertWatcher(certFile, keyFile, 0)
-	if err != nil {
-		return nil, err
-	}
-	tlsCfg := &tls.Config{
-		GetClientCertificate: watcher.GetClientCertificate,
-		MinVersion:           tls.VersionTLS12,
-	}
+	var pool *x509.CertPool
 	if caCertFile != "" {
 		pem, err := os.ReadFile(caCertFile)
 		if err != nil {
 			return nil, fmt.Errorf("reading CA bundle: %w", err)
 		}
-		pool := x509.NewCertPool()
+		pool = x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(pem) {
 			return nil, fmt.Errorf("no certificates found in CA bundle %s", caCertFile)
 		}
-		tlsCfg.RootCAs = pool
 	}
-	return newWithTransport(addr, authMount, authRole, &http.Transport{
-		TLSClientConfig: tlsCfg,
-		// Cert rotation is only observed on a fresh TLS handshake. Secret
-		// reads are infrequent enough (recipe execution, not a hot loop)
-		// that trading away connection reuse for "the very next request
-		// after rotation uses the new cert" is the right default.
-		DisableKeepAlives: true,
-	}), nil
+	watcher, err := sdb.NewCertWatcher(certFile, keyFile, interval)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg := api.NewConfig()
+	if cfg.Error != nil {
+		watcher.Close()
+		return nil, fmt.Errorf("%w: %w", ErrNotConfigured, cfg.Error)
+	}
+	// NewConfig's transport: go-cleanhttp's pooled transport with a TLS
+	// 1.2 minimum and HTTP/2 configured. Only the settings below differ.
+	transport := cfg.HttpClient.Transport.(*http.Transport)
+	transport.Proxy = http.ProxyFromEnvironment
+	transport.TLSClientConfig.GetClientCertificate = watcher.GetClientCertificate
+	if pool != nil {
+		transport.TLSClientConfig.RootCAs = pool
+	}
+	// Cert rotation is only observed on a fresh TLS handshake. Secret
+	// reads are infrequent enough (recipe execution, not a hot loop)
+	// that trading away connection reuse for "the very next request
+	// after rotation uses the new cert" is the right default.
+	transport.DisableKeepAlives = true
+
+	p, err := newWithConfig(addr, authMount, authRole, cfg)
+	if err != nil {
+		watcher.Close()
+		return nil, err
+	}
+	p.watcher = watcher
+	return p, nil
 }
 
+// newWithTransport builds a Provider whose requests go through transport
+// instead of a client-certificate one, for tests against a plain
+// httptest server.
 func newWithTransport(addr, authMount, authRole string, transport http.RoundTripper) *Provider {
-	return &Provider{
-		Addr:       strings.TrimRight(addr, "/"),
-		AuthMount:  authMount,
-		AuthRole:   authRole,
-		httpClient: &http.Client{Transport: transport, Timeout: 30 * time.Second},
+	cfg := api.NewConfig()
+	cfg.HttpClient.Transport = transport
+	p, err := newWithConfig(addr, authMount, authRole, cfg)
+	if err != nil {
+		panic(err)
+	}
+	return p
+}
+
+func newWithConfig(addr, authMount, authRole string, cfg *api.Config) (*Provider, error) {
+	if authMount == "" {
+		authMount = "cert"
+	}
+	addr = strings.TrimRight(addr, "/")
+	cfg.Address = addr
+	cfg.Timeout = requestTimeout
+	cfg.HttpClient.Timeout = requestTimeout
+	cfg.MaxRetries = 0
+	client, err := api.NewClient(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrNotConfigured, err)
+	}
+	// NewClient reads no environment with NewConfig's DisableEnvironment;
+	// clear anyway, so only the login token is ever sent.
+	client.ClearToken()
+	client.ClearNamespace()
+
+	p := &Provider{
+		Addr:      addr,
+		AuthMount: strings.Trim(authMount, "/"),
+		AuthRole:  authRole,
+		client:    client,
+	}
+	p.tokens.Fetch = p.login
+	return p, nil
+}
+
+// Close stops the client certificate watcher. The registered provider
+// lives as long as the sprout and never needs it.
+func (p *Provider) Close() {
+	if p.watcher != nil {
+		p.watcher.Close()
 	}
 }
 
@@ -139,81 +223,22 @@ func init() {
 	}
 }
 
-type loginResponse struct {
-	Auth *struct {
-		ClientToken   string `json:"client_token"`
-		LeaseDuration int    `json:"lease_duration"`
-	} `json:"auth"`
-	Errors []string `json:"errors"`
-}
-
 // login authenticates via the cert auth method over the already-mTLS'd
-// connection and caches the resulting token until shortly before its
-// lease expires.
-func (p *Provider) login(ctx context.Context) (string, error) {
-	body := []byte("{}")
+// connection. It is the TokenCache's Fetch, which keeps the token until
+// 90% of its lease has passed.
+func (p *Provider) login(ctx context.Context) (string, time.Duration, error) {
+	body := map[string]string{}
 	if p.AuthRole != "" {
-		b, err := json.Marshal(map[string]string{"name": p.AuthRole})
-		if err != nil {
-			return "", err
-		}
-		body = b
+		body["name"] = p.AuthRole
 	}
-	reqURL := fmt.Sprintf("%s/v1/auth/%s/login", p.Addr, p.AuthMount)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, strings.NewReader(string(body)))
+	secret, err := p.request(ctx, "", http.MethodPost, "auth/"+p.AuthMount+"/login", body)
 	if err != nil {
-		return "", err
+		return "", 0, fmt.Errorf("%w: %w", ErrLoginFailed, err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("%w: %w", ErrLoginFailed, err)
+	if secret == nil || secret.Auth == nil || secret.Auth.ClientToken == "" {
+		return "", 0, fmt.Errorf("%w: %s", ErrLoginFailed, joinWarnings(secret))
 	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("%w: reading response: %w", ErrLoginFailed, err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("%w: status %d: %s", ErrLoginFailed, resp.StatusCode, string(data))
-	}
-	var lr loginResponse
-	if err := json.Unmarshal(data, &lr); err != nil {
-		return "", fmt.Errorf("%w: decoding response: %w", ErrLoginFailed, err)
-	}
-	if lr.Auth == nil || lr.Auth.ClientToken == "" {
-		return "", fmt.Errorf("%w: %s", ErrLoginFailed, strings.Join(lr.Errors, "; "))
-	}
-	p.tokenMu.Lock()
-	p.token = lr.Auth.ClientToken
-	// Renew a little before the lease actually expires.
-	margin := time.Duration(lr.Auth.LeaseDuration) * time.Second / 10
-	p.tokenExpiry = time.Now().Add(time.Duration(lr.Auth.LeaseDuration)*time.Second - margin)
-	p.tokenMu.Unlock()
-	return lr.Auth.ClientToken, nil
-}
-
-func (p *Provider) currentToken(ctx context.Context) (string, error) {
-	p.tokenMu.Lock()
-	tok := p.token
-	valid := tok != "" && time.Now().Before(p.tokenExpiry)
-	p.tokenMu.Unlock()
-	if valid {
-		return tok, nil
-	}
-	return p.login(ctx)
-}
-
-type kvV2Response struct {
-	Data struct {
-		Data map[string]any `json:"data"`
-	} `json:"data"`
-	Errors []string `json:"errors"`
-}
-
-type kvV1Response struct {
-	Data   map[string]any `json:"data"`
-	Errors []string       `json:"errors"`
+	return secret.Auth.ClientToken, time.Duration(secret.Auth.LeaseDuration) * time.Second, nil
 }
 
 // Get implements sdb.SecretProvider. ref is
@@ -229,13 +254,19 @@ func (p *Provider) Get(ctx context.Context, ref string) (string, error) {
 		return "", err
 	}
 
-	token, err := p.currentToken(ctx)
+	token, err := p.tokens.Get(ctx)
 	if err != nil {
 		return "", err
 	}
 
 	fields, err := p.readKV(ctx, token, mount, secretPath)
 	if err != nil {
+		// A token revoked or expired early on the server answers 403;
+		// log in afresh on the next Get rather than until the cached
+		// lease runs out.
+		if statusCode(err) == http.StatusForbidden {
+			p.tokens.Invalidate()
+		}
 		return "", err
 	}
 	return sdb.SelectField(fields, u.Fragment)
@@ -264,62 +295,109 @@ func (p *Provider) readKV(ctx context.Context, token, mount, secretPath string) 
 var errNotKVv2 = errors.New("not a kv-v2 mount")
 
 func (p *Provider) readKVv2(ctx context.Context, token, mount, secretPath string) (map[string]string, error) {
-	reqURL := fmt.Sprintf("%s/v1/%s/data/%s", p.Addr, mount, secretPath)
-	data, status, err := p.doRead(ctx, token, reqURL)
+	secret, err := p.request(ctx, token, http.MethodGet, mount+"/data/"+secretPath, nil)
+	if statusCode(err) == http.StatusNotFound {
+		return nil, errNotKVv2
+	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrReadFailed, err)
 	}
-	if status == http.StatusNotFound {
+	if secret == nil || secret.Data == nil {
 		return nil, errNotKVv2
 	}
-	if status != http.StatusOK {
-		return nil, fmt.Errorf("%w: status %d: %s", ErrReadFailed, status, string(data))
-	}
-	var kr kvV2Response
-	if err := json.Unmarshal(data, &kr); err != nil {
-		return nil, fmt.Errorf("%w: decoding response: %w", ErrReadFailed, err)
-	}
-	if kr.Data.Data == nil {
+	data, ok := secret.Data["data"].(map[string]any)
+	if !ok {
 		return nil, errNotKVv2
 	}
-	return stringify(kr.Data.Data), nil
+	return stringify(data), nil
 }
 
 func (p *Provider) readKVv1(ctx context.Context, token, mount, secretPath string) (map[string]string, error) {
-	reqURL := fmt.Sprintf("%s/v1/%s/%s", p.Addr, mount, secretPath)
-	data, status, err := p.doRead(ctx, token, reqURL)
+	secret, err := p.request(ctx, token, http.MethodGet, mount+"/"+secretPath, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrReadFailed, err)
 	}
-	if status != http.StatusOK {
-		return nil, fmt.Errorf("%w: status %d: %s", ErrReadFailed, status, string(data))
+	if secret == nil || secret.Data == nil {
+		return nil, fmt.Errorf("%w: %s", ErrReadFailed, joinWarnings(secret))
 	}
-	var kr kvV1Response
-	if err := json.Unmarshal(data, &kr); err != nil {
-		return nil, fmt.Errorf("%w: decoding response: %w", ErrReadFailed, err)
-	}
-	if kr.Data == nil {
-		return nil, fmt.Errorf("%w: %s", ErrReadFailed, strings.Join(kr.Errors, "; "))
-	}
-	return stringify(kr.Data), nil
+	return stringify(secret.Data), nil
 }
 
-func (p *Provider) doRead(ctx context.Context, token, reqURL string) ([]byte, int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return nil, 0, err
+// request sends method /v1/<path> as token ("" for none) with body, if
+// not nil, as JSON, and parses the response. A 2xx with an empty body
+// returns (nil, nil).
+func (p *Provider) request(ctx context.Context, token, method, path string, body any) (*api.Secret, error) {
+	r := p.client.NewRequest(method, "/v1/"+strings.TrimLeft(path, "/"))
+	r.ClientToken = token
+	if body != nil {
+		if err := r.SetJSONBody(body); err != nil {
+			return nil, fmt.Errorf("encoding request: %w", err)
+		}
+		r.Headers.Set("Content-Type", "application/json")
 	}
-	req.Header.Set("X-Vault-Token", token)
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		return nil, 0, fmt.Errorf("%w: %w", ErrReadFailed, err)
+	resp, err := p.client.RawRequestWithContext(ctx, r)
+	if resp != nil {
+		defer resp.Body.Close()
 	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, 0, fmt.Errorf("%w: reading response: %w", ErrReadFailed, err)
+		return nil, responseError(err)
 	}
-	return data, resp.StatusCode, nil
+	// The client follows one redirect and treats any other 3xx as
+	// success; only a 2xx carries a secret.
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, &statusError{code: resp.StatusCode}
+	}
+	secret, err := api.ParseSecret(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return secret, nil
+}
+
+// statusError is a non-2xx answer. Its message is the status and
+// OpenBao's "errors" strings only: a body that isn't OpenBao's JSON (a
+// proxy's or load balancer's error page, which might echo the request
+// and its token) is left out, as is the request URL.
+type statusError struct {
+	code   int
+	errors []string
+}
+
+func (e *statusError) Error() string {
+	if len(e.errors) == 0 {
+		return fmt.Sprintf("status %d", e.code)
+	}
+	return fmt.Sprintf("status %d: %s", e.code, strings.Join(e.errors, "; "))
+}
+
+func responseError(err error) error {
+	var re *api.ResponseError
+	if !errors.As(err, &re) {
+		return err
+	}
+	se := &statusError{code: re.StatusCode}
+	if !re.RawError {
+		se.errors = re.Errors
+	}
+	return se
+}
+
+// statusCode returns the HTTP status of a *statusError in err's chain, or 0.
+func statusCode(err error) int {
+	var se *statusError
+	if errors.As(err, &se) {
+		return se.code
+	}
+	return 0
+}
+
+// joinWarnings describes a 2xx response that lacked what was asked for,
+// using only its warnings (never its data).
+func joinWarnings(secret *api.Secret) string {
+	if secret == nil || len(secret.Warnings) == 0 {
+		return "empty response"
+	}
+	return strings.Join(secret.Warnings, "; ")
 }
 
 func stringify(m map[string]any) map[string]string {
@@ -329,6 +407,8 @@ func stringify(m map[string]any) map[string]string {
 		case string:
 			out[k] = val
 		default:
+			// Numbers arrive as json.Number (the client decodes with
+			// UseNumber) and marshal back to their literal text.
 			b, err := json.Marshal(val)
 			if err != nil {
 				continue

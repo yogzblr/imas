@@ -18,7 +18,7 @@ is used unmodified, or any change to it is shared. For MPL-2.0 modules
 
 | Module | Licence | Pulled in by |
 |---|---|---|
-| `github.com/openbao/openbao/api/v2` | MPL-2.0 | `internal/openbao`, the official OpenBao Go client behind every server-side OpenBao identity |
+| `github.com/openbao/openbao/api/v2` | MPL-2.0 | `internal/openbao`, the official OpenBao Go client behind every server-side OpenBao identity, and the sprout's `sdb://openbao` provider (`internal/ingredients/sdb/openbao`), so it ships in the sprout binary |
 | `github.com/hashicorp/errwrap`, `go-cleanhttp`, `go-multierror`, `go-retryablehttp`, `go-secure-stdlib/parseutil`, `go-secure-stdlib/strutil`, `go-sockaddr`, `hcl` | MPL-2.0 | the OpenBao client |
 | `github.com/go-sql-driver/mysql` | MPL-2.0 | the PXC/MySQL store |
 
