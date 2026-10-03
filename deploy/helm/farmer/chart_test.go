@@ -961,17 +961,19 @@ func TestSaasapiFleetUpdateClockSkewEnv(t *testing.T) {
 // only when set, so saasapi's own defaults apply otherwise.
 func TestSaasapiOutboxSweeperEnv(t *testing.T) {
 	names := []string{"SAASAPI_OUTBOX_SWEEP_INTERVAL", "SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER",
-		"SAASAPI_OUTBOX_ACTION_STALE_AFTER", "SAASAPI_OUTBOX_MAX_ATTEMPTS", "SAASAPI_OUTBOX_LEASE_TTL"}
+		"SAASAPI_OUTBOX_ACTION_STALE_AFTER", "SAASAPI_OUTBOX_MAX_ATTEMPTS", "SAASAPI_OUTBOX_LEASE_TTL",
+		"SAASAPI_OUTBOX_ACTION_MAX_AGE"}
 	for _, tc := range []struct {
 		args    []string
 		enabled string
 		want    []string
 	}{
-		{nil, "true", []string{"", "", "", "", ""}},
-		{[]string{"--set", "saasapi.outboxSweeper.enabled=false"}, "false", []string{"", "", "", "", ""}},
+		{nil, "true", []string{"", "", "", "", "", ""}},
+		{[]string{"--set", "saasapi.outboxSweeper.enabled=false"}, "false", []string{"", "", "", "", "", ""}},
 		{[]string{"--set", "saasapi.outboxSweeper.interval=10s", "--set", "saasapi.outboxSweeper.provisioningStaleAfter=5m",
 			"--set", "saasapi.outboxSweeper.actionStaleAfter=90s", "--set", "saasapi.outboxSweeper.maxAttempts=3",
-			"--set", "saasapi.outboxSweeper.leaseTTL=1m"}, "true", []string{"10s", "5m", "90s", "3", "1m"}},
+			"--set", "saasapi.outboxSweeper.leaseTTL=1m", "--set", "saasapi.outboxSweeper.actionMaxAge=10m"},
+			"true", []string{"10s", "5m", "90s", "3", "1m", "10m"}},
 	} {
 		env := envMap(container(t, find(t, mustRender(t, tc.args...), "Deployment", "t-farmer-saasapi"), "saasapi"))
 		if e := env["SAASAPI_OUTBOX_SWEEPER_ENABLED"]; e == nil || e["value"] != tc.enabled {

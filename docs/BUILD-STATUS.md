@@ -328,7 +328,7 @@ key set fetched over the bus. Release/rollout flow: see `docs/RELEASING.md`.
 | FU.2 Sprout fetch, verify, install | Sprout reads its repository's own index (apt, rpm incl. zstd, NuGet flat container), verifies signature and SHA-256, installs with `dpkg -i`, `rpm -U`, `zypper` or `msiexec`, refuses downgrades; keyring shipped in deb/rpm/MSI; Ansible variables for repo URL and token; `testing/selfupdate-e2e` drives a real cycle against Nexus on Debian and Rocky. FLAG FOR SECURITY REVIEW | merged — PR #53 (`f3d035d`) |
 | FU.7 Farmer dispatch | Farmer dispatches `self_update` as `{version}` only and re-verifies it against the catalog (`internal/fleetcatalog`) before sending | merged — PR #53 |
 | CL.1 Remove the dead live fleet-key path | Deleted `internal/fleetkeys` and its farmer wiring, `payloadbox.PurposeFleetSigningResponse`, the `imas.sprouts.<id>.fleetsigningkeys` grant in sprout JWTs, `fleet_signing_jwks` in `POST /v1/enroll` (farmer and sprout client), `GET /v1/.well-known/fleet-signing-jwks.json`, the sprout's enrollment pin (`internal/pki/fleetkey.go`) and the `sproutfleetsigningjwks` setting. Enrollment no longer needs the fleet key source. A sprout built before this refuses to enrol against a farmer built after it: upgrade sprouts first, or re-enrol. FLAG FOR SECURITY REVIEW | ready for review — PR #62 |
-| CL.3 Outbox sweeper | `internal/saasapi/sweeper.go`, on every saasapi replica (`SAASAPI_OUTBOX_*`, Helm `saasapi.outboxSweeper.*`). Row leases (`lease_owner`/`lease_until`, claimed by one conditional `UPDATE` that must affect the row; not `GET_LOCK`), migration `saas/00006`, which also adds `provisioning_jobs.last_dispatched_at`, `asset_action_items.dispatched_at` and `planned_at_target` (what a resumed rollout needs and wasn't stored) and an index on `asset_action_items.status`. Re-publishes pending provisioning jobs with exponential backoff, failing them after `SAASAPI_OUTBOX_MAX_ATTEMPTS`; re-sends §1.5 items still `queued`, never ones in `dispatching`; with dispatch enabled, takes over an update rollout whose lease lapsed and resumes it from the database, gating already-sent items on deadlines from their dispatch time and re-checking approval, revocation, registration and the tenant before every wave. Farmer's handling of a repeated `job_id` checked: harmless on its own; the one race (a late provision copy against a deprovision) is mitigated in saasapi by `DELETE` waiting out a re-published provision job, with the `internal/pki` fix left open (out of scope). Tested with sqlite and against MySQL 8. FLAG FOR SECURITY REVIEW | ready for review — PR #63 |
+| CL.3 Outbox sweeper | `internal/saasapi/sweeper.go`, on every saasapi replica (`SAASAPI_OUTBOX_*`, Helm `saasapi.outboxSweeper.*`). Row leases (`lease_owner`/`lease_until`, claimed by one conditional `UPDATE` that must affect the row; not `GET_LOCK`), migration `saas/00006`, which also adds `provisioning_jobs.last_dispatched_at`, `asset_action_items.dispatched_at` and `planned_at_target` (what a resumed rollout needs and wasn't stored) and an index on `asset_action_items.status`. Re-publishes pending provisioning jobs with exponential backoff, failing them after `SAASAPI_OUTBOX_MAX_ATTEMPTS`; re-sends §1.5 items still `queued` (failing them `expired_not_sent` past `SAASAPI_OUTBOX_ACTION_MAX_AGE`, 15m), never ones in `dispatching`, which it fails `dispatch_outcome_unknown` once their dead dispatcher would have given up (nothing downstream deduplicates a re-send, and nothing downstream rejects an old command: the envelope's ±5m window counts from farmer's seal time); with dispatch enabled, takes over an update rollout whose lease lapsed and resumes it from the database, gating already-sent items on deadlines from their dispatch time and re-checking approval, revocation, registration and the tenant before every wave, reporting the same item codes as a live rollout; a stuck `dispatching` item halts it and frees the tenant's rollout slot. Farmer's handling of a repeated `job_id` checked: harmless on its own; the one race (a late provision copy against a deprovision) is mitigated in saasapi by `DELETE` waiting out a re-published provision job, with the `internal/pki` fix left open (out of scope; Open items, 6). Tested with sqlite and against MySQL 8. FLAG FOR SECURITY REVIEW | ready for review — PR #63 |
 | FU.5 Helm release hook | `sprout-release-register-job.yaml` (post-install/post-upgrade) runs `farmer register-sprout-release`; `min_sprout_version` stamped at release time (`packaging/helm/`) | merged — PR #55 (`6815306`) |
 | FU.6 Rollout gates | Health-gated waves (a sprout counts when it reports the new version), one rollout per tenant, per-sprout OS/arch/package-type resolution, sprouts report their release as the `sprout_version` fact | merged — PR #57 (`ec21992`) |
 | FU.6b Gate freshness | Gate counts only reports written after dispatch; dedicated `rollout_claimed_at` column (migration 00005). FLAG FOR SECURITY REVIEW | merged — PR #58 (`507554d`) |
@@ -351,10 +351,9 @@ UAT gate has run the published packages. Known leftovers from this work:
 - FU.6 open question 1 (targets created before FU.6) is not needed
   pre-production; question 4 (`facts.request`) is deferred.
 - **Outbox sweeper: built by CL.3** (see the table above). Open from it:
-  an item a dead pod left in `dispatching` is never re-sent and keeps an
-  update rollout's tenant slot taken; `internal/pki`'s provision/deprovision
-  race on a re-published request (mitigated in saasapi); no maximum age for
-  a queued §1.5 item. See `docs/design/imas-internal-api-account.md`.
+  `internal/pki`'s provision/deprovision race on a re-published request,
+  mitigated in saasapi by `DELETE` waiting it out (Open items, 6). See
+  `docs/design/imas-internal-api-account.md`.
 
 Decided 2026-09-29: `helm rollback` leaves the sprout release registered
 (withdrawn only by explicit revoke); one `cmd/migrate` binary; sprout
@@ -511,17 +510,29 @@ HTTP directly.
    CL.3, the outbox sweeper that resumes batches and rollouts after a pod
    restart, is ready for review in PR #63):
    replace the hand-rolled OpenBao HTTP clients with the official Go client
-   as decided on 2026-09-29. CL.3 leaves three open questions (stuck
-   `dispatching` items, the `internal/pki` provision/deprovision race, no
-   maximum age for queued items); see "Deferred / open questions" in
+   as decided on 2026-09-29.
+6. **`internal/pki`: close the provision/deprovision race (follow-up to
+   CL.3).** With the outbox sweeper re-publishing a lost provision request,
+   a late copy can still be running on one farmer replica while a
+   deprovision of the same tenant runs on another, and push the tenant's
+   live Account JWT after the locked-out one. Fix in `internal/pki`:
+   `ProvisionTenant` re-checks `deleted` under `tenantAuthMu` after its
+   resolver push and re-pushes the locked-out JWT if a deprovision won;
+   `DeprovisionTenant` re-pushes the locked-out JWT even when the row is
+   already deleted, so a retried deprovision repairs the bus. Until then
+   saasapi refuses `DELETE /tenants/{id}` with `409
+   provisioning_in_progress` for `SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER`
+   after the last publish of a provision job published more than once (read
+   from `provisioning_jobs`, so every replica enforces it). Remove that wait
+   once this lands. See "Outbox re-dispatch sweeper" in
    `docs/design/imas-internal-api-account.md`.
-6. **SaaS API §1.7** (caller API keys, teams, webhooks, billing/metering) has
+7. **SaaS API §1.7** (caller API keys, teams, webhooks, billing/metering) has
    never been designed or started.
-7. **Docs:** `requirements.md` item 15 still says the new private key is sent
+8. **Docs:** `requirements.md` item 15 still says the new private key is sent
    encrypted over NATS, which the built (and designed) behaviour deliberately
    does not do; `README.md`'s "Batteries Included" still describes an
    embedded bus.
-8. **Nice-to-haves:** run the Keycloak JWKS harness somewhere with a Docker
+9. **Nice-to-haves:** run the Keycloak JWKS harness somewhere with a Docker
    daemon; tenant key rotation has no scheduler inside farmer (run
    `imas keys rotate-tenant-key` from a CronJob); CERT-In/DPDP/data
    sovereignty review is still unowned.

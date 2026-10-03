@@ -200,9 +200,8 @@ that each sprout belongs to the tenant before running anything. Poll
 `GET .../sprouts/actions/{batch_id}`: the batch is `in_progress` until every
 item reaches `unresolved`, `succeeded`, `failed` or
 `unresponsive_after_update`. Failed items carry a fixed `error` code and
-message (`sprout_not_accepted`, `sprout_unreachable`, `command_failed` with
-`exit_code`, `job_failed`, `dispatch_outcome_unknown`, …), never raw error
-text.
+message, never raw error text. See [item error codes](#item-error-codes)
+for the full list, and which of them mean the action never ran.
 
 Dispatch runs in the process that accepted the POST. If that pod dies, or
 had no bus connection, the [outbox sweeper](#outbox-sweeper) of any replica
@@ -211,8 +210,56 @@ batch's lease has lapsed, from the batch's stored params. An item still
 `queued` after `SAASAPI_OUTBOX_MAX_ATTEMPTS` dispatches (no farmer
 listening each time) fails with `dispatch_not_delivered`, and one whose
 tenant is no longer `active` by then fails with `tenant_not_active`; neither
-ran. An item in `dispatching` (sent, no reply recorded) is never sent again,
-since a `cmd.run` might run twice: it stays `dispatching`.
+ran. A queued item that couldn't be sent within
+`SAASAPI_OUTBOX_ACTION_MAX_AGE` (15 minutes) of the POST fails with
+`expired_not_sent` instead of being sent late, by whichever process reaches
+it; it never ran. Nothing downstream would refuse a late command: the
+sealed envelope's ±5 minute window is measured from when farmer seals it,
+at send time, not from the POST.
+
+An item in `dispatching` (its request went out, or may have, and no reply
+was recorded) is never sent again: nothing on the path deduplicates a
+second send (each one gets a fresh envelope id, and a cook a fresh jid),
+so a `cmd.run` could run twice. If the pod waiting on its reply died, the
+sweeper fails it with `dispatch_outcome_unknown` once that pod would have
+given up (the reply timeout: 45 seconds plus a `cmd.run`'s own timeout,
+plus 30 seconds' margin). It may or may not have run; retry it with a new
+POST if that is safe.
+
+#### Item error codes
+
+Every failed item carries one of these codes, with a fixed message:
+
+| Code | Ran? | Meaning |
+|---|---|---|
+| `sprout_not_accepted` | no | the sprout's key isn't accepted; never sent |
+| `invalid_request`, `unsupported_action`, `sprout_not_found` | no | farmer refused the action |
+| `sprout_unreachable` | no | farmer couldn't reach the sprout |
+| `command_failed` | yes | a `cmd.run` exited non-zero (`exit_code`) |
+| `job_failed`, `job_expired` | yes / maybe | a cook or update job failed, or started too late to be recorded |
+| `dispatch_outcome_unknown` | maybe | sent, but no usable reply: it timed out, or its pod died waiting |
+| `dispatch_not_delivered` | no | still queued after `SAASAPI_OUTBOX_MAX_ATTEMPTS` dispatches, no farmer listening |
+| `expired_not_sent` | no | not sent within `SAASAPI_OUTBOX_ACTION_MAX_AGE` of the POST |
+| `tenant_not_active` | no | the tenant stopped being `active` before the item was sent |
+| `internal_error` | maybe | anything else |
+
+Update rollouts (below) add their own. Items failed before they were sent:
+
+| Code | Meaning |
+|---|---|
+| `no_release_for_platform`, `below_min_sprout_version`, `sprout_newer_than_target` | refused at planning, from what the sprout last reported |
+| `version_revoked` | the version was revoked before the item's wave |
+| `version_approval_withdrawn` | the tenant's approved version changed before the item's wave |
+| `rollout_window_closed` | the rollout window ended before the item's wave |
+| `tenant_not_active` | the tenant stopped being `active` before the item's wave (a resumed rollout) |
+| `update_already_in_progress` | no longer written (a second rollout is now refused with `409 update_in_progress`); items stored before that keep it |
+| `rollout_halted` | the rollout can't continue: an earlier wave failed its gate, or, for a resumed rollout, the version is no longer registered or a row's signature no longer verifies |
+
+And for items that were sent: `unresponsive_after_update` (the sprout didn't
+come back on the target version in time), `facts_clock_skew` (its report is
+dated too far ahead of saasapi's clock), and `dispatch_outcome_unknown`,
+`job_failed`, `job_expired` as above. A resumed rollout reports exactly the
+codes a live one would.
 
 ### Fleet versions and update policy
 
@@ -282,8 +329,10 @@ so the contract is on record for when it's enabled. With the flag on:
   `updated_at` doesn't move when a rollout starts.
   A rollout whose pod dies is resumed by the
   [outbox sweeper](#outbox-sweeper) of another replica once its lease has
-  lapsed. An item the dead pod left in `dispatching` is never re-sent, and
-  keeps the tenant's slot taken (an open question).
+  lapsed. An item the dead pod left in `dispatching` is never re-sent: it
+  fails with `dispatch_outcome_unknown` once the dead pod would have given
+  up on its reply, which halts the rollout and frees the tenant's slot, so
+  an operator can start a new rollout deliberately.
 - **Mixed OS/arch.** One batch may span OS and arch; `target_version` is
   the only parameter and each sprout resolves its own catalog row. Using
   what each sprout last reported in its facts, saasapi fails up front,
@@ -353,8 +402,13 @@ so the contract is on record for when it's enabled. With the flag on:
   Before every resumed wave, approval, the window and revocation are
   checked as before, and also that the tenant is still `active`
   (`tenant_not_active`) and the version is still registered with every
-  row's signature valid (`rollout_halted`). An item left in `dispatching`
-  is never re-sent; it fails the gate at its deadline, halting the rest.
+  row's signature valid (`rollout_halted`). A resumed rollout reports the
+  same codes a live one would; `rollout_halted` alone means it can't
+  continue. An item left in `dispatching` is never re-sent: it fails with
+  `dispatch_outcome_unknown` 75 seconds after its recorded dispatch (the
+  reply wait plus margin), which fails the gate, halts the rest and frees
+  the tenant's rollout slot. Queued rollout items don't expire: they wait
+  for their wave by design, and every wave re-checks the policy instead.
 - saasapi also needs `IMAS_FLEETSIGN_OPENBAO_*` (read-only fleet key) with the
   flag on, or it refuses to start.
 - Rate limit: one request per 10 seconds, burst 2, per pod.
@@ -369,8 +423,9 @@ dispatching, every `SAASAPI_OUTBOX_SWEEP_INTERVAL` (30 seconds):
 | Row | Re-sent when | Re-sent how | Never |
 |---|---|---|---|
 | provisioning job `pending` | 2 minutes after its last publish (or creation), doubling per attempt | the same request, same `job_id`; farmer handles a repeated `job_id` idempotently and saasapi applies one result per job | past 5 publishes: failed |
-| action item `queued` | the batch's lease has lapsed, and 2 minutes after the item's last change, doubling per attempt | from the batch's stored params, through the same `queued` → `dispatching` claim | an item in `dispatching`; past 5 attempts: `dispatch_not_delivered` |
-| update rollout with `queued` or `running` items | the batch's lease has lapsed, and only with `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=true` | resumed as described under [fleet update dispatch](#fleet-update-dispatch-not-generally-available) | an item in `dispatching` |
+| action item `queued` | the batch's lease has lapsed, and 2 minutes after the item's last change, doubling per attempt | from the batch's stored params, through the same `queued` → `dispatching` claim | past 5 attempts: `dispatch_not_delivered`; 15 minutes after the POST: `expired_not_sent` |
+| action item `dispatching` whose pod died | never re-sent | — | failed with `dispatch_outcome_unknown` once its pod would have given up on the reply |
+| update rollout with `queued`, `dispatching` or `running` items | the batch's lease has lapsed, and only with `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=true` | resumed as described under [fleet update dispatch](#fleet-update-dispatch-not-generally-available) | an item in `dispatching`: failed as above, halting the rollout and freeing the tenant's slot |
 
 Work is claimed with a lease on the row (`lease_owner`, `lease_until`,
 migration `saas/00006`), taken by one conditional `UPDATE` that must affect
@@ -492,6 +547,7 @@ error, never a silent default.
 | `SAASAPI_OUTBOX_SWEEP_INTERVAL` | `30s` | time between sweeps, `1s`–`1h` |
 | `SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER` | `2m` | a pending provisioning job is published again this long after its last publish, doubling per attempt; also how long `DELETE` waits after a re-published provision job; `10s`–`24h` |
 | `SAASAPI_OUTBOX_ACTION_STALE_AFTER` | `2m` | the same for a queued action item, from its last change; `10s`–`24h` |
+| `SAASAPI_OUTBOX_ACTION_MAX_AGE` | `15m` | a queued action item not sent this long after its POST fails with `expired_not_sent`, never sent; `1m`–`1h` |
 | `SAASAPI_OUTBOX_MAX_ATTEMPTS` | `5` | publishes of a job, or dispatches of an item, before it is failed; `1`–`50` |
 | `SAASAPI_OUTBOX_LEASE_TTL` | `2m` | how long a lease lasts unrenewed: how soon a dead pod's batch or rollout is taken over; `15s`–`1h` |
 | `SAASAPI_OPERATOR_LISTEN_ADDR` | empty (off) | operator plane HTTPS listener; with it set, the next five are required |

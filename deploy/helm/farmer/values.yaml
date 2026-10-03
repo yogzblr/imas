@@ -368,6 +368,10 @@ saasapi:
     # SAASAPI_OUTBOX_ACTION_STALE_AFTER: the same for a queued action item.
     # Default 2m, 10s..24h.
     actionStaleAfter: ""
+    # SAASAPI_OUTBOX_ACTION_MAX_AGE: a queued action item not sent this long
+    # after it was accepted fails as expired_not_sent instead of being sent
+    # late. Default 15m, 1m..1h.
+    actionMaxAge: ""
     # SAASAPI_OUTBOX_MAX_ATTEMPTS: dispatches before a job or item is
     # failed. Default 5, 1..50.
     maxAttempts: null

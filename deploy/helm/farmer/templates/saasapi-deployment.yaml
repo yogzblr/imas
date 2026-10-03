@@ -218,6 +218,10 @@ spec:
             - name: SAASAPI_OUTBOX_ACTION_STALE_AFTER
               value: {{ . | toString | quote }}
             {{- end }}
+            {{- with .actionMaxAge }}
+            - name: SAASAPI_OUTBOX_ACTION_MAX_AGE
+              value: {{ . | toString | quote }}
+            {{- end }}
             {{- if not (kindIs "invalid" .maxAttempts) }}
             - name: SAASAPI_OUTBOX_MAX_ATTEMPTS
               value: {{ .maxAttempts | int | quote }}

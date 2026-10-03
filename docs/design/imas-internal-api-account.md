@@ -503,19 +503,54 @@ sweeper can't both send one item. What is and isn't re-sent:
   was never claimed, or its claim ended in "no responders" (no farmer
   subscribed), which `dispatchItem` moves back to `queued` with
   `dispatched_at` cleared.
-- `dispatching`: **never re-sent.** Its request went out and no reply was
-  recorded; `cmd.run` isn't idempotent. Its status is left exactly as it
-  is (open question below).
+- `dispatching`: **never re-sent.** Its request went out, or may have, and
+  no reply was recorded. Once the process waiting on the reply would have
+  given up (its reply timeout, `farmerSproutWait + dispatchReplyMargin`
+  plus a `cmd.run`'s own timeout, plus another `dispatchReplyMargin` for
+  clock skew: `stuckDispatchAfter`), and the batch's lease has lapsed, the
+  sweeper fails it with `dispatch_outcome_unknown`. That is the code
+  `dispatchItem` itself records when a reply times out. The conditional
+  update (`dispatching` → `failed`) means a late reply recorded first wins.
 - `queued` past `SAASAPI_OUTBOX_MAX_ATTEMPTS`: failed with
   `dispatch_not_delivered`, unsent. `queued` whose tenant is no longer
   `active`: failed with `tenant_not_active`, unsent.
+- `queued` past `SAASAPI_OUTBOX_ACTION_MAX_AGE` (15m) since the POST:
+  failed with `expired_not_sent`, unsent. The original dispatcher applies
+  the same limit to an item still waiting for a dispatch slot, so no §1.5
+  command is ever sent more than that long after it was accepted. Update
+  rollout items are exempt: they wait for their wave by design, and every
+  wave re-checks the tenant's policy.
+
+*No re-send exception for idempotent commands (checked for CL.3).* Nothing
+on the path deduplicates a second send of one item. saasapi's
+`SproutActionRequest` carries only tenant, sprout and action, with no
+request id. Farmer seals every send with a fresh random envelope id
+(`payloadbox.NewMessage`), and gives a cook or self_update a fresh jid
+(`cook.GenerateJobID`). The sprout's replay guard keys on the envelope id,
+so it only catches a byte-for-byte replay of one sealed message. Its
+handled-jobs file keys on the jid and is only read when it pulls a staged
+recipe, never for a pushed command. A re-sent `cmd.run` or cook would run
+twice; a re-sent self_update would update a second time unless the
+sprout is already on the target. So a stuck item is never re-sent
+automatically; an operator retries deliberately.
+
+*No age limit downstream (checked for CL.3).* The sealed envelope's
+freshness window is ±5 minutes (`payloadbox.DefaultMaxSkew`), but it is
+measured from `IssuedAt`, which farmer sets when it seals the message at
+dispatch, not from when saasapi accepted the request. Nothing else on the
+farmer or sprout side rejects a command for its age. Farmer's
+`IMAS_JOB_RECONCILE_WINDOW` and the sprout's `stagedrecipemaxage` both
+count from farmer's dispatch, and `stagedrecipemaxage` only applies to
+pulled cooks. So `SAASAPI_OUTBOX_ACTION_MAX_AGE` is the only bound on how
+late a command can arrive. It is not capped at the envelope window, which
+measures something else.
 - `self_update` batches are never re-dispatched by this job (job 3).
 
 **Job 3: update rollouts** (only with
 `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=true`). `runRollout` now renews the
 batch's lease, checks it before every wave and before halting, and stops
-without halting once it is lost. A `self_update` batch with `queued` or
-`running` items whose lease has lapsed is taken over: the lease claim and a
+without halting once it is lost. A `self_update` batch with `queued`,
+`dispatching` or `running` items whose lease has lapsed is taken over: the lease claim and a
 rewrite of the tenant's `tenant_update_policy.rollout_claimed_at` (the
 tenant's rollout claim, `claimRollout`) happen in one transaction, so on
 PXC the takeover certifies against any other claim on the tenant. The
@@ -538,8 +573,14 @@ resumed run (`resumeRollout`) rebuilds its state from the rows:
 Every item already sent forms one wave, each with its own deadline
 (`dispatched_at` + 30m) and proof; it must pass the batch's gate before
 anything else is sent (`job_status`: all succeeded; `dispatch`: all
-accepted, none failed). An item left in `dispatching` holds the gate until
-its deadline and then fails it, halting the rest; it is never re-sent. Then
+accepted, none failed). An item left in `dispatching` is never re-sent:
+its deadline is `stuckDispatchAfter` from its dispatch (75 seconds for a
+self_update), after which it fails with `dispatch_outcome_unknown`. That
+fails the gate, halts the rest with `rollout_halted`, and leaves nothing
+`queued`, `dispatching` or `running`, so the tenant's rollout slot
+(`updateInProgress`) is free. An operator can start a new rollout
+deliberately; sprouts already on the target answer "already running".
+Then
 the `queued` items go out in request order, in waves of the original size,
 exactly as `runRollout` sends them. Before every resumed wave the tenant's
 policy and window and the version's revocation are checked
@@ -556,29 +597,23 @@ write (wave timeout + reply wait + lease TTL).
 
 ## Deferred / open questions
 
-- **Items stuck in `dispatching`** (CL.3). An item whose process died
-  between sending and recording the reply stays `dispatching` forever: the
-  sweeper never re-sends it (cmd.run isn't idempotent) and doesn't change
-  its status. For a §1.5 batch this keeps the batch `in_progress`; for an
-  update rollout it fails the resumed gate at its deadline (halting the
-  rest), but because `updateInProgress` counts `dispatching`, **it keeps the
-  tenant's rollout slot taken for good**. Options for a follow-up: move it
-  to `failed`/`dispatch_outcome_unknown` after the reply timeout plus a
-  margin (what `dispatchItem` does when it sees no reply itself), or ask
-  farmer (`farmer.job_status` by tenant, sprout and a request id we don't
-  carry today) whether it ran. Needs a decision, not built.
-- **Farmer-side provision/deprovision race.** See job 1 above.
-  `pki.ProvisionTenant` should re-check `deleted` after its resolver push
-  (under `tenantAuthMu`) and re-push the locked-out JWT if a deprovision won
-  the race, and `pki.DeprovisionTenant` should re-push the locked-out JWT
-  even when the row is already deleted, so a retried deprovision repairs the
-  bus. `internal/pki` was outside CL.3's file scope; saasapi's DELETE wait
-  is the mitigation until then.
-- **No maximum age for a queued §1.5 item.** The sweeper re-sends a queued
-  item however long ago it was accepted (a bus outage longer than a day,
-  say, would send day-old commands when it ends). The attempt limit only
-  counts dispatches that reached the bus. A `SAASAPI_OUTBOX_ACTION_MAX_AGE`
-  after which queued items fail unsent may be wanted.
+- **Farmer-side provision/deprovision race** (BUILD-STATUS "Open
+  items"). See job 1 above. `pki.ProvisionTenant` should re-check
+  `deleted` after its resolver push (under `tenantAuthMu`) and re-push the
+  locked-out JWT if a deprovision won the race. `pki.DeprovisionTenant`
+  should re-push the locked-out JWT even when the row is already deleted,
+  so a retried deprovision repairs the bus. `internal/pki` was outside
+  CL.3's file scope. Until it lands, saasapi's DELETE wait is the
+  mitigation. That wait is read from `provisioning_jobs.attempts` and
+  `last_dispatched_at` in the DELETE's own transaction, so every saasapi
+  replica sees it, not just the one whose sweeper re-published
+  (`TestMySQLDeleteWaitIsSharedAcrossReplicas`).
+- **Items stuck in `dispatching`: decided and built (CL.3).** Failed with
+  `dispatch_outcome_unknown` once their dispatcher would have given up,
+  never re-sent, and for an update rollout that halts it and frees the
+  tenant's slot (job 2 and job 3 above).
+- **Maximum age for queued §1.5 items: decided and built (CL.3).**
+  `SAASAPI_OUTBOX_ACTION_MAX_AGE`, 15 minutes by default (job 2 above).
 - **`internal.sprout.*` permissions.** Added when those handlers land (see
   above). `internal.sprout.mint`, `.revoke`, `.action`, and
   `internal.sprouts.list` are request-reply, so that change also has to
