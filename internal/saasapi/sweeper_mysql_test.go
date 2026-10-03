@@ -1,0 +1,176 @@
+package saasapi
+
+// The outbox sweeper against MySQL, where the lease's guarantees actually
+// come from: InnoDB row locks, rows affected counting changed rows, and
+// datetime(3) comparisons. Skipped unless IMAS_TEST_MYSQL_ROOT_DSN names a
+// MySQL-compatible server by its root account, as in internal/migrations'
+// MySQL tests:
+//
+//	IMAS_TEST_MYSQL_ROOT_DSN='root:pw@tcp(127.0.0.1:3306)/' go test ./internal/saasapi/ -run MySQL
+
+import (
+	"context"
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"os"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/go-sql-driver/mysql"
+	gormmysql "gorm.io/driver/mysql"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
+
+	"github.com/yogzblr/imas/internal/migrations"
+)
+
+// newMySQLSaasSchema creates a fresh schema migrated by the saas set and
+// returns two independent GORM handles on it, standing in for two
+// saasapi replicas. The schema is dropped when the test ends.
+func newMySQLSaasSchema(t *testing.T) (*gorm.DB, *gorm.DB) {
+	t.Helper()
+	dsn := os.Getenv("IMAS_TEST_MYSQL_ROOT_DSN")
+	if dsn == "" {
+		t.Skip("IMAS_TEST_MYSQL_ROOT_DSN not set; skipping the MySQL tests")
+	}
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatal("IMAS_TEST_MYSQL_ROOT_DSN: not a valid DSN")
+	}
+	sfx := make([]byte, 4)
+	if _, err := rand.Read(sfx); err != nil {
+		t.Fatal(err)
+	}
+	schema := "t_saasapi_sweep_" + hex.EncodeToString(sfx)
+	cfg.DBName = ""
+	root, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Close() })
+	if _, err := root.Exec("CREATE DATABASE `" + schema + "`"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Exec("DROP DATABASE IF EXISTS `" + schema + "`") })
+
+	cfg = cfg.Clone()
+	cfg.DBName, cfg.ParseTime, cfg.Loc = schema, true, time.UTC
+	sdb, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sdb.Close() })
+	if _, err := migrations.Up(context.Background(), sdb, migrations.Saas, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	open := func() *gorm.DB {
+		g, err := gorm.Open(gormmysql.Open(cfg.FormatDSN()), &gorm.Config{Logger: gormlogger.Default.LogMode(gormlogger.Silent)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s, err := g.DB(); err == nil {
+			t.Cleanup(func() { s.Close() })
+		}
+		return g
+	}
+	return open(), open()
+}
+
+// Lease claims on MySQL: of many concurrent claims on one row exactly one
+// wins; a live lease isn't taken over and an expired one is; a renewal is
+// never a no-op MySQL reports as zero rows, even within one millisecond.
+func TestMySQLRowLease(t *testing.T) {
+	g1, g2 := newMySQLSaasSchema(t)
+	clock := useTestClock(t)
+	batch := AssetActionBatch{ID: "b_mysql_lease", TenantID: "t_mysql", ActionType: "cmd.run", ActionParams: "{}", RequestedAssetIDs: "[]"}
+	if err := g1.Create(&batch).Error; err != nil {
+		t.Fatal(err)
+	}
+	table, key := AssetActionBatch{}.TableName(), []any{batch.ID, batch.TenantID}
+
+	var (
+		mu   sync.Mutex
+		won  []*rowLease
+		wg   sync.WaitGroup
+		errs []error
+	)
+	for i := range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			g := g1
+			if i%2 == 1 {
+				g = g2
+			}
+			l, err := claimRowLease(g, table, batchLeaseKey, key, "", nil, nil, time.Minute)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, err)
+			}
+			if l != nil {
+				won = append(won, l)
+			}
+		}()
+	}
+	wg.Wait()
+	if len(won) != 1 || len(errs) != 0 {
+		t.Fatalf("%d of 16 concurrent claims won (errors %v), want exactly 1", len(won), errs)
+	}
+	holder := won[0]
+
+	// Two renewals in the same millisecond still each change the row.
+	if !holder.renew() || !holder.renew() {
+		t.Fatal("renewing within one millisecond was reported as a lost lease")
+	}
+	clock.Advance(30 * time.Second)
+	if l, err := claimRowLease(g2, table, batchLeaseKey, key, "", nil, nil, time.Minute); l != nil || err != nil {
+		t.Fatalf("a live lease was taken over (%v)", err)
+	}
+	clock.Advance(2 * time.Minute)
+	taker, err := claimRowLease(g2, table, batchLeaseKey, key, "", nil, nil, time.Minute)
+	if err != nil || taker == nil {
+		t.Fatalf("an expired lease was not taken over (%v)", err)
+	}
+	if holder.renew() || holder.held() {
+		t.Fatal("the old holder kept a lease that was taken over")
+	}
+	if !taker.renew() {
+		t.Fatal("the new holder could not renew")
+	}
+}
+
+// The provisioning crash case on MySQL, with two replicas' sweepers on
+// separate connection pools: the job is published once per due attempt.
+func TestMySQLSweepProvisioningJobs_TwoReplicas(t *testing.T) {
+	g1, g2 := newMySQLSaasSchema(t)
+	clock := useTestClock(t)
+	SetDB(g1)
+	t.Cleanup(func() { SetDB(nil) })
+	tenant := Tenant{ID: "t_mysql_prov", Name: "Acme", Status: TenantStatusPending}
+	if err := g1.Create(&tenant).Error; err != nil {
+		t.Fatal(err)
+	}
+	job, err := enqueueProvisioningJob(g1, tenant.ID, ProvisioningJobProvision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := startTestBus(t)
+	nc := connectSaaSBus(t, ns)
+	farmer := startProvisioningFarmer(t, nc)
+	a, b := testSweeper(g1, nc), testSweeper(g2, nc)
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		clock.Advance(backoff(defaultProvisioningStaleAfter, attempt-1) + time.Second)
+		sweepConcurrently(a, b, a, b)
+		if got := farmer.received(t, attempt); got[job.ID] != attempt {
+			t.Fatalf("attempt %d: farmer got %v", attempt, got)
+		}
+	}
+	var stored ProvisioningJob
+	if err := g2.First(&stored, "id = ?", job.ID).Error; err != nil || stored.Attempts != 3 || stored.LastDispatchedAt == nil {
+		t.Fatalf("stored job %+v, %v", stored, err)
+	}
+}

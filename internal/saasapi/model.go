@@ -56,8 +56,11 @@ const (
 //
 // provisioning.go's applyProvisioningResult moves a job out of "pending"
 // when farmer's internal.tenant.{de,}provisioned.{job_id} result arrives
-// (§2.2); Attempts counts dispatches, for a future re-dispatch sweeper to
-// bound on (see docs/design/imas-internal-api-account.md).
+// (§2.2). Attempts counts publishes and LastDispatchedAt records the
+// latest; the outbox sweeper (sweeper.go) re-publishes a job still pending
+// after a backoff measured from it, and fails the job once Attempts
+// reaches its limit. LeaseOwner/LeaseUntil are the sweeper's row lease
+// (migration saas/00006); never part of the API.
 type ProvisioningJob struct {
 	ID        string                `gorm:"column:id;primaryKey;size:36" json:"id"`
 	TenantID  string                `gorm:"column:tenant_id;size:32;not null;index" json:"tenant_id"`
@@ -69,9 +72,12 @@ type ProvisioningJob struct {
 	// (controlplane.PublicWarningMessage) for a result that reached its end
 	// state by an unusual path — e.g. deprovisioning a tenant farmer never
 	// provisioned. Surfaced by GET /tenants/{id}/status.
-	Warning   string    `gorm:"column:warning;type:text" json:"warning,omitempty"`
-	CreatedAt time.Time `gorm:"column:created_at" json:"created_at"`
-	UpdatedAt time.Time `gorm:"column:updated_at" json:"updated_at"`
+	Warning          string     `gorm:"column:warning;type:text" json:"warning,omitempty"`
+	CreatedAt        time.Time  `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt        time.Time  `gorm:"column:updated_at" json:"updated_at"`
+	LastDispatchedAt *time.Time `gorm:"column:last_dispatched_at" json:"-"`
+	LeaseOwner       string     `gorm:"column:lease_owner;size:64;not null;default:''" json:"-"`
+	LeaseUntil       *time.Time `gorm:"column:lease_until" json:"-"`
 }
 
 func (ProvisioningJob) TableName() string { return "provisioning_jobs" }
@@ -274,8 +280,8 @@ func (s AssetActionItemStatus) terminal() bool {
 // its AssetActionItem rows.
 //
 // ActionParams is the farmer-side internal.sprout.action params exactly as
-// dispatched (see sprout_actions.go's translateAction), kept so a future
-// outbox sweeper can re-send a queued item unchanged. It holds the command
+// dispatched (see sprout_actions.go's translateAction), kept so the outbox
+// sweeper (sweeper.go) can re-send a queued item unchanged. It holds the command
 // line the caller supplied (never environment variables: the API accepts
 // none), so it is never returned by the API. RequestedAssetIDs is the JSON array of the
 // batch's deduplicated asset_ids, in request order.
@@ -286,15 +292,23 @@ func (s AssetActionItemStatus) terminal() bool {
 // gate it was created with. Both are zero for a §1.5 batch. They're
 // columns on this table, not a new one: design doc §4.3 has update
 // dispatch reuse the §1.5 tables.
+//
+// LeaseOwner/LeaseUntil are the batch's row lease (sweeper.go, migration
+// saas/00006): whoever dispatches the batch, the process that created it
+// or the outbox sweeper of any replica, holds it and renews it while it
+// works, so no two processes dispatch or roll out the same batch at once.
+// LeaseUntil NULL means no one holds it. Never part of the API.
 type AssetActionBatch struct {
-	ID                string    `gorm:"column:id;primaryKey;size:32"`
-	TenantID          string    `gorm:"column:tenant_id;size:32;not null;index"`
-	ActionType        string    `gorm:"column:action_type;size:32;not null"`
-	ActionParams      string    `gorm:"column:action_params;type:text;not null"`
-	RequestedAssetIDs string    `gorm:"column:requested_asset_ids;type:text;not null"`
-	RolloutBatchSize  int       `gorm:"column:rollout_batch_size;not null;default:0"`
-	RolloutGate       string    `gorm:"column:rollout_gate;size:32;not null;default:''"`
-	CreatedAt         time.Time `gorm:"column:created_at"`
+	ID                string     `gorm:"column:id;primaryKey;size:32"`
+	TenantID          string     `gorm:"column:tenant_id;size:32;not null;index"`
+	ActionType        string     `gorm:"column:action_type;size:32;not null"`
+	ActionParams      string     `gorm:"column:action_params;type:text;not null"`
+	RequestedAssetIDs string     `gorm:"column:requested_asset_ids;type:text;not null"`
+	RolloutBatchSize  int        `gorm:"column:rollout_batch_size;not null;default:0"`
+	RolloutGate       string     `gorm:"column:rollout_gate;size:32;not null;default:''"`
+	CreatedAt         time.Time  `gorm:"column:created_at"`
+	LeaseOwner        string     `gorm:"column:lease_owner;size:64;not null;default:''"`
+	LeaseUntil        *time.Time `gorm:"column:lease_until"`
 }
 
 func (AssetActionBatch) TableName() string { return "asset_action_batches" }
@@ -312,19 +326,31 @@ func (AssetActionBatch) TableName() string { return "asset_action_batches" }
 // in request order. SproutID and JID are empty until known. ErrorCode is
 // a fixed code (controlplane.ErrorCode or one of sprout_actions.go's own),
 // never error text. ExitCode is set only for a completed cmd.run.
+//
+// DispatchedAt is when the item was claimed for sending (queued ->
+// dispatching), on the dispatching saasapi's clock, and is cleared if the
+// bus proved the request was never delivered (back to queued). It is set
+// on every item that was ever handed to farmer, so a resumed update
+// rollout (sweeper.go) can tell which items were sent and measure their
+// wave deadline from it. PlannedAtTarget is set on a self_update item
+// whose sprout already reported the target version when the rollout was
+// planned (planUpdateItems' atTarget): its update job's success is then
+// proof enough (judgeUpdateItem). Both from migration saas/00006.
 type AssetActionItem struct {
-	BatchID   string                `gorm:"column:batch_id;primaryKey;size:32"`
-	AssetID   string                `gorm:"column:asset_id;primaryKey;size:191"`
-	TenantID  string                `gorm:"column:tenant_id;size:32;not null"`
-	Position  int                   `gorm:"column:position;not null"`
-	SproutID  string                `gorm:"column:sprout_id;size:253;not null;default:''"`
-	JID       string                `gorm:"column:jid;size:64;not null;default:''"`
-	Status    AssetActionItemStatus `gorm:"column:status;size:32;not null"`
-	ErrorCode string                `gorm:"column:error_code;size:64;not null;default:''"`
-	ExitCode  *int                  `gorm:"column:exit_code"`
-	Attempts  int                   `gorm:"column:attempts;not null;default:0"`
-	CreatedAt time.Time             `gorm:"column:created_at"`
-	UpdatedAt time.Time             `gorm:"column:updated_at"`
+	BatchID         string                `gorm:"column:batch_id;primaryKey;size:32"`
+	AssetID         string                `gorm:"column:asset_id;primaryKey;size:191"`
+	TenantID        string                `gorm:"column:tenant_id;size:32;not null"`
+	Position        int                   `gorm:"column:position;not null"`
+	SproutID        string                `gorm:"column:sprout_id;size:253;not null;default:''"`
+	JID             string                `gorm:"column:jid;size:64;not null;default:''"`
+	Status          AssetActionItemStatus `gorm:"column:status;size:32;not null;index"`
+	ErrorCode       string                `gorm:"column:error_code;size:64;not null;default:''"`
+	ExitCode        *int                  `gorm:"column:exit_code"`
+	Attempts        int                   `gorm:"column:attempts;not null;default:0"`
+	CreatedAt       time.Time             `gorm:"column:created_at"`
+	UpdatedAt       time.Time             `gorm:"column:updated_at"`
+	DispatchedAt    *time.Time            `gorm:"column:dispatched_at"`
+	PlannedAtTarget bool                  `gorm:"column:planned_at_target;not null;default:false"`
 }
 
 func (AssetActionItem) TableName() string { return "asset_action_items" }

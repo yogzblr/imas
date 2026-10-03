@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	"gorm.io/gorm"
@@ -42,23 +43,18 @@ func enqueueProvisioningJob(tx *gorm.DB, tenantID string, jobType ProvisioningJo
 //
 // Fire-and-forget over NATS core: a publish that fails (or a request
 // farmer never receives) leaves the job pending with its attempt counted.
-// Re-dispatching stale pending jobs is the outbox sweeper's job — deferred,
-// see docs/design/imas-internal-api-account.md.
+// The outbox sweeper re-publishes a job still pending after a backoff
+// (sweepProvisioningJobs), until the attempt limit fails it.
 func dispatchProvisioning(_ context.Context, job *ProvisioningJob, tenantName string) {
-	publishProvisioningJob(job, controlplane.SubjectTenantProvision, controlplane.TenantProvisionRequest{
-		JobID:    job.ID,
-		TenantID: job.TenantID,
-		Name:     tenantName,
-	})
+	subject, payload := provisioningRequest(job, tenantName)
+	publishProvisioningJob(job, subject, payload)
 }
 
 // dispatchDeprovisioning is the DELETE-path counterpart of
 // dispatchProvisioning, publishing internal.tenant.deprovision.
 func dispatchDeprovisioning(_ context.Context, job *ProvisioningJob) {
-	publishProvisioningJob(job, controlplane.SubjectTenantDeprovision, controlplane.TenantDeprovisionRequest{
-		JobID:    job.ID,
-		TenantID: job.TenantID,
-	})
+	subject, payload := provisioningRequest(job, "")
+	publishProvisioningJob(job, subject, payload)
 }
 
 func publishProvisioningJob(job *ProvisioningJob, subject string, payload any) {
@@ -72,15 +68,148 @@ func publishProvisioningJob(job *ProvisioningJob, subject string, payload any) {
 		log.Errorf("saasapi: marshalling %s for job %s: %v", subject, job.ID, err)
 		return
 	}
-	if err := db.Model(&ProvisioningJob{}).Where("id = ?", job.ID).
-		UpdateColumn("attempts", gorm.Expr("attempts + 1")).Error; err != nil {
+	// The attempt and its time are recorded before the publish, so the
+	// sweeper's backoff counts from no later than the request.
+	if err := db.Model(&ProvisioningJob{}).Where("id = ? AND tenant_id = ?", job.ID, job.TenantID).
+		UpdateColumns(map[string]any{
+			"attempts":           gorm.Expr("attempts + 1"),
+			"last_dispatched_at": dbTime(outboxNow()),
+		}).Error; err != nil {
 		log.Errorf("saasapi: recording dispatch attempt for job %s: %v", job.ID, err)
 	}
+	sendProvisioningJob(nc, job, subject, data)
+}
+
+// sendProvisioningJob publishes data, a job's request, on subject. The
+// caller has already counted the attempt.
+func sendProvisioningJob(nc *nats.Conn, job *ProvisioningJob, subject string, data []byte) {
 	if err := nc.Publish(subject, data); err != nil {
 		log.Errorf("saasapi: publishing %s for job %s (tenant %s): %v — job left pending", subject, job.ID, job.TenantID, err)
 		return
 	}
 	log.Infof("saasapi: dispatched %s for job %s (tenant %s)", subject, job.ID, job.TenantID)
+}
+
+// provisioningRequest is job's farmer request: its subject and payload.
+// tenantName is only used for a provision job.
+func provisioningRequest(job *ProvisioningJob, tenantName string) (string, any) {
+	if job.Type == ProvisioningJobDeprovision {
+		return controlplane.SubjectTenantDeprovision, controlplane.TenantDeprovisionRequest{JobID: job.ID, TenantID: job.TenantID}
+	}
+	return controlplane.SubjectTenantProvision, controlplane.TenantProvisionRequest{JobID: job.ID, TenantID: job.TenantID, Name: tenantName}
+}
+
+// provisioningNoResultMessage is the last_error of a job the outbox sweeper
+// gave up on: a fixed, caller-safe message like publicJobError's.
+const provisioningNoResultMessage = "no result was received for this request after repeated attempts; contact support"
+
+// sweepProvisioningJobs is the outbox sweeper's provisioning job: every
+// pending job whose backoff has passed since it was last published (or,
+// never published, since it was written) is published again, under a
+// row lease claimed in the same UPDATE that counts the attempt; one that
+// has used every attempt is failed instead (failStaleProvisioningJob).
+//
+// Re-publishing is safe because a repeated job_id is harmless on both
+// sides (checked for CL.3, see docs/design/imas-internal-api-account.md):
+// farmer's ProvisionTenant re-confirms an existing Account and re-pushes
+// it, DeprovisionTenant finds the tenant already deleted and reports
+// offboarded, and applyProvisioningResult applies the first result of a
+// job and ignores the rest. The one hazard is a late copy of a provision
+// request still running on farmer when the tenant is offboarded; DELETE
+// waits out a re-published provision job for that reason (DeleteTenant).
+func (sw *sweeper) sweepProvisioningJobs() {
+	now := dbTime(outboxNow())
+	var jobs []ProvisioningJob
+	if err := sw.d.Where("status = ?", ProvisioningJobPending).
+		Where("COALESCE(last_dispatched_at, created_at) <= ?", now.Add(-sw.s.ProvisioningStaleAfter)).
+		Where(leaseFree, now).
+		Order("created_at").Limit(sweepBatchLimit).Find(&jobs).Error; err != nil {
+		log.Errorf("saasapi: outbox sweep: reading pending provisioning jobs: %v", err)
+		return
+	}
+	for i := range jobs {
+		job := &jobs[i]
+		last := job.CreatedAt
+		if job.LastDispatchedAt != nil {
+			last = *job.LastDispatchedAt
+		}
+		if now.Before(last.Add(backoff(sw.s.ProvisioningStaleAfter, job.Attempts))) {
+			continue
+		}
+		if job.Attempts >= sw.s.MaxAttempts {
+			sw.failStaleProvisioningJob(job, now)
+			continue
+		}
+		sw.republishProvisioningJob(job, now)
+	}
+}
+
+// republishProvisioningJob claims job (still pending, with the attempt
+// count read, and its lease free), counting the attempt, and publishes it.
+// Another replica that read the same row matches nothing and sends
+// nothing.
+func (sw *sweeper) republishProvisioningJob(job *ProvisioningJob, now time.Time) {
+	var name string
+	if job.Type == ProvisioningJobProvision {
+		var tenant Tenant
+		if err := sw.d.Select("id", "name").Where("id = ?", job.TenantID).First(&tenant).Error; err != nil {
+			log.Errorf("saasapi: outbox sweep: looking up tenant %s for job %s: %v", job.TenantID, job.ID, err)
+			return
+		}
+		name = tenant.Name
+	}
+	subject, payload := provisioningRequest(job, name)
+	data, err := json.Marshal(payload)
+	if err != nil {
+		log.Errorf("saasapi: outbox sweep: marshalling %s for job %s: %v", subject, job.ID, err)
+		return
+	}
+	lease, err := claimRowLease(sw.d, ProvisioningJob{}.TableName(), "id = ? AND tenant_id = ?", []any{job.ID, job.TenantID},
+		"status = ? AND attempts = ?", []any{ProvisioningJobPending, job.Attempts},
+		map[string]any{"attempts": gorm.Expr("attempts + 1"), "last_dispatched_at": now}, sw.s.LeaseTTL)
+	if err != nil {
+		log.Errorf("saasapi: outbox sweep: claiming job %s (tenant %s): %v", job.ID, job.TenantID, err)
+		return
+	}
+	if lease == nil {
+		return // another replica has it, or it moved on
+	}
+	log.Warnf("saasapi: outbox sweep: job %s (tenant %s, %s) still pending; publishing it again (attempt %d of %d)",
+		job.ID, job.TenantID, job.Type, job.Attempts+1, sw.s.MaxAttempts)
+	sendProvisioningJob(sw.nc, job, subject, data)
+}
+
+// failStaleProvisioningJob fails a pending job that has used every attempt
+// and waited out its last backoff with no result, as a farmer failure
+// would (applyProvisioningResult): a provision job's tenant moves from
+// pending to failed, so it can be deleted; a deprovision job's tenant
+// stays offboarding, and GET .../status shows the job's error. The update
+// is conditional on the job being unchanged and unleased since it was
+// read. A result that arrives afterwards is ignored like any duplicate.
+func (sw *sweeper) failStaleProvisioningJob(job *ProvisioningJob, now time.Time) {
+	err := sw.d.Transaction(func(tx *gorm.DB) error {
+		r := tx.Model(&ProvisioningJob{}).
+			Where("id = ? AND tenant_id = ? AND status = ? AND attempts = ?", job.ID, job.TenantID, ProvisioningJobPending, job.Attempts).
+			Where(leaseFree, now).
+			Updates(map[string]any{
+				"status":     ProvisioningJobFailed,
+				"last_error": fmt.Sprintf("%s (reference %s)", provisioningNoResultMessage, job.ID),
+				"warning":    "",
+			})
+		if r.Error != nil || r.RowsAffected == 0 {
+			return r.Error
+		}
+		log.Errorf("saasapi: outbox sweep: job %s (tenant %s, %s) got no result after %d attempts; marked failed",
+			job.ID, job.TenantID, job.Type, job.Attempts)
+		if job.Type != ProvisioningJobProvision {
+			return nil
+		}
+		return tx.Model(&Tenant{}).Where("id = ? AND status = ?", job.TenantID, TenantStatusPending).
+			Update("status", TenantStatusFailed).Error
+	})
+	if err != nil {
+		log.Errorf("saasapi: outbox sweep: failing job %s (tenant %s): %v", job.ID, job.TenantID, err)
+	}
 }
 
 // StartProvisioningResultListener queue-subscribes nc to farmer's
@@ -151,9 +280,9 @@ func publicJobError(jobID string, code controlplane.ErrorCode) string {
 //     surfaces the failed job's last_error
 //
 // Both updates are conditional on the row's current status, so a duplicate
-// or late result (NATS core can redeliver nothing, but a future outbox
-// sweeper can re-dispatch, and farmer's ProvisionTenant is idempotent) is a
-// no-op, and a provision result arriving after the tenant was already
+// or late result (NATS core can redeliver nothing, but the outbox sweeper
+// re-publishes a pending job, and farmer's ProvisionTenant is idempotent)
+// is a no-op, and a provision result arriving after the tenant was already
 // moved to offboarding never resurrects it as active.
 func applyProvisioningResult(jobType ProvisioningJobType, res controlplane.TenantResult) error {
 	var succeeded bool
