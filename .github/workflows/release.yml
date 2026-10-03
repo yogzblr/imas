@@ -1,9 +1,11 @@
 name: Release
 
-# Manual-only for now: this needs GPG_PRIVATE_KEY/GPG_PASSPHRASE/GORELEASER_KEY
-# (goreleaser-pro) configured as repo secrets. Re-enable the tags trigger
-# below once they are set on yogzblr/imas (the "Check release secrets" step
-# fails fast, naming whatever is missing).
+# Manual-only for now: this needs GPG_PRIVATE_KEY/GPG_PASSPHRASE configured
+# as repo secrets. Re-enable the tags trigger below once they are set on
+# yogzblr/imas (the "Check release secrets" step fails fast, naming whatever
+# is missing). It runs GoReleaser OSS (MIT): no licence key is needed; the
+# Windows MSI comes from a build hook (packaging/windows/build-msi.sh), not
+# goreleaser-pro's msi pipe.
 #
 # Run it on a tag ref (Use workflow from: tag vX.Y.Z), not a branch: the
 # keyless cosign signatures are bound to this workflow *and* its ref, and
@@ -51,10 +53,9 @@ jobs:
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-          GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
         run: |
           missing=()
-          for name in GPG_PRIVATE_KEY GPG_PASSPHRASE GORELEASER_KEY; do
+          for name in GPG_PRIVATE_KEY GPG_PASSPHRASE; do
             [ -n "${!name}" ] || missing+=("$name")
           done
           if [ "${#missing[@]}" -gt 0 ]; then
@@ -62,8 +63,9 @@ jobs:
             exit 1
           fi
 
-      # goreleaser's msi pipe builds the imas-sprout MSI with msitools' wixl;
-      # packaging/windows/msi-postprocess.sh uses msibuild/msiinfo from msitools.
+      # The sprout-windows-pkg build hook (packaging/windows/build-msi.sh)
+      # builds the imas-sprout MSI with msitools' wixl, and
+      # packaging/windows/msi-postprocess.sh uses msibuild/msiinfo.
       - name: Install msitools
         run: sudo apt-get update -q && sudo apt-get install -y -q wixl msitools
 
@@ -93,10 +95,9 @@ jobs:
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
-          distribution: goreleaser-pro
+          distribution: goreleaser
           version: "~> v2"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}
-          GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}

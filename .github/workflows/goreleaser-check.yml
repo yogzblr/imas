@@ -1,0 +1,94 @@
+name: GoReleaser check
+
+# Secret-free proof that the release config still works, for pull requests
+# that touch it: GoReleaser OSS accepts .goreleaser.yaml, a snapshot builds
+# everything except the images, the sprout-windows-pkg build hook
+# (packaging/windows/build-msi.sh) leaves exactly one imas-sprout MSI in dist,
+# and checksums.txt lists it with the right hash. The release itself
+# (release.yml) signs checksums.txt, so that hash is what the GPG and cosign
+# signatures cover. Also runs the Windows packaging tests.
+#
+# Nothing here is published or signed, and it needs no secrets, so it runs
+# on pull requests from forks too.
+on:
+  pull_request:
+    paths:
+      - .goreleaser.yaml
+      - "packaging/**"
+      - ".github/workflows/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  goreleaser-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: 1.26.x
+          check-latest: true
+
+      # wixl and msibuild/msiinfo for build-msi.sh; zip/unzip and python3
+      # (preinstalled) for test-windows-packaging.sh.
+      - name: Install msitools
+        run: sudo apt-get update -q && sudo apt-get install -y -q wixl msitools zip unzip
+
+      - name: Install GoReleaser OSS
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          install-only: true
+
+      # goreleaser check exits 1 for deprecated properties too, and the config
+      # still uses some (dockers, nfpms.builds, snapshot.name_template).
+      # Accept that case only: anything else it reports fails the job.
+      - name: goreleaser check
+        run: |
+          set +e
+          out="$(goreleaser check 2>&1)"
+          rc=$?
+          set -e
+          printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ] && ! grep -q 'configuration is valid, but uses deprecated properties' <<<"$out"; then
+            echo "::error::goreleaser check rejected .goreleaser.yaml"
+            exit 1
+          fi
+
+      # publish and signing need secrets; the images need registry access and
+      # aren't what this checks.
+      - name: Snapshot build
+        run: goreleaser release --snapshot --clean --skip=publish,sign,docker
+
+      - name: Check the MSI and checksums.txt
+        run: |
+          mapfile -t msis < <(find dist -name '*.msi')
+          if [ "${#msis[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one MSI in dist, found ${#msis[@]}: ${msis[*]}"
+            exit 1
+          fi
+          name="$(basename "${msis[0]}")"
+          if [ "${msis[0]}" != "dist/$name" ] || [[ ! "$name" =~ ^imas-sprout-[0-9][^/]*-windows-x64\.msi$ ]]; then
+            echo "::error::unexpected MSI path ${msis[0]}"
+            exit 1
+          fi
+          [ -f dist/checksums.txt ] || { echo "::error::dist/checksums.txt missing"; exit 1; }
+          line="$(grep -E "^[0-9a-f]{64}  ${name//./\\.}\$" dist/checksums.txt || true)"
+          if [ "$(wc -l <<<"$line")" -ne 1 ] || [ -z "$line" ]; then
+            echo "::error::checksums.txt does not list $name exactly once"
+            cat dist/checksums.txt
+            exit 1
+          fi
+          (cd dist && sha256sum --check --strict <<<"$line")
+          msiinfo export "dist/$name" Property | grep -E '^(ProductName|ProductVersion|UpgradeCode)'
+
+      - name: Windows packaging tests
+        run: packaging/test/test-windows-packaging.sh

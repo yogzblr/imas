@@ -1,10 +1,12 @@
 name: Snapshot Build
 
-# Manual-only for now: this needs GPG_PRIVATE_KEY/GPG_PASSPHRASE/GORELEASER_KEY
-# (goreleaser-pro) configured as repo secrets, which don't exist yet on the
-# new imas repo (they lived on the original project's infra, not this fork's).
-# Re-enable the push/pull_request triggers below once those secrets are set
-# on yogzblr/imas.
+# Manual-only for now: this needs GPG_PRIVATE_KEY/GPG_PASSPHRASE configured
+# as repo secrets, which don't exist yet on the new imas repo (they lived on
+# the original project's infra, not this fork's). Re-enable the
+# push/pull_request triggers below once those secrets are set on
+# yogzblr/imas. It runs GoReleaser OSS (MIT), so no licence key is needed.
+# The secret-free check of the release config, MSI and checksums for pull
+# requests is goreleaser-check.yml.
 on:
   workflow_dispatch:
   # push:
@@ -14,10 +16,12 @@ on:
 
 jobs:
   snapshot:
-    # Only run on the canonical repo — this job publishes to imas's own
-    # infra (S3 bucket, GHCR, Docker Hub) and needs secrets a fork won't
-    # (and shouldn't) have. Forks get a plain `go build`/`go test` via ci.yml
-    # instead.
+    # Only run on the canonical repo — this job uses the release signing
+    # secrets (the goreleaser environment), which a fork won't (and
+    # shouldn't) have. --skip=publish keeps it from uploading anything: no
+    # GitHub release, and the images are built but not pushed to GHCR
+    # (skip_push on snapshots). Forks get a plain `go build`/`go test` via
+    # ci.yml instead.
     if: github.repository == 'yogzblr/imas'
     environment: goreleaser
     runs-on: ubuntu-latest
@@ -39,18 +43,18 @@ jobs:
           gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
           passphrase: ${{ secrets.GPG_PASSPHRASE }}    
 
-      # The msi pipe (imas-sprout Windows installer) needs msitools' wixl,
-      # and its after-hook msibuild/msiinfo.
+      # The sprout-windows-pkg build hook (packaging/windows/build-msi.sh)
+      # builds the imas-sprout MSI with msitools' wixl, and its
+      # post-process step uses msibuild/msiinfo.
       - name: Install msitools
         run: sudo apt-get update -q && sudo apt-get install -y -q wixl msitools
       
       - name: Test GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
-          distribution: goreleaser-pro
+          distribution: goreleaser
           version: "~> v2"
           args: release --snapshot --clean --skip=publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}
-          GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}

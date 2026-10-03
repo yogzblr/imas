@@ -14,7 +14,7 @@ What each release builds, and how it gets to hosts:
 | Package | Formats | Built by | Published to |
 |---|---|---|---|
 | `imas`, `imas-farmer`, `imas-sprout` | apk, deb, rpm | `nfpms` | GitHub release; `.deb` → Buildkite `imasdeb`, `.rpm` → Buildkite `imasrpm` |
-| `imas-sprout` (Windows) | MSI | `msi` (goreleaser-pro, msitools' wixl) | GitHub release |
+| `imas-sprout` (Windows) | MSI | `packaging/windows/build-msi.sh` (msitools' wixl), a post hook of the `sprout-windows-pkg` build | GitHub release |
 | `imas.sprout.windows` (winget) | installer `.nupkg` + manifests `.nupkg` | `packaging/windows/winget/build-winget-nupkg.sh`, in `publish-packages.yml` | Buildkite `imasnget` (public NuGet feed) |
 
 ## Windows: MSI
@@ -79,13 +79,50 @@ imas-sprout status                        # state, settings, log path
 msiexec /i imas-sprout-<version>-windows-x64.msi /quiet /norestart START_SERVICE=1
 ```
 
+### Supported Windows versions
+
+The oldest supported Windows is **Windows Server 2016** (decided
+2026-10-03). Client Windows is not supported. The MSI declares Windows
+Installer 5.0 (`InstallerVersion='500'`), which Server 2016 has, and must
+not use anything newer. winget is not present on Server 2016: there the
+Ansible role installs the MSI with `win_package`. No Server 2016 host has
+installed this MSI yet.
+
 ### Building the MSI
 
-goreleaser-pro's `msi` pipe templates the `.wxs` file and runs `wixl` on
-Linux (`apt-get install wixl msitools`). wixl implements only part of the v3
-schema and drops some attributes without warning. A goreleaser after-hook,
-`packaging/windows/msi-postprocess.sh`, puts back what the `.wxs` asks for
-using `msibuild`:
+Releases use GoReleaser OSS; there is no goreleaser-pro `msi` pipe. The
+`sprout-windows-pkg` build in `.goreleaser.yaml` has a post hook that runs
+`packaging/windows/build-msi.sh` with the built binary, the version and
+`dist` as the output directory. The script:
+
+1. renders the template fields of the `.wxs` (`Major`, `Minor`, `Patch`,
+   `Version`, `MsiArch` as `x64`, `Binary`) and drops the non-x64 branch and
+   the `.Runtime.Goos "windows"` (WiX toolset only) blocks. Any other
+   template action fails the build;
+2. stages `imas-sprout.exe`, `packaging/etc/imas-sprout.conf` and
+   `packaging/etc/fleet-signing-keys.json` at those relative paths next to the
+   rendered `.wxs`, with modification times set to the commit timestamp;
+3. runs `wixl -a x64` (`apt-get install wixl msitools`), then
+   `msi-postprocess.sh`;
+4. writes `dist/imas-sprout-<version>-windows-x64.msi`, by an atomic rename,
+   so a failed build leaves no MSI.
+
+`checksum.extra_files` and `release.extra_files` pick the MSI up from `dist`,
+so it is listed in `checksums.txt` (and covered by its GPG and cosign
+signatures) and attached to the release. Checksums are computed after all
+builds, so the MSI exists by then; `.github/workflows/goreleaser-check.yml`
+checks that on every pull request that touches the release config or
+packaging.
+
+The MSI is not byte-for-byte reproducible: every build gets a new
+ProductCode and PackageCode (`Id='*'`, which `MajorUpgrade` relies on), and
+wixl stamps the build time into the summary information. With the same
+inputs and timestamp the files inside it, and the cabinet holding them, are
+identical.
+
+wixl implements only part of the v3 schema and drops some attributes without
+warning. `packaging/windows/msi-postprocess.sh` puts back what the `.wxs`
+asks for using `msibuild`:
 
 * `Permanent`/`NeverOverwrite` on the config and state components (wixl
   ignores both);
@@ -96,27 +133,25 @@ using `msibuild`:
 * `MsiServiceConfigFailureActions` + `MsiConfigureServices`: restart on
   failure. This is the equivalent of systemd's `Restart=always`.
 
-Both tables need MSI 5.0 (Windows 7 / Server 2008 R2 or later).
+Both tables need Windows Installer 5.0, which Windows Server 2016 has.
 
 wixl implements `AllowSameVersionUpgrades` as a separate
 `WIX_SAME_VERSION_UPGRADE_DETECTED` property, which the start condition
 includes. It matters because ProductVersion drops prerelease suffixes.
 
-Note that `msi.ids` in `.goreleaser.yaml` takes **build** IDs, even though
-the goreleaser docs say archive IDs. With an archive ID the pipe silently
-produces nothing (checked with goreleaser-pro v2.18.2).
-
 Tests (Linux, no Windows needed): `packaging/test/test-windows-packaging.sh`
-builds the MSI the way goreleaser does, then checks the service, start
-condition, directory, upgrade and post-processed tables, and the two winget
-packages. Set
+builds the MSI with `build-msi.sh`, as the release does, then checks the
+script's error handling, the service, start condition, directory, upgrade
+and post-processed tables, and the two winget packages. Set
 `WINGET_SCHEMA_DIR` to a checkout of winget-cli's
 `schemas/JSON/manifests/v1.10.0` to also validate the manifests against the
 official schema.
 
-Not tested yet, because it needs a Windows host: installing the MSI, whether
-the ACL, failure actions and start condition take effect, upgrading,
-uninstalling, and `winget install`.
+Not tested yet, because it needs a Windows host: installing the MSI (nothing
+has installed it on any Windows host, Server 2016 included), whether the
+ACL, failure actions and start condition take effect, upgrading,
+uninstalling, and `winget install`. The first real release tag is also the
+first run of the whole release pipeline.
 
 ## Windows: winget via NuGet
 
