@@ -861,6 +861,10 @@ Sub-waves, each held until the one before is merged to `main`:
 | 5A | REL.1 | Independent of CL.1 and CL.3: scope is `.goreleaser.yaml`, the workflows and `packaging/`. It only shares the two release rows of `docs/BUILD-STATUS.md`, so merge whichever finishes first and rebase the other. Run it first if the first release is the priority, because the Terraform UAT gate needs published packages. |
 | 5B | CL.2a, then CL.2b | CL.2a touches `cmd/farmer/main.go` and files CL.1 edits, so it waits for CL.1. CL.2b follows CL.2a so it reuses the shared package CL.2a creates. |
 
+**Status, 2026-10-03:** CL.1 (PR #62), CL.3 (PR #63), REL.1 (PR #64, #65),
+CL.2a (PR #66) and CL.2b (PR #67) are all merged. Follow-ups they left are in
+`docs/BUILD-STATUS.md` Open items (5, 6).
+
 Every brief below inherits `CLAUDE.md`. The prompts avoid backticks, double
 quotes and dollar signs so they survive being pasted inside a shell string.
 
