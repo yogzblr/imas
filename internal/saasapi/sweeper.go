@@ -14,7 +14,8 @@
 //     went out and cmd.run is not idempotent (AssetActionItemStatus). See
 //     sweepActionBatches.
 //   - self_update rollouts whose process died: resumed, wave by wave,
-//     after the batch's lease has lapsed. See sweepRollouts.
+//     after the batch's lease has lapsed, only while fleet update dispatch
+//     is enabled. See sweepRollouts and rollout_resume.go.
 //
 // Every item and job is still claimed by the same conditional UPDATE the
 // original dispatch uses, so a sweeper and a live dispatcher, or two
@@ -177,6 +178,7 @@ func (sw *sweeper) sweep() {
 	}
 	sw.sweepProvisioningJobs()
 	sw.sweepActionBatches()
+	sw.sweepRollouts()
 }
 
 // sweepActionBatches is the outbox sweeper's §1.5 job. It finds batches

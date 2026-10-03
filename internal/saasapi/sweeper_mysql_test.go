@@ -223,3 +223,55 @@ func TestMySQLSweepActionBatches_TwoReplicas(t *testing.T) {
 		t.Fatalf("dispatching item = %+v, %v", stuck, err)
 	}
 }
+
+// Taking over a rollout on MySQL: of many concurrent takeovers from two
+// replicas exactly one wins, and it rewrites the tenant's rollout claim in
+// the same transaction.
+func TestMySQLClaimRolloutTakeover(t *testing.T) {
+	g1, g2 := newMySQLSaasSchema(t)
+	useTestClock(t)
+	version := "v2.4.1"
+	prev := dbTime(time.Now().Add(-time.Hour))
+	if err := g1.Create(&TenantUpdatePolicy{TenantID: "t_mysql", ApprovedVersion: &version, RolloutClaimedAt: &prev}).Error; err != nil {
+		t.Fatal(err)
+	}
+	expired := dbTime(outboxNow().Add(-time.Second))
+	batch := AssetActionBatch{ID: "b_mysql_roll", TenantID: "t_mysql", ActionType: controlplane.ActionSelfUpdate,
+		ActionParams: `{"version":"v2.4.1"}`, RequestedAssetIDs: "[]", RolloutBatchSize: 1, RolloutGate: gateJobStatus,
+		LeaseOwner: "dead-pod/x", LeaseUntil: &expired}
+	if err := g1.Create(&batch).Error; err != nil {
+		t.Fatal(err)
+	}
+	var (
+		mu  sync.Mutex
+		won int
+		wg  sync.WaitGroup
+	)
+	for i := range 12 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			g := g1
+			if i%2 == 1 {
+				g = g2
+			}
+			l, err := claimRolloutTakeover(g, batch, time.Minute)
+			if err != nil {
+				t.Logf("takeover %d: %v (counts as not claimed)", i, err)
+			}
+			if l != nil {
+				mu.Lock()
+				won++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if won != 1 {
+		t.Fatalf("%d of 12 concurrent takeovers won, want 1", won)
+	}
+	var p TenantUpdatePolicy
+	if err := g2.First(&p, "tenant_id = ?", "t_mysql").Error; err != nil || p.RolloutClaimedAt == nil || !p.RolloutClaimedAt.After(prev) {
+		t.Fatalf("rollout claim after the takeover: %+v, %v", p.RolloutClaimedAt, err)
+	}
+}

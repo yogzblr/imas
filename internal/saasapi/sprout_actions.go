@@ -588,19 +588,22 @@ func createActionBatch(tenantID string, assetIDs []string, action controlplane.S
 		TenantID:     tenantID,
 		ActionType:   action.Type,
 		ActionParams: string(action.Params),
-	}, assetIDs, resolved, nil, nil)
+	}, assetIDs, resolved, nil, nil, nil)
 }
 
 // createBatch writes batch (its ID, RequestedAssetIDs and lease are filled
 // in here) and one item per asset_id in one transaction, and returns the
 // queued items in request order. The batch is written already leased to
 // this process for outboxSettings.LeaseTTL (outbox_lease.go), so the
-// sweeper leaves it alone while this process dispatches it. blocked maps a resolved, accepted
-// sprout to the error code its item fails with instead of being queued.
-// claim, if set, runs first inside the same transaction; an error from it
+// sweeper leaves it alone while this process dispatches it.
+//
+// blocked maps a resolved, accepted sprout to the error code its item
+// fails with instead of being queued; atTarget marks the queued items
+// whose sprout already runs an update rollout's target version
+// (PlannedAtTarget). claim, if set, runs first inside the same transaction; an error from it
 // rolls everything back and is returned as is.
 func createBatch(batch AssetActionBatch, assetIDs []string, resolved []sproutByAssetItem,
-	blocked map[SproutRef]string, claim func(tx *gorm.DB) error) (AssetActionBatch, []AssetActionItem, error) {
+	blocked map[SproutRef]string, atTarget map[SproutRef]bool, claim func(tx *gorm.DB) error) (AssetActionBatch, []AssetActionItem, error) {
 	id, err := newID(actionBatchIDPrefix)
 	if err != nil {
 		return AssetActionBatch{}, nil, err
@@ -642,6 +645,7 @@ func createBatch(batch AssetActionBatch, assetIDs []string, resolved []sproutByA
 		default:
 			item.SproutID = row.SproutID
 			item.Status = ActionItemQueued
+			item.PlannedAtTarget = atTarget[SproutRef{TenantID: tenantID, SproutID: row.SproutID}]
 		}
 		items = append(items, item)
 	}

@@ -41,6 +41,18 @@ func useTestClock(t *testing.T) *testClock {
 	return c
 }
 
+// useOutboxClock is useTestClock for outboxNow alone: leases move with the
+// test's clock, while rollouts keep the real one, which farmer.props'
+// write times (reportFact) are on.
+func useOutboxClock(t *testing.T) *testClock {
+	t.Helper()
+	c := &testClock{now: time.Now().UTC().Truncate(time.Millisecond)}
+	prev := outboxNow
+	outboxNow = c.Now
+	t.Cleanup(func() { outboxNow = prev })
+	return c
+}
+
 func (c *testClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
