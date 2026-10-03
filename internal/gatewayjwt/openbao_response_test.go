@@ -26,7 +26,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -37,6 +36,8 @@ import (
 
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
+
+	"github.com/yogzblr/imas/internal/openbao/openbaotest"
 )
 
 // realTransitSignInput is the message transit-sign-v*.json signed.
@@ -200,33 +201,10 @@ func TestOpenBaoLive_JWKSServesMintedTokenKey(t *testing.T) {
 	mount := "gwjwttest-" + hex.EncodeToString(suffix)
 	const keyName = "imas-gateway-jwt"
 
-	admin := func(method, path string, body any) {
-		t.Helper()
-		var r io.Reader
-		if body != nil {
-			data, _ := json.Marshal(body)
-			r = bytes.NewReader(data)
-		}
-		req, _ := http.NewRequest(method, addr+"/v1/"+path, r)
-		req.Header.Set("X-Vault-Token", rootToken)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("%s %s: %v", method, path, err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode/100 != 2 {
-			msg, _ := io.ReadAll(resp.Body)
-			t.Fatalf("%s %s: status %d: %s", method, path, resp.StatusCode, msg)
-		}
-	}
+	bao := openbaotest.NewAdmin(t, addr, rootToken)
+	admin := func(method, path string, body any) { bao.Must(method, path, body) }
 	admin(http.MethodPost, "sys/mounts/"+mount, map[string]any{"type": "transit"})
-	t.Cleanup(func() {
-		req, _ := http.NewRequest(http.MethodDelete, addr+"/v1/sys/mounts/"+mount, nil)
-		req.Header.Set("X-Vault-Token", rootToken)
-		if resp, err := http.DefaultClient.Do(req); err == nil {
-			resp.Body.Close()
-		}
-	})
+	t.Cleanup(func() { bao.Delete("sys/mounts/" + mount) })
 	admin(http.MethodPost, mount+"/keys/"+keyName, map[string]any{"type": "ed25519"})
 	admin(http.MethodPost, mount+"/keys/"+keyName+"/rotate", nil)
 

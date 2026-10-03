@@ -4,17 +4,12 @@ package fleetsign
 // imas-fleet-signing key, used by farmer (to serve the key's public half
 // and to re-check a release's signature before dispatching a
 // self_update) and by saasapi (to check a catalog row's signature before
-// building a rollout). It is a copy of internal/gatewayjwt/obtransit.go's
-// hand-rolled HTTP client pattern — raw net/http, static-token or
-// Kubernetes auth, token caching with a 20% safety margin — for the same
-// reason every other OpenBao client in this repo is hand-rolled: the
-// official client (github.com/openbao/openbao/api,
-// github.com/hashicorp/vault/api) is MPL-2.0, which CLAUDE.md's
-// Apache-2.0/MIT-only rule disallows as a dependency.
+// building a rollout). The client is internal/openbao (the official
+// OpenBao Go client), which owns auth, TLS and error decoding.
 //
-// Deliberately NOT copied: gatewayjwt's sign method. The only request
-// this client can make against Transit is GET <mount>/keys/<key>. The
-// sign-capable copy of this pattern lives in cmd/fleetreleaser, a
+// Deliberately absent: a sign method. The only request this package
+// makes against Transit is GET <mount>/keys/<key>. The sign-capable
+// client lives in cmd/fleetreleaser, a
 // separate binary with its own OpenBao identity. Whether farmer's and
 // saasapi's tokens *can* sign is decided by their OpenBao policy
 // (deploy/fleetreleaser/policies/imas-fleet-verify.hcl), which is what
@@ -22,23 +17,19 @@ package fleetsign
 // TestOpenBaoEnforcesReadOnlyFleetKey.
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
+
+	"github.com/yogzblr/imas/internal/openbao"
 )
 
 // Environment variables configuring the read-only Transit client. Named
@@ -60,7 +51,10 @@ const (
 	// OpenBao's kubernetes auth method, used when AuthMethod is "kubernetes".
 	EnvOpenBaoK8sRole    = "IMAS_FLEETSIGN_OPENBAO_K8S_ROLE"
 	EnvOpenBaoK8sMount   = "IMAS_FLEETSIGN_OPENBAO_K8S_MOUNT"    // default "kubernetes"
-	EnvOpenBaoK8sJWTPath = "IMAS_FLEETSIGN_OPENBAO_K8S_JWT_PATH" // default defaultK8sJWTPath
+	EnvOpenBaoK8sJWTPath = "IMAS_FLEETSIGN_OPENBAO_K8S_JWT_PATH" // default openbao.DefaultK8sJWTPath
+
+	// EnvOpenBaoNamespace optionally sets the X-Vault-Namespace header.
+	EnvOpenBaoNamespace = "IMAS_FLEETSIGN_OPENBAO_NAMESPACE"
 
 	// EnvTransitKeyName overrides DefaultTransitKeyName.
 	EnvTransitKeyName = "IMAS_FLEETSIGN_TRANSIT_KEY"
@@ -68,14 +62,20 @@ const (
 
 // Recognized values for IMAS_FLEETSIGN_OPENBAO_AUTH_METHOD.
 const (
-	AuthMethodToken      = "token"
-	AuthMethodKubernetes = "kubernetes"
+	AuthMethodToken      = openbao.AuthMethodToken
+	AuthMethodKubernetes = openbao.AuthMethodKubernetes
 )
 
-const defaultK8sJWTPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
-
-// authTokenSafetyMargin mirrors internal/gatewayjwt/obtransit.go's.
-const authTokenSafetyMargin = 5 // 1/5 = 20%
+var openBaoEnv = openbao.Env{
+	Addr:       EnvOpenBaoAddr,
+	CACert:     EnvOpenBaoCACert,
+	AuthMethod: EnvOpenBaoAuthMethod,
+	Token:      EnvOpenBaoToken,
+	K8sRole:    EnvOpenBaoK8sRole,
+	K8sMount:   EnvOpenBaoK8sMount,
+	K8sJWTPath: EnvOpenBaoK8sJWTPath,
+	Namespace:  EnvOpenBaoNamespace,
+}
 
 var (
 	ErrNotConfigured = errors.New("fleetsign: openbao transit client not configured")
@@ -88,173 +88,41 @@ var (
 // obTransitClient is a read-only client for Transit's GET
 // /v1/<mount>/keys/<key>.
 type obTransitClient struct {
-	addr       string
-	mount      string
-	httpClient *http.Client
-
-	authMethod  string
-	staticToken string
-
-	k8sRole    string
-	k8sMount   string
-	k8sJWTPath string
-
-	authMu     sync.Mutex
-	authToken  string
-	authExpiry time.Time
+	ob    *openbao.Client
+	mount string
 }
 
-// newTransitClientFromEnv mirrors internal/gatewayjwt's: read fresh on
-// every construction so tests can point it at a local server.
+// newTransitClientFromEnv reads the environment fresh on every
+// construction so tests can point it at a local server.
 func newTransitClientFromEnv() (*obTransitClient, error) {
-	addr := os.Getenv(EnvOpenBaoAddr)
-	if addr == "" {
-		return nil, fmt.Errorf("%w: %s is required", ErrNotConfigured, EnvOpenBaoAddr)
+	ob, err := openbao.NewFromEnv(openBaoEnv, openbao.Errors{
+		NotConfigured:     ErrNotConfigured,
+		K8sJWTUnavailable: ErrK8sJWTUnavailable,
+		K8sAuthFailed:     ErrK8sAuthFailed,
+	})
+	if err != nil {
+		return nil, err
 	}
 	mount := os.Getenv(EnvOpenBaoTransitMount)
 	if mount == "" {
 		mount = "transit"
 	}
-	authMethod := os.Getenv(EnvOpenBaoAuthMethod)
-	if authMethod == "" {
-		authMethod = AuthMethodToken
-	}
-
-	c := &obTransitClient{
-		addr:       strings.TrimRight(addr, "/"),
-		mount:      mount,
-		authMethod: authMethod,
-	}
-
-	switch authMethod {
-	case AuthMethodToken:
-		token := os.Getenv(EnvOpenBaoToken)
-		if token == "" {
-			return nil, fmt.Errorf("%w: %s is required when %s=%s (or unset)",
-				ErrNotConfigured, EnvOpenBaoToken, EnvOpenBaoAuthMethod, AuthMethodToken)
-		}
-		c.staticToken = token
-	case AuthMethodKubernetes:
-		k8sRole := os.Getenv(EnvOpenBaoK8sRole)
-		if k8sRole == "" {
-			return nil, fmt.Errorf("%w: %s is required when %s=%s",
-				ErrNotConfigured, EnvOpenBaoK8sRole, EnvOpenBaoAuthMethod, AuthMethodKubernetes)
-		}
-		c.k8sRole = k8sRole
-		c.k8sMount = os.Getenv(EnvOpenBaoK8sMount)
-		if c.k8sMount == "" {
-			c.k8sMount = "kubernetes"
-		}
-		c.k8sJWTPath = os.Getenv(EnvOpenBaoK8sJWTPath)
-		if c.k8sJWTPath == "" {
-			c.k8sJWTPath = defaultK8sJWTPath
-		}
-	default:
-		return nil, fmt.Errorf("%w: unknown %s %q (want %q or %q)",
-			ErrNotConfigured, EnvOpenBaoAuthMethod, authMethod, AuthMethodToken, AuthMethodKubernetes)
-	}
-
-	var transport http.RoundTripper = http.DefaultTransport
-	if caFile := os.Getenv(EnvOpenBaoCACert); caFile != "" {
-		pemBytes, err := os.ReadFile(caFile)
-		if err != nil {
-			return nil, fmt.Errorf("reading OpenBao CA bundle: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pemBytes) {
-			return nil, fmt.Errorf("no certificates found in OpenBao CA bundle %s", caFile)
-		}
-		transport = &http.Transport{
-			TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
-		}
-	}
-	c.httpClient = &http.Client{Transport: transport, Timeout: 30 * time.Second}
-	return c, nil
+	return &obTransitClient{ob: ob, mount: mount}, nil
 }
 
-// currentToken mirrors internal/gatewayjwt/obtransit.go's.
-func (c *obTransitClient) currentToken(ctx context.Context) (string, error) {
-	if c.authMethod == AuthMethodToken {
-		return c.staticToken, nil
-	}
-	c.authMu.Lock()
-	defer c.authMu.Unlock()
-	if c.authToken != "" && time.Now().Before(c.authExpiry) {
-		return c.authToken, nil
-	}
-	return c.k8sLoginLocked(ctx)
-}
-
-type k8sLoginResponse struct {
-	Auth *struct {
-		ClientToken   string `json:"client_token"`
-		LeaseDuration int    `json:"lease_duration"`
-	} `json:"auth"`
-	Errors []string `json:"errors"`
-}
-
-// k8sLoginLocked mirrors internal/gatewayjwt/obtransit.go's. Callers must
-// hold c.authMu.
-func (c *obTransitClient) k8sLoginLocked(ctx context.Context) (string, error) {
-	jwtBytes, err := os.ReadFile(c.k8sJWTPath)
-	if err != nil {
-		return "", fmt.Errorf("%w: reading %s: %w", ErrK8sJWTUnavailable, c.k8sJWTPath, err)
-	}
-	jwt := strings.TrimSpace(string(jwtBytes))
-	if jwt == "" {
-		return "", fmt.Errorf("%w: %s is empty", ErrK8sJWTUnavailable, c.k8sJWTPath)
-	}
-	reqBody, err := json.Marshal(map[string]string{"role": c.k8sRole, "jwt": jwt})
-	if err != nil {
-		return "", fmt.Errorf("%w: encoding request: %w", ErrK8sAuthFailed, err)
-	}
-	reqURL := fmt.Sprintf("%s/v1/auth/%s/login", c.addr, c.k8sMount)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(reqBody))
-	if err != nil {
-		return "", fmt.Errorf("%w: %w", ErrK8sAuthFailed, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("%w: %w", ErrK8sAuthFailed, err)
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("%w: reading response: %w", ErrK8sAuthFailed, err)
-	}
-	var lr k8sLoginResponse
-	if resp.StatusCode != http.StatusOK {
-		_ = json.Unmarshal(data, &lr)
-		return "", fmt.Errorf("%w: status %d: %s", ErrK8sAuthFailed, resp.StatusCode, strings.Join(lr.Errors, "; "))
-	}
-	if err := json.Unmarshal(data, &lr); err != nil {
-		return "", fmt.Errorf("%w: decoding response: %w", ErrK8sAuthFailed, err)
-	}
-	if lr.Auth == nil || lr.Auth.ClientToken == "" {
-		return "", fmt.Errorf("%w: response had no auth.client_token: %s", ErrK8sAuthFailed, strings.Join(lr.Errors, "; "))
-	}
-	c.authToken = lr.Auth.ClientToken
-	margin := time.Duration(lr.Auth.LeaseDuration) * time.Second / authTokenSafetyMargin
-	c.authExpiry = time.Now().Add(time.Duration(lr.Auth.LeaseDuration)*time.Second - margin)
-	return c.authToken, nil
-}
-
-type transitReadKeyResponse struct {
-	Data struct {
-		Type string `json:"type"`
-		Keys map[string]struct {
-			PublicKey string `json:"public_key"`
-		} `json:"keys"`
-		// MinEncryptionVersion is the floor for producing NEW signatures —
-		// a signer-side concern. Decoded but deliberately not used here.
-		MinEncryptionVersion int `json:"min_encryption_version"`
-		// MinDecryptionVersion is the floor Transit's own /verify honors,
-		// and the one readKeySet filters on.
-		MinDecryptionVersion int `json:"min_decryption_version"`
-		LatestVersion        int `json:"latest_version"`
-	} `json:"data"`
-	Errors []string `json:"errors"`
+// transitReadKeyData is the data of Transit's keys/<key> read.
+type transitReadKeyData struct {
+	Type string `json:"type"`
+	Keys map[string]struct {
+		PublicKey string `json:"public_key"`
+	} `json:"keys"`
+	// MinEncryptionVersion is the floor for producing NEW signatures —
+	// a signer-side concern. Decoded but deliberately not used here.
+	MinEncryptionVersion int `json:"min_encryption_version"`
+	// MinDecryptionVersion is the floor Transit's own /verify honors,
+	// and the one readKeySet filters on.
+	MinDecryptionVersion int `json:"min_decryption_version"`
+	LatestVersion        int `json:"latest_version"`
 }
 
 // readKeySet calls Transit's GET /v1/<mount>/keys/<keyName> and returns
@@ -287,44 +155,25 @@ type transitReadKeyResponse struct {
 // stays an operator decision (deploy/fleetreleaser/README.md, "Rotating
 // the key").
 func (c *obTransitClient) readKeySet(ctx context.Context, keyName string) (KeySet, error) {
-	token, err := c.currentToken(ctx)
+	secret, err := c.ob.Read(ctx, c.mount+"/keys/"+keyName, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrReadKeyFailed, err)
 	}
-	reqURL := fmt.Sprintf("%s/v1/%s/keys/%s", c.addr, c.mount, keyName)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
+	var rd transitReadKeyData
+	if err := openbao.DecodeData(secret, &rd); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrReadKeyFailed, err)
 	}
-	req.Header.Set("X-Vault-Token", token)
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrReadKeyFailed, err)
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("%w: reading response: %w", ErrReadKeyFailed, err)
-	}
-	var rr transitReadKeyResponse
-	if resp.StatusCode != http.StatusOK {
-		_ = json.Unmarshal(data, &rr)
-		return nil, fmt.Errorf("%w: status %d: %s", ErrReadKeyFailed, resp.StatusCode, strings.Join(rr.Errors, "; "))
-	}
-	if err := json.Unmarshal(data, &rr); err != nil {
-		return nil, fmt.Errorf("%w: decoding response: %w", ErrReadKeyFailed, err)
-	}
-	if rr.Data.Type != "ed25519" {
-		return nil, fmt.Errorf("%w: Transit key %q is type %q, want ed25519", ErrReadKeyFailed, keyName, rr.Data.Type)
+	if rd.Type != "ed25519" {
+		return nil, fmt.Errorf("%w: Transit key %q is type %q, want ed25519", ErrReadKeyFailed, keyName, rd.Type)
 	}
 	// A floor of 0 is Transit's "no restriction" sentinel: treat it as 1,
 	// the same handling PublicKeys gives min_encryption_version.
-	minVersion := rr.Data.MinDecryptionVersion
+	minVersion := rd.MinDecryptionVersion
 	if minVersion < 1 {
 		minVersion = 1
 	}
-	keys := make([]PublicKey, 0, len(rr.Data.Keys))
-	for k, v := range rr.Data.Keys {
+	keys := make([]PublicKey, 0, len(rd.Keys))
+	for k, v := range rd.Keys {
 		version, convErr := strconv.Atoi(k)
 		if convErr != nil {
 			return nil, fmt.Errorf("%w: unexpected key version %q", ErrReadKeyFailed, k)

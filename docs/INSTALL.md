@@ -162,6 +162,19 @@ Environment=IMAS_TENANTBOX_OPENBAO_ADDR=https://openbao:8200
 # ...and each client's _TOKEN (or _AUTH_METHOD=kubernetes), _CACERT, etc.
 ```
 
+Every client (`IMAS_CERTS_`, `IMAS_GATEWAY_`, `IMAS_FLEETSIGN_`,
+`IMAS_TENANTBOX_`, and outside farmer `IMAS_SAASAPI_CRED_` and
+`IMAS_FLEETRELEASER_`) takes the same `<prefix>OPENBAO_*` set: `ADDR`
+(required); `AUTH_METHOD`, `token` (default, with `TOKEN`) or `kubernetes`
+(with `K8S_ROLE`, and optionally `K8S_MOUNT`, default `kubernetes`, and
+`K8S_JWT_PATH`, default the pod's service account token); `CACERT`, a PEM
+bundle to verify OpenBao's TLS; and `NAMESPACE`, which sends
+`X-Vault-Namespace` on every request when set. A kubernetes login is
+repeated once 80% of its lease has passed. Requests time out after 30
+seconds and are not retried. The clients are built on the official OpenBao
+Go client (`internal/openbao`) and read nothing else: `BAO_*` and `VAULT_*`
+variables, `BAO_SKIP_VERIFY` included, are ignored.
+
 The policies to create are in
 [`deploy/helm/farmer/README.md`](../deploy/helm/farmer/README.md), "OpenBao".
 The Transit key setup is in [`deploy/envoy/README.md`](../deploy/envoy/README.md).

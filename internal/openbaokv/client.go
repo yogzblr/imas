@@ -13,40 +13,19 @@
 // long-running server process. deploy/farmer/README.md states the exact
 // policy boundary.
 //
-// Like internal/certs (tls.go) and internal/gatewayjwt (obtransit.go),
-// this talks to OpenBao's HTTP API over raw net/http: the official client
-// (github.com/openbao/openbao/api, github.com/hashicorp/vault/api) is
-// MPL-2.0 licensed, which conflicts with this repo's Apache-2.0/MIT-only
-// dependency constraint (see CLAUDE.md).
-//
-// This is now the third near-identical hand-rolled OpenBao client. The
-// auth-method plumbing (static token or Kubernetes auth, env-var driven,
-// token caching with a 20% safety margin) deliberately mirrors
-// internal/certs/tls.go's obClient and internal/gatewayjwt's
-// obTransitClient line for line rather than being factored out into a
-// shared package in the same change: both of those clients sit on
-// security-reviewed paths (TLS issuance, the DMZ gateway signer), and
-// refactoring them in a change whose own review focus is a new OpenBao
-// write policy would widen that review for no functional gain. Extracting
-// a shared internal/openbaoclient auth helper across all three is the
-// natural follow-up.
+// The client is internal/openbao (the official OpenBao Go client), which
+// owns auth, TLS and error decoding for every server-side OpenBao
+// identity; this package keeps the KV v2 paths and its own errors.
 package openbaokv
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"strings"
-	"sync"
-	"time"
+
+	"github.com/yogzblr/imas/internal/openbao"
 )
 
 // Environment variables configuring the OpenBao KV v2 client. Addr is
@@ -69,24 +48,30 @@ const (
 	// OpenBao's kubernetes auth method, used when AuthMethod is "kubernetes".
 	EnvOpenBaoK8sRole    = "IMAS_SAASAPI_CRED_OPENBAO_K8S_ROLE"
 	EnvOpenBaoK8sMount   = "IMAS_SAASAPI_CRED_OPENBAO_K8S_MOUNT"    // default "kubernetes"
-	EnvOpenBaoK8sJWTPath = "IMAS_SAASAPI_CRED_OPENBAO_K8S_JWT_PATH" // default defaultK8sJWTPath
+	EnvOpenBaoK8sJWTPath = "IMAS_SAASAPI_CRED_OPENBAO_K8S_JWT_PATH" // default openbao.DefaultK8sJWTPath
+
+	// EnvOpenBaoNamespace optionally sets the X-Vault-Namespace header.
+	EnvOpenBaoNamespace = "IMAS_SAASAPI_CRED_OPENBAO_NAMESPACE"
 )
 
 // Recognized values for IMAS_SAASAPI_CRED_OPENBAO_AUTH_METHOD.
 const (
-	AuthMethodToken      = "token"
-	AuthMethodKubernetes = "kubernetes"
+	AuthMethodToken      = openbao.AuthMethodToken
+	AuthMethodKubernetes = openbao.AuthMethodKubernetes
 )
 
-const (
-	defaultKVMount    = "secret"
-	defaultK8sJWTPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
-)
+const defaultKVMount = "secret"
 
-// authTokenSafetyMargin is the fraction of a kubernetes-auth login's
-// lease_duration reserved as a safety margin (same convention as
-// internal/certs/tls.go and internal/gatewayjwt/obtransit.go).
-const authTokenSafetyMargin = 5 // 1/5 = 20%
+var openBaoEnv = openbao.Env{
+	Addr:       EnvOpenBaoAddr,
+	CACert:     EnvOpenBaoCACert,
+	AuthMethod: EnvOpenBaoAuthMethod,
+	Token:      EnvOpenBaoToken,
+	K8sRole:    EnvOpenBaoK8sRole,
+	K8sMount:   EnvOpenBaoK8sMount,
+	K8sJWTPath: EnvOpenBaoK8sJWTPath,
+	Namespace:  EnvOpenBaoNamespace,
+}
 
 var (
 	ErrNotConfigured = errors.New("openbaokv: openbao kv client not configured")
@@ -98,33 +83,23 @@ var (
 	ErrK8sAuthFailed     = errors.New("openbaokv: openbao kubernetes auth login failed")
 )
 
-// Client is a minimal client for the subset of OpenBao's HTTP API this
-// package needs: KV v2's GET and POST /v1/<mount>/data/<path>.
+// Client is a KV v2 client for GET and POST /v1/<mount>/data/<path>.
 type Client struct {
-	addr       string
-	mount      string // KV v2 secrets engine mount, default "secret"
-	httpClient *http.Client
-
-	authMethod  string
-	staticToken string
-
-	k8sRole    string
-	k8sMount   string
-	k8sJWTPath string
-
-	authMu     sync.Mutex
-	authToken  string
-	authExpiry time.Time
+	ob    *openbao.Client
+	mount string // KV v2 secrets engine mount, default "secret"
 }
 
 // NewClientFromEnv builds a Client from the Env* variables above, read
-// fresh on every call rather than cached at package init (same rationale
-// as internal/certs/tls.go's newClientFromEnv: tests routinely change the
-// environment to point at a local server).
+// fresh on every call rather than cached at package init (tests change
+// the environment to point at a local server).
 func NewClientFromEnv() (*Client, error) {
-	addr := os.Getenv(EnvOpenBaoAddr)
-	if addr == "" {
-		return nil, fmt.Errorf("%w: %s is required", ErrNotConfigured, EnvOpenBaoAddr)
+	ob, err := openbao.NewFromEnv(openBaoEnv, openbao.Errors{
+		NotConfigured:     ErrNotConfigured,
+		K8sJWTUnavailable: ErrK8sJWTUnavailable,
+		K8sAuthFailed:     ErrK8sAuthFailed,
+	})
+	if err != nil {
+		return nil, err
 	}
 	mount := strings.Trim(os.Getenv(EnvOpenBaoKVMount), "/")
 	if mount == "" {
@@ -133,138 +108,11 @@ func NewClientFromEnv() (*Client, error) {
 	if err := validatePath(mount); err != nil {
 		return nil, fmt.Errorf("%w: %s: %w", ErrNotConfigured, EnvOpenBaoKVMount, err)
 	}
-	authMethod := os.Getenv(EnvOpenBaoAuthMethod)
-	if authMethod == "" {
-		authMethod = AuthMethodToken
-	}
-
-	c := &Client{
-		addr:       strings.TrimRight(addr, "/"),
-		mount:      mount,
-		authMethod: authMethod,
-	}
-
-	switch authMethod {
-	case AuthMethodToken:
-		token := os.Getenv(EnvOpenBaoToken)
-		if token == "" {
-			return nil, fmt.Errorf("%w: %s is required when %s=%s (or unset)",
-				ErrNotConfigured, EnvOpenBaoToken, EnvOpenBaoAuthMethod, AuthMethodToken)
-		}
-		c.staticToken = token
-	case AuthMethodKubernetes:
-		k8sRole := os.Getenv(EnvOpenBaoK8sRole)
-		if k8sRole == "" {
-			return nil, fmt.Errorf("%w: %s is required when %s=%s",
-				ErrNotConfigured, EnvOpenBaoK8sRole, EnvOpenBaoAuthMethod, AuthMethodKubernetes)
-		}
-		c.k8sRole = k8sRole
-		c.k8sMount = os.Getenv(EnvOpenBaoK8sMount)
-		if c.k8sMount == "" {
-			c.k8sMount = "kubernetes"
-		}
-		c.k8sJWTPath = os.Getenv(EnvOpenBaoK8sJWTPath)
-		if c.k8sJWTPath == "" {
-			c.k8sJWTPath = defaultK8sJWTPath
-		}
-	default:
-		return nil, fmt.Errorf("%w: unknown %s %q (want %q or %q)",
-			ErrNotConfigured, EnvOpenBaoAuthMethod, authMethod, AuthMethodToken, AuthMethodKubernetes)
-	}
-
-	var transport http.RoundTripper = http.DefaultTransport
-	if caFile := os.Getenv(EnvOpenBaoCACert); caFile != "" {
-		pemBytes, err := os.ReadFile(caFile)
-		if err != nil {
-			return nil, fmt.Errorf("reading OpenBao CA bundle: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pemBytes) {
-			return nil, fmt.Errorf("no certificates found in OpenBao CA bundle %s", caFile)
-		}
-		transport = &http.Transport{
-			TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
-		}
-	}
-	c.httpClient = &http.Client{Transport: transport, Timeout: 30 * time.Second}
-	return c, nil
+	return &Client{ob: ob, mount: mount}, nil
 }
 
 // Mount is the KV v2 mount this client reads and writes under.
 func (c *Client) Mount() string { return c.mount }
-
-// currentToken mirrors internal/certs/tls.go's (*obClient).currentToken.
-func (c *Client) currentToken(ctx context.Context) (string, error) {
-	if c.authMethod == AuthMethodToken {
-		return c.staticToken, nil
-	}
-	c.authMu.Lock()
-	defer c.authMu.Unlock()
-	if c.authToken != "" && time.Now().Before(c.authExpiry) {
-		return c.authToken, nil
-	}
-	return c.k8sLoginLocked(ctx)
-}
-
-type k8sLoginAuth struct {
-	ClientToken   string `json:"client_token"`
-	LeaseDuration int    `json:"lease_duration"`
-	Renewable     bool   `json:"renewable"`
-}
-
-type k8sLoginResponse struct {
-	Auth   *k8sLoginAuth `json:"auth"`
-	Errors []string      `json:"errors"`
-}
-
-// k8sLoginLocked mirrors internal/certs/tls.go's
-// (*obClient).k8sLoginLocked. Callers must hold c.authMu.
-func (c *Client) k8sLoginLocked(ctx context.Context) (string, error) {
-	jwtBytes, err := os.ReadFile(c.k8sJWTPath)
-	if err != nil {
-		return "", fmt.Errorf("%w: reading %s: %w", ErrK8sJWTUnavailable, c.k8sJWTPath, err)
-	}
-	jwt := strings.TrimSpace(string(jwtBytes))
-	if jwt == "" {
-		return "", fmt.Errorf("%w: %s is empty", ErrK8sJWTUnavailable, c.k8sJWTPath)
-	}
-
-	reqBody, err := json.Marshal(map[string]string{"role": c.k8sRole, "jwt": jwt})
-	if err != nil {
-		return "", fmt.Errorf("%w: encoding request: %w", ErrK8sAuthFailed, err)
-	}
-	reqURL := fmt.Sprintf("%s/v1/auth/%s/login", c.addr, c.k8sMount)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(reqBody))
-	if err != nil {
-		return "", fmt.Errorf("%w: %w", ErrK8sAuthFailed, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("%w: %w", ErrK8sAuthFailed, err)
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("%w: reading response: %w", ErrK8sAuthFailed, err)
-	}
-	var lr k8sLoginResponse
-	if resp.StatusCode != http.StatusOK {
-		_ = json.Unmarshal(data, &lr)
-		return "", fmt.Errorf("%w: status %d: %s", ErrK8sAuthFailed, resp.StatusCode, strings.Join(lr.Errors, "; "))
-	}
-	if err := json.Unmarshal(data, &lr); err != nil {
-		return "", fmt.Errorf("%w: decoding response: %w", ErrK8sAuthFailed, err)
-	}
-	if lr.Auth == nil || lr.Auth.ClientToken == "" {
-		return "", fmt.Errorf("%w: response had no auth.client_token: %s", ErrK8sAuthFailed, strings.Join(lr.Errors, "; "))
-	}
-
-	c.authToken = lr.Auth.ClientToken
-	margin := time.Duration(lr.Auth.LeaseDuration) * time.Second / authTokenSafetyMargin
-	c.authExpiry = time.Now().Add(time.Duration(lr.Auth.LeaseDuration)*time.Second - margin)
-	return c.authToken, nil
-}
 
 // validatePath rejects a mount or secret path that is empty, has empty
 // segments, or contains "." / ".." segments. OpenBao's policy language
@@ -286,29 +134,18 @@ func validatePath(p string) error {
 	return nil
 }
 
-// dataURL is KV v2's data endpoint for secretPath under c.mount, with
-// each path segment escaped.
-func (c *Client) dataURL(secretPath string) (string, error) {
+// dataPath is KV v2's data endpoint for secretPath under c.mount. The
+// client escapes each segment when it builds the URL.
+func (c *Client) dataPath(secretPath string) (string, error) {
 	secretPath = strings.Trim(secretPath, "/")
 	if err := validatePath(secretPath); err != nil {
 		return "", err
 	}
-	segs := strings.Split(c.mount+"/data/"+secretPath, "/")
-	for i, s := range segs {
-		segs[i] = url.PathEscape(s)
-	}
-	return c.addr + "/v1/" + strings.Join(segs, "/"), nil
+	return c.mount + "/data/" + secretPath, nil
 }
 
-type kvReadResponse struct {
-	Data *struct {
-		Data map[string]any `json:"data"`
-	} `json:"data"`
-	Errors []string `json:"errors"`
-}
-
-type kvErrorResponse struct {
-	Errors []string `json:"errors"`
+type kvReadData struct {
+	Data map[string]any `json:"data"`
 }
 
 // Read returns the latest version of the secret at secretPath, keeping
@@ -316,45 +153,26 @@ type kvErrorResponse struct {
 // latest version is soft-deleted or destroyed, which KV v2 also answers
 // with 404 — is reported as (nil, nil), not an error.
 func (c *Client) Read(ctx context.Context, secretPath string) (map[string]string, error) {
-	reqURL, err := c.dataURL(secretPath)
+	path, err := c.dataPath(secretPath)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrReadFailed, err)
 	}
-	token, err := c.currentToken(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrReadFailed, err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrReadFailed, err)
-	}
-	req.Header.Set("X-Vault-Token", token)
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrReadFailed, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("%w: reading response: %w", ErrReadFailed, err)
-	}
-	if resp.StatusCode == http.StatusNotFound {
+	secret, err := c.ob.Read(ctx, path, nil)
+	if openbao.IsNotFound(err) {
 		return nil, nil
 	}
-	if resp.StatusCode != http.StatusOK {
-		var er kvErrorResponse
-		_ = json.Unmarshal(body, &er)
-		return nil, fmt.Errorf("%w: status %d: %s", ErrReadFailed, resp.StatusCode, strings.Join(er.Errors, "; "))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrReadFailed, err)
 	}
-	var rr kvReadResponse
-	if err := json.Unmarshal(body, &rr); err != nil {
-		return nil, fmt.Errorf("%w: decoding response: %w", ErrReadFailed, err)
+	var rd kvReadData
+	if err := openbao.DecodeData(secret, &rd); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrReadFailed, err)
 	}
-	if rr.Data == nil || rr.Data.Data == nil {
+	if rd.Data == nil {
 		return nil, nil
 	}
-	out := make(map[string]string, len(rr.Data.Data))
-	for k, v := range rr.Data.Data {
+	out := make(map[string]string, len(rd.Data))
+	for k, v := range rd.Data {
 		if s, ok := v.(string); ok {
 			out[k] = s
 		}
@@ -362,55 +180,27 @@ func (c *Client) Read(ctx context.Context, secretPath string) (map[string]string
 	return out, nil
 }
 
-type kvWriteResponse struct {
-	Data struct {
-		Version int `json:"version"`
-	} `json:"data"`
-	Errors []string `json:"errors"`
+type kvWriteData struct {
+	Version int `json:"version"`
 }
 
 // Write stores data as a new version of the secret at secretPath (KV v2
 // POST /v1/<mount>/data/<path>), replacing every field of the previous
 // version, and returns the version number OpenBao assigned.
 func (c *Client) Write(ctx context.Context, secretPath string, data map[string]string) (int, error) {
-	reqURL, err := c.dataURL(secretPath)
+	path, err := c.dataPath(secretPath)
 	if err != nil {
 		return 0, fmt.Errorf("%w: %w", ErrWriteFailed, err)
 	}
-	token, err := c.currentToken(ctx)
+	secret, err := c.ob.Post(ctx, path, map[string]any{"data": data})
 	if err != nil {
 		return 0, fmt.Errorf("%w: %w", ErrWriteFailed, err)
 	}
-	reqBody, err := json.Marshal(map[string]any{"data": data})
-	if err != nil {
-		return 0, fmt.Errorf("%w: encoding request: %w", ErrWriteFailed, err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(reqBody))
-	if err != nil {
+	var wd kvWriteData
+	if err := openbao.DecodeData(secret, &wd); err != nil {
 		return 0, fmt.Errorf("%w: %w", ErrWriteFailed, err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Vault-Token", token)
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return 0, fmt.Errorf("%w: %w", ErrWriteFailed, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return 0, fmt.Errorf("%w: reading response: %w", ErrWriteFailed, err)
-	}
-	var wr kvWriteResponse
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		_ = json.Unmarshal(body, &wr)
-		return 0, fmt.Errorf("%w: status %d: %s", ErrWriteFailed, resp.StatusCode, strings.Join(wr.Errors, "; "))
-	}
-	if len(body) > 0 {
-		if err := json.Unmarshal(body, &wr); err != nil {
-			return 0, fmt.Errorf("%w: decoding response: %w", ErrWriteFailed, err)
-		}
-	}
-	return wr.Data.Version, nil
+	return wd.Version, nil
 }
 
 // Secret binds a Client to one secret path, for callers (such as

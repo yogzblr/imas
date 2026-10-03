@@ -248,10 +248,14 @@ func TestUpdateManifestRoute_NoURLInResponse(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("got %d", code)
 	}
-	if _, err := fleetsign.ParseManifest([]byte(body)); err != nil {
+	m, err := fleetsign.ParseManifest([]byte(body))
+	if err != nil {
 		t.Fatalf("response has fields beyond the signed manifest: %v\n%s", err, body)
 	}
-	lower := strings.ToLower(body)
+	// The signature is base64 under a key generated per run, so it can
+	// spell "url" or "repo" by chance; ParseManifest has already checked
+	// its format. Search everything else.
+	lower := strings.ToLower(strings.Replace(body, m.Signature, "", 1))
 	for _, s := range []string{"url", "http", "://", "artifact", "repo"} {
 		if strings.Contains(lower, s) {
 			t.Errorf("response contains %q: %s", s, body)

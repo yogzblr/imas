@@ -1,0 +1,215 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
+package api
+
+import (
+	"context"
+	"net/http"
+)
+
+func (c *Sys) GenerateRootStatus() (*GenerateRootStatusResponse, error) {
+	return c.GenerateRootStatusWithContext(context.Background())
+}
+
+func (c *Sys) GenerateRecoveryOperationTokenStatus() (*GenerateRootStatusResponse, error) {
+	return c.GenerateRecoveryOperationTokenStatusWithContext(context.Background())
+}
+
+func (c *Sys) GenerateRootStatusWithContext(ctx context.Context) (*GenerateRootStatusResponse, error) {
+	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
+	defer cancelFunc()
+
+	r := c.c.NewRequest(http.MethodGet, "/v1/sys/generate-root-token/attempt")
+
+	resp, err := c.c.rawRequestWithContext(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	var result struct {
+		Data GenerateRootStatusResponse `json:"data"`
+	}
+	err = resp.DecodeJSON(&result)
+	return &result.Data, err
+}
+
+func (c *Sys) GenerateRecoveryOperationTokenStatusWithContext(ctx context.Context) (*GenerateRootStatusResponse, error) {
+	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
+	defer cancelFunc()
+
+	r := c.c.NewRequest(http.MethodGet, "/v1/sys/generate-recovery-token/attempt")
+
+	resp, err := c.c.rawRequestWithContext(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	var result GenerateRootStatusResponse
+	err = resp.DecodeJSON(&result)
+	return &result, err
+}
+
+func (c *Sys) GenerateRootInit(otp, pgpKey string) (*GenerateRootStatusResponse, error) {
+	return c.GenerateRootInitWithContext(context.Background(), otp, pgpKey)
+}
+
+func (c *Sys) GenerateRecoveryOperationTokenInit(otp, pgpKey string) (*GenerateRootStatusResponse, error) {
+	return c.GenerateRecoveryOperationTokenInitWithContext(context.Background(), otp, pgpKey)
+}
+
+func (c *Sys) GenerateRootInitWithContext(ctx context.Context, otp, pgpKey string) (*GenerateRootStatusResponse, error) {
+	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
+	defer cancelFunc()
+
+	body := map[string]any{
+		"otp":     otp,
+		"pgp_key": pgpKey,
+	}
+
+	r := c.c.NewRequest(http.MethodPut, "/v1/sys/generate-root-token/attempt")
+	if err := r.SetJSONBody(body); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.c.rawRequestWithContext(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	var result struct {
+		Data GenerateRootStatusResponse `json:"data"`
+	}
+	err = resp.DecodeJSON(&result)
+	return &result.Data, err
+}
+
+func (c *Sys) GenerateRecoveryOperationTokenInitWithContext(ctx context.Context, otp, pgpKey string) (*GenerateRootStatusResponse, error) {
+	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
+	defer cancelFunc()
+
+	body := map[string]any{
+		"otp":     otp,
+		"pgp_key": pgpKey,
+	}
+
+	r := c.c.NewRequest(http.MethodPut, "/v1/sys/generate-recovery-token/attempt")
+	if err := r.SetJSONBody(body); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.c.rawRequestWithContext(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	var result GenerateRootStatusResponse
+	err = resp.DecodeJSON(&result)
+	return &result, err
+}
+
+func (c *Sys) GenerateRootCancel() error {
+	return c.GenerateRootCancelWithContext(context.Background())
+}
+
+func (c *Sys) GenerateRecoveryOperationTokenCancel() error {
+	return c.GenerateRecoveryOperationTokenCancelWithContext(context.Background())
+}
+
+func (c *Sys) GenerateRootCancelWithContext(ctx context.Context) error {
+	return c.generateRootCancelCommonWithContext(ctx, "/v1/sys/generate-root-token/attempt")
+}
+
+func (c *Sys) GenerateRecoveryOperationTokenCancelWithContext(ctx context.Context) error {
+	return c.generateRootCancelCommonWithContext(ctx, "/v1/sys/generate-recovery-token/attempt")
+}
+
+func (c *Sys) generateRootCancelCommonWithContext(ctx context.Context, path string) error {
+	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
+	defer cancelFunc()
+
+	r := c.c.NewRequest(http.MethodDelete, path)
+
+	resp, err := c.c.rawRequestWithContext(ctx, r)
+	if err == nil {
+		defer resp.Body.Close() //nolint:errcheck
+	}
+	return err
+}
+
+func (c *Sys) GenerateRootUpdate(shard, nonce string) (*GenerateRootStatusResponse, error) {
+	return c.GenerateRootUpdateWithContext(context.Background(), shard, nonce)
+}
+
+func (c *Sys) GenerateRecoveryOperationTokenUpdate(shard, nonce string) (*GenerateRootStatusResponse, error) {
+	return c.GenerateRecoveryOperationTokenUpdateWithContext(context.Background(), shard, nonce)
+}
+
+func (c *Sys) GenerateRootUpdateWithContext(ctx context.Context, shard, nonce string) (*GenerateRootStatusResponse, error) {
+	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
+	defer cancelFunc()
+
+	body := map[string]any{
+		"key":   shard,
+		"nonce": nonce,
+	}
+
+	r := c.c.NewRequest(http.MethodPut, "/v1/sys/generate-root-token/update")
+	if err := r.SetJSONBody(body); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.c.rawRequestWithContext(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	var result struct {
+		Data GenerateRootStatusResponse `json:"Data"`
+	}
+	err = resp.DecodeJSON(&result)
+	return &result.Data, err
+}
+
+func (c *Sys) GenerateRecoveryOperationTokenUpdateWithContext(ctx context.Context, shard, nonce string) (*GenerateRootStatusResponse, error) {
+	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
+	defer cancelFunc()
+
+	body := map[string]any{
+		"key":   shard,
+		"nonce": nonce,
+	}
+
+	r := c.c.NewRequest(http.MethodPut, "/v1/sys/generate-recovery-token/update")
+	if err := r.SetJSONBody(body); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.c.rawRequestWithContext(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	var result GenerateRootStatusResponse
+	err = resp.DecodeJSON(&result)
+	return &result, err
+}
+
+type GenerateRootStatusResponse struct {
+	Nonce            string `json:"nonce"`
+	Started          bool   `json:"started"`
+	Progress         int    `json:"progress"`
+	Required         int    `json:"required"`
+	Complete         bool   `json:"complete"`
+	EncodedToken     string `json:"encoded_token"`
+	EncodedRootToken string `json:"encoded_root_token"`
+	PGPFingerprint   string `json:"pgp_fingerprint"`
+	OTP              string `json:"otp"`
+	OTPLength        int    `json:"otp_length"`
+}

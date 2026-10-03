@@ -20,14 +20,12 @@ package main
 // its own mount and changes nothing else.
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -35,6 +33,7 @@ import (
 	"testing"
 
 	"github.com/yogzblr/imas/internal/fleetsign"
+	"github.com/yogzblr/imas/internal/openbao/openbaotest"
 )
 
 const (
@@ -46,28 +45,17 @@ type baoAdmin struct {
 	t     *testing.T
 	addr  string
 	token string
+	bao   *openbaotest.Admin
 }
 
 // call sends one request as token and returns the status and the decoded
 // body.
 func (b baoAdmin) call(token, method, path string, body any) (int, map[string]any) {
 	b.t.Helper()
-	var r io.Reader
-	if body != nil {
-		data, _ := json.Marshal(body)
-		r = bytes.NewReader(data)
-	}
-	req, _ := http.NewRequest(method, b.addr+"/v1/"+path, r)
-	req.Header.Set("X-Vault-Token", token)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		b.t.Fatalf("%s %s: %v", method, path, err)
-	}
-	defer resp.Body.Close()
+	status, data := b.bao.Call(token, method, path, body)
 	out := map[string]any{}
-	data, _ := io.ReadAll(resp.Body)
 	_ = json.Unmarshal(data, &out)
-	return resp.StatusCode, out
+	return status, out
 }
 
 func (b baoAdmin) must(method, path string, body any) map[string]any {
@@ -112,7 +100,7 @@ func TestOpenBaoEnforcesReadOnlyFleetKey(t *testing.T) {
 	if addr == "" || rootToken == "" {
 		t.Skipf("%s and %s not set; this test needs a real OpenBao to prove policy enforcement", envTestOpenBaoAddr, envTestOpenBaoToken)
 	}
-	b := baoAdmin{t: t, addr: strings.TrimRight(addr, "/"), token: rootToken}
+	b := baoAdmin{t: t, addr: strings.TrimRight(addr, "/"), token: rootToken, bao: openbaotest.NewAdmin(t, addr, rootToken)}
 
 	suffix := make([]byte, 4)
 	rand.Read(suffix)

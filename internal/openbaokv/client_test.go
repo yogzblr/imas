@@ -14,7 +14,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 const testToken = "s.test-token"
@@ -420,16 +419,8 @@ func TestKubernetesAuth_LoginThenWriteWithIssuedToken(t *testing.T) {
 		t.Errorf("expected the token to be cached across writes (1 login), got %d", n)
 	}
 
-	// Simulate the cached token falling inside its safety margin.
-	c.authMu.Lock()
-	c.authExpiry = time.Now().Add(-time.Second)
-	c.authMu.Unlock()
-	if _, err := c.Write(ctx, "p", map[string]string{"k": "v"}); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	if n := atomic.LoadInt32(&loginCalls); n != 2 || gotWriteToken != "tok-2" {
-		t.Errorf("expected a re-login near expiry (2 logins, tok-2), got %d logins, token %q", n, gotWriteToken)
-	}
+	// Re-login before expiry is internal/openbao's, tested there
+	// (TestKubernetesAuth_ReLoginNearExpiry).
 }
 
 func TestKubernetesAuth_JWTFileMissingOrEmpty(t *testing.T) {
