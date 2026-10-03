@@ -371,7 +371,7 @@ timeout with no retries, and an optional `<prefix>NAMESPACE`.
 `internal/openbaokv`, `internal/fleetsign`, `internal/gatewayjwt`,
 `internal/certs`, `internal/pki` (tenant box keys) and `cmd/fleetreleaser`
 use it; their variable names, defaults, HTTP methods and errors are
-unchanged. CL.2b (ready for review, FLAG FOR SECURITY REVIEW) moves
+unchanged. CL.2b (ready for review in PR #67, FLAG FOR SECURITY REVIEW) moves
 `internal/ingredients/sdb/openbao`, the sprout's `sdb://openbao` provider,
 onto the same client directly rather than through `internal/openbao`, whose
 identities are configured from `IMAS_*_OPENBAO_*` blocks and authenticate
@@ -543,7 +543,7 @@ request path brings `golang.org/x/net/http2`, `go-retryablehttp` and both
    restart, is ready for review in PR #63): replace the hand-rolled OpenBao
    HTTP clients with the official Go client as decided on 2026-09-29.
    **CL.2a** (server side) is merged (PR #66) and **CL.2b** (the sprout's
-   `sdb://openbao` provider) is ready for review (see "Licensing
+   `sdb://openbao` provider) is ready for review in PR #67 (see "Licensing
    follow-through" for both). CL.2b added 1.74 MiB (linux/amd64) and
    1.78 MiB (windows/amd64) to the sprout, not the "little" expected: the
    sprout had linked only a sliver of the client. Also found by CL.2a: the `go-licenses` workflow's
