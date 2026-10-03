@@ -751,7 +751,8 @@ type sentWave struct {
 	deadlines map[string]time.Time
 }
 
-// deadlineOf is the time by which it's sprout must be back on the target.
+// deadlineOf is when the sprout of item it must be back on the target
+// version.
 func (w sentWave) deadlineOf(it AssetActionItem) time.Time {
 	if d, ok := w.deadlines[it.AssetID]; ok {
 		return d

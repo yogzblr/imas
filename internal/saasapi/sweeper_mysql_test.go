@@ -188,6 +188,9 @@ func TestMySQLSweepActionBatches_TwoReplicas(t *testing.T) {
 	nc := connectSaaSBus(t, ns)
 	farmer := startFakeFarmer(t, ns, completingFarmer)
 
+	if err := g1.Create(&Tenant{ID: "t_mysql", Name: "Acme", Status: TenantStatusActive}).Error; err != nil {
+		t.Fatal(err)
+	}
 	params, _ := json.Marshal(farmerCmdRun{Command: "uptime", Timeout: time.Minute})
 	expired := dbTime(clock.Now().Add(-time.Minute))
 	batch := AssetActionBatch{ID: "b_mysql_sweep", TenantID: "t_mysql", ActionType: controlplane.ActionCmdRun,

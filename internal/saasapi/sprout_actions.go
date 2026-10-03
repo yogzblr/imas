@@ -605,8 +605,9 @@ func createActionBatch(tenantID string, assetIDs []string, action controlplane.S
 // blocked maps a resolved, accepted sprout to the error code its item
 // fails with instead of being queued; atTarget marks the queued items
 // whose sprout already runs an update rollout's target version
-// (PlannedAtTarget). claim, if set, runs first inside the same transaction; an error from it
-// rolls everything back and is returned as is.
+// (PlannedAtTarget). claim, if set, runs first inside the same
+// transaction; an error from it rolls everything back and is returned as
+// is.
 func createBatch(batch AssetActionBatch, assetIDs []string, resolved []sproutByAssetItem,
 	blocked map[SproutRef]string, atTarget map[SproutRef]bool, claim func(tx *gorm.DB) error) (AssetActionBatch, []AssetActionItem, error) {
 	id, err := newID(actionBatchIDPrefix)
