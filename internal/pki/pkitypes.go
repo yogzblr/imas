@@ -37,4 +37,5 @@ var (
 	ErrNKeyClientNotReady       = errors.New("nkey HTTP client is not initialized; call LoadRootCA first")
 	ErrTenantNotFound           = errors.New("no such tenant has been provisioned")
 	ErrTenantIDInvalid          = errors.New("bad user input: invalid tenant ID received")
+	ErrTenantDeprovisioned      = errors.New("tenant was deprovisioned")
 )
