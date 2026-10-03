@@ -58,6 +58,22 @@ imas_sprout_bus_proxy_url: ""
 # hand.
 imas_sprout_boxkey_prev_grace: ""
 
+# Backoff before each attempt to reach the bus after losing it (config keys
+# "busreconnectbase" and "busreconnectcap"): a random wait between 0 and a
+# ceiling that starts at the base and doubles with every failed attempt up to
+# the cap, back to the base once connected, so a fleet doesn't reconnect in
+# step after a bus restart. Go duration strings, e.g. "1s" and "10m". "" (the
+# default): don't manage the key; the sprout uses 2s and 5m.
+#
+# Like imas_sprout_boxkey_prev_grace, and for the same reason, setting one
+# back to "" does NOT remove a value this role wrote earlier: the sprout
+# writes its own default for these keys into the config file (e.g.
+# "busreconnectbase: 2s", "busreconnectcap: 5m0s") whenever it saves the
+# file, so this role only ever adds an override. To reset one, set it to the
+# default or edit the sprout's config file by hand.
+imas_sprout_bus_reconnect_base: ""
+imas_sprout_bus_reconnect_cap: ""
+
 # --- Package ------------------------------------------------------------------
 
 # Buildkite organization that owns the imasdeb/imasrpm/imasnget registries

@@ -132,7 +132,8 @@ For each host, the playbook:
 2. **Writes the enrollment settings** into the config file the sprout already
    reads (`/etc/imas/sprout`, or `%ProgramData%\imas\sprout` on Windows):
    `farmerinterface`, `farmerapiport`, `busurls` if set, `busproxyurl` if
-   set, `sproutboxkeyprevgrace` if set, the self-update repository settings
+   set, `sproutboxkeyprevgrace` if set, `busreconnectbase` and
+   `busreconnectcap` if set, the self-update repository settings
    (`sproutupdaterepourl`, `sproutupdaterepoformat`, `sproutupdaterepodist`,
    `sproutupdaterepopackageid`, `sproutupdaterepotoken`) if set, and
    `jointoken` if the host isn't
@@ -169,6 +170,8 @@ Set these in `group_vars`/`host_vars`. `roles/*/defaults/main.yml` and
 | `imas_sprout_root_ca` | `""` | PEM of the CA that issued the enrollment endpoint's certificate. **Required behind the DMZ edge.** Without it, the sprout trusts the first certificate it sees. |
 | `imas_sprout_bus_proxy_url` | `""` | Outbound proxy for the bus connection only: `http://host:port` (HTTP CONNECT) or `socks5://host:port`, optionally with `user:password@`. Empty dials directly. The sprout's HTTP requests (enroll, refresh, recipes) already follow `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` from the environment and don't need this. |
 | `imas_sprout_boxkey_prev_grace` | `""` | How long the sprout keeps the private key a farmer-triggered payload-encryption key rotation replaced, and so the shortest interval between rotations. A Go duration string, e.g. `30m`, writes that value. Empty leaves this key alone rather than clearing it — the sprout writes its own default into the config file on other saves, so this role only ever adds an explicit override, never removes one. |
+| `imas_sprout_bus_reconnect_base` | `""` | Ceiling of the random wait before the first attempt to reach the bus after losing it (`busreconnectbase`). It doubles with every failed attempt up to `imas_sprout_bus_reconnect_cap`, and goes back to this value once connected, so a fleet doesn't reconnect in step after a bus restart. A Go duration string, e.g. `1s`. Empty leaves the key alone (the sprout uses `2s`); like `imas_sprout_boxkey_prev_grace`, the role only ever adds an override, never removes one. |
+| `imas_sprout_bus_reconnect_cap` | `""` | Largest wait before an attempt to reach the bus (`busreconnectcap`), e.g. `10m`. Empty leaves the key alone (the sprout uses `5m`); only ever added, never removed. |
 | `imas_buildkite_org` | `yogzblr` | Buildkite organization that publishes the packages (`https://packages.buildkite.com/yogzblr/imasdeb`, `imasrpm`, `imasnget`). |
 | `imas_sprout_version` | `""` | Pin a version. Linux: the package version as the repository lists it (`1.2.3+git`). Windows: the release (`1.2.3`). |
 | `imas_sprout_package_state` | `present` | Linux: `latest` upgrades to the newest version on every run. |
