@@ -74,3 +74,8 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+      # The release's before hook (.goreleaser.yaml) runs the same check, so
+      # an untidy go.mod would otherwise first fail at release time.
+      - name: Check go.mod and go.sum are tidy
+        run: go mod tidy && git diff --exit-code -- go.mod go.sum
