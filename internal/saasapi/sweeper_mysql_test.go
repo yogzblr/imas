@@ -125,8 +125,10 @@ func TestMySQLRowLease(t *testing.T) {
 	holder := won[0]
 
 	// Two renewals in the same millisecond still each change the row.
-	if !holder.renew() || !holder.renew() {
-		t.Fatal("renewing within one millisecond was reported as a lost lease")
+	for i := range 2 {
+		if !holder.renew() {
+			t.Fatalf("renewal %d within one millisecond was reported as a lost lease", i+1)
+		}
 	}
 	clock.Advance(30 * time.Second)
 	if l, err := claimRowLease(g2, table, batchLeaseKey, key, "", nil, nil, time.Minute); l != nil || err != nil {
