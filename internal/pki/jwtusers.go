@@ -44,12 +44,6 @@ func sproutPermissions(id string) jwt.Permissions {
 			"_INBOX.>",
 			"imas.cook." + id + ".>",
 			"imas.sprouts." + id + ".facts",
-			// Request imas-fleet-signing's current key versions from farmer
-			// (internal/fleetkeys). The reply comes back on
-			// imas.sprouts.<id>.fleetsigningkeys.reply.<random>, covered by
-			// the existing Sub grant below; no Sub grant on _INBOX.> (which
-			// would expose every reply in the Account to every sprout).
-			"imas.sprouts." + id + ".fleetsigningkeys",
 			// Submit a new payload-encryption public key after farmer
 			// triggers a box key rotation (cmd/sprout's boxkey.go).
 			// Farmer only records a submission sealed under one of this

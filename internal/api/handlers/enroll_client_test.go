@@ -47,7 +47,6 @@ func (m signingGatewayMinter) MintGatewayJWT(_ context.Context, c gatewayjwt.Gat
 func TestEnrollClient_AgainstHandler(t *testing.T) {
 	setupPKIDirs(t)
 	withFakeTenantBoxOpenBao(t)
-	withFakeFleetKeySource(t)
 	_, gwKey, _ := ed25519.GenerateKey(rand.Reader)
 	pki.SetGatewaySigner(signingGatewayMinter{key: gwKey})
 	t.Cleanup(func() { pki.SetGatewaySigner(nil) })
@@ -68,7 +67,6 @@ func TestEnrollClient_AgainstHandler(t *testing.T) {
 		&config.SproutTenantX25519PubFile: "tenant-x25519.pub",
 		&config.SproutBoxPrivFile:         "sprout-x25519.key",
 		&config.SproutBoxPubFile:          "sprout-x25519.pub",
-		&config.SproutFleetSigningJWKS:    "fleet-signing-jwks.json",
 		&config.SproutBusURLsFile:         "bus-urls.json",
 	}
 	for p, name := range paths {
@@ -114,9 +112,6 @@ func TestEnrollClient_AgainstHandler(t *testing.T) {
 	}
 	if !pki.SproutEnrolled() {
 		t.Fatal("expected the sprout to be enrolled")
-	}
-	if _, err := pki.LoadPinnedFleetSigningKeys(); err != nil {
-		t.Errorf("fleet signing keys not pinned: %v", err)
 	}
 	// The handler's nats_urls pass the client's validation and are what
 	// the sprout's bus connection dials.

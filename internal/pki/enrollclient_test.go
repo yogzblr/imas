@@ -36,7 +36,7 @@ func setupSproutFiles(t *testing.T) nkeys.KeyPair {
 	saved := []*string{
 		&config.NKeySproutPrivFile, &config.SproutUserJWTFile, &config.SproutGatewayJWTFile,
 		&config.SproutTenantX25519PubFile, &config.SproutBoxPrivFile, &config.SproutBoxPubFile,
-		&config.SproutFleetSigningJWKS, &config.FarmerURL, &config.SproutBusURLsFile,
+		&config.FarmerURL, &config.SproutBusURLsFile,
 		&config.SproutRootCA,
 	}
 	old := make([]string, len(saved))
@@ -58,7 +58,6 @@ func setupSproutFiles(t *testing.T) nkeys.KeyPair {
 	config.SproutTenantX25519PubFile = filepath.Join(dir, "tenant-x25519.pub")
 	config.SproutBoxPrivFile = filepath.Join(dir, "sprout-x25519.key")
 	config.SproutBoxPubFile = filepath.Join(dir, "sprout-x25519.pub")
-	config.SproutFleetSigningJWKS = filepath.Join(dir, "fleet-signing-jwks.json")
 
 	kp, err := nkeys.CreateUser()
 	if err != nil {
@@ -110,13 +109,6 @@ func signTestGatewayJWT(key ed25519.PrivateKey, sub string, iat, exp time.Time) 
 	return string(b), err
 }
 
-// fleetJWKS returns a valid fleet signing JWKS document.
-func fleetJWKS(t *testing.T) json.RawMessage {
-	t.Helper()
-	_, data := testFleetJWKS(t)
-	return data
-}
-
 // enrollServer is a TLS farmer stand-in that answers POST /v1/enroll by
 // calling the real Enroll, and records every request it receives.
 type enrollServer struct {
@@ -125,7 +117,6 @@ type enrollServer struct {
 	// refreshBodies holds each POST /v1/refresh body verbatim, so tests
 	// can check which fields the client actually sent.
 	refreshBodies []map[string]any
-	jwks          json.RawMessage
 	// natsURLs is what POST /v1/enroll returns as nats_urls.
 	natsURLs []string
 }
@@ -158,7 +149,7 @@ func (s *enrollServer) lastRequest() enrollWireRequest {
 
 func startEnrollServer(t *testing.T) *enrollServer {
 	t.Helper()
-	s := &enrollServer{jwks: fleetJWKS(t), natsURLs: []string{"wss://127.0.0.1:5407"}}
+	s := &enrollServer{natsURLs: []string{"wss://127.0.0.1:5407"}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/enroll", func(w http.ResponseWriter, r *http.Request) {
 		var req enrollWireRequest
@@ -179,7 +170,7 @@ func startEnrollServer(t *testing.T) *enrollServer {
 		_ = json.NewEncoder(w).Encode(EnrollResponse{
 			SproutID: res.SproutID, JWT: res.JWT, GatewayJWT: res.GatewayJWT,
 			NKeyIdentity: req.NKeyPub, TenantX25519Pub: res.TenantX25519Pub,
-			FleetSigningJWKS: s.jwks, NatsURLs: natsURLs,
+			NatsURLs:               natsURLs,
 			TenantX25519Continuity: res.TenantX25519Continuity,
 		})
 	})
@@ -338,9 +329,6 @@ func TestEnrollSprout_EnrollPersistAndRefresh(t *testing.T) {
 	if b, _ := os.ReadFile(config.SproutTenantX25519PubFile); string(b) != resp.TenantX25519Pub {
 		t.Errorf("tenant X25519 pub on disk = %q, want %q", b, resp.TenantX25519Pub)
 	}
-	if _, err := LoadPinnedFleetSigningKeys(); err != nil {
-		t.Errorf("fleet signing keys not pinned: %v", err)
-	}
 	if runtime.GOOS != "windows" {
 		for _, p := range []string{config.SproutUserJWTFile, config.SproutGatewayJWTFile} {
 			info, err := os.Stat(p)
@@ -487,12 +475,11 @@ func TestValidateEnrollResponse(t *testing.T) {
 	tenantPub, _, _ := box.GenerateKey(rand.Reader)
 	good := func() *EnrollResponse {
 		return &EnrollResponse{
-			SproutID:         "web-01",
-			JWT:              userJWTFor(nkeyPub),
-			GatewayJWT:       gatewayFor(nkeyPub, time.Now().Add(time.Hour)),
-			NKeyIdentity:     nkeyPub,
-			TenantX25519Pub:  base64.StdEncoding.EncodeToString(tenantPub[:]),
-			FleetSigningJWKS: fleetJWKS(t),
+			SproutID:        "web-01",
+			JWT:             userJWTFor(nkeyPub),
+			GatewayJWT:      gatewayFor(nkeyPub, time.Now().Add(time.Hour)),
+			NKeyIdentity:    nkeyPub,
+			TenantX25519Pub: base64.StdEncoding.EncodeToString(tenantPub[:]),
 		}
 	}
 	if err := validateEnrollResponse(good(), nkeyPub); err != nil {
@@ -500,15 +487,14 @@ func TestValidateEnrollResponse(t *testing.T) {
 	}
 
 	cases := map[string]func(r *EnrollResponse){
-		"invalid sprout_id":         func(r *EnrollResponse) { r.SproutID = "../etc" },
-		"other nkey_identity":       func(r *EnrollResponse) { r.NKeyIdentity = otherPub },
-		"jwt for another nkey":      func(r *EnrollResponse) { r.JWT = userJWTFor(otherPub) },
-		"jwt not a NATS JWT":        func(r *EnrollResponse) { r.JWT = "garbage" },
-		"gateway for another nkey":  func(r *EnrollResponse) { r.GatewayJWT = gatewayFor(otherPub, time.Now().Add(time.Hour)) },
-		"gateway already expired":   func(r *EnrollResponse) { r.GatewayJWT = gatewayFor(nkeyPub, time.Now().Add(-time.Minute)) },
-		"gateway not a JWT":         func(r *EnrollResponse) { r.GatewayJWT = "garbage" },
-		"bad tenant_x25519_pub":     func(r *EnrollResponse) { r.TenantX25519Pub = "AAAA" },
-		"missing fleet signing set": func(r *EnrollResponse) { r.FleetSigningJWKS = nil },
+		"invalid sprout_id":        func(r *EnrollResponse) { r.SproutID = "../etc" },
+		"other nkey_identity":      func(r *EnrollResponse) { r.NKeyIdentity = otherPub },
+		"jwt for another nkey":     func(r *EnrollResponse) { r.JWT = userJWTFor(otherPub) },
+		"jwt not a NATS JWT":       func(r *EnrollResponse) { r.JWT = "garbage" },
+		"gateway for another nkey": func(r *EnrollResponse) { r.GatewayJWT = gatewayFor(otherPub, time.Now().Add(time.Hour)) },
+		"gateway already expired":  func(r *EnrollResponse) { r.GatewayJWT = gatewayFor(nkeyPub, time.Now().Add(-time.Minute)) },
+		"gateway not a JWT":        func(r *EnrollResponse) { r.GatewayJWT = "garbage" },
+		"bad tenant_x25519_pub":    func(r *EnrollResponse) { r.TenantX25519Pub = "AAAA" },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -521,22 +507,17 @@ func TestValidateEnrollResponse(t *testing.T) {
 	}
 }
 
-func TestPersistEnrollment_KeepsDifferentPinnedFleetKeys(t *testing.T) {
-	setupSproutFiles(t)
-	first := fleetJWKS(t)
-	if err := PinFleetSigningKeys(first); err != nil {
-		t.Fatal(err)
+// A farmer built before CL.1 still sends fleet_signing_jwks. The sprout
+// ignores it (it verifies releases against its shipped keyring), so a
+// sprout upgraded first keeps enrolling against an older farmer.
+func TestEnrollResponse_IgnoresLegacyFleetSigningJWKS(t *testing.T) {
+	var resp EnrollResponse
+	body := `{"sprout_id":"web-01","jwt":"j","gateway_jwt":"g","nkey_identity":"n","tenant_x25519_pub":"t","fleet_signing_jwks":{"keys":[]},"nats_urls":["wss://farmer:5407"]}`
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("decoding a response with fleet_signing_jwks: %v", err)
 	}
-	resp := &EnrollResponse{JWT: "user-jwt", GatewayJWT: "gw-jwt", TenantX25519Pub: "pub", FleetSigningJWKS: fleetJWKS(t)}
-	if err := PersistEnrollment(resp); err != nil {
-		t.Fatalf("a different already-pinned key set should not fail enrollment: %v", err)
-	}
-	pinned, _ := os.ReadFile(config.SproutFleetSigningJWKS)
-	if string(pinned) != string(first) {
-		t.Error("the existing fleet signing pin was replaced")
-	}
-	if !SproutEnrolled() {
-		t.Error("expected the sprout to be enrolled")
+	if resp.SproutID != "web-01" || len(resp.NatsURLs) != 1 {
+		t.Errorf("decoded %+v", resp)
 	}
 }
 
@@ -810,7 +791,7 @@ func TestPersistEnrollment_TenantKeyMismatchRefused(t *testing.T) {
 	if err := os.WriteFile(config.SproutTenantX25519PubFile, []byte(pinned), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	resp := &EnrollResponse{JWT: "user-jwt", GatewayJWT: "gw-jwt", TenantX25519Pub: otherBoxPub(t), FleetSigningJWKS: fleetJWKS(t)}
+	resp := &EnrollResponse{JWT: "user-jwt", GatewayJWT: "gw-jwt", TenantX25519Pub: otherBoxPub(t)}
 	if err := PersistEnrollment(resp); !errors.Is(err, ErrTenantKeyMismatch) {
 		t.Fatalf("PersistEnrollment = %v, want ErrTenantKeyMismatch", err)
 	}
@@ -829,7 +810,7 @@ func TestPersistEnrollment_TenantKeyMismatchRefused(t *testing.T) {
 func TestPersistEnrollment_SameTenantKeyAccepted(t *testing.T) {
 	setupSproutFiles(t)
 	pub := otherBoxPub(t)
-	resp := &EnrollResponse{JWT: "user-jwt", GatewayJWT: "gw-jwt", TenantX25519Pub: pub, FleetSigningJWKS: fleetJWKS(t)}
+	resp := &EnrollResponse{JWT: "user-jwt", GatewayJWT: "gw-jwt", TenantX25519Pub: pub}
 	if err := PersistEnrollment(resp); err != nil {
 		t.Fatal(err)
 	}

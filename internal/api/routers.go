@@ -61,11 +61,6 @@ func NewRouter(certificate string) *http.ServeMux {
 	// jwt_authn remote_jwks (deploy/envoy/envoy.yaml) fetches.
 	mux.Handle("GET /v1/.well-known/jwks.json", Logger(http.HandlerFunc(handlers.JWKS), "JWKS"))
 
-	// Fleet release signing key (design doc §2.5) — the public half of
-	// imas-fleet-signing, read with farmer's read-only Transit token.
-	// Public keys only, no auth required, same as the gateway JWKS above.
-	mux.Handle("GET /v1/.well-known/fleet-signing-jwks.json", Logger(http.HandlerFunc(handlers.FleetSigningJWKS), "FleetSigningJWKS"))
-
 	// Health checks (unauthenticated): /health is liveness (process up and
 	// holding a Valkey client, no network calls — see handlers.GetHealth);
 	// /ready is readiness (PXC, Valkey, and NATS tenant connection state —

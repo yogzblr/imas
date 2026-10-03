@@ -15,8 +15,8 @@ type KeySetSource interface {
 
 // JWKSHandler serves src's key set as a JWKS document, the same way
 // internal/gatewayjwt.JWKSHandler serves the gateway key: public keys
-// only, so it is deliberately not wrapped in any auth middleware at the
-// route-registration call site (internal/api/routers.go).
+// only, so it needs no auth middleware. No route serves it since CL.1
+// (see the package comment).
 func JWKSHandler(src KeySetSource) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ks, err := src.KeySet(r.Context())

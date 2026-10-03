@@ -269,10 +269,12 @@ type transitReadKeyResponse struct {
 // floors its JWKS on min_encryption_version; the version-sorted
 // {version, public key} shape is the same.
 //
-// Every verifier of a fleet release (farmer's self_update re-check,
-// saasapi's dispatch check, the enrollment pin, and the live key set
-// sprouts fetch on imas.sprouts.<id>.fleetsigningkeys) uses this one
-// selection, so they all agree on which versions are valid.
+// Every Transit-side verifier of a fleet release (farmer's update
+// manifest endpoint and self_update re-check, saasapi's release
+// registration and dispatch checks) uses this one selection, so they all
+// agree on which versions are valid. A sprout verifies against its
+// shipped Keyring instead, which an operator keeps in step with these
+// versions (packaging/etc/fleet-signing-keys.md).
 //
 // Consequence, and an OPERATIONAL CONSTRAINT: raising
 // imas-fleet-signing's min_decryption_version retires every version below

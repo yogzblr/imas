@@ -209,7 +209,7 @@ SECURITY REVIEW).** What it changes:
   record, which `internal/jobs` used to read off the plaintext dispatch,
   is now written by the dispatching replica (`cook.SetDispatchRecorder`).
   The `fleetsigningkeys` reply was sealed earlier, in PR #31
-  (`internal/fleetkeys`).
+  (`internal/fleetkeys`); CL.1 has since removed that subject and package.
 - **Every other boundary is still plaintext inside TLS**: cook's step
   events (`imas.cook.<id>.<jid>`), `test.ping`, `shell.*`, facts,
   `cancel`, the `boxkey.rotate` trigger, and sprout log shipping
@@ -327,6 +327,7 @@ key set fetched over the bus. Release/rollout flow: see `docs/RELEASING.md`.
 | FU.1 Manifest endpoint | Farmer serves `GET /v1/sprout/update-manifest` (sprout JWT), read-only from the release catalog; routed through Envoy and tested against real Envoy | merged — PR #51 (`e44b1a6`), #52 (`c23fce5`) |
 | FU.2 Sprout fetch, verify, install | Sprout reads its repository's own index (apt, rpm incl. zstd, NuGet flat container), verifies signature and SHA-256, installs with `dpkg -i`, `rpm -U`, `zypper` or `msiexec`, refuses downgrades; keyring shipped in deb/rpm/MSI; Ansible variables for repo URL and token; `testing/selfupdate-e2e` drives a real cycle against Nexus on Debian and Rocky. FLAG FOR SECURITY REVIEW | merged — PR #53 (`f3d035d`) |
 | FU.7 Farmer dispatch | Farmer dispatches `self_update` as `{version}` only and re-verifies it against the catalog (`internal/fleetcatalog`) before sending | merged — PR #53 |
+| CL.1 Remove the dead live fleet-key path | Deleted `internal/fleetkeys` and its farmer wiring, `payloadbox.PurposeFleetSigningResponse`, the `imas.sprouts.<id>.fleetsigningkeys` grant in sprout JWTs, `fleet_signing_jwks` in `POST /v1/enroll` (farmer and sprout client), `GET /v1/.well-known/fleet-signing-jwks.json`, the sprout's enrollment pin (`internal/pki/fleetkey.go`) and the `sproutfleetsigningjwks` setting. Enrollment no longer needs the fleet key source. A sprout built before this refuses to enrol against a farmer built after it: upgrade sprouts first, or re-enrol. FLAG FOR SECURITY REVIEW | ready for review — PR #62 |
 | FU.5 Helm release hook | `sprout-release-register-job.yaml` (post-install/post-upgrade) runs `farmer register-sprout-release`; `min_sprout_version` stamped at release time (`packaging/helm/`) | merged — PR #55 (`6815306`) |
 | FU.6 Rollout gates | Health-gated waves (a sprout counts when it reports the new version), one rollout per tenant, per-sprout OS/arch/package-type resolution, sprouts report their release as the `sprout_version` fact | merged — PR #57 (`ec21992`) |
 | FU.6b Gate freshness | Gate counts only reports written after dispatch; dedicated `rollout_claimed_at` column (migration 00005). FLAG FOR SECURITY REVIEW | merged — PR #58 (`507554d`) |
@@ -338,15 +339,12 @@ and has never run on real hosts, and the Windows install path has only been
 tested with `msiexec` mocked. Turn it on after review and after the Terraform
 UAT gate has run the published packages. Known leftovers from this work:
 
-- **Dead live-key-set path.** The design drops the key-set fetch on
-  `imas.sprouts.<id>.fleetsigningkeys` for fleet keys, and the sprout no
-  longer calls it, but `internal/fleetkeys`, its farmer wiring in
-  `cmd/farmer/main.go`, and the NATS permission granted in
-  `internal/pki/jwtusers.go` are still there. Remove them (smaller bus
-  attack surface), or document why they stay. The enrollment response still
-  carries `fleet_signing_jwks` and the sprout still has a
-  `sproutfleetsigningjwks` setting; check whether anything reads them now
-  that the shipped keyring is the trust root.
+- **Dead live-key-set path: removed by CL.1** (see the table above).
+  Sprouts enrolled before CL.1 keep the unused
+  `imas.sprouts.<id>.fleetsigningkeys` Publish grant until their User JWT is
+  next re-minted; nothing subscribes to it any more. `fleetsign`'s JWKS
+  encoding and `JWKSHandler` now have no production caller and are left
+  for a follow-up.
 - **Farmer's real dispatch path in the e2e test.** `testing/selfupdate-e2e`
   uses the Molecule stub farmer, not `internal/natsapi`.
 - FU.6 open question 1 (targets created before FU.6) is not needed
@@ -503,11 +501,12 @@ HTTP directly.
 4. **Security review of the flagged work**, including FU.0/FU.2/FU.3/FU.4/
    FU.6b and the J follow-ups, before `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED`
    is turned on anywhere.
-5. **Clean-ups left by Wave 4** (briefs CL.1, CL.2a, CL.2b and CL.3 are in
-   `docs/claude-code-parallel-build-plan.md` §4c, not yet dispatched): remove `internal/fleetkeys` and its
-   permission (dead for fleet keys); replace the hand-rolled OpenBao HTTP
-   clients with the official Go client as decided on 2026-09-29; the outbox
-   sweeper that resumes batches and rollouts after a pod restart.
+5. **Clean-ups left by Wave 4** (briefs CL.2a, CL.2b and CL.3 are in
+   `docs/claude-code-parallel-build-plan.md` §4c, not yet dispatched; CL.1,
+   removing `internal/fleetkeys` and its permission, is ready for review in PR #62):
+   replace the hand-rolled OpenBao HTTP clients with the official Go client
+   as decided on 2026-09-29; the outbox sweeper that resumes batches and
+   rollouts after a pod restart.
 6. **SaaS API §1.7** (caller API keys, teams, webhooks, billing/metering) has
    never been designed or started.
 7. **Docs:** `requirements.md` item 15 still says the new private key is sent

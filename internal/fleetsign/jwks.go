@@ -13,9 +13,8 @@ import (
 // MarshalJWKS renders ks as a standard JWKS document (RFC 7517), in the
 // same shape internal/gatewayjwt/jwks.go serves the gateway key in: one
 // OKP/Ed25519 JWK per key version, kid = the Transit key version,
-// use = "sig", alg = "EdDSA". This one document is what farmer serves
-// ungated, what POST /v1/enroll returns as fleet_signing_jwks, and what a
-// sprout pins to disk, so all three are byte-for-byte comparable.
+// use = "sig", alg = "EdDSA". Nothing in production serves or pins it
+// any more (see the package comment); a sprout trusts its Keyring.
 func (ks KeySet) MarshalJWKS() ([]byte, error) {
 	if len(ks) == 0 {
 		return nil, ErrNoKeys

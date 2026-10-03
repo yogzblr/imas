@@ -217,21 +217,3 @@ func TestNewRouterReadyEndpoint(t *testing.T) {
 		t.Errorf("GET /ready returned %d, want 503", resp.StatusCode)
 	}
 }
-
-// The fleet signing JWKS is public key material and must be reachable
-// without auth, like the gateway JWKS. With no key source configured it
-// answers 503 — from the handler, not 401 from Auth or 404 from the mux.
-func TestNewRouterFleetSigningJWKSIsUngated(t *testing.T) {
-	handlers.SetFleetKeySource(nil)
-	srv := httptest.NewServer(NewRouter(""))
-	defer srv.Close()
-
-	resp, err := http.Get(srv.URL + "/v1/.well-known/fleet-signing-jwks.json")
-	if err != nil {
-		t.Fatalf("GET fleet-signing-jwks.json: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("GET fleet-signing-jwks.json returned %d, want 503 from the unconfigured handler", resp.StatusCode)
-	}
-}

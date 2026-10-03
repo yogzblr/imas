@@ -33,7 +33,6 @@ import (
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/facts"
-	"github.com/yogzblr/imas/internal/fleetkeys"
 	"github.com/yogzblr/imas/internal/fleetsign"
 	"github.com/yogzblr/imas/internal/gatewayjwt"
 	"github.com/yogzblr/imas/internal/heartbeat"
@@ -405,24 +404,24 @@ func initGatewaySigner() {
 }
 
 // initFleetKeySource wires up farmer's READ-ONLY view of the
-// imas-fleet-signing Transit key (internal/fleetsign, design doc §2.5):
-// served ungated as a JWKS, served live to sprouts on
-// imas.sprouts.<id>.fleetsigningkeys (internal/fleetkeys — what a sprout
-// actually verifies releases against), returned in POST /v1/enroll as a
-// bootstrap-only key, and used to re-verify a release before a
-// self_update is dispatched. The token behind IMAS_FLEETSIGN_OPENBAO_* must carry only
+// imas-fleet-signing Transit key (internal/fleetsign, design doc §2.5),
+// used to re-verify a stored release before GET
+// /v1/sprout/update-manifest serves it and before a self_update is
+// dispatched. Sprouts never receive this key set: they verify against the
+// keyring shipped in their package. The token behind
+// IMAS_FLEETSIGN_OPENBAO_* must carry only
 // deploy/fleetreleaser/policies/imas-fleet-verify.hcl; farmer never signs
 // releases (cmd/fleetreleaser does). Not fatal if unconfigured, like
-// initGatewaySigner: POST /v1/enroll and self_update fail closed instead.
+// initGatewaySigner: the update manifest endpoint and self_update fail
+// closed instead.
 func initFleetKeySource() {
 	src, err := fleetsign.NewTransitKeySourceFromEnv()
 	if err != nil {
-		log.Errorf("fleet signing key not configured (POST /v1/enroll and self_update will fail until it is): %v", err)
+		log.Errorf("fleet signing key not configured (GET /v1/sprout/update-manifest and self_update will fail until it is): %v", err)
 		return
 	}
 	handlers.SetFleetKeySource(src)
 	natsapi.SetFleetKeySource(src)
-	fleetkeys.SetKeySource(src)
 	log.Infof("Fleet signing key source configured (read-only, Transit key %s)", src.KeyName())
 }
 
@@ -759,9 +758,6 @@ func registerTenantHandlers(nc *nats.Conn, tenantID string) error {
 	cook.RegisterFarmerNatsConn(tenantID, nc)
 	jobs.RegisterNatsConn(tenantID, nc)
 	facts.RegisterFarmerListener(tenantID, nc)
-	if err := fleetkeys.RegisterFarmerListener(tenantID, nc); err != nil {
-		log.Errorf("%v", err)
-	}
 
 	if err := natsapi.Subscribe(nc, tenantID); err != nil {
 		return fmt.Errorf("failed to subscribe NATS API handlers for tenant %s: %w", tenantID, err)

@@ -137,13 +137,6 @@ var (
 	// whatever answers first. See docs/design/imas-envoy-enrollment-design.md.
 	SproutRootCATOFU bool
 
-	// SproutFleetSigningJWKS is where a sprout pins the imas-fleet-signing
-	// public key set it received at enrollment (POST /v1/enroll's
-	// fleet_signing_jwks, design doc §2.5) — next to SproutRootCA, with
-	// the same write-once lifecycle (pki.PinFleetSigningKeys). The
-	// selfupdate ingredient verifies every release against it.
-	SproutFleetSigningJWKS string
-
 	// SproutFleetSigningKeyring ("sproutfleetsigningkeyring", sprout only)
 	// is the imas-fleet-signing public keyring the selfupdate ingredient
 	// verifies every update manifest against (fleetsign.LoadKeyring,
@@ -601,7 +594,6 @@ func LoadConfig(binary string) {
 			jety.SetDefault("sproutpki", filepath.Join(systemConfigRoot, "pki/sprout")+string(filepath.Separator))
 			jety.SetDefault("sproutrootca", filepath.Join(systemConfigRoot, "pki/sprout/tls-rootca.pem"))
 			jety.SetDefault("sproutrootcatofu", true)
-			jety.SetDefault("sproutfleetsigningjwks", filepath.Join(systemConfigRoot, "pki/sprout/fleet-signing-jwks.json"))
 			jety.SetDefault("sproutfleetsigningkeyring", filepath.Join(systemConfigRoot, "fleet-signing-keys.json"))
 			jety.SetDefault("nkeysproutpubfile", filepath.Join(systemConfigRoot, "pki/sprout/sprout.nkey.pub"))
 			jety.SetDefault("joblogdir", defaultSproutJobLogDir())
@@ -719,7 +711,6 @@ func LoadConfig(binary string) {
 	SproutID = jety.GetString("sproutid")
 	SproutPKI = jety.GetString("sproutpki")
 	SproutRootCA = jety.GetString("sproutrootca")
-	SproutFleetSigningJWKS = jety.GetString("sproutfleetsigningjwks")
 	SproutUserJWTFile = jety.GetString("sproutuserjwtfile")
 	SproutGatewayJWTFile = jety.GetString("sproutgatewayjwtfile")
 	SproutTenantX25519PubFile = jety.GetString("sprouttenantx25519pubfile")

@@ -60,7 +60,6 @@ import (
 	jwxjwt "github.com/lestrrat-go/jwx/v2/jwt"
 
 	"github.com/yogzblr/imas/internal/config"
-	"github.com/yogzblr/imas/internal/fleetsign"
 	log "github.com/yogzblr/imas/internal/log"
 )
 
@@ -107,13 +106,12 @@ type enrollWireRequest struct {
 
 // EnrollResponse is POST /v1/enroll's success body.
 type EnrollResponse struct {
-	SproutID         string          `json:"sprout_id"`
-	JWT              string          `json:"jwt"`
-	GatewayJWT       string          `json:"gateway_jwt"`
-	NKeyIdentity     string          `json:"nkey_identity"`
-	TenantX25519Pub  string          `json:"tenant_x25519_pub"`
-	FleetSigningJWKS json.RawMessage `json:"fleet_signing_jwks"`
-	NatsURLs         []string        `json:"nats_urls"`
+	SproutID        string   `json:"sprout_id"`
+	JWT             string   `json:"jwt"`
+	GatewayJWT      string   `json:"gateway_jwt"`
+	NKeyIdentity    string   `json:"nkey_identity"`
+	TenantX25519Pub string   `json:"tenant_x25519_pub"`
+	NatsURLs        []string `json:"nats_urls"`
 	// TenantX25519Continuity is set after a tenant key rotation; see
 	// reconcileTenantKeyPin.
 	TenantX25519Continuity json.RawMessage `json:"tenant_x25519_continuity,omitempty"`
@@ -340,9 +338,6 @@ func validateEnrollResponse(resp *EnrollResponse, nkeyPub string) error {
 	if err := validateIdentity(resp.SproutID, resp.NKeyIdentity, resp.JWT, resp.GatewayJWT, resp.TenantX25519Pub, nkeyPub); err != nil {
 		return err
 	}
-	if _, err := fleetsign.ParseJWKS(resp.FleetSigningJWKS); err != nil {
-		return fmt.Errorf("pki: enrollment response's fleet_signing_jwks: %w", err)
-	}
 	urls, err := ValidateBusURLs(resp.NatsURLs)
 	if err != nil {
 		return fmt.Errorf("pki: enrollment response's nats_urls: %w", err)
@@ -448,9 +443,9 @@ func EnsureEnrolled(ctx context.Context, joinToken, requestedID, sproutPub strin
 // sprout's NKey seed and root CA. The tenant X25519 public key is checked
 // against any already-pinned one before anything else is written
 // (reconcileTenantKeyPin: ErrTenantKeyMismatch, unless a continuity proof
-// moves the pin), then the gateway JWT, the tenant key pin, the
-// fleet signing JWKS pin and the bus URLs (nats_urls, which
-// LoadSproutBus connects to) are written, and the NATS User JWT last.
+// moves the pin), then the gateway JWT, the tenant key pin and the bus
+// URLs (nats_urls, which LoadSproutBus connects to) are written, and the
+// NATS User JWT last.
 // SproutEnrolled keys off the User JWT, so a crash part-way leaves the
 // sprout un-enrolled and it enrolls again on restart, which farmer answers
 // from its idempotent replay without spending another use of the join
@@ -465,17 +460,6 @@ func PersistEnrollment(resp *EnrollResponse) error {
 	setCurrentGatewayJWT(resp.GatewayJWT)
 	if err := pinTenantX25519Pub(resp.TenantX25519Pub); err != nil {
 		return err
-	}
-	if err := PinFleetSigningKeys(resp.FleetSigningJWKS); err != nil {
-		// A different set already pinned means an earlier, interrupted
-		// enrollment pinned one and farmer's key has rotated since. The
-		// pin is only a bootstrap fallback (fleetkey.go), and replacing
-		// an existing pin is exactly what it must never do silently, so
-		// keep the old one.
-		if !errors.Is(err, ErrFleetKeyAlreadyPinned) {
-			return fmt.Errorf("pki: pinning fleet signing keys: %w", err)
-		}
-		log.Warnf("enroll: keeping the already-pinned fleet signing key set; farmer returned a different one")
 	}
 	// Not a pin: every enrollment replaces it (or removes it, when farmer
 	// sent none, which falls back to FarmerBusURL).

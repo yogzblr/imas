@@ -17,8 +17,18 @@ import (
 
 // --- fixtures ---
 
+// staticFleetKeys is a fleetsign.KeySetSource over a fixed key set,
+// standing in for farmer's read-only Transit client (internal/fleetsign's
+// own tests cover that client).
+type staticFleetKeys struct {
+	ks  fleetsign.KeySet
+	err error
+}
+
+func (s staticFleetKeys) KeySet(context.Context) (fleetsign.KeySet, error) { return s.ks, s.err }
+
 // installFleetKey installs a fresh imas-fleet-signing stand-in as the
-// fleet key source (staticFleetKeys, enroll_test.go) and returns its private half.
+// fleet key source (staticFleetKeys) and returns its private half.
 func installFleetKey(t *testing.T) ed25519.PrivateKey {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)

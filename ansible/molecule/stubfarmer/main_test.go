@@ -14,7 +14,6 @@ import (
 	natsjwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
 
-	"github.com/yogzblr/imas/internal/fleetsign"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
@@ -112,9 +111,6 @@ func TestEnrollResponseIsWhatTheSproutAccepts(t *testing.T) {
 	}
 	if _, err := pki.DecodeBoxPubKey(resp.TenantX25519Pub); err != nil {
 		t.Errorf("tenant_x25519_pub: %v", err)
-	}
-	if _, err := fleetsign.ParseJWKS(resp.FleetSigningJWKS); err != nil {
-		t.Errorf("fleet_signing_jwks: %v", err)
 	}
 	if _, err := pki.ValidateBusURLs(resp.NatsURLs); err != nil {
 		t.Errorf("nats_urls: %v", err)
