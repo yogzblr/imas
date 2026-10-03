@@ -287,7 +287,11 @@ func (c *Client) k8sLoginLocked(ctx context.Context) (string, error) {
 	secret, err := do(ctx, c.login, "", http.MethodPost, "auth/"+c.k8sMount+"/login", nil,
 		map[string]string{"role": c.k8sRole, "jwt": jwt})
 	if err != nil {
-		return "", fmt.Errorf("%w: %w", c.errs.K8sAuthFailed, err)
+		// %v, not %w: the login's HTTP status must never read as the
+		// status of the request it was logging in for (StatusCode,
+		// IsNotFound), or a refused login could pass for "secret absent"
+		// or a lost check-and-set.
+		return "", fmt.Errorf("%w: %v", c.errs.K8sAuthFailed, err)
 	}
 	if secret == nil || secret.Auth == nil || secret.Auth.ClientToken == "" {
 		return "", fmt.Errorf("%w: response had no auth.client_token", c.errs.K8sAuthFailed)

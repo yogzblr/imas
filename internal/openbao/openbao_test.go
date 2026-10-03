@@ -542,6 +542,41 @@ func TestKubernetesAuth_LoginFailures(t *testing.T) {
 	}
 }
 
+// TestKubernetesAuth_LoginStatusIsNotTheRequestStatus: callers branch on
+// a request's status (404 = absent, 400 = check-and-set lost). A login
+// refused with that same status must not be mistaken for it.
+func TestKubernetesAuth_LoginStatusIsNotTheRequestStatus(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusBadRequest, http.StatusConflict} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var kv atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/login") {
+					w.WriteHeader(status)
+					w.Write([]byte(`{"errors":["no handler for route"]}`))
+					return
+				}
+				kv.Add(1)
+			}))
+			defer srv.Close()
+			setK8sEnv(t, srv.URL, writeJWT(t, "sa-jwt"))
+			c, err := NewFromEnv(testEnv, testErrs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = c.Put(t.Context(), "secret/data/p", map[string]any{})
+			if !errors.Is(err, errTestAuth) || !strings.Contains(err.Error(), "no handler for route") {
+				t.Fatalf("got %v, want errTestAuth with OpenBao's message", err)
+			}
+			if StatusCode(err) != 0 || IsNotFound(err) {
+				t.Fatalf("login status leaked as the request's: StatusCode = %d", StatusCode(err))
+			}
+			if kv.Load() != 0 {
+				t.Fatal("request sent despite the failed login")
+			}
+		})
+	}
+}
+
 func TestKubernetesAuth_Unreachable(t *testing.T) {
 	setK8sEnv(t, "http://127.0.0.1:1", writeJWT(t, "sa-jwt"))
 	c, err := NewFromEnv(testEnv, testErrs)
