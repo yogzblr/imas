@@ -1,22 +1,110 @@
 name: "go-licenses"
-on: 
+
+# Keeps dependencies/ (the licence of every module in the build, plus the
+# full source of each MPL-2.0 module) in step with go.mod and go.sum, and
+# fails when a dependency's licence is forbidden, restricted or cannot be
+# identified. See DEPENDENCIES.md.
+#
+# - pull_request: `check` only, so a break shows up before it reaches main.
+# - push to main/v1/v2 and workflow_dispatch: `check`, then `save`, which
+#   regenerates dependencies/ and commits it if anything changed.
+#
+# The build covers more than one platform: the Windows sprout links modules
+# the Linux build doesn't (go-ole, go-tpm, go-bindings-win32), so every step
+# runs once per entry in TARGETS. The imas CLI's darwin build adds no module
+# today; it is listed so that a future one is caught.
+#
+# Paths include *.go because a new import of a module that go.mod already
+# requires (indirectly) can bring it into the build without touching go.mod.
+# dependencies/ is excluded: it holds third-party .go files, and save writes
+# them.
+on:
   push:
-    paths:
-      - 'go.mod'
     branches:
       - main
       - v1
       - v2
-
+    paths:
+      - 'go.mod'
+      - 'go.sum'
+      - '**.go'
+      - '!dependencies/**'
+      - '.github/workflows/go-licenses.yml'
+  pull_request:
+    paths:
+      - 'go.mod'
+      - 'go.sum'
+      - '**.go'
+      - '!dependencies/**'
+      - '.github/workflows/go-licenses.yml'
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  # Pinned, never @latest. v2.0.1 (licenseclassifier/v2) identifies
+  # modernc.org/mathutil's LICENSE as BSD-3-Clause, which it is: the standard
+  # three clauses with "Neither the names of the authors nor the names of the
+  # contributors" in clause 3. v1.6.0, which @latest resolved to, uses
+  # licenseclassifier v1, whose MultipleMatch stays under its 0.9 threshold on
+  # that wording (0 matches; its NearestMatch scores 0.94), so it found no
+  # licence and `save` failed on every run after glebarez/sqlite (via
+  # internal/fleetcatalog/fleetcatalogtest) brought the module in. v1.6.0
+  # also misread modernc.org/libc as MIT (from LICENSE-3RD-PARTY.md); v2.0.1
+  # reads its LICENSE, BSD-3-Clause. No module needs --ignore: an ignored
+  # module would also be left out of dependencies/.
+  GO_LICENSES_VERSION: v2.0.1
+  # forbidden,restricted as before, plus `unknown` (v2's own default). With
+  # v1.6.0, `check --disallowed_types=forbidden,restricted` exited 0 on
+  # mathutil and only `save` failed; v2.0.1 fails `check` on a licence it
+  # can't identify either way, and `unknown` keeps that explicit.
+  DISALLOWED_TYPES: forbidden,restricted,unknown
+  # "GOOS/GOARCH packages", one per line.
+  TARGETS: |
+    linux/amd64 ./...
+    windows/amd64 ./cmd/sprout
+    darwin/arm64 ./cmd/imas
 
 jobs:
-  go-licenses:
+  check:
     runs-on: ubuntu-latest
-    name: Run go-licenses
+    name: Check licences
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      # go-licenses must be built and run with the toolchain that go.mod asks
+      # for. Built with another one it can't tell standard-library packages
+      # from modules ("does not have module info") and fails.
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Install go-licenses
+        run: go install "github.com/google/go-licenses/v2@${GO_LICENSES_VERSION}"
+        shell: bash
+
+      - name: Run go-licenses check
+        run: |
+          set -euo pipefail
+          while read -r platform pkgs; do
+            [ -n "$platform" ] || continue
+            echo "::group::go-licenses check ${platform} ${pkgs}"
+            GOOS="${platform%/*}" GOARCH="${platform#*/}" CGO_ENABLED=0 \
+              go-licenses check ${pkgs} --disallowed_types="${DISALLOWED_TYPES}"
+            echo "::endgroup::"
+          done <<< "${TARGETS}"
+        shell: bash
+
+  save:
+    if: github.event_name != 'pull_request'
+    needs: check
+    runs-on: ubuntu-latest
+    name: Save licences
+    permissions:
+      contents: write
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
@@ -25,13 +113,32 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - name: Get google/go-licenses package
-        run: go install github.com/google/go-licenses@latest
+
+      - name: Install go-licenses
+        run: go install "github.com/google/go-licenses/v2@${GO_LICENSES_VERSION}"
         shell: bash
-      - name: Run go-licenses and save deps
+
+      # The first target replaces dependencies/ (--force); each later one is
+      # saved on its own and only adds what is missing, so a module that two
+      # targets share is written once.
+      - name: Run go-licenses save
         run: |
-          go-licenses save ./... --save_path=dependencies --force
-          go-licenses check ./... --disallowed_types="forbidden,restricted"
+          set -euo pipefail
+          first=1
+          while read -r platform pkgs; do
+            [ -n "$platform" ] || continue
+            export GOOS="${platform%/*}" GOARCH="${platform#*/}" CGO_ENABLED=0
+            if [ "$first" = 1 ]; then
+              go-licenses save ${pkgs} --save_path=dependencies --force
+              first=0
+            else
+              out="${RUNNER_TEMP}/go-licenses-${GOOS}-${GOARCH}"
+              go-licenses save ${pkgs} --save_path="$out" --force
+              cp -R --update=none "$out"/. dependencies/
+            fi
+          done <<< "${TARGETS}"
+        shell: bash
+
       - name: Push licenses
         run: |
           git config --global user.name "${{ vars.CI_COMMIT_AUTHOR }}"
