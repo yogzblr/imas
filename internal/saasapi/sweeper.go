@@ -11,8 +11,12 @@
 //     stored action_params. A queued item has provably never reached
 //     farmer (dispatchItem moves it back to queued only on "no
 //     responders"). Items in dispatching are NEVER re-sent: their request
-//     went out and cmd.run is not idempotent (AssetActionItemStatus). See
-//     sweepActionBatches.
+//     went out, cmd.run is not idempotent (AssetActionItemStatus), and
+//     nothing downstream deduplicates a second send. One a dead process
+//     left there is failed with dispatch_outcome_unknown once its
+//     dispatcher would have given up on it. A queued item accepted longer
+//     ago than SAASAPI_OUTBOX_ACTION_MAX_AGE is failed, never sent late.
+//     See sweepActionBatches.
 //   - self_update rollouts whose process died: resumed, wave by wave,
 //     after the batch's lease has lapsed, only while fleet update dispatch
 //     is enabled. See sweepRollouts and rollout_resume.go.
@@ -53,6 +57,13 @@ type OutboxSweeperSettings struct {
 	// ActionStaleAfter is the same for a queued §1.5 action item, measured
 	// from its last change (SAASAPI_OUTBOX_ACTION_STALE_AFTER).
 	ActionStaleAfter time.Duration
+	// ActionMaxAge is how long after it was accepted a §1.5 action item may
+	// still be sent (SAASAPI_OUTBOX_ACTION_MAX_AGE). Past it, a queued item
+	// fails with expired_not_sent, by the original dispatcher or the
+	// sweeper, whichever reaches it. Nothing downstream bounds this: the
+	// sealed envelope's ±5 minute window is measured from when farmer seals
+	// it at dispatch, not from when saasapi accepted the request.
+	ActionMaxAge time.Duration
 	// MaxAttempts bounds the publishes of a provisioning job and the
 	// dispatches of an action item, counting the first
 	// (SAASAPI_OUTBOX_MAX_ATTEMPTS). Past it the job or item is failed.
@@ -69,6 +80,7 @@ const (
 	defaultOutboxSweepInterval    = 30 * time.Second
 	defaultProvisioningStaleAfter = 2 * time.Minute
 	defaultActionStaleAfter       = 2 * time.Minute
+	defaultActionMaxAge           = 15 * time.Minute
 	defaultOutboxMaxAttempts      = 5
 	defaultOutboxLeaseTTL         = 2 * time.Minute
 
@@ -76,6 +88,8 @@ const (
 	maxOutboxSweepInterval = time.Hour
 	minOutboxStaleAfter    = 10 * time.Second
 	maxOutboxStaleAfter    = 24 * time.Hour
+	minActionMaxAge        = time.Minute
+	maxActionMaxAge        = time.Hour
 	maxOutboxMaxAttempts   = 50
 	minOutboxLeaseTTL      = 15 * time.Second
 	maxOutboxLeaseTTL      = time.Hour
@@ -97,6 +111,7 @@ func DefaultOutboxSweeperSettings() OutboxSweeperSettings {
 		Interval:               defaultOutboxSweepInterval,
 		ProvisioningStaleAfter: defaultProvisioningStaleAfter,
 		ActionStaleAfter:       defaultActionStaleAfter,
+		ActionMaxAge:           defaultActionMaxAge,
 		MaxAttempts:            defaultOutboxMaxAttempts,
 		LeaseTTL:               defaultOutboxLeaseTTL,
 	}
@@ -182,32 +197,44 @@ func (sw *sweeper) sweep() {
 }
 
 // sweepActionBatches is the outbox sweeper's §1.5 job. It finds batches
-// (not update rollouts: sweepRollouts resumes those) with queued items
-// whose lease has lapsed or was never set, and for each one whose queued
-// items include one due again (backoff from the item's last change,
-// counting its attempts), claims the batch's lease and dispatches the due
-// items in the background under it, from the batch's stored action_params,
-// exactly as the original dispatch would have (dispatchBatch).
+// (not update rollouts: sweepRollouts resumes those) whose lease has lapsed
+// or was never set and that have work: a queued item due again (backoff
+// from the item's last change, counting its attempts), a queued item past
+// SAASAPI_OUTBOX_ACTION_MAX_AGE, or an item a dead process left in
+// dispatching. For each, it claims the batch's lease and then:
+//
+//   - fails a stuck dispatching item (stuckDispatching) with
+//     dispatch_outcome_unknown. It is never re-sent: its request went out,
+//     or may have, and nothing downstream deduplicates a second send, so
+//     cmd.run could run twice. An operator can retry it deliberately;
+//   - fails a queued item accepted more than SAASAPI_OUTBOX_ACTION_MAX_AGE
+//     ago with expired_not_sent, unsent;
+//   - fails the batch's other due items with tenant_not_active, unsent, if
+//     its tenant is no longer active;
+//   - fails a due item already dispatched SAASAPI_OUTBOX_MAX_ATTEMPTS times
+//     (each time back to queued: no farmer was listening) with
+//     dispatch_not_delivered;
+//   - and dispatches the remaining due items in the background under the
+//     lease, from the batch's stored action_params, exactly as the original
+//     dispatch would have (dispatchBatch).
 //
 // Only queued items are ever sent: a queued item has provably never
-// reached farmer. An item in dispatching was sent, and is left exactly as
-// it is, however long it has been there: cmd.run isn't idempotent, so
-// re-sending one could run a command twice. dispatchItem's queued ->
-// dispatching claim still guards every send, so even a live dispatcher
-// that outlived its lease can't send an item the sweeper also sends.
-//
-// A due item that has already been dispatched SAASAPI_OUTBOX_MAX_ATTEMPTS
-// times (each time back to queued: no farmer was listening) is failed with
-// dispatch_not_delivered instead. If the batch's tenant is no longer
-// active, its due items are failed with tenant_not_active, unsent.
+// reached farmer. dispatchItem's queued -> dispatching claim still guards
+// every send, so even a live dispatcher that outlived its lease can't send
+// an item the sweeper also sends.
 func (sw *sweeper) sweepActionBatches() {
 	now := dbTime(outboxNow())
+	// The shortest stuckDispatchAfter of any batch (a cook, or a cmd.run
+	// with the shortest timeout); redispatchBatch checks each item exactly.
+	minStuck := farmerSproutWait + 2*dispatchReplyMargin
 	type ref struct{ BatchID, TenantID string }
 	var refs []ref
 	if err := sw.d.Table(AssetActionItem{}.TableName()+" AS i").
 		Joins("JOIN "+AssetActionBatch{}.TableName()+" AS b ON b.id = i.batch_id AND b.tenant_id = i.tenant_id").
-		Where("i.status = ? AND i.updated_at <= ? AND b.action_type <> ?",
-			ActionItemQueued, now.Add(-sw.s.ActionStaleAfter), controlplane.ActionSelfUpdate).
+		Where("b.action_type <> ?", controlplane.ActionSelfUpdate).
+		Where("(i.status = ? AND (i.updated_at <= ? OR i.created_at <= ?)) OR (i.status = ? AND i.updated_at <= ?)",
+			ActionItemQueued, now.Add(-sw.s.ActionStaleAfter), now.Add(-sw.s.ActionMaxAge),
+			ActionItemDispatching, now.Add(-minStuck)).
 		Where("(b.lease_until IS NULL OR b.lease_until < ?)", now).
 		Distinct("i.batch_id", "i.tenant_id").Order("i.batch_id").Limit(sweepBatchLimit).
 		Scan(&refs).Error; err != nil {
@@ -229,24 +256,30 @@ func (sw *sweeper) redispatchBatch(batchID, tenantID string, now time.Time) {
 	if batch.ActionType == controlplane.ActionSelfUpdate {
 		return
 	}
-	var queued []AssetActionItem
-	if err := sw.d.Where("batch_id = ? AND tenant_id = ? AND status = ?", batch.ID, batch.TenantID, ActionItemQueued).
-		Order("position").Find(&queued).Error; err != nil {
-		log.Errorf("saasapi: outbox sweep: reading queued items of batch %s (tenant %s): %v", batch.ID, batch.TenantID, err)
+	var open []AssetActionItem
+	if err := sw.d.Where("batch_id = ? AND tenant_id = ? AND status IN ?", batch.ID, batch.TenantID,
+		[]AssetActionItemStatus{ActionItemQueued, ActionItemDispatching}).
+		Order("position").Find(&open).Error; err != nil {
+		log.Errorf("saasapi: outbox sweep: reading open items of batch %s (tenant %s): %v", batch.ID, batch.TenantID, err)
 		return
 	}
-	var due, exhausted []AssetActionItem
-	for _, it := range queued {
-		if now.Before(it.UpdatedAt.Add(backoff(sw.s.ActionStaleAfter, it.Attempts))) {
-			continue
-		}
-		if it.Attempts >= sw.s.MaxAttempts {
+	var stuck, expired, due, exhausted []AssetActionItem
+	for _, it := range open {
+		switch {
+		case it.Status == ActionItemDispatching:
+			if stuckDispatching(batch, it, now) {
+				stuck = append(stuck, it)
+			}
+		case actionExpired(batch, it, now, sw.s.ActionMaxAge):
+			expired = append(expired, it)
+		case now.Before(it.UpdatedAt.Add(backoff(sw.s.ActionStaleAfter, it.Attempts))):
+		case it.Attempts >= sw.s.MaxAttempts:
 			exhausted = append(exhausted, it)
-		} else {
+		default:
 			due = append(due, it)
 		}
 	}
-	if len(due) == 0 && len(exhausted) == 0 {
+	if len(stuck)+len(expired)+len(due)+len(exhausted) == 0 {
 		return
 	}
 	lease, err := claimRowLease(sw.d, batch.TableName(), batchLeaseKey, []any{batch.ID, batch.TenantID},
@@ -257,6 +290,15 @@ func (sw *sweeper) redispatchBatch(batchID, tenantID string, now time.Time) {
 	}
 	if lease == nil {
 		return // another replica has it, or its dispatcher renewed in time
+	}
+	for _, it := range stuck {
+		failStuckDispatching(sw.d, batch, it)
+	}
+	for _, it := range expired {
+		expireItem(sw.d, batch, it)
+	}
+	if len(due)+len(exhausted) == 0 {
+		return
 	}
 	// The POST required an active tenant. One that has since started
 	// offboarding gets nothing more sent: its due items fail unsent.

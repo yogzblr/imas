@@ -134,6 +134,10 @@ const (
 	// no longer active (offboarding, say) when the item was due to be sent
 	// again, so it was failed unsent.
 	errCodeTenantNotActive = "tenant_not_active"
+	// errCodeExpiredNotSent: the item was still queued
+	// SAASAPI_OUTBOX_ACTION_MAX_AGE after the batch was accepted (a long
+	// outage, say), so it was failed rather than sent late. It never ran.
+	errCodeExpiredNotSent = "expired_not_sent"
 )
 
 // actionErrorMessages is the only text ever shown for an item's error
@@ -154,6 +158,7 @@ var actionErrorMessages = map[string]string{
 	errCodeDispatchOutcomeUnknown: "no reply was received for the action; it may or may not have run",
 	errCodeNotDelivered:           "the action could not be delivered after repeated attempts, so it was not run",
 	errCodeTenantNotActive:        "the tenant was no longer active when the action was due to be sent, so it was not sent",
+	errCodeExpiredNotSent:         "the action could not be sent in time after it was accepted, so it expired and was never sent",
 
 	// Fleet update rollouts (fleet_update_dispatch.go).
 	errCodeRolloutHalted:           "an earlier wave of this rollout did not fully succeed, so the update was not sent to this sprout",
@@ -734,6 +739,11 @@ func dispatchBatch(d *gorm.DB, nc *nats.Conn, batch AssetActionBatch, items []As
 				batch.ID, batch.TenantID)
 			break
 		}
+		if actionExpired(batch, item, outboxNow(), outboxSettings.ActionMaxAge) {
+			<-actionDispatchSlots
+			expireItem(d, batch, item)
+			continue
+		}
 		wg.Add(1)
 		go func(item AssetActionItem) {
 			defer wg.Done()
@@ -742,6 +752,70 @@ func dispatchBatch(d *gorm.DB, nc *nats.Conn, batch AssetActionBatch, items []As
 		}(item)
 	}
 	wg.Wait()
+}
+
+// actionExpired reports whether item, of a §1.5 batch, was accepted at
+// least maxAge before now: too long ago to send it at all
+// (SAASAPI_OUTBOX_ACTION_MAX_AGE). Update rollouts are never expired: their
+// items wait for their wave by design, and every wave re-checks the
+// tenant's policy instead.
+func actionExpired(batch AssetActionBatch, item AssetActionItem, now time.Time, maxAge time.Duration) bool {
+	if batch.ActionType == controlplane.ActionSelfUpdate || maxAge <= 0 {
+		return false
+	}
+	accepted := item.CreatedAt
+	if accepted.IsZero() {
+		accepted = batch.CreatedAt
+	}
+	return !accepted.IsZero() && !now.Before(accepted.Add(maxAge))
+}
+
+// expireItem fails a queued item with expired_not_sent, conditionally on
+// its still being queued. It was never sent.
+func expireItem(d *gorm.DB, batch AssetActionBatch, item AssetActionItem) {
+	ok, err := updateItem(d, item, ActionItemQueued, failedUpdate(errCodeExpiredNotSent))
+	switch {
+	case err != nil:
+		log.Errorf("saasapi: expiring batch %s asset %s: %v", batch.ID, item.AssetID, err)
+	case ok:
+		log.Warnf("saasapi: batch %s (tenant %s) asset %s was not sent within %s of being accepted; failed with %s, never sent",
+			batch.ID, batch.TenantID, item.AssetID, outboxSettings.ActionMaxAge, errCodeExpiredNotSent)
+	}
+}
+
+// stuckDispatchAfter is how long after its dispatch an item of batch can
+// still be in dispatching with a live dispatcher waiting on its reply:
+// the dispatcher's own reply timeout plus a margin for clock skew. An item
+// still dispatching after that was claimed by a process that died before
+// recording the reply (stuckDispatching).
+func stuckDispatchAfter(batch AssetActionBatch) time.Duration {
+	return replyTimeoutFor(batch.ActionType, batch.ActionParams) + dispatchReplyMargin
+}
+
+// stuckDispatching reports whether it, of batch, is an item a dead process
+// left in dispatching: its request went out (or may have) and no reply was
+// ever recorded, and its dispatcher would have given up on it by now.
+// Such an item is failed with dispatch_outcome_unknown, never re-sent: the
+// sprout deduplicates nothing (a second send gets a fresh envelope id and,
+// for a cook or self_update, a fresh jid), so a re-send could run a
+// command twice. An operator can retry it deliberately.
+func stuckDispatching(batch AssetActionBatch, it AssetActionItem, now time.Time) bool {
+	return it.Status == ActionItemDispatching && !now.Before(dispatchTimeOf(it).Add(stuckDispatchAfter(batch)))
+}
+
+// failStuckDispatching fails it, an item stuckDispatching found, with
+// dispatch_outcome_unknown, conditionally on its still being dispatching.
+// It reports whether it did.
+func failStuckDispatching(d *gorm.DB, batch AssetActionBatch, it AssetActionItem) bool {
+	ok, err := updateItem(d, it, ActionItemDispatching, failedUpdate(errCodeDispatchOutcomeUnknown))
+	switch {
+	case err != nil:
+		log.Errorf("saasapi: failing stuck batch %s asset %s: %v", batch.ID, it.AssetID, err)
+	case ok:
+		log.Warnf("saasapi: batch %s (tenant %s) asset %s was left dispatching with no reply by a process that died; failed with %s, not re-sent",
+			batch.ID, batch.TenantID, it.AssetID, errCodeDispatchOutcomeUnknown)
+	}
+	return ok
 }
 
 // dispatchReplyTimeout is how long to wait for farmer's reply to an action:

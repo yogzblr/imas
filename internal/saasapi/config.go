@@ -107,6 +107,11 @@ import (
 //     provision job before it offboards the tenant.
 //   - SAASAPI_OUTBOX_ACTION_STALE_AFTER: the same for a queued action
 //     item, from its last change; default 2m, 10s..24h.
+//   - SAASAPI_OUTBOX_ACTION_MAX_AGE: how long after it was accepted a
+//     queued action item may still be sent; past it the item fails with
+//     expired_not_sent, never sent. Default 15m, 1m..1h. The only age
+//     limit on the path: farmer and the sprout never reject a command on
+//     its acceptance time.
 //   - SAASAPI_OUTBOX_MAX_ATTEMPTS: dispatches of one job or item, the first
 //     included, before it is failed; default 5, 1..50.
 //   - SAASAPI_OUTBOX_LEASE_TTL: how long a lease lasts unrenewed, and so how
@@ -315,6 +320,7 @@ func loadOutboxSweeperSettings(s *OutboxSweeperSettings) error {
 		{"SAASAPI_OUTBOX_SWEEP_INTERVAL", &s.Interval, minOutboxSweepInterval, maxOutboxSweepInterval},
 		{"SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER", &s.ProvisioningStaleAfter, minOutboxStaleAfter, maxOutboxStaleAfter},
 		{"SAASAPI_OUTBOX_ACTION_STALE_AFTER", &s.ActionStaleAfter, minOutboxStaleAfter, maxOutboxStaleAfter},
+		{"SAASAPI_OUTBOX_ACTION_MAX_AGE", &s.ActionMaxAge, minActionMaxAge, maxActionMaxAge},
 		{"SAASAPI_OUTBOX_LEASE_TTL", &s.LeaseTTL, minOutboxLeaseTTL, maxOutboxLeaseTTL},
 	} {
 		v := os.Getenv(d.name)

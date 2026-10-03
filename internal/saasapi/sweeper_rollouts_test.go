@@ -288,11 +288,13 @@ func TestSweepRollouts_LiveLeaseNotTakenOver(t *testing.T) {
 	wantStates(t, itemStates(t, f.gdb, batch.ID), "succeeded/")
 }
 
-// An item a dead process left in dispatching is never re-sent. It holds
-// the gate until its deadline, measured from its dispatch time, and then
-// fails it: the queued rest are halted unsent, and the item itself is left
-// in dispatching.
-func TestSweepRollouts_NeverResendsDispatching(t *testing.T) {
+// An item a dead process left in dispatching is never re-sent. Once its
+// dispatcher would have given up on the reply (stuckDispatchAfter, from
+// its recorded dispatch time) it fails with dispatch_outcome_unknown,
+// which fails the gate: the queued rest are halted unsent, and the
+// tenant's rollout slot is free again, so an operator can start a new
+// rollout deliberately.
+func TestSweepRollouts_StuckDispatchingFailsAndFreesSlot(t *testing.T) {
 	f := newRolloutFixture(t, 2)
 	useOutboxClock(t)
 	ns := startTestBus(t)
@@ -300,19 +302,56 @@ func TestSweepRollouts_NeverResendsDispatching(t *testing.T) {
 	farmer := startFakeFarmer(t, ns, dispatchedFarmer)
 	installReader(t, succeedingReader(farmer, f.gdb))
 	expired := dbTime(time.Now().Add(-time.Second))
+	params := AssetActionBatch{ActionType: controlplane.ActionSelfUpdate, ActionParams: `{"version":"v2.4.1"}`}
 	batch := f.seed(t, 1, gateJobStatus, &expired, []AssetActionItem{
-		{Status: ActionItemDispatching, Attempts: 1, DispatchedAt: sentAt(time.Now().Add(-4 * time.Second))},
+		{Status: ActionItemDispatching, Attempts: 1, DispatchedAt: sentAt(time.Now().Add(-stuckDispatchAfter(params) + time.Second))},
 		{Status: ActionItemQueued},
 	})
+	if busy, _ := updateInProgress(f.gdb, f.tid); busy != batch.ID {
+		t.Fatalf("the stuck rollout doesn't hold the slot: %q", busy)
+	}
 	start := time.Now()
 	sweepConcurrently(testSweeper(f.gdb, nc))
 	if got := sentSprouts(farmer); len(got) != 0 {
 		t.Fatalf("sent %v", got)
 	}
 	if waited := time.Since(start); waited < 500*time.Millisecond {
-		t.Fatalf("halted after %s, before the dispatching item's deadline", waited)
+		t.Fatalf("failed after %s, before its dispatcher would have given up", waited)
 	}
-	wantStates(t, itemStates(t, f.gdb, batch.ID), "dispatching/", "failed/rollout_halted")
+	wantStates(t, itemStates(t, f.gdb, batch.ID), "failed/"+errCodeDispatchOutcomeUnknown, "failed/rollout_halted")
+	if busy, err := updateInProgress(f.gdb, f.tid); busy != "" || err != nil {
+		t.Fatalf("the tenant's rollout slot is still held by %q (%v)", busy, err)
+	}
+	// A later sweep has nothing to resume and sends nothing.
+	sweepConcurrently(testSweeper(f.gdb, nc))
+	if got := sentSprouts(farmer); len(got) != 0 {
+		t.Fatalf("sent %v", got)
+	}
+}
+
+// A rollout left with nothing but a stuck dispatching item (every other
+// item settled) is resumed too, so that item is failed and the slot freed.
+func TestSweepRollouts_OnlyStuckItemLeft(t *testing.T) {
+	f := newRolloutFixture(t, 2)
+	useOutboxClock(t)
+	ns := startTestBus(t)
+	nc := connectSaaSBus(t, ns)
+	farmer := startFakeFarmer(t, ns, dispatchedFarmer)
+	installReader(t, succeedingReader(farmer, f.gdb))
+	expired := dbTime(time.Now().Add(-time.Second))
+	params := AssetActionBatch{ActionType: controlplane.ActionSelfUpdate, ActionParams: `{"version":"v2.4.1"}`}
+	batch := f.seed(t, 1, gateJobStatus, &expired, []AssetActionItem{
+		{Status: ActionItemSucceeded, JID: jidFor(f.sprout(0)), Attempts: 1, DispatchedAt: sentAt(time.Now().Add(-time.Hour))},
+		{Status: ActionItemDispatching, Attempts: 1, DispatchedAt: sentAt(time.Now().Add(-stuckDispatchAfter(params)))},
+	})
+	sweepConcurrently(testSweeper(f.gdb, nc))
+	wantStates(t, itemStates(t, f.gdb, batch.ID), "succeeded/", "failed/"+errCodeDispatchOutcomeUnknown)
+	if busy, _ := updateInProgress(f.gdb, f.tid); busy != "" {
+		t.Fatalf("the tenant's rollout slot is still held by %q", busy)
+	}
+	if got := sentSprouts(farmer); len(got) != 0 {
+		t.Fatalf("sent %v", got)
+	}
 }
 
 // With fleet update dispatch off, nothing is resumed.

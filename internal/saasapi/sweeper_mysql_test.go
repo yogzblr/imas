@@ -180,7 +180,8 @@ func TestMySQLSweepProvisioningJobs_TwoReplicas(t *testing.T) {
 
 // The action batch crash case on MySQL, with two replicas' sweepers on
 // separate connection pools sweeping repeatedly: every queued item is
-// sent exactly once, and a dispatching item never.
+// sent exactly once, and a dispatching item a dead process left an hour
+// ago is never sent, only failed with dispatch_outcome_unknown.
 func TestMySQLSweepActionBatches_TwoReplicas(t *testing.T) {
 	g1, g2 := newMySQLSaasSchema(t)
 	clock := useTestClock(t)
@@ -209,7 +210,7 @@ func TestMySQLSweepActionBatches_TwoReplicas(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	clock.Advance(time.Hour)
+	clock.Advance(defaultActionStaleAfter + time.Second)
 	a, b := testSweeper(g1, nc), testSweeper(g2, nc)
 	sweepConcurrently(a, b, a, b, a, b)
 	sends := sendsPerSprout(farmer)
@@ -222,7 +223,8 @@ func TestMySQLSweepActionBatches_TwoReplicas(t *testing.T) {
 		}
 	}
 	var stuck AssetActionItem
-	if err := g2.First(&stuck, "batch_id = ? AND asset_id = ?", batch.ID, "stuck").Error; err != nil || stuck.Status != ActionItemDispatching {
+	if err := g2.First(&stuck, "batch_id = ? AND asset_id = ?", batch.ID, "stuck").Error; err != nil ||
+		stuck.Status != ActionItemFailed || stuck.ErrorCode != errCodeDispatchOutcomeUnknown {
 		t.Fatalf("dispatching item = %+v, %v", stuck, err)
 	}
 }
@@ -276,5 +278,54 @@ func TestMySQLClaimRolloutTakeover(t *testing.T) {
 	var p TenantUpdatePolicy
 	if err := g2.First(&p, "tenant_id = ?", "t_mysql").Error; err != nil || p.RolloutClaimedAt == nil || !p.RolloutClaimedAt.After(prev) {
 		t.Fatalf("rollout claim after the takeover: %+v, %v", p.RolloutClaimedAt, err)
+	}
+}
+
+// The DELETE wait after a re-published provision job comes from the
+// database (provisioning_jobs.attempts and last_dispatched_at), not from
+// any replica's memory: replica A's sweeper re-publishes the job, and a
+// DELETE served by replica B, on its own connection pool, still waits it
+// out, then goes ahead once the window has passed.
+func TestMySQLDeleteWaitIsSharedAcrossReplicas(t *testing.T) {
+	g1, g2 := newMySQLSaasSchema(t)
+	clock := useTestClock(t)
+	tenant := Tenant{ID: "t_mysql_del", Name: "Acme", Status: TenantStatusPending}
+	if err := g1.Create(&tenant).Error; err != nil {
+		t.Fatal(err)
+	}
+	job, err := enqueueProvisioningJob(g1, tenant.ID, ProvisioningJobProvision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := startTestBus(t)
+	nc := connectSaaSBus(t, ns)
+	farmer := startProvisioningFarmer(t, nc)
+
+	// Replica A publishes it twice (the original and one re-publish).
+	SetDB(g1)
+	dispatchProvisioning(context.Background(), job, tenant.Name)
+	clock.Advance(defaultProvisioningStaleAfter + time.Second)
+	testSweeper(g1, nc).sweep()
+	if got := farmer.received(t, 2); got[job.ID] != 2 {
+		t.Fatalf("farmer got %v", got)
+	}
+	// One copy's result comes back: the tenant is active.
+	if err := applyProvisioningResult(ProvisioningJobProvision, controlplane.TenantResult{JobID: job.ID, TenantID: tenant.ID, Status: controlplane.StatusActive}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Replica B serves the DELETE.
+	SetDB(g2)
+	t.Cleanup(func() { SetDB(nil) })
+	SetBus(nil)
+	del := func() int {
+		return doRequest(t, DeleteTenant, "DELETE", "/v1/tenants/"+tenant.ID, map[string]string{"tenant_id": tenant.ID}, nil).Code
+	}
+	if code := del(); code != 409 {
+		t.Fatalf("DELETE on the other replica right after the re-publish: %d, want 409", code)
+	}
+	clock.Advance(defaultProvisioningStaleAfter + time.Second)
+	if code := del(); code != 202 {
+		t.Fatalf("DELETE after the window: %d, want 202", code)
 	}
 }

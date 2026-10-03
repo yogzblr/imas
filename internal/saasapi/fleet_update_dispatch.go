@@ -73,9 +73,9 @@
 // what the database records (sweepRollouts, resumeRollout): the same waves
 // of the same size and gate, the policy and the catalog checked again
 // before each one. Only items still queued are ever sent; an item a dead
-// process left in dispatching is never re-sent, and, since its outcome is
-// unknown, keeps the tenant's rollout slot taken (an open question, see
-// docs/design/imas-internal-api-account.md).
+// process left in dispatching is never re-sent: once its dispatcher would
+// have given up on the reply it fails with dispatch_outcome_unknown, which
+// halts the rollout and frees the tenant's rollout slot.
 package saasapi
 
 import (
@@ -998,8 +998,10 @@ func anyWaveFailed(d *gorm.DB, readers rolloutReaders, batch AssetActionBatch, s
 // whether any of them isn't success (failed). An item still running or
 // dispatching once its deadline (deadlineOf) has passed is settled as a
 // failure: a running one is marked unresponsive_after_update, a
-// dispatching one (its request went out and no reply was recorded) is
-// left as it is and never re-sent.
+// dispatching one (its request went out, or may have, and no reply was
+// ever recorded) is failed with dispatch_outcome_unknown and never re-sent
+// (stuckDispatching). Either way it is terminal, so it no longer holds the
+// tenant's rollout slot (updateInProgress).
 //
 // An item still queued after dispatchBatch had no farmer to take it. It
 // can't succeed, so it counts as failed, and haltRollout fails it.
@@ -1027,7 +1029,7 @@ func pollWave(d *gorm.DB, readers rolloutReaders, batch AssetActionBatch, w sent
 			failed = true
 		}
 	}
-	markUnresponsive(d, overdue)
+	markOverdue(d, batch, overdue)
 	return settled, failed
 }
 
@@ -1237,11 +1239,17 @@ func loadWaveItems(d *gorm.DB, batch AssetActionBatch, wave []AssetActionItem) (
 	return items, err
 }
 
-// markUnresponsive moves every item still running to
-// unresponsive_after_update. The update is conditional on the item still
-// being running, so an outcome a concurrent GET has just recorded wins.
-func markUnresponsive(d *gorm.DB, items []AssetActionItem) {
+// markOverdue settles items past their wave deadline: a running one
+// becomes unresponsive_after_update, a dispatching one fails with
+// dispatch_outcome_unknown (failStuckDispatching). Each update is
+// conditional on the item's status, so an outcome a concurrent GET has
+// just recorded wins.
+func markOverdue(d *gorm.DB, batch AssetActionBatch, items []AssetActionItem) {
 	for _, it := range items {
+		if it.Status == ActionItemDispatching {
+			failStuckDispatching(d, batch, it)
+			continue
+		}
 		if it.Status != ActionItemRunning {
 			continue
 		}

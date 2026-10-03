@@ -107,6 +107,7 @@ func TestLoadConfigOutboxSweeper(t *testing.T) {
 	t.Setenv("SAASAPI_OUTBOX_SWEEP_INTERVAL", "10s")
 	t.Setenv("SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER", "5m")
 	t.Setenv("SAASAPI_OUTBOX_ACTION_STALE_AFTER", "90s")
+	t.Setenv("SAASAPI_OUTBOX_ACTION_MAX_AGE", "10m")
 	t.Setenv("SAASAPI_OUTBOX_MAX_ATTEMPTS", "3")
 	t.Setenv("SAASAPI_OUTBOX_LEASE_TTL", "1m")
 	cfg, err = LoadConfig()
@@ -114,7 +115,7 @@ func TestLoadConfigOutboxSweeper(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := OutboxSweeperSettings{Enabled: false, Interval: 10 * time.Second, ProvisioningStaleAfter: 5 * time.Minute,
-		ActionStaleAfter: 90 * time.Second, MaxAttempts: 3, LeaseTTL: time.Minute}
+		ActionStaleAfter: 90 * time.Second, ActionMaxAge: 10 * time.Minute, MaxAttempts: 3, LeaseTTL: time.Minute}
 	if cfg.OutboxSweeper != want {
 		t.Fatalf("overrides = %+v, want %+v", cfg.OutboxSweeper, want)
 	}
@@ -124,6 +125,7 @@ func TestLoadConfigOutboxSweeper(t *testing.T) {
 		"SAASAPI_OUTBOX_SWEEP_INTERVAL":           "0s",
 		"SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER": "1s",
 		"SAASAPI_OUTBOX_ACTION_STALE_AFTER":       "48h",
+		"SAASAPI_OUTBOX_ACTION_MAX_AGE":           "2h",
 		"SAASAPI_OUTBOX_MAX_ATTEMPTS":             "0",
 		"SAASAPI_OUTBOX_LEASE_TTL":                "5s",
 	} {

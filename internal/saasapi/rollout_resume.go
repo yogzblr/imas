@@ -17,7 +17,12 @@
 //     revocation, and its registration (catalog rows whose signatures
 //     verify) are checked again, as CreateFleetUpdateBatch and farmer's
 //     re-verification do.
-//   - Items in dispatching are never re-sent.
+//   - Items in dispatching are never re-sent: the sprout deduplicates
+//     nothing, so a second send could update (or, for a §1.5 batch, run a
+//     command) twice. One a dead process left there fails with
+//     dispatch_outcome_unknown once its dispatcher would have given up on
+//     it, which halts the rollout and frees the tenant's rollout slot. An
+//     operator retries it deliberately, with a new rollout.
 package saasapi
 
 import (
@@ -46,6 +51,7 @@ var neverSentCodes = map[string]bool{
 	errCodeVersionRevoked:        true,
 	errCodeNotDelivered:          true,
 	errCodeTenantNotActive:       true,
+	errCodeExpiredNotSent:        true,
 }
 
 // wasSent reports whether it was ever handed to farmer. An item sent by
@@ -133,8 +139,10 @@ func rolloutRegistrationCheck(d *gorm.DB, batch AssetActionBatch, version string
 //     batch's gate, as the dead process's last wave had to: job_status
 //     waits for every sent item to succeed and fails on the first failure;
 //     dispatch needs every sent item accepted (running or succeeded) and
-//     none failed. An item left in dispatching is never re-sent; it holds
-//     the gate until its deadline and then fails it.
+//     none failed. An item left in dispatching is never re-sent: its
+//     deadline is when its dispatcher would have given up on the reply
+//     (stuckDispatchAfter), after which it fails with
+//     dispatch_outcome_unknown and so fails the gate.
 //  2. If it passes, the items still queued go out in waves of the batch's
 //     size and gate, exactly as runRollout sends them, with the policy,
 //     revocation and registration checked before each wave. If it fails,
@@ -176,6 +184,11 @@ func resumeRollout(d *gorm.DB, nc *nats.Conn, readers rolloutReaders, batch Asse
 			prior.items = append(prior.items, it)
 			prior.proofs[it.AssetID] = updateProof{dispatched: at, jobSuffices: it.PlannedAtTarget}
 			prior.deadlines[it.AssetID] = at.Add(rolloutWaveTimeout)
+			if it.Status == ActionItemDispatching {
+				// No reply will ever come for it: its dispatcher is gone.
+				// It fails once that dispatcher would have given up.
+				prior.deadlines[it.AssetID] = at.Add(stuckDispatchAfter(batch))
+			}
 		}
 	}
 	log.Warnf("saasapi: resuming update batch %s (tenant %s) to %s: %d items already sent, %d still queued, waves of %d, gate %s",
@@ -206,7 +219,8 @@ func resumeRollout(d *gorm.DB, nc *nats.Conn, readers rolloutReaders, batch Asse
 
 // sweepRollouts is the outbox sweeper's rollout job, run only while fleet
 // update dispatch is enabled. It finds self_update batches with items
-// still queued or running whose lease has lapsed, takes each one over
+// still queued, dispatching or running whose lease has lapsed, takes each
+// one over
 // (claimRolloutTakeover) and resumes it in the background under its lease
 // (resumeRollout).
 //
@@ -216,10 +230,10 @@ func resumeRollout(d *gorm.DB, nc *nats.Conn, readers rolloutReaders, batch Asse
 // live rollout goes without a write (rolloutWaveTimeout, plus the reply
 // wait and the lease TTL as margin).
 //
-// A batch whose only unfinished items are in dispatching is not resumed:
-// nothing about them can change (they are never re-sent), so it would only
-// be taken over again and again. Such an item keeps the tenant's rollout
-// slot taken; that is an open question, not something the sweeper decides.
+// A batch whose only unfinished items are in dispatching is resumed too:
+// that is how such an item, which a dead process left with no reply, is
+// failed (dispatch_outcome_unknown) and stops holding the tenant's rollout
+// slot.
 func (sw *sweeper) sweepRollouts() {
 	if !fleetUpdateDispatchEnabled {
 		return
@@ -229,7 +243,8 @@ func (sw *sweeper) sweepRollouts() {
 	var refs []ref
 	if err := sw.d.Table(AssetActionItem{}.TableName()+" AS i").
 		Joins("JOIN "+AssetActionBatch{}.TableName()+" AS b ON b.id = i.batch_id AND b.tenant_id = i.tenant_id").
-		Where("i.status IN ? AND b.action_type = ?", []AssetActionItemStatus{ActionItemQueued, ActionItemRunning}, controlplane.ActionSelfUpdate).
+		Where("i.status IN ? AND b.action_type = ?",
+			[]AssetActionItemStatus{ActionItemQueued, ActionItemDispatching, ActionItemRunning}, controlplane.ActionSelfUpdate).
 		Where("(b.lease_until IS NULL OR b.lease_until < ?)", now).
 		Distinct("i.batch_id", "i.tenant_id").Order("i.batch_id").Limit(sweepBatchLimit).
 		Scan(&refs).Error; err != nil {
