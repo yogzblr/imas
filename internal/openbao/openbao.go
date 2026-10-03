@@ -81,8 +81,10 @@ var (
 	ErrK8sAuthFailed     = errors.New("openbao: kubernetes auth login failed")
 )
 
-// Env names one identity's environment variables. Addr is required;
-// the rest are read as their comments say.
+// Env names one identity's environment variables, by convention
+// <prefix>ADDR, CACERT, AUTH_METHOD, TOKEN, K8S_ROLE, K8S_MOUNT,
+// K8S_JWT_PATH and NAMESPACE (e.g. IMAS_CERTS_OPENBAO_ADDR). Each caller
+// spells its names out so a search for one finds where it is read.
 type Env struct {
 	Addr       string // required
 	CACert     string // optional PEM bundle verifying OpenBao's TLS
@@ -92,22 +94,6 @@ type Env struct {
 	K8sMount   string // default DefaultK8sMount
 	K8sJWTPath string // default DefaultK8sJWTPath
 	Namespace  string // optional; sets X-Vault-Namespace on every request
-}
-
-// EnvWithPrefix is the Env every identity uses: prefix followed by ADDR,
-// CACERT, AUTH_METHOD, TOKEN, K8S_ROLE, K8S_MOUNT, K8S_JWT_PATH and
-// NAMESPACE (e.g. prefix "IMAS_CERTS_OPENBAO_").
-func EnvWithPrefix(prefix string) Env {
-	return Env{
-		Addr:       prefix + "ADDR",
-		CACert:     prefix + "CACERT",
-		AuthMethod: prefix + "AUTH_METHOD",
-		Token:      prefix + "TOKEN",
-		K8sRole:    prefix + "K8S_ROLE",
-		K8sMount:   prefix + "K8S_MOUNT",
-		K8sJWTPath: prefix + "K8S_JWT_PATH",
-		Namespace:  prefix + "NAMESPACE",
-	}
 }
 
 // Errors are the sentinels a caller's errors wrap, so each package keeps
@@ -306,25 +292,25 @@ func (c *Client) k8sLoginLocked(ctx context.Context) (string, error) {
 // Read is GET /v1/<path>?<query>. A 404 is a *StatusError (see
 // IsNotFound), not (nil, nil).
 func (c *Client) Read(ctx context.Context, path string, query url.Values) (*api.Secret, error) {
-	return c.Request(ctx, http.MethodGet, path, query, nil)
+	return c.request(ctx, http.MethodGet, path, query, nil)
 }
 
 // Put is PUT /v1/<path> with body as JSON.
 func (c *Client) Put(ctx context.Context, path string, body any) (*api.Secret, error) {
-	return c.Request(ctx, http.MethodPut, path, nil, body)
+	return c.request(ctx, http.MethodPut, path, nil, body)
 }
 
 // Post is POST /v1/<path> with body as JSON. OpenBao treats POST and PUT
 // alike; each caller keeps the method it always sent, so stubs and
 // captured traffic written against it still match.
 func (c *Client) Post(ctx context.Context, path string, body any) (*api.Secret, error) {
-	return c.Request(ctx, http.MethodPost, path, nil, body)
+	return c.request(ctx, http.MethodPost, path, nil, body)
 }
 
-// Request sends one request as this identity and parses the response.
+// request sends one request as this identity and parses the response.
 // body, if not nil, is sent as JSON. A 2xx with an empty body (204)
 // returns (nil, nil).
-func (c *Client) Request(ctx context.Context, method, path string, query url.Values, body any) (*api.Secret, error) {
+func (c *Client) request(ctx context.Context, method, path string, query url.Values, body any) (*api.Secret, error) {
 	token, err := c.Token(ctx)
 	if err != nil {
 		return nil, err

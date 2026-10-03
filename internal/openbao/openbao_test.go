@@ -21,7 +21,10 @@ import (
 
 const prefix = "IMAS_OBTEST_OPENBAO_"
 
-var testEnv = EnvWithPrefix(prefix)
+var testEnv = Env{
+	Addr: prefix + "ADDR", CACert: prefix + "CACERT", AuthMethod: prefix + "AUTH_METHOD", Token: prefix + "TOKEN",
+	K8sRole: prefix + "K8S_ROLE", K8sMount: prefix + "K8S_MOUNT", K8sJWTPath: prefix + "K8S_JWT_PATH", Namespace: prefix + "NAMESPACE",
+}
 
 var (
 	errTestNotConfigured = errors.New("obtest: not configured")
@@ -95,19 +98,6 @@ func setK8sEnv(t *testing.T, addr, jwtPath string) {
 	t.Setenv(testEnv.AuthMethod, AuthMethodKubernetes)
 	t.Setenv(testEnv.K8sRole, "imas-role")
 	t.Setenv(testEnv.K8sJWTPath, jwtPath)
-}
-
-func TestEnvWithPrefix(t *testing.T) {
-	e := EnvWithPrefix("IMAS_CERTS_OPENBAO_")
-	want := Env{
-		Addr: "IMAS_CERTS_OPENBAO_ADDR", CACert: "IMAS_CERTS_OPENBAO_CACERT",
-		AuthMethod: "IMAS_CERTS_OPENBAO_AUTH_METHOD", Token: "IMAS_CERTS_OPENBAO_TOKEN",
-		K8sRole: "IMAS_CERTS_OPENBAO_K8S_ROLE", K8sMount: "IMAS_CERTS_OPENBAO_K8S_MOUNT",
-		K8sJWTPath: "IMAS_CERTS_OPENBAO_K8S_JWT_PATH", Namespace: "IMAS_CERTS_OPENBAO_NAMESPACE",
-	}
-	if e != want {
-		t.Fatalf("EnvWithPrefix = %+v, want %+v", e, want)
-	}
 }
 
 func TestNewFromEnv_ConfigErrors(t *testing.T) {
