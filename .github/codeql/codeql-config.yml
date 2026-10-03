@@ -1,0 +1,9 @@
+name: imas CodeQL config
+
+# dependencies/ is third-party source saved by go-licenses
+# (.github/workflows/go-licenses.yml) for the licence record: each tree has
+# its own go.mod and none of it is built into imas. Alerts there are not
+# imas's to fix; the modules imas does build are analysed from the module
+# cache like any other dependency.
+paths-ignore:
+  - dependencies
