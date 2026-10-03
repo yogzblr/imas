@@ -2,10 +2,12 @@
 
 > **Status (2026-10-03): this flow has never been run.** No tag or release
 > exists and neither workflow has had a run. Expect the first real release to
-> need fixes. It needs the repo secrets `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE`
-> and `GORELEASER_KEY`, and the Buildkite organisation variable and token
+> need fixes. It needs the repo secrets `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE`,
+> and the Buildkite organisation variable and token
 > (see the header comments of `release.yml` and `publish-packages.yml`). Start
-> with a pre-release tag such as `v0.1.0-rc.1`.
+> with a pre-release tag such as `v0.1.0-rc.1`. Until brief REL.1 merges the
+> workflows still use GoReleaser Pro and also need `GORELEASER_KEY`; after it,
+> GoReleaser OSS builds the Windows MSI with `wixl` and no licence key is needed.
 
 One tag releases everything: the `imas`, `imas-farmer` and `imas-sprout`
 binaries and packages, the five container images, and the Helm charts. The

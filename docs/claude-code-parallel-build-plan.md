@@ -846,7 +846,8 @@ decides a fleet update succeeded."
 ## 4c. Wave 5: Wave 4 clean-ups
 
 Added 2026-10-03 from the "Open items" list in `docs/BUILD-STATUS.md`
-(item 5). These are the leftovers Wave 4 knowingly left behind. None of
+(item 5), plus REL.1 (replace GoReleaser Pro with a wixl build hook, a
+first-release prerequisite). These are the leftovers Wave 4 knowingly left behind. None of
 them blocks the Terraform UAT gate, but CL.1 removes attack surface and CL.3
 closes the restart gap that keeps a tenant's one rollout slot taken. Not in
 this wave: `shell.*` sealing, sprout reconnect jitter and a clustered bus
@@ -857,6 +858,7 @@ Sub-waves, each held until the one before is merged to `main`:
 | Wave | Briefs (run in parallel) | Why this order |
 |---|---|---|
 | 5A | CL.1, CL.3 | Disjoint scopes: CL.1 is farmer, pki and the sprout enrollment client; CL.3 is `internal/saasapi`. |
+| 5A | REL.1 | Independent of CL.1 and CL.3: scope is `.goreleaser.yaml`, the workflows and `packaging/`. It only shares the two release rows of `docs/BUILD-STATUS.md`, so merge whichever finishes first and rebase the other. Run it first if the first release is the priority, because the Terraform UAT gate needs published packages. |
 | 5B | CL.2a, then CL.2b | CL.2a touches `cmd/farmer/main.go` and files CL.1 edits, so it waits for CL.1. CL.2b follows CL.2a so it reuses the shared package CL.2a creates. |
 
 Every brief below inherits `CLAUDE.md`. The prompts avoid backticks, double
@@ -1047,6 +1049,82 @@ is running. If the official client cannot meet (2) or (3) cleanly, do not
 force it: leave the provider as it is, and write up why in the PR and in
 BUILD-STATUS (Open items, item 5). Scope: internal/ingredients/sdb/, go.mod,
 go.sum, DEPENDENCIES.md, dependencies/, docs. FLAG FOR SECURITY REVIEW."
+```
+
+**REL.1: replace GoReleaser Pro with GoReleaser OSS and a wixl build hook**
+```
+claude --cloud "Implement REL.1 from docs/BUILD-STATUS.md ('Open items',
+item 1, first-release prerequisite) and docs/RELEASING.md: stop depending on
+GoReleaser Pro. FLAG FOR SECURITY REVIEW.
+Background: GoReleaser itself is MIT licensed; only the Pro edition needs
+GORELEASER_KEY. The only Pro-only feature in .goreleaser.yaml is the
+top-level msi pipe (the GoReleaser docs say it is exclusively Pro). If you
+can install the OSS goreleaser binary, run goreleaser check with it and
+report anything else it rejects; if you cannot, say so. release.yml and
+snapshot.yml pin distribution goreleaser-pro and fail without the key.
+Goal: the same MSI, built by wixl from a script that GoReleaser OSS runs as a
+post-build hook, with the MSI still listed in the signed checksums.txt and
+still a release asset, so .github/workflows/publish-packages.yml, packaging/
+windows/winget/build-winget-nupkg.sh and the Ansible role keep working
+unchanged.
+Do, one commit each: (1) packaging/windows/build-msi.sh (new). Arguments:
+--binary, --version (GoReleaser Version, no leading v, may carry a
+prerelease such as 1.2.3-rc.1), --out directory, optional --timestamp.
+Promote the Python stand-in that packaging/test/test-windows-packaging.sh
+already uses to render the .wxs template fields (Major, Minor, Patch,
+Version, MsiArch as x64, Binary, and dropping the else branch and the
+Runtime.Goos windows blocks) so there is one renderer, and fail on any
+unhandled template action. Stage a temp directory holding imas-sprout.exe,
+packaging/etc/imas-sprout.conf and packaging/etc/fleet-signing-keys.json at
+those relative paths next to the rendered wxs (what the msi pipe did), run
+wixl -a x64, run packaging/windows/msi-postprocess.sh on the result, and
+write imas-sprout-VERSION-windows-x64.msi into the out directory (the name the
+msi pipe produced). Use set -euo pipefail, give clear errors when wixl,
+msibuild or msiinfo are missing, and never leave a partial MSI behind. Keep
+the output reproducible for the same inputs where wixl allows (fixed file
+modification times from the timestamp argument) and say in the PR whether it
+is.
+(2) .goreleaser.yaml: delete the msi block. Add a post hook to the build with
+id sprout-windows-pkg that calls the script with the built binary path, the
+Version and the dist directory as output (build hook templates provide Path
+and Version). Add checksum.extra_files and release.extra_files entries that
+glob the MSI in dist; checksums are written after builds, so the file exists
+by then, but confirm that in a snapshot run rather than assuming it. Remove
+imas-sprout-msi from release.ids (that artifact no longer exists). Keep the
+checksum file name checksums.txt and both signs entries (gpg and cosign)
+unchanged, so the MSI hash stays covered by both signatures. Update the
+comments, including the note about msi.ids.
+(3) Workflows: release.yml and snapshot.yml use the OSS distribution and drop
+GORELEASER_KEY from the environment, the secret check list and the header
+comments. Keep GPG_PRIVATE_KEY and GPG_PASSPHRASE. Fix snapshot.yml's stale
+comment about S3 and Docker Hub.
+(4) packaging/test/test-windows-packaging.sh: call build-msi.sh instead of its
+own stand-in, and keep every assertion.
+(5) CI proof that needs no secrets: a job or workflow, on pull requests that
+touch .goreleaser.yaml, packaging/ or the workflows, that installs goreleaser
+OSS, wixl and msitools, runs goreleaser check, then a snapshot with publish,
+signing and docker skipped (read goreleaser release --help for the valid skip
+values), then asserts that dist holds exactly one MSI, that checksums.txt
+lists it, and that sha256sum --check passes on it. It also runs
+test-windows-packaging.sh.
+(6) Docs: packaging/README.md (the table row, the paragraphs about the msi
+pipe, the msi.ids note), the header comment in packaging/windows/
+imas-sprout.wxs, docs/RELEASING.md (remove GORELEASER_KEY from the status
+banner and say GoReleaser OSS is used), docs/BUILD-STATUS.md (the release flow
+row and the first-release prerequisite).
+Do not change what the MSI contains or does. Compare the table dumps of the
+old build (the msi pipe, or the existing test script's build at the parent
+commit) and the new one: msiinfo export of Property, Component, File,
+Directory, ServiceInstall, ServiceControl, MsiLockPermissionsEx and
+MsiServiceConfigFailureActions, and state that they match or list the
+differences. Do not touch the Linux packages, the container images or Helm
+publishing. Out of scope: go-msi, MSIX, and installing the MSI on Windows;
+say in the PR that nothing has installed this MSI on a Windows host yet and
+that the first real tag is still the real test of the whole pipeline.
+Scope: .goreleaser.yaml, .github/workflows/, packaging/windows/, packaging/
+test/, packaging/README.md, docs/RELEASING.md, docs/BUILD-STATUS.md. Tests:
+go test ./... and packaging/test/test-windows-packaging.sh must pass. PR:
+state exactly what was run and what was not."
 ```
 
 ## 5. Orchestrator prompt — paste into one lead Claude Code session

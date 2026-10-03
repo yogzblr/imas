@@ -319,7 +319,7 @@ key set fetched over the bus. Release/rollout flow: see `docs/RELEASING.md`.
 
 | Item | What shipped | Status |
 |---|---|---|
-| Release flow (`docs/RELEASING.md`), **never run** | One `vMAJOR.MINOR.PATCH` tag releases everything: five GHCR images (keyless cosign), binaries and checksums on GitHub releases, rpm/deb/winget to the Buildkite registries, `farmer` and `nats` charts to `imashelm`. Stale upstream publishers (Docker Hub, Cloudsmith, S3, AUR) removed. `release.yml` is manual-only until the repo secrets `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE` and `GORELEASER_KEY` (goreleaser-pro, a paid licence) exist, and `publish-packages.yml` needs the Buildkite organisation variable and token. No tag exists and neither workflow has a run. | merged — PR #43 (`c3f6f65`), #44 |
+| Release flow (`docs/RELEASING.md`), **never run** | One `vMAJOR.MINOR.PATCH` tag releases everything: five GHCR images (keyless cosign), binaries and checksums on GitHub releases, rpm/deb/winget to the Buildkite registries, `farmer` and `nats` charts to `imashelm`. Stale upstream publishers (Docker Hub, Cloudsmith, S3, AUR) removed. `release.yml` is manual-only until the repo secrets `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE` and `GORELEASER_KEY` (goreleaser-pro, a paid licence; brief REL.1 in plan §4c replaces it with GoReleaser OSS and a `wixl` build hook, after which the key is not needed) exist, and `publish-packages.yml` needs the Buildkite organisation variable and token. No tag exists and neither workflow has a run. | merged — PR #43 (`c3f6f65`), #44 |
 | DB.1 goose migrations | `cmd/migrate` and `internal/migrations` (goose, embedded SQL, no CGO): baseline per schema, row-based run lock (not `GET_LOCK`, which is node-local on Galera), `up` and `check`; GORM `AutoMigrate` removed from `internal/pxc` and saasapi; services check the schema version at startup. `saas` migrations 00001–00005 and `farmer` 00001 are on `main`. | merged — PR #46 (`1e56315`) |
 | DB.2 Migration hook Job | `db-migrate-job.yaml` replaces `db-bootstrap-job.yaml`: one pod, `pre-upgrade`/`pre-rollback`, `post-install` with the bundled PXC; `imas-migrate` image shipped; chart tests extended | merged — PR #48 (`691a1bc`) |
 | FU.0 Signed manifest | URL-free manifest (`imas-fleet-manifest-v1|version|os|arch|file_name|checksum_sha256|min_sprout_version`) signed with the Transit key, verified against a keyring; `selfupdate` and `sprout_action` reworked. FLAG FOR SECURITY REVIEW | merged — PR #45 (`c5ecebe`) |
@@ -490,7 +490,8 @@ HTTP directly.
    pre-release (for example `v0.1.0-rc.1`), run **Release** on that tag, review
    the draft and publish it, and fix whatever the first real run of the
    pipeline turns up (cosign verification, the Buildkite uploads, the chart
-   stamp). Do this before dispatching the UAT brief.
+   stamp). Dispatch brief REL.1 (plan §4c) first so the paid
+   GoReleaser Pro key is not one of the secrets. Do this before dispatching the UAT brief.
 2. **`shell.*` is not sealed** (requirement 14). An interactive PTY is started
    from a plaintext request on `imas.sprouts.<id>.shell.start`; a compromised
    bus can still get a shell on any Unix sprout, which undoes the value of
