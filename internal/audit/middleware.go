@@ -106,23 +106,21 @@ func ShouldLog(action string) bool {
 }
 
 // LogAction is a convenience function that logs an action using the
-// global logger. It extracts identity from the params if possible.
-// If no global logger is set, it silently returns nil.
+// global logger. If no global logger is set, it silently returns nil.
+//
+// It records no user: nothing in params is trusted as an identity. A
+// user's request is audited by the sealed router (internal/natsapi
+// auditCall) with the user it verified; LogAction is for actions no user
+// request carries, such as tenant provisioning from the SaaS API.
 func LogAction(action string, params json.RawMessage, result any, err error) error {
 	l := Global()
 	if l == nil {
 		return nil
 	}
 
-	// Extract identity from params (most NATS handlers pass a token).
-	pubkey, roleName, username := extractIdentity(params)
-
 	entry := Entry{
-		Username: username,
-		Pubkey:   pubkey,
-		RoleName: roleName,
-		Action:   action,
-		Success:  err == nil,
+		Action:  action,
+		Success: err == nil,
 	}
 
 	if err != nil {
@@ -131,7 +129,7 @@ func LogAction(action string, params json.RawMessage, result any, err error) err
 
 	// For write actions, include the params for forensic value.
 	if !IsReadOnly(action) && len(params) > 0 {
-		// Redact the token from params before storing.
+		// Never store a token, should params carry one.
 		entry.Parameters = redactToken(params)
 	}
 
@@ -139,56 +137,6 @@ func LogAction(action string, params json.RawMessage, result any, err error) err
 	entry.Targets = extractTargets(params)
 
 	return l.Log(entry)
-}
-
-// identityFields is used to extract pubkey/role from params.
-type identityFields struct {
-	Token string `json:"token"`
-}
-
-// extractIdentity attempts to resolve the user from the token in params.
-// Returns empty strings if the token is missing or invalid.
-func extractIdentity(params json.RawMessage) (pubkey, roleName, username string) {
-	if len(params) == 0 {
-		return "", "", ""
-	}
-	var fields identityFields
-	if err := json.Unmarshal(params, &fields); err != nil || fields.Token == "" {
-		return "", "", ""
-	}
-
-	// Use auth.WhoAmI to resolve — but we don't import auth here to
-	// avoid circular dependencies. Instead, use the resolver function.
-	resolverMu.RLock()
-	resolve := identityResolver
-	resolverMu.RUnlock()
-
-	if resolve == nil {
-		return "", "", ""
-	}
-
-	pk, role, name, err := resolve(fields.Token)
-	if err != nil {
-		return "", "", ""
-	}
-	return pk, role, name
-}
-
-// IdentityResolverFunc resolves a token to (pubkey, roleName, username, error).
-// Username is the human-readable label configured for the pubkey.
-type IdentityResolverFunc func(token string) (pubkey, roleName, username string, err error)
-
-var (
-	resolverMu       sync.RWMutex
-	identityResolver IdentityResolverFunc
-)
-
-// SetIdentityResolver sets the function used to resolve tokens to identities.
-// Typically set to auth.WhoAmI during farmer startup.
-func SetIdentityResolver(fn IdentityResolverFunc) {
-	resolverMu.Lock()
-	defer resolverMu.Unlock()
-	identityResolver = fn
 }
 
 // targetFields holds common fields used to extract sprout targets from params.

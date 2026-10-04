@@ -1,8 +1,8 @@
 // Recipe browsing: the platform recipe tree's dot-notation list and get,
 // over sealed imas.api.recipes.list and imas.api.recipes.get (J.3).
 //
-// These went over farmer's HTTPS API (GET /v1/recipes) with the CLI's
-// bearer token in the Authorization header. Bearer tokens are gone: any
+// These used to go over farmer's HTTPS API (GET /v1/recipes, removed in
+// CL.4) with the CLI's bearer token in the Authorization header. Bearer tokens are gone: any
 // credential built from the CLI's NKey signature is one a compromised bus
 // can mint from a CONNECT nonce (docs/design/
 // imas-payload-encryption-design.md, Decision A). So recipe browsing is a
@@ -15,14 +15,14 @@ import (
 	"fmt"
 )
 
-// RecipeInfo mirrors handlers.RecipeInfo for CLI/web UI unmarshaling.
+// RecipeInfo mirrors natsapi.RecipeInfo for CLI/web UI unmarshaling.
 type RecipeInfo struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
 	Size int64  `json:"size"`
 }
 
-// RecipeContent mirrors handlers.RecipeContent for CLI/web UI unmarshaling.
+// RecipeContent mirrors natsapi.RecipeContent for CLI/web UI unmarshaling.
 type RecipeContent struct {
 	Name    string `json:"name"`
 	Path    string `json:"path"`

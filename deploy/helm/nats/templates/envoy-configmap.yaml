@@ -113,9 +113,7 @@ data:
 
                             # Route 2: authenticated recipe download, farmer's
                             # GET /files/<key> (the trailing slash keeps e.g.
-                            # "/filesystem" out). /v1/recipes is the CLI's
-                            # RBAC-token API and is deliberately not routed:
-                            # it falls through to route 3.
+                            # "/filesystem" out).
                             - match: { prefix: "/files/" }
                               route:
                                 cluster: recipe_service

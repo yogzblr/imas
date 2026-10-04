@@ -36,9 +36,8 @@ func Logger(inner http.Handler, name string) http.Handler {
 // CLI credential any more: the CLI's bearer token, an NKey signature a
 // compromised bus could mint from a CONNECT nonce, is gone (J.3,
 // docs/design/imas-payload-encryption-design.md Decision A), and the CLI
-// browses recipes over sealed imas.api.recipes.* instead. ListRecipes and
-// GetRecipe therefore refuse every request; removing those routes is a
-// follow-up.
+// browses recipes over sealed imas.api.recipes.* instead; the HTTP recipe
+// routes are gone (CL.4).
 func Auth(inner http.Handler, name string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch name {

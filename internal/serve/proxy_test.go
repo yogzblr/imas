@@ -604,3 +604,36 @@ type errorReader struct{}
 func (e *errorReader) Read([]byte) (int, error) {
 	return 0, io.ErrUnexpectedEOF
 }
+
+// POST /api/v1/auth/users hands farmer's sealed auth.users.add the whole
+// body, boxpub included, so a user added from the UI can make sealed
+// requests at once.
+func TestHandleUserAdd_PassesBoxPub(t *testing.T) {
+	cleanup := startTestNATS(t)
+	defer cleanup()
+
+	const boxpub = "q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s="
+	var got map[string]string
+	testFarmer.Handle(t, client.NatsConn, "auth.users.add", func(params json.RawMessage) (any, error) {
+		if err := json.Unmarshal(params, &got); err != nil {
+			return nil, err
+		}
+		return map[string]any{"success": true}, nil
+	})
+
+	mux := NewMux()
+	body := `{"pubkey":"UNKEY_NEW","role":"viewer","username":"carol","boxpub":"` + boxpub + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/users", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	want := map[string]string{"pubkey": "UNKEY_NEW", "role": "viewer", "username": "carol", "boxpub": boxpub}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("auth.users.add params[%q] = %q, want %q (params %v)", k, got[k], v, got)
+		}
+	}
+}

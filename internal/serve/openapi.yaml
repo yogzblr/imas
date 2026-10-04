@@ -804,8 +804,11 @@ paths:
       operationId: addUser
       summary: Add a user
       description: |
-        Register a new user with the given public key and role.
-        Requires admin permissions.
+        Register a new user with the given NKey public key, role and CLI
+        box public key (boxpub), forwarded as-is to farmer's sealed
+        auth.users.add. The box key is registered with the user so they
+        can make sealed requests at once; farmer refuses an add without
+        one. Requires admin permissions.
       tags:
         - auth
       requestBody:
@@ -826,7 +829,7 @@ paths:
                   value:
                     result:
                       success: true
-                      message: user PUBKEY789 added with role viewer
+                      message: user PUBKEY789 added with role viewer and CLI box key BOXKEYFINGERPRINT
         "502":
           $ref: "#/components/responses/NATSError"
 
@@ -1762,13 +1765,23 @@ components:
       required:
         - pubkey
         - role
+        - boxpub
       properties:
         pubkey:
           type: string
-          description: The user's public key
+          description: The user's NKey public key (their user ID)
         role:
           type: string
           description: Role to assign (e.g., admin, operator, viewer)
+        username:
+          type: string
+          description: Optional human-readable label for the user
+        boxpub:
+          type: string
+          contentEncoding: base64
+          description: |
+            The user's CLI box public key: 32 bytes, standard base64, as
+            printed by their `imas auth keygen`. Required.
 
     UserMutateResponse:
       type: object

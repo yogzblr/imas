@@ -1229,6 +1229,22 @@ by an external git sync today.
       the cleanup waits for a later PR ("leave the cleanup for a later
       PR"): the HTTP recipe routes, the audit token resolver, and `boxpub`
       in the web UI's add-user form, which fails until then.
+    - **CL.4, that cleanup, in review, flagged for security review.**
+      Farmer's `GET /v1/recipes` and `GET /v1/recipes/{name...}` and their
+      handlers are removed (both now answer 404; sealed `recipes.list`/
+      `recipes.get` are unchanged), with their stale comments in
+      `internal/api`, `deploy/envoy` and the Helm chart's Envoy config
+      (Envoy never routed them). `internal/audit`'s token resolver
+      (`SetIdentityResolver`, `extractIdentity`) is removed: `LogAction`
+      records no user, and a user's request is audited by the sealed router
+      with the user it verified. `imas serve`'s OpenAPI document gives
+      `POST /api/v1/auth/users` a required `boxpub` (and the optional
+      `username`), and serve forwards the body to `auth.users.add`
+      unchanged. Still open: the web UI's add-user form (the
+      `grlx-web-ui` submodule, outside this repo) must send `boxpub`;
+      until it does, adding a user from the UI fails. `internal/rbac`'s
+      route map keeps unused `ListRecipes`/`GetRecipe` entries (out of
+      CL.4's scope).
 
     **J.4, sealed SaaS API ↔ farmer (Decision B, rollout step 5), in
     review, flagged for security review.** Closes the `internal.*` bullet

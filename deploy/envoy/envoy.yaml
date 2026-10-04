@@ -44,15 +44,6 @@
 #                           and serves only keys under that sprout's own
 #                           sprouts/<tenant_id>/<sprout_id>/ prefix. See
 #                           the recipe_service cluster below.
-#
-#                           Deliberately NOT /v1/recipes: ListRecipes/
-#                           GetRecipe are the imas CLI's and web UI's
-#                           browse endpoints, authenticated with the
-#                           CLI's NKey-signed RBAC token only, which a
-#                           sprout doesn't hold — a gateway JWT there is
-#                           always rejected. Requests for /v1/recipes fall
-#                           through to route 3 and never reach farmer's
-#                           HTTP API.
 #   2b. /v1/sprout/update-manifest
 #                         — jwt_authn-gated, exact path, proxied unmodified
 #                           to farmer's GET /v1/sprout/update-manifest
