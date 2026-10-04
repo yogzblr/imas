@@ -21,6 +21,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/controlplane"
+	"github.com/yogzblr/imas/internal/payloadbox"
 )
 
 func seedTenantAndJob(t *testing.T, gdb *gorm.DB, status TenantStatus, jobType ProvisioningJobType) (Tenant, ProvisioningJob) {
@@ -147,10 +148,16 @@ func TestApplyProvisioningResult_RejectsMismatches(t *testing.T) {
 func TestHandleProvisioningResult_SubjectAndPayloadMustAgree(t *testing.T) {
 	gdb := newTestDB(t)
 	tenant, job := seedTenantAndJob(t, gdb, TenantStatusPending, ProvisioningJobProvision)
-	payload, _ := json.Marshal(controlplane.TenantResult{JobID: "pj_someoneelse", TenantID: tenant.ID, Status: controlplane.StatusActive})
-
-	handleProvisioningResult(ProvisioningJobProvision, controlplane.SubjectTenantProvisionedPrefix, controlplane.ProvisionedSubject(job.ID), payload)
-	handleProvisioningResult(ProvisioningJobProvision, controlplane.SubjectTenantProvisionedPrefix, controlplane.ProvisionedSubject(job.ID), []byte("{bad"))
+	// Genuinely sealed by farmer, but for another job, delivered on this
+	// job's subject.
+	moved := testKeys.sealedResultMsg(ProvisioningJobProvision, controlplane.TenantResult{JobID: "pj_someoneelse", TenantID: tenant.ID, Status: controlplane.StatusActive})
+	moved.Subject = controlplane.ProvisionedSubject(job.ID)
+	handleProvisioningResult(ProvisioningJobProvision, controlplane.SubjectTenantProvisionedPrefix, moved)
+	// Claims to be sealed, and isn't.
+	garbled := nats.NewMsg(controlplane.ProvisionedSubject(job.ID))
+	garbled.Header.Set(payloadbox.Header, payloadbox.HeaderBox1)
+	garbled.Data = []byte("{bad")
+	handleProvisioningResult(ProvisioningJobProvision, controlplane.SubjectTenantProvisionedPrefix, garbled)
 
 	gotTenant, gotJob := reload(t, gdb, tenant.ID, job.ID)
 	if gotTenant.Status != TenantStatusPending || gotJob.Status != ProvisioningJobPending {
@@ -206,7 +213,7 @@ func TestDispatchPublishesAndCountsAttempt(t *testing.T) {
 		t.Fatalf("expected a deprovision request: %v", err)
 	}
 	var req controlplane.TenantDeprovisionRequest
-	if err := json.Unmarshal(msg.Data, &req); err != nil || req.JobID != job.ID || req.TenantID != tenant.ID {
+	if _, err := farmerOpenRequest(msg, &req); err != nil || req.JobID != job.ID || req.TenantID != tenant.ID {
 		t.Fatalf("request = %+v (err %v)", req, err)
 	}
 	_, got := reload(t, gdb, tenant.ID, job.ID)

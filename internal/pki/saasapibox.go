@@ -1,15 +1,17 @@
 package pki
 
 // The SaaS API's end of sealed SaaS API <-> farmer traffic
-// (docs/design/imas-payload-encryption-design.md, Decision B, J.1): its
-// own box private key and the platform public key(s) it pins, both handed
-// to it out of band (platformbox.go's file comment), never over the bus.
-// internal/saasapi already imports this package; it isn't wired into
-// saasapi's dispatch yet (rollout step 5). FLAG FOR SECURITY REVIEW.
+// (docs/design/imas-payload-encryption-design.md, Decision B, J.1 and
+// J.4): its own box private key and the platform public key(s) it pins,
+// both handed to it out of band (platformbox.go's file comment), never
+// over the bus. internal/saasapi seals every internal.* request, and opens
+// every reply and result, through it (J.4, rollout step 5): sealed only,
+// with no plaintext fallback in either direction. FLAG FOR SECURITY REVIEW.
 
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/yogzblr/imas/internal/payloadbox"
 )
@@ -42,13 +44,19 @@ func NewSaaSAPIBox(priv *[32]byte, platformPubs ...string) (*SaaSAPIBox, error) 
 	if err != nil {
 		return nil, err
 	}
+	ownKey, err := decodeBoxKeyHalf(own)
+	if err != nil {
+		return nil, err
+	}
 	b := &SaaSAPIBox{priv: priv, guard: payloadbox.NewReplayGuard()}
 	for _, p := range platformPubs {
-		k, err := decodePinnedBoxPub(p)
+		k, err := decodePinnedBoxPub(strings.TrimSpace(p))
 		if err != nil {
 			return nil, fmt.Errorf("pki: pinned platform public key: %w", err)
 		}
-		if p == own {
+		// Compared as keys, not strings: the same key written another way
+		// is still the SaaS API's own.
+		if *k == *ownKey {
 			return nil, errors.New("pki: the pinned platform key is the SaaS API's own key")
 		}
 		b.platformPubs = append(b.platformPubs, k)
@@ -114,4 +122,42 @@ func (b *SaaSAPIBox) OpenResult(purpose, method, subject string, data []byte) (*
 		return nil, err
 	}
 	return body, nil
+}
+
+// SealSaaSAPIRequest seals params as the SaaS API's request on subject
+// (internal.tenant.provision, internal.tenant.deprovision or
+// internal.sprout.action), bound to that subject's purpose and method
+// (SaaSAPIRequestWire), and returns the envelope and its message ID, which
+// farmer's reply must name. Every call is a new message: a fresh random
+// ID and the current time, so a re-send (the outbox sweeper's) is never a
+// replay of an earlier one.
+func (b *SaaSAPIBox) SealSaaSAPIRequest(subject string, params any) (data []byte, msgID string, err error) {
+	w, ok := SaaSAPIRequestWire(subject)
+	if !ok {
+		return nil, "", fmt.Errorf("pki: %q is not a SaaS API request subject", subject)
+	}
+	return b.SealRequest(w.Purpose, w.Method, w.Subject, params)
+}
+
+// OpenSproutActionReply opens farmer's sealed reply to the
+// internal.sprout.action request whose ID is requestID
+// (SproutActionReplyWire). Any failure, a reply to another request
+// included, is payloadbox.ErrOpen.
+func (b *SaaSAPIBox) OpenSproutActionReply(requestID string, data []byte) (*payloadbox.ReplyBody, error) {
+	w := SproutActionReplyWire()
+	return b.OpenReply(w.Purpose, w.Method, w.Subject, requestID, data)
+}
+
+// OpenTenantResult opens farmer's sealed provisioning result for jobID,
+// as it arrived on subject: it must be jobID's result subject
+// (TenantResultWire), and the result must be sealed to that subject, so a
+// result for one job can't be moved onto another's. It is accepted once,
+// within ±payloadbox.DefaultMaxSkew of this clock (payloadbox.ErrStale,
+// payloadbox.ErrReplayed). Every other failure is payloadbox.ErrOpen.
+func (b *SaaSAPIBox) OpenTenantResult(deprovision bool, jobID, subject string, data []byte) (*payloadbox.CallBody, error) {
+	w, err := TenantResultWire(deprovision, jobID)
+	if err != nil || w.Subject != subject {
+		return nil, payloadbox.ErrOpen
+	}
+	return b.OpenResult(w.Purpose, w.Method, w.Subject, data)
 }

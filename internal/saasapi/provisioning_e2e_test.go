@@ -30,6 +30,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -43,16 +44,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/glebarez/sqlite"
 	nats_server "github.com/nats-io/nats-server/v2/server"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
+	"github.com/valkey-io/valkey-go"
 	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/controlplane"
 	"github.com/yogzblr/imas/internal/natsapi"
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 )
 
 // e2eEnv is one fully wired SaaS API + bus + farmer handler stack.
@@ -160,6 +165,7 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 	}
 	t.Setenv("SAASAPI_NATS_NKEY_SEED_FILE", seedFile)
 	t.Setenv("SAASAPI_NATS_USER_JWT", userJWT)
+	setupE2EControlPlaneKeys(t)
 	cfg, err := LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
@@ -175,6 +181,63 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 	SetBus(nc)
 	t.Cleanup(func() { SetBus(nil) })
 	return env
+}
+
+// setupE2EControlPlaneKeys is J.4's key material, made the production
+// way: farmer's control-plane keygen Job writes the platform key and the
+// SaaS API box key into OpenBao (here a mock); farmer reads the platform
+// key and the SaaS API's public key from there; the SaaS API gets its
+// private key as a file and the platform public key as a pin
+// (SAASAPI_BOX_PRIV_FILE, SAASAPI_PLATFORM_BOX_PUB), as its External
+// Secret would deliver them. Farmer's cluster-wide claims go to a Valkey
+// stand-in.
+func setupE2EControlPlaneKeys(t *testing.T) {
+	t.Helper()
+	bao := tenantboxtest.Start(t)
+	pki.InvalidatePlatformBoxKeys()
+	t.Cleanup(pki.InvalidatePlatformBoxKeys)
+	t.Setenv(pki.EnvCPBoxOpenBaoAddr, bao.URL)
+	t.Setenv(pki.EnvCPBoxOpenBaoAuthMethod, "token")
+	t.Setenv(pki.EnvCPBoxOpenBaoToken, tenantboxtest.Token)
+	t.Setenv(pki.EnvCPBoxOpenBaoKVPath, tenantboxtest.BasePath)
+	if _, err := pki.EnsureControlPlaneBoxKeys(t.Context()); err != nil {
+		t.Fatalf("control-plane keygen: %v", err)
+	}
+	saas := bao.Versions(tenantboxtest.BasePath + "/saasapi-box")[0].Data
+	pubs := bao.Versions(tenantboxtest.BasePath + "/controlplane-pub")[0].Data
+	privFile := filepath.Join(t.TempDir(), "saasapi-box.key")
+	if err := os.WriteFile(privFile, []byte(saas["priv"]), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SAASAPI_BOX_PRIV_FILE", privFile)
+	t.Setenv("SAASAPI_PLATFORM_BOX_PUB", pubs["platform_pub"])
+	observer, err := pki.LoadSaaSAPIBox(privFile, pubs["platform_pub"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := func(path, field string) *[32]byte {
+		raw, err := base64.StdEncoding.DecodeString(bao.Versions(tenantboxtest.BasePath + path)[0].Data[field])
+		if err != nil || len(raw) != 32 {
+			t.Fatalf("%s %s: %v", path, field, err)
+		}
+		var k [32]byte
+		copy(k[:], raw)
+		return &k
+	}
+	e2eKeys.farmer = []payloadbox.KeyPair{{PeerPub: key("/controlplane-pub", "saasapi_box_pub"), Priv: key("/platform", "priv")}}
+	e2eKeys.observer = observer
+	// ConnectBus installs the box it loads; put the package's test box
+	// back afterwards.
+	t.Cleanup(func() { SetControlPlaneBox(testKeys.saasBox()) })
+
+	mr := miniredis.RunT(t)
+	vc, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{mr.Addr()}, DisableCache: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(vc.Close)
+	pki.SetReplayCacheClient(vc)
+	t.Cleanup(func() { pki.SetReplayCacheClient(nil) })
 }
 
 // observe subscribes farmer's SYS connection (not a queue member, so it
@@ -255,10 +318,55 @@ func nextJSON[T any](t *testing.T, sub *nats.Subscription, what string) (T, stri
 	if err != nil {
 		t.Fatalf("expected %s: %v", what, err)
 	}
-	if err := json.Unmarshal(msg.Data, &v); err != nil {
+	// On the bus it is ciphertext (J.4): opened here with the keys the
+	// keygen Job wrote, the way its receiver opens it.
+	if msg.Header.Get(payloadbox.Header) != payloadbox.HeaderBox1 || !isEnvelope(msg.Data) {
+		t.Fatalf("%s is not sealed on the bus: %v %s", what, msg.Header, msg.Data)
+	}
+	if err := json.Unmarshal(e2eOpen(t, msg), &v); err != nil {
 		t.Fatalf("decoding %s: %v", what, err)
 	}
 	return v, msg.Subject
+}
+
+// isEnvelope reports whether data is a payloadbox envelope.
+func isEnvelope(data []byte) bool {
+	var env payloadbox.Envelope
+	return json.Unmarshal(data, &env) == nil && env.V == payloadbox.Version && len(env.Copies) > 0
+}
+
+// e2eKeys is what setupE2EControlPlaneKeys made, for the test to open
+// what it observes on the bus.
+var e2eKeys struct {
+	farmer   []payloadbox.KeyPair // (saasapi box pub, platform priv)
+	observer *pki.SaaSAPIBox      // the SaaS API's keys, its own replay guard
+}
+
+// e2eOpen opens msg as its receiver would: a request as farmer, a result
+// as the SaaS API.
+func e2eOpen(t *testing.T, msg *nats.Msg) json.RawMessage {
+	t.Helper()
+	if w, ok := pki.SaaSAPIRequestWire(msg.Subject); ok {
+		_, body, err := payloadbox.OpenCall(msg.Data, e2eKeys.farmer, payloadbox.CallExpect{
+			Purpose: w.Purpose, TenantID: payloadbox.PlatformTenantID, Principal: payloadbox.PrincipalSaaSAPI,
+			Method: w.Method, Subject: w.Subject,
+		})
+		if err != nil {
+			t.Fatalf("opening the request on %s as farmer: %v", msg.Subject, err)
+		}
+		return body.Params
+	}
+	deprovision := strings.HasPrefix(msg.Subject, controlplane.SubjectTenantDeprovisionedPrefix)
+	prefix := controlplane.SubjectTenantProvisionedPrefix
+	if deprovision {
+		prefix = controlplane.SubjectTenantDeprovisionedPrefix
+	}
+	jobID, _ := controlplane.JobIDFromSubject(msg.Subject, prefix)
+	body, err := e2eKeys.observer.OpenTenantResult(deprovision, jobID, msg.Subject, msg.Data)
+	if err != nil {
+		t.Fatalf("opening the result on %s as the SaaS API: %v", msg.Subject, err)
+	}
+	return body.Params
 }
 
 // dialTenantAccountAsFarmer connects with farmer's User JWT under
@@ -383,8 +491,11 @@ func TestProvisioningBridge_EndToEnd_FarmerFailureMovesTenantToFailed(t *testing
 		t.Fatalf("expected an internal.tenant.provisioned result: %v", err)
 	}
 	assertNoInternalDetail(t, "the published result", string(msg.Data))
+	opened := e2eOpen(t, msg)
+	// Not even inside the box: only the fixed code crosses the boundary.
+	assertNoInternalDetail(t, "the opened result", string(opened))
 	var res controlplane.TenantResult
-	if err := json.Unmarshal(msg.Data, &res); err != nil {
+	if err := json.Unmarshal(opened, &res); err != nil {
 		t.Fatalf("decoding result: %v", err)
 	}
 	if msg.Subject != controlplane.ProvisionedSubject(job.ID) || res.Status != controlplane.StatusFailed || res.ErrorCode != controlplane.ErrorInternal {

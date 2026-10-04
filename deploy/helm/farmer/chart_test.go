@@ -712,6 +712,8 @@ func TestBootstrapRoles(t *testing.T) {
 		"imas-farmer-fleet-verify":    {"t-farmer", "imas-core", "imas-fleet-verify", "20m", "1h"},
 		"imas-farmer-tenantbox":       {"t-farmer", "imas-core", "imas-farmer-tenantbox", "20m", "1h"},
 		"imas-saasapi-cred-publisher": {"imas-saasapi-cred-publisher", "imas-core", "imas-saasapi-cred-publisher", "5m", "5m"},
+		// On by default since J.4.
+		"imas-controlplane-box-keygen": {"imas-controlplane-box-keygen", "imas-core", "imas-controlplane-box-keygen", "5m", "5m"},
 	}
 	if len(roles) != len(want) {
 		t.Errorf("roles %v, want %v", roles, want)
@@ -1239,7 +1241,10 @@ func TestSharedDependencies(t *testing.T) {
 		check(t, docs, "imas-core-db", "valkey-0.valkey.valkey.svc.cluster.local:6379,valkey-1.valkey.valkey.svc.cluster.local:6379")
 		// No generated Secret and no eval OpenBao bootstrap; the schemas
 		// are still migrated (TestDBMigrateJobs).
-		jobs := map[any]bool{"t-farmer-saasapi-credential-publish": true, "t-farmer-db-migrate": true, "t-farmer-db-migrate-check": true}
+		// The control-plane keygen Job runs against the external OpenBao
+		// too (on by default since J.4); its role and policy are ops'.
+		jobs := map[any]bool{"t-farmer-saasapi-credential-publish": true, "t-farmer-db-migrate": true, "t-farmer-db-migrate-check": true,
+			"t-farmer-controlplane-box-keys": true}
 		for _, d := range docs {
 			if d["kind"] == "Secret" || d["kind"] == "Job" && !jobs[get(d, "metadata", "name")] {
 				t.Errorf("external mode rendered %s %v", d["kind"], get(d, "metadata", "name"))
@@ -2601,20 +2606,26 @@ func policyBlocks(hcl string) map[string]string {
 	return out
 }
 
-// The control-plane keygen Job (J.1) is off by default: no Job, no
-// ServiceAccount, no policy, no role.
-func TestControlPlaneBoxKeysOffByDefault(t *testing.T) {
+// The control-plane keygen Job (J.1) is on by default since J.4, which
+// gives its keys their consumers; turned off, it renders no Job, no
+// ServiceAccount, no policy and no role.
+func TestControlPlaneBoxKeysOnByDefault(t *testing.T) {
 	docs := mustRender(t)
-	if has(docs, "Job", "t-farmer-controlplane-box-keys") || has(docs, "ServiceAccount", "imas-controlplane-box-keygen") {
+	if !has(docs, "Job", "t-farmer-controlplane-box-keys") || !has(docs, "ServiceAccount", "imas-controlplane-box-keygen") {
+		t.Error("keygen Job not rendered by default")
+	}
+	off := mustRender(t, "--set", "controlPlaneBoxKeys.enabled=false")
+	if has(off, "Job", "t-farmer-controlplane-box-keys") || has(off, "ServiceAccount", "imas-controlplane-box-keygen") {
 		t.Error("keygen Job rendered while controlPlaneBoxKeys.enabled is false")
 	}
-	cm := find(t, docs, "ConfigMap", "t-farmer-openbao-policies")
-	if _, ok := get(cm, "data").(obj)["imas-controlplane-box-keygen.hcl"]; ok {
+	offCM := find(t, off, "ConfigMap", "t-farmer-openbao-policies")
+	if _, ok := get(offCM, "data").(obj)["imas-controlplane-box-keygen.hcl"]; ok {
 		t.Error("keygen policy rendered while disabled")
 	}
-	if _, ok := bootstrapRoles(t, docs)["imas-controlplane-box-keygen"]; ok {
+	if _, ok := bootstrapRoles(t, off)["imas-controlplane-box-keygen"]; ok {
 		t.Error("keygen role created while disabled")
 	}
+	cm := find(t, docs, "ConfigMap", "t-farmer-openbao-policies")
 	// farmer reads, never writes, the platform key and the public keys,
 	// and never the SaaS API's private key.
 	blocks := policyBlocks(get(cm, "data", "imas-farmer-tenantbox.hcl").(string))

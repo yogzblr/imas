@@ -83,32 +83,6 @@ func stubSproutActionDispatch(t *testing.T, verify func(string, string) error) *
 	return rec
 }
 
-// dialSaaSAPI connects the way the SaaS API must: with its scoped inbox
-// prefix, so request replies land under _INBOX.saasapi.
-func dialSaaSAPI(t *testing.T, farmer *nats.Conn) *nats.Conn {
-	t.Helper()
-	nc, err := nats.Connect(farmer.ConnectedUrl(), nats.CustomInboxPrefix(controlplane.SaaSAPIInboxPrefix))
-	if err != nil {
-		t.Fatalf("connect SaaS API client: %v", err)
-	}
-	t.Cleanup(nc.Close)
-	return nc
-}
-
-func requestSproutAction(t *testing.T, nc *nats.Conn, req controlplane.SproutActionRequest) controlplane.SproutActionReply {
-	t.Helper()
-	data, _ := json.Marshal(req)
-	msg, err := nc.Request(controlplane.SubjectSproutAction, data, 5*time.Second)
-	if err != nil {
-		t.Fatalf("request %s: %v", controlplane.SubjectSproutAction, err)
-	}
-	var reply controlplane.SproutActionReply
-	if err := json.Unmarshal(msg.Data, &reply); err != nil {
-		t.Fatalf("decoding reply %s: %v", msg.Data, err)
-	}
-	return reply
-}
-
 func cmdRunRequest(tenantID, sproutID string) controlplane.SproutActionRequest {
 	return controlplane.SproutActionRequest{
 		TenantID: tenantID,
@@ -140,7 +114,8 @@ func TestSproutAction_RegisteredWithTenantProvisioning(t *testing.T) {
 // TestSproutAction_RefusesUnscopedReplySubjects: farmer's SYS user has no
 // permission restrictions and NATS doesn't check the reply subject a
 // publisher sets, so a request whose reply subject isn't a SaaS API inbox
-// must be neither executed nor answered.
+// must be neither executed nor answered. The requests are genuinely sealed
+// by the SaaS API: the reply subject check comes first all the same.
 func TestSproutAction_RefusesUnscopedReplySubjects(t *testing.T) {
 	nc, cleanup := startEmbeddedNATS(t)
 	defer cleanup()
@@ -149,15 +124,16 @@ func TestSproutAction_RefusesUnscopedReplySubjects(t *testing.T) {
 	if err := RegisterSproutAction(nc); err != nil {
 		t.Fatalf("RegisterSproutAction: %v", err)
 	}
+	saas := dialSaaSAPI(t, nc)
 
-	data, _ := json.Marshal(cmdRunRequest("t_1", "web-01"))
 	watch, _ := nc.SubscribeSync(">")
 	if err := nc.Flush(); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
 
 	// No reply subject at all (fire-and-forget).
-	if err := nc.Publish(controlplane.SubjectSproutAction, data); err != nil {
+	m, _ := saas.sealedMsg(t, controlplane.SubjectSproutAction, cmdRunRequest("t_1", "web-01"))
+	if err := nc.PublishMsg(m); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 	for _, reply := range []string{
@@ -168,7 +144,9 @@ func TestSproutAction_RefusesUnscopedReplySubjects(t *testing.T) {
 		"$SYS.REQ.SERVER.PING",
 		"imas.sprouts.web-01.cmd.run",
 	} {
-		if err := nc.PublishRequest(controlplane.SubjectSproutAction, reply, data); err != nil {
+		m, _ := saas.sealedMsg(t, controlplane.SubjectSproutAction, cmdRunRequest("t_1", "web-01"))
+		m.Reply = reply
+		if err := nc.PublishMsg(m); err != nil {
 			t.Fatalf("publish with reply %q: %v", reply, err)
 		}
 	}

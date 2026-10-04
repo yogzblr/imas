@@ -108,7 +108,9 @@ Codes used across routes: `invalid_request` (400), `unauthorized` (401),
 required) and returns **202** with `{"tenant_id": "t_…", "status": "pending"}`.
 Provisioning is asynchronous: saasapi writes the tenant and an outbox row in
 one transaction, then publishes `internal.tenant.provision` to farmer over
-the bus. Poll `GET .../status` until `active` or `failed`. The status
+the bus, sealed between saasapi's box key and farmer's platform key (farmer
+refuses anything else, and saasapi applies only farmer's sealed result;
+see `docs/design/imas-payload-encryption-design.md`, "As built: J.4"). Poll `GET .../status` until `active` or `failed`. The status
 response carries `last_error` when the last job failed, and `warning` when it
 succeeded with one.
 
@@ -200,8 +202,11 @@ saasapi has no Valkey configured.
 - Rate-limited per tenant at 1 request/second, burst 5, per pod.
 
 The response is **202** `{"batch_id": "b_…"}`. Items are dispatched to
-farmer's `internal.sprout.action` in the background, and farmer re-checks
-that each sprout belongs to the tenant before running anything. Poll
+farmer's `internal.sprout.action` in the background, each as a sealed
+request (a new one on every send), and farmer re-checks that each sprout
+belongs to the tenant before running anything. Only farmer's sealed reply
+to that request is believed: any other answer fails the item with
+`dispatch_outcome_unknown`. Poll
 `GET .../sprouts/actions/{batch_id}`: the batch is `in_progress` until every
 item reaches `unresolved`, `succeeded`, `failed` or
 `unresponsive_after_update`. Failed items carry a fixed `error` code and
@@ -219,8 +224,9 @@ ran. A queued item that couldn't be sent within
 `SAASAPI_OUTBOX_ACTION_MAX_AGE` (15 minutes) of the POST fails with
 `expired_not_sent` instead of being sent late, by whichever process reaches
 it; it never ran. Nothing downstream would refuse a late command: the
-sealed envelope's ±5 minute window is measured from when farmer seals it,
-at send time, not from the POST.
+sealed envelopes' ±5 minute windows are measured from when saasapi seals
+the request and farmer seals the command, both at send time, not from the
+POST.
 
 An item in `dispatching` (its request went out, or may have, and no reply
 was recorded) is never sent again: nothing on the path deduplicates a
@@ -242,7 +248,7 @@ Every failed item carries one of these codes, with a fixed message:
 | `sprout_unreachable` | no | farmer couldn't reach the sprout |
 | `command_failed` | yes | a `cmd.run` exited non-zero (`exit_code`) |
 | `job_failed`, `job_expired` | yes / maybe | a cook or update job failed, or started too late to be recorded |
-| `dispatch_outcome_unknown` | maybe | sent, but no usable reply: it timed out, or its pod died waiting |
+| `dispatch_outcome_unknown` | maybe | sent, but no usable reply: it timed out, its pod died waiting, or the answer wasn't farmer's sealed reply to that request |
 | `dispatch_not_delivered` | no | still queued after `SAASAPI_OUTBOX_MAX_ATTEMPTS` dispatches, no farmer listening |
 | `expired_not_sent` | no | not sent within `SAASAPI_OUTBOX_ACTION_MAX_AGE` of the POST |
 | `tenant_not_active` | no | the tenant stopped being `active` before the item was sent |
@@ -635,6 +641,8 @@ error, never a silent default.
 | `SAASAPI_KEYCLOAK_JWKS_URL`, `SAASAPI_JWT_ISSUER`, `SAASAPI_JWT_AUDIENCE` | — | Keycloak realm for user JWTs |
 | `SAASAPI_NATS_URL`, `SAASAPI_NATS_CA_FILE` | — | farmerbus TLS URL (`:5406`) and the CA that signed it |
 | `SAASAPI_NATS_NKEY_SEED_FILE`, `SAASAPI_NATS_USER_JWT` | — | saasapi's SYS-Account NATS User; the seed only as a file path |
+| `SAASAPI_BOX_PRIV_FILE` | — | path to saasapi's X25519 box private key (standard base64, `priv` of `<base>/saasapi-box` in OpenBao, written by farmer's control-plane keygen Job); every `internal.*` request is sealed with it. Required: without it saasapi doesn't start |
+| `SAASAPI_PLATFORM_BOX_PUB` | — | the platform public key saasapi pins (`platform_pub` of `<base>/controlplane-pub`); comma-separated for two across a platform key rotation. Required |
 | `SAASAPI_VALKEY_ADDRS` | empty | Valkey farmer writes heartbeats to; also shares the key rate limit across pods |
 | `SAASAPI_ENROLLMENT_KEY_RATE_LIMIT` / `_BURST` | `1` / `5` | per-tenant limit on minting keys |
 | `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` | `false` | registers the dispatch routes, and lets the outbox sweeper resume rollouts; leave it off |

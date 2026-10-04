@@ -51,6 +51,20 @@ import (
 //   - SAASAPI_NATS_CA_FILE: path to the root CA PEM that signed the bus's
 //     server certificate — the same config.RootCA farmer's own
 //     connections trust.
+//   - SAASAPI_BOX_PRIV_FILE: path to this service's X25519 box private
+//     key (standard base64): the "priv" field of <base>/saasapi-box in
+//     OpenBao, written by farmer's control-plane keygen Job and delivered
+//     as a mounted Secret only these pods mount (J.1). Every internal.*
+//     request is sealed with it, and every reply and result opened with
+//     it (sealedbus.go, J.4). Like the NATS seed, only as a path.
+//   - SAASAPI_PLATFORM_BOX_PUB: the platform public key this service
+//     pins (standard base64): "platform_pub" of <base>/controlplane-pub.
+//     Comma-separated to pin two keys across a platform key rotation: a
+//     request then carries one sealed copy per pinned key, and a reply or
+//     result opens under either. Never fetched over the bus.
+//
+// ConnectBus refuses to connect without both: there is no plaintext
+// fallback (owner decision, 2026-10-04).
 //
 // The per-tenant rate limit on POST .../enrollment-keys (see router.go's
 // enrollmentKeyIssuanceRate for why the defaults are what they are) is
@@ -201,6 +215,17 @@ type Config struct {
 	// NATSUserJWT is this service's signed NATS User JWT.
 	NATSUserJWT string
 
+	// BoxPrivFile is the path to a file holding this service's X25519
+	// box private key (standard base64), the SaaS API box key every
+	// internal.* request is sealed with and every reply and result is
+	// opened with (sealedbus.go, J.4). ConnectBus reads it; the key itself
+	// is never held in Config.
+	BoxPrivFile string
+	// PlatformBoxPubs are the platform public keys (standard base64)
+	// this service pins. More than one only across a platform key
+	// rotation.
+	PlatformBoxPubs []string
+
 	// EnrollmentKeyRateLimit is the sustained per-tenant rate, in
 	// requests per second, for POST .../enrollment-keys.
 	EnrollmentKeyRateLimit float64
@@ -265,6 +290,9 @@ func LoadConfig() (Config, error) {
 		NATSCAFile:       os.Getenv("SAASAPI_NATS_CA_FILE"),
 		NATSNKeySeedFile: os.Getenv("SAASAPI_NATS_NKEY_SEED_FILE"),
 		NATSUserJWT:      os.Getenv("SAASAPI_NATS_USER_JWT"),
+
+		BoxPrivFile:     os.Getenv("SAASAPI_BOX_PRIV_FILE"),
+		PlatformBoxPubs: splitAddrs(os.Getenv("SAASAPI_PLATFORM_BOX_PUB")),
 
 		EnrollmentKeyRateLimit: float64(enrollmentKeyIssuanceRate),
 		EnrollmentKeyRateBurst: enrollmentKeyIssuanceBurst,
