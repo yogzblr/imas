@@ -678,8 +678,40 @@ explanation rather than deploying something that silently can't work.
 {{- if lt (int $s.replicaCount) 1 -}}
 {{- fail "saasapi.replicaCount must be at least 1" -}}
 {{- end -}}
+{{- include "imas-farmer.saasapi.recipes.validate" . -}}
 {{- if $s.operator.enabled -}}
 {{- include "imas-farmer.saasapi.operator.validate" . -}}
+{{- end -}}
+{{- end }}
+
+{{- define "imas-farmer.saasapi.recipes.validate" -}}
+{{- $r := .Values.saasapi.recipes -}}
+{{- if or (not $r.readRole) (not $r.writeRole) (eq (toString $r.readRole) (toString $r.writeRole)) -}}
+{{- fail "saasapi.recipes.readRole and writeRole must both be set and differ: one role for both would make every reader a recipe writer" -}}
+{{- end -}}
+{{- range $k := list "maxCount" "maxTotalBytes" -}}
+{{- $v := get $r $k -}}
+{{- if not (or (kindIs "float64" $v) (kindIs "int64" $v) (kindIs "int" $v)) -}}
+{{- fail (printf "saasapi.recipes.%s must be a positive whole number, got %v" $k $v) -}}
+{{- end -}}
+{{- if or (lt (float64 $v) 1.0) (ne (float64 $v) (float64 (int64 $v))) -}}
+{{- fail (printf "saasapi.recipes.%s must be a positive whole number, got %v" $k $v) -}}
+{{- end -}}
+{{- end -}}
+{{- $b := $r.writeRateLimit.burst -}}
+{{- if or (kindIs "invalid" $b) (lt (float64 $b) 1.0) (ne (float64 $b) (float64 (int $b))) -}}
+{{- fail (printf "saasapi.recipes.writeRateLimit.burst must be a whole number >= 1, got %v" $b) -}}
+{{- end -}}
+{{- if $r.enabled -}}
+{{- if not $r.credentialsSecret -}}
+{{- fail "saasapi.recipes.credentialsSecret is required with saasapi.recipes.enabled: saasapi's OWN object-store access key pair, limited to tenants/*/recipes/* (files/objectstore-policies/)" -}}
+{{- end -}}
+{{- if eq (toString $r.credentialsSecret) (toString .Values.objectStore.credentialsSecret) -}}
+{{- fail "saasapi.recipes.credentialsSecret must not be objectStore.credentialsSecret: farmer's credential can write sprouts/ and the platform recipe prefix, saasapi's must only reach tenants/*/recipes/*" -}}
+{{- end -}}
+{{- if or (not .Values.objectStore.endpoint) (not .Values.objectStore.bucket) -}}
+{{- fail "saasapi.recipes.enabled needs objectStore.endpoint and objectStore.bucket: saasapi writes the bucket farmer cooks from" -}}
+{{- end -}}
 {{- end -}}
 {{- end }}
 

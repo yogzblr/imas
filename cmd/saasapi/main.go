@@ -79,6 +79,15 @@ func main() {
 	log.Infof("saasapi: enrollment-key issuance limited to %g req/s per tenant, burst %d, %s",
 		cfg.EnrollmentKeyRateLimit, cfg.EnrollmentKeyRateBurst, scope)
 
+	// Tenant recipe upload (SAASAPI_RECIPES_*, IMAS_RECIPE_*). Before
+	// NewRouter, which wires the recipe roles and write limiter in effect
+	// at that moment. Recipes configured but unusable (an unreadable
+	// secret key file, a render limit out of range) stop saasapi rather
+	// than leave the routes answering 503.
+	if err := saasapi.ConfigureRecipes(cfg.Recipes, vc); err != nil {
+		log.Fatalf("saasapi: %v", err)
+	}
+
 	// A background context: the JWKS cache's auto-refresh goroutine
 	// (see NewAuthConfig) should live for the whole process, not just
 	// until shutdown starts.

@@ -85,6 +85,53 @@ func Approve(t testing.TB, db *gorm.DB, tenantID string, version *string) {
 	exec(t, db, `INSERT INTO saas.tenant_update_policy (tenant_id, approved_version, auto_update) VALUES (?, ?, 0)`, tenantID, version)
 }
 
+// SetWindow sets tenantID's rollout window on its existing policy row, in
+// UTC (nil writes NULL). Setting only one end writes the corrupt row
+// saasapi's validation never would.
+func SetWindow(t testing.TB, db *gorm.DB, tenantID string, start, end *time.Time) {
+	t.Helper()
+	utc := func(p *time.Time) any {
+		if p == nil {
+			return nil
+		}
+		return p.UTC()
+	}
+	exec(t, db, `UPDATE saas.tenant_update_policy SET rollout_window_start = ?, rollout_window_end = ? WHERE tenant_id = ?`,
+		utc(start), utc(end), tenantID)
+}
+
+// WindowCase is one case of the rollout window rule
+// (fleetcatalog.RolloutWindowClosed) at a fixed now.
+type WindowCase struct {
+	Name       string
+	Start, End *time.Time // both nil: the policy sets no window
+	Closed     bool       // a self_update now is refused rollout_window_closed
+	// Corrupt: exactly one end is set. Both services refuse it as a
+	// failed policy read (ErrCorruptRolloutWindow), never as no window.
+	Corrupt bool
+}
+
+// WindowCases is the one table farmer's check (internal/natsapi) and
+// saasapi's (policyRefusal) are both tested against, so the two rules
+// can't drift. now should be on a whole millisecond:
+// saas.tenant_update_policy stores datetime(3).
+func WindowCases(now time.Time) []WindowCase {
+	at := func(d time.Duration) *time.Time { t := now.Add(d); return &t }
+	return []WindowCase{
+		{Name: "no window"},
+		{Name: "inside", Start: at(-time.Hour), End: at(time.Hour)},
+		{Name: "before start", Start: at(time.Minute), End: at(time.Hour), Closed: true},
+		{Name: "a millisecond before start", Start: at(time.Millisecond), End: at(time.Hour), Closed: true},
+		{Name: "exactly at start", Start: at(0), End: at(time.Hour)},
+		{Name: "a millisecond before end", Start: at(-time.Hour), End: at(time.Millisecond)},
+		{Name: "exactly at end", Start: at(-time.Hour), End: at(0), Closed: true},
+		{Name: "after end", Start: at(-2 * time.Hour), End: at(-time.Hour), Closed: true},
+		// now would be inside either half-window: corrupt all the same.
+		{Name: "only start set", Start: at(-time.Hour), Corrupt: true},
+		{Name: "only end set", End: at(time.Hour), Corrupt: true},
+	}
+}
+
 // Revoke marks every row of version revoked, as saasapi's revoke call does.
 func Revoke(t testing.TB, db *gorm.DB, version string) {
 	t.Helper()

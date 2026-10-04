@@ -64,7 +64,7 @@ released.
 | 17 | Probe capability | **Green** | |
 | 18 | Installers: yum, apt, zypper, MSI | **Amber** | Cut a first release so the packages are published and installed once. |
 | 19 | Ansible with one-time key | **Green** | |
-| 20 | Fleet updates from the sprout's repo | **Amber** | SEC.5 fixes M1, L1, L2, L8, M5 (ready for review). Next: fleetcatalog's `RolloutWindow` (farmer refuses every update until it exists), H2, the human review, the UAT gate's self-update cycle, then both switches on. |
+| 20 | Fleet updates from the sprout's repo | **Amber** | SEC.5 fixes M1, L1, L2, L8, M5 (ready for review). SEC.5b: farmer reads each tenant's rollout window, so a `self_update` can pass farmer's checks (ready for review). Next: H2, the human review, the UAT gate's self-update cycle, then both switches on. |
 | 21 | Licensing | **Amber** | Decide on BSD-2-Clause, BSD-3-Clause, ISC and 0BSD and record them under item 21 (every such module and the binaries that link it are in `DEPENDENCIES.md`; questions in PR #73). |
 
 ### Build plan (`docs/claude-code-parallel-build-plan.md`)
@@ -86,7 +86,7 @@ released.
 
 | # | Item | RAG | Next step |
 |---|---|---|---|
-| 1 | Terraform UAT gate, and the first release it needs | **Red** | Tag `v0.1.0-rc.1`, run Release on it, publish the Buildkite packages by hand with `publish-packages.yml` (pre-releases are skipped), then choose the provider and dispatch the gate. |
+| 1 | Terraform UAT gate, and the first release it needs | **Red** | Tag `v0.1.0-rc.1`, run Release on it, publish the Buildkite packages by hand with `publish-packages.yml` (pre-releases are skipped), then choose the provider and dispatch the gate. Recipe upload (REC.1) is built and awaiting review; the UAT needs saasapi's own object-store credential and the recipe roles set up. |
 | 2 | `shell.*` unsealed | **Red** | Design written, awaiting security review ("Sealing `shell.*`" in `imas-payload-encryption-design.md`). Then decide its open questions and dispatch the implementation brief. |
 | 3 | Scale and latency (jitter, clustered bus, load tests) | **Red** | Jitter (SCALE.1), clustered bus (SCALE.2) and the load harness (SCALE.3) are built. Run the harness at 10k and 100k on a real cluster (`docs/loadtest.md`); no load result exists yet. |
 | 4 | Security review of the flagged work | **Amber** | Read-only code review done (`docs/security-review-2026-10.md`: 4 High, 8 Medium, 25 Low). SEC.5 fixes M1, L1, L2, L8 and M5 (ready for review); L4 decided (revocation stays on farmer). Left before dispatch: H2, fleetcatalog's `RolloutWindow`, and the human review, recorded here. |
@@ -95,7 +95,7 @@ released.
 | 7 | SaaS API section 1.7 (API keys, teams, webhooks, billing) | **Red** | Never designed; needs a design pass. |
 | 8 | Docs wording (requirement 15, README embedded bus) | **Amber** | Small docs change. |
 | 9 | Nice-to-haves (Keycloak harness, rotation scheduler, CERT-In/DPDP review) | **Amber** | Unowned. |
-| 10 | Leftovers from PR #62 to #67 (release pipeline, stale diagram, OpenBao client follow-ups) | **Amber** | Fold into one clean-up brief after the first release shows what the pipeline really needs. Add fleetreleaser's check against the tag's signed `checksums.txt` there if wanted (SEC.5 report). |
+| 10 | Leftovers from PR #62 to #67 (release pipeline, stale diagram, OpenBao client follow-ups) | **Amber** | Fold into one clean-up brief after the first release shows what the pipeline really needs. Add fleetreleaser's check against the tag's signed `checksums.txt` there if wanted (SEC.5 report). REC.1 follow-ups are listed under item 10: audit table, deprovision clean-up, and the role on `cook`. |
 | 11 | Control plane forgeable by a compromised bus (CLI tokens, sprout refresh, `internal.*`) | **Red** | Design written, awaiting security review ("Sealing the control plane" in `imas-payload-encryption-design.md`). Ship the token-lifetime stopgap now. |
 
 ## Requirements traceability
@@ -650,6 +650,16 @@ by an external git sync today.
    now set, so the first tag is unblocked. A pre-release is skipped by
    `publish-packages.yml`, so publish it deliberately with `workflow_dispatch`. Nothing has installed the MSI on a Windows host yet (oldest
    supported: Windows Server 2016). Do this before dispatching the UAT brief.
+   **Recipe upload (REC.1), the gate's other prerequisite: built, ready for
+   review (FLAG FOR SECURITY REVIEW).** `GET/PUT/DELETE
+   /v1/tenants/{tenant_id}/recipes[/{name}]` (design doc §1.6,
+   `docs/api/saasapi.md` "Recipes", `docs/INSTALL.md` "Upload a recipe").
+   `cmd/saasapi` sets it up at startup (`saasapi.ConfigureRecipes`, added
+   to `main.go` with the owner's approval) and refuses to start on unusable
+   recipe settings. Before the UAT can upload a recipe, the deployment
+   needs saasapi's own object-store credential (`saasapi.recipes.*`, policy
+   in `deploy/helm/farmer/files/objectstore-policies/`) and the Keycloak
+   roles `imas-recipes-read`/`imas-recipes-write`.
 2. **`shell.*` is not sealed** (requirement 14). An interactive PTY is started
    from a plaintext request on `imas.sprouts.<id>.shell.start`; a compromised
    bus can still get a shell on any Unix sprout, which undoes the value of
@@ -758,11 +768,9 @@ by an external git sync today.
      rc's MSI and the final's both say 2.5.0).
    - **L1:** farmer's own switch, `IMAS_SELF_UPDATE_ENABLED` (default
      false, Helm `farmer.selfUpdate.enabled`), checked before anything
-     else. Farmer also enforces the tenant's rollout window, but it reads
-     the window through a `RolloutWindow` method that
-     `internal/fleetcatalog` doesn't have yet (outside SEC.5's scope).
-     Until that is added, farmer fails closed: every `self_update` is
-     refused with `internal_error`.
+     else. Farmer also enforces the tenant's rollout window (read since
+     SEC.5b, below; until then farmer refused every `self_update` with
+     `internal_error`).
    - **L2:** a repository error carries the redirect URL reduced to scheme,
      host and path.
    - **L8:** a live rollout checks the tenant is active before every wave
@@ -777,8 +785,27 @@ by an external git sync today.
      pool.
    - **L4, decided by the owner on 2026-10-04:** revocation stays enforced
      on farmer, not on the sprout. No sprout-side deny list.
+   **SEC.5b (2026-10-04, ready for review, not merged; FLAG FOR SECURITY
+   REVIEW):** farmer reads the tenant's rollout window.
+   `fleetcatalog.Catalog` has `RolloutWindow`: one query on
+   `saas.tenant_update_policy` scoped by `tenant_id`, times in UTC. Both
+   columns NULL is no window. A row with only one set is corrupt, never
+   read as no window. The rule is one function,
+   `fleetcatalog.RolloutWindowClosed`: refused before start or at or after
+   end, and a corrupt row is an error. farmer and saasapi's
+   `policyRefusal` both call it, and both are tested against one table of
+   cases, corrupt rows included. Farmer answers a corrupt row, a failed
+   read or a policy row deleted after the approval check with
+   `internal_error`. saasapi treats a corrupt row as a failed policy read:
+   POST answers 500 `internal_error` and creates no batch, and a running or
+   resumed rollout halts its unsent items with `internal_error` (owner's
+   decision, 2026-10-04). farmer's existing `SELECT ON saas.*` grant (§4.1)
+   covers the two columns; no grant changed. With
+   `IMAS_SELF_UPDATE_ENABLED` on, an approved, signed version now
+   dispatches inside the window and is refused with
+   `rollout_window_closed` outside it.
    **Still open:** H2 (the review's other must-fix before dispatch);
-   `fleetcatalog.RolloutWindow`; moving the new reply codes
+   moving the new reply codes
    (`self_update_disabled`, `rollout_window_closed`, `farmer_busy`) into
    `internal/controlplane`, and adding `self_update_disabled` to the API
    docs' item codes (saasapi records it as `internal_error` until then);
@@ -929,8 +956,40 @@ by an external git sync today.
       reads them for planning (not for the wave gate, which needs a write
       time); `hostname` in a recipe is now the sprout's reported hostname
       fact (it was farmer's own), kept 10 minutes, then falling back to the
-      sprout ID; a deprovisioned tenant's `tenants/<tenant_id>/recipes/` is not deleted; the upload
-      routes themselves are REC.1.
+      sprout ID; a deprovisioned tenant's `tenants/<tenant_id>/recipes/` is not deleted.
+    - **Recipe upload (REC.1; FLAG FOR SECURITY REVIEW, ready for review).**
+      The four §1.6 routes are built in `internal/saasapi/recipes.go`.
+      saasapi writes the recipe bucket directly with its own credential,
+      limited by policy to `tenants/*/recipes/*` (plus append-only
+      `tenants/*/recipe-audit/*`). Names are validated strictly and mapped
+      to keys by one function. Uploads are validated under farmer's own
+      `IMAS_RECIPE_*` limits and sandbox before anything is stored.
+      Decided (owner, 2026-10-04): upload validation and cook-time
+      rendering share one set of limits, `farmer.recipes.templateLimits`,
+      with no separate saasapi override. The tenant caps are 500 recipes
+      and 20 MiB. Writes are a compare-and-swap
+      (`If-None-Match: *` / `If-Match: "<sha256>"`, 412). Reading and
+      writing need separate Keycloak roles, PUT and DELETE are rate-limited,
+      and every write and delete is audited without its content, failing
+      closed. `objectstore` gained `PutConditional`, `GetLimitedWithInfo`
+      and `ListPage`. Freshness was confirmed with no change to `internal/cook`:
+      no cache, and the next cook uses the upload
+      (`TestRecipeUploadCooksOnSameTenantOnly`). Still open:
+      - Audit records are objects in the bucket, not a `saas` table, which
+        would need a migration.
+      - Tenant deprovisioning deletes neither `recipes/` nor `recipe-audit/`.
+      - §1.5's `cook` action has no role check, so the read role alone
+        can't stop someone without the write role cooking an existing
+        recipe.
+      - A DELETE `If-Match` is a check then a delete (S3 has no
+        conditional delete).
+      - Validation renders with empty props, so a template that fails only
+        for some prop values fails at cook time.
+      Fixed alongside: Go's ServeMux answered a path with `..` with a 307
+      to the cleaned path, so `DELETE .../recipes/..` redirected to
+      `DELETE /v1/tenants/{id}`. PR #89 (merged) serves the tenant router,
+      recipe routes included, behind `RejectUncleanPaths`, which answers
+      400 instead (`TestRecipeRoutesWired` covers a recipe path).
     - **Sealed payloads after SEC.3b (security review 2026-10, H3, M2,
       H4; FLAG FOR SECURITY REVIEW):** left for later. Farmer still sends
       `cmd.run` and `cook` in plaintext, with a warning, to a sprout with no

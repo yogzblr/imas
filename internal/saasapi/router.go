@@ -91,9 +91,10 @@ const (
 
 var fleetUpdateLimiter callerLimiter = NewPerCallerLimiter(fleetUpdateRate, fleetUpdateBurst)
 
-// NewRouter builds the SaaS API's HTTP router (design doc §1.1–§1.5 and
+// NewRouter builds the SaaS API's HTTP router (design doc §1.1–§1.6 and
 // §1.8, the last one's dispatch routes only with the feature flag on; see
-// SetFleetUpdateDispatchEnabled).
+// SetFleetUpdateDispatchEnabled). Call ConfigureRecipes first: the recipe
+// routes use the roles and rate limiter it installed.
 // Every route is wrapped in Auth — see middleware.go for the two-layer
 // shared-secret + Keycloak-JWT check it performs, and SetAuthConfig,
 // which must be called (from main, after NewAuthConfig) before this
@@ -155,6 +156,23 @@ func NewRouter() *http.ServeMux {
 		route(mux, "GET /v1/tenants/{tenant_id}/sprouts/updates/{batch_id}", GetFleetUpdateBatch, "GetFleetUpdateBatch")
 	}
 
+	// Tenant recipes (§1.6, recipes.go; FLAG FOR SECURITY REVIEW). Reading
+	// takes the read or the write role, writing the write role only
+	// (SAASAPI_RECIPES_READ_ROLE / _WRITE_ROLE): a recipe runs as root on
+	// every sprout of the tenant that cooks it, so writing it is granted
+	// like the right to run code, not like a viewer. PUT and DELETE share
+	// one per-tenant rate limit (SAASAPI_RECIPES_WRITE_RATE_LIMIT/_BURST).
+	// Registered whether or not storage is configured; without it they
+	// answer 503 recipes_not_configured. Uses the settings ConfigureRecipes
+	// installed before this call.
+	rs := recipeSvc
+	readRoles := []string{rs.settings.ReadRole, rs.settings.WriteRole}
+	writeRoles := []string{rs.settings.WriteRole}
+	routeWithRole(mux, "GET /v1/tenants/{tenant_id}/recipes", rs.ListRecipes, "ListRecipes", readRoles, nil)
+	routeWithRole(mux, "GET /v1/tenants/{tenant_id}/recipes/{name}", rs.GetRecipe, "GetRecipe", readRoles, nil)
+	routeWithRole(mux, "PUT /v1/tenants/{tenant_id}/recipes/{name}", rs.PutRecipe, "PutRecipe", writeRoles, rs.limiter)
+	routeWithRole(mux, "DELETE /v1/tenants/{tenant_id}/recipes/{name}", rs.DeleteRecipe, "DeleteRecipe", writeRoles, rs.limiter)
+
 	// Fleet release registration (§2.5) is deliberately not on this mux:
 	// it is the operator plane, with its own listener and credential
 	// (NewOperatorServer, fleet_releases.go). The BFF's credentials never
@@ -173,4 +191,15 @@ func route(mux *http.ServeMux, pattern string, h http.HandlerFunc, name string) 
 // first) never consumes rate-limit bookkeeping.
 func routeRateLimited(mux *http.ServeMux, pattern string, h http.HandlerFunc, name string, limiter callerLimiter) {
 	mux.Handle(pattern, Logger(Auth(RateLimit(h, limiter), name), name))
+}
+
+// routeWithRole is route plus a RequireRole gate (caller.go), and a
+// per-tenant RateLimit after it when limiter isn't nil: the role is
+// checked first, so a caller without it never spends the tenant's budget.
+func routeWithRole(mux *http.ServeMux, pattern string, h http.HandlerFunc, name string, roles []string, limiter callerLimiter) {
+	var inner http.Handler = h
+	if limiter != nil {
+		inner = RateLimit(inner, limiter)
+	}
+	mux.Handle(pattern, Logger(Auth(RequireRole(inner, name, roles...), name), name))
 }
