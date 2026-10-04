@@ -17,6 +17,7 @@ package objectstore
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -97,6 +98,35 @@ func (s *Store) Get(ctx context.Context, key string) ([]byte, error) {
 			return nil, err
 		}
 		return nil, fmt.Errorf("objectstore: reading %s: %w", key, err)
+	}
+	return data, nil
+}
+
+// ErrObjectTooLarge is returned by GetLimited for an object larger than
+// its limit.
+var ErrObjectTooLarge = errors.New("objectstore: object exceeds size limit")
+
+// GetLimited is Get for an object that must be at most limit bytes: it
+// reads at most limit+1 bytes, and returns ErrObjectTooLarge (wrapped) if
+// there were more, so an oversized object is never held in memory whole.
+func (s *Store) GetLimited(ctx context.Context, key string, limit int64) ([]byte, error) {
+	if limit < 0 {
+		return nil, fmt.Errorf("objectstore: negative limit for %s", key)
+	}
+	obj, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("objectstore: getting %s: %w", key, err)
+	}
+	defer obj.Close()
+	data, err := io.ReadAll(io.LimitReader(obj, limit+1))
+	if err != nil {
+		if IsNotExist(err) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("objectstore: reading %s: %w", key, err)
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%w: %s is over %d bytes", ErrObjectTooLarge, key, limit)
 	}
 	return data, nil
 }

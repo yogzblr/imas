@@ -697,10 +697,20 @@ func syncTenantSprouts(mat *natsAuthMaterial, tam *tenantAccountMaterial, tenant
 		log.Errorf("failed to mint farmer User JWT for tenant %s: %v", tenantID, mintErr)
 	}
 
+	// See syncNatsAuth: read before granting, and fail closed.
+	revoked, err := revokedNKeys(tenantID)
+	if err != nil {
+		return false, err
+	}
+
 	for _, s := range getNKeysByTypeForTenant(tenantID, "accepted").Sprouts {
 		row, errGet := findNKeyRowInTenant(tenantID, s.SproutID)
 		if errGet != nil {
 			log.Errorf("failed to get NKey for sprout %s in tenant %s: %v", s.SproutID, tenantID, errGet)
+			continue
+		}
+		if _, isRevoked := revoked[row.NKey]; isRevoked {
+			log.Errorf("sprout %s in tenant %s is accepted with a revoked NKey; keeping it revoked", s.SproutID, tenantID)
 			continue
 		}
 		if ensureUserGranted(ac, row.NKey) {
@@ -723,6 +733,9 @@ func syncTenantSprouts(mat *natsAuthMaterial, tam *tenantAccountMaterial, tenant
 				changed = true
 			}
 		}
+	}
+	if applyRevokedNKeys(ac, revoked) {
+		changed = true
 	}
 
 	if changed {

@@ -203,6 +203,20 @@ spec:
             - name: SAASAPI_FLEET_UPDATE_CLOCK_SKEW
               value: {{ . | toString | quote }}
             {{- end }}
+            {{- with $s.actionDispatch }}
+            {{- if not (kindIs "invalid" .concurrency) }}
+            - name: SAASAPI_ACTION_DISPATCH_CONCURRENCY
+              value: {{ .concurrency | int | quote }}
+            {{- end }}
+            {{- if not (kindIs "invalid" .selfUpdateConcurrency) }}
+            - name: SAASAPI_SELF_UPDATE_DISPATCH_CONCURRENCY
+              value: {{ .selfUpdateConcurrency | int | quote }}
+            {{- end }}
+            {{- if not (kindIs "invalid" .tenantConcurrency) }}
+            - name: SAASAPI_ACTION_DISPATCH_TENANT_CONCURRENCY
+              value: {{ .tenantConcurrency | int | quote }}
+            {{- end }}
+            {{- end }}
             {{- with $s.outboxSweeper }}
             - name: SAASAPI_OUTBOX_SWEEPER_ENABLED
               value: {{ .enabled | toString | quote }}

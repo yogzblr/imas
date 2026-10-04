@@ -61,7 +61,7 @@ func TestResolveRecipeFilePath(t *testing.T) {
 	}}
 	for _, tc := range testCases {
 		t.Run(tc.id, func(t *testing.T) {
-			filepath, err := ResolveRecipeFilePath(context.Background(), getBasePath(), tc.recipe)
+			filepath, err := ResolveRecipeFilePath(context.Background(), testPropsTenantID, getBasePath(), tc.recipe)
 			if filepath != tc.filepath {
 				t.Errorf("expected %s but got %s", tc.filepath, filepath)
 			}

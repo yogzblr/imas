@@ -69,6 +69,13 @@ func SetPropForTenant(tenantID, sproutID, name, value string) error {
 	return setProp(tenantID, sproutID, name, value)
 }
 
+// SetPropForTenantWithTTL is SetPropForTenant with an explicit time to
+// live instead of DefaultPropTTL. internal/facts uses it for the hostname
+// fact (facts.HostnamePropTTL).
+func SetPropForTenantWithTTL(tenantID, sproutID, name, value string, ttl time.Duration) error {
+	return setPropWithTTL(tenantID, sproutID, name, value, ttl)
+}
+
 func setProp(tenantID, sproutID, name, value string) error {
 	return setPropWithTTL(tenantID, sproutID, name, value, DefaultPropTTL)
 }

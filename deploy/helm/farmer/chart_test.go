@@ -349,6 +349,12 @@ func TestValidationFailures(t *testing.T) {
 		{"bad seed name", "must match", []string{"--set", "natsSeeds.extraSeeds.bad-name=x.nk"}},
 		{"two farmers", "farmer.replicaCount must be 1", []string{"--set", "farmer.replicaCount=2"}},
 		{"bare number window", "must be a quoted duration", []string{"--set", "farmer.jobs.reconcileWindow=7200"}},
+		{"string source limit", "maxSourceBytes must be a positive whole number", []string{"--set-string", "farmer.recipes.templateLimits.maxSourceBytes=1Mi"}},
+		{"zero output limit", "maxRenderedBytes must be a positive whole number", []string{"--set", "farmer.recipes.templateLimits.maxRenderedBytes=0"}},
+		{"fractional value limit", "maxValueBytes must be a positive whole number", []string{"--set", "farmer.recipes.templateLimits.maxValueBytes=1.5"}},
+		{"null range limit", "maxRangeIterations must be a positive whole number", []string{"--set", "farmer.recipes.templateLimits.maxRangeIterations=null"}},
+		{"bare number timeout", "renderTimeout must be a quoted duration", []string{"--set", "farmer.recipes.templateLimits.renderTimeout=2"}},
+		{"unitless timeout", "renderTimeout must be a quoted duration", []string{"--set-string", "farmer.recipes.templateLimits.renderTimeout=2"}},
 		{"fractional burst", "burst must be a whole number", []string{"--set", "saasapi.enrollmentKeys.rateLimit.burst=2.5"}},
 		{"bad tls mode", "tls.mode must be", []string{"--set", "tls.mode=selfsigned"}},
 		{"tls secret without name", "tls.secretName is required", []string{"--set", "tls.mode=secret", "--set", "tls.secretName="}},
@@ -628,8 +634,10 @@ func TestFarmerPoliciesAreExact(t *testing.T) {
 	cm := find(t, mustRender(t, "--set", "openbaoBootstrap.farmerbus.enabled=true",
 		"--set", "openbaoBootstrap.farmerbus.serviceAccountName=imas-dmz-nats-bus"), "ConfigMap", "t-farmer-openbao-policies")
 	want := map[string][]string{
-		"imas-farmer-gateway.hcl":   {`path "transit/sign/imas-gateway-jwt"`, `path "transit/keys/imas-gateway-jwt"`},
-		"imas-farmer-tenantbox.hcl": {`path "secret/data/imas/tenant-x25519"`, `path "secret/data/imas/tenant-x25519/tenants/+"`},
+		"imas-farmer-gateway.hcl": {`path "transit/sign/imas-gateway-jwt"`, `path "transit/keys/imas-gateway-jwt"`},
+		// Only the per-tenant secrets: no read of the base path, where the
+		// deleted legacy shared keypair lived (security review 2026-10, H3).
+		"imas-farmer-tenantbox.hcl": {`path "secret/data/imas/tenant-x25519/tenants/+"`},
 		"imas-farmer-certs.hcl":     {`path "pki/issue/imas-farmer"`},
 		"imas-farmerbus-certs.hcl":  {`path "pki/issue/imas-farmerbus"`},
 	}
@@ -912,6 +920,43 @@ func TestReconcileWindow(t *testing.T) {
 	}
 }
 
+// farmer.recipes.templateLimits renders the IMAS_RECIPE_* variables
+// internal/config reads into cook.SetRenderLimits, with cook's defaults.
+func TestRecipeTemplateLimitsEnv(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want map[string]string
+	}{
+		{nil, map[string]string{
+			"IMAS_RECIPE_MAX_SOURCE_BYTES":     "262144",
+			"IMAS_RECIPE_MAX_RENDERED_BYTES":   "1048576",
+			"IMAS_RECIPE_MAX_VALUE_BYTES":      "262144",
+			"IMAS_RECIPE_RENDER_TIMEOUT":       "2s",
+			"IMAS_RECIPE_MAX_RANGE_ITERATIONS": "10000",
+		}},
+		{[]string{
+			"--set", "farmer.recipes.templateLimits.maxSourceBytes=131072",
+			"--set", "farmer.recipes.templateLimits.maxRenderedBytes=4194304",
+			"--set", "farmer.recipes.templateLimits.maxValueBytes=65536",
+			"--set-string", "farmer.recipes.templateLimits.renderTimeout=500ms",
+			"--set", "farmer.recipes.templateLimits.maxRangeIterations=2000",
+		}, map[string]string{
+			"IMAS_RECIPE_MAX_SOURCE_BYTES":     "131072",
+			"IMAS_RECIPE_MAX_RENDERED_BYTES":   "4194304",
+			"IMAS_RECIPE_MAX_VALUE_BYTES":      "65536",
+			"IMAS_RECIPE_RENDER_TIMEOUT":       "500ms",
+			"IMAS_RECIPE_MAX_RANGE_ITERATIONS": "2000",
+		}},
+	} {
+		env := envValues(container(t, farmerDeploy(t, mustRender(t, tc.args...)), "farmer"))
+		for name, want := range tc.want {
+			if env[name] != want {
+				t.Errorf("%v: %s = %q, want %q", tc.args, name, env[name], want)
+			}
+		}
+	}
+}
+
 // deploy/saasapi/deployment.env.rate-limit.yaml semantics.
 func TestSaasapiRateLimitEnv(t *testing.T) {
 	for _, tc := range []struct {
@@ -986,6 +1031,69 @@ func TestSaasapiOutboxSweeperEnv(t *testing.T) {
 			}
 			if tc.want[i] != "" && (!ok || e["value"] != tc.want[i]) {
 				t.Errorf("%v: %s = %v, want %s", tc.args, name, e, tc.want[i])
+			}
+		}
+	}
+}
+
+// Farmer's own self_update switch (security review L1) is always
+// rendered, and off by default.
+func TestFarmerSelfUpdateEnv(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{nil, "false"},
+		{[]string{"--set", "farmer.selfUpdate.enabled=true"}, "true"},
+		{[]string{"--set", "farmer.selfUpdate.enabled=false"}, "false"},
+		{[]string{"--set", "farmer.selfUpdate.enabled=null"}, "false"},
+	} {
+		env := envMap(container(t, farmerDeploy(t, mustRender(t, tc.args...)), "farmer"))
+		if e := env["IMAS_SELF_UPDATE_ENABLED"]; e == nil || e["value"] != tc.want {
+			t.Errorf("%v: IMAS_SELF_UPDATE_ENABLED = %v, want %s", tc.args, e, tc.want)
+		}
+	}
+	// saasapi's dispatch flag doesn't turn farmer's on.
+	env := envMap(container(t, farmerDeploy(t, mustRender(t, "--set", "saasapi.fleetUpdateDispatch.enabled=true")), "farmer"))
+	if e := env["IMAS_SELF_UPDATE_ENABLED"]; e == nil || e["value"] != "false" {
+		t.Errorf("with saasapi dispatch on: IMAS_SELF_UPDATE_ENABLED = %v, want false", e)
+	}
+}
+
+// Dispatch concurrency (security review M5) in farmer and saasapi: the
+// documented defaults are rendered, overrides pass through, null emits
+// nothing.
+func TestDispatchConcurrencyEnv(t *testing.T) {
+	for _, svc := range []struct {
+		name, prefix string
+		deploy       func(t *testing.T, docs []obj) obj
+		vars         []string
+	}{
+		{"farmer", "farmer.sproutActions", func(t *testing.T, docs []obj) obj { return farmerDeploy(t, docs) },
+			[]string{"IMAS_SPROUT_ACTION_CONCURRENCY", "IMAS_SELF_UPDATE_CONCURRENCY", "IMAS_SPROUT_ACTION_TENANT_CONCURRENCY"}},
+		{"saasapi", "saasapi.actionDispatch", func(t *testing.T, docs []obj) obj { return find(t, docs, "Deployment", "t-farmer-saasapi") },
+			[]string{"SAASAPI_ACTION_DISPATCH_CONCURRENCY", "SAASAPI_SELF_UPDATE_DISPATCH_CONCURRENCY", "SAASAPI_ACTION_DISPATCH_TENANT_CONCURRENCY"}},
+	} {
+		keys := []string{"concurrency", "selfUpdateConcurrency", "tenantConcurrency"}
+		for _, tc := range []struct {
+			args []string
+			want []string
+		}{
+			{nil, []string{"64", "16", "8"}},
+			{[]string{"--set", svc.prefix + ".concurrency=128", "--set", svc.prefix + ".selfUpdateConcurrency=32", "--set", svc.prefix + ".tenantConcurrency=4"},
+				[]string{"128", "32", "4"}},
+			{[]string{"--set", svc.prefix + ".concurrency=null", "--set", svc.prefix + ".selfUpdateConcurrency=null", "--set", svc.prefix + ".tenantConcurrency=null"},
+				[]string{"", "", ""}},
+		} {
+			env := envMap(container(t, svc.deploy(t, mustRender(t, tc.args...)), svc.name))
+			for i, name := range svc.vars {
+				e, ok := env[name]
+				if tc.want[i] == "" && ok {
+					t.Errorf("%s %v: %s (%s) rendered for null: %v", svc.name, tc.args, name, keys[i], e)
+				}
+				if tc.want[i] != "" && (!ok || e["value"] != tc.want[i]) {
+					t.Errorf("%s %v: %s = %v, want %s", svc.name, tc.args, name, e, tc.want[i])
+				}
 			}
 		}
 	}

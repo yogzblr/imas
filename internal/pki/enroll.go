@@ -416,6 +416,14 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 		log.Errorf("enroll: resolving sprout id for hostname %q: %v", hostname, err)
 		return nil, ErrEnrollmentFailed
 	}
+	// An NKey revoked by deleting or replacing its sprout (H1) stays
+	// revoked: enrolling it again would clear its revocation on the
+	// Account and bring the retired host's User JWT back. Checked before
+	// redeeming, like the ID above.
+	if revoked, err := isNKeyRevoked(row.TenantID, nkeyPub); err != nil || revoked {
+		log.Warnf("enroll: nkey_pub %s is revoked in tenant %s, or the check failed (%v)", nkeyPub, row.TenantID, err)
+		return nil, ErrEnrollmentFailed
+	}
 
 	// row.TenantID (workstream E, FLAG FOR SECURITY REVIEW: tenant
 	// isolation correctness) is the enrollment key's real tenant, and is
@@ -455,11 +463,9 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 		return nil, ErrEnrollmentFailed
 	}
 	// The tenant's X25519 key is read (and, for a tenant's first
-	// enrollment, created) before this sprout's box key is recorded:
-	// tenantbox.go decides whether a brand new tenant secret adopts the
-	// legacy shared keypair by whether the tenant already has sprout box
-	// keys on record, and this sprout, which will pin whatever is
-	// returned here, must not count towards that.
+	// enrollment, created fresh: tenantbox.go). This sprout's box key is
+	// not recorded on this path at all (see below), so a failure here
+	// leaves no box key behind.
 	tenantPub, err := GetTenantX25519PublicKey(row.TenantID)
 	if err != nil {
 		log.Errorf("enroll: sprout %s accepted but failed to load tenant %s X25519 key: %v", sproutID, row.TenantID, err)
@@ -654,10 +660,17 @@ func hashSecret(secret string) string {
 // two different tenants may legitimately each have a sprout resolving to
 // the same base hostname (e.g. "web-01"), and must not collide with each
 // other's sprout IDs.
+//
+// The hostname is normalised by NormalizeSproutID, which maps '.' to '-'
+// (security review 2026-10, M4): "web01.example.com" enrols as
+// "web01-example-com", never with a dot that would let "web01"'s grants
+// cover its subjects. A reserved ID (reservedSproutIDs) is refused.
+//
+// An ID freed by DeleteNKey is handed out again: the new host enrols
+// under it with its own NKey and box key, and the old host's NKey and box
+// keys stay revoked.
 func resolveEnrollSproutID(tenantID, hostname, nkeyPub string) (string, error) {
-	base := strings.ToLower(hostname)
-	base = strings.ReplaceAll(base, "_", "-")
-	base = strings.TrimPrefix(base, "-")
+	base := NormalizeSproutID(hostname)
 	if !IsValidSproutID(base) {
 		return "", ErrSproutIDInvalid
 	}

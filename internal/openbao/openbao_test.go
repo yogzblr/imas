@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/openbao/openbao/api/v2"
 )
 
 const prefix = "IMAS_OBTEST_OPENBAO_"
@@ -380,8 +382,21 @@ func TestStatusErrors(t *testing.T) {
 	if StatusCode(err) != 403 || !strings.Contains(err.Error(), "status 403") || !strings.Contains(err.Error(), "permission denied") {
 		t.Errorf("denied: got %v", err)
 	}
-	if _, err := c.Read(ctx, "raw", nil); err == nil || err.Error() != "status 502: upstream down" {
-		t.Errorf("raw: got %v", err)
+	// A non-JSON body is not OpenBao's: it is whatever sits in front of
+	// it, and may echo the request's token (M7). Only the status is kept,
+	// and the body can't be reached through Unwrap either.
+	_, err = c.Read(ctx, "raw", nil)
+	if StatusCode(err) != http.StatusBadGateway || err.Error() != "status 502" {
+		t.Errorf("raw: got %v, want only the status", err)
+	}
+	if strings.Contains(err.Error(), "upstream down") {
+		t.Errorf("raw: body leaked into the error: %v", err)
+	}
+	var re *api.ResponseError
+	if !errors.As(err, &re) {
+		t.Errorf("raw: expected a wrapped *api.ResponseError, got %v", err)
+	} else if len(re.Errors) != 0 || strings.Contains(re.Error(), "upstream down") {
+		t.Errorf("raw: body reachable through the wrapped ResponseError: %q", re.Errors)
 	}
 	if b, err := c.ReadRaw(ctx, "pem"); err != nil || !strings.HasPrefix(string(b), "-----BEGIN") {
 		t.Errorf("ReadRaw: %q, %v", b, err)
@@ -536,6 +551,36 @@ func TestKubernetesAuth_LoginFailures(t *testing.T) {
 				t.Fatalf("got %v, want errTestAuth containing %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestKubernetesAuth_LoginRawBodyDropped: a proxy in front of OpenBao
+// that answers the login with a non-JSON page echoing the request puts
+// the service account JWT in the body. The error must carry the status
+// alone (M7).
+func TestKubernetesAuth_LoginRawBodyDropped(t *testing.T) {
+	const jwt = "eyJhbGciOiJSUzI1NiJ9.sa-jwt-secret.sig"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusBadGateway)
+		fmt.Fprintf(w, "<html><pre>502 Bad Gateway\n%s %s\nX-Vault-Token: %s\n%s</pre></html>",
+			r.Method, r.URL.Path, r.Header.Get("X-Vault-Token"), body)
+	}))
+	defer srv.Close()
+	setK8sEnv(t, srv.URL, writeJWT(t, jwt+"\n"))
+	c, err := NewFromEnv(testEnv, testErrs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Token(t.Context())
+	if !errors.Is(err, errTestAuth) || !strings.Contains(err.Error(), "status 502") {
+		t.Fatalf("got %v, want errTestAuth with status 502", err)
+	}
+	for _, leak := range []string{"sa-jwt-secret", "Bad Gateway", "<html>", "imas-role"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("login error carries the response body (%q): %v", leak, err)
+		}
 	}
 }
 

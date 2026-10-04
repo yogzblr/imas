@@ -19,10 +19,10 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
-	"path/filepath"
 	"strings"
 
 	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/objectstore"
 )
 
@@ -41,7 +41,11 @@ func SetRecipeStore(s *objectstore.Store) { recipeStore = s }
 //
 // A sprout authenticating with its gateway JWT (rather than a CLI token)
 // may only read keys under SproutFilePrefix for its own (tenant_id,
-// sprout_id) — enforced by Auth before this handler runs.
+// sprout_id) — enforced by Auth before this handler runs. That is the
+// only route a sprout can read the bucket through, and it never reaches a
+// tenant's source recipes (tenants/<tenant_id>/recipes/, see "Recipe key
+// layout" in internal/cook/store.go) or the platform tree: farmer renders
+// those itself and stages only the result, under the sprout's own prefix.
 func GetFile(w http.ResponseWriter, r *http.Request) {
 	key := FileKey(r)
 	if key == "" || strings.HasSuffix(r.URL.Path, "/") {
@@ -128,7 +132,14 @@ func ListRecipes(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	ext := "." + config.ImasExt
-	prefix := strings.TrimSuffix(recipeDir, "/") + "/"
+	// The platform tree only: never a prefix under tenants/, sprouts/ or
+	// jobs/ (cook.PlatformRecipePrefix), which would list tenants' recipes
+	// or staged files.
+	prefix, err := cook.PlatformRecipePrefix(recipeDir)
+	if err != nil {
+		http.Error(w, "recipe directory not usable", http.StatusServiceUnavailable)
+		return
+	}
 
 	keys, err := recipeStore.List(ctx, prefix)
 	if err != nil {
@@ -177,13 +188,23 @@ func GetRecipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert dot-notation to an object key. Object storage has no
-	// directory-traversal concept the way a local filesystem does — a
-	// crafted name containing ".." just names a distinct, harmless key,
-	// never a path outside the bucket — so no separate path-traversal
-	// check is needed here, same as the NATS handler this replaces.
-	relPath := strings.ReplaceAll(recipeName, ".", "/") + "." + config.ImasExt
-	key := filepath.Join(recipeDir, relPath)
+	// The platform tree only (see "Recipe key layout" in
+	// internal/cook/store.go): the name must be one cook would accept,
+	// so it can never hold "..", an empty segment or a leading slash,
+	// and the prefix may not sit under tenants/, sprouts/ or jobs/. Names
+	// with '/' are still accepted, as before, as a segment separator.
+	segments, _, err := cook.ParseRecipeName(recipeName)
+	if err != nil {
+		http.Error(w, "invalid recipe name", http.StatusBadRequest)
+		return
+	}
+	prefix, err := cook.PlatformRecipePrefix(recipeDir)
+	if err != nil {
+		http.Error(w, "recipe directory not usable", http.StatusServiceUnavailable)
+		return
+	}
+	relPath := strings.Join(segments, "/") + "." + config.ImasExt
+	key := prefix + relPath
 
 	content, err := recipeStore.Get(r.Context(), key)
 	if err != nil {

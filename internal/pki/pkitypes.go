@@ -38,4 +38,8 @@ var (
 	ErrTenantNotFound           = errors.New("no such tenant has been provisioned")
 	ErrTenantIDInvalid          = errors.New("bad user input: invalid tenant ID received")
 	ErrTenantDeprovisioned      = errors.New("tenant was deprovisioned")
+	// ErrNKeyRevoked: the NKey belonged to a sprout that was deleted or
+	// replaced, and stays revoked on the tenant's Account for good. The
+	// host has to re-enrol with a fresh NKey.
+	ErrNKeyRevoked = errors.New("this NKey belonged to a deleted or replaced sprout and is revoked; re-enrol with a fresh key")
 )

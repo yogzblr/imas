@@ -9,7 +9,6 @@ package natsapi
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -292,6 +291,7 @@ func TestSproutAction_DispatchIsBoundToTheVerifiedTenant(t *testing.T) {
 }
 
 func TestSproutAction_RejectsBeforeDispatch(t *testing.T) {
+	enableSelfUpdate(t) // so self_update's params are what's checked
 	rec := stubSproutActionDispatch(t, func(tenant, sprout string) error {
 		switch {
 		case !pki.IsValidTenantID(tenant):
@@ -486,80 +486,5 @@ func TestSproutActionConcurrency_FromEnv(t *testing.T) {
 		if got := sproutActionConcurrency(); got != tc.want {
 			t.Errorf("%s=%q: got %d, want %d", EnvSproutActionConcurrency, tc.env, got, tc.want)
 		}
-	}
-}
-
-// TestSproutAction_ConcurrencyLimitIsEnforced: with the limit set to n,
-// exactly n dispatches run at once and the next request waits for a slot.
-func TestSproutAction_ConcurrencyLimitIsEnforced(t *testing.T) {
-	for _, limit := range []int{1, 3} {
-		t.Run(fmt.Sprint(limit), func(t *testing.T) {
-			nc, cleanup := startEmbeddedNATS(t)
-			defer cleanup()
-			stubSproutActionDispatch(t, func(string, string) error { return nil })
-			t.Setenv(EnvSproutActionConcurrency, fmt.Sprint(limit))
-
-			var inFlight, peak atomic.Int32
-			started := make(chan struct{}, limit+1)
-			release := make(chan struct{})
-			dispatchCmdRun = func(_ string, params json.RawMessage) (any, error) {
-				n := inFlight.Add(1)
-				defer inFlight.Add(-1)
-				for {
-					p := peak.Load()
-					if n <= p || peak.CompareAndSwap(p, n) {
-						break
-					}
-				}
-				started <- struct{}{}
-				<-release
-				var ta apitypes.TargetedAction
-				_ = json.Unmarshal(params, &ta)
-				return apitypes.TargetedResults{Results: map[string]any{ta.Target[0].SproutID: apitypes.CmdRun{}}}, nil
-			}
-			if err := RegisterSproutAction(nc); err != nil {
-				t.Fatalf("RegisterSproutAction: %v", err)
-			}
-			if err := nc.Flush(); err != nil {
-				t.Fatalf("flush: %v", err)
-			}
-			saas := dialSaaSAPI(t, nc)
-
-			// One more request than there are slots.
-			replies := make(chan *nats.Msg, limit+1)
-			for i := 0; i <= limit; i++ {
-				data := mustJSON(t, cmdRunRequest("t_1", "web-01"))
-				go func() {
-					msg, err := saas.Request(controlplane.SubjectSproutAction, data, 5*time.Second)
-					if err == nil {
-						replies <- msg
-					}
-				}()
-			}
-			for i := 0; i < limit; i++ {
-				select {
-				case <-started:
-				case <-time.After(2 * time.Second):
-					t.Fatalf("only %d of %d slots filled", i, limit)
-				}
-			}
-			select {
-			case <-started:
-				t.Fatalf("request %d dispatched with only %d slots", limit+1, limit)
-			case <-time.After(300 * time.Millisecond):
-			}
-
-			close(release)
-			for i := 0; i <= limit; i++ {
-				select {
-				case <-replies:
-				case <-time.After(3 * time.Second):
-					t.Fatalf("got %d of %d replies after releasing the slots", i, limit+1)
-				}
-			}
-			if got := peak.Load(); got != int32(limit) {
-				t.Fatalf("peak concurrent dispatches = %d, want %d", got, limit)
-			}
-		})
 	}
 }

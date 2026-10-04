@@ -22,6 +22,7 @@ package pki
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -76,11 +77,40 @@ type tenantRow struct {
 
 func (tenantRow) TableName() string { return "pki_tenants" }
 
+// revokedNKeyRow is the `pki_revoked_nkeys` table: every sprout NKey a
+// tenant has revoked for good by deleting or replacing its sprout
+// (retireSproutTx). FLAG FOR SECURITY REVIEW (security review 2026-10,
+// H1). Account revocations used to be rebuilt only from pki_nkeys rows in
+// unaccepted, denied or rejected, so a deleted row was never revoked and
+// its User JWT, which has no exp, stayed valid. This list remembers what
+// pki_nkeys no longer holds; every Account rebuild applies it
+// (applyRevokedNKeys), and nothing ever removes a row or accepts its NKey
+// again.
+//
+// Keyed on (tenant_id, nkey): a revocation is of a public key on one
+// tenant's Account, whichever sprout ID it was under. sprout_id records
+// that ID, and its (tenant_id, sprout_id) index serves lookups by sprout;
+// it is never queried without tenant_id. revoked_at (Unix seconds) is the
+// revocation's time on the Account: User JWTs for the key issued at or
+// before it are refused.
+type revokedNKeyRow struct {
+	TenantID  string `gorm:"column:tenant_id;primaryKey;size:191;index:idx_pki_revoked_nkeys_sprout,priority:1"`
+	NKey      string `gorm:"column:nkey;primaryKey;size:191"`
+	SproutID  string `gorm:"column:sprout_id;size:253;not null;index:idx_pki_revoked_nkeys_sprout,priority:2"`
+	RevokedAt int64  `gorm:"column:revoked_at;not null"`
+}
+
+func (revokedNKeyRow) TableName() string { return "pki_revoked_nkeys" }
+
 // Models returns the GORM models this package owns, for callers assembling
 // a single AutoMigrate call across the whole farmer schema (see
 // cmd/farmer/main.go and internal/pxc). sproutBoxKeyRow is workstream J's
-// (boxkeys.go); tenantRow is this workstream's.
-func Models() []any { return []any{&nkeyRow{}, &tenantRow{}, &sproutBoxKeyRow{}} }
+// (boxkeys.go); tenantRow is this workstream's; revokedNKeyRow is SEC.3a's.
+// The schema itself comes from internal/migrations' farmer set, whose
+// tests check it against these models.
+func Models() []any {
+	return []any{&nkeyRow{}, &tenantRow{}, &sproutBoxKeyRow{}, &revokedNKeyRow{}}
+}
 
 // db is the shared farmer-schema GORM handle. Nil until SetDB is called.
 var db *gorm.DB
@@ -125,6 +155,64 @@ func upsertNKeyRow(row nkeyRow) error {
 		Columns:   []clause.Column{{Name: "tenant_id"}, {Name: "sprout_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{"nkey", "state"}),
 	}).Create(&row).Error
+}
+
+// retireSproutTx ends sprout id's credentials in tenantID inside tx, for
+// DeleteNKey and AcceptNKey's replace path: it puts the sprout's NKey on
+// the tenant's revoked list (unless it is keep, the NKey taking the ID
+// over on the replace path), deletes its pki_nkeys row, and revokes every
+// one of its box keys. found reports whether a pki_nkeys row existed; the
+// box keys are revoked either way. The Account JWT carrying the
+// revocation is pushed by the caller's reload, after the commit.
+func retireSproutTx(tx *gorm.DB, tenantID, id, keep string) (found bool, err error) {
+	var rows []nkeyRow
+	if err := tx.Where("tenant_id = ? AND sprout_id = ?", tenantID, id).Find(&rows).Error; err != nil {
+		return false, err
+	}
+	now := time.Now().Unix()
+	for _, r := range rows {
+		if r.NKey == "" || r.NKey == keep {
+			continue
+		}
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&revokedNKeyRow{
+			TenantID: tenantID, NKey: r.NKey, SproutID: id, RevokedAt: now,
+		}).Error; err != nil {
+			return false, fmt.Errorf("pki: revoking NKey of sprout %q in tenant %q: %w", id, tenantID, err)
+		}
+	}
+	if len(rows) > 0 {
+		if err := tx.Where("tenant_id = ? AND sprout_id = ?", tenantID, id).Delete(&nkeyRow{}).Error; err != nil {
+			return false, err
+		}
+	}
+	if err := revokeSproutBoxKeysTx(tx, tenantID, id); err != nil {
+		return false, err
+	}
+	return len(rows) > 0, nil
+}
+
+// isNKeyRevoked reports whether nkey is on tenantID's revoked list.
+func isNKeyRevoked(tenantID, nkey string) (bool, error) {
+	var n int64
+	if err := db.Model(&revokedNKeyRow{}).Where("tenant_id = ? AND nkey = ?", tenantID, nkey).Count(&n).Error; err != nil {
+		return false, fmt.Errorf("pki: checking whether an NKey is revoked in tenant %q: %w", tenantID, err)
+	}
+	return n > 0, nil
+}
+
+// revokedNKeys returns tenantID's revoked list as NKey -> revoked_at.
+func revokedNKeys(tenantID string) (map[string]int64, error) {
+	var rows []revokedNKeyRow
+	if err := db.Where("tenant_id = ?", tenantID).Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("pki: reading tenant %q's revoked NKeys: %w", tenantID, err)
+	}
+	out := make(map[string]int64, len(rows))
+	for _, r := range rows {
+		if r.TenantID == tenantID {
+			out[r.NKey] = r.RevokedAt
+		}
+	}
+	return out, nil
 }
 
 func setStateInTenant(tenantID, id, state string) error {
