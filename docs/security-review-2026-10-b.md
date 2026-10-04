@@ -51,7 +51,7 @@ Line numbers are at `f645a93`.
 |---|---|---|---|---|
 | B1 | High | J.2 / recipes | The sprout decodes and cooks a staged recipe pulled over `/files/` with no proof farmer produced it; Envoy (DMZ) terminates that TLS, so whoever answers the pull chooses the steps that run as root | CONFIRMED (throwaway test) |
 | B2 | High | J.1 / enrollment | An accepted sprout with no active box key (pre-J, mid-enrollment, or post-revocation) accepts an attacker-chosen box key proven under the attacker's own private half, and is handed a gateway JWT — the enrollment PoP binds the key to itself, not to the sprout | CONFIRMED code path (throwaway test); the compromised-bus race to win step 2 is UNCONFIRMED |
-| B3 | High (incomplete fix) | CL.1 / J (H1 residue) | H1 revokes the NATS User JWT and box keys of a deleted or replaced host, but not its **gateway JWT**; that credential reads `/files/` for up to its TTL (default 24h), and on the replace path it is scoped to the reused `(tenant_id, sprout_id)`, so the old host reads the **new** host's staged recipe | CONFIRMED (throwaway test) |
+| B3 | High (incomplete fix) | CL.1 / J (H1 residue) | H1 revokes the NATS User JWT and box keys of a deleted or replaced host, but not its **gateway JWT**; that credential reads `/files/` for up to its TTL (default 24h), and on the replace path it is scoped to the reused `(tenant_id, sprout_id)`, so the old host reads the **new** host's staged recipe | CONFIRMED (throwaway test); **addressed by SEC.7c** (ready for review) |
 | B4 | Medium | SEC.3b / recipes | A hostile tenant's recipe render cost scales with its own include count (up to 256), each include rendered under its own `RecipeRenderTimeout`; one cook can burn many CPU-seconds, and tenants now upload recipes | CONFIRMED (throwaway probe); absolute impact not load-measured |
 | B5 | Medium | M6, carried | Same-second Account-JWT `iat` tie in the bus fence is unchanged (`fence.go:484`), as planned (deferred past the UAT gate); with SCALE.2's single-node push it can still turn a missed revocation into a permanent cluster-wide revert | CONFIRMED in code; upstream `jti` sharing per repo comments |
 | B6 | Medium | J.4 | Forged "no responders" on `internal.sprout.action` still lets one action run up to `SAASAPI_OUTBOX_MAX_ATTEMPTS` times (owner-accepted residual, unchanged by J.4) | CONFIRMED; accepted |
@@ -187,6 +187,26 @@ enrollment PoP), so they weaken the same boundary the J work strengthened.
   residual window, or bind `/files/` reads to the live NATS session rather than a
   standalone bearer token.
 - **Mark:** CONFIRMED, exercised.
+- **Status: addressed by SEC.7c (FLAG FOR SECURITY REVIEW, ready for
+  review).** The first fix was taken, for both routes. `sproutFileAccess`
+  and `sproutIdentityAuth` now share one check
+  (`internal/api/middleware.go`, `verifySproutGatewayJWT`) that, after the
+  signature, calls `pki.VerifyGatewaySubject`
+  (`internal/pki/gatewaysubject.go`): the token's `sub` must not be on the
+  tenant's `pki_revoked_nkeys` list, the tenant must be live, and `sub` must
+  equal the NKey of the accepted `pki_nkeys` row for `(tenant_id,
+  sprout_id)`, so a replace cuts the old host off even before its
+  revocation is consulted. Every lookup is keyed on `tenant_id`; a database
+  error, or no database, refuses. No cache. The throwaway test above is kept
+  as `TestFilesRoute_ReacceptedSproutIDRefusesOldHostsGatewayJWT`
+  (`internal/api/gateway_revocation_test.go`), which first reproduces the
+  200 with the check stubbed out and then shows the 403; the same file
+  covers the replace path, a deleted sprout, a database error, cross-tenant
+  tokens and `/v1/sprout/update-manifest`. `gatewayjwtttl` stays at 24h:
+  it no longer bounds access to farmer's routes, only Envoy's admission of
+  the websocket, where the bus refuses the revoked User JWT
+  (`imas-envoy-enrollment-design.md`, "A gateway JWT ends with its
+  sprout").
 
 ## Medium
 

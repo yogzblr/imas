@@ -36,6 +36,15 @@ var ErrInvalidToken = errors.New("gatewayjwt: invalid gateway JWT")
 // "kid" is the Transit version and "alg" is pinned to EdDSA on each key,
 // so jwx picks the algorithm from the key, never from the token header,
 // and a token without a matching kid is rejected.
+//
+// A token that passes here is genuine and unexpired, not current: this
+// package holds no sprout state, so it cannot tell that the sprout named
+// was deleted, or replaced by a host with another NKey, after the token
+// was minted. Every caller that grants access on a gateway JWT must also
+// check the returned Subject against the sprout's current NKey and the
+// tenant's revoked list, failing closed (internal/api's
+// verifySproutGatewayJWT does, via pki.VerifyGatewaySubject; SEC.7c,
+// security review 2026-10-b B3).
 func VerifyGatewayJWT(ctx context.Context, keys PublicKeySource, token string) (GatewayClaims, error) {
 	if keys == nil {
 		return GatewayClaims{}, fmt.Errorf("gatewayjwt: nil key source")

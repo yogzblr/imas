@@ -33,8 +33,16 @@ func (k testGatewayKey) PublicKeys(context.Context) ([]gatewayjwt.TransitKeyVers
 	return []gatewayjwt.TransitKeyVersion{{Version: 1, PublicKey: k.pub}}, nil
 }
 
+// installGatewayKey also stands in for the revocation check
+// (gatewaySubjectCheck) with one that passes every subject: these tests
+// are about signature and scoping, and most run without a pki database.
+// gateway_revocation_test.go puts the real check back
+// (useRealGatewaySubjectCheck).
 func installGatewayKey(t *testing.T) testGatewayKey {
 	t.Helper()
+	origCheck := gatewaySubjectCheck
+	gatewaySubjectCheck = func(string, string, string) error { return nil }
+	t.Cleanup(func() { gatewaySubjectCheck = origCheck })
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)

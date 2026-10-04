@@ -8,6 +8,7 @@ import (
 	"github.com/yogzblr/imas/internal/api/handlers"
 	"github.com/yogzblr/imas/internal/gatewayjwt"
 	log "github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 func Logger(inner http.Handler, name string) http.Handler {
@@ -75,29 +76,62 @@ func Auth(inner http.Handler, name string) http.Handler {
 // keys. A variable so tests can install a static key set.
 var gatewayKeys = handlers.GatewayKeySource
 
-// sproutFileAccess reports whether token is a valid gateway JWT whose
-// (tenant_id, sprout_id) owns the file r requests: the object key must
-// sit under handlers.SproutFilePrefix for that pair. A valid gateway JWT
-// grants nothing beyond its own sprout's subtree — not other sprouts'
-// files, not the tenant's, not the shared recipe tree.
+// gatewaySubjectCheck is the revocation check every gateway JWT passes
+// after its signature: see verifySproutGatewayJWT. A variable so tests
+// that are not about revocation can run without a pki database.
+var gatewaySubjectCheck = pki.VerifyGatewaySubject
+
+// verifySproutGatewayJWT is the one gateway JWT check both
+// sproutFileAccess and sproutIdentityAuth make. It verifies token's
+// signature, issuer and expiry (gatewayjwt.VerifyGatewayJWT), requires
+// tenant_id and sprout_id usable as key segments, and then — FLAG FOR
+// SECURITY REVIEW (SEC.7c, security review 2026-10-b B3) — requires the
+// token's sub (the sprout's NKey) to be the NKey currently accepted for
+// its (tenant_id, sprout_id) and not on that tenant's revoked list
+// (pki.VerifyGatewaySubject). A signature is no proof the sprout still
+// holds that identity: a deleted host's token, or the replaced host's
+// after pki.accept hands its ID to a new NKey, is refused from the
+// moment the change commits, not when the token expires
+// (config.GatewayJWTTTL).
+//
+// It fails closed: a database error refuses exactly as a revoked NKey
+// does. route names the caller in log lines.
+func verifySproutGatewayJWT(r *http.Request, route, token string) (gatewayjwt.GatewayClaims, bool) {
+	keys := gatewayKeys()
+	if keys == nil {
+		log.Warnf("%s: gateway JWT presented but no gateway signer is configured", route)
+		return gatewayjwt.GatewayClaims{}, false
+	}
+	claims, err := gatewayjwt.VerifyGatewayJWT(r.Context(), keys, token)
+	if err != nil {
+		log.Warnf("%s: rejecting gateway JWT: %v", route, err)
+		return gatewayjwt.GatewayClaims{}, false
+	}
+	if !isKeySegment(claims.TenantID) || !isKeySegment(claims.SproutID) {
+		log.Warnf("%s: gateway JWT tenant_id/sprout_id not usable as a key segment", route)
+		return gatewayjwt.GatewayClaims{}, false
+	}
+	if err := gatewaySubjectCheck(claims.TenantID, claims.SproutID, claims.Subject); err != nil {
+		log.Warnf("%s: gateway JWT for tenant %q sprout %q refused: its NKey is not the sprout's current one: %v", route, claims.TenantID, claims.SproutID, err)
+		return gatewayjwt.GatewayClaims{}, false
+	}
+	return claims, true
+}
+
+// sproutFileAccess reports whether token is a valid gateway JWT
+// (verifySproutGatewayJWT, revocation included) whose (tenant_id,
+// sprout_id) owns the file r requests: the object key must sit under
+// handlers.SproutFilePrefix for that pair. A valid gateway JWT grants
+// nothing beyond its own sprout's subtree — not other sprouts' files,
+// not the tenant's, not the shared recipe tree.
 //
 // The token is re-verified here rather than trusting Envoy: farmer's API
 // port is reachable without passing through Envoy, and headers Envoy
 // derives from the token (x-imas-sprout-nkey) can be spoofed on that
 // path.
 func sproutFileAccess(r *http.Request, token string) bool {
-	keys := gatewayKeys()
-	if keys == nil {
-		log.Warnf("FileServer: gateway JWT presented but no gateway signer is configured")
-		return false
-	}
-	claims, err := gatewayjwt.VerifyGatewayJWT(r.Context(), keys, token)
-	if err != nil {
-		log.Warnf("FileServer: rejecting gateway JWT: %v", err)
-		return false
-	}
-	if !isKeySegment(claims.TenantID) || !isKeySegment(claims.SproutID) {
-		log.Warnf("FileServer: gateway JWT tenant_id/sprout_id not usable as a key segment")
+	claims, ok := verifySproutGatewayJWT(r, "FileServer", token)
+	if !ok {
 		return false
 	}
 
@@ -112,35 +146,25 @@ func sproutFileAccess(r *http.Request, token string) bool {
 }
 
 // sproutIdentityAuth serves r through inner only if it carries a valid
-// gateway JWT ("Authorization: Bearer <jws>"), with the token's verified
-// (tenant_id, sprout_id) on the request context
-// (handlers.WithSproutIdentity) — the only place the handler gets a
-// tenant from. No CLI token, no development bypass, and no
-// header Envoy derived from the token: farmer's API port is reachable
-// without passing through Envoy, so the token is verified here.
+// gateway JWT ("Authorization: Bearer <jws>"; verifySproutGatewayJWT,
+// revocation included), with the token's verified (tenant_id,
+// sprout_id) on the request context (handlers.WithSproutIdentity) — the
+// only place the handler gets a tenant from. No CLI token, no
+// development bypass, and no header Envoy derived from the token:
+// farmer's API port is reachable without passing through Envoy, so the
+// token is verified here.
 //
 // A missing or non-bearer Authorization header is 401; a bearer token
-// that does not verify, or whose tenant_id/sprout_id is unusable, is 403.
+// that does not verify, whose tenant_id/sprout_id is unusable, or whose
+// NKey is revoked or superseded (or can't be checked) is 403.
 func sproutIdentityAuth(inner http.Handler, w http.ResponseWriter, r *http.Request) {
 	jws, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok || jws == "" {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	keys := gatewayKeys()
-	if keys == nil {
-		log.Warnf("SproutUpdateManifest: gateway JWT presented but no gateway signer is configured")
-		w.WriteHeader(http.StatusForbidden)
-		return
-	}
-	claims, err := gatewayjwt.VerifyGatewayJWT(r.Context(), keys, jws)
-	if err != nil {
-		log.Warnf("SproutUpdateManifest: rejecting gateway JWT: %v", err)
-		w.WriteHeader(http.StatusForbidden)
-		return
-	}
-	if !isKeySegment(claims.TenantID) || !isKeySegment(claims.SproutID) {
-		log.Warnf("SproutUpdateManifest: gateway JWT tenant_id/sprout_id unusable")
+	claims, ok := verifySproutGatewayJWT(r, "SproutUpdateManifest", jws)
+	if !ok {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
