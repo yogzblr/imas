@@ -31,7 +31,13 @@
 //     rollout window if one is set. Both, and that the version hasn't been
 //     revoked, are checked again under the claim below and before every
 //     wave, so withdrawing approval, revoking the version or reaching the
-//     end of the window stops the rollout.
+//     end of the window stops the rollout. That the tenant is still active
+//     is checked before every wave and every item (tenant_not_active
+//     otherwise): DeleteTenant keeps the policy row.
+//   - Waves take dispatch slots from a pool reserved for self_update,
+//     within a per-tenant cap (dispatch_limits.go), so cmd.run and cook
+//     traffic can't starve a rollout. An item farmer refuses unrun
+//     (farmer_busy) is sent again after a short backoff.
 //   - A tenant has at most one update rollout in progress. The batch is
 //     written in the same transaction that claims the tenant's
 //     tenant_update_policy row (claimRollout), so two POSTs can't both
@@ -817,7 +823,8 @@ type rolloutRun struct {
 	lease   *rowLease
 	// resumed: before each wave, also check that the target version is
 	// still registered and verifies (rolloutRegistrationCheck), as the
-	// POST did before the original process started.
+	// POST did before the original process started. (That the tenant is
+	// still active is checked for every run.)
 	resumed bool
 	// sent is every wave sent so far, a resumed run's predecessor's
 	// included.
@@ -861,9 +868,15 @@ func (r *rolloutRun) sendWaves(queued []AssetActionItem, atTarget map[SproutRef]
 		}
 
 		wave := sentWave{items: queued[start:min(start+size, len(queued))]}
-		wave.proofs = rolloutProofs(batch, wave.items, dispatchWave(r.d, r.nc, batch, wave.items), atTarget)
+		dispatched, stopped := dispatchWave(r.d, r.nc, batch, wave.items)
+		wave.proofs = rolloutProofs(batch, wave.items, dispatched, atTarget)
 		wave.deadline = rolloutNow().Add(rolloutWaveTimeout)
 		r.sent = append(r.sent, wave)
+		if stopped != "" {
+			log.Warnf("saasapi: update batch %s (tenant %s) halted during wave %d: %s", batch.ID, batch.TenantID, n, stopped)
+			halted = stopped
+			break
+		}
 
 		passed := false
 		switch batch.RolloutGate {
@@ -885,16 +898,23 @@ func (r *rolloutRun) sendWaves(queued []AssetActionItem, atTarget map[SproutRef]
 }
 
 // preWaveCheck is the check before every wave: the tenant's policy and
-// the version's revocation (rolloutPolicyCheck), and for a resumed run the
-// version's registration too. It returns "" to go ahead, or the code the
-// unsent items are failed with.
+// the version's revocation (rolloutPolicyCheck); that the tenant is still
+// active (rolloutTenantCheck), for a live run as for a resumed one
+// (security review L8: DeleteTenant keeps the policy row, so the policy
+// check alone would let a live rollout keep going for a deleted tenant);
+// and for a resumed run the version's registration too. It returns "" to
+// go ahead, or the code the unsent items are failed with. dispatchWave
+// repeats the tenant check before every item.
 func (r *rolloutRun) preWaveCheck() string {
 	code, err := rolloutPolicyCheck(r.d, r.batch.TenantID, r.version, rolloutNow())
 	if err != nil {
 		log.Errorf("saasapi: update batch %s (tenant %s): checking update policy: %v; halting", r.batch.ID, r.batch.TenantID, err)
 		return string(controlplane.ErrorInternal)
 	}
-	if code != "" || !r.resumed {
+	if code != "" {
+		return code
+	}
+	if code := rolloutTenantCheck(r.d, r.batch); code != "" || !r.resumed {
 		return code
 	}
 	return rolloutRegistrationCheck(r.d, r.batch, r.version)
@@ -921,25 +941,80 @@ func (r *rolloutRun) finish(halted string) {
 	}
 }
 
+// Retries of a rollout item farmer refused unrun (farmer_busy, or no
+// farmer subscribed): up to farmerBusyRetries more sends, after
+// farmerBusyBackoff, doubling. Variables so tests can shorten them.
+var (
+	farmerBusyRetries = 3
+	farmerBusyBackoff = 2 * time.Second
+)
+
 // dispatchWave is dispatchBatch for one wave of a rollout, recording when
 // each item was handed to dispatchItem, on saasapi's clock (rolloutNow).
 // The time is taken once the item holds a dispatch slot, just before
 // dispatchItem claims and sends it, so it is never later than the send.
-func dispatchWave(d *gorm.DB, nc *nats.Conn, batch AssetActionBatch, items []AssetActionItem) map[string]time.Time {
+//
+// Items take slots from the pool reserved for self_update, within the
+// tenant's cap (dispatch_limits.go), so no cmd.run or cook traffic delays
+// a wave. Before every item, and before every retry, the tenant must
+// still be active (security review L8; rolloutTenantCheck): once it
+// isn't, nothing more is sent and dispatchWave returns that check's code
+// as halted, for sendWaves to stop the rollout with. An item farmer
+// refused unrun is sent again up to farmerBusyRetries times, with a fresh
+// dispatch time; one still unsent after that stays queued, which fails
+// the wave's gate.
+func dispatchWave(d *gorm.DB, nc *nats.Conn, batch AssetActionBatch, items []AssetActionItem) (map[string]time.Time, string) {
+	limits := dispatchLimits.Load()
 	dispatched := make(map[string]time.Time, len(items))
+	var mu sync.Mutex
+	halted := ""
+	stop := func() bool {
+		mu.Lock()
+		if halted != "" {
+			mu.Unlock()
+			return true
+		}
+		mu.Unlock()
+		code := rolloutTenantCheck(d, batch)
+		if code == "" {
+			return false
+		}
+		mu.Lock()
+		if halted == "" {
+			halted = code
+		}
+		mu.Unlock()
+		return true
+	}
 	var wg sync.WaitGroup
 	for _, item := range items {
-		actionDispatchSlots <- struct{}{}
-		dispatched[item.AssetID] = rolloutNow()
+		release := limits.acquire(batch.TenantID, batch.ActionType)
+		if stop() {
+			release()
+			break
+		}
 		wg.Add(1)
 		go func(item AssetActionItem) {
 			defer wg.Done()
-			defer func() { <-actionDispatchSlots }()
-			dispatchItem(d, nc, batch, item)
+			defer release()
+			backoff := farmerBusyBackoff
+			for attempt := 0; ; attempt++ {
+				mu.Lock()
+				dispatched[item.AssetID] = rolloutNow()
+				mu.Unlock()
+				if !dispatchItem(d, nc, batch, item) || attempt >= farmerBusyRetries {
+					return
+				}
+				time.Sleep(backoff)
+				backoff *= 2
+				if stop() {
+					return
+				}
+			}
 		}(item)
 	}
 	wg.Wait()
-	return dispatched
+	return dispatched, halted
 }
 
 // rolloutProofs is each wave item's updateProof: a fresh report, or, for

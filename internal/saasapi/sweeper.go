@@ -72,6 +72,19 @@ type OutboxSweeperSettings struct {
 	// rollout or batch whose process died can be taken over
 	// (SAASAPI_OUTBOX_LEASE_TTL). Holders renew every third of it.
 	LeaseTTL time.Duration
+
+	// Dispatch concurrency (dispatch_limits.go), for every dispatcher,
+	// the sweeper's and the handlers' alike. Zero takes the default.
+	//
+	// DispatchConcurrency is the cmd.run/cook pool
+	// (SAASAPI_ACTION_DISPATCH_CONCURRENCY, default 64).
+	DispatchConcurrency int
+	// SelfUpdateDispatchConcurrency is the pool reserved for rollout waves
+	// (SAASAPI_SELF_UPDATE_DISPATCH_CONCURRENCY, default 16).
+	SelfUpdateDispatchConcurrency int
+	// DispatchTenantConcurrency is one tenant's cap in each pool
+	// (SAASAPI_ACTION_DISPATCH_TENANT_CONCURRENCY, default 8).
+	DispatchTenantConcurrency int
 }
 
 // Defaults and bounds for OutboxSweeperSettings. LoadConfig refuses a
@@ -114,6 +127,10 @@ func DefaultOutboxSweeperSettings() OutboxSweeperSettings {
 		ActionMaxAge:           defaultActionMaxAge,
 		MaxAttempts:            defaultOutboxMaxAttempts,
 		LeaseTTL:               defaultOutboxLeaseTTL,
+
+		DispatchConcurrency:           defaultActionDispatchConcurrency,
+		SelfUpdateDispatchConcurrency: defaultSelfUpdateDispatchConcurrency,
+		DispatchTenantConcurrency:     defaultActionDispatchTenantConcurrency,
 	}
 }
 
@@ -122,8 +139,12 @@ var outboxSettings = DefaultOutboxSweeperSettings()
 
 // SetOutboxSweeperSettings installs s. Like SetDB, call it once at startup,
 // before NewRouter's handlers serve requests: their dispatches take leases
-// with s.LeaseTTL. LoadConfig has already validated s.
-func SetOutboxSweeperSettings(s OutboxSweeperSettings) { outboxSettings = s }
+// with s.LeaseTTL and slots from s's dispatch pools. LoadConfig has already
+// validated s.
+func SetOutboxSweeperSettings(s OutboxSweeperSettings) {
+	outboxSettings = s
+	setDispatchLimits(s.DispatchConcurrency, s.SelfUpdateDispatchConcurrency, s.DispatchTenantConcurrency)
+}
 
 // CurrentOutboxSweeperSettings returns the settings in use.
 func CurrentOutboxSweeperSettings() OutboxSweeperSettings { return outboxSettings }
@@ -212,7 +233,8 @@ func (sw *sweeper) sweep() {
 //   - fails the batch's other due items with tenant_not_active, unsent, if
 //     its tenant is no longer active;
 //   - fails a due item already dispatched SAASAPI_OUTBOX_MAX_ATTEMPTS times
-//     (each time back to queued: no farmer was listening) with
+//     (each time back to queued: no farmer was listening, or farmer was
+//     busy and refused it unrun) with
 //     dispatch_not_delivered;
 //   - and dispatches the remaining due items in the background under the
 //     lease, from the batch's stored action_params, exactly as the original
