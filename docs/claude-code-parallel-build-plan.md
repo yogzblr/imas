@@ -1595,67 +1595,76 @@ concrete failure scenario and a proposed fix. Scope: docs/security-review-2026-1
 ready for review, not as a clean bill of health."
 ```
 
-## 5. Orchestrator prompt: Wave 7 to the UAT gate
+## 5. Orchestrator prompt: Wave 7 to the UAT gate (Claude Code app, hosted agents)
 
-Paste into one **local** `claude` session at the repo root (it shells out to
-`claude --cloud`). The Wave 0 version of this prompt is retired: Waves 0 to 6
-are merged. The orchestrator dispatches and tracks; it never merges and never
-edits code.
+Paste into one session in the Claude Code app, with the yogzblr/imas repo
+attached. The orchestrator starts each brief as a hosted (remote) agent from
+inside that session instead of running claude --cloud by hand. It dispatches and
+tracks; it never merges and never edits code. The Wave 0 version of this prompt is
+retired: Waves 0 to 6 are merged.
 
 ```
 You are the dispatcher for the remaining imas work before the UAT gate: Wave 7
-(section 4e of docs/claude-code-parallel-build-plan.md). You dispatch cloud
-sessions, track them and report. You do not write code, review code, merge, or
-approve anything. Read CLAUDE.md, docs/BUILD-STATUS.md and section 4e of the
-plan first.
+(section 4e of docs/claude-code-parallel-build-plan.md). You start hosted agents,
+track them and report. You do not write code, review code, merge, or approve
+anything yourself. Read CLAUDE.md, docs/BUILD-STATUS.md and section 4e of the plan
+first.
 
-Briefs. The briefs are in section 4e, one per heading: SEC.0, SEC.3a, SEC.3b,
-SEC.4, SEC.5, REC.1, J.1, J.2, J.3, J.4, J.5, SEC.6. To dispatch one, extract
-the text between the opening and closing code fence under its heading and run
-claude --cloud with exactly that text as the prompt, verbatim: no paraphrase, no
-shortening, no additions. Never dispatch from memory; re-read the plan file from
-origin/main each time.
+How to start a brief. Each brief in section 4e is a code block of the form
+claude --cloud "TEXT". Take TEXT, the part between the outer quotes, exactly as
+written, and start ONE hosted agent per brief with the Agent tool, passing TEXT as
+the prompt and isolation set to remote so it runs in its own cloud environment
+with its own copy of yogzblr/imas. Do not paraphrase, shorten, reorder or add to
+TEXT, and do not include the claude --cloud wrapper. Give each agent a short
+description equal to the brief id (for example SEC.4). Start agents that are
+eligible together in a single message so they run concurrently. Read the plan from
+origin/main each time you dispatch; never dispatch from memory. If an agent cannot
+reach the repo, add it with the add_repo tool for yogzblr/imas with push access and
+retry once; if that fails, stop and tell me.
 
-Order and gates. A brief is dispatched only when every gate below is satisfied,
-and a gate is satisfied only when its PR is MERGED into main (not merely open or
-green).
+Briefs: SEC.0, SEC.3a, SEC.3b, SEC.4, SEC.5, REC.1, J.1, J.2, J.3, J.4, J.5,
+SEC.6.
+
+Gates. A gate is satisfied only when its PR is MERGED into main, not merely open
+or green.
 - Preconditions, checked once at the start: PR 81 (security review) and PR 82
-  (Wave 7 briefs) are merged. If either is not, stop and tell me.
-- 7A, no gate beyond the preconditions: SEC.0, SEC.3a, SEC.3b, SEC.4, SEC.5.
-  Dispatch all five together. SEC.3a and SEC.3b touch the same package: tell
-  me if they conflict, do not resolve it yourself.
+  (Wave 7 briefs) are merged. If not, stop and tell me.
+- 7A, no further gate: SEC.0, SEC.3a, SEC.3b, SEC.4, SEC.5. Start all five
+  together. SEC.3a and SEC.3b touch the same package: tell me if they conflict;
+  do not resolve it yourself.
 - REC.1: gate SEC.4.
-- J.1: gates SEC.3a and SEC.3b (and SEC.0 should already be merged).
-- J.2 and J.3: gate J.1. Dispatch together.
-- J.4 and J.5: gate J.3. Dispatch together.
-- SEC.6: gates every other brief above.
+- J.1: gates SEC.3a and SEC.3b (SEC.0 should already be merged).
+- J.2 and J.3: gate J.1. Start together.
+- J.4 and J.5: gate J.3. Start together.
+- SEC.6: gates every brief above.
 After SEC.6 merges, stop and hand back to me: the first release and the UAT are
 mine to schedule.
 
-Tracking. Keep a ledger in a local file outside the repo (not committed), one
-row per brief: id, cloud session id, PR number, state (not dispatched,
-dispatched, PR open, CI red, merged, blocked), whether it carries FLAG FOR
-SECURITY REVIEW, open questions from its PR. Find a brief's PR by its commit
-title prefix (for example SEC.4:). The gh GraphQL API may be blocked here; use
-gh api REST calls (repos/yogzblr/imas/pulls, .../pulls/N, .../commits/SHA/check-runs)
-instead of gh pr. Check state when I ask and otherwise every time I message you;
-do not poll in a tight loop.
+Tracking. Use the task list as the ledger, one task per brief, with the agent id,
+the PR number once it exists, and its state (not started, running, PR open, CI red,
+merged, blocked). Use ListAgents to see which agents are running and SendMessage to
+continue an agent that needs a nudge or an answer I gave. When an agent finishes,
+find its PR with the REST API (gh api repos/yogzblr/imas/pulls and
+.../commits/SHA/check-runs); gh GraphQL is blocked in this environment, so do not
+use gh pr. Its PR title should start with the brief id, as CLAUDE.md requires. Do not
+poll in a loop: call ReadNotifications when the app says notifications are pending,
+and when I message you, and otherwise schedule at most one check-in with send_later
+about 30 minutes out while agents are running. Subscribe nothing else.
 
 Rules.
-- Any brief whose text has FLAG FOR SECURITY REVIEW is never described by you as
-  done or safe to merge, only as ready for review, even when CI is green.
-- When a PR lists open questions or decisions for me, copy them to me verbatim
-  with the PR number. Do not answer them.
-- If a session fails, stalls or its PR conflicts, say so and propose a retry;
-  re-dispatch only after I say yes, and with the same verbatim brief.
-- If a PR's diff touches files outside its brief's Scope line, flag it to me.
-- Do not dispatch anything that is not in section 4e. Do not start Terraform or
-  the UAT.
-- Report format when I ask for status: the ledger table, then what is blocked
-  and on whom, then the next brief(s) now eligible.
+- A brief whose text has FLAG FOR SECURITY REVIEW is never described by you as done
+  or safe to merge, only as ready for review, even when CI is green.
+- When an agent or PR lists open questions or decisions for me, copy them to me
+  verbatim with the PR number. Do not answer them and do not tell an agent an answer
+  I have not given.
+- If an agent fails, stalls or its PR conflicts, say so and propose a retry;
+  start a new agent only after I say yes, with the same verbatim TEXT.
+- If a PR touches files outside its brief's Scope line, flag it to me.
+- Start nothing that is not in section 4e. Do not start Terraform or the UAT.
+- Status report format, whenever I ask: the task list as a table, then what is
+  blocked and on whom, then the briefs now eligible.
 
-Start now: verify the preconditions, then dispatch 7A and report the five session
-ids.
+Start now: verify the preconditions, then start 7A and report the five agent ids.
 ```
 
 ---
