@@ -306,9 +306,10 @@ next cook uses it, with no restart and no cache to clear. Design:
 How-to: [`INSTALL.md`](../INSTALL.md#upload-a-recipe).
 
 **Off unless configured.** Without `SAASAPI_RECIPES_S3_ENDPOINT` every recipe
-route answers `503 recipes_not_configured`. `cmd/saasapi` doesn't call
-`ConfigureRecipes` yet, so today they answer 503 in a deployment whatever
-the configuration (see BUILD-STATUS Open item 10).
+route answers `503 recipes_not_configured`. With it set, saasapi sets up
+recipe storage at startup (`ConfigureRecipes`, before the router), and
+refuses to start if those settings can't be used: an unreadable secret key
+file, or a render limit out of range.
 
 **Roles.** These routes, unlike the rest, also check a Keycloak role on the
 token: realm roles (`realm_access.roles`) or client roles of the token's

@@ -878,12 +878,6 @@ from source and no cluster:
    namespace with farmer's seed Secret, but it mounts only its own
    credential Secret. Whoever can create pods in this namespace could
    mount either one.
-4. **`cmd/saasapi` doesn't call `saasapi.ConfigureRecipes` yet** (REC.1 was
-   scoped to `internal/saasapi`). `LoadConfig` reads and checks every
-   `SAASAPI_RECIPES_*` and `IMAS_RECIPE_*` value, so a bad one still stops
-   saasapi, but until `main` passes `cfg.Recipes` to `ConfigureRecipes`
-   before `NewRouter`, the recipe routes answer 503 whatever
-   `saasapi.recipes.enabled` says, with the default roles and limits.
 
 ## Licensing
 

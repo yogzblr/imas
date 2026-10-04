@@ -86,7 +86,7 @@ released.
 
 | # | Item | RAG | Next step |
 |---|---|---|---|
-| 1 | Terraform UAT gate, and the first release it needs | **Red** | Tag `v0.1.0-rc.1`, run Release on it, publish the Buildkite packages by hand with `publish-packages.yml` (pre-releases are skipped), then choose the provider and dispatch the gate. Recipe upload (REC.1) is built and awaiting review, but needs `cmd/saasapi` to call `ConfigureRecipes` before the UAT can use it. |
+| 1 | Terraform UAT gate, and the first release it needs | **Red** | Tag `v0.1.0-rc.1`, run Release on it, publish the Buildkite packages by hand with `publish-packages.yml` (pre-releases are skipped), then choose the provider and dispatch the gate. Recipe upload (REC.1) is built and awaiting review; the UAT needs saasapi's own object-store credential and the recipe roles set up. |
 | 2 | `shell.*` unsealed | **Red** | Design written, awaiting security review ("Sealing `shell.*`" in `imas-payload-encryption-design.md`). Then decide its open questions and dispatch the implementation brief. |
 | 3 | Scale and latency (jitter, clustered bus, load tests) | **Red** | Jitter (SCALE.1), clustered bus (SCALE.2) and the load harness (SCALE.3) are built. Run the harness at 10k and 100k on a real cluster (`docs/loadtest.md`); no load result exists yet. |
 | 4 | Security review of the flagged work | **Amber** | Read-only code review done (`docs/security-review-2026-10.md`: 4 High, 8 Medium, 25 Low). SEC.5 fixes M1, L1, L2, L8 and M5 (ready for review); L4 decided (revocation stays on farmer). Left before dispatch: H2, fleetcatalog's `RolloutWindow`, and the human review, recorded here. |
@@ -95,7 +95,7 @@ released.
 | 7 | SaaS API section 1.7 (API keys, teams, webhooks, billing) | **Red** | Never designed; needs a design pass. |
 | 8 | Docs wording (requirement 15, README embedded bus) | **Amber** | Small docs change. |
 | 9 | Nice-to-haves (Keycloak harness, rotation scheduler, CERT-In/DPDP review) | **Amber** | Unowned. |
-| 10 | Leftovers from PR #62 to #67 (release pipeline, stale diagram, OpenBao client follow-ups) | **Amber** | Fold into one clean-up brief after the first release shows what the pipeline really needs. Add fleetreleaser's check against the tag's signed `checksums.txt` there if wanted (SEC.5 report). REC.1 follow-ups are listed under item 10: wiring, audit table, deprovision clean-up, the role on `cook`, and ServeMux redirects (PR #89). |
+| 10 | Leftovers from PR #62 to #67 (release pipeline, stale diagram, OpenBao client follow-ups) | **Amber** | Fold into one clean-up brief after the first release shows what the pipeline really needs. Add fleetreleaser's check against the tag's signed `checksums.txt` there if wanted (SEC.5 report). REC.1 follow-ups are listed under item 10: audit table, deprovision clean-up, the role on `cook`, and ServeMux redirects (PR #89). |
 | 11 | Control plane forgeable by a compromised bus (CLI tokens, sprout refresh, `internal.*`) | **Red** | Design written, awaiting security review ("Sealing the control plane" in `imas-payload-encryption-design.md`). Ship the token-lifetime stopgap now. |
 
 ## Requirements traceability
@@ -654,13 +654,12 @@ by an external git sync today.
    review (FLAG FOR SECURITY REVIEW).** `GET/PUT/DELETE
    /v1/tenants/{tenant_id}/recipes[/{name}]` (design doc §1.6,
    `docs/api/saasapi.md` "Recipes", `docs/INSTALL.md` "Upload a recipe").
-   Before the UAT can upload a recipe, two things are needed. First,
-   `cmd/saasapi` must call `saasapi.ConfigureRecipes(cfg.Recipes, vc)` before
-   `NewRouter`. REC.1's scope stopped at `internal/saasapi`, so until that
-   one call is added the routes answer 503. Second, the deployment needs
-   saasapi's own object-store credential (`saasapi.recipes.*`, policy in
-   `deploy/helm/farmer/files/objectstore-policies/`) and the Keycloak roles
-   `imas-recipes-read`/`imas-recipes-write`.
+   `cmd/saasapi` sets it up at startup (`saasapi.ConfigureRecipes`, added
+   to `main.go` with the owner's approval) and refuses to start on unusable
+   recipe settings. Before the UAT can upload a recipe, the deployment
+   needs saasapi's own object-store credential (`saasapi.recipes.*`, policy
+   in `deploy/helm/farmer/files/objectstore-policies/`) and the Keycloak
+   roles `imas-recipes-read`/`imas-recipes-write`.
 2. **`shell.*` is not sealed** (requirement 14). An interactive PTY is started
    from a plaintext request on `imas.sprouts.<id>.shell.start`; a compromised
    bus can still get a shell on any Unix sprout, which undoes the value of
@@ -956,7 +955,6 @@ by an external git sync today.
       and `ListPage`. Freshness was confirmed with no change to `internal/cook`:
       no cache, and the next cook uses the upload
       (`TestRecipeUploadCooksOnSameTenantOnly`). Still open:
-      - `cmd/saasapi` doesn't call `ConfigureRecipes` yet (Open item 1).
       - Audit records are objects in the bucket, not a `saas` table, which
         would need a migration.
       - Tenant deprovisioning deletes neither `recipes/` nor `recipe-audit/`.
