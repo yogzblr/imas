@@ -238,14 +238,6 @@ func openRefreshReply(t *testing.T, sealed []byte, msgID string) pki.RefreshResp
 	return res
 }
 
-func keysOf(m map[string]json.RawMessage) []string {
-	var out []string
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
-}
-
 // Owner decision, 2026-10-04: no NKey-only refresh for any sprout, box
 // key or not, and no fallback.
 func TestRefresh_RefusesTheNKeyProof(t *testing.T) {
