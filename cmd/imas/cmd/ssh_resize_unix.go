@@ -3,35 +3,40 @@
 package cmd
 
 import (
-	"encoding/json"
 	"os"
 	"os/signal"
 	"syscall"
 
-	nats "github.com/nats-io/nats.go"
 	"golang.org/x/term"
-
-	"github.com/yogzblr/imas/internal/shell"
 )
 
-// watchTerminalResize watches for SIGWINCH (terminal resize) and publishes
-// a shell.ResizeMessage to resizeSubject whenever the terminal size
-// changes, until done is closed.
-func watchTerminalResize(nc *nats.Conn, resizeSubject string, done <-chan struct{}) {
+// watchTerminalResize delivers the terminal's new size on every SIGWINCH,
+// until done is closed. The session sends each as a sealed RESIZE frame.
+func watchTerminalResize(done <-chan struct{}) <-chan [2]int {
+	sizes := make(chan [2]int, 1)
 	sigWinch := make(chan os.Signal, 1)
 	signal.Notify(sigWinch, syscall.SIGWINCH)
 	go func() {
+		defer signal.Stop(sigWinch)
 		for {
 			select {
 			case <-sigWinch:
 				if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
-					resize := shell.ResizeMessage{Cols: w, Rows: h}
-					data, _ := json.Marshal(resize)
-					nc.Publish(resizeSubject, data)
+					select {
+					case sizes <- [2]int{w, h}:
+					default:
+						// A newer size replaces one not yet sent.
+						select {
+						case <-sizes:
+						default:
+						}
+						sizes <- [2]int{w, h}
+					}
 				}
 			case <-done:
 				return
 			}
 		}
 	}()
+	return sizes
 }

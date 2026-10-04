@@ -56,6 +56,17 @@ func sproutPermissions(id string) jwt.Permissions {
 			// imas.sprouts.<id>.>, so the sprout never receives its own
 			// logs back through its Sub grant.
 			sproutLogPublishGrant(id),
+			// Sealed shell (J.5): the sprout's s2f frames,
+			// imas.shell.sprout.<id>.<session_id>.s2f. Outside
+			// imas.sprouts.<id>.>, so the sprout never receives its own
+			// frames; farmer's f2s frames and the sealed shell.start
+			// arrive inside its Sub grant. Every frame is sealed under
+			// per-session keys, so the grant lets the sprout publish; what
+			// it publishes still has to open at farmer. Before this grant
+			// shell couldn't work at all for a sprout with a per-sprout
+			// JWT. Already-enrolled sprouts get it through the
+			// mintOrReuseUserJWT re-mint on their next refresh and restart.
+			SproutShellPublishGrant(id),
 		}},
 		Sub: jwt.Permission{Allow: jwt.StringList{
 			"imas.sprouts." + id + ".>",
@@ -73,6 +84,12 @@ func SproutLogSubjectPrefix(id string) string {
 // key (internal/natsapi's SproutBoxKeySubmitPattern).
 func SproutBoxKeySubmitSubject(id string) string {
 	return "imas.sprouts." + id + ".boxkey.pub"
+}
+
+// SproutShellPublishGrant is sprout id's publish grant for its sealed
+// shell frames (internal/shell's SproutOutSubjectPrefix plus ".>").
+func SproutShellPublishGrant(id string) string {
+	return "imas.shell.sprout." + id + ".>"
 }
 
 func sproutLogPublishGrant(id string) string {

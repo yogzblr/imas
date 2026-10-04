@@ -114,7 +114,10 @@ const (
 	MethodRecipesGet  = "recipes.get"
 
 	// Shell
-	MethodShellStart = "shell.start"
+	// MethodShellOpen opens a sealed shell session (purpose c2f.shell.open;
+	// internal/natsapi shell.go). It replaced the plaintext shell.start
+	// (J.5), which is gone.
+	MethodShellOpen = "shell.open"
 
 	// Audit
 	MethodAuditDates = "audit.dates"
@@ -195,8 +198,8 @@ type CohortRefreshRequest = CohortRefreshParams
 // AuthLoginResponse is the response for the auth.login endpoint.
 type AuthLoginResponse = apitypes.LoginResponse
 
-// ShellStartRequest is the request to start an interactive shell session.
-type ShellStartRequest = shell.CLIStartRequest
+// ShellOpenRequest is the sealed request opening a shell session.
+type ShellOpenRequest = shell.OpenRequest
 
 // RecipesGetRequest identifies a recipe by dot-notation name.
 type RecipesGetRequest struct {
@@ -278,8 +281,8 @@ type CohortsRefreshResponse = CohortRefreshResponse
 // CohortsValidateResponse describes whether all cohort references are valid.
 type CohortsValidateResponse = CohortValidateResponse
 
-// ShellStartResponse contains session subjects for the CLI to use.
-type ShellStartResponse = shell.StartResponse
+// ShellOpenResponse is farmer's sealed answer to it.
+type ShellOpenResponse = shell.OpenResult
 
 // AuditDatesResponse is a list of dates with audit entries.
 type AuditDatesResponse = []string
@@ -313,7 +316,7 @@ func AllMethods() []string {
 		MethodAuthLogin, MethodAuthWhoAmI, MethodAuthListUsers, MethodAuthAddUser, MethodAuthRemoveUser, MethodAuthExplain,
 		MethodAuthResetKey, MethodAuthRotateKey,
 		MethodRecipesList, MethodRecipesGet,
-		MethodShellStart,
+		MethodShellOpen,
 		MethodAuditDates, MethodAuditQuery,
 	}
 }

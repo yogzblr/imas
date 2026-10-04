@@ -8,12 +8,10 @@ import (
 	"time"
 
 	"github.com/taigrr/jety"
-	"github.com/yogzblr/imas/internal/audit"
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/jobs"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/rbac"
-	"github.com/yogzblr/imas/internal/shell"
 )
 
 // --- jety test helpers ---
@@ -160,21 +158,6 @@ func TestHandleCookInvalidAction(t *testing.T) {
 	_, err := handleCook(apiCaller{TenantID: pki.CurrentTenantID()}, params)
 	if err == nil {
 		t.Fatal("expected error for invalid action")
-	}
-}
-
-// --- handleShellStart with registered sprout but nil NATS ---
-
-func TestHandleShellStartRegisteredSproutNoNATS(t *testing.T) {
-	pkiDir := setupNatsAPIPKI(t)
-	writeNKey(t, pkiDir, "accepted", "sprout-ssh", "UKEY_SSH")
-
-	ClearNatsConn(pki.CurrentTenantID())
-
-	params := json.RawMessage(`{"sprout_id":"sprout-ssh","cols":80,"rows":24}`)
-	_, err := handleShellStart(apiCaller{TenantID: pki.CurrentTenantID()}, params)
-	if err == nil {
-		t.Fatal("expected error when NATS not available")
 	}
 }
 
@@ -355,98 +338,6 @@ func TestHandleJobsCancelInvalidJSON(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
-}
-
-// --- logShellEnd tests ---
-
-func TestLogShellEndNilGlobalLogger(t *testing.T) {
-	// Ensure no global logger.
-	audit.SetGlobal(nil)
-
-	info := &shell.SessionInfo{
-		SessionID: "test-sess",
-		SproutID:  "test-sprout",
-		Pubkey:    "UTEST",
-		RoleName:  "admin",
-		Shell:     "/bin/bash",
-		StartedAt: time.Now().Add(-5 * time.Minute),
-	}
-
-	// Should not panic.
-	logShellEnd(info, 5*time.Minute, 0, "")
-}
-
-func TestLogShellEndWithLogger(t *testing.T) {
-	dir := t.TempDir()
-	logger, err := audit.NewLogger(dir)
-	if err != nil {
-		t.Fatalf("NewLogger: %v", err)
-	}
-	defer logger.Close()
-	audit.SetGlobal(logger)
-	defer audit.SetGlobal(nil)
-
-	info := &shell.SessionInfo{
-		SessionID: "test-sess-logged",
-		SproutID:  "test-sprout",
-		Pubkey:    "UTESTKEY",
-		RoleName:  "operator",
-		Shell:     "/bin/sh",
-		StartedAt: time.Now().Add(-3 * time.Minute),
-	}
-
-	// Should log without error.
-	logShellEnd(info, 3*time.Minute, 0, "")
-}
-
-func TestLogShellEndWithError(t *testing.T) {
-	dir := t.TempDir()
-	logger, err := audit.NewLogger(dir)
-	if err != nil {
-		t.Fatalf("NewLogger: %v", err)
-	}
-	defer logger.Close()
-	audit.SetGlobal(logger)
-	defer audit.SetGlobal(nil)
-
-	info := &shell.SessionInfo{
-		SessionID: "test-sess-err",
-		SproutID:  "test-sprout",
-		Pubkey:    "UTESTKEY",
-		RoleName:  "admin",
-		StartedAt: time.Now().Add(-1 * time.Minute),
-	}
-
-	// Should log with error message.
-	logShellEnd(info, 1*time.Minute, 1, "connection reset")
-}
-
-// --- subscribeSessionDone ---
-
-func TestSubscribeSessionDoneNilNATS(t *testing.T) {
-	ClearNatsConn(pki.CurrentTenantID())
-
-	info := &shell.SessionInfo{
-		SessionID:   "test-sub-nil",
-		SproutID:    "test-sprout",
-		DoneSubject: "imas.shell.done.test",
-	}
-
-	// Should return immediately without panic.
-	subscribeSessionDone(nil, info)
-}
-
-func TestSubscribeSessionDoneEmptySubject(t *testing.T) {
-	ClearNatsConn(pki.CurrentTenantID())
-
-	info := &shell.SessionInfo{
-		SessionID:   "test-sub-empty",
-		SproutID:    "test-sprout",
-		DoneSubject: "",
-	}
-
-	// Should return immediately without panic.
-	subscribeSessionDone(nil, info)
 }
 
 // --- handleJobsCancel scope check path ---

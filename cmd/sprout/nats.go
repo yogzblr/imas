@@ -18,6 +18,7 @@ import (
 	"github.com/yogzblr/imas/internal/shell"
 
 	nats "github.com/nats-io/nats.go"
+	"github.com/taigrr/jety"
 )
 
 func natsInit(ctx context.Context, nc *nats.Conn) error {
@@ -121,15 +122,31 @@ func natsInit(ctx context.Context, nc *nats.Conn) error {
 		return err
 	}
 
-	// Interactive shell sessions.
-	_, err = nc.Subscribe("imas.sprouts."+sproutID+".shell.start", func(m *nats.Msg) {
-		shell.HandleShellStart(nc, m)
-	})
+	// Interactive shell sessions: sealed only (internal/shell, J.5).
+	shellServer = shell.NewSprout(nc, sproutID)
+	_, err = nc.Subscribe(shell.StartSubject(sproutID), shellServer.HandleStart)
 	if err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// shellServer serves this sprout's shell sessions; runSprout ends them
+// when the sprout stops.
+var shellServer *shell.Sprout
+
+// shellPolicyFromConfig reads the sprout's shell policy: disableshell
+// (default false), shellallowlist (default empty: /etc/shells) and
+// shellmaxsessions (default 0: shell.DefaultSproutMaxSessions). None has
+// a jety default, so the sprout never writes them back into its config
+// file (see the Ansible role's imas_sprout_disable_shell).
+func shellPolicyFromConfig() shell.SproutPolicy {
+	return shell.SproutPolicy{
+		Disabled:      jety.GetBool("disableshell"),
+		AllowedShells: jety.GetStringSlice("shellallowlist"),
+		MaxSessions:   jety.GetInt("shellmaxsessions"),
+	}
 }
 
 // stagedSyncTimeout bounds a staged recipe pull's download (including a

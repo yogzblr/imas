@@ -74,6 +74,18 @@ imas_sprout_boxkey_prev_grace: ""
 imas_sprout_bus_reconnect_base: ""
 imas_sprout_bus_reconnect_cap: ""
 
+# Refuse every interactive shell session (imas ssh) on this host, whatever
+# farmer allows (config key "disableshell"). The sprout checks it before
+# anything else, so it is a per-host off switch that doesn't depend on
+# farmer. Sessions are sealed end to end either way; the shells allowed
+# are /etc/shells unless the sprout's config sets "shellallowlist".
+#
+# Always written, as true or false. Unlike imas_sprout_boxkey_prev_grace,
+# the sprout registers no default for "disableshell", so it never rewrites
+# the key with a value of its own and a run stays idempotent (the Molecule
+# note in docs/BUILD-STATUS.md, "Ansible + packaging").
+imas_sprout_disable_shell: false
+
 # --- Package ------------------------------------------------------------------
 
 # Buildkite organization that owns the imasdeb/imasrpm/imasnget registries

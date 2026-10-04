@@ -118,7 +118,7 @@ var userRoutes = map[string]userHandler{
 	MethodAuthWhoAmI:    handleAuthWhoAmI,
 	MethodAuthExplain:   handleAuthExplain,
 	MethodAuthRotateKey: handleAuthRotateKey,
-	MethodShellStart:    handleShellStart,
+	MethodShellOpen:     handleShellOpen,
 }
 
 // apiRoutes is every imas.api.* method Subscribe registers, as a

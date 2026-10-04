@@ -24,7 +24,8 @@
   ansible.builtin.set_fact:
     _imas_sprout_managed: >-
       {{
-        {'farmerinterface': imas_farmer_host, 'farmerapiport': imas_farmer_api_port | string}
+        {'farmerinterface': imas_farmer_host, 'farmerapiport': imas_farmer_api_port | string,
+         'disableshell': imas_sprout_disable_shell | bool}
         | combine({'busurls': imas_farmer_bus_urls} if imas_farmer_bus_urls | length > 0 else {})
         | combine({'sproutrootcatofu': false} if imas_sprout_root_ca | length > 0 else {})
         | combine({'busproxyurl': imas_sprout_bus_proxy_url} if imas_sprout_bus_proxy_url | length > 0 else {})
@@ -56,6 +57,11 @@
     # otherwise. The same goes for imas_sprout_bus_reconnect_base and
     # imas_sprout_bus_reconnect_cap ("busreconnectbase", "busreconnectcap"),
     # whose defaults the sprout writes back as "2s" and "5m0s".
+    #
+    # imas_sprout_disable_shell ("disableshell") is the opposite case: the
+    # sprout has no default for it, so it is always written (true or
+    # false) and the sprout only ever writes back the value it read. A
+    # boolean compares equal as a string either way ("False" == "False").
     _imas_sprout_unmanaged: >-
       {{
         (['busurls'] if imas_farmer_bus_urls | length == 0 else [])
