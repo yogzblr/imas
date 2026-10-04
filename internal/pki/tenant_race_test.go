@@ -610,6 +610,46 @@ func TestDeprovisionTenant_RowCreatedAfterLookup(t *testing.T) {
 	}
 }
 
+// A deprovision that read the row before a provision on another replica
+// recorded the tenant's Account, and has no account.jwt on its own disk
+// (per-replica volumes with shared keys): the provision has already pushed
+// a live JWT and re-checked before the mark. The "nothing to lock out"
+// decision must use the Account recorded after the mark, not the stale
+// read, or the deleted tenant stays live on the bus.
+func TestDeprovisionTenant_AccountRecordedBeforeMark(t *testing.T) {
+	startRaceBus(t)
+	t.Cleanup(func() { testHookDeprovisionAfterLookup = nil })
+	rt := setupRaceTenant(t, "t_stale_account")
+	pub, err := GetTenantAccountPub(rt.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What this replica sees when its deprovision starts: the row without
+	// an Account yet, and no account.jwt on its own disk (the keys are
+	// shared, as with externally supplied seeds).
+	if err := db.Model(&tenantRow{}).Where("id = ?", rt.id).Update("account_pub", "").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(tenantAccountJWTPath(rt.id)); err != nil {
+		t.Fatal(err)
+	}
+	// The other replica records the Account (its live JWT is already on the
+	// bus) between this deprovision's read and its mark.
+	testHookDeprovisionAfterLookup = func(id string) {
+		if id != rt.id {
+			return
+		}
+		if err := setTenantAccountPub(id, pub); err != nil {
+			t.Errorf("setTenantAccountPub: %v", err)
+		}
+	}
+
+	if err := DeprovisionTenant(rt.id); err != nil {
+		t.Fatalf("DeprovisionTenant = %v, want the lockout pushed", err)
+	}
+	assertBusLockedOut(t, rt)
+}
+
 func slicesContains(ss []string, s string) bool {
 	for _, v := range ss {
 		if v == s {
