@@ -149,7 +149,7 @@ func NewOperatorServer(cfg Config) (*http.Server, error) {
 	}
 	return &http.Server{
 		Addr:              cfg.OperatorListenAddr,
-		Handler:           p.router(),
+		Handler:           p.handler(),
 		TLSConfig:         &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -157,6 +157,12 @@ func NewOperatorServer(cfg Config) (*http.Server, error) {
 		WriteTimeout: maxReleasePackages*fleetReleaserTimeout + time.Minute,
 		IdleTimeout:  2 * time.Minute,
 	}, nil
+}
+
+// handler is router behind RejectUncleanPaths: what the operator
+// listener serves.
+func (p *operatorPlane) handler() http.Handler {
+	return RejectUncleanPaths(p.router())
 }
 
 // router serves the operator routes and nothing else: none of NewRouter's

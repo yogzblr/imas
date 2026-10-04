@@ -59,10 +59,16 @@ import (
 // version that is not X.Y.Z, a non-canonical result — is refused rather
 // than guessed at. The result must equal the manifest's version exactly.
 //
-// An MSI ProductVersion is numeric only (prerelease suffixes are dropped
-// when the MSI is built), so for an MSI only MAJOR.MINOR.PATCH can be
-// compared: an MSI of v2.5.0-rc.1 and one of v2.5.0 both say 2.5.0. That
-// residual gap is recorded in docs/BUILD-STATUS.md (Open item 4).
+// An MSI ProductVersion is numeric only: the prerelease is dropped when
+// the MSI is built, so an MSI of v2.5.0-rc.1 and one of v2.5.0 both say
+// 2.5.0, and an MSI's metadata can't bind it to a prerelease version. So
+// a prerelease is never installed on Windows (owner's decision on PR #86,
+// 2026-10-04): prepare refuses a prerelease target on an MSI platform
+// before anything is fetched (ErrPrereleaseOnWindows), and
+// verifyPackageIdentity refuses an MSI for a prerelease manifest again.
+// For a release version, MAJOR.MINOR.PATCH is the whole version, so the
+// MSI's ProductVersion must equal it. Linux packages are unaffected:
+// their metadata carries the prerelease, which is compared in full.
 
 const (
 	// sproutPackageName is the deb Package and rpm NAME of every sprout
@@ -331,6 +337,9 @@ func verifyPackageIdentity(ctx context.Context, p platform, file string, m fleet
 	}
 	if id.name != sproutPackageName {
 		return id, nil, fmt.Errorf("%w: the package is %q, not %s", ErrPackageMismatch, id.name, sproutPackageName)
+	}
+	if p.pkgType == pkgMSI && semver.Prerelease(m.Version) != "" {
+		return id, nil, fmt.Errorf("%w: %s", ErrPrereleaseOnWindows, m.Version)
 	}
 	v, err := packageSemver(p.pkgType, id)
 	if err != nil {

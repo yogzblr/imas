@@ -132,7 +132,7 @@ func main() {
 	// reaching the SaaS API over REST without this binary owning certs.
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,
-		Handler:      newRouter(cfg),
+		Handler:      saasapi.RejectUncleanPaths(newRouter(cfg)),
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
 		IdleTimeout:  cfg.IdleTimeout,
