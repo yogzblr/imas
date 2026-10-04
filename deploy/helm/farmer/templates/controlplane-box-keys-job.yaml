@@ -1,0 +1,131 @@
+{{- if .Values.controlPlaneBoxKeys.enabled }}
+{{- include "imas-farmer.validate" . -}}
+{{- $c := .Values.controlPlaneBoxKeys -}}
+{{- $t := .Values.farmer.openbao.tenantBox -}}
+{{- /*
+`farmer ensure-controlplane-box-keys` (internal/pki controlplanekeys.go):
+creates the platform keypair and the SaaS API's box keypair in OpenBao KV
+v2 if missing, and publishes their public halves (values.yaml,
+controlPlaneBoxKeys). FLAG FOR SECURITY REVIEW.
+
+The ServiceAccount below is the only identity that may log in with the
+imas-controlplane-box-keygen role, which can create (never update) both
+keypairs. farmer's own ServiceAccount must never be bound to it;
+_helpers.tpl refuses a render that names another workload's ServiceAccount
+or OpenBao role here.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $c.serviceAccountName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controlplane-box-keygen
+# No RBAC Role/RoleBinding: the Job needs no Kubernetes API access. Its
+# token is used only to log in to OpenBao (the projected volume).
+automountServiceAccountToken: false
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-controlplane-box-keys" (include "imas-farmer.fullname" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controlplane-box-keygen
+  annotations:
+    # After the OpenBao bootstrap (weight 0), which writes its role and
+    # policy, and before the credential publisher (weight 10). Re-running
+    # it on every upgrade creates only what's missing.
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    {{- if $c.argoCDHooks }}
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/sync-wave: "5"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    {{- end }}
+spec:
+  backoffLimit: {{ $c.backoffLimit }}
+  activeDeadlineSeconds: {{ $c.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ $c.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "imas-farmer.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: controlplane-box-keygen
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ $c.serviceAccountName }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with .Values.farmer.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: keygen
+          # The same image, same tag, as the farmer Deployment.
+          image: {{ include "imas-farmer.farmer.image" . | quote }}
+          imagePullPolicy: {{ .Values.farmer.image.pullPolicy }}
+          args: ["ensure-controlplane-box-keys"] # ENTRYPOINT is /farmer
+          env:
+            # Its own OpenBao identity (IMAS_CPBOX_OPENBAO_*), never
+            # farmer's IMAS_TENANTBOX_OPENBAO_* one.
+            {{- include "imas-farmer.openbaoEnv" (dict "root" $ "prefix" "IMAS_CPBOX_OPENBAO" "k8sRole" $c.k8sRole "tokenKey" $c.tokenSecretKey "tokenSecret" $c.tokenSecretName) | nindent 12 }}
+            - name: IMAS_CPBOX_OPENBAO_KV_MOUNT
+              value: {{ $t.kvMount | quote }}
+            - name: IMAS_CPBOX_OPENBAO_KV_PATH
+              value: {{ $t.kvPath | quote }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          {{- with $c.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            {{- include "imas-farmer.openbaoVolumeMounts" . | trim | nindent 12 }}
+            # farmer's config root, as for the publish Job: an emptyDir,
+            # never farmer's PKI volume. The Job reads no seed and never
+            # reaches the bus.
+            - name: imas-config
+              mountPath: /etc/imas
+      volumes:
+        {{- include "imas-farmer.openbaoVolumes" . | trim | nindent 8 }}
+        - name: imas-config
+          emptyDir:
+            sizeLimit: 16Mi
+---
+# The Job talks to OpenBao and DNS, nothing else. Rendered with the Job
+# whatever networkPolicy.enabled says, like the publisher's.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $c.serviceAccountName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controlplane-box-keygen
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: controlplane-box-keygen
+  policyTypes: ["Ingress", "Egress"]
+  ingress: []
+  egress:
+    {{- include "imas-farmer.openbaoEgress" . | nindent 4 }}
+    {{- include "imas-farmer.dnsEgress" . | nindent 4 }}
+{{- end }}

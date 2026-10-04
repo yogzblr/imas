@@ -27,6 +27,10 @@ data:
     {{- include "imas-farmer.policy.farmerGateway" . | nindent 4 }}
   imas-farmer-tenantbox.hcl: |
     {{- include "imas-farmer.policy.farmerTenantBox" . | nindent 4 }}
+  {{- if .Values.controlPlaneBoxKeys.enabled }}
+  imas-controlplane-box-keygen.hcl: |
+    {{- include "imas-farmer.policy.controlPlaneBoxKeygen" . | nindent 4 }}
+  {{- end }}
   {{- if eq .Values.tls.mode "openbao" }}
   imas-farmer-certs.hcl: |
     {{- include "imas-farmer.policy.farmerCerts" . | nindent 4 }}

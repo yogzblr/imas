@@ -56,8 +56,11 @@ type ReplayState struct {
 // (security review 2026-10, M2). A receiver that must survive a restart
 // sets Commit to persist each new state before the message is acted on,
 // and Restores the persisted state at startup. internal/pki's sproutbox.go
-// does both for the sprout. (Farmer doesn't need a guard: it only accepts
-// replies whose ReplyTo names a request it just sent.)
+// does both for the sprout. Farmer needs no guard for a sprout's replies
+// (it accepts only one whose ReplyTo names a request it just sent), but
+// does for sealed control-plane calls: internal/natsapi's sealedapi.go
+// keeps one per replica, in memory only, since a cluster-wide claim in
+// Valkey backs it for every call that changes state.
 type ReplayGuard struct {
 	MaxSkew    time.Duration
 	MaxEntries int

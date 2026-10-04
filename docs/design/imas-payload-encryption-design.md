@@ -268,9 +268,9 @@ Not in scope: a compromised farmer (it holds `tenant_priv` and can always open a
 9. **Windows shells.** ConPTY rules out the Server 2016 floor. Build for Server 2019 and later only, or not at all?
 10. **Leg 1 for a browser.** Should the SaaS API or web UI ever offer a shell? It would need its own leg 1, since a browser has an OIDC session, not a CLI box key.
 
-## Sealing the control plane (design, not built)
+## Sealing the control plane (design; J.1 building blocks built)
 
-**FLAG FOR SECURITY REVIEW.** This section is a design and has not been built. It is ready for review, not approved. It answers the shell section's Open question 1. Everything above seals farmer ↔ sprout. This section covers the other side of farmer: the imas CLI and the SaaS API, which reach farmer over the same bus, and the sprout's `/v1/refresh`. Until it is built, a compromised bus can't inject a command **into a sprout**, but it can get **farmer** to send one, and the sealing works exactly as designed while it does.
+**FLAG FOR SECURITY REVIEW.** This section is a design. Its building blocks (rollout step 2, J.1) are built and ready for review, not approved; nothing uses them yet, so behaviour is unchanged (see "As built: J.1" at the end of this section). The owner's decisions of 2026-10-04 there replace the compatibility flags and ratchets in "Rollout". It answers the shell section's Open question 1. Everything above seals farmer ↔ sprout. This section covers the other side of farmer: the imas CLI and the SaaS API, which reach farmer over the same bus, and the sprout's `/v1/refresh`. Until it is built, a compromised bus can't inject a command **into a sprout**, but it can get **farmer** to send one, and the sealing works exactly as designed while it does.
 
 ### What is wrong today
 
@@ -428,6 +428,8 @@ Not in scope: a compromised farmer, SaaS API, OpenBao or CLI host. A compromised
 
 Requirement 14 is Green only once steps 3 to 6 are done with both flags off, and the fleet runs the new sprout build.
 
+**Owner decisions, 2026-10-04, replace the compatibility parts of steps 3 to 5.** Nothing is deployed, so there is no compatibility window: no `apiallowbearertoken`, no `internalallowplaintext`, no per-user or per-sprout ratchet, no plaintext and no bearer-token fallback. Steps 3 to 5 each end sealed only (J.3, J.4), and a sprout with no box key is refused, not downgraded. Sealing is built before the UAT gate.
+
 ### Open questions
 
 1. **Stopgap 2.** Take user management off the bus API until Decision A lands?
@@ -439,3 +441,51 @@ Requirement 14 is Green only once steps 3 to 6 are done with both flags off, and
 7. **Valkey for mutating requests.** Is the fail-closed dependency on Valkey acceptable, or should the cluster-wide claim live in PXC?
 8. **Forward secrecy for control traffic.** `cmd.run` output and audit queries are sealed under static keys, which matches this document's accepted tradeoff. Should they use ephemeral keys, as shell does?
 9. **Method names in subjects.** Should they be hidden behind a single subject such as `imas.api.sealed`, or is that metadata acceptable?
+
+### As built: J.1 (building blocks, no change in behaviour)
+
+**FLAG FOR SECURITY REVIEW.** Rollout step 2. Nothing below is wired into a running path yet: the router, `client.NatsRequest`, `/v1/refresh` and saasapi's dispatch are unchanged, with one exception, the users store (below), which the brief asked to move.
+
+**Owner decisions, 2026-10-04.** Sealed only, with no compatibility window (see "Rollout"). Method names stay visible in subjects (Open question 9). Control traffic uses static keys (Open question 8). The Valkey claim for mutating methods fails closed (Open question 7).
+
+**`internal/payloadbox` (`control.go`).**
+
+- Purposes: `c2f.api`, `f2c.api`, `c2f.userkey.pub`; `a2f.tenant.provision`, `a2f.tenant.deprovision`, `a2f.sprout.action` and their answers `f2a.tenant.provisioned`, `f2a.tenant.deprovisioned`, `f2a.sprout.action`; `s2f.refresh`.
+- Fields: a **Call** (a request, or an asynchronous f2a result) has the body `{method, subject, params}`; a **Reply** has `{method, subject, result, error, continuity}` and must name its Call's ID in `re`. `OpenCall` refuses a body whose method or subject isn't the one the receiver derived from the subject the message arrived on, and any message with a `re`; `OpenReply` refuses one whose `re`, method or subject differ. `Imas-Principal` is the header naming the sender, never trusted alone: the message's `sid` must equal it and the box must open under that principal's registered key. a2f/f2a messages carry `tid` = `@platform`, outside the tenant ID alphabet, and `sid` = `saasapi`.
+- `CheckPublicKey` refuses a low-order X25519 point (one whose shared secret is the same for every private key), at every registration. `Fingerprint` is how a key is shown to a person.
+
+**The users store (Open question 2, answered).** `auth.users.add` wrote farmer's local config file with `jety.WriteConfig` and mirrored the user into `rbac_user_roles`. That is **not** consistent across replicas:
+
+- Each replica has its own file. In the Helm chart it is a read-only ConfigMap mount, so the write fails and `auth.users.add` doesn't work at all.
+- With a writable file per replica, each farmer start wipes the tenant's `rbac_user_roles` rows and reloads them from its own file (`rbac.LoadUsersFromConfig`). A user added on one replica disappears when another restarts, and a user **removed** on one comes back: a revocation that doesn't hold.
+- A user in the legacy `pubkeys` section is resolved from each replica's in-memory config, so removing one reached only the replica that handled the request.
+
+So registration moved to the farmer database (migration `farmer/00003`): `auth_users`, keyed on `(tenant_id, user_id)`, is the durable record of a user registered through the API, shared by every replica. `AddUser` writes it (and mirrors into the policy's map), never the file; `LoadPolicy` re-applies the rows after the config reload; `RemoveUser` deletes the row and retires the user's CLI box keys in one transaction. The config file's `users`/`pubkeys` stay the out-of-band bootstrap (the first admin), and `RemoveUser` refuses a user defined there (`ErrUserInConfig`): remove them from the file on every replica. The user's tenant is the policy's existing seam (`farmerorganization`); per-request tenants arrive with sealed requests. **Exposure until J.4:** `auth.users.add` now persists on a Helm install too, while it still accepts a bearer token the bus can mint for 15 minutes (SEC.0). Nothing is deployed; Stopgap 2 or J.4 closes it.
+
+**CLI box keys.** `auth_cli_box_keys`, keyed on `(tenant_id, user_id)`: the registered public key, its status (`active`, `grace`, `retired`), `created_at`, `rotated_at` and `grace_until`. At most one active key per `(tenant_id, user_id)` (`active_slot`, as for sprouts); `pub` is unique across the table, so no key is ever registered to two principals or reused after retirement. On farmer (`internal/pki` `clibox.go`):
+
+- `RegisterCLIBoxKey` is the admin path (the sealed `auth.users.add` will carry the key at J.4). It refuses a key that is any sprout's box key in any tenant (new index `idx_pki_sprout_box_keys_pub`), the tenant's key or the platform key, and a second key while one is active (replacing is a rotation).
+- `OpenFromCLI` opens a request under the user's active key, then each grace key on its own, against every tenant key, and reports which key opened it. A user with no key opens nothing.
+- `RecordCLIBoxKeySubmission` applies a `c2f.userkey.pub`: only the active key may change the active key; a grace key may only re-assert it; a superseded key never comes back. The old key keeps opening for 15 minutes.
+- `SealToCLI` seals a reply to the user's active key, one copy per tenant key.
+
+On the CLI (`cliboxclient.go`, `cmd/imas/cmd/authbox.go`): `imas auth keygen` writes `cliboxprivfile` (0600, default `~/.config/imas/cli-box.key`) and prints the public key and fingerprint; it refuses to replace a key without `--force`. `imas auth rotate-key` writes a pending key (`<cliboxprivfile>.next`), sends `c2f.userkey.pub` sealed under the current key on `imas.api.auth.rotatekey`, and promotes the pending key only when farmer's sealed reply opens under it; the old private key is then deleted. Until farmer routes the method (J.4) it reports that farmer doesn't serve sealed requests and keeps the pending key. The CLI pins `tenantboxpub` and also `tenantid`, because every sealed message names its tenant.
+
+**Platform key and SaaS API box key (Open question 4, answered).** Generated by a Helm hook Job, `farmer ensure-controlplane-box-keys`, into **OpenBao KV v2**, not a Secret, under the tenant box base path `<base>`: `<base>/platform` (`pub`, `priv`), `<base>/saasapi-box` (`pub`, `priv`), and `<base>/controlplane-pub` (`platform_pub`, `saasapi_box_pub`). The Job has its own ServiceAccount and OpenBao role, which may create and read the keypairs but never update them, so a re-run can't replace a key. Farmer's `imas-farmer-tenantbox` policy gains **read** on `platform` and `controlplane-pub` and nothing on `saasapi-box`. Each private half is readable only by its owner: farmer reads the platform key; the SaaS API's External Secret (step 5) reads `saasapi-box` into a Secret only its pods mount. Pinning: farmer pins `saasapi_box_pub` from `controlplane-pub` (plus the previous version inside a rotation's grace window); the SaaS API pins `platform_pub` from the same secret through its External Secret. Neither is ever fetched over the bus. A continuity proof for the platform key (`f2a.platformkey.continuity`) isn't built: re-pinning on rollout is enough while one team ships both ends. Helpers: `pki.OpenFromSaaSAPI`, `SealReplyToSaaSAPI` and `SealResultToSaaSAPI` on farmer; `pki.SaaSAPIBox` on the SaaS API, which also runs its own replay guard on results.
+
+**Farmer's NATS side (`internal/natsapi` `sealedapi.go`).** In order: the `Imas-Payload` marker (else `encryption-required`); open under the named principal's key, method and subject bound (else `open-failed`); the replica's replay guard on `(tenant_id, principal, message id)`, ±5 minutes (else `open-failed`); and for a mutating method, the Valkey claim `SET NX imas:replay:sealed:<tenant_id>:<principal>:<id>` with a 10-minute TTL (`pki.ClaimSealedMessage`). A claim already taken is `open-failed`. Valkey unreachable refuses the request (`ErrSealedStoreUnavailable`), answered with a sealed error since the request did open. A read-only method never touches Valkey. The replay guard is 64 `payloadbox.ReplayGuard` shards of 16384 entries each, because a guard sweeps its whole map on every accept.
+
+**The read-only list (Open question 6).** The design's list, unchanged: `health`, `version`, `sprouts.list`, `sprouts.get`, `jobs.list`, `jobs.get`, `jobs.forsprout`, `props.getall`, `props.get`, `cohorts.list`, `cohorts.get`, `cohorts.resolve`, `cohorts.validate`, `pki.list`, `auth.whoami`, `auth.users`, `auth.explain`, `audit.dates`, `audit.query`. I checked each handler: none writes state (`sprouts.get` sends the sprout a liveness probe, which changes nothing). `cohorts.refresh` is mutating, agreed: it rewrites the membership cache and is costly to repeat. `auth.login` is read-only too but isn't on the list; it stays mutating by default, which costs it only a Valkey dependency. `auth.rotatekey` is mutating.
+
+**Decision C (`internal/pki` `refreshsealed.go`).** `SproutSealedRefresh` builds `s2f.refresh` (`{nkey_pub, timestamp}`, sealed with the current box key to the pinned tenant key). `OpenSealedRefresh` looks the sprout up by `nkey_pub`, opens under every retained tenant key back to the last severing rotation against the sprout's valid box keys, checks `nkey_pub` and both timestamps (±5 minutes), and claims the message ID once in Valkey on `(tenant_id, sprout_id, id)`. Every failure is `ErrEnrollmentFailed`.
+
+**Not built in J.1.**
+
+- Wiring: sealed `imas.api.*` (step 4), sealed `internal.*` (step 5), sealed `/v1/refresh` on both ends (step 3), and removing the token code.
+- `cmd/farmer` dispatching `ensure-controlplane-box-keys` (outside J.1's file scope), so the chart's Job stays off (`controlPlaneBoxKeys.enabled`).
+- saasapi's External Secret and mount for its box key and the platform pin (step 5).
+- `f2c.tenantkey.continuity` for the CLI (the reply field is reserved).
+- Platform key rotation tooling.
+- Refusing, at sprout enrollment, a sprout box key that is a registered CLI key (registration already refuses the other way round).
+- How the first admin's CLI box key is registered, given the first admin is a config-file user. Proposed: a `boxpub` beside the user's entry in farmer's config, imported once at start into `auth_cli_box_keys` if the user has no key yet.
+

@@ -95,6 +95,12 @@ func LoadPolicy() error {
 		return err
 	}
 	userRoleMap = rbac.LoadUsersFromConfig()
+	// Users registered through the API live in the users store, not the
+	// config file: put them back after the config reload above wiped
+	// them (store.go).
+	if err := applyRegisteredUsersLocked(); err != nil {
+		return err
+	}
 	cohortReg, err = rbac.LoadCohortsFromConfig()
 	if err != nil {
 		return err
@@ -479,8 +485,11 @@ func GetRole(name string) (*rbac.Role, error) {
 	return roleStore.Get(name)
 }
 
-// AddUser adds a pubkey→role mapping to the config and reloads the policy.
-// It writes to the "users" config section (new format).
+// AddUser registers pubkey with roleName in the users store
+// (store.go): an auth_users row every farmer replica reads, mirrored into
+// the policy's user map. Nothing is written to farmer's config file. A
+// pubkey the config file defines, or one already registered, is
+// ErrUserExists.
 func AddUser(pubkey, roleName string) error {
 	policyMu.Lock()
 	defer policyMu.Unlock()
@@ -497,95 +506,74 @@ func AddUser(pubkey, roleName string) error {
 		}
 	}
 
-	// Check the user isn't already assigned.
-	if userRoleMap != nil && userRoleMap.RoleName(pubkey) != "" {
+	// Check the user isn't already assigned, by config or registration.
+	if (userRoleMap != nil && userRoleMap.RoleName(pubkey) != "") || legacyRoleName(pubkey) != "" {
 		return ErrUserExists
 	}
-
-	// Read existing users section, add the new pubkey, and write back.
-	usersMap := jety.GetStringMap("users")
-	if usersMap == nil {
-		usersMap = make(map[string]interface{})
-	}
-	existing := extractStringSlice(usersMap[roleName])
-	existing = append(existing, pubkey)
-	usersMap[roleName] = existing
-	jety.Set("users", usersMap)
-	if err := jety.WriteConfig(); err != nil {
-		return fmt.Errorf("writing config: %w", err)
+	if err := registerUser(usersTenantID(), pubkey, roleName, "", ""); err != nil {
+		return err
 	}
 
-	// Update in-memory state.
+	// Mirror into the policy's map, which every lookup reads.
 	if userRoleMap != nil {
 		userRoleMap.Set(pubkey, roleName)
 	}
-
 	return nil
 }
 
-// RemoveUser removes a pubkey from the config and reloads the policy.
+// RemoveUser removes a user registered through the API: their auth_users
+// row, every CLI box key they hold (retired, in the same transaction),
+// and their entry in the policy's map. A user defined in farmer's config
+// file is ErrUserInConfig: the API can't remove them consistently, since
+// each replica re-reads its own file at start. Remove them from the file
+// on every replica instead.
 func RemoveUser(pubkey string) error {
 	policyMu.Lock()
 	defer policyMu.Unlock()
 
-	// Find which role this pubkey belongs to.
-	found := false
-	var foundRole string
-	if userRoleMap != nil {
-		foundRole = userRoleMap.RoleName(pubkey)
-		if foundRole != "" {
-			found = true
-		}
+	_, _, registered, err := RegisteredUser(usersTenantID(), pubkey)
+	if err != nil && !errors.Is(err, ErrStoreNotConfigured) {
+		return err
 	}
-	if !found {
+	if !registered {
+		if (userRoleMap != nil && userRoleMap.RoleName(pubkey) != "") || legacyRoleName(pubkey) != "" {
+			return ErrUserInConfig
+		}
 		return ErrUserNotFound
 	}
-
-	// Remove from the "users" config section.
-	usersMap := jety.GetStringMap("users")
-	if usersMap != nil {
-		for roleName, v := range usersMap {
-			keys := extractStringSlice(v)
-			filtered := make([]string, 0, len(keys))
-			for _, k := range keys {
-				if k != pubkey {
-					filtered = append(filtered, k)
-				}
-			}
-			if len(filtered) != len(keys) {
-				usersMap[roleName] = filtered
-			}
-		}
-		jety.Set("users", usersMap)
+	if _, err := deregisterUser(usersTenantID(), pubkey); err != nil {
+		return err
 	}
-
-	// Also check legacy "pubkeys" section.
-	pubkeysMap := jety.GetStringMap("pubkeys")
-	if pubkeysMap != nil {
-		for roleName, v := range pubkeysMap {
-			keys := extractStringSlice(v)
-			filtered := make([]string, 0, len(keys))
-			for _, k := range keys {
-				if k != pubkey {
-					filtered = append(filtered, k)
-				}
-			}
-			if len(filtered) != len(keys) {
-				pubkeysMap[roleName] = filtered
-			}
-		}
-		jety.Set("pubkeys", pubkeysMap)
-	}
-
-	if err := jety.WriteConfig(); err != nil {
-		return fmt.Errorf("writing config: %w", err)
-	}
-
-	// Update in-memory state.
 	if userRoleMap != nil {
 		userRoleMap.Delete(pubkey)
 	}
+	return nil
+}
 
+// applyRegisteredUsersLocked mirrors every user registered through the
+// API into the policy's user map, after LoadPolicy rebuilt it from the
+// config file. A user the config file also defines keeps the config
+// file's role. Must be called with policyMu held.
+func applyRegisteredUsersLocked() error {
+	if db == nil || userRoleMap == nil {
+		return nil
+	}
+	roles, usernames, err := RegisteredUsers(usersTenantID())
+	if err != nil {
+		return fmt.Errorf("loading registered users: %w", err)
+	}
+	for id, role := range roles {
+		if existing := userRoleMap.RoleName(id); existing != "" {
+			if existing != role {
+				log.Warnf("auth: user %s is in farmer's config as %q and registered as %q; the config file wins", id, existing, role)
+			}
+			continue
+		}
+		userRoleMap.Set(id, role)
+		if u := usernames[id]; u != "" {
+			userRoleMap.SetUsername(id, u)
+		}
+	}
 	return nil
 }
 

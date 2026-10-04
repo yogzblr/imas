@@ -562,6 +562,43 @@ credentialPublisher:
     limits: { memory: 128Mi }
 
 # ---------------------------------------------------------------------------
+# Control-plane box keys (docs/design/imas-payload-encryption-design.md,
+# "Sealing the control plane", J.1; README.md "Control-plane box keys"):
+# a post-install/post-upgrade hook Job (`farmer
+# ensure-controlplane-box-keys`, farmer's image, its own ServiceAccount and
+# OpenBao role) that creates the platform key and the SaaS API's box key
+# in OpenBao KV v2, never in a Kubernetes Secret this chart renders, and
+# publishes their public halves. Under farmer.openbao.tenantBox's
+# kvMount/kvPath (<base>):
+#   <base>/platform          platform keypair. Read by farmer's tenantbox
+#                            role only.
+#   <base>/saasapi-box       the SaaS API's box keypair. Read only by the
+#                            SaaS API's External Secret (rollout step 5);
+#                            no farmer policy reaches it.
+#   <base>/controlplane-pub  the public halves: farmer pins
+#                            saasapi_box_pub, the SaaS API platform_pub.
+# The Job may create and read the keypairs but never update them, so an
+# upgrade can't replace a key. Keep it off until cmd/farmer dispatches the
+# subcommand (not in J.1's file scope): with it off nothing uses these
+# keys yet. FLAG FOR SECURITY REVIEW.
+# ---------------------------------------------------------------------------
+controlPlaneBoxKeys:
+  enabled: false
+  # Fixed name: the OpenBao role's bound_service_account_names names it.
+  serviceAccountName: imas-controlplane-box-keygen
+  k8sRole: imas-controlplane-box-keygen
+  # token auth: the Job's own Secret (empty: openbaoClient's).
+  tokenSecretName: ""
+  tokenSecretKey: cpbox-token
+  argoCDHooks: true
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 3600
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { memory: 128Mi }
+
+# ---------------------------------------------------------------------------
 # Sprout release registration (API design §2.5, README.md "Sprout release
 # registration"): a post-install/post-upgrade hook Job (`farmer
 # register-sprout-release`, farmer's image) that POSTs the sprout release

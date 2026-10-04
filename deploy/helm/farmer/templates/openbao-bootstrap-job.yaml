@@ -161,6 +161,10 @@ spec:
               # deploy/farmer/README.md: a run makes two KV calls; 5m is plenty.
               role {{ $p.k8sRole }} {{ $p.serviceAccountName }} {{ $ns }} imas-saasapi-cred-publisher 5m 5m
               {{- end }}
+              {{- if .Values.controlPlaneBoxKeys.enabled }}
+              # The control-plane keygen Job: a few KV calls per run.
+              role {{ .Values.controlPlaneBoxKeys.k8sRole }} {{ .Values.controlPlaneBoxKeys.serviceAccountName }} {{ $ns }} imas-controlplane-box-keygen 5m 5m
+              {{- end }}
               {{- if $bs.farmerbus.enabled }}
               role imas-farmerbus {{ $bs.farmerbus.serviceAccountName }} {{ .Values.bus.namespace }} imas-farmerbus-certs {{ $bs.tokenTTL }} {{ $bs.tokenMaxTTL }}
               {{- end }}

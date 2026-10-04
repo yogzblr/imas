@@ -215,6 +215,50 @@ The rotation runbook in `deploy/farmer/README.md` applies unchanged. Step 4
 defaults `reloader.stakater.com/auto` on both Deployments, which steps 3
 and 5 rely on.
 
+## Control-plane box keys
+
+**FLAG FOR SECURITY REVIEW.** J.1 of "Sealing the control plane"
+(`docs/design/imas-payload-encryption-design.md`). Off by default
+(`controlPlaneBoxKeys.enabled`), and nothing uses these keys yet: farmer
+starts sealing SaaS API traffic at rollout step 5.
+
+The SaaS API and farmer seal `internal.*` to each other with NaCl box:
+the SaaS API with its own **SaaS API box key**, farmer with the
+**platform key**, one per deployment. Both live in **OpenBao KV v2**, not
+in a Kubernetes Secret this chart renders, under farmer's tenant box base
+path (`farmer.openbao.tenantBox.kvMount`/`kvPath`, `<base>`):
+
+| Secret | Fields | Who reads it |
+|---|---|---|
+| `<base>/platform` | `pub`, `priv`, `origin` | farmer only (`imas-farmer-tenantbox`, read only) |
+| `<base>/saasapi-box` | `pub`, `priv` | the SaaS API only, through its External Secret (step 5). No farmer policy reaches it. |
+| `<base>/controlplane-pub` | `platform_pub`, `saasapi_box_pub` | farmer, which pins `saasapi_box_pub`; the SaaS API, which pins `platform_pub` |
+
+`farmer ensure-controlplane-box-keys` (`internal/pki` `controlplanekeys.go`)
+writes them, as a `post-install,post-upgrade` hook Job (weight 5: after
+the OpenBao bootstrap, before the credential publisher) with farmer's
+image, its own ServiceAccount (`imas-controlplane-box-keygen`, no RBAC, no
+token automount) and its own OpenBao role. Its policy can **create and
+read** the keypairs and never update them, so a re-run (every upgrade)
+creates only what is missing and can't replace a key. It rewrites
+`controlplane-pub` only if it doesn't match the keypairs. It logs
+fingerprints, never key material. Its NetworkPolicy allows OpenBao and DNS
+only. The render fails if the Job is given another workload's
+ServiceAccount or OpenBao role.
+
+**Pinning.** Each end pins the other's public key from OpenBao, never
+from the bus: farmer reads `saasapi_box_pub` (and, inside a rotation's
+grace window, the version before it) through its tenantbox client; the
+SaaS API gets `platform_pub` and its own private key from one External
+Secret mounted only in its pods. Rotating either key is deliberate and
+manual for now (the design's open question 4).
+
+**Before enabling it:** `cmd/farmer` must dispatch
+`ensure-controlplane-box-keys` to `pki.RunControlPlaneBoxKeys`, as it does
+`publish-saasapi-credential`. That three-line change was outside J.1's
+file scope and isn't made yet: until it is, the Job would start farmer's
+server instead.
+
 ## OpenBao
 
 Each OpenBao client runs under its own role and gets exactly one policy.
@@ -224,9 +268,10 @@ Each OpenBao client runs under its own role and gets exactly one policy.
 | farmer, API certificate (`tls.mode=openbao`) | `IMAS_CERTS_OPENBAO_*` | `imas-farmer-certs` (`tls.openbao.k8sRole`) | `imas-farmer-certs`: `pki/issue/imas-farmer` |
 | farmer, gateway JWT signer | `IMAS_GATEWAY_OPENBAO_*` | `imas-farmer-gateway` | `imas-farmer-gateway`: sign and read on `transit/*/imas-gateway-jwt` only |
 | farmer, fleet key (read-only) | `IMAS_FLEETSIGN_OPENBAO_*` | `imas-farmer-fleet-verify` | `imas-fleet-verify` (reviewed copy) |
-| farmer, tenant box keypairs | `IMAS_TENANTBOX_OPENBAO_*` | `imas-farmer-tenantbox` | `imas-farmer-tenantbox`: KV v2 read/write on `secret/data/imas/tenant-x25519/tenants/+` (one secret per tenant), nothing else |
+| farmer, tenant box keypairs | `IMAS_TENANTBOX_OPENBAO_*` | `imas-farmer-tenantbox` | `imas-farmer-tenantbox`: KV v2 read/write on `secret/data/imas/tenant-x25519/tenants/+` (one secret per tenant), and read only on `.../platform` and `.../controlplane-pub` (J.1), nothing else |
 | saasapi, fleet key (only with `fleetUpdateDispatch` or `operator`) | `IMAS_FLEETSIGN_OPENBAO_*` | `imas-saasapi-fleet-verify` | `imas-fleet-verify` |
 | the publish Job | `IMAS_SAASAPI_CRED_OPENBAO_*` | `imas-saasapi-cred-publisher` | `imas-saasapi-cred-publisher` (reviewed copy) |
+| the control-plane keygen Job (`controlPlaneBoxKeys.enabled`, off by default) | `IMAS_CPBOX_OPENBAO_*` | `imas-controlplane-box-keygen` | `imas-controlplane-box-keygen`: create and read on `.../platform` and `.../saasapi-box`, create, read and update on `.../controlplane-pub` |
 
 - **Shared connection settings.** `openbaoClient.addr`, `caConfigMap` and
   `authMethod` are shared by all clients. In `authMethod=token`, each

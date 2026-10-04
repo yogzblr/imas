@@ -30,6 +30,13 @@ func newTestDB(t *testing.T) *gorm.DB {
 	}
 	rbac.SetDB(rbacDB)
 	t.Cleanup(func() { rbac.SetDB(nil) })
+	// The users and CLI box key stores (store.go) share the farmer
+	// schema with rbac in production.
+	if err := rbacDB.AutoMigrate(Models()...); err != nil {
+		t.Fatalf("migrating auth test db: %v", err)
+	}
+	SetDB(rbacDB)
+	t.Cleanup(func() { SetDB(nil) })
 
 	propsDSN := fmt.Sprintf("file:%s-props?mode=memory&cache=shared", t.Name())
 	propsDB, err := gorm.Open(sqlite.Open(propsDSN), &gorm.Config{})

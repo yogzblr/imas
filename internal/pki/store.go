@@ -27,6 +27,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"github.com/yogzblr/imas/internal/auth"
 	"github.com/yogzblr/imas/internal/config"
 )
 
@@ -108,16 +109,25 @@ func (revokedNKeyRow) TableName() string { return "pki_revoked_nkeys" }
 // (boxkeys.go); tenantRow is this workstream's; revokedNKeyRow is SEC.3a's.
 // The schema itself comes from internal/migrations' farmer set, whose
 // tests check it against these models.
+//
+// internal/auth's users and CLI box key tables (J.1) are listed here too:
+// pki already imports auth, and listing them here is what puts them in
+// internal/pxc's Models, which farmer's tests and the migration parity
+// test use. SetDB installs auth's handle for the same reason.
 func Models() []any {
-	return []any{&nkeyRow{}, &tenantRow{}, &sproutBoxKeyRow{}, &revokedNKeyRow{}}
+	return append([]any{&nkeyRow{}, &tenantRow{}, &sproutBoxKeyRow{}, &revokedNKeyRow{}}, auth.Models()...)
 }
 
 // db is the shared farmer-schema GORM handle. Nil until SetDB is called.
 var db *gorm.DB
 
-// SetDB installs the GORM handle this package reads and writes through.
-// Call once at startup, after internal/pxc.OpenDB.
-func SetDB(d *gorm.DB) { db = d }
+// SetDB installs the GORM handle this package reads and writes through,
+// and internal/auth's users and CLI box key stores (see Models). Call once
+// at startup, after internal/pxc.OpenDB.
+func SetDB(d *gorm.DB) {
+	db = d
+	auth.SetDB(d)
+}
 
 // tenantID resolves the current tenant scope for the handful of genuinely
 // process-level, boot/SIGHUP-time contexts that still don't have a real
