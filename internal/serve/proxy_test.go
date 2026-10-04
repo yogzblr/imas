@@ -1,6 +1,8 @@
 package serve
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -671,6 +673,47 @@ func TestHandleUserAdd_RejectsMissingBoxPub(t *testing.T) {
 			var resp map[string]string
 			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || resp["error"] == "" {
 				t.Errorf("body %q: want a JSON error", rec.Body.String())
+			}
+		})
+	}
+}
+
+// A boxpub farmer would refuse is refused here first with 400: it must be
+// standard base64 of exactly 32 bytes and not a weak key, the rule
+// intauth.DecodeCLIBoxPub applies on farmer's side.
+func TestHandleUserAdd_RejectsInvalidBoxPub(t *testing.T) {
+	cleanup := startTestNATS(t)
+	defer cleanup()
+
+	testFarmer.Handle(t, client.NatsConn, "auth.users.add", func(params json.RawMessage) (any, error) {
+		t.Errorf("auth.users.add reached farmer with %s", params)
+		return map[string]any{"success": true}, nil
+	})
+
+	key := func(b byte, n int) []byte { return bytes.Repeat([]byte{b}, n) }
+	mux := NewMux()
+	for name, boxpub := range map[string]string{
+		"not base64":      "not base64 at all!",
+		"16 bytes":        base64.StdEncoding.EncodeToString(key(0xab, 16)),
+		"33 bytes":        base64.StdEncoding.EncodeToString(key(0xab, 33)),
+		"URL-safe base64": base64.URLEncoding.EncodeToString(key(0xfb, 32)),
+		"no padding":      base64.RawStdEncoding.EncodeToString(key(0xab, 32)),
+		"weak (all zero)": base64.StdEncoding.EncodeToString(key(0, 32)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			body, err := json.Marshal(map[string]string{"pubkey": "UNKEY_NEW", "role": "viewer", "boxpub": boxpub})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/users", bytes.NewReader(body))
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("got %d %s, want 400", rec.Code, rec.Body.String())
+			}
+			var resp map[string]string
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || !strings.HasPrefix(resp["error"], "invalid boxpub") {
+				t.Errorf("body %q: want an \"invalid boxpub\" error", rec.Body.String())
 			}
 		})
 	}

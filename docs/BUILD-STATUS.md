@@ -1239,8 +1239,10 @@ by an external git sync today.
       records no user, and a user's request is audited by the sealed router
       with the user it verified. `imas serve`'s OpenAPI document gives
       `POST /api/v1/auth/users` a required `boxpub` (and the optional
-      `username`); serve refuses a body without `boxpub` with 400 and
-      otherwise forwards it to `auth.users.add` unchanged. Still open: the web UI's add-user form (the
+      `username`); serve refuses with 400 a body without `boxpub` or with
+      one farmer would refuse (`auth.DecodeCLIBoxPub`: standard base64 of
+      32 bytes, not a weak key), and otherwise forwards it to
+      `auth.users.add` unchanged. Still open: the web UI's add-user form (the
       `grlx-web-ui` submodule, outside this repo) must send `boxpub`;
       until it does, adding a user from the UI fails. `internal/rbac`'s
       unused `ListRecipes`/`GetRecipe` route-map entries are removed too.

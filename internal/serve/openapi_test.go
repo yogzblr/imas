@@ -2,6 +2,7 @@ package serve
 
 import (
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -133,6 +134,24 @@ func TestOpenAPIUserAddRequestHasBoxPub(t *testing.T) {
 			t.Errorf("UserAddRequest has no %q", f)
 		}
 	}
+	// The documented pattern takes a real key and refuses the URL-safe
+	// alphabet and a missing pad, as farmer does.
+	pattern, _ := props["boxpub"].(map[string]any)["pattern"].(string)
+	re, err := regexp.Compile(pattern)
+	if pattern == "" || err != nil {
+		t.Fatalf("boxpub pattern %q: %v", pattern, err)
+	}
+	for k, want := range map[string]bool{
+		"q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s=": true,
+		"-_urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s=": false,
+		"q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s":  false,
+		"q6urq6urq6urq6urq6urq6s=":                     false,
+	} {
+		if re.MatchString(k) != want {
+			t.Errorf("boxpub pattern on %q: match = %v, want %v", k, !want, want)
+		}
+	}
+
 	post, err := resolveRef(spec, "#/paths/~1api~1v1~1auth~1users/post/responses")
 	if err != nil {
 		t.Fatal(err)

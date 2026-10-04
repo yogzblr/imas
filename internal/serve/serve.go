@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/yogzblr/imas/internal/api/client"
+	intauth "github.com/yogzblr/imas/internal/auth"
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/log"
 )
@@ -423,9 +424,11 @@ func HandleRecipeGet(w http.ResponseWriter, r *http.Request) {
 // HandleUserAddProxy returns a handler that forwards a user add request
 // (pubkey, role, username, boxpub; openapi.yaml UserAddRequest) to a NATS
 // subject unchanged, after refusing with 400 a body that is not a JSON
-// object or has no boxpub. Farmer refuses an add without one too and
-// validates the key itself; checking here gives the UI a 400 rather than
-// a 502 for its own mistake.
+// object, has no boxpub, or has a boxpub farmer would refuse: it is
+// checked with intauth.DecodeCLIBoxPub, the same rule farmer's
+// auth.users.add applies (standard base64 of 32 bytes, not a weak key).
+// Farmer still checks it; checking here gives the UI a 400 rather than a
+// 502 for its own mistake.
 func HandleUserAddProxy(method string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -440,8 +443,13 @@ func HandleUserAddProxy(method string) http.HandlerFunc {
 			WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 			return
 		}
-		if boxpub, _ := params["boxpub"].(string); strings.TrimSpace(boxpub) == "" {
+		boxpub, _ := params["boxpub"].(string)
+		if strings.TrimSpace(boxpub) == "" {
 			WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "boxpub is required: the user's CLI box public key, from imas auth keygen"})
+			return
+		}
+		if _, err := intauth.DecodeCLIBoxPub(boxpub); err != nil {
+			WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid boxpub: " + err.Error()})
 			return
 		}
 

@@ -807,9 +807,10 @@ paths:
         Register a new user with the given NKey public key, role and CLI
         box public key (boxpub), forwarded as-is to farmer's sealed
         auth.users.add. The box key is registered with the user so they
-        can make sealed requests at once. A body without boxpub is
-        refused with 400 before it reaches farmer, which validates the key
-        itself. Requires admin permissions.
+        can make sealed requests at once. A body without boxpub, or with
+        one that is not standard base64 of a 32-byte key (or is a weak
+        key), is refused with 400 before it reaches farmer, which applies
+        the same check. Requires admin permissions.
       tags:
         - auth
       requestBody:
@@ -1782,9 +1783,11 @@ components:
         boxpub:
           type: string
           contentEncoding: base64
+          pattern: "^[A-Za-z0-9+/]{43}=$"
           description: |
             The user's CLI box public key: 32 bytes, standard base64, as
-            printed by their `imas auth keygen`. Required.
+            printed by their `imas auth keygen`. Required. A weak
+            (low-order) key is refused too.
 
     UserMutateResponse:
       type: object
