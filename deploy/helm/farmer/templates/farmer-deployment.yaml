@@ -125,6 +125,24 @@ spec:
             - name: IMAS_JOB_RECONCILE_WINDOW
               value: {{ . | quote }}
             {{- end }}
+            # Farmer's own self_update switch (security review L1), off unless
+            # farmer.selfUpdate.enabled.
+            - name: IMAS_SELF_UPDATE_ENABLED
+              value: {{ .Values.farmer.selfUpdate.enabled | default false | toString | quote }}
+            {{- with .Values.farmer.sproutActions }}
+            {{- if not (kindIs "invalid" .concurrency) }}
+            - name: IMAS_SPROUT_ACTION_CONCURRENCY
+              value: {{ .concurrency | int | quote }}
+            {{- end }}
+            {{- if not (kindIs "invalid" .selfUpdateConcurrency) }}
+            - name: IMAS_SELF_UPDATE_CONCURRENCY
+              value: {{ .selfUpdateConcurrency | int | quote }}
+            {{- end }}
+            {{- if not (kindIs "invalid" .tenantConcurrency) }}
+            - name: IMAS_SPROUT_ACTION_TENANT_CONCURRENCY
+              value: {{ .tenantConcurrency | int | quote }}
+            {{- end }}
+            {{- end }}
             {{- if eq .Values.tls.mode "openbao" }}
             # API certificate from OpenBao PKI (internal/certs).
             {{- include "imas-farmer.openbaoEnv" (dict "root" $ "prefix" "IMAS_CERTS_OPENBAO" "k8sRole" .Values.tls.openbao.k8sRole "tokenKey" .Values.tls.openbao.tokenSecretKey) | nindent 12 }}

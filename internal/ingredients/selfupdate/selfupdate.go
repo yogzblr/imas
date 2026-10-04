@@ -28,7 +28,11 @@
 //     without the sprout JWT;
 //  6. checks the file's SHA-256 against the signed checksum (for an MSI,
 //     the MSI inside the NuGet package) before anything else touches it;
-//  7. installs from that local file with the OS installer (dpkg -i,
+//  7. reads the package's own metadata and requires it to name
+//     imas-sprout at exactly the manifest's version (pkgmeta.go): a signed
+//     checksum alone can name an older genuine package (security review
+//     M1);
+//  8. installs from that local file with the OS installer (dpkg -i,
 //     rpm -U, zypper on SUSE, msiexec /i /qn on Windows) and restarts the
 //     service onto the new version (install.go).
 //
@@ -261,8 +265,14 @@ func (s SelfUpdate) apply(ctx context.Context) (cook.Result, error) {
 	}
 	downloaded := cook.Snprintf("%s downloaded from %s; sha256 %s matches the signed manifest", pl.manifest.FileName, redact(from), pl.manifest.ChecksumSHA256)
 
-	notes, err := installPackage(ctx, pl.platform, file, pl.target, filepath.Join(stage, "msiexec.log"))
-	notes = append([]fmt.Stringer{verified, downloaded}, notes...)
+	id, bound, err := verifyPackageIdentity(ctx, pl.platform, file, pl.manifest)
+	if err != nil {
+		os.RemoveAll(stage)
+		return failed(err, verified, downloaded)
+	}
+
+	notes, err := installPackage(ctx, pl.platform, file, pl.target, filepath.Join(stage, "msiexec.log"), id)
+	notes = append([]fmt.Stringer{verified, downloaded, bound}, notes...)
 	if err != nil {
 		os.RemoveAll(stage)
 		return failed(err, notes...)
@@ -293,8 +303,8 @@ func (s SelfUpdate) Test(ctx context.Context) (cook.Result, error) {
 		return cook.Result{Succeeded: true, Notes: []fmt.Stringer{cook.Snprintf("already running %s", pl.running)}}, nil
 	}
 	return cook.Result{Succeeded: true, Changed: true, Notes: []fmt.Stringer{
-		cook.Snprintf("%s for %s: manifest signature verified; would fetch %s from the %s, check sha256 %s and install it with %s (running %s)",
-			pl.target, pl.platform, pl.manifest.FileName, pl.repo, pl.manifest.ChecksumSHA256, pl.platform.installer, pl.running),
+		cook.Snprintf("%s for %s: manifest signature verified; would fetch %s from the %s, check sha256 %s and that the package is %s at that version, and install it with %s (running %s)",
+			pl.target, pl.platform, pl.manifest.FileName, pl.repo, pl.manifest.ChecksumSHA256, sproutPackageName, pl.platform.installer, pl.running),
 	}}, nil
 }
 

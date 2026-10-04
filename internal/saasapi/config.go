@@ -116,6 +116,23 @@ import (
 //     soon a dead process's batch or rollout is taken over; default 2m,
 //     15s..1h.
 //
+// Dispatch concurrency (dispatch_limits.go; security review M5). Per
+// process; an invalid or out-of-range value is a startup error:
+//
+//   - SAASAPI_ACTION_DISPATCH_CONCURRENCY: cmd.run and cook items in
+//     flight to farmer at once, all tenants together. Default 64, 1..1024.
+//   - SAASAPI_SELF_UPDATE_DISPATCH_CONCURRENCY: self_update items in
+//     flight at once, a pool of its own so rollout waves are never
+//     starved by cmd.run or cook. Default 16, 1..1024.
+//   - SAASAPI_ACTION_DISPATCH_TENANT_CONCURRENCY: one tenant's cap in each
+//     of those pools. Default 8, 1..1024, and at most half of
+//     SAASAPI_ACTION_DISPATCH_CONCURRENCY.
+//
+// Keep them at or below farmer's IMAS_SPROUT_ACTION_CONCURRENCY,
+// IMAS_SELF_UPDATE_CONCURRENCY and IMAS_SPROUT_ACTION_TENANT_CONCURRENCY
+// times the farmer replicas: farmer refuses what doesn't fit
+// (farmer_busy), and the item is sent again later.
+//
 // The operator plane (fleet_releases.go, design doc §2.5): release
 // registration and revocation, served on its own HTTPS listener and never
 // on the tenant API's. Off unless SAASAPI_OPERATOR_LISTEN_ADDR is set;
@@ -337,6 +354,30 @@ func loadOutboxSweeperSettings(s *OutboxSweeperSettings) error {
 			return fmt.Errorf("saasapi: SAASAPI_OUTBOX_MAX_ATTEMPTS=%q: want an integer from 1 to %d", v, maxOutboxMaxAttempts)
 		}
 		s.MaxAttempts = n
+	}
+	for _, c := range []struct {
+		name string
+		dst  *int
+	}{
+		{"SAASAPI_ACTION_DISPATCH_CONCURRENCY", &s.DispatchConcurrency},
+		{"SAASAPI_SELF_UPDATE_DISPATCH_CONCURRENCY", &s.SelfUpdateDispatchConcurrency},
+		{"SAASAPI_ACTION_DISPATCH_TENANT_CONCURRENCY", &s.DispatchTenantConcurrency},
+	} {
+		v := os.Getenv(c.name)
+		if v == "" {
+			continue
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > maxDispatchConcurrency {
+			return fmt.Errorf("saasapi: %s=%q: want an integer from 1 to %d", c.name, v, maxDispatchConcurrency)
+		}
+		*c.dst = n
+	}
+	// "Well below the pool size" (security review M5): one tenant may
+	// never hold more than half the cmd.run/cook pool.
+	if s.DispatchTenantConcurrency*2 > s.DispatchConcurrency {
+		return fmt.Errorf("saasapi: SAASAPI_ACTION_DISPATCH_TENANT_CONCURRENCY=%d must be at most half of SAASAPI_ACTION_DISPATCH_CONCURRENCY=%d",
+			s.DispatchTenantConcurrency, s.DispatchConcurrency)
 	}
 	return nil
 }

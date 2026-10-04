@@ -89,13 +89,6 @@ const (
 	// queued behind farmer's concurrency limit, and bus latency.
 	dispatchReplyMargin = 30 * time.Second
 
-	// maxConcurrentActionDispatches bounds how many internal.sprout.action
-	// requests one SaaS API process has in flight at once, across all
-	// batches. It matches farmer's default per-replica concurrency
-	// (internal/natsapi's defaultSproutActionConcurrency), so one SaaS API
-	// replica alone can't pile up a queue on a single farmer replica.
-	maxConcurrentActionDispatches = 64
-
 	// jobRefreshTimeout bounds one GET's JobStatusReader call.
 	jobRefreshTimeout = 5 * time.Second
 )
@@ -138,6 +131,27 @@ const (
 	// SAASAPI_OUTBOX_ACTION_MAX_AGE after the batch was accepted (a long
 	// outage, say), so it was failed rather than sent late. It never ran.
 	errCodeExpiredNotSent = "expired_not_sent"
+)
+
+// Codes farmer's internal.sprout.action replies with besides
+// controlplane's (internal/natsapi, sprout_action.go, which pins the same
+// strings). They belong in internal/controlplane, which was outside
+// SEC.5's scope.
+const (
+	// farmerCodeSelfUpdateDisabled: farmer's IMAS_SELF_UPDATE_ENABLED is
+	// off, so it refused the self_update unrun. Stored as internal_error
+	// (with this reason logged): a new item code must first be added to
+	// docs/api/saasapi.md and the OpenAPI enum (TestItemErrorCodesDocumented),
+	// which were outside SEC.5's scope.
+	farmerCodeSelfUpdateDisabled = "self_update_disabled"
+	// farmerCodeRolloutWindowClosed: farmer found now outside the
+	// tenant's rollout window and refused the self_update unrun. The same
+	// string as errCodeRolloutWindowClosed.
+	farmerCodeRolloutWindowClosed = errCodeRolloutWindowClosed
+	// farmerCodeBusy: farmer's per-tenant cap or pool was full, so it
+	// refused the request unrun. Never stored: the item goes back to
+	// queued (replyUpdate).
+	farmerCodeBusy = "farmer_busy"
 )
 
 // actionErrorMessages is the only text ever shown for an item's error
@@ -186,7 +200,8 @@ func actionErrorMessage(code string) string {
 func farmerErrorCode(code controlplane.ErrorCode) string {
 	switch code {
 	case controlplane.ErrorInvalidRequest, controlplane.ErrorUnsupportedAction,
-		controlplane.ErrorSproutNotFound, controlplane.ErrorSproutUnreachable:
+		controlplane.ErrorSproutNotFound, controlplane.ErrorSproutUnreachable,
+		farmerCodeRolloutWindowClosed:
 		return string(code)
 	}
 	return string(controlplane.ErrorInternal)
@@ -688,9 +703,6 @@ var (
 	// exercise the no-reply path without waiting it out.
 	replyTimeoutFor = dispatchReplyTimeout
 
-	// actionDispatchSlots bounds in-flight internal.sprout.action requests
-	// process-wide (maxConcurrentActionDispatches).
-	actionDispatchSlots = make(chan struct{}, maxConcurrentActionDispatches)
 	// actionDispatches tracks background dispatchBatch goroutines, so
 	// tests can wait for them before tearing down the database.
 	actionDispatches sync.WaitGroup
@@ -715,9 +727,9 @@ func startBatchDispatch(batch AssetActionBatch, items []AssetActionItem) {
 	}()
 }
 
-// dispatchBatch sends one internal.sprout.action request per item, at most
-// maxConcurrentActionDispatches at a time process-wide, and returns once
-// every item has been answered or given up on. It stops starting new items
+// dispatchBatch sends one internal.sprout.action request per item, within
+// the batch's pool and its tenant's cap (dispatch_limits.go), and returns
+// once every item has been answered or given up on. It stops starting new items
 // once lease (the batch's, nil for none) is no longer held: whoever took it
 // over sends the rest.
 //
@@ -730,24 +742,25 @@ func dispatchBatch(d *gorm.DB, nc *nats.Conn, batch AssetActionBatch, items []As
 		log.Errorf("saasapi: not connected to the NATS bus; action batch %s (tenant %s) left queued", batch.ID, batch.TenantID)
 		return
 	}
+	limits := dispatchLimits.Load()
 	var wg sync.WaitGroup
 	for _, item := range items {
-		actionDispatchSlots <- struct{}{}
+		release := limits.acquire(batch.TenantID, batch.ActionType)
 		if !lease.held() {
-			<-actionDispatchSlots
+			release()
 			log.Warnf("saasapi: no longer holding the lease on action batch %s (tenant %s); leaving its remaining items queued",
 				batch.ID, batch.TenantID)
 			break
 		}
 		if actionExpired(batch, item, outboxNow(), outboxSettings.ActionMaxAge) {
-			<-actionDispatchSlots
+			release()
 			expireItem(d, batch, item)
 			continue
 		}
 		wg.Add(1)
 		go func(item AssetActionItem) {
 			defer wg.Done()
-			defer func() { <-actionDispatchSlots }()
+			defer release()
 			dispatchItem(d, nc, batch, item)
 		}(item)
 	}
@@ -862,8 +875,13 @@ func updateItem(d *gorm.DB, item AssetActionItem, from AssetActionItemStatus, up
 //     failed/dispatch_outcome_unknown. The action may have run, so the
 //     item is terminal rather than re-sendable — cmd.run isn't
 //     idempotent.
-//   - a reply: applied by replyUpdate.
-func dispatchItem(d *gorm.DB, nc *nats.Conn, batch AssetActionBatch, item AssetActionItem) {
+//   - a farmer_busy reply: farmer refused it unrun (a full cap or pool), so
+//     it goes back to queued, as for no responders.
+//   - any other reply: applied by replyUpdate.
+//
+// It reports whether the item went back to queued unsent (no responders,
+// or farmer_busy): a caller may send it again.
+func dispatchItem(d *gorm.DB, nc *nats.Conn, batch AssetActionBatch, item AssetActionItem) (requeued bool) {
 	data, err := json.Marshal(controlplane.SproutActionRequest{
 		TenantID: batch.TenantID,
 		SproutID: item.SproutID,
@@ -871,7 +889,7 @@ func dispatchItem(d *gorm.DB, nc *nats.Conn, batch AssetActionBatch, item AssetA
 	})
 	if err != nil {
 		log.Errorf("saasapi: marshalling %s for batch %s asset %s: %v — item left queued", controlplane.SubjectSproutAction, batch.ID, item.AssetID, err)
-		return
+		return false
 	}
 
 	claimed, err := updateItem(d, item, ActionItemQueued, map[string]any{
@@ -883,7 +901,7 @@ func dispatchItem(d *gorm.DB, nc *nats.Conn, batch AssetActionBatch, item AssetA
 		if err != nil {
 			log.Errorf("saasapi: claiming batch %s asset %s for dispatch: %v — not sent", batch.ID, item.AssetID, err)
 		}
-		return
+		return false
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), replyTimeoutFor(batch.ActionType, batch.ActionParams))
@@ -894,7 +912,7 @@ func dispatchItem(d *gorm.DB, nc *nats.Conn, batch AssetActionBatch, item AssetA
 	switch {
 	case errors.Is(err, nats.ErrNoResponders):
 		log.Errorf("saasapi: no farmer subscribed to %s; batch %s asset %s left queued", controlplane.SubjectSproutAction, batch.ID, item.AssetID)
-		update = map[string]any{"status": ActionItemQueued, "dispatched_at": nil}
+		update = requeueUpdate()
 	case err != nil:
 		log.Errorf("saasapi: %s for batch %s asset %s (tenant %s, sprout %s) got no reply: %v — outcome unknown",
 			controlplane.SubjectSproutAction, batch.ID, item.AssetID, batch.TenantID, item.SproutID, err)
@@ -904,7 +922,15 @@ func dispatchItem(d *gorm.DB, nc *nats.Conn, batch AssetActionBatch, item AssetA
 	}
 	if _, err := updateItem(d, item, ActionItemDispatching, update); err != nil {
 		log.Errorf("saasapi: recording outcome for batch %s asset %s: %v", batch.ID, item.AssetID, err)
+		return false
 	}
+	return update["status"] == ActionItemQueued
+}
+
+// requeueUpdate puts a dispatching item back to queued, never delivered:
+// farmer provably didn't run it.
+func requeueUpdate() map[string]any {
+	return map[string]any{"status": ActionItemQueued, "dispatched_at": nil}
 }
 
 // jobTracked reports whether actionType is answered with a jid and then
@@ -936,6 +962,14 @@ func replyUpdate(batch AssetActionBatch, item AssetActionItem, data []byte) map[
 	}
 
 	switch {
+	case reply.Status == controlplane.StatusFailed && reply.ErrorCode == farmerCodeBusy:
+		log.Warnf("saasapi: farmer was busy (its pool or tenant %s's cap full) and refused batch %s asset %s unrun; left queued",
+			batch.TenantID, batch.ID, item.AssetID)
+		return requeueUpdate()
+	case reply.Status == controlplane.StatusFailed && reply.ErrorCode == farmerCodeSelfUpdateDisabled:
+		log.Errorf("saasapi: farmer refused batch %s asset %s (tenant %s): self_update is disabled on farmer (IMAS_SELF_UPDATE_ENABLED); recorded as %s",
+			batch.ID, item.AssetID, batch.TenantID, controlplane.ErrorInternal)
+		return failedUpdate(string(controlplane.ErrorInternal))
 	case reply.Status == controlplane.StatusFailed:
 		return failedUpdate(farmerErrorCode(reply.ErrorCode))
 	case reply.Status == controlplane.StatusCompleted && batch.ActionType == controlplane.ActionCmdRun && reply.Result != nil:

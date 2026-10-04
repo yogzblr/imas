@@ -16,7 +16,8 @@
 //     original size. Before every wave the tenant's policy, the version's
 //     revocation, and its registration (catalog rows whose signatures
 //     verify) are checked again, as CreateFleetUpdateBatch and farmer's
-//     re-verification do.
+//     re-verification do, and before every wave and item that the tenant
+//     is still active, as a live rollout does.
 //   - Items in dispatching are never re-sent: the sprout deduplicates
 //     nothing, so a second send could update (or, for a §1.5 batch, run a
 //     command) twice. One a dead process left there fails with
@@ -89,23 +90,32 @@ func tenantIsActive(d *gorm.DB, tenantID string) (bool, error) {
 	return n > 0, err
 }
 
-// rolloutRegistrationCheck is a resumed rollout's extra check before each
-// wave: the tenant is still active (the POST required it; it may have
-// started offboarding since), the target version still has catalog rows,
-// every one of them verifies against the fleet signing key
-// (selfUpdateParams), and they still build exactly the params the batch
-// was created with. Revocation and the tenant's policy are
-// rolloutPolicyCheck's. It returns "" to go ahead, tenant_not_active or
-// rollout_halted if a check fails, or internal_error if the tenant or the
-// catalog can't be read.
-func rolloutRegistrationCheck(d *gorm.DB, batch AssetActionBatch, version string) string {
-	if active, err := tenantIsActive(d, batch.TenantID); err != nil {
+// rolloutTenantCheck is every rollout's check before each wave and each
+// item (preWaveCheck, dispatchWave): the tenant is still active (the POST
+// required it; it may have started offboarding or been deleted since). It
+// returns "" to go ahead, tenant_not_active, or internal_error if the
+// tenant can't be read.
+func rolloutTenantCheck(d *gorm.DB, batch AssetActionBatch) string {
+	active, err := tenantIsActive(d, batch.TenantID)
+	switch {
+	case err != nil:
 		log.Errorf("saasapi: update batch %s (tenant %s): reading the tenant: %v; halting", batch.ID, batch.TenantID, err)
 		return string(controlplane.ErrorInternal)
-	} else if !active {
+	case !active:
 		log.Warnf("saasapi: update batch %s (tenant %s): the tenant is no longer active; halting", batch.ID, batch.TenantID)
 		return errCodeTenantNotActive
 	}
+	return ""
+}
+
+// rolloutRegistrationCheck is a resumed rollout's extra check before each
+// wave: the target version still has catalog rows, every one of them
+// verifies against the fleet signing key (selfUpdateParams), and they
+// still build exactly the params the batch was created with. Revocation
+// and the tenant's policy are rolloutPolicyCheck's, the tenant's status
+// rolloutTenantCheck's. It returns "" to go ahead, rollout_halted if a
+// check fails, or internal_error if the catalog can't be read.
+func rolloutRegistrationCheck(d *gorm.DB, batch AssetActionBatch, version string) string {
 	var rows []FleetVersion
 	if err := d.Where("version = ?", version).Order("os").Order("arch").Order("package_type").Find(&rows).Error; err != nil {
 		log.Errorf("saasapi: update batch %s (tenant %s): reading the catalog rows of %s: %v; halting", batch.ID, batch.TenantID, version, err)

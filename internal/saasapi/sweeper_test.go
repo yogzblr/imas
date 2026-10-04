@@ -115,7 +115,8 @@ func TestLoadConfigOutboxSweeper(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := OutboxSweeperSettings{Enabled: false, Interval: 10 * time.Second, ProvisioningStaleAfter: 5 * time.Minute,
-		ActionStaleAfter: 90 * time.Second, ActionMaxAge: 10 * time.Minute, MaxAttempts: 3, LeaseTTL: time.Minute}
+		ActionStaleAfter: 90 * time.Second, ActionMaxAge: 10 * time.Minute, MaxAttempts: 3, LeaseTTL: time.Minute,
+		DispatchConcurrency: 64, SelfUpdateDispatchConcurrency: 16, DispatchTenantConcurrency: 8}
 	if cfg.OutboxSweeper != want {
 		t.Fatalf("overrides = %+v, want %+v", cfg.OutboxSweeper, want)
 	}

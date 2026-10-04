@@ -991,6 +991,69 @@ func TestSaasapiOutboxSweeperEnv(t *testing.T) {
 	}
 }
 
+// Farmer's own self_update switch (security review L1) is always
+// rendered, and off by default.
+func TestFarmerSelfUpdateEnv(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{nil, "false"},
+		{[]string{"--set", "farmer.selfUpdate.enabled=true"}, "true"},
+		{[]string{"--set", "farmer.selfUpdate.enabled=false"}, "false"},
+		{[]string{"--set", "farmer.selfUpdate.enabled=null"}, "false"},
+	} {
+		env := envMap(container(t, farmerDeploy(t, mustRender(t, tc.args...)), "farmer"))
+		if e := env["IMAS_SELF_UPDATE_ENABLED"]; e == nil || e["value"] != tc.want {
+			t.Errorf("%v: IMAS_SELF_UPDATE_ENABLED = %v, want %s", tc.args, e, tc.want)
+		}
+	}
+	// saasapi's dispatch flag doesn't turn farmer's on.
+	env := envMap(container(t, farmerDeploy(t, mustRender(t, "--set", "saasapi.fleetUpdateDispatch.enabled=true")), "farmer"))
+	if e := env["IMAS_SELF_UPDATE_ENABLED"]; e == nil || e["value"] != "false" {
+		t.Errorf("with saasapi dispatch on: IMAS_SELF_UPDATE_ENABLED = %v, want false", e)
+	}
+}
+
+// Dispatch concurrency (security review M5) in farmer and saasapi: the
+// documented defaults are rendered, overrides pass through, null emits
+// nothing.
+func TestDispatchConcurrencyEnv(t *testing.T) {
+	for _, svc := range []struct {
+		name, prefix string
+		deploy       func(t *testing.T, docs []obj) obj
+		vars         []string
+	}{
+		{"farmer", "farmer.sproutActions", func(t *testing.T, docs []obj) obj { return farmerDeploy(t, docs) },
+			[]string{"IMAS_SPROUT_ACTION_CONCURRENCY", "IMAS_SELF_UPDATE_CONCURRENCY", "IMAS_SPROUT_ACTION_TENANT_CONCURRENCY"}},
+		{"saasapi", "saasapi.actionDispatch", func(t *testing.T, docs []obj) obj { return find(t, docs, "Deployment", "t-farmer-saasapi") },
+			[]string{"SAASAPI_ACTION_DISPATCH_CONCURRENCY", "SAASAPI_SELF_UPDATE_DISPATCH_CONCURRENCY", "SAASAPI_ACTION_DISPATCH_TENANT_CONCURRENCY"}},
+	} {
+		keys := []string{"concurrency", "selfUpdateConcurrency", "tenantConcurrency"}
+		for _, tc := range []struct {
+			args []string
+			want []string
+		}{
+			{nil, []string{"64", "16", "8"}},
+			{[]string{"--set", svc.prefix + ".concurrency=128", "--set", svc.prefix + ".selfUpdateConcurrency=32", "--set", svc.prefix + ".tenantConcurrency=4"},
+				[]string{"128", "32", "4"}},
+			{[]string{"--set", svc.prefix + ".concurrency=null", "--set", svc.prefix + ".selfUpdateConcurrency=null", "--set", svc.prefix + ".tenantConcurrency=null"},
+				[]string{"", "", ""}},
+		} {
+			env := envMap(container(t, svc.deploy(t, mustRender(t, tc.args...)), svc.name))
+			for i, name := range svc.vars {
+				e, ok := env[name]
+				if tc.want[i] == "" && ok {
+					t.Errorf("%s %v: %s (%s) rendered for null: %v", svc.name, tc.args, name, keys[i], e)
+				}
+				if tc.want[i] != "" && (!ok || e["value"] != tc.want[i]) {
+					t.Errorf("%s %v: %s = %v, want %s", svc.name, tc.args, name, e, tc.want[i])
+				}
+			}
+		}
+	}
+}
+
 // farmer and saasapi share PXC and Valkey: both DSNs point at the same
 // host, both Valkey lists are identical (saasapi reads farmer's heartbeat
 // keys).
