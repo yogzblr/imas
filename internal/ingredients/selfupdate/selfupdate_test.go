@@ -126,7 +126,7 @@ type fixture struct {
 
 // fakePkg is one package's own metadata.
 type fakePkg struct {
-	name, version, epoch, release      string
+	name, version, epoch, release       string
 	msiName, msiVersion, msiUpgradeCode string
 }
 

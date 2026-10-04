@@ -165,7 +165,7 @@ func TestApply_RefusesPackageMetadataMismatch(t *testing.T) {
 		// An MSI can't tell (TestApply_PrereleaseVersions), so this case
 		// runs for deb and rpm only.
 		"prerelease of the target": genuinePkg("v2.4.1-rc.1"),
-		"with an epoch": func() fakePkg { p := genuinePkg(testTarget); p.version = "1:" + p.version; p.epoch = "1"; return p }(),
+		"with an epoch":            func() fakePkg { p := genuinePkg(testTarget); p.version = "1:" + p.version; p.epoch = "1"; return p }(),
 	} {
 		for _, pc := range platformCases {
 			t.Run(name+"/"+pc.name, func(t *testing.T) {
@@ -291,11 +291,11 @@ func TestControlFields(t *testing.T) {
 		t.Errorf("got %v, %v", got, err)
 	}
 	for _, out := range []string{
-		"Package: imas-sprout\n",                                       // no Version
-		"Package: imas-sprout\nVersion: 2.4.1\nVersion: 2.0.0\n",       // twice
-		"Package: imas-sprout\nVersion: 2.4.1\n continued\n",           // multi-line
-		"Package: imas-sprout\nVersion: 2.4.1\nDescription: x\n",       // unexpected
-		"Package: imas-sprout\nVersion: \n",                            // empty
+		"Package: imas-sprout\n",                                        // no Version
+		"Package: imas-sprout\nVersion: 2.4.1\nVersion: 2.0.0\n",        // twice
+		"Package: imas-sprout\nVersion: 2.4.1\n continued\n",            // multi-line
+		"Package: imas-sprout\nVersion: 2.4.1\nDescription: x\n",        // unexpected
+		"Package: imas-sprout\nVersion: \n",                             // empty
 		"dpkg-deb: warning: ignoring\nPackage: a\nVersion: 2.4.1+git\n", // anything else
 	} {
 		if _, err := controlFields(out, "Package", "Version"); !errors.Is(err, ErrPackageMismatch) {
