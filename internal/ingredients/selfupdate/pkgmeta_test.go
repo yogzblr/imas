@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/fleetsign"
 )
 
@@ -187,27 +188,24 @@ func TestApply_RefusesPackageMetadataMismatch(t *testing.T) {
 	}
 }
 
-// An MSI ProductVersion carries no prerelease, so an rc's MSI and the
-// final's are told apart only by MAJOR.MINOR.PATCH. This pins that
-// documented limit: a v2.5.0-rc.1 manifest accepts a 2.5.0 MSI, and a
-// deb or rpm must still match in full.
+// A prerelease installs on Linux, where the package's metadata carries
+// the prerelease and is compared in full.
 func TestApply_PrereleaseVersions(t *testing.T) {
-	for _, pc := range platformCases {
+	for _, pc := range platformCases[:3] {
 		t.Run(pc.name, func(t *testing.T) {
 			f := newFixture(t)
 			pc.setup(t, f)
 			f.manifest.Version = "v2.5.0-rc.1"
 			f.pkgMeta[sha(pkgBytes)] = genuinePkg("v2.5.0-rc.1")
-			if pc.goos == "windows" {
-				// The NuGet flat container path is the version's.
-				t.Skip("the fixture's NuGet feed serves only 2.4.1")
-			}
 			res, err := step(t, target("v2.5.0-rc.1")).Apply(context.Background())
 			if err != nil || !res.Succeeded {
 				t.Fatalf("Apply = %+v, %v", res, err)
 			}
 			if !notesContain(res, "matches the signed manifest") {
 				t.Errorf("notes %v don't record the metadata check", res.Notes)
+			}
+			if _, _, installs := f.counts(); installs != 1 {
+				t.Errorf("installed %d times, want 1", installs)
 			}
 		})
 	}
@@ -216,12 +214,55 @@ func TestApply_PrereleaseVersions(t *testing.T) {
 		setSeam(t, &msiProperties, func(string, []string) (map[string]string, error) {
 			return map[string]string{"ProductName": msiProductName, "ProductVersion": "2.5.0", "UpgradeCode": strings.ToLower(msiUpgradeCode)}, nil
 		})
-		m := fleetsignManifest("v2.5.0-rc.1")
-		if _, _, err := verifyPackageIdentity(context.Background(), p, "x.msi", m); err != nil {
-			t.Errorf("rc manifest, 2.5.0 MSI: %v", err)
+		// A prerelease manifest is refused for an MSI, even though the
+		// MSI's ProductVersion (2.5.0) matches its MAJOR.MINOR.PATCH.
+		if _, _, err := verifyPackageIdentity(context.Background(), p, "x.msi", fleetsignManifest("v2.5.0-rc.1")); !errors.Is(err, ErrPrereleaseOnWindows) {
+			t.Errorf("rc manifest, 2.5.0 MSI: %v, want ErrPrereleaseOnWindows", err)
+		}
+		if _, _, err := verifyPackageIdentity(context.Background(), p, "x.msi", fleetsignManifest("v2.5.0")); err != nil {
+			t.Errorf("v2.5.0 manifest, 2.5.0 MSI: %v", err)
 		}
 		if _, _, err := verifyPackageIdentity(context.Background(), p, "x.msi", fleetsignManifest("v2.5.1")); !errors.Is(err, ErrPackageMismatch) {
 			t.Errorf("v2.5.1 manifest, 2.5.0 MSI: %v, want ErrPackageMismatch", err)
+		}
+	})
+}
+
+// TestApply_PrereleaseRefusedOnWindows: a prerelease target on a Windows
+// sprout is refused before farmer or the repository is asked anything,
+// by both Apply and the dry run. A release version on Windows still
+// installs.
+func TestApply_PrereleaseRefusedOnWindows(t *testing.T) {
+	for _, v := range []string{"v2.5.0-rc.1", "v2.4.1-0.beta"} {
+		t.Run(v, func(t *testing.T) {
+			f := newFixture(t)
+			platformCases[3].setup(t, f)
+			f.manifest.Version = v
+			f.pkgMeta[sha(pkgBytes)] = genuinePkg(v)
+			for name, run := range map[string]func(context.Context) (cook.Result, error){
+				"Apply": step(t, target(v)).Apply, "Test": step(t, target(v)).Test,
+			} {
+				res, err := run(context.Background())
+				if !errors.Is(err, ErrPrereleaseOnWindows) || res.Succeeded || !res.Failed {
+					t.Fatalf("%s = %+v, %v; want ErrPrereleaseOnWindows", name, res, err)
+				}
+			}
+			f.runDeferred()
+			if farmer, repo, installs := f.counts(); farmer != 0 || repo != 0 || installs != 0 {
+				t.Errorf("farmer %d, repo %d, installs %d; want nothing fetched or installed", farmer, repo, installs)
+			}
+			assertNoStagedFiles(t)
+		})
+	}
+	t.Run("release still installs", func(t *testing.T) {
+		f := newFixture(t)
+		platformCases[3].setup(t, f)
+		if res, err := step(t, target(testTarget)).Apply(context.Background()); err != nil || !res.Succeeded {
+			t.Fatalf("Apply = %+v, %v", res, err)
+		}
+		f.runDeferred()
+		if len(f.detached) != 1 {
+			t.Errorf("msiexec started %d times, want 1", len(f.detached))
 		}
 	})
 }

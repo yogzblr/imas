@@ -681,6 +681,13 @@ func planUpdateItems(ctx context.Context, reader SproutFactsReader, tenantID str
 	// reading if it ever isn't.
 	minByPlatform := make(map[string]string)
 	for _, row := range catalog {
+		// A prerelease is never installed from an MSI (the sprout refuses
+		// it: its ProductVersion can't carry the prerelease), so a
+		// prerelease's msi rows give Windows sprouts nothing to install:
+		// they fail up front with no_release_for_platform, unsent.
+		if row.PackageType == "msi" && semver.Prerelease(target) != "" {
+			continue
+		}
 		key := row.OS + "/" + row.Arch
 		if cur, ok := minByPlatform[key]; !ok || semver.Compare(row.MinSproutVersion, cur) > 0 {
 			minByPlatform[key] = row.MinSproutVersion
