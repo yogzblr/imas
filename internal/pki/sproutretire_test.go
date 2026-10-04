@@ -44,7 +44,7 @@ func sealAsTestSprout(t *testing.T, tenant, sproutID, purpose string, k testSpro
 	if err != nil {
 		t.Fatal(err)
 	}
-	msg, err := payloadbox.NewMessage(purpose, sproutID, "", body)
+	msg, err := payloadbox.NewMessage(purpose, tenant, sproutID, "", body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,10 +287,30 @@ func TestEnroll_ReusedSproutIDHasExactlyOneActiveKey(t *testing.T) {
 	store, _ := setupEnrollTest(t)
 	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 5}
 
+	// Each host completes enrollment the way the client does (SEC.3b):
+	// the first request issues the identity, and the second, carrying
+	// proof of possession of the box key, records it.
+	enrollProven := func(kp nkeys.KeyPair) (string, *EnrollResult) {
+		t.Helper()
+		k := newTestSproutBox(t)
+		first, err := Enroll(t.Context(), signedEnroll(t, kp, "ek_1.s", "web-01", k.b64()))
+		if err != nil {
+			t.Fatalf("Enroll: %v", err)
+		}
+		proof := enrollProof(t, "t_1", first.SproutID, first.TenantX25519Pub, testNKeyPub(t, kp), k.b64(), k.priv)
+		if _, err := Enroll(t.Context(), provenEnroll(t, kp, k.b64(), proof)); err != nil {
+			t.Fatalf("proven Enroll: %v", err)
+		}
+		return k.b64(), first
+	}
+
 	oldKP := testEnrollNKey(t)
-	oldBox := testEnrollBoxPub(t)
-	if res, err := Enroll(t.Context(), signedEnroll(t, oldKP, "ek_1.s", "web-01", oldBox)); err != nil || res.SproutID != "web-01" {
-		t.Fatalf("first Enroll: %+v, %v", res, err)
+	oldBox, res := enrollProven(oldKP)
+	if res.SproutID != "web-01" {
+		t.Fatalf("first Enroll got sprout %s, want web-01", res.SproutID)
+	}
+	if got := activeRows(t, "t_1", "web-01"); len(got) != 1 || got[0] != oldBox {
+		t.Fatalf("active box keys %v, want exactly the old host's", got)
 	}
 	if err := DeleteNKey("t_1", "web-01"); err != nil {
 		t.Fatal(err)
@@ -302,11 +322,7 @@ func TestEnroll_ReusedSproutIDHasExactlyOneActiveKey(t *testing.T) {
 		t.Errorf("a refused revoked NKey consumed a use: used_count=%d", store.rows["ek_1"].UsedCount)
 	}
 
-	newBox := testEnrollBoxPub(t)
-	res, err := Enroll(t.Context(), signedEnroll(t, testEnrollNKey(t), "ek_1.s", "web-01", newBox))
-	if err != nil {
-		t.Fatalf("re-enrolling the freed ID: %v", err)
-	}
+	newBox, res := enrollProven(testEnrollNKey(t))
 	if res.SproutID != "web-01" {
 		t.Errorf("the freed ID wasn't reused: got %s", res.SproutID)
 	}

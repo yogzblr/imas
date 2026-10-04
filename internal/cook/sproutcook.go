@@ -31,7 +31,10 @@ const DefaultCookTimeout = 30 * time.Minute
 func CookRecipeEnvelope(envelope RecipeEnvelope) error {
 	nonCCM.Lock()
 	defer nonCCM.Unlock()
-	log.Tracef("received new envelope: %v", envelope)
+	// Only the job ID and step count, at any level: the envelope carries
+	// each step's rendered properties, and the sprout's log is shipped
+	// over the bus in plaintext (security review 2026-10, H4).
+	log.Infof("cook: cooking job %s (%d steps)", envelope.JobID, len(envelope.Steps))
 
 	completionMap := map[StepID]StepCompletion{}
 	for _, step := range envelope.Steps {
@@ -81,7 +84,9 @@ func CookRecipeEnvelope(envelope RecipeEnvelope) error {
 			}
 
 			conn.Publish("imas.cook."+pki.GetSproutID()+"."+envelope.JobID, b)
-			log.Infof("Step %s completed with status %v", completion.ID, completion)
+			// Not the completion itself: its changes and notes can carry
+			// step output.
+			log.Infof("Step %s completed with status %v", completion.ID, completion.CompletionStatus)
 			completed++
 			logStepResult(envelope.JobID, completion)
 			completionMap[completion.ID] = completion

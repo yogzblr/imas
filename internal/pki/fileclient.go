@@ -84,7 +84,8 @@ var onDemandRefreshMu sync.Mutex
 // under its own sprouts/<tenant_id>/<sprout_id>/ prefix.
 //
 // If the refresh it needs fails, the download fails with that error.
-// ErrTenantKeyMismatch and ErrTenantKeyNotPinned come through wrapped, and
+// ErrTenantKeyMismatch, ErrTenantKeyNotPinned, ErrSproutTenantMismatch and
+// ErrSproutTenantNotPinned (IsFatalRefreshError) come through wrapped, and
 // callers treat them as fatal, as RunGatewayJWTRefresher's caller does.
 func FetchFarmerFile(ctx context.Context, key string) ([]byte, error) {
 	if !isFarmerFileKey(key) {

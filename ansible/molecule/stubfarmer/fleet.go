@@ -188,7 +188,7 @@ func (f *farmer) selfUpdate(w http.ResponseWriter, r *http.Request) {
 		DispatchedAt: time.Now().UTC(),
 	}
 	pair := []payloadbox.KeyPair{{PeerPub: sproutPub, Priv: f.tenantBoxPriv}}
-	msg, err := payloadbox.NewMessage(payloadbox.PurposeCookRequest, req.SproutID, "", env)
+	msg, err := payloadbox.NewMessage(payloadbox.PurposeCookRequest, stubTenantID, req.SproutID, "", env)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -210,7 +210,7 @@ func (f *farmer) selfUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sprout refused the sealed cook: "+code, http.StatusBadGateway)
 		return
 	}
-	opened, err := payloadbox.Open(reply.Data, pair, payloadbox.Expect{Purpose: payloadbox.PurposeCookResponse, SproutID: req.SproutID})
+	opened, err := payloadbox.Open(reply.Data, pair, payloadbox.Expect{Purpose: payloadbox.PurposeCookResponse, TenantID: stubTenantID, SproutID: req.SproutID})
 	if err != nil || opened.ReplyTo != msg.ID {
 		http.Error(w, fmt.Sprintf("opening the sprout's acknowledgement: %v", err), http.StatusBadGateway)
 		return

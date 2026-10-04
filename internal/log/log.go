@@ -40,8 +40,7 @@ func init() {
 }
 
 // SetLogLevel sets the minimum log level for the charm terminal logger.
-// The NATS logger always receives all messages (filtering is done by
-// subscribers).
+// The NATS logger has its own minimum, SetNATSMinLevel (Info by default).
 func SetLogLevel(l Level) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -58,7 +57,7 @@ func SetOutput(w io.Writer) {
 
 // ConnectNATS dials url and connects the NATS logger backend over that
 // new, unauthenticated connection, which Flush closes. The NATS logger
-// publishes all levels regardless of the terminal log level.
+// publishes from NATSMinLevel up, regardless of the terminal log level.
 //
 // Neither binary uses this any more: a bus in operator mode, or behind
 // Envoy, rejects a connection without the caller's User JWT and pinned
@@ -80,8 +79,10 @@ func ConnectNATS(url string) error {
 // connection the caller has already authenticated, instead of dialling a
 // new one. Each entry is published to subjectPrefix + "." + its level
 // (e.g. "imas.logs.sprouts.web01.INFO"); nc's User JWT must grant publish
-// on those subjects, or the bus rejects every entry. All levels are
-// published, regardless of the terminal log level.
+// on those subjects, or the bus rejects every entry. Entries from
+// NATSMinLevel up are published (Info unless SetNATSMinLevel changed it),
+// regardless of the terminal log level: log shipping is plaintext on the
+// bus.
 //
 // nc stays the caller's: Flush flushes it but never closes it. Calling
 // UseNATSConn again replaces the connection and prefix.
@@ -106,16 +107,41 @@ func UseNATSConn(nc *nats.Conn, subjectPrefix string) error {
 	return nil
 }
 
-// attachNATSLocked adds the log-nats logger to the mux once. mu must be
-// held. It goes after the charm adapter, whose Panic* and Fatal* panic or
+// attachNATSLocked adds the log-nats logger, behind the natsSink level
+// filter, to the mux once. mu must be held. It goes after the charm adapter, whose Panic* and Fatal* panic or
 // exit first, so log-nats's own Panic*/Fatal* (which close the
 // connection, borrowed or not) are never reached.
 func attachNATSLocked() {
 	if natsUp {
 		return
 	}
-	logger.SubLoggers = append(logger.SubLoggers, nlog.Default())
+	logger.SubLoggers = append(logger.SubLoggers, natsSink{inner: nlog.Default()})
 	natsUp = true
+}
+
+// DetachNATS removes the NATS backend, if one is attached: entries go to
+// the terminal logger only from then on. A connection from ConnectNATS is
+// closed; one from UseNATSConn is left to its owner.
+func DetachNATS() {
+	mu.Lock()
+	defer mu.Unlock()
+	if !natsUp {
+		return
+	}
+	if borrowedConn == nil {
+		nlog.Flush()
+	}
+	kept := logger.SubLoggers[:0]
+	for _, sl := range logger.SubLoggers {
+		if _, isNATS := sl.(natsSink); !isNATS {
+			kept = append(kept, sl)
+		}
+	}
+	logger.SubLoggers = kept
+	nlog.SetDefaultConn(nil)
+	nlog.SetSubjectTemplate("logging.{{.Namespace}}.{{.Level}}")
+	borrowedConn = nil
+	natsUp = false
 }
 
 // validateSubjectPrefix rejects a prefix that isn't one or more literal

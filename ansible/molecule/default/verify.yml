@@ -165,7 +165,10 @@
         that:
           # One use of the key per host, across converge, idempotence and
           # the re-runs above: an enrolled sprout never enrolled again.
+          # A first enrollment is two requests (identity, then proof of
+          # possession of the box key), counted once when it completes.
           - _state.json.redemptions == groups['sprouts'] | length
-          - _state.json.enroll_requests == groups['sprouts'] | length
+          - _state.json.completed_enrollments == groups['sprouts'] | length
+          - _state.json.reenroll_requests == 0
           - _state.json.sprouts | length == groups['sprouts'] | length
         fail_msg: "{{ _state.json | to_json }}"

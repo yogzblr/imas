@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"golang.org/x/crypto/nacl/box"
 
 	"github.com/yogzblr/imas/internal/gatewayjwt"
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 )
 
@@ -359,40 +361,187 @@ func activeBoxKeyForTenant(t *testing.T, tenantID, sproutID string) string {
 	return row.Pub
 }
 
-func TestEnroll_PersistsSproutBoxKey(t *testing.T) {
-	store, _ := setupEnrollTest(t)
-	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
-
-	sproutPub := testEnrollBoxPub(t)
-	if _, err := Enroll(t.Context(), signedEnroll(t, testEnrollNKey(t), "ek_1.s", "web-01", sproutPub)); err != nil {
-		t.Fatalf("Enroll: %v", err)
+// enrollProof builds a sprout_pub_proof as the sprout's client does
+// (sproutEnrollProof), but sealed with sealer, which a test can make a
+// key other than sproutPub's private half.
+func enrollProof(t *testing.T, tenantID, sproutID, tenantPubB64, nkeyPub, sproutPubB64 string, sealer *[32]byte) json.RawMessage {
+	t.Helper()
+	tenantPub, err := DecodeBoxPubKey(tenantPubB64)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	active := activeBoxKeyForTenant(t, "t_1", "web-01")
-	if active != sproutPub {
-		t.Errorf("expected active box key %q, got %q", sproutPub, active)
+	msg, err := payloadbox.NewMessage(payloadbox.PurposeEnrollProof, tenantID, sproutID, "",
+		enrollProofBody{NKeyPub: nkeyPub, SproutPub: sproutPubB64})
+	if err != nil {
+		t.Fatal(err)
 	}
+	data, err := payloadbox.Seal(msg, []payloadbox.KeyPair{{PeerPub: tenantPub, Priv: sealer}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
-func TestEnroll_IdempotentReplayReassertsSproutBoxKey(t *testing.T) {
+// provenEnroll is the second request of a first enrollment: the replay
+// path, carrying proof.
+func provenEnroll(t *testing.T, kp nkeys.KeyPair, sproutPubB64 string, proof json.RawMessage) EnrollRequest {
+	t.Helper()
+	req := signedEnroll(t, kp, "bogus.token", "web-01", sproutPubB64)
+	req.SproutPubProof = proof
+	return req
+}
+
+// hasActiveBoxKey reports whether sproutID has an active box key in
+// tenantID.
+func hasActiveBoxKey(t *testing.T, tenantID, sproutID string) bool {
+	t.Helper()
+	var n int64
+	if err := db.Model(&sproutBoxKeyRow{}).Where("tenant_id = ? AND sprout_id = ? AND state = ?", tenantID, sproutID, boxKeyStateActive).Count(&n).Error; err != nil {
+		t.Fatal(err)
+	}
+	return n > 0
+}
+
+// The first enrollment issues the identity but records no box key; the
+// proven second request records it (security review 2026-10, H3: proof
+// of possession of sprout_pub).
+func TestEnroll_RecordsSproutBoxKeyOnlyWithProof(t *testing.T) {
 	store, _ := setupEnrollTest(t)
 	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
 
 	kp := testEnrollNKey(t)
-	sproutPub := testEnrollBoxPub(t)
-	if _, err := Enroll(t.Context(), signedEnroll(t, kp, "ek_1.s", "web-01", sproutPub)); err != nil {
-		t.Fatalf("first Enroll: %v", err)
+	sproutPub, sproutPriv, _ := box.GenerateKey(rand.Reader)
+	first, err := Enroll(t.Context(), signedEnroll(t, kp, "ek_1.s", "web-01", b64(sproutPub)))
+	if err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+	if first.TenantID != "t_1" {
+		t.Errorf("TenantID = %q, want t_1", first.TenantID)
+	}
+	if hasActiveBoxKey(t, "t_1", "web-01") {
+		t.Fatal("a box key was recorded without proof of possession")
+	}
+	if _, _, err := SealToSprout("t_1", "web-01", payloadbox.PurposeCmdRunRequest, "", "x"); !errors.Is(err, ErrNoActiveBoxKey) {
+		t.Fatalf("farmer sealed to an unproven box key: %v", err)
+	}
+	// A replay without proof doesn't record it either.
+	if _, err := Enroll(t.Context(), signedEnroll(t, kp, "bogus.token", "web-01", b64(sproutPub))); err != nil {
+		t.Fatalf("replay without proof: %v", err)
+	}
+	if hasActiveBoxKey(t, "t_1", "web-01") {
+		t.Fatal("a replay without proof recorded the box key")
 	}
 
-	// Replay presents the same sprout_pub again (the sprout only generates
-	// its keypair once) — must not error and must leave the stored key
-	// unchanged.
-	if _, err := Enroll(t.Context(), signedEnroll(t, kp, "bogus.token", "web-01", sproutPub)); err != nil {
-		t.Fatalf("replay Enroll: %v", err)
+	proof := enrollProof(t, "t_1", "web-01", first.TenantX25519Pub, testNKeyPub(t, kp), b64(sproutPub), sproutPriv)
+	if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), proof)); err != nil {
+		t.Fatalf("proven Enroll: %v", err)
 	}
-	active := activeBoxKeyForTenant(t, "t_1", "web-01")
-	if active != sproutPub {
-		t.Errorf("expected active box key unchanged at %q, got %q", sproutPub, active)
+	if active := activeBoxKeyForTenant(t, "t_1", "web-01"); active != b64(sproutPub) {
+		t.Errorf("active box key %q, want %q", active, b64(sproutPub))
+	}
+	// Retried (the response was lost): the same proof for the same key
+	// is a no-op.
+	proof = enrollProof(t, "t_1", "web-01", first.TenantX25519Pub, testNKeyPub(t, kp), b64(sproutPub), sproutPriv)
+	if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), proof)); err != nil {
+		t.Fatalf("retried proven Enroll: %v", err)
+	}
+	if active := activeBoxKeyForTenant(t, "t_1", "web-01"); active != b64(sproutPub) {
+		t.Errorf("active box key changed to %q", active)
+	}
+}
+
+// Every proof that isn't exactly right fails the whole request and records
+// nothing.
+func TestEnroll_RefusesBadSproutPubProofs(t *testing.T) {
+	store, _ := setupEnrollTest(t)
+	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 2}
+
+	kp := testEnrollNKey(t)
+	nkeyPub := testNKeyPub(t, kp)
+	sproutPub, sproutPriv, _ := box.GenerateKey(rand.Reader)
+	_, attackerPriv, _ := box.GenerateKey(rand.Reader)
+	first, err := Enroll(t.Context(), signedEnroll(t, kp, "ek_1.s", "web-01", b64(sproutPub)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tp := first.TenantX25519Pub
+	otherNKey := testNKeyPub(t, testEnrollNKey(t))
+	for name, proof := range map[string]json.RawMessage{
+		// The H3 case: the enroller doesn't hold sprout_pub's private key.
+		"sealed by a key other than sprout_pub's": enrollProof(t, "t_1", "web-01", tp, nkeyPub, b64(sproutPub), attackerPriv),
+		"for another tenant":                      enrollProof(t, "t_2", "web-01", tp, nkeyPub, b64(sproutPub), sproutPriv),
+		"for another sprout":                      enrollProof(t, "t_1", "web-02", tp, nkeyPub, b64(sproutPub), sproutPriv),
+		"naming another nkey":                     enrollProof(t, "t_1", "web-01", tp, otherNKey, b64(sproutPub), sproutPriv),
+		"garbage":                                 json.RawMessage(`{"v":2,"s":[]}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), proof)); !errors.Is(err, ErrEnrollmentFailed) {
+				t.Fatalf("Enroll = %v, want ErrEnrollmentFailed", err)
+			}
+			if hasActiveBoxKey(t, "t_1", "web-01") {
+				t.Fatal("a bad proof recorded a box key")
+			}
+		})
+	}
+
+	// A stale proof.
+	t.Run("stale", func(t *testing.T) {
+		proof := enrollProof(t, "t_1", "web-01", tp, nkeyPub, b64(sproutPub), sproutPriv)
+		if err := verifyEnrollProof("t_1", "web-01", nkeyPub, b64(sproutPub), proof); err != nil {
+			t.Fatalf("control: %v", err)
+		}
+		withEnrollNow(t, time.Now().Add(EnrollSigMaxSkew+time.Minute))
+		if err := verifyEnrollProof("t_1", "web-01", nkeyPub, b64(sproutPub), proof); err == nil {
+			t.Fatal("a proof issued long before farmer's clock verified")
+		}
+	})
+
+	// A proof on a first enrollment (the sprout can't know the tenant key
+	// yet) is refused without spending the token.
+	kp2 := testEnrollNKey(t)
+	req := signedEnroll(t, kp2, "ek_1.s", "web-09", b64(sproutPub))
+	req.SproutPubProof = enrollProof(t, "t_1", "web-09", tp, testNKeyPub(t, kp2), b64(sproutPub), sproutPriv)
+	if _, err := Enroll(t.Context(), req); !errors.Is(err, ErrEnrollmentFailed) {
+		t.Fatalf("proof on a first enrollment: %v", err)
+	}
+
+	// With a box key recorded, a proof for a different key is refused:
+	// replacing a key is a rotation.
+	good := enrollProof(t, "t_1", "web-01", tp, nkeyPub, b64(sproutPub), sproutPriv)
+	if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), good)); err != nil {
+		t.Fatalf("valid proof: %v", err)
+	}
+	newPub, newPriv, _ := box.GenerateKey(rand.Reader)
+	swap := enrollProof(t, "t_1", "web-01", tp, nkeyPub, b64(newPub), newPriv)
+	if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(newPub), swap)); !errors.Is(err, ErrEnrollmentFailed) {
+		t.Fatalf("proof for a second box key: %v", err)
+	}
+	if active := activeBoxKeyForTenant(t, "t_1", "web-01"); active != b64(sproutPub) {
+		t.Errorf("active box key changed to %q", active)
+	}
+}
+
+// H3 (security review 2026-10), the enrollment half: tenant B can't
+// register tenant A's sprout box public key (which the bus can learn)
+// under its own same-named sprout, because it can't prove possession.
+func TestEnroll_AnotherTenantCannotRegisterACopiedBoxKey(t *testing.T) {
+	store, _ := setupEnrollTest(t)
+	store.rows["ek_a"] = &enrollmentKeyRow{TenantID: "t_a", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
+	store.rows["ek_b"] = &enrollmentKeyRow{TenantID: "t_b", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
+
+	victimPub, _, _ := box.GenerateKey(rand.Reader)
+	_, attackerPriv, _ := box.GenerateKey(rand.Reader)
+	kp := testEnrollNKey(t)
+	first, err := Enroll(t.Context(), signedEnroll(t, kp, "ek_b.s", "web-01", b64(victimPub)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := enrollProof(t, "t_b", "web-01", first.TenantX25519Pub, testNKeyPub(t, kp), b64(victimPub), attackerPriv)
+	if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(victimPub), proof)); !errors.Is(err, ErrEnrollmentFailed) {
+		t.Fatalf("Enroll with a copied box key = %v, want ErrEnrollmentFailed", err)
+	}
+	if hasActiveBoxKey(t, "t_b", "web-01") {
+		t.Fatal("tenant B registered a box key it doesn't hold")
 	}
 }
 
@@ -619,6 +768,10 @@ func TestEnroll_ReplayAfterRotationCarriesContinuity(t *testing.T) {
 	kp := testEnrollNKey(t)
 	first, err := Enroll(t.Context(), signedEnroll(t, kp, "ek_1.s", "web-01", b64(sproutPub)))
 	if err != nil {
+		t.Fatal(err)
+	}
+	proof := enrollProof(t, "t_1", "web-01", first.TenantX25519Pub, testNKeyPub(t, kp), b64(sproutPub), sproutPriv)
+	if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), proof)); err != nil {
 		t.Fatal(err)
 	}
 	if first.TenantX25519Continuity != nil {

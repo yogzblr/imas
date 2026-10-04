@@ -21,10 +21,25 @@
 //     sprout as a "command") would otherwise be accepted. Every Message
 //     carries a Purpose ("f2s.cmd.run", "s2f.cmd.run", ...), and Open
 //     refuses one that isn't the purpose the caller expects.
-//   - Recipient binding. Message.SproutID is checked against the sprout
-//     the caller expects. The keys already bind the (tenant, sprout) pair
-//     (sprout_id is only unique per tenant, but no two sprouts share a
-//     box key), so this is defence in depth.
+//   - Tenant binding. Every Message names the tenant it belongs to
+//     (Message.TenantID), and Open refuses one for any tenant but the one
+//     the caller expects (Expect.TenantID, which must be set). sprout_id
+//     is only unique per tenant, so without this a message farmer sealed
+//     for tenant B's "web01" would be accepted by tenant A's "web01"
+//     whenever the keys allowed it to open there at all (two tenants
+//     sharing a keypair, or a sprout box key registered in both: security
+//     review 2026-10, H3). The sprout pins its tenant at enrollment and
+//     farmer checks the tenant of everything it opens.
+//   - Recipient key binding. Every sealed copy names the box public key it
+//     was sealed to (Message.RecipientKey, KeyID of that key), and Open
+//     refuses a copy whose RecipientKey isn't the public half of the
+//     private key that opened it. Callers can't forget this check: Open
+//     derives the key itself. It also binds direction a second way: a
+//     farmer->sprout message names the sprout's key, so reflected back at
+//     farmer it names a key farmer doesn't hold.
+//   - Sprout binding. Message.SproutID is checked against the sprout the
+//     caller expects. The keys already bind the (tenant, sprout) pair
+//     (no two sprouts share a box key), so this is defence in depth.
 //   - Replay and freshness. Every Message has a random ID and an
 //     IssuedAt; ReplayGuard rejects stale messages and IDs it has already
 //     seen. A reply names the request it answers (ReplyTo), so a bus
@@ -39,12 +54,15 @@ package payloadbox
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
+	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/nacl/box"
 )
 
@@ -104,11 +122,17 @@ const (
 	// PurposeTenantKeyContinuity is farmer telling a sprout, under a
 	// tenant key the sprout has pinned, which tenant key replaces it.
 	PurposeTenantKeyContinuity = "f2s.tenantkey.continuity"
+	// PurposeEnrollProof is a sprout proving, at enrollment, that it holds
+	// the private half of the box public key it enrolled with
+	// (internal/pki's enroll.go). Sealed under that key, so only its
+	// holder (or the tenant key's) could have produced it.
+	PurposeEnrollProof = "s2f.enroll.proof"
 )
 
 // Version is the only Envelope and Message version this package reads or
-// writes.
-const Version = 1
+// writes. 2 added Message.TenantID and Message.RecipientKey; a version 1
+// envelope, which binds neither, never opens.
+const Version = 2
 
 // MaxCopies bounds how many sealed copies one Envelope may carry, and so
 // how many box.Open attempts a receiver makes per candidate key pair.
@@ -133,9 +157,16 @@ type KeyPair struct {
 
 // Message is the authenticated plaintext inside every sealed copy.
 type Message struct {
-	V        int    `json:"v"`
-	Purpose  string `json:"p"`
+	V       int    `json:"v"`
+	Purpose string `json:"p"`
+	// TenantID is the tenant the message belongs to: the sprout's
+	// tenant, for both directions. Open refuses any other.
+	TenantID string `json:"tid"`
 	SproutID string `json:"sid"`
+	// RecipientKey is KeyID of the box public key this copy was sealed
+	// to: the sprout's box key for f2s, the tenant's for s2f. Seal sets
+	// it per copy; whatever the caller put there is overwritten.
+	RecipientKey string `json:"rk"`
 	// ID is 128 random bits, hex. Replay protection keys on it.
 	ID string `json:"id"`
 	// ReplyTo is the ID of the request this message answers; empty for
@@ -173,9 +204,31 @@ func NewID() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-// NewMessage builds a Message for purpose, addressed to (or sent by)
-// sproutID, with a fresh ID and IssuedAt, and body JSON-marshalled.
-func NewMessage(purpose, sproutID, replyTo string, body any) (Message, error) {
+// KeyID identifies a box public key without revealing anything the key
+// itself doesn't: the first 16 bytes of SHA-256 over a domain tag and the
+// key, unpadded base64url.
+func KeyID(pub *[32]byte) string {
+	h := sha256.New()
+	h.Write([]byte("imas-payloadbox-key-id-v1\n"))
+	h.Write(pub[:])
+	return base64.RawURLEncoding.EncodeToString(h.Sum(nil)[:16])
+}
+
+// keyIDOfPriv is KeyID of priv's public half.
+func keyIDOfPriv(priv *[32]byte) (string, bool) {
+	pub, err := curve25519.X25519(priv[:], curve25519.Basepoint)
+	if err != nil {
+		return "", false
+	}
+	var p [32]byte
+	copy(p[:], pub)
+	return KeyID(&p), true
+}
+
+// NewMessage builds a Message for purpose, in tenantID, addressed to (or
+// sent by) sproutID, with a fresh ID and IssuedAt, and body
+// JSON-marshalled.
+func NewMessage(purpose, tenantID, sproutID, replyTo string, body any) (Message, error) {
 	id, err := NewID()
 	if err != nil {
 		return Message{}, err
@@ -185,13 +238,14 @@ func NewMessage(purpose, sproutID, replyTo string, body any) (Message, error) {
 		return Message{}, fmt.Errorf("payloadbox: encoding body: %w", err)
 	}
 	return Message{
-		V: Version, Purpose: purpose, SproutID: sproutID, ID: id, ReplyTo: replyTo,
+		V: Version, Purpose: purpose, TenantID: tenantID, SproutID: sproutID, ID: id, ReplyTo: replyTo,
 		IssuedAt: now().Unix(), Body: b,
 	}, nil
 }
 
 // Seal seals msg once per key pair in pairs, each copy under a fresh
-// random nonce, and returns the JSON Envelope.
+// random nonce and naming its own recipient key (Message.RecipientKey,
+// KeyID of the pair's PeerPub), and returns the JSON Envelope.
 func Seal(msg Message, pairs []KeyPair) ([]byte, error) {
 	if len(pairs) == 0 {
 		return nil, errors.New("payloadbox: no key pairs to seal under")
@@ -199,17 +253,18 @@ func Seal(msg Message, pairs []KeyPair) ([]byte, error) {
 	if len(pairs) > MaxCopies {
 		return nil, fmt.Errorf("payloadbox: %d key pairs exceeds the %d-copy limit", len(pairs), MaxCopies)
 	}
-	if msg.V != Version || msg.Purpose == "" || msg.SproutID == "" || msg.ID == "" {
-		return nil, errors.New("payloadbox: message is missing its version, purpose, sprout id or id")
-	}
-	plaintext, err := json.Marshal(msg)
-	if err != nil {
-		return nil, fmt.Errorf("payloadbox: encoding message: %w", err)
+	if msg.V != Version || msg.Purpose == "" || msg.TenantID == "" || msg.SproutID == "" || msg.ID == "" {
+		return nil, errors.New("payloadbox: message is missing its version, purpose, tenant id, sprout id or id")
 	}
 	env := Envelope{V: Version, Copies: make([]Sealed, 0, len(pairs))}
 	for _, p := range pairs {
 		if p.PeerPub == nil || p.Priv == nil {
 			return nil, errors.New("payloadbox: nil key in key pair")
+		}
+		msg.RecipientKey = KeyID(p.PeerPub)
+		plaintext, err := json.Marshal(msg)
+		if err != nil {
+			return nil, fmt.Errorf("payloadbox: encoding message: %w", err)
 		}
 		var nonce [24]byte
 		if _, err := rand.Read(nonce[:]); err != nil {
@@ -223,18 +278,30 @@ func Seal(msg Message, pairs []KeyPair) ([]byte, error) {
 	return json.Marshal(env)
 }
 
-// Expect is what Open checks an opened Message against.
+// Expect is what Open checks an opened Message against. Every field is
+// required: an empty one matches nothing, so a caller that forgets the
+// tenant fails closed.
+//
+// The recipient key is checked too, but not from here: Open compares the
+// Message's RecipientKey with the public half of the candidate private
+// key that opened it, so it can't be left out or set wrongly.
 type Expect struct {
 	Purpose  string
+	TenantID string
 	SproutID string
 }
 
 // Open opens data, a JSON Envelope, under the first candidate key pair
 // any of its copies opens with, and checks the Message's version,
-// purpose and sprout ID against want. Freshness and replay are the
-// caller's (ReplayGuard, or ReplyTo matching). Every failure is ErrOpen.
+// purpose, tenant, sprout ID and recipient key: purpose, tenant and
+// sprout against want, the recipient key against the candidate private
+// key that opened the copy. Freshness and replay are the caller's
+// (ReplayGuard, or ReplyTo matching). Every failure is ErrOpen.
 func Open(data []byte, candidates []KeyPair, want Expect) (*Message, error) {
 	if len(data) > MaxEnvelopeBytes || len(candidates) == 0 {
+		return nil, ErrOpen
+	}
+	if want.Purpose == "" || want.TenantID == "" || want.SproutID == "" {
 		return nil, ErrOpen
 	}
 	var env Envelope
@@ -262,7 +329,11 @@ func Open(data []byte, candidates []KeyPair, want Expect) (*Message, error) {
 			if err := json.Unmarshal(plaintext, &msg); err != nil {
 				return nil, ErrOpen
 			}
-			if msg.V != Version || msg.Purpose != want.Purpose || msg.SproutID != want.SproutID || msg.ID == "" {
+			if msg.V != Version || msg.Purpose != want.Purpose || msg.TenantID != want.TenantID ||
+				msg.SproutID != want.SproutID || msg.ID == "" {
+				return nil, ErrOpen
+			}
+			if rk, ok := keyIDOfPriv(k.Priv); !ok || msg.RecipientKey != rk {
 				return nil, ErrOpen
 			}
 			return &msg, nil

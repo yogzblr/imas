@@ -14,6 +14,34 @@ package pki
 // (claimSignedPayload, replaycache.go), so a captured one can't be
 // resubmitted while its timestamp is still inside the skew window.
 //
+// Proof of possession of the box key (security review 2026-10, H3). The
+// NKey signature proves the caller holds the NKey seed, not that it holds
+// the private half of sprout_pub, the X25519 box key farmer will seal
+// that sprout's commands to. Without a second proof, an enroller could
+// register a box public key it copied from another sprout, and farmer
+// would seal its commands to that key. So a box key is only recorded once
+// the sprout has proved it holds the private half:
+//
+//  1. The first enrollment (the join token path) issues the identity but
+//     records no box key: the sprout can't prove anything yet, because
+//     it doesn't know the tenant's box public key, and X25519 has no
+//     signatures. It does learn the tenant key from the response.
+//  2. The sprout immediately enrolls again, on the replay path (its NKey
+//     is now known, no token is spent), with sprout_pub_proof: a
+//     payloadbox message (PurposeEnrollProof) naming its tenant, sprout
+//     ID, NKey and sprout_pub, sealed with its box private key to the
+//     tenant's box public key. verifyEnrollProof opens it with the
+//     tenant's private key paired with sprout_pub. box authenticates:
+//     only a holder of the sprout_pub private key (or of the tenant
+//     private key, which is farmer) can produce a box that opens under
+//     that pair. Then, and only then, sprout_pub is recorded.
+//
+// Until step 2, farmer has no box key for the sprout and seals nothing to
+// it. A proof that doesn't verify fails the whole request. A proof is
+// only accepted on the replay path, and only to record the sprout's
+// first box key (or re-assert the one on record); changing a box key is
+// a rotation (boxkeys.go), which needs the current key.
+//
 // Every failure path in Enroll returns the single generic
 // ErrEnrollmentFailed sentinel (design doc §3.4) — unknown key_id,
 // malformed token, a hash mismatch, revoked, expired, exhausted, and a
@@ -143,6 +171,9 @@ type EnrollResult struct {
 	// short-lived (config.GatewayJWTTTL), unlike the cached-to-disk NATS
 	// JWT above.
 	GatewayJWT string
+	// TenantID is the sprout's tenant, which the sprout pins at
+	// enrollment and every sealed message names (payloadbox.Message).
+	TenantID string
 	// TenantX25519Pub is the sprout's tenant's current NaCl box public
 	// key, backed by OpenBao custody of the private half (see
 	// tenantbox.go).
@@ -171,6 +202,13 @@ type EnrollRequest struct {
 	// this request.
 	Timestamp int64
 	NKeySig   string
+	// SproutPubProof is the sprout's proof of possession of SproutPub's
+	// private half (see the package comment and verifyEnrollProof), sent
+	// on the second, replay-path request of a first enrollment. Not
+	// covered by NKeySig: the proof binds NKeyPub and SproutPub itself,
+	// and is sealed so only a holder of the box private key could have
+	// made it.
+	SproutPubProof json.RawMessage
 }
 
 // enrollSigDomain prefixes every enrollment signing payload so a
@@ -305,7 +343,20 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 			log.Warnf("enroll: rejected resubmitted or unrecordable signed request for nkey_pub %s: %v", nkeyPub, err)
 			return nil, ErrEnrollmentFailed
 		}
+		if len(req.SproutPubProof) > 0 {
+			if err := recordProvenSproutBoxKey(replayTenantID, sproutID, nkeyPub, sproutPub, req.SproutPubProof); err != nil {
+				log.Warnf("enroll: refused sprout_pub_proof for sprout %s in tenant %s: %v", sproutID, replayTenantID, err)
+				return nil, ErrEnrollmentFailed
+			}
+		}
 		return replayExistingEnrollment(ctx, replayTenantID, sproutID, nkeyPub)
+	}
+	// A proof is only meaningful for an identity that exists: the sprout
+	// can't know its tenant's box key, or its final sprout ID, before
+	// the first response.
+	if len(req.SproutPubProof) > 0 {
+		log.Warnf("enroll: rejected a sprout_pub_proof on a first enrollment for nkey_pub %s", nkeyPub)
+		return nil, ErrEnrollmentFailed
 	}
 
 	keyID, secret, ok := splitJoinToken(joinToken)
@@ -412,28 +463,18 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 		return nil, ErrEnrollmentFailed
 	}
 	// The tenant's X25519 key is read (and, for a tenant's first
-	// enrollment, created fresh: tenantbox.go) before this sprout's box
-	// key is recorded, so a failure here leaves no box key behind.
+	// enrollment, created fresh: tenantbox.go). This sprout's box key is
+	// not recorded on this path at all (see below), so a failure here
+	// leaves no box key behind.
 	tenantPub, err := GetTenantX25519PublicKey(row.TenantID)
 	if err != nil {
 		log.Errorf("enroll: sprout %s accepted but failed to load tenant %s X25519 key: %v", sproutID, row.TenantID, err)
 		return nil, ErrEnrollmentFailed
 	}
-	// Bootstraps the sprout's half of the payload-encryption keypair
-	// (docs/design/imas-payload-encryption-design.md "Bootstrap"): the
-	// sprout generated this locally and never sends its private half.
-	//
-	// Scoped to row.TenantID (the enrollment key's real tenant), not the
-	// process-global tenantID() seam workstream J's original call here
-	// used — pki_sprout_box_keys is (tenant_id, sprout_id)-keyed the same
-	// way pki_nkeys/the JWT storage above are, so writing under the wrong
-	// (global) tenant would let two different tenants' same-named sprouts
-	// collide on this table exactly the way the JWT re-keying elsewhere in
-	// this file was written to prevent.
-	if err := upsertSproutBoxKeyActive(row.TenantID, sproutID, sproutPub); err != nil {
-		log.Errorf("enroll: sprout %s accepted but failed to persist sprout_pub: %v", sproutID, err)
-		return nil, ErrEnrollmentFailed
-	}
+	// sprout_pub is NOT recorded here: the sprout hasn't proved it holds
+	// its private half yet. It does so on its next request, the replay
+	// path above (recordProvenSproutBoxKey), once this response has told
+	// it the tenant key to seal its proof to.
 
 	signedJWT, err := GetSproutUserJWTForTenant(row.TenantID, sproutID)
 	if err != nil {
@@ -454,7 +495,61 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 	}
 
 	log.Infof("enroll: sprout %s enrolled via key_id %s", sproutID, keyID)
-	return &EnrollResult{SproutID: sproutID, JWT: signedJWT, GatewayJWT: gatewayJWT, TenantX25519Pub: tenantPub, TenantX25519Continuity: continuity}, nil
+	return &EnrollResult{SproutID: sproutID, JWT: signedJWT, GatewayJWT: gatewayJWT, TenantID: row.TenantID, TenantX25519Pub: tenantPub, TenantX25519Continuity: continuity}, nil
+}
+
+// verifyEnrollProof checks proof, a sprout's sprout_pub_proof: that it
+// opens under one of tenantID's box private keys paired with sproutPub
+// (which only a holder of sproutPub's private half, or of the tenant
+// key, could have sealed), is for this tenant and sprout
+// (payloadbox.PurposeEnrollProof), names exactly nkeyPub and sproutPub,
+// and was issued within EnrollSigMaxSkew of farmer's clock. The error is
+// for local logging only.
+func verifyEnrollProof(tenantID, sproutID, nkeyPub, sproutPub string, proof []byte) error {
+	msg, err := openEnrollProof(tenantID, sproutID, sproutPub, proof)
+	if err != nil {
+		return err
+	}
+	var body enrollProofBody
+	if err := json.Unmarshal(msg.Body, &body); err != nil {
+		return errors.New("proof body does not decode")
+	}
+	if body.NKeyPub != nkeyPub || body.SproutPub != sproutPub {
+		return errors.New("proof names another nkey_pub or sprout_pub")
+	}
+	skew := enrollNow().Sub(time.Unix(msg.IssuedAt, 0))
+	if skew > EnrollSigMaxSkew || skew < -EnrollSigMaxSkew {
+		return errors.New("proof is outside the allowed skew")
+	}
+	return nil
+}
+
+// recordProvenSproutBoxKey verifies proof (verifyEnrollProof) and records
+// sproutPub as sproutID's active box key, scoped to tenantID: the tenant
+// SproutIDAndTenantForNKey found the NKey under, never a global one
+// (pki_sprout_box_keys is (tenant_id, sprout_id)-keyed). Only a sprout's
+// first box key is recorded this way. A proof for the key already active
+// is a no-op (a retried second request); one for a different key, while
+// one is active, is refused: replacing a key is a rotation, which must be
+// sealed under the current one (boxkeys.go).
+func recordProvenSproutBoxKey(tenantID, sproutID, nkeyPub, sproutPub string, proof []byte) error {
+	if err := verifyEnrollProof(tenantID, sproutID, nkeyPub, sproutPub, proof); err != nil {
+		return err
+	}
+	active, _, err := ValidSproutBoxKeys(tenantID, sproutID)
+	switch {
+	case err == nil && active == sproutPub:
+		return nil
+	case err == nil:
+		return errors.New("the sprout already has a different active box key; a new one needs a rotation")
+	case !errors.Is(err, ErrNoActiveBoxKey):
+		return err
+	}
+	if err := upsertSproutBoxKeyActive(tenantID, sproutID, sproutPub); err != nil {
+		return err
+	}
+	log.Infof("enroll: sprout %s in tenant %s proved possession of its payload-encryption key; recorded it", sproutID, tenantID)
+	return nil
 }
 
 // replayExistingEnrollment handles design doc §3.3 step 1: an already-
@@ -502,7 +597,7 @@ func reissueExistingIdentity(ctx context.Context, tenantID, sproutID, nkeyPub st
 		log.Errorf("enroll: reissuing identity for %s but failed to mint gateway JWT: %v", sproutID, err)
 		return nil, ErrEnrollmentFailed
 	}
-	return &EnrollResult{SproutID: sproutID, JWT: existingJWT, GatewayJWT: gatewayJWT, TenantX25519Pub: tenantPub, TenantX25519Continuity: continuity}, nil
+	return &EnrollResult{SproutID: sproutID, JWT: existingJWT, GatewayJWT: gatewayJWT, TenantID: tenantID, TenantX25519Pub: tenantPub, TenantX25519Continuity: continuity}, nil
 }
 
 // sproutTenantKeyContinuity is TenantKeyContinuity sealed to the

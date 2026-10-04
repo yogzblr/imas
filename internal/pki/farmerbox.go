@@ -11,7 +11,10 @@ package pki
 // rotation's grace window) and the sprout's box public key(s) from
 // ValidSproutBoxKeys (its active key, plus a former one inside its own
 // grace window). Every lookup is by (tenant_id, sprout_id), never
-// sprout_id alone (CLAUDE.md, "Tenant safety").
+// sprout_id alone (CLAUDE.md, "Tenant safety"), and every message
+// sealed or opened here names tenant_id (payloadbox.Message.TenantID):
+// farmer seals the tenant into everything and refuses anything that
+// names another (security review 2026-10, H3).
 
 import (
 	"errors"
@@ -47,7 +50,7 @@ func SealToSprout(tenantID, sproutID, purpose, replyTo string, body any) (data [
 	for _, k := range tenantKeys {
 		pairs = append(pairs, payloadbox.KeyPair{PeerPub: sproutPub, Priv: k.Priv})
 	}
-	msg, err := payloadbox.NewMessage(purpose, sproutID, replyTo, body)
+	msg, err := payloadbox.NewMessage(purpose, tenantID, sproutID, replyTo, body)
 	if err != nil {
 		return nil, "", err
 	}
@@ -97,7 +100,7 @@ func openFromSproutUnder(tenantID, sproutID, purpose string, data []byte, sprout
 	if len(sproutPubs) == 0 {
 		return nil, payloadbox.ErrOpen
 	}
-	want := payloadbox.Expect{Purpose: purpose, SproutID: sproutID}
+	want := payloadbox.Expect{Purpose: purpose, TenantID: tenantID, SproutID: sproutID}
 	open := func() (*payloadbox.Message, error) {
 		tenantKeys, err := TenantBoxKeys(tenantID)
 		if err != nil {
@@ -129,4 +132,27 @@ func tenantBoxCachedLongerThan(tenantID string, d time.Duration) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.set != nil && time.Since(e.set.loaded) > d
+}
+
+// openEnrollProof opens proof, a sprout's enrollment proof of possession
+// (payloadbox.PurposeEnrollProof) for sproutID in tenantID, under every
+// tenant key TenantBoxKeys returns paired with sproutPub, the box public
+// key the sprout is enrolling with: not one on record, which is the
+// point. Any failure is payloadbox.ErrOpen; the caller checks the body
+// and freshness (enroll.go's verifyEnrollProof).
+func openEnrollProof(tenantID, sproutID, sproutPub string, proof []byte) (*payloadbox.Message, error) {
+	sp, err := DecodeBoxPubKey(sproutPub)
+	if err != nil {
+		return nil, payloadbox.ErrOpen
+	}
+	tenantKeys, err := TenantBoxKeys(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	candidates := make([]payloadbox.KeyPair, 0, len(tenantKeys))
+	for _, tk := range tenantKeys {
+		candidates = append(candidates, payloadbox.KeyPair{PeerPub: sp, Priv: tk.Priv})
+	}
+	return payloadbox.Open(proof, candidates,
+		payloadbox.Expect{Purpose: payloadbox.PurposeEnrollProof, TenantID: tenantID, SproutID: sproutID})
 }

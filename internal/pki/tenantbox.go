@@ -537,7 +537,7 @@ func TenantKeyContinuity(tenantID, sproutID, sproutPub string) (json.RawMessage,
 	if err != nil {
 		return nil, err
 	}
-	msg, err := payloadbox.NewMessage(payloadbox.PurposeTenantKeyContinuity, sproutID, "",
+	msg, err := payloadbox.NewMessage(payloadbox.PurposeTenantKeyContinuity, tenantID, sproutID, "",
 		tenantKeyContinuityBody{To: base64.StdEncoding.EncodeToString(set.current.pub[:])})
 	if err != nil {
 		return nil, err

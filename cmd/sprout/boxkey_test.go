@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -21,6 +22,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/config"
+	log "github.com/yogzblr/imas/internal/log"
 	"github.com/yogzblr/imas/internal/natsapi"
 	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
@@ -108,6 +110,10 @@ func setupBoxKeyEnv(t *testing.T) *boxKeyEnv {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(config.SproutTenantX25519PubFile, []byte(tenantPub), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// And the tenant it pinned with it.
+	if err := os.WriteFile(pki.SproutTenantIDFile(), []byte(e.tenant), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -237,6 +243,11 @@ func TestBoxKeySubjectsMatchFarmer(t *testing.T) {
 func TestBoxKeyRotation_RoundTrip(t *testing.T) {
 	e := setupBoxKeyEnv(t)
 	oldPub := sproutCurrentPub(t)
+	// Everything logged during the rotation, which log shipping would
+	// publish on the bus.
+	var logged syncBuffer
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(nil) })
 
 	admin := e.connect(t)
 	resp, err := admin.Request(natsapi.Subject(natsapi.MethodPKIRotateBoxKey), []byte(`{"id":"web-01"}`), 5*time.Second)
@@ -265,6 +276,43 @@ func TestBoxKeyRotation_RoundTrip(t *testing.T) {
 		t.Fatalf("sprout seals with %s, farmer has %s active", got, newPub)
 	}
 	e.farmerTraffic(t)
+	// H3 (security review 2026-10): the new public key is never logged,
+	// so the bus can't learn it from shipped logs.
+	if strings.Contains(logged.String(), newPub) {
+		t.Error("the new box public key was logged")
+	}
+	if !strings.Contains(logged.String(), "submitted a new payload-encryption key") {
+		t.Error("control: the rotation's log line wasn't captured")
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for the logger's concurrent writes.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+func TestSetNATSLogMinLevel(t *testing.T) {
+	t.Cleanup(func() { log.SetNATSMinLevel(log.DefaultNATSMinLevel) })
+	for in, want := range map[string]log.Level{"": log.LInfo, "debug": log.LDebug, "warn": log.LWarn, "nonsense": log.LInfo} {
+		log.SetNATSMinLevel(log.LFatal)
+		setNATSLogMinLevel(in)
+		if got := log.NATSMinLevel(); got != want {
+			t.Errorf("setNATSLogMinLevel(%q): NATS minimum %v, want %v", in, got, want)
+		}
+	}
 }
 
 // A rogue bus subscriber publishing the trigger itself. Accepted, low
