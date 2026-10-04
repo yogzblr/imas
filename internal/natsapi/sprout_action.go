@@ -41,6 +41,16 @@ package natsapi
 // the version, over the same tenant connection; the sprout fetches its
 // own signed row from farmer and verifies it again, against the keyring
 // shipped in its package.
+//
+// Security review 2026-10 (SEC.5) added, for self_update: farmer's own
+// switch, IMAS_SELF_UPDATE_ENABLED (default false; L1), checked before
+// anything else, so a forged or replayed internal.sprout.action can't
+// install anything while saasapi's dispatch flag is off; and the tenant's
+// rollout window, enforced here as well as in saasapi. And, for every
+// action (M5): per-tenant concurrency caps well below the pool size, a
+// pool reserved for self_update so cmd.run and cook can't starve a
+// rollout, and a refusal (farmer_busy) instead of a blocked subscription
+// callback when a cap or pool is full (sproutActionLimiter).
 
 import (
 	"context"
@@ -50,6 +60,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -91,42 +103,169 @@ const selfUpdateVerifyTimeout = 15 * time.Second
 
 const auditActionSproutAction = controlplane.SubjectSproutAction
 
-// EnvSproutActionConcurrency sets how many internal.sprout.action
-// requests one farmer process runs at once (see sproutActionConcurrency).
-// Read once, when RegisterSproutAction is called.
-const EnvSproutActionConcurrency = "IMAS_SPROUT_ACTION_CONCURRENCY"
+// Farmer-side self_update switch (security review L1).
+const (
+	// EnvSelfUpdateEnabled turns self_update on in farmer. Default false:
+	// with it off every self_update is refused (self_update_disabled)
+	// before the catalog, the tenant or the sprout is even looked at. It
+	// is farmer's own switch, independent of saasapi's
+	// SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED, so a request forged or
+	// replayed on the bus can't start an update saasapi's flag would not.
+	// Read once, when RegisterSproutAction is called; a value
+	// strconv.ParseBool doesn't accept is logged and leaves it off.
+	EnvSelfUpdateEnabled = "IMAS_SELF_UPDATE_ENABLED"
+)
 
-// Bounds for EnvSproutActionConcurrency. A cmd.run holds its slot until
-// the sprout answers (up to its timeout), so handling requests serially —
-// NATS's default for one subscription — would let one slow sprout stall a
-// whole §1.5 batch. When every slot is busy the subscription callback
-// blocks, and further requests queue in the subscription's pending buffer.
+// selfUpdateEnabled is EnvSelfUpdateEnabled's value.
+var selfUpdateEnabled atomic.Bool
+
+// selfUpdateEnabledFromEnv reads EnvSelfUpdateEnabled, failing closed.
+func selfUpdateEnabledFromEnv() bool {
+	raw := strings.TrimSpace(os.Getenv(EnvSelfUpdateEnabled))
+	if raw == "" {
+		return false
+	}
+	on, err := strconv.ParseBool(raw)
+	if err != nil {
+		log.Errorf("natsapi: %s=%q is not a boolean; self_update stays disabled", EnvSelfUpdateEnabled, raw)
+		return false
+	}
+	return on
+}
+
+// Error codes internal.sprout.action replies with in addition to
+// controlplane's. saasapi (internal/saasapi, farmerErrorCode) keeps exactly
+// these strings; TestSproutActionErrorCodeValues pins them. They belong in
+// internal/controlplane, which was outside SEC.5's scope.
+const (
+	// ErrorSelfUpdateDisabled: IMAS_SELF_UPDATE_ENABLED is off, so the
+	// self_update was refused without being looked at.
+	ErrorSelfUpdateDisabled controlplane.ErrorCode = "self_update_disabled"
+	// ErrorRolloutWindowClosed: now is outside the tenant's rollout
+	// window (saas.tenant_update_policy), so the self_update was refused.
+	// The same string saasapi records for an item its own window check
+	// stopped.
+	ErrorRolloutWindowClosed controlplane.ErrorCode = "rollout_window_closed"
+	// ErrorFarmerBusy: the tenant's concurrency cap or the action's pool
+	// was full, so the request was refused unrun. Nothing was dispatched;
+	// it is safe to send again.
+	ErrorFarmerBusy controlplane.ErrorCode = "farmer_busy"
+)
+
+// Concurrency of internal.sprout.action (security review M5). Each farmer
+// process has two pools: one for cmd.run and cook (and anything
+// unrecognized, which is refused at once), and one reserved for
+// self_update, so a tenant posting long cmd.runs can't hold the slots a
+// rollout wave needs. Within each pool one tenant may hold at most
+// EnvSproutActionTenantConcurrency slots. A request that finds its
+// tenant's cap or its pool full is refused at once with farmer_busy: the
+// subscription callback never blocks, so nothing queues behind a full pool
+// until saasapi's reply timeout turns it into dispatch_outcome_unknown.
+// All three are read once, when RegisterSproutAction is called. A value
+// that isn't a positive integer is logged and the default used; a value
+// above maxSproutActionConcurrency is clamped.
+const (
+	// EnvSproutActionConcurrency is the cmd.run/cook pool's size.
+	EnvSproutActionConcurrency = "IMAS_SPROUT_ACTION_CONCURRENCY"
+	// EnvSelfUpdateConcurrency is the self_update pool's size.
+	EnvSelfUpdateConcurrency = "IMAS_SELF_UPDATE_CONCURRENCY"
+	// EnvSproutActionTenantConcurrency is one tenant's cap in each pool.
+	EnvSproutActionTenantConcurrency = "IMAS_SPROUT_ACTION_TENANT_CONCURRENCY"
+)
+
+// Defaults and bounds. A cmd.run holds its slot until the sprout answers
+// (up to its timeout); a self_update only until it is dispatched. The
+// defaults match saasapi's (internal/saasapi, dispatchLimits), so one
+// saasapi replica alone never sends more than one farmer replica admits.
 // The ceiling keeps a typo from turning into an unbounded goroutine count
 // on a privileged surface.
 const (
-	defaultSproutActionConcurrency = 64
-	maxSproutActionConcurrency     = 1024
+	defaultSproutActionConcurrency       = 64
+	defaultSelfUpdateConcurrency         = 16
+	defaultSproutActionTenantConcurrency = 8
+	maxSproutActionConcurrency           = 1024
 )
 
-// sproutActionConcurrency returns EnvSproutActionConcurrency's value, or
-// the default if it's unset or not a positive integer, clamped to
-// maxSproutActionConcurrency. A bad value is logged, never fatal: it only
-// tunes throughput.
-func sproutActionConcurrency() int {
-	raw := strings.TrimSpace(os.Getenv(EnvSproutActionConcurrency))
+// envConcurrency returns name's value, or def if it's unset or not a
+// positive integer, clamped to maxSproutActionConcurrency.
+func envConcurrency(name string, def int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
-		return defaultSproutActionConcurrency
+		return def
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil || n < 1 {
-		log.Warnf("natsapi: ignoring %s=%q (want a positive integer); using %d", EnvSproutActionConcurrency, raw, defaultSproutActionConcurrency)
-		return defaultSproutActionConcurrency
+		log.Warnf("natsapi: ignoring %s=%q (want a positive integer); using %d", name, raw, def)
+		return def
 	}
 	if n > maxSproutActionConcurrency {
-		log.Warnf("natsapi: %s=%d exceeds the maximum; using %d", EnvSproutActionConcurrency, n, maxSproutActionConcurrency)
+		log.Warnf("natsapi: %s=%d exceeds the maximum; using %d", name, n, maxSproutActionConcurrency)
 		return maxSproutActionConcurrency
 	}
 	return n
+}
+
+// sproutActionConcurrency is the cmd.run/cook pool's size.
+func sproutActionConcurrency() int {
+	return envConcurrency(EnvSproutActionConcurrency, defaultSproutActionConcurrency)
+}
+
+// sproutActionLimiter admits internal.sprout.action requests without ever
+// blocking: tryAcquire either takes a slot in the request's pool, counted
+// against its tenant, or says why it can't. Tenants are counted by the
+// request's asserted tenant_id (the point-of-effect check comes later,
+// inside the slot); the pool size bounds the total regardless.
+type sproutActionLimiter struct {
+	mu        sync.Mutex
+	tenantCap int
+	pools     map[bool]*actionPool // keyed by "is self_update"
+}
+
+type actionPool struct {
+	size, used int
+	byTenant   map[string]int
+}
+
+func newSproutActionLimiter(general, selfUpdate, tenantCap int) *sproutActionLimiter {
+	return &sproutActionLimiter{tenantCap: tenantCap, pools: map[bool]*actionPool{
+		false: {size: general, byTenant: map[string]int{}},
+		true:  {size: selfUpdate, byTenant: map[string]int{}},
+	}}
+}
+
+// tryAcquire takes a slot for a request of actionType from tenantID. It
+// returns the release func, or "" and the reason it refused.
+func (l *sproutActionLimiter) tryAcquire(tenantID, actionType string) (func(), string) {
+	selfUpdate := actionType == controlplane.ActionSelfUpdate
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	p := l.pools[selfUpdate]
+	switch {
+	case p.byTenant[tenantID] >= l.tenantCap:
+		return nil, fmt.Sprintf("tenant %q already has %d %s in flight (cap %d)", tenantID, p.byTenant[tenantID], poolName(selfUpdate), l.tenantCap)
+	case p.used >= p.size:
+		return nil, fmt.Sprintf("the %s pool is full (%d)", poolName(selfUpdate), p.size)
+	}
+	p.used++
+	p.byTenant[tenantID]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			p.used--
+			if p.byTenant[tenantID]--; p.byTenant[tenantID] <= 0 {
+				delete(p.byTenant, tenantID)
+			}
+		})
+	}, ""
+}
+
+func poolName(selfUpdate bool) string {
+	if selfUpdate {
+		return "self_update"
+	}
+	return "cmd.run/cook"
 }
 
 // maxSproutActionCmdTimeout caps a cmd.run's own timeout. The handler
@@ -148,9 +287,15 @@ var errSproutActionInvalid = errors.New("invalid internal.sprout.action request"
 // Call once per process, not once per tenant. RegisterTenantProvisioning
 // calls it, so it is registered wherever the tenant subjects are. It
 // returns only once the server has the subscription.
+//
+// It reads EnvSelfUpdateEnabled and the concurrency settings
+// (sproutActionLimiter) once, here.
 func RegisterSproutAction(nc *nats.Conn) error {
-	concurrency := sproutActionConcurrency()
-	slots := make(chan struct{}, concurrency)
+	selfUpdateEnabled.Store(selfUpdateEnabledFromEnv())
+	general := sproutActionConcurrency()
+	reserved := envConcurrency(EnvSelfUpdateConcurrency, defaultSelfUpdateConcurrency)
+	tenantCap := envConcurrency(EnvSproutActionTenantConcurrency, defaultSproutActionTenantConcurrency)
+	limiter := newSproutActionLimiter(general, reserved, tenantCap)
 	if _, err := nc.QueueSubscribe(controlplane.SubjectSproutAction, natsCoreQueueGroup, func(msg *nats.Msg) {
 		// Checked before decoding or doing anything else: a request with
 		// no valid SaaS API inbox is dropped, not executed and not
@@ -160,18 +305,21 @@ func RegisterSproutAction(nc *nats.Conn) error {
 			log.Errorf("natsapi: dropping %s request with a reply subject outside %s: %q", controlplane.SubjectSproutAction, controlplane.SaaSAPIInboxWildcard, msg.Reply)
 			return
 		}
-		slots <- struct{}{}
+		var req controlplane.SproutActionRequest
+		if err := json.Unmarshal(msg.Data, &req); err != nil {
+			// Refused without dispatching anything: answered here.
+			respondSproutAction(msg, handleSproutAction(msg.Data))
+			return
+		}
+		// Never blocks: a full cap or pool is a refusal, answered here.
+		release, refused := limiter.tryAcquire(req.TenantID, req.Action.Type)
+		if refused != "" {
+			respondSproutAction(msg, refuseBusy(req, msg.Data, refused))
+			return
+		}
 		go func() {
-			defer func() { <-slots }()
-			reply := handleSproutAction(msg.Data)
-			data, err := json.Marshal(reply)
-			if err != nil {
-				log.Errorf("natsapi: marshalling %s reply: %v", controlplane.SubjectSproutAction, err)
-				return
-			}
-			if err := msg.Respond(data); err != nil {
-				log.Errorf("natsapi: responding to %s: %v", controlplane.SubjectSproutAction, err)
-			}
+			defer release()
+			respondSproutAction(msg, handleSproutActionRequest(req, msg.Data))
 		}()
 	}); err != nil {
 		return fmt.Errorf("natsapi: failed to subscribe to %s: %w", controlplane.SubjectSproutAction, err)
@@ -185,8 +333,31 @@ func RegisterSproutAction(nc *nats.Conn) error {
 	if err := nc.Flush(); err != nil {
 		return fmt.Errorf("natsapi: failed to confirm subscription to %s: %w", controlplane.SubjectSproutAction, err)
 	}
-	log.Infof("natsapi: registered sprout action handler (SYS account, concurrency %d)", concurrency)
+	log.Infof("natsapi: registered sprout action handler (SYS account; cmd.run/cook pool %d, self_update pool %d, per-tenant cap %d; self_update %s)",
+		general, reserved, tenantCap, map[bool]string{true: "enabled", false: "disabled (" + EnvSelfUpdateEnabled + ")"}[selfUpdateEnabled.Load()])
 	return nil
+}
+
+func respondSproutAction(msg *nats.Msg, reply controlplane.SproutActionReply) {
+	data, err := json.Marshal(reply)
+	if err != nil {
+		log.Errorf("natsapi: marshalling %s reply: %v", controlplane.SubjectSproutAction, err)
+		return
+	}
+	if err := msg.Respond(data); err != nil {
+		log.Errorf("natsapi: responding to %s: %v", controlplane.SubjectSproutAction, err)
+	}
+}
+
+// refuseBusy is the reply to a request sproutActionLimiter refused:
+// farmer_busy, with nothing run.
+func refuseBusy(req controlplane.SproutActionRequest, data []byte, why string) controlplane.SproutActionReply {
+	reply := controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
+		Status: controlplane.StatusFailed, ErrorCode: ErrorFarmerBusy}
+	err := fmt.Errorf("refused unrun: %s", why)
+	log.Warnf("natsapi: %s %s on sprout %q (tenant %q): %v", controlplane.SubjectSproutAction, req.Action.Type, req.SproutID, req.TenantID, err)
+	auditTenantAction(auditActionSproutAction, data, reply, err)
+	return reply
 }
 
 // handleSproutAction runs one internal.sprout.action request and returns
@@ -200,7 +371,12 @@ func handleSproutAction(data []byte) controlplane.SproutActionReply {
 		auditTenantAction(auditActionSproutAction, data, reply, err)
 		return reply
 	}
+	return handleSproutActionRequest(req, data)
+}
 
+// handleSproutActionRequest is handleSproutAction for a request already
+// decoded from data.
+func handleSproutActionRequest(req controlplane.SproutActionRequest, data []byte) controlplane.SproutActionReply {
 	reply, err := runSproutAction(req)
 	if err != nil {
 		log.Errorf("natsapi: %s %s on sprout %q (tenant %q) failed: %v", controlplane.SubjectSproutAction, req.Action.Type, req.SproutID, req.TenantID, err)
@@ -220,6 +396,10 @@ func runSproutAction(req controlplane.SproutActionRequest) (controlplane.SproutA
 	case controlplane.ActionCmdRun, controlplane.ActionCook, controlplane.ActionSelfUpdate:
 	default:
 		return fail(controlplane.ErrorUnsupportedAction, fmt.Errorf("unsupported action type %q", req.Action.Type))
+	}
+	// Farmer's own switch, before anything is looked up (L1).
+	if req.Action.Type == controlplane.ActionSelfUpdate && !selfUpdateEnabled.Load() {
+		return fail(ErrorSelfUpdateDisabled, fmt.Errorf("self_update refused: %s is off", EnvSelfUpdateEnabled))
 	}
 
 	// The point-of-effect check. Nothing below runs unless the sprout's
@@ -383,9 +563,9 @@ func triggerCookOnTenantConn(tenantID, jid string) error {
 
 // runSproutSelfUpdate checks the requested version against the release
 // catalog (checkSelfUpdateRelease) and, only if it passes, dispatches the
-// selfupdate step. Every refusal is invalid_request; the specific reason
-// stays in farmer's log. A catalog or key read that fails is
-// internal_error. There is no path that dispatches a version the catalog
+// selfupdate step. Every refusal is invalid_request, except a closed
+// rollout window (rollout_window_closed); the specific reason stays in
+// farmer's log. A catalog or key read that fails is internal_error. There is no path that dispatches a version the catalog
 // doesn't vouch for.
 func runSproutSelfUpdate(req controlplane.SproutActionRequest, reply controlplane.SproutActionReply) (controlplane.SproutActionReply, error) {
 	in, err := controlplane.DecodeSelfUpdateParams(req.Action.Params)
@@ -434,6 +614,11 @@ const maxSelfUpdateVersionLen = 64
 //     this sprout would fetch only its own OS/arch row: a version with a
 //     forged row is not a release CloudXP signed.
 //
+//
+// and now must be inside the tenant's rollout window, if its policy sets
+// one (rollout_window_closed otherwise), as saasapi's policyRefusal
+// checks it.
+//
 // The sprout then fetches and verifies its own row a third time, against
 // the keyring shipped in its package. A refusal is invalid_request; a
 // catalog or key read that fails is internal_error.
@@ -461,6 +646,9 @@ func checkSelfUpdateRelease(ctx context.Context, tenantID, version string) (cont
 	if !ok || approved != version {
 		return refuse("not the tenant's approved version (approved: %q)", approved)
 	}
+	if code, err := checkRolloutWindow(ctx, cat, tenantID, selfUpdateNow()); err != nil {
+		return code, err
+	}
 	rows, err := cat.ReleaseRows(ctx, version)
 	if err != nil {
 		return controlplane.ErrorInternal, fmt.Errorf("self_update refused: reading the catalog rows of %s: %w", version, err)
@@ -484,6 +672,44 @@ func checkSelfUpdateRelease(ctx context.Context, tenantID, version string) (cont
 		if err := ks.Verify(m); err != nil {
 			return refuse("row %s does not verify: %v", key, err)
 		}
+	}
+	return "", nil
+}
+
+// rolloutWindowCatalog is the read checkRolloutWindow needs from the
+// release catalog: tenantID's rollout window from
+// saas.tenant_update_policy (rollout_window_start, rollout_window_end;
+// both set or both NULL), scoped by tenant_id. ok is false when the tenant
+// has no policy row.
+//
+// internal/fleetcatalog's SQL catalog doesn't implement it yet (adding
+// it was outside SEC.5's scope; see docs/BUILD-STATUS.md, Open item 4).
+// Until it does, every self_update is refused with internal_error: farmer
+// fails closed rather than skip the window.
+type rolloutWindowCatalog interface {
+	RolloutWindow(ctx context.Context, tenantID string) (start, end *time.Time, ok bool, err error)
+}
+
+// selfUpdateNow is farmer's clock for the rollout window, a seam for
+// tests.
+var selfUpdateNow = time.Now
+
+// checkRolloutWindow refuses a self_update when cat's policy for tenantID
+// sets a window and now is outside [start, end), the same rule as
+// saasapi's policyRefusal. A catalog that can't read windows, or a read
+// that fails, is internal_error.
+func checkRolloutWindow(ctx context.Context, cat fleetcatalog.Catalog, tenantID string, now time.Time) (controlplane.ErrorCode, error) {
+	wc, ok := cat.(rolloutWindowCatalog)
+	if !ok {
+		return controlplane.ErrorInternal, errors.New("self_update refused: the release catalog can't read tenant rollout windows (fleetcatalog has no RolloutWindow); failing closed")
+	}
+	start, end, found, err := wc.RolloutWindow(ctx, tenantID)
+	if err != nil {
+		return controlplane.ErrorInternal, fmt.Errorf("self_update refused: reading tenant %q's rollout window: %w", tenantID, err)
+	}
+	if found && start != nil && end != nil && (now.Before(*start) || !now.Before(*end)) {
+		return ErrorRolloutWindowClosed, fmt.Errorf("self_update for tenant %q refused: now (%s) is outside its rollout window [%s, %s)",
+			tenantID, now.UTC().Format(time.RFC3339), start.UTC().Format(time.RFC3339), end.UTC().Format(time.RFC3339))
 	}
 	return "", nil
 }
