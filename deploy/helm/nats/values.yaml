@@ -87,6 +87,14 @@ bus:
     # client port.
     health: 8080
 
+  # -- Most client connections one bus node accepts, TCP and websocket
+  # together (busmaxconnections, nats-server's max_connections). A
+  # client over the limit is refused at connect. 65536 is nats-server's
+  # own default. Raise it with bus.resources: every connection costs the
+  # node memory (see README.md, "Connection limit"), and the default
+  # 512Mi limit is OOM-killed long before 65536 sprouts.
+  maxConnections: 65536
+
   cluster:
     # -- NATS cluster name, used when replicaCount > 1.
     name: imas-bus

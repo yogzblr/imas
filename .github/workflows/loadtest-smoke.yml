@@ -1,0 +1,55 @@
+name: Load test smoke
+
+# Runs tools/loadtest's smoke mode (docs/loadtest.md): 200 simulated
+# sprouts against a local one-node bus, a test.ping latency window, one
+# bus restart and a second latency window. The thresholds are generous on
+# purpose: this proves the harness and the reconnect path still work, not
+# that the bus is fast. Its numbers come from a shared runner and are not
+# a scale or latency result.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "tools/loadtest/**"
+      - ".github/workflows/loadtest-smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Smoke (200 sprouts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: 1.26.x
+          check-latest: true
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+        run: go build -o loadtest ./tools/loadtest
+
+      - name: Smoke run
+        # The tool's own -smoke deadline is 170s; this is the backstop.
+        timeout-minutes: 3
+        run: ./loadtest -smoke -workdir "$RUNNER_TEMP/loadtest" -json smoke.json
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loadtest-smoke
+          path: |
+            smoke.json
+            ${{ runner.temp }}/loadtest/bus.log
+          if-no-files-found: ignore

@@ -161,6 +161,40 @@ SIGHUP, and nothing here sends one. Roll the pods when the cert changes,
 for example with `bus.podAnnotations: {reloader.stakater.com/auto: "true"}`.
 In openbao mode, a restart is the rotation.
 
+## Connection limit
+
+`bus.maxConnections` (default `65536`, nats-server's own default) is the
+most client connections one bus node accepts. It counts the TCP and
+websocket listeners together, so every sprout counts (Envoy opens one
+upstream websocket per sprout), plus core's connections. The chart
+writes it to `/etc/imas/farmer` as `busmaxconnections`, which
+`cmd/farmerbus` passes to nats-server as `max_connections`. It is
+chart-managed, so `bus.extraConfig` cannot override it, and it must be a
+whole number of 1 or more: nats-server reads a negative limit as "refuse
+every client", not "unlimited".
+
+A node at the limit refuses each new client at connect: nats-server sends
+`-ERR 'maximum connections exceeded'` and closes. On this TLS-only
+listener the client is already upgrading to TLS by then, so a sprout logs
+a TLS error rather than that message, and keeps retrying with its
+backoff. `tools/loadtest` reports these refusals as "refused during TLS
+(a bus at its connection limit does this)".
+
+**Raise the limit and the memory together.** Each connection costs the
+node memory. A 5,000-sprout run of `tools/loadtest` on a development VM
+showed 80 to 90 KiB per connection in the bus's own memory figure; treat
+that as an order of magnitude and measure your own (`docs/loadtest.md`).
+At that rate the default `bus.resources.limits.memory` of 512Mi is
+reached at about 6,000 connections, long before 65,536, and a node over
+its memory limit is OOM-killed, which drops every sprout on it. So size
+`bus.resources` for `bus.maxConnections`, not the other way round, and
+check that the container runtime's open-file limit (`nofile`) is above
+it too.
+
+In a cluster, size each node for its share of the fleet plus the sprouts
+it inherits when a node is down: at least
+`sprouts / (replicaCount - 1)`, plus headroom for core.
+
 ## Clustering
 
 `bus.replicaCount` sets the StatefulSet size: `1` (the default), or an odd
@@ -491,6 +525,7 @@ node. Most CNIs allow them regardless of policy. Check yours.
 | `bus.ports.client` | `5406` | TCP NATS listener (`farmerbusport`), used by core. |
 | `bus.ports.websocket` | `5407` | NATS websocket listener (`farmerwsport`), used by Envoy. |
 | `bus.ports.health` | `8080` | Probe listener (`IMAS_BUS_HEALTH_PORT`): `/healthz`, and `/readyz` (503 while fenced). |
+| `bus.maxConnections` | `65536` | Most client connections per node (`busmaxconnections`, nats-server's `max_connections`). A whole number of 1 or more; raise `bus.resources` with it. See [Connection limit](#connection-limit). |
 | `bus.cluster.name` | `imas-bus` | `IMAS_BUS_CLUSTER_NAME` when clustered. |
 | `bus.cluster.port` | `6222` | Route port when clustered. |
 | `bus.cluster.routesSupported` | `true` | The image reads `IMAS_BUS_CLUSTER_*`. Set `false` only to pin an older image; `replicaCount > 1` then fails to render. |

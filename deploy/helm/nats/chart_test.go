@@ -250,6 +250,11 @@ func TestValidationFailures(t *testing.T) {
 		{"cluster on an image without routes", "routesSupported=false", []string{"--set", "bus.replicaCount=3", "--set", "bus.cluster.auth.secretName=r", "--set", "bus.cluster.routesSupported=false"}},
 		{"cluster without persistence", "bus.persistence.enabled must be true", []string{"--set", "bus.replicaCount=3", "--set", "bus.cluster.auth.secretName=r", "--set", "bus.persistence.enabled=false"}},
 		{"bad route password key", "passwordKey", []string{"--set", "bus.replicaCount=3", "--set", "bus.cluster.auth.secretName=r", "--set", "bus.cluster.auth.passwordKey=a/b"}},
+		{"zero max connections", "bus.maxConnections must be a whole number >= 1", []string{"--set", "bus.maxConnections=0"}},
+		{"negative max connections", "bus.maxConnections must be a whole number >= 1", []string{"--set", "bus.maxConnections=-1"}},
+		{"fractional max connections", "bus.maxConnections must be a whole number >= 1", []string{"--set", "bus.maxConnections=1.5"}},
+		{"non-numeric max connections", "bus.maxConnections must be a whole number >= 1", []string{"--set", "bus.maxConnections=lots"}},
+		{"unset max connections", "bus.maxConnections must be a whole number >= 1", []string{"--set", "bus.maxConnections=null"}},
 		{"bad tls mode", "bus.tls.mode must be", []string{"--set", "bus.tls.mode=selfsigned"}},
 		{"openbao token without secret", "tokenSecretName is required", []string{"--set", "bus.tls.mode=openbao", "--set", "bus.tls.openbao.authMethod=token"}},
 		{"envoy without tls", "envoy.tls.secretName is required", []string{"--set", "envoy.tls.secretName="}},
@@ -264,6 +269,30 @@ func TestValidationFailures(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) { mustFail(t, tc.want, tc.args...) })
+	}
+}
+
+// busConfig returns the /etc/imas/farmer the bus ConfigMap renders.
+func busConfig(t *testing.T, docs []obj) map[string]any {
+	t.Helper()
+	var cfg map[string]any
+	if err := yaml.Unmarshal([]byte(get(find(t, docs, "ConfigMap", "-bus"), "data", "farmer").(string)), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+// bus.maxConnections becomes busmaxconnections (config.BusMaxConnections,
+// nats-server's max_connections), as an integer, and is chart-managed.
+func TestBusMaxConnections(t *testing.T) {
+	if got := busConfig(t, mustRender(t))["busmaxconnections"]; got != 65536 {
+		t.Errorf("default busmaxconnections = %#v, want 65536", got)
+	}
+	if got := busConfig(t, mustRender(t, "--set", "bus.maxConnections=250000"))["busmaxconnections"]; got != 250000 {
+		t.Errorf("busmaxconnections = %#v, want 250000", got)
+	}
+	if got := busConfig(t, mustRender(t, "--set", "bus.extraConfig.busmaxconnections=-1"))["busmaxconnections"]; got != 65536 {
+		t.Errorf("extraConfig overrode the chart-managed busmaxconnections: %#v", got)
 	}
 }
 

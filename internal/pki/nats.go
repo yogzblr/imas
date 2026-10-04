@@ -68,6 +68,12 @@ func baseNatsOptions() nats_server.Options {
 		LogFile:               "nats.log",
 		AuthTimeout:           10,
 	}
+	// 0 leaves nats-server's default (65,536). A negative MaxConn would
+	// refuse every client, so only a positive value is passed through;
+	// config.LoadConfig already turns a negative one into 0.
+	if config.BusMaxConnections > 0 {
+		NatsConfig.MaxConn = config.BusMaxConnections
+	}
 	certPool = x509.NewCertPool()
 	rootPEM, err := os.ReadFile(RootCA)
 	if err != nil || rootPEM == nil {
