@@ -184,17 +184,31 @@ func TestIsValidSproutID(t *testing.T) {
 		{id: "-test", shouldSucceed: false, testID: "leading hyphen"},
 		{id: "te_st", shouldSucceed: true, testID: "embedded underscore"},
 		{id: "imasNode", shouldSucceed: false, testID: "capital letter"},
-		{id: "t.est", shouldSucceed: true, testID: "embedded dot"},
+		{id: "t.est", shouldSucceed: false, testID: "embedded dot"},
 		{id: strings.Repeat("a", 300), shouldSucceed: false, testID: "300 long string"},
 		{id: strings.Repeat("a", 253), shouldSucceed: true, testID: "253 long string"},
-		{id: "0132-465798qwertyuiopasdfghjklzxcv.bnm", shouldSucceed: true, testID: "keyboard smash"},
+		{id: "0132-465798qwertyuiopasdfghjklzxcv_bnm", shouldSucceed: true, testID: "keyboard smash"},
+		{id: "0132-465798qwertyuiopasdfghjklzxcv.bnm", shouldSucceed: false, testID: "keyboard smash with a dot"},
 		{id: "te\nst", shouldSucceed: false, testID: "multiline"},
 		{id: "", shouldSucceed: false, testID: "empty string"},
 		{id: "_test", shouldSucceed: false, testID: "leading underscore"},
 		{id: "test.", shouldSucceed: false, testID: "trailing dot"},
 		{id: "a", shouldSucceed: true, testID: "single char"},
-		{id: "web-01.example.com", shouldSucceed: true, testID: "fqdn-like"},
-		{id: "192.168.1.1", shouldSucceed: true, testID: "ip-like"},
+		// Security review 2026-10, M4: a dot would let sprout "web-01"'s
+		// grants (imas.sprouts.web-01.>) cover "web-01.example.com"'s.
+		{id: "web-01.example.com", shouldSucceed: false, testID: "fqdn-like"},
+		{id: "192.168.1.1", shouldSucceed: false, testID: "ip-like"},
+		{id: "web-01-example-com", shouldSucceed: true, testID: "fqdn mapped to dashes"},
+		{id: ".web", shouldSucceed: false, testID: "leading dot"},
+		// A NATS wildcard or token separator can never be part of an ID.
+		{id: "web*", shouldSucceed: false, testID: "star"},
+		{id: "web>", shouldSucceed: false, testID: "gt"},
+		{id: "web 01", shouldSucceed: false, testID: "space"},
+		// Reserved: imas.sprouts.announce.<id> is every sprout's
+		// announcement, so a sprout named "announce" would receive them all.
+		{id: "announce", shouldSucceed: false, testID: "reserved announce"},
+		{id: "announce_1", shouldSucceed: true, testID: "suffixed reserved word is its own token"},
+		{id: "announce-01", shouldSucceed: true, testID: "reserved word as a prefix"},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.testID, func(t *testing.T) {
@@ -1264,3 +1278,24 @@ func TestSproutIDForNKey(t *testing.T) {
 
 // Suppress unused import warnings.
 var _ = fmt.Sprintf
+
+func TestNormalizeSproutID(t *testing.T) {
+	for in, want := range map[string]string{
+		"web01":                    "web01",
+		"Web01.Example.COM":        "web01-example-com",
+		"web01.example.com.":       "web01-example-com",
+		"ip-10-0-0-5.ec2.internal": "ip-10-0-0-5-ec2-internal",
+		"_web_01":                  "web-01",
+		"--web":                    "web",
+		"192.168.1.1":              "192-168-1-1",
+		"announce":                 "announce", // still refused by IsValidSproutID
+	} {
+		if got := NormalizeSproutID(in); got != want {
+			t.Errorf("NormalizeSproutID(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// Whatever a hostname looks like, the result never contains a dot.
+	if got := NormalizeSproutID("a.b.c"); !IsValidSproutID(got) {
+		t.Errorf("NormalizeSproutID(a.b.c) = %q is not a valid ID", got)
+	}
+}

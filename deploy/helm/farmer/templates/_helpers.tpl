@@ -476,13 +476,9 @@ path "{{ .Values.tls.openbao.pkiMount }}/issue/{{ .Values.tls.openbao.role }}" {
 # imas-farmer-tenantbox: tenant X25519 keypairs (internal/pki
 # tenantbox.go). KV v2 read and write on one secret per tenant under
 # <kvPath>/tenants/ ("+" matches exactly one path segment: a tenant ID,
-# nothing deeper), and read-only on <kvPath> itself, the legacy
-# one-per-deployment keypair that tenants with already-enrolled sprouts
-# adopt on first use. No metadata, delete or destroy.
-path "{{ $t.kvMount }}/data/{{ $t.kvPath }}" {
-  capabilities = ["read"]
-}
-
+# nothing deeper), and nothing else: no access to <kvPath> itself (the
+# shared legacy keypair and its adoption are gone, security review
+# 2026-10 H3), and no metadata, delete or destroy.
 path "{{ $t.kvMount }}/data/{{ $t.kvPath }}/tenants/+" {
   capabilities = ["create", "update", "read"]
 }

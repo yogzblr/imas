@@ -186,6 +186,60 @@ func TestHandleBoxKeySubmit_RefusesRollback(t *testing.T) {
 	}
 }
 
+// Security review 2026-10, M3: a submission sealed under a key that is
+// only in its grace window can't change the active key. Under the active
+// key it can.
+func TestHandleBoxKeySubmit_GraceKeyRefusedActiveKeyAccepted(t *testing.T) {
+	setupCryptoTest(t)
+	k1, k2, attacker := newSproutKeypair(t), newSproutKeypair(t), newSproutKeypair(t)
+	enrollSprout(t, pki.CurrentTenantID(), "web-01", k1)
+	handleBoxKeySubmit(pki.CurrentTenantID(), sealedSubmission(t, k1, "web-01", k2.pubB64()))
+	if active, grace := activeAndGrace(t, "web-01"); active != k2.pubB64() || len(grace) != 1 || grace[0] != k1.pubB64() {
+		t.Fatalf("setup: active %s grace %v", active, grace)
+	}
+
+	// k1 leaked: sealed under it (now grace), naming the attacker's key.
+	handleBoxKeySubmit(pki.CurrentTenantID(), sealedSubmission(t, k1, "web-01", attacker.pubB64()))
+	if active, _ := activeAndGrace(t, "web-01"); active != k2.pubB64() {
+		t.Fatalf("a submission under a grace key changed the active key to %q", active)
+	}
+
+	// The same key may re-assert the active one (a sprout retrying):
+	// accepted, and nothing changes.
+	handleBoxKeySubmit(pki.CurrentTenantID(), sealedSubmission(t, k1, "web-01", k2.pubB64()))
+	if active, grace := activeAndGrace(t, "web-01"); active != k2.pubB64() || len(grace) != 1 {
+		t.Fatalf("re-assertion changed the keys: active %s grace %v", active, grace)
+	}
+
+	// Under the active key, the same request goes through.
+	handleBoxKeySubmit(pki.CurrentTenantID(), sealedSubmission(t, k2, "web-01", attacker.pubB64()))
+	if active, _ := activeAndGrace(t, "web-01"); active != attacker.pubB64() {
+		t.Fatalf("a submission under the active key was refused: active %q", active)
+	}
+}
+
+// Security review 2026-10, M4: the sprout ID is exactly one subject
+// token. A dotted or reserved one, or any other subject shape, is
+// ignored.
+func TestHandleBoxKeySubmit_RefusesInvalidSproutIDs(t *testing.T) {
+	setupCryptoTest(t)
+	current, next := newSproutKeypair(t), newSproutKeypair(t)
+	enrollSprout(t, pki.CurrentTenantID(), "web-01", current)
+	for _, subject := range []string{
+		"imas.sprouts.web-01.example.boxkey.pub", // a dotted ID
+		"imas.sprouts.announce.boxkey.pub",
+		"imas.sprouts.web-01.boxkey.pub.extra",
+		"imas.other.web-01.boxkey.pub",
+	} {
+		msg := sealedSubmission(t, current, "web-01", next.pubB64())
+		msg.Subject = subject
+		handleBoxKeySubmit(pki.CurrentTenantID(), msg) // must not panic
+		if active, _ := activeAndGrace(t, "web-01"); active != current.pubB64() {
+			t.Fatalf("submission on %s changed the active key", subject)
+		}
+	}
+}
+
 func TestHandleBoxKeySubmit_IgnoresMalformedSubject(t *testing.T) {
 	setupCryptoTest(t)
 	// Fewer than 4 dot-separated components: no sprout ID to key off of.

@@ -69,7 +69,8 @@ const tenantBoxRereadAfter = 5 * time.Second
 // trying every tenant key TenantBoxKeys returns against every box key
 // ValidSproutBoxKeys returns for the sprout. Any failure to open is
 // payloadbox.ErrOpen; freshness is the caller's to check (a reply's
-// ReplyTo, or a timestamp window).
+// ReplyTo, or a timestamp window). A box key submission is opened with
+// OpenBoxKeySubmission instead, which reports which key opened it.
 func OpenFromSprout(tenantID, sproutID, purpose string, data []byte) (*payloadbox.Message, error) {
 	active, grace, err := ValidSproutBoxKeys(tenantID, sproutID)
 	if err != nil {
@@ -78,11 +79,23 @@ func OpenFromSprout(tenantID, sproutID, purpose string, data []byte) (*payloadbo
 		}
 		return nil, err
 	}
+	return openFromSproutUnder(tenantID, sproutID, purpose, data, append([]string{active}, grace...))
+}
+
+// openFromSproutUnder opens data, an envelope sproutID sent under
+// purpose, trying every tenant key TenantBoxKeys returns against each of
+// the sprout's box public keys in sproutKeys (standard base64). If it
+// doesn't open and the cached tenant keys are older than
+// tenantBoxRereadAfter, it re-reads them once and tries again.
+func openFromSproutUnder(tenantID, sproutID, purpose string, data []byte, sproutKeys []string) (*payloadbox.Message, error) {
 	var sproutPubs []*[32]byte
-	for _, p := range append([]string{active}, grace...) {
+	for _, p := range sproutKeys {
 		if pub, err := DecodeBoxPubKey(p); err == nil {
 			sproutPubs = append(sproutPubs, pub)
 		}
+	}
+	if len(sproutPubs) == 0 {
+		return nil, payloadbox.ErrOpen
 	}
 	want := payloadbox.Expect{Purpose: purpose, SproutID: sproutID}
 	open := func() (*payloadbox.Message, error) {

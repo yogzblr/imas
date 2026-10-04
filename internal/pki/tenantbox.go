@@ -37,22 +37,13 @@
 // pinned to it move to the current key. tenant_id is validated
 // (IsValidTenantID: [0-9A-Za-z_-]) before it is ever used in a path.
 //
-// Migration from one keypair per deployment. Before this layout, every
-// tenant shared one keypair at <base> itself, and every sprout enrolled
-// then pinned its public key; a sprout exits on a pin mismatch
-// (ErrTenantKeyMismatch), and sprouts built before continuity proofs
-// can't re-pin at all. So the first time a tenant's own secret is
-// needed and doesn't exist yet (ensureTenantKeySet), the legacy keypair
-// is *adopted* — copied into the tenant's secret as its version 1,
-// origin "adopted-legacy" — if the legacy secret exists and the tenant
-// already has at least one sprout box key on record (only a sprout that
-// enrolled against the shared key can have one before the tenant's own
-// secret exists: Enroll reads the tenant key before recording the
-// sprout's). Every other tenant gets a freshly generated keypair. An
-// adopted tenant is still sharing a private key with other tenants until
-// its first rotation (RotateTenantX25519Keypair), which an operator runs
-// once the tenant's sprouts run a build that verifies continuity proofs;
-// see docs/design/imas-payload-encryption-design.md, "As built".
+// Every tenant gets its own freshly generated keypair the first time its
+// secret is needed (ensureTenantKeySet). There is no shared keypair: the
+// one-per-deployment keypair J first shipped at <base> itself, which
+// tenants with already-enrolled sprouts used to adopt, is gone, along
+// with the adoption path (security review 2026-10, H3: adopted tenants
+// shared one private key). Nothing was deployed with it, so no install
+// needs migrating. Nothing here reads or writes <base> itself.
 package pki
 
 import (
@@ -90,8 +81,7 @@ const (
 	EnvTenantBoxOpenBaoAddr    = "IMAS_TENANTBOX_OPENBAO_ADDR"
 	EnvTenantBoxOpenBaoKVMount = "IMAS_TENANTBOX_OPENBAO_KV_MOUNT" // default "secret", must be KV v2
 	// EnvTenantBoxOpenBaoKVPath is the base path: tenants' secrets live
-	// under <base>/tenants/, and <base> itself is the legacy
-	// one-per-deployment keypair, read (never written) for migration.
+	// under <base>/tenants/. Nothing is read or written at <base> itself.
 	EnvTenantBoxOpenBaoKVPath     = "IMAS_TENANTBOX_OPENBAO_KV_PATH" // default "imas/tenant-x25519"
 	EnvTenantBoxOpenBaoCACert     = "IMAS_TENANTBOX_OPENBAO_CACERT"  // optional, verify OpenBao's own TLS
 	EnvTenantBoxOpenBaoAuthMethod = "IMAS_TENANTBOX_OPENBAO_AUTH_METHOD"
@@ -133,12 +123,10 @@ var tenantBoxOpenBaoEnv = openbao.Env{
 const tenantBoxTenantsDir = "tenants"
 
 // Values of a tenant secret's "origin" field: how that version's keypair
-// came to be. Informational (an operator reading OpenBao can see which
-// tenants still share the legacy keypair); nothing branches on it.
+// came to be. Informational; nothing branches on it.
 const (
-	tenantBoxOriginGenerated     = "generated"
-	tenantBoxOriginAdoptedLegacy = "adopted-legacy"
-	tenantBoxOriginRotated       = "rotated"
+	tenantBoxOriginGenerated = "generated"
+	tenantBoxOriginRotated   = "rotated"
 )
 
 // maxTenantBoxPredecessors bounds how many earlier versions of a tenant's
@@ -170,8 +158,6 @@ type obKVClient struct {
 	mount string
 	path  string // base path; see EnvTenantBoxOpenBaoKVPath
 }
-
-func (c *obKVClient) legacyPath() string { return c.path }
 
 func (c *obKVClient) tenantPath(tenantID string) string {
 	return c.path + "/" + tenantBoxTenantsDir + "/" + tenantID
@@ -341,23 +327,9 @@ type tenantBoxKeySet struct {
 	loaded   time.Time
 }
 
-// tenantHasSproutBoxKeys reports whether any sprout of tenantID has a box
-// public key on record — the adoption test ensureTenantKeySet applies.
-// A variable so tests can stub the store.
-var tenantHasSproutBoxKeys = func(tenantID string) (bool, error) {
-	if db == nil {
-		return false, errors.New("pki: store not initialised")
-	}
-	var n int64
-	if err := db.Model(&sproutBoxKeyRow{}).Where("tenant_id = ?", tenantID).Limit(1).Count(&n).Error; err != nil {
-		return false, err
-	}
-	return n > 0, nil
-}
-
 // ensureTenantKeySet reads tenantID's key set from OpenBao, creating the
-// tenant's secret first if it has never been written (see this file's
-// header for the adopt-or-generate rule).
+// tenant's secret first, with a freshly generated keypair, if it has
+// never been written.
 func (c *obKVClient) ensureTenantKeySet(ctx context.Context, tenantID string) (*tenantBoxKeySet, error) {
 	path := c.tenantPath(tenantID)
 	current, found, err := c.readKeypair(ctx, path, 0)
@@ -365,11 +337,11 @@ func (c *obKVClient) ensureTenantKeySet(ctx context.Context, tenantID string) (*
 		return nil, err
 	}
 	if !found {
-		pub, priv, origin, err := c.initialKeypair(ctx, tenantID)
+		pub, priv, err := box.GenerateKey(rand.Reader)
 		if err != nil {
 			return nil, err
 		}
-		if _, err := c.writeKeypair(ctx, path, pub, priv, 0, map[string]string{"origin": origin}); err != nil {
+		if _, err := c.writeKeypair(ctx, path, pub, priv, 0, map[string]string{"origin": tenantBoxOriginGenerated}); err != nil {
 			return nil, err
 		}
 		// Written or lost the create race, re-read whichever won rather
@@ -383,9 +355,6 @@ func (c *obKVClient) ensureTenantKeySet(ctx context.Context, tenantID string) (*
 			// version was deleted in OpenBao (so the create was refused):
 			// fail closed rather than guess which key sprouts have pinned.
 			return nil, fmt.Errorf("pki: tenant %s X25519 keypair not readable after creating it (is its current version deleted in OpenBao?)", tenantID)
-		}
-		if current.origin == tenantBoxOriginAdoptedLegacy {
-			log.Noticef("tenantbox: tenant %s adopted the legacy shared X25519 keypair (it has sprouts pinned to it); rotate it once its sprouts verify continuity proofs", tenantID)
 		}
 	}
 	set := &tenantBoxKeySet{current: *current, loaded: time.Now()}
@@ -410,31 +379,6 @@ func (c *obKVClient) ensureTenantKeySet(ctx context.Context, tenantID string) (*
 		}
 	}
 	return set, nil
-}
-
-// initialKeypair picks the first keypair for tenantID: the legacy shared
-// one if the tenant has sprouts that can only have pinned it, else fresh.
-func (c *obKVClient) initialKeypair(ctx context.Context, tenantID string) (pub, priv *[32]byte, origin string, err error) {
-	legacy, found, err := c.readKeypair(ctx, c.legacyPath(), 0)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	if found {
-		pinned, err := tenantHasSproutBoxKeys(tenantID)
-		if err != nil {
-			// Guessing "no" here would strand every sprout pinned to the
-			// legacy key; fail closed and let the caller retry.
-			return nil, nil, "", fmt.Errorf("pki: checking whether tenant %s has enrolled sprouts: %w", tenantID, err)
-		}
-		if pinned {
-			return legacy.pub, legacy.priv, tenantBoxOriginAdoptedLegacy, nil
-		}
-	}
-	pub, priv, err = box.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	return pub, priv, tenantBoxOriginGenerated, nil
 }
 
 // tenantBoxCacheTTL bounds how long a replica keeps using a tenant key

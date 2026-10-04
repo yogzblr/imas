@@ -35,16 +35,6 @@ func withTenantBoxGrace(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { config.BoxKeyGraceDuration, config.GatewayJWTTTL = origBox, origTTL })
 }
 
-// stubTenantHasSproutBoxKeys replaces the adoption check's store lookup.
-func stubTenantHasSproutBoxKeys(t *testing.T, fn func(string) (bool, error)) {
-	t.Helper()
-	orig := tenantHasSproutBoxKeys
-	tenantHasSproutBoxKeys = fn
-	t.Cleanup(func() { tenantHasSproutBoxKeys = orig })
-}
-
-func noEnrolledSprouts(string) (bool, error) { return false, nil }
-
 func b64(k *[32]byte) string { return base64.StdEncoding.EncodeToString(k[:]) }
 
 func TestGetTenantX25519PublicKey_NotConfigured(t *testing.T) {
@@ -68,7 +58,6 @@ func TestGetTenantX25519PublicKey_RejectsInvalidTenantID(t *testing.T) {
 
 func TestGetTenantX25519PublicKey_GeneratesAndPersistsPerTenant(t *testing.T) {
 	srv := setupTenantBoxOpenBao(t)
-	stubTenantHasSproutBoxKeys(t, noEnrolledSprouts)
 
 	pubA, err := GetTenantX25519PublicKey("t_a")
 	if err != nil {
@@ -100,64 +89,45 @@ func TestGetTenantX25519PublicKey_GeneratesAndPersistsPerTenant(t *testing.T) {
 	}
 }
 
-// A tenant whose sprouts enrolled against the one-per-deployment keypair
-// keeps it (adopted into its own secret); a tenant without any gets its
-// own.
-func TestGetTenantX25519PublicKey_AdoptsLegacyOnlyForTenantsWithSprouts(t *testing.T) {
+// No tenant ever gets a shared keypair (security review 2026-10, H3):
+// even with a keypair sitting at the base path, where the deleted legacy
+// one-per-deployment keypair lived, and with sprouts on record, every
+// tenant's first key is freshly generated, and the base path is neither
+// used nor written.
+func TestGetTenantX25519PublicKey_NeverAdoptsASharedKeypair(t *testing.T) {
+	setupTestPKI(t)
 	srv := setupTenantBoxOpenBao(t)
 	legacyPub, _ := srv.SeedKeypair(t, tenantboxtest.BasePath, nil)
-	stubTenantHasSproutBoxKeys(t, func(id string) (bool, error) { return id == "t_old", nil })
-
-	old, err := GetTenantX25519PublicKey("t_old")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if old != b64(legacyPub) {
-		t.Errorf("tenant with enrolled sprouts got %s, want the legacy key %s", old, b64(legacyPub))
-	}
-	if got := srv.Versions(tenantboxtest.TenantPath("t_old"))[0].Data["origin"]; got != tenantBoxOriginAdoptedLegacy {
-		t.Errorf("origin %q, want %q", got, tenantBoxOriginAdoptedLegacy)
-	}
-	fresh, err := GetTenantX25519PublicKey("t_new")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fresh == b64(legacyPub) {
-		t.Error("tenant without sprouts adopted the shared legacy key")
-	}
-}
-
-func TestGetTenantX25519PublicKey_AdoptionCheckFailureFailsClosed(t *testing.T) {
-	srv := setupTenantBoxOpenBao(t)
-	srv.SeedKeypair(t, tenantboxtest.BasePath, nil)
-	stubTenantHasSproutBoxKeys(t, func(string) (bool, error) { return false, errors.New("db down") })
-
-	if _, err := GetTenantX25519PublicKey("t_1"); err == nil {
-		t.Fatal("expected an error when the adoption check can't run")
-	}
-	if len(srv.Versions(tenantboxtest.TenantPath("t_1"))) != 0 {
-		t.Error("a keypair was written despite the failed adoption check")
-	}
-}
-
-// The real store lookup: a tenant counts as having sprouts once one of
-// them has a box key row, and only that tenant.
-func TestTenantHasSproutBoxKeys(t *testing.T) {
-	setupTestPKI(t)
-	if err := RotateSproutBoxKey("t_a", "web-01", testEnrollBoxPub(t), time.Hour); err != nil {
-		t.Fatal(err)
-	}
-	for tenant, want := range map[string]bool{"t_a": true, "t_b": false} {
-		got, err := tenantHasSproutBoxKeys(tenant)
-		if err != nil || got != want {
-			t.Errorf("tenantHasSproutBoxKeys(%s) = %v, %v; want %v", tenant, got, err, want)
+	for _, tenant := range []string{"t_old", "t_other"} {
+		if err := upsertSproutBoxKeyActive(tenant, "web-01", testEnrollBoxPub(t)); err != nil {
+			t.Fatal(err)
 		}
+	}
+	seen := map[string]string{}
+	for _, tenant := range []string{"t_old", "t_other", "t_new"} {
+		pub, err := GetTenantX25519PublicKey(tenant)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pub == b64(legacyPub) {
+			t.Errorf("tenant %s was given the keypair at the base path", tenant)
+		}
+		if other, dup := seen[pub]; dup {
+			t.Errorf("tenants %s and %s share a keypair", other, tenant)
+		}
+		seen[pub] = tenant
+		vs := srv.Versions(tenantboxtest.TenantPath(tenant))
+		if len(vs) != 1 || vs[0].Data["origin"] != tenantBoxOriginGenerated {
+			t.Errorf("tenant %s stored %+v, want one generated version", tenant, vs)
+		}
+	}
+	if n := len(srv.Versions(tenantboxtest.BasePath)); n != 1 {
+		t.Errorf("base path has %d versions, want the 1 seeded", n)
 	}
 }
 
 func TestLoadTenantKeySet_CacheAndStaleLimit(t *testing.T) {
 	srv := setupTenantBoxOpenBao(t)
-	stubTenantHasSproutBoxKeys(t, noEnrolledSprouts)
 
 	pub1, err := GetTenantX25519PublicKey("t_1")
 	if err != nil {
@@ -188,7 +158,6 @@ func TestLoadTenantKeySet_CacheAndStaleLimit(t *testing.T) {
 
 func TestGetTenantX25519PublicKey_ConcurrentBootstrapAgreesOnOneKey(t *testing.T) {
 	setupTenantBoxOpenBao(t)
-	stubTenantHasSproutBoxKeys(t, noEnrolledSprouts)
 
 	const n = 8
 	results := make([]string, n)
@@ -291,7 +260,6 @@ func openContinuity(t *testing.T, proof []byte, pinnedTenantPub, sproutPriv *[32
 
 func TestRotateTenantX25519Keypair_GraceAndContinuity(t *testing.T) {
 	srv := setupTenantBoxOpenBao(t)
-	stubTenantHasSproutBoxKeys(t, noEnrolledSprouts)
 	withTenantBoxGrace(t, time.Hour)
 	sproutPub, sproutPriv, _ := box.GenerateKey(rand.Reader)
 
@@ -354,7 +322,6 @@ func TestRotateTenantX25519Keypair_GraceAndContinuity(t *testing.T) {
 
 func TestRotateTenantX25519Keypair_SeverCutsGraceAndContinuity(t *testing.T) {
 	srv := setupTenantBoxOpenBao(t)
-	stubTenantHasSproutBoxKeys(t, noEnrolledSprouts)
 	withTenantBoxGrace(t, time.Hour)
 	sproutPub, sproutPriv, _ := box.GenerateKey(rand.Reader)
 
@@ -394,7 +361,6 @@ func TestRotateTenantX25519Keypair_SeverCutsGraceAndContinuity(t *testing.T) {
 // Deleting a version in OpenBao retires it: no continuity from it.
 func TestTenantKeyContinuity_SkipsDeletedVersions(t *testing.T) {
 	srv := setupTenantBoxOpenBao(t)
-	stubTenantHasSproutBoxKeys(t, noEnrolledSprouts)
 	sproutPub, sproutPriv, _ := box.GenerateKey(rand.Reader)
 
 	v1, _ := GetTenantX25519PublicKey("t_1")
@@ -419,7 +385,6 @@ func TestTenantKeyContinuity_SkipsDeletedVersions(t *testing.T) {
 
 func TestRotateTenantX25519Keypair_Isolated(t *testing.T) {
 	setupTenantBoxOpenBao(t)
-	stubTenantHasSproutBoxKeys(t, noEnrolledSprouts)
 	a1, _ := GetTenantX25519PublicKey("t_a")
 	b1, _ := GetTenantX25519PublicKey("t_b")
 	if _, err := RotateTenantX25519Keypair("t_a", false); err != nil {

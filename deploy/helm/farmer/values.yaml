@@ -280,7 +280,9 @@ farmer:
       keyName: imas-fleet-signing
       k8sRole: imas-farmer-fleet-verify
       tokenSecretKey: farmer-fleetsign-token
-    # Tenant X25519 keypair in KV v2.
+    # Tenant X25519 keypairs in KV v2: one secret per tenant at
+    # <kvMount>/data/<kvPath>/tenants/<tenant_id>. Nothing is read or
+    # written at <kvPath> itself; there is no shared keypair.
     tenantBox:
       kvMount: secret
       kvPath: imas/tenant-x25519

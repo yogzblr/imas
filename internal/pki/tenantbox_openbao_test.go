@@ -48,7 +48,6 @@ func TestTenantBoxLive_KVv2AgainstRealOpenBao(t *testing.T) {
 	t.Setenv(EnvTenantBoxOpenBaoToken, rootToken)
 	resetTenantX25519KeypairCache()
 	t.Cleanup(resetTenantX25519KeypairCache)
-	stubTenantHasSproutBoxKeys(t, noEnrolledSprouts)
 	withTenantBoxGrace(t, time.Hour)
 
 	const tenant = "t_live"

@@ -46,8 +46,8 @@ func sproutPermissions(id string) jwt.Permissions {
 			"imas.sprouts." + id + ".facts",
 			// Submit a new payload-encryption public key after farmer
 			// triggers a box key rotation (cmd/sprout's boxkey.go).
-			// Farmer only records a submission sealed under one of this
-			// sprout's current box keys (internal/natsapi's
+			// Farmer only records a submission sealed under this
+			// sprout's active box key (internal/natsapi's
 			// handleBoxKeySubmit), so the grant lets the sprout submit;
 			// what it submits still has to open.
 			SproutBoxKeySubmitSubject(id),
@@ -112,6 +112,29 @@ func ensureUserRevoked(ac *jwt.AccountClaims, pubkey string) bool {
 	}
 	ac.Revoke(pubkey)
 	return true
+}
+
+// applyRevokedNKeys puts every NKey on tenantID's revoked list
+// (pki_revoked_nkeys, filled by DeleteNKey and AcceptNKey's replace path)
+// into ac's revocations, at its recorded time or later, and reports
+// whether it changed ac. FLAG FOR SECURITY REVIEW (security review
+// 2026-10, H1): this is what keeps a deleted or replaced sprout's User JWT
+// refused. Revocations derived from pki_nkeys rows can't, since the row is
+// gone. Callers apply it after granting accepted sprouts, and never grant
+// an NKey that is on the list (revoked), so the list always wins.
+func applyRevokedNKeys(ac *jwt.AccountClaims, revoked map[string]int64) bool {
+	changed := false
+	for key, at := range revoked {
+		if ac.Revocations == nil {
+			ac.Revocations = jwt.RevocationList{}
+		}
+		if cur, ok := ac.Revocations[key]; ok && cur >= at {
+			continue
+		}
+		ac.Revocations[key] = at
+		changed = true
+	}
+	return changed
 }
 
 // mintOrReuseUserJWT (re)mints a signed User JWT for pubkey under the
@@ -197,11 +220,23 @@ func syncNatsAuth(mat *natsAuthMaterial) (bool, error) {
 		}
 	}
 
+	// Read before anything is granted: if it can't be read, a revoked
+	// NKey that is somehow still accepted must not be granted (fail
+	// closed).
+	revoked, err := revokedNKeys(currentTenantID())
+	if err != nil {
+		return false, err
+	}
+
 	for _, s := range GetNKeysByType(currentTenantID(), "accepted").Sprouts {
 		log.Tracef("Syncing accepted sprout `%s` onto the tenant Account JWT", s.SproutID)
 		key, errGet := GetNKey(currentTenantID(), s.SproutID)
 		if errGet != nil {
 			log.Errorf("failed to get NKey for sprout %s: %v", s.SproutID, errGet)
+			continue
+		}
+		if _, isRevoked := revoked[key]; isRevoked {
+			log.Errorf("sprout %s is accepted with a revoked NKey; keeping it revoked", s.SproutID)
 			continue
 		}
 		if ensureUserGranted(ac, key) {
@@ -223,6 +258,9 @@ func syncNatsAuth(mat *natsAuthMaterial) (bool, error) {
 				changed = true
 			}
 		}
+	}
+	if applyRevokedNKeys(ac, revoked) {
+		changed = true
 	}
 
 	log.Tracef("Completed syncing authorized clients onto the tenant Account JWT.")

@@ -34,11 +34,30 @@ const (
 	CliPubNKey
 )
 
-var sproutMatcher *regexp.Regexp
+// sproutMatcher is the shape of a sprout ID: lowercase letters, digits,
+// '-' and '_', starting with a letter or digit. No '.': a sprout ID is
+// one NATS subject token. Every grant and subscription that names a
+// sprout puts its ID in one token position (imas.sprouts.<id>.>,
+// imas.sprouts.announce.<id>, imas.cook.<id>.>, imas.logs.sprouts.<id>.>,
+// and the farmer side's imas.sprouts.*.facts, imas.sprouts.*.boxkey.pub,
+// imas.cook.*.*), so a dot would make sprout "web01"'s grants cover
+// "web01.example.com"'s subjects, and the single-token wildcards would
+// never match a dotted ID at all (security review 2026-10, M4).
+var sproutMatcher = regexp.MustCompile(`^[0-9a-z][-0-9_a-z]*$`)
 
-func init() {
-	sproutMatcher = regexp.MustCompile(`^[0-9a-z\.][-0-9_a-z\.]*$`)
+// reservedSproutIDs are subject tokens that sit where a sprout ID does in
+// some subject, so a sprout holding one as its ID would be granted
+// another subject tree: imas.sprouts.announce.<id> is every sprout's
+// startup announcement, so a sprout named "announce" would subscribe to
+// all of them through its imas.sprouts.<id>.> grant. Nothing else under
+// imas.sprouts., imas.cook. or imas.logs.sprouts. puts a fixed token in
+// the ID's position today; add any new one here.
+var reservedSproutIDs = map[string]bool{
+	"announce": true,
 }
+
+// maxSproutIDLen bounds a sprout ID (and the pki_nkeys.sprout_id column).
+const maxSproutIDLen = 253
 
 // SetupPKIFarmer ensures the farmer's PKI directory exists. Sprout NKey
 // lifecycle state itself now lives in PXC (see store.go) — this directory
@@ -75,15 +94,23 @@ func SetupPKISprout() {
 	}
 }
 
-// rules on sprout ids:
-// must be unique
-// if multiple sprouts claim the same id, the first one gets the id,
-// following sprouts get id_n where n is their place in the queue
-// sprout ids must be valid *nix hostnames: [0-9a-z\.][-0-9a-z\.]
-// should automatically convert any found underscores to hyphens, unless
-// the hostname starts with an underscore, in which case it is removed.
-// maximum length is 253 characters
-// trailing dots are not allowed
+// Rules on sprout IDs (IsValidSproutID): unique per tenant; lowercase
+// letters, digits, '-' and '_', starting with a letter or digit; at most
+// maxSproutIDLen characters; no '.' and none of reservedSproutIDs. If
+// several sprouts in a tenant claim the same ID, the first one gets it and
+// later ones get <id>_<n> (resolveEnrollSproutID). NormalizeSproutID turns
+// a hostname into this shape.
+
+// NormalizeSproutID maps a hostname to sprout ID form: lowercased, '_' and
+// '.' turned into '-', and leading and trailing '-' removed, so
+// "Web01.Example.COM." becomes "web01-example-com". The result may still
+// be invalid (empty, reserved, too long or containing other characters);
+// callers check it with IsValidSproutID.
+func NormalizeSproutID(hostname string) string {
+	id := strings.ToLower(hostname)
+	id = strings.NewReplacer("_", "-", ".", "-").Replace(id)
+	return strings.Trim(id, "-")
+}
 
 func createSproutID() string {
 	id, err := os.Hostname()
@@ -92,30 +119,21 @@ func createSproutID() string {
 		log.Errorf("failed to get hostname for sprout ID: %v", err)
 		id = "unknown"
 	}
-	id = strings.ToLower(id)
-	id = strings.ReplaceAll(id, "_", "-")
-	id = strings.TrimPrefix(id, "-")
-	return id
+	return NormalizeSproutID(id)
 }
 
+// IsValidSproutID reports whether id is a well-formed sprout ID: see the
+// rules above. FLAG FOR SECURITY REVIEW: this is what keeps one sprout's
+// minted grants (jwtusers.go's sproutPermissions) from covering another
+// sprout's subjects.
 func IsValidSproutID(id string) bool {
-	if len(id) > 253 {
-		return false
-	}
-	if strings.HasPrefix(id, "_") {
-		return false
-	}
-	if strings.HasPrefix(id, "-") {
-		return false
-	}
-	if strings.HasSuffix(id, ".") {
+	if len(id) > maxSproutIDLen {
 		return false
 	}
 	if !sproutMatcher.MatchString(id) {
 		return false
 	}
-
-	return true
+	return !reservedSproutIDs[id]
 }
 
 // reloadNKeysFor syncs and pushes tenantID's NATS Account after an
@@ -143,6 +161,15 @@ func reloadNKeysFor(tenantID string) error {
 // current-tenant seam, so accepting a sprout under a
 // dynamically-provisioned tenant reloads the right Account. See
 // docs/design/imas-tenant-context-threading.md.
+//
+// Accepting <base>_<n> replaces <base>: the host that took the suffixed ID
+// because <base> was in use becomes <base>. FLAG FOR SECURITY REVIEW
+// (security review 2026-10, H1): the replaced host is retired exactly as
+// DeleteNKey retires one (retireSproutTx), in the same transaction as the
+// rename, so its NKey is revoked on the Account and its box keys stop
+// sealing and opening. The new host's box keys move from <base>_<n> to
+// <base> with it. An NKey on the tenant's revoked list is never accepted
+// again (ErrNKeyRevoked).
 func AcceptNKey(tenantID, id string) error {
 	defer func() {
 		if err := reloadNKeysFor(tenantID); err != nil {
@@ -157,13 +184,25 @@ func AcceptNKey(tenantID, id string) error {
 	if err != nil {
 		return err
 	}
-	if len(strings.SplitN(id, "_", 2)) > 1 {
-		DeleteNKey(tenantID, base)
-	}
 	if id == base && row.State == stateAccepted {
 		return ErrAlreadyAccepted
 	}
+	revoked, err := isNKeyRevoked(tenantID, row.NKey)
+	if err != nil {
+		return err
+	}
+	if revoked {
+		return ErrNKeyRevoked
+	}
 	return db.Transaction(func(tx *gorm.DB) error {
+		if id != base {
+			if _, err := retireSproutTx(tx, tenantID, base, row.NKey); err != nil {
+				return err
+			}
+			if err := moveSproutBoxKeysTx(tx, tenantID, id, base); err != nil {
+				return err
+			}
+		}
 		if err := tx.Where("tenant_id = ? AND sprout_id = ?", tenantID, id).Delete(&nkeyRow{}).Error; err != nil {
 			return err
 		}
@@ -174,6 +213,19 @@ func AcceptNKey(tenantID, id string) error {
 	})
 }
 
+// DeleteNKey removes sprout id from tenantID and ends its credentials.
+// FLAG FOR SECURITY REVIEW (security review 2026-10, H1): deleting only
+// the pki_nkeys row, as this used to, left the sprout's User JWT valid
+// (User JWTs carry no exp, and the Account's revocations were rebuilt only
+// from rows still on record) and its box key active. Now, in one
+// transaction (retireSproutTx), its NKey goes on the tenant's revoked
+// list, which every Account rebuild applies (applyRevokedNKeys), and every
+// one of its box keys is revoked. The deferred reload then pushes the
+// Account JWT carrying the revocation, which closes a live connection and
+// refuses the JWT on reconnect.
+//
+// The sprout ID itself is free again: a host can enrol under it, but only
+// with an NKey that isn't revoked, and it gets a fresh box key.
 func DeleteNKey(tenantID, id string) error {
 	defer func() {
 		if err := reloadNKeysFor(tenantID); err != nil {
@@ -183,14 +235,16 @@ func DeleteNKey(tenantID, id string) error {
 	if !IsValidSproutID(id) {
 		return ErrSproutIDInvalid
 	}
-	res := db.Where("tenant_id = ? AND sprout_id = ?", tenantID, id).Delete(&nkeyRow{})
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 0 {
-		return ErrSproutIDNotFound
-	}
-	return nil
+	return db.Transaction(func(tx *gorm.DB) error {
+		found, err := retireSproutTx(tx, tenantID, id, "")
+		if err != nil {
+			return err
+		}
+		if !found {
+			return ErrSproutIDNotFound
+		}
+		return nil
+	})
 }
 
 func DenyNKey(tenantID, id string) error {
