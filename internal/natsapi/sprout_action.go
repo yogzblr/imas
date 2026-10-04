@@ -612,11 +612,10 @@ const maxSelfUpdateVersionLen = 64
 //     set farmer reads from OpenBao Transit with its READ-ONLY token
 //     (SetFleetKeySource). One bad row refuses the whole version, though
 //     this sprout would fetch only its own OS/arch row: a version with a
-//     forged row is not a release CloudXP signed.
-//
-// and now must be inside the tenant's rollout window, if its policy sets
-// one (rollout_window_closed otherwise), as saasapi's policyRefusal
-// checks it.
+//     forged row is not a release CloudXP signed;
+//   - inside the tenant's rollout window now, if its policy sets one
+//     (rollout_window_closed otherwise), as saasapi's policyRefusal checks
+//     it (checkRolloutWindow).
 //
 // The sprout then fetches and verifies its own row a third time, against
 // the keyring shipped in its package. A refusal is invalid_request; a
