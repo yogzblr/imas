@@ -64,7 +64,7 @@ released.
 | 17 | Probe capability | **Green** | |
 | 18 | Installers: yum, apt, zypper, MSI | **Amber** | Cut a first release so the packages are published and installed once. |
 | 19 | Ansible with one-time key | **Green** | |
-| 20 | Fleet updates from the sprout's repo | **Amber** | SEC.5 fixes M1, L1, L2, L8, M5 (ready for review). Next: fleetcatalog's `RolloutWindow` (farmer refuses every update until it exists), H2, the human review, the UAT gate's self-update cycle, then both switches on. |
+| 20 | Fleet updates from the sprout's repo | **Amber** | SEC.5 fixes M1, L1, L2, L8, M5 (ready for review). SEC.5b: farmer reads each tenant's rollout window, so a `self_update` can pass farmer's checks (ready for review). Next: H2, the human review, the UAT gate's self-update cycle, then both switches on. |
 | 21 | Licensing | **Amber** | Decide on BSD-2-Clause, BSD-3-Clause, ISC and 0BSD and record them under item 21 (every such module and the binaries that link it are in `DEPENDENCIES.md`; questions in PR #73). |
 
 ### Build plan (`docs/claude-code-parallel-build-plan.md`)
@@ -768,11 +768,9 @@ by an external git sync today.
      rc's MSI and the final's both say 2.5.0).
    - **L1:** farmer's own switch, `IMAS_SELF_UPDATE_ENABLED` (default
      false, Helm `farmer.selfUpdate.enabled`), checked before anything
-     else. Farmer also enforces the tenant's rollout window, but it reads
-     the window through a `RolloutWindow` method that
-     `internal/fleetcatalog` doesn't have yet (outside SEC.5's scope).
-     Until that is added, farmer fails closed: every `self_update` is
-     refused with `internal_error`.
+     else. Farmer also enforces the tenant's rollout window (read since
+     SEC.5b, below; until then farmer refused every `self_update` with
+     `internal_error`).
    - **L2:** a repository error carries the redirect URL reduced to scheme,
      host and path.
    - **L8:** a live rollout checks the tenant is active before every wave
@@ -787,8 +785,27 @@ by an external git sync today.
      pool.
    - **L4, decided by the owner on 2026-10-04:** revocation stays enforced
      on farmer, not on the sprout. No sprout-side deny list.
+   **SEC.5b (2026-10-04, ready for review, not merged; FLAG FOR SECURITY
+   REVIEW):** farmer reads the tenant's rollout window.
+   `fleetcatalog.Catalog` has `RolloutWindow`: one query on
+   `saas.tenant_update_policy` scoped by `tenant_id`, times in UTC. Both
+   columns NULL is no window. A row with only one set is corrupt, never
+   read as no window. The rule is one function,
+   `fleetcatalog.RolloutWindowClosed`: refused before start or at or after
+   end, and a corrupt row is an error. farmer and saasapi's
+   `policyRefusal` both call it, and both are tested against one table of
+   cases, corrupt rows included. Farmer answers a corrupt row, a failed
+   read or a policy row deleted after the approval check with
+   `internal_error`. saasapi treats a corrupt row as a failed policy read:
+   POST answers 500 `internal_error` and creates no batch, and a running or
+   resumed rollout halts its unsent items with `internal_error` (owner's
+   decision, 2026-10-04). farmer's existing `SELECT ON saas.*` grant (§4.1)
+   covers the two columns; no grant changed. With
+   `IMAS_SELF_UPDATE_ENABLED` on, an approved, signed version now
+   dispatches inside the window and is refused with
+   `rollout_window_closed` outside it.
    **Still open:** H2 (the review's other must-fix before dispatch);
-   `fleetcatalog.RolloutWindow`; moving the new reply codes
+   moving the new reply codes
    (`self_update_disabled`, `rollout_window_closed`, `farmer_busy`) into
    `internal/controlplane`, and adding `self_update_disabled` to the API
    docs' item codes (saasapi records it as `internal_error` until then);

@@ -674,40 +674,37 @@ func checkSelfUpdateRelease(ctx context.Context, tenantID, version string) (cont
 	return "", nil
 }
 
-// rolloutWindowCatalog is the read checkRolloutWindow needs from the
-// release catalog: tenantID's rollout window from
-// saas.tenant_update_policy (rollout_window_start, rollout_window_end;
-// both set or both NULL), scoped by tenant_id. ok is false when the tenant
-// has no policy row.
-//
-// internal/fleetcatalog's SQL catalog doesn't implement it yet (adding
-// it was outside SEC.5's scope; see docs/BUILD-STATUS.md, Open item 4).
-// Until it does, every self_update is refused with internal_error: farmer
-// fails closed rather than skip the window.
-type rolloutWindowCatalog interface {
-	RolloutWindow(ctx context.Context, tenantID string) (start, end *time.Time, ok bool, err error)
-}
-
 // selfUpdateNow is farmer's clock for the rollout window, a seam for
 // tests.
 var selfUpdateNow = time.Now
 
 // checkRolloutWindow refuses a self_update when cat's policy for tenantID
-// sets a window and now is outside [start, end), the same rule as
-// saasapi's policyRefusal. A catalog that can't read windows, or a read
-// that fails, is internal_error.
+// (fleetcatalog's RolloutWindow, one query scoped by tenant_id) sets a
+// window and now is outside [start, end): fleetcatalog.RolloutWindowClosed,
+// the rule saasapi's policyRefusal applies too. It fails closed, with
+// internal_error, never "no window", when:
+//
+//   - the read fails;
+//   - the policy row sets only one end of its window (corrupt);
+//   - there is no policy row at all (removed since checkSelfUpdateRelease
+//     read the approved version).
 func checkRolloutWindow(ctx context.Context, cat fleetcatalog.Catalog, tenantID string, now time.Time) (controlplane.ErrorCode, error) {
-	wc, ok := cat.(rolloutWindowCatalog)
-	if !ok {
-		return controlplane.ErrorInternal, errors.New("self_update refused: the release catalog can't read tenant rollout windows (fleetcatalog has no RolloutWindow); failing closed")
-	}
-	start, end, found, err := wc.RolloutWindow(ctx, tenantID)
+	start, end, found, err := cat.RolloutWindow(ctx, tenantID)
 	if err != nil {
 		return controlplane.ErrorInternal, fmt.Errorf("self_update refused: reading tenant %q's rollout window: %w", tenantID, err)
 	}
-	if found && start != nil && end != nil && (now.Before(*start) || !now.Before(*end)) {
+	if !found {
+		return controlplane.ErrorInternal, fmt.Errorf("self_update refused: tenant %q's update policy row disappeared after its approved version was read", tenantID)
+	}
+	// fleetcatalog.SQL already refuses a corrupt row; this covers any
+	// other Catalog.
+	closed, err := fleetcatalog.RolloutWindowClosed(now, start, end)
+	if err != nil {
+		return controlplane.ErrorInternal, fmt.Errorf("self_update refused: tenant %q's rollout window: %w", tenantID, err)
+	}
+	if closed {
 		return ErrorRolloutWindowClosed, fmt.Errorf("self_update for tenant %q refused: now (%s) is outside its rollout window [%s, %s)",
-			tenantID, now.UTC().Format(time.RFC3339), start.UTC().Format(time.RFC3339), end.UTC().Format(time.RFC3339))
+			tenantID, now.UTC().Format(time.RFC3339Nano), start.UTC().Format(time.RFC3339Nano), end.UTC().Format(time.RFC3339Nano))
 	}
 	return "", nil
 }

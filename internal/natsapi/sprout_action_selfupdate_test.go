@@ -61,7 +61,7 @@ func newSUCatalog(t *testing.T) (*suCatalog, func(fleetcatalog.Row), func(tenant
 	ks, _ := fleetsign.NewKeySet([]fleetsign.PublicKey{{Version: 1, Key: pub}})
 	db := fleetcatalogtest.Open(t)
 	origCat, origKeys := fleetcatalog.Current(), fleetKeys
-	fleetcatalog.Install(windowedCatalog{SQL: fleetcatalog.New(db), db: db})
+	fleetcatalog.Install(fleetcatalog.New(db))
 	SetFleetKeySource(staticKeys{ks: ks})
 	enableSelfUpdate(t)
 	t.Cleanup(func() { fleetcatalog.Install(origCat); SetFleetKeySource(origKeys) })
@@ -349,34 +349,10 @@ func enableSelfUpdate(t *testing.T) {
 	t.Cleanup(func() { selfUpdateEnabled.Store(prev) })
 }
 
-// windowedCatalog is the SQL catalog plus the rollout window read farmer
-// needs (rolloutWindowCatalog), which internal/fleetcatalog doesn't have
-// yet: the query is the one it should run, scoped by tenant_id.
-type windowedCatalog struct {
-	fleetcatalog.SQL
-	db *gorm.DB
-}
-
-func (c windowedCatalog) RolloutWindow(ctx context.Context, tenantID string) (*time.Time, *time.Time, bool, error) {
-	var rows []struct {
-		Start *time.Time
-		End   *time.Time
-	}
-	err := c.db.WithContext(ctx).Raw(`SELECT rollout_window_start AS start, rollout_window_end AS end
-  FROM saas.tenant_update_policy WHERE tenant_id = ?`, tenantID).Scan(&rows).Error
-	if err != nil || len(rows) == 0 {
-		return nil, nil, false, err
-	}
-	return rows[0].Start, rows[0].End, true, nil
-}
-
 // setWindow sets tenant's rollout window in c's policy table.
 func (c *suCatalog) setWindow(tenant string, start, end time.Time) {
 	c.t.Helper()
-	if err := c.db.Exec(`UPDATE saas.tenant_update_policy SET rollout_window_start = ?, rollout_window_end = ? WHERE tenant_id = ?`,
-		start.UTC(), end.UTC(), tenant).Error; err != nil {
-		c.t.Fatal(err)
-	}
+	fleetcatalogtest.SetWindow(c.t, c.db, tenant, &start, &end)
 }
 
 // failingCatalog fails every read.
@@ -392,4 +368,7 @@ func (failingCatalog) ApprovedVersion(context.Context, string) (string, bool, er
 }
 func (failingCatalog) ReleaseRows(context.Context, string) ([]fleetcatalog.Row, error) {
 	return nil, errCatalogDown
+}
+func (failingCatalog) RolloutWindow(context.Context, string) (*time.Time, *time.Time, bool, error) {
+	return nil, nil, false, errCatalogDown
 }
