@@ -45,10 +45,31 @@ func setupSprout() {
 	}
 	config.LoadConfig("sprout")
 	log.SetLogLevel(config.LogLevel)
+	setNATSLogMinLevel(jety.GetString(natsLogMinLevelKey))
 	sproutID = pki.GetSproutID()
 	createConfigRoot()
 	pki.SetupPKISprout()
 	cook.NewRecipeCooker = ingredients.NewRecipeCooker
+}
+
+// natsLogMinLevelKey is the sprout config key for the lowest log level
+// shipped over the bus (log.SetNATSMinLevel). Unset, it is info: Trace
+// and Debug stay in the local log (security review 2026-10, H4).
+const natsLogMinLevelKey = "natslogminlevel"
+
+// setNATSLogMinLevel applies the natslogminlevel setting, keeping the
+// default (log.DefaultNATSMinLevel) for an empty or unknown value.
+func setNATSLogMinLevel(v string) {
+	if v == "" {
+		log.SetNATSMinLevel(log.DefaultNATSMinLevel)
+		return
+	}
+	l, err := log.ParseLevel(v)
+	if err != nil {
+		log.Warnf("%s %q is not a log level; shipping logs from %s", natsLogMinLevelKey, v, "info")
+		l = log.DefaultNATSMinLevel
+	}
+	log.SetNATSMinLevel(l)
 }
 
 var (

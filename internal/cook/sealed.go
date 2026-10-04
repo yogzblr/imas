@@ -182,9 +182,19 @@ func plainAck(ack Ack) *nats.Msg {
 // RespondCook is the sprout's handler for a message on its own
 // imas.sprouts.<id>.cook: it returns the reply to send and, if the
 // dispatch was accepted, the envelope to cook (nil if refused). An
-// accepted envelope has already been recorded as pushed
-// (NotePushedEnvelope), so the caller only has to cook it. sproutID is
+// accepted envelope has already been recorded as handled
+// (claimPushedEnvelope), so the caller only has to cook it. sproutID is
 // the sprout's enrolled ID.
+//
+// A dispatch of a job the sprout already handled (one listed in the
+// handled jobs file, which survives restarts) is not cooked again: it is
+// answered with an Ack that isn't Acknowledged, which farmer reports as a
+// failed dispatch. With the persisted replay guard (sproutbox.go) this is
+// the second of two independent stops on a replayed dispatch (security
+// review 2026-10, M2).
+//
+// Nothing from the opened envelope is logged but its job ID and step
+// count: the sprout's log is shipped over the bus in plaintext (H4).
 func RespondCook(sproutID string, m *nats.Msg) (*nats.Msg, *RecipeEnvelope) {
 	msg, refused := cookBoundary.open(sproutID, m)
 	if refused != nil {
@@ -194,17 +204,37 @@ func RespondCook(sproutID string, m *nats.Msg) (*nats.Msg, *RecipeEnvelope) {
 	if msg == nil {
 		// Enrolled before workstream J: no keys, so plaintext as before.
 		_ = json.Unmarshal(m.Data, &env)
-		NotePushedEnvelope(env.JobID)
+		if ok, reply := claimDispatch(env); !ok {
+			return plainAck(reply), nil
+		}
 		return plainAck(Ack{Acknowledged: true, JobID: env.JobID}), &env
 	}
 	if err := json.Unmarshal(msg.Body, &env); err != nil {
-		log.Warnf("cook: refusing a sealed cook: decoding its body: %v", err)
+		log.Warnf("cook: refusing a sealed cook: its body does not decode as a recipe envelope")
 		return refusal(payloadbox.ErrorCodeOpenFailed), nil
 	}
 	// Before cooking, so a pull of this job's staged copy (on reconnect
 	// or a nudge) never cooks it a second time.
-	NotePushedEnvelope(env.JobID)
+	if ok, reply := claimDispatch(env); !ok {
+		return cookBoundary.reply(sproutID, msg, reply), nil
+	}
 	return cookBoundary.reply(sproutID, msg, Ack{Acknowledged: true, JobID: env.JobID}), &env
+}
+
+// claimDispatch records env's job as handled (claimPushedEnvelope) and
+// reports whether it may be cooked; if not, ack is the refusal to send.
+func claimDispatch(env RecipeEnvelope) (ok bool, ack Ack) {
+	fresh, err := claimPushedEnvelope(env.JobID)
+	if err != nil {
+		log.Errorf("cook: refusing dispatch of job %s: recording it as handled failed: %v", env.JobID, err)
+		return false, Ack{Acknowledged: false, JobID: env.JobID}
+	}
+	if !fresh {
+		log.Warnf("cook: refusing dispatch of job %s: this sprout already handled it", env.JobID)
+		return false, Ack{Acknowledged: false, JobID: env.JobID}
+	}
+	log.Infof("cook: accepted job %s (%d steps)", env.JobID, len(env.Steps))
+	return true, Ack{}
 }
 
 // RespondNudge is the sprout's handler for a message on its own

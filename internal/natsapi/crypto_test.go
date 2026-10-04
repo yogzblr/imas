@@ -88,9 +88,9 @@ func pinnedTenantPub(t *testing.T, tenantID string) *[32]byte {
 
 // sealAsSprout seals body the way a real sprout would: under its own
 // private key and its pinned tenant public key.
-func sealAsSprout(t *testing.T, sprout sproutKeypair, tenantPub *[32]byte, sproutID, purpose string, body any) []byte {
+func sealAsSprout(t *testing.T, sprout sproutKeypair, tenantID string, tenantPub *[32]byte, sproutID, purpose string, body any) []byte {
 	t.Helper()
-	msg, err := payloadbox.NewMessage(purpose, sproutID, "", body)
+	msg, err := payloadbox.NewMessage(purpose, tenantID, sproutID, "", body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,9 +102,9 @@ func sealAsSprout(t *testing.T, sprout sproutKeypair, tenantPub *[32]byte, sprou
 }
 
 // openAsSprout opens data the way a real sprout would.
-func openAsSprout(sprout sproutKeypair, tenantPub *[32]byte, sproutID, purpose string, data []byte) (*payloadbox.Message, error) {
+func openAsSprout(sprout sproutKeypair, tenantID string, tenantPub *[32]byte, sproutID, purpose string, data []byte) (*payloadbox.Message, error) {
 	return payloadbox.Open(data, []payloadbox.KeyPair{{PeerPub: tenantPub, Priv: sprout.priv}},
-		payloadbox.Expect{Purpose: purpose, SproutID: sproutID})
+		payloadbox.Expect{Purpose: purpose, TenantID: tenantID, SproutID: sproutID})
 }
 
 func TestPublishEncryptedTo_NoConnection(t *testing.T) {
@@ -142,7 +142,7 @@ func TestPublishEncryptedTo_SproutOpensIt(t *testing.T) {
 	if m.Header.Get(payloadbox.Header) != payloadbox.HeaderBox1 {
 		t.Error("published message isn't marked sealed")
 	}
-	msg, err := openAsSprout(sprout, pinnedTenantPub(t, tenantID), "web-01", payloadbox.PurposeCmdRunRequest, m.Data)
+	msg, err := openAsSprout(sprout, tenantID, pinnedTenantPub(t, tenantID), "web-01", payloadbox.PurposeCmdRunRequest, m.Data)
 	if err != nil {
 		t.Fatalf("sprout couldn't open it: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestDecryptEncryptedFrom_DecryptsRealSproutPayload(t *testing.T) {
 	sprout := newSproutKeypair(t)
 	enrollSprout(t, pki.CurrentTenantID(), "web-01", sprout)
 
-	sealed := sealAsSprout(t, sprout, pinnedTenantPub(t, pki.CurrentTenantID()), "web-01", payloadbox.PurposeCmdRunResponse, map[string]string{"os": "linux"})
+	sealed := sealAsSprout(t, sprout, pki.CurrentTenantID(), pinnedTenantPub(t, pki.CurrentTenantID()), "web-01", payloadbox.PurposeCmdRunResponse, map[string]string{"os": "linux"})
 	var out struct {
 		OS string `json:"os"`
 	}
@@ -180,7 +180,7 @@ func TestDecryptEncryptedFrom_SproutKeyGracePeriod(t *testing.T) {
 
 	enrollSprout(t, tenantID, "web-01", oldSprout)
 	enrollSprout(t, tenantID, "web-01", newSprout) // old key now in grace
-	sealed := sealAsSprout(t, oldSprout, tenantPub, "web-01", payloadbox.PurposeCmdRunResponse, "in flight")
+	sealed := sealAsSprout(t, oldSprout, tenantID, tenantPub, "web-01", payloadbox.PurposeCmdRunResponse, "in flight")
 	if _, err := DecryptEncryptedFrom(tenantID, "web-01", payloadbox.PurposeCmdRunResponse, sealed, nil); err != nil {
 		t.Fatalf("expected the graced old key to still decrypt, got: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestDecryptEncryptedFrom_SproutKeyGracePeriod(t *testing.T) {
 	if err := pki.RotateSproutBoxKey(tenantID, "web-02", newSproutKeypair(t).pubB64(), -time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	sealed = sealAsSprout(t, expiredSprout, tenantPub, "web-02", payloadbox.PurposeCmdRunResponse, "late")
+	sealed = sealAsSprout(t, expiredSprout, tenantID, tenantPub, "web-02", payloadbox.PurposeCmdRunResponse, "late")
 	if _, err := DecryptEncryptedFrom(tenantID, "web-02", payloadbox.PurposeCmdRunResponse, sealed, nil); err == nil {
 		t.Fatal("expected decryption under an expired grace-period key to fail")
 	}
@@ -207,7 +207,7 @@ func TestDecryptEncryptedFrom_TenantKeyGracePeriod(t *testing.T) {
 	if _, err := pki.RotateTenantX25519Keypair(tenantID, false); err != nil {
 		t.Fatal(err)
 	}
-	sealed := sealAsSprout(t, sprout, oldTenantPub, "web-01", payloadbox.PurposeCmdRunResponse, "not re-pinned yet")
+	sealed := sealAsSprout(t, sprout, tenantID, oldTenantPub, "web-01", payloadbox.PurposeCmdRunResponse, "not re-pinned yet")
 	if _, err := DecryptEncryptedFrom(tenantID, "web-01", payloadbox.PurposeCmdRunResponse, sealed, nil); err != nil {
 		t.Fatalf("payload under the previous tenant key, inside grace: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestDecryptEncryptedFrom_WrongSproutTamperedAndMalformedFail(t *testing.T) 
 	tenantPub := pinnedTenantPub(t, tenantID)
 
 	// Sealed as sprout A, but farmer is told it came from sprout B.
-	sealed := sealAsSprout(t, sproutA, tenantPub, "web-a", payloadbox.PurposeCmdRunResponse, "x")
+	sealed := sealAsSprout(t, sproutA, tenantID, tenantPub, "web-a", payloadbox.PurposeCmdRunResponse, "x")
 	if _, err := DecryptEncryptedFrom(tenantID, "web-b", payloadbox.PurposeCmdRunResponse, sealed, nil); !errors.Is(err, ErrDecryptFailed) {
 		t.Errorf("wrong sprout: %v", err)
 	}
@@ -263,8 +263,8 @@ func TestDecryptEncryptedFrom_TwoTenantsSameSproutID_DecryptConcurrentlyWithoutC
 		t.Fatal("two tenants share a tenant key")
 	}
 
-	sealedA := sealAsSprout(t, sproutA, pubA, sproutID, payloadbox.PurposeCmdRunResponse, map[string]string{"tenant": "a"})
-	sealedB := sealAsSprout(t, sproutB, pubB, sproutID, payloadbox.PurposeCmdRunResponse, map[string]string{"tenant": "b"})
+	sealedA := sealAsSprout(t, sproutA, "t_a", pubA, sproutID, payloadbox.PurposeCmdRunResponse, map[string]string{"tenant": "a"})
+	sealedB := sealAsSprout(t, sproutB, "t_b", pubB, sproutID, payloadbox.PurposeCmdRunResponse, map[string]string{"tenant": "b"})
 
 	type result struct {
 		tenant string

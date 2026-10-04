@@ -273,12 +273,12 @@ func TestWriteKeypair_CASGuard(t *testing.T) {
 	}
 }
 
-// openContinuity opens a continuity proof the way a sprout pinned to
-// pinnedTenantPub would, and returns the key it names.
+// openContinuity opens a continuity proof the way a sprout of tenant t_1
+// pinned to pinnedTenantPub would, and returns the key it names.
 func openContinuity(t *testing.T, proof []byte, pinnedTenantPub, sproutPriv *[32]byte, sproutID string) (string, error) {
 	t.Helper()
 	msg, err := payloadbox.Open(proof, []payloadbox.KeyPair{{PeerPub: pinnedTenantPub, Priv: sproutPriv}},
-		payloadbox.Expect{Purpose: payloadbox.PurposeTenantKeyContinuity, SproutID: sproutID})
+		payloadbox.Expect{Purpose: payloadbox.PurposeTenantKeyContinuity, TenantID: "t_1", SproutID: sproutID})
 	if err != nil {
 		return "", err
 	}

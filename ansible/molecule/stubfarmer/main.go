@@ -62,6 +62,7 @@ import (
 	"github.com/nats-io/nkeys"
 	"golang.org/x/crypto/nacl/box"
 
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
@@ -79,6 +80,10 @@ type enrollRequest struct {
 	SproutPub string `json:"sprout_pub"`
 	Timestamp int64  `json:"timestamp"`
 	NKeySig   string `json:"nkey_sig"`
+	// SproutPubProof is the sprout's proof that it holds SproutPub's
+	// private half, on the second request of a first enrollment
+	// (internal/pki's enroll.go). The stub records a box key only from it.
+	SproutPubProof json.RawMessage `json:"sprout_pub_proof,omitempty"`
 }
 
 type refreshRequest struct {
@@ -250,7 +255,27 @@ func (f *farmer) enroll(w http.ResponseWriter, r *http.Request) {
 	} else {
 		log.Printf("enroll: replayed sprout %s", sproutID)
 	}
-	f.sproutBox[sproutID] = sproutBoxPub
+	if len(req.SproutPubProof) > 0 {
+		if !enrolled {
+			enrollmentFailed(w, "sprout_pub_proof on a first enrollment")
+			return
+		}
+		// As farmer's verifyEnrollProof: sealed by the holder of
+		// sprout_pub's private half to the tenant key, for this tenant
+		// and sprout, naming this NKey and box key.
+		pair := []payloadbox.KeyPair{{PeerPub: sproutBoxPub, Priv: f.tenantBoxPriv}}
+		opened, err := payloadbox.Open(req.SproutPubProof, pair,
+			payloadbox.Expect{Purpose: payloadbox.PurposeEnrollProof, TenantID: stubTenantID, SproutID: sproutID})
+		var body struct {
+			NKeyPub   string `json:"nkey_pub"`
+			SproutPub string `json:"sprout_pub"`
+		}
+		if err != nil || json.Unmarshal(opened.Body, &body) != nil || body.NKeyPub != req.NKeyPub || body.SproutPub != req.SproutPub {
+			enrollmentFailed(w, "sprout_pub_proof does not verify")
+			return
+		}
+		f.sproutBox[sproutID] = sproutBoxPub
+	}
 	userJWT, gatewayJWT, err := f.mint(req.NKeyPub, sproutID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -258,6 +283,7 @@ func (f *farmer) enroll(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, pki.EnrollResponse{
 		SproutID:        sproutID,
+		TenantID:        stubTenantID,
 		JWT:             userJWT,
 		GatewayJWT:      gatewayJWT,
 		NKeyIdentity:    req.NKeyPub,

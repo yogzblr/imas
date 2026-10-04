@@ -42,6 +42,11 @@ type enrollRequest struct {
 	// replay alike.
 	Timestamp int64  `json:"timestamp"`
 	NKeySig   string `json:"nkey_sig"`
+	// SproutPubProof proves the caller holds SproutPub's private half
+	// (pki.EnrollRequest.SproutPubProof). Optional on the wire: a first
+	// enrollment has none, and farmer records the box key only from the
+	// second, replay-path request that carries one.
+	SproutPubProof json.RawMessage `json:"sprout_pub_proof,omitempty"`
 }
 
 // enrollSuccessResponse is design doc §3.2's success shape, plus
@@ -67,7 +72,10 @@ type enrollRequest struct {
 // tenant_x25519_pub succeeds them; a sprout re-enrolling with an older
 // key pinned verifies it and re-pins. Older sprouts ignore it.
 type enrollSuccessResponse struct {
-	SproutID        string   `json:"sprout_id"`
+	SproutID string `json:"sprout_id"`
+	// TenantID is the tenant the sprout pins at enrollment; every sealed
+	// payload names it.
+	TenantID        string   `json:"tenant_id"`
 	JWT             string   `json:"jwt"`
 	GatewayJWT      string   `json:"gateway_jwt"`
 	NKeyIdentity    string   `json:"nkey_identity"`
@@ -109,6 +117,8 @@ func Enroll(w http.ResponseWriter, r *http.Request) {
 		SproutPub: req.SproutPub,
 		Timestamp: req.Timestamp,
 		NKeySig:   req.NKeySig,
+
+		SproutPubProof: req.SproutPubProof,
 	})
 	if err != nil {
 		// pki.Enroll has already logged the specific reason; nothing more
@@ -119,6 +129,7 @@ func Enroll(w http.ResponseWriter, r *http.Request) {
 
 	resp := enrollSuccessResponse{
 		SproutID:        result.SproutID,
+		TenantID:        result.TenantID,
 		JWT:             result.JWT,
 		GatewayJWT:      result.GatewayJWT,
 		NKeyIdentity:    req.NKeyPub,

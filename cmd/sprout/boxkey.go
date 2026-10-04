@@ -54,7 +54,7 @@ func subscribeBoxKeyRotate(nc *nats.Conn, sproutID string) error {
 // failure here, or a submission lost on the way, leaves the sprout on its
 // current key; farmer triggering again resubmits the same new key.
 func rotateBoxKey(nc *nats.Conn, sproutID string) {
-	submission, pub, err := pki.BeginSproutBoxKeyRotation(sproutID)
+	submission, _, err := pki.BeginSproutBoxKeyRotation(sproutID)
 	if errors.Is(err, pki.ErrSproutBoxKeyRotationTooSoon) {
 		log.Warnf("box key rotation: ignoring a rotate trigger: %v", err)
 		return
@@ -70,7 +70,10 @@ func rotateBoxKey(nc *nats.Conn, sproutID string) {
 		log.Errorf("box key rotation: submitting the new key: %v", err)
 		return
 	}
-	log.Noticef("box key rotation: submitted new payload-encryption key %s; it becomes current once farmer seals to it", pub)
+	// Not the key itself: this line is shipped over the bus, and a box
+	// public key read from it is what lets a hostile enrolment register
+	// this sprout's key elsewhere (security review 2026-10, H3).
+	log.Noticef("box key rotation: submitted a new payload-encryption key; it becomes current once farmer seals to it")
 }
 
 // userJWTGrantsPub reports whether userJWT lets its holder publish on

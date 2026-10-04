@@ -28,9 +28,13 @@ func genKeys(t *testing.T) keys {
 func farmerPair(tenant, sprout keys) KeyPair { return KeyPair{PeerPub: sprout.pub, Priv: tenant.priv} }
 func sproutPair(tenant, sprout keys) KeyPair { return KeyPair{PeerPub: tenant.pub, Priv: sprout.priv} }
 
+// testTenant is the tenant every test message belongs to unless a test
+// says otherwise.
+const testTenant = "t_a"
+
 func mustMessage(t *testing.T, purpose, sproutID, replyTo string, body any) Message {
 	t.Helper()
-	m, err := NewMessage(purpose, sproutID, replyTo, body)
+	m, err := NewMessage(purpose, testTenant, sproutID, replyTo, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +48,7 @@ func TestSealOpenRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := Open(data, []KeyPair{sproutPair(tenant, sprout)}, Expect{Purpose: PurposeCmdRunRequest, SproutID: "web-01"})
+	got, err := Open(data, []KeyPair{sproutPair(tenant, sprout)}, Expect{Purpose: PurposeCmdRunRequest, TenantID: testTenant, SproutID: "web-01"})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -80,28 +84,29 @@ func TestOpenRejectsReflection(t *testing.T) {
 	req := mustMessage(t, PurposeCmdRunRequest, "web-01", "", "x")
 	data, _ := Seal(req, []KeyPair{farmerPair(tenant, sprout)})
 	// Farmer, expecting a reply, is handed its own request.
-	if _, err := Open(data, []KeyPair{farmerPair(tenant, sprout)}, Expect{Purpose: PurposeCmdRunResponse, SproutID: "web-01"}); !errors.Is(err, ErrOpen) {
+	if _, err := Open(data, []KeyPair{farmerPair(tenant, sprout)}, Expect{Purpose: PurposeCmdRunResponse, TenantID: testTenant, SproutID: "web-01"}); !errors.Is(err, ErrOpen) {
 		t.Fatalf("reflected request opened as a response: %v", err)
 	}
-	// And the same bytes do open for the purpose they were sealed for,
-	// under the farmer's own view of the key pair: the check above is
-	// what stops them, not the keys.
-	if _, err := Open(data, []KeyPair{farmerPair(tenant, sprout)}, Expect{Purpose: PurposeCmdRunRequest, SproutID: "web-01"}); err != nil {
-		t.Fatalf("control: %v", err)
+	// Even under the purpose it was sealed for, farmer can't open its own
+	// request: the copy names the sprout's key as its recipient, and
+	// farmer's private key is the tenant's. Purpose and recipient key
+	// each stop a reflection on their own.
+	if _, err := Open(data, []KeyPair{farmerPair(tenant, sprout)}, Expect{Purpose: PurposeCmdRunRequest, TenantID: testTenant, SproutID: "web-01"}); !errors.Is(err, ErrOpen) {
+		t.Fatalf("reflected request opened under the sender's own key: %v", err)
 	}
 }
 
 func TestOpenRejectsWrongSproutAndWrongKeys(t *testing.T) {
 	tenant, sprout, other := genKeys(t), genKeys(t), genKeys(t)
 	data, _ := Seal(mustMessage(t, PurposeCmdRunRequest, "web-01", "", "x"), []KeyPair{farmerPair(tenant, sprout)})
-	if _, err := Open(data, []KeyPair{sproutPair(tenant, sprout)}, Expect{Purpose: PurposeCmdRunRequest, SproutID: "web-02"}); !errors.Is(err, ErrOpen) {
+	if _, err := Open(data, []KeyPair{sproutPair(tenant, sprout)}, Expect{Purpose: PurposeCmdRunRequest, TenantID: testTenant, SproutID: "web-02"}); !errors.Is(err, ErrOpen) {
 		t.Errorf("opened for the wrong sprout: %v", err)
 	}
-	if _, err := Open(data, []KeyPair{sproutPair(tenant, other)}, Expect{Purpose: PurposeCmdRunRequest, SproutID: "web-01"}); !errors.Is(err, ErrOpen) {
+	if _, err := Open(data, []KeyPair{sproutPair(tenant, other)}, Expect{Purpose: PurposeCmdRunRequest, TenantID: testTenant, SproutID: "web-01"}); !errors.Is(err, ErrOpen) {
 		t.Errorf("opened under another sprout's key: %v", err)
 	}
 	otherTenant := genKeys(t)
-	if _, err := Open(data, []KeyPair{sproutPair(otherTenant, sprout)}, Expect{Purpose: PurposeCmdRunRequest, SproutID: "web-01"}); !errors.Is(err, ErrOpen) {
+	if _, err := Open(data, []KeyPair{sproutPair(otherTenant, sprout)}, Expect{Purpose: PurposeCmdRunRequest, TenantID: testTenant, SproutID: "web-01"}); !errors.Is(err, ErrOpen) {
 		t.Errorf("opened under another tenant's key: %v", err)
 	}
 }
@@ -113,11 +118,11 @@ func TestOpenRejectsTampering(t *testing.T) {
 	json.Unmarshal(data, &env)
 	env.Copies[0].Box[len(env.Copies[0].Box)-1] ^= 1
 	tampered, _ := json.Marshal(env)
-	if _, err := Open(tampered, []KeyPair{sproutPair(tenant, sprout)}, Expect{Purpose: PurposeCmdRunRequest, SproutID: "web-01"}); !errors.Is(err, ErrOpen) {
+	if _, err := Open(tampered, []KeyPair{sproutPair(tenant, sprout)}, Expect{Purpose: PurposeCmdRunRequest, TenantID: testTenant, SproutID: "web-01"}); !errors.Is(err, ErrOpen) {
 		t.Fatalf("tampered envelope opened: %v", err)
 	}
 	for _, bad := range []string{``, `{}`, `not json`, `{"v":2,"s":[]}`, `{"v":1,"s":[{"n":"AA==","c":"AA=="}]}`} {
-		if _, err := Open([]byte(bad), []KeyPair{sproutPair(tenant, sprout)}, Expect{Purpose: PurposeCmdRunRequest, SproutID: "web-01"}); !errors.Is(err, ErrOpen) {
+		if _, err := Open([]byte(bad), []KeyPair{sproutPair(tenant, sprout)}, Expect{Purpose: PurposeCmdRunRequest, TenantID: testTenant, SproutID: "web-01"}); !errors.Is(err, ErrOpen) {
 			t.Errorf("Open(%q) = %v, want ErrOpen", bad, err)
 		}
 	}
@@ -133,7 +138,7 @@ func TestOpenPicksTheCopyForThePinnedKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, pinned := range map[string]keys{"old": oldTenant, "new": newTenant} {
-		if _, err := Open(data, []KeyPair{sproutPair(pinned, sprout)}, Expect{Purpose: PurposeCmdRunRequest, SproutID: "web-01"}); err != nil {
+		if _, err := Open(data, []KeyPair{sproutPair(pinned, sprout)}, Expect{Purpose: PurposeCmdRunRequest, TenantID: testTenant, SproutID: "web-01"}); err != nil {
 			t.Errorf("sprout pinned to the %s tenant key: %v", name, err)
 		}
 	}
@@ -149,6 +154,11 @@ func TestSealRejectsBadInput(t *testing.T) {
 	noPurpose.Purpose = ""
 	if _, err := Seal(noPurpose, []KeyPair{farmerPair(tenant, sprout)}); err == nil {
 		t.Error("sealed a message with no purpose")
+	}
+	noTenant := good
+	noTenant.TenantID = ""
+	if _, err := Seal(noTenant, []KeyPair{farmerPair(tenant, sprout)}); err == nil {
+		t.Error("sealed a message with no tenant")
 	}
 	many := make([]KeyPair, MaxCopies+1)
 	for i := range many {
@@ -226,6 +236,7 @@ func TestPurposesAreDistinctAndDirected(t *testing.T) {
 		PurposeCookRequest, PurposeCookResponse,
 		PurposeCookNudgeRequest, PurposeCookNudgeResponse,
 		PurposeBoxKeySubmit, PurposeTenantKeyContinuity,
+		PurposeEnrollProof,
 	}
 	seen := map[string]bool{}
 	for _, p := range purposes {
@@ -236,5 +247,175 @@ func TestPurposesAreDistinctAndDirected(t *testing.T) {
 		if !strings.HasPrefix(p, "f2s.") && !strings.HasPrefix(p, "s2f.") {
 			t.Errorf("purpose %q doesn't name its direction", p)
 		}
+	}
+}
+
+// H3 (security review 2026-10): two tenants sharing a keypair, or one
+// sprout box key registered under both, must not let a message sealed
+// for tenant B open for tenant A's same-named sprout. The keys open it;
+// the tenant binding refuses it.
+func TestOpenRefusesAnotherTenantEvenUnderASharedKey(t *testing.T) {
+	shared, sprout := genKeys(t), genKeys(t)
+	forB, err := NewMessage(PurposeCmdRunRequest, "t_b", "web-01", "", "reboot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := Seal(forB, []KeyPair{farmerPair(shared, sprout)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(data, []KeyPair{sproutPair(shared, sprout)}, Expect{Purpose: PurposeCmdRunRequest, TenantID: "t_a", SproutID: "web-01"}); !errors.Is(err, ErrOpen) {
+		t.Fatalf("tenant A's sprout opened a message for tenant B: %v", err)
+	}
+	// Control: tenant B's own sprout opens it.
+	if _, err := Open(data, []KeyPair{sproutPair(shared, sprout)}, Expect{Purpose: PurposeCmdRunRequest, TenantID: "t_b", SproutID: "web-01"}); err != nil {
+		t.Fatalf("control: %v", err)
+	}
+}
+
+// An Expect with no tenant matches nothing: forgetting it fails closed.
+func TestOpenRefusesAnEmptyExpectation(t *testing.T) {
+	tenant, sprout := genKeys(t), genKeys(t)
+	data, _ := Seal(mustMessage(t, PurposeCmdRunRequest, "web-01", "", "x"), []KeyPair{farmerPair(tenant, sprout)})
+	for name, want := range map[string]Expect{
+		"no tenant":  {Purpose: PurposeCmdRunRequest, SproutID: "web-01"},
+		"no sprout":  {Purpose: PurposeCmdRunRequest, TenantID: testTenant},
+		"no purpose": {TenantID: testTenant, SproutID: "web-01"},
+	} {
+		if _, err := Open(data, []KeyPair{sproutPair(tenant, sprout)}, want); !errors.Is(err, ErrOpen) {
+			t.Errorf("%s: opened: %v", name, err)
+		}
+	}
+}
+
+// Every copy names the key it was sealed to, and Open checks that against
+// the key that opened it.
+func TestSealNamesTheRecipientKeyAndOpenChecksIt(t *testing.T) {
+	tenant, sprout := genKeys(t), genKeys(t)
+	msg := mustMessage(t, PurposeCmdRunRequest, "web-01", "", "x")
+	msg.RecipientKey = "caller-supplied"
+	data, err := Seal(msg, []KeyPair{farmerPair(tenant, sprout)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Open(data, []KeyPair{sproutPair(tenant, sprout)}, Expect{Purpose: PurposeCmdRunRequest, TenantID: testTenant, SproutID: "web-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RecipientKey != KeyID(sprout.pub) {
+		t.Errorf("RecipientKey = %q, want KeyID of the sprout's key %q", got.RecipientKey, KeyID(sprout.pub))
+	}
+
+	// A copy sealed with the right shared secret but naming another
+	// recipient key is refused. Built by hand, since Seal always names
+	// the real one.
+	bad := msg
+	bad.RecipientKey = KeyID(genKeys(t).pub)
+	plaintext, _ := json.Marshal(bad)
+	var nonce [24]byte
+	rand.Read(nonce[:])
+	env, _ := json.Marshal(Envelope{V: Version, Copies: []Sealed{{Nonce: nonce[:], Box: box.Seal(nil, plaintext, &nonce, sprout.pub, tenant.priv)}}})
+	if _, err := Open(env, []KeyPair{sproutPair(tenant, sprout)}, Expect{Purpose: PurposeCmdRunRequest, TenantID: testTenant, SproutID: "web-01"}); !errors.Is(err, ErrOpen) {
+		t.Fatalf("a copy naming another recipient key opened: %v", err)
+	}
+}
+
+func TestKeyIDIsStableAndDistinct(t *testing.T) {
+	a, b := genKeys(t), genKeys(t)
+	if KeyID(a.pub) != KeyID(a.pub) || KeyID(a.pub) == KeyID(b.pub) {
+		t.Fatal("KeyID is not a stable, distinct identifier")
+	}
+	if strings.Contains(string(mustJSON(t, a.pub[:])), KeyID(a.pub)) {
+		t.Fatal("KeyID is the key itself")
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// M2 (security review 2026-10): a guard restored from its committed state
+// (a restarted process) still refuses every message it had accepted.
+func TestReplayGuardSurvivesRestartThroughCommitAndRestore(t *testing.T) {
+	base := time.Unix(1_800_000_000, 0)
+	defer func(orig func() time.Time) { now = orig }(now)
+	clock := base
+	now = func() time.Time { return clock }
+
+	var persisted ReplayState
+	g := NewReplayGuard()
+	g.Commit = func(s ReplayState) error { persisted = s; return nil }
+	m := mustMessage(t, PurposeCmdRunRequest, "web-01", "", "x")
+	if err := g.Accept(&m); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := persisted.Seen[m.ID]; !ok {
+		t.Fatal("Accept returned before committing the message's ID")
+	}
+
+	clock = base.Add(time.Minute)
+	restarted := NewReplayGuard()
+	b, _ := json.Marshal(persisted)
+	var loaded ReplayState
+	if err := json.Unmarshal(b, &loaded); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.Restore(loaded); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.Accept(&m); !errors.Is(err, ErrReplayed) {
+		t.Fatalf("replay after restart: %v, want ErrReplayed", err)
+	}
+	if err := restarted.Restore(ReplayState{V: 99}); err == nil {
+		t.Error("restored a state of an unknown version")
+	}
+}
+
+// A message is never accepted unless its ID was committed.
+func TestReplayGuardCommitFailureRefusesTheMessage(t *testing.T) {
+	g := NewReplayGuard()
+	g.Commit = func(ReplayState) error { return errors.New("disk full") }
+	m := mustMessage(t, PurposeCmdRunRequest, "web-01", "", "x")
+	if err := g.Accept(&m); err == nil {
+		t.Fatal("accepted a message whose ID couldn't be committed")
+	}
+	g.Commit = nil
+	if err := g.Accept(&m); err != nil {
+		t.Fatalf("the refused message was still remembered: %v", err)
+	}
+}
+
+// After a forgotten ID's window closes the floor rises past it, so a
+// clock stepped backwards can't make that message fresh again.
+func TestReplayGuardFloorSurvivesABackwardClockStep(t *testing.T) {
+	base := time.Unix(1_800_000_000, 0)
+	defer func(orig func() time.Time) { now = orig }(now)
+	clock := base
+	now = func() time.Time { return clock }
+
+	g := NewReplayGuard()
+	old := mustMessage(t, PurposeCmdRunRequest, "web-01", "", "old")
+	if err := g.Accept(&old); err != nil {
+		t.Fatal(err)
+	}
+	// Later, another message: accepting it forgets old's ID.
+	clock = base.Add(DefaultMaxSkew + time.Minute)
+	later := mustMessage(t, PurposeCmdRunRequest, "web-01", "", "later")
+	if err := g.Accept(&later); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := g.State().Seen[old.ID]; ok {
+		t.Fatal("old ID was not forgotten")
+	}
+	// The clock steps back to when old was issued: old is inside the
+	// window again, and its ID is gone, but the floor refuses it.
+	clock = base
+	if err := g.Accept(&old); !errors.Is(err, ErrStale) {
+		t.Fatalf("replay after a backward clock step: %v, want ErrStale", err)
 	}
 }

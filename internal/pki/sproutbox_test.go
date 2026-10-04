@@ -97,7 +97,7 @@ func TestReconcileTenantKeyPin_RejectsBadProofs(t *testing.T) {
 
 	proof := func(signer *[32]byte, sproutID, purpose, to string) json.RawMessage {
 		t.Helper()
-		msg, err := payloadbox.NewMessage(purpose, sproutID, "", tenantKeyContinuityBody{To: to})
+		msg, err := payloadbox.NewMessage(purpose, "t_1", sproutID, "", tenantKeyContinuityBody{To: to})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -442,7 +442,7 @@ func TestSproutBoxKeyRotation_ForgedPayloadDoesNotPromote(t *testing.T) {
 		t.Fatal(err)
 	}
 	attacker := newTestBoxKeyPair(t)
-	msg, err := payloadbox.NewMessage(payloadbox.PurposeCmdRunRequest, "web-01", "", "rm -rf /")
+	msg, err := payloadbox.NewMessage(payloadbox.PurposeCmdRunRequest, "t_1", "web-01", "", "rm -rf /")
 	if err != nil {
 		t.Fatal(err)
 	}

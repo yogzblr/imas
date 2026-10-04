@@ -119,7 +119,7 @@ beyond unit tests (real Envoy, Molecule containers, real OpenBao).
 | 11 | Recipe download uses the same JWT | **Green** | Built, validated | Same gateway JWT, same Envoy gate. |
 | 12 | Envoy with JWT validation in front of NATS | **Green** | Built, validated | `deploy/envoy/envoy.yaml`, `jwt_authn` with remote JWKS; checked against real Envoy. Keycloak JWKS cross-check harness has never been run (nice-to-have). |
 | 13 | Backend on Kubernetes (NATS, Valkey, farmer, Percona) | **Amber** | Built | Helm charts with optional PXC/OpenBao/Valkey subcharts; single migration hook Job; sprout-release hook Job. Chart tests render them; no gate has installed them on a real cluster. **No Terraform exists yet** (see the UAT gate row). |
-| 14 | Payload encryption, key pair per sprout and per tenant | **Red** | **Partly built** | Per-tenant and per-sprout X25519 keys; `cmd.run`, `cook` and box-key submissions are sealed end to end. **`shell.*` (interactive PTY) is still plaintext inside TLS**, as are cook step events, `test.ping`, facts, `cancel`, the rotate trigger and log shipping. `shell.*` is the one that matters: a compromised bus can still open a shell on a Unix sprout. |
+| 14 | Payload encryption, key pair per sprout and per tenant | **Red** | **Partly built** | Per-tenant and per-sprout X25519 keys; `cmd.run`, `cook` and box-key submissions are sealed end to end. Since SEC.3b (FLAG FOR SECURITY REVIEW, ready for review): every sealed message names its tenant and recipient key, and the sprout refuses another tenant's message even under a shared key; farmer records a sprout's box key only after the sprout proves it holds the private half; the sprout's replay guard survives restarts, and a handled cook job is never cooked again; opened bodies are never logged, and log shipping sends Info and above only (`natslogminlevel`). **`shell.*` (interactive PTY) is still plaintext inside TLS**, as are cook step events, `test.ping`, facts, `cancel`, the rotate trigger and log shipping. `shell.*` is the one that matters: a compromised bus can still open a shell on a Unix sprout. |
 | 15 | Key rotation for sprout keys | **Amber** | Built, **deliberately differs from the wording** | The requirement text says the new private key is sent encrypted over NATS. The built design never transmits a private key: the sprout generates the new pair and submits only the public key, farmer-triggered. See `imas-payload-encryption-design.md`. `requirements.md` should be reworded to match (see "Open items"). |
 | 16 | SDB-equivalent secrets in the sprout | **Green** | Built (v1 tier) | `internal/ingredients/sdb`: OpenBao/Vault (hot-reloaded client cert, official OpenBao client since CL.2b, tested against OpenBao 2.4.1 and Vault 1.20.4), Azure Key Vault, AWS Secrets Manager, GCP Secret Manager. CyberArk and Delinea (Tier 2) not built, by design. |
 | 17 | Probe capability (database, HTTP) as a sprout task | **Green** | Built | `probe.http`, `probe.database`, plus `wait`, `cond`, `on_exit`, registered variables with `sensitive` redaction. |
@@ -846,6 +846,17 @@ by an external git sync today.
       `INSTALL.md` should say that a sprout behind an environment proxy needs
       `NO_PROXY` for a customer server reachable only directly, and that the
       platform's own OpenBao address may need it where a proxy is set.
+    - **Sealed payloads after SEC.3b (security review 2026-10, H3, M2,
+      H4; FLAG FOR SECURITY REVIEW):** left for later. Farmer still sends
+      `cmd.run` and `cook` in plaintext, with a warning, to a sprout with no
+      box key on record; since SEC.3b that includes a sprout between its two
+      enrollment requests, or one whose proof of possession never arrived.
+      Nothing is deployed, so the fallback could be deleted. `/v1/refresh`
+      does not return `tenant_id`, so the tenant pin is checked at
+      enrollment and on every sealed message, but not on refresh. A sprout
+      enrolled before SEC.3b has no tenant pin and can't seal or open
+      anything until it re-enrolls. The persisted replay guard rewrites one
+      small file per accepted message.
 11. **The control plane can be forged by a compromised bus** (requirement 14).
     Sealing farmer ↔ sprout stops the bus injecting commands *into a sprout*,
     but not asking *farmer* to send them. Verified with throwaway tests

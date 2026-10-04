@@ -38,21 +38,7 @@ func connectTestNATS(t *testing.T, ns *natsserver.Server) *nats.Conn {
 // only the charm logger attached.
 func detachNATS(t *testing.T) {
 	t.Helper()
-	t.Cleanup(func() {
-		mu.Lock()
-		defer mu.Unlock()
-		kept := logger.SubLoggers[:0]
-		for _, sl := range logger.SubLoggers {
-			if _, isNATS := sl.(*nlog.Logger); !isNATS {
-				kept = append(kept, sl)
-			}
-		}
-		logger.SubLoggers = kept
-		nlog.SetDefaultConn(nil)
-		nlog.SetSubjectTemplate("logging.{{.Namespace}}.{{.Level}}")
-		borrowedConn = nil
-		natsUp = false
-	})
+	t.Cleanup(DetachNATS)
 }
 
 func TestUseNATSConnPublishesOverProvidedConn(t *testing.T) {
@@ -125,5 +111,74 @@ func TestUseNATSConnRejectsBadInput(t *testing.T) {
 	defer mu.RUnlock()
 	if natsUp || borrowedConn != nil {
 		t.Error("a rejected UseNATSConn attached the NATS backend")
+	}
+}
+
+// H4 (security review 2026-10): by default nothing below Info is shipped,
+// and the minimum is configurable.
+func TestNATSSinkDropsTraceAndDebugByDefault(t *testing.T) {
+	ns := startTestNATS(t)
+	pub := connectTestNATS(t, ns)
+	sub := connectTestNATS(t, ns)
+	detachNATS(t)
+	t.Cleanup(func() { SetNATSMinLevel(DefaultNATSMinLevel) })
+
+	msgs, err := sub.SubscribeSync("imas.logs.sprouts.web01.>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sub.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := UseNATSConn(pub, "imas.logs.sprouts.web01"); err != nil {
+		t.Fatal(err)
+	}
+	if NATSMinLevel() != LInfo {
+		t.Fatalf("default NATS minimum level = %v, want Info", NATSMinLevel())
+	}
+	Tracef("trace %s", "x")
+	Trace("trace")
+	Traceln("trace")
+	Debugf("debug %s", "x")
+	Debug("debug")
+	Debugln("debug")
+	Infof("info %s", "x")
+	Flush()
+	msg, err := msgs.NextMsg(2 * time.Second)
+	if err != nil {
+		t.Fatalf("no Info entry published: %v", err)
+	}
+	if msg.Subject != "imas.logs.sprouts.web01.INFO" {
+		t.Fatalf("first entry published on %s, want only Info and above", msg.Subject)
+	}
+	if extra, err := msgs.NextMsg(200 * time.Millisecond); err == nil {
+		t.Fatalf("unexpected entry on %s", extra.Subject)
+	}
+
+	// Raised to Warn: Info is dropped too. Lowered to Trace: everything.
+	SetNATSMinLevel(LWarn)
+	Infof("info")
+	Warnf("warn")
+	Flush()
+	if msg, err := msgs.NextMsg(2 * time.Second); err != nil || msg.Subject != "imas.logs.sprouts.web01.WARN" {
+		t.Fatalf("with minimum Warn got %v, %v; want only the WARN entry", msg, err)
+	}
+	SetNATSMinLevel(LTrace)
+	Tracef("trace")
+	Flush()
+	if msg, err := msgs.NextMsg(2 * time.Second); err != nil || msg.Subject != "imas.logs.sprouts.web01.TRACE" {
+		t.Fatalf("with minimum Trace got %v, %v; want the TRACE entry", msg, err)
+	}
+}
+
+func TestParseLevel(t *testing.T) {
+	for in, want := range map[string]Level{"trace": LTrace, "DEBUG": LDebug, " info ": LInfo, "notice": LNotice,
+		"warn": LWarn, "warning": LWarn, "error": LError, "panic": LPanic, "fatal": LFatal} {
+		if got, err := ParseLevel(in); err != nil || got != want {
+			t.Errorf("ParseLevel(%q) = %v, %v; want %v", in, got, err, want)
+		}
+	}
+	if _, err := ParseLevel("loud"); err == nil {
+		t.Error("ParseLevel accepted an unknown level")
 	}
 }

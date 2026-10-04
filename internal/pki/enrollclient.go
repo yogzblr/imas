@@ -34,6 +34,14 @@ package pki
 //     private half that names the new key (authenticated tenant key
 //     rotation, sproutbox.go's reconcileTenantKeyPin); then the pin
 //     moves to the new key.
+//   - The tenant ID is pinned at enrollment too (sproutbox.go's
+//     pinSproutTenant), and never moves. Every sealed message names it.
+//   - A first enrollment is two requests (enroll.go's package comment,
+//     "Proof of possession of the box key"): the first issues the
+//     identity and names the tenant's box key; the second, on farmer's
+//     replay path, carries the sprout's proof that it holds its box
+//     private key, sealed to that tenant key, and only then does farmer
+//     record the box key.
 
 import (
 	"bytes"
@@ -102,11 +110,16 @@ type enrollWireRequest struct {
 	SproutPub string `json:"sprout_pub"`
 	Timestamp int64  `json:"timestamp"`
 	NKeySig   string `json:"nkey_sig"`
+	// SproutPubProof is set on the second request of a first enrollment;
+	// see EnrollSprout.
+	SproutPubProof json.RawMessage `json:"sprout_pub_proof,omitempty"`
 }
 
 // EnrollResponse is POST /v1/enroll's success body.
 type EnrollResponse struct {
-	SproutID        string   `json:"sprout_id"`
+	SproutID string `json:"sprout_id"`
+	// TenantID is the tenant the sprout pins (pinSproutTenant).
+	TenantID        string   `json:"tenant_id"`
 	JWT             string   `json:"jwt"`
 	GatewayJWT      string   `json:"gateway_jwt"`
 	NKeyIdentity    string   `json:"nkey_identity"`
@@ -251,11 +264,19 @@ func readBoxPrivKey(path string) ([]byte, error) {
 	return priv, nil
 }
 
-// EnrollSprout calls POST /v1/enroll with joinToken, signing the request
-// with the sprout's NKey seed, and returns the validated response. It
-// persists nothing; see PersistEnrollment. hostname is the sprout ID the
-// sprout asks for; farmer may assign a suffixed one on a collision, which
-// the response's SproutID carries.
+// EnrollSprout enrolls through POST /v1/enroll with joinToken, signing
+// each request with the sprout's NKey seed, and returns the validated
+// response. It persists nothing; see PersistEnrollment. hostname is the
+// sprout ID the sprout asks for; farmer may assign a suffixed one on a
+// collision, which the response's SproutID carries.
+//
+// It makes two requests (enroll.go's "Proof of possession of the box
+// key"). The first issues the identity and names the tenant and its box
+// public key. The second, which farmer answers from its replay path
+// without spending the token again, carries sprout_pub_proof: proof that
+// this sprout holds the private half of sproutPub, sealed to that tenant
+// key. Farmer records sproutPub only then. The second response must name
+// the same sprout, tenant and tenant key as the first.
 func EnrollSprout(ctx context.Context, joinToken, hostname, sproutPub string) (*EnrollResponse, error) {
 	if joinToken == "" {
 		return nil, errors.New("pki: no join token configured")
@@ -269,12 +290,34 @@ func EnrollSprout(ctx context.Context, joinToken, hostname, sproutPub string) (*
 	if err != nil {
 		return nil, fmt.Errorf("pki: sprout NKey public key: %w", err)
 	}
+	first, err := postEnroll(ctx, kp, nkeyPub, joinToken, hostname, sproutPub, nil)
+	if err != nil {
+		return nil, err
+	}
+	proof, err := sproutEnrollProof(first.TenantID, first.SproutID, first.TenantX25519Pub, nkeyPub, sproutPub)
+	if err != nil {
+		return nil, fmt.Errorf("pki: building the box key proof of possession: %w", err)
+	}
+	second, err := postEnroll(ctx, kp, nkeyPub, joinToken, hostname, sproutPub, proof)
+	if err != nil {
+		return nil, fmt.Errorf("pki: proving possession of the box key: %w", err)
+	}
+	if second.SproutID != first.SproutID || second.TenantID != first.TenantID || second.TenantX25519Pub != first.TenantX25519Pub {
+		return nil, errors.New("pki: farmer's two enrollment responses name different sprouts, tenants or tenant keys")
+	}
+	return second, nil
+}
+
+// postEnroll sends one signed POST /v1/enroll request, with proof as its
+// sprout_pub_proof if set, and returns the validated response.
+func postEnroll(ctx context.Context, kp nkeys.KeyPair, nkeyPub, joinToken, hostname, sproutPub string, proof json.RawMessage) (*EnrollResponse, error) {
 	req := enrollWireRequest{
-		JoinToken: joinToken,
-		NKeyPub:   nkeyPub,
-		Hostname:  hostname,
-		SproutPub: sproutPub,
-		Timestamp: nextSigningTimestamp(),
+		JoinToken:      joinToken,
+		NKeyPub:        nkeyPub,
+		Hostname:       hostname,
+		SproutPub:      sproutPub,
+		Timestamp:      nextSigningTimestamp(),
+		SproutPubProof: proof,
 	}
 	sig, err := kp.Sign(EnrollSigningPayload(req.Timestamp, req.NKeyPub, req.Hostname, req.SproutPub, req.JoinToken))
 	if err != nil {
@@ -337,6 +380,9 @@ func postToFarmer(ctx context.Context, path string, body, out any) error {
 func validateEnrollResponse(resp *EnrollResponse, nkeyPub string) error {
 	if err := validateIdentity(resp.SproutID, resp.NKeyIdentity, resp.JWT, resp.GatewayJWT, resp.TenantX25519Pub, nkeyPub); err != nil {
 		return err
+	}
+	if !IsValidTenantID(resp.TenantID) {
+		return fmt.Errorf("pki: farmer's response has an invalid tenant_id %q", resp.TenantID)
 	}
 	urls, err := ValidateBusURLs(resp.NatsURLs)
 	if err != nil {
@@ -440,10 +486,11 @@ func EnsureEnrolled(ctx context.Context, joinToken, requestedID, sproutPub strin
 }
 
 // PersistEnrollment writes a validated enrollment response next to the
-// sprout's NKey seed and root CA. The tenant X25519 public key is checked
-// against any already-pinned one before anything else is written
-// (reconcileTenantKeyPin: ErrTenantKeyMismatch, unless a continuity proof
-// moves the pin), then the gateway JWT, the tenant key pin and the bus
+// sprout's NKey seed and root CA. The tenant ID and tenant X25519 public
+// key are checked against any already-pinned ones before anything else
+// is written (ErrSproutTenantMismatch; reconcileTenantKeyPin:
+// ErrTenantKeyMismatch, unless a continuity proof moves the key pin),
+// then the gateway JWT, the tenant ID and tenant key pins and the bus
 // URLs (nats_urls, which LoadSproutBus connects to) are written, and the
 // NATS User JWT last.
 // SproutEnrolled keys off the User JWT, so a crash part-way leaves the
@@ -451,6 +498,9 @@ func EnsureEnrolled(ctx context.Context, joinToken, requestedID, sproutPub strin
 // from its idempotent replay without spending another use of the join
 // token.
 func PersistEnrollment(resp *EnrollResponse) error {
+	if err := checkPinnedSproutTenant(resp.TenantID); err != nil {
+		return err
+	}
 	if err := reconcileTenantKeyPin(resp.SproutID, resp.TenantX25519Pub, resp.TenantX25519Continuity); err != nil {
 		return err
 	}
@@ -458,6 +508,9 @@ func PersistEnrollment(resp *EnrollResponse) error {
 		return fmt.Errorf("pki: persisting gateway JWT: %w", err)
 	}
 	setCurrentGatewayJWT(resp.GatewayJWT)
+	if err := pinSproutTenant(resp.TenantID); err != nil {
+		return err
+	}
 	if err := pinTenantX25519Pub(resp.TenantX25519Pub); err != nil {
 		return err
 	}

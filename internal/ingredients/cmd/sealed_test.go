@@ -109,6 +109,10 @@ func setupSealed(t *testing.T, tenant string) *sealedEnv {
 		t.Fatal(err)
 	}
 	env.pin(t, env.tenantPub)
+	// And the tenant it pinned with it.
+	if err := os.WriteFile(pki.SproutTenantIDFile(), []byte(tenant), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	url := startTestNATS(t)
 	env.farmer, env.sprout = connect(t, url), connect(t, url)

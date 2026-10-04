@@ -92,7 +92,7 @@ func sealedSubmission(t *testing.T, signer sproutKeypair, sproutID, newPub strin
 	t.Helper()
 	msg := nats.NewMsg(SproutSubject(sproutID, "boxkey.pub"))
 	msg.Header.Set(payloadbox.Header, payloadbox.HeaderBox1)
-	msg.Data = sealAsSprout(t, signer, pinnedTenantPub(t, pki.CurrentTenantID()), sproutID,
+	msg.Data = sealAsSprout(t, signer, pki.CurrentTenantID(), pinnedTenantPub(t, pki.CurrentTenantID()), sproutID,
 		payloadbox.PurposeBoxKeySubmit, boxKeySubmitRequest{Pub: newPub})
 	return msg
 }
@@ -155,7 +155,7 @@ func TestHandleBoxKeySubmit_RefusesStaleSubmission(t *testing.T) {
 	enrollSprout(t, pki.CurrentTenantID(), "web-01", current)
 
 	body := mustMarshal(t, boxKeySubmitRequest{Pub: next.pubB64()})
-	stale := payloadbox.Message{V: payloadbox.Version, Purpose: payloadbox.PurposeBoxKeySubmit, SproutID: "web-01",
+	stale := payloadbox.Message{V: payloadbox.Version, Purpose: payloadbox.PurposeBoxKeySubmit, TenantID: pki.CurrentTenantID(), SproutID: "web-01",
 		ID: "stale", IssuedAt: time.Now().Add(-time.Hour).Unix(), Body: body}
 	data, err := payloadbox.Seal(stale, []payloadbox.KeyPair{{PeerPub: pinnedTenantPub(t, pki.CurrentTenantID()), Priv: current.priv}})
 	if err != nil {
