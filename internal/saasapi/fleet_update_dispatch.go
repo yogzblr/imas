@@ -100,6 +100,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/yogzblr/imas/internal/controlplane"
+	"github.com/yogzblr/imas/internal/fleetcatalog"
 	"github.com/yogzblr/imas/internal/fleetsign"
 	log "github.com/yogzblr/imas/internal/log"
 )
@@ -503,13 +504,16 @@ func versionRevoked(d *gorm.DB, version string) (bool, error) {
 
 // policyRefusal returns errCodeApprovalWithdrawn if version isn't p's
 // approved_version (or there's no policy), errCodeRolloutWindowClosed if
-// p sets a window and now is outside [start, end), and "" otherwise.
+// p sets a window and now is outside [start, end), and "" otherwise. The
+// window rule is fleetcatalog.OutsideRolloutWindow, the one farmer
+// applies again before each self_update (internal/natsapi,
+// checkRolloutWindow).
 func policyRefusal(p *TenantUpdatePolicy, version string, now time.Time) string {
 	if p == nil || p.ApprovedVersion == nil || *p.ApprovedVersion != version {
 		return errCodeApprovalWithdrawn
 	}
 	if p.RolloutWindowStart != nil && p.RolloutWindowEnd != nil &&
-		(now.Before(*p.RolloutWindowStart) || !now.Before(*p.RolloutWindowEnd)) {
+		fleetcatalog.OutsideRolloutWindow(now, *p.RolloutWindowStart, *p.RolloutWindowEnd) {
 		return errCodeRolloutWindowClosed
 	}
 	return ""

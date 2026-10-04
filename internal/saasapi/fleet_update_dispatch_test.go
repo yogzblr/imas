@@ -15,6 +15,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/controlplane"
+	"github.com/yogzblr/imas/internal/fleetcatalog/fleetcatalogtest"
 	"github.com/yogzblr/imas/internal/props"
 )
 
@@ -1134,6 +1135,37 @@ func TestRolloutPolicyCheck(t *testing.T) {
 		if c := check(); c != tc.want {
 			t.Errorf("window %s–%s: %q, want %q", tc.start, tc.end, c, tc.want)
 		}
+	}
+}
+
+// TestRolloutPolicyCheck_SharedWindowCases: saasapi's window rule, read
+// back from the database, against the table farmer's checkRolloutWindow
+// is tested against too (internal/natsapi), so the two can't drift.
+func TestRolloutPolicyCheck_SharedWindowCases(t *testing.T) {
+	gdb := newUpdateTestDB(t)
+	tid := mustCreateActiveTenant(t, gdb)
+	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	for _, tc := range fleetcatalogtest.WindowCases(now) {
+		t.Run(tc.Name, func(t *testing.T) {
+			want := ""
+			if tc.Closed {
+				want = errCodeRolloutWindowClosed
+			}
+			var window []time.Time
+			if tc.Start != nil {
+				window = []time.Time{*tc.Start, *tc.End}
+			}
+			mustApprove(t, gdb, tid, "v2.4.1", window...)
+			code, err := rolloutPolicyCheck(gdb, tid, "v2.4.1", now)
+			if err != nil || code != want {
+				t.Fatalf("rolloutPolicyCheck: %q, %v; want %q", code, err, want)
+			}
+			version := "v2.4.1"
+			p := TenantUpdatePolicy{TenantID: tid, ApprovedVersion: &version, RolloutWindowStart: tc.Start, RolloutWindowEnd: tc.End}
+			if code := policyRefusal(&p, "v2.4.1", now); code != want {
+				t.Fatalf("policyRefusal: %q, want %q", code, want)
+			}
+		})
 	}
 }
 

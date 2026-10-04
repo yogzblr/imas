@@ -1,8 +1,9 @@
 // Package fleetcatalog is farmer's read-only view of the fleet release
 // catalog (design doc §2.5, §2.6, §4.3): saas.fleet_versions, the signed
 // rows saasapi registers, and saas.tenant_update_policy, the version each
-// tenant has approved. Farmer reads both through its own PXC handle and
-// its read-only saas grant (§4.1); nothing here writes.
+// tenant has approved and its rollout window. Farmer reads both through
+// its own PXC handle and its read-only saas grant (§4.1: SELECT on
+// saas.*, so every column); nothing here writes.
 //
 // Two farmer paths read it:
 //
@@ -10,8 +11,10 @@
 //     row for a sprout's tenant, version, OS, arch and package type
 //     (ApprovedManifest);
 //   - internal.sprout.action self_update (internal/natsapi): before
-//     dispatching, the tenant's approved version (ApprovedVersion) and
-//     every row of the target version (ReleaseRows), each re-verified.
+//     dispatching, the tenant's approved version (ApprovedVersion), its
+//     rollout window (RolloutWindow, checked with OutsideRolloutWindow,
+//     the rule saasapi applies too) and every row of the target version
+//     (ReleaseRows), each re-verified.
 //
 // Every query is scoped by tenant_id where a tenant is involved (§4
 // "Tenant safety").
@@ -21,7 +24,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"sync"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -46,6 +51,12 @@ type Catalog interface {
 	// ApprovedVersion returns tenantID's approved_version. ok is false if
 	// the tenant has no policy row or approved none.
 	ApprovedVersion(ctx context.Context, tenantID string) (version string, ok bool, err error)
+	// RolloutWindow returns tenantID's rollout window, in UTC. ok is false
+	// if the tenant has no policy row; start and end are both nil if its
+	// policy sets no window. A row with exactly one of the two set is
+	// corrupt (saasapi only writes both or neither): that is an error
+	// wrapping ErrCorruptRolloutWindow, never "no window".
+	RolloutWindow(ctx context.Context, tenantID string) (start, end *time.Time, ok bool, err error)
 	// ReleaseRows returns every row of version, revoked ones included,
 	// ordered by OS, arch and package type. None means version isn't
 	// registered.
@@ -94,6 +105,44 @@ func (s SQL) ApprovedVersion(ctx context.Context, tenantID string) (string, bool
 		return "", false, err
 	}
 	return v.String, v.Valid && v.String != "", nil
+}
+
+// rolloutWindowQuery reads both window columns of the tenant's one policy
+// row (tenant_id is tenant_update_policy's primary key) in one statement,
+// scoped by tenant_id (§4 "Tenant safety").
+const rolloutWindowQuery = `SELECT rollout_window_start, rollout_window_end
+  FROM saas.tenant_update_policy WHERE tenant_id = ?`
+
+// ErrCorruptRolloutWindow: a policy row sets one end of its rollout
+// window and not the other.
+var ErrCorruptRolloutWindow = errors.New("rollout window has exactly one of rollout_window_start and rollout_window_end set")
+
+func (s SQL) RolloutWindow(ctx context.Context, tenantID string) (*time.Time, *time.Time, bool, error) {
+	var start, end sql.NullTime
+	err := s.db.WithContext(ctx).Raw(rolloutWindowQuery, tenantID).Row().Scan(&start, &end)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, false, nil
+	}
+	if err != nil {
+		return nil, nil, false, err
+	}
+	switch {
+	case !start.Valid && !end.Valid:
+		return nil, nil, true, nil
+	case start.Valid != end.Valid:
+		return nil, nil, false, fmt.Errorf("tenant %q: %w", tenantID, ErrCorruptRolloutWindow)
+	}
+	st, en := start.Time.UTC(), end.Time.UTC()
+	return &st, &en, true, nil
+}
+
+// OutsideRolloutWindow reports whether now is outside the rollout window
+// [start, end): before start, or at or after end. It is the one rule both
+// saasapi (policyRefusal, before a rollout and each wave) and farmer
+// (internal/natsapi checkRolloutWindow, before each self_update) apply,
+// so the two can't drift.
+func OutsideRolloutWindow(now, start, end time.Time) bool {
+	return now.Before(start) || !now.Before(end)
 }
 
 const releaseRowsQuery = `SELECT version, os, arch, package_type, file_name,
