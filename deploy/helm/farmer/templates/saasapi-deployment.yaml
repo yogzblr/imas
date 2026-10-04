@@ -245,6 +245,53 @@ spec:
               value: {{ . | toString | quote }}
             {{- end }}
             {{- end }}
+            {{- /* Recipe template render limits: the same values farmer
+            renders under, so an upload is validated as it will be cooked.
+            Types checked in validate, ranges by saasapi at startup. */}}
+            {{- with .Values.farmer.recipes.templateLimits }}
+            - name: IMAS_RECIPE_MAX_SOURCE_BYTES
+              value: {{ .maxSourceBytes | int64 | toString | quote }}
+            - name: IMAS_RECIPE_MAX_RENDERED_BYTES
+              value: {{ .maxRenderedBytes | int64 | toString | quote }}
+            - name: IMAS_RECIPE_MAX_VALUE_BYTES
+              value: {{ .maxValueBytes | int64 | toString | quote }}
+            - name: IMAS_RECIPE_RENDER_TIMEOUT
+              value: {{ .renderTimeout | quote }}
+            - name: IMAS_RECIPE_MAX_RANGE_ITERATIONS
+              value: {{ .maxRangeIterations | int64 | toString | quote }}
+            {{- end }}
+            {{- with $s.recipes }}
+            - name: SAASAPI_RECIPES_READ_ROLE
+              value: {{ .readRole | quote }}
+            - name: SAASAPI_RECIPES_WRITE_ROLE
+              value: {{ .writeRole | quote }}
+            - name: SAASAPI_RECIPES_MAX_COUNT
+              value: {{ .maxCount | int64 | toString | quote }}
+            - name: SAASAPI_RECIPES_MAX_TOTAL_BYTES
+              value: {{ .maxTotalBytes | int64 | toString | quote }}
+            - name: SAASAPI_RECIPES_WRITE_RATE_LIMIT
+              value: {{ .writeRateLimit.perSecond | quote }}
+            - name: SAASAPI_RECIPES_WRITE_RATE_BURST
+              value: {{ .writeRateLimit.burst | int | quote }}
+            {{- if .enabled }}
+            # Recipe upload (REC.1): saasapi's OWN object-store credential,
+            # limited by its policy to tenants/*/recipes/* (and PutObject on
+            # tenants/*/recipe-audit/*). The secret key only as a file.
+            - name: SAASAPI_RECIPES_S3_ENDPOINT
+              value: {{ $.Values.objectStore.endpoint | quote }}
+            - name: SAASAPI_RECIPES_S3_BUCKET
+              value: {{ $.Values.objectStore.bucket | quote }}
+            - name: SAASAPI_RECIPES_S3_USE_SSL
+              value: {{ $.Values.objectStore.useSSL | toString | quote }}
+            - name: SAASAPI_RECIPES_S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .credentialsSecret }}
+                  key: {{ .accessKeyIdKey }}
+            - name: SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY_FILE
+              value: /var/run/secrets/imas/recipes-s3/secret-access-key
+            {{- end }}
+            {{- end }}
             {{- if $fleetVerify }}
             # Fleet signing key, READ-ONLY (imas-fleet-verify). saasapi
             # writes saas.fleet_versions, so it must never hold sign. Fleet
@@ -307,6 +354,11 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            {{- if $s.recipes.enabled }}
+            - name: recipes-s3
+              mountPath: /var/run/secrets/imas/recipes-s3
+              readOnly: true
+            {{- end }}
             {{- if $fleetVerify }}
             {{- include "imas-farmer.openbaoVolumeMounts" . | trim | nindent 12 }}
             {{- end }}
@@ -363,6 +415,15 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: 16Mi
+        {{- if $s.recipes.enabled }}
+        # Only the secret key of saasapi's own recipe credential.
+        - name: recipes-s3
+          secret:
+            secretName: {{ $s.recipes.credentialsSecret }}
+            defaultMode: 0440
+            items:
+              - { key: {{ $s.recipes.secretAccessKeyKey | quote }}, path: secret-access-key }
+        {{- end }}
         {{- if or $fleetVerify (and $fetchCA .Values.openbaoClient.caConfigMap) }}
         {{- if $fleetVerify }}
         {{- include "imas-farmer.openbaoVolumes" . | trim | nindent 8 }}

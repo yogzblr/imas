@@ -21,7 +21,7 @@ where the two differ, the code wins, and this page follows the code.
 
 ## Every route is under `/v1`
 
-`NewRouter` registers 16 routes unconditionally, plus 2 behind a feature flag
+`NewRouter` registers 20 routes unconditionally, plus 2 behind a feature flag
 that is off by default:
 
 | Method | Path | Handler | Notes |
@@ -42,6 +42,10 @@ that is off by default:
 | GET | `/v1/versions` | `ListFleetVersions` | not tenant-scoped |
 | GET | `/v1/tenants/{tenant_id}/update-policy` | `GetUpdatePolicy` | |
 | PATCH | `/v1/tenants/{tenant_id}/update-policy` | `PatchUpdatePolicy` | |
+| GET | `/v1/tenants/{tenant_id}/recipes` | `ListRecipes` | read role; paged |
+| GET | `/v1/tenants/{tenant_id}/recipes/{name}` | `GetRecipe` | read role |
+| PUT | `/v1/tenants/{tenant_id}/recipes/{name}` | `PutRecipe` | write role, rate-limited, conditional |
+| DELETE | `/v1/tenants/{tenant_id}/recipes/{name}` | `DeleteRecipe` | write role, rate-limited |
 | POST | `/v1/tenants/{tenant_id}/sprouts/updates` | `CreateFleetUpdateBatch` | **flag, off by default**, see below |
 | GET | `/v1/tenants/{tenant_id}/sprouts/updates/{batch_id}` | `GetFleetUpdateBatch` | **flag, off by default**, see below |
 
@@ -286,6 +290,96 @@ is; no rollout of that version is created.
 
 Storing a policy dispatches nothing. With dispatch off, which is the default,
 `auto_update` has no effect.
+
+### Recipes
+
+> **FLAG FOR SECURITY REVIEW.** A recipe runs as root on every sprout of the
+> tenant that cooks it, and its template is untrusted input farmer renders.
+
+A tenant's own recipes, stored in the recipe bucket at
+`tenants/<tenant_id>/recipes/<name with dots as slashes>.imas`. When farmer
+cooks `name` for one of the tenant's sprouts, it looks there first, then in
+the platform tree, and never in another tenant's prefix. So an upload
+shadows a platform recipe of the same name for this tenant only, and the
+next cook uses it, with no restart and no cache to clear. Design:
+[§1.6](../design/cloudxp-machine-manager-api-design.md#16-recipes-jobs-audit).
+How-to: [`INSTALL.md`](../INSTALL.md#upload-a-recipe).
+
+**Off unless configured.** Without `SAASAPI_RECIPES_S3_ENDPOINT` every recipe
+route answers `503 recipes_not_configured`. `cmd/saasapi` doesn't call
+`ConfigureRecipes` yet, so today they answer 503 in a deployment whatever
+the configuration (see BUILD-STATUS Open item 10).
+
+**Roles.** These routes, unlike the rest, also check a Keycloak role on the
+token: realm roles (`realm_access.roles`) or client roles of the token's
+audience (`resource_access.<SAASAPI_JWT_AUDIENCE>.roles`). The GETs need
+`imas-recipes-read` or `imas-recipes-write`, PUT and DELETE need
+`imas-recipes-write` (`SAASAPI_RECIPES_READ_ROLE` / `_WRITE_ROLE`). Without
+the role the answer is `403 forbidden`, and the request doesn't count
+against the rate limit.
+
+**Names.** Dot notation, `{name}` in the path, never percent-encoded: 1 to
+200 bytes; 1 to 16 segments of 1 to 64 lowercase letters, digits, `-` and
+`_`, each starting with a letter or digit; not starting with `tenants`,
+`sprouts` or `jobs`; not ending in `imas` or `init`. Anything else is
+`400 invalid_recipe_name`, with a message naming the rule.
+
+`GET .../recipes?limit=1-500&page_token=` (default 100) returns
+`{"recipes":[{"name","size","updated_at"}], "next_page_token"}` in name
+order. Pass `next_page_token` back to continue; it is absent on the last
+page.
+
+`GET .../recipes/{name}` returns `{"name","sha256","size","updated_at","content"}`,
+with `ETag: "<sha256>"`, or `404 recipe_not_found`.
+
+`PUT .../recipes/{name}` takes the recipe as the raw request body
+(`Content-Type: application/yaml`, `text/yaml`, `text/plain` or none; UTF-8),
+and a precondition, which is required:
+
+- `If-None-Match: *` creates it, and fails with `412` if it exists;
+- `If-Match: "<sha256>"` replaces that version, and fails with `412`
+  (`details.current_sha256`) if it has changed since. `If-Match: *`
+  replaces whatever is there.
+
+It returns `201` (created) or `200` (replaced) with
+`{"name","sha256","size","updated_at"}` and the new `ETag`. Before anything is
+stored the body is checked, and a refusal names the rule broken without
+echoing the body:
+
+| Status | `error` | When |
+|---|---|---|
+| 400 | `invalid_recipe_name`, `invalid_precondition` | bad name; malformed `If-Match`/`If-None-Match` |
+| 409 | `recipe_quota_exceeded` | over the tenant's recipe count or total size (`details.quota`: `count` or `total_bytes`) |
+| 409 | `tenant_not_active` | the tenant isn't active |
+| 412 | `precondition_failed` | the precondition didn't hold, including a concurrent write that landed first |
+| 413 | `recipe_too_large` | over `IMAS_RECIPE_MAX_SOURCE_BYTES` (256 KiB by default) |
+| 415 | `unsupported_media_type` | another `Content-Type` or charset |
+| 422 | `recipe_empty`, `recipe_not_utf8`, `recipe_not_text` | empty, not UTF-8, control characters |
+| 422 | `recipe_template_invalid` | the template doesn't parse, or calls an unknown function (`details.line`) |
+| 422 | `recipe_template_forbidden` | `env`, `call`, `html`, `js`, `template`, `define`, `block`, or a `range` over a number |
+| 422 | `recipe_template_limit` | a render limit (`details.limit`: `render_timeout`, `rendered_bytes`, `value_bytes`, `range_iterations`) |
+| 422 | `recipe_template_failed` | the template fails when run against empty placeholder props (`details.line`) |
+| 422 | `recipe_yaml_invalid` | the rendered recipe isn't a YAML mapping (`details.line`) |
+| 428 | `precondition_required` | neither `If-Match` nor `If-None-Match` |
+| 429 | `rate_limited` | PUT and DELETE share one per-tenant budget |
+| 502 | `recipe_store_unavailable` | the object store failed |
+| 503 | `audit_unavailable`, `recipes_not_configured`, `recipe_validation_busy` | the change couldn't be audited, so it wasn't made; storage off; too many validations at once |
+
+Includes are not checked at upload: a missing include fails at cook time.
+Props are empty during validation, so a template that only fails for some
+prop values passes here and fails at cook time.
+
+`DELETE .../recipes/{name}` returns `204`, or `404 recipe_not_found`.
+`If-Match: "<sha256>"` is optional and makes the delete conditional (`412`
+on a mismatch).
+
+**Audit.** Every PUT and DELETE that passes auth, the role check and name
+validation is audited: tenant, caller (token `sub`), name, sha256 and size
+before and after, outcome and error code, never the content. A change first
+writes an `attempted` record, and if that can't be stored, nothing changes
+and the answer is `503 audit_unavailable`. Records are JSON objects under
+`tenants/<tenant_id>/recipe-audit/` in the recipe bucket, and are also
+logged.
 
 ### Fleet update dispatch: not generally available
 
@@ -558,6 +652,14 @@ error, never a silent default.
 | `SAASAPI_FLEETRELEASER_TOKEN_FILE` | — | the token saasapi presents to fleetreleaser, as a file |
 | `SAASAPI_FLEETRELEASER_CA_FILE` | system roots | CA bundle for fleetreleaser's certificate |
 | `IMAS_FLEETSIGN_OPENBAO_*`, `IMAS_FLEETSIGN_TRANSIT_KEY` | — | read-only view of the fleet signing key (`internal/fleetsign`); required with the dispatch flag on or the operator plane on |
+| `SAASAPI_RECIPES_S3_ENDPOINT` | empty (off) | the recipe bucket's S3/MinIO `host:port`; with it set, the next three are required |
+| `SAASAPI_RECIPES_S3_BUCKET`, `SAASAPI_RECIPES_S3_ACCESS_KEY_ID` | — | the recipe bucket (farmer's `IMAS_S3_BUCKET`) and saasapi's **own** access key id, limited to `tenants/*/recipes/*` |
+| `SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY_FILE` | — | its secret key, as a mounted file |
+| `SAASAPI_RECIPES_S3_USE_SSL` | `true` | |
+| `SAASAPI_RECIPES_READ_ROLE` / `_WRITE_ROLE` | `imas-recipes-read` / `imas-recipes-write` | Keycloak roles for the recipe GETs, and for PUT/DELETE; must differ |
+| `SAASAPI_RECIPES_MAX_COUNT` / `_MAX_TOTAL_BYTES` | `500` / `20971520` | per-tenant caps; `1`–`100000` / up to 1 GiB |
+| `SAASAPI_RECIPES_WRITE_RATE_LIMIT` / `_BURST` | `1` / `10` | per-tenant limit on recipe PUT and DELETE together |
+| `IMAS_RECIPE_MAX_SOURCE_BYTES`, `_MAX_RENDERED_BYTES`, `_MAX_VALUE_BYTES`, `_RENDER_TIMEOUT`, `_MAX_RANGE_ITERATIONS` | cook's defaults | the render limits uploads are validated under: set them to farmer's (the chart does) |
 
 saasapi exits at startup if it can't connect to the bus or, when configured,
 to Valkey. The Helm chart in [`deploy/helm/farmer`](../../deploy/helm/farmer/README.md)

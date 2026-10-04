@@ -479,6 +479,39 @@ saasapi:
       keyName: imas-fleet-signing
       k8sRole: imas-saasapi-fleet-verify
       tokenSecretKey: saasapi-fleetsign-token
+  # Tenant recipe upload (REC.1, API design §1.6; FLAG FOR SECURITY
+  # REVIEW): PUT/GET/DELETE /v1/tenants/{tenant_id}/recipes/{name}. saasapi
+  # writes tenants' recipes to objectStore.bucket at objectStore.endpoint
+  # (the bucket farmer cooks from) with an object-store credential of its
+  # OWN, never farmer's (objectStore.credentialsSecret). That credential's
+  # policy must allow only tenants/*/recipes/* (plus PutObject on
+  # tenants/*/recipe-audit/*): never sprouts/, the job bucket or the
+  # platform recipe prefix. Examples: files/objectstore-policies/. Uploads
+  # are validated under farmer.recipes.templateLimits, the same IMAS_RECIPE_*
+  # values farmer cooks under. Off: the routes answer 503.
+  recipes:
+    enabled: false
+    # Existing Secret with saasapi's access key pair. The id becomes
+    # SAASAPI_RECIPES_S3_ACCESS_KEY_ID; the secret key is mounted as a file
+    # (SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY_FILE). Required when enabled.
+    credentialsSecret: ""
+    accessKeyIdKey: access-key-id
+    secretAccessKeyKey: secret-access-key
+    # Keycloak roles (realm roles, or client roles of saasapi.jwt.audience).
+    # Reading needs either; writing (PUT, DELETE) needs writeRole. A recipe
+    # runs as root on the tenant's sprouts: grant writeRole like the right
+    # to run commands, not like a viewer. They must differ.
+    readRole: imas-recipes-read
+    writeRole: imas-recipes-write
+    # Per-tenant caps (SAASAPI_RECIPES_MAX_COUNT, 1..100000, and
+    # SAASAPI_RECIPES_MAX_TOTAL_BYTES, up to 1 GiB).
+    maxCount: 500
+    maxTotalBytes: 20971520
+    # PUT and DELETE per tenant, one budget for both (shared across pods
+    # through Valkey when it is configured).
+    writeRateLimit:
+      perSecond: 1
+      burst: 10
   # deploy/saasapi/values.rate-limit.yaml. null emits no env var (the
   # compiled-in default).
   enrollmentKeys:

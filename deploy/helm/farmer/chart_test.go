@@ -356,6 +356,13 @@ func TestValidationFailures(t *testing.T) {
 		{"bare number timeout", "renderTimeout must be a quoted duration", []string{"--set", "farmer.recipes.templateLimits.renderTimeout=2"}},
 		{"unitless timeout", "renderTimeout must be a quoted duration", []string{"--set-string", "farmer.recipes.templateLimits.renderTimeout=2"}},
 		{"fractional burst", "burst must be a whole number", []string{"--set", "saasapi.enrollmentKeys.rateLimit.burst=2.5"}},
+		// Recipe upload (REC.1): saasapi's own, separate credential.
+		{"recipes without credential", "saasapi.recipes.credentialsSecret is required", []string{"--set", "saasapi.recipes.enabled=true", "--set", "objectStore.endpoint=minio:9000", "--set", "objectStore.bucket=recipes"}},
+		{"recipes with farmer's credential", "must not be objectStore.credentialsSecret", []string{"--set", "saasapi.recipes.enabled=true", "--set", "objectStore.endpoint=minio:9000", "--set", "objectStore.bucket=recipes", "--set", "objectStore.credentialsSecret=s3", "--set", "saasapi.recipes.credentialsSecret=s3"}},
+		{"recipes without bucket", "needs objectStore.endpoint and objectStore.bucket", []string{"--set", "saasapi.recipes.enabled=true", "--set", "saasapi.recipes.credentialsSecret=saasapi-s3"}},
+		{"one recipe role", "readRole and writeRole must both be set and differ", []string{"--set", "saasapi.recipes.writeRole=imas-recipes-read"}},
+		{"fractional recipe cap", "saasapi.recipes.maxCount must be a positive whole number", []string{"--set", "saasapi.recipes.maxCount=1.5"}},
+		{"zero recipe burst", "saasapi.recipes.writeRateLimit.burst must be a whole number", []string{"--set", "saasapi.recipes.writeRateLimit.burst=0"}},
 		{"bad tls mode", "tls.mode must be", []string{"--set", "tls.mode=selfsigned"}},
 		{"tls secret without name", "tls.secretName is required", []string{"--set", "tls.mode=secret", "--set", "tls.secretName="}},
 		{"external openbao without addr", "openbaoClient.addr is required", []string{"--set", "openbao.enabled=false"}},
@@ -954,6 +961,73 @@ func TestRecipeTemplateLimitsEnv(t *testing.T) {
 				t.Errorf("%v: %s = %q, want %q", tc.args, name, env[name], want)
 			}
 		}
+	}
+}
+
+// Recipe upload (REC.1): saasapi validates uploads under farmer's own
+// render limits, and with recipes on gets its own object-store credential
+// (never farmer's), the secret key as a file only.
+func TestSaasapiRecipesEnv(t *testing.T) {
+	limits := []string{"IMAS_RECIPE_MAX_SOURCE_BYTES", "IMAS_RECIPE_MAX_RENDERED_BYTES", "IMAS_RECIPE_MAX_VALUE_BYTES",
+		"IMAS_RECIPE_RENDER_TIMEOUT", "IMAS_RECIPE_MAX_RANGE_ITERATIONS"}
+
+	// Off (the default): limits, roles and caps, but no store.
+	docs := mustRender(t, "--set", "farmer.recipes.templateLimits.maxSourceBytes=131072")
+	s := envValues(container(t, find(t, docs, "Deployment", "t-farmer-saasapi"), "saasapi"))
+	f := envValues(container(t, farmerDeploy(t, docs), "farmer"))
+	for _, name := range limits {
+		if s[name] == "" || s[name] != f[name] {
+			t.Errorf("%s: saasapi %q, farmer %q; want the same value", name, s[name], f[name])
+		}
+	}
+	if s["IMAS_RECIPE_MAX_SOURCE_BYTES"] != "131072" {
+		t.Errorf("IMAS_RECIPE_MAX_SOURCE_BYTES = %q", s["IMAS_RECIPE_MAX_SOURCE_BYTES"])
+	}
+	for name, want := range map[string]string{
+		"SAASAPI_RECIPES_READ_ROLE": "imas-recipes-read", "SAASAPI_RECIPES_WRITE_ROLE": "imas-recipes-write",
+		"SAASAPI_RECIPES_MAX_COUNT": "500", "SAASAPI_RECIPES_MAX_TOTAL_BYTES": "20971520",
+		"SAASAPI_RECIPES_WRITE_RATE_LIMIT": "1", "SAASAPI_RECIPES_WRITE_RATE_BURST": "10",
+	} {
+		if s[name] != want {
+			t.Errorf("%s = %q, want %q", name, s[name], want)
+		}
+	}
+	if _, ok := s["SAASAPI_RECIPES_S3_ENDPOINT"]; ok {
+		t.Error("recipe store configured with saasapi.recipes.enabled=false")
+	}
+
+	// On.
+	docs = mustRender(t, "--set", "saasapi.recipes.enabled=true", "--set", "saasapi.recipes.credentialsSecret=saasapi-s3",
+		"--set", "objectStore.endpoint=minio.storage:9000", "--set", "objectStore.bucket=imas-recipes",
+		"--set", "objectStore.credentialsSecret=farmer-s3", "--set", "objectStore.useSSL=false")
+	d := find(t, docs, "Deployment", "t-farmer-saasapi")
+	c := container(t, d, "saasapi")
+	env := envMap(c)
+	for name, want := range map[string]string{
+		"SAASAPI_RECIPES_S3_ENDPOINT": "minio.storage:9000", "SAASAPI_RECIPES_S3_BUCKET": "imas-recipes",
+		"SAASAPI_RECIPES_S3_USE_SSL":                "false",
+		"SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY_FILE": "/var/run/secrets/imas/recipes-s3/secret-access-key",
+	} {
+		if v, _ := env[name]["value"].(string); v != want {
+			t.Errorf("%s = %v, want %s", name, env[name], want)
+		}
+	}
+	if get(env["SAASAPI_RECIPES_S3_ACCESS_KEY_ID"], "valueFrom", "secretKeyRef", "name") != "saasapi-s3" {
+		t.Errorf("access key id: %v", env["SAASAPI_RECIPES_S3_ACCESS_KEY_ID"])
+	}
+	if _, ok := env["SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY"]; ok {
+		t.Error("the secret key is in the environment; it must only be a file")
+	}
+	// No farmer credential anywhere on saasapi.
+	if strings.Contains(yamlString(t, d), "farmer-s3") {
+		t.Error("saasapi references farmer's object-store credential")
+	}
+	vols := byName(podSpec(d)["volumes"])
+	if get(vols["recipes-s3"], "secret", "secretName") != "saasapi-s3" {
+		t.Errorf("recipes-s3 volume: %v", vols["recipes-s3"])
+	}
+	if items, _ := get(vols["recipes-s3"], "secret", "items").([]any); len(items) != 1 || get(items[0], "key") != "secret-access-key" {
+		t.Errorf("recipes-s3 items: %v", items)
 	}
 }
 

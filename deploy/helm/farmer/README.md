@@ -551,6 +551,51 @@ ship the fix as a new version, which they can update to.
 There is no un-revoke. A later `helm upgrade` of a chart carrying the
 revoked version gets a 200 no-op (same contents) and leaves it revoked.
 
+## Tenant recipe upload
+
+`saasapi.recipes.enabled` (default off) turns on
+`GET/PUT/DELETE /v1/tenants/{tenant_id}/recipes[/{name}]` (REC.1, API
+design §1.6; **FLAG FOR SECURITY REVIEW**). saasapi writes tenants' recipes
+straight into `objectStore.bucket`, the bucket farmer cooks from, at
+`tenants/<tenant_id>/recipes/<name with dots as slashes>.imas`.
+
+It does so with **its own** object-store credential,
+`saasapi.recipes.credentialsSecret`, never farmer's (the chart refuses the
+same Secret). Its policy must allow only what the routes need, in every
+tenant's prefix, and nothing on `sprouts/` (staged recipes), the job bucket
+or the platform recipe prefix. The example,
+[`files/objectstore-policies/saasapi-recipes.json`](files/objectstore-policies/saasapi-recipes.json)
+(replace `RECIPE_BUCKET`), works as a MinIO policy or an AWS IAM policy:
+
+- `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` on `tenants/*/recipes/*`;
+- `s3:ListBucket` with the prefix limited to `tenants/*/recipes/*`;
+- `s3:PutObject` only on `tenants/*/recipe-audit/*`, saasapi's audit
+  records, so saasapi can add records but never read or delete them;
+- `s3:GetBucketLocation`, which the client calls first.
+
+The design allows saasapi to read the platform prefix, but nothing uses it
+yet, so the example grants none. With MinIO:
+
+```bash
+sed 's/RECIPE_BUCKET/imas-recipes/' files/objectstore-policies/saasapi-recipes.json > /tmp/p.json
+mc admin policy create ALIAS imas-saasapi-recipes /tmp/p.json
+mc admin user add ALIAS imas-saasapi "$SECRET_KEY"
+mc admin policy attach ALIAS imas-saasapi-recipes --user imas-saasapi
+kubectl -n imas create secret generic saasapi-s3 \
+  --from-literal=access-key-id=imas-saasapi --from-literal=secret-access-key="$SECRET_KEY"
+```
+
+`internal/saasapi`'s `TestRecipeObjectStorePolicy` checks this file against
+the keys the code writes. saasapi gets the access key id as an env var and
+the secret key only as a file. It validates uploads under
+`farmer.recipes.templateLimits`, which it receives as the same
+`IMAS_RECIPE_*` variables farmer gets, so a recipe that uploads is a recipe
+farmer will render. Reading needs `saasapi.recipes.readRole` or `writeRole`
+(Keycloak realm roles, or client roles of `saasapi.jwt.audience`), and
+writing needs `writeRole`. Egress to the object store goes through
+`networkPolicy.saasapiExtraEgress`: its default allows 443, so add the port
+for a MinIO on 9000.
+
 ## Valkey
 
 farmer (`IMAS_VALKEY_ADDRS`) and saasapi (`SAASAPI_VALKEY_ADDRS`) get the
@@ -593,7 +638,7 @@ state moved off local disk first.
 | saasapi | in | with `saasapi.operator`: the sprout release hook Job's pods, plus `networkPolicy.saasapiOperatorIngress.from` (default: none) | `saasapi.operator.port` (8443) |
 | saasapi | out | with `saasapi.operator`: fleetreleaser (`networkPolicy.fleetreleaser.to`, default any destination) | `fleetReleaser.url`'s port |
 | saasapi | out | the bus pods | `bus.port` |
-| saasapi | out | `saasapiExtraEgress`, default HTTPS anywhere (the Keycloak JWKS). **Narrow it.** | 443 |
+| saasapi | out | `saasapiExtraEgress`, default HTTPS anywhere (the Keycloak JWKS, and the object store with `saasapi.recipes`). **Narrow it.** | 443 |
 | publish Job | out | OpenBao, DNS; nothing else, no ingress | 8200, 53 |
 | migrate Jobs | out | PXC, DNS; nothing else, no ingress | 3306, 53 |
 | sprout release hook Job | out | saasapi's pods on the operator port, DNS; nothing else, no ingress | 8443, 53 |
@@ -675,6 +720,11 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `saasapi.outboxSweeper.{interval,provisioningStaleAfter,actionStaleAfter,actionMaxAge,leaseTTL}` / `maxAttempts` | `""` / `null` (30s, 2m, 2m, 15m, 2m / 5) | `SAASAPI_OUTBOX_SWEEP_INTERVAL`, `_PROVISIONING_STALE_AFTER`, `_ACTION_STALE_AFTER`, `_ACTION_MAX_AGE`, `_LEASE_TTL`, `_MAX_ATTEMPTS`. Empty or null emits no env var. See [`docs/api/saasapi.md`](../../../docs/api/saasapi.md#outbox-sweeper). |
 | `saasapi.operator.*` | off, port `8443` | The operator plane: TLS Secret, token Secret, fleetreleaser client. See [saasapi's operator plane](#saasapis-operator-plane). |
 | `saasapi.enrollmentKeys.rateLimit.*` | `1` / `5` | `deploy/saasapi/values.rate-limit.yaml`. `null` emits no env var. |
+| `saasapi.recipes.enabled` | `false` | Tenant recipe upload: `SAASAPI_RECIPES_S3_*` from `objectStore.endpoint`/`bucket`/`useSSL` and saasapi's own credential. Off, the recipe routes answer 503. See [Tenant recipe upload](#tenant-recipe-upload). |
+| `saasapi.recipes.credentialsSecret` / `accessKeyIdKey` / `secretAccessKeyKey` | `""` / `access-key-id` / `secret-access-key` | saasapi's own access key pair, limited to `tenants/*/recipes/*`. Required when enabled; must not be `objectStore.credentialsSecret`. |
+| `saasapi.recipes.readRole` / `writeRole` | `imas-recipes-read` / `imas-recipes-write` | `SAASAPI_RECIPES_READ_ROLE` / `_WRITE_ROLE`: Keycloak roles for GET, and for PUT/DELETE. Must differ. |
+| `saasapi.recipes.maxCount` / `maxTotalBytes` | `500` / `20971520` | `SAASAPI_RECIPES_MAX_COUNT` / `_MAX_TOTAL_BYTES`: per-tenant caps. |
+| `saasapi.recipes.writeRateLimit.*` | `1` / `10` | `SAASAPI_RECIPES_WRITE_RATE_LIMIT` / `_BURST`: PUT and DELETE per tenant. |
 | `saasapi.extraEnv` | `[]` | Extra env vars for saasapi, e.g. `IMAS_FLEETSIGN_OPENBAO_NAMESPACE` (see [OpenBao](#openbao)) or `HTTPS_PROXY`/`NO_PROXY`. |
 | `credentialPublisher.*` | enabled, `platform/imas/saasapi-nats-user` | The publish Job. |
 | `sproutRelease.register` | `true` | Register `files/sprout-release.json` when the chart has it and the operator plane is on. |
@@ -828,6 +878,12 @@ from source and no cluster:
    namespace with farmer's seed Secret, but it mounts only its own
    credential Secret. Whoever can create pods in this namespace could
    mount either one.
+4. **`cmd/saasapi` doesn't call `saasapi.ConfigureRecipes` yet** (REC.1 was
+   scoped to `internal/saasapi`). `LoadConfig` reads and checks every
+   `SAASAPI_RECIPES_*` and `IMAS_RECIPE_*` value, so a bad one still stops
+   saasapi, but until `main` passes `cfg.Recipes` to `ConfigureRecipes`
+   before `NewRouter`, the recipe routes answer 503 whatever
+   `saasapi.recipes.enabled` says, with the default roles and limits.
 
 ## Licensing
 
@@ -873,6 +929,12 @@ exceptions, all subcharts and none of them Go dependencies:
   write it back to disk.
 - **saasapi's default egress** includes HTTPS to anywhere, for the Keycloak
   JWKS. Narrow `networkPolicy.saasapiExtraEgress`.
+- **saasapi's recipe credential** ([Tenant recipe upload](#tenant-recipe-upload))
+  can write every tenant's recipes, which run as root on that tenant's
+  sprouts. Tenant scoping is enforced in saasapi's code, not by the bucket
+  policy, which can only limit the credential to `tenants/*/recipes/*`. Keep
+  it a Secret of its own, scoped by the example policy, and never reuse
+  farmer's (farmer's can write `sprouts/` and the platform tree).
 - **The operator credential** ([Sprout release registration](#sprout-release-registration)).
   Whoever holds the operator token can get any well-formed release above
   fleetreleaser's floor signed and offered to tenants. Only two pods get
