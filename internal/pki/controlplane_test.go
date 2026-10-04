@@ -461,7 +461,7 @@ func sproutNKeyPub(t *testing.T) string {
 func TestSealedRefreshRoundTripAndRefusals(t *testing.T) {
 	enrollForTest(t)
 	nkeyPub := sproutNKeyPub(t)
-	sealed, err := SproutSealedRefresh("web-01", nkeyPub)
+	sealed, _, err := SproutSealedRefresh("web-01", nkeyPub)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +479,7 @@ func TestSealedRefreshRoundTripAndRefusals(t *testing.T) {
 	// Presented with another sprout's NKey: refused.
 	other, _ := nkeys.CreateUser()
 	otherPub, _ := other.PublicKey()
-	fresh, _ := SproutSealedRefresh("web-01", nkeyPub)
+	fresh, _, _ := SproutSealedRefresh("web-01", nkeyPub)
 	if _, _, err := OpenSealedRefresh(t.Context(), otherPub, fresh); !errors.Is(err, ErrEnrollmentFailed) {
 		t.Errorf("another NKey: %v", err)
 	}
@@ -504,7 +504,7 @@ func TestSealedRefreshRoundTripAndRefusals(t *testing.T) {
 func TestSealedRefreshFailsClosedWithoutValkey(t *testing.T) {
 	enrollForTest(t)
 	nkeyPub := sproutNKeyPub(t)
-	sealed, err := SproutSealedRefresh("web-01", nkeyPub)
+	sealed, _, err := SproutSealedRefresh("web-01", nkeyPub)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -524,7 +524,7 @@ func TestSealedRefreshOpensUnderARetainedTenantKey(t *testing.T) {
 	if _, err := RotateTenantX25519Keypair("t_1", false); err != nil {
 		t.Fatal(err)
 	}
-	sealed, err := SproutSealedRefresh("web-01", nkeyPub)
+	sealed, _, err := SproutSealedRefresh("web-01", nkeyPub)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -268,9 +268,9 @@ Not in scope: a compromised farmer (it holds `tenant_priv` and can always open a
 9. **Windows shells.** ConPTY rules out the Server 2016 floor. Build for Server 2019 and later only, or not at all?
 10. **Leg 1 for a browser.** Should the SaaS API or web UI ever offer a shell? It would need its own leg 1, since a browser has an OIDC session, not a CLI box key.
 
-## Sealing the control plane (design; J.1 building blocks built)
+## Sealing the control plane (design; J.1 building blocks and J.2 sealed refresh built)
 
-**FLAG FOR SECURITY REVIEW.** This section is a design. Its building blocks (rollout step 2, J.1) are built and ready for review, not approved; nothing uses them yet, so behaviour is unchanged (see "As built: J.1" at the end of this section). The owner's decisions of 2026-10-04 there replace the compatibility flags and ratchets in "Rollout". It answers the shell section's Open question 1. Everything above seals farmer ↔ sprout. This section covers the other side of farmer: the imas CLI and the SaaS API, which reach farmer over the same bus, and the sprout's `/v1/refresh`. Until it is built, a compromised bus can't inject a command **into a sprout**, but it can get **farmer** to send one, and the sealing works exactly as designed while it does.
+**FLAG FOR SECURITY REVIEW.** This section is a design. Its building blocks (rollout step 2, J.1) are built and ready for review, not approved (see "As built: J.1" at the end of this section). J.2 wires the first of them in: sealed sprout refresh, and a gateway JWT from `/v1/enroll` only for a box key proof (see "As built: J.2"); it too is ready for review, not approved. The CLI and SaaS API paths are unchanged until J.3 and J.4. The owner's decisions of 2026-10-04 there replace the compatibility flags and ratchets in "Rollout". It answers the shell section's Open question 1. Everything above seals farmer ↔ sprout. This section covers the other side of farmer: the imas CLI and the SaaS API, which reach farmer over the same bus, and the sprout's `/v1/refresh`. Until it is built, a compromised bus can't inject a command **into a sprout**, but it can get **farmer** to send one, and the sealing works exactly as designed while it does.
 
 ### What is wrong today
 
@@ -278,7 +278,7 @@ Read from `main` at `a38becb`. Items 2 and 3 were reproduced with a throwaway te
 
 1. **Bearer tokens.** Each `imas.api.*` request carries a `token`, built by `auth.NewToken` and added by `injectToken`. It is the CLI's NKey signature over an expiry time and nothing else. It isn't bound to the method, the parameters or the tenant, and it travels in plaintext through the bus. A compromised bus can replay it with any parameters, to any farmer replica, until it expires.
 2. **The bus can mint CLI tokens that never expire.** The CLI authenticates to the bus with `nats.Nkey(pubkey, auth.Sign)`, which signs whatever nonce the server sends. The token is a signature over the expiry string, and `UserAuth.IsValid` checks only that the expiry is in the future, with no upper bound. A bus that sends the nonce `2099-01-01T00:00:00Z` gets back a signature that is a valid token for that user until 2099. With an admin's token it can call `auth.users.add` to register a key of its own as admin (`handleAuthAddUser` writes it to farmer's config), and keep that access for good. No CLI request needs to be seen first: one connection is enough. **Verified.**
-3. **The bus can refresh as any sprout.** The sprout's NKey seed signs both the bus `CONNECT` nonce (`nats.UserJWTAndSeed`) and its `/v1/refresh` proof, `RefreshSigningPayload(timestamp, nkey_pub)`. That proof is plain text: a domain string, the timestamp and the key, separated by newlines. A JSON nonce can carry newlines, and the signature from `CONNECT` passes `verifyTimestampedNKeySig` unchanged. **Verified.** With it, the bus calls `/v1/refresh` (through Envoy, reachable from the DMZ by design) and gets a fresh gateway JWT for that sprout. That JWT reads `GET /files/sprouts/<tenant_id>/<sprout_id>/recipe.json`, the **staged copy of the last rendered recipe**, including whatever secrets it was templated with (`internal/cook/stage.go`). That is exactly the content sealed `cook` protects on the bus. Single-use claiming (`claimSignedPayload`) doesn't help, because the bus chooses a fresh timestamp.
+3. **The bus can refresh as any sprout.** The sprout's NKey seed signs both the bus `CONNECT` nonce (`nats.UserJWTAndSeed`) and its `/v1/refresh` proof, `RefreshSigningPayload(timestamp, nkey_pub)`. That proof is plain text: a domain string, the timestamp and the key, separated by newlines. A JSON nonce can carry newlines, and the signature from `CONNECT` passes `verifyTimestampedNKeySig` unchanged. **Verified.** With it, the bus calls `/v1/refresh` (through Envoy, reachable from the DMZ by design) and gets a fresh gateway JWT for that sprout. That JWT reads `GET /files/sprouts/<tenant_id>/<sprout_id>/recipe.json`, the **staged copy of the last rendered recipe**, including whatever secrets it was templated with (`internal/cook/stage.go`). That is exactly the content sealed `cook` protects on the bus. Single-use claiming (`claimSignedPayload`) doesn't help, because the bus chooses a fresh timestamp. J.2 found the same hole in `/v1/enroll`'s replay path (Decision C, corrected), and closes both ("As built: J.2").
 4. **`internal.*` trusts the bus.** `tenant_provision.go` says it plainly: "authorization is the bus's own per-User permission check". A compromised bus ignores those permissions. It can:
    - forge `internal.tenant.provision`;
    - forge `internal.tenant.deprovision`, which locks a tenant out so all its sprouts are disconnected;
@@ -379,10 +379,10 @@ Read from `main` at `a38becb`. Items 2 and 3 were reproduced with a throwaway te
   - looks the sprout up by `nkey_pub`, giving `(tenant_id, sprout_id)`;
   - opens with `OpenFromSprout`, also trying retained tenant keys back to the last severing rotation, as continuity does, so a sprout whose pin is out of date can still refresh;
   - checks freshness (±5 minutes) and claims the message ID once, reusing the store `claimSignedPayload` already uses.
-- **Per-sprout ratchet.** Once farmer has accepted one sealed refresh from a sprout, it records that, and refuses NKey-only refresh for that sprout from then on. No fleet-wide switch is needed. A sprout on an old build keeps refreshing the old way until it upgrades, and is protected from its first sealed refresh onwards.
-- **A sprout with no box key** has only the NKey proof. It stays exposed until it is re-enrolled (Open question 3). It is already exposed in every other way listed in this document.
-- **Enrollment is unchanged.** Its signed payload includes the one-time join token. A signature the bus obtains over it is useless without a token, and the sprout deletes its token after enrolling.
-- After this change the sprout's NKey signs only bus nonces and its one enrollment, so P1 holds for sprouts too.
+- **Per-sprout ratchet.** *(Superseded: owner decisions, 2026-10-04. Farmer refuses NKey-only refresh for every sprout, with no ratchet; see "As built: J.2".)* Once farmer has accepted one sealed refresh from a sprout, it records that, and refuses NKey-only refresh for that sprout from then on. No fleet-wide switch is needed. A sprout on an old build keeps refreshing the old way until it upgrades, and is protected from its first sealed refresh onwards.
+- **A sprout with no box key** *(answered, Open question 3: it is refused and re-enrolls)* has only the NKey proof. It stays exposed until it is re-enrolled. It is already exposed in every other way listed in this document.
+- **Enrollment is not safe unchanged (corrected by J.2).** This bullet used to say enrollment is unchanged, because its signed payload includes the one-time join token, so a signature the bus obtains over it is useless without a token. That is wrong for the replay path. An already-enrolled `nkey_pub` takes the idempotency replay before the join token is looked at, and the replay never checks the token. A compromised bus can get `EnrollSigningPayload` signed over a `CONNECT` nonce, with any token it likes, and before J.2 that replayed the sprout's identity with a fresh gateway JWT: the same hole as the NKey-signed refresh. So enrollment changes too: `/v1/enroll` issues a gateway JWT only for a request with a verified `sprout_pub_proof` (the second request of a first enrollment), whose message ID farmer claims once. A request with only the NKey proof gets the identity, the tenant and its key, and no gateway JWT.
+- After this change the sprout's NKey signs bus nonces and its enrollment requests, and farmer issues a gateway JWT for neither on its own, so P1 holds for sprouts too: no proof farmer acts on rests on a signature the bus can obtain.
 
 ### Decision D: streams to the CLI (later)
 
@@ -404,12 +404,12 @@ Neither stopgap helps the sprout refresh (Decision C) or `internal.*` (Decision 
 | A compromised bus | After this section and the shell section are built |
 |---|---|
 | Acts toward farmer as a CLI user, the SaaS API or a sprout | **No.** Each request must open under that principal's registered box key. |
-| Mints a token, or refreshes as a box-ready sprout | **No.** Tokens are gone. Refresh is sealed, and the ratchet takes effect from each sprout's first sealed refresh. |
+| Mints a token, or refreshes as a box-ready sprout | **No.** Tokens are gone. Refresh is sealed for every sprout (J.2, no ratchet), and enrollment issues a gateway JWT only for a box key proof. |
 | Reads requests or replies | **No.** It sees the subject (the method name), the principal header, sizes and timing. |
 | Forges or alters a reply or result | **No.** |
 | Replays a request | **Refused.** Every method is checked per replica. Mutating methods are also claimed across the cluster. A read replayed to another replica runs, but the bus can't open its reply. |
 | Denies service, or delays a request inside the 5-minute window | **Yes.** |
-| Attacks sprouts with no box key, or CLIs and SaaS APIs on old builds | **Yes, until they upgrade.** Flags and ratchets (rollout) keep the window short. |
+| Attacks sprouts with no box key, or CLIs and SaaS APIs on old builds | **No, as built:** owner decisions of 2026-10-04 removed the flags and ratchets, so these are refused, not downgraded (a sprout with no box key re-enrolls). |
 
 Not in scope: a compromised farmer, SaaS API, OpenBao or CLI host. A compromised **Valkey** can make farmer refuse mutating requests (fail closed). It can also let an authentic mutating request run a second time on another replica within 5 minutes. It can't create or change a request.
 
@@ -417,7 +417,7 @@ Not in scope: a compromised farmer, SaaS API, OpenBao or CLI host. A compromised
 
 1. **Stopgap 1** (token lifetime cap). It can ship immediately.
 2. **The building blocks**, with no change in behaviour: `payloadbox` purposes, the CLI box key store in the users store, the platform key, sealed request and reply helpers for both ends, and the Valkey claim helper.
-3. **Sprout refresh (Decision C).** Farmer accepts sealed refresh and applies the ratchet. The sprout build sends sealed refresh. This can ride the same sprout release as sealed shell.
+3. **Sprout refresh (Decision C).** Farmer accepts sealed refresh and applies the ratchet. The sprout build sends sealed refresh. This can ride the same sprout release as sealed shell. *(As built in J.2: sealed only, no ratchet; see "As built: J.2".)*
 4. **CLI (Decision A).**
    - Farmer accepts sealed `imas.api.*` and still accepts tokens, behind `apiallowbearertoken` (default `true` in this release). Farmer also ratchets **per user**: once a user has sent a sealed request, it refuses that user's tokens.
    - The CLI release sends only sealed requests. Each user runs `imas auth keygen` and has an admin register the key.
@@ -434,7 +434,7 @@ Requirement 14 is Green only once steps 3 to 6 are done with both flags off, and
 
 1. **Stopgap 2.** Take user management off the bus API until Decision A lands?
 2. **The users store with several farmer replicas.** `auth.users.add` writes farmer's local config file (`jety.WriteConfig`). Is that store actually consistent across replicas today? This design keeps whatever store exists, but key registration and rotation make it matter more. Not checked.
-3. **Sprouts with no box key.** Keep NKey-only refresh for them (proposed, with a warning on every use), or refuse it and force re-enrollment?
+3. **Sprouts with no box key.** Keep NKey-only refresh for them (proposed, with a warning on every use), or refuse it and force re-enrollment? *Answered (owner, 2026-10-04): refuse it; the sprout re-enrolls. Built in J.2.*
 4. **SaaS API keys.** Where is the SaaS API box key generated (proposed: a Helm hook job, private half to its Secret or OpenBao path)? Does the platform key need a continuity proof, or is re-pinning on rollout enough?
 5. **B2 as well as B1.** Move `internal.*` onto a transport only the core can reach?
 6. **The read-only list.** Confirm it. `cohorts.refresh` is treated as mutating.
@@ -444,7 +444,7 @@ Requirement 14 is Green only once steps 3 to 6 are done with both flags off, and
 
 ### As built: J.1 (building blocks, no change in behaviour)
 
-**FLAG FOR SECURITY REVIEW.** Rollout step 2. Nothing below is wired into a running path yet: the router, `client.NatsRequest`, `/v1/refresh` and saasapi's dispatch are unchanged, with one exception, the users store (below), which the brief asked to move.
+**FLAG FOR SECURITY REVIEW.** Rollout step 2. Nothing below was wired into a running path by J.1: the router, `client.NatsRequest`, `/v1/refresh` and saasapi's dispatch were unchanged, with one exception, the users store (below), which the brief asked to move. J.2 has since wired in the sealed refresh ("As built: J.2").
 
 **Owner decisions, 2026-10-04.** Sealed only, with no compatibility window (see "Rollout"). Method names stay visible in subjects (Open question 9). Control traffic uses static keys (Open question 8). The Valkey claim for mutating methods fails closed (Open question 7).
 
@@ -481,14 +481,46 @@ On the CLI (`cliboxclient.go`, `cmd/imas/cmd/authbox.go`): `imas auth keygen` wr
 
 **The read-only list (Open question 6).** The design's list, unchanged: `health`, `version`, `sprouts.list`, `sprouts.get`, `jobs.list`, `jobs.get`, `jobs.forsprout`, `props.getall`, `props.get`, `cohorts.list`, `cohorts.get`, `cohorts.resolve`, `cohorts.validate`, `pki.list`, `auth.whoami`, `auth.users`, `auth.explain`, `audit.dates`, `audit.query`. I checked each handler: none writes state (`sprouts.get` sends the sprout a liveness probe, which changes nothing). `cohorts.refresh` is mutating, agreed: it rewrites the membership cache and is costly to repeat. `auth.login` is read-only too but isn't on the list; it stays mutating by default, which costs it only a Valkey dependency. `auth.rotatekey` is mutating.
 
-**Decision C (`internal/pki` `refreshsealed.go`).** `SproutSealedRefresh` builds `s2f.refresh` (`{nkey_pub, timestamp}`, sealed with the current box key to the pinned tenant key). `OpenSealedRefresh` looks the sprout up by `nkey_pub`, opens under every retained tenant key back to the last severing rotation against the sprout's valid box keys, checks `nkey_pub` and both timestamps (±5 minutes), and claims the message ID once in Valkey on `(tenant_id, sprout_id, id)`. Every failure is `ErrEnrollmentFailed`.
+**Decision C (`internal/pki` `refreshsealed.go`).** `SproutSealedRefresh` builds `s2f.refresh` (`{nkey_pub, timestamp}`, sealed with the current box key to the pinned tenant key). `OpenSealedRefresh` looks the sprout up by `nkey_pub`, opens under every retained tenant key back to the last severing rotation against the sprout's valid box keys, checks `nkey_pub` and both timestamps (±5 minutes), and claims the message ID once in Valkey on `(tenant_id, sprout_id, id)`. Every failure is `ErrEnrollmentFailed`. J.2 wires these in and extends them (a pending-key copy, the `ReplyTo` check, a sealed `f2s.refresh` reply): see "As built: J.2".
 
 **Not built in J.1.**
 
-- Wiring: sealed `imas.api.*` (step 4), sealed `internal.*` (step 5), sealed `/v1/refresh` on both ends (step 3), and removing the token code.
+- Wiring: sealed `imas.api.*` (step 4), sealed `internal.*` (step 5), sealed `/v1/refresh` on both ends (step 3, built in J.2, below), and removing the token code.
 - Turning the keygen Job on by default. `cmd/farmer` dispatches `ensure-controlplane-box-keys` before loading config (owner-approved outside J.1's scope), but `controlPlaneBoxKeys.enabled` stays off until step 5 gives the keys a consumer.
 - saasapi's External Secret and mount for its box key and the platform pin (step 5).
 - `f2c.tenantkey.continuity` for the CLI (the reply field is reserved).
 - Platform key rotation tooling.
 - Refusing, at sprout enrollment, a sprout box key that is a registered CLI key (registration already refuses the other way round).
+
+### As built: J.2 (sealed sprout refresh)
+
+**FLAG FOR SECURITY REVIEW.** Rollout step 3, ready for review, not approved. Decision C is wired in on both ends, under the owner decisions of 2026-10-04: sealed only, no NKey-only fallback and no per-sprout ratchet, and a sprout with no box key is refused and re-enrolls.
+
+**The request (`POST /v1/refresh`).** The body is `{nkey_pub, sealed}`, and nothing else: a body with `nkey_sig`, `timestamp`, `join_token` or any other field is refused, so the NKey-signed contract is gone for every sprout. `sealed` is an `s2f.refresh` message (`pki.SproutSealedRefresh`): `tid` the sprout's pinned tenant, `sid` its pinned sprout ID, body `{nkey_pub, timestamp}`, sealed to the pinned tenant key with the sprout's current box key, plus a second copy under its pending key while a box key rotation is in progress. The sprout now pins the sprout ID farmer assigned it (`sprout-id`, beside `tenant-id`), written once at enrollment, because farmer opens a refresh only for the sprout its NKey belongs to, and that ID may carry a collision suffix. Farmer (`pki.RefreshSprout`):
+
+- refuses an envelope of more than two copies before opening anything;
+- looks the sprout up by `nkey_pub` among accepted sprouts, giving `(tenant_id, sprout_id)`;
+- opens under each retained tenant key, newest first, back to the last severing rotation, against the sprout's active and grace box keys, re-reading the tenant's keys once if the cache is stale. A sprout with no box key on record opens nothing;
+- requires a request (no `ReplyTo`) that names that `nkey_pub`, with its timestamp and issue time within ±5 minutes of farmer's clock;
+- claims the message ID once cluster-wide (`ClaimSealedMessage` on `(tenant_id, sprout_id, id)`, Valkey, 10-minute TTL, fail closed);
+- and only then mints the gateway JWT. Every failure is the generic `enrollment_failed`.
+
+**The reply.** `{sealed}` and nothing else: an `f2s.refresh` Reply (`payloadbox.PurposeRefreshReply`, method `refresh`, subject `POST /v1/refresh`) whose `re` is the request's ID. It is sealed to the sprout's active box key under the tenant key the request opened with, which is the one the sprout has pinned. Its result is the NATS User JWT, the gateway JWT, the tenant ID and key, and the continuity proof after a tenant key rotation. The sprout accepts only the reply that opens under its pinned tenant key, for its tenant and sprout ID, naming the request it just sent. So nothing in the HTTP exchange, at Envoy or anywhere else in the DMZ, carries a gateway JWT in the clear, and an old reply can't answer a new request.
+
+- **Box key rotation during a refresh.** Farmer seals the reply to the active key only, as it seals everything, so a reply that opens under the sprout's pending key promotes it. A sprout whose old key has left farmer's grace window before it heard from farmer still refreshes: its pending-key copy opens.
+- **Tenant pin.** A pin older than the grace window still refreshes: farmer opens under the retained key and the continuity proof inside re-pins. After a severing rotation farmer holds no key the sprout pinned, so it can't open the request, and nothing it could answer would be authenticated. The refusal is unauthenticated, so it is an ordinary, retried error, not a fatal one.
+- **Fatal on the sprout** (it must be re-enrolled): no box key, no tenant key, tenant ID or sprout ID pin, and a sealed reply naming another tenant key without continuity, or another tenant or sprout ID.
+- **Expired gateway JWT.** The sealed refresh needs none. After one, the next websocket handshake (`GatewayJWTHeaders`, called on every nats.go reconnect) presents the new token, so the jittered reconnect loop recovers.
+
+**Enrollment: a gateway JWT only for a box key proof.** Decision C first said enrollment was unchanged. That was wrong (see Decision C): the replay path never checks the join token, so an `EnrollSigningPayload` signed over a `CONNECT` nonce, with any token, replayed an enrolled sprout's identity with a fresh gateway JWT. `pki.Enroll` now mints a gateway JWT only on the request carrying a verified `sprout_pub_proof` (step 2 of a first enrollment), and claims that proof's message ID once cluster-wide, so a proof copied from an earlier request can't earn another. A request with only the NKey proof, on either path (step 1, or a retry of it), gets the identity, the User JWT, the tenant and its key, and no gateway JWT. The sprout never used step 1's. Step 2's gateway JWT travels plaintext inside TLS, as designed.
+
+**Tests.** The SEC.0 fake-bus capture, extended to the sprout's real connect path (`pki.LoadSproutBus`): a `CONNECT` signature over a refresh-shaped nonce authorises no refresh in any form, and one over an enrollment-shaped nonce earns no gateway JWT. Both fail on `main` before J.2. The through-real-Envoy suites run on Envoy v1.35.3, including a nats.go reconnect loop refused by `jwt_authn` with an expired token that recovers after a sealed refresh through Envoy.
+
+**Owner decisions, 2026-10-04 (PR #94).**
+
+- **Severing rotation: "let the sprout re-enroll."** Read narrowly: the behaviour above is accepted. A sprout cut off by a severing rotation gets a retried refusal and stays cut off until an operator re-enrolls it. It does not detect the state, stop, or re-enroll itself. That would need a credential it doesn't hold: the join token is deleted after enrollment, and any unauthenticated signal it acted on (a refusal, a key named in an unsealed answer) would also let whoever sits in the DMZ trigger it.
+- **The gateway JWT in step 2's enrollment response stays plaintext inside TLS**, as designed. No sealing.
+- **`f2s.refresh` lives in `internal/payloadbox`'s purpose list** (`PurposeRefreshReply`), beside `s2f.refresh`.
+
+**Not changed in J.2.** `ansible/molecule/stubfarmer` still speaks the old refresh contract (its 24-hour tokens mean a molecule run never refreshes), and `pki.RefreshSigningPayload` remains, unused by farmer, so it builds and the regression tests can build the refused proof.
 

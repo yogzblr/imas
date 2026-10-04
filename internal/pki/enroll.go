@@ -42,6 +42,20 @@ package pki
 // first box key (or re-assert the one on record); changing a box key is
 // a rotation (boxkeys.go), which needs the current key.
 //
+// A gateway JWT only for a box key proof (J.2, FLAG FOR SECURITY REVIEW).
+// The NKey seed also signs the bus's CONNECT nonce, and a compromised bus
+// chooses that nonce, so it can get EnrollSigningPayload signed for any
+// sprout, with any join token it likes. The replay path never looks at the
+// join token, so before J.2 that signature alone replayed an enrolled
+// sprout's identity with a fresh gateway JWT, which reads the sprout's
+// staged rendered recipe from /files/: the same hole as the NKey-signed
+// refresh. Now a request with only the NKey proof (step 1 on either path,
+// or a retry of it) gets the identity, the tenant and its key, and no
+// gateway JWT. The gateway JWT comes only with step 2's sprout_pub_proof,
+// whose message ID is claimed once cluster-wide (ClaimSealedMessage), or
+// from a sealed refresh (refreshsealed.go). The sprout never used step
+// 1's gateway JWT.
+//
 // Every failure path in Enroll returns the single generic
 // ErrEnrollmentFailed sentinel (design doc §3.4) — unknown key_id,
 // malformed token, a hash mismatch, revoked, expired, exhausted, and a
@@ -166,8 +180,10 @@ type EnrollResult struct {
 	JWT string
 	// GatewayJWT is the standard alg:EdDSA companion token
 	// (internal/gatewayjwt) presented to Envoy's jwt_authn-gated wss://
-	// and recipe-download routes. Minted fresh on every enrollment
-	// response, including idempotent replays — it's meant to be
+	// and recipe-download routes. Minted fresh, and only for a request
+	// that proved possession of the sprout's box key (a verified
+	// sprout_pub_proof, or a sealed refresh); empty for a request with
+	// the NKey proof alone (see the package comment). It's meant to be
 	// short-lived (config.GatewayJWTTTL), unlike the cached-to-disk NATS
 	// JWT above.
 	GatewayJWT string
@@ -302,6 +318,12 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 		log.Warnf("enroll: rejected malformed nkey_pub")
 		return nil, ErrEnrollmentFailed
 	}
+	// Only step 2 mints a gateway JWT, so check the signer is there before
+	// step 1 can redeem a join token for an enrollment that can't finish.
+	if gatewayMinter == nil {
+		log.Errorf("enroll: no gateway JWT signer configured (SetGatewaySigner was never called)")
+		return nil, ErrEnrollmentFailed
+	}
 	// Validated up front, alongside nkeyPub, and before any DB work below:
 	// a malformed sprout_pub is a client-side mistake, not a real
 	// enrollment attempt, and shouldn't cost a possibly single-use join
@@ -343,13 +365,17 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 			log.Warnf("enroll: rejected resubmitted or unrecordable signed request for nkey_pub %s: %v", nkeyPub, err)
 			return nil, ErrEnrollmentFailed
 		}
-		if len(req.SproutPubProof) > 0 {
-			if err := recordProvenSproutBoxKey(replayTenantID, sproutID, nkeyPub, sproutPub, req.SproutPubProof); err != nil {
+		// The NKey proof alone gets no gateway JWT: a compromised bus can
+		// obtain one (see the package comment). Only a verified proof of
+		// possession of the box key does.
+		proven := len(req.SproutPubProof) > 0
+		if proven {
+			if err := recordProvenSproutBoxKey(ctx, replayTenantID, sproutID, nkeyPub, sproutPub, req.SproutPubProof); err != nil {
 				log.Warnf("enroll: refused sprout_pub_proof for sprout %s in tenant %s: %v", sproutID, replayTenantID, err)
 				return nil, ErrEnrollmentFailed
 			}
 		}
-		return replayExistingEnrollment(ctx, replayTenantID, sproutID, nkeyPub)
+		return replayExistingEnrollment(ctx, replayTenantID, sproutID, nkeyPub, proven)
 	}
 	// A proof is only meaningful for an identity that exists: the sprout
 	// can't know its tenant's box key, or its final sprout ID, before
@@ -488,52 +514,63 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 		log.Errorf("enroll: sprout %s enrolled but failed to build tenant key continuity proof: %v", sproutID, err)
 		return nil, ErrEnrollmentFailed
 	}
-	gatewayJWT, err := mintGatewayJWTFor(ctx, row.TenantID, sproutID, nkeyPub)
-	if err != nil {
-		log.Errorf("enroll: sprout %s enrolled but failed to mint gateway JWT: %v", sproutID, err)
-		return nil, ErrEnrollmentFailed
-	}
+	// No gateway JWT yet: the sprout hasn't proved it holds a box key.
+	// Its next request, on the replay path with sprout_pub_proof, gets
+	// one (see the package comment).
 
 	log.Infof("enroll: sprout %s enrolled via key_id %s", sproutID, keyID)
-	return &EnrollResult{SproutID: sproutID, JWT: signedJWT, GatewayJWT: gatewayJWT, TenantID: row.TenantID, TenantX25519Pub: tenantPub, TenantX25519Continuity: continuity}, nil
+	return &EnrollResult{SproutID: sproutID, JWT: signedJWT, TenantID: row.TenantID, TenantX25519Pub: tenantPub, TenantX25519Continuity: continuity}, nil
 }
 
 // verifyEnrollProof checks proof, a sprout's sprout_pub_proof: that it
 // opens under one of tenantID's box private keys paired with sproutPub
 // (which only a holder of sproutPub's private half, or of the tenant
 // key, could have sealed), is for this tenant and sprout
-// (payloadbox.PurposeEnrollProof), names exactly nkeyPub and sproutPub,
-// and was issued within EnrollSigMaxSkew of farmer's clock. The error is
-// for local logging only.
-func verifyEnrollProof(tenantID, sproutID, nkeyPub, sproutPub string, proof []byte) error {
+// (payloadbox.PurposeEnrollProof), is a request (no ReplyTo), names
+// exactly nkeyPub and sproutPub, and was issued within EnrollSigMaxSkew
+// of farmer's clock. It returns the proof's message ID, which the caller
+// claims. The error is for local logging only.
+func verifyEnrollProof(tenantID, sproutID, nkeyPub, sproutPub string, proof []byte) (string, error) {
 	msg, err := openEnrollProof(tenantID, sproutID, sproutPub, proof)
 	if err != nil {
-		return err
+		return "", err
+	}
+	if msg.ReplyTo != "" {
+		return "", errors.New("proof names a request it answers")
 	}
 	var body enrollProofBody
 	if err := json.Unmarshal(msg.Body, &body); err != nil {
-		return errors.New("proof body does not decode")
+		return "", errors.New("proof body does not decode")
 	}
 	if body.NKeyPub != nkeyPub || body.SproutPub != sproutPub {
-		return errors.New("proof names another nkey_pub or sprout_pub")
+		return "", errors.New("proof names another nkey_pub or sprout_pub")
 	}
 	skew := enrollNow().Sub(time.Unix(msg.IssuedAt, 0))
 	if skew > EnrollSigMaxSkew || skew < -EnrollSigMaxSkew {
-		return errors.New("proof is outside the allowed skew")
+		return "", errors.New("proof is outside the allowed skew")
 	}
-	return nil
+	return msg.ID, nil
 }
 
-// recordProvenSproutBoxKey verifies proof (verifyEnrollProof) and records
-// sproutPub as sproutID's active box key, scoped to tenantID: the tenant
-// SproutIDAndTenantForNKey found the NKey under, never a global one
-// (pki_sprout_box_keys is (tenant_id, sprout_id)-keyed). Only a sprout's
-// first box key is recorded this way. A proof for the key already active
-// is a no-op (a retried second request); one for a different key, while
-// one is active, is refused: replacing a key is a rotation, which must be
+// recordProvenSproutBoxKey verifies proof (verifyEnrollProof), claims its
+// message ID once cluster-wide (ClaimSealedMessage, failing closed
+// without Valkey), and records sproutPub as sproutID's active box key,
+// scoped to tenantID: the tenant SproutIDAndTenantForNKey found the NKey
+// under, never a global one (pki_sprout_box_keys is (tenant_id,
+// sprout_id)-keyed). The claim matters because this proof is what earns
+// the response its gateway JWT: an NKey signature the bus can obtain,
+// plus a proof copied from an earlier request, must not earn another. The
+// sprout builds a fresh proof for every attempt. Only a sprout's first
+// box key is recorded this way. A proof for the key already active is a
+// no-op (a retried second request); one for a different key, while one
+// is active, is refused: replacing a key is a rotation, which must be
 // sealed under the current one (boxkeys.go).
-func recordProvenSproutBoxKey(tenantID, sproutID, nkeyPub, sproutPub string, proof []byte) error {
-	if err := verifyEnrollProof(tenantID, sproutID, nkeyPub, sproutPub, proof); err != nil {
+func recordProvenSproutBoxKey(ctx context.Context, tenantID, sproutID, nkeyPub, sproutPub string, proof []byte) error {
+	msgID, err := verifyEnrollProof(tenantID, sproutID, nkeyPub, sproutPub, proof)
+	if err != nil {
+		return err
+	}
+	if err := ClaimSealedMessage(ctx, tenantID, sproutID, msgID); err != nil {
 		return err
 	}
 	active, _, err := ValidSproutBoxKeys(tenantID, sproutID)
@@ -557,13 +594,13 @@ func recordProvenSproutBoxKey(tenantID, sproutID, nkeyPub, sproutPub string, pro
 // Enroll only calls it after verifyNKeyPossession has passed and the
 // signed request has been claimed; the caller has proven it holds
 // nkeyPub's seed, not just that it knows nkeyPub, and isn't resubmitting
-// an earlier request.
-// The gateway JWT is still minted fresh — see EnrollResult.GatewayJWT's
-// doc comment on why it isn't cached like the NATS JWT is. tenantID is the
-// tenant SproutIDAndTenantForNKey found this sprout under, not necessarily
+// an earlier request. A gateway JWT is minted, fresh (see
+// EnrollResult.GatewayJWT), only if proven: the request also carried a
+// sprout_pub_proof that verified and was claimed. tenantID is the tenant
+// SproutIDAndTenantForNKey found this sprout under, not necessarily
 // whatever tenant a caller might have guessed from context.
-func replayExistingEnrollment(ctx context.Context, tenantID, sproutID, nkeyPub string) (*EnrollResult, error) {
-	res, err := reissueExistingIdentity(ctx, tenantID, sproutID, nkeyPub)
+func replayExistingEnrollment(ctx context.Context, tenantID, sproutID, nkeyPub string, proven bool) (*EnrollResult, error) {
+	res, err := reissueExistingIdentity(ctx, tenantID, sproutID, nkeyPub, proven)
 	if err != nil {
 		return nil, err
 	}
@@ -572,11 +609,13 @@ func replayExistingEnrollment(ctx context.Context, tenantID, sproutID, nkeyPub s
 }
 
 // reissueExistingIdentity returns an accepted sprout's existing NATS User
-// JWT and the tenant X25519 public key, with a freshly minted gateway
-// JWT. Shared by the enrollment replay path and RefreshSprout; callers
-// must have verified the caller's proof of possession of nkeyPub, and
-// claimed its signed payload (claimSignedPayload), first.
-func reissueExistingIdentity(ctx context.Context, tenantID, sproutID, nkeyPub string) (*EnrollResult, error) {
+// JWT and the tenant X25519 public key, and, if withGateway, a freshly
+// minted gateway JWT. Shared by the enrollment replay path and
+// RefreshSprout. Callers must have verified and claimed the request
+// first, and pass withGateway only for a request that proved possession
+// of the sprout's box key (a sprout_pub_proof or a sealed refresh): an
+// NKey signature alone is not enough, since the bus can obtain one.
+func reissueExistingIdentity(ctx context.Context, tenantID, sproutID, nkeyPub string, withGateway bool) (*EnrollResult, error) {
 	existingJWT, err := GetSproutUserJWTForTenant(tenantID, sproutID)
 	if err != nil {
 		log.Errorf("enroll: sprout %s has an accepted nkey but no readable JWT: %v", sproutID, err)
@@ -592,10 +631,12 @@ func reissueExistingIdentity(ctx context.Context, tenantID, sproutID, nkeyPub st
 		log.Errorf("enroll: reissuing identity for %s but failed to build tenant key continuity proof: %v", sproutID, err)
 		return nil, ErrEnrollmentFailed
 	}
-	gatewayJWT, err := mintGatewayJWTFor(ctx, tenantID, sproutID, nkeyPub)
-	if err != nil {
-		log.Errorf("enroll: reissuing identity for %s but failed to mint gateway JWT: %v", sproutID, err)
-		return nil, ErrEnrollmentFailed
+	var gatewayJWT string
+	if withGateway {
+		if gatewayJWT, err = mintGatewayJWTFor(ctx, tenantID, sproutID, nkeyPub); err != nil {
+			log.Errorf("enroll: reissuing identity for %s but failed to mint gateway JWT: %v", sproutID, err)
+			return nil, ErrEnrollmentFailed
+		}
 	}
 	return &EnrollResult{SproutID: sproutID, JWT: existingJWT, GatewayJWT: gatewayJWT, TenantID: tenantID, TenantX25519Pub: tenantPub, TenantX25519Continuity: continuity}, nil
 }

@@ -9,7 +9,7 @@
 # Both buckets are per Envoy process (shared by its worker threads) and
 # per route: the two never share tokens.
 envoy:
-  # POST /v1/refresh: authenticated (NKey proof of possession), and
+  # POST /v1/refresh: authenticated (a request sealed with the sprout's box key), and
   # legitimately high-volume, so sized from the fleet rather than fixed.
   # tokens_per_fill is computed from these unless overridden below:
   #

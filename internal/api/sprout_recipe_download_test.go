@@ -6,12 +6,13 @@ package api
 // to this package's real router (Auth, GetFile) over the
 // SproutRootCA-pinned client pki.LoadRootCA builds.
 //
-// POST /v1/refresh is a stand-in here that checks the sprout's NKey
-// proof of possession and mints a gateway JWT with the key Auth verifies
-// against. The real handler's server side (pki.RefreshSprout) needs PKI
-// state this package can't set up; internal/api/handlers'
-// TestEnrollClient_AgainstHandler runs the same client refresh against
-// it.
+// POST /v1/refresh is a stand-in here that opens the sprout's sealed
+// refresh (J.2: s2f.refresh, under its box key and the tenant key) and
+// answers with a sealed reply carrying a gateway JWT minted with the key
+// Auth verifies against. The real handler's server side
+// (pki.RefreshSprout) needs PKI state this package can't set up;
+// internal/api/handlers' TestEnrollClient_AgainstHandler runs the same
+// client refresh against it.
 
 import (
 	"crypto/ed25519"
@@ -34,10 +35,12 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwt"
 	natsjwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
+	"golang.org/x/crypto/nacl/box"
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/gatewayjwt"
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
@@ -59,14 +62,20 @@ func (f *sproutFarmer) snapshot() ([]recordedDownload, int) {
 	return append([]recordedDownload(nil), f.downloads...), f.refreshes
 }
 
-// testSprout is an enrolled sprout's on-disk identity.
+// testSprout is an enrolled sprout's on-disk identity, and the tenant
+// keypair farmer would hold for it.
 type testSprout struct {
 	kp       nkeys.KeyPair
 	pub      string
 	tenantID string
 	sproutID string
 	userJWT  string
-	boxPub   string
+	// boxPub is the tenant's X25519 public key, which the sprout pinned.
+	boxPub     string
+	tenantPriv *[32]byte
+	// sproutBoxPub is the sprout's own box public key, as farmer records
+	// it at enrollment.
+	sproutBoxPub *[32]byte
 }
 
 // newTestSprout points the sprout's credential paths at a temp dir and
@@ -81,6 +90,8 @@ func newTestSprout(t *testing.T, tenantID, sproutID string) *testSprout {
 		&config.SproutUserJWTFile:         "sprout.jwt",
 		&config.SproutGatewayJWTFile:      "gateway.jwt",
 		&config.SproutTenantX25519PubFile: "tenant-x25519.pub",
+		&config.SproutBoxPrivFile:         "sprout-x25519.key",
+		&config.SproutBoxPubFile:          "sprout-x25519.pub",
 	} {
 		old := *p
 		*p = filepath.Join(dir, name)
@@ -101,25 +112,33 @@ func newTestSprout(t *testing.T, tenantID, sproutID string) *testSprout {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var box [32]byte
-	if _, err := rand.Read(box[:]); err != nil {
+	tenantPub, tenantPriv, err := box.GenerateKey(rand.Reader)
+	if err != nil {
 		t.Fatal(err)
 	}
 	s := &testSprout{
 		kp: kp, pub: pub, tenantID: tenantID, sproutID: sproutID,
-		userJWT: userJWT, boxPub: base64.StdEncoding.EncodeToString(box[:]),
+		userJWT: userJWT, boxPub: base64.StdEncoding.EncodeToString(tenantPub[:]), tenantPriv: tenantPriv,
 	}
 	for path, data := range map[string]string{
 		config.NKeySproutPrivFile:        string(seed),
 		config.SproutUserJWTFile:         userJWT,
 		config.SproutTenantX25519PubFile: s.boxPub,
-		// The tenant an enrolled sprout pinned, which every refresh is
-		// checked against.
+		// The tenant and sprout ID an enrolled sprout pinned: every
+		// refresh is sealed naming them, and checked against them.
 		pki.SproutTenantIDFile(): tenantID,
+		pki.SproutIDFile():       sproutID,
 	} {
 		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	sproutBoxPub, err := pki.EnsureSproutBoxKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.sproutBoxPub, err = pki.DecodeBoxPubKey(sproutBoxPub); err != nil {
+		t.Fatal(err)
 	}
 	return s
 }
@@ -171,31 +190,40 @@ func startSproutFarmer(t *testing.T, key testGatewayKey, s *testSprout) *sproutF
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/refresh", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			NKeyPub   string `json:"nkey_pub"`
-			Timestamp int64  `json:"timestamp"`
-			NKeySig   string `json:"nkey_sig"`
+			NKeyPub string          `json:"nkey_pub"`
+			Sealed  json.RawMessage `json:"sealed"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.NKeyPub != s.pub {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		sig, err := base64.RawURLEncoding.DecodeString(req.NKeySig)
-		verifier, _ := nkeys.FromPublicKey(req.NKeyPub)
-		if err != nil || verifier.Verify(pki.RefreshSigningPayload(req.Timestamp, req.NKeyPub), sig) != nil {
+		pair := []payloadbox.KeyPair{{PeerPub: s.sproutBoxPub, Priv: s.tenantPriv}}
+		msg, err := payloadbox.Open(req.Sealed, pair,
+			payloadbox.Expect{Purpose: payloadbox.PurposeRefresh, TenantID: s.tenantID, SproutID: s.sproutID})
+		var body struct {
+			NKeyPub string `json:"nkey_pub"`
+		}
+		if err != nil || msg.ReplyTo != "" || json.Unmarshal(msg.Body, &body) != nil || body.NKeyPub != s.pub {
 			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		reply, err := payloadbox.SealReply(payloadbox.Reply{
+			Purpose: pki.PurposeRefreshReply, TenantID: s.tenantID, Principal: s.sproutID, ReplyTo: msg.ID,
+			Method: pki.RefreshMethod, Subject: pki.RefreshSubject,
+			Result: pki.RefreshResponse{
+				SproutID: s.sproutID, TenantID: s.tenantID, JWT: s.userJWT,
+				GatewayJWT:   s.mintFor(t, key, time.Now(), time.Now().Add(time.Hour)),
+				NKeyIdentity: s.pub, TenantX25519Pub: s.boxPub,
+			},
+		}, pair)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		f.mu.Lock()
 		f.refreshes++
 		f.mu.Unlock()
-		json.NewEncoder(w).Encode(map[string]string{
-			"sprout_id":         s.sproutID,
-			"tenant_id":         s.tenantID,
-			"jwt":               s.userJWT,
-			"gateway_jwt":       s.mintFor(t, key, time.Now(), time.Now().Add(time.Hour)),
-			"nkey_identity":     s.pub,
-			"tenant_x25519_pub": s.boxPub,
-		})
+		json.NewEncoder(w).Encode(map[string]json.RawMessage{"sealed": reply})
 	})
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/files/") {

@@ -119,20 +119,50 @@ type enrollServer struct {
 	refreshBodies []map[string]any
 	// natsURLs is what POST /v1/enroll returns as nats_urls.
 	natsURLs []string
-	// refreshTenantOverride, if set, is the tenant_id POST /v1/refresh
-	// names instead of the real one.
-	refreshTenantOverride string
+	// refreshTenantOverride and refreshTenantPubOverride, if set, are the
+	// tenant_id and tenant_x25519_pub POST /v1/refresh names (inside a
+	// reply farmer sealed properly) instead of the real ones.
+	refreshTenantOverride    string
+	refreshTenantPubOverride string
 }
 
-// refreshTenant is the tenant_id POST /v1/refresh returns: real, unless
-// a test overrode it.
-func (s *enrollServer) refreshTenant(real string) string {
+// refreshOverrides returns the test's overrides of the refresh result.
+func (s *enrollServer) refreshOverrides() (tenant, tenantPub string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.refreshTenantOverride != "" {
-		return s.refreshTenantOverride
+	return s.refreshTenantOverride, s.refreshTenantPubOverride
+}
+
+// serveRefresh answers one POST /v1/refresh body the way the real handler
+// does (RefreshSprout), or, if the test overrode part of the result, with
+// a reply sealed exactly as RefreshSprout seals one but carrying the
+// overridden fields: a farmer bug or a farmer-side attacker, not anything
+// the bus could produce.
+func (s *enrollServer) serveRefresh(ctx context.Context, req refreshWireRequest) (json.RawMessage, error) {
+	tenant, tenantPub := s.refreshOverrides()
+	if tenant == "" && tenantPub == "" {
+		return RefreshSprout(ctx, RefreshRequest(req))
 	}
-	return real
+	o, err := verifySealedRefresh(ctx, req.NKeyPub, req.Sealed)
+	if err != nil {
+		return nil, err
+	}
+	res, err := reissueExistingIdentity(ctx, o.tenantID, o.sproutID, req.NKeyPub, true)
+	if err != nil {
+		return nil, err
+	}
+	out := RefreshResponse{
+		SproutID: res.SproutID, TenantID: res.TenantID, JWT: res.JWT, GatewayJWT: res.GatewayJWT,
+		NKeyIdentity: req.NKeyPub, TenantX25519Pub: res.TenantX25519Pub,
+		TenantX25519Continuity: res.TenantX25519Continuity,
+	}
+	if tenant != "" {
+		out.TenantID = tenant
+	}
+	if tenantPub != "" {
+		out.TenantX25519Pub, out.TenantX25519Continuity = tenantPub, nil
+	}
+	return sealRefreshReply(o, out)
 }
 
 // setNatsURLs changes what later POST /v1/enroll responses carry as
@@ -200,17 +230,13 @@ func startEnrollServer(t *testing.T) *enrollServer {
 		b, _ := json.Marshal(raw)
 		var req refreshWireRequest
 		_ = json.Unmarshal(b, &req)
-		res, err := RefreshSprout(r.Context(), RefreshRequest(req))
+		sealed, err := s.serveRefresh(r.Context(), req)
 		if err != nil {
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"error":"enrollment_failed"}`))
 			return
 		}
-		_ = json.NewEncoder(w).Encode(RefreshResponse{
-			SproutID: res.SproutID, TenantID: s.refreshTenant(res.TenantID), JWT: res.JWT, GatewayJWT: res.GatewayJWT,
-			NKeyIdentity: req.NKeyPub, TenantX25519Pub: res.TenantX25519Pub,
-			TenantX25519Continuity: res.TenantX25519Continuity,
-		})
+		_ = json.NewEncoder(w).Encode(refreshWireResponse{Sealed: sealed})
 	})
 	ts := httptest.NewTLSServer(mux)
 	t.Cleanup(ts.Close)
@@ -366,8 +392,12 @@ func TestEnrollSprout_EnrollPersistAndRefresh(t *testing.T) {
 		}
 	}
 
+	if got, err := PinnedSproutID(); err != nil || got != "web-01" {
+		t.Errorf("pinned sprout ID = %q, %v; want web-01", got, err)
+	}
+
 	// Refresh: its own contract on POST /v1/refresh, carrying nkey_pub
-	// and a proof of possession only, and spending no token use.
+	// and a sealed request only, and spending no token use.
 	firstGateway := resp.GatewayJWT
 	time.Sleep(1100 * time.Millisecond) // a new iat second, so the token differs
 	id, err := RefreshGatewayJWT(t.Context())
@@ -378,19 +408,24 @@ func TestEnrollSprout_EnrollPersistAndRefresh(t *testing.T) {
 		t.Errorf("refresh re-issued sprout_id %q, want web-01", id)
 	}
 	body := srv.lastRefreshBody()
-	if len(body) != 3 || body["nkey_pub"] != nkeyPub || body["timestamp"] == nil || body["nkey_sig"] == nil {
-		t.Errorf("refresh body = %v, want exactly nkey_pub, timestamp and nkey_sig", body)
+	if len(body) != 2 || body["nkey_pub"] != nkeyPub || body["sealed"] == nil {
+		t.Errorf("refresh body = %v, want exactly nkey_pub and sealed", body)
 	}
-	if _, ok := body["join_token"]; ok {
-		t.Error("refresh must not send a join_token")
+	for _, f := range []string{"join_token", "nkey_sig", "timestamp"} {
+		if _, ok := body[f]; ok {
+			t.Errorf("refresh must not send %s", f)
+		}
+	}
+	if sealed, _ := json.Marshal(body["sealed"]); strings.Contains(string(sealed), nkeyPub) {
+		t.Error("the sealed refresh request is readable")
 	}
 	if store.rows["ek_1"].UsedCount != 1 {
 		t.Errorf("used_count = %d after refresh, want 1", store.rows["ek_1"].UsedCount)
 	}
-	// Enrollment is two requests (the second proves possession of the
-	// box key), then one refresh.
-	if minter.calls != 3 {
-		t.Errorf("gateway JWT mints = %d, want 3", minter.calls)
+	// Enrollment is two requests, and only the second (which proves
+	// possession of the box key) gets a gateway JWT; then one refresh.
+	if minter.calls != 2 {
+		t.Errorf("gateway JWT mints = %d, want 2", minter.calls)
 	}
 	gw, _ := LoadGatewayJWT()
 	if gw == firstGateway || gw != CurrentGatewayJWT() {
@@ -510,8 +545,19 @@ func TestValidateEnrollResponse(t *testing.T) {
 			TenantX25519Pub: base64.StdEncoding.EncodeToString(tenantPub[:]),
 		}
 	}
-	if err := validateEnrollResponse(good(), nkeyPub); err != nil {
+	if err := validateEnrollResponse(good(), nkeyPub, true); err != nil {
 		t.Fatalf("valid response rejected: %v", err)
+	}
+	// The answer to a request without a box key proof carries no gateway
+	// JWT (J.2), and must not need one; the answer to one with a proof
+	// must carry it.
+	noGateway := good()
+	noGateway.GatewayJWT = ""
+	if err := validateEnrollResponse(noGateway, nkeyPub, false); err != nil {
+		t.Errorf("a response with no gateway JWT to a request without a proof: %v", err)
+	}
+	if err := validateEnrollResponse(noGateway, nkeyPub, true); err == nil {
+		t.Error("a response with no gateway JWT to a request with a proof was accepted")
 	}
 
 	cases := map[string]func(r *EnrollResponse){
@@ -530,8 +576,13 @@ func TestValidateEnrollResponse(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			r := good()
 			mutate(r)
-			if err := validateEnrollResponse(r, nkeyPub); err == nil {
+			if err := validateEnrollResponse(r, nkeyPub, true); err == nil {
 				t.Error("expected the response to be rejected")
+			}
+			// A gateway JWT that is present is checked even where none is
+			// required.
+			if err := validateEnrollResponse(r, nkeyPub, false); err == nil {
+				t.Error("expected the response to be rejected without a proof too")
 			}
 		})
 	}
@@ -648,8 +699,8 @@ func TestRunGatewayJWTRefresher_RefreshesExpiredTokenAndStops(t *testing.T) {
 	minter.mu.Lock()
 	calls := minter.calls
 	minter.mu.Unlock()
-	if calls != 3 {
-		t.Errorf("gateway JWT mints = %d, want 3 (enroll's two requests + one refresh, then sleep until due)", calls)
+	if calls != 2 {
+		t.Errorf("gateway JWT mints = %d, want 2 (enroll's second request + one refresh, then sleep until due)", calls)
 	}
 	if strings.TrimSpace(CurrentGatewayJWT()) == "" {
 		t.Error("expected a gateway JWT in memory")
@@ -759,21 +810,14 @@ func otherBoxPub(t *testing.T) string {
 	return base64.StdEncoding.EncodeToString(pub[:])
 }
 
-// A refresh whose tenant X25519 key differs from the pinned one is
-// refused whole: the pin, the gateway JWT and the User JWT are untouched.
-func TestRefreshGatewayJWT_TenantKeyMismatchRefused(t *testing.T) {
-	enrollForTest(t)
-	pinned := otherBoxPub(t)
-	if err := os.WriteFile(config.SproutTenantX25519PubFile, []byte(pinned), 0o644); err != nil {
-		t.Fatal(err)
-	}
+// assertRefreshPersistedNothing checks a refused refresh left the pin, the
+// gateway JWT (on disk and in memory) and the User JWT as they were.
+func assertRefreshPersistedNothing(t *testing.T, pinned string, refresh func() error) error {
+	t.Helper()
 	gwBefore, _ := os.ReadFile(config.SproutGatewayJWTFile)
 	userBefore, _ := os.ReadFile(config.SproutUserJWTFile)
 	memBefore := CurrentGatewayJWT()
-
-	if _, err := RefreshGatewayJWT(t.Context()); !errors.Is(err, ErrTenantKeyMismatch) {
-		t.Fatalf("RefreshGatewayJWT = %v, want ErrTenantKeyMismatch", err)
-	}
+	err := refresh()
 	if b, _ := os.ReadFile(config.SproutTenantX25519PubFile); string(b) != pinned {
 		t.Error("the pinned tenant X25519 key was replaced")
 	}
@@ -786,6 +830,44 @@ func TestRefreshGatewayJWT_TenantKeyMismatchRefused(t *testing.T) {
 	if CurrentGatewayJWT() != memBefore {
 		t.Error("a refused refresh installed its gateway JWT in memory")
 	}
+	return err
+}
+
+// A sealed reply naming a tenant X25519 key other than the pinned one,
+// without a continuity proof, is refused whole and fatally: the pin, the
+// gateway JWT and the User JWT are untouched.
+func TestRefreshGatewayJWT_TenantKeyMismatchRefused(t *testing.T) {
+	srv, _, _ := enrollForTest(t)
+	pinned := pinnedTenantKey(t)
+	srv.mu.Lock()
+	srv.refreshTenantPubOverride = otherBoxPub(t)
+	srv.mu.Unlock()
+	err := assertRefreshPersistedNothing(t, pinned, func() error {
+		_, err := RefreshGatewayJWT(t.Context())
+		return err
+	})
+	if !errors.Is(err, ErrTenantKeyMismatch) || !IsFatalRefreshError(err) {
+		t.Fatalf("RefreshGatewayJWT = %v, want the fatal ErrTenantKeyMismatch", err)
+	}
+}
+
+// A sprout pinned to a tenant key farmer doesn't hold seals its refresh
+// to that key, so farmer can't open it and refuses it. The refusal is
+// unauthenticated, so it is an ordinary error (the sprout retries), and
+// nothing is persisted.
+func TestRefreshGatewayJWT_UnknownPinnedTenantKeyRefused(t *testing.T) {
+	enrollForTest(t)
+	pinned := otherBoxPub(t)
+	if err := os.WriteFile(config.SproutTenantX25519PubFile, []byte(pinned), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := assertRefreshPersistedNothing(t, pinned, func() error {
+		_, err := RefreshGatewayJWT(t.Context())
+		return err
+	})
+	if err == nil || IsFatalRefreshError(err) {
+		t.Fatalf("RefreshGatewayJWT = %v, want farmer's (non-fatal) refusal", err)
+	}
 }
 
 // The refresher gives up at once on a tenant key mismatch, since a retry
@@ -793,9 +875,9 @@ func TestRefreshGatewayJWT_TenantKeyMismatchRefused(t *testing.T) {
 // treat as fatal.
 func TestRunGatewayJWTRefresher_TenantKeyMismatchIsFatal(t *testing.T) {
 	srv, _, _ := enrollForTest(t)
-	if err := os.WriteFile(config.SproutTenantX25519PubFile, []byte(otherBoxPub(t)), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	srv.mu.Lock()
+	srv.refreshTenantPubOverride = otherBoxPub(t)
+	srv.mu.Unlock()
 	setCurrentGatewayJWT("") // due now
 
 	done := make(chan error, 1)
@@ -821,7 +903,7 @@ func TestPersistEnrollment_TenantKeyMismatchRefused(t *testing.T) {
 	if err := os.WriteFile(config.SproutTenantX25519PubFile, []byte(pinned), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	resp := &EnrollResponse{TenantID: "t_1", JWT: "user-jwt", GatewayJWT: "gw-jwt", TenantX25519Pub: otherBoxPub(t)}
+	resp := &EnrollResponse{SproutID: "web-01", TenantID: "t_1", JWT: "user-jwt", GatewayJWT: "gw-jwt", TenantX25519Pub: otherBoxPub(t)}
 	if err := PersistEnrollment(resp); !errors.Is(err, ErrTenantKeyMismatch) {
 		t.Fatalf("PersistEnrollment = %v, want ErrTenantKeyMismatch", err)
 	}
@@ -842,7 +924,7 @@ func TestPersistEnrollment_TenantKeyMismatchRefused(t *testing.T) {
 func TestPersistEnrollment_TenantMismatchRefused(t *testing.T) {
 	setupSproutFiles(t)
 	pub := otherBoxPub(t)
-	if err := PersistEnrollment(&EnrollResponse{TenantID: "t_1", JWT: "user-jwt", GatewayJWT: "gw-jwt", TenantX25519Pub: pub}); err != nil {
+	if err := PersistEnrollment(&EnrollResponse{SproutID: "web-01", TenantID: "t_1", JWT: "user-jwt", GatewayJWT: "gw-jwt", TenantX25519Pub: pub}); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := SproutTenantID(); err != nil || got != "t_1" {
@@ -851,7 +933,7 @@ func TestPersistEnrollment_TenantMismatchRefused(t *testing.T) {
 	if err := os.Remove(config.SproutGatewayJWTFile); err != nil {
 		t.Fatal(err)
 	}
-	err := PersistEnrollment(&EnrollResponse{TenantID: "t_2", JWT: "user-jwt", GatewayJWT: "gw-jwt", TenantX25519Pub: pub})
+	err := PersistEnrollment(&EnrollResponse{SproutID: "web-01", TenantID: "t_2", JWT: "user-jwt", GatewayJWT: "gw-jwt", TenantX25519Pub: pub})
 	if !errors.Is(err, ErrSproutTenantMismatch) {
 		t.Fatalf("PersistEnrollment for another tenant = %v, want ErrSproutTenantMismatch", err)
 	}
@@ -867,7 +949,7 @@ func TestPersistEnrollment_TenantMismatchRefused(t *testing.T) {
 func TestPersistEnrollment_SameTenantKeyAccepted(t *testing.T) {
 	setupSproutFiles(t)
 	pub := otherBoxPub(t)
-	resp := &EnrollResponse{TenantID: "t_1", JWT: "user-jwt", GatewayJWT: "gw-jwt", TenantX25519Pub: pub}
+	resp := &EnrollResponse{SproutID: "web-01", TenantID: "t_1", JWT: "user-jwt", GatewayJWT: "gw-jwt", TenantX25519Pub: pub}
 	if err := PersistEnrollment(resp); err != nil {
 		t.Fatal(err)
 	}

@@ -8,8 +8,9 @@ package pki
 //
 // Real: Envoy and its jwt_authn/local_ratelimit config; this package's
 // enrollment client and server side (EnrollSprout -> Enroll,
-// RefreshGatewayJWT -> RefreshSprout, both with NKey proof of
-// possession); gateway JWTs minted and served as a JWKS by
+// RefreshGatewayJWT -> RefreshSprout: NKey proof of possession on
+// enrollment, a sealed request and reply on refresh); gateway JWTs
+// minted and served as a JWKS by
 // internal/gatewayjwt's production code; the operator-mode bus
 // (ConfigureNats) with its websocket listener; the bus connection
 // ConnectSprout makes (LoadSproutBus: the nats_urls persisted at
@@ -263,6 +264,94 @@ func TestSproutLifecycle_ThroughRealEnvoy(t *testing.T) {
 			t.Fatalf("refreshed token not persisted (err=%v)", err)
 		}
 		roundTrip(t)
+	})
+
+	// J.2: what a compromised bus can get signed (the NKey proof) is
+	// refused through Envoy, and so is a sealed request seen once already.
+	t.Run("NKey-signed and replayed refreshes are refused through Envoy", func(t *testing.T) {
+		post := func(t *testing.T, body string) int {
+			t.Helper()
+			r, err := env.HTTPClient().Post(env.URL+"/v1/refresh", "application/json", strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			io.Copy(io.Discard, r.Body)
+			r.Body.Close()
+			return r.StatusCode
+		}
+		ts := time.Now().Unix()
+		sig, err := sproutKP.Sign(RefreshSigningPayload(ts, sproutNKey))
+		if err != nil {
+			t.Fatal(err)
+		}
+		nkeyOnly := `{"nkey_pub":"` + sproutNKey + `","timestamp":` + strconv.FormatInt(ts, 10) +
+			`,"nkey_sig":"` + base64.RawURLEncoding.EncodeToString(sig) + `"}`
+		if code := post(t, nkeyOnly); code != http.StatusUnauthorized {
+			t.Errorf("NKey-signed refresh through Envoy: %d, want 401", code)
+		}
+		sealed, _, err := SproutSealedRefresh(sproutID, sproutNKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := `{"nkey_pub":"` + sproutNKey + `","sealed":` + string(sealed) + `}`
+		if code := post(t, body); code != http.StatusOK {
+			t.Fatalf("sealed refresh through Envoy: %d, want 200", code)
+		}
+		if code := post(t, body); code != http.StatusUnauthorized {
+			t.Errorf("replayed sealed refresh through Envoy: %d, want 401", code)
+		}
+	})
+
+	// SCALE.1's reconnect path with an expired gateway JWT: every
+	// websocket handshake is refused by jwt_authn until the sealed
+	// refresh (through Envoy's ungated route, needing no gateway JWT)
+	// installs a new one, which the next handshake presents.
+	t.Run("expired gateway JWT at reconnect recovers after a sealed refresh", func(t *testing.T) {
+		bus, err := LoadSproutBus()
+		if err != nil {
+			t.Fatal(err)
+		}
+		reconnected := make(chan struct{}, 4)
+		nc, err := bus.Connect(
+			nats.MaxReconnects(-1),
+			nats.CustomReconnectDelay(func(int) time.Duration { return 100 * time.Millisecond }),
+			nats.ReconnectHandler(func(*nats.Conn) { reconnected <- struct{}{} }),
+		)
+		if err != nil {
+			t.Fatalf("connect through Envoy: %v", err)
+		}
+		defer nc.Close()
+		setCurrentGatewayJWT(mint(t, signer, time.Now().Add(-10*time.Minute)))
+		if err := nc.ForceReconnect(); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-reconnected:
+			t.Fatal("reconnected through Envoy with an expired gateway JWT")
+		case <-time.After(2 * time.Second):
+		}
+		if nc.IsConnected() {
+			t.Fatal("still connected after a forced reconnect with an expired gateway JWT")
+		}
+		if _, err := RefreshGatewayJWT(t.Context()); err != nil {
+			t.Fatalf("sealed refresh through Envoy with an expired gateway JWT: %v", err)
+		}
+		select {
+		case <-reconnected:
+		case <-time.After(15 * time.Second):
+			t.Fatal("the reconnect loop did not recover after the refresh")
+		}
+		subj := "imas.sprouts." + sproutID + ".facts"
+		sub, err := nc.SubscribeSync(subj)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := nc.Publish(subj, []byte("back")); err != nil {
+			t.Fatal(err)
+		}
+		if msg, err := sub.NextMsg(5 * time.Second); err != nil || string(msg.Data) != "back" {
+			t.Fatalf("round trip after the recovered reconnect: msg=%v err=%v", msg, err)
+		}
 	})
 
 	t.Run("recipe download through Envoy's /files/ route", func(t *testing.T) {

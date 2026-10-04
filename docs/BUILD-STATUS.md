@@ -58,7 +58,7 @@ released.
 | 11 | Recipe download uses the same JWT | **Green** | |
 | 12 | Envoy with JWT validation | **Green** | |
 | 13 | Backend on Kubernetes | **Amber** | Install the charts on a real cluster (UAT gate). No Terraform exists. |
-| 14 | Payload encryption | **Red** | Seal `shell.*` (Open item 2) and the control plane (Open item 11): a compromised bus can still open a shell on a Unix sprout, mint CLI tokens and refresh as a sprout. |
+| 14 | Payload encryption | **Red** | Seal `shell.*` (Open item 2) and the control plane (Open item 11): a compromised bus can still open a shell on a Unix sprout and mint CLI tokens. Refreshing as a sprout is closed by J.2 (sealed refresh, in review). |
 | 15 | Key rotation for sprout keys | **Amber** | Reword `requirements.md` to match the built design (the private key is never sent). |
 | 16 | SDB-equivalent secrets | **Green** | |
 | 17 | Probe capability | **Green** | |
@@ -1011,7 +1011,11 @@ by an external git sync today.
       an admin's token, `auth.users.add` gives it permanent admin access.
     - The sprout's NKey signs both the `CONNECT` nonce and its `/v1/refresh`
       proof. The bus can refresh as any sprout and read its staged rendered
-      recipe, secrets included, from `/files/`.
+      recipe, secrets included, from `/files/`. J.2 found the same hole in
+      `/v1/enroll`'s replay path, which never checks the join token: an
+      NKey-signed enrollment payload (any token) replayed an enrolled
+      sprout's identity with a fresh gateway JWT. Both are closed by J.2
+      (in review, below).
     - Captured tokens can be replayed for 5 minutes.
     - `internal.*` (SaaS API ↔ farmer) trusts the bus's account permissions,
       so a compromised bus can forge provisioning, deprovisioning, sprout
@@ -1024,8 +1028,9 @@ by an external git sync today.
     - Every `imas.api.*` and `internal.*` request and reply becomes a
       `payloadbox` message under a CLI box key, or under a SaaS API box key
       and a platform key.
-    - Box-ready sprouts refresh with a sealed proof, with a ratchet per
-      sprout.
+    - Box-ready sprouts refresh with a sealed proof. (The design's
+      per-sprout ratchet was dropped by the owner decisions below; as built
+      in J.2, NKey-only refresh is refused for every sprout.)
 
     Owner decisions, 2026-10-04: sealing is built before the UAT gate, with
     no compatibility window (no bearer-token or plaintext fallback, no
@@ -1053,9 +1058,9 @@ by an external git sync today.
     - Sealed request and reply helpers for both ends, the per-replica replay
       guard, and the Valkey claim (10-minute TTL, fail closed for mutating
       methods; the design's read-only list).
-    - Not wired yet: sealed refresh (rollout step 3), sealed `imas.api.*`
-      (step 4), sealed `internal.*` (step 5). Until then every gap above
-      stands. `auth.users.add` now persists on a Helm install too, while it
+    - Not wired by J.1: sealed refresh (rollout step 3, now J.2, below),
+      sealed `imas.api.*` (step 4), sealed `internal.*` (step 5). Until
+      those land, every gap above but the sprout refresh stands. `auth.users.add` now persists on a Helm install too, while it
       still takes a bearer token the bus can mint for 15 minutes; nothing
       is deployed. Owner decision, 2026-10-04: no stopgap, the exposure is
       accepted until J.4 lands.
@@ -1065,6 +1070,66 @@ by an external git sync today.
     - Known limitation, accepted (owner decision): no per-user rate limit
       on the replay guard, so one user sending about 3,500 requests a
       second to a replica fills it. Operators only, so not needed now.
+
+    **J.2, sealed sprout refresh (rollout step 3), 2026-10-04: ready for
+    review, not merged. FLAG FOR SECURITY REVIEW.** Same owner decisions as
+    J.1: no NKey-only fallback, no ratchet, and a sprout with no box key is
+    refused and re-enrolls.
+    - `POST /v1/refresh` takes `{nkey_pub, sealed}`: an `s2f.refresh`
+      `payloadbox` message, sealed with the sprout's box key to its pinned
+      tenant key, naming its pinned tenant and sprout ID (a new `sprout-id`
+      pin beside `tenant-id`). Farmer looks the sprout up by `nkey_pub`,
+      opens under its active and grace box keys and every retained tenant
+      key back to the last severing rotation, requires a request (no
+      `ReplyTo`) naming that `nkey_pub`, checks both timestamps ±5 minutes,
+      and claims the message ID in Valkey (fail closed). The answer is
+      `{sealed}` only: an `f2s.refresh` reply bound to the request's ID,
+      sealed to the sprout's active box key under the tenant key it pinned,
+      carrying the gateway JWT, User JWT, tenant and continuity proof.
+      Nothing in the HTTP exchange, Envoy included, carries a gateway JWT
+      in the clear. The NKey-signed body is refused (unknown fields).
+    - `/v1/enroll` issues a gateway JWT only for a request with a verified
+      `sprout_pub_proof` (enrollment step 2), and claims that proof's
+      message ID once. A request with the NKey proof alone, on either path,
+      gets the identity, the tenant and its key, and no gateway JWT. The
+      sprout never used step 1's.
+    - Box key rotation during refresh: while a rotation is pending the
+      sprout seals the refresh under both its current and pending keys, so
+      it still refreshes once farmer has recorded the new key and the old
+      one's grace has run out; a reply sealed to the new key promotes it.
+      Tenant pin: a pin older than the grace window still refreshes and
+      re-pins; after a severing rotation the sprout is cut off (farmer can't
+      open its request, and no answer could be authenticated) and its
+      refreshes fail, retried, until it is re-enrolled (before J.2 this was
+      the fatal `ErrTenantKeyMismatch`). Missing keys or pins are fatal.
+    - Tested: the SEC.0 fake-bus capture, extended to the sprout's real
+      connect path, shows a `CONNECT` signature over a refresh-shaped or
+      enrollment-shaped nonce earns no gateway JWT (both tests fail on
+      `main`); replay, clock skew, reflected and mis-addressed messages,
+      box key rotation, stale and severed tenant pins, and the expired
+      gateway JWT at reconnect. The through-real-Envoy suites pass on Envoy
+      v1.35.3 (binary from the official `envoyproxy/envoy:v1.35.3` image,
+      sha256 matching the Wave 1 release binary), including an `nats.go`
+      reconnect loop refused by `jwt_authn` with an expired token that
+      recovers after a sealed refresh through Envoy.
+    - Owner decisions, 2026-10-04 (PR #94):
+      - Severing rotation, "let the sprout re-enroll", read narrowly: the
+        behaviour above is accepted. A severed sprout gets a retried
+        refusal and stays cut off until an operator re-enrolls it; it
+        doesn't detect the state or re-enroll itself (it has no join token
+        left, and acting on an unauthenticated signal would let the DMZ
+        trigger it).
+      - The gateway JWT in enrollment step 2's response stays plaintext
+        inside TLS, as designed.
+      - `f2s.refresh` moved into `internal/payloadbox`'s purpose list
+        (`PurposeRefreshReply`).
+      - The files J.2 touched outside its brief's scope are accepted, and
+        the stale docs were fixed in the same PR: Decision C and a new
+        "As built: J.2" in the payload encryption design, the enrollment
+        design's refresh section, `internal/api/routers.go`, the Envoy and
+        Helm docs, INSTALL and the architecture diagram.
+    - Known gap: `ansible/molecule/stubfarmer` still speaks the old refresh
+      contract (its 24-hour tokens mean a molecule run never refreshes).
 
     **Stopgap SEC.0 (in review, flagged for security review):**
     `UserAuth.IsValid` refuses an expiry more than 15 minutes ahead (the

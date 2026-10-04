@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -221,8 +222,11 @@ func TestEnroll_IdempotentReplaySucceeds(t *testing.T) {
 	if resp.JWT == "" {
 		t.Error("expected non-empty jwt")
 	}
-	if resp.GatewayJWT == "" {
-		t.Error("expected non-empty gateway_jwt")
+	// J.2: an NKey signature alone, which a compromised bus can get made
+	// over a CONNECT nonce, earns no gateway JWT; only a request with a box
+	// key proof does (TestEnrollClient_AgainstHandler).
+	if resp.GatewayJWT != "" || strings.Contains(w.Body.String(), "gateway_jwt") {
+		t.Error("a replay with the NKey proof alone got a gateway_jwt")
 	}
 	if resp.NKeyIdentity != nkey {
 		t.Errorf("expected nkey_identity %q, got %q", nkey, resp.NKeyIdentity)
