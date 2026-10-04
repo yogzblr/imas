@@ -118,14 +118,15 @@ func TestSubscribeTestPingRoute(t *testing.T) {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
-	// test.ping with empty targets — should succeed (dangerously_allow_root
-	// skips the scope check that would refuse an empty target list).
+	// test.ping with empty targets is refused by the scope check, even
+	// with dangerously_allow_root set: the flag bypasses nothing on the
+	// NATS path (owner decision, PR #95).
 	params := apitypes.TargetedAction{
 		Target: []pki.KeyManager{},
 		Action: apitypes.PingPong{Ping: true},
 	}
-	if _, err := call("test.ping", params); err != nil {
-		t.Fatalf("test.ping: %v", err)
+	if _, err := call("test.ping", params); err == nil || !strings.Contains(err.Error(), "no targets specified") {
+		t.Fatalf("test.ping with no targets: %v, want refused", err)
 	}
 }
 
@@ -719,7 +720,7 @@ func TestHandleSproutsListWithConnectedSprout(t *testing.T) {
 	jetyCleanup := setupJetyDangerouslyAllowRoot(t, true)
 	defer jetyCleanup()
 
-	result, err := handleSproutsList(apiCaller{TenantID: tenantID}, nil)
+	result, err := handleSproutsList(adminCaller(t, tenantID), nil)
 	if err != nil {
 		t.Fatalf("handleSproutsList: %v", err)
 	}
@@ -799,7 +800,7 @@ func TestHandleJobsCancelWithNATS(t *testing.T) {
 	nc.Flush()
 
 	params, _ := json.Marshal(JobsGetParams{JID: "jid-cancel-int"})
-	result, err := handleJobsCancel(apiCaller{TenantID: tenantID}, params)
+	result, err := handleJobsCancel(adminCaller(t, tenantID), params)
 	if err != nil {
 		t.Fatalf("handleJobsCancel: %v", err)
 	}

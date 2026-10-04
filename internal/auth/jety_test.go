@@ -611,19 +611,16 @@ func TestDangerouslyAllowRootEnabled(t *testing.T) {
 		t.Error("expected DangerouslyAllowRoot to return true")
 	}
 
-	// The bypass is RBAC only: the user is still one a sealed request
-	// opened under (internal/natsapi), never a value from a body.
-	if !UserHasAction("AUNKNOWN", rbac.ActionCook) {
-		t.Error("UserHasAction should return true with bypass")
+	// The user checks don't consult the flag: it has no effect on the
+	// NATS path (owner decision 2026-10-04, PR #95).
+	if UserHasAction("AUNKNOWN", rbac.ActionCook) {
+		t.Error("UserHasAction granted an unknown user under the flag")
 	}
-	if !UserHasScopedAccess("AUNKNOWN", rbac.ActionCook, []string{"s1"}, nil) {
-		t.Error("UserHasScopedAccess should return true with bypass")
+	if UserHasScopedAccess("AUNKNOWN", rbac.ActionCook, []string{"s1"}, nil) {
+		t.Error("UserHasScopedAccess granted an unknown user under the flag")
 	}
-
-	sprouts := []string{"s1", "s2"}
-	filtered := UserScopeFilter("AUNKNOWN", rbac.ActionCook, sprouts, nil)
-	if len(filtered) != 2 {
-		t.Errorf("UserScopeFilter should return all sprouts with bypass, got %d", len(filtered))
+	if filtered := UserScopeFilter("AUNKNOWN", rbac.ActionCook, []string{"s1", "s2"}, nil); len(filtered) != 0 {
+		t.Errorf("UserScopeFilter = %v for an unknown user under the flag", filtered)
 	}
 }
 

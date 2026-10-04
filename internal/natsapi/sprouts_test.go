@@ -15,7 +15,7 @@ func TestHandleSproutsList_Empty(t *testing.T) {
 	setupNatsAPIPKI(t)
 	setDangerouslyAllowRoot(t, true)
 
-	result, err := handleSproutsList(apiCaller{TenantID: pki.CurrentTenantID()}, nil)
+	result, err := handleSproutsList(adminCaller(t, pki.CurrentTenantID()), nil)
 	if err != nil {
 		t.Fatalf("handleSproutsList: unexpected error: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestHandleSproutsList_AcceptedSprouts(t *testing.T) {
 	nkey := generateTestNKey(t)
 	writeTestSproutKey(t, pkiDir, "accepted", "web-01", nkey)
 
-	result, err := handleSproutsList(apiCaller{TenantID: pki.CurrentTenantID()}, nil)
+	result, err := handleSproutsList(adminCaller(t, pki.CurrentTenantID()), nil)
 	if err != nil {
 		t.Fatalf("handleSproutsList: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestHandleSproutsList_MixedStates(t *testing.T) {
 	writeTestSproutKey(t, pkiDir, "denied", "bad-actor", generateTestNKey(t))
 	writeTestSproutKey(t, pkiDir, "rejected", "old-key", generateTestNKey(t))
 
-	result, err := handleSproutsList(apiCaller{TenantID: pki.CurrentTenantID()}, nil)
+	result, err := handleSproutsList(adminCaller(t, pki.CurrentTenantID()), nil)
 	if err != nil {
 		t.Fatalf("handleSproutsList: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestHandleSproutsList_MultipleSameState(t *testing.T) {
 	writeTestSproutKey(t, pkiDir, "accepted", "web-02", generateTestNKey(t))
 	writeTestSproutKey(t, pkiDir, "accepted", "web-03", generateTestNKey(t))
 
-	result, err := handleSproutsList(apiCaller{TenantID: pki.CurrentTenantID()}, nil)
+	result, err := handleSproutsList(adminCaller(t, pki.CurrentTenantID()), nil)
 	if err != nil {
 		t.Fatalf("handleSproutsList: %v", err)
 	}

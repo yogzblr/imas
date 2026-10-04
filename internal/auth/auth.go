@@ -235,9 +235,12 @@ func Sign(nonce []byte) ([]byte, error) {
 }
 
 // DangerouslyAllowRoot returns true if the farmer config has
-// dangerously_allow_root set. It bypasses RBAC checks (dev only). It
-// never bypasses sealing: a sealed API request still has to open under a
-// registered user's CLI box key before anything looks at this.
+// dangerously_allow_root set (dev only). It bypasses authentication on
+// farmer's HTTP API for GET /files/ and the GET /v1/recipes routes
+// (internal/api's Auth), and nothing else. It has no effect on the NATS
+// API: every sealed imas.api.* request goes through the role and scope
+// checks below for the user it opened under (owner decision 2026-10-04,
+// PR #95).
 func DangerouslyAllowRoot() bool {
 	return jety.GetBool("dangerously_allow_root")
 }
@@ -268,9 +271,6 @@ func UserIdentity(userID string) (roleName, username string) {
 // UserHasAction reports whether userID's role includes action, without
 // scope checking (UserHasScopedAccess checks scope).
 func UserHasAction(userID string, action rbac.Action) bool {
-	if DangerouslyAllowRoot() {
-		return true
-	}
 	role := lookupRole(userID)
 	return role != nil && role.HasAction(action)
 }
@@ -279,9 +279,6 @@ func UserHasAction(userID string, action rbac.Action) bool {
 // every one of sproutIDs. allSproutIDs is the tenant's accepted sprouts,
 // for resolving dynamic cohorts.
 func UserHasScopedAccess(userID string, action rbac.Action, sproutIDs []string, allSproutIDs []string) bool {
-	if DangerouslyAllowRoot() {
-		return true
-	}
 	role := lookupRole(userID)
 	if role == nil {
 		return false
@@ -292,9 +289,6 @@ func UserHasScopedAccess(userID string, action rbac.Action, sproutIDs []string, 
 // UserScopeFilter returns the subset of sproutIDs userID's role permits
 // for action: nil for a user with no role.
 func UserScopeFilter(userID string, action rbac.Action, sproutIDs []string, allSproutIDs []string) []string {
-	if DangerouslyAllowRoot() {
-		return sproutIDs
-	}
 	role := lookupRole(userID)
 	if role == nil {
 		return nil

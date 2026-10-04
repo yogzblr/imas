@@ -120,11 +120,55 @@ func TestAuthorize(t *testing.T) {
 	}
 }
 
-func TestAuthorize_DangerouslyAllowRoot(t *testing.T) {
+// dangerously_allow_root bypasses nothing on the NATS path (owner
+// decision 2026-10-04, PR #95: "remove dangerously_allow_root bypass from
+// the NATS path"): with it set, a registered user whose role lacks the
+// action is still refused, and a scoped role is still held to its scope.
+func TestAuthorize_DangerouslyAllowRootBypassesNothing(t *testing.T) {
 	setupNatsAPIPKI(t)
 	defer setupJetyDangerouslyAllowRoot(t, true)()
-	if err := authorize(MethodCmdRun, apiCaller{TenantID: pki.CurrentTenantID(), UserID: "UNOBODY"}, json.RawMessage(`{"target":[{"sprout_id":"web-1"}]}`)); err != nil {
-		t.Fatalf("dangerously_allow_root: %v", err)
+	if !intauth.DangerouslyAllowRoot() {
+		t.Fatal("control: the flag isn't set")
+	}
+	rs := rbac.NewRoleStore()
+	for _, r := range []*rbac.Role{
+		{Name: "viewer", Rules: []rbac.Rule{{Action: rbac.ActionView, Scope: "*"}}},
+		{Name: "web", Rules: []rbac.Rule{{Action: rbac.ActionCmd, Scope: "sprout:web-1"}}},
+	} {
+		if err := rs.Register(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	urm := rbac.NewUserRoleMap()
+	urm.Set("UVIEWER", "viewer")
+	urm.Set("UWEB", "web")
+	intauth.SetPolicy(rs, urm, nil)
+	defer intauth.SetPolicy(nil, nil, nil)
+
+	tenant := pki.CurrentTenantID()
+	on := func(sprout string) json.RawMessage {
+		return json.RawMessage(`{"target":[{"sprout_id":"` + sprout + `"}]}`)
+	}
+	for _, tc := range []struct {
+		name, method, user string
+		params             json.RawMessage
+		want               error
+	}{
+		{"registered user without the action", MethodCmdRun, "UVIEWER", on("web-1"), rbac.ErrAccessDenied},
+		{"registered user, admin method", MethodAuthAddUser, "UVIEWER", nil, rbac.ErrAccessDenied},
+		{"unknown user", MethodJobsGet, "UNOBODY", nil, rbac.ErrAccessDenied},
+		{"scoped role, outside its scope", MethodCmdRun, "UWEB", on("db-1"), rbac.ErrAccessDenied},
+		{"scoped role, inside its scope", MethodCmdRun, "UWEB", on("web-1"), nil},
+	} {
+		if err := authorize(tc.method, apiCaller{TenantID: tenant, UserID: tc.user}, tc.params); err != tc.want {
+			t.Errorf("%s: authorize = %v, want %v", tc.name, err, tc.want)
+		}
+	}
+	if err := authorize(MethodCmdRun, apiCaller{TenantID: tenant, UserID: "UWEB"}, json.RawMessage(`{"target":[]}`)); err == nil {
+		t.Error("an empty target list was authorized")
+	}
+	if got := filterSproutsByScope(tenant, "UWEB", rbac.ActionCmd, []string{"web-1", "db-1"}); len(got) != 1 || got[0] != "web-1" {
+		t.Errorf("scope filter under the flag = %v, want [web-1]", got)
 	}
 }
 

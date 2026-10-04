@@ -31,6 +31,7 @@ import (
 	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
+	"github.com/yogzblr/imas/internal/rbac"
 )
 
 // boxKeyEnv is farmer (its real NATS API, internal/natsapi.Subscribe,
@@ -120,10 +121,6 @@ func setupBoxKeyEnv(t *testing.T) *boxKeyEnv {
 	if err := os.WriteFile(pki.SproutTenantIDFile(), []byte(e.tenant), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	// The admin call below is sealed by a user with no role.
-	jety.Set("dangerously_allow_root", true)
-	t.Cleanup(func() { jety.Set("dangerously_allow_root", false) })
 
 	ns, err := server.NewServer(&server.Options{Host: "127.0.0.1", Port: -1})
 	if err != nil {
@@ -292,8 +289,8 @@ func TestBoxKeyRotation_RoundTrip(t *testing.T) {
 
 // sealedCLIAdmin registers a CLI user with a box key in tenantID (the
 // users tenant here) and configures this process's CLI as them, with a
-// Valkey stand-in for farmer's claim on mutating requests. RBAC is
-// dangerously_allow_root's (setupBoxKeyEnv).
+// Valkey stand-in for farmer's claim on mutating requests, and the
+// admin role (the NATS path has no RBAC bypass).
 func sealedCLIAdmin(t *testing.T, tenantID string) {
 	t.Helper()
 	mr := miniredis.RunT(t)
@@ -313,6 +310,23 @@ func sealedCLIAdmin(t *testing.T, tenantID string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// An admin role, since dangerously_allow_root no longer bypasses
+	// RBAC on the NATS path.
+	rdb, err := gorm.Open(sqlite.Open("file:rbac_"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.AutoMigrate(rbac.Models()...); err != nil {
+		t.Fatal(err)
+	}
+	rbac.SetDB(rdb)
+	t.Cleanup(func() { rbac.SetDB(nil) })
+	rs := rbac.NewRoleStore()
+	if err := rs.Register(&rbac.Role{Name: "admin", Rules: []rbac.Rule{{Action: rbac.ActionAdmin, Scope: "*"}}}); err != nil {
+		t.Fatal(err)
+	}
+	intauth.SetPolicy(rs, rbac.NewUserRoleMap(), nil)
+	t.Cleanup(func() { intauth.SetPolicy(nil, nil, nil) })
 	if err := intauth.AddUser(id, "admin", "", pub); err != nil {
 		t.Fatal(err)
 	}

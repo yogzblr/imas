@@ -219,10 +219,11 @@ func TestCheckScopedAccessDangerouslyAllowRoot(t *testing.T) {
 	cleanup := setupJetyDangerouslyAllowRoot(t, true)
 	defer cleanup()
 
-	// With dangerouslyAllowRoot, even an unknown user passes.
+	// dangerously_allow_root bypasses nothing on the NATS path (owner
+	// decision, PR #95): an unknown user is still refused.
 	err := checkScopedAccess(pki.CurrentTenantID(), "UANYUSER", rbac.ActionCook, []string{"sprout-1"})
-	if err != nil {
-		t.Fatalf("expected nil error with dangerouslyAllowRoot, got: %v", err)
+	if err == nil {
+		t.Fatal("dangerously_allow_root let an unknown user through the scope check")
 	}
 }
 
@@ -247,10 +248,10 @@ func TestFilterSproutsByScopeDangerouslyAllowRoot(t *testing.T) {
 	cleanup := setupJetyDangerouslyAllowRoot(t, true)
 	defer cleanup()
 
-	// With dangerouslyAllowRoot, should return all sprouts.
+	// No bypass: an unknown user sees nothing, flag or not.
 	result := filterSproutsByScope(pki.CurrentTenantID(), "UANYUSER", rbac.ActionView, []string{"sprout-f1", "sprout-f2"})
-	if len(result) != 2 {
-		t.Errorf("expected 2 filtered sprouts, got %d", len(result))
+	if len(result) != 0 {
+		t.Errorf("expected 0 filtered sprouts, got %d", len(result))
 	}
 }
 
@@ -266,7 +267,7 @@ func TestFilterSproutsByScopeUnknownUser(t *testing.T) {
 	}
 }
 
-// --- handleSproutsList with dangerouslyAllowRoot (skips scope filter) ---
+// --- handleSproutsList with dangerouslyAllowRoot (still filters by scope) ---
 
 func TestHandleSproutsListDangerouslyAllowRoot(t *testing.T) {
 	pkiDir := setupNatsAPIPKI(t)
@@ -277,14 +278,14 @@ func TestHandleSproutsListDangerouslyAllowRoot(t *testing.T) {
 	cleanup := setupJetyDangerouslyAllowRoot(t, true)
 	defer cleanup()
 
-	result, err := handleSproutsList(apiCaller{TenantID: pki.CurrentTenantID()}, nil)
+	result, err := handleSproutsList(apiCaller{TenantID: pki.CurrentTenantID(), UserID: "UNOROLE"}, nil)
 	if err != nil {
 		t.Fatalf("handleSproutsList: %v", err)
 	}
 
 	m := result.(map[string][]SproutInfo)
-	if len(m["sprouts"]) != 1 {
-		t.Errorf("expected 1 sprout, got %d", len(m["sprouts"]))
+	if len(m["sprouts"]) != 0 {
+		t.Errorf("a user with no role saw %d sprouts under dangerously_allow_root", len(m["sprouts"]))
 	}
 }
 
@@ -302,14 +303,14 @@ func TestHandleJobsListDangerouslyAllowRoot(t *testing.T) {
 	}
 	writeTestJob(t, obj, "sprout-dar-j", "jid-dar-1", steps)
 
-	result, err := handleJobsList(apiCaller{TenantID: pki.CurrentTenantID()}, nil)
+	result, err := handleJobsList(apiCaller{TenantID: pki.CurrentTenantID(), UserID: "UNOROLE"}, nil)
 	if err != nil {
 		t.Fatalf("handleJobsList: %v", err)
 	}
 
 	summaries := result.([]jobs.JobSummary)
-	if len(summaries) != 1 {
-		t.Errorf("expected 1 job, got %d", len(summaries))
+	if len(summaries) != 0 {
+		t.Errorf("a user with no role saw %d jobs under dangerously_allow_root", len(summaries))
 	}
 }
 

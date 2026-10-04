@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	intauth "github.com/yogzblr/imas/internal/auth"
-	log "github.com/yogzblr/imas/internal/log"
 	"github.com/yogzblr/imas/internal/rbac"
 )
 
@@ -103,12 +102,13 @@ func NATSMethodAction(method string) rbac.Action {
 // (checkScopedAccess, in c's tenant). Both checks look the role up by
 // c.UserID, never by anything in params. nil means allowed;
 // rbac.ErrAccessDenied otherwise.
+//
+// dangerously_allow_root changes nothing here (owner decision 2026-10-04,
+// PR #95: "remove dangerously_allow_root bypass from the NATS path"): a
+// sealed request always goes through the role and scope checks for the
+// user it opened under.
 func authorize(method string, c apiCaller, params json.RawMessage) error {
 	if selfMethods[method] {
-		return nil
-	}
-	if intauth.DangerouslyAllowRoot() {
-		log.Warnf("dangerously_allow_root: bypassing RBAC for NATS method %s (user %s)", method, c.UserID)
 		return nil
 	}
 	requiredAction := NATSMethodAction(method)
