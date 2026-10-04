@@ -628,7 +628,7 @@ func TestFarmerPoliciesAreExact(t *testing.T) {
 	cm := find(t, mustRender(t, "--set", "openbaoBootstrap.farmerbus.enabled=true",
 		"--set", "openbaoBootstrap.farmerbus.serviceAccountName=imas-dmz-nats-bus"), "ConfigMap", "t-farmer-openbao-policies")
 	want := map[string][]string{
-		"imas-farmer-gateway.hcl":   {`path "transit/sign/imas-gateway-jwt"`, `path "transit/keys/imas-gateway-jwt"`},
+		"imas-farmer-gateway.hcl": {`path "transit/sign/imas-gateway-jwt"`, `path "transit/keys/imas-gateway-jwt"`},
 		// Only the per-tenant secrets: no read of the base path, where the
 		// deleted legacy shared keypair lived (security review 2026-10, H3).
 		"imas-farmer-tenantbox.hcl": {`path "secret/data/imas/tenant-x25519/tenants/+"`},
