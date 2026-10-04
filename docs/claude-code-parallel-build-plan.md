@@ -1159,6 +1159,7 @@ Sub-waves, each held until the one before is merged to `main`:
 | Wave | Briefs (run in parallel) | Why this order |
 |---|---|---|
 | 7A | SEC.0, SEC.3a, SEC.3b, SEC.4, SEC.5 | Fixes on today's code. Disjoint areas: SEC.0 is `internal/auth` and `internal/openbao`; SEC.3a and SEC.3b are `internal/pki`, `internal/payloadbox` and the sprout (different files, rebase on each other); SEC.4 is facts, props and recipes; SEC.5 is self-update and dispatch. SEC.0 is tiny and should merge first. |
+| 7A+ | REC.1 | SaaS API recipe upload, needed for the UAT. Needs SEC.4 merged (it uses SEC.4's per-tenant key prefix and restricted template functions). Touches saasapi and objectstore only, so it runs in parallel with the J chain. |
 | 7B | J.1 | The sealing building blocks touch `internal/pki` and `internal/payloadbox`, so they wait for SEC.3a and SEC.3b. |
 | 7C | J.2, J.3 | Sealed refresh (pki, api handlers, sprout) and sealed `imas.api.*` (natsapi, auth, CLI) share only J.1's helpers. |
 | 7D | J.4, J.5 | Sealed `internal.*` and sealed shell both need J.3 (the natsapi wrapper and the CLI box keys). |
@@ -1166,8 +1167,7 @@ Sub-waves, each held until the one before is merged to `main`:
 
 Not in this wave, after the UAT gate: review M6 (same-second `iat` tie in the
 bus fence), the other Low findings, sealing the streams to the CLI (Decision D)
-and the cook step events, and the SaaS API recipe upload endpoints (SEC.4
-writes down what they need). Every brief inherits `CLAUDE.md`; the prompts
+and the cook step events, (REC.1, the SaaS API recipe upload, is in 7A+ because the UAT needs it). Every brief inherits `CLAUDE.md`; the prompts
 avoid backticks, double quotes and dollar signs.
 
 **SEC.0: token lifetime cap and the OpenBao echo fix**
@@ -1296,8 +1296,8 @@ unbounded work; cap template output size and execution time; keep props and
 hostname, which are already tenant-scoped. (4) Per-tenant recipes: resolve a
 recipe name under a per-tenant prefix first and then under a platform-wide
 read-only prefix, never under another tenant's. Check how recipes are staged for
-sprouts and served at /files/ (internal/natsapi/recipes.go, internal/api,
-deploy/envoy) and make sure a sprout of tenant A can never fetch tenant B's
+sprouts and served at /files/ (internal/api/handlers/recipes.go, internal/cook/store.go,
+internal/objectstore, deploy/envoy; the old internal/natsapi/recipes.go no longer exists) and make sure a sprout of tenant A can never fetch tenant B's
 staged or source recipe, with a test through the real handler. Do NOT build the
 upload endpoints here: in docs/design/cloudxp-machine-manager-api-design.md
 section 1.6 write down what they need (PUT and DELETE on
@@ -1307,8 +1307,8 @@ Tests: a forged fact body is ignored; reserved names are refused; a prop value
 with a newline stays one value; env and every removed function fail to render;
 template time and size limits; a cross-tenant recipe read is refused at every
 layer.
-Scope: internal/facts, internal/natsapi (props.go, recipes.go), internal/cook
-(farmercook.go, helpers.go), internal/saasapi/fleet_sprout_facts.go,
+Scope: internal/facts, internal/natsapi (props.go), internal/api/handlers (recipes.go),
+internal/objectstore, internal/cook (store.go, farmercook.go, helpers.go), internal/saasapi/fleet_sprout_facts.go,
 internal/api, deploy/envoy (only if a route needs it),
 docs/design/cloudxp-machine-manager-api-design.md, docs/BUILD-STATUS.md (Open
 items 10 and the requirement 9 row only). Tests: go test ./... must pass. PR:
@@ -1351,6 +1351,65 @@ internal/saasapi, cmd/fleetreleaser (report only), deploy/helm/farmer (values an
 env), docs/BUILD-STATUS.md (Open items 4 and 10 and the requirement 20 row only).
 Tests: go test ./... must pass. PR: state what you built, what you deferred, and
 any open question."
+```
+
+**REC.1: SaaS API recipe upload (after SEC.4)**
+```
+claude --cloud "Implement REC.1: tenants upload, list, read and delete their own
+recipes through the SaaS API. Owner decision, 2026-10-04: tenants write recipes
+and upload them through the SaaS API, and the UAT cannot run without it. Today
+recipes only arrive in the recipe bucket by a git sync outside this repo, the
+SaaS API has no object store client, and farmer reads recipes through
+internal/cook/store.go and internal/api/handlers/recipes.go. Recipe templates are
+untrusted input. FLAG FOR SECURITY REVIEW.
+Read first: docs/security-review-2026-10.md (M8, H2), the SEC.4 PR (the per-tenant
+key prefix, the restricted template function map, the section 1.6 notes in
+docs/design/cloudxp-machine-manager-api-design.md) and internal/objectstore. Use
+the key layout SEC.4 merged; if it did not settle one, use
+tenants/<tenant_id>/recipes/<name> and say so.
+Build: (1) Routes in internal/saasapi, in the section 1.6 style, every one behind
+Auth and tenant-scoped like the others: GET /v1/tenants/{tenant_id}/recipes (list,
+paged), GET .../recipes/{name} (content, sha256, size, updated time), PUT
+.../recipes/{name} (create or replace), DELETE .../recipes/{name}. Names are
+dot-notation like the existing recipes: validate strictly (lowercase letters,
+digits, dot, dash and underscore, no empty or dot-only segment, a length cap, no
+slash or traversal, nothing that collides with a reserved prefix) and map to the
+key in one function that every route uses. (2) Writer: the SaaS API writes to the
+recipe bucket directly with its own object store credential limited to the
+tenants/ prefix (never sprouts/, jobs or the platform prefix); add the config and
+the Helm values and a MinIO or S3 policy example, and say in the PR why this beats
+routing through farmer (farmer needs sealed internal.* first, J.4). Reads of the
+platform-wide prefix are allowed, writes are not. (3) Validation on PUT, before
+anything is stored: body size cap, per-tenant recipe count and total size caps,
+UTF-8 text only, the YAML parses, and the template parses and executes against dummy
+props with SEC.4's restricted function map under its time and output limits; reject
+anything that fails with a clear 4xx and never echo the body in an error or a log.
+(4) Concurrency and integrity: a conditional write (If-Match on the stored
+checksum or an expected sha256 header) so two editors do not silently overwrite each
+other; return the new sha256. (5) RBAC and audit: say which Keycloak role or scope may
+write versus read (follow the existing middleware model, least privilege), rate limit
+PUT and DELETE like the other mutating routes, and write an audit row for every
+write and delete with the tenant, caller, name, sha256 and size, never the content.
+(6) Freshness: confirm that farmer and the sprout pick up an uploaded recipe on the
+next cook without a restart or a cache to clear (internal/cook/store.go,
+the staged recipe path); if there is a cache, add an invalidation or a short TTL and
+test it. (7) Update docs/design/cloudxp-machine-manager-api-design.md section 1.6
+(replace the stale text that says these proxy farmer recipes.* subjects, which no
+longer exist), add the routes to docs/api, and write a short tenant-facing howto for
+uploading a recipe with curl in docs/INSTALL.md or a new docs page.
+Tests: a tenant cannot read, list, write or delete another tenant's recipes under any
+name or encoded path; invalid names, oversize bodies, over-quota, bad YAML, bad
+template and a template using a removed function are refused; a conditional write
+conflict returns 412; a recipe uploaded through the API cooks on a sprout of the same
+tenant and is not visible to a sprout of another tenant (use the embedded
+farmer and an in-memory or MinIO test store as the existing tests do); audit rows
+carry no content.
+Scope: internal/saasapi, internal/objectstore (only if a conditional put or a paged
+list is missing), internal/cook (store.go, only for the freshness fix),
+deploy/helm (saasapi values, secret and env), docs/design/cloudxp-machine-manager-api-design.md,
+docs/api, docs/INSTALL.md, docs/BUILD-STATUS.md (Open items 1 and 10 only). Needs SEC.4
+merged. Tests: go test ./... must pass. PR: state what you built, what you deferred,
+and any open question."
 ```
 
 **J.1: sealing building blocks (after SEC.3a and SEC.3b)**

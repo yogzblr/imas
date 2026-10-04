@@ -628,7 +628,9 @@ tenants write recipes and upload them through the SaaS API, so recipe
 templates are untrusted input (M8 is a blocker); sealing (items 2 and 11) is
 built before the Terraform UAT gate, sealed-only with no compatibility window
 because nothing is deployed. Briefs: `docs/claude-code-parallel-build-plan.md`
-section 4e (Wave 7: SEC.0, SEC.3a, SEC.3b, SEC.4, SEC.5, J.1 to J.5, SEC.6).
+section 4e (Wave 7: SEC.0, SEC.3a, SEC.3b, SEC.4, SEC.5, REC.1, J.1 to J.5, SEC.6).
+REC.1 (SaaS API recipe upload) is a UAT prerequisite: recipes only reach the bucket
+by an external git sync today.
 
 1. **Terraform UAT gate: not started.** No Terraform exists in the repo. It
    is the release-quality gate (provision VMs per OS, install the published
