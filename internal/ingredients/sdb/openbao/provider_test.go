@@ -2,6 +2,7 @@ package openbao
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -137,6 +138,81 @@ func TestGet_KVv1Fallback(t *testing.T) {
 	}
 	if got != "legacy-secret" {
 		t.Errorf("got %q, want %q", got, "legacy-secret")
+	}
+}
+
+// TestGet_ReadErrorNamesEveryPathTried: an absent KV v2 secret falls
+// back to KV v1, and the error says what both reads returned, so a
+// refused fallback doesn't read as only "permission denied". The lookup
+// order is unchanged: KV v2 first, KV v1 only after a 404.
+func TestGet_ReadErrorNamesEveryPathTried(t *testing.T) {
+	statuses := map[string]int{}
+	var order []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(r.URL.Path, "/v1/auth/") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"auth": map[string]any{"client_token": "t", "lease_duration": 3600}})
+			return
+		}
+		order = append(order, r.URL.Path)
+		code, ok := statuses[r.URL.Path]
+		if !ok {
+			code = http.StatusNotFound
+		}
+		w.WriteHeader(code)
+		errs := []string{}
+		if code == http.StatusForbidden {
+			errs = []string{"permission denied"}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"errors": errs})
+	}))
+	t.Cleanup(srv.Close)
+	p := newWithTransport(srv.URL, "cert", "", http.DefaultTransport)
+
+	for _, tc := range []struct {
+		name     string
+		statuses map[string]int
+		want     string
+		paths    []string
+		status   int
+	}{
+		{
+			name:     "absent, fallback refused",
+			statuses: map[string]int{"/v1/kv/app/db": http.StatusForbidden},
+			want:     "openbao secret read failed: tried kv/data/app/db (KV v2): status 404 (not found); then kv/app/db (KV v1): status 403 (forbidden): permission denied",
+			paths:    []string{"/v1/kv/data/app/db", "/v1/kv/app/db"},
+			status:   http.StatusForbidden,
+		},
+		{
+			name:   "absent from both",
+			want:   "openbao secret read failed: tried kv/data/app/db (KV v2): status 404 (not found); then kv/app/db (KV v1): status 404 (not found)",
+			paths:  []string{"/v1/kv/data/app/db", "/v1/kv/app/db"},
+			status: http.StatusNotFound,
+		},
+		{
+			name:     "KV v2 refused: no fallback",
+			statuses: map[string]int{"/v1/kv/data/app/db": http.StatusForbidden},
+			want:     "openbao secret read failed: tried kv/data/app/db (KV v2): status 403 (forbidden): permission denied",
+			paths:    []string{"/v1/kv/data/app/db"},
+			status:   http.StatusForbidden,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			statuses, order = tc.statuses, nil
+			_, err := p.Get(t.Context(), "sdb://openbao/kv/app/db#password")
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("err = %v\nwant %s", err, tc.want)
+			}
+			if !errors.Is(err, ErrReadFailed) {
+				t.Errorf("err is not ErrReadFailed")
+			}
+			if got := statusCode(err); got != tc.status {
+				t.Errorf("statusCode = %d, want %d (the last read's)", got, tc.status)
+			}
+			if strings.Join(order, " ") != strings.Join(tc.paths, " ") {
+				t.Errorf("reads = %v, want %v", order, tc.paths)
+			}
+		})
 	}
 }
 
