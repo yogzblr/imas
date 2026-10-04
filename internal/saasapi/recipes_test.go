@@ -304,10 +304,22 @@ func TestRecipeTenantIsolation(t *testing.T) {
 	}
 	for _, m := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
 		for _, target := range crafted {
+			// As served (cmd/saasapi), behind RejectUncleanPaths: every
+			// crafted target is a plain 400, by the guard or the name check.
+			guarded := httptest.NewRecorder()
+			r := httptest.NewRequest(m, target, strings.NewReader(recipeBody("x")))
+			r.Header.Set(InternalAuthHeader, testInternalAuthSecretCurrent)
+			r.Header.Set("Authorization", "Bearer "+aAll)
+			r.Header.Set("If-Match", "*")
+			RejectUncleanPaths(e.mux).ServeHTTP(guarded, r)
+			if guarded.Code != http.StatusBadRequest {
+				t.Errorf("guarded %s %s: %d %s, want 400", m, target, guarded.Code, guarded.Body.String())
+			}
+
+			// The bare mux, worst case: ServeMux answers a path with dot
+			// segments with a redirect to the cleaned path; a client that
+			// follows it lands on B's route, where Auth refuses A's token.
 			w := e.do(m, target, aAll, recipeBody("x"), map[string]string{"If-Match": "*"})
-			// ServeMux answers a path with dot segments with a redirect to
-			// the cleaned path; a client that follows it lands on B's
-			// route, where Auth refuses A's token.
 			// (A redirect to A's own /v1/tenants/{id} is not followed here:
 			// it leaves the recipe routes.)
 			if loc := w.Header().Get("Location"); w.Code == http.StatusTemporaryRedirect || w.Code == http.StatusMovedPermanently {

@@ -95,7 +95,7 @@ released.
 | 7 | SaaS API section 1.7 (API keys, teams, webhooks, billing) | **Red** | Never designed; needs a design pass. |
 | 8 | Docs wording (requirement 15, README embedded bus) | **Amber** | Small docs change. |
 | 9 | Nice-to-haves (Keycloak harness, rotation scheduler, CERT-In/DPDP review) | **Amber** | Unowned. |
-| 10 | Leftovers from PR #62 to #67 (release pipeline, stale diagram, OpenBao client follow-ups) | **Amber** | Fold into one clean-up brief after the first release shows what the pipeline really needs. Add fleetreleaser's check against the tag's signed `checksums.txt` there if wanted (SEC.5 report). REC.1 follow-ups are listed under item 10: audit table, deprovision clean-up, the role on `cook`, and ServeMux redirects (PR #89). |
+| 10 | Leftovers from PR #62 to #67 (release pipeline, stale diagram, OpenBao client follow-ups) | **Amber** | Fold into one clean-up brief after the first release shows what the pipeline really needs. Add fleetreleaser's check against the tag's signed `checksums.txt` there if wanted (SEC.5 report). REC.1 follow-ups are listed under item 10: audit table, deprovision clean-up, and the role on `cook`. |
 | 11 | Control plane forgeable by a compromised bus (CLI tokens, sprout refresh, `internal.*`) | **Red** | Design written, awaiting security review ("Sealing the control plane" in `imas-payload-encryption-design.md`). Ship the token-lifetime stopgap now. |
 
 ## Requirements traceability
@@ -965,11 +965,11 @@ by an external git sync today.
         conditional delete).
       - Validation renders with empty props, so a template that fails only
         for some prop values fails at cook time.
-      - Go's ServeMux answers a path with `..` with a 307 to the cleaned
-        path, so `DELETE .../recipes/..` redirects to `DELETE
-        /v1/tenants/{id}` for a client that follows redirects (all routes,
-        not just recipes). PR #89 fixes it separately; this PR neither
-        depends on it nor includes it.
+      Fixed alongside: Go's ServeMux answered a path with `..` with a 307
+      to the cleaned path, so `DELETE .../recipes/..` redirected to
+      `DELETE /v1/tenants/{id}`. PR #89 (merged) serves the tenant router,
+      recipe routes included, behind `RejectUncleanPaths`, which answers
+      400 instead (`TestRecipeRoutesWired` covers a recipe path).
     - **Sealed payloads after SEC.3b (security review 2026-10, H3, M2,
       H4; FLAG FOR SECURITY REVIEW):** left for later. Farmer still sends
       `cmd.run` and `cook` in plaintext, with a warning, to a sprout with no

@@ -113,33 +113,43 @@ func resetRecipes(t *testing.T) {
 	t.Cleanup(func() { _ = saasapi.ConfigureRecipes(saasapi.DefaultRecipeSettings(), nil) })
 }
 
+// tenantHandler builds the tenant API handler the way main does: startup
+// recipe configuration, then the router behind RejectUncleanPaths (the
+// expression main hands to its http.Server).
+func tenantHandler(t *testing.T) http.Handler {
+	t.Helper()
+	cfg, err := saasapi.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if err := saasapi.ConfigureRecipes(cfg.Recipes, nil); err != nil {
+		t.Fatalf("ConfigureRecipes: %v", err)
+	}
+	return saasapi.RejectUncleanPaths(newRouter(cfg))
+}
+
 // TestRecipeRoutesWired: through main's startup path (LoadConfig →
-// saasapi.ConfigureRecipes → newRouter), recipe config in the environment
-// makes the recipe routes live, and without it they answer 503. A PUT
-// without a precondition is the probe: a live route answers 428 before it
-// needs the database, an unconfigured one 503.
+// saasapi.ConfigureRecipes → RejectUncleanPaths(newRouter)), recipe config
+// in the environment makes the recipe routes live, and without it they
+// answer 503. A PUT without a precondition is the probe: a live route
+// answers 428 before it needs the database, an unconfigured one 503. An
+// unclean recipe path is refused by the guard, never redirected.
 func TestRecipeRoutesWired(t *testing.T) {
 	resetRecipes(t)
 	mint := wiringAuth(t)
 
-	probe := func(t *testing.T) *httptest.ResponseRecorder {
-		t.Helper()
-		cfg, err := saasapi.LoadConfig()
-		if err != nil {
-			t.Fatalf("LoadConfig: %v", err)
-		}
-		if err := saasapi.ConfigureRecipes(cfg.Recipes, nil); err != nil {
-			t.Fatalf("ConfigureRecipes: %v", err)
-		}
-		mux := newRouter(cfg)
-		r := httptest.NewRequest(http.MethodPut, "/v1/tenants/"+wiringTenant+"/recipes/web.hello",
-			strings.NewReader("steps: {}\n"))
+	put := func(h http.Handler, path string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPut, path, strings.NewReader("steps: {}\n"))
 		r.Header.Set(saasapi.InternalAuthHeader, wiringSecret)
 		r.Header.Set("Authorization", "Bearer "+mint("imas-recipes-write"))
 		r.Header.Set("Content-Type", "application/yaml")
 		w := httptest.NewRecorder()
-		mux.ServeHTTP(w, r)
+		h.ServeHTTP(w, r)
 		return w
+	}
+	probe := func(t *testing.T) *httptest.ResponseRecorder {
+		t.Helper()
+		return put(tenantHandler(t), "/v1/tenants/"+wiringTenant+"/recipes/web.hello")
 	}
 	code := func(w *httptest.ResponseRecorder) string {
 		var body struct{ Error string }
@@ -153,6 +163,12 @@ func TestRecipeRoutesWired(t *testing.T) {
 		w := probe(t)
 		if w.Code != http.StatusPreconditionRequired || code(w) != "precondition_required" {
 			t.Fatalf("PUT with recipes configured = %d %s, want 428 precondition_required (the route is live)", w.Code, w.Body.String())
+		}
+		// Behind RejectUncleanPaths: a dot-segment path is a 400, not a
+		// 307 on to PUT /v1/tenants/{id}.
+		w = put(tenantHandler(t), "/v1/tenants/"+wiringTenant+"/recipes/..")
+		if w.Code != http.StatusBadRequest || code(w) != "invalid_request" || w.Header().Get("Location") != "" {
+			t.Fatalf("PUT .../recipes/.. = %d %s (Location %q), want 400 invalid_request", w.Code, w.Body.String(), w.Header().Get("Location"))
 		}
 	})
 	t.Run("unconfigured", func(t *testing.T) {
