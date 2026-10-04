@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
 
 	"crypto/ecdsa"
@@ -36,13 +37,22 @@ import (
 // also creates a fake farmer
 // NKey pub file so that pki.ReloadNKeys() (called by defer in AcceptNKey,
 // DenyNKey, etc.) doesn't log.Fatal.
+// pkiTestDBSeq numbers setupPKIDirs's databases.
+var pkiTestDBSeq atomic.Int64
+
 func setupPKIDirs(t *testing.T) string {
 	t.Helper()
 
-	dsn := "file:" + t.Name() + "-pki?mode=memory&cache=shared"
+	// A shared-cache in-memory database lives as long as a connection to
+	// it does, so a name reused by the same test under -count would find
+	// the previous run's rows: give each call its own, and close it.
+	dsn := "file:" + t.Name() + "-pki-" + strconv.FormatInt(pkiTestDBSeq.Add(1), 10) + "?mode=memory&cache=shared"
 	gdb, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("opening pki test db: %v", err)
+	}
+	if sqlDB, err := gdb.DB(); err == nil {
+		t.Cleanup(func() { _ = sqlDB.Close() })
 	}
 	if err := gdb.AutoMigrate(pki.Models()...); err != nil {
 		t.Fatalf("migrating pki test db: %v", err)
