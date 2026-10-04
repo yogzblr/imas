@@ -21,14 +21,30 @@ var (
 	certPool   *x509.CertPool
 )
 
-// ConfigureNats builds the NATS server options for this farmer's bus node.
-// Auth is decentralized JWT (see docs/design/imas-nats-jwt-auth-design.md):
-// the Operator is the trust anchor, the SYSTEM account is used only to
-// receive claims-update pushes (see resolver.go), and a "full" resolver
-// (every node holds every Account JWT, appropriate at the near-term tenant
-// count) is seeded with the SYSTEM and tenant Account JWTs so the server
-// can validate connections from the moment it starts.
+// ConfigureNats builds the NATS server options for a bus node that shares
+// this process, and its FarmerPKI directory, with core: the in-process
+// core-plus-bus setup the package's tests use. Auth is decentralized JWT
+// (see docs/design/imas-nats-jwt-auth-design.md): the Operator is the
+// trust anchor, the SYSTEM account is used only to receive claims-update
+// pushes (see resolver.go), and a "full" resolver (every node holds every
+// Account JWT, appropriate at the near-term tenant count) is seeded with
+// the SYSTEM and tenant Account JWTs core holds on disk, so the server can
+// validate connections from the moment it starts.
+//
+// The DMZ bus (cmd/farmerbus) uses ConfigureBusNats instead (busauth.go),
+// which seeds no claims of its own beyond a SYS bootstrap that can't
+// outrank anything core signs.
 func ConfigureNats() nats_server.Options {
+	NatsConfig := baseNatsOptions()
+	seedResolverFromCore(&NatsConfig)
+	return NatsConfig
+}
+
+// baseNatsOptions builds the listeners and TLS for a bus node: the TCP
+// client port and, when configured, the websocket port, both TLS only.
+// It sets no auth; the callers add the operator, SYSTEM account and
+// resolver.
+func baseNatsOptions() nats_server.Options {
 	var NatsConfig nats_server.Options
 	FarmerInterface := config.FarmerInterface
 	FBusPort := config.FarmerBusPort
@@ -104,6 +120,12 @@ func ConfigureNats() nats_server.Options {
 		}
 	}
 
+	return NatsConfig
+}
+
+// seedResolverFromCore adds ConfigureNats's auth: the operator, SYSTEM
+// account and a full resolver seeded from core's on-disk material.
+func seedResolverFromCore(NatsConfig *nats_server.Options) {
 	mat, err := ensureNatsAuth()
 	if err != nil {
 		log.Panicf("nats: failed to bootstrap decentralized JWT auth material: %v", err)
@@ -157,8 +179,6 @@ func ConfigureNats() nats_server.Options {
 		}
 	}
 	NatsConfig.AccountResolver = resolver
-
-	return NatsConfig
 }
 
 func SetNATSServer(s *nats_server.Server) {

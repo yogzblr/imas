@@ -187,7 +187,7 @@ explanation rather than deploying something that silently can't work.
 {{- fail (printf "bus.cluster.auth.passwordKey %q is not a valid Secret key" .Values.bus.cluster.auth.passwordKey) -}}
 {{- end -}}
 {{- if not .Values.bus.persistence.enabled -}}
-{{- fail "bus.persistence.enabled must be true when bus.replicaCount > 1: without a PVC every restart re-mints the bus-local legacy tenant Account JWT with a fresh issued-at, which then outranks core's pushed one (and its revocations) on every node through the resolver sync (see README.md, \"Clustering\")." -}}
+{{- fail "bus.persistence.enabled must be true when bus.replicaCount > 1: a node without a PVC starts with no Account JWTs on every restart and serves nobody until it has pulled them all from its peers, and a restart of every node loses them until core reconnects and pushes them again (see README.md, \"Clustering\")." -}}
 {{- end -}}
 {{- end -}}
 {{- if not (has .Values.bus.tls.mode (list "secret" "openbao")) -}}

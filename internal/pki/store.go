@@ -340,6 +340,21 @@ func ListProvisionedTenantIDs() ([]string, error) {
 	return ids, nil
 }
 
+// listDeletedTenantIDs returns every deprovisioned tenant ID in
+// pki_tenants, tombstones included (PushAllAccounts skips those that never
+// had an Account).
+func listDeletedTenantIDs() ([]string, error) {
+	var rows []tenantRow
+	if err := db.Where("deleted = ?", true).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r.ID)
+	}
+	return ids, nil
+}
+
 func TenantIDForAccountPub(accountPub string) (string, error) {
 	if accountPub == "" {
 		return "", ErrTenantNotFound

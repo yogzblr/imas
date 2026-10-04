@@ -670,10 +670,12 @@ this file can be checked against the repository's history.
    a node is down, partitioned, or on a partial mesh); never on a real
    cluster. Left open, all in the chart README's "Clustering": a push in
    the ~4 s before a partition is detected can miss a node until its next
-   pull; farmerbus's self-minted legacy-tenant Account JWT outranks core's
-   pushed one on an empty PVC (pre-existing, but a cluster spreads it), so
-   core should re-push every Account on connect; and core still pushes to
-   one node, never waiting for every node to confirm.
+   pull; and core still pushes to one node, never waiting for every node
+   to confirm. Fixed since: the bus no longer mints its own legacy-tenant
+   and SYS Account JWTs (on an empty volume those outranked core's pushed
+   ones and, in a cluster, spread to every node, re-admitting revoked
+   sprouts and rotated-out SaaS API keys); core now pushes every Account
+   whenever its SYS connection connects or reconnects.
 4. **Security review of the flagged work**, including FU.0/FU.2/FU.3/FU.4/
    FU.6b, CL.1, CL.2a, CL.2b, CL.3 and the J follow-ups. All have merged, but
    this file does not record that a separate security review was held; record

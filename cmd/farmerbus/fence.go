@@ -153,17 +153,16 @@ func (f *fence) gate(next func(tls.ConnectionState) error) func(tls.ConnectionSt
 }
 
 // start connects the fence's own in-process SYS client and runs the
-// health loop until stop. The in-process connection never touches a
-// listener, so the TLS gate does not apply to it.
-func (f *fence) start(srv *nats_server.Server) error {
+// health loop until stop.
+func (f *fence) start(srv *nats_server.Server, sysUser pki.BusSysUser) error {
 	f.srv = srv
-	nc, err := pki.ConnectSystemAccount(
+	// An in-process pipe: no listener, so neither the TLS gate nor TLS
+	// itself applies. sysUser is the bus's ephemeral SYS user
+	// (pki.ConfigureBusNats).
+	nc, err := nats.Connect(nats.DefaultURL,
 		nats.InProcessServer(srv),
+		nats.UserJWTAndSeed(sysUser.JWT, sysUser.Seed),
 		nats.Name("farmerbus-fence"),
-		// pki adds nats.Secure for the network push path; an in-process
-		// pipe has no network to protect, and nats-server does not offer
-		// TLS on it as required.
-		func(o *nats.Options) error { o.Secure = false; o.TLSConfig = nil; return nil },
 		nats.MaxReconnects(-1),
 	)
 	if err != nil {
