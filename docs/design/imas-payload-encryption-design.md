@@ -256,7 +256,7 @@ Not in scope: a compromised farmer (it holds `tenant_priv` and can always open a
 The owner answered every question on 2026-10-04, taking each proposed default, before J.5 was built. The answers are recorded under each question.
 
 1. **The control-plane gap** is now designed in "Sealing the control plane" below, with its own open questions. Shell can't ship before that section's CLI box keys (its rollout step 4). *Answered: J.3 built them; leg 1 authenticates with the CLI box key, as Decision 1 says.*
-2. **Transcripts.** Do CERT-In, DPDP or customer contracts require session recording? If so: output only, per tenant, where it is stored, under what key, and for how long? *Answered for v1: no transcripts, only audit entries when a session starts and ends. Whether CERT-In or DPDP require recording is still open and is asked in the J.5 PR.*
+2. **Transcripts.** Do CERT-In, DPDP or customer contracts require session recording? If so: output only, per tenant, where it is stored, under what key, and for how long? *Answered: no transcripts, only audit entries when a session starts and ends. Owner, 2026-10-04 (PR #98): "no recording needed": CERT-In and DPDP don't call for session recording.*
 3. **Defaults:**
    - farmer's default and maximum idle timeout (proposed 15 min and 60 min);
    - maximum session duration (proposed 8 h);
@@ -264,7 +264,7 @@ The owner answered every question on 2026-10-04, taking each proposed default, b
    - the sprout shell allow-list (proposed: `/etc/shells`, overridable in sprout config).
 
    *Answered: all four as proposed.*
-4. **Should the built-in `operator` role keep `shell`,** or should `shell` need an explicit grant? Proposed: drop it from `operator`. *Answered: drop it; `operator` loses `shell` unless granted. Not yet built: it lives in `internal/rbac`, outside J.5's scope (see "As built: J.5").*
+4. **Should the built-in `operator` role keep `shell`,** or should `shell` need an explicit grant? Proposed: drop it from `operator`. *Answered: drop it; `operator` loses `shell` unless granted. Not yet built: it lives in `internal/rbac`, and the owner made it a follow-up PR (PR #98). Until it lands, the built-in `operator` role can still open a shell, contrary to this decision (see "As built: J.5").*
 5. **Keystroke timing.** Should v1 send input on a fixed tick with chaff frames, as OpenSSH does, or accept the leak as a recorded residual risk? *Answered: a recorded residual risk; no chaff in v1.*
 6. **Pinning `tenantboxpub` in the CLI.** Explicit config only (proposed), or trust on first use with a fingerprint prompt? *Answered: explicit config only.*
 7. **Sessions die with their farmer replica.** Is that acceptable, and is an admin `imas shell list` / `imas shell kill` across replicas (a Valkey registry keyed `(tenant_id, session_id)`) needed in v1? *Answered: acceptable, and v1 has no cross-replica list.*
@@ -337,12 +337,22 @@ The owner answered every question on 2026-10-04, taking each proposed default, b
 - **Audit.** The router's entry `shell.open` records the sealed request, as for every method. The handler writes `shell.start`, not a second `shell.open`, so the two can't be confused: leg 2's outcome, with the session ID and the fixed code if it failed (including `no-hello`). It also writes `shell.end`: duration, exit code, reason, and bytes and frames each way. Neither entry ever holds content.
 - **`key-severed` is conservative.** A session ends when the tenant key version its leg 2 used is no longer one farmer seals and opens under: the current key, plus the previous one inside the grace window. That covers `--sever` and a deleted version. It also ends a session that outlives its key's grace window: two rotations during one session, or a grace window shorter than the session. The default grace is 24 h, longer than the 8 h maximum session.
 
-**Not built in J.5, and why.**
+**Owner decisions, 2026-10-04 (PR #98): "no recording needed, follow-ups for the rest".**
 
-- **`operator` losing `shell`.** The owner decided it, but `BuiltinOperatorRole` is in `internal/rbac`, outside this brief's file scope. Until then `operator` still grants `shell`; `natsapi`'s `TestOperatorRoleNATSAccess` pins today's behaviour.
-- **`farmer-shutdown` on farmer's stop.** `natsapi.CloseShellSessions` exists, but calling it from farmer's shutdown path means editing `cmd/farmer`, outside scope. Until then both ends see `peer-lost` within 45 s, and the sprout kills the shell.
-- **User docs.** `docs/INSTALL.md` ("`imas ssh` sessions are plaintext until sealed shell"), `docs/api/farmer-cli-api.md`, `README.md` and `ansible/README.md`'s variable table are outside scope and still describe plaintext shell.
-- **Keystroke timing obfuscation.** Not built: the owner recorded it as a residual risk (Open question 5).
+- **No session recording.** CERT-In and DPDP don't call for it, so v1 keeps only the audit entries when a session starts and ends (Open question 2). There are no transcripts, input or output.
+- **The rest becomes follow-up PRs** (below), not part of J.5.
+
+**Deferred to follow-up PRs (owner decision).**
+
+- **`operator` losing `shell`** (`internal/rbac/config.go`, `BuiltinOperatorRole`, and its tests). **Until it lands, the built-in `operator` role can still open a shell, contrary to the agreed default** (Open question 4). `natsapi`'s `TestOperatorRoleNATSAccess` pins today's behaviour, and changes with it.
+- **`farmer-shutdown` on farmer's stop.** Farmer's shutdown path (`cmd/farmer`) should call `natsapi.CloseShellSessions()`, which kills every session and waits for it. Until it does, both ends see `peer-lost` within 45 s, and the sprout kills the shell.
+- **User docs that still describe shell as plaintext:**
+  - `docs/INSTALL.md` ("`imas ssh` sessions are plaintext until sealed shell");
+  - `docs/api/farmer-cli-api.md`;
+  - `README.md`;
+  - `ansible/README.md`'s variable table (`imas_sprout_disable_shell`).
+
+**Not built, by decision.** Keystroke timing obfuscation: the owner recorded the leak as a residual risk (Open question 5).
 
 **What a compromised bus can still do** is Decision 3's table, unchanged:
 
