@@ -680,10 +680,12 @@ this file can be checked against the repository's history.
    reconnected after the bus was stopped for 2 s. That shows the harness
    and the reconnect path work; it is not a scale or latency result, and
    no run at 10k, 100k or 1M has been made.
-   Writing it found that a bus node refuses clients above 65,536
-   (nats-server's default `max_connections`, which neither
-   `pki.ConfigureBusNats` nor `cmd/farmerbus` sets), so 100k sprouts needs
-   a cluster or that limit raised. **SCALE.2, the clustered bus, is
+   Writing it found that a bus node refused clients above 65,536
+   (nats-server's default `max_connections`, which nothing set); the limit
+   is now `busmaxconnections`, exposed as the nats chart's
+   `bus.maxConnections` (default 65,536). Raising it needs memory to
+   match: the chart's default 512Mi bus memory limit is reached at a few
+   thousand connections. **SCALE.2, the clustered bus, is
    built** (FLAG FOR SECURITY REVIEW, not yet reviewed): `cmd/farmerbus`
    reads `IMAS_BUS_CLUSTER_*`, routes need mutual TLS plus a route password
    and are confined to bus pods by their own NetworkPolicy, and a fence

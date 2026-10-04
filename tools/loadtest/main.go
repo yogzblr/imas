@@ -96,6 +96,7 @@ type options struct {
 	BusHost        string
 	BusPort        int
 	BusTrace       bool
+	BusMaxConn     int
 	Deadline       time.Duration
 
 	MaxP99            time.Duration
@@ -168,6 +169,7 @@ func defineFlags(fs *flag.FlagSet, o *options) {
 	fs.StringVar(&o.WorkDir, "workdir", "", "local bus working directory (certificates, seeds, bus.log); default a new temporary one")
 	fs.StringVar(&o.BusHost, "bus-host", "127.0.0.1", "local bus listen address")
 	fs.IntVar(&o.BusPort, "bus-port", 0, "local bus port; 0 picks a free one")
+	fs.IntVar(&o.BusMaxConn, "bus-max-connections", 0, "local bus: its busmaxconnections (0 for nats-server's default of 65,536)")
 	fs.BoolVar(&o.BusTrace, "bus-trace", true, "local bus: NATS debug and trace logging on, as cmd/farmerbus sets it; false to measure what it costs")
 	fs.DurationVar(&o.Deadline, "deadline", 0, "abort the whole run after this long; 0 for none")
 
@@ -257,6 +259,9 @@ func (o *options) validate() error {
 	}
 	if o.IDPrefix != "" && !validPrefix(o.IDPrefix) {
 		return fmt.Errorf("-id-prefix %q: use letters, digits and '-', starting with a letter", o.IDPrefix)
+	}
+	if o.BusMaxConn < 0 {
+		return errors.New("-bus-max-connections must not be negative")
 	}
 	if o.PingRate <= 0 {
 		return errors.New("-ping-rate must be positive")
@@ -416,6 +421,7 @@ func run(ctx context.Context, o *options) (*result, error) {
 		if bus, pool, err = newLocalBus(dir, o.BusHost, o.BusPort, seeds, o.BusTrace); err != nil {
 			return nil, err
 		}
+		bus.maxConn = o.BusMaxConn
 		defer bus.Close()
 		logf("starting the local bus (%s, log in %s/bus.log)", bus.URL(), dir)
 		if err := bus.Start(ctx); err != nil {

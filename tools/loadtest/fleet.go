@@ -374,9 +374,14 @@ func connectReason(err error) string {
 	case errors.Is(err, nats.ErrAuthorization), strings.Contains(err.Error(), "Authorization Violation"):
 		return "authorization violation"
 	case errors.Is(err, nats.ErrMaxConnectionsExceeded), strings.Contains(err.Error(), "maximum connections exceeded"):
-		// nats-server's max_connections: 65536 unless set, and neither
-		// pki.ConfigureBusNats nor cmd/farmerbus sets it.
 		return "maximum connections exceeded"
+	case strings.Contains(err.Error(), "tls error: EOF"),
+		strings.Contains(err.Error(), "first record does not look like a TLS handshake"):
+		// A bus at its connection limit (busmaxconnections, 65,536 by
+		// default) sends a plaintext -ERR after its INFO and closes. On
+		// its TLS-only listener the client is mid-upgrade by then: it
+		// reads the -ERR as a bad TLS record, or sees only the close.
+		return "refused during TLS (a bus at its connection limit does this)"
 	case errors.Is(err, nats.ErrNoServers):
 		return "no servers available"
 	case errors.Is(err, nats.ErrTimeout), errors.As(err, &ne) && ne.Timeout():

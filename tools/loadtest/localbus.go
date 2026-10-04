@@ -50,7 +50,9 @@ const (
 	envBusPort = "IMAS_LOADTEST_BUS_PORT"
 	// envBusTrace "off" turns NATS debug and trace logging off.
 	envBusTrace = "IMAS_LOADTEST_BUS_TRACE"
-	busReady    = "IMAS-LOADTEST-BUS-READY"
+	// envBusMaxConn is the bus's busmaxconnections.
+	envBusMaxConn = "IMAS_LOADTEST_BUS_MAX_CONNECTIONS"
+	busReady      = "IMAS-LOADTEST-BUS-READY"
 )
 
 // writeBusCerts issues a CA and a server certificate for host (and
@@ -123,6 +125,8 @@ type localBus struct {
 	port  int
 	seeds seedFiles
 	trace bool
+	// maxConn is the child's busmaxconnections; 0 for the default.
+	maxConn int
 
 	mu      sync.Mutex
 	cmd     *exec.Cmd
@@ -184,6 +188,9 @@ func (b *localBus) Start(ctx context.Context) error {
 	)
 	if !b.trace {
 		cmd.Env = append(cmd.Env, envBusTrace+"=off")
+	}
+	if b.maxConn != 0 {
+		cmd.Env = append(cmd.Env, envBusMaxConn+"="+strconv.Itoa(b.maxConn))
 	}
 	for name, path := range b.seeds {
 		cmd.Env = append(cmd.Env, "IMAS_NATS_"+name+"_SEED_FILE="+path)
@@ -270,6 +277,13 @@ func runBusNode() error {
 	config.KeyFile = filepath.Join(dir, "key.pem")
 	// farmer's default "loglevel".
 	log.SetLogLevel(log.LInfo)
+	if v := os.Getenv(envBusMaxConn); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return fmt.Errorf("%s=%q: want a non-negative integer", envBusMaxConn, v)
+		}
+		config.BusMaxConnections = n
+	}
 
 	opts, _ := pki.ConfigureBusNats()
 	// A fixed name, so the node reads as one bus across restarts in the

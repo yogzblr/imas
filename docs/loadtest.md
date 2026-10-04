@@ -185,14 +185,19 @@ network as the bus.
 
 This needs several generators and a bus that can hold the connections.
 
-**The bus.** Neither `pki.ConfigureBusNats` nor `cmd/farmerbus` sets
-nats-server's `max_connections`, so **every node refuses clients above
-65,536** (the nats-server default). 100,000 sprouts needs a cluster
-(`bus.replicaCount` 3 or more), and with one node restarted the remaining
-nodes must hold its sprouts too. The harness reports refusals as
-"maximum connections exceeded". Also check the bus pods' memory limits
-against the per-connection memory the varz rows report on a smaller run,
-and the nodes' file descriptor limit.
+**The bus.** Each node accepts at most `bus.maxConnections` clients
+(`busmaxconnections`; 65,536 by default, nats-server's own default), and
+the default 512Mi memory limit is OOM-killed far sooner, at a few
+thousand connections. Size `bus.resources` and `bus.maxConnections`
+together, as the nats chart README's "Connection limit" section
+describes. With one node of a cluster restarted, the remaining nodes must
+hold its sprouts too, so give each node room for
+`sprouts / (replicaCount - 1)`. The harness reports a refusal at the
+limit as "refused during TLS (a bus at its connection limit does this)":
+on the TLS-only listener a client never sees nats-server's
+`maximum connections exceeded` message. Against the local bus,
+`-bus-max-connections` sets the same limit. Also check the nodes' file
+descriptor limit.
 
 **The generators.** One generator process holds about 20,000 to 25,000
 connections comfortably. Size them from your own smaller run: the report

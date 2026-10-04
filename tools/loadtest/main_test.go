@@ -56,6 +56,7 @@ func TestParseOptionsDefaultsAndErrors(t *testing.T) {
 		{"-id-prefix", "-bad"},
 		{"-id-prefix", "a.b"},
 		{"-sprouts", "0"},
+		{"-bus-max-connections", "-1"},
 		{"-proc", "core"},
 		{"stray"},
 	} {
@@ -76,6 +77,11 @@ func TestParseOptionsDefaultsAndErrors(t *testing.T) {
 // client TLS config and a tenant already pushed to it.
 func startTestBus(t *testing.T) (*localBus, *tls.Config, *trust, *tenantFixture) {
 	t.Helper()
+	return startTestBusMaxConn(t, 0)
+}
+
+func startTestBusMaxConn(t *testing.T, maxConn int) (*localBus, *tls.Config, *trust, *tenantFixture) {
+	t.Helper()
 	dir := t.TempDir()
 	tr, seeds, err := newLocalTrust(dir)
 	if err != nil {
@@ -85,6 +91,7 @@ func startTestBus(t *testing.T) (*localBus, *tls.Config, *trust, *tenantFixture)
 	if err != nil {
 		t.Fatal(err)
 	}
+	bus.maxConn = maxConn
 	t.Cleanup(bus.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -193,5 +200,28 @@ func TestRunLocalEndToEnd(t *testing.T) {
 	}
 	if res.SproutHandledPings < res.Hold.OK {
 		t.Errorf("sprouts answered %d pings, requester counted %d", res.SproutHandledPings, res.Hold.OK)
+	}
+}
+
+// TestBusConnectionLimit checks -bus-max-connections reaches the local
+// bus (config.BusMaxConnections) and that the harness names the refusal,
+// which a client of the TLS-only bus sees only as a TLS failure.
+func TestBusConnectionLimit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts a bus process")
+	}
+	bus, tlsCfg, _, tf := startTestBusMaxConn(t, 5)
+	creds, err := tf.mintSprouts("cap", 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fl := newFleet(creds, fleetOptions{Servers: []string{bus.URL()}, TLS: tlsCfg, ConnectTimeout: 5 * time.Second})
+	defer fl.Close()
+	res := fl.connectAll(context.Background(), 0, 1, 0)
+	if res.Connected != 5 || res.NotConnected != 3 {
+		t.Fatalf("connected %d, not connected %d; want 5 and 3 (reasons %v)", res.Connected, res.NotConnected, res.Reasons)
+	}
+	if n := res.Reasons["refused during TLS (a bus at its connection limit does this)"]; n != 3 {
+		t.Errorf("reasons %v: want 3 connection-limit refusals", res.Reasons)
 	}
 }
