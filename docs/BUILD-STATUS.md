@@ -96,7 +96,7 @@ released.
 | 8 | Docs wording (requirement 15, README embedded bus) | **Amber** | Small docs change. |
 | 9 | Nice-to-haves (Keycloak harness, rotation scheduler, CERT-In/DPDP review) | **Amber** | Unowned. |
 | 10 | Leftovers from PR #62 to #67 (release pipeline, stale diagram, OpenBao client follow-ups) | **Amber** | Fold into one clean-up brief after the first release shows what the pipeline really needs. Add fleetreleaser's check against the tag's signed `checksums.txt` there if wanted (SEC.5 report). REC.1 follow-ups are listed under item 10: audit table, deprovision clean-up, and the role on `cook`. |
-| 11 | Control plane forgeable by a compromised bus (CLI tokens, sprout refresh, `internal.*`) | **Red** | Design written ("Sealing the control plane" in `imas-payload-encryption-design.md`). J.1 (building blocks), J.2 (sealed sprout refresh) and J.3 (sealed CLI API, bearer tokens removed) merged; J.4 (sealed `internal.*`) in review; all flagged for security review. Left: the Helm wiring for J.4's keys (`deploy/helm`, outside J.4's scope: a Helm-installed saasapi won't start until it lands), and "no responders" on `internal.sprout.action`, which a compromised bus can still forge to get an action re-sent (design Open question 10). |
+| 11 | Control plane forgeable by a compromised bus (CLI tokens, sprout refresh, `internal.*`) | **Red** | Design written ("Sealing the control plane" in `imas-payload-encryption-design.md`). J.1 (building blocks), J.2 (sealed sprout refresh) and J.3 (sealed CLI API, bearer tokens removed) merged; J.4 (sealed `internal.*`) in review; all flagged for security review. Left: the Helm wiring for J.4's keys (`deploy/helm`, outside J.4's scope: a Helm-installed saasapi won't start until it lands), and "no responders" on `internal.sprout.action`, which a compromised bus can still forge to get an action re-sent (design Open question 10): an accepted, known residual risk (owner decision, 2026-10-04, PR #97). |
 
 ## Requirements traceability
 
@@ -1211,7 +1211,14 @@ by an external git sync today.
       saasapi refuses to start. Also not built: B2, a core-only transport
       for `internal.*` (what it would take is written down in the design),
       and at-most-once per action item on farmer, the fix for a forged "no
-      responders" (design Open question 10).
+      responders" (the control-plane design's Open question 10).
+    - Owner decisions, 2026-10-04 (PR #97), verbatim: "accept no-responders
+      for now, do Helm wiring as follow-up PR". **Accepted, known residual
+      risk:** a compromised bus can deliver an `internal.sprout.action`
+      request, answer "no responders", and have the SaaS API send it again
+      as a new sealed message farmer accepts, so the action can run up to
+      `SAASAPI_OUTBOX_MAX_ATTEMPTS` times. No code change for it. The Helm
+      wiring goes in a follow-up PR.
 
     **Stopgap SEC.0 (superseded by J.3, which deleted the token code, this
     cap included):** `UserAuth.IsValid` refused an expiry more than 15 minutes ahead (the

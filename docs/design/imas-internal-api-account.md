@@ -695,7 +695,8 @@ What changes here:
   answer to that request fails the item with `dispatch_outcome_unknown`;
   only a sealed `farmer_busy` or sealed refusal-unrun sends it back to
   `queued`. "No responders" still does too, and that is the one
-  unauthenticated signal left: see that design's Open question 10.
+  unauthenticated signal left: see that design's Open question 10, an
+  accepted, known residual risk (owner decision, 2026-10-04, PR #97).
 - **Credential delivery.** The box key comes from `<base>/saasapi-box` in
   OpenBao, written by farmer's control-plane keygen Job, alongside the NATS
   credential's hand-off; the Helm wiring for it is a follow-up outside
