@@ -833,6 +833,32 @@ by an external git sync today.
    docs' item codes (saasapi records it as `internal_error` until then);
    the human review itself, and its decisions on the review's other open
    questions.
+   **Follow-up read-only review done 2026-10-04** over everything merged
+   since `eacdc79`, at `f645a93`
+   (`docs/security-review-2026-10-b.md`). Input to the human review, not a
+   substitute, and not a clean bill of health: 3 High, 3 Medium, 3 Low, 6
+   Info; no code changed; `go test ./...` passes. It re-checked the first
+   review's findings (H2, H4, M2, M3, M4, M7, M8 fixed with tests; H1 and H3
+   fixed in the parts their briefs named but each leaving a related path
+   open; M1 fixed with a residual; M5 fixed with its documented residual; M6
+   deliberately deferred), then SEC.0–SEC.5b and J.1–J.5, with throwaway
+   hostile-bus tests (run and deleted). New Highs, all before dispatch is
+   enabled or requirement 14 is called Green:
+   - **B1:** the sprout cooks a staged recipe pulled over `/files/` with no
+     proof farmer produced it; the DMZ Envoy terminates that TLS, so it
+     chooses the steps that run as root.
+   - **B2:** an accepted sprout with no active box key (pre-J, mid-enrollment
+     or post-revocation) accepts an attacker-chosen box key proven under the
+     attacker's own key and is handed a gateway JWT — the enrollment proof
+     binds the key to itself, not to the sprout.
+   - **B3:** H1 revokes a deleted or replaced host's User JWT and box keys
+     but not its gateway JWT, which reads `/files/` for up to its TTL (24h)
+     and, after a replace, reads the new host's staged recipe.
+
+     B4 (hostile-tenant recipe render cost scales with include count), B5
+     (M6 unchanged), B6 (J.4 forged no-responders re-run, accepted), B7
+     (`operator` still has `shell`), B8 (MSI version binding) and B9 are
+     ranked there too.
 5. **Clean-ups left by Wave 4** (briefs in
    `docs/claude-code-parallel-build-plan.md` §4c; CL.1, removing
    `internal/fleetkeys` and its permission, merged in PR #62; CL.3, the
