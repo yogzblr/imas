@@ -235,6 +235,7 @@ func TestPurposesAreDistinctAndDirected(t *testing.T) {
 		PurposeCmdRunRequest, PurposeCmdRunResponse,
 		PurposeCookRequest, PurposeCookResponse,
 		PurposeCookNudgeRequest, PurposeCookNudgeResponse,
+		PurposeStagedRecipe,
 		PurposeBoxKeySubmit, PurposeTenantKeyContinuity,
 		PurposeEnrollProof,
 	}

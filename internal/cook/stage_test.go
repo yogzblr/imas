@@ -6,13 +6,19 @@ import (
 	"errors"
 	"net/http"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats.go"
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/objectstore"
 	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
+	"github.com/yogzblr/imas/internal/payloadbox"
+	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 )
 
 // newStageTestStore gives t its own recipe store on a fake S3 server it
@@ -44,20 +50,80 @@ func newStageTestStore(t *testing.T) *objectstoretest.Server {
 	return srv
 }
 
-// ackCooks answers every cook request for sproutID, acknowledging it if
-// ack is true, and passes each pushed envelope's raw bytes to pushed.
-func ackCooks(t *testing.T, nc *nats.Conn, sproutID string, ack bool) <-chan []byte {
+// stageSprout is a stub sprout with a box keypair farmer has on record,
+// so dispatches to it are sealed and staged (stage.go), and the tenant
+// key it pinned. Tests that start one start the mock OpenBao first
+// (useStageKeys).
+type stageSprout struct {
+	tenant, id string
+	priv       *[32]byte
+	tenantPub  *[32]byte
+}
+
+// useStageKeys starts a mock OpenBao for tenant keypairs for the rest of
+// t, with tenants' cached keys dropped before and after.
+func useStageKeys(t *testing.T, tenants ...string) {
 	t.Helper()
-	pushed := make(chan []byte, 8)
-	sub, err := nc.Subscribe("imas.sprouts."+sproutID+".cook", func(msg *nats.Msg) {
+	tenantboxtest.Start(t)
+	for _, tenant := range tenants {
+		pki.InvalidateTenantBoxKeys(tenant)
+		t.Cleanup(func() { pki.InvalidateTenantBoxKeys(tenant) })
+	}
+}
+
+// newStageSprout records a fresh box key for tenant's sproutID, as
+// enrollment would.
+func newStageSprout(t *testing.T, tenant, sproutID string) stageSprout {
+	t.Helper()
+	pub, priv := genBoxKey(t)
+	if err := pki.RotateSproutBoxKey(tenant, sproutID, encodeBoxKey(pub), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	tenantPubB64, err := pki.GetTenantX25519PublicKey(tenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenantPub, err := pki.DecodeBoxPubKey(tenantPubB64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stageSprout{tenant: tenant, id: sproutID, priv: priv, tenantPub: tenantPub}
+}
+
+func (s stageSprout) open(data []byte, purpose string) (*payloadbox.Message, error) {
+	return payloadbox.Open(data, []payloadbox.KeyPair{{PeerPub: s.tenantPub, Priv: s.priv}},
+		payloadbox.Expect{Purpose: purpose, TenantID: s.tenant, SproutID: s.id})
+}
+
+// ackCooks answers every sealed cook request for sp, acknowledging it if
+// ack is true, and passes each pushed envelope, opened, to pushed.
+func ackCooks(t *testing.T, nc *nats.Conn, sp stageSprout, ack bool) <-chan RecipeEnvelope {
+	t.Helper()
+	pushed := make(chan RecipeEnvelope, 8)
+	sub, err := nc.Subscribe(CookSubject(sp.id), func(msg *nats.Msg) {
+		m, err := sp.open(msg.Data, payloadbox.PurposeCookRequest)
+		if err != nil {
+			t.Errorf("opening pushed envelope: %v", err)
+			return
+		}
 		var env RecipeEnvelope
-		if err := json.Unmarshal(msg.Data, &env); err != nil {
+		if err := json.Unmarshal(m.Body, &env); err != nil {
 			t.Errorf("unmarshal envelope: %v", err)
 			return
 		}
-		pushed <- msg.Data
-		data, _ := json.Marshal(Ack{Acknowledged: ack, JobID: env.JobID})
-		msg.Respond(data)
+		pushed <- env
+		reply, err := payloadbox.NewMessage(payloadbox.PurposeCookResponse, sp.tenant, sp.id, m.ID, Ack{Acknowledged: ack, JobID: env.JobID})
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		r := nats.NewMsg("")
+		r.Header.Set(payloadbox.Header, payloadbox.HeaderBox1)
+		if r.Data, err = payloadbox.Seal(reply, []payloadbox.KeyPair{{PeerPub: sp.tenantPub, Priv: sp.priv}}); err != nil {
+			t.Error(err)
+			return
+		}
+		msg.RespondMsg(r)
 	})
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
@@ -75,14 +141,19 @@ func mustStagedKey(t *testing.T, tenantID, sproutID string) string {
 	return key
 }
 
-func readStaged(t *testing.T, tenantID, sproutID string) RecipeEnvelope {
+// readStaged opens sp's staged recipe as sp would.
+func readStaged(t *testing.T, sp stageSprout) RecipeEnvelope {
 	t.Helper()
-	data, err := store.Get(context.Background(), mustStagedKey(t, tenantID, sproutID))
+	data, err := store.Get(context.Background(), mustStagedKey(t, sp.tenant, sp.id))
 	if err != nil {
-		t.Fatalf("reading staged recipe for %s/%s: %v", tenantID, sproutID, err)
+		t.Fatalf("reading staged recipe for %s/%s: %v", sp.tenant, sp.id, err)
+	}
+	m, err := sp.open(data, payloadbox.PurposeStagedRecipe)
+	if err != nil {
+		t.Fatalf("opening staged recipe for %s/%s: %v", sp.tenant, sp.id, err)
 	}
 	var env RecipeEnvelope
-	if err := json.Unmarshal(data, &env); err != nil {
+	if err := json.Unmarshal(m.Body, &env); err != nil {
 		t.Fatalf("decoding staged recipe: %v", err)
 	}
 	return env
@@ -112,29 +183,33 @@ func TestStagedRecipeKey(t *testing.T) {
 	}
 }
 
-// TestSendCookEvent_StagesPushedEnvelope: the staged copy is byte-for-byte
-// the envelope pushed over NATS, at the sprout's own key.
+// TestSendCookEvent_StagesPushedEnvelope: the staged copy, sealed for
+// the sprout under its own purpose, opens to the envelope pushed over
+// NATS, at the sprout's own key, and carries none of it in plaintext.
 func TestSendCookEvent_StagesPushedEnvelope(t *testing.T) {
 	newStageTestStore(t)
+	useStageKeys(t, testTenantID)
 	nc, cleanup := startCookTestNATS(t)
 	defer cleanup()
-	sproutID := "stage-sprout"
-	pushed := ackCooks(t, nc, sproutID, true)
+	sp := newStageSprout(t, testTenantID, "stage-sprout")
+	pushed := ackCooks(t, nc, sp, true)
 
 	jid := GenerateJobID()
-	if err := SendCookEvent(testTenantID, sproutID, "first", jid, false, WithInvoker("UINVOKER")); err != nil {
+	if err := SendCookEvent(testTenantID, sp.id, "first", jid, false, WithInvoker("UINVOKER")); err != nil {
 		t.Fatalf("SendCookEvent: %v", err)
 	}
-	staged, err := store.Get(context.Background(), mustStagedKey(t, testTenantID, sproutID))
-	if err != nil {
-		t.Fatalf("reading staged recipe: %v", err)
+	env := readStaged(t, sp)
+	if got := <-pushed; !reflect.DeepEqual(got, env) {
+		t.Errorf("staged copy differs from pushed envelope:\nstaged: %+v\npushed: %+v", env, got)
 	}
-	if got := string(<-pushed); got != string(staged) {
-		t.Errorf("staged copy differs from pushed envelope:\nstaged: %s\npushed: %s", staged, got)
-	}
-	env := readStaged(t, testTenantID, sproutID)
 	if env.JobID != jid || env.InvokedBy != "UINVOKER" || len(env.Steps) != 1 || env.Steps[0].Properties["name"] != "echo first" {
 		t.Errorf("unexpected staged envelope: %+v", env)
+	}
+	raw, _ := store.Get(context.Background(), mustStagedKey(t, testTenantID, sp.id))
+	for _, plain := range []string{jid, "echo first", "UINVOKER"} {
+		if strings.Contains(string(raw), plain) {
+			t.Errorf("staged object carries %q in plaintext", plain)
+		}
 	}
 }
 
@@ -143,24 +218,25 @@ func TestSendCookEvent_StagesPushedEnvelope(t *testing.T) {
 // object under the sprout's prefix.
 func TestSendCookEvent_RestageReplacesPrevious(t *testing.T) {
 	newStageTestStore(t)
+	useStageKeys(t, testTenantID)
 	nc, cleanup := startCookTestNATS(t)
 	defer cleanup()
-	sproutID := "restage-sprout"
-	ackCooks(t, nc, sproutID, true)
+	sp := newStageSprout(t, testTenantID, "restage-sprout")
+	ackCooks(t, nc, sp, true)
 
-	if err := SendCookEvent(testTenantID, sproutID, "first", GenerateJobID(), false); err != nil {
+	if err := SendCookEvent(testTenantID, sp.id, "first", GenerateJobID(), false); err != nil {
 		t.Fatalf("first dispatch: %v", err)
 	}
 	secondJID := GenerateJobID()
-	if err := SendCookEvent(testTenantID, sproutID, "second", secondJID, false); err != nil {
+	if err := SendCookEvent(testTenantID, sp.id, "second", secondJID, false); err != nil {
 		t.Fatalf("second dispatch: %v", err)
 	}
 
-	env := readStaged(t, testTenantID, sproutID)
+	env := readStaged(t, sp)
 	if env.JobID != secondJID || len(env.Steps) != 1 || env.Steps[0].Properties["name"] != "echo second" {
 		t.Errorf("staged copy is not the latest dispatch: %+v", env)
 	}
-	keys, err := store.List(context.Background(), "sprouts/"+testTenantID+"/"+sproutID+"/")
+	keys, err := store.List(context.Background(), "sprouts/"+testTenantID+"/"+sp.id+"/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,15 +257,16 @@ func TestSendCookEvent_StagesPrunedSteps(t *testing.T) {
     cmd.run:
       - name: echo b
 `)
+	useStageKeys(t, testTenantID)
 	nc, cleanup := startCookTestNATS(t)
 	defer cleanup()
-	sproutID := "pruned-sprout"
-	ackCooks(t, nc, sproutID, true)
+	sp := newStageSprout(t, testTenantID, "pruned-sprout")
+	ackCooks(t, nc, sp, true)
 
-	if err := SendCookEvent(testTenantID, sproutID, "two", GenerateJobID(), false, WithTargetStep("step b")); err != nil {
+	if err := SendCookEvent(testTenantID, sp.id, "two", GenerateJobID(), false, WithTargetStep("step b")); err != nil {
 		t.Fatalf("SendCookEvent: %v", err)
 	}
-	env := readStaged(t, testTenantID, sproutID)
+	env := readStaged(t, sp)
 	if len(env.Steps) != 1 || env.Steps[0].ID != "step b" {
 		t.Errorf("staged steps: got %+v, want only step b", env.Steps)
 	}
@@ -199,40 +276,49 @@ func TestSendCookEvent_StagesPrunedSteps(t *testing.T) {
 // the recipe farmer last assigned, whether or not the sprout acked it.
 func TestSendCookEvent_StagedCopyKeptWhenPushFails(t *testing.T) {
 	newStageTestStore(t)
+	useStageKeys(t, testTenantID)
 	nc, cleanup := startCookTestNATS(t)
 	defer cleanup()
-	sproutID := "nack-sprout"
-	ackCooks(t, nc, sproutID, false)
+	sp := newStageSprout(t, testTenantID, "nack-sprout")
+	ackCooks(t, nc, sp, false)
 
 	jid := GenerateJobID()
-	if err := SendCookEvent(testTenantID, sproutID, "first", jid, false); err == nil {
+	if err := SendCookEvent(testTenantID, sp.id, "first", jid, false); err == nil {
 		t.Fatal("expected an error for an unacknowledged cook")
 	}
-	if env := readStaged(t, testTenantID, sproutID); env.JobID != jid {
+	if env := readStaged(t, sp); env.JobID != jid {
 		t.Errorf("staged JobID: got %q, want %q", env.JobID, jid)
 	}
 }
 
 // TestSendCookEvent_TenantsStagedSeparately: the same sprout_id in two
-// tenants gets two independent staged copies.
+// tenants gets two independent staged copies, each sealed for its own
+// tenant's sprout only.
 func TestSendCookEvent_TenantsStagedSeparately(t *testing.T) {
 	newStageTestStore(t)
+	useStageKeys(t, testTenantID, "t_other")
 	const sproutID = "shared-name"
+	other := newStageSprout(t, "t_other", sproutID)
 	if err := stageRecipe(context.Background(), "t_other", sproutID, RecipeEnvelope{JobID: "other-tenant-job"}); err != nil {
 		t.Fatal(err)
 	}
 	nc, cleanup := startCookTestNATS(t)
 	defer cleanup()
-	ackCooks(t, nc, sproutID, true)
+	sp := newStageSprout(t, testTenantID, sproutID)
+	ackCooks(t, nc, sp, true)
 	jid := GenerateJobID()
 	if err := SendCookEvent(testTenantID, sproutID, "first", jid, false); err != nil {
 		t.Fatalf("SendCookEvent: %v", err)
 	}
-	if env := readStaged(t, testTenantID, sproutID); env.JobID != jid {
+	if env := readStaged(t, sp); env.JobID != jid {
 		t.Errorf("%s: got JobID %q, want %q", testTenantID, env.JobID, jid)
 	}
-	if env := readStaged(t, "t_other", sproutID); env.JobID != "other-tenant-job" {
+	if env := readStaged(t, other); env.JobID != "other-tenant-job" {
 		t.Errorf("t_other's staged copy was touched: %+v", env)
+	}
+	data, _ := store.Get(context.Background(), mustStagedKey(t, "t_other", sproutID))
+	if _, err := sp.open(data, payloadbox.PurposeStagedRecipe); err == nil {
+		t.Error("t_other's staged copy opens for the same sprout_id in another tenant")
 	}
 }
 
@@ -240,6 +326,8 @@ func TestSendCookEvent_TenantsStagedSeparately(t *testing.T) {
 // the previous copy is deleted rather than left readable.
 func TestStageRecipe_FailedWriteRemovesStaleCopy(t *testing.T) {
 	srv := newStageTestStore(t)
+	useStageKeys(t, testTenantID)
+	newStageSprout(t, testTenantID, "w")
 	ctx := context.Background()
 	if err := stageRecipe(ctx, testTenantID, "w", RecipeEnvelope{JobID: "old"}); err != nil {
 		t.Fatal(err)
@@ -258,6 +346,8 @@ func TestStageRecipe_FailedWriteRemovesStaleCopy(t *testing.T) {
 // can't be removed either, staging fails, and so does the dispatch.
 func TestStageRecipe_FailedWriteAndDeleteRefusesDispatch(t *testing.T) {
 	srv := newStageTestStore(t)
+	useStageKeys(t, testTenantID)
+	newStageSprout(t, testTenantID, "w")
 	ctx := context.Background()
 	if err := stageRecipe(ctx, testTenantID, "w", RecipeEnvelope{JobID: "old"}); err != nil {
 		t.Fatal(err)
@@ -269,8 +359,27 @@ func TestStageRecipe_FailedWriteAndDeleteRefusesDispatch(t *testing.T) {
 	}
 }
 
+// TestStageRecipe_SealFailureRefusesDispatch: a sprout with a box key on
+// record whose payload can't be sealed (here, no tenant key store) gets
+// no staged copy and no dispatch: never a plaintext fallback.
+func TestStageRecipe_SealFailureRefusesDispatch(t *testing.T) {
+	newStageTestStore(t)
+	useStageKeys(t, testTenantID)
+	newStageSprout(t, testTenantID, "w")
+	pki.InvalidateTenantBoxKeys(testTenantID)
+	t.Setenv("IMAS_TENANTBOX_OPENBAO_ADDR", "")
+	if err := stageRecipe(context.Background(), testTenantID, "w", RecipeEnvelope{JobID: "j"}); err == nil {
+		t.Fatal("stageRecipe: expected an error when sealing fails")
+	}
+	if ok, _ := store.Exists(context.Background(), mustStagedKey(t, testTenantID, "w")); ok {
+		t.Error("something was staged although sealing failed")
+	}
+}
+
 func TestUnstageRecipe(t *testing.T) {
 	newStageTestStore(t)
+	useStageKeys(t, testTenantID)
+	newStageSprout(t, testTenantID, "gone")
 	ctx := context.Background()
 	if err := stageRecipe(ctx, testTenantID, "gone", RecipeEnvelope{JobID: "j"}); err != nil {
 		t.Fatal(err)
@@ -301,10 +410,11 @@ func TestStageRecipe_NoStore(t *testing.T) {
 // just-staged copy is removed and nothing is pushed.
 func TestSendCookEvent_StageGuardFailure(t *testing.T) {
 	newStageTestStore(t)
+	useStageKeys(t, testTenantID)
 	nc, cleanup := startCookTestNATS(t)
 	defer cleanup()
 	sproutID := "guarded-sprout"
-	pushed := ackCooks(t, nc, sproutID, true)
+	pushed := ackCooks(t, nc, newStageSprout(t, testTenantID, sproutID), true)
 
 	guardErr := errors.New("sprout replaced")
 	err := SendCookEvent(testTenantID, sproutID, "first", GenerateJobID(), false,

@@ -648,6 +648,29 @@ func SproutOpenFromFarmer(sproutID, purpose string, data []byte) (*payloadbox.Me
 	return msg, nil
 }
 
+// SproutOpenStagedFromFarmer opens data, a staged payload farmer sealed
+// for sproutID in the pinned tenant under purpose and wrote to the
+// recipe bucket for the sprout to pull over GET /files/ (internal/cook's
+// stagedfetch.go; security review 2026-10-b, B1). Same keys and checks
+// as SproutOpenFromFarmer (purpose, pinned tenant, sprout ID, recipient
+// key; every key the sprout holds, a pending one promoted), except the
+// replay guard: a staged copy is read long after farmer sealed it, well
+// outside payloadbox.DefaultMaxSkew, and may be read more than once. The
+// caller bounds replay and freshness from the opened body instead
+// (internal/cook: the handled-jobs file and StagedRecipeMaxAge).
+//
+// Only farmer, holding a tenant private key the sprout has pinned, or the
+// sprout itself could have sealed what this opens. Every failure to open
+// is payloadbox.ErrOpen; ErrSproutBoxNotReady if the sprout has no keys.
+func SproutOpenStagedFromFarmer(sproutID, purpose string, data []byte) (*payloadbox.Message, error) {
+	msg, pendingPub, err := openAsSprout(sproutID, purpose, data)
+	if err != nil {
+		return nil, err
+	}
+	promoteAfterOpen(pendingPub)
+	return msg, nil
+}
+
 // SproutSealForFarmer seals body from sproutID to farmer under purpose,
 // answering the request whose message ID is replyTo (empty for a message
 // that isn't a reply). Sealed under the pinned tenant key: farmer opens
