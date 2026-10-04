@@ -58,7 +58,7 @@ released.
 | 11 | Recipe download uses the same JWT | **Green** | |
 | 12 | Envoy with JWT validation | **Green** | |
 | 13 | Backend on Kubernetes | **Amber** | Install the charts on a real cluster (UAT gate). No Terraform exists. |
-| 14 | Payload encryption | **Red** | Seal `shell.*` (Open item 2) and the control plane (Open item 11): a compromised bus can still open a shell on a Unix sprout and forge `internal.*`. Refreshing as a sprout is closed by J.2 (sealed refresh); minting CLI tokens is closed by J.3 (bearer tokens removed, the CLI API sealed, in review). |
+| 14 | Payload encryption | **Red** | Seal `shell.*` (Open item 2) and finish the control plane (Open item 11): a compromised bus can still open a shell on a Unix sprout. Refreshing as a sprout is closed by J.2 (sealed refresh); minting CLI tokens is closed by J.3 (bearer tokens removed, the CLI API sealed); forging `internal.*` is closed by J.4 (sealed SaaS API ↔ farmer, in review; its Helm wiring is a follow-up). |
 | 15 | Key rotation for sprout keys | **Amber** | Reword `requirements.md` to match the built design (the private key is never sent). |
 | 16 | SDB-equivalent secrets | **Green** | |
 | 17 | Probe capability | **Green** | |
@@ -96,7 +96,7 @@ released.
 | 8 | Docs wording (requirement 15, README embedded bus) | **Amber** | Small docs change. |
 | 9 | Nice-to-haves (Keycloak harness, rotation scheduler, CERT-In/DPDP review) | **Amber** | Unowned. |
 | 10 | Leftovers from PR #62 to #67 (release pipeline, stale diagram, OpenBao client follow-ups) | **Amber** | Fold into one clean-up brief after the first release shows what the pipeline really needs. Add fleetreleaser's check against the tag's signed `checksums.txt` there if wanted (SEC.5 report). REC.1 follow-ups are listed under item 10: audit table, deprovision clean-up, and the role on `cook`. |
-| 11 | Control plane forgeable by a compromised bus (CLI tokens, sprout refresh, `internal.*`) | **Red** | Design written ("Sealing the control plane" in `imas-payload-encryption-design.md`). J.1 (building blocks) and J.2 (sealed sprout refresh) merged; J.3 (sealed CLI API, bearer tokens removed) in review; all flagged for security review. `internal.*` (J.4) still open. |
+| 11 | Control plane forgeable by a compromised bus (CLI tokens, sprout refresh, `internal.*`) | **Red** | Design written ("Sealing the control plane" in `imas-payload-encryption-design.md`). J.1 (building blocks), J.2 (sealed sprout refresh) and J.3 (sealed CLI API, bearer tokens removed) merged; J.4 (sealed `internal.*`) in review; all flagged for security review. Left: the Helm wiring for J.4's keys (`deploy/helm`, outside J.4's scope: a Helm-installed saasapi won't start until it lands), and "no responders" on `internal.sprout.action`, which a compromised bus can still forge to get an action re-sent (design Open question 10). |
 
 ## Requirements traceability
 
@@ -1019,7 +1019,7 @@ by an external git sync today.
     - Captured tokens can be replayed for 5 minutes.
     - `internal.*` (SaaS API ↔ farmer) trusts the bus's account permissions,
       so a compromised bus can forge provisioning, deprovisioning, sprout
-      actions and their results.
+      actions and their results. Closed by J.4 (in review, below).
 
     **Design written, not built:** "Sealing the control plane" in
     `docs/design/imas-payload-encryption-design.md` (flagged for security
@@ -1181,6 +1181,37 @@ by an external git sync today.
       the cleanup waits for a later PR ("leave the cleanup for a later
       PR"): the HTTP recipe routes, the audit token resolver, and `boxpub`
       in the web UI's add-user form, which fails until then.
+
+    **J.4, sealed SaaS API ↔ farmer (Decision B, rollout step 5), in
+    review, flagged for security review.** Closes the `internal.*` bullet
+    above. Sealed only (owner decisions, 2026-10-04): no
+    `internalallowplaintext`, no plaintext fallback either way.
+    - Every `internal.tenant.provision`, `internal.tenant.deprovision` and
+      `internal.sprout.action` request is a sealed `a2f` message from the
+      SaaS API box key to the platform key, bound to its method and
+      subject, with the tenant inside the box. Farmer opens it only under
+      the registered SaaS API key, refuses plaintext, and refuses a stale
+      or replayed one per replica and cluster-wide (Valkey, fail closed),
+      before any handler runs. The point-of-effect checks (tenant active,
+      sprout in tenant, release approval and signatures, rollout window,
+      farmer's self_update switch) run behind the seal unchanged.
+    - Provisioning results are sealed `f2a` messages bound to their job's
+      subject; `internal.sprout.action` replies are sealed and bound to the
+      request's ID. The SaaS API refuses plaintext and forged results and
+      replies; an unauthenticated refusal or a reply that isn't farmer's
+      fails an item with `dispatch_outcome_unknown`, never re-sends it.
+    - Every send, the outbox sweeper's re-sends included, seals a new
+      message (new ID and `iat`); idempotency stays on the job ID and the
+      item claim, as CL.3 built it.
+    - New saasapi settings, both required: `SAASAPI_BOX_PRIV_FILE`,
+      `SAASAPI_PLATFORM_BOX_PUB`.
+    - Not built: the Helm wiring (mount the SaaS API's box key, set the two
+      variables, turn the control-plane keygen Job on by default), which is
+      in `deploy/helm`, outside J.4's scope; until it lands a Helm-installed
+      saasapi refuses to start. Also not built: B2, a core-only transport
+      for `internal.*` (what it would take is written down in the design),
+      and at-most-once per action item on farmer, the fix for a forged "no
+      responders" (design Open question 10).
 
     **Stopgap SEC.0 (superseded by J.3, which deleted the token code, this
     cap included):** `UserAuth.IsValid` refused an expiry more than 15 minutes ahead (the

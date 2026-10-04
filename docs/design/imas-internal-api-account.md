@@ -666,6 +666,41 @@ release, whose process may still be running it) is taken over only once
 none of its items has changed for longer than any live wave goes without a
 write (wave timeout + reply wait + lease TTL).
 
+## Sealed messages (J.4): the permissions are no longer the defence
+
+**FLAG FOR SECURITY REVIEW.** The User's permissions above hold only on an
+honest bus. A compromised bus ignores its own permissions, so until J.4 it
+could forge provisioning, deprovisioning, `internal.sprout.action` and
+their results. Since J.4 (`imas-payload-encryption-design.md`, Decision B
+and "As built: J.4") every `internal.*` request and reply is a sealed
+`payloadbox` message between the SaaS API box key and the platform key,
+bound to its method and subject, with the tenant inside the box, and
+replay-protected (farmer: per-replica guard and Valkey claim; the SaaS
+API: a guard on results, `ReplyTo` on replies). Farmer opens a request
+only under the registered SaaS API key and refuses plaintext; the SaaS API
+refuses plaintext and forged replies and results. The permissions stay, as
+defence in depth and to keep an honest bus's tenants and users out.
+
+What changes here:
+
+- **Boot posture.** `ConnectBus` also requires `SAASAPI_BOX_PRIV_FILE`
+  and `SAASAPI_PLATFORM_BOX_PUB` and fails closed without them, for the
+  same reasons as the NATS credential.
+- **Outbox sweeper.** Every re-send (a re-published provisioning job, a
+  re-dispatched queued item) is sealed at send time, so it is a new
+  message with a new ID and `iat`, never stored ciphertext sent again,
+  which farmer would refuse as a replay. Idempotency stays on the job ID
+  and the item's claim, as above.
+- **Replies.** A refusal code or any reply that isn't farmer's sealed
+  answer to that request fails the item with `dispatch_outcome_unknown`;
+  only a sealed `farmer_busy` or sealed refusal-unrun sends it back to
+  `queued`. "No responders" still does too, and that is the one
+  unauthenticated signal left: see that design's Open question 10.
+- **Credential delivery.** The box key comes from `<base>/saasapi-box` in
+  OpenBao, written by farmer's control-plane keygen Job, alongside the NATS
+  credential's hand-off; the Helm wiring for it is a follow-up outside
+  J.4's scope ("As built: J.4", "Not built").
+
 ## Deferred / open questions
 
 - **Farmer-side provision/deprovision race: resolved by PKI.1.** See job
