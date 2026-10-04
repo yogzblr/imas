@@ -374,6 +374,13 @@ for saasapi's egress rule. */}}
 {{- default "443" (regexFind ":[0-9]+$" $host | trimPrefix ":") -}}
 {{- end }}
 
+{{/* The port in objectStore.endpoint (host[:port], no scheme; with none,
+443 under useSSL, else 80), for saasapi's recipe egress rule. */}}
+{{- define "imas-farmer.objectStorePort" -}}
+{{- $def := ternary "443" "80" (ne (toString .Values.objectStore.useSSL) "false") -}}
+{{- default $def (regexFind ":[0-9]+$" (toString .Values.objectStore.endpoint) | trimPrefix ":") -}}
+{{- end }}
+
 {{/*
 The sprout release this chart carries: files/sprout-release.json, written
 at release time by packaging/helm/stamp-sprout-release.sh and absent from a
