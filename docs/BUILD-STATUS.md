@@ -872,8 +872,12 @@ by an external git sync today.
     - Box-ready sprouts refresh with a sealed proof, with a ratchet per
       sprout.
 
-    A stopgap that caps token lifetime at 5 minutes can ship ahead of the
-    design.
+    **Stopgap SEC.0 (in review, flagged for security review):**
+    `UserAuth.IsValid` refuses an expiry more than 15 minutes ahead (the
+    5-minute token lifetime plus a 10-minute clock skew allowance, set by
+    farmer's `apitokenclockskew`, 0 to 30m). The bus can still mint tokens
+    from a `CONNECT` nonce, but each one expires within that limit instead
+    of in 2099. Only the design closes it.
 
 Known accepted gaps, unchanged: JWT permission re-mint does not apply to
 already-enrolled sprouts (harmless pre-production), and

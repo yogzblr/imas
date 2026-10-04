@@ -42,6 +42,7 @@ func clearJetyKeys(t *testing.T) {
 	jety.Set("dangerously_allow_root", false)
 	jety.Set("roles", nil)
 	jety.Set("cohorts", nil)
+	jety.Set(TokenClockSkewKey, nil)
 }
 
 // --- getPrivateSeed / GetPubkey / CreatePrivkey / NewToken / Sign ---

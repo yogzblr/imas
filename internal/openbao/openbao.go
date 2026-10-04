@@ -380,25 +380,44 @@ func do(ctx context.Context, client *api.Client, token, method, path string, que
 // StatusError is a non-2xx answer from OpenBao.
 type StatusError struct {
 	StatusCode int
-	// Errors is OpenBao's "errors" array, or the raw body when it wasn't
-	// JSON.
+	// Errors is OpenBao's "errors" array. It is empty when the body
+	// wasn't JSON: see statusError.
 	Errors []string
 
 	err *api.ResponseError
 }
 
 func (e *StatusError) Error() string {
+	if len(e.Errors) == 0 {
+		return fmt.Sprintf("status %d", e.StatusCode)
+	}
 	return fmt.Sprintf("status %d: %s", e.StatusCode, strings.Join(e.Errors, "; "))
 }
 
 func (e *StatusError) Unwrap() error { return e.err }
 
+// statusError turns the official client's *api.ResponseError into a
+// *StatusError. When the body wasn't JSON (RawError), the client copies
+// the whole body into Errors. That body didn't come from OpenBao's error
+// handling: it is whatever a proxy, ingress or WAF in front of OpenBao
+// sent, and one that echoes request headers puts the X-Vault-Token (or,
+// on a Kubernetes login, the service account JWT) in it. Callers pass
+// these errors on (pki.rotatetenantbox returns them to the tenant), so a
+// raw body is dropped and only the status code is kept. The wrapped
+// ResponseError is a copy with Errors cleared, so errors.As can't reach
+// the body either. The sprout side does the same
+// (internal/ingredients/sdb/openbao, CL.2b).
 func statusError(err error) error {
 	var re *api.ResponseError
-	if errors.As(err, &re) {
-		return &StatusError{StatusCode: re.StatusCode, Errors: re.Errors, err: re}
+	if !errors.As(err, &re) {
+		return err
 	}
-	return err
+	if re.RawError {
+		scrubbed := *re
+		scrubbed.Errors = nil
+		return &StatusError{StatusCode: re.StatusCode, err: &scrubbed}
+	}
+	return &StatusError{StatusCode: re.StatusCode, Errors: re.Errors, err: re}
 }
 
 // StatusCode returns the HTTP status of a *StatusError in err's chain,
