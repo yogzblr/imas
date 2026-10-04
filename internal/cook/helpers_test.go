@@ -152,7 +152,7 @@ func TestExtractIncludes(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.id, func(t *testing.T) {
-			fp, err := ResolveRecipeFilePath(context.Background(), getBasePath(), tc.recipe)
+			fp, err := ResolveRecipeFilePath(context.Background(), testPropsTenantID, getBasePath(), tc.recipe)
 			if err != nil {
 				t.Error(err)
 			}

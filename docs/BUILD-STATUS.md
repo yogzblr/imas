@@ -114,7 +114,7 @@ beyond unit tests (real Envoy, Molecule containers, real OpenBao).
 | 6 | Per-sprout JWT | **Green** | Built, validated | Paired JWTs minted at enrollment and refresh. |
 | 7 | Farmer horizontally scalable | **Amber** | Built, not load-tested | Core is stateless: `QueueSubscribe` on `imas-core`, PXC read-through, Valkey heartbeat, object-store recipes. The bus tier can now run as 3 or more meshed nodes (SCALE.2, see 1); it has not been run on a real Kubernetes cluster or under load. |
 | 8 | Sprout via proxies | **Green** | Built | `busproxyurl` (HTTP CONNECT / SOCKS5) for the bus connection; HTTP clients use `ProxyFromEnvironment` (the `sdb://openbao` provider only since CL.2b: before it, it connected directly). Ansible variable exposed. |
-| 9 | Recipe download from a configured HTTP endpoint | **Green** | Built, validated | `/files/` behind Envoy; `TestSproutDownloadsStagedRecipe_ThroughRealEnvoy`. |
+| 9 | Recipe download from a configured HTTP endpoint | **Green** | Built, validated | `/files/` behind Envoy; `TestSproutDownloadsStagedRecipe_ThroughRealEnvoy`. A sprout reads only its own staged recipe; SEC.4 added per-tenant source recipes (`tenants/<tenant_id>/recipes/`, then the platform prefix, never another tenant's) and tests the cross-tenant refusal at every layer (`TestTenantRecipes_CrossTenantRefusedAtEveryLayer`). Tenant upload is REC.1. |
 | 10 | NATS response under 300 ms | **Amber** | **Not validated** | Design removes the synchronous probe loop; no latency measurement has been taken. |
 | 11 | Recipe download uses the same JWT | **Green** | Built, validated | Same gateway JWT, same Envoy gate. |
 | 12 | Envoy with JWT validation in front of NATS | **Green** | Built, validated | `deploy/envoy/envoy.yaml`, `jwt_authn` with remote JWKS; checked against real Envoy. Keycloak JWKS cross-check harness has never been run (nice-to-have). |
@@ -895,6 +895,23 @@ by an external git sync today.
       `INSTALL.md` should say that a sprout behind an environment proxy needs
       `NO_PROXY` for a customer server reachable only directly, and that the
       platform's own OpenBao address may need it where a proxy is set.
+    - **Facts, recipe templates, per-tenant recipes (SEC.4; FLAG FOR
+      SECURITY REVIEW):** H2 and M8 are fixed in code: facts are stored
+      under the subject's sprout and a body naming another is dropped;
+      `props.set`/`props.delete` refuse the fact names (reservation chosen
+      over a source column); prop and fact values are substituted into
+      parsed YAML, not spliced into recipe text; `env`, `call`, `html`,
+      `js` and `template`/`define`/`block` are gone from recipes, which
+      render under size, time and range limits, which are farmer chart
+      values (`farmer.recipes.templateLimits`); recipes resolve per tenant,
+      a tenant recipe shadowing a platform one of the same name (design doc
+      §1.6). Still open: static props from farmer's config
+      (`props.static`) can still set reserved names, and saasapi still
+      reads them for planning (not for the wave gate, which needs a write
+      time); `hostname` in a recipe is now the sprout's reported hostname
+      fact (it was farmer's own), kept 10 minutes, then falling back to the
+      sprout ID; a deprovisioned tenant's `tenants/<tenant_id>/recipes/` is not deleted; the upload
+      routes themselves are REC.1.
 11. **The control plane can be forged by a compromised bus** (requirement 14).
     Sealing farmer ↔ sprout stops the bus injecting commands *into a sprout*,
     but not asking *farmer* to send them. Verified with throwaway tests

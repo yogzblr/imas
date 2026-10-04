@@ -133,17 +133,39 @@ The join is on the composite `(tenant_id, sprout_id)` — `pki_nkeys`' primary k
 ```
 Batch/item status backed by `saas.asset_action_batches` / `saas.asset_action_items` (§5.2). Once an item's underlying farmer `jid` is known, its status is refreshed via a local read into `farmer.jobs` — no NATS call needed for polling, same pattern as §1.4.
 
-### 1.6 Recipes, jobs, audit (read-through proxies)
+### 1.6 Recipes, jobs, audit
 
-Thin, tenant-scoped wrappers over farmer's existing `recipes.*`, `jobs.*`, and `audit.*` subjects (§2.1) — same shapes, tenant filter enforced by the SaaS API before forwarding.
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/tenants/{tenant_id}/recipes` | The tenant's own recipes (paged). Not built. |
+| `GET` | `/tenants/{tenant_id}/recipes/{name}` | One of the tenant's own recipes. Not built. |
+| `PUT` | `/tenants/{tenant_id}/recipes/{name}` | Create or replace. Not built (REC.1). |
+| `DELETE` | `/tenants/{tenant_id}/recipes/{name}` | Not built (REC.1). |
+| `GET` | `/tenants/{tenant_id}/jobs` | |
+| `GET` | `/tenants/{tenant_id}/jobs/{jid}` | |
+| `GET` | `/tenants/{tenant_id}/audit?date=...` | |
 
-| Method | Path |
-|---|---|
-| `GET` | `/tenants/{tenant_id}/recipes` |
-| `GET` | `/tenants/{tenant_id}/recipes/{name}` |
-| `GET` | `/tenants/{tenant_id}/jobs` |
-| `GET` | `/tenants/{tenant_id}/jobs/{jid}` |
-| `GET` | `/tenants/{tenant_id}/audit?date=...` |
+The jobs and audit routes are tenant-scoped wrappers over farmer's `jobs.*` and `audit.*` subjects (§2.1), with the tenant filter enforced by the SaaS API. Recipes are not: farmer's old `recipes.*` subjects no longer exist (farmer's recipe browsing is CLI-only HTTP, `GET /v1/recipes`, platform tree only), and recipes now have their own storage layout.
+
+**Recipe storage and resolution (decided, SEC.4, FLAG FOR SECURITY REVIEW).** Owner decision, 2026-10-04: tenants write recipes and upload them through the SaaS API, so recipe templates are untrusted input. In the recipe bucket:
+
+- `tenants/<tenant_id>/recipes/<path>.imas` (or `<path>/init.imas`) holds a tenant's own recipes. `<path>` is the dot-notation name with dots as slashes: `nginx.harden` is `nginx/harden.imas`.
+- `<recipe dir>/<path>.imas` is the platform-wide tree (`config.RecipeDir` / `IMAS_RECIPE_DIR`, synced from git outside this repo). It is read-only to tenants: only the platform's sync writes it.
+- `sprouts/<tenant_id>/<sprout_id>/recipe.json` is the rendered, staged copy of a sprout's latest dispatch, the only thing a sprout can read over `GET /files/` with its gateway JWT.
+
+When farmer cooks a recipe for a sprout, it resolves the name under the sprout's own tenant's prefix first, then under the platform prefix, and never under another tenant's (`internal/cook/store.go`, "Recipe key layout"). Includes resolve the same way, so a tenant recipe may include a platform recipe, and a tenant's recipe of the same name shadows the platform one for that tenant's sprouts only, including where a platform recipe includes it (owner decision, 2026-10-04; `TestRecipeResolution_TenantShadowsPlatformInclude`). A name is 1 to 32 segments of 1 to 128 ASCII letters, digits, `_` and `-`, separated by `.` (`cook.ParseRecipeName`), at most 512 bytes. The platform prefix may not be empty or under `tenants/`, `sprouts/` or `jobs/`. Rendering runs under a restricted function map (no `env`, `call`, `html`, `js`; no `template`/`define`/`block`) and limits that are Helm values of the farmer chart (`farmer.recipes.templateLimits`, owner decision 2026-10-04; defaults: 256 KiB source, 1 MiB output, 256 KiB per value, 2 s, 10,000 range iterations; farmer checks their ranges at startup), and prop and fact values are substituted into parsed YAML scalars rather than spliced into the text (`internal/cook/farmercook.go`, `cook.ValidateRecipeSource`).
+
+**What the upload routes need (for REC.1; not built here):**
+
+- **Routes.** `PUT` and `DELETE /v1/tenants/{tenant_id}/recipes/{name}`, plus the two `GET`s above, behind `Auth` with `{tenant_id}` checked against the token's `organization.id` (§1.7), like every other tenant route. `{name}` is a single path segment in dot notation, validated with the same rules as `cook.ParseRecipeName` before anything else, and stricter for writes: lowercase only, no `.imas` suffix in the name, no `/`, nothing percent-encoded. One function maps a validated name to `tenants/<tenant_id>/recipes/<path>.imas`; every route uses it, and no route accepts a key, a prefix or a tenant from the body or query. `<name>.init` is not special on upload (store `<path>.imas` only), so one name maps to one key.
+- **Writer and credential.** The SaaS API writes the bucket directly with its own object-store credential whose policy allows `PutObject`/`DeleteObject`/`GetObject`/`ListBucket` on `tenants/*` only: never `sprouts/`, `jobs/` or the platform prefix. It may read the platform prefix (to show what a tenant recipe shadows) but not write it. Routing writes through farmer is not an option until farmer's `internal.*` subjects are sealed (J.4).
+- **Limits.** Body at most `farmer.recipes.templateLimits.maxSourceBytes` (256 KiB by default; farmer enforces it on read too, so a larger object can never be cooked). The SaaS API must validate with the same five limit values as farmer, so its chart wiring should read them from the same Helm values. Per tenant: a recipe count cap (suggested 500) and a total size cap (suggested 20 MiB), both checked before the write, with a clear `413` or `409`/`422` code; the caps are Helm values.
+- **Validation on upload, before anything is stored.** UTF-8 text only; the YAML must parse; the template must parse and execute under farmer's restricted function map and its time and output limits, against dummy props (`cook.ValidateRecipeSource` does exactly this); a template using a removed function, `template`/`define`/`block`, or a range over a number is refused. Includes are not resolved at upload (a missing include fails at cook time, as today). An error names the rule broken and never echoes the body, in the response or a log.
+- **Concurrency.** A conditional write: `If-Match` with the stored sha256 (or an expected-sha256 header), `412` on mismatch, `If-None-Match: *` for create-only. The response carries the new sha256 and size.
+- **RBAC.** Least privilege: reading recipes is a separate Keycloak role or scope from writing them, and writing recipes is effectively running code on every sprout of the tenant that cooks them, so the write role should be granted like the role that may start a `cook` action (§1.5), not like a viewer. `PUT` and `DELETE` are rate limited per tenant like the other mutating routes (`routeRateLimited`).
+- **Audit.** One audit row per write and delete: tenant, caller (token subject), name, sha256 and size before and after, and the outcome. Never the content.
+- **Freshness.** Farmer reads recipes from the bucket on every cook with no cache (`internal/cook/store.go`), so an upload is used by the next cook; the staged copy is rewritten on every dispatch.
+- **Deletion and tenants.** Deprovisioning a tenant should delete `tenants/<tenant_id>/recipes/`; nothing does yet.
 
 ### 1.7 Request auth (decided), plus teams, API keys, webhooks, usage — *(surface only; not detailed yet)*
 
@@ -287,7 +309,7 @@ Transport: NATS subjects under `imas.api.*` (existing) and a new `imas.internal.
 | `cohorts.*` | Sprout groupings | — |
 | `auth.*` | Human RBAC (today: static config-file check) | Superseded long-term by SaaS API's `/api-keys`, `/teams` (§1.7) |
 | `shell.start` | Interactive shell | — |
-| `recipes.{list,get}` | Recipe catalog | Proxied via §1.6 |
+| `recipes.{list,get}` | Recipe catalog | Removed: farmer serves the platform tree to the CLI over HTTP (`GET /v1/recipes`); tenant recipes are §1.6 |
 | `audit.{dates,query}` | Audit log | Proxied via §1.6, tenant-filtered |
 
 ### 2.2 New subjects — tenant & sprout lifecycle

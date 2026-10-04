@@ -1,6 +1,7 @@
 package cook
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -343,16 +344,19 @@ func TestRenderRecipeTemplateUndefinedFunction(t *testing.T) {
 	}
 }
 
-func TestTemplateFuncEnv(t *testing.T) {
+// TestTemplateFuncEnv_Removed: env read farmer's own environment
+// (IMAS_PXC_DSN, the S3 keys) into the recipe (security review M8). It
+// no longer renders.
+func TestTemplateFuncEnv_Removed(t *testing.T) {
 	t.Setenv("IMAS_TEST_VAR", "hello_world")
 
 	recipe := []byte(`value: {{ env "IMAS_TEST_VAR" }}`)
 	out, err := renderRecipeTemplate(testPropsTenantID, "test-sprout", "env-test", recipe)
-	if err != nil {
-		t.Fatalf("renderRecipeTemplate error: %v", err)
+	if !errors.Is(err, ErrTemplateFuncRemoved) {
+		t.Fatalf("env rendered (%q, %v), want ErrTemplateFuncRemoved", out, err)
 	}
-	if !strings.Contains(string(out), "hello_world") {
-		t.Fatalf("expected 'hello_world' in output, got: %s", out)
+	if strings.Contains(string(out), "hello_world") {
+		t.Fatalf("env value leaked into output: %s", out)
 	}
 }
 
@@ -411,22 +415,27 @@ func TestTemplateFuncPathHelpers(t *testing.T) {
 }
 
 func TestTemplateFuncDefault(t *testing.T) {
-	t.Setenv("IMAS_EMPTY", "")
-	t.Setenv("IMAS_SET", "custom")
+	const sproutID = "template-default-sprout"
+	if err := props.SetPropForTenant(testPropsTenantID, sproutID, "empty", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := props.SetPropForTenant(testPropsTenantID, sproutID, "set", "custom"); err != nil {
+		t.Fatal(err)
+	}
 
 	tests := []struct {
 		name     string
 		template string
 		expected string
 	}{
-		{"empty uses default", `{{ default "fallback" (env "IMAS_EMPTY") }}`, "fallback"},
-		{"set uses value", `{{ default "fallback" (env "IMAS_SET") }}`, "custom"},
-		{"unset uses default", `{{ default "fallback" (env "IMAS_UNSET_VAR_XYZ") }}`, "fallback"},
+		{"empty uses default", `{{ default "fallback" (props "empty") }}`, "fallback"},
+		{"set uses value", `{{ default "fallback" (props "set") }}`, "custom"},
+		{"unset uses default", `{{ default "fallback" (props "unset_prop_xyz") }}`, "fallback"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out, err := renderRecipeTemplate(testPropsTenantID, "test-sprout", tt.name, []byte(tt.template))
+			out, err := renderRecipeTemplate(testPropsTenantID, sproutID, tt.name, []byte(tt.template))
 			if err != nil {
 				t.Fatalf("render error: %v", err)
 			}

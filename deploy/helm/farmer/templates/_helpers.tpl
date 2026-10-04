@@ -595,6 +595,19 @@ explanation rather than deploying something that silently can't work.
 {{- fail (printf "farmer.jobs.reconcileWindow must be a quoted duration such as \"2h\", got %v" .) -}}
 {{- end -}}
 {{- end -}}
+{{- $tl := .Values.farmer.recipes.templateLimits -}}
+{{- range $k := list "maxSourceBytes" "maxRenderedBytes" "maxValueBytes" "maxRangeIterations" -}}
+{{- $v := get $tl $k -}}
+{{- if not (or (kindIs "float64" $v) (kindIs "int64" $v) (kindIs "int" $v)) -}}
+{{- fail (printf "farmer.recipes.templateLimits.%s must be a positive whole number, got %v" $k $v) -}}
+{{- end -}}
+{{- if or (lt (float64 $v) 1.0) (ne (float64 $v) (float64 (int64 $v))) -}}
+{{- fail (printf "farmer.recipes.templateLimits.%s must be a positive whole number, got %v" $k $v) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (and (kindIs "string" $tl.renderTimeout) (regexMatch "^[0-9]+(\\.[0-9]+)?(ms|s|m)$" (toString $tl.renderTimeout))) -}}
+{{- fail (printf "farmer.recipes.templateLimits.renderTimeout must be a quoted duration such as \"2s\", got %v" $tl.renderTimeout) -}}
+{{- end -}}
 {{- $os := .Values.objectStore -}}
 {{- if and $os.bucket $os.jobBucket (eq $os.bucket $os.jobBucket) -}}
 {{- fail "objectStore.jobBucket must differ from objectStore.bucket: GET /files/ serves every key in the recipe bucket to any authenticated caller, so job logs there would be readable across sprouts and tenants" -}}

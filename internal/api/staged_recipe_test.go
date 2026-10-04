@@ -45,6 +45,13 @@ func TestStagedRecipeKey_UnderGatewayPrefix(t *testing.T) {
 // sealed.go), which these stub sprouts read.
 func newStagingTestServer(t *testing.T, tenants ...string) *httptest.Server {
 	t.Helper()
+	return newStagingTestServerWithRecipes(t, nil, tenants...)
+}
+
+// newStagingTestServerWithRecipes is newStagingTestServer with extra
+// objects seeded into the bucket alongside recipes/webserver.imas.
+func newStagingTestServerWithRecipes(t *testing.T, extra map[string]string, tenants ...string) *httptest.Server {
+	t.Helper()
 	gdb, err := gorm.Open(sqlite.Open("file:"+strings.ReplaceAll(t.Name(), "/", "_")+"_pki?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
@@ -58,6 +65,9 @@ func newStagingTestServer(t *testing.T, tenants ...string) *httptest.Server {
 	objectstoretest.Seed(t, store, map[string]string{
 		"recipes/webserver.imas": "steps:\n  install nginx:\n    cmd.run:\n      - name: echo {{ sproutID }}\n",
 	})
+	if extra != nil {
+		objectstoretest.Seed(t, store, extra)
+	}
 	cook.SetStore(store)
 	t.Cleanup(func() { cook.SetStore(nil) })
 	handlers.SetRecipeStore(store)

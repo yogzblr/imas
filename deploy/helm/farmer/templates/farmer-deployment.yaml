@@ -125,6 +125,20 @@ spec:
             - name: IMAS_JOB_RECONCILE_WINDOW
               value: {{ . | quote }}
             {{- end }}
+            {{- /* Recipe template render limits; types checked in validate,
+            ranges by farmer at startup (cook.SetRenderLimits). */}}
+            {{- with .Values.farmer.recipes.templateLimits }}
+            - name: IMAS_RECIPE_MAX_SOURCE_BYTES
+              value: {{ .maxSourceBytes | int64 | toString | quote }}
+            - name: IMAS_RECIPE_MAX_RENDERED_BYTES
+              value: {{ .maxRenderedBytes | int64 | toString | quote }}
+            - name: IMAS_RECIPE_MAX_VALUE_BYTES
+              value: {{ .maxValueBytes | int64 | toString | quote }}
+            - name: IMAS_RECIPE_RENDER_TIMEOUT
+              value: {{ .renderTimeout | quote }}
+            - name: IMAS_RECIPE_MAX_RANGE_ITERATIONS
+              value: {{ .maxRangeIterations | int64 | toString | quote }}
+            {{- end }}
             # Farmer's own self_update switch (security review L1), off unless
             # farmer.selfUpdate.enabled.
             - name: IMAS_SELF_UPDATE_ENABLED

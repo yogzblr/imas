@@ -653,6 +653,11 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `farmer.logLevel` / `apiPort` / `gatewayJWTTTL` | `info` / `5405` / `24h` | `loglevel`, `farmerapiport`, `gatewayjwtttl`. |
 | `farmer.adminPubKeys` | `[]` | `pubkeys.admin`. |
 | `farmer.jobs.reconcileWindow` | `"2h"` | `IMAS_JOB_RECONCILE_WINDOW` (`deploy/farmer/values.job-reconcile.yaml`). |
+| `farmer.recipes.templateLimits.maxSourceBytes` | `262144` | `IMAS_RECIPE_MAX_SOURCE_BYTES`: largest recipe source farmer reads or renders. |
+| `farmer.recipes.templateLimits.maxRenderedBytes` | `1048576` | `IMAS_RECIPE_MAX_RENDERED_BYTES`: largest output of one recipe render. |
+| `farmer.recipes.templateLimits.maxValueBytes` | `262144` | `IMAS_RECIPE_MAX_VALUE_BYTES`: largest string one template function returns; at most `maxRenderedBytes`. |
+| `farmer.recipes.templateLimits.renderTimeout` | `"2s"` | `IMAS_RECIPE_RENDER_TIMEOUT`: time limit of one recipe render, a quoted Go duration up to `1m`. |
+| `farmer.recipes.templateLimits.maxRangeIterations` | `10000` | `IMAS_RECIPE_MAX_RANGE_ITERATIONS`: total `range` iterations in one render. Recipes are tenant-written (untrusted); all five are required, and farmer refuses to start if one is out of range (sizes up to 64 MiB, iterations up to 10000000). |
 | `farmer.selfUpdate.enabled` | `false` | `IMAS_SELF_UPDATE_ENABLED`: farmer's own switch for `self_update` (security review L1). Off, farmer refuses every update whatever saasapi sends. A rollout needs this and `saasapi.fleetUpdateDispatch.enabled`. |
 | `farmer.sproutActions.{concurrency,selfUpdateConcurrency,tenantConcurrency}` | `64`, `16`, `8` | `IMAS_SPROUT_ACTION_CONCURRENCY`, `IMAS_SELF_UPDATE_CONCURRENCY`, `IMAS_SPROUT_ACTION_TENANT_CONCURRENCY`: per replica, the cmd.run/cook pool, the pool reserved for `self_update`, and one tenant's cap in each (security review M5). A request that doesn't fit is refused at once (`farmer_busy`) and saasapi sends it again. Null emits no env var. |
 | `farmer.openbao.{gateway,fleetSign,tenantBox}.*` | see values.yaml | Mount, key or path, role, and token key per client. |

@@ -137,6 +137,7 @@ func main() {
 	}
 	fmt.Printf("Starting Farmer (core) with bus URL %s\n", config.FarmerBusURL)
 	defer log.Flush()
+	initRecipeLimits()
 	initStorage()
 	recipeStore := initRecipeStore()
 	jobStore := initJobStore()
@@ -283,6 +284,25 @@ func initStorage() {
 // storageModels is every GORM model in the farmer schema, for this
 // package's tests to create in sqlite. PXC's schema comes from cmd/migrate.
 func storageModels() []any { return pxc.Models() }
+
+// initRecipeLimits installs the recipe template render limits from the
+// farmer chart's farmer.recipes.templateLimits (config.RecipeLimits, the
+// IMAS_RECIPE_* variables), stopping farmer if one is out of range.
+func initRecipeLimits() {
+	l := config.RecipeLimits
+	if err := cook.SetRenderLimits(cook.RenderLimits{
+		MaxSourceBytes:     l.MaxSourceBytes,
+		MaxRenderedBytes:   l.MaxRenderedBytes,
+		MaxValueBytes:      l.MaxValueBytes,
+		RenderTimeout:      l.RenderTimeout,
+		MaxRangeIterations: l.MaxRangeIterations,
+	}); err != nil {
+		log.Fatalf("recipe template limits (IMAS_RECIPE_*): %v", err)
+	}
+	cur := cook.CurrentRenderLimits()
+	log.Noticef("recipes: templates limited to %d source bytes, %d rendered bytes, %d bytes per value, %s, %d range iterations",
+		cur.MaxSourceBytes, cur.MaxRenderedBytes, cur.MaxValueBytes, cur.RenderTimeout, cur.MaxRangeIterations)
+}
 
 // installStorage hands the farmer-schema handle to every package
 // that reads or writes through it.
