@@ -40,6 +40,7 @@ import (
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/rbac"
 	"github.com/yogzblr/imas/internal/shell"
 )
 
@@ -860,6 +861,59 @@ func TestSealedShellNeedsShellAction(t *testing.T) {
 	if ShellTracker().Active() != 0 {
 		t.Fatal("tracked")
 	}
+}
+
+// The built-in operator role doesn't grant shell (owner decision on J.5):
+// an operator is refused shell.open.
+func TestSealedShellOperatorRefused(t *testing.T) {
+	env := startShellEnv(t)
+	if err := intauth.CurrentPolicy().Roles.Register(rbac.BuiltinOperatorRole()); err != nil {
+		t.Fatal(err)
+	}
+	intauth.CurrentPolicy().Users.Set(env.user.id, "operator")
+	eph, _ := payloadbox.NewEphemeralKey()
+	if _, err := env.open(shell.OpenRequest{SproutID: shellTestSprout, CLIEphPub: eph.PublicKey().Bytes()}); err == nil {
+		t.Fatal("the built-in operator role opened a shell")
+	}
+	if ShellTracker().Active() != 0 || env.sp.Active() != 0 {
+		t.Fatal("a session was started")
+	}
+}
+
+// A role that names shell, scoped to the sprout, still opens one: what an
+// operator who needs a shell is now given.
+func TestSealedShellExplicitGrant(t *testing.T) {
+	env := startShellEnv(t)
+	op := rbac.BuiltinOperatorRole()
+	role := &rbac.Role{Name: "operator-shell", Rules: append(op.Rules, rbac.Rule{Action: rbac.ActionShell, Scope: "sprout:" + shellTestSprout})}
+	if err := intauth.CurrentPolicy().Roles.Register(role); err != nil {
+		t.Fatal(err)
+	}
+	intauth.CurrentPolicy().Users.Set(env.user.id, "operator-shell")
+	run := env.startClient(t, nil)
+	run.waitReady(t)
+	run.send(t, "exit 0\n")
+	if res := run.wait(t); res.Reason != payloadbox.CloseExit || res.ExitCode != 0 {
+		t.Fatalf("ended %+v, want exit 0", res)
+	}
+}
+
+// Farmer's stop (CloseShellSessions, called by cmd/farmer before its bus
+// connections close) ends a live session with farmer-shutdown at both
+// ends, and the sprout kills the shell.
+func TestSealedShellFarmerShutdown(t *testing.T) {
+	env := startShellEnv(t)
+	run := env.startClient(t, nil)
+	run.waitReady(t)
+	CloseShellSessions()
+	if ShellTracker().Active() != 0 {
+		t.Fatal("a session outlived CloseShellSessions")
+	}
+	res := run.wait(t)
+	if res.Reason != payloadbox.CloseFarmerShutdown {
+		t.Fatalf("ended %+v, want farmer-shutdown", res)
+	}
+	waitFor(t, "the sprout to kill the shell", func() bool { return env.sp.Active() == 0 })
 }
 
 // --sever ends running sessions (key-severed); a normal rotation doesn't.

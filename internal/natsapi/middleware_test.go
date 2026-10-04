@@ -217,7 +217,7 @@ func TestOperatorRoleNATSAccess(t *testing.T) {
 		"jobs.list", "jobs.get", "jobs.forsprout", "jobs.cancel",
 		"props.getall", "props.get", "props.set", "props.delete",
 		"cohorts.list", "cohorts.get", "cohorts.resolve", "cohorts.refresh",
-		"cook", "cook.resync", "cmd.run", "shell.open", "test.ping",
+		"cook", "cook.resync", "cmd.run", "test.ping",
 		"auth.whoami", "auth.explain",
 	}
 	for _, method := range allowedMethods {
@@ -227,8 +227,10 @@ func TestOperatorRoleNATSAccess(t *testing.T) {
 		}
 	}
 
-	// Methods the operator should be denied (PKI + user management + audit)
+	// Methods the operator should be denied (PKI + user management + audit,
+	// and shell, which only a role that names it grants)
 	deniedMethods := []string{
+		"shell.open",
 		"pki.list", "pki.accept", "pki.reject", "pki.deny", "pki.unaccept", "pki.delete",
 		"auth.users", "auth.users.add", "auth.users.remove",
 		"audit.dates", "audit.query",
