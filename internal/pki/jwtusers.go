@@ -150,7 +150,7 @@ func mintOrReuseUserJWT(path, pubkey, name string, perms jwt.Permissions, issuer
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return false, err
 	}
-	if err := os.WriteFile(path, []byte(signed), 0o600); err != nil {
+	if err := writeFileAtomic(path, []byte(signed), 0o600); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -232,7 +232,7 @@ func syncNatsAuth(mat *natsAuthMaterial) (bool, error) {
 		if encErr != nil {
 			return false, encErr
 		}
-		if writeErr := os.WriteFile(tenantJWTPath(), []byte(signed), 0o600); writeErr != nil {
+		if writeErr := writeFileAtomic(tenantJWTPath(), []byte(signed), 0o600); writeErr != nil {
 			return false, writeErr
 		}
 		mat.tenantJWT = signed

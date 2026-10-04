@@ -737,7 +737,17 @@ func RunGatewayJWTRefresher(ctx context.Context, sproutID string, retryDelay tim
 
 // writeFileAtomic writes data to path via a temp file in the same
 // directory and a rename, so a crash never leaves a truncated credential
-// behind.
+// behind, and a concurrent reader sees the old contents or the new, never
+// a partial file.
+//
+// FLAG FOR SECURITY REVIEW. Core's trust material goes through it too:
+// every Operator, Account and User JWT and every seed jwtauth.go,
+// jwtusers.go, tenant.go and saasapi_user.go persist. With a plain
+// os.WriteFile (truncate, then write) a read could land in between, and
+// the readers that bootstrap that material (ensureNatsAuth,
+// ensureTenantAccountMaterial) treat a JWT that doesn't decode as missing
+// and mint a fresh one: an Account JWT without the revocations it
+// carried, written back and pushed to the bus as the tenant's claims.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if path == "" {
 		return errors.New("pki: no path configured")

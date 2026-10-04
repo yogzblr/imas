@@ -222,7 +222,7 @@ func ensureSaaSAPICredentialLocked(mat *natsAuthMaterial) (userJWT string, seed 
 		if err := os.MkdirAll(filepath.Dir(SaaSAPIUserJWTPath()), 0o700); err != nil {
 			return "", nil, "", false, err
 		}
-		if err := os.WriteFile(SaaSAPIUserJWTPath(), []byte(userJWT), 0o600); err != nil {
+		if err := writeFileAtomic(SaaSAPIUserJWTPath(), []byte(userJWT), 0o600); err != nil {
 			return "", nil, "", false, err
 		}
 		log.Infof("Minted the SaaS API's NATS User JWT under the SYS Account (%s).", SaaSAPIUserJWTPath())
@@ -234,7 +234,7 @@ func ensureSaaSAPICredentialLocked(mat *natsAuthMaterial) (userJWT string, seed 
 		if err != nil {
 			return "", nil, "", false, fmt.Errorf("re-signing the SYS Account JWT: %w", err)
 		}
-		if err := os.WriteFile(sysAccountJWTPath(), []byte(sysJWT), 0o600); err != nil {
+		if err := writeFileAtomic(sysAccountJWTPath(), []byte(sysJWT), 0o600); err != nil {
 			return "", nil, "", false, err
 		}
 	}
