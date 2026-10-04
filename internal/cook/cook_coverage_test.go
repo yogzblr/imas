@@ -1449,7 +1449,7 @@ func TestSendCookEventInvalidRecipe(t *testing.T) {
 func TestResolveRecipeFilePathDirectory(t *testing.T) {
 	// A prefix with nothing under it — the object-storage analogue of an
 	// empty recipe directory.
-	_, err := ResolveRecipeFilePath(context.Background(), "empty-prefix", RecipeName("test.imas"))
+	_, err := ResolveRecipeFilePath(context.Background(), testPropsTenantID, "empty-prefix", RecipeName("test.imas"))
 	if !errors.Is(err, ErrNoRecipe) {
 		t.Errorf("expected ErrNoRecipe, got %v", err)
 	}
@@ -1462,7 +1462,7 @@ func TestResolveRecipeFilePathInitIsDirectory(t *testing.T) {
 	recipeDir := newRecipeTestStore(t)
 	writeRecipe(t, filepath.Join(recipeDir, "myrecipe", "init.imas", "nested.imas"), "steps: {}\n")
 
-	_, err := ResolveRecipeFilePath(context.Background(), recipeDir, RecipeName("myrecipe"))
+	_, err := ResolveRecipeFilePath(context.Background(), testPropsTenantID, recipeDir, RecipeName("myrecipe"))
 	if !errors.Is(err, ErrNoRecipe) {
 		t.Errorf("expected ErrNoRecipe, got %v", err)
 	}
@@ -1473,7 +1473,7 @@ func TestResolveRecipeFilePathExtIsDirectory(t *testing.T) {
 	recipeDir := newRecipeTestStore(t)
 	writeRecipe(t, filepath.Join(recipeDir, "myrecipe.imas", "nested.imas"), "steps: {}\n")
 
-	_, err := ResolveRecipeFilePath(context.Background(), recipeDir, RecipeName("myrecipe"))
+	_, err := ResolveRecipeFilePath(context.Background(), testPropsTenantID, recipeDir, RecipeName("myrecipe"))
 	if !errors.Is(err, ErrNoRecipe) {
 		t.Errorf("expected ErrNoRecipe, got %v", err)
 	}

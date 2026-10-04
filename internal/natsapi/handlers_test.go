@@ -444,7 +444,7 @@ func TestHandleJobsDeleteInvalidJSON(t *testing.T) {
 
 func TestHandlePropsSetAndGet(t *testing.T) {
 	// Props uses an in-memory cache, so we just set and get.
-	setParams := json.RawMessage(`{"sprout_id":"sprout-1","name":"os","value":"linux"}`)
+	setParams := json.RawMessage(`{"sprout_id":"sprout-1","name":"role","value":"linux"}`)
 	result, err := handlePropsSet(props.CurrentTenantID(), setParams)
 	if err != nil {
 		t.Fatalf("handlePropsSet: %v", err)
@@ -454,7 +454,7 @@ func TestHandlePropsSetAndGet(t *testing.T) {
 		t.Fatalf("expected success=true, got %v", result)
 	}
 
-	getParams := json.RawMessage(`{"sprout_id":"sprout-1","name":"os"}`)
+	getParams := json.RawMessage(`{"sprout_id":"sprout-1","name":"role"}`)
 	result, err = handlePropsGet(props.CurrentTenantID(), getParams)
 	if err != nil {
 		t.Fatalf("handlePropsGet: %v", err)
@@ -469,16 +469,16 @@ func TestHandlePropsSetAndGet(t *testing.T) {
 	}
 
 	// Clean up.
-	props.DeleteProp("sprout-1", "os")
+	props.DeleteProp("sprout-1", "role")
 }
 
 func TestHandlePropsGetAll(t *testing.T) {
 	// Set multiple props.
-	handlePropsSet(props.CurrentTenantID(), json.RawMessage(`{"sprout_id":"sprout-2","name":"arch","value":"amd64"}`))
-	handlePropsSet(props.CurrentTenantID(), json.RawMessage(`{"sprout_id":"sprout-2","name":"os","value":"freebsd"}`))
+	handlePropsSet(props.CurrentTenantID(), json.RawMessage(`{"sprout_id":"sprout-2","name":"rack","value":"r12"}`))
+	handlePropsSet(props.CurrentTenantID(), json.RawMessage(`{"sprout_id":"sprout-2","name":"role","value":"web"}`))
 	defer func() {
-		props.DeleteProp("sprout-2", "arch")
-		props.DeleteProp("sprout-2", "os")
+		props.DeleteProp("sprout-2", "rack")
+		props.DeleteProp("sprout-2", "role")
 	}()
 
 	params := json.RawMessage(`{"sprout_id":"sprout-2"}`)

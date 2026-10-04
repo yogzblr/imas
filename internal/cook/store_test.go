@@ -34,7 +34,7 @@ func TestNoStore_FailsClearly(t *testing.T) {
 			return err
 		},
 		"ResolveRecipeFilePath": func() error {
-			_, err := ResolveRecipeFilePath(ctx, getBasePath(), "dev")
+			_, err := ResolveRecipeFilePath(ctx, testPropsTenantID, getBasePath(), "dev")
 			return err
 		},
 		"collectAllIncludes": func() error {

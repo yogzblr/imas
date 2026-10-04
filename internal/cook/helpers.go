@@ -3,13 +3,16 @@ package cook
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
-	"text/template"
+	"unicode/utf8"
 
 	"github.com/nats-io/nats.go"
 	"gopkg.in/yaml.v3"
@@ -139,9 +142,12 @@ func recipeToStep(id string, recipe map[string]interface{}) (Step, error) {
 	return Step{}, errors.New("error: recipe must have exactly one key")
 }
 
+// maxRecipeIncludes caps the distinct recipes one cook may include.
+const maxRecipeIncludes = 256
+
 func collectAllIncludes(ctx context.Context, tenantID, sproutID, basepath string, recipeID RecipeName) ([]RecipeName, error) {
 	// pass in an ID to a Recipe
-	recipeFilePath, err := ResolveRecipeFilePath(ctx, basepath, recipeID)
+	recipeFilePath, err := ResolveRecipeFilePath(ctx, tenantID, basepath, recipeID)
 	if err != nil {
 		return []RecipeName{}, err
 	}
@@ -378,19 +384,27 @@ func pathToRecipeName(path string) (RecipeName, error) {
 func relativeRecipeToAbsolute(ctx context.Context, basepath, relatedRecipePath string, recipeID RecipeName) (RecipeName, error) {
 	path := string(recipeID)
 	if !strings.HasPrefix(path, ".") {
-		var err error
-		path, err = ResolveRecipeFilePath(ctx, basepath, recipeID)
-		if err != nil {
+		if err := ValidateRecipeName(path); err != nil {
 			return "", err
 		}
-		return pathToRecipeName(path)
+		return recipeID, nil
 	}
 	path = strings.TrimPrefix(path, ".")
 
 	relationBasePath := filepath.Dir(relatedRecipePath)
 
 	path = filepath.Join(relationBasePath, path)
-	return pathToRecipeName(path)
+	name, err := pathToRecipeName(path)
+	if err != nil {
+		return "", err
+	}
+	// The joined path is a name again, and is resolved under the cooking
+	// sprout's tenant and the platform prefix like any other; refuse one
+	// that climbed out with "..".
+	if err := ValidateRecipeName(string(name)); err != nil {
+		return "", err
+	}
+	return name, nil
 }
 
 // RecipeDirEnvVar names an optional environment variable that overrides the
@@ -438,21 +452,136 @@ func extractIncludes(ctx context.Context, tenantID, sproutID, basepath, recipePa
 	return includeList, nil
 }
 
+// renderRecipeTemplate renders file, a recipe template, for tenantID's
+// sproutID and returns YAML in which every prop, fact and sprout ID the
+// template printed is a value inside the scalar it was printed into, never
+// recipe structure (security review H2). See "Template values" in
+// farmercook.go: the template runs with placeholders standing in for those
+// values, the YAML is parsed, and substituteTemplateValues replaces them
+// in the parsed scalars and encodes the result again. A template that
+// printed no such value is returned exactly as it rendered.
 func renderRecipeTemplate(tenantID, sproutID, recipeName string, file []byte) ([]byte, error) {
-	temp := template.New(recipeName)
-	gFuncs := populateFuncMap(tenantID, sproutID)
-	temp.Funcs(gFuncs)
-	rt, err := temp.Parse(string(file))
+	out, err := executeRecipeTemplate(newRenderState(tenantID, sproutID), recipeName, file)
 	if err != nil {
 		return []byte{}, err
 	}
-	rt.Option("missingkey=error")
-	buf := bytes.NewBuffer([]byte{})
-	err = rt.Execute(buf, nil)
-	if err != nil {
-		return []byte{}, err
+	return substituteTemplateValues(out)
+}
+
+// Template-value placeholders. A placeholder is
+// "imasv" + nonce + "x" + hex(value) + "x": letters and digits only, so it
+// is inert in every YAML context (plain, quoted, block scalars, keys, flow
+// collections) and YAML parsing never splits or changes it. The nonce is
+// random per process so a recipe's own text is not mistaken for one by
+// accident. Its secrecy is not relied on: substitution makes one pass over
+// the parsed scalars, so a value whose content looks like a placeholder is
+// inserted as that text, not expanded again.
+var (
+	templatePlaceholderPrefix = "imasv" + randomPlaceholderNonce() + "x"
+	templatePlaceholderRE     = regexp.MustCompile(regexp.QuoteMeta(templatePlaceholderPrefix) + `([0-9a-f]*)x`)
+)
+
+func randomPlaceholderNonce() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic("cook: no randomness for template placeholders: " + err.Error())
 	}
-	return buf.Bytes(), nil
+	return hex.EncodeToString(b)
+}
+
+func encodeTemplatePlaceholder(value string) string {
+	return templatePlaceholderPrefix + hex.EncodeToString([]byte(value)) + "x"
+}
+
+// substituteTemplateValues resolves the placeholders in rendered, a
+// template's output (see renderRecipeTemplate). If there are none it
+// returns rendered unchanged. Otherwise it parses rendered as one YAML
+// document, replaces each placeholder inside the scalar (value or key)
+// holding it, and encodes the document again, so the encoder quotes or
+// block-formats each value as its content needs.
+//
+// A scalar that is a value, unquoted, and exactly one placeholder takes
+// the YAML type its content resolves to as a single plain scalar (so
+// "port: {{ props "port" }}" is still a number); anything that would not
+// be a scalar (a mapping, a list, an alias) stays a string. Every other
+// scalar holding a placeholder, and every key, is a string. Comments are
+// dropped.
+func substituteTemplateValues(rendered []byte) ([]byte, error) {
+	if !bytes.Contains(rendered, []byte(templatePlaceholderPrefix)) {
+		return rendered, nil
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(rendered, &doc); err != nil {
+		return nil, err
+	}
+	if doc.Kind == 0 {
+		return []byte{}, nil
+	}
+	if err := substituteNode(&doc, false); err != nil {
+		return nil, err
+	}
+	return yaml.Marshal(&doc)
+}
+
+func substituteNode(n *yaml.Node, isKey bool) error {
+	n.HeadComment, n.LineComment, n.FootComment = "", "", ""
+	switch n.Kind {
+	case yaml.DocumentNode, yaml.SequenceNode:
+		for _, c := range n.Content {
+			if err := substituteNode(c, false); err != nil {
+				return err
+			}
+		}
+	case yaml.MappingNode:
+		for i, c := range n.Content {
+			if err := substituteNode(c, i%2 == 0); err != nil {
+				return err
+			}
+		}
+	case yaml.ScalarNode:
+		if !strings.Contains(n.Value, templatePlaceholderPrefix) {
+			return nil
+		}
+		whole := templatePlaceholderRE.FindString(n.Value) == n.Value
+		var decodeErr error
+		value := templatePlaceholderRE.ReplaceAllStringFunc(n.Value, func(ph string) string {
+			raw, err := hex.DecodeString(templatePlaceholderRE.FindStringSubmatch(ph)[1])
+			if err != nil {
+				decodeErr = err
+				return ""
+			}
+			return string(raw)
+		})
+		if decodeErr != nil {
+			return decodeErr
+		}
+		if !utf8.ValidString(value) {
+			return ErrTemplateValueEncoding
+		}
+		n.Value = value
+		n.Tag = "!!str"
+		n.Style &^= yaml.TaggedStyle
+		if !isKey && whole && n.Style == 0 && plainScalarKeepsType(value) {
+			n.Tag = ""
+		}
+	}
+	return nil
+}
+
+// plainScalarKeepsType reports whether value, read as a single plain YAML
+// scalar, is a number, a bool or null: the types a value printed bare into
+// a recipe used to take. It decodes a lone scalar node, so YAML syntax in
+// value is never parsed as structure.
+func plainScalarKeepsType(value string) bool {
+	var out any
+	if err := (&yaml.Node{Kind: yaml.ScalarNode, Value: value}).Decode(&out); err != nil {
+		return false
+	}
+	switch out.(type) {
+	case nil, bool, int, int64, uint64, float64:
+		return true
+	}
+	return false
 }
 
 func unmarshalRecipe(recipe []byte) (map[string]interface{}, error) {
@@ -469,7 +598,10 @@ func collectIncludesRecurse(ctx context.Context, tenantID, sproutID, basepath st
 			if !done {
 				allIncluded = false
 				starter[inc] = true
-				recipeFilePath, err := ResolveRecipeFilePath(ctx, basepath, inc)
+				if len(starter) > maxRecipeIncludes {
+					return starter, fmt.Errorf("%w: more than %d recipes included", ErrInvalidFormat, maxRecipeIncludes)
+				}
+				recipeFilePath, err := ResolveRecipeFilePath(ctx, tenantID, basepath, inc)
 				if err != nil {
 					return starter, err
 				}
