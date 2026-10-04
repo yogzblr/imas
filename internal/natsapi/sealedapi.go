@@ -5,9 +5,9 @@ package natsapi
 // plane", J.1 and J.3). FLAG FOR SECURITY REVIEW.
 //
 // openCLIRequest and sealCLIReply are wired around every imas.api.*
-// handler by the sealed router (sealedrouter.go, J.3). The SaaS API pair
-// (openSaaSAPIRequest and its seals) waits for rollout step 5 (J.4) to be
-// put around internal.*. Owner decisions, 2026-10-04: sealed only, with
+// handler by the sealed router (sealedrouter.go, J.3); openSaaSAPIRequest
+// and its seals around every internal.* handler (tenant_provision.go and
+// sprout_action.go, J.4). Owner decisions, 2026-10-04: sealed only, with
 // no bearer token fallback and no plaintext fallback; method names stay
 // visible in subjects (open question 9); static keys (open question 8);
 // the Valkey claim for mutating methods fails closed (open question 7).
@@ -42,7 +42,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 
-	"github.com/yogzblr/imas/internal/controlplane"
+	log "github.com/yogzblr/imas/internal/log"
 	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 )
@@ -267,32 +267,27 @@ func sealCLIReply(req *sealedRequest, result any, handlerErr error) ([]byte, err
 	return pki.SealToCLI(req.TenantID, req.Principal, r)
 }
 
-// saasapiPurposes maps an internal.* request subject to its purpose.
-var saasapiPurposes = map[string]string{
-	controlplane.SubjectTenantProvision:   payloadbox.PurposeSaaSTenantProvision,
-	controlplane.SubjectTenantDeprovision: payloadbox.PurposeSaaSTenantDeprovision,
-	controlplane.SubjectSproutAction:      payloadbox.PurposeSaaSSproutAction,
-}
-
-// saasapiSubjectPrefix is the prefix of every SaaS API subject.
-const saasapiSubjectPrefix = "internal."
-
-// openSaaSAPIRequest checks m, a SaaS API request on one of
-// saasapiPurposes' subjects, and returns it opened. All three are
-// mutating, so each is claimed cluster-wide. Errors as openCLIRequest's.
+// openSaaSAPIRequest checks m, a SaaS API request on one of the
+// internal.* request subjects (pki.SaaSAPIRequestWire), and returns it
+// opened: sealed by the SaaS API's registered box key (current, or the
+// previous one inside a rotation's grace window) to a platform key farmer
+// holds, bound to the subject it arrived on, fresh, and not seen before on
+// this replica or, through the Valkey claim, on any other. All three
+// subjects are mutating, so every request is claimed cluster-wide. Errors
+// as openCLIRequest's: ErrSealedStoreUnavailable comes with the opened
+// request, so a request-reply caller can answer it sealed.
 func (s *sealedAPI) openSaaSAPIRequest(ctx context.Context, m *nats.Msg) (*sealedRequest, error) {
 	if m.Header.Get(payloadbox.Header) != payloadbox.HeaderBox1 {
 		return nil, refuse(payloadbox.ErrorCodeEncryptionRequired, errors.New("plaintext request"))
 	}
-	purpose, ok := saasapiPurposes[m.Subject]
+	w, ok := pki.SaaSAPIRequestWire(m.Subject)
 	if !ok {
 		return nil, refuse(payloadbox.ErrorCodeOpenFailed, fmt.Errorf("not a SaaS API request subject: %s", m.Subject))
 	}
 	if m.Header.Get(payloadbox.PrincipalHeader) != payloadbox.PrincipalSaaSAPI {
 		return nil, refuse(payloadbox.ErrorCodeOpenFailed, errors.New("principal header is not the SaaS API"))
 	}
-	method := strings.TrimPrefix(m.Subject, saasapiSubjectPrefix)
-	msg, body, err := pki.OpenFromSaaSAPI(purpose, method, m.Subject, m.Data)
+	msg, body, err := pki.OpenFromSaaSAPI(w.Purpose, w.Method, w.Subject, m.Data)
 	if err != nil {
 		if errors.Is(err, payloadbox.ErrOpen) {
 			return nil, refuse(payloadbox.ErrorCodeOpenFailed, err)
@@ -303,20 +298,30 @@ func (s *sealedAPI) openSaaSAPIRequest(ctx context.Context, m *nats.Msg) (*seale
 		return nil, err
 	}
 	req := &sealedRequest{
-		TenantID: payloadbox.PlatformTenantID, Principal: payloadbox.PrincipalSaaSAPI, Purpose: purpose,
-		Method: method, Subject: m.Subject, ID: msg.ID, Params: body.Params,
+		TenantID: payloadbox.PlatformTenantID, Principal: payloadbox.PrincipalSaaSAPI, Purpose: w.Purpose,
+		Method: w.Method, Subject: w.Subject, ID: msg.ID, Params: body.Params,
 	}
 	if err := s.accept(ctx, req, msg, true); err != nil {
+		if errors.Is(err, ErrSealedStoreUnavailable) {
+			// It opened: a request-reply caller answers with a sealed error.
+			return req, err
+		}
 		return nil, err
 	}
 	return req, nil
 }
 
 // sealSaaSAPIReply seals farmer's reply to an internal.sprout.action
-// request (f2a.sprout.action).
+// request (f2a.sprout.action, pki.SproutActionReplyWire), bound to the
+// request's ID. result is the controlplane.SproutActionReply. handlerErr
+// is set only when farmer refused the request before running anything
+// (ErrSealedStoreUnavailable); it then travels inside the box with no
+// result, and the SaaS API reads "an error and no result" as refused
+// unrun.
 func sealSaaSAPIReply(req *sealedRequest, result any, handlerErr error) ([]byte, error) {
+	w := pki.SproutActionReplyWire()
 	r := payloadbox.Reply{
-		Purpose: payloadbox.PurposeSaaSSproutActionReply, ReplyTo: req.ID, Method: req.Method, Subject: req.Subject, Result: result,
+		Purpose: w.Purpose, ReplyTo: req.ID, Method: req.Method, Subject: req.Subject, Result: result,
 	}
 	if handlerErr != nil {
 		r.Result, r.Error = nil, handlerErr.Error()
@@ -326,20 +331,58 @@ func sealSaaSAPIReply(req *sealedRequest, result any, handlerErr error) ([]byte,
 
 // sealSaaSAPIResult seals an asynchronous provisioning result for jobID:
 // f2a.tenant.provisioned on internal.tenant.provisioned.<job_id>, or the
-// deprovisioned pair, bound to that subject so it can't be moved to
-// another job's. It returns the subject to publish on and the envelope.
+// deprovisioned pair (pki.TenantResultWire), bound to that subject so it
+// can't be moved to another job's. It returns the subject to publish on
+// and the envelope. Every result is a new message (fresh ID and time).
 func sealSaaSAPIResult(deprovision bool, jobID string, result any) (subject string, data []byte, err error) {
-	purpose, prefix := payloadbox.PurposeSaaSTenantProvisioned, controlplane.SubjectTenantProvisionedPrefix
-	if deprovision {
-		purpose, prefix = payloadbox.PurposeSaaSTenantDeprovisioned, controlplane.SubjectTenantDeprovisionedPrefix
+	w, err := pki.TenantResultWire(deprovision, jobID)
+	if err != nil {
+		return "", nil, fmt.Errorf("natsapi: %w", err)
 	}
-	if jobID == "" || strings.ContainsAny(jobID, ".*> \t") {
-		return "", nil, fmt.Errorf("natsapi: invalid job id %q", jobID)
+	data, _, err = pki.SealResultToSaaSAPI(payloadbox.Call{Purpose: w.Purpose, Method: w.Method, Subject: w.Subject, Params: result})
+	return w.Subject, data, err
+}
+
+// openSaaSAPIRequestOrRefuse opens m with s (openSaaSAPIRequest) and
+// returns the opened request, or nil once a refusal is dealt with: logged
+// and, when answer is set (internal.sprout.action, request-reply, whose
+// reply subject the caller has already checked), answered, with the fixed
+// code and no body, or with a sealed error for a request that opened while
+// Valkey was down. Without answer (the fire-and-forget provisioning
+// subjects) nothing is published: the SaaS API's job stays pending, and
+// its outbox sweeper sends a new request later.
+func (s *sealedAPI) openSaaSAPIRequestOrRefuse(m *nats.Msg, answer bool) *sealedRequest {
+	ctx, cancel := context.WithTimeout(context.Background(), sealedRequestTimeout)
+	req, err := s.openSaaSAPIRequest(ctx, m)
+	cancel()
+	switch {
+	case err == nil:
+		return req
+	case errors.Is(err, ErrSealedStoreUnavailable) && req != nil:
+		log.Warnf("natsapi: refusing %s from the SaaS API (message %s): %v", m.Subject, req.ID, err)
+		if !answer {
+			return nil
+		}
+		data, sealErr := sealSaaSAPIReply(req, nil, ErrSealedStoreUnavailable)
+		if sealErr == nil {
+			if rerr := respondSealed(m, data); rerr != nil {
+				log.Errorf("natsapi: failed to answer %s: %v", m.Subject, rerr)
+			}
+			return nil
+		}
+		log.Errorf("natsapi: sealing the refusal of %s: %v", m.Subject, sealErr)
+		err = sealErr
+	default:
+		// The reason stays in farmer's log; the bus sees a fixed code.
+		log.Warnf("natsapi: refusing a request on %s (principal header %q): %v",
+			m.Subject, m.Header.Get(payloadbox.PrincipalHeader), err)
 	}
-	subject = prefix + jobID
-	method := strings.TrimSuffix(strings.TrimPrefix(prefix, saasapiSubjectPrefix), ".")
-	data, _, err = pki.SealResultToSaaSAPI(payloadbox.Call{Purpose: purpose, Method: method, Subject: subject, Params: result})
-	return subject, data, err
+	if answer {
+		if rerr := respondSealedRefusal(m, err); rerr != nil {
+			log.Errorf("natsapi: failed to answer %s: %v", m.Subject, rerr)
+		}
+	}
+	return nil
 }
 
 // respondSealedRefusal answers m with err's fixed code and no body.

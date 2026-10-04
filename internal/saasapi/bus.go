@@ -79,6 +79,13 @@ func validateBusCredential(seed, userJWT string) error {
 // retrying rather than serving POST /tenants with no way to dispatch.
 // Once connected, the connection reconnects indefinitely, so a bus
 // restart doesn't permanently sever it.
+//
+// It also loads this service's box key and platform pin
+// (SAASAPI_BOX_PRIV_FILE, SAASAPI_PLATFORM_BOX_PUB) and installs them
+// (SetControlPlaneBox) before dialing: farmer accepts only sealed
+// internal.* requests, and this service accepts only sealed answers
+// (sealedbus.go, J.4), so a connection without them could do nothing but
+// fail. Missing or unreadable keys are a startup error.
 func ConnectBus(cfg Config) (*nats.Conn, error) {
 	if cfg.NATSURL == "" || cfg.NATSCAFile == "" || cfg.NATSNKeySeedFile == "" || cfg.NATSUserJWT == "" {
 		return nil, fmt.Errorf("%w: SAASAPI_NATS_URL, SAASAPI_NATS_CA_FILE, SAASAPI_NATS_NKEY_SEED_FILE and SAASAPI_NATS_USER_JWT are all required", ErrBusNotConfigured)
@@ -98,6 +105,10 @@ func ConnectBus(cfg Config) (*nats.Conn, error) {
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(rootPEM) {
 		return nil, fmt.Errorf("saasapi: no certificates found in SAASAPI_NATS_CA_FILE %s", cfg.NATSCAFile)
+	}
+	box, err := loadControlPlaneBox(cfg)
+	if err != nil {
+		return nil, err
 	}
 	nc, err := nats.Connect(cfg.NATSURL,
 		nats.Name("imas-saasapi"),
@@ -131,5 +142,6 @@ func ConnectBus(cfg Config) (*nats.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("saasapi: connecting to NATS bus %s: %w", cfg.NATSURL, err)
 	}
+	SetControlPlaneBox(box)
 	return nc, nil
 }

@@ -10,8 +10,17 @@ package natsapi
 // once per farmer process on its SYS listener connection — see
 // tenant_provision.go and docs/design/imas-internal-api-account.md. Unlike
 // internal.tenant.*, a request here reaches into one tenant's fleet on the
-// SaaS API's say-so, so two checks run before anything executes:
+// SaaS API's say-so, so these checks run before anything executes:
 //
+//  0. Since J.4 (docs/design/imas-payload-encryption-design.md, Decision
+//     B) the request must be a sealed a2f.sprout.action Call from the SaaS
+//     API's registered box key to the platform key, bound to this
+//     subject, fresh, and claimed once on this replica and cluster-wide
+//     (openSaaSAPIRequest). The bus's account permissions are no longer
+//     what farmer relies on: a compromised bus ignores them. The reply is
+//     sealed too, bound to the request's ID. The checks below still run,
+//     because they also stand against a compromised SaaS API, which
+//     sealing doesn't.
 //  1. The reply subject must be one of the SaaS API's own scoped inboxes
 //     (controlplane.ValidSaaSAPIReplySubject). Farmer replies from its SYS
 //     user, which has no permission restrictions, and NATS doesn't check
@@ -285,14 +294,30 @@ var errSproutActionInvalid = errors.New("invalid internal.sprout.action request"
 //
 // It reads EnvSelfUpdateEnabled and the concurrency settings
 // (sproutActionLimiter) once, here.
+//
+// Every request is a sealed a2f.sprout.action Call (J.4,
+// openSaaSAPIRequest): one that is plaintext, forged, moved from another
+// subject, stale or replayed is refused before it is decoded, and
+// answered only with a fixed Imas-Payload-Error code. It is claimed
+// cluster-wide before the limiter or anything else sees it, so a refusal
+// that sends the SaaS API back to try again (farmer_busy) never leaves a
+// copy another replica could still run. Every reply, refusals by the
+// limiter or the handler included, is a sealed f2a.sprout.action Reply
+// bound to the request's ID (respondSproutAction).
 func RegisterSproutAction(nc *nats.Conn) error {
+	return registerSproutAction(nc, replicaSealedAPI)
+}
+
+// registerSproutAction is RegisterSproutAction with the replica's
+// sealed-request state passed in.
+func registerSproutAction(nc *nats.Conn, s *sealedAPI) error {
 	selfUpdateEnabled.Store(selfUpdateEnabledFromEnv())
 	general := sproutActionConcurrency()
 	reserved := envConcurrency(EnvSelfUpdateConcurrency, defaultSelfUpdateConcurrency)
 	tenantCap := envConcurrency(EnvSproutActionTenantConcurrency, defaultSproutActionTenantConcurrency)
 	limiter := newSproutActionLimiter(general, reserved, tenantCap)
 	if _, err := nc.QueueSubscribe(controlplane.SubjectSproutAction, natsCoreQueueGroup, func(msg *nats.Msg) {
-		// Checked before decoding or doing anything else: a request with
+		// Checked before opening or doing anything else: a request with
 		// no valid SaaS API inbox is dropped, not executed and not
 		// answered. The contract is request-reply, so there's no one to
 		// tell, and running it anyway would be an effect nobody sees.
@@ -300,21 +325,25 @@ func RegisterSproutAction(nc *nats.Conn) error {
 			log.Errorf("natsapi: dropping %s request with a reply subject outside %s: %q", controlplane.SubjectSproutAction, controlplane.SaaSAPIInboxWildcard, msg.Reply)
 			return
 		}
+		sreq := s.openSaaSAPIRequestOrRefuse(msg, true)
+		if sreq == nil {
+			return
+		}
 		var req controlplane.SproutActionRequest
-		if err := json.Unmarshal(msg.Data, &req); err != nil {
+		if err := json.Unmarshal(sreq.Params, &req); err != nil {
 			// Refused without dispatching anything: answered here.
-			respondSproutAction(msg, handleSproutAction(msg.Data))
+			respondSproutAction(msg, sreq, handleSproutAction(sreq.Params))
 			return
 		}
 		// Never blocks: a full cap or pool is a refusal, answered here.
 		release, refused := limiter.tryAcquire(req.TenantID, req.Action.Type)
 		if refused != "" {
-			respondSproutAction(msg, refuseBusy(req, msg.Data, refused))
+			respondSproutAction(msg, sreq, refuseBusy(req, sreq.Params, refused))
 			return
 		}
 		go func() {
 			defer release()
-			respondSproutAction(msg, handleSproutActionRequest(req, msg.Data))
+			respondSproutAction(msg, sreq, handleSproutActionRequest(req, sreq.Params))
 		}()
 	}); err != nil {
 		return fmt.Errorf("natsapi: failed to subscribe to %s: %w", controlplane.SubjectSproutAction, err)
@@ -333,13 +362,21 @@ func RegisterSproutAction(nc *nats.Conn) error {
 	return nil
 }
 
-func respondSproutAction(msg *nats.Msg, reply controlplane.SproutActionReply) {
-	data, err := json.Marshal(reply)
+// respondSproutAction answers msg, the opened request req, with reply
+// sealed to the SaaS API (sealSaaSAPIReply). A reply that can't be sealed
+// (the platform key became unreadable in between) is answered with the
+// internal code and no body, never in plaintext; the SaaS API can't tell
+// whether the action ran, and records it as such.
+func respondSproutAction(msg *nats.Msg, req *sealedRequest, reply controlplane.SproutActionReply) {
+	data, err := sealSaaSAPIReply(req, reply, nil)
 	if err != nil {
-		log.Errorf("natsapi: marshalling %s reply: %v", controlplane.SubjectSproutAction, err)
+		log.Errorf("natsapi: sealing the %s reply (message %s): %v", controlplane.SubjectSproutAction, req.ID, err)
+		if rerr := respondSealedRefusal(msg, err); rerr != nil {
+			log.Errorf("natsapi: responding to %s: %v", controlplane.SubjectSproutAction, rerr)
+		}
 		return
 	}
-	if err := msg.Respond(data); err != nil {
+	if err := respondSealed(msg, data); err != nil {
 		log.Errorf("natsapi: responding to %s: %v", controlplane.SubjectSproutAction, err)
 	}
 }

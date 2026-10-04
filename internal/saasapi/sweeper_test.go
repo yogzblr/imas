@@ -1,7 +1,6 @@
 package saasapi
 
 import (
-	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/controlplane"
+	"github.com/yogzblr/imas/internal/payloadbox"
 )
 
 // clearOutbox empties the outbox tables. The sqlite test database is
@@ -200,6 +200,14 @@ type provisioningFarmer struct {
 	mu    sync.Mutex
 	byJob map[string]int
 	names map[string]string
+	msgs  []*payloadbox.Message // every request, opened, in arrival order
+}
+
+// sent returns every request farmer received, opened.
+func (f *provisioningFarmer) sent() []*payloadbox.Message {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*payloadbox.Message(nil), f.msgs...)
 }
 
 func startProvisioningFarmer(t *testing.T, nc *nats.Conn) *provisioningFarmer {
@@ -208,13 +216,15 @@ func startProvisioningFarmer(t *testing.T, nc *nats.Conn) *provisioningFarmer {
 	for _, subject := range []string{controlplane.SubjectTenantProvision, controlplane.SubjectTenantDeprovision} {
 		if _, err := nc.Subscribe(subject, func(msg *nats.Msg) {
 			var req controlplane.TenantProvisionRequest
-			if err := json.Unmarshal(msg.Data, &req); err != nil {
-				t.Errorf("bad request: %v", err)
+			sealed, err := farmerOpenRequest(msg, &req)
+			if err != nil {
+				t.Errorf("request didn't open: %v", err)
 				return
 			}
 			f.mu.Lock()
 			f.byJob[req.JobID]++
 			f.names[req.JobID] = req.Name
+			f.msgs = append(f.msgs, sealed)
 			f.mu.Unlock()
 		}); err != nil {
 			t.Fatal(err)

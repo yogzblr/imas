@@ -132,7 +132,7 @@ type heldFarmer struct {
 	mu       sync.Mutex
 	hold     string
 	released bool
-	held     []*nats.Msg
+	held     []heldRequest
 	inFlight int
 	peak     int
 	seen     map[string]int // requests by tenant/type
@@ -146,30 +146,33 @@ func startHeldFarmer(t *testing.T, ns *server.Server, hold string) *heldFarmer {
 		t.Fatal(err)
 	}
 	t.Cleanup(fnc.Close)
-	answer := func(msg *nats.Msg, req controlplane.SproutActionRequest) {
+	answer := func(msg *nats.Msg, id string, req controlplane.SproutActionRequest) {
 		reply := controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID}
 		if req.Action.Type == controlplane.ActionSelfUpdate {
 			reply.Status, reply.JID = controlplane.StatusDispatched, jidFor(req.SproutID)
 		} else {
 			reply.Status, reply.Result = controlplane.StatusCompleted, &controlplane.CmdRunResult{}
 		}
-		b, _ := json.Marshal(reply)
-		_ = msg.Respond(b)
+		_ = farmerRespond(msg, id, reply)
 	}
 	if _, err := fnc.Subscribe(controlplane.SubjectSproutAction, func(msg *nats.Msg) {
 		var req controlplane.SproutActionRequest
-		_ = json.Unmarshal(msg.Data, &req)
+		sealed, err := farmerOpenRequest(msg, &req)
+		if err != nil {
+			t.Errorf("held farmer: request didn't open: %v", err)
+			return
+		}
 		f.mu.Lock()
 		f.seen[req.TenantID+"/"+req.Action.Type]++
 		if req.TenantID == f.hold && req.Action.Type == controlplane.ActionCmdRun && !f.released {
-			f.held = append(f.held, msg)
+			f.held = append(f.held, heldRequest{msg: msg, id: sealed.ID, req: req})
 			f.inFlight++
 			f.peak = max(f.peak, f.inFlight)
 			f.mu.Unlock()
 			return
 		}
 		f.mu.Unlock()
-		answer(msg, req)
+		answer(msg, sealed.ID, req)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -190,13 +193,17 @@ func (f *heldFarmer) release() {
 	held := f.held
 	f.held, f.inFlight = nil, 0
 	f.mu.Unlock()
-	for _, msg := range held {
-		var req controlplane.SproutActionRequest
-		_ = json.Unmarshal(msg.Data, &req)
-		b, _ := json.Marshal(controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
+	for _, h := range held {
+		_ = farmerRespond(h.msg, h.id, controlplane.SproutActionReply{TenantID: h.req.TenantID, SproutID: h.req.SproutID,
 			Status: controlplane.StatusCompleted, Result: &controlplane.CmdRunResult{}})
-		_ = msg.Respond(b)
 	}
+}
+
+// heldRequest is a request heldFarmer hasn't answered yet.
+type heldRequest struct {
+	msg *nats.Msg
+	id  string
+	req controlplane.SproutActionRequest
 }
 
 // waitBatchDone polls GET until the batch is completed.

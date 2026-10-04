@@ -24,6 +24,7 @@ type fakeFarmer struct {
 	mu       sync.Mutex
 	requests []controlplane.SproutActionRequest
 	replies  []string // reply subjects, to check the inbox prefix
+	ids      []string // each request's sealed message ID
 }
 
 func (f *fakeFarmer) seen() ([]controlplane.SproutActionRequest, []string) {
@@ -69,22 +70,26 @@ func startFakeFarmer(t *testing.T, ns *server.Server, respond func(controlplane.
 	}
 	t.Cleanup(fnc.Close)
 	_, err = fnc.Subscribe(controlplane.SubjectSproutAction, func(msg *nats.Msg) {
+		// Opened as farmer opens it: sealed by the SaaS API, bound to
+		// this subject.
 		var req controlplane.SproutActionRequest
-		if err := json.Unmarshal(msg.Data, &req); err != nil {
-			t.Errorf("fake farmer: bad request %q: %v", msg.Data, err)
+		sealed, err := farmerOpenRequest(msg, &req)
+		if err != nil {
+			t.Errorf("fake farmer: request didn't open: %v", err)
 			return
 		}
 		f.mu.Lock()
 		f.requests = append(f.requests, req)
 		f.replies = append(f.replies, msg.Reply)
+		f.ids = append(f.ids, sealed.ID)
 		f.mu.Unlock()
 		switch out := respond(req).(type) {
 		case nil:
 		case []byte:
+			// Raw bytes, unsealed: a reply that isn't farmer's.
 			_ = msg.Respond(out)
 		default:
-			b, _ := json.Marshal(out)
-			_ = msg.Respond(b)
+			_ = farmerRespond(msg, sealed.ID, out)
 		}
 	})
 	if err != nil {

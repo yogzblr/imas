@@ -867,28 +867,40 @@ func updateItem(d *gorm.DB, item AssetActionItem, from AssetActionItemStatus, up
 // the attempt and recording dispatched_at); if that doesn't apply, someone
 // else already owns it and nothing is sent. From then on:
 //
-//   - no responders: no farmer was subscribed, so the request provably
-//     went nowhere — back to queued, safe to send again, with
-//     dispatched_at cleared (it was never delivered).
-//   - any other request error (timeout, connection lost mid-request), an
-//     unreadable reply, or one naming a different tenant or sprout:
-//     failed/dispatch_outcome_unknown. The action may have run, so the
-//     item is terminal rather than re-sendable — cmd.run isn't
+//   - no responders: no farmer was subscribed, so the request went
+//     nowhere — back to queued, safe to send again, with dispatched_at
+//     cleared (it was never delivered). This is the one answer that isn't
+//     authenticated and still sends the item back: it is the bus's own
+//     status, which nothing can seal. A compromised bus can claim it after
+//     delivering the request, and the next dispatch is a new sealed
+//     message farmer accepts; see "As built: J.4" in the payload
+//     encryption design (open question 10).
+//   - any other request error (timeout, connection lost mid-request), a
+//     reply that isn't farmer's sealed answer to this request (plaintext,
+//     an Imas-Payload-Error code, one that doesn't open or names another
+//     request), an unreadable result, or one naming a different tenant or
+//     sprout: failed/dispatch_outcome_unknown. The action may have run, so
+//     the item is terminal rather than re-sendable — cmd.run isn't
 //     idempotent.
-//   - a farmer_busy reply: farmer refused it unrun (a full cap or pool), so
-//     it goes back to queued, as for no responders.
-//   - any other reply: applied by replyUpdate.
+//   - a sealed farmer_busy reply, or a sealed refusal with no result
+//     (farmer's replay store was down): farmer refused it unrun, so it goes
+//     back to queued, as for no responders.
+//   - any other sealed reply: applied by replyUpdate.
 //
 // It reports whether the item went back to queued unsent (no responders,
-// or farmer_busy): a caller may send it again.
+// farmer_busy, or refused unrun): a caller may send it again.
 func dispatchItem(d *gorm.DB, nc *nats.Conn, batch AssetActionBatch, item AssetActionItem) (requeued bool) {
-	data, err := json.Marshal(controlplane.SproutActionRequest{
+	// Sealed before the claim, as a new message every time (J.4,
+	// sealedbus.go): a re-dispatch of a requeued item is never a replay
+	// of its earlier request, which farmer would refuse. One that can't be
+	// sealed is never claimed, so it stays queued.
+	req, reqID, err := sealedRequestMsg(controlplane.SubjectSproutAction, controlplane.SproutActionRequest{
 		TenantID: batch.TenantID,
 		SproutID: item.SproutID,
 		Action:   controlplane.SproutAction{Type: batch.ActionType, Params: json.RawMessage(batch.ActionParams)},
 	})
 	if err != nil {
-		log.Errorf("saasapi: marshalling %s for batch %s asset %s: %v — item left queued", controlplane.SubjectSproutAction, batch.ID, item.AssetID, err)
+		log.Errorf("saasapi: sealing %s for batch %s asset %s: %v — item left queued", controlplane.SubjectSproutAction, batch.ID, item.AssetID, err)
 		return false
 	}
 
@@ -906,7 +918,7 @@ func dispatchItem(d *gorm.DB, nc *nats.Conn, batch AssetActionBatch, item AssetA
 
 	ctx, cancel := context.WithTimeout(context.Background(), replyTimeoutFor(batch.ActionType, batch.ActionParams))
 	defer cancel()
-	msg, err := nc.RequestWithContext(ctx, controlplane.SubjectSproutAction, data)
+	msg, err := nc.RequestMsgWithContext(ctx, req)
 
 	var update map[string]any
 	switch {
@@ -918,7 +930,7 @@ func dispatchItem(d *gorm.DB, nc *nats.Conn, batch AssetActionBatch, item AssetA
 			controlplane.SubjectSproutAction, batch.ID, item.AssetID, batch.TenantID, item.SproutID, err)
 		update = failedUpdate(errCodeDispatchOutcomeUnknown)
 	default:
-		update = replyUpdate(batch, item, msg.Data)
+		update = sealedReplyUpdate(batch, item, reqID, msg)
 	}
 	if _, err := updateItem(d, item, ActionItemDispatching, update); err != nil {
 		log.Errorf("saasapi: recording outcome for batch %s asset %s: %v", batch.ID, item.AssetID, err)
@@ -945,10 +957,35 @@ func failedUpdate(code string) map[string]any {
 	return map[string]any{"status": ActionItemFailed, "error_code": code}
 }
 
-// replyUpdate maps farmer's internal.sprout.action reply onto the item's
-// new state. Only a reply for exactly this tenant and sprout, whose status
-// fits the action type, is believed; anything else is logged and recorded
-// as dispatch_outcome_unknown or internal_error.
+// sealedReplyUpdate maps msg, farmer's answer to the request whose ID is
+// requestID, onto the item's new state. Only a reply sealed by farmer to
+// this service and bound to that request (openSproutActionReply) is read
+// at all (replyUpdate). A sealed refusal with no result means farmer
+// refused it unrun, so the item goes back to queued, as for farmer_busy.
+// Anything else — a plaintext reply, one that doesn't open or answers
+// another request, an unauthenticated refusal code — could have been put
+// there by the bus after the request reached farmer, so the item fails
+// with dispatch_outcome_unknown: never re-sent, never believed.
+func sealedReplyUpdate(batch AssetActionBatch, item AssetActionItem, requestID string, msg *nats.Msg) map[string]any {
+	result, err := openSproutActionReply(requestID, msg)
+	switch {
+	case errors.Is(err, errFarmerRefusedUnrun):
+		log.Warnf("saasapi: farmer refused batch %s asset %s (tenant %s) unrun: %v; left queued",
+			batch.ID, item.AssetID, batch.TenantID, err)
+		return requeueUpdate()
+	case err != nil:
+		log.Errorf("saasapi: %s reply for batch %s asset %s (tenant %s, sprout %s) not accepted: %v — outcome unknown",
+			controlplane.SubjectSproutAction, batch.ID, item.AssetID, batch.TenantID, item.SproutID, err)
+		return failedUpdate(errCodeDispatchOutcomeUnknown)
+	}
+	return replyUpdate(batch, item, result)
+}
+
+// replyUpdate maps farmer's internal.sprout.action reply, the result
+// inside its opened sealed reply, onto the item's new state. Only a reply
+// for exactly this tenant and sprout, whose status fits the action type,
+// is believed; anything else is logged and recorded as
+// dispatch_outcome_unknown or internal_error.
 func replyUpdate(batch AssetActionBatch, item AssetActionItem, data []byte) map[string]any {
 	var reply controlplane.SproutActionReply
 	if err := json.Unmarshal(data, &reply); err != nil {
