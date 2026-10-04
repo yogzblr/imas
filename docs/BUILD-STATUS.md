@@ -1243,8 +1243,7 @@ by an external git sync today.
       unchanged. Still open: the web UI's add-user form (the
       `grlx-web-ui` submodule, outside this repo) must send `boxpub`;
       until it does, adding a user from the UI fails. `internal/rbac`'s
-      route map keeps unused `ListRecipes`/`GetRecipe` entries (out of
-      CL.4's scope).
+      unused `ListRecipes`/`GetRecipe` route-map entries are removed too.
 
     **J.4, sealed SaaS API ↔ farmer (Decision B, rollout step 5), in
     review, flagged for security review.** Closes the `internal.*` bullet
