@@ -11,12 +11,28 @@ package natsapi
 // connection (cmd/farmer/main.go's initSystemAccountListeners) — not on
 // any tenant's connection, and not via Subscribe/routes, whose handlers
 // all receive a connection-bound tenantID. See
-// docs/design/imas-internal-api-account.md for that decision. The only
-// identity allowed to publish these request subjects (besides farmer's
-// own SYS user) is the SaaS API's scoped SYS User
-// (pki.EnsureSaaSAPICredential), so no per-message token/RBAC check
-// applies here — authorization is the bus's own per-User permission
-// check, the same way sprout-facing subjects are authorized.
+// docs/design/imas-internal-api-account.md for that decision.
+//
+// FLAG FOR SECURITY REVIEW. Authorization is not the bus's per-User
+// permission check: a compromised bus ignores its own permissions, and
+// until J.4 that let it forge provisioning and deprovisioning and their
+// results (docs/design/imas-payload-encryption-design.md, "Sealing the
+// control plane", Decision B). Every request is now a payloadbox Call
+// sealed by the SaaS API's registered box key to the platform key, bound
+// to its purpose, method and subject, fresh, and accepted once on this
+// replica and once cluster-wide (openSaaSAPIRequest). A plaintext,
+// forged, moved or replayed request is dropped without running anything
+// and without an answer (the subjects are fire-and-forget). Every result
+// is a sealed f2a Call bound to its job's subject (sealSaaSAPIResult),
+// never plaintext. The SaaS API's scoped SYS User
+// (pki.EnsureSaaSAPICredential) still limits who may publish here on an
+// honest bus; it is no longer what farmer relies on.
+//
+// A re-sent request (the SaaS API's outbox sweeper) is a new sealed
+// message with a new ID, accepted like the first. That is safe for the
+// same reason it was before J.4: pki.ProvisionTenant and
+// pki.DeprovisionTenant are idempotent for a repeated job_id, and the
+// SaaS API applies one result per job (CL.3).
 
 import (
 	"encoding/json"
@@ -28,6 +44,7 @@ import (
 	"github.com/yogzblr/imas/internal/audit"
 	"github.com/yogzblr/imas/internal/controlplane"
 	log "github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
@@ -57,21 +74,36 @@ const (
 // other SaaS API -> farmer subject on this connection, so that
 // cmd/farmer/main.go's initSystemAccountListeners picks it up through its
 // existing call here.
+//
+// Each request is opened (openSaaSAPIRequest) before its handler sees
+// anything; the handler gets only the opened params.
 func RegisterTenantProvisioning(nc *nats.Conn) error {
+	return registerSaaSAPIHandlers(nc, replicaSealedAPI)
+}
+
+// registerSaaSAPIHandlers is RegisterTenantProvisioning with the replica's
+// sealed-request state passed in, so tests can stand up two replicas.
+func registerSaaSAPIHandlers(nc *nats.Conn, s *sealedAPI) error {
 	if _, err := nc.QueueSubscribe(controlplane.SubjectTenantProvision, natsCoreQueueGroup, func(msg *nats.Msg) {
-		handleTenantProvision(nc, msg.Data)
+		if req := s.openSaaSAPIRequestOrRefuse(msg, false); req != nil {
+			handleTenantProvision(nc, req.Params)
+		}
 	}); err != nil {
 		return fmt.Errorf("natsapi: failed to subscribe to %s: %w", controlplane.SubjectTenantProvision, err)
 	}
 	if _, err := nc.QueueSubscribe(controlplane.SubjectTenantDeprovision, natsCoreQueueGroup, func(msg *nats.Msg) {
-		handleTenantDeprovision(nc, msg.Data)
+		if req := s.openSaaSAPIRequestOrRefuse(msg, false); req != nil {
+			handleTenantDeprovision(nc, req.Params)
+		}
 	}); err != nil {
 		return fmt.Errorf("natsapi: failed to subscribe to %s: %w", controlplane.SubjectTenantDeprovision, err)
 	}
-	log.Info("natsapi: registered tenant provisioning handlers (SYS account)")
-	return RegisterSproutAction(nc)
+	log.Info("natsapi: registered tenant provisioning handlers (SYS account, sealed)")
+	return registerSproutAction(nc, s)
 }
 
+// handleTenantProvision runs data, an opened internal.tenant.provision
+// request's params, and publishes its sealed result.
 func handleTenantProvision(nc *nats.Conn, data []byte) {
 	var req controlplane.TenantProvisionRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -95,9 +127,11 @@ func handleTenantProvision(nc *nats.Conn, data []byte) {
 		res.ErrorCode = tenantErrorCode(err)
 	}
 	auditTenantAction(auditActionTenantProvision, data, res, err)
-	publishTenantResult(nc, controlplane.ProvisionedSubject(req.JobID), res)
+	publishTenantResult(nc, false, res)
 }
 
+// handleTenantDeprovision runs data, an opened internal.tenant.deprovision
+// request's params, and publishes its sealed result.
 func handleTenantDeprovision(nc *nats.Conn, data []byte) {
 	var req controlplane.TenantDeprovisionRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -128,7 +162,7 @@ func handleTenantDeprovision(nc *nats.Conn, data []byte) {
 		res.ErrorCode = tenantErrorCode(err)
 	}
 	auditTenantAction(auditActionTenantDeprovision, data, res, err)
-	publishTenantResult(nc, controlplane.DeprovisionedSubject(req.JobID), res)
+	publishTenantResult(nc, true, res)
 }
 
 // tenantErrorCode maps a pki provisioning error to the fixed code
@@ -147,13 +181,21 @@ func tenantErrorCode(err error) controlplane.ErrorCode {
 	}
 }
 
-func publishTenantResult(nc *nats.Conn, subject string, res controlplane.TenantResult) {
-	data, err := json.Marshal(res)
+// publishTenantResult seals res (sealSaaSAPIResult) and publishes it on
+// its job's result subject. A result that can't be sealed (the platform
+// key unreadable) is logged and not published, never sent in plaintext:
+// the SaaS API's job stays pending, its outbox sweeper sends the request
+// again, and the idempotent handlers answer it then.
+func publishTenantResult(nc *nats.Conn, deprovision bool, res controlplane.TenantResult) {
+	subject, data, err := sealSaaSAPIResult(deprovision, res.JobID, res)
 	if err != nil {
-		log.Errorf("natsapi: marshalling result for %s: %v", subject, err)
+		log.Errorf("natsapi: sealing the result of job %s (tenant %s): %v; not published", res.JobID, res.TenantID, err)
 		return
 	}
-	if err := nc.Publish(subject, data); err != nil {
+	msg := nats.NewMsg(subject)
+	msg.Header.Set(payloadbox.Header, payloadbox.HeaderBox1)
+	msg.Data = data
+	if err := nc.PublishMsg(msg); err != nil {
 		log.Errorf("natsapi: publishing %s: %v", subject, err)
 	}
 }

@@ -474,14 +474,10 @@ func setupSaaSAPIKeys(t *testing.T, env *sealedEnv) *pki.SaaSAPIBox {
 
 func saasRequest(t *testing.T, b *pki.SaaSAPIBox, subject string) (*nats.Msg, string) {
 	t.Helper()
-	data, id, err := b.SealRequest(saasapiPurposes[subject], subject[len(saasapiSubjectPrefix):], subject, map[string]string{"tenant_id": "t_1"})
+	m, id, err := sealedSaaSAPIMsg(b, subject, map[string]string{"tenant_id": "t_1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := nats.NewMsg(subject)
-	m.Header.Set(payloadbox.Header, payloadbox.HeaderBox1)
-	m.Header.Set(payloadbox.PrincipalHeader, payloadbox.PrincipalSaaSAPI)
-	m.Data = data
 	return m, id
 }
 

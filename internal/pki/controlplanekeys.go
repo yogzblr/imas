@@ -19,9 +19,12 @@ package pki
 //
 // cmd/farmer dispatches to RunControlPlaneBoxKeys on ControlPlaneBoxKeysCommand
 // before it loads any config, as it does register-sprout-release
-// (cmd/farmer/subcommands.go). The chart's Job stays off by default
-// (controlPlaneBoxKeys.enabled) until rollout step 5 gives the keys a
-// consumer.
+// (cmd/farmer/subcommands.go). Since J.4 (rollout step 5) both keys have
+// their consumer: farmer opens and seals every internal.* message with
+// them, and the SaaS API won't connect without its half. The chart's Job
+// is still off by default (controlPlaneBoxKeys.enabled), and the SaaS
+// API's Deployment doesn't mount its key yet: both are deploy/helm
+// changes outside J.4's scope (see "As built: J.4" in the design).
 
 import (
 	"context"

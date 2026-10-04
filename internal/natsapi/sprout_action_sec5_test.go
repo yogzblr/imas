@@ -290,13 +290,9 @@ func TestSproutAction_HostileTenantFillsItsCap(t *testing.T) {
 	const flood = 6
 	replies := make(chan controlplane.SproutActionReply, flood)
 	for i := range flood {
-		data := mustJSON(t, cmdRunRequest("t_hostile", fmt.Sprintf("web-%02d", i)))
+		req := cmdRunRequest("t_hostile", fmt.Sprintf("web-%02d", i))
 		go func() {
-			msg, err := saas.Request(controlplane.SubjectSproutAction, data, 10*time.Second)
-			var r controlplane.SproutActionReply
-			if err == nil {
-				_ = json.Unmarshal(msg.Data, &r)
-			}
+			r, _ := saas.sproutAction(req, 10*time.Second)
 			replies <- r
 		}()
 	}
@@ -379,9 +375,9 @@ func TestSproutAction_FullPoolStillAdmitsSelfUpdate(t *testing.T) {
 	saas := dialSaaSAPI(t, nc)
 	done := make(chan *nats.Msg, 2)
 	for _, tenant := range []string{"t_a", "t_b"} {
-		data := mustJSON(t, cmdRunRequest(tenant, "web-01"))
+		req := cmdRunRequest(tenant, "web-01")
 		go func() {
-			msg, _ := saas.Request(controlplane.SubjectSproutAction, data, 10*time.Second)
+			msg, _, _ := saas.request(controlplane.SubjectSproutAction, req, 10*time.Second)
 			done <- msg
 		}()
 	}

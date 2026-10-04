@@ -2,7 +2,6 @@ package saasapi
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -63,11 +62,6 @@ func publishProvisioningJob(job *ProvisioningJob, subject string, payload any) {
 		log.Errorf("saasapi: not connected to the NATS bus; job %s (tenant %s, %s) left pending", job.ID, job.TenantID, job.Type)
 		return
 	}
-	data, err := json.Marshal(payload)
-	if err != nil {
-		log.Errorf("saasapi: marshalling %s for job %s: %v", subject, job.ID, err)
-		return
-	}
 	// The attempt and its time are recorded before the publish, so the
 	// sweeper's backoff counts from no later than the request.
 	if err := db.Model(&ProvisioningJob{}).Where("id = ? AND tenant_id = ?", job.ID, job.TenantID).
@@ -77,13 +71,21 @@ func publishProvisioningJob(job *ProvisioningJob, subject string, payload any) {
 		}).Error; err != nil {
 		log.Errorf("saasapi: recording dispatch attempt for job %s: %v", job.ID, err)
 	}
-	sendProvisioningJob(nc, job, subject, data)
+	sendProvisioningJob(nc, job, subject, payload)
 }
 
-// sendProvisioningJob publishes data, a job's request, on subject. The
-// caller has already counted the attempt.
-func sendProvisioningJob(nc *nats.Conn, job *ProvisioningJob, subject string, data []byte) {
-	if err := nc.Publish(subject, data); err != nil {
+// sendProvisioningJob seals payload, a job's request, as a new message on
+// subject (sealedRequestMsg: a fresh ID and time on every call, the
+// sweeper's re-sends included) and publishes it. The caller has already
+// counted the attempt. A request that can't be sealed is not sent: the job
+// stays pending, as for a failed publish.
+func sendProvisioningJob(nc *nats.Conn, job *ProvisioningJob, subject string, payload any) {
+	msg, _, err := sealedRequestMsg(subject, payload)
+	if err != nil {
+		log.Errorf("saasapi: sealing %s for job %s (tenant %s): %v — job left pending", subject, job.ID, job.TenantID, err)
+		return
+	}
+	if err := nc.PublishMsg(msg); err != nil {
 		log.Errorf("saasapi: publishing %s for job %s (tenant %s): %v — job left pending", subject, job.ID, job.TenantID, err)
 		return
 	}
@@ -161,11 +163,6 @@ func (sw *sweeper) republishProvisioningJob(job *ProvisioningJob, now time.Time)
 		name = tenant.Name
 	}
 	subject, payload := provisioningRequest(job, name)
-	data, err := json.Marshal(payload)
-	if err != nil {
-		log.Errorf("saasapi: outbox sweep: marshalling %s for job %s: %v", subject, job.ID, err)
-		return
-	}
 	lease, err := claimRowLease(sw.d, ProvisioningJob{}.TableName(), "id = ? AND tenant_id = ?", []any{job.ID, job.TenantID},
 		"status = ? AND attempts = ?", []any{ProvisioningJobPending, job.Attempts},
 		map[string]any{"attempts": gorm.Expr("attempts + 1"), "last_dispatched_at": now}, sw.s.LeaseTTL)
@@ -178,7 +175,9 @@ func (sw *sweeper) republishProvisioningJob(job *ProvisioningJob, now time.Time)
 	}
 	log.Warnf("saasapi: outbox sweep: job %s (tenant %s, %s) still pending; publishing it again (attempt %d of %d)",
 		job.ID, job.TenantID, job.Type, job.Attempts+1, sw.s.MaxAttempts)
-	sendProvisioningJob(sw.nc, job, subject, data)
+	// A new sealed message, not the earlier one again: farmer refuses a
+	// message it has seen, so a re-send must be a new one (J.4).
+	sendProvisioningJob(sw.nc, job, subject, payload)
 }
 
 // failStaleProvisioningJob fails a pending job that has used every attempt
@@ -229,7 +228,7 @@ func StartProvisioningResultListener(nc *nats.Conn) error {
 	for _, s := range subs {
 		prefix, jobType := s.prefix, s.jobType
 		if _, err := nc.QueueSubscribe(s.wildcard, busQueueGroup, func(msg *nats.Msg) {
-			handleProvisioningResult(jobType, prefix, msg.Subject, msg.Data)
+			handleProvisioningResult(jobType, prefix, msg)
 		}); err != nil {
 			return fmt.Errorf("saasapi: subscribing to %s: %w", s.wildcard, err)
 		}
@@ -237,15 +236,21 @@ func StartProvisioningResultListener(nc *nats.Conn) error {
 	return nc.Flush()
 }
 
-func handleProvisioningResult(jobType ProvisioningJobType, prefix, subject string, data []byte) {
-	jobID, ok := controlplane.JobIDFromSubject(subject, prefix)
+// handleProvisioningResult applies msg, a result that arrived on a
+// provisioning result subject, if it is farmer's: sealed to this service
+// under a pinned platform key, for the job its subject names, fresh and
+// not seen before (openTenantResult). Anything else — plaintext, forged,
+// moved from another job's subject, stale, replayed — is logged and
+// ignored, so the job stays as it was.
+func handleProvisioningResult(jobType ProvisioningJobType, prefix string, msg *nats.Msg) {
+	jobID, ok := controlplane.JobIDFromSubject(msg.Subject, prefix)
 	if !ok {
-		log.Errorf("saasapi: ignoring provisioning result on unexpected subject %q", subject)
+		log.Errorf("saasapi: ignoring provisioning result on unexpected subject %q", msg.Subject)
 		return
 	}
-	var res controlplane.TenantResult
-	if err := json.Unmarshal(data, &res); err != nil {
-		log.Errorf("saasapi: ignoring malformed provisioning result for job %s: %v", jobID, err)
+	res, err := openTenantResult(jobType, jobID, msg)
+	if err != nil {
+		log.Errorf("saasapi: ignoring provisioning result for job %s: %v", jobID, err)
 		return
 	}
 	if res.JobID != jobID {
