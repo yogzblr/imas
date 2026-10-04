@@ -15,6 +15,7 @@ import (
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/objectstore"
 	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
@@ -226,13 +227,34 @@ func TestHandleCook_SproutReplacedMidDispatch(t *testing.T) {
 	cook.RegisterFarmerNatsConn(tenant, nc)
 	defer cook.UnregisterFarmerNatsConn(tenant)
 
+	setupSealedEnv(t)
+	// web-02 has a box key on record, so its staged copy and push are
+	// sealed (security review 2026-10-b, B1: nothing is staged for a
+	// sprout without one); its stub opens the push and acks it sealed.
+	web02Box := newSproutKeypair(t)
+	enrollSprout(t, tenant, "web-02", web02Box)
+	tenantPub := pinnedTenantPub(t, tenant)
+
 	pushed := make(chan string, 4)
 	sub, err := nc.Subscribe("imas.sprouts.*.cook", func(msg *nats.Msg) {
 		pushed <- msg.Subject
 		var env cook.RecipeEnvelope
-		_ = json.Unmarshal(msg.Data, &env)
-		ack, _ := json.Marshal(cook.Ack{Acknowledged: true, JobID: env.JobID})
-		_ = msg.Respond(ack)
+		if msg.Header.Get(payloadbox.Header) != payloadbox.HeaderBox1 {
+			_ = json.Unmarshal(msg.Data, &env)
+			ack, _ := json.Marshal(cook.Ack{Acknowledged: true, JobID: env.JobID})
+			_ = msg.Respond(ack)
+			return
+		}
+		m, err := openAsSprout(web02Box, tenant, tenantPub, "web-02", payloadbox.PurposeCookRequest, msg.Data)
+		if err != nil {
+			return
+		}
+		_ = json.Unmarshal(m.Body, &env)
+		reply, _ := payloadbox.NewMessage(payloadbox.PurposeCookResponse, tenant, "web-02", m.ID, cook.Ack{Acknowledged: true, JobID: env.JobID})
+		r := nats.NewMsg("")
+		r.Header.Set(payloadbox.Header, payloadbox.HeaderBox1)
+		r.Data, _ = payloadbox.Seal(reply, []payloadbox.KeyPair{{PeerPub: tenantPub, Priv: web02Box.priv}})
+		_ = msg.RespondMsg(r)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -243,7 +265,6 @@ func TestHandleCook_SproutReplacedMidDispatch(t *testing.T) {
 		"target": []map[string]string{{"id": "web-01"}, {"id": "web-02"}},
 		"action": map[string]string{"recipe": "webserver"},
 	})
-	setupSealedEnv(t)
 	u := newSealedCLIUserIn(t, tenant)
 	result, err := handleCook(apiCaller{TenantID: tenant, UserID: u.id}, params)
 	if err != nil {

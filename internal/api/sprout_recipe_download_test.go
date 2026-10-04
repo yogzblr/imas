@@ -35,7 +35,6 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwt"
 	natsjwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
-	"golang.org/x/crypto/nacl/box"
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
@@ -80,7 +79,11 @@ type testSprout struct {
 
 // newTestSprout points the sprout's credential paths at a temp dir and
 // writes what a completed enrollment leaves there, minus the gateway JWT
-// (see setGatewayJWT).
+// (see setGatewayJWT). The tenant key it pins is tenantID's real one from
+// the mock OpenBao newStagingTestServer starts, and farmer records its box
+// key, as enrollment would, so what farmer stages for it is sealed to it
+// (security review 2026-10-b, B1) and opens with cook.FetchStagedRecipe.
+// Call it before dispatching to it.
 func newTestSprout(t *testing.T, tenantID, sproutID string) *testSprout {
 	t.Helper()
 	dir := t.TempDir()
@@ -112,10 +115,11 @@ func newTestSprout(t *testing.T, tenantID, sproutID string) *testSprout {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tenantPub, tenantPriv, err := box.GenerateKey(rand.Reader)
+	tenantKeys, err := pki.TenantBoxKeys(tenantID)
 	if err != nil {
 		t.Fatal(err)
 	}
+	tenantPub, tenantPriv := tenantKeys[0].Pub, tenantKeys[0].Priv
 	s := &testSprout{
 		kp: kp, pub: pub, tenantID: tenantID, sproutID: sproutID,
 		userJWT: userJWT, boxPub: base64.StdEncoding.EncodeToString(tenantPub[:]), tenantPriv: tenantPriv,
@@ -140,6 +144,23 @@ func newTestSprout(t *testing.T, tenantID, sproutID string) *testSprout {
 	if s.sproutBoxPub, err = pki.DecodeBoxPubKey(sproutBoxPub); err != nil {
 		t.Fatal(err)
 	}
+	if err := pki.RotateSproutBoxKey(tenantID, sproutID, sproutBoxPub, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	// So the stub sprout answering farmer's sealed push opens it too.
+	encodedPriv, err := os.ReadFile(config.SproutBoxPrivFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawPriv, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(encodedPriv)))
+	if err != nil || len(rawPriv) != 32 {
+		t.Fatalf("decoding the sprout's box key: %v", err)
+	}
+	var priv [32]byte
+	copy(priv[:], rawPriv)
+	stagingSproutsMu.Lock()
+	stagingSprouts[[2]string{tenantID, sproutID}] = &priv
+	stagingSproutsMu.Unlock()
 	return s
 }
 
@@ -267,8 +288,8 @@ func TestSproutDownloadsStagedRecipe(t *testing.T) {
 	t.Run("fresh gateway JWT sent as the bearer token", func(t *testing.T) {
 		key := installGatewayKey(t)
 		newStagingTestServer(t, tenantID)
-		jid := dispatch(t, tenantID, sproutID)
 		s := newTestSprout(t, tenantID, sproutID)
+		jid := dispatch(t, tenantID, sproutID)
 		farmer := startSproutFarmer(t, key, s)
 		tok := s.mintFor(t, key, time.Now(), time.Now().Add(time.Hour))
 		s.setGatewayJWT(t, tok)
@@ -294,8 +315,8 @@ func TestSproutDownloadsStagedRecipe(t *testing.T) {
 		t.Run(name+" gateway JWT refreshed first", func(t *testing.T) {
 			key := installGatewayKey(t)
 			newStagingTestServer(t, tenantID)
-			jid := dispatch(t, tenantID, sproutID)
 			s := newTestSprout(t, tenantID, sproutID)
+			jid := dispatch(t, tenantID, sproutID)
 			farmer := startSproutFarmer(t, key, s)
 			stale := s.mintFor(t, key, time.Now().Add(exp-time.Hour), time.Now().Add(exp))
 			s.setGatewayJWT(t, stale)
@@ -333,8 +354,8 @@ func TestSproutDownloadsStagedRecipe(t *testing.T) {
 		}
 		retired := testGatewayKey{priv: retiredPriv}
 		newStagingTestServer(t, tenantID)
-		jid := dispatch(t, tenantID, sproutID)
 		s := newTestSprout(t, tenantID, sproutID)
+		jid := dispatch(t, tenantID, sproutID)
 		farmer := startSproutFarmer(t, key, s)
 		s.setGatewayJWT(t, s.mintFor(t, retired, time.Now(), time.Now().Add(time.Hour)))
 
@@ -355,8 +376,8 @@ func TestSproutDownloadsStagedRecipe(t *testing.T) {
 		key := installGatewayKey(t)
 		newStagingTestServer(t, tenantID, "t_other")
 		dispatch(t, tenantID, sproutID)
-		otherJID := dispatch(t, "t_other", sproutID)
 		s := newTestSprout(t, "t_other", sproutID)
+		otherJID := dispatch(t, "t_other", sproutID)
 		farmer := startSproutFarmer(t, key, s)
 		s.setGatewayJWT(t, s.mintFor(t, key, time.Now(), time.Now().Add(time.Hour)))
 

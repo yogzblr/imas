@@ -38,6 +38,12 @@ func TestTenantRecipes_CrossTenantRefusedAtEveryLayer(t *testing.T) {
 	exp := time.Now().Add(time.Hour)
 	ctx := context.Background()
 
+	// Box keys on record, as enrollment leaves them, so what farmer stages
+	// is sealed to each sprout (security review 2026-10-b, B1).
+	for _, id := range [][2]string{{"t_acme", "web-01"}, {"t_other", "web-01"}, {"t_other", "web-02"}} {
+		recordStagingSprout(t, id[0], id[1])
+	}
+
 	// Layer 1, recipe resolution: each tenant's "private" is its own, and
 	// t_other cannot cook acme's recipe by name or by a crafted name.
 	jidAcme := cook.GenerateJobID()
@@ -56,7 +62,8 @@ func TestTenantRecipes_CrossTenantRefusedAtEveryLayer(t *testing.T) {
 	}
 
 	// Layer 2, staging: each sprout's staged copy holds its own tenant's
-	// steps only, and the refused cook staged nothing.
+	// steps only, opens for that sprout only, and the refused cook staged
+	// nothing. Nothing is readable in the served body itself.
 	readStaged := func(tenant, sprout string) (int, string) {
 		stagedKey, err := cook.StagedRecipeKey(tenant, sprout)
 		if err != nil {
@@ -64,17 +71,25 @@ func TestTenantRecipes_CrossTenantRefusedAtEveryLayer(t *testing.T) {
 		}
 		return get(t, srv.URL+"/files/"+stagedKey, "Bearer "+mint(t, key.priv, tenant, sprout, exp))
 	}
+	stepsOf := func(env cook.RecipeEnvelope) string {
+		b, _ := json.Marshal(env.Steps)
+		return string(b)
+	}
 	code, body := readStaged("t_acme", "web-01")
-	if code != http.StatusOK || !strings.Contains(body, acmeSecret) || strings.Contains(body, otherSecret) {
+	if code != http.StatusOK || strings.Contains(body, acmeSecret) || strings.Contains(body, otherSecret) {
 		t.Fatalf("t_acme/web-01 staged: %d %s", code, body)
 	}
-	var env cook.RecipeEnvelope
-	if err := json.Unmarshal([]byte(body), &env); err != nil || env.JobID != jidAcme {
-		t.Fatalf("t_acme/web-01 staged envelope: %v %+v", err, env)
+	env := openStaged(t, "t_acme", "web-01", body)
+	if steps := stepsOf(env); env.JobID != jidAcme || !strings.Contains(steps, acmeSecret) || strings.Contains(steps, otherSecret) {
+		t.Fatalf("t_acme/web-01 staged envelope: %+v", env)
 	}
 	code, body = readStaged("t_other", "web-01")
-	if code != http.StatusOK || !strings.Contains(body, otherSecret) || strings.Contains(body, acmeSecret) {
+	if code != http.StatusOK || strings.Contains(body, acmeSecret) || strings.Contains(body, otherSecret) {
 		t.Fatalf("t_other/web-01 staged: %d %s", code, body)
+	}
+	env = openStaged(t, "t_other", "web-01", body)
+	if steps := stepsOf(env); env.JobID != jidOther || !strings.Contains(steps, otherSecret) || strings.Contains(steps, acmeSecret) {
+		t.Fatalf("t_other/web-01 staged envelope: %+v", env)
 	}
 	if code, _ := readStaged("t_other", "web-02"); code != http.StatusNotFound {
 		t.Errorf("t_other/web-02 after refused cooks: got %d, want 404 (nothing staged)", code)
