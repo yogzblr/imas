@@ -292,7 +292,7 @@ func TestDeprovisionTenant_RetryAfterFailedPushLocksOut(t *testing.T) {
 		nc.Close()
 		t.Fatal("the retry left the deprovisioned tenant live on the bus")
 	}
-	// And a third call is a harmless re-push of the same lock-out.
+	// And a third call is a harmless re-push of a lock-out.
 	if err := DeprovisionTenant(tenantID); err != nil {
 		t.Fatalf("re-pushing an existing lock-out: %v", err)
 	}

@@ -145,17 +145,18 @@ var (
 //
 // A tenant whose provisioning is still in flight (status pending, or any
 // provision job still pending) can't be deleted yet: 409
-// provisioning_in_progress, retry once GET .../status leaves pending. The
-// same applies, for SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER after it was
-// last published, to a provision job the outbox sweeper re-published:
-// farmer may still be running an earlier copy of it.
-// Allowing it would race the provision and deprovision requests against
-// each other on farmer (its queue group can hand them to different
-// replicas), which could end with a live NATS Account for a tenant the
-// saas schema considers offboarded. Only active or failed tenants can be
-// offboarded, and that's enforced by a conditional update inside the
-// transaction, not just the pre-check, so a concurrent status change can't
-// slip past it.
+// provisioning_in_progress, retry once GET .../status leaves pending.
+// Only active or failed tenants can be offboarded, and that's enforced by
+// a conditional update inside the transaction, not just the pre-check, so
+// a concurrent status change can't slip past it.
+//
+// A provision job the outbox sweeper published more than once doesn't
+// hold DELETE up: an earlier copy can still be running on one farmer
+// replica while the deprovision runs on another, and farmer itself closes
+// that race (internal/pki's ProvisionTenant re-checks the tenant's deleted
+// state after its push and pushes the lockout again if the deprovision
+// won; see "Outbox re-dispatch sweeper" in
+// docs/design/imas-internal-api-account.md).
 func DeleteTenant(w http.ResponseWriter, r *http.Request) {
 	tenant, ok := lookupTenant(w, r)
 	if !ok {
@@ -175,19 +176,6 @@ func DeleteTenant(w http.ResponseWriter, r *http.Request) {
 		var inFlight int64
 		if err := tx.Model(&ProvisioningJob{}).
 			Where("tenant_id = ? AND type = ? AND status = ?", tenant.ID, ProvisioningJobProvision, ProvisioningJobPending).
-			Count(&inFlight).Error; err != nil {
-			return err
-		}
-		if inFlight > 0 {
-			return errProvisioningInProgress
-		}
-		// A provision job the outbox sweeper published more than once can
-		// still have a copy in flight on farmer after the first result came
-		// back. Offboarding while one is running could race it there, so
-		// wait out the sweeper's stale threshold after the last copy.
-		if err := tx.Model(&ProvisioningJob{}).
-			Where("tenant_id = ? AND type = ? AND attempts > 1 AND last_dispatched_at > ?",
-				tenant.ID, ProvisioningJobProvision, dbTime(outboxNow()).Add(-outboxSettings.ProvisioningStaleAfter)).
 			Count(&inFlight).Error; err != nil {
 			return err
 		}

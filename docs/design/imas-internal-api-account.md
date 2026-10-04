@@ -353,7 +353,12 @@ response. Putting `err.Error()` back on the bus makes that test fail.
   moves to `offboarded`, and `GET /tenants/{id}/status` answers 200 with a
   fixed `warning` message (`controlplane.PublicWarningMessage`). The
   `DELETE` itself stays 202, because the async contract is unchanged:
-  farmer is what finds out there was nothing to tear down.
+  farmer is what finds out there was nothing to tear down. Since PKI.1,
+  `DeprovisionTenant` also writes a deleted tombstone row in that case
+  (not for the legacy current tenant), so a late provision copy or an
+  enrollment for the offboarded tenant is refused rather than creating a
+  live Account; a retry finds the tombstone and still reports
+  `tenant_not_provisioned`, minting nothing.
 - **What makes that safe.** `getTenantRow` used to map *every* lookup
   error, including a transient DB error, to `ErrTenantNotFound`. It now
   returns `ErrTenantNotFound` only for an absent row, and wraps any other
@@ -474,20 +479,80 @@ nil, so farmer reports `offboarded` again. Each copy publishes a result on
 applies the first (conditional on `status = 'pending'`) and ignores the
 rest. A provision request for a tenant already deprovisioned is refused by
 `ensureTenantAccountLocked` ("tenant was deprovisioned"), so a late copy
-can't recreate a deleted tenant row. **The one hazard** is a late copy of a
-provision request still *running* on one farmer replica while a
-deprovision of the same tenant runs on another: `ProvisionTenant` reads the
-Account JWT before the deprovision locks it out and pushes it afterwards,
-outside `tenantAuthMu`. The bus's full resolver keeps the JWT with the later
-`iat`, so the stale push loses unless `syncTenantSprouts` re-signed the
-JWT during the race, but that isn't a guarantee. Without the sweeper this
-can't happen (DELETE requires the provision result first, and there is one
-copy). With it, saasapi now refuses `DELETE` with
-`409 provisioning_in_progress` for `SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER`
-after the last publish of a provision job that was published more than
-once, which far outlasts the seconds farmer's handler takes. The farmer
-side fix belongs in `internal/pki`, outside CL.3's scope, and is listed as
-an open question below.
+can't recreate a deleted tenant row. **The one hazard, closed by PKI.1 (FLAG FOR SECURITY REVIEW)**, was a
+late copy of a provision request still *running* on one farmer replica
+while a deprovision of the same tenant runs on another. `ProvisionTenant`
+checks `deleted` under `tenantAuthMu`, which only orders one process, and
+pushes the live Account JWT afterwards. nats-server's full resolver stores
+a pushed JWT unconditionally (the update handler calls `save`, not
+`saveIfNewer`; `iat` only orders copies when the resolver re-seeds from disk
+or syncs a cluster), so a push that arrived after the lockout left a deleted
+tenant live on the bus. The fix, in `internal/pki`:
+
+- *Provision re-checks after its push.* `pushLiveTenantAccount` (used by
+  `ProvisionTenant` and by `ReloadNKeysForTenant`, the enrollment path,
+  which pushes the same way) re-reads the tenant's row from the database
+  under `tenantAuthMu` once the bus has answered the push, also when the push
+  failed (a timed-out request may still have been applied). If the row is
+  now deleted, it re-signs the lockout (also rewriting the on-disk JWT,
+  which a provision on this replica may have re-signed live), pushes it,
+  fires the deprovisioned hook and returns `ErrTenantDeprovisioned`.
+- *Deprovision marks first, and repairs on retry.* `deprovisionTenantLocked`
+  marks the row deleted before it signs the lockout, and `DeprovisionTenant`
+  signs and pushes a fresh lockout even when the row is already deleted (a
+  crash between the mark and the push, or a bus that took a live JWT
+  later), so a retried deprovision always leaves the bus locked out.
+- *A tombstone for a tenant with no row.* Removing saasapi's wait opened
+  one more window: copy 1 of a provision fails before writing any row, the
+  tenant is deleted, and a late copy 2 then creates the row and a live
+  Account. `DeprovisionTenant` now writes a deleted tombstone when it finds
+  no row, and the provision path inserts its row only if absent and
+  re-reads it (the old upsert reset `deleted`, which could have wiped a
+  concurrent tombstone), so copy 2 is refused on any replica. If the
+  provision's insert wins instead, the deprovision finds that row and
+  marks it deleted, and the provision's post-push re-check locks it out.
+
+*The ordering guarantee across replicas.* The bus applies a claims update
+before answering it and applies updates in arrival order. The re-check is
+a database read that starts after the provision's push was answered. If it
+sees the row deleted, the provision pushes a lockout after its live JWT. If
+it doesn't, the deprovision's mark committed after that read, and the
+deprovision pushes its lockout after the mark, so after the live JWT was
+applied. Either way the last push the bus applies for a deleted tenant is a
+lockout, with no assumption about clocks. Its assumptions:
+
+- The re-check sees a deprovision's committed write: one database, PXC
+  read and written through one node (the chart's HAProxy Service sends all
+  traffic to one node), or `wsrep_sync_wait` set in the DSN. Through
+  several PXC nodes without it, a stale read could miss the mark.
+- Where the resolver orders copies by `iat` instead (re-seeding from
+  farmer's disk at bus start; a clustered bus, not built), the lockout must
+  also carry the later `iat`. Marking before signing gives that when replica
+  clocks agree to within the time between the two signings.
+- If the re-check itself can't read the database, `ProvisionTenant` returns
+  the error and the bus state is unknown until a deprovision runs again.
+
+Tests (`internal/pki/tenant_race_test.go`, run with `-race`): every
+interleaving of a provision and a deprovision, paused with hooks rather
+than sleeps, against a real embedded bus, checking the JWT the resolver
+holds and that the tenant's sprout is refused. They cover the live push
+landing after the lockout, the lockout landing after the live push, both
+paused before their pushes, a provision during or after a deprovision, the
+enrollment path, a retried deprovision after a crash before its push and
+after a live JWT reached the bus, and the same race with the provision in
+a second process (the test binary re-executed) sharing only the database
+and the bus, with one PKI directory and with a copy each. Removing the
+re-check's lockout push leaves the bus live in the in-process and the
+two-process tests; restoring the old early return on an already deleted
+row fails both retry tests. `TestResolverPush_LastArrivalWins` pins the
+nats-server behaviour the guarantee relies on.
+
+With the race closed in farmer, saasapi's mitigation was removed: `DELETE
+/tenants/{id}` no longer returns `409 provisioning_in_progress` for
+`SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER` after a provision job published
+more than once. It still refuses a tenant that is `pending` or has a
+provision job `pending`. The setting stays: it is the sweeper's re-publish
+backoff.
 
 **Job 2: §1.5 action items.** A batch is written already leased to the
 process that accepted it (`createBatch`), which renews the lease while it
@@ -597,17 +662,13 @@ write (wave timeout + reply wait + lease TTL).
 
 ## Deferred / open questions
 
-- **Farmer-side provision/deprovision race** (BUILD-STATUS "Open
-  items"). See job 1 above. `pki.ProvisionTenant` should re-check
-  `deleted` after its resolver push (under `tenantAuthMu`) and re-push the
-  locked-out JWT if a deprovision won the race. `pki.DeprovisionTenant`
-  should re-push the locked-out JWT even when the row is already deleted,
-  so a retried deprovision repairs the bus. `internal/pki` was outside
-  CL.3's file scope. Until it lands, saasapi's DELETE wait is the
-  mitigation. That wait is read from `provisioning_jobs.attempts` and
-  `last_dispatched_at` in the DELETE's own transaction, so every saasapi
-  replica sees it, not just the one whose sweeper re-published
-  (`TestMySQLDeleteWaitIsSharedAcrossReplicas`).
+- **Farmer-side provision/deprovision race: resolved by PKI.1.** See job
+  1 above. `pki.ProvisionTenant` (and `ReloadNKeysForTenant`) re-checks
+  `deleted` in the database after its resolver push and re-pushes the
+  locked-out JWT if a deprovision won; `pki.DeprovisionTenant` re-pushes
+  the locked-out JWT even when the row is already deleted. saasapi's
+  DELETE wait after a re-published provision job, the interim mitigation,
+  is removed.
 - **Items stuck in `dispatching`: decided and built (CL.3).** Failed with
   `dispatch_outcome_unknown` once their dispatcher would have given up,
   never re-sent, and for an update rollout that halts it and frees the
