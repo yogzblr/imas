@@ -1,8 +1,8 @@
 package fleetsign
 
 // This file is a READ-ONLY OpenBao Transit client for the
-// imas-fleet-signing key, used by farmer (to serve the key's public half
-// and to re-check a release's signature before dispatching a
+// imas-fleet-signing key, used by farmer (to re-check a release's
+// signature before serving an update manifest or dispatching a
 // self_update) and by saasapi (to check a catalog row's signature before
 // building a rollout). The client is internal/openbao (the official
 // OpenBao Go client), which owns auth, TLS and error decoding.
@@ -231,6 +231,12 @@ func ParseEd25519PublicKeyPEM(s string) (ed25519.PublicKey, error) {
 // keySetCacheTTL bounds how often a TransitKeySource hits Transit, same
 // value and rationale as internal/gatewayjwt's transitPublicKeyCacheTTL.
 const keySetCacheTTL = 60 * time.Second
+
+// KeySetSource is anything that can report the current fleet signing key
+// set. *TransitKeySource is the production implementation.
+type KeySetSource interface {
+	KeySet(ctx context.Context) (KeySet, error)
+}
 
 // TransitKeySource serves the imas-fleet-signing public keys from
 // OpenBao Transit, read-only, cached in-process for keySetCacheTTL.

@@ -22,6 +22,7 @@ import (
 	"github.com/yogzblr/imas/internal/ingredients/selfupdate"
 	"github.com/yogzblr/imas/internal/ingredients/test"
 	"github.com/yogzblr/imas/internal/jobs"
+	"github.com/yogzblr/imas/internal/natsretry"
 	"github.com/yogzblr/imas/internal/pki"
 
 	nats "github.com/nats-io/nats.go"
@@ -243,9 +244,25 @@ func ConnectSprout(ctx context.Context, done chan<- struct{}) {
 		log.Panicf("failed to load bus connection settings: %v", err)
 	}
 	log.Infof("connecting to the bus at %s (from %s)", strings.Join(bus.Servers, ", "), bus.Source)
+	// Full-jitter exponential backoff instead of a fixed wait, so a fleet
+	// that lost the bus together (a bus restart) doesn't come back in
+	// step. nats.go restarts the attempt count after every successful
+	// connect. See internal/natsretry.
+	backoff := natsretry.New(config.BusReconnectBase, config.BusReconnectCap, nil)
+	if backoff.Base() != config.BusReconnectBase || backoff.Cap() != config.BusReconnectCap {
+		log.Warnf("busreconnectbase %s and busreconnectcap %s: using %s and %s (non-positive values take the default, and the cap is at least the base)",
+			config.BusReconnectBase, config.BusReconnectCap, backoff.Base(), backoff.Cap())
+	}
 	connectOpts := []nats.Option{
 		nats.MaxReconnects(-1),
-		nats.ReconnectWait(time.Second * 15),
+		// nats.go waits this long once per pass over the bus addresses
+		// (with a single address, before every attempt), passing the
+		// pass number within the current outage.
+		nats.CustomReconnectDelay(func(attempt int) time.Duration {
+			d := backoff.Delay(attempt)
+			log.Debugf("bus reconnect %d in %s", attempt, d)
+			return d
+		}),
 		nats.DisconnectHandler(func(_ *nats.Conn) {
 			log.Debugf("Reconnecting to Farmer, attempt: %d\n", connectionAttempts.Add(1))
 		}),
@@ -256,12 +273,13 @@ func ConnectSprout(ctx context.Context, done chan<- struct{}) {
 		}),
 	}
 	nc, err := bus.Connect(connectOpts...)
-	for err != nil {
-		log.Warnf("bus connect failed, retrying in 15s: %v", err)
+	for attempt := 1; err != nil; attempt++ {
+		wait := backoff.Delay(attempt)
+		log.Warnf("bus connect failed, retrying in %s: %v", wait.Round(time.Millisecond), err)
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(time.Second * 15):
+		case <-time.After(wait):
 		}
 		nc, err = bus.Connect(connectOpts...)
 	}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/taigrr/jety"
 	"github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/natsretry"
 )
 
 // resetForTest resets the sync.Once so LoadConfig can be called again,
@@ -1264,6 +1265,53 @@ func TestLoadConfig_SproutStagedRecipeSettings(t *testing.T) {
 		for _, key := range []string{"stagedrecipemaxage", "gatewayjwtrefreshmargin", "sprouthandledjobsfile", "sproutboxkeyprevgrace"} {
 			if !strings.Contains(string(b), key) {
 				t.Errorf("sprout config file doesn't list %q, so operators can't see it:\n%s", key, b)
+			}
+		}
+	})
+}
+
+// The sprout's bus reconnect backoff comes from the sprout config file,
+// with natsretry's defaults written back when unset. The defaults land in
+// the file as concrete values, which is why the Ansible role only ever
+// adds an override for these keys and never removes them.
+func TestLoadConfig_SproutBusReconnectSettings(t *testing.T) {
+	t.Run("from the config file", func(t *testing.T) {
+		tmpRoot := t.TempDir()
+		cfgFile := writeTempConfig(t, tmpRoot, "sprout", "busreconnectbase: 500ms\nbusreconnectcap: 2m\n")
+		resetForBinaryTest(t, tmpRoot)
+		jety.SetConfigType("yaml")
+		jety.SetConfigFile(cfgFile)
+		_ = jety.ReadInConfig()
+
+		LoadConfig("sprout")
+
+		if BusReconnectBase != 500*time.Millisecond {
+			t.Errorf("BusReconnectBase = %v, want 500ms", BusReconnectBase)
+		}
+		if BusReconnectCap != 2*time.Minute {
+			t.Errorf("BusReconnectCap = %v, want 2m", BusReconnectCap)
+		}
+	})
+
+	t.Run("defaults, written back to the config file", func(t *testing.T) {
+		tmpRoot := t.TempDir()
+		resetForBinaryTest(t, tmpRoot)
+
+		LoadConfig("sprout")
+
+		if BusReconnectBase != natsretry.DefaultBase {
+			t.Errorf("BusReconnectBase = %v, want %v", BusReconnectBase, natsretry.DefaultBase)
+		}
+		if BusReconnectCap != natsretry.DefaultCap {
+			t.Errorf("BusReconnectCap = %v, want %v", BusReconnectCap, natsretry.DefaultCap)
+		}
+		b, err := os.ReadFile(filepath.Join(tmpRoot, "sprout"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range []string{"busreconnectbase: 2s", "busreconnectcap: 5m0s"} {
+			if !strings.Contains(string(b), line) {
+				t.Errorf("sprout config file doesn't contain %q:\n%s", line, b)
 			}
 		}
 	})

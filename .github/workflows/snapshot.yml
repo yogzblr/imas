@@ -1,26 +1,23 @@
 name: Snapshot Build
 
-# Manual-only for now: this needs GPG_PRIVATE_KEY/GPG_PASSPHRASE configured
-# as repo secrets, which don't exist yet on the new imas repo (they lived on
-# the original project's infra, not this fork's). Re-enable the
-# push/pull_request triggers below once those secrets are set on
-# yogzblr/imas. It runs GoReleaser OSS (MIT), so no licence key is needed.
-# The secret-free check of the release config, MSI and checksums for pull
-# requests is goreleaser-check.yml.
+# Manual-only. It runs GoReleaser OSS (MIT), so no licence key is needed, and
+# it needs no secrets: it neither signs nor publishes. The check of the
+# release config, MSI and checksums that runs on pull requests is
+# goreleaser-check.yml; this workflow adds the images.
 #
 # What a snapshot run does: builds everything release.yml builds (binaries,
 # archives, rpm/deb/apk, the imas-sprout MSI, checksums.txt and the
-# linux/amd64 + linux/arm64 images, loaded into the runner's Docker only) and
-# signs checksums.txt the way the release does, with GPG and keyless cosign.
+# linux/amd64 + linux/arm64 images, loaded into the runner's Docker only).
 # --skip=publish skips GoReleaser's whole publish stage: no GitHub release, no
 # image or manifest push, and so no docker_signs either (they are part of
 # that stage, and there is nothing pushed for them to sign).
 #
-# Keyless cosign is not private: signing checksums.txt here writes a public
-# entry to the Sigstore Rekor transparency log, with a certificate naming
-# this workflow (.github/workflows/snapshot.yml) and the ref it ran on.
-# publish-packages.yml only accepts signatures from release.yml on
-# refs/tags/v*, so a snapshot signature can't pass for a release one.
+# --skip=sign: snapshots don't sign checksums.txt (decided 2026-10-03, PR
+# #75). Keyless cosign would write a public Sigstore Rekor entry for every
+# run, and GPG would need the release key here. Signing is exercised by
+# release.yml itself; the first tag is a pre-release so that a signing
+# failure costs only a deleted draft (docs/RELEASING.md, "First release
+# checklist").
 on:
   workflow_dispatch:
   # push:
@@ -30,20 +27,9 @@ on:
 
 permissions:
   contents: read
-  # Keyless cosign: the run's OIDC token is exchanged with Sigstore for a
-  # short-lived signing certificate.
-  id-token: write
 
 jobs:
   snapshot:
-    # Only run on the canonical repo — this job uses the release signing
-    # secrets (the goreleaser environment), which a fork won't (and
-    # shouldn't) have. --skip=publish keeps it from uploading anything: no
-    # GitHub release, and the images are built but not pushed to GHCR
-    # (skip_push on snapshots). Forks get a plain `go build`/`go test` via
-    # ci.yml instead.
-    if: github.repository == 'yogzblr/imas'
-    environment: goreleaser
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -55,13 +41,6 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: stable
-
-      - name: Import GPG key
-        id: import_gpg
-        uses: crazy-max/ghaction-import-gpg@v7
-        with:
-          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
-          passphrase: ${{ secrets.GPG_PASSPHRASE }}
 
       # The sprout-windows-pkg build hook (packaging/windows/build-msi.sh)
       # builds the imas-sprout MSI with msitools' wixl, and its
@@ -78,17 +57,11 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # For the cosign entry in .goreleaser.yaml's signs (keyless, over
-      # checksums.txt).
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3
-
       - name: Test GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --snapshot --clean --skip=publish
+          args: release --snapshot --clean --skip=publish,sign
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}

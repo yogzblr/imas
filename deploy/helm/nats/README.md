@@ -148,7 +148,13 @@ file. For the same reason the pods set `enableServiceLinks: false`.
     first bullet already covers).
 - **`bus.tls.mode: openbao`** issues a cert from OpenBao PKI at startup
   through `IMAS_CERTS_OPENBAO_*`, into a memory `emptyDir`. The SANs are
-  `bus.tls.certHosts` or the Service and per-pod DNS names.
+  `bus.tls.certHosts` or the Service and per-pod DNS names. The client
+  also reads the optional `IMAS_CERTS_OPENBAO_NAMESPACE`, which it sends as
+  `X-Vault-Namespace` on every request, login included. It is unset by
+  default and the chart has no value for it: to use a namespace, add it
+  to `bus.extraEnv`. With a proxy in `bus.extraEnv` (`HTTPS_PROXY`), the
+  OpenBao host belongs in `NO_PROXY` unless the proxy should reach it
+  (`docs/INSTALL.md`, "Proxies and `NO_PROXY`").
 
 Nothing in farmerbus rotates a cert while it runs. It only reloads on
 SIGHUP, and nothing here sends one. Roll the pods when the cert changes,

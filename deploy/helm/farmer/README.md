@@ -263,6 +263,19 @@ Each OpenBao client runs under its own role and gets exactly one policy.
   Then run the checks from `deploy/farmer/README.md` and
   `deploy/fleetreleaser/README.md` (`bao token capabilities ...`). They
   must print `deny` where those READMEs say so.
+- **Namespaces (optional, unset by default).** Each client also reads
+  `<prefix>NAMESPACE`: `IMAS_CERTS_OPENBAO_NAMESPACE`,
+  `IMAS_GATEWAY_OPENBAO_NAMESPACE`, `IMAS_FLEETSIGN_OPENBAO_NAMESPACE`,
+  `IMAS_TENANTBOX_OPENBAO_NAMESPACE` and
+  `IMAS_SAASAPI_CRED_OPENBAO_NAMESPACE`. When one is set, that client sends
+  it as `X-Vault-Namespace` on every request, logins included; when it is
+  unset, no namespace header is sent. The chart sets none of them. To use
+  a namespace, add the variables to `farmer.extraEnv` (farmer's four
+  clients) and `saasapi.extraEnv` (saasapi's `IMAS_FLEETSIGN_OPENBAO_*`
+  client). The publish Job has no `extraEnv`, so the chart can't set
+  `IMAS_SAASAPI_CRED_OPENBAO_NAMESPACE`, and the `bao` CLI steps (the
+  bootstrap Job and saasapi's `fetch-bus-ca` init container) don't set a
+  namespace either. `docs/INSTALL.md` has the full `<prefix>OPENBAO_*` set.
 
 ## PXC
 
@@ -642,6 +655,7 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `farmer.jobs.reconcileWindow` | `"2h"` | `IMAS_JOB_RECONCILE_WINDOW` (`deploy/farmer/values.job-reconcile.yaml`). |
 | `farmer.openbao.{gateway,fleetSign,tenantBox}.*` | see values.yaml | Mount, key or path, role, and token key per client. |
 | `farmer.extraConfig` | `{}` | Extra `/etc/imas/farmer` keys. Chart-managed keys win. |
+| `farmer.extraEnv` | `[]` | Extra env vars for farmer, e.g. the optional `*_OPENBAO_NAMESPACE` (see [OpenBao](#openbao)) or `HTTPS_PROXY`/`NO_PROXY`. Never a raw `IMAS_NATS_*_SEED` or any `IMAS_SAASAPI_CRED_OPENBAO_*`. |
 | `farmer.persistence.*` | 1Gi RWO, kept | FarmerPKI and audit logs. |
 | `saasapi.enabled` / `replicaCount` / `port` | `true` / `2` / `8081` | |
 | `saasapi.jwt.*` | `""` | Keycloak JWKS URL, issuer and audience. Required. |
@@ -653,6 +667,7 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `saasapi.outboxSweeper.{interval,provisioningStaleAfter,actionStaleAfter,actionMaxAge,leaseTTL}` / `maxAttempts` | `""` / `null` (30s, 2m, 2m, 15m, 2m / 5) | `SAASAPI_OUTBOX_SWEEP_INTERVAL`, `_PROVISIONING_STALE_AFTER`, `_ACTION_STALE_AFTER`, `_ACTION_MAX_AGE`, `_LEASE_TTL`, `_MAX_ATTEMPTS`. Empty or null emits no env var. See [`docs/api/saasapi.md`](../../../docs/api/saasapi.md#outbox-sweeper). |
 | `saasapi.operator.*` | off, port `8443` | The operator plane: TLS Secret, token Secret, fleetreleaser client. See [saasapi's operator plane](#saasapis-operator-plane). |
 | `saasapi.enrollmentKeys.rateLimit.*` | `1` / `5` | `deploy/saasapi/values.rate-limit.yaml`. `null` emits no env var. |
+| `saasapi.extraEnv` | `[]` | Extra env vars for saasapi, e.g. `IMAS_FLEETSIGN_OPENBAO_NAMESPACE` (see [OpenBao](#openbao)) or `HTTPS_PROXY`/`NO_PROXY`. |
 | `credentialPublisher.*` | enabled, `platform/imas/saasapi-nats-user` | The publish Job. |
 | `sproutRelease.register` | `true` | Register `files/sprout-release.json` when the chart has it and the operator plane is on. |
 | `sproutRelease.channel` | `stable` | Sent with the release. `min_sprout_version` is not a value: it is stamped at release time from `packaging/helm/min-sprout-version`. |

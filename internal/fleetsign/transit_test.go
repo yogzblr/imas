@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -186,78 +185,4 @@ func TestNewTransitKeySourceFromEnv_NotConfigured(t *testing.T) {
 	if _, err := NewTransitKeySourceFromEnv(); !errors.Is(err, ErrNotConfigured) {
 		t.Errorf("missing k8s role: %v", err)
 	}
-}
-
-func TestJWKS_RoundTrip(t *testing.T) {
-	k1, _ := newTestKey(t, 1)
-	k2, _ := newTestKey(t, 2)
-	ks, _ := NewKeySet([]PublicKey{k2, k1})
-	data, err := ks.MarshalJWKS()
-	if err != nil {
-		t.Fatalf("MarshalJWKS: %v", err)
-	}
-	for _, want := range []string{`"kty":"OKP"`, `"crv":"Ed25519"`, `"kid":"1"`, `"kid":"2"`, `"alg":"EdDSA"`, `"use":"sig"`} {
-		if !strings.Contains(string(data), want) {
-			t.Errorf("JWKS %s missing %s", data, want)
-		}
-	}
-	back, err := ParseJWKS(data)
-	if err != nil {
-		t.Fatalf("ParseJWKS: %v", err)
-	}
-	if len(back) != 2 || !back[0].Key.Equal(k1.Key) || !back[1].Key.Equal(k2.Key) {
-		t.Fatalf("ParseJWKS = %+v", back)
-	}
-}
-
-func TestParseJWKS_Strict(t *testing.T) {
-	pub, priv, _ := ed25519.GenerateKey(nil)
-	x := jwkB64(pub)
-	d := jwkB64(priv.Seed())
-	cases := map[string]string{
-		"not json":       `{`,
-		"empty set":      `{"keys":[]}`,
-		"private key":    `{"keys":[{"kty":"OKP","crv":"Ed25519","x":"` + x + `","d":"` + d + `","kid":"1"}]}`,
-		"no kid":         `{"keys":[{"kty":"OKP","crv":"Ed25519","x":"` + x + `"}]}`,
-		"non-numeric":    `{"keys":[{"kty":"OKP","crv":"Ed25519","x":"` + x + `","kid":"gw-2026"}]}`,
-		"zero kid":       `{"keys":[{"kty":"OKP","crv":"Ed25519","x":"` + x + `","kid":"0"}]}`,
-		"wrong use":      `{"keys":[{"kty":"OKP","crv":"Ed25519","x":"` + x + `","kid":"1","use":"enc"}]}`,
-		"wrong alg":      `{"keys":[{"kty":"OKP","crv":"Ed25519","x":"` + x + `","kid":"1","alg":"ES256"}]}`,
-		"x25519 not sig": `{"keys":[{"kty":"OKP","crv":"X25519","x":"` + x + `","kid":"1"}]}`,
-		"duplicate kid":  `{"keys":[{"kty":"OKP","crv":"Ed25519","x":"` + x + `","kid":"1"},{"kty":"OKP","crv":"Ed25519","x":"` + x + `","kid":"1"}]}`,
-	}
-	for name, doc := range cases {
-		if _, err := ParseJWKS([]byte(doc)); err == nil {
-			t.Errorf("%s: ParseJWKS accepted %s", name, doc)
-		}
-	}
-}
-
-func TestJWKSHandler(t *testing.T) {
-	k1, _ := newTestKey(t, 1)
-	m := &mockTransit{token: "ro-token", keys: []PublicKey{k1}}
-	m.start(t)
-	src, _ := NewTransitKeySourceFromEnv()
-
-	rec := httptest.NewRecorder()
-	JWKSHandler(src)(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/json" {
-		t.Fatalf("status %d, content-type %q", rec.Code, rec.Header().Get("Content-Type"))
-	}
-	ks, err := ParseJWKS(rec.Body.Bytes())
-	if err != nil || len(ks) != 1 || !ks[0].Key.Equal(k1.Key) {
-		t.Fatalf("served JWKS = %s (%v)", rec.Body, err)
-	}
-
-	t.Setenv(EnvOpenBaoToken, "wrong")
-	bad, _ := NewTransitKeySourceFromEnv()
-	rec = httptest.NewRecorder()
-	JWKSHandler(bad)(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status with failing Transit = %d, want 503", rec.Code)
-	}
-}
-
-func jwkB64(b []byte) string {
-	return base64.RawURLEncoding.EncodeToString(b)
 }

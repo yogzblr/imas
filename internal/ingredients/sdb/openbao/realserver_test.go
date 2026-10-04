@@ -129,9 +129,9 @@ path "` + kv1 + `/*" { capabilities = ["read"] }`,
 		{kv2 + "/app/db#nope", "nope"},
 		{kv2 + "/app/db", "#field"},
 		// Absent from KV v2 reads as "not KV v2" (a 404 either way), so
-		// the KV v1 fallback answers: a 404, or the 403 here, since the
-		// policy grants no v1-style path on the KV v2 mount.
-		{kv2 + "/app/absent", ErrReadFailed.Error()},
+		// KV v1 is tried too; the policy grants no v1-style path on the
+		// KV v2 mount, so that read is refused. The error names both.
+		{kv2 + "/app/absent", kv2 + "/data/app/absent (KV v2): status 404 (not found); then " + kv2 + "/app/absent (KV v1): status 403 (forbidden)"},
 	} {
 		_, err := get(tc.ref)
 		if err == nil {
