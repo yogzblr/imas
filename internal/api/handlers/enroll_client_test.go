@@ -24,6 +24,7 @@ import (
 
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwt"
+	"github.com/nats-io/nkeys"
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/gatewayjwt"
@@ -44,7 +45,22 @@ func (m signingGatewayMinter) MintGatewayJWT(_ context.Context, c gatewayjwt.Gat
 	return string(b), err
 }
 
-func TestEnrollClient_AgainstHandler(t *testing.T) {
+// handlerSprout is a sprout enrolled through the real Enroll handler.
+type handlerSprout struct {
+	kp        nkeys.KeyPair
+	nkeyPub   string
+	sproutPub string
+	farmer    *httptest.Server
+	resp      *pki.EnrollResponse
+}
+
+// enrollAgainstHandlers points every sprout-side path at a temp dir,
+// serves the real Enroll and Refresh handlers over TLS, pins that server
+// as the sprout's root CA, and enrolls an accepted NKey through the
+// client (the replay path: two requests, the second with the box key
+// proof, which records the box key). The enrollment is persisted.
+func enrollAgainstHandlers(t *testing.T) *handlerSprout {
+	t.Helper()
 	setupPKIDirs(t)
 	withFakeTenantBoxOpenBao(t)
 	_, gwKey, _ := ed25519.GenerateKey(rand.Reader)
@@ -74,6 +90,9 @@ func TestEnrollClient_AgainstHandler(t *testing.T) {
 		*p = filepath.Join(dir, name)
 		t.Cleanup(func() { *p = old })
 	}
+	oldBusURLs := config.BusURLs
+	config.BusURLs = nil
+	t.Cleanup(func() { config.BusURLs = oldBusURLs })
 	if err := os.WriteFile(config.NKeySproutPrivFile, seed, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -104,11 +123,17 @@ func TestEnrollClient_AgainstHandler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnrollSprout against the real handler: %v", err)
 	}
-	if resp.SproutID != "web-01" || resp.NKeyIdentity != nkeyPub || len(resp.NatsURLs) == 0 {
-		t.Errorf("unexpected response: %+v", resp)
-	}
 	if err := pki.PersistEnrollment(resp); err != nil {
 		t.Fatalf("PersistEnrollment: %v", err)
+	}
+	return &handlerSprout{kp: kp, nkeyPub: nkeyPub, sproutPub: sproutPub, farmer: ts, resp: resp}
+}
+
+func TestEnrollClient_AgainstHandler(t *testing.T) {
+	s := enrollAgainstHandlers(t)
+	resp := s.resp
+	if resp.SproutID != "web-01" || resp.NKeyIdentity != s.nkeyPub || len(resp.NatsURLs) == 0 || resp.GatewayJWT == "" {
+		t.Errorf("unexpected response: %+v", resp)
 	}
 	if !pki.SproutEnrolled() {
 		t.Fatal("expected the sprout to be enrolled")
@@ -128,12 +153,8 @@ func TestEnrollClient_AgainstHandler(t *testing.T) {
 	}
 
 	// A tenant key rotation reaches the sprout through the real refresh
-	// handler's tenant_x25519_continuity, and the sprout re-pins. (This
-	// sprout was accepted directly rather than enrolled, so record its box
-	// key the way enrollment would have.)
-	if err := pki.RotateSproutBoxKey(pki.CurrentTenantID(), "web-01", sproutPub, time.Hour); err != nil {
-		t.Fatal(err)
-	}
+	// handler's sealed reply (tenant_x25519_continuity), and the sprout
+	// re-pins.
 	rot, err := pki.RotateTenantX25519Keypair(pki.CurrentTenantID(), false)
 	if err != nil {
 		t.Fatal(err)

@@ -84,7 +84,7 @@ never `/v1/enroll`'s, because the two need opposite budgets:
 | Route | Authenticated by | Volume | Budget |
 |---|---|---|---|
 | `/v1/enroll` | the join token only | an Ansible rollout at a time | small and fixed (20 per 60 s per Envoy): it is what bounds join-token guessing |
-| `/v1/refresh` | NKey proof of possession, verified by farmer | every sprout, every ~⅔ of the TTL | large, sized from fleet size ÷ TTL |
+| `/v1/refresh` | a request sealed with the sprout's box key, opened by farmer (the reply is sealed back) | every sprout, every ~⅔ of the TTL | large, sized from fleet size ÷ TTL |
 
 Both buckets are **per Envoy process** (shared by its worker threads;
 Envoy's default) and **per route** (Envoy builds a separate bucket for
@@ -132,8 +132,10 @@ max_tokens               = tokens_per_fill × (burstSeconds / fill_interval)
 The first row is what `envoy.yaml` ships with. Compare `/v1/enroll`: 20
 per 60 s is 0.33/s per Envoy, about 1/30 of the first row.
 
-**Farmer has to keep up too.** Each refresh is a PXC lookup and an
-OpenBao Transit `sign` call. Size farmer and the Transit backend for R ×
+**Farmer has to keep up too.** Each refresh is a PXC lookup, a few NaCl
+box opens and one seal (against the tenant's key set, read from OpenBao
+KV and cached for a minute), a Valkey `SET NX` claiming the request, and
+an OpenBao Transit `sign` call. Size farmer and the Transit backend for R ×
 headroom, not just the Envoy bucket; raising the bucket past what they
 can serve only moves the `429`s to `5xx`s.
 
@@ -159,9 +161,9 @@ not a value: it should not grow with the fleet.
 - `internal/api/handlers/enroll.go` / `internal/api/routers.go` — the
   farmer-side `POST /v1/enroll` handler this config's enroll route
   proxies to.
-- `internal/api/handlers/refresh.go` / `internal/pki/refresh.go` — the
-  farmer-side `POST /v1/refresh` handler and its proof-of-possession
-  check, behind this config's refresh route.
+- `internal/api/handlers/refresh.go` / `internal/pki/refreshsealed.go` —
+  the farmer-side `POST /v1/refresh` handler, which opens the sprout's
+  sealed request and seals its reply, behind this config's refresh route.
 - `internal/pki/enroll.go` — the token validation, atomic redemption, and
   minting logic behind that handler (mints both the native NATS JWT and,
   via `internal/gatewayjwt`, the gateway JWT).

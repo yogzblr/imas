@@ -174,8 +174,11 @@ func TestEnroll_Success(t *testing.T) {
 	if result.JWT == "" {
 		t.Error("expected non-empty JWT")
 	}
-	if result.GatewayJWT == "" {
-		t.Error("expected non-empty gateway JWT")
+	// J.2: the first request proves only the NKey, which a compromised bus
+	// can get signed, so it gets no gateway JWT; the second, with the box
+	// key proof, does (TestEnroll_GatewayJWTOnlyWithABoxKeyProof).
+	if result.GatewayJWT != "" {
+		t.Error("the first enrollment request got a gateway JWT")
 	}
 	if result.TenantX25519Pub == "" {
 		t.Error("expected non-empty tenant X25519 pubkey")
@@ -183,8 +186,8 @@ func TestEnroll_Success(t *testing.T) {
 	if store.rows["ek_1"].UsedCount != 1 {
 		t.Errorf("expected used_count 1, got %d", store.rows["ek_1"].UsedCount)
 	}
-	if minter.calls != 1 {
-		t.Errorf("expected exactly 1 gateway JWT mint call, got %d", minter.calls)
+	if minter.calls != 0 {
+		t.Errorf("expected no gateway JWT mint call, got %d", minter.calls)
 	}
 
 	gotTenant, sproutID, err := SproutIDAndTenantForNKey(testNKeyPub(t, kp))
@@ -231,11 +234,10 @@ func TestEnroll_IdempotentReplayDoesNotConsumeToken(t *testing.T) {
 	if store.rows["ek_1"].UsedCount != 1 {
 		t.Errorf("expected replay not to consume a use, used_count=%d", store.rows["ek_1"].UsedCount)
 	}
-	// The gateway JWT is short-lived by design (see EnrollResult.GatewayJWT),
-	// so a replay must still mint a fresh one rather than reusing the
-	// first response's.
-	if minter.calls != 2 {
-		t.Errorf("expected the replay to mint its own gateway JWT (2 total calls), got %d", minter.calls)
+	// J.2: neither request proved possession of a box key, so neither got
+	// a gateway JWT (a compromised bus can get the NKey signature made).
+	if first.GatewayJWT != "" || second.GatewayJWT != "" || minter.calls != 0 {
+		t.Errorf("gateway JWTs issued without a box key proof: first %q, replay %q, %d mints", first.GatewayJWT, second.GatewayJWT, minter.calls)
 	}
 }
 
@@ -450,6 +452,51 @@ func TestEnroll_RecordsSproutBoxKeyOnlyWithProof(t *testing.T) {
 	}
 }
 
+// J.2: /v1/enroll issues a gateway JWT only with a box key proof, and
+// each proof earns one at most. A compromised bus can get any enrollment
+// payload NKey-signed (over a CONNECT nonce), and the replay path never
+// checks the join token, so the NKey proof alone must not be enough; and a
+// proof copied from an earlier request, with a fresh NKey signature, must
+// not earn a second token.
+func TestEnroll_GatewayJWTOnlyWithABoxKeyProof(t *testing.T) {
+	store, minter := setupEnrollTest(t)
+	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
+	kp := testEnrollNKey(t)
+	nkeyPub := testNKeyPub(t, kp)
+	sproutPub, sproutPriv, _ := box.GenerateKey(rand.Reader)
+
+	first, err := Enroll(t.Context(), signedEnroll(t, kp, "ek_1.s", "web-01", b64(sproutPub)))
+	if err != nil || first.GatewayJWT != "" {
+		t.Fatalf("first Enroll = %+v, %v; want the identity with no gateway JWT", first, err)
+	}
+	// What the bus can do on its own: an NKey-signed replay, any token.
+	busReplay, err := Enroll(t.Context(), signedEnroll(t, kp, "anything.at-all", "web-01", b64(sproutPub)))
+	if err != nil || busReplay.GatewayJWT != "" {
+		t.Fatalf("NKey-only replay = %+v, %v; want the identity with no gateway JWT", busReplay, err)
+	}
+	if minter.calls != 0 {
+		t.Fatalf("%d gateway JWTs minted for the NKey proof alone", minter.calls)
+	}
+
+	proof := enrollProof(t, "t_1", "web-01", first.TenantX25519Pub, nkeyPub, b64(sproutPub), sproutPriv)
+	proven, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), proof))
+	if err != nil || proven.GatewayJWT == "" {
+		t.Fatalf("proven Enroll = %+v, %v; want a gateway JWT", proven, err)
+	}
+	// The same proof under a fresh NKey signature: refused.
+	if res, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), proof)); !errors.Is(err, ErrEnrollmentFailed) {
+		t.Fatalf("a reused proof = %+v, %v; want ErrEnrollmentFailed", res, err)
+	}
+	if minter.calls != 1 {
+		t.Errorf("gateway JWT mints = %d, want 1", minter.calls)
+	}
+	// A fresh proof (what a sprout retrying a lost response sends) works.
+	again := enrollProof(t, "t_1", "web-01", first.TenantX25519Pub, nkeyPub, b64(sproutPub), sproutPriv)
+	if res, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), again)); err != nil || res.GatewayJWT == "" {
+		t.Fatalf("a fresh proof = %+v, %v; want a gateway JWT", res, err)
+	}
+}
+
 // Every proof that isn't exactly right fails the whole request and records
 // nothing.
 func TestEnroll_RefusesBadSproutPubProofs(t *testing.T) {
@@ -487,11 +534,11 @@ func TestEnroll_RefusesBadSproutPubProofs(t *testing.T) {
 	// A stale proof.
 	t.Run("stale", func(t *testing.T) {
 		proof := enrollProof(t, "t_1", "web-01", tp, nkeyPub, b64(sproutPub), sproutPriv)
-		if err := verifyEnrollProof("t_1", "web-01", nkeyPub, b64(sproutPub), proof); err != nil {
+		if _, err := verifyEnrollProof("t_1", "web-01", nkeyPub, b64(sproutPub), proof); err != nil {
 			t.Fatalf("control: %v", err)
 		}
 		withEnrollNow(t, time.Now().Add(EnrollSigMaxSkew+time.Minute))
-		if err := verifyEnrollProof("t_1", "web-01", nkeyPub, b64(sproutPub), proof); err == nil {
+		if _, err := verifyEnrollProof("t_1", "web-01", nkeyPub, b64(sproutPub), proof); err == nil {
 			t.Fatal("a proof issued long before farmer's clock verified")
 		}
 	})
@@ -668,12 +715,12 @@ func TestEnroll_ReplayWithValidSignatureSucceeds(t *testing.T) {
 		if replay.SproutID != first.SproutID || replay.JWT != first.JWT {
 			t.Errorf("replay returned a different identity: %+v vs %+v", replay, first)
 		}
-		if replay.GatewayJWT == "" {
-			t.Error("expected replay to mint a gateway JWT")
+		if replay.GatewayJWT != "" {
+			t.Error("a replay with the NKey proof alone got a gateway JWT")
 		}
 	}
-	if minter.calls != 3 {
-		t.Errorf("expected 3 gateway JWT mints (enroll + 2 replays), got %d", minter.calls)
+	if minter.calls != 0 {
+		t.Errorf("expected no gateway JWT mints without a box key proof, got %d", minter.calls)
 	}
 	if store.rows["ek_1"].UsedCount != 1 {
 		t.Errorf("expected replays not to consume a use, used_count=%d", store.rows["ek_1"].UsedCount)

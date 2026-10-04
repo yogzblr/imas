@@ -75,9 +75,13 @@ type enrollSuccessResponse struct {
 	SproutID string `json:"sprout_id"`
 	// TenantID is the tenant the sprout pins at enrollment; every sealed
 	// payload names it.
-	TenantID        string   `json:"tenant_id"`
-	JWT             string   `json:"jwt"`
-	GatewayJWT      string   `json:"gateway_jwt"`
+	TenantID string `json:"tenant_id"`
+	JWT      string `json:"jwt"`
+	// GatewayJWT is present only in the answer to the request that
+	// carries sprout_pub_proof (J.2): farmer issues no gateway JWT for an
+	// NKey signature alone, which a compromised bus can obtain over a
+	// CONNECT nonce (internal/pki/enroll.go's package comment).
+	GatewayJWT      string   `json:"gateway_jwt,omitempty"`
 	NKeyIdentity    string   `json:"nkey_identity"`
 	TenantX25519Pub string   `json:"tenant_x25519_pub"`
 	NatsURLs        []string `json:"nats_urls"`

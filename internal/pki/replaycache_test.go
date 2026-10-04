@@ -11,6 +11,8 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/valkey-io/valkey-go"
+
+	"github.com/yogzblr/imas/internal/payloadbox"
 )
 
 // withTestReplayCache installs a replay cache backed by miniredis, an
@@ -54,8 +56,8 @@ func TestEnroll_ResubmittedFirstEnrollmentRejected(t *testing.T) {
 	if res, err := Enroll(t.Context(), req); !errors.Is(err, ErrEnrollmentFailed) {
 		t.Fatalf("resubmitted Enroll = %+v, %v; want ErrEnrollmentFailed", res, err)
 	}
-	if minter.calls != 1 {
-		t.Errorf("gateway JWT mints = %d, want 1", minter.calls)
+	if minter.calls != 0 { // J.2: no gateway JWT without a box key proof
+		t.Errorf("gateway JWT mints = %d, want 0", minter.calls)
 	}
 	if store.rows["ek_1"].UsedCount != 1 {
 		t.Errorf("used_count = %d, want 1", store.rows["ek_1"].UsedCount)
@@ -83,8 +85,8 @@ func TestEnroll_ResubmittedReplayRejected(t *testing.T) {
 	if _, err := Enroll(t.Context(), signedEnroll(t, kp, "bogus.token", "web-01", sproutPub)); err != nil {
 		t.Fatalf("freshly signed replay: %v", err)
 	}
-	if minter.calls != 3 {
-		t.Errorf("gateway JWT mints = %d, want 3 (enroll + 2 fresh replays)", minter.calls)
+	if minter.calls != 0 { // J.2: no gateway JWT without a box key proof
+		t.Errorf("gateway JWT mints = %d, want 0", minter.calls)
 	}
 }
 
@@ -120,25 +122,8 @@ func TestEnroll_ResubmissionWithReencodedSignatureRejected(t *testing.T) {
 	if _, err := Enroll(t.Context(), reencoded); !errors.Is(err, ErrEnrollmentFailed) {
 		t.Fatalf("re-encoded resubmission = %v, want ErrEnrollmentFailed", err)
 	}
-	if minter.calls != 2 {
-		t.Errorf("gateway JWT mints = %d, want 2", minter.calls)
-	}
-}
-
-func TestRefreshSprout_ResubmittedRequestRejected(t *testing.T) {
-	kp, _, minter := enrolledForRefresh(t)
-	req := signedRefresh(t, kp)
-	if _, err := RefreshSprout(t.Context(), req); err != nil {
-		t.Fatalf("RefreshSprout: %v", err)
-	}
-	if _, err := RefreshSprout(t.Context(), req); !errors.Is(err, ErrEnrollmentFailed) {
-		t.Fatalf("resubmitted RefreshSprout = %v, want ErrEnrollmentFailed", err)
-	}
-	if _, err := RefreshSprout(t.Context(), signedRefresh(t, kp)); err != nil {
-		t.Fatalf("freshly signed RefreshSprout: %v", err)
-	}
-	if minter.calls != 3 {
-		t.Errorf("gateway JWT mints = %d, want 3 (enroll + 2 fresh refreshes)", minter.calls)
+	if minter.calls != 0 { // J.2: no gateway JWT without a box key proof
+		t.Errorf("gateway JWT mints = %d, want 0", minter.calls)
 	}
 }
 
@@ -156,8 +141,19 @@ func TestReplayCache_UnauthenticatedRequestsWriteNothing(t *testing.T) {
 			t.Fatalf("Enroll with %q = %v, want ErrEnrollmentFailed", token, err)
 		}
 	}
-	if _, err := RefreshSprout(t.Context(), signedRefresh(t, stranger)); !errors.Is(err, ErrEnrollmentFailed) {
+	strangerBox := newTestBoxKeyPair(t)
+	tenantBox := newTestBoxKeyPair(t)
+	junk, err := payloadbox.Seal(refreshMessage(t, payloadbox.PurposeRefresh, "t_1", "web-01", "",
+		sealedRefreshBody{NKeyPub: testNKeyPub(t, stranger), Timestamp: time.Now().Unix()}),
+		[]payloadbox.KeyPair{{PeerPub: tenantBox.pub, Priv: strangerBox.priv}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RefreshSprout(t.Context(), RefreshRequest{NKeyPub: testNKeyPub(t, stranger), Sealed: junk}); !errors.Is(err, ErrEnrollmentFailed) {
 		t.Fatalf("RefreshSprout for a stranger = %v, want ErrEnrollmentFailed", err)
+	}
+	if keys := mr.Keys(); len(keys) != 0 {
+		t.Errorf("a stranger's refresh claimed %v", keys)
 	}
 	if keys := replayKeys(mr); len(keys) != 0 {
 		t.Errorf("replay cache has %d key(s), want 0: %v", len(keys), keys)
@@ -175,11 +171,18 @@ func TestReplayCache_FailsClosed(t *testing.T) {
 	}
 	for name, breakCache := range cases {
 		t.Run(name, func(t *testing.T) {
-			kp, store, minter := enrolledForRefresh(t)
+			_, minter, store := enrollForTest(t)
 			store.rows["ek_2"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
+			kp, err := loadSproutNKey()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer kp.Wipe()
+			req, _ := sealedRefresh(t)
+			calls := minter.calls
 			breakCache(t, withTestReplayCache(t))
 
-			if _, err := RefreshSprout(t.Context(), signedRefresh(t, kp)); !errors.Is(err, ErrEnrollmentFailed) {
+			if _, err := RefreshSprout(t.Context(), req); !errors.Is(err, ErrEnrollmentFailed) {
 				t.Errorf("RefreshSprout = %v, want ErrEnrollmentFailed", err)
 			}
 			if _, err := Enroll(t.Context(), signedEnroll(t, kp, "bogus.token", "web-01", testEnrollBoxPub(t))); !errors.Is(err, ErrEnrollmentFailed) {
@@ -188,8 +191,8 @@ func TestReplayCache_FailsClosed(t *testing.T) {
 			if _, err := Enroll(t.Context(), signedEnroll(t, testEnrollNKey(t), "ek_2.s", "web-02", testEnrollBoxPub(t))); !errors.Is(err, ErrEnrollmentFailed) {
 				t.Errorf("first-time Enroll = %v, want ErrEnrollmentFailed", err)
 			}
-			if minter.calls != 1 {
-				t.Errorf("gateway JWT mints = %d, want 1 (the setup enrollment only)", minter.calls)
+			if minter.calls != calls {
+				t.Errorf("gateway JWT mints = %d, want %d (the setup enrollment only)", minter.calls, calls)
 			}
 			if store.rows["ek_2"].UsedCount != 0 {
 				t.Errorf("used_count = %d, want 0: a failed claim must not spend a join-token use", store.rows["ek_2"].UsedCount)
