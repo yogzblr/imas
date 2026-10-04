@@ -276,3 +276,56 @@ func TestPushAllAccounts_FreshBusLearnsEveryAccount(t *testing.T) {
 		t.Fatalf("the bus still holds its SYS bootstrap, not core's SYS Account JWT (%v)", err)
 	}
 }
+
+// config.BusMaxConnections reaches the bus's MaxConn when positive; zero
+// keeps nats-server's default and a negative value never gets through
+// (nats-server would refuse every client).
+func TestConfigureBusNats_MaxConnections(t *testing.T) {
+	setupTestPKI(t)
+	shareSeedsWithBus(t)
+	prev := config.BusMaxConnections
+	t.Cleanup(func() { config.BusMaxConnections = prev })
+	for _, tc := range []struct{ set, want int }{{0, 0}, {150000, 150000}, {-1, 0}} {
+		config.BusMaxConnections = tc.set
+		var opts nats_server.Options
+		withFarmerPKI(t.TempDir(), func() { opts, _ = ConfigureBusNats() })
+		if opts.MaxConn != tc.want {
+			t.Errorf("BusMaxConnections %d: MaxConn = %d, want %d", tc.set, opts.MaxConn, tc.want)
+		}
+	}
+
+	// And the running bus enforces it.
+	config.BusMaxConnections = 1
+	mat, err := ensureNatsAuth()
+	if err != nil {
+		t.Fatal(err)
+	}
+	startBusNode(t, t.TempDir())
+	first, err := connectSystemAccount(mat)
+	if err != nil {
+		t.Fatalf("first connection: %v", err)
+	}
+	defer first.Close()
+	// nats-server sends a plaintext -ERR 'maximum connections exceeded'
+	// and closes; on this TLS-only listener the client is mid-upgrade by
+	// then and reports a TLS error (the -ERR read as a TLS record, or
+	// the close), not the -ERR itself.
+	if second, err := connectSystemAccount(mat); err == nil {
+		second.Close()
+		t.Fatal("a second connection was accepted with busmaxconnections 1")
+	}
+	// The refusal was the limit: once the first leaves, a client gets in.
+	first.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		third, err := connectSystemAccount(mat)
+		if err == nil {
+			third.Close()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no connection accepted after the first closed: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}

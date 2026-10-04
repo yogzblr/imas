@@ -1317,6 +1317,30 @@ func TestLoadConfig_SproutBusReconnectSettings(t *testing.T) {
 	})
 }
 
+// busmaxconnections is read by farmer and farmerbus (which loads the
+// "farmer" config). Unset, unparseable and negative all mean nats-server's
+// own default: a negative MaxConn would make the bus refuse every client.
+func TestLoadConfig_BusMaxConnections(t *testing.T) {
+	for _, tc := range []struct {
+		name, content string
+		want          int
+	}{
+		{"unset", "", 0},
+		{"integer", "busmaxconnections: 150000\n", 150000},
+		{"quoted", "busmaxconnections: \"200000\"\n", 200000},
+		{"negative", "busmaxconnections: -1\n", 0},
+		{"not a number", "busmaxconnections: lots\n", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			BusMaxConnections = -42
+			loadFarmerWithConfig(t, tc.content)
+			if BusMaxConnections != tc.want {
+				t.Errorf("BusMaxConnections = %d, want %d", BusMaxConnections, tc.want)
+			}
+		})
+	}
+}
+
 func loadFarmerWithConfig(t *testing.T, content string) {
 	t.Helper()
 	tmpRoot := t.TempDir()

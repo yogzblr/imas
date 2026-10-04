@@ -97,6 +97,15 @@ var (
 	// FarmerBusPort (the plain TCP NATS listener imas CLI/farmer-to-farmer
 	// connections still use).
 	FarmerWSPort string
+	// BusMaxConnections ("busmaxconnections", farmer and farmerbus) is
+	// the most client connections one bus node accepts, across its TCP
+	// and websocket listeners (nats-server's max_connections). 0, the
+	// default, keeps nats-server's own default of 65,536, which caps a
+	// node well below the sprout counts docs/loadtest.md sizes for.
+	// Negative values are refused (nats-server would then refuse every
+	// client) and fall back to 0. Raising it needs the memory and file
+	// descriptors to match: see deploy/helm/nats/README.md.
+	BusMaxConnections int
 	// FarmerInterface ("farmerinterface") is, on farmer and farmerbus,
 	// the address their listeners bind: farmer's HTTPS API
 	// (cmd/farmer's StartAPIServer) and the bus's NATS and websocket
@@ -485,6 +494,11 @@ func LoadConfig(binary string) {
 			JobLogDir = jety.GetString("joblogdir")
 			JobLogTTL = jety.GetDuration("joblogttl")
 			PropsDir = jety.GetString("propsdir")
+			BusMaxConnections = jety.GetInt("busmaxconnections")
+			if BusMaxConnections < 0 {
+				log.Errorf("busmaxconnections %d is negative, which would refuse every client; using the NATS server default", BusMaxConnections)
+				BusMaxConnections = 0
+			}
 			CertHosts = jety.GetStringSlice("certhosts")
 
 			// PXC/Valkey/S3 connection settings are deployment secrets, not
