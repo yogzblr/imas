@@ -154,6 +154,11 @@ import (
 //     to fleetreleaser.
 //   - SAASAPI_FLEETRELEASER_CA_FILE: optional PEM bundle for
 //     fleetreleaser's certificate; the system roots otherwise.
+//
+// Tenant recipe upload (recipes.go, REC.1): SAASAPI_RECIPES_* (the object
+// store credential, roles, caps and write rate limit) and the
+// IMAS_RECIPE_* template render limits farmer uses too. See
+// RecipeSettings.
 type Config struct {
 	// ListenAddr is the address the HTTP server binds to, e.g. ":8081".
 	ListenAddr string
@@ -228,13 +233,19 @@ type Config struct {
 	FleetReleaserURL          string
 	FleetReleaserTokenFile    string
 	FleetReleaserCAFile       string
+
+	// Recipes configures tenant recipe upload (recipes.go), passed to
+	// ConfigureRecipes before NewRouter. See RecipeSettings for its
+	// SAASAPI_RECIPES_* and IMAS_RECIPE_* variables.
+	Recipes RecipeSettings
 }
 
 // LoadConfig reads the saasapi service's configuration from environment
 // variables, applying sane defaults where possible. It returns an error
 // only for a value that is set but invalid (the enrollment-key rate-limit
 // settings, the fleet update dispatch flag and clock-skew margin, the
-// outbox sweeper's settings, and the operator plane's settings).
+// outbox sweeper's settings, the recipe upload settings, and the operator
+// plane's settings).
 func LoadConfig() (Config, error) {
 	cfg := Config{
 		ListenAddr:   envOrDefault("SAASAPI_LISTEN_ADDR", ":8081"),
@@ -272,6 +283,8 @@ func LoadConfig() (Config, error) {
 		FleetReleaserURL:          os.Getenv("SAASAPI_FLEETRELEASER_URL"),
 		FleetReleaserTokenFile:    os.Getenv("SAASAPI_FLEETRELEASER_TOKEN_FILE"),
 		FleetReleaserCAFile:       os.Getenv("SAASAPI_FLEETRELEASER_CA_FILE"),
+
+		Recipes: DefaultRecipeSettings(),
 	}
 
 	if v := os.Getenv("SAASAPI_ENROLLMENT_KEY_RATE_LIMIT"); v != "" {
@@ -306,6 +319,9 @@ func LoadConfig() (Config, error) {
 		cfg.FleetUpdateClockSkew = d
 	}
 	if err := loadOutboxSweeperSettings(&cfg.OutboxSweeper); err != nil {
+		return Config{}, err
+	}
+	if err := loadRecipeSettings(&cfg.Recipes); err != nil {
 		return Config{}, err
 	}
 	if cfg.OperatorListenAddr != "" {

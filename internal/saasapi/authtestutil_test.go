@@ -104,6 +104,11 @@ type tokenOpts struct {
 	expiresAt time.Time
 	org       *Organization // nil: omit the organization claim entirely
 	badOrg    bool          // true: include an organization claim with no "id" field
+	// realmRoles and clientRoles become realm_access.roles and
+	// resource_access.<testJWTAudience>.roles; nil omits the claim.
+	realmRoles  []string
+	clientRoles []string
+	subject     string // default "test-user"
 }
 
 func (e *testAuthEnv) mintToken(opts tokenOpts) string {
@@ -122,12 +127,22 @@ func (e *testAuthEnv) mintToken(opts tokenOpts) string {
 		expiresAt = time.Now().Add(time.Hour)
 	}
 
+	subject := opts.subject
+	if subject == "" {
+		subject = "test-user"
+	}
 	builder := jwt.NewBuilder().
 		Issuer(issuer).
 		Audience([]string{audience}).
 		IssuedAt(time.Now()).
 		Expiration(expiresAt).
-		Subject("test-user")
+		Subject(subject)
+	if opts.realmRoles != nil {
+		builder = builder.Claim("realm_access", map[string]any{"roles": opts.realmRoles})
+	}
+	if opts.clientRoles != nil {
+		builder = builder.Claim("resource_access", map[string]any{testJWTAudience: map[string]any{"roles": opts.clientRoles}})
+	}
 
 	switch {
 	case opts.org != nil:

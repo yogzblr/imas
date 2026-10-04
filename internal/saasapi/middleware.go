@@ -82,7 +82,8 @@ func Logger(inner http.Handler, name string) http.Handler {
 //
 // On success, the full parsed Organization (id, name, attributes) is
 // attached to the request context via OrganizationFromContext, not just
-// the boolean match result.
+// the boolean match result, and so is the Caller (token subject and
+// Keycloak roles, caller.go) that RequireRole checks.
 func Auth(inner http.Handler, name string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg := authCfg
@@ -133,9 +134,11 @@ func Auth(inner http.Handler, name string) http.Handler {
 			}
 		}
 
+		ctx := withCaller(r.Context(), callerFromToken(tok, cfg.audience))
 		if orgErr == nil {
-			r = r.WithContext(withOrganization(r.Context(), org))
+			ctx = withOrganization(ctx, org)
 		}
+		r = r.WithContext(ctx)
 
 		inner.ServeHTTP(w, r)
 	})

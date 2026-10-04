@@ -23,10 +23,11 @@ If you have questions, [open an issue](https://github.com/yogzblr/imas/issues/ne
 4. [Install on Linux hosts with systemd](#install-on-linux-hosts-with-systemd)
 5. [Create a tenant and an enrollment key](#create-a-tenant-and-an-enrollment-key)
 6. [Install and enroll a sprout](#install-and-enroll-a-sprout)
-7. [Proxies and `NO_PROXY`](#proxies-and-no_proxy)
-8. [The imas CLI](#the-imas-cli)
-9. [Ports](#ports)
-10. [Coming from the single-tenant install](#coming-from-the-single-tenant-install)
+7. [Upload a recipe](#upload-a-recipe)
+8. [Proxies and `NO_PROXY`](#proxies-and-no_proxy)
+9. [The imas CLI](#the-imas-cli)
+10. [Ports](#ports)
+11. [Coming from the single-tenant install](#coming-from-the-single-tenant-install)
 
 ## Components
 
@@ -315,6 +316,93 @@ curl -s "${H[@]}" -X POST \
 curl -s "${H[@]}" "https://saasapi.example.internal/v1/tenants/t_mfrggzdfmztwq2lk/sprouts?asset_ids=vm-001"
 # {"results":[{"sprout_id":"web-01","asset_id":"vm-001","key_state":"accepted","connected":true}],"unresolved":[]}
 ```
+
+## Upload a recipe
+
+A tenant writes its own recipes and uploads them through the SaaS API. The
+next cook on any of the tenant's sprouts uses the upload, with nothing to
+restart. Another tenant never sees it, and a recipe you upload with the same
+name as a platform recipe replaces that one for your sprouts only.
+Full reference: [`api/saasapi.md`](api/saasapi.md#recipes).
+
+**Before you start.**
+
+- The deployment must have recipe storage on (`saasapi.recipes.enabled` in
+  the Helm chart). Otherwise every call answers
+  `503 recipes_not_configured`.
+- Your Keycloak user needs the `imas-recipes-write` role to upload or
+  delete, and `imas-recipes-read` (or the write role) to list and read.
+  Without it the answer is `403`.
+- Requests normally go through CloudXP's BFF, which adds `X-Internal-Auth`.
+  The examples below call saasapi directly with the same headers as
+  [above](#create-a-tenant-and-an-enrollment-key).
+
+```bash
+T=t_mfrggzdfmztwq2lk
+API=https://saasapi.example.internal/v1/tenants/$T/recipes
+A=(-H "X-Internal-Auth: $INTERNAL_SECRET" -H "Authorization: Bearer $USER_JWT")
+
+cat > harden.imas <<'EOF'
+steps:
+  disable root ssh login:
+    file.managed:
+      - name: /etc/ssh/sshd_config.d/10-imas.conf
+      - contents: "PermitRootLogin no\n"
+  reload sshd:
+    cmd.run:
+      - name: systemctl reload sshd
+      - requisites:
+        - require: disable root ssh login
+EOF
+
+# 1. Create nginx.harden. --data-binary keeps the newlines, which -d drops.
+#    If-None-Match: * means "create only": 412 if the name is taken.
+curl -s "${A[@]}" -X PUT "$API/nginx.harden" \
+  -H "Content-Type: application/yaml" -H "If-None-Match: *" --data-binary @harden.imas
+# {"name":"nginx.harden","sha256":"3b0c…","size":231,"updated_at":"…"}
+
+# 2. List and read. The ETag is the sha256.
+curl -s "${A[@]}" "$API?limit=100"
+curl -s "${A[@]}" "$API/nginx.harden"
+# {"name":"nginx.harden","sha256":"3b0c…","size":231,"updated_at":"…","content":"steps:\n…"}
+
+# 3. Replace it. Send the sha256 you read: if someone else changed it in the
+#    meantime you get 412 (with details.current_sha256) instead of
+#    overwriting their change. Read it again, merge, and retry.
+SHA=$(curl -s "${A[@]}" "$API/nginx.harden" | jq -r .sha256)
+curl -s "${A[@]}" -X PUT "$API/nginx.harden" \
+  -H "Content-Type: application/yaml" -H "If-Match: \"$SHA\"" --data-binary @harden.imas
+
+# 4. Cook it on a sprout (section 1.5's batch action), by asset id.
+curl -s "${A[@]}" -H "Content-Type: application/json" -X POST \
+  https://saasapi.example.internal/v1/tenants/$T/sprouts/actions \
+  -d '{"asset_ids":["vm-001"],"action":{"type":"cook","params":{"recipe":"nginx.harden"}}}'
+
+# 5. Delete it (If-Match optional). Your sprouts then cook the platform
+#    recipe of that name, if there is one.
+curl -s "${A[@]}" -X DELETE "$API/nginx.harden" -H "If-Match: \"$SHA\""
+```
+
+**Names.** Use lowercase dot notation, `nginx.harden`, which is stored as
+`nginx/harden.imas`. Each segment is lowercase letters, digits, `-` and `_`.
+A name may not start with `tenants`, `sprouts` or `jobs`, or end in `imas`
+or `init`. Never percent-encode the name.
+
+**What is checked on upload.** Nothing is stored unless all of these pass,
+and an error names the rule broken without repeating your recipe back:
+
+- the size: 256 KiB by default (`413`);
+- your tenant's caps: 500 recipes and 20 MiB by default (`409`);
+- UTF-8 text;
+- the template parses and runs under the recipe sandbox, against empty
+  props. `env`, `call`, `html`, `js`, `template`, `define` and `block` are
+  not available;
+- the result is a YAML mapping (`422`, with a line number where one is
+  known).
+
+Includes are not checked until the recipe cooks. Uploads and deletes are
+rate-limited per tenant (`429`) and audited (who, what name, which sha256,
+never the content).
 
 ## Update sprouts
 

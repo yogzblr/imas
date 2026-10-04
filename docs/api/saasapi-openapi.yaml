@@ -2,8 +2,10 @@
 # handler code, not from the design doc:
 #   internal/saasapi/router.go (NewRouter: the route table)
 #   internal/saasapi/tenants.go, enrollment_keys.go, asset_links.go,
-#   sprout_actions.go, fleet_updates.go, fleet_update_dispatch.go
-#   internal/saasapi/middleware.go (Auth, RateLimit), errors.go
+#   sprout_actions.go, fleet_updates.go, fleet_update_dispatch.go,
+#   recipes.go
+#   internal/saasapi/middleware.go (Auth, RateLimit), caller.go
+#   (RequireRole), errors.go
 # Narrative and caveats: docs/api/saasapi.md.
 #
 # Keep this in step with NewRouter. Every path below must be a route
@@ -59,6 +61,13 @@ tags:
     description: Batch `cmd.run` and `cook` against a tenant's sprouts by asset_id (§1.5).
   - name: fleet-updates
     description: The version catalog and each tenant's update policy (§1.8). Nothing here sends anything to a sprout.
+  - name: recipes
+    description: |
+      A tenant's own recipes (§1.6, REC.1; FLAG FOR SECURITY REVIEW),
+      stored in the recipe bucket that farmer cooks from, and used by the
+      next cook on that tenant's sprouts. Unlike the other routes these
+      also check a Keycloak role. Every route answers 503
+      `recipes_not_configured` when recipe storage is off.
   - name: fleet-update-dispatch
     description: |
       **Not generally available. Off by default.** These two routes are
@@ -577,6 +586,205 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /v1/tenants/{tenant_id}/recipes:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [recipes]
+      operationId: ListRecipes
+      summary: List the tenant's own recipes, paged
+      description: |
+        Names in key order, with size and modification time (no content,
+        no sha256: GET the recipe for those). Requires the read or the
+        write role. Objects under the tenant's prefix that are not exactly
+        an uploadable name's key are skipped.
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+        - name: page_token
+          in: query
+          description: "`next_page_token` from the previous page."
+          schema: { type: string, maxLength: 2048 }
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecipeList" }
+        "400":
+          description: "`invalid_request` (limit) or `invalid_page_token`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/RecipeForbidden" }
+        "404": { $ref: "#/components/responses/TenantNotFound" }
+        "502": { $ref: "#/components/responses/RecipeStoreUnavailable" }
+        "503": { $ref: "#/components/responses/RecipesNotConfigured" }
+
+  /v1/tenants/{tenant_id}/recipes/{name}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/RecipeName"
+    get:
+      tags: [recipes]
+      operationId: GetRecipe
+      summary: Read one of the tenant's recipes
+      description: Requires the read or the write role. The `ETag` is the content's sha256, for `If-Match` on a later PUT.
+      responses:
+        "200":
+          description: The recipe.
+          headers:
+            ETag: { schema: { type: string }, description: '`"<sha256>"`' }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecipeWithContent" }
+        "400": { $ref: "#/components/responses/InvalidRecipeName" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/RecipeForbidden" }
+        "404":
+          description: "`tenant_not_found` or `recipe_not_found`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: "`recipe_unreadable`: an object over the size limit, written some other way."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502": { $ref: "#/components/responses/RecipeStoreUnavailable" }
+        "503": { $ref: "#/components/responses/RecipesNotConfigured" }
+    put:
+      tags: [recipes]
+      operationId: PutRecipe
+      summary: Create or replace a recipe (conditional)
+      description: |
+        Requires the write role; rate-limited per tenant together with
+        DELETE. A precondition is required: `If-None-Match: *` to create,
+        `If-Match: "<sha256>"` (or `*`) to replace. The body is checked
+        before anything is stored (size, UTF-8 text, template under farmer's
+        restricted function map and render limits against empty placeholder
+        props, YAML) and the tenant's count and total-size caps are
+        checked; no refusal echoes the body. The write itself is a
+        compare-and-swap on the object read, so a concurrent writer makes
+        this 412 rather than being overwritten. Audited (never the content);
+        if the attempt can't be audited nothing is written (503
+        `audit_unavailable`).
+      parameters:
+        - name: If-Match
+          in: header
+          schema: { type: string, examples: ['"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"', "*"] }
+        - name: If-None-Match
+          in: header
+          schema: { type: string, enum: ["*"] }
+      requestBody:
+        required: true
+        description: The recipe source, at most IMAS_RECIPE_MAX_SOURCE_BYTES (256 KiB by default).
+        content:
+          application/yaml:
+            schema: { type: string }
+          text/yaml:
+            schema: { type: string }
+          text/plain:
+            schema: { type: string }
+      responses:
+        "200":
+          description: Replaced.
+          headers:
+            ETag: { schema: { type: string }, description: '`"<new sha256>"`' }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Recipe" }
+        "201":
+          description: Created.
+          headers:
+            ETag: { schema: { type: string }, description: '`"<sha256>"`' }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Recipe" }
+        "400":
+          description: "`invalid_recipe_name` or `invalid_precondition`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/RecipeForbidden" }
+        "404": { $ref: "#/components/responses/TenantNotFound" }
+        "409":
+          description: "`recipe_quota_exceeded` (`details.quota`: `count` or `total_bytes`; `details.limit`) or `tenant_not_active`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "412": { $ref: "#/components/responses/RecipePreconditionFailed" }
+        "413":
+          description: "`recipe_too_large` (`details.max`)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: "`unsupported_media_type`: not YAML/plain text, or not UTF-8."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: |
+            The recipe is not valid. `error` names the rule:
+            `recipe_empty`, `recipe_not_utf8`, `recipe_not_text`,
+            `recipe_template_invalid`, `recipe_template_forbidden`,
+            `recipe_template_limit` (`details.limit`), `recipe_template_failed`,
+            `recipe_yaml_invalid`, `recipe_invalid`. `details.line` where known.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "428":
+          description: "`precondition_required`: neither If-Match nor If-None-Match."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/RecipeStoreUnavailable" }
+        "503":
+          description: "`audit_unavailable`, `recipes_not_configured` or `recipe_validation_busy`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    delete:
+      tags: [recipes]
+      operationId: DeleteRecipe
+      summary: Delete a recipe
+      description: |
+        Requires the write role; rate-limited with PUT. `If-Match:
+        "<sha256>"` is optional and makes it conditional (a check, then the
+        delete: S3 has no conditional delete). Audited like PUT. After it,
+        the tenant's sprouts cook the platform recipe of that name, if any.
+      parameters:
+        - name: If-Match
+          in: header
+          schema: { type: string }
+      responses:
+        "204": { description: Deleted. }
+        "400":
+          description: "`invalid_recipe_name` or `invalid_precondition`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/RecipeForbidden" }
+        "404":
+          description: "`tenant_not_found` or `recipe_not_found`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "412": { $ref: "#/components/responses/RecipePreconditionFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/RecipeStoreUnavailable" }
+        "503":
+          description: "`audit_unavailable` or `recipes_not_configured`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /v1/tenants/{tenant_id}/sprouts/updates:
     parameters:
       - $ref: "#/components/parameters/TenantID"
@@ -724,6 +932,21 @@ components:
       required: true
       description: "`b_` plus 16 lowercase base32 characters. Ids over 32 characters are 404 without a lookup."
       schema: { type: string, maxLength: 32 }
+    RecipeName:
+      name: name
+      in: path
+      required: true
+      description: |
+        Dot-notation recipe name, never percent-encoded: 1 to 16 segments of
+        1 to 64 lowercase letters, digits, `-` and `_`, each starting with a
+        letter or digit; at most 200 bytes; not starting with `tenants`,
+        `sprouts` or `jobs`; not ending in `imas` or `init`. Stored at
+        `tenants/<tenant_id>/recipes/<dots as slashes>.imas`.
+      schema:
+        type: string
+        maxLength: 200
+        pattern: "^[a-z0-9][a-z0-9_-]{0,63}(\\.[a-z0-9][a-z0-9_-]{0,63}){0,15}$"
+        examples: [nginx.harden]
 
   responses:
     InvalidRequest:
@@ -773,8 +996,71 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    RecipeForbidden:
+      description: |
+        `forbidden`: organization.id doesn't match {tenant_id}, or the token
+        lacks the recipe role (SAASAPI_RECIPES_READ_ROLE or _WRITE_ROLE for
+        GET, _WRITE_ROLE for PUT and DELETE; realm roles or client roles of
+        the token's audience).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    InvalidRecipeName:
+      description: "`invalid_recipe_name`: the message names the rule broken."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RecipePreconditionFailed:
+      description: |
+        `precondition_failed`: the recipe exists (If-None-Match: *), doesn't
+        exist, or has another sha256 than If-Match names, including when a
+        concurrent write landed first. `details.current_sha256` when known.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RecipeStoreUnavailable:
+      description: "`recipe_store_unavailable`: the object store could not be read or written."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RecipesNotConfigured:
+      description: "`recipes_not_configured`: recipe storage is off on this deployment."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
 
   schemas:
+    Recipe:
+      type: object
+      required: [name, sha256, size, updated_at]
+      properties:
+        name: { type: string }
+        sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        size: { type: integer }
+        updated_at: { type: string, format: date-time }
+    RecipeWithContent:
+      allOf:
+        - $ref: "#/components/schemas/Recipe"
+        - type: object
+          required: [content]
+          properties:
+            content: { type: string, description: The recipe source. }
+    RecipeListItem:
+      type: object
+      required: [name, size, updated_at]
+      properties:
+        name: { type: string }
+        size: { type: integer }
+        updated_at: { type: string, format: date-time }
+    RecipeList:
+      type: object
+      required: [recipes]
+      properties:
+        recipes:
+          type: array
+          items: { $ref: "#/components/schemas/RecipeListItem" }
+        next_page_token: { type: string, description: Absent on the last page. }
+
     Error:
       type: object
       required: [error, message]

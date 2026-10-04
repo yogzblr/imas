@@ -8,21 +8,26 @@
 //
 // It doesn't validate request signing, and understands just enough of
 // the protocol (GET/PUT/HEAD/DELETE on objects, HEAD on the bucket,
-// ListObjectsV2, GetBucketLocation, and aws-chunked streaming-signature
-// bodies) for minio-go's client to consider it a working single-node
-// endpoint.
+// ListObjectsV2 with start-after, GetBucketLocation, aws-chunked
+// streaming-signature bodies, and PUT's If-Match / If-None-Match
+// conditions against an MD5 ETag) for minio-go's client to consider it a
+// working single-node endpoint.
 package objectstoretest
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/xml"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/yogzblr/imas/internal/objectstore"
 )
@@ -31,11 +36,34 @@ const bucket = "test-bucket"
 
 type fakeS3 struct {
 	mu   sync.Mutex
-	data map[string][]byte // key -> content, within the fixed test bucket
+	data map[string]*object // key -> object, within the fixed test bucket
 
 	// failures queues injected error responses (see Server.FailNext),
 	// consumed one per request.
 	failures []failure
+
+	// beforePut, if set, runs (with mu held) before each PUT is applied;
+	// see Server.BeforePut.
+	beforePut func(key string)
+}
+
+// object is one stored object: its content, ETag (the hex MD5 of the
+// content, as S3 gives a single-part upload) and modification time.
+type object struct {
+	data    []byte
+	etag    string
+	modTime time.Time
+}
+
+func newObject(data []byte) *object {
+	sum := md5.Sum(data)
+	return &object{data: data, etag: hex.EncodeToString(sum[:]), modTime: time.Now().UTC()}
+}
+
+func (o *object) setHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Length", strconv.Itoa(len(o.data)))
+	w.Header().Set("ETag", `"`+o.etag+`"`)
+	w.Header().Set("Last-Modified", o.modTime.Format(http.TimeFormat))
 }
 
 type failure struct {
@@ -80,6 +108,45 @@ func (s *Server) FailNext(n int, status int, code string) {
 	for range n {
 		s.f.failures = append(s.f.failures, failure{status: status, code: code})
 	}
+}
+
+// BeforePut installs fn to run before every PUT is applied, with the
+// server's lock held, so a test can change the stored objects between a
+// client's read and its conditional write (a concurrent writer). fn may
+// call Server.Set but nothing that takes the lock. Nil removes it.
+func (s *Server) BeforePut(fn func(key string)) {
+	s.f.mu.Lock()
+	defer s.f.mu.Unlock()
+	s.f.beforePut = fn
+}
+
+// Set stores content at key directly, as another writer would. It must
+// only be called from a BeforePut hook (the lock is already held).
+func (s *Server) Set(key, content string) {
+	s.f.data[key] = newObject([]byte(content))
+}
+
+// Keys returns every stored key, sorted.
+func (s *Server) Keys() []string {
+	s.f.mu.Lock()
+	defer s.f.mu.Unlock()
+	keys := make([]string, 0, len(s.f.data))
+	for k := range s.f.data {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// Object returns the content stored at key and whether there is one.
+func (s *Server) Object(key string) (string, bool) {
+	s.f.mu.Lock()
+	defer s.f.mu.Unlock()
+	obj, ok := s.f.data[key]
+	if !ok {
+		return "", false
+	}
+	return string(obj.data), true
 }
 
 // NewStore starts an in-process fake S3 server and returns an
@@ -133,7 +200,7 @@ func newStore() (*objectstore.Store, func(), error) {
 }
 
 func startServer() *Server {
-	f := &fakeS3{data: make(map[string][]byte)}
+	f := &fakeS3{data: make(map[string]*object)}
 	return &Server{f: f, srv: httptest.NewServer(http.HandlerFunc(f.handle))}
 }
 
@@ -187,12 +254,23 @@ func (f *fakeS3) handle(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Content-Encoding") == "aws-chunked" || strings.Contains(r.Header.Get("X-Amz-Content-Sha256"), "STREAMING") {
 			body = decodeAWSChunked(body)
 		}
-		f.data[key] = body
+		if f.beforePut != nil {
+			f.beforePut(key)
+		}
+		if !f.putConditionHolds(key, r.Header) {
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusPreconditionFailed)
+			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>` +
+				`<Error><Code>PreconditionFailed</Code><Message>At least one of the pre-conditions you specified did not hold</Message></Error>`))
+			return
+		}
+		obj := newObject(body)
+		f.data[key] = obj
+		w.Header().Set("ETag", `"`+obj.etag+`"`)
 		w.WriteHeader(http.StatusOK)
 	case http.MethodHead:
-		if data, ok := f.data[key]; ok {
-			w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-			w.Header().Set("Last-Modified", "Mon, 02 Jan 2006 15:04:05 GMT")
+		if obj, ok := f.data[key]; ok {
+			obj.setHeaders(w)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -205,19 +283,19 @@ func (f *fakeS3) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if r.URL.Query().Get("list-type") == "2" {
-			f.handleList(w, r.URL.Query().Get("prefix"))
+			f.handleList(w, r.URL.Query().Get("prefix"), r.URL.Query().Get("start-after"))
 			return
 		}
-		data, ok := f.data[key]
+		obj, ok := f.data[key]
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>` +
 				`<Error><Code>NoSuchKey</Code><Message>no such key</Message><Key>` + key + `</Key></Error>`))
 			return
 		}
-		w.Header().Set("Last-Modified", "Mon, 02 Jan 2006 15:04:05 GMT")
+		obj.setHeaders(w)
 		w.WriteHeader(http.StatusOK)
-		w.Write(data)
+		w.Write(obj.data)
 	case http.MethodDelete:
 		// S3 answers 204 whether or not the key existed.
 		delete(f.data, key)
@@ -227,8 +305,31 @@ func (f *fakeS3) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// putConditionHolds evaluates a PUT's If-Match / If-None-Match headers
+// against the object at key, as S3 does: If-None-Match "*" needs no
+// object, If-Match "*" any object, and If-Match "<etag>" that ETag.
+func (f *fakeS3) putConditionHolds(key string, h http.Header) bool {
+	obj, exists := f.data[key]
+	if v := h.Get("If-None-Match"); v != "" {
+		if v == "*" {
+			return !exists
+		}
+		return !exists || strings.Trim(v, `"`) != obj.etag
+	}
+	if v := h.Get("If-Match"); v != "" {
+		if !exists {
+			return false
+		}
+		return v == "*" || strings.Trim(v, `"`) == obj.etag
+	}
+	return true
+}
+
 type listContents struct {
-	Key string `xml:"Key"`
+	Key          string `xml:"Key"`
+	Size         int64  `xml:"Size"`
+	ETag         string `xml:"ETag"`
+	LastModified string `xml:"LastModified"`
 }
 
 type listResult struct {
@@ -238,13 +339,27 @@ type listResult struct {
 	Contents []listContents `xml:"Contents"`
 }
 
-func (f *fakeS3) handleList(w http.ResponseWriter, prefix string) {
+// handleList answers ListObjectsV2 in one untruncated page, in key order
+// (as S3 lists), starting after startAfter when it is set.
+func (f *fakeS3) handleList(w http.ResponseWriter, prefix, startAfter string) {
 	result := listResult{Name: bucket, Prefix: prefix}
+	keys := make([]string, 0, len(f.data))
 	for k := range f.data {
 		if prefix != "" && !strings.HasPrefix(k, prefix) {
 			continue
 		}
-		result.Contents = append(result.Contents, listContents{Key: k})
+		if startAfter != "" && k <= startAfter {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		obj := f.data[k]
+		result.Contents = append(result.Contents, listContents{
+			Key: k, Size: int64(len(obj.data)), ETag: `"` + obj.etag + `"`,
+			LastModified: obj.modTime.Format(time.RFC3339Nano),
+		})
 	}
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
