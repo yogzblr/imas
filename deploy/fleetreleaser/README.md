@@ -108,7 +108,8 @@ a change):
 | `IMAS_FLEETRELEASER_CALLER_TOKEN_FILE` | required; mounted Secret file holding the token saasapi presents (at least 32 characters, no whitespace) |
 | `IMAS_FLEETRELEASER_CALLER_TOKEN_PREVIOUS_FILE` | optional; the previous token, accepted during a rotation |
 | `IMAS_FLEETRELEASER_VERSION_FLOOR` | required; canonical semver. Nothing at or below it is signed. `v0.0.0` allows everything |
-| `IMAS_FLEETRELEASER_OPENBAO_*`, `IMAS_FLEETRELEASER_TRANSIT_KEY` | its own OpenBao identity (see Roles) |
+| `IMAS_FLEETRELEASER_OPENBAO_*`, `IMAS_FLEETRELEASER_TRANSIT_KEY` | its own OpenBao identity (see Roles); the `<prefix>OPENBAO_*` set is in `docs/INSTALL.md` |
+| `IMAS_FLEETRELEASER_OPENBAO_NAMESPACE` | optional, unset by default; when set, sent as `X-Vault-Namespace` on every OpenBao request, login included |
 
 It refuses to start (exit 2) without any of the required settings, and
 exits 1 if it can't read the Transit key or the key isn't Ed25519.

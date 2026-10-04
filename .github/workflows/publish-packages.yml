@@ -81,6 +81,9 @@ jobs:
         with:
           ref: ${{ env.TAG }}
 
+      # checksums.txt.sigstore.json is a release asset only because
+      # .goreleaser.yaml's release.ids lists the signs IDs (gpg, cosign);
+      # without them GoReleaser leaves the signatures off the release.
       - name: Download release assets
         env:
           GH_TOKEN: ${{ github.token }}

@@ -1,19 +1,23 @@
 name: Release
 
-# Manual-only for now: this needs GPG_PRIVATE_KEY/GPG_PASSPHRASE configured
-# as repo secrets. Re-enable the tags trigger below once they are set on
-# yogzblr/imas (the "Check release secrets" step fails fast, naming whatever
-# is missing). It runs GoReleaser OSS (MIT): no licence key is needed; the
-# Windows MSI comes from a build hook (packaging/windows/build-msi.sh), not
+# Manual-only for now. It needs GPG_PRIVATE_KEY/GPG_PASSPHRASE (repo or
+# "goreleaser" environment secrets; the "Check release secrets" step fails
+# fast, naming whatever is missing). They were set on 2026-10-03, but the tags
+# trigger below stays off until the first release has been run by hand and
+# checked (docs/RELEASING.md, "First release checklist"); re-enable it then.
+# It runs GoReleaser OSS (MIT): no licence key is needed; the Windows MSI
+# comes from a build hook (packaging/windows/build-msi.sh), not
 # goreleaser-pro's msi pipe.
 #
 # Run it on a tag ref (Use workflow from: tag vX.Y.Z), not a branch: the
 # keyless cosign signatures are bound to this workflow *and* its ref, and
-# publish-packages.yml only accepts refs/tags/v*.
+# publish-packages.yml only accepts refs/tags/v*. "Check the ref" refuses
+# anything else before anything is built.
 #
-# This creates a draft GitHub release (binaries, rpm/deb/msi, checksums with
-# GPG + cosign signatures) and pushes the signed multi-arch images to GHCR
-# (ghcr.io/yogzblr/imas-{farmer,sprout,saasapi,farmerbus,fleetreleaser}).
+# This creates a draft GitHub release (archives, rpm/deb/apk, the MSI,
+# checksums.txt with its GPG .sig and cosign .sigstore.json) and pushes the
+# signed multi-arch images to GHCR
+# (ghcr.io/yogzblr/imas-{farmer,sprout,saasapi,farmerbus,fleetreleaser,migrate}).
 # Publishing that release (a maintainer's review step) is what uploads the OS
 # packages and then the Helm charts to Buildkite: see publish-packages.yml.
 on:
@@ -46,6 +50,15 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: stable
+
+      # A branch run would sign under refs/heads/..., which
+      # publish-packages.yml rejects, after the images were already pushed.
+      - name: Check the ref
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/v[0-9]*) ;;
+            *) echo "::error::run Release on a vX.Y.Z tag (Use workflow from: tag), not $GITHUB_REF"; exit 1 ;;
+          esac
 
       # Every secret this workflow uses, checked up front so a missing one
       # fails here with its name instead of halfway through a publish.
@@ -101,3 +114,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}
+          # Build the version of the tag this run is on (the ref the cosign
+          # identity names). Without it GoReleaser takes the first tag at HEAD
+          # in git's version sort, which puts v0.1.0-rc.1 before v0.1.0: a
+          # final tagged on the rc's commit would be built as the rc.
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}

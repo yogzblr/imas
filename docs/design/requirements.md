@@ -22,8 +22,10 @@ Status and delivery detail live in `docs/BUILD-STATUS.md`, not here.
 13. The backend (NATS, Valkey, farmer, Percona) runs on Kubernetes.
 14. NATS payloads are encrypted using a key pair per sprout and a key pair
     per tenant held on the master side.
-15. Key rotation for sprout key pairs, delivered as a new transaction that
-    sends the new private key encrypted over NATS.
+15. Key rotation for sprout key pairs, triggered by the master side as a
+    new transaction over NATS. The trigger carries no key material: the
+    sprout generates the new key pair itself and submits only the new
+    public key, sealed under its current key. A private key is never sent.
 16. SDB support equivalent to Salt in the sprout: secrets from external
     sources as defined in the recipe.
 17. Probe capability in the sprout supporting database and HTTP sequences;

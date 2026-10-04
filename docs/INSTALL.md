@@ -23,9 +23,10 @@ If you have questions, [open an issue](https://github.com/yogzblr/imas/issues/ne
 4. [Install on Linux hosts with systemd](#install-on-linux-hosts-with-systemd)
 5. [Create a tenant and an enrollment key](#create-a-tenant-and-an-enrollment-key)
 6. [Install and enroll a sprout](#install-and-enroll-a-sprout)
-7. [The imas CLI](#the-imas-cli)
-8. [Ports](#ports)
-9. [Coming from the single-tenant install](#coming-from-the-single-tenant-install)
+7. [Proxies and `NO_PROXY`](#proxies-and-no_proxy)
+8. [The imas CLI](#the-imas-cli)
+9. [Ports](#ports)
+10. [Coming from the single-tenant install](#coming-from-the-single-tenant-install)
 
 ## Components
 
@@ -291,8 +292,7 @@ systemctl enable --now imas-sprout
    keys and hostname, and a signature proving it holds the NKey seed.
 3. farmer redeems one use of the key and accepts the sprout into the key's
    tenant. It answers with the sprout's NATS User JWT, a gateway JWT, the
-   tenant's X25519 public key, the fleet signing keys and the `wss://`
-   `nats_urls`. The sprout ID is the one the sprout asked for (its
+   tenant's X25519 public key and the `wss://` `nats_urls`. The sprout ID is the one the sprout asked for (its
    `sproutid`, by default derived from the hostname), normalized, and
    suffixed (`_1`, `_2`, …) if that name is already taken in the tenant.
 4. The sprout writes all of that under `/etc/imas/pki/sprout/`, deletes
@@ -333,6 +333,58 @@ and roll it out in health-gated waves. **The dispatch endpoints are off by
 default** (`SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=false`) and should stay off
 until the security review and the release UAT gate are done; see
 [`BUILD-STATUS.md`](BUILD-STATUS.md).
+
+## Proxies and `NO_PROXY`
+
+Two different settings decide how imas reaches out through a proxy, and
+neither covers the other.
+
+- **`busproxyurl`** (sprout config; Ansible `imas_sprout_bus_proxy_url`) is
+  for the bus connection only. Every bus address is dialled through it, as
+  an HTTP CONNECT (`http://`) or SOCKS5 (`socks5://`) tunnel. The
+  environment's proxy variables do not apply to the bus.
+- **`HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`** in the process's
+  environment (or their lowercase forms) apply to imas's HTTP clients
+  through Go's `http.ProxyFromEnvironment`. `busproxyurl` does not apply
+  to any of them.
+
+`NO_PROXY` is a comma-separated list of host names, IP addresses or CIDR
+ranges, each optionally with a port. A host name also matches its
+subdomains; with a leading `.` it matches only subdomains. Go reads these
+variables once per process, so restart the service after changing them.
+
+### Sprouts
+
+A sprout's HTTP requests (enrollment, refresh, recipe downloads,
+self-update) follow the environment's proxy. So, since CL.2b, does the
+`sdb://openbao` secrets provider: before CL.2b it always connected
+directly. A sprout that has `HTTPS_PROXY` set and reaches a customer Vault
+or OpenBao server (`IMAS_SDB_OPENBAO_ADDR`) only directly, not through the
+proxy, needs that server's host in `NO_PROXY`. Otherwise its secret
+lookups go to the proxy. On Linux, set both in a drop-in
+(`systemctl edit imas-sprout`):
+
+```ini
+[Service]
+Environment=HTTPS_PROXY=http://proxy.example.com:3128
+Environment=NO_PROXY=vault.corp.example.com
+Environment=IMAS_SDB_OPENBAO_ADDR=https://vault.corp.example.com:8200
+```
+
+The provider ignores `VAULT_*` and `BAO_*` variables, so a
+`VAULT_HTTP_PROXY` or `BAO_HTTP_PROXY` set for other tools has no effect on
+it.
+
+### farmer, saasapi and fleetreleaser
+
+The platform's OpenBao clients (every `IMAS_*_OPENBAO_*` identity) also
+follow `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`, and ignore
+`BAO_HTTP_PROXY` and `BAO_PROXY_ADDR`. Wherever you set a proxy in the
+environment of farmer, saasapi, fleetreleaser or the credential publish
+Job, put the platform OpenBao's host (the host in `*_OPENBAO_ADDR`) in
+`NO_PROXY`, unless the proxy is meant to reach it. With the Helm charts,
+the proxy variables go in `farmer.extraEnv` or `saasapi.extraEnv`; the
+charts set none of them themselves.
 
 ## The imas CLI
 
