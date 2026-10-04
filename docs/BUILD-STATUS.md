@@ -106,13 +106,13 @@ beyond unit tests (real Envoy, Molecule containers, real OpenBao).
 
 | # | Requirement | RAG | Status | Evidence / gap |
 |---|---|---|---|---|
-| 1 | 1M endpoints | **Red** | **Not validated; one scale-plan item not built** | Storage (PXC, Valkey, object storage) and queue-grouped core are built. **Reconnect jitter (SCALE.1, in review):** the sprout's fixed `ReconnectWait(15s)` is replaced by `nats.CustomReconnectDelay` with full-jitter exponential backoff (`internal/natsretry`; config keys `busreconnectbase`, default 2s, and `busreconnectcap`, default 5m; Ansible `imas_sprout_bus_reconnect_base`/`_cap`), also used for the first connect's retries, `MaxReconnects(-1)` kept. Unit-tested (2000 simulated sprouts: busiest tenth of the base window holds 11.9%), never load-tested. Farmer's own fixed waits (`cmd/farmer/main.go`: SYS listener 5s, per-tenant connections 15s with `MaxReconnects(30)`) are unchanged. Not built: **a clustered bus**: `cmd/farmerbus` does not read cluster routes, so the nats chart refuses `bus.replicaCount > 1` unless `bus.cluster.routesSupported` is set, and nothing sets it truthfully yet. No load or chaos test has ever run and no harness is in the repo. |
+| 1 | 1M endpoints | **Red** | **Not validated; one scale-plan item not built** | Storage (PXC, Valkey, object storage) and queue-grouped core are built. **Clustered bus: built (SCALE.2), not load-tested.** `cmd/farmerbus` meshes on authenticated routes (mutual TLS + route password) and fences a node that lacks a majority, sits on a partial mesh, or hasn't synced its resolver, so a missed lock-out never stays live; in-process 3-node tests cover cross-node delivery, failover, and lock-out while a node is down or partitioned (`cmd/farmerbus/cluster_integration_test.go`). The nats chart allows `bus.replicaCount` of 1 or an odd number ≥ 3 (default 1). Not built: **reconnect jitter**: the sprout still uses a fixed `ReconnectWait(15s)` with unlimited retries (`cmd/sprout/main.go`), and `nats.CustomReconnectDelay` appears nowhere; at 1M sprouts a bus restart is a thundering herd, which Phase 2 of the scale plan called out. No load or chaos test has ever run and no harness is in the repo, so no connection or throughput figure is claimed for the cluster. |
 | 2 | DMZ / non-DMZ split | **Green** | Built | `cmd/farmerbus` (DMZ) vs `cmd/farmer` (core, outbound only); Helm charts `deploy/helm/nats` and `deploy/helm/farmer`, with NetworkPolicies. |
 | 3 | Windows and Unix | **Amber** | Built, **not validated on Windows hosts** | Full G.1–G.9 ingredient set, SCM service wrapper, MSI. Windows paths are cross-compiled and unit-tested; the self-update MSI path is tested with `msiexec` mocked. The Terraform UAT gate would be the first real-host run. |
 | 4 | Deployment automation with Ansible | **Green** | Built, validated | `ansible/roles/imas_sprout` and `imas_verify`, Molecule CI on Rocky, Debian and openSUSE Leap. |
 | 5 | JWT auth to the NATS websocket; enrollment key only to bootstrap | **Green** | Built, validated | NATS User JWT plus gateway EdDSA JWT; `POST /v1/enroll`; run through real Envoy v1.35.3. |
 | 6 | Per-sprout JWT | **Green** | Built, validated | Paired JWTs minted at enrollment and refresh. |
-| 7 | Farmer horizontally scalable | **Amber** | Built, not load-tested | Core is stateless: `QueueSubscribe` on `imas-core`, PXC read-through, Valkey heartbeat, object-store recipes. The bus tier is single-node until farmerbus supports routes (see 1). |
+| 7 | Farmer horizontally scalable | **Amber** | Built, not load-tested | Core is stateless: `QueueSubscribe` on `imas-core`, PXC read-through, Valkey heartbeat, object-store recipes. The bus tier can now run as 3 or more meshed nodes (SCALE.2, see 1); it has not been run on a real Kubernetes cluster or under load. |
 | 8 | Sprout via proxies | **Green** | Built | `busproxyurl` (HTTP CONNECT / SOCKS5) for the bus connection; HTTP clients use `ProxyFromEnvironment` (the `sdb://openbao` provider only since CL.2b: before it, it connected directly). Ansible variable exposed. |
 | 9 | Recipe download from a configured HTTP endpoint | **Green** | Built, validated | `/files/` behind Envoy; `TestSproutDownloadsStagedRecipe_ThroughRealEnvoy`. |
 | 10 | NATS response under 300 ms | **Amber** | **Not validated** | Design removes the synchronous probe loop; no latency measurement has been taken. |
@@ -659,22 +659,21 @@ this file can be checked against the repository's history.
    spawns the PTY, but no input or output can flow. Requirement 14 stays Red
    until this item and Open item 11 are both done.
 3. **Scale and latency (requirements 1, 7, 10):** no load or chaos test has
-   ever run. One scale-plan item is unbuilt: a clustered bus (`cmd/farmerbus`
-   has no route support, so the chart blocks more than one bus replica).
-   Jittered sprout reconnect is built and in review (SCALE.1:
-   `internal/natsretry`, full-jitter exponential backoff from
-   `busreconnectbase`, 2s, to `busreconnectcap`, 5m, reset by every
-   successful connect), unit-tested only. Left from SCALE.1: with more
-   than one bus address, nats.go waits once per pass over the list, so the
-   first retry after a disconnect goes to the next address immediately
-   (fine while that address is up, not spread if the whole bus restarted);
-   a refreshed gateway JWT is only used at the next scheduled attempt, up
-   to the cap later; a sprout whose NATS User JWT is refused twice in a row
-   (revoked, tenant locked out) has its connection closed by nats.go and
-   stays offline until restarted (unchanged by SCALE.1); and farmer's own
-   reconnects still use fixed waits (SYS listener 5s; per-tenant
-   connections 15s with `MaxReconnects(30)`; nothing in `cmd/farmer`
-   redials a tenant connection nats.go closed after those 30).
+   ever run. One scale-plan item is unbuilt: jittered sprout reconnect
+   (still a fixed 15 s `ReconnectWait`). **SCALE.2, the clustered bus, is
+   built** (FLAG FOR SECURITY REVIEW, not yet reviewed): `cmd/farmerbus`
+   reads `IMAS_BUS_CLUSTER_*`, routes need mutual TLS plus a route password
+   and are confined to bus pods by their own NetworkPolicy, and a fence
+   keeps a node that may hold stale claims from serving anyone. The chart
+   sets `routesSupported` true, keeps `replicaCount: 1` by default and
+   refuses 2. Tested in process only (three nodes, failover, lock-out while
+   a node is down, partitioned, or on a partial mesh); never on a real
+   cluster. Left open, all in the chart README's "Clustering": a push in
+   the ~4 s before a partition is detected can miss a node until its next
+   pull; farmerbus's self-minted legacy-tenant Account JWT outranks core's
+   pushed one on an empty PVC (pre-existing, but a cluster spreads it), so
+   core should re-push every Account on connect; and core still pushes to
+   one node, never waiting for every node to confirm.
 4. **Security review of the flagged work**, including FU.0/FU.2/FU.3/FU.4/
    FU.6b, CL.1, CL.2a, CL.2b, CL.3 and the J follow-ups. All have merged, but
    this file does not record that a separate security review was held; record

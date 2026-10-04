@@ -15,6 +15,8 @@ import (
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
+
+	"github.com/yogzblr/imas/internal/config"
 )
 
 // TestReloadNKeysForTenant_LazyProvisionsAndConnects covers the path
@@ -238,5 +240,102 @@ func TestDeprovisionTenant_LatePushStillLocksOut(t *testing.T) {
 	if nc, err := dialAsSprout(t, freshJWT, freshSeed); err == nil {
 		nc.Close()
 		t.Fatal("expected a User JWT minted after deprovisioning to be rejected too")
+	}
+}
+
+// TestDeprovisionTenant_RetryAfterFailedPushLocksOut: the tenant is marked
+// deleted before the lock-out is pushed, so when no bus node takes the
+// push (every node down, or fenced by cmd/farmerbus during a partition)
+// the retry is the only thing left that can lock the tenant out. It must
+// push again rather than report "already deprovisioned" and leave the
+// tenant live.
+func TestDeprovisionTenant_RetryAfterFailedPushLocksOut(t *testing.T) {
+	setupTestPKI(t)
+	useRealFarmerKey(t)
+	defer startTestBus(t)()
+
+	const tenantID = "t_retry_lockout"
+	if err := ProvisionTenant(tenantID, "Retry Co"); err != nil {
+		t.Fatalf("ProvisionTenant: %v", err)
+	}
+	sproutKP, _ := nkeys.CreateUser()
+	sproutPub, _ := sproutKP.PublicKey()
+	sproutSeed, _ := sproutKP.Seed()
+	if err := upsertNKeyRow(nkeyRow{TenantID: tenantID, SproutID: "web-01", NKey: sproutPub, State: stateAccepted}); err != nil {
+		t.Fatalf("upsertNKeyRow: %v", err)
+	}
+	if err := ReloadNKeysForTenant(tenantID); err != nil {
+		t.Fatalf("ReloadNKeysForTenant: %v", err)
+	}
+	sproutJWT, err := GetSproutUserJWTForTenant(tenantID, "web-01")
+	if err != nil {
+		t.Fatalf("GetSproutUserJWTForTenant: %v", err)
+	}
+
+	// The bus is unreachable for the first attempt.
+	busURL := config.FarmerBusURL
+	config.FarmerBusURL = "127.0.0.1:1"
+	if err := DeprovisionTenant(tenantID); err == nil {
+		t.Fatal("expected DeprovisionTenant to fail while the bus is unreachable")
+	}
+	config.FarmerBusURL = busURL
+	if nc, err := dialAsSprout(t, sproutJWT, sproutSeed); err != nil {
+		t.Fatalf("precondition: the failed push should have left the tenant live on the bus: %v", err)
+	} else {
+		nc.Close()
+	}
+
+	if err := DeprovisionTenant(tenantID); err != nil {
+		t.Fatalf("retrying DeprovisionTenant: %v", err)
+	}
+	if nc, err := dialAsSprout(t, sproutJWT, sproutSeed); err == nil {
+		nc.Close()
+		t.Fatal("the retry left the deprovisioned tenant live on the bus")
+	}
+	// And a third call is a harmless re-push of a lock-out.
+	if err := DeprovisionTenant(tenantID); err != nil {
+		t.Fatalf("re-pushing an existing lock-out: %v", err)
+	}
+}
+
+// TestDeprovisionTenant_LockOutHasNewerIssuedAt: the lock-out must carry a
+// strictly newer iat (and therefore a different jti) than the live JWT it
+// replaces, even when signed in the same second, or a clustered bus node
+// still holding the live JWT would treat the lock-out as a JWT it already
+// has (see waitPastIssuedAt).
+func TestDeprovisionTenant_LockOutHasNewerIssuedAt(t *testing.T) {
+	setupTestPKI(t)
+	useRealFarmerKey(t)
+	defer startTestBus(t)()
+
+	const tenantID = "t_same_second"
+	if err := ProvisionTenant(tenantID, "Same Second Co"); err != nil {
+		t.Fatalf("ProvisionTenant: %v", err)
+	}
+	tam, err := loadTenantAccountMaterial(tenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := jwt.DecodeAccountClaims(tam.jwt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := DeprovisionTenant(tenantID); err != nil {
+		t.Fatalf("DeprovisionTenant: %v", err)
+	}
+	tam, err = loadTenantAccountMaterial(tenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locked, err := jwt.DecodeAccountClaims(tam.jwt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isLockedOut(locked) {
+		t.Fatal("stored Account JWT is not locked out")
+	}
+	if locked.IssuedAt <= live.IssuedAt || locked.ID == live.ID {
+		t.Fatalf("lock-out iat=%d jti=%s, live iat=%d jti=%s: want a strictly newer iat and a new jti",
+			locked.IssuedAt, locked.ID, live.IssuedAt, live.ID)
 	}
 }

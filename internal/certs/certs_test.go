@@ -1067,23 +1067,22 @@ func TestGenCertCertFileUnwritable(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	readonlyDir := filepath.Join(dir, "readonly")
-	if err := os.MkdirAll(readonlyDir, 0o755); err != nil {
-		t.Fatalf("failed to create dir: %v", err)
-	}
-	config.CertFile = filepath.Join(readonlyDir, "cert.pem")
-	if err := os.Chmod(readonlyDir, 0o555); err != nil {
-		t.Fatalf("failed to chmod: %v", err)
-	}
-	defer os.Chmod(readonlyDir, 0o755)
+	// A parent directory that doesn't exist: writeFile doesn't create
+	// parents, and unlike a chmod 0o555 directory this also fails for
+	// root (CI containers often run tests as root).
+	config.CertFile = filepath.Join(dir, "missing-dir", "cert.pem")
 
 	t.Setenv(EnvOpenBaoAddr, srv.URL)
 	t.Setenv(EnvOpenBaoToken, "test-token")
 	t.Setenv(EnvOpenBaoPKIMount, "pki")
 	t.Setenv(EnvOpenBaoRole, "test-role")
 
-	if err := GenCert(); err == nil {
+	err := GenCert()
+	if err == nil {
 		t.Fatal("GenCert should fail when the cert file cannot be written")
+	}
+	if !strings.Contains(err.Error(), "failed to write cert file") {
+		t.Fatalf("GenCert failed at the wrong step: %v", err)
 	}
 }
 
@@ -1101,23 +1100,21 @@ func TestGenCertKeyFileUnwritable(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	readonlyDir := filepath.Join(dir, "readonly")
-	if err := os.MkdirAll(readonlyDir, 0o755); err != nil {
-		t.Fatalf("failed to create dir: %v", err)
-	}
-	config.KeyFile = filepath.Join(readonlyDir, "key.pem")
-	if err := os.Chmod(readonlyDir, 0o555); err != nil {
-		t.Fatalf("failed to chmod: %v", err)
-	}
-	defer os.Chmod(readonlyDir, 0o755)
+	// Missing parent directory: fails for root too (see
+	// TestGenCertCertFileUnwritable).
+	config.KeyFile = filepath.Join(dir, "missing-dir", "key.pem")
 
 	t.Setenv(EnvOpenBaoAddr, srv.URL)
 	t.Setenv(EnvOpenBaoToken, "test-token")
 	t.Setenv(EnvOpenBaoPKIMount, "pki")
 	t.Setenv(EnvOpenBaoRole, "test-role")
 
-	if err := GenCert(); err == nil {
+	err := GenCert()
+	if err == nil {
 		t.Fatal("GenCert should fail when the key file cannot be written")
+	}
+	if !strings.Contains(err.Error(), "failed to write key file") {
+		t.Fatalf("GenCert failed at the wrong step: %v", err)
 	}
 }
 
@@ -1354,47 +1351,38 @@ func TestGenNKeyFarmerAndSproutDistinct(t *testing.T) {
 	}
 }
 
-func TestGenNKeyUnwritablePubDir(t *testing.T) {
-	dir := t.TempDir()
-	readonlyDir := filepath.Join(dir, "readonly")
-	if err := os.MkdirAll(readonlyDir, 0o755); err != nil {
-		t.Fatalf("failed to create dir: %v", err)
-	}
-	// Use 0o555 so stat works but write fails.
-	if err := os.Chmod(readonlyDir, 0o555); err != nil {
-		t.Fatalf("failed to chmod: %v", err)
-	}
-	defer os.Chmod(readonlyDir, 0o755)
+// The GenNKey write-failure tests below put a key file in a directory that
+// doesn't exist: os.Stat reports ENOENT (so GenNKey goes on to write, as
+// it would for a missing key) and os.WriteFile fails, because it never
+// creates parents. Unlike a chmod 0o555 directory, that also fails when
+// the tests run as root, as they do in many CI containers.
 
-	config.NKeyFarmerPrivFile = filepath.Join(readonlyDir, "farmer.nkey")
-	config.NKeyFarmerPubFile = filepath.Join(readonlyDir, "farmer.pub")
+func TestGenNKeyUnwritablePubDir(t *testing.T) {
+	missingDir := filepath.Join(t.TempDir(), "missing-dir")
+	config.NKeyFarmerPrivFile = filepath.Join(missingDir, "farmer.nkey")
+	config.NKeyFarmerPubFile = filepath.Join(missingDir, "farmer.pub")
 
 	err := GenNKey(true)
 	if err == nil {
 		t.Fatal("GenNKey should fail when pub key directory is not writable")
 	}
+	if !strings.Contains(err.Error(), "failed to write NKey public key") {
+		t.Fatalf("GenNKey failed at the wrong step: %v", err)
+	}
 }
 
 func TestGenNKeyUnwritablePrivDir(t *testing.T) {
-	dir := t.TempDir()
 	writableDir := t.TempDir()
-	readonlyDir := filepath.Join(dir, "readonly")
-	if err := os.MkdirAll(readonlyDir, 0o755); err != nil {
-		t.Fatalf("failed to create dir: %v", err)
-	}
-
-	// Pub goes to writable dir, priv to read-only dir
+	// Pub goes to a writable dir, priv to one that doesn't exist.
 	config.NKeyFarmerPubFile = filepath.Join(writableDir, "farmer.pub")
-	config.NKeyFarmerPrivFile = filepath.Join(readonlyDir, "farmer.nkey")
-
-	if err := os.Chmod(readonlyDir, 0o555); err != nil {
-		t.Fatalf("failed to chmod: %v", err)
-	}
-	defer os.Chmod(readonlyDir, 0o755)
+	config.NKeyFarmerPrivFile = filepath.Join(writableDir, "missing-dir", "farmer.nkey")
 
 	err := GenNKey(true)
 	if err == nil {
 		t.Fatal("GenNKey should fail when priv key directory is not writable")
+	}
+	if !strings.Contains(err.Error(), "failed to write NKey private key") {
+		t.Fatalf("GenNKey failed at the wrong step: %v", err)
 	}
 }
 
@@ -1491,51 +1479,43 @@ func TestGenNKeyStatErrorNotENOENT(t *testing.T) {
 
 func TestGenNKeyWritePubFails(t *testing.T) {
 	// Cover GenNKey error when pub key write fails but stat returns ENOENT.
-	// Dir has read+execute (so stat can see file doesn't exist) but no write.
 	dir := t.TempDir()
-	noWriteDir := filepath.Join(dir, "nowrite")
-	if err := os.MkdirAll(noWriteDir, 0o755); err != nil {
+	// Priv file in a writable dir so stat returns ENOENT.
+	config.NKeyFarmerPrivFile = filepath.Join(dir, "farmer.nkey")
+	// The pub path is an existing directory: opening it for writing fails
+	// with EISDIR, for root too.
+	pubAsDir := filepath.Join(dir, "farmer.pub")
+	if err := os.MkdirAll(pubAsDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-
-	// Priv file in writable dir so stat returns ENOENT.
-	config.NKeyFarmerPrivFile = filepath.Join(dir, "farmer.nkey")
-	// Pub file in read-only dir so write fails.
-	config.NKeyFarmerPubFile = filepath.Join(noWriteDir, "farmer.pub")
-
-	if err := os.Chmod(noWriteDir, 0o555); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	defer os.Chmod(noWriteDir, 0o755)
+	config.NKeyFarmerPubFile = pubAsDir
 
 	err := GenNKey(true)
 	if err == nil {
 		t.Fatal("GenNKey should fail when pub key write fails")
 	}
+	if !strings.Contains(err.Error(), "failed to write NKey public key") {
+		t.Fatalf("GenNKey failed at the wrong step: %v", err)
+	}
 }
 
 func TestGenNKeyWritePrivFails(t *testing.T) {
 	// Cover GenNKey error when priv key write fails after pub succeeds.
-	// Both are in different dirs: priv dir is read-only, pub dir is writable.
 	dir := t.TempDir()
-	noWriteDir := filepath.Join(dir, "nowrite")
-	if err := os.MkdirAll(noWriteDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	// Priv file in read-only dir — stat returns ENOENT (file doesn't exist,
-	// but dir is readable so stat can check).
-	config.NKeyFarmerPrivFile = filepath.Join(noWriteDir, "farmer.nkey")
-	// Pub file in writable dir — write succeeds.
+	// Priv file in a directory that doesn't exist: stat returns ENOENT,
+	// and the write fails (for root too).
+	config.NKeyFarmerPrivFile = filepath.Join(dir, "nowrite", "farmer.nkey")
+	// Pub file in a writable dir: the write succeeds.
 	config.NKeyFarmerPubFile = filepath.Join(dir, "farmer.pub")
-
-	if err := os.Chmod(noWriteDir, 0o555); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	defer os.Chmod(noWriteDir, 0o755)
 
 	err := GenNKey(true)
 	if err == nil {
 		t.Fatal("GenNKey should fail when priv key write fails")
+	}
+	if !strings.Contains(err.Error(), "failed to write NKey private key") {
+		t.Fatalf("GenNKey failed at the wrong step: %v", err)
+	}
+	if _, err := os.Stat(config.NKeyFarmerPubFile); err != nil {
+		t.Fatalf("pub key should have been written before the priv write failed: %v", err)
 	}
 }

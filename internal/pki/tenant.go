@@ -506,6 +506,7 @@ func signLockedOutTenantJWT(mat *natsAuthMaterial, tenantID, name string) (strin
 	if err != nil {
 		return "", fmt.Errorf("pki: decoding tenant %q's Account JWT: %w", tenantID, err)
 	}
+	waitPastIssuedAt(ac.IssuedAt)
 	lockOutAccount(ac, time.Now())
 	signed, err := ac.Encode(mat.operatorSigningKP)
 	if err != nil {
@@ -640,6 +641,23 @@ func lockOutAccount(ac *jwt.AccountClaims, now time.Time) {
 	ac.RevokeAt(jwt.All, now)
 	ac.Limits.Conn = 0
 	ac.Limits.LeafNodeConn = 0
+}
+
+// waitPastIssuedAt sleeps, at most about a second, until the wall clock is
+// in a later second than prevIssuedAt, so the JWT signed next gets a
+// strictly newer iat than the one it replaces.
+//
+// The bus resolver syncs Account JWTs between nodes by "newest iat wins",
+// and treats two JWTs with the same jti as the same JWT. jwt/v2 derives
+// the jti from the generic claims only (subject, issuer, name, iat), not
+// from limits or revocations, so a lock-out signed in the same second as
+// the live JWT before it has the same jti, and a cluster node holding the
+// live one would never take the lock-out from its peers (see
+// cmd/farmerbus/fence.go).
+func waitPastIssuedAt(prevIssuedAt int64) {
+	if d := time.Until(time.Unix(prevIssuedAt+1, 0)); d > 0 {
+		time.Sleep(d)
+	}
 }
 
 // syncTenantSprouts is syncNatsAuth (jwtusers.go) parameterized by an

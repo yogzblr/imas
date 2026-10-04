@@ -11,7 +11,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"sync"
@@ -27,10 +29,8 @@ import (
 	nats_server "github.com/nats-io/nats-server/v2/server"
 )
 
-func init() {
-	config.LoadConfig("farmer")
-	log.SetLogLevel(config.LogLevel)
-}
+// envHealthPort, when set, starts the /healthz and /readyz probe listener.
+const envHealthPort = "IMAS_BUS_HEALTH_PORT"
 
 var (
 	// srvMu guards the s package global, read by the shutdown path in main
@@ -54,7 +54,10 @@ func getNATSServer() *nats_server.Server {
 }
 
 func main() {
+	// Config is loaded here, not in an init(): LoadConfig creates
+	// /etc/imas, which a package test (run unprivileged) can't do.
 	config.LoadConfig("farmer")
+	log.SetLogLevel(config.LogLevel)
 	fmt.Printf("Starting Farmer Bus on %s:%s\n", config.FarmerInterface, config.FarmerBusPort)
 	defer log.Flush()
 	pki.SetupPKIFarmer()
@@ -67,6 +70,12 @@ func main() {
 	// the NATS server.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if hp := os.Getenv(envHealthPort); hp != "" {
+		addr := net.JoinHostPort(config.FarmerInterface, hp)
+		if err := serveHealth(ctx, addr, getBusNode().Ready); err != nil {
+			log.Fatalf("failed to start the health listener on %s: %v", addr, err)
+		}
+	}
 	sighupDone := make(chan struct{})
 	go handleSIGHUP(ctx, sighupDone)
 
@@ -80,8 +89,8 @@ func main() {
 	case <-time.After(20 * time.Second):
 		log.Warn("timed out waiting for SIGHUP handler to stop")
 	}
-	if srv := getNATSServer(); srv != nil {
-		srv.Shutdown()
+	if node := getBusNode(); node != nil {
+		node.Shutdown()
 	}
 	log.Info("Farmer bus stopped")
 }
@@ -99,21 +108,88 @@ func main() {
 // restart or local reload needed on this side for an ACL change.
 func RunNATSServer() {
 	opts := pki.ConfigureNats()
+	cl, err := clusterConfigFromEnv(os.Getenv, os.ReadFile)
+	if err != nil {
+		log.Fatalf("invalid bus cluster configuration: %v", err)
+	}
+	node, err := startBus(opts, cl, defaultFenceTiming)
+	if err != nil {
+		log.Panicf("Unable to start NATS Server: %v", err)
+	}
+	setNATSServer(node.srv)
+	setBusNode(node)
+	pki.SetNATSServer(node.srv)
+	if cl != nil {
+		log.Infof("NATS bus started as node %q of cluster %q (%d nodes); clients are refused until the fence lifts", cl.ServerName, cl.Name, cl.Size())
+	} else {
+		log.Info("NATS bus started")
+	}
+}
+
+// busNode is one running bus: the server and, when clustered, its fence.
+type busNode struct {
+	srv   *nats_server.Server
+	fence *fence
+}
+
+// Ready reports whether the node should receive client traffic.
+func (n *busNode) Ready() bool {
+	if n == nil || n.srv == nil || !n.srv.Running() {
+		return false
+	}
+	return n.fence == nil || !n.fence.Fenced()
+}
+
+// Shutdown stops the fence, then the server.
+func (n *busNode) Shutdown() {
+	if n.fence != nil {
+		n.fence.stop()
+	}
+	n.srv.Shutdown()
+}
+
+var (
+	nodeMu  sync.Mutex
+	curNode *busNode
+)
+
+func setBusNode(n *busNode) { nodeMu.Lock(); curNode = n; nodeMu.Unlock() }
+func getBusNode() *busNode  { nodeMu.Lock(); defer nodeMu.Unlock(); return curNode }
+
+// startBus starts the embedded server from opts (pki.ConfigureNats's
+// output). With cl non-nil it adds authenticated routes (cluster.go) and a
+// fence (fence.go) that keeps clients out until this node has quorum and
+// has synced its resolver from its peers.
+func startBus(opts nats_server.Options, cl *clusterConfig, timing fenceTiming) (*busNode, error) {
+	var f *fence
+	if cl != nil {
+		if err := applyCluster(&opts, cl); err != nil {
+			return nil, err
+		}
+		f = newFence(cl.Size(), timing)
+		if err := f.install(&opts); err != nil {
+			return nil, err
+		}
+	}
 	srv, err := nats_server.NewServer(&opts)
 	if err != nil || srv == nil {
-		log.Panicf("No NATS Server object returned: %v", err)
+		return nil, fmt.Errorf("no NATS Server object returned: %v", err)
 	}
-	// Run server in Go routine.
-	go srv.Start()
 	var natsLogger log.Logger
 	srv.SetLogger(natsLogger, true, true)
+	go srv.Start()
 	// Wait for accept loop(s) to be started
 	if !srv.ReadyForConnections(10 * time.Second) {
-		log.Panicf("Unable to start NATS Server")
+		srv.Shutdown()
+		return nil, errors.New("NATS server did not start listening")
 	}
-	setNATSServer(srv)
-	pki.SetNATSServer(srv)
-	log.Info("NATS bus started")
+	if f != nil {
+		if err := f.start(srv); err != nil {
+			srv.Shutdown()
+			return nil, err
+		}
+	}
+	return &busNode{srv: srv, fence: f}, nil
 }
 
 // handleSIGHUP reloads the NATS server's configuration (picking up rotated

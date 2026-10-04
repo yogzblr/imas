@@ -3,6 +3,7 @@
 {{- $tlsDir := include "imas-nats.bus.tlsDir" . -}}
 {{- $ob := .Values.bus.tls.openbao -}}
 {{- $clustered := gt (int .Values.bus.replicaCount) 1 -}}
+{{- $cl := .Values.bus.cluster -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -100,6 +101,9 @@ spec:
             - name: websocket
               containerPort: {{ .Values.bus.ports.websocket }}
               protocol: TCP
+            - name: health
+              containerPort: {{ .Values.bus.ports.health }}
+              protocol: TCP
             {{- if $clustered }}
             - name: cluster
               containerPort: {{ .Values.bus.cluster.port }}
@@ -113,15 +117,34 @@ spec:
             - name: IMAS_NATS_{{ $name }}_SEED_FILE
               value: {{ printf "%s/%s" $.Values.natsSeeds.mountPath $key | quote }}
             {{- end }}
+            - name: IMAS_BUS_HEALTH_PORT
+              value: {{ .Values.bus.ports.health | quote }}
             {{- if $clustered }}
-            # Consumed by cmd/farmerbus once it supports routes (see
-            # README.md, "Clustering"). Route TLS reuses the node cert.
+            # Routes (cmd/farmerbus/cluster.go): mutual TLS with the node
+            # cert against the same root CA as the client port, plus the
+            # route password from a mounted file. Every node is listed,
+            # this one included; the list's length is the cluster size the
+            # fence's majority check uses.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: IMAS_BUS_SERVER_NAME
+              value: "$(POD_NAME)"
             - name: IMAS_BUS_CLUSTER_NAME
-              value: {{ .Values.bus.cluster.name | quote }}
+              value: {{ $cl.name | quote }}
             - name: IMAS_BUS_CLUSTER_PORT
-              value: {{ .Values.bus.cluster.port | quote }}
+              value: {{ $cl.port | quote }}
             - name: IMAS_BUS_CLUSTER_ROUTES
               value: {{ include "imas-nats.bus.routes" . | quote }}
+            # Announced to peers for implicit routes: the per-pod headless
+            # name the cert carries, not the pod IP it doesn't.
+            - name: IMAS_BUS_CLUSTER_ADVERTISE
+              value: {{ printf "$(POD_NAME).%s.%s.svc.%s:%d" (include "imas-nats.bus.headless" .) .Release.Namespace (include "imas-nats.clusterDomain" .) (int $cl.port) | quote }}
+            - name: IMAS_BUS_CLUSTER_ROUTE_USER
+              value: {{ $cl.auth.user | quote }}
+            - name: IMAS_BUS_CLUSTER_ROUTE_PASSWORD_FILE
+              value: {{ printf "%s/%s" $cl.auth.mountPath $cl.auth.passwordKey | quote }}
             {{- end }}
             {{- if eq .Values.bus.tls.mode "openbao" }}
             - name: IMAS_CERTS_OPENBAO_ADDR
@@ -184,6 +207,11 @@ spec:
             - name: nats-seeds
               mountPath: {{ .Values.natsSeeds.mountPath }}
               readOnly: true
+            {{- if $clustered }}
+            - name: route-auth
+              mountPath: {{ $cl.auth.mountPath }}
+              readOnly: true
+            {{- end }}
             {{- if eq .Values.bus.tls.mode "secret" }}
             - name: tls
               mountPath: {{ $tlsDir }}
@@ -220,6 +248,15 @@ spec:
               - key: {{ $key | quote }}
                 path: {{ $key | quote }}
               {{- end }}
+        {{- if $clustered }}
+        - name: route-auth
+          secret:
+            secretName: {{ $cl.auth.secretName }}
+            defaultMode: 0440
+            items:
+              - key: {{ $cl.auth.passwordKey | quote }}
+                path: {{ $cl.auth.passwordKey | quote }}
+        {{- end }}
         {{- if eq .Values.bus.tls.mode "secret" }}
         - name: tls
           secret:

@@ -449,15 +449,14 @@ func TestCacheFileVerifyUnknownHashType(t *testing.T) {
 
 func TestCacheFileVerifyFileOpenError(t *testing.T) {
 	dir := t.TempDir()
-	filePath := filepath.Join(dir, "noperm.txt")
-	if err := os.WriteFile(filePath, []byte("hello\n"), 0o644); err != nil {
+	notADir := filepath.Join(dir, "regular.txt")
+	if err := os.WriteFile(notADir, []byte("hello\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Remove read permission
-	if err := os.Chmod(filePath, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.Chmod(filePath, 0o644) })
+	// A path under a regular file: opening it fails with ENOTDIR, which is
+	// not "does not exist". Unlike a chmod 0o000 file, that also fails for
+	// root (CI containers often run tests as root).
+	filePath := filepath.Join(notADir, "child.txt")
 
 	cf := CacheFile{
 		ID:          "step-1",
@@ -472,9 +471,9 @@ func TestCacheFileVerifyFileOpenError(t *testing.T) {
 	if match {
 		t.Error("expected no match")
 	}
-	// Should not be ErrFileNotFound — file exists but can't be opened
+	// Should not be ErrFileNotFound: the open failed for another reason.
 	if errors.Is(err, ErrFileNotFound) {
-		t.Error("should not be ErrFileNotFound for permission error")
+		t.Error("should not be ErrFileNotFound for an open error other than not-exist")
 	}
 }
 
