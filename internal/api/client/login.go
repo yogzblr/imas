@@ -7,10 +7,10 @@ import (
 	apitypes "github.com/yogzblr/imas/internal/api/types"
 )
 
-// Login performs a formal auth handshake with the farmer. The CLI
-// presents its signed token (containing the public key) and the farmer
-// validates it against configured users, returning the user's identity,
-// role, and permissions.
+// Login performs a formal auth handshake with the farmer: a sealed
+// auth.login that opens on farmer only under the CLI box key registered
+// for this user, answered with the user's identity, role, and
+// permissions in a sealed reply.
 //
 // This is distinct from WhoAmI in that it returns the full permission
 // set and is intended as an explicit "login" action.

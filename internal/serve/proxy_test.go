@@ -2,30 +2,23 @@ package serve
 
 import (
 	"encoding/json"
-	"encoding/pem"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nkeys"
-	"github.com/taigrr/jety"
 
 	"github.com/yogzblr/imas/internal/api/client"
-	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/api/client/clienttest"
 )
 
-// natsResponse mirrors the client's internal envelope.
-type natsResponse struct {
-	Result json.RawMessage `json:"result,omitempty"`
-	Error  string          `json:"error,omitempty"`
-}
+// testFarmer is the sealed stand-in farmer the current test's mocks
+// answer as (startTestNATS sets it, and configures the CLI's keys).
+var testFarmer *clienttest.Farmer
 
 // startTestNATS starts an embedded NATS server and wires client.NatsConn.
 func startTestNATS(t *testing.T) func() {
@@ -44,6 +37,7 @@ func startTestNATS(t *testing.T) func() {
 		ns.Shutdown()
 		t.Fatalf("connect NATS: %v", err)
 	}
+	testFarmer = clienttest.Setup(t)
 	client.NatsConn = nc
 	return func() {
 		client.NatsConn = nil
@@ -52,88 +46,29 @@ func startTestNATS(t *testing.T) func() {
 	}
 }
 
-// mockMethod subscribes to imas.api.<method> and replies with given data.
+// mockMethod answers imas.api.<method>'s sealed requests with response,
+// sealed, as farmer does.
 func mockMethod(t *testing.T, nc *nats.Conn, method string, response any) {
 	t.Helper()
-	data, err := json.Marshal(response)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	resp := natsResponse{Result: data}
-	sub, err := nc.Subscribe("imas.api."+method, func(msg *nats.Msg) {
-		payload, _ := json.Marshal(resp)
-		msg.Respond(payload)
-	})
-	if err != nil {
-		t.Fatalf("subscribe: %v", err)
-	}
-	t.Cleanup(func() { sub.Unsubscribe() })
-	nc.Flush()
+	testFarmer.Handle(t, nc, method, clienttest.Result(response))
 }
 
-// mockMethodError subscribes and replies with an error envelope.
+// mockMethodError answers with a handler error, inside the sealed reply.
 func mockMethodError(t *testing.T, nc *nats.Conn, method, errMsg string) {
 	t.Helper()
-	resp := natsResponse{Error: errMsg}
-	sub, err := nc.Subscribe("imas.api."+method, func(msg *nats.Msg) {
-		payload, _ := json.Marshal(resp)
-		msg.Respond(payload)
-	})
-	if err != nil {
-		t.Fatalf("subscribe: %v", err)
-	}
-	t.Cleanup(func() { sub.Unsubscribe() })
-	nc.Flush()
+	testFarmer.Handle(t, nc, method, clienttest.Error(errMsg))
 }
 
-// startTestRecipeFarmer stands in for the farmer's dedicated recipe HTTP
-// endpoint (internal/api/handlers/recipes.go), which HandleRecipesList/
-// HandleRecipeGet call over real HTTPS via internal/api/client —
-// unlike the rest of this file's NATS-proxied routes. It trusts the test
-// server's certificate as config.ImasRootCA and provisions a signing key
-// for the auth token internal/api/client attaches, mirroring
-// internal/api/client/recipes_test.go's setupRecipeTestServer.
-func startTestRecipeFarmer(t *testing.T, handler http.HandlerFunc) {
+// startTestRecipeFarmer stands in for farmer's sealed recipes.list and
+// recipes.get (the CLI, and so imas serve, browses recipes over the
+// sealed API since J.3), answering both with fn.
+func startTestRecipeFarmer(t *testing.T, fn func(json.RawMessage) (any, error)) {
 	t.Helper()
-	ts := httptest.NewTLSServer(handler)
-	t.Cleanup(ts.Close)
-
-	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ts.Certificate().Raw})
-	caFile := filepath.Join(t.TempDir(), "rootca.pem")
-	if err := os.WriteFile(caFile, caPEM, 0o600); err != nil {
-		t.Fatal(err)
+	cleanup := startTestNATS(t)
+	t.Cleanup(cleanup)
+	for _, m := range []string{"recipes.list", "recipes.get"} {
+		testFarmer.Handle(t, client.NatsConn, m, fn)
 	}
-	host, port, ok := strings.Cut(strings.TrimPrefix(ts.URL, "https://"), ":")
-	if !ok {
-		t.Fatalf("unexpected test server URL: %s", ts.URL)
-	}
-
-	origRootCA, origIface, origPort := config.ImasRootCA, config.FarmerInterface, config.FarmerAPIPort
-	config.ImasRootCA = caFile
-	config.FarmerInterface = host
-	config.FarmerAPIPort = port
-	t.Cleanup(func() {
-		config.ImasRootCA = origRootCA
-		config.FarmerInterface = origIface
-		config.FarmerAPIPort = origPort
-	})
-
-	configPath := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(configPath, []byte("# test config\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	jety.SetConfigType("toml")
-	jety.SetConfigFile(configPath)
-	kp, err := nkeys.CreateAccount()
-	if err != nil {
-		t.Fatal(err)
-	}
-	seed, err := kp.Seed()
-	if err != nil {
-		t.Fatal(err)
-	}
-	jety.Set("privkey", string(seed))
-	t.Cleanup(func() { jety.Set("privkey", "") })
 }
 
 func TestHandleNATSProxy_Success(t *testing.T) {
@@ -482,11 +417,9 @@ func TestHandleCohortGetProxy_NATSError(t *testing.T) {
 }
 
 func TestHandleRecipeGet_Success(t *testing.T) {
-	startTestRecipeFarmer(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]string{
-			"name": "base.webserver", "content": "pkg.installed: nginx",
-		})
-	})
+	startTestRecipeFarmer(t, clienttest.Result(map[string]string{
+		"name": "base.webserver", "content": "pkg.installed: nginx",
+	}))
 
 	mux := NewMux()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/recipes/base/webserver", nil)
@@ -499,9 +432,7 @@ func TestHandleRecipeGet_Success(t *testing.T) {
 }
 
 func TestHandleRecipeGet_FarmerError(t *testing.T) {
-	startTestRecipeFarmer(t, func(w http.ResponseWriter, r *http.Request) {
-		http.NotFound(w, r)
-	})
+	startTestRecipeFarmer(t, clienttest.Error("recipe missing not found"))
 
 	mux := NewMux()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/recipes/missing", nil)

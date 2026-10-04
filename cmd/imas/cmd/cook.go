@@ -14,7 +14,6 @@ import (
 	"github.com/yogzblr/imas/internal/api/client"
 	apitypes "github.com/yogzblr/imas/internal/api/types"
 	"github.com/yogzblr/imas/internal/auth"
-	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/jobs"
 	"github.com/yogzblr/imas/internal/pki"
@@ -118,14 +117,15 @@ var cmdCook = &cobra.Command{
 			log.Printf("Error subscribing to %s: %v\n", topic, err)
 			log.Fatal(err)
 		}
-		triggerMsg := config.TriggerMsg{JID: jid}
-		b, _ := json.Marshal(triggerMsg)
-		triggerReply, err := nc.Request(fmt.Sprintf("imas.farmer.cook.trigger.%s", jid), b, 15*time.Second)
+		// The step events above are read in plaintext until Decision D
+		// (docs/design/imas-payload-encryption-design.md); the trigger
+		// is sealed, and farmer takes it only from this user. Sent on nc,
+		// after the subscription, so no event is missed.
+		targetedSprouts, err := client.TriggerCook(nc, jid)
 		if err != nil {
 			log.Fatalf("Failed to trigger cook: %v", err)
 		}
-		var targetedSprouts []string
-		if err := json.Unmarshal(triggerReply.Data, &targetedSprouts); err == nil && len(targetedSprouts) > 0 {
+		if len(targetedSprouts) > 0 {
 			fmt.Printf("Cooking on %d sprout(s): %s\n", len(targetedSprouts), strings.Join(targetedSprouts, ", "))
 		}
 

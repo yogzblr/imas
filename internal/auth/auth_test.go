@@ -56,57 +56,21 @@ func TestDangerouslyAllowRoot(t *testing.T) {
 	}
 }
 
-func TestDangerouslyAllowRootBypassesTokenHasAccess(t *testing.T) {
+func TestUnknownUserHasNoAccess(t *testing.T) {
 	newTestDB(t)
-	// Without dangerously_allow_root, invalid tokens are rejected.
-	if TokenHasAccess("invalid-token", "GET") {
-		t.Error("expected TokenHasAccess to reject invalid token without bypass")
+	// Without dangerously_allow_root, a user the policy doesn't know gets
+	// nothing.
+	if UserHasAction("AUNKNOWN", rbac.ActionView) {
+		t.Error("UserHasAction granted an unknown user")
 	}
-	if TokenHasRouteAccess("invalid-token", "Cook") {
-		t.Error("expected TokenHasRouteAccess to reject invalid token without bypass")
+	if UserHasScopedAccess("AUNKNOWN", rbac.ActionCook, []string{"sprout-1"}, nil) {
+		t.Error("UserHasScopedAccess granted an unknown user")
 	}
-	if TokenHasAction("invalid-token", rbac.ActionCook) {
-		t.Error("expected TokenHasAction to reject invalid token without bypass")
+	if filtered := UserScopeFilter("AUNKNOWN", rbac.ActionCook, []string{"sprout-1"}, nil); filtered != nil {
+		t.Errorf("UserScopeFilter = %v for an unknown user, want nil", filtered)
 	}
-	if TokenHasScopedAccess("invalid-token", rbac.ActionCook, []string{"sprout-1"}, nil) {
-		t.Error("expected TokenHasScopedAccess to reject invalid token without bypass")
-	}
-	filtered := TokenScopeFilter("invalid-token", rbac.ActionCook, []string{"sprout-1"}, nil)
-	if filtered != nil {
-		t.Errorf("expected TokenScopeFilter to return nil without bypass, got %v", filtered)
-	}
-}
-
-func TestWhoAmIInvalidToken(t *testing.T) {
-	newTestDB(t)
-	_, roleName, _, err := WhoAmI("invalid-token")
-	if err == nil {
-		t.Error("expected error for invalid token")
-	}
-	if roleName != "" {
-		t.Errorf("expected empty role name, got %q", roleName)
-	}
-}
-
-func TestTokenHasRouteAccessInvalidToken(t *testing.T) {
-	newTestDB(t)
-	if TokenHasRouteAccess("bad-token", "Cook") {
-		t.Error("expected TokenHasRouteAccess to return false for invalid token")
-	}
-}
-
-func TestTokenHasScopedAccessInvalidToken(t *testing.T) {
-	newTestDB(t)
-	if TokenHasScopedAccess("bad-token", rbac.ActionCook, []string{"web-1"}, nil) {
-		t.Error("expected TokenHasScopedAccess to return false for invalid token")
-	}
-}
-
-func TestTokenScopeFilterInvalidToken(t *testing.T) {
-	newTestDB(t)
-	result := TokenScopeFilter("bad-token", rbac.ActionCook, []string{"web-1"}, nil)
-	if result != nil {
-		t.Errorf("expected nil for invalid token, got %v", result)
+	if role, name := UserIdentity("AUNKNOWN"); role != "" || name != "" {
+		t.Errorf("UserIdentity = %q, %q for an unknown user", role, name)
 	}
 }
 

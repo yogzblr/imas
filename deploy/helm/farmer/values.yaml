@@ -217,7 +217,26 @@ farmer:
   replicaCount: 1
   logLevel: info
   apiPort: 5405
-  # Admin NKey public keys (pubkeys.admin in /etc/imas/farmer).
+  # The first admin of the imas CLI, bootstrapped from farmer's config
+  # file (users.admin in /etc/imas/farmer), never over the bus (J.3,
+  # docs/design/imas-payload-encryption-design.md Decision A). Every CLI
+  # request is sealed with the user's CLI box key, so the first admin
+  # needs both halves of their identity here:
+  #   pubkey:   their NKey public key (imas auth pubkey), the user ID.
+  #   boxpub:   the CLI box public key their own imas auth keygen printed.
+  #             Check its fingerprint with them out of band.
+  #   username: optional, shown in listings and audit entries.
+  # Farmer imports boxpub into its database once, on the first start that
+  # sees this user with no key history; from then on the database is
+  # authoritative (rotations, admin resets), and changing boxpub here does
+  # nothing. Further users are added by this admin with imas users add.
+  # Leave pubkey empty to render no users section.
+  bootstrapAdmin:
+    pubkey: ""
+    username: ""
+    boxpub: ""
+  # Removed in J.3: an admin with no CLI box key can't make a single
+  # request. Rendering fails if it is set; use bootstrapAdmin.
   adminPubKeys: []
   # gatewayjwtttl. Keep equal to the nats chart's
   # envoy.refreshRateLimit.gatewayJwtTtlSeconds.

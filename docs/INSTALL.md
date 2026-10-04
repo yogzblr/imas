@@ -479,25 +479,76 @@ charts set none of them themselves.
 
 ## The imas CLI
 
-The CLI still authenticates to farmer with its own keypair, and it is
-optional for SaaS operation.
+The CLI is optional for SaaS operation and is for operators only. Every
+request it makes to farmer is sealed with its own CLI box key to the
+tenant's box key, and every reply is sealed back
+([`docs/api/farmer-cli-api.md`](api/farmer-cli-api.md)). There are no
+bearer tokens: the CLI's NKey only authenticates its bus connection.
+Operators belong to farmer's `farmerorganization` tenant.
 
 1. Put `imas` on your `PATH`.
 2. In `~/.config/imas/imas`, set `farmerinterface` and `farmerapiport` to
-   farmer's API address, and `farmerbusurl` to the bus (for example
-   `tls://bus.example.internal:5406`). The CLI dials the bus from there; it
-   doesn't assume the bus is on the API host.
-3. Run `imas auth privkey` to generate a key and pin farmer's TLS
-   certificate, then `imas auth pubkey` to print the public key.
-4. Add it on farmer and restart farmer:
+   farmer's API address (the CLI fetches farmer's TLS certificate there once) and
+   `farmerbusurl` to the bus (for example `tls://bus.example.internal:5406`).
+   The CLI dials the bus from there; it doesn't assume the bus is on the API
+   host.
+3. Pin the tenant, out of band: set `tenantid` to farmer's
+   `farmerorganization` (the Helm value `organization`) and `tenantboxpub` to
+   that tenant's box public key. Farmer logs both when it starts
+   (`imas CLI users pin tenantid=... tenantboxpub=... (box1:...)`), and the
+   key is the `pub` field of OpenBao's `<mount>/<base>/tenants/<tenant_id>`
+   (default `secret/imas/tenant-x25519/tenants/<tenant_id>`). The CLI never
+   fetches it over the bus.
+4. Create your keys: `imas auth privkey` (your NKey, which also pins farmer's
+   TLS certificate), then `imas auth keygen` (your CLI box key, written to
+   `~/.config/imas/cli-box.key`, mode 0600). Note the NKey public key
+   (`imas auth pubkey`) and the box key and fingerprint `keygen` prints.
+5. Register yourself.
+   - **The first admin** goes in farmer's config file, never over the bus.
+     With the Helm chart:
 
-   ```yaml
-   pubkeys:
-     admin:
-       - <YOUR PUBKEY>
-   ```
+     ```yaml
+     farmer:
+       bootstrapAdmin:
+         pubkey: <YOUR NKEY PUBLIC KEY>
+         boxpub: <YOUR CLI BOX PUBLIC KEY>
+         username: <a name for listings and audit entries>
+     ```
 
-5. Run `imas version` to check you're authenticated.
+     Without the chart, the same under `users` in `/etc/imas/farmer`:
+
+     ```yaml
+     users:
+       admin:
+         - pubkey: <YOUR NKEY PUBLIC KEY>
+           boxpub: <YOUR CLI BOX PUBLIC KEY>
+           username: <name>
+     ```
+
+     Farmer imports the box key at its next start, once; after that its
+     database is authoritative, and editing `boxpub` changes nothing. Use
+     `imas users reset-key` (another admin) or `imas auth rotate-key`
+     instead. `farmer.adminPubKeys` and the bare `pubkeys.admin` list no
+     longer work for the CLI: an admin with no box key can't make a request.
+   - **Everyone else** sends their NKey public key and box key to an admin,
+     who checks the box key's fingerprint with them out of band and runs
+     `imas users add <role> <pubkey> --boxpub <box key> [--username <name>]`.
+6. Run `imas auth whoami` to check you're authenticated.
+
+Day to day:
+
+- `imas auth rotate-key` replaces your box key; the old one keeps working
+  for 15 minutes.
+- A lost or stolen key: an admin runs `imas users reset-key <pubkey> --boxpub
+  <new key>`, which retires every key you held. `imas users remove` retires
+  them with the user.
+- After a tenant key rotation (`imas keys rotate-tenant-key`), update
+  `tenantboxpub` within the grace window. Until then requests are refused
+  with `open-failed`.
+- Still read in plaintext from the bus, until sealed step events land: the
+  step results `imas cook` and `imas jobs watch` show, and `imas serve`'s
+  live log. Check a result that matters with `imas jobs show <JID>`, which
+  is sealed. `imas ssh` sessions are plaintext until sealed shell.
 
 ## Ports
 
@@ -506,7 +557,7 @@ optional for SaaS operation.
 | 8443 | Envoy (HTTPS and WSS) | sprouts, from anywhere |
 | 5407 | farmerbus websocket | Envoy only |
 | 5406 | farmerbus TLS NATS | farmer and saasapi (core dials out to the DMZ) |
-| 5405 | farmer HTTPS API | Envoy (`/v1/enroll`, `/v1/refresh`, JWKS, `/files/`) and the CLI |
+| 5405 | farmer HTTPS API | Envoy (`/v1/enroll`, `/v1/refresh`, JWKS, `/files/`) and the CLI's first certificate fetch |
 | 8081 | saasapi HTTP | the BFF, through your TLS terminator |
 
 Sprouts never connect to 5405, 5406 or 5407 directly. The core never

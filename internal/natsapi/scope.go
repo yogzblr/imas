@@ -124,20 +124,22 @@ func allAcceptedSproutIDs(tenantID string) []string {
 	return ids
 }
 
-// checkScopedAccess verifies that the token's role permits the given
-// action on the specified sprout IDs, within tenantID. Returns nil if
-// access is granted, ErrAccessDenied otherwise.
-func checkScopedAccess(tenantID, token string, action rbac.Action, sproutIDs []string) error {
+// checkScopedAccess verifies that userID's role permits the given action
+// on the specified sprout IDs, within tenantID. userID is the user a
+// sealed request opened under (the router's apiCaller), never a value
+// from the request. Returns nil if access is granted, ErrAccessDenied
+// otherwise.
+func checkScopedAccess(tenantID, userID string, action rbac.Action, sproutIDs []string) error {
 	allIDs := allAcceptedSproutIDs(tenantID)
-	if !intauth.TokenHasScopedAccess(token, action, sproutIDs, allIDs) {
+	if !intauth.UserHasScopedAccess(userID, action, sproutIDs, allIDs) {
 		return rbac.ErrAccessDenied
 	}
 	return nil
 }
 
-// filterSproutsByScope returns the subset of sproutIDs the token's role
+// filterSproutsByScope returns the subset of sproutIDs userID's role
 // permits for the given action, within tenantID.
-func filterSproutsByScope(tenantID, token string, action rbac.Action, sproutIDs []string) []string {
+func filterSproutsByScope(tenantID, userID string, action rbac.Action, sproutIDs []string) []string {
 	allIDs := allAcceptedSproutIDs(tenantID)
-	return intauth.TokenScopeFilter(token, action, sproutIDs, allIDs)
+	return intauth.UserScopeFilter(userID, action, sproutIDs, allIDs)
 }

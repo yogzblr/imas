@@ -6,9 +6,9 @@ package cmd
 //
 // The CLI box key is an X25519 key whose private half never leaves this
 // host (cliboxprivfile, mode 0600). Once farmer accepts only sealed
-// requests (rollout step 4), every imas.api.* request is sealed with it to
-// the tenant's box key the CLI pins (tenantboxpub, with tenantid), and it
-// is what proves to farmer which user sent a request. The NKey keeps
+// requests (J.3), every imas.api.* request is sealed with it to the
+// tenant's box key the CLI pins (tenantboxpub, with tenantid), and it is
+// what proves to farmer which user sent a request. The NKey keeps
 // authenticating the bus connection only: the bus chooses the nonce the
 // NKey signs, so a signature from it proves nothing to farmer.
 
@@ -101,11 +101,9 @@ rotate-key resubmits the same pending key. Farmer keeps accepting the old
 key for 15 minutes.`,
 	Args: cobra.NoArgs,
 	Run: func(cmd *cobra.Command, _ []string) {
-		if client.NatsConn == nil {
-			if err := client.ConnectNats(); err != nil {
-				printAuthBoxResult(rotateKeyResult{}, err, nil)
-				return
-			}
+		if err := ensureNats(); err != nil {
+			printAuthBoxResult(rotateKeyResult{}, err, nil)
+			return
 		}
 		pub, err := rotateCLIBoxKey(client.NatsConn, rotateKeyTimeout)
 		res := rotateKeyResult{}
@@ -118,8 +116,8 @@ key for 15 minutes.`,
 	},
 }
 
-// errSealedNotServed: nothing on the bus answers sealed requests yet.
-var errSealedNotServed = errors.New("farmer doesn't accept sealed requests yet; the new key stays pending and the next rotate-key resubmits it")
+// errSealedNotServed: nothing on the bus answered the rotation.
+var errSealedNotServed = errors.New("no farmer answered the rotation; the new key stays pending and the next rotate-key resubmits it")
 
 // rotateCLIBoxKey runs one rotation round trip over nc and returns the
 // new key. It never promotes a key on anything but a sealed reply that

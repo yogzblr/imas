@@ -341,6 +341,7 @@ func initRecipeStore() *objectstore.Store {
 	}
 	cook.SetStore(store)
 	handlers.SetRecipeStore(store)
+	natsapi.SetRecipeStore(store)
 	return store
 }
 
@@ -571,7 +572,6 @@ func initAuditLogger() {
 		return
 	}
 	audit.SetGlobal(logger)
-	audit.SetIdentityResolver(auth.WhoAmI)
 	level := audit.ParseLevel(config.AuditLevel)
 	audit.SetLevel(level)
 	log.Infof("Audit logging enabled: %s (level: %s)", auditDir, level)
@@ -579,7 +579,7 @@ func initAuditLogger() {
 
 func loadAuthPolicy() {
 	if auth.DangerouslyAllowRoot() {
-		log.Warn("WARNING: dangerously_allow_root is enabled — ALL auth checks are bypassed. Do not use in production!")
+		log.Warn("WARNING: dangerously_allow_root is enabled — authentication is bypassed on farmer's HTTP API for GET /files/ (every object, any tenant) and GET /v1/recipes. It does not affect the NATS API, where every request is sealed and role-checked. Do not use in production!")
 	}
 
 	if err := auth.LoadPolicy(); err != nil {

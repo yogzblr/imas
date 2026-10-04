@@ -15,8 +15,8 @@ package pki
 // and nothing falls back to a weaker check. Replies are sealed to the
 // user's active key only.
 //
-// Not wired into the router yet (rollout step 4): internal/natsapi's
-// sealedapi.go has the NATS side.
+// internal/natsapi's sealed router (sealedrouter.go, J.3) puts these
+// around every imas.api.* request; sealedapi.go has the NATS side.
 
 import (
 	"encoding/json"
@@ -32,8 +32,8 @@ import (
 const CLIAPISubjectPrefix = "imas.api."
 
 // MethodAuthRotateKey is the method a CLI box key rotation is sent on
-// (imas auth rotate-key, purpose c2f.userkey.pub). Mutating, and not
-// routed until rollout step 4.
+// (imas auth rotate-key, purpose c2f.userkey.pub). Mutating; routed by
+// internal/natsapi (J.3).
 const MethodAuthRotateKey = "auth.rotatekey"
 
 // cliUserKeyBody is a c2f.userkey.pub submission's body.
@@ -154,9 +154,11 @@ func checkBoxPubUnclaimed(tenantID, pub string) error {
 }
 
 // RegisterCLIBoxKey registers pub as userID's first CLI box key in
-// tenantID: the admin path (auth.users.add carrying the new user's key,
-// rollout step 4). It refuses a key any principal holds, or a farmer-side
-// key, then records it (auth.RegisterCLIBoxKey).
+// tenantID, for a user who has none. (auth.users.add registers a user and
+// their key together, through auth.AddUser, with the same cross-principal
+// check; an admin replaces a key with auth.ResetUserCLIBoxKey.) It
+// refuses a key any principal holds, or a farmer-side key, then records
+// it (auth.RegisterCLIBoxKey).
 func RegisterCLIBoxKey(tenantID, userID, pub string) error {
 	if !IsValidTenantID(tenantID) {
 		return fmt.Errorf("pki: invalid tenant id %q", tenantID)

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	apitypes "github.com/yogzblr/imas/internal/api/types"
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/jobs"
@@ -92,7 +93,7 @@ func TestHandleJobsListEmpty(t *testing.T) {
 	_, cleanup := setupJobStore(t)
 	defer cleanup()
 
-	result, err := handleJobsList(props.CurrentTenantID(), nil)
+	result, err := handleJobsList(adminCaller(t, props.CurrentTenantID()), nil)
 	if err != nil {
 		t.Fatalf("handleJobsList: %v", err)
 	}
@@ -120,7 +121,7 @@ func TestHandleJobsListWithJobs(t *testing.T) {
 	writeTestJob(t, obj, "sprout-alpha", "jid-001", steps)
 	writeTestJob(t, obj, "sprout-beta", "jid-002", steps)
 
-	result, err := handleJobsList(props.CurrentTenantID(), nil)
+	result, err := handleJobsList(adminCaller(t, props.CurrentTenantID()), nil)
 	if err != nil {
 		t.Fatalf("handleJobsList: %v", err)
 	}
@@ -146,7 +147,7 @@ func TestHandleJobsListWithLimit(t *testing.T) {
 	writeTestJob(t, obj, "sprout-a", "jid-3", steps)
 
 	params := json.RawMessage(`{"limit":2}`)
-	result, err := handleJobsList(props.CurrentTenantID(), params)
+	result, err := handleJobsList(adminCaller(t, props.CurrentTenantID()), params)
 	if err != nil {
 		t.Fatalf("handleJobsList: %v", err)
 	}
@@ -191,7 +192,7 @@ func TestHandleJobsListFilterByUser(t *testing.T) {
 
 	// Filter by Alice — should get 2 jobs.
 	params := json.RawMessage(`{"user":"UALICE000"}`)
-	result, err := handleJobsList(props.CurrentTenantID(), params)
+	result, err := handleJobsList(adminCaller(t, props.CurrentTenantID()), params)
 	if err != nil {
 		t.Fatalf("handleJobsList: %v", err)
 	}
@@ -207,7 +208,7 @@ func TestHandleJobsListFilterByUser(t *testing.T) {
 
 	// Filter by Bob — should get 1 job.
 	params = json.RawMessage(`{"user":"UBOB00000"}`)
-	result, err = handleJobsList(props.CurrentTenantID(), params)
+	result, err = handleJobsList(adminCaller(t, props.CurrentTenantID()), params)
 	if err != nil {
 		t.Fatalf("handleJobsList: %v", err)
 	}
@@ -218,7 +219,7 @@ func TestHandleJobsListFilterByUser(t *testing.T) {
 
 	// Filter by unknown user — should get 0 jobs.
 	params = json.RawMessage(`{"user":"UNOBODY00"}`)
-	result, err = handleJobsList(props.CurrentTenantID(), params)
+	result, err = handleJobsList(adminCaller(t, props.CurrentTenantID()), params)
 	if err != nil {
 		t.Fatalf("handleJobsList: %v", err)
 	}
@@ -300,7 +301,7 @@ func TestHandleJobsCancelNoNATS(t *testing.T) {
 	ClearNatsConn(props.CurrentTenantID())
 
 	params := json.RawMessage(`{"jid":"jid-cancel"}`)
-	_, err := handleJobsCancel(props.CurrentTenantID(), params)
+	_, err := handleJobsCancel(apiCaller{TenantID: props.CurrentTenantID()}, params)
 	if err == nil {
 		t.Fatal("expected error when NATS not available")
 	}
@@ -311,7 +312,7 @@ func TestHandleJobsCancelEmptyJID(t *testing.T) {
 	defer cleanup()
 
 	params := json.RawMessage(`{"jid":""}`)
-	_, err := handleJobsCancel(props.CurrentTenantID(), params)
+	_, err := handleJobsCancel(apiCaller{TenantID: props.CurrentTenantID()}, params)
 	if err == nil {
 		t.Fatal("expected error for empty JID")
 	}
@@ -322,7 +323,7 @@ func TestHandleJobsCancelNonexistent(t *testing.T) {
 	defer cleanup()
 
 	params := json.RawMessage(`{"jid":"does-not-exist"}`)
-	_, err := handleJobsCancel(props.CurrentTenantID(), params)
+	_, err := handleJobsCancel(apiCaller{TenantID: props.CurrentTenantID()}, params)
 	if err == nil {
 		t.Fatal("expected error for nonexistent JID")
 	}
@@ -388,7 +389,7 @@ func TestHandleJobsDeleteSuccess(t *testing.T) {
 	writeTestJob(t, obj, "sprout-del", "del-jid", steps)
 
 	params := json.RawMessage(`{"jid":"del-jid"}`)
-	result, err := handleJobsDelete(props.CurrentTenantID(), params)
+	result, err := handleJobsDelete(adminCaller(t, props.CurrentTenantID()), params)
 	if err != nil {
 		t.Fatalf("handleJobsDelete: %v", err)
 	}
@@ -413,7 +414,7 @@ func TestHandleJobsDeleteNotFound(t *testing.T) {
 	defer cleanup()
 
 	params := json.RawMessage(`{"jid":"nonexistent"}`)
-	_, err := handleJobsDelete(props.CurrentTenantID(), params)
+	_, err := handleJobsDelete(adminCaller(t, props.CurrentTenantID()), params)
 	if err == nil {
 		t.Fatal("expected error for nonexistent job")
 	}
@@ -424,7 +425,7 @@ func TestHandleJobsDeleteEmptyJID(t *testing.T) {
 	defer cleanup()
 
 	params := json.RawMessage(`{"jid":""}`)
-	_, err := handleJobsDelete(props.CurrentTenantID(), params)
+	_, err := handleJobsDelete(adminCaller(t, props.CurrentTenantID()), params)
 	if err == nil {
 		t.Fatal("expected error for empty JID")
 	}
@@ -434,7 +435,7 @@ func TestHandleJobsDeleteInvalidJSON(t *testing.T) {
 	_, cleanup := setupJobStore(t)
 	defer cleanup()
 
-	_, err := handleJobsDelete(props.CurrentTenantID(), json.RawMessage(`{invalid`))
+	_, err := handleJobsDelete(adminCaller(t, props.CurrentTenantID()), json.RawMessage(`{invalid`))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
@@ -954,33 +955,39 @@ func TestHandleCohortsValidateNilRegistry(t *testing.T) {
 
 // --- Auth handler tests ---
 
-func TestHandleAuthWhoAmINoToken(t *testing.T) {
-	// Without dangerouslyAllowRoot, no token should fail.
-	_, err := handleAuthWhoAmI(props.CurrentTenantID(), json.RawMessage(`{}`))
-	if err == nil {
-		t.Fatal("expected error for empty token")
+// The auth handlers report the caller the router verified, and nothing a
+// request's params say.
+func TestHandleAuthWhoAmIIsTheCaller(t *testing.T) {
+	c := adminCaller(t, props.CurrentTenantID())
+	result, err := handleAuthWhoAmI(c, json.RawMessage(`{"token":"x","pubkey":"USOMEONEELSE"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info := result.(apitypes.UserInfo); info.Pubkey != c.UserID || info.RoleName != "admin" {
+		t.Fatalf("whoami = %+v", info)
 	}
 }
 
-func TestHandleAuthWhoAmIEmptyParams(t *testing.T) {
-	_, err := handleAuthWhoAmI(props.CurrentTenantID(), nil)
-	if err == nil {
-		t.Fatal("expected error for nil params")
+func TestHandleAuthExplainIsTheCaller(t *testing.T) {
+	c := adminCaller(t, props.CurrentTenantID())
+	result, err := handleAuthExplain(c, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp := result.(apitypes.ExplainResponse); resp.Pubkey != c.UserID || !resp.IsAdmin {
+		t.Fatalf("explain = %+v", resp)
 	}
 }
 
-func TestHandleAuthWhoAmIInvalidToken(t *testing.T) {
-	params := json.RawMessage(`{"token":"invalid-garbage"}`)
-	_, err := handleAuthWhoAmI(props.CurrentTenantID(), params)
-	if err == nil {
-		t.Fatal("expected error for invalid token")
+func TestHandleAuthLoginUnknownCaller(t *testing.T) {
+	// A caller whose request opened but who has no role (their key is
+	// registered, their role isn't): authenticated, with nothing allowed.
+	result, err := handleAuthLogin(apiCaller{TenantID: props.CurrentTenantID(), UserID: "UNOROLE"}, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestHandleAuthExplainNoToken(t *testing.T) {
-	_, err := handleAuthExplain(props.CurrentTenantID(), json.RawMessage(`{}`))
-	if err == nil {
-		t.Fatal("expected error for empty token")
+	if resp := result.(apitypes.LoginResponse); resp.IsAdmin || len(resp.Actions) != 0 || resp.Pubkey != "UNOROLE" {
+		t.Fatalf("login = %+v", resp)
 	}
 }
 

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	intauth "github.com/yogzblr/imas/internal/auth"
 	"github.com/yogzblr/imas/internal/jobs"
 	"github.com/yogzblr/imas/internal/rbac"
 )
@@ -31,7 +30,7 @@ type JobsForSproutParams struct {
 	SproutID string `json:"sprout_id"`
 }
 
-func handleJobsList(tenantID string, params json.RawMessage) (any, error) {
+func handleJobsList(c apiCaller, params json.RawMessage) (any, error) {
 	var p JobsListParams
 	if len(params) > 0 {
 		json.Unmarshal(params, &p)
@@ -48,38 +47,26 @@ func handleJobsList(tenantID string, params json.RawMessage) (any, error) {
 		summaries = []jobs.JobSummary{}
 	}
 
-	// Scope filtering: if the user has scoped view access, filter the
-	// job list to only include jobs for sprouts they can view.
-	if !intauth.DangerouslyAllowRoot() {
-		var tp tokenParams
-		if len(params) > 0 {
-			json.Unmarshal(params, &tp)
-		}
-		if tp.Token != "" {
-			sproutIDs := make([]string, 0, len(summaries))
-			seen := make(map[string]bool)
-			for _, s := range summaries {
-				if s.SproutID != "" && !seen[s.SproutID] {
-					sproutIDs = append(sproutIDs, s.SproutID)
-					seen[s.SproutID] = true
-				}
-			}
-			allowed := filterSproutsByScope(tenantID, tp.Token, rbac.ActionView, sproutIDs)
-			if allowed != nil {
-				allowedSet := make(map[string]bool, len(allowed))
-				for _, id := range allowed {
-					allowedSet[id] = true
-				}
-				filtered := make([]jobs.JobSummary, 0, len(summaries))
-				for _, s := range summaries {
-					if s.SproutID == "" || allowedSet[s.SproutID] {
-						filtered = append(filtered, s)
-					}
-				}
-				summaries = filtered
-			}
+	// Scope filtering: only jobs for sprouts the verified user may view.
+	sproutIDs := make([]string, 0, len(summaries))
+	seen := make(map[string]bool)
+	for _, s := range summaries {
+		if s.SproutID != "" && !seen[s.SproutID] {
+			sproutIDs = append(sproutIDs, s.SproutID)
+			seen[s.SproutID] = true
 		}
 	}
+	allowedSet := make(map[string]bool, len(sproutIDs))
+	for _, id := range filterSproutsByScope(c.TenantID, c.UserID, rbac.ActionView, sproutIDs) {
+		allowedSet[id] = true
+	}
+	filtered := make([]jobs.JobSummary, 0, len(summaries))
+	for _, s := range summaries {
+		if s.SproutID == "" || allowedSet[s.SproutID] {
+			filtered = append(filtered, s)
+		}
+	}
+	summaries = filtered
 
 	// Filter by invoking user if requested.
 	if p.User != "" {
@@ -115,7 +102,7 @@ type JobsDeleteParams struct {
 	JID string `json:"jid"`
 }
 
-func handleJobsDelete(tenantID string, params json.RawMessage) (any, error) {
+func handleJobsDelete(c apiCaller, params json.RawMessage) (any, error) {
 	var p JobsDeleteParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, err
@@ -131,15 +118,9 @@ func handleJobsDelete(tenantID string, params json.RawMessage) (any, error) {
 	}
 
 	// Scope check: verify the user can delete jobs on this sprout.
-	if !intauth.DangerouslyAllowRoot() {
-		var tp tokenParams
-		if len(params) > 0 {
-			json.Unmarshal(params, &tp)
-		}
-		if tp.Token != "" && summary.SproutID != "" {
-			if err := checkScopedAccess(tenantID, tp.Token, rbac.ActionJobAdmin, []string{summary.SproutID}); err != nil {
-				return nil, rbac.ErrAccessDenied
-			}
+	if summary.SproutID != "" {
+		if err := checkScopedAccess(c.TenantID, c.UserID, rbac.ActionJobAdmin, []string{summary.SproutID}); err != nil {
+			return nil, rbac.ErrAccessDenied
 		}
 	}
 
@@ -153,7 +134,8 @@ func handleJobsDelete(tenantID string, params json.RawMessage) (any, error) {
 	}, nil
 }
 
-func handleJobsCancel(tenantID string, params json.RawMessage) (any, error) {
+func handleJobsCancel(c apiCaller, params json.RawMessage) (any, error) {
+	tenantID := c.TenantID
 	var p JobsGetParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, err
@@ -171,15 +153,9 @@ func handleJobsCancel(tenantID string, params json.RawMessage) (any, error) {
 	// The middleware checks action-level (job_admin), but we need to
 	// verify scope against the job's sprout_id which is only known
 	// after looking up the job.
-	if !intauth.DangerouslyAllowRoot() {
-		var tp tokenParams
-		if len(params) > 0 {
-			json.Unmarshal(params, &tp)
-		}
-		if tp.Token != "" && summary.SproutID != "" {
-			if err := checkScopedAccess(tenantID, tp.Token, rbac.ActionJobAdmin, []string{summary.SproutID}); err != nil {
-				return nil, rbac.ErrAccessDenied
-			}
+	if summary.SproutID != "" {
+		if err := checkScopedAccess(tenantID, c.UserID, rbac.ActionJobAdmin, []string{summary.SproutID}); err != nil {
+			return nil, rbac.ErrAccessDenied
 		}
 	}
 

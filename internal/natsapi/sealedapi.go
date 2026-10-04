@@ -2,16 +2,15 @@ package natsapi
 
 // Sealed control-plane requests, farmer's NATS side
 // (docs/design/imas-payload-encryption-design.md, "Sealing the control
-// plane", J.1). FLAG FOR SECURITY REVIEW.
+// plane", J.1 and J.3). FLAG FOR SECURITY REVIEW.
 //
-// Helpers only: nothing here is registered on the bus yet, and the router
-// (Subscribe, authMiddleware) is unchanged. Rollout step 4 puts
-// openCLIRequest and sealCLIReply around every imas.api.* handler in
-// Subscribe's wrapper, and step 5 puts the SaaS API pair around
-// internal.*. Owner decisions, 2026-10-04: sealed only, with no bearer
-// token fallback and no plaintext fallback; method names stay visible in
-// subjects (open question 9); static keys (open question 8); the Valkey
-// claim for mutating methods fails closed (open question 7).
+// openCLIRequest and sealCLIReply are wired around every imas.api.*
+// handler by the sealed router (sealedrouter.go, J.3). The SaaS API pair
+// (openSaaSAPIRequest and its seals) waits for rollout step 5 (J.4) to be
+// put around internal.*. Owner decisions, 2026-10-04: sealed only, with
+// no bearer token fallback and no plaintext fallback; method names stay
+// visible in subjects (open question 9); static keys (open question 8);
+// the Valkey claim for mutating methods fails closed (open question 7).
 //
 // What a request must pass, in order, before a handler may run:
 //
@@ -49,12 +48,14 @@ import (
 )
 
 // MethodAuthRotateKey is a CLI user's box key rotation
-// (c2f.userkey.pub). Not routed until rollout step 4; mutating.
+// (c2f.userkey.pub, handleAuthRotateKey); mutating.
 const MethodAuthRotateKey = pki.MethodAuthRotateKey
 
 // readOnlyMethods are the imas.api.* methods that change nothing, so a
 // sealed request for one needs no cluster-wide claim: the design's
-// explicit list. Every other method counts as mutating, the way
+// explicit list, plus recipes.list and recipes.get (owner decision
+// 2026-10-04, PR #95: "yes make it readonly"). Every other method counts
+// as mutating, the way
 // NATSMethodAction defaults to admin, including cohorts.refresh (it
 // rewrites the membership cache and is costly), auth.login (not on the
 // design's list; harmless, but a list of exceptions should stay the
@@ -79,6 +80,8 @@ var readOnlyMethods = map[string]bool{
 	MethodAuthExplain:     true,
 	MethodAuditDates:      true,
 	MethodAuditQuery:      true,
+	MethodRecipesList:     true,
+	MethodRecipesGet:      true,
 }
 
 // IsMutatingMethod reports whether a sealed request for method must be
@@ -211,8 +214,9 @@ func (s *sealedAPI) accept(ctx context.Context, req *sealedRequest, msg *payload
 
 // openCLIRequest checks m, a request on imas.api.<method> on tenantID's
 // connection, and returns it opened. A *sealedRefusal (RefusalCode) is
-// answered with its header code; ErrSealedStoreUnavailable with a sealed
-// error (sealCLIReply); anything else with the internal code.
+// answered with its header code; ErrSealedStoreUnavailable, which comes
+// with the opened request, with a sealed error (sealCLIReply); anything
+// else with the internal code.
 func (s *sealedAPI) openCLIRequest(ctx context.Context, tenantID string, m *nats.Msg) (*sealedRequest, error) {
 	if m.Header.Get(payloadbox.Header) != payloadbox.HeaderBox1 {
 		return nil, refuse(payloadbox.ErrorCodeEncryptionRequired, errors.New("plaintext request"))
@@ -241,6 +245,10 @@ func (s *sealedAPI) openCLIRequest(ctx context.Context, tenantID string, m *nats
 		ID: msg.ID, Params: body.Params, SealedUnder: sealedUnder,
 	}
 	if err := s.accept(ctx, req, msg, IsMutatingMethod(method)); err != nil {
+		if errors.Is(err, ErrSealedStoreUnavailable) {
+			// It opened: the caller answers with a sealed error.
+			return req, err
+		}
 		return nil, err
 	}
 	return req, nil

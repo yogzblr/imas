@@ -12,7 +12,11 @@ import (
 	"github.com/yogzblr/imas/internal/auth"
 )
 
-// testCmd represents the test command
+// authCmd groups the CLI's identity commands. There is no token command:
+// the CLI's NKey signs only the bus's connection nonce, and every request
+// to farmer is sealed with the CLI box key (imas auth keygen), so there is
+// no bearer token to print (docs/design/imas-payload-encryption-design.md,
+// Decision A).
 var authCmd = &cobra.Command{
 	Use:   "auth",
 	Short: "Commands for authentication information",
@@ -25,7 +29,6 @@ func init() {
 	authCmd.AddCommand(authLoginCmd)
 	authCmd.AddCommand(authPrivKeyCmd)
 	authCmd.AddCommand(authPubKeyCmd)
-	authCmd.AddCommand(authTokenCmd)
 	authCmd.AddCommand(authWhoAmICmd)
 	authCmd.AddCommand(authUsersCmd)
 	authCmd.AddCommand(authRolesCmd)
@@ -43,7 +46,7 @@ and returns the user's identity, role, and permissions.
 This is useful to verify connectivity and auth before running commands.`,
 	Args: cobra.NoArgs,
 	Run: func(cmd *cobra.Command, _ []string) {
-		result, err := client.Login()
+		result, err := withNats(client.Login)
 		switch outputMode {
 		case "json":
 			if err != nil {
@@ -96,7 +99,7 @@ var authWhoAmICmd = &cobra.Command{
 	Short: "Show the identity and role of the current CLI user",
 	Args:  cobra.NoArgs,
 	Run: func(cmd *cobra.Command, _ []string) {
-		info, err := client.WhoAmI()
+		info, err := withNats(client.WhoAmI)
 		switch outputMode {
 		case "json":
 			result := struct {
@@ -133,7 +136,7 @@ var authUsersCmd = &cobra.Command{
 	Short: "List all configured users and their roles",
 	Args:  cobra.NoArgs,
 	Run: func(cmd *cobra.Command, _ []string) {
-		result, err := client.ListUsers()
+		result, err := withNats(client.ListUsers)
 		switch outputMode {
 		case "json":
 			jw, _ := json.Marshal(result)
@@ -174,7 +177,7 @@ var authRolesCmd = &cobra.Command{
 	Short: "List all configured role definitions",
 	Args:  cobra.NoArgs,
 	Run: func(cmd *cobra.Command, _ []string) {
-		result, err := client.ListUsers()
+		result, err := withNats(client.ListUsers)
 		switch outputMode {
 		case "json":
 			jw, _ := json.Marshal(result.Roles)
@@ -213,7 +216,7 @@ var authExplainCmd = &cobra.Command{
 	Long:  "Displays a permission summary including actions, scopes, and any policy warnings for the authenticated user.",
 	Args:  cobra.NoArgs,
 	Run: func(cmd *cobra.Command, _ []string) {
-		result, err := client.ExplainAccess()
+		result, err := withNats(client.ExplainAccess)
 		switch outputMode {
 		case "json":
 			jw, _ := json.Marshal(result)
@@ -317,36 +320,20 @@ var authPubKeyCmd = &cobra.Command{
 	},
 }
 
-var authTokenCmd = &cobra.Command{
-	Use:   "token",
-	Short: "Create token for the Authorization header of API requests",
-	Long:  `Token is valid for 5 minutes`,
-	Args:  cobra.NoArgs,
-	Run: func(cmd *cobra.Command, _ []string) {
-		token, err := auth.NewToken()
-		switch outputMode {
-		case "json":
-			token := struct {
-				Token string `json:"token"`
-				Error string `json:"error"`
-			}{Token: token}
-			if err != nil {
-				token.Error = err.Error()
-			}
-			jw, _ := json.Marshal(token)
-			fmt.Println(string(jw))
-			if err != nil {
-				os.Exit(1)
-			}
-			return
-		case "":
-			fallthrough
-		case "text":
-			if err != nil {
-				log.Println("Error: " + err.Error())
-				os.Exit(1)
-			}
-			fmt.Println(token)
-		}
-	},
+// ensureNats connects to the bus if root's PersistentPreRun didn't (it
+// skips the auth commands, most of which work offline).
+func ensureNats() error {
+	if client.NatsConn != nil {
+		return nil
+	}
+	return client.ConnectNats()
+}
+
+// withNats connects (ensureNats), then calls f.
+func withNats[T any](f func() (T, error)) (T, error) {
+	if err := ensureNats(); err != nil {
+		var zero T
+		return zero, err
+	}
+	return f()
 }

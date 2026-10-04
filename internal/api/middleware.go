@@ -23,19 +23,22 @@ func Logger(inner http.Handler, name string) http.Handler {
 	})
 }
 
-// Auth wraps a handler with authentication and role-based access control.
-// The name parameter must match a key from the Routes map so that
-// role permissions can be checked against the route.
+// Auth wraps a handler with authentication.
+// The name parameter must match a key from the Routes map.
 //
 // Public routes (GetCertificate, PutNKey) are allowed without a token.
 // If dangerously_allow_root is set in the farmer config, all requests
 // are allowed without authentication.
 //
-// FileServer (GET /files/) additionally accepts a sprout's gateway JWT
-// — see sproutFileAccess. SproutUpdateManifest (GET
-// /v1/sprout/update-manifest) accepts only a gateway JWT — see
-// sproutIdentityAuth. Every other route, ListRecipes/GetRecipe
-// included, accepts only the CLI's NKey-signed RBAC token.
+// FileServer (GET /files/) accepts a sprout's gateway JWT — see
+// sproutFileAccess. SproutUpdateManifest (GET /v1/sprout/update-manifest)
+// accepts only a gateway JWT — see sproutIdentityAuth. Nothing accepts a
+// CLI credential any more: the CLI's bearer token, an NKey signature a
+// compromised bus could mint from a CONNECT nonce, is gone (J.3,
+// docs/design/imas-payload-encryption-design.md Decision A), and the CLI
+// browses recipes over sealed imas.api.recipes.* instead. ListRecipes and
+// GetRecipe therefore refuse every request without
+// dangerously_allow_root; removing those routes is a follow-up.
 func Auth(inner http.Handler, name string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch name {
@@ -64,26 +67,15 @@ func Auth(inner http.Handler, name string) http.Handler {
 		}
 
 		// A gateway JWT arrives as "Bearer <jws>" (Envoy's jwt_authn
-		// default, forwarded as-is); the CLI token is bare base64 JSON
-		// and never has that prefix. Once a request presents a bearer
-		// token it is judged on that token alone — no fallback to the
-		// CLI path.
+		// default, forwarded as-is). It is the only credential any
+		// route here accepts.
 		if name == "FileServer" {
-			if jws, ok := strings.CutPrefix(authToken, "Bearer "); ok {
-				if sproutFileAccess(r, jws) {
-					inner.ServeHTTP(w, r)
-				} else {
-					w.WriteHeader(http.StatusForbidden)
-				}
+			if jws, ok := strings.CutPrefix(authToken, "Bearer "); ok && sproutFileAccess(r, jws) {
+				inner.ServeHTTP(w, r)
 				return
 			}
 		}
-
-		if auth.TokenHasRouteAccess(authToken, name) {
-			inner.ServeHTTP(w, r)
-		} else {
-			w.WriteHeader(http.StatusForbidden)
-		}
+		w.WriteHeader(http.StatusForbidden)
 	})
 }
 

@@ -58,7 +58,7 @@ released.
 | 11 | Recipe download uses the same JWT | **Green** | |
 | 12 | Envoy with JWT validation | **Green** | |
 | 13 | Backend on Kubernetes | **Amber** | Install the charts on a real cluster (UAT gate). No Terraform exists. |
-| 14 | Payload encryption | **Red** | Seal `shell.*` (Open item 2) and the control plane (Open item 11): a compromised bus can still open a shell on a Unix sprout and mint CLI tokens. Refreshing as a sprout is closed by J.2 (sealed refresh, in review). |
+| 14 | Payload encryption | **Red** | Seal `shell.*` (Open item 2) and the control plane (Open item 11): a compromised bus can still open a shell on a Unix sprout and forge `internal.*`. Refreshing as a sprout is closed by J.2 (sealed refresh); minting CLI tokens is closed by J.3 (bearer tokens removed, the CLI API sealed, in review). |
 | 15 | Key rotation for sprout keys | **Amber** | Reword `requirements.md` to match the built design (the private key is never sent). |
 | 16 | SDB-equivalent secrets | **Green** | |
 | 17 | Probe capability | **Green** | |
@@ -96,7 +96,7 @@ released.
 | 8 | Docs wording (requirement 15, README embedded bus) | **Amber** | Small docs change. |
 | 9 | Nice-to-haves (Keycloak harness, rotation scheduler, CERT-In/DPDP review) | **Amber** | Unowned. |
 | 10 | Leftovers from PR #62 to #67 (release pipeline, stale diagram, OpenBao client follow-ups) | **Amber** | Fold into one clean-up brief after the first release shows what the pipeline really needs. Add fleetreleaser's check against the tag's signed `checksums.txt` there if wanted (SEC.5 report). REC.1 follow-ups are listed under item 10: audit table, deprovision clean-up, and the role on `cook`. |
-| 11 | Control plane forgeable by a compromised bus (CLI tokens, sprout refresh, `internal.*`) | **Red** | Design written, awaiting security review ("Sealing the control plane" in `imas-payload-encryption-design.md`). Ship the token-lifetime stopgap now. |
+| 11 | Control plane forgeable by a compromised bus (CLI tokens, sprout refresh, `internal.*`) | **Red** | Design written ("Sealing the control plane" in `imas-payload-encryption-design.md`). J.1 (building blocks) and J.2 (sealed sprout refresh) merged; J.3 (sealed CLI API, bearer tokens removed) in review; all flagged for security review. `internal.*` (J.4) still open. |
 
 ## Requirements traceability
 
@@ -1059,11 +1059,11 @@ by an external git sync today.
       guard, and the Valkey claim (10-minute TTL, fail closed for mutating
       methods; the design's read-only list).
     - Not wired by J.1: sealed refresh (rollout step 3, now J.2, below),
-      sealed `imas.api.*` (step 4), sealed `internal.*` (step 5). Until
-      those land, every gap above but the sprout refresh stands. `auth.users.add` now persists on a Helm install too, while it
-      still takes a bearer token the bus can mint for 15 minutes; nothing
-      is deployed. Owner decision, 2026-10-04: no stopgap, the exposure is
-      accepted until J.4 lands.
+      sealed `imas.api.*` (step 4, now J.3, below), sealed `internal.*`
+      (step 5, J.4). Until J.4 lands, the `internal.*` gaps above stand.
+      `auth.users.add` now persists on a Helm install too; the bearer token
+      the bus could mint for it (accepted until J.4 by the owner's decision
+      of 2026-10-04, no stopgap) is gone since J.3, which seals the request.
     - The first admin's CLI box key comes from a `boxpub` field in farmer's
       config, imported once at start (owner decision). Users stay under
       the `farmerorganization` tenant: the CLI is for operators only.
@@ -1131,12 +1131,58 @@ by an external git sync today.
     - Known gap: `ansible/molecule/stubfarmer` still speaks the old refresh
       contract (its 24-hour tokens mean a molecule run never refreshes).
 
-    **Stopgap SEC.0 (in review, flagged for security review):**
-    `UserAuth.IsValid` refuses an expiry more than 15 minutes ahead (the
+
+    **J.3, sealed CLI ↔ farmer (Decision A, rollout step 4), in review,
+    flagged for security review.** Closes the first and third bullets above
+    for the CLI. Sprout refresh is J.2's (above); the SaaS API is J.4's.
+    - Bearer tokens are deleted: no token is created, sent, accepted or
+      validated anywhere (`auth.NewToken`, `UserAuth`, the SEC.0 cap and
+      `apitokenclockskew`, `injectToken`, `imas auth token`). The CLI's
+      NKey signs the bus nonce only, so a signature the bus collects at
+      `CONNECT` is worth nothing (`TestForgedTokenRegression`).
+    - Every `imas.api.*` request is a sealed `c2f.api` message from the
+      user's CLI box key, every reply a sealed `f2c.api` back. One router
+      (`internal/natsapi` `sealedrouter.go`) opens, derives the user from
+      the key that opened it, authorizes and scope-checks that user,
+      audits, and seals the reply. Replays are refused per replica and,
+      for mutating methods, across replicas (Valkey, fail closed). The CLI
+      refuses a plaintext reply. Only an unsealed `health`/`version` gets a
+      plaintext answer, for monitoring.
+    - `auth.users.add` carries the new user's box key (required);
+      `auth.users.resetkey` (new) replaces a lost key; `auth.rotatekey` is
+      routed. The first admin is bootstrapped from farmer's config, with
+      the Helm value `farmer.bootstrapAdmin` (`adminPubKeys` now refuses to
+      render); a config `users.admin` now gets the built-in admin role,
+      which it silently lacked before.
+    - The cook trigger is a sealed `cook.trigger.<jid>` accepted only from
+      the job's creator; recipe browsing moved from the HTTPS token route
+      to sealed `recipes.list`/`recipes.get`.
+    - Still plaintext until Decision D: the step events `imas cook`, `imas
+      jobs watch` and `imas serve`'s log stream read, which a compromised
+      bus can read and forge (the job store, through sealed `jobs.get`, is
+      authoritative); shell sessions until J.5. Listed in the design.
+    - Outside J.3's file scope, changed only as far as the token removal
+      forced: `internal/api/middleware.go` (no CLI-token branch; the HTTP
+      recipe routes now refuse everything), `cmd/farmer/main.go` (no token
+      resolver; installs the recipe store for `recipes.*`), and tests in
+      `internal/serve` and `cmd/sprout`. Owner decision, 2026-10-04 (PR #95):
+      "out of scope is ok"; these files and the design edits are accepted.
+    - Owner decisions, 2026-10-04 (PR #95): "remove dangerously_allow_root
+      bypass from the NATS path" (done: the flag now only bypasses
+      farmer's HTTP `GET /files/` and `GET /v1/recipes`); `recipes.list`
+      and `recipes.get` are read-only ("yes make it readonly"); the JID in
+      the cook trigger's subject is accepted ("yes fine");
+      `auth.users.resetkey` stays ("lets keep it since it is admin only");
+      the cleanup waits for a later PR ("leave the cleanup for a later
+      PR"): the HTTP recipe routes, the audit token resolver, and `boxpub`
+      in the web UI's add-user form, which fails until then.
+
+    **Stopgap SEC.0 (superseded by J.3, which deleted the token code, this
+    cap included):** `UserAuth.IsValid` refused an expiry more than 15 minutes ahead (the
     5-minute token lifetime plus a 10-minute clock skew allowance, set by
-    farmer's `apitokenclockskew`, 0 to 30m). The bus can still mint tokens
-    from a `CONNECT` nonce, but each one expires within that limit instead
-    of in 2099. Only the design closes it.
+    farmer's `apitokenclockskew`, 0 to 30m). The bus could still mint tokens
+    from a `CONNECT` nonce, but each one expired within that limit instead
+    of in 2099. J.3 closes it: there are no tokens.
 
 Known accepted gaps, unchanged: JWT permission re-mint does not apply to
 already-enrolled sprouts (harmless pre-production), and

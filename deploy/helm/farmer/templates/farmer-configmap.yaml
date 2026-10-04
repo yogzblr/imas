@@ -33,8 +33,14 @@
 {{- with .Values.bus.tlsServerName }}
 {{- $_ := set $managed "farmerbustlsservername" . }}
 {{- end }}
-{{- with .Values.farmer.adminPubKeys }}
-{{- $_ := set $managed "pubkeys" (dict "admin" .) }}
+{{- with .Values.farmer.bootstrapAdmin }}
+{{- if .pubkey }}
+{{- $admin := dict "pubkey" .pubkey "boxpub" .boxpub }}
+{{- with .username }}
+{{- $_ := set $admin "username" . }}
+{{- end }}
+{{- $_ := set $managed "users" (dict "admin" (list $admin)) }}
+{{- end }}
 {{- end }}
 apiVersion: v1
 kind: ConfigMap

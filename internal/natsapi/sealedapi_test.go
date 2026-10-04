@@ -36,9 +36,14 @@ type sealedEnv struct {
 func setupSealedEnv(t *testing.T) *sealedEnv {
 	t.Helper()
 	bao := tenantboxtest.Start(t)
-	pki.InvalidateTenantBoxKeys("t_1")
-	pki.InvalidatePlatformBoxKeys()
-	t.Cleanup(func() { pki.InvalidateTenantBoxKeys("t_1"); pki.InvalidatePlatformBoxKeys() })
+	invalidate := func() {
+		for _, tid := range []string{"t_1", "t_2", pki.CurrentTenantID()} {
+			pki.InvalidateTenantBoxKeys(tid)
+		}
+		pki.InvalidatePlatformBoxKeys()
+	}
+	invalidate()
+	t.Cleanup(invalidate)
 
 	mr := miniredis.RunT(t)
 	client, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{mr.Addr()}, DisableCache: true})
@@ -61,11 +66,17 @@ func setupSealedEnv(t *testing.T) *sealedEnv {
 // cliUser is a CLI user with a registered CLI box key in t_1, whose CLI
 // config (jety) is loaded.
 type cliUser struct {
-	id, keyFile string
-	seed        []byte
+	id, keyFile, tenant string
+	seed                []byte
 }
 
 func newSealedCLIUser(t *testing.T) *cliUser {
+	t.Helper()
+	return newSealedCLIUserIn(t, "t_1")
+}
+
+// newSealedCLIUserIn is newSealedCLIUser in tenantID.
+func newSealedCLIUserIn(t *testing.T, tenantID string) *cliUser {
 	t.Helper()
 	kp, err := nkeys.CreateAccount()
 	if err != nil {
@@ -74,13 +85,13 @@ func newSealedCLIUser(t *testing.T) *cliUser {
 	seed, _ := kp.Seed()
 	id, _ := kp.PublicKey()
 	intauth.CurrentPolicy().Users.Set(id, "admin")
-	u := &cliUser{id: id, seed: seed, keyFile: filepath.Join(t.TempDir(), "cli-box.key")}
+	u := &cliUser{id: id, seed: seed, tenant: tenantID, keyFile: filepath.Join(t.TempDir(), "cli-box.key")}
 	u.use(t)
 	pub, err := pki.GenerateCLIBoxKey(u.keyFile, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := pki.RegisterCLIBoxKey("t_1", id, pub); err != nil {
+	if err := pki.RegisterCLIBoxKey(tenantID, id, pub); err != nil {
 		t.Fatalf("RegisterCLIBoxKey: %v", err)
 	}
 	return u
@@ -88,14 +99,14 @@ func newSealedCLIUser(t *testing.T) *cliUser {
 
 func (u *cliUser) use(t *testing.T) {
 	t.Helper()
-	tk, err := pki.GetTenantX25519PublicKey("t_1")
+	tk, err := pki.GetTenantX25519PublicKey(u.tenant)
 	if err != nil {
 		t.Fatal(err)
 	}
 	jety.Set("privkey", string(u.seed))
 	jety.Set(pki.CLIBoxPrivFileKey, u.keyFile)
 	jety.Set(pki.CLITenantBoxPubKey, tk)
-	jety.Set(pki.CLITenantIDKey, "t_1")
+	jety.Set(pki.CLITenantIDKey, u.tenant)
 	t.Cleanup(func() {
 		for _, k := range []string{"privkey", pki.CLIBoxPrivFileKey, pki.CLITenantBoxPubKey, pki.CLITenantIDKey} {
 			jety.Set(k, "")
@@ -332,21 +343,25 @@ func jetyUser(t *testing.T) string {
 // anything else (cohorts.refresh, the auth.users mutators, methods added
 // later) counts as mutating.
 func TestReadOnlyMethods(t *testing.T) {
+	all := apiRoutes()
 	for m := range readOnlyMethods {
-		if _, ok := routes[m]; !ok {
+		if _, ok := all[m]; !ok {
 			t.Errorf("read-only method %q is not a route", m)
 		}
 	}
-	if len(readOnlyMethods) != 19 {
-		t.Errorf("%d read-only methods, the design lists 19", len(readOnlyMethods))
+	// The design's 19, plus recipes.list and recipes.get (owner decision,
+	// PR #95).
+	if len(readOnlyMethods) != 21 {
+		t.Errorf("%d read-only methods, want the design's 19 and the two recipe reads", len(readOnlyMethods))
 	}
 	for _, m := range []string{MethodCohortsRefresh, MethodAuthAddUser, MethodAuthRemoveUser, MethodAuthLogin,
-		MethodCmdRun, MethodCook, MethodShellStart, MethodPKIRotateTenantBoxKey, MethodAuthRotateKey, "x.y"} {
+		MethodCmdRun, MethodCook, MethodShellStart, MethodPKIRotateTenantBoxKey, MethodAuthRotateKey,
+		MethodAuthResetKey, CookTriggerMethod("j1"), "x.y"} {
 		if !IsMutatingMethod(m) {
 			t.Errorf("%s is not treated as mutating", m)
 		}
 	}
-	for _, m := range []string{MethodJobsList, MethodAuditQuery, MethodPKIList} {
+	for _, m := range []string{MethodJobsList, MethodAuditQuery, MethodPKIList, MethodRecipesList, MethodRecipesGet} {
 		if IsMutatingMethod(m) {
 			t.Errorf("%s is treated as mutating", m)
 		}

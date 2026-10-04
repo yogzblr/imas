@@ -195,22 +195,11 @@ func TestScopeExtractorsRegistry(t *testing.T) {
 	}
 }
 
-func TestAuthMiddleware_ScopeEnforcement(t *testing.T) {
-	// When dangerously_allow_root is off and token is invalid,
-	// scope-checked methods should still be denied at the token stage.
-	called := false
-	inner := func(_ string, params json.RawMessage) (any, error) {
-		called = true
-		return "ok", nil
-	}
-
-	wrapped := authMiddleware("cook", inner)
+func TestAuthorize_ScopeEnforcement(t *testing.T) {
+	// A user the policy doesn't know is denied before any scope check,
+	// whatever the params say.
 	params := json.RawMessage(`{"target":[{"sprout_id":"web-1"}],"action":{},"token":"invalid"}`)
-	_, err := wrapped("t_test", params)
-	if err == nil {
-		t.Fatal("expected error for invalid token")
-	}
-	if called {
-		t.Fatal("handler should not be called when token is invalid")
+	if err := authorize("cook", apiCaller{TenantID: "t_test", UserID: "UNOBODY"}, params); err == nil {
+		t.Fatal("expected an unknown user to be denied")
 	}
 }

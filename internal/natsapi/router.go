@@ -1,12 +1,16 @@
 // Package natsapi provides a NATS-based API for the farmer.
-// Authenticated users connect to the NATS bus and send requests to
-// imas.api.<method> subjects. The farmer subscribes to these subjects
-// and dispatches to the appropriate handler.
+// Users of the imas CLI send requests to imas.api.<method> subjects; the
+// farmer subscribes to these subjects and dispatches to the appropriate
+// handler.
 //
-// Request/response follows a simple JSON-RPC-like pattern:
-//
-//	Request:  JSON params (or empty)
-//	Response: {"result": ...} or {"error": "..."}
+// Every request and reply is sealed (docs/design/
+// imas-payload-encryption-design.md, Decision A, J.3): a request is a
+// payloadbox c2f.api Call from the user's CLI box key to the tenant key,
+// and the reply an f2c.api Reply back, carrying {"result": ...} or
+// {"error": "..."} inside the box. sealedrouter.go is the one place that
+// opens, authorizes, audits and seals; handlers see only the verified
+// caller and the opened params. Only health and version are also answered
+// in plaintext, for monitoring.
 package natsapi
 
 import (
@@ -15,18 +19,24 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/yogzblr/imas/internal/audit"
+	intauth "github.com/yogzblr/imas/internal/auth"
 	log "github.com/yogzblr/imas/internal/log"
 )
 
-// handler is a function that processes a NATS API request. It receives the
-// tenant ID of the connection the request arrived on — connection-level
+// handler is a function that processes a NATS API request that doesn't
+// need to know who sent it (authorization already ran). It receives the
+// tenant ID of the connection the request arrived on (connection-level
 // metadata captured by Subscribe's closure, per
-// docs/design/imas-tenant-context-threading.md's Option A — and the raw
+// docs/design/imas-tenant-context-threading.md's Option A) and the opened
 // JSON params, and returns a result or error.
 type handler func(tenantID string, params json.RawMessage) (any, error)
 
-// response is the envelope returned to the caller.
+// userHandler is a handler that needs the caller: apiCaller.UserID is the
+// user whose registered CLI box key the request opened under.
+type userHandler func(c apiCaller, params json.RawMessage) (any, error)
+
+// response is the plaintext envelope health and version answer
+// unsealed requests with (sealedrouter.go). Every other reply is sealed.
 type response struct {
 	Result any    `json:"result,omitempty"`
 	Error  string `json:"error,omitempty"`
@@ -52,8 +62,7 @@ var routes = map[string]handler{
 	MethodPKIRotateTenantBoxKey: handlePKIRotateTenantBoxKey,
 
 	// Sprouts
-	MethodSproutsList: handleSproutsList,
-	MethodSproutsGet:  handleSproutsGet,
+	MethodSproutsGet: handleSproutsGet,
 
 	// Test
 	MethodTestPing: handleTestPing,
@@ -62,14 +71,10 @@ var routes = map[string]handler{
 	MethodCmdRun: handleCmdRun,
 
 	// Cook
-	MethodCook:       handleCook,
 	MethodCookResync: handleCookResync,
 
 	// Jobs
-	MethodJobsList:      handleJobsList,
 	MethodJobsGet:       handleJobsGet,
-	MethodJobsDelete:    handleJobsDelete,
-	MethodJobsCancel:    handleJobsCancel,
 	MethodJobsForSprout: handleJobsListForSprout,
 
 	// Props
@@ -86,19 +91,47 @@ var routes = map[string]handler{
 	MethodCohortsValidate: handleCohortsValidate,
 
 	// Auth
-	MethodAuthLogin:      handleAuthLogin,
-	MethodAuthWhoAmI:     handleAuthWhoAmI,
 	MethodAuthListUsers:  handleAuthListUsers,
 	MethodAuthAddUser:    handleAuthAddUser,
 	MethodAuthRemoveUser: handleAuthRemoveUser,
-	MethodAuthExplain:    handleAuthExplain,
+	MethodAuthResetKey:   handleAuthResetKey,
 
-	// Shell (interactive SSH-like sessions)
-	MethodShellStart: handleShellStart,
+	// Recipes
+	MethodRecipesList: handleRecipesList,
+	MethodRecipesGet:  handleRecipesGet,
 
 	// Audit
 	MethodAuditDates: handleAuditList,
 	MethodAuditQuery: handleAuditQuery,
+}
+
+// userRoutes are the methods whose handlers need the verified caller:
+// scope filtering by the user's role, job attribution, the user's own
+// identity, their own key.
+var userRoutes = map[string]userHandler{
+	MethodSproutsList:   handleSproutsList,
+	MethodCook:          handleCook,
+	MethodJobsList:      handleJobsList,
+	MethodJobsDelete:    handleJobsDelete,
+	MethodJobsCancel:    handleJobsCancel,
+	MethodAuthLogin:     handleAuthLogin,
+	MethodAuthWhoAmI:    handleAuthWhoAmI,
+	MethodAuthExplain:   handleAuthExplain,
+	MethodAuthRotateKey: handleAuthRotateKey,
+	MethodShellStart:    handleShellStart,
+}
+
+// apiRoutes is every imas.api.* method Subscribe registers, as a
+// userHandler.
+func apiRoutes() map[string]userHandler {
+	all := make(map[string]userHandler, len(routes)+len(userRoutes))
+	for method, h := range routes {
+		all[method] = func(c apiCaller, params json.RawMessage) (any, error) { return h(c.TenantID, params) }
+	}
+	for method, h := range userRoutes {
+		all[method] = h
+	}
+	return all
 }
 
 // natsCoreQueueGroup is the NATS queue group shared by all farmer replicas
@@ -111,44 +144,20 @@ const natsCoreQueueGroup = "imas-core"
 
 // Subscribe registers all NATS API handlers on the given connection,
 // scoped to tenantID — the connection's own tenant identity, per
-// docs/design/imas-tenant-context-threading.md's Option A. It subscribes
-// to "imas.api.>" and dispatches based on subject suffix. Each handler is
-// wrapped with RBAC enforcement middleware that checks the caller's token
-// before dispatching. Called once per tenant connection: farmer opens one
-// NATS connection per tenant (cmd/farmer/main.go's ConnectFarmer), and
-// every one of them gets its own full set of registrations.
+// docs/design/imas-tenant-context-threading.md's Option A. Each
+// imas.api.<method> subject gets a queue subscription whose messages go
+// through the sealed router (sealedAPI.serve): opened under the sending
+// user's registered CLI box key, authorized for that user, run, audited,
+// and answered sealed. Called once per tenant connection: farmer opens
+// one NATS connection per tenant (cmd/farmer/main.go's ConnectFarmer),
+// and every one of them gets its own full set of registrations.
 func Subscribe(nc *nats.Conn, tenantID string) error {
 	SetNatsConn(tenantID, nc)
 
-	for method, h := range routes {
+	for method, run := range apiRoutes() {
 		subject := Subject(method)
-		handler := authMiddleware(method, h) // wrap with RBAC enforcement
-		action := method                     // capture for audit
 		_, err := nc.QueueSubscribe(subject, natsCoreQueueGroup, func(msg *nats.Msg) {
-			result, err := handler(tenantID, msg.Data)
-
-			// Audit log: record actions based on configured audit level.
-			if audit.ShouldLog(action) {
-				if auditErr := audit.LogAction(action, msg.Data, result, err); auditErr != nil {
-					log.Errorf("natsapi: audit log failed for %s: %v", action, auditErr)
-				}
-			}
-
-			var resp response
-			if err != nil {
-				resp.Error = err.Error()
-			} else {
-				resp.Result = result
-			}
-			data, marshalErr := json.Marshal(resp)
-			if marshalErr != nil {
-				data = []byte(fmt.Sprintf(`{"error":"marshal error: %s"}`, marshalErr.Error()))
-			}
-			if msg.Reply != "" {
-				if pubErr := msg.Respond(data); pubErr != nil {
-					log.Errorf("natsapi: failed to respond to %s: %v", msg.Subject, pubErr)
-				}
-			}
+			replicaSealedAPI.serve(tenantID, method, run, msg)
 		})
 		if err != nil {
 			return fmt.Errorf("natsapi: failed to subscribe to %s: %w", subject, err)
@@ -160,5 +169,8 @@ func Subscribe(nc *nats.Conn, tenantID string) error {
 		return err
 	}
 
+	if announceCLIPin && tenantID == intauth.UsersTenantID() {
+		go logCLIPin(tenantID)
+	}
 	return nil
 }

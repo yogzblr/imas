@@ -77,6 +77,9 @@ func TestMain(m *testing.M) {
 	cook.SetStore(store)
 	testRecipeStore = store
 
+	// Subscribe would read the users tenant's box key to log the CLI pin.
+	announceCLIPin = false
+
 	code := m.Run()
 	closeStore()
 	os.Exit(code)

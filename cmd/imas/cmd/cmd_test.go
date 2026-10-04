@@ -524,7 +524,7 @@ func TestKeysCommand_HasSubcommands(t *testing.T) {
 }
 
 func TestAuthCommand_HasSubcommands(t *testing.T) {
-	expected := []string{"privkey", "pubkey", "token", "whoami", "users", "roles", "explain"}
+	expected := []string{"privkey", "pubkey", "keygen", "rotate-key", "whoami", "users", "roles", "explain"}
 	names := make(map[string]bool)
 	for _, c := range authCmd.Commands() {
 		names[c.Name()] = true

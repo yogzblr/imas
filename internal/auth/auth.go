@@ -7,8 +7,10 @@ import (
 
 	"github.com/nats-io/nkeys"
 	"github.com/taigrr/jety"
+	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/rbac"
 )
 
@@ -70,13 +72,6 @@ func LoadPolicy() error {
 	policyMu.Lock()
 	defer policyMu.Unlock()
 
-	// An invalid token clock skew allowance fails the whole load, like
-	// any other policy error: with no policy loaded, every token is
-	// refused (fail closed).
-	if err := loadTokenClockSkew(); err != nil {
-		return err
-	}
-
 	// Validate pubkey uniqueness before loading — reject configs where
 	// the same key appears under multiple roles.
 	if err := rbac.ValidateUserUniqueness(); err != nil {
@@ -94,6 +89,9 @@ func LoadPolicy() error {
 	if err != nil {
 		return err
 	}
+	if err := ensureBuiltinAdminRoleLocked(); err != nil {
+		return err
+	}
 	userRoleMap = rbac.LoadUsersFromConfig()
 	// Users registered through the API live in the users store, not the
 	// config file: put them back after the config reload above wiped
@@ -109,24 +107,6 @@ func LoadPolicy() error {
 		return err
 	}
 
-	// If no roles defined but legacy pubkeys.admin exists, create a
-	// built-in admin role so existing configs keep working.
-	if len(roleStore.List()) == 0 {
-		legacyKeys, legacyErr := GetPubkeysByRole("admin")
-		if legacyErr == nil && len(legacyKeys) > 0 {
-			adminRole := &rbac.Role{
-				Name:  "admin",
-				Rules: []rbac.Rule{{Action: rbac.ActionAdmin, Scope: "*"}},
-			}
-			roleStore.Register(adminRole)
-			for _, k := range legacyKeys {
-				if userRoleMap.RoleName(k) == "" {
-					userRoleMap.Set(k, "admin")
-				}
-			}
-		}
-	}
-
 	// Validate the assembled policy and log warnings.
 	policy := currentPolicyLocked()
 	warnings := rbac.ValidatePolicy(policy)
@@ -135,6 +115,27 @@ func LoadPolicy() error {
 	}
 
 	return nil
+}
+
+// AdminRoleName is the built-in role that grants every action on every
+// scope. The first admin is assigned it in farmer's config file
+// (users.admin, or Helm's farmer.bootstrapAdmin).
+const AdminRoleName = "admin"
+
+// ensureBuiltinAdminRoleLocked registers the built-in admin role unless
+// the config file defines a role of that name, so a users.admin or legacy
+// pubkeys.admin entry means what it says without a roles section. (The
+// check this replaces only ran when no role at all was defined, which
+// never happens: the viewer and operator roles are always registered, so
+// a config-file admin had no role.) Must be called with policyMu held.
+func ensureBuiltinAdminRoleLocked() error {
+	if _, err := roleStore.Get(AdminRoleName); err == nil {
+		return nil
+	}
+	return roleStore.Register(&rbac.Role{
+		Name:  AdminRoleName,
+		Rules: []rbac.Rule{{Action: rbac.ActionAdmin, Scope: "*"}},
+	})
 }
 
 // currentPolicyLocked returns a Policy snapshot. Must be called with
@@ -212,19 +213,13 @@ func getPrivateSeed() (string, error) {
 	return seed, nil
 }
 
-func NewToken() (string, error) {
-	seed, err := getPrivateSeed()
-	if err != nil {
-		return "", err
-	}
-	kp, err := nkeys.FromSeed([]byte(seed))
-	if err != nil {
-		return "", err
-	}
-	return createSignedToken(kp)
-}
-
-// Sign signs a nonce using the local private key.
+// Sign signs a bus nonce with the local private key: the CLI's NKey
+// authenticates its NATS connection (nats.Nkey) and signs nothing else.
+// The bus chooses the nonce, so a signature from this key proves nothing
+// to farmer, and farmer accepts no proof that rests on one: requests are
+// sealed under the CLI box key instead (docs/design/
+// imas-payload-encryption-design.md, Decision A, P1). There are no bearer
+// tokens any more (J.3): nothing turns a signature into a credential.
 func Sign(nonce []byte) ([]byte, error) {
 	seed, err := getPrivateSeed()
 	if err != nil {
@@ -240,141 +235,65 @@ func Sign(nonce []byte) ([]byte, error) {
 }
 
 // DangerouslyAllowRoot returns true if the farmer config has
-// dangerously_allow_root set. Bypasses all auth checks (dev only).
+// dangerously_allow_root set (dev only). It bypasses authentication on
+// farmer's HTTP API for GET /files/ and the GET /v1/recipes routes
+// (internal/api's Auth), and nothing else. It has no effect on the NATS
+// API: every sealed imas.api.* request goes through the role and scope
+// checks below for the user it opened under (owner decision 2026-10-04,
+// PR #95).
 func DangerouslyAllowRoot() bool {
 	return jety.GetBool("dangerously_allow_root")
 }
 
-// TokenHasAccess is the legacy auth check — returns true if the token
-// maps to any configured user. Kept for backward compatibility.
-func TokenHasAccess(token string, method string) bool {
-	if DangerouslyAllowRoot() {
-		return true
-	}
-	ua, err := decodeToken(token)
-	if err != nil {
-		return false
-	}
-	pk, err := ua.IsValid()
-	if err != nil {
-		return false
-	}
-	return pubkeyHasAccess(pk, method)
-}
+// ---- what a verified user may do ----------------------------------------
+//
+// Every check below takes a user ID (an NKey public key) that a sealed
+// request opened under: internal/natsapi's router derives it from the
+// registered CLI box key that opened the request, never from a field in
+// the request. These functions only answer what that user may do.
 
-// TokenHasRouteAccess checks whether the bearer token has permission
-// for the named route (e.g. "Cook", "AcceptID"). Uses policy-based RBAC.
-func TokenHasRouteAccess(token string, routeName string) bool {
-	if DangerouslyAllowRoot() {
-		return true
-	}
-	ua, err := decodeToken(token)
-	if err != nil {
-		return false
-	}
-	pk, err := ua.IsValid()
-	if err != nil {
-		return false
-	}
-	role := lookupRole(pk)
-	if role == nil {
-		return false
-	}
-	return role.HasRouteAccess(routeName)
-}
-
-// TokenHasAction checks whether the bearer token's role includes a
-// specific RBAC action (without scope checking). Use TokenHasScopedAccess
-// when scope-level checks are needed.
-func TokenHasAction(token string, action rbac.Action) bool {
-	if DangerouslyAllowRoot() {
-		return true
-	}
-	ua, err := decodeToken(token)
-	if err != nil {
-		return false
-	}
-	pk, err := ua.IsValid()
-	if err != nil {
-		return false
-	}
-	role := lookupRole(pk)
-	if role == nil {
-		return false
-	}
-	return role.HasAction(action)
-}
-
-// TokenHasScopedAccess checks whether the token has permission for a
-// specific action on specific sprout IDs. Used by handlers that need
-// scope-level checks (cook, cmd, props, etc.).
-func TokenHasScopedAccess(token string, action rbac.Action, sproutIDs []string, allSproutIDs []string) bool {
-	if DangerouslyAllowRoot() {
-		return true
-	}
-	ua, err := decodeToken(token)
-	if err != nil {
-		return false
-	}
-	pk, err := ua.IsValid()
-	if err != nil {
-		return false
-	}
-	role := lookupRole(pk)
-	if role == nil {
-		return false
-	}
-	resolver := CohortResolver(allSproutIDs)
-	return role.HasScopedAccessMulti(action, sproutIDs, resolver)
-}
-
-// TokenScopeFilter returns the subset of sproutIDs that the token's role
-// permits for the given action.
-func TokenScopeFilter(token string, action rbac.Action, sproutIDs []string, allSproutIDs []string) []string {
-	if DangerouslyAllowRoot() {
-		return sproutIDs
-	}
-	ua, err := decodeToken(token)
-	if err != nil {
-		return nil
-	}
-	pk, err := ua.IsValid()
-	if err != nil {
-		return nil
-	}
-	role := lookupRole(pk)
-	if role == nil {
-		return nil
-	}
-	resolver := CohortResolver(allSproutIDs)
-	return role.ScopeFilter(action, sproutIDs, resolver)
-}
-
-// WhoAmI returns the public key, role name, and username for a given token.
-func WhoAmI(token string) (pubkey string, roleName string, username string, err error) {
-	ua, err := decodeToken(token)
-	if err != nil {
-		return "", "", "", err
-	}
-	pk, err := ua.IsValid()
-	if err != nil {
-		return "", "", "", err
-	}
-
+// UserIdentity returns userID's role name and username, as the policy
+// has them (config file, legacy pubkeys section, or the users store).
+// Both are empty for a user the policy doesn't know.
+func UserIdentity(userID string) (roleName, username string) {
 	policyMu.RLock()
 	defer policyMu.RUnlock()
-	name := ""
-	uname := ""
 	if userRoleMap != nil {
-		name = userRoleMap.RoleName(pk)
-		uname = userRoleMap.Username(pk)
+		roleName = userRoleMap.RoleName(userID)
+		username = userRoleMap.Username(userID)
 	}
-	if name == "" {
-		// Check legacy
-		name = legacyRoleName(pk)
+	if roleName == "" {
+		roleName = legacyRoleName(userID)
 	}
+	return roleName, username
+}
 
-	return pk, name, uname, nil
+// UserHasAction reports whether userID's role includes action, without
+// scope checking (UserHasScopedAccess checks scope).
+func UserHasAction(userID string, action rbac.Action) bool {
+	role := lookupRole(userID)
+	return role != nil && role.HasAction(action)
+}
+
+// UserHasScopedAccess reports whether userID's role permits action on
+// every one of sproutIDs. allSproutIDs is the tenant's accepted sprouts,
+// for resolving dynamic cohorts.
+func UserHasScopedAccess(userID string, action rbac.Action, sproutIDs []string, allSproutIDs []string) bool {
+	role := lookupRole(userID)
+	if role == nil {
+		return false
+	}
+	return role.HasScopedAccessMulti(action, sproutIDs, CohortResolver(allSproutIDs))
+}
+
+// UserScopeFilter returns the subset of sproutIDs userID's role permits
+// for action: nil for a user with no role.
+func UserScopeFilter(userID string, action rbac.Action, sproutIDs []string, allSproutIDs []string) []string {
+	role := lookupRole(userID)
+	if role == nil {
+		return nil
+	}
+	return role.ScopeFilter(action, sproutIDs, CohortResolver(allSproutIDs))
 }
 
 // lookupRole returns the Role object for a pubkey, or nil if not found.
@@ -414,12 +333,6 @@ func legacyRoleName(pubkey string) string {
 		}
 	}
 	return ""
-}
-
-// pubkeyHasAccess is the legacy check — returns true if the pubkey
-// maps to any role. Kept for backward compatibility with TokenHasAccess.
-func pubkeyHasAccess(pubkey string, method string) bool {
-	return lookupRole(pubkey) != nil
 }
 
 // extractStringSlice handles both []any and []string from config values.
@@ -488,18 +401,35 @@ func GetRole(name string) (*rbac.Role, error) {
 	return roleStore.Get(name)
 }
 
-// AddUser registers pubkey with roleName in the users store
-// (store.go): an auth_users row every farmer replica reads, mirrored into
-// the policy's user map. Nothing is written to farmer's config file. A
-// pubkey the config file defines, or one already registered, is
-// ErrUserExists.
-func AddUser(pubkey, roleName string) error {
+// ErrBoxPubRequired: a user registered through the API must come with
+// their CLI box public key (imas auth keygen), since a user with no key
+// can't make a single request.
+var ErrBoxPubRequired = errors.New("auth: the user's CLI box public key is required (they print it with imas auth keygen)")
+
+// AddUser registers pubkey with roleName (and username, which may be
+// empty) in the users store (store.go), together with boxPub as their
+// first CLI box key, in one transaction: an auth_users row and an
+// auth_cli_box_keys row every farmer replica reads, mirrored into the
+// policy's user map. Nothing is written to farmer's config file. A pubkey
+// the config file defines, or one already registered, is ErrUserExists;
+// a box key any principal holds, or a farmer-side key, is refused
+// (boxKeyClaimCheck, then the table's unique index).
+//
+// It is reached only through a sealed auth.users.add from an admin, so
+// the bus can no longer forge it (Decision A).
+func AddUser(pubkey, roleName, username, boxPub string) error {
 	policyMu.Lock()
 	defer policyMu.Unlock()
 
 	// Validate the pubkey looks like an nkey.
 	if !nkeys.IsValidPublicAccountKey(pubkey) {
 		return ErrInvalidPubkey
+	}
+	if boxPub == "" {
+		return ErrBoxPubRequired
+	}
+	if _, err := DecodeCLIBoxPub(boxPub); err != nil {
+		return err
 	}
 
 	// Check that the role exists.
@@ -513,16 +443,86 @@ func AddUser(pubkey, roleName string) error {
 	if (userRoleMap != nil && userRoleMap.RoleName(pubkey) != "") || legacyRoleName(pubkey) != "" {
 		return ErrUserExists
 	}
-	if err := registerUser(usersTenantID(), pubkey, roleName, "", ""); err != nil {
+	tenantID := usersTenantID()
+	if boxKeyClaimCheck != nil {
+		if err := boxKeyClaimCheck(tenantID, boxPub); err != nil {
+			return err
+		}
+	}
+	if err := registerUser(tenantID, pubkey, roleName, username, boxPub); err != nil {
 		return err
 	}
 
 	// Mirror into the policy's map, which every lookup reads.
 	if userRoleMap != nil {
 		userRoleMap.Set(pubkey, roleName)
+		if username != "" {
+			userRoleMap.SetUsername(pubkey, username)
+		}
 	}
 	return nil
 }
+
+// ResetUserCLIBoxKey is an admin's reset of userID's CLI box key, for a
+// lost or stolen key: every key the user holds in the users tenant is
+// retired and boxPub becomes their only active key, in one transaction.
+// The user must be known to the policy (config file or users store). A
+// retired key never comes back and a key any principal holds is refused,
+// as at registration. Reached only through a sealed
+// auth.users.resetkey from an admin.
+func ResetUserCLIBoxKey(userID, boxPub string) error {
+	if db == nil {
+		return ErrStoreNotConfigured
+	}
+	if _, err := DecodeCLIBoxPub(boxPub); err != nil {
+		return err
+	}
+	tenantID := usersTenantID()
+	if lookupRole(userID) == nil {
+		if _, _, found, err := RegisteredUser(tenantID, userID); err != nil || !found {
+			if err != nil {
+				return err
+			}
+			return ErrUnknownUser
+		}
+	}
+	if boxKeyClaimCheck != nil {
+		if err := boxKeyClaimCheck(tenantID, boxPub); err != nil {
+			return err
+		}
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := retireCLIBoxKeysTx(tx, "tenant_id = ? AND user_id = ?", tenantID, userID); err != nil {
+			return err
+		}
+		return createActiveCLIBoxKeyTx(tx, tenantID, userID, boxPub)
+	})
+}
+
+// UserCLIBoxKeyFingerprints returns, for every user with an active CLI box
+// key in the users tenant, that key's fingerprint (for auth.users).
+func UserCLIBoxKeyFingerprints() (map[string]string, error) {
+	if db == nil {
+		return nil, ErrStoreNotConfigured
+	}
+	var rows []cliBoxKeyRow
+	if err := db.Where("tenant_id = ? AND status = ?", usersTenantID(), CLIBoxKeyActive).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(rows))
+	for _, r := range rows {
+		if pub, err := DecodeCLIBoxPub(r.Pub); err == nil {
+			out[r.UserID] = payloadbox.Fingerprint(pub)
+		}
+	}
+	return out, nil
+}
+
+// UsersTenantID is the tenant CLI users, and their CLI box keys, belong
+// to: farmer's farmerorganization (users are deployment-wide operators,
+// owner decision 2026-10-04). A CLI pins this tenant and its box key, and
+// its requests open only on that tenant's connection.
+func UsersTenantID() string { return usersTenantID() }
 
 // RemoveUser removes a user registered through the API: their auth_users
 // row, every CLI box key they hold (retired, in the same transaction),
