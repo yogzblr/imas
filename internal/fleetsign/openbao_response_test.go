@@ -3,8 +3,8 @@ package fleetsign
 // Tests against what a real OpenBao actually returns. mockTransit
 // (transit_test.go) once served Ed25519 public keys as PEM, which real
 // Transit never does, and that hid a fleet-signing JWKS endpoint (and
-// enrollment's fleet_signing_jwks) that failed against every real
-// OpenBao.
+// enrollment's fleet_signing_jwks, both since removed) that failed
+// against every real OpenBao.
 //
 // testdata/openbao-v2.7.0/ holds verbatim response bodies captured from
 // an OpenBao v2.7.0 dev server:
@@ -82,8 +82,7 @@ func transitSignatureToRelease(t *testing.T, body []byte) string {
 }
 
 // The regression test: a TransitKeySource reading a real OpenBao key
-// response must verify signatures that same OpenBao made, and the JWKS
-// handler must serve 200.
+// response must verify signatures that same OpenBao made.
 func TestTransitKeySource_RealOpenBaoResponse(t *testing.T) {
 	body := readRealTransitFixture(t, "transit-keys.json")
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -124,16 +123,6 @@ func TestTransitKeySource_RealOpenBaoResponse(t *testing.T) {
 		if err := ks.Verify(m); !errors.Is(err, ErrInvalidSignature) {
 			t.Errorf("%s: pre-FU.0 signature accepted for a Manifest: %v", name, err)
 		}
-	}
-
-	rec := httptest.NewRecorder()
-	JWKSHandler(src)(rec, httptest.NewRequest(http.MethodGet, "/v1/.well-known/fleet-signing-jwks.json", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("fleet-signing JWKS against a real OpenBao key read: status %d: %s", rec.Code, rec.Body.String())
-	}
-	served, err := ParseJWKS(rec.Body.Bytes())
-	if err != nil || len(served) != 2 || !served[0].Key.Equal(ks[0].Key) || !served[1].Key.Equal(ks[1].Key) {
-		t.Fatalf("served JWKS = %s (%v)", rec.Body, err)
 	}
 }
 
@@ -185,8 +174,8 @@ func TestParseEd25519PublicKeyPEM_AcceptsRealTransitFormat(t *testing.T) {
 
 // TestOpenBaoLive_TransitKeySource runs the read path against a real
 // OpenBao: create and rotate an Ed25519 Transit key, have OpenBao sign a
-// release, then read the key set through TransitKeySource, verify, and
-// serve the JWKS. It needs an OpenBao (or Vault) it may configure, e.g.
+// release, then read the key set through TransitKeySource and verify.
+// It needs an OpenBao (or Vault) it may configure, e.g.
 //
 //	bao server -dev -dev-root-token-id=root &
 //	IMAS_TEST_OPENBAO_ADDR=http://127.0.0.1:8200 IMAS_TEST_OPENBAO_TOKEN=root \
@@ -233,13 +222,7 @@ func TestOpenBaoLive_TransitKeySource(t *testing.T) {
 	if err := src.Verify(t.Context(), m); err != nil {
 		t.Fatalf("manifest signed by real Transit doesn't verify: %v", err)
 	}
-
-	rec := httptest.NewRecorder()
-	JWKSHandler(src)(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("fleet-signing JWKS against real OpenBao: status %d: %s", rec.Code, rec.Body.String())
-	}
-	if served, err := ParseJWKS(rec.Body.Bytes()); err != nil || len(served) != 2 {
-		t.Fatalf("served JWKS = %s (%v), want 2 keys", rec.Body, err)
+	if ks, err := src.KeySet(t.Context()); err != nil || len(ks) != 2 {
+		t.Fatalf("KeySet = %+v (%v), want 2 keys", ks, err)
 	}
 }
