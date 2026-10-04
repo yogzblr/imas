@@ -16,7 +16,8 @@
 //     fleetsign.LoadKeyring), never a key fetched from farmer or the bus.
 //     A missing or bad signature, or a key id the keyring doesn't hold, is
 //     a refusal; there is no checksum-only fallback;
-//  4. refuses a manifest whose signed min_sprout_version is above the
+//  4. refuses a prerelease target on Windows (ErrPrereleaseOnWindows),
+//     and a manifest whose signed min_sprout_version is above the
 //     running version, and a file_name that isn't this platform's package
 //     type (.deb, .rpm, .msi);
 //  5. finds the package in the repository configured in the sprout
@@ -95,6 +96,12 @@ var (
 	ErrUnsupportedPlatform = errors.New("selfupdate: self-update not supported on this platform")
 	// ErrInstallFailed: the OS installer failed.
 	ErrInstallFailed = errors.New("selfupdate: install failed")
+	// ErrPrereleaseOnWindows: the target is a prerelease and this sprout
+	// installs an MSI. An MSI's ProductVersion has no prerelease part, so
+	// the package can't be bound to the signed version (pkgmeta.go);
+	// prerelease rollouts are refused on Windows (owner's decision,
+	// 2026-10-04, PR #86).
+	ErrPrereleaseOnWindows = errors.New("selfupdate: prerelease versions are not installed on Windows (an MSI ProductVersion can't carry the prerelease)")
 	// ErrUpdateInProgress: another self_update is running, or one has
 	// installed and the service hasn't restarted onto it yet.
 	ErrUpdateInProgress = errors.New("selfupdate: another update is in progress or awaiting restart")
@@ -192,6 +199,9 @@ func (s SelfUpdate) prepare(ctx context.Context) (plan, error) {
 	}
 	if pl.platform, err = detectPlatform(); err != nil {
 		return pl, err
+	}
+	if pl.platform.pkgType == pkgMSI && semver.Prerelease(pl.target) != "" {
+		return pl, fmt.Errorf("%w: %s", ErrPrereleaseOnWindows, pl.target)
 	}
 	if err := pl.platform.preflight(); err != nil {
 		return pl, err
