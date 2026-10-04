@@ -114,9 +114,11 @@ const provisioningNoResultMessage = "no result was received for this request aft
 // farmer's ProvisionTenant re-confirms an existing Account and re-pushes
 // it, DeprovisionTenant finds the tenant already deleted and reports
 // offboarded, and applyProvisioningResult applies the first result of a
-// job and ignores the rest. The one hazard is a late copy of a provision
-// request still running on farmer when the tenant is offboarded; DELETE
-// waits out a re-published provision job for that reason (DeleteTenant).
+// job and ignores the rest. A late copy of a provision request still
+// running on farmer when the tenant is offboarded is handled by farmer
+// (internal/pki re-checks the tenant after its push and locks it out again;
+// a tenant deprovisioned before any row existed gets a deleted tombstone),
+// so DELETE doesn't wait for re-published copies (DeleteTenant).
 func (sw *sweeper) sweepProvisioningJobs() {
 	now := dbTime(outboxNow())
 	var jobs []ProvisioningJob

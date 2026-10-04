@@ -353,7 +353,12 @@ response. Putting `err.Error()` back on the bus makes that test fail.
   moves to `offboarded`, and `GET /tenants/{id}/status` answers 200 with a
   fixed `warning` message (`controlplane.PublicWarningMessage`). The
   `DELETE` itself stays 202, because the async contract is unchanged:
-  farmer is what finds out there was nothing to tear down.
+  farmer is what finds out there was nothing to tear down. Since PKI.1,
+  `DeprovisionTenant` also writes a deleted tombstone row in that case
+  (not for the legacy current tenant), so a late provision copy or an
+  enrollment for the offboarded tenant is refused rather than creating a
+  live Account; a retry finds the tombstone and still reports
+  `tenant_not_provisioned`, minting nothing.
 - **What makes that safe.** `getTenantRow` used to map *every* lookup
   error, including a transient DB error, to `ErrTenantNotFound`. It now
   returns `ErrTenantNotFound` only for an absent row, and wraps any other
@@ -497,6 +502,15 @@ tenant live on the bus. The fix, in `internal/pki`:
   signs and pushes a fresh lockout even when the row is already deleted (a
   crash between the mark and the push, or a bus that took a live JWT
   later), so a retried deprovision always leaves the bus locked out.
+- *A tombstone for a tenant with no row.* Removing saasapi's wait opened
+  one more window: copy 1 of a provision fails before writing any row, the
+  tenant is deleted, and a late copy 2 then creates the row and a live
+  Account. `DeprovisionTenant` now writes a deleted tombstone when it finds
+  no row, and the provision path inserts its row only if absent and
+  re-reads it (the old upsert reset `deleted`, which could have wiped a
+  concurrent tombstone), so copy 2 is refused on any replica. If the
+  provision's insert wins instead, the deprovision finds that row and
+  marks it deleted, and the provision's post-push re-check locks it out.
 
 *The ordering guarantee across replicas.* The bus applies a claims update
 before answering it and applies updates in arrival order. The re-check is

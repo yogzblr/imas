@@ -705,7 +705,9 @@ this file can be checked against the repository's history.
    tenant's deleted state from the database after their push and push the
    lockout again if a deprovision won; `DeprovisionTenant` marks the row
    before signing the lockout and pushes a fresh lockout even when the row
-   is already deleted, so a retry repairs the bus. Across replicas this
+   is already deleted, so a retry repairs the bus, and leaves a deleted
+   tombstone for a tenant it finds no row for, so a late provision copy
+   can't create one. Across replicas this
    needs no clock agreement, only that the re-check sees committed writes
    (one database, PXC through one node, or `wsrep_sync_wait`). Proven by
    hook-driven interleaving tests against a real bus, including one with
