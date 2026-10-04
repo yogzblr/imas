@@ -7,12 +7,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -70,7 +72,7 @@ func newRepoClient() *http.Client {
 				return fmt.Errorf("stopped after %d redirects", maxRedirects)
 			}
 			if req.URL.Scheme != "https" {
-				return fmt.Errorf("refusing a redirect to non-https %s", req.URL.Redacted())
+				return fmt.Errorf("refusing a redirect to non-https %s", redact(req.URL))
 			}
 			// net/http already drops Authorization on a redirect to another
 			// domain; drop it on any change of host, so the repo token only
@@ -98,7 +100,7 @@ func (r repo) get(ctx context.Context, u *url.URL) (*http.Response, error) {
 	}
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("selfupdate: GET %s: %w", redact(u), err)
+		return nil, redactedError(fmt.Errorf("selfupdate: GET %s: %w", redact(u), err))
 	}
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
@@ -217,10 +219,52 @@ func writeVerified(src io.Reader, dest, wantSHA256 string) (err error) {
 }
 
 // redact drops anything but scheme, host and path from a URL for
-// messages.
+// messages: no user info, query or fragment.
 func redact(u *url.URL) string {
 	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}).String()
 }
+
+// reURLQuery matches the query and fragment of an http(s) URL inside a
+// message, up to whitespace or a quote.
+var reURLQuery = regexp.MustCompile(`(?i)(https?://[^\s"'?#]*)[?#][^\s"']*`)
+
+// redactedError returns err with every URL in its message reduced to
+// scheme, host and path (security review 2026-10, L2). The URL a
+// *url.Error carries is the last one requested, which after a redirect is
+// the repository's redirect target: a presigned CDN URL whose query holds
+// its signature (X-Amz-Signature and the like). url.URL.Redacted() hides
+// only a password, so the query would reach the step's error, the bus and
+// the job result. The url.Error's URL is replaced with redact's form, and
+// any other URL in the message (net/http quotes an unparseable Location
+// header in full) loses its query and fragment. The chain is kept for
+// errors.Is and errors.As, through a copy of the url.Error with the
+// redacted URL.
+func redactedError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		cp := *ue
+		if parsed, perr := url.Parse(ue.URL); perr == nil {
+			cp.URL = redact(parsed)
+		} else {
+			cp.URL = "(unparseable URL)"
+		}
+		msg := strings.Replace(err.Error(), ue.Error(), cp.Error(), 1)
+		return &redacted{msg: reURLQuery.ReplaceAllString(msg, "$1"), err: &cp}
+	}
+	return &redacted{msg: reURLQuery.ReplaceAllString(err.Error(), "$1"), err: err}
+}
+
+// redacted is an error whose message has had URLs redacted.
+type redacted struct {
+	msg string
+	err error
+}
+
+func (e *redacted) Error() string { return e.msg }
+func (e *redacted) Unwrap() error { return e.err }
 
 // hasControl reports whether s has an ASCII control character.
 func hasControl(s string) bool {

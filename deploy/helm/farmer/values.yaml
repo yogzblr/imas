@@ -245,6 +245,27 @@ farmer:
       renderTimeout: "2s"
       # Total iterations of every range in one render.
       maxRangeIterations: 10000
+  # IMAS_SELF_UPDATE_ENABLED: farmer's own switch for self_update on
+  # internal.sprout.action (security review 2026-10, L1), independent of
+  # saasapi.fleetUpdateDispatch.enabled. Off, farmer refuses every
+  # self_update, so a forged request can't start an update. Leave it off
+  # until the security review and the release UAT gate are done
+  # (docs/BUILD-STATUS.md); a rollout needs both switches on.
+  selfUpdate:
+    enabled: false
+  # internal.sprout.action concurrency per farmer replica (security review
+  # M5). cmd.run and cook share one pool; self_update has a pool of its
+  # own, so rollouts can't be starved; within each pool one tenant holds
+  # at most tenantConcurrency slots. A request that doesn't fit is refused
+  # at once (farmer_busy) and saasapi sends it again; nothing queues.
+  # Positive integers up to 1024; null emits no env var (farmer's default).
+  sproutActions:
+    # IMAS_SPROUT_ACTION_CONCURRENCY.
+    concurrency: 64
+    # IMAS_SELF_UPDATE_CONCURRENCY.
+    selfUpdateConcurrency: 16
+    # IMAS_SPROUT_ACTION_TENANT_CONCURRENCY.
+    tenantConcurrency: 8
   # OpenBao clients inside farmer, one role each.
   openbao:
     # Gateway JWT signer (Transit sign on exactly this key).
@@ -361,7 +382,8 @@ saasapi:
     jwtKey: SAASAPI_NATS_USER_JWT
   # POST .../sprouts/updates. The sprout-side update path is built, but
   # leave this off until the security review and the release UAT gate are
-  # done (docs/BUILD-STATUS.md). On needs the fleetSign client below.
+  # done (docs/BUILD-STATUS.md). On needs the fleetSign client below, and
+  # farmer.selfUpdate.enabled, or farmer refuses every update.
   fleetUpdateDispatch:
     enabled: false
     # SAASAPI_FLEET_UPDATE_CLOCK_SKEW: how far saasapi's and farmer's
@@ -369,6 +391,20 @@ saasapi:
     # its update (a Go duration, above 0 and at most 5m). Empty keeps
     # saasapi's default, 30s. Widen only for nodes without NTP.
     clockSkew: ""
+  # internal.sprout.action dispatch concurrency per saasapi replica
+  # (internal/saasapi/dispatch_limits.go; security review M5): a
+  # cmd.run/cook pool, a pool reserved for rollout waves, and one tenant's
+  # cap in each, which must be at most half of concurrency (saasapi
+  # refuses to start otherwise). Keep each at or below farmer's
+  # farmer.sproutActions value times farmer's replicas. Positive integers
+  # up to 1024; null emits no env var (saasapi's default).
+  actionDispatch:
+    # SAASAPI_ACTION_DISPATCH_CONCURRENCY.
+    concurrency: 64
+    # SAASAPI_SELF_UPDATE_DISPATCH_CONCURRENCY.
+    selfUpdateConcurrency: 16
+    # SAASAPI_ACTION_DISPATCH_TENANT_CONCURRENCY.
+    tenantConcurrency: 8
   # The outbox sweeper (internal/saasapi/sweeper.go, CL.3): re-publishes
   # tenant provisioning jobs left pending, re-sends §1.5 action items left
   # queued (never ones already sent), and resumes update rollouts whose pod

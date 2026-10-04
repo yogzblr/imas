@@ -163,8 +163,9 @@ func msiexecPath() string {
 }
 
 // preflight checks, before any download, that this platform's install can
-// run to completion: the installer exists and, on Linux, the sprout can
-// restart its own service afterwards.
+// run to completion: the installer and the tools that read package
+// metadata exist and, on Linux, the sprout can restart its own service
+// afterwards.
 func (p platform) preflight() error {
 	if p.installer == installMsiexec {
 		if _, err := os.Stat(msiexecPath()); err != nil {
@@ -174,6 +175,11 @@ func (p platform) preflight() error {
 	}
 	if _, err := findTool(p.installer); err != nil {
 		return err
+	}
+	for _, tool := range metadataTools(p) {
+		if _, err := findTool(tool); err != nil {
+			return err
+		}
 	}
 	if _, err := findTool("systemctl"); err != nil {
 		return err
