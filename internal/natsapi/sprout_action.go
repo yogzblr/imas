@@ -614,7 +614,6 @@ const maxSelfUpdateVersionLen = 64
 //     this sprout would fetch only its own OS/arch row: a version with a
 //     forged row is not a release CloudXP signed.
 //
-//
 // and now must be inside the tenant's rollout window, if its policy sets
 // one (rollout_window_closed otherwise), as saasapi's policyRefusal
 // checks it.

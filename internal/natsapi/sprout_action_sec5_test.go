@@ -53,7 +53,7 @@ func TestSelfUpdate_DisabledByDefault(t *testing.T) {
 	defer cleanup()
 	var verified atomic.Int32
 	rec := stubSproutActionDispatch(t, func(string, string) error { verified.Add(1); return nil })
-	newSUCatalog(t)                     // turns the switch on...
+	newSUCatalog(t)                    // turns the switch on...
 	t.Setenv(EnvSelfUpdateEnabled, "") // ...and the environment turns it off again
 	if err := RegisterSproutAction(nc); err != nil {
 		t.Fatal(err)
