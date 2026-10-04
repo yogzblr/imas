@@ -863,7 +863,7 @@ by an external git sync today.
 
      B4 (hostile-tenant recipe render cost scales with include count), B5
      (M6 unchanged), B6 (J.4 forged no-responders re-run, accepted), B7
-     (`operator` still has `shell`), B8 (MSI version binding) and B9 are
+     (`operator` had `shell`; fixed in SH.1), B8 (MSI version binding) and B9 are
      ranked there too.
 5. **Clean-ups left by Wave 4** (briefs in
    `docs/claude-code-parallel-build-plan.md` §4c; CL.1, removing
