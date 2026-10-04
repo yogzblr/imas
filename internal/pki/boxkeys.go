@@ -59,7 +59,7 @@ import (
 type sproutBoxKeyRow struct {
 	TenantID   string     `gorm:"column:tenant_id;primaryKey;size:191;uniqueIndex:idx_pki_sprout_box_keys_one_active,priority:1"`
 	SproutID   string     `gorm:"column:sprout_id;primaryKey;size:253;uniqueIndex:idx_pki_sprout_box_keys_one_active,priority:2"`
-	Pub        string     `gorm:"column:pub;primaryKey;size:64"`
+	Pub        string     `gorm:"column:pub;primaryKey;size:64;index:idx_pki_sprout_box_keys_pub"`
 	State      string     `gorm:"column:state;size:16;not null;index;check:chk_pki_sprout_box_keys_active_slot,(state = 'active' AND active_slot IS NOT NULL AND active_slot = 1) OR (state <> 'active' AND active_slot IS NULL)"`
 	GraceUntil *time.Time `gorm:"column:grace_until"`
 	ActiveSlot *int8      `gorm:"column:active_slot;uniqueIndex:idx_pki_sprout_box_keys_one_active,priority:3"`

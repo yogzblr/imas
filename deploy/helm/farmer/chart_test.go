@@ -644,9 +644,15 @@ func TestFarmerPoliciesAreExact(t *testing.T) {
 		"imas-farmer-gateway.hcl": {`path "transit/sign/imas-gateway-jwt"`, `path "transit/keys/imas-gateway-jwt"`},
 		// Only the per-tenant secrets: no read of the base path, where the
 		// deleted legacy shared keypair lived (security review 2026-10, H3).
-		"imas-farmer-tenantbox.hcl": {`path "secret/data/imas/tenant-x25519/tenants/+"`},
-		"imas-farmer-certs.hcl":     {`path "pki/issue/imas-farmer"`},
-		"imas-farmerbus-certs.hcl":  {`path "pki/issue/imas-farmerbus"`},
+		// Plus, read only, the platform keypair and the control-plane
+		// public keys (J.1), and never the SaaS API's private key.
+		"imas-farmer-tenantbox.hcl": {
+			`path "secret/data/imas/tenant-x25519/tenants/+"`,
+			`path "secret/data/imas/tenant-x25519/platform"`,
+			`path "secret/data/imas/tenant-x25519/controlplane-pub"`,
+		},
+		"imas-farmer-certs.hcl":    {`path "pki/issue/imas-farmer"`},
+		"imas-farmerbus-certs.hcl": {`path "pki/issue/imas-farmerbus"`},
 	}
 	for name, paths := range want {
 		body, _ := get(cm, "data", name).(string)
@@ -2576,4 +2582,120 @@ func TestStampedReleaseRenders(t *testing.T) {
 	if _, err := stamp(t, "v"+v, filepath.Join(t.TempDir(), "missing")); err == nil || !strings.Contains(err.Error(), "no ") {
 		t.Errorf("missing floor file: %v", err)
 	}
+}
+
+// policyBlocks maps each path in an HCL policy to its capabilities line.
+func policyBlocks(hcl string) map[string]string {
+	out := map[string]string{}
+	var path string
+	for _, l := range strings.Split(policyStatements(hcl), "\n") {
+		switch {
+		case strings.HasPrefix(l, "path "):
+			path = strings.TrimSuffix(strings.TrimPrefix(l, "path "), " {")
+		case strings.HasPrefix(l, "capabilities"):
+			out[path] = l
+		}
+	}
+	return out
+}
+
+// The control-plane keygen Job (J.1) is off by default: no Job, no
+// ServiceAccount, no policy, no role.
+func TestControlPlaneBoxKeysOffByDefault(t *testing.T) {
+	docs := mustRender(t)
+	if has(docs, "Job", "t-farmer-controlplane-box-keys") || has(docs, "ServiceAccount", "imas-controlplane-box-keygen") {
+		t.Error("keygen Job rendered while controlPlaneBoxKeys.enabled is false")
+	}
+	cm := find(t, docs, "ConfigMap", "t-farmer-openbao-policies")
+	if _, ok := get(cm, "data").(obj)["imas-controlplane-box-keygen.hcl"]; ok {
+		t.Error("keygen policy rendered while disabled")
+	}
+	if _, ok := bootstrapRoles(t, docs)["imas-controlplane-box-keygen"]; ok {
+		t.Error("keygen role created while disabled")
+	}
+	// farmer reads, never writes, the platform key and the public keys,
+	// and never the SaaS API's private key.
+	blocks := policyBlocks(get(cm, "data", "imas-farmer-tenantbox.hcl").(string))
+	for _, p := range []string{`"secret/data/imas/tenant-x25519/platform"`, `"secret/data/imas/tenant-x25519/controlplane-pub"`} {
+		if blocks[p] != `capabilities = ["read"]` {
+			t.Errorf("farmer's %s: %q, want read only", p, blocks[p])
+		}
+	}
+	for p := range blocks {
+		if strings.Contains(p, "saasapi-box") {
+			t.Errorf("farmer's policy reaches the SaaS API's private key: %s", p)
+		}
+	}
+}
+
+func TestControlPlaneBoxKeysJob(t *testing.T) {
+	docs := mustRender(t, "--set", "controlPlaneBoxKeys.enabled=true")
+	job := find(t, docs, "Job", "t-farmer-controlplane-box-keys")
+	ann := get(job, "metadata", "annotations").(obj)
+	if ann["helm.sh/hook"] != "post-install,post-upgrade" || ann["helm.sh/hook-weight"] != "5" {
+		t.Errorf("hook annotations %v: want post-install/post-upgrade, after the bootstrap (0), before the publisher (10)", ann)
+	}
+	ps := podSpec(job)
+	if ps["serviceAccountName"] != "imas-controlplane-box-keygen" || ps["automountServiceAccountToken"] != false {
+		t.Errorf("pod identity: %v %v", ps["serviceAccountName"], ps["automountServiceAccountToken"])
+	}
+	c := container(t, job, "keygen")
+	if args := get(c, "args").([]any); len(args) != 1 || args[0] != "ensure-controlplane-box-keys" {
+		t.Errorf("args %v", args)
+	}
+	env := envValues(c)
+	if env["IMAS_CPBOX_OPENBAO_K8S_ROLE"] != "imas-controlplane-box-keygen" ||
+		env["IMAS_CPBOX_OPENBAO_KV_MOUNT"] != "secret" || env["IMAS_CPBOX_OPENBAO_KV_PATH"] != "imas/tenant-x25519" {
+		t.Errorf("env %v", env)
+	}
+	for name := range env {
+		if strings.HasPrefix(name, "IMAS_NATS_") || strings.HasPrefix(name, "IMAS_TENANTBOX_") || strings.HasPrefix(name, "IMAS_SAASAPI_CRED_") {
+			t.Errorf("the keygen Job has %s", name)
+		}
+	}
+	for _, v := range ps["volumes"].([]any) {
+		if get(v, "secret") != nil || get(v, "persistentVolumeClaim") != nil {
+			t.Errorf("the keygen Job mounts %v", v)
+		}
+	}
+	np := find(t, docs, "NetworkPolicy", "imas-controlplane-box-keygen")
+	if ing := get(np, "spec", "ingress").([]any); len(ing) != 0 {
+		t.Errorf("ingress %v", ing)
+	}
+
+	// Its policy: create and read the keypairs, never update them.
+	cm := find(t, docs, "ConfigMap", "t-farmer-openbao-policies")
+	blocks := policyBlocks(get(cm, "data", "imas-controlplane-box-keygen.hcl").(string))
+	want := map[string]string{
+		`"secret/data/imas/tenant-x25519/platform"`:         `capabilities = ["create", "read"]`,
+		`"secret/data/imas/tenant-x25519/saasapi-box"`:      `capabilities = ["create", "read"]`,
+		`"secret/data/imas/tenant-x25519/controlplane-pub"`: `capabilities = ["create", "read", "update"]`,
+	}
+	if len(blocks) != len(want) {
+		t.Errorf("keygen policy paths %v", blocks)
+	}
+	for p, w := range want {
+		if blocks[p] != w {
+			t.Errorf("keygen policy %s: %q, want %q", p, blocks[p], w)
+		}
+	}
+	roles := bootstrapRoles(t, docs)
+	if !slices.Equal(roles["imas-controlplane-box-keygen"], []string{"imas-controlplane-box-keygen", "imas-core", "imas-controlplane-box-keygen", "5m", "5m"}) {
+		t.Errorf("keygen role %v", roles["imas-controlplane-box-keygen"])
+	}
+	// farmer's ServiceAccount is bound to none of the keygen's identity.
+	for name, r := range roles {
+		if name != "imas-controlplane-box-keygen" && r[2] == "imas-controlplane-box-keygen" {
+			t.Errorf("role %s binds the keygen policy", name)
+		}
+	}
+}
+
+func TestControlPlaneBoxKeysRefusesSharedIdentity(t *testing.T) {
+	mustFail(t, "another workload's ServiceAccount", "--set", "controlPlaneBoxKeys.enabled=true",
+		"--set", "controlPlaneBoxKeys.serviceAccountName=t-farmer")
+	mustFail(t, "another workload's ServiceAccount", "--set", "controlPlaneBoxKeys.enabled=true",
+		"--set", "controlPlaneBoxKeys.serviceAccountName=imas-saasapi-cred-publisher")
+	mustFail(t, "another workload's OpenBao role", "--set", "controlPlaneBoxKeys.enabled=true",
+		"--set", "controlPlaneBoxKeys.k8sRole=imas-farmer-tenantbox")
 }

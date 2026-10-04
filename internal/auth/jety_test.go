@@ -402,6 +402,8 @@ func TestAddUserAlreadyExists(t *testing.T) {
 	}
 }
 
+// A user added through the API can be removed through it; their row and
+// their policy entry go, and nothing is written to the config file.
 func TestRemoveUserSuccess(t *testing.T) {
 	setupJetyForTest(t)
 	defer clearJetyKeys(t)
@@ -412,25 +414,53 @@ func TestRemoveUserSuccess(t *testing.T) {
 		Rules: []rbac.Rule{{Action: rbac.ActionAdmin, Scope: "*"}},
 	})
 	urm := rbac.NewUserRoleMap()
-
-	kp, _ := nkeys.CreateAccount()
-	pk, _ := kp.PublicKey()
-	urm.Set(pk, "admin")
-
-	jety.Set("users", map[string]interface{}{
-		"admin": []interface{}{pk},
-	})
-
 	SetPolicy(rs, urm, nil)
 	defer SetPolicy(nil, nil, nil)
 
-	err := RemoveUser(pk)
-	if err != nil {
+	kp, _ := nkeys.CreateAccount()
+	pk, _ := kp.PublicKey()
+	if err := AddUser(pk, "admin"); err != nil {
+		t.Fatalf("AddUser: %v", err)
+	}
+	if err := RemoveUser(pk); err != nil {
 		t.Fatalf("RemoveUser failed: %v", err)
 	}
-
 	if urm.RoleName(pk) != "" {
 		t.Error("user should be removed after RemoveUser")
+	}
+	if _, _, found, _ := RegisteredUser(usersTenantID(), pk); found {
+		t.Error("registration should be gone after RemoveUser")
+	}
+	if err := RemoveUser(pk); err != ErrUserNotFound {
+		t.Errorf("second RemoveUser = %v, want ErrUserNotFound", err)
+	}
+}
+
+// A user defined in the config file (users or legacy pubkeys) can't be
+// removed through the API: each replica re-reads its own file at start,
+// so a removal there wouldn't hold (Open item 11).
+func TestRemoveUserDefinedInConfigIsRefused(t *testing.T) {
+	for _, section := range []string{"users", "pubkeys"} {
+		t.Run(section, func(t *testing.T) {
+			setupJetyForTest(t)
+			defer clearJetyKeys(t)
+
+			kp, _ := nkeys.CreateAccount()
+			pk, _ := kp.PublicKey()
+			jety.Set(section, map[string]interface{}{"admin": []interface{}{pk}})
+
+			urm := rbac.NewUserRoleMap()
+			urm.Set(pk, "admin")
+			SetPolicy(rbac.NewRoleStore(), urm, nil)
+			defer SetPolicy(nil, nil, nil)
+
+			if err := RemoveUser(pk); err != ErrUserInConfig {
+				t.Fatalf("RemoveUser = %v, want ErrUserInConfig", err)
+			}
+			if urm.RoleName(pk) != "admin" {
+				t.Error("a config-defined user lost their role")
+			}
+		})
 	}
 }
 
@@ -444,32 +474,6 @@ func TestRemoveUserNotFound(t *testing.T) {
 	err := RemoveUser("AUNKNOWNKEY")
 	if err != ErrUserNotFound {
 		t.Errorf("expected ErrUserNotFound, got %v", err)
-	}
-}
-
-func TestRemoveUserFromLegacyPubkeys(t *testing.T) {
-	setupJetyForTest(t)
-	defer clearJetyKeys(t)
-
-	kp, _ := nkeys.CreateAccount()
-	pk, _ := kp.PublicKey()
-
-	jety.Set("pubkeys", map[string]interface{}{
-		"admin": []interface{}{pk},
-	})
-
-	urm := rbac.NewUserRoleMap()
-	urm.Set(pk, "admin")
-	SetPolicy(rbac.NewRoleStore(), urm, nil)
-	defer SetPolicy(nil, nil, nil)
-
-	err := RemoveUser(pk)
-	if err != nil {
-		t.Fatalf("RemoveUser from legacy failed: %v", err)
-	}
-
-	if urm.RoleName(pk) != "" {
-		t.Error("user should be removed")
 	}
 }
 

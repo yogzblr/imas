@@ -129,6 +129,65 @@ const (
 	PurposeEnrollProof = "s2f.enroll.proof"
 )
 
+// Control-plane purposes (docs/design/imas-payload-encryption-design.md,
+// "Sealing the control plane", J.1). Two more direction prefixes: c2f/f2c
+// is the imas CLI to farmer and back, a2f/f2a the SaaS API to farmer and
+// back. Every request is a Call (control.go), bound to its method and its
+// NATS subject; every reply is a Reply bound to the request's ID.
+// Message.SproutID carries the non-farmer principal's ID: a user's NKey
+// public key for c2f/f2c, PrincipalSaaSAPI for a2f/f2a, the sprout ID for
+// s2f.refresh. A principal of one kind can't pass for another, because
+// each kind has purposes of its own.
+const (
+	// PurposeCLIRequest is a CLI user's sealed imas.api.<method> request,
+	// and PurposeCLIReply farmer's sealed reply to it (to any c2f
+	// purpose).
+	PurposeCLIRequest = "c2f.api"
+	PurposeCLIReply   = "f2c.api"
+	// PurposeCLIUserKeySubmit is a CLI user reporting a new CLI box public
+	// key of their own, sealed under their current key: the CLI's
+	// counterpart of PurposeBoxKeySubmit (imas auth rotate-key).
+	PurposeCLIUserKeySubmit = "c2f.userkey.pub"
+
+	// The SaaS API's requests on internal.tenant.provision,
+	// internal.tenant.deprovision and internal.sprout.action.
+	PurposeSaaSTenantProvision   = "a2f.tenant.provision"
+	PurposeSaaSTenantDeprovision = "a2f.tenant.deprovision"
+	PurposeSaaSSproutAction      = "a2f.sprout.action"
+	// Farmer's results: the asynchronous provisioning results published
+	// on internal.tenant.(de)provisioned.<job_id>, and the reply to
+	// internal.sprout.action. A result is sealed as a Call (bound to its
+	// subject, which names the job), the reply as a Reply.
+	PurposeSaaSTenantProvisioned   = "f2a.tenant.provisioned"
+	PurposeSaaSTenantDeprovisioned = "f2a.tenant.deprovisioned"
+	PurposeSaaSSproutActionReply   = "f2a.sprout.action"
+
+	// PurposeRefresh is a box-ready sprout's sealed proof on POST
+	// /v1/refresh (Decision C), replacing the NKey signature the bus can
+	// obtain from a CONNECT nonce.
+	PurposeRefresh = "s2f.refresh"
+)
+
+// PrincipalHeader names the principal a sealed control-plane request
+// claims to come from: a user's NKey public key, or PrincipalSaaSAPI. A
+// hint telling farmer which registered box keys to try, never trusted on
+// its own: the request must open under that principal's key, and its
+// Message.SproutID must equal the header.
+const PrincipalHeader = "Imas-Principal"
+
+// PrincipalSaaSAPI is the principal ID (Message.SproutID) of the SaaS
+// API. The SaaS API's purposes are its own, so no user or sprout ID can
+// stand in for it either way.
+const PrincipalSaaSAPI = "saasapi"
+
+// PlatformTenantID is Message.TenantID on a2f/f2a messages, which belong
+// to the deployment, not to one tenant: they are sealed under the
+// platform key, not a tenant key. '@' is outside the tenant ID alphabet
+// ([0-9A-Za-z_-], internal/pki IsValidTenantID), so no tenant can be
+// named this. The tenant a SaaS API request concerns travels in its
+// params and is checked at the point of effect, as today.
+const PlatformTenantID = "@platform"
+
 // Version is the only Envelope and Message version this package reads or
 // writes. 2 added Message.TenantID and Message.RecipientKey; a version 1
 // envelope, which binds neither, never opens.

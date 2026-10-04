@@ -482,6 +482,38 @@ path "{{ .Values.tls.openbao.pkiMount }}/issue/{{ .Values.tls.openbao.role }}" {
 path "{{ $t.kvMount }}/data/{{ $t.kvPath }}/tenants/+" {
   capabilities = ["create", "update", "read"]
 }
+
+# The platform keypair and the control-plane public keys (internal/pki
+# platformbox.go, J.1): read only. The keygen Job creates them; farmer
+# never writes either, and never reads <kvPath>/saasapi-box, the SaaS
+# API's private key.
+path "{{ $t.kvMount }}/data/{{ $t.kvPath }}/platform" {
+  capabilities = ["read"]
+}
+
+path "{{ $t.kvMount }}/data/{{ $t.kvPath }}/controlplane-pub" {
+  capabilities = ["read"]
+}
+{{- end }}
+
+{{- define "imas-farmer.policy.controlPlaneBoxKeygen" -}}
+{{- $t := .Values.farmer.openbao.tenantBox -}}
+# imas-controlplane-box-keygen: `farmer ensure-controlplane-box-keys`
+# (internal/pki controlplanekeys.go, J.1). Create and read the platform
+# and SaaS API keypairs, never update them, so no run can replace a key;
+# create, read and update the public halves it publishes. Nothing under
+# <kvPath>/tenants/, and no metadata, delete or destroy.
+path "{{ $t.kvMount }}/data/{{ $t.kvPath }}/platform" {
+  capabilities = ["create", "read"]
+}
+
+path "{{ $t.kvMount }}/data/{{ $t.kvPath }}/saasapi-box" {
+  capabilities = ["create", "read"]
+}
+
+path "{{ $t.kvMount }}/data/{{ $t.kvPath }}/controlplane-pub" {
+  capabilities = ["create", "read", "update"]
+}
 {{- end }}
 
 {{- define "imas-farmer.policy.farmerbusCerts" -}}
@@ -613,6 +645,9 @@ explanation rather than deploying something that silently can't work.
 {{- end -}}
 {{- if .Values.credentialPublisher.enabled -}}
 {{- include "imas-farmer.publisher.validate" . -}}
+{{- end -}}
+{{- if .Values.controlPlaneBoxKeys.enabled -}}
+{{- include "imas-farmer.cpbox.validate" . -}}
 {{- end -}}
 {{- if hasKey .Values.sproutRelease "minSproutVersion" -}}
 {{- fail "sproutRelease.minSproutVersion was removed: min_sprout_version is set at release time, from packaging/helm/min-sprout-version, and stamped into files/sprout-release.json with the version" -}}
@@ -751,6 +786,27 @@ explanation rather than deploying something that silently can't work.
 {{- range $r := list .Values.tls.openbao.k8sRole .Values.farmer.openbao.gateway.k8sRole .Values.farmer.openbao.fleetSign.k8sRole .Values.farmer.openbao.tenantBox.k8sRole -}}
 {{- if eq $r $p.k8sRole -}}
 {{- fail (printf "credentialPublisher.k8sRole %q is also one of farmer's OpenBao roles: the KV-write role must never be one farmer can log in with" $p.k8sRole) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+The control-plane keygen Job's identity is its own: never farmer's,
+saasapi's or the publisher's ServiceAccount or OpenBao role. Its token can
+create the platform key and the SaaS API's private key.
+*/}}
+{{- define "imas-farmer.cpbox.validate" -}}
+{{- $c := .Values.controlPlaneBoxKeys -}}
+{{- $sas := list (include "imas-farmer.farmer.serviceAccountName" .) .Values.credentialPublisher.serviceAccountName -}}
+{{- if .Values.saasapi.enabled -}}
+{{- $sas = append $sas (include "imas-farmer.saasapi.serviceAccountName" .) -}}
+{{- end -}}
+{{- if has $c.serviceAccountName $sas -}}
+{{- fail (printf "controlPlaneBoxKeys.serviceAccountName %q is another workload's ServiceAccount: the keygen Job's token can create the platform key and the SaaS API's private key, so it must be its own" $c.serviceAccountName) -}}
+{{- end -}}
+{{- range $r := list .Values.tls.openbao.k8sRole .Values.farmer.openbao.gateway.k8sRole .Values.farmer.openbao.fleetSign.k8sRole .Values.farmer.openbao.tenantBox.k8sRole .Values.credentialPublisher.k8sRole .Values.saasapi.openbao.fleetSign.k8sRole -}}
+{{- if eq $r $c.k8sRole -}}
+{{- fail (printf "controlPlaneBoxKeys.k8sRole %q is another workload's OpenBao role" $c.k8sRole) -}}
 {{- end -}}
 {{- end -}}
 {{- end }}

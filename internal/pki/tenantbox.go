@@ -332,39 +332,50 @@ type tenantBoxKeySet struct {
 // never been written.
 func (c *obKVClient) ensureTenantKeySet(ctx context.Context, tenantID string) (*tenantBoxKeySet, error) {
 	path := c.tenantPath(tenantID)
-	current, found, err := c.readKeypair(ctx, path, 0)
+	set, found, err := c.readKeySet(ctx, path)
+	if err != nil || found {
+		return set, err
+	}
+	pub, priv, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := c.writeKeypair(ctx, path, pub, priv, 0, map[string]string{"origin": tenantBoxOriginGenerated}); err != nil {
+		return nil, err
+	}
+	// Written or lost the create race, re-read whichever won rather
+	// than trusting the local copy.
+	set, found, err = c.readKeySet(ctx, path)
 	if err != nil {
 		return nil, err
 	}
 	if !found {
-		pub, priv, err := box.GenerateKey(rand.Reader)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := c.writeKeypair(ctx, path, pub, priv, 0, map[string]string{"origin": tenantBoxOriginGenerated}); err != nil {
-			return nil, err
-		}
-		// Written or lost the create race, re-read whichever won rather
-		// than trusting the local copy.
-		current, found, err = c.readKeypair(ctx, path, 0)
-		if err != nil {
-			return nil, err
-		}
-		if !found {
-			// Either it vanished right after being created, or its current
-			// version was deleted in OpenBao (so the create was refused):
-			// fail closed rather than guess which key sprouts have pinned.
-			return nil, fmt.Errorf("pki: tenant %s X25519 keypair not readable after creating it (is its current version deleted in OpenBao?)", tenantID)
-		}
+		// Either it vanished right after being created, or its current
+		// version was deleted in OpenBao (so the create was refused):
+		// fail closed rather than guess which key sprouts have pinned.
+		return nil, fmt.Errorf("pki: tenant %s X25519 keypair not readable after creating it (is its current version deleted in OpenBao?)", tenantID)
 	}
-	set := &tenantBoxKeySet{current: *current, loaded: time.Now()}
+	return set, nil
+}
+
+// readKeySet reads the keypair secret at path and the retained earlier
+// versions its current one continues from (tenantBoxKeySet.previous).
+// found is false, with a nil error, when the secret has no current
+// version. Shared by tenant keys and the platform key (platformbox.go),
+// whose secrets have the same shape and rotate the same way.
+func (c *obKVClient) readKeySet(ctx context.Context, path string) (set *tenantBoxKeySet, found bool, err error) {
+	current, found, err := c.readKeypair(ctx, path, 0)
+	if err != nil || !found {
+		return nil, false, err
+	}
+	set = &tenantBoxKeySet{current: *current, loaded: time.Now()}
 	if current.severed {
-		return set, nil
+		return set, true, nil
 	}
 	for v := current.version - 1; v >= 1 && v >= current.version-maxTenantBoxPredecessors; v-- {
 		prev, found, err := c.readKeypair(ctx, path, v)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if !found {
 			// Deleted or destroyed (or pruned past max_versions): an
@@ -378,7 +389,7 @@ func (c *obKVClient) ensureTenantKeySet(ctx context.Context, tenantID string) (*
 			break
 		}
 	}
-	return set, nil
+	return set, true, nil
 }
 
 // tenantBoxCacheTTL bounds how long a replica keeps using a tenant key
@@ -485,12 +496,7 @@ func TenantBoxKeys(tenantID string) ([]TenantBoxKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	keys := []TenantBoxKey{{Pub: set.current.pub, Priv: set.current.priv, Version: set.current.version}}
-	if len(set.previous) > 0 && !set.current.created.IsZero() && time.Since(set.current.created) < tenantBoxGrace() {
-		p := set.previous[0]
-		keys = append(keys, TenantBoxKey{Pub: p.pub, Priv: p.priv, Version: p.version})
-	}
-	return keys, nil
+	return graceKeys(set), nil
 }
 
 // GetTenantX25519PublicKey returns tenantID's current NaCl box public

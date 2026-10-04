@@ -1027,6 +1027,45 @@ by an external git sync today.
     - Box-ready sprouts refresh with a sealed proof, with a ratchet per
       sprout.
 
+    Owner decisions, 2026-10-04: sealing is built before the UAT gate, with
+    no compatibility window (no bearer-token or plaintext fallback, no
+    `apiallowbearertoken`/`internalallowplaintext` flags, no ratchets); the
+    end state of J.3 and J.4 is sealed only; a sprout with no box key is
+    refused, not downgraded.
+
+    **J.1, the building blocks (rollout step 2), in review, flagged for
+    security review.** No change in behaviour except the users store:
+    - `payloadbox` purposes and fields for `c2f.api`/`f2c.api`,
+      `c2f.userkey.pub`, the `a2f`/`f2a` set and `s2f.refresh`, bound to
+      the method, the subject and the `Imas-Principal` header.
+    - **The users store was not consistent across replicas** (each
+      replica's own config file, read-only in the Helm chart; every start
+      reloads `rbac_user_roles` from that replica's file, so a removed user
+      came back). Registration moved to the farmer database
+      (`auth_users`, migration `farmer/00003`); the config file stays the
+      bootstrap. CLI box keys are in `auth_cli_box_keys`, keyed on
+      `(tenant_id, user_id)`. `imas auth keygen` and `imas auth rotate-key`
+      exist; farmer doesn't route the rotation until J.4.
+    - The platform key and the SaaS API box key: a Helm hook Job (off by
+      default) writes both to OpenBao KV v2 under the tenant box path, with
+      the public halves each end pins. `cmd/farmer` runs it before
+      loading config; it stays off by default until step 5 uses the keys.
+    - Sealed request and reply helpers for both ends, the per-replica replay
+      guard, and the Valkey claim (10-minute TTL, fail closed for mutating
+      methods; the design's read-only list).
+    - Not wired yet: sealed refresh (rollout step 3), sealed `imas.api.*`
+      (step 4), sealed `internal.*` (step 5). Until then every gap above
+      stands. `auth.users.add` now persists on a Helm install too, while it
+      still takes a bearer token the bus can mint for 15 minutes; nothing
+      is deployed. Owner decision, 2026-10-04: no stopgap, the exposure is
+      accepted until J.4 lands.
+    - The first admin's CLI box key comes from a `boxpub` field in farmer's
+      config, imported once at start (owner decision). Users stay under
+      the `farmerorganization` tenant: the CLI is for operators only.
+    - Known limitation, accepted (owner decision): no per-user rate limit
+      on the replay guard, so one user sending about 3,500 requests a
+      second to a replica fills it. Operators only, so not needed now.
+
     **Stopgap SEC.0 (in review, flagged for security review):**
     `UserAuth.IsValid` refuses an expiry more than 15 minutes ahead (the
     5-minute token lifetime plus a 10-minute clock skew allowance, set by
