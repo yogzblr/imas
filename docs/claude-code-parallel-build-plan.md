@@ -1138,37 +1138,533 @@ go test ./... and packaging/test/test-windows-packaging.sh must pass. PR:
 state exactly what was run and what was not."
 ```
 
-## 5. Orchestrator prompt — paste into one lead Claude Code session
+## 4e. Wave 7: security fixes and sealing, before the UAT gate
 
-Use this if you'd rather have Claude dispatch and track Wave 0 for you
-instead of running the nine commands above by hand. Run it as a **local**
-`claude` session at the repo root (it needs Bash to shell out to
-`claude --cloud`), or as a Claude Code **Project**.
+Added 2026-10-04 from `docs/security-review-2026-10.md` (PR #81) and the two
+designs in `docs/design/imas-payload-encryption-design.md` ("Sealing
+`shell.*`", "Sealing the control plane"). Owner decisions, 2026-10-04:
+
+- The legacy shared tenant keypair adoption path is deleted (review H3).
+- Revocation is enforced on farmer, not on the sprout (review L4).
+- Tenants write recipes and upload them through the SaaS API, so recipe
+  templates are untrusted input (review M8 becomes a blocker).
+- Sealing is built before the Terraform UAT gate.
+- Nothing is deployed, so there is no compatibility window: the sealing
+  briefs end in sealed-only. No bearer-token fallback, no plaintext fallback,
+  none of the design's rollout flags or ratchets, and a sprout with no box
+  key is refused rather than downgraded.
+
+Sub-waves, each held until the one before is merged to `main`:
+
+| Wave | Briefs (run in parallel) | Why this order |
+|---|---|---|
+| 7A | SEC.0, SEC.3a, SEC.3b, SEC.4, SEC.5 | Fixes on today's code. Disjoint areas: SEC.0 is `internal/auth` and `internal/openbao`; SEC.3a and SEC.3b are `internal/pki`, `internal/payloadbox` and the sprout (different files, rebase on each other); SEC.4 is facts, props and recipes; SEC.5 is self-update and dispatch. SEC.0 is tiny and should merge first. |
+| 7A+ | REC.1 | SaaS API recipe upload, needed for the UAT. Needs SEC.4 merged (it uses SEC.4's per-tenant key prefix and restricted template functions). Touches saasapi and objectstore only, so it runs in parallel with the J chain. |
+| 7B | J.1 | The sealing building blocks touch `internal/pki` and `internal/payloadbox`, so they wait for SEC.3a and SEC.3b. |
+| 7C | J.2, J.3 | Sealed refresh (pki, api handlers, sprout) and sealed `imas.api.*` (natsapi, auth, CLI) share only J.1's helpers. |
+| 7D | J.4, J.5 | Sealed `internal.*` and sealed shell both need J.3 (the natsapi wrapper and the CLI box keys). |
+| 7E | SEC.6 | A read-only re-review of the final state. Then the first release and the UAT gate. |
+
+Not in this wave, after the UAT gate: review M6 (same-second `iat` tie in the
+bus fence), the other Low findings, sealing the streams to the CLI (Decision D)
+and the cook step events, (REC.1, the SaaS API recipe upload, is in 7A+ because the UAT needs it). Every brief inherits `CLAUDE.md`; the prompts
+avoid backticks, double quotes and dollar signs.
+
+**SEC.0: token lifetime cap and the OpenBao echo fix**
+```
+claude --cloud "Implement SEC.0 from docs/design/imas-payload-encryption-design.md
+('Stopgaps that can ship before the design is built', stopgap 1) and
+docs/security-review-2026-10.md (M7). Two small fixes and nothing else.
+FLAG FOR SECURITY REVIEW.
+(1) The CLI API token is an NKey signature over an expiry time, and
+UserAuth.IsValid in internal/auth sets no upper bound on it, so a compromised
+bus can mint a token valid until 2099 from a crafted nonce. Make IsValid refuse
+an expiry more than 5 minutes plus the existing clock skew allowance in the
+future. Check every place that creates or validates these tokens
+(internal/auth, internal/api/client, cmd/imas, the natsapi middleware) so no
+legitimate caller asks for a longer one. Keep the error generic. Tests: a
+regression that runs a fake server sending a nonce of 2099-01-01T00:00:00Z,
+captures the signature the client makes at connect, and shows IsValid refuses
+it; boundary tests just inside and just outside the limit; an expired token.
+(2) internal/openbao statusError copies a non-JSON response body into the error
+(the official client sets ResponseError.RawError), and pki.rotatetenantbox
+returns that text to the tenant. Keep Errors only when RawError is false,
+otherwise report the status code alone. Change the test that pins the old
+behaviour to assert the body is absent, and add one for the kubernetes login
+path.
+Scope: internal/auth, internal/api/client (only if needed), internal/openbao,
+docs/BUILD-STATUS.md (Open item 11 stopgap line only). Tests: go test ./...
+must pass. PR: state what you built, what you deferred, and any open question."
+```
+
+**SEC.3a: deleted sprouts, box keys, sprout IDs, legacy keypair**
+```
+claude --cloud "Implement SEC.3a from docs/security-review-2026-10.md (H1, M3,
+M4 and the legacy keypair part of H3). Owner decisions, 2026-10-04: nothing is
+deployed, so no existing install needs migrating; the legacy shared tenant
+keypair adoption path is DELETED; schema and wire changes are fine now. FLAG
+FOR SECURITY REVIEW.
+(1) H1: deleting or replacing a sprout must end its bus credential and its box
+key. Record a revocation for the removed NKey in a per-tenant revoked-keys list
+(a revocation set derived only from rows in unaccepted, denied or rejected
+cannot remember deleted rows) and apply it in DeleteNKey, on the AcceptNKey
+replace path, and in the rebuilt Account JWT revocations. In the same
+transaction revoke every pki_sprout_box_keys row for the tenant and sprout. Make
+upsertSproutBoxKeyActive demote other active rows; add a goose migration (see
+internal/migrations) with a unique constraint of one active key per
+(tenant_id, sprout_id); make ValidSproutBoxKeys fail closed if more than one row
+is active. A freed sprout_id may enrol again with a fresh key; say so in the
+docs. (2) M3: accept a box key submission only under the ACTIVE key
+(internal/natsapi/boxkeys.go, pki.OpenFromSprout); a grace key may only
+re-assert the key that is already active. (3) M4: reject dots in sprout IDs
+(IsValidSproutID), map dots to dashes in resolveEnrollSproutID, and reserve
+control tokens such as announce. Check every subject pattern that takes a token
+by position (facts, boxkey.pub, shell, logs) against the new rule. (4) H3,
+legacy part: delete the adopted-legacy path in internal/pki/tenantbox.go so
+every tenant gets its own fresh keypair, and delete the legacy read-only KV
+path from the Helm policy and values.
+Tests: delete a sprout and show its JWT is refused on reconnect and its box key
+no longer opens or seals; replace by accept; enrol a reused id and check exactly
+one active key; a submission under a grace key refused and under the active key
+accepted; dotted and reserved ids; the migration up and down on sqlite and
+MySQL like the existing migration tests. Keep every table and map keyed on
+tenant_id and sprout_id together.
+Scope: internal/pki, internal/natsapi/boxkeys.go, internal/migrations,
+deploy/helm/farmer (policy and values only), docs/design/imas-payload-encryption-design.md,
+docs/BUILD-STATUS.md (Open item 10 and the requirement 14 row only). SEC.3b edits
+the same package in other files: rebase if it merges first. Tests: go test ./...
+must pass. PR: state what you built, what you deferred, and any open question."
+```
+
+**SEC.3b: tenant binding in sealed messages, replay after restart, cook logging**
+```
+claude --cloud "Implement SEC.3b from docs/security-review-2026-10.md (H3
+tenant binding and proof of possession, M2, H4). Wire format changes are fine:
+nothing is deployed. FLAG FOR SECURITY REVIEW.
+(1) H3: bind the tenant and the recipient key into every sealed message.
+payloadbox.Message gains tenant_id and a recipient key identifier (a hash of the
+recipient box public key); Expect checks both; the sprout pins its tenant at
+enrollment (it already pins the tenant box public key) and refuses a message for
+another tenant; farmer checks the tenant on everything it opens. Update cmd.run,
+cook and the box key submission to the new Message. Require proof of possession
+of sprout_pub at enrollment (for example the sprout opens a farmer-sealed
+challenge): say what you chose and why. (2) M2: after a sprout restarts, a
+sealed cmd.run or cook from the last 5 minutes can be replayed because the
+replay guard is only in memory. Persist the guard (ids with expiry, atomic 0600
+file) or refuse any message whose iat is earlier than process start plus the
+skew allowance, and make RespondCook refuse a job id already in the handled jobs
+file. Say which you chose, and what happens after a clock jump. (3) H4: the
+sprout logs every opened cook envelope at Trace (internal/cook/sproutcook.go)
+and log shipping publishes every level on the bus. Log only the job id and step
+count; stop shipping Trace and Debug over NATS (a configurable minimum level,
+default info); stop logging a new box public key at Notice in
+cmd/sprout/boxkey.go. Add a test that no opened body reaches any log sink,
+including the NATS sink, and search farmer for the same pattern (opened
+envelopes, props, secrets in logs) and fix what you find.
+Tests: a sealed message for tenant B opened by tenant A's sprout is refused even
+under a shared key; an enrollment without proof of possession is refused; a
+replay after a simulated restart is refused for cmd.run and cook; the log sink
+test.
+Scope: internal/payloadbox, internal/pki (sproutbox.go, farmerbox.go, enroll.go),
+internal/cook, internal/ingredients/cmd, cmd/sprout, internal/log,
+internal/natsapi/boxkeys.go (only where the Message changes),
+docs/design/imas-payload-encryption-design.md, docs/BUILD-STATUS.md (Open item
+10 and the requirement 14 row only). SEC.3a edits the same package in other
+files: rebase if it merges first. Tests: go test ./... must pass. PR: state what
+you built, what you deferred, and any open question."
+```
+
+**SEC.4: forged facts, recipe templates, per-tenant recipes**
+```
+claude --cloud "Implement SEC.4 from docs/security-review-2026-10.md (H2, M8).
+Owner decision, 2026-10-04: tenants write recipes and upload them through the
+SaaS API, so recipe templates are untrusted input. FLAG FOR SECURITY REVIEW.
+(1) H2: farmer stores facts under the sprout_id in the message body
+(internal/facts/listener.go). Take the sprout id from subject token 2, drop a
+message whose body id differs, validate the id, and key the store on tenant_id
+and sprout_id together. Reserve the names that drive decisions (os, arch,
+sprout_version, hostname, ip_addresses and the hardware keys) in props.set and
+props.delete (internal/natsapi/props.go), or record a source column and make
+saasapi read only facts the sprout wrote itself
+(internal/saasapi/fleet_sprout_facts.go): say which you chose. (2) Stop splicing
+prop and fact values into recipe text before YAML parsing
+(internal/cook/helpers.go): quote or escape them, or pass them as data, so a
+value containing a newline cannot add steps. (3) M8: remove env from the
+farmer-side template function map (internal/cook/farmercook.go populateFuncMap);
+audit every other function for file, network, process or secret access and for
+unbounded work; cap template output size and execution time; keep props and
+hostname, which are already tenant-scoped. (4) Per-tenant recipes: resolve a
+recipe name under a per-tenant prefix first and then under a platform-wide
+read-only prefix, never under another tenant's. Check how recipes are staged for
+sprouts and served at /files/ (internal/api/handlers/recipes.go, internal/cook/store.go,
+internal/objectstore, deploy/envoy; the old internal/natsapi/recipes.go no longer exists) and make sure a sprout of tenant A can never fetch tenant B's
+staged or source recipe, with a test through the real handler. Do NOT build the
+upload endpoints here: in docs/design/cloudxp-machine-manager-api-design.md
+section 1.6 write down what they need (PUT and DELETE on
+tenants/{tenant_id}/recipes/{name}, size and count limits, validation on upload,
+RBAC, audit) so the follow-up brief can be written.
+Tests: a forged fact body is ignored; reserved names are refused; a prop value
+with a newline stays one value; env and every removed function fail to render;
+template time and size limits; a cross-tenant recipe read is refused at every
+layer.
+Scope: internal/facts, internal/natsapi (props.go), internal/api/handlers (recipes.go),
+internal/objectstore, internal/cook (store.go, farmercook.go, helpers.go), internal/saasapi/fleet_sprout_facts.go,
+internal/api, deploy/envoy (only if a route needs it),
+docs/design/cloudxp-machine-manager-api-design.md, docs/BUILD-STATUS.md (Open
+items 10 and the requirement 9 row only). Tests: go test ./... must pass. PR:
+state what you built, what you deferred, and any open question."
+```
+
+**SEC.5: pre-dispatch fixes (self-update and rollouts)**
+```
+claude --cloud "Implement SEC.5 from docs/security-review-2026-10.md (M1, L1,
+L2, L8, M5): the fixes the review asks for before
+SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED is turned on anywhere. Owner decision,
+2026-10-04: revocation stays enforced on farmer, not on the sprout (L4): add no
+sprout-side deny list. FLAG FOR SECURITY REVIEW.
+(1) M1: the signed manifest version is not bound to the package it names. Before
+installing, read the package's own metadata and require the name imas-sprout and
+a version equal to the manifest's (dpkg-deb -f, rpm -qp --qf, the MSI
+ProductVersion). The packages carry a +git version suffix (version_metadata in
+.goreleaser.yaml), so compare the canonical version and say how. Pass
+--refuse-downgrade to dpkg. Check what zypper does on a downgrade and report. Say
+whether fleetreleaser could check the checksum against the tag's signed
+checksums.txt; do not build that. (2) L1: add a farmer-side switch
+IMAS_SELF_UPDATE_ENABLED, default false, checked in
+internal/natsapi/sprout_action.go before any self_update, make farmer enforce the
+rollout window as well, and expose the switch in the farmer chart (default
+false). (3) L2: in internal/ingredients/selfupdate/download.go replace the
+url.Error URL with the redacted form and strip the query, so a presigned URL
+never reaches a job error. (4) L8: a live rollout re-checks that the tenant is
+active before every wave and every item, as the resumed path does, and stops
+with the same code. (5) M5: per-tenant concurrency caps well below the pool size
+in saasapi (internal/saasapi/sprout_actions.go) and farmer
+(internal/natsapi/sprout_action.go), and a reserved pool for self_update so
+rollouts cannot be starved, with Helm values and documented defaults. Farmer must
+not block its subscription callback when its pool is full: refuse with a clear
+code instead.
+Tests for each, including a hostile tenant filling its cap while another tenant
+and a rollout wave still proceed, and a downgrade attempt that names an older
+genuine package.
+Scope: internal/ingredients/selfupdate, internal/natsapi/sprout_action.go,
+internal/saasapi, cmd/fleetreleaser (report only), deploy/helm/farmer (values and
+env), docs/BUILD-STATUS.md (Open items 4 and 10 and the requirement 20 row only).
+Tests: go test ./... must pass. PR: state what you built, what you deferred, and
+any open question."
+```
+
+**REC.1: SaaS API recipe upload (after SEC.4)**
+```
+claude --cloud "Implement REC.1: tenants upload, list, read and delete their own
+recipes through the SaaS API. Owner decision, 2026-10-04: tenants write recipes
+and upload them through the SaaS API, and the UAT cannot run without it. Today
+recipes only arrive in the recipe bucket by a git sync outside this repo, the
+SaaS API has no object store client, and farmer reads recipes through
+internal/cook/store.go and internal/api/handlers/recipes.go. Recipe templates are
+untrusted input. FLAG FOR SECURITY REVIEW.
+Read first: docs/security-review-2026-10.md (M8, H2), the SEC.4 PR (the per-tenant
+key prefix, the restricted template function map, the section 1.6 notes in
+docs/design/cloudxp-machine-manager-api-design.md) and internal/objectstore. Use
+the key layout SEC.4 merged; if it did not settle one, use
+tenants/<tenant_id>/recipes/<name> and say so.
+Build: (1) Routes in internal/saasapi, in the section 1.6 style, every one behind
+Auth and tenant-scoped like the others: GET /v1/tenants/{tenant_id}/recipes (list,
+paged), GET .../recipes/{name} (content, sha256, size, updated time), PUT
+.../recipes/{name} (create or replace), DELETE .../recipes/{name}. Names are
+dot-notation like the existing recipes: validate strictly (lowercase letters,
+digits, dot, dash and underscore, no empty or dot-only segment, a length cap, no
+slash or traversal, nothing that collides with a reserved prefix) and map to the
+key in one function that every route uses. (2) Writer: the SaaS API writes to the
+recipe bucket directly with its own object store credential limited to the
+tenants/ prefix (never sprouts/, jobs or the platform prefix); add the config and
+the Helm values and a MinIO or S3 policy example, and say in the PR why this beats
+routing through farmer (farmer needs sealed internal.* first, J.4). Reads of the
+platform-wide prefix are allowed, writes are not. (3) Validation on PUT, before
+anything is stored: body size cap, per-tenant recipe count and total size caps,
+UTF-8 text only, the YAML parses, and the template parses and executes against dummy
+props with SEC.4's restricted function map under its time and output limits; reject
+anything that fails with a clear 4xx and never echo the body in an error or a log.
+(4) Concurrency and integrity: a conditional write (If-Match on the stored
+checksum or an expected sha256 header) so two editors do not silently overwrite each
+other; return the new sha256. (5) RBAC and audit: say which Keycloak role or scope may
+write versus read (follow the existing middleware model, least privilege), rate limit
+PUT and DELETE like the other mutating routes, and write an audit row for every
+write and delete with the tenant, caller, name, sha256 and size, never the content.
+(6) Freshness: confirm that farmer and the sprout pick up an uploaded recipe on the
+next cook without a restart or a cache to clear (internal/cook/store.go,
+the staged recipe path); if there is a cache, add an invalidation or a short TTL and
+test it. (7) Update docs/design/cloudxp-machine-manager-api-design.md section 1.6
+(replace the stale text that says these proxy farmer recipes.* subjects, which no
+longer exist), add the routes to docs/api, and write a short tenant-facing howto for
+uploading a recipe with curl in docs/INSTALL.md or a new docs page.
+Tests: a tenant cannot read, list, write or delete another tenant's recipes under any
+name or encoded path; invalid names, oversize bodies, over-quota, bad YAML, bad
+template and a template using a removed function are refused; a conditional write
+conflict returns 412; a recipe uploaded through the API cooks on a sprout of the same
+tenant and is not visible to a sprout of another tenant (use the embedded
+farmer and an in-memory or MinIO test store as the existing tests do); audit rows
+carry no content.
+Scope: internal/saasapi, internal/objectstore (only if a conditional put or a paged
+list is missing), internal/cook (store.go, only for the freshness fix),
+deploy/helm (saasapi values, secret and env), docs/design/cloudxp-machine-manager-api-design.md,
+docs/api, docs/INSTALL.md, docs/BUILD-STATUS.md (Open items 1 and 10 only). Needs SEC.4
+merged. Tests: go test ./... must pass. PR: state what you built, what you deferred,
+and any open question."
+```
+
+**J.1: sealing building blocks (after SEC.3a and SEC.3b)**
+```
+claude --cloud "Implement J.1 from docs/design/imas-payload-encryption-design.md
+('Sealing the control plane': Decisions A, B and C, and Rollout step 2):
+building blocks, with no change in behaviour yet. Owner decisions, 2026-10-04:
+sealing is built BEFORE the UAT gate; nothing is deployed, so there is no
+compatibility window: no plaintext fallback, no bearer token fallback, no
+apiallowbearertoken or internalallowplaintext flags and no per-user or
+per-sprout ratchets; the end state in J.3 and J.4 is sealed only; a sprout with
+no box key is refused rather than downgraded; method names stay visible in
+subjects (open question 9); control traffic uses static keys (open question 8);
+the Valkey claim for mutating methods fails closed (open question 7). FLAG FOR
+SECURITY REVIEW.
+Build: (1) payloadbox purposes and fields for c2f.api, f2c.api, the SaaS API to
+farmer pair, and s2f.refresh, bound to the method, the subject and the principal
+header, as the design says. (2) The CLI box key store: a table keyed on
+(tenant_id, user_id) with the registered public key, status and created and
+rotated times, in a new goose migration (farmer schema); admin registration and
+rotation on farmer; imas auth keygen and imas auth rotate-key in cmd/imas. (3)
+The platform key and the SaaS API box key: generated by a Helm hook job into an
+OpenBao path or a Secret (say which), private half readable only by its owner,
+and how farmer and saasapi pin each other's public keys. (4) Sealed request and
+reply helpers for both ends, the per-replica ReplayGuard use, and the Valkey
+claim helper (SET NX on tenant_id, user_id and message id with a 10 minute TTL,
+fail closed for mutating methods; use the design's explicit read-only list and
+treat cohorts.refresh as mutating; say if you disagree with any entry). (5) The
+users store: auth.users.add writes farmer's local config file
+(jety.WriteConfig). Find out whether that is consistent across several farmer
+replicas and report it; if it is not, move user registration and CLI box keys to
+the farmer database in this brief, or stop and say why.
+Tests: a round trip for every purpose; wrong key, wrong principal, wrong method,
+wrong subject, stale, replayed on one replica, replayed on another replica
+(Valkey), Valkey down (mutating refused, reads allowed).
+Scope: internal/payloadbox, internal/pki, internal/auth (store only),
+internal/migrations, internal/natsapi (helpers only, no router change), cmd/imas
+(auth subcommands), deploy/helm/farmer (hook job, values, policy), docs/design,
+docs/BUILD-STATUS.md (Open item 11 only). Needs SEC.3a and SEC.3b merged. Tests:
+go test ./... must pass. PR: state what you built, what you deferred, and any
+open question."
+```
+
+**J.2: sealed sprout refresh (after J.1)**
+```
+claude --cloud "Implement J.2 from docs/design/imas-payload-encryption-design.md
+(Decision C): sealed sprout refresh. Today the sprout NKey signs both the
+CONNECT nonce and its /v1/refresh proof, so a compromised bus can refresh as
+any sprout and read its staged rendered recipe from /files/. Same owner
+decisions as J.1: no fallback and no ratchet; a sprout with no box key must
+re-enrol. FLAG FOR SECURITY REVIEW.
+Build: the sprout sends s2f.refresh (a payloadbox message under its box key to
+the tenant key, with the freshness, replay and ReplyTo rules) instead of the
+NKey-signed proof; farmer verifies it under the sprout's active box key and the
+tenant, returns the new gateway JWT sealed to the sprout, and refuses NKey-only
+refresh for every sprout; do the same for any other follow-up call that uses the
+NKey proof. Check the Envoy path (deploy/envoy) and the refresh handler in
+internal/api/handlers, and keep the jwt_authn behaviour. Think through and test:
+a sprout box key rotation during refresh, an expired gateway JWT at reconnect
+(the SCALE.1 reconnect path must still recover), clock skew, and the tenant pin.
+Tests: the fake-server regression from SEC.0 extended so a signature captured at
+CONNECT cannot authorise a refresh; refresh under a rotated key; a stale tenant
+pin; a replayed refresh. Run the through-real-Envoy tests
+(IMAS_TEST_ENVOY_BIN, see BUILD-STATUS Wave 1) if you can get the binary; say if
+you cannot.
+Scope: internal/pki (enrollment client, refresh), internal/api/handlers,
+cmd/sprout, internal/payloadbox (use only), deploy/envoy (only if needed),
+docs/BUILD-STATUS.md (Open item 11 only). Needs J.1 merged. Tests: go test ./...
+must pass. PR: state what you built, what you deferred, and any open question."
+```
+
+**J.3: sealed CLI to farmer API (after J.1)**
+```
+claude --cloud "Implement J.3 from docs/design/imas-payload-encryption-design.md
+(Decision A): sealed CLI to farmer API. Remove bearer tokens; the CLI NKey signs
+only the bus nonce. Same owner decisions as J.1: sealed only, no fallback, no
+ratchet. FLAG FOR SECURITY REVIEW.
+Build: every imas.api.* request is a payloadbox c2f.api message from the CLI box
+key to the tenant key and every reply is f2c.api back, with the method bound to
+the subject, a principal header, the per-replica replay guard and the Valkey
+claim for mutating methods (J.1 helpers). A router wrapper in internal/natsapi
+opens the request, derives the user from the verified key (never from a field in
+the body), runs checkScopedAccess for that user and seals the reply. Remove
+token creation and validation from internal/auth and the token from the client
+(internal/api/client/nats.go) entirely, and update every caller in cmd/imas,
+tools and testing. The CLI refuses a plaintext reply. Make auth.users.* work
+with the J.1 key store, and make the first admin bootstrappable (a config or Helm
+value) without a bus token. Check what the CLI still reads in plaintext (cook
+--follow, imas serve) and write down in the design what stays plaintext until
+Decision D.
+Tests: the forged-token regression (no token can be minted or replayed any
+more); wrong key, wrong user, replay on two replicas, a revoked key, a method not
+granted; an end-to-end CLI test against an embedded farmer and bus.
+Scope: internal/natsapi, internal/auth, internal/api/client, cmd/imas,
+internal/pki (CLI key lookups), deploy/helm/farmer (bootstrap admin value),
+docs/api, docs/INSTALL.md, docs/BUILD-STATUS.md. Needs J.1 merged. Tests: go test
+./... must pass. PR: state what you built, what you deferred, and any open
+question."
+```
+
+**J.4: sealed SaaS API to farmer (after J.3)**
+```
+claude --cloud "Implement J.4 from docs/design/imas-payload-encryption-design.md
+(Decision B): sealed SaaS API to farmer traffic. internal.* trusts the bus
+account's permissions, so a compromised bus can forge provisioning,
+deprovisioning, internal.sprout.action and their results. Same owner decisions as
+J.1: sealed only, no fallback. FLAG FOR SECURITY REVIEW.
+Build: every internal.* request and reply is a payloadbox message between the SaaS
+API box key and the platform key (J.1), bound to the method, the subject and the
+tenant, with replay protection. Farmer opens only under the registered SaaS API
+key and refuses plaintext; the SaaS API refuses plaintext replies and results.
+Point-of-effect checks (tenant active, release approval, signatures, rollout
+window) keep running on farmer as FU.7 and CL.3 do. The outbox sweeper's re-sends
+must produce fresh sealed messages (new id and iat) while idempotency by job id
+stays as CL.3 built it. Do not move internal.* onto a core-only transport (design
+open question 5): write down in the design what that would take.
+Tests: forged and replayed provision, deprovision and sprout_action requests are
+refused; forged results are refused; a sweeper re-send; the PKI.1 interleaving
+tests still pass; go test -race on internal/saasapi and internal/natsapi.
+Scope: internal/saasapi, internal/natsapi (tenant provisioning, sprout_action),
+internal/pki (platform key use), docs/design, docs/api, docs/BUILD-STATUS.md.
+Needs J.3 merged (it shares the natsapi wrapper). Tests: go test ./... must pass.
+PR: state what you built, what you deferred, and any open question."
+```
+
+**J.5: sealed shell (after J.3)**
+```
+claude --cloud "Implement J.5 from docs/design/imas-payload-encryption-design.md
+('Sealing shell.*'). Read the whole section first. Where it proposes a default,
+take it, as the owner agreed on 2026-10-04: farmer relays with both legs sealed;
+leg 1 authenticates with the CLI box key (J.3); idle timeout 15 minutes by
+default and 60 at most, maximum session 8 hours; sprout disableshell defaults to
+false and is exposed in the Ansible role; the shell allow-list is /etc/shells,
+overridable in sprout config; the operator role loses shell unless granted;
+keystroke timing leakage is a recorded residual risk; the CLI pins tenantboxpub
+from explicit config only; sessions die with their farmer replica and v1 has no
+cross-replica shell list; no plaintext fallback and no shellallowplaintextsprouts
+flag; Windows sprouts keep refusing shell (ConPTY needs Server 2019 and the
+supported floor is Server 2016); no transcripts in v1, only audit entries when a
+session opens and ends (ask the owner in the PR whether CERT-In or DPDP need
+recording); no browser or SaaS API shell. FLAG FOR SECURITY REVIEW.
+Also fix what the design found: sproutPermissions grants no imas.shell.> subject,
+so shell does not work for a per-sprout JWT today.
+Build: the payloadbox stream codec (HKDF from ephemeral X25519, ChaCha20-Poly1305
+with the sequence number as nonce, fail closed on replay, reorder or gap, flow
+control, heartbeats); internal/shell on the sprout; the relay in
+internal/natsapi/shell.go with the 60 second RBAC re-check and --sever closing
+running sessions; the grant in internal/pki/jwtusers.go; cmd/imas/cmd/ssh.go. Mind
+the Molecule idempotence note in BUILD-STATUS (Ansible and packaging row) when you
+add the role variable.
+Tests: integration tests on an embedded nats-server with real per-sprout JWT
+permissions and a hostile bus publisher that tries to open, inject, replay,
+reorder, drop and read; a sprout refuses a plaintext shell.start; a cross-tenant
+open is refused.
+Scope: internal/payloadbox, internal/shell, internal/natsapi, internal/pki (the
+grant), cmd/sprout, cmd/imas, ansible/roles/imas_sprout, packaging/etc,
+docs/design, docs/BUILD-STATUS.md (Open item 2 and the requirement 14 row). Needs
+J.3 merged. Tests: go test ./... must pass. PR: state what you built, what you
+deferred, and any open question."
+```
+
+**SEC.6: read-only re-review of the final state (last)**
+```
+claude --cloud "Do a read-only security review of everything merged since
+eacdc79 and record the findings. Change no code. This is input for the human
+security review, not a replacement. FLAG FOR SECURITY REVIEW.
+Method: the same as docs/security-review-2026-10.md (read it first): for each
+area answer what is trusted, what a compromised bus can do, what a hostile
+tenant can do, what a malicious update repository can do, whether everything is
+keyed on tenant_id and sprout_id together, whether secrets reach logs, errors or
+job results, and where a failure opens instead of closing. Mark every finding
+CONFIRMED or UNCONFIRMED and say which link is unverified. Areas, in order: (1)
+every High and Medium finding of that review: confirm each is fixed with a test
+and say if the fix is incomplete; (2) SEC.0 to SEC.5; (3) J.1 to J.5: the sealed
+refresh, CLI API, internal.* and shell. For the sealed designs, test the table
+'What a compromised bus can still do' in docs/design/imas-payload-encryption-design.md
+claim by claim against the code, and write a throwaway hostile-bus test for each
+claim you can, run it, delete it, and report the result; (4) recipes: a hostile
+tenant uploading a recipe, templates, staged files and /files/. Write
+docs/security-review-2026-10-b.md: findings ranked, each with file and line, a
+concrete failure scenario and a proposed fix. Scope: docs/security-review-2026-10-b.md
+(new) and docs/BUILD-STATUS.md (Open items 4 only). PR: describe the findings as
+ready for review, not as a clean bill of health."
+```
+
+## 5. Orchestrator prompt: Wave 7 to the UAT gate (Claude Code app, hosted agents)
+
+Paste into one session in the Claude Code app, with the yogzblr/imas repo
+attached. The orchestrator starts each brief as a hosted (remote) agent from
+inside that session instead of running claude --cloud by hand. It dispatches and
+tracks; it never merges and never edits code. The Wave 0 version of this prompt is
+retired: Waves 0 to 6 are merged.
 
 ```
-You are coordinating the Wave 0 buildout of the imas SaaS Machine Manager
-fork. Read docs/design/imas-master-plan.md and
-docs/design/imas-fork-roadmap.md for context first.
+You are the dispatcher for the remaining imas work before the UAT gate: Wave 7
+(section 4e of docs/claude-code-parallel-build-plan.md). You start hosted agents,
+track them and report. You do not write code, review code, merge, or approve
+anything yourself. Read CLAUDE.md, docs/BUILD-STATUS.md and section 4e of the plan
+first.
 
-Create docs/BUILD-STATUS.md with a table of these nine workstreams:
-B, D, F, G.1+G.3, G.5+G.8+G.9, H.4+H.5, L, K, SaaS-API-scaffold.
-Columns: workstream | one-line description | cloud session ID | status
-(dispatched / in review / merged) | needs security review (y/n).
+How to start a brief. Each brief in section 4e is a code block of the form
+claude --cloud "TEXT". Take TEXT, the part between the outer quotes, exactly as
+written, and start ONE hosted agent per brief with the Agent tool, passing TEXT as
+the prompt and isolation set to remote so it runs in its own cloud environment
+with its own copy of yogzblr/imas. Do not paraphrase, shorten, reorder or add to
+TEXT, and do not include the claude --cloud wrapper. Give each agent a short
+description equal to the brief id (for example SEC.4). Start agents that are
+eligible together in a single message so they run concurrently. Read the plan from
+origin/main each time you dispatch; never dispatch from memory. If an agent cannot
+reach the repo, add it with the add_repo tool for yogzblr/imas with push access and
+retry once; if that fails, stop and tell me.
 
-For each workstream, run `claude --cloud "<task brief>"` using the exact
-task briefs from claude-code-parallel-build-plan.md sections 1.1 through
-1.9 in this repo (copy them verbatim — do not paraphrase or shorten
-them). Record each returned session ID into BUILD-STATUS.md.
+Briefs: SEC.0, SEC.3a, SEC.3b, SEC.4, SEC.5, REC.1, J.1, J.2, J.3, J.4, J.5,
+SEC.6.
 
-Do not dispatch Wave 1 or Wave 2 workstreams (A, C, H, E, I, J) yourself
-— those depend on B and A being merged first. Stop after dispatching
-Wave 0 and tell me to review the nine PRs. When I tell you B (and A, if
-you've also started it) are merged, come back and I'll ask you to
-dispatch Wave 1.
+Gates. A gate is satisfied only when its PR is MERGED into main, not merely open
+or green.
+- Preconditions, checked once at the start: PR 81 (security review) and PR 82
+  (Wave 7 briefs) are merged. If not, stop and tell me.
+- 7A, no further gate: SEC.0, SEC.3a, SEC.3b, SEC.4, SEC.5. Start all five
+  together. SEC.3a and SEC.3b touch the same package: tell me if they conflict;
+  do not resolve it yourself.
+- REC.1: gate SEC.4.
+- J.1: gates SEC.3a and SEC.3b (SEC.0 should already be merged).
+- J.2 and J.3: gate J.1. Start together.
+- J.4 and J.5: gate J.3. Start together.
+- SEC.6: gates every brief above.
+After SEC.6 merges, stop and hand back to me: the first release and the UAT are
+mine to schedule.
 
-For any workstream whose brief says "FLAG FOR SECURITY REVIEW," mark
-that in BUILD-STATUS.md and do not represent it as ready to merge, only
-ready for review, even after its tests pass.
+Tracking. Use the task list as the ledger, one task per brief, with the agent id,
+the PR number once it exists, and its state (not started, running, PR open, CI red,
+merged, blocked). Use ListAgents to see which agents are running and SendMessage to
+continue an agent that needs a nudge or an answer I gave. When an agent finishes,
+find its PR with the REST API (gh api repos/yogzblr/imas/pulls and
+.../commits/SHA/check-runs); gh GraphQL is blocked in this environment, so do not
+use gh pr. Its PR title should start with the brief id, as CLAUDE.md requires. Do not
+poll in a loop: call ReadNotifications when the app says notifications are pending,
+and when I message you, and otherwise schedule at most one check-in with send_later
+about 30 minutes out while agents are running. Subscribe nothing else.
+
+Rules.
+- A brief whose text has FLAG FOR SECURITY REVIEW is never described by you as done
+  or safe to merge, only as ready for review, even when CI is green.
+- When an agent or PR lists open questions or decisions for me, copy them to me
+  verbatim with the PR number. Do not answer them and do not tell an agent an answer
+  I have not given.
+- If an agent fails, stalls or its PR conflicts, say so and propose a retry;
+  start a new agent only after I say yes, with the same verbatim TEXT.
+- If a PR touches files outside its brief's Scope line, flag it to me.
+- Start nothing that is not in section 4e. Do not start Terraform or the UAT.
+- Status report format, whenever I ask: the task list as a table, then what is
+  blocked and on whom, then the briefs now eligible.
+
+Start now: verify the preconditions, then start 7A and report the five agent ids.
 ```
 
 ---
