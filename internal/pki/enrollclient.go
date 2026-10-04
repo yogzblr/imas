@@ -11,10 +11,15 @@ package pki
 //
 //   - Key material is generated here, locally, and only public halves are
 //     sent: the NKey public key (certs.GenNKey made the seed) and the
-//     X25519 box public key (EnsureSproutBoxKey). Every request carries
-//     the NKey seed's signature, the proof of possession farmer checks
-//     before anything else: over EnrollSigningPayload for enrollment,
-//     over RefreshSigningPayload for refresh.
+//     X25519 box public key (EnsureSproutBoxKey). Enrollment requests
+//     carry the NKey seed's signature over EnrollSigningPayload, the proof
+//     of possession farmer checks before anything else. Refresh carries no
+//     NKey signature at all (J.2): the seed also signs the bus's CONNECT
+//     nonce, which a compromised bus chooses, so a refresh is sealed with
+//     the box key instead (SproutSealedRefresh) and its reply, the new
+//     gateway JWT, sealed back (refreshsealed.go). The seed now signs only
+//     bus nonces and enrollment requests, and farmer issues a gateway JWT
+//     for neither on its own.
 //   - Requests go over the SproutRootCA-pinned client LoadRootCA builds,
 //     the same one PutNKey used. That root CA is itself fetched
 //     trust-on-first-use (FetchRootCA), which this file does not change.
@@ -36,6 +41,8 @@ package pki
 //     moves to the new key.
 //   - The tenant ID is pinned at enrollment too (sproutbox.go's
 //     pinSproutTenant), and never moves. Every sealed message names it.
+//     So is the sprout ID farmer assigned (pinSproutID), which a sealed
+//     refresh names.
 //   - A first enrollment is two requests (enroll.go's package comment,
 //     "Proof of possession of the box key"): the first issues the
 //     identity and names the tenant's box key; the second, on farmer's
@@ -130,13 +137,22 @@ type EnrollResponse struct {
 	TenantX25519Continuity json.RawMessage `json:"tenant_x25519_continuity,omitempty"`
 }
 
+// refreshWireRequest is POST /v1/refresh's body: the sprout's NKey public
+// key, saying which sprout it claims to be, and its sealed request
+// (SproutSealedRefresh), which proves it. No NKey signature.
 type refreshWireRequest struct {
-	NKeyPub   string `json:"nkey_pub"`
-	Timestamp int64  `json:"timestamp"`
-	NKeySig   string `json:"nkey_sig"`
+	NKeyPub string          `json:"nkey_pub"`
+	Sealed  json.RawMessage `json:"sealed"`
 }
 
-// RefreshResponse is POST /v1/refresh's success body.
+// refreshWireResponse is POST /v1/refresh's success body: farmer's sealed
+// reply, whose result is a RefreshResponse.
+type refreshWireResponse struct {
+	Sealed json.RawMessage `json:"sealed"`
+}
+
+// RefreshResponse is the result inside farmer's sealed reply to a
+// refresh (refreshsealed.go); nothing of it travels in plaintext.
 type RefreshResponse struct {
 	SproutID string `json:"sprout_id"`
 	// TenantID is checked against the tenant pinned at enrollment on
@@ -164,14 +180,15 @@ var (
 )
 
 // nextSigningTimestamp returns the timestamp for the next signed
-// /v1/enroll or /v1/refresh request: enrollClock's Unix seconds, bumped
-// past the previous one if that was the same second or later. Farmer
-// accepts each signed payload only once (replaycache.go), and a payload is
-// fully determined by its fields and this second-granularity timestamp, so
-// two requests signed in the same second (the background refresher and an
-// on-demand refresh, say) would otherwise be identical and the second
-// rejected. A previous timestamp at least maxSigningTimestampLead ahead
-// of the clock (the clock was stepped back) is not bumped past.
+// /v1/enroll request: enrollClock's Unix seconds, bumped past the
+// previous one if that was the same second or later. Farmer accepts each
+// signed payload only once (replaycache.go), and a payload is fully
+// determined by its fields and this second-granularity timestamp, so two
+// requests signed in the same second (an enrollment's two requests, say)
+// would otherwise be identical and the second rejected. A previous
+// timestamp at least maxSigningTimestampLead ahead of the clock (the
+// clock was stepped back) is not bumped past. (A sealed refresh needs
+// none of this: each carries a fresh random message ID.)
 func nextSigningTimestamp() int64 {
 	signingTimestampMu.Lock()
 	defer signingTimestampMu.Unlock()
@@ -278,8 +295,11 @@ func readBoxPrivKey(path string) ([]byte, error) {
 // public key. The second, which farmer answers from its replay path
 // without spending the token again, carries sprout_pub_proof: proof that
 // this sprout holds the private half of sproutPub, sealed to that tenant
-// key. Farmer records sproutPub only then. The second response must name
-// the same sprout, tenant and tenant key as the first.
+// key. Farmer records sproutPub only then, and only the second response
+// carries a gateway JWT: farmer issues none for an NKey signature alone,
+// which a compromised bus can obtain (enroll.go's package comment). The
+// second response must name the same sprout, tenant and tenant key as
+// the first.
 func EnrollSprout(ctx context.Context, joinToken, hostname, sproutPub string) (*EnrollResponse, error) {
 	if joinToken == "" {
 		return nil, errors.New("pki: no join token configured")
@@ -312,7 +332,9 @@ func EnrollSprout(ctx context.Context, joinToken, hostname, sproutPub string) (*
 }
 
 // postEnroll sends one signed POST /v1/enroll request, with proof as its
-// sprout_pub_proof if set, and returns the validated response.
+// sprout_pub_proof if set, and returns the validated response. A response
+// to a request with a proof must carry a gateway JWT; one to a request
+// without may not.
 func postEnroll(ctx context.Context, kp nkeys.KeyPair, nkeyPub, joinToken, hostname, sproutPub string, proof json.RawMessage) (*EnrollResponse, error) {
 	req := enrollWireRequest{
 		JoinToken:      joinToken,
@@ -332,7 +354,7 @@ func postEnroll(ctx context.Context, kp nkeys.KeyPair, nkeyPub, joinToken, hostn
 	if err := postToFarmer(ctx, "/v1/enroll", req, &out); err != nil {
 		return nil, err
 	}
-	if err := validateEnrollResponse(&out, nkeyPub); err != nil {
+	if err := validateEnrollResponse(&out, nkeyPub, len(proof) > 0); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -379,9 +401,12 @@ func postToFarmer(ctx context.Context, path string, body, out any) error {
 }
 
 // validateEnrollResponse checks that resp is complete and issued to
-// nkeyPub before any of it is persisted.
-func validateEnrollResponse(resp *EnrollResponse, nkeyPub string) error {
-	if err := validateIdentity(resp.SproutID, resp.NKeyIdentity, resp.JWT, resp.GatewayJWT, resp.TenantX25519Pub, nkeyPub); err != nil {
+// nkeyPub before any of it is persisted. The gateway JWT is required only
+// if wantGateway (the response to a request that proved possession of the
+// box key); otherwise it is checked if present.
+func validateEnrollResponse(resp *EnrollResponse, nkeyPub string, wantGateway bool) error {
+	checkGateway := wantGateway || resp.GatewayJWT != ""
+	if err := validateIdentity(resp.SproutID, resp.NKeyIdentity, resp.JWT, resp.GatewayJWT, checkGateway, resp.TenantX25519Pub, nkeyPub); err != nil {
 		return err
 	}
 	if !IsValidTenantID(resp.TenantID) {
@@ -396,8 +421,10 @@ func validateEnrollResponse(resp *EnrollResponse, nkeyPub string) error {
 }
 
 // validateIdentity checks the fields enrollment and refresh responses
-// share: that they are well-formed and issued to nkeyPub.
-func validateIdentity(sproutID, nkeyIdentity, userJWT, gatewayJWT, tenantPub, nkeyPub string) error {
+// share: that they are well-formed and issued to nkeyPub. gatewayJWT is
+// checked only if checkGateway (an enrollment request without a box key
+// proof legitimately gets none).
+func validateIdentity(sproutID, nkeyIdentity, userJWT, gatewayJWT string, checkGateway bool, tenantPub, nkeyPub string) error {
 	if !IsValidSproutID(sproutID) {
 		return fmt.Errorf("pki: farmer's response has an invalid sprout_id %q", sproutID)
 	}
@@ -411,8 +438,10 @@ func validateIdentity(sproutID, nkeyIdentity, userJWT, gatewayJWT, tenantPub, nk
 	if uc.Subject != nkeyPub {
 		return errors.New("pki: farmer's response's jwt was not issued to this sprout's NKey")
 	}
-	if _, err := checkGatewayJWT(gatewayJWT, nkeyPub); err != nil {
-		return err
+	if checkGateway {
+		if _, err := checkGatewayJWT(gatewayJWT, nkeyPub); err != nil {
+			return err
+		}
 	}
 	if _, err := DecodeBoxPubKey(tenantPub); err != nil {
 		return fmt.Errorf("pki: farmer's response's tenant_x25519_pub: %w", err)
@@ -492,16 +521,19 @@ func EnsureEnrolled(ctx context.Context, joinToken, requestedID, sproutPub strin
 // sprout's NKey seed and root CA. The tenant ID and tenant X25519 public
 // key are checked against any already-pinned ones before anything else
 // is written (ErrSproutTenantMismatch; reconcileTenantKeyPin:
-// ErrTenantKeyMismatch, unless a continuity proof moves the key pin),
-// then the gateway JWT, the tenant ID and tenant key pins and the bus
-// URLs (nats_urls, which LoadSproutBus connects to) are written, and the
-// NATS User JWT last.
+// ErrTenantKeyMismatch, unless a continuity proof moves the key pin; the
+// sprout ID, ErrSproutIDMismatch), then the gateway JWT, the tenant ID,
+// sprout ID and tenant key pins and the bus URLs (nats_urls, which
+// LoadSproutBus connects to) are written, and the NATS User JWT last.
 // SproutEnrolled keys off the User JWT, so a crash part-way leaves the
 // sprout un-enrolled and it enrolls again on restart, which farmer answers
 // from its idempotent replay without spending another use of the join
 // token.
 func PersistEnrollment(resp *EnrollResponse) error {
 	if err := checkPinnedSproutTenant(resp.TenantID); err != nil {
+		return err
+	}
+	if err := checkPinnedSproutID(resp.SproutID); err != nil {
 		return err
 	}
 	if err := reconcileTenantKeyPin(resp.SproutID, resp.TenantX25519Pub, resp.TenantX25519Continuity); err != nil {
@@ -512,6 +544,9 @@ func PersistEnrollment(resp *EnrollResponse) error {
 	}
 	setCurrentGatewayJWT(resp.GatewayJWT)
 	if err := pinSproutTenant(resp.TenantID); err != nil {
+		return err
+	}
+	if err := pinSproutID(resp.SproutID); err != nil {
 		return err
 	}
 	if err := pinTenantX25519Pub(resp.TenantX25519Pub); err != nil {
@@ -628,45 +663,70 @@ func GatewayJWTHeaders() (http.Header, error) {
 }
 
 // RefreshGatewayJWT gets a fresh gateway JWT from POST /v1/refresh and
-// persists it. The request carries only nkey_pub and a timestamped
-// proof of possession of its seed (RefreshSigningPayload); no join token.
-// The response is validated in full, and its tenant X25519 key checked
-// against the pinned one, before anything is written: a different key
-// re-pins only with a continuity proof that verifies
-// (reconcileTenantKeyPin); otherwise it returns ErrTenantKeyMismatch (a
-// missing pin, ErrTenantKeyNotPinned) and persists nothing. Its tenant_id
-// is checked against the tenant pinned at enrollment the same way
-// (checkRefreshTenant: ErrSproutTenantMismatch, or ErrSproutTenantNotPinned
-// with no pin), before anything is written. If farmer returns a different
-// NATS User JWT than the one on disk (for instance, re-minted after a
-// signing key change), that is persisted too and picked up on the
+// persists it. The request is nkey_pub and a sealed s2f.refresh
+// (SproutSealedRefresh: the box key, to the pinned tenant key, naming the
+// pinned tenant and sprout ID); no NKey signature and no join token. The
+// pins and keys it needs are checked first, and a sprout missing one
+// can't refresh at all and must be re-enrolled (fatal, IsFatalRefreshError:
+// ErrTenantKeyNotPinned, ErrSproutTenantNotPinned, ErrSproutIDNotPinned,
+// ErrSproutBoxNotReady).
+//
+// Farmer's reply must open under the pinned tenant key, for this sprout
+// and tenant, as the reply to this very request (sproutOpenRefreshReply);
+// anything else is an error and nothing is written. The result is then
+// validated in full, and its tenant X25519 key checked against the pinned
+// one, before anything is written: a different key re-pins only with a
+// continuity proof that verifies (reconcileTenantKeyPin); otherwise it
+// returns ErrTenantKeyMismatch and persists nothing. Its tenant_id is
+// checked against the tenant pinned at enrollment the same way
+// (checkRefreshTenant: ErrSproutTenantMismatch). If farmer returns a
+// different NATS User JWT than the one on disk (for instance, re-minted
+// after a signing key change), that is persisted too and picked up on the
 // sprout's next start. It returns the sprout_id farmer re-issued.
+//
+// A refresh farmer refuses (the generic 401) is an ordinary, retryable
+// error: farmer gives no reason, and nothing it could send unsealed would
+// be authenticated. That includes a sprout pinned to a tenant key farmer
+// no longer holds (a severing rotation): it can't seal anything farmer
+// opens, nor open anything farmer seals, so it is cut off until it is
+// re-enrolled, and its refreshes keep failing.
 func RefreshGatewayJWT(ctx context.Context) (string, error) {
 	kp, err := loadSproutNKey()
 	if err != nil {
 		return "", err
 	}
-	defer kp.Wipe()
 	nkeyPub, err := kp.PublicKey()
+	kp.Wipe()
 	if err != nil {
 		return "", fmt.Errorf("pki: sprout NKey public key: %w", err)
 	}
-	req := refreshWireRequest{NKeyPub: nkeyPub, Timestamp: nextSigningTimestamp()}
-	sig, err := kp.Sign(RefreshSigningPayload(req.Timestamp, req.NKeyPub))
-	if err != nil {
-		return "", fmt.Errorf("pki: signing refresh request: %w", err)
-	}
-	req.NKeySig = base64.RawURLEncoding.EncodeToString(sig)
-
-	var resp RefreshResponse
-	if err := postToFarmer(ctx, "/v1/refresh", req, &resp); err != nil {
-		return "", err
-	}
-	if err := validateIdentity(resp.SproutID, resp.NKeyIdentity, resp.JWT, resp.GatewayJWT, resp.TenantX25519Pub, nkeyPub); err != nil {
-		return "", err
-	}
 	if _, err := os.Stat(config.SproutTenantX25519PubFile); os.IsNotExist(err) {
 		return "", ErrTenantKeyNotPinned
+	}
+	if _, err := SproutTenantID(); err != nil {
+		return "", err
+	}
+	sproutID, err := PinnedSproutID()
+	if err != nil {
+		return "", err
+	}
+	sealed, msgID, err := SproutSealedRefresh(sproutID, nkeyPub)
+	if err != nil {
+		return "", fmt.Errorf("pki: sealing the refresh request: %w", err)
+	}
+	var wire refreshWireResponse
+	if err := postToFarmer(ctx, "/v1/refresh", refreshWireRequest{NKeyPub: nkeyPub, Sealed: sealed}, &wire); err != nil {
+		return "", err
+	}
+	resp, err := sproutOpenRefreshReply(sproutID, msgID, wire.Sealed)
+	if err != nil {
+		return "", fmt.Errorf("pki: farmer's refresh reply: %w", err)
+	}
+	if err := validateIdentity(resp.SproutID, resp.NKeyIdentity, resp.JWT, resp.GatewayJWT, true, resp.TenantX25519Pub, nkeyPub); err != nil {
+		return "", err
+	}
+	if resp.SproutID != sproutID {
+		return "", ErrSproutIDMismatch
 	}
 	if err := checkRefreshTenant(resp.TenantID); err != nil {
 		return "", err
@@ -904,9 +964,12 @@ func checkRefreshTenant(tenantID string) error {
 
 // IsFatalRefreshError reports whether err, from RefreshGatewayJWT (or a
 // download that refreshed first), means the sprout can't trust farmer's
-// answer about its tenant or tenant key: a retry would get the same
-// answer, so the sprout must stop and be re-enrolled.
+// answer about its tenant, tenant key or sprout ID, or can't make a
+// sealed refresh at all (no box key, or a pin missing): a retry would get
+// the same answer, so the sprout must stop and be re-enrolled.
 func IsFatalRefreshError(err error) bool {
 	return errors.Is(err, ErrTenantKeyMismatch) || errors.Is(err, ErrTenantKeyNotPinned) ||
-		errors.Is(err, ErrSproutTenantMismatch) || errors.Is(err, ErrSproutTenantNotPinned)
+		errors.Is(err, ErrSproutTenantMismatch) || errors.Is(err, ErrSproutTenantNotPinned) ||
+		errors.Is(err, ErrSproutIDMismatch) || errors.Is(err, ErrSproutIDNotPinned) ||
+		errors.Is(err, ErrSproutBoxNotReady)
 }

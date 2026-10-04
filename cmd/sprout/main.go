@@ -212,14 +212,20 @@ func runSprout(parent context.Context, joinToken string, handleSignals bool) {
 	}
 	if _, err := pki.LoadGatewayJWT(); err != nil {
 		// Not fatal: the refresher below replaces a missing token first.
+		// The sealed refresh needs no gateway JWT, only the box key and
+		// the pins enrollment wrote.
 		log.Warnf("no persisted gateway JWT: %v", err)
 	}
 	go func() {
-		// A refresher error means farmer's tenant X25519 key or tenant ID
-		// no longer matches the one pinned at enrollment, or a pin is
-		// missing (pki.IsFatalRefreshError). Exit non-zero so the
-		// service manager records a failure and monitoring alerts; a log
-		// line alone would go unnoticed while the gateway JWT expires.
+		// A refresher error means farmer's tenant X25519 key, tenant ID or
+		// sprout ID no longer matches the one pinned at enrollment, or the
+		// sprout can't make a sealed refresh at all: a pin or its box key
+		// is missing (pki.IsFatalRefreshError). There is no NKey-signed
+		// fallback (J.2); the sprout must be re-enrolled. Exit non-zero so
+		// the service manager records a failure and monitoring alerts; a
+		// log line alone would go unnoticed while the gateway JWT expires.
+		// A refresh farmer merely refuses is retried, not fatal: the
+		// refusal is unauthenticated.
 		if err := pki.RunGatewayJWTRefresher(ctx, sproutID, enrollRetryDelay); err != nil {
 			log.Fatalf("gateway JWT refresh: %v", err)
 		}

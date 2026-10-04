@@ -213,7 +213,7 @@ func TestControlPurposesAreDistinctAndDirected(t *testing.T) {
 		PurposeCLIRequest, PurposeCLIReply, PurposeCLIUserKeySubmit,
 		PurposeSaaSTenantProvision, PurposeSaaSTenantDeprovision, PurposeSaaSSproutAction,
 		PurposeSaaSTenantProvisioned, PurposeSaaSTenantDeprovisioned, PurposeSaaSSproutActionReply,
-		PurposeRefresh,
+		PurposeRefresh, PurposeRefreshReply,
 	}
 	seen := map[string]bool{}
 	for _, p := range all {

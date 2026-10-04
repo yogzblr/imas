@@ -104,7 +104,7 @@
   <text x="358" y="312" class="small">jwt_authn verifies the gateway JWT (alg:EdDSA)</text>
   <text x="358" y="327" class="small">against farmer's JWKS, /v1/.well-known/jwks.json.</text>
   <text x="358" y="350" class="small">Enroll is gated in farmer by the join token + NKey</text>
-  <text x="358" y="365" class="small">proof of possession; refresh by NKey PoP only.</text>
+  <text x="358" y="365" class="small">proof of possession; refresh sealed by box key.</text>
   <text x="358" y="388" class="small">Verified against real Envoy v1.35.3 by the</text>
   <text x="358" y="403" class="small">*_ThroughRealEnvoy e2e tests (IMAS_TEST_ENVOY_BIN).</text>
 

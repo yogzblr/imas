@@ -19,9 +19,12 @@
 #                           (internal/api/handlers/enroll.go).
 #   1b. /v1/refresh      — NOT jwt_authn-gated either: an enrolled sprout
 #                           renews its gateway JWT here, possibly after it
-#                           has expired. Authenticated by farmer instead,
-#                           with an NKey proof of possession
-#                           (internal/pki/refresh.go); no join token.
+#                           has expired. Authenticated by farmer instead:
+#                           a payloadbox request sealed with the sprout's
+#                           box key, answered with a reply sealed back to
+#                           it (internal/pki/refreshsealed.go). No NKey
+#                           signature (the bus can get one over a CONNECT
+#                           nonce) and no join token.
 #                           Legitimately high-volume at fleet scale, so it
 #                           has its own, much larger rate-limit bucket,
 #                           sized from fleet size / gateway JWT TTL (see
@@ -155,9 +158,11 @@ static_resources:
                         # Route 1b: gateway JWT refresh. No JWT gate: a
                         # sprout whose gateway JWT has already expired
                         # (powered off past its TTL) must still be able to
-                        # renew it. Farmer authenticates the request with
-                        # an NKey proof of possession
-                        # (internal/api/handlers/refresh.go) and only ever
+                        # renew it. Farmer authenticates the request by
+                        # opening it under the sprout's box key and seals
+                        # the new gateway JWT back to it, so nothing here
+                        # sees one in the clear
+                        # (internal/api/handlers/refresh.go), and only ever
                         # re-issues an existing, accepted identity. Its
                         # own local_ratelimit config, so its own token
                         # bucket (Envoy builds one per route-level config),

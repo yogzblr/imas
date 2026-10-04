@@ -309,12 +309,12 @@ func TestFetchFarmerFile_RetryBackoffHonoursContext(t *testing.T) {
 // If the refresh a stale token needs fails, the download fails with that
 // error and the stale token is never sent.
 func TestFetchFarmerFile_FailedRefreshFailsDownload(t *testing.T) {
-	_, minter, _ := enrollForTest(t)
+	enroll, minter, _ := enrollForTest(t)
 	files := startFileServer(t, map[string]string{testFileKey: "recipe"})
 	installGatewayJWT(t, minter, time.Now().Add(-time.Minute))
-	if err := os.WriteFile(config.SproutTenantX25519PubFile, []byte(otherBoxPub(t)), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	enroll.mu.Lock()
+	enroll.refreshTenantPubOverride = otherBoxPub(t)
+	enroll.mu.Unlock()
 
 	if _, err := FetchFarmerFile(t.Context(), testFileKey); !errors.Is(err, ErrTenantKeyMismatch) {
 		t.Fatalf("FetchFarmerFile = %v, want ErrTenantKeyMismatch", err)

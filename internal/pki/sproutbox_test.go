@@ -2,6 +2,7 @@ package pki
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"golang.org/x/crypto/nacl/box"
 
 	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/gatewayjwt"
 	"github.com/yogzblr/imas/internal/payloadbox"
 )
 
@@ -66,19 +68,165 @@ func TestRefreshGatewayJWT_RepinsAcrossSeveralRotations(t *testing.T) {
 	}
 }
 
-// A severing rotation carries no proof: the sprout's refresh fails with
-// ErrTenantKeyMismatch (fatal; it must be re-enrolled) and the pin stays.
-func TestRefreshGatewayJWT_SeveredRotationIsFatal(t *testing.T) {
+// A severing rotation cuts the sprout off: farmer no longer holds the key
+// it pinned, so it can't open the sprout's sealed refresh, and nothing it
+// could answer would be authenticated to the sprout. The refresh fails
+// (an ordinary, retried error: the refusal itself is unauthenticated),
+// nothing is persisted, and the pin stays. The sprout must be re-enrolled.
+func TestRefreshGatewayJWT_SeveredRotationCutsTheSproutOff(t *testing.T) {
 	enrollForTest(t)
 	before := pinnedTenantKey(t)
 	if _, err := RotateTenantX25519Keypair("t_1", true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RefreshGatewayJWT(t.Context()); !errors.Is(err, ErrTenantKeyMismatch) {
-		t.Fatalf("RefreshGatewayJWT after a severing rotation = %v, want ErrTenantKeyMismatch", err)
+	gwBefore := CurrentGatewayJWT()
+	if _, err := RefreshGatewayJWT(t.Context()); err == nil {
+		t.Fatal("RefreshGatewayJWT succeeded after a severing rotation")
 	}
 	if got := pinnedTenantKey(t); got != before {
 		t.Error("the pin moved without a proof")
+	}
+	if CurrentGatewayJWT() != gwBefore {
+		t.Error("a refused refresh installed a gateway JWT")
+	}
+}
+
+// A sprout whose tenant pin is older than the grace window (it was off
+// through a rotation) still refreshes: farmer opens its request under the
+// retained key it pinned, seals the reply under that same key, and the
+// continuity proof inside re-pins it.
+func TestRefreshGatewayJWT_StalePinOutsideTheGraceWindow(t *testing.T) {
+	_, minter, _ := enrollForTest(t)
+	// No grace window at all (withTenantBoxGrace zeroes the gateway JWT
+	// lifetime too, so mint this test's tokens for an hour regardless).
+	withTenantBoxGrace(t, 0)
+	gatewayMinter = hourLongMinter{minter}
+	before := pinnedTenantKey(t)
+	rot, err := RotateTenantX25519Keypair("t_1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keys, err := TenantBoxKeys("t_1"); err != nil || len(keys) != 1 {
+		t.Fatalf("TenantBoxKeys = %d keys, %v; want only the new one (no grace)", len(keys), err)
+	}
+	if _, err := RefreshGatewayJWT(t.Context()); err != nil {
+		t.Fatalf("RefreshGatewayJWT with a pin from before the grace window: %v", err)
+	}
+	if got := pinnedTenantKey(t); got != rot.Pub || got == before {
+		t.Errorf("pin is %s, want the rotated key %s", got, rot.Pub)
+	}
+	farmerOpensReply(t)
+}
+
+// hourLongMinter mints through m with an expiry an hour out, whatever
+// config.GatewayJWTTTL says.
+type hourLongMinter struct{ m *jwsGatewayMinter }
+
+func (h hourLongMinter) MintGatewayJWT(ctx context.Context, c gatewayjwt.GatewayClaims) (string, error) {
+	c.Expiry = time.Now().Add(time.Hour)
+	return h.m.MintGatewayJWT(ctx, c)
+}
+
+// A box key rotation in flight at refresh time, every way it can stand.
+func TestRefreshGatewayJWT_DuringABoxKeyRotation(t *testing.T) {
+	// The sprout submitted its new key; farmer hasn't recorded it. The
+	// refresh opens under the current key and the reply comes back to it:
+	// nothing is promoted.
+	t.Run("submitted, not recorded", func(t *testing.T) {
+		enrollForTest(t)
+		oldPub := sproutCurrentPub(t)
+		if _, _, err := BeginSproutBoxKeyRotation("web-01"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := RefreshGatewayJWT(t.Context()); err != nil {
+			t.Fatalf("RefreshGatewayJWT: %v", err)
+		}
+		if got := sproutCurrentPub(t); got != oldPub || !fileExists(sproutPendingBoxPrivFile()) {
+			t.Error("a reply sealed to the current key promoted the pending one")
+		}
+	})
+	// Farmer recorded the new key: it seals the reply to it, which is the
+	// sprout's confirmation, so the refresh promotes the pending key.
+	t.Run("recorded", func(t *testing.T) {
+		enrollForTest(t)
+		submission, newPub, err := BeginSproutBoxKeyRotation("web-01")
+		if err != nil {
+			t.Fatal(err)
+		}
+		farmerAcceptsSubmission(t, submission)
+		if _, err := RefreshGatewayJWT(t.Context()); err != nil {
+			t.Fatalf("RefreshGatewayJWT: %v", err)
+		}
+		if got := sproutCurrentPub(t); got != newPub {
+			t.Errorf("current key is %s, want the promoted %s", got, newPub)
+		}
+		if active, _ := farmerActive(t); active != newPub {
+			t.Errorf("farmer's active key is %s, want %s", active, newPub)
+		}
+		farmerOpensReply(t)
+	})
+	// Farmer recorded the new key and the old one's grace there has run
+	// out (the sprout heard nothing from farmer for that long). Only the
+	// copy sealed under the pending key opens; the sprout still recovers.
+	t.Run("recorded, old key past farmer's grace", func(t *testing.T) {
+		enrollForTest(t)
+		submission, newPub, err := BeginSproutBoxKeyRotation("web-01")
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg, err := OpenFromSprout("t_1", "web-01", payloadbox.PurposeBoxKeySubmit, submission)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body sproutBoxKeySubmitBody
+		if err := json.Unmarshal(msg.Body, &body); err != nil {
+			t.Fatal(err)
+		}
+		if err := RotateSproutBoxKey("t_1", "web-01", body.Pub, 0); err != nil {
+			t.Fatal(err)
+		}
+		if _, grace := farmerActive(t); len(grace) != 0 {
+			t.Fatalf("farmer still holds %d grace key(s)", len(grace))
+		}
+		if _, err := RefreshGatewayJWT(t.Context()); err != nil {
+			t.Fatalf("RefreshGatewayJWT with only the pending key on farmer: %v", err)
+		}
+		if got := sproutCurrentPub(t); got != newPub {
+			t.Errorf("current key is %s, want the promoted %s", got, newPub)
+		}
+	})
+	// Already promoted: the old key is the sprout's previous one, and the
+	// refresh is an ordinary one under the new key.
+	t.Run("promoted", func(t *testing.T) {
+		enrollForTest(t)
+		submission, newPub, err := BeginSproutBoxKeyRotation("web-01")
+		if err != nil {
+			t.Fatal(err)
+		}
+		farmerAcceptsSubmission(t, submission)
+		sproutOpens(t, farmerSeals(t))
+		if _, err := RefreshGatewayJWT(t.Context()); err != nil {
+			t.Fatalf("RefreshGatewayJWT: %v", err)
+		}
+		if got := sproutCurrentPub(t); got != newPub {
+			t.Errorf("current key is %s, want %s", got, newPub)
+		}
+	})
+}
+
+// The tenant ID pin is what the sealed refresh names. A sprout whose pin
+// has been changed names a tenant farmer doesn't hold it under, and is
+// refused; one with no pin can't refresh at all (fatal).
+func TestRefreshGatewayJWT_TenantPinIsWhatItSeals(t *testing.T) {
+	srv, _, _ := enrollForTest(t)
+	if err := os.WriteFile(SproutTenantIDFile(), []byte("t_2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RefreshGatewayJWT(t.Context()); err == nil || IsFatalRefreshError(err) {
+		t.Fatalf("refresh naming another tenant = %v, want farmer's refusal", err)
+	}
+	if n := srv.refreshCount(); n != 1 {
+		t.Errorf("refresh requests = %d, want 1", n)
 	}
 }
 

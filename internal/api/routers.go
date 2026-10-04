@@ -52,8 +52,11 @@ func NewRouter(certificate string) *http.ServeMux {
 
 	// Gateway JWT refresh for enrolled sprouts — no auth required here
 	// either: the sprout's gateway JWT may already have expired, so the
-	// request authenticates with an NKey proof of possession, verified
-	// inside handlers.Refresh/pki.RefreshSprout. No join token.
+	// request authenticates as a payloadbox message sealed with the
+	// sprout's box key, opened inside handlers.Refresh/pki.RefreshSprout,
+	// and the new gateway JWT goes back sealed to it (J.2). No NKey
+	// signature (the bus can get one over a CONNECT nonce) and no join
+	// token.
 	mux.Handle("POST /v1/refresh", Logger(http.HandlerFunc(handlers.Refresh), "Refresh"))
 
 	// Gateway JWT JWKS (design doc §2.4 per the "Gateway JWT Companion

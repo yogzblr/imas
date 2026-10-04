@@ -229,6 +229,75 @@ func SproutTenantID() (string, error) {
 	return id, nil
 }
 
+// ErrSproutIDMismatch means farmer named a different sprout ID than the
+// one this sprout pinned at enrollment. Nothing from that response is
+// persisted.
+var ErrSproutIDMismatch = errors.New("pki: farmer named a different sprout ID than the one this sprout was enrolled as; refusing it")
+
+// ErrSproutIDNotPinned means an enrolled sprout has no pinned sprout ID,
+// so it can't name itself in a sealed refresh (J.2): it enrolled before
+// the pin existed, or its state was tampered with. Fatal: re-enroll it.
+var ErrSproutIDNotPinned = errors.New("pki: sprout has no pinned sprout ID; re-enroll it")
+
+// SproutIDFile is where the sprout pins the sprout ID farmer assigned it
+// at enrollment, next to its tenant pin (SproutTenantIDFile). A sealed
+// refresh names it (payloadbox Message.SproutID), and farmer opens the
+// refresh only for the sprout its NKey belongs to, so the sprout must know
+// farmer's ID for it, which may carry a collision suffix the requested
+// one didn't. Like the tenant pin, it never moves.
+func SproutIDFile() string {
+	return filepath.Join(filepath.Dir(config.SproutTenantX25519PubFile), "sprout-id")
+}
+
+// pinSproutID pins sproutID as this sprout's ID if none is pinned yet. It
+// never replaces a pin: a different ID is ErrSproutIDMismatch.
+func pinSproutID(sproutID string) error {
+	if !IsValidSproutID(sproutID) {
+		return fmt.Errorf("pki: farmer named an invalid sprout_id %q", sproutID)
+	}
+	err := writeFileOnce(SproutIDFile(), []byte(sproutID), 0o644)
+	if err == nil {
+		return nil
+	}
+	if !os.IsExist(err) {
+		return fmt.Errorf("pki: pinning sprout ID: %w", err)
+	}
+	return checkPinnedSproutID(sproutID)
+}
+
+// checkPinnedSproutID returns ErrSproutIDMismatch if a sprout ID is pinned
+// and sproutID isn't it. No pin yet is not an error.
+func checkPinnedSproutID(sproutID string) error {
+	pinned, err := PinnedSproutID()
+	if errors.Is(err, ErrSproutIDNotPinned) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if pinned != sproutID {
+		return ErrSproutIDMismatch
+	}
+	return nil
+}
+
+// PinnedSproutID returns the sprout ID this sprout pinned at enrollment,
+// or ErrSproutIDNotPinned.
+func PinnedSproutID() (string, error) {
+	b, err := os.ReadFile(SproutIDFile())
+	if os.IsNotExist(err) {
+		return "", ErrSproutIDNotPinned
+	}
+	if err != nil {
+		return "", fmt.Errorf("pki: reading pinned sprout ID: %w", err)
+	}
+	id := strings.TrimSpace(string(b))
+	if !IsValidSproutID(id) {
+		return "", fmt.Errorf("pki: pinned sprout ID %q is malformed", id)
+	}
+	return id, nil
+}
+
 // sproutReplayGuardFile is where the sprout's replay guard is persisted,
 // next to its box private key.
 func sproutReplayGuardFile() string {
