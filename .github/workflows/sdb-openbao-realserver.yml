@@ -1,0 +1,112 @@
+name: sdb OpenBao real server
+
+# Runs TestRealServer (internal/ingredients/sdb/openbao/realserver_test.go)
+# against a real OpenBao dev server on TLS. The test skips itself unless
+# IMAS_TEST_SDB_OPENBAO_ADDR, _TOKEN and _CACERT are set, so the plain
+# `go test ./...` in ci.yml never runs it.
+#
+# OpenBao only. Recent HashiCorp Vault releases are not under a licence
+# this project accepts by default (CLAUDE.md, "Licensing"), so there is
+# no Vault job here.
+#
+# The test sets the server up itself with the root token: it enables a
+# cert auth method, KV v2 and KV v1 mounts and a policy under random
+# names, creates two cert auth roles, and removes all of them when done.
+# This workflow only provides the server.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "internal/ingredients/sdb/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/sdb-openbao-realserver.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "internal/ingredients/sdb/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/sdb-openbao-realserver.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # To bump: take the linux_amd64 tar.gz line from the release's
+  # checksums.txt (https://github.com/openbao/openbao/releases), ideally
+  # after checking checksums.txt against its checksums.txt.sigstore.json.
+  OPENBAO_VERSION: "2.7.1"
+  OPENBAO_SHA256: "0e2f1ce10d124e03112b50dd2fbec6b78003783253bc3a91587938f39d1e2243"
+
+jobs:
+  realserver:
+    name: TestRealServer (OpenBao)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: 1.26.x
+          check-latest: true
+
+      - name: Install OpenBao ${{ env.OPENBAO_VERSION }}
+        run: |
+          set -euo pipefail
+          tarball="openbao_${OPENBAO_VERSION}_linux_amd64.tar.gz"
+          cd "$RUNNER_TEMP"
+          curl -fsSL --retry 3 -o "$tarball" \
+            "https://github.com/openbao/openbao/releases/download/v${OPENBAO_VERSION}/${tarball}"
+          echo "${OPENBAO_SHA256}  ${tarball}" | sha256sum --check --strict
+          mkdir -p bin
+          tar -xzf "$tarball" -C bin bao
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Start OpenBao dev server on TLS
+        run: |
+          set -euo pipefail
+          # A fresh root token per run, masked in the log (dev mode prints
+          # it at startup).
+          token="$(openssl rand -hex 24)"
+          echo "::add-mask::$token"
+          tls_dir="$RUNNER_TEMP/bao-tls"
+          mkdir -p "$tls_dir"
+          nohup bao server -dev -dev-tls \
+            -dev-root-token-id="$token" \
+            -dev-tls-cert-dir="$tls_dir" \
+            -dev-listen-address=127.0.0.1:8200 \
+            > "$RUNNER_TEMP/bao.log" 2>&1 &
+          for _ in $(seq 1 30); do
+            if [ -f "$tls_dir/vault-ca.pem" ] &&
+              curl -fsS --cacert "$tls_dir/vault-ca.pem" https://127.0.0.1:8200/v1/sys/health > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS --cacert "$tls_dir/vault-ca.pem" https://127.0.0.1:8200/v1/sys/health
+          echo
+          {
+            echo "IMAS_TEST_SDB_OPENBAO_ADDR=https://127.0.0.1:8200"
+            echo "IMAS_TEST_SDB_OPENBAO_TOKEN=$token"
+            echo "IMAS_TEST_SDB_OPENBAO_CACERT=$tls_dir/vault-ca.pem"
+          } >> "$GITHUB_ENV"
+
+      - name: Run TestRealServer
+        run: |
+          set -euo pipefail
+          go test -count=1 -v -run '^TestRealServer$' ./internal/ingredients/sdb/openbao \
+            | tee "$RUNNER_TEMP/test.log"
+          # A missing variable makes the test skip, which go test reports
+          # as ok; only a pass counts.
+          grep -q -- '--- PASS: TestRealServer' "$RUNNER_TEMP/test.log"
+
+      - name: OpenBao server log
+        if: failure()
+        run: cat "$RUNNER_TEMP/bao.log" || true

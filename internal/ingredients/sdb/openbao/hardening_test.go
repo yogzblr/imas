@@ -166,6 +166,17 @@ func TestErrorsCarryNoSecrets(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		v1 := !strings.Contains(r.URL.Path, "/data/")
+		switch {
+		case (m == "absent-then-403" || m == "absent-then-html") && !v1:
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"errors": []string{}})
+			return
+		case m == "absent-then-403":
+			m = "read-403"
+		case m == "absent-then-html":
+			m = "read-html"
+		}
 		switch m {
 		case "read-html":
 			w.WriteHeader(http.StatusInternalServerError)
@@ -186,6 +197,8 @@ func TestErrorsCarryNoSecrets(t *testing.T) {
 		{"login-html", "sdb://openbao/secret/app#password", "status 502"},
 		{"read-html", "sdb://openbao/secret/app#password", "status 500"},
 		{"read-403", "sdb://openbao/secret/app#password", "permission denied"},
+		{"absent-then-403", "sdb://openbao/secret/app#password", "secret/data/app (KV v2): status 404 (not found); then secret/app (KV v1): status 403 (forbidden): permission denied"},
+		{"absent-then-html", "sdb://openbao/secret/app#password", "secret/app (KV v1): status 500"},
 		{"", "sdb://openbao/secret/app#missing", "missing"},
 		{"", "sdb://openbao/secret/app", "#field"},
 	}
