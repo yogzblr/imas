@@ -1,7 +1,7 @@
 package main
 
 // In-process three-node bus clusters, built the way cmd/farmerbus builds
-// one node (pki.ConfigureNats + startBus), each node with its own resolver
+// one node (pki.ConfigureBusNats + startBus), each node with its own resolver
 // directory and the shared trust chain supplied as external seed files,
 // like the chart's IMAS_NATS_*_SEED_FILE mounts. The test plays core: it
 // signs Account and sprout User JWTs with the same seeds and pushes them
@@ -54,6 +54,9 @@ type trust struct {
 	sysAccount, sysUser nkeys.KeyPair
 	sysUserJWT          string
 	caPool              *x509.CertPool
+	// legacyTenant is the TENANT seed: the Account an older bus minted
+	// claims for on an empty volume.
+	legacyTenant nkeys.KeyPair
 }
 
 func newTrust(t *testing.T) *trust {
@@ -80,6 +83,7 @@ func newTrust(t *testing.T) *trust {
 	}
 	tr.operatorSigning = kps["OPERATOR_SIGNING"]
 	tr.sysAccount = kps["SYS_ACCOUNT"]
+	tr.legacyTenant = kps["TENANT"]
 	tr.sysUser, _ = nkeys.CreateUser()
 	pub, _ := tr.sysUser.PublicKey()
 	uc := jwt.NewUserClaims(pub)
@@ -352,7 +356,7 @@ func newTestCluster(t *testing.T, tr *trust, n int) *testCluster {
 func (c *testCluster) start(i int) {
 	c.t.Helper()
 	config.FarmerPKI = c.pkiDirs[i]
-	opts := pki.ConfigureNats()
+	opts, sysUser := pki.ConfigureBusNats()
 	opts.LogFile, opts.Trace, opts.Debug = "", false, false
 	opts.NoLog = true
 	cl := &clusterConfig{
@@ -370,7 +374,7 @@ func (c *testCluster) start(i int) {
 		}
 		cl.Routes = append(cl.Routes, u)
 	}
-	nd, err := startBus(opts, cl, testTiming)
+	nd, err := startBus(opts, sysUser, cl, testTiming)
 	if err != nil {
 		c.t.Fatalf("starting node %d: %v", i, err)
 	}
@@ -644,6 +648,109 @@ func TestClusterPartialMeshFences(t *testing.T) {
 		if nc, err := tr.dialSprout(tn, []string{c.url(i)}); err == nil {
 			nc.Close()
 			t.Fatalf("node %d served the locked-out tenant", i)
+		}
+	}
+}
+
+// TestClusterWipedNodeDoesNotRollBackRevocations: a node that comes back
+// on an empty volume (a StatefulSet scale-out, a replaced PVC) must not
+// re-admit anything core revoked. An older bus minted the legacy tenant's
+// and the SYS Account JWTs for itself on an empty volume, with no
+// revocations and the newest issued-at, and the cluster sync then spread
+// them to every node.
+func TestClusterWipedNodeDoesNotRollBackRevocations(t *testing.T) {
+	tr := newTrust(t)
+	c := newTestCluster(t, tr, 3)
+	c.waitReady(0, 1, 2)
+
+	// Core's legacy tenant Account, revoking one sprout.
+	legacyPub, _ := tr.legacyTenant.PublicKey()
+	good := &tenant{kp: tr.legacyTenant, pub: legacyPub, sproutID: "web-good"}
+	bad := &tenant{kp: tr.legacyTenant, pub: legacyPub, sproutID: "web-bad"}
+	for _, sp := range []*tenant{good, bad} {
+		kp, _ := nkeys.CreateUser()
+		pub, _ := kp.PublicKey()
+		sp.sproutSeed, _ = kp.Seed()
+		uc := jwt.NewUserClaims(pub)
+		uc.Permissions = jwt.Permissions{Sub: jwt.Permission{Allow: jwt.StringList{"imas.sprouts." + sp.sproutID + ".>"}}}
+		var err error
+		if sp.sproutJWT, err = uc.Encode(tr.legacyTenant); err != nil {
+			t.Fatal(err)
+		}
+	}
+	badClaims, _ := jwt.DecodeUserClaims(bad.sproutJWT)
+	lac := jwt.NewAccountClaims(legacyPub)
+	lac.Name = "imas"
+	lac.Revoke(badClaims.Subject)
+	legacyJWT, err := lac.Encode(tr.operatorSigning)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Core's SYS Account, revoking a rotated-out SYS user.
+	oldKP, _ := nkeys.CreateUser()
+	oldPub, _ := oldKP.PublicKey()
+	oldJWT, err := jwt.NewUserClaims(oldPub).Encode(tr.sysAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sysPub, _ := tr.sysAccount.PublicKey()
+	sac := jwt.NewAccountClaims(sysPub)
+	sac.Name = "SYS"
+	sac.Revoke(oldPub)
+	sysJWT, err := sac.Encode(tr.operatorSigning)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, j := range []string{sysJWT, legacyJWT} {
+		if err := tr.push(c.url(0), j); err != nil {
+			t.Fatalf("core push: %v", err)
+		}
+	}
+	oldSysUserAdmitted := func(i int) bool {
+		nc, err := nats.Connect(c.url(i), nats.Secure(tr.tlsConfig()), nats.UserJWTAndSeed(oldJWT, mustSeed(oldKP)),
+			nats.Timeout(2*time.Second), nats.NoReconnect())
+		if err == nil {
+			nc.Close()
+		}
+		return err == nil
+	}
+	admitted := func(sp *tenant, i int) bool {
+		nc, err := tr.dialSprout(sp, []string{c.url(i)}, nats.NoReconnect())
+		if err == nil {
+			nc.Close()
+		}
+		return err == nil
+	}
+	waitFor(t, "the good sprout to be admitted on node 2", 5*time.Second, func() bool { return admitted(good, 2) })
+
+	// Node 2 comes back on an empty volume. The next second boundary
+	// matters: anything it signed for itself would now carry a newer
+	// issued-at than core's pushes.
+	c.stop(2)
+	time.Sleep(1100 * time.Millisecond)
+	if err := os.RemoveAll(c.pkiDirs[2]); err != nil {
+		t.Fatal(err)
+	}
+	c.start(2)
+	c.waitReady(2)
+	time.Sleep(10 * testTiming.Interval) // let every node's pull run
+
+	for i := 0; i < 3; i++ {
+		if admitted(bad, i) {
+			t.Errorf("node %d admitted a sprout core revoked, after node 2 restarted on an empty volume", i)
+		}
+		if oldSysUserAdmitted(i) {
+			t.Errorf("node %d admitted a SYS user core revoked, after node 2 restarted on an empty volume", i)
+		}
+		if !admitted(good, i) {
+			t.Errorf("node %d refused the good legacy sprout (the account didn't reach it)", i)
+		}
+		for pub, want := range map[string]string{legacyPub: legacyJWT, sysPub: sysJWT} {
+			if got, _ := c.nodes[i].fence.resolver.LoadAcc(pub); got != want {
+				t.Errorf("node %d holds a different Account JWT for %s than core pushed", i, pub)
+			}
 		}
 	}
 }

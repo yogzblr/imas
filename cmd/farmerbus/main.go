@@ -100,19 +100,23 @@ func main() {
 // pki.ReloadNKeys(): that call's push (see internal/pki/resolver.go)
 // recomputes sprout User JWTs and the tenant Account's revocation list from
 // PXC-backed accept/deny/reject state — state this DMZ-side process has no
-// business holding a database connection to. pki.ConfigureNats() seeds the
-// resolver directly from whatever Account JWTs already exist on disk (or
-// bootstraps a fresh trust chain, on first boot); from then on, the core
-// process (cmd/farmer) is what keeps that state current here, over the
-// network, via its own ReloadNKeys push to $SYS.REQ.CLAIMS.UPDATE — no
-// restart or local reload needed on this side for an ACL change.
+// business holding a database connection to.
+//
+// pki.ConfigureBusNats seeds the resolver with nothing but a SYS bootstrap
+// Account JWT that any SYS Account JWT core signs outranks; the bus mints
+// no tenant Account (internal/pki/busauth.go). It learns every Account
+// from core, which pushes them all whenever its SYS connection connects
+// or reconnects and pushes each change as it happens, over the network to
+// $SYS.REQ.CLAIMS.UPDATE; a clustered node also pulls them from its peers
+// (fence.go). No restart or local reload is needed on this side for an
+// ACL change.
 func RunNATSServer() {
-	opts := pki.ConfigureNats()
+	opts, sysUser := pki.ConfigureBusNats()
 	cl, err := clusterConfigFromEnv(os.Getenv, os.ReadFile)
 	if err != nil {
 		log.Fatalf("invalid bus cluster configuration: %v", err)
 	}
-	node, err := startBus(opts, cl, defaultFenceTiming)
+	node, err := startBus(opts, sysUser, cl, defaultFenceTiming)
 	if err != nil {
 		log.Panicf("Unable to start NATS Server: %v", err)
 	}
@@ -156,11 +160,11 @@ var (
 func setBusNode(n *busNode) { nodeMu.Lock(); curNode = n; nodeMu.Unlock() }
 func getBusNode() *busNode  { nodeMu.Lock(); defer nodeMu.Unlock(); return curNode }
 
-// startBus starts the embedded server from opts (pki.ConfigureNats's
+// startBus starts the embedded server from opts (pki.ConfigureBusNats's
 // output). With cl non-nil it adds authenticated routes (cluster.go) and a
 // fence (fence.go) that keeps clients out until this node has quorum and
 // has synced its resolver from its peers.
-func startBus(opts nats_server.Options, cl *clusterConfig, timing fenceTiming) (*busNode, error) {
+func startBus(opts nats_server.Options, sysUser pki.BusSysUser, cl *clusterConfig, timing fenceTiming) (*busNode, error) {
 	var f *fence
 	if cl != nil {
 		if err := applyCluster(&opts, cl); err != nil {
@@ -184,7 +188,7 @@ func startBus(opts nats_server.Options, cl *clusterConfig, timing fenceTiming) (
 		return nil, errors.New("NATS server did not start listening")
 	}
 	if f != nil {
-		if err := f.start(srv); err != nil {
+		if err := f.start(srv, sysUser); err != nil {
 			srv.Shutdown()
 			return nil, err
 		}

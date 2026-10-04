@@ -177,7 +177,7 @@ func parseRouteURL(raw string) (*url.URL, error) {
 
 // applyCluster adds the route listener and routes to opts, which must
 // already carry the client-port TLS configuration built by
-// pki.ConfigureNats: the routes reuse its certificate and root CA.
+// pki.ConfigureBusNats: the routes reuse its certificate and root CA.
 func applyCluster(opts *nats_server.Options, c *clusterConfig) error {
 	if opts.TLSConfig == nil || len(opts.TLSConfig.Certificates) == 0 || opts.TLSConfig.RootCAs == nil {
 		return errors.New("cluster routes need the bus TLS certificate and root CA; none configured")
