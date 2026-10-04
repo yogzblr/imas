@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,29 @@ var systemConfigRoot = defaultSystemConfigRoot()
 // EnvJobReconcileWindow sets JobReconcileWindow on farmer when the config
 // file doesn't (e.g. from the Helm chart; see deploy/farmer).
 const EnvJobReconcileWindow = "IMAS_JOB_RECONCILE_WINDOW"
+
+// Recipe template render limits on farmer (RecipeTemplateLimits), set by
+// the Helm chart's farmer.recipes.templateLimits. Unset or empty keeps
+// internal/cook's default.
+const (
+	EnvRecipeMaxSourceBytes     = "IMAS_RECIPE_MAX_SOURCE_BYTES"
+	EnvRecipeMaxRenderedBytes   = "IMAS_RECIPE_MAX_RENDERED_BYTES"
+	EnvRecipeMaxValueBytes      = "IMAS_RECIPE_MAX_VALUE_BYTES"
+	EnvRecipeRenderTimeout      = "IMAS_RECIPE_RENDER_TIMEOUT"
+	EnvRecipeMaxRangeIterations = "IMAS_RECIPE_MAX_RANGE_ITERATIONS"
+)
+
+// RecipeTemplateLimits are the limits farmer renders recipe templates
+// under (internal/cook's "Bounded work"). A zero field keeps cook's
+// default. cmd/farmer hands them to cook.SetRenderLimits, which checks
+// their ranges and stops startup if one is out of range.
+type RecipeTemplateLimits struct {
+	MaxSourceBytes     int
+	MaxRenderedBytes   int
+	MaxValueBytes      int
+	RenderTimeout      time.Duration
+	MaxRangeIterations int
+}
 
 // Sprout setting defaults; see GatewayJWTRefreshMargin,
 // StagedRecipeMaxAge and SproutBoxKeyPrevGrace.
@@ -321,6 +345,12 @@ var (
 	// fleet, or late jobs will run on sprouts without being recorded.
 	JobReconcileWindow time.Duration
 
+	// RecipeLimits (farmer only) are the recipe template render limits,
+	// from the IMAS_RECIPE_* variables above (no config-file keys). Each
+	// must be a positive integer (bytes or iterations) or a positive Go
+	// duration; anything else stops farmer at startup.
+	RecipeLimits RecipeTemplateLimits
+
 	// SproutHandledJobsFile ("sprouthandledjobsfile", sprout only) lists
 	// the IDs of the recipe jobs the sprout most recently handled, pushed
 	// or pulled, so a pull never cooks a job twice, across restarts too.
@@ -553,6 +583,11 @@ func LoadConfig(binary string) {
 			if JobReconcileWindow < 0 {
 				log.Fatalf("jobreconcilewindow = %s: must not be negative", JobReconcileWindow)
 			}
+			limits, err := recipeTemplateLimitsFromEnv()
+			if err != nil {
+				log.Fatalf("%v", err)
+			}
+			RecipeLimits = limits
 			if len(jety.GetStringSlice("sproutbusurls")) == 0 {
 				if v, found := os.LookupEnv("IMAS_SPROUT_BUS_URLS"); found {
 					urls := []string{}
@@ -928,4 +963,39 @@ func StaticProps() map[string]interface{} {
 func SetSproutID(id string) {
 	jety.Set("sproutid", id)
 	jety.WriteConfig()
+}
+
+// recipeTemplateLimitsFromEnv reads RecipeTemplateLimits from the
+// IMAS_RECIPE_* variables. An unset or empty variable leaves its field
+// zero (cook's default); a set one must be positive, and the error names
+// it.
+func recipeTemplateLimitsFromEnv() (RecipeTemplateLimits, error) {
+	var l RecipeTemplateLimits
+	for _, f := range []struct {
+		env string
+		dst *int
+	}{
+		{EnvRecipeMaxSourceBytes, &l.MaxSourceBytes},
+		{EnvRecipeMaxRenderedBytes, &l.MaxRenderedBytes},
+		{EnvRecipeMaxValueBytes, &l.MaxValueBytes},
+		{EnvRecipeMaxRangeIterations, &l.MaxRangeIterations},
+	} {
+		v := os.Getenv(f.env)
+		if v == "" {
+			continue
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return RecipeTemplateLimits{}, fmt.Errorf("%s=%q: want a positive whole number", f.env, v)
+		}
+		*f.dst = n
+	}
+	if v := os.Getenv(EnvRecipeRenderTimeout); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return RecipeTemplateLimits{}, fmt.Errorf("%s=%q: want a positive duration such as 2s", EnvRecipeRenderTimeout, v)
+		}
+		l.RenderTimeout = d
+	}
+	return l, nil
 }

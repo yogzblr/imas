@@ -125,6 +125,20 @@ spec:
             - name: IMAS_JOB_RECONCILE_WINDOW
               value: {{ . | quote }}
             {{- end }}
+            {{- /* Recipe template render limits; types checked in validate,
+            ranges by farmer at startup (cook.SetRenderLimits). */}}
+            {{- with .Values.farmer.recipes.templateLimits }}
+            - name: IMAS_RECIPE_MAX_SOURCE_BYTES
+              value: {{ .maxSourceBytes | int64 | toString | quote }}
+            - name: IMAS_RECIPE_MAX_RENDERED_BYTES
+              value: {{ .maxRenderedBytes | int64 | toString | quote }}
+            - name: IMAS_RECIPE_MAX_VALUE_BYTES
+              value: {{ .maxValueBytes | int64 | toString | quote }}
+            - name: IMAS_RECIPE_RENDER_TIMEOUT
+              value: {{ .renderTimeout | quote }}
+            - name: IMAS_RECIPE_MAX_RANGE_ITERATIONS
+              value: {{ .maxRangeIterations | int64 | toString | quote }}
+            {{- end }}
             {{- if eq .Values.tls.mode "openbao" }}
             # API certificate from OpenBao PKI (internal/certs).
             {{- include "imas-farmer.openbaoEnv" (dict "root" $ "prefix" "IMAS_CERTS_OPENBAO" "k8sRole" .Values.tls.openbao.k8sRole "tokenKey" .Values.tls.openbao.tokenSecretKey) | nindent 12 }}

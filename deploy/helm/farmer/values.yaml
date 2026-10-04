@@ -226,6 +226,25 @@ farmer:
   # A quoted Go duration; null or "" emits nothing (every job recorded).
   jobs:
     reconcileWindow: "2h"
+  # Recipe template render limits (IMAS_RECIPE_*; internal/cook's
+  # "Bounded work"). Recipes are tenant-written, untrusted input, so every
+  # render is capped. All five are required: sizes and iterations are
+  # positive whole numbers, renderTimeout a quoted Go duration. Farmer
+  # refuses to start if one is out of range (sizes up to 64 MiB, time up
+  # to 1m, iterations up to 10000000, maxValueBytes <= maxRenderedBytes).
+  # The SaaS API's recipe upload should validate with the same values.
+  recipes:
+    templateLimits:
+      # A recipe's source, checked on read and before parsing.
+      maxSourceBytes: 262144
+      # One render's output.
+      maxRenderedBytes: 1048576
+      # Any one string a template function returns.
+      maxValueBytes: 262144
+      # One recipe's template execution.
+      renderTimeout: "2s"
+      # Total iterations of every range in one render.
+      maxRangeIterations: 10000
   # OpenBao clients inside farmer, one role each.
   openbao:
     # Gateway JWT signer (Transit sign on exactly this key).

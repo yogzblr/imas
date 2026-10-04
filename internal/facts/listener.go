@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	log "github.com/yogzblr/imas/internal/log"
@@ -124,7 +125,7 @@ func storeFacts(tenantID string, sf SystemFacts) {
 	sid := sf.SproutID
 	props.SetPropForTenant(tenantID, sid, PropOS, sf.OS)
 	props.SetPropForTenant(tenantID, sid, PropArch, sf.Arch)
-	props.SetPropForTenant(tenantID, sid, PropHostname, sf.Hostname)
+	props.SetPropForTenantWithTTL(tenantID, sid, PropHostname, sf.Hostname, HostnamePropTTL)
 	props.SetPropForTenant(tenantID, sid, PropGoVersion, sf.GoVersion)
 	props.SetPropForTenant(tenantID, sid, PropNumCPU, fmt.Sprintf("%d", sf.NumCPU))
 	storeSproutVersion(tenantID, sid, sf.SproutVersion)
@@ -134,6 +135,14 @@ func storeFacts(tenantID string, sf SystemFacts) {
 	}
 	storeHardwareFacts(tenantID, sid, sf.Hardware)
 }
+
+// HostnamePropTTL is how long the hostname fact's prop lives: 10 minutes
+// (owner decision on PR 84), rather than props.DefaultPropTTL's 5. Recipe
+// templates' hostname function reads it and falls back to the sprout ID
+// once it has expired. Only the hostname gets the longer lifetime: saasapi
+// recovers the write time of os, arch and sprout_version from their expiry
+// minus props.DefaultPropTTL (internal/saasapi/fleet_sprout_facts.go).
+const HostnamePropTTL = 10 * time.Minute
 
 // Prop names the facts listener stores a sprout's own report under.
 // Together with PropSproutVersion and hardwarePropNames they are the

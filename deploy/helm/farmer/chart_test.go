@@ -349,6 +349,12 @@ func TestValidationFailures(t *testing.T) {
 		{"bad seed name", "must match", []string{"--set", "natsSeeds.extraSeeds.bad-name=x.nk"}},
 		{"two farmers", "farmer.replicaCount must be 1", []string{"--set", "farmer.replicaCount=2"}},
 		{"bare number window", "must be a quoted duration", []string{"--set", "farmer.jobs.reconcileWindow=7200"}},
+		{"string source limit", "maxSourceBytes must be a positive whole number", []string{"--set-string", "farmer.recipes.templateLimits.maxSourceBytes=1Mi"}},
+		{"zero output limit", "maxRenderedBytes must be a positive whole number", []string{"--set", "farmer.recipes.templateLimits.maxRenderedBytes=0"}},
+		{"fractional value limit", "maxValueBytes must be a positive whole number", []string{"--set", "farmer.recipes.templateLimits.maxValueBytes=1.5"}},
+		{"null range limit", "maxRangeIterations must be a positive whole number", []string{"--set", "farmer.recipes.templateLimits.maxRangeIterations=null"}},
+		{"bare number timeout", "renderTimeout must be a quoted duration", []string{"--set", "farmer.recipes.templateLimits.renderTimeout=2"}},
+		{"unitless timeout", "renderTimeout must be a quoted duration", []string{"--set-string", "farmer.recipes.templateLimits.renderTimeout=2"}},
 		{"fractional burst", "burst must be a whole number", []string{"--set", "saasapi.enrollmentKeys.rateLimit.burst=2.5"}},
 		{"bad tls mode", "tls.mode must be", []string{"--set", "tls.mode=selfsigned"}},
 		{"tls secret without name", "tls.secretName is required", []string{"--set", "tls.mode=secret", "--set", "tls.secretName="}},
@@ -908,6 +914,43 @@ func TestReconcileWindow(t *testing.T) {
 			}
 		} else if !ok || e["value"] != tc.want {
 			t.Errorf("%v: IMAS_JOB_RECONCILE_WINDOW = %v, want %s", tc.args, e, tc.want)
+		}
+	}
+}
+
+// farmer.recipes.templateLimits renders the IMAS_RECIPE_* variables
+// internal/config reads into cook.SetRenderLimits, with cook's defaults.
+func TestRecipeTemplateLimitsEnv(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want map[string]string
+	}{
+		{nil, map[string]string{
+			"IMAS_RECIPE_MAX_SOURCE_BYTES":     "262144",
+			"IMAS_RECIPE_MAX_RENDERED_BYTES":   "1048576",
+			"IMAS_RECIPE_MAX_VALUE_BYTES":      "262144",
+			"IMAS_RECIPE_RENDER_TIMEOUT":       "2s",
+			"IMAS_RECIPE_MAX_RANGE_ITERATIONS": "10000",
+		}},
+		{[]string{
+			"--set", "farmer.recipes.templateLimits.maxSourceBytes=131072",
+			"--set", "farmer.recipes.templateLimits.maxRenderedBytes=4194304",
+			"--set", "farmer.recipes.templateLimits.maxValueBytes=65536",
+			"--set-string", "farmer.recipes.templateLimits.renderTimeout=500ms",
+			"--set", "farmer.recipes.templateLimits.maxRangeIterations=2000",
+		}, map[string]string{
+			"IMAS_RECIPE_MAX_SOURCE_BYTES":     "131072",
+			"IMAS_RECIPE_MAX_RENDERED_BYTES":   "4194304",
+			"IMAS_RECIPE_MAX_VALUE_BYTES":      "65536",
+			"IMAS_RECIPE_RENDER_TIMEOUT":       "500ms",
+			"IMAS_RECIPE_MAX_RANGE_ITERATIONS": "2000",
+		}},
+	} {
+		env := envValues(container(t, farmerDeploy(t, mustRender(t, tc.args...)), "farmer"))
+		for name, want := range tc.want {
+			if env[name] != want {
+				t.Errorf("%v: %s = %q, want %q", tc.args, name, env[name], want)
+			}
 		}
 	}
 }

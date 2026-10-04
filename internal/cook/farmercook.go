@@ -100,6 +100,9 @@ func WithStageGuard(check func() error) CookOption {
 //
 // # Bounded work
 //
+// The limits below are defaults; farmer takes them from the Helm chart's
+// farmer.recipes.templateLimits (SetRenderLimits).
+//
 // A recipe template is parsed only if it is at most MaxRecipeSourceBytes.
 // After parsing, the tree is checked and rewritten (sandboxTemplateTree):
 // template, define and block are refused (they allow recursion), removed
@@ -125,22 +128,114 @@ func WithStageGuard(check func() error) CookOption {
 // stays one value. Comparisons (eq, ne, ...), len and if see the real
 // content, since a templateValue is a string underneath.
 
-// Render limits. Variables so tests can lower them.
+// Render limits. Their defaults are the Default* constants; farmer sets
+// them at startup from the Helm chart's farmer.recipes.templateLimits
+// (SetRenderLimits), and tests lower them directly.
 var (
 	// MaxRecipeSourceBytes caps a recipe's source, checked before
 	// parsing (and when it is read from the store).
-	MaxRecipeSourceBytes = 256 << 10
+	MaxRecipeSourceBytes = DefaultMaxRecipeSourceBytes
 	// MaxRenderedRecipeBytes caps a template's rendered output.
-	MaxRenderedRecipeBytes = 1 << 20
+	MaxRenderedRecipeBytes = DefaultMaxRenderedRecipeBytes
 	// RecipeRenderTimeout caps one recipe's template execution.
-	RecipeRenderTimeout = 2 * time.Second
+	RecipeRenderTimeout = DefaultRecipeRenderTimeout
 	// maxTemplateValueBytes caps any one string a template function
 	// returns.
-	maxTemplateValueBytes = 256 << 10
+	maxTemplateValueBytes = DefaultMaxTemplateValueBytes
 	// maxRangeIterations caps the total iterations of every range in one
 	// render.
-	maxRangeIterations = 10000
+	maxRangeIterations = DefaultMaxRangeIterations
 )
+
+// Default render limits.
+const (
+	DefaultMaxRecipeSourceBytes   = 256 << 10
+	DefaultMaxRenderedRecipeBytes = 1 << 20
+	DefaultMaxTemplateValueBytes  = 256 << 10
+	DefaultRecipeRenderTimeout    = 2 * time.Second
+	DefaultMaxRangeIterations     = 10000
+)
+
+// Upper bounds SetRenderLimits accepts. They are far above any recipe's
+// needs and exist so a typo in a Helm value (a missing unit, an extra
+// digit) cannot quietly remove a limit.
+const (
+	maxSettableBytes      = 64 << 20
+	maxSettableTimeout    = time.Minute
+	maxSettableIterations = 10_000_000
+)
+
+// RenderLimits are the settable render limits. A zero field keeps the
+// current value.
+type RenderLimits struct {
+	MaxSourceBytes     int
+	MaxRenderedBytes   int
+	MaxValueBytes      int
+	RenderTimeout      time.Duration
+	MaxRangeIterations int
+}
+
+// ErrRenderLimits is returned by SetRenderLimits for a limit out of range.
+var ErrRenderLimits = errors.New("recipe template render limit out of range")
+
+// CurrentRenderLimits returns the render limits in force.
+func CurrentRenderLimits() RenderLimits {
+	return RenderLimits{
+		MaxSourceBytes:     MaxRecipeSourceBytes,
+		MaxRenderedBytes:   MaxRenderedRecipeBytes,
+		MaxValueBytes:      maxTemplateValueBytes,
+		RenderTimeout:      RecipeRenderTimeout,
+		MaxRangeIterations: maxRangeIterations,
+	}
+}
+
+// SetRenderLimits installs l's non-zero fields as the render limits, after
+// checking every field: each must be positive and at most 64 MiB (sizes),
+// one minute (time) or 10,000,000 (iterations), and a single value may not
+// exceed the rendered output cap. On error nothing is changed. Call once at
+// startup, before any cook.
+func SetRenderLimits(l RenderLimits) error {
+	next := CurrentRenderLimits()
+	if l.MaxSourceBytes != 0 {
+		next.MaxSourceBytes = l.MaxSourceBytes
+	}
+	if l.MaxRenderedBytes != 0 {
+		next.MaxRenderedBytes = l.MaxRenderedBytes
+	}
+	if l.MaxValueBytes != 0 {
+		next.MaxValueBytes = l.MaxValueBytes
+	}
+	if l.RenderTimeout != 0 {
+		next.RenderTimeout = l.RenderTimeout
+	}
+	if l.MaxRangeIterations != 0 {
+		next.MaxRangeIterations = l.MaxRangeIterations
+	}
+	for name, v := range map[string]int{
+		"source size":          next.MaxSourceBytes,
+		"rendered output size": next.MaxRenderedBytes,
+		"value size":           next.MaxValueBytes,
+	} {
+		if v <= 0 || v > maxSettableBytes {
+			return fmt.Errorf("%w: %s %d must be between 1 and %d bytes", ErrRenderLimits, name, v, maxSettableBytes)
+		}
+	}
+	if next.MaxValueBytes > next.MaxRenderedBytes {
+		return fmt.Errorf("%w: value size %d exceeds rendered output size %d", ErrRenderLimits, next.MaxValueBytes, next.MaxRenderedBytes)
+	}
+	if next.RenderTimeout <= 0 || next.RenderTimeout > maxSettableTimeout {
+		return fmt.Errorf("%w: render timeout %s must be above 0 and at most %s", ErrRenderLimits, next.RenderTimeout, maxSettableTimeout)
+	}
+	if next.MaxRangeIterations <= 0 || next.MaxRangeIterations > maxSettableIterations {
+		return fmt.Errorf("%w: range iterations %d must be between 1 and %d", ErrRenderLimits, next.MaxRangeIterations, maxSettableIterations)
+	}
+	MaxRecipeSourceBytes = next.MaxSourceBytes
+	MaxRenderedRecipeBytes = next.MaxRenderedBytes
+	maxTemplateValueBytes = next.MaxValueBytes
+	RecipeRenderTimeout = next.RenderTimeout
+	maxRangeIterations = next.MaxRangeIterations
+	return nil
+}
 
 // maxFormatWidth caps a printf width or precision.
 const maxFormatWidth = 1000

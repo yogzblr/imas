@@ -653,6 +653,11 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `farmer.logLevel` / `apiPort` / `gatewayJWTTTL` | `info` / `5405` / `24h` | `loglevel`, `farmerapiport`, `gatewayjwtttl`. |
 | `farmer.adminPubKeys` | `[]` | `pubkeys.admin`. |
 | `farmer.jobs.reconcileWindow` | `"2h"` | `IMAS_JOB_RECONCILE_WINDOW` (`deploy/farmer/values.job-reconcile.yaml`). |
+| `farmer.recipes.templateLimits.maxSourceBytes` | `262144` | `IMAS_RECIPE_MAX_SOURCE_BYTES`: largest recipe source farmer reads or renders. |
+| `farmer.recipes.templateLimits.maxRenderedBytes` | `1048576` | `IMAS_RECIPE_MAX_RENDERED_BYTES`: largest output of one recipe render. |
+| `farmer.recipes.templateLimits.maxValueBytes` | `262144` | `IMAS_RECIPE_MAX_VALUE_BYTES`: largest string one template function returns; at most `maxRenderedBytes`. |
+| `farmer.recipes.templateLimits.renderTimeout` | `"2s"` | `IMAS_RECIPE_RENDER_TIMEOUT`: time limit of one recipe render, a quoted Go duration up to `1m`. |
+| `farmer.recipes.templateLimits.maxRangeIterations` | `10000` | `IMAS_RECIPE_MAX_RANGE_ITERATIONS`: total `range` iterations in one render. Recipes are tenant-written (untrusted); all five are required, and farmer refuses to start if one is out of range (sizes up to 64 MiB, iterations up to 10000000). |
 | `farmer.openbao.{gateway,fleetSign,tenantBox}.*` | see values.yaml | Mount, key or path, role, and token key per client. |
 | `farmer.extraConfig` | `{}` | Extra `/etc/imas/farmer` keys. Chart-managed keys win. |
 | `farmer.extraEnv` | `[]` | Extra env vars for farmer, e.g. the optional `*_OPENBAO_NAMESPACE` (see [OpenBao](#openbao)) or `HTTPS_PROXY`/`NO_PROXY`. Never a raw `IMAS_NATS_*_SEED` or any `IMAS_SAASAPI_CRED_OPENBAO_*`. |

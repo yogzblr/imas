@@ -158,3 +158,33 @@ func TestParseRecipeName(t *testing.T) {
 		}
 	}
 }
+
+// TestRecipeResolution_TenantShadowsPlatformInclude: a tenant recipe with
+// the same name as a platform recipe shadows it for that tenant's sprouts,
+// also when a platform recipe includes it (owner decision on PR 84); other
+// tenants still get the platform recipe.
+func TestRecipeResolution_TenantShadowsPlatformInclude(t *testing.T) {
+	seedTenantRecipes(t)
+	objectstoretest.Seed(t, store, map[string]string{
+		"recipes/site.imas":             "include:\n  - base\nsteps:\n  site:\n    cmd.run:\n      - name: echo site\n",
+		"recipes/base.imas":             "steps:\n  platform base:\n    cmd.run:\n      - name: echo platform base\n",
+		"tenants/t_a/recipes/base.imas": "steps:\n  a base:\n    cmd.run:\n      - name: echo a base\n",
+	})
+	ids := func(tenant string) map[string]bool {
+		steps, err := resolveRecipeSteps(context.Background(), tenant, "web-01", "site")
+		if err != nil {
+			t.Fatalf("%s: %v", tenant, err)
+		}
+		out := map[string]bool{}
+		for _, s := range steps {
+			out[string(s.ID)] = true
+		}
+		return out
+	}
+	if got := ids("t_a"); len(got) != 2 || !got["site"] || !got["a base"] {
+		t.Errorf("t_a cooking platform site: steps %v, want site + t_a's base", got)
+	}
+	if got := ids("t_b"); len(got) != 2 || !got["site"] || !got["platform base"] {
+		t.Errorf("t_b cooking platform site: steps %v, want site + platform base", got)
+	}
+}

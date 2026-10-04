@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/glebarez/sqlite"
 	"github.com/nats-io/nkeys"
+	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/pki"
@@ -161,5 +163,35 @@ func TestForgedFacts_RealBus(t *testing.T) {
 	got := props.GetPropsForTenant(tenant, victim)
 	if got[PropSproutVersion] != "v1.0.0" || got[PropOS] != "linux" || got[PropArch] != "amd64" {
 		t.Errorf("forged facts reached the victim: %v", got)
+	}
+}
+
+// TestHostnameFactTTL: the hostname fact lives 10 minutes (owner decision
+// on PR 84); the facts saasapi dates by expiry keep props.DefaultPropTTL.
+func TestHostnameFactTTL(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const tenant, sid = "t_host_ttl", "host-ttl"
+	before := time.Now()
+	handleFactsMsg(tenant, "imas.sprouts."+sid+".facts", factsBody(t, SystemFacts{
+		OS: "linux", Arch: "amd64", Hostname: "web", SproutID: sid, SproutVersion: "v1.0.0",
+	}))
+	ttl := func(name string) time.Duration {
+		var row struct{ Expiry time.Time }
+		if err := gdb.Table("props").Select("expiry").Where("tenant_id = ? AND sprout_id = ? AND name = ?", tenant, sid, name).Scan(&row).Error; err != nil {
+			t.Fatal(err)
+		}
+		return row.Expiry.Sub(before)
+	}
+	near := func(got, want time.Duration) bool { return got > want-time.Second && got < want+5*time.Second }
+	if got := ttl(PropHostname); HostnamePropTTL != 10*time.Minute || !near(got, HostnamePropTTL) {
+		t.Errorf("hostname expires %v after the write, want 10m", got)
+	}
+	for _, name := range []string{PropOS, PropArch, PropSproutVersion} {
+		if got := ttl(name); !near(got, props.DefaultPropTTL) {
+			t.Errorf("%s expires %v after the write, want props.DefaultPropTTL", name, got)
+		}
 	}
 }

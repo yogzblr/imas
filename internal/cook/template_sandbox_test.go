@@ -340,3 +340,43 @@ func TestCheckFormat(t *testing.T) {
 		}
 	}
 }
+
+func TestSetRenderLimits(t *testing.T) {
+	orig := CurrentRenderLimits()
+	t.Cleanup(func() {
+		if err := SetRenderLimits(orig); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if orig != (RenderLimits{DefaultMaxRecipeSourceBytes, DefaultMaxRenderedRecipeBytes, DefaultMaxTemplateValueBytes, DefaultRecipeRenderTimeout, DefaultMaxRangeIterations}) {
+		t.Fatalf("defaults = %+v", orig)
+	}
+	// Zero fields keep the current value.
+	if err := SetRenderLimits(RenderLimits{}); err != nil || CurrentRenderLimits() != orig {
+		t.Fatalf("empty limits: %v, %+v", err, CurrentRenderLimits())
+	}
+	want := RenderLimits{MaxSourceBytes: 1000, MaxRenderedBytes: 4000, MaxValueBytes: 2000, RenderTimeout: time.Second, MaxRangeIterations: 5}
+	if err := SetRenderLimits(want); err != nil || CurrentRenderLimits() != want {
+		t.Fatalf("set: %v, %+v", err, CurrentRenderLimits())
+	}
+	// The new limits are the ones a render uses.
+	if _, err := renderRecipeTemplate(testPropsTenantID, "limits-sprout", "l", []byte(`{{ range split "a,b,c,d,e,f" "," }}{{ end }}`)); !errors.Is(err, ErrTemplateRangeTooLong) {
+		t.Errorf("range over 6 with a budget of 5: got %v", err)
+	}
+	for name, bad := range map[string]RenderLimits{
+		"negative source":     {MaxSourceBytes: -1},
+		"huge output":         {MaxRenderedBytes: 1 << 30},
+		"value above output":  {MaxRenderedBytes: 100, MaxValueBytes: 200},
+		"negative timeout":    {RenderTimeout: -time.Second},
+		"long timeout":        {RenderTimeout: time.Hour},
+		"negative iterations": {MaxRangeIterations: -5},
+		"too many iterations": {MaxRangeIterations: 1 << 30},
+	} {
+		if err := SetRenderLimits(bad); !errors.Is(err, ErrRenderLimits) {
+			t.Errorf("%s: got %v, want ErrRenderLimits", name, err)
+		}
+		if CurrentRenderLimits() != want {
+			t.Errorf("%s: limits changed on error: %+v", name, CurrentRenderLimits())
+		}
+	}
+}

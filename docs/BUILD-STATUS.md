@@ -853,13 +853,15 @@ by an external git sync today.
       over a source column); prop and fact values are substituted into
       parsed YAML, not spliced into recipe text; `env`, `call`, `html`,
       `js` and `template`/`define`/`block` are gone from recipes, which
-      render under size, time and range limits; recipes resolve per tenant
-      (design doc §1.6). Still open: static props from farmer's config
+      render under size, time and range limits, which are farmer chart
+      values (`farmer.recipes.templateLimits`); recipes resolve per tenant,
+      a tenant recipe shadowing a platform one of the same name (design doc
+      §1.6). Still open: static props from farmer's config
       (`props.static`) can still set reserved names, and saasapi still
       reads them for planning (not for the wave gate, which needs a write
       time); `hostname` in a recipe is now the sprout's reported hostname
-      fact (it was farmer's own), falling back to the sprout ID once the
-      fact's prop has expired; a deprovisioned tenant's `tenants/<tenant_id>/recipes/` is not deleted; the upload
+      fact (it was farmer's own), kept 10 minutes, then falling back to the
+      sprout ID; a deprovisioned tenant's `tenants/<tenant_id>/recipes/` is not deleted; the upload
       routes themselves are REC.1.
 11. **The control plane can be forged by a compromised bus** (requirement 14).
     Sealing farmer ↔ sprout stops the bus injecting commands *into a sprout*,
