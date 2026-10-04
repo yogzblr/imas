@@ -105,7 +105,8 @@ data:
 
                             # Route 1b: gateway JWT refresh. No JWT gate
                             # (an expired gateway JWT must still renew);
-                            # farmer checks an NKey proof of possession.
+                            # farmer opens a request sealed with the
+                            # sprout's box key and seals its answer back.
                             # Its own bucket, sized from the fleet
                             # (envoy.refreshRateLimit), never /v1/enroll's.
                             {{- include "imas-nats.envoy.refreshRoute" . | nindent 28 }}

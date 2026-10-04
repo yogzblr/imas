@@ -136,7 +136,7 @@ const (
 // NATS subject; every reply is a Reply bound to the request's ID.
 // Message.SproutID carries the non-farmer principal's ID: a user's NKey
 // public key for c2f/f2c, PrincipalSaaSAPI for a2f/f2a, the sprout ID for
-// s2f.refresh. A principal of one kind can't pass for another, because
+// s2f.refresh and f2s.refresh. A principal of one kind can't pass for another, because
 // each kind has purposes of its own.
 const (
 	// PurposeCLIRequest is a CLI user's sealed imas.api.<method> request,
@@ -166,6 +166,10 @@ const (
 	// /v1/refresh (Decision C), replacing the NKey signature the bus can
 	// obtain from a CONNECT nonce.
 	PurposeRefresh = "s2f.refresh"
+	// PurposeRefreshReply is farmer's sealed answer to it (J.2): a Reply
+	// bound by ReplyTo to the request's ID, carrying the new gateway JWT,
+	// sealed to the sprout's active box key.
+	PurposeRefreshReply = "f2s.refresh"
 )
 
 // PrincipalHeader names the principal a sealed control-plane request

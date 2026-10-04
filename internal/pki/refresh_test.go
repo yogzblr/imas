@@ -159,7 +159,7 @@ func TestRefreshSprout_Rejections(t *testing.T) {
 		"sealed by another box key":            {NKeyPub: nkeyPub, Sealed: sealedByAttacker},
 		"a reply, not a request":               {NKeyPub: nkeyPub, Sealed: sealAsSprout(t, refreshMessage(t, payloadbox.PurposeRefresh, "t_1", "web-01", "0123456789abcdef0123456789abcdef", body))},
 		"another purpose (a cmd.run reply)":    {NKeyPub: nkeyPub, Sealed: sealAsSprout(t, refreshMessage(t, payloadbox.PurposeCmdRunResponse, "t_1", "web-01", "", body))},
-		"farmer's own reply purpose reflected": {NKeyPub: nkeyPub, Sealed: sealAsSprout(t, refreshMessage(t, PurposeRefreshReply, "t_1", "web-01", "", body))},
+		"farmer's own reply purpose reflected": {NKeyPub: nkeyPub, Sealed: sealAsSprout(t, refreshMessage(t, payloadbox.PurposeRefreshReply, "t_1", "web-01", "", body))},
 		"naming another tenant":                {NKeyPub: nkeyPub, Sealed: sealAsSprout(t, refreshMessage(t, payloadbox.PurposeRefresh, "t_2", "web-01", "", body))},
 		"naming another sprout":                {NKeyPub: nkeyPub, Sealed: sealAsSprout(t, refreshMessage(t, payloadbox.PurposeRefresh, "t_1", "web-02", "", body))},
 		"naming another NKey":                  {NKeyPub: nkeyPub, Sealed: sealAsSprout(t, refreshMessage(t, payloadbox.PurposeRefresh, "t_1", "web-01", "", sealedRefreshBody{NKeyPub: strangerPub, Timestamp: time.Now().Unix()}))},

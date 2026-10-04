@@ -15,10 +15,13 @@ the sprout talks only to Envoy.
   JWT header) to the real operator-mode bus's websocket listener and
   round-trips a message, checks that the legacy `FarmerBusURL` (TLS NATS
   to Envoy's HTTPS listener) does not connect, refreshes through
-  `/v1/refresh` (real `RefreshGatewayJWT` → `RefreshSprout`) and
-  reconnects with the new token, and downloads a recipe through `/files/`
-  (`FetchFarmerFile`). It also checks Envoy's own 401 for a missing,
-  expired or forged token on the upgrade.
+  `/v1/refresh` (real `RefreshGatewayJWT` → `RefreshSprout`, a sealed
+  request and reply since J.2) and reconnects with the new token, and
+  downloads a recipe through `/files/` (`FetchFarmerFile`). It also checks
+  Envoy's own 401 for a missing, expired or forged token on the upgrade;
+  that an NKey-signed or replayed refresh is refused through Envoy; and
+  that a nats.go reconnect loop refused by `jwt_authn` with an expired
+  gateway JWT recovers after a sealed refresh through Envoy.
 - `internal/api/envoy_e2e_test.go`: the staged-recipe download
   (`cook.FetchStagedRecipe`) against farmer's real router, with `Auth` on
   its production key source, the same signer the router's JWKS endpoint

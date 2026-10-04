@@ -74,9 +74,9 @@ func fakeBusTLS(t *testing.T) (*tls.Config, []byte) {
 }
 
 type capturedConnect struct {
-	nkey, jwt string
-	sig       []byte
-	err       error
+	jwt string
+	sig []byte
+	err error
 }
 
 // runFakeBus accepts one connection, plays the NATS server handshake far

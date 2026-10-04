@@ -51,14 +51,14 @@ import (
 	"github.com/yogzblr/imas/internal/payloadbox"
 )
 
-// PurposeRefreshReply is farmer's sealed answer to an s2f.refresh
-// (payloadbox.PurposeRefresh). Defined here rather than beside the other
-// purposes in internal/payloadbox, which J.2 uses without changing; to
-// payloadbox it is an ordinary purpose string, bound and checked like
-// any other. The f2s prefix keeps it apart from the request it answers:
-// box keys are symmetric, so a reply reflected back at farmer must not
-// open as a request.
-const PurposeRefreshReply = "f2s.refresh"
+// PurposeRefreshReply is payloadbox.PurposeRefreshReply, farmer's sealed
+// answer to an s2f.refresh. The f2s prefix keeps it apart from the
+// request it answers: box keys are symmetric, so a reply reflected back
+// at farmer must not open as a request. It lives in payloadbox's purpose
+// list (owner decision, 2026-10-04); this name remains only because
+// internal/api's refresh stand-in refers to it, and goes once that test
+// moves to payloadbox's.
+const PurposeRefreshReply = payloadbox.PurposeRefreshReply
 
 // RefreshMethod and RefreshSubject are what a refresh reply binds as its
 // method and subject (payloadbox.ReplyBody): the HTTP route it answers.
@@ -125,7 +125,7 @@ func sproutOpenRefreshReply(sproutID, msgID string, data []byte) (*RefreshRespon
 	}
 	defer keys.wipe()
 	want := payloadbox.ReplyExpect{
-		Purpose: PurposeRefreshReply, TenantID: keys.tenantID, Principal: sproutID,
+		Purpose: payloadbox.PurposeRefreshReply, TenantID: keys.tenantID, Principal: sproutID,
 		ReplyTo: msgID, Method: RefreshMethod, Subject: RefreshSubject,
 	}
 	var body *payloadbox.ReplyBody
@@ -339,7 +339,7 @@ func sealRefreshReply(o *openedRefresh, res RefreshResponse) (json.RawMessage, e
 		return nil, err
 	}
 	return payloadbox.SealReply(payloadbox.Reply{
-		Purpose: PurposeRefreshReply, TenantID: o.tenantID, Principal: o.sproutID,
+		Purpose: payloadbox.PurposeRefreshReply, TenantID: o.tenantID, Principal: o.sproutID,
 		ReplyTo: o.msgID, Method: RefreshMethod, Subject: RefreshSubject, Result: res,
 	}, []payloadbox.KeyPair{{PeerPub: sproutPub, Priv: o.tenantPriv}})
 }

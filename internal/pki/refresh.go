@@ -34,12 +34,13 @@ const refreshSigDomain = "imas-refresh-v1"
 // seed to refresh before J.2: refreshSigDomain, the timestamp and
 // nkeyPub, newline-separated.
 //
-// Deprecated: farmer refuses this proof (RefreshSprout accepts only a
-// sealed request), because a compromised bus can get the same signature
-// made over a CONNECT nonce. It remains only so tests can build the old
-// proof and show it is refused, and so ansible/molecule/stubfarmer, which
-// still speaks the old contract and is outside J.2's scope, builds. Do
-// not use it for anything new.
+// Farmer refuses this proof (RefreshSprout accepts only a sealed
+// request), because a compromised bus can get the same signature made
+// over a CONNECT nonce. It remains only so tests can build the old proof
+// and show it is refused, and so ansible/molecule/stubfarmer, which still
+// speaks the old contract and is outside J.2's scope, builds. Do not use
+// it for anything new. (Not marked Deprecated: staticcheck's SA1019 would
+// then fail CI on the stub's and the regression tests' uses.)
 func RefreshSigningPayload(timestamp int64, nkeyPub string) []byte {
 	return []byte(strings.Join([]string{
 		refreshSigDomain,

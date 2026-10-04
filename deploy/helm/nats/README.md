@@ -13,8 +13,9 @@ It deploys:
   → User-per-sprout (`docs/design/imas-nats-jwt-auth-design.md`).
 - **The gateway.** Envoy runs as a Deployment, configured from
   `deploy/envoy/envoy.yaml` (`docs/design/imas-envoy-enrollment-design.md`):
-  - `/v1/enroll` (join token) and `/v1/refresh` (NKey proof of
-    possession, checked by farmer) have no JWT check. Each has its own
+  - `/v1/enroll` (join token) and `/v1/refresh` (a request sealed with
+    the sprout's box key, opened by farmer, answered sealed) have no JWT
+    check. Each has its own
     rate-limit bucket.
   - `/files/` (recipe download) and the `wss://` NATS route are both
     gated by `jwt_authn` on the EdDSA gateway JWT.
@@ -348,7 +349,7 @@ The Envoy config (`templates/envoy-configmap.yaml`) matches
 | Route | Gate | Rate limit | Upstream |
 |---|---|---|---|
 | `/v1/enroll` (prefix) | none; the join token is checked by farmer | fixed 20 per 60s per Envoy | `farmer_api` |
-| `/v1/refresh` (exact path) | none; farmer checks an NKey proof of possession | `envoy.refreshRateLimit`, sized from the fleet | `farmer_api` |
+| `/v1/refresh` (exact path) | none; farmer opens a request sealed with the sprout's box key and seals the answer back | `envoy.refreshRateLimit`, sized from the fleet | `farmer_api` |
 | `/files/` (prefix) | `jwt_authn` | none | `recipe_service` |
 | `/` (everything else) | `jwt_authn` | none | `nats_websocket` (the bus) |
 

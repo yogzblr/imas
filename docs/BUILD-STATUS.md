@@ -58,7 +58,7 @@ released.
 | 11 | Recipe download uses the same JWT | **Green** | |
 | 12 | Envoy with JWT validation | **Green** | |
 | 13 | Backend on Kubernetes | **Amber** | Install the charts on a real cluster (UAT gate). No Terraform exists. |
-| 14 | Payload encryption | **Red** | Seal `shell.*` (Open item 2) and the control plane (Open item 11): a compromised bus can still open a shell on a Unix sprout, mint CLI tokens and refresh as a sprout. |
+| 14 | Payload encryption | **Red** | Seal `shell.*` (Open item 2) and the control plane (Open item 11): a compromised bus can still open a shell on a Unix sprout and mint CLI tokens. Refreshing as a sprout is closed by J.2 (sealed refresh, in review). |
 | 15 | Key rotation for sprout keys | **Amber** | Reword `requirements.md` to match the built design (the private key is never sent). |
 | 16 | SDB-equivalent secrets | **Green** | |
 | 17 | Probe capability | **Green** | |
@@ -1028,8 +1028,9 @@ by an external git sync today.
     - Every `imas.api.*` and `internal.*` request and reply becomes a
       `payloadbox` message under a CLI box key, or under a SaaS API box key
       and a platform key.
-    - Box-ready sprouts refresh with a sealed proof, with a ratchet per
-      sprout.
+    - Box-ready sprouts refresh with a sealed proof. (The design's
+      per-sprout ratchet was dropped by the owner decisions below; as built
+      in J.2, NKey-only refresh is refused for every sprout.)
 
     Owner decisions, 2026-10-04: sealing is built before the UAT gate, with
     no compatibility window (no bearer-token or plaintext fallback, no
@@ -1111,9 +1112,24 @@ by an external git sync today.
       sha256 matching the Wave 1 release binary), including an `nats.go`
       reconnect loop refused by `jwt_authn` with an expired token that
       recovers after a sealed refresh through Envoy.
-    - Not changed here: `ansible/molecule/stubfarmer` still speaks the old
-      refresh contract (its 24-hour tokens mean a molecule run never
-      refreshes); `internal/api/routers.go`'s comment on `/v1/refresh`.
+    - Owner decisions, 2026-10-04 (PR #94):
+      - Severing rotation, "let the sprout re-enroll", read narrowly: the
+        behaviour above is accepted. A severed sprout gets a retried
+        refusal and stays cut off until an operator re-enrolls it; it
+        doesn't detect the state or re-enroll itself (it has no join token
+        left, and acting on an unauthenticated signal would let the DMZ
+        trigger it).
+      - The gateway JWT in enrollment step 2's response stays plaintext
+        inside TLS, as designed.
+      - `f2s.refresh` moved into `internal/payloadbox`'s purpose list
+        (`PurposeRefreshReply`).
+      - The files J.2 touched outside its brief's scope are accepted, and
+        the stale docs were fixed in the same PR: Decision C and a new
+        "As built: J.2" in the payload encryption design, the enrollment
+        design's refresh section, `internal/api/routers.go`, the Envoy and
+        Helm docs, INSTALL and the architecture diagram.
+    - Known gap: `ansible/molecule/stubfarmer` still speaks the old refresh
+      contract (its 24-hour tokens mean a molecule run never refreshes).
 
     **Stopgap SEC.0 (in review, flagged for security review):**
     `UserAuth.IsValid` refuses an expiry more than 15 minutes ahead (the

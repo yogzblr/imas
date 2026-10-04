@@ -292,8 +292,11 @@ systemctl enable --now imas-sprout
 2. It calls `POST /v1/enroll` through Envoy with the join token, its public
    keys and hostname, and a signature proving it holds the NKey seed.
 3. farmer redeems one use of the key and accepts the sprout into the key's
-   tenant. It answers with the sprout's NATS User JWT, a gateway JWT, the
-   tenant's X25519 public key and the `wss://` `nats_urls`. The sprout ID is the one the sprout asked for (its
+   tenant. It answers with the sprout's NATS User JWT, the tenant's X25519
+   public key and the `wss://` `nats_urls`. The sprout then calls
+   `/v1/enroll` once more, without spending another use, with a proof sealed
+   by its box key; only that answer carries the gateway JWT. Later gateway
+   JWTs come from `/v1/refresh`, sealed both ways. The sprout ID is the one the sprout asked for (its
    `sproutid`, by default derived from the hostname), normalized, and
    suffixed (`_1`, `_2`, …) if that name is already taken in the tenant.
 4. The sprout writes all of that under `/etc/imas/pki/sprout/`, deletes
