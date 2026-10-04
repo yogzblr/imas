@@ -184,7 +184,7 @@ func ensureNatsAuth() (*natsAuthMaterial, error) {
 		if encErr != nil {
 			return nil, encErr
 		}
-		if werr := os.WriteFile(filepath.Join(dir, "operator.jwt"), []byte(signed), 0o600); werr != nil {
+		if werr := writeFileAtomic(filepath.Join(dir, "operator.jwt"), []byte(signed), 0o600); werr != nil {
 			return nil, werr
 		}
 		mat.operatorJWT = signed
@@ -205,7 +205,7 @@ func ensureNatsAuth() (*natsAuthMaterial, error) {
 		if encErr != nil {
 			return nil, encErr
 		}
-		if werr := os.WriteFile(filepath.Join(dir, "sys-account.jwt"), []byte(signed), 0o600); werr != nil {
+		if werr := writeFileAtomic(filepath.Join(dir, "sys-account.jwt"), []byte(signed), 0o600); werr != nil {
 			return nil, werr
 		}
 		mat.sysAccountJWT = signed
@@ -241,7 +241,7 @@ func ensureNatsAuth() (*natsAuthMaterial, error) {
 		if encErr != nil {
 			return nil, encErr
 		}
-		if werr := os.WriteFile(filepath.Join(dir, "sys-user.jwt"), []byte(signed), 0o600); werr != nil {
+		if werr := writeFileAtomic(filepath.Join(dir, "sys-user.jwt"), []byte(signed), 0o600); werr != nil {
 			return nil, werr
 		}
 		mat.sysUserJWT = signed
@@ -268,7 +268,7 @@ func ensureNatsAuth() (*natsAuthMaterial, error) {
 		if encErr != nil {
 			return nil, encErr
 		}
-		if werr := os.WriteFile(tenantJWTPath(), []byte(signed), 0o600); werr != nil {
+		if werr := writeFileAtomic(tenantJWTPath(), []byte(signed), 0o600); werr != nil {
 			return nil, werr
 		}
 		mat.tenantJWT = signed
@@ -336,7 +336,7 @@ func loadOrCreateSeed(path, name string, create func() (nkeys.KeyPair, error)) (
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(path, seed, 0o600); err != nil {
+	if err := writeFileAtomic(path, seed, 0o600); err != nil {
 		return nil, err
 	}
 	log.Tracef("Generated new NATS auth keypair at %s", path)

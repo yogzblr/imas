@@ -184,7 +184,7 @@ func ensureTenantAccountMaterial(mat *natsAuthMaterial, tenantID, name string) (
 		if encErr != nil {
 			return nil, false, encErr
 		}
-		if werr := os.WriteFile(tenantAccountJWTPath(tenantID), []byte(signed), 0o600); werr != nil {
+		if werr := writeFileAtomic(tenantAccountJWTPath(tenantID), []byte(signed), 0o600); werr != nil {
 			return nil, false, werr
 		}
 		tam.jwt = signed
@@ -519,7 +519,7 @@ func signLockedOutTenantJWT(mat *natsAuthMaterial, tenantID, name string) (strin
 	if err != nil {
 		return "", fmt.Errorf("pki: re-signing tenant %q's Account JWT locked out: %w", tenantID, err)
 	}
-	if err := os.WriteFile(tenantAccountJWTPath(tenantID), []byte(signed), 0o600); err != nil {
+	if err := writeFileAtomic(tenantAccountJWTPath(tenantID), []byte(signed), 0o600); err != nil {
 		return "", err
 	}
 	return signed, nil
@@ -730,7 +730,7 @@ func syncTenantSprouts(mat *natsAuthMaterial, tam *tenantAccountMaterial, tenant
 		if encErr != nil {
 			return false, encErr
 		}
-		if writeErr := os.WriteFile(tenantAccountJWTPath(tenantID), []byte(signed), 0o600); writeErr != nil {
+		if writeErr := writeFileAtomic(tenantAccountJWTPath(tenantID), []byte(signed), 0o600); writeErr != nil {
 			return false, writeErr
 		}
 		tam.jwt = signed
