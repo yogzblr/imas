@@ -88,10 +88,15 @@ READMEs are the full reference; this is the order to do things in.
    database the Job has not reached. A second hook Job registers the sprout
    release that belongs to this chart version with saasapi (see
    [`RELEASING.md`](RELEASING.md)).
-3. **Deliver saasapi's NATS credential.** A post-install Job has farmer mint
-   saasapi's SYS-Account User JWT and write it to OpenBao. External Secrets
-   syncs it into saasapi's Secret; without ESO (the eval), copy it by hand as
-   the chart README shows.
+3. **Deliver saasapi's NATS credential and box key.** Post-install Jobs
+   have farmer mint saasapi's SYS-Account User JWT, and create the
+   control-plane box keys that seal `internal.*` (J.4), in OpenBao.
+   External Secrets syncs them into saasapi's two Secrets
+   (`imas-saasapi-nats`, `imas-saasapi-box`); without ESO (the eval), copy
+   them by hand as the chart README shows. saasapi's pods wait until both
+   exist; don't install with `--wait`. With an external OpenBao, the
+   keygen Job's role and policy must exist first ("Control-plane box keys"
+   in the chart README).
 4. **Install the DMZ chart**, `deploy/helm/nats`. It deploys farmerbus and
    Envoy. It needs a bus TLS certificate and a DMZ edge certificate for
    Envoy. Point `envoy.upstreams.farmerAPI.host` at the core farmer Service.
@@ -205,8 +210,12 @@ No package or unit ships for saasapi either. It's configured entirely from
 environment variables; the table is in
 [`api/saasapi.md`](api/saasapi.md#configuration). It needs its own NATS User
 credential, which farmer mints (`imas-farmer publish-saasapi-credential`,
-described in [`deploy/farmer/README.md`](../deploy/farmer/README.md)). It
-serves plain HTTP on `:8081`, so put TLS in front of it.
+described in [`deploy/farmer/README.md`](../deploy/farmer/README.md)), and
+its control-plane box key and the platform public key
+(`SAASAPI_BOX_PRIV_FILE`, `SAASAPI_PLATFORM_BOX_PUB`), which
+`imas-farmer ensure-controlplane-box-keys` writes to OpenBao; it won't
+start without them. It serves plain HTTP on `:8081`, so put TLS in front
+of it.
 
 ### Envoy
 

@@ -592,6 +592,7 @@ explanation rather than deploying something that silently can't work.
 {{- if and (eq .Values.tls.mode "secret") (not .Values.tls.secretName) -}}
 {{- fail "tls.secretName is required when tls.mode=secret" -}}
 {{- end -}}
+{{- include "imas-farmer.saasapiBox.validate" . -}}
 {{- if not (include "imas-farmer.openbaoAddr" .) -}}
 {{- fail "openbaoClient.addr is required when openbao.enabled=false (farmer's gateway signer, fleet key source, tenant box and the publish Job all need OpenBao)" -}}
 {{- end -}}
@@ -799,6 +800,41 @@ explanation rather than deploying something that silently can't work.
 {{- range $r := list .Values.tls.openbao.k8sRole .Values.farmer.openbao.gateway.k8sRole .Values.farmer.openbao.fleetSign.k8sRole .Values.farmer.openbao.tenantBox.k8sRole -}}
 {{- if eq $r $p.k8sRole -}}
 {{- fail (printf "credentialPublisher.k8sRole %q is also one of farmer's OpenBao roles: the KV-write role must never be one farmer can log in with" $p.k8sRole) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+saasapi's box key Secret (saasapi.controlPlaneBox, J.4). It holds the
+SaaS API's PRIVATE box key, so it must be a Secret of its own: never one
+farmer, the publish Job or the bus mounts, so no other workload's pod can
+read it. With ESO, it is read through the same SecretStore as the other
+ExternalSecrets, so the tenant box KV mount must be that store's mount
+(credentialPublisher.kvMount's).
+*/}}
+{{- define "imas-farmer.saasapiBox.validate" -}}
+{{- if .Values.saasapi.enabled -}}
+{{- $b := .Values.saasapi.controlPlaneBox -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" (toString $b.secretName)) -}}
+{{- fail (printf "saasapi.controlPlaneBox.secretName %q is not a valid Secret name" (toString $b.secretName)) -}}
+{{- end -}}
+{{- $others := list .Values.natsSeeds.secretName .Values.saasapi.natsCredentials.secretName (include "imas-farmer.dbSecretName" .) .Values.saasapi.internalAuthSecret.secretName -}}
+{{- if eq .Values.tls.mode "secret" -}}
+{{- $others = append $others .Values.tls.secretName -}}
+{{- end -}}
+{{- if has $b.secretName $others -}}
+{{- fail (printf "saasapi.controlPlaneBox.secretName %q is another Secret this chart mounts: it holds the SaaS API's private box key and must be its own, mounted only in saasapi's pods" $b.secretName) -}}
+{{- end -}}
+{{- range $k := list $b.privKey $b.platformPubKey -}}
+{{- if not (regexMatch "^[-._a-zA-Z0-9]+$" (toString $k)) -}}
+{{- fail (printf "saasapi.controlPlaneBox: secret key %q is not a valid Secret key" (toString $k)) -}}
+{{- end -}}
+{{- end -}}
+{{- if eq (toString $b.privKey) (toString $b.platformPubKey) -}}
+{{- fail "saasapi.controlPlaneBox.privKey and platformPubKey must differ" -}}
+{{- end -}}
+{{- if and .Values.externalSecrets.enabled .Values.externalSecrets.saasapi.enabled (ne .Values.farmer.openbao.tenantBox.kvMount .Values.credentialPublisher.kvMount) -}}
+{{- fail (printf "farmer.openbao.tenantBox.kvMount %q must equal credentialPublisher.kvMount %q with externalSecrets on: saasapi's box key (<tenantBox.kvPath>/saasapi-box) is read through the same SecretStore as its NATS JWT" .Values.farmer.openbao.tenantBox.kvMount .Values.credentialPublisher.kvMount) -}}
 {{- end -}}
 {{- end -}}
 {{- end }}

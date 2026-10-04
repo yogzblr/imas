@@ -42,7 +42,11 @@ with the same seeds the nats chart mounts. This chart never generates one.
 
 saasapi starts once Secret "{{ .Values.saasapi.natsCredentials.secretName }}" exists
 ({{ if .Values.externalSecrets.enabled }}ESO syncs it{{ else }}externalSecrets.enabled=false: create it by hand{{ end }} from its seed and the JWT the publish Job
-wrote to {{ .Values.credentialPublisher.kvMount }}/{{ .Values.credentialPublisher.kvPath }}, field "jwt").
+wrote to {{ .Values.credentialPublisher.kvMount }}/{{ .Values.credentialPublisher.kvPath }}, field "jwt"),
+and Secret "{{ .Values.saasapi.controlPlaneBox.secretName }}" exists ({{ if .Values.externalSecrets.enabled }}ESO syncs it{{ else }}create it by hand{{ end }} from
+{{ .Values.farmer.openbao.tenantBox.kvMount }}/{{ .Values.farmer.openbao.tenantBox.kvPath }}/saasapi-box field "priv" and .../controlplane-pub field "platform_pub",
+which the control-plane keygen Job writes{{ if not .Values.controlPlaneBoxKeys.enabled }}: controlPlaneBoxKeys.enabled=false, so create the keys some other way first{{ end }}).
+Until both exist its pods wait to start.
 {{- end }}
 
 {{- $relFile := include "imas-farmer.sproutRelease.file" . }}

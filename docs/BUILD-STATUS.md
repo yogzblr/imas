@@ -58,7 +58,7 @@ released.
 | 11 | Recipe download uses the same JWT | **Green** | |
 | 12 | Envoy with JWT validation | **Green** | |
 | 13 | Backend on Kubernetes | **Amber** | Install the charts on a real cluster (UAT gate). No Terraform exists. |
-| 14 | Payload encryption | **Red** | Seal `shell.*` (Open item 2) and finish the control plane (Open item 11): a compromised bus can still open a shell on a Unix sprout. Refreshing as a sprout is closed by J.2 (sealed refresh); minting CLI tokens is closed by J.3 (bearer tokens removed, the CLI API sealed); forging `internal.*` is closed by J.4 (sealed SaaS API ↔ farmer, in review; its Helm wiring is a follow-up). |
+| 14 | Payload encryption | **Red** | Seal `shell.*` (Open item 2) and finish the control plane (Open item 11): a compromised bus can still open a shell on a Unix sprout. Refreshing as a sprout is closed by J.2 (sealed refresh); minting CLI tokens is closed by J.3 (bearer tokens removed, the CLI API sealed); forging `internal.*` is closed by J.4 (sealed SaaS API ↔ farmer, in review; its Helm wiring is in a follow-up PR, also in review). |
 | 15 | Key rotation for sprout keys | **Amber** | Reword `requirements.md` to match the built design (the private key is never sent). |
 | 16 | SDB-equivalent secrets | **Green** | |
 | 17 | Probe capability | **Green** | |
@@ -96,7 +96,7 @@ released.
 | 8 | Docs wording (requirement 15, README embedded bus) | **Amber** | Small docs change. |
 | 9 | Nice-to-haves (Keycloak harness, rotation scheduler, CERT-In/DPDP review) | **Amber** | Unowned. |
 | 10 | Leftovers from PR #62 to #67 (release pipeline, stale diagram, OpenBao client follow-ups) | **Amber** | Fold into one clean-up brief after the first release shows what the pipeline really needs. Add fleetreleaser's check against the tag's signed `checksums.txt` there if wanted (SEC.5 report). REC.1 follow-ups are listed under item 10: audit table, deprovision clean-up, and the role on `cook`. |
-| 11 | Control plane forgeable by a compromised bus (CLI tokens, sprout refresh, `internal.*`) | **Red** | Design written ("Sealing the control plane" in `imas-payload-encryption-design.md`). J.1 (building blocks), J.2 (sealed sprout refresh) and J.3 (sealed CLI API, bearer tokens removed) merged; J.4 (sealed `internal.*`) in review; all flagged for security review. Left: the Helm wiring for J.4's keys (`deploy/helm`, outside J.4's scope: a Helm-installed saasapi won't start until it lands), and "no responders" on `internal.sprout.action`, which a compromised bus can still forge to get an action re-sent (design Open question 10): an accepted, known residual risk (owner decision, 2026-10-04, PR #97). |
+| 11 | Control plane forgeable by a compromised bus (CLI tokens, sprout refresh, `internal.*`) | **Red** | Design written ("Sealing the control plane" in `imas-payload-encryption-design.md`). J.1 (building blocks), J.2 (sealed sprout refresh) and J.3 (sealed CLI API, bearer tokens removed) merged; J.4 (sealed `internal.*`) in review; all flagged for security review. Left: the Helm wiring for J.4's keys (in review in the J.4 follow-up PR; a Helm-installed saasapi won't start until it lands), and "no responders" on `internal.sprout.action`, which a compromised bus can still forge to get an action re-sent (design Open question 10): an accepted, known residual risk (owner decision, 2026-10-04, PR #97). |
 
 ## Requirements traceability
 
@@ -1219,6 +1219,32 @@ by an external git sync today.
       as a new sealed message farmer accepts, so the action can run up to
       `SAASAPI_OUTBOX_MAX_ATTEMPTS` times. No code change for it. The Helm
       wiring goes in a follow-up PR.
+
+    **J.4 follow-up, Helm wiring (`deploy/helm/farmer`), in review, flagged
+    for security review; merges after J.4.** Closes J.4's "Not built: the
+    Helm wiring".
+    - saasapi gets one new Secret, `imas-saasapi-box`
+      (`saasapi.controlPlaneBox`), mounted only in its pods: its box
+      private key as a read-only file (`SAASAPI_BOX_PRIV_FILE`, 0440, the
+      saasapi container only) and the platform public key it pins
+      (`SAASAPI_PLATFORM_BOX_PUB`). With ESO an ExternalSecret renders it
+      from `<base>/saasapi-box` `priv` and `<base>/controlplane-pub`
+      `platform_pub` and nothing else; without ESO it is created by hand
+      (chart README).
+    - `controlPlaneBoxKeys.enabled` defaults to `true`: the keygen hook Job
+      (weight 5) writes the keys on every install and upgrade. With an
+      external OpenBao its role and policy must exist before install.
+    - Chart tests prove farmer never gets the SaaS API's private key and
+      saasapi never gets the platform private key (across the default,
+      eval, production, token-auth, ESO and fleet-dispatch renders), and
+      that the default render sets both variables and runs the keygen hook
+      before saasapi can start. The render fails if the Secret is shared
+      with anything else the chart mounts.
+    - Order on a fresh install: saasapi's pods wait (the Secret volume and
+      env reference aren't optional) until the keys exist and the Secret is
+      synced, as they already wait for `imas-saasapi-nats`; no init
+      container and no crash loop. `--wait` on a first install deadlocks,
+      as before, and the README says not to use it.
 
     **Stopgap SEC.0 (superseded by J.3, which deleted the token code, this
     cap included):** `UserAuth.IsValid` refused an expiry more than 15 minutes ahead (the
