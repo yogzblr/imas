@@ -58,7 +58,7 @@ released.
 | 11 | Recipe download uses the same JWT | **Green** | |
 | 12 | Envoy with JWT validation | **Green** | |
 | 13 | Backend on Kubernetes | **Amber** | Install the charts on a real cluster (UAT gate). No Terraform exists. |
-| 14 | Payload encryption | **Red** | Finish the control plane (Open item 11) and get J.5 reviewed. `shell.*` is sealed by J.5 (Open item 2, in review), for sprouts on the new build: a compromised bus can no longer open a shell on an upgraded Unix sprout. Refreshing as a sprout is closed by J.2 (sealed refresh); minting CLI tokens is closed by J.3 (bearer tokens removed, the CLI API sealed); forging `internal.*` is closed by J.4 (sealed SaaS API ↔ farmer, in review; its Helm wiring is in a follow-up PR, also in review). |
+| 14 | Payload encryption | **Red** | Finish the control plane (Open item 11) and get J.5 reviewed. `shell.*` is sealed by J.5 (Open item 2, in review), for sprouts on the new build: a compromised bus can no longer open a shell on an upgraded Unix sprout. Refreshing as a sprout is closed by J.2 (sealed refresh); minting CLI tokens is closed by J.3 (bearer tokens removed, the CLI API sealed); forging `internal.*` is closed by J.4 (sealed SaaS API ↔ farmer, in review; its Helm wiring is in a follow-up PR, also in review). A deleted or replaced host's gateway JWT is refused by SEC.7c (security review 2026-10-b B3, in review). |
 | 15 | Key rotation for sprout keys | **Amber** | Reword `requirements.md` to match the built design (the private key is never sent). |
 | 16 | SDB-equivalent secrets | **Green** | |
 | 17 | Probe capability | **Green** | |
@@ -853,7 +853,10 @@ by an external git sync today.
      binds the key to itself, not to the sprout.
    - **B3:** H1 revokes a deleted or replaced host's User JWT and box keys
      but not its gateway JWT, which reads `/files/` for up to its TTL (24h)
-     and, after a replace, reads the new host's staged recipe.
+     and, after a replace, reads the new host's staged recipe. **Addressed
+     by SEC.7c (FLAG FOR SECURITY REVIEW, ready for review):** farmer
+     refuses a gateway JWT whose `sub` is revoked or not the NKey accepted
+     for its `(tenant_id, sprout_id)`, failing closed (Open item 10).
 
      B4 (hostile-tenant recipe render cost scales with include count), B5
      (M6 unchanged), B6 (J.4 forged no-responders re-run, accepted), B7
