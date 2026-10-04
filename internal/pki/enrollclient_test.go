@@ -119,6 +119,10 @@ type enrollServer struct {
 	refreshBodies []map[string]any
 	// natsURLs is what POST /v1/enroll returns as nats_urls.
 	natsURLs []string
+	// failProven is how many more requests carrying sprout_pub_proof are
+	// answered with a 502 before reaching Enroll, standing in for an
+	// Envoy or network failure between enrollment's two steps.
+	failProven int
 	// refreshTenantOverride and refreshTenantPubOverride, if set, are the
 	// tenant_id and tenant_x25519_pub POST /v1/refresh names (inside a
 	// reply farmer sealed properly) instead of the real ones.
@@ -204,7 +208,15 @@ func startEnrollServer(t *testing.T) *enrollServer {
 		s.mu.Lock()
 		s.requests = append(s.requests, req)
 		natsURLs := s.natsURLs
+		fail := len(req.SproutPubProof) > 0 && s.failProven > 0
+		if fail {
+			s.failProven--
+		}
 		s.mu.Unlock()
+		if fail {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
 		res, err := Enroll(r.Context(), EnrollRequest(req))
 		if err != nil {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -216,6 +228,7 @@ func startEnrollServer(t *testing.T) *enrollServer {
 			NKeyIdentity: req.NKeyPub, TenantX25519Pub: res.TenantX25519Pub,
 			NatsURLs:               natsURLs,
 			TenantX25519Continuity: res.TenantX25519Continuity,
+			EnrollBinding:          res.EnrollBinding,
 		})
 	})
 	mux.HandleFunc("POST /v1/refresh", func(w http.ResponseWriter, r *http.Request) {
@@ -240,6 +253,9 @@ func startEnrollServer(t *testing.T) *enrollServer {
 	})
 	ts := httptest.NewTLSServer(mux)
 	t.Cleanup(ts.Close)
+	origDelay := enrollStep2RetryDelay
+	enrollStep2RetryDelay = time.Millisecond
+	t.Cleanup(func() { enrollStep2RetryDelay = origDelay })
 	config.FarmerURL = ts.URL
 	nkeyClientMu.Lock()
 	orig := nkeyClient
@@ -346,6 +362,10 @@ func TestEnrollSprout_EnrollPersistAndRefresh(t *testing.T) {
 	srv.mu.Unlock()
 	if len(reqs) != 2 || len(reqs[0].SproutPubProof) != 0 || len(reqs[1].SproutPubProof) == 0 {
 		t.Fatalf("enrollment sent %d requests, want 2: the second, only, carrying sprout_pub_proof", len(reqs))
+	}
+	// SEC.7b: the second returns the binding the first response carried.
+	if len(reqs[0].EnrollBinding) != 0 || len(reqs[1].EnrollBinding) == 0 {
+		t.Fatalf("enroll_binding sent on step 1 (%d bytes) and step 2 (%d bytes); want only on step 2", len(reqs[0].EnrollBinding), len(reqs[1].EnrollBinding))
 	}
 	if active, _, err := ValidSproutBoxKeys(resp.TenantID, "web-01"); err != nil || active != sproutPub {
 		t.Errorf("farmer's active box key = %q, %v; want the proven %q", active, err, sproutPub)
@@ -481,6 +501,52 @@ func TestEnrollSprout_Rejected(t *testing.T) {
 	}
 	if SproutEnrolled() {
 		t.Error("a rejected enrollment must not mark the sprout enrolled")
+	}
+}
+
+// A failed second request is retried with a fresh signature and proof and
+// the same binding (SEC.7b: farmer issues the binding once, so giving up on
+// it would leave the sprout to be enrolled again), up to
+// enrollStep2Attempts times.
+func TestEnrollSprout_RetriesStep2WithTheSameBinding(t *testing.T) {
+	store, _ := setupEnrollTest(t)
+	newJWSGatewayMinter(t)
+	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
+	setupSproutFiles(t)
+	srv := startEnrollServer(t)
+	sproutPub, _ := EnsureSproutBoxKey()
+
+	srv.mu.Lock()
+	srv.failProven = enrollStep2Attempts - 1
+	srv.mu.Unlock()
+	resp, err := EnrollSprout(t.Context(), "ek_1.s", "web-01", sproutPub)
+	if err != nil || resp.GatewayJWT == "" {
+		t.Fatalf("EnrollSprout = %+v, %v; want success on the last attempt", resp, err)
+	}
+	srv.mu.Lock()
+	reqs := append([]enrollWireRequest(nil), srv.requests...)
+	srv.mu.Unlock()
+	if len(reqs) != 1+enrollStep2Attempts {
+		t.Fatalf("sent %d requests, want %d", len(reqs), 1+enrollStep2Attempts)
+	}
+	for i, r := range reqs[1:] {
+		if string(r.EnrollBinding) != string(reqs[1].EnrollBinding) || len(r.EnrollBinding) == 0 {
+			t.Errorf("attempt %d carried a different or no binding", i+1)
+		}
+		if i > 0 && (r.NKeySig == reqs[i].NKeySig || string(r.SproutPubProof) == string(reqs[i].SproutPubProof)) {
+			t.Errorf("attempt %d reused the previous signature or proof", i+1)
+		}
+	}
+
+	// One failure more than that and it gives up.
+	store.rows["ek_2"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
+	setupSproutFiles(t)
+	sproutPub, _ = EnsureSproutBoxKey()
+	srv.mu.Lock()
+	srv.failProven = enrollStep2Attempts
+	srv.mu.Unlock()
+	if _, err := EnrollSprout(t.Context(), "ek_2.s", "web-02", sproutPub); err == nil {
+		t.Fatal("EnrollSprout succeeded with every second request failing")
 	}
 }
 

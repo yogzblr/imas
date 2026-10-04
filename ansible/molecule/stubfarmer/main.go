@@ -10,8 +10,13 @@
 //   - POST /v1/enroll: checks proof of possession the way farmer does
 //     (pki.EnrollSigningPayload, signed by nkey_pub), then the join token.
 //     A request from an already-enrolled nkey_pub is answered from the
-//     replay path without spending a use, like farmer's step 1. Failures
-//     are the generic 403 enrollment_failed.
+//     replay path without spending a use, like farmer's step 1. As
+//     farmer (SEC.7b), the identity-issuing response carries an
+//     enroll_binding, and a sprout's first box key is recorded only from
+//     a proof that returns it (here an opaque one-time nonce, not
+//     farmer's sealed message); a sprout with no box key gets nothing
+//     from the replay path otherwise. Failures are the generic 403
+//     enrollment_failed.
 //   - POST /v1/refresh: a fresh gateway JWT for an enrolled nkey_pub.
 //   - GET /_stub/state: what the tests assert on (join token redemptions,
 //     enrollments, and the NKeys connected to the bus).
@@ -84,7 +89,21 @@ type enrollRequest struct {
 	// private half, on the second request of a first enrollment
 	// (internal/pki's enroll.go). The stub records a box key only from it.
 	SproutPubProof json.RawMessage `json:"sprout_pub_proof,omitempty"`
+	// EnrollBinding is the enroll_binding the first response carried,
+	// returned with SproutPubProof.
+	EnrollBinding json.RawMessage `json:"enroll_binding,omitempty"`
 }
+
+// stubBinding is an enroll_binding the stub issued: the one-time nonce
+// and the sprout_pub the identity-issuing request named.
+type stubBinding struct {
+	nonce     string
+	sproutPub string
+	issued    time.Time
+}
+
+// bindingTTL matches farmer's EnrollBindingTTL.
+const bindingTTL = 5 * time.Minute
 
 type refreshRequest struct {
 	NKeyPub   string `json:"nkey_pub"`
@@ -142,8 +161,9 @@ type farmer struct {
 	// verified), and reenrollRequests counts requests from them since.
 	completed        map[string]bool
 	reenrollRequests int
-	sprouts          map[string]string    // nkey_pub -> sprout ID
-	sproutBox        map[string]*[32]byte // sprout ID -> its X25519 box public key
+	sprouts          map[string]string      // nkey_pub -> sprout ID
+	sproutBox        map[string]*[32]byte   // sprout ID -> its X25519 box public key
+	bindings         map[string]stubBinding // nkey_pub -> its unspent enroll_binding
 	seenSigs         map[string]bool
 }
 
@@ -181,6 +201,7 @@ func newFarmer(joinToken string, maxUses int, natsURLs []string) (*farmer, error
 		now:           time.Now,
 		connected:     func() []string { return nil },
 		sprouts:       map[string]string{},
+		bindings:      map[string]stubBinding{},
 		completed:     map[string]bool{},
 		seenSigs:      map[string]bool{},
 	}, nil
@@ -256,6 +277,7 @@ func (f *farmer) enroll(w http.ResponseWriter, r *http.Request) {
 		f.reenrollRequests++
 	}
 	sproutID, enrolled := f.sprouts[req.NKeyPub]
+	var binding json.RawMessage
 	if !enrolled {
 		if subtle.ConstantTimeCompare([]byte(req.JoinToken), []byte(f.joinToken)) != 1 {
 			enrollmentFailed(w, "wrong join token")
@@ -270,17 +292,29 @@ func (f *farmer) enroll(w http.ResponseWriter, r *http.Request) {
 			enrollmentFailed(w, "bad hostname")
 			return
 		}
+		if len(req.SproutPubProof) > 0 || len(req.EnrollBinding) > 0 {
+			enrollmentFailed(w, "sprout_pub_proof or enroll_binding on a first enrollment")
+			return
+		}
+		nonce := make([]byte, 32)
+		if _, err := rand.Read(nonce); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		b := stubBinding{nonce: base64.RawURLEncoding.EncodeToString(nonce), sproutPub: req.SproutPub, issued: f.now()}
+		binding, _ = json.Marshal(b.nonce)
 		f.redemptions++
 		f.sprouts[req.NKeyPub] = sproutID
+		f.bindings[req.NKeyPub] = b
 		log.Printf("enroll: sprout %s enrolled (redemption %d of %d)", sproutID, f.redemptions, f.maxUses)
 	} else {
 		log.Printf("enroll: replayed sprout %s", sproutID)
 	}
+	if enrolled && len(req.SproutPubProof) == 0 && f.sproutBox[sproutID] == nil {
+		enrollmentFailed(w, "replay from a sprout with no box key")
+		return
+	}
 	if len(req.SproutPubProof) > 0 {
-		if !enrolled {
-			enrollmentFailed(w, "sprout_pub_proof on a first enrollment")
-			return
-		}
 		// As farmer's verifyEnrollProof: sealed by the holder of
 		// sprout_pub's private half to the tenant key, for this tenant
 		// and sprout, naming this NKey and box key.
@@ -294,6 +328,25 @@ func (f *farmer) enroll(w http.ResponseWriter, r *http.Request) {
 		if err != nil || json.Unmarshal(opened.Body, &body) != nil || body.NKeyPub != req.NKeyPub || body.SproutPub != req.SproutPub {
 			enrollmentFailed(w, "sprout_pub_proof does not verify")
 			return
+		}
+		// As farmer's recordProvenSproutBoxKey: the key on record is
+		// re-asserted; a first key needs the identity-issuing response's
+		// binding, spent once; another key is a rotation.
+		switch active := f.sproutBox[sproutID]; {
+		case active != nil && *active == *sproutBoxPub:
+		case active != nil:
+			enrollmentFailed(w, "sprout already has a different box key")
+			return
+		default:
+			b, ok := f.bindings[req.NKeyPub]
+			var nonce string
+			if !ok || json.Unmarshal(req.EnrollBinding, &nonce) != nil ||
+				subtle.ConstantTimeCompare([]byte(nonce), []byte(b.nonce)) != 1 ||
+				b.sproutPub != req.SproutPub || f.now().Sub(b.issued) > bindingTTL {
+				enrollmentFailed(w, "no valid enroll_binding for a first box key")
+				return
+			}
+			delete(f.bindings, req.NKeyPub)
 		}
 		f.sproutBox[sproutID] = sproutBoxPub
 		if !f.completed[req.NKeyPub] {
@@ -314,6 +367,7 @@ func (f *farmer) enroll(w http.ResponseWriter, r *http.Request) {
 		NKeyIdentity:    req.NKeyPub,
 		TenantX25519Pub: f.tenantBoxPK,
 		NatsURLs:        f.natsURLs,
+		EnrollBinding:   binding,
 	})
 }
 

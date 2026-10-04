@@ -47,6 +47,10 @@ type enrollRequest struct {
 	// enrollment has none, and farmer records the box key only from the
 	// second, replay-path request that carries one.
 	SproutPubProof json.RawMessage `json:"sprout_pub_proof,omitempty"`
+	// EnrollBinding is returned with SproutPubProof: the binding the
+	// identity-issuing response carried (pki.EnrollRequest.EnrollBinding).
+	// Required for a sprout's first box key (SEC.7b).
+	EnrollBinding json.RawMessage `json:"enroll_binding,omitempty"`
 }
 
 // enrollSuccessResponse is design doc §3.2's success shape, plus
@@ -87,6 +91,12 @@ type enrollSuccessResponse struct {
 	NatsURLs        []string `json:"nats_urls"`
 
 	TenantX25519Continuity json.RawMessage `json:"tenant_x25519_continuity,omitempty"`
+	// EnrollBinding is present only in the answer to the request that
+	// issued the identity (the join token path): a farmer-sealed,
+	// single-use binding of the sprout to the sprout_pub it enrolled
+	// with, which its box key proof must return (SEC.7b; see
+	// internal/pki/enroll.go's package comment). Opaque to the sprout.
+	EnrollBinding json.RawMessage `json:"enroll_binding,omitempty"`
 }
 
 // enrollErrorResponse is design doc §3.4's single generic failure shape.
@@ -123,6 +133,7 @@ func Enroll(w http.ResponseWriter, r *http.Request) {
 		NKeySig:   req.NKeySig,
 
 		SproutPubProof: req.SproutPubProof,
+		EnrollBinding:  req.EnrollBinding,
 	})
 	if err != nil {
 		// pki.Enroll has already logged the specific reason; nothing more
@@ -141,6 +152,7 @@ func Enroll(w http.ResponseWriter, r *http.Request) {
 		NatsURLs:        enrollBusURLs(),
 
 		TenantX25519Continuity: result.TenantX25519Continuity,
+		EnrollBinding:          result.EnrollBinding,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
