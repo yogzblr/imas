@@ -476,19 +476,26 @@ func deprovisionTenantLocked(mat *natsAuthMaterial, tenantID string) (signedJWT 
 	}
 	// No Account was ever recorded or written for this tenant (a tombstone,
 	// or a provision that hasn't minted yet): nothing can be on the bus, so
-	// don't mint keys just to lock them out. Every push follows
-	// setTenantAccountPub, and a provision still in flight sees the row
-	// deleted when it re-checks after its push.
+	// don't mint keys just to lock them out. The Account is read again
+	// after the mark has committed, not taken from the row read above: a
+	// provision on another replica can record its Account and push between
+	// that read and the mark. Every push follows setTenantAccountPub, so if
+	// this read still finds none, the provision records it after the mark,
+	// and its post-push re-check sees the row deleted and locks it out.
+	wasDeleted := row.Deleted
+	if row, err = getTenantRow(tenantID); err != nil {
+		return "", false, err
+	}
 	if row.AccountPub == "" {
 		if _, statErr := os.Stat(tenantAccountJWTPath(tenantID)); os.IsNotExist(statErr) {
-			return "", row.Deleted, ErrTenantNotFound
+			return "", wasDeleted, ErrTenantNotFound
 		}
 	}
 	signed, err := signLockedOutTenantJWT(mat, tenantID, row.Name)
 	if err != nil {
 		return "", false, err
 	}
-	return signed, row.Deleted, nil
+	return signed, wasDeleted, nil
 }
 
 // signLockedOutTenantJWT re-signs tenantID's Account JWT locked out (see

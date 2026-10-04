@@ -511,6 +511,12 @@ tenant live on the bus. The fix, in `internal/pki`:
   concurrent tombstone), so copy 2 is refused on any replica. If the
   provision's insert wins instead, the deprovision finds that row and
   marks it deleted, and the provision's post-push re-check locks it out.
+  A deprovision skips the lockout only when, read again after its mark has
+  committed, the row still records no Account and there is no
+  `account.jwt` on its disk: a provision records its Account before it
+  pushes, so one recorded between the deprovision's first read and its
+  mark (PKI.1 follow-up, from the PR's security review) is still locked
+  out.
 
 *The ordering guarantee across replicas.* The bus applies a claims update
 before answering it and applies updates in arrival order. The re-check is
