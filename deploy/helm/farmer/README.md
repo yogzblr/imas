@@ -744,7 +744,10 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `farmer.image.*` | `ghcr.io/yogzblr/imas-farmer` | Also the publish Job's image. |
 | `farmer.replicaCount` | `1` | Must be 1. |
 | `farmer.logLevel` / `apiPort` / `gatewayJWTTTL` | `info` / `5405` / `24h` | `loglevel`, `farmerapiport`, `gatewayjwtttl`. |
-| `farmer.adminPubKeys` | `[]` | `pubkeys.admin`. |
+| `farmer.bootstrapAdmin.pubkey` | `""` | The first imas CLI admin's NKey public key (`imas auth pubkey`), rendered as `users.admin`. Empty renders no users. |
+| `farmer.bootstrapAdmin.boxpub` | `""` | Required with `pubkey`: the CLI box public key the admin's `imas auth keygen` printed. Farmer imports it once at start; the database is authoritative after that (J.3). |
+| `farmer.bootstrapAdmin.username` | `""` | Optional name for listings and audit entries. |
+| `farmer.adminPubKeys` | `[]` | Removed in J.3: rendering fails if set. An admin with no CLI box key can't make a request; use `farmer.bootstrapAdmin`. |
 | `farmer.jobs.reconcileWindow` | `"2h"` | `IMAS_JOB_RECONCILE_WINDOW` (`deploy/farmer/values.job-reconcile.yaml`). |
 | `farmer.recipes.templateLimits.maxSourceBytes` | `262144` | `IMAS_RECIPE_MAX_SOURCE_BYTES`: largest recipe source farmer reads or renders. |
 | `farmer.recipes.templateLimits.maxRenderedBytes` | `1048576` | `IMAS_RECIPE_MAX_RENDERED_BYTES`: largest output of one recipe render. |

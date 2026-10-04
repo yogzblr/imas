@@ -869,8 +869,7 @@ func TestBusAddress(t *testing.T) {
 
 func TestFarmerConfigFile(t *testing.T) {
 	docs := mustRender(t, "--set", "farmer.extraConfig.farmerorganization=evil",
-		"--set", "farmer.extraConfig.cohortrefreshinterval=1m",
-		"--set", "farmer.adminPubKeys[0]=UADMIN")
+		"--set", "farmer.extraConfig.cohortrefreshinterval=1m")
 	cfg := farmerConfig(t, docs)
 	if cfg["farmerorganization"] != "imas" {
 		t.Errorf("extraConfig overrode a chart-managed key: %v", cfg["farmerorganization"])
@@ -881,8 +880,11 @@ func TestFarmerConfigFile(t *testing.T) {
 	if !slices.Equal(cfg["sproutbusurls"].([]any), []any{"wss://bus.imas.example.com:443/"}) {
 		t.Errorf("sproutbusurls = %v", cfg["sproutbusurls"])
 	}
-	if get(cfg, "pubkeys", "admin", 0) != "UADMIN" {
-		t.Errorf("pubkeys = %v", cfg["pubkeys"])
+	if _, ok := cfg["pubkeys"]; ok {
+		t.Errorf("pubkeys = %v; the chart renders no NKey-only admins", cfg["pubkeys"])
+	}
+	if _, ok := cfg["users"]; ok {
+		t.Errorf("users = %v without farmer.bootstrapAdmin", cfg["users"])
 	}
 	for k, want := range map[string]string{
 		"farmerpki": "/var/lib/imas/farmer/pki/", "nkeyfarmerprivfile": "/var/lib/imas/farmer/pki/farmer.nkey",
@@ -2698,4 +2700,36 @@ func TestControlPlaneBoxKeysRefusesSharedIdentity(t *testing.T) {
 		"--set", "controlPlaneBoxKeys.serviceAccountName=imas-saasapi-cred-publisher")
 	mustFail(t, "another workload's OpenBao role", "--set", "controlPlaneBoxKeys.enabled=true",
 		"--set", "controlPlaneBoxKeys.k8sRole=imas-farmer-tenantbox")
+}
+
+// The first admin is bootstrapped from a Helm value, never over the bus
+// (J.3): farmer.bootstrapAdmin renders users.admin with the admin's NKey
+// public key and CLI box key, which farmer imports at start
+// (internal/auth's bootstrapkeys.go). An NKey-only admin can't make a
+// sealed request, so farmer.adminPubKeys refuses to render.
+func TestBootstrapAdmin(t *testing.T) {
+	const (
+		pubkey = "AB3CQ7X5ZV2JMR4FZYPG2ZLNZ6QX6S7HCLRT5JH4PO5ILHMYXM2AXUNG"
+		boxpub = "2O0Y4D6rpqfWAeY+pn2AFOP0AkFqm2t8dNVO3uYFQUQ="
+	)
+	cfg := farmerConfig(t, mustRender(t, "--set", "farmer.bootstrapAdmin.pubkey="+pubkey,
+		"--set", "farmer.bootstrapAdmin.boxpub="+boxpub, "--set", "farmer.bootstrapAdmin.username=root"))
+	if get(cfg, "users", "admin", 0, "pubkey") != pubkey || get(cfg, "users", "admin", 0, "boxpub") != boxpub ||
+		get(cfg, "users", "admin", 0, "username") != "root" {
+		t.Errorf("users = %v", cfg["users"])
+	}
+	if _, ok := cfg["pubkeys"]; ok {
+		t.Errorf("pubkeys = %v", cfg["pubkeys"])
+	}
+	// username is optional.
+	cfg = farmerConfig(t, mustRender(t, "--set", "farmer.bootstrapAdmin.pubkey="+pubkey, "--set", "farmer.bootstrapAdmin.boxpub="+boxpub))
+	if _, ok := get(cfg, "users", "admin", 0).(obj)["username"]; ok {
+		t.Errorf("users = %v", cfg["users"])
+	}
+
+	mustFail(t, "boxpub is required", "--set", "farmer.bootstrapAdmin.pubkey="+pubkey)
+	mustFail(t, "boxpub is required", "--set", "farmer.bootstrapAdmin.pubkey="+pubkey, "--set", "farmer.bootstrapAdmin.boxpub=not-a-key")
+	mustFail(t, "not an NKey user public key", "--set", "farmer.bootstrapAdmin.boxpub="+boxpub)
+	mustFail(t, "not an NKey user public key", "--set", "farmer.bootstrapAdmin.pubkey=UADMIN", "--set", "farmer.bootstrapAdmin.boxpub="+boxpub)
+	mustFail(t, "farmer.adminPubKeys was removed", "--set", "farmer.adminPubKeys[0]="+pubkey)
 }

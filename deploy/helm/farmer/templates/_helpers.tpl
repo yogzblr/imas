@@ -534,6 +534,19 @@ explanation rather than deploying something that silently can't work.
 {{- if not (regexMatch "^[0-9A-Za-z_-]{1,191}$" (toString .Values.organization)) -}}
 {{- fail (printf "organization %q is not a valid tenant ID (^[0-9A-Za-z_-]{1,191}$, internal/pki IsValidTenantID); it is farmerorganization and must equal the nats chart's bus.organization" .Values.organization) -}}
 {{- end -}}
+{{- if .Values.farmer.adminPubKeys -}}
+{{- fail "farmer.adminPubKeys was removed in J.3: every imas CLI request is sealed with the user's CLI box key, so an admin listed by NKey alone can't make a single request. Set farmer.bootstrapAdmin.pubkey and farmer.bootstrapAdmin.boxpub (from the admin's imas auth keygen) instead." -}}
+{{- end -}}
+{{- with .Values.farmer.bootstrapAdmin -}}
+{{- if or .pubkey .boxpub .username -}}
+{{- if not (regexMatch "^A[A-Z2-7]{55}$" (toString .pubkey)) -}}
+{{- fail (printf "farmer.bootstrapAdmin.pubkey %q is not an NKey user public key (imas auth pubkey prints it: A and 55 more base32 characters)" (toString .pubkey)) -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9+/]{43}=$" (toString .boxpub)) -}}
+{{- fail "farmer.bootstrapAdmin.boxpub is required with pubkey: the CLI box public key (standard base64, 32 bytes) the admin's imas auth keygen printed. Without it the first admin can't make a request." -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- if not .Values.bus.serviceName -}}
 {{- fail "bus.serviceName is required: the nats chart's bus client Service (<release>-nats-bus), with bus.namespace its namespace" -}}
 {{- end -}}
