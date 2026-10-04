@@ -206,8 +206,11 @@ here claims a throughput or connection figure; none has been measured.
    default `certHosts` already list them and OpenBao PKI roles set
    `client_flag` by default; check yours. In `secret` mode, add the
    per-pod names to the cert-manager `Certificate`.
-3. **Persistence** must stay on (render fails otherwise). See "Stale
-   bus-local claims" below.
+3. **Persistence** must stay on (render fails otherwise). A node keeps
+   the Account JWTs it was pushed across restarts; one that starts empty
+   serves nobody until its pull from its peers has brought them all in,
+   and if every node starts empty they come back only once core
+   reconnects and pushes them (see below).
 
 ### How routes are authenticated
 
@@ -242,6 +245,23 @@ a push catches up through:
 - for an Account it has never seen, a lookup to its peers at connect
   time.
 
+Core also pushes **every** Account JWT (SYS, the legacy tenant, every
+provisioned tenant, and a fresh lock-out for every deprovisioned one)
+whenever its SYS connection to the bus connects or reconnects
+(`pki.PushAllAccounts`), and keeps pushing them at start-up until the bus
+accepts them. That is how a bus, or a whole cluster, that starts on
+empty volumes learns them.
+
+**The bus signs no claims of its own** (`internal/pki/busauth.go`). It
+holds the operator signing seed, but it mints no tenant Account JWT, and
+its only self-signed Account JWT, the SYS bootstrap the server needs
+before core's first push can land, is dated to the Unix epoch, so any
+SYS Account JWT core signs outranks it. Older buses minted the legacy
+tenant's and the SYS Account JWTs on an empty volume with the current
+time and none of core's revocations, which won the resolver sync and
+re-admitted revoked sprouts and rotated-out SaaS API keys; a bus that
+upgrades drops those copies from its resolver at start.
+
 ### The fence: a node that may be stale serves nobody
 
 A clustered node keeps its client and websocket listeners shut, failing
@@ -269,7 +289,8 @@ What that means for a tenant:
 | Locked out while a node is down | Same. The returning node starts from its PVC, which still holds the live Account JWT, and serves nobody until its pull merged the lock-out. Merging closes the tenant's connections at once. |
 | Provisioned or locked out while one node is cut off | The cut-off node lost its majority and is fenced: it dropped its clients and refuses new ones, including the push. The majority side applies the push. On heal the node pulls before it serves. |
 | Locked out during a partial mesh (two nodes lost their link but both still reach a third) | The two that lost each other fence after the grace. Only the node that sees everyone serves and takes the push. |
-| Locked out while no node can take the push (all down or all fenced) | The push fails and `DeprovisionTenant` returns an error. Retrying it re-pushes the stored lock-out (it used to return early once the tenant was marked deleted, leaving it live). |
+| Locked out while no node can take the push (all down or all fenced) | The push fails and `DeprovisionTenant` returns an error. Retrying it signs and pushes a fresh lock-out. Core's next connect or reconnect to the bus also pushes one, for every deprovisioned tenant. |
+| A node restarts on an empty volume (scale-out, a replaced PVC) | It has only the SYS bootstrap, so it is fenced until its pull has brought in every Account from its peers. Nothing it holds can outrank what core pushed. |
 
 Merges are fail-closed on ties: if two JWTs for one Account carry the
 same issued-at, the locked-out one wins. Lock-outs are also signed at a
@@ -280,16 +301,9 @@ cover limits or revocations.
 **What is still open.** A partition that forms in the second or so
 before a push (the fence's 1 s tick plus the 3 s partial-mesh grace) can
 let that one push miss a node until the next pull. A lock-out is still
-applied cluster-wide once a pull runs. **Stale bus-local claims:**
-farmerbus mints its own copy of the legacy tenant's Account JWT
-(`bus.organization`) the first time it starts on an empty PVC. That copy
-has a newer issued-at than anything core pushed before then, so it wins
-the resolver sync and drops core's revocations until core next pushes
-that Account. This also affects a single node, but a cluster spreads the
-copy. Persistence is required for that reason; a lost PVC needs core to
-re-push.
+applied cluster-wide once a pull runs.
 
-## Envoy and `jwt_authn`## Envoy and `jwt_authn`
+## Envoy and `jwt_authn`
 
 The Envoy config (`templates/envoy-configmap.yaml`) matches
 `deploy/envoy/envoy.yaml` route for route:
@@ -676,10 +690,12 @@ rendered openbao-mode config (that chart's README, "Verification status"):
 
 ## Security review notes
 
-- **The DMZ bus holds the Operator root seed.** `ConfigureNats` derives
-  `operator.jwt` by signing with the Operator seed. It also needs
-  `OPERATOR_SIGNING`, which can sign any Account. So a compromise of the
-  DMZ bus pod exposes the whole trust chain. The design doc wants the
+- **The DMZ bus holds the Operator root seed.** `ConfigureBusNats` signs
+  the operator JWT with the Operator seed, and the SYS bootstrap with
+  `OPERATOR_SIGNING`, which can sign any Account. In normal operation the
+  bus signs nothing else (no tenant Account JWTs; see
+  [Clustering](#clustering)), but a compromise of the DMZ bus pod still
+  exposes the whole trust chain. The design doc wants the
   Operator key cold, and it wants this process to "expose as little as
   possible". Fixing that is a code change: have farmerbus load a
   pre-minted `operator.jwt` and the SYS Account's public key instead of

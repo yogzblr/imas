@@ -155,7 +155,7 @@ bus:
       tokenSecretKey: token
 
   persistence:
-    # -- Persist FarmerPKI (resolver JWT store, bus-local JWTs) per node.
+    # -- Persist FarmerPKI (the resolver's store of pushed JWTs) per node.
     # Without it, pushed Account JWTs are lost on restart until core
     # pushes again. Required when replicaCount > 1 (see README.md,
     # "Clustering").
