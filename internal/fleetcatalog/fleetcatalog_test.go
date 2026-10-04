@@ -147,19 +147,33 @@ func TestSQL_RolloutWindow(t *testing.T) {
 	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
 	for _, tc := range fleetcatalogtest.WindowCases(now) {
 		t.Run("case "+tc.Name, func(t *testing.T) {
+			// The rule on its own.
+			closed, err := fleetcatalog.RolloutWindowClosed(now, tc.Start, tc.End)
+			if tc.Corrupt {
+				if !errors.Is(err, fleetcatalog.ErrCorruptRolloutWindow) || closed {
+					t.Errorf("RolloutWindowClosed = %v, %v; want ErrCorruptRolloutWindow", closed, err)
+				}
+			} else if err != nil || closed != tc.Closed {
+				t.Errorf("RolloutWindowClosed = %v, %v; want %v", closed, err, tc.Closed)
+			}
+
+			// Through the database.
 			fleetcatalogtest.SetWindow(t, db, "t_case", tc.Start, tc.End)
 			start, end, ok, err := cat.RolloutWindow(ctx, "t_case")
+			if tc.Corrupt {
+				if !errors.Is(err, fleetcatalog.ErrCorruptRolloutWindow) || ok || start != nil || end != nil {
+					t.Fatalf("got %v %v %v %v, want ErrCorruptRolloutWindow", start, end, ok, err)
+				}
+				return
+			}
 			if err != nil || !ok || (start == nil) != (tc.Start == nil) || (end == nil) != (tc.End == nil) {
 				t.Fatalf("got %v %v %v %v", start, end, ok, err)
 			}
-			if start == nil {
-				return
-			}
-			if !start.Equal(*tc.Start) || !end.Equal(*tc.End) {
+			if start != nil && (!start.Equal(*tc.Start) || !end.Equal(*tc.End)) {
 				t.Fatalf("read [%s, %s), wrote [%s, %s)", start, end, tc.Start, tc.End)
 			}
-			if got := fleetcatalog.OutsideRolloutWindow(now, *start, *end); got != tc.Closed {
-				t.Errorf("OutsideRolloutWindow = %v, want %v", got, tc.Closed)
+			if closed, err := fleetcatalog.RolloutWindowClosed(now, start, end); err != nil || closed != tc.Closed {
+				t.Errorf("read back: RolloutWindowClosed = %v, %v; want %v", closed, err, tc.Closed)
 			}
 		})
 	}

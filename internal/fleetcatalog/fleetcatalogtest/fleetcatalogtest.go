@@ -101,11 +101,14 @@ func SetWindow(t testing.TB, db *gorm.DB, tenantID string, start, end *time.Time
 }
 
 // WindowCase is one case of the rollout window rule
-// (fleetcatalog.OutsideRolloutWindow) at a fixed now.
+// (fleetcatalog.RolloutWindowClosed) at a fixed now.
 type WindowCase struct {
 	Name       string
 	Start, End *time.Time // both nil: the policy sets no window
 	Closed     bool       // a self_update now is refused rollout_window_closed
+	// Corrupt: exactly one end is set. Both services refuse it as a
+	// failed policy read (ErrCorruptRolloutWindow), never as no window.
+	Corrupt bool
 }
 
 // WindowCases is the one table farmer's check (internal/natsapi) and
@@ -123,6 +126,9 @@ func WindowCases(now time.Time) []WindowCase {
 		{Name: "a millisecond before end", Start: at(-time.Hour), End: at(time.Millisecond)},
 		{Name: "exactly at end", Start: at(-time.Hour), End: at(0), Closed: true},
 		{Name: "after end", Start: at(-2 * time.Hour), End: at(-time.Hour), Closed: true},
+		// now would be inside either half-window: corrupt all the same.
+		{Name: "only start set", Start: at(-time.Hour), Corrupt: true},
+		{Name: "only end set", End: at(time.Hour), Corrupt: true},
 	}
 }
 

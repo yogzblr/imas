@@ -15,6 +15,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/controlplane"
+	"github.com/yogzblr/imas/internal/fleetcatalog"
 	"github.com/yogzblr/imas/internal/fleetcatalog/fleetcatalogtest"
 	"github.com/yogzblr/imas/internal/props"
 )
@@ -610,6 +611,12 @@ func TestFleetUpdate_PolicyRecheckedBeforeEachWave(t *testing.T) {
 			gdb.Model(&TenantUpdatePolicy{}).Where("tenant_id = ?", tid).
 				Updates(map[string]any{"rollout_window_start": now.Add(-2 * time.Hour), "rollout_window_end": now.Add(-time.Hour)})
 		}, errCodeRolloutWindowClosed},
+		// A corrupt window halts like a failed policy read, never reads
+		// as "no window".
+		{"window corrupted (start only)", func(gdb *gorm.DB, tid string) {
+			gdb.Model(&TenantUpdatePolicy{}).Where("tenant_id = ?", tid).
+				Update("rollout_window_start", time.Now().UTC().Add(-time.Hour))
+		}, string(controlplane.ErrorInternal)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gdb := newUpdateTestDB(t)
@@ -1138,9 +1145,13 @@ func TestRolloutPolicyCheck(t *testing.T) {
 	}
 }
 
-// TestRolloutPolicyCheck_SharedWindowCases: saasapi's window rule, read
-// back from the database, against the table farmer's checkRolloutWindow
-// is tested against too (internal/natsapi), so the two can't drift.
+// TestRolloutPolicyCheck_SharedWindowCases: saasapi's window rule against
+// the table farmer's checkRolloutWindow is tested against too
+// (internal/natsapi), so the two can't drift: policyRefusal on its own,
+// rolloutPolicyCheck (the early POST check and the check before every
+// wave) reading the row back, and claimRollout on the locked row. A
+// one-NULL (corrupt) row is an error wrapping ErrCorruptRolloutWindow on
+// every path, never a pass.
 func TestRolloutPolicyCheck_SharedWindowCases(t *testing.T) {
 	gdb := newUpdateTestDB(t)
 	tid := mustCreateActiveTenant(t, gdb)
@@ -1151,21 +1162,71 @@ func TestRolloutPolicyCheck_SharedWindowCases(t *testing.T) {
 			if tc.Closed {
 				want = errCodeRolloutWindowClosed
 			}
-			var window []time.Time
-			if tc.Start != nil {
-				window = []time.Time{*tc.Start, *tc.End}
-			}
-			mustApprove(t, gdb, tid, "v2.4.1", window...)
-			code, err := rolloutPolicyCheck(gdb, tid, "v2.4.1", now)
-			if err != nil || code != want {
-				t.Fatalf("rolloutPolicyCheck: %q, %v; want %q", code, err, want)
+			check := func(what, code string, err error) {
+				t.Helper()
+				if tc.Corrupt {
+					if !errors.Is(err, fleetcatalog.ErrCorruptRolloutWindow) || code != "" {
+						t.Fatalf("%s: %q, %v; want ErrCorruptRolloutWindow", what, code, err)
+					}
+					return
+				}
+				if err != nil || code != want {
+					t.Fatalf("%s: %q, %v; want %q", what, code, err, want)
+				}
 			}
 			version := "v2.4.1"
 			p := TenantUpdatePolicy{TenantID: tid, ApprovedVersion: &version, RolloutWindowStart: tc.Start, RolloutWindowEnd: tc.End}
-			if code := policyRefusal(&p, "v2.4.1", now); code != want {
-				t.Fatalf("policyRefusal: %q, want %q", code, want)
+			code, err := policyRefusal(&p, version, now)
+			check("policyRefusal", code, err)
+
+			if err := gdb.Save(&p).Error; err != nil {
+				t.Fatalf("saving policy: %v", err)
 			}
+			code, err = rolloutPolicyCheck(gdb, tid, version, now)
+			check("rolloutPolicyCheck", code, err)
+
+			err = gdb.Transaction(claimRollout(tid, version, now))
+			var refused rolloutRefused
+			if errors.As(err, &refused) {
+				code, err = refused.code, nil
+			} else {
+				code = ""
+			}
+			check("claimRollout", code, err)
 		})
+	}
+}
+
+// A POST for a tenant whose policy row has a corrupt (one-NULL) rollout
+// window is a 500 internal_error, as a failed policy read is, and creates
+// no batch.
+func TestFleetUpdate_CorruptWindowRefusesPost(t *testing.T) {
+	gdb := newUpdateTestDB(t)
+	fastRollouts(t, 5*time.Second)
+	ns := startTestBus(t)
+	connectSaaSBus(t, ns)
+	tid := mustCreateActiveTenant(t, gdb)
+	mustPublishVersion(t, gdb, "v2.4.1", time.Now())
+	mustApprove(t, gdb, tid, "v2.4.1")
+	assets := mustUpdateFleet(t, gdb, tid, 2)
+	farmer := startFakeFarmer(t, ns, func(req controlplane.SproutActionRequest) any {
+		return controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
+			Status: controlplane.StatusDispatched, JID: jidFor(req.SproutID)}
+	})
+	gdb.Model(&TenantUpdatePolicy{}).Where("tenant_id = ?", tid).Update("rollout_window_start", time.Now().UTC().Add(-time.Hour))
+
+	status, resp := postUpdates(t, tid, map[string]any{"asset_ids": assets, "target_version": "v2.4.1"})
+	actionDispatches.Wait()
+	if status != 500 || resp["error"] != "internal_error" {
+		t.Fatalf("POST = %d %v, want 500 internal_error", status, resp)
+	}
+	if reqs, _ := farmer.seen(); len(reqs) != 0 {
+		t.Fatalf("farmer got %d requests, want none", len(reqs))
+	}
+	var batches int64
+	gdb.Model(&AssetActionBatch{}).Where("tenant_id = ?", tid).Count(&batches)
+	if batches != 0 {
+		t.Fatalf("%d batches written, want none", batches)
 	}
 }
 

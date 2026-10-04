@@ -475,7 +475,8 @@ func selfUpdateParams(ctx context.Context, rows []FleetVersion) (json.RawMessage
 // with a rollout of version at now. It returns "" if the rollout may go
 // ahead, errCodeVersionRevoked if version has been revoked, or
 // policyRefusal's code for the tenant's policy row (none counts as nothing
-// approved).
+// approved). A failed read, or a policy row whose rollout window is
+// corrupt (policyRefusal), is an error.
 func rolloutPolicyCheck(d *gorm.DB, tenantID, version string, now time.Time) (string, error) {
 	if revoked, err := versionRevoked(d, version); err != nil || revoked {
 		if revoked {
@@ -491,7 +492,7 @@ func rolloutPolicyCheck(d *gorm.DB, tenantID, version string, now time.Time) (st
 	if len(policies) > 0 {
 		p = &policies[0]
 	}
-	return policyRefusal(p, version, now), nil
+	return policyRefusal(p, version, now)
 }
 
 // versionRevoked reports whether any row of version has been revoked
@@ -505,18 +506,27 @@ func versionRevoked(d *gorm.DB, version string) (bool, error) {
 // policyRefusal returns errCodeApprovalWithdrawn if version isn't p's
 // approved_version (or there's no policy), errCodeRolloutWindowClosed if
 // p sets a window and now is outside [start, end), and "" otherwise. The
-// window rule is fleetcatalog.OutsideRolloutWindow, the one farmer
-// applies again before each self_update (internal/natsapi,
-// checkRolloutWindow).
-func policyRefusal(p *TenantUpdatePolicy, version string, now time.Time) string {
+// window rule is fleetcatalog.RolloutWindowClosed, the one farmer applies
+// again before each self_update (internal/natsapi, checkRolloutWindow).
+//
+// A row with only one end of its window set is corrupt (PATCH
+// update-policy never writes one): the error wraps
+// fleetcatalog.ErrCorruptRolloutWindow and is handled as a failed policy
+// read, never as "no window". POST answers 500 internal_error and creates
+// no batch; a running or resumed rollout halts its unsent items with
+// internal_error (preWaveCheck). Nothing is dispatched either way.
+func policyRefusal(p *TenantUpdatePolicy, version string, now time.Time) (string, error) {
 	if p == nil || p.ApprovedVersion == nil || *p.ApprovedVersion != version {
-		return errCodeApprovalWithdrawn
+		return errCodeApprovalWithdrawn, nil
 	}
-	if p.RolloutWindowStart != nil && p.RolloutWindowEnd != nil &&
-		fleetcatalog.OutsideRolloutWindow(now, *p.RolloutWindowStart, *p.RolloutWindowEnd) {
-		return errCodeRolloutWindowClosed
+	closed, err := fleetcatalog.RolloutWindowClosed(now, p.RolloutWindowStart, p.RolloutWindowEnd)
+	if err != nil {
+		return "", fmt.Errorf("tenant %s's update policy: %w", p.TenantID, err)
 	}
-	return ""
+	if closed {
+		return errCodeRolloutWindowClosed, nil
+	}
+	return "", nil
 }
 
 // rolloutRefused is a POST refused for a policy reason (code is a
@@ -583,7 +593,11 @@ func claimRollout(tenantID, version string, now time.Time) func(tx *gorm.DB) err
 		if len(policies) > 0 {
 			p = &policies[0]
 		}
-		if code := policyRefusal(p, version, now); code != "" {
+		code, err := policyRefusal(p, version, now)
+		if err != nil {
+			return err
+		}
+		if code != "" {
 			return rolloutRefused{code: code}
 		}
 		revoked, err := versionRevoked(tx, version)

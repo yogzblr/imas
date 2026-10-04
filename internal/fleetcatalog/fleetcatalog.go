@@ -137,12 +137,26 @@ func (s SQL) RolloutWindow(ctx context.Context, tenantID string) (*time.Time, *t
 }
 
 // OutsideRolloutWindow reports whether now is outside the rollout window
-// [start, end): before start, or at or after end. It is the one rule both
-// saasapi (policyRefusal, before a rollout and each wave) and farmer
-// (internal/natsapi checkRolloutWindow, before each self_update) apply,
-// so the two can't drift.
+// [start, end): before start, or at or after end.
 func OutsideRolloutWindow(now, start, end time.Time) bool {
 	return now.Before(start) || !now.Before(end)
+}
+
+// RolloutWindowClosed applies a policy row's window columns at now: no
+// window (both nil) is open; exactly one nil is corrupt and an error
+// wrapping ErrCorruptRolloutWindow, never "no window"; otherwise
+// OutsideRolloutWindow. It is the one rule both saasapi (policyRefusal,
+// before a rollout and each wave) and farmer (internal/natsapi
+// checkRolloutWindow, before each self_update) apply, so the two can't
+// drift.
+func RolloutWindowClosed(now time.Time, start, end *time.Time) (bool, error) {
+	switch {
+	case start == nil && end == nil:
+		return false, nil
+	case start == nil || end == nil:
+		return false, ErrCorruptRolloutWindow
+	}
+	return OutsideRolloutWindow(now, *start, *end), nil
 }
 
 const releaseRowsQuery = `SELECT version, os, arch, package_type, file_name,

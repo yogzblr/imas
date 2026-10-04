@@ -90,18 +90,21 @@ func fixSelfUpdateNow(t *testing.T, now time.Time) {
 func TestSelfUpdate_RolloutWindowEnforcedByFarmer(t *testing.T) {
 	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
 	fixSelfUpdateNow(t, now)
-	at := func(d time.Duration) *time.Time { t := now.Add(d); return &t }
 
 	type windowCase struct {
 		name  string
 		setup func(c *suCatalog)
 		want  controlplane.ErrorCode // "" means dispatched
 	}
-	// The table saasapi's policyRefusal is tested against too.
+	// The table saasapi's policyRefusal is tested against too, its two
+	// one-NULL (corrupt) rows included: internal_error, not "no window".
 	var cases []windowCase
 	for _, wc := range fleetcatalogtest.WindowCases(now) {
 		want := controlplane.ErrorCode("")
-		if wc.Closed {
+		switch {
+		case wc.Corrupt:
+			want = controlplane.ErrorInternal
+		case wc.Closed:
 			want = ErrorRolloutWindowClosed
 		}
 		cases = append(cases, windowCase{wc.Name, func(c *suCatalog) {
@@ -119,13 +122,6 @@ func TestSelfUpdate_RolloutWindowEnforcedByFarmer(t *testing.T) {
 			c.setWindow(suTenant, now.Add(-2*time.Hour), now.Add(-time.Hour))
 			c.setWindow("t_other", now.Add(-time.Hour), now.Add(time.Hour))
 		}, ErrorRolloutWindowClosed},
-		// One NULL is a corrupt row, not "no window".
-		windowCase{"only rollout_window_start set", func(c *suCatalog) {
-			fleetcatalogtest.SetWindow(c.t, c.db, suTenant, at(-time.Hour), nil)
-		}, controlplane.ErrorInternal},
-		windowCase{"only rollout_window_end set", func(c *suCatalog) {
-			fleetcatalogtest.SetWindow(c.t, c.db, suTenant, nil, at(time.Hour))
-		}, controlplane.ErrorInternal},
 		windowCase{"window read fails", func(c *suCatalog) {
 			fleetcatalog.Install(fixedWindowCatalog{SQL: fleetcatalog.New(c.db), err: errCatalogDown})
 		}, controlplane.ErrorInternal},
@@ -177,7 +173,7 @@ func TestCheckRolloutWindow(t *testing.T) {
 		want controlplane.ErrorCode
 	}{
 		// The policy row went away after the approved version was read.
-		{"no policy row", sqlCat, controlplane.ErrorInvalidRequest},
+		{"no policy row", sqlCat, controlplane.ErrorInternal},
 		{"inside", fixedWindowCatalog{SQL: sqlCat, start: &start, end: &end, ok: true}, ""},
 		// A Catalog other than fleetcatalog.SQL that hands back one end.
 		{"start only from another catalog", fixedWindowCatalog{SQL: sqlCat, start: &start, ok: true}, controlplane.ErrorInternal},

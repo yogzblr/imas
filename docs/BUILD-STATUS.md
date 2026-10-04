@@ -789,18 +789,21 @@ by an external git sync today.
    REVIEW):** farmer reads the tenant's rollout window.
    `fleetcatalog.Catalog` has `RolloutWindow`: one query on
    `saas.tenant_update_policy` scoped by `tenant_id`, times in UTC. Both
-   columns NULL is no window. A row with only one set is refused as
-   corrupt (`internal_error`), not read as no window. A failed read is
-   `internal_error`, and a policy row deleted after the approval check is
-   `invalid_request`. The rule (refused before start, or at or after end)
-   is one function, `fleetcatalog.OutsideRolloutWindow`, which saasapi's
-   `policyRefusal` calls too. Both are tested against one table of cases.
-   farmer's existing `SELECT ON saas.*` grant (§4.1) covers the two
-   columns; no grant changed. With `IMAS_SELF_UPDATE_ENABLED` on, an
-   approved, signed version now dispatches inside the window and is
-   refused with `rollout_window_closed` outside it. saasapi still treats a
-   one-NULL row as no window (its PATCH never writes one); farmer then
-   refuses it.
+   columns NULL is no window. A row with only one set is corrupt, never
+   read as no window. The rule is one function,
+   `fleetcatalog.RolloutWindowClosed`: refused before start or at or after
+   end, and a corrupt row is an error. farmer and saasapi's
+   `policyRefusal` both call it, and both are tested against one table of
+   cases, corrupt rows included. Farmer answers a corrupt row, a failed
+   read or a policy row deleted after the approval check with
+   `internal_error`. saasapi treats a corrupt row as a failed policy read:
+   POST answers 500 `internal_error` and creates no batch, and a running or
+   resumed rollout halts its unsent items with `internal_error` (owner's
+   decision, 2026-10-04). farmer's existing `SELECT ON saas.*` grant (§4.1)
+   covers the two columns; no grant changed. With
+   `IMAS_SELF_UPDATE_ENABLED` on, an approved, signed version now
+   dispatches inside the window and is refused with
+   `rollout_window_closed` outside it.
    **Still open:** H2 (the review's other must-fix before dispatch);
    moving the new reply codes
    (`self_update_disabled`, `rollout_window_closed`, `farmer_busy`) into
