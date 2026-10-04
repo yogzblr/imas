@@ -135,8 +135,10 @@ var (
 
 // usersTenantID is the tenant the deployment-wide policy's users belong
 // to: the same seam internal/rbac uses for rbac_user_roles, so a user
-// AddUser registers lands where the policy looks. Per-request tenants
-// arrive with sealed requests (J.4), whose store calls name the tenant.
+// AddUser registers lands where the policy looks. CLI users are
+// deployment-wide operators (owner decision 2026-10-04), so their CLI box
+// keys live in this tenant too, and their sealed requests open on its
+// connection (J.3).
 func usersTenantID() string {
 	if config.FarmerOrganization != "" {
 		return config.FarmerOrganization
@@ -296,7 +298,8 @@ func CLIBoxKeyRegistered(pub string) (bool, error) {
 }
 
 // RegisterCLIBoxKey records pub as userID's first CLI box key in tenantID:
-// the admin path (auth.users.add carrying the new user's key, J.4). The
+// a key on its own for a user who has none (auth.users.add registers the
+// user and their key together, AddUser). The
 // user must be known to the policy. Registering the key that is already
 // the user's active one is a no-op; any other key while one is active is
 // ErrCLIBoxKeyExists, since replacing a key is a rotation, sealed under

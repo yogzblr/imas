@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	intauth "github.com/yogzblr/imas/internal/auth"
 	"github.com/yogzblr/imas/internal/heartbeat"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/rbac"
@@ -20,7 +19,8 @@ type SproutInfo struct {
 	NKey      string `json:"nkey,omitempty"`
 }
 
-func handleSproutsList(tenantID string, params json.RawMessage) (any, error) {
+func handleSproutsList(c apiCaller, params json.RawMessage) (any, error) {
+	tenantID := c.TenantID
 	allKeys := pki.ListNKeysByType(tenantID)
 	var sprouts []SproutInfo
 
@@ -61,34 +61,23 @@ func handleSproutsList(tenantID string, params json.RawMessage) (any, error) {
 		sprouts = []SproutInfo{}
 	}
 
-	// Scope filtering: if the user has scoped view access, filter the
-	// sprout list to only include sprouts they can see.
-	if !intauth.DangerouslyAllowRoot() {
-		var tp tokenParams
-		if len(params) > 0 {
-			json.Unmarshal(params, &tp)
-		}
-		if tp.Token != "" {
-			allIDs := make([]string, len(sprouts))
-			for i, s := range sprouts {
-				allIDs[i] = s.ID
-			}
-			allowed := filterSproutsByScope(tenantID, tp.Token, rbac.ActionView, allIDs)
-			if allowed != nil {
-				allowedSet := make(map[string]bool, len(allowed))
-				for _, id := range allowed {
-					allowedSet[id] = true
-				}
-				filtered := make([]SproutInfo, 0, len(allowed))
-				for _, s := range sprouts {
-					if allowedSet[s.ID] {
-						filtered = append(filtered, s)
-					}
-				}
-				sprouts = filtered
-			}
+	// Scope filtering: only the sprouts the verified user may view. A
+	// user with no role sees none (UserScopeFilter returns nil).
+	allIDs := make([]string, len(sprouts))
+	for i, s := range sprouts {
+		allIDs[i] = s.ID
+	}
+	allowedSet := make(map[string]bool, len(allIDs))
+	for _, id := range filterSproutsByScope(tenantID, c.UserID, rbac.ActionView, allIDs) {
+		allowedSet[id] = true
+	}
+	filtered := make([]SproutInfo, 0, len(allowedSet))
+	for _, s := range sprouts {
+		if allowedSet[s.ID] {
+			filtered = append(filtered, s)
 		}
 	}
+	sprouts = filtered
 
 	return map[string][]SproutInfo{"sprouts": sprouts}, nil
 }

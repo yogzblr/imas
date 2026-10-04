@@ -2,25 +2,21 @@ package cmd
 
 import (
 	"encoding/json"
-	"encoding/pem"
-	"net/http"
-	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nkeys"
-	"github.com/taigrr/jety"
+	"github.com/spf13/cobra"
 
 	"github.com/yogzblr/imas/internal/api/client"
+	"github.com/yogzblr/imas/internal/api/client/clienttest"
 	apitypes "github.com/yogzblr/imas/internal/api/types"
 	"github.com/yogzblr/imas/internal/audit"
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/jobs"
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/rbac"
 )
 
@@ -55,21 +51,29 @@ func startTestNATSServer(t *testing.T) (*server.Server, *nats.Conn) {
 	return ns, conn
 }
 
-// natsRespond wraps a result in the standard nats response envelope.
+// cmdTestFarmer is the sealed stand-in farmer the current test's mocks
+// answer as (setupTestNATS sets it, and configures the CLI's keys for it).
+var cmdTestFarmer *clienttest.Farmer
+
+// natsRespond answers msg, a sealed CLI request, as farmer would: it
+// opens it and replies with result, sealed to the CLI. A request that
+// doesn't open is refused.
 func natsRespond(msg *nats.Msg, result interface{}) {
-	resultBytes, _ := json.Marshal(result)
-	resp := struct {
-		Result json.RawMessage `json:"result"`
-	}{Result: resultBytes}
-	data, _ := json.Marshal(resp)
-	msg.Respond(data)
+	req, err := cmdTestFarmer.Open(msg)
+	if err != nil {
+		_ = clienttest.Refuse(msg, payloadbox.ErrorCodeOpenFailed)
+		return
+	}
+	_ = cmdTestFarmer.Reply(msg, req, result, "")
 }
 
-// setupTestNATS sets up an embedded NATS server and configures client.NatsConn.
+// setupTestNATS sets up an embedded NATS server, configures client.NatsConn
+// and the CLI's keys against a sealed stand-in farmer (cmdTestFarmer).
 // Returns a cleanup function to restore the original connection.
 func setupTestNATS(t *testing.T) (*nats.Conn, func()) {
 	t.Helper()
 	_, conn := startTestNATSServer(t)
+	cmdTestFarmer = clienttest.Setup(t)
 	origConn := client.NatsConn
 	client.NatsConn = conn
 	return conn, func() {
@@ -545,64 +549,24 @@ func TestVersionCommand_JSON(t *testing.T) {
 
 // --- Recipes commands ---
 
-// setupTestRecipeFarmer stands in for the farmer's dedicated recipe HTTP
-// endpoint (internal/api/handlers/recipes.go) that cmd/imas/cmd/recipes.go
-// now calls directly over HTTPS via internal/api/client, instead of the
-// imas.api.recipes.list/recipes.get NATS methods these tests used to mock
-// — see docs/design/imas-fork-roadmap.md workstream I. It trusts the test
-// server's certificate as config.ImasRootCA and provisions a signing key
-// for the auth token internal/api/client attaches.
-func setupTestRecipeFarmer(t *testing.T, handler http.HandlerFunc) {
+// setupTestRecipeFarmer stands in for farmer's sealed recipes.list and
+// recipes.get (the CLI browses recipes over the sealed API since J.3),
+// answering both with response.
+func setupTestRecipeFarmer(t *testing.T, response any) {
 	t.Helper()
-	ts := httptest.NewTLSServer(handler)
-	t.Cleanup(ts.Close)
-
-	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ts.Certificate().Raw})
-	caFile := filepath.Join(t.TempDir(), "rootca.pem")
-	if err := os.WriteFile(caFile, caPEM, 0o600); err != nil {
-		t.Fatal(err)
+	conn, cleanup := setupTestNATS(t)
+	t.Cleanup(cleanup)
+	for _, m := range []string{"recipes.list", "recipes.get"} {
+		cmdTestFarmer.Handle(t, conn, m, clienttest.Result(response))
 	}
-	host, port, ok := strings.Cut(strings.TrimPrefix(ts.URL, "https://"), ":")
-	if !ok {
-		t.Fatalf("unexpected test server URL: %s", ts.URL)
-	}
-
-	origRootCA, origIface, origPort := config.ImasRootCA, config.FarmerInterface, config.FarmerAPIPort
-	config.ImasRootCA = caFile
-	config.FarmerInterface = host
-	config.FarmerAPIPort = port
-	t.Cleanup(func() {
-		config.ImasRootCA = origRootCA
-		config.FarmerInterface = origIface
-		config.FarmerAPIPort = origPort
-	})
-
-	configPath := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(configPath, []byte("# test config\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	jety.SetConfigType("toml")
-	jety.SetConfigFile(configPath)
-	kp, err := nkeys.CreateAccount()
-	if err != nil {
-		t.Fatal(err)
-	}
-	seed, err := kp.Seed()
-	if err != nil {
-		t.Fatal(err)
-	}
-	jety.Set("privkey", string(seed))
-	t.Cleanup(func() { jety.Set("privkey", "") })
 }
 
 func TestRecipesListCommand_Text(t *testing.T) {
-	setupTestRecipeFarmer(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string][]RecipeInfo{
-			"recipes": {
-				{Name: "base.packages", Path: "/srv/recipes/base/packages.imas", Size: 1024},
-				{Name: "webserver.nginx", Path: "/srv/recipes/webserver/nginx.imas", Size: 2048},
-			},
-		})
+	setupTestRecipeFarmer(t, map[string][]RecipeInfo{
+		"recipes": {
+			{Name: "base.packages", Path: "/srv/recipes/base/packages.imas", Size: 1024},
+			{Name: "webserver.nginx", Path: "/srv/recipes/webserver/nginx.imas", Size: 2048},
+		},
 	})
 
 	oldMode := outputMode
@@ -625,9 +589,7 @@ func TestRecipesListCommand_Text(t *testing.T) {
 }
 
 func TestRecipesListCommand_Empty(t *testing.T) {
-	setupTestRecipeFarmer(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string][]RecipeInfo{"recipes": {}})
-	})
+	setupTestRecipeFarmer(t, map[string][]RecipeInfo{"recipes": {}})
 
 	oldMode := outputMode
 	defer func() { outputMode = oldMode }()
@@ -643,13 +605,11 @@ func TestRecipesListCommand_Empty(t *testing.T) {
 }
 
 func TestRecipesShowCommand_Text(t *testing.T) {
-	setupTestRecipeFarmer(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(RecipeContent{
-			Name:    "base.packages",
-			Path:    "/srv/recipes/base/packages.imas",
-			Content: "pkg.installed:\n  - name: nginx",
-			Size:    42,
-		})
+	setupTestRecipeFarmer(t, RecipeContent{
+		Name:    "base.packages",
+		Path:    "/srv/recipes/base/packages.imas",
+		Content: "pkg.installed:\n  - name: nginx",
+		Size:    42,
 	})
 
 	oldMode := outputMode
@@ -1696,6 +1656,58 @@ func TestUsersAddCommand_Text(t *testing.T) {
 	}
 }
 
+// imas users add sends the new user's CLI box key (and username) with
+// the pubkey and role, sealed.
+func TestUsersAddCommand_SendsBoxKey(t *testing.T) {
+	conn, cleanup := setupTestNATS(t)
+	defer cleanup()
+
+	got := make(chan map[string]string, 1)
+	cmdTestFarmer.Handle(t, conn, "auth.users.add", func(p json.RawMessage) (any, error) {
+		var m map[string]string
+		_ = json.Unmarshal(p, &m)
+		got <- m
+		return apitypes.UserMutateResponse{Success: true, Message: "added"}, nil
+	})
+	usersAddBoxPub, usersAddUsername = "BOXPUB", "carol"
+	defer func() { usersAddBoxPub, usersAddUsername = "", "" }()
+
+	captureStdout(t, func() { usersAddCmd.Run(usersAddCmd, []string{"operator", "UCAROL"}) })
+	m := <-got
+	if m["pubkey"] != "UCAROL" || m["role"] != "operator" || m["boxpub"] != "BOXPUB" || m["username"] != "carol" {
+		t.Fatalf("auth.users.add params %v", m)
+	}
+	if f := usersAddCmd.Flags().Lookup("boxpub"); f == nil || f.Annotations[cobra.BashCompOneRequiredFlag] == nil {
+		t.Error("--boxpub is not a required flag")
+	}
+}
+
+func TestUsersResetKeyCommand(t *testing.T) {
+	conn, cleanup := setupTestNATS(t)
+	defer cleanup()
+
+	got := make(chan map[string]string, 1)
+	cmdTestFarmer.Handle(t, conn, "auth.users.resetkey", func(p json.RawMessage) (any, error) {
+		var m map[string]string
+		_ = json.Unmarshal(p, &m)
+		got <- m
+		return apitypes.UserMutateResponse{Success: true, Message: "key reset"}, nil
+	})
+	usersResetBoxPub = "NEWBOX"
+	defer func() { usersResetBoxPub = "" }()
+	oldMode := outputMode
+	defer func() { outputMode = oldMode }()
+	outputMode = ""
+
+	out := captureStdout(t, func() { usersResetKeyCmd.Run(usersResetKeyCmd, []string{"UBOB"}) })
+	if m := <-got; m["pubkey"] != "UBOB" || m["boxpub"] != "NEWBOX" {
+		t.Fatalf("auth.users.resetkey params %v", m)
+	}
+	if !strings.Contains(out, "key reset") {
+		t.Errorf("output %q", out)
+	}
+}
+
 func TestUsersAddCommand_JSON(t *testing.T) {
 	conn, cleanup := setupTestNATS(t)
 	defer cleanup()
@@ -1776,13 +1788,11 @@ func TestUsersRemoveCommand_JSON(t *testing.T) {
 // --- Recipes show JSON ---
 
 func TestRecipesShowCommand_JSON(t *testing.T) {
-	setupTestRecipeFarmer(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(RecipeContent{
-			Name:    "base.packages",
-			Path:    "/srv/recipes/base/packages.imas",
-			Content: "pkg.installed:\n  - name: nginx",
-			Size:    42,
-		})
+	setupTestRecipeFarmer(t, RecipeContent{
+		Name:    "base.packages",
+		Path:    "/srv/recipes/base/packages.imas",
+		Content: "pkg.installed:\n  - name: nginx",
+		Size:    42,
 	})
 
 	oldMode := outputMode

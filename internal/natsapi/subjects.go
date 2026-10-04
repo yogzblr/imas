@@ -70,6 +70,10 @@ const (
 
 	// Cook
 	MethodCook = "cook"
+	// MethodCookTriggerPrefix + <jid> starts a cook's dispatch
+	// (CookTriggerMethod): sealed, and accepted only from the user who
+	// created the job, on the replica holding it.
+	MethodCookTriggerPrefix = "cook.trigger."
 	// MethodCookResync nudges sprouts to pull their staged recipe and
 	// cook it if they missed its push (cook.NudgeSprout).
 	MethodCookResync = "cook.resync"
@@ -101,6 +105,13 @@ const (
 	MethodAuthAddUser    = "auth.users.add"
 	MethodAuthRemoveUser = "auth.users.remove"
 	MethodAuthExplain    = "auth.explain"
+	// MethodAuthResetKey is an admin's reset of a user's CLI box key.
+	MethodAuthResetKey = "auth.users.resetkey"
+
+	// Recipes: the platform recipe tree's dot-notation list and get
+	// (they were HTTP routes behind a bearer token until J.3).
+	MethodRecipesList = "recipes.list"
+	MethodRecipesGet  = "recipes.get"
 
 	// Shell
 	MethodShellStart = "shell.start"
@@ -134,10 +145,6 @@ const (
 
 	// SproutShellStart is the suffix for starting a shell session on a sprout.
 	SproutShellStart = "shell.start"
-
-	// SproutCookTrigger is the prefix for cook trigger responses.
-	// Full subject: imas.farmer.cook.trigger.<jid>
-	SproutCookTriggerPrefix = "imas.farmer.cook.trigger."
 
 	// SproutBoxKeyRotateCmd is the suffix for farmer's rotate-trigger
 	// instruction to a sprout (MethodPKIRotateBoxKey's handler publishes
@@ -185,19 +192,15 @@ type CohortResolveRequest = CohortResolveParams
 // CohortRefreshRequest optionally identifies a cohort to refresh (empty = all).
 type CohortRefreshRequest = CohortRefreshParams
 
-// AuthTokenRequest holds a token for auth operations.
-type AuthTokenRequest = AuthParams
-
 // AuthLoginResponse is the response for the auth.login endpoint.
 type AuthLoginResponse = apitypes.LoginResponse
 
 // ShellStartRequest is the request to start an interactive shell session.
 type ShellStartRequest = shell.CLIStartRequest
 
-// RecipesGetRequest identifies a recipe by name.
+// RecipesGetRequest identifies a recipe by dot-notation name.
 type RecipesGetRequest struct {
 	Name string `json:"name"`
-	ID   string `json:"id"`
 }
 
 // AuditQueryRequest holds query parameters for audit log searches.
@@ -308,6 +311,8 @@ func AllMethods() []string {
 		MethodPropsGetAll, MethodPropsGet, MethodPropsSet, MethodPropsDelete,
 		MethodCohortsList, MethodCohortsGet, MethodCohortsResolve, MethodCohortsRefresh, MethodCohortsValidate,
 		MethodAuthLogin, MethodAuthWhoAmI, MethodAuthListUsers, MethodAuthAddUser, MethodAuthRemoveUser, MethodAuthExplain,
+		MethodAuthResetKey, MethodAuthRotateKey,
+		MethodRecipesList, MethodRecipesGet,
 		MethodShellStart,
 		MethodAuditDates, MethodAuditQuery,
 	}

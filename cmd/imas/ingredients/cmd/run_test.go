@@ -9,7 +9,9 @@ import (
 	"github.com/nats-io/nats.go"
 
 	pkiclient "github.com/yogzblr/imas/internal/api/client"
+	"github.com/yogzblr/imas/internal/api/client/clienttest"
 	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
@@ -30,6 +32,7 @@ func startTestNATS(t *testing.T) (*nats.Conn, func()) {
 		ns.Shutdown()
 		t.Fatalf("connect NATS: %v", err)
 	}
+	testFarmer = clienttest.Setup(t)
 	pkiclient.NatsConn = nc
 	oldTimeout := pkiclient.NatsRequestTimeout
 	pkiclient.NatsRequestTimeout = 2 * time.Second
@@ -41,10 +44,28 @@ func startTestNATS(t *testing.T) (*nats.Conn, func()) {
 	}
 }
 
-// natsReply is the envelope that NatsRequest expects.
+// natsReply is what a mock answers: a result, or a handler error.
 type natsReply struct {
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  string          `json:"error,omitempty"`
+}
+
+// testFarmer is the sealed stand-in farmer (startTestNATS sets it).
+var testFarmer *clienttest.Farmer
+
+// sealedRespond answers msg, a sealed CLI request, with reply sealed back
+// as farmer would; a request that doesn't open is refused.
+func sealedRespond(msg *nats.Msg, reply natsReply) {
+	req, err := testFarmer.Open(msg)
+	if err != nil {
+		_ = clienttest.Refuse(msg, payloadbox.ErrorCodeOpenFailed)
+		return
+	}
+	var result any
+	if len(reply.Result) > 0 {
+		result = reply.Result
+	}
+	_ = testFarmer.Reply(msg, req, result, reply.Error)
 }
 
 // mockPKIList subscribes to imas.api.pki.list and returns the given accepted sprouts.
@@ -60,8 +81,7 @@ func mockPKIList(t *testing.T, nc *nats.Conn, accepted []string) *nats.Subscript
 	reply := natsReply{Result: data}
 
 	sub, err := nc.Subscribe("imas.api.pki.list", func(msg *nats.Msg) {
-		payload, _ := json.Marshal(reply)
-		_ = msg.Respond(payload)
+		sealedRespond(msg, reply)
 	})
 	if err != nil {
 		t.Fatalf("subscribe pki.list: %v", err)
@@ -76,8 +96,7 @@ func mockCmdRun(t *testing.T, nc *nats.Conn, results apitypes.TargetedResults) *
 	data, _ := json.Marshal(results)
 	reply := natsReply{Result: data}
 	sub, err := nc.Subscribe("imas.api.cmd.run", func(msg *nats.Msg) {
-		payload, _ := json.Marshal(reply)
-		_ = msg.Respond(payload)
+		sealedRespond(msg, reply)
 	})
 	if err != nil {
 		t.Fatalf("subscribe cmd.run: %v", err)
@@ -211,8 +230,7 @@ func TestFRun_PKIListError(t *testing.T) {
 	// Mock pki.list to return an error
 	reply := natsReply{Error: "permission denied"}
 	sub, err := nc.Subscribe("imas.api.pki.list", func(msg *nats.Msg) {
-		payload, _ := json.Marshal(reply)
-		_ = msg.Respond(payload)
+		sealedRespond(msg, reply)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -237,8 +255,7 @@ func TestFRun_CmdRunError(t *testing.T) {
 	// Mock cmd.run to return an error
 	reply := natsReply{Error: "command execution failed"}
 	sub2, err := nc.Subscribe("imas.api.cmd.run", func(msg *nats.Msg) {
-		payload, _ := json.Marshal(reply)
-		_ = msg.Respond(payload)
+		sealedRespond(msg, reply)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -263,8 +280,7 @@ func TestFRun_InvalidJSONResponse(t *testing.T) {
 	// Return a result that's not valid TargetedResults JSON
 	reply := natsReply{Result: json.RawMessage(`"just a string"`)}
 	sub2, err := nc.Subscribe("imas.api.cmd.run", func(msg *nats.Msg) {
-		payload, _ := json.Marshal(reply)
-		_ = msg.Respond(payload)
+		sealedRespond(msg, reply)
 	})
 	if err != nil {
 		t.Fatal(err)

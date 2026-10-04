@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
+	intauth "github.com/yogzblr/imas/internal/auth"
+	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/rbac"
 )
 
@@ -37,85 +39,92 @@ func TestNATSMethodAction(t *testing.T) {
 	}
 }
 
-func TestPublicMethods(t *testing.T) {
-	for method := range publicMethods {
-		if !publicMethods[method] {
-			t.Errorf("expected %q to be public", method)
+// The self methods are about the caller themselves: any user whose
+// request opened may call them. Nothing that acts on sprouts, keys or
+// other users is among them.
+func TestSelfMethods(t *testing.T) {
+	want := map[string]bool{
+		MethodHealth: true, MethodVersion: true, MethodAuthLogin: true,
+		MethodAuthWhoAmI: true, MethodAuthExplain: true, MethodAuthRotateKey: true,
+	}
+	if len(selfMethods) != len(want) {
+		t.Errorf("selfMethods = %v", selfMethods)
+	}
+	for m := range want {
+		if !selfMethods[m] {
+			t.Errorf("%s is not a self method", m)
 		}
 	}
-	// Non-public methods should not be in the map.
-	if publicMethods["cook"] {
-		t.Error("cook should not be a public method")
-	}
-	if publicMethods["pki.accept"] {
-		t.Error("pki.accept should not be a public method")
+	for _, m := range []string{MethodCook, MethodPKIAccept, MethodAuthAddUser, MethodAuthResetKey, MethodAuthListUsers} {
+		if selfMethods[m] {
+			t.Errorf("%s must not be a self method", m)
+		}
 	}
 }
 
-func TestAuthMiddleware_PublicMethod(t *testing.T) {
-	called := false
-	inner := func(_ string, params json.RawMessage) (any, error) {
-		called = true
-		return "ok", nil
+// authorize looks the role up by the verified caller, never by anything
+// in params: a request whose params name an admin, or carry a token,
+// gets the caller's own access and no more.
+func TestAuthorize(t *testing.T) {
+	setupNatsAPIPKI(t)
+	defer setupJetyDangerouslyAllowRoot(t, false)()
+	rs := rbac.NewRoleStore()
+	for _, r := range []*rbac.Role{
+		{Name: "admin", Rules: []rbac.Rule{{Action: rbac.ActionAdmin, Scope: "*"}}},
+		{Name: "viewer", Rules: []rbac.Rule{{Action: rbac.ActionView, Scope: "*"}}},
+		{Name: "web", Rules: []rbac.Rule{{Action: rbac.ActionCook, Scope: "sprout:web-1"}}},
+	} {
+		if err := rs.Register(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	urm := rbac.NewUserRoleMap()
+	urm.Set("UADMIN", "admin")
+	urm.Set("UVIEWER", "viewer")
+	urm.Set("UWEB", "web")
+	intauth.SetPolicy(rs, urm, nil)
+	defer intauth.SetPolicy(nil, nil, nil)
+
+	tenant := pki.CurrentTenantID()
+	cookOn := func(sprout string) json.RawMessage {
+		b, _ := json.Marshal(map[string]any{"token": "UADMIN", "user": "UADMIN", "target": []map[string]string{{"sprout_id": sprout}}})
+		return b
+	}
+	for _, tc := range []struct {
+		name, method, user string
+		params             json.RawMessage
+		want               error
+	}{
+		{"admin, admin method", MethodAuditDates, "UADMIN", nil, nil},
+		{"viewer, admin method", MethodAuditDates, "UVIEWER", nil, rbac.ErrAccessDenied},
+		{"viewer, admin method, params naming the admin", MethodAuthAddUser, "UVIEWER", json.RawMessage(`{"token":"UADMIN","pubkey":"UADMIN"}`), rbac.ErrAccessDenied},
+		{"viewer, read", MethodJobsGet, "UVIEWER", nil, nil},
+		{"unknown user", MethodJobsGet, "UNOBODY", nil, rbac.ErrAccessDenied},
+		{"unknown user, self method", MethodAuthWhoAmI, "UNOBODY", nil, nil},
+		{"scoped cook, granted sprout", MethodCook, "UWEB", cookOn("web-1"), nil},
+		{"scoped cook, other sprout", MethodCook, "UWEB", cookOn("db-1"), rbac.ErrAccessDenied},
+		{"method not granted", MethodCmdRun, "UWEB", cookOn("web-1"), rbac.ErrAccessDenied},
+		{"cook trigger needs cook", MethodCookTriggerPrefix + "j1", "UVIEWER", nil, rbac.ErrAccessDenied},
+		{"cook trigger", MethodCookTriggerPrefix + "j1", "UWEB", nil, nil},
+		{"key reset is admin", MethodAuthResetKey, "UWEB", nil, rbac.ErrAccessDenied},
+	} {
+		err := authorize(tc.method, apiCaller{TenantID: tenant, UserID: tc.user}, tc.params)
+		if err != tc.want {
+			t.Errorf("%s: authorize = %v, want %v", tc.name, err, tc.want)
+		}
 	}
 
-	wrapped := authMiddleware("version", inner)
-	result, err := wrapped("t_test", nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !called {
-		t.Fatal("inner handler was not called for public method")
-	}
-	if result != "ok" {
-		t.Fatalf("unexpected result: %v", result)
+	// Targets that can't be read are refused, not handed to the handler.
+	if err := authorize(MethodCook, apiCaller{TenantID: tenant, UserID: "UADMIN"}, json.RawMessage(`{"target":"not-an-array"}`)); err == nil {
+		t.Error("unreadable targets were authorized")
 	}
 }
 
-func TestAuthMiddleware_NoToken(t *testing.T) {
-	inner := func(_ string, params json.RawMessage) (any, error) {
-		t.Fatal("handler should not be called without a token")
-		return nil, nil
-	}
-
-	wrapped := authMiddleware("cook", inner)
-
-	// No params at all
-	_, err := wrapped("t_test", nil)
-	if err == nil {
-		t.Fatal("expected error for missing token")
-	}
-	if err != rbac.ErrAccessDenied {
-		t.Fatalf("expected ErrAccessDenied, got: %v", err)
-	}
-
-	// Empty params
-	_, err = wrapped("t_test", json.RawMessage(`{}`))
-	if err != rbac.ErrAccessDenied {
-		t.Fatalf("expected ErrAccessDenied for empty params, got: %v", err)
-	}
-
-	// Params with empty token
-	_, err = wrapped("t_test", json.RawMessage(`{"token":""}`))
-	if err != rbac.ErrAccessDenied {
-		t.Fatalf("expected ErrAccessDenied for empty token, got: %v", err)
-	}
-}
-
-func TestAuthMiddleware_InvalidToken(t *testing.T) {
-	inner := func(_ string, params json.RawMessage) (any, error) {
-		t.Fatal("handler should not be called with invalid token")
-		return nil, nil
-	}
-
-	wrapped := authMiddleware("cook", inner)
-	params := json.RawMessage(`{"token":"invalid-garbage-token"}`)
-	_, err := wrapped("t_test", params)
-	if err == nil {
-		t.Fatal("expected error for invalid token")
-	}
-	if err != rbac.ErrAccessDenied {
-		t.Fatalf("expected ErrAccessDenied, got: %v", err)
+func TestAuthorize_DangerouslyAllowRoot(t *testing.T) {
+	setupNatsAPIPKI(t)
+	defer setupJetyDangerouslyAllowRoot(t, true)()
+	if err := authorize(MethodCmdRun, apiCaller{TenantID: pki.CurrentTenantID(), UserID: "UNOBODY"}, json.RawMessage(`{"target":[{"sprout_id":"web-1"}]}`)); err != nil {
+		t.Fatalf("dangerously_allow_root: %v", err)
 	}
 }
 
@@ -189,9 +198,21 @@ func TestOperatorRoleNATSAccess(t *testing.T) {
 
 func TestAllRoutesHaveActionMapping(t *testing.T) {
 	// Every route in the router should have an entry in natsActionMap.
-	for method := range routes {
+	for method := range apiRoutes() {
 		if _, ok := natsActionMap[method]; !ok {
 			t.Errorf("route %q has no entry in natsActionMap (will default to admin)", method)
 		}
+	}
+}
+
+// No method is both a tenant-only route and a user route.
+func TestRouteTablesDisjoint(t *testing.T) {
+	for m := range userRoutes {
+		if _, ok := routes[m]; ok {
+			t.Errorf("%s is in both route tables", m)
+		}
+	}
+	if len(apiRoutes()) != len(routes)+len(userRoutes) {
+		t.Error("apiRoutes lost a method")
 	}
 }

@@ -423,7 +423,7 @@ func TestHandleSproutsListEmpty(t *testing.T) {
 	// Ensure no NATS conn for probe.
 	ClearNatsConn(pki.CurrentTenantID())
 
-	result, err := handleSproutsList(pki.CurrentTenantID(), nil)
+	result, err := handleSproutsList(apiCaller{TenantID: pki.CurrentTenantID()}, nil)
 	if err != nil {
 		t.Fatalf("handleSproutsList: %v", err)
 	}
@@ -446,7 +446,7 @@ func TestHandleSproutsListWithSprouts(t *testing.T) {
 	writeNKey(t, pkiDir, "unaccepted", "sprout-beta", "UKEY_BETA")
 	writeNKey(t, pkiDir, "denied", "sprout-gamma", "UKEY_GAMMA")
 
-	result, err := handleSproutsList(pki.CurrentTenantID(), nil)
+	result, err := handleSproutsList(adminCaller(t, pki.CurrentTenantID()), nil)
 	if err != nil {
 		t.Fatalf("handleSproutsList: %v", err)
 	}
@@ -666,7 +666,7 @@ func TestHandleTestPingUnknownSprout(t *testing.T) {
 func TestHandleCookInvalidJSON(t *testing.T) {
 	setupNatsAPIPKI(t)
 
-	_, err := handleCook(pki.CurrentTenantID(), json.RawMessage(`{invalid`))
+	_, err := handleCook(apiCaller{TenantID: pki.CurrentTenantID()}, json.RawMessage(`{invalid`))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
@@ -676,7 +676,7 @@ func TestHandleCookInvalidSproutID(t *testing.T) {
 	setupNatsAPIPKI(t)
 
 	params := json.RawMessage(`{"target":[{"id":"BAD_UPPER"}],"action":{"recipe":"test.sls"}}`)
-	_, err := handleCook(pki.CurrentTenantID(), params)
+	_, err := handleCook(apiCaller{TenantID: pki.CurrentTenantID()}, params)
 	if err == nil {
 		t.Fatal("expected error for invalid sprout ID")
 	}
@@ -686,7 +686,7 @@ func TestHandleCookUnknownSprout(t *testing.T) {
 	setupNatsAPIPKI(t)
 
 	params := json.RawMessage(`{"target":[{"id":"ghost-sprout"}],"action":{"recipe":"test.sls"}}`)
-	_, err := handleCook(pki.CurrentTenantID(), params)
+	_, err := handleCook(apiCaller{TenantID: pki.CurrentTenantID()}, params)
 	if err == nil {
 		t.Fatal("expected error for unknown sprout")
 	}
@@ -701,7 +701,7 @@ func TestHandleCookNoNATSConn(t *testing.T) {
 	ClearNatsConn(pki.CurrentTenantID())
 
 	params := json.RawMessage(`{"target":[{"id":"sprout-cook"}],"action":{"recipe":"test.sls"}}`)
-	_, err := handleCook(pki.CurrentTenantID(), params)
+	_, err := handleCook(apiCaller{TenantID: pki.CurrentTenantID()}, params)
 	if err == nil {
 		t.Fatal("expected error when NATS not available")
 	}
@@ -715,7 +715,7 @@ func TestHandleCookNoNATSConn(t *testing.T) {
 func TestHandleShellStartInvalidJSON(t *testing.T) {
 	setupNatsAPIPKI(t)
 
-	_, err := handleShellStart(pki.CurrentTenantID(), json.RawMessage(`{invalid`))
+	_, err := handleShellStart(apiCaller{TenantID: pki.CurrentTenantID()}, json.RawMessage(`{invalid`))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
@@ -725,7 +725,7 @@ func TestHandleShellStartMissingSproutID(t *testing.T) {
 	setupNatsAPIPKI(t)
 
 	params := json.RawMessage(`{}`)
-	_, err := handleShellStart(pki.CurrentTenantID(), params)
+	_, err := handleShellStart(apiCaller{TenantID: pki.CurrentTenantID()}, params)
 	if err == nil {
 		t.Fatal("expected error for missing sprout_id")
 	}
@@ -735,7 +735,7 @@ func TestHandleShellStartInvalidSproutID(t *testing.T) {
 	setupNatsAPIPKI(t)
 
 	params := json.RawMessage(`{"sprout_id":"BAD_UPPER"}`)
-	_, err := handleShellStart(pki.CurrentTenantID(), params)
+	_, err := handleShellStart(apiCaller{TenantID: pki.CurrentTenantID()}, params)
 	if err == nil {
 		t.Fatal("expected error for invalid sprout ID")
 	}
@@ -745,7 +745,7 @@ func TestHandleShellStartUnknownSprout(t *testing.T) {
 	setupNatsAPIPKI(t)
 
 	params := json.RawMessage(`{"sprout_id":"unknown-sprout"}`)
-	_, err := handleShellStart(pki.CurrentTenantID(), params)
+	_, err := handleShellStart(apiCaller{TenantID: pki.CurrentTenantID()}, params)
 	if err == nil {
 		t.Fatal("expected error for unknown sprout")
 	}
@@ -755,39 +755,9 @@ func TestHandleShellStartSproutIDWithUnderscore(t *testing.T) {
 	setupNatsAPIPKI(t)
 
 	params := json.RawMessage(`{"sprout_id":"sprout_bad"}`)
-	_, err := handleShellStart(pki.CurrentTenantID(), params)
+	_, err := handleShellStart(apiCaller{TenantID: pki.CurrentTenantID()}, params)
 	if err == nil {
 		t.Fatal("expected error for sprout ID with underscore")
-	}
-}
-
-// --- resolveCallerIdentity tests ---
-
-func TestResolveCallerIdentityEmpty(t *testing.T) {
-	pk, role := resolveCallerIdentity(nil)
-	if pk != "" || role != "" {
-		t.Errorf("expected empty, got pk=%q role=%q", pk, role)
-	}
-}
-
-func TestResolveCallerIdentityNoToken(t *testing.T) {
-	pk, role := resolveCallerIdentity(json.RawMessage(`{}`))
-	if pk != "" || role != "" {
-		t.Errorf("expected empty, got pk=%q role=%q", pk, role)
-	}
-}
-
-func TestResolveCallerIdentityInvalidJSON(t *testing.T) {
-	pk, role := resolveCallerIdentity(json.RawMessage(`{invalid`))
-	if pk != "" || role != "" {
-		t.Errorf("expected empty for invalid JSON, got pk=%q role=%q", pk, role)
-	}
-}
-
-func TestResolveCallerIdentityBadToken(t *testing.T) {
-	pk, role := resolveCallerIdentity(json.RawMessage(`{"token":"garbage"}`))
-	if pk != "" || role != "" {
-		t.Errorf("expected empty for bad token, got pk=%q role=%q", pk, role)
 	}
 }
 

@@ -19,7 +19,8 @@ import (
 // sessionTracker tracks active shell sessions on the farmer for audit logging.
 var sessionTracker = shell.NewTracker()
 
-func handleShellStart(tenantID string, params json.RawMessage) (any, error) {
+func handleShellStart(c apiCaller, params json.RawMessage) (any, error) {
+	tenantID := c.TenantID
 	var req shell.CLIStartRequest
 	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, fmt.Errorf("invalid request: %w", err)
@@ -38,8 +39,9 @@ func handleShellStart(tenantID string, params json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("unknown sprout: %s", req.SproutID)
 	}
 
-	// Resolve the caller's identity for audit logging.
-	pubkey, roleName := resolveCallerIdentity(params)
+	// The caller's identity for audit logging: the verified user.
+	pubkey := c.UserID
+	roleName, _ := intauth.UserIdentity(pubkey)
 
 	// Generate a unique session ID.
 	sessionID := uuid.New().String()
@@ -99,24 +101,6 @@ func handleShellStart(tenantID string, params json.RawMessage) (any, error) {
 	log.Infof("shell: session %s started (user=%s, sprout=%s)", sessionID, pubkey, req.SproutID)
 
 	return resp, nil
-}
-
-// resolveCallerIdentity extracts the pubkey and role from the token in params.
-func resolveCallerIdentity(params json.RawMessage) (pubkey, roleName string) {
-	var tp struct {
-		Token string `json:"token"`
-	}
-	if len(params) == 0 {
-		return "", ""
-	}
-	if err := json.Unmarshal(params, &tp); err != nil || tp.Token == "" {
-		return "", ""
-	}
-	pk, role, _, err := intauth.WhoAmI(tp.Token)
-	if err != nil {
-		return "", ""
-	}
-	return pk, role
 }
 
 // subscribeSessionDone subscribes to the session's done subject on the farmer

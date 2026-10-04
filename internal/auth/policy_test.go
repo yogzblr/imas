@@ -3,28 +3,29 @@ package auth
 import (
 	"testing"
 
+	"github.com/nats-io/nkeys"
+
 	"github.com/yogzblr/imas/internal/rbac"
 )
 
-// makeValidToken creates a signed, valid token from a fresh keypair.
-// Returns the token string and the public key.
-func makeValidToken(t *testing.T) (string, string) {
+// makeUser returns a fresh user ID (an NKey public key): what the sealed
+// router hands these checks once a request opened under the user's key.
+func makeUser(t *testing.T) string {
 	t.Helper()
-	kp := mustCreateKeyPair(t)
+	kp, err := nkeys.CreateAccount()
+	if err != nil {
+		t.Fatal(err)
+	}
 	pk, err := kp.PublicKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, err := createSignedToken(kp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return token, pk
+	return pk
 }
 
-func TestTokenHasAccessWithValidAdminToken(t *testing.T) {
+func TestUserHasActionAdmin(t *testing.T) {
 	newTestDB(t)
-	token, pk := makeValidToken(t)
+	pk := makeUser(t)
 
 	rs := rbac.NewRoleStore()
 	admin := &rbac.Role{
@@ -39,14 +40,14 @@ func TestTokenHasAccessWithValidAdminToken(t *testing.T) {
 	SetPolicy(rs, urm, nil)
 	defer SetPolicy(nil, nil, nil)
 
-	if !TokenHasAccess(token, "GET") {
+	if !UserHasAction(pk, rbac.ActionView) {
 		t.Error("TokenHasAccess should return true for valid admin token")
 	}
 }
 
-func TestTokenHasAccessWithUnknownPubkey(t *testing.T) {
+func TestUserHasActionUnknownUser(t *testing.T) {
 	newTestDB(t)
-	token, _ := makeValidToken(t)
+	pk := makeUser(t)
 
 	// Set up a policy but don't add the token's pubkey.
 	rs := rbac.NewRoleStore()
@@ -57,14 +58,14 @@ func TestTokenHasAccessWithUnknownPubkey(t *testing.T) {
 	SetPolicy(rs, rbac.NewUserRoleMap(), nil)
 	defer SetPolicy(nil, nil, nil)
 
-	if TokenHasAccess(token, "GET") {
+	if UserHasAction(pk, rbac.ActionView) {
 		t.Error("TokenHasAccess should return false for unknown pubkey")
 	}
 }
 
-func TestTokenHasRouteAccessWithValidToken(t *testing.T) {
+func TestUserHasRouteActionsAdmin(t *testing.T) {
 	newTestDB(t)
-	token, pk := makeValidToken(t)
+	pk := makeUser(t)
 
 	rs := rbac.NewRoleStore()
 	admin := &rbac.Role{
@@ -79,17 +80,17 @@ func TestTokenHasRouteAccessWithValidToken(t *testing.T) {
 	SetPolicy(rs, urm, nil)
 	defer SetPolicy(nil, nil, nil)
 
-	if !TokenHasRouteAccess(token, "Cook") {
+	if !UserHasAction(pk, rbac.RouteAction("Cook")) {
 		t.Error("admin token should have access to Cook route")
 	}
-	if !TokenHasRouteAccess(token, "AcceptID") {
+	if !UserHasAction(pk, rbac.RouteAction("AcceptID")) {
 		t.Error("admin token should have access to AcceptID route")
 	}
 }
 
-func TestTokenHasRouteAccessViewerRestrictions(t *testing.T) {
+func TestUserHasRouteActionsViewer(t *testing.T) {
 	newTestDB(t)
-	token, pk := makeValidToken(t)
+	pk := makeUser(t)
 
 	rs := rbac.NewRoleStore()
 	rs.Register(rbac.BuiltinViewerRole())
@@ -101,19 +102,19 @@ func TestTokenHasRouteAccessViewerRestrictions(t *testing.T) {
 	defer SetPolicy(nil, nil, nil)
 
 	// Viewer can read.
-	if !TokenHasRouteAccess(token, "ListSprouts") {
+	if !UserHasAction(pk, rbac.RouteAction("ListSprouts")) {
 		t.Error("viewer should access ListSprouts")
 	}
 
 	// Viewer cannot cook.
-	if TokenHasRouteAccess(token, "Cook") {
+	if UserHasAction(pk, rbac.RouteAction("Cook")) {
 		t.Error("viewer should not access Cook")
 	}
 }
 
-func TestTokenHasActionWithValidToken(t *testing.T) {
+func TestUserHasActionOperator(t *testing.T) {
 	newTestDB(t)
-	token, pk := makeValidToken(t)
+	pk := makeUser(t)
 
 	rs := rbac.NewRoleStore()
 	operator := &rbac.Role{
@@ -131,20 +132,20 @@ func TestTokenHasActionWithValidToken(t *testing.T) {
 	SetPolicy(rs, urm, nil)
 	defer SetPolicy(nil, nil, nil)
 
-	if !TokenHasAction(token, rbac.ActionCook) {
+	if !UserHasAction(pk, rbac.ActionCook) {
 		t.Error("operator should have cook action")
 	}
-	if !TokenHasAction(token, rbac.ActionView) {
+	if !UserHasAction(pk, rbac.ActionView) {
 		t.Error("operator should have view action")
 	}
-	if TokenHasAction(token, rbac.ActionAdmin) {
+	if UserHasAction(pk, rbac.ActionAdmin) {
 		t.Error("operator should not have admin action")
 	}
 }
 
-func TestTokenHasScopedAccessWithCohort(t *testing.T) {
+func TestUserHasScopedAccessWithCohort(t *testing.T) {
 	newTestDB(t)
-	token, pk := makeValidToken(t)
+	pk := makeUser(t)
 
 	rs := rbac.NewRoleStore()
 	scoped := &rbac.Role{
@@ -172,19 +173,19 @@ func TestTokenHasScopedAccessWithCohort(t *testing.T) {
 	allSprouts := []string{"web-1", "web-2", "web-3", "db-1", "db-2"}
 
 	// Should have access to web sprouts.
-	if !TokenHasScopedAccess(token, rbac.ActionCook, []string{"web-1"}, allSprouts) {
+	if !UserHasScopedAccess(pk, rbac.ActionCook, []string{"web-1"}, allSprouts) {
 		t.Error("web-operator should have access to web-1")
 	}
 
 	// Should NOT have access to db sprouts.
-	if TokenHasScopedAccess(token, rbac.ActionCook, []string{"db-1"}, allSprouts) {
+	if UserHasScopedAccess(pk, rbac.ActionCook, []string{"db-1"}, allSprouts) {
 		t.Error("web-operator should not have access to db-1")
 	}
 }
 
-func TestTokenScopeFilterWithCohort(t *testing.T) {
+func TestUserScopeFilterWithCohort(t *testing.T) {
 	newTestDB(t)
-	token, pk := makeValidToken(t)
+	pk := makeUser(t)
 
 	rs := rbac.NewRoleStore()
 	scoped := &rbac.Role{
@@ -209,7 +210,7 @@ func TestTokenScopeFilterWithCohort(t *testing.T) {
 	defer SetPolicy(nil, nil, nil)
 
 	allSprouts := []string{"web-1", "web-2", "db-1"}
-	filtered := TokenScopeFilter(token, rbac.ActionCook, []string{"web-1", "web-2", "db-1"}, allSprouts)
+	filtered := UserScopeFilter(pk, rbac.ActionCook, []string{"web-1", "web-2", "db-1"}, allSprouts)
 
 	if len(filtered) != 2 {
 		t.Fatalf("expected 2 filtered sprouts, got %d: %v", len(filtered), filtered)
@@ -221,9 +222,9 @@ func TestTokenScopeFilterWithCohort(t *testing.T) {
 	}
 }
 
-func TestTokenScopeFilterWildcard(t *testing.T) {
+func TestUserScopeFilterWildcard(t *testing.T) {
 	newTestDB(t)
-	token, pk := makeValidToken(t)
+	pk := makeUser(t)
 
 	rs := rbac.NewRoleStore()
 	admin := &rbac.Role{
@@ -239,15 +240,15 @@ func TestTokenScopeFilterWildcard(t *testing.T) {
 	defer SetPolicy(nil, nil, nil)
 
 	sprouts := []string{"a", "b", "c"}
-	filtered := TokenScopeFilter(token, rbac.ActionCook, sprouts, sprouts)
+	filtered := UserScopeFilter(pk, rbac.ActionCook, sprouts, sprouts)
 	if len(filtered) != 3 {
 		t.Errorf("admin should see all sprouts, got %d", len(filtered))
 	}
 }
 
-func TestWhoAmIWithValidToken(t *testing.T) {
+func TestUserIdentity(t *testing.T) {
 	newTestDB(t)
-	token, pk := makeValidToken(t)
+	pk := makeUser(t)
 
 	rs := rbac.NewRoleStore()
 	rs.Register(&rbac.Role{
@@ -261,37 +262,28 @@ func TestWhoAmIWithValidToken(t *testing.T) {
 	SetPolicy(rs, urm, nil)
 	defer SetPolicy(nil, nil, nil)
 
-	gotPK, roleName, _, err := WhoAmI(token)
-	if err != nil {
-		t.Fatalf("WhoAmI() error: %v", err)
-	}
-	if gotPK != pk {
-		t.Errorf("WhoAmI() pubkey = %q, want %q", gotPK, pk)
-	}
+	roleName, _ := UserIdentity(pk)
 	if roleName != "admin" {
-		t.Errorf("WhoAmI() role = %q, want 'admin'", roleName)
+		t.Errorf("UserIdentity() role = %q, want 'admin'", roleName)
 	}
 }
 
-func TestWhoAmIUnknownUser(t *testing.T) {
+func TestUserIdentityUnknownUser(t *testing.T) {
 	newTestDB(t)
-	token, _ := makeValidToken(t)
+	pk := makeUser(t)
 
 	SetPolicy(rbac.NewRoleStore(), rbac.NewUserRoleMap(), nil)
 	defer SetPolicy(nil, nil, nil)
 
-	_, roleName, _, err := WhoAmI(token)
-	if err != nil {
-		t.Fatalf("WhoAmI() error: %v", err)
-	}
+	roleName, _ := UserIdentity(pk)
 	if roleName != "" {
-		t.Errorf("WhoAmI() role = %q, want empty for unknown user", roleName)
+		t.Errorf("UserIdentity() role = %q, want empty for unknown user", roleName)
 	}
 }
 
-func TestWhoAmIWithUsername(t *testing.T) {
+func TestUserIdentityWithUsername(t *testing.T) {
 	newTestDB(t)
-	token, pk := makeValidToken(t)
+	pk := makeUser(t)
 
 	rs := rbac.NewRoleStore()
 	rs.Register(&rbac.Role{
@@ -306,15 +298,12 @@ func TestWhoAmIWithUsername(t *testing.T) {
 	SetPolicy(rs, urm, nil)
 	defer SetPolicy(nil, nil, nil)
 
-	_, roleName, username, err := WhoAmI(token)
-	if err != nil {
-		t.Fatalf("WhoAmI() error: %v", err)
-	}
+	roleName, username := UserIdentity(pk)
 	if roleName != "admin" {
-		t.Errorf("WhoAmI() role = %q, want 'admin'", roleName)
+		t.Errorf("UserIdentity() role = %q, want 'admin'", roleName)
 	}
 	if username != "alice" {
-		t.Errorf("WhoAmI() username = %q, want 'alice'", username)
+		t.Errorf("UserIdentity() username = %q, want 'alice'", username)
 	}
 }
 

@@ -52,6 +52,7 @@ func TestSproutSubject(t *testing.T) {
 
 func TestAllMethodsMatchRoutes(t *testing.T) {
 	methods := AllMethods()
+	routes := apiRoutes()
 	if len(methods) != len(routes) {
 		t.Errorf("AllMethods() has %d entries, routes map has %d", len(methods), len(routes))
 	}
@@ -95,10 +96,10 @@ func TestSubjectPrefixFormat(t *testing.T) {
 	}
 }
 
-func TestCookTriggerPrefix(t *testing.T) {
+func TestCookTriggerSubject(t *testing.T) {
 	jid := "20260326-abc123"
-	got := SproutCookTriggerPrefix + jid
-	want := "imas.farmer.cook.trigger.20260326-abc123"
+	got := Subject(CookTriggerMethod(jid))
+	want := "imas.api.cook.trigger.20260326-abc123"
 	if got != want {
 		t.Errorf("cook trigger = %q, want %q", got, want)
 	}

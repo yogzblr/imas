@@ -136,7 +136,7 @@ func TestAddUser_Success(t *testing.T) {
 	}
 	mockHandler(t, NatsConn, "imas.api.auth.users.add", want)
 
-	got, err := AddUser("NKEY_NEW", "operator")
+	got, err := AddUser("NKEY_NEW", "operator", "", "AAAA")
 	if err != nil {
 		t.Fatalf("AddUser: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestAddUser_Error(t *testing.T) {
 
 	mockErrorHandler(t, NatsConn, "imas.api.auth.users.add", "role not found")
 
-	_, err := AddUser("NKEY_NEW", "nonexistent-role")
+	_, err := AddUser("NKEY_NEW", "nonexistent-role", "", "AAAA")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -166,7 +166,7 @@ func TestAddUser_BadJSON(t *testing.T) {
 
 	mockBadJSONHandler(t, NatsConn, "imas.api.auth.users.add")
 
-	_, err := AddUser("NKEY_NEW", "admin")
+	_, err := AddUser("NKEY_NEW", "admin", "", "AAAA")
 	if err == nil {
 		t.Fatal("expected unmarshal error")
 	}

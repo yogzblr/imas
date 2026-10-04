@@ -2,16 +2,19 @@ package natsapi
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 
+	"github.com/yogzblr/imas/internal/api/client"
 	apitypes "github.com/yogzblr/imas/internal/api/types"
 	"github.com/yogzblr/imas/internal/audit"
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/rbac"
 	"github.com/yogzblr/imas/internal/shell"
@@ -86,6 +89,19 @@ func TestSubscribeRegistersAllRoutes(t *testing.T) {
 	}
 }
 
+// sealedCaller registers a CLI user in tenantID and returns the CLI's
+// sealed request function on nc, for tests that go through Subscribe.
+// Call it after setupNatsAPIPKI, which swaps the database the user's key
+// is stored in.
+func sealedCaller(t *testing.T, nc *nats.Conn, tenantID string) func(method string, params any) (json.RawMessage, error) {
+	t.Helper()
+	setupSealedEnv(t)
+	newSealedCLIUserIn(t, tenantID)
+	return func(method string, params any) (json.RawMessage, error) {
+		return client.SealedRequest(nc, payloadbox.PurposeCLIRequest, method, params, 5*time.Second)
+	}
+}
+
 func TestSubscribeTestPingRoute(t *testing.T) {
 	nc, cleanup := startEmbeddedNATS(t)
 	defer cleanup()
@@ -94,6 +110,7 @@ func TestSubscribeTestPingRoute(t *testing.T) {
 	defer ClearNatsConn(tenantID)
 
 	setupNatsAPIPKI(t)
+	call := sealedCaller(t, nc, tenantID)
 	jetyCleanup := setupJetyDangerouslyAllowRoot(t, true)
 	defer jetyCleanup()
 
@@ -101,21 +118,14 @@ func TestSubscribeTestPingRoute(t *testing.T) {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
-	// test.ping with empty targets — should succeed.
-	params, _ := json.Marshal(apitypes.TargetedAction{
+	// test.ping with empty targets — should succeed (dangerously_allow_root
+	// skips the scope check that would refuse an empty target list).
+	params := apitypes.TargetedAction{
 		Target: []pki.KeyManager{},
 		Action: apitypes.PingPong{Ping: true},
-	})
-
-	msg, err := nc.Request("imas.api.test.ping", params, 2*time.Second)
-	if err != nil {
-		t.Fatalf("request to imas.api.test.ping: %v", err)
 	}
-
-	var resp response
-	json.Unmarshal(msg.Data, &resp)
-	if resp.Error != "" {
-		t.Fatalf("unexpected error: %s", resp.Error)
+	if _, err := call("test.ping", params); err != nil {
+		t.Fatalf("test.ping: %v", err)
 	}
 }
 
@@ -128,23 +138,14 @@ func TestSubscribeJobsListRoute(t *testing.T) {
 
 	_, jobCleanup := setupJobStore(t)
 	defer jobCleanup()
-
-	jetyCleanup := setupJetyDangerouslyAllowRoot(t, true)
-	defer jetyCleanup()
+	call := sealedCaller(t, nc, tenantID)
 
 	if err := Subscribe(nc, tenantID); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
-	msg, err := nc.Request("imas.api.jobs.list", nil, 2*time.Second)
-	if err != nil {
-		t.Fatalf("request to imas.api.jobs.list: %v", err)
-	}
-
-	var resp response
-	json.Unmarshal(msg.Data, &resp)
-	if resp.Error != "" {
-		t.Fatalf("unexpected error: %s", resp.Error)
+	if _, err := call("jobs.list", nil); err != nil {
+		t.Fatalf("jobs.list: %v", err)
 	}
 }
 
@@ -154,48 +155,24 @@ func TestSubscribePropsSetGetRoute(t *testing.T) {
 
 	tenantID := pki.CurrentTenantID()
 	defer ClearNatsConn(tenantID)
-
-	jetyCleanup := setupJetyDangerouslyAllowRoot(t, true)
-	defer jetyCleanup()
+	call := sealedCaller(t, nc, tenantID)
 
 	if err := Subscribe(nc, tenantID); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
 	// Set a prop via NATS.
-	setParams, _ := json.Marshal(PropsParams{
-		SproutID: "integration-sprout",
-		Name:     "env",
-		Value:    "testing",
-	})
-	msg, err := nc.Request("imas.api.props.set", setParams, 2*time.Second)
-	if err != nil {
-		t.Fatalf("props.set request: %v", err)
-	}
-	var setResp response
-	json.Unmarshal(msg.Data, &setResp)
-	if setResp.Error != "" {
-		t.Fatalf("props.set error: %s", setResp.Error)
+	if _, err := call("props.set", PropsParams{SproutID: "integration-sprout", Name: "env", Value: "testing"}); err != nil {
+		t.Fatalf("props.set: %v", err)
 	}
 
 	// Get it back.
-	getParams, _ := json.Marshal(PropsParams{
-		SproutID: "integration-sprout",
-		Name:     "env",
-	})
-	msg, err = nc.Request("imas.api.props.get", getParams, 2*time.Second)
+	res, err := call("props.get", PropsParams{SproutID: "integration-sprout", Name: "env"})
 	if err != nil {
-		t.Fatalf("props.get request: %v", err)
+		t.Fatalf("props.get: %v", err)
 	}
-	var getResp response
-	json.Unmarshal(msg.Data, &getResp)
-	if getResp.Error != "" {
-		t.Fatalf("props.get error: %s", getResp.Error)
-	}
-
-	b, _ := json.Marshal(getResp.Result)
 	var m map[string]string
-	json.Unmarshal(b, &m)
+	json.Unmarshal(res, &m)
 	if m["value"] != "testing" {
 		t.Errorf("value = %q, want %q", m["value"], "testing")
 	}
@@ -210,24 +187,15 @@ func TestSubscribeHandlerError(t *testing.T) {
 
 	_, jobCleanup := setupJobStore(t)
 	defer jobCleanup()
-
-	jetyCleanup := setupJetyDangerouslyAllowRoot(t, true)
-	defer jetyCleanup()
+	call := sealedCaller(t, nc, tenantID)
 
 	if err := Subscribe(nc, tenantID); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
-	// Request a nonexistent job — should return error in response envelope.
-	params, _ := json.Marshal(JobsGetParams{JID: "nonexistent-jid"})
-	msg, err := nc.Request("imas.api.jobs.get", params, 2*time.Second)
-	if err != nil {
-		t.Fatalf("request: %v", err)
-	}
-
-	var resp response
-	json.Unmarshal(msg.Data, &resp)
-	if resp.Error == "" {
+	// Request a nonexistent job: the handler's error comes back inside the
+	// sealed reply.
+	if _, err := call("jobs.get", JobsGetParams{JID: "nonexistent-jid"}); err == nil {
 		t.Fatal("expected error in response for nonexistent job")
 	}
 }
@@ -319,7 +287,7 @@ func TestHandleCookSuccessWithNATS(t *testing.T) {
 		"action": map[string]string{"recipe": "test.recipe"},
 	})
 
-	result, err := handleCook(tenantID, params)
+	result, err := handleCook(apiCaller{TenantID: tenantID}, params)
 	if err != nil {
 		t.Fatalf("handleCook: %v", err)
 	}
@@ -337,7 +305,9 @@ func TestHandleCookSuccessWithNATS(t *testing.T) {
 	}
 }
 
-func TestHandleCookWithTokenInvoker(t *testing.T) {
+// The job's invoker is the verified caller; a "token" or invoker in the
+// params is ignored.
+func TestHandleCookInvokerIsTheCaller(t *testing.T) {
 	nc, cleanup := startEmbeddedNATS(t)
 	defer cleanup()
 
@@ -348,18 +318,14 @@ func TestHandleCookWithTokenInvoker(t *testing.T) {
 	SetNatsConn(tenantID, nc)
 	defer ClearNatsConn(tenantID)
 
-	token, authCleanup := setupAuthWithToken(t, "operator", []rbac.Rule{
-		{Action: rbac.ActionCook, Scope: "*"},
-	})
-	defer authCleanup()
-
 	params, _ := json.Marshal(map[string]interface{}{
-		"token":  token,
-		"target": []map[string]string{{"id": "sprout-cook-tk"}},
-		"action": map[string]string{"recipe": "deploy.recipe"},
+		"token":   "USOMEONEELSE",
+		"invoker": "USOMEONEELSE",
+		"target":  []map[string]string{{"id": "sprout-cook-tk"}},
+		"action":  map[string]string{"recipe": "deploy.recipe"},
 	})
 
-	result, err := handleCook(tenantID, params)
+	result, err := handleCook(apiCaller{TenantID: tenantID, UserID: "UOPERATOR"}, params)
 	if err != nil {
 		t.Fatalf("handleCook: %v", err)
 	}
@@ -393,7 +359,7 @@ func TestHandleCookMultipleTargets(t *testing.T) {
 		"action": map[string]string{"recipe": "multi.recipe"},
 	})
 
-	result, err := handleCook(tenantID, params)
+	result, err := handleCook(apiCaller{TenantID: tenantID}, params)
 	if err != nil {
 		t.Fatalf("handleCook: %v", err)
 	}
@@ -423,7 +389,7 @@ func TestHandleCookTestMode(t *testing.T) {
 		"action": map[string]interface{}{"recipe": "dry-run.recipe", "test": true},
 	})
 
-	result, err := handleCook(tenantID, params)
+	result, err := handleCook(apiCaller{TenantID: tenantID}, params)
 	if err != nil {
 		t.Fatalf("handleCook: %v", err)
 	}
@@ -449,7 +415,7 @@ func TestHandleCookUnregisteredSprout(t *testing.T) {
 		"action": map[string]string{"recipe": "test.recipe"},
 	})
 
-	_, err := handleCook(tenantID, params)
+	_, err := handleCook(apiCaller{TenantID: tenantID}, params)
 	if err == nil {
 		t.Fatal("expected error for unregistered sprout")
 	}
@@ -463,7 +429,7 @@ func TestHandleCookInvalidJSONWithNATS(t *testing.T) {
 	SetNatsConn(tenantID, nc)
 	defer ClearNatsConn(tenantID)
 
-	_, err := handleCook(tenantID, json.RawMessage(`{invalid`))
+	_, err := handleCook(apiCaller{TenantID: tenantID}, json.RawMessage(`{invalid`))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
@@ -507,7 +473,7 @@ func TestHandleShellStartSuccess(t *testing.T) {
 		Rows:     24,
 	})
 
-	result, err := handleShellStart(tenantID, params)
+	result, err := handleShellStart(apiCaller{TenantID: tenantID}, params)
 	if err != nil {
 		t.Fatalf("handleShellStart: %v", err)
 	}
@@ -568,7 +534,7 @@ func TestHandleShellStartSproutError(t *testing.T) {
 		Rows:     24,
 	})
 
-	_, err := handleShellStart(tenantID, params)
+	_, err := handleShellStart(apiCaller{TenantID: tenantID}, params)
 	if err == nil {
 		t.Fatal("expected error when sprout returns error")
 	}
@@ -588,7 +554,7 @@ func TestHandleShellStartEmptySproutID(t *testing.T) {
 		Rows:     24,
 	})
 
-	_, err := handleShellStart(tenantID, params)
+	_, err := handleShellStart(apiCaller{TenantID: tenantID}, params)
 	if err == nil {
 		t.Fatal("expected error for empty sprout_id")
 	}
@@ -602,7 +568,7 @@ func TestHandleShellStartInvalidJSONWithNATS(t *testing.T) {
 	SetNatsConn(tenantID, nc)
 	defer ClearNatsConn(tenantID)
 
-	_, err := handleShellStart(tenantID, json.RawMessage(`{invalid`))
+	_, err := handleShellStart(apiCaller{TenantID: tenantID}, json.RawMessage(`{invalid`))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
@@ -629,7 +595,7 @@ func TestHandleShellStartTimeout(t *testing.T) {
 		Rows:     24,
 	})
 
-	_, err := handleShellStart(tenantID, params)
+	_, err := handleShellStart(apiCaller{TenantID: tenantID}, params)
 	if err == nil {
 		t.Fatal("expected error for sprout timeout")
 	}
@@ -753,7 +719,7 @@ func TestHandleSproutsListWithConnectedSprout(t *testing.T) {
 	jetyCleanup := setupJetyDangerouslyAllowRoot(t, true)
 	defer jetyCleanup()
 
-	result, err := handleSproutsList(tenantID, nil)
+	result, err := handleSproutsList(apiCaller{TenantID: tenantID}, nil)
 	if err != nil {
 		t.Fatalf("handleSproutsList: %v", err)
 	}
@@ -833,7 +799,7 @@ func TestHandleJobsCancelWithNATS(t *testing.T) {
 	nc.Flush()
 
 	params, _ := json.Marshal(JobsGetParams{JID: "jid-cancel-int"})
-	result, err := handleJobsCancel(tenantID, params)
+	result, err := handleJobsCancel(apiCaller{TenantID: tenantID}, params)
 	if err != nil {
 		t.Fatalf("handleJobsCancel: %v", err)
 	}
@@ -868,11 +834,11 @@ func TestHandleCookTriggerAndSendEvents(t *testing.T) {
 	SetNatsConn(tenantID, nc)
 	defer ClearNatsConn(tenantID)
 
-	jetyCleanup := setupJetyDangerouslyAllowRoot(t, true)
-	defer jetyCleanup()
+	setupSealedEnv(t)
+	creator := newSealedCLIUserIn(t, tenantID)
 
 	params := json.RawMessage(`{"target":[{"id":"sprout-cook-trigger"}],"action":{"recipe":"deploy.app"}}`)
-	result, err := handleCook(tenantID, params)
+	result, err := handleCook(apiCaller{TenantID: tenantID, UserID: creator.id}, params)
 	if err != nil {
 		t.Fatalf("handleCook: %v", err)
 	}
@@ -883,17 +849,26 @@ func TestHandleCookTriggerAndSendEvents(t *testing.T) {
 	}
 	json.Unmarshal(b, &cmd)
 
-	// Simulate the trigger message arriving (normally from the farmer's cook subsystem).
-	triggerSubject := "imas.farmer.cook.trigger." + cmd.JID
-	msg, err := nc.Request(triggerSubject, nil, 5*time.Second)
+	// A plaintext trigger, as the CLI sent before J.3, is refused.
+	plain, err := nc.Request(Subject(CookTriggerMethod(cmd.JID)), []byte(`{"jid":"`+cmd.JID+`"}`), 5*time.Second)
 	if err != nil {
-		t.Fatalf("trigger request: %v", err)
+		t.Fatalf("plaintext trigger: %v", err)
+	}
+	if plain.Header.Get(payloadbox.ErrorHeader) != payloadbox.ErrorCodeEncryptionRequired {
+		t.Fatalf("plaintext trigger answered %v %q", plain.Header, plain.Data)
 	}
 
-	// The goroutine should respond with the sprout IDs.
-	var sproutIDs []string
-	if err := json.Unmarshal(msg.Data, &sproutIDs); err != nil {
-		t.Fatalf("unmarshal trigger response: %v", err)
+	// Another registered user may not fire someone else's job.
+	newSealedCLIUserIn(t, tenantID)
+	if _, err := client.TriggerCook(nc, cmd.JID); err == nil || !strings.Contains(err.Error(), rbac.ErrAccessDenied.Error()) {
+		t.Fatalf("another user's trigger: %v, want access denied", err)
+	}
+
+	// The creator's sealed trigger answers with the sprout IDs.
+	creator.use(t)
+	sproutIDs, err := client.TriggerCook(nc, cmd.JID)
+	if err != nil {
+		t.Fatalf("trigger: %v", err)
 	}
 	if len(sproutIDs) != 1 || sproutIDs[0] != "sprout-cook-trigger" {
 		t.Errorf("trigger response = %v, want [sprout-cook-trigger]", sproutIDs)
@@ -929,7 +904,7 @@ func TestSubscribeSessionDoneUntrackedSession(t *testing.T) {
 func TestHandleShellStartSproutIDWithUnderscoreIntegration(t *testing.T) {
 	setupNatsAPIPKI(t)
 
-	_, err := handleShellStart(pki.CurrentTenantID(), json.RawMessage(`{"sprout_id":"sprout_bad","cols":80,"rows":24}`))
+	_, err := handleShellStart(apiCaller{TenantID: pki.CurrentTenantID()}, json.RawMessage(`{"sprout_id":"sprout_bad","cols":80,"rows":24}`))
 	if err == nil {
 		t.Fatal("expected error for sprout ID with underscore")
 	}

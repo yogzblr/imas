@@ -12,15 +12,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/glebarez/sqlite"
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-server/v2/server"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 	"github.com/taigrr/jety"
+	"github.com/valkey-io/valkey-go"
 	"golang.org/x/crypto/nacl/box"
 	"gorm.io/gorm"
 
+	"github.com/yogzblr/imas/internal/api/client"
+	intauth "github.com/yogzblr/imas/internal/auth"
 	"github.com/yogzblr/imas/internal/config"
 	log "github.com/yogzblr/imas/internal/log"
 	"github.com/yogzblr/imas/internal/natsapi"
@@ -117,7 +121,7 @@ func setupBoxKeyEnv(t *testing.T) *boxKeyEnv {
 		t.Fatal(err)
 	}
 
-	// The admin call below has no token.
+	// The admin call below is sealed by a user with no role.
 	jety.Set("dangerously_allow_root", true)
 	t.Cleanup(func() { jety.Set("dangerously_allow_root", false) })
 
@@ -249,17 +253,17 @@ func TestBoxKeyRotation_RoundTrip(t *testing.T) {
 	log.SetOutput(&logged)
 	t.Cleanup(func() { log.SetOutput(nil) })
 
+	// The admin's call is a sealed CLI request (J.3): farmer refuses a
+	// plaintext one.
 	admin := e.connect(t)
-	resp, err := admin.Request(natsapi.Subject(natsapi.MethodPKIRotateBoxKey), []byte(`{"id":"web-01"}`), 5*time.Second)
+	sealedCLIAdmin(t, e.tenant)
+	res, err := client.SealedRequest(admin, payloadbox.PurposeCLIRequest, natsapi.MethodPKIRotateBoxKey, map[string]string{"id": "web-01"}, 5*time.Second)
 	if err != nil {
 		t.Fatalf("pki.rotatebox: %v", err)
 	}
-	var result struct {
-		Result map[string]bool `json:"result"`
-		Error  string          `json:"error"`
-	}
-	if err := json.Unmarshal(resp.Data, &result); err != nil || !result.Result["success"] {
-		t.Fatalf("pki.rotatebox response %s (%v)", resp.Data, err)
+	var result map[string]bool
+	if err := json.Unmarshal(res, &result); err != nil || !result["success"] {
+		t.Fatalf("pki.rotatebox response %s (%v)", res, err)
 	}
 
 	newPub := e.waitForActive(t, oldPub)
@@ -283,6 +287,43 @@ func TestBoxKeyRotation_RoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(logged.String(), "submitted a new payload-encryption key") {
 		t.Error("control: the rotation's log line wasn't captured")
+	}
+}
+
+// sealedCLIAdmin registers a CLI user with a box key in tenantID (the
+// users tenant here) and configures this process's CLI as them, with a
+// Valkey stand-in for farmer's claim on mutating requests. RBAC is
+// dangerously_allow_root's (setupBoxKeyEnv).
+func sealedCLIAdmin(t *testing.T, tenantID string) {
+	t.Helper()
+	mr := miniredis.RunT(t)
+	vk, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{mr.Addr()}, DisableCache: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(vk.Close)
+	pki.SetReplayCacheClient(vk)
+	t.Cleanup(func() { pki.SetReplayCacheClient(nil) })
+
+	kp, _ := nkeys.CreateAccount()
+	seed, _ := kp.Seed()
+	id, _ := kp.PublicKey()
+	keyFile := filepath.Join(t.TempDir(), "cli-box.key")
+	pub, err := pki.GenerateCLIBoxKey(keyFile, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := intauth.AddUser(id, "admin", "", pub); err != nil {
+		t.Fatal(err)
+	}
+	tenantPub, err := pki.GetTenantX25519PublicKey(tenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range map[string]string{"privkey": string(seed), pki.CLIBoxPrivFileKey: keyFile, pki.CLITenantBoxPubKey: tenantPub, pki.CLITenantIDKey: tenantID} {
+		jety.Set(k, v)
+		k := k
+		t.Cleanup(func() { jety.Set(k, "") })
 	}
 }
 

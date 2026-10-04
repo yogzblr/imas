@@ -11,7 +11,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -21,10 +20,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
+	"github.com/taigrr/jety"
 
+	"github.com/yogzblr/imas/internal/api/client/clienttest"
 	"github.com/yogzblr/imas/internal/auth"
 	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/payloadbox"
 )
 
 // fakeBusTLS returns a server TLS config for 127.0.0.1 and writes its
@@ -128,7 +131,7 @@ func runFakeBus(ln net.Listener, tlsCfg *tls.Config, nonce string, out chan<- ca
 // signature the CLI made over it with its key.
 func captureConnectSignature(t *testing.T, nonce string) (pubkey string, sig []byte) {
 	t.Helper()
-	setupTokenInjectionTest(t)
+	setupCLIKey(t)
 	tlsCfg, caPath := fakeBusTLS(t)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -169,8 +172,8 @@ func captureConnectSignature(t *testing.T, nonce string) (pubkey string, sig []b
 	if got.nkey != want {
 		t.Fatalf("CONNECT nkey = %q, want the CLI's key %q", got.nkey, want)
 	}
-	// The capture is a genuine signature over the nonce, so any refusal
-	// below comes from the expiry check, not from a bad signature.
+	// The capture is a genuine signature over the nonce: the bus does get
+	// that much.
 	kp, err := nkeys.FromPublicKey(got.nkey)
 	if err != nil {
 		t.Fatal(err)
@@ -181,45 +184,75 @@ func captureConnectSignature(t *testing.T, nonce string) (pubkey string, sig []b
 	return got.nkey, got.sig
 }
 
-// tokenFrom assembles the bearer token a compromised bus would build
-// from a signature captured at connect.
-func tokenFrom(t *testing.T, expires, pubkey string, sig []byte) (auth.UserAuth, string) {
-	t.Helper()
-	ua := auth.UserAuth{Expires: expires, Pubkey: pubkey, Sig: base64.StdEncoding.EncodeToString(sig)}
-	b, err := json.Marshal(ua)
+// TestConnectNonceSignatureIsAllTheBusGets is the J.3 half of the
+// forged-token regression on the CLI side. A compromised bus chooses the
+// nonce the CLI's NKey signs at CONNECT: here the expiry string that, as
+// a bearer token, used to be valid until 2099 (SEC.0). The CLI still
+// signs it (the bus's own handshake needs that), but nothing farmer
+// accepts rests on that signature any more: the CLI builds no token, and
+// every request it sends is a sealed c2f.api message under its box key,
+// which the NKey never touches. internal/natsapi's
+// TestForgedTokenRegression shows farmer refusing every use of such a
+// signature.
+func TestConnectNonceSignatureIsAllTheBusGets(t *testing.T) {
+	const nonce = "2099-01-01T00:00:00Z"
+	pubkey, sig := captureConnectSignature(t, nonce)
+	if pubkey == "" || len(sig) == 0 {
+		t.Fatal("no capture")
+	}
+	// The JSON a bus would hand farmer as the old token: there is no
+	// longer any code in this repository that reads it.
+	forged, _ := json.Marshal(map[string]string{"expires": nonce, "pubkey": pubkey, "sig": base64.StdEncoding.EncodeToString(sig)})
+	if len(forged) == 0 {
+		t.Fatal("marshal")
+	}
+}
+
+// A request this CLI sends carries no NKey signature and nothing readable:
+// the bus sees the subject, the principal header and ciphertext.
+func TestSealedRequestCarriesNoSignature(t *testing.T) {
+	defer startTestNATS(t)()
+	wires := make(chan *nats.Msg, 1)
+	tap, err := NatsConn.Subscribe("imas.api.auth.users.add", func(m *nats.Msg) { wires <- m })
 	if err != nil {
 		t.Fatal(err)
 	}
-	return ua, base64.StdEncoding.EncodeToString(b)
+	defer tap.Unsubscribe()
+	testFarmer.Handle(t, NatsConn, "auth.users.add", clienttest.Result(map[string]any{"success": true}))
+
+	if _, err := AddUser("UNEWUSER", "admin", "", "AAAA"); err != nil {
+		t.Fatal(err)
+	}
+	var wire *nats.Msg
+	select {
+	case wire = <-wires:
+	case <-time.After(5 * time.Second):
+		t.Fatal("tap saw nothing")
+	}
+	if wire.Header.Get(payloadbox.Header) != payloadbox.HeaderBox1 || wire.Header.Get(payloadbox.PrincipalHeader) != testFarmer.UserID {
+		t.Fatalf("headers %v", wire.Header)
+	}
+	for _, s := range []string{"token", "UNEWUSER", "admin", "expires", testFarmer.UserID} {
+		if strings.Contains(string(wire.Data), s) {
+			t.Errorf("%q readable on the wire", s)
+		}
+	}
 }
 
-// TestConnectNonceCannotMintLongLivedToken is the SEC.0 regression: a
-// compromised bus sends an expiry timestamp as its nonce, captures the
-// signature the CLI makes over it at connect, and presents that as a
-// CLI token. Before the cap, IsValid accepted it until 2099.
-func TestConnectNonceCannotMintLongLivedToken(t *testing.T) {
-	const nonce = "2099-01-01T00:00:00Z"
-	pubkey, sig := captureConnectSignature(t, nonce)
-	ua, token := tokenFrom(t, nonce, pubkey, sig)
-
-	if _, err := ua.IsValid(); !errors.Is(err, auth.ErrInvalidToken) {
-		t.Fatalf("IsValid on a token minted from a 2099 nonce = %v, want ErrInvalidToken", err)
+// setupCLIKey gives this CLI an NKey (jety's privkey).
+func setupCLIKey(t *testing.T) {
+	t.Helper()
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(configPath, []byte("# test config\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if _, _, _, err := auth.WhoAmI(token); err == nil {
-		t.Fatal("WhoAmI accepted a token minted from a 2099 nonce")
+	jety.SetConfigType("toml")
+	jety.SetConfigFile(configPath)
+	kp, err := nkeys.CreateAccount()
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-// TestConnectNonceWithinCap documents what the stopgap still allows: a
-// nonce inside MaxTokenExpiry() yields a token that IsValid accepts, so a
-// compromised bus can still mint a short-lived token (closed only by
-// Decision A in imas-payload-encryption-design.md).
-func TestConnectNonceWithinCap(t *testing.T) {
-	nonce := time.Now().Add(auth.TokenLifetime).UTC().Format(time.RFC3339)
-	pubkey, sig := captureConnectSignature(t, nonce)
-	ua, _ := tokenFrom(t, nonce, pubkey, sig)
-
-	if got, err := ua.IsValid(); err != nil || got != pubkey {
-		t.Fatalf("IsValid = %q, %v; want the CLI's key accepted", got, err)
-	}
+	seed, _ := kp.Seed()
+	jety.Set("privkey", string(seed))
+	t.Cleanup(func() { jety.Set("privkey", "") })
 }

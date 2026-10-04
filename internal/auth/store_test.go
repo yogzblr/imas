@@ -12,6 +12,7 @@ import (
 	"github.com/taigrr/jety"
 	"golang.org/x/crypto/nacl/box"
 
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/rbac"
 )
 
@@ -64,7 +65,7 @@ func TestAddedUserSurvivesAnotherReplicasStart(t *testing.T) {
 	firstAdmin := newUserID(t)
 	adminPolicyConfig(t, firstAdmin)
 	added := newUserID(t)
-	if err := AddUser(added, "admin"); err != nil {
+	if err := AddUser(added, "admin", "", newBoxPub(t)); err != nil {
 		t.Fatalf("AddUser: %v", err)
 	}
 	if after, _ := os.ReadFile(cfgPath); string(after) != string(before) {
@@ -99,14 +100,14 @@ func TestAddUserRefusesConfigAndRegisteredUsers(t *testing.T) {
 	defer SetPolicy(nil, nil, nil)
 	firstAdmin := newUserID(t)
 	adminPolicyConfig(t, firstAdmin)
-	if err := AddUser(firstAdmin, "admin"); !errors.Is(err, ErrUserExists) {
+	if err := AddUser(firstAdmin, "admin", "", newBoxPub(t)); !errors.Is(err, ErrUserExists) {
 		t.Errorf("adding a config user: %v, want ErrUserExists", err)
 	}
 	u := newUserID(t)
-	if err := AddUser(u, "admin"); err != nil {
+	if err := AddUser(u, "admin", "", newBoxPub(t)); err != nil {
 		t.Fatal(err)
 	}
-	if err := AddUser(u, "admin"); !errors.Is(err, ErrUserExists) {
+	if err := AddUser(u, "admin", "", newBoxPub(t)); !errors.Is(err, ErrUserExists) {
 		t.Errorf("adding twice: %v, want ErrUserExists", err)
 	}
 }
@@ -117,7 +118,7 @@ func TestAddUserWithoutStoreFails(t *testing.T) {
 	defer SetPolicy(nil, nil, nil)
 	adminPolicyConfig(t)
 	SetDB(nil)
-	if err := AddUser(newUserID(t), "admin"); !errors.Is(err, ErrStoreNotConfigured) {
+	if err := AddUser(newUserID(t), "admin", "", newBoxPub(t)); !errors.Is(err, ErrStoreNotConfigured) {
 		t.Fatalf("AddUser without a store: %v, want ErrStoreNotConfigured", err)
 	}
 }
@@ -156,7 +157,7 @@ func TestRegisterCLIBoxKey(t *testing.T) {
 	}
 	// The same key for anyone else, in any tenant, is refused.
 	other := newUserID(t)
-	if err := AddUser(other, "admin"); err != nil {
+	if err := AddUser(other, "admin", "", newBoxPub(t)); err != nil {
 		t.Fatal(err)
 	}
 	if err := RegisterCLIBoxKey("t_a", other, k1); !errors.Is(err, ErrCLIBoxKeyInUse) {
@@ -277,7 +278,7 @@ func TestCLIBoxKeyGraceExpires(t *testing.T) {
 func TestRemoveUserRetiresCLIBoxKeys(t *testing.T) {
 	setupKeyStore(t)
 	u := newUserID(t)
-	if err := AddUser(u, "admin"); err != nil {
+	if err := AddUser(u, "admin", "", newBoxPub(t)); err != nil {
 		t.Fatal(err)
 	}
 	ka, kb := newBoxPub(t), newBoxPub(t)
@@ -330,5 +331,83 @@ func TestStoreNotConfigured(t *testing.T) {
 	}
 	if _, _, err := ValidCLIBoxKeys("t_a", "U"); !errors.Is(err, ErrStoreNotConfigured) {
 		t.Errorf("valid: %v", err)
+	}
+	if err := ResetUserCLIBoxKey("U", newBoxPub(t)); !errors.Is(err, ErrStoreNotConfigured) {
+		t.Errorf("reset: %v", err)
+	}
+	if _, err := UserCLIBoxKeyFingerprints(); !errors.Is(err, ErrStoreNotConfigured) {
+		t.Errorf("fingerprints: %v", err)
+	}
+}
+
+// A user added through the API comes with their CLI box key, registered
+// in the same transaction; without one (or with a bad or claimed one) the
+// user isn't added at all.
+func TestAddUserRegistersTheBoxKey(t *testing.T) {
+	setupKeyStore(t)
+	u, pub := newUserID(t), newBoxPub(t)
+	if err := AddUser(u, "admin", "bob", pub); err != nil {
+		t.Fatal(err)
+	}
+	if active, _, err := ValidCLIBoxKeys(usersTenantID(), u); err != nil || active != pub {
+		t.Fatalf("active key %q, %v; want the key AddUser was given", active, err)
+	}
+	if role, name := UserIdentity(u); role != "admin" || name != "bob" {
+		t.Errorf("UserIdentity = %q, %q", role, name)
+	}
+	fps, err := UserCLIBoxKeyFingerprints()
+	if err != nil || fps[u] == "" || fps[u] != boxFingerprintOf(t, pub) {
+		t.Errorf("fingerprints %v, %v", fps, err)
+	}
+
+	for name, bp := range map[string]string{"none": "", "malformed": "x", "weak": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "in use": pub} {
+		v := newUserID(t)
+		if err := AddUser(v, "admin", "", bp); err == nil {
+			t.Errorf("%s box key: user added", name)
+		}
+		if _, _, found, _ := RegisteredUser(usersTenantID(), v); found {
+			t.Errorf("%s box key: user row left behind", name)
+		}
+	}
+	SetBoxKeyClaimCheck(func(string, string) error { return errors.New("a sprout holds it") })
+	t.Cleanup(func() { SetBoxKeyClaimCheck(nil) })
+	if err := AddUser(newUserID(t), "admin", "", newBoxPub(t)); err == nil {
+		t.Error("a key another principal holds was registered")
+	}
+}
+
+func boxFingerprintOf(t *testing.T, pub string) string {
+	t.Helper()
+	k, err := DecodeCLIBoxPub(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payloadbox.Fingerprint(k)
+}
+
+// An admin's reset retires every key the user holds and makes the new one
+// the only active key; a retired key never comes back, and an unknown user
+// gets nothing.
+func TestResetUserCLIBoxKey(t *testing.T) {
+	admin := setupKeyStore(t)
+	first, second := newBoxPub(t), newBoxPub(t)
+	if err := RegisterCLIBoxKey(usersTenantID(), admin, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetUserCLIBoxKey(admin, second); err != nil {
+		t.Fatal(err)
+	}
+	active, grace, err := ValidCLIBoxKeys(usersTenantID(), admin)
+	if err != nil || active != second || len(grace) != 0 {
+		t.Fatalf("after reset: %q %v %v", active, grace, err)
+	}
+	if err := ResetUserCLIBoxKey(admin, first); !errors.Is(err, ErrCLIBoxKeyInUse) {
+		t.Errorf("resetting back to a retired key: %v, want ErrCLIBoxKeyInUse", err)
+	}
+	if err := ResetUserCLIBoxKey(newUserID(t), newBoxPub(t)); !errors.Is(err, ErrUnknownUser) {
+		t.Errorf("reset for an unknown user: %v, want ErrUnknownUser", err)
+	}
+	if err := ResetUserCLIBoxKey(admin, "x"); err == nil {
+		t.Error("reset to a malformed key")
 	}
 }

@@ -7,11 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nkeys"
-
 	"github.com/taigrr/jety"
 	"github.com/yogzblr/imas/internal/audit"
-	intauth "github.com/yogzblr/imas/internal/auth"
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/jobs"
 	"github.com/yogzblr/imas/internal/pki"
@@ -41,149 +38,9 @@ func setupJetyDangerouslyAllowRoot(t *testing.T, enable bool) func() {
 	}
 }
 
-// --- authMiddleware with dangerouslyAllowRoot ---
-
-func TestAuthMiddleware_DangerouslyAllowRoot(t *testing.T) {
-	cleanup := setupJetyDangerouslyAllowRoot(t, true)
-	defer cleanup()
-
-	called := false
-	inner := func(tenantID string, params json.RawMessage) (any, error) {
-		called = true
-		return "bypass-ok", nil
-	}
-
-	// Non-public method should bypass auth with dangerouslyAllowRoot.
-	wrapped := authMiddleware("cook", inner)
-	result, err := wrapped(pki.CurrentTenantID(), nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !called {
-		t.Fatal("inner handler was not called with dangerouslyAllowRoot")
-	}
-	if result != "bypass-ok" {
-		t.Fatalf("unexpected result: %v", result)
-	}
-}
-
-func TestAuthMiddleware_DangerouslyAllowRootWithScopeExtractor(t *testing.T) {
-	cleanup := setupJetyDangerouslyAllowRoot(t, true)
-	defer cleanup()
-
-	called := false
-	inner := func(tenantID string, params json.RawMessage) (any, error) {
-		called = true
-		return "scoped-ok", nil
-	}
-
-	// A method with a scope extractor should still bypass auth.
-	wrapped := authMiddleware("cmd.run", inner)
-	params := json.RawMessage(`{"target":[{"sprout_id":"web-1"}],"action":{"command":"echo hi"}}`)
-	result, err := wrapped(pki.CurrentTenantID(), params)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !called {
-		t.Fatal("inner handler was not called")
-	}
-	if result != "scoped-ok" {
-		t.Fatalf("unexpected result: %v", result)
-	}
-}
-
-func TestAuthMiddleware_ScopeExtractorError(t *testing.T) {
-	// When the scope extractor returns an error (bad params), the
-	// middleware should fall through to the handler for proper error
-	// reporting — but only if the token passes the action check.
-	// With an invalid token, it should be denied before scope checks.
-	cleanup := setupJetyDangerouslyAllowRoot(t, false)
-	defer cleanup()
-
-	called := false
-	inner := func(tenantID string, params json.RawMessage) (any, error) {
-		called = true
-		return "ok", nil
-	}
-
-	wrapped := authMiddleware("cook", inner)
-	// Invalid JSON in target but has a token — should be denied at token check.
-	params := json.RawMessage(`{"token":"invalid","target":"not-an-array"}`)
-	_, err := wrapped(pki.CurrentTenantID(), params)
-	if err == nil {
-		t.Fatal("expected error for invalid token")
-	}
-	if called {
-		t.Fatal("handler should not be called with invalid token")
-	}
-}
-
 // --- handleAuthExplain with dangerouslyAllowRoot ---
 
-func TestHandleAuthExplainDangerouslyAllowRoot(t *testing.T) {
-	cleanup := setupJetyDangerouslyAllowRoot(t, true)
-	defer cleanup()
-
-	result, err := handleAuthExplain(pki.CurrentTenantID(), json.RawMessage(`{}`))
-	if err != nil {
-		t.Fatalf("handleAuthExplain: %v", err)
-	}
-	// Should return the admin explain response.
-	b, _ := json.Marshal(result)
-	var resp map[string]interface{}
-	json.Unmarshal(b, &resp)
-
-	if resp["pubkey"] != "(dangerously_allow_root)" {
-		t.Errorf("pubkey = %v, want (dangerously_allow_root)", resp["pubkey"])
-	}
-	if resp["isAdmin"] != true {
-		t.Errorf("isAdmin = %v, want true", resp["isAdmin"])
-	}
-}
-
-func TestHandleAuthExplainInvalidJSON(t *testing.T) {
-	cleanup := setupJetyDangerouslyAllowRoot(t, false)
-	defer cleanup()
-
-	// Invalid JSON should not panic; it should unmarshal to empty struct.
-	_, err := handleAuthExplain(pki.CurrentTenantID(), json.RawMessage(`{invalid`))
-	if err == nil {
-		t.Fatal("expected error for invalid params (no token)")
-	}
-}
-
-func TestHandleAuthExplainNilParams(t *testing.T) {
-	cleanup := setupJetyDangerouslyAllowRoot(t, false)
-	defer cleanup()
-
-	_, err := handleAuthExplain(pki.CurrentTenantID(), nil)
-	if err == nil {
-		t.Fatal("expected error for nil params (no token)")
-	}
-}
-
 // --- handleAuthWhoAmI with dangerouslyAllowRoot ---
-
-func TestHandleAuthWhoAmIDangerouslyAllowRoot(t *testing.T) {
-	cleanup := setupJetyDangerouslyAllowRoot(t, true)
-	defer cleanup()
-
-	result, err := handleAuthWhoAmI(pki.CurrentTenantID(), json.RawMessage(`{}`))
-	if err != nil {
-		t.Fatalf("handleAuthWhoAmI: %v", err)
-	}
-
-	b, _ := json.Marshal(result)
-	var resp map[string]interface{}
-	json.Unmarshal(b, &resp)
-
-	if resp["pubkey"] != "(dangerously_allow_root)" {
-		t.Errorf("pubkey = %v, want (dangerously_allow_root)", resp["pubkey"])
-	}
-	if resp["role"] != "admin" {
-		t.Errorf("role = %v, want admin", resp["role"])
-	}
-}
 
 // --- handleCmdRun with registered sprout (covers validation pass path) ---
 
@@ -276,7 +133,7 @@ func TestHandleCookRegisteredSproutNoNATS(t *testing.T) {
 	ClearNatsConn(pki.CurrentTenantID())
 
 	params := json.RawMessage(`{"target":[{"id":"sprout-cook-valid"}],"action":{"recipe":"webserver.nginx"}}`)
-	_, err := handleCook(pki.CurrentTenantID(), params)
+	_, err := handleCook(apiCaller{TenantID: pki.CurrentTenantID()}, params)
 	if err == nil {
 		t.Fatal("expected error when NATS not available")
 	}
@@ -289,7 +146,7 @@ func TestHandleCookSproutIDWithUnderscore(t *testing.T) {
 	setupNatsAPIPKI(t)
 
 	params := json.RawMessage(`{"target":[{"id":"sprout_bad"}],"action":{"recipe":"test"}}`)
-	_, err := handleCook(pki.CurrentTenantID(), params)
+	_, err := handleCook(apiCaller{TenantID: pki.CurrentTenantID()}, params)
 	if err == nil {
 		t.Fatal("expected error for sprout ID with underscore")
 	}
@@ -300,7 +157,7 @@ func TestHandleCookInvalidAction(t *testing.T) {
 
 	// Valid target structure but action is a string instead of object.
 	params := json.RawMessage(`{"target":[{"id":"test-sprout"}],"action":"not-an-object"}`)
-	_, err := handleCook(pki.CurrentTenantID(), params)
+	_, err := handleCook(apiCaller{TenantID: pki.CurrentTenantID()}, params)
 	if err == nil {
 		t.Fatal("expected error for invalid action")
 	}
@@ -315,7 +172,7 @@ func TestHandleShellStartRegisteredSproutNoNATS(t *testing.T) {
 	ClearNatsConn(pki.CurrentTenantID())
 
 	params := json.RawMessage(`{"sprout_id":"sprout-ssh","cols":80,"rows":24}`)
-	_, err := handleShellStart(pki.CurrentTenantID(), params)
+	_, err := handleShellStart(apiCaller{TenantID: pki.CurrentTenantID()}, params)
 	if err == nil {
 		t.Fatal("expected error when NATS not available")
 	}
@@ -362,21 +219,21 @@ func TestCheckScopedAccessDangerouslyAllowRoot(t *testing.T) {
 	cleanup := setupJetyDangerouslyAllowRoot(t, true)
 	defer cleanup()
 
-	// With dangerouslyAllowRoot, even invalid tokens should pass.
-	err := checkScopedAccess(pki.CurrentTenantID(), "any-token", rbac.ActionCook, []string{"sprout-1"})
+	// With dangerouslyAllowRoot, even an unknown user passes.
+	err := checkScopedAccess(pki.CurrentTenantID(), "UANYUSER", rbac.ActionCook, []string{"sprout-1"})
 	if err != nil {
 		t.Fatalf("expected nil error with dangerouslyAllowRoot, got: %v", err)
 	}
 }
 
-func TestCheckScopedAccessInvalidToken(t *testing.T) {
+func TestCheckScopedAccessUnknownUser(t *testing.T) {
 	setupNatsAPIPKI(t)
 	cleanup := setupJetyDangerouslyAllowRoot(t, false)
 	defer cleanup()
 
-	err := checkScopedAccess(pki.CurrentTenantID(), "invalid-token", rbac.ActionCook, []string{"sprout-1"})
+	err := checkScopedAccess(pki.CurrentTenantID(), "UUNKNOWNUSER", rbac.ActionCook, []string{"sprout-1"})
 	if err == nil {
-		t.Fatal("expected error for invalid token")
+		t.Fatal("expected error for an unknown user")
 	}
 }
 
@@ -391,21 +248,21 @@ func TestFilterSproutsByScopeDangerouslyAllowRoot(t *testing.T) {
 	defer cleanup()
 
 	// With dangerouslyAllowRoot, should return all sprouts.
-	result := filterSproutsByScope(pki.CurrentTenantID(), "any-token", rbac.ActionView, []string{"sprout-f1", "sprout-f2"})
+	result := filterSproutsByScope(pki.CurrentTenantID(), "UANYUSER", rbac.ActionView, []string{"sprout-f1", "sprout-f2"})
 	if len(result) != 2 {
 		t.Errorf("expected 2 filtered sprouts, got %d", len(result))
 	}
 }
 
-func TestFilterSproutsByScopeInvalidToken(t *testing.T) {
+func TestFilterSproutsByScopeUnknownUser(t *testing.T) {
 	setupNatsAPIPKI(t)
 	cleanup := setupJetyDangerouslyAllowRoot(t, false)
 	defer cleanup()
 
-	result := filterSproutsByScope(pki.CurrentTenantID(), "invalid-token", rbac.ActionView, []string{"sprout-1"})
-	// Invalid token → no scope filtering possible → returns nil or empty.
+	result := filterSproutsByScope(pki.CurrentTenantID(), "UUNKNOWNUSER", rbac.ActionView, []string{"sprout-1"})
+	// An unknown user sees nothing.
 	if len(result) != 0 {
-		t.Errorf("expected 0 filtered sprouts for invalid token, got %d", len(result))
+		t.Errorf("expected 0 filtered sprouts for an unknown user, got %d", len(result))
 	}
 }
 
@@ -420,7 +277,7 @@ func TestHandleSproutsListDangerouslyAllowRoot(t *testing.T) {
 	cleanup := setupJetyDangerouslyAllowRoot(t, true)
 	defer cleanup()
 
-	result, err := handleSproutsList(pki.CurrentTenantID(), nil)
+	result, err := handleSproutsList(apiCaller{TenantID: pki.CurrentTenantID()}, nil)
 	if err != nil {
 		t.Fatalf("handleSproutsList: %v", err)
 	}
@@ -429,31 +286,6 @@ func TestHandleSproutsListDangerouslyAllowRoot(t *testing.T) {
 	if len(m["sprouts"]) != 1 {
 		t.Errorf("expected 1 sprout, got %d", len(m["sprouts"]))
 	}
-}
-
-func TestHandleSproutsListWithToken(t *testing.T) {
-	pkiDir := setupNatsAPIPKI(t)
-	writeNKey(t, pkiDir, "accepted", "sprout-tk-1", "UKEY_TK1")
-	writeNKey(t, pkiDir, "accepted", "sprout-tk-2", "UKEY_TK2")
-
-	ClearNatsConn(pki.CurrentTenantID())
-
-	cleanup := setupJetyDangerouslyAllowRoot(t, false)
-	defer cleanup()
-
-	// With an invalid token, scope filtering should filter out sprouts.
-	params := json.RawMessage(`{"token":"invalid-token"}`)
-	result, err := handleSproutsList(pki.CurrentTenantID(), params)
-	if err != nil {
-		t.Fatalf("handleSproutsList: %v", err)
-	}
-
-	m := result.(map[string][]SproutInfo)
-	// With invalid token and no dangerouslyAllowRoot, sprouts should be
-	// filtered by scope. TokenScopeFilter with invalid token returns nil,
-	// which means "no filter applied" or "deny all" depending on implementation.
-	// Either way, no error should occur.
-	_ = m
 }
 
 // --- handleJobsList scope filtering ---
@@ -470,7 +302,7 @@ func TestHandleJobsListDangerouslyAllowRoot(t *testing.T) {
 	}
 	writeTestJob(t, obj, "sprout-dar-j", "jid-dar-1", steps)
 
-	result, err := handleJobsList(pki.CurrentTenantID(), nil)
+	result, err := handleJobsList(apiCaller{TenantID: pki.CurrentTenantID()}, nil)
 	if err != nil {
 		t.Fatalf("handleJobsList: %v", err)
 	}
@@ -481,36 +313,12 @@ func TestHandleJobsListDangerouslyAllowRoot(t *testing.T) {
 	}
 }
 
-func TestHandleJobsListWithTokenScope(t *testing.T) {
-	obj, cleanup := setupJobStore(t)
-	defer cleanup()
-
-	jetyCleanup := setupJetyDangerouslyAllowRoot(t, false)
-	defer jetyCleanup()
-
-	steps := []cook.StepCompletion{
-		{ID: "s1", CompletionStatus: cook.StepCompleted, Started: time.Now()},
-	}
-	writeTestJob(t, obj, "sprout-scope-j", "jid-scope-1", steps)
-
-	// Token-based filtering with invalid token.
-	params := json.RawMessage(`{"token":"invalid-token"}`)
-	result, err := handleJobsList(pki.CurrentTenantID(), params)
-	if err != nil {
-		t.Fatalf("handleJobsList: %v", err)
-	}
-
-	summaries := result.([]jobs.JobSummary)
-	// Should not error; may filter down to 0 depending on scope.
-	_ = summaries
-}
-
 func TestHandleJobsListInvalidJSON(t *testing.T) {
 	_, cleanup := setupJobStore(t)
 	defer cleanup()
 
 	// Invalid JSON should be ignored and return all jobs.
-	result, err := handleJobsList(pki.CurrentTenantID(), json.RawMessage(`{invalid`))
+	result, err := handleJobsList(apiCaller{TenantID: pki.CurrentTenantID()}, json.RawMessage(`{invalid`))
 	if err != nil {
 		t.Fatalf("handleJobsList: %v", err)
 	}
@@ -532,7 +340,7 @@ func TestHandleJobsCancelCompletedJob(t *testing.T) {
 	writeTestJob(t, obj, "sprout-done", "jid-done", steps)
 
 	params := json.RawMessage(`{"jid":"jid-done"}`)
-	_, err := handleJobsCancel(pki.CurrentTenantID(), params)
+	_, err := handleJobsCancel(apiCaller{TenantID: pki.CurrentTenantID()}, params)
 	if err == nil {
 		t.Fatal("expected error for completed job cancel")
 	}
@@ -542,7 +350,7 @@ func TestHandleJobsCancelInvalidJSON(t *testing.T) {
 	_, cleanup := setupJobStore(t)
 	defer cleanup()
 
-	_, err := handleJobsCancel(pki.CurrentTenantID(), json.RawMessage(`{invalid`))
+	_, err := handleJobsCancel(apiCaller{TenantID: pki.CurrentTenantID()}, json.RawMessage(`{invalid`))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
@@ -641,28 +449,6 @@ func TestSubscribeSessionDoneEmptySubject(t *testing.T) {
 }
 
 // --- handleJobsCancel scope check path ---
-
-func TestHandleJobsCancelWithTokenScope(t *testing.T) {
-	obj, cleanup := setupJobStore(t)
-	defer cleanup()
-
-	jetyCleanup := setupJetyDangerouslyAllowRoot(t, false)
-	defer jetyCleanup()
-
-	steps := []cook.StepCompletion{
-		{ID: "s1", Started: time.Now()},
-	}
-	writeTestJob(t, obj, "sprout-cancel-scope", "jid-cancel-scope", steps)
-
-	ClearNatsConn(pki.CurrentTenantID())
-
-	// Token included → triggers scope check path.
-	params := json.RawMessage(`{"jid":"jid-cancel-scope","token":"invalid-token"}`)
-	_, err := handleJobsCancel(pki.CurrentTenantID(), params)
-	if err == nil {
-		t.Fatal("expected error (scope deny or NATS unavailable)")
-	}
-}
 
 // --- handleAuthListUsers with roles ---
 
@@ -776,484 +562,5 @@ func TestHandleJobsListForSproutInvalidJSON(t *testing.T) {
 	_, err := handleJobsListForSprout(pki.CurrentTenantID(), json.RawMessage(`{invalid`))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
-	}
-}
-
-// --- Full auth token tests ---
-
-// setupAuthWithToken creates a real NKey, sets up jety with a privkey and
-// user-role mapping, and returns a valid token + cleanup function.
-func setupAuthWithToken(t *testing.T, roleName string, rules []rbac.Rule) (string, func()) {
-	t.Helper()
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.toml")
-	if err := os.WriteFile(path, []byte("# test config\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	jety.SetConfigType("toml")
-	jety.SetConfigFile(path)
-	jety.Set("dangerously_allow_root", false)
-
-	kp, err := nkeys.CreateAccount()
-	if err != nil {
-		t.Fatal(err)
-	}
-	seed, _ := kp.Seed()
-	pk, _ := kp.PublicKey()
-	jety.Set("privkey", string(seed))
-
-	rs := rbac.NewRoleStore()
-	rs.Register(&rbac.Role{
-		Name:  roleName,
-		Rules: rules,
-	})
-	urm := rbac.NewUserRoleMap()
-	urm.Set(pk, roleName)
-	intauth.SetPolicy(rs, urm, nil)
-
-	token, err := intauth.NewToken()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	cleanup := func() {
-		intauth.SetPolicy(nil, nil, nil)
-		jety.Set("privkey", "")
-		jety.Set("pubkeys", nil)
-		jety.Set("users", nil)
-		jety.Set("roles", nil)
-		jety.Set("cohorts", nil)
-		jety.Set("dangerously_allow_root", false)
-	}
-	return token, cleanup
-}
-
-func TestAuthMiddleware_ValidTokenAllowed(t *testing.T) {
-	token, cleanup := setupAuthWithToken(t, "admin", []rbac.Rule{
-		{Action: rbac.ActionAdmin, Scope: "*"},
-	})
-	defer cleanup()
-
-	called := false
-	inner := func(tenantID string, params json.RawMessage) (any, error) {
-		called = true
-		return "admin-ok", nil
-	}
-
-	wrapped := authMiddleware("audit.dates", inner)
-	params, _ := json.Marshal(map[string]string{"token": token})
-	result, err := wrapped(pki.CurrentTenantID(), params)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !called {
-		t.Fatal("handler was not called with valid admin token")
-	}
-	if result != "admin-ok" {
-		t.Fatalf("result = %v, want admin-ok", result)
-	}
-}
-
-func TestAuthMiddleware_ValidTokenDenied(t *testing.T) {
-	// Create a viewer token — should be denied for admin methods.
-	token, cleanup := setupAuthWithToken(t, "viewer", []rbac.Rule{
-		{Action: rbac.ActionView, Scope: "*"},
-	})
-	defer cleanup()
-
-	called := false
-	inner := func(tenantID string, params json.RawMessage) (any, error) {
-		called = true
-		return nil, nil
-	}
-
-	wrapped := authMiddleware("audit.dates", inner)
-	params, _ := json.Marshal(map[string]string{"token": token})
-	_, err := wrapped(pki.CurrentTenantID(), params)
-	if err == nil {
-		t.Fatal("expected error for insufficient permissions")
-	}
-	if err != rbac.ErrAccessDenied {
-		t.Fatalf("expected ErrAccessDenied, got: %v", err)
-	}
-	if called {
-		t.Fatal("handler should not be called when permissions denied")
-	}
-}
-
-func TestAuthMiddleware_ValidTokenScopeCheck(t *testing.T) {
-	// Create an operator token with global scope.
-	token, cleanup := setupAuthWithToken(t, "operator", []rbac.Rule{
-		{Action: rbac.ActionCook, Scope: "*"},
-		{Action: rbac.ActionView, Scope: "*"},
-		{Action: rbac.ActionCmd, Scope: "*"},
-		{Action: rbac.ActionTest, Scope: "*"},
-	})
-	defer cleanup()
-
-	called := false
-	inner := func(tenantID string, params json.RawMessage) (any, error) {
-		called = true
-		return "cook-ok", nil
-	}
-
-	wrapped := authMiddleware("cook", inner)
-	params, _ := json.Marshal(map[string]interface{}{
-		"token":  token,
-		"target": []map[string]string{{"sprout_id": "web-1"}},
-		"action": map[string]string{"recipe": "test.sls"},
-	})
-	result, err := wrapped(pki.CurrentTenantID(), params)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !called {
-		t.Fatal("handler was not called")
-	}
-	if result != "cook-ok" {
-		t.Fatalf("result = %v, want cook-ok", result)
-	}
-}
-
-// --- handleAuthExplain with valid token ---
-
-func TestHandleAuthExplainWithToken(t *testing.T) {
-	token, cleanup := setupAuthWithToken(t, "operator", []rbac.Rule{
-		{Action: rbac.ActionCook, Scope: "*"},
-		{Action: rbac.ActionView, Scope: "*"},
-	})
-	defer cleanup()
-
-	params, _ := json.Marshal(map[string]string{"token": token})
-	result, err := handleAuthExplain(pki.CurrentTenantID(), params)
-	if err != nil {
-		t.Fatalf("handleAuthExplain: %v", err)
-	}
-
-	b, _ := json.Marshal(result)
-	var resp map[string]interface{}
-	json.Unmarshal(b, &resp)
-
-	if resp["role"] != "operator" {
-		t.Errorf("role = %v, want operator", resp["role"])
-	}
-}
-
-// --- handleAuthWhoAmI with valid token ---
-
-func TestHandleAuthWhoAmIWithToken(t *testing.T) {
-	token, cleanup := setupAuthWithToken(t, "admin", []rbac.Rule{
-		{Action: rbac.ActionAdmin, Scope: "*"},
-	})
-	defer cleanup()
-
-	params, _ := json.Marshal(map[string]string{"token": token})
-	result, err := handleAuthWhoAmI(pki.CurrentTenantID(), params)
-	if err != nil {
-		t.Fatalf("handleAuthWhoAmI: %v", err)
-	}
-
-	b, _ := json.Marshal(result)
-	var resp map[string]interface{}
-	json.Unmarshal(b, &resp)
-
-	if resp["role"] != "admin" {
-		t.Errorf("role = %v, want admin", resp["role"])
-	}
-	if resp["pubkey"] == "" || resp["pubkey"] == "(dangerously_allow_root)" {
-		t.Errorf("expected real pubkey, got %v", resp["pubkey"])
-	}
-}
-
-// --- handleAuthListUsers with configured users ---
-
-func TestHandleAuthListUsersWithUsers(t *testing.T) {
-	token, cleanup := setupAuthWithToken(t, "admin", []rbac.Rule{
-		{Action: rbac.ActionAdmin, Scope: "*"},
-	})
-	defer cleanup()
-	_ = token
-
-	result, err := handleAuthListUsers(pki.CurrentTenantID(), nil)
-	if err != nil {
-		t.Fatalf("handleAuthListUsers: %v", err)
-	}
-
-	b, _ := json.Marshal(result)
-	var resp map[string]interface{}
-	json.Unmarshal(b, &resp)
-
-	// Should have at least the user we configured.
-	users, ok := resp["users"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("users type = %T, want map", resp["users"])
-	}
-	if len(users) == 0 {
-		t.Error("expected at least 1 user")
-	}
-
-	roles, ok := resp["roles"].([]interface{})
-	if !ok {
-		t.Fatalf("roles type = %T, want []", resp["roles"])
-	}
-	if len(roles) == 0 {
-		t.Error("expected at least 1 role")
-	}
-}
-
-// --- handleAuthAddUser + RemoveUser with valid auth setup ---
-
-func TestHandleAuthAddAndRemoveUser(t *testing.T) {
-	_, cleanup := setupAuthWithToken(t, "admin", []rbac.Rule{
-		{Action: rbac.ActionAdmin, Scope: "*"},
-	})
-	defer cleanup()
-
-	// Create a real NKey pubkey for the new user.
-	newKP, err := nkeys.CreateAccount()
-	if err != nil {
-		t.Fatal(err)
-	}
-	newPK, _ := newKP.PublicKey()
-
-	// Add the user.
-	addParams, _ := json.Marshal(map[string]string{
-		"pubkey": newPK,
-		"role":   "admin",
-	})
-	result, err := handleAuthAddUser(pki.CurrentTenantID(), addParams)
-	if err != nil {
-		t.Fatalf("handleAuthAddUser: %v", err)
-	}
-	b, _ := json.Marshal(result)
-	if !json.Valid(b) {
-		t.Fatal("invalid JSON result")
-	}
-
-	// Remove the user.
-	removeParams, _ := json.Marshal(map[string]string{
-		"pubkey": newPK,
-	})
-	result, err = handleAuthRemoveUser(pki.CurrentTenantID(), removeParams)
-	if err != nil {
-		t.Fatalf("handleAuthRemoveUser: %v", err)
-	}
-	b, _ = json.Marshal(result)
-	if !json.Valid(b) {
-		t.Fatal("invalid JSON result")
-	}
-}
-
-// --- handleSproutsList with valid token (scope filtering active path) ---
-
-func TestHandleSproutsListWithValidToken(t *testing.T) {
-	pkiDir := setupNatsAPIPKI(t)
-	writeNKey(t, pkiDir, "accepted", "sprout-vt-1", "UKEY_VT1")
-	writeNKey(t, pkiDir, "accepted", "sprout-vt-2", "UKEY_VT2")
-
-	ClearNatsConn(pki.CurrentTenantID())
-
-	token, cleanup := setupAuthWithToken(t, "viewer", []rbac.Rule{
-		{Action: rbac.ActionView, Scope: "*"},
-		{Action: rbac.ActionUserRead, Scope: "*"},
-	})
-	defer cleanup()
-
-	params, _ := json.Marshal(map[string]string{"token": token})
-	result, err := handleSproutsList(pki.CurrentTenantID(), params)
-	if err != nil {
-		t.Fatalf("handleSproutsList: %v", err)
-	}
-
-	m := result.(map[string][]SproutInfo)
-	// With global scope, both sprouts should be visible.
-	if len(m["sprouts"]) < 2 {
-		t.Errorf("expected at least 2 sprouts, got %d", len(m["sprouts"]))
-	}
-}
-
-// --- handleJobsList with valid token (scope filtering active path) ---
-
-func TestHandleJobsListWithValidToken(t *testing.T) {
-	obj, cleanup := setupJobStore(t)
-	defer cleanup()
-
-	token, authCleanup := setupAuthWithToken(t, "viewer", []rbac.Rule{
-		{Action: rbac.ActionView, Scope: "*"},
-		{Action: rbac.ActionUserRead, Scope: "*"},
-	})
-	defer authCleanup()
-
-	steps := []cook.StepCompletion{
-		{ID: "s1", CompletionStatus: cook.StepCompleted, Started: time.Now()},
-	}
-	writeTestJob(t, obj, "sprout-jl-1", "jid-jl-1", steps)
-	writeTestJob(t, obj, "sprout-jl-2", "jid-jl-2", steps)
-
-	params, _ := json.Marshal(map[string]string{"token": token})
-	result, err := handleJobsList(pki.CurrentTenantID(), params)
-	if err != nil {
-		t.Fatalf("handleJobsList: %v", err)
-	}
-
-	summaries := result.([]jobs.JobSummary)
-	if len(summaries) < 2 {
-		t.Errorf("expected at least 2 jobs, got %d", len(summaries))
-	}
-}
-
-// --- resolveCallerIdentity with valid token ---
-
-func TestResolveCallerIdentityValidToken(t *testing.T) {
-	token, cleanup := setupAuthWithToken(t, "admin", []rbac.Rule{
-		{Action: rbac.ActionAdmin, Scope: "*"},
-	})
-	defer cleanup()
-
-	params, _ := json.Marshal(map[string]string{"token": token})
-	pk, role := resolveCallerIdentity(params)
-	if pk == "" {
-		t.Error("expected non-empty pubkey")
-	}
-	if role != "admin" {
-		t.Errorf("role = %q, want admin", role)
-	}
-}
-
-// --- handleAuthLogin tests ---
-
-func TestHandleAuthLoginDangerouslyAllowRoot(t *testing.T) {
-	cleanup := setupJetyDangerouslyAllowRoot(t, true)
-	defer cleanup()
-
-	result, err := handleAuthLogin(pki.CurrentTenantID(), json.RawMessage(`{}`))
-	if err != nil {
-		t.Fatalf("handleAuthLogin: %v", err)
-	}
-
-	b, _ := json.Marshal(result)
-	var resp map[string]interface{}
-	json.Unmarshal(b, &resp)
-
-	if resp["authenticated"] != true {
-		t.Errorf("authenticated = %v, want true", resp["authenticated"])
-	}
-	if resp["pubkey"] != "(dangerously_allow_root)" {
-		t.Errorf("pubkey = %v, want (dangerously_allow_root)", resp["pubkey"])
-	}
-	if resp["role"] != "admin" {
-		t.Errorf("role = %v, want admin", resp["role"])
-	}
-	if resp["isAdmin"] != true {
-		t.Errorf("isAdmin = %v, want true", resp["isAdmin"])
-	}
-}
-
-func TestHandleAuthLoginNoToken(t *testing.T) {
-	cleanup := setupJetyDangerouslyAllowRoot(t, false)
-	defer cleanup()
-
-	_, err := handleAuthLogin(pki.CurrentTenantID(), json.RawMessage(`{}`))
-	if err == nil {
-		t.Fatal("expected error for no token")
-	}
-}
-
-func TestHandleAuthLoginEmptyParams(t *testing.T) {
-	cleanup := setupJetyDangerouslyAllowRoot(t, false)
-	defer cleanup()
-
-	_, err := handleAuthLogin(pki.CurrentTenantID(), nil)
-	if err == nil {
-		t.Fatal("expected error for nil params")
-	}
-}
-
-func TestHandleAuthLoginValidToken(t *testing.T) {
-	token, cleanup := setupAuthWithToken(t, "operator", []rbac.Rule{
-		{Action: rbac.ActionCook, Scope: "*"},
-		{Action: rbac.ActionView, Scope: "*"},
-	})
-	defer cleanup()
-
-	params, _ := json.Marshal(map[string]string{"token": token})
-	result, err := handleAuthLogin(pki.CurrentTenantID(), params)
-	if err != nil {
-		t.Fatalf("handleAuthLogin: %v", err)
-	}
-
-	b, _ := json.Marshal(result)
-	var resp map[string]interface{}
-	json.Unmarshal(b, &resp)
-
-	if resp["authenticated"] != true {
-		t.Errorf("authenticated = %v, want true", resp["authenticated"])
-	}
-	if resp["role"] != "operator" {
-		t.Errorf("role = %v, want operator", resp["role"])
-	}
-	if resp["isAdmin"] == true {
-		t.Error("expected isAdmin=false for operator role")
-	}
-	actions, ok := resp["actions"].([]interface{})
-	if !ok {
-		t.Fatalf("actions type = %T, want []interface{}", resp["actions"])
-	}
-	if len(actions) < 1 {
-		t.Error("expected at least 1 action in response")
-	}
-}
-
-func TestHandleAuthLoginInvalidToken(t *testing.T) {
-	cleanup := setupJetyDangerouslyAllowRoot(t, false)
-	defer cleanup()
-
-	params, _ := json.Marshal(map[string]string{"token": "not-a-real-token"})
-	_, err := handleAuthLogin(pki.CurrentTenantID(), params)
-	if err == nil {
-		t.Fatal("expected error for invalid token")
-	}
-}
-
-func TestHandleAuthLoginAdminToken(t *testing.T) {
-	token, cleanup := setupAuthWithToken(t, "admin", []rbac.Rule{
-		{Action: rbac.ActionAdmin, Scope: "*"},
-	})
-	defer cleanup()
-
-	params, _ := json.Marshal(map[string]string{"token": token})
-	result, err := handleAuthLogin(pki.CurrentTenantID(), params)
-	if err != nil {
-		t.Fatalf("handleAuthLogin: %v", err)
-	}
-
-	b, _ := json.Marshal(result)
-	var resp map[string]interface{}
-	json.Unmarshal(b, &resp)
-
-	if resp["authenticated"] != true {
-		t.Errorf("authenticated = %v, want true", resp["authenticated"])
-	}
-	if resp["isAdmin"] != true {
-		t.Errorf("isAdmin = %v, want true", resp["isAdmin"])
-	}
-	if resp["role"] != "admin" {
-		t.Errorf("role = %v, want admin", resp["role"])
-	}
-}
-
-func TestHandleAuthLoginIsPublicMethod(t *testing.T) {
-	// auth.login should be in the publicMethods map.
-	if !publicMethods[MethodAuthLogin] {
-		t.Error("auth.login should be a public method")
-	}
-}
-
-func TestHandleAuthLoginMiddlewareAction(t *testing.T) {
-	// auth.login should map to ActionUserRead in the natsActionMap.
-	action := NATSMethodAction(MethodAuthLogin)
-	if action != rbac.ActionUserRead {
-		t.Errorf("NATSMethodAction(auth.login) = %v, want %v", action, rbac.ActionUserRead)
 	}
 }

@@ -9,6 +9,7 @@ import (
 
 	nats "github.com/nats-io/nats.go"
 
+	"github.com/yogzblr/imas/internal/api/client"
 	apitypes "github.com/yogzblr/imas/internal/api/types"
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
@@ -242,7 +243,9 @@ func TestHandleCook_SproutReplacedMidDispatch(t *testing.T) {
 		"target": []map[string]string{{"id": "web-01"}, {"id": "web-02"}},
 		"action": map[string]string{"recipe": "webserver"},
 	})
-	result, err := handleCook(tenant, params)
+	setupSealedEnv(t)
+	u := newSealedCLIUserIn(t, tenant)
+	result, err := handleCook(apiCaller{TenantID: tenant, UserID: u.id}, params)
 	if err != nil {
 		t.Fatalf("handleCook: %v", err)
 	}
@@ -253,7 +256,7 @@ func TestHandleCook_SproutReplacedMidDispatch(t *testing.T) {
 	if err := pki.AcceptNKey(tenant, "web-01_1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := nc.Request(SproutCookTriggerPrefix+jid, nil, 5*time.Second); err != nil {
+	if _, err := client.TriggerCook(nc, jid); err != nil {
 		t.Fatalf("triggering cook: %v", err)
 	}
 

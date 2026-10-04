@@ -128,11 +128,8 @@ func TestConfigBoxPubRefusals(t *testing.T) {
 	}
 	// Another user's key.
 	other := newUserID(t)
-	if err := AddUser(other, "admin"); err != nil {
-		t.Fatal(err)
-	}
 	taken := newBoxPub(t)
-	if err := RegisterCLIBoxKey(usersTenantID(), other, taken); err != nil {
+	if err := AddUser(other, "admin", "", taken); err != nil {
 		t.Fatal(err)
 	}
 	loadWithBoxPub(t, admin, taken)

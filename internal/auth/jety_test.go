@@ -42,10 +42,9 @@ func clearJetyKeys(t *testing.T) {
 	jety.Set("dangerously_allow_root", false)
 	jety.Set("roles", nil)
 	jety.Set("cohorts", nil)
-	jety.Set(TokenClockSkewKey, nil)
 }
 
-// --- getPrivateSeed / GetPubkey / CreatePrivkey / NewToken / Sign ---
+// --- getPrivateSeed / GetPubkey / CreatePrivkey / Sign ---
 
 func TestGetPrivateSeedEmpty(t *testing.T) {
 	setupJetyForTest(t)
@@ -137,46 +136,6 @@ func TestCreatePrivkeyWhenMissing(t *testing.T) {
 	}
 	if seed == "" {
 		t.Error("seed should not be empty after CreatePrivkey")
-	}
-}
-
-func TestNewTokenNoPrivkey(t *testing.T) {
-	setupJetyForTest(t)
-	defer clearJetyKeys(t)
-
-	_, err := NewToken()
-	if err != ErrNoPrivkey {
-		t.Errorf("expected ErrNoPrivkey, got %v", err)
-	}
-}
-
-func TestNewTokenWithPrivkey(t *testing.T) {
-	setupJetyForTest(t)
-	defer clearJetyKeys(t)
-
-	kp, _ := nkeys.CreateAccount()
-	seed, _ := kp.Seed()
-	jety.Set("privkey", string(seed))
-
-	token, err := NewToken()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if token == "" {
-		t.Error("expected non-empty token")
-	}
-
-	ua, err := decodeToken(token)
-	if err != nil {
-		t.Fatalf("decodeToken failed: %v", err)
-	}
-	pk, err := ua.IsValid()
-	if err != nil {
-		t.Fatalf("token not valid: %v", err)
-	}
-	expectedPK, _ := kp.PublicKey()
-	if pk != expectedPK {
-		t.Errorf("token pubkey = %q, want %q", pk, expectedPK)
 	}
 }
 
@@ -329,7 +288,7 @@ func TestAddUserSuccess(t *testing.T) {
 	kp, _ := nkeys.CreateAccount()
 	pk, _ := kp.PublicKey()
 
-	err := AddUser(pk, "admin")
+	err := AddUser(pk, "admin", "", newBoxPub(t))
 	if err != nil {
 		t.Fatalf("AddUser failed: %v", err)
 	}
@@ -351,7 +310,7 @@ func TestAddUserInvalidPubkey(t *testing.T) {
 	SetPolicy(rs, rbac.NewUserRoleMap(), nil)
 	defer SetPolicy(nil, nil, nil)
 
-	err := AddUser("not-a-valid-key", "admin")
+	err := AddUser("not-a-valid-key", "admin", "", newBoxPub(t))
 	if err != ErrInvalidPubkey {
 		t.Errorf("expected ErrInvalidPubkey, got %v", err)
 	}
@@ -372,7 +331,7 @@ func TestAddUserUnknownRole(t *testing.T) {
 	kp, _ := nkeys.CreateAccount()
 	pk, _ := kp.PublicKey()
 
-	err := AddUser(pk, "nonexistent-role")
+	err := AddUser(pk, "nonexistent-role", "", newBoxPub(t))
 	if err == nil {
 		t.Error("expected error for unknown role")
 	}
@@ -396,7 +355,7 @@ func TestAddUserAlreadyExists(t *testing.T) {
 	SetPolicy(rs, urm, nil)
 	defer SetPolicy(nil, nil, nil)
 
-	err := AddUser(pk, "admin")
+	err := AddUser(pk, "admin", "", newBoxPub(t))
 	if err != ErrUserExists {
 		t.Errorf("expected ErrUserExists, got %v", err)
 	}
@@ -419,7 +378,7 @@ func TestRemoveUserSuccess(t *testing.T) {
 
 	kp, _ := nkeys.CreateAccount()
 	pk, _ := kp.PublicKey()
-	if err := AddUser(pk, "admin"); err != nil {
+	if err := AddUser(pk, "admin", "", newBoxPub(t)); err != nil {
 		t.Fatalf("AddUser: %v", err)
 	}
 	if err := RemoveUser(pk); err != nil {
@@ -652,23 +611,19 @@ func TestDangerouslyAllowRootEnabled(t *testing.T) {
 		t.Error("expected DangerouslyAllowRoot to return true")
 	}
 
-	if !TokenHasAccess("invalid", "GET") {
-		t.Error("TokenHasAccess should return true with bypass")
+	// The bypass is RBAC only: the user is still one a sealed request
+	// opened under (internal/natsapi), never a value from a body.
+	if !UserHasAction("AUNKNOWN", rbac.ActionCook) {
+		t.Error("UserHasAction should return true with bypass")
 	}
-	if !TokenHasRouteAccess("invalid", "Cook") {
-		t.Error("TokenHasRouteAccess should return true with bypass")
-	}
-	if !TokenHasAction("invalid", rbac.ActionCook) {
-		t.Error("TokenHasAction should return true with bypass")
-	}
-	if !TokenHasScopedAccess("invalid", rbac.ActionCook, []string{"s1"}, nil) {
-		t.Error("TokenHasScopedAccess should return true with bypass")
+	if !UserHasScopedAccess("AUNKNOWN", rbac.ActionCook, []string{"s1"}, nil) {
+		t.Error("UserHasScopedAccess should return true with bypass")
 	}
 
 	sprouts := []string{"s1", "s2"}
-	filtered := TokenScopeFilter("invalid", rbac.ActionCook, sprouts, nil)
+	filtered := UserScopeFilter("AUNKNOWN", rbac.ActionCook, sprouts, nil)
 	if len(filtered) != 2 {
-		t.Errorf("TokenScopeFilter should return all sprouts with bypass, got %d", len(filtered))
+		t.Errorf("UserScopeFilter should return all sprouts with bypass, got %d", len(filtered))
 	}
 }
 
@@ -748,50 +703,53 @@ func TestListAllUsersMixedModernAndLegacy(t *testing.T) {
 	}
 }
 
-// --- End-to-end: NewToken + TokenHasAccess with real policy ---
+// --- End-to-end: a config-file admin with no roles section ---
 
-func TestNewTokenWithPolicyEndToEnd(t *testing.T) {
+// users.admin in farmer's config (the first admin, or Helm's
+// farmer.bootstrapAdmin) means the built-in admin role, even though the
+// viewer and operator roles are always registered: the check this
+// replaced only ran when no role was defined at all, so such an admin had
+// no role.
+func TestConfigAdminGetsBuiltinAdminRole(t *testing.T) {
 	setupJetyForTest(t)
 	defer clearJetyKeys(t)
 
 	kp, _ := nkeys.CreateAccount()
-	seed, _ := kp.Seed()
 	pk, _ := kp.PublicKey()
-	jety.Set("privkey", string(seed))
-
-	rs := rbac.NewRoleStore()
-	rs.Register(&rbac.Role{
-		Name:  "admin",
-		Rules: []rbac.Rule{{Action: rbac.ActionAdmin, Scope: "*"}},
-	})
-	urm := rbac.NewUserRoleMap()
-	urm.Set(pk, "admin")
-	SetPolicy(rs, urm, nil)
+	legacy, _ := nkeys.CreateAccount()
+	legacyPK, _ := legacy.PublicKey()
+	jety.Set("users", map[string]any{"admin": []any{map[string]any{"pubkey": pk, "username": "alice"}}})
+	jety.Set("pubkeys", map[string]any{"admin": []any{legacyPK}})
+	if err := LoadPolicy(); err != nil {
+		t.Fatalf("LoadPolicy: %v", err)
+	}
 	defer SetPolicy(nil, nil, nil)
 
-	token, err := NewToken()
-	if err != nil {
-		t.Fatalf("NewToken failed: %v", err)
+	for _, u := range []string{pk, legacyPK} {
+		if !UserHasAction(u, rbac.ActionAdmin) || !UserHasAction(u, rbac.ActionPKI) {
+			t.Errorf("config admin %s has no admin access", u)
+		}
 	}
+	if role, name := UserIdentity(pk); role != "admin" || name != "alice" {
+		t.Errorf("UserIdentity = %q, %q", role, name)
+	}
+}
 
-	if !TokenHasAccess(token, "GET") {
-		t.Error("valid admin token should pass TokenHasAccess")
-	}
-	if !TokenHasRouteAccess(token, "Cook") {
-		t.Error("valid admin token should pass TokenHasRouteAccess for Cook")
-	}
-	if !TokenHasAction(token, rbac.ActionAdmin) {
-		t.Error("valid admin token should have admin action")
-	}
+// A config file that defines its own admin role keeps it.
+func TestConfigAdminRoleNotReplaced(t *testing.T) {
+	setupJetyForTest(t)
+	defer clearJetyKeys(t)
 
-	gotPK, roleName, _, err := WhoAmI(token)
-	if err != nil {
-		t.Fatalf("WhoAmI failed: %v", err)
+	kp, _ := nkeys.CreateAccount()
+	pk, _ := kp.PublicKey()
+	jety.Set("roles", map[string]any{"admin": []any{map[string]any{"action": "view"}}})
+	jety.Set("users", map[string]any{"admin": []any{pk}})
+	if err := LoadPolicy(); err != nil {
+		t.Fatalf("LoadPolicy: %v", err)
 	}
-	if gotPK != pk {
-		t.Errorf("WhoAmI pubkey mismatch")
-	}
-	if roleName != "admin" {
-		t.Errorf("WhoAmI role = %q, want admin", roleName)
+	defer SetPolicy(nil, nil, nil)
+
+	if UserHasAction(pk, rbac.ActionPKI) || !UserHasAction(pk, rbac.ActionView) {
+		t.Error("the config file's own admin role was replaced by the built-in one")
 	}
 }

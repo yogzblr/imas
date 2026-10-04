@@ -68,7 +68,6 @@ import (
 	"golang.org/x/mod/semver"
 
 	apitypes "github.com/yogzblr/imas/internal/api/types"
-	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/controlplane"
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/fleetcatalog"
@@ -83,8 +82,8 @@ import (
 var (
 	verifySproutInTenant = pki.VerifySproutInTenant
 	dispatchCmdRun       = handleCmdRun
-	dispatchCook         = handleCook
-	triggerCook          = triggerCookOnTenantConn
+	dispatchCook         = prepareSaaSAPICook
+	triggerCook          = triggerLocalCook
 	dispatchSelfUpdate   = sendSelfUpdate
 )
 
@@ -272,10 +271,6 @@ func poolName(selfUpdate bool) string {
 // waits for the sprout for 15s plus this long, holding a concurrency slot
 // the whole time; the SaaS API's request timeout has to exceed it too.
 const maxSproutActionCmdTimeout = 10 * time.Minute
-
-// cookTriggerTimeout matches the window handleCook's goroutine waits for
-// its trigger.
-const cookTriggerTimeout = 15 * time.Second
 
 // errSproutActionInvalid marks a request farmer rejects as malformed
 // before dispatching it.
@@ -533,11 +528,11 @@ func runSproutCook(req controlplane.SproutActionRequest, reply controlplane.Spro
 		reply.ErrorCode = controlplane.ErrorInternal
 		return reply, fmt.Errorf("unexpected cook result %T without a JID", res)
 	}
-	// handleCook only sends the cook once its caller triggers the JID
-	// (the CLI subscribes to the job's events first, then triggers). The
-	// SaaS API tracks the job through farmer.jobs rather than the event
-	// stream, and can't reach the tenant's trigger subject from SYS
-	// anyway, so farmer triggers it itself.
+	// A cook is only sent once it is triggered (the CLI subscribes to
+	// the job's events first, then sends the sealed trigger). The SaaS
+	// API tracks the job through farmer.jobs rather than the event
+	// stream, so farmer triggers it itself, on this replica, without
+	// the bus (prepareSaaSAPICook, triggerLocalCook).
 	if err := triggerCook(req.TenantID, cmd.JID); err != nil {
 		reply.ErrorCode = controlplane.ErrorInternal
 		return reply, fmt.Errorf("triggering cook %s: %w", cmd.JID, err)
@@ -546,19 +541,6 @@ func runSproutCook(req controlplane.SproutActionRequest, reply controlplane.Spro
 	reply.Status = controlplane.StatusDispatched
 	reply.JID = cmd.JID
 	return reply, nil
-}
-
-// triggerCookOnTenantConn sends handleCook's trigger for jid over
-// tenantID's own connection — the one handleCook subscribed the trigger
-// on, so the SUB is already ahead of this request on the wire.
-func triggerCookOnTenantConn(tenantID, jid string) error {
-	nc := natsConnFor(tenantID)
-	if nc == nil {
-		return fmt.Errorf("no NATS connection for tenant %q", tenantID)
-	}
-	b, _ := json.Marshal(config.TriggerMsg{JID: jid})
-	_, err := nc.Request(SproutCookTriggerPrefix+jid, b, cookTriggerTimeout)
-	return err
 }
 
 // runSproutSelfUpdate checks the requested version against the release
