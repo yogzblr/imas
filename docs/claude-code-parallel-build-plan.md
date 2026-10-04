@@ -1595,37 +1595,67 @@ concrete failure scenario and a proposed fix. Scope: docs/security-review-2026-1
 ready for review, not as a clean bill of health."
 ```
 
-## 5. Orchestrator prompt — paste into one lead Claude Code session
+## 5. Orchestrator prompt: Wave 7 to the UAT gate
 
-Use this if you'd rather have Claude dispatch and track Wave 0 for you
-instead of running the nine commands above by hand. Run it as a **local**
-`claude` session at the repo root (it needs Bash to shell out to
-`claude --cloud`), or as a Claude Code **Project**.
+Paste into one **local** `claude` session at the repo root (it shells out to
+`claude --cloud`). The Wave 0 version of this prompt is retired: Waves 0 to 6
+are merged. The orchestrator dispatches and tracks; it never merges and never
+edits code.
 
 ```
-You are coordinating the Wave 0 buildout of the imas SaaS Machine Manager
-fork. Read docs/design/imas-master-plan.md and
-docs/design/imas-fork-roadmap.md for context first.
+You are the dispatcher for the remaining imas work before the UAT gate: Wave 7
+(section 4e of docs/claude-code-parallel-build-plan.md). You dispatch cloud
+sessions, track them and report. You do not write code, review code, merge, or
+approve anything. Read CLAUDE.md, docs/BUILD-STATUS.md and section 4e of the
+plan first.
 
-Create docs/BUILD-STATUS.md with a table of these nine workstreams:
-B, D, F, G.1+G.3, G.5+G.8+G.9, H.4+H.5, L, K, SaaS-API-scaffold.
-Columns: workstream | one-line description | cloud session ID | status
-(dispatched / in review / merged) | needs security review (y/n).
+Briefs. The briefs are in section 4e, one per heading: SEC.0, SEC.3a, SEC.3b,
+SEC.4, SEC.5, REC.1, J.1, J.2, J.3, J.4, J.5, SEC.6. To dispatch one, extract
+the text between the opening and closing code fence under its heading and run
+claude --cloud with exactly that text as the prompt, verbatim: no paraphrase, no
+shortening, no additions. Never dispatch from memory; re-read the plan file from
+origin/main each time.
 
-For each workstream, run `claude --cloud "<task brief>"` using the exact
-task briefs from claude-code-parallel-build-plan.md sections 1.1 through
-1.9 in this repo (copy them verbatim — do not paraphrase or shorten
-them). Record each returned session ID into BUILD-STATUS.md.
+Order and gates. A brief is dispatched only when every gate below is satisfied,
+and a gate is satisfied only when its PR is MERGED into main (not merely open or
+green).
+- Preconditions, checked once at the start: PR 81 (security review) and PR 82
+  (Wave 7 briefs) are merged. If either is not, stop and tell me.
+- 7A, no gate beyond the preconditions: SEC.0, SEC.3a, SEC.3b, SEC.4, SEC.5.
+  Dispatch all five together. SEC.3a and SEC.3b touch the same package: tell
+  me if they conflict, do not resolve it yourself.
+- REC.1: gate SEC.4.
+- J.1: gates SEC.3a and SEC.3b (and SEC.0 should already be merged).
+- J.2 and J.3: gate J.1. Dispatch together.
+- J.4 and J.5: gate J.3. Dispatch together.
+- SEC.6: gates every other brief above.
+After SEC.6 merges, stop and hand back to me: the first release and the UAT are
+mine to schedule.
 
-Do not dispatch Wave 1 or Wave 2 workstreams (A, C, H, E, I, J) yourself
-— those depend on B and A being merged first. Stop after dispatching
-Wave 0 and tell me to review the nine PRs. When I tell you B (and A, if
-you've also started it) are merged, come back and I'll ask you to
-dispatch Wave 1.
+Tracking. Keep a ledger in a local file outside the repo (not committed), one
+row per brief: id, cloud session id, PR number, state (not dispatched,
+dispatched, PR open, CI red, merged, blocked), whether it carries FLAG FOR
+SECURITY REVIEW, open questions from its PR. Find a brief's PR by its commit
+title prefix (for example SEC.4:). The gh GraphQL API may be blocked here; use
+gh api REST calls (repos/yogzblr/imas/pulls, .../pulls/N, .../commits/SHA/check-runs)
+instead of gh pr. Check state when I ask and otherwise every time I message you;
+do not poll in a tight loop.
 
-For any workstream whose brief says "FLAG FOR SECURITY REVIEW," mark
-that in BUILD-STATUS.md and do not represent it as ready to merge, only
-ready for review, even after its tests pass.
+Rules.
+- Any brief whose text has FLAG FOR SECURITY REVIEW is never described by you as
+  done or safe to merge, only as ready for review, even when CI is green.
+- When a PR lists open questions or decisions for me, copy them to me verbatim
+  with the PR number. Do not answer them.
+- If a session fails, stalls or its PR conflicts, say so and propose a retry;
+  re-dispatch only after I say yes, and with the same verbatim brief.
+- If a PR's diff touches files outside its brief's Scope line, flag it to me.
+- Do not dispatch anything that is not in section 4e. Do not start Terraform or
+  the UAT.
+- Report format when I ask for status: the ledger table, then what is blocked
+  and on whom, then the next brief(s) now eligible.
+
+Start now: verify the preconditions, then dispatch 7A and report the five session
+ids.
 ```
 
 ---
