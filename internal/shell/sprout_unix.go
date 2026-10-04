@@ -151,15 +151,15 @@ func (s *sproutSession) requestEnd(reason string, exit int) {
 
 // run drives the session until it ends.
 func (s *sproutSession) run() {
-	go func() {
+	s.sp.goSession(func() {
 		if err := s.stream.Run(s.ctx); errors.Is(err, payloadbox.ErrStreamPeerLost) {
 			s.requestEnd(payloadbox.ClosePeerLost, exitCodeNone)
 		}
-	}()
-	go s.inputLoop()
+	})
+	s.sp.goSession(s.inputLoop)
 	outputDone := make(chan struct{})
-	go s.outputLoop(outputDone)
-	go func() {
+	s.sp.goSession(func() { s.outputLoop(outputDone) })
+	s.sp.goSession(func() {
 		code := 0
 		if err := s.cmd.Wait(); err != nil {
 			code = exitCodeNone
@@ -173,7 +173,7 @@ func (s *sproutSession) run() {
 		case <-time.After(outputDrainTimeout):
 		}
 		s.requestEnd(payloadbox.CloseExit, code)
-	}()
+	})
 
 	idle := time.NewTimer(s.idle)
 	defer idle.Stop()
@@ -249,7 +249,7 @@ func (s *sproutSession) inputLoop() {
 func (s *sproutSession) outputLoop(done chan<- struct{}) {
 	defer close(done)
 	chunks := make(chan []byte, 4)
-	go func() {
+	s.sp.goSession(func() {
 		defer close(chunks)
 		for {
 			buf := make([]byte, payloadbox.MaxFrameData)
@@ -268,7 +268,7 @@ func (s *sproutSession) outputLoop(done chan<- struct{}) {
 				return
 			}
 		}
-	}()
+	})
 	var pending []byte
 	flush := func() bool {
 		if len(pending) == 0 {
@@ -339,8 +339,9 @@ func (s *sproutSession) kill() {
 	}
 }
 
-// CloseAll ends every session (the sprout is stopping), so no shell
-// outlives it even where there is no Pdeathsig.
+// CloseAll ends every session (the sprout is stopping) and waits for
+// their goroutines, so no shell or session work
+// outlives it, even where there is no Pdeathsig.
 func (sp *Sprout) CloseAll() {
 	sp.mu.Lock()
 	all := make([]*sproutSession, 0, len(sp.sessions))
@@ -351,4 +352,8 @@ func (sp *Sprout) CloseAll() {
 	for _, s := range all {
 		s.end(payloadbox.CloseSproutShutdown, exitCodeNone)
 	}
+	// end cancelled each session's context and killed its shell, so its
+	// goroutines are finishing; wait for them (at most the output drain
+	// timeout).
+	sp.wg.Wait()
 }

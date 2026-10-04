@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -125,10 +126,21 @@ func RunClient(ctx context.Context, o ClientOptions) (*ClientResult, error) {
 		return nil, err
 	}
 
+	// Every goroutine started here except the stdin reader is waited for
+	// before RunClient returns (deferred after cancel, so it runs after
+	// it). The stdin reader can be blocked in Read, which nothing can
+	// interrupt; once the stream is closed it sends nothing and stops at
+	// its next read.
+	var wg sync.WaitGroup
+	defer wg.Wait()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	runErr := make(chan error, 1)
-	go func() { runErr <- stream.Run(ctx) }()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runErr <- stream.Run(ctx)
+	}()
 
 	result := &ClientResult{SessionID: res.SessionID}
 	closeWith := func(reason string) (*ClientResult, error) {
@@ -180,7 +192,9 @@ func RunClient(ctx context.Context, o ClientOptions) (*ClientResult, error) {
 		}
 	}()
 	if o.Resize != nil {
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			for {
 				select {
 				case <-ctx.Done():

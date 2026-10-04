@@ -43,6 +43,18 @@ type Sprout struct {
 
 	mu       sync.Mutex
 	sessions map[string]*sproutSession
+	// wg counts every goroutine a session runs; CloseAll waits for it,
+	// so nothing a session does outlives the sprout's shutdown.
+	wg sync.WaitGroup
+}
+
+// goSession runs f as one of a session's goroutines (see wg).
+func (sp *Sprout) goSession(f func()) {
+	sp.wg.Add(1)
+	go func() {
+		defer sp.wg.Done()
+		f()
+	}()
 }
 
 // NewSprout returns the shell server for sproutID (its enrolled ID) on
@@ -69,7 +81,7 @@ func (sp *Sprout) HandleStart(m *nats.Msg) {
 		return
 	}
 	if run != nil {
-		go run.run()
+		sp.goSession(run.run)
 	}
 }
 

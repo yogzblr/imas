@@ -104,6 +104,20 @@ type shellRegistry struct {
 
 	keysMu sync.Mutex
 	keys   map[string]tenantKeyVersions
+
+	// wg counts every goroutine a session runs (its control loop, both
+	// legs' Run and both relay pumps). Nothing a session does outlives
+	// it: CloseShellSessions waits for wg.
+	wg sync.WaitGroup
+}
+
+// spawn runs f as one of a session's goroutines (see wg).
+func (r *shellRegistry) spawn(f func()) {
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		f()
+	}()
 }
 
 type tenantKeyVersions struct {
@@ -120,11 +134,26 @@ func ShellTracker() *shell.Tracker { return shellSessions.tracker }
 
 // CloseShellSessions ends every session this replica relays, with
 // farmer-shutdown, so both ends learn at once instead of after the
-// heartbeat timeout. For farmer's shutdown path.
+// heartbeat timeout, and returns once every session goroutine has
+// finished. For farmer's shutdown path (and tests, which must not leave
+// one running into the next).
 func CloseShellSessions() {
 	for _, s := range shellSessions.all() {
 		s.kill(payloadbox.CloseFarmerShutdown)
 	}
+	shellSessions.wg.Wait()
+}
+
+// hasTenant reports whether any session of tenantID is live.
+func (r *shellRegistry) hasTenant(tenantID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for k := range r.live {
+		if k.TenantID == tenantID {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *shellRegistry) all() []*farmerShell {
@@ -178,9 +207,14 @@ func (r *shellRegistry) keyVersions(tenantID string, force bool) (map[int]bool, 
 
 // recheckTenantKeys re-reads tenantID's keys now and ends, with
 // key-severed, every session of that tenant whose leg 2 used a key no
-// longer among them. Called after a tenant key rotation on this replica;
-// other replicas notice within shellRecheckInterval.
+// longer among them. Called synchronously by the tenant key rotation
+// handler on this replica; other replicas notice within
+// shellRecheckInterval. With no session of that tenant it reads nothing.
+// It only signals sessions (kill never blocks), so it returns at once.
 func (r *shellRegistry) recheckTenantKeys(tenantID string) {
+	if !r.hasTenant(tenantID) {
+		return
+	}
 	versions, err := r.keyVersions(tenantID, true)
 	if err != nil {
 		log.Warnf("natsapi: re-reading tenant %s keys for shell sessions: %v", tenantID, err)
@@ -206,16 +240,20 @@ type farmerShell struct {
 	keys2      *payloadbox.StreamKeys
 	sub1, sub2 *nats.Subscription
 
-	mu        sync.Mutex
-	version   int      // tenant key version leg 2's handshake used
-	preLeg2   [][]byte // s2f frames that arrived before leg 2's keys
-	preDrop   bool
-	ctx       context.Context
-	cancel    context.CancelFunc
-	killCh    chan string
-	endOnce   sync.Once
-	started   bool
-	startedAt time.Time
+	mu      sync.Mutex
+	version int      // tenant key version leg 2's handshake used
+	preLeg2 [][]byte // s2f frames that arrived before leg 2's keys
+	preDrop bool
+	ctx     context.Context
+	cancel  context.CancelFunc
+	killCh  chan string
+	// killed is cancelled by kill, so a kill also interrupts the start
+	// request to the sprout rather than waiting out its timeout.
+	killed     context.Context
+	killCancel context.CancelFunc
+	endOnce    sync.Once
+	started    bool
+	startedAt  time.Time
 }
 
 func (s *farmerShell) leg2Version() int {
@@ -230,6 +268,7 @@ func (s *farmerShell) kill(reason string) {
 	case s.killCh <- reason:
 	default:
 	}
+	s.killCancel()
 }
 
 func handleShellOpen(c apiCaller, params json.RawMessage) (any, error) {
@@ -313,6 +352,7 @@ func handleShellOpen(c apiCaller, params json.RawMessage) (any, error) {
 		killCh: make(chan string, 4),
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.killed, s.killCancel = context.WithCancel(s.ctx)
 	f2c := shell.CLISubject(sessionID, payloadbox.DirF2C)
 	s.leg1, err = payloadbox.NewStream(keys1, false, func(frame []byte) error { return publishFrame(nc, f2c, frame) }, shellStreamOptions)
 	if err != nil {
@@ -331,7 +371,7 @@ func handleShellOpen(c apiCaller, params json.RawMessage) (any, error) {
 		s.cleanup()
 		return nil, fmt.Errorf("subscribing to the session: %w", err)
 	}
-	go s.run()
+	shellSessions.spawn(s.run)
 	log.Infof("natsapi: shell session %s offered to %s for sprout %s (tenant %s)", sessionID, c.UserID, req.SproutID, c.TenantID)
 	return shell.OpenResult{
 		SessionID: sessionID, SproutID: req.SproutID, FarmerEphPub: farmerPub,
@@ -346,13 +386,19 @@ func publishFrame(nc *nats.Conn, subject string, frame []byte) error {
 	return nc.PublishMsg(m)
 }
 
-// cleanup drops a session that never ran.
+// cleanup drops a session that never relayed. Removing it from the
+// registry is the last thing it does.
 func (s *farmerShell) cleanup() {
 	s.cancel()
-	if s.sub1 != nil {
-		_ = s.sub1.Unsubscribe()
+	for _, sub := range []*nats.Subscription{s.sub1, s.sub2} {
+		if sub != nil {
+			_ = sub.Unsubscribe()
+		}
 	}
 	s.keys1.Wipe()
+	if s.keys2 != nil {
+		s.keys2.Wipe()
+	}
 	shellSessions.remove(s)
 }
 
@@ -383,15 +429,16 @@ func (s *farmerShell) run() {
 	cols, rows, _ := payloadbox.DecodeTerminalSize(hello.Payload) // checked by the stream
 
 	if code := s.startLeg2(cols, rows); code != "" {
+		// A kill during the start (farmer stopping, a severed key) is
+		// the reason, not the interrupted request.
+		select {
+		case reason := <-s.killCh:
+			code = reason
+		default:
+		}
 		s.auditStart(false, code)
 		_ = s.leg1.Close(payloadbox.CloseInfo{Reason: code, ExitCode: -1})
 		s.cleanup()
-		if s.sub2 != nil {
-			_ = s.sub2.Unsubscribe()
-		}
-		if s.keys2 != nil {
-			s.keys2.Wipe()
-		}
 		return
 	}
 	if err := s.leg1.SendReady(); err != nil {
@@ -438,7 +485,10 @@ func (s *farmerShell) startLeg2(cols, rows int) string {
 	m := nats.NewMsg(shell.StartSubject(s.info.SproutID))
 	m.Header.Set(payloadbox.Header, payloadbox.HeaderBox1)
 	m.Data = data
-	reply, err := s.nc.RequestMsg(m, shellStartTimeout)
+	// Bounded by the start timeout, and cut short by a kill.
+	reqCtx, cancelReq := context.WithTimeout(s.killed, shellStartTimeout)
+	reply, err := s.nc.RequestMsgWithContext(reqCtx, m)
+	cancelReq()
 	if err != nil {
 		log.Warnf("natsapi: shell session %s: sprout %s did not answer the start: %v", s.key.SessionID, s.info.SproutID, err)
 		return payloadbox.CloseSproutUnreachable
@@ -561,14 +611,14 @@ func (s *farmerShell) relay() {
 	}
 	input := make(chan struct{}, 1)
 	for _, leg := range []*payloadbox.Stream{s.leg1, s.leg2} {
-		go func() {
+		shellSessions.spawn(func() {
 			if err := leg.Run(s.ctx); errors.Is(err, payloadbox.ErrStreamPeerLost) {
 				request(payloadbox.ClosePeerLost, -1)
 			}
-		}()
+		})
 	}
 	// CLI -> sprout.
-	go func() {
+	shellSessions.spawn(func() {
 		for {
 			select {
 			case <-s.ctx.Done():
@@ -596,9 +646,9 @@ func (s *farmerShell) relay() {
 				}
 			}
 		}
-	}()
+	})
 	// Sprout -> CLI.
-	go func() {
+	shellSessions.spawn(func() {
 		for {
 			select {
 			case <-s.ctx.Done():
@@ -622,7 +672,7 @@ func (s *farmerShell) relay() {
 				}
 			}
 		}
-	}()
+	})
 
 	idle := time.NewTimer(s.idle)
 	defer idle.Stop()
@@ -719,10 +769,11 @@ func (s *farmerShell) end(reason string, exit int) {
 		if s.keys2 != nil {
 			s.keys2.Wipe()
 		}
-		shellSessions.remove(s)
 		s.auditEnd(reason, exit)
 		log.Infof("natsapi: shell session %s ended: %s (user %s, sprout %s, %s)", s.key.SessionID, reason,
 			s.info.Pubkey, s.info.SproutID, time.Since(s.startedAt).Round(time.Second))
+		// Last, so a session counted as gone has nothing left to do.
+		shellSessions.remove(s)
 	})
 }
 

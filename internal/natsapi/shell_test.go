@@ -53,10 +53,12 @@ type shellEnv struct {
 	hostile *nats.Conn
 	sprout  *nats.Conn
 	sp      *shell.Sprout
-	spy     *busSpy
-	sproutP *permErrs
-	sprPub  string
-	audit   string
+	// startSub is the sprout's shell.start subscription.
+	startSub *nats.Subscription
+	spy      *busSpy
+	sproutP  *permErrs
+	sprPub   string
+	audit    string
 }
 
 // permErrs collects the sprout connection's async errors (permission
@@ -259,7 +261,7 @@ func startShellEnv(t *testing.T) *shellEnv {
 	env.sprout = dialBus(t, url, sproutJWT, sproutSeed, nats.ErrorHandler(env.sproutP.handler))
 	env.sp = shell.NewSprout(env.sprout, shellTestSprout)
 	env.sp.Stream = shellStreamOptions
-	if _, err := env.sprout.Subscribe(shell.StartSubject(shellTestSprout), env.sp.HandleStart); err != nil {
+	if env.startSub, err = env.sprout.Subscribe(shell.StartSubject(shellTestSprout), env.sp.HandleStart); err != nil {
 		t.Fatal(err)
 	}
 	for _, nc := range []*nats.Conn{env.farmer, env.cli, env.hostile, env.sprout} {
@@ -280,8 +282,13 @@ func startShellEnv(t *testing.T) *shellEnv {
 	t.Cleanup(func() { audit.SetGlobal(nil); logger.Close() })
 
 	t.Cleanup(func() {
+		// Both return only once every session goroutine has finished, so
+		// none reads state the cleanups below reset.
 		CloseShellSessions()
-		waitFor(t, "sessions to end", func() bool { return ShellTracker().Active() == 0 && env.sp.Active() == 0 })
+		env.sp.CloseAll()
+		if ShellTracker().Active() != 0 || env.sp.Active() != 0 {
+			t.Errorf("sessions left after shutdown: farmer %d, sprout %d", ShellTracker().Active(), env.sp.Active())
+		}
 		if errs := env.sproutP.all(); len(errs) != 0 {
 			t.Errorf("the sprout hit permission errors: %v", errs)
 		}
@@ -613,6 +620,22 @@ type manualCLI struct {
 
 func (e *shellEnv) openManual(t *testing.T) *manualCLI {
 	t.Helper()
+	m := e.openManualHello(t)
+	select {
+	case f := <-m.stream.Frames():
+		if f.Type != payloadbox.FrameReady {
+			t.Fatalf("got %v, want READY", f.Type)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no READY")
+	}
+	return m
+}
+
+// openManualHello opens a session and sends HELLO, without waiting for
+// READY.
+func (e *shellEnv) openManualHello(t *testing.T) *manualCLI {
+	t.Helper()
 	eph, _ := payloadbox.NewEphemeralKey()
 	ephPub := eph.PublicKey().Bytes()
 	raw, err := e.open(shell.OpenRequest{SproutID: shellTestSprout, CLIEphPub: ephPub})
@@ -649,15 +672,42 @@ func (e *shellEnv) openManual(t *testing.T) *manualCLI {
 	if err := m.stream.SendHello(80, 24); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case f := <-m.stream.Frames():
-		if f.Type != payloadbox.FrameReady {
-			t.Fatalf("got %v, want READY", f.Type)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("no READY")
-	}
 	return m
+}
+
+// Shutting down waits for every session goroutine, and a kill interrupts
+// a session waiting on a sprout that never answers its start, so
+// CloseShellSessions neither leaves work running nor waits out the start
+// timeout.
+func TestCloseShellSessionsInterruptsAndWaits(t *testing.T) {
+	env := startShellEnv(t)
+	if err := env.startSub.Unsubscribe(); err != nil {
+		t.Fatal(err)
+	}
+	// Received, never answered.
+	silent, err := env.sprout.SubscribeSync(shell.StartSubject(shellTestSprout))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = env.sprout.Flush()
+	shellStartTimeout = time.Minute
+	t.Cleanup(func() { shellStartTimeout = shell.StartTimeout })
+
+	m := env.openManualHello(t)
+	if _, err := silent.NextMsg(10 * time.Second); err != nil {
+		t.Fatalf("farmer never sent the start: %v", err)
+	}
+	start := time.Now()
+	CloseShellSessions()
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("CloseShellSessions took %s: the kill didn't interrupt the start", d)
+	}
+	if ShellTracker().Active() != 0 {
+		t.Fatal("a session outlived CloseShellSessions")
+	}
+	if info := m.waitClose(t); info.Reason != payloadbox.CloseFarmerShutdown {
+		t.Fatalf("closed %+v, want farmer-shutdown", info)
+	}
 }
 
 func (m *manualCLI) holdFrames(on bool) {

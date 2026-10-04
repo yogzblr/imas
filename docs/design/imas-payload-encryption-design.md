@@ -310,6 +310,10 @@ The owner answered every question on 2026-10-04, taking each proposed default, b
 - Farmer config: `shellidletimeout` (default 15 min, clamped to 60 min; the CLI may only ask for less) and `shellmaxduration` (default and maximum 8 h).
 - `shell.Tracker` is keyed `(tenant_id, session_id)`.
 - The plaintext `imas.api.shell.start` and the `imas.shell.<session>.{input,output,resize,done}` subjects are removed.
+- Nothing runs detached:
+  - The rotation handler re-checks sessions synchronously, and only for a tenant that has sessions.
+  - Every goroutine a session starts is counted by the registry. `CloseShellSessions` kills every session and waits for all of them. A kill also cuts short a start request still waiting on the sprout.
+  - The sprout's `CloseAll` does the same for its sessions.
 
 **The grant (`internal/pki` `jwtusers.go`).** `sproutPermissions` adds the publish grant `imas.shell.sprout.<id>.>` (`SproutShellPublishGrant`). This fixes what the design found: until now a per-sprout JWT couldn't carry a shell at all. Already-enrolled sprouts get the grant through the `mintOrReuseUserJWT` re-mint on their next refresh and restart. A sprout whose JWT lacks it logs a warning at start.
 
