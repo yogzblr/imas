@@ -106,7 +106,7 @@ beyond unit tests (real Envoy, Molecule containers, real OpenBao).
 
 | # | Requirement | RAG | Status | Evidence / gap |
 |---|---|---|---|---|
-| 1 | 1M endpoints | **Red** | **Not validated; two scale-plan items not built** | Storage (PXC, Valkey, object storage) and queue-grouped core are built. Not built: (a) **reconnect jitter**: the sprout still uses a fixed `ReconnectWait(15s)` with unlimited retries (`cmd/sprout/main.go`), and `nats.CustomReconnectDelay` appears nowhere; at 1M sprouts a bus restart is a thundering herd, which Phase 2 of the scale plan called out; (b) **a clustered bus**: `cmd/farmerbus` does not read cluster routes, so the nats chart refuses `bus.replicaCount > 1` unless `bus.cluster.routesSupported` is set, and nothing sets it truthfully yet. No load or chaos test has ever run and no harness is in the repo. |
+| 1 | 1M endpoints | **Red** | **Not validated; one scale-plan item not built** | Storage (PXC, Valkey, object storage) and queue-grouped core are built. **Reconnect jitter (SCALE.1, in review):** the sprout's fixed `ReconnectWait(15s)` is replaced by `nats.CustomReconnectDelay` with full-jitter exponential backoff (`internal/natsretry`; config keys `busreconnectbase`, default 2s, and `busreconnectcap`, default 5m; Ansible `imas_sprout_bus_reconnect_base`/`_cap`), also used for the first connect's retries, `MaxReconnects(-1)` kept. Unit-tested (2000 simulated sprouts: busiest tenth of the base window holds 11.9%), never load-tested. Farmer's own fixed waits (`cmd/farmer/main.go`: SYS listener 5s, per-tenant connections 15s with `MaxReconnects(30)`) are unchanged. Not built: **a clustered bus**: `cmd/farmerbus` does not read cluster routes, so the nats chart refuses `bus.replicaCount > 1` unless `bus.cluster.routesSupported` is set, and nothing sets it truthfully yet. No load or chaos test has ever run and no harness is in the repo. |
 | 2 | DMZ / non-DMZ split | **Green** | Built | `cmd/farmerbus` (DMZ) vs `cmd/farmer` (core, outbound only); Helm charts `deploy/helm/nats` and `deploy/helm/farmer`, with NetworkPolicies. |
 | 3 | Windows and Unix | **Amber** | Built, **not validated on Windows hosts** | Full G.1–G.9 ingredient set, SCM service wrapper, MSI. Windows paths are cross-compiled and unit-tested; the self-update MSI path is tested with `msiexec` mocked. The Terraform UAT gate would be the first real-host run. |
 | 4 | Deployment automation with Ansible | **Green** | Built, validated | `ansible/roles/imas_sprout` and `imas_verify`, Molecule CI on Rocky, Debian and openSUSE Leap. |
@@ -659,9 +659,22 @@ this file can be checked against the repository's history.
    spawns the PTY, but no input or output can flow. Requirement 14 stays Red
    until this item and Open item 11 are both done.
 3. **Scale and latency (requirements 1, 7, 10):** no load or chaos test has
-   ever run. Two scale-plan items are also unbuilt: jittered sprout reconnect
-   (still a fixed 15 s `ReconnectWait`) and a clustered bus (`cmd/farmerbus`
+   ever run. One scale-plan item is unbuilt: a clustered bus (`cmd/farmerbus`
    has no route support, so the chart blocks more than one bus replica).
+   Jittered sprout reconnect is built and in review (SCALE.1:
+   `internal/natsretry`, full-jitter exponential backoff from
+   `busreconnectbase`, 2s, to `busreconnectcap`, 5m, reset by every
+   successful connect), unit-tested only. Left from SCALE.1: with more
+   than one bus address, nats.go waits once per pass over the list, so the
+   first retry after a disconnect goes to the next address immediately
+   (fine while that address is up, not spread if the whole bus restarted);
+   a refreshed gateway JWT is only used at the next scheduled attempt, up
+   to the cap later; a sprout whose NATS User JWT is refused twice in a row
+   (revoked, tenant locked out) has its connection closed by nats.go and
+   stays offline until restarted (unchanged by SCALE.1); and farmer's own
+   reconnects still use fixed waits (SYS listener 5s; per-tenant
+   connections 15s with `MaxReconnects(30)`; nothing in `cmd/farmer`
+   redials a tenant connection nats.go closed after those 30).
 4. **Security review of the flagged work**, including FU.0/FU.2/FU.3/FU.4/
    FU.6b, CL.1, CL.2a, CL.2b, CL.3 and the J follow-ups. All have merged, but
    this file does not record that a separate security review was held; record

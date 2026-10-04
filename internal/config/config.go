@@ -13,6 +13,7 @@ import (
 
 	"github.com/taigrr/jety"
 	"github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/natsretry"
 )
 
 const ImasExt = "imas"
@@ -244,6 +245,19 @@ var (
 	// follow HTTP_PROXY/HTTPS_PROXY/NO_PROXY, which the bus does not.
 	// Empty by default: dial directly.
 	BusProxyURL string
+
+	// BusReconnectBase and BusReconnectCap ("busreconnectbase" and
+	// "busreconnectcap" in the sprout config file, sprout only) shape the
+	// sprout's wait before each attempt to reach the bus, after losing it
+	// and while its first connect keeps failing: a random wait between 0
+	// and a ceiling that starts at BusReconnectBase and doubles with every
+	// failed attempt up to BusReconnectCap, starting again from
+	// BusReconnectBase once connected (internal/natsretry). The random
+	// spread is what keeps a fleet from reconnecting in step after a bus
+	// restart. Non-positive values fall back to natsretry.DefaultBase (2s)
+	// and natsretry.DefaultCap (5m); a cap below the base is raised to it.
+	BusReconnectBase time.Duration
+	BusReconnectCap  time.Duration
 
 	// SproutBoxPrivFile/SproutBoxPubFile hold the sprout's own X25519
 	// box keypair (docs/design/imas-payload-encryption-design.md,
@@ -613,6 +627,8 @@ func LoadConfig(binary string) {
 			jety.SetDefault("gatewayjwtrefreshmargin", DefaultGatewayJWTRefreshMargin)
 			jety.SetDefault("stagedrecipemaxage", DefaultStagedRecipeMaxAge)
 			jety.SetDefault("sproutboxkeyprevgrace", DefaultSproutBoxKeyPrevGrace)
+			jety.SetDefault("busreconnectbase", natsretry.DefaultBase)
+			jety.SetDefault("busreconnectcap", natsretry.DefaultCap)
 			jety.SetDefault("sprouthandledjobsfile", defaultSproutHandledJobsFile())
 			jety.SetDefault("rootca_retry_delay", 5*time.Second)
 			jety.SetDefault("nkey_retry_delay", 5*time.Second)
@@ -627,6 +643,8 @@ func LoadConfig(binary string) {
 			SproutRootCATOFU = jety.GetBool("sproutrootcatofu")
 			BusURLs = stringList(jety.Get("busurls"))
 			BusProxyURL = strings.TrimSpace(jety.GetString("busproxyurl"))
+			BusReconnectBase = jety.GetDuration("busreconnectbase")
+			BusReconnectCap = jety.GetDuration("busreconnectcap")
 			SproutFleetSigningKeyring = jety.GetString("sproutfleetsigningkeyring")
 			SproutUpdateRepoURL = strings.TrimSpace(jety.GetString("sproutupdaterepourl"))
 			SproutUpdateRepoToken = strings.TrimSpace(jety.GetString("sproutupdaterepotoken"))
