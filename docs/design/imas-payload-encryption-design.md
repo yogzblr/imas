@@ -88,9 +88,9 @@ What the code does today, and where it departs from, or adds to, the sections ab
 
 **Still plaintext inside TLS:** cook's step events (`imas.cook.<id>.<jid>`), which the imas CLI reads directly without a tenant key, and every other boundary listed in `docs/BUILD-STATUS.md`.
 
-## Sealing `shell.*` (design, not built)
+## Sealing `shell.*` (design; built in J.5)
 
-**FLAG FOR SECURITY REVIEW.** This section is a design and has not been built. It is ready for review, not approved. It closes `docs/BUILD-STATUS.md` Open item 2 (requirement 14). It reuses `internal/payloadbox` for every handshake message, along with its purposes, its ±5 minute freshness window, its single-use message IDs and its `ReplyTo` binding. It adds one thing `payloadbox` doesn't have: a sealed stream of numbered frames for the life of a session.
+**FLAG FOR SECURITY REVIEW.** This section is a design, built in J.5 (see "As built: J.5" at the end of this section, which records where the build departs from the text); the build is ready for review, not approved. It closes `docs/BUILD-STATUS.md` Open item 2 (requirement 14). It reuses `internal/payloadbox` for every handshake message, along with its purposes, its ±5 minute freshness window, its single-use message IDs and its `ReplyTo` binding. It adds one thing `payloadbox` doesn't have: a sealed stream of numbered frames for the life of a session.
 
 ### What is wrong today
 
@@ -253,20 +253,135 @@ Not in scope: a compromised farmer (it holds `tenant_priv` and can always open a
 
 ### Open questions
 
-1. **The control-plane gap** is now designed in "Sealing the control plane" below, with its own open questions. Shell can't ship before that section's CLI box keys (its rollout step 4).
-2. **Transcripts.** Do CERT-In, DPDP or customer contracts require session recording? If so: output only, per tenant, where it is stored, under what key, and for how long?
+The owner answered every question on 2026-10-04, taking each proposed default, before J.5 was built. The answers are recorded under each question.
+
+1. **The control-plane gap** is now designed in "Sealing the control plane" below, with its own open questions. Shell can't ship before that section's CLI box keys (its rollout step 4). *Answered: J.3 built them; leg 1 authenticates with the CLI box key, as Decision 1 says.*
+2. **Transcripts.** Do CERT-In, DPDP or customer contracts require session recording? If so: output only, per tenant, where it is stored, under what key, and for how long? *Answered: no transcripts, only audit entries when a session starts and ends. Owner, 2026-10-04 (PR #98): "no recording needed": CERT-In and DPDP don't call for session recording.*
 3. **Defaults:**
    - farmer's default and maximum idle timeout (proposed 15 min and 60 min);
    - maximum session duration (proposed 8 h);
    - whether sprout `disableshell` defaults to `true` for new installs (proposed: `false` for now, exposed in the Ansible role);
    - the sprout shell allow-list (proposed: `/etc/shells`, overridable in sprout config).
-4. **Should the built-in `operator` role keep `shell`,** or should `shell` need an explicit grant? Proposed: drop it from `operator`.
-5. **Keystroke timing.** Should v1 send input on a fixed tick with chaff frames, as OpenSSH does, or accept the leak as a recorded residual risk?
-6. **Pinning `tenantboxpub` in the CLI.** Explicit config only (proposed), or trust on first use with a fingerprint prompt?
-7. **Sessions die with their farmer replica.** Is that acceptable, and is an admin `imas shell list` / `imas shell kill` across replicas (a Valkey registry keyed `(tenant_id, session_id)`) needed in v1?
-8. **Pre-J sprouts.** Confirm no deployment depends on plaintext shell to sprouts without a box key, so `shellallowplaintextsprouts` can ship defaulting to `false` and be removed later.
-9. **Windows shells.** ConPTY rules out the Server 2016 floor. Build for Server 2019 and later only, or not at all?
-10. **Leg 1 for a browser.** Should the SaaS API or web UI ever offer a shell? It would need its own leg 1, since a browser has an OIDC session, not a CLI box key.
+
+   *Answered: all four as proposed.*
+4. **Should the built-in `operator` role keep `shell`,** or should `shell` need an explicit grant? Proposed: drop it from `operator`. *Answered: drop it; `operator` loses `shell` unless granted. Not yet built: it lives in `internal/rbac`, and the owner made it a follow-up PR (PR #98). Until it lands, the built-in `operator` role can still open a shell, contrary to this decision (see "As built: J.5").*
+5. **Keystroke timing.** Should v1 send input on a fixed tick with chaff frames, as OpenSSH does, or accept the leak as a recorded residual risk? *Answered: a recorded residual risk; no chaff in v1.*
+6. **Pinning `tenantboxpub` in the CLI.** Explicit config only (proposed), or trust on first use with a fingerprint prompt? *Answered: explicit config only.*
+7. **Sessions die with their farmer replica.** Is that acceptable, and is an admin `imas shell list` / `imas shell kill` across replicas (a Valkey registry keyed `(tenant_id, session_id)`) needed in v1? *Answered: acceptable, and v1 has no cross-replica list.*
+8. **Pre-J sprouts.** Confirm no deployment depends on plaintext shell to sprouts without a box key, so `shellallowplaintextsprouts` can ship defaulting to `false` and be removed later. *Answered: no plaintext fallback at all, and no `shellallowplaintextsprouts` flag. Nothing is deployed.*
+9. **Windows shells.** ConPTY rules out the Server 2016 floor. Build for Server 2019 and later only, or not at all? *Answered: not at all for now; Windows sprouts keep refusing.*
+10. **Leg 1 for a browser.** Should the SaaS API or web UI ever offer a shell? It would need its own leg 1, since a browser has an OIDC session, not a CLI box key. *Answered: no browser or SaaS API shell.*
+
+### As built: J.5 (sealed shell)
+
+**FLAG FOR SECURITY REVIEW.** Ready for review, not approved. Built on J.3 (sealed CLI ↔ farmer) under the owner's answers above: farmer relays with both legs sealed (Decision 1, shape C), and there is no plaintext path of any kind.
+
+**`internal/payloadbox` (`stream.go`).**
+
+- Purposes `c2f.shell.open`, `f2s.shell.start` and `s2f.shell.start`.
+- `DeriveStreamKeys`: X25519 between the leg's two ephemeral keys (`crypto/ecdh`), refusing a low-order peer key (`CheckPublicKey`) and an all-zero secret. Then HKDF-SHA256 (`crypto/hkdf`) with the SHA-256 of the transcript as salt, one key per direction.
+- `Stream`: the frame format of Decision 2 (version, seq, ChaCha20-Poly1305 with nonce `0⁴ ‖ seq`, associated data binding protocol, direction, session, version and seq). Receiving fails closed on any replay, duplicate, gap, reorder, tamper, reflection or other session's frame, with no resynchronisation. Each direction carries only its own frame types. The CLI's first frame must be HELLO, and farmer's first frame to the CLI must be READY or CLOSE.
+- Flow control: 512 KiB unacknowledged. Heartbeat after 15 s without sending, peer-lost after 45 s without receiving. CLOSE carries a fixed reason, an exit code and its own seq.
+
+**The sprout (`internal/shell`, `cmd/sprout`).**
+
+- A start is acted on only if it is a sealed `f2s.shell.start` that `pki.SproutOpenFromFarmer` opens: pinned tenant, own sprout ID, fresh, and passed through the persisted replay guard.
+- A plaintext start is refused (`encryption-required`) on every Unix sprout, with box keys or without. A sealed start on a sprout without keys gets `no-keys`.
+- Local policy is checked before anything is spawned, and its refusal travels inside the sealed reply. The checks:
+  - `disableshell` (default `false`);
+  - the allow-list: `shellallowlist`, else `/etc/shells` read at each start; an unreadable `/etc/shells` allows nothing;
+  - `shellmaxsessions` (default 8).
+- The shell runs in its own session and process group (`Setsid`), with `Pdeathsig: SIGKILL` on Linux, and the whole group is killed when the session ends. `Sprout.CloseAll` ends every session when the sprout stops.
+- The sprout enforces the idle timeout and the maximum duration from the sealed start, capped at 60 min and 8 h.
+- PTY output is sent in chunks of up to 16 KiB, flushed after 10 ms without output. PTY input is written from its own goroutine, so a shell that isn't reading can't stall ACK processing.
+- The sprout logs a session's ID, user and close reason, and never content.
+- Windows: a sealed start is opened and answered with a sealed `unsupported`; a plaintext one gets `encryption-required` if the sprout has keys, else the old message.
+
+**Farmer (`internal/natsapi` `shell.go`).**
+
+- `imas.api.shell.open` goes through the sealed router like every method: it is opened under the user's CLI box key, passes the replay guard and the Valkey claim (it is mutating), and the user's role must grant scoped `shell` on that sprout. Farmer has no development bypass (PR #95 and #96).
+- The handler checks:
+  - the sprout is accepted in this tenant (`pki.VerifySproutInTenant`, on `(tenant_id, sprout_id)`);
+  - the sprout has a box key: one without is refused ("re-enroll"), never downgraded;
+  - the CLI's ephemeral key is well formed and not a tenant key;
+  - the limits: 4 sessions per user, 64 per tenant and 256 per replica.
+- Farmer contacts the sprout only after the CLI's HELLO opens; a session with no HELLO within 10 s is dropped.
+- The relay re-checks every 60 s: the user's role, by `UserHasAction` and `checkScopedAccess` (`revoked`), and the tenant key leg 2 used (`key-severed`). `imas keys rotate-tenant-key --sever` also re-checks the tenant's sessions on this replica at once.
+- Farmer config: `shellidletimeout` (default 15 min, clamped to 60 min; the CLI may only ask for less) and `shellmaxduration` (default and maximum 8 h).
+- `shell.Tracker` is keyed `(tenant_id, session_id)`.
+- The plaintext `imas.api.shell.start` and the `imas.shell.<session>.{input,output,resize,done}` subjects are removed.
+- Nothing runs detached:
+  - The rotation handler re-checks sessions synchronously, and only for a tenant that has sessions.
+  - Every goroutine a session starts is counted by the registry. `CloseShellSessions` kills every session and waits for all of them. A kill also cuts short a start request still waiting on the sprout.
+  - The sprout's `CloseAll` does the same for its sessions.
+
+**The grant (`internal/pki` `jwtusers.go`).** `sproutPermissions` adds the publish grant `imas.shell.sprout.<id>.>` (`SproutShellPublishGrant`). This fixes what the design found: until now a per-sprout JWT couldn't carry a shell at all. Already-enrolled sprouts get the grant through the `mintOrReuseUserJWT` re-mint on their next refresh and restart. A sprout whose JWT lacks it logs a warning at start.
+
+**The CLI (`cmd/imas` `ssh.go`, `internal/shell` `client.go`).** `imas ssh` seals `c2f.shell.open` with `client.SealedRequest`, using the CLI box key and the `tenantboxpub` and `tenantid` pins from explicit config. It derives leg 1's keys, sends HELLO, and goes raw only after READY. It reports the close reason, and exits non-zero unless the shell exited 0 or the user closed it.
+
+**Ansible and packaging.** `imas_sprout_disable_shell` (default `false`) is always written as `disableshell: true|false`. The sprout registers no default for that key, so it never rewrites it, and the Molecule idempotence problem recorded for `sproutboxkeyprevgrace` doesn't arise. `packaging/etc` documents `disableshell`, `shellallowlist` and `shellmaxsessions` (sprout), and `shellidletimeout` and `shellmaxduration` (farmer).
+
+**Deviations from the text above.**
+
+- **No `f2c.shell.open` purpose.** Farmer answers `c2f.shell.open` with an `f2c.api` Reply, bound by `ReplyTo`, method and subject, as `auth.rotatekey`'s `c2f.userkey.pub` is. The CLI's only reply opener (`pki.CLIOpenReply`) accepts `f2c.api` alone, and changing it was outside J.5's scope. The binding is the same.
+- **No `f2c.tenantkey.continuity`.** As after J.3, a CLI re-pins `tenantboxpub` by hand after a rotation's grace window.
+- **The transcript leaves out the two handshake message IDs.** The CLI's sealed-request helper doesn't expose them, and the sprout learns its reply's ID only after sealing it. Both ephemeral keys and the session ID are in the transcript and are fresh per session, so no two sessions or legs share a transcript.
+- **Flow control:**
+  - RESIZE is windowed as well as DATA.
+  - The window also counts frames: 256 unacknowledged, which bounds a stream of one-byte keystrokes.
+  - An ACK means "every frame below this seq was received and consumed", not "highest contiguous seq received". A receiver acknowledges a frame only once its owner has handled it: written to the PTY or stdout, or forwarded to the other leg. Without that, farmer's queue between the legs would be unbounded.
+- **Close codes added:**
+  - `sprout-shutdown` (the sprout is stopping);
+  - `sprout-unreachable`, `sprout-refused` and `sprout-needs-upgrade` (farmer couldn't start leg 2);
+  - the sprout's refusal codes (`shell-disabled`, `shell-not-allowed`, `too-many-sessions`, `unsupported`, `spawn-failed`), passed to the CLI as its close reason.
+- **Audit.** The router's entry `shell.open` records the sealed request, as for every method. The handler writes `shell.start`, not a second `shell.open`, so the two can't be confused: leg 2's outcome, with the session ID and the fixed code if it failed (including `no-hello`). It also writes `shell.end`: duration, exit code, reason, and bytes and frames each way. Neither entry ever holds content.
+- **`key-severed` is conservative.** A session ends when the tenant key version its leg 2 used is no longer one farmer seals and opens under: the current key, plus the previous one inside the grace window. That covers `--sever` and a deleted version. It also ends a session that outlives its key's grace window: two rotations during one session, or a grace window shorter than the session. The default grace is 24 h, longer than the 8 h maximum session.
+
+**Owner decisions, 2026-10-04 (PR #98): "no recording needed, follow-ups for the rest".**
+
+- **No session recording.** CERT-In and DPDP don't call for it, so v1 keeps only the audit entries when a session starts and ends (Open question 2). There are no transcripts, input or output.
+- **The rest becomes follow-up PRs** (below), not part of J.5.
+
+**Deferred to follow-up PRs (owner decision).**
+
+- **`operator` losing `shell`** (`internal/rbac/config.go`, `BuiltinOperatorRole`, and its tests). **Until it lands, the built-in `operator` role can still open a shell, contrary to the agreed default** (Open question 4). `natsapi`'s `TestOperatorRoleNATSAccess` pins today's behaviour, and changes with it.
+- **`farmer-shutdown` on farmer's stop.** Farmer's shutdown path (`cmd/farmer`) should call `natsapi.CloseShellSessions()`, which kills every session and waits for it. Until it does, both ends see `peer-lost` within 45 s, and the sprout kills the shell.
+- **User docs that still describe shell as plaintext:**
+  - `docs/INSTALL.md` ("`imas ssh` sessions are plaintext until sealed shell");
+  - `docs/api/farmer-cli-api.md`;
+  - `README.md`;
+  - `ansible/README.md`'s variable table (`imas_sprout_disable_shell`).
+
+**Not built, by decision.** Keystroke timing obfuscation: the owner recorded the leak as a residual risk (Open question 5).
+
+**What a compromised bus can still do** is Decision 3's table, unchanged:
+
+- A sprout on a build older than J.5 gets no shell from farmer: farmer never sends a plaintext start, and that build can't read a sealed one. It still accepts a plaintext start the bus injects, until it upgrades.
+- Denial of service, metadata, and keystroke timing remain.
+- Farmer itself sees plaintext keystrokes, as Decision 1 accepts.
+
+**Tests.**
+
+- `internal/payloadbox` `stream_test.go`: key agreement, and keys that differ per transcript field. Refusal of every way a bus can interfere with a frame: replay, duplicate, reorder, drop, tampered ciphertext or seq, wrong version, truncation, reflection, another session. Frame rules per direction, the window (a sender blocks; a peer that overruns fails), a bogus ACK, heartbeat and peer-lost, and CLOSE's frame count.
+- `internal/natsapi` `shell_test.go`, end to end on an operator-mode embedded bus built by `pki.ConfigureNats`. The sprout connects with the User JWT farmer minted on accept, so its real permissions apply; no permission violation may occur. A hostile allow-all connection records and attacks:
+  - the bus sees no plaintext (the command, its output, the shell path);
+  - a plaintext start, a forged sealed start and a plaintext `shell.open` are refused, and the removed `shell.start` is unanswered;
+  - captured opens and starts replayed are refused;
+  - an open never confirmed with HELLO is dropped without contacting the sprout;
+  - injected, replayed or misdirected frames on c2f, f2s and s2f end the session with `integrity`, and the shell is killed;
+  - a dropped or reordered c2f frame (a test CLI whose leg 1 publisher holds frames) ends it with `integrity`;
+  - a silent CLI ends it with `peer-lost`;
+  - cross-tenant: a sprout of another tenant is "unknown sprout" and nothing is sent; a start farmer sealed for tenant `t_2`'s `web-01` under the same box key doesn't open on tenant one's `web-01`;
+  - revocation mid-session, and no shell action at all;
+  - `--sever` through the handler (immediate) and behind farmer's back (periodic), while a normal rotation ends nothing;
+  - the sprout policy refusals, sealed;
+  - the idle timeout, and a CLI unable to lengthen it;
+  - the open's validation.
+- `internal/pki` `sproutshell_integration_test.go`: the live-bus grant, own subjects only, and the re-mint.
+- `internal/shell` `shell_test.go`: the sprout's refusals before opening, policy, allow-list, the tracker's limits and its keying on tenant and session, subjects against the grant.
+- `cmd/sprout`, `cmd/imas`: config reading, and end-of-session reporting.
+
+Molecule was not run for this change: the sandbox has no Ansible.
 
 ## Sealing the control plane (design; J.1 building blocks, J.2 sealed refresh, J.3 sealed CLI and J.4 sealed SaaS API built)
 
@@ -394,7 +509,7 @@ Read from `main` at `a38becb`. Items 2 and 3 were reproduced with a throwaway te
 | `imas jobs watch <jid>` | `imas.cook.*.<jid>` | the same | Decision D |
 | The CLI's local job store (`internal/jobs` `CLIListener`, used by `imas cook`) | `imas.cook.*.<jid>` (and `imas.cook.*.*` in `Subscribe`) | the same, written to `~/.cache` | Decision D |
 | `imas serve`'s log stream (`internal/serve/logstream.go`, the web UI's live log) | `imas.cook.*.*` | every step event of every job in the tenant | Decision D |
-| `imas ssh` | the session's output and done subjects from the (sealed) `shell.start` reply | terminal output and exit status | J.5 (sealed shell) |
+| `imas ssh` | (none since J.5: the session is a sealed stream relayed by farmer) | terminal input and output, exit status | sealed in J.5 |
 | `imas tail` | `imas.>` and `_INBOX.>` | everything on the bus; it now shows ciphertext for every API request and reply | a debugging tool; nothing to seal |
 
 So until Decision D, `imas cook`'s on-screen result and `imas serve`'s live log are what the bus says they are: a compromised bus can hide a failure or show a forged success. The authoritative record is farmer's job store, read through the sealed `jobs.get` and `jobs.forsprout`. Sprouts publish step events in plaintext today (the shell section's Decision 6), so sealing the CLI's leg alone wouldn't help yet.

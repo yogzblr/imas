@@ -229,10 +229,7 @@ func (s *sealedAPI) openCLIRequest(ctx context.Context, tenantID string, m *nats
 	if !nkeys.IsValidPublicAccountKey(principal) {
 		return nil, refuse(payloadbox.ErrorCodeOpenFailed, errors.New("no valid principal header"))
 	}
-	purpose := payloadbox.PurposeCLIRequest
-	if method == MethodAuthRotateKey {
-		purpose = payloadbox.PurposeCLIUserKeySubmit
-	}
+	purpose := cliRequestPurpose(method)
 	msg, body, sealedUnder, err := pki.OpenFromCLI(tenantID, principal, purpose, method, m.Subject, m.Data)
 	if err != nil {
 		if errors.Is(err, payloadbox.ErrOpen) {
@@ -252,6 +249,23 @@ func (s *sealedAPI) openCLIRequest(ctx context.Context, tenantID string, m *nats
 		return nil, err
 	}
 	return req, nil
+}
+
+// cliMethodPurposes are the methods sealed under a purpose of their own
+// rather than c2f.api: a box key rotation, and a shell open (J.5), so a
+// request sealed for one can never be taken for another method's.
+var cliMethodPurposes = map[string]string{
+	MethodAuthRotateKey: payloadbox.PurposeCLIUserKeySubmit,
+	MethodShellOpen:     payloadbox.PurposeShellOpen,
+}
+
+// cliRequestPurpose is the purpose a CLI request for method is sealed
+// under. Its reply is always f2c.api.
+func cliRequestPurpose(method string) string {
+	if p, ok := cliMethodPurposes[method]; ok {
+		return p
+	}
+	return payloadbox.PurposeCLIRequest
 }
 
 // sealCLIReply seals the reply to req: result, or handlerErr's text,

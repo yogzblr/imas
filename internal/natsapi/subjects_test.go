@@ -16,7 +16,7 @@ func TestSubjectReturnsFullSubject(t *testing.T) {
 		{MethodJobsCancel, "imas.api.jobs.cancel"},
 		{MethodAuthWhoAmI, "imas.api.auth.whoami"},
 		{MethodCook, "imas.api.cook"},
-		{MethodShellStart, "imas.api.shell.start"},
+		{MethodShellOpen, "imas.api.shell.open"},
 		{MethodAuditQuery, "imas.api.audit.query"},
 	}
 

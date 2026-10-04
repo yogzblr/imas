@@ -355,7 +355,7 @@ func TestReadOnlyMethods(t *testing.T) {
 		t.Errorf("%d read-only methods, want the design's 19 and the two recipe reads", len(readOnlyMethods))
 	}
 	for _, m := range []string{MethodCohortsRefresh, MethodAuthAddUser, MethodAuthRemoveUser, MethodAuthLogin,
-		MethodCmdRun, MethodCook, MethodShellStart, MethodPKIRotateTenantBoxKey, MethodAuthRotateKey,
+		MethodCmdRun, MethodCook, MethodShellOpen, MethodPKIRotateTenantBoxKey, MethodAuthRotateKey,
 		MethodAuthResetKey, CookTriggerMethod("j1"), "x.y"} {
 		if !IsMutatingMethod(m) {
 			t.Errorf("%s is not treated as mutating", m)

@@ -24,6 +24,7 @@ import (
 	"github.com/yogzblr/imas/internal/jobs"
 	"github.com/yogzblr/imas/internal/natsretry"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/shell"
 
 	nats "github.com/nats-io/nats.go"
 
@@ -326,6 +327,17 @@ func ConnectSprout(ctx context.Context, done chan<- struct{}) {
 		log.Warnf("farmer-triggered payload-encryption key rotation can't complete: this sprout's User JWT has no publish grant for %s; farmer re-mints it, and it takes effect after the next refresh and restart", submit)
 	}
 
+	// Sealed shell's s2f frames need this grant (J.5); a JWT minted
+	// before it can't publish them until a refresh and restart.
+	if grant := shell.SproutOutSubjectPrefix(sproutID) + ".>"; bus.UserJWT != "" && !userJWTGrantsPub(bus.UserJWT, grant) {
+		log.Warnf("shell sessions to this sprout can't work yet: its User JWT has no publish grant for %s.>; farmer re-mints it, and it takes effect after the next refresh and restart", shell.SproutOutSubjectPrefix(sproutID))
+	}
+	pol := shellPolicyFromConfig()
+	shell.SetSproutPolicy(pol)
+	if pol.Disabled {
+		log.Noticef("interactive shell is disabled on this sprout (disableshell)")
+	}
+
 	test.RegisterNatsConn(nc)
 	cmd.RegisterNatsConn(nc)
 	cook.RegisterNatsConn(nc)
@@ -339,5 +351,9 @@ func ConnectSprout(ctx context.Context, done chan<- struct{}) {
 	// Expire old local job logs written by cook runs on this sprout.
 	jobs.StartSproutReaper(ctx, jobLogDir, jobLogTTL)
 	<-ctx.Done()
+	if shellServer != nil {
+		shellServer.CloseAll()
+		_ = nc.FlushTimeout(2 * time.Second)
+	}
 	nc.Close()
 }

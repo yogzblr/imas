@@ -172,7 +172,7 @@ func TestExtractSproutsGetID(t *testing.T) {
 func TestScopeExtractorsRegistry(t *testing.T) {
 	// Verify that all methods expected to have scope extractors are registered.
 	expected := []string{
-		"cook", "cook.resync", "cmd.run", "test.ping", "shell.start",
+		"cook", "cook.resync", "cmd.run", "test.ping", "shell.open",
 		"props.getall", "props.get", "props.set", "props.delete",
 		"jobs.forsprout", "sprouts.get",
 	}

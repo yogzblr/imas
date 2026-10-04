@@ -23,7 +23,7 @@ var scopeExtractors = map[string]scopeExtractor{
 	"cook.resync": extractTargetedSproutIDs,
 	"cmd.run":     extractTargetedSproutIDs,
 	"test.ping":   extractTargetedSproutIDs,
-	"shell.start": extractShellSproutID,
+	"shell.open":  extractShellSproutID,
 
 	// Props methods — extract from sprout_id field
 	"props.getall": extractPropsSproutID,

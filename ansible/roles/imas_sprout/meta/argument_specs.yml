@@ -68,6 +68,14 @@ argument_specs:
             C(busreconnectcap)). A Go duration string, e.g. C(10m).
           - Empty leaves the key alone (the sprout's default is C(5m)). Only ever
             added, never removed, like imas_sprout_bus_reconnect_base.
+      imas_sprout_disable_shell:
+        type: bool
+        description:
+          - Refuse every interactive shell session (C(imas ssh)) on this host,
+            whatever farmer allows (config key C(disableshell)). Checked by the
+            sprout before anything else, so it doesn't depend on farmer.
+          - Default C(false). Always written as C(true) or C(false); the sprout
+            has no default of its own for the key, so it never rewrites it.
       imas_buildkite_org:
         type: str
         description:

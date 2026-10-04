@@ -34,7 +34,7 @@ var natsActionMap = map[string]rbac.Action{
 	MethodCook:        rbac.ActionCook,
 	MethodCookResync:  rbac.ActionCook,
 	MethodCmdRun:      rbac.ActionCmd,
-	MethodShellStart:  rbac.ActionShell,
+	MethodShellOpen:   rbac.ActionShell,
 	MethodTestPing:    rbac.ActionTest,
 	MethodPropsSet:    rbac.ActionProps,
 	MethodPropsDelete: rbac.ActionProps,

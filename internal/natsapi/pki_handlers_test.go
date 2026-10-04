@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -120,6 +121,9 @@ func generateNatsAPICerts(t *testing.T, tmpDir string) {
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		// For the JWT-mode bus in shell_test.go, which farmer pushes
+		// Account updates to over TLS at 127.0.0.1.
+		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
 	}
 
 	leafDER, err := x509.CreateCertificate(rand.Reader, &leafTemplate, &caTemplate, &leafKey.PublicKey, caKey)
@@ -708,89 +712,6 @@ func TestHandleCookNoNATSConn(t *testing.T) {
 	if err.Error() != "NATS connection not available" {
 		t.Errorf("error = %q, want 'NATS connection not available'", err.Error())
 	}
-}
-
-// --- Shell handler tests ---
-
-func TestHandleShellStartInvalidJSON(t *testing.T) {
-	setupNatsAPIPKI(t)
-
-	_, err := handleShellStart(apiCaller{TenantID: pki.CurrentTenantID()}, json.RawMessage(`{invalid`))
-	if err == nil {
-		t.Fatal("expected error for invalid JSON")
-	}
-}
-
-func TestHandleShellStartMissingSproutID(t *testing.T) {
-	setupNatsAPIPKI(t)
-
-	params := json.RawMessage(`{}`)
-	_, err := handleShellStart(apiCaller{TenantID: pki.CurrentTenantID()}, params)
-	if err == nil {
-		t.Fatal("expected error for missing sprout_id")
-	}
-}
-
-func TestHandleShellStartInvalidSproutID(t *testing.T) {
-	setupNatsAPIPKI(t)
-
-	params := json.RawMessage(`{"sprout_id":"BAD_UPPER"}`)
-	_, err := handleShellStart(apiCaller{TenantID: pki.CurrentTenantID()}, params)
-	if err == nil {
-		t.Fatal("expected error for invalid sprout ID")
-	}
-}
-
-func TestHandleShellStartUnknownSprout(t *testing.T) {
-	setupNatsAPIPKI(t)
-
-	params := json.RawMessage(`{"sprout_id":"unknown-sprout"}`)
-	_, err := handleShellStart(apiCaller{TenantID: pki.CurrentTenantID()}, params)
-	if err == nil {
-		t.Fatal("expected error for unknown sprout")
-	}
-}
-
-func TestHandleShellStartSproutIDWithUnderscore(t *testing.T) {
-	setupNatsAPIPKI(t)
-
-	params := json.RawMessage(`{"sprout_id":"sprout_bad"}`)
-	_, err := handleShellStart(apiCaller{TenantID: pki.CurrentTenantID()}, params)
-	if err == nil {
-		t.Fatal("expected error for sprout ID with underscore")
-	}
-}
-
-// --- ShellTracker test ---
-
-func TestShellTracker(t *testing.T) {
-	tracker := ShellTracker()
-	if tracker == nil {
-		t.Fatal("ShellTracker returned nil")
-	}
-}
-
-// --- logShellEnd tests (nil audit logger) ---
-
-func TestLogShellEndNilLogger(t *testing.T) {
-	// Should not panic even with nil global audit logger.
-	// audit.Global() returns nil in test context.
-	info := &struct {
-		SessionID string
-		SproutID  string
-		Pubkey    string
-		RoleName  string
-		Shell     string
-	}{
-		SessionID: "test-session",
-		SproutID:  "test-sprout",
-		Pubkey:    "UTEST",
-		RoleName:  "admin",
-	}
-	// We can't easily call logShellEnd with the shell.SessionInfo type
-	// from here since it requires the actual type. Just verify ShellTracker
-	// works.
-	_ = info
 }
 
 // --- Auth add/remove user tests ---

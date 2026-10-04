@@ -71,7 +71,18 @@ func handlePKIRotateTenantBoxKey(tenantID string, params json.RawMessage) (any, 
 			return nil, fmt.Errorf("invalid request: %w", err)
 		}
 	}
-	return pki.RotateTenantX25519Keypair(tenantID, req.Sever)
+	rot, err := pki.RotateTenantX25519Keypair(tenantID, req.Sever)
+	if err != nil {
+		return nil, err
+	}
+	// A severed key may be in someone else's hands: end this replica's
+	// shell sessions whose leg 2 used it now (key-severed). Other replicas
+	// notice within shellRecheckInterval. A normal rotation keeps the
+	// previous key in the set, so it ends nothing. Synchronous: it reads
+	// nothing unless this tenant has a session, and only signals the
+	// sessions it ends, so nothing outlives the request.
+	shellSessions.recheckTenantKeys(tenantID)
+	return rot, nil
 }
 
 // boxKeySubmitRequest is what a sprout publishes on
