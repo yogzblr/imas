@@ -47,7 +47,15 @@ func TestPrepend(t *testing.T) {
 		t.Fatalf("failed to create file without content %s: %v", fileWithoutContent, err)
 	}
 
-	fakePath := filepath.Join("/", "fakepath")
+	// fakePath names a file that doesn't exist (a dangling symlink into a
+	// missing directory), in a parent that does, and that can't be
+	// created: os.Create follows the link and fails with ENOENT. That
+	// holds for root too, unlike creating a file in "/", which CI
+	// containers running tests as root simply succeed at.
+	fakePath := filepath.Join(tempDir, "dangling-link")
+	if err := os.Symlink(filepath.Join(tempDir, "missing-dir", "target"), fakePath); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
 
 	tests := []struct {
 		name     string
@@ -125,14 +133,19 @@ func TestPrepend(t *testing.T) {
 				Changed:   false,
 				Notes:     []fmt.Stringer{cook.Snprintf("failed to open %s", fakePath)},
 			},
-			// The trailing OS error text varies by platform ("permission
-			// denied" on Linux, "read-only file system" on macOS), so only
-			// the stable prefix is asserted.
+			// Only the stable prefix is asserted; the trailing OS error
+			// text varies by platform.
 			error: fmt.Errorf("failed to create %s: open %s:", fakePath, fakePath),
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			if test.name == "PrependFileInvalidPermissions" && os.Geteuid() == 0 {
+				// Root opens a 0o444 file for writing anyway, and there is
+				// no portable way to make a readable regular file
+				// unwritable for root. Unprivileged runs (CI) cover it.
+				t.Skip("root bypasses file permissions")
+			}
 			f := File{
 				id:     "",
 				method: "",
