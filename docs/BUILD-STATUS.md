@@ -946,8 +946,11 @@ by an external git sync today.
       limited by policy to `tenants/*/recipes/*` (plus append-only
       `tenants/*/recipe-audit/*`). Names are validated strictly and mapped
       to keys by one function. Uploads are validated under farmer's own
-      `IMAS_RECIPE_*` limits and sandbox before anything is stored. The
-      tenant caps are 500 recipes and 20 MiB. Writes are a compare-and-swap
+      `IMAS_RECIPE_*` limits and sandbox before anything is stored.
+      Decided (owner, 2026-10-04): upload validation and cook-time
+      rendering share one set of limits, `farmer.recipes.templateLimits`,
+      with no separate saasapi override. The tenant caps are 500 recipes
+      and 20 MiB. Writes are a compare-and-swap
       (`If-None-Match: *` / `If-Match: "<sha256>"`, 412). Reading and
       writing need separate Keycloak roles, PUT and DELETE are rate-limited,
       and every write and delete is audited without its content, failing

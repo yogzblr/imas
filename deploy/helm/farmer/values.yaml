@@ -232,7 +232,8 @@ farmer:
   # positive whole numbers, renderTimeout a quoted Go duration. Farmer
   # refuses to start if one is out of range (sizes up to 64 MiB, time up
   # to 1m, iterations up to 10000000, maxValueBytes <= maxRenderedBytes).
-  # The SaaS API's recipe upload should validate with the same values.
+  # saasapi validates recipe uploads under these same values (owner
+  # decision, 2026-10-04: one set of limits, no saasapi override).
   recipes:
     templateLimits:
       # A recipe's source, checked on read and before parsing.

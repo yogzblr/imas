@@ -590,7 +590,8 @@ the keys the code writes. saasapi gets the access key id as an env var and
 the secret key only as a file. It validates uploads under
 `farmer.recipes.templateLimits`, which it receives as the same
 `IMAS_RECIPE_*` variables farmer gets, so a recipe that uploads is a recipe
-farmer will render. Reading needs `saasapi.recipes.readRole` or `writeRole`
+farmer will render. That one set of limits for both is an owner decision
+(2026-10-04): there is no separate saasapi value to override it. Reading needs `saasapi.recipes.readRole` or `writeRole`
 (Keycloak realm roles, or client roles of `saasapi.jwt.audience`), and
 writing needs `writeRole`. Egress to the object store goes through
 `networkPolicy.saasapiExtraEgress`: its default allows 443, so add the port

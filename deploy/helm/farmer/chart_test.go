@@ -971,18 +971,40 @@ func TestSaasapiRecipesEnv(t *testing.T) {
 	limits := []string{"IMAS_RECIPE_MAX_SOURCE_BYTES", "IMAS_RECIPE_MAX_RENDERED_BYTES", "IMAS_RECIPE_MAX_VALUE_BYTES",
 		"IMAS_RECIPE_RENDER_TIMEOUT", "IMAS_RECIPE_MAX_RANGE_ITERATIONS"}
 
-	// Off (the default): limits, roles and caps, but no store.
-	docs := mustRender(t, "--set", "farmer.recipes.templateLimits.maxSourceBytes=131072")
-	s := envValues(container(t, find(t, docs, "Deployment", "t-farmer-saasapi"), "saasapi"))
-	f := envValues(container(t, farmerDeploy(t, docs), "farmer"))
-	for _, name := range limits {
-		if s[name] == "" || s[name] != f[name] {
-			t.Errorf("%s: saasapi %q, farmer %q; want the same value", name, s[name], f[name])
+	// One set of limits for both (owner decision, 2026-10-04): saasapi's
+	// upload validator gets exactly farmer's farmer.recipes.templateLimits,
+	// at the defaults and with every value overridden, and there is no
+	// saasapi-side override (a saasapi.recipes.templateLimits value is
+	// ignored).
+	overridden := []string{
+		"--set", "farmer.recipes.templateLimits.maxSourceBytes=131072",
+		"--set", "farmer.recipes.templateLimits.maxRenderedBytes=4194304",
+		"--set", "farmer.recipes.templateLimits.maxValueBytes=65536",
+		"--set-string", "farmer.recipes.templateLimits.renderTimeout=500ms",
+		"--set", "farmer.recipes.templateLimits.maxRangeIterations=2000",
+	}
+	for _, tc := range []struct {
+		args []string
+		want []string // in the order of limits
+	}{
+		{nil, []string{"262144", "1048576", "262144", "2s", "10000"}},
+		{overridden, []string{"131072", "4194304", "65536", "500ms", "2000"}},
+		{append(slices.Clone(overridden), "--set", "saasapi.recipes.templateLimits.maxSourceBytes=1"),
+			[]string{"131072", "4194304", "65536", "500ms", "2000"}},
+	} {
+		docs := mustRender(t, tc.args...)
+		s := envValues(container(t, find(t, docs, "Deployment", "t-farmer-saasapi"), "saasapi"))
+		f := envValues(container(t, farmerDeploy(t, docs), "farmer"))
+		for i, name := range limits {
+			if s[name] != tc.want[i] || f[name] != tc.want[i] {
+				t.Errorf("%v: %s: saasapi %q, farmer %q; want both %q", tc.args, name, s[name], f[name], tc.want[i])
+			}
 		}
 	}
-	if s["IMAS_RECIPE_MAX_SOURCE_BYTES"] != "131072" {
-		t.Errorf("IMAS_RECIPE_MAX_SOURCE_BYTES = %q", s["IMAS_RECIPE_MAX_SOURCE_BYTES"])
-	}
+
+	// Off (the default): roles and caps, but no store.
+	docs := mustRender(t)
+	s := envValues(container(t, find(t, docs, "Deployment", "t-farmer-saasapi"), "saasapi"))
 	for name, want := range map[string]string{
 		"SAASAPI_RECIPES_READ_ROLE": "imas-recipes-read", "SAASAPI_RECIPES_WRITE_ROLE": "imas-recipes-write",
 		"SAASAPI_RECIPES_MAX_COUNT": "500", "SAASAPI_RECIPES_MAX_TOTAL_BYTES": "20971520",
