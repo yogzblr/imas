@@ -119,6 +119,20 @@ type enrollServer struct {
 	refreshBodies []map[string]any
 	// natsURLs is what POST /v1/enroll returns as nats_urls.
 	natsURLs []string
+	// refreshTenantOverride, if set, is the tenant_id POST /v1/refresh
+	// names instead of the real one.
+	refreshTenantOverride string
+}
+
+// refreshTenant is the tenant_id POST /v1/refresh returns: real, unless
+// a test overrode it.
+func (s *enrollServer) refreshTenant(real string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.refreshTenantOverride != "" {
+		return s.refreshTenantOverride
+	}
+	return real
 }
 
 // setNatsURLs changes what later POST /v1/enroll responses carry as
@@ -168,7 +182,7 @@ func startEnrollServer(t *testing.T) *enrollServer {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(EnrollResponse{
-			SproutID: res.SproutID, JWT: res.JWT, GatewayJWT: res.GatewayJWT,
+			SproutID: res.SproutID, TenantID: res.TenantID, JWT: res.JWT, GatewayJWT: res.GatewayJWT,
 			NKeyIdentity: req.NKeyPub, TenantX25519Pub: res.TenantX25519Pub,
 			NatsURLs:               natsURLs,
 			TenantX25519Continuity: res.TenantX25519Continuity,
@@ -193,7 +207,7 @@ func startEnrollServer(t *testing.T) *enrollServer {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(RefreshResponse{
-			SproutID: res.SproutID, JWT: res.JWT, GatewayJWT: res.GatewayJWT,
+			SproutID: res.SproutID, TenantID: s.refreshTenant(res.TenantID), JWT: res.JWT, GatewayJWT: res.GatewayJWT,
 			NKeyIdentity: req.NKeyPub, TenantX25519Pub: res.TenantX25519Pub,
 			TenantX25519Continuity: res.TenantX25519Continuity,
 		})
@@ -299,6 +313,17 @@ func TestEnrollSprout_EnrollPersistAndRefresh(t *testing.T) {
 	if sent.NKeyPub != nkeyPub || sent.SproutPub != sproutPub || sent.Hostname != "web-01" {
 		t.Errorf("request carried the wrong identity: %+v", sent)
 	}
+	// Two requests: the first without a proof of possession of the box
+	// key, the second with one, after which farmer has recorded it.
+	srv.mu.Lock()
+	reqs := append([]enrollWireRequest(nil), srv.requests...)
+	srv.mu.Unlock()
+	if len(reqs) != 2 || len(reqs[0].SproutPubProof) != 0 || len(reqs[1].SproutPubProof) == 0 {
+		t.Fatalf("enrollment sent %d requests, want 2: the second, only, carrying sprout_pub_proof", len(reqs))
+	}
+	if active, _, err := ValidSproutBoxKeys(resp.TenantID, "web-01"); err != nil || active != sproutPub {
+		t.Errorf("farmer's active box key = %q, %v; want the proven %q", active, err, sproutPub)
+	}
 	if resp.SproutID != "web-01" {
 		t.Errorf("sprout_id = %q, want web-01", resp.SproutID)
 	}
@@ -362,8 +387,10 @@ func TestEnrollSprout_EnrollPersistAndRefresh(t *testing.T) {
 	if store.rows["ek_1"].UsedCount != 1 {
 		t.Errorf("used_count = %d after refresh, want 1", store.rows["ek_1"].UsedCount)
 	}
-	if minter.calls != 2 {
-		t.Errorf("gateway JWT mints = %d, want 2", minter.calls)
+	// Enrollment is two requests (the second proves possession of the
+	// box key), then one refresh.
+	if minter.calls != 3 {
+		t.Errorf("gateway JWT mints = %d, want 3", minter.calls)
 	}
 	gw, _ := LoadGatewayJWT()
 	if gw == firstGateway || gw != CurrentGatewayJWT() {
@@ -476,6 +503,7 @@ func TestValidateEnrollResponse(t *testing.T) {
 	good := func() *EnrollResponse {
 		return &EnrollResponse{
 			SproutID:        "web-01",
+			TenantID:        "t_1",
 			JWT:             userJWTFor(nkeyPub),
 			GatewayJWT:      gatewayFor(nkeyPub, time.Now().Add(time.Hour)),
 			NKeyIdentity:    nkeyPub,
@@ -495,6 +523,8 @@ func TestValidateEnrollResponse(t *testing.T) {
 		"gateway already expired":  func(r *EnrollResponse) { r.GatewayJWT = gatewayFor(nkeyPub, time.Now().Add(-time.Minute)) },
 		"gateway not a JWT":        func(r *EnrollResponse) { r.GatewayJWT = "garbage" },
 		"bad tenant_x25519_pub":    func(r *EnrollResponse) { r.TenantX25519Pub = "AAAA" },
+		"no tenant_id":             func(r *EnrollResponse) { r.TenantID = "" },
+		"invalid tenant_id":        func(r *EnrollResponse) { r.TenantID = "../t_1" },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -618,8 +648,8 @@ func TestRunGatewayJWTRefresher_RefreshesExpiredTokenAndStops(t *testing.T) {
 	minter.mu.Lock()
 	calls := minter.calls
 	minter.mu.Unlock()
-	if calls != 2 {
-		t.Errorf("gateway JWT mints = %d, want 2 (enroll + one refresh, then sleep until due)", calls)
+	if calls != 3 {
+		t.Errorf("gateway JWT mints = %d, want 3 (enroll's two requests + one refresh, then sleep until due)", calls)
 	}
 	if strings.TrimSpace(CurrentGatewayJWT()) == "" {
 		t.Error("expected a gateway JWT in memory")
@@ -791,7 +821,7 @@ func TestPersistEnrollment_TenantKeyMismatchRefused(t *testing.T) {
 	if err := os.WriteFile(config.SproutTenantX25519PubFile, []byte(pinned), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	resp := &EnrollResponse{JWT: "user-jwt", GatewayJWT: "gw-jwt", TenantX25519Pub: otherBoxPub(t)}
+	resp := &EnrollResponse{TenantID: "t_1", JWT: "user-jwt", GatewayJWT: "gw-jwt", TenantX25519Pub: otherBoxPub(t)}
 	if err := PersistEnrollment(resp); !errors.Is(err, ErrTenantKeyMismatch) {
 		t.Fatalf("PersistEnrollment = %v, want ErrTenantKeyMismatch", err)
 	}
@@ -806,11 +836,38 @@ func TestPersistEnrollment_TenantKeyMismatchRefused(t *testing.T) {
 	}
 }
 
+// H3 (security review 2026-10): the tenant is pinned at enrollment and
+// never moves. An enrollment response naming another tenant fails before
+// writing anything.
+func TestPersistEnrollment_TenantMismatchRefused(t *testing.T) {
+	setupSproutFiles(t)
+	pub := otherBoxPub(t)
+	if err := PersistEnrollment(&EnrollResponse{TenantID: "t_1", JWT: "user-jwt", GatewayJWT: "gw-jwt", TenantX25519Pub: pub}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := SproutTenantID(); err != nil || got != "t_1" {
+		t.Fatalf("pinned tenant = %q, %v; want t_1", got, err)
+	}
+	if err := os.Remove(config.SproutGatewayJWTFile); err != nil {
+		t.Fatal(err)
+	}
+	err := PersistEnrollment(&EnrollResponse{TenantID: "t_2", JWT: "user-jwt", GatewayJWT: "gw-jwt", TenantX25519Pub: pub})
+	if !errors.Is(err, ErrSproutTenantMismatch) {
+		t.Fatalf("PersistEnrollment for another tenant = %v, want ErrSproutTenantMismatch", err)
+	}
+	if _, err := os.Stat(config.SproutGatewayJWTFile); !os.IsNotExist(err) {
+		t.Error("an enrollment for another tenant wrote the gateway JWT")
+	}
+	if got, _ := SproutTenantID(); got != "t_1" {
+		t.Errorf("tenant pin moved to %q", got)
+	}
+}
+
 // The same key again (a replay after a crash mid-persist) is fine.
 func TestPersistEnrollment_SameTenantKeyAccepted(t *testing.T) {
 	setupSproutFiles(t)
 	pub := otherBoxPub(t)
-	resp := &EnrollResponse{JWT: "user-jwt", GatewayJWT: "gw-jwt", TenantX25519Pub: pub}
+	resp := &EnrollResponse{TenantID: "t_1", JWT: "user-jwt", GatewayJWT: "gw-jwt", TenantX25519Pub: pub}
 	if err := PersistEnrollment(resp); err != nil {
 		t.Fatal(err)
 	}
@@ -835,5 +892,70 @@ func TestRefreshGatewayJWT_MissingTenantKeyPinRefused(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(config.SproutGatewayJWTFile); string(b) != string(gwBefore) {
 		t.Error("a refused refresh persisted its gateway JWT")
+	}
+}
+
+// H3 (security review 2026-10): every refresh checks farmer's tenant_id
+// against the tenant pinned at enrollment. A matching one passes; another
+// tenant is the fatal ErrSproutTenantMismatch and nothing is persisted.
+func TestRefreshGatewayJWT_TenantChecked(t *testing.T) {
+	srv, _, _ := enrollForTest(t)
+	if _, err := RefreshGatewayJWT(t.Context()); err != nil {
+		t.Fatalf("refresh naming the pinned tenant: %v", err)
+	}
+
+	gwBefore, _ := os.ReadFile(config.SproutGatewayJWTFile)
+	srv.mu.Lock()
+	srv.refreshTenantOverride = "t_2"
+	srv.mu.Unlock()
+	_, err := RefreshGatewayJWT(t.Context())
+	if !errors.Is(err, ErrSproutTenantMismatch) || !IsFatalRefreshError(err) {
+		t.Fatalf("refresh naming another tenant = %v, want the fatal ErrSproutTenantMismatch", err)
+	}
+	if b, _ := os.ReadFile(config.SproutGatewayJWTFile); string(b) != string(gwBefore) {
+		t.Error("a refresh naming another tenant persisted its gateway JWT")
+	}
+	if got, _ := SproutTenantID(); got != "t_1" {
+		t.Errorf("tenant pin moved to %q", got)
+	}
+}
+
+// A sprout with no tenant pin (one enrolled before SEC.3b, or tampered
+// state) is refused on refresh rather than pinning whatever farmer names:
+// the pin is only ever set at enrollment, so it has to re-enroll.
+func TestRefreshGatewayJWT_MissingTenantPinRefused(t *testing.T) {
+	enrollForTest(t)
+	if err := os.Remove(SproutTenantIDFile()); err != nil {
+		t.Fatal(err)
+	}
+	gwBefore, _ := os.ReadFile(config.SproutGatewayJWTFile)
+	_, err := RefreshGatewayJWT(t.Context())
+	if !errors.Is(err, ErrSproutTenantNotPinned) || !IsFatalRefreshError(err) {
+		t.Fatalf("refresh with no tenant pin = %v, want the fatal ErrSproutTenantNotPinned", err)
+	}
+	if _, err := os.Stat(SproutTenantIDFile()); !os.IsNotExist(err) {
+		t.Error("a refresh pinned a tenant")
+	}
+	if b, _ := os.ReadFile(config.SproutGatewayJWTFile); string(b) != string(gwBefore) {
+		t.Error("a refused refresh persisted its gateway JWT")
+	}
+}
+
+// The refresher stops on a tenant mismatch rather than retrying.
+func TestRunGatewayJWTRefresher_StopsOnTenantMismatch(t *testing.T) {
+	srv, _, _ := enrollForTest(t)
+	srv.mu.Lock()
+	srv.refreshTenantOverride = "t_2"
+	srv.mu.Unlock()
+	setCurrentGatewayJWT("") // due now
+	done := make(chan error, 1)
+	go func() { done <- RunGatewayJWTRefresher(t.Context(), "web-01", 10*time.Millisecond) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrSproutTenantMismatch) {
+			t.Fatalf("RunGatewayJWTRefresher = %v, want ErrSproutTenantMismatch", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the refresher kept retrying a tenant mismatch")
 	}
 }

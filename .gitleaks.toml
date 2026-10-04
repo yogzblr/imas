@@ -17,4 +17,7 @@ regexes = [
   '''ek91cd2a\.c2VjcmV0''',
   '''PurposeBoxKeySubmit\s*=\s*"s2f\.boxkey\.pub"''',
   '''PurposeTenantKeyContinuity\s*=\s*"f2s\.tenantkey\.continuity"''',
+  # Dummy log-sink marker in SEC.3b's cmd.run test as first committed
+  # (5f3480f); replaced since, but that commit stays in history.
+  '''secret\s*=\s*"s3cret-cmd-91fe"''',
 ]

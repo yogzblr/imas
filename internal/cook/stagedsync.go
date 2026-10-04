@@ -88,14 +88,36 @@ var (
 
 // NotePushedEnvelope records a job the sprout received by NATS push, so a
 // later pull of its staged copy is skipped and a pull in flight is
-// dropped. Call it before cooking the pushed envelope.
+// dropped. Call it before cooking the pushed envelope. RespondCook uses
+// claimPushedEnvelope instead, which also refuses a job already handled.
 func NotePushedEnvelope(jobID string) {
-	handledMu.Lock()
-	defer handledMu.Unlock()
-	pushGen++
-	if err := recordHandledJob(jobID); err != nil {
+	if _, err := claimPushedEnvelope(jobID); err != nil {
 		log.Errorf("cook: recording pushed job %s as handled: %v", jobID, err)
 	}
+}
+
+// claimPushedEnvelope records jobID, a job the sprout received by NATS
+// push, as handled, and reports whether it was new: false if the handled
+// jobs file already lists it, in which case it must not be cooked again
+// (security review 2026-10, M2: a dispatch replayed after a restart, or
+// sent twice, names a job this sprout already ran). An error means the
+// file couldn't be read or written, and the job must not be cooked
+// either: nothing would then stop it being cooked a second time.
+func claimPushedEnvelope(jobID string) (bool, error) {
+	handledMu.Lock()
+	defer handledMu.Unlock()
+	handled, err := loadHandledJobs()
+	if err != nil {
+		return false, err
+	}
+	if slices.Contains(handled, jobID) {
+		return false, nil
+	}
+	if err := recordHandledJob(jobID); err != nil {
+		return false, err
+	}
+	pushGen++
+	return true, nil
 }
 
 // SyncStagedRecipe pulls this sprout's staged recipe and cooks it if the

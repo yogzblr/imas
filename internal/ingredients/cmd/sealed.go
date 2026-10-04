@@ -143,7 +143,7 @@ func RespondCmdRun(sproutID string, m *nats.Msg) *nats.Msg {
 	}
 	var cmdRun apitypes.CmdRun
 	if err := json.Unmarshal(msg.Body, &cmdRun); err != nil {
-		log.Warnf("cmd: refusing a sealed cmd.run: decoding its body: %v", err)
+		log.Warnf("cmd: refusing a sealed cmd.run: its body does not decode as a command")
 		return refusal(payloadbox.ErrorCodeOpenFailed)
 	}
 	cmdRun.StreamTopic = ""

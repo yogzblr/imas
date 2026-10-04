@@ -62,6 +62,7 @@ import (
 	"github.com/nats-io/nkeys"
 	"golang.org/x/crypto/nacl/box"
 
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
@@ -79,6 +80,10 @@ type enrollRequest struct {
 	SproutPub string `json:"sprout_pub"`
 	Timestamp int64  `json:"timestamp"`
 	NKeySig   string `json:"nkey_sig"`
+	// SproutPubProof is the sprout's proof that it holds SproutPub's
+	// private half, on the second request of a first enrollment
+	// (internal/pki's enroll.go). The stub records a box key only from it.
+	SproutPubProof json.RawMessage `json:"sprout_pub_proof,omitempty"`
 }
 
 type refreshRequest struct {
@@ -92,11 +97,24 @@ type State struct {
 	// Redemptions counts join token uses: first-time enrollments only.
 	Redemptions int `json:"redemptions"`
 	// EnrollRequests counts every POST /v1/enroll, replays and failures
-	// included.
+	// included. A first enrollment is two requests (the second proves
+	// possession of the box key; internal/pki's enroll.go), so this is
+	// twice the number of sprouts when every enrollment went cleanly.
 	EnrollRequests int `json:"enroll_requests"`
+	// CompletedEnrollments counts NKeys whose enrollment completed: the
+	// box key proof verified and the box key was recorded. Once per
+	// sprout.
+	CompletedEnrollments int `json:"completed_enrollments"`
+	// ReenrollRequests counts POST /v1/enroll requests from an NKey whose
+	// enrollment had already completed: an enrolled sprout enrolling
+	// again. Zero when every sprout enrolled exactly once.
+	ReenrollRequests int `json:"reenroll_requests"`
 	// Sprouts maps each enrolled NKey to its sprout ID.
 	Sprouts map[string]string `json:"sprouts"`
-	// Connected lists the NKeys with a client connection to the bus.
+	// Connected lists the NKeys with a client connection to the bus. It
+	// includes the stub's own connection (connectBus, a User named
+	// "stubfarmer" minted fresh at each start), so it has one more entry
+	// than there are sprouts.
 	Connected []string `json:"connected"`
 }
 
@@ -120,9 +138,13 @@ type farmer struct {
 	mu             sync.Mutex
 	redemptions    int
 	enrollRequests int
-	sprouts        map[string]string    // nkey_pub -> sprout ID
-	sproutBox      map[string]*[32]byte // sprout ID -> its X25519 box public key
-	seenSigs       map[string]bool
+	// completed holds the NKeys whose enrollment completed (box key proof
+	// verified), and reenrollRequests counts requests from them since.
+	completed        map[string]bool
+	reenrollRequests int
+	sprouts          map[string]string    // nkey_pub -> sprout ID
+	sproutBox        map[string]*[32]byte // sprout ID -> its X25519 box public key
+	seenSigs         map[string]bool
 }
 
 func newFarmer(joinToken string, maxUses int, natsURLs []string) (*farmer, error) {
@@ -159,6 +181,7 @@ func newFarmer(joinToken string, maxUses int, natsURLs []string) (*farmer, error
 		now:           time.Now,
 		connected:     func() []string { return nil },
 		sprouts:       map[string]string{},
+		completed:     map[string]bool{},
 		seenSigs:      map[string]bool{},
 	}, nil
 }
@@ -229,6 +252,9 @@ func (f *farmer) enroll(w http.ResponseWriter, r *http.Request) {
 		enrollmentFailed(w, "proof of possession: "+err.Error())
 		return
 	}
+	if f.completed[req.NKeyPub] {
+		f.reenrollRequests++
+	}
 	sproutID, enrolled := f.sprouts[req.NKeyPub]
 	if !enrolled {
 		if subtle.ConstantTimeCompare([]byte(req.JoinToken), []byte(f.joinToken)) != 1 {
@@ -250,7 +276,31 @@ func (f *farmer) enroll(w http.ResponseWriter, r *http.Request) {
 	} else {
 		log.Printf("enroll: replayed sprout %s", sproutID)
 	}
-	f.sproutBox[sproutID] = sproutBoxPub
+	if len(req.SproutPubProof) > 0 {
+		if !enrolled {
+			enrollmentFailed(w, "sprout_pub_proof on a first enrollment")
+			return
+		}
+		// As farmer's verifyEnrollProof: sealed by the holder of
+		// sprout_pub's private half to the tenant key, for this tenant
+		// and sprout, naming this NKey and box key.
+		pair := []payloadbox.KeyPair{{PeerPub: sproutBoxPub, Priv: f.tenantBoxPriv}}
+		opened, err := payloadbox.Open(req.SproutPubProof, pair,
+			payloadbox.Expect{Purpose: payloadbox.PurposeEnrollProof, TenantID: stubTenantID, SproutID: sproutID})
+		var body struct {
+			NKeyPub   string `json:"nkey_pub"`
+			SproutPub string `json:"sprout_pub"`
+		}
+		if err != nil || json.Unmarshal(opened.Body, &body) != nil || body.NKeyPub != req.NKeyPub || body.SproutPub != req.SproutPub {
+			enrollmentFailed(w, "sprout_pub_proof does not verify")
+			return
+		}
+		f.sproutBox[sproutID] = sproutBoxPub
+		if !f.completed[req.NKeyPub] {
+			f.completed[req.NKeyPub] = true
+			log.Printf("enroll: sprout %s proved possession of its box key; enrollment complete", sproutID)
+		}
+	}
 	userJWT, gatewayJWT, err := f.mint(req.NKeyPub, sproutID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -258,6 +308,7 @@ func (f *farmer) enroll(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, pki.EnrollResponse{
 		SproutID:        sproutID,
+		TenantID:        stubTenantID,
 		JWT:             userJWT,
 		GatewayJWT:      gatewayJWT,
 		NKeyIdentity:    req.NKeyPub,
@@ -290,6 +341,7 @@ func (f *farmer) refresh(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, pki.RefreshResponse{
 		SproutID:        sproutID,
+		TenantID:        stubTenantID,
 		JWT:             userJWT,
 		GatewayJWT:      gatewayJWT,
 		NKeyIdentity:    req.NKeyPub,
@@ -328,9 +380,11 @@ func (f *farmer) mint(nkeyPub, sproutID string) (string, string, error) {
 func (f *farmer) state(w http.ResponseWriter, _ *http.Request) {
 	f.mu.Lock()
 	st := State{
-		Redemptions:    f.redemptions,
-		EnrollRequests: f.enrollRequests,
-		Sprouts:        map[string]string{},
+		Redemptions:          f.redemptions,
+		EnrollRequests:       f.enrollRequests,
+		CompletedEnrollments: len(f.completed),
+		ReenrollRequests:     f.reenrollRequests,
+		Sprouts:              map[string]string{},
 	}
 	for k, v := range f.sprouts {
 		st.Sprouts[k] = v

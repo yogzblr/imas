@@ -14,6 +14,17 @@ package pki
 // promotion takes effect on the very next message and no private key is
 // held in memory between messages.
 //
+// The sprout also pins its tenant ID at enrollment (pinSproutTenant,
+// next to the tenant key pin; security review 2026-10, H3). Every
+// message it seals names that tenant, and it refuses every message that
+// names another, even one that opens under its keys. The tenant pin never
+// moves: a sprout belongs to one tenant for life.
+//
+// Replay protection survives a restart (M2): the replay guard's state,
+// message IDs and timestamps only, is written atomically, 0600, to
+// sproutReplayGuardFile before a message is acted on, and loaded back on
+// the first message after a start. See sproutGuard.
+//
 // The pin only ever moves through reconcileTenantKeyPin: farmer's
 // refresh (or enrollment) response names a different tenant key AND
 // carries a continuity proof that opens under the currently pinned key,
@@ -78,6 +89,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -104,7 +116,7 @@ var ErrSproutBoxKeyRotationTooSoon = errors.New("pki: the previous box key rotat
 // a rotation replaced (config.SproutBoxKeyPrevGrace is raised to it).
 // Everything opened with that key is a farmer payload sealed before
 // farmer recorded the new key, and a payload is refused once its
-// IssuedAt is payloadbox.DefaultMaxSkew old (sproutReplayGuard). The one
+// IssuedAt is payloadbox.DefaultMaxSkew old (sproutGuard). The one
 // that promoted the new key was issued after farmer recorded it and at
 // most DefaultMaxSkew ahead of the sprout's clock at promotion, so
 // anything sealed to the old key is stale within 2*DefaultMaxSkew of
@@ -151,9 +163,146 @@ type sproutBoxKeySubmitBody struct {
 	Pub string `json:"pub"`
 }
 
-// sproutReplayGuard remembers the farmer->sprout messages this process
-// has accepted (payloadbox.ReplayGuard).
-var sproutReplayGuard = payloadbox.NewReplayGuard()
+// ErrSproutTenantMismatch means farmer named a different tenant than the
+// one this sprout pinned at enrollment. Nothing from that response is
+// persisted; callers treat it as fatal, like ErrTenantKeyMismatch.
+var ErrSproutTenantMismatch = errors.New("pki: farmer named a different tenant than the one this sprout was enrolled in; refusing it")
+
+// ErrSproutTenantNotPinned means the sprout has payload-encryption keys
+// but no pinned tenant ID. It can neither seal nor open anything: it
+// fails closed, and re-enrolling fixes it.
+var ErrSproutTenantNotPinned = errors.New("pki: sprout has no pinned tenant ID; re-enroll it")
+
+// SproutTenantIDFile is where the sprout pins its tenant ID, next to
+// config.SproutTenantX25519PubFile, the tenant key pin it goes with.
+func SproutTenantIDFile() string {
+	return filepath.Join(filepath.Dir(config.SproutTenantX25519PubFile), "tenant-id")
+}
+
+// pinSproutTenant pins tenantID as this sprout's tenant if none is pinned
+// yet. It never replaces a pin: a different tenant is
+// ErrSproutTenantMismatch.
+func pinSproutTenant(tenantID string) error {
+	if !IsValidTenantID(tenantID) {
+		return fmt.Errorf("pki: farmer named an invalid tenant_id %q", tenantID)
+	}
+	err := writeFileOnce(SproutTenantIDFile(), []byte(tenantID), 0o644)
+	if err == nil {
+		return nil
+	}
+	if !os.IsExist(err) {
+		return fmt.Errorf("pki: pinning tenant ID: %w", err)
+	}
+	return checkPinnedSproutTenant(tenantID)
+}
+
+// checkPinnedSproutTenant returns ErrSproutTenantMismatch if a tenant is
+// pinned and tenantID isn't it. No pin yet is not an error.
+func checkPinnedSproutTenant(tenantID string) error {
+	pinned, err := SproutTenantID()
+	if errors.Is(err, ErrSproutTenantNotPinned) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if pinned != tenantID {
+		return ErrSproutTenantMismatch
+	}
+	return nil
+}
+
+// SproutTenantID returns the tenant this sprout pinned at enrollment, or
+// ErrSproutTenantNotPinned.
+func SproutTenantID() (string, error) {
+	b, err := os.ReadFile(SproutTenantIDFile())
+	if os.IsNotExist(err) {
+		return "", ErrSproutTenantNotPinned
+	}
+	if err != nil {
+		return "", fmt.Errorf("pki: reading pinned tenant ID: %w", err)
+	}
+	id := strings.TrimSpace(string(b))
+	if !IsValidTenantID(id) {
+		return "", fmt.Errorf("pki: pinned tenant ID %q is malformed", id)
+	}
+	return id, nil
+}
+
+// sproutReplayGuardFile is where the sprout's replay guard is persisted,
+// next to its box private key.
+func sproutReplayGuardFile() string {
+	return filepath.Join(filepath.Dir(config.SproutBoxPrivFile), "payload-replay.json")
+}
+
+var (
+	sproutGuardMu   sync.Mutex
+	sproutGuardPath string
+	sproutGuardInst *payloadbox.ReplayGuard
+	// sproutProcessStart is when this process started, for the
+	// fallback floor of a replay guard file that can't be read.
+	sproutProcessStart = time.Now()
+)
+
+// sproutGuard returns the replay guard for farmer->sprout messages,
+// loading its persisted state the first time it is used in this process
+// (or after the configured path changes, which only tests do). Every
+// state it accepts a message in is written to sproutReplayGuardFile,
+// atomically and 0600, before the message is acted on
+// (payloadbox.ReplayGuard.Commit), so a restart forgets nothing.
+//
+// A missing file is a fresh guard: a sprout that has never accepted a
+// sealed message. A file that exists but can't be read or parsed fails
+// closed for one window: the guard refuses anything issued before this
+// process started plus payloadbox.DefaultMaxSkew, which covers every
+// message an earlier process could have accepted, at the cost of
+// refusing farmer's messages for up to five minutes. The file is
+// rewritten with the next accepted message.
+func sproutGuard() *payloadbox.ReplayGuard {
+	sproutGuardMu.Lock()
+	defer sproutGuardMu.Unlock()
+	path := sproutReplayGuardFile()
+	if sproutGuardInst != nil && sproutGuardPath == path {
+		return sproutGuardInst
+	}
+	g := payloadbox.NewReplayGuard()
+	raw, err := os.ReadFile(path)
+	switch {
+	case os.IsNotExist(err):
+	case err == nil:
+		var st payloadbox.ReplayState
+		if err = json.Unmarshal(raw, &st); err == nil {
+			err = g.Restore(st)
+		}
+	}
+	if err != nil && !os.IsNotExist(err) {
+		log.Errorf("pki: the replay guard file %s can't be read (%v); refusing farmer messages issued before %s", path, err,
+			sproutProcessStart.Add(payloadbox.DefaultMaxSkew).UTC().Format(time.RFC3339))
+		_ = g.Restore(payloadbox.ReplayState{V: payloadbox.ReplayStateVersion,
+			Floor: sproutProcessStart.Add(payloadbox.DefaultMaxSkew).Unix()})
+	}
+	g.Commit = func(st payloadbox.ReplayState) error {
+		b, err := json.Marshal(st)
+		if err != nil {
+			return err
+		}
+		if err := writeFileAtomic(path, b, 0o600); err != nil {
+			return fmt.Errorf("pki: persisting the replay guard: %w", err)
+		}
+		return nil
+	}
+	sproutGuardInst, sproutGuardPath = g, path
+	return g
+}
+
+// ForgetSproutReplayGuard drops the in-memory replay guard, as a restart
+// does: the next message loads it from disk again. For tests that
+// simulate a sprout restart; nothing else needs it.
+func ForgetSproutReplayGuard() {
+	sproutGuardMu.Lock()
+	defer sproutGuardMu.Unlock()
+	sproutGuardInst, sproutGuardPath = nil, ""
+}
 
 // SproutBoxReady reports whether this sprout has both keys it needs to
 // seal and open payloads. A sprout that does refuses plaintext on sealed
@@ -170,9 +319,10 @@ func SproutBoxReady() bool {
 	return true
 }
 
-// sproutBoxKeys is the pinned tenant public key and every box private
-// key the sprout holds. The caller wipes it when done.
+// sproutBoxKeys is the pinned tenant ID and public key and every box
+// private key the sprout holds. The caller wipes it when done.
 type sproutBoxKeys struct {
+	tenantID  string
 	tenantPub *[32]byte
 	current   *[32]byte
 	// pending is nil unless a rotation is in progress.
@@ -204,7 +354,11 @@ func loadSproutBoxKeysLocked() (*sproutBoxKeys, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pki: pinned tenant X25519 public key: %w", err)
 	}
-	k := &sproutBoxKeys{tenantPub: tenantPub}
+	tenantID, err := SproutTenantID()
+	if err != nil {
+		return nil, err
+	}
+	k := &sproutBoxKeys{tenantID: tenantID, tenantPub: tenantPub}
 	if k.current, err = readBoxPrivKeyFile(config.SproutBoxPrivFile, false); err != nil {
 		return nil, err
 	}
@@ -269,7 +423,7 @@ func openAsSprout(sproutID, purpose string, data []byte) (msg *payloadbox.Messag
 		return nil, "", err
 	}
 	defer keys.wipe()
-	want := payloadbox.Expect{Purpose: purpose, SproutID: sproutID}
+	want := payloadbox.Expect{Purpose: purpose, TenantID: keys.tenantID, SproutID: sproutID}
 	for _, priv := range []*[32]byte{keys.current, keys.pending, keys.previous} {
 		if priv == nil {
 			continue
@@ -334,7 +488,9 @@ func promoteSproutBoxKey(pendingPub string) error {
 			log.Warnf("pki: writing sprout X25519 public key: %v", err)
 		}
 	}
-	log.Noticef("pki: farmer is sealing to the new payload-encryption key %s; it is now current, and the one it replaced is kept for %s", pub, SproutBoxKeyPrevGrace())
+	// Not the key itself: this line is shipped over the bus, and a
+	// sprout's box public keys are for farmer alone (review 2026-10, H3).
+	log.Noticef("pki: farmer is sealing to the new payload-encryption key; it is now current, and the one it replaced is kept for %s", SproutBoxKeyPrevGrace())
 	return nil
 }
 
@@ -390,7 +546,7 @@ func BeginSproutBoxKeyRotation(sproutID string) (submission []byte, pub string, 
 	if pub, err = boxPubFromPriv(keys.pending); err != nil {
 		return nil, "", err
 	}
-	msg, err := payloadbox.NewMessage(payloadbox.PurposeBoxKeySubmit, sproutID, "", sproutBoxKeySubmitBody{Pub: pub})
+	msg, err := payloadbox.NewMessage(payloadbox.PurposeBoxKeySubmit, keys.tenantID, sproutID, "", sproutBoxKeySubmitBody{Pub: pub})
 	if err != nil {
 		return nil, "", err
 	}
@@ -402,9 +558,11 @@ func BeginSproutBoxKeyRotation(sproutID string) (submission []byte, pub string, 
 }
 
 // SproutOpenFromFarmer opens data, a payload farmer sealed for sproutID
-// under purpose, and checks it is fresh and not a replay
-// (payloadbox.ErrOpen, ErrStale, ErrReplayed; distinguishable in the
-// sprout's own log only: a reply to farmer carries one generic code).
+// in the pinned tenant under purpose, and checks it is fresh and not a
+// replay (payloadbox.ErrOpen, ErrStale, ErrReplayed; distinguishable in
+// the sprout's own log only: a reply to farmer carries one generic code).
+// The replay check is persisted before this returns (sproutGuard), so a
+// message accepted before a restart is refused after it.
 // Tries every key the sprout holds (openAsSprout); one that opens under
 // the pending key promotes it, even if it then fails the freshness
 // checks, since only farmer could have sealed it and farmer only seals to
@@ -415,7 +573,7 @@ func SproutOpenFromFarmer(sproutID, purpose string, data []byte) (*payloadbox.Me
 		return nil, err
 	}
 	promoteAfterOpen(pendingPub)
-	if err := sproutReplayGuard.Accept(msg); err != nil {
+	if err := sproutGuard().Accept(msg); err != nil {
 		return nil, err
 	}
 	return msg, nil
@@ -435,7 +593,7 @@ func SproutSealForFarmer(sproutID, purpose, replyTo string, body any) ([]byte, e
 		return nil, err
 	}
 	defer keys.wipe()
-	msg, err := payloadbox.NewMessage(purpose, sproutID, replyTo, body)
+	msg, err := payloadbox.NewMessage(purpose, keys.tenantID, sproutID, replyTo, body)
 	if err != nil {
 		return nil, err
 	}
@@ -483,4 +641,39 @@ func verifyTenantKeyContinuity(sproutID, pub string, proof json.RawMessage) erro
 		return errors.New("proof names a different tenant key")
 	}
 	return nil
+}
+
+// enrollProofBody is the body of an enrollment proof of possession
+// (payloadbox.PurposeEnrollProof): which NKey and box key it vouches for.
+type enrollProofBody struct {
+	NKeyPub   string `json:"nkey_pub"`
+	SproutPub string `json:"sprout_pub"`
+}
+
+// sproutEnrollProof builds the sprout's proof that it holds the private
+// half of sproutPub, its box public key, for the enrollment of nkeyPub
+// as sproutID in tenantID: a payloadbox message under
+// PurposeEnrollProof naming both keys, sealed with the box private key
+// (config.SproutBoxPrivFile) to tenantPub, the tenant key farmer's first
+// enrollment response named. See enroll.go's verifyEnrollProof for why
+// this proves possession. Nothing is pinned or persisted here.
+func sproutEnrollProof(tenantID, sproutID, tenantPub, nkeyPub, sproutPub string) (json.RawMessage, error) {
+	tp, err := DecodeBoxPubKey(tenantPub)
+	if err != nil {
+		return nil, err
+	}
+	priv, err := readBoxPrivKeyFile(config.SproutBoxPrivFile, false)
+	if err != nil {
+		return nil, err
+	}
+	defer wipe(priv[:])
+	if pub, err := boxPubFromPriv(priv); err != nil || pub != sproutPub {
+		return nil, errors.New("pki: the box key on disk is not the one being enrolled")
+	}
+	msg, err := payloadbox.NewMessage(payloadbox.PurposeEnrollProof, tenantID, sproutID, "",
+		enrollProofBody{NKeyPub: nkeyPub, SproutPub: sproutPub})
+	if err != nil {
+		return nil, err
+	}
+	return payloadbox.Seal(msg, []payloadbox.KeyPair{{PeerPub: tp, Priv: priv}})
 }

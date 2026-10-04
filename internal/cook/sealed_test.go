@@ -78,6 +78,10 @@ func setupSealedCook(t *testing.T, tenant string) *sealedCookEnv {
 	if err := os.WriteFile(config.SproutTenantX25519PubFile, []byte(tenantPub), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// And the tenant it pinned with it.
+	if err := os.WriteFile(pki.SproutTenantIDFile(), []byte(tenant), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	ns, err := server.NewServer(&server.Options{Host: "127.0.0.1", Port: -1})
 	if err != nil {

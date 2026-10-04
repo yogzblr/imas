@@ -49,6 +49,11 @@ func TestRefresh_Success(t *testing.T) {
 	if resp.SproutID != "web-01" || resp.JWT == "" || resp.GatewayJWT == "" || resp.NKeyIdentity != nkey || resp.TenantX25519Pub == "" {
 		t.Errorf("unexpected response %+v", resp)
 	}
+	// The sprout checks this against the tenant it pinned at enrollment
+	// (security review 2026-10, H3).
+	if want := pki.CurrentTenantID(); resp.TenantID != want {
+		t.Errorf("tenant_id = %q, want the sprout's tenant %q", resp.TenantID, want)
+	}
 }
 
 // The refresh contract has no join_token; a body carrying one (or any

@@ -113,6 +113,9 @@ func newTestSprout(t *testing.T, tenantID, sproutID string) *testSprout {
 		config.NKeySproutPrivFile:        string(seed),
 		config.SproutUserJWTFile:         userJWT,
 		config.SproutTenantX25519PubFile: s.boxPub,
+		// The tenant an enrolled sprout pinned, which every refresh is
+		// checked against.
+		pki.SproutTenantIDFile(): tenantID,
 	} {
 		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 			t.Fatal(err)
@@ -187,6 +190,7 @@ func startSproutFarmer(t *testing.T, key testGatewayKey, s *testSprout) *sproutF
 		f.mu.Unlock()
 		json.NewEncoder(w).Encode(map[string]string{
 			"sprout_id":         s.sproutID,
+			"tenant_id":         s.tenantID,
 			"jwt":               s.userJWT,
 			"gateway_jwt":       s.mintFor(t, key, time.Now(), time.Now().Add(time.Hour)),
 			"nkey_identity":     s.pub,
