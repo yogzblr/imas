@@ -53,7 +53,9 @@ const MethodAuthRotateKey = pki.MethodAuthRotateKey
 
 // readOnlyMethods are the imas.api.* methods that change nothing, so a
 // sealed request for one needs no cluster-wide claim: the design's
-// explicit list. Every other method counts as mutating, the way
+// explicit list, plus recipes.list and recipes.get (owner decision
+// 2026-10-04, PR #95: "yes make it readonly"). Every other method counts
+// as mutating, the way
 // NATSMethodAction defaults to admin, including cohorts.refresh (it
 // rewrites the membership cache and is costly), auth.login (not on the
 // design's list; harmless, but a list of exceptions should stay the
@@ -78,6 +80,8 @@ var readOnlyMethods = map[string]bool{
 	MethodAuthExplain:     true,
 	MethodAuditDates:      true,
 	MethodAuditQuery:      true,
+	MethodRecipesList:     true,
+	MethodRecipesGet:      true,
 }
 
 // IsMutatingMethod reports whether a sealed request for method must be

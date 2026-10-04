@@ -62,7 +62,7 @@ Read-only methods (no Valkey claim): `health`, `version`, `sprouts.list`,
 `sprouts.get`, `jobs.list`, `jobs.get`, `jobs.forsprout`, `props.getall`,
 `props.get`, `cohorts.list`, `cohorts.get`, `cohorts.resolve`,
 `cohorts.validate`, `pki.list`, `auth.whoami`, `auth.users`, `auth.explain`,
-`audit.dates`, `audit.query`.
+`audit.dates`, `audit.query`, `recipes.list`, `recipes.get`.
 
 ## Reply
 
@@ -96,8 +96,8 @@ sends one.
 | `auth.login`, `auth.whoami`, `auth.explain` | none | the caller | Report the verified caller. A `token` param is ignored. |
 | `cook` | targeted cook | `cook` on the targets | Returns the JID; the job runs only when triggered. |
 | `cook.trigger.<jid>` | `{jid}` | the user who created the job, with `cook` | New. Sent once the CLI is subscribed to the job's step events; answered by the replica holding the job, within 15 seconds, once. Returns the targeted sprout IDs. |
-| `recipes.list` | none | `view` | New on the bus (was `GET /v1/recipes`). The platform recipe tree. |
-| `recipes.get` | `{name}` | `view` | New on the bus (was `GET /v1/recipes/{name}`). At most 256 KiB. |
+| `recipes.list` | none | `view` | New on the bus (was `GET /v1/recipes`). The platform recipe tree. Read-only. |
+| `recipes.get` | `{name}` | `view` | New on the bus (was `GET /v1/recipes/{name}`). At most 256 KiB. Read-only. |
 
 Every other method keeps its params and result; `token` is no longer read
 anywhere.

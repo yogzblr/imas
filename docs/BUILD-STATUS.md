@@ -1167,6 +1167,15 @@ by an external git sync today.
       resolver; installs the recipe store for `recipes.*`), and tests in
       `internal/serve` and `cmd/sprout`. Owner decision, 2026-10-04 (PR #95):
       "out of scope is ok"; these files and the design edits are accepted.
+    - Owner decisions, 2026-10-04 (PR #95): "remove dangerously_allow_root
+      bypass from the NATS path" (done: the flag now only bypasses
+      farmer's HTTP `GET /files/` and `GET /v1/recipes`); `recipes.list`
+      and `recipes.get` are read-only ("yes make it readonly"); the JID in
+      the cook trigger's subject is accepted ("yes fine");
+      `auth.users.resetkey` stays ("lets keep it since it is admin only");
+      the cleanup waits for a later PR ("leave the cleanup for a later
+      PR"): the HTTP recipe routes, the audit token resolver, and `boxpub`
+      in the web UI's add-user form, which fails until then.
 
     **Stopgap SEC.0 (superseded by J.3, which deleted the token code, this
     cap included):** `UserAuth.IsValid` refused an expiry more than 15 minutes ahead (the

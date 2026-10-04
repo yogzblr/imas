@@ -362,6 +362,32 @@ func TestSealedRouterValkeyDown(t *testing.T) {
 	}
 }
 
+// recipes.list and recipes.get are read-only (owner decision, PR #95):
+// they run with Valkey down, and with it up they leave no claim.
+func TestSealedRecipesAreReadOnly(t *testing.T) {
+	f := startSealedFarmer(t)
+	newSealedCLIUser(t)
+	useRecipeBrowseStore(t)
+
+	f.env.mr.SetError("LOADING Valkey is unavailable")
+	if _, err := f.call(MethodRecipesList, nil); err != nil {
+		t.Fatalf("recipes.list with Valkey down: %v", err)
+	}
+	if _, err := f.call(MethodRecipesGet, map[string]string{"name": "base"}); err != nil {
+		t.Fatalf("recipes.get with Valkey down: %v", err)
+	}
+	f.env.mr.SetError("")
+	if _, err := f.call(MethodRecipesList, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.call(MethodRecipesGet, map[string]string{"name": "base"}); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(f.env.mr.Keys()); n != 0 {
+		t.Errorf("%d claims in Valkey after recipe reads, want none", n)
+	}
+}
+
 // auth.users.* with the key store: an admin adds a user with their box
 // key, the new user can make requests at once, sees their key's
 // fingerprint in auth.users, rotates it, and once removed (or reset) the

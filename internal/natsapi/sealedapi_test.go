@@ -349,16 +349,19 @@ func TestReadOnlyMethods(t *testing.T) {
 			t.Errorf("read-only method %q is not a route", m)
 		}
 	}
-	if len(readOnlyMethods) != 19 {
-		t.Errorf("%d read-only methods, the design lists 19", len(readOnlyMethods))
+	// The design's 19, plus recipes.list and recipes.get (owner decision,
+	// PR #95).
+	if len(readOnlyMethods) != 21 {
+		t.Errorf("%d read-only methods, want the design's 19 and the two recipe reads", len(readOnlyMethods))
 	}
 	for _, m := range []string{MethodCohortsRefresh, MethodAuthAddUser, MethodAuthRemoveUser, MethodAuthLogin,
-		MethodCmdRun, MethodCook, MethodShellStart, MethodPKIRotateTenantBoxKey, MethodAuthRotateKey, "x.y"} {
+		MethodCmdRun, MethodCook, MethodShellStart, MethodPKIRotateTenantBoxKey, MethodAuthRotateKey,
+		MethodAuthResetKey, CookTriggerMethod("j1"), "x.y"} {
 		if !IsMutatingMethod(m) {
 			t.Errorf("%s is not treated as mutating", m)
 		}
 	}
-	for _, m := range []string{MethodJobsList, MethodAuditQuery, MethodPKIList} {
+	for _, m := range []string{MethodJobsList, MethodAuditQuery, MethodPKIList, MethodRecipesList, MethodRecipesGet} {
 		if IsMutatingMethod(m) {
 			t.Errorf("%s is treated as mutating", m)
 		}
