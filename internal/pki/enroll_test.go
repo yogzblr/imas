@@ -571,17 +571,15 @@ func TestEnroll_RejectsNewlineInSignedField(t *testing.T) {
 	}
 }
 
-// Each tenant gets its own tenant X25519 key. A tenant whose sprouts
-// enrolled against the old one-per-deployment keypair keeps that keypair
-// (adopted into its own secret) so their pins still match, and a tenant's
-// first enrollment never counts itself towards that: Enroll reads the
-// tenant key before recording the sprout's box key.
-func TestEnroll_TenantKeysArePerTenantAndAdoptLegacyOnlyForExistingSprouts(t *testing.T) {
+// Each tenant gets its own tenant X25519 key, freshly generated, even a
+// tenant that already has sprouts on record and with a keypair sitting at
+// the base path where the deleted legacy one-per-deployment keypair lived
+// (security review 2026-10, H3).
+func TestEnroll_TenantKeysArePerTenantAndNeverShared(t *testing.T) {
 	store, _ := setupEnrollTest(t)
 	srv := setupTenantBoxOpenBao(t)
 	legacyPub, _ := srv.SeedKeypair(t, tenantboxtest.BasePath, nil)
-	// A sprout of t_old enrolled before the upgrade, against the legacy key.
-	if err := upsertSproutBoxKeyActive("t_old", "pre-upgrade", testEnrollBoxPub(t)); err != nil {
+	if err := upsertSproutBoxKeyActive("t_old", "pre-existing", testEnrollBoxPub(t)); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"t_old", "t_new"} {
@@ -595,12 +593,15 @@ func TestEnroll_TenantKeysArePerTenantAndAdoptLegacyOnlyForExistingSprouts(t *te
 		}
 		return res.TenantX25519Pub
 	}
-	if got := enroll("t_old", "web-01"); got != b64(legacyPub) {
-		t.Errorf("existing tenant got %s, want the legacy key it's pinned to", got)
-	}
+	old := enroll("t_old", "web-01")
 	first := enroll("t_new", "web-01")
-	if first == b64(legacyPub) {
-		t.Error("a new tenant's first enrollment adopted the shared legacy key")
+	for _, got := range []string{old, first} {
+		if got == b64(legacyPub) {
+			t.Error("a tenant was given the keypair at the base path")
+		}
+	}
+	if old == first {
+		t.Error("two tenants share a tenant key")
 	}
 	if second := enroll("t_new", "web-02"); second != first {
 		t.Errorf("second sprout of t_new got %s, want %s", second, first)

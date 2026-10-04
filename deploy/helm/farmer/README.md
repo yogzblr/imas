@@ -224,7 +224,7 @@ Each OpenBao client runs under its own role and gets exactly one policy.
 | farmer, API certificate (`tls.mode=openbao`) | `IMAS_CERTS_OPENBAO_*` | `imas-farmer-certs` (`tls.openbao.k8sRole`) | `imas-farmer-certs`: `pki/issue/imas-farmer` |
 | farmer, gateway JWT signer | `IMAS_GATEWAY_OPENBAO_*` | `imas-farmer-gateway` | `imas-farmer-gateway`: sign and read on `transit/*/imas-gateway-jwt` only |
 | farmer, fleet key (read-only) | `IMAS_FLEETSIGN_OPENBAO_*` | `imas-farmer-fleet-verify` | `imas-fleet-verify` (reviewed copy) |
-| farmer, tenant box keypairs | `IMAS_TENANTBOX_OPENBAO_*` | `imas-farmer-tenantbox` | `imas-farmer-tenantbox`: KV v2 read/write on `secret/data/imas/tenant-x25519/tenants/+` (one secret per tenant), read-only on the legacy `secret/data/imas/tenant-x25519` |
+| farmer, tenant box keypairs | `IMAS_TENANTBOX_OPENBAO_*` | `imas-farmer-tenantbox` | `imas-farmer-tenantbox`: KV v2 read/write on `secret/data/imas/tenant-x25519/tenants/+` (one secret per tenant), nothing else |
 | saasapi, fleet key (only with `fleetUpdateDispatch` or `operator`) | `IMAS_FLEETSIGN_OPENBAO_*` | `imas-saasapi-fleet-verify` | `imas-fleet-verify` |
 | the publish Job | `IMAS_SAASAPI_CRED_OPENBAO_*` | `imas-saasapi-cred-publisher` | `imas-saasapi-cred-publisher` (reviewed copy) |
 

@@ -54,7 +54,7 @@ var saasFS embed.FS
 // release N (built for 7) still passes `migrate check` after a rollback,
 // and release N-1 (built for 6, still reading x) doesn't.
 const (
-	farmerCompatibleFrom = 1
+	farmerCompatibleFrom = 2
 	saasCompatibleFrom   = 1
 )
 

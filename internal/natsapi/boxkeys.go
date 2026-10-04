@@ -83,7 +83,10 @@ type boxKeySubmitRequest struct {
 
 // handleBoxKeySubmit records a sprout's new payload-encryption public
 // key. The sprout ID comes from the subject, not the message body — the
-// same trust model internal/facts's listener uses.
+// same trust model internal/facts's listener uses. The subject must be
+// exactly imas.sprouts.<id>.boxkey.pub with a valid sprout ID in the one
+// token position: sprout IDs never contain a dot (pki.IsValidSproutID,
+// security review 2026-10, M4), so <id> is always parts[2].
 //
 // That trust model is not enough here, though: this subject decides
 // which key farmer seals every later payload to, and the threat this
@@ -91,30 +94,43 @@ type boxKeySubmitRequest struct {
 // on any subject. A plaintext submission would let it swap in its own key
 // and read everything farmer sends that sprout from then on. So a
 // submission must be sealed (purpose s2f.boxkey.pub) under a key the
-// sprout already holds, i.e. one of its currently valid box keys: only
-// the holder of that private key could have sealed it. It must also be
-// fresh (payloadbox.DefaultMaxSkew), and pki.RotateSproutBoxKey never
-// re-activates a key that has been superseded, so a replayed submission
-// can't roll a sprout back to an older key.
+// sprout already holds: only the holder of that private key could have
+// sealed it. It must also be fresh (payloadbox.DefaultMaxSkew).
 //
-// Nothing on the sprout side submits yet (sprout-initiated box key
-// rotation is a follow-up); until then this only ever refuses.
+// FLAG FOR SECURITY REVIEW (security review 2026-10, M3): only the
+// sprout's *active* key may change which key is active
+// (pki.RecordSproutBoxKeySubmission). A submission sealed under a key in
+// its grace window may only re-assert the key that is already active (a
+// sprout retrying a submission farmer already recorded); naming any other
+// key is refused. Otherwise an old key leaked from, say, a VM snapshot
+// could take over the sprout's sealed channel for the grace window after
+// the rotation meant to retire it. pki.RotateSproutBoxKey never
+// re-activates a superseded key either, so a replayed submission can't
+// roll a sprout back.
 func handleBoxKeySubmit(tenantID string, msg *nats.Msg) {
 	parts := strings.Split(msg.Subject, ".")
-	if len(parts) < 4 {
+	if len(parts) != 5 || parts[0] != "imas" || parts[1] != "sprouts" || parts[3] != "boxkey" || parts[4] != "pub" {
 		log.Errorf("boxkeys: unexpected subject format: %s", msg.Subject)
 		return
 	}
 	sproutID := parts[2]
+	if !pki.IsValidSproutID(sproutID) {
+		log.Warnf("boxkeys: refusing a box key submission for an invalid sprout ID on %s", msg.Subject)
+		return
+	}
 
 	if msg.Header.Get(payloadbox.Header) != payloadbox.HeaderBox1 {
 		log.Warnf("boxkeys: refusing an unsealed box key submission for %s", sproutID)
 		return
 	}
-	var req boxKeySubmitRequest
-	opened, err := DecryptEncryptedFrom(tenantID, sproutID, payloadbox.PurposeBoxKeySubmit, msg.Data, &req)
+	opened, sealedUnder, err := pki.OpenBoxKeySubmission(tenantID, sproutID, msg.Data)
 	if err != nil {
 		log.Warnf("boxkeys: refusing a box key submission for %s that doesn't open under its current keys: %v", sproutID, err)
+		return
+	}
+	var req boxKeySubmitRequest
+	if err := json.Unmarshal(opened.Body, &req); err != nil {
+		log.Warnf("boxkeys: refusing a box key submission for %s with an undecodable body: %v", sproutID, err)
 		return
 	}
 	issued := time.Unix(opened.IssuedAt, 0)
@@ -126,11 +142,11 @@ func handleBoxKeySubmit(tenantID string, msg *nats.Msg) {
 		log.Errorf("boxkeys: empty pub in submission from %s", sproutID)
 		return
 	}
-	if err := pki.RotateSproutBoxKey(tenantID, sproutID, req.Pub, config.BoxKeyGraceDuration); err != nil {
-		log.Errorf("boxkeys: failed to record new box key for %s: %v", sproutID, err)
+	if err := pki.RecordSproutBoxKeySubmission(tenantID, sproutID, sealedUnder, req.Pub, config.BoxKeyGraceDuration); err != nil {
+		log.Warnf("boxkeys: refusing a box key submission for %s: %v", sproutID, err)
 		return
 	}
-	log.Noticef("boxkeys: sprout %s rotated its payload-encryption key", sproutID)
+	log.Noticef("boxkeys: sprout %s's payload-encryption key is recorded", sproutID)
 }
 
 // registerBoxKeySubmitListener subscribes to sprout key-rotation

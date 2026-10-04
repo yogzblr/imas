@@ -119,7 +119,7 @@ beyond unit tests (real Envoy, Molecule containers, real OpenBao).
 | 11 | Recipe download uses the same JWT | **Green** | Built, validated | Same gateway JWT, same Envoy gate. |
 | 12 | Envoy with JWT validation in front of NATS | **Green** | Built, validated | `deploy/envoy/envoy.yaml`, `jwt_authn` with remote JWKS; checked against real Envoy. Keycloak JWKS cross-check harness has never been run (nice-to-have). |
 | 13 | Backend on Kubernetes (NATS, Valkey, farmer, Percona) | **Amber** | Built | Helm charts with optional PXC/OpenBao/Valkey subcharts; single migration hook Job; sprout-release hook Job. Chart tests render them; no gate has installed them on a real cluster. **No Terraform exists yet** (see the UAT gate row). |
-| 14 | Payload encryption, key pair per sprout and per tenant | **Red** | **Partly built** | Per-tenant and per-sprout X25519 keys; `cmd.run`, `cook` and box-key submissions are sealed end to end. **`shell.*` (interactive PTY) is still plaintext inside TLS**, as are cook step events, `test.ping`, facts, `cancel`, the rotate trigger and log shipping. `shell.*` is the one that matters: a compromised bus can still open a shell on a Unix sprout. |
+| 14 | Payload encryption, key pair per sprout and per tenant | **Red** | **Partly built** | Per-tenant and per-sprout X25519 keys; `cmd.run`, `cook` and box-key submissions are sealed end to end. SEC.3a (security review 2026-10 H1, M3, M4, H3's legacy part; FLAG FOR SECURITY REVIEW): every tenant has its own fresh keypair (the shared legacy keypair and its adoption are deleted); deleting or replacing a sprout revokes its NKey on the Account (`pki_revoked_nkeys`) and its box keys; one active box key per sprout, enforced by the schema (farmer migration 00002); only the active box key can name a new one; sprout IDs have no dots. **`shell.*` (interactive PTY) is still plaintext inside TLS**, as are cook step events, `test.ping`, facts, `cancel`, the rotate trigger and log shipping. `shell.*` is the one that matters: a compromised bus can still open a shell on a Unix sprout. |
 | 15 | Key rotation for sprout keys | **Amber** | Built, **deliberately differs from the wording** | The requirement text says the new private key is sent encrypted over NATS. The built design never transmits a private key: the sprout generates the new pair and submits only the public key, farmer-triggered. See `imas-payload-encryption-design.md`. `requirements.md` should be reworded to match (see "Open items"). |
 | 16 | SDB-equivalent secrets in the sprout | **Green** | Built (v1 tier) | `internal/ingredients/sdb`: OpenBao/Vault (hot-reloaded client cert, official OpenBao client since CL.2b, tested against OpenBao 2.4.1 and Vault 1.20.4), Azure Key Vault, AWS Secrets Manager, GCP Secret Manager. CyberArk and Delinea (Tier 2) not built, by design. |
 | 17 | Probe capability (database, HTTP) as a sprout task | **Green** | Built | `probe.http`, `probe.database`, plus `wait`, `cond`, `on_exit`, registered variables with `sensitive` redaction. |
@@ -831,6 +831,25 @@ by an external git sync today.
       refresh could read a half-written file). It also leaves the old JWT
       valid: it has no expiry and is not revoked. The simpler fix is to run
       `syncTenantSprouts` for every provisioned tenant at farmer start.
+    - **Deleted and replaced sprouts (SEC.3a, security review 2026-10 H1,
+      M3, M4, H3's legacy part; FLAG FOR SECURITY REVIEW, ready for review):**
+      `pki.delete` and the `pki.accept` replace path now put the old NKey on
+      a per-tenant revoked list (`pki_revoked_nkeys`, farmer migration
+      00002, which raises the farmer schema's compatibility floor to 2) and
+      revoke the old host's box keys in the same transaction; every Account
+      rebuild applies the list, so the old User JWT is refused although it
+      has no expiry, and the NKey can't be accepted or enrolled again. A
+      freed sprout ID can be enrolled again with a fresh NKey and box key.
+      One active box key per `(tenant_id, sprout_id)` is enforced by the
+      schema, and farmer refuses to seal or open if it finds two. A box key
+      submission sealed under a grace key can only re-assert the active key.
+      Sprout IDs can't contain dots (enrollment maps them to dashes) and
+      `announce` is reserved. The legacy shared tenant keypair, its adoption
+      and its read-only Helm policy path are deleted. Still open: User JWTs
+      still have no `exp`, so the revoked list (and each Account JWT's
+      revocations) only grows; `docs/INSTALL.md` still describes the legacy
+      KV path; a deleted sprout's JWT file stays on farmer's disk (it is
+      never served: refresh needs an accepted row).
     - **OpenBao client (#66, #67):** CL.4 added a CI workflow for the
       real-server test (`TestRealServer`):
       `.github/workflows/sdb-openbao-realserver.yml`. It runs against an
