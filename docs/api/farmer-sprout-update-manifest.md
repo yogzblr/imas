@@ -28,8 +28,9 @@ behind Envoy, because farmer's API port is reachable without Envoy.
 - The tenant and sprout are the token's `tenant_id` and `sprout_id`
   claims. There is no tenant parameter; any query parameter other than
   `os`, `arch`, `package_type` and `version` is ignored.
-- The CLI's RBAC token is not accepted, and `dangerously_allow_root` does
-  not open this route: without a verified JWT there is no tenant to answer
+- No CLI credential is accepted (the CLI's bearer token is gone, J.3), and
+  there is no development bypass: `dangerously_allow_root` was removed and
+  farmer ignores it. Without a verified JWT there is no tenant to answer
   for.
 
 | Request | Status |
