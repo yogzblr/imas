@@ -482,8 +482,16 @@ func initSystemAccountListeners() {
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
 			log.Warnf("SYS listener connection lost (heartbeat, tenant provisioning): %v", err)
 		}),
+		// Every (re)connection to the bus pushes all Account JWTs: the
+		// bus mints none of its own (internal/pki/busauth.go), so a bus
+		// that restarted on an empty volume, or a new cluster, learns
+		// every tenant, revocation and lock-out from this.
+		nats.ConnectHandler(func(_ *nats.Conn) {
+			go pushAllAccounts("connected")
+		}),
 		nats.ReconnectHandler(func(_ *nats.Conn) {
 			log.Info("SYS listener connection re-established")
+			go pushAllAccounts("reconnected")
 		}),
 	)
 	if err != nil {
@@ -505,6 +513,36 @@ func initSystemAccountListeners() {
 	if err := log.UseNATSConn(nc, farmerLogSubject); err != nil {
 		log.Errorf("Failed to attach log-nats backend to the SYS connection: %v", err)
 	}
+}
+
+// pushAccountsUntilAccepted calls push until it succeeds or ctx ends,
+// waiting `every` between attempts.
+func pushAccountsUntilAccepted(ctx context.Context, push func() (int, error), every time.Duration) {
+	for {
+		n, err := push()
+		if err == nil {
+			log.Infof("Pushed all %d Account JWTs to the bus", n)
+			return
+		}
+		log.Warnf("Pushing all Account JWTs to the bus (%d accepted so far): %v; retrying in %s", n, err, every)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(every):
+		}
+	}
+}
+
+// pushAllAccounts runs pki.PushAllAccounts after the SYS listener
+// connected or reconnected to the bus. A failure is logged: the next
+// reconnect, and every accept/deny or provisioning push, tries again.
+func pushAllAccounts(why string) {
+	n, err := pki.PushAllAccounts()
+	if err != nil {
+		log.Errorf("SYS listener %s: pushing all Account JWTs to the bus: %d accepted, errors: %v", why, n, err)
+		return
+	}
+	log.Infof("SYS listener %s: pushed all %d Account JWTs to the bus", why, n)
 }
 
 func initAuditLogger() {
@@ -856,7 +894,15 @@ func ConnectFarmer(ctx context.Context, done chan<- struct{}) {
 
 	legacyTenant := pki.CurrentTenantID()
 	tenantConns.MarkPending(legacyTenant)
+	// The bus mints no Account JWTs of its own (internal/pki/busauth.go):
+	// a bus that started on an empty volume knows the legacy tenant only
+	// once core pushes it, and the SYS listener that pushes on every
+	// (re)connect is registered only after this dial succeeds. So keep
+	// pushing everything until it lands, while the dial retries.
+	pushCtx, stopPushing := context.WithCancel(ctx)
+	go pushAccountsUntilAccepted(pushCtx, pki.PushAllAccounts, 15*time.Second)
 	nc, err := dialTenantBus(ctx, legacyTenant)
+	stopPushing()
 	if err != nil {
 		log.Fatalf("Failed to connect farmer to NATS bus for the legacy tenant %s: %v", legacyTenant, err)
 	}
