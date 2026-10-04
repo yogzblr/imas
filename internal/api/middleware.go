@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/yogzblr/imas/internal/api/handlers"
-	"github.com/yogzblr/imas/internal/auth"
 	"github.com/yogzblr/imas/internal/gatewayjwt"
 	log "github.com/yogzblr/imas/internal/log"
 )
@@ -27,8 +26,9 @@ func Logger(inner http.Handler, name string) http.Handler {
 // The name parameter must match a key from the Routes map.
 //
 // Public routes (GetCertificate, PutNKey) are allowed without a token.
-// If dangerously_allow_root is set in the farmer config, all requests
-// are allowed without authentication.
+// There is no development bypass: dangerously_allow_root was removed
+// (owner decision 2026-10-04, PR #95: "remove the HTTP bypass too in PR
+// 95"), and farmer ignores the key.
 //
 // FileServer (GET /files/) accepts a sprout's gateway JWT — see
 // sproutFileAccess. SproutUpdateManifest (GET /v1/sprout/update-manifest)
@@ -37,8 +37,8 @@ func Logger(inner http.Handler, name string) http.Handler {
 // compromised bus could mint from a CONNECT nonce, is gone (J.3,
 // docs/design/imas-payload-encryption-design.md Decision A), and the CLI
 // browses recipes over sealed imas.api.recipes.* instead. ListRecipes and
-// GetRecipe therefore refuse every request without
-// dangerously_allow_root; removing those routes is a follow-up.
+// GetRecipe therefore refuse every request; removing those routes is a
+// follow-up.
 func Auth(inner http.Handler, name string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch name {
@@ -46,17 +46,9 @@ func Auth(inner http.Handler, name string) http.Handler {
 			inner.ServeHTTP(w, r)
 			return
 		case "SproutUpdateManifest":
-			// Before the dangerously_allow_root bypass: the handler's
-			// tenant is the JWT's, so there is nothing to serve without
-			// one.
+			// The handler's tenant is the JWT's, so there is nothing to
+			// serve without one.
 			sproutIdentityAuth(inner, w, r)
-			return
-		}
-
-		// Development bypass — no auth required.
-		if auth.DangerouslyAllowRoot() {
-			log.Warnf("dangerously_allow_root: bypassing auth for %s %s", r.Method, name)
-			inner.ServeHTTP(w, r)
 			return
 		}
 
@@ -123,7 +115,7 @@ func sproutFileAccess(r *http.Request, token string) bool {
 // gateway JWT ("Authorization: Bearer <jws>"), with the token's verified
 // (tenant_id, sprout_id) on the request context
 // (handlers.WithSproutIdentity) — the only place the handler gets a
-// tenant from. No CLI token, no dangerously_allow_root bypass, and no
+// tenant from. No CLI token, no development bypass, and no
 // header Envoy derived from the token: farmer's API port is reachable
 // without passing through Envoy, so the token is verified here.
 //

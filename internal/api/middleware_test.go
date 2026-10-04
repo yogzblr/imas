@@ -56,26 +56,37 @@ func TestAuthBadTokenReturns403(t *testing.T) {
 	}
 }
 
-func TestAuthDangerouslyAllowRootBypassesAuth(t *testing.T) {
+// dangerously_allow_root bypasses nothing on the HTTP API either (owner
+// decision 2026-10-04, PR #95: "remove the HTTP bypass too in PR 95"):
+// with it set, every route still takes its normal credential.
+func TestAuthDangerouslyAllowRootBypassesNothing(t *testing.T) {
 	jety.Set("dangerously_allow_root", true)
 	t.Cleanup(func() { jety.Set("dangerously_allow_root", false) })
 
-	called := false
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
+		t.Errorf("%s reached the handler", r.URL.Path)
 		w.WriteHeader(http.StatusOK)
 	})
-
-	handler := Auth(inner, "FileServer")
-	req := httptest.NewRequest(http.MethodGet, "/files/test", nil)
-	// No Authorization header — should still pass with dangerously_allow_root.
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Errorf("dangerously_allow_root bypass returned %d, want 200", rec.Code)
-	}
-	if !called {
-		t.Error("inner handler was not called despite dangerously_allow_root=true")
+	for _, tc := range []struct {
+		route, path, authz string
+		want               int
+	}{
+		{"FileServer", "/files/sprouts/t_acme/web-01/nginx.conf", "", http.StatusUnauthorized},
+		{"FileServer", "/files/sprouts/t_acme/web-01/nginx.conf", "Bearer not-a-jwt", http.StatusForbidden},
+		{"ListRecipes", "/v1/recipes", "", http.StatusUnauthorized},
+		{"ListRecipes", "/v1/recipes", "anything", http.StatusForbidden},
+		{"GetRecipe", "/v1/recipes/base", "", http.StatusUnauthorized},
+		{"SproutUpdateManifest", "/v1/sprout/update-manifest", "", http.StatusUnauthorized},
+	} {
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		if tc.authz != "" {
+			req.Header.Set("Authorization", tc.authz)
+		}
+		rec := httptest.NewRecorder()
+		Auth(inner, tc.route).ServeHTTP(rec, req)
+		if rec.Code != tc.want {
+			t.Errorf("%s %q with the flag set: %d, want %d", tc.route, tc.authz, rec.Code, tc.want)
+		}
 	}
 }
 

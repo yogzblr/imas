@@ -1162,14 +1162,19 @@ by an external git sync today.
       bus can read and forge (the job store, through sealed `jobs.get`, is
       authoritative); shell sessions until J.5. Listed in the design.
     - Outside J.3's file scope, changed only as far as the token removal
-      forced: `internal/api/middleware.go` (no CLI-token branch; the HTTP
+      and the owner's decisions below required: `internal/api/middleware.go`
+      (no CLI-token branch and no `dangerously_allow_root` bypass; the HTTP
       recipe routes now refuse everything), `cmd/farmer/main.go` (no token
-      resolver; installs the recipe store for `recipes.*`), and tests in
-      `internal/serve` and `cmd/sprout`. Owner decision, 2026-10-04 (PR #95):
-      "out of scope is ok"; these files and the design edits are accepted.
+      resolver; installs the recipe store for `recipes.*`; no bypass
+      warning), and tests in `internal/serve`, `cmd/sprout` and
+      `internal/api` (`middleware_test.go`, `gateway_auth_test.go`). Owner
+      decision, 2026-10-04 (PR #95): "out of scope is ok"; these files and
+      the design edits are accepted.
     - Owner decisions, 2026-10-04 (PR #95): "remove dangerously_allow_root
-      bypass from the NATS path" (done: the flag now only bypasses
-      farmer's HTTP `GET /files/` and `GET /v1/recipes`); `recipes.list`
+      bypass from the NATS path" and "remove the HTTP bypass too in PR 95"
+      (done: there is no development bypass anywhere; farmer ignores the
+      key and warns if it is set, and `GET /files/` always needs a gateway
+      JWT scoped to its own sprout); `recipes.list`
       and `recipes.get` are read-only ("yes make it readonly"); the JID in
       the cook trigger's subject is accepted ("yes fine");
       `auth.users.resetkey` stays ("lets keep it since it is admin only");

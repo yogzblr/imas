@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/taigrr/jety"
 	intauth "github.com/yogzblr/imas/internal/auth"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/rbac"
@@ -127,7 +128,7 @@ func TestAuthorize(t *testing.T) {
 func TestAuthorize_DangerouslyAllowRootBypassesNothing(t *testing.T) {
 	setupNatsAPIPKI(t)
 	defer setupJetyDangerouslyAllowRoot(t, true)()
-	if !intauth.DangerouslyAllowRoot() {
+	if !jety.GetBool("dangerously_allow_root") {
 		t.Fatal("control: the flag isn't set")
 	}
 	rs := rbac.NewRoleStore()

@@ -49,10 +49,13 @@ func TestContainsKey(t *testing.T) {
 	}
 }
 
-func TestDangerouslyAllowRoot(t *testing.T) {
-	newTestDB(t)
-	if DangerouslyAllowRoot() {
-		t.Error("DangerouslyAllowRoot should default to false")
+// dangerously_allow_root and apitokenclockskew are removed keys: listed,
+// so LoadPolicy warns about them, and read by nothing else.
+func TestRemovedConfigKeysListed(t *testing.T) {
+	for _, k := range []string{"dangerously_allow_root", "apitokenclockskew"} {
+		if removedConfigKeys[k] == "" {
+			t.Errorf("%s is not a removed config key", k)
+		}
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jws"
 	"github.com/lestrrat-go/jwx/v2/jwt"
+	"github.com/taigrr/jety"
 
 	"github.com/yogzblr/imas/internal/api/handlers"
 	"github.com/yogzblr/imas/internal/config"
@@ -257,6 +258,35 @@ func TestRecipesRoutes_RejectGatewayJWT(t *testing.T) {
 					t.Errorf("got %d, want 403", code)
 				}
 			})
+		}
+	}
+}
+
+// With dangerously_allow_root set, GET /files/ still needs a gateway JWT,
+// and a tenant's JWT still reads only its own sprout's files (owner
+// decision 2026-10-04, PR #95: "remove the HTTP bypass too in PR 95").
+func TestFilesRoute_DangerouslyAllowRootBypassesNothing(t *testing.T) {
+	key := installGatewayKey(t)
+	srv := newGatewayTestServer(t)
+	jety.Set("dangerously_allow_root", true)
+	t.Cleanup(func() { jety.Set("dangerously_allow_root", false) })
+
+	if code, body := get(t, srv.URL+"/files/"+ownFile, ""); code != http.StatusUnauthorized || body == ownFileContent {
+		t.Errorf("no JWT: %d %q, want 401", code, body)
+	}
+	tenantA := "Bearer " + mint(t, key.priv, "t_acme", "web-01", time.Now().Add(time.Hour))
+	if code, body := get(t, srv.URL+"/files/"+otherTenantFile, tenantA); code != http.StatusForbidden {
+		t.Errorf("tenant t_acme's JWT reading t_other's file: %d %q, want 403", code, body)
+	}
+	if code, _ := get(t, srv.URL+"/files/"+otherSproutFile, tenantA); code != http.StatusForbidden {
+		t.Errorf("web-01's JWT reading web-02's file: %d, want 403", code)
+	}
+	if code, body := get(t, srv.URL+"/files/"+ownFile, tenantA); code != http.StatusOK || body != ownFileContent {
+		t.Errorf("own file: %d %q", code, body)
+	}
+	for _, path := range []string{"/v1/recipes", "/v1/recipes/webserver.nginx"} {
+		if code, _ := get(t, srv.URL+path, ""); code != http.StatusUnauthorized {
+			t.Errorf("%s with the flag set: %d, want 401", path, code)
 		}
 	}
 }
