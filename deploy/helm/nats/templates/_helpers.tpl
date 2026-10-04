@@ -173,6 +173,13 @@ explanation rather than deploying something that silently can't work.
 {{- if lt (int .Values.bus.replicaCount) 1 -}}
 {{- fail "bus.replicaCount must be at least 1" -}}
 {{- end -}}
+{{- $maxConn := .Values.bus.maxConnections -}}
+{{- if not (or (kindIs "int" $maxConn) (kindIs "int64" $maxConn) (kindIs "float64" $maxConn)) -}}
+{{- fail (printf "bus.maxConnections must be a whole number >= 1, got %v" $maxConn) -}}
+{{- end -}}
+{{- if or (lt (float64 $maxConn) 1.0) (ne (float64 $maxConn) (float64 (int64 $maxConn))) -}}
+{{- fail (printf "bus.maxConnections must be a whole number >= 1, got %v (0 or a negative value would not mean \"unlimited\": nats-server reads a negative limit as refuse every client)" $maxConn) -}}
+{{- end -}}
 {{- if gt (int .Values.bus.replicaCount) 1 -}}
 {{- if not .Values.bus.cluster.routesSupported -}}
 {{- fail "bus.replicaCount > 1 needs a farmerbus image that reads IMAS_BUS_CLUSTER_* and meshes, and bus.cluster.routesSupported=false says this one doesn't. Extra replicas would be un-meshed servers: a claims push or a publish reaching one node would never reach the others (see README.md, \"Clustering\")." -}}

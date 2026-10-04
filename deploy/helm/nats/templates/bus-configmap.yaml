@@ -6,6 +6,7 @@
   "farmerbusport" (toString .Values.bus.ports.client)
   "farmerwsport" (toString .Values.bus.ports.websocket)
   "farmerorganization" .Values.bus.organization
+  "busmaxconnections" (int64 .Values.bus.maxConnections)
   "configroot" "/etc/imas/"
   "farmerpki" "/var/lib/imas/farmerbus/pki/"
 -}}
