@@ -156,11 +156,13 @@ func captureLogSinks(t *testing.T, sproutConn, busConn *nats.Conn, sproutID stri
 func TestSealedCmdRun_NoOpenedBodyReachesALogSink(t *testing.T) {
 	e := setupSealed(t, "t_sealed_logs")
 	sinks := captureLogSinks(t, e.sprout, e.farmer, e.sproutID)
-	const secret = "s3cret-cmd-91fe"
+	// A dummy marker, not a credential: it just has to be findable in a
+	// log sink if any part of the opened body reached one.
+	const marker = "opened-body-marker"
 	runs := []apitypes.CmdRun{
-		{Command: "/bin/sh", Args: []string{"-c", "echo " + secret}, Env: map[string]string{"TOKEN": secret}, Timeout: 5 * time.Second},
-		{Command: "/bin/sh", Args: []string{"-c", "echo " + secret + " >&2; exit 3"}, Timeout: 5 * time.Second},
-		{Command: "/nonexistent/" + secret, Timeout: 5 * time.Second},
+		{Command: "/bin/sh", Args: []string{"-c", "echo " + marker}, Env: map[string]string{"MARKER": marker}, Timeout: 5 * time.Second},
+		{Command: "/bin/sh", Args: []string{"-c", "echo " + marker + " >&2; exit 3"}, Timeout: 5 * time.Second},
+		{Command: "/nonexistent/" + marker, Timeout: 5 * time.Second},
 	}
 	for _, run := range runs {
 		_, _ = FRun(e.tenant, pki.KeyManager{SproutID: e.sproutID}, run)
@@ -168,7 +170,7 @@ func TestSealedCmdRun_NoOpenedBodyReachesALogSink(t *testing.T) {
 	log.Flush()
 	e.sprout.Flush()
 	time.Sleep(200 * time.Millisecond) // let the bus deliver the shipped entries
-	if where, found := sinks.contains(secret); found {
+	if where, found := sinks.contains(marker); found {
 		t.Fatalf("an opened cmd.run body reached the %s log sink", where)
 	}
 	sinks.mu.Lock()

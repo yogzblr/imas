@@ -322,8 +322,15 @@ func TestSealNamesTheRecipientKeyAndOpenChecksIt(t *testing.T) {
 
 func TestKeyIDIsStableAndDistinct(t *testing.T) {
 	a, b := genKeys(t), genKeys(t)
-	if KeyID(a.pub) != KeyID(a.pub) || KeyID(a.pub) == KeyID(b.pub) {
-		t.Fatal("KeyID is not a stable, distinct identifier")
+	// Stable: a separate copy of the same key bytes gets the same ID, so
+	// the ID depends on the key's value, not on which array holds it.
+	same := *a.pub
+	if KeyID(&same) != KeyID(a.pub) {
+		t.Fatal("KeyID differs for two copies of the same key")
+	}
+	// Distinct: another key gets another ID.
+	if KeyID(a.pub) == KeyID(b.pub) {
+		t.Fatal("KeyID is the same for two different keys")
 	}
 	if strings.Contains(string(mustJSON(t, a.pub[:])), KeyID(a.pub)) {
 		t.Fatal("KeyID is the key itself")
