@@ -98,6 +98,10 @@ var fleetUpdateLimiter callerLimiter = NewPerCallerLimiter(fleetUpdateRate, flee
 // shared-secret + Keycloak-JWT check it performs, and SetAuthConfig,
 // which must be called (from main, after NewAuthConfig) before this
 // router serves any request.
+//
+// Serve it behind RejectUncleanPaths: on its own, http.ServeMux answers a
+// path with "." or ".." segments with a method-preserving redirect to the
+// cleaned path (see cleanpath.go).
 func NewRouter() *http.ServeMux {
 	mux := http.NewServeMux()
 
