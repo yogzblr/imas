@@ -211,7 +211,7 @@ func TestConnectNonceCannotMintLongLivedToken(t *testing.T) {
 }
 
 // TestConnectNonceWithinCap documents what the stopgap still allows: a
-// nonce inside MaxTokenExpiry yields a token that IsValid accepts, so a
+// nonce inside MaxTokenExpiry() yields a token that IsValid accepts, so a
 // compromised bus can still mint a short-lived token (closed only by
 // Decision A in imas-payload-encryption-design.md).
 func TestConnectNonceWithinCap(t *testing.T) {

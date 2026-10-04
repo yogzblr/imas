@@ -4,10 +4,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nkeys"
+	"github.com/taigrr/jety"
 )
 
 type UserAuth struct {
@@ -27,24 +31,81 @@ var (
 const (
 	// TokenLifetime is how long a token NewToken creates stays valid.
 	TokenLifetime = 5 * time.Minute
-	// TokenClockSkew is how far ahead of farmer's clock a CLI's clock may
-	// run and still have its tokens accepted. It matches the 5 minutes
-	// used for every other signed timestamp farmer checks
-	// (pki.EnrollSigMaxSkew, payloadbox.DefaultMaxSkew).
-	TokenClockSkew = 5 * time.Minute
-	// MaxTokenExpiry is the furthest in the future IsValid accepts a
-	// token's expiry to be.
-	//
-	// The token is an NKey signature over its expiry string, and the CLI
-	// signs the bus's nonce with the same key at connect. A compromised
-	// bus can send an expiry as its nonce (2099-01-01T00:00:00Z) and so
-	// obtain a valid signature over it. Without this cap that was a token
-	// valid until 2099. With it, the bus can still mint a token, but only
-	// one that expires within MaxTokenExpiry (SEC.0, stopgap 1 in
-	// docs/design/imas-payload-encryption-design.md; the real fix is
-	// Decision A there).
-	MaxTokenExpiry = TokenLifetime + TokenClockSkew
+
+	// TokenClockSkewKey is the farmer config key that sets the clock
+	// skew allowance, as a Go duration string ("10m", "90s").
+	TokenClockSkewKey = "apitokenclockskew"
+	// DefaultTokenClockSkew is the allowance when TokenClockSkewKey is
+	// unset.
+	DefaultTokenClockSkew = 10 * time.Minute
+	// MaxTokenClockSkew is the largest allowance LoadPolicy accepts.
+	// Every minute of allowance is a minute longer a token a compromised
+	// bus mints stays valid, so it is bounded.
+	MaxTokenClockSkew = 30 * time.Minute
 )
+
+// tokenClockSkew is how far ahead of farmer's clock a CLI's clock may run
+// and still have its tokens accepted. LoadPolicy sets it from
+// TokenClockSkewKey.
+var tokenClockSkew atomic.Int64
+
+func init() { tokenClockSkew.Store(int64(DefaultTokenClockSkew)) }
+
+// TokenClockSkew returns the clock skew allowance in use.
+func TokenClockSkew() time.Duration { return time.Duration(tokenClockSkew.Load()) }
+
+// MaxTokenExpiry is the furthest in the future IsValid accepts a token's
+// expiry to be: TokenLifetime plus TokenClockSkew (15 minutes by
+// default).
+//
+// The token is an NKey signature over its expiry string, and the CLI
+// signs the bus's nonce with the same key at connect. A compromised bus
+// can send an expiry as its nonce (2099-01-01T00:00:00Z) and so obtain a
+// valid signature over it. Without this cap that was a token valid until
+// 2099. With it, the bus can still mint a token, but only one that
+// expires within MaxTokenExpiry (SEC.0, stopgap 1 in
+// docs/design/imas-payload-encryption-design.md; the real fix is
+// Decision A there).
+func MaxTokenExpiry() time.Duration { return TokenLifetime + TokenClockSkew() }
+
+// parseTokenClockSkew validates a TokenClockSkewKey value: unset means
+// DefaultTokenClockSkew, otherwise a duration from 0 to
+// MaxTokenClockSkew. A bare number is refused because its unit would be
+// a guess.
+func parseTokenClockSkew(v any) (time.Duration, error) {
+	var d time.Duration
+	switch v := v.(type) {
+	case nil:
+		return DefaultTokenClockSkew, nil
+	case time.Duration:
+		d = v
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return DefaultTokenClockSkew, nil
+		}
+		var err error
+		if d, err = time.ParseDuration(strings.TrimSpace(v)); err != nil {
+			return 0, fmt.Errorf("%s = %q: want a duration such as \"10m\"", TokenClockSkewKey, v)
+		}
+	default:
+		return 0, fmt.Errorf("%s = %v: want a duration string such as \"10m\"", TokenClockSkewKey, v)
+	}
+	if d < 0 || d > MaxTokenClockSkew {
+		return 0, fmt.Errorf("%s = %s: must be between 0 and %s", TokenClockSkewKey, d, MaxTokenClockSkew)
+	}
+	return d, nil
+}
+
+// loadTokenClockSkew sets the allowance from farmer's config. On an
+// invalid value it returns an error and leaves the allowance unchanged.
+func loadTokenClockSkew() error {
+	d, err := parseTokenClockSkew(jety.Get(TokenClockSkewKey))
+	if err != nil {
+		return err
+	}
+	tokenClockSkew.Store(int64(d))
+	return nil
+}
 
 // Sign adds a signature digest to the UserAuth struct using the provided
 // KeyPair. The signature digest is base64 encoded.
@@ -62,7 +123,7 @@ func (u UserAuth) Sign(kp nkeys.KeyPair) (UserAuth, error) {
 // Note this checks the signature using the public key in the token,
 // which is not necessarily a public key that is trusted by the server.
 //
-// An expiry more than MaxTokenExpiry in the future is refused with
+// An expiry more than MaxTokenExpiry() in the future is refused with
 // ErrInvalidToken, so a signature over a far-future timestamp is not a
 // long-lived token.
 func (u UserAuth) IsValid() (string, error) {
@@ -77,7 +138,7 @@ func (u UserAuth) isValidAt(now time.Time) (string, error) {
 	if exp.Before(now) {
 		return "", ErrExpired
 	}
-	if exp.After(now.Add(MaxTokenExpiry)) {
+	if exp.After(now.Add(MaxTokenExpiry())) {
 		return "", ErrInvalidToken
 	}
 	kp, err := nkeys.FromPublicKey(u.Pubkey)

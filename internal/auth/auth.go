@@ -70,6 +70,13 @@ func LoadPolicy() error {
 	policyMu.Lock()
 	defer policyMu.Unlock()
 
+	// An invalid token clock skew allowance fails the whole load, like
+	// any other policy error: with no policy loaded, every token is
+	// refused (fail closed).
+	if err := loadTokenClockSkew(); err != nil {
+		return err
+	}
+
 	// Validate pubkey uniqueness before loading — reject configs where
 	// the same key appears under multiple roles.
 	if err := rbac.ValidateUserUniqueness(); err != nil {
