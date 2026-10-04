@@ -127,6 +127,13 @@ var db *gorm.DB
 func SetDB(d *gorm.DB) {
 	db = d
 	auth.SetDB(d)
+	// A CLI box key imported from farmer's config (the first admin's) gets
+	// the same cross-principal check as one registered through the API.
+	if d == nil {
+		auth.SetBoxKeyClaimCheck(nil)
+	} else {
+		auth.SetBoxKeyClaimCheck(checkBoxPubUnclaimed)
+	}
 }
 
 // tenantID resolves the current tenant scope for the handful of genuinely

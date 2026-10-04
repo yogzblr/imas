@@ -1048,8 +1048,8 @@ by an external git sync today.
       exist; farmer doesn't route the rotation until J.4.
     - The platform key and the SaaS API box key: a Helm hook Job (off by
       default) writes both to OpenBao KV v2 under the tenant box path, with
-      the public halves each end pins. It needs a `cmd/farmer` dispatch
-      that was outside J.1's scope.
+      the public halves each end pins. `cmd/farmer` runs it before
+      loading config; it stays off by default until step 5 uses the keys.
     - Sealed request and reply helpers for both ends, the per-replica replay
       guard, and the Valkey claim (10-minute TTL, fail closed for mutating
       methods; the design's read-only list).
@@ -1057,7 +1057,14 @@ by an external git sync today.
       (step 4), sealed `internal.*` (step 5). Until then every gap above
       stands. `auth.users.add` now persists on a Helm install too, while it
       still takes a bearer token the bus can mint for 15 minutes; nothing
-      is deployed.
+      is deployed. Owner decision, 2026-10-04: no stopgap, the exposure is
+      accepted until J.4 lands.
+    - The first admin's CLI box key comes from a `boxpub` field in farmer's
+      config, imported once at start (owner decision). Users stay under
+      the `farmerorganization` tenant: the CLI is for operators only.
+    - Known limitation, accepted (owner decision): no per-user rate limit
+      on the replay guard, so one user sending about 3,500 requests a
+      second to a replica fills it. Operators only, so not needed now.
 
     **Stopgap SEC.0 (in review, flagged for security review):**
     `UserAuth.IsValid` refuses an expiry more than 15 minutes ahead (the

@@ -253,11 +253,13 @@ SaaS API gets `platform_pub` and its own private key from one External
 Secret mounted only in its pods. Rotating either key is deliberate and
 manual for now (the design's open question 4).
 
-**Before enabling it:** `cmd/farmer` must dispatch
-`ensure-controlplane-box-keys` to `pki.RunControlPlaneBoxKeys`, as it does
-`publish-saasapi-credential`. That three-line change was outside J.1's
-file scope and isn't made yet: until it is, the Job would start farmer's
-server instead.
+**Off by default, on purpose.** `cmd/farmer` dispatches
+`ensure-controlplane-box-keys` before loading any config, as it does
+`register-sprout-release`, so the Job works when enabled. It stays off
+until rollout step 5 gives the keys a consumer: until then enabling it
+only adds a hook that can fail a release (with an external OpenBao, its
+role and policy must exist first) and a private key nothing reads. With
+the bundled OpenBao and `openbaoBootstrap`, enabling it is safe to try.
 
 ## OpenBao
 

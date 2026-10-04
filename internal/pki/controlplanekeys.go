@@ -17,10 +17,11 @@ package pki
 // The private halves exist in this process only between generation and
 // the write, and are never printed: the Job logs fingerprints.
 //
-// cmd/farmer dispatches to RunControlPlaneBoxKeys on ControlPlaneBoxKeysCommand,
-// as it does for publish-saasapi-credential (internal/saasapicred). That
-// dispatch is outside this change's file scope and isn't wired yet; the
-// chart's Job stays off (controlPlaneBoxKeys.enabled) until it is.
+// cmd/farmer dispatches to RunControlPlaneBoxKeys on ControlPlaneBoxKeysCommand
+// before it loads any config, as it does register-sprout-release
+// (cmd/farmer/subcommands.go). The chart's Job stays off by default
+// (controlPlaneBoxKeys.enabled) until rollout step 5 gives the keys a
+// consumer.
 
 import (
 	"context"

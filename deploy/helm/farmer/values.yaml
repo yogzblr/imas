@@ -612,9 +612,11 @@ credentialPublisher:
 #   <base>/controlplane-pub  the public halves: farmer pins
 #                            saasapi_box_pub, the SaaS API platform_pub.
 # The Job may create and read the keypairs but never update them, so an
-# upgrade can't replace a key. Keep it off until cmd/farmer dispatches the
-# subcommand (not in J.1's file scope): with it off nothing uses these
-# keys yet. FLAG FOR SECURITY REVIEW.
+# upgrade can't replace a key. Off by default until rollout step 5, when
+# saasapi and farmer start using the keys: until then turning it on only
+# adds a hook that can fail a release (an external OpenBao needs its role
+# and policy first) and a private key nothing reads. FLAG FOR SECURITY
+# REVIEW.
 # ---------------------------------------------------------------------------
 controlPlaneBoxKeys:
   enabled: false

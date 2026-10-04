@@ -101,6 +101,9 @@ func LoadPolicy() error {
 	if err := applyRegisteredUsersLocked(); err != nil {
 		return err
 	}
+	// The first admin's CLI box key, from the config file's boxpub
+	// field, imported once (bootstrapkeys.go). Never fails the load.
+	importConfigCLIBoxKeys()
 	cohortReg, err = rbac.LoadCohortsFromConfig()
 	if err != nil {
 		return err

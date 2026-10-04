@@ -559,3 +559,34 @@ func TestClaimSealedMessage(t *testing.T) {
 		t.Errorf("Valkey down: %v", err)
 	}
 }
+
+// The first admin's boxpub, imported from farmer's config at start, gets
+// the same cross-principal check as an API registration (pki.SetDB
+// installs it): a sprout's box key is refused, a fresh key is imported.
+func TestConfigBoxPubImportChecksOtherPrincipals(t *testing.T) {
+	setupCLIStore(t)
+	kp, _ := nkeys.CreateAccount()
+	admin, _ := kp.PublicKey()
+	sproutPub := otherBoxPub(t)
+	if err := upsertSproutBoxKeyActive("t_9", "web-01", sproutPub); err != nil {
+		t.Fatal(err)
+	}
+	load := func(boxpub string) {
+		t.Helper()
+		jety.Set("roles", map[string]interface{}{"admin": []interface{}{map[string]interface{}{"action": "admin"}}})
+		jety.Set("users", map[string]interface{}{"admin": []interface{}{map[string]interface{}{"pubkey": admin, "boxpub": boxpub}}})
+		if err := auth.LoadPolicy(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { jety.Set("roles", nil); jety.Set("users", nil) })
+	load(sproutPub)
+	if _, _, err := auth.ValidCLIBoxKeys(CurrentTenantID(), admin); !errors.Is(err, auth.ErrNoActiveCLIBoxKey) {
+		t.Fatalf("a sprout's box key was imported as a CLI key: %v", err)
+	}
+	fresh := otherBoxPub(t)
+	load(fresh)
+	if active, _, err := auth.ValidCLIBoxKeys(CurrentTenantID(), admin); err != nil || active != fresh {
+		t.Fatalf("fresh key: %q, %v", active, err)
+	}
+}
