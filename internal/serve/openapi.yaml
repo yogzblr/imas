@@ -807,8 +807,9 @@ paths:
         Register a new user with the given NKey public key, role and CLI
         box public key (boxpub), forwarded as-is to farmer's sealed
         auth.users.add. The box key is registered with the user so they
-        can make sealed requests at once; farmer refuses an add without
-        one. Requires admin permissions.
+        can make sealed requests at once. A body without boxpub is
+        refused with 400 before it reaches farmer, which validates the key
+        itself. Requires admin permissions.
       tags:
         - auth
       requestBody:
@@ -830,6 +831,8 @@ paths:
                     result:
                       success: true
                       message: user PUBKEY789 added with role viewer and CLI box key BOXKEYFINGERPRINT
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "502":
           $ref: "#/components/responses/NATSError"
 

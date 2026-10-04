@@ -697,7 +697,7 @@ A request that doesn't open gets the fixed `Imas-Payload-Error` code and an empt
 
 - `f2c.tenantkey.continuity`: after a tenant key rotation the CLI must re-pin `tenantboxpub` by hand (from OpenBao, or farmer's log at its next start). Until the grace window ends the old pin still works; after it, requests fail closed with `open-failed`.
 - Decision D (the plaintext reads above) and J.5 (shell sessions).
-- The cleanup the owner deferred (PR #95: "leave the cleanup for a later PR"), done in CL.4 except the web UI: farmer's HTTP `ListRecipes`/`GetRecipe` routes and their stale comments are removed, so is `internal/audit`'s unused token resolver, and `imas serve`'s OpenAPI document requires `boxpub` on `POST /api/v1/auth/users` (serve forwards the body to `auth.users.add` unchanged). Still open: the web UI's add-user form (the `grlx-web-ui` submodule) must send `boxpub`; adding a user from the UI fails until it does.
+- The cleanup the owner deferred (PR #95: "leave the cleanup for a later PR"), done in CL.4 except the web UI: farmer's HTTP `ListRecipes`/`GetRecipe` routes and their stale comments are removed, so is `internal/audit`'s unused token resolver, and `imas serve`'s OpenAPI document requires `boxpub` on `POST /api/v1/auth/users` (serve refuses a body without it with 400, and otherwise forwards the body to `auth.users.add` unchanged). Still open: the web UI's add-user form (the `grlx-web-ui` submodule) must send `boxpub`; adding a user from the UI fails until it does.
 - A per-user rate limit on the replay guard (J.1's accepted limitation).
 
 ### As built: J.4 (sealed SaaS API ↔ farmer, Decision B)

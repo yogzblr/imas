@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/yogzblr/imas/internal/api/client"
 	"github.com/yogzblr/imas/internal/config"
@@ -67,9 +68,7 @@ func NewMux() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/auth/whoami", HandleNATSProxy("auth.whoami"))
 	mux.HandleFunc("GET /api/v1/auth/users", HandleNATSProxy("auth.users"))
 	mux.HandleFunc("GET /api/v1/auth/explain", HandleNATSProxy("auth.explain"))
-	// The body (pubkey, role, username, boxpub) goes to auth.users.add
-	// unchanged; farmer requires boxpub (openapi.yaml UserAddRequest).
-	mux.HandleFunc("POST /api/v1/auth/users", HandleNATSProxyWithBody("auth.users.add"))
+	mux.HandleFunc("POST /api/v1/auth/users", HandleUserAddProxy("auth.users.add"))
 	mux.HandleFunc("DELETE /api/v1/auth/users/{pubkey}", HandleUserRemoveProxy("auth.users.remove"))
 
 	// Cmd (ad-hoc command execution)
@@ -419,6 +418,42 @@ func HandleRecipeGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	WriteJSON(w, http.StatusOK, recipe)
+}
+
+// HandleUserAddProxy returns a handler that forwards a user add request
+// (pubkey, role, username, boxpub; openapi.yaml UserAddRequest) to a NATS
+// subject unchanged, after refusing with 400 a body that is not a JSON
+// object or has no boxpub. Farmer refuses an add without one too and
+// validates the key itself; checking here gives the UI a 400 rather than
+// a 502 for its own mistake.
+func HandleUserAddProxy(method string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read request body"})
+			return
+		}
+		defer r.Body.Close()
+
+		var params map[string]any
+		if err := json.Unmarshal(body, &params); err != nil || params == nil {
+			WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			return
+		}
+		if boxpub, _ := params["boxpub"].(string); strings.TrimSpace(boxpub) == "" {
+			WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "boxpub is required: the user's CLI box public key, from imas auth keygen"})
+			return
+		}
+
+		result, err := client.NatsRequest(method, params)
+		if err != nil {
+			WriteJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(result)
+	}
 }
 
 // HandleUserRemoveProxy returns a handler that forwards a user removal request

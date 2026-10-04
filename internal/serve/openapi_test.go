@@ -133,6 +133,13 @@ func TestOpenAPIUserAddRequestHasBoxPub(t *testing.T) {
 			t.Errorf("UserAddRequest has no %q", f)
 		}
 	}
+	post, err := resolveRef(spec, "#/paths/~1api~1v1~1auth~1users/post/responses")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := post.(map[string]any)["400"]; !ok {
+		t.Error("POST /api/v1/auth/users documents no 400 for a missing boxpub")
+	}
 	var required []string
 	for _, r := range s["required"].([]any) {
 		required = append(required, r.(string))

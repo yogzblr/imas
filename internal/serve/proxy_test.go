@@ -637,3 +637,41 @@ func TestHandleUserAdd_PassesBoxPub(t *testing.T) {
 		}
 	}
 }
+
+// A body without a usable boxpub, or that isn't a JSON object, is refused
+// with 400 before anything is sent to farmer.
+func TestHandleUserAdd_RejectsMissingBoxPub(t *testing.T) {
+	cleanup := startTestNATS(t)
+	defer cleanup()
+
+	testFarmer.Handle(t, client.NatsConn, "auth.users.add", func(params json.RawMessage) (any, error) {
+		t.Errorf("auth.users.add reached farmer with %s", params)
+		return map[string]any{"success": true}, nil
+	})
+
+	mux := NewMux()
+	for name, body := range map[string]string{
+		"absent":     `{"pubkey":"UNKEY_NEW","role":"viewer"}`,
+		"empty":      `{"pubkey":"UNKEY_NEW","role":"viewer","boxpub":""}`,
+		"blank":      `{"pubkey":"UNKEY_NEW","role":"viewer","boxpub":"   "}`,
+		"null":       `{"pubkey":"UNKEY_NEW","role":"viewer","boxpub":null}`,
+		"not string": `{"pubkey":"UNKEY_NEW","role":"viewer","boxpub":42}`,
+		"no body":    ``,
+		"JSON null":  `null`,
+		"array":      `[{"boxpub":"q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s="}]`,
+		"bad JSON":   `{"boxpub":`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/users", strings.NewReader(body))
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("got %d %s, want 400", rec.Code, rec.Body.String())
+			}
+			var resp map[string]string
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || resp["error"] == "" {
+				t.Errorf("body %q: want a JSON error", rec.Body.String())
+			}
+		})
+	}
+}
