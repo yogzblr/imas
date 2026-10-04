@@ -75,8 +75,11 @@ var (
 
 // installPackage installs the verified package at file for p and
 // arranges the restart onto it. It returns the notes for the job.
-// msiLog is where msiexec writes its log (Windows only).
-func installPackage(ctx context.Context, p platform, file, version, msiLog string) ([]fmt.Stringer, error) {
+// msiLog is where msiexec writes its log (Windows only). want is what the
+// package's own metadata said it is (verifyPackageIdentity); on Linux the
+// package database must report exactly that afterwards (verifyInstalled),
+// or the install is a failure and no restart is scheduled.
+func installPackage(ctx context.Context, p platform, file, version, msiLog string, want pkgIdentity) ([]fmt.Stringer, error) {
 	if p.installer == installMsiexec {
 		msiexec := msiexecPath()
 		args := []string{"/i", file, "/qn", "/norestart", "/l*v", msiLog}
@@ -103,7 +106,10 @@ func installPackage(ctx context.Context, p platform, file, version, msiLog strin
 	case installDpkg:
 		// Keep the admin's (and the sprout's own) edits to conffiles such
 		// as /etc/imas/sprout without prompting: there is no terminal.
-		args = []string{"--force-confdef", "--force-confold", "-i", file}
+		// --refuse-downgrade: dpkg's "downgrade" force is on by default
+		// (security review M1). dpkg then skips an older package and
+		// exits 0, which verifyInstalled catches.
+		args = []string{"--force-confdef", "--force-confold", "--refuse-downgrade", "-i", file}
 		env = []string{"DEBIAN_FRONTEND=noninteractive"}
 	case installRPM:
 		args = []string{"-U", file}
@@ -111,7 +117,9 @@ func installPackage(ctx context.Context, p platform, file, version, msiLog strin
 		// The packages are unsigned (the Ansible role checks the
 		// repository metadata's signature instead), and a local file has
 		// no repository metadata: what vouches for these bytes is the
-		// signed manifest's SHA-256, checked before this runs.
+		// signed manifest's SHA-256, checked before this runs. No
+		// --oldpackage: zypper then refuses an older package (by skipping
+		// it, with exit 0, which verifyInstalled catches).
 		args = []string{"--non-interactive", "--no-refresh", "install", "--allow-unsigned-rpm", file}
 	default:
 		return nil, fmt.Errorf("%w: installer %q", ErrUnsupportedPlatform, p.installer)
@@ -122,6 +130,9 @@ func installPackage(ctx context.Context, p platform, file, version, msiLog strin
 	if err != nil && !zypperSuccess(p.installer, err) {
 		return []fmt.Stringer{outputNote(p.installer, out)},
 			fmt.Errorf("%w: %s %s: %v", ErrInstallFailed, p.installer, strings.Join(args, " "), err)
+	}
+	if err := verifyInstalled(ctx, p, want); err != nil {
+		return []fmt.Stringer{outputNote(p.installer, out)}, err
 	}
 	afterReport(func() {
 		rctx, cancel := context.WithTimeout(context.Background(), time.Minute)

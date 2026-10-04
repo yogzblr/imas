@@ -110,11 +110,83 @@ type fixture struct {
 	// rejectJWT makes farmer answer 401 to this token.
 	rejectJWT string
 	refreshes int
+
+	// pkgMeta is what each package says it is, by the SHA-256 of its
+	// bytes: what dpkg-deb, rpm -qp and the MSI's Property table report.
+	pkgMeta map[string]fakePkg
+	// dbInstalled is what the package database reports as installed
+	// (dpkg-query, rpm -q): the deb Version or the rpm EPOCH:VERSION-RELEASE.
+	// A successful installer run sets it to the package's, unless
+	// skipInstall (dpkg --refuse-downgrade or zypper skipping an older
+	// package and exiting 0).
+	dbInstalled string
+	skipInstall bool
+	queries     []call
+}
+
+// fakePkg is one package's own metadata.
+type fakePkg struct {
+	name, version, epoch, release      string
+	msiName, msiVersion, msiUpgradeCode string
+}
+
+// genuinePkg is the metadata of an imas-sprout package built at tag v.
+func genuinePkg(v string) fakePkg {
+	core, pre, _ := strings.Cut(strings.TrimPrefix(v, "v"), "-")
+	ver := core
+	if pre != "" {
+		ver += "~" + pre
+	}
+	return fakePkg{name: "imas-sprout", version: ver + "+git", epoch: "(none)", release: "1",
+		msiName: "imas sprout", msiVersion: core, msiUpgradeCode: msiUpgradeCode}
+}
+
+func (f *fixture) metaOf(file string) (fakePkg, error) {
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return fakePkg{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	m, ok := f.pkgMeta[sha(b)]
+	if !ok {
+		return fakePkg{}, errors.New("not a package")
+	}
+	return m, nil
+}
+
+// fakeQuery stands in for dpkg-deb, dpkg-query and rpm.
+func (f *fixture) fakeQuery(_ context.Context, name string, args []string) ([]byte, error) {
+	f.mu.Lock()
+	f.queries = append(f.queries, call{name: name, args: args})
+	db := f.dbInstalled
+	f.mu.Unlock()
+	switch filepath.Base(name) {
+	case "dpkg-deb":
+		m, err := f.metaOf(args[1])
+		if err != nil {
+			return nil, err
+		}
+		return []byte(fmt.Sprintf("Package: %s\nVersion: %s\n", m.name, m.version)), nil
+	case "dpkg-query":
+		return []byte("install ok installed\n" + db + "\n"), nil
+	case "rpm":
+		if args[0] == "-qp" {
+			m, err := f.metaOf(args[len(args)-1])
+			if err != nil {
+				return nil, err
+			}
+			return []byte(fmt.Sprintf("%s\n%s\n%s\n%s\n", m.name, m.epoch, m.version, m.release)), nil
+		}
+		return []byte(db + "\n"), nil
+	}
+	return nil, fmt.Errorf("unexpected query tool %s", name)
 }
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	f := &fixture{t: t, keyID: 1, repoBody: pkgBytes}
+	f := &fixture{t: t, keyID: 1, repoBody: pkgBytes,
+		pkgMeta: map[string]fakePkg{sha(pkgBytes): genuinePkg(testTarget)}, dbInstalled: "2.4.0+git"}
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	f.priv = priv
 	f.manifest = fleetsign.Manifest{
@@ -151,7 +223,7 @@ func newFixture(t *testing.T) *fixture {
 
 	// Platform: Debian, with fake tools and a running systemd.
 	tools := filepath.Join(dir, "bin")
-	for _, name := range []string{"dpkg", "rpm", "zypper", "systemctl"} {
+	for _, name := range []string{"dpkg", "dpkg-deb", "dpkg-query", "rpm", "zypper", "systemctl"} {
 		writeFile(t, filepath.Join(tools, name), []byte("#!/bin/sh\nexit 0\n"), 0o755)
 	}
 	osRelease := filepath.Join(dir, "os-release")
@@ -179,13 +251,34 @@ func newFixture(t *testing.T) *fixture {
 		return testJWT + ".refreshed", nil
 	})
 	setSeam(t, &runCommand, func(_ context.Context, name string, args, env []string) ([]byte, error) {
+		tool := filepath.Base(name)
+		var m fakePkg
+		var metaErr error
+		if tool != "systemctl" {
+			m, metaErr = f.metaOf(args[len(args)-1])
+		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.calls = append(f.calls, call{name, args, env})
-		if filepath.Base(name) != "systemctl" && f.failInstall != nil {
+		if tool != "systemctl" && !f.skipInstall && metaErr == nil {
+			if tool == "dpkg" {
+				f.dbInstalled = m.version
+			} else {
+				f.dbInstalled = m.epoch + ":" + m.version + "-" + m.release
+			}
+		}
+		if tool != "systemctl" && f.failInstall != nil {
 			return []byte("dpkg: error processing archive"), f.failInstall
 		}
 		return []byte("Setting up imas-sprout (2.4.1) ..."), nil
+	})
+	setSeam(t, &queryCommand, f.fakeQuery)
+	setSeam(t, &msiProperties, func(file string, _ []string) (map[string]string, error) {
+		m, err := f.metaOf(file)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{"ProductName": m.msiName, "ProductVersion": m.msiVersion, "UpgradeCode": m.msiUpgradeCode}, nil
 	})
 	setSeam(t, &startDetached, func(name string, args []string) error {
 		f.mu.Lock()
@@ -424,14 +517,14 @@ func TestApply_Deb_DownloadsVerifiesAndInstalls(t *testing.T) {
 		t.Fatalf("calls before the result was reported = %+v, want only dpkg", f.calls)
 	}
 	c := f.calls[0]
-	if filepath.Base(c.name) != "dpkg" || !slices.Equal(c.args[:3], []string{"--force-confdef", "--force-confold", "-i"}) {
+	if filepath.Base(c.name) != "dpkg" || !slices.Equal(c.args[:4], []string{"--force-confdef", "--force-confold", "--refuse-downgrade", "-i"}) {
 		t.Errorf("installer = %s %q", c.name, c.args)
 	}
 	if !slices.Contains(c.env, "DEBIAN_FRONTEND=noninteractive") {
 		t.Errorf("dpkg env = %q", c.env)
 	}
-	if filepath.Base(c.args[3]) != testFileDeb || !strings.HasPrefix(c.args[3], filepath.Join(config.CacheDir, stageDirName)) {
-		t.Errorf("dpkg installed %q, want the staged %s", c.args[3], testFileDeb)
+	if filepath.Base(c.args[4]) != testFileDeb || !strings.HasPrefix(c.args[4], filepath.Join(config.CacheDir, stageDirName)) {
+		t.Errorf("dpkg installed %q, want the staged %s", c.args[4], testFileDeb)
 	}
 	f.runDeferred()
 	if len(f.calls) != 2 || filepath.Base(f.calls[1].name) != "systemctl" ||
@@ -446,8 +539,8 @@ func TestApply_InstallerPerPlatform(t *testing.T) {
 		wantTool              string
 		wantArgs              []string
 	}{
-		{"debian", "ID=debian\n", testFileDeb, "dpkg", []string{"--force-confdef", "--force-confold", "-i"}},
-		{"ubuntu", "ID=ubuntu\nID_LIKE=debian\n", testFileDeb, "dpkg", []string{"--force-confdef", "--force-confold", "-i"}},
+		{"debian", "ID=debian\n", testFileDeb, "dpkg", []string{"--force-confdef", "--force-confold", "--refuse-downgrade", "-i"}},
+		{"ubuntu", "ID=ubuntu\nID_LIKE=debian\n", testFileDeb, "dpkg", []string{"--force-confdef", "--force-confold", "--refuse-downgrade", "-i"}},
 		{"rhel", "ID=\"rhel\"\nID_LIKE=\"fedora\"\n", testFileRPM, "rpm", []string{"-U"}},
 		{"rocky", "ID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"\n", testFileRPM, "rpm", []string{"-U"}},
 		{"sles", "ID=\"sles\"\nID_LIKE=\"suse\"\n", testFileRPM, "zypper", []string{"--non-interactive", "--no-refresh", "install", "--allow-unsigned-rpm"}},
