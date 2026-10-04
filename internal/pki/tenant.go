@@ -292,27 +292,33 @@ func ensureTenantAccountLocked(mat *natsAuthMaterial, tenantID, nameHint string)
 	defer tenantAuthMu.Unlock()
 
 	row, lookupErr := getTenantRow(tenantID)
-	switch {
-	case lookupErr == nil && row.Deleted:
-		return nil, false, fmt.Errorf("pki: tenant %q was deprovisioned; call ProvisionTenant explicitly to re-provision it", tenantID)
-	case lookupErr == nil:
-		nameHint = row.Name
-	case !errors.Is(lookupErr, ErrTenantNotFound):
-		// A real lookup failure, not an absent row: don't fall through to
-		// upsertTenantRow, whose upsert would also reset Deleted and so
-		// silently un-delete a deprovisioned tenant.
-		return nil, false, lookupErr
-	default:
+	if testHookProvisionAfterLookup != nil {
+		testHookProvisionAfterLookup(tenantID)
+	}
+	if errors.Is(lookupErr, ErrTenantNotFound) {
+		// Absent when read; a DeprovisionTenant on another replica may
+		// write its tombstone before this insert (tenantAuthMu orders only
+		// this process), so insert only if still absent and re-read either
+		// way: the row this proceeds on is the one in the database.
 		name := nameHint
 		if name == "" {
 			name = tenantID
 		}
-		if err := upsertTenantRow(tenantRow{ID: tenantID, Name: name, CreatedAt: time.Now().Unix()}); err != nil {
+		inserted, err := insertTenantRowIfAbsent(tenantRow{ID: tenantID, Name: name, CreatedAt: time.Now().Unix()})
+		if err != nil {
 			return nil, false, fmt.Errorf("pki: recording tenant %q: %w", tenantID, err)
 		}
-		nameHint = name
-		provisioned = true
+		provisioned = inserted
+		row, lookupErr = getTenantRow(tenantID)
 	}
+	switch {
+	case lookupErr != nil:
+		// A real lookup failure, never taken as an absent row.
+		return nil, false, lookupErr
+	case row.Deleted:
+		return nil, false, fmt.Errorf("pki: tenant %q: %w", tenantID, ErrTenantDeprovisioned)
+	}
+	nameHint = row.Name
 
 	tam, minted, err := ensureTenantAccountMaterial(mat, tenantID, nameHint)
 	if err != nil {
@@ -338,6 +344,14 @@ func ensureTenantAccountLocked(mat *natsAuthMaterial, tenantID, nameHint string)
 // internal.tenant.provision delivery — NATS core gives no dedup on its
 // own), and always (re-)pushes so a resolver that missed an earlier push
 // (bus node started after this call, or a prior push failed) catches up.
+//
+// A copy of the request re-published by saasapi's outbox sweeper can run
+// on one replica while DeprovisionTenant runs on another. After its push,
+// ProvisionTenant re-reads the tenant's deleted state from the database
+// and, if the deprovision won, pushes the locked-out JWT again and returns
+// an error wrapping ErrTenantDeprovisioned (see pushLiveTenantAccount for
+// the ordering this gives). A tenant already deleted when the call starts
+// is refused before anything is pushed (ensureTenantAccountLocked).
 func ProvisionTenant(tenantID, name string) error {
 	mat, tam, _, err := ensureTenantAccount(tenantID, name)
 	if err != nil {
@@ -356,7 +370,7 @@ func ProvisionTenant(tenantID, name string) error {
 		log.Errorf("failed to sync tenant %q's Account JWT during provisioning: %v", tenantID, err)
 		return err
 	}
-	if err := pushAccountUpdate(mat, tam.jwt); err != nil {
+	if err := pushLiveTenantAccount(mat, tenantID, tam.jwt); err != nil {
 		log.Errorf("failed to push tenant %q's Account JWT to the bus resolver: %v", tenantID, err)
 		return err
 	}
@@ -368,9 +382,14 @@ func ProvisionTenant(tenantID, name string) error {
 // the pki_tenants registry and pushes a locked-out Account JWT to the
 // resolver (see lockOutAccount), so the bus closes the tenant's live
 // connections and refuses new ones, effective immediately. It does not
-// delete on-disk key material or sprout state — only ProvisionTenant
-// re-establishing trust can bring a deprovisioned tenant back,
-// deliberately (see ensureTenantAccount).
+// delete on-disk key material or sprout state.
+//
+// It is also the repair for a bus that still holds a live JWT for a
+// deleted tenant (a crash between marking the row and pushing, or a lost
+// push): called again for a tenant whose row is already deleted, it signs
+// and pushes a fresh locked-out JWT rather than returning early, so a
+// retried deprovision always leaves the bus locked out. See
+// ProvisionTenant for the other half of the provision/deprovision race fix.
 func DeprovisionTenant(tenantID string) error {
 	if !IsValidTenantID(tenantID) {
 		return ErrTenantIDInvalid
@@ -386,16 +405,22 @@ func DeprovisionTenant(tenantID string) error {
 	if err != nil {
 		return err
 	}
-	if alreadyDeleted {
-		return nil
+	if testHookDeprovisionBeforePush != nil {
+		testHookDeprovisionBeforePush(tenantID)
 	}
 	if err := pushAccountUpdate(mat, signedJWT); err != nil {
 		log.Errorf("failed to push tenant %q's locked-out Account JWT to the bus resolver: %v", tenantID, err)
 		return err
 	}
-	log.Infof("Deprovisioned tenant %q: locked-out Account JWT pushed to the bus resolver.", tenantID)
+	if alreadyDeleted {
+		log.Infof("Tenant %q was already deprovisioned: locked-out Account JWT pushed to the bus resolver again.", tenantID)
+	} else {
+		log.Infof("Deprovisioned tenant %q: locked-out Account JWT pushed to the bus resolver.", tenantID)
+	}
 	// See OnTenantDeprovisioned's doc comment: lets cmd/farmer/main.go close
-	// this tenant's NATS connection and unregister its handlers.
+	// this tenant's NATS connection and unregister its handlers. Fired on a
+	// retry too: disconnectTenant is a no-op for a tenant with no
+	// connection, and closes one a late provision copy may have opened.
 	if tenantDeprovisionedHook != nil {
 		go tenantDeprovisionedHook(tenantID)
 	}
@@ -403,10 +428,100 @@ func DeprovisionTenant(tenantID string) error {
 }
 
 // deprovisionTenantLocked is DeprovisionTenant's tenantAuthMu-guarded body:
-// it marks tenantID deleted and re-signs its Account JWT locked out (see
-// lockOutAccount), but leaves the actual bus push to the caller (network
-// I/O shouldn't happen while holding this lock).
+// it marks tenantID deleted (unless it already is) and then re-signs its
+// Account JWT locked out (see lockOutAccount), leaving the bus push to the
+// caller (network I/O shouldn't happen while holding this lock).
+// alreadyDeleted reports that the row was deleted before this call.
+//
+// The row is marked deleted before the lockout is signed, not after. On
+// one bus only the order of the pushes matters (see
+// pushLiveTenantAccount), but the resolver compares iat where it
+// reconciles copies (re-seeding from disk at bus start, a future bus
+// cluster), and this order means a provision copy that read the row as not
+// deleted signed its live JWT before this lockout. If the process fails
+// between the two steps the row is deleted but the bus is still live; a
+// retried DeprovisionTenant repairs that.
 func deprovisionTenantLocked(mat *natsAuthMaterial, tenantID string) (signedJWT string, alreadyDeleted bool, err error) {
+	tenantAuthMu.Lock()
+	defer tenantAuthMu.Unlock()
+
+	row, err := getTenantRow(tenantID)
+	if testHookDeprovisionAfterLookup != nil {
+		testHookDeprovisionAfterLookup(tenantID)
+	}
+	if errors.Is(err, ErrTenantNotFound) && tenantID != currentTenantID() {
+		// Never provisioned: nothing to lock out, but leave a deleted
+		// tombstone so a provision copy or an enrollment arriving later,
+		// on any replica, is refused (ensureTenantAccountLocked) rather
+		// than creating a live Account for an offboarded tenant. The
+		// legacy current tenant is exempt: it is not deprovisioned this
+		// way and must stay enrollable. If a concurrent provision inserted
+		// the row first, deprovision it like any other.
+		inserted, insErr := insertTenantRowIfAbsent(tenantRow{ID: tenantID, Name: tenantID, Deleted: true, CreatedAt: time.Now().Unix()})
+		if insErr != nil {
+			return "", false, fmt.Errorf("pki: recording tenant %q's tombstone: %w", tenantID, insErr)
+		}
+		if inserted {
+			return "", false, ErrTenantNotFound
+		}
+		row, err = getTenantRow(tenantID)
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if !row.Deleted {
+		if err := markTenantDeleted(tenantID); err != nil {
+			return "", false, err
+		}
+	}
+	// No Account was ever recorded or written for this tenant (a tombstone,
+	// or a provision that hasn't minted yet): nothing can be on the bus, so
+	// don't mint keys just to lock them out. Every push follows
+	// setTenantAccountPub, and a provision still in flight sees the row
+	// deleted when it re-checks after its push.
+	if row.AccountPub == "" {
+		if _, statErr := os.Stat(tenantAccountJWTPath(tenantID)); os.IsNotExist(statErr) {
+			return "", row.Deleted, ErrTenantNotFound
+		}
+	}
+	signed, err := signLockedOutTenantJWT(mat, tenantID, row.Name)
+	if err != nil {
+		return "", false, err
+	}
+	return signed, row.Deleted, nil
+}
+
+// signLockedOutTenantJWT re-signs tenantID's Account JWT locked out (see
+// lockOutAccount) as of now and persists it to disk, replacing whatever is
+// there: the on-disk JWT may be live again if a provision on this replica
+// re-signed it after an earlier lockout (syncTenantSprouts writes it
+// outside tenantAuthMu). The caller must hold tenantAuthMu and must
+// already have seen the tenant's row marked deleted.
+func signLockedOutTenantJWT(mat *natsAuthMaterial, tenantID, name string) (string, error) {
+	tam, _, err := ensureTenantAccountMaterial(mat, tenantID, name)
+	if err != nil {
+		return "", err
+	}
+	ac, err := jwt.DecodeAccountClaims(tam.jwt)
+	if err != nil {
+		return "", fmt.Errorf("pki: decoding tenant %q's Account JWT: %w", tenantID, err)
+	}
+	lockOutAccount(ac, time.Now())
+	signed, err := ac.Encode(mat.operatorSigningKP)
+	if err != nil {
+		return "", fmt.Errorf("pki: re-signing tenant %q's Account JWT locked out: %w", tenantID, err)
+	}
+	if err := os.WriteFile(tenantAccountJWTPath(tenantID), []byte(signed), 0o600); err != nil {
+		return "", err
+	}
+	return signed, nil
+}
+
+// relockIfDeletedLocked takes tenantAuthMu, reads tenantID's row from the
+// database (the source of truth shared by every replica; tenantAuthMu
+// only orders this process), and, if the row is deleted, re-signs the
+// locked-out JWT. deleted is false, with no JWT, for a live tenant.
+func relockIfDeletedLocked(mat *natsAuthMaterial, tenantID string) (signedJWT string, deleted bool, err error) {
 	tenantAuthMu.Lock()
 	defer tenantAuthMu.Unlock()
 
@@ -414,30 +529,94 @@ func deprovisionTenantLocked(mat *natsAuthMaterial, tenantID string) (signedJWT 
 	if err != nil {
 		return "", false, err
 	}
-	if row.Deleted {
-		return "", true, nil
+	if !row.Deleted {
+		return "", false, nil
 	}
-	tam, _, err := ensureTenantAccountMaterial(mat, tenantID, row.Name)
+	signed, err := signLockedOutTenantJWT(mat, tenantID, row.Name)
 	if err != nil {
-		return "", false, err
+		return "", true, err
 	}
-	ac, err := jwt.DecodeAccountClaims(tam.jwt)
-	if err != nil {
-		return "", false, fmt.Errorf("pki: decoding tenant %q's Account JWT: %w", tenantID, err)
-	}
-	lockOutAccount(ac, time.Now())
-	signed, err := ac.Encode(mat.operatorSigningKP)
-	if err != nil {
-		return "", false, fmt.Errorf("pki: re-signing tenant %q's Account JWT locked out: %w", tenantID, err)
-	}
-	if err := os.WriteFile(tenantAccountJWTPath(tenantID), []byte(signed), 0o600); err != nil {
-		return "", false, err
-	}
-	if err := markTenantDeleted(tenantID); err != nil {
-		return "", false, err
-	}
-	return signed, false, nil
+	return signed, true, nil
 }
+
+// pushLiveTenantAccount pushes a live (not locked-out) Account JWT for
+// tenantID, the push ProvisionTenant and ReloadNKeysForTenant make, and
+// then closes the race with a concurrent DeprovisionTenant, possibly on
+// another replica (PKI.1).
+//
+// Both callers checked that the tenant wasn't deleted before building the
+// JWT, but under tenantAuthMu, which is local to this process: a
+// deprovision on another replica can mark the row deleted and push its
+// lockout between that check and this push, and this push would then
+// replace the lockout on the bus with the live JWT. So once the push has
+// returned, this re-reads the row from the database, and if it is now
+// deleted, signs a fresh lockout, pushes it, and returns an error
+// wrapping ErrTenantDeprovisioned.
+//
+// The ordering this gives, across replicas: the bus applies a claims
+// update before it answers it, and applies updates in the order they
+// arrive, whatever their iat (nats-server's full resolver stores a pushed
+// JWT unconditionally; TestResolverPush_LastArrivalWins pins that). The
+// re-check is a database read that starts after the bus has answered this
+// push. Either it sees the row deleted, and this pushes a lockout after
+// its live JWT; or it doesn't, so the deprovision marked the row after
+// this read, and pushes its lockout after that (deprovisionTenantLocked),
+// so after this push was applied. Either way the last push the bus applies
+// for a deleted tenant is a lockout, with no assumption about clocks. It
+// relies on the re-check seeing a deprovision's committed write: one
+// database, or PXC read and written through one node (the HAProxy
+// Service), or wsrep_sync_wait. Where the resolver orders copies by iat
+// instead (re-seeding from disk at bus start, a future bus cluster), the
+// lockout also has to carry the later iat, which holds when replica clocks
+// agree to within the time between the two signings.
+//
+// The re-check runs even when the push failed: a request that timed out
+// may still have been applied. If the re-check itself can't read the
+// database, the error is returned and the bus state is unknown; a retried
+// DeprovisionTenant repairs it.
+func pushLiveTenantAccount(mat *natsAuthMaterial, tenantID, accountJWT string) error {
+	if testHookBeforeLivePush != nil {
+		testHookBeforeLivePush(tenantID)
+	}
+	pushErr := pushAccountUpdate(mat, accountJWT)
+	if testHookAfterLivePush != nil {
+		testHookAfterLivePush(tenantID)
+	}
+	signed, deleted, err := relockIfDeletedLocked(mat, tenantID)
+	if err != nil {
+		return fmt.Errorf("pki: re-checking tenant %q after pushing its Account JWT (bus state unconfirmed): %w", tenantID, errors.Join(err, pushErr))
+	}
+	if !deleted {
+		return pushErr
+	}
+	log.Warnf("tenant %q was deprovisioned while its live Account JWT was being pushed; pushing the locked-out JWT again", tenantID)
+	if err := pushAccountUpdate(mat, signed); err != nil {
+		return fmt.Errorf("pki: re-pushing tenant %q's locked-out Account JWT: %w", tenantID, err)
+	}
+	if tenantDeprovisionedHook != nil {
+		go tenantDeprovisionedHook(tenantID)
+	}
+	return fmt.Errorf("pki: tenant %q was deprovisioned during provisioning; its locked-out Account JWT was pushed again: %w", tenantID, ErrTenantDeprovisioned)
+}
+
+// Test hooks for the provision/deprovision interleaving tests
+// (tenant_race_test.go). Always nil in production.
+var (
+	// testHookBeforeLivePush runs in pushLiveTenantAccount after the
+	// caller's deleted check and before the live push.
+	testHookBeforeLivePush func(tenantID string)
+	// testHookAfterLivePush runs after the live push and before the
+	// database re-check.
+	testHookAfterLivePush func(tenantID string)
+	// testHookProvisionAfterLookup and testHookDeprovisionAfterLookup run
+	// under tenantAuthMu right after each path's first pki_tenants read,
+	// standing in for another replica writing the row in between.
+	testHookProvisionAfterLookup   func(tenantID string)
+	testHookDeprovisionAfterLookup func(tenantID string)
+	// testHookDeprovisionBeforePush runs in DeprovisionTenant after the
+	// row is marked deleted and the lockout signed, before it is pushed.
+	testHookDeprovisionBeforePush func(tenantID string)
+)
 
 // lockOutAccount edits ac so that, once pushed, the bus closes every
 // connection under the Account and accepts no new ones:
@@ -557,7 +736,7 @@ func ReloadNKeysForTenant(tenantID string) error {
 	if !provisioned && !changed {
 		return nil
 	}
-	if err := pushAccountUpdate(mat, tam.jwt); err != nil {
+	if err := pushLiveTenantAccount(mat, tenantID, tam.jwt); err != nil {
 		log.Errorf("failed to push tenant %s's updated Account JWT to the bus resolver: %v", tenantID, err)
 		return err
 	}

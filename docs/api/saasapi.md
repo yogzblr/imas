@@ -110,11 +110,12 @@ succeeded with one.
 
 `DELETE` works the same way in reverse (`offboarding` → `offboarded`) and is
 allowed only for an `active` or `failed` tenant. It returns
-`409 provisioning_in_progress` while a tenant is still pending, so that the
-provision and deprovision requests can't race on farmer. It does the same,
-for `SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER` (2 minutes) after the last
-publish, when the tenant's provision request had to be published more than
-once (below): farmer may still be running an earlier copy.
+`409 provisioning_in_progress` while a tenant, or its provision job, is
+still pending. Once provisioning has a result, `DELETE` goes ahead at once,
+even if the provision request had to be published more than once (below)
+and farmer may still be running an earlier copy: farmer re-checks the
+tenant after pushing its Account and locks it out again if the deprovision
+won, so a late copy can't leave an offboarded tenant live on the bus.
 
 If no result comes back for a provisioning job (farmer was down, or saasapi
 was down when the result arrived), the [outbox sweeper](#outbox-sweeper)
@@ -545,7 +546,7 @@ error, never a silent default.
 | `SAASAPI_FLEET_UPDATE_CLOCK_SKEW` | `30s` | clock-skew margin of the rollout wave gate, above 0 and at most `5m` |
 | `SAASAPI_OUTBOX_SWEEPER_ENABLED` | `true` | runs the [outbox sweeper](#outbox-sweeper) |
 | `SAASAPI_OUTBOX_SWEEP_INTERVAL` | `30s` | time between sweeps, `1s`–`1h` |
-| `SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER` | `2m` | a pending provisioning job is published again this long after its last publish, doubling per attempt; also how long `DELETE` waits after a re-published provision job; `10s`–`24h` |
+| `SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER` | `2m` | a pending provisioning job is published again this long after its last publish, doubling per attempt; `10s`–`24h` |
 | `SAASAPI_OUTBOX_ACTION_STALE_AFTER` | `2m` | the same for a queued action item, from its last change; `10s`–`24h` |
 | `SAASAPI_OUTBOX_ACTION_MAX_AGE` | `15m` | a queued action item not sent this long after its POST fails with `expired_not_sent`, never sent; `1m`–`1h` |
 | `SAASAPI_OUTBOX_MAX_ATTEMPTS` | `5` | publishes of a job, or dispatches of an item, before it is failed; `1`–`50` |

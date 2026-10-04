@@ -103,8 +103,6 @@ import (
 //   - SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER: how long a tenant
 //     provisioning job may stay pending after it was last published before
 //     it is published again, doubling per attempt; default 2m, 10s..24h.
-//     Also how long DELETE /tenants/{id} waits after a re-published
-//     provision job before it offboards the tenant.
 //   - SAASAPI_OUTBOX_ACTION_STALE_AFTER: the same for a queued action
 //     item, from its last change; default 2m, 10s..24h.
 //   - SAASAPI_OUTBOX_ACTION_MAX_AGE: how long after it was accepted a
