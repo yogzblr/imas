@@ -1160,6 +1160,7 @@ Sub-waves, each held until the one before is merged to `main`:
 |---|---|---|
 | 7A | SEC.0, SEC.3a, SEC.3b, SEC.4, SEC.5 | Fixes on today's code. Disjoint areas: SEC.0 is `internal/auth` and `internal/openbao`; SEC.3a and SEC.3b are `internal/pki`, `internal/payloadbox` and the sprout (different files, rebase on each other); SEC.4 is facts, props and recipes; SEC.5 is self-update and dispatch. SEC.0 is tiny and should merge first. |
 | 7A+ | REC.1 | SaaS API recipe upload, needed for the UAT. Needs SEC.4 merged (it uses SEC.4's per-tenant key prefix and restricted template functions). Touches saasapi and objectstore only, so it runs in parallel with the J chain. |
+| 7A+ | SEC.5b | Added 2026-10-04 at the owner's request: farmer reads each tenant's rollout window (`internal/fleetcatalog`), so the self_update check SEC.5 added can pass; until it lands farmer refuses every self_update. Needs SEC.5 merged. Touches `internal/fleetcatalog` and `internal/natsapi/sprout_action.go`, so it runs in parallel with REC.1 and J.1 to J.3; merge it before J.4, which also works in `internal/natsapi`. |
 | 7B | J.1 | The sealing building blocks touch `internal/pki` and `internal/payloadbox`, so they wait for SEC.3a and SEC.3b. |
 | 7C | J.2, J.3 | Sealed refresh (pki, api handlers, sprout) and sealed `imas.api.*` (natsapi, auth, CLI) share only J.1's helpers. |
 | 7D | J.4, J.5 | Sealed `internal.*` and sealed shell both need J.3 (the natsapi wrapper and the CLI box keys). |
@@ -1351,6 +1352,46 @@ internal/saasapi, cmd/fleetreleaser (report only), deploy/helm/farmer (values an
 env), docs/BUILD-STATUS.md (Open items 4 and 10 and the requirement 20 row only).
 Tests: go test ./... must pass. PR: state what you built, what you deferred, and
 any open question."
+```
+
+**SEC.5b: farmer reads tenant rollout windows (after SEC.5)**
+```
+claude --cloud "Implement SEC.5b: farmer reads each tenant's rollout window, so
+the self_update check SEC.5 added can pass. Today internal/natsapi/sprout_action.go
+checkRolloutWindow type-asserts the release catalog to a rolloutWindowCatalog
+interface (RolloutWindow(ctx, tenantID) returning start, end, ok, err), and the
+SQL catalog in internal/fleetcatalog does not implement it, so farmer refuses
+every self_update with internal_error even with IMAS_SELF_UPDATE_ENABLED on.
+That fail-closed default stays until this lands. FLAG FOR SECURITY REVIEW.
+Build: (1) Add RolloutWindow to the Catalog interface in internal/fleetcatalog
+and implement it on SQL: read rollout_window_start and rollout_window_end from
+saas.tenant_update_policy WHERE tenant_id = ?, one query, scoped by tenant_id
+(CLAUDE.md tenant safety); ok is false when the tenant has no policy row; both
+columns NULL means no window; exactly one NULL is a corrupt row and must fail
+closed, not be read as no window. Return times in UTC. (2) Drop the type
+assertion in checkRolloutWindow now that every Catalog has the method, and
+remove the failing-closed message that names the missing method; keep the
+rule identical to saasapi policyRefusal (internal/saasapi/fleet_update_dispatch.go):
+refused when now is before start or at or after end. Use one shared clock
+helper or test both against the same table of cases so the two cannot drift.
+(3) Update the fleetcatalogtest fixture and the windowedCatalog stand-in in
+internal/natsapi/sprout_action_selfupdate_test.go to use the real
+implementation where they can. (4) Check farmer's read-only saas grant covers
+the two columns (design doc section 4.1, deploy/helm/farmer README PXC
+section); if it is column-scoped and misses them, say so and stop rather than
+widen it.
+Tests: no row, no window, inside, before start, exactly at start, exactly at
+end, after end, one-NULL corrupt row refused, another tenant's window never
+read (two tenants with different windows), a failed read is internal_error;
+the farmer and saasapi rules agree on the same cases; an end-to-end
+self_update through checkSelfUpdateRelease passes inside the window with the
+switch on and is refused with rollout_window_closed outside it.
+Scope: internal/fleetcatalog (including fleetcatalogtest),
+internal/natsapi/sprout_action.go and its tests, internal/saasapi
+(fleet_update_dispatch.go, only to share the window rule), docs/BUILD-STATUS.md
+(Open item 4 and the requirement 20 row only). Needs SEC.5 merged. Tests: go
+test ./... must pass. PR: state what you built, what you deferred, and any
+open question."
 ```
 
 **REC.1: SaaS API recipe upload (after SEC.4)**
@@ -1622,8 +1663,8 @@ origin/main each time you dispatch; never dispatch from memory. If an agent cann
 reach the repo, add it with the add_repo tool for yogzblr/imas with push access and
 retry once; if that fails, stop and tell me.
 
-Briefs: SEC.0, SEC.3a, SEC.3b, SEC.4, SEC.5, REC.1, J.1, J.2, J.3, J.4, J.5,
-SEC.6.
+Briefs: SEC.0, SEC.3a, SEC.3b, SEC.4, SEC.5, SEC.5b, REC.1, J.1, J.2, J.3, J.4,
+J.5, SEC.6.
 
 Gates. A gate is satisfied only when its PR is MERGED into main, not merely open
 or green.
@@ -1633,6 +1674,7 @@ or green.
   together. SEC.3a and SEC.3b touch the same package: tell me if they conflict;
   do not resolve it yourself.
 - REC.1: gate SEC.4.
+- SEC.5b: gate SEC.5.
 - J.1: gates SEC.3a and SEC.3b (SEC.0 should already be merged).
 - J.2 and J.3: gate J.1. Start together.
 - J.4 and J.5: gate J.3. Start together.
