@@ -990,10 +990,12 @@ func closeTenantConns(conns []*nats.Conn) {
 // endShellSessions runs closeShellSessions, waiting at most timeout for
 // it: a stuck session must not hold up the rest of farmer's stop.
 func endShellSessions(timeout time.Duration) {
+	// Read here, not in the goroutine, which may outlive this call.
+	closeAll := closeShellSessions
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		closeShellSessions()
+		closeAll()
 	}()
 	select {
 	case <-done:
