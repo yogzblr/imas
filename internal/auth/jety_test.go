@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/nats-io/nkeys"
 	"github.com/taigrr/jety"
 
+	"github.com/yogzblr/imas/internal/log"
 	"github.com/yogzblr/imas/internal/rbac"
 )
 
@@ -599,20 +601,28 @@ func TestLoadPolicyAcceptsUniqueUsernames(t *testing.T) {
 	}
 }
 
-// --- DangerouslyAllowRoot bypass with jety ---
+// --- dangerously_allow_root is a removed key ---
 
-func TestDangerouslyAllowRootEnabled(t *testing.T) {
+func TestDangerouslyAllowRootIgnored(t *testing.T) {
 	setupJetyForTest(t)
 	defer clearJetyKeys(t)
 
 	jety.Set("dangerously_allow_root", true)
 
-	if !DangerouslyAllowRoot() {
-		t.Error("expected DangerouslyAllowRoot to return true")
+	// LoadPolicy warns that the key is ignored, and still loads.
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(nil) })
+	if err := LoadPolicy(); err != nil {
+		t.Fatalf("LoadPolicy with the removed key set: %v", err)
+	}
+	defer SetPolicy(nil, nil, nil)
+	if !strings.Contains(logged.String(), "dangerously_allow_root, which was removed") {
+		t.Errorf("no warning about the removed key:\n%s", logged.String())
 	}
 
-	// The user checks don't consult the flag: it has no effect on the
-	// NATS path (owner decision 2026-10-04, PR #95).
+	// The user checks don't consult it (owner decisions 2026-10-04,
+	// PR #95).
 	if UserHasAction("AUNKNOWN", rbac.ActionCook) {
 		t.Error("UserHasAction granted an unknown user under the flag")
 	}

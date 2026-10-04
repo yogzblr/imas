@@ -578,10 +578,8 @@ func initAuditLogger() {
 }
 
 func loadAuthPolicy() {
-	if auth.DangerouslyAllowRoot() {
-		log.Warn("WARNING: dangerously_allow_root is enabled — authentication is bypassed on farmer's HTTP API for GET /files/ (every object, any tenant) and GET /v1/recipes. It does not affect the NATS API, where every request is sealed and role-checked. Do not use in production!")
-	}
-
+	// auth.LoadPolicy warns if the config still sets a removed key, such
+	// as dangerously_allow_root, which is ignored and bypasses nothing.
 	if err := auth.LoadPolicy(); err != nil {
 		log.Errorf("Failed to load auth policy: %v", err)
 	} else {

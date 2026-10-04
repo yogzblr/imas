@@ -72,6 +72,8 @@ func LoadPolicy() error {
 	policyMu.Lock()
 	defer policyMu.Unlock()
 
+	warnRemovedConfigKeys()
+
 	// Validate pubkey uniqueness before loading — reject configs where
 	// the same key appears under multiple roles.
 	if err := rbac.ValidateUserUniqueness(); err != nil {
@@ -234,15 +236,38 @@ func Sign(nonce []byte) ([]byte, error) {
 	return b, err
 }
 
-// DangerouslyAllowRoot returns true if the farmer config has
-// dangerously_allow_root set (dev only). It bypasses authentication on
-// farmer's HTTP API for GET /files/ and the GET /v1/recipes routes
-// (internal/api's Auth), and nothing else. It has no effect on the NATS
-// API: every sealed imas.api.* request goes through the role and scope
-// checks below for the user it opened under (owner decision 2026-10-04,
-// PR #95).
-func DangerouslyAllowRoot() bool {
-	return jety.GetBool("dangerously_allow_root")
+// removedConfigKeys are farmer config keys that no longer do anything,
+// with why. LoadPolicy warns about each one that is still set; none
+// stops farmer starting.
+var removedConfigKeys = map[string]string{
+	// Owner decisions 2026-10-04 (PR #95): "remove dangerously_allow_root
+	// bypass from the NATS path" and "remove the HTTP bypass too in PR
+	// 95". Nothing reads it: there is no development bypass anywhere.
+	"dangerously_allow_root": "it is ignored and bypasses nothing: every NATS API request is sealed and role-checked, and every HTTP route takes its normal credential",
+	// J.3 deleted bearer tokens, and this allowance with them.
+	"apitokenclockskew": "it is ignored: there are no bearer tokens any more (J.3)",
+}
+
+// warnRemovedConfigKeys logs a warning for each removedConfigKeys entry
+// still set in farmer's config to something other than its zero value
+// (dangerously_allow_root: false asks for nothing, so it isn't worth a
+// warning).
+func warnRemovedConfigKeys() {
+	for key, why := range removedConfigKeys {
+		switch v := jety.Get(key).(type) {
+		case nil:
+			continue
+		case bool:
+			if !v {
+				continue
+			}
+		case string:
+			if v == "" {
+				continue
+			}
+		}
+		log.Warnf("farmer config sets %s, which was removed: %s. Delete it from the config.", key, why)
+	}
 }
 
 // ---- what a verified user may do ----------------------------------------
