@@ -16,7 +16,35 @@ type UserAuth struct {
 	Sig     string `json:"sig"`
 }
 
-var ErrExpired = errors.New("auth token expired")
+var (
+	ErrExpired = errors.New("auth token expired")
+	// ErrInvalidToken is returned for a token IsValid refuses for any
+	// reason other than expiry or a malformed field. It is deliberately
+	// generic: it doesn't say which check failed or what the limits are.
+	ErrInvalidToken = errors.New("auth token invalid")
+)
+
+const (
+	// TokenLifetime is how long a token NewToken creates stays valid.
+	TokenLifetime = 5 * time.Minute
+	// TokenClockSkew is how far ahead of farmer's clock a CLI's clock may
+	// run and still have its tokens accepted. It matches the 5 minutes
+	// used for every other signed timestamp farmer checks
+	// (pki.EnrollSigMaxSkew, payloadbox.DefaultMaxSkew).
+	TokenClockSkew = 5 * time.Minute
+	// MaxTokenExpiry is the furthest in the future IsValid accepts a
+	// token's expiry to be.
+	//
+	// The token is an NKey signature over its expiry string, and the CLI
+	// signs the bus's nonce with the same key at connect. A compromised
+	// bus can send an expiry as its nonce (2099-01-01T00:00:00Z) and so
+	// obtain a valid signature over it. Without this cap that was a token
+	// valid until 2099. With it, the bus can still mint a token, but only
+	// one that expires within MaxTokenExpiry (SEC.0, stopgap 1 in
+	// docs/design/imas-payload-encryption-design.md; the real fix is
+	// Decision A there).
+	MaxTokenExpiry = TokenLifetime + TokenClockSkew
+)
 
 // Sign adds a signature digest to the UserAuth struct using the provided
 // KeyPair. The signature digest is base64 encoded.
@@ -33,13 +61,24 @@ func (u UserAuth) Sign(kp nkeys.KeyPair) (UserAuth, error) {
 // if valid, or an error if not.
 // Note this checks the signature using the public key in the token,
 // which is not necessarily a public key that is trusted by the server.
+//
+// An expiry more than MaxTokenExpiry in the future is refused with
+// ErrInvalidToken, so a signature over a far-future timestamp is not a
+// long-lived token.
 func (u UserAuth) IsValid() (string, error) {
+	return u.isValidAt(time.Now())
+}
+
+func (u UserAuth) isValidAt(now time.Time) (string, error) {
 	exp, err := time.Parse(time.RFC3339, u.Expires)
 	if err != nil {
 		return "", err
 	}
-	if exp.Before(time.Now()) {
+	if exp.Before(now) {
 		return "", ErrExpired
+	}
+	if exp.After(now.Add(MaxTokenExpiry)) {
+		return "", ErrInvalidToken
 	}
 	kp, err := nkeys.FromPublicKey(u.Pubkey)
 	if err != nil {
@@ -65,7 +104,8 @@ func decodeToken(token string) (UserAuth, error) {
 }
 
 // createSignedToken creates a signed token that can be used to authenticate
-// with the server. The token is valid for 5 minutes, and is base64 encoded.
+// with the server. The token is valid for TokenLifetime, and is base64
+// encoded.
 func createSignedToken(kp nkeys.KeyPair) (string, error) {
 	pk, err := kp.PublicKey()
 	if err != nil {
@@ -73,7 +113,7 @@ func createSignedToken(kp nkeys.KeyPair) (string, error) {
 	}
 
 	ua := UserAuth{
-		Expires: time.Now().Add(time.Duration(time.Minute) * 5).Format(time.RFC3339),
+		Expires: time.Now().Add(TokenLifetime).Format(time.RFC3339),
 		Pubkey:  pk,
 	}
 	ua, err = ua.Sign(kp)

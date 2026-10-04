@@ -3,6 +3,8 @@ package auth
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -249,5 +251,108 @@ func TestSignPreservesOtherFields(t *testing.T) {
 	}
 	if signed.Pubkey != pk {
 		t.Errorf("Sign changed Pubkey: got %q, want %q", signed.Pubkey, pk)
+	}
+}
+
+// signedAt returns a token for kp expiring at exp.
+func signedAt(t *testing.T, kp nkeys.KeyPair, exp time.Time) UserAuth {
+	t.Helper()
+	pk, err := kp.PublicKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ua, err := UserAuth{Expires: exp.Format(time.RFC3339), Pubkey: pk}.Sign(kp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ua
+}
+
+// TestUserAuthIsValidExpiryCap: SEC.0. The token is a signature over its
+// expiry, which a compromised bus can obtain by sending an expiry as its
+// connect nonce, so an expiry further out than MaxTokenExpiry is refused.
+func TestUserAuthIsValidExpiryCap(t *testing.T) {
+	kp := mustCreateKeyPair(t)
+	pk, _ := kp.PublicKey()
+	// RFC3339 carries whole seconds, so work from a whole second.
+	now := time.Now().Truncate(time.Second)
+
+	cases := []struct {
+		name    string
+		exp     time.Time
+		wantErr error
+	}{
+		{"fresh token", now.Add(TokenLifetime), nil},
+		{"at the cap", now.Add(MaxTokenExpiry), nil},
+		{"one second past the cap", now.Add(MaxTokenExpiry + time.Second), ErrInvalidToken},
+		{"one minute past the cap", now.Add(MaxTokenExpiry + time.Minute), ErrInvalidToken},
+		{"far future", time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC), ErrInvalidToken},
+		{"expires now", now, nil},
+		{"expired one second ago", now.Add(-time.Second), ErrExpired},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := signedAt(t, kp, tc.exp).isValidAt(now)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("isValidAt = %q, %v; want error %v", got, err, tc.wantErr)
+			}
+			if tc.wantErr == nil && got != pk {
+				t.Fatalf("isValidAt returned %q, want %q", got, pk)
+			}
+		})
+	}
+}
+
+// TestUserAuthIsValidFarFutureRefused goes through the exported IsValid
+// with the timestamp from the regression scenario.
+func TestUserAuthIsValidFarFutureRefused(t *testing.T) {
+	kp := mustCreateKeyPair(t)
+	ua := signedAt(t, kp, time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC))
+	if ua.Expires != "2099-01-01T00:00:00Z" {
+		t.Fatalf("Expires = %q", ua.Expires)
+	}
+	_, err := ua.IsValid()
+	if !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("IsValid = %v, want ErrInvalidToken", err)
+	}
+	// Generic: the error says neither the expiry nor the limit.
+	if msg := err.Error(); strings.Contains(msg, "2099") || strings.Contains(msg, "minute") || strings.Contains(msg, "future") {
+		t.Errorf("error is not generic: %q", msg)
+	}
+}
+
+// TestCreateSignedTokenWithinCap: the only token creator (NewToken, via
+// createSignedToken) must ask for no more than IsValid accepts, with room
+// for the CLI's clock to run ahead.
+func TestCreateSignedTokenWithinCap(t *testing.T) {
+	if TokenLifetime > MaxTokenExpiry-TokenClockSkew {
+		t.Fatalf("TokenLifetime %v leaves no clock skew room under MaxTokenExpiry %v", TokenLifetime, MaxTokenExpiry)
+	}
+	kp := mustCreateKeyPair(t)
+	before := time.Now().Truncate(time.Second)
+	token, err := createSignedToken(kp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ua, err := decodeToken(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exp, err := time.Parse(time.RFC3339, ua.Expires)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exp.After(time.Now().Add(TokenLifetime)) || exp.Before(before.Add(TokenLifetime)) {
+		t.Fatalf("token expires %v, want about now + %v", exp, TokenLifetime)
+	}
+	// Farmer checks it at the moment it was created by a CLI clock
+	// running exactly TokenClockSkew ahead: accepted.
+	farmerNow := exp.Add(-TokenLifetime - TokenClockSkew)
+	if _, err := ua.isValidAt(farmerNow); err != nil {
+		t.Fatalf("token from a clock %v ahead refused: %v", TokenClockSkew, err)
+	}
+	// From a CLI clock one second further ahead: refused.
+	if _, err := ua.isValidAt(farmerNow.Add(-time.Second)); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("token from a clock more than %v ahead: got %v, want ErrInvalidToken", TokenClockSkew, err)
 	}
 }
