@@ -175,6 +175,17 @@ spec:
                 secretKeyRef:
                   name: {{ $s.natsCredentials.secretName }}
                   key: {{ $s.natsCredentials.jwtKey }}
+            # Sealed internal.* (J.4): its box private key as a file only,
+            # and the platform public key it pins (not secret) as a value,
+            # both from saasapi.controlPlaneBox's Secret. No fallback:
+            # saasapi refuses to start without them.
+            - name: SAASAPI_BOX_PRIV_FILE
+              value: /var/run/secrets/imas/saasapi-box/{{ $s.controlPlaneBox.privKey }}
+            - name: SAASAPI_PLATFORM_BOX_PUB
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $s.controlPlaneBox.secretName }}
+                  key: {{ $s.controlPlaneBox.platformPubKey }}
             {{- /*
             deploy/saasapi/deployment.env.rate-limit.yaml, with the same
             semantics: null emits nothing (the compiled-in default), burst
@@ -349,6 +360,9 @@ spec:
             - name: nats-credentials
               mountPath: /var/run/secrets/imas/nats
               readOnly: true
+            - name: saasapi-box
+              mountPath: /var/run/secrets/imas/saasapi-box
+              readOnly: true
             - name: bus-ca
               mountPath: /var/run/imas/bus-ca
               readOnly: true
@@ -390,6 +404,20 @@ spec:
             items:
               - key: {{ $s.natsCredentials.seedKey | quote }}
                 path: {{ $s.natsCredentials.seedKey | quote }}
+        # Only the box private key, as the nats seed: owner root, group the
+        # pod's fsGroup (saasapi's), 0440, nothing for others; mounted by
+        # the saasapi container alone, never by the init container. The
+        # platform public key reaches the container as SAASAPI_PLATFORM_BOX_PUB.
+        # Until the Secret exists (the keygen Job hasn't run, or ESO hasn't
+        # synced yet) the kubelet doesn't start the pod: it waits, it
+        # doesn't crash-loop.
+        - name: saasapi-box
+          secret:
+            secretName: {{ $s.controlPlaneBox.secretName }}
+            defaultMode: 0440
+            items:
+              - key: {{ $s.controlPlaneBox.privKey | quote }}
+                path: {{ $s.controlPlaneBox.privKey | quote }}
         - name: bus-ca
           {{- if .Values.bus.ca.secretName }}
           secret:

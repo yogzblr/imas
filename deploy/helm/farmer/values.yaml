@@ -402,6 +402,19 @@ saasapi:
     secretName: imas-saasapi-nats
     seedKey: nats-user.nk
     jwtKey: SAASAPI_NATS_USER_JWT
+  # The SaaS API's half of sealed internal.* traffic (J.4, README "Control-
+  # plane box keys"). One Secret, mounted only in saasapi's pods: its box
+  # PRIVATE key (<base>/saasapi-box, field priv), mounted read-only as a
+  # file (SAASAPI_BOX_PRIV_FILE), and the platform PUBLIC key it pins
+  # (<base>/controlplane-pub, field platform_pub; SAASAPI_PLATFORM_BOX_PUB).
+  # ESO renders it with externalSecrets.enabled; otherwise create it by
+  # hand once the keygen Job has run (README). saasapi refuses to start
+  # without both. It never holds the platform private key, and farmer never
+  # mounts this Secret. FLAG FOR SECURITY REVIEW.
+  controlPlaneBox:
+    secretName: imas-saasapi-box
+    privKey: saasapi-box.key
+    platformPubKey: SAASAPI_PLATFORM_BOX_PUB
   # POST .../sprouts/updates. The sprout-side update path is built, but
   # leave this off until the security review and the release UAT gate are
   # done (docs/BUILD-STATUS.md). On needs the fleetSign client below, and
@@ -626,19 +639,22 @@ credentialPublisher:
 #   <base>/platform          platform keypair. Read by farmer's tenantbox
 #                            role only.
 #   <base>/saasapi-box       the SaaS API's box keypair. Read only by the
-#                            SaaS API's External Secret (rollout step 5);
-#                            no farmer policy reaches it.
+#                            SaaS API's External Secret
+#                            (saasapi.controlPlaneBox); no farmer policy
+#                            reaches it.
 #   <base>/controlplane-pub  the public halves: farmer pins
 #                            saasapi_box_pub, the SaaS API platform_pub.
 # The Job may create and read the keypairs but never update them, so an
-# upgrade can't replace a key. Off by default until rollout step 5, when
-# saasapi and farmer start using the keys: until then turning it on only
-# adds a hook that can fail a release (an external OpenBao needs its role
-# and policy first) and a private key nothing reads. FLAG FOR SECURITY
-# REVIEW.
+# upgrade can't replace a key. On by default since J.4 (rollout step 5):
+# farmer opens and seals every internal.* message with these keys, and
+# saasapi won't start without its half. With an external OpenBao
+# (openbaoBootstrap off), its role and policy (imas-controlplane-box-keygen,
+# rendered in the policies ConfigMap) must exist before install, or the
+# hook fails the release. Turn it off only if you create the keys some
+# other way (README). FLAG FOR SECURITY REVIEW.
 # ---------------------------------------------------------------------------
 controlPlaneBoxKeys:
-  enabled: false
+  enabled: true
   # Fixed name: the OpenBao role's bound_service_account_names names it.
   serviceAccountName: imas-controlplane-box-keygen
   k8sRole: imas-controlplane-box-keygen

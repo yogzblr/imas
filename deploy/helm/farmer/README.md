@@ -104,6 +104,16 @@ kubectl -n imas-core create secret generic imas-saasapi-nats \
   --from-file=SAASAPI_NATS_USER_JWT=jwt
 ```
 
+And saasapi's control-plane box key (J.4, [Control-plane box keys](#control-plane-box-keys)):
+its private key and the platform public key, both written by the keygen
+Job. Only these two fields, and never `.../platform`:
+
+```sh
+kubectl -n imas-core create secret generic imas-saasapi-box \
+  --from-file=saasapi-box.key=<(kubectl -n imas-core exec imas-core-openbao-0 -- env BAO_TOKEN=root bao kv get -field=priv secret/imas/tenant-x25519/saasapi-box) \
+  --from-file=SAASAPI_PLATFORM_BOX_PUB=<(kubectl -n imas-core exec imas-core-openbao-0 -- env BAO_TOKEN=root bao kv get -field=platform_pub secret/imas/tenant-x25519/controlplane-pub)
+```
+
 What to expect on first install:
 
 - PXC takes a few minutes to come up. The migrate Job is a post-install
@@ -111,8 +121,14 @@ What to expect on first install:
   and both schemas are migrated: give it a `--timeout` of at least
   `database.migrate.activeDeadlineSeconds` (Helm's default, 5m, is too
   short). Until then farmer and saasapi wait for their schema.
-- The OpenBao bootstrap and publish Jobs are hooks too. Helm waits for
-  them, so `helm install` needs the seed Secret in place, or it times out.
+- The OpenBao bootstrap, control-plane keygen and publish Jobs are hooks
+  too. Helm waits for them, so `helm install` needs the seed Secret in
+  place, or it times out.
+- saasapi's pods wait (`ContainerCreating`, or `CreateContainerConfigError`
+  in their events) until both `imas-saasapi-nats` and `imas-saasapi-box`
+  exist. That is expected: they don't crash-loop, and they start once the
+  Secrets appear. Don't pass `--wait` on a first install: Helm would wait
+  for saasapi before running the hooks that produce its credentials.
 - **Dev-mode OpenBao is in memory.** If its pod restarts, the keys, the
   eval CA, the policies and the roles are gone. `helm upgrade` re-runs the
   bootstrap, but it mints *new* gateway and fleet keys and a new CA.
@@ -130,7 +146,11 @@ What to expect on first install:
 - `externalSecrets.enabled=true`.
 
 The OpenBao policies and roles are then the ops repo's job. See
-[OpenBao](#openbao).
+[OpenBao](#openbao). That includes the control-plane keygen Job's role
+and policy (`imas-controlplane-box-keygen`), which must exist before
+install now that the Job is on by default, and read access for the ESO
+SecretStore to `<base>/saasapi-box` and `<base>/controlplane-pub` (see
+[Control-plane box keys](#control-plane-box-keys)).
 
 ## Reaching the bus
 
@@ -218,9 +238,10 @@ and 5 rely on.
 ## Control-plane box keys
 
 **FLAG FOR SECURITY REVIEW.** J.1 of "Sealing the control plane"
-(`docs/design/imas-payload-encryption-design.md`). Off by default
-(`controlPlaneBoxKeys.enabled`), and nothing uses these keys yet: farmer
-starts sealing SaaS API traffic at rollout step 5.
+(`docs/design/imas-payload-encryption-design.md`) made the keys; J.4
+(rollout step 5) uses them: farmer opens and seals every `internal.*`
+message with them, and saasapi refuses to start without its half. The
+keygen Job is on by default (`controlPlaneBoxKeys.enabled`).
 
 The SaaS API and farmer seal `internal.*` to each other with NaCl box:
 the SaaS API with its own **SaaS API box key**, farmer with the
@@ -231,7 +252,7 @@ path (`farmer.openbao.tenantBox.kvMount`/`kvPath`, `<base>`):
 | Secret | Fields | Who reads it |
 |---|---|---|
 | `<base>/platform` | `pub`, `priv`, `origin` | farmer only (`imas-farmer-tenantbox`, read only) |
-| `<base>/saasapi-box` | `pub`, `priv` | the SaaS API only, through its External Secret (step 5). No farmer policy reaches it. |
+| `<base>/saasapi-box` | `pub`, `priv` | the SaaS API only, through its Secret `saasapi.controlPlaneBox.secretName` (below). No farmer policy reaches it. |
 | `<base>/controlplane-pub` | `platform_pub`, `saasapi_box_pub` | farmer, which pins `saasapi_box_pub`; the SaaS API, which pins `platform_pub` |
 
 `farmer ensure-controlplane-box-keys` (`internal/pki` `controlplanekeys.go`)
@@ -253,13 +274,61 @@ SaaS API gets `platform_pub` and its own private key from one External
 Secret mounted only in its pods. Rotating either key is deliberate and
 manual for now (the design's open question 4).
 
-**Off by default, on purpose.** `cmd/farmer` dispatches
-`ensure-controlplane-box-keys` before loading any config, as it does
-`register-sprout-release`, so the Job works when enabled. It stays off
-until rollout step 5 gives the keys a consumer: until then enabling it
-only adds a hook that can fail a release (with an external OpenBao, its
-role and policy must exist first) and a private key nothing reads. With
-the bundled OpenBao and `openbaoBootstrap`, enabling it is safe to try.
+**saasapi's half (J.4).** saasapi gets exactly two things, from one
+Secret (`saasapi.controlPlaneBox.secretName`, default `imas-saasapi-box`)
+that only its pods mount:
+
+| Secret key | From | In saasapi |
+|---|---|---|
+| `saasapi-box.key` (`privKey`) | `<base>/saasapi-box`, field `priv` | a file, `/var/run/secrets/imas/saasapi-box/saasapi-box.key`, read-only, mode `0440` (owner root, group the pod's `fsGroup`, nothing for others), mounted by the saasapi container only (not its init container); `SAASAPI_BOX_PRIV_FILE` names it |
+| `SAASAPI_PLATFORM_BOX_PUB` (`platformPubKey`) | `<base>/controlplane-pub`, field `platform_pub` | the env var of that name (a public key) |
+
+With `externalSecrets.enabled`, an ExternalSecret renders it from exactly
+those two fields, through the same SecretStore as saasapi's NATS
+credential, so `farmer.openbao.tenantBox.kvMount` must be that store's
+mount (`credentialPublisher.kvMount`; the render fails otherwise). The
+store's OpenBao role needs read on both paths and nothing under
+`<base>/platform`. Without ESO, create it by hand (eval: see
+[Eval install](#eval-install-everything-bundled)).
+
+What the chart guarantees, and `saasapibox_test.go` checks across the
+default, eval, production, token-auth, ESO and fleet-dispatch renders:
+
+- **farmer never gets the SaaS API's private key**: no pod but saasapi's
+  references its Secret, no farmer policy reaches `<base>/saasapi-box`,
+  and no farmer role binds the keygen policy. The render fails if
+  `saasapi.controlPlaneBox.secretName` names a Secret anything else
+  mounts (the seeds, saasapi's NATS credential, the DB Secret, the BFF
+  secret, `tls.secretName`).
+- **saasapi never gets the platform private key**: it has no OpenBao
+  client that reaches `<base>/platform` (no tenantbox or keygen identity,
+  no role on its ServiceAccount binding those policies), and no
+  ExternalSecret reads `<base>/platform`.
+
+**Order on a fresh install.** The keygen Job is a `post-install,
+post-upgrade` hook (weight 5: after the OpenBao bootstrap, which writes
+its role, and before the credential publisher), so the keys can't exist
+before the release's resources do. saasapi's Deployment is created at
+install, and its pods can't start until `imas-saasapi-box` exists: the
+volume and the `SAASAPI_PLATFORM_BOX_PUB` reference aren't optional, so
+the kubelet holds the pod rather than starting saasapi without keys. ESO
+creates the Secret once both remote fields exist, at its next refresh
+(`externalSecrets.saasapi.refreshInterval`, 1m); by hand, once you create
+it. This is the same wait saasapi already has for `imas-saasapi-nats`,
+whose JWT another post-install hook writes. The alternatives were worse:
+an init container that polls OpenBao would give saasapi an OpenBao
+identity it otherwise doesn't need, and the keygen Job can't be a
+pre-install hook, because the bundled OpenBao and its bootstrap only
+exist after install. If the Secret exists but is wrong, saasapi exits at
+startup (fail closed) and Kubernetes restarts it.
+
+**Turning it off.** `cmd/farmer` dispatches `ensure-controlplane-box-keys`
+before loading any config, so you can also run it yourself (same image,
+same `IMAS_CPBOX_OPENBAO_*` identity) and set
+`controlPlaneBoxKeys.enabled=false`. Without the keys farmer refuses every
+`internal.*` request (`no-keys`) and saasapi never starts; NOTES warns.
+With an external OpenBao the Job's role and policy must exist before
+install, or the hook fails the release.
 
 ## OpenBao
 
@@ -273,7 +342,7 @@ Each OpenBao client runs under its own role and gets exactly one policy.
 | farmer, tenant box keypairs | `IMAS_TENANTBOX_OPENBAO_*` | `imas-farmer-tenantbox` | `imas-farmer-tenantbox`: KV v2 read/write on `secret/data/imas/tenant-x25519/tenants/+` (one secret per tenant), and read only on `.../platform` and `.../controlplane-pub` (J.1), nothing else |
 | saasapi, fleet key (only with `fleetUpdateDispatch` or `operator`) | `IMAS_FLEETSIGN_OPENBAO_*` | `imas-saasapi-fleet-verify` | `imas-fleet-verify` |
 | the publish Job | `IMAS_SAASAPI_CRED_OPENBAO_*` | `imas-saasapi-cred-publisher` | `imas-saasapi-cred-publisher` (reviewed copy) |
-| the control-plane keygen Job (`controlPlaneBoxKeys.enabled`, off by default) | `IMAS_CPBOX_OPENBAO_*` | `imas-controlplane-box-keygen` | `imas-controlplane-box-keygen`: create and read on `.../platform` and `.../saasapi-box`, create, read and update on `.../controlplane-pub` |
+| the control-plane keygen Job (`controlPlaneBoxKeys.enabled`, on by default since J.4) | `IMAS_CPBOX_OPENBAO_*` | `imas-controlplane-box-keygen` | `imas-controlplane-box-keygen`: create and read on `.../platform` and `.../saasapi-box`, create, read and update on `.../controlplane-pub` |
 
 - **Shared connection settings.** `openbaoClient.addr`, `caConfigMap` and
   `authMethod` are shared by all clients. In `authMethod=token`, each
@@ -764,6 +833,8 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `saasapi.jwt.*` | `""` | Keycloak JWKS URL, issuer and audience. Required. |
 | `saasapi.internalAuthSecret.*` | `imas-saasapi-internal-auth` | `INTERNAL_AUTH_SECRET_CURRENT`/`_PREVIOUS`. |
 | `saasapi.natsCredentials.*` | `imas-saasapi-nats` | The seed (as a file) and the JWT. |
+| `saasapi.controlPlaneBox.{secretName,privKey,platformPubKey}` | `imas-saasapi-box`, `saasapi-box.key`, `SAASAPI_PLATFORM_BOX_PUB` | saasapi's box private key (a read-only file, `SAASAPI_BOX_PRIV_FILE`) and the platform public key it pins (`SAASAPI_PLATFORM_BOX_PUB`). Required; ESO renders it with `externalSecrets.enabled`. See [Control-plane box keys](#control-plane-box-keys). |
+| `controlPlaneBoxKeys.enabled` | `true` | The keygen hook Job that writes the platform and SaaS API box keys. |
 | `saasapi.fleetUpdateDispatch.enabled` | `false` | Also turns on saasapi's verify-only OpenBao client. |
 | `saasapi.actionDispatch.{concurrency,selfUpdateConcurrency,tenantConcurrency}` | `64`, `16`, `8` | `SAASAPI_ACTION_DISPATCH_CONCURRENCY`, `SAASAPI_SELF_UPDATE_DISPATCH_CONCURRENCY`, `SAASAPI_ACTION_DISPATCH_TENANT_CONCURRENCY`: per replica, the cmd.run/cook dispatch pool, the pool reserved for rollout waves, and one tenant's cap in each (security review M5). The cap must be at most half of `concurrency`. Keep each at or below farmer's matching value times farmer's replicas. Null emits no env var. |
 | `saasapi.fleetUpdateDispatch.clockSkew` | `""` (30s) | `SAASAPI_FLEET_UPDATE_CLOCK_SKEW`: clock-skew margin of the rollout wave gate, a Go duration up to `5m`. Empty emits no env var. |
