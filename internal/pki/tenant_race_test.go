@@ -492,6 +492,133 @@ func TestResolverPush_LastArrivalWins(t *testing.T) {
 	}
 }
 
+// --- Never-provisioned tenants: the tombstone -------------------------------
+
+// startTombstoneTest is startRaceBus without a bus: none of these paths
+// push anything.
+func startTombstoneTest(t *testing.T) {
+	t.Helper()
+	setupTestPKI(t)
+	if sqlDB, err := db.DB(); err == nil {
+		t.Cleanup(func() { sqlDB.Close() })
+	}
+	useRealFarmerKey(t)
+	resetRaceHooks(t)
+	t.Cleanup(func() {
+		testHookProvisionAfterLookup = nil
+		testHookDeprovisionAfterLookup = nil
+	})
+}
+
+func assertTombstone(t *testing.T, tenantID string) {
+	t.Helper()
+	row, err := getTenantRow(tenantID)
+	if err != nil || !row.Deleted || row.AccountPub != "" {
+		t.Fatalf("tenant %q row = %+v, err %v; want a deleted tombstone with no Account", tenantID, row, err)
+	}
+	if _, err := os.Stat(tenantAccountJWTPath(tenantID)); !os.IsNotExist(err) {
+		t.Fatalf("tenant %q has Account material on disk (stat err %v); a tombstone must not mint any", tenantID, err)
+	}
+}
+
+// Deprovisioning a tenant farmer never provisioned (copy 1 of its provision
+// failed before writing a row) still reports ErrTenantNotFound, but leaves
+// a tombstone, so a late provision copy or an enrollment for it is refused
+// instead of creating a live Account for an offboarded tenant. A retry
+// changes nothing and mints nothing.
+func TestDeprovisionTenant_NeverProvisionedLeavesTombstone(t *testing.T) {
+	startTombstoneTest(t)
+	const id = "t_never_provisioned"
+
+	if err := DeprovisionTenant(id); !errors.Is(err, ErrTenantNotFound) {
+		t.Fatalf("DeprovisionTenant = %v, want ErrTenantNotFound", err)
+	}
+	assertTombstone(t, id)
+
+	if err := ProvisionTenant(id, "Late Copy Co"); !errors.Is(err, ErrTenantDeprovisioned) {
+		t.Fatalf("late ProvisionTenant = %v, want ErrTenantDeprovisioned", err)
+	}
+	if err := ReloadNKeysForTenant(id); !errors.Is(err, ErrTenantDeprovisioned) {
+		t.Fatalf("enrollment's ReloadNKeysForTenant = %v, want ErrTenantDeprovisioned", err)
+	}
+	if err := DeprovisionTenant(id); !errors.Is(err, ErrTenantNotFound) {
+		t.Fatalf("retried DeprovisionTenant = %v, want ErrTenantNotFound", err)
+	}
+	assertTombstone(t, id)
+	if ids, err := ListProvisionedTenantIDs(); err != nil || slicesContains(ids, id) {
+		t.Fatalf("ListProvisionedTenantIDs = %v, %v; must not list a tombstone", ids, err)
+	}
+}
+
+// The legacy current tenant has no pki_tenants row of its own and must stay
+// enrollable, so deprovisioning it writes no tombstone.
+func TestDeprovisionTenant_LegacyTenantGetsNoTombstone(t *testing.T) {
+	startTombstoneTest(t)
+	if err := DeprovisionTenant(CurrentTenantID()); !errors.Is(err, ErrTenantNotFound) {
+		t.Fatalf("DeprovisionTenant(legacy) = %v, want ErrTenantNotFound", err)
+	}
+	if _, err := getTenantRow(CurrentTenantID()); !errors.Is(err, ErrTenantNotFound) {
+		t.Fatalf("legacy tenant row lookup = %v, want no row", err)
+	}
+}
+
+// A provision that read the row as absent, with a deprovision on another
+// replica writing its tombstone before the provision's insert: the insert
+// must not overwrite it (the old upsert reset deleted), and the provision
+// is refused.
+func TestProvisionTenant_TombstoneWrittenAfterLookup(t *testing.T) {
+	startTombstoneTest(t)
+	const id = "t_tombstone_race"
+	testHookProvisionAfterLookup = func(tid string) {
+		if tid != id {
+			return
+		}
+		if _, err := insertTenantRowIfAbsent(tenantRow{ID: id, Name: id, Deleted: true, CreatedAt: time.Now().Unix()}); err != nil {
+			t.Errorf("writing the tombstone: %v", err)
+		}
+	}
+	if err := ProvisionTenant(id, "Race Co"); !errors.Is(err, ErrTenantDeprovisioned) {
+		t.Fatalf("ProvisionTenant = %v, want ErrTenantDeprovisioned", err)
+	}
+	assertTombstone(t, id)
+}
+
+// The reverse: a deprovision that read the row as absent, with a provision
+// on another replica inserting the live row before the tombstone. The
+// tombstone insert must not hide that row: the deprovision marks it
+// deleted, so the provision's post-push re-check locks the tenant out.
+func TestDeprovisionTenant_RowCreatedAfterLookup(t *testing.T) {
+	startTombstoneTest(t)
+	const id = "t_row_race"
+	testHookDeprovisionAfterLookup = func(tid string) {
+		if tid != id {
+			return
+		}
+		if _, err := insertTenantRowIfAbsent(tenantRow{ID: id, Name: "Race Co", CreatedAt: time.Now().Unix()}); err != nil {
+			t.Errorf("inserting the live row: %v", err)
+		}
+	}
+	if err := DeprovisionTenant(id); !errors.Is(err, ErrTenantNotFound) {
+		t.Fatalf("DeprovisionTenant = %v, want ErrTenantNotFound (no Account minted yet)", err)
+	}
+	row, err := getTenantRow(id)
+	if err != nil || !row.Deleted || row.Name != "Race Co" {
+		t.Fatalf("row = %+v, err %v; want the provision's row, marked deleted", row, err)
+	}
+	if err := ProvisionTenant(id, "Race Co"); !errors.Is(err, ErrTenantDeprovisioned) {
+		t.Fatalf("ProvisionTenant after the deprovision = %v, want ErrTenantDeprovisioned", err)
+	}
+}
+
+func slicesContains(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
 // --- Two processes, one database --------------------------------------------
 
 const raceHelperEnv = "IMAS_PKI_RACE_HELPER"

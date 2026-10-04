@@ -245,13 +245,19 @@ func VerifySproutInTenant(tenantID, sproutID string) error {
 	return nil
 }
 
-// upsertTenantRow inserts or (if already present, undeleting it) updates
-// the pki_tenants row for id/name. Idempotent — see ProvisionTenant.
-func upsertTenantRow(row tenantRow) error {
-	return db.Clauses(clause.OnConflict{
+// insertTenantRowIfAbsent inserts row unless a pki_tenants row with its ID
+// already exists, which it leaves untouched, and reports whether it
+// inserted. It never changes an existing row: an upsert that reset
+// deleted could un-delete a tenant, or wipe the tombstone a concurrent
+// DeprovisionTenant on another replica just wrote (see
+// deprovisionTenantLocked). Callers re-read the row when nothing was
+// inserted.
+func insertTenantRowIfAbsent(row tenantRow) (bool, error) {
+	res := db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "id"}},
-		DoUpdates: clause.AssignmentColumns([]string{"name", "deleted"}),
-	}).Create(&row).Error
+		DoNothing: true,
+	}).Create(&row)
+	return res.RowsAffected > 0, res.Error
 }
 
 // markTenantDeleted flags a tenant as deprovisioned without removing its

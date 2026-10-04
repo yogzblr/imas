@@ -292,27 +292,33 @@ func ensureTenantAccountLocked(mat *natsAuthMaterial, tenantID, nameHint string)
 	defer tenantAuthMu.Unlock()
 
 	row, lookupErr := getTenantRow(tenantID)
-	switch {
-	case lookupErr == nil && row.Deleted:
-		return nil, false, fmt.Errorf("pki: tenant %q: %w", tenantID, ErrTenantDeprovisioned)
-	case lookupErr == nil:
-		nameHint = row.Name
-	case !errors.Is(lookupErr, ErrTenantNotFound):
-		// A real lookup failure, not an absent row: don't fall through to
-		// upsertTenantRow, whose upsert would also reset Deleted and so
-		// silently un-delete a deprovisioned tenant.
-		return nil, false, lookupErr
-	default:
+	if testHookProvisionAfterLookup != nil {
+		testHookProvisionAfterLookup(tenantID)
+	}
+	if errors.Is(lookupErr, ErrTenantNotFound) {
+		// Absent when read; a DeprovisionTenant on another replica may
+		// write its tombstone before this insert (tenantAuthMu orders only
+		// this process), so insert only if still absent and re-read either
+		// way: the row this proceeds on is the one in the database.
 		name := nameHint
 		if name == "" {
 			name = tenantID
 		}
-		if err := upsertTenantRow(tenantRow{ID: tenantID, Name: name, CreatedAt: time.Now().Unix()}); err != nil {
+		inserted, err := insertTenantRowIfAbsent(tenantRow{ID: tenantID, Name: name, CreatedAt: time.Now().Unix()})
+		if err != nil {
 			return nil, false, fmt.Errorf("pki: recording tenant %q: %w", tenantID, err)
 		}
-		nameHint = name
-		provisioned = true
+		provisioned = inserted
+		row, lookupErr = getTenantRow(tenantID)
 	}
+	switch {
+	case lookupErr != nil:
+		// A real lookup failure, never taken as an absent row.
+		return nil, false, lookupErr
+	case row.Deleted:
+		return nil, false, fmt.Errorf("pki: tenant %q: %w", tenantID, ErrTenantDeprovisioned)
+	}
+	nameHint = row.Name
 
 	tam, minted, err := ensureTenantAccountMaterial(mat, tenantID, nameHint)
 	if err != nil {
@@ -440,12 +446,42 @@ func deprovisionTenantLocked(mat *natsAuthMaterial, tenantID string) (signedJWT 
 	defer tenantAuthMu.Unlock()
 
 	row, err := getTenantRow(tenantID)
+	if testHookDeprovisionAfterLookup != nil {
+		testHookDeprovisionAfterLookup(tenantID)
+	}
+	if errors.Is(err, ErrTenantNotFound) && tenantID != currentTenantID() {
+		// Never provisioned: nothing to lock out, but leave a deleted
+		// tombstone so a provision copy or an enrollment arriving later,
+		// on any replica, is refused (ensureTenantAccountLocked) rather
+		// than creating a live Account for an offboarded tenant. The
+		// legacy current tenant is exempt: it is not deprovisioned this
+		// way and must stay enrollable. If a concurrent provision inserted
+		// the row first, deprovision it like any other.
+		inserted, insErr := insertTenantRowIfAbsent(tenantRow{ID: tenantID, Name: tenantID, Deleted: true, CreatedAt: time.Now().Unix()})
+		if insErr != nil {
+			return "", false, fmt.Errorf("pki: recording tenant %q's tombstone: %w", tenantID, insErr)
+		}
+		if inserted {
+			return "", false, ErrTenantNotFound
+		}
+		row, err = getTenantRow(tenantID)
+	}
 	if err != nil {
 		return "", false, err
 	}
 	if !row.Deleted {
 		if err := markTenantDeleted(tenantID); err != nil {
 			return "", false, err
+		}
+	}
+	// No Account was ever recorded or written for this tenant (a tombstone,
+	// or a provision that hasn't minted yet): nothing can be on the bus, so
+	// don't mint keys just to lock them out. Every push follows
+	// setTenantAccountPub, and a provision still in flight sees the row
+	// deleted when it re-checks after its push.
+	if row.AccountPub == "" {
+		if _, statErr := os.Stat(tenantAccountJWTPath(tenantID)); os.IsNotExist(statErr) {
+			return "", row.Deleted, ErrTenantNotFound
 		}
 	}
 	signed, err := signLockedOutTenantJWT(mat, tenantID, row.Name)
@@ -572,6 +608,11 @@ var (
 	// testHookAfterLivePush runs after the live push and before the
 	// database re-check.
 	testHookAfterLivePush func(tenantID string)
+	// testHookProvisionAfterLookup and testHookDeprovisionAfterLookup run
+	// under tenantAuthMu right after each path's first pki_tenants read,
+	// standing in for another replica writing the row in between.
+	testHookProvisionAfterLookup   func(tenantID string)
+	testHookDeprovisionAfterLookup func(tenantID string)
 	// testHookDeprovisionBeforePush runs in DeprovisionTenant after the
 	// row is marked deleted and the lockout signed, before it is pushed.
 	testHookDeprovisionBeforePush func(tenantID string)
