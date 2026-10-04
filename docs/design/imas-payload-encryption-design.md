@@ -268,9 +268,9 @@ Not in scope: a compromised farmer (it holds `tenant_priv` and can always open a
 9. **Windows shells.** ConPTY rules out the Server 2016 floor. Build for Server 2019 and later only, or not at all?
 10. **Leg 1 for a browser.** Should the SaaS API or web UI ever offer a shell? It would need its own leg 1, since a browser has an OIDC session, not a CLI box key.
 
-## Sealing the control plane (design; J.1 building blocks built)
+## Sealing the control plane (design; J.1 building blocks and J.3 sealed CLI built)
 
-**FLAG FOR SECURITY REVIEW.** This section is a design. Its building blocks (rollout step 2, J.1) are built and ready for review, not approved; nothing uses them yet, so behaviour is unchanged (see "As built: J.1" at the end of this section). The owner's decisions of 2026-10-04 there replace the compatibility flags and ratchets in "Rollout". It answers the shell section's Open question 1. Everything above seals farmer ↔ sprout. This section covers the other side of farmer: the imas CLI and the SaaS API, which reach farmer over the same bus, and the sprout's `/v1/refresh`. Until it is built, a compromised bus can't inject a command **into a sprout**, but it can get **farmer** to send one, and the sealing works exactly as designed while it does.
+**FLAG FOR SECURITY REVIEW.** This section is a design. Its building blocks (rollout step 2, J.1) and the sealed CLI ↔ farmer API (Decision A, rollout step 4, J.3) are built and ready for review, not approved (see "As built: J.1" and "As built: J.3" at the end of this section). Sealed refresh (J.2) and sealed `internal.*` (J.4) are not built yet. The owner's decisions of 2026-10-04 there replace the compatibility flags and ratchets in "Rollout". It answers the shell section's Open question 1. Everything above seals farmer ↔ sprout. This section covers the other side of farmer: the imas CLI and the SaaS API, which reach farmer over the same bus, and the sprout's `/v1/refresh`. Until it is built, a compromised bus can't inject a command **into a sprout**, but it can get **farmer** to send one, and the sealing works exactly as designed while it does.
 
 ### What is wrong today
 
@@ -386,6 +386,19 @@ Read from `main` at `a38becb`. Items 2 and 3 were reproduced with a throwaway te
 
 ### Decision D: streams to the CLI (later)
 
+**What stays plaintext until Decision D (checked at J.3).** J.3 seals every `imas.api.*` request and reply, including `shell.start` and the cook trigger. These CLI and `imas serve` reads are not requests to farmer and stay plaintext on the bus until Decision D (and, for shell, J.5). A compromised bus can read them and forge them; it can't use them to make farmer act:
+
+| Who reads | Subject | What it carries | Until |
+|---|---|---|---|
+| `imas cook` (it always follows its job) | `imas.cook.*.<jid>` | step completions from each sprout: step IDs, status, changes, timings | Decision D |
+| `imas jobs watch <jid>` | `imas.cook.*.<jid>` | the same | Decision D |
+| The CLI's local job store (`internal/jobs` `CLIListener`, used by `imas cook`) | `imas.cook.*.<jid>` (and `imas.cook.*.*` in `Subscribe`) | the same, written to `~/.cache` | Decision D |
+| `imas serve`'s log stream (`internal/serve/logstream.go`, the web UI's live log) | `imas.cook.*.*` | every step event of every job in the tenant | Decision D |
+| `imas ssh` | the session's output and done subjects from the (sealed) `shell.start` reply | terminal output and exit status | J.5 (sealed shell) |
+| `imas tail` | `imas.>` and `_INBOX.>` | everything on the bus; it now shows ciphertext for every API request and reply | a debugging tool; nothing to seal |
+
+So until Decision D, `imas cook`'s on-screen result and `imas serve`'s live log are what the bus says they are: a compromised bus can hide a failure or show a forged success. The authoritative record is farmer's job store, read through the sealed `jobs.get` and `jobs.forsprout`. Sprouts publish step events in plaintext today (the shell section's Decision 6), so sealing the CLI's leg alone wouldn't help yet.
+
 `cook --follow`, `jobs` watch and the `imas serve` log stream read step events off the bus in plaintext. Once sprouts seal their step events (`s2f.cook.event`, the shell section's Decision 6):
 
 - The CLI's sealed request asks to follow and carries an ephemeral key.
@@ -492,3 +505,47 @@ On the CLI (`cliboxclient.go`, `cmd/imas/cmd/authbox.go`): `imas auth keygen` wr
 - Platform key rotation tooling.
 - Refusing, at sprout enrollment, a sprout box key that is a registered CLI key (registration already refuses the other way round).
 
+### As built: J.3 (sealed CLI ↔ farmer, Decision A)
+
+**FLAG FOR SECURITY REVIEW.** Rollout step 4, sealed only, as the owner decided on 2026-10-04: no bearer tokens, no plaintext fallback, no `apiallowbearertoken` flag and no per-user ratchet.
+
+**Tokens are gone.** `auth.NewToken`, `createSignedToken`, `UserAuth` (sign, `IsValid`, the SEC.0 expiry cap and `apitokenclockskew`), `decodeToken`, every `Token*` check and `WhoAmI(token)` are deleted from `internal/auth`; `injectToken` from the client. The CLI's NKey signs the bus `CONNECT` nonce and nothing else (`auth.Sign`). Nothing in the repository turns an NKey signature into a credential, so a signature the bus collects at `CONNECT` (the SEC.0 attack, nonce `2099-01-01T00:00:00Z`) is worth nothing: `TestForgedTokenRegression` (`internal/natsapi`) presents it as the old plaintext token, inside a box the bus sealed under its own key labelled as the admin, and as a raw body, and each is refused; a captured genuine admin request replayed to the same replica or another is refused too. Farmer's checks are now `UserHasAction`, `UserHasScopedAccess`, `UserScopeFilter` and `UserIdentity`, all on a user ID.
+
+**The router (`internal/natsapi` `sealedrouter.go`).** Every `imas.api.<method>` queue subscription goes through `sealedAPI.serve`, the one place that:
+
+1. opens the request (`openCLIRequest`: marker, `Imas-Principal`, the box under that user's registered CLI box key in the connection's tenant, method and subject bound, the replica's replay guard, and the Valkey claim for a mutating method);
+2. builds the caller, `apiCaller{TenantID, UserID}`, from what opened it. Handlers get the caller and the opened params; nothing in the params names the caller;
+3. authorizes (`authorize`): the role's action for the method, looked up by the verified user, then `checkScopedAccess` on the method's targets. A request whose targets can't be read is refused (until J.3 it went to the handler, which might read them more leniently than the scope check did). The self methods (`health`, `version`, `auth.login`, `auth.whoami`, `auth.explain`, `auth.rotatekey`) need only to open. `dangerously_allow_root` still skips RBAC (dev only); it never skips opening;
+4. runs the handler, audits the call as the verified user (`audit.Entry` with the user's key, role and username, the method's targets, and a write's params), and seals the reply (`f2c.api`, `re` = the request's ID, one copy per tenant key, to the user's active key).
+
+A request that doesn't open gets the fixed `Imas-Payload-Error` code and an empty body; the reason stays in farmer's log. A mutating request that opened while Valkey is down gets a sealed `ErrSealedStoreUnavailable`. A reply that can't be sealed (the user's key was revoked between open and reply, or the tenant keys are unreadable) gets the `internal` code, never plaintext. Unsealed `health` and `version` are still answered in plaintext, for monitoring, with no identity.
+
+**The CLI (`internal/api/client` `nats.go`).** `NatsRequest` (and `SealedRequest`, for another connection or purpose) seals with `pki.CLISealRequest` and accepts only a reply with the `Imas-Payload: box1` marker that `pki.CLIOpenReply` opens under the CLI's key and that names this request's ID, method and subject. A plaintext reply is `ErrPlaintextReply`, a sealed one that doesn't open or answers another request `ErrReplyDidNotOpen`, a refusal a `RefusedError` with its code. `imas serve` goes through `NatsRequest`, so its API proxy is sealed too. `imas auth token` is removed. The auth commands connect on demand (root's pre-run skips them).
+
+**Users and keys (`auth.users.*` on the J.1 key store).**
+
+- `auth.users.add` takes `{pubkey, role, username?, boxpub}`; `boxpub` is required. The user row and their first CLI box key are written in one transaction, after the cross-principal check (no sprout's, tenant's or platform key; the CLI key table's own unique index). `imas users add <role> <pubkey> --boxpub <key> [--username <name>]`.
+- `auth.users.resetkey` (new, admin): retires every key the user holds in the users tenant and makes the given one their only key, in one transaction: a lost or stolen key, or a config-file user who has none. A retired key never comes back. `imas users reset-key <pubkey> --boxpub <key>`.
+- `auth.users.remove` retires the user's keys with the row (J.1), so their next request opens nothing.
+- `auth.users` also returns each user's active key fingerprint (`box_keys`), shown by `imas users list`.
+- `auth.rotatekey` is routed: `c2f.userkey.pub` through the same path, recorded by `pki.RecordCLIBoxKeySubmission`; the reply is sealed to the new active key, so the CLI promotes its pending key only once farmer recorded it.
+- Users and their keys live in the users tenant (`farmerorganization`, owner decision 2026-10-04), so CLI requests open only on that tenant's connection, which is the one the CLI's bus account lands on.
+
+**The first admin without a bus token.** Farmer's config file names them: `users.admin: [{pubkey, username, boxpub}]`, imported once at start (J.1's `bootstrapkeys.go`). The Helm chart renders it from `farmer.bootstrapAdmin.{pubkey,boxpub,username}` and refuses to render `farmer.adminPubKeys` (an admin with no box key can't make a request). `users.admin` now means the built-in admin role whenever the config defines no role of that name: the check this replaced only ran when no role at all was defined, which never happened (the viewer and operator roles are always registered), so a config-file admin had no role. The CLI pins `tenantid` and `tenantboxpub`, never fetched over the bus: farmer logs both, with the key's fingerprint, when it subscribes for the users tenant (which also creates the tenant keypair if there is none yet), and they are in OpenBao at `<mount>/<base>/tenants/<tenant_id>` (`pub`). `docs/INSTALL.md` has the steps.
+
+**Deviations from the design text above.**
+
+- **The cook trigger** is `imas.api.cook.trigger.<jid>`, not `imas.api.cook.trigger` with the JID in the params. Only the replica that created the job holds it, and only that replica subscribes to the trigger, outside the queue group, for the existing 15 seconds; a queue-grouped subject would land on any replica. The JID is still bound inside the box (it is in the method and subject). It is sealed, mutating, needs `cook`, and is accepted once and only from the user who created the job; a refused trigger doesn't use the job up. `internal.sprout.action`'s cook no longer triggers itself over the bus: farmer holds it on the replica and starts it directly (`prepareSaaSAPICook`, `triggerLocalCook`).
+- **Recipe browsing moved back onto the bus** as sealed `recipes.list` and `recipes.get`. It was farmer's HTTPS API (`GET /v1/recipes`) behind the CLI's bearer token; with tokens gone the CLI had no credential for it, and P4 (one mechanism) argues against inventing an HTTP one. Same keys as before: the platform tree only. `recipes.get` returns at most 256 KiB, so its sealed reply fits the bus's default payload limit. `cmd/farmer` installs the store with `natsapi.SetRecipeStore`.
+- **Farmer's HTTP API accepts no CLI credential.** `internal/api` `Auth` lost its token branch: `/files/` takes a gateway JWT only, and `ListRecipes`/`GetRecipe` refuse every request without `dangerously_allow_root` (removing those routes is a follow-up). `cmd/farmer` no longer installs a token resolver for the audit log; `internal.*` audit entries carry no identity, as before (they never had a token).
+
+**Read-only list (open question 6), unchanged.** `recipes.list`, `recipes.get`, the cook trigger, `auth.users.resetkey` and `auth.rotatekey` are new methods and so mutating by default: each is claimed in Valkey. For the two recipe reads that costs only the Valkey dependency; adding them to the list is an owner decision.
+
+**Tests.** `internal/natsapi`: `sealedrouter_test.go` (the verified user end to end; plaintext only for monitoring; the forged-token regression; wrong user, wrong key, a method not granted, a revoked key; replay on two replicas sharing Valkey, run once; Valkey down; `auth.users.*` with the key store including reset and removal; rotation through the router; audit identity), `middleware_test.go` (`authorize`), the cook trigger in `integration_test.go` (plaintext refused, another user refused, the creator accepted). `internal/api/client`: plaintext, replayed, moved and impostor-sealed replies are refused; nothing readable or token-like on the wire. `cmd/imas/cmd` `sealed_e2e_test.go`: the CLI's own commands against an embedded farmer and a nats-server that authenticates NKey users over TLS, with the first admin bootstrapped from farmer's config. Client-side tests stub farmer with `internal/api/client/clienttest`, a sealed stand-in.
+
+**Not built in J.3.**
+
+- `f2c.tenantkey.continuity`: after a tenant key rotation the CLI must re-pin `tenantboxpub` by hand (from OpenBao, or farmer's log at its next start). Until the grace window ends the old pin still works; after it, requests fail closed with `open-failed`.
+- Decision D (the plaintext reads above) and J.5 (shell sessions).
+- Removing farmer's HTTP `ListRecipes`/`GetRecipe` routes and `internal/audit`'s unused token resolver (`SetIdentityResolver`, `extractIdentity`), and updating `imas serve`'s OpenAPI document for `boxpub`: outside J.3's file scope.
+- A per-user rate limit on the replay guard (J.1's accepted limitation).
