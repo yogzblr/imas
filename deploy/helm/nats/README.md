@@ -250,7 +250,10 @@ provisioned tenant, and a fresh lock-out for every deprovisioned one)
 whenever its SYS connection to the bus connects or reconnects
 (`pki.PushAllAccounts`), and keeps pushing them at start-up until the bus
 accepts them. That is how a bus, or a whole cluster, that starts on
-empty volumes learns them.
+empty volumes learns them. After each push it re-reads the Account JWT
+and pushes again if it changed meanwhile, so a deny or key rotation
+racing it can't be undone by the older copy it read first (the bus
+applies claims pushes in arrival order).
 
 **The bus signs no claims of its own** (`internal/pki/busauth.go`). It
 holds the operator signing seed, but it mints no tenant Account JWT, and
