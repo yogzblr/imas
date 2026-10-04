@@ -34,10 +34,13 @@ type refreshRequest struct {
 // tenant_x25519_continuity carries pki.TenantKeyContinuity's proof that
 // the new key succeeds the one the sprout pinned, which is how a sprout
 // re-pins (pki.RefreshGatewayJWT); a sprout that predates it ignores the
-// field and exits on the mismatch. The fleet signing keys and bus URLs
-// are enrollment-only.
+// field and exits on the mismatch. tenant_id is the sprout's tenant,
+// which the sprout checks against the one it pinned at enrollment and
+// exits on a mismatch (security review 2026-10, H3). The fleet signing
+// keys and bus URLs are enrollment-only.
 type refreshSuccessResponse struct {
 	SproutID        string `json:"sprout_id"`
+	TenantID        string `json:"tenant_id"`
 	JWT             string `json:"jwt"`
 	GatewayJWT      string `json:"gateway_jwt"`
 	NKeyIdentity    string `json:"nkey_identity"`
@@ -77,6 +80,7 @@ func Refresh(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(refreshSuccessResponse{
 		SproutID:        result.SproutID,
+		TenantID:        result.TenantID,
 		JWT:             result.JWT,
 		GatewayJWT:      result.GatewayJWT,
 		NKeyIdentity:    req.NKeyPub,

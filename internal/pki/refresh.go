@@ -58,7 +58,9 @@ func RefreshSigningPayload(timestamp int64, nkeyPub string) []byte {
 
 // RefreshSprout verifies req's proof of possession and, for an accepted
 // sprout, returns its existing NATS User JWT, a freshly minted gateway
-// JWT and the tenant X25519 public key. An unknown, denied, rejected or
+// JWT, its tenant ID (EnrollResult.TenantID, which the sprout checks
+// against the tenant it pinned at enrollment) and the tenant X25519
+// public key. An unknown, denied, rejected or
 // deleted nkey_pub fails like every other failure, and so does a
 // resubmission of an earlier request.
 func RefreshSprout(ctx context.Context, req RefreshRequest) (*EnrollResult, error) {

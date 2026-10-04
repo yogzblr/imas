@@ -936,12 +936,12 @@ by an external git sync today.
       `cmd.run` and `cook` in plaintext, with a warning, to a sprout with no
       box key on record; since SEC.3b that includes a sprout between its two
       enrollment requests, or one whose proof of possession never arrived.
-      Nothing is deployed, so the fallback could be deleted. `/v1/refresh`
-      does not return `tenant_id`, so the tenant pin is checked at
-      enrollment and on every sealed message, but not on refresh. A sprout
-      enrolled before SEC.3b has no tenant pin and can't seal or open
-      anything until it re-enrolls. The persisted replay guard rewrites one
-      small file per accepted message.
+      The owner has assigned removing this fallback to the J sealing
+      briefs, which end sealed-only. `/v1/refresh` returns `tenant_id`, and
+      the sprout checks it against its pin on every refresh. A sprout
+      enrolled before SEC.3b has no tenant pin: it can't seal or open
+      anything, and its next refresh is refused, until it re-enrolls. The
+      persisted replay guard rewrites one small file per accepted message.
 11. **The control plane can be forged by a compromised bus** (requirement 14).
     Sealing farmer ↔ sprout stops the bus injecting commands *into a sprout*,
     but not asking *farmer* to send them. Verified with throwaway tests

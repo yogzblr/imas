@@ -239,3 +239,31 @@ func TestEnrollFailures(t *testing.T) {
 		}
 	})
 }
+
+// The stub's /v1/refresh names the tenant the sprout pinned at
+// enrollment, which the real client checks on every refresh.
+func TestRefreshNamesTheTenant(t *testing.T) {
+	_, h := newTestFarmer(t, 1)
+	s := newTestSprout(t)
+	now := time.Now().Unix()
+	if rec := s.enroll(t, h, testToken, "web-01", now); rec.Code != http.StatusOK {
+		t.Fatalf("enroll: %d", rec.Code)
+	}
+	sig, err := s.kp.Sign(pki.RefreshSigningPayload(now+1, s.pub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(refreshRequest{NKeyPub: s.pub, Timestamp: now + 1, NKeySig: base64.RawURLEncoding.EncodeToString(sig)})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/refresh", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refresh: %d %s", rec.Code, rec.Body)
+	}
+	var resp pki.RefreshResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.TenantID != stubTenantID {
+		t.Errorf("tenant_id = %q, want %q", resp.TenantID, stubTenantID)
+	}
+}

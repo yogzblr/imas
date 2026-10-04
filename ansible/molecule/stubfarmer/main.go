@@ -341,6 +341,7 @@ func (f *farmer) refresh(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, pki.RefreshResponse{
 		SproutID:        sproutID,
+		TenantID:        stubTenantID,
 		JWT:             userJWT,
 		GatewayJWT:      gatewayJWT,
 		NKeyIdentity:    req.NKeyPub,

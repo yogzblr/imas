@@ -138,7 +138,10 @@ type refreshWireRequest struct {
 
 // RefreshResponse is POST /v1/refresh's success body.
 type RefreshResponse struct {
-	SproutID        string `json:"sprout_id"`
+	SproutID string `json:"sprout_id"`
+	// TenantID is checked against the tenant pinned at enrollment on
+	// every refresh (checkRefreshTenant).
+	TenantID        string `json:"tenant_id"`
 	JWT             string `json:"jwt"`
 	GatewayJWT      string `json:"gateway_jwt"`
 	NKeyIdentity    string `json:"nkey_identity"`
@@ -631,7 +634,10 @@ func GatewayJWTHeaders() (http.Header, error) {
 // against the pinned one, before anything is written: a different key
 // re-pins only with a continuity proof that verifies
 // (reconcileTenantKeyPin); otherwise it returns ErrTenantKeyMismatch (a
-// missing pin, ErrTenantKeyNotPinned) and persists nothing. If farmer returns a different
+// missing pin, ErrTenantKeyNotPinned) and persists nothing. Its tenant_id
+// is checked against the tenant pinned at enrollment the same way
+// (checkRefreshTenant: ErrSproutTenantMismatch, or ErrSproutTenantNotPinned
+// with no pin), before anything is written. If farmer returns a different
 // NATS User JWT than the one on disk (for instance, re-minted after a
 // signing key change), that is persisted too and picked up on the
 // sprout's next start. It returns the sprout_id farmer re-issued.
@@ -661,6 +667,9 @@ func RefreshGatewayJWT(ctx context.Context) (string, error) {
 	}
 	if _, err := os.Stat(config.SproutTenantX25519PubFile); os.IsNotExist(err) {
 		return "", ErrTenantKeyNotPinned
+	}
+	if err := checkRefreshTenant(resp.TenantID); err != nil {
+		return "", err
 	}
 	if err := reconcileTenantKeyPin(resp.SproutID, resp.TenantX25519Pub, resp.TenantX25519Continuity); err != nil {
 		return "", err
@@ -742,10 +751,10 @@ const maxRefreshRetryDelay = 5 * time.Minute
 // refresh that re-issues a different one is logged, not adopted, since
 // the sprout's subscriptions are already bound to its current ID.
 //
-// It returns nil when ctx is done, and ErrTenantKeyMismatch or
-// ErrTenantKeyNotPinned (without retrying, since a retry would get the
-// same answer) when farmer's tenant key can't be checked against the
-// pinned one; the caller must treat that as fatal.
+// It returns nil when ctx is done, and IsFatalRefreshError's errors
+// (without retrying, since a retry would get the same answer) when
+// farmer's tenant key or tenant ID can't be checked against the pinned
+// one; the caller must treat that as fatal.
 func RunGatewayJWTRefresher(ctx context.Context, sproutID string, retryDelay time.Duration) error {
 	if retryDelay <= 0 {
 		retryDelay = 5 * time.Second
@@ -766,7 +775,7 @@ func RunGatewayJWTRefresher(ctx context.Context, sproutID string, retryDelay tim
 		case <-time.After(wait):
 		}
 		gotID, err := RefreshGatewayJWT(ctx)
-		if errors.Is(err, ErrTenantKeyMismatch) || errors.Is(err, ErrTenantKeyNotPinned) {
+		if IsFatalRefreshError(err) {
 			return err
 		}
 		if err != nil {
@@ -869,4 +878,35 @@ func writeFileOnce(path string, data []byte, perm os.FileMode) error {
 	}
 	// Link, unlike Rename, refuses to replace an existing path.
 	return os.Link(tmpPath, path)
+}
+
+// checkRefreshTenant checks tenantID, the tenant a /v1/refresh response
+// names, against the one this sprout pinned at enrollment (security
+// review 2026-10, H3): ErrSproutTenantMismatch if it differs. A sprout
+// with no tenant pin gets ErrSproutTenantNotPinned rather than pinning
+// whatever the refresh names: the pin is set at enrollment only, and a
+// sprout enrolled before SEC.3b (nothing is deployed) re-enrolls. Both
+// are fatal (IsFatalRefreshError), and nothing from the response is
+// persisted.
+func checkRefreshTenant(tenantID string) error {
+	if !IsValidTenantID(tenantID) {
+		return fmt.Errorf("pki: farmer's refresh response has an invalid tenant_id %q", tenantID)
+	}
+	pinned, err := SproutTenantID()
+	if err != nil {
+		return err
+	}
+	if pinned != tenantID {
+		return ErrSproutTenantMismatch
+	}
+	return nil
+}
+
+// IsFatalRefreshError reports whether err, from RefreshGatewayJWT (or a
+// download that refreshed first), means the sprout can't trust farmer's
+// answer about its tenant or tenant key: a retry would get the same
+// answer, so the sprout must stop and be re-enrolled.
+func IsFatalRefreshError(err error) bool {
+	return errors.Is(err, ErrTenantKeyMismatch) || errors.Is(err, ErrTenantKeyNotPinned) ||
+		errors.Is(err, ErrSproutTenantMismatch) || errors.Is(err, ErrSproutTenantNotPinned)
 }
