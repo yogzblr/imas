@@ -1847,6 +1847,161 @@ test ./... must pass. PR: state what you built, what you deferred, and any open
 question."
 ```
 
+## 4g. Wave 7 validation fixes (FIX.1 to FIX.4)
+
+Added 2026-10-05 after validating `main` at `b78c9e7` (all of PRs 81 to 108
+merged, CI green). The validation found a plaintext downgrade left in cmd.run
+and cook, job-log keys with no tenant, three Helm gaps on a fresh install, and a
+BUILD-STATUS that stops at PR 67. FIX.1, FIX.2 and FIX.3 run in parallel from
+`main`; each edits only its own BUILD-STATUS rows, so merge `main` in if it moves.
+FIX.4 runs last, after the other three are merged. Every brief inherits
+`CLAUDE.md`; the prompts avoid backticks, double quotes and dollar signs.
+
+**FIX.1: remove the plaintext cmd.run and cook path for sprouts with no box key**
+```
+claude --cloud "Implement FIX.1: delete the last plaintext downgrade in the sealed
+command path. Owner decision, 2026-10-04: sealing is sealed-only, with no fallback
+and no compatibility window; a sprout with no box key re-enrolls and is refused in
+the meantime. Today farmer still sends cmd.run and cook in plaintext to a sprout
+with no box key on record (internal/ingredients/cmd/sealed.go, internal/cook/sealed.go,
+the boundary request helper), and a sprout with no keys still accepts plaintext from
+anyone on the bus (the not-sealed-and-not-ready branches in the sprout side
+handlers and in RespondCook). The design doc says these are refused, not downgraded,
+so the docs and the code disagree. FLAG FOR SECURITY REVIEW.
+Build: (1) Farmer: when pki.SealToSprout returns ErrNoActiveBoxKey, do not send.
+Return a clear error naming the sprout and telling the operator to re-enroll it, with
+a stable error code, for cmd.run, cook and any other caller of the same boundary
+helper; the batch and sprout action paths must record that sprout as failed with the
+code, not hang. (2) Sprout: a sprout with no box keys refuses BOTH plaintext and
+sealed cmd.run and cook with the existing no-keys refusal; delete the plaintext
+execution branches. Check every other handler that has a similar enrolled-before-J
+branch (grep for the comment text and for SproutBoxReady) and report each. (3) Delete
+dead code this exposes (for example internal/api/handlers/ingredients/cmd/run.go if it
+is no longer reached from any route; say what you removed and confirm with grep and
+the build). (4) Fix the docs: the table row in docs/design/imas-payload-encryption-design.md
+('Attacks sprouts with no box key') becomes true; remove the stale statements in
+docs/BUILD-STATUS.md about the plaintext path (Open item 10 and the requirement 14 row
+only) and add the plaintext residuals that ARE still real and documented nowhere:
+the imas.sprouts.announce join event (farmer only logs it) and the fact that cancel has
+no sprout handler. List them as known residuals.
+Tests: farmer refuses to send to a keyless sprout and the action records the code;
+a keyless sprout refuses a plaintext and a sealed cmd.run and cook; a sprout with keys
+still runs a sealed one; the real-bus tests from J.1 to J.3 still pass; go test -race on
+internal/cook, internal/ingredients/cmd and internal/natsapi.
+Scope: internal/ingredients/cmd, internal/cook, internal/natsapi (error mapping only),
+internal/saasapi (only where a send error is classified), internal/api/handlers/ingredients
+(dead code only), docs/design/imas-payload-encryption-design.md, docs/BUILD-STATUS.md
+(Open item 10 and the requirement 14 row only). Tests: go test ./... must pass. PR: state
+what you built, what you deferred, and any open question; call it ready for review, not
+done."
+```
+
+**FIX.2: tenant-prefix the job object keys (review item I4)**
+```
+claude --cloud "Implement FIX.2: key job objects on tenant and sprout together. The job
+store writes jobs/<sprout_id>/<jid>/... in one global bucket (internal/jobs/store.go,
+jobKeyPrefix and the key helpers, plus internal/jobs/clistore.go, jobtypes.go,
+internal/serve, internal/saasapi/job_status.go, internal/saasapi/recipes.go and
+internal/rbac/config.go where they read or list job keys). sprout_id is unique per
+tenant only, so two tenants with the same sprout_id share job logs: a cross-tenant
+collision and a read leak. CLAUDE.md requires every table, index, cache and map to be
+keyed on (tenant_id, sprout_id). Review item I4 in docs/security-review-2026-10-b.md.
+FLAG FOR SECURITY REVIEW.
+Build: (1) Change the layout to jobs/<tenant_id>/<sprout_id>/<jid>/... and thread the
+tenant id through every writer, reader, lister, expiry sweep, the reconcile window and
+the cook step event listener; derive the tenant from the verified principal or the
+subject, never from a body field. Reject a tenant_id or sprout_id containing a slash,
+dot-dot or control characters before building a key; build every key in one function.
+(2) ListAllJobs and any whole-prefix scan must be per tenant, or if a platform-wide scan
+is needed (reconcile, expiry), it parses the tenant from the key and applies the
+tenant's own rules; no code path may return a job to a caller of another tenant. (3) No
+migration: nothing is deployed. Say so in the PR, and say what happens to an old-layout
+object (ignored), and make the code refuse to read one. (4) The saasapi job status
+read path (internal/saasapi/job_status.go) and the CLI job commands must pass the
+tenant and check it against the caller's tenant. (5) Check the object store policy
+examples in deploy/helm for the jobs bucket and update them to the new prefix. (6)
+Update docs and mark I4 addressed in docs/security-review-2026-10-b.md.
+Tests: two tenants with the same sprout_id and the same jid-shaped value write, list,
+read, expire and reconcile without ever seeing each other's objects, including through
+the saasapi route and the farmer HTTP and NATS read paths; a key with a hostile
+tenant_id or sprout_id (slash, dot-dot) is refused; the old layout is not read; the
+existing jobs, serve and saasapi tests are updated, not deleted.
+Scope: internal/jobs, internal/serve, internal/saasapi (job_status.go and recipes.go only
+where they read job keys), internal/rbac (only if it names job keys), cmd/farmer (wiring),
+cmd/imas (job commands only), deploy/helm/farmer (bucket policy examples only),
+docs/security-review-2026-10-b.md, docs/BUILD-STATUS.md (Open item 10 only). Tests: go
+test ./... must pass. PR: state what you built, what you deferred, and any open question."
+```
+
+**FIX.3: Helm gaps on a fresh install**
+```
+claude --cloud "Implement FIX.3: close three gaps that would make a fresh install of
+deploy/helm/farmer fail or be unsafe. FLAG FOR SECURITY REVIEW.
+(1) Farmer's object store egress. networkPolicy.farmerExtraEgress defaults to empty and
+the farmer NetworkPolicy has no rule for objectStore.endpoint, so recipes, staged recipes
+and job logs fail by default. Add a dedicated farmer egress rule for the object store
+port, the way saasapi has networkPolicy.saasapiEgress.objectStore (see
+templates/networkpolicy.yaml and values.yaml near line 803), restricted by the same
+destination setting, and keep farmerExtraEgress as an addition. (2) Bootstrap admin.
+farmer.bootstrapAdmin.pubkey defaults to empty and nothing complains, but with J.3 the
+CLI cannot add a user over the bus, so the install is unusable. Make render fail with a
+clear message when it is empty, unless an explicit value (for example
+farmer.bootstrapAdmin.skip: true with a documented reason such as users already exist in
+the database) is set; check how _helpers.tpl validates it today (around line 547) and
+keep the existing username and boxpub checks. (3) The SaaS API recipe credential. Today
+only an example policy (files/objectstore-policies/saasapi-recipes.json) limits it to
+tenants/*/recipes/*, and the chart only checks the Secret differs from farmer's. Add a
+chart-level control that makes the limit real and not documentation: for example a
+required, rendered policy name or an optional bucket-policy Job for MinIO that creates
+the policy and the user, or at minimum a startup self-check in saasapi that tries a
+write outside tenants/ and a read of sprouts/ and refuses to start with a clear error if
+either succeeds. Say which you chose and why. If the self-check needs code, it lives in
+internal/saasapi and internal/objectstore and is covered by a test with a fake store.
+Also: pods waiting on the imas-saasapi-box Secret with externalSecrets disabled should
+fail with a clear NOTES warning at install time (it is documented; confirm and test).
+Tests: extend chart_test.go and saasapinetpol_test.go: default values render the farmer
+object store egress; bootstrapAdmin empty fails render and skip passes; the policy
+control behaves as designed; existing tests still pass. helm template and lint on both
+charts with the default values, the values used in the UAT (docs) and a minimal override.
+Scope: deploy/helm/farmer (templates, values, tests, policy files, NOTES),
+deploy/helm/nats (only if a value is shared), internal/saasapi and internal/objectstore
+(only for the self-check), docs/INSTALL.md, docs/BUILD-STATUS.md (Open item 10 and the
+requirement 13 row only). Tests: go test ./... must pass. PR: state what you built, what you
+deferred, and any open question."
+```
+
+**FIX.4: refresh BUILD-STATUS to match main (after FIX.1, FIX.2 and FIX.3 merge)**
+```
+claude --cloud "Implement FIX.4: bring docs/BUILD-STATUS.md up to date with main. Docs
+only. Change no code and no other file. The file stops at PR 67 in its header, its
+requirements RAG table, its build plan table and its PR ledger, and many sections still say
+in review for PRs that merged. Work from the merged PR list (gh api repos/yogzblr/imas/pulls
+with state closed, PRs 68 onward; gh GraphQL is blocked here, so use REST), each PR's
+description, the code on main, docs/security-review-2026-10.md and
+docs/security-review-2026-10-b.md.
+Do: (1) update the header date and commit, the RAG summary (legend, counts, requirements
+table, build plan table, open items table) with a judgement from the code and CI on main,
+not from PR titles; keep the legend meaning; requirement 14 should reflect what is really
+sealed and what is documented residual. (2) Add every PR from 68 to the latest to the PR
+ledger with its brief id and one line. (3) Add a Wave 7 row (SEC.0 to SEC.6, REC.1, J.1 to
+J.5, SEC.5b, SEC.7a to SEC.7c, SH.1, CL.4, OPS.1, T.1, FIX.1 to FIX.3) to the build plan table.
+(4) Rewrite Open items 1, 2, 4, 10 and 11 so each states what is true on main: item 4 now
+records both security reviews, which findings are addressed and which are open (B4, B5, B6,
+B8 and the Info items), and what must be done before SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED
+is turned on. Change every in review that is now merged. (5) Resolve the contradictions the
+validation found: requirements 1 and 7 rows versus the SCALE.1 and SCALE.2 sections.
+(6) Add a short Validation 2026-10-05 note: what was verified, what could not be run
+(tests need the Go toolchain, so CI is the evidence), and the first release prerequisites
+still owed by the owner (GPG public key committed and the SECURITY.md fingerprint,
+Buildkite registries and variable, tag v0.1.0-rc.1, release run, publish by
+workflow_dispatch, verify the Buildkite index layout and the +git version against the
+manifest, re-enable the release.yml tag trigger). Do not invent a status you cannot check:
+mark it UNCONFIRMED and say what would confirm it. Needs FIX.1, FIX.2 and FIX.3 merged so
+the file describes the final state. Scope: docs/BUILD-STATUS.md only. Tests: none to run;
+check every PR number, file path and open item cross reference you write. PR: state what you
+changed, what you could not verify, and any open question."
+```
+
 ## 5. Orchestrator prompt: Wave 7 to the UAT gate (Claude Code app, hosted agents)
 
 Paste into one session in the Claude Code app, with the yogzblr/imas repo
@@ -1918,6 +2073,64 @@ Rules.
   blocked and on whom, then the briefs now eligible.
 
 Start now: verify the preconditions, then start 7A and report the five agent ids.
+```
+
+## 5b. Dispatcher prompt: validation fixes FIX.1 to FIX.4 (Claude Code app, hosted agents)
+
+Paste into one session in the Claude Code app with the yogzblr/imas repo attached.
+Same mechanism as section 5: each brief runs as a hosted (remote) agent started from
+this session. The dispatcher never merges and never edits code.
+
+```
+You are the dispatcher for four fix briefs, FIX.1 to FIX.4, in section 4g of
+docs/claude-code-parallel-build-plan.md. You start hosted agents, track them and
+report. You do not write code, review code, merge, or approve anything yourself. Read
+CLAUDE.md and section 4g of the plan first.
+
+Precondition, checked once at the start: the PR that added section 4g is merged into
+main (read the plan from origin/main; if section 4g is not there, stop and tell me).
+
+How to start a brief. Each brief in section 4g is a code block of the form
+claude --cloud "TEXT". Take TEXT, the part between the outer quotes, exactly as
+written, and start ONE hosted agent per brief with the Agent tool, passing TEXT as the
+prompt and isolation set to remote so it runs in its own cloud environment with its
+own copy of yogzblr/imas. Do not paraphrase, shorten, reorder or add to TEXT, and do
+not include the claude --cloud wrapper. Give each agent a description equal to the brief
+id. Start eligible briefs together in one message so they run concurrently. If an agent
+cannot reach the repo, add it with the add_repo tool for yogzblr/imas with push access and
+retry once; if that fails, stop and tell me.
+
+Gates. A gate is satisfied only when its PR is MERGED into main, not merely open or green.
+- FIX.1, FIX.2 and FIX.3: no gate. Start all three together.
+- FIX.4: gates FIX.1, FIX.2 and FIX.3. Start it only after all three are merged.
+After FIX.4 merges, stop and hand back to me.
+
+Tracking. Use the task list as the ledger, one task per brief, with the agent id, the PR
+number once it exists, and its state (not started, running, PR open, CI red, merged,
+blocked). Use ListAgents to see running agents and SendMessage to continue an agent that
+needs a nudge or an answer I gave. When an agent finishes, find its PR with the REST API
+(gh api repos/yogzblr/imas/pulls and .../commits/SHA/check-runs); gh GraphQL is blocked
+here, so do not use gh pr. Its PR title should start with the brief id. Do not poll in a
+loop: call ReadNotifications when the app says notifications are pending, and when I
+message you, and otherwise schedule at most one check-in with send_later about 30 minutes
+out while agents are running.
+
+Rules.
+- FIX.1, FIX.2 and FIX.3 carry FLAG FOR SECURITY REVIEW: never describe them as done or
+  safe to merge, only as ready for review, even when CI is green.
+- When an agent or PR lists open questions or decisions for me, copy them to me verbatim
+  with the PR number. Do not answer them and do not tell an agent an answer I have not
+  given.
+- If an agent fails, stalls or its PR conflicts, say so and propose a retry; start a new
+  agent only after I say yes, with the same verbatim TEXT. FIX.1 to FIX.3 may touch the
+  same docs and BUILD-STATUS rows: if their PRs conflict, report it and do not resolve it.
+- If a PR touches files outside its brief's Scope line, flag it to me.
+- Start nothing that is not in section 4g. Do not start the release or the UAT.
+- Status report format, whenever I ask: the task list as a table, then what is blocked and
+  on whom, then the briefs now eligible.
+
+Start now: verify the precondition, then start FIX.1, FIX.2 and FIX.3 and report the three
+agent ids.
 ```
 
 ---
