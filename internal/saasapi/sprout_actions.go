@@ -152,6 +152,16 @@ const (
 	// refused the request unrun. Never stored: the item goes back to
 	// queued (replyUpdate).
 	farmerCodeBusy = "farmer_busy"
+	// farmerCodeSproutReenrollRequired: the sprout has no
+	// payload-encryption key on record, so farmer refused to send it
+	// anything (FIX.1: sealed only, never plaintext); it must be
+	// re-enrolled. Not sent again: it would be refused the same way until
+	// then. Stored as internal_error, with the reason logged naming the
+	// sprout, for the same reason as farmerCodeSelfUpdateDisabled: a new
+	// item code must first be added to docs/api/saasapi.md and the OpenAPI
+	// enum (TestItemErrorCodesDocumented), which were outside FIX.1's
+	// scope.
+	farmerCodeSproutReenrollRequired = "sprout_reenroll_required"
 )
 
 // actionErrorMessages is the only text ever shown for an item's error
@@ -1006,6 +1016,10 @@ func replyUpdate(batch AssetActionBatch, item AssetActionItem, data []byte) map[
 	case reply.Status == controlplane.StatusFailed && reply.ErrorCode == farmerCodeSelfUpdateDisabled:
 		log.Errorf("saasapi: farmer refused batch %s asset %s (tenant %s): self_update is disabled on farmer (IMAS_SELF_UPDATE_ENABLED); recorded as %s",
 			batch.ID, item.AssetID, batch.TenantID, controlplane.ErrorInternal)
+		return failedUpdate(string(controlplane.ErrorInternal))
+	case reply.Status == controlplane.StatusFailed && reply.ErrorCode == farmerCodeSproutReenrollRequired:
+		log.Errorf("saasapi: farmer refused batch %s asset %s (tenant %s): sprout %s has no payload-encryption key on record and must be re-enrolled (%s); nothing was sent; recorded as %s",
+			batch.ID, item.AssetID, batch.TenantID, item.SproutID, farmerCodeSproutReenrollRequired, controlplane.ErrorInternal)
 		return failedUpdate(string(controlplane.ErrorInternal))
 	case reply.Status == controlplane.StatusFailed:
 		return failedUpdate(farmerErrorCode(reply.ErrorCode))

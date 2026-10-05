@@ -13,8 +13,10 @@ import (
 
 	"github.com/yogzblr/imas/internal/api/handlers"
 	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/cook/cooktest"
 	"github.com/yogzblr/imas/internal/jobs"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 	"github.com/yogzblr/imas/internal/props"
 	"github.com/yogzblr/imas/internal/rbac"
 )
@@ -84,19 +86,13 @@ func TestInstalledStorageIndexesCookJobs(t *testing.T) {
 	t.Cleanup(func() { cook.SetDispatchRecorder(nil) })
 	cook.RegisterFarmerNatsConn(tenant, nc)
 	t.Cleanup(func() { cook.UnregisterFarmerNatsConn(tenant) })
-	// The sprout has no box key on record, so the dispatch is plaintext
-	// and a stub can acknowledge it.
-	if _, err := nc.Subscribe(cook.CookSubject(sprout), func(m *nats.Msg) {
-		var env cook.RecipeEnvelope
-		json.Unmarshal(m.Data, &env)
-		b, _ := json.Marshal(cook.Ack{Acknowledged: true, JobID: env.JobID})
-		m.Respond(b)
-	}); err != nil {
-		t.Fatalf("subscribing stub sprout: %v", err)
-	}
-	if err := nc.Flush(); err != nil {
-		t.Fatalf("flushing subscriptions: %v", err)
-	}
+	// The dispatch is sealed only (FIX.1: a sprout with no box key is
+	// sent nothing), so the stub sprout has a box key on record and
+	// acknowledges the sealed dispatch.
+	tenantboxtest.Start(t)
+	pki.InvalidateTenantBoxKeys(tenant)
+	t.Cleanup(func() { pki.InvalidateTenantBoxKeys(tenant) })
+	cooktest.NewSprout(t, tenant, sprout).AnswerCooks(t, nc, cooktest.Acknowledge)
 
 	if err := cook.SendStepsEvent(tenant, sprout, jid, []cook.Step{{ID: "s1"}}); err != nil {
 		t.Fatalf("dispatching: %v", err)

@@ -15,11 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
-
 	apitypes "github.com/yogzblr/imas/internal/api/types"
 	"github.com/yogzblr/imas/internal/controlplane"
 	"github.com/yogzblr/imas/internal/ingredients/cmd"
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
@@ -51,11 +50,12 @@ func (d *dispatchRecorder) all() []dispatchCall {
 func stubSproutActionDispatch(t *testing.T, verify func(string, string) error) *dispatchRecorder {
 	t.Helper()
 	origV, origR, origC, origT := verifySproutInTenant, dispatchCmdRun, dispatchCook, triggerCook
-	origS, origK := dispatchSelfUpdate, fleetKeys
+	origS, origK, origB := dispatchSelfUpdate, fleetKeys, requireSproutBoxKey
 	t.Cleanup(func() {
 		verifySproutInTenant, dispatchCmdRun, dispatchCook, triggerCook = origV, origR, origC, origT
-		dispatchSelfUpdate, fleetKeys = origS, origK
+		dispatchSelfUpdate, fleetKeys, requireSproutBoxKey = origS, origK, origB
 	})
+	requireSproutBoxKey = func(string, string, string) error { return nil }
 
 	rec := &dispatchRecorder{}
 	if verify != nil {
@@ -349,25 +349,27 @@ func TestSproutAction_CmdRunThroughRealHandler(t *testing.T) {
 	writeNKey(t, "", "accepted", "offline-01", "UKEY_OFFLINE")
 	cmd.RegisterFarmerNatsConn(legacy, nc)
 	defer cmd.UnregisterFarmerNatsConn(legacy)
+	saas := dialSaaSAPI(t, nc)
 
+	// Both sprouts have a box key on record: cmd.run is sealed only, and
+	// one without would be refused before anything is sent (FIX.1,
+	// sprout_action_fix1_test.go).
+	newSealedStubSprout(t, legacy, "offline-01")
 	var got apitypes.CmdRun
 	var gotMu sync.Mutex
-	if _, err := nc.Subscribe("imas.sprouts.web-01.cmd.run", func(msg *nats.Msg) {
-		gotMu.Lock()
-		_ = json.Unmarshal(msg.Data, &got)
-		gotMu.Unlock()
-		out, _ := json.Marshal(apitypes.CmdRun{Stdout: "up 3 days", Stderr: "warn", ErrCode: 3, Duration: time.Second})
-		_ = msg.Respond(out)
-	}); err != nil {
-		t.Fatalf("fake sprout subscribe: %v", err)
-	}
+	newSealedStubSprout(t, legacy, "web-01").answer(t, nc, "imas.sprouts.web-01.cmd.run",
+		payloadbox.PurposeCmdRunRequest, payloadbox.PurposeCmdRunResponse, func(body []byte) any {
+			gotMu.Lock()
+			_ = json.Unmarshal(body, &got)
+			gotMu.Unlock()
+			return apitypes.CmdRun{Stdout: "up 3 days", Stderr: "warn", ErrCode: 3, Duration: time.Second}
+		})
 	if err := RegisterSproutAction(nc); err != nil {
 		t.Fatalf("RegisterSproutAction: %v", err)
 	}
 	if err := nc.Flush(); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
-	saas := dialSaaSAPI(t, nc)
 
 	req := cmdRunRequest(legacy, "web-01")
 	req.Action.Params = json.RawMessage(`{"command":"uptime","args":["-p"]}`)
@@ -409,7 +411,11 @@ func TestSproutAction_CookThroughRealHandler(t *testing.T) {
 	if err := nc.Flush(); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
-	reply := requestSproutAction(t, dialSaaSAPI(t, nc), controlplane.SproutActionRequest{
+	saas := dialSaaSAPI(t, nc)
+	// A box key on record: a sprout without one is refused before the
+	// cook is prepared (FIX.1, sprout_action_fix1_test.go).
+	newSealedStubSprout(t, legacy, "web-01")
+	reply := requestSproutAction(t, saas, controlplane.SproutActionRequest{
 		TenantID: legacy,
 		SproutID: "web-01",
 		Action:   controlplane.SproutAction{Type: controlplane.ActionCook, Params: json.RawMessage(`{"recipe":"nginx.harden"}`)},

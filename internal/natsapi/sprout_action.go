@@ -94,6 +94,7 @@ var (
 	dispatchCook         = prepareSaaSAPICook
 	triggerCook          = triggerLocalCook
 	dispatchSelfUpdate   = sendSelfUpdate
+	requireSproutBoxKey  = cook.RequireSproutBoxKey
 )
 
 // fleetKeys is the imas-fleet-signing public key source self_update
@@ -158,7 +159,28 @@ const (
 	// was full, so the request was refused unrun. Nothing was dispatched;
 	// it is safe to send again.
 	ErrorFarmerBusy controlplane.ErrorCode = "farmer_busy"
+	// ErrorSproutReenrollRequired: the sprout has no payload-encryption
+	// (box) key on record, so farmer refused to send it the cmd.run, cook
+	// or self_update (FIX.1: sealed only, never plaintext). Nothing was
+	// sent; the sprout must be re-enrolled before anything can be. The
+	// same string as cook.ReenrollRequiredCode, which farmer's errors to
+	// the CLI carry.
+	ErrorSproutReenrollRequired controlplane.ErrorCode = "sprout_reenroll_required"
 )
+
+// sendErrorCode classifies err, a failure to send an action to the
+// sprout or to get its answer: sprout_reenroll_required if farmer
+// refused to send to a sprout with no box key (cook.ErrSproutReenrollRequired),
+// sprout_unreachable if nothing answered, internal_error otherwise.
+func sendErrorCode(err error) controlplane.ErrorCode {
+	switch {
+	case errors.Is(err, cook.ErrSproutReenrollRequired):
+		return ErrorSproutReenrollRequired
+	case errors.Is(err, nats.ErrTimeout), errors.Is(err, nats.ErrNoResponders):
+		return controlplane.ErrorSproutUnreachable
+	}
+	return controlplane.ErrorInternal
+}
 
 // Concurrency of internal.sprout.action (security review M5). Each farmer
 // process has two pools: one for cmd.run and cook (and anything
@@ -521,10 +543,7 @@ func runSproutCmd(req controlplane.SproutActionRequest, reply controlplane.Sprou
 		return reply, fmt.Errorf("cmd.run returned no result for sprout %q", req.SproutID)
 	}
 	if out.Error != nil {
-		reply.ErrorCode = controlplane.ErrorInternal
-		if errors.Is(out.Error, nats.ErrTimeout) || errors.Is(out.Error, nats.ErrNoResponders) {
-			reply.ErrorCode = controlplane.ErrorSproutUnreachable
-		}
+		reply.ErrorCode = sendErrorCode(out.Error)
 		return reply, out.Error
 	}
 
@@ -553,6 +572,15 @@ func runSproutCook(req controlplane.SproutActionRequest, reply controlplane.Spro
 		State:  in.State,
 		Test:   in.Test,
 		Env:    in.Env,
+	}
+	// The dispatch itself runs after this reply (triggerCook), where
+	// farmer's refusal to send to a sprout with no box key would only be
+	// logged and the item would wait for a job that never starts. Check
+	// first, so it is answered with the code instead (FIX.1). The send
+	// checks again.
+	if err := requireSproutBoxKey(req.TenantID, req.SproutID, "cook"); err != nil {
+		reply.ErrorCode = sendErrorCode(err)
+		return reply, err
 	}
 
 	res, err := dispatchCook(req.TenantID, singleTargetParams(req.SproutID, action))
@@ -604,10 +632,7 @@ func runSproutSelfUpdate(req controlplane.SproutActionRequest, reply controlplan
 
 	jid, err := dispatchSelfUpdate(req.TenantID, req.SproutID, in.Version)
 	if err != nil {
-		reply.ErrorCode = controlplane.ErrorInternal
-		if errors.Is(err, nats.ErrTimeout) || errors.Is(err, nats.ErrNoResponders) {
-			reply.ErrorCode = controlplane.ErrorSproutUnreachable
-		}
+		reply.ErrorCode = sendErrorCode(err)
 		return reply, err
 	}
 	reply.Status = controlplane.StatusDispatched

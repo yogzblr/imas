@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"sync"
@@ -19,9 +18,10 @@ import (
 )
 
 // nc is the single connection a sprout process registers via
-// RegisterNatsConn — used only by SRun (below) to stream a running
-// command's output back over the bus. Sprout is inherently single-tenant
-// (one process, one connection), so this stays a bare package var.
+// RegisterNatsConn. Nothing reads it any more: SRun used it to stream a
+// running command's output over the bus in plaintext, which FIX.1
+// removed. The registration stays only because its caller
+// (cmd/sprout/main.go) was outside FIX.1's scope; remove both together.
 var nc *nats.Conn
 
 func RegisterNatsConn(conn *nats.Conn) {
@@ -121,16 +121,12 @@ func SRun(cmd apitypes.CmdRun) (apitypes.CmdRun, error) {
 	}
 	command.Dir = cmd.CWD
 
+	// Output is only collected for the (sealed) reply. StreamTopic is
+	// ignored: live streaming published output in plaintext, and FIX.1
+	// removed it with the plaintext cmd.run path it was reachable from.
 	var stdoutBuf, stderrBuf bytes.Buffer
-	stdoutWriters := []io.Writer{&stdoutBuf}
-	stderrWriters := []io.Writer{&stderrBuf}
-	// Stream output over NATS for live monitoring when a connection is available.
-	if nc != nil && cmd.StreamTopic != "" {
-		stdoutWriters = append(stdoutWriters, &natsWriter{conn: nc, topic: cmd.StreamTopic, stream: "stdout"})
-		stderrWriters = append(stderrWriters, &natsWriter{conn: nc, topic: cmd.StreamTopic, stream: "stderr"})
-	}
-	command.Stdout = io.MultiWriter(stdoutWriters...)
-	command.Stderr = io.MultiWriter(stderrWriters...)
+	command.Stdout = &stdoutBuf
+	command.Stderr = &stderrBuf
 	timer := time.Now()
 	err := command.Run()
 	cmd.Duration = time.Since(timer)

@@ -11,8 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
-
 	"github.com/yogzblr/imas/internal/objectstore"
 	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
 	"github.com/yogzblr/imas/internal/props"
@@ -83,24 +81,8 @@ func TestSendCookEvent_ReadsFromStore(t *testing.T) {
       - name: echo from-object-store
 `)
 
-	nc, cleanup := startCookTestNATS(t)
-	defer cleanup()
 	sproutID := "store-only-sprout"
-	got := make(chan RecipeEnvelope, 1)
-	sub, err := nc.Subscribe("imas.sprouts."+sproutID+".cook", func(msg *nats.Msg) {
-		var env RecipeEnvelope
-		if err := json.Unmarshal(msg.Data, &env); err != nil {
-			t.Errorf("unmarshal envelope: %v", err)
-			return
-		}
-		got <- env
-		data, _ := json.Marshal(Ack{Acknowledged: true, JobID: env.JobID})
-		msg.Respond(data)
-	})
-	if err != nil {
-		t.Fatalf("subscribe: %v", err)
-	}
-	defer sub.Unsubscribe()
+	got := sendCookStub(t, sproutID, acknowledge)
 
 	if err := SendCookEventContext(context.Background(), testTenantID, sproutID, "storeonly", GenerateJobID(), false); err != nil {
 		t.Fatalf("SendCookEventContext: %v", err)
