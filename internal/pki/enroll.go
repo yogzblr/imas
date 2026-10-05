@@ -628,7 +628,8 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 // after step 1, so this only has to cover a few retries; a sprout that
 // misses it is closed and has to be enrolled again. It must stay below
 // SealedClaimTTL minus replayCacheClockMargin, so that a binding's claim
-// outlives every replica that would still accept it.
+// outlives every replica that would still accept it. Owner decision,
+// 2026-10-05 (SEC.7d, answering SEC.7b's open question): keep 5 minutes.
 const EnrollBindingTTL = 5 * time.Minute
 
 // enrollBindingPurpose is an enrollment binding's payloadbox purpose:

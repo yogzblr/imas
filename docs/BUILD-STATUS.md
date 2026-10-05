@@ -1068,7 +1068,8 @@ by an external git sync today.
       briefs, which end sealed-only. Since SEC.7b (security review
       2026-10-b B2) such a sprout can no longer be given a box key by
       anyone but itself, within 5 minutes of its first request (the
-      `enroll_binding`). After that it is closed: `/v1/enroll` refuses it,
+      `enroll_binding`; owner decision 2026-10-05, SEC.7d: 5 minutes
+      stays). After that it is closed: `/v1/enroll` refuses it,
       so it never gets a gateway JWT, and it has to be deleted
       (`imas keys delete`) and enrolled again under a new NKey with a fresh
       join token. Not done by SEC.7b: farmer still sends the plaintext
@@ -1084,7 +1085,14 @@ by an external git sync today.
       refuses any staged copy that doesn't open under its keys. Not caught
       up either: a copy staged before a tenant key rotation, pulled by a
       sprout that has since re-pinned, or before a box key rotation, pulled
-      more than `sproutboxkeyprevgrace` after it.
+      more than `sproutboxkeyprevgrace` after it. Since SEC.7d (owner
+      decision 2026-10-05; FLAG FOR SECURITY REVIEW, ready for review) a
+      copy stamped up to `stagedrecipeclockskew` (default 1m, cap 5m)
+      before the newest job handled is still cooked, so a farmer replica
+      whose clock runs behind doesn't drop it; a handled job ID is still
+      refused, and the newest handled time never moves back. Accepted
+      cost: an older captured job the sprout never ran can be cooked after
+      a newer one within that window.
 11. **The control plane can be forged by a compromised bus** (requirement 14).
     Sealing farmer ↔ sprout stops the bus injecting commands *into a sprout*,
     but not asking *farmer* to send them. Verified with throwaway tests

@@ -1217,7 +1217,7 @@ func TestLoadConfig_SproutConfigFileIs0600(t *testing.T) {
 func TestLoadConfig_SproutStagedRecipeSettings(t *testing.T) {
 	t.Run("from the config file", func(t *testing.T) {
 		tmpRoot := t.TempDir()
-		content := "stagedrecipemaxage: 6h\ngatewayjwtrefreshmargin: 10m\nsprouthandledjobsfile: /tmp/imas-handled\nsproutboxkeyprevgrace: 1h\n"
+		content := "stagedrecipemaxage: 6h\nstagedrecipeclockskew: 2m\ngatewayjwtrefreshmargin: 10m\nsprouthandledjobsfile: /tmp/imas-handled\nsproutboxkeyprevgrace: 1h\n"
 		cfgFile := writeTempConfig(t, tmpRoot, "sprout", content)
 		resetForBinaryTest(t, tmpRoot)
 		jety.SetConfigType("yaml")
@@ -1228,6 +1228,9 @@ func TestLoadConfig_SproutStagedRecipeSettings(t *testing.T) {
 
 		if StagedRecipeMaxAge != 6*time.Hour {
 			t.Errorf("StagedRecipeMaxAge = %v, want 6h", StagedRecipeMaxAge)
+		}
+		if StagedRecipeClockSkew != 2*time.Minute {
+			t.Errorf("StagedRecipeClockSkew = %v, want 2m", StagedRecipeClockSkew)
 		}
 		if GatewayJWTRefreshMargin != 10*time.Minute {
 			t.Errorf("GatewayJWTRefreshMargin = %v, want 10m", GatewayJWTRefreshMargin)
@@ -1249,6 +1252,9 @@ func TestLoadConfig_SproutStagedRecipeSettings(t *testing.T) {
 		if StagedRecipeMaxAge != DefaultStagedRecipeMaxAge {
 			t.Errorf("StagedRecipeMaxAge = %v, want %v", StagedRecipeMaxAge, DefaultStagedRecipeMaxAge)
 		}
+		if StagedRecipeClockSkew != DefaultStagedRecipeClockSkew {
+			t.Errorf("StagedRecipeClockSkew = %v, want %v", StagedRecipeClockSkew, DefaultStagedRecipeClockSkew)
+		}
 		if GatewayJWTRefreshMargin != DefaultGatewayJWTRefreshMargin {
 			t.Errorf("GatewayJWTRefreshMargin = %v, want %v", GatewayJWTRefreshMargin, DefaultGatewayJWTRefreshMargin)
 		}
@@ -1262,7 +1268,7 @@ func TestLoadConfig_SproutStagedRecipeSettings(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, key := range []string{"stagedrecipemaxage", "gatewayjwtrefreshmargin", "sprouthandledjobsfile", "sproutboxkeyprevgrace"} {
+		for _, key := range []string{"stagedrecipemaxage", "stagedrecipeclockskew", "gatewayjwtrefreshmargin", "sprouthandledjobsfile", "sproutboxkeyprevgrace"} {
 			if !strings.Contains(string(b), key) {
 				t.Errorf("sprout config file doesn't list %q, so operators can't see it:\n%s", key, b)
 			}
@@ -1474,6 +1480,74 @@ func TestLoadConfig_SproutUpdateRepoSettings(t *testing.T) {
 			}
 			if want := filepath.Join(tmpRoot, "fleet-signing-keys.json"); SproutFleetSigningKeyring != want {
 				t.Errorf("SproutFleetSigningKeyring = %q, want %q", SproutFleetSigningKeyring, want)
+			}
+		})
+	}
+}
+
+// SEC.7d: the staged recipe clock skew tolerance defaults to a minute
+// (farmer replicas' clock margin), is capped at five, and anything that
+// isn't a duration in that range falls back to the default.
+func TestStagedRecipeClockSkewFrom(t *testing.T) {
+	if DefaultStagedRecipeClockSkew != time.Minute || MaxStagedRecipeClockSkew != 5*time.Minute {
+		t.Fatalf("default, cap = %v, %v; want 1m, 5m", DefaultStagedRecipeClockSkew, MaxStagedRecipeClockSkew)
+	}
+	if DefaultStagedRecipeClockSkew > MaxStagedRecipeClockSkew || MaxStagedRecipeClockSkew >= DefaultStagedRecipeMaxAge {
+		t.Fatal("the default must be within the cap, and the cap below the default max age")
+	}
+	for name, tc := range map[string]struct {
+		in      any
+		want    time.Duration
+		wantErr bool
+	}{
+		"unset":               {nil, DefaultStagedRecipeClockSkew, false},
+		"the default":         {DefaultStagedRecipeClockSkew, DefaultStagedRecipeClockSkew, false},
+		"30s":                 {"30s", 30 * time.Second, false},
+		"spaces":              {" 2m ", 2 * time.Minute, false},
+		"0s disables":         {"0s", 0, false},
+		"bare 0":              {0, 0, false},
+		"bare 0 as float":     {float64(0), 0, false},
+		"at the cap":          {"5m", MaxStagedRecipeClockSkew, false},
+		"over the cap":        {"5m1s", DefaultStagedRecipeClockSkew, true},
+		"an hour":             {"1h", DefaultStagedRecipeClockSkew, true},
+		"negative":            {"-1s", DefaultStagedRecipeClockSkew, true},
+		"negative duration":   {-time.Second, DefaultStagedRecipeClockSkew, true},
+		"not a duration":      {"soon", DefaultStagedRecipeClockSkew, true},
+		"empty string":        {"", DefaultStagedRecipeClockSkew, true},
+		"bare number no unit": {30, DefaultStagedRecipeClockSkew, true},
+		"bare float no unit":  {1.5, DefaultStagedRecipeClockSkew, true},
+		"a list":              {[]any{"1m"}, DefaultStagedRecipeClockSkew, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := stagedRecipeClockSkewFrom(tc.in)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, want error %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// An invalid value in the sprout config file leaves the default in use.
+func TestLoadConfig_SproutStagedRecipeClockSkewInvalid(t *testing.T) {
+	for _, v := range []string{"1h", "-30s", "soon", "30"} {
+		t.Run(v, func(t *testing.T) {
+			tmpRoot := t.TempDir()
+			cfgFile := writeTempConfig(t, tmpRoot, "sprout", "stagedrecipeclockskew: "+v+"\n")
+			resetForBinaryTest(t, tmpRoot)
+			jety.SetConfigType("yaml")
+			jety.SetConfigFile(cfgFile)
+			_ = jety.ReadInConfig()
+			old := StagedRecipeClockSkew
+			t.Cleanup(func() { StagedRecipeClockSkew = old })
+			StagedRecipeClockSkew = 3 * time.Minute
+
+			LoadConfig("sprout")
+
+			if StagedRecipeClockSkew != DefaultStagedRecipeClockSkew {
+				t.Errorf("StagedRecipeClockSkew = %v, want the default %v", StagedRecipeClockSkew, DefaultStagedRecipeClockSkew)
 			}
 		})
 	}
