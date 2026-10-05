@@ -358,8 +358,8 @@ Full reference: [`api/saasapi.md`](api/saasapi.md#recipes).
   `tenants/*/recipes/*` (the chart's `files/objectstore-policies/`). saasapi
   checks this at startup: if the object store lets the credential write
   outside `tenants/`, or write, read or list `sprouts/`, saasapi logs which
-  and refuses to start (`SAASAPI_RECIPES_CREDENTIAL_CHECK`, on in the
-  chart). It also refuses when it can't reach the object store within about
+  and refuses to start (`SAASAPI_RECIPES_CREDENTIAL_CHECK`, on by default
+  in the binary and the chart; only an explicit `false` turns it off). It also refuses when it can't reach the object store within about
   30 seconds, and its pod restarts and tries again.
 - Your Keycloak user needs the `imas-recipes-write` role to upload or
   delete, and `imas-recipes-read` (or the write role) to list and read.

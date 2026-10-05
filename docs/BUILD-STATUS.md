@@ -1051,9 +1051,9 @@ by an external git sync today.
       `mc` image (AGPL-3.0) or MinIO admin credential in the cluster. NOTES
       now also warns at install time that saasapi's pods wait on
       `imas-saasapi-nats` and `imas-saasapi-box` whenever ESO doesn't sync
-      them. Still open: the binary defaults the check to off (only the
-      chart turns it on) because `cmd/saasapi`'s wiring tests run recipes
-      against a permissive fake store; the read probe can't catch a key
+      them. The binary defaults the check to on as well (owner decision,
+      2026-10-05); only an explicit `false` turns it off. Still open: the
+      read probe can't catch a key
       that may read `sprouts/*` but not list the bucket on AWS (it answers
       `AccessDenied` for a missing key); `docs/api/saasapi.md` doesn't list
       the new variable yet; the chart tests ran without the real subcharts.

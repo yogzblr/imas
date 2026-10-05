@@ -739,7 +739,8 @@ kubectl -n imas create secret generic saasapi-s3 \
 
 **The limit is checked, not just documented (FIX.3).** With
 `saasapi.recipes.enabled` the chart sets `SAASAPI_RECIPES_CREDENTIAL_CHECK`
-(`saasapi.recipes.credentialCheck`, default `true`), and at startup saasapi
+(`saasapi.recipes.credentialCheck`, default `true`; saasapi's own default
+is on too, so only an explicit `false` turns it off), and at startup saasapi
 asks the object store, with its own credential, to do what that credential
 must not be able to do:
 

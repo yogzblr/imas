@@ -34,7 +34,7 @@ func TestLoadRecipeSettingsDefaults(t *testing.T) {
 	}
 	if s.Endpoint != "" || !s.UseSSL || s.ReadRole != "imas-recipes-read" || s.WriteRole != "imas-recipes-write" ||
 		s.MaxCount != 500 || s.MaxTotalBytes != 20<<20 || s.WriteRateLimit != 1 || s.WriteRateBurst != 10 ||
-		s.RenderLimits != (cook.RenderLimits{}) || s.CredentialCheck {
+		s.RenderLimits != (cook.RenderLimits{}) || !s.CredentialCheck {
 		t.Fatalf("defaults %+v", s)
 	}
 }
@@ -47,7 +47,7 @@ func TestLoadRecipeSettingsFromEnv(t *testing.T) {
 		"SAASAPI_RECIPES_S3_ACCESS_KEY_ID":          "saasapi",
 		"SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY_FILE": "/var/run/secrets/key",
 		"SAASAPI_RECIPES_S3_USE_SSL":                "false",
-		"SAASAPI_RECIPES_CREDENTIAL_CHECK":          "true",
+		"SAASAPI_RECIPES_CREDENTIAL_CHECK":          "false",
 		"SAASAPI_RECIPES_READ_ROLE":                 "r",
 		"SAASAPI_RECIPES_WRITE_ROLE":                "w",
 		"SAASAPI_RECIPES_MAX_COUNT":                 "10",
@@ -64,7 +64,7 @@ func TestLoadRecipeSettingsFromEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := RecipeSettings{Endpoint: "minio:9000", Bucket: "recipes", AccessKeyID: "saasapi", SecretAccessKeyFile: "/var/run/secrets/key",
-		CredentialCheck: true, ReadRole: "r", WriteRole: "w", MaxCount: 10, MaxTotalBytes: 1000, WriteRateLimit: 0.5, WriteRateBurst: 3,
+		CredentialCheck: false, ReadRole: "r", WriteRole: "w", MaxCount: 10, MaxTotalBytes: 1000, WriteRateLimit: 0.5, WriteRateBurst: 3,
 		RenderLimits: cook.RenderLimits{MaxSourceBytes: 1024, RenderTimeout: 500 * time.Millisecond}}
 	if s != want {
 		t.Fatalf("got %+v\nwant %+v", s, want)
@@ -134,6 +134,10 @@ func TestConfigureRecipes(t *testing.T) {
 	}
 	s := DefaultRecipeSettings()
 	s.Endpoint, s.Bucket, s.AccessKeyID, s.SecretAccessKeyFile = "minio:9000", "recipes", "saasapi", keyFile
+	// No store answers at minio:9000: this test is about the key file and
+	// the limits, so the scope check (on by default, covered in
+	// recipes_credcheck_test.go) is off here.
+	s.CredentialCheck = false
 	s.RenderLimits = cook.RenderLimits{MaxSourceBytes: 4096}
 	if err := ConfigureRecipes(s, nil); err != nil {
 		t.Fatal(err)

@@ -85,6 +85,7 @@ func clearRecipeEnv(t *testing.T) {
 		"SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY_FILE", "SAASAPI_RECIPES_S3_USE_SSL",
 		"SAASAPI_RECIPES_READ_ROLE", "SAASAPI_RECIPES_WRITE_ROLE", "SAASAPI_RECIPES_MAX_COUNT",
 		"SAASAPI_RECIPES_MAX_TOTAL_BYTES", "SAASAPI_RECIPES_WRITE_RATE_LIMIT", "SAASAPI_RECIPES_WRITE_RATE_BURST",
+		"SAASAPI_RECIPES_CREDENTIAL_CHECK",
 		"IMAS_RECIPE_MAX_SOURCE_BYTES", "IMAS_RECIPE_MAX_RENDERED_BYTES", "IMAS_RECIPE_MAX_VALUE_BYTES",
 		"IMAS_RECIPE_RENDER_TIMEOUT", "IMAS_RECIPE_MAX_RANGE_ITERATIONS",
 	} {
@@ -92,11 +93,34 @@ func clearRecipeEnv(t *testing.T) {
 	}
 }
 
-// setRecipeEnv points the recipe settings at a fresh fake S3 bucket, with
-// the secret key in a file, as the Helm chart does.
-func setRecipeEnv(t *testing.T) {
+// saasapiRecipePolicy is deploy/helm/farmer/files/objectstore-policies/
+// saasapi-recipes.json in the fake store: read, write and delete under
+// tenants/*/recipes/, create under tenants/*/recipe-audit/, list only
+// within tenants/*/recipes/, nothing else. saasapi's startup credential
+// check (SAASAPI_RECIPES_CREDENTIAL_CHECK, on by default) refuses a store
+// that allows more.
+func saasapiRecipePolicy(op, key string) bool {
+	p := strings.SplitN(key, "/", 4)
+	if len(p) < 3 || p[0] != "tenants" || p[1] == "" {
+		return true
+	}
+	switch p[2] {
+	case "recipes":
+		return false
+	case "recipe-audit":
+		return op != "PUT"
+	}
+	return true
+}
+
+// setRecipeEnv points the recipe settings at a fresh fake S3 bucket that
+// enforces saasapi's recipe policy, with the secret key in a file, as the
+// Helm chart does. It returns the fake server.
+func setRecipeEnv(t *testing.T) *objectstoretest.Server {
 	t.Helper()
-	s3 := objectstoretest.NewServer(t).Config()
+	srv := objectstoretest.NewServer(t)
+	srv.Deny(saasapiRecipePolicy)
+	s3 := srv.Config()
 	keyFile := filepath.Join(t.TempDir(), "secret-access-key")
 	if err := os.WriteFile(keyFile, []byte(s3.SecretAccessKey+"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -106,6 +130,7 @@ func setRecipeEnv(t *testing.T) {
 	t.Setenv("SAASAPI_RECIPES_S3_ACCESS_KEY_ID", s3.AccessKeyID)
 	t.Setenv("SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY_FILE", keyFile)
 	t.Setenv("SAASAPI_RECIPES_S3_USE_SSL", "false")
+	return srv
 }
 
 // resetRecipes puts saasapi's recipe settings back to "off" after a test.
@@ -185,18 +210,24 @@ func TestRecipeRoutesWired(t *testing.T) {
 // treats as fatal, so saasapi refuses to start instead of serving 503.
 func TestRecipeConfigInvalidStopsStartup(t *testing.T) {
 	resetRecipes(t)
-	for name, set := range map[string]func(t *testing.T){
-		"missing secret key file": func(t *testing.T) {
+	for name, set := range map[string]func(t *testing.T, srv *objectstoretest.Server){
+		"missing secret key file": func(t *testing.T, _ *objectstoretest.Server) {
 			t.Setenv("SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY_FILE", filepath.Join(t.TempDir(), "absent"))
 		},
-		"render limit out of range": func(t *testing.T) {
+		"render limit out of range": func(t *testing.T, _ *objectstoretest.Server) {
 			t.Setenv("IMAS_RECIPE_MAX_SOURCE_BYTES", "1099511627776")
+		},
+		// FIX.3: with no SAASAPI_RECIPES_CREDENTIAL_CHECK set (the binary's
+		// default is on), a credential the store lets onto sprouts/ stops
+		// startup.
+		"credential reaches beyond tenants/": func(t *testing.T, srv *objectstoretest.Server) {
+			srv.Deny(nil)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			clearRecipeEnv(t)
-			setRecipeEnv(t)
-			set(t)
+			srv := setRecipeEnv(t)
+			set(t, srv)
 			cfg, err := saasapi.LoadConfig()
 			if err != nil {
 				t.Fatalf("LoadConfig refused it first (%v); this test wants the case only ConfigureRecipes catches", err)

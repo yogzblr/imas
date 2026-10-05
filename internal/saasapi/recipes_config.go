@@ -37,12 +37,12 @@ import (
 //   - SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY_FILE: path to a file holding its
 //     secret key (a mounted Secret), never the key itself.
 //   - SAASAPI_RECIPES_S3_USE_SSL: default true.
-//   - SAASAPI_RECIPES_CREDENTIAL_CHECK: default false; the Helm chart sets
-//     it true. With it, ConfigureRecipes asks the object store whether the
-//     credential can write outside tenants/ or write, read or list
-//     sprouts/, and refuses to start if it can, or if the store gives no
-//     answer it can classify (recipes_credcheck.go). Ignored with no
-//     endpoint.
+//   - SAASAPI_RECIPES_CREDENTIAL_CHECK: default true (owner decision,
+//     FIX.3), as in the Helm chart. ConfigureRecipes asks the object store
+//     whether the credential can write outside tenants/ or write, read or
+//     list sprouts/, and refuses to start if it can, or if the store gives
+//     no answer it can classify (recipes_credcheck.go). Only an explicit
+//     false turns it off. Ignored with no endpoint.
 //   - SAASAPI_RECIPES_READ_ROLE / SAASAPI_RECIPES_WRITE_ROLE: the Keycloak
 //     roles (caller.go) that may read (GET) and write (PUT, DELETE) a
 //     tenant's recipes. Defaults imas-recipes-read and imas-recipes-write;
@@ -101,13 +101,14 @@ const (
 // every other field at its default.
 func DefaultRecipeSettings() RecipeSettings {
 	return RecipeSettings{
-		UseSSL:         true,
-		ReadRole:       defaultRecipeReadRole,
-		WriteRole:      defaultRecipeWriteRole,
-		MaxCount:       defaultRecipeMaxCount,
-		MaxTotalBytes:  defaultRecipeMaxTotalBytes,
-		WriteRateLimit: defaultRecipeWriteRate,
-		WriteRateBurst: defaultRecipeWriteBurst,
+		UseSSL:          true,
+		CredentialCheck: true,
+		ReadRole:        defaultRecipeReadRole,
+		WriteRole:       defaultRecipeWriteRole,
+		MaxCount:        defaultRecipeMaxCount,
+		MaxTotalBytes:   defaultRecipeMaxTotalBytes,
+		WriteRateLimit:  defaultRecipeWriteRate,
+		WriteRateBurst:  defaultRecipeWriteBurst,
 	}
 }
 
@@ -273,12 +274,13 @@ func newRecipeService(s RecipeSettings, store *objectstore.Store, vc valkey.Clie
 // from saasapi's own credential (when an endpoint is set), the roles, the
 // caps and the write rate limiter (Valkey-backed with a non-nil vc). Call
 // it once at startup, before NewRouter, which wires the roles and limiter
-// in effect at that moment. Without s.CredentialCheck it makes no network
-// call: like farmer, saasapi starts without the object store, and recipe
-// requests fail until it is reachable. With it, it first verifies the
+// in effect at that moment. With s.CredentialCheck (the default) it first
+// verifies the
 // credential's scope against the store (recipes_credcheck.go), waiting
 // for the store about half a minute, and returns an error, which stops
 // saasapi, if the credential is too broad or the store didn't answer.
+// Without it, it makes no network call: saasapi then starts without the
+// object store, and recipe requests fail until it is reachable.
 func ConfigureRecipes(s RecipeSettings, vc valkey.Client) error {
 	if err := s.validate(); err != nil {
 		return err
@@ -304,7 +306,7 @@ func ConfigureRecipes(s RecipeSettings, vc valkey.Client) error {
 				return err
 			}
 		} else {
-			log.Warnf("saasapi: recipe credential check off (SAASAPI_RECIPES_CREDENTIAL_CHECK unset or false): nothing verifies that the credential is limited to tenants/*/recipes/*")
+			log.Warnf("saasapi: recipe credential check off (SAASAPI_RECIPES_CREDENTIAL_CHECK=false): nothing verifies that the credential is limited to tenants/*/recipes/*")
 		}
 		log.Infof("saasapi: recipe upload on: bucket %s at %s, caps %d recipes / %d bytes per tenant, read role %q, write role %q",
 			s.Bucket, s.Endpoint, s.MaxCount, s.MaxTotalBytes, s.ReadRole, s.WriteRole)
