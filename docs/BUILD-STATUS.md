@@ -995,6 +995,18 @@ by an external git sync today.
       revoked User JWT). Still open: Envoy itself cannot see revocation, so
       a retired host's unexpired token still passes `jwt_authn` on every
       route and costs farmer the lookup before the 403.
+    - **Job store keys (FIX.2, security review 2026-10-b I4; FLAG FOR
+      SECURITY REVIEW, ready for review):** job objects were keyed
+      `jobs/<sprout_id>/<jid>/...` in one bucket, so two tenants with the
+      same `sprout_id` shared job logs. They are now
+      `jobs/<tenant_id>/<sprout_id>/<jid>/...`, one key builder refuses
+      unsafe IDs, every read and list is per tenant (the tenant from the
+      event's connection or the verified CLI caller, never a body field),
+      the reaper parses the tenant from each key, and the CLI's local job
+      store is per pinned tenant. No migration (nothing deployed);
+      old-layout objects are ignored and never read. Still open: looking a
+      job up by JID alone lists the tenant's whole prefix (no jid index);
+      the reaper still lists the whole bucket once an hour per replica.
     - **OpenBao client (#66, #67):** CL.4 added a CI workflow for the
       real-server test (`TestRealServer`):
       `.github/workflows/sdb-openbao-realserver.yml`. It runs against an

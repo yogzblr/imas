@@ -451,7 +451,7 @@ func TestHandleJobsListForSproutInvalidJSON(t *testing.T) {
 	_, cleanup := setupJobStore(t)
 	defer cleanup()
 
-	_, err := handleJobsListForSprout(pki.CurrentTenantID(), json.RawMessage(`{invalid`))
+	_, err := handleJobsListForSprout(adminCaller(t, pki.CurrentTenantID()), json.RawMessage(`{invalid`))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}

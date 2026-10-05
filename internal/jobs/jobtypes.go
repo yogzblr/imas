@@ -18,16 +18,17 @@ type (
 		PubKey string
 	}
 	// JobMeta stores metadata about a job, including who invoked it.
-	// Written as <JID>.meta.json alongside the <JID>.jsonl step log.
+	// Written as jobs/<tenant>/<sprout>/<jid>/meta.json in the job store
+	// (see the key layout in store.go).
 	JobMeta struct {
 		JID       string    `json:"jid"`
 		InvokedBy string    `json:"invoked_by,omitempty"`
 		CreatedAt time.Time `json:"created_at"`
 	}
 
-	// ExpiredMarker is jobs/<sprout>/<jid>/expired.json: written once when
-	// farmer finds the job started later than its reconcile window allows,
-	// and dropped its events (see reconcile.go).
+	// ExpiredMarker is jobs/<tenant>/<sprout>/<jid>/expired.json: written
+	// once when farmer finds the job started later than its reconcile
+	// window allows, and dropped its events (see reconcile.go).
 	ExpiredMarker struct {
 		JID          string        `json:"jid"`
 		DispatchedAt time.Time     `json:"dispatched_at"`

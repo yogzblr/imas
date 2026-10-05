@@ -11,7 +11,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/taigrr/jety"
+
 	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // CLIJobMeta holds per-job metadata tracked on the CLI side,
@@ -30,15 +33,19 @@ var (
 )
 
 // CLIStore provides local job storage on the CLI user's machine.
-// Job data is stored under ~/.config/imas/jobs/<sproutID>/<jid>.jsonl
-// with a companion .meta.json file for per-user tracking.
+// Job data is stored under ~/.config/imas/jobs/<tenantID>/<sproutID>/<jid>.jsonl
+// with a companion .meta.json file for per-user tracking. One CLIStore is
+// one tenant's directory (DefaultCLIStorePath): a sprout_id is unique per
+// tenant only, so a CLI that has been pointed at two tenants keeps their
+// jobs apart. Files in the pre-tenant layout
+// (~/.config/imas/jobs/<sproutID>/<jid>.jsonl) are not read.
 type CLIStore struct {
 	mu     sync.RWMutex
 	logDir string
 }
 
-// NewCLIStore creates a CLIStore using the given base directory.
-// Typically this is ~/.config/imas/jobs/.
+// NewCLIStore creates a CLIStore using the given directory, one tenant's
+// directory (DefaultCLIStorePath gives the CLI's own).
 func NewCLIStore(dir string) (*CLIStore, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("creating CLI job store dir: %w", err)
@@ -46,7 +53,11 @@ func NewCLIStore(dir string) (*CLIStore, error) {
 	return &CLIStore{logDir: dir}, nil
 }
 
-// DefaultCLIStorePath returns the default CLI job store directory.
+// DefaultCLIStorePath returns the CLI job store directory for the tenant
+// this CLI is pinned to (its tenantid setting, the tenant its sealed
+// requests go to): ~/.config/imas/jobs/<tenantID>. It fails if no usable
+// tenant is pinned, rather than falling back to a directory shared by
+// every tenant.
 func DefaultCLIStorePath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -56,12 +67,32 @@ func DefaultCLIStorePath() (string, error) {
 	if configDir == "" {
 		configDir = filepath.Join(home, ".config")
 	}
-	return filepath.Join(configDir, "imas", "jobs"), nil
+	return cliStoreTenantDir(filepath.Join(configDir, "imas", "jobs"), jety.GetString(pki.CLITenantIDKey))
+}
+
+// cliStoreTenantDir is tenantID's directory under the CLI job store base.
+func cliStoreTenantDir(base, tenantID string) (string, error) {
+	if err := checkKeySegment("tenant", tenantID); err != nil {
+		return "", fmt.Errorf("CLI job store: no usable %s in the CLI config: %w", pki.CLITenantIDKey, err)
+	}
+	return filepath.Join(base, tenantID), nil
+}
+
+// checkCLIJob refuses a sprout or job ID that can't be one path segment,
+// before it is joined into a file path. Both arrive in NATS subject tokens.
+func checkCLIJob(sproutID, jid string) error {
+	if err := checkKeySegment("sprout", sproutID); err != nil {
+		return err
+	}
+	return checkKeySegment("job", jid)
 }
 
 // RecordJobStart creates the initial job files: a .meta.json with user
 // identity and an empty .jsonl ready for step completions.
 func (s *CLIStore) RecordJobStart(meta CLIJobMeta) error {
+	if err := checkCLIJob(meta.SproutID, meta.JID); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -95,6 +126,9 @@ func (s *CLIStore) RecordJobStart(meta CLIJobMeta) error {
 
 // AppendStep appends a step completion to the local JSONL file for a job.
 func (s *CLIStore) AppendStep(sproutID, jid string, step cook.StepCompletion) error {
+	if err := checkCLIJob(sproutID, jid); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -126,6 +160,9 @@ func (s *CLIStore) AppendStep(sproutID, jid string, step cook.StepCompletion) er
 
 // GetJobMeta retrieves the metadata for a job, searching all sprout directories.
 func (s *CLIStore) GetJobMeta(jid string) (*CLIJobMeta, error) {
+	if err := checkKeySegment("job", jid); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -152,6 +189,9 @@ func (s *CLIStore) GetJobMeta(jid string) (*CLIJobMeta, error) {
 
 // GetJob retrieves a job summary from local storage.
 func (s *CLIStore) GetJob(jid string) (*JobSummary, *CLIJobMeta, error) {
+	if err := checkKeySegment("job", jid); err != nil {
+		return nil, nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -247,6 +287,9 @@ func (s *CLIStore) ListJobs(limit int, userKey string, sproutFilter string) ([]J
 
 // DeleteJob removes a job's JSONL and metadata files from local storage.
 func (s *CLIStore) DeleteJob(jid string) error {
+	if err := checkKeySegment("job", jid); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

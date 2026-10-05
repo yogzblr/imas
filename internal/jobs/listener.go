@@ -36,12 +36,11 @@ const natsCoreQueueGroup = "imas-core"
 // farmer's per-tenant NATS connections (see
 // docs/design/imas-tenant-context-threading.md's Option A). Called once
 // per tenant connection by cmd/farmer/main.go, so every tenant's job/cook
-// events reach farmer, not just the legacy tenant's. Job storage itself
-// (the job object store, see SetStore) stays a single, un-partitioned
-// keyspace across every tenant. The design doc makes the same carve-out
-// explicit for internal/cook and internal/facts: this is about which
-// connection a handler runs on, not about rescoping what the handler does
-// once it's there.
+// events reach farmer, not just the legacy tenant's. The job object store
+// (see SetStore) is one bucket for every tenant, partitioned by key: each
+// event and creation record is written under jobs/<tenantID>/..., where
+// tenantID is the tenant whose connection it arrived on, never anything
+// in the message (see "Tenant safety" in store.go).
 //
 // This used to use plain Subscribe (fan-out), not QueueSubscribe, on
 // purpose. Job data was written to a local, per-process directory
@@ -67,9 +66,9 @@ func RegisterNatsConn(tenantID string, conn *nats.Conn) {
 	// would race between one call's assignment and another's Subscribe, and
 	// nothing else in this package needs to read it back afterward.
 	//
-	// tenantID is passed to each handler for the job-status index
-	// (status_index.go), which keys every row by the tenant whose
-	// connection the event arrived on.
+	// tenantID is passed to each handler for the job object keys
+	// (store.go) and the job-status index (status_index.go), both keyed
+	// by the tenant whose connection the event arrived on.
 	_, err := conn.QueueSubscribe("imas.cook.*.*", natsCoreQueueGroup, func(msg *nats.Msg) {
 		logJobs(tenantID, msg)
 	})
@@ -93,8 +92,19 @@ func recordJobCreation(tenantID, sprout string, envelope cook.RecipeEnvelope) {
 	if envelope.JobID == "" {
 		return
 	}
-	if !validKeySegment(sprout) || !validKeySegment(envelope.JobID) {
-		log.Errorf("refusing to record job %q for sprout %q: not usable as an object key segment", envelope.JobID, sprout)
+	ref, err := newJobRef(tenantID, sprout, envelope.JobID)
+	if err != nil {
+		log.Errorf("refusing to record job %q for sprout %q (tenant %q): %v", envelope.JobID, sprout, tenantID, err)
+		return
+	}
+	createdKey, err := ref.key(createdObject)
+	if err != nil {
+		log.Errorf("refusing to record job %q: %v", envelope.JobID, err)
+		return
+	}
+	metaKey, err := ref.key(metaObject)
+	if err != nil {
+		log.Errorf("refusing to record job %q: %v", envelope.JobID, err)
 		return
 	}
 	// Independent of the object-store writes below, which it neither
@@ -117,7 +127,7 @@ func recordJobCreation(tenantID, sprout string, envelope cook.RecipeEnvelope) {
 
 	// Write a creation marker so the job appears in listings immediately,
 	// even before any step completions arrive.
-	exists, err := obj.Exists(ctx, createdKey(sprout, envelope.JobID))
+	exists, err := obj.Exists(ctx, createdKey)
 	if err != nil {
 		log.Errorf("failed to check for existing job %s: %v", envelope.JobID, err)
 		return
@@ -136,7 +146,7 @@ func recordJobCreation(tenantID, sprout string, envelope cook.RecipeEnvelope) {
 		CreatedAt: time.Now().UTC(),
 	}
 	if metaData, mErr := json.Marshal(meta); mErr == nil {
-		if putErr := obj.Put(ctx, metaKey(sprout, envelope.JobID), metaData); putErr != nil {
+		if putErr := obj.Put(ctx, metaKey, metaData); putErr != nil {
 			log.Errorf("failed to write job metadata for %s: %v", envelope.JobID, putErr)
 		}
 	}
@@ -158,15 +168,16 @@ func recordJobCreation(tenantID, sprout string, envelope cook.RecipeEnvelope) {
 		buf.Write(b)
 		buf.WriteString("\n")
 	}
-	if err := obj.Put(ctx, createdKey(sprout, envelope.JobID), buf.Bytes()); err != nil {
+	if err := obj.Put(ctx, createdKey, buf.Bytes()); err != nil {
 		log.Errorf("failed to create job %s: %v", envelope.JobID, err)
 		return
 	}
-	log.Noticef("job %s created for sprout %s (%d steps)", envelope.JobID, sprout, len(envelope.Steps))
+	log.Noticef("job %s created for sprout %s (tenant %s, %d steps)", envelope.JobID, sprout, tenantID, len(envelope.Steps))
 }
 
-// logJobs records one job event: in the job object store, and in the
-// job-status index for tenantID.
+// logJobs records one job event: in the job object store under tenantID,
+// and in the job-status index for tenantID. tenantID is the tenant whose
+// connection msg arrived on; the sprout and job IDs come from the subject.
 func logJobs(tenantID string, msg *nats.Msg) {
 	// Subject: imas.cook.<sproutID>.<jid>
 	tComponents := strings.Split(msg.Subject, ".")
@@ -184,8 +195,9 @@ func logJobs(tenantID string, msg *nats.Msg) {
 		log.Error(err)
 		return
 	}
-	if !validKeySegment(sprout) || !validKeySegment(JID) {
-		log.Errorf("refusing to record step for job %q on sprout %q: not usable as an object key segment", JID, sprout)
+	ref, err := newJobRef(tenantID, sprout, JID)
+	if err != nil {
+		log.Errorf("refusing to record step for job %q on sprout %q (tenant %q): %v", JID, sprout, tenantID, err)
 		return
 	}
 	switch verdict, dispatchedAt := reconcileCheck(tenantID, sprout, JID); verdict {
@@ -213,7 +225,11 @@ func logJobs(tenantID string, msg *nats.Msg) {
 	defer cancel()
 
 	// Each event is its own object; see store.go for why.
-	key := eventKey(sprout, JID, time.Now())
+	key, err := ref.eventKey(time.Now())
+	if err != nil {
+		log.Errorf("failed to record step %s of job %s: %v", completedStep.ID, JID, err)
+		return
+	}
 	log.Tracef("Job event object: %s\n", key)
 	if err := obj.Put(ctx, key, append(b, '\n')); err != nil {
 		log.Errorf("failed to record step %s of job %s: %v", completedStep.ID, JID, err)
