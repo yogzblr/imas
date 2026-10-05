@@ -356,6 +356,23 @@ enrollment PoP), so they weaken the same boundary the J work strengthened.
   sprout-keyed store outside H2's scope; a cross-tenant `sprout_id` collision in
   the shared bucket would mix job logs. Worth confirming the bucket is
   per-tenant or the key gains a tenant segment.
+  **Status: addressed by FIX.2** (FLAG FOR SECURITY REVIEW; ready for review,
+  not merged). The key gains a tenant segment:
+  `jobs/<tenant_id>/<sprout_id>/<jid>/...`, built in one function
+  (`jobKey` in `internal/jobs/store.go`) that refuses a tenant, sprout or job
+  ID containing `/`, a backslash, `..`, control characters or invalid UTF-8.
+  The tenant is the one whose connection an event or dispatch arrived on, or
+  the verified caller of a sealed `jobs.*` request (`apiCaller.TenantID`);
+  never a body field. Every store read, list and delete takes the tenant and
+  lists only `jobs/<tenant>/`; the reaper, the one platform-wide scan, parses
+  the tenant from each key and expires each job by its own keys. The
+  `jobs.get` and `jobs.forsprout` handlers now take the caller (they ignored
+  the tenant before), and `jobs.get` is scope-checked like `jobs.list`. The
+  CLI's local job store is per pinned tenant too. No migration: nothing was
+  deployed with the old layout; old-layout keys don't parse and are ignored
+  (never read, never reaped). Two tenants with the same `sprout_id` and `jid`
+  are tested through the listener, store, reaper, reconcile window, the sealed
+  NATS routes, the `imas serve` HTTP proxy and the SaaS API batch route.
 - **I5.** `statusError` now drops a raw OpenBao body when `RawError` is set
   (`internal/openbao/openbao.go`); M7 is fixed and pinned by
   `TestKubernetesAuth_LoginRawBodyDropped`.

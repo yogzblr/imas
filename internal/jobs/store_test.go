@@ -106,7 +106,7 @@ func TestGetJob_Found(t *testing.T) {
 	}
 	writeJobFile(t, obj, "sprout-a", "job-123", steps)
 
-	summary, err := store.GetJob("sprout-a", "job-123")
+	summary, err := store.GetJob(testTenant, "sprout-a", "job-123")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestGetJob_Found(t *testing.T) {
 func TestGetJob_NotFound(t *testing.T) {
 	store, _ := newTestStore(t)
 
-	_, err := store.GetJob("nonexistent", "no-such-job")
+	_, err := store.GetJob(testTenant, "nonexistent", "no-such-job")
 	if err != ErrJobNotFound {
 		t.Errorf("expected ErrJobNotFound, got %v", err)
 	}
@@ -145,7 +145,7 @@ func TestFindJob(t *testing.T) {
 	}
 	writeJobFile(t, obj, "sprout-b", "unique-jid", steps)
 
-	summary, err := store.FindJob("unique-jid")
+	summary, err := store.FindJob(testTenant, "unique-jid")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestFindJob(t *testing.T) {
 func TestFindJob_NotFound(t *testing.T) {
 	store, _ := newTestStore(t)
 
-	_, err := store.FindJob("missing")
+	_, err := store.FindJob(testTenant, "missing")
 	if err != ErrJobNotFound {
 		t.Errorf("expected ErrJobNotFound, got %v", err)
 	}
@@ -180,7 +180,7 @@ func TestListJobsForSprout(t *testing.T) {
 		makeStep("s1", cook.StepFailed, now.Add(20*time.Second), time.Second),
 	})
 
-	summaries, err := store.ListJobsForSprout("sprout-c")
+	summaries, err := store.ListJobsForSprout(testTenant, "sprout-c")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestListJobsForSprout(t *testing.T) {
 func TestListJobsForSprout_NoJobs(t *testing.T) {
 	store, _ := newTestStore(t)
 
-	_, err := store.ListJobsForSprout("nonexistent")
+	_, err := store.ListJobsForSprout(testTenant, "nonexistent")
 	if err != ErrSproutNoJobs {
 		t.Errorf("expected ErrSproutNoJobs, got %v", err)
 	}
@@ -216,7 +216,7 @@ func TestListAllJobs(t *testing.T) {
 		makeStep("s1", cook.StepCompleted, now.Add(5*time.Second), time.Second),
 	})
 
-	summaries, err := store.ListAllJobs(0)
+	summaries, err := store.ListAllJobs(testTenant, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestListAllJobs_WithLimit(t *testing.T) {
 		})
 	}
 
-	summaries, err := store.ListAllJobs(3)
+	summaries, err := store.ListAllJobs(testTenant, 3)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestListSprouts(t *testing.T) {
 		makeStep("s1", cook.StepCompleted, now, time.Second),
 	})
 
-	sprouts, err := store.ListSprouts()
+	sprouts, err := store.ListSprouts(testTenant)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestCountJobsForSprout(t *testing.T) {
 		makeStep("s1", cook.StepCompleted, now, time.Second),
 	})
 
-	count, err := store.CountJobsForSprout("sprout-count")
+	count, err := store.CountJobsForSprout(testTenant, "sprout-count")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestCountJobsForSprout(t *testing.T) {
 func TestCountJobsForSprout_Nonexistent(t *testing.T) {
 	store, _ := newTestStore(t)
 
-	count, err := store.CountJobsForSprout("ghost")
+	count, err := store.CountJobsForSprout(testTenant, "ghost")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -465,7 +465,7 @@ func TestReadJobFile_EmptyLines(t *testing.T) {
 func TestListAllJobs_EmptyBucket(t *testing.T) {
 	store, _ := newTestStore(t)
 
-	summaries, err := store.ListAllJobs(0)
+	summaries, err := store.ListAllJobs(testTenant, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -477,7 +477,7 @@ func TestListAllJobs_EmptyBucket(t *testing.T) {
 func TestListSprouts_EmptyBucket(t *testing.T) {
 	store, _ := newTestStore(t)
 
-	sprouts, err := store.ListSprouts()
+	sprouts, err := store.ListSprouts(testTenant)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -492,25 +492,25 @@ func TestStore_NotConfigured(t *testing.T) {
 	t.Cleanup(func() { SetStore(orig) })
 	store := NewStore()
 
-	if _, err := store.GetJob("s", "j"); !errors.Is(err, ErrJobStoreNotConfigured) {
+	if _, err := store.GetJob(testTenant, "s", "j"); !errors.Is(err, ErrJobStoreNotConfigured) {
 		t.Errorf("GetJob: expected ErrJobStoreNotConfigured, got %v", err)
 	}
-	if _, err := store.FindJob("j"); !errors.Is(err, ErrJobStoreNotConfigured) {
+	if _, err := store.FindJob(testTenant, "j"); !errors.Is(err, ErrJobStoreNotConfigured) {
 		t.Errorf("FindJob: expected ErrJobStoreNotConfigured, got %v", err)
 	}
-	if _, err := store.ListJobsForSprout("s"); !errors.Is(err, ErrJobStoreNotConfigured) {
+	if _, err := store.ListJobsForSprout(testTenant, "s"); !errors.Is(err, ErrJobStoreNotConfigured) {
 		t.Errorf("ListJobsForSprout: expected ErrJobStoreNotConfigured, got %v", err)
 	}
-	if _, err := store.ListAllJobs(0); !errors.Is(err, ErrJobStoreNotConfigured) {
+	if _, err := store.ListAllJobs(testTenant, 0); !errors.Is(err, ErrJobStoreNotConfigured) {
 		t.Errorf("ListAllJobs: expected ErrJobStoreNotConfigured, got %v", err)
 	}
-	if err := store.DeleteJob("j"); !errors.Is(err, ErrJobStoreNotConfigured) {
+	if err := store.DeleteJob(testTenant, "s", "j"); !errors.Is(err, ErrJobStoreNotConfigured) {
 		t.Errorf("DeleteJob: expected ErrJobStoreNotConfigured, got %v", err)
 	}
-	if _, err := store.ListSprouts(); !errors.Is(err, ErrJobStoreNotConfigured) {
+	if _, err := store.ListSprouts(testTenant); !errors.Is(err, ErrJobStoreNotConfigured) {
 		t.Errorf("ListSprouts: expected ErrJobStoreNotConfigured, got %v", err)
 	}
-	if _, err := store.CountJobsForSprout("s"); !errors.Is(err, ErrJobStoreNotConfigured) {
+	if _, err := store.CountJobsForSprout(testTenant, "s"); !errors.Is(err, ErrJobStoreNotConfigured) {
 		t.Errorf("CountJobsForSprout: expected ErrJobStoreNotConfigured, got %v", err)
 	}
 }
@@ -527,7 +527,7 @@ func TestNewStore_ResolvesStoreLazily(t *testing.T) {
 	writeJobFile(t, obj, "sprout-late", "job-late", []cook.StepCompletion{
 		makeStep("s1", cook.StepCompleted, time.Now(), time.Second),
 	})
-	if _, err := store.GetJob("sprout-late", "job-late"); err != nil {
+	if _, err := store.GetJob(testTenant, "sprout-late", "job-late"); err != nil {
 		t.Errorf("GetJob after SetStore: %v", err)
 	}
 }
@@ -556,7 +556,7 @@ func TestGetJob_WithInvokedBy(t *testing.T) {
 	writeJobFile(t, obj, "web-1", "job-meta-1", steps)
 	writeJobMeta(t, obj, "web-1", "job-meta-1", "UPUBKEY_ALICE")
 
-	summary, err := store.GetJob("web-1", "job-meta-1")
+	summary, err := store.GetJob(testTenant, "web-1", "job-meta-1")
 	if err != nil {
 		t.Fatalf("GetJob: %v", err)
 	}
@@ -574,7 +574,7 @@ func TestGetJob_WithoutMeta(t *testing.T) {
 	}
 	writeJobFile(t, obj, "web-1", "job-no-meta", steps)
 
-	summary, err := store.GetJob("web-1", "job-no-meta")
+	summary, err := store.GetJob(testTenant, "web-1", "job-no-meta")
 	if err != nil {
 		t.Fatalf("GetJob: %v", err)
 	}
@@ -593,7 +593,7 @@ func TestFindJob_WithInvokedBy(t *testing.T) {
 	writeJobFile(t, obj, "db-1", "job-find-meta", steps)
 	writeJobMeta(t, obj, "db-1", "job-find-meta", "UPUBKEY_BOB")
 
-	summary, err := store.FindJob("job-find-meta")
+	summary, err := store.FindJob(testTenant, "job-find-meta")
 	if err != nil {
 		t.Fatalf("FindJob: %v", err)
 	}
@@ -614,7 +614,7 @@ func TestListJobsForSprout_WithInvokedBy(t *testing.T) {
 	writeJobFile(t, obj, "app-1", "job-list-2", steps)
 	// No meta for job-list-2
 
-	summaries, err := store.ListJobsForSprout("app-1")
+	summaries, err := store.ListJobsForSprout(testTenant, "app-1")
 	if err != nil {
 		t.Fatalf("ListJobsForSprout: %v", err)
 	}
@@ -655,18 +655,18 @@ func TestDeleteJob_Found(t *testing.T) {
 	writeJobFile(t, obj, "sprout-del", "keep-job", steps)
 
 	// Confirm it exists.
-	_, err := store.FindJob("del-job-1")
+	_, err := store.FindJob(testTenant, "del-job-1")
 	if err != nil {
 		t.Fatalf("setup: job should exist: %v", err)
 	}
 
 	// Delete it.
-	if err := store.DeleteJob("del-job-1"); err != nil {
+	if err := store.DeleteJob(testTenant, "sprout-del", "del-job-1"); err != nil {
 		t.Fatalf("DeleteJob: %v", err)
 	}
 
 	// Confirm it's gone.
-	_, err = store.FindJob("del-job-1")
+	_, err = store.FindJob(testTenant, "del-job-1")
 	if err != ErrJobNotFound {
 		t.Errorf("expected ErrJobNotFound after delete, got %v", err)
 	}
@@ -679,7 +679,7 @@ func TestDeleteJob_Found(t *testing.T) {
 	if len(keys) != 0 {
 		t.Errorf("expected no objects left for the deleted job, got %v", keys)
 	}
-	if _, err := store.GetJob("sprout-del", "keep-job"); err != nil {
+	if _, err := store.GetJob(testTenant, "sprout-del", "keep-job"); err != nil {
 		t.Errorf("other job on the same sprout should survive: %v", err)
 	}
 }
@@ -687,7 +687,7 @@ func TestDeleteJob_Found(t *testing.T) {
 func TestDeleteJob_NotFound(t *testing.T) {
 	store, _ := newTestStore(t)
 
-	err := store.DeleteJob("nonexistent-jid")
+	err := store.DeleteJob(testTenant, "sprout-del", "nonexistent-jid")
 	if err != ErrJobNotFound {
 		t.Errorf("expected ErrJobNotFound, got %v", err)
 	}
@@ -696,7 +696,7 @@ func TestDeleteJob_NotFound(t *testing.T) {
 func TestDeleteJob_EmptyBucket(t *testing.T) {
 	store, _ := newTestStore(t)
 
-	err := store.DeleteJob("any-jid")
+	err := store.DeleteJob(testTenant, "any-sprout", "any-jid")
 	if err != ErrJobNotFound {
 		t.Errorf("expected ErrJobNotFound for an empty bucket, got %v", err)
 	}
@@ -710,7 +710,7 @@ func TestReadJobMeta_MalformedJSON(t *testing.T) {
 	})
 	putObject(t, obj, metaKey("sprout-bad", "bad-job"), []byte("not json"))
 
-	summary, err := store.GetJob("sprout-bad", "bad-job")
+	summary, err := store.GetJob(testTenant, "sprout-bad", "bad-job")
 	if err != nil {
 		t.Fatalf("GetJob: %v", err)
 	}
@@ -742,7 +742,7 @@ func TestStore_SharedBucketAcrossReplicas(t *testing.T) {
 	})
 
 	for name, replica := range map[string]*Store{"A": replicaA, "B": replicaB} {
-		got, err := replica.GetJob("web-1", "job-shared")
+		got, err := replica.GetJob(testTenant, "web-1", "job-shared")
 		if err != nil {
 			t.Fatalf("replica %s GetJob: %v", name, err)
 		}
@@ -753,25 +753,25 @@ func TestStore_SharedBucketAcrossReplicas(t *testing.T) {
 			t.Errorf("replica %s status = %s, want failed", name, got.Status)
 		}
 
-		found, err := replica.FindJob("job-other")
+		found, err := replica.FindJob(testTenant, "job-other")
 		if err != nil || found.SproutID != "db-1" {
 			t.Errorf("replica %s FindJob(job-other) = %+v, %v", name, found, err)
 		}
-		all, err := replica.ListAllJobs(0)
+		all, err := replica.ListAllJobs(testTenant, 0)
 		if err != nil || len(all) != 2 {
 			t.Errorf("replica %s ListAllJobs = %d jobs, %v; want 2", name, len(all), err)
 		}
-		sprouts, err := replica.ListSprouts()
+		sprouts, err := replica.ListSprouts(testTenant)
 		if err != nil || fmt.Sprint(sprouts) != "[db-1 web-1]" {
 			t.Errorf("replica %s ListSprouts = %v, %v", name, sprouts, err)
 		}
 	}
 
 	// A delete through one replica is seen by the other.
-	if err := replicaB.DeleteJob("job-shared"); err != nil {
+	if err := replicaB.DeleteJob(testTenant, "web-1", "job-shared"); err != nil {
 		t.Fatalf("replica B DeleteJob: %v", err)
 	}
-	if _, err := replicaA.GetJob("web-1", "job-shared"); err != ErrJobNotFound {
+	if _, err := replicaA.GetJob(testTenant, "web-1", "job-shared"); err != ErrJobNotFound {
 		t.Errorf("replica A after B's delete: expected ErrJobNotFound, got %v", err)
 	}
 }

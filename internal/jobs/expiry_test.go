@@ -22,10 +22,10 @@ func TestReapRemovesExpiredJobs(t *testing.T) {
 	// Reap with a 24h TTL — old-job should be removed.
 	store.reap(24 * time.Hour)
 
-	if _, err := store.GetJob("sprout-a", "old-job"); err != ErrJobNotFound {
+	if _, err := store.GetJob(testTenant, "sprout-a", "old-job"); err != ErrJobNotFound {
 		t.Errorf("expected old-job to be removed, got %v", err)
 	}
-	if _, err := store.GetJob("sprout-a", "new-job"); err != nil {
+	if _, err := store.GetJob(testTenant, "sprout-a", "new-job"); err != nil {
 		t.Errorf("expected new-job to still exist, got error: %v", err)
 	}
 }
@@ -41,7 +41,7 @@ func TestReapUsesNewestEvent(t *testing.T) {
 
 	store.reap(24 * time.Hour)
 
-	if _, err := store.GetJob("sprout-a", "long-job"); err != nil {
+	if _, err := store.GetJob(testTenant, "sprout-a", "long-job"); err != nil {
 		t.Errorf("expected long-job to survive (newest event is 1h old), got %v", err)
 	}
 }
@@ -97,12 +97,12 @@ func TestReap_SkipsStrayObjects(t *testing.T) {
 	store, obj := newTestStore(t)
 
 	// Objects outside the job layout are never touched.
-	putObject(t, obj, "jobs/sprout-skip/notes.txt", []byte("keep me"))
+	putObject(t, obj, "jobs/t_test/sprout-skip/notes.txt", []byte("keep me"))
 	putObject(t, obj, "elsewhere/old.jsonl", []byte("keep me"))
 
 	store.reap(time.Nanosecond)
 
-	for _, key := range []string{"jobs/sprout-skip/notes.txt", "elsewhere/old.jsonl"} {
+	for _, key := range []string{"jobs/t_test/sprout-skip/notes.txt", "elsewhere/old.jsonl"} {
 		if !objectExists(t, obj, key) {
 			t.Errorf("expected %s to be preserved", key)
 		}
@@ -150,7 +150,7 @@ func TestReapZeroTTLNoOp(t *testing.T) {
 	// is ever deleted.
 	store.StartReaper(0)
 
-	if _, err := store.GetJob("sprout-c", "job"); err != nil {
+	if _, err := store.GetJob(testTenant, "sprout-c", "job"); err != nil {
 		t.Errorf("expected job to still exist when TTL=0: %v", err)
 	}
 }

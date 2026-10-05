@@ -959,9 +959,11 @@ func ConnectFarmer(ctx context.Context, done chan<- struct{}) {
 		go connectTenantWithRetry(ctx, id)
 	}
 
-	// Start the job log reaper to expire old jobs — process-wide, not
-	// per-tenant: job storage (the job object store) isn't tenant-
-	// partitioned (see internal/jobs.RegisterNatsConn's own doc comment).
+	// Start the job log reaper to expire old jobs. One reaper per process,
+	// not per tenant connection: the job object store is one bucket whose
+	// keys are partitioned by tenant (jobs/<tenant>/<sprout>/<jid>/...), and
+	// the reaper reads each job's tenant from its keys and expires it by
+	// its own full key (see internal/jobs/store.go, "Tenant safety").
 	jobs.NewStore().StartReaperCtx(ctx, config.JobLogTTL)
 
 	<-ctx.Done()

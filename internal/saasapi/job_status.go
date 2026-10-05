@@ -32,16 +32,31 @@ const (
 // farmerJobStatusReader implements JobStatusReader over farmer.job_status.
 type farmerJobStatusReader struct{}
 
-var errNoDB = errors.New("saasapi: database not configured")
+var (
+	errNoDB = errors.New("saasapi: database not configured")
+	// errNoJobTenant: a job status lookup without a tenant is refused
+	// rather than run unscoped.
+	errNoJobTenant = errors.New("saasapi: job status lookup needs a tenant")
+)
 
 // JobOutcomes looks up every requested job in one query, keyed on the full
 // (tenant_id, sprout_id, jid) — farmer.job_status' primary key — since a
 // sprout_id is only unique within its tenant. A job with no row yet (its
 // first event hasn't been indexed) is simply absent from the result.
+//
+// tenantID is the tenant of the batch being polled (its route's
+// {tenant_id}, which the batch was looked up under), never anything from
+// a request body. An empty tenant is refused, and every row's tenant_id is
+// checked against it once more before its status is used, so another
+// tenant's row for the same sprout_id and jid can never decide an item
+// (security review 2026-10-b, I4).
 func (farmerJobStatusReader) JobOutcomes(ctx context.Context, tenantID string, jobs []JobRef) (map[JobRef]JobOutcome, error) {
 	d := db
 	if d == nil {
 		return nil, errNoDB
+	}
+	if tenantID == "" {
+		return nil, errNoJobTenant
 	}
 	if len(jobs) == 0 {
 		return map[JobRef]JobOutcome{}, nil
@@ -51,12 +66,13 @@ func (farmerJobStatusReader) JobOutcomes(ctx context.Context, tenantID string, j
 		pairs[i] = []any{j.SproutID, j.JID}
 	}
 	var rows []struct {
+		TenantID string
 		SproutID string
 		JID      string `gorm:"column:jid"`
 		Status   string
 	}
 	err := d.WithContext(ctx).Table(farmerJobStatusTable).
-		Select("sprout_id", "jid", "status").
+		Select("tenant_id", "sprout_id", "jid", "status").
 		Where("tenant_id = ? AND (sprout_id, jid) IN ?", tenantID, pairs).
 		Scan(&rows).Error
 	if err != nil {
@@ -64,6 +80,9 @@ func (farmerJobStatusReader) JobOutcomes(ctx context.Context, tenantID string, j
 	}
 	out := make(map[JobRef]JobOutcome, len(rows))
 	for _, r := range rows {
+		if r.TenantID != tenantID {
+			continue
+		}
 		outcome := JobOutcomeRunning
 		switch r.Status {
 		case farmerJobSucceeded:

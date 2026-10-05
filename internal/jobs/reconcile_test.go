@@ -55,7 +55,7 @@ func (h *reconcileHarness) runJob(jid string) {
 
 func (h *reconcileHarness) eventObjects(jid string) int {
 	n := 0
-	for _, k := range listKeys(h.t, objStore, jobPrefix(reconcileSprout, jid)) {
+	for _, k := range listKeys(h.t, objStore, tenantJobPrefix(reconcileTenant, reconcileSprout, jid)) {
 		if strings.Contains(k, "/"+eventsDir) {
 			n++
 		}
@@ -118,7 +118,7 @@ func TestReconcileWindow_LateJobExpired(t *testing.T) {
 		t.Errorf("event objects = %d, want 0", n)
 	}
 
-	data, err := objStore.Get(t.Context(), expiredKey(reconcileSprout, "j"))
+	data, err := objStore.Get(t.Context(), mustKey(reconcileTenant, reconcileSprout, "j", expiredObject))
 	if err != nil {
 		t.Fatalf("expired marker: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestReconcileWindow_LateJobExpired(t *testing.T) {
 		t.Errorf("marker = %+v", marker)
 	}
 
-	summary, err := NewStoreWithObjectStore(objStore).GetJob(reconcileSprout, "j")
+	summary, err := NewStoreWithObjectStore(objStore).GetJob(reconcileTenant, reconcileSprout, "j")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,10 +161,10 @@ func TestReconcileWindow_DeleteRemovesMarker(t *testing.T) {
 	h := newReconcileHarness(t, time.Hour)
 	h.dispatch("j", h.now.Add(-2*time.Hour))
 	h.runJob("j")
-	if err := NewStoreWithObjectStore(objStore).DeleteJob("j"); err != nil {
+	if err := NewStoreWithObjectStore(objStore).DeleteJob(reconcileTenant, reconcileSprout, "j"); err != nil {
 		t.Fatal(err)
 	}
-	if keys := listKeys(t, objStore, jobPrefix(reconcileSprout, "j")); len(keys) != 0 {
+	if keys := listKeys(t, objStore, tenantJobPrefix(reconcileTenant, reconcileSprout, "j")); len(keys) != 0 {
 		t.Errorf("objects left after delete: %v", keys)
 	}
 }

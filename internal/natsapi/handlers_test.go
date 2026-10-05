@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	apitypes "github.com/yogzblr/imas/internal/api/types"
+	intauth "github.com/yogzblr/imas/internal/auth"
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/jobs"
@@ -73,9 +75,17 @@ func setupJobStore(t *testing.T) (*objectstore.Store, func()) {
 	return obj, func() { jobStore = old }
 }
 
-// writeTestJob seeds a job's step log using internal/jobs's object key
-// layout (see the comment at the top of internal/jobs/store.go).
+// writeTestJob seeds a job's step log in the legacy tenant (the tenant
+// these handler tests call as), using internal/jobs's object key layout
+// (see the comment at the top of internal/jobs/store.go).
 func writeTestJob(t *testing.T, obj *objectstore.Store, sproutID, jid string, steps []cook.StepCompletion) {
+	t.Helper()
+	writeTenantTestJob(t, obj, props.CurrentTenantID(), sproutID, jid, steps)
+}
+
+// writeTenantTestJob is writeTestJob in tenantID:
+// jobs/<tenant>/<sprout>/<jid>/created.jsonl.
+func writeTenantTestJob(t *testing.T, obj *objectstore.Store, tenantID, sproutID, jid string, steps []cook.StepCompletion) {
 	t.Helper()
 	var buf bytes.Buffer
 	for _, step := range steps {
@@ -83,7 +93,7 @@ func writeTestJob(t *testing.T, obj *objectstore.Store, sproutID, jid string, st
 		buf.Write(b)
 		buf.WriteString("\n")
 	}
-	key := fmt.Sprintf("jobs/%s/%s/created.jsonl", sproutID, jid)
+	key := fmt.Sprintf("jobs/%s/%s/%s/created.jsonl", tenantID, sproutID, jid)
 	if err := obj.Put(context.Background(), key, buf.Bytes()); err != nil {
 		t.Fatalf("writing job: %v", err)
 	}
@@ -166,7 +176,7 @@ func writeTestJobMeta(t *testing.T, obj *objectstore.Store, sproutID, jid, invok
 		CreatedAt: time.Now().UTC(),
 	}
 	data, _ := json.Marshal(meta)
-	key := fmt.Sprintf("jobs/%s/%s/meta.json", sproutID, jid)
+	key := fmt.Sprintf("jobs/%s/%s/%s/meta.json", props.CurrentTenantID(), sproutID, jid)
 	if err := obj.Put(context.Background(), key, data); err != nil {
 		t.Fatalf("writing job meta: %v", err)
 	}
@@ -234,7 +244,7 @@ func TestHandleJobsGetMissing(t *testing.T) {
 	defer cleanup()
 
 	params := json.RawMessage(`{"jid":"nonexistent"}`)
-	_, err := handleJobsGet(props.CurrentTenantID(), params)
+	_, err := handleJobsGet(adminCaller(t, props.CurrentTenantID()), params)
 	if err == nil {
 		t.Fatal("expected error for nonexistent JID")
 	}
@@ -250,7 +260,7 @@ func TestHandleJobsGetFound(t *testing.T) {
 	writeTestJob(t, obj, "sprout-x", "jid-abc", steps)
 
 	params := json.RawMessage(`{"jid":"jid-abc"}`)
-	result, err := handleJobsGet(props.CurrentTenantID(), params)
+	result, err := handleJobsGet(adminCaller(t, props.CurrentTenantID()), params)
 	if err != nil {
 		t.Fatalf("handleJobsGet: %v", err)
 	}
@@ -272,7 +282,7 @@ func TestHandleJobsGetEmptyJID(t *testing.T) {
 	defer cleanup()
 
 	params := json.RawMessage(`{"jid":""}`)
-	_, err := handleJobsGet(props.CurrentTenantID(), params)
+	_, err := handleJobsGet(adminCaller(t, props.CurrentTenantID()), params)
 	if err == nil {
 		t.Fatal("expected error for empty JID")
 	}
@@ -282,7 +292,7 @@ func TestHandleJobsGetInvalidJSON(t *testing.T) {
 	_, cleanup := setupJobStore(t)
 	defer cleanup()
 
-	_, err := handleJobsGet(props.CurrentTenantID(), json.RawMessage(`{invalid`))
+	_, err := handleJobsGet(adminCaller(t, props.CurrentTenantID()), json.RawMessage(`{invalid`))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
@@ -341,7 +351,7 @@ func TestHandleJobsListForSprout(t *testing.T) {
 	writeTestJob(t, obj, "sprout-other", "jid-c", steps)
 
 	params := json.RawMessage(`{"sprout_id":"sprout-target"}`)
-	result, err := handleJobsListForSprout(props.CurrentTenantID(), params)
+	result, err := handleJobsListForSprout(adminCaller(t, props.CurrentTenantID()), params)
 	if err != nil {
 		t.Fatalf("handleJobsListForSprout: %v", err)
 	}
@@ -360,7 +370,7 @@ func TestHandleJobsListForSproutEmpty(t *testing.T) {
 	defer cleanup()
 
 	params := json.RawMessage(`{"sprout_id":""}`)
-	_, err := handleJobsListForSprout(props.CurrentTenantID(), params)
+	_, err := handleJobsListForSprout(adminCaller(t, props.CurrentTenantID()), params)
 	if err == nil {
 		t.Fatal("expected error for empty sprout_id")
 	}
@@ -371,7 +381,7 @@ func TestHandleJobsListForSproutNoJobs(t *testing.T) {
 	defer cleanup()
 
 	params := json.RawMessage(`{"sprout_id":"no-such-sprout"}`)
-	_, err := handleJobsListForSprout(props.CurrentTenantID(), params)
+	_, err := handleJobsListForSprout(adminCaller(t, props.CurrentTenantID()), params)
 	if err == nil {
 		t.Fatal("expected error for sprout with no jobs directory")
 	}
@@ -403,7 +413,7 @@ func TestHandleJobsDeleteSuccess(t *testing.T) {
 	}
 
 	// Verify job is gone.
-	_, err = handleJobsGet(props.CurrentTenantID(), json.RawMessage(`{"jid":"del-jid"}`))
+	_, err = handleJobsGet(adminCaller(t, props.CurrentTenantID()), json.RawMessage(`{"jid":"del-jid"}`))
 	if err == nil {
 		t.Fatal("expected error: job should be deleted")
 	}
@@ -438,6 +448,153 @@ func TestHandleJobsDeleteInvalidJSON(t *testing.T) {
 	_, err := handleJobsDelete(adminCaller(t, props.CurrentTenantID()), json.RawMessage(`{invalid`))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+// --- Jobs: tenant safety (FIX.2, security review 2026-10-b I4) ---
+
+const (
+	jobTenantOne = "t_1"
+	jobTenantTwo = "t_2"
+	jobSharedSID = "web-01"
+	jobSharedJID = "11111111-2222-3333-4444-555555555555"
+)
+
+// seedTwoTenantJobs writes a running job in each of t_1 and t_2, on the
+// same sprout_id with the same jid, told apart by their step IDs.
+func seedTwoTenantJobs(t *testing.T, obj *objectstore.Store) {
+	t.Helper()
+	for _, tenant := range []string{jobTenantOne, jobTenantTwo} {
+		writeTenantTestJob(t, obj, tenant, jobSharedSID, jobSharedJID, []cook.StepCompletion{
+			{ID: cook.StepID(tenant + "-step"), Started: time.Now()},
+		})
+	}
+}
+
+// onlyTenantSteps reports whether every summary is tenant's own job.
+func onlyTenantSteps(tenant string, summaries ...jobs.JobSummary) bool {
+	for _, s := range summaries {
+		if s.TenantID != tenant || len(s.Steps) != 1 || string(s.Steps[0].ID) != tenant+"-step" {
+			return false
+		}
+	}
+	return len(summaries) > 0
+}
+
+// Two tenants with the same sprout_id and jid: every jobs.* handler reads
+// in the caller's tenant (apiCaller.TenantID) and returns only that
+// tenant's job.
+func TestHandleJobs_TwoTenantsSameSproutAndJID(t *testing.T) {
+	obj, cleanup := setupJobStore(t)
+	defer cleanup()
+	seedTwoTenantJobs(t, obj)
+
+	for _, tenant := range []string{jobTenantOne, jobTenantTwo} {
+		c := adminCaller(t, tenant)
+		got, err := handleJobsGet(c, json.RawMessage(`{"jid":"`+jobSharedJID+`"}`))
+		if err != nil || !onlyTenantSteps(tenant, *got.(*jobs.JobSummary)) {
+			t.Errorf("%s: jobs.get = %+v, %v; want only its own job", tenant, got, err)
+		}
+		list, err := handleJobsList(c, nil)
+		if err != nil || len(list.([]jobs.JobSummary)) != 1 || !onlyTenantSteps(tenant, list.([]jobs.JobSummary)...) {
+			t.Errorf("%s: jobs.list = %+v, %v; want only its own job", tenant, list, err)
+		}
+		forSprout, err := handleJobsListForSprout(c, json.RawMessage(`{"sprout_id":"`+jobSharedSID+`"}`))
+		if err != nil || len(forSprout.([]jobs.JobSummary)) != 1 || !onlyTenantSteps(tenant, forSprout.([]jobs.JobSummary)...) {
+			t.Errorf("%s: jobs.forsprout = %+v, %v; want only its own job", tenant, forSprout, err)
+		}
+	}
+
+	// A third tenant, with no job of its own, sees none of theirs.
+	c := adminCaller(t, "t_3")
+	if _, err := handleJobsGet(c, json.RawMessage(`{"jid":"`+jobSharedJID+`"}`)); !errors.Is(err, jobs.ErrJobNotFound) {
+		t.Errorf("t_3 jobs.get: %v, want ErrJobNotFound", err)
+	}
+	if list, err := handleJobsList(c, nil); err != nil || len(list.([]jobs.JobSummary)) != 0 {
+		t.Errorf("t_3 jobs.list = %v, %v", list, err)
+	}
+	if _, err := handleJobsListForSprout(c, json.RawMessage(`{"sprout_id":"`+jobSharedSID+`"}`)); !errors.Is(err, jobs.ErrSproutNoJobs) {
+		t.Errorf("t_3 jobs.forsprout: %v, want ErrSproutNoJobs", err)
+	}
+	if _, err := handleJobsCancel(c, json.RawMessage(`{"jid":"`+jobSharedJID+`"}`)); !errors.Is(err, jobs.ErrJobNotFound) {
+		t.Errorf("t_3 jobs.cancel: %v, want ErrJobNotFound", err)
+	}
+	if _, err := handleJobsDelete(c, json.RawMessage(`{"jid":"`+jobSharedJID+`"}`)); !errors.Is(err, jobs.ErrJobNotFound) {
+		t.Errorf("t_3 jobs.delete: %v, want ErrJobNotFound", err)
+	}
+
+	// t_1 deleting its job leaves t_2's.
+	if _, err := handleJobsDelete(adminCaller(t, jobTenantOne), json.RawMessage(`{"jid":"`+jobSharedJID+`"}`)); err != nil {
+		t.Fatalf("t_1 jobs.delete: %v", err)
+	}
+	if _, err := handleJobsGet(adminCaller(t, jobTenantOne), json.RawMessage(`{"jid":"`+jobSharedJID+`"}`)); !errors.Is(err, jobs.ErrJobNotFound) {
+		t.Errorf("t_1 jobs.get after delete: %v", err)
+	}
+	got, err := handleJobsGet(adminCaller(t, jobTenantTwo), json.RawMessage(`{"jid":"`+jobSharedJID+`"}`))
+	if err != nil || !onlyTenantSteps(jobTenantTwo, *got.(*jobs.JobSummary)) {
+		t.Errorf("t_2 jobs.get after t_1's delete = %+v, %v", got, err)
+	}
+}
+
+// A tenant ID in the params is not a field the handlers read: the tenant
+// is the caller's, whatever the body says.
+func TestHandleJobs_IgnoreTenantInParams(t *testing.T) {
+	obj, cleanup := setupJobStore(t)
+	defer cleanup()
+	seedTwoTenantJobs(t, obj)
+
+	c := adminCaller(t, jobTenantOne)
+	got, err := handleJobsGet(c, json.RawMessage(`{"jid":"`+jobSharedJID+`","tenant_id":"`+jobTenantTwo+`"}`))
+	if err != nil || !onlyTenantSteps(jobTenantOne, *got.(*jobs.JobSummary)) {
+		t.Errorf("jobs.get with tenant_id t_2 in params = %+v, %v; want t_1's job", got, err)
+	}
+	list, err := handleJobsListForSprout(c, json.RawMessage(`{"sprout_id":"`+jobSharedSID+`","tenant_id":"`+jobTenantTwo+`"}`))
+	if err != nil || !onlyTenantSteps(jobTenantOne, list.([]jobs.JobSummary)...) {
+		t.Errorf("jobs.forsprout with tenant_id t_2 in params = %+v, %v; want t_1's job", list, err)
+	}
+}
+
+// A sprout_id or jid that can't be a key segment is refused before any
+// key is built.
+func TestHandleJobs_RefuseHostileIDs(t *testing.T) {
+	obj, cleanup := setupJobStore(t)
+	defer cleanup()
+	seedTwoTenantJobs(t, obj)
+
+	c := adminCaller(t, jobTenantOne)
+	for _, bad := range []string{"..", "../t_2", "t_2/web-01", "web\x00"} {
+		if _, err := handleJobsListForSprout(c, mustJSON(t, map[string]string{"sprout_id": bad})); !errors.Is(err, jobs.ErrInvalidJobKey) {
+			t.Errorf("jobs.forsprout %q: %v, want ErrInvalidJobKey", bad, err)
+		}
+		if _, err := handleJobsGet(c, mustJSON(t, map[string]string{"jid": bad})); !errors.Is(err, jobs.ErrInvalidJobKey) {
+			t.Errorf("jobs.get %q: %v, want ErrInvalidJobKey", bad, err)
+		}
+	}
+	// The handlers never run with a hostile caller tenant (it is the
+	// connection's), but the store refuses one anyway.
+	if _, err := handleJobsList(adminCaller(t, "t_1/../t_2"), nil); !errors.Is(err, jobs.ErrInvalidJobKey) {
+		t.Errorf("jobs.list in a hostile tenant: %v, want ErrInvalidJobKey", err)
+	}
+}
+
+// jobs.get is scope-checked against the job's sprout, like jobs.list's
+// filtering: a user whose role doesn't reach the sprout can't read it.
+func TestHandleJobsGet_ScopeChecked(t *testing.T) {
+	obj, cleanup := setupJobStore(t)
+	defer cleanup()
+	seedTwoTenantJobs(t, obj)
+	rs := rbac.NewRoleStore()
+	if err := rs.Register(&rbac.Role{Name: "db-viewer", Rules: []rbac.Rule{{Action: rbac.ActionView, Scope: "sprout:db-01"}}}); err != nil {
+		t.Fatal(err)
+	}
+	urm := rbac.NewUserRoleMap()
+	urm.Set("UDBVIEWER", "db-viewer")
+	intauth.SetPolicy(rs, urm, nil)
+	t.Cleanup(func() { intauth.SetPolicy(nil, nil, nil) })
+
+	c := apiCaller{TenantID: jobTenantOne, UserID: "UDBVIEWER"}
+	if _, err := handleJobsGet(c, json.RawMessage(`{"jid":"`+jobSharedJID+`"}`)); !errors.Is(err, rbac.ErrAccessDenied) {
+		t.Errorf("jobs.get outside the user's scope: %v, want ErrAccessDenied", err)
 	}
 }
 
