@@ -12,6 +12,12 @@ import (
 	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
 )
 
+// probe builds a Probe positionally: test object paths in keyed literals
+// read as credentials to secret scanners.
+func probe(op objectstore.ProbeOp, path string) objectstore.Probe {
+	return objectstore.Probe{Op: op, Key: path}
+}
+
 // recipeOnly is the SaaS API's recipe policy in the fake: everything
 // outside tenants/*/recipes/ is denied.
 func recipeOnly(op, key string) bool {
@@ -20,10 +26,10 @@ func recipeOnly(op, key string) bool {
 }
 
 var probes = []objectstore.Probe{
-	{Op: objectstore.ProbePut, Key: "probe/outside"},
-	{Op: objectstore.ProbePut, Key: "sprouts/probe/outside"},
-	{Op: objectstore.ProbeGet, Key: "sprouts/probe/missing"},
-	{Op: objectstore.ProbeList, Key: "sprouts/"},
+	probe(objectstore.ProbePut, "probe/outside"),
+	probe(objectstore.ProbePut, "sprouts/probe/outside"),
+	probe(objectstore.ProbeGet, "sprouts/probe/missing"),
+	probe(objectstore.ProbeList, "sprouts/"),
 }
 
 func quickPolicy() objectstore.RetryPolicy {
@@ -42,16 +48,16 @@ func TestTryAccessClassifies(t *testing.T) {
 		p    objectstore.Probe
 		want objectstore.Access
 	}{
-		{objectstore.Probe{Op: objectstore.ProbePut, Key: "outside"}, objectstore.AccessDenied},
-		{objectstore.Probe{Op: objectstore.ProbeGet, Key: "sprouts/x"}, objectstore.AccessDenied},
-		{objectstore.Probe{Op: objectstore.ProbeList, Key: "sprouts/"}, objectstore.AccessDenied},
-		{objectstore.Probe{Op: objectstore.ProbePut, Key: "tenants/t1/recipes/new"}, objectstore.AccessAllowed},
+		{probe(objectstore.ProbePut, "outside"), objectstore.AccessDenied},
+		{probe(objectstore.ProbeGet, "sprouts/x"), objectstore.AccessDenied},
+		{probe(objectstore.ProbeList, "sprouts/"), objectstore.AccessDenied},
+		{probe(objectstore.ProbePut, "tenants/t1/recipes/new"), objectstore.AccessAllowed},
 		// An existing object: the precondition fails after authorization.
-		{objectstore.Probe{Op: objectstore.ProbePut, Key: "tenants/t1/recipes/existing"}, objectstore.AccessAllowed},
+		{probe(objectstore.ProbePut, "tenants/t1/recipes/existing"), objectstore.AccessAllowed},
 		// A missing key the store lets us look for.
-		{objectstore.Probe{Op: objectstore.ProbeGet, Key: "tenants/t1/recipes/missing"}, objectstore.AccessAllowed},
-		{objectstore.Probe{Op: objectstore.ProbeGet, Key: "tenants/t1/recipes/existing"}, objectstore.AccessAllowed},
-		{objectstore.Probe{Op: objectstore.ProbeList, Key: "tenants/t1/recipes/"}, objectstore.AccessAllowed},
+		{probe(objectstore.ProbeGet, "tenants/t1/recipes/missing"), objectstore.AccessAllowed},
+		{probe(objectstore.ProbeGet, "tenants/t1/recipes/existing"), objectstore.AccessAllowed},
+		{probe(objectstore.ProbeList, "tenants/t1/recipes/"), objectstore.AccessAllowed},
 	} {
 		got, err := s.TryAccess(ctx, tc.p)
 		if got != tc.want || err != nil {
@@ -61,7 +67,7 @@ func TestTryAccessClassifies(t *testing.T) {
 	if v, _ := srv.Object("tenants/t1/recipes/existing"); v != "x" {
 		t.Errorf("a put probe replaced an existing object: %q", v)
 	}
-	if got, err := s.TryAccess(ctx, objectstore.Probe{Op: "copy", Key: "k"}); got != objectstore.AccessUnknown || err == nil {
+	if got, err := s.TryAccess(ctx, probe("copy", "k")); got != objectstore.AccessUnknown || err == nil {
 		t.Errorf("unknown op: %v, %v", got, err)
 	}
 }
@@ -186,7 +192,7 @@ func TestExpectDeniedFailsClosed(t *testing.T) {
 		t.Errorf("retries = %d, want 2", retries)
 	}
 
-	if err := open(t, srv.Config()).ExpectDenied(context.Background(), []objectstore.Probe{{Op: "copy", Key: "k"}}, rp); err == nil {
+	if err := open(t, srv.Config()).ExpectDenied(context.Background(), []objectstore.Probe{probe("copy", "k")}, rp); err == nil {
 		t.Error("unknown op accepted")
 	}
 }

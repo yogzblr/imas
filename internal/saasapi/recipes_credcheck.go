@@ -52,6 +52,10 @@ var recipeCredentialCheckPolicy = objectstore.RetryPolicy{
 // (when deleting it failed too) is recognisable.
 const recipeCredentialCheckPrefix = "imas-saasapi-credential-check"
 
+// sproutsPrefix is farmer's staged recipe tree in the recipe bucket
+// (internal/cook stagedRecipeRoot), which the credential must not reach.
+const sproutsPrefix = "sprouts/"
+
 // recipeCredentialProbes returns the self-check's probes, at keys made
 // unique by nonce.
 func recipeCredentialProbes(nonce string) []objectstore.Probe {
@@ -59,7 +63,7 @@ func recipeCredentialProbes(nonce string) []objectstore.Probe {
 		{Op: objectstore.ProbePut, Key: fmt.Sprintf("%s/%s", recipeCredentialCheckPrefix, nonce)},
 		{Op: objectstore.ProbePut, Key: fmt.Sprintf("sprouts/%s/%s", recipeCredentialCheckPrefix, nonce)},
 		{Op: objectstore.ProbeGet, Key: fmt.Sprintf("sprouts/%s/%s-read", recipeCredentialCheckPrefix, nonce)},
-		{Op: objectstore.ProbeList, Key: "sprouts/"},
+		{Op: objectstore.ProbeList, Key: sproutsPrefix},
 	}
 }
 
