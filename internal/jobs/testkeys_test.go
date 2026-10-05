@@ -1,9 +1,6 @@
 package jobs
 
-import (
-	"testing"
-	"time"
-)
+import "time"
 
 // testTenant is the tenant most tests record and read jobs in: the tenant
 // of the connection RegisterNatsConn is called with in these tests.
@@ -23,8 +20,8 @@ func tenantJobPrefix(tenantID, sproutID, jid string) string {
 	return mustKey(tenantID, sproutID, jid, "")
 }
 
-// jobPrefix, createdKey, metaKey, expiredKey and eventKey name testTenant's
-// keys for a job, as the listener writes them.
+// jobPrefix, createdKey, metaKey and eventKey name testTenant's keys for a
+// job, as the listener writes them.
 func jobPrefix(sproutID, jid string) string { return tenantJobPrefix(testTenant, sproutID, jid) }
 
 func createdKey(sproutID, jid string) string {
@@ -32,10 +29,6 @@ func createdKey(sproutID, jid string) string {
 }
 
 func metaKey(sproutID, jid string) string { return mustKey(testTenant, sproutID, jid, metaObject) }
-
-func expiredKey(sproutID, jid string) string {
-	return mustKey(testTenant, sproutID, jid, expiredObject)
-}
 
 func eventKey(sproutID, jid string, at time.Time) string {
 	return tenantEventKey(testTenant, sproutID, jid, at)
@@ -48,14 +41,4 @@ func tenantEventKey(tenantID, sproutID, jid string, at time.Time) string {
 		panic(err)
 	}
 	return key
-}
-
-// testRef is testTenant's ref for jid on sproutID.
-func testRef(t *testing.T, sproutID, jid string) jobRef {
-	t.Helper()
-	ref, err := newJobRef(testTenant, sproutID, jid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return ref
 }
