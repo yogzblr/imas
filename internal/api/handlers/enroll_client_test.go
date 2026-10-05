@@ -54,11 +54,17 @@ type handlerSprout struct {
 	resp      *pki.EnrollResponse
 }
 
+// handlerJoinToken is the join token enrollAgainstHandlers enrolls with
+// (pki.UseInMemoryJoinToken).
+const handlerJoinToken = "ek_handlers.secret"
+
 // enrollAgainstHandlers points every sprout-side path at a temp dir,
 // serves the real Enroll and Refresh handlers over TLS, pins that server
-// as the sprout's root CA, and enrolls an accepted NKey through the
-// client (the replay path: two requests, the second with the box key
-// proof, which records the box key). The enrollment is persisted.
+// as the sprout's root CA, and enrolls a fresh NKey through the client
+// with handlerJoinToken: two requests, the first issuing the identity and
+// its enrollment binding, the second, on the replay path, carrying the box
+// key proof and the binding, which records the box key. The enrollment is
+// persisted.
 func enrollAgainstHandlers(t *testing.T) *handlerSprout {
 	t.Helper()
 	setupPKIDirs(t)
@@ -70,7 +76,11 @@ func enrollAgainstHandlers(t *testing.T) *handlerSprout {
 	config.GatewayJWTTTL = time.Hour
 	t.Cleanup(func() { config.GatewayJWTTTL = origTTL })
 
-	kp := acceptedTestNKey(t)
+	t.Cleanup(pki.UseInMemoryJoinToken(handlerJoinToken, pki.CurrentTenantID(), 1))
+	kp, err := nkeys.CreateUser()
+	if err != nil {
+		t.Fatal(err)
+	}
 	nkeyPub, _ := kp.PublicKey()
 	seed, _ := kp.Seed()
 
@@ -119,7 +129,7 @@ func enrollAgainstHandlers(t *testing.T) *handlerSprout {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := pki.EnrollSprout(t.Context(), "irrelevant.token", "web-01", sproutPub)
+	resp, err := pki.EnrollSprout(t.Context(), handlerJoinToken, "web-01", sproutPub)
 	if err != nil {
 		t.Fatalf("EnrollSprout against the real handler: %v", err)
 	}

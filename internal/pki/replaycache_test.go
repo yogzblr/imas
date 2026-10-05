@@ -71,10 +71,8 @@ func TestEnroll_ResubmittedReplayRejected(t *testing.T) {
 	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
 
 	kp := testEnrollNKey(t)
-	sproutPub := testEnrollBoxPub(t)
-	if _, err := Enroll(t.Context(), signedEnroll(t, kp, "ek_1.s", "web-01", sproutPub)); err != nil {
-		t.Fatalf("first Enroll: %v", err)
-	}
+	_, sproutPub, _ := enrollWithBoxKey(t, kp, "ek_1.s", "web-01")
+	mints := minter.calls
 	replay := signedEnroll(t, kp, "bogus.token", "web-01", sproutPub)
 	if _, err := Enroll(t.Context(), replay); err != nil {
 		t.Fatalf("replay: %v", err)
@@ -85,8 +83,8 @@ func TestEnroll_ResubmittedReplayRejected(t *testing.T) {
 	if _, err := Enroll(t.Context(), signedEnroll(t, kp, "bogus.token", "web-01", sproutPub)); err != nil {
 		t.Fatalf("freshly signed replay: %v", err)
 	}
-	if minter.calls != 0 { // J.2: no gateway JWT without a box key proof
-		t.Errorf("gateway JWT mints = %d, want 0", minter.calls)
+	if minter.calls != mints { // J.2: no gateway JWT without a box key proof
+		t.Errorf("gateway JWT mints = %d, want 0", minter.calls-mints)
 	}
 }
 
@@ -99,10 +97,8 @@ func TestEnroll_ResubmissionWithReencodedSignatureRejected(t *testing.T) {
 	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
 
 	kp := testEnrollNKey(t)
-	sproutPub := testEnrollBoxPub(t)
-	if _, err := Enroll(t.Context(), signedEnroll(t, kp, "ek_1.s", "web-01", sproutPub)); err != nil {
-		t.Fatalf("first Enroll: %v", err)
-	}
+	_, sproutPub, _ := enrollWithBoxKey(t, kp, "ek_1.s", "web-01")
+	mints := minter.calls
 	replay := signedEnroll(t, kp, "bogus.token", "web-01", sproutPub)
 	if _, err := Enroll(t.Context(), replay); err != nil {
 		t.Fatalf("replay: %v", err)
@@ -122,8 +118,8 @@ func TestEnroll_ResubmissionWithReencodedSignatureRejected(t *testing.T) {
 	if _, err := Enroll(t.Context(), reencoded); !errors.Is(err, ErrEnrollmentFailed) {
 		t.Fatalf("re-encoded resubmission = %v, want ErrEnrollmentFailed", err)
 	}
-	if minter.calls != 0 { // J.2: no gateway JWT without a box key proof
-		t.Errorf("gateway JWT mints = %d, want 0", minter.calls)
+	if minter.calls != mints { // J.2: no gateway JWT without a box key proof
+		t.Errorf("gateway JWT mints = %d, want 0", minter.calls-mints)
 	}
 }
 

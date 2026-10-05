@@ -12,6 +12,7 @@ import (
 
 	"github.com/nats-io/nkeys"
 	"golang.org/x/crypto/nacl/box"
+	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/gatewayjwt"
 	"github.com/yogzblr/imas/internal/payloadbox"
@@ -216,15 +217,13 @@ func TestEnroll_IdempotentReplayDoesNotConsumeToken(t *testing.T) {
 	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("supersecret"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
 
 	kp := testEnrollNKey(t)
-	first, err := Enroll(t.Context(), signedEnroll(t, kp, "ek_1.supersecret", "web-01", testEnrollBoxPub(t)))
-	if err != nil {
-		t.Fatalf("first Enroll: %v", err)
-	}
+	first, sproutPub, _ := enrollWithBoxKey(t, kp, "ek_1.supersecret", "web-01")
+	mints := minter.calls
 
 	// Retry with the same nkey_pub but a bogus token: design doc §3.3 step
 	// 1 says the idempotency check happens before the token is even
 	// looked at, so this should replay the existing identity.
-	second, err := Enroll(t.Context(), signedEnroll(t, kp, "bogus.token", "web-01", testEnrollBoxPub(t)))
+	second, err := Enroll(t.Context(), signedEnroll(t, kp, "bogus.token", "web-01", sproutPub))
 	if err != nil {
 		t.Fatalf("replay Enroll: %v", err)
 	}
@@ -236,8 +235,12 @@ func TestEnroll_IdempotentReplayDoesNotConsumeToken(t *testing.T) {
 	}
 	// J.2: neither request proved possession of a box key, so neither got
 	// a gateway JWT (a compromised bus can get the NKey signature made).
-	if first.GatewayJWT != "" || second.GatewayJWT != "" || minter.calls != 0 {
-		t.Errorf("gateway JWTs issued without a box key proof: first %q, replay %q, %d mints", first.GatewayJWT, second.GatewayJWT, minter.calls)
+	// SEC.7b: and the replay path issues no enrollment binding.
+	if first.GatewayJWT != "" || second.GatewayJWT != "" || minter.calls != mints {
+		t.Errorf("gateway JWTs issued without a box key proof: first %q, replay %q, %d mints", first.GatewayJWT, second.GatewayJWT, minter.calls-mints)
+	}
+	if len(second.EnrollBinding) != 0 {
+		t.Error("the replay path issued an enrollment binding")
 	}
 }
 
@@ -385,12 +388,36 @@ func enrollProof(t *testing.T, tenantID, sproutID, tenantPubB64, nkeyPub, sprout
 }
 
 // provenEnroll is the second request of a first enrollment: the replay
-// path, carrying proof.
-func provenEnroll(t *testing.T, kp nkeys.KeyPair, sproutPubB64 string, proof json.RawMessage) EnrollRequest {
+// path, carrying proof and binding, the first response's enroll_binding.
+func provenEnroll(t *testing.T, kp nkeys.KeyPair, sproutPubB64 string, proof, binding json.RawMessage) EnrollRequest {
 	t.Helper()
 	req := signedEnroll(t, kp, "bogus.token", "web-01", sproutPubB64)
 	req.SproutPubProof = proof
+	req.EnrollBinding = binding
 	return req
+}
+
+// enrollWithBoxKey completes a first enrollment of kp as hostname the way
+// the client does: step 1 with joinToken, then step 2 with a proof under a
+// fresh box key and step 1's binding. It returns step 1's result and the
+// box key.
+func enrollWithBoxKey(t *testing.T, kp nkeys.KeyPair, joinToken, hostname string) (first *EnrollResult, sproutPubB64 string, sproutPriv *[32]byte) {
+	t.Helper()
+	pub, priv, _ := box.GenerateKey(rand.Reader)
+	first, err := Enroll(t.Context(), signedEnroll(t, kp, joinToken, hostname, b64(pub)))
+	if err != nil {
+		t.Fatalf("step 1: %v", err)
+	}
+	if len(first.EnrollBinding) == 0 {
+		t.Fatal("step 1 issued no enroll_binding")
+	}
+	proof := enrollProof(t, first.TenantID, first.SproutID, first.TenantX25519Pub, testNKeyPub(t, kp), b64(pub), priv)
+	req := signedEnroll(t, kp, "bogus.token", hostname, b64(pub))
+	req.SproutPubProof, req.EnrollBinding = proof, first.EnrollBinding
+	if res, err := Enroll(t.Context(), req); err != nil || res.GatewayJWT == "" {
+		t.Fatalf("step 2 = %+v, %v; want a gateway JWT", res, err)
+	}
+	return first, b64(pub), priv
 }
 
 // hasActiveBoxKey reports whether sproutID has an active box key in
@@ -426,16 +453,17 @@ func TestEnroll_RecordsSproutBoxKeyOnlyWithProof(t *testing.T) {
 	if _, _, err := SealToSprout("t_1", "web-01", payloadbox.PurposeCmdRunRequest, "", "x"); !errors.Is(err, ErrNoActiveBoxKey) {
 		t.Fatalf("farmer sealed to an unproven box key: %v", err)
 	}
-	// A replay without proof doesn't record it either.
-	if _, err := Enroll(t.Context(), signedEnroll(t, kp, "bogus.token", "web-01", b64(sproutPub))); err != nil {
-		t.Fatalf("replay without proof: %v", err)
+	// A replay without proof doesn't record it either: it's refused, as
+	// the sprout has no box key yet (SEC.7b).
+	if _, err := Enroll(t.Context(), signedEnroll(t, kp, "bogus.token", "web-01", b64(sproutPub))); !errors.Is(err, ErrEnrollmentFailed) {
+		t.Fatalf("replay without proof of a keyless sprout = %v, want ErrEnrollmentFailed", err)
 	}
 	if hasActiveBoxKey(t, "t_1", "web-01") {
 		t.Fatal("a replay without proof recorded the box key")
 	}
 
 	proof := enrollProof(t, "t_1", "web-01", first.TenantX25519Pub, testNKeyPub(t, kp), b64(sproutPub), sproutPriv)
-	if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), proof)); err != nil {
+	if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), proof, first.EnrollBinding)); err != nil {
 		t.Fatalf("proven Enroll: %v", err)
 	}
 	if active := activeBoxKeyForTenant(t, "t_1", "web-01"); active != b64(sproutPub) {
@@ -444,7 +472,7 @@ func TestEnroll_RecordsSproutBoxKeyOnlyWithProof(t *testing.T) {
 	// Retried (the response was lost): the same proof for the same key
 	// is a no-op.
 	proof = enrollProof(t, "t_1", "web-01", first.TenantX25519Pub, testNKeyPub(t, kp), b64(sproutPub), sproutPriv)
-	if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), proof)); err != nil {
+	if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), proof, first.EnrollBinding)); err != nil {
 		t.Fatalf("retried proven Enroll: %v", err)
 	}
 	if active := activeBoxKeyForTenant(t, "t_1", "web-01"); active != b64(sproutPub) {
@@ -470,21 +498,27 @@ func TestEnroll_GatewayJWTOnlyWithABoxKeyProof(t *testing.T) {
 		t.Fatalf("first Enroll = %+v, %v; want the identity with no gateway JWT", first, err)
 	}
 	// What the bus can do on its own: an NKey-signed replay, any token.
-	busReplay, err := Enroll(t.Context(), signedEnroll(t, kp, "anything.at-all", "web-01", b64(sproutPub)))
-	if err != nil || busReplay.GatewayJWT != "" {
-		t.Fatalf("NKey-only replay = %+v, %v; want the identity with no gateway JWT", busReplay, err)
+	// Before step 2 the sprout has no box key, so it's refused outright.
+	if res, err := Enroll(t.Context(), signedEnroll(t, kp, "anything.at-all", "web-01", b64(sproutPub))); !errors.Is(err, ErrEnrollmentFailed) {
+		t.Fatalf("NKey-only replay of a keyless sprout = %+v, %v; want ErrEnrollmentFailed", res, err)
 	}
 	if minter.calls != 0 {
 		t.Fatalf("%d gateway JWTs minted for the NKey proof alone", minter.calls)
 	}
 
 	proof := enrollProof(t, "t_1", "web-01", first.TenantX25519Pub, nkeyPub, b64(sproutPub), sproutPriv)
-	proven, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), proof))
+	proven, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), proof, first.EnrollBinding))
 	if err != nil || proven.GatewayJWT == "" {
 		t.Fatalf("proven Enroll = %+v, %v; want a gateway JWT", proven, err)
 	}
+	// Once it has one, the NKey-only replay gets the identity, still with
+	// no gateway JWT.
+	busReplay, err := Enroll(t.Context(), signedEnroll(t, kp, "anything.at-all", "web-01", b64(sproutPub)))
+	if err != nil || busReplay.GatewayJWT != "" {
+		t.Fatalf("NKey-only replay = %+v, %v; want the identity with no gateway JWT", busReplay, err)
+	}
 	// The same proof under a fresh NKey signature: refused.
-	if res, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), proof)); !errors.Is(err, ErrEnrollmentFailed) {
+	if res, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), proof, first.EnrollBinding)); !errors.Is(err, ErrEnrollmentFailed) {
 		t.Fatalf("a reused proof = %+v, %v; want ErrEnrollmentFailed", res, err)
 	}
 	if minter.calls != 1 {
@@ -492,7 +526,7 @@ func TestEnroll_GatewayJWTOnlyWithABoxKeyProof(t *testing.T) {
 	}
 	// A fresh proof (what a sprout retrying a lost response sends) works.
 	again := enrollProof(t, "t_1", "web-01", first.TenantX25519Pub, nkeyPub, b64(sproutPub), sproutPriv)
-	if res, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), again)); err != nil || res.GatewayJWT == "" {
+	if res, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), again, first.EnrollBinding)); err != nil || res.GatewayJWT == "" {
 		t.Fatalf("a fresh proof = %+v, %v; want a gateway JWT", res, err)
 	}
 }
@@ -522,7 +556,7 @@ func TestEnroll_RefusesBadSproutPubProofs(t *testing.T) {
 		"garbage":                                 json.RawMessage(`{"v":2,"s":[]}`),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), proof)); !errors.Is(err, ErrEnrollmentFailed) {
+			if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), proof, first.EnrollBinding)); !errors.Is(err, ErrEnrollmentFailed) {
 				t.Fatalf("Enroll = %v, want ErrEnrollmentFailed", err)
 			}
 			if hasActiveBoxKey(t, "t_1", "web-01") {
@@ -555,12 +589,12 @@ func TestEnroll_RefusesBadSproutPubProofs(t *testing.T) {
 	// With a box key recorded, a proof for a different key is refused:
 	// replacing a key is a rotation.
 	good := enrollProof(t, "t_1", "web-01", tp, nkeyPub, b64(sproutPub), sproutPriv)
-	if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), good)); err != nil {
+	if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), good, first.EnrollBinding)); err != nil {
 		t.Fatalf("valid proof: %v", err)
 	}
 	newPub, newPriv, _ := box.GenerateKey(rand.Reader)
 	swap := enrollProof(t, "t_1", "web-01", tp, nkeyPub, b64(newPub), newPriv)
-	if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(newPub), swap)); !errors.Is(err, ErrEnrollmentFailed) {
+	if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(newPub), swap, first.EnrollBinding)); !errors.Is(err, ErrEnrollmentFailed) {
 		t.Fatalf("proof for a second box key: %v", err)
 	}
 	if active := activeBoxKeyForTenant(t, "t_1", "web-01"); active != b64(sproutPub) {
@@ -584,7 +618,7 @@ func TestEnroll_AnotherTenantCannotRegisterACopiedBoxKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	proof := enrollProof(t, "t_b", "web-01", first.TenantX25519Pub, testNKeyPub(t, kp), b64(victimPub), attackerPriv)
-	if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(victimPub), proof)); !errors.Is(err, ErrEnrollmentFailed) {
+	if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(victimPub), proof, first.EnrollBinding)); !errors.Is(err, ErrEnrollmentFailed) {
 		t.Fatalf("Enroll with a copied box key = %v, want ErrEnrollmentFailed", err)
 	}
 	if hasActiveBoxKey(t, "t_b", "web-01") {
@@ -697,11 +731,8 @@ func TestEnroll_ReplayWithValidSignatureSucceeds(t *testing.T) {
 	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
 
 	kp := testEnrollNKey(t)
-	sproutPub := testEnrollBoxPub(t)
-	first, err := Enroll(t.Context(), signedEnroll(t, kp, "ek_1.s", "web-01", sproutPub))
-	if err != nil {
-		t.Fatalf("first Enroll: %v", err)
-	}
+	first, sproutPub, _ := enrollWithBoxKey(t, kp, "ek_1.s", "web-01")
+	mints := minter.calls
 
 	// Farmer's clock sits just inside the skew window either side of the
 	// sprout's signing time.
@@ -719,8 +750,8 @@ func TestEnroll_ReplayWithValidSignatureSucceeds(t *testing.T) {
 			t.Error("a replay with the NKey proof alone got a gateway JWT")
 		}
 	}
-	if minter.calls != 0 {
-		t.Errorf("expected no gateway JWT mints without a box key proof, got %d", minter.calls)
+	if minter.calls != mints {
+		t.Errorf("expected no gateway JWT mints without a box key proof, got %d", minter.calls-mints)
 	}
 	if store.rows["ek_1"].UsedCount != 1 {
 		t.Errorf("expected replays not to consume a use, used_count=%d", store.rows["ek_1"].UsedCount)
@@ -818,7 +849,7 @@ func TestEnroll_ReplayAfterRotationCarriesContinuity(t *testing.T) {
 		t.Fatal(err)
 	}
 	proof := enrollProof(t, "t_1", "web-01", first.TenantX25519Pub, testNKeyPub(t, kp), b64(sproutPub), sproutPriv)
-	if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), proof)); err != nil {
+	if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), proof, first.EnrollBinding)); err != nil {
 		t.Fatal(err)
 	}
 	if first.TenantX25519Continuity != nil {
@@ -838,5 +869,243 @@ func TestEnroll_ReplayAfterRotationCarriesContinuity(t *testing.T) {
 	pinned, _ := DecodeBoxPubKey(first.TenantX25519Pub)
 	if to, err := openContinuity(t, replay.TenantX25519Continuity, pinned, sproutPriv, "web-01"); err != nil || to != rot.Pub {
 		t.Errorf("continuity proof: %q, %v; want %q", to, err, rot.Pub)
+	}
+}
+
+// B2 (security review 2026-10-b), the review's throwaway test kept: an
+// accepted sprout with no active box key, and an enrollment request the
+// bus got the sprout to sign over a CONNECT nonce, naming a box key X the
+// bus holds, with a proof sealed under X. Before SEC.7b farmer recorded X
+// and minted a gateway JWT. Now X is refused however the request carries
+// a binding, and the real sprout's own step 2 still succeeds, once.
+func TestEnroll_KeylessSproutRefusesAnAttackerBoxKey(t *testing.T) {
+	store, minter := setupEnrollTest(t)
+	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
+	kp := testEnrollNKey(t)
+	nkeyPub := testNKeyPub(t, kp)
+	realPub, realPriv, _ := box.GenerateKey(rand.Reader)
+	first, err := Enroll(t.Context(), signedEnroll(t, kp, "ek_1.s", "web-01", b64(realPub)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenantPub, err := DecodeBoxPubKey(first.TenantX25519Pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	attackerPub, attackerPriv, _ := box.GenerateKey(rand.Reader)
+	// A binding naming X, sealed by the attacker: it has no tenant private
+	// key, so the best it can do is seal under its own key.
+	forgedMsg, err := payloadbox.NewMessage(enrollBindingPurpose, "t_1", "web-01", "",
+		enrollBindingBody{NKeyPub: nkeyPub, SproutPub: b64(attackerPub)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged, err := payloadbox.Seal(forgedMsg, []payloadbox.KeyPair{{PeerPub: tenantPub, Priv: attackerPriv}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, binding := range map[string]json.RawMessage{
+		"no binding (the review's request)": nil,
+		// A DMZ that terminates the enrollment TLS reads step 1's response.
+		"the real sprout's binding":     first.EnrollBinding,
+		"a binding the attacker sealed": forged,
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := signedEnroll(t, kp, "attacker.token", "web-01", b64(attackerPub))
+			req.SproutPubProof = enrollProof(t, "t_1", "web-01", first.TenantX25519Pub, nkeyPub, b64(attackerPub), attackerPriv)
+			req.EnrollBinding = binding
+			if res, err := Enroll(t.Context(), req); !errors.Is(err, ErrEnrollmentFailed) {
+				t.Fatalf("attacker's box key = %+v, %v; want ErrEnrollmentFailed", res, err)
+			}
+			if hasActiveBoxKey(t, "t_1", "web-01") {
+				t.Fatal("the attacker's box key was recorded")
+			}
+		})
+	}
+	if minter.calls != 0 {
+		t.Fatalf("%d gateway JWTs minted for the attacker", minter.calls)
+	}
+
+	// The real sprout's step 2 still succeeds: none of the above spent its
+	// binding.
+	step2 := provenEnroll(t, kp, b64(realPub), enrollProof(t, "t_1", "web-01", first.TenantX25519Pub, nkeyPub, b64(realPub), realPriv), first.EnrollBinding)
+	if res, err := Enroll(t.Context(), step2); err != nil || res.GatewayJWT == "" {
+		t.Fatalf("the real sprout's step 2 = %+v, %v; want a gateway JWT", res, err)
+	}
+	if active := activeBoxKeyForTenant(t, "t_1", "web-01"); active != b64(realPub) {
+		t.Fatalf("active box key %q, want the real sprout's", active)
+	}
+	// A replayed step 2, verbatim or re-signed, earns nothing more.
+	if _, err := Enroll(t.Context(), step2); !errors.Is(err, ErrEnrollmentFailed) {
+		t.Fatalf("verbatim replay of step 2 = %v, want ErrEnrollmentFailed", err)
+	}
+	if _, err := Enroll(t.Context(), resign(t, kp, func() EnrollRequest { r := step2; r.Timestamp = nextSigningTimestamp(); return r }())); !errors.Is(err, ErrEnrollmentFailed) {
+		t.Fatalf("re-signed replay of step 2 = %v, want ErrEnrollmentFailed", err)
+	}
+	if minter.calls != 1 {
+		t.Errorf("gateway JWT mints = %d, want 1", minter.calls)
+	}
+}
+
+// An accepted sprout with no active box key and no live binding is a
+// closed state (SEC.7b): every replay is refused, an NKey-only one, the
+// attacker's proof, and the sprout's own proof alike. It has to be enrolled
+// again under a new NKey with a fresh join token.
+func TestEnroll_AcceptedSproutWithNoBoxKeyIsClosed(t *testing.T) {
+	for name, setup := range map[string]func(t *testing.T, kp nkeys.KeyPair) (tenantPub string, binding json.RawMessage){
+		// Accepted outside the two-step flow (before workstream J, or an
+		// admin accept): there never was a binding.
+		"accepted outside enrollment": func(t *testing.T, kp nkeys.KeyPair) (string, json.RawMessage) {
+			if err := acceptEnrolledNKey("t_1", "web-01", testNKeyPub(t, kp)); err != nil {
+				t.Fatal(err)
+			}
+			tp, err := GetTenantX25519PublicKey("t_1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			return tp, nil
+		},
+		// Fully enrolled, then its box keys revoked: its binding was spent
+		// recording the first key and can't record another.
+		"box keys revoked": func(t *testing.T, kp nkeys.KeyPair) (string, json.RawMessage) {
+			first, _, _ := enrollWithBoxKey(t, kp, "ek_1.s", "web-01")
+			if err := db.Transaction(func(tx *gorm.DB) error { return revokeSproutBoxKeysTx(tx, "t_1", "web-01") }); err != nil {
+				t.Fatal(err)
+			}
+			if hasActiveBoxKey(t, "t_1", "web-01") {
+				t.Fatal("test setup: box key still active")
+			}
+			return first.TenantX25519Pub, first.EnrollBinding
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, minter := setupEnrollTest(t)
+			store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 5}
+			kp := testEnrollNKey(t)
+			nkeyPub := testNKeyPub(t, kp)
+			tenantPub, binding := setup(t, kp)
+			mints := minter.calls
+
+			ownPub, ownPriv, _ := box.GenerateKey(rand.Reader)
+			attackerPub, attackerPriv, _ := box.GenerateKey(rand.Reader)
+			for what, req := range map[string]EnrollRequest{
+				"an NKey-only replay": signedEnroll(t, kp, "ek_1.s", "web-01", b64(ownPub)),
+				"the attacker's proof": provenEnroll(t, kp, b64(attackerPub),
+					enrollProof(t, "t_1", "web-01", tenantPub, nkeyPub, b64(attackerPub), attackerPriv), binding),
+				"the sprout's own proof": provenEnroll(t, kp, b64(ownPub),
+					enrollProof(t, "t_1", "web-01", tenantPub, nkeyPub, b64(ownPub), ownPriv), binding),
+			} {
+				if res, err := Enroll(t.Context(), req); !errors.Is(err, ErrEnrollmentFailed) {
+					t.Errorf("%s = %+v, %v; want ErrEnrollmentFailed", what, res, err)
+				}
+			}
+			if hasActiveBoxKey(t, "t_1", "web-01") {
+				t.Fatal("a closed sprout was given a box key")
+			}
+			if minter.calls != mints {
+				t.Errorf("%d gateway JWTs minted for a closed sprout", minter.calls-mints)
+			}
+			// The way out: delete the identity and enroll a new NKey with a
+			// fresh join token. It reuses the sprout ID.
+			if err := DeleteNKey("t_1", "web-01"); err != nil {
+				t.Fatal(err)
+			}
+			first, _, _ := enrollWithBoxKey(t, testEnrollNKey(t), "ek_1.s", "web-01")
+			if first.SproutID != "web-01" {
+				t.Errorf("re-enrolled as %s, want web-01", first.SproutID)
+			}
+		})
+	}
+}
+
+// Each way an enrollment binding can be wrong is refused, and a binding
+// on a first enrollment is refused without spending the join token.
+func TestEnroll_EnrollBindingChecks(t *testing.T) {
+	store, minter := setupEnrollTest(t)
+	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
+	store.rows["ek_2"] = &enrollmentKeyRow{TenantID: "t_2", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
+	kp := testEnrollNKey(t)
+	nkeyPub := testNKeyPub(t, kp)
+	sproutPub, sproutPriv, _ := box.GenerateKey(rand.Reader)
+	first, err := Enroll(t.Context(), signedEnroll(t, kp, "ek_1.s", "web-01", b64(sproutPub)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Another tenant's binding for the same sprout ID and keys.
+	other, err := Enroll(t.Context(), signedEnroll(t, testEnrollNKey(t), "ek_2.s", "web-01", b64(sproutPub)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := func(sproutID, nkey, pub string) json.RawMessage {
+		b, err := issueEnrollBinding("t_1", sproutID, nkey, pub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	otherPub, _, _ := box.GenerateKey(rand.Reader)
+	for name, binding := range map[string]json.RawMessage{
+		"for another sprout_pub": issue("web-01", nkeyPub, b64(otherPub)),
+		"for another nkey_pub":   issue("web-01", testNKeyPub(t, testEnrollNKey(t)), b64(sproutPub)),
+		"for another sprout":     issue("web-02", nkeyPub, b64(sproutPub)),
+		"from another tenant":    other.EnrollBinding,
+		"garbage":                json.RawMessage(`{"v":2,"s":[]}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			proof := enrollProof(t, "t_1", "web-01", first.TenantX25519Pub, nkeyPub, b64(sproutPub), sproutPriv)
+			if _, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), proof, binding)); !errors.Is(err, ErrEnrollmentFailed) {
+				t.Fatalf("Enroll = %v, want ErrEnrollmentFailed", err)
+			}
+			if hasActiveBoxKey(t, "t_1", "web-01") {
+				t.Fatal("a bad binding recorded a box key")
+			}
+		})
+	}
+
+	t.Run("expiry", func(t *testing.T) {
+		if _, err := verifyEnrollBinding("t_1", "web-01", nkeyPub, b64(sproutPub), first.EnrollBinding); err != nil {
+			t.Fatalf("control: %v", err)
+		}
+		withEnrollNow(t, time.Now().Add(EnrollBindingTTL+time.Minute))
+		if _, err := verifyEnrollBinding("t_1", "web-01", nkeyPub, b64(sproutPub), first.EnrollBinding); err == nil {
+			t.Fatal("a binding older than EnrollBindingTTL verified")
+		}
+		withEnrollNow(t, time.Now().Add(-replayCacheClockMargin-time.Minute))
+		if _, err := verifyEnrollBinding("t_1", "web-01", nkeyPub, b64(sproutPub), first.EnrollBinding); err == nil {
+			t.Fatal("a binding from the future verified")
+		}
+	})
+	if EnrollBindingTTL+replayCacheClockMargin > SealedClaimTTL {
+		t.Errorf("a binding (%s, plus %s clock margin) outlives its claim (%s)", EnrollBindingTTL, replayCacheClockMargin, SealedClaimTTL)
+	}
+
+	// The binding, offered as a proof of a box key that is the tenant's
+	// own (the pair it is sealed under), is refused.
+	t.Run("tenant key as sprout_pub", func(t *testing.T) {
+		req := provenEnroll(t, kp, first.TenantX25519Pub, first.EnrollBinding, first.EnrollBinding)
+		if _, err := Enroll(t.Context(), req); !errors.Is(err, ErrEnrollmentFailed) {
+			t.Fatalf("Enroll = %v, want ErrEnrollmentFailed", err)
+		}
+	})
+
+	// A binding on a first enrollment: refused before the token is spent.
+	req := signedEnroll(t, testEnrollNKey(t), "ek_1.s", "web-03", b64(sproutPub))
+	store.rows["ek_1"].MaxUses = 2
+	req.EnrollBinding = first.EnrollBinding
+	if _, err := Enroll(t.Context(), req); !errors.Is(err, ErrEnrollmentFailed) {
+		t.Fatalf("binding on a first enrollment = %v, want ErrEnrollmentFailed", err)
+	}
+	if store.rows["ek_1"].UsedCount != 1 {
+		t.Errorf("used_count = %d, want 1", store.rows["ek_1"].UsedCount)
+	}
+	if minter.calls != 0 {
+		t.Errorf("%d gateway JWTs minted", minter.calls)
+	}
+
+	// After all of that, the right binding still works.
+	proof := enrollProof(t, "t_1", "web-01", first.TenantX25519Pub, nkeyPub, b64(sproutPub), sproutPriv)
+	if res, err := Enroll(t.Context(), provenEnroll(t, kp, b64(sproutPub), proof, first.EnrollBinding)); err != nil || res.GatewayJWT == "" {
+		t.Fatalf("step 2 = %+v, %v", res, err)
 	}
 }

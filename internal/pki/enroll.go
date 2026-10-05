@@ -42,6 +42,32 @@ package pki
 // first box key (or re-assert the one on record); changing a box key is
 // a rotation (boxkeys.go), which needs the current key.
 //
+// A first box key only from the exchange that issued the identity
+// (security review 2026-10-b, B2; SEC.7b, FLAG FOR SECURITY REVIEW). The
+// proof binds sprout_pub to itself: whoever holds a box private key can
+// prove it, so on its own it can't say whether that key is the sprout's.
+// Before SEC.7b, any accepted sprout with no active box key (an abandoned
+// step 1, revoked keys, or one accepted outside this flow) took the first
+// proven key it was sent, and a compromised bus can get the NKey
+// signature that request needs over a CONNECT nonce. So step 1, and only
+// step 1 (the join token path, which issues the identity), also returns
+// an enrollment binding (issueEnrollBinding): a payloadbox message farmer
+// seals to itself under the tenant key, naming the tenant, sprout ID,
+// nkey_pub and the sprout_pub the NKey-signed step 1 request carried, and
+// valid for EnrollBindingTTL. Step 2 returns it, and a first box key is
+// recorded only when the binding opens, names exactly the sprout_pub
+// being proven, is fresh, and its message ID is claimed once
+// cluster-wide (ClaimSealedMessage). Only farmer can make one (its tenant
+// private key is the only way to seal under the tenant key pair), so a
+// bus that reads step 1's response still can't bind another key, and an
+// unauthenticated Valkey can at worst pre-claim one (refusing an
+// enrollment), never forge one. The replay path never issues a binding.
+// An accepted sprout with no active box key and no live binding is a
+// closed state: every replay request from it is refused, with or without
+// a proof, and it must be enrolled again under a new NKey with a fresh
+// join token (an operator deletes the old identity; see
+// docs/design/imas-envoy-enrollment-design.md).
+//
 // A gateway JWT only for a box key proof (J.2, FLAG FOR SECURITY REVIEW).
 // The NKey seed also signs the bus's CONNECT nonce, and a compromised bus
 // chooses that nonce, so it can get EnrollSigningPayload signed for any
@@ -72,8 +98,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nkeys"
@@ -81,6 +109,7 @@ import (
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/gatewayjwt"
 	log "github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/payloadbox"
 )
 
 // ErrEnrollmentFailed is the single error every enrollment failure mode
@@ -170,6 +199,54 @@ func (mysqlEnrollmentKeyStore) redeem(keyID string) (bool, error) {
 	return res.RowsAffected == 1, nil
 }
 
+// UseInMemoryJoinToken makes Enroll accept joinToken ("{key_id}.{secret}")
+// for tenantID up to maxUses times, from an in-memory store that replaces
+// saas.enrollment_keys until the returned function restores it. For tests
+// outside this package that drive POST /v1/enroll end to end
+// (internal/api/handlers): the production store's cross-schema MySQL
+// can't run on their SQLite database, and since SEC.7b a sprout's first
+// box key can only be recorded through the join token path, so those tests
+// can no longer start from a sprout accepted outside it. Never called
+// outside tests.
+func UseInMemoryJoinToken(joinToken, tenantID string, maxUses int) (restore func()) {
+	keyID, secret, ok := splitJoinToken(joinToken)
+	if !ok {
+		panic("pki: UseInMemoryJoinToken: malformed join token")
+	}
+	orig := enrollKeyStore
+	enrollKeyStore = &memoryEnrollmentKeyStore{keyID: keyID, row: enrollmentKeyRow{
+		TenantID: tenantID, KeyHash: hashSecret(secret), Expiry: time.Now().Add(24 * time.Hour), MaxUses: maxUses,
+	}}
+	return func() { enrollKeyStore = orig }
+}
+
+// memoryEnrollmentKeyStore holds UseInMemoryJoinToken's one join token.
+type memoryEnrollmentKeyStore struct {
+	mu    sync.Mutex
+	keyID string
+	row   enrollmentKeyRow
+}
+
+func (m *memoryEnrollmentKeyStore) lookup(keyID string) (*enrollmentKeyRow, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if keyID != m.keyID {
+		return nil, sql.ErrNoRows
+	}
+	row := m.row
+	return &row, nil
+}
+
+func (m *memoryEnrollmentKeyStore) redeem(keyID string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if keyID != m.keyID || m.row.Revoked || m.row.UsedCount >= m.row.MaxUses || time.Now().After(m.row.Expiry) {
+		return false, nil
+	}
+	m.row.UsedCount++
+	return true, nil
+}
+
 // EnrollResult is what a successful Enroll call hands back to the HTTP
 // layer for the design doc §3.2 success response.
 type EnrollResult struct {
@@ -199,6 +276,10 @@ type EnrollResult struct {
 	// keys the sprout may have pinned before a rotation; nil if the
 	// tenant has never rotated.
 	TenantX25519Continuity json.RawMessage
+	// EnrollBinding is set only on the response that issued the identity
+	// (the join token path): the farmer-sealed binding the sprout returns
+	// with its box key proof (issueEnrollBinding). Opaque to the sprout.
+	EnrollBinding json.RawMessage
 }
 
 // EnrollRequest carries one POST /v1/enroll request's fields into Enroll.
@@ -225,6 +306,11 @@ type EnrollRequest struct {
 	// and is sealed so only a holder of the box private key could have
 	// made it.
 	SproutPubProof json.RawMessage
+	// EnrollBinding is the binding the first request's response carried
+	// (EnrollResult.EnrollBinding), returned with SproutPubProof. Required
+	// to record a first box key; ignored once one is active. Not covered
+	// by NKeySig: farmer sealed it to itself.
+	EnrollBinding json.RawMessage
 }
 
 // enrollSigDomain prefixes every enrollment signing payload so a
@@ -369,8 +455,17 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 		// obtain one (see the package comment). Only a verified proof of
 		// possession of the box key does.
 		proven := len(req.SproutPubProof) > 0
+		// An accepted sprout with no active box key is closed: only step
+		// 2 of the exchange that issued its identity, carrying that
+		// exchange's binding, gives it one (see the package comment).
+		if !proven {
+			if _, _, err := ValidSproutBoxKeys(replayTenantID, sproutID); err != nil {
+				log.Warnf("enroll: refused a replay for sprout %s in tenant %s with no box key proof: it has no active box key (%v); it must be enrolled again under a new NKey with a fresh join token", sproutID, replayTenantID, err)
+				return nil, ErrEnrollmentFailed
+			}
+		}
 		if proven {
-			if err := recordProvenSproutBoxKey(ctx, replayTenantID, sproutID, nkeyPub, sproutPub, req.SproutPubProof); err != nil {
+			if err := recordProvenSproutBoxKey(ctx, replayTenantID, sproutID, nkeyPub, sproutPub, req.SproutPubProof, req.EnrollBinding); err != nil {
 				log.Warnf("enroll: refused sprout_pub_proof for sprout %s in tenant %s: %v", sproutID, replayTenantID, err)
 				return nil, ErrEnrollmentFailed
 			}
@@ -380,8 +475,8 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 	// A proof is only meaningful for an identity that exists: the sprout
 	// can't know its tenant's box key, or its final sprout ID, before
 	// the first response.
-	if len(req.SproutPubProof) > 0 {
-		log.Warnf("enroll: rejected a sprout_pub_proof on a first enrollment for nkey_pub %s", nkeyPub)
+	if len(req.SproutPubProof) > 0 || len(req.EnrollBinding) > 0 {
+		log.Warnf("enroll: rejected a sprout_pub_proof or enroll_binding on a first enrollment for nkey_pub %s", nkeyPub)
 		return nil, ErrEnrollmentFailed
 	}
 
@@ -515,11 +610,88 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 		return nil, ErrEnrollmentFailed
 	}
 	// No gateway JWT yet: the sprout hasn't proved it holds a box key.
-	// Its next request, on the replay path with sprout_pub_proof, gets
-	// one (see the package comment).
+	// Its next request, on the replay path with sprout_pub_proof and this
+	// binding, gets one (see the package comment). This is the only place
+	// a binding is issued.
+	binding, err := issueEnrollBinding(row.TenantID, sproutID, nkeyPub, sproutPub)
+	if err != nil {
+		log.Errorf("enroll: sprout %s enrolled but failed to issue its enrollment binding: %v", sproutID, err)
+		return nil, ErrEnrollmentFailed
+	}
 
 	log.Infof("enroll: sprout %s enrolled via key_id %s", sproutID, keyID)
-	return &EnrollResult{SproutID: sproutID, JWT: signedJWT, TenantID: row.TenantID, TenantX25519Pub: tenantPub, TenantX25519Continuity: continuity}, nil
+	return &EnrollResult{SproutID: sproutID, JWT: signedJWT, TenantID: row.TenantID, TenantX25519Pub: tenantPub, TenantX25519Continuity: continuity, EnrollBinding: binding}, nil
+}
+
+// EnrollBindingTTL is how long after step 1 an enrollment binding is
+// accepted (see the package comment). The sprout sends step 2 straight
+// after step 1, so this only has to cover a few retries; a sprout that
+// misses it is closed and has to be enrolled again. It must stay below
+// SealedClaimTTL minus replayCacheClockMargin, so that a binding's claim
+// outlives every replica that would still accept it.
+const EnrollBindingTTL = 5 * time.Minute
+
+// enrollBindingPurpose is an enrollment binding's payloadbox purpose:
+// farmer to itself. Defined here rather than in payloadbox because no
+// other party ever seals or opens one, and the tenant self-pair it is
+// sealed under (openEnrollBinding) opens nothing else.
+const enrollBindingPurpose = "f2f.enroll.binding"
+
+// enrollBindingBody is an enrollment binding's body: the NKey and box
+// key the identity-issuing request named.
+type enrollBindingBody struct {
+	NKeyPub   string `json:"nkey_pub"`
+	SproutPub string `json:"sprout_pub"`
+}
+
+// issueEnrollBinding seals, from farmer to farmer, the binding of
+// tenantID's sproutID to nkeyPub and sproutPub, as the identity-issuing
+// request named them (see the package comment). Its message ID is the
+// one-time nonce recordProvenSproutBoxKey claims.
+func issueEnrollBinding(tenantID, sproutID, nkeyPub, sproutPub string) (json.RawMessage, error) {
+	pairs, err := tenantSelfPairs(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	msg, err := payloadbox.NewMessage(enrollBindingPurpose, tenantID, sproutID, "",
+		enrollBindingBody{NKeyPub: nkeyPub, SproutPub: sproutPub})
+	if err != nil {
+		return nil, err
+	}
+	return payloadbox.Seal(msg, pairs)
+}
+
+// verifyEnrollBinding checks binding, an enrollment binding returned on
+// step 2: that farmer sealed it (openEnrollBinding) for this tenant and
+// sprout, it answers nothing (no ReplyTo), names exactly nkeyPub and
+// sproutPub, and was issued no more than EnrollBindingTTL ago (and not
+// more than replayCacheClockMargin ahead of this replica's clock). It
+// returns the binding's message ID, which the caller claims. The error
+// is for local logging only.
+func verifyEnrollBinding(tenantID, sproutID, nkeyPub, sproutPub string, binding []byte) (string, error) {
+	if len(binding) == 0 {
+		return "", errors.New("no enroll_binding: a first box key is accepted only with the binding its identity was issued with")
+	}
+	msg, err := openEnrollBinding(tenantID, sproutID, binding)
+	if err != nil {
+		return "", fmt.Errorf("enroll_binding does not open: %w", err)
+	}
+	if msg.ReplyTo != "" {
+		return "", errors.New("enroll_binding names a request it answers")
+	}
+	var body enrollBindingBody
+	if err := json.Unmarshal(msg.Body, &body); err != nil {
+		return "", errors.New("enroll_binding body does not decode")
+	}
+	if subtle.ConstantTimeCompare([]byte(body.NKeyPub), []byte(nkeyPub)) != 1 ||
+		subtle.ConstantTimeCompare([]byte(body.SproutPub), []byte(sproutPub)) != 1 {
+		return "", errors.New("enroll_binding names another nkey_pub or sprout_pub")
+	}
+	age := enrollNow().Sub(time.Unix(msg.IssuedAt, 0))
+	if age > EnrollBindingTTL || age < -replayCacheClockMargin {
+		return "", errors.New("enroll_binding has expired or is from the future")
+	}
+	return msg.ID, nil
 }
 
 // verifyEnrollProof checks proof, a sprout's sprout_pub_proof: that it
@@ -560,27 +732,42 @@ func verifyEnrollProof(tenantID, sproutID, nkeyPub, sproutPub string, proof []by
 // sprout_id)-keyed). The claim matters because this proof is what earns
 // the response its gateway JWT: an NKey signature the bus can obtain,
 // plus a proof copied from an earlier request, must not earn another. The
-// sprout builds a fresh proof for every attempt. Only a sprout's first
-// box key is recorded this way. A proof for the key already active is a
-// no-op (a retried second request); one for a different key, while one
-// is active, is refused: replacing a key is a rotation, which must be
-// sealed under the current one (boxkeys.go).
-func recordProvenSproutBoxKey(ctx context.Context, tenantID, sproutID, nkeyPub, sproutPub string, proof []byte) error {
+// sprout builds a fresh proof for every attempt.
+//
+// Only a sprout's first box key is recorded this way, and only with
+// binding, the enrollment binding step 1 issued (verifyEnrollBinding),
+// whose message ID is claimed too, so it records one key once. A proof
+// for the key already active is a no-op that needs no binding (a retried
+// second request: the proof is under the key on record, so only the
+// sprout can make it); one for a different key, while one is active, is
+// refused: replacing a key is a rotation, which must be sealed under the
+// current one (boxkeys.go).
+func recordProvenSproutBoxKey(ctx context.Context, tenantID, sproutID, nkeyPub, sproutPub string, proof, binding []byte) error {
 	msgID, err := verifyEnrollProof(tenantID, sproutID, nkeyPub, sproutPub, proof)
+	if err != nil {
+		return err
+	}
+	active, _, err := ValidSproutBoxKeys(tenantID, sproutID)
+	switch {
+	case err == nil && active == sproutPub:
+		return ClaimSealedMessage(ctx, tenantID, sproutID, msgID)
+	case err == nil:
+		return errors.New("the sprout already has a different active box key; a new one needs a rotation")
+	case !errors.Is(err, ErrNoActiveBoxKey):
+		return err
+	}
+	// A first box key: only with the binding of the exchange that issued
+	// this identity, checked before either claim so that a request
+	// without one spends nothing.
+	bindingID, err := verifyEnrollBinding(tenantID, sproutID, nkeyPub, sproutPub, binding)
 	if err != nil {
 		return err
 	}
 	if err := ClaimSealedMessage(ctx, tenantID, sproutID, msgID); err != nil {
 		return err
 	}
-	active, _, err := ValidSproutBoxKeys(tenantID, sproutID)
-	switch {
-	case err == nil && active == sproutPub:
-		return nil
-	case err == nil:
-		return errors.New("the sprout already has a different active box key; a new one needs a rotation")
-	case !errors.Is(err, ErrNoActiveBoxKey):
-		return err
+	if err := ClaimSealedMessage(ctx, tenantID, sproutID, bindingID); err != nil {
+		return fmt.Errorf("enroll_binding already used or unclaimable: %w", err)
 	}
 	if err := upsertSproutBoxKeyActive(tenantID, sproutID, sproutPub); err != nil {
 		return err

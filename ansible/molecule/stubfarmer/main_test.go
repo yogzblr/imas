@@ -47,7 +47,7 @@ func newTestSprout(t *testing.T) *testSprout {
 // first request does.
 func (s *testSprout) enroll(t *testing.T, h http.Handler, token, hostname string, ts int64) *httptest.ResponseRecorder {
 	t.Helper()
-	return s.enrollWithProof(t, h, token, hostname, ts, nil)
+	return s.enrollWithProof(t, h, token, hostname, ts, nil, nil)
 }
 
 // proof is the sprout_pub_proof pki.EnrollSprout's second request
@@ -70,7 +70,7 @@ func (s *testSprout) proof(t *testing.T, sproutID, tenantPub string) json.RawMes
 	return data
 }
 
-func (s *testSprout) enrollWithProof(t *testing.T, h http.Handler, token, hostname string, ts int64, proof json.RawMessage) *httptest.ResponseRecorder {
+func (s *testSprout) enrollWithProof(t *testing.T, h http.Handler, token, hostname string, ts int64, proof, binding json.RawMessage) *httptest.ResponseRecorder {
 	t.Helper()
 	sig, err := s.kp.Sign(pki.EnrollSigningPayload(ts, s.pub, hostname, s.sproutPub, token))
 	if err != nil {
@@ -79,7 +79,7 @@ func (s *testSprout) enrollWithProof(t *testing.T, h http.Handler, token, hostna
 	body, _ := json.Marshal(enrollRequest{
 		JoinToken: token, NKeyPub: s.pub, Hostname: hostname, SproutPub: s.sproutPub,
 		Timestamp: ts, NKeySig: base64.RawURLEncoding.EncodeToString(sig),
-		SproutPubProof: proof,
+		SproutPubProof: proof, EnrollBinding: binding,
 	})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(body)))
@@ -152,15 +152,23 @@ func TestReplayDoesNotSpendAUse(t *testing.T) {
 	_, h := newTestFarmer(t, 1)
 	s := newTestSprout(t)
 	now := time.Now().Unix()
-	if rec := s.enroll(t, h, testToken, "web-01", now); rec.Code != http.StatusOK {
+	rec := s.enroll(t, h, testToken, "web-01", now)
+	if rec.Code != http.StatusOK {
 		t.Fatalf("first enroll: %d", rec.Code)
 	}
+	var first pki.EnrollResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+	if rec := s.enrollWithProof(t, h, testToken, "web-01", now+1, s.proof(t, first.SproutID, first.TenantX25519Pub), first.EnrollBinding); rec.Code != http.StatusOK {
+		t.Fatalf("proven enroll: %d", rec.Code)
+	}
 	// The key is now exhausted, but the same NKey is replayed.
-	if rec := s.enroll(t, h, testToken, "web-01", now+1); rec.Code != http.StatusOK {
+	if rec := s.enroll(t, h, testToken, "web-01", now+2); rec.Code != http.StatusOK {
 		t.Fatalf("replayed enroll: %d", rec.Code)
 	}
-	if st := state(t, h); st.Redemptions != 1 || st.EnrollRequests != 2 {
-		t.Errorf("state = %+v, want 1 redemption of 2 requests", st)
+	if st := state(t, h); st.Redemptions != 1 || st.EnrollRequests != 3 {
+		t.Errorf("state = %+v, want 1 redemption of 3 requests", st)
 	}
 	if rec := newTestSprout(t).enroll(t, h, testToken, "web-02", now); rec.Code != http.StatusForbidden {
 		t.Errorf("second sprout on an exhausted key: %d, want 403", rec.Code)
@@ -189,21 +197,32 @@ func TestTwoRequestEnrollmentCountsOnce(t *testing.T) {
 	if st := state(t, h); st.CompletedEnrollments != 0 {
 		t.Fatalf("enrollment completed without a proof: %+v", st)
 	}
+	if len(first.EnrollBinding) == 0 {
+		t.Fatal("the identity-issuing response carried no enroll_binding")
+	}
+	// Before step 2 the sprout has no box key: a replay without a proof
+	// gets nothing, and neither does a proof without the binding.
+	if rec := s.enroll(t, h, testToken, "web-01", now+1); rec.Code == http.StatusOK {
+		t.Fatal("a keyless sprout's replay was answered")
+	}
+	if rec := s.enrollWithProof(t, h, testToken, "web-01", now+2, s.proof(t, first.SproutID, first.TenantX25519Pub), nil); rec.Code == http.StatusOK {
+		t.Fatal("a first box key was recorded without the binding")
+	}
 	// A proof sealed by a key other than sprout_pub's is refused.
 	forger := *s
 	_, forger.boxPriv, _ = box.GenerateKey(rand.Reader)
-	if rec := s.enrollWithProof(t, h, testToken, "web-01", now+1, forger.proof(t, first.SproutID, first.TenantX25519Pub)); rec.Code == http.StatusOK {
+	if rec := s.enrollWithProof(t, h, testToken, "web-01", now+3, forger.proof(t, first.SproutID, first.TenantX25519Pub), first.EnrollBinding); rec.Code == http.StatusOK {
 		t.Fatal("a forged proof was accepted")
 	}
-	if rec := s.enrollWithProof(t, h, testToken, "web-01", now+2, s.proof(t, first.SproutID, first.TenantX25519Pub)); rec.Code != http.StatusOK {
+	if rec := s.enrollWithProof(t, h, testToken, "web-01", now+4, s.proof(t, first.SproutID, first.TenantX25519Pub), first.EnrollBinding); rec.Code != http.StatusOK {
 		t.Fatalf("proven enroll: %d %s", rec.Code, rec.Body)
 	}
 	st := state(t, h)
-	if st.Redemptions != 1 || st.CompletedEnrollments != 1 || st.ReenrollRequests != 0 || st.EnrollRequests != 3 {
-		t.Fatalf("state = %+v, want 1 redemption, 1 completed enrollment, 0 re-enroll requests of 3 requests", st)
+	if st.Redemptions != 1 || st.CompletedEnrollments != 1 || st.ReenrollRequests != 0 || st.EnrollRequests != 5 {
+		t.Fatalf("state = %+v, want 1 redemption, 1 completed enrollment, 0 re-enroll requests of 5 requests", st)
 	}
 	// The same sprout enrolling again after completing is counted.
-	if rec := s.enroll(t, h, testToken, "web-01", now+3); rec.Code != http.StatusOK {
+	if rec := s.enroll(t, h, testToken, "web-01", now+5); rec.Code != http.StatusOK {
 		t.Fatalf("re-enroll: %d", rec.Code)
 	}
 	if st := state(t, h); st.ReenrollRequests != 1 || st.CompletedEnrollments != 1 {
