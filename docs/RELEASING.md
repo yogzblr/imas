@@ -53,7 +53,7 @@ neither signs (`--skip=sign`) nor publishes.
 Each workflow checks its own names first and fails naming any that are
 missing. The Buildkite organisation needs four registries: `imasrpm` (Red
 Hat), `imasdeb` (Debian), `imasnget` (NuGet, **public**: winget downloads
-the MSI from it anonymously) and `imashelm` (Helm). If the `goreleaser`
+the MSI from it anonymously) and `imashelm` (a **Helm** registry, not Helm OCI: `publish-helm.sh` uploads with the REST API, which only the standard Helm type accepts; the registry type cannot be changed after creation). If the `goreleaser`
 environment has deployment branch or tag rules, they must allow `v*` tags
 (Release, and Publish packages on a published release) and `main`
 (Publish packages run by hand).
@@ -105,7 +105,9 @@ What a release carries, for version `X.Y.Z` (tag `vX.Y.Z`):
    waves (API design §1.8).
 
 To re-run a failed publish: Actions, **Publish packages**, *Run workflow*
-with the tag.
+with the tag. If the rpm, deb and NuGet uploads already succeeded and only the
+Helm step failed, tick **only_helm** so those are not uploaded again (Buildkite
+rejects a version it already holds).
 
 ## First release checklist
 
