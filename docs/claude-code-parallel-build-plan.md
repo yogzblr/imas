@@ -1636,6 +1636,217 @@ concrete failure scenario and a proposed fix. Scope: docs/security-review-2026-1
 ready for review, not as a clean bill of health."
 ```
 
+## 4f. Post-SEC.6 follow-ups
+
+Added 2026-10-04 at the owner's request after SEC.6 (PR #100,
+`docs/security-review-2026-10-b.md`). The owner chose to run these after
+SEC.6, including the review's three High findings. They run in parallel, each
+in its own session, from `main` at `43e716a`; none gates another, but SEC.7b
+and SEC.7c both edit `internal/pki` and most of them touch
+`docs/BUILD-STATUS.md`, so later ones merge `main` in. The stub farmer's old
+refresh contract stays as it is (owner decision). Every brief inherits
+`CLAUDE.md`; the prompts avoid backticks, double quotes and dollar signs.
+
+**SEC.7a: staged recipe envelope authenticated end to end (review B1, B9)**
+```
+claude --cloud "Implement SEC.7a from docs/security-review-2026-10-b.md (B1, and B9 which
+folds into it). The sprout cooks a staged recipe pulled over GET /files/ with no
+proof farmer produced it: internal/cook/stagedfetch.go only decodes the body and
+internal/cook/stagedsync.go accepts it on non-cryptographic checks, and the DMZ
+terminates that TLS. Owner decisions so far: sealed only, no fallback, no
+compatibility window (nothing is deployed). FLAG FOR SECURITY REVIEW.
+Build: farmer seals or signs every staged envelope it writes for a sprout under
+the tenant key, bound to tenant_id, sprout_id, the job id and DispatchedAt,
+using internal/payloadbox the way the sealed cook push does (add a purpose such
+as f2s.staged to payloadbox's purpose list). The sprout opens or verifies it
+against its pinned tenant key before decoding and refuses anything else,
+including today's plain JSON, with no fallback. Keep the existing push-race,
+handled-job and max-age checks after verification, and take the job id and
+freshness only from inside the verified envelope, never from the object key or
+headers. Say how an envelope written before a tenant key rotation is handled
+(grace keys). Find every farmer writer of the staged envelope and every sprout
+reader.
+Tests: reproduce the review's throwaway test first (a forged envelope served at
+/files/ is cooked) and show it is now refused and not cooked; an envelope for
+another sprout or tenant is refused; a replayed old envelope is refused; a
+genuine one still cooks; tenant key rotation; go test -race on internal/cook and
+internal/pki.
+Scope: internal/cook, internal/payloadbox (the new purpose only), internal/pki
+(tenant key helpers only), internal/api/handlers (staging only, if needed),
+cmd/sprout (wiring only), docs/design/imas-payload-encryption-design.md,
+docs/security-review-2026-10-b.md (mark B1 and B9 addressed),
+docs/BUILD-STATUS.md (requirement 14 row and Open item 10 only). Other
+post-SEC.6 briefs run in parallel: merge main with a merge commit if it moves.
+Tests: go test ./... must pass. PR: state what you built, what you deferred, and
+any open question."
+```
+
+**SEC.7b: no first box key outside the identity-issuing exchange (review B2)**
+```
+claude --cloud "Implement SEC.7b from docs/security-review-2026-10-b.md (B2). An accepted
+sprout with no active box key accepts an attacker-chosen box key at enrollment
+and is handed a gateway JWT: openEnrollProof in internal/pki/farmerbox.go opens
+the proof against the sprout_pub from the request, recordProvenSproutBoxKey in
+internal/pki/enroll.go records it when no key is active, and the idempotency
+replay path mints a gateway JWT. A compromised bus can obtain the NKey signature
+it needs from an enrollment-shaped CONNECT nonce. Owner decisions so far:
+nothing is deployed, no compatibility window, a sprout with no box key is
+refused rather than downgraded. FLAG FOR SECURITY REVIEW.
+Build: make an accepted-but-keyless sprout a closed state, not a standing
+window. Accept a first box key only on the identity-issuing exchange, never on
+the replay path for an already accepted sprout: for example bind the proof of
+possession to the step 1 response with a farmer-issued one-time nonce that the
+step 2 proof must contain, stored with a short TTL and consumed once. A sprout
+that is accepted with no active key (revoked keys, pre-J, an abandoned step 1)
+must re-enrol with a fresh join token. Say what you chose and why. Keep J.2's
+rule that a gateway JWT is issued only after a verified proof, and SEC.3a's
+one-active-key and revoked-NKey rules.
+Tests: reproduce the review's throwaway test first (keyless sprout, proof sealed
+under an attacker key, replay path, key recorded and gateway JWT minted) and
+show it now records no key and mints no JWT; the real sprout's step 2 still
+succeeds; a step 2 without the step 1 binding is refused; a replayed step 2 is
+refused; extend TestConnectNonceCannotEarnAGatewayJWTByEnrolling to the keyless
+case; update the stub farmer only if the enrollment contract changes.
+Scope: internal/pki (enroll.go, farmerbox.go, enrollclient.go and their tests),
+internal/api/handlers (enroll.go and its tests), ansible/molecule/stubfarmer
+(only if the contract changes), docs/design, docs/security-review-2026-10-b.md
+(mark B2 addressed), docs/BUILD-STATUS.md (requirement 14 row and Open item 10
+only). SEC.7c also edits internal/pki in other files: merge main with a merge
+commit if it lands first. Tests: go test ./... must pass. PR: state what you
+built, what you deferred, and any open question."
+```
+
+**SEC.7c: revoked or superseded NKeys lose /files/ at once (review B3)**
+```
+claude --cloud "Implement SEC.7c from docs/security-review-2026-10-b.md (B3). SEC.3a revokes
+a deleted or replaced host's NATS User JWT and box keys but not its gateway JWT:
+the /files/ checks (internal/gatewayjwt/verify.go, and sproutFileAccess and
+sproutIdentityAuth in internal/api/middleware.go) look only at the signature,
+issuer, expiry and the tenant_id and sprout_id claims, gatewayjwtttl defaults to
+24 hours, and after a replace the old host reads the new host's staged recipe.
+FLAG FOR SECURITY REVIEW.
+Build: every gateway JWT check fails closed for a revoked or superseded NKey.
+In both sproutFileAccess and sproutIdentityAuth, refuse a token whose sub (the
+NKey) is on the tenant's pki_revoked_nkeys list, and require that sub is the
+NKey currently accepted for that (tenant_id, sprout_id), so a replace cuts the
+old host off at once. Key every lookup on tenant_id together with the NKey or
+sprout_id, and fail closed on a database error. Cache only if needed, with a
+short TTL and invalidation on delete and accept. Say whether the default
+gatewayjwtttl should drop; do not change it without saying why.
+Tests: reproduce the review's throwaway test first (accept web-01, delete it,
+re-accept under a new NKey, the old host's gateway JWT still reads the file)
+and show it is now refused; a deleted sprout's token is refused; a live
+sprout's token still works; a database error refuses; cross-tenant is still
+refused; the update-manifest route is covered too.
+Scope: internal/gatewayjwt, internal/api (middleware.go and its tests),
+internal/pki (revoked-NKey and accepted-NKey lookups only), docs/design,
+docs/security-review-2026-10-b.md (mark B3 addressed), docs/BUILD-STATUS.md
+(requirement 14 row and Open item 10 only). SEC.7b also edits internal/pki in
+other files: merge main with a merge commit if it lands first. Tests: go test
+./... must pass. PR: state what you built, what you deferred, and any open
+question."
+```
+
+**SH.1: shell follow-ups from J.5**
+```
+claude --cloud "Implement SH.1: the three shell follow-ups the owner deferred from J.5 (PR 98).
+Read As built: J.5 in docs/design/imas-payload-encryption-design.md and
+docs/BUILD-STATUS.md Open item 2 first. FLAG FOR SECURITY REVIEW.
+Build: (1) the built-in operator role in internal/rbac/config.go loses the
+shell action, as the owner agreed for J.5; shell is granted only by a role that
+names it. Update every test, doc or default that assumes operator can open a
+shell, and say in the PR what an existing operator user now needs. (2) farmer
+calls natsapi.CloseShellSessions() during shutdown in cmd/farmer, before the bus
+connection closes, so open sessions end with farmer-shutdown instead of
+peer-lost. (3) Update the user docs that still describe shell as plaintext
+(docs/INSTALL.md, docs/api/farmer-cli-api.md, README.md, ansible/README.md) to
+the sealed shell as built: imas ssh, the tenantboxpub pin, disableshell and
+imas_sprout_disable_shell, the idle and session limits, audit entries only, and
+Windows refusing shell.
+Tests: an operator without an explicit shell grant is refused shell.open; a
+role that grants shell still works; farmer shutdown ends open sessions with
+farmer-shutdown.
+Scope: internal/rbac, cmd/farmer, internal/natsapi (only if the shutdown wiring
+needs it), docs/INSTALL.md, docs/api/farmer-cli-api.md, README.md,
+ansible/README.md, docs/BUILD-STATUS.md (Open item 2 only). Other post-SEC.6
+briefs run in parallel: merge main with a merge commit if it moves. Tests: go
+test ./... must pass. PR: state what you built, what you deferred, and any open
+question."
+```
+
+**CL.4: J.3 cleanup**
+```
+claude --cloud "Implement CL.4: the J.3 cleanup the owner deferred (PRs 95 and 96). Since J.3
+the CLI token is gone and the HTTP recipe routes refuse every request. FLAG FOR
+SECURITY REVIEW.
+Build: (1) remove the dead HTTP recipe routes GET /v1/recipes and GET
+/v1/recipes/{name...} from internal/api/routers.go, their handlers ListRecipes
+and GetRecipe in internal/api/handlers/recipes.go, and every stale comment, doc
+and Envoy route for them (deploy/envoy, the Envoy config in deploy/helm/nats).
+The sealed recipes.list and recipes.get on NATS stay. (2) Remove internal/audit's
+unused identity resolver (extractIdentity, identityResolver and its setter in
+internal/audit/middleware.go) and anything that only fed it; audit entries must
+keep the verified user from the sealed router. (3) imas serve: add boxpub to
+POST /api/v1/auth/users in internal/serve/openapi.yaml and in whatever
+internal/serve forwards, so it matches farmer's auth.users.add. The web UI
+source is the grlx-web-ui git submodule (github.com/gogrlx/grlx-web-ui),
+outside this repo, and internal/serve/dist is its built bundle: do not edit the
+bundle by hand and do not add a Node toolchain. Write in the PR exactly what the
+UI's add-user form must change so the owner can raise it there.
+Tests: the removed routes return 404; audit entries still carry the user; the
+serve OpenAPI still validates and the add-user path passes boxpub through.
+Scope: internal/api, internal/audit, internal/serve (not dist), deploy/envoy and
+deploy/helm/nats (route removal only), docs/api, docs/BUILD-STATUS.md (Open item
+11 only). Other post-SEC.6 briefs run in parallel: merge main with a merge
+commit if it moves. Tests: go test ./... must pass. PR: state what you built,
+what you deferred, and any open question."
+```
+
+**OPS.1: saasapi NetworkPolicy and PDB after J.4**
+```
+claude --cloud "Implement OPS.1: answer the question left open on PR 99 (J.4 Helm wiring):
+does saasapi's NetworkPolicy or PodDisruptionBudget in deploy/helm/farmer need
+to change now that saasapi holds the SaaS API box key, reaches farmer over the
+sealed internal.* path (J.4) and writes recipes to the object store (REC.1)?
+FLAG FOR SECURITY REVIEW.
+Build: read the chart's NetworkPolicy, PDB and the saasapi and farmer
+deployments, and list every connection saasapi makes and receives (bus, PXC,
+Valkey, Keycloak, object store, OpenBao via External Secrets, farmer). Where the
+policy is missing an allowed path saasapi needs, or allows more than it needs,
+fix it with least privilege and chart tests; where the PDB is wrong for the
+replica count, fix it. If nothing needs to change, change no templates and
+write the reasoning into deploy/helm/farmer/README.md. Put any judgement call
+in the PR as an open question rather than deciding it.
+Tests: chart tests (helm on PATH, so they run rather than skip) for every
+policy or PDB change, including a negative case.
+Scope: deploy/helm/farmer, docs/BUILD-STATUS.md (one line under the J.4 entry).
+Other post-SEC.6 briefs run in parallel: merge main with a merge commit if it
+moves. Tests: go test ./... must pass. PR: state what you built, what you
+deferred, and any open question."
+```
+
+**T.1: fix the flaky J.2 sealed-refresh test**
+```
+claude --cloud "Implement T.1: fix the flaky test TestRefresh_AnswersOnlySealed in
+internal/api/handlers (refresh_test.go), from J.2. It fails in about 1.5
+percent of runs (6 in 460) because it searches the sealed reply body for the
+substring eyJ, and the random base64 ciphertext sometimes contains it. It is a
+test bug, not a leak.
+Build: change the assertion to what it means: the response body is exactly the
+sealed reply shape, the sealed field opens only under the sprout key, and no
+plaintext field of the response is or contains a JWT (three dot-separated
+base64url parts whose first part decodes to a JSON header). Do not weaken the
+check that no gateway JWT is in the clear. Search the repo's tests for the same
+substring pattern and fix those the same way.
+Tests: show the old assertion failing on a crafted ciphertext that contains
+eyJ, and the new test passing with go test -count=2000 -run
+TestRefresh_AnswersOnlySealed ./internal/api/handlers/.
+Scope: test files only, in internal/api and internal/pki. Other post-SEC.6
+briefs run in parallel: merge main with a merge commit if it moves. Tests: go
+test ./... must pass. PR: state what you built, what you deferred, and any open
+question."
+```
+
 ## 5. Orchestrator prompt: Wave 7 to the UAT gate (Claude Code app, hosted agents)
 
 Paste into one session in the Claude Code app, with the yogzblr/imas repo
