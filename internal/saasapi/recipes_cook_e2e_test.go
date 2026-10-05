@@ -11,9 +11,14 @@ package saasapi
 //	  -> saasapi writes tenants/A/recipes/web/hello.imas with its own client
 //	farmer: cook.SendCookEventContext (real resolution, render, staging)
 //	  -> reads the bucket with a separate client, as farmer does
-//	  -> pushes on A's connection (nothing staged: these sprouts have no
-//	     box key, and a staged copy is only ever sealed)
-//	sprout: cook.RespondCook on imas.sprouts.web-01.cook accepts it
+//	  -> stages a copy sealed to A's sprout, and pushes the dispatch,
+//	     sealed to it, on A's connection
+//	sprout: a stub with its own box key (internal/cook/cooktest) opens
+//	     the sealed dispatch on imas.sprouts.web-01.cook and acknowledges
+//	     it. Since FIX.1 farmer sends nothing to a sprout with no box key,
+//	     so each tenant's web-01 is enrolled with one; the stub stands in
+//	     for cook.RespondCook because one process can only hold one
+//	     sprout's keys, and this test runs a web-01 in each of two tenants.
 
 import (
 	"context"
@@ -21,7 +26,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -32,15 +36,17 @@ import (
 	nats "github.com/nats-io/nats.go"
 	"gorm.io/gorm"
 
-	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/cook/cooktest"
 	"github.com/yogzblr/imas/internal/objectstore"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 )
 
 // cookSprout is one tenant's sprout "web-01" on its own bus, recording the
 // envelopes it accepted.
 type cookSprout struct {
+	*cooktest.Sprout
 	mu       sync.Mutex
 	accepted []cook.RecipeEnvelope
 }
@@ -63,7 +69,8 @@ func (s *cookSprout) count() int {
 
 // startTenantBus starts an embedded NATS server standing in for tenant's
 // Account, registers farmer's connection for tenant on it, and answers
-// cook for sprout web-01 there with the sprout's real RespondCook.
+// cook for sprout web-01 there with a stub sprout enrolled with its own
+// box key (cooktest), acknowledging every sealed dispatch it opens.
 func startTenantBus(t *testing.T, tenant string) *cookSprout {
 	t.Helper()
 	ns, err := server.NewServer(&server.Options{Host: "127.0.0.1", Port: -1})
@@ -87,21 +94,13 @@ func startTenantBus(t *testing.T, tenant string) *cookSprout {
 	cook.RegisterFarmerNatsConn(tenant, farmer)
 	t.Cleanup(func() { cook.UnregisterFarmerNatsConn(tenant) })
 
-	s := &cookSprout{}
-	if _, err := sproutConn.Subscribe(cook.CookSubject("web-01"), func(m *nats.Msg) {
-		reply, env := cook.RespondCook("web-01", m)
-		if env != nil {
-			s.mu.Lock()
-			s.accepted = append(s.accepted, *env)
-			s.mu.Unlock()
-		}
-		_ = m.RespondMsg(reply)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := sproutConn.Flush(); err != nil {
-		t.Fatal(err)
-	}
+	s := &cookSprout{Sprout: cooktest.NewSprout(t, tenant, "web-01")}
+	s.AnswerCooks(t, sproutConn, func(env cook.RecipeEnvelope) cook.Ack {
+		s.mu.Lock()
+		s.accepted = append(s.accepted, env)
+		s.mu.Unlock()
+		return cooktest.Acknowledge(env)
+	})
 	return s
 }
 
@@ -110,8 +109,8 @@ func TestRecipeUploadCooksOnSameTenantOnly(t *testing.T) {
 	ctx := context.Background()
 
 	// Farmer's side: its own client on the same bucket, the platform
-	// prefix "platform", a pki store with no box keys (plaintext
-	// dispatch), and the sprout's handled-jobs file in a temp dir.
+	// prefix "platform", a pki store holding each sprout's box key, and
+	// a mock OpenBao for the tenant keypairs it seals with.
 	farmerStore, err := objectstore.Open(e.srv.Config())
 	if err != nil {
 		t.Fatal(err)
@@ -128,12 +127,11 @@ func TestRecipeUploadCooksOnSameTenantOnly(t *testing.T) {
 	}
 	pki.SetDB(pkiDB)
 	t.Cleanup(func() { pki.SetDB(nil) })
-	origHandled, origPriv, origPin := config.SproutHandledJobsFile, config.SproutBoxPrivFile, config.SproutTenantX25519PubFile
-	t.Cleanup(func() {
-		config.SproutHandledJobsFile, config.SproutBoxPrivFile, config.SproutTenantX25519PubFile = origHandled, origPriv, origPin
-	})
-	config.SproutHandledJobsFile = filepath.Join(t.TempDir(), "handled-jobs")
-	config.SproutBoxPrivFile, config.SproutTenantX25519PubFile = "", ""
+	tenantboxtest.Start(t)
+	for _, tenant := range []string{e.tA, e.tB} {
+		pki.InvalidateTenantBoxKeys(tenant)
+		t.Cleanup(func() { pki.InvalidateTenantBoxKeys(tenant) })
+	}
 
 	sproutA, sproutB := startTenantBus(t, e.tA), startTenantBus(t, e.tB)
 
@@ -177,13 +175,19 @@ func TestRecipeUploadCooksOnSameTenantOnly(t *testing.T) {
 	if got := stepsOf(sproutA.last(t)); !strings.Contains(got, "tenant-a-v1") {
 		t.Fatalf("after upload A cooked %s", got)
 	}
-	// These sprouts have no box key on record (plaintext dispatch), so
-	// farmer stages no copy for them (security review 2026-10-b, B1): a
-	// staged copy is sealed to the sprout or not written. Sealed staging
-	// per tenant is covered by internal/api's
-	// TestTenantRecipes_CrossTenantRefusedAtEveryLayer.
-	if got := staged(e.tA); got != "" {
-		t.Fatalf("A's keyless sprout was staged a copy: %s", got)
+	// The staged copy is sealed to A's sprout (security review 2026-10-b,
+	// B1): unreadable in the bucket, and it opens for that sprout to the
+	// recipe just cooked. Cross-tenant staging is also covered by
+	// internal/api's TestTenantRecipes_CrossTenantRefusedAtEveryLayer.
+	stagedA := staged(e.tA)
+	if stagedA == "" || strings.Contains(stagedA, "tenant-a-v1") {
+		t.Fatalf("A's staged copy is missing or readable in the bucket: %q", stagedA)
+	}
+	if env, err := sproutA.OpenStaged([]byte(stagedA)); err != nil || !strings.Contains(stepsOf(env), "tenant-a-v1") {
+		t.Fatalf("A's staged copy: %v, %s", err, stepsOf(env))
+	}
+	if _, err := sproutB.OpenStaged([]byte(stagedA)); err == nil {
+		t.Fatal("B's sprout opened A's staged copy")
 	}
 
 	// 3. B's sprout of the same name still gets the platform recipe,
@@ -199,8 +203,11 @@ func TestRecipeUploadCooksOnSameTenantOnly(t *testing.T) {
 	if err := cook.SendCookEventContext(ctx, e.tB, "web-01", "only.a", "job-b-only", false); !errors.Is(err, cook.ErrNoRecipe) {
 		t.Fatalf("B cooking A's only.a: %v, want ErrNoRecipe", err)
 	}
-	if sproutB.count() != before || strings.Contains(staged(e.tB), "tenant-a") {
-		t.Fatal("B's sprout received or was staged A's recipe")
+	if sproutB.count() != before {
+		t.Fatal("B's sprout received A's recipe")
+	}
+	if env, err := sproutB.OpenStaged([]byte(staged(e.tB))); err != nil || strings.Contains(stepsOf(env), "tenant-a") || !strings.Contains(stepsOf(env), "platform-version") {
+		t.Fatalf("B's staged copy: %v, %s", err, stepsOf(env))
 	}
 
 	// 4. A replaces it; the very next cook uses the new version.

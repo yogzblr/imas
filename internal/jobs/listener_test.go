@@ -18,9 +18,11 @@ import (
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/cook/cooktest"
 	"github.com/yogzblr/imas/internal/objectstore"
 	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 )
 
 // eventually polls cond until it returns true or timeout passes, and
@@ -555,17 +557,13 @@ func TestRegisterNatsConn_RecordsDispatchedJobs(t *testing.T) {
 	t.Cleanup(func() { cook.SetDispatchRecorder(nil) })
 	cook.RegisterFarmerNatsConn("t_test", conn)
 	t.Cleanup(func() { cook.UnregisterFarmerNatsConn("t_test") })
-	// A sprout with no box key on record, so the dispatch is plaintext
-	// and a stub can acknowledge it.
-	if _, err := conn.Subscribe(cook.CookSubject("sprout-dispatch"), func(m *nats.Msg) {
-		var env cook.RecipeEnvelope
-		json.Unmarshal(m.Data, &env)
-		b, _ := json.Marshal(cook.Ack{Acknowledged: true, JobID: env.JobID})
-		m.Respond(b)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	conn.Flush()
+	// The dispatch is sealed only (FIX.1: a sprout with no box key is
+	// sent nothing), so the stub sprout has a box key on record and
+	// acknowledges the sealed dispatch.
+	tenantboxtest.Start(t)
+	pki.InvalidateTenantBoxKeys("t_test")
+	t.Cleanup(func() { pki.InvalidateTenantBoxKeys("t_test") })
+	cooktest.NewSprout(t, "t_test", "sprout-dispatch").AnswerCooks(t, conn, cooktest.Acknowledge)
 
 	if err := cook.SendStepsEvent("t_test", "sprout-dispatch", "dispatch-job", []cook.Step{{ID: "s1"}, {ID: "s2"}}); err != nil {
 		t.Fatalf("SendStepsEvent: %v", err)
