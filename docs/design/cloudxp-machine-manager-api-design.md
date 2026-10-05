@@ -145,7 +145,7 @@ Batch/item status backed by `saas.asset_action_batches` / `saas.asset_action_ite
 | `GET` | `/tenants/{tenant_id}/jobs/{jid}` | Not built. |
 | `GET` | `/tenants/{tenant_id}/audit?date=...` | Not built. |
 
-The jobs and audit routes, when built, are tenant-scoped wrappers over farmer's `jobs.*` and `audit.*` subjects (§2.1), with the tenant filter enforced by the SaaS API. The recipe routes are not wrappers over farmer: farmer has no `recipes.*` subjects any more (its recipe browsing is CLI-only HTTP, `GET /v1/recipes`, platform tree only). The SaaS API reads and writes the tenant's recipes in the recipe bucket itself (below).
+The jobs and audit routes, when built, are tenant-scoped wrappers over farmer's `jobs.*` and `audit.*` subjects (§2.1), with the tenant filter enforced by the SaaS API. The recipe routes are not wrappers over farmer: farmer's `recipes.list` and `recipes.get` are the CLI's sealed `imas.api.*` methods over the platform tree only (J.3; the HTTP `GET /v1/recipes` they replaced was removed in CL.4), never a tenant's recipes. The SaaS API reads and writes the tenant's recipes in the recipe bucket itself (below).
 
 **Recipe storage and resolution (decided, SEC.4, FLAG FOR SECURITY REVIEW).** Owner decision, 2026-10-04: tenants write recipes and upload them through the SaaS API, so recipe templates are untrusted input. In the recipe bucket:
 
@@ -309,7 +309,7 @@ Transport: NATS subjects under `imas.api.*` (existing) and a new `imas.internal.
 | `cohorts.*` | Sprout groupings | — |
 | `auth.*` | Human RBAC (today: static config-file check) | Superseded long-term by SaaS API's `/api-keys`, `/teams` (§1.7) |
 | `shell.start` | Interactive shell | — |
-| `recipes.{list,get}` | Recipe catalog | Removed: farmer serves the platform tree to the CLI over HTTP (`GET /v1/recipes`); tenant recipes are §1.6 |
+| `recipes.{list,get}` | Recipe catalog | Not wrapped: sealed CLI-only `imas.api.recipes.{list,get}` over the platform tree (J.3; the HTTP `GET /v1/recipes` was removed in CL.4); tenant recipes are §1.6 |
 | `audit.{dates,query}` | Audit log | Proxied via §1.6, tenant-filtered |
 
 ### 2.2 New subjects — tenant & sprout lifecycle

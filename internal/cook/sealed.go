@@ -224,7 +224,7 @@ func RespondCook(sproutID string, m *nats.Msg) (*nats.Msg, *RecipeEnvelope) {
 // claimDispatch records env's job as handled (claimPushedEnvelope) and
 // reports whether it may be cooked; if not, ack is the refusal to send.
 func claimDispatch(env RecipeEnvelope) (ok bool, ack Ack) {
-	fresh, err := claimPushedEnvelope(env.JobID)
+	fresh, err := claimPushedEnvelope(env.JobID, env.DispatchedAt)
 	if err != nil {
 		log.Errorf("cook: refusing dispatch of job %s: recording it as handled failed: %v", env.JobID, err)
 		return false, Ack{Acknowledged: false, JobID: env.JobID}

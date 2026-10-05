@@ -48,7 +48,12 @@ package pki
 //     identity and names the tenant's box key; the second, on farmer's
 //     replay path, carries the sprout's proof that it holds its box
 //     private key, sealed to that tenant key, and only then does farmer
-//     record the box key.
+//     record the box key. The second also returns the enrollment binding
+//     the first response carried (enroll.go, SEC.7b): farmer records a
+//     first box key only with it, and issues it only on the request that
+//     issued the identity, so a step 2 that keeps failing past
+//     EnrollBindingTTL leaves an identity that has to be enrolled again
+//     under a new NKey.
 
 import (
 	"bytes"
@@ -120,6 +125,9 @@ type enrollWireRequest struct {
 	// SproutPubProof is set on the second request of a first enrollment;
 	// see EnrollSprout.
 	SproutPubProof json.RawMessage `json:"sprout_pub_proof,omitempty"`
+	// EnrollBinding is returned with SproutPubProof: the binding the
+	// first response carried, if it carried one. Opaque to the sprout.
+	EnrollBinding json.RawMessage `json:"enroll_binding,omitempty"`
 }
 
 // EnrollResponse is POST /v1/enroll's success body.
@@ -135,6 +143,9 @@ type EnrollResponse struct {
 	// TenantX25519Continuity is set after a tenant key rotation; see
 	// reconcileTenantKeyPin.
 	TenantX25519Continuity json.RawMessage `json:"tenant_x25519_continuity,omitempty"`
+	// EnrollBinding is set on the response that issued the identity; the
+	// sprout returns it with its box key proof (EnrollSprout).
+	EnrollBinding json.RawMessage `json:"enroll_binding,omitempty"`
 }
 
 // refreshWireRequest is POST /v1/refresh's body: the sprout's NKey public
@@ -291,15 +302,22 @@ func readBoxPrivKey(path string) ([]byte, error) {
 // collision, which the response's SproutID carries.
 //
 // It makes two requests (enroll.go's "Proof of possession of the box
-// key"). The first issues the identity and names the tenant and its box
-// public key. The second, which farmer answers from its replay path
-// without spending the token again, carries sprout_pub_proof: proof that
-// this sprout holds the private half of sproutPub, sealed to that tenant
-// key. Farmer records sproutPub only then, and only the second response
-// carries a gateway JWT: farmer issues none for an NKey signature alone,
-// which a compromised bus can obtain (enroll.go's package comment). The
-// second response must name the same sprout, tenant and tenant key as
-// the first.
+// key"). The first issues the identity, names the tenant and its box
+// public key, and carries an enrollment binding. The second, which farmer
+// answers from its replay path without spending the token again, carries
+// sprout_pub_proof: proof that this sprout holds the private half of
+// sproutPub, sealed to that tenant key, and returns the binding. Farmer
+// records sproutPub only then, and only the second response carries a
+// gateway JWT: farmer issues none for an NKey signature alone, which a
+// compromised bus can obtain (enroll.go's package comment). The second
+// response must name the same sprout, tenant and tenant key as the first.
+//
+// The second request is tried enrollStep2Attempts times, each with a
+// fresh signature and proof: farmer issues the binding only once, so a
+// sprout that gives up on it has to be enrolled again under a new NKey.
+// When the first request was answered from farmer's replay path (this
+// NKey was already enrolled, with a box key), there is no binding, and
+// the second request re-asserts the box key on record.
 func EnrollSprout(ctx context.Context, joinToken, hostname, sproutPub string) (*EnrollResponse, error) {
 	if joinToken == "" {
 		return nil, errors.New("pki: no join token configured")
@@ -313,17 +331,29 @@ func EnrollSprout(ctx context.Context, joinToken, hostname, sproutPub string) (*
 	if err != nil {
 		return nil, fmt.Errorf("pki: sprout NKey public key: %w", err)
 	}
-	first, err := postEnroll(ctx, kp, nkeyPub, joinToken, hostname, sproutPub, nil)
+	first, err := postEnroll(ctx, kp, nkeyPub, joinToken, hostname, sproutPub, nil, nil)
 	if err != nil {
 		return nil, err
 	}
-	proof, err := sproutEnrollProof(first.TenantID, first.SproutID, first.TenantX25519Pub, nkeyPub, sproutPub)
-	if err != nil {
-		return nil, fmt.Errorf("pki: building the box key proof of possession: %w", err)
-	}
-	second, err := postEnroll(ctx, kp, nkeyPub, joinToken, hostname, sproutPub, proof)
-	if err != nil {
-		return nil, fmt.Errorf("pki: proving possession of the box key: %w", err)
+	var second *EnrollResponse
+	for attempt := 1; ; attempt++ {
+		proof, err := sproutEnrollProof(first.TenantID, first.SproutID, first.TenantX25519Pub, nkeyPub, sproutPub)
+		if err != nil {
+			return nil, fmt.Errorf("pki: building the box key proof of possession: %w", err)
+		}
+		second, err = postEnroll(ctx, kp, nkeyPub, joinToken, hostname, sproutPub, proof, first.EnrollBinding)
+		if err == nil {
+			break
+		}
+		if attempt == enrollStep2Attempts || ctx.Err() != nil {
+			return nil, fmt.Errorf("pki: proving possession of the box key (if this sprout has no box key on record and its first enrollment was not completed within %s, it has to be deleted and enrolled again under a new NKey with a fresh join token): %w", EnrollBindingTTL, err)
+		}
+		log.Warnf("enroll: proving possession of the box key failed (attempt %d of %d), retrying: %v", attempt, enrollStep2Attempts, err)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(enrollStep2RetryDelay << (attempt - 1)):
+		}
 	}
 	if second.SproutID != first.SproutID || second.TenantID != first.TenantID || second.TenantX25519Pub != first.TenantX25519Pub {
 		return nil, errors.New("pki: farmer's two enrollment responses name different sprouts, tenants or tenant keys")
@@ -331,11 +361,19 @@ func EnrollSprout(ctx context.Context, joinToken, hostname, sproutPub string) (*
 	return second, nil
 }
 
+// enrollStep2Attempts and enrollStep2RetryDelay bound EnrollSprout's
+// retries of its second request (delays of 1s, 2s, 4s, 8s: well inside
+// EnrollBindingTTL). Variables so tests can shorten them.
+var (
+	enrollStep2Attempts   = 5
+	enrollStep2RetryDelay = time.Second
+)
+
 // postEnroll sends one signed POST /v1/enroll request, with proof as its
-// sprout_pub_proof if set, and returns the validated response. A response
-// to a request with a proof must carry a gateway JWT; one to a request
-// without may not.
-func postEnroll(ctx context.Context, kp nkeys.KeyPair, nkeyPub, joinToken, hostname, sproutPub string, proof json.RawMessage) (*EnrollResponse, error) {
+// sprout_pub_proof and binding as its enroll_binding if set, and returns
+// the validated response. A response to a request with a proof must
+// carry a gateway JWT; one to a request without may not.
+func postEnroll(ctx context.Context, kp nkeys.KeyPair, nkeyPub, joinToken, hostname, sproutPub string, proof, binding json.RawMessage) (*EnrollResponse, error) {
 	req := enrollWireRequest{
 		JoinToken:      joinToken,
 		NKeyPub:        nkeyPub,
@@ -343,6 +381,7 @@ func postEnroll(ctx context.Context, kp nkeys.KeyPair, nkeyPub, joinToken, hostn
 		SproutPub:      sproutPub,
 		Timestamp:      nextSigningTimestamp(),
 		SproutPubProof: proof,
+		EnrollBinding:  binding,
 	}
 	sig, err := kp.Sign(EnrollSigningPayload(req.Timestamp, req.NKeyPub, req.Hostname, req.SproutPub, req.JoinToken))
 	if err != nil {

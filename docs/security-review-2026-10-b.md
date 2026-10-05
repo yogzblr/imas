@@ -49,15 +49,15 @@ Line numbers are at `f645a93`.
 
 | ID | Sev | Area | Finding | Mark |
 |---|---|---|---|---|
-| B1 | High | J.2 / recipes | The sprout decodes and cooks a staged recipe pulled over `/files/` with no proof farmer produced it; Envoy (DMZ) terminates that TLS, so whoever answers the pull chooses the steps that run as root | CONFIRMED (throwaway test) |
-| B2 | High | J.1 / enrollment | An accepted sprout with no active box key (pre-J, mid-enrollment, or post-revocation) accepts an attacker-chosen box key proven under the attacker's own private half, and is handed a gateway JWT — the enrollment PoP binds the key to itself, not to the sprout | CONFIRMED code path (throwaway test); the compromised-bus race to win step 2 is UNCONFIRMED |
+| B1 | High | J.2 / recipes | The sprout decodes and cooks a staged recipe pulled over `/files/` with no proof farmer produced it; Envoy (DMZ) terminates that TLS, so whoever answers the pull chooses the steps that run as root | CONFIRMED (throwaway test); **addressed by SEC.7a** (ready for review) |
+| B2 | High | J.1 / enrollment | An accepted sprout with no active box key (pre-J, mid-enrollment, or post-revocation) accepts an attacker-chosen box key proven under the attacker's own private half, and is handed a gateway JWT — the enrollment PoP binds the key to itself, not to the sprout | CONFIRMED code path (throwaway test); the compromised-bus race to win step 2 is UNCONFIRMED. **Addressed by SEC.7b** (in review) |
 | B3 | High (incomplete fix) | CL.1 / J (H1 residue) | H1 revokes the NATS User JWT and box keys of a deleted or replaced host, but not its **gateway JWT**; that credential reads `/files/` for up to its TTL (default 24h), and on the replace path it is scoped to the reused `(tenant_id, sprout_id)`, so the old host reads the **new** host's staged recipe | CONFIRMED (throwaway test); **addressed by SEC.7c** (ready for review) |
 | B4 | Medium | SEC.3b / recipes | A hostile tenant's recipe render cost scales with its own include count (up to 256), each include rendered under its own `RecipeRenderTimeout`; one cook can burn many CPU-seconds, and tenants now upload recipes | CONFIRMED (throwaway probe); absolute impact not load-measured |
 | B5 | Medium | M6, carried | Same-second Account-JWT `iat` tie in the bus fence is unchanged (`fence.go:484`), as planned (deferred past the UAT gate); with SCALE.2's single-node push it can still turn a missed revocation into a permanent cluster-wide revert | CONFIRMED in code; upstream `jti` sharing per repo comments |
 | B6 | Medium | J.4 | Forged "no responders" on `internal.sprout.action` still lets one action run up to `SAASAPI_OUTBOX_MAX_ATTEMPTS` times (owner-accepted residual, unchanged by J.4) | CONFIRMED; accepted |
-| B7 | Low | J.5 | The built-in `operator` role still grants `shell` on every sprout (`rbac/config.go:100`), contrary to the agreed default; deferred to a follow-up PR | CONFIRMED |
+| B7 | Low | J.5 | The built-in `operator` role still grants `shell` on every sprout (`rbac/config.go:100`), contrary to the agreed default; deferred to a follow-up PR | CONFIRMED; fixed in SH.1 (PR #102) |
 | B8 | Low | SEC.5 | M1's binding of the package to the manifest is complete on deb/rpm but an MSI `ProductVersion` carries no prerelease, so on Windows an rc and the final of one MAJOR.MINOR.PATCH are indistinguishable; zypper's downgrade-skip was read, not run | CONFIRMED (deb/rpm); MSI residual and zypper UNCONFIRMED |
-| B9 | Low | J.2 / cook | A sprout cooks whatever a pulled staged recipe's `DispatchedAt` lets through within `StagedRecipeMaxAge`; combined with B1 the staleness check is the only bound on a forged pull, and it is attacker-set | CONFIRMED |
+| B9 | Low | J.2 / cook | A sprout cooks whatever a pulled staged recipe's `DispatchedAt` lets through within `StagedRecipeMaxAge`; combined with B1 the staleness check is the only bound on a forged pull, and it is attacker-set | CONFIRMED; **addressed by SEC.7a** with B1 (ready for review) |
 | B10 | Info | — | Smaller notes (I1–I6 below) | — |
 
 **What the first review's four Highs and eight Mediums look like now:** H2, H4,
@@ -109,6 +109,20 @@ enrollment PoP), so they weaken the same boundary the J work strengthened.
   requirement 14 is not met while the staged pull is forgeable, because the pull
   is an alternative to the sealed push that the sprout acts on automatically.
 - **Mark:** CONFIRMED, exercised.
+- **Status: addressed by SEC.7a** (FLAG FOR SECURITY REVIEW; ready for review,
+  not closed until the human review accepts it). Farmer seals every staged
+  copy with `pki.SealToSprout` under its own purpose, `f2s.staged`, bound to
+  `tenant_id`, `sprout_id`, the job ID and `DispatchedAt` (the body), under
+  every tenant key in its grace set; a sprout with no box key gets no staged
+  copy. The sprout opens it with `pki.SproutOpenStagedFromFarmer` against its
+  own keys and pins before decoding, refuses anything else (plain JSON
+  included), and only then runs the push-race, handled-job and max-age checks
+  on the opened envelope, plus a new one: not older than the newest job it
+  already handled. The throwaway test above is now kept as
+  `internal/cook/stagedsealed_test.go`
+  `TestStagedSealed_ForgedPlainEnvelopeIsRefused`, and is refused. Details,
+  and how a copy staged before a tenant key rotation is handled, in
+  `docs/design/imas-payload-encryption-design.md` ("Staged recipes").
 
 ### B2. A keyless accepted sprout accepts an attacker's box key at enrollment, and is handed a gateway JWT (J.1, enrollment PoP)
 
@@ -154,6 +168,29 @@ enrollment PoP), so they weaken the same boundary the J work strengthened.
 - **Mark:** CONFIRMED code path (tested). Whether a compromised bus reliably wins
   the step-1/step-2 race against a live sprout is UNCONFIRMED; the pre-J and
   post-revocation keyless states need no race.
+- **Addressed by SEC.7b** (FLAG FOR SECURITY REVIEW; ready for review, not
+  approved). Built the first fix above. Only the join-token request, which
+  issues the identity, returns an `enroll_binding`: a `payloadbox` message
+  farmer seals to itself under the tenant key, naming the tenant, sprout ID,
+  `nkey_pub` and the `sprout_pub` that request carried. A first box key is
+  recorded only from a step 2 that returns it within 5 minutes, with both its
+  message ID and the proof's claimed once in Valkey. Valkey holds claims only,
+  so it can't forge a binding. A binding names the real `sprout_pub`, so the
+  attacker's `X` is refused even by a DMZ that read step 1's response. An
+  accepted sprout with no active box key is refused on the replay path,
+  with or without a proof, and has to be deleted and enrolled again under a
+  new NKey with a fresh join token. That covers pre-J, revoked, accepted
+  outside the flow, and step 2 not done within the TTL. The throwaway test
+  is kept as `internal/pki`'s
+  `TestEnroll_KeylessSproutRefusesAnAttackerBoxKey`, which records no key
+  and mints no JWT. The keyless case is added to
+  `TestConnectNonceCannotEarnAGatewayJWTByEnrolling`. Residual: an attacker
+  who can submit its own step 1 before the real sprout does (it would need
+  the join token and an NKey signature over a step 1 naming its key, and the
+  sprout signs no bus nonce before its first response) binds its own key.
+  That is a failed enrollment the real sprout notices, not a silent
+  takeover. See `docs/design/imas-envoy-enrollment-design.md`, "A first
+  box key only from the exchange that issued the identity".
 
 ### B3. H1 leaves the deleted or replaced host's gateway JWT live (CL.1 / J, H1 residue)
 
@@ -278,6 +315,8 @@ enrollment PoP), so they weaken the same boundary the J work strengthened.
   `operator` loses `shell` unless granted. Deferred to a follow-up PR per J.5's
   owner decision; `TestOperatorRoleNATSAccess` pins today's behaviour. Fix: drop
   `ActionShell` from the built-in role. CONFIRMED.
+  **Status (SH.1, PR #102):** fixed as proposed; the built-in role no longer
+  grants `shell`, and `TestOperatorRoleNATSAccess` expects it denied.
 - **B8. MSI version binding is MAJOR.MINOR.PATCH only.** `internal/ingredients/selfupdate/pkgmeta.go:60-70,196-205`:
   an MSI `ProductVersion` has no prerelease, so an rc's MSI and the final's both
   read `2.5.0`; the code refuses a prerelease manifest on Windows
@@ -289,7 +328,10 @@ enrollment PoP), so they weaken the same boundary the J work strengthened.
 - **B9. Staleness is the only bound on a forged pull.** `internal/cook/stagedsync.go:173-176`:
   a pulled recipe is cooked if `DispatchedAt` is within `StagedRecipeMaxAge`; with
   B1 the attacker sets `DispatchedAt`, so the window is no bound at all. Folded
-  into B1's fix (authenticate the envelope). CONFIRMED.
+  into B1's fix (authenticate the envelope). CONFIRMED. **Addressed by SEC.7a**
+  with B1 (ready for review): `DispatchedAt` and the job ID are read only from
+  inside the verified envelope, so the window is farmer's, and a copy older
+  than the newest job already handled is refused too.
 
 ## Info
 
@@ -379,5 +421,5 @@ enrollment PoP), so they weaken the same boundary the J work strengthened.
    accepted-but-keyless sprout be a closed state rather than a standing window?
 3. **Per-cook render budget (B4).** Now that tenants upload recipes, is a total
    per-cook render budget wanted before dispatch is enabled?
-4. **`operator` and `shell` (B7), M6 (B5), no-responders (B6).** Confirm these
-   deferrals are still intended for after the UAT gate.
+4. **M6 (B5), no-responders (B6).** Confirm these deferrals are still intended
+   for after the UAT gate. (B7, `operator` and `shell`, was fixed in SH.1, PR #102.)

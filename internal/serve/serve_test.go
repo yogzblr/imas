@@ -640,7 +640,7 @@ func TestMuxTestPingRoute(t *testing.T) {
 func TestMuxAuthUserAddRoute(t *testing.T) {
 	mux := NewMux()
 
-	body := `{"pubkey":"NKEY_ABC123","role":"viewer"}`
+	body := `{"pubkey":"NKEY_ABC123","role":"viewer","boxpub":"q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s="}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/users", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)

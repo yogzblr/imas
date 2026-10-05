@@ -244,10 +244,10 @@ func TestFilesRoute_GatewayJWTFailsClosedWithoutSigner(t *testing.T) {
 	}
 }
 
-// TestRecipesRoutes_RejectGatewayJWT: ListRecipes/GetRecipe stay
-// CLI-token-only. Neither an invalid nor a valid, correctly-scoped
-// gateway JWT gets through.
-func TestRecipesRoutes_RejectGatewayJWT(t *testing.T) {
+// TestRecipesRoutes_GoneForGatewayJWT: the HTTP recipe routes were
+// removed (CL.4). Neither an invalid nor a valid, correctly-scoped
+// gateway JWT finds anything there.
+func TestRecipesRoutes_GoneForGatewayJWT(t *testing.T) {
 	key := installGatewayKey(t)
 	srv := newGatewayTestServer(t)
 
@@ -262,8 +262,8 @@ func TestRecipesRoutes_RejectGatewayJWT(t *testing.T) {
 	for _, path := range []string{"/v1/recipes", "/v1/recipes/webserver.nginx"} {
 		for name, token := range tokens {
 			t.Run(path+"/"+name, func(t *testing.T) {
-				if code, _ := get(t, srv.URL+path, "Bearer "+token); code != http.StatusForbidden {
-					t.Errorf("got %d, want 403", code)
+				if code, _ := get(t, srv.URL+path, "Bearer "+token); code != http.StatusNotFound {
+					t.Errorf("got %d, want 404", code)
 				}
 			})
 		}
@@ -293,8 +293,8 @@ func TestFilesRoute_DangerouslyAllowRootBypassesNothing(t *testing.T) {
 		t.Errorf("own file: %d %q", code, body)
 	}
 	for _, path := range []string{"/v1/recipes", "/v1/recipes/webserver.nginx"} {
-		if code, _ := get(t, srv.URL+path, ""); code != http.StatusUnauthorized {
-			t.Errorf("%s with the flag set: %d, want 401", path, code)
+		if code, _ := get(t, srv.URL+path, ""); code != http.StatusNotFound {
+			t.Errorf("%s with the flag set: %d, want 404", path, code)
 		}
 	}
 }

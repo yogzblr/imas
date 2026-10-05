@@ -168,7 +168,7 @@ func TestBuiltinOperatorRole(t *testing.T) {
 
 	// Operator should have these actions
 	wantActions := []Action{
-		ActionView, ActionCook, ActionCmd, ActionShell,
+		ActionView, ActionCook, ActionCmd,
 		ActionTest, ActionProps, ActionJobAdmin, ActionUserRead,
 	}
 	for _, action := range wantActions {
@@ -178,7 +178,8 @@ func TestBuiltinOperatorRole(t *testing.T) {
 	}
 
 	// Operator should NOT have these actions
-	denyActions := []Action{ActionAdmin, ActionPKI}
+	// Shell is granted only by a role that names it, never by operator.
+	denyActions := []Action{ActionAdmin, ActionPKI, ActionShell}
 	for _, action := range denyActions {
 		if op.HasAction(action) {
 			t.Errorf("operator role should not have action %q", action)
@@ -195,7 +196,7 @@ func TestBuiltinOperatorRoleRouteAccess(t *testing.T) {
 		"GetVersion", "ListSprouts", "GetSprout",
 		"ListJobs", "GetJob", "ListJobsForSprout",
 		"GetAllProps", "GetProp", "ListCohorts",
-		"Cook", "CmdRun", "ShellStart", "TestPing",
+		"Cook", "CmdRun", "TestPing",
 		"SetProp", "DeleteProp", "CancelJob",
 		"WhoAmI", "ResolveCohort",
 	}
@@ -208,7 +209,7 @@ func TestBuiltinOperatorRoleRouteAccess(t *testing.T) {
 	// Routes that should be denied
 	deniedRoutes := []string{
 		"AcceptID", "RejectID", "DenyID", "DeleteID",
-		"UnacceptID", "ListUsers",
+		"UnacceptID", "ListUsers", "ShellStart",
 	}
 	for _, route := range deniedRoutes {
 		if op.HasRouteAccess(route) {

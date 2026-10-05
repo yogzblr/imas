@@ -62,7 +62,9 @@ func signedEnrollRequest(t *testing.T, kp nkeys.KeyPair, joinToken, hostname, sp
 }
 
 // acceptedTestNKey creates a user NKey and registers it as the accepted
-// sprout "web-01", so a request presenting it takes the replay path.
+// sprout "web-01", so a request presenting it takes the replay path. It
+// is accepted outside the enrollment flow, so it has no box key and no
+// enrollment binding: since SEC.7b every replay from it is refused.
 func acceptedTestNKey(t *testing.T) nkeys.KeyPair {
 	t.Helper()
 	kp, err := nkeys.CreateUser()
@@ -191,20 +193,15 @@ func TestEnroll_UnknownToken(t *testing.T) {
 }
 
 // TestEnroll_IdempotentReplaySucceeds drives a full 200 response through
-// the handler without needing a real saas.enrollment_keys table: an
-// already-accepted nkey_pub, correctly signed for, takes design doc §3.3
-// step 1's idempotency path, which never touches the enrollment-key store
-// at all.
+// the handler on design doc §3.3 step 1's idempotency path: an enrolled
+// nkey_pub (with a box key), correctly signed for, gets its identity back
+// without the join token being looked at again.
 func TestEnroll_IdempotentReplaySucceeds(t *testing.T) {
 	setupPKIDirs(t)
+	s := enrollAgainstHandlers(t)
 	config.FarmerWSPort = "5407"
-	withFakeGatewaySigner(t)
-	withFakeTenantBoxOpenBao(t)
 
-	kp := acceptedTestNKey(t)
-	nkey, _ := kp.PublicKey()
-
-	body, _ := json.Marshal(signedEnrollRequest(t, kp, "irrelevant.token", "web-01", generateTestBoxPub(t)))
+	body, _ := json.Marshal(signedEnrollRequest(t, s.kp, "irrelevant.token", "web-01", s.sproutPub))
 	req := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	Enroll(w, req)
@@ -224,12 +221,16 @@ func TestEnroll_IdempotentReplaySucceeds(t *testing.T) {
 	}
 	// J.2: an NKey signature alone, which a compromised bus can get made
 	// over a CONNECT nonce, earns no gateway JWT; only a request with a box
-	// key proof does (TestEnrollClient_AgainstHandler).
+	// key proof does (TestEnrollClient_AgainstHandler). SEC.7b: nor an
+	// enrollment binding, which only the join token path issues.
 	if resp.GatewayJWT != "" || strings.Contains(w.Body.String(), "gateway_jwt") {
 		t.Error("a replay with the NKey proof alone got a gateway_jwt")
 	}
-	if resp.NKeyIdentity != nkey {
-		t.Errorf("expected nkey_identity %q, got %q", nkey, resp.NKeyIdentity)
+	if strings.Contains(w.Body.String(), "enroll_binding") {
+		t.Error("a replay got an enroll_binding")
+	}
+	if resp.NKeyIdentity != s.nkeyPub {
+		t.Errorf("expected nkey_identity %q, got %q", s.nkeyPub, resp.NKeyIdentity)
 	}
 	if resp.TenantX25519Pub == "" {
 		t.Error("expected non-empty tenant_x25519_pub")
@@ -238,6 +239,20 @@ func TestEnroll_IdempotentReplaySucceeds(t *testing.T) {
 	if len(resp.NatsURLs) != 1 || resp.NatsURLs[0] != wantURL {
 		t.Errorf("expected nats_urls [%q], got %v", wantURL, resp.NatsURLs)
 	}
+}
+
+// SEC.7b: an accepted sprout with no box key is closed. Its NKey-signed
+// replay, which used to get the identity back, is refused.
+func TestEnroll_KeylessAcceptedSproutRefused(t *testing.T) {
+	setupPKIDirs(t)
+	withFakeGatewaySigner(t)
+	withFakeTenantBoxOpenBao(t)
+
+	kp := acceptedTestNKey(t)
+	body, _ := json.Marshal(signedEnrollRequest(t, kp, "irrelevant.token", "web-01", generateTestBoxPub(t)))
+	w := httptest.NewRecorder()
+	Enroll(w, httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(body)))
+	assertEnrollFailed(t, w)
 }
 
 func assertEnrollFailed(t *testing.T, w *httptest.ResponseRecorder) {
@@ -263,12 +278,17 @@ func TestEnroll_NoFleetSigningKeyInResponse(t *testing.T) {
 	withFakeTenantBoxOpenBao(t)
 	SetFleetKeySource(nil)
 
-	kp := acceptedTestNKey(t)
-	body, _ := json.Marshal(signedEnrollRequest(t, kp, "irrelevant.token", "web-01", generateTestBoxPub(t)))
+	t.Cleanup(pki.UseInMemoryJoinToken("ek_fleet.secret", pki.CurrentTenantID(), 1))
+	kp, _ := nkeys.CreateUser()
+	body, _ := json.Marshal(signedEnrollRequest(t, kp, "ek_fleet.secret", "web-01", generateTestBoxPub(t)))
 	w := httptest.NewRecorder()
 	Enroll(w, httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(body)))
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 with no fleet key source configured, got %d: %s", w.Code, w.Body.String())
+	}
+	// The identity-issuing response is the one that carries the binding.
+	if !strings.Contains(w.Body.String(), `"enroll_binding"`) {
+		t.Errorf("a first enrollment's response has no enroll_binding: %s", w.Body)
 	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {

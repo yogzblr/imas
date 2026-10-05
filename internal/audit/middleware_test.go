@@ -113,6 +113,10 @@ func TestExtractTargets(t *testing.T) {
 	}
 }
 
+// LogAction records the action, its targets and its params, but no user:
+// a token in params is neither resolved nor stored. A user's request is
+// audited by the sealed router with the user it verified (see
+// TestSealedRouterAudit in internal/natsapi).
 func TestLogActionWithGlobal(t *testing.T) {
 	dir := t.TempDir()
 	logger, err := NewLogger(dir)
@@ -124,16 +128,7 @@ func TestLogActionWithGlobal(t *testing.T) {
 	SetGlobal(logger)
 	defer SetGlobal(nil)
 
-	// Set a mock identity resolver
-	SetIdentityResolver(func(token string) (string, string, string, error) {
-		if token == "test-token" {
-			return "APUBKEY_TEST", "admin", "alice", nil
-		}
-		return "", "", "", nil
-	})
-	defer SetIdentityResolver(nil)
-
-	params := json.RawMessage(`{"token":"test-token","sprout_id":"web-1"}`)
+	params := json.RawMessage(`{"token":"test-token","sprout_id":"web-1","username":"mallory"}`)
 	err = LogAction("pki.accept", params, nil, nil)
 	if err != nil {
 		t.Fatalf("LogAction: %v", err)
@@ -151,14 +146,8 @@ func TestLogActionWithGlobal(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 
-	if got.Pubkey != "APUBKEY_TEST" {
-		t.Errorf("pubkey = %q, want APUBKEY_TEST", got.Pubkey)
-	}
-	if got.RoleName != "admin" {
-		t.Errorf("role = %q, want admin", got.RoleName)
-	}
-	if got.Username != "alice" {
-		t.Errorf("username = %q, want alice", got.Username)
+	if got.Pubkey != "" || got.RoleName != "" || got.Username != "" {
+		t.Errorf("identity from params: pubkey %q role %q username %q, want none", got.Pubkey, got.RoleName, got.Username)
 	}
 	if got.Action != "pki.accept" {
 		t.Errorf("action = %q, want pki.accept", got.Action)
@@ -170,14 +159,15 @@ func TestLogActionWithGlobal(t *testing.T) {
 		t.Errorf("targets = %v, want [web-1]", got.Targets)
 	}
 
-	// Verify token is redacted from params
-	if got.Parameters != nil {
-		var pm map[string]json.RawMessage
-		if err := json.Unmarshal(got.Parameters, &pm); err == nil {
-			if _, hasToken := pm["token"]; hasToken {
-				t.Error("token should be redacted from params")
-			}
-		}
+	var pm map[string]json.RawMessage
+	if err := json.Unmarshal(got.Parameters, &pm); err != nil {
+		t.Fatalf("parameters %s: %v", got.Parameters, err)
+	}
+	if _, hasToken := pm["token"]; hasToken {
+		t.Error("token should be redacted from params")
+	}
+	if string(pm["sprout_id"]) != `"web-1"` {
+		t.Errorf("parameters = %s, want sprout_id kept", got.Parameters)
 	}
 }
 

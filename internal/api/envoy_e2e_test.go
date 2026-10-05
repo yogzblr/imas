@@ -53,8 +53,8 @@ func TestSproutDownloadsStagedRecipe_ThroughRealEnvoy(t *testing.T) {
 	t.Cleanup(func() { handlers.SetGatewaySigner(nil) })
 
 	newStagingTestServer(t, tenantID)
-	jid := dispatch(t, tenantID, sproutID)
 	s := newTestSprout(t, tenantID, sproutID)
+	jid := dispatch(t, tenantID, sproutID)
 	farmer := startSproutFarmer(t, key, s)
 	farmerURL, err := url.Parse(config.FarmerURL)
 	if err != nil {

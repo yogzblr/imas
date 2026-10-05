@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,15 +27,24 @@ import (
 	"github.com/yogzblr/imas/internal/config"
 )
 
+// testDBSeq numbers newTestDB's databases.
+var testDBSeq atomic.Int64
+
 // newTestDB opens a fresh in-memory, pure-Go (no CGO) sqlite database,
 // migrates this package's table, and installs it as the package-level db
 // used by every store function.
 func newTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", t.Name())
+	// A shared-cache in-memory database lives as long as a connection to
+	// it does, so a name reused by the same test under -count would find
+	// the previous run's rows: give each call its own, and close it.
+	dsn := fmt.Sprintf("file:%s-%d?mode=memory&cache=shared", t.Name(), testDBSeq.Add(1))
 	gdb, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("opening test db: %v", err)
+	}
+	if sqlDB, err := gdb.DB(); err == nil {
+		t.Cleanup(func() { _ = sqlDB.Close() })
 	}
 	if err := gdb.AutoMigrate(Models()...); err != nil {
 		t.Fatalf("migrating test db: %v", err)

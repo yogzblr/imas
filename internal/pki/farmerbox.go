@@ -138,8 +138,13 @@ func tenantBoxCachedLongerThan(tenantID string, d time.Duration) bool {
 // (payloadbox.PurposeEnrollProof) for sproutID in tenantID, under every
 // tenant key TenantBoxKeys returns paired with sproutPub, the box public
 // key the sprout is enrolling with: not one on record, which is the
-// point. Any failure is payloadbox.ErrOpen; the caller checks the body
-// and freshness (enroll.go's verifyEnrollProof).
+// point. A sproutPub that is one of the tenant's own keys is refused:
+// that pair is the one enrollment bindings are sealed under
+// (openEnrollBinding). Any failure is payloadbox.ErrOpen; the caller
+// checks the body and freshness (enroll.go's verifyEnrollProof). The
+// proof says only that its sealer holds sproutPub's private half, not
+// that sproutPub is the sprout's: enroll.go records a first key only with
+// the binding its identity was issued with (verifyEnrollBinding).
 func openEnrollProof(tenantID, sproutID, sproutPub string, proof []byte) (*payloadbox.Message, error) {
 	sp, err := DecodeBoxPubKey(sproutPub)
 	if err != nil {
@@ -151,8 +156,43 @@ func openEnrollProof(tenantID, sproutID, sproutPub string, proof []byte) (*paylo
 	}
 	candidates := make([]payloadbox.KeyPair, 0, len(tenantKeys))
 	for _, tk := range tenantKeys {
+		if *tk.Pub == *sp {
+			return nil, payloadbox.ErrOpen
+		}
 		candidates = append(candidates, payloadbox.KeyPair{PeerPub: sp, Priv: tk.Priv})
 	}
 	return payloadbox.Open(proof, candidates,
 		payloadbox.Expect{Purpose: payloadbox.PurposeEnrollProof, TenantID: tenantID, SproutID: sproutID})
+}
+
+// tenantSelfPairs returns, for every tenant key TenantBoxKeys returns, the
+// pair of that key's private half with its own public half: the pairs
+// farmer seals enrollment bindings to itself under (enroll.go's
+// issueEnrollBinding). Only a holder of a tenant private key can seal or
+// open under one, and no sprout ever holds one.
+func tenantSelfPairs(tenantID string) ([]payloadbox.KeyPair, error) {
+	tenantKeys, err := TenantBoxKeys(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	pairs := make([]payloadbox.KeyPair, 0, len(tenantKeys))
+	for _, tk := range tenantKeys {
+		pairs = append(pairs, payloadbox.KeyPair{PeerPub: tk.Pub, Priv: tk.Priv})
+	}
+	return pairs, nil
+}
+
+// openEnrollBinding opens binding, an enrollment binding farmer issued
+// for sproutID in tenantID (enroll.go's issueEnrollBinding), under
+// tenantSelfPairs. A binding sealed under a tenant key that has since
+// left TenantBoxKeys no longer opens; the sprout then has to enroll
+// again. Any failure is payloadbox.ErrOpen; the caller checks the body
+// and freshness (enroll.go's verifyEnrollBinding).
+func openEnrollBinding(tenantID, sproutID string, binding []byte) (*payloadbox.Message, error) {
+	pairs, err := tenantSelfPairs(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	return payloadbox.Open(binding, pairs,
+		payloadbox.Expect{Purpose: enrollBindingPurpose, TenantID: tenantID, SproutID: sproutID})
 }

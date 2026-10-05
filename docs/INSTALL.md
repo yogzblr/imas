@@ -557,7 +557,66 @@ Day to day:
 - Still read in plaintext from the bus, until sealed step events land: the
   step results `imas cook` and `imas jobs watch` show, and `imas serve`'s
   live log. Check a result that matters with `imas jobs show <JID>`, which
-  is sealed. `imas ssh` sessions are plaintext until sealed shell.
+  is sealed.
+
+### Interactive shell (`imas ssh`)
+
+`imas ssh <sprout>` (or `imas ssh -C <cohort>`) opens a shell on a sprout
+through farmer, with both legs sealed: the CLI to farmer, and farmer to the
+sprout. The bus can't read or change what is typed or printed. Nothing
+connects to the sprout directly. **FLAG FOR SECURITY REVIEW.**
+
+- **The pin.** The request is sealed with your CLI box key to the
+  `tenantboxpub` you pinned in step 3; there is no other way to open a
+  session, and no plaintext fallback.
+- **Who may.** Your role must grant the `shell` action on the sprout. The
+  built-in `operator` role does **not**: shell is granted only by a role
+  that names it. An operator who needs a shell gets a role like this in
+  farmer's config (`roles`):
+
+  ```yaml
+  roles:
+    operator-shell:
+      - action: view
+      - action: cook
+      - action: cmd
+      - action: test
+      - action: props
+      - action: job_admin
+      - action: user_read
+      - action: shell
+        scope: "cohort:web"   # or "sprout:<id>", or "*"
+  ```
+
+  Then move the user to it: in farmer's config `users` section if they are
+  assigned there; a user added with `imas users add` is moved with `imas
+  users remove` and `imas users add operator-shell <pubkey> --boxpub <box
+  key>`, with a new CLI box key from `imas auth keygen` (removing a user
+  retires their keys). A role in `roles` named `operator` replaces the
+  built-in one, so adding `shell` to it gives shell back to every operator
+  at once. Admins (`admin`) keep shell. Farmer re-checks the role every 60
+  seconds and ends the session (`revoked`) once it no longer grants shell.
+- **Limits.** Farmer ends a session with no input after `shellidletimeout`
+  (default 15 minutes, at most 60; `imas ssh --idle-timeout` can only ask
+  for less) and any session after `shellmaxduration` (default and at most
+  8 hours). At most 4 sessions per user, 64 per tenant and 256 per farmer
+  replica. A sprout runs at most `shellmaxsessions` (default 8).
+- **On the sprout.** `disableshell: true` in the sprout's config refuses
+  every session on that host, whatever farmer allows (the Ansible role's
+  `imas_sprout_disable_shell`, default `false`). The shell must be on the
+  sprout's allow-list: `shellallowlist`, else the paths in `/etc/shells`.
+  The sprout refuses any start that isn't sealed by farmer, and one with
+  no box key is refused rather than downgraded (re-enroll it).
+- **Windows** sprouts refuse every shell (`unsupported`).
+- **Audit, not recording.** Farmer writes audit entries when a session is
+  opened (`shell.open`, `shell.start`) and when it ends (`shell.end`:
+  duration, exit code, reason, bytes and frames each way). Nothing records
+  what was typed or printed.
+- **Sessions end with their farmer replica.** When farmer stops, its open
+  sessions end with `farmer-shutdown`; one cut off any other way ends with
+  `peer-lost` within 45 seconds, and the sprout kills the shell. After a
+  tenant key rotation, re-pin `tenantboxpub` as for every request;
+  `--sever` ends running sessions (`key-severed`).
 
 ## Ports
 

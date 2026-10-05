@@ -298,7 +298,7 @@ func TestEnroll_ReusedSproutIDHasExactlyOneActiveKey(t *testing.T) {
 			t.Fatalf("Enroll: %v", err)
 		}
 		proof := enrollProof(t, "t_1", first.SproutID, first.TenantX25519Pub, testNKeyPub(t, kp), k.b64(), k.priv)
-		if _, err := Enroll(t.Context(), provenEnroll(t, kp, k.b64(), proof)); err != nil {
+		if _, err := Enroll(t.Context(), provenEnroll(t, kp, k.b64(), proof, first.EnrollBinding)); err != nil {
 			t.Fatalf("proven Enroll: %v", err)
 		}
 		return k.b64(), first

@@ -2,16 +2,22 @@ package handlers
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nkeys"
+	"golang.org/x/crypto/nacl/box"
 
+	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
@@ -19,11 +25,19 @@ import (
 // enrollAgainstHandlers enrolled, sealed now, with extra fields merged in.
 func sealedRefreshBody(t *testing.T, s *handlerSprout, extra map[string]any) []byte {
 	t.Helper()
+	b, _ := sealedRefreshBodyWithID(t, s, extra)
+	return b
+}
+
+// sealedRefreshBodyWithID is sealedRefreshBody, also returning the sealed
+// request's message ID, which farmer's reply must name.
+func sealedRefreshBodyWithID(t *testing.T, s *handlerSprout, extra map[string]any) ([]byte, string) {
+	t.Helper()
 	sproutID, err := pki.PinnedSproutID()
 	if err != nil {
 		t.Fatal(err)
 	}
-	sealed, _, err := pki.SproutSealedRefresh(sproutID, s.nkeyPub)
+	sealed, msgID, err := pki.SproutSealedRefresh(sproutID, s.nkeyPub)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +46,7 @@ func sealedRefreshBody(t *testing.T, s *handlerSprout, extra map[string]any) []b
 		body[k] = v
 	}
 	b, _ := json.Marshal(body)
-	return b
+	return b, msgID
 }
 
 // nkeySignedRefreshBody is the pre-J.2 refresh body: the NKey seed's
@@ -58,33 +72,170 @@ func postRefresh(body []byte) *httptest.ResponseRecorder {
 
 // The answer is the sealed reply and nothing else: no gateway JWT, User
 // JWT or identity in the clear for anything between farmer and the
-// sprout (Envoy terminates TLS in the DMZ).
+// sprout (Envoy terminates TLS in the DMZ). The body is exactly
+// {"sealed": envelope}, so its only plaintext is that shape's field
+// names; no key or string in it is or contains a JWT; and the envelope
+// opens under the sprout's box key, as the reply to this request, and
+// under no other key. (It used to search the body for "eyJ", which the
+// random base64 ciphertext contains in about 1.5% of runs: T.1.)
 func TestRefresh_AnswersOnlySealed(t *testing.T) {
 	s := enrollAgainstHandlers(t)
-	w := postRefresh(sealedRefreshBody(t, s, nil))
+	reqBody, msgID := sealedRefreshBodyWithID(t, s, nil)
+	w := postRefresh(reqBody)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var resp map[string]json.RawMessage
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+	var resp struct {
+		Sealed json.RawMessage `json:"sealed"`
+	}
+	if err := decodeStrict(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("the response is not exactly {sealed}: %v: %s", err, w.Body)
+	}
+	if err := checkSealedEnvelope(resp.Sealed); err != nil {
+		t.Fatalf("the response's sealed field: %v", err)
+	}
+	if jwt, found, err := jwtInJSON(w.Body.Bytes()); err != nil || found {
+		t.Errorf("the response carries a JWT in the clear: %q (%v)", jwt, err)
+	}
+
+	res := openRefreshReply(t, resp.Sealed, msgID)
+	for name, v := range map[string]string{"gateway_jwt": res.GatewayJWT, "jwt": res.JWT} {
+		if _, ok := findJWT(v); !ok {
+			t.Errorf("sealed %s %q is not recognized as a JWT, so the check above proves nothing", name, v)
+		}
+		if strings.Contains(w.Body.String(), v) {
+			t.Errorf("the response carries the %s in the clear", name)
+		}
+	}
+	if res.SproutID != "web-01" || res.NKeyIdentity != s.nkeyPub || res.TenantID != pki.CurrentTenantID() {
+		t.Errorf("unexpected sealed result %+v", res)
+	}
+
+	// Under any other box key, or as the reply to another request, it
+	// doesn't open.
+	tenantPub, sproutPriv, tenantID := sproutReplyKeys(t)
+	strangerPub, strangerPriv, _ := box.GenerateKey(rand.Reader)
+	want := refreshReplyExpect(tenantID, msgID)
+	for name, kp := range map[string]payloadbox.KeyPair{
+		"another sprout key": {PeerPub: tenantPub, Priv: strangerPriv},
+		"another tenant key": {PeerPub: strangerPub, Priv: sproutPriv},
+	} {
+		if _, _, err := payloadbox.OpenReply(resp.Sealed, []payloadbox.KeyPair{kp}, want); !errors.Is(err, payloadbox.ErrOpen) {
+			t.Errorf("under %s: %v, want payloadbox.ErrOpen", name, err)
+		}
+	}
+	other := want
+	other.ReplyTo = "0123456789abcdef0123456789abcdef"
+	if _, _, err := payloadbox.OpenReply(resp.Sealed, []payloadbox.KeyPair{{PeerPub: tenantPub, Priv: sproutPriv}}, other); !errors.Is(err, payloadbox.ErrOpen) {
+		t.Errorf("as the reply to another request: %v, want payloadbox.ErrOpen", err)
+	}
+}
+
+// The old assertion, a substring search of the body for "eyJ", fails on
+// a sealed reply whose ciphertext happens to encode to it; the new one
+// passes it, and still catches a JWT in any plaintext field.
+func TestRefresh_SealedCheckIgnoresCiphertextThatLooksLikeJWT(t *testing.T) {
+	// `{"` encodes to "eyJ" in standard base64 as in base64url.
+	ct := append([]byte(`{"`), bytes.Repeat([]byte{0x5a}, 46)...)
+	env := payloadbox.Envelope{V: payloadbox.Version, Copies: []payloadbox.Sealed{{Nonce: make([]byte, 24), Box: ct}}}
+	sealed, _ := json.Marshal(env)
+	body, _ := json.Marshal(map[string]json.RawMessage{"sealed": sealed})
+
+	if !strings.Contains(string(body), "eyJ") {
+		t.Fatalf("crafted body %s doesn't contain eyJ", body)
+	}
+	// The new checks: exact shape, and no JWT in the clear.
+	var resp struct {
+		Sealed json.RawMessage `json:"sealed"`
+	}
+	if err := decodeStrict(body, &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp) != 1 || len(resp["sealed"]) == 0 {
-		t.Errorf("response fields = %v, want exactly sealed", keysOf(resp))
+	if err := checkSealedEnvelope(resp.Sealed); err != nil {
+		t.Errorf("crafted ciphertext refused: %v", err)
 	}
-	for _, plain := range []string{"gateway_jwt", "eyJ", "web-01", s.nkeyPub, pki.CurrentTenantID()} {
-		if strings.Contains(w.Body.String(), plain) {
-			t.Errorf("the response carries %q in the clear", plain)
+	if jwt, found, err := jwtInJSON(body); err != nil || found {
+		t.Errorf("crafted ciphertext read as a JWT: %q (%v)", jwt, err)
+	}
+
+	// A real JWT anywhere in the clear is still caught: in an extra
+	// field, inside a longer string, or as a key.
+	const jwt = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ3ZWItMDEifQ.c2ln"
+	for name, leaky := range map[string]string{
+		"extra field":    `{"sealed":` + string(sealed) + `,"gateway_jwt":"` + jwt + `"}`,
+		"inside a value": `{"sealed":` + string(sealed) + `,"note":"Bearer ` + jwt + `;"}`,
+		"duplicate key":  `{"sealed":"` + jwt + `","sealed":` + string(sealed) + `}`,
+		"as a key":       `{"sealed":` + string(sealed) + `,"` + jwt + `":1}`,
+		"unpadded sig":   `{"x":"` + strings.TrimSuffix(jwt, "c2ln") + `"}`,
+	} {
+		if _, found, err := jwtInJSON([]byte(leaky)); err != nil || !found {
+			t.Errorf("%s: JWT not found (%v)", name, err)
+		}
+	}
+	// And an extra plaintext field fails the shape check whatever it holds.
+	if err := decodeStrict([]byte(`{"sealed":`+string(sealed)+`,"web-01":1}`), &resp); err == nil {
+		t.Error("an extra plaintext field passed the shape check")
+	}
+	// Not a JWT: dots between non-header parts, or base64 with no header.
+	for _, s := range []string{"a.b.c", "web-01.example.com", "eyJ", "eyJhYmMi.x.y"} {
+		if _, ok := findJWT(s); ok {
+			t.Errorf("findJWT(%q) matched", s)
 		}
 	}
 }
 
-func keysOf(m map[string]json.RawMessage) []string {
-	var out []string
-	for k := range m {
-		out = append(out, k)
+// sproutReplyKeys reads the enrolled sprout's pinned tenant key, current
+// box private key and pinned tenant ID: what the sprout opens a reply
+// with.
+func sproutReplyKeys(t *testing.T) (tenantPub, sproutPriv *[32]byte, tenantID string) {
+	t.Helper()
+	pinned, err := os.ReadFile(config.SproutTenantX25519PubFile)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return out
+	if tenantPub, err = pki.DecodeBoxPubKey(strings.TrimSpace(string(pinned))); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(config.SproutBoxPrivFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw)))
+	if err != nil || len(priv) != 32 {
+		t.Fatalf("sprout box key: %d bytes (%v)", len(priv), err)
+	}
+	sproutPriv = new([32]byte)
+	copy(sproutPriv[:], priv)
+	if tenantID, err = pki.SproutTenantID(); err != nil {
+		t.Fatal(err)
+	}
+	return tenantPub, sproutPriv, tenantID
+}
+
+func refreshReplyExpect(tenantID, msgID string) payloadbox.ReplyExpect {
+	return payloadbox.ReplyExpect{
+		Purpose: payloadbox.PurposeRefreshReply, TenantID: tenantID, Principal: "web-01",
+		ReplyTo: msgID, Method: pki.RefreshMethod, Subject: pki.RefreshSubject,
+	}
+}
+
+// openRefreshReply opens sealed under the sprout's keys as the reply to
+// msgID and returns its result.
+func openRefreshReply(t *testing.T, sealed []byte, msgID string) pki.RefreshResponse {
+	t.Helper()
+	tenantPub, sproutPriv, tenantID := sproutReplyKeys(t)
+	_, body, err := payloadbox.OpenReply(sealed, []payloadbox.KeyPair{{PeerPub: tenantPub, Priv: sproutPriv}}, refreshReplyExpect(tenantID, msgID))
+	if err != nil {
+		t.Fatalf("the sprout can't open the reply: %v", err)
+	}
+	if body.Error != "" {
+		t.Fatalf("farmer sealed an error: %s", body.Error)
+	}
+	var res pki.RefreshResponse
+	if err := json.Unmarshal(body.Result, &res); err != nil {
+		t.Fatal(err)
+	}
+	return res
 }
 
 // Owner decision, 2026-10-04: no NKey-only refresh for any sprout, box

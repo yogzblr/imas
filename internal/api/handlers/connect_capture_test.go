@@ -253,4 +253,104 @@ func TestConnectNonceCannotEarnAGatewayJWTByEnrolling(t *testing.T) {
 	sig2 := captureSproutConnectSignature(t, s, string(pki.EnrollSigningPayload(ts2, s.nkeyPub, hostname, s.sproutPub, token)))
 	req.Timestamp, req.NKeySig, req.SproutPubProof = ts2, base64.RawURLEncoding.EncodeToString(sig2), forged
 	assertEnrollFailed(t, postJSON(Enroll, "/v1/enroll", req))
+
+	t.Run("keyless sprout", func(t *testing.T) { connectNonceAgainstAKeylessSprout(t, s) })
+}
+
+// The keyless case (security review 2026-10-b, B2): a sprout between
+// enrollment step 1 and step 2 has an identity and a User JWT, so it
+// connects to the bus, but no box key yet. The bus has it sign an
+// enrollment payload naming a box key the bus holds, and sends that with a
+// proof sealed under its own key, without a binding and with the sprout's
+// real binding (which a DMZ terminating the enrollment TLS reads off step
+// 1's response). Before SEC.7b farmer recorded the bus's key and returned
+// a gateway JWT. Now every attempt is refused and the real sprout's own
+// step 2 still succeeds.
+func connectNonceAgainstAKeylessSprout(t *testing.T, enrolled *handlerSprout) {
+	const hostname, joinToken = "web-02", "ek_keyless.secret"
+	t.Cleanup(pki.UseInMemoryJoinToken(joinToken, pki.CurrentTenantID(), 1))
+	kp, err := nkeys.CreateUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nkeyPub, _ := kp.PublicKey()
+	seed, _ := kp.Seed()
+	if err := os.WriteFile(config.NKeySproutPrivFile, seed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	realPub, realPriv, _ := box.GenerateKey(rand.Reader)
+	realPubB64 := base64.StdEncoding.EncodeToString(realPub[:])
+
+	// Step 1 only: the identity, its User JWT (which the sprout connects
+	// to the bus with) and the binding.
+	w := postJSON(Enroll, "/v1/enroll", signedEnrollRequest(t, kp, joinToken, hostname, realPubB64))
+	if w.Code != http.StatusOK {
+		t.Fatalf("step 1: %d %s", w.Code, w.Body)
+	}
+	var first enrollSuccessResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &first); err != nil || len(first.EnrollBinding) == 0 {
+		t.Fatalf("step 1 response %s (%v): want an enroll_binding", w.Body, err)
+	}
+	if err := os.WriteFile(config.SproutUserJWTFile, []byte(first.JWT), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keyless := &handlerSprout{kp: kp, nkeyPub: nkeyPub, sproutPub: realPubB64, farmer: enrolled.farmer}
+	tenantPub, err := pki.DecodeBoxPubKey(first.TenantX25519Pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proofUnder := func(sproutPubB64 string, priv *[32]byte) json.RawMessage {
+		msg, err := payloadbox.NewMessage(payloadbox.PurposeEnrollProof, first.TenantID, first.SproutID, "",
+			map[string]string{"nkey_pub": nkeyPub, "sprout_pub": sproutPubB64})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sealed, err := payloadbox.Seal(msg, []payloadbox.KeyPair{{PeerPub: tenantPub, Priv: priv}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sealed
+	}
+
+	busPub, busPriv, _ := box.GenerateKey(rand.Reader)
+	busPubB64 := base64.StdEncoding.EncodeToString(busPub[:])
+	ts := time.Now().Unix()
+	for i, attempt := range []struct {
+		name      string
+		sproutPub string
+		proof     json.RawMessage
+		binding   json.RawMessage
+	}{
+		{name: "NKey signature alone", sproutPub: realPubB64},
+		{name: "the bus's box key, no binding (the review's request)", sproutPub: busPubB64, proof: proofUnder(busPubB64, busPriv)},
+		{name: "the bus's box key, the sprout's binding", sproutPub: busPubB64, proof: proofUnder(busPubB64, busPriv), binding: first.EnrollBinding},
+	} {
+		reqTS := ts + int64(i)
+		sig := captureSproutConnectSignature(t, keyless, string(pki.EnrollSigningPayload(reqTS, nkeyPub, hostname, attempt.sproutPub, "attacker.token")))
+		w := postJSON(Enroll, "/v1/enroll", enrollRequest{
+			JoinToken: "attacker.token", NKeyPub: nkeyPub, Hostname: hostname, SproutPub: attempt.sproutPub,
+			Timestamp: reqTS, NKeySig: base64.RawURLEncoding.EncodeToString(sig),
+			SproutPubProof: attempt.proof, EnrollBinding: attempt.binding,
+		})
+		if strings.Contains(w.Body.String(), "gateway_jwt") {
+			t.Fatalf("%s: a CONNECT signature earned a keyless sprout's gateway JWT: %s", attempt.name, w.Body)
+		}
+		assertEnrollFailed(t, w)
+	}
+
+	// The real sprout's step 2: its own proof and binding. It succeeds,
+	// which also shows none of the above recorded a box key.
+	step2 := signedEnrollRequest(t, kp, joinToken, hostname, realPubB64)
+	step2.Timestamp = ts + 10
+	sig, err := kp.Sign(pki.EnrollSigningPayload(step2.Timestamp, nkeyPub, hostname, realPubB64, joinToken))
+	if err != nil {
+		t.Fatal(err)
+	}
+	step2.NKeySig = base64.RawURLEncoding.EncodeToString(sig)
+	step2.SproutPubProof, step2.EnrollBinding = proofUnder(realPubB64, realPriv), first.EnrollBinding
+	w = postJSON(Enroll, "/v1/enroll", step2)
+	var second enrollSuccessResponse
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &second) != nil || second.GatewayJWT == "" {
+		t.Fatalf("the real sprout's step 2: %d %s", w.Code, w.Body)
+	}
 }

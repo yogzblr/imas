@@ -104,7 +104,10 @@ func TestNewRouterFilesEndpointRequiresAuth(t *testing.T) {
 	}
 }
 
-func TestNewRouterRecipesEndpointsRequireAuth(t *testing.T) {
+// The HTTP recipe routes are gone (CL.4): recipes are browsed over sealed
+// imas.api.recipes.list/get. With or without a credential, any method,
+// they are not found.
+func TestNewRouterRecipesRoutesRemoved(t *testing.T) {
 	tmpDir := t.TempDir()
 	origRecipeDir := config.RecipeDir
 	config.RecipeDir = tmpDir
@@ -114,14 +117,25 @@ func TestNewRouterRecipesEndpointsRequireAuth(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	for _, path := range []string{"/v1/recipes", "/v1/recipes/webserver.nginx"} {
-		resp, err := http.Get(srv.URL + path)
-		if err != nil {
-			t.Fatalf("GET %s: %v", path, err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusUnauthorized {
-			t.Errorf("GET %s without auth returned %d, want 401", path, resp.StatusCode)
+	for _, path := range []string{"/v1/recipes", "/v1/recipes/", "/v1/recipes/webserver.nginx", "/v1/recipes/webserver/nginx"} {
+		for _, authz := range []string{"", "Bearer anything"} {
+			for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost} {
+				req, err := http.NewRequest(method, srv.URL+path, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if authz != "" {
+					req.Header.Set("Authorization", authz)
+				}
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					t.Fatalf("%s %s: %v", method, path, err)
+				}
+				resp.Body.Close()
+				if resp.StatusCode != http.StatusNotFound {
+					t.Errorf("%s %s (authz %q) returned %d, want 404", method, path, authz, resp.StatusCode)
+				}
+			}
 		}
 	}
 }

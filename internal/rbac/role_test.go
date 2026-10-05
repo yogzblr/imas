@@ -64,8 +64,10 @@ func TestRouteAction(t *testing.T) {
 		{"AcceptID", ActionPKI},
 		{"WhoAmI", ActionUserRead},
 		{"ListUsers", ActionAdmin},
-		{"ListRecipes", ActionView},
-		{"GetRecipe", ActionView},
+		// The HTTP recipe routes were removed (CL.4); their names are
+		// unknown now and so need admin, like any other unknown route.
+		{"ListRecipes", ActionAdmin},
+		{"GetRecipe", ActionAdmin},
 		{"UnknownRoute", ActionAdmin},
 	}
 	for _, tt := range tests {
