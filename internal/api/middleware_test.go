@@ -73,9 +73,6 @@ func TestAuthDangerouslyAllowRootBypassesNothing(t *testing.T) {
 	}{
 		{"FileServer", "/files/sprouts/t_acme/web-01/nginx.conf", "", http.StatusUnauthorized},
 		{"FileServer", "/files/sprouts/t_acme/web-01/nginx.conf", "Bearer not-a-jwt", http.StatusForbidden},
-		{"ListRecipes", "/v1/recipes", "", http.StatusUnauthorized},
-		{"ListRecipes", "/v1/recipes", "anything", http.StatusForbidden},
-		{"GetRecipe", "/v1/recipes/base", "", http.StatusUnauthorized},
 		{"SproutUpdateManifest", "/v1/sprout/update-manifest", "", http.StatusUnauthorized},
 	} {
 		req := httptest.NewRequest(http.MethodGet, tc.path, nil)

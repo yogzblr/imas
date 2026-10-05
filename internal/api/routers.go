@@ -22,11 +22,10 @@ import (
 //     workstream H's Envoy JWT gate (deploy/envoy/envoy.yaml's /files/
 //     route); Auth accepts a sprout's gateway JWT here, scoped to that
 //     sprout's own keys (handlers.SproutFilePrefix).
-//   - Recipe browsing (GET /v1/recipes, GET /v1/recipes/{name...}): the
-//     dot-notation list/get surface used by the imas CLI and web UI,
-//     CLI-token auth only, not routed through Envoy — replaces the old NATS-based
-//     internal/natsapi/recipes.go per
-//     docs/design/imas-fork-roadmap.md workstream I.
+//   - No recipe browsing: the imas CLI and imas serve list and read
+//     recipes over sealed imas.api.recipes.list/get
+//     (internal/natsapi/recipes.go). The HTTP routes for that were
+//     removed once J.3 left them nothing to accept (CL.4).
 //   - Sprout update manifest (GET /v1/sprout/update-manifest): the
 //     signed fleetsign.Manifest of the caller's tenant's approved sprout
 //     version for one OS/arch (cloudxp-machine-manager-api-design.md
@@ -73,11 +72,6 @@ func NewRouter(certificate string) *http.ServeMux {
 
 	// File server: serves recipe files over HTTPS (farmer:// scheme).
 	mux.Handle("GET /files/", Logger(Auth(http.HandlerFunc(handlers.GetFile), "FileServer"), "FileServer"))
-
-	// Recipe browsing: dot-notation list/get, used by the imas CLI and
-	// web UI (docs/design/imas-fork-roadmap.md workstream I).
-	mux.Handle("GET /v1/recipes", Logger(Auth(http.HandlerFunc(handlers.ListRecipes), "ListRecipes"), "ListRecipes"))
-	mux.Handle("GET /v1/recipes/{name...}", Logger(Auth(http.HandlerFunc(handlers.GetRecipe), "GetRecipe"), "GetRecipe"))
 
 	// Sprout update manifest (design doc §2.6): gateway JWT only, which
 	// Auth verifies and turns into the (tenant_id, sprout_id) the handler

@@ -60,9 +60,9 @@ Treat this as a reviewed starting point, not a drop-in production config.
   `GET /files/<key>` (`internal/api/handlers/recipes.go`'s `GetFile`), the
   sprout-facing download path. Farmer re-verifies the forwarded gateway
   JWT and serves only keys under that sprout's own
-  `sprouts/<tenant_id>/<sprout_id>/` prefix. `/v1/recipes` (the CLI and
-  web UI browse endpoints) is deliberately not routed: it accepts only the
-  CLI's RBAC token, never a gateway JWT. `docs/design/imas-fork-roadmap.md`
+  `sprouts/<tenant_id>/<sprout_id>/` prefix. Farmer serves no other recipe
+  route over HTTP: the CLI and web UI browse recipes over sealed
+  `imas.api.recipes.list`/`get` on the bus. `docs/design/imas-fork-roadmap.md`
   workstream I describes a dedicated, non-DMZ recipe service this route
   is meant to front instead. Repoint the `recipe_service` cluster once that
   exists.

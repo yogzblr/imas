@@ -17,7 +17,9 @@ import (
 // SEC.4: a sprout of one tenant can never fetch another tenant's staged or
 // source recipe, at any layer: recipe resolution in cook, staging, the
 // /files/ route through the real router, Auth and GetFile without the
-// router's path cleaning, and the CLI recipe routes.
+// router's path cleaning. (The CLI's recipe browsing is sealed
+// imas.api.recipes.get now; its crafted-name refusals are tested in
+// internal/natsapi/recipes_test.go.)
 
 const (
 	acmeSecret  = "acme-only-secret-step"
@@ -132,36 +134,5 @@ func TestTenantRecipes_CrossTenantRefusedAtEveryLayer(t *testing.T) {
 		if rec.Code != http.StatusForbidden || strings.Contains(rec.Body.String(), acmeSecret) {
 			t.Errorf("Auth+GetFile %s: got %d, want 403", path, rec.Code)
 		}
-	}
-}
-
-// TestTenantRecipes_GetRecipeRefusesCraftedNames: the CLI's GET
-// /v1/recipes/{name...} reads the platform tree only, and a crafted name
-// cannot reach a tenant's recipes or a sprout's staged file.
-func TestTenantRecipes_GetRecipeRefusesCraftedNames(t *testing.T) {
-	newStagingTestServerWithRecipes(t, tenantRecipeFixture())
-	for _, name := range []string{
-		"../tenants/t_acme/recipes/private",
-		"..tenants.t_acme.recipes.private",
-		"/tenants/t_acme/recipes/private",
-		"a/../../tenants/t_acme/recipes/private",
-		"..",
-	} {
-		req := httptest.NewRequest(http.MethodGet, "/v1/recipes/x", nil)
-		req.SetPathValue("name", name)
-		rec := httptest.NewRecorder()
-		handlers.GetRecipe(rec, req)
-		if rec.Code != http.StatusBadRequest || strings.Contains(rec.Body.String(), acmeSecret) {
-			t.Errorf("GetRecipe(%q): got %d %q, want 400", name, rec.Code, rec.Body.String())
-		}
-	}
-	// A name that is valid but only exists under a tenant prefix is not
-	// found in the platform tree.
-	req := httptest.NewRequest(http.MethodGet, "/v1/recipes/x", nil)
-	req.SetPathValue("name", "tenants.t_acme.recipes.private")
-	rec := httptest.NewRecorder()
-	handlers.GetRecipe(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("GetRecipe(tenants.t_acme.recipes.private): got %d, want 404", rec.Code)
 	}
 }
