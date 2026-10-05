@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -38,6 +39,12 @@ var cmdCmd = &cobra.Command{
 var cmdCmdRun = &cobra.Command{
 	Use:   "run command [and optional args]...",
 	Short: "Run a command remotely and see the output locally.",
+	Long: `Run a command remotely and see the output locally.
+
+Exits 1 if the command failed on any target: a non-zero exit code, an
+error from farmer or the sprout (for example farmer's refusal to send to
+a sprout that must be re-enrolled, [sprout_reenroll_required]), or a
+result that can't be read. Every target's result is printed first.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		if len(args) < 1 {
 			cmd.Help()
@@ -80,35 +87,69 @@ var cmdCmdRun = &cobra.Command{
 		case "json":
 			jw, _ := json.Marshal(results)
 			fmt.Println(string(jw))
-			return
 		case "":
 			fallthrough
 		case "text":
-			for keyID, result := range results.Results {
-				jw, err := json.Marshal(result)
-				if err != nil {
-					color.Red("%s: \n returned an invalid message!\n", keyID)
-					continue
-				}
-				var value apitypes.CmdRun
-				err = json.NewDecoder(bytes.NewBuffer(jw)).Decode(&value)
-				if err != nil {
-					color.Red("%s returned an invalid message!\n", keyID)
-					continue
-				}
-				if value.ErrCode != 0 {
-					color.Red("%s:\n", keyID)
-				} else {
-					fmt.Printf("%s:\n", keyID)
-				}
-				if noerr {
-					fmt.Printf("%s\n", value.Stdout)
-				} else {
-					fmt.Printf("%s%s\n", value.Stdout, value.Stderr)
-				}
-			}
+			printCmdRunResults(results, noerr)
+		}
+		if cmdRunFailed(results) {
+			cmdRunExit(1)
 		}
 	},
+}
+
+// cmdRunExit ends `imas cmd run` with a status; tests replace it.
+var cmdRunExit = os.Exit
+
+// decodeCmdRunResult reads one sprout's result, as decoded from farmer's
+// reply, as a CmdRun.
+func decodeCmdRunResult(result any) (apitypes.CmdRun, error) {
+	var value apitypes.CmdRun
+	jw, err := json.Marshal(result)
+	if err != nil {
+		return value, err
+	}
+	err = json.NewDecoder(bytes.NewBuffer(jw)).Decode(&value)
+	return value, err
+}
+
+// cmdRunFailed reports whether the command failed on any target: a
+// result that can't be read, an error, or a non-zero exit code.
+func cmdRunFailed(results apitypes.TargetedResults) bool {
+	for _, result := range results.Results {
+		value, err := decodeCmdRunResult(result)
+		if err != nil || value.Error != nil || value.ErrCode != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// printCmdRunResults writes each sprout's cmd.run result as text: its
+// output, and the error farmer or the sprout reported for it, such as
+// farmer's refusal to send to a sprout that must be re-enrolled
+// ([sprout_reenroll_required]).
+func printCmdRunResults(results apitypes.TargetedResults, noerr bool) {
+	for keyID, result := range results.Results {
+		value, err := decodeCmdRunResult(result)
+		if err != nil {
+			color.Red("%s returned an invalid message!\n", keyID)
+			continue
+		}
+		if value.ErrCode != 0 || value.Error != nil {
+			color.Red("%s:\n", keyID)
+		} else {
+			fmt.Printf("%s:\n", keyID)
+		}
+		if value.Error != nil {
+			color.Red("error: %s\n", value.Error)
+		}
+		if noerr {
+			fmt.Printf("%s\n", value.Stdout)
+		} else {
+			fmt.Printf("%s%s\n", value.Stdout, value.Stderr)
+		}
+	}
 }
 
 func init() {

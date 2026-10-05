@@ -1121,8 +1121,7 @@ PR #112).
       which no sprout subscribes to, so cancel does nothing on the sprout
       although farmer answers `cancel request published`. Deferred by FIX.1:
       a multi-sprout CLI cook only logs a keyless sprout's refusal on farmer
-      (the CLI times out for it); `apitypes.CmdRun.Error` serialises as `{}`,
-      so the CLI loses `cmd.run` error text; `cmd.RegisterNatsConn` and its
+      (the CLI times out for it); `cmd.RegisterNatsConn` and its
       unused connection, and the routeless `HTestPing` handler, remain;
       `docs/design/imas-sprout-orchestration.md` ("As built: cook's wire
       format") still describes the removed plaintext fallback. Open from
