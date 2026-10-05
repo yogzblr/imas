@@ -32,10 +32,8 @@ import (
 //   - create an object under the platform recipe prefix (FIX.5);
 //   - delete a key under the platform recipe prefix (FIX.5);
 //
-// and in the job bucket (FIX.5), where any access must be refused, when
-// saasapi is told which bucket that is (SAASAPI_RECIPES_JOB_BUCKET; the
-// Helm chart always sets it; without it the check warns that it didn't
-// probe the job bucket):
+// and in the job bucket (FIX.5), where any access must be refused
+// (SAASAPI_RECIPES_JOB_BUCKET, required while the check is on):
 //
 //   - create an object under jobs/;
 //   - read a key under jobs/;
@@ -107,7 +105,7 @@ func jobBucketCredentialProbes(nonce string) []objectstore.Probe {
 // recipeCredentialScope is what the self-check probes: the recipe bucket
 // (saasapi's recipe store, opened with its own credential) with farmer's
 // platform recipe prefix in it, and farmer's job bucket opened with the
-// same credential (nil when SAASAPI_RECIPES_JOB_BUCKET is unset).
+// same credential.
 type recipeCredentialScope struct {
 	recipes        *objectstore.Store
 	recipeBucket   string
@@ -119,11 +117,11 @@ type recipeCredentialScope struct {
 // checkRecipeCredentialScope runs the self-check and returns an error
 // saying what to fix if the credential is broader than the recipe policy
 // or the check couldn't tell. Every probe is made, in both buckets, before
-// it decides; a missing recipe store or platform prefix fails it (fail
-// closed). With no job store it probes the recipe bucket only and warns.
+// it decides; a missing recipe store, platform prefix or job store fails
+// it (fail closed).
 func checkRecipeCredentialScope(ctx context.Context, sc recipeCredentialScope) error {
-	if sc.recipes == nil || sc.platformPrefix == "" {
-		return errors.New("saasapi: refusing to start: the recipe credential check needs the recipe bucket and the platform recipe prefix (SAASAPI_RECIPES_CREDENTIAL_CHECK)")
+	if sc.recipes == nil || sc.platformPrefix == "" || sc.jobs == nil {
+		return errors.New("saasapi: refusing to start: the recipe credential check needs the recipe bucket, the platform recipe prefix and the job bucket (SAASAPI_RECIPES_CREDENTIAL_CHECK, SAASAPI_RECIPES_JOB_BUCKET)")
 	}
 	var nonce [8]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
@@ -135,10 +133,7 @@ func checkRecipeCredentialScope(ctx context.Context, sc recipeCredentialScope) e
 		log.Infof("saasapi: recipe credential check: object store not answering yet (attempt %d: %v), retrying in %s", attempt, err, wait)
 	}
 	recipeErr := sc.recipes.ExpectDenied(ctx, recipeCredentialProbes(n, sc.platformPrefix), policy)
-	var jobErr error
-	if sc.jobs != nil {
-		jobErr = sc.jobs.ExpectDenied(ctx, jobBucketCredentialProbes(n), policy)
-	}
+	jobErr := sc.jobs.ExpectDenied(ctx, jobBucketCredentialProbes(n), policy)
 
 	var allowed, inconclusive errList
 	for _, r := range []struct {
@@ -162,12 +157,6 @@ func checkRecipeCredentialScope(ctx context.Context, sc recipeCredentialScope) e
 		return fmt.Errorf("saasapi: refusing to start: could not verify the recipe credential's scope in buckets %s and %s (SAASAPI_RECIPES_CREDENTIAL_CHECK): %w. "+
 			"Check SAASAPI_RECIPES_S3_ENDPOINT, both buckets (SAASAPI_RECIPES_S3_BUCKET, SAASAPI_RECIPES_JOB_BUCKET), the key pair and network access to the object store; "+
 			"the check counts only AccessDenied as denied", sc.recipeBucket, sc.jobBucket, inconclusive)
-	}
-	if sc.jobs == nil {
-		log.Warnf("saasapi: recipe credential check passed for bucket %s (refused outside tenants/, under sprouts/ and under the platform recipe prefix %s), "+
-			"but farmer's job bucket was NOT probed: set SAASAPI_RECIPES_JOB_BUCKET (farmer's IMAS_S3_JOB_BUCKET) so the check makes sure this credential can't read or rewrite job logs",
-			sc.recipeBucket, sc.platformPrefix)
-		return nil
 	}
 	log.Infof("saasapi: recipe credential check passed: bucket %s refuses this credential outside tenants/, under sprouts/ and under the platform recipe prefix %s, and job bucket %s refuses it everything",
 		sc.recipeBucket, sc.platformPrefix, sc.jobBucket)

@@ -102,8 +102,9 @@ func TestLoadRecipeSettingsRejects(t *testing.T) {
 }
 
 // FIX.5: with the credential check on (the default), the platform recipe
-// prefix must be usable and the job bucket, when set, must not be the
-// recipe bucket; with the check off neither is looked at.
+// prefix must be usable and the job bucket must be set (FIX.5 follow-up,
+// owner decision) and must not be the recipe bucket; with the check off
+// neither is looked at.
 func TestLoadRecipeSettingsCredentialCheckScope(t *testing.T) {
 	store := map[string]string{
 		"SAASAPI_RECIPES_S3_ENDPOINT":               "minio:9000",
@@ -117,7 +118,7 @@ func TestLoadRecipeSettingsCredentialCheckScope(t *testing.T) {
 		want string // "" accepts
 	}{
 		{"job bucket set", map[string]string{"SAASAPI_RECIPES_JOB_BUCKET": "jobs"}, ""},
-		{"no job bucket (the check warns at startup)", nil, ""},
+		{"no job bucket", nil, "SAASAPI_RECIPES_JOB_BUCKET (farmer's IMAS_S3_JOB_BUCKET) is required"},
 		{"job bucket is the recipe bucket", map[string]string{"SAASAPI_RECIPES_JOB_BUCKET": "recipes"}, "must differ"},
 		{"platform dir under tenants/", map[string]string{"SAASAPI_RECIPES_JOB_BUCKET": "jobs", "SAASAPI_RECIPES_PLATFORM_RECIPE_DIR": "tenants/x"}, "SAASAPI_RECIPES_PLATFORM_RECIPE_DIR"},
 		{"platform dir under sprouts/", map[string]string{"SAASAPI_RECIPES_JOB_BUCKET": "jobs", "SAASAPI_RECIPES_PLATFORM_RECIPE_DIR": "/sprouts"}, "SAASAPI_RECIPES_PLATFORM_RECIPE_DIR"},

@@ -52,9 +52,21 @@ It does **not** deploy the DMZ bus or Envoy. Those are `deploy/helm/nats`.
 
 ## Before you install
 
-1. **Fetch the subcharts:** run `helm dependency build deploy/helm/farmer`.
-   `Chart.lock` pins the exact versions; `charts/` is gitignored. Use
-   `helm dependency update` only to move a pin, and commit the new lock.
+1. **Fetch the subcharts.** Add the three repositories `Chart.lock` names,
+   then build:
+
+   ```sh
+   helm repo add openbao https://openbao.github.io/openbao-helm
+   helm repo add percona https://percona.github.io/percona-helm-charts
+   helm repo add valkey https://valkey.io/valkey-helm/
+   helm dependency build deploy/helm/farmer
+   ```
+
+   Without the `helm repo add` lines, Helm 3 and 4 both refuse with
+   `no repository definition for ...`. CI runs the same commands
+   (`.github/workflows/ci.yml`). `Chart.lock` pins the exact versions;
+   `charts/` is gitignored. Use `helm dependency update` only to move a pin,
+   and commit the new lock.
 2. **The seed Secret** (`natsSeeds.secretName`, default
    `imas-farmer-nats-seeds`) must exist in the release namespace. The chart
    never generates seeds. See [Seeds](#seeds).
@@ -118,6 +130,9 @@ kubectl -n imas-core create secret generic imas-farmer-nats-seeds \
 kubectl -n imas-core create secret generic imas-saasapi-internal-auth \
   --from-literal=current="$(openssl rand -hex 32)"
 
+helm repo add openbao https://openbao.github.io/openbao-helm
+helm repo add percona https://percona.github.io/percona-helm-charts
+helm repo add valkey https://valkey.io/valkey-helm/
 helm dependency build deploy/helm/farmer
 helm install imas-core deploy/helm/farmer -n imas-core -f deploy/helm/farmer/ci/default-values.yaml \
   --timeout 30m \
@@ -737,34 +752,64 @@ kubectl -n imas create secret generic saasapi-s3 \
   --from-literal=access-key-id=imas-saasapi --from-literal=secret-access-key="$SECRET_KEY"
 ```
 
-**The limit is checked, not just documented (FIX.3).** With
+**The limit is checked, not just documented (FIX.3, FIX.5).** With
 `saasapi.recipes.enabled` the chart sets `SAASAPI_RECIPES_CREDENTIAL_CHECK`
 (`saasapi.recipes.credentialCheck`, default `true`; saasapi's own default
 is on too, so only an explicit `false` turns it off), and at startup saasapi
 asks the object store, with its own credential, to do what that credential
-must not be able to do:
+must not be able to do. In the recipe bucket (`objectStore.bucket`):
 
 - create an object at the bucket root (outside `tenants/`);
 - create an object under `sprouts/` (farmer's staged recipes);
 - read a key under `sprouts/`;
-- list `sprouts/`.
+- list `sprouts/`;
+- create an object under the platform recipe prefix (farmer's `recipedir`,
+  default `/srv/imas/recipes/prod/`, the key prefix
+  `srv/imas/recipes/prod/` in the bucket);
+- delete a key under the platform recipe prefix.
 
-If the store allows any of them, saasapi logs which and exits instead of
-serving: farmer's key, a bucket-wide key or an admin key never runs as the
-recipe credential. Only `AccessDenied` counts as denied, so a store that
-can't be reached within about 30 seconds, a rejected key or a missing
-bucket also stops it (the pod restarts and tries again). Writes are
-create-only at random keys under `imas-saasapi-credential-check/`, never
-overwriting anything, and an object a wrongly allowed probe created is
-deleted again before saasapi exits. Why a self-check rather than a Job that
+In farmer's job bucket (`objectStore.jobBucket`), where the credential must
+have no access at all:
+
+- create an object under `jobs/`;
+- read a key under `jobs/`;
+- delete a key under `jobs/`;
+- list `jobs/`;
+- list the bucket root.
+
+Every probe runs before saasapi decides. If the store allows any of them,
+saasapi logs which and exits instead of serving: farmer's key, a
+bucket-wide key or an admin key never runs as the recipe credential. Only
+`AccessDenied` counts as denied, so a store that can't be reached within
+about 30 seconds, a rejected key or a missing bucket also stops it (the pod
+restarts and tries again). Writes are create-only at random keys under
+`imas-saasapi-credential-check/`, never overwriting anything, and an object
+a wrongly allowed probe created is deleted again before saasapi exits (or
+named in the error if it can't be). Deletes are of fresh random keys that
+nothing wrote, so a wrongly allowed one removes nothing; a versioned bucket
+gets a delete marker at that key.
+
+**The check needs the job bucket.** While `saasapi.recipes.enabled` and
+`saasapi.recipes.credentialCheck` are both on, the chart refuses to render
+without `objectStore.jobBucket`, and passes it to saasapi as
+`SAASAPI_RECIPES_JOB_BUCKET`. The saasapi binary refuses to start without
+`SAASAPI_RECIPES_JOB_BUCKET` while the check is on, so it never runs a
+check that can't see the job bucket. The job bucket must differ from the
+recipe bucket. The platform recipe prefix comes from
+`SAASAPI_RECIPES_PLATFORM_RECIPE_DIR`, whose default
+`/srv/imas/recipes/prod` is farmer's default `recipedir`. The chart doesn't
+change farmer's `recipedir` and doesn't set this variable. If you run
+farmer with a different `recipedir`, set
+`SAASAPI_RECIPES_PLATFORM_RECIPE_DIR` to the same path through
+`saasapi.extraEnv`. Why a self-check rather than a Job that
 creates the MinIO policy and user: it works for any S3 store (MinIO, AWS,
 others) and checks the credential saasapi actually runs with, whoever made
 it, and it needs no MinIO client image (`mc` is AGPL-3.0) and no MinIO admin
 credential in the cluster. What it doesn't prove: the whole policy. One
 known gap: AWS answers a read of a missing key with `AccessDenied` to a
 caller without `s3:ListBucket`, so a credential that may read `sprouts/*`
-but not list the bucket at all passes the read probe (the list probe still
-fails a bucket-wide key). `saasapi.recipes.credentialCheck=false` turns it
+(or job bucket keys) but not list that bucket at all passes the read probe
+(the list probes still fail a bucket-wide key). `saasapi.recipes.credentialCheck=false` turns it
 off, and NOTES warns; do that only for a store whose answers the check
 can't classify, after limiting the credential some other way.
 
@@ -950,7 +995,7 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `saasapi.recipes.readRole` / `writeRole` | `imas-recipes-read` / `imas-recipes-write` | `SAASAPI_RECIPES_READ_ROLE` / `_WRITE_ROLE`: Keycloak roles for GET, and for PUT/DELETE. Must differ. |
 | `saasapi.recipes.maxCount` / `maxTotalBytes` | `500` / `20971520` | `SAASAPI_RECIPES_MAX_COUNT` / `_MAX_TOTAL_BYTES`: per-tenant caps. |
 | `saasapi.recipes.writeRateLimit.*` | `1` / `10` | `SAASAPI_RECIPES_WRITE_RATE_LIMIT` / `_BURST`: PUT and DELETE per tenant. |
-| `saasapi.recipes.credentialCheck` | `true` | `SAASAPI_RECIPES_CREDENTIAL_CHECK`: saasapi refuses to start unless the object store denies its recipe credential outside `tenants/` and on `sprouts/`. `false` turns it off; NOTES warns. See [Tenant recipe upload](#tenant-recipe-upload). |
+| `saasapi.recipes.credentialCheck` | `true` | `SAASAPI_RECIPES_CREDENTIAL_CHECK`: saasapi refuses to start unless the object store denies its recipe credential outside `tenants/`, on `sprouts/`, creating and deleting under the platform recipe prefix (farmer's `recipedir`, default `/srv/imas/recipes/prod/`), and put, get, delete and list (of `jobs/` and of the bucket root) in the job bucket. Requires `objectStore.jobBucket`, passed as `SAASAPI_RECIPES_JOB_BUCKET`; the chart refuses to render without it while this is on. `false` turns it off; NOTES warns. See [Tenant recipe upload](#tenant-recipe-upload). |
 | `saasapi.extraEnv` | `[]` | Extra env vars for saasapi, e.g. `IMAS_FLEETSIGN_OPENBAO_NAMESPACE` (see [OpenBao](#openbao)) or `HTTPS_PROXY`/`NO_PROXY`. |
 | `credentialPublisher.*` | enabled, `platform/imas/saasapi-nats-user` | The publish Job. |
 | `sproutRelease.register` | `true` | Register `files/sprout-release.json` when the chart has it and the operator plane is on. |
@@ -1156,9 +1201,9 @@ exceptions, all subcharts and none of them Go dependencies:
   it a Secret of its own, scoped by the example policy, and never reuse
   farmer's (farmer's can write `sprouts/` and the platform tree). saasapi
   checks the scope itself at startup (`saasapi.recipes.credentialCheck`,
-  FIX.3) and refuses to run with a credential the store lets outside
-  `tenants/` or onto `sprouts/`; see that section for what the check does
-  not prove.
+  FIX.3, FIX.5) and refuses to run with a credential the store lets outside
+  `tenants/`, onto `sprouts/`, onto the platform recipe prefix or into the
+  job bucket; see that section for what the check does not prove.
 - **The bootstrap admin** (`farmer.bootstrapAdmin`) becomes the platform's
   first CLI admin, with every right. The chart requires it (or an explicit
   `skip`), but can't check whose key it is: verify the box key's

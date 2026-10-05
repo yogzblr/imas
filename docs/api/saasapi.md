@@ -668,7 +668,7 @@ error, never a silent default.
 | `SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY_FILE` | — | its secret key, as a mounted file |
 | `SAASAPI_RECIPES_S3_USE_SSL` | `true` | |
 | `SAASAPI_RECIPES_CREDENTIAL_CHECK` | `true` | at startup, refuse to start unless the object store denies the recipe credential outside `tenants/`, under `sprouts/`, writes and deletes under the platform recipe prefix, and everything in the job bucket; only an explicit `false` turns it off |
-| `SAASAPI_RECIPES_JOB_BUCKET` | empty | farmer's job bucket (`IMAS_S3_JOB_BUCKET`), which the check makes sure the credential can't reach at all; must differ from the recipe bucket. Unset, the job bucket isn't probed and saasapi logs a warning; the Helm chart always sets it while the check is on |
+| `SAASAPI_RECIPES_JOB_BUCKET` | empty | farmer's job bucket (`IMAS_S3_JOB_BUCKET`), which the check makes sure the credential can't reach at all; must differ from the recipe bucket. Required while the check is on: unset, saasapi refuses to start. The Helm chart sets it from `objectStore.jobBucket` |
 | `SAASAPI_RECIPES_PLATFORM_RECIPE_DIR` | `/srv/imas/recipes/prod` | farmer's `recipedir`, whose cleaned form is the platform recipe prefix the check probes; set it if farmer's differs from farmer's default |
 | `SAASAPI_RECIPES_READ_ROLE` / `_WRITE_ROLE` | `imas-recipes-read` / `imas-recipes-write` | Keycloak roles for the recipe GETs, and for PUT/DELETE; must differ |
 | `SAASAPI_RECIPES_MAX_COUNT` / `_MAX_TOTAL_BYTES` | `500` / `20971520` | per-tenant caps; `1`–`100000` / up to 1 GiB |

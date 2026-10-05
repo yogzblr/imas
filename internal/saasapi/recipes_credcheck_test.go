@@ -273,6 +273,7 @@ func TestCheckRecipeCredentialScopeInconclusive(t *testing.T) {
 	for name, mutate := range map[string]func(*recipeCredentialScope){
 		"no recipe store":    func(sc *recipeCredentialScope) { sc.recipes = nil },
 		"no platform prefix": func(sc *recipeCredentialScope) { sc.platformPrefix = "" },
+		"no job store":       func(sc *recipeCredentialScope) { sc.jobs, sc.jobBucket = nil, "" },
 	} {
 		sc, _, _ := testScope(t, saasapiRecipePolicy, denyAll)
 		mutate(&sc)
@@ -333,22 +334,36 @@ func TestConfigureRecipesCredentialCheck(t *testing.T) {
 	}
 }
 
-// FIX.5: without SAASAPI_RECIPES_JOB_BUCKET the job bucket can't be
-// probed: the recipe bucket's probes, the platform prefix's included, still
-// decide, and the check passes only with a warning.
+// FIX.5 follow-up (owner decision): without the job bucket the check
+// refuses to start, even for a credential the recipe bucket refuses
+// everywhere it should, and makes no probe at all.
 func TestCheckRecipeCredentialScopeWithoutJobBucket(t *testing.T) {
 	fastCredentialCheck(t)
-	sc, _, _ := testScope(t, saasapiRecipePolicy, nil)
+	sc, rs, _ := testScope(t, saasapiRecipePolicy, nil)
 	sc.jobs, sc.jobBucket = nil, ""
-	if err := checkRecipeCredentialScope(context.Background(), sc); err != nil {
-		t.Fatalf("limited credential, no job bucket: %v", err)
+	if err := checkRecipeCredentialScope(context.Background(), sc); err == nil ||
+		!strings.Contains(err.Error(), "refusing to start") || !strings.Contains(err.Error(), "SAASAPI_RECIPES_JOB_BUCKET") {
+		t.Fatalf("limited credential, no job bucket: got %v", err)
 	}
-	sc, _, _ = testScope(t, func(op, key string) bool {
-		return !(op == "DELETE" && strings.HasPrefix(key, testPlatformPrefix)) && saasapiRecipePolicy(op, key)
-	}, nil)
-	sc.jobs, sc.jobBucket = nil, ""
-	if err := checkRecipeCredentialScope(context.Background(), sc); !errors.Is(err, objectstore.ErrAccessAllowed) ||
-		!strings.Contains(err.Error(), "delete "+testPlatformPrefix) {
-		t.Fatalf("platform prefix deletable, no job bucket: got %v", err)
+	if keys := rs.Keys(); len(keys) != 0 {
+		t.Fatalf("probe objects written without a job bucket: %v", keys)
+	}
+}
+
+// recipeCredentialCheckScope refuses an unset job bucket too, behind
+// validate, and opens the job bucket when one is set.
+func TestRecipeCredentialCheckScopeJobBucket(t *testing.T) {
+	s := DefaultRecipeSettings()
+	s.Endpoint, s.Bucket, s.AccessKeyID, s.UseSSL = "minio:9000", "recipes", "saasapi", false
+	if _, err := recipeCredentialCheckScope(s, nil, "secret"); err == nil || !strings.Contains(err.Error(), "SAASAPI_RECIPES_JOB_BUCKET") {
+		t.Fatalf("no job bucket: got %v", err)
+	}
+	s.JobBucket = "jobs"
+	sc, err := recipeCredentialCheckScope(s, nil, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sc.jobs == nil || sc.jobBucket != "jobs" || sc.platformPrefix == "" {
+		t.Fatalf("scope %+v", sc)
 	}
 }

@@ -604,9 +604,9 @@ Docs-only PRs in the same window: #68 (this file's RAG summary), #82 (plan
 
 ## Merged pull requests, 2026-09-28 to 2026-10-05
 
-Every PR merged to `main` in this window (#36 to #116; #54 was not merged), so
-this file can be checked against the repository's history, plus FIX.5, still
-open. From #68 on, each
+Every PR merged to `main` in this window (#36 to #118; #54 was not merged), so
+this file can be checked against the repository's history, plus #120, still
+open (#119 was closed unmerged and reopened as #120). From #68 on, each
 row starts with its brief ID ("docs" for a docs-only PR).
 
 | PR | Merged | What | Recorded in |
@@ -679,7 +679,9 @@ row starts with its brief ID ("docs" for a docs-only PR).
 | #114 | 10-05 | **FIX.4**: This file brought up to `main` at `7fb527a` (PRs #68 to #113) | Validation, 2026-10-05 |
 | #115 | 10-05 | **docs**: Release GPG public key committed; `SECURITY.md` fingerprint fixed | Validation, 2026-10-05 (first release prerequisite 1) |
 | #116 | 10-05 | **docs**: Plan §4g: the FIX.5 brief (release blockers from the 2026-10-05 re-validation) | this ledger |
-| FIX.5 | open | **FIX.5**: Helm lint with CI values and Chart.lock repositories in the publish workflow; chart tests required to run in CI (`IMAS_REQUIRE_HELM=1`); keyless sprout items recorded as `sprout_reenroll_required`; recipe credential check probes the platform recipe prefix and the job bucket; security review and this file's marks updated. Flagged; ready for review, not merged | Validation, 2026-10-05 |
+| #117 | 10-05 | **FIX.5**: Helm lint with CI values and Chart.lock repositories in the publish workflow; chart tests required to run in CI (`IMAS_REQUIRE_HELM=1`); keyless sprout items recorded as `sprout_reenroll_required`; recipe credential check probes the platform recipe prefix and the job bucket; security review and this file's marks updated. Flagged for security review | Validation, 2026-10-05; Open items 4, 10 |
+| #118 | 10-05 | **FIX.1** follow-up: `cmd.run` errors carried as text, so the CLI shows farmer's refusal; `imas cmd run` exits 1 when the command failed on any target | this ledger |
+| #120 | open | **FIX.5 follow-up**: saasapi refuses to start without `SAASAPI_RECIPES_JOB_BUCKET` while `SAASAPI_RECIPES_CREDENTIAL_CHECK` is on (owner decision: strictly fail closed); chart README and `INSTALL.md` list the new probes and add `helm repo add` before `helm dependency build`. Flagged; ready for review, not merged | Validation, 2026-10-05; Open item 10 |
 
 ## Notes
 
@@ -797,12 +799,12 @@ templates are untrusted input (M8 is a blocker); sealing (items 2 and 11) is
 built before the Terraform UAT gate, sealed-only with no compatibility window
 because nothing is deployed. Briefs: `docs/claude-code-parallel-build-plan.md`
 §4e (Wave 7), §4f (post-SEC.6 follow-ups) and §4g (validation fixes); every
-one except FIX.4 (this refresh) has merged ("Open-item briefs and Wave 7").
+one has merged, FIX.5 last (PR #117) ("Open-item briefs and Wave 7").
 **Decisions, 2026-10-05:** a staged recipe copy may be up to
 `stagedrecipeclockskew` older than the newest handled job (SEC.7d, PR #110);
 the enrollment binding stays at 5 minutes (SEC.7d); saasapi records FIX.1's
-`sprout_reenroll_required` as `internal_error` for now (PR #113; FIX.5,
-not merged, records and documents the code itself); the saasapi
+`sprout_reenroll_required` as `internal_error` for now (PR #113; since
+FIX.5, PR #117, saasapi records and documents the code itself); the saasapi
 binary defaults the recipe credential check to on, as the chart does (FIX.3,
 PR #112).
 
@@ -994,9 +996,10 @@ PR #112).
    4. Smaller, not blocking: move `self_update_disabled`,
       `rollout_window_closed` and `farmer_busy` into `internal/controlplane`
       and add `self_update_disabled` and `sprout_reenroll_required` to
-      `docs/api/saasapi.md` and the OpenAPI item enum (saasapi records both
-      as `internal_error` until then). FIX.5 (not merged) does this for
-      `sprout_reenroll_required`; `self_update_disabled` is left.
+      `docs/api/saasapi.md` and the OpenAPI item enum. FIX.5 (merged,
+      PR #117) did this for `sprout_reenroll_required`;
+      `self_update_disabled` is left, and saasapi still records it as
+      `internal_error`.
 5. **Licences (LIC.1, merged, PR #73).** CL.2a found the `go-licenses`
    workflow's `save` step failing on `main` (`modernc.org/mathutil` reported
    an unknown licence), so `dependencies/` was not refreshed after
@@ -1098,8 +1101,8 @@ PR #112).
       everywhere farmer talks to a sprout's commands. Farmer sends nothing
       to a sprout with no box key on record and fails `cmd.run`, the cook
       dispatch and the nudge with `sprout_reenroll_required` (saasapi stores
-      it as `internal_error`, owner decision; FIX.5, not merged, stores the
-      code itself); a sprout with no keys refuses
+      the code itself since FIX.5, PR #117; before that it stored
+      `internal_error`, owner decision); a sprout with no keys refuses
       everything with `no-keys`. A first box key needs the 5-minute
       `enroll_binding` (owner decision 2026-10-05 kept 5 minutes); after it
       a keyless accepted sprout is closed and must be deleted (`imas keys
@@ -1184,13 +1187,18 @@ PR #112).
       must be created by hand. Chosen over a MinIO policy Job, which would
       need the AGPL-3.0 `mc` image and a MinIO admin credential. Still open:
       on AWS the read probe can't catch a key that may read `sprouts/*` but
-      can't list the bucket (it answers `AccessDenied` for a missing key);
-      `docs/api/saasapi.md` doesn't list `SAASAPI_RECIPES_CREDENTIAL_CHECK`;
-      the chart tests ran without the real subcharts (FIX.5, not merged,
-      lists the variable, makes CI build the subcharts and fail rather than
-      skip the chart tests, and adds probes of the platform recipe prefix
-      and the job bucket); PR #112's questions
+      can't list the bucket (it answers `AccessDenied` for a missing key,
+      and the same holds for job bucket keys); PR #112's questions
       (render farmer's rule with no endpoint; a required `skipReason`).
+      FIX.5 (merged, PR #117) closed the rest: `docs/api/saasapi.md` lists
+      `SAASAPI_RECIPES_CREDENTIAL_CHECK`, CI builds the real subcharts and
+      fails rather than skips the chart tests (`IMAS_REQUIRE_HELM=1`), and
+      the check also probes the platform recipe prefix and the job bucket.
+      With the check on, the job bucket is required: the chart refuses to
+      render without `objectStore.jobBucket` (FIX.5, PR #117), and the
+      saasapi binary refuses to start without `SAASAPI_RECIPES_JOB_BUCKET`
+      instead of warning that it didn't probe it (PR #120, not merged; owner
+      decision).
     - **saasapi NetworkPolicy and PDB (OPS.1, PR #105):** nothing stops
       `saasapi.pdb.maxUnavailable` being 0 (blocks every drain) or at least
       `replicaCount` (protects nothing); neither is the default.
@@ -1426,7 +1434,7 @@ with the SCALE sections, and both rows now say so.
 Then the Terraform UAT gate (Open item 1), which also needs the
 compute-provider decision.
 
-**FIX.5 (2026-10-05, ready for review, not merged).** The re-validation of
+**FIX.5 (2026-10-05, merged, PR #117; flagged for security review).** The re-validation of
 `main` at `cefa9ca` found two release blockers. `publish-packages.yml` ran
 `helm dependency build` on the farmer chart without adding its `Chart.lock`
 repositories, which Helm refuses ("no repository definition"), and linted
@@ -1436,3 +1444,17 @@ pins Helm (`v4.3.0`), and lints and renders each chart with its
 test skipped; the Test job now installs the same Helm, builds both charts'
 dependencies and sets `IMAS_REQUIRE_HELM=1`, which turns every chart-test
 skip into a failure.
+
+**FIX.5 follow-up (2026-10-05, PR #120, ready for review, not merged).**
+The job bucket is now required while the recipe credential check is on.
+FIX.5 (PR #117) had left `SAASAPI_RECIPES_JOB_BUCKET` optional in the binary: unset,
+saasapi probed the recipe bucket only and logged a warning. The owner chose
+to fail closed. `RecipeSettings.validate` refuses an unset job bucket while
+`SAASAPI_RECIPES_CREDENTIAL_CHECK` is on, and the check itself refuses a
+missing job store. With the check off nothing changes. The chart already
+required `objectStore.jobBucket` in that case (FIX.5). An operator running
+the binary outside the chart, with recipes and the check on but no job
+bucket, must now set `SAASAPI_RECIPES_JOB_BUCKET` (farmer's
+`IMAS_S3_JOB_BUCKET`) or saasapi won't start. The same PR documents the
+probes in the chart README and `docs/INSTALL.md`, and adds the
+`helm repo add` lines the README's install steps were missing.
