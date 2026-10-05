@@ -559,10 +559,13 @@ saasapi:
     # SAASAPI_RECIPES_CREDENTIAL_CHECK (FIX.3): at startup saasapi asks the
     # object store whether its recipe credential can create an object
     # outside tenants/ or under sprouts/, read a key under sprouts/ or list
-    # sprouts/, and refuses to start if any of it is allowed, or if the
+    # sprouts/, create or delete one under the platform recipe prefix
+    # (farmer's recipedir), or do anything at all in objectStore.jobBucket
+    # (FIX.5), and refuses to start if any of it is allowed, or if the
     # store gives no answer it can classify within about 30 seconds (fail
-    # closed: only AccessDenied counts as denied). This is what makes the
-    # policy in files/objectstore-policies/ a checked limit rather than
+    # closed: only AccessDenied counts as denied). It needs
+    # objectStore.jobBucket set. This is what makes the policy in
+    # files/objectstore-policies/ a checked limit rather than
     # documentation. Turn it off only for a store whose answers it can't
     # classify, and limit the credential some other way; NOTES warns.
     credentialCheck: true

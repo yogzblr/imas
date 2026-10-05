@@ -303,9 +303,15 @@ spec:
               value: /var/run/secrets/imas/recipes-s3/secret-access-key
             # FIX.3: refuse to start unless the object store denies this
             # credential outside tenants/ and under sprouts/
-            # (internal/saasapi recipes_credcheck.go).
+            # (internal/saasapi recipes_credcheck.go). FIX.5: and under the
+            # platform recipe prefix (farmer's default recipedir, which is
+            # saasapi's default too), and everything in the job bucket.
             - name: SAASAPI_RECIPES_CREDENTIAL_CHECK
               value: {{ .credentialCheck | toString | quote }}
+            {{- with $.Values.objectStore.jobBucket }}
+            - name: SAASAPI_RECIPES_JOB_BUCKET
+              value: {{ . | quote }}
+            {{- end }}
             {{- end }}
             {{- end }}
             {{- if $fleetVerify }}

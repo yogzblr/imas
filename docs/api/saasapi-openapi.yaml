@@ -1277,13 +1277,16 @@ components:
                   reports the same codes as a live one; `rollout_halted`
                   alone means it can't continue. `dispatch_outcome_unknown`
                   may have run; `dispatch_not_delivered`,
-                  `expired_not_sent` and `tenant_not_active` never ran.
+                  `expired_not_sent`, `tenant_not_active` and
+                  `sprout_reenroll_required` (the sprout has no
+                  payload-encryption key on record; re-enroll it) never ran.
                   See "Item error codes" in docs/api/saasapi.md.
                 enum:
                   - invalid_request
                   - unsupported_action
                   - sprout_not_found
                   - sprout_unreachable
+                  - sprout_reenroll_required
                   - internal_error
                   - sprout_not_accepted
                   - command_failed

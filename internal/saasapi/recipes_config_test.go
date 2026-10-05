@@ -19,6 +19,7 @@ func clearRecipeEnv(t *testing.T) {
 		"SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY_FILE", "SAASAPI_RECIPES_S3_USE_SSL", "SAASAPI_RECIPES_READ_ROLE",
 		"SAASAPI_RECIPES_WRITE_ROLE", "SAASAPI_RECIPES_MAX_COUNT", "SAASAPI_RECIPES_MAX_TOTAL_BYTES",
 		"SAASAPI_RECIPES_WRITE_RATE_LIMIT", "SAASAPI_RECIPES_WRITE_RATE_BURST", "SAASAPI_RECIPES_CREDENTIAL_CHECK",
+		"SAASAPI_RECIPES_JOB_BUCKET", "SAASAPI_RECIPES_PLATFORM_RECIPE_DIR",
 		"IMAS_RECIPE_MAX_SOURCE_BYTES", "IMAS_RECIPE_MAX_RENDERED_BYTES", "IMAS_RECIPE_MAX_VALUE_BYTES",
 		"IMAS_RECIPE_RENDER_TIMEOUT", "IMAS_RECIPE_MAX_RANGE_ITERATIONS",
 	} {
@@ -34,7 +35,7 @@ func TestLoadRecipeSettingsDefaults(t *testing.T) {
 	}
 	if s.Endpoint != "" || !s.UseSSL || s.ReadRole != "imas-recipes-read" || s.WriteRole != "imas-recipes-write" ||
 		s.MaxCount != 500 || s.MaxTotalBytes != 20<<20 || s.WriteRateLimit != 1 || s.WriteRateBurst != 10 ||
-		s.RenderLimits != (cook.RenderLimits{}) || !s.CredentialCheck {
+		s.RenderLimits != (cook.RenderLimits{}) || !s.CredentialCheck || s.JobBucket != "" || s.PlatformRecipeDir != "/srv/imas/recipes/prod" {
 		t.Fatalf("defaults %+v", s)
 	}
 }
@@ -48,6 +49,8 @@ func TestLoadRecipeSettingsFromEnv(t *testing.T) {
 		"SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY_FILE": "/var/run/secrets/key",
 		"SAASAPI_RECIPES_S3_USE_SSL":                "false",
 		"SAASAPI_RECIPES_CREDENTIAL_CHECK":          "false",
+		"SAASAPI_RECIPES_JOB_BUCKET":                "jobs",
+		"SAASAPI_RECIPES_PLATFORM_RECIPE_DIR":       "/srv/recipes",
 		"SAASAPI_RECIPES_READ_ROLE":                 "r",
 		"SAASAPI_RECIPES_WRITE_ROLE":                "w",
 		"SAASAPI_RECIPES_MAX_COUNT":                 "10",
@@ -64,7 +67,7 @@ func TestLoadRecipeSettingsFromEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := RecipeSettings{Endpoint: "minio:9000", Bucket: "recipes", AccessKeyID: "saasapi", SecretAccessKeyFile: "/var/run/secrets/key",
-		CredentialCheck: false, ReadRole: "r", WriteRole: "w", MaxCount: 10, MaxTotalBytes: 1000, WriteRateLimit: 0.5, WriteRateBurst: 3,
+		CredentialCheck: false, JobBucket: "jobs", PlatformRecipeDir: "/srv/recipes", ReadRole: "r", WriteRole: "w", MaxCount: 10, MaxTotalBytes: 1000, WriteRateLimit: 0.5, WriteRateBurst: 3,
 		RenderLimits: cook.RenderLimits{MaxSourceBytes: 1024, RenderTimeout: 500 * time.Millisecond}}
 	if s != want {
 		t.Fatalf("got %+v\nwant %+v", s, want)
@@ -92,6 +95,50 @@ func TestLoadRecipeSettingsRejects(t *testing.T) {
 			s := DefaultRecipeSettings()
 			err := loadRecipeSettings(&s)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want an error naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// FIX.5: with the credential check on (the default), the platform recipe
+// prefix must be usable and the job bucket, when set, must not be the
+// recipe bucket; with the check off neither is looked at.
+func TestLoadRecipeSettingsCredentialCheckScope(t *testing.T) {
+	store := map[string]string{
+		"SAASAPI_RECIPES_S3_ENDPOINT":               "minio:9000",
+		"SAASAPI_RECIPES_S3_BUCKET":                 "recipes",
+		"SAASAPI_RECIPES_S3_ACCESS_KEY_ID":          "saasapi",
+		"SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY_FILE": "/var/run/secrets/key",
+	}
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want string // "" accepts
+	}{
+		{"job bucket set", map[string]string{"SAASAPI_RECIPES_JOB_BUCKET": "jobs"}, ""},
+		{"no job bucket (the check warns at startup)", nil, ""},
+		{"job bucket is the recipe bucket", map[string]string{"SAASAPI_RECIPES_JOB_BUCKET": "recipes"}, "must differ"},
+		{"platform dir under tenants/", map[string]string{"SAASAPI_RECIPES_JOB_BUCKET": "jobs", "SAASAPI_RECIPES_PLATFORM_RECIPE_DIR": "tenants/x"}, "SAASAPI_RECIPES_PLATFORM_RECIPE_DIR"},
+		{"platform dir under sprouts/", map[string]string{"SAASAPI_RECIPES_JOB_BUCKET": "jobs", "SAASAPI_RECIPES_PLATFORM_RECIPE_DIR": "/sprouts"}, "SAASAPI_RECIPES_PLATFORM_RECIPE_DIR"},
+		{"check off, no job bucket", map[string]string{"SAASAPI_RECIPES_CREDENTIAL_CHECK": "false"}, ""},
+		{"check off, bad platform dir", map[string]string{"SAASAPI_RECIPES_CREDENTIAL_CHECK": "false", "SAASAPI_RECIPES_PLATFORM_RECIPE_DIR": "tenants/x"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearRecipeEnv(t)
+			for k, v := range store {
+				t.Setenv(k, v)
+			}
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			s := DefaultRecipeSettings()
+			err := loadRecipeSettings(&s)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("got %v, want an error naming %q", err, tc.want)
 			}
 		})

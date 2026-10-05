@@ -246,6 +246,7 @@ Every failed item carries one of these codes, with a fixed message:
 | `sprout_not_accepted` | no | the sprout's key isn't accepted; never sent |
 | `invalid_request`, `unsupported_action`, `sprout_not_found` | no | farmer refused the action |
 | `sprout_unreachable` | no | farmer couldn't reach the sprout |
+| `sprout_reenroll_required` | no | the sprout has no payload-encryption key on record, so farmer refused to send it anything (nothing is sent in plaintext); re-enroll the sprout. Not retried |
 | `command_failed` | yes | a `cmd.run` exited non-zero (`exit_code`) |
 | `job_failed`, `job_expired` | yes / maybe | a cook or update job failed, or started too late to be recorded |
 | `dispatch_outcome_unknown` | maybe | sent, but no usable reply: it timed out, its pod died waiting, or the answer wasn't farmer's sealed reply to that request |
@@ -265,6 +266,7 @@ Update rollouts (below) add their own. Items failed before they were sent:
 | `tenant_not_active` | the tenant stopped being `active` before the item's wave (a resumed rollout) |
 | `update_already_in_progress` | no longer written (a second rollout is now refused with `409 update_in_progress`); items stored before that keep it |
 | `rollout_halted` | the rollout can't continue: an earlier wave failed its gate, or, for a resumed rollout, the version is no longer registered or a row's signature no longer verifies |
+| `sprout_reenroll_required` | farmer refused to send the update: the sprout has no payload-encryption key on record (as above) |
 
 And for items that were sent: `unresponsive_after_update` (the sprout didn't
 come back on the target version in time), `facts_clock_skew` (its report is
@@ -665,6 +667,9 @@ error, never a silent default.
 | `SAASAPI_RECIPES_S3_BUCKET`, `SAASAPI_RECIPES_S3_ACCESS_KEY_ID` | — | the recipe bucket (farmer's `IMAS_S3_BUCKET`) and saasapi's **own** access key id, limited to `tenants/*/recipes/*` |
 | `SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY_FILE` | — | its secret key, as a mounted file |
 | `SAASAPI_RECIPES_S3_USE_SSL` | `true` | |
+| `SAASAPI_RECIPES_CREDENTIAL_CHECK` | `true` | at startup, refuse to start unless the object store denies the recipe credential outside `tenants/`, under `sprouts/`, writes and deletes under the platform recipe prefix, and everything in the job bucket; only an explicit `false` turns it off |
+| `SAASAPI_RECIPES_JOB_BUCKET` | empty | farmer's job bucket (`IMAS_S3_JOB_BUCKET`), which the check makes sure the credential can't reach at all; must differ from the recipe bucket. Unset, the job bucket isn't probed and saasapi logs a warning; the Helm chart always sets it while the check is on |
+| `SAASAPI_RECIPES_PLATFORM_RECIPE_DIR` | `/srv/imas/recipes/prod` | farmer's `recipedir`, whose cleaned form is the platform recipe prefix the check probes; set it if farmer's differs from farmer's default |
 | `SAASAPI_RECIPES_READ_ROLE` / `_WRITE_ROLE` | `imas-recipes-read` / `imas-recipes-write` | Keycloak roles for the recipe GETs, and for PUT/DELETE; must differ |
 | `SAASAPI_RECIPES_MAX_COUNT` / `_MAX_TOTAL_BYTES` | `500` / `20971520` | per-tenant caps; `1`–`100000` / up to 1 GiB |
 | `SAASAPI_RECIPES_WRITE_RATE_LIMIT` / `_BURST` | `1` / `10` | per-tenant limit on recipe PUT and DELETE together |

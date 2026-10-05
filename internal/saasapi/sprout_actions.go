@@ -131,6 +131,12 @@ const (
 	// SAASAPI_OUTBOX_ACTION_MAX_AGE after the batch was accepted (a long
 	// outage, say), so it was failed rather than sent late. It never ran.
 	errCodeExpiredNotSent = "expired_not_sent"
+	// errCodeSproutReenrollRequired: farmer refused to send the action
+	// because the sprout has no payload-encryption key on record (FIX.1:
+	// sealed only, never plaintext). It never ran, and it isn't sent again:
+	// it would be refused the same way until the sprout is re-enrolled.
+	// The same string farmer replies with (farmerCodeSproutReenrollRequired).
+	errCodeSproutReenrollRequired = "sprout_reenroll_required"
 )
 
 // Codes farmer's internal.sprout.action replies with besides
@@ -156,12 +162,9 @@ const (
 	// payload-encryption key on record, so farmer refused to send it
 	// anything (FIX.1: sealed only, never plaintext); it must be
 	// re-enrolled. Not sent again: it would be refused the same way until
-	// then. Stored as internal_error, with the reason logged naming the
-	// sprout, for the same reason as farmerCodeSelfUpdateDisabled: a new
-	// item code must first be added to docs/api/saasapi.md and the OpenAPI
-	// enum (TestItemErrorCodesDocumented), which were outside FIX.1's
-	// scope.
-	farmerCodeSproutReenrollRequired = "sprout_reenroll_required"
+	// then. Stored as errCodeSproutReenrollRequired, the same string
+	// (FIX.5; FIX.1 stored internal_error until the code was documented).
+	farmerCodeSproutReenrollRequired = errCodeSproutReenrollRequired
 )
 
 // actionErrorMessages is the only text ever shown for an item's error
@@ -183,6 +186,7 @@ var actionErrorMessages = map[string]string{
 	errCodeNotDelivered:           "the action could not be delivered after repeated attempts, so it was not run",
 	errCodeTenantNotActive:        "the tenant was no longer active when the action was due to be sent, so it was not sent",
 	errCodeExpiredNotSent:         "the action could not be sent in time after it was accepted, so it expired and was never sent",
+	errCodeSproutReenrollRequired: "the sprout has no payload-encryption key on record, so the action was not sent; re-enroll the sprout",
 
 	// Fleet update rollouts (fleet_update_dispatch.go).
 	errCodeRolloutHalted:           "an earlier wave of this rollout did not fully succeed, so the update was not sent to this sprout",
@@ -1018,9 +1022,9 @@ func replyUpdate(batch AssetActionBatch, item AssetActionItem, data []byte) map[
 			batch.ID, item.AssetID, batch.TenantID, controlplane.ErrorInternal)
 		return failedUpdate(string(controlplane.ErrorInternal))
 	case reply.Status == controlplane.StatusFailed && reply.ErrorCode == farmerCodeSproutReenrollRequired:
-		log.Errorf("saasapi: farmer refused batch %s asset %s (tenant %s): sprout %s has no payload-encryption key on record and must be re-enrolled (%s); nothing was sent; recorded as %s",
-			batch.ID, item.AssetID, batch.TenantID, item.SproutID, farmerCodeSproutReenrollRequired, controlplane.ErrorInternal)
-		return failedUpdate(string(controlplane.ErrorInternal))
+		log.Warnf("saasapi: farmer refused batch %s asset %s (tenant %s): sprout %s has no payload-encryption key on record and must be re-enrolled; nothing was sent; recorded as %s",
+			batch.ID, item.AssetID, batch.TenantID, item.SproutID, errCodeSproutReenrollRequired)
+		return failedUpdate(errCodeSproutReenrollRequired)
 	case reply.Status == controlplane.StatusFailed:
 		return failedUpdate(farmerErrorCode(reply.ErrorCode))
 	case reply.Status == controlplane.StatusCompleted && batch.ActionType == controlplane.ActionCmdRun && reply.Result != nil:

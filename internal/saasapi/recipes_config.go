@@ -39,10 +39,22 @@ import (
 //   - SAASAPI_RECIPES_S3_USE_SSL: default true.
 //   - SAASAPI_RECIPES_CREDENTIAL_CHECK: default true (owner decision,
 //     FIX.3), as in the Helm chart. ConfigureRecipes asks the object store
-//     whether the credential can write outside tenants/ or write, read or
-//     list sprouts/, and refuses to start if it can, or if the store gives
-//     no answer it can classify (recipes_credcheck.go). Only an explicit
-//     false turns it off. Ignored with no endpoint.
+//     whether the credential can write outside tenants/, write, read or
+//     list sprouts/, write or delete under the platform recipe prefix, or
+//     do anything at all in the job bucket, and refuses to start if it
+//     can, or if the store gives no answer it can classify
+//     (recipes_credcheck.go). Only an explicit false turns it off. Ignored
+//     with no endpoint.
+//   - SAASAPI_RECIPES_JOB_BUCKET: farmer's job bucket (IMAS_S3_JOB_BUCKET),
+//     which the check probes with the recipe credential (FIX.5); it must
+//     differ from SAASAPI_RECIPES_S3_BUCKET. Unset, the check can't probe
+//     it and says so in a warning at startup; the Helm chart always sets it
+//     while the check is on (and refuses to render without
+//     objectStore.jobBucket then).
+//   - SAASAPI_RECIPES_PLATFORM_RECIPE_DIR: farmer's recipedir, whose
+//     cleaned form is the platform recipe prefix in the recipe bucket
+//     (cook.PlatformRecipePrefix), which the check probes (FIX.5). Default
+//     /srv/imas/recipes/prod, farmer's default (internal/config).
 //   - SAASAPI_RECIPES_READ_ROLE / SAASAPI_RECIPES_WRITE_ROLE: the Keycloak
 //     roles (caller.go) that may read (GET) and write (PUT, DELETE) a
 //     tenant's recipes. Defaults imas-recipes-read and imas-recipes-write;
@@ -68,6 +80,10 @@ type RecipeSettings struct {
 	// CredentialCheck runs the startup self-check of the credential's
 	// scope (recipes_credcheck.go).
 	CredentialCheck bool
+	// JobBucket is farmer's job bucket and PlatformRecipeDir farmer's
+	// recipedir: what the self-check probes besides tenants/ and sprouts/.
+	JobBucket         string
+	PlatformRecipeDir string
 
 	ReadRole  string
 	WriteRole string
@@ -95,20 +111,25 @@ const (
 	defaultRecipeWriteBurst     = 10
 	recipeWriteLimiterName      = "recipe-writes"
 	maxRecipeSecretKeyFileBytes = 4096
+	// defaultPlatformRecipeDir is farmer's default recipedir
+	// (internal/config), so the platform recipe prefix farmer reads when
+	// nothing sets it.
+	defaultPlatformRecipeDir = "/srv/imas/recipes/prod"
 )
 
 // DefaultRecipeSettings returns the settings with recipe upload off and
 // every other field at its default.
 func DefaultRecipeSettings() RecipeSettings {
 	return RecipeSettings{
-		UseSSL:          true,
-		CredentialCheck: true,
-		ReadRole:        defaultRecipeReadRole,
-		WriteRole:       defaultRecipeWriteRole,
-		MaxCount:        defaultRecipeMaxCount,
-		MaxTotalBytes:   defaultRecipeMaxTotalBytes,
-		WriteRateLimit:  defaultRecipeWriteRate,
-		WriteRateBurst:  defaultRecipeWriteBurst,
+		UseSSL:            true,
+		CredentialCheck:   true,
+		PlatformRecipeDir: defaultPlatformRecipeDir,
+		ReadRole:          defaultRecipeReadRole,
+		WriteRole:         defaultRecipeWriteRole,
+		MaxCount:          defaultRecipeMaxCount,
+		MaxTotalBytes:     defaultRecipeMaxTotalBytes,
+		WriteRateLimit:    defaultRecipeWriteRate,
+		WriteRateBurst:    defaultRecipeWriteBurst,
 	}
 }
 
@@ -133,6 +154,10 @@ func loadRecipeSettings(s *RecipeSettings) error {
 			return fmt.Errorf("saasapi: SAASAPI_RECIPES_CREDENTIAL_CHECK=%q: not a boolean", v)
 		}
 		s.CredentialCheck = b
+	}
+	s.JobBucket = os.Getenv("SAASAPI_RECIPES_JOB_BUCKET")
+	if v := os.Getenv("SAASAPI_RECIPES_PLATFORM_RECIPE_DIR"); v != "" {
+		s.PlatformRecipeDir = v
 	}
 	if v := os.Getenv("SAASAPI_RECIPES_READ_ROLE"); v != "" {
 		s.ReadRole = v
@@ -223,6 +248,15 @@ func (s RecipeSettings) validate() error {
 				return fmt.Errorf("saasapi: %s is required when SAASAPI_RECIPES_S3_ENDPOINT is set", name)
 			}
 		}
+		if s.CredentialCheck {
+			// What the self-check probes besides tenants/ and sprouts/ (FIX.5).
+			if s.JobBucket != "" && s.JobBucket == s.Bucket {
+				return fmt.Errorf("saasapi: SAASAPI_RECIPES_JOB_BUCKET must differ from SAASAPI_RECIPES_S3_BUCKET (both %q): farmer keeps job logs out of the recipe bucket", s.Bucket)
+			}
+			if _, err := cook.PlatformRecipePrefix(s.PlatformRecipeDir); err != nil {
+				return fmt.Errorf("saasapi: SAASAPI_RECIPES_PLATFORM_RECIPE_DIR=%q: %w", s.PlatformRecipeDir, err)
+			}
+		}
 	}
 	for name, v := range map[string]string{"SAASAPI_RECIPES_READ_ROLE": s.ReadRole, "SAASAPI_RECIPES_WRITE_ROLE": s.WriteRole} {
 		if strings.TrimSpace(v) != v || v == "" {
@@ -302,7 +336,11 @@ func ConfigureRecipes(s RecipeSettings, vc valkey.Client) error {
 			return fmt.Errorf("saasapi: recipe store: %w", err)
 		}
 		if s.CredentialCheck {
-			if err := checkRecipeCredentialScope(context.Background(), store, s.Bucket); err != nil {
+			sc, err := recipeCredentialCheckScope(s, store, secret)
+			if err != nil {
+				return err
+			}
+			if err := checkRecipeCredentialScope(context.Background(), sc); err != nil {
 				return err
 			}
 		} else {
@@ -315,6 +353,30 @@ func ConfigureRecipes(s RecipeSettings, vc valkey.Client) error {
 	}
 	recipeSvc = newRecipeService(s, store, vc)
 	return nil
+}
+
+// recipeCredentialCheckScope builds what the self-check probes: store
+// (the recipe bucket), the platform recipe prefix, and, when
+// SAASAPI_RECIPES_JOB_BUCKET is set, the job bucket opened with the same
+// credential. validate has checked the settings.
+func recipeCredentialCheckScope(s RecipeSettings, store *objectstore.Store, secret string) (recipeCredentialScope, error) {
+	prefix, err := cook.PlatformRecipePrefix(s.PlatformRecipeDir)
+	if err != nil {
+		return recipeCredentialScope{}, fmt.Errorf("saasapi: SAASAPI_RECIPES_PLATFORM_RECIPE_DIR: %w", err)
+	}
+	sc := recipeCredentialScope{recipes: store, recipeBucket: s.Bucket, platformPrefix: prefix}
+	if s.JobBucket == "" {
+		return sc, nil
+	}
+	jobs, err := objectstore.Open(objectstore.Config{
+		Endpoint: s.Endpoint, Bucket: s.JobBucket, UseSSL: s.UseSSL,
+		AccessKeyID: s.AccessKeyID, SecretAccessKey: secret,
+	})
+	if err != nil {
+		return recipeCredentialScope{}, fmt.Errorf("saasapi: SAASAPI_RECIPES_JOB_BUCKET: %w", err)
+	}
+	sc.jobs, sc.jobBucket = jobs, s.JobBucket
+	return sc, nil
 }
 
 // readSecretFile reads a mounted secret, at most limit bytes, trimming

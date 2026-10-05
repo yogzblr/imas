@@ -29,7 +29,9 @@ import (
 // A put probe that succeeds created an object; ExpectDenied deletes it
 // again (best effort, reported if that fails). Put probes are create-only
 // (If-None-Match: *), so a probe never replaces an existing object, and
-// ExpectDenied never deletes an object a probe didn't write.
+// ExpectDenied never deletes an object a probe didn't write. A delete
+// probe targets a fresh key nothing wrote, so even an allowed one removes
+// nothing (in a versioned bucket it leaves a delete marker at that key).
 
 // ProbeOp is the request an access probe makes.
 type ProbeOp string
@@ -43,7 +45,21 @@ const (
 	ProbeGet ProbeOp = "get"
 	// ProbeList lists one object under the key, used as a prefix.
 	ProbeList ProbeOp = "list"
+	// ProbeDelete deletes the object at the key. Use a fresh key that
+	// doesn't exist: S3 answers a permitted delete of a missing key with
+	// success (204) and a forbidden one with AccessDenied, whether or not
+	// the caller may list the bucket, so the answer needs no object there.
+	ProbeDelete ProbeOp = "delete"
 )
+
+// validProbeOp reports whether op is one TryAccess knows.
+func validProbeOp(op ProbeOp) bool {
+	switch op {
+	case ProbePut, ProbeGet, ProbeList, ProbeDelete:
+		return true
+	}
+	return false
+}
 
 // Probe is one access probe: an operation on a key (or, for ProbeList, a
 // prefix) of the store's bucket.
@@ -52,7 +68,12 @@ type Probe struct {
 	Key string
 }
 
-func (p Probe) String() string { return fmt.Sprintf("%s %s", p.Op, p.Key) }
+func (p Probe) String() string {
+	if p.Key == "" {
+		return fmt.Sprintf("%s (bucket root)", p.Op)
+	}
+	return fmt.Sprintf("%s %s", p.Op, p.Key)
+}
 
 // Access is a probe's classified outcome.
 type Access int
@@ -110,6 +131,12 @@ func (s *Store) tryAccess(ctx context.Context, p Probe) (Access, bool, error) {
 		}
 	case ProbeList:
 		_, _, err = s.ListPage(ctx, p.Key, "", 1)
+	case ProbeDelete:
+		err = s.client.RemoveObject(ctx, s.bucket, p.Key, minio.RemoveObjectOptions{})
+		if err != nil && errorCode(err) == "NoSuchKey" {
+			// Some stores say so for a missing key, after authorizing.
+			return AccessAllowed, false, nil
+		}
 	default:
 		return AccessUnknown, false, fmt.Errorf("objectstore: unknown probe operation %q", p.Op)
 	}
@@ -206,7 +233,7 @@ func (e *AllowedError) Unwrap() error { return ErrAccessAllowed }
 func (s *Store) ExpectDenied(ctx context.Context, probes []Probe, rp RetryPolicy) error {
 	rp = rp.withDefaults()
 	for _, p := range probes {
-		if p.Op != ProbePut && p.Op != ProbeGet && p.Op != ProbeList {
+		if !validProbeOp(p.Op) {
 			return fmt.Errorf("objectstore: unknown probe operation %q", p.Op)
 		}
 	}

@@ -34,7 +34,33 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # The chart tests (deploy/helm/*/chart_test.go) render the charts with
+      # the helm CLI and skip without it. Pinned to the version
+      # publish-packages.yml lints and packages the charts with.
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v4.3.0
+
+      # Fetch the farmer chart's subcharts (pinned by Chart.lock) so
+      # TestSubchartsRender runs. `helm dependency build` needs each
+      # Chart.lock repository added first. The nats chart has no
+      # dependencies; building it checks that stays so.
+      - name: Build Helm chart dependencies
+        run: |
+          set -euo pipefail
+          helm repo add openbao https://openbao.github.io/openbao-helm
+          helm repo add percona https://percona.github.io/percona-helm-charts
+          helm repo add valkey https://valkey.io/valkey-helm/
+          helm dependency build deploy/helm/farmer
+          helm dependency build deploy/helm/nats
+
+      # IMAS_REQUIRE_HELM=1 turns every chart-test skip (no helm, charts/
+      # not populated, a missing tool) into a failure, so this job can't
+      # pass without having rendered the charts.
       - name: Test with race detection and coverage
+        env:
+          IMAS_REQUIRE_HELM: "1"
         run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Upload coverage to Codecov
