@@ -680,6 +680,7 @@ row starts with its brief ID ("docs" for a docs-only PR).
 | #115 | 10-05 | **docs**: Release GPG public key committed; `SECURITY.md` fingerprint fixed | Validation, 2026-10-05 (first release prerequisite 1) |
 | #116 | 10-05 | **docs**: Plan §4g: the FIX.5 brief (release blockers from the 2026-10-05 re-validation) | this ledger |
 | FIX.5 | open | **FIX.5**: Helm lint with CI values and Chart.lock repositories in the publish workflow; chart tests required to run in CI (`IMAS_REQUIRE_HELM=1`); keyless sprout items recorded as `sprout_reenroll_required`; recipe credential check probes the platform recipe prefix and the job bucket; security review and this file's marks updated. Flagged; ready for review, not merged | Validation, 2026-10-05 |
+| #120 | open | **FIX.5 follow-up**: saasapi refuses to start without `SAASAPI_RECIPES_JOB_BUCKET` while `SAASAPI_RECIPES_CREDENTIAL_CHECK` is on (owner decision: strictly fail closed); chart README and `INSTALL.md` list the new probes and add `helm repo add` before `helm dependency build`. Flagged; ready for review, not merged | Validation, 2026-10-05; Open item 10 |
 
 ## Notes
 
@@ -1191,6 +1192,11 @@ PR #112).
       skip the chart tests, and adds probes of the platform recipe prefix
       and the job bucket); PR #112's questions
       (render farmer's rule with no endpoint; a required `skipReason`).
+      With the check on, the job bucket is required: the chart refuses to
+      render without `objectStore.jobBucket` (FIX.5, PR #117), and the
+      saasapi binary refuses to start without `SAASAPI_RECIPES_JOB_BUCKET`
+      instead of warning that it didn't probe it (PR #120, not merged; owner
+      decision).
     - **saasapi NetworkPolicy and PDB (OPS.1, PR #105):** nothing stops
       `saasapi.pdb.maxUnavailable` being 0 (blocks every drain) or at least
       `replicaCount` (protects nothing); neither is the default.
@@ -1436,3 +1442,17 @@ pins Helm (`v4.3.0`), and lints and renders each chart with its
 test skipped; the Test job now installs the same Helm, builds both charts'
 dependencies and sets `IMAS_REQUIRE_HELM=1`, which turns every chart-test
 skip into a failure.
+
+**FIX.5 follow-up (2026-10-05, PR #120, ready for review, not merged).**
+The job bucket is now required while the recipe credential check is on.
+FIX.5 had left `SAASAPI_RECIPES_JOB_BUCKET` optional in the binary: unset,
+saasapi probed the recipe bucket only and logged a warning. The owner chose
+to fail closed. `RecipeSettings.validate` refuses an unset job bucket while
+`SAASAPI_RECIPES_CREDENTIAL_CHECK` is on, and the check itself refuses a
+missing job store. With the check off nothing changes. The chart already
+required `objectStore.jobBucket` in that case (FIX.5). An operator running
+the binary outside the chart, with recipes and the check on but no job
+bucket, must now set `SAASAPI_RECIPES_JOB_BUCKET` (farmer's
+`IMAS_S3_JOB_BUCKET`) or saasapi won't start. The same PR documents the
+probes in the chart README and `docs/INSTALL.md`, and adds the
+`helm repo add` lines the README's install steps were missing.
