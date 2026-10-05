@@ -38,11 +38,23 @@ import (
 //   - farmer stamped its DispatchedAt, and it is no older than
 //     config.StagedRecipeMaxAge;
 //   - its DispatchedAt is not before that of the newest job this sprout
-//     already handled, pushed or pulled (newestHandledFile). A sealed
-//     staged copy can be captured by anyone holding the sprout's gateway
-//     JWT (the DMZ sees it) and served again later; the job ID check
-//     stops it being cooked twice, and this stops an older job the
-//     sprout never ran being cooked after a newer one it did.
+//     already handled, pushed or pulled (newestHandledFile), by more than
+//     config.StagedRecipeClockSkew. A sealed staged copy can be captured
+//     by anyone holding the sprout's gateway JWT (the DMZ sees it) and
+//     served again later; the job ID check stops it being cooked twice,
+//     and this stops an older job the sprout never ran being cooked
+//     after a newer one it did.
+//
+// The skew tolerance (SEC.7d, owner decision 2026-10-05) is there because
+// DispatchedAt is stamped on the clock of whichever farmer replica
+// dispatched the job, so a genuinely newer job can look a little older
+// than the newest one handled. It only widens the last check: the
+// envelope is still verified first, a handled job ID is still refused,
+// and the max age still applies. A job cooked inside the tolerance never
+// moves newestHandledFile backwards (recordNewestHandled only raises it),
+// so the window can't be walked back one job at a time. What it accepts:
+// an older job the sprout never ran, captured while staged, can still be
+// cooked after a newer one if it is no more than the tolerance older.
 //
 // A pulled job is recorded as handled before it is cooked, and whether or
 // not it is cooked, so it is considered at most once.
@@ -65,7 +77,7 @@ const (
 	SyncPushRaced      SyncOutcome = "a push arrived while fetching"
 	SyncUndated        SyncOutcome = "no dispatch time"
 	SyncTooOld         SyncOutcome = "older than the max age"
-	SyncSuperseded     SyncOutcome = "older than a job already handled"
+	SyncSuperseded     SyncOutcome = "older than a job already handled, beyond the clock skew tolerance"
 	SyncCooked         SyncOutcome = "cooked"
 )
 
@@ -197,7 +209,7 @@ func pullStagedRecipe(ctx context.Context) (RecipeEnvelope, SyncOutcome, error) 
 		outcome = SyncUndated
 	case syncClock().Sub(env.DispatchedAt) > stagedRecipeMaxAge():
 		outcome = SyncTooOld
-	case env.DispatchedAt.Before(newest):
+	case env.DispatchedAt.Before(newest.Add(-stagedRecipeClockSkew())):
 		outcome = SyncSuperseded
 	}
 	// Recorded even when skipped: it will only get older. If this fails
@@ -219,6 +231,16 @@ func stagedRecipeMaxAge() time.Duration {
 		return d
 	}
 	return config.DefaultStagedRecipeMaxAge
+}
+
+// stagedRecipeClockSkew is config.StagedRecipeClockSkew, or its default
+// if it is outside 0 to config.MaxStagedRecipeClockSkew (config validates
+// it on load; this covers a value set some other way).
+func stagedRecipeClockSkew() time.Duration {
+	if d := config.StagedRecipeClockSkew; d >= 0 && d <= config.MaxStagedRecipeClockSkew {
+		return d
+	}
+	return config.DefaultStagedRecipeClockSkew
 }
 
 // loadHandledJobs returns the handled job IDs, oldest first. A missing

@@ -316,8 +316,10 @@ func TestStagedSealed_ReplayedOldEnvelopeIsRefused(t *testing.T) {
 
 	// job-2 is staged; the DMZ, which holds the sprout's gateway JWT,
 	// copies it. The sprout misses job-2's push but receives job-3's.
-	// Served job-2 afterwards, it must not run it after job-3.
-	e.stage(t, RecipeEnvelope{JobID: "job-2", DispatchedAt: time.Now().Add(-time.Second).UTC()})
+	// Served job-2 afterwards, it must not run it after job-3. job-2 is
+	// older than job-3 by more than any clock skew tolerance allows
+	// (SEC.7d; inside it, it would be cooked: stagedsync_test.go).
+	e.stage(t, RecipeEnvelope{JobID: "job-2", DispatchedAt: time.Now().Add(-config.MaxStagedRecipeClockSkew - time.Minute).UTC()})
 	captured2 := e.stagedBytes(t)
 	if err := SendStepsEvent(e.tenant, e.sproutID, "job-3", secretSteps()); err != nil {
 		t.Fatalf("SendStepsEvent: %v", err)

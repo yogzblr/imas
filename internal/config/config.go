@@ -57,12 +57,54 @@ type RecipeTemplateLimits struct {
 }
 
 // Sprout setting defaults; see GatewayJWTRefreshMargin,
-// StagedRecipeMaxAge and SproutBoxKeyPrevGrace.
+// StagedRecipeMaxAge, StagedRecipeClockSkew and SproutBoxKeyPrevGrace.
 const (
 	DefaultGatewayJWTRefreshMargin = 5 * time.Minute
 	DefaultStagedRecipeMaxAge      = time.Hour
 	DefaultSproutBoxKeyPrevGrace   = 15 * time.Minute
+
+	// DefaultStagedRecipeClockSkew matches replayCacheClockMargin
+	// (internal/pki), the margin the repo already allows for clock
+	// differences between farmer replicas, which is what this tolerates.
+	DefaultStagedRecipeClockSkew = time.Minute
+	// MaxStagedRecipeClockSkew is the widest skew the repo accepts
+	// anywhere (payloadbox.DefaultMaxSkew, pki.EnrollSigMaxSkew, saasapi's
+	// maxRolloutClockSkew). Every second of tolerance is a second in which
+	// an older job the sprout never ran can still be cooked after a newer
+	// one it did.
+	MaxStagedRecipeClockSkew = 5 * time.Minute
 )
+
+// stagedRecipeClockSkewFrom validates a "stagedrecipeclockskew" value:
+// a Go duration string (or a time.Duration, the default) from 0 to
+// MaxStagedRecipeClockSkew, or a bare 0. A bare number other than 0 has
+// no unit, so it is refused rather than read as nanoseconds. On an error
+// it returns DefaultStagedRecipeClockSkew.
+func stagedRecipeClockSkewFrom(v any) (time.Duration, error) {
+	var d time.Duration
+	switch v := v.(type) {
+	case nil:
+		return DefaultStagedRecipeClockSkew, nil
+	case time.Duration:
+		d = v
+	case string:
+		parsed, err := time.ParseDuration(strings.TrimSpace(v))
+		if err != nil {
+			return DefaultStagedRecipeClockSkew, fmt.Errorf("stagedrecipeclockskew %q is not a duration", v)
+		}
+		d = parsed
+	case int, int64, uint64, float64:
+		if fmt.Sprint(v) != "0" {
+			return DefaultStagedRecipeClockSkew, fmt.Errorf("stagedrecipeclockskew %v has no unit (write e.g. 30s)", v)
+		}
+	default:
+		return DefaultStagedRecipeClockSkew, fmt.Errorf("stagedrecipeclockskew %v is not a duration", v)
+	}
+	if d < 0 || d > MaxStagedRecipeClockSkew {
+		return DefaultStagedRecipeClockSkew, fmt.Errorf("stagedrecipeclockskew %v is outside 0 to %v", d, MaxStagedRecipeClockSkew)
+	}
+	return d, nil
+}
 
 // setSystemConfigRoot overrides the config root for testing.
 func setSystemConfigRoot(root string) {
@@ -322,6 +364,15 @@ var (
 	// are skipped. Non-positive values fall back to
 	// DefaultStagedRecipeMaxAge.
 	StagedRecipeMaxAge time.Duration
+
+	// StagedRecipeClockSkew ("stagedrecipeclockskew", sprout only) is how
+	// much older than the newest job the sprout already handled a pulled
+	// staged recipe's DispatchedAt may be and still be cooked (SEC.7d),
+	// so a job stamped by a farmer replica whose clock runs slightly
+	// behind isn't dropped. A Go duration from 0 (no tolerance) to
+	// MaxStagedRecipeClockSkew; anything else is logged and replaced by
+	// DefaultStagedRecipeClockSkew (stagedRecipeClockSkewFrom).
+	StagedRecipeClockSkew = DefaultStagedRecipeClockSkew
 
 	// SproutBoxKeyPrevGrace ("sproutboxkeyprevgrace", sprout only) is how
 	// long a sprout keeps the X25519 private key a box key rotation
@@ -675,6 +726,7 @@ func LoadConfig(binary string) {
 			jety.SetDefault("gatewayjwtttl", 24*time.Hour)
 			jety.SetDefault("gatewayjwtrefreshmargin", DefaultGatewayJWTRefreshMargin)
 			jety.SetDefault("stagedrecipemaxage", DefaultStagedRecipeMaxAge)
+			jety.SetDefault("stagedrecipeclockskew", DefaultStagedRecipeClockSkew)
 			jety.SetDefault("sproutboxkeyprevgrace", DefaultSproutBoxKeyPrevGrace)
 			jety.SetDefault("busreconnectbase", natsretry.DefaultBase)
 			jety.SetDefault("busreconnectcap", natsretry.DefaultCap)
@@ -687,6 +739,11 @@ func LoadConfig(binary string) {
 			JobLogTTL = jety.GetDuration("joblogttl")
 			GatewayJWTRefreshMargin = jety.GetDuration("gatewayjwtrefreshmargin")
 			StagedRecipeMaxAge = jety.GetDuration("stagedrecipemaxage")
+			skew, err := stagedRecipeClockSkewFrom(jety.Get("stagedrecipeclockskew"))
+			if err != nil {
+				log.Errorf("config: %v; using %v", err, DefaultStagedRecipeClockSkew)
+			}
+			StagedRecipeClockSkew = skew
 			SproutBoxKeyPrevGrace = jety.GetDuration("sproutboxkeyprevgrace")
 			SproutHandledJobsFile = jety.GetString("sprouthandledjobsfile")
 			SproutRootCATOFU = jety.GetBool("sproutrootcatofu")
