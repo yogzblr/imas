@@ -66,6 +66,16 @@ environment has deployment branch or tag rules, they must allow `v*` tags
 (Release, and Publish packages on a published release) and `main`
 (Publish packages run by hand).
 
+**Manual gate (set 2026-10-05).** The `goreleaser` environment has the
+repository owner as a **required reviewer**, with **Prevent self-review**
+off (there is one maintainer) and deployment rules allowing the tag pattern
+`v*` and the branch `main`. Both workflows run in this environment, so every
+Release run (a pushed `v*` tag, a release created in the GitHub UI, or a
+manual dispatch) and every Publish packages run stops at "Waiting for
+review" before any job step runs; approve it under **Review deployments**,
+or reject it, which costs nothing (no images pushed, no draft created). If
+you rebuild the repository settings, set this again: it is not in the repo.
+
 What a release carries, for version `X.Y.Z` (tag `vX.Y.Z`):
 
 - GitHub release assets: `imas-X.Y.Z-linux-{386,amd64,arm,arm64}.tar.gz` and
