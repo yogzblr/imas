@@ -2002,6 +2002,62 @@ check every PR number, file path and open item cross reference you write. PR: st
 changed, what you could not verify, and any open question."
 ```
 
+**FIX.5: release blockers found in the 2026-10-05 re-validation**
+```
+claude --cloud "Implement FIX.5: fix what the re-validation of main at cefa9ca found
+before the first release candidate. Two items are release blockers and are listed first.
+FLAG FOR SECURITY REVIEW (items 4 and 5 touch security behaviour).
+(1) BLOCKER, helm lint in the publish workflow. .github/workflows/publish-packages.yml
+runs helm lint on deploy/helm/farmer and deploy/helm/nats with default values. The farmer
+chart now fails render on defaults (bus.serviceName and the other required values, and since
+FIX.3 an empty farmer.bootstrapAdmin), so the first publish would fail. Check by running
+helm lint and helm template locally (install helm in the session) with defaults and with
+-f deploy/helm/farmer/ci/default-values.yaml and the other ci values files; make the
+workflow lint each chart with the values file that CI uses (add one for the nats chart if
+it needs it), and keep helm package unchanged. Do not touch the tag trigger of release.yml.
+(2) BLOCKER, chart tests are skipped in CI. deploy/helm/farmer/chart_test.go skips when helm
+is not on PATH and when charts/ is not populated, and .github/workflows/ci.yml installs
+neither, so FIX.3 and every other chart render test may never have run. Install helm with
+azure/setup-helm pinned to a version, run helm dependency build for the farmer and nats
+charts in the Test job (or a new Chart job), and make the tests fail, not skip, when
+they are run in CI (for example require an environment variable such as IMAS_REQUIRE_HELM=1
+and set it in the workflow). Then run them. If any test now fails, fix the chart or the
+test as appropriate and list each such fix in the PR; do not delete or weaken a test to make
+it pass. If the Helm dependency build needs network registries the CI cannot reach, say so
+and choose the least bad option.
+(3) FIX.1 gap: the batch item for a keyless sprout is recorded as internal_error
+(internal/saasapi/sprout_actions.go around line 1020, pinned by dispatch_limits_test.go).
+Record sprout_reenroll_required instead, add the code to the API docs and the OpenAPI enum
+in docs/api and to the CLI messages, and update the tests that pin the old behaviour. Also
+fix docs/design/imas-payload-encryption-design.md around line 219, which still says cmd.run
+falls back to plaintext and mentions shellallowplaintextsprouts, a flag that no longer
+exists; make it agree with line 85 of the same file.
+(4) FIX.3 gap: the SaaS API recipe credential self-check (internal/saasapi/recipes_credcheck.go,
+internal/objectstore/probe.go) never probes the platform recipe prefix or the jobs bucket, yet
+its error text says it protects them. Add probes: a write and a delete under the platform
+recipe prefix must be refused, and any access to the jobs bucket must be refused. Keep the
+check fail-closed and covered by a fake-store test for each new probe, and say in the PR what
+the AWS read-probe gap is and whether it can be closed.
+(5) Documentation drift: in docs/security-review-2026-10-b.md update the status of B2
+(addressed by SEC.7b, merged in PR 108) and I4 (addressed by FIX.2, merged in PR 111) and any
+other mark that main contradicts; in docs/BUILD-STATUS.md remove the leftover done-this-pass
+wording around line 419, correct the line near 413 that calls the UAT gate unblocked (it still
+needs a release and a compute-provider decision), make the older sections that describe the
+plaintext fallback, unsealed shell and adopted tenants carry a visible Superseded banner at the
+top of each section, note that requirement 14 at Amber and requirement 4 at Green are judgement
+calls with the reason, and mention FIX.5 in the PR ledger. Do not edit any other status claim
+without checking it against main.
+Tests: helm lint and helm template for both charts with defaults-plus-ci-values and with the
+UAT values from the docs; go test ./... must pass, including the chart tests now running;
+new tests for items 3 and 4.
+Scope: .github/workflows/publish-packages.yml and ci.yml (the helm steps only),
+deploy/helm/farmer and deploy/helm/nats (values, templates and tests, only as needed to make
+the tests pass), internal/saasapi, internal/objectstore, docs/api, docs/design/imas-payload-encryption-design.md,
+docs/security-review-2026-10-b.md, docs/BUILD-STATUS.md. Do not touch release.yml. PR: state
+what you built, what you deferred, which tests newly ran and which of them failed before your
+fixes, and any open question; call the security items ready for review, not done."
+```
+
 ## 5. Orchestrator prompt: Wave 7 to the UAT gate (Claude Code app, hosted agents)
 
 Paste into one session in the Claude Code app, with the yogzblr/imas repo
