@@ -2,6 +2,7 @@ package saasapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -47,10 +48,10 @@ import (
 //     with no endpoint.
 //   - SAASAPI_RECIPES_JOB_BUCKET: farmer's job bucket (IMAS_S3_JOB_BUCKET),
 //     which the check probes with the recipe credential (FIX.5); it must
-//     differ from SAASAPI_RECIPES_S3_BUCKET. Unset, the check can't probe
-//     it and says so in a warning at startup; the Helm chart always sets it
-//     while the check is on (and refuses to render without
-//     objectStore.jobBucket then).
+//     differ from SAASAPI_RECIPES_S3_BUCKET. Required while the check is on
+//     (owner decision, FIX.5 follow-up): saasapi refuses to start rather
+//     than skip the job bucket. The Helm chart sets it from
+//     objectStore.jobBucket (and refuses to render without it then).
 //   - SAASAPI_RECIPES_PLATFORM_RECIPE_DIR: farmer's recipedir, whose
 //     cleaned form is the platform recipe prefix in the recipe bucket
 //     (cook.PlatformRecipePrefix), which the check probes (FIX.5). Default
@@ -250,7 +251,11 @@ func (s RecipeSettings) validate() error {
 		}
 		if s.CredentialCheck {
 			// What the self-check probes besides tenants/ and sprouts/ (FIX.5).
-			if s.JobBucket != "" && s.JobBucket == s.Bucket {
+			// Fail closed: a check that can't see the job bucket doesn't run.
+			if s.JobBucket == "" {
+				return errors.New("saasapi: SAASAPI_RECIPES_JOB_BUCKET (farmer's IMAS_S3_JOB_BUCKET) is required while SAASAPI_RECIPES_CREDENTIAL_CHECK is on: the check must make sure the recipe credential can't read or rewrite job logs")
+			}
+			if s.JobBucket == s.Bucket {
 				return fmt.Errorf("saasapi: SAASAPI_RECIPES_JOB_BUCKET must differ from SAASAPI_RECIPES_S3_BUCKET (both %q): farmer keeps job logs out of the recipe bucket", s.Bucket)
 			}
 			if _, err := cook.PlatformRecipePrefix(s.PlatformRecipeDir); err != nil {
@@ -356,9 +361,9 @@ func ConfigureRecipes(s RecipeSettings, vc valkey.Client) error {
 }
 
 // recipeCredentialCheckScope builds what the self-check probes: store
-// (the recipe bucket), the platform recipe prefix, and, when
-// SAASAPI_RECIPES_JOB_BUCKET is set, the job bucket opened with the same
-// credential. validate has checked the settings.
+// (the recipe bucket), the platform recipe prefix, and the job bucket
+// (SAASAPI_RECIPES_JOB_BUCKET) opened with the same credential. validate
+// has checked the settings; an unset job bucket is refused here too.
 func recipeCredentialCheckScope(s RecipeSettings, store *objectstore.Store, secret string) (recipeCredentialScope, error) {
 	prefix, err := cook.PlatformRecipePrefix(s.PlatformRecipeDir)
 	if err != nil {
@@ -366,7 +371,7 @@ func recipeCredentialCheckScope(s RecipeSettings, store *objectstore.Store, secr
 	}
 	sc := recipeCredentialScope{recipes: store, recipeBucket: s.Bucket, platformPrefix: prefix}
 	if s.JobBucket == "" {
-		return sc, nil
+		return recipeCredentialScope{}, errors.New("saasapi: SAASAPI_RECIPES_JOB_BUCKET is required while SAASAPI_RECIPES_CREDENTIAL_CHECK is on")
 	}
 	jobs, err := objectstore.Open(objectstore.Config{
 		Endpoint: s.Endpoint, Bucket: s.JobBucket, UseSSL: s.UseSSL,

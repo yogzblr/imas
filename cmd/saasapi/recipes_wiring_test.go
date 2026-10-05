@@ -85,7 +85,7 @@ func clearRecipeEnv(t *testing.T) {
 		"SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY_FILE", "SAASAPI_RECIPES_S3_USE_SSL",
 		"SAASAPI_RECIPES_READ_ROLE", "SAASAPI_RECIPES_WRITE_ROLE", "SAASAPI_RECIPES_MAX_COUNT",
 		"SAASAPI_RECIPES_MAX_TOTAL_BYTES", "SAASAPI_RECIPES_WRITE_RATE_LIMIT", "SAASAPI_RECIPES_WRITE_RATE_BURST",
-		"SAASAPI_RECIPES_CREDENTIAL_CHECK",
+		"SAASAPI_RECIPES_CREDENTIAL_CHECK", "SAASAPI_RECIPES_JOB_BUCKET", "SAASAPI_RECIPES_PLATFORM_RECIPE_DIR",
 		"IMAS_RECIPE_MAX_SOURCE_BYTES", "IMAS_RECIPE_MAX_RENDERED_BYTES", "IMAS_RECIPE_MAX_VALUE_BYTES",
 		"IMAS_RECIPE_RENDER_TIMEOUT", "IMAS_RECIPE_MAX_RANGE_ITERATIONS",
 	} {
@@ -115,7 +115,11 @@ func saasapiRecipePolicy(op, key string) bool {
 
 // setRecipeEnv points the recipe settings at a fresh fake S3 bucket that
 // enforces saasapi's recipe policy, with the secret key in a file, as the
-// Helm chart does. It returns the fake server.
+// Helm chart does, and names a job bucket, which the credential check
+// requires (FIX.5 follow-up). The fake serves every bucket from one key
+// space and the policy denies everything under jobs/ and a bucket-wide
+// listing, so any job bucket name stands in for one the credential has no
+// grant on. It returns the fake server.
 func setRecipeEnv(t *testing.T) *objectstoretest.Server {
 	t.Helper()
 	srv := objectstoretest.NewServer(t)
@@ -130,6 +134,7 @@ func setRecipeEnv(t *testing.T) *objectstoretest.Server {
 	t.Setenv("SAASAPI_RECIPES_S3_ACCESS_KEY_ID", s3.AccessKeyID)
 	t.Setenv("SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY_FILE", keyFile)
 	t.Setenv("SAASAPI_RECIPES_S3_USE_SSL", "false")
+	t.Setenv("SAASAPI_RECIPES_JOB_BUCKET", "wiring-jobs")
 	return srv
 }
 

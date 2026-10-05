@@ -356,11 +356,25 @@ Full reference: [`api/saasapi.md`](api/saasapi.md#recipes).
   `503 recipes_not_configured`.
 - saasapi's recipe credential must be its own, limited to
   `tenants/*/recipes/*` (the chart's `files/objectstore-policies/`). saasapi
-  checks this at startup: if the object store lets the credential write
-  outside `tenants/`, or write, read or list `sprouts/`, saasapi logs which
-  and refuses to start (`SAASAPI_RECIPES_CREDENTIAL_CHECK`, on by default
-  in the binary and the chart; only an explicit `false` turns it off). It also refuses when it can't reach the object store within about
-  30 seconds, and its pod restarts and tries again.
+  checks this at startup (`SAASAPI_RECIPES_CREDENTIAL_CHECK`, on by default
+  in the binary and the chart; only an explicit `false` turns it off). It
+  logs which probe the object store allowed and refuses to start if the
+  credential can do any of these:
+  - in the recipe bucket: write outside `tenants/`; write, read or list
+    `sprouts/`; create or delete under the platform recipe prefix (farmer's
+    `recipedir`, default `/srv/imas/recipes/prod/`);
+  - in farmer's job bucket: put, get or delete under `jobs/`, or list
+    `jobs/` or the bucket root.
+
+  It also refuses when it can't reach the object store within about 30
+  seconds, and its pod restarts and tries again.
+- With the check on, saasapi needs the job bucket:
+  `SAASAPI_RECIPES_JOB_BUCKET` (farmer's `IMAS_S3_JOB_BUCKET`, different from
+  the recipe bucket). Without it the binary refuses to start, and the Helm
+  chart refuses to render without `objectStore.jobBucket`, which it passes
+  through. `SAASAPI_RECIPES_PLATFORM_RECIPE_DIR` names farmer's `recipedir`.
+  Its default `/srv/imas/recipes/prod` is farmer's default, which the chart
+  doesn't change, so set it only if your farmer uses another `recipedir`.
 - Your Keycloak user needs the `imas-recipes-write` role to upload or
   delete, and `imas-recipes-read` (or the write role) to list and read.
   Without it the answer is `403`.
