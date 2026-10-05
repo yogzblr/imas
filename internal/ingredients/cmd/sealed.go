@@ -14,20 +14,23 @@ package cmd
 // them, forge or replay a command, nor pass one command's output off as
 // another's.
 //
-// Rules each end enforces:
+// Rules each end enforces. Sealed only, with no plaintext path in either
+// direction (FIX.1, owner decision 2026-10-04):
 //
-//   - Farmer seals whenever the sprout has a box key on record. Only a
-//     sprout enrolled before workstream J has none; it gets plaintext, as
-//     before, with a warning (it can't open anything, and re-enrolling
-//     fixes it). Any other failure to seal fails the command: never a
-//     silent fallback to plaintext.
+//   - Farmer seals every cmd.run to the sprout's active box key. A sprout
+//     with no box key on record gets nothing: farmer refuses to send and
+//     returns a cook.ReenrollRequiredError (code
+//     cook.ReenrollRequiredCode) naming the sprout. Any other failure to
+//     seal fails the command too. Nothing is ever sent in plaintext.
 //   - Farmer only accepts a sealed reply that opens under its keys and
 //     answers this request. A plaintext reply to a sealed request is an
 //     error, never a result: that is what a sprout built before this
 //     change sends back (it can't read the request), and what a bus
 //     attempting a downgrade would send.
-//   - A sprout with payload-encryption keys (pki.SproutBoxReady) refuses
-//     a plaintext cmd.run without running it, so a bus can't inject one.
+//   - A sprout without payload-encryption keys (pki.SproutBoxReady false)
+//     refuses every cmd.run, plaintext or sealed, with no-keys, and runs
+//     nothing. A sprout with keys refuses a plaintext one with
+//     encryption-required. Either way a bus can't inject a command.
 //   - Live output streaming (CmdRun.StreamTopic) is dropped from sealed
 //     requests: it publishes output as it's produced, in plaintext, to a
 //     subject the imas CLI reads directly (it holds no tenant key), which
@@ -43,6 +46,7 @@ import (
 	nats "github.com/nats-io/nats.go"
 
 	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/log"
 	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
@@ -71,14 +75,8 @@ func frun(conn *nats.Conn, tenantID string, target pki.KeyManager, cmdRun apityp
 	sealedReq.StreamTopic = ""
 	data, reqID, err := pki.SealToSprout(tenantID, target.SproutID, payloadbox.PurposeCmdRunRequest, "", sealedReq)
 	if errors.Is(err, pki.ErrNoActiveBoxKey) {
-		log.Warnf("cmd: sending cmd.run to sprout %s in plaintext: it has no payload-encryption key on record (enrolled before workstream J); re-enroll it", target.SproutID)
-		b, _ := json.Marshal(cmdRun)
-		msg, err := conn.Request(topic, b, timeout)
-		if err != nil {
-			return results, err
-		}
-		err = json.Unmarshal(msg.Data, &results)
-		return results, err
+		log.Warnf("cmd: not sending cmd.run to sprout %s: it has no payload-encryption key on record; re-enroll it [%s]", target.SproutID, cook.ReenrollRequiredCode)
+		return results, &cook.ReenrollRequiredError{Op: "cmd.run", SproutID: target.SproutID}
 	}
 	if err != nil {
 		return results, fmt.Errorf("cmd: sealing cmd.run for %s: %w", target.SproutID, err)
@@ -114,24 +112,13 @@ func frun(conn *nats.Conn, tenantID string, target pki.KeyManager, cmdRun apityp
 // enrolled ID.
 func RespondCmdRun(sproutID string, m *nats.Msg) *nats.Msg {
 	sealed := m.Header.Get(payloadbox.Header) == payloadbox.HeaderBox1
-	ready := pki.SproutBoxReady()
 	switch {
-	case !sealed && ready:
+	case !pki.SproutBoxReady():
+		log.Warnf("cmd: refusing a cmd.run: this sprout has no payload-encryption keys; re-enroll it")
+		return refusal(payloadbox.ErrorCodeNoKeys)
+	case !sealed:
 		log.Warnf("cmd: refusing a plaintext cmd.run: this sprout only accepts sealed commands")
 		return refusal(payloadbox.ErrorCodeEncryptionRequired)
-	case !sealed:
-		// Enrolled before workstream J: no keys, so plaintext as before.
-		var cmdRun apitypes.CmdRun
-		_ = json.Unmarshal(m.Data, &cmdRun)
-		results, err := SRun(cmdRun)
-		if err != nil {
-			log.Error(err)
-		}
-		b, _ := json.Marshal(results)
-		return &nats.Msg{Data: b}
-	case !ready:
-		log.Warnf("cmd: refusing a sealed cmd.run: this sprout has no payload-encryption keys; re-enroll it")
-		return refusal(payloadbox.ErrorCodeNoKeys)
 	}
 
 	msg, err := pki.SproutOpenFromFarmer(sproutID, payloadbox.PurposeCmdRunRequest, m.Data)

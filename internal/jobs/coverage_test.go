@@ -21,7 +21,7 @@ func TestStartReaper_NegativeTTL(t *testing.T) {
 	// Negative TTL should disable reaper (same as zero).
 	store.StartReaper(-1 * time.Hour)
 
-	if _, err := store.GetJob("sprout", "j"); err != nil {
+	if _, err := store.GetJob(testTenant, "sprout", "j"); err != nil {
 		t.Errorf("expected job to survive with negative TTL: %v", err)
 	}
 }
@@ -255,12 +255,13 @@ func TestCLIStore_ListJobs_DirsAndNonJsonlSkipped(t *testing.T) {
 func TestDefaultCLIStorePath_WithXDG(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
+	setCLITenant(t, "t_xdg")
 
 	path, err := DefaultCLIStorePath()
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := filepath.Join(dir, "imas", "jobs")
+	expected := filepath.Join(dir, "imas", "jobs", "t_xdg")
 	if path != expected {
 		t.Errorf("expected %q, got %q", expected, path)
 	}
@@ -336,7 +337,7 @@ func TestListSprouts_StrayObjectsIgnored(t *testing.T) {
 	putObject(t, obj, "jobs/also-not/x", []byte("hi"))
 	putObject(t, obj, "elsewhere/sprout/job/created.jsonl", []byte("{}\n"))
 
-	sprouts, err := store.ListSprouts()
+	sprouts, err := store.ListSprouts(testTenant)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +360,7 @@ func TestListJobsForSprout_CorruptJobSkipped(t *testing.T) {
 	// One job whose log can't be parsed.
 	putObject(t, obj, createdKey("sprout-unreadable", "bad-job"), []byte("not json\n"))
 
-	summaries, err := store.ListJobsForSprout("sprout-unreadable")
+	summaries, err := store.ListJobsForSprout(testTenant, "sprout-unreadable")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,7 +384,7 @@ func TestListAllJobs_CorruptSproutSkipped(t *testing.T) {
 	// A sprout whose only job can't be parsed.
 	putObject(t, obj, eventKey("bad-sprout", "j2", now), []byte("{not json\n"))
 
-	summaries, err := store.ListAllJobs(0)
+	summaries, err := store.ListAllJobs(testTenant, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +403,7 @@ func TestCountJobsForSprout_ReadError(t *testing.T) {
 	})
 
 	srv.FailNext(1, 403, "AccessDenied")
-	_, err := store.CountJobsForSprout("sprout-count-err")
+	_, err := store.CountJobsForSprout(testTenant, "sprout-count-err")
 	if err == nil {
 		t.Error("expected error when the object store listing fails")
 	}
@@ -479,7 +480,7 @@ func TestFindJob_MultipleSprouts(t *testing.T) {
 		makeStep("s1", cook.StepFailed, now, time.Second),
 	})
 
-	summary, err := store.FindJob("shared-jid")
+	summary, err := store.FindJob(testTenant, "shared-jid")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -544,7 +545,7 @@ func TestStartReaper_PositiveTTL(t *testing.T) {
 	store.StartReaperCtx(ctx, 24*time.Hour)
 
 	if !eventually(5*time.Second, func() bool {
-		_, err := store.GetJob("sprout-reaper", "old")
+		_, err := store.GetJob(testTenant, "sprout-reaper", "old")
 		return err == ErrJobNotFound
 	}) {
 		t.Error("expected old job to be removed by StartReaper initial reap")
@@ -632,11 +633,11 @@ func TestRecordJobCreation_PutError(t *testing.T) {
 	// created.jsonl Put fail.
 	srv.FailNext(1, 404, "NoSuchKey")
 	srv.FailNext(2, 403, "AccessDenied")
-	recordJobCreation("", "sprout-fail", cook.RecipeEnvelope{JobID: "fail-create", Steps: []cook.Step{{ID: "s1"}}})
+	recordJobCreation(testTenant, "sprout-fail", cook.RecipeEnvelope{JobID: "fail-create", Steps: []cook.Step{{ID: "s1"}}})
 
 	// Should not panic, and no half-created job is visible.
 	store := NewStoreWithObjectStore(obj)
-	if _, err := store.GetJob("sprout-fail", "fail-create"); err != ErrJobNotFound {
+	if _, err := store.GetJob(testTenant, "sprout-fail", "fail-create"); err != ErrJobNotFound {
 		t.Errorf("expected ErrJobNotFound, got %v", err)
 	}
 	if keys := listKeys(t, obj, jobKeyPrefix); len(keys) != 0 {
@@ -777,13 +778,14 @@ func TestCLIStore_GetJob_AcrossSprouts(t *testing.T) {
 
 func TestDefaultCLIStorePath_WithoutXDG(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "")
+	setCLITenant(t, "t_home")
 
 	path, err := DefaultCLIStorePath()
 	if err != nil {
 		t.Fatal(err)
 	}
 	home, _ := os.UserHomeDir()
-	expected := filepath.Join(home, ".config", "imas", "jobs")
+	expected := filepath.Join(home, ".config", "imas", "jobs", "t_home")
 	if path != expected {
 		t.Errorf("expected %q, got %q", expected, path)
 	}

@@ -73,9 +73,8 @@ var routes = map[string]handler{
 	// Cook
 	MethodCookResync: handleCookResync,
 
-	// Jobs
-	MethodJobsGet:       handleJobsGet,
-	MethodJobsForSprout: handleJobsListForSprout,
+	// Jobs: all in userRoutes, since the job store is read in the
+	// caller's tenant and job reads are scope-checked against the caller.
 
 	// Props
 	MethodPropsGetAll: handlePropsGetAll,
@@ -107,11 +106,15 @@ var routes = map[string]handler{
 
 // userRoutes are the methods whose handlers need the verified caller:
 // scope filtering by the user's role, job attribution, the user's own
-// identity, their own key.
+// identity, their own key. Every jobs.* method is here: the job store is
+// read and changed in the caller's tenant (c.TenantID), and a job found by
+// JID is scope-checked against the caller.
 var userRoutes = map[string]userHandler{
 	MethodSproutsList:   handleSproutsList,
 	MethodCook:          handleCook,
 	MethodJobsList:      handleJobsList,
+	MethodJobsGet:       handleJobsGet,
+	MethodJobsForSprout: handleJobsListForSprout,
 	MethodJobsDelete:    handleJobsDelete,
 	MethodJobsCancel:    handleJobsCancel,
 	MethodAuthLogin:     handleAuthLogin,

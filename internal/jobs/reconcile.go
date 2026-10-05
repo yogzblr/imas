@@ -100,9 +100,14 @@ func markJobExpired(tenantID, sproutID, jid string, dispatchedAt time.Time) {
 		log.Errorf("failed to encode expiry marker for job %s: %v", jid, err)
 		return
 	}
+	key, err := jobKey(tenantID, sproutID, jid, expiredObject)
+	if err != nil {
+		log.Errorf("failed to mark job %s for sprout %s expired in the job store: %v", jid, sproutID, err)
+		return
+	}
 	ctx, cancel := opContext()
 	defer cancel()
-	if err := obj.Put(ctx, expiredKey(sproutID, jid), data); err != nil {
-		log.Errorf("failed to mark job %s for sprout %s expired in the job store: %v", jid, sproutID, err)
+	if err := obj.Put(ctx, key, data); err != nil {
+		log.Errorf("failed to mark job %s for sprout %s (tenant %s) expired in the job store: %v", jid, sproutID, tenantID, err)
 	}
 }

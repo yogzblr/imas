@@ -75,13 +75,22 @@ func (s *Store) reap(ttl time.Duration) {
 	removed := 0
 	// Deliberately indexJobs, not listJobs: a meta.json with no log
 	// objects (its job's created.jsonl Put failed) should expire too.
-	for ref, objs := range indexJobs(keys) {
+	//
+	// This is the job store's one platform-wide scan (every tenant's
+	// jobs/<tenant>/ prefix at once). indexJobs parses each key's tenant
+	// into its jobRef, so each job is dated from, and deleted by, its own
+	// (tenant, sprout, jid) keys only: two tenants' jobs with the same
+	// sprout and job IDs are two refs, and one expiring never touches the
+	// other. The TTL is farmer's one joblogttl; there is no per-tenant TTL
+	// to apply. Keys in the pre-tenant layout don't parse, so they are
+	// neither read nor deleted.
+	for ref, objs := range indexJobs(keys, "") {
 		last := lastActivity(ctx, obj, ref, objs)
 		if last.IsZero() || !last.Before(cutoff) {
 			continue
 		}
 		if err := deleteJobObjects(ctx, obj, ref, objs); err != nil {
-			log.Errorf("reaper: removing job %s for sprout %s: %v", ref.jid, ref.sproutID, err)
+			log.Errorf("reaper: removing job %s for sprout %s (tenant %s): %v", ref.jid, ref.sproutID, ref.tenantID, err)
 			continue
 		}
 		removed++

@@ -2,14 +2,18 @@ package jobs
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/taigrr/jety"
+
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/objectstore"
 	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 func TestNewStore_Default(t *testing.T) {
@@ -60,13 +64,18 @@ func TestGetJob_InvalidRef(t *testing.T) {
 		makeStep("s1", cook.StepCompleted, time.Now(), time.Second),
 	})
 
+	// Refused before any key is built: ErrInvalidJobKey, not "not found".
 	for _, ref := range [][2]string{{"", "job"}, {"sprout", ""}, {"..", "job"}, {"sprout/job", "x"}, {"sprout", "job/events"}} {
-		if _, err := store.GetJob(ref[0], ref[1]); err != ErrJobNotFound {
-			t.Errorf("GetJob(%q, %q): expected ErrJobNotFound, got %v", ref[0], ref[1], err)
+		if _, err := store.GetJob(testTenant, ref[0], ref[1]); !errors.Is(err, ErrInvalidJobKey) {
+			t.Errorf("GetJob(%q, %q): expected ErrInvalidJobKey, got %v", ref[0], ref[1], err)
 		}
 	}
-	if _, err := store.ListJobsForSprout("a/b"); err != ErrSproutNoJobs {
-		t.Errorf("ListJobsForSprout: expected ErrSproutNoJobs, got %v", err)
+	if _, err := store.ListJobsForSprout(testTenant, "a/b"); !errors.Is(err, ErrInvalidJobKey) {
+		t.Errorf("ListJobsForSprout: expected ErrInvalidJobKey, got %v", err)
+	}
+	// The valid job is still there.
+	if _, err := store.GetJob(testTenant, "sprout", "job"); err != nil {
+		t.Errorf("GetJob(sprout, job): %v", err)
 	}
 }
 
@@ -76,7 +85,7 @@ func TestGetJob_ReadError(t *testing.T) {
 	// An event object that isn't valid JSONL.
 	putObject(t, obj, eventKey("sprout-err", "job-bad", time.Now()), []byte("not json\n"))
 
-	_, err := store.GetJob("sprout-err", "job-bad")
+	_, err := store.GetJob(testTenant, "sprout-err", "job-bad")
 	if err == nil || err == ErrJobNotFound {
 		t.Errorf("expected a read error for a corrupt event object, got %v", err)
 	}
@@ -94,7 +103,7 @@ func TestGetJob_ObjectStoreError(t *testing.T) {
 	})
 
 	srv.FailNext(1, 403, "AccessDenied")
-	if _, err := store.GetJob("sprout-err", "job"); err == nil || err == ErrJobNotFound {
+	if _, err := store.GetJob(testTenant, "sprout-err", "job"); err == nil || err == ErrJobNotFound {
 		t.Errorf("expected the object store's error to surface, got %v", err)
 	}
 }
@@ -108,11 +117,11 @@ func TestCountJobsForSprout_IgnoresStrayObjects(t *testing.T) {
 	// Metadata alone doesn't make a job, and keys outside the layout are
 	// ignored.
 	writeJobMeta(t, obj, "sprout-mixed", "meta-only", "UPUBKEY")
-	putObject(t, obj, "jobs/sprout-mixed/readme.txt", []byte("hi"))
-	putObject(t, obj, "jobs/sprout-mixed/job/notes.txt", []byte("hi"))
-	putObject(t, obj, "jobs/sprout-mixed/job/events/nested/x.jsonl", []byte("{}\n"))
+	putObject(t, obj, "jobs/t_test/sprout-mixed/readme.txt", []byte("hi"))
+	putObject(t, obj, "jobs/t_test/sprout-mixed/job/notes.txt", []byte("hi"))
+	putObject(t, obj, "jobs/t_test/sprout-mixed/job/events/nested/x.jsonl", []byte("{}\n"))
 
-	count, err := store.CountJobsForSprout("sprout-mixed")
+	count, err := store.CountJobsForSprout(testTenant, "sprout-mixed")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,10 +139,10 @@ func TestListJobsForSprout_SkipsStrayObjects(t *testing.T) {
 		makeStep("s1", cook.StepCompleted, now, time.Second),
 	})
 	// Objects that aren't part of any job's log.
-	putObject(t, obj, "jobs/sprout-dirs/readme.txt", []byte("hi"))
-	putObject(t, obj, "jobs/sprout-dirs/not-a-job/other.bin", []byte("hi"))
+	putObject(t, obj, "jobs/t_test/sprout-dirs/readme.txt", []byte("hi"))
+	putObject(t, obj, "jobs/t_test/sprout-dirs/not-a-job/other.bin", []byte("hi"))
 
-	summaries, err := store.ListJobsForSprout("sprout-dirs")
+	summaries, err := store.ListJobsForSprout(testTenant, "sprout-dirs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +191,7 @@ func TestListAllJobs_WithInvokedBy(t *testing.T) {
 	})
 	writeJobMeta(t, obj, "sprout-allinv", "job-inv-1", "UPUBKEY_TESTER")
 
-	summaries, err := store.ListAllJobs(0)
+	summaries, err := store.ListAllJobs(testTenant, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,17 +203,34 @@ func TestListAllJobs_WithInvokedBy(t *testing.T) {
 	}
 }
 
+// setCLITenant pins tenantID in the CLI config for the rest of the test.
+func setCLITenant(t *testing.T, tenantID string) {
+	t.Helper()
+	old := jety.GetString(pki.CLITenantIDKey)
+	jety.Set(pki.CLITenantIDKey, tenantID)
+	t.Cleanup(func() { jety.Set(pki.CLITenantIDKey, old) })
+}
+
 func TestDefaultCLIStorePath(t *testing.T) {
+	setCLITenant(t, "t_cli")
 	path, err := DefaultCLIStorePath()
 	if err != nil {
 		t.Fatalf("DefaultCLIStorePath: %v", err)
 	}
-	if path == "" {
-		t.Error("expected non-empty path")
+	// Should end with "imas/jobs/<tenant>".
+	if filepath.Base(path) != "t_cli" || filepath.Base(filepath.Dir(path)) != "jobs" {
+		t.Errorf("expected path ending with 'jobs/t_cli', got %q", path)
 	}
-	// Should end with "imas/jobs".
-	if filepath.Base(path) != "jobs" {
-		t.Errorf("expected path ending with 'jobs', got %q", path)
+}
+
+// The CLI's local store is per tenant too, and refuses to pick a
+// directory when no usable tenant is pinned rather than sharing one.
+func TestDefaultCLIStorePath_RefusesMissingOrHostileTenant(t *testing.T) {
+	for _, tenant := range []string{"", "..", "a/b", "../t_other", "t\x00x", `a\b`} {
+		setCLITenant(t, tenant)
+		if path, err := DefaultCLIStorePath(); !errors.Is(err, ErrInvalidJobKey) {
+			t.Errorf("tenant %q: DefaultCLIStorePath = %q, %v; want ErrInvalidJobKey", tenant, path, err)
+		}
 	}
 }
 

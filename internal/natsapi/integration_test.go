@@ -14,6 +14,7 @@ import (
 	"github.com/yogzblr/imas/internal/audit"
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/jobs"
 	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/rbac"
@@ -146,6 +147,65 @@ func TestSubscribeJobsListRoute(t *testing.T) {
 
 	if _, err := call("jobs.list", nil); err != nil {
 		t.Fatalf("jobs.list: %v", err)
+	}
+}
+
+// FIX.2 (security review 2026-10-b I4), end to end over the bus: farmer
+// subscribed on two tenants' connections (one bus each, as each tenant has
+// its own NATS account), one shared job bucket holding a job in each
+// tenant on the same sprout_id with the same jid. A CLI user of each
+// tenant reads only its own job through jobs.get, jobs.list and
+// jobs.forsprout: the tenant comes from the connection and the CLI key the
+// sealed request opened under, never from the params. A request sealed for
+// one tenant and sent on the other tenant's connection is refused.
+func TestSubscribeJobsRoutes_TwoTenantsSameSproutAndJID(t *testing.T) {
+	obj, jobCleanup := setupJobStore(t)
+	defer jobCleanup()
+	seedTwoTenantJobs(t, obj)
+
+	setupSealedEnv(t)
+	conns := map[string]*nats.Conn{}
+	users := map[string]*cliUser{}
+	for _, tenant := range []string{jobTenantOne, jobTenantTwo} {
+		nc, cleanup := startEmbeddedNATS(t)
+		t.Cleanup(cleanup)
+		if err := Subscribe(nc, tenant); err != nil {
+			t.Fatalf("Subscribe(%s): %v", tenant, err)
+		}
+		t.Cleanup(func() { ClearNatsConn(tenant) })
+		conns[tenant] = nc
+		users[tenant] = newSealedCLIUserIn(t, tenant)
+	}
+
+	for _, tenant := range []string{jobTenantOne, jobTenantTwo} {
+		users[tenant].use(t)
+		call := func(method string, params any) (json.RawMessage, error) {
+			return client.SealedRequest(conns[tenant], payloadbox.PurposeCLIRequest, method, params, 5*time.Second)
+		}
+
+		raw, err := call("jobs.get", map[string]string{"jid": jobSharedJID, "tenant_id": "t_other"})
+		var got jobs.JobSummary
+		if err != nil || json.Unmarshal(raw, &got) != nil || !onlyTenantSteps(tenant, got) {
+			t.Errorf("%s: jobs.get = %s, %v; want only its own job", tenant, raw, err)
+		}
+		for method, params := range map[string]any{
+			"jobs.list":      nil,
+			"jobs.forsprout": map[string]string{"sprout_id": jobSharedSID},
+		} {
+			raw, err := call(method, params)
+			var list []jobs.JobSummary
+			if err != nil || json.Unmarshal(raw, &list) != nil || len(list) != 1 || !onlyTenantSteps(tenant, list...) {
+				t.Errorf("%s: %s = %s, %v; want only its own job", tenant, method, raw, err)
+			}
+		}
+	}
+
+	// t_1's user, sealing to t_1's key, sends on t_2's connection: t_2's
+	// farmer handler can't open it, so nothing of t_2's comes back.
+	users[jobTenantOne].use(t)
+	if raw, err := client.SealedRequest(conns[jobTenantTwo], payloadbox.PurposeCLIRequest, "jobs.get",
+		map[string]string{"jid": jobSharedJID}, 5*time.Second); err == nil {
+		t.Errorf("t_1's request on t_2's connection answered: %s", raw)
 	}
 }
 

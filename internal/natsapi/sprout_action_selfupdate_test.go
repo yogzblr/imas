@@ -17,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
 	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/controlplane"
@@ -25,6 +24,7 @@ import (
 	"github.com/yogzblr/imas/internal/fleetcatalog"
 	"github.com/yogzblr/imas/internal/fleetcatalog/fleetcatalogtest"
 	"github.com/yogzblr/imas/internal/fleetsign"
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
@@ -285,17 +285,18 @@ func TestSelfUpdate_ThroughRealDispatch(t *testing.T) {
 	defer cook.UnregisterFarmerNatsConn(legacy)
 	_, _, approve := newSUCatalog(t)
 	approve(legacy, ptr(suVersion))
+	saas := dialSaaSAPI(t, nc)
 
+	// A sealed stub sprout (sprout_action_fix1_test.go): the dispatch is
+	// sealed only, and a sprout with no box key is sent nothing (FIX.1).
 	got := make(chan cook.RecipeEnvelope, 1)
-	if _, err := nc.Subscribe("imas.sprouts.web-01.cook", func(msg *nats.Msg) {
-		var env cook.RecipeEnvelope
-		_ = json.Unmarshal(msg.Data, &env)
-		got <- env
-		ack, _ := json.Marshal(cook.Ack{Acknowledged: true, JobID: env.JobID})
-		_ = msg.Respond(ack)
-	}); err != nil {
-		t.Fatal(err)
-	}
+	newSealedStubSprout(t, legacy, "web-01").answer(t, nc, "imas.sprouts.web-01.cook",
+		payloadbox.PurposeCookRequest, payloadbox.PurposeCookResponse, func(body []byte) any {
+			var env cook.RecipeEnvelope
+			_ = json.Unmarshal(body, &env)
+			got <- env
+			return cook.Ack{Acknowledged: true, JobID: env.JobID}
+		})
 	if err := RegisterSproutAction(nc); err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +305,6 @@ func TestSelfUpdate_ThroughRealDispatch(t *testing.T) {
 	if err := nc.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	saas := dialSaaSAPI(t, nc)
 	reply := requestSproutAction(t, saas, controlplane.SproutActionRequest{
 		TenantID: legacy, SproutID: "web-01",
 		Action: controlplane.SproutAction{Type: controlplane.ActionSelfUpdate, Params: mustJSON(t, controlplane.SelfUpdateParams{Version: suVersion})},

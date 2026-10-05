@@ -8,9 +8,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/taigrr/jety"
+
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/jobs"
+	"github.com/yogzblr/imas/internal/pki"
 )
+
+// localJobsTenant is the tenant the CLI is pinned to in these tests.
+const localJobsTenant = "t_local"
 
 // setupLocalJobsEnv creates a temp HOME with CLI job store data,
 // sets HOME env var, and returns the original HOME for restoration.
@@ -20,8 +26,12 @@ func setupLocalJobsEnv(t *testing.T) (cleanup func()) {
 	origXDG := os.Getenv("XDG_CONFIG_HOME")
 	tmpHome := t.TempDir()
 
-	// Set up store at $HOME/.config/imas/jobs/
-	storeDir := filepath.Join(tmpHome, ".config", "imas", "jobs")
+	// The CLI is pinned to localJobsTenant; its store is
+	// $HOME/.config/imas/jobs/<tenant>/ (internal/jobs.DefaultCLIStorePath).
+	oldTenant := jety.GetString(pki.CLITenantIDKey)
+	jety.Set(pki.CLITenantIDKey, localJobsTenant)
+	t.Cleanup(func() { jety.Set(pki.CLITenantIDKey, oldTenant) })
+	storeDir := filepath.Join(tmpHome, ".config", "imas", "jobs", localJobsTenant)
 	sproutDir := filepath.Join(storeDir, "web-1")
 	if err := os.MkdirAll(sproutDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -88,6 +98,49 @@ func TestListLocalJobs_Direct(t *testing.T) {
 	}
 	if summaries[0].JID != "job-local-1" {
 		t.Errorf("expected job-local-1, got %s", summaries[0].JID)
+	}
+}
+
+// FIX.2: the local job commands read only the pinned tenant's directory.
+// Another tenant's job on the same sprout_id, and a file left in the
+// pre-tenant layout (jobs/<sprout>/<jid>.jsonl), are not listed; pinning
+// the other tenant lists only its job.
+func TestListLocalJobs_OnlyPinnedTenant(t *testing.T) {
+	cleanup := setupLocalJobsEnv(t)
+	defer cleanup()
+	oldLimit, oldUser := jobsLimit, jobsUser
+	defer func() { jobsLimit = oldLimit; jobsUser = oldUser }()
+	jobsLimit, jobsUser = 50, ""
+
+	base := filepath.Join(os.Getenv("HOME"), ".config", "imas", "jobs")
+	line, _ := json.Marshal(cook.StepCompletion{ID: "other", CompletionStatus: cook.StepCompleted})
+	for _, dir := range []string{
+		filepath.Join(base, "t_other", "web-1"), // another tenant, same sprout_id
+		filepath.Join(base, "web-1"),            // pre-tenant layout
+	} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "job-other.jsonl"), append(line, '\n'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	summaries, err := listLocalJobs(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 1 || summaries[0].JID != "job-local-1" {
+		t.Fatalf("pinned to %s: listed %+v, want only job-local-1", localJobsTenant, summaries)
+	}
+
+	jety.Set(pki.CLITenantIDKey, "t_other")
+	summaries, err = listLocalJobs(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 1 || summaries[0].JID != "job-other" {
+		t.Fatalf("pinned to t_other: listed %+v, want only job-other", summaries)
 	}
 }
 

@@ -5,8 +5,9 @@ package jobs
 // It exists so the SaaS API can poll a §1.5 batch's cook items with one
 // local, tenant-scoped SQL read
 // (docs/design/cloudxp-machine-manager-api-design.md §1.5), rather than
-// reading farmer's job object store. The object store has no tenant in its
-// keys, and the SaaS API has no access to it.
+// reading farmer's job object store, which the SaaS API has no access to.
+// Both are keyed the same way: the object store's keys start
+// jobs/<tenant_id>/<sprout_id>/<jid>/ (store.go).
 //
 // The index is written alongside the object-store writes in listener.go
 // (recordJobCreation, logJobs), not instead of them: the object store stays

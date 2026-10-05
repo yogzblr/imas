@@ -49,19 +49,44 @@ package jobs
 // the recipe bucket, because GET /files/ serves any key in that bucket to
 // any authenticated caller.
 //
-//	jobs/<sprout>/<jid>/created.jsonl               placeholders from recordJobCreation
-//	jobs/<sprout>/<jid>/meta.json                   JobMeta (invoker, creation time)
-//	jobs/<sprout>/<jid>/events/<unixnano>-<rand>.jsonl  one step event
-//	jobs/<sprout>/<jid>/expired.json               ExpiredMarker, if the job expired
+//	jobs/<tenant>/<sprout>/<jid>/created.jsonl               placeholders from recordJobCreation
+//	jobs/<tenant>/<sprout>/<jid>/meta.json                   JobMeta (invoker, creation time)
+//	jobs/<tenant>/<sprout>/<jid>/events/<unixnano>-<rand>.jsonl  one step event
+//	jobs/<tenant>/<sprout>/<jid>/expired.json               ExpiredMarker, if the job expired
 //
 // A job exists once it has created.jsonl or at least one event.
 // created.jsonl followed by events/ in key order holds the same lines the
 // old local <jid>.jsonl file did.
 //
-// Deferred: looking a job up by JID alone (FindJob, DeleteJob) lists the
-// whole jobs/ prefix, as ListAllJobs always has to. A jid-to-sprout index
-// would make that one List call if job counts grow enough to matter.
-// Nothing compacts a finished job's event objects into a single object.
+// # Tenant safety
+//
+// A sprout_id is unique per tenant only (CLAUDE.md; API design §4 "Tenant
+// safety"), so every key starts with the tenant, and every job is a
+// jobRef{tenant, sprout, jid}. The tenant always comes from where the
+// request or event arrived: the tenant connection a cook event or dispatch
+// came in on (RegisterNatsConn), or the verified caller of a sealed API
+// request (internal/natsapi's apiCaller.TenantID). Nothing in a message
+// body names it.
+//
+// jobKey builds every key and prefix, and refuses a tenant, sprout or job
+// ID that isn't safe as one key segment (validKeySegment: no "/", backslash,
+// "..", control characters or invalid UTF-8). Every Store method takes the
+// tenant and lists only that tenant's prefix, jobs/<tenant>/, and
+// indexJobs drops any key outside it, so no method returns another
+// tenant's job. The one platform-wide scan, the reaper (expiry.go), parses
+// the tenant out of each key and deletes each job by its own full ref.
+//
+// The pre-tenant layout, jobs/<sprout>/<jid>/..., is never read: nothing
+// was deployed with it, so there is no migration. Its keys don't parse
+// under this layout (created.jsonl and meta.json sit one segment short;
+// an event's last segment is not a job object name), so parseJobKey
+// rejects them and indexJobs ignores them, in listings, lookups and the
+// reaper alike. They are left where they are.
+//
+// Deferred: looking a job up by JID alone (FindJob) lists the tenant's
+// whole jobs/<tenant>/ prefix. A jid-to-sprout index would make that one
+// List call if job counts grow enough to matter. Nothing compacts a
+// finished job's event objects into a single object.
 
 import (
 	"context"
@@ -77,6 +102,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/objectstore"
@@ -90,6 +117,10 @@ var (
 	// a cue to fall back to local disk, which would bring back the
 	// cross-replica inconsistency object storage exists to remove.
 	ErrJobStoreNotConfigured = errors.New("job store not configured")
+	// ErrInvalidJobKey means a tenant, sprout or job ID can't be used as
+	// one segment of a job key (see validKeySegment). No key is built
+	// from it, so nothing is read or written.
+	ErrInvalidJobKey = errors.New("invalid job key")
 )
 
 // objStore is the object-storage backend farmer's job logs are kept in.
@@ -115,6 +146,11 @@ const (
 	expiredObject = "expired.json"
 	eventsDir     = "events/"
 	logExt        = ".jsonl"
+
+	// maxKeySegmentLen bounds a tenant, sprout or job ID in a key. It is
+	// the job-status index's widest ID column (sprout_id), and three of
+	// them stay well inside an object key's 1024 bytes.
+	maxKeySegmentLen = 253
 )
 
 // JobStatus represents the aggregate status of a job across all its steps.
@@ -182,7 +218,11 @@ func (s *JobStatus) UnmarshalJSON(data []byte) error {
 
 // JobSummary provides an overview of a job's execution.
 type JobSummary struct {
-	JID       string                `json:"jid"`
+	JID string `json:"jid"`
+	// TenantID is the tenant whose job store the job was read from (the
+	// first segment of its keys). Empty for a job read from the CLI's
+	// local store.
+	TenantID  string                `json:"tenant_id,omitempty"`
 	SproutID  string                `json:"sprout_id"`
 	Status    JobStatus             `json:"status"`
 	Steps     []cook.StepCompletion `json:"steps"`
@@ -231,23 +271,27 @@ func opContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), opTimeout)
 }
 
-// GetJob retrieves a job by its JID and sprout ID.
-func (s *Store) GetJob(sproutID, jid string) (*JobSummary, error) {
+// GetJob retrieves tenantID's job jid on sproutID.
+func (s *Store) GetJob(tenantID, sproutID, jid string) (*JobSummary, error) {
 	obj, err := s.backend()
 	if err != nil {
 		return nil, err
 	}
-	if !validKeySegment(sproutID) || !validKeySegment(jid) {
-		return nil, ErrJobNotFound
+	ref, err := newJobRef(tenantID, sproutID, jid)
+	if err != nil {
+		return nil, err
+	}
+	prefix, err := ref.prefix()
+	if err != nil {
+		return nil, err
 	}
 	ctx, cancel := opContext()
 	defer cancel()
 
-	idx, err := listJobs(ctx, obj, jobPrefix(sproutID, jid))
+	idx, err := listJobs(ctx, obj, prefix, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("listing job: %w", err)
 	}
-	ref := jobRef{sproutID: sproutID, jid: jid}
 	objs, ok := idx[ref]
 	if !ok {
 		return nil, ErrJobNotFound
@@ -263,19 +307,25 @@ func (s *Store) GetJob(sproutID, jid string) (*JobSummary, error) {
 	return summary, nil
 }
 
-// FindJob searches all sprouts for a job with the given JID.
-func (s *Store) FindJob(jid string) (*JobSummary, error) {
+// FindJob searches tenantID's sprouts, and only theirs, for a job with the
+// given JID. If more than one of them ran it, it returns the first by
+// sprout ID that loads.
+func (s *Store) FindJob(tenantID, jid string) (*JobSummary, error) {
 	obj, err := s.backend()
 	if err != nil {
 		return nil, err
 	}
-	if !validKeySegment(jid) {
-		return nil, ErrJobNotFound
+	if err := checkKeySegment("job", jid); err != nil {
+		return nil, err
+	}
+	prefix, err := jobKey(tenantID, "", "", "")
+	if err != nil {
+		return nil, err
 	}
 	ctx, cancel := opContext()
 	defer cancel()
 
-	idx, err := listJobs(ctx, obj, jobKeyPrefix)
+	idx, err := listJobs(ctx, obj, prefix, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("listing jobs: %w", err)
 	}
@@ -289,20 +339,21 @@ func (s *Store) FindJob(jid string) (*JobSummary, error) {
 	return nil, ErrJobNotFound
 }
 
-// ListJobsForSprout returns all job summaries for a specific sprout,
+// ListJobsForSprout returns all job summaries for tenantID's sproutID,
 // sorted by start time (most recent first).
-func (s *Store) ListJobsForSprout(sproutID string) ([]JobSummary, error) {
+func (s *Store) ListJobsForSprout(tenantID, sproutID string) ([]JobSummary, error) {
 	obj, err := s.backend()
 	if err != nil {
 		return nil, err
 	}
-	if !validKeySegment(sproutID) {
-		return nil, ErrSproutNoJobs
+	prefix, err := jobKey(tenantID, sproutID, "", "")
+	if err != nil {
+		return nil, err
 	}
 	ctx, cancel := opContext()
 	defer cancel()
 
-	idx, err := listJobs(ctx, obj, sproutPrefix(sproutID))
+	idx, err := listJobs(ctx, obj, prefix, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("listing sprout jobs: %w", err)
 	}
@@ -312,17 +363,22 @@ func (s *Store) ListJobsForSprout(sproutID string) ([]JobSummary, error) {
 	return loadJobs(ctx, obj, idx), nil
 }
 
-// ListAllJobs returns job summaries across all sprouts,
-// sorted by start time (most recent first). Limit of 0 means no limit.
-func (s *Store) ListAllJobs(limit int) ([]JobSummary, error) {
+// ListAllJobs returns job summaries across all of tenantID's sprouts, and
+// no other tenant's, sorted by start time (most recent first). Limit of 0
+// means no limit.
+func (s *Store) ListAllJobs(tenantID string, limit int) ([]JobSummary, error) {
 	obj, err := s.backend()
+	if err != nil {
+		return nil, err
+	}
+	prefix, err := jobKey(tenantID, "", "", "")
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := opContext()
 	defer cancel()
 
-	idx, err := listJobs(ctx, obj, jobKeyPrefix)
+	idx, err := listJobs(ctx, obj, prefix, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("listing jobs: %w", err)
 	}
@@ -333,41 +389,51 @@ func (s *Store) ListAllJobs(limit int) ([]JobSummary, error) {
 	return allSummaries, nil
 }
 
-// DeleteJob removes a job's log and metadata objects. If more than one
-// sprout ran the JID, it deletes the same one FindJob would return (the
-// first by sprout ID).
-func (s *Store) DeleteJob(jid string) error {
+// DeleteJob removes tenantID's job jid on sproutID: its log objects and
+// metadata. It names the sprout, rather than deleting whichever sprout's
+// run FindJob would pick, so a caller deletes exactly the job it looked up
+// and checked access to.
+func (s *Store) DeleteJob(tenantID, sproutID, jid string) error {
 	obj, err := s.backend()
 	if err != nil {
 		return err
 	}
-	if !validKeySegment(jid) {
-		return ErrJobNotFound
+	ref, err := newJobRef(tenantID, sproutID, jid)
+	if err != nil {
+		return err
+	}
+	prefix, err := ref.prefix()
+	if err != nil {
+		return err
 	}
 	ctx, cancel := opContext()
 	defer cancel()
 
-	idx, err := listJobs(ctx, obj, jobKeyPrefix)
+	idx, err := listJobs(ctx, obj, prefix, tenantID)
 	if err != nil {
 		return fmt.Errorf("listing jobs: %w", err)
 	}
-	refs := refsForJID(idx, jid)
-	if len(refs) == 0 {
+	objs, ok := idx[ref]
+	if !ok {
 		return ErrJobNotFound
 	}
-	return deleteJobObjects(ctx, obj, refs[0], idx[refs[0]])
+	return deleteJobObjects(ctx, obj, ref, objs)
 }
 
-// ListSprouts returns the IDs of all sprouts that have job records.
-func (s *Store) ListSprouts() ([]string, error) {
+// ListSprouts returns the IDs of tenantID's sprouts that have job records.
+func (s *Store) ListSprouts(tenantID string) ([]string, error) {
 	obj, err := s.backend()
+	if err != nil {
+		return nil, err
+	}
+	prefix, err := jobKey(tenantID, "", "", "")
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := opContext()
 	defer cancel()
 
-	idx, err := listJobs(ctx, obj, jobKeyPrefix)
+	idx, err := listJobs(ctx, obj, prefix, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("listing jobs: %w", err)
 	}
@@ -383,61 +449,150 @@ func (s *Store) ListSprouts() ([]string, error) {
 	return sprouts, nil
 }
 
-// CountJobsForSprout returns the number of jobs recorded for a sprout.
-func (s *Store) CountJobsForSprout(sproutID string) (int, error) {
+// CountJobsForSprout returns the number of jobs recorded for tenantID's
+// sproutID.
+func (s *Store) CountJobsForSprout(tenantID, sproutID string) (int, error) {
 	obj, err := s.backend()
 	if err != nil {
 		return 0, err
 	}
-	if !validKeySegment(sproutID) {
-		return 0, nil
+	prefix, err := jobKey(tenantID, sproutID, "", "")
+	if err != nil {
+		return 0, err
 	}
 	ctx, cancel := opContext()
 	defer cancel()
 
-	idx, err := listJobs(ctx, obj, sproutPrefix(sproutID))
+	idx, err := listJobs(ctx, obj, prefix, tenantID)
 	if err != nil {
 		return 0, fmt.Errorf("listing sprout jobs: %w", err)
 	}
 	return len(idx), nil
 }
 
-// validKeySegment reports whether id (a sprout ID or JID) can be used as
-// one segment of an object key. Both arrive in NATS subject tokens, which
-// may contain "/", and a "/" would let one job's keys land inside
-// another's prefix.
+// validKeySegment reports whether id (a tenant ID, sprout ID or JID) can
+// be used as one segment of an object key. Sprout IDs and JIDs arrive in
+// NATS subject tokens, which may contain "/", and a "/" would let one
+// job's keys land inside another's prefix, or another tenant's. "..", a
+// backslash and control characters are refused too: some object stores
+// and proxies normalise them, and none belongs in an ID.
 func validKeySegment(id string) bool {
-	return id != "" && id != "." && id != ".." && !strings.Contains(id, "/")
+	if id == "" || id == "." || len(id) > maxKeySegmentLen || strings.Contains(id, "..") || !utf8.ValidString(id) {
+		return false
+	}
+	for _, r := range id {
+		if r == '/' || r == '\\' || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
-func sproutPrefix(sproutID string) string {
-	return jobKeyPrefix + sproutID + "/"
+// checkKeySegment is validKeySegment as an ErrInvalidJobKey error naming
+// which part (tenant, sprout, job) was refused.
+func checkKeySegment(part, id string) error {
+	if !validKeySegment(id) {
+		return fmt.Errorf("%w: %s ID %q is not usable as a key segment", ErrInvalidJobKey, part, id)
+	}
+	return nil
 }
 
-func jobPrefix(sproutID, jid string) string {
-	return sproutPrefix(sproutID) + jid + "/"
+// validObjectName reports whether name is one of a job's own objects:
+// created.jsonl, meta.json, expired.json or events/<one segment>.jsonl.
+func validObjectName(name string) bool {
+	switch name {
+	case createdObject, metaObject, expiredObject:
+		return true
+	}
+	event, ok := strings.CutPrefix(name, eventsDir)
+	return ok && strings.HasSuffix(event, logExt) && validKeySegment(event)
 }
 
-func createdKey(sproutID, jid string) string {
-	return jobPrefix(sproutID, jid) + createdObject
+// jobKey builds every key and key prefix the job store reads, writes,
+// lists or deletes. Trailing parts may be left empty to build a prefix:
+//
+//	jobKey(t, "", "", "")     jobs/<t>/
+//	jobKey(t, s, "", "")      jobs/<t>/<s>/
+//	jobKey(t, s, j, "")       jobs/<t>/<s>/<j>/
+//	jobKey(t, s, j, object)   jobs/<t>/<s>/<j>/<object>
+//
+// The tenant is always required, and an empty part may not be followed by
+// a set one. Each ID must pass validKeySegment and object must be a job
+// object name (validObjectName); otherwise no key is built and the error
+// wraps ErrInvalidJobKey.
+func jobKey(tenantID, sproutID, jid, object string) (string, error) {
+	if err := checkKeySegment("tenant", tenantID); err != nil {
+		return "", err
+	}
+	key := jobKeyPrefix + tenantID + "/"
+	if sproutID == "" {
+		if jid != "" || object != "" {
+			return "", fmt.Errorf("%w: a job key needs a sprout ID", ErrInvalidJobKey)
+		}
+		return key, nil
+	}
+	if err := checkKeySegment("sprout", sproutID); err != nil {
+		return "", err
+	}
+	key += sproutID + "/"
+	if jid == "" {
+		if object != "" {
+			return "", fmt.Errorf("%w: a job object key needs a job ID", ErrInvalidJobKey)
+		}
+		return key, nil
+	}
+	if err := checkKeySegment("job", jid); err != nil {
+		return "", err
+	}
+	key += jid + "/"
+	if object == "" {
+		return key, nil
+	}
+	if !validObjectName(object) {
+		return "", fmt.Errorf("%w: %q is not a job object name", ErrInvalidJobKey, object)
+	}
+	return key + object, nil
 }
 
-func metaKey(sproutID, jid string) string {
-	return jobPrefix(sproutID, jid) + metaObject
+// jobRef identifies one tenant's sprout's run of one job. Build one with
+// newJobRef (or parseJobKey), which checks every part.
+type jobRef struct {
+	tenantID string
+	sproutID string
+	jid      string
 }
 
-func expiredKey(sproutID, jid string) string {
-	return jobPrefix(sproutID, jid) + expiredObject
+// newJobRef returns the ref for tenantID's job jid on sproutID, or an
+// ErrInvalidJobKey error if any part can't be a key segment.
+func newJobRef(tenantID, sproutID, jid string) (jobRef, error) {
+	ref := jobRef{tenantID: tenantID, sproutID: sproutID, jid: jid}
+	if sproutID == "" || jid == "" {
+		return jobRef{}, fmt.Errorf("%w: a job needs a tenant, sprout and job ID", ErrInvalidJobKey)
+	}
+	if _, err := ref.prefix(); err != nil {
+		return jobRef{}, err
+	}
+	return ref, nil
+}
+
+// prefix is jobs/<tenant>/<sprout>/<jid>/.
+func (r jobRef) prefix() (string, error) {
+	return jobKey(r.tenantID, r.sproutID, r.jid, "")
+}
+
+// key is the key of the job's object named object (createdObject, ...).
+func (r jobRef) key(object string) (string, error) {
+	return jobKey(r.tenantID, r.sproutID, r.jid, object)
 }
 
 // eventKey names the object for one job event received at the given
 // time. The zero-padded UnixNano sorts lexically in time order; the random
 // suffix keeps two events received in the same nanosecond (on different
 // replicas) from overwriting each other.
-func eventKey(sproutID, jid string, at time.Time) string {
+func (r jobRef) eventKey(at time.Time) (string, error) {
 	var suffix [4]byte
 	rand.Read(suffix[:])
-	return fmt.Sprintf("%s%s%020d-%s%s", jobPrefix(sproutID, jid), eventsDir, at.UnixNano(), hex.EncodeToString(suffix[:]), logExt)
+	return r.key(fmt.Sprintf("%s%020d-%s%s", eventsDir, at.UnixNano(), hex.EncodeToString(suffix[:]), logExt))
 }
 
 // eventTime recovers the receive time eventKey encoded into key.
@@ -452,12 +607,6 @@ func eventTime(key string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return time.Unix(0, ns), true
-}
-
-// jobRef identifies one sprout's run of one job.
-type jobRef struct {
-	sproutID string
-	jid      string
 }
 
 // jobObjects is what a List found under one job's prefix.
@@ -475,38 +624,53 @@ func (o *jobObjects) hasLog() bool {
 	return o.created || len(o.events) > 0 || o.expired
 }
 
-// indexJobs groups object keys under jobKeyPrefix by job. Keys that don't
-// fit the layout are ignored.
-func indexJobs(keys []string) map[jobRef]*jobObjects {
+// parseJobKey splits a key in the job layout into its job and object
+// name. It reports false for a key that doesn't fit the layout, including
+// every key in the pre-tenant layout (jobs/<sprout>/<jid>/...): those are
+// never read.
+func parseJobKey(key string) (jobRef, string, bool) {
+	rest, ok := strings.CutPrefix(key, jobKeyPrefix)
+	if !ok {
+		return jobRef{}, "", false
+	}
+	parts := strings.SplitN(rest, "/", 4)
+	if len(parts) != 4 {
+		return jobRef{}, "", false
+	}
+	ref, err := newJobRef(parts[0], parts[1], parts[2])
+	if err != nil || !validObjectName(parts[3]) {
+		return jobRef{}, "", false
+	}
+	return ref, parts[3], true
+}
+
+// indexJobs groups object keys in the job layout by job. Keys that don't
+// fit the layout are ignored. With onlyTenant set, so are keys of any
+// other tenant: every Store method lists one tenant's prefix, and this
+// keeps a listing that ever returned more than the prefix from handing
+// back another tenant's job. Only the reaper passes "".
+func indexJobs(keys []string, onlyTenant string) map[jobRef]*jobObjects {
 	idx := make(map[jobRef]*jobObjects)
 	for _, key := range keys {
-		rest, ok := strings.CutPrefix(key, jobKeyPrefix)
-		if !ok {
+		ref, name, ok := parseJobKey(key)
+		if !ok || (onlyTenant != "" && ref.tenantID != onlyTenant) {
 			continue
 		}
-		parts := strings.SplitN(rest, "/", 3)
-		if len(parts) != 3 || !validKeySegment(parts[0]) || !validKeySegment(parts[1]) {
-			continue
-		}
-		ref := jobRef{sproutID: parts[0], jid: parts[1]}
-		name := parts[2]
 		objs := idx[ref]
 		if objs == nil {
 			objs = &jobObjects{}
+			idx[ref] = objs
 		}
-		switch {
-		case name == createdObject:
+		switch name {
+		case createdObject:
 			objs.created = true
-		case name == metaObject:
+		case metaObject:
 			objs.meta = true
-		case name == expiredObject:
+		case expiredObject:
 			objs.expired = true
-		case strings.HasPrefix(name, eventsDir) && strings.HasSuffix(name, logExt) && !strings.Contains(name[len(eventsDir):], "/"):
-			objs.events = append(objs.events, key)
 		default:
-			continue
+			objs.events = append(objs.events, key)
 		}
-		idx[ref] = objs
 	}
 	for _, objs := range idx {
 		slices.Sort(objs.events)
@@ -514,13 +678,17 @@ func indexJobs(keys []string) map[jobRef]*jobObjects {
 	return idx
 }
 
-// listJobs lists and indexes every job under prefix that has step data.
-func listJobs(ctx context.Context, obj *objectstore.Store, prefix string) (map[jobRef]*jobObjects, error) {
+// listJobs lists and indexes every job of tenantID under prefix (one of
+// tenantID's own prefixes, from jobKey) that has step data.
+func listJobs(ctx context.Context, obj *objectstore.Store, prefix, tenantID string) (map[jobRef]*jobObjects, error) {
+	if err := checkKeySegment("tenant", tenantID); err != nil {
+		return nil, err
+	}
 	keys, err := obj.List(ctx, prefix)
 	if err != nil {
 		return nil, err
 	}
-	idx := indexJobs(keys)
+	idx := indexJobs(keys, tenantID)
 	for ref, objs := range idx {
 		if !objs.hasLog() {
 			delete(idx, ref)
@@ -547,7 +715,11 @@ func refsForJID(idx map[jobRef]*jobObjects, jid string) []jobRef {
 func loadJob(ctx context.Context, obj *objectstore.Store, ref jobRef, objs *jobObjects) (*JobSummary, error) {
 	var logKeys []string
 	if objs.created {
-		logKeys = append(logKeys, createdKey(ref.sproutID, ref.jid))
+		key, err := ref.key(createdObject)
+		if err != nil {
+			return nil, err
+		}
+		logKeys = append(logKeys, key)
 	}
 	logKeys = append(logKeys, objs.events...)
 
@@ -565,6 +737,7 @@ func loadJob(ctx context.Context, obj *objectstore.Store, ref jobRef, objs *jobO
 	}
 
 	summary := buildSummary(ref.jid, ref.sproutID, steps)
+	summary.TenantID = ref.tenantID
 	if objs.expired {
 		summary.Status = JobExpired
 	}
@@ -620,7 +793,11 @@ func loadJobs(ctx context.Context, obj *objectstore.Store, idx map[jobRef]*jobOb
 func deleteJobObjects(ctx context.Context, obj *objectstore.Store, ref jobRef, objs *jobObjects) error {
 	var logKeys []string
 	if objs.created {
-		logKeys = append(logKeys, createdKey(ref.sproutID, ref.jid))
+		key, err := ref.key(createdObject)
+		if err != nil {
+			return err
+		}
+		logKeys = append(logKeys, key)
 	}
 	logKeys = append(logKeys, objs.events...)
 	for _, key := range logKeys {
@@ -628,18 +805,27 @@ func deleteJobObjects(ctx context.Context, obj *objectstore.Store, ref jobRef, o
 			return fmt.Errorf("deleting job: %w", err)
 		}
 	}
-	if objs.expired {
-		obj.Delete(ctx, expiredKey(ref.sproutID, ref.jid))
-	}
-	if objs.meta {
-		obj.Delete(ctx, metaKey(ref.sproutID, ref.jid))
+	for _, o := range []struct {
+		name    string
+		present bool
+	}{{expiredObject, objs.expired}, {metaObject, objs.meta}} {
+		if !o.present {
+			continue
+		}
+		if key, err := ref.key(o.name); err == nil {
+			obj.Delete(ctx, key)
+		}
 	}
 	return nil
 }
 
 // readJobMeta reads a job's meta.json.
 func readJobMeta(ctx context.Context, obj *objectstore.Store, ref jobRef) (*JobMeta, error) {
-	data, err := obj.Get(ctx, metaKey(ref.sproutID, ref.jid))
+	key, err := ref.key(metaObject)
+	if err != nil {
+		return nil, err
+	}
+	data, err := obj.Get(ctx, key)
 	if err != nil {
 		return nil, err
 	}

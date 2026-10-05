@@ -259,6 +259,49 @@ func TestHandleJobsForSproutProxy_NATSError(t *testing.T) {
 	}
 }
 
+// FIX.2 (security review 2026-10-b I4): the job routes of imas serve's
+// HTTP API carry no tenant. Whatever tenant the HTTP request names (query,
+// header), the sealed request farmer gets holds only the jid or sprout_id;
+// farmer reads the tenant from the CLI key the request is sealed under
+// (internal/natsapi/jobs.go). The fake farmer below records exactly what
+// it opened.
+func TestJobProxies_ForwardNoTenant(t *testing.T) {
+	cleanup := startTestNATS(t)
+	defer cleanup()
+
+	got := map[string]string{}
+	for _, method := range []string{"jobs.list", "jobs.get", "jobs.forsprout", "jobs.cancel"} {
+		testFarmer.Handle(t, client.NatsConn, method, func(params json.RawMessage) (any, error) {
+			got[method] = string(params)
+			return map[string]string{}, nil
+		})
+	}
+
+	mux := NewMux()
+	for _, c := range []struct {
+		httpMethod, path, natsMethod, want string
+	}{
+		{http.MethodGet, "/api/v1/jobs", "jobs.list", ""}, // no params at all
+		{http.MethodGet, "/api/v1/jobs/jid-42", "jobs.get", `{"jid":"jid-42"}`},
+		{http.MethodGet, "/api/v1/jobs/sprout/web-01", "jobs.forsprout", `{"sprout_id":"web-01"}`},
+		{http.MethodDelete, "/api/v1/jobs/jid-42", "jobs.cancel", `{"jid":"jid-42"}`},
+	} {
+		req := httptest.NewRequest(c.httpMethod, c.path+"?tenant_id=t_other", strings.NewReader(`{"tenant_id":"t_other"}`))
+		req.Header.Set("X-Tenant-ID", "t_other")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s %s: status %d: %s", c.httpMethod, c.path, rec.Code, rec.Body)
+		}
+		if got[c.natsMethod] != c.want {
+			t.Errorf("%s %s: farmer got params %s, want %s", c.httpMethod, c.path, got[c.natsMethod], c.want)
+		}
+	}
+	if testFarmer.TenantID != clienttest.TenantID {
+		t.Fatalf("fake farmer tenant = %q", testFarmer.TenantID)
+	}
+}
+
 func TestHandlePropsAllProxy_Success(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()

@@ -13,8 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
-
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/pki"
 )
@@ -255,18 +253,19 @@ func TestNudgeSprout(t *testing.T) {
 	nc, cleanup := startCookTestNATS(t)
 	defer cleanup()
 
-	if err := NudgeSprout(testTenantID, "web-01"); err == nil {
-		t.Error("NudgeSprout succeeded with no sprout listening")
+	useStageKeys(t, testTenantID)
+
+	// No box key on record: nothing is sent (FIX.1).
+	if err := NudgeSprout(testTenantID, "web-01"); !errors.Is(err, ErrSproutReenrollRequired) {
+		t.Errorf("NudgeSprout to a sprout with no box key: %v, want ErrSproutReenrollRequired", err)
 	}
 
-	sub, err := nc.Subscribe(NudgeSubject("web-01"), func(m *nats.Msg) {
-		b, _ := json.Marshal(Ack{Acknowledged: true})
-		m.Respond(b)
-	})
-	if err != nil {
-		t.Fatal(err)
+	sp := newStageSprout(t, testTenantID, "web-01")
+	if err := NudgeSprout(testTenantID, "web-01"); err == nil || errors.Is(err, ErrSproutReenrollRequired) {
+		t.Errorf("NudgeSprout with no sprout listening: %v, want a send error", err)
 	}
-	defer sub.Unsubscribe()
+
+	ackNudges(t, nc, sp)
 	if err := NudgeSprout(testTenantID, "web-01"); err != nil {
 		t.Errorf("NudgeSprout: %v", err)
 	}

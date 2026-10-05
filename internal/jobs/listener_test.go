@@ -18,9 +18,11 @@ import (
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/cook/cooktest"
 	"github.com/yogzblr/imas/internal/objectstore"
 	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 )
 
 // eventually polls cond until it returns true or timeout passes, and
@@ -44,7 +46,7 @@ func waitForSteps(t *testing.T, obj *objectstore.Store, sproutID, jid string, wa
 	store := NewStoreWithObjectStore(obj)
 	var summary *JobSummary
 	ok := eventually(5*time.Second, func() bool {
-		s, err := store.GetJob(sproutID, jid)
+		s, err := store.GetJob(testTenant, sproutID, jid)
 		if err != nil {
 			return false
 		}
@@ -188,7 +190,7 @@ func TestLogJobs_ExistingJobAppend(t *testing.T) {
 		Started:          time.Now(),
 		Duration:         2 * time.Second,
 	}
-	logJobs("", stepMsg(t, "imas.cook.sprout-existing.existing-job", newStep))
+	logJobs(testTenant, stepMsg(t, "imas.cook.sprout-existing.existing-job", newStep))
 
 	summary := waitForSteps(t, obj, "sprout-existing", "existing-job", 2)
 	if summary.Steps[0].ID != "existing-step" || summary.Steps[1].ID != "new-step" {
@@ -208,7 +210,7 @@ func TestLogJobs_InvalidJSON(t *testing.T) {
 	obj := useTestObjStore(t)
 
 	// Invalid JSON — should not panic, and nothing is written.
-	logJobs("", &nats.Msg{Subject: "imas.cook.sprout-bad.job-bad", Data: []byte("invalid json")})
+	logJobs(testTenant, &nats.Msg{Subject: "imas.cook.sprout-bad.job-bad", Data: []byte("invalid json")})
 
 	if keys := listKeys(t, obj, jobKeyPrefix); len(keys) != 0 {
 		t.Errorf("expected nothing written for invalid JSON, got %v", keys)
@@ -221,7 +223,7 @@ func TestLogJobs_ShortSubject(t *testing.T) {
 
 	// The wildcard subscription guarantees 4 tokens, but logJobs guards
 	// anyway.
-	logJobs("", stepMsg(t, "imas.cook.only-three", step))
+	logJobs(testTenant, stepMsg(t, "imas.cook.only-three", step))
 
 	if keys := listKeys(t, obj, jobKeyPrefix); len(keys) != 0 {
 		t.Errorf("expected nothing written for a short subject, got %v", keys)
@@ -234,9 +236,9 @@ func TestLogJobs_UnsafeKeySegment(t *testing.T) {
 	obj := useTestObjStore(t)
 	step := makeStep("s1", cook.StepCompleted, time.Now(), time.Second)
 
-	logJobs("", stepMsg(t, "imas.cook.sprout/other.job", step))
-	logJobs("", stepMsg(t, "imas.cook.sprout.job/events", step))
-	logJobs("", stepMsg(t, "imas.cook.sprout...", step))
+	logJobs(testTenant, stepMsg(t, "imas.cook.sprout/other.job", step))
+	logJobs(testTenant, stepMsg(t, "imas.cook.sprout.job/events", step))
+	logJobs(testTenant, stepMsg(t, "imas.cook.sprout...", step))
 
 	if keys := listKeys(t, obj, ""); len(keys) != 0 {
 		t.Errorf("expected nothing written for unsafe key segments, got %v", keys)
@@ -249,7 +251,7 @@ func TestLogJobs_NotConfigured(t *testing.T) {
 	t.Cleanup(func() { SetStore(orig) })
 
 	// Should log and drop the event, not panic.
-	logJobs("", stepMsg(t, "imas.cook.sprout.job", makeStep("s1", cook.StepCompleted, time.Now(), time.Second)))
+	logJobs(testTenant, stepMsg(t, "imas.cook.sprout.job", makeStep("s1", cook.StepCompleted, time.Now(), time.Second)))
 }
 
 func TestLogJobs_PutError(t *testing.T) {
@@ -257,7 +259,7 @@ func TestLogJobs_PutError(t *testing.T) {
 
 	srv.FailNext(1, 403, "AccessDenied")
 	// Should log the failed Put, not panic.
-	logJobs("", stepMsg(t, "imas.cook.sprout-err.job-err", makeStep("s1", cook.StepCompleted, time.Now(), time.Second)))
+	logJobs(testTenant, stepMsg(t, "imas.cook.sprout-err.job-err", makeStep("s1", cook.StepCompleted, time.Now(), time.Second)))
 
 	if keys := listKeys(t, obj, jobKeyPrefix); len(keys) != 0 {
 		t.Errorf("expected nothing written after a failed Put, got %v", keys)
@@ -328,12 +330,12 @@ func TestRecordJobCreation(t *testing.T) {
 func TestRecordJobCreation_ThenSteps(t *testing.T) {
 	obj := useTestObjStore(t)
 
-	recordJobCreation("", "sprout-flow", cook.RecipeEnvelope{
+	recordJobCreation(testTenant, "sprout-flow", cook.RecipeEnvelope{
 		JobID: "flow-job",
 		Steps: []cook.Step{{ID: "a"}, {ID: "b"}},
 	})
-	logJobs("", stepMsg(t, "imas.cook.sprout-flow.flow-job", makeStep("a", cook.StepCompleted, time.Now(), time.Second)))
-	logJobs("", stepMsg(t, "imas.cook.sprout-flow.flow-job", makeStep("b", cook.StepCompleted, time.Now(), time.Second)))
+	logJobs(testTenant, stepMsg(t, "imas.cook.sprout-flow.flow-job", makeStep("a", cook.StepCompleted, time.Now(), time.Second)))
+	logJobs(testTenant, stepMsg(t, "imas.cook.sprout-flow.flow-job", makeStep("b", cook.StepCompleted, time.Now(), time.Second)))
 
 	// Same lines, in the same order, the old local .jsonl file held:
 	// placeholders first, then events as they arrived.
@@ -355,7 +357,7 @@ func TestRecordJobCreation_EmptyJobID(t *testing.T) {
 	obj := useTestObjStore(t)
 
 	// Envelope with empty JobID should be ignored.
-	recordJobCreation("", "sprout-empty", cook.RecipeEnvelope{
+	recordJobCreation(testTenant, "sprout-empty", cook.RecipeEnvelope{
 		JobID: "",
 		Steps: []cook.Step{{ID: "step-a"}},
 	})
@@ -369,7 +371,7 @@ func TestRecordJobCreation_NoInvokedBy(t *testing.T) {
 	obj := useTestObjStore(t)
 
 	before := time.Now().UTC().Add(-time.Second)
-	recordJobCreation("", "sprout-noinv", cook.RecipeEnvelope{
+	recordJobCreation(testTenant, "sprout-noinv", cook.RecipeEnvelope{
 		JobID: "no-invoker-job",
 		Steps: []cook.Step{{ID: "step-a"}},
 	})
@@ -381,7 +383,7 @@ func TestRecordJobCreation_NoInvokedBy(t *testing.T) {
 
 	// meta.json is still written, since the reaper dates a job by its
 	// CreatedAt until the first event arrives.
-	meta, err := readJobMeta(context.Background(), obj, jobRef{sproutID: "sprout-noinv", jid: "no-invoker-job"})
+	meta, err := readJobMeta(context.Background(), obj, jobRef{tenantID: testTenant, sproutID: "sprout-noinv", jid: "no-invoker-job"})
 	if err != nil {
 		t.Fatalf("expected meta object: %v", err)
 	}
@@ -398,7 +400,7 @@ func TestRecordJobCreation_DuplicateJobID(t *testing.T) {
 	}
 
 	// First creation.
-	recordJobCreation("", "sprout-dup", env)
+	recordJobCreation(testTenant, "sprout-dup", env)
 	key := createdKey("sprout-dup", "dup-job")
 	originalContent, err := obj.Get(context.Background(), key)
 	if err != nil {
@@ -409,7 +411,7 @@ func TestRecordJobCreation_DuplicateJobID(t *testing.T) {
 	// already exists (the placeholders carry a fresh Started time, so a
 	// rewrite would change the content).
 	time.Sleep(time.Millisecond)
-	recordJobCreation("", "sprout-dup", env)
+	recordJobCreation(testTenant, "sprout-dup", env)
 
 	afterContent, err := obj.Get(context.Background(), key)
 	if err != nil {
@@ -423,7 +425,7 @@ func TestRecordJobCreation_DuplicateJobID(t *testing.T) {
 func TestRecordJobCreation_EmptySproutID(t *testing.T) {
 	obj := useTestObjStore(t)
 
-	recordJobCreation("", "", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}})
+	recordJobCreation(testTenant, "", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}})
 
 	if keys := listKeys(t, obj, jobKeyPrefix); len(keys) != 0 {
 		t.Errorf("expected nothing written for an empty sprout ID, got %v", keys)
@@ -433,8 +435,8 @@ func TestRecordJobCreation_EmptySproutID(t *testing.T) {
 func TestRecordJobCreation_UnsafeKeySegment(t *testing.T) {
 	obj := useTestObjStore(t)
 
-	recordJobCreation("", "sprout", cook.RecipeEnvelope{JobID: "../other", Steps: []cook.Step{{ID: "s"}}})
-	recordJobCreation("", "a/b", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}})
+	recordJobCreation(testTenant, "sprout", cook.RecipeEnvelope{JobID: "../other", Steps: []cook.Step{{ID: "s"}}})
+	recordJobCreation(testTenant, "a/b", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}})
 
 	if keys := listKeys(t, obj, ""); len(keys) != 0 {
 		t.Errorf("expected nothing written for unsafe key segments, got %v", keys)
@@ -447,14 +449,14 @@ func TestRecordJobCreation_NotConfigured(t *testing.T) {
 	t.Cleanup(func() { SetStore(orig) })
 
 	// Should log and drop the event, not panic.
-	recordJobCreation("", "sprout", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}})
+	recordJobCreation(testTenant, "sprout", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}})
 }
 
 func TestRecordJobCreation_ExistsError(t *testing.T) {
 	srv, obj := useTestObjServer(t)
 
 	srv.FailNext(1, 403, "AccessDenied")
-	recordJobCreation("", "sprout-err", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}})
+	recordJobCreation(testTenant, "sprout-err", cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s"}}})
 
 	// A failed existence check doesn't risk overwriting a job: nothing is
 	// written.
@@ -555,17 +557,13 @@ func TestRegisterNatsConn_RecordsDispatchedJobs(t *testing.T) {
 	t.Cleanup(func() { cook.SetDispatchRecorder(nil) })
 	cook.RegisterFarmerNatsConn("t_test", conn)
 	t.Cleanup(func() { cook.UnregisterFarmerNatsConn("t_test") })
-	// A sprout with no box key on record, so the dispatch is plaintext
-	// and a stub can acknowledge it.
-	if _, err := conn.Subscribe(cook.CookSubject("sprout-dispatch"), func(m *nats.Msg) {
-		var env cook.RecipeEnvelope
-		json.Unmarshal(m.Data, &env)
-		b, _ := json.Marshal(cook.Ack{Acknowledged: true, JobID: env.JobID})
-		m.Respond(b)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	conn.Flush()
+	// The dispatch is sealed only (FIX.1: a sprout with no box key is
+	// sent nothing), so the stub sprout has a box key on record and
+	// acknowledges the sealed dispatch.
+	tenantboxtest.Start(t)
+	pki.InvalidateTenantBoxKeys("t_test")
+	t.Cleanup(func() { pki.InvalidateTenantBoxKeys("t_test") })
+	cooktest.NewSprout(t, "t_test", "sprout-dispatch").AnswerCooks(t, conn, cooktest.Acknowledge)
 
 	if err := cook.SendStepsEvent("t_test", "sprout-dispatch", "dispatch-job", []cook.Step{{ID: "s1"}, {ID: "s2"}}); err != nil {
 		t.Fatalf("SendStepsEvent: %v", err)
@@ -626,7 +624,7 @@ func TestRegisterNatsConn_TwoReplicasRecordEachEventOnce(t *testing.T) {
 	// no duplicates.
 	waitForSteps(t, stores[1], "sprout-shared", "shared-job", 1+numSteps)
 	time.Sleep(100 * time.Millisecond) // any duplicate would have landed by now
-	summary, err := NewStoreWithObjectStore(stores[1]).GetJob("sprout-shared", "shared-job")
+	summary, err := NewStoreWithObjectStore(stores[1]).GetJob(testTenant, "sprout-shared", "shared-job")
 	if err != nil {
 		t.Fatal(err)
 	}

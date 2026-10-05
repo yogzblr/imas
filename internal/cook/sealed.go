@@ -24,18 +24,23 @@ package cook
 // (ReplyTo). So a compromised bus can neither read a recipe, forge or
 // replay a dispatch, nor answer one dispatch with another's Ack.
 //
-// Rules each end enforces, as for cmd.run:
+// Rules each end enforces, as for cmd.run. Sealed only, with no
+// plaintext path in either direction (FIX.1, owner decision 2026-10-04):
 //
-//   - Farmer seals whenever the sprout has a box key on record. Only a
-//     sprout enrolled before workstream J has none; it gets plaintext, as
-//     before, with a warning. Any other failure to seal fails the
-//     dispatch: never a silent fallback to plaintext.
+//   - Farmer seals every dispatch and nudge to the sprout's active box
+//     key. A sprout with no box key on record gets nothing: farmer refuses
+//     to send and returns a ReenrollRequiredError (code
+//     ReenrollRequiredCode, reenroll.go) naming the sprout. Any other
+//     failure to seal fails the request too. Nothing is ever sent in
+//     plaintext.
 //   - Farmer only accepts a sealed Ack that opens under its keys and
 //     answers this request. A plaintext Ack to a sealed request is an
 //     error, never an acknowledgement.
-//   - A sprout with payload-encryption keys (pki.SproutBoxReady) refuses
-//     a plaintext dispatch or nudge without acting on it, so a bus can't
-//     inject one.
+//   - A sprout without payload-encryption keys (pki.SproutBoxReady false)
+//     refuses every dispatch and nudge, plaintext or sealed, with no-keys:
+//     it can't open a sealed one, and acts on no plaintext one. A sprout
+//     with keys refuses a plaintext one with encryption-required. Either
+//     way nothing is acted on, so a bus can't inject one.
 //
 // Not sealed here: the step events the sprout publishes while it cooks
 // (imas.cook.<id>.<jid>, sproutcook.go). They are fire-and-forget
@@ -79,37 +84,28 @@ var (
 	nudgeBoundary = boundary{"recipe nudge", NudgeSubject, payloadbox.PurposeCookNudgeRequest, payloadbox.PurposeCookNudgeResponse}
 )
 
-// request builds farmer's request carrying body to sproutID: sealed, or
-// plaintext (body JSON-encoded, nothing for a nil body) for a sprout with
-// no box key on record, in which case reqID is empty.
+// request builds farmer's request carrying body to sproutID, sealed, and
+// returns it with its message ID. A sprout with no box key on record gets
+// no request at all: a ReenrollRequiredError, and nothing to send.
 func (b boundary) request(tenantID, sproutID string, body any) (req *nats.Msg, reqID string, err error) {
-	req = nats.NewMsg(b.subject(sproutID))
 	data, reqID, err := pki.SealToSprout(tenantID, sproutID, b.reqPurpose, "", body)
 	if errors.Is(err, pki.ErrNoActiveBoxKey) {
-		log.Warnf("cook: sending %s to sprout %s in plaintext: it has no payload-encryption key on record (enrolled before workstream J); re-enroll it", b.name, sproutID)
-		if body != nil {
-			if req.Data, err = json.Marshal(body); err != nil {
-				return nil, "", fmt.Errorf("cook: encoding %s for %s: %w", b.name, sproutID, err)
-			}
-		}
-		return req, "", nil
+		log.Warnf("cook: not sending %s to sprout %s: it has no payload-encryption key on record; re-enroll it [%s]", b.name, sproutID, ReenrollRequiredCode)
+		return nil, "", &ReenrollRequiredError{Op: b.name, SproutID: sproutID}
 	}
 	if err != nil {
 		return nil, "", fmt.Errorf("cook: sealing %s for %s: %w", b.name, sproutID, err)
 	}
+	req = nats.NewMsg(b.subject(sproutID))
 	req.Header.Set(payloadbox.Header, payloadbox.HeaderBox1)
 	req.Data = data
 	return req, reqID, nil
 }
 
-// ack reads the sprout's Ack from reply, the answer to the request
-// request returned with reqID (empty: it was plaintext).
+// ack reads the sprout's Ack from reply, the answer to the sealed request
+// request returned with reqID.
 func (b boundary) ack(tenantID, sproutID, reqID string, reply *nats.Msg) (Ack, error) {
 	var ack Ack
-	if reqID == "" {
-		err := json.Unmarshal(reply.Data, &ack)
-		return ack, err
-	}
 	if code := reply.Header.Get(payloadbox.ErrorHeader); code != "" {
 		return ack, fmt.Errorf("%w: %s", ErrSproutRefusedPayload, code)
 	}
@@ -128,21 +124,20 @@ func (b boundary) ack(tenantID, sproutID, reqID string, reply *nats.Msg) (Ack, e
 }
 
 // open is the sprout's side: it returns the opened request's message if
-// m is acceptable on this boundary, or the refusal to send back. A nil
-// message and nil refusal mean m is a plaintext request to a sprout with
-// no keys (enrolled before workstream J), to be handled as before.
+// m is acceptable on this boundary, or the refusal to send back; exactly
+// one of the two is non-nil. Only a sealed request that opens under this
+// sprout's keys is acceptable: a sprout with no keys refuses everything
+// with no-keys, plaintext included, and one with keys refuses plaintext
+// with encryption-required.
 func (b boundary) open(sproutID string, m *nats.Msg) (msg *payloadbox.Message, refused *nats.Msg) {
 	sealed := m.Header.Get(payloadbox.Header) == payloadbox.HeaderBox1
-	ready := pki.SproutBoxReady()
 	switch {
-	case !sealed && ready:
+	case !pki.SproutBoxReady():
+		log.Warnf("cook: refusing a %s: this sprout has no payload-encryption keys; re-enroll it", b.name)
+		return nil, refusal(payloadbox.ErrorCodeNoKeys)
+	case !sealed:
 		log.Warnf("cook: refusing a plaintext %s: this sprout only accepts sealed ones", b.name)
 		return nil, refusal(payloadbox.ErrorCodeEncryptionRequired)
-	case !sealed:
-		return nil, nil
-	case !ready:
-		log.Warnf("cook: refusing a sealed %s: this sprout has no payload-encryption keys; re-enroll it", b.name)
-		return nil, refusal(payloadbox.ErrorCodeNoKeys)
 	}
 	msg, err := pki.SproutOpenFromFarmer(sproutID, b.reqPurpose, m.Data)
 	if err != nil {
@@ -174,11 +169,6 @@ func refusal(code string) *nats.Msg {
 	return r
 }
 
-func plainAck(ack Ack) *nats.Msg {
-	b, _ := json.Marshal(ack)
-	return &nats.Msg{Data: b}
-}
-
 // RespondCook is the sprout's handler for a message on its own
 // imas.sprouts.<id>.cook: it returns the reply to send and, if the
 // dispatch was accepted, the envelope to cook (nil if refused). An
@@ -201,14 +191,6 @@ func RespondCook(sproutID string, m *nats.Msg) (*nats.Msg, *RecipeEnvelope) {
 		return refused, nil
 	}
 	var env RecipeEnvelope
-	if msg == nil {
-		// Enrolled before workstream J: no keys, so plaintext as before.
-		_ = json.Unmarshal(m.Data, &env)
-		if ok, reply := claimDispatch(env); !ok {
-			return plainAck(reply), nil
-		}
-		return plainAck(Ack{Acknowledged: true, JobID: env.JobID}), &env
-	}
 	if err := json.Unmarshal(msg.Body, &env); err != nil {
 		log.Warnf("cook: refusing a sealed cook: its body does not decode as a recipe envelope")
 		return refusal(payloadbox.ErrorCodeOpenFailed), nil
@@ -245,9 +227,6 @@ func RespondNudge(sproutID string, m *nats.Msg) (*nats.Msg, bool) {
 	msg, refused := nudgeBoundary.open(sproutID, m)
 	if refused != nil {
 		return refused, false
-	}
-	if msg == nil {
-		return plainAck(Ack{Acknowledged: true}), true
 	}
 	return nudgeBoundary.reply(sproutID, msg, Ack{Acknowledged: true}), true
 }

@@ -52,10 +52,10 @@ func TestMain(m *testing.M) {
 	}
 	props.SetDB(gdb)
 	// Dispatch seals to the sprout's box key (sealed.go), so it looks one
-	// up in pki's store. Nothing enrolls a box key here, so every sprout
-	// these tests dispatch to is one enrolled before workstream J and gets
-	// plaintext, as their stub sprouts expect; sealed_test.go installs
-	// keys of its own.
+	// up in pki's store. Nothing enrolls a box key here: a test that
+	// dispatches records one for its stub sprout (stage_test.go's
+	// newStageSprout, sealed_test.go's setupSealedCook). A sprout without
+	// one is sent nothing (FIX.1).
 	if err := gdb.AutoMigrate(pki.Models()...); err != nil {
 		fmt.Println("migrating pki test db:", err)
 		os.Exit(1)

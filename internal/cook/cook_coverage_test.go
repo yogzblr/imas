@@ -1287,134 +1287,85 @@ func TestCookRecipeEnvelopeCookerFactoryError(t *testing.T) {
 
 // --- SendCookEvent ---
 
-func TestSendCookEvent(t *testing.T) {
+// sendCookStub is an enrolled stub sprout (box key on record, so every
+// dispatch to it is sealed; stage_test.go's stageSprout) of testTenantID
+// answering each sealed dispatch with answer(envelope). Since FIX.1 a
+// sprout with no box key is sent nothing, so there is no plaintext stub.
+func sendCookStub(t *testing.T, sproutID string, answer func(RecipeEnvelope) Ack) <-chan RecipeEnvelope {
+	t.Helper()
 	nc, cleanup := startCookTestNATS(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
+	useStageKeys(t, testTenantID)
+	return answerCooks(t, nc, newStageSprout(t, testTenantID, sproutID), answer)
+}
 
-	// Subscribe to the cook subject for the test sprout, replying with an ack.
-	sproutID := "send-cook-sprout"
-	sub, err := nc.Subscribe("imas.sprouts."+sproutID+".cook", func(msg *nats.Msg) {
-		var env RecipeEnvelope
-		if err := json.Unmarshal(msg.Data, &env); err != nil {
-			t.Errorf("unmarshal envelope: %v", err)
-			return
-		}
-		ack := Ack{Acknowledged: true, JobID: env.JobID}
-		data, _ := json.Marshal(ack)
-		if err := msg.Respond(data); err != nil {
-			t.Errorf("respond: %v", err)
-		}
-	})
-	if err != nil {
-		t.Fatalf("subscribe: %v", err)
-	}
-	defer sub.Unsubscribe()
+func acknowledge(env RecipeEnvelope) Ack { return Ack{Acknowledged: true, JobID: env.JobID} }
 
+func TestSendCookEvent(t *testing.T) {
+	pushed := sendCookStub(t, "send-cook-sprout", acknowledge)
 	jid := GenerateJobID()
-	err = SendCookEvent(testTenantID, sproutID, "independent", jid, false)
-	if err != nil {
+	if err := SendCookEvent(testTenantID, "send-cook-sprout", "independent", jid, false); err != nil {
 		t.Fatalf("SendCookEvent: %v", err)
+	}
+	if env := <-pushed; env.JobID != jid {
+		t.Errorf("sprout received job %q, want %q", env.JobID, jid)
 	}
 }
 
 func TestSendCookEventTestMode(t *testing.T) {
-	nc, cleanup := startCookTestNATS(t)
-	defer cleanup()
-
-	sproutID := "send-cook-test-sprout"
-	sub, err := nc.Subscribe("imas.sprouts."+sproutID+".cook", func(msg *nats.Msg) {
-		var env RecipeEnvelope
-		if err := json.Unmarshal(msg.Data, &env); err != nil {
-			t.Errorf("unmarshal: %v", err)
-			return
-		}
-		if !env.Test {
-			t.Error("expected Test=true in envelope")
-		}
-		ack := Ack{Acknowledged: true, JobID: env.JobID}
-		data, _ := json.Marshal(ack)
-		msg.Respond(data)
-	})
-	if err != nil {
-		t.Fatalf("subscribe: %v", err)
-	}
-	defer sub.Unsubscribe()
-
-	err = SendCookEvent(testTenantID, sproutID, "independent", GenerateJobID(), true)
-	if err != nil {
+	pushed := sendCookStub(t, "send-cook-test-sprout", acknowledge)
+	if err := SendCookEvent(testTenantID, "send-cook-test-sprout", "independent", GenerateJobID(), true); err != nil {
 		t.Fatalf("SendCookEvent (test mode): %v", err)
+	}
+	if env := <-pushed; !env.Test {
+		t.Error("expected Test=true in envelope")
 	}
 }
 
 func TestSendCookEventWithInvoker(t *testing.T) {
-	nc, cleanup := startCookTestNATS(t)
-	defer cleanup()
-
-	sproutID := "send-cook-invoker-sprout"
-	sub, err := nc.Subscribe("imas.sprouts."+sproutID+".cook", func(msg *nats.Msg) {
-		var env RecipeEnvelope
-		if err := json.Unmarshal(msg.Data, &env); err != nil {
-			t.Errorf("unmarshal: %v", err)
-			return
-		}
-		if env.InvokedBy != "pubkey-xyz" {
-			t.Errorf("expected InvokedBy 'pubkey-xyz', got %q", env.InvokedBy)
-		}
-		ack := Ack{Acknowledged: true, JobID: env.JobID}
-		data, _ := json.Marshal(ack)
-		msg.Respond(data)
-	})
-	if err != nil {
-		t.Fatalf("subscribe: %v", err)
-	}
-	defer sub.Unsubscribe()
-
-	err = SendCookEvent(testTenantID, sproutID, "independent", GenerateJobID(), false, WithInvoker("pubkey-xyz"))
-	if err != nil {
+	pushed := sendCookStub(t, "send-cook-invoker-sprout", acknowledge)
+	if err := SendCookEvent(testTenantID, "send-cook-invoker-sprout", "independent", GenerateJobID(), false, WithInvoker("pubkey-xyz")); err != nil {
 		t.Fatalf("SendCookEvent (with invoker): %v", err)
+	}
+	if env := <-pushed; env.InvokedBy != "pubkey-xyz" {
+		t.Errorf("expected InvokedBy 'pubkey-xyz', got %q", env.InvokedBy)
 	}
 }
 
 func TestSendCookEventNotAcknowledged(t *testing.T) {
-	nc, cleanup := startCookTestNATS(t)
-	defer cleanup()
-
-	sproutID := "send-cook-nack-sprout"
-	sub, err := nc.Subscribe("imas.sprouts."+sproutID+".cook", func(msg *nats.Msg) {
-		ack := Ack{Acknowledged: false, JobID: "wrong"}
-		data, _ := json.Marshal(ack)
-		msg.Respond(data)
-	})
-	if err != nil {
-		t.Fatalf("subscribe: %v", err)
-	}
-	defer sub.Unsubscribe()
-
-	err = SendCookEvent(testTenantID, sproutID, "independent", GenerateJobID(), false)
-	if err == nil {
-		t.Error("expected error when sprout does not acknowledge")
+	sendCookStub(t, "send-cook-nack-sprout", func(RecipeEnvelope) Ack { return Ack{Acknowledged: false, JobID: "wrong"} })
+	err := SendCookEvent(testTenantID, "send-cook-nack-sprout", "independent", GenerateJobID(), false)
+	if err == nil || !strings.Contains(err.Error(), "did not acknowledge") {
+		t.Errorf("SendCookEvent error %v, want the sprout's refusal to acknowledge", err)
 	}
 }
 
 func TestSendCookEventWrongJobID(t *testing.T) {
+	sendCookStub(t, "send-cook-wrongjid-sprout", func(RecipeEnvelope) Ack { return Ack{Acknowledged: true, JobID: "wrong-jid"} })
+	err := SendCookEvent(testTenantID, "send-cook-wrongjid-sprout", "independent", GenerateJobID(), false)
+	if err == nil || !strings.Contains(err.Error(), "wrong JobID") {
+		t.Errorf("SendCookEvent error %v, want the wrong job ID in the ack", err)
+	}
+}
+
+// A sprout with no box key on record is sent nothing (FIX.1): the whole
+// SendCookEvent path, staging included, ends in ReenrollRequiredError.
+func TestSendCookEventNoBoxKey(t *testing.T) {
 	nc, cleanup := startCookTestNATS(t)
 	defer cleanup()
-
-	sproutID := "send-cook-wrongjid-sprout"
-	sub, err := nc.Subscribe("imas.sprouts."+sproutID+".cook", func(msg *nats.Msg) {
-		ack := Ack{Acknowledged: true, JobID: "wrong-jid"}
-		data, _ := json.Marshal(ack)
-		msg.Respond(data)
+	useStageKeys(t, testTenantID)
+	sub, err := nc.Subscribe(CookSubject("send-cook-keyless-sprout"), func(*nats.Msg) {
+		t.Error("a dispatch reached a sprout with no box key")
 	})
 	if err != nil {
-		t.Fatalf("subscribe: %v", err)
+		t.Fatal(err)
 	}
 	defer sub.Unsubscribe()
-
-	err = SendCookEvent(testTenantID, sproutID, "independent", GenerateJobID(), false)
-	if err == nil {
-		t.Error("expected error for wrong job ID in ack")
+	err = SendCookEvent(testTenantID, "send-cook-keyless-sprout", "independent", GenerateJobID(), false)
+	if !errors.Is(err, ErrSproutReenrollRequired) {
+		t.Fatalf("SendCookEvent error %v, want ErrSproutReenrollRequired", err)
 	}
+	nc.Flush()
 }
 
 func TestSendCookEventNoRecipe(t *testing.T) {

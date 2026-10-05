@@ -17,6 +17,7 @@ import (
 
 	apitypes "github.com/yogzblr/imas/internal/api/types"
 	"github.com/yogzblr/imas/internal/controlplane"
+	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/fleetcatalog"
 	"github.com/yogzblr/imas/internal/fleetcatalog/fleetcatalogtest"
 )
@@ -24,13 +25,18 @@ import (
 // The codes saasapi keeps verbatim (internal/saasapi, farmerErrorCode).
 func TestSproutActionErrorCodeValues(t *testing.T) {
 	for code, want := range map[controlplane.ErrorCode]string{
-		ErrorSelfUpdateDisabled:  "self_update_disabled",
-		ErrorRolloutWindowClosed: "rollout_window_closed",
-		ErrorFarmerBusy:          "farmer_busy",
+		ErrorSelfUpdateDisabled:     "self_update_disabled",
+		ErrorRolloutWindowClosed:    "rollout_window_closed",
+		ErrorFarmerBusy:             "farmer_busy",
+		ErrorSproutReenrollRequired: "sprout_reenroll_required",
 	} {
 		if string(code) != want {
 			t.Errorf("%s, want %s", code, want)
 		}
+	}
+	// The code farmer's errors to the CLI carry is the same string.
+	if string(ErrorSproutReenrollRequired) != cook.ReenrollRequiredCode {
+		t.Errorf("ErrorSproutReenrollRequired %q, cook.ReenrollRequiredCode %q", ErrorSproutReenrollRequired, cook.ReenrollRequiredCode)
 	}
 }
 
