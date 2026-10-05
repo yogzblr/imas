@@ -173,3 +173,139 @@ func TestCmdCookErrorsTravelAsMessages(t *testing.T) {
 		t.Errorf("legacy object: %v", legacy.Errors["web-01"])
 	}
 }
+
+// Inline is what the CLI prints for an error in --output json mode, and
+// what farmer's pki handlers reply with: its Error goes out as the message,
+// where encoding/json used to write "error":{}.
+func TestInlineErrorTravelsAsItsMessage(t *testing.T) {
+	b, err := json.Marshal(Inline{Success: false, Error: errors.New("boom")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != `{"success":false,"error":"boom"}` {
+		t.Errorf("wire form %s", b)
+	}
+	var got Inline
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Success || got.Error == nil || got.Error.Error() != "boom" {
+		t.Errorf("decoded %+v", got)
+	}
+
+	b, err = json.Marshal(Inline{Success: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// null, as before: an older CLI decodes it.
+	if string(b) != `{"success":true,"error":null}` {
+		t.Errorf("no error: wire form %s", b)
+	}
+}
+
+func TestInlineDecodes(t *testing.T) {
+	for name, c := range map[string]struct {
+		in          string
+		wantSuccess bool
+		wantErr     error
+	}{
+		"string":       {`{"success":false,"error":"boom"}`, false, errors.New("boom")},
+		"null":         {`{"success":true,"error":null}`, true, nil},
+		"absent":       {`{"success":true}`, true, nil},
+		"empty object": {`{"success":false,"error":{}}`, false, errLegacyWireError},
+	} {
+		var got Inline
+		if err := json.Unmarshal([]byte(c.in), &got); err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if got.Success != c.wantSuccess {
+			t.Errorf("%s: success %t, want %t", name, got.Success, c.wantSuccess)
+		}
+		switch {
+		case c.wantErr == nil && got.Error != nil:
+			t.Errorf("%s: error %v, want nil", name, got.Error)
+		case c.wantErr != nil && (got.Error == nil || got.Error.Error() != c.wantErr.Error()):
+			t.Errorf("%s: error %v, want %q", name, got.Error, c.wantErr)
+		}
+	}
+
+	prev := errors.New("kept")
+	got := Inline{Error: prev}
+	if err := json.Unmarshal([]byte(`{"success":true}`), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Error != prev || !got.Success {
+		t.Errorf("absent key: %+v, want Error kept", got)
+	}
+
+	if err := json.Unmarshal([]byte(`{"success":"yes"}`), &got); err == nil {
+		t.Error("a malformed field decoded without an error")
+	}
+}
+
+func TestPingPongErrorTravelsAsItsMessage(t *testing.T) {
+	b, err := json.Marshal(PingPong{Ping: true, Error: errors.New("boom")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != `{"ping":true,"pong":false,"error":"boom"}` {
+		t.Errorf("wire form %s", b)
+	}
+	var got PingPong
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Ping || got.Pong || got.Error == nil || got.Error.Error() != "boom" {
+		t.Errorf("decoded %+v", got)
+	}
+
+	b, err = json.Marshal(PingPong{Ping: true, Pong: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != `{"ping":true,"pong":true,"error":null}` {
+		t.Errorf("no error: wire form %s", b)
+	}
+}
+
+func TestPingPongDecodes(t *testing.T) {
+	for name, c := range map[string]struct {
+		in       string
+		wantPong bool
+		wantErr  error
+	}{
+		"string":       {`{"ping":true,"pong":false,"error":"boom"}`, false, errors.New("boom")},
+		"null":         {`{"ping":true,"pong":true,"error":null}`, true, nil},
+		"absent":       {`{"ping":true,"pong":true}`, true, nil},
+		"empty object": {`{"ping":true,"pong":false,"error":{}}`, false, errLegacyWireError},
+	} {
+		var got PingPong
+		if err := json.Unmarshal([]byte(c.in), &got); err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if !got.Ping || got.Pong != c.wantPong {
+			t.Errorf("%s: decoded %+v", name, got)
+		}
+		switch {
+		case c.wantErr == nil && got.Error != nil:
+			t.Errorf("%s: error %v, want nil", name, got.Error)
+		case c.wantErr != nil && (got.Error == nil || got.Error.Error() != c.wantErr.Error()):
+			t.Errorf("%s: error %v, want %q", name, got.Error, c.wantErr)
+		}
+	}
+
+	prev := errors.New("kept")
+	got := PingPong{Error: prev}
+	if err := json.Unmarshal([]byte(`{"pong":true}`), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Error != prev || !got.Pong {
+		t.Errorf("absent key: %+v, want Error kept", got)
+	}
+
+	if err := json.Unmarshal([]byte(`{"pong":"yes"}`), &got); err == nil {
+		t.Error("a malformed field decoded without an error")
+	}
+}

@@ -89,6 +89,9 @@ func TestOutputError_JSONMode(t *testing.T) {
 	if result["success"] != false {
 		t.Errorf("expected success=false, got: %v", result["success"])
 	}
+	if result["error"] != "json error" {
+		t.Errorf("expected error=%q, got: %s", "json error", out)
+	}
 }
 
 // --- WriteJSON / WriteJSONErr / WriteOutput tests ---
@@ -120,6 +123,10 @@ func TestWriteJSONErr(t *testing.T) {
 	}
 	if result["success"] != false {
 		t.Errorf("expected success=false, got: %v", result["success"])
+	}
+	// The error's text, not the {} encoding/json writes for an error value.
+	if result["error"] != "test write json err" {
+		t.Errorf("expected error=%q, got: %s", "test write json err", trimmed)
 	}
 }
 

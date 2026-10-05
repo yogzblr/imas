@@ -5,13 +5,14 @@ import (
 	"errors"
 )
 
-// The error fields of CmdRun and CmdCook travel as their message string,
-// or null for no error. encoding/json would otherwise write a non-nil
+// The error fields of CmdRun, CmdCook, Inline and PingPong travel as their
+// message string, or null for no error. encoding/json would otherwise write a non-nil
 // error interface as its exported fields (`{}` for most errors,
 // `{"Op":"cmd.run","SproutID":"web-01"}` for a cook.ReenrollRequiredError),
 // which drops the message and cannot be decoded back into an error, so the
-// CLI reported the whole result as an invalid message. The same approach
-// as cook.StepCompletion's Error.
+// CLI reported the whole result as an invalid message (and the CLI's
+// --output json errors, written as an Inline, printed "error":{}). The same
+// approach as cook.StepCompletion's Error.
 
 // errLegacyWireError stands in for an error that an older imas encoded as
 // a JSON object: the result still failed, but its message was lost.
@@ -111,5 +112,67 @@ func (c *CmdCook) UnmarshalJSON(b []byte) error {
 	for k, raw := range aux.Errors {
 		c.Errors[k] = decodeWireError(raw)
 	}
+	return nil
+}
+
+// inlineFields has Inline's fields but none of its methods.
+type inlineFields Inline
+
+// MarshalJSON encodes Error as its message string, or null when Error is
+// nil.
+func (i Inline) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		inlineFields
+		Error *string `json:"error"`
+	}{inlineFields(i), wireErrorMessage(i.Error)})
+}
+
+// UnmarshalJSON is the inverse of MarshalJSON, and accepts the object
+// older versions wrote for an error, as CmdRun's does.
+func (i *Inline) UnmarshalJSON(b []byte) error {
+	aux := struct {
+		inlineFields
+		Error json.RawMessage `json:"error"`
+	}{inlineFields: inlineFields(*i)}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+	*i = Inline(aux.inlineFields)
+	if aux.Error == nil {
+		// Key absent: leave Error as it was.
+		return nil
+	}
+	i.Error = decodeWireError(aux.Error)
+	return nil
+}
+
+// pingPongFields has PingPong's fields but none of its methods.
+type pingPongFields PingPong
+
+// MarshalJSON encodes Error as its message string, or null when Error is
+// nil.
+func (p PingPong) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		pingPongFields
+		Error *string `json:"error"`
+	}{pingPongFields(p), wireErrorMessage(p.Error)})
+}
+
+// UnmarshalJSON is the inverse of MarshalJSON, and accepts the object
+// older versions wrote for an error, as CmdRun's does.
+func (p *PingPong) UnmarshalJSON(b []byte) error {
+	aux := struct {
+		pingPongFields
+		Error json.RawMessage `json:"error"`
+	}{pingPongFields: pingPongFields(*p)}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+	*p = PingPong(aux.pingPongFields)
+	if aux.Error == nil {
+		// Key absent: leave Error as it was.
+		return nil
+	}
+	p.Error = decodeWireError(aux.Error)
 	return nil
 }

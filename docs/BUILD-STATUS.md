@@ -1147,7 +1147,11 @@ PR #112).
       (the CLI times out for it); `cmd.RegisterNatsConn` and its
       unused connection, and the routeless `HTestPing` handler, remain;
       `docs/design/imas-sprout-orchestration.md` ("As built: cook's wire
-      format") still describes the removed plaintext fallback. Open from
+      format") still describes the removed plaintext fallback. Left by
+      PR #118 and closed by PR #122: `apitypes.Inline.Error` and
+      `PingPong.Error` now travel as their message text too, so the CLI's
+      `--output json` errors (e.g. `imas keys`) print `"error":"<text>"`
+      instead of `"error":{}`. Open from
       SEC.7b: the exported test seam `pki.UseInMemoryJoinToken`, and
       whether the proof should also carry the binding ID. Open from SEC.7d:
       whether an out-of-range `stagedrecipeclockskew` should stop the sprout
