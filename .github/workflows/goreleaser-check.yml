@@ -37,9 +37,10 @@ jobs:
           check-latest: true
 
       # wixl and msibuild/msiinfo for build-msi.sh; zip/unzip and python3
-      # (preinstalled) for test-windows-packaging.sh.
+      # (preinstalled) for test-windows-packaging.sh; rpm to list .rpm
+      # contents in check-package-contents.sh.
       - name: Install msitools
-        run: sudo apt-get update -q && sudo apt-get install -y -q wixl msitools zip unzip
+        run: sudo apt-get update -q && sudo apt-get install -y -q wixl msitools zip unzip rpm
 
       - name: Install GoReleaser OSS
         uses: goreleaser/goreleaser-action@v7
@@ -67,6 +68,12 @@ jobs:
       # aren't what this checks.
       - name: Snapshot build
         run: goreleaser release --snapshot --clean --skip=publish,sign,docker
+
+      # Every deb/rpm/apk must carry the unversioned binary, the default
+      # config, the trust root, the state directories and the unit or init
+      # script. The rc.3 packages shipped none of these but the binary.
+      - name: Check the deb/rpm/apk contents
+        run: packaging/check-package-contents.sh dist
 
       - name: Check the MSI and checksums.txt
         run: |

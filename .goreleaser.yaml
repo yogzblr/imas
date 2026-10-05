@@ -17,10 +17,14 @@ snapshot:
   name_template: "{{ incpatch .Version }}-next"
 
 builds:
-  # Package manager builds (no self-update)
+  # Package manager builds (no self-update). The binary name is deliberately
+  # unversioned: nfpm installs it under bindir as-is, and the systemd units,
+  # OpenRC init scripts and docs all expect /usr/bin/imas-sprout,
+  # /usr/bin/imas-farmer and /usr/bin/imas. (Each build writes into its own
+  # dist/<id>_<os>_<arch> directory, so the names do not collide.)
   - main: ./cmd/sprout/
     id: "sprout-pkg"
-    binary: "{{.ProjectName}}-sprout-{{.Version}}-{{.Os}}-{{.Arch}}"
+    binary: "{{.ProjectName}}-sprout"
     goos:
       - linux
     goarch:
@@ -34,7 +38,7 @@ builds:
       - no_self_update
   - main: ./cmd/farmer/
     id: "farmer-pkg"
-    binary: "{{.ProjectName}}-farmer-{{.Version}}-{{.Os}}-{{.Arch}}"
+    binary: "{{.ProjectName}}-farmer"
     goos:
       - linux
     goarch:
@@ -48,7 +52,7 @@ builds:
       - no_self_update
   - main: ./cmd/imas/
     id: "imas-pkg"
-    binary: "{{.ProjectName}}-{{.Version}}-{{.Os}}-{{.Arch}}"
+    binary: "{{.ProjectName}}"
     goos:
       - linux
       - darwin
@@ -233,10 +237,10 @@ nfpms:
     formats: [apk, deb, rpm]
     bindir: /usr/bin
     description: "Effective fleet configuration management"
-    maintainer: Tai Groot <tai@taigrr.com>
+    maintainer: Yogesh Gundurao <yogesh.gundurao@gmail.com>
     license: 0BSD
     homepage: https://imas.dev
-    vendor: Adatomic, Inc.
+    vendor: imas contributors
     version_metadata: git
 
   - id: imas-farmer
@@ -245,35 +249,38 @@ nfpms:
     formats: [apk, deb, rpm]
     bindir: /usr/bin
     description: "IMAS control plane"
-    maintainer: Tai Groot <tai@taigrr.com>
+    maintainer: Yogesh Gundurao <yogesh.gundurao@gmail.com>
     license: 0BSD
     homepage: https://imas.dev
-    vendor: Adatomic, Inc.
+    vendor: imas contributors
     version_metadata: git
-    contents:
-      - src: ./packaging/etc/imas-farmer.conf
-        dst: /etc/imas/farmer
-        type: config
-        file_info:
-          mode: 0644
-      - dst: /etc/imas/pki/farmer/
-        type: dir
-        file_info:
-          mode: 0755
-          owner: farmer
-          group: farmer
-      - dst: /var/cache/imas/farmer
-        type: dir
-        file_info:
-          mode: 0755
-          owner: farmer
-          group: farmer
+    # Shared files (config, trust root, directories) are repeated under each
+    # override below on purpose: a per-format `contents` REPLACES the
+    # top-level list in nfpm, it is not appended to it. See
+    # packaging/check-package-contents.sh, which CI runs on a snapshot.
     scripts:
       preinstall: ./packaging/alpine/imas-farmer.pre-install
       postinstall: ./packaging/alpine/imas-farmer.post-install
     overrides:
       apk:
         contents:
+          - src: ./packaging/etc/imas-farmer.conf
+            dst: /etc/imas/farmer
+            type: config
+            file_info:
+              mode: 0644
+          - dst: /etc/imas/pki/farmer/
+            type: dir
+            file_info:
+              mode: 0755
+              owner: farmer
+              group: farmer
+          - dst: /var/cache/imas/farmer
+            type: dir
+            file_info:
+              mode: 0755
+              owner: farmer
+              group: farmer
           - src: ./packaging/alpine/imas-farmer.initd
             dst: /etc/init.d/imas-farmer
             type: config
@@ -281,23 +288,57 @@ nfpms:
               mode: 0755
       deb:
         contents:
+          - src: ./packaging/etc/imas-farmer.conf
+            dst: /etc/imas/farmer
+            type: config
+            file_info:
+              mode: 0644
+          - dst: /etc/imas/pki/farmer/
+            type: dir
+            file_info:
+              mode: 0755
+              owner: farmer
+              group: farmer
+          - dst: /var/cache/imas/farmer
+            type: dir
+            file_info:
+              mode: 0755
+              owner: farmer
+              group: farmer
           - src: ./packaging/systemd/imas-farmer.service
             dst: /lib/systemd/system/imas-farmer.service
             type: config
             file_info:
               mode: 0644
         scripts:
-          preinstall: ./packaging/alpine/imas-farmer.pre-install
+          preinstall: ./packaging/scripts/imas-farmer-preinstall.sh
           postinstall: ./packaging/scripts/imas-farmer-deb-postinstall.sh
       rpm:
         contents:
+          - src: ./packaging/etc/imas-farmer.conf
+            dst: /etc/imas/farmer
+            type: config
+            file_info:
+              mode: 0644
+          - dst: /etc/imas/pki/farmer/
+            type: dir
+            file_info:
+              mode: 0755
+              owner: farmer
+              group: farmer
+          - dst: /var/cache/imas/farmer
+            type: dir
+            file_info:
+              mode: 0755
+              owner: farmer
+              group: farmer
           - src: ./packaging/systemd/imas-farmer.service
             dst: /usr/lib/systemd/system/imas-farmer.service
             type: config
             file_info:
               mode: 0644
         scripts:
-          preinstall: ./packaging/alpine/imas-farmer.pre-install
+          preinstall: ./packaging/scripts/imas-farmer-preinstall.sh
           postinstall: ./packaging/scripts/imas-farmer-rpm-postinstall.sh
 
   - id: imas-sprout
@@ -306,37 +347,40 @@ nfpms:
     formats: [apk, deb, rpm]
     bindir: /usr/bin
     description: "IMAS remote control agent"
-    maintainer: Will Sinatra <wpsinatra@gmail.com>
+    maintainer: Yogesh Gundurao <yogesh.gundurao@gmail.com>
     license: 0BSD
     homepage: https://imas.dev
-    vendor: Adatomic, Inc.
+    vendor: imas contributors
     version_metadata: git
-    contents:
-      # noreplace: the sprout writes its own state (sproutid, an emptied
-      # jointoken) and the admin's settings into this file, so an upgrade,
-      # including a self_update's rpm -U, must keep it (.rpmnew beside it)
-      # rather than move it to .rpmsave. dpkg keeps it via --force-confold.
-      - src: ./packaging/etc/imas-sprout.conf
-        dst: /etc/imas/sprout
-        type: config|noreplace
-        file_info:
-          mode: 0644
-      # The self_update trust root (packaging/etc/fleet-signing-keys.md).
-      # Deliberately not a config file: every upgrade replaces it, which is
-      # how a signing key rotation reaches the fleet.
-      - src: ./packaging/etc/fleet-signing-keys.json
-        dst: /etc/imas/fleet-signing-keys.json
-        file_info:
-          mode: 0644
-      - dst: /var/cache/imas/sprout
-        type: dir
-        file_info:
-          mode: 0755
+    # Shared files (config, trust root, directories) are repeated under each
+    # override below on purpose: a per-format `contents` REPLACES the
+    # top-level list in nfpm, it is not appended to it. See
+    # packaging/check-package-contents.sh, which CI runs on a snapshot.
     scripts:
       postinstall: ./packaging/alpine/imas-sprout.post-install
     overrides:
       apk:
         contents:
+          # noreplace: the sprout writes its own state (sproutid, an emptied
+          # jointoken) and the admin's settings into this file, so an upgrade,
+          # including a self_update's rpm -U, must keep it (.rpmnew beside it)
+          # rather than move it to .rpmsave. dpkg keeps it via --force-confold.
+          - src: ./packaging/etc/imas-sprout.conf
+            dst: /etc/imas/sprout
+            type: config|noreplace
+            file_info:
+              mode: 0644
+          # The self_update trust root (packaging/etc/fleet-signing-keys.md).
+          # Deliberately not a config file: every upgrade replaces it, which is
+          # how a signing key rotation reaches the fleet.
+          - src: ./packaging/etc/fleet-signing-keys.json
+            dst: /etc/imas/fleet-signing-keys.json
+            file_info:
+              mode: 0644
+          - dst: /var/cache/imas/sprout
+            type: dir
+            file_info:
+              mode: 0755
           - src: ./packaging/alpine/imas-sprout.initd
             dst: /etc/init.d/imas-sprout
             type: config
@@ -344,6 +388,26 @@ nfpms:
               mode: 0755
       deb:
         contents:
+          # noreplace: the sprout writes its own state (sproutid, an emptied
+          # jointoken) and the admin's settings into this file, so an upgrade,
+          # including a self_update's rpm -U, must keep it (.rpmnew beside it)
+          # rather than move it to .rpmsave. dpkg keeps it via --force-confold.
+          - src: ./packaging/etc/imas-sprout.conf
+            dst: /etc/imas/sprout
+            type: config|noreplace
+            file_info:
+              mode: 0644
+          # The self_update trust root (packaging/etc/fleet-signing-keys.md).
+          # Deliberately not a config file: every upgrade replaces it, which is
+          # how a signing key rotation reaches the fleet.
+          - src: ./packaging/etc/fleet-signing-keys.json
+            dst: /etc/imas/fleet-signing-keys.json
+            file_info:
+              mode: 0644
+          - dst: /var/cache/imas/sprout
+            type: dir
+            file_info:
+              mode: 0755
           - src: ./packaging/systemd/imas-sprout.service
             dst: /lib/systemd/system/imas-sprout.service
             type: config
@@ -353,6 +417,26 @@ nfpms:
           postinstall: ./packaging/scripts/imas-sprout-deb-postinstall.sh
       rpm:
         contents:
+          # noreplace: the sprout writes its own state (sproutid, an emptied
+          # jointoken) and the admin's settings into this file, so an upgrade,
+          # including a self_update's rpm -U, must keep it (.rpmnew beside it)
+          # rather than move it to .rpmsave. dpkg keeps it via --force-confold.
+          - src: ./packaging/etc/imas-sprout.conf
+            dst: /etc/imas/sprout
+            type: config|noreplace
+            file_info:
+              mode: 0644
+          # The self_update trust root (packaging/etc/fleet-signing-keys.md).
+          # Deliberately not a config file: every upgrade replaces it, which is
+          # how a signing key rotation reaches the fleet.
+          - src: ./packaging/etc/fleet-signing-keys.json
+            dst: /etc/imas/fleet-signing-keys.json
+            file_info:
+              mode: 0644
+          - dst: /var/cache/imas/sprout
+            type: dir
+            file_info:
+              mode: 0755
           - src: ./packaging/systemd/imas-sprout.service
             dst: /usr/lib/systemd/system/imas-sprout.service
             type: config

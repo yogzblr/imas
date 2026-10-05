@@ -2,10 +2,10 @@
 
 cat <<EOF
 *
-*  imas-sprout expects /srv/imas/sprout/ to exist.
-*  This directory is not automatically created.
+*  imas-sprout is installed but not started.
 *
-*  This can be corrected with the following commands:
-*    mkdir -p /srv/imas/sprout
+*  Set farmerinterface and jointoken in /etc/imas/sprout, then:
+*    rc-update add imas-sprout default
+*    rc-service imas-sprout start
 *
-EOF 
+EOF
