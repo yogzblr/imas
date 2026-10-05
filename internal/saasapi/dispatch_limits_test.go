@@ -493,6 +493,8 @@ func TestReplyUpdate_FarmerCodes(t *testing.T) {
 		"self_update_disabled":  failedUpdate(string(controlplane.ErrorInternal)),
 		"farmer_busy":           requeueUpdate(),
 		"something_new":         failedUpdate(string(controlplane.ErrorInternal)),
+		// Not sent again: it would be refused until the sprout re-enrolls.
+		"sprout_reenroll_required": failedUpdate(string(controlplane.ErrorInternal)),
 	} {
 		b, _ := json.Marshal(controlplane.SproutActionReply{TenantID: "t_1", SproutID: "web-01", Status: controlplane.StatusFailed, ErrorCode: code})
 		if got := replyUpdate(batch, item, b); fmt.Sprint(got) != fmt.Sprint(want) {
@@ -505,7 +507,34 @@ func TestReplyUpdate_FarmerCodes(t *testing.T) {
 		t.Errorf("mismatched busy reply: %v", got)
 	}
 	// The strings farmer sends (internal/natsapi pins the same values).
-	if farmerCodeBusy != "farmer_busy" || farmerCodeSelfUpdateDisabled != "self_update_disabled" || farmerCodeRolloutWindowClosed != "rollout_window_closed" {
+	if farmerCodeBusy != "farmer_busy" || farmerCodeSelfUpdateDisabled != "self_update_disabled" || farmerCodeRolloutWindowClosed != "rollout_window_closed" ||
+		farmerCodeSproutReenrollRequired != "sprout_reenroll_required" {
 		t.Error("farmer code values changed")
+	}
+}
+
+// FIX.1: farmer refused to send a §1.5 cmd.run to a sprout with no box
+// key (sprout_reenroll_required). The item fails at once, recorded as
+// internal_error until the code is documented, and is not left queued
+// for the sweeper to send again.
+func TestSproutActionBatch_SproutReenrollRequiredFailsItem(t *testing.T) {
+	gdb := newTestDBWithFarmer(t)
+	ns := startTestBus(t)
+	connectSaaSBus(t, ns)
+	tid := mustCreateActiveTenant(t, gdb)
+	mustInsertFarmerSprout(t, gdb, tid, "web-01", "accepted")
+	mustLinkAsset(t, tid, "web-01", "a1")
+	startFakeFarmer(t, ns, func(req controlplane.SproutActionRequest) any {
+		return controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
+			Status: controlplane.StatusFailed, ErrorCode: farmerCodeSproutReenrollRequired}
+	})
+	_, resp := postActions(t, tid, map[string]any{"asset_ids": []string{"a1"}, "action": cmdAction("uptime")})
+	actionDispatches.Wait()
+	var it AssetActionItem
+	if err := gdb.Where("batch_id = ? AND tenant_id = ?", resp["batch_id"], tid).First(&it).Error; err != nil {
+		t.Fatal(err)
+	}
+	if it.Status != ActionItemFailed || it.ErrorCode != string(controlplane.ErrorInternal) || it.Attempts != 1 {
+		t.Fatalf("item = %+v, want failed (internal_error) after 1 attempt", it)
 	}
 }

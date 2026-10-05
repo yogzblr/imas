@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -427,7 +428,7 @@ func TestSealedCook_FarmerRejectsBadAcks(t *testing.T) {
 		want    error
 	}{
 		"plaintext": {func(m *nats.Msg) *nats.Msg {
-			return plainAck(Ack{Acknowledged: true, JobID: "job-bad"})
+			return plaintextAck(Ack{Acknowledged: true, JobID: "job-bad"})
 		}, ErrReplyNotSealed},
 		"reflected request": {func(m *nats.Msg) *nats.Msg {
 			r := nats.NewMsg("")
@@ -481,7 +482,7 @@ func TestSealedCook_FarmerRejectsBadNudgeAcks(t *testing.T) {
 		respond func(m *nats.Msg) *nats.Msg
 		want    error
 	}{
-		"plaintext": {func(*nats.Msg) *nats.Msg { return plainAck(Ack{Acknowledged: true}) }, ErrReplyNotSealed},
+		"plaintext": {func(*nats.Msg) *nats.Msg { return plaintextAck(Ack{Acknowledged: true}) }, ErrReplyNotSealed},
 		"cook ack for this request": {func(m *nats.Msg) *nats.Msg {
 			// Seal an Ack under the cook purpose, naming this nudge.
 			opened, err := pki.SproutOpenFromFarmer(e.sproutID, payloadbox.PurposeCookNudgeRequest, m.Data)
@@ -502,7 +503,7 @@ func TestSealedCook_FarmerRejectsBadNudgeAcks(t *testing.T) {
 	}
 }
 
-// Any failure to seal other than "no box key on record" fails the
+// Any failure to seal (not only "no box key on record") fails the
 // dispatch: nothing is sent, in plaintext or otherwise, and nothing is
 // recorded.
 func TestSealedCook_SealFailureFailsTheDispatch(t *testing.T) {
@@ -530,49 +531,125 @@ func TestSealedCook_SealFailureFailsTheDispatch(t *testing.T) {
 	}
 }
 
-// A sprout enrolled before workstream J has no box key on record and no
-// keys of its own: cook and nudge stay plaintext for it, as before.
-func TestSealedCook_LegacySproutStaysPlaintext(t *testing.T) {
-	e := setupSealedCook(t, "t_cook_sealed_legacy")
-	const legacy = "legacy-01"
-	os.Remove(config.SproutTenantX25519PubFile) // this process now plays a keyless sprout
-	e.serve(t, legacy)
-	spy := spyOnCookBus(t, e, CookSubject(legacy))
+// plaintextAck is a plaintext Ack, what a sprout built before sealed cook
+// (or a bus attempting a downgrade) answers with.
+func plaintextAck(ack Ack) *nats.Msg {
+	b, _ := json.Marshal(ack)
+	return &nats.Msg{Data: b}
+}
 
-	if err := SendStepsEvent(e.tenant, legacy, "job-legacy", secretSteps()); err != nil {
-		t.Fatalf("SendStepsEvent to a legacy sprout: %v", err)
-	}
-	if err := NudgeSprout(e.tenant, legacy); err != nil {
-		t.Fatalf("NudgeSprout to a legacy sprout: %v", err)
-	}
-	if got := e.cookedJobs(); !slices.Equal(got, []string{"job-legacy"}) {
-		t.Errorf("legacy sprout accepted %v, want [job-legacy]", got)
-	}
-	if e.nudges() != 1 {
-		t.Errorf("legacy sprout accepted %d nudges, want 1", e.nudges())
-	}
-	for _, m := range spy.waitFor(t, 2) {
-		if m.Header.Get(payloadbox.Header) != "" {
-			t.Errorf("message on %s to a legacy sprout is marked sealed", m.Subject)
+// A sprout with no box key on record (enrolled before workstream J, or
+// between its two enrollment requests) is sent nothing at all, sealed or
+// plaintext (FIX.1): farmer refuses with a ReenrollRequiredError naming
+// the sprout and carrying ReenrollRequiredCode, and records nothing.
+func TestSealedCook_FarmerRefusesToSendToASproutWithNoBoxKey(t *testing.T) {
+	e := setupSealedCook(t, "t_cook_sealed_nokey")
+	const keyless = "keyless-01"
+	e.serve(t, keyless) // a sprout is listening, so a send would be answered
+	spy := spyOnCookBus(t, e, CookSubject(keyless), NudgeSubject(keyless))
+
+	checkRefusal := func(what string, err error) {
+		t.Helper()
+		if !errors.Is(err, ErrSproutReenrollRequired) || !errors.Is(err, pki.ErrNoActiveBoxKey) {
+			t.Fatalf("%s error %v, want ErrSproutReenrollRequired wrapping pki.ErrNoActiveBoxKey", what, err)
 		}
+		var rerr *ReenrollRequiredError
+		if !errors.As(err, &rerr) || rerr.SproutID != keyless {
+			t.Fatalf("%s error %#v doesn't name sprout %s", what, err, keyless)
+		}
+		for _, want := range []string{keyless, "re-enroll", ReenrollRequiredCode} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s error %q doesn't mention %q", what, err, want)
+			}
+		}
+	}
+	checkRefusal("SendStepsEvent", SendStepsEvent(e.tenant, keyless, "job-nokey", secretSteps()))
+	checkRefusal("NudgeSprout", NudgeSprout(e.tenant, keyless))
+	checkRefusal("RequireSproutBoxKey", RequireSproutBoxKey(e.tenant, keyless, "cook"))
+	if err := RequireSproutBoxKey(e.tenant, e.sproutID, "cook"); err != nil {
+		t.Errorf("RequireSproutBoxKey for a sprout with a box key: %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond) // anything published would have landed
+	spy.mu.Lock()
+	n := len(spy.msgs)
+	spy.mu.Unlock()
+	if n != 0 {
+		t.Errorf("the bus saw %d messages for a sprout with no box key", n)
+	}
+	if got := e.recordedJobs(); len(got) != 0 {
+		t.Errorf("dispatch recorder saw %v for a dispatch that was never sent", got)
+	}
+	if got := e.cookedJobs(); len(got) != 0 || e.nudges() != 0 {
+		t.Errorf("a sprout with no box key accepted %v and %d nudges", got, e.nudges())
 	}
 }
 
-// The other half of the carve-out: a keyless sprout can't open a sealed
-// dispatch (farmer has a box key on record for it, but the sprout lost
-// its keys), and says so instead of acting on it.
-func TestSealedCook_KeylessSproutRefusesSealed(t *testing.T) {
+// A sprout with no keys of its own refuses every dispatch and nudge with
+// no-keys, sealed ones (farmer has a box key on record, but the sprout
+// lost its keys) and plaintext ones a bus injects alike, and acts on
+// none (FIX.1: there is no plaintext branch left).
+func TestSealedCook_KeylessSproutRefusesSealedAndPlaintext(t *testing.T) {
 	e := setupSealedCook(t, "t_cook_sealed_keyless")
-	os.Remove(config.SproutTenantX25519PubFile)
+	os.Remove(config.SproutTenantX25519PubFile) // this process now plays a keyless sprout
+
 	err := SendStepsEvent(e.tenant, e.sproutID, "job-keyless", secretSteps())
-	if !errors.Is(err, ErrSproutRefusedPayload) {
-		t.Fatalf("SendStepsEvent error %v, want ErrSproutRefusedPayload", err)
+	if !errors.Is(err, ErrSproutRefusedPayload) || !strings.Contains(err.Error(), payloadbox.ErrorCodeNoKeys) {
+		t.Fatalf("SendStepsEvent error %v, want ErrSproutRefusedPayload: %s", err, payloadbox.ErrorCodeNoKeys)
 	}
-	if err := NudgeSprout(e.tenant, e.sproutID); !errors.Is(err, ErrSproutRefusedPayload) {
-		t.Fatalf("NudgeSprout error %v, want ErrSproutRefusedPayload", err)
+	if err := NudgeSprout(e.tenant, e.sproutID); !errors.Is(err, ErrSproutRefusedPayload) || !strings.Contains(err.Error(), payloadbox.ErrorCodeNoKeys) {
+		t.Fatalf("NudgeSprout error %v, want ErrSproutRefusedPayload: %s", err, payloadbox.ErrorCodeNoKeys)
+	}
+
+	// What a compromised bus would inject: the plaintext dispatch and
+	// nudge a keyless sprout used to act on.
+	env, _ := json.Marshal(RecipeEnvelope{JobID: "injected-keyless", Steps: secretSteps(), DispatchedAt: time.Now().UTC()})
+	for subject, body := range map[string][]byte{CookSubject(e.sproutID): env, NudgeSubject(e.sproutID): nil} {
+		reply, err := e.farmer.Request(subject, body, 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := reply.Header.Get(payloadbox.ErrorHeader); code != payloadbox.ErrorCodeNoKeys {
+			t.Errorf("%s: refusal code %q, want %q", subject, code, payloadbox.ErrorCodeNoKeys)
+		}
+		if len(reply.Data) != 0 {
+			t.Errorf("%s: refusal carries a body: %s", subject, reply.Data)
+		}
 	}
 	if got := e.cookedJobs(); len(got) != 0 {
 		t.Errorf("keyless sprout accepted %v", got)
+	}
+	if e.nudges() != 0 {
+		t.Errorf("keyless sprout accepted %d nudges", e.nudges())
+	}
+	if handled, _ := os.ReadFile(config.SproutHandledJobsFile); bytes.Contains(handled, []byte("injected-keyless")) {
+		t.Error("a refused plaintext dispatch was recorded as handled")
+	}
+}
+
+// The handlers alone, without a bus: RespondCook and RespondNudge on a
+// keyless sprout return the no-keys refusal and nothing to act on, for a
+// plaintext and a sealed request.
+func TestSealedCook_KeylessRespondersReturnNothingToActOn(t *testing.T) {
+	e := setupSealedCook(t, "t_cook_sealed_keyless_unit")
+	sealedCook := sealedRequest(t, e.tenant, e.sproutID, CookSubject(e.sproutID), payloadbox.PurposeCookRequest,
+		RecipeEnvelope{JobID: "job-unit", Steps: secretSteps(), DispatchedAt: time.Now().UTC()})
+	sealedNudge := sealedRequest(t, e.tenant, e.sproutID, NudgeSubject(e.sproutID), payloadbox.PurposeCookNudgeRequest, nil)
+	plainCook := &nats.Msg{Subject: CookSubject(e.sproutID), Data: []byte(`{"JobID":"job-unit-plain"}`)}
+	plainNudge := &nats.Msg{Subject: NudgeSubject(e.sproutID)}
+	os.Remove(config.SproutTenantX25519PubFile)
+
+	for name, m := range map[string]*nats.Msg{"sealed": sealedCook, "plaintext": plainCook} {
+		reply, env := RespondCook(e.sproutID, m)
+		if env != nil || reply.Header.Get(payloadbox.ErrorHeader) != payloadbox.ErrorCodeNoKeys {
+			t.Errorf("%s cook: envelope %v, refusal %q; want none and %q", name, env, reply.Header.Get(payloadbox.ErrorHeader), payloadbox.ErrorCodeNoKeys)
+		}
+	}
+	for name, m := range map[string]*nats.Msg{"sealed": sealedNudge, "plaintext": plainNudge} {
+		reply, ok := RespondNudge(e.sproutID, m)
+		if ok || reply.Header.Get(payloadbox.ErrorHeader) != payloadbox.ErrorCodeNoKeys {
+			t.Errorf("%s nudge: accepted %t, refusal %q; want refused with %q", name, ok, reply.Header.Get(payloadbox.ErrorHeader), payloadbox.ErrorCodeNoKeys)
+		}
 	}
 }
 

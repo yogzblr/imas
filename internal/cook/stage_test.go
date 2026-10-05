@@ -95,9 +95,35 @@ func (s stageSprout) open(data []byte, purpose string) (*payloadbox.Message, err
 		payloadbox.Expect{Purpose: purpose, TenantID: s.tenant, SproutID: s.id})
 }
 
+// sealedReply is sp's reply to request ID replyTo, body sealed under
+// purpose, as the real sprout would send it.
+func (s stageSprout) sealedReply(t *testing.T, purpose, replyTo string, body any) *nats.Msg {
+	t.Helper()
+	reply, err := payloadbox.NewMessage(purpose, s.tenant, s.id, replyTo, body)
+	if err != nil {
+		t.Error(err)
+		return nil
+	}
+	r := nats.NewMsg("")
+	r.Header.Set(payloadbox.Header, payloadbox.HeaderBox1)
+	if r.Data, err = payloadbox.Seal(reply, []payloadbox.KeyPair{{PeerPub: s.tenantPub, Priv: s.priv}}); err != nil {
+		t.Error(err)
+		return nil
+	}
+	return r
+}
+
 // ackCooks answers every sealed cook request for sp, acknowledging it if
 // ack is true, and passes each pushed envelope, opened, to pushed.
 func ackCooks(t *testing.T, nc *nats.Conn, sp stageSprout, ack bool) <-chan RecipeEnvelope {
+	t.Helper()
+	return answerCooks(t, nc, sp, func(env RecipeEnvelope) Ack { return Ack{Acknowledged: ack, JobID: env.JobID} })
+}
+
+// answerCooks answers every sealed cook request for sp with a sealed
+// answer(envelope), and passes each pushed envelope, opened, to pushed.
+// A request that doesn't open as a sealed dispatch for sp fails t.
+func answerCooks(t *testing.T, nc *nats.Conn, sp stageSprout, answer func(RecipeEnvelope) Ack) <-chan RecipeEnvelope {
 	t.Helper()
 	pushed := make(chan RecipeEnvelope, 8)
 	sub, err := nc.Subscribe(CookSubject(sp.id), func(msg *nats.Msg) {
@@ -112,24 +138,34 @@ func ackCooks(t *testing.T, nc *nats.Conn, sp stageSprout, ack bool) <-chan Reci
 			return
 		}
 		pushed <- env
-		reply, err := payloadbox.NewMessage(payloadbox.PurposeCookResponse, sp.tenant, sp.id, m.ID, Ack{Acknowledged: ack, JobID: env.JobID})
-		if err != nil {
-			t.Error(err)
-			return
+		if r := sp.sealedReply(t, payloadbox.PurposeCookResponse, m.ID, answer(env)); r != nil {
+			msg.RespondMsg(r)
 		}
-		r := nats.NewMsg("")
-		r.Header.Set(payloadbox.Header, payloadbox.HeaderBox1)
-		if r.Data, err = payloadbox.Seal(reply, []payloadbox.KeyPair{{PeerPub: sp.tenantPub, Priv: sp.priv}}); err != nil {
-			t.Error(err)
-			return
-		}
-		msg.RespondMsg(r)
 	})
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
 	t.Cleanup(func() { sub.Unsubscribe() })
 	return pushed
+}
+
+// ackNudges acknowledges every sealed recipe nudge for sp, sealed.
+func ackNudges(t *testing.T, nc *nats.Conn, sp stageSprout) {
+	t.Helper()
+	sub, err := nc.Subscribe(NudgeSubject(sp.id), func(msg *nats.Msg) {
+		m, err := sp.open(msg.Data, payloadbox.PurposeCookNudgeRequest)
+		if err != nil {
+			t.Errorf("opening nudge: %v", err)
+			return
+		}
+		if r := sp.sealedReply(t, payloadbox.PurposeCookNudgeResponse, m.ID, Ack{Acknowledged: true}); r != nil {
+			msg.RespondMsg(r)
+		}
+	})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	t.Cleanup(func() { sub.Unsubscribe() })
 }
 
 func mustStagedKey(t *testing.T, tenantID, sproutID string) string {

@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	nats "github.com/nats-io/nats.go"
+
 	apitypes "github.com/yogzblr/imas/internal/api/types"
 	"github.com/yogzblr/imas/internal/pki"
 )
@@ -149,7 +151,23 @@ func TestSRunNonexistentRunas(t *testing.T) {
 }
 
 func TestSRunWithStreamTopic(t *testing.T) {
-	// Without a NATS connection, stream topic should be ignored gracefully
+	// StreamTopic is ignored since FIX.1 removed plaintext output
+	// streaming: nothing is published, even with a connection registered.
+	url := startTestNATS(t)
+	RegisterNatsConn(connect(t, url))
+	t.Cleanup(func() { RegisterNatsConn(nil) })
+	spy := connect(t, url)
+	published := make(chan *nats.Msg, 4)
+	if _, err := spy.ChanSubscribe("imas.test.output", published); err != nil {
+		t.Fatal(err)
+	}
+	spy.Flush()
+	defer func() {
+		time.Sleep(50 * time.Millisecond)
+		if len(published) != 0 {
+			t.Errorf("SRun published %d output chunks", len(published))
+		}
+	}()
 	cmd := apitypes.CmdRun{
 		Command:     "echo",
 		Args:        []string{"stream_test"},

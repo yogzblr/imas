@@ -26,6 +26,7 @@ import (
 
 	apitypes "github.com/yogzblr/imas/internal/api/types"
 	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
@@ -345,17 +346,78 @@ func TestSealedCmdRun_AcrossTenantKeyRotation(t *testing.T) {
 	}
 }
 
-// A sprout enrolled before workstream J has no box key on record and no
-// keys of its own: cmd.run stays plaintext for it, as before.
-func TestSealedCmdRun_LegacySproutStaysPlaintext(t *testing.T) {
-	e := setupSealed(t, "t_sealed_legacy")
-	const legacy = "legacy-01"
-	os.Remove(config.SproutTenantX25519PubFile) // this process now plays a keyless sprout
-	e.sprout.Subscribe(cmdRunSubject(legacy), func(m *nats.Msg) { m.RespondMsg(RespondCmdRun(legacy, m)) })
+// A sprout with no box key on record (enrolled before workstream J, or
+// between its two enrollment requests) is sent nothing at all, sealed or
+// plaintext (FIX.1): FRun refuses with cook's ReenrollRequiredError,
+// naming the sprout and carrying its stable code.
+func TestSealedCmdRun_FarmerRefusesToSendToASproutWithNoBoxKey(t *testing.T) {
+	e := setupSealed(t, "t_sealed_nokey")
+	const keyless = "keyless-01"
+	marker := filepath.Join(e.dir, "ran")
+	got := 0
+	var mu sync.Mutex
+	e.sprout.Subscribe(cmdRunSubject(keyless), func(m *nats.Msg) {
+		mu.Lock()
+		got++
+		mu.Unlock()
+		m.RespondMsg(RespondCmdRun(keyless, m))
+	})
 	e.sprout.Flush()
-	res, err := FRun(e.tenant, pki.KeyManager{SproutID: legacy}, apitypes.CmdRun{Command: "echo", Args: []string{"plain"}, Timeout: 5 * time.Second})
-	if err != nil || strings.TrimSpace(res.Stdout) != "plain" {
-		t.Fatalf("FRun to a legacy sprout: %+v, %v", res, err)
+
+	_, err := FRun(e.tenant, pki.KeyManager{SproutID: keyless}, apitypes.CmdRun{Command: "touch", Args: []string{marker}, Timeout: 5 * time.Second})
+	if !errors.Is(err, cook.ErrSproutReenrollRequired) || !errors.Is(err, pki.ErrNoActiveBoxKey) {
+		t.Fatalf("FRun to a sprout with no box key: %v, want cook.ErrSproutReenrollRequired", err)
+	}
+	var rerr *cook.ReenrollRequiredError
+	if !errors.As(err, &rerr) || rerr.SproutID != keyless || rerr.Op != "cmd.run" {
+		t.Fatalf("FRun error %#v doesn't name cmd.run to %s", err, keyless)
+	}
+	for _, want := range []string{keyless, "re-enroll", cook.ReenrollRequiredCode} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("FRun error %q doesn't mention %q", err, want)
+		}
+	}
+	e.farmer.Flush()
+	time.Sleep(100 * time.Millisecond) // anything published would have landed
+	mu.Lock()
+	defer mu.Unlock()
+	if got != 0 {
+		t.Errorf("the sprout received %d cmd.run requests", got)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("the command ran")
+	}
+}
+
+// A sprout with no keys of its own refuses every cmd.run with no-keys,
+// a sealed one (farmer has a box key on record, but the sprout lost its
+// keys) and a plaintext one a bus injects alike, and runs neither
+// (FIX.1: there is no plaintext branch left).
+func TestSealedCmdRun_KeylessSproutRefusesSealedAndPlaintext(t *testing.T) {
+	e := setupSealed(t, "t_sealed_keyless")
+	os.Remove(config.SproutTenantX25519PubFile) // this process now plays a keyless sprout
+	marker := filepath.Join(e.dir, "ran")
+
+	_, err := FRun(e.tenant, pki.KeyManager{SproutID: e.sproutID}, apitypes.CmdRun{Command: "touch", Args: []string{marker}, Timeout: 5 * time.Second})
+	if !errors.Is(err, ErrSproutRefusedPayload) || !strings.Contains(err.Error(), payloadbox.ErrorCodeNoKeys) {
+		t.Fatalf("sealed FRun to a keyless sprout: %v, want ErrSproutRefusedPayload: %s", err, payloadbox.ErrorCodeNoKeys)
+	}
+
+	// What a compromised bus would inject: the plaintext command a
+	// keyless sprout used to run.
+	reply, err := e.farmer.Request(cmdRunSubject(e.sproutID),
+		[]byte(`{"command":"touch","args":["`+marker+`"]}`), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := reply.Header.Get(payloadbox.ErrorHeader); code != payloadbox.ErrorCodeNoKeys {
+		t.Errorf("plaintext cmd.run: refusal code %q, want %q", code, payloadbox.ErrorCodeNoKeys)
+	}
+	if len(reply.Data) != 0 {
+		t.Errorf("plaintext cmd.run: refusal carries a body: %s", reply.Data)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("a keyless sprout ran a command")
 	}
 }
 
