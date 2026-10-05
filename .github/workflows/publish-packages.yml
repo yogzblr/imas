@@ -39,6 +39,11 @@ on:
         description: "Release tag to publish, e.g. v1.2.3"
         required: true
         type: string
+      only_helm:
+        description: "Re-run after a partial publish: skip the rpm, deb, NuGet and winget uploads (already in Buildkite) and publish only the Helm charts"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -133,6 +138,7 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Build winget NuGet packages
+        if: ${{ !inputs.only_helm }}
         env:
           BUILDKITE_ORGANIZATION_SLUG: ${{ vars.BUILDKITE_ORGANIZATION_SLUG }}
         run: |
@@ -149,6 +155,7 @@ jobs:
             --msi "${msis[0]}" --version "$TAG" --package-base-address "$base" --out dist/winget
 
       - name: Publish to Buildkite Packages
+        if: ${{ !inputs.only_helm }}
         env:
           BUILDKITE_PACKAGES_TOKEN: ${{ secrets.BUILDKITE_PACKAGES_TOKEN }}
           BUILDKITE_ORGANIZATION_SLUG: ${{ vars.BUILDKITE_ORGANIZATION_SLUG }}
