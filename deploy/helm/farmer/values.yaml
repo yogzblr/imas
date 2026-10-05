@@ -800,6 +800,12 @@ networkPolicy:
     pxc: []
     valkey: []
     valkeyPort: 6379
+    # saasapi's recipe writes (saasapi.recipes), on objectStore.endpoint's
+    # port. Rendered only with saasapi.recipes.enabled, and independent of
+    # saasapiExtraEgress, so narrowing that to Keycloak keeps uploads
+    # working. Empty: any destination, on that port only. farmer's object
+    # store egress is still networkPolicy.farmerExtraEgress.
+    objectStore: []
   # saasapi's listener. Empty: anyone, on that port only.
   saasapiIngress:
     from: []

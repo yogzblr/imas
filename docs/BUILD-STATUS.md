@@ -1306,6 +1306,7 @@ by an external git sync today.
       synced, as they already wait for `imas-saasapi-nats`; no init
       container and no crash loop. `--wait` on a first install deadlocks,
       as before, and the README says not to use it.
+    - OPS.1 (in review, flagged for security review): J.4 needs no new saasapi NetworkPolicy path (`internal.*` rides the bus, ESO delivers the box key) and the PDB is right; REC.1's object store gets its own saasapi egress rule (`networkPolicy.external.objectStore`) with `saasapi.recipes` on.
 
     **Stopgap SEC.0 (superseded by J.3, which deleted the token code, this
     cap included):** `UserAuth.IsValid` refused an expiry more than 15 minutes ahead (the
