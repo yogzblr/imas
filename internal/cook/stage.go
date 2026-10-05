@@ -2,16 +2,17 @@ package cook
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/payloadbox"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
-// Staged recipes: a copy of the rendered, sprout-specific RecipeEnvelope
-// SendCookEventContext pushes to a sprout over NATS, written to the
+// Staged recipes: a sealed copy of the rendered, sprout-specific
+// RecipeEnvelope SendCookEventContext pushes to a sprout over NATS, written to the
 // recipe bucket under that sprout's own key prefix so the sprout can
 // fetch it over HTTP (GET /files/<key>, internal/api/handlers/recipes.go's
 // GetFile) with its gateway JWT.
@@ -40,6 +41,23 @@ import (
 // fixed name the sprout can only ever read the latest recipe farmer
 // dispatched to it. The envelope carries its JobID, so a reader can tell
 // which dispatch it came from.
+//
+// # Sealed (security review 2026-10-b, B1)
+//
+// FLAG FOR SECURITY REVIEW. The staged copy is not the plain JSON
+// envelope: it is a payloadbox envelope (payloadbox.PurposeStagedRecipe),
+// sealed by pki.SealToSprout exactly as the pushed dispatch is
+// (sealed.go), to the sprout's active box key under every tenant key in
+// farmer's grace set. The sealed Message names tenant_id and sprout_id,
+// and its body is the RecipeEnvelope with its JobID and DispatchedAt, so
+// all four are authenticated: GET /files/ crosses the DMZ, where Envoy
+// terminates TLS, and the sprout cooks what it pulls as root. The sprout
+// opens it against its own keys and pinned tenant key before decoding
+// anything (stagedfetch.go) and refuses everything else, plain JSON
+// included. There is no plaintext fallback: a sprout with no box key on
+// record (enrolled before workstream J) gets no staged copy at all, and
+// any copy left from before is deleted, so its missed dispatches are
+// not caught up by a pull.
 //
 // If the overwrite fails, stageRecipe deletes the old object, so a failed
 // write never leaves an older recipe readable in place of the one being
@@ -77,9 +95,12 @@ func isStageKeySegment(s string) bool {
 	return s != "" && s != "." && s != ".." && !strings.ContainsAny(s, "/\\\x00")
 }
 
-// stageRecipe writes env to sproutID's staged recipe key, replacing the
-// previous one. See the staleness notes above for what happens on
-// failure.
+// stageRecipe seals env for sproutID (see "Sealed" above) and writes it
+// to the sprout's staged recipe key, replacing the previous one. See the
+// staleness notes above for what happens on failure. A sprout with no
+// box key on record gets nothing staged, and its previous copy, if any,
+// is removed. Any other failure to seal fails staging, and so the
+// dispatch: the push would fail to seal the same way.
 func stageRecipe(ctx context.Context, tenantID, sproutID string, env RecipeEnvelope) error {
 	if store == nil {
 		return ErrRecipeStoreNotConfigured
@@ -88,9 +109,16 @@ func stageRecipe(ctx context.Context, tenantID, sproutID string, env RecipeEnvel
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(env)
+	data, _, err := pki.SealToSprout(tenantID, sproutID, payloadbox.PurposeStagedRecipe, "", env)
+	if errors.Is(err, pki.ErrNoActiveBoxKey) {
+		log.Warnf("cook: not staging job %s for sprout %s: it has no payload-encryption key on record (enrolled before workstream J), so it could not verify a staged copy; re-enroll it", env.JobID, sproutID)
+		if delErr := store.Delete(ctx, key); delErr != nil {
+			return fmt.Errorf("cook: removing previous staged recipe at %s: %w", key, delErr)
+		}
+		return nil
+	}
 	if err != nil {
-		return fmt.Errorf("cook: encoding staged recipe for %s/%s: %w", tenantID, sproutID, err)
+		return fmt.Errorf("cook: sealing staged recipe for %s/%s: %w", tenantID, sproutID, err)
 	}
 	putErr := store.Put(ctx, key, data)
 	if putErr == nil {

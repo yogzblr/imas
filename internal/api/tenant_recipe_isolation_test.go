@@ -17,7 +17,9 @@ import (
 // SEC.4: a sprout of one tenant can never fetch another tenant's staged or
 // source recipe, at any layer: recipe resolution in cook, staging, the
 // /files/ route through the real router, Auth and GetFile without the
-// router's path cleaning, and the CLI recipe routes.
+// router's path cleaning. (The CLI's recipe browsing is sealed
+// imas.api.recipes.get now; its crafted-name refusals are tested in
+// internal/natsapi/recipes_test.go.)
 
 const (
 	acmeSecret  = "acme-only-secret-step"
@@ -38,6 +40,12 @@ func TestTenantRecipes_CrossTenantRefusedAtEveryLayer(t *testing.T) {
 	exp := time.Now().Add(time.Hour)
 	ctx := context.Background()
 
+	// Box keys on record, as enrollment leaves them, so what farmer stages
+	// is sealed to each sprout (security review 2026-10-b, B1).
+	for _, id := range [][2]string{{"t_acme", "web-01"}, {"t_other", "web-01"}, {"t_other", "web-02"}} {
+		recordStagingSprout(t, id[0], id[1])
+	}
+
 	// Layer 1, recipe resolution: each tenant's "private" is its own, and
 	// t_other cannot cook acme's recipe by name or by a crafted name.
 	jidAcme := cook.GenerateJobID()
@@ -56,7 +64,8 @@ func TestTenantRecipes_CrossTenantRefusedAtEveryLayer(t *testing.T) {
 	}
 
 	// Layer 2, staging: each sprout's staged copy holds its own tenant's
-	// steps only, and the refused cook staged nothing.
+	// steps only, opens for that sprout only, and the refused cook staged
+	// nothing. Nothing is readable in the served body itself.
 	readStaged := func(tenant, sprout string) (int, string) {
 		stagedKey, err := cook.StagedRecipeKey(tenant, sprout)
 		if err != nil {
@@ -64,17 +73,25 @@ func TestTenantRecipes_CrossTenantRefusedAtEveryLayer(t *testing.T) {
 		}
 		return get(t, srv.URL+"/files/"+stagedKey, "Bearer "+mint(t, key.priv, tenant, sprout, exp))
 	}
+	stepsOf := func(env cook.RecipeEnvelope) string {
+		b, _ := json.Marshal(env.Steps)
+		return string(b)
+	}
 	code, body := readStaged("t_acme", "web-01")
-	if code != http.StatusOK || !strings.Contains(body, acmeSecret) || strings.Contains(body, otherSecret) {
+	if code != http.StatusOK || strings.Contains(body, acmeSecret) || strings.Contains(body, otherSecret) {
 		t.Fatalf("t_acme/web-01 staged: %d %s", code, body)
 	}
-	var env cook.RecipeEnvelope
-	if err := json.Unmarshal([]byte(body), &env); err != nil || env.JobID != jidAcme {
-		t.Fatalf("t_acme/web-01 staged envelope: %v %+v", err, env)
+	env := openStaged(t, "t_acme", "web-01", body)
+	if steps := stepsOf(env); env.JobID != jidAcme || !strings.Contains(steps, acmeSecret) || strings.Contains(steps, otherSecret) {
+		t.Fatalf("t_acme/web-01 staged envelope: %+v", env)
 	}
 	code, body = readStaged("t_other", "web-01")
-	if code != http.StatusOK || !strings.Contains(body, otherSecret) || strings.Contains(body, acmeSecret) {
+	if code != http.StatusOK || strings.Contains(body, acmeSecret) || strings.Contains(body, otherSecret) {
 		t.Fatalf("t_other/web-01 staged: %d %s", code, body)
+	}
+	env = openStaged(t, "t_other", "web-01", body)
+	if steps := stepsOf(env); env.JobID != jidOther || !strings.Contains(steps, otherSecret) || strings.Contains(steps, acmeSecret) {
+		t.Fatalf("t_other/web-01 staged envelope: %+v", env)
 	}
 	if code, _ := readStaged("t_other", "web-02"); code != http.StatusNotFound {
 		t.Errorf("t_other/web-02 after refused cooks: got %d, want 404 (nothing staged)", code)
@@ -117,36 +134,5 @@ func TestTenantRecipes_CrossTenantRefusedAtEveryLayer(t *testing.T) {
 		if rec.Code != http.StatusForbidden || strings.Contains(rec.Body.String(), acmeSecret) {
 			t.Errorf("Auth+GetFile %s: got %d, want 403", path, rec.Code)
 		}
-	}
-}
-
-// TestTenantRecipes_GetRecipeRefusesCraftedNames: the CLI's GET
-// /v1/recipes/{name...} reads the platform tree only, and a crafted name
-// cannot reach a tenant's recipes or a sprout's staged file.
-func TestTenantRecipes_GetRecipeRefusesCraftedNames(t *testing.T) {
-	newStagingTestServerWithRecipes(t, tenantRecipeFixture())
-	for _, name := range []string{
-		"../tenants/t_acme/recipes/private",
-		"..tenants.t_acme.recipes.private",
-		"/tenants/t_acme/recipes/private",
-		"a/../../tenants/t_acme/recipes/private",
-		"..",
-	} {
-		req := httptest.NewRequest(http.MethodGet, "/v1/recipes/x", nil)
-		req.SetPathValue("name", name)
-		rec := httptest.NewRecorder()
-		handlers.GetRecipe(rec, req)
-		if rec.Code != http.StatusBadRequest || strings.Contains(rec.Body.String(), acmeSecret) {
-			t.Errorf("GetRecipe(%q): got %d %q, want 400", name, rec.Code, rec.Body.String())
-		}
-	}
-	// A name that is valid but only exists under a tenant prefix is not
-	// found in the platform tree.
-	req := httptest.NewRequest(http.MethodGet, "/v1/recipes/x", nil)
-	req.SetPathValue("name", "tenants.t_acme.recipes.private")
-	rec := httptest.NewRecorder()
-	handlers.GetRecipe(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("GetRecipe(tenants.t_acme.recipes.private): got %d, want 404", rec.Code)
 	}
 }

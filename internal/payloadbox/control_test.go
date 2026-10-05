@@ -208,7 +208,7 @@ func TestSealCallAndReplyNeedTheirBindings(t *testing.T) {
 func TestControlPurposesAreDistinctAndDirected(t *testing.T) {
 	all := []string{
 		PurposeCmdRunRequest, PurposeCmdRunResponse, PurposeCookRequest, PurposeCookResponse,
-		PurposeCookNudgeRequest, PurposeCookNudgeResponse, PurposeBoxKeySubmit, PurposeTenantKeyContinuity,
+		PurposeCookNudgeRequest, PurposeCookNudgeResponse, PurposeStagedRecipe, PurposeBoxKeySubmit, PurposeTenantKeyContinuity,
 		PurposeEnrollProof,
 		PurposeCLIRequest, PurposeCLIReply, PurposeCLIUserKeySubmit,
 		PurposeSaaSTenantProvision, PurposeSaaSTenantDeprovision, PurposeSaaSSproutAction,

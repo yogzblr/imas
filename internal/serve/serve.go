@@ -8,8 +8,10 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/yogzblr/imas/internal/api/client"
+	intauth "github.com/yogzblr/imas/internal/auth"
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/log"
 )
@@ -67,7 +69,7 @@ func NewMux() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/auth/whoami", HandleNATSProxy("auth.whoami"))
 	mux.HandleFunc("GET /api/v1/auth/users", HandleNATSProxy("auth.users"))
 	mux.HandleFunc("GET /api/v1/auth/explain", HandleNATSProxy("auth.explain"))
-	mux.HandleFunc("POST /api/v1/auth/users", HandleNATSProxyWithBody("auth.users.add"))
+	mux.HandleFunc("POST /api/v1/auth/users", HandleUserAddProxy("auth.users.add"))
 	mux.HandleFunc("DELETE /api/v1/auth/users/{pubkey}", HandleUserRemoveProxy("auth.users.remove"))
 
 	// Cmd (ad-hoc command execution)
@@ -79,9 +81,8 @@ func NewMux() *http.ServeMux {
 	// OpenAPI spec
 	mux.HandleFunc("GET /api/v1/openapi.yaml", HandleOpenAPI)
 
-	// Recipes: farmer's dedicated HTTP endpoint (GET /v1/recipes,
-	// GET /v1/recipes/{name...}), not the NATS proxy pattern the rest of
-	// this file uses — see docs/design/imas-fork-roadmap.md workstream I.
+	// Recipes: sealed imas.api.recipes.list/get through internal/api/client,
+	// shaped into the {"recipes": [...]} and RecipeContent bodies the UI reads.
 	mux.HandleFunc("GET /api/v1/recipes", HandleRecipesList)
 	mux.HandleFunc("GET /api/v1/recipes/{id...}", HandleRecipeGet)
 
@@ -392,9 +393,8 @@ func HandleCohortGetProxy(method string) http.HandlerFunc {
 	}
 }
 
-// HandleRecipesList calls the farmer's dedicated recipe HTTP endpoint
-// (GET /v1/recipes) instead of going over NATS — see
-// docs/design/imas-fork-roadmap.md workstream I.
+// HandleRecipesList lists recipes over sealed recipes.list
+// (client.ListRecipes).
 func HandleRecipesList(w http.ResponseWriter, _ *http.Request) {
 	recipes, err := client.ListRecipes()
 	if err != nil {
@@ -404,10 +404,9 @@ func HandleRecipesList(w http.ResponseWriter, _ *http.Request) {
 	WriteJSON(w, http.StatusOK, map[string][]client.RecipeInfo{"recipes": recipes})
 }
 
-// HandleRecipeGet calls the farmer's dedicated recipe HTTP endpoint
-// (GET /v1/recipes/{name...}) instead of going over NATS. It uses a
-// wildcard path parameter because recipe names contain dots (e.g.,
-// "webserver.nginx").
+// HandleRecipeGet reads one recipe over sealed recipes.get
+// (client.GetRecipe). It uses a wildcard path parameter because recipe
+// names contain dots (e.g., "webserver.nginx").
 func HandleRecipeGet(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("id")
 	if name == "" {
@@ -420,6 +419,49 @@ func HandleRecipeGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	WriteJSON(w, http.StatusOK, recipe)
+}
+
+// HandleUserAddProxy returns a handler that forwards a user add request
+// (pubkey, role, username, boxpub; openapi.yaml UserAddRequest) to a NATS
+// subject unchanged, after refusing with 400 a body that is not a JSON
+// object, has no boxpub, or has a boxpub farmer would refuse: it is
+// checked with intauth.DecodeCLIBoxPub, the same rule farmer's
+// auth.users.add applies (standard base64 of 32 bytes, not a weak key).
+// Farmer still checks it; checking here gives the UI a 400 rather than a
+// 502 for its own mistake.
+func HandleUserAddProxy(method string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read request body"})
+			return
+		}
+		defer r.Body.Close()
+
+		var params map[string]any
+		if err := json.Unmarshal(body, &params); err != nil || params == nil {
+			WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			return
+		}
+		boxpub, _ := params["boxpub"].(string)
+		if strings.TrimSpace(boxpub) == "" {
+			WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "boxpub is required: the user's CLI box public key, from imas auth keygen"})
+			return
+		}
+		if _, err := intauth.DecodeCLIBoxPub(boxpub); err != nil {
+			WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid boxpub: " + err.Error()})
+			return
+		}
+
+		result, err := client.NatsRequest(method, params)
+		if err != nil {
+			WriteJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(result)
+	}
 }
 
 // HandleUserRemoveProxy returns a handler that forwards a user removal request

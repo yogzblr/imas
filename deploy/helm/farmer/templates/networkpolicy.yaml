@@ -55,8 +55,11 @@ spec:
 #        networkPolicy.saasapiOperatorIngress.from) -> the operator port
 #   out: the bus (client port), PXC, Valkey, DNS; OpenBao only for the
 #        fleet key client or the bus CA fetch; fleetreleaser with
-#        saasapi.operator; plus networkPolicy.saasapiExtraEgress (default:
-#        HTTPS anywhere, for the Keycloak JWKS)
+#        saasapi.operator; the object store with saasapi.recipes; plus
+#        networkPolicy.saasapiExtraEgress (default: HTTPS anywhere, for the
+#        Keycloak JWKS)
+# Sealed internal.* (J.4) adds no path: it rides the bus connection, and
+# the box key arrives as a Secret ESO syncs, never from OpenBao directly.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -105,6 +108,9 @@ spec:
     {{- end }}
     {{- if .Values.saasapi.operator.enabled }}
     {{- include "imas-farmer.depEgress" (dict "bundled" false "peers" $np.fleetreleaser.to "port" (include "imas-farmer.saasapi.fleetReleaserPort" .)) | nindent 4 }}
+    {{- end }}
+    {{- if .Values.saasapi.recipes.enabled }}
+    {{- include "imas-farmer.depEgress" (dict "bundled" false "peers" $np.external.objectStore "port" (include "imas-farmer.objectStorePort" .)) | nindent 4 }}
     {{- end }}
     {{- include "imas-farmer.dnsEgress" . | nindent 4 }}
     {{- with $np.saasapiExtraEgress }}

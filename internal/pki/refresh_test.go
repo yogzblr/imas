@@ -65,15 +65,24 @@ func TestRefreshSprout_SealedRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RefreshSprout: %v", err)
 	}
-	// Nothing in the reply is readable without the sprout's box key.
-	for _, plain := range []string{"gateway_jwt", "web-01", "t_1", req.NKeyPub} {
-		if strings.Contains(string(reply), plain) {
-			t.Errorf("the sealed reply carries %q in the clear", plain)
-		}
+	// Nothing in the reply is readable without the sprout's box key: it
+	// is exactly a sealed envelope, whose only plaintext is its field
+	// names, with no JWT in any key or string. (Not a substring search:
+	// the ciphertext is random base64.)
+	if err := checkSealedEnvelope(reply); err != nil {
+		t.Errorf("the reply: %v", err)
+	}
+	if jwt, found, err := jwtInJSON(reply); err != nil || found {
+		t.Errorf("the sealed reply carries a JWT in the clear: %q (%v)", jwt, err)
 	}
 	res, err := sproutOpenRefreshReply("web-01", id, reply)
 	if err != nil {
 		t.Fatalf("the sprout can't open farmer's reply: %v", err)
+	}
+	for _, v := range []string{res.GatewayJWT, res.JWT} {
+		if _, ok := findJWT(v); !ok {
+			t.Errorf("sealed %q is not recognized as a JWT, so the check above proves nothing", v)
+		}
 	}
 	if res.SproutID != "web-01" || res.TenantID != "t_1" || res.JWT == "" || res.GatewayJWT == "" ||
 		res.NKeyIdentity != req.NKeyPub || res.TenantX25519Pub != pinnedTenantKey(t) {

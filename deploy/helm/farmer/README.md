@@ -709,9 +709,12 @@ the secret key only as a file. It validates uploads under
 farmer will render. That one set of limits for both is an owner decision
 (2026-10-04): there is no separate saasapi value to override it. Reading needs `saasapi.recipes.readRole` or `writeRole`
 (Keycloak realm roles, or client roles of `saasapi.jwt.audience`), and
-writing needs `writeRole`. Egress to the object store goes through
-`networkPolicy.saasapiExtraEgress`: its default allows 443, so add the port
-for a MinIO on 9000.
+writing needs `writeRole`. With `saasapi.recipes.enabled`, saasapi's
+NetworkPolicy opens egress on `objectStore.endpoint`'s port (443 or 80 by
+`useSSL` when it has none) to `networkPolicy.external.objectStore` (empty:
+any destination, on that port only). That rule is separate from
+`saasapiExtraEgress`, so narrowing that to your Keycloak doesn't break
+uploads.
 
 ## Valkey
 
@@ -755,7 +758,8 @@ state moved off local disk first.
 | saasapi | in | with `saasapi.operator`: the sprout release hook Job's pods, plus `networkPolicy.saasapiOperatorIngress.from` (default: none) | `saasapi.operator.port` (8443) |
 | saasapi | out | with `saasapi.operator`: fleetreleaser (`networkPolicy.fleetreleaser.to`, default any destination) | `fleetReleaser.url`'s port |
 | saasapi | out | the bus pods | `bus.port` |
-| saasapi | out | `saasapiExtraEgress`, default HTTPS anywhere (the Keycloak JWKS, and the object store with `saasapi.recipes`). **Narrow it.** | 443 |
+| saasapi | out | with `saasapi.recipes`: the object store (`networkPolicy.external.objectStore`, default any destination) | `objectStore.endpoint`'s port |
+| saasapi | out | `saasapiExtraEgress`, default HTTPS anywhere (the Keycloak JWKS). **Narrow it.** | 443 |
 | publish Job | out | OpenBao, DNS; nothing else, no ingress | 8200, 53 |
 | migrate Jobs | out | PXC, DNS; nothing else, no ingress | 3306, 53 |
 | sprout release hook Job | out | saasapi's pods on the operator port, DNS; nothing else, no ingress | 8443, 53 |
@@ -772,7 +776,32 @@ state moved off local disk first.
   external one uses `networkPolicy.external.<dep>`. An empty list means any
   destination, on that port only. OpenBao defaults to the reference's
   `openbao` namespace.
-- **Object storage** needs `networkPolicy.farmerExtraEgress`.
+- **Object storage:** farmer's needs `networkPolicy.farmerExtraEgress`;
+  saasapi's (recipe upload) is the rule above.
+- **saasapi after J.4 and REC.1** (OPS.1, 2026-10). Every connection
+  saasapi makes or receives, and what the policy does about it:
+  - *in:* the BFF on `saasapi.port`; with the operator plane, the release
+    hook Job (and `saasapiOperatorIngress.from`) on its port. Nothing else:
+    farmer never dials saasapi.
+  - *out:* the bus (NATS, `bus.port`), PXC, Valkey, DNS, Keycloak's JWKS
+    (`saasapiExtraEgress`), the object store with `saasapi.recipes`, and
+    fleetreleaser with the operator plane. OpenBao only for the fleet key
+    client or the bus CA fetch.
+  - *farmer, over sealed `internal.*` (J.4):* no new path. The sealed
+    requests and replies are NATS messages on saasapi's existing bus
+    connection; saasapi never connects to farmer's pods or API port, and
+    the chart tests check that.
+  - *the box key:* no new path. It is a Kubernetes Secret that External
+    Secrets syncs from OpenBao; ESO talks to OpenBao, saasapi doesn't, so
+    holding the key adds no OpenBao egress.
+  - *the object store (REC.1):* a new path, now its own rule (above).
+    Before it, a MinIO on 9000, or a `saasapiExtraEgress` narrowed to
+    Keycloak, silently blocked uploads.
+  - *PDB:* unchanged. saasapi is stateless across replicas (the box key is
+    the same Secret in each pod, the outbox uses leases), so
+    `maxUnavailable: 1` at the default two replicas keeps one serving
+    through a drain, and one replica gets no PDB, which would otherwise
+    block every drain.
 - **The nats chart must admit this namespace.** Set its
   `networkPolicy.core.namespaceSelector` to this namespace (NOTES prints
   it). Its default core pod selector, `app.kubernetes.io/name: farmer`,
@@ -857,7 +886,7 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `sproutRelease.argoCDHooks` | `true` | `PostSync`, sync-wave 1. |
 | `externalSecrets.*` | off | ESO wiring. |
 | `openbaoBootstrap.*` | on | The bundled OpenBao's setup Job. |
-| `networkPolicy.*` | on | See above. `saasapiOperatorIngress.from` and `fleetreleaser.to` are the operator plane's peers. |
+| `networkPolicy.*` | on | See above. `saasapiOperatorIngress.from` and `fleetreleaser.to` are the operator plane's peers; `external.objectStore` is saasapi's recipe store peer. |
 
 ## Testing the chart
 

@@ -109,8 +109,6 @@ var routeActions = map[string]Action{
 	"GetAllProps":       ActionView,
 	"GetProp":           ActionView,
 	"ListID":            ActionView,
-	"ListRecipes":       ActionView,
-	"GetRecipe":         ActionView,
 
 	// Scoped write operations
 	"TestPing":      ActionTest,
