@@ -88,8 +88,10 @@ func BuiltinViewerRole() *Role {
 
 // BuiltinOperatorRole returns the built-in "operator" role with
 // operational permissions. Operators can view everything and perform
-// scoped write operations (cook, cmd, test, props, job_admin, shell)
-// but cannot manage PKI keys or user accounts.
+// scoped write operations (cook, cmd, test, props, job_admin) but cannot
+// manage PKI keys or user accounts, and cannot open a shell: shell is
+// granted only by a role that names it (owner decision on J.5, Open
+// question 4 in docs/design/imas-payload-encryption-design.md).
 func BuiltinOperatorRole() *Role {
 	return &Role{
 		Name: "operator",
@@ -97,7 +99,6 @@ func BuiltinOperatorRole() *Role {
 			{Action: ActionView, Scope: "*"},
 			{Action: ActionCook, Scope: "*"},
 			{Action: ActionCmd, Scope: "*"},
-			{Action: ActionShell, Scope: "*"},
 			{Action: ActionTest, Scope: "*"},
 			{Action: ActionProps, Scope: "*"},
 			{Action: ActionJobAdmin, Scope: "*"},

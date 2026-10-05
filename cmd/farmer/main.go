@@ -965,7 +965,41 @@ func ConnectFarmer(ctx context.Context, done chan<- struct{}) {
 	jobs.NewStore().StartReaperCtx(ctx, config.JobLogTTL)
 
 	<-ctx.Done()
-	for _, c := range tenantConns.All() {
+	closeTenantConns(tenantConns.All())
+}
+
+// closeShellSessions is natsapi.CloseShellSessions, swappable in tests.
+var closeShellSessions = natsapi.CloseShellSessions
+
+// shellShutdownTimeout bounds how long farmer's stop waits for its shell
+// sessions to end. main waits 10 s for ConnectFarmer, so this stays under.
+var shellShutdownTimeout = 5 * time.Second
+
+// closeTenantConns is farmer's stop for the tenant buses. Shell sessions
+// end first, while the connections they relay over are still open, so the
+// CLI and the sprout get a sealed CLOSE with farmer-shutdown rather than
+// noticing peer-lost 45 s later. A session opened after that (the routes
+// stay subscribed until Close) still ends with peer-lost.
+func closeTenantConns(conns []*nats.Conn) {
+	endShellSessions(shellShutdownTimeout)
+	for _, c := range conns {
 		c.Close()
+	}
+}
+
+// endShellSessions runs closeShellSessions, waiting at most timeout for
+// it: a stuck session must not hold up the rest of farmer's stop.
+func endShellSessions(timeout time.Duration) {
+	// Read here, not in the goroutine, which may outlive this call.
+	closeAll := closeShellSessions
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		closeAll()
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		log.Warnf("timed out after %s waiting for shell sessions to end", timeout)
 	}
 }

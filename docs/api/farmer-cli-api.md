@@ -102,8 +102,49 @@ sends one.
 Every other method keeps its params and result; `token` is no longer read
 anywhere.
 
+## `shell.open` (J.5, sealed shell)
+
+`imas ssh` opens a session with `imas.api.shell.open`, through the router
+above like every method (mutating, so it takes the Valkey claim), with
+purpose `c2f.shell.open`. The caller's role must grant `shell` scoped to
+the target sprout. The built-in `operator` role doesn't: shell is granted
+only by a role that names it. Design: "Sealing `shell.*`" and "As built:
+J.5" in the [payload encryption design](../design/imas-payload-encryption-design.md).
+**FLAG FOR SECURITY REVIEW.**
+
+| | |
+|---|---|
+| Params | `{sprout_id, shell?, idle_timeout_sec?, cli_eph_pub}`: `cli_eph_pub` is a fresh X25519 key for this session only. The terminal size goes in the first frame (HELLO). |
+| Result | `{session_id, sprout_id, farmer_eph_pub, idle_timeout_sec, max_duration_sec}`, in an `f2c.api` reply bound by `re`, method and subject. |
+| Farmer refuses | a sprout not accepted in the tenant, a sprout with no box key, a malformed or tenant-key `cli_eph_pub`, and more than 4 sessions per user, 64 per tenant or 256 per replica. |
+
+After the reply, each leg is a stream of numbered ChaCha20-Poly1305 frames
+(header `Imas-Payload: shell1`) under keys derived from the two legs'
+ephemeral keys: CLI ↔ farmer on `imas.shell.cli.<session>.<dir>`, farmer ↔
+sprout on `imas.sprouts.<id>.shell.<session>.f2s` and
+`imas.shell.sprout.<id>.<session>.s2f`. Farmer starts the sprout's side
+(`f2s.shell.start`) only after the CLI's first frame (HELLO) opens, within
+10 seconds. A replayed, reordered, dropped or altered frame ends the
+session (`integrity`). There is no plaintext shell subject and no plaintext
+fallback.
+
+A session ends with a reason the CLI prints: `exit`, `client-close`,
+`idle` (farmer's `shellidletimeout`, default 15 minutes, at most 60; the
+CLI may ask for less), `max-duration` (`shellmaxduration`, default and at
+most 8 hours), `revoked` (the role stopped granting `shell`; re-checked
+every 60 s), `key-severed`, `farmer-shutdown` (farmer stopped),
+`peer-lost` (nothing heard for 45 s), `integrity`, the sprout's refusals
+(`shell-disabled` for a sprout with `disableshell: true`,
+`shell-not-allowed`, `too-many-sessions`, `unsupported` on Windows,
+`spawn-failed`) and farmer's (`sprout-unreachable`, `sprout-refused`,
+`sprout-needs-upgrade`).
+
+Farmer's audit log gets `shell.open` (the request), `shell.start` (leg 2's
+outcome) and `shell.end` (duration, exit code, reason, bytes and frames
+each way). No entry, and nothing else, records what was typed or printed.
+
 ## Still plaintext
 
 Step events (`imas.cook.*.<jid>`, read by `imas cook`, `imas jobs watch`,
-the CLI's local job store and `imas serve`'s log stream) and shell session
-streams. See "What stays plaintext until Decision D" in the design.
+the CLI's local job store and `imas serve`'s log stream). See "What stays
+plaintext until Decision D" in the design.

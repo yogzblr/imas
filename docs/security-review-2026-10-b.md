@@ -55,7 +55,7 @@ Line numbers are at `f645a93`.
 | B4 | Medium | SEC.3b / recipes | A hostile tenant's recipe render cost scales with its own include count (up to 256), each include rendered under its own `RecipeRenderTimeout`; one cook can burn many CPU-seconds, and tenants now upload recipes | CONFIRMED (throwaway probe); absolute impact not load-measured |
 | B5 | Medium | M6, carried | Same-second Account-JWT `iat` tie in the bus fence is unchanged (`fence.go:484`), as planned (deferred past the UAT gate); with SCALE.2's single-node push it can still turn a missed revocation into a permanent cluster-wide revert | CONFIRMED in code; upstream `jti` sharing per repo comments |
 | B6 | Medium | J.4 | Forged "no responders" on `internal.sprout.action` still lets one action run up to `SAASAPI_OUTBOX_MAX_ATTEMPTS` times (owner-accepted residual, unchanged by J.4) | CONFIRMED; accepted |
-| B7 | Low | J.5 | The built-in `operator` role still grants `shell` on every sprout (`rbac/config.go:100`), contrary to the agreed default; deferred to a follow-up PR | CONFIRMED |
+| B7 | Low | J.5 | The built-in `operator` role still grants `shell` on every sprout (`rbac/config.go:100`), contrary to the agreed default; deferred to a follow-up PR | CONFIRMED; fixed in SH.1 (PR #102) |
 | B8 | Low | SEC.5 | M1's binding of the package to the manifest is complete on deb/rpm but an MSI `ProductVersion` carries no prerelease, so on Windows an rc and the final of one MAJOR.MINOR.PATCH are indistinguishable; zypper's downgrade-skip was read, not run | CONFIRMED (deb/rpm); MSI residual and zypper UNCONFIRMED |
 | B9 | Low | J.2 / cook | A sprout cooks whatever a pulled staged recipe's `DispatchedAt` lets through within `StagedRecipeMaxAge`; combined with B1 the staleness check is the only bound on a forged pull, and it is attacker-set | CONFIRMED |
 | B10 | Info | — | Smaller notes (I1–I6 below) | — |
@@ -258,6 +258,8 @@ enrollment PoP), so they weaken the same boundary the J work strengthened.
   `operator` loses `shell` unless granted. Deferred to a follow-up PR per J.5's
   owner decision; `TestOperatorRoleNATSAccess` pins today's behaviour. Fix: drop
   `ActionShell` from the built-in role. CONFIRMED.
+  **Status (SH.1, PR #102):** fixed as proposed; the built-in role no longer
+  grants `shell`, and `TestOperatorRoleNATSAccess` expects it denied.
 - **B8. MSI version binding is MAJOR.MINOR.PATCH only.** `internal/ingredients/selfupdate/pkgmeta.go:60-70,196-205`:
   an MSI `ProductVersion` has no prerelease, so an rc's MSI and the final's both
   read `2.5.0`; the code refuses a prerelease manifest on Windows
@@ -359,5 +361,5 @@ enrollment PoP), so they weaken the same boundary the J work strengthened.
    accepted-but-keyless sprout be a closed state rather than a standing window?
 3. **Per-cook render budget (B4).** Now that tenants upload recipes, is a total
    per-cook render budget wanted before dispatch is enabled?
-4. **`operator` and `shell` (B7), M6 (B5), no-responders (B6).** Confirm these
-   deferrals are still intended for after the UAT gate.
+4. **M6 (B5), no-responders (B6).** Confirm these deferrals are still intended
+   for after the UAT gate. (B7, `operator` and `shell`, was fixed in SH.1, PR #102.)

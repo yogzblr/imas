@@ -67,6 +67,78 @@ func TestConfigFileKeysAreRead(t *testing.T) {
 	}
 }
 
+// TestConfigFileCommentsStandAlone checks that every comment in the
+// config files matched by configFileGlobs starts a line or follows
+// whitespace. YAML reads a '#' glued to a value as part of the value, so
+// a block appended to a file with no trailing newline ("- <KEY># note")
+// silently becomes data (J.5 did this to imas-farmer.conf's admin key).
+// Each file must also end in a newline, so the next append can't do it.
+func TestConfigFileCommentsStandAlone(t *testing.T) {
+	root := moduleRoot(t)
+	for _, pattern := range configFileGlobs {
+		confs, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(pattern)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, conf := range confs {
+			rel, err := filepath.Rel(root, conf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Run(filepath.ToSlash(rel), func(t *testing.T) {
+				data, err := os.ReadFile(conf)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(data) > 0 && data[len(data)-1] != '\n' {
+					t.Error("does not end in a newline")
+				}
+				for i, line := range strings.Split(string(data), "\n") {
+					if j := gluedComment(line); j >= 0 {
+						t.Errorf("line %d: '#' at column %d is glued to a value, so YAML reads it as data: %q", i+1, j+1, line)
+					}
+				}
+			})
+		}
+	}
+}
+
+// gluedComment returns the index of the first '#' in line that follows a
+// non-whitespace character outside quotes, or -1.
+func gluedComment(line string) int {
+	var quote rune
+	for i, r := range line {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			}
+		case r == '"' || r == '\'':
+			quote = r
+		case r == '#':
+			if i > 0 && line[i-1] != ' ' && line[i-1] != '\t' {
+				return i
+			}
+			return -1
+		}
+	}
+	return -1
+}
+
+func TestGluedComment(t *testing.T) {
+	for line, want := range map[string]int{
+		"# comment":                    -1,
+		"key: value # comment":         -1,
+		"    - <KEY HERE># comment":    16,
+		`url: "http://h/#frag" # note`: -1,
+		"plain: value":                 -1,
+	} {
+		if got := gluedComment(line); got != want {
+			t.Errorf("gluedComment(%q) = %d, want %d", line, got, want)
+		}
+	}
+}
+
 // TestJetyKeysFindsKnownKeys guards the source scan itself: if it stopped
 // finding keys, TestConfigFileKeysAreRead would fail for the wrong
 // reason, or pass vacuously if the configs were emptied.

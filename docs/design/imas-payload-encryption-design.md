@@ -226,7 +226,7 @@ Not in scope: a compromised farmer (it holds `tenant_priv` and can always open a
 
 ### Decision 5: RBAC, audit, transcripts, rotation
 
-- **Who may open a shell.** A registered user whose role grants the existing scoped `shell` action (`rbac.ActionShell`) for that sprout's cohort or ID, in that tenant, proved by the request opening under that user's registered CLI box key. `cmd` doesn't imply `shell`. There is no development bypass: `dangerously_allow_root` is removed, and farmer ignores it (owner decisions 2026-10-04, PR #95). The SaaS API (`internal.sprout.action`) gets **no** shell action in this design. `translateAction` already rejects unknown actions, and a browser shell would need its own leg 1. Limits come from farmer policy: concurrent sessions per user, per tenant and per replica. The built-in `operator` role grants `shell` today (Open question 4).
+- **Who may open a shell.** A registered user whose role grants the existing scoped `shell` action (`rbac.ActionShell`) for that sprout's cohort or ID, in that tenant, proved by the request opening under that user's registered CLI box key. `cmd` doesn't imply `shell`. There is no development bypass: `dangerously_allow_root` is removed, and farmer ignores it (owner decisions 2026-10-04, PR #95). The SaaS API (`internal.sprout.action`) gets **no** shell action in this design. `translateAction` already rejects unknown actions, and a browser shell would need its own leg 1. Limits come from farmer policy: concurrent sessions per user, per tenant and per replica. The built-in `operator` role doesn't grant `shell`: only a role that names it does (Open question 4, built in SH.1).
 - **Revocation while a session runs.** Every 60 s the owning replica re-checks that the user still exists and still has `shell` on that sprout. If not, it closes the session with `revoked`.
 - **Audit (farmer, `internal/audit`).**
   - `shell.open`: user, role, tenant, sprout, `session_id`, shell, outcome, and the fixed refusal code if refused.
@@ -264,7 +264,7 @@ The owner answered every question on 2026-10-04, taking each proposed default, b
    - the sprout shell allow-list (proposed: `/etc/shells`, overridable in sprout config).
 
    *Answered: all four as proposed.*
-4. **Should the built-in `operator` role keep `shell`,** or should `shell` need an explicit grant? Proposed: drop it from `operator`. *Answered: drop it; `operator` loses `shell` unless granted. Not yet built: it lives in `internal/rbac`, and the owner made it a follow-up PR (PR #98). Until it lands, the built-in `operator` role can still open a shell, contrary to this decision (see "As built: J.5").*
+4. **Should the built-in `operator` role keep `shell`,** or should `shell` need an explicit grant? Proposed: drop it from `operator`. *Answered: drop it; `operator` loses `shell` unless granted. Built in SH.1 (PR #102), the follow-up the owner asked for on PR #98: the built-in `operator` role no longer grants `shell`.*
 5. **Keystroke timing.** Should v1 send input on a fixed tick with chaff frames, as OpenSSH does, or accept the leak as a recorded residual risk? *Answered: a recorded residual risk; no chaff in v1.*
 6. **Pinning `tenantboxpub` in the CLI.** Explicit config only (proposed), or trust on first use with a fingerprint prompt? *Answered: explicit config only.*
 7. **Sessions die with their farmer replica.** Is that acceptable, and is an admin `imas shell list` / `imas shell kill` across replicas (a Valkey registry keyed `(tenant_id, session_id)`) needed in v1? *Answered: acceptable, and v1 has no cross-replica list.*
@@ -342,15 +342,11 @@ The owner answered every question on 2026-10-04, taking each proposed default, b
 - **No session recording.** CERT-In and DPDP don't call for it, so v1 keeps only the audit entries when a session starts and ends (Open question 2). There are no transcripts, input or output.
 - **The rest becomes follow-up PRs** (below), not part of J.5.
 
-**Deferred to follow-up PRs (owner decision).**
+**Follow-ups, built in SH.1 (PR #102, FLAG FOR SECURITY REVIEW).** The owner moved these out of J.5:
 
-- **`operator` losing `shell`** (`internal/rbac/config.go`, `BuiltinOperatorRole`, and its tests). **Until it lands, the built-in `operator` role can still open a shell, contrary to the agreed default** (Open question 4). `natsapi`'s `TestOperatorRoleNATSAccess` pins today's behaviour, and changes with it.
-- **`farmer-shutdown` on farmer's stop.** Farmer's shutdown path (`cmd/farmer`) should call `natsapi.CloseShellSessions()`, which kills every session and waits for it. Until it does, both ends see `peer-lost` within 45 s, and the sprout kills the shell.
-- **User docs that still describe shell as plaintext:**
-  - `docs/INSTALL.md` ("`imas ssh` sessions are plaintext until sealed shell");
-  - `docs/api/farmer-cli-api.md`;
-  - `README.md`;
-  - `ansible/README.md`'s variable table (`imas_sprout_disable_shell`).
+- **`operator` loses `shell`** (`internal/rbac/config.go`, `BuiltinOperatorRole`). Only a role that names `shell` grants it; `admin` keeps it. `TestOperatorRoleNATSAccess` now expects `shell.open` to be denied, and `TestSealedShellOperatorRefused` / `TestSealedShellExplicitGrant` cover both sides end to end. An operator who needs a shell is moved to a role that adds it, or the config redefines `operator` (`docs/INSTALL.md`, "Interactive shell").
+- **`farmer-shutdown` on farmer's stop.** `cmd/farmer` calls `natsapi.CloseShellSessions()` (bounded at 5 s) before it closes the tenant bus connections, so both ends get a sealed CLOSE with `farmer-shutdown`. A session opened between the two still sees `peer-lost`.
+- **User docs** describe the sealed shell: `docs/INSTALL.md`, `docs/api/farmer-cli-api.md`, `README.md`, and `imas_sprout_disable_shell` in `ansible/README.md`.
 
 **Not built, by decision.** Keystroke timing obfuscation: the owner recorded the leak as a residual risk (Open question 5).
 
