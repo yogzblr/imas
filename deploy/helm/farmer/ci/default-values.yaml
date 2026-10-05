@@ -9,3 +9,11 @@ saasapi:
     keycloakJWKSURL: https://keycloak.example.com/realms/cloudxp/protocol/openid-connect/certs
     issuer: https://keycloak.example.com/realms/cloudxp
     audience: imas-saasapi
+# The bootstrap admin is required (FIX.3). These are PLACEHOLDERS that can
+# never be used: the box key is all zeros, which farmer refuses to import
+# (a weak key), and NOTES warns. Replace both with the output of
+# imas auth pubkey and imas auth keygen on the admin's machine.
+farmer:
+  bootstrapAdmin:
+    pubkey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    boxpub: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=

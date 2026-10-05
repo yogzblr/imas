@@ -65,10 +65,41 @@ It does **not** deploy the DMZ bus or Envoy. Those are `deploy/helm/nats`.
    - the Keycloak realm (`saasapi.jwt.*`);
    - the BFF shared-secret Secret (`saasapi.internalAuthSecret.secretName`,
      key `current`, and optionally `previous`).
-5. **Images.** Each release publishes signed multi-arch farmer and saasapi
+5. **The bootstrap admin's keys** (`farmer.bootstrapAdmin.pubkey` and
+   `boxpub`). Required: see [Bootstrap admin](#bootstrap-admin).
+6. **Images.** Each release publishes signed multi-arch farmer and saasapi
    images to `ghcr.io/yogzblr/imas-farmer` and `imas-saasapi`; the chart
    defaults to the tag equal to its `appVersion`. Set `farmer.image.*` and
    `saasapi.image.*` only to use your own build or mirror.
+
+### Bootstrap admin
+
+Since J.3 the imas CLI can't register a user over the bus: the first admin
+comes from farmer's config file, rendered from `farmer.bootstrapAdmin`, and
+every further user is added by that admin. A release with no bootstrap
+admin therefore has nobody who can make a single CLI request, so the chart
+refuses to render one (FIX.3). On the admin's own machine, before the
+install (both commands work offline):
+
+```sh
+imas auth privkey && imas auth pubkey   # farmer.bootstrapAdmin.pubkey (A...)
+imas auth keygen                        # farmer.bootstrapAdmin.boxpub ("Box key:"), and its fingerprint
+```
+
+Pass both, and optionally `farmer.bootstrapAdmin.username`. Check the box
+key's fingerprint with the admin out of band: whoever's key this is
+becomes the platform's first admin. Farmer imports the box key once; the
+database is authoritative after that, so the values can stay set on
+upgrades and changing them later does nothing.
+
+`farmer.bootstrapAdmin.skip=true` renders no admin instead, and NOTES says
+so. Use it only when farmer's database already holds an admin: an upgrade
+of a release installed before this check, or a reinstall against the same
+database. It can't be combined with `pubkey`, `boxpub` or `username`.
+
+The `ci/` values files carry a placeholder admin so they render: an
+all-zero box key, which farmer refuses to import (a weak key), so it can
+never be anyone's. NOTES warns while it is set. Replace it.
 
 ### Eval install (everything bundled)
 
@@ -90,6 +121,7 @@ kubectl -n imas-core create secret generic imas-saasapi-internal-auth \
 helm dependency build deploy/helm/farmer
 helm install imas-core deploy/helm/farmer -n imas-core -f deploy/helm/farmer/ci/default-values.yaml \
   --timeout 30m \
+  --set farmer.bootstrapAdmin.pubkey=<imas auth pubkey> --set farmer.bootstrapAdmin.boxpub=<imas auth keygen's box key> \
   --set farmer.image.repository=<registry>/imas-farmer --set saasapi.image.repository=<registry>/imas-saasapi \
   --set database.migrate.image.repository=<registry>/imas-migrate
 ```
@@ -129,6 +161,10 @@ What to expect on first install:
   exist. That is expected: they don't crash-loop, and they start once the
   Secrets appear. Don't pass `--wait` on a first install: Helm would wait
   for saasapi before running the hooks that produce its credentials.
+  NOTES prints a WARNING naming both Secrets whenever External Secrets
+  doesn't sync them (`externalSecrets.enabled` or
+  `externalSecrets.saasapi.enabled` false), so this is visible at install
+  time and not only in pod events.
 - **Dev-mode OpenBao is in memory.** If its pod restarts, the keys, the
   eval CA, the policies and the roles are gone. `helm upgrade` re-runs the
   bootstrap, but it mints *new* gateway and fleet keys and a new CA.
@@ -701,6 +737,36 @@ kubectl -n imas create secret generic saasapi-s3 \
   --from-literal=access-key-id=imas-saasapi --from-literal=secret-access-key="$SECRET_KEY"
 ```
 
+**The limit is checked, not just documented (FIX.3).** With
+`saasapi.recipes.enabled` the chart sets `SAASAPI_RECIPES_CREDENTIAL_CHECK`
+(`saasapi.recipes.credentialCheck`, default `true`), and at startup saasapi
+asks the object store, with its own credential, to do what that credential
+must not be able to do:
+
+- create an object at the bucket root (outside `tenants/`);
+- create an object under `sprouts/` (farmer's staged recipes);
+- read a key under `sprouts/`;
+- list `sprouts/`.
+
+If the store allows any of them, saasapi logs which and exits instead of
+serving: farmer's key, a bucket-wide key or an admin key never runs as the
+recipe credential. Only `AccessDenied` counts as denied, so a store that
+can't be reached within about 30 seconds, a rejected key or a missing
+bucket also stops it (the pod restarts and tries again). Writes are
+create-only at random keys under `imas-saasapi-credential-check/`, never
+overwriting anything, and an object a wrongly allowed probe created is
+deleted again before saasapi exits. Why a self-check rather than a Job that
+creates the MinIO policy and user: it works for any S3 store (MinIO, AWS,
+others) and checks the credential saasapi actually runs with, whoever made
+it, and it needs no MinIO client image (`mc` is AGPL-3.0) and no MinIO admin
+credential in the cluster. What it doesn't prove: the whole policy. One
+known gap: AWS answers a read of a missing key with `AccessDenied` to a
+caller without `s3:ListBucket`, so a credential that may read `sprouts/*`
+but not list the bucket at all passes the read probe (the list probe still
+fails a bucket-wide key). `saasapi.recipes.credentialCheck=false` turns it
+off, and NOTES warns; do that only for a store whose answers the check
+can't classify, after limiting the credential some other way.
+
 `internal/saasapi`'s `TestRecipeObjectStorePolicy` checks this file against
 the keys the code writes. saasapi gets the access key id as an env var and
 the secret key only as a file. It validates uploads under
@@ -753,6 +819,7 @@ state moved off local disk first.
 | farmer | out | the nats chart's bus pods | `bus.port` (5406), at `farmerbusurl` |
 | farmer, saasapi | out | PXC / Valkey | 3306 / 6379 |
 | farmer | out | OpenBao | 8200 |
+| farmer | out | with `objectStore.endpoint` set: the object store (`networkPolicy.external.objectStore`, default any destination) | `objectStore.endpoint`'s port |
 | saasapi | out | OpenBao, only for the fleet key client (fleet dispatch, operator plane) or the bus CA fetch | 8200 |
 | saasapi | in | `networkPolicy.saasapiIngress.from` (default: anyone) | `saasapi.port` (8081) |
 | saasapi | in | with `saasapi.operator`: the sprout release hook Job's pods, plus `networkPolicy.saasapiOperatorIngress.from` (default: none) | `saasapi.operator.port` (8443) |
@@ -776,8 +843,13 @@ state moved off local disk first.
   external one uses `networkPolicy.external.<dep>`. An empty list means any
   destination, on that port only. OpenBao defaults to the reference's
   `openbao` namespace.
-- **Object storage:** farmer's needs `networkPolicy.farmerExtraEgress`;
-  saasapi's (recipe upload) is the rule above.
+- **Object storage:** farmer's own rule (recipes, staged recipes, job
+  logs), rendered whenever `objectStore.endpoint` is set, and saasapi's
+  (recipe upload) are separate rules on the endpoint's port, both narrowed
+  by `networkPolicy.external.objectStore`. Before FIX.3 farmer's needed a
+  hand-written `networkPolicy.farmerExtraEgress` rule, so a default install
+  couldn't serve a recipe or store a job log; `farmerExtraEgress` is now
+  only for anything else farmer must reach.
 - **saasapi after J.4 and REC.1** (OPS.1, 2026-10). Every connection
   saasapi makes or receives, and what the policy does about it:
   - *in:* the BFF on `saasapi.port`; with the operator plane, the release
@@ -842,9 +914,10 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `farmer.image.*` | `ghcr.io/yogzblr/imas-farmer` | Also the publish Job's image. |
 | `farmer.replicaCount` | `1` | Must be 1. |
 | `farmer.logLevel` / `apiPort` / `gatewayJWTTTL` | `info` / `5405` / `24h` | `loglevel`, `farmerapiport`, `gatewayjwtttl`. |
-| `farmer.bootstrapAdmin.pubkey` | `""` | The first imas CLI admin's NKey public key (`imas auth pubkey`), rendered as `users.admin`. Empty renders no users. |
+| `farmer.bootstrapAdmin.pubkey` | `""` | The first imas CLI admin's NKey public key (`imas auth pubkey`), rendered as `users.admin`. Required, with `boxpub`, unless `skip`: see [Bootstrap admin](#bootstrap-admin). |
 | `farmer.bootstrapAdmin.boxpub` | `""` | Required with `pubkey`: the CLI box public key the admin's `imas auth keygen` printed. Farmer imports it once at start; the database is authoritative after that (J.3). |
 | `farmer.bootstrapAdmin.username` | `""` | Optional name for listings and audit entries. |
+| `farmer.bootstrapAdmin.skip` | `false` | `true` renders no admin and lifts the requirement. Only when farmer's database already holds an admin; not with `pubkey`, `boxpub` or `username`. NOTES says so. |
 | `farmer.adminPubKeys` | `[]` | Removed in J.3: rendering fails if set. An admin with no CLI box key can't make a request; use `farmer.bootstrapAdmin`. |
 | `farmer.jobs.reconcileWindow` | `"2h"` | `IMAS_JOB_RECONCILE_WINDOW` (`deploy/farmer/values.job-reconcile.yaml`). |
 | `farmer.recipes.templateLimits.maxSourceBytes` | `262144` | `IMAS_RECIPE_MAX_SOURCE_BYTES`: largest recipe source farmer reads or renders. |
@@ -876,6 +949,7 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `saasapi.recipes.readRole` / `writeRole` | `imas-recipes-read` / `imas-recipes-write` | `SAASAPI_RECIPES_READ_ROLE` / `_WRITE_ROLE`: Keycloak roles for GET, and for PUT/DELETE. Must differ. |
 | `saasapi.recipes.maxCount` / `maxTotalBytes` | `500` / `20971520` | `SAASAPI_RECIPES_MAX_COUNT` / `_MAX_TOTAL_BYTES`: per-tenant caps. |
 | `saasapi.recipes.writeRateLimit.*` | `1` / `10` | `SAASAPI_RECIPES_WRITE_RATE_LIMIT` / `_BURST`: PUT and DELETE per tenant. |
+| `saasapi.recipes.credentialCheck` | `true` | `SAASAPI_RECIPES_CREDENTIAL_CHECK`: saasapi refuses to start unless the object store denies its recipe credential outside `tenants/` and on `sprouts/`. `false` turns it off; NOTES warns. See [Tenant recipe upload](#tenant-recipe-upload). |
 | `saasapi.extraEnv` | `[]` | Extra env vars for saasapi, e.g. `IMAS_FLEETSIGN_OPENBAO_NAMESPACE` (see [OpenBao](#openbao)) or `HTTPS_PROXY`/`NO_PROXY`. |
 | `credentialPublisher.*` | enabled, `platform/imas/saasapi-nats-user` | The publish Job. |
 | `sproutRelease.register` | `true` | Register `files/sprout-release.json` when the chart has it and the operator plane is on. |
@@ -886,7 +960,7 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `sproutRelease.argoCDHooks` | `true` | `PostSync`, sync-wave 1. |
 | `externalSecrets.*` | off | ESO wiring. |
 | `openbaoBootstrap.*` | on | The bundled OpenBao's setup Job. |
-| `networkPolicy.*` | on | See above. `saasapiOperatorIngress.from` and `fleetreleaser.to` are the operator plane's peers; `external.objectStore` is saasapi's recipe store peer. |
+| `networkPolicy.*` | on | See above. `saasapiOperatorIngress.from` and `fleetreleaser.to` are the operator plane's peers; `external.objectStore` is the object store's peer for farmer and for saasapi's recipe writes; `farmerExtraEgress` and `saasapiExtraEgress` are added on top. |
 
 ## Testing the chart
 
@@ -1079,7 +1153,16 @@ exceptions, all subcharts and none of them Go dependencies:
   sprouts. Tenant scoping is enforced in saasapi's code, not by the bucket
   policy, which can only limit the credential to `tenants/*/recipes/*`. Keep
   it a Secret of its own, scoped by the example policy, and never reuse
-  farmer's (farmer's can write `sprouts/` and the platform tree).
+  farmer's (farmer's can write `sprouts/` and the platform tree). saasapi
+  checks the scope itself at startup (`saasapi.recipes.credentialCheck`,
+  FIX.3) and refuses to run with a credential the store lets outside
+  `tenants/` or onto `sprouts/`; see that section for what the check does
+  not prove.
+- **The bootstrap admin** (`farmer.bootstrapAdmin`) becomes the platform's
+  first CLI admin, with every right. The chart requires it (or an explicit
+  `skip`), but can't check whose key it is: verify the box key's
+  fingerprint with its owner out of band, and never ship the `ci/`
+  placeholder (NOTES warns while it's set).
 - **The operator credential** ([Sprout release registration](#sprout-release-registration)).
   Whoever holds the operator token can get any well-formed release above
   fleetreleaser's floor signed and offered to tenants. Only two pods get

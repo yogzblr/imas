@@ -40,7 +40,22 @@ var required = []string{
 	"--set", "saasapi.jwt.keycloakJWKSURL=https://kc.example.com/realms/x/protocol/openid-connect/certs",
 	"--set", "saasapi.jwt.issuer=https://kc.example.com/realms/x",
 	"--set", "saasapi.jwt.audience=imas-saasapi",
+	"--set", "farmer.bootstrapAdmin.pubkey=" + testAdminPubkey,
+	"--set", "farmer.bootstrapAdmin.boxpub=" + testAdminBoxpub,
 }
+
+// skipAdmin replaces required's bootstrap admin with an explicit skip.
+var skipAdmin = []string{"--set", "farmer.bootstrapAdmin.pubkey=", "--set", "farmer.bootstrapAdmin.boxpub=",
+	"--set", "farmer.bootstrapAdmin.skip=true"}
+
+// noAdmin clears required's bootstrap admin.
+var noAdmin = []string{"--set", "farmer.bootstrapAdmin.pubkey=", "--set", "farmer.bootstrapAdmin.boxpub="}
+
+// The bootstrap admin every render carries (FIX.3: the chart requires one).
+const (
+	testAdminPubkey = "AB3CQ7X5ZV2JMR4FZYPG2ZLNZ6QX6S7HCLRT5JH4PO5ILHMYXM2AXUNG"
+	testAdminBoxpub = "2O0Y4D6rpqfWAeY+pn2AFOP0AkFqm2t8dNVO3uYFQUQ="
+)
 
 func chartDir(t *testing.T) string {
 	t.Helper()
@@ -870,8 +885,8 @@ func TestBusAddress(t *testing.T) {
 }
 
 func TestFarmerConfigFile(t *testing.T) {
-	docs := mustRender(t, "--set", "farmer.extraConfig.farmerorganization=evil",
-		"--set", "farmer.extraConfig.cohortrefreshinterval=1m")
+	docs := mustRender(t, append(slices.Clone(skipAdmin), "--set", "farmer.extraConfig.farmerorganization=evil",
+		"--set", "farmer.extraConfig.cohortrefreshinterval=1m")...)
 	cfg := farmerConfig(t, docs)
 	if cfg["farmerorganization"] != "imas" {
 		t.Errorf("extraConfig overrode a chart-managed key: %v", cfg["farmerorganization"])
@@ -886,7 +901,7 @@ func TestFarmerConfigFile(t *testing.T) {
 		t.Errorf("pubkeys = %v; the chart renders no NKey-only admins", cfg["pubkeys"])
 	}
 	if _, ok := cfg["users"]; ok {
-		t.Errorf("users = %v without farmer.bootstrapAdmin", cfg["users"])
+		t.Errorf("users = %v with farmer.bootstrapAdmin.skip", cfg["users"])
 	}
 	for k, want := range map[string]string{
 		"farmerpki": "/var/lib/imas/farmer/pki/", "nkeyfarmerprivfile": "/var/lib/imas/farmer/pki/farmer.nkey",
@@ -1060,6 +1075,55 @@ func TestSaasapiRecipesEnv(t *testing.T) {
 	}
 	if items, _ := get(vols["recipes-s3"], "secret", "items").([]any); len(items) != 1 || get(items[0], "key") != "secret-access-key" {
 		t.Errorf("recipes-s3 items: %v", items)
+	}
+}
+
+// FIX.3: the recipe credential's limit to tenants/*/recipes/* is checked,
+// not just documented. With recipe upload on, the chart turns on saasapi's
+// startup self-check (SAASAPI_RECIPES_CREDENTIAL_CHECK, internal/saasapi
+// recipes_credcheck.go), which refuses to start when the object store
+// lets the credential write outside tenants/ or write, read or list
+// sprouts/. Turning it off is an explicit false that NOTES warns about.
+func TestSaasapiRecipeCredentialCheck(t *testing.T) {
+	on := []string{"--set", "saasapi.recipes.enabled=true", "--set", "saasapi.recipes.credentialsSecret=saasapi-s3",
+		"--set", "objectStore.endpoint=minio.storage:9000", "--set", "objectStore.bucket=imas-recipes"}
+	check := func(docs []obj) (string, bool) {
+		e, ok := envMap(container(t, find(t, docs, "Deployment", "t-farmer-saasapi"), "saasapi"))["SAASAPI_RECIPES_CREDENTIAL_CHECK"]
+		v, _ := e["value"].(string)
+		return v, ok
+	}
+
+	docs := mustRenderRelease(t, "", on...)
+	if v, ok := check(docs); !ok || v != "true" {
+		t.Errorf("recipes on: SAASAPI_RECIPES_CREDENTIAL_CHECK = %q (set %v), want \"true\"", v, ok)
+	}
+	if n := notes(t, docs); strings.Contains(n, "credentialCheck=false") {
+		t.Errorf("NOTES warns about a check that is on:\n%s", n)
+	}
+
+	// Off only by an explicit false, with a warning.
+	docs = mustRenderRelease(t, "", append(slices.Clone(on), "--set", "saasapi.recipes.credentialCheck=false")...)
+	if v, _ := check(docs); v != "false" {
+		t.Errorf("credentialCheck=false: SAASAPI_RECIPES_CREDENTIAL_CHECK = %q", v)
+	}
+	n := notes(t, docs)
+	for _, want := range []string{"WARNING: saasapi.recipes.credentialCheck=false", `Secret "saasapi-s3"`, "tenants/*/recipes/*"} {
+		if !strings.Contains(n, want) {
+			t.Errorf("NOTES lacks %q:\n%s", want, n)
+		}
+	}
+	mustFail(t, "saasapi.recipes.credentialCheck must be true or false", append(slices.Clone(on), "--set-string", "saasapi.recipes.credentialCheck=no")...)
+
+	// Recipes off: no store, so nothing to check and no variable.
+	if _, ok := check(mustRender(t)); ok {
+		t.Error("SAASAPI_RECIPES_CREDENTIAL_CHECK set with saasapi.recipes.enabled=false")
+	}
+	// The reviewed policy the check stands behind is still the example
+	// shipped with the chart, and it never reaches sprouts/ or the bucket
+	// root.
+	pol := string(repoFile(t, "deploy/helm/farmer/files/objectstore-policies/saasapi-recipes.json"))
+	if strings.Contains(pol, "sprouts/") || strings.Contains(pol, `RECIPE_BUCKET/*"`) {
+		t.Errorf("the example recipe policy reaches beyond tenants/:\n%s", pol)
 	}
 }
 
@@ -2738,9 +2802,65 @@ func TestBootstrapAdmin(t *testing.T) {
 		t.Errorf("users = %v", cfg["users"])
 	}
 
-	mustFail(t, "boxpub is required", "--set", "farmer.bootstrapAdmin.pubkey="+pubkey)
+	mustFail(t, "boxpub is required", "--set", "farmer.bootstrapAdmin.pubkey="+pubkey, "--set", "farmer.bootstrapAdmin.boxpub=")
 	mustFail(t, "boxpub is required", "--set", "farmer.bootstrapAdmin.pubkey="+pubkey, "--set", "farmer.bootstrapAdmin.boxpub=not-a-key")
-	mustFail(t, "not an NKey user public key", "--set", "farmer.bootstrapAdmin.boxpub="+boxpub)
+	mustFail(t, "not an NKey user public key", "--set", "farmer.bootstrapAdmin.pubkey=", "--set", "farmer.bootstrapAdmin.boxpub="+boxpub)
 	mustFail(t, "not an NKey user public key", "--set", "farmer.bootstrapAdmin.pubkey=UADMIN", "--set", "farmer.bootstrapAdmin.boxpub="+boxpub)
+	mustFail(t, "not an NKey user public key", append(slices.Clone(noAdmin), "--set", "farmer.bootstrapAdmin.username=root")...)
 	mustFail(t, "farmer.adminPubKeys was removed", "--set", "farmer.adminPubKeys[0]="+pubkey)
+}
+
+// FIX.3: an install with no bootstrap admin is unusable (J.3: the CLI
+// can't add a user over the bus), so the render fails unless the admin's
+// keys are set or farmer.bootstrapAdmin.skip says one already exists.
+func TestBootstrapAdminRequired(t *testing.T) {
+	// The chart's own defaults: no admin, no skip.
+	mustFail(t, "farmer.bootstrapAdmin.pubkey and farmer.bootstrapAdmin.boxpub are required", noAdmin...)
+	mustFail(t, "set farmer.bootstrapAdmin.skip=true instead", noAdmin...)
+	// Every documented example carries one, on its own (without required,
+	// whose --set would win over the file).
+	for _, f := range []string{"default-values.yaml", "external-values.yaml", "token-auth-values.yaml"} {
+		docs, err := runHelm(t, strippedChart(t), "-f", ciValues(t, f))
+		if err != nil {
+			t.Fatalf("ci/%s: %v", f, err)
+		}
+		cfg := farmerConfig(t, docs)
+		if get(cfg, "users", "admin", 0, "pubkey") == nil || get(cfg, "users", "admin", 0, "boxpub") == nil {
+			t.Errorf("ci/%s: users = %v", f, cfg["users"])
+		}
+	}
+	// Their placeholder can never be anyone's key (an all-zero box key,
+	// which farmer refuses as weak), and NOTES says to replace it.
+	docs, err := runHelm(t, releaseChart(t, ""), "-f", ciValues(t, "default-values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if get(farmerConfig(t, docs), "users", "admin", 0, "boxpub") != "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" {
+		t.Error("ci/default-values.yaml's bootstrap admin is not the all-zero placeholder")
+	}
+	if n := notes(t, docs); !strings.Contains(n, "WARNING: farmer.bootstrapAdmin is the ci/ example's placeholder") {
+		t.Errorf("NOTES doesn't flag the placeholder admin:\n%s", n)
+	}
+	if n := notes(t, mustRenderRelease(t, "")); strings.Contains(n, "placeholder") {
+		t.Errorf("NOTES flags a real admin as the placeholder:\n%s", n)
+	}
+
+	// skip: no users section, a NOTES line saying so.
+	docs = mustRenderRelease(t, "", skipAdmin...)
+	if _, ok := farmerConfig(t, docs)["users"]; ok {
+		t.Error("users rendered with skip")
+	}
+	if n := notes(t, docs); !strings.Contains(n, "farmer.bootstrapAdmin.skip=true") {
+		t.Errorf("NOTES doesn't mention the skip:\n%s", n)
+	}
+	if n := notes(t, mustRenderRelease(t, "")); strings.Contains(n, "bootstrapAdmin.skip") {
+		t.Errorf("NOTES mentions a skip that isn't set:\n%s", n)
+	}
+
+	// skip with keys is contradictory; skip must be a boolean.
+	mustFail(t, "choose one", "--set", "farmer.bootstrapAdmin.skip=true")
+	mustFail(t, "choose one", append(slices.Clone(skipAdmin), "--set", "farmer.bootstrapAdmin.username=root")...)
+	mustFail(t, "must be true or false", append(slices.Clone(noAdmin), "--set-string", "farmer.bootstrapAdmin.skip=yes")...)
+	// An explicit false is the default: still required.
+	mustFail(t, "are required", append(slices.Clone(noAdmin), "--set", "farmer.bootstrapAdmin.skip=false")...)
 }

@@ -301,6 +301,11 @@ spec:
                   key: {{ .accessKeyIdKey }}
             - name: SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY_FILE
               value: /var/run/secrets/imas/recipes-s3/secret-access-key
+            # FIX.3: refuse to start unless the object store denies this
+            # credential outside tenants/ and under sprouts/
+            # (internal/saasapi recipes_credcheck.go).
+            - name: SAASAPI_RECIPES_CREDENTIAL_CHECK
+              value: {{ .credentialCheck | toString | quote }}
             {{- end }}
             {{- end }}
             {{- if $fleetVerify }}

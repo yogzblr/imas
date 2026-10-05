@@ -350,4 +350,28 @@ func TestSaasapiBoxNotes(t *testing.T) {
 	if n := notes(t, mustRenderRelease(t, "", "--set", "controlPlaneBoxKeys.enabled=false")); !strings.Contains(n, "controlPlaneBoxKeys.enabled=false") {
 		t.Errorf("NOTES doesn't warn that the keys must come from elsewhere:\n%s", n)
 	}
+
+	// FIX.3: with External Secrets off (the default), nothing creates the
+	// two Secrets, so NOTES says plainly at install time that saasapi's
+	// pods will hang until they exist, and where the commands are.
+	n = notes(t, mustRenderRelease(t, ""))
+	for _, want := range []string{"WARNING: nothing in this release creates Secrets", `"imas-saasapi-nats" and "imas-saasapi-box"`,
+		"ContainerCreating", "CreateContainerConfigError", `"Eval install"`, "--wait"} {
+		if !strings.Contains(n, want) {
+			t.Errorf("NOTES lacks %q with externalSecrets off:\n%s", want, n)
+		}
+	}
+	// ESO on, but not for saasapi: still by hand.
+	n = notes(t, mustRenderRelease(t, "", "--set", "externalSecrets.enabled=true", "--set", "externalSecrets.saasapi.enabled=false"))
+	if !strings.Contains(n, "WARNING: nothing in this release creates Secrets") || !strings.Contains(n, "externalSecrets.saasapi.enabled=false: create it by hand") {
+		t.Errorf("NOTES doesn't warn with externalSecrets.saasapi.enabled=false:\n%s", n)
+	}
+	// ESO syncs both: no warning.
+	if n := notes(t, mustRenderRelease(t, "", "--set", "externalSecrets.enabled=true")); strings.Contains(n, "WARNING: nothing in this release creates") {
+		t.Errorf("NOTES warns although ESO syncs both Secrets:\n%s", n)
+	}
+	// No saasapi: nothing to wait for.
+	if n := notes(t, mustRenderRelease(t, "", "--set", "saasapi.enabled=false")); strings.Contains(n, "imas-saasapi-box") {
+		t.Errorf("NOTES mentions saasapi's Secrets with saasapi off:\n%s", n)
+	}
 }

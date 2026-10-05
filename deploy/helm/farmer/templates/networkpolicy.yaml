@@ -6,8 +6,10 @@
 {{- $hasValkey := include "imas-farmer.valkeyAddrs" . -}}
 # farmer (core). Allowed, and nothing else:
 #   in:  the nats chart's Envoy -> API port (/v1/enroll, /v1/refresh, /files/, JWKS)
-#   out: the bus (client port, farmerbusurl), PXC, Valkey, OpenBao, DNS,
-#        plus networkPolicy.farmerExtraEgress (object storage)
+#   out: the bus (client port, farmerbusurl), PXC, Valkey, OpenBao, the
+#        object store (objectStore.endpoint's port, peers
+#        networkPolicy.external.objectStore) when objectStore.endpoint is
+#        set, DNS, plus networkPolicy.farmerExtraEgress
 # Core only ever dials out to the DMZ; the bus never dials in.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -43,6 +45,9 @@ spec:
     {{- include "imas-farmer.depEgress" $valkey | nindent 4 }}
     {{- end }}
     {{- include "imas-farmer.openbaoEgress" . | nindent 4 }}
+    {{- if .Values.objectStore.endpoint }}
+    {{- include "imas-farmer.depEgress" (dict "bundled" false "peers" $np.external.objectStore "port" (include "imas-farmer.objectStorePort" .)) | nindent 4 }}
+    {{- end }}
     {{- include "imas-farmer.dnsEgress" . | nindent 4 }}
     {{- with $np.farmerExtraEgress }}
     {{- toYaml . | nindent 4 }}

@@ -1,6 +1,7 @@
 package saasapi
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -36,6 +37,12 @@ import (
 //   - SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY_FILE: path to a file holding its
 //     secret key (a mounted Secret), never the key itself.
 //   - SAASAPI_RECIPES_S3_USE_SSL: default true.
+//   - SAASAPI_RECIPES_CREDENTIAL_CHECK: default false; the Helm chart sets
+//     it true. With it, ConfigureRecipes asks the object store whether the
+//     credential can write outside tenants/ or write, read or list
+//     sprouts/, and refuses to start if it can, or if the store gives no
+//     answer it can classify (recipes_credcheck.go). Ignored with no
+//     endpoint.
 //   - SAASAPI_RECIPES_READ_ROLE / SAASAPI_RECIPES_WRITE_ROLE: the Keycloak
 //     roles (caller.go) that may read (GET) and write (PUT, DELETE) a
 //     tenant's recipes. Defaults imas-recipes-read and imas-recipes-write;
@@ -58,6 +65,9 @@ type RecipeSettings struct {
 	AccessKeyID         string
 	SecretAccessKeyFile string
 	UseSSL              bool
+	// CredentialCheck runs the startup self-check of the credential's
+	// scope (recipes_credcheck.go).
+	CredentialCheck bool
 
 	ReadRole  string
 	WriteRole string
@@ -115,6 +125,13 @@ func loadRecipeSettings(s *RecipeSettings) error {
 			return fmt.Errorf("saasapi: SAASAPI_RECIPES_S3_USE_SSL=%q: not a boolean", v)
 		}
 		s.UseSSL = b
+	}
+	if v := os.Getenv("SAASAPI_RECIPES_CREDENTIAL_CHECK"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("saasapi: SAASAPI_RECIPES_CREDENTIAL_CHECK=%q: not a boolean", v)
+		}
+		s.CredentialCheck = b
 	}
 	if v := os.Getenv("SAASAPI_RECIPES_READ_ROLE"); v != "" {
 		s.ReadRole = v
@@ -256,9 +273,12 @@ func newRecipeService(s RecipeSettings, store *objectstore.Store, vc valkey.Clie
 // from saasapi's own credential (when an endpoint is set), the roles, the
 // caps and the write rate limiter (Valkey-backed with a non-nil vc). Call
 // it once at startup, before NewRouter, which wires the roles and limiter
-// in effect at that moment. It makes no network call: like farmer,
-// saasapi starts without the object store, and recipe requests fail until
-// it is reachable.
+// in effect at that moment. Without s.CredentialCheck it makes no network
+// call: like farmer, saasapi starts without the object store, and recipe
+// requests fail until it is reachable. With it, it first verifies the
+// credential's scope against the store (recipes_credcheck.go), waiting
+// for the store about half a minute, and returns an error, which stops
+// saasapi, if the credential is too broad or the store didn't answer.
 func ConfigureRecipes(s RecipeSettings, vc valkey.Client) error {
 	if err := s.validate(); err != nil {
 		return err
@@ -278,6 +298,13 @@ func ConfigureRecipes(s RecipeSettings, vc valkey.Client) error {
 		})
 		if err != nil {
 			return fmt.Errorf("saasapi: recipe store: %w", err)
+		}
+		if s.CredentialCheck {
+			if err := checkRecipeCredentialScope(context.Background(), store, s.Bucket); err != nil {
+				return err
+			}
+		} else {
+			log.Warnf("saasapi: recipe credential check off (SAASAPI_RECIPES_CREDENTIAL_CHECK unset or false): nothing verifies that the credential is limited to tenants/*/recipes/*")
 		}
 		log.Infof("saasapi: recipe upload on: bucket %s at %s, caps %d recipes / %d bytes per tenant, read role %q, write role %q",
 			s.Bucket, s.Endpoint, s.MaxCount, s.MaxTotalBytes, s.ReadRole, s.WriteRole)

@@ -60,7 +60,7 @@ The core needs these before farmer can enroll a single sprout:
 | **PXC** (Percona XtraDB Cluster / MySQL 8) with a `farmer` and a `saas` schema | farmer (`IMAS_PXC_DSN`), saasapi (`SAASAPI_DSN`) | farmer exits at startup without it. The grants are design doc §5.1; see [`deploy/helm/farmer/README.md`](../deploy/helm/farmer/README.md), "PXC". |
 | **OpenBao** | farmer: PKI (API certificate), Transit `imas-gateway-jwt` (gateway JWTs), Transit `imas-fleet-signing` (read-only), KV v2 `secret/imas/tenant-x25519/tenants/<tenant>` (one payload-encryption keypair per tenant, generated fresh; nothing is read at `secret/imas/tenant-x25519` itself) | farmer starts without the Transit keys, but `POST /v1/enroll` fails closed until both are configured. Without OpenBao PKI you must place farmer's certificate and key yourself. |
 | **Valkey** | farmer (heartbeats, enrollment replay cache), saasapi (rate limits, `connected`) | `/v1/enroll` and `/v1/refresh` fail closed without it. Give farmer and saasapi the same address list. |
-| **S3-compatible object storage** | farmer: recipes and job logs, in two different buckets | recipe and job requests fail until it's configured. |
+| **S3-compatible object storage** | farmer: recipes and job logs, in two different buckets; saasapi: tenant recipe uploads, with its own credential | recipe and job requests fail until it's configured. The Helm chart opens farmer's egress to `objectStore.endpoint`'s port by itself. |
 | **Keycloak** | saasapi verifies the end-user JWTs the BFF forwards | saasapi won't authenticate anything without it. |
 
 ## Install on Kubernetes (recommended)
@@ -80,6 +80,16 @@ READMEs are the full reference; this is the order to do things in.
    `ci/external-values.yaml` is the production one. Set `bus.serviceName`,
    `bus.namespace`, and `bus.sproutBusURLs` (Envoy's external `wss://`
    address, which farmer hands to sprouts as `nats_urls`).
+   **Set the bootstrap admin**, `farmer.bootstrapAdmin.pubkey` and
+   `boxpub`: the render fails without them, because the CLI can't add the
+   first user over the bus. Make both offline on the admin's machine first
+   (`imas auth privkey`, `imas auth pubkey`, `imas auth keygen`; see
+   [The imas CLI](#the-imas-cli), steps 4 and 5). The `ci/` files carry an
+   unusable placeholder; replace it. Upgrading a release that already has
+   an admin in its database: set `farmer.bootstrapAdmin.skip=true` instead.
+   With `objectStore.endpoint` set, farmer's NetworkPolicy opens egress to
+   that port itself; `networkPolicy.external.objectStore` narrows it to
+   your object store's peers (it narrows saasapi's recipe rule too).
    Database schemas are created and migrated by the chart itself: a single
    hook Job (`imas-migrate`, goose migrations) runs before upgrades and
    rollbacks, and after install when PXC is bundled, and farmer and saasapi
@@ -94,7 +104,9 @@ READMEs are the full reference; this is the order to do things in.
    External Secrets syncs them into saasapi's two Secrets
    (`imas-saasapi-nats`, `imas-saasapi-box`); without ESO (the eval), copy
    them by hand as the chart README shows. saasapi's pods wait until both
-   exist; don't install with `--wait`. With an external OpenBao, the
+   exist (`ContainerCreating`, with `CreateContainerConfigError` events),
+   and the install's NOTES print a WARNING naming both Secrets whenever ESO
+   doesn't sync them; don't install with `--wait`. With an external OpenBao, the
    keygen Job's role and policy must exist first ("Control-plane box keys"
    in the chart README).
 4. **Install the DMZ chart**, `deploy/helm/nats`. It deploys farmerbus and
@@ -342,6 +354,13 @@ Full reference: [`api/saasapi.md`](api/saasapi.md#recipes).
 - The deployment must have recipe storage on (`saasapi.recipes.enabled` in
   the Helm chart). Otherwise every call answers
   `503 recipes_not_configured`.
+- saasapi's recipe credential must be its own, limited to
+  `tenants/*/recipes/*` (the chart's `files/objectstore-policies/`). saasapi
+  checks this at startup: if the object store lets the credential write
+  outside `tenants/`, or write, read or list `sprouts/`, saasapi logs which
+  and refuses to start (`SAASAPI_RECIPES_CREDENTIAL_CHECK`, on in the
+  chart). It also refuses when it can't reach the object store within about
+  30 seconds, and its pod restarts and tries again.
 - Your Keycloak user needs the `imas-recipes-write` role to upload or
   delete, and `imas-recipes-read` (or the write role) to list and read.
   Without it the answer is `403`.
@@ -514,7 +533,9 @@ Operators belong to farmer's `farmerorganization` tenant.
    (`imas auth pubkey`) and the box key and fingerprint `keygen` prints.
 5. Register yourself.
    - **The first admin** goes in farmer's config file, never over the bus.
-     With the Helm chart:
+     With the Helm chart (required: the chart refuses to render without
+     it, unless `farmer.bootstrapAdmin.skip=true` because the database
+     already has an admin):
 
      ```yaml
      farmer:
