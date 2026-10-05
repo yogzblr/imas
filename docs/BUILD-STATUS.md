@@ -35,12 +35,18 @@ exercised on real hosts. Nothing here has run against production-shaped
 infrastructure: that is what the Terraform UAT gate and the load tests below
 are for.
 
-**No release has ever been cut.** `yogzblr/imas` has no tag and no GitHub
-release, and neither `release.yml` nor `publish-packages.yml` has run once
-(checked 2026-10-05). Everything that depends on a published artifact (the
-Buildkite registries the Ansible role installs from, the signed GHCR images,
-the Helm charts in `imashelm`, the stamped sprout release) is written and
-reviewed but untried.
+**Releases (updated 2026-10-05).** Pre-releases `v0.1.0-rc.1` to `-rc.4` have
+been cut. rc.1 failed in GoReleaser (`.IsPrerelease` template, fixed in
+PR #124/#125), rc.2 was tagged from a broken `main` and skipped, and rc.3
+shipped deb/rpm/apk packages with a versioned binary name and none of the
+config, signing keys or state directories (fixed in PR #127). **rc.4 is the
+first good one**: checksums, GPG and keyless cosign signatures and the six
+multi-arch images verified for rc.3's pipeline, and rc.4's packages passed
+the new contents check and installed from the `imasdeb` Buildkite registry on
+Ubuntu (WSL2), where the service started and, with a placeholder config,
+retried the root CA fetch as expected. `publish-packages.yml` has run to the
+end (rpm, deb, NuGet, Helm). Still untried: the Windows MSI on a host, the
+rpm and apk installs, and enrolment through Envoy against a real backend.
 
 **No human security review is recorded.** Every PR that carries "FLAG FOR
 SECURITY REVIEW" has been merged by the owner. Two read-only reviews were
@@ -107,7 +113,7 @@ has merged except the Terraform UAT gate, and nothing has been released.
 | Wave 5: REL.1 (PR #64, #65) | **Green** | Merged: GoReleaser OSS, MSI from `build-msi.sh`, secret-free `goreleaser-check.yml`. No real tag has exercised it. |
 | Open-item briefs, 2026-10-03/04, not in the plan document: DOC.1, the J sealing designs, CL.4 (PR #71), SCALE.1 to SCALE.3, LIC.1, REL.2, PKI.1, PKI.2, SEC.1 (PR #69 to #81) | **Amber** | All merged. The scale work is unmeasured (Open item 3) and SCALE.2, PKI.1 and PKI.2 are flagged for a security review not yet held. See "Open-item briefs and Wave 7". |
 | Wave 7 (plan §4e to §4g): SEC.0, SEC.3a, SEC.3b, SEC.4, SEC.5, SEC.5b, SEC.6, REC.1, J.1 to J.5, SEC.7a to SEC.7d, SH.1, CL.4 (PR #103), OPS.1, T.1, FIX.1 to FIX.3 (PR #83 to #113) | **Amber** | All merged, CI green on `main`. Every brief but T.1 is flagged for security review and none has had the human one; SEC.6 is a read-only review. Open residuals in Open items 4, 10 and 11. SEC.1 (the first review, PR #81) ran before this wave; there is no SEC.2. See "Open-item briefs and Wave 7". |
-| First release (`release.yml`, `publish-packages.yml`) | **Red** | Never run; no tag exists. Owner prerequisites in "Validation, 2026-10-05". |
+| First release (`release.yml`, `publish-packages.yml`) | **Amber** | `v0.1.0-rc.4` (2026-10-05) is released and published; rc.3 and earlier are not usable. Tag trigger in `release.yml` re-enabled. Untried: MSI on Windows, rpm/apk installs, enrolment against a backend. |
 | Terraform UAT gate | **Red** | Not started. Needs a first release and a compute-provider decision. |
 
 ### Open items (numbered as in "Open items" below)
@@ -151,7 +157,7 @@ beyond unit tests (real Envoy, Molecule containers, real OpenBao).
 | 15 | Key rotation for sprout keys | **Green** | Built, matches the requirement | DOC.1 (PR #69) reworded `requirements.md` item 15 to the built design: farmer-triggered, the trigger carries no key material, the sprout generates the new pair and submits only the public key, sealed under its current key. See `imas-payload-encryption-design.md`, "Sprout-side rotation, farmer-triggered only". |
 | 16 | SDB-equivalent secrets in the sprout | **Green** | Built (v1 tier) | `internal/ingredients/sdb`: OpenBao/Vault (hot-reloaded client cert, official OpenBao client since CL.2b, tested against OpenBao 2.4.1 and Vault 1.20.4), Azure Key Vault, AWS Secrets Manager, GCP Secret Manager. CyberArk and Delinea (Tier 2) not built, by design. |
 | 17 | Probe capability (database, HTTP) as a sprout task | **Green** | Built | `probe.http`, `probe.database`, plus `wait`, `cond`, `on_exit`, registered variables with `sensitive` redaction. |
-| 18 | Installers: yum, apt, zypper, MSI | **Amber** | Built, **never published** | nfpm deb/rpm/apk, SUSE rpm check, MSI and winget package, and the workflow that uploads them to the Buildkite registries. No release has ever been cut (see "Release flow" below), so the registries hold no imas packages and nothing has exercised the upload. |
+| 18 | Installers: yum, apt, zypper, MSI | **Amber** | Built, **published (rc.4)** | nfpm deb/rpm/apk, SUSE rpm check, MSI and winget package, and the workflow that uploads them to the Buildkite registries. `v0.1.0-rc.4` went through it on 2026-10-05; the deb installed from `imasdeb` on Ubuntu (WSL2) and the service started. The rpm and apk installs and the MSI on Windows are untried; rc.3's packages in the registries are broken. |
 | 19 | Ansible with one-time key | **Green** | Built, validated | Join token handled `no_log`, mode `0600`, removed by the sprout after enrollment. |
 | 20 | Fleet updates from the sprout's configured repo | **Amber** | Built, **dispatch off by default** | FU.0 to FU.7, FU.6b merged (below). `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` stays `false`, in the Helm chart too (`saasapi.fleetUpdateDispatch.enabled`); farmer has its own switch since SEC.5, `IMAS_SELF_UPDATE_ENABLED` (Helm `farmer.selfUpdate.enabled`), also `false`, and a rollout needs both on. Since SEC.5 the sprout installs only a package whose own metadata names `imas-sprout` at the signed version, dpkg runs with `--refuse-downgrade`, and the installed version is read back; a pre-release is refused on Windows (PR #88), because an MSI ProductVersion can't carry it (review B8). Since SEC.5b farmer enforces the tenant's rollout window, and since SEC.4 facts are stored under the subject's sprout (review H2). Linux path has an end-to-end test against a real repository (Nexus), not against the Buildkite registries; Windows is mock-tested only, and its MSI metadata read (`msi.dll`) is compiled but not run; zypper's downgrade skip was read from source, not run. See Open item 4 for what is left before dispatch. |
 | 21 | Licensing | **Amber** | Built, **BSD/ISC/0BSD not recorded** | Apache/MIT default; PXC and MPL-2.0 exceptions recorded; goose (MIT) added. LIC.1 (PR #73) fixed the `go-licenses` workflow: pinned to v2.0.1, whose classifier identifies `modernc.org/mathutil`'s LICENSE as the BSD-3-Clause it is (v1.6.0, what `@latest` gave, could not); the check now also fails on an unidentified licence and runs on pull requests; `dependencies/` is regenerated for Linux, the Windows sprout and the darwin CLI. Both jobs have passed on every `main` push that ran them since (`7fb527a` included). `DEPENDENCIES.md` lists every module that is not Apache-2.0 or MIT and which binaries link it. BSD-2-Clause, BSD-3-Clause, ISC and 0BSD (Go's own `x/*` modules among them) are not yet recorded under item 21. Open question from PR #73: the MPL-2.0 OpenBao client is linked into the imas CLI too. |
@@ -441,7 +447,7 @@ key set fetched over the bus. Release/rollout flow: see `docs/RELEASING.md`.
 
 | Item | What shipped | Status |
 |---|---|---|
-| Release flow (`docs/RELEASING.md`), **never run** | One `vMAJOR.MINOR.PATCH` tag releases everything: five GHCR images (keyless cosign), binaries and checksums on GitHub releases, rpm/deb/winget to the Buildkite registries, `farmer` and `nats` charts to `imashelm`. Stale upstream publishers (Docker Hub, Cloudsmith, S3, AUR) removed. `release.yml` is manual-only until the repo secrets `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE` exist (set 2026-10-03), and `publish-packages.yml` needs the Buildkite organisation variable and token. GoReleaser OSS since brief REL.1: the Windows MSI comes from `packaging/windows/build-msi.sh` (`wixl`) as a build hook instead of goreleaser-pro's `msi` pipe, so no `GORELEASER_KEY`; `goreleaser-check.yml` runs a secret-free snapshot on pull requests and checks the MSI is in `checksums.txt`. No tag exists and neither release workflow has a run. | merged — PR #43 (`c3f6f65`), #44; REL.1 merged — PR #64, #65 |
+| Release flow (`docs/RELEASING.md`), **run to the end with rc.4** | One `vMAJOR.MINOR.PATCH` tag releases everything: five GHCR images (keyless cosign), binaries and checksums on GitHub releases, rpm/deb/winget to the Buildkite registries, `farmer` and `nats` charts to `imashelm`. Stale upstream publishers (Docker Hub, Cloudsmith, S3, AUR) removed. `release.yml` is manual-only until the repo secrets `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE` exist (set 2026-10-03), and `publish-packages.yml` needs the Buildkite organisation variable and token. GoReleaser OSS since brief REL.1: the Windows MSI comes from `packaging/windows/build-msi.sh` (`wixl`) as a build hook instead of goreleaser-pro's `msi` pipe, so no `GORELEASER_KEY`; `goreleaser-check.yml` runs a secret-free snapshot on pull requests and checks the MSI is in `checksums.txt`. rc.1 to rc.3 failed or were broken (see "Releases" above); rc.4 is the first good one, and the tag trigger in `release.yml` is on again. | merged — PR #43 (`c3f6f65`), #44; REL.1 merged — PR #64, #65 |
 | DB.1 goose migrations | `cmd/migrate` and `internal/migrations` (goose, embedded SQL, no CGO): baseline per schema, row-based run lock (not `GET_LOCK`, which is node-local on Galera), `up` and `check`; GORM `AutoMigrate` removed from `internal/pxc` and saasapi; services check the schema version at startup. `saas` migrations 00001–00005 and `farmer` 00001 are on `main`. | merged — PR #46 (`1e56315`) |
 | DB.2 Migration hook Job | `db-migrate-job.yaml` replaces `db-bootstrap-job.yaml`: one pod, `pre-upgrade`/`pre-rollback`, `post-install` with the bundled PXC; `imas-migrate` image shipped; chart tests extended | merged — PR #48 (`691a1bc`) |
 | FU.0 Signed manifest | URL-free manifest (`imas-fleet-manifest-v1|version|os|arch|file_name|checksum_sha256|min_sprout_version`) signed with the Transit key, verified against a keyring; `selfupdate` and `sprout_action` reworked. FLAG FOR SECURITY REVIEW | merged — PR #45 (`c5ecebe`) |

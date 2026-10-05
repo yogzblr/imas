@@ -1,10 +1,13 @@
 name: Release
 
-# Manual-only for now. It needs GPG_PRIVATE_KEY/GPG_PASSPHRASE (repo or
+# Runs on every pushed vX.Y.Z tag, and by hand (workflow_dispatch, Use
+# workflow from: the tag). It needs GPG_PRIVATE_KEY/GPG_PASSPHRASE (repo or
 # "goreleaser" environment secrets; the "Check release secrets" step fails
-# fast, naming whatever is missing). They were set on 2026-10-03, but the tags
-# trigger below stays off until the first release has been run by hand and
-# checked (docs/RELEASING.md, "First release checklist"); re-enable it then.
+# fast, naming whatever is missing). The tag trigger was kept off until a
+# release had been run by hand and checked: v0.1.0-rc.4 (2026-10-05) was the
+# first one whose packages were right (docs/RELEASING.md, "First release
+# checklist"), so it is on now. Creating a release in the GitHub UI pushes a
+# tag too, so that starts this workflow as well.
 # It runs GoReleaser OSS (MIT): no licence key is needed; the Windows MSI
 # comes from a build hook (packaging/windows/build-msi.sh), not
 # goreleaser-pro's msi pipe.
@@ -22,8 +25,8 @@ name: Release
 # packages and then the Helm charts to Buildkite: see publish-packages.yml.
 on:
   workflow_dispatch:
-  # push:
-  #   tags: ["v*"]
+  push:
+    tags: ["v*"]
 
 permissions:
   contents: write
