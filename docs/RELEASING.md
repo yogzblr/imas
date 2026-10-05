@@ -1,10 +1,18 @@
 # Releasing imas
 
-> **Status (2026-10-03): this flow has never been run.** No tag or release
-> exists and neither workflow has had a run. Expect the first real release to
-> need fixes: follow the [First release checklist](#first-release-checklist).
-> The secrets and variable it needs are listed under
-> [Settings](#settings). Start with a pre-release tag such as `v0.1.0-rc.1`.
+> **Status (2026-10-05): the flow has been run to the end.** `v0.1.0-rc.1`
+> to `-rc.3` failed or shipped broken packages and stay as they are (a tag
+> never moves). **`v0.1.0-rc.3`'s deb, rpm and apk packages are broken** (a
+> versioned binary name the units don't match, and no config, signing keys
+> or state directories): do not install them. **`v0.1.0-rc.4` is the first
+> usable pre-release**: its packages passed `packaging/check-package-contents.sh`,
+> installed from the `imasdeb` registry on Ubuntu (WSL2) and the service
+> started. The `imas-sprout` MSI, the rpm and apk installs and enrolment
+> against a backend have not been tried. Keep following the
+> [First release checklist](#first-release-checklist) for the next tag. The
+> secrets and variable it needs are listed under
+> [Settings](#settings). Use a pre-release tag such as `v0.1.0-rc.5` for
+> anything that is not final.
 > The workflows use GoReleaser OSS (MIT), so no GoReleaser licence key is
 > needed; the Windows MSI is built by `packaging/windows/build-msi.sh`
 > (msitools' `wixl`) as a build hook (brief REL.1). Nothing has installed
@@ -203,9 +211,10 @@ step's result differs from "look for", stop and fix by PR before going on.
     *Look for:* the packages install and the services start; the farmer
     chart's `files/sprout-release.json` names `v0.1.0-rc.1`. Then run the
     Terraform UAT gate against this tag (step 6 of [Steps](#steps)).
-11. **After it went through:** re-enable the `push: tags` trigger in
-    `release.yml` by PR, record the run in `docs/BUILD-STATUS.md`, and
-    release `v0.1.0` the same way. It can be tagged on the rc's commit:
+11. **After it went through:** the `push: tags` trigger in `release.yml` is
+    on since 2026-10-05 (after `v0.1.0-rc.4`), so pushing a `v*` tag, or
+    creating a release in the GitHub UI, starts a release run by itself. The
+    run is recorded in `docs/BUILD-STATUS.md`. Release `v0.1.0` the same way. It can be tagged on the rc's commit:
     the version comes from the tag the run is on, not the first tag at
     that commit. The final MSI has the same ProductVersion (`0.1.0`) as the
     rc's, which the MSI upgrades in place (`AllowSameVersionUpgrades`).
