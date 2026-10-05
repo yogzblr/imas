@@ -29,20 +29,20 @@ All imas releases are cryptographically signed with GPG to ensure authenticity a
 
 ### GPG Key Information
 
-- **Key ID**: `33DCE4DD`
-- **Fingerprint**: `3F62 7C68 8B72 ACC6 BC4C  A9A7 1E0B 7A1D 33DC E4DD`
-- **Owner**: imas signing key <security@imas.dev>
+- **Key ID**: `CCEBCDB641F041EB` (short form `41F041EB`)
+- **Fingerprint**: `84F4 5E90 19CF D4B2 3D38  142B CCEB CDB6 41F0 41EB`
+- **Type**: RSA 4096, created 2026-10-03, no expiry
+- **Owner**: Yogesh Gundurao <yogesh.gundurao@gmail.com>
 
 ### Importing the Public Key
 
+The key is not published on a key server. Import it from this repository:
+
 ```bash
-# Method 1: From key servers
-gpg --keyserver keyserver.ubuntu.com --recv-keys 33DCE4DD
+# Method 1: download and import
+curl -s https://raw.githubusercontent.com/yogzblr/imas/main/gpg-public-key.asc | gpg --import
 
-# Method 2: From this repository
-curl -s https://raw.githubusercontent.com/yogzblr/imas/master/gpg-public-key.asc | gpg --import
-
-# Method 3: Manual import
+# Method 2: from a clone
 gpg --import gpg-public-key.asc
 ```
 
@@ -84,13 +84,13 @@ cosign verify ghcr.io/yogzblr/imas-farmer:1.0.0 \
 After importing the key, verify the fingerprint matches:
 
 ```bash
-gpg --fingerprint 33DCE4DD
+gpg --fingerprint 84F45E9019CFD4B23D38142BCCEBCDB641F041EB
 ```
 
 Expected output:
 ```
-pub   ed25519 2025-06-08 [SC]
-      3F62 7C68 8B72 ACC6 BC4C  A9A7 1E0B 7A1D 33DC E4DD
-uid           imas signing key <security@imas.dev>
-sub   cv25519 2025-06-08 [E]
+pub   rsa4096 2026-10-03 [SC]
+      84F4 5E90 19CF D4B2 3D38  142B CCEB CDB6 41F0 41EB
+uid           Yogesh Gundurao <yogesh.gundurao@gmail.com>
+sub   rsa4096 2026-10-03 [E]
 ```
