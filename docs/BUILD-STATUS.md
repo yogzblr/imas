@@ -680,7 +680,7 @@ row starts with its brief ID ("docs" for a docs-only PR).
 | #115 | 10-05 | **docs**: Release GPG public key committed; `SECURITY.md` fingerprint fixed | Validation, 2026-10-05 (first release prerequisite 1) |
 | #116 | 10-05 | **docs**: Plan §4g: the FIX.5 brief (release blockers from the 2026-10-05 re-validation) | this ledger |
 | #117 | 10-05 | **FIX.5**: Helm lint with CI values and Chart.lock repositories in the publish workflow; chart tests required to run in CI (`IMAS_REQUIRE_HELM=1`); keyless sprout items recorded as `sprout_reenroll_required`; recipe credential check probes the platform recipe prefix and the job bucket; security review and this file's marks updated. Flagged for security review | Validation, 2026-10-05; Open items 4, 10 |
-| #118 | 10-05 | **FIX.1** follow-up: `cmd.run` errors carried as text, so the CLI shows farmer's refusal; `imas cmd run` exits 1 when the command failed on any target | Open item 10 (not yet updated there) |
+| #118 | 10-05 | **FIX.1** follow-up: `cmd.run` errors carried as text, so the CLI shows farmer's refusal; `imas cmd run` exits 1 when the command failed on any target | this ledger |
 | #120 | open | **FIX.5 follow-up**: saasapi refuses to start without `SAASAPI_RECIPES_JOB_BUCKET` while `SAASAPI_RECIPES_CREDENTIAL_CHECK` is on (owner decision: strictly fail closed); chart README and `INSTALL.md` list the new probes and add `helm repo add` before `helm dependency build`. Flagged; ready for review, not merged | Validation, 2026-10-05; Open item 10 |
 
 ## Notes
