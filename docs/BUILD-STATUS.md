@@ -604,9 +604,9 @@ Docs-only PRs in the same window: #68 (this file's RAG summary), #82 (plan
 
 ## Merged pull requests, 2026-09-28 to 2026-10-05
 
-Every PR merged to `main` in this window (#36 to #118; #54 was not merged), so
-this file can be checked against the repository's history, plus #120, still
-open (#119 was closed unmerged and reopened as #120). From #68 on, each
+Every PR merged to `main` in this window (#36 to #120; #54 and #119 were not
+merged, and #119 was reopened as #120), so this file can be checked against
+the repository's history. From #68 on, each
 row starts with its brief ID ("docs" for a docs-only PR).
 
 | PR | Merged | What | Recorded in |
@@ -680,8 +680,8 @@ row starts with its brief ID ("docs" for a docs-only PR).
 | #115 | 10-05 | **docs**: Release GPG public key committed; `SECURITY.md` fingerprint fixed | Validation, 2026-10-05 (first release prerequisite 1) |
 | #116 | 10-05 | **docs**: Plan §4g: the FIX.5 brief (release blockers from the 2026-10-05 re-validation) | this ledger |
 | #117 | 10-05 | **FIX.5**: Helm lint with CI values and Chart.lock repositories in the publish workflow; chart tests required to run in CI (`IMAS_REQUIRE_HELM=1`); keyless sprout items recorded as `sprout_reenroll_required`; recipe credential check probes the platform recipe prefix and the job bucket; security review and this file's marks updated. Flagged for security review | Validation, 2026-10-05; Open items 4, 10 |
-| #118 | 10-05 | **FIX.1** follow-up: `cmd.run` errors carried as text, so the CLI shows farmer's refusal; `imas cmd run` exits 1 when the command failed on any target | this ledger |
-| #120 | open | **FIX.5 follow-up**: saasapi refuses to start without `SAASAPI_RECIPES_JOB_BUCKET` while `SAASAPI_RECIPES_CREDENTIAL_CHECK` is on (owner decision: strictly fail closed); chart README and `INSTALL.md` list the new probes and add `helm repo add` before `helm dependency build`. Flagged; ready for review, not merged | Validation, 2026-10-05; Open item 10 |
+| #118 | 10-05 | **FIX.1** follow-up: `cmd.run` errors carried as text, so the CLI shows farmer's refusal; `imas cmd run` exits 1 when the command failed on any target. Flagged for security review | Open item 10 |
+| #120 | 10-05 | **FIX.5 follow-up**: saasapi refuses to start without `SAASAPI_RECIPES_JOB_BUCKET` while `SAASAPI_RECIPES_CREDENTIAL_CHECK` is on (owner decision: strictly fail closed); chart README and `INSTALL.md` list the new probes and add `helm repo add` before `helm dependency build`. Flagged for security review | Validation, 2026-10-05; Open item 10 |
 
 ## Notes
 
@@ -1097,7 +1097,7 @@ PR #112).
       a retired host's unexpired gateway JWT still passes `jwt_authn` and
       costs farmer the lookup before the 403 (`gatewayjwtttl` stays 24h).
     - **Sealed payloads after FIX.1 (SEC.3b, PR #87; SEC.7a, PR #107;
-      SEC.7b, PR #108; SEC.7d, PR #110; FIX.1, PR #113):** sealed only
+      SEC.7b, PR #108; SEC.7d, PR #110; FIX.1, PRs #113 and #118):** sealed only
       everywhere farmer talks to a sprout's commands. Farmer sends nothing
       to a sprout with no box key on record and fails `cmd.run`, the cook
       dispatch and the nudge with `sprout_reenroll_required` (saasapi stores
@@ -1122,7 +1122,27 @@ PR #112).
       bus: the join event on `imas.sprouts.announce.<id>` (farmer only logs
       it), and `jobs.cancel`'s `{"jid"}` on `imas.sprouts.<id>.cancel`,
       which no sprout subscribes to, so cancel does nothing on the sprout
-      although farmer answers `cancel request published`. Deferred by FIX.1:
+      although farmer answers `cancel request published`. Since PR #118
+      (FIX.1 follow-up, flagged for security review), `apitypes.CmdRun` and
+      `CmdCook` carry their errors as message text, or `null` for none
+      (`internal/api/types/wireerror.go`). So `imas cmd run` shows farmer's
+      `[sprout_reenroll_required]` refusal instead of `returned an invalid
+      message!`, and farmer decodes a sprout's sealed reply that carries an
+      error. A sprout-side error now travels as text inside the sealed
+      `cmd.run` reply. On `internal.sprout.action` it reaches farmer's log
+      and `auditTenantAction`, and it can name the command the caller sent.
+      The object form older farmers and sprouts wrote decodes as an error
+      whose message was lost. `imas cmd run` prints every target's result,
+      then exits 1 if the command failed on any target (a non-zero exit
+      code, an error from farmer or the sprout, or a result it can't read).
+      Left by #118: an older CLI against a new farmer still prints
+      `invalid message` for a result with an error (it never could decode
+      one); `apitypes.PingPong.Error` and `Inline.Error` still hold an
+      `error`, and the CLI sets `Inline.Error` in `util.WriteJSONErr`, so
+      `--output json` errors from `imas keys` print `"error":{}` (checked
+      2026-10-05; #118 said nothing sets them); other multi-target commands
+      such as `imas cook` keep their exit status; open question whether a
+      remote failure should exit 2 rather than 1. Deferred by FIX.1:
       a multi-sprout CLI cook only logs a keyless sprout's refusal on farmer
       (the CLI times out for it); `cmd.RegisterNatsConn` and its
       unused connection, and the routeless `HTestPing` handler, remain;
@@ -1197,7 +1217,7 @@ PR #112).
       With the check on, the job bucket is required: the chart refuses to
       render without `objectStore.jobBucket` (FIX.5, PR #117), and the
       saasapi binary refuses to start without `SAASAPI_RECIPES_JOB_BUCKET`
-      instead of warning that it didn't probe it (PR #120, not merged; owner
+      instead of warning that it didn't probe it (PR #120, merged; owner
       decision).
     - **saasapi NetworkPolicy and PDB (OPS.1, PR #105):** nothing stops
       `saasapi.pdb.maxUnavailable` being 0 (blocks every drain) or at least
@@ -1445,7 +1465,7 @@ test skipped; the Test job now installs the same Helm, builds both charts'
 dependencies and sets `IMAS_REQUIRE_HELM=1`, which turns every chart-test
 skip into a failure.
 
-**FIX.5 follow-up (2026-10-05, PR #120, ready for review, not merged).**
+**FIX.5 follow-up (2026-10-05, merged, PR #120; flagged for security review).**
 The job bucket is now required while the recipe credential check is on.
 FIX.5 (PR #117) had left `SAASAPI_RECIPES_JOB_BUCKET` optional in the binary: unset,
 saasapi probed the recipe bucket only and logged a warning. The owner chose
