@@ -604,7 +604,7 @@ Docs-only PRs in the same window: #68 (this file's RAG summary), #82 (plan
 
 ## Merged pull requests, 2026-09-28 to 2026-10-05
 
-Every PR merged to `main` in this window (#36 to #120; #54 and #119 were not
+Every PR merged to `main` in this window (#36 to #122; #54 and #119 were not
 merged, and #119 was reopened as #120), so this file can be checked against
 the repository's history. From #68 on, each
 row starts with its brief ID ("docs" for a docs-only PR).
@@ -682,6 +682,8 @@ row starts with its brief ID ("docs" for a docs-only PR).
 | #117 | 10-05 | **FIX.5**: Helm lint with CI values and Chart.lock repositories in the publish workflow; chart tests required to run in CI (`IMAS_REQUIRE_HELM=1`); keyless sprout items recorded as `sprout_reenroll_required`; recipe credential check probes the platform recipe prefix and the job bucket; security review and this file's marks updated. Flagged for security review | Validation, 2026-10-05; Open items 4, 10 |
 | #118 | 10-05 | **FIX.1** follow-up: `cmd.run` errors carried as text, so the CLI shows farmer's refusal; `imas cmd run` exits 1 when the command failed on any target. Flagged for security review | Open item 10 |
 | #120 | 10-05 | **FIX.5 follow-up**: saasapi refuses to start without `SAASAPI_RECIPES_JOB_BUCKET` while `SAASAPI_RECIPES_CREDENTIAL_CHECK` is on (owner decision: strictly fail closed); chart README and `INSTALL.md` list the new probes and add `helm repo add` before `helm dependency build`. Flagged for security review | Validation, 2026-10-05; Open item 10 |
+| #121 | 10-05 | **FIX.1** follow-up, docs: this file records #118's `cmd.run` error fix and what it left, including `Inline.Error` printing `"error":{}` in the CLI's `--output json` errors; #120 marked merged | Open item 10 |
+| #122 | 10-05 | **FIX.1** follow-up: `apitypes.Inline` and `PingPong` errors carried as text, as #118 did for `CmdRun`, so the CLI's `--output json` errors (e.g. `imas keys`) print `"error":"<text>"` instead of `"error":{}` | Open item 10 |
 
 ## Notes
 
@@ -1097,7 +1099,7 @@ PR #112).
       a retired host's unexpired gateway JWT still passes `jwt_authn` and
       costs farmer the lookup before the 403 (`gatewayjwtttl` stays 24h).
     - **Sealed payloads after FIX.1 (SEC.3b, PR #87; SEC.7a, PR #107;
-      SEC.7b, PR #108; SEC.7d, PR #110; FIX.1, PRs #113 and #118):** sealed only
+      SEC.7b, PR #108; SEC.7d, PR #110; FIX.1, PRs #113, #118 and #122):** sealed only
       everywhere farmer talks to a sprout's commands. Farmer sends nothing
       to a sprout with no box key on record and fails `cmd.run`, the cook
       dispatch and the nudge with `sprout_reenroll_required` (saasapi stores
@@ -1137,21 +1139,20 @@ PR #112).
       code, an error from farmer or the sprout, or a result it can't read).
       Left by #118: an older CLI against a new farmer still prints
       `invalid message` for a result with an error (it never could decode
-      one); `apitypes.PingPong.Error` and `Inline.Error` still hold an
-      `error`, and the CLI sets `Inline.Error` in `util.WriteJSONErr`, so
-      `--output json` errors from `imas keys` print `"error":{}` (checked
-      2026-10-05; #118 said nothing sets them); other multi-target commands
+      one); other multi-target commands
       such as `imas cook` keep their exit status; open question whether a
-      remote failure should exit 2 rather than 1. Deferred by FIX.1:
+      remote failure should exit 2 rather than 1. #118 also left
+      `apitypes.PingPong.Error` and `Inline.Error` holding an `error`
+      encoding/json wrote as `{}`; #118 said nothing sets them, but the CLI
+      sets `Inline.Error` in `util.WriteJSONErr`, so `--output json` errors
+      from `imas keys` printed `"error":{}`. Closed by PR #122: both now
+      travel as their message text (`"error":"<text>"`), with the same
+      legacy-object decoding. Deferred by FIX.1:
       a multi-sprout CLI cook only logs a keyless sprout's refusal on farmer
       (the CLI times out for it); `cmd.RegisterNatsConn` and its
       unused connection, and the routeless `HTestPing` handler, remain;
       `docs/design/imas-sprout-orchestration.md` ("As built: cook's wire
-      format") still describes the removed plaintext fallback. Left by
-      PR #118 and closed by PR #122: `apitypes.Inline.Error` and
-      `PingPong.Error` now travel as their message text too, so the CLI's
-      `--output json` errors (e.g. `imas keys`) print `"error":"<text>"`
-      instead of `"error":{}`. Open from
+      format") still describes the removed plaintext fallback. Open from
       SEC.7b: the exported test seam `pki.UseInMemoryJoinToken`, and
       whether the proof should also carry the binding ID. Open from SEC.7d:
       whether an out-of-range `stagedrecipeclockskew` should stop the sprout
