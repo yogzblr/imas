@@ -39,14 +39,41 @@ the bus certificate must carry {{ default (include "imas-farmer.busFQDN" .) .Val
 Before farmer can start, Secret "{{ .Values.natsSeeds.secretName }}" must exist in {{ .Release.Namespace }}
 with the same seeds the nats chart mounts. This chart never generates one.
 {{- if .Values.saasapi.enabled }}
+{{- $eso := and .Values.externalSecrets.enabled .Values.externalSecrets.saasapi.enabled }}
 
 saasapi starts once Secret "{{ .Values.saasapi.natsCredentials.secretName }}" exists
-({{ if .Values.externalSecrets.enabled }}ESO syncs it{{ else }}externalSecrets.enabled=false: create it by hand{{ end }} from its seed and the JWT the publish Job
+({{ if $eso }}ESO syncs it{{ else }}{{ if .Values.externalSecrets.enabled }}externalSecrets.saasapi.enabled=false{{ else }}externalSecrets.enabled=false{{ end }}: create it by hand{{ end }} from its seed and the JWT the publish Job
 wrote to {{ .Values.credentialPublisher.kvMount }}/{{ .Values.credentialPublisher.kvPath }}, field "jwt"),
-and Secret "{{ .Values.saasapi.controlPlaneBox.secretName }}" exists ({{ if .Values.externalSecrets.enabled }}ESO syncs it{{ else }}create it by hand{{ end }} from
+and Secret "{{ .Values.saasapi.controlPlaneBox.secretName }}" exists ({{ if $eso }}ESO syncs it{{ else }}create it by hand{{ end }} from
 {{ .Values.farmer.openbao.tenantBox.kvMount }}/{{ .Values.farmer.openbao.tenantBox.kvPath }}/saasapi-box field "priv" and .../controlplane-pub field "platform_pub",
 which the control-plane keygen Job writes{{ if not .Values.controlPlaneBoxKeys.enabled }}: controlPlaneBoxKeys.enabled=false, so create the keys some other way first{{ end }}).
 Until both exist its pods wait to start.
+{{- if not $eso }}
+
+WARNING: nothing in this release creates Secrets "{{ .Values.saasapi.natsCredentials.secretName }}" and "{{ .Values.saasapi.controlPlaneBox.secretName }}"
+(External Secrets is off). saasapi's {{ .Values.saasapi.replicaCount }} pod(s) will sit in ContainerCreating, with
+CreateContainerConfigError or FailedMount events, until you create both by hand: the
+commands are in the chart README, "Eval install". Not a crash and not a failed install; a
+helm install --wait would time out on it.
+{{- end }}
+{{- if and .Values.saasapi.recipes.enabled (not .Values.saasapi.recipes.credentialCheck) }}
+
+WARNING: saasapi.recipes.credentialCheck=false. Nothing checks that saasapi's recipe credential
+(Secret "{{ .Values.saasapi.recipes.credentialsSecret }}") is limited to tenants/*/recipes/*: if it can write sprouts/ or
+platform recipes, a compromised saasapi can change what every sprout cooks. Limit it with
+files/objectstore-policies/ and turn the check back on.
+{{- end }}
+{{- end }}
+{{- if eq (toString .Values.farmer.bootstrapAdmin.boxpub) "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" }}
+
+WARNING: farmer.bootstrapAdmin is the ci/ example's placeholder (an all-zero box key, which
+farmer refuses to import). Nobody can use the imas CLI until you set the admin's own
+pubkey and boxpub (imas auth pubkey, imas auth keygen) and upgrade.
+{{- end }}
+{{- if .Values.farmer.bootstrapAdmin.skip }}
+
+farmer.bootstrapAdmin.skip=true: no bootstrap admin is rendered. The imas CLI works only if
+farmer's database already holds an admin; the CLI can't add the first one over the bus.
 {{- end }}
 
 {{- $relFile := include "imas-farmer.sproutRelease.file" . }}

@@ -18,7 +18,7 @@ func clearRecipeEnv(t *testing.T) {
 		"SAASAPI_RECIPES_S3_ENDPOINT", "SAASAPI_RECIPES_S3_BUCKET", "SAASAPI_RECIPES_S3_ACCESS_KEY_ID",
 		"SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY_FILE", "SAASAPI_RECIPES_S3_USE_SSL", "SAASAPI_RECIPES_READ_ROLE",
 		"SAASAPI_RECIPES_WRITE_ROLE", "SAASAPI_RECIPES_MAX_COUNT", "SAASAPI_RECIPES_MAX_TOTAL_BYTES",
-		"SAASAPI_RECIPES_WRITE_RATE_LIMIT", "SAASAPI_RECIPES_WRITE_RATE_BURST",
+		"SAASAPI_RECIPES_WRITE_RATE_LIMIT", "SAASAPI_RECIPES_WRITE_RATE_BURST", "SAASAPI_RECIPES_CREDENTIAL_CHECK",
 		"IMAS_RECIPE_MAX_SOURCE_BYTES", "IMAS_RECIPE_MAX_RENDERED_BYTES", "IMAS_RECIPE_MAX_VALUE_BYTES",
 		"IMAS_RECIPE_RENDER_TIMEOUT", "IMAS_RECIPE_MAX_RANGE_ITERATIONS",
 	} {
@@ -34,7 +34,7 @@ func TestLoadRecipeSettingsDefaults(t *testing.T) {
 	}
 	if s.Endpoint != "" || !s.UseSSL || s.ReadRole != "imas-recipes-read" || s.WriteRole != "imas-recipes-write" ||
 		s.MaxCount != 500 || s.MaxTotalBytes != 20<<20 || s.WriteRateLimit != 1 || s.WriteRateBurst != 10 ||
-		s.RenderLimits != (cook.RenderLimits{}) {
+		s.RenderLimits != (cook.RenderLimits{}) || !s.CredentialCheck {
 		t.Fatalf("defaults %+v", s)
 	}
 }
@@ -47,6 +47,7 @@ func TestLoadRecipeSettingsFromEnv(t *testing.T) {
 		"SAASAPI_RECIPES_S3_ACCESS_KEY_ID":          "saasapi",
 		"SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY_FILE": "/var/run/secrets/key",
 		"SAASAPI_RECIPES_S3_USE_SSL":                "false",
+		"SAASAPI_RECIPES_CREDENTIAL_CHECK":          "false",
 		"SAASAPI_RECIPES_READ_ROLE":                 "r",
 		"SAASAPI_RECIPES_WRITE_ROLE":                "w",
 		"SAASAPI_RECIPES_MAX_COUNT":                 "10",
@@ -63,7 +64,7 @@ func TestLoadRecipeSettingsFromEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := RecipeSettings{Endpoint: "minio:9000", Bucket: "recipes", AccessKeyID: "saasapi", SecretAccessKeyFile: "/var/run/secrets/key",
-		ReadRole: "r", WriteRole: "w", MaxCount: 10, MaxTotalBytes: 1000, WriteRateLimit: 0.5, WriteRateBurst: 3,
+		CredentialCheck: false, ReadRole: "r", WriteRole: "w", MaxCount: 10, MaxTotalBytes: 1000, WriteRateLimit: 0.5, WriteRateBurst: 3,
 		RenderLimits: cook.RenderLimits{MaxSourceBytes: 1024, RenderTimeout: 500 * time.Millisecond}}
 	if s != want {
 		t.Fatalf("got %+v\nwant %+v", s, want)
@@ -73,6 +74,7 @@ func TestLoadRecipeSettingsFromEnv(t *testing.T) {
 func TestLoadRecipeSettingsRejects(t *testing.T) {
 	for _, tc := range []struct{ env, val, want string }{
 		{"SAASAPI_RECIPES_S3_USE_SSL", "maybe", "SAASAPI_RECIPES_S3_USE_SSL"},
+		{"SAASAPI_RECIPES_CREDENTIAL_CHECK", "yes please", "SAASAPI_RECIPES_CREDENTIAL_CHECK"},
 		{"SAASAPI_RECIPES_MAX_COUNT", "0", "SAASAPI_RECIPES_MAX_COUNT"},
 		{"SAASAPI_RECIPES_MAX_COUNT", "100001", "SAASAPI_RECIPES_MAX_COUNT"},
 		{"SAASAPI_RECIPES_MAX_TOTAL_BYTES", "-1", "SAASAPI_RECIPES_MAX_TOTAL_BYTES"},
@@ -132,6 +134,10 @@ func TestConfigureRecipes(t *testing.T) {
 	}
 	s := DefaultRecipeSettings()
 	s.Endpoint, s.Bucket, s.AccessKeyID, s.SecretAccessKeyFile = "minio:9000", "recipes", "saasapi", keyFile
+	// No store answers at minio:9000: this test is about the key file and
+	// the limits, so the scope check (on by default, covered in
+	// recipes_credcheck_test.go) is off here.
+	s.CredentialCheck = false
 	s.RenderLimits = cook.RenderLimits{MaxSourceBytes: 4096}
 	if err := ConfigureRecipes(s, nil); err != nil {
 		t.Fatal(err)

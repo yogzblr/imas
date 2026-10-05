@@ -375,7 +375,8 @@ for saasapi's egress rule. */}}
 {{- end }}
 
 {{/* The port in objectStore.endpoint (host[:port], no scheme; with none,
-443 under useSSL, else 80), for saasapi's recipe egress rule. */}}
+443 under useSSL, else 80), for farmer's object store egress rule and
+saasapi's recipe egress rule. */}}
 {{- define "imas-farmer.objectStorePort" -}}
 {{- $def := ternary "443" "80" (ne (toString .Values.objectStore.useSSL) "false") -}}
 {{- default $def (regexFind ":[0-9]+$" (toString .Values.objectStore.endpoint) | trimPrefix ":") -}}
@@ -545,6 +546,15 @@ explanation rather than deploying something that silently can't work.
 {{- fail "farmer.adminPubKeys was removed in J.3: every imas CLI request is sealed with the user's CLI box key, so an admin listed by NKey alone can't make a single request. Set farmer.bootstrapAdmin.pubkey and farmer.bootstrapAdmin.boxpub (from the admin's imas auth keygen) instead." -}}
 {{- end -}}
 {{- with .Values.farmer.bootstrapAdmin -}}
+{{- if not (kindIs "bool" (default false .skip)) -}}
+{{- fail (printf "farmer.bootstrapAdmin.skip must be true or false, got %v" .skip) -}}
+{{- end -}}
+{{- if and .skip (or .pubkey .boxpub .username) -}}
+{{- fail "farmer.bootstrapAdmin.skip=true and farmer.bootstrapAdmin.pubkey/boxpub/username are both set: choose one. Set the admin's keys for a first install; skip only when an admin already exists in farmer's database." -}}
+{{- end -}}
+{{- if and (not .skip) (not (or .pubkey .boxpub .username)) -}}
+{{- fail "farmer.bootstrapAdmin.pubkey and farmer.bootstrapAdmin.boxpub are required: since J.3 the imas CLI can't add a user over the bus, so an install without a bootstrap admin has no one who can make a single request. Run imas auth keygen on the admin's machine and set both values it prints (see README.md, \"Bootstrap admin\"). If farmer's database already has an admin (an upgrade, or a reinstall against the same database), set farmer.bootstrapAdmin.skip=true instead." -}}
+{{- end -}}
 {{- if or .pubkey .boxpub .username -}}
 {{- if not (regexMatch "^A[A-Z2-7]{55}$" (toString .pubkey)) -}}
 {{- fail (printf "farmer.bootstrapAdmin.pubkey %q is not an NKey user public key (imas auth pubkey prints it: A and 55 more base32 characters)" (toString .pubkey)) -}}
@@ -722,6 +732,9 @@ explanation rather than deploying something that silently can't work.
 {{- $b := $r.writeRateLimit.burst -}}
 {{- if or (kindIs "invalid" $b) (lt (float64 $b) 1.0) (ne (float64 $b) (float64 (int $b))) -}}
 {{- fail (printf "saasapi.recipes.writeRateLimit.burst must be a whole number >= 1, got %v" $b) -}}
+{{- end -}}
+{{- if not (kindIs "bool" $r.credentialCheck) -}}
+{{- fail (printf "saasapi.recipes.credentialCheck must be true or false, got %v" $r.credentialCheck) -}}
 {{- end -}}
 {{- if $r.enabled -}}
 {{- if not $r.credentialsSecret -}}

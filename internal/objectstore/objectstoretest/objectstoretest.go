@@ -11,7 +11,8 @@
 // ListObjectsV2 with start-after, GetBucketLocation, aws-chunked
 // streaming-signature bodies, and PUT's If-Match / If-None-Match
 // conditions against an MD5 ETag) for minio-go's client to consider it a
-// working single-node endpoint.
+// working single-node endpoint. Server.Deny adds a per-request access
+// policy (403 AccessDenied), for code that probes what a credential may do.
 package objectstoretest
 
 import (
@@ -45,6 +46,10 @@ type fakeS3 struct {
 	// beforePut, if set, runs (with mu held) before each PUT is applied;
 	// see Server.BeforePut.
 	beforePut func(key string)
+
+	// deny, if set, decides which object requests answer AccessDenied;
+	// see Server.Deny.
+	deny func(op, key string) bool
 }
 
 // object is one stored object: its content, ETag (the hex MD5 of the
@@ -118,6 +123,18 @@ func (s *Server) BeforePut(fn func(key string)) {
 	s.f.mu.Lock()
 	defer s.f.mu.Unlock()
 	s.f.beforePut = fn
+}
+
+// Deny installs an access policy: every object request (op "GET",
+// "HEAD", "PUT" or "DELETE", with its key) and every listing (op "LIST",
+// with its prefix) for which fn returns true answers 403 AccessDenied, as
+// S3 does for a credential whose policy doesn't allow it. Bucket requests
+// (the existence check, the location lookup) are never denied. Nil removes
+// it. fn runs with the server's lock held.
+func (s *Server) Deny(fn func(op, key string) bool) {
+	s.f.mu.Lock()
+	defer s.f.mu.Unlock()
+	s.f.deny = fn
 }
 
 // Set stores content at key directly, as another writer would. It must
@@ -246,6 +263,24 @@ func (f *fakeS3) handle(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 		}
 		return
+	}
+
+	if f.deny != nil {
+		op, k := r.Method, key
+		if r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2" {
+			op, k = "LIST", r.URL.Query().Get("prefix")
+		}
+		_, isLocation := r.URL.Query()["location"]
+		if !isLocation && f.deny(op, k) {
+			io.Copy(io.Discard, r.Body)
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusForbidden)
+			if r.Method != http.MethodHead {
+				w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>` +
+					`<Error><Code>AccessDenied</Code><Message>Access Denied.</Message></Error>`))
+			}
+			return
+		}
 	}
 
 	switch r.Method {

@@ -230,11 +230,22 @@ farmer:
   # sees this user with no key history; from then on the database is
   # authoritative (rotations, admin resets), and changing boxpub here does
   # nothing. Further users are added by this admin with imas users add.
-  # Leave pubkey empty to render no users section.
+  #
+  # Required (FIX.3): the CLI can't add a user over the bus, so an install
+  # with no bootstrap admin has no one who can make a request, and the
+  # render fails if pubkey and boxpub are empty. Both keys are made
+  # offline, before the install (imas auth privkey, imas auth keygen; see
+  # docs/INSTALL.md, "The imas CLI").
+  #   skip:     true renders no users section and silences that check.
+  #             Only when farmer's database already holds an admin: an
+  #             upgrade of a release installed without this value, or a
+  #             reinstall against the same database. Mutually exclusive
+  #             with pubkey, boxpub and username.
   bootstrapAdmin:
     pubkey: ""
     username: ""
     boxpub: ""
+    skip: false
   # Removed in J.3: an admin with no CLI box key can't make a single
   # request. Rendering fails if it is set; use bootstrapAdmin.
   adminPubKeys: []
@@ -545,6 +556,16 @@ saasapi:
     writeRateLimit:
       perSecond: 1
       burst: 10
+    # SAASAPI_RECIPES_CREDENTIAL_CHECK (FIX.3): at startup saasapi asks the
+    # object store whether its recipe credential can create an object
+    # outside tenants/ or under sprouts/, read a key under sprouts/ or list
+    # sprouts/, and refuses to start if any of it is allowed, or if the
+    # store gives no answer it can classify within about 30 seconds (fail
+    # closed: only AccessDenied counts as denied). This is what makes the
+    # policy in files/objectstore-policies/ a checked limit rather than
+    # documentation. Turn it off only for a store whose answers it can't
+    # classify, and limit the credential some other way; NOTES warns.
+    credentialCheck: true
   # deploy/saasapi/values.rate-limit.yaml. null emits no env var (the
   # compiled-in default).
   enrollmentKeys:
@@ -800,11 +821,15 @@ networkPolicy:
     pxc: []
     valkey: []
     valkeyPort: 6379
-    # saasapi's recipe writes (saasapi.recipes), on objectStore.endpoint's
-    # port. Rendered only with saasapi.recipes.enabled, and independent of
-    # saasapiExtraEgress, so narrowing that to Keycloak keeps uploads
-    # working. Empty: any destination, on that port only. farmer's object
-    # store egress is still networkPolicy.farmerExtraEgress.
+    # The object store at objectStore.endpoint, on its port (443 or 80
+    # with no port, per objectStore.useSSL), for both workloads: farmer
+    # (recipes, staged recipes, job logs) whenever objectStore.endpoint is
+    # set, and saasapi (recipe writes) with saasapi.recipes.enabled. Each
+    # is a rule of its own, independent of farmerExtraEgress and
+    # saasapiExtraEgress, so narrowing those keeps object storage working.
+    # Empty: any destination, on that port only. Set it to the object
+    # store's peers (namespaceSelector/podSelector, or ipBlock) to narrow
+    # both rules.
     objectStore: []
   # saasapi's listener. Empty: anyone, on that port only.
   saasapiIngress:
@@ -818,8 +843,9 @@ networkPolicy:
   # port. Empty: any destination, on that port only.
   fleetreleaser:
     to: []
-  # Extra egress rules. saasapi's default allows HTTPS anywhere for the
-  # Keycloak JWKS fetch; narrow it to your Keycloak.
+  # Extra egress rules, added to the ones above. saasapi's default allows
+  # HTTPS anywhere for the Keycloak JWKS fetch; narrow it to your Keycloak.
+  # farmer's object store needs nothing here (external.objectStore).
   farmerExtraEgress: []
   saasapiExtraEgress:
     - ports:

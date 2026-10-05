@@ -57,7 +57,7 @@ released.
 | 10 | NATS response under 300 ms | **Amber** | A latency measurement. The design removes the slow probe loop but nothing has been timed. |
 | 11 | Recipe download uses the same JWT | **Green** | |
 | 12 | Envoy with JWT validation | **Green** | |
-| 13 | Backend on Kubernetes | **Amber** | Install the charts on a real cluster (UAT gate). No Terraform exists. |
+| 13 | Backend on Kubernetes | **Amber** | Install the charts on a real cluster (UAT gate). No Terraform exists. FIX.3 (ready for review) fixes three things a fresh install would have hit: no farmer object store egress, no required bootstrap admin, and an unchecked recipe credential. |
 | 14 | Payload encryption | **Red** | Finish the control plane (Open item 11) and get J.5 reviewed. `shell.*` is sealed by J.5 (Open item 2, in review), for sprouts on the new build: a compromised bus can no longer open a shell on an upgraded Unix sprout. Refreshing as a sprout is closed by J.2 (sealed refresh); minting CLI tokens is closed by J.3 (bearer tokens removed, the CLI API sealed); forging `internal.*` is closed by J.4 (sealed SaaS API ↔ farmer, in review; its Helm wiring is in a follow-up PR, also in review). A deleted or replaced host's gateway JWT is refused by SEC.7c (security review 2026-10-b B3, in review). |
 | 15 | Key rotation for sprout keys | **Amber** | Reword `requirements.md` to match the built design (the private key is never sent). |
 | 16 | SDB-equivalent secrets | **Green** | |
@@ -95,7 +95,7 @@ released.
 | 7 | SaaS API section 1.7 (API keys, teams, webhooks, billing) | **Red** | Never designed; needs a design pass. |
 | 8 | Docs wording (requirement 15, README embedded bus) | **Amber** | Small docs change. |
 | 9 | Nice-to-haves (Keycloak harness, rotation scheduler, CERT-In/DPDP review) | **Amber** | Unowned. |
-| 10 | Leftovers from PR #62 to #67 (release pipeline, stale diagram, OpenBao client follow-ups) | **Amber** | Fold into one clean-up brief after the first release shows what the pipeline really needs. Add fleetreleaser's check against the tag's signed `checksums.txt` there if wanted (SEC.5 report). REC.1 follow-ups are listed under item 10: audit table, deprovision clean-up, and the role on `cook`. |
+| 10 | Leftovers from PR #62 to #67 (release pipeline, stale diagram, OpenBao client follow-ups) | **Amber** | Fold into one clean-up brief after the first release shows what the pipeline really needs. Add fleetreleaser's check against the tag's signed `checksums.txt` there if wanted (SEC.5 report). REC.1 follow-ups are listed under item 10: audit table, deprovision clean-up, and the role on `cook`. FIX.3 (ready for review) closes three Helm fresh-install gaps: farmer's object store egress, a required bootstrap admin, and saasapi's startup check of its recipe credential's scope; its follow-ups are listed there too. |
 | 11 | Control plane forgeable by a compromised bus (CLI tokens, sprout refresh, `internal.*`) | **Red** | Design written ("Sealing the control plane" in `imas-payload-encryption-design.md`). J.1 (building blocks), J.2 (sealed sprout refresh) and J.3 (sealed CLI API, bearer tokens removed) merged; J.4 (sealed `internal.*`) in review; all flagged for security review. Left: the Helm wiring for J.4's keys (in review in the J.4 follow-up PR; a Helm-installed saasapi won't start until it lands), and "no responders" on `internal.sprout.action`, which a compromised bus can still forge to get an action re-sent (design Open question 10): an accepted, known residual risk (owner decision, 2026-10-04, PR #97). |
 
 ## Requirements traceability
@@ -118,7 +118,7 @@ beyond unit tests (real Envoy, Molecule containers, real OpenBao).
 | 10 | NATS response under 300 ms | **Amber** | **Not validated** | Design removes the synchronous probe loop; no latency measurement has been taken. |
 | 11 | Recipe download uses the same JWT | **Green** | Built, validated | Same gateway JWT, same Envoy gate. |
 | 12 | Envoy with JWT validation in front of NATS | **Green** | Built, validated | `deploy/envoy/envoy.yaml`, `jwt_authn` with remote JWKS; checked against real Envoy. Keycloak JWKS cross-check harness has never been run (nice-to-have). |
-| 13 | Backend on Kubernetes (NATS, Valkey, farmer, Percona) | **Amber** | Built | Helm charts with optional PXC/OpenBao/Valkey subcharts; single migration hook Job; sprout-release hook Job. Chart tests render them; no gate has installed them on a real cluster. **No Terraform exists yet** (see the UAT gate row). |
+| 13 | Backend on Kubernetes (NATS, Valkey, farmer, Percona) | **Amber** | Built | Helm charts with optional PXC/OpenBao/Valkey subcharts; single migration hook Job; sprout-release hook Job. Chart tests render them; no gate has installed them on a real cluster. FIX.3 (ready for review): farmer's NetworkPolicy reaches `objectStore.endpoint` by default, the render refuses an install with no bootstrap admin (or an explicit `farmer.bootstrapAdmin.skip`), saasapi refuses to start with a recipe credential the object store lets outside `tenants/` or onto `sprouts/`, and NOTES warns when saasapi's two Secrets must be created by hand (Open items, 10). **No Terraform exists yet** (see the UAT gate row). |
 | 14 | Payload encryption, key pair per sprout and per tenant | **Red** | **Partly built** | Per-tenant and per-sprout X25519 keys; `cmd.run`, `cook` and box-key submissions are sealed end to end. FIX.1 (FLAG FOR SECURITY REVIEW, ready for review) removed the last plaintext downgrade on `cmd.run` and `cook`: farmer sends nothing to a sprout with no box key on record (`sprout_reenroll_required`), and a sprout with no keys refuses every `cmd.run`, cook dispatch and nudge, plaintext included (`no-keys`). SEC.3a (security review 2026-10 H1, M3, M4, H3's legacy part; FLAG FOR SECURITY REVIEW): every tenant has its own fresh keypair (the shared legacy keypair and its adoption are deleted); deleting or replacing a sprout revokes its NKey on the Account (`pki_revoked_nkeys`) and its box keys, and (SEC.7c, security review 2026-10-b B3; FLAG FOR SECURITY REVIEW, ready for review) farmer refuses its gateway JWT on `/files/` and `/v1/sprout/update-manifest` from the same commit, since a gateway JWT's `sub` must be the NKey accepted for its `(tenant_id, sprout_id)` and not revoked, failing closed on a database error; one active box key per sprout, enforced by the schema (farmer migration 00002); only the active box key can name a new one; sprout IDs have no dots. SEC.3b (security review 2026-10 H3, M2, H4; FLAG FOR SECURITY REVIEW, ready for review): every sealed message names its tenant and recipient key, and the sprout refuses another tenant's message even under a shared key; farmer records a sprout's box key only after the sprout proves it holds the private half; SEC.7b (security review 2026-10-b B2; FLAG FOR SECURITY REVIEW, ready for review): only with the farmer-sealed, single-use, 5-minute `enroll_binding` that the identity-issuing request returned, which names the `sprout_pub` it carried, so a bus-obtained NKey signature can no longer register its own box key for a keyless sprout; an accepted sprout with no active box key is refused and must be deleted and re-enrolled under a new NKey with a fresh join token; the sprout's replay guard survives restarts, and a handled cook job is never cooked again; opened bodies are never logged, and log shipping sends Info and above only (`natslogminlevel`). J.5 (FLAG FOR SECURITY REVIEW, ready for review): **`shell.*` is sealed end to end**, farmer relaying with both legs sealed under per-session ephemeral keys. A sprout refuses any plaintext start, and `sproutPermissions` grants the shell subjects a per-sprout JWT lacked. A sprout still on an older build accepts a plaintext start injected by the bus until it upgrades. SEC.7a (security review 2026-10-b B1, B9; FLAG FOR SECURITY REVIEW, ready for review): **the staged recipe a sprout pulls over `/files/` is sealed** by farmer (`f2s.staged`, bound to tenant, sprout, job ID and dispatch time) and cooked only if it opens under the sprout's own keys and pinned tenant key; no plaintext fallback (a sprout with no box key gets no staged copy), and a copy older than the newest job already handled is refused. Still plaintext inside TLS: cook step events, `test.ping`, facts, `cancel`, the rotate trigger and log shipping. Known residuals (Open item 10): the sprout's `imas.sprouts.announce.<id>` join event, which farmer only logs, and `cancel`, which no sprout handles, so a cancel does nothing on the sprout. |
 | 15 | Key rotation for sprout keys | **Amber** | Built, **deliberately differs from the wording** | The requirement text says the new private key is sent encrypted over NATS. The built design never transmits a private key: the sprout generates the new pair and submits only the public key, farmer-triggered. See `imas-payload-encryption-design.md`. `requirements.md` should be reworded to match (see "Open items"). |
 | 16 | SDB-equivalent secrets in the sprout | **Green** | Built (v1 tier) | `internal/ingredients/sdb`: OpenBao/Vault (hot-reloaded client cert, official OpenBao client since CL.2b, tested against OpenBao 2.4.1 and Vault 1.20.4), Azure Key Vault, AWS Secrets Manager, GCP Secret Manager. CyberArk and Delinea (Tier 2) not built, by design. |
@@ -1038,6 +1038,37 @@ by an external git sync today.
       time); `hostname` in a recipe is now the sprout's reported hostname
       fact (it was farmer's own), kept 10 minutes, then falling back to the
       sprout ID; a deprovisioned tenant's `tenants/<tenant_id>/recipes/` is not deleted.
+    - **Helm fresh-install gaps (FIX.3; FLAG FOR SECURITY REVIEW, ready
+      for review).** Three things made a default `deploy/helm/farmer`
+      install fail or unsafe. (1) Farmer's NetworkPolicy had no object
+      store rule, so recipes, staged recipes and job logs failed unless
+      someone wrote `networkPolicy.farmerExtraEgress`: farmer now gets its
+      own rule on `objectStore.endpoint`'s port whenever an endpoint is
+      set, narrowed by `networkPolicy.external.objectStore` like saasapi's
+      recipe rule; `farmerExtraEgress` stays an addition. (2) An empty
+      `farmer.bootstrapAdmin` rendered silently, leaving an install where
+      nobody can make a CLI request (J.3): the render now fails unless
+      `pubkey` and `boxpub` are set, or `farmer.bootstrapAdmin.skip=true`
+      says the database already has an admin; the `ci/` files carry an
+      all-zero placeholder farmer refuses to import, and NOTES warns.
+      (3) saasapi's recipe credential was limited only by an example policy:
+      with `saasapi.recipes.enabled` the chart now sets
+      `SAASAPI_RECIPES_CREDENTIAL_CHECK`, and saasapi refuses to start if
+      the object store lets that credential create an object outside
+      `tenants/` or under `sprouts/`, read a key under `sprouts/` or list
+      `sprouts/`, or gives no classifiable answer within about 30 s
+      (`internal/saasapi` `recipes_credcheck.go`, `objectstore`
+      `ExpectDenied`). Chosen over a MinIO policy Job because it works for
+      any S3 store, checks the credential actually in use, and needs no
+      `mc` image (AGPL-3.0) or MinIO admin credential in the cluster. NOTES
+      now also warns at install time that saasapi's pods wait on
+      `imas-saasapi-nats` and `imas-saasapi-box` whenever ESO doesn't sync
+      them. The binary defaults the check to on as well (owner decision,
+      2026-10-05); only an explicit `false` turns it off. Still open: the
+      read probe can't catch a key
+      that may read `sprouts/*` but not list the bucket on AWS (it answers
+      `AccessDenied` for a missing key); `docs/api/saasapi.md` doesn't list
+      the new variable yet; the chart tests ran without the real subcharts.
     - **Recipe upload (REC.1; FLAG FOR SECURITY REVIEW, ready for review).**
       The four §1.6 routes are built in `internal/saasapi/recipes.go`.
       saasapi writes the recipe bucket directly with its own credential,
