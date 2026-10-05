@@ -58,6 +58,9 @@ func TestTryAccessClassifies(t *testing.T) {
 		{probe(objectstore.ProbeGet, "tenants/t1/recipes/missing"), objectstore.AccessAllowed},
 		{probe(objectstore.ProbeGet, "tenants/t1/recipes/existing"), objectstore.AccessAllowed},
 		{probe(objectstore.ProbeList, "tenants/t1/recipes/"), objectstore.AccessAllowed},
+		// FIX.5: delete probes, at fresh keys.
+		{probe(objectstore.ProbeDelete, "platform/probe/missing"), objectstore.AccessDenied},
+		{probe(objectstore.ProbeDelete, "tenants/t1/recipes/missing"), objectstore.AccessAllowed},
 	} {
 		got, err := s.TryAccess(ctx, tc.p)
 		if got != tc.want || err != nil {
@@ -194,5 +197,55 @@ func TestExpectDeniedFailsClosed(t *testing.T) {
 
 	if err := open(t, srv.Config()).ExpectDenied(context.Background(), []objectstore.Probe{probe("copy", "k")}, rp); err == nil {
 		t.Error("unknown op accepted")
+	}
+}
+
+// FIX.5: a delete probe is classified like the others, never removes
+// anything when denied, and is accepted by ExpectDenied, which never
+// tries to clean up after it (it wrote nothing).
+func TestDeleteProbe(t *testing.T) {
+	srv := objectstoretest.NewServer(t)
+	s := open(t, srv.Config())
+	ctx := context.Background()
+	if err := s.Put(ctx, "platform/base.imas", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	del := probe(objectstore.ProbeDelete, "platform/probe/missing")
+
+	srv.Deny(recipeOnly)
+	if err := s.ExpectDenied(ctx, []objectstore.Probe{del}, quickPolicy()); err != nil {
+		t.Fatalf("denied delete: %v", err)
+	}
+
+	srv.Deny(nil)
+	err := s.ExpectDenied(ctx, []objectstore.Probe{del}, quickPolicy())
+	var ae *objectstore.AllowedError
+	if !errors.As(err, &ae) || len(ae.Allowed) != 1 || ae.Allowed[0] != del || len(ae.Leftovers) != 0 ||
+		!strings.Contains(err.Error(), "delete platform/probe/missing") {
+		t.Fatalf("allowed delete: got %v", err)
+	}
+	if v, ok := srv.Object("platform/base.imas"); !ok || v != "x" {
+		t.Errorf("an object the probe didn't target changed: %q, %v", v, ok)
+	}
+
+	// A store that answers NoSuchKey for a missing key has authorized the
+	// delete first.
+	srv.FailNext(1, 404, "NoSuchKey")
+	if a, err := s.TryAccess(ctx, del); a != objectstore.AccessAllowed || err != nil {
+		t.Errorf("NoSuchKey: %v, %v", a, err)
+	}
+	// Anything else is inconclusive, not denied.
+	srv.FailNext(1, 400, "InvalidRequest")
+	if a, err := s.TryAccess(ctx, del); a != objectstore.AccessUnknown || err == nil {
+		t.Errorf("InvalidRequest: %v, %v", a, err)
+	}
+}
+
+func TestProbeString(t *testing.T) {
+	if got := probe(objectstore.ProbeList, "").String(); got != "list (bucket root)" {
+		t.Errorf("root list: %q", got)
+	}
+	if got := probe(objectstore.ProbeDelete, "jobs/x").String(); got != "delete jobs/x" {
+		t.Errorf("delete: %q", got)
 	}
 }

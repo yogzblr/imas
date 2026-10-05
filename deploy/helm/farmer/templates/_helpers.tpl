@@ -746,6 +746,9 @@ explanation rather than deploying something that silently can't work.
 {{- if or (not .Values.objectStore.endpoint) (not .Values.objectStore.bucket) -}}
 {{- fail "saasapi.recipes.enabled needs objectStore.endpoint and objectStore.bucket: saasapi writes the bucket farmer cooks from" -}}
 {{- end -}}
+{{- if and $r.credentialCheck (not .Values.objectStore.jobBucket) -}}
+{{- fail "objectStore.jobBucket is required with saasapi.recipes.enabled and saasapi.recipes.credentialCheck: saasapi's startup check makes sure its recipe credential can't reach farmer's job bucket (SAASAPI_RECIPES_JOB_BUCKET), and refuses to start without knowing which bucket that is" -}}
+{{- end -}}
 {{- end -}}
 {{- end }}
 

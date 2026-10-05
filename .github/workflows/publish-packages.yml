@@ -156,18 +156,32 @@ jobs:
 
       # Last, so every sprout package is already in the sprout repos by the
       # time a farmer chart carrying this release can register it.
+      # Pinned to the version ci.yml runs the chart tests with.
       - name: Set up Helm
         uses: azure/setup-helm@v4
+        with:
+          version: v4.3.0
 
+      # Lint and render each chart with the values file CI renders it with
+      # (ci/default-values.yaml): the farmer chart refuses to render without
+      # its required values (bus.serviceName, bus.sproutBusURLs, saasapi.jwt.*,
+      # farmer.bootstrapAdmin), and helm lint reports a template's `fail` only
+      # as [INFO], so the helm template run is what fails the step on a chart
+      # that doesn't render. `helm dependency build` needs each Chart.lock
+      # repository added first.
       - name: Package Helm charts
         run: |
           set -euo pipefail
           version="${TAG#v}"
           ./packaging/helm/stamp-sprout-release.sh dist "$TAG" deploy/helm/farmer/files/sprout-release.json
+          helm repo add openbao https://openbao.github.io/openbao-helm
+          helm repo add percona https://percona.github.io/percona-helm-charts
+          helm repo add valkey https://valkey.io/valkey-helm/
           mkdir -p dist/charts
           for chart in deploy/helm/farmer deploy/helm/nats; do
             if [ -f "$chart/Chart.lock" ]; then helm dependency build "$chart"; fi
-            helm lint "$chart"
+            helm lint "$chart" -f "$chart/ci/default-values.yaml"
+            helm template lint "$chart" -f "$chart/ci/default-values.yaml" >/dev/null
             helm package "$chart" --version "$version" --app-version "$version" --destination dist/charts
           done
 

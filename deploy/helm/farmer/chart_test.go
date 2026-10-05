@@ -10,6 +10,10 @@
 // its dependencies stripped, which renders every template of this chart;
 // TestSubchartsRender additionally renders the real subcharts when
 // charts/ has been populated.
+//
+// With IMAS_REQUIRE_HELM=1 (set by .github/workflows/ci.yml) nothing here
+// skips: a missing helm, an unpopulated charts/ or a missing tool fails
+// the test instead, so CI can't go green without having rendered the chart.
 package farmerchart
 
 import (
@@ -79,9 +83,21 @@ func helmBin(t *testing.T) string {
 	t.Helper()
 	helm, err := exec.LookPath("helm")
 	if err != nil {
-		t.Skip("helm not on PATH; skipping chart rendering tests")
+		skipUnlessRequired(t, "helm not on PATH; skipping chart rendering tests")
 	}
 	return helm
+}
+
+// requireHelmEnv makes every skip in this package a failure when set to 1.
+const requireHelmEnv = "IMAS_REQUIRE_HELM"
+
+// skipUnlessRequired skips the test, or fails it when requireHelmEnv is 1.
+func skipUnlessRequired(t *testing.T, msg string) {
+	t.Helper()
+	if os.Getenv(requireHelmEnv) == "1" {
+		t.Fatalf("%s (%s=1: chart tests must run, not skip)", msg, requireHelmEnv)
+	}
+	t.Skip(msg)
 }
 
 // depsVendored reports whether charts/ holds every dependency archive.
@@ -1045,7 +1061,7 @@ func TestSaasapiRecipesEnv(t *testing.T) {
 
 	// On.
 	docs = mustRender(t, "--set", "saasapi.recipes.enabled=true", "--set", "saasapi.recipes.credentialsSecret=saasapi-s3",
-		"--set", "objectStore.endpoint=minio.storage:9000", "--set", "objectStore.bucket=imas-recipes",
+		"--set", "objectStore.endpoint=minio.storage:9000", "--set", "objectStore.bucket=imas-recipes", "--set", "objectStore.jobBucket=imas-jobs",
 		"--set", "objectStore.credentialsSecret=farmer-s3", "--set", "objectStore.useSSL=false")
 	d := find(t, docs, "Deployment", "t-farmer-saasapi")
 	c := container(t, d, "saasapi")
@@ -1083,20 +1099,39 @@ func TestSaasapiRecipesEnv(t *testing.T) {
 // startup self-check (SAASAPI_RECIPES_CREDENTIAL_CHECK, internal/saasapi
 // recipes_credcheck.go), which refuses to start when the object store
 // lets the credential write outside tenants/ or write, read or list
-// sprouts/. Turning it off is an explicit false that NOTES warns about.
+// sprouts/, and (FIX.5) write or delete under the platform recipe prefix
+// or reach the job bucket at all, so the chart hands it the job bucket
+// (SAASAPI_RECIPES_JOB_BUCKET) and refuses to render without one while the
+// check is on. Turning it off is an explicit false that NOTES warns about.
 func TestSaasapiRecipeCredentialCheck(t *testing.T) {
-	on := []string{"--set", "saasapi.recipes.enabled=true", "--set", "saasapi.recipes.credentialsSecret=saasapi-s3",
+	noJobBucket := []string{"--set", "saasapi.recipes.enabled=true", "--set", "saasapi.recipes.credentialsSecret=saasapi-s3",
 		"--set", "objectStore.endpoint=minio.storage:9000", "--set", "objectStore.bucket=imas-recipes"}
-	check := func(docs []obj) (string, bool) {
-		e, ok := envMap(container(t, find(t, docs, "Deployment", "t-farmer-saasapi"), "saasapi"))["SAASAPI_RECIPES_CREDENTIAL_CHECK"]
+	on := append(slices.Clone(noJobBucket), "--set", "objectStore.jobBucket=imas-jobs")
+	envOf := func(docs []obj, name string) (string, bool) {
+		e, ok := envMap(container(t, find(t, docs, "Deployment", "t-farmer-saasapi"), "saasapi"))[name]
 		v, _ := e["value"].(string)
 		return v, ok
 	}
+	check := func(docs []obj) (string, bool) { return envOf(docs, "SAASAPI_RECIPES_CREDENTIAL_CHECK") }
 
 	docs := mustRenderRelease(t, "", on...)
 	if v, ok := check(docs); !ok || v != "true" {
 		t.Errorf("recipes on: SAASAPI_RECIPES_CREDENTIAL_CHECK = %q (set %v), want \"true\"", v, ok)
 	}
+	if v, ok := envOf(docs, "SAASAPI_RECIPES_JOB_BUCKET"); v != "imas-jobs" {
+		t.Errorf("recipes on: SAASAPI_RECIPES_JOB_BUCKET = %q (set %v), want the job bucket", v, ok)
+	}
+	// saasapi's default platform recipe prefix is farmer's default
+	// recipedir, which the chart doesn't change.
+	if _, ok := envOf(docs, "SAASAPI_RECIPES_PLATFORM_RECIPE_DIR"); ok {
+		t.Error("SAASAPI_RECIPES_PLATFORM_RECIPE_DIR set although the chart leaves farmer's recipedir at its default")
+	}
+	if strings.Contains(yamlString(t, farmerConfig(t, docs)), "recipedir") {
+		t.Error("farmer's recipedir is set by the chart: saasapi's platform recipe prefix must follow it")
+	}
+	mustFail(t, "objectStore.jobBucket is required with saasapi.recipes.enabled and saasapi.recipes.credentialCheck", noJobBucket...)
+	// With the check off nothing probes the job bucket, so none is needed.
+	mustRenderRelease(t, "", append(slices.Clone(noJobBucket), "--set", "saasapi.recipes.credentialCheck=false")...)
 	if n := notes(t, docs); strings.Contains(n, "credentialCheck=false") {
 		t.Errorf("NOTES warns about a check that is on:\n%s", n)
 	}
@@ -1691,7 +1726,7 @@ func TestNetworkPolicy(t *testing.T) {
 func TestSubchartsRender(t *testing.T) {
 	helmBin(t)
 	if !depsVendored(t) {
-		t.Skip("charts/ not populated; run `helm dependency build deploy/helm/farmer` to include the subcharts")
+		skipUnlessRequired(t, "charts/ not populated; run `helm dependency build deploy/helm/farmer` to include the subcharts")
 	}
 	docs, err := runHelm(t, chartDir(t), required...)
 	if err != nil {
@@ -2519,7 +2554,7 @@ func TestStampedReleaseRenders(t *testing.T) {
 	helmBin(t)
 	for _, tool := range []string{"bash", "jq", "sha256sum"} {
 		if _, err := exec.LookPath(tool); err != nil {
-			t.Skipf("%s not on PATH", tool)
+			skipUnlessRequired(t, tool+" not on PATH")
 		}
 	}
 	stampScript := filepath.Join(chartDir(t), "..", "..", "..", "packaging", "helm", "stamp-sprout-release.sh")

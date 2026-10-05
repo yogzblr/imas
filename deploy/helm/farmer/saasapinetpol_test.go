@@ -14,6 +14,7 @@ func recipesOn(endpoint string, extra ...string) []string {
 		"--set", "saasapi.recipes.credentialsSecret=saasapi-s3",
 		"--set", "objectStore.endpoint=" + endpoint,
 		"--set", "objectStore.bucket=recipes",
+		"--set", "objectStore.jobBucket=jobs",
 	}, extra...)
 }
 

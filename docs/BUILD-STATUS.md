@@ -74,7 +74,7 @@ has merged except the Terraform UAT gate, and nothing has been released.
 | 1 | 1M endpoints | **Amber** | Jitter (SCALE.1), the clustered bus (SCALE.2) and the load harness (SCALE.3) are built; the harness has only made its 200-sprout smoke run. Run it at 10k and 100k on a real cluster (`docs/loadtest.md`), add the PXC and Valkey failure tests the scale plan's Phase 3 asks for (not in the harness), close SCALE.2's one-node push and the same-second `iat` tie (B5), and decide the resolver mode. See Open item 3. |
 | 2 | DMZ / non-DMZ split | **Green** | |
 | 3 | Windows and Unix | **Amber** | A real Windows Server host run (UAT gate). Server 2016 is the stated floor and nothing has installed the MSI. |
-| 4 | Ansible deployment | **Green** | (Linux is validated by Molecule; the Windows `win_package` path is not.) |
+| 4 | Ansible deployment | **Green** | (Linux is validated by Molecule; the Windows `win_package` path is not.) **Judgement call:** Green although the Windows path has never run, because the role is built for both, Linux is exercised end to end in CI, and the Windows gap is carried by requirement 3 (Amber, UAT gate) rather than counted twice; a stricter reading of the legend would make this Amber. |
 | 5 | JWT auth to the NATS websocket | **Green** | |
 | 6 | Per-sprout JWT | **Green** | |
 | 7 | Horizontally scalable farmer | **Amber** | A load test. Core is queue-grouped and stateless; the bus tier can run as 3 or more meshed nodes since SCALE.2 (chart default `bus.replicaCount: 1`), never run on a real cluster or under load. |
@@ -84,7 +84,7 @@ has merged except the Terraform UAT gate, and nothing has been released.
 | 11 | Recipe download uses the same JWT | **Green** | |
 | 12 | Envoy with JWT validation | **Green** | |
 | 13 | Backend on Kubernetes | **Amber** | Install the charts on a real cluster (UAT gate). No Terraform exists. FIX.3 (merged, PR #112) fixed three things a fresh install would have hit: no farmer object store egress, no required bootstrap admin, and an unchecked recipe credential. |
-| 14 | Payload encryption | **Amber** | The human security review of the sealing work, then the residuals: facts, cook step events, `test.ping`, the rotate trigger, log shipping and the join event are still plaintext inside TLS, facts being the one review 2026-10 ranked High (they feed the rollout gate and recipe templates); the forged "no responders" re-run (B6) is an accepted residual. Sealed only, as built: `cmd.run`, `cook` and its nudge, box-key submissions, `shell.*` (J.5), the staged recipe on `/files/` (SEC.7a), sprout refresh (J.2), the CLI API (J.3) and `internal.*` (J.4); a sprout with no box key is refused, never downgraded (FIX.1). |
+| 14 | Payload encryption | **Amber** | The human security review of the sealing work, then the residuals: facts, cook step events, `test.ping`, the rotate trigger, log shipping and the join event are still plaintext inside TLS, facts being the one review 2026-10 ranked High (they feed the rollout gate and recipe templates); the forged "no responders" re-run (B6) is an accepted residual. Sealed only, as built: `cmd.run`, `cook` and its nudge, box-key submissions, `shell.*` (J.5), the staged recipe on `/files/` (SEC.7a), sprout refresh (J.2), the CLI API (J.3) and `internal.*` (J.4); a sprout with no box key is refused, never downgraded (FIX.1). **Judgement call:** Amber, not Red, although facts stay plaintext inside TLS and review 2026-10 ranked that High: every boundary that carries a command, a recipe, a key or a credential is sealed only, and the facts gap lets a compromised bus forge data, not run anything. A reader who weighs the rollout gate and templates fed by forgeable facts as defeating the requirement would call it Red. |
 | 15 | Key rotation for sprout keys | **Green** | (`requirements.md` item 15 now describes the built design, DOC.1, PR #69.) |
 | 16 | SDB-equivalent secrets | **Green** | |
 | 17 | Probe capability | **Green** | |
@@ -264,6 +264,15 @@ design's accepted mitigation for having no forward secrecy.
 **J follow-up (branch `claude/tender-cerf-kudmy3`, merged as PR #30, FLAG FOR
 SECURITY REVIEW).** What it changes:
 
+> **Superseded (2026-10-05). Historical record of PR #30, not the current
+> state.** The plaintext `cmd.run` fallback for a sprout with no box key
+> described below is deleted (FIX.1, PR #113: farmer sends nothing to such a
+> sprout and refuses with `sprout_reenroll_required`; a keyless sprout
+> refuses everything with `no-keys`). Adopted tenants and the legacy shared
+> keypair are gone (SEC.3a, PR #85: every tenant has its own fresh keypair).
+> For what is sealed today, see requirement 14 in "Requirements
+> traceability".
+
 - **One keypair per tenant.** `internal/pki/tenantbox.go` keeps each
   tenant's keypair in its own KV v2 secret,
   `<IMAS_TENANTBOX_OPENBAO_KV_PATH>/tenants/<tenant_id>`, and each
@@ -301,18 +310,17 @@ SECURITY REVIEW).** What it changes:
   the sprout's current keys, and fresh; a superseded key is never made
   active again.
 
-**Superseded since (2026-10-05).** This section and the list below are the
-record as of PR #30 to #34. Since then: the plaintext fallback for a sprout
-with no box key, described in the `cmd.run` bullet above and in the `cook`
-bullet below, is deleted (FIX.1, PR #113: farmer sends nothing to such a
-sprout and a keyless sprout refuses everything); `shell.*` is sealed (J.5,
-PR #98); adopted tenants and the legacy shared keypair are gone (SEC.3a,
-PR #85: every tenant has a fresh keypair); and live `cmd.run` streaming is
-removed with the plaintext path (FIX.1). For what is sealed today, see
-requirement 14 in "Requirements traceability"; for what is left, Open items
-10 and 11.
-
 **Still open in J after the follow-up:**
+
+> **Superseded (2026-10-05). Historical record as of PR #30 to #34, not
+> the current state.** The plaintext fallback for a sprout with no box key
+> (the `cook` bullet below) is deleted (FIX.1, PR #113); `shell.*` is
+> sealed end to end, so the "`shell.*` now matters most" bullet no longer
+> holds (J.5, PR #98, and SH.1, PR #102); adopted tenants and the legacy
+> shared keypair are gone (SEC.3a, PR #85); and live `cmd.run` streaming is
+> removed with the plaintext path (FIX.1). For what is sealed today, see
+> requirement 14 in "Requirements traceability"; for what is left, Open
+> items 10 and 11.
 
 - **`cook` is sealed end to end** (`internal/cook/sealed.go`): the
   dispatch on `imas.sprouts.<id>.cook` and its Ack, and the resync nudge
@@ -410,13 +418,13 @@ directly in this session instead.
 | **Workstream M.2** — MSI installer + winget package | MSI via `wixl`/`msitools`, winget NuGet package published to the public `imasnget` Buildkite feed on release, sprout starts itself post-upgrade | merged — PR #21 (`1c6a2a5`, `65bc985`) |
 | **Workstream M.3** — SUSE rpm validation | `zypper`-specific check on the existing `nfpm`-built rpm packaging | merged — folded into PR #21 (`1c6a2a5`'s "SUSE RPM check") |
 | **Workstream M.4** — customer-run Ansible playbooks | `ansible/roles/imas_sprout` (adds the Buildkite apt/yum/zypper repo or does `win_package`, merges enrollment settings into the sprout's existing config file via drift-detection rather than overwriting it — the sprout itself writes back `sproutid` and empties `jointoken` post-enroll — `no_log` + mode `0600` on the join token) + `ansible/roles/imas_verify` (polls a custom `imas_sprout_bus_status` module for connected state, fails clearly on timeout). Molecule scenario (`ansible/molecule/default/`, a stub farmer + Rocky/Debian/openSUSE Leap 15.6 containers) wired into CI (`.github/workflows/molecule.yml`: `ansible-lint`, `pytest`, `molecule test`). Along the way, caught and fixed two real packaging bugs found while building the playbooks: `packaging/etc/imas-sprout.conf` had `farmerapiport` misspelled `farmeripoprt` (silently ignored, masked by the value matching the default), and `packaging/etc/imas-farmer.conf` had a tab-indented `pubkeys` list (invalid YAML, `LoadConfig` would panic) plus a stale `organization:` key (farmer reads `farmerorganization`) — a new regression test, `internal/config/config_files_test.go`, now statically checks every packaged/testing config's keys against what the code actually reads via `jety`. | **merged** — PR #24 (`0ea6384`), PR #25 (`7377ba9`, `ef36998`, `6c630b7`, `7d3a70e`, `930f191`, `7356668`), PR #26 (`edca7ac`), PR #28 |
-| **New: Terraform UAT gate** | Provision per-OS VMs, install a tagged release's actual Buildkite-published packages via the M.4 playbooks, smoke-test enrollment/recipe-run/reboot survival, and now also one self-update cycle (FU.2) per OS. Task brief is in `docs/claude-code-parallel-build-plan.md` §4a (item 5), including a flag that the default compute-provider choice (libvirt/KVM) needs a human sign-off. | **not started — no `.tf` files, modules or workflow exist in the repo.** Every dependency (M.4, the release flow, FU.2) is now merged, so it is unblocked and is the main remaining delivery item |
+| **New: Terraform UAT gate** | Provision per-OS VMs, install a tagged release's actual Buildkite-published packages via the M.4 playbooks, smoke-test enrollment/recipe-run/reboot survival, and now also one self-update cycle (FU.2) per OS. Task brief is in `docs/claude-code-parallel-build-plan.md` §4a (item 5), including a flag that the default compute-provider choice (libvirt/KVM) needs a human sign-off. | **not started — no `.tf` files, modules or workflow exist in the repo.** Its code dependencies (M.4, the release flow, FU.2) are merged, but it is **not unblocked**: it still needs a first release (none has been cut; see "Validation, 2026-10-05") and a decision on the compute provider. It is the main remaining delivery item (Open item 1) |
 | J follow-up: per-tenant tenant keypairs, tenant key rotation with authenticated re-pin, `cmd.run` sealed end to end, box key submissions sealed | See "J follow-up" under Wave 2. FLAG FOR SECURITY REVIEW | merged — PR #30 (`60c39a2`); still flagged for security review |
 | Docs refresh (architecture diagram, SaaS API reference, `INSTALL.md`, this file, `packaging/systemd/*.service` vs `docs/*.service` dedup) | Done on branch `claude/sweet-sagan-yklpu8`: `docs/diagrams/imas-architecture.svg` replaces `grlx-arch-light.png`; `docs/api/saasapi.md` + `docs/api/saasapi-openapi.yaml` (all 18 `NewRouter` routes, the 2 dispatch routes marked off by default); `INSTALL.md` rewritten for tenants, enrollment keys, the SaaS API and Envoy; `docs/imas-{farmer,sprout}.service` removed in favour of `packaging/systemd/` | merged — PR #23 |
 | J: seal `cook` dispatch and resync nudge end to end | See "As built (J follow-up)" under Wave 2. Closes the highest-priority item on the "still plaintext" list: a compromised bus can no longer inject either a command (`cmd.run`) or a recipe (`cook`) onto a box-ready sprout. Also moved farmer's job-creation recording off the (now sealed) plaintext dispatch onto an explicit hook (`cook.SetDispatchRecorder`). FLAG FOR SECURITY REVIEW | merged — PR #32 (`d2692c8`, `6f1ac36`, `bf5956c`) |
 | H: sprout outbound proxy support for the bus connection (requirements.md item 8) | New sprout config key `busproxyurl` (`http://` HTTP CONNECT or `socks5://`); `pki.LoadSproutBus` wires it as nats.go's `CustomDialer`, covering `wss://`, `tls://` and `nats://` alike, with `nats.SkipHostLookup` so the proxy resolves the bus host. The sprout's HTTP clients already covered this via `ProxyFromEnvironment`; this closes the one real gap (the bus connection itself) | merged — PR #33 (`924e9dc`, `ac523c1`) |
 | J: sprout side of farmer-triggered box key rotation (requirements.md item 15) | Closes "sprout-initiated box key rotation has a farmer side but no sprout side." Farmer-triggered only, no sprout-side scheduling. New key held `pending` until confirmed by the first farmer payload that opens under it; replaced key kept `previous` for `sproutboxkeyprevgrace` (default 15m, floored at `2×DefaultMaxSkew`). Along the way, found and fixed a real gap: `sproutPermissions` never granted the `boxkey.pub` publish subject at all, so every submission was refused as a Permissions Violation until this PR added it (existing sprouts pick it up via JWT re-mint on next refresh). See `docs/design/imas-payload-encryption-design.md`'s "Sprout-side rotation, farmer-triggered only." FLAG FOR SECURITY REVIEW | merged — PR #34 (`8eb23da`, `8384084`, `7b9d80d`) |
-| Ansible + packaging: expose `busproxyurl` and `sproutboxkeyprevgrace` | `ansible/roles/imas_sprout` variables `imas_sprout_bus_proxy_url` (drift-managed the same way as `busurls`: set when non-empty, removed when emptied) and `imas_sprout_boxkey_prev_grace` (set when non-empty, but deliberately never removed — see below), `packaging/etc/imas-sprout.conf` commented examples, `ansible/README.md` variable table. Found and fixed a Molecule idempotence failure along the way: `sproutboxkeyprevgrace` is the only one of the two with a `jety.SetDefault` in `internal/config/config.go`, so the sprout rewrites it into the config file with a concrete default value on any other save (enrolling, clearing its join token). Managing it the same "remove when empty" way as `busurls`/`busproxyurl` fought that write-back every run — molecule's idempotence check caught it: `imas_sprout : Write the enrollment settings...` and the restart handler both fired non-idempotently on all three containers. Fixed by only ever adding an explicit override for this key and never trying to force it absent. | **done, this pass** (docs/ansible only, no application code) |
+| Ansible + packaging: expose `busproxyurl` and `sproutboxkeyprevgrace` | `ansible/roles/imas_sprout` variables `imas_sprout_bus_proxy_url` (drift-managed the same way as `busurls`: set when non-empty, removed when emptied) and `imas_sprout_boxkey_prev_grace` (set when non-empty, but deliberately never removed — see below), `packaging/etc/imas-sprout.conf` commented examples, `ansible/README.md` variable table. Found and fixed a Molecule idempotence failure along the way: `sproutboxkeyprevgrace` is the only one of the two with a `jety.SetDefault` in `internal/config/config.go`, so the sprout rewrites it into the config file with a concrete default value on any other save (enrolling, clearing its join token). Managing it the same "remove when empty" way as `busurls`/`busproxyurl` fought that write-back every run — molecule's idempotence check caught it: `imas_sprout : Write the enrollment settings...` and the restart handler both fired non-idempotently on all three containers. Fixed by only ever adding an explicit override for this key and never trying to force it absent. | merged — PR #35 (`aa51688`, `73ecaf2`; docs and Ansible only, no application code) |
 
 ## Fleet updates and DB migrations (Wave 4, merged 2026-10-01 to 2026-10-02) and the Wave 5 clean-ups (merged 2026-10-03)
 
@@ -596,8 +604,9 @@ Docs-only PRs in the same window: #68 (this file's RAG summary), #82 (plan
 
 ## Merged pull requests, 2026-09-28 to 2026-10-05
 
-Every PR merged to `main` in this window (#36 to #113; #54 was not merged), so
-this file can be checked against the repository's history. From #68 on, each
+Every PR merged to `main` in this window (#36 to #116; #54 was not merged), so
+this file can be checked against the repository's history, plus FIX.5, still
+open. From #68 on, each
 row starts with its brief ID ("docs" for a docs-only PR).
 
 | PR | Merged | What | Recorded in |
@@ -667,6 +676,10 @@ row starts with its brief ID ("docs" for a docs-only PR).
 | #111 | 10-05 | **FIX.2**: Job objects keyed on `(tenant_id, sprout_id)` (I4) | Open-item briefs and Wave 7; Open items 4, 10 |
 | #112 | 10-05 | **FIX.3**: Helm fresh-install gaps: farmer object store egress, required bootstrap admin, recipe credential self-check | Open-item briefs and Wave 7; requirement 13; Open item 10 |
 | #113 | 10-05 | **FIX.1**: `cmd.run` and `cook` refused to sprouts with no box key; plaintext path deleted | Open-item briefs and Wave 7; requirement 14; Open item 10 |
+| #114 | 10-05 | **FIX.4**: This file brought up to `main` at `7fb527a` (PRs #68 to #113) | Validation, 2026-10-05 |
+| #115 | 10-05 | **docs**: Release GPG public key committed; `SECURITY.md` fingerprint fixed | Validation, 2026-10-05 (first release prerequisite 1) |
+| #116 | 10-05 | **docs**: Plan §4g: the FIX.5 brief (release blockers from the 2026-10-05 re-validation) | this ledger |
+| FIX.5 | open | **FIX.5**: Helm lint with CI values and Chart.lock repositories in the publish workflow; chart tests required to run in CI (`IMAS_REQUIRE_HELM=1`); keyless sprout items recorded as `sprout_reenroll_required`; recipe credential check probes the platform recipe prefix and the job bucket; security review and this file's marks updated. Flagged; ready for review, not merged | Validation, 2026-10-05 |
 
 ## Notes
 
@@ -747,7 +760,8 @@ row starts with its brief ID ("docs" for a docs-only PR).
   (`go.mod` requires it) because `proxy.golang.org` isn't on the egress
   allowlist here — so the new config-key test is verified by reading it,
   not by executing it.
-- **2026-09-27, later same day: `cook` sealing, sprout bus proxy support,
+- *Superseded: the unsealed `shell.*` this note describes was sealed by
+  J.5 (PR #98).* **2026-09-27, later same day: `cook` sealing, sprout bus proxy support,
   and farmer-triggered sprout box key rotation merged (PRs #32–#34)**, plus
   the ansible/packaging follow-up exposing the two new sprout config keys
   (`busproxyurl`, `sproutboxkeyprevgrace`) as role variables. Requirements
@@ -787,7 +801,8 @@ one except FIX.4 (this refresh) has merged ("Open-item briefs and Wave 7").
 **Decisions, 2026-10-05:** a staged recipe copy may be up to
 `stagedrecipeclockskew` older than the newest handled job (SEC.7d, PR #110);
 the enrollment binding stays at 5 minutes (SEC.7d); saasapi records FIX.1's
-`sprout_reenroll_required` as `internal_error` for now (PR #113); the saasapi
+`sprout_reenroll_required` as `internal_error` for now (PR #113; FIX.5,
+not merged, records and documents the code itself); the saasapi
 binary defaults the recipe credential check to on, as the chart does (FIX.3,
 PR #112).
 
@@ -980,7 +995,8 @@ PR #112).
       `rollout_window_closed` and `farmer_busy` into `internal/controlplane`
       and add `self_update_disabled` and `sprout_reenroll_required` to
       `docs/api/saasapi.md` and the OpenAPI item enum (saasapi records both
-      as `internal_error` until then).
+      as `internal_error` until then). FIX.5 (not merged) does this for
+      `sprout_reenroll_required`; `self_update_disabled` is left.
 5. **Licences (LIC.1, merged, PR #73).** CL.2a found the `go-licenses`
    workflow's `save` step failing on `main` (`modernc.org/mathutil` reported
    an unknown licence), so `dependencies/` was not refreshed after
@@ -1082,7 +1098,8 @@ PR #112).
       everywhere farmer talks to a sprout's commands. Farmer sends nothing
       to a sprout with no box key on record and fails `cmd.run`, the cook
       dispatch and the nudge with `sprout_reenroll_required` (saasapi stores
-      it as `internal_error`, owner decision); a sprout with no keys refuses
+      it as `internal_error`, owner decision; FIX.5, not merged, stores the
+      code itself); a sprout with no keys refuses
       everything with `no-keys`. A first box key needs the 5-minute
       `enroll_binding` (owner decision 2026-10-05 kept 5 minutes); after it
       a keyless accepted sprout is closed and must be deleted (`imas keys
@@ -1170,7 +1187,10 @@ PR #112).
       on AWS the read probe can't catch a key that may read `sprouts/*` but
       can't list the bucket (it answers `AccessDenied` for a missing key);
       `docs/api/saasapi.md` doesn't list `SAASAPI_RECIPES_CREDENTIAL_CHECK`;
-      the chart tests ran without the real subcharts; PR #112's questions
+      the chart tests ran without the real subcharts (FIX.5, not merged,
+      lists the variable, makes CI build the subcharts and fail rather than
+      skip the chart tests, and adds probes of the platform recipe prefix
+      and the job bucket); PR #112's questions
       (render farmer's rule with no endpoint; a required `skipReason`).
     - **saasapi NetworkPolicy and PDB (OPS.1, PR #105):** nothing stops
       `saasapi.pdb.maxUnavailable` being 0 (blocks every drain) or at least
@@ -1316,6 +1336,10 @@ scale plan did call out reconnect-storm hardening.
 
 ## Re-evaluation, 2026-10-03 (evening): RAG pass
 
+> **Superseded (2026-10-05).** The Red for unsealed `shell.*` (requirement
+> 14) recorded here no longer holds: `shell.*` is sealed (J.5, PR #98), and
+> requirement 14 is Amber in the RAG summary above.
+
 After PR #62 to #67 merged (CL.1, CL.3, REL.1, CL.2a, CL.2b), this file got a
 RAG summary and the rows that still said "ready for review" were corrected.
 Colours were assigned from the code on `main` and CI at the time: the
@@ -1380,10 +1404,10 @@ with the SCALE sections, and both rows now say so.
 
 **First release prerequisites still owed by the owner** (in the order of
 `docs/RELEASING.md`'s First release checklist):
-1. Commit the GPG public key (as `gpg-public-key.asc` at the repo root; it
-   isn't there today) and make `SECURITY.md` match it: its fingerprint
-   (`3F62 7C68 … E4DD` today) and its download link, which points at a
-   `master` branch that doesn't exist.
+1. ~~Commit the GPG public key and make `SECURITY.md` match it.~~ Done by
+   PR #115: `gpg-public-key.asc` is at the repo root, and `SECURITY.md`'s
+   fingerprint (`84F4 5E90 … 41F0 41EB`) and its `main` download link
+   match it (checked 2026-10-05, FIX.5).
 2. Create the Buildkite registries `imasrpm`, `imasdeb`, `imasnget`
    (public) and `imashelm`, and set `BUILDKITE_ORGANIZATION_SLUG` and
    `BUILDKITE_PACKAGES_TOKEN`; check the `goreleaser` environment's rules
@@ -1402,3 +1426,14 @@ with the SCALE sections, and both rows now say so.
 
 Then the Terraform UAT gate (Open item 1), which also needs the
 compute-provider decision.
+
+**FIX.5 (2026-10-05, ready for review, not merged).** The re-validation of
+`main` at `cefa9ca` found two release blockers. `publish-packages.yml` ran
+`helm dependency build` on the farmer chart without adding its `Chart.lock`
+repositories, which Helm refuses ("no repository definition"), and linted
+both charts with their default values only; it now adds the repositories,
+pins Helm (`v4.3.0`), and lints and renders each chart with its
+`ci/default-values.yaml`. And CI never installed Helm, so every chart render
+test skipped; the Test job now installs the same Helm, builds both charts'
+dependencies and sets `IMAS_REQUIRE_HELM=1`, which turns every chart-test
+skip into a failure.

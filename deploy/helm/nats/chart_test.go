@@ -1,7 +1,8 @@
 // Package natschart tests the deploy/helm/nats Helm chart by rendering it
 // with the helm CLI and asserting on the manifests. The tests skip when
 // helm is not on PATH, so `go test ./...` stays green on machines without
-// it; run them locally with helm v3 installed.
+// it; run them locally with helm v3 installed. With IMAS_REQUIRE_HELM=1 (set
+// by .github/workflows/ci.yml) a missing helm fails the tests instead.
 package natschart
 
 import (
@@ -37,6 +38,9 @@ func render(t *testing.T, args ...string) ([]obj, error) {
 	t.Helper()
 	helm, err := exec.LookPath("helm")
 	if err != nil {
+		if os.Getenv("IMAS_REQUIRE_HELM") == "1" {
+			t.Fatal("helm not on PATH (IMAS_REQUIRE_HELM=1: chart tests must run, not skip)")
+		}
 		t.Skip("helm not on PATH; skipping chart rendering tests")
 	}
 	cmd := exec.Command(helm, append([]string{"template", "t", chartDir(t),
