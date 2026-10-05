@@ -84,31 +84,42 @@ var cmdCmdRun = &cobra.Command{
 		case "":
 			fallthrough
 		case "text":
-			for keyID, result := range results.Results {
-				jw, err := json.Marshal(result)
-				if err != nil {
-					color.Red("%s: \n returned an invalid message!\n", keyID)
-					continue
-				}
-				var value apitypes.CmdRun
-				err = json.NewDecoder(bytes.NewBuffer(jw)).Decode(&value)
-				if err != nil {
-					color.Red("%s returned an invalid message!\n", keyID)
-					continue
-				}
-				if value.ErrCode != 0 {
-					color.Red("%s:\n", keyID)
-				} else {
-					fmt.Printf("%s:\n", keyID)
-				}
-				if noerr {
-					fmt.Printf("%s\n", value.Stdout)
-				} else {
-					fmt.Printf("%s%s\n", value.Stdout, value.Stderr)
-				}
-			}
+			printCmdRunResults(results, noerr)
 		}
 	},
+}
+
+// printCmdRunResults writes each sprout's cmd.run result as text: its
+// output, and the error farmer or the sprout reported for it, such as
+// farmer's refusal to send to a sprout that must be re-enrolled
+// ([sprout_reenroll_required]).
+func printCmdRunResults(results apitypes.TargetedResults, noerr bool) {
+	for keyID, result := range results.Results {
+		jw, err := json.Marshal(result)
+		if err != nil {
+			color.Red("%s: \n returned an invalid message!\n", keyID)
+			continue
+		}
+		var value apitypes.CmdRun
+		err = json.NewDecoder(bytes.NewBuffer(jw)).Decode(&value)
+		if err != nil {
+			color.Red("%s returned an invalid message!\n", keyID)
+			continue
+		}
+		if value.ErrCode != 0 || value.Error != nil {
+			color.Red("%s:\n", keyID)
+		} else {
+			fmt.Printf("%s:\n", keyID)
+		}
+		if value.Error != nil {
+			color.Red("error: %s\n", value.Error)
+		}
+		if noerr {
+			fmt.Printf("%s\n", value.Stdout)
+		} else {
+			fmt.Printf("%s%s\n", value.Stdout, value.Stderr)
+		}
+	}
 }
 
 func init() {
