@@ -116,6 +116,15 @@ const (
 	// never be accepted as a dispatch, or a dispatch as a nudge.
 	PurposeCookNudgeRequest  = "f2s.cook.nudge"
 	PurposeCookNudgeResponse = "s2f.cook.nudge"
+	// PurposeStagedRecipe is the staged copy of a recipe dispatch farmer
+	// writes to the sprout's own key in the recipe bucket, which the
+	// sprout pulls over GET /files/ (internal/cook's stage.go and
+	// stagedfetch.go; security review 2026-10-b, B1). One-way: there is
+	// no reply. Its own purpose, not PurposeCookRequest: a staged copy
+	// has no replay-guard window (the sprout's handled-jobs file and
+	// StagedRecipeMaxAge bound it instead), so a captured sealed dispatch
+	// must never open as a staged recipe, or the reverse.
+	PurposeStagedRecipe = "f2s.staged"
 	// PurposeBoxKeySubmit is a sprout reporting a new box public key of
 	// its own, sealed under its current (still valid) key.
 	PurposeBoxKeySubmit = "s2f.boxkey.pub"

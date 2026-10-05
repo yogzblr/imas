@@ -11,7 +11,8 @@ package saasapi
 //	  -> saasapi writes tenants/A/recipes/web/hello.imas with its own client
 //	farmer: cook.SendCookEventContext (real resolution, render, staging)
 //	  -> reads the bucket with a separate client, as farmer does
-//	  -> stages sprouts/A/web-01/recipe.json and pushes on A's connection
+//	  -> pushes on A's connection (nothing staged: these sprouts have no
+//	     box key, and a staged copy is only ever sealed)
 //	sprout: cook.RespondCook on imas.sprouts.web-01.cook accepts it
 
 import (
@@ -176,8 +177,13 @@ func TestRecipeUploadCooksOnSameTenantOnly(t *testing.T) {
 	if got := stepsOf(sproutA.last(t)); !strings.Contains(got, "tenant-a-v1") {
 		t.Fatalf("after upload A cooked %s", got)
 	}
-	if !strings.Contains(staged(e.tA), "tenant-a-v1") {
-		t.Fatalf("A's staged recipe: %s", staged(e.tA))
+	// These sprouts have no box key on record (plaintext dispatch), so
+	// farmer stages no copy for them (security review 2026-10-b, B1): a
+	// staged copy is sealed to the sprout or not written. Sealed staging
+	// per tenant is covered by internal/api's
+	// TestTenantRecipes_CrossTenantRefusedAtEveryLayer.
+	if got := staged(e.tA); got != "" {
+		t.Fatalf("A's keyless sprout was staged a copy: %s", got)
 	}
 
 	// 3. B's sprout of the same name still gets the platform recipe,
