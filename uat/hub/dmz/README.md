@@ -42,16 +42,17 @@ the tofu `uat` JSON is itself a valid endpoints file. Extra keys are ignored.
 
 | Key | Required | Default | Used for |
 |---|---|---|---|
-| `dmz.fqdn` | yes | | the Envoy certificate's only name; SNI and Host in `check.sh` |
+| `dmz.fqdn` | yes | | the public name: a SAN of the Envoy certificate, SNI and Host in `check.sh` from the runner |
 | `dmz.private_ip` | yes | | the node address core dials for the bus; an IP SAN of the bus certificate |
 | `dmz.public_ip` | no | `dmz.fqdn` | where `check.sh` connects (the FQDN is still sent and verified) |
 | `dmz.ports.envoy` | no | 8443 | Envoy's node port (and load balancer port): sprouts and the runner connect here. Owner's decision, 2026-10-06 |
 | `dmz.ports.bus` (or `dmz.ports.bus_client`) | no | 8442 | the bus client node port: core connects here. Owner's decision, 2026-10-06 |
 | `dmz.envoy_service_type` | no | `NodePort` | `NodePort` or `LoadBalancer`, as UAT.2's PR #130 writes it; `install.sh --expose` overrides it |
 | `core.private_ip` | yes | | Envoy's farmer upstream; the NetworkPolicy peer for core |
-| `core.fqdn` | yes | | the SNI Envoy sends to farmer |
+| `core.fqdn` | yes | | checked as a DNS name (unused otherwise) |
 | `core.ports.farmer_api` | no | 5405 | Envoy's farmer upstream port |
 | `cluster_issuer` | no | `imas-uat-ca` | the cert-manager ClusterIssuer of the UAT CA (UAT.2) |
+| `private_dns_zone` | no | `uat.imas.internal` | the run's private DNS zone (UAT.1's `private_dns_zone`). `dmz.<zone>` and `core.<zone>` are the hubs' private names; see [Private names](#private-names) |
 
 The defaults are the ports in the nats and farmer chart READMEs. The shape is
 this brief's proposal: the contract names the file but does not spell it
@@ -81,19 +82,17 @@ uat/hub/dmz/install.sh --kubeconfig dmz.kubeconfig --endpoints endpoints.json \
 
    with `<org>` from `BUILDKITE_ORGANIZATION_SLUG` (default `yogzblr`, the
    org `ansible/README.md` uses), or `--chart-repo-url`. It is added as
-   `imas-uat-imashelm` in a private, temporary Helm home (removed on exit,
-   and never in the work directory, since it would hold the token), then
+   `imas-uat-imashelm` in a temporary Helm home (removed on exit), then
    `helm pull imas-uat-imashelm/nats --version <X.Y.Z[-rc.N]>`. The pulled
-   `.tgz` is kept in the work directory.
+   `.tgz` is kept in the work directory. **`imashelm` is public** (owner's
+   decision, 2026-10-06): no token is taken or sent.
    **Pre-releases:** an exact `--version` selects `0.1.0-rc.4` like any
    other version. Helm leaves pre-releases out only when it resolves a
    range or "the newest" (that is what `--devel` is for), and this script
    never does either, so nothing but the named version can be pulled. The
    pulled chart's `version` and `appVersion` are both checked against the
-   tag, and the farmerbus image tag is set explicitly as well. If `imashelm`
-   is private, export a Buildkite read token as `IMAS_HELM_REGISTRY_TOKEN`;
-   it goes to `helm repo add --username buildkite --password-stdin`, never
-   on a command line. Envoy's image is the chart's pinned
+   tag, and the farmerbus image tag is set explicitly as well. Envoy's
+   image is the chart's pinned
    `envoyproxy/envoy:v1.35.3`, not an imas image.
 2. **Writes the run's values and manifests** into the work directory:
    `values-run.yaml` (image tag, farmer upstream, NetworkPolicy egress to
@@ -125,6 +124,20 @@ uat/hub/dmz/install.sh --kubeconfig dmz.kubeconfig --endpoints endpoints.json \
 
 `--render-only` stops after step 2 and touches no cluster (`--chart` then
 takes a local chart; an install always pulls the published one).
+
+### Private names
+
+Owner's decision, 2026-10-06: "Private DNS names dmz./core.uat.imas.internal
+go in the Shared contract, with SANs, farmerinterface and farmerbusurl using
+them." UAT.1 (PR #135) creates them as an Azure Private DNS zone linked to
+the VNet; the zone is `private_dns_zone` in the endpoints file (default
+`uat.imas.internal`), so the local rig can use its own. Here:
+
+| Name | Used for |
+|---|---|
+| `dmz.<zone>` (`dmz.uat.imas.internal`) | a SAN of the Envoy certificate (sprouts' `farmerinterface`; `envoy.sprout_bus_url` in `dmz.json`), and of the bus certificate (farmer's `farmerbusurl` is `tls://dmz.uat.imas.internal:8442`, `bus.farmerbusurl` in `dmz.json`) |
+| `core.<zone>` (`core.uat.imas.internal`) | the SNI Envoy sends to farmer. Envoy still dials farmer by the core private IP, so the NetworkPolicy `ipBlock` and the upstream agree and Envoy needs no DNS for it |
+| `dmz.fqdn` (public) | the second SAN of the Envoy certificate: the runner reaches Envoy from outside the VNet, where the private names do not resolve |
 
 ### Names
 
@@ -210,6 +223,7 @@ what the repo's real-Envoy tests assert (`internal/pki/envoy_e2e_test.go`,
 | D9 | `POST /v1/enroll` repeatedly, at most `--max-burst` (41) times | Envoy answers `429 local_rate_limited`. Its bucket holds 20 and refills 20 every 60 s, so it should come after at most 20 answered requests; a refill landing mid-burst can let 40 through, which is reported but passes |
 | D10 | `POST /v1/refresh` with `{}`, while `/v1/enroll`'s bucket is empty | farmer's `401 enrollment_failed`, not 429: no JWT gate, and a bucket of its own |
 | D11 | `POST /v1/enroll` every 5 s for up to `--refill-wait` (75) s | the bucket refills and farmer answers again |
+| D12 | `openssl s_client` again, sending and verifying `dmz.<zone>` over the same connection | the certificate also verifies for the private name sprouts use (the runner cannot resolve it, so only the name changes) |
 
 "jwt_authn's body" means a 401 whose body starts with `Jwt ` or `Jwks `
 (Envoy's reasons: `Jwt is missing`, `Jwt verification fails`, `Jwks doesn't
@@ -246,30 +260,26 @@ makes, and what `dmz.json` gives it.
    `networkPolicy.dmz.*` selects pods, which a peer in another cluster is
    not, so core needs an `ipBlock` for `dmz.private_ip/32` on the farmer API
    port (traffic from Envoy is source-NATed to the DMZ node's address).
-3. **farmer and saasapi reach the bus at
-   `tls://imas-dmz-nats-bus.imas-dmz.svc.cluster.local:5406`**: the farmer
-   chart's `bus.serviceName=imas-dmz-nats-bus`, `bus.namespace=imas-dmz`,
-   `bus.port=5406` (its defaults apart from the service name). That name has
-   to resolve inside the core cluster to `dmz.private_ip`, with port 5406
-   arriving at `dmz.ports.bus` (node port 8442); for example a namespace
-   `imas-dmz` in the core cluster with a selectorless Service
-   `imas-dmz-nats-bus` on 5406 and an EndpointSlice for
-   `dmz.private_ip:8442`. `dmz.json`'s `bus`
-   object carries both halves. TLS: farmer and saasapi verify the bus
-   Service FQDN, which the bus certificate carries; it also carries
-   `dmz.private_ip` and `dmz.fqdn` in case core sets `bus.tlsServerName`
-   instead. Core's own egress policy needs an `ipBlock` for
-   `dmz.private_ip/32` on that port, for the same reason as in 2.
+3. **farmer and saasapi reach the bus at `tls://dmz.uat.imas.internal:8442`**
+   (owner's decision: `farmerbusurl` uses the private name; `dmz.json`,
+   `bus.farmerbusurl`). The name resolves to `dmz.private_ip` inside the
+   VNet, and from core's pods if their DNS forwards to the node's resolver.
+   farmer and saasapi verify that name; the bus certificate carries it, and
+   the DMZ private IP. How the farmer chart is set to this URL is UAT.3b's:
+   it builds `farmerbusurl` and `SAASAPI_NATS_URL` from `bus.serviceName`,
+   `bus.namespace` and `bus.port` as an in-cluster name (see Open
+   questions). Core's own egress policy needs an `ipBlock` for
+   `dmz.private_ip/32` on 8442, for the same reason as in 2.
 4. **Core's connections arrive from `core.private_ip`.** Pod egress leaving
    the core node is source-NATed to the node's address (true of k0s's
    default kube-router and of kind); the bus rule admits that address only.
 5. **One UAT CA on both hubs.** UAT.2 sets up the same per-run root as a
    ClusterIssuer on each hub, so the bus certificate's `ca.crt` is the CA
    farmer's and saasapi's bus CA settings (`bus.ca`, `tls`) must trust.
-6. **farmer hands sprouts `wss://<dmz.fqdn>:<dmz.ports.envoy>/`** as
+6. **farmer hands sprouts `wss://dmz.uat.imas.internal:8443/`** as
    `bus.sproutBusURLs` (`dmz.json`, `envoy.sprout_bus_url`), and the
    enrolment (UAT.4) points sprouts' `farmerinterface` and `farmerapiport`
-   at the same host and port, with the UAT CA as `sproutrootca` and
+   at the same host and port (owner's decision on the private names), with the UAT CA as `sproutrootca` and
    `sproutrootcatofu: false`.
 7. **Same `organization`** on both charts (`imas`, the farmer chart's
    default), and farmer's `gatewayjwtttl` at its 24 h default, which the
@@ -277,8 +287,9 @@ makes, and what `dmz.json` gives it.
    300 burst).
 8. **farmer's API certificate is not checked by Envoy.** Upstream TLS
    verification is off, as in the reference `envoy.yaml`, because the
-   farmer certificate comes from core's own PKI. Envoy sends `core.fqdn` as
-   SNI so that turning verification on later needs only that name in
+   farmer certificate comes from core's own PKI. Envoy sends
+   `core.uat.imas.internal` as SNI so that turning verification on later
+   needs only that name in
    farmer's certificate and its CA in `envoy.upstreamTLS`.
 
 ## Tests
@@ -305,9 +316,9 @@ helm, bash or jq fails the render tests instead):
   `dmz.json`. `TestRenderServiceTypeFromEndpoints`: the endpoints file's
   `dmz.envoy_service_type` picks the mode unless `--expose` is given.
 - **The install path with stub kubectl and helm** (`TestInstallWithStubs`):
-  the order of the steps; the registry token reaching `helm repo add` on
-  stdin only and never left in the work directory; an exact-version `helm
-  pull` and no `--devel`; only the five bus seeds read from core (never
+  the order of the steps; no registry credential passed to helm, even
+  with a token in the environment; an exact-version `helm pull` and no
+  `--devel`; only the five bus seeds read from core (never
   `saasapi-user.nk`) and put in the DMZ Secret unchanged; every DMZ call
   carrying the DMZ kubeconfig. `TestInstallLoadBalancerWithStubs`: the load
   balancer's address lands in `dmz.json`, and no address fails the
@@ -317,10 +328,10 @@ helm, bash or jq fails the render tests instead):
   from the tag, bad endpoints, conflicting options.
 - **check.sh against a fake Envoy** (`TestCheck*`), with the real curl and
   openssl: a TLS server with a test CA that answers as `envoy.yaml`
-  documents passes D1 to D11; fakes that leave `/files/` open, accept a
+  documents passes D1 to D12; fakes that leave `/files/` open, accept a
   forged token, do not rate limit, cannot reach farmer, share the
-  `/v1/refresh` bucket, present another CA's certificate, or a certificate
-  for another name each fail the right checks.
+  `/v1/refresh` bucket, present another CA's certificate, a certificate for
+  another name, or one without the private name each fail the right checks.
 - **Lint** (`TestLint`): `shellcheck -x` on the scripts and `yamllint -s` on
   `values-uat.yaml` and the generated values and manifests.
 
@@ -340,6 +351,11 @@ and 8443, which depends on UAT.2's range.
   answers the earlier questions about 8443 falling outside UAT.2's range and
   about two Services wanting one node port.
 - **Install order:** core first, then DMZ (assumption 1 above).
+- **Private names:** `dmz.uat.imas.internal` and `core.uat.imas.internal`,
+  used for the SANs, `farmerinterface` and `farmerbusurl` (see
+  [Private names](#private-names)). This answers where sprouts and core find
+  the DMZ.
+- **`imashelm` is public:** no token. The token path is removed.
 
 ## Open questions
 
@@ -367,7 +383,15 @@ and 8443, which depends on UAT.2's range.
 5. **LoadBalancer in UAT.** No load balancer controller is installed on the
    k0s hubs, so `--expose loadbalancer` would wait and fail there; it is
    ready for a cluster that has one.
-6. **Is `imashelm` private?** If it is, the workflow needs a Buildkite
-   read token as `IMAS_HELM_REGISTRY_TOKEN`; the Buildkite Helm URL and the
-   `buildkite` user name are from Buildkite's documentation and have not
-   been tried against this registry.
+6. **`farmerbusurl` on the private name, in the farmer chart.**
+   `deploy/helm/farmer` builds `farmerbusurl` and saasapi's
+   `SAASAPI_NATS_URL` as `tls://<bus.serviceName>.<bus.namespace>.svc.<clusterDomain>:<bus.port>`,
+   so it cannot produce `tls://dmz.uat.imas.internal:8442` from its values.
+   That is for UAT.3b (and possibly a chart change); this side only makes
+   sure the bus certificate carries the name.
+7. **Private names from pods.** Envoy dials farmer by IP, so the DMZ needs no
+   private name resolution. Core's pods need `dmz.uat.imas.internal` to
+   resolve: CoreDNS forwards to the node's resolver by default on k0s, and
+   the zone is linked to the VNet, but this has not been tried.
+8. **The Shared contract** (section 4h) is to carry the private names; that
+   text is outside this brief.

@@ -271,13 +271,18 @@ func containerPort(t *testing.T, workload obj, container, port string) int {
 }
 
 type want struct {
-	dmzFQDN, dmzIP, coreIP, coreFQDN, issuer string
-	envoyPort, busPort, farmerPort           int
-	expose                                   string
+	dmzFQDN, dmzIP, coreIP, issuer string
+	zone                           string // private DNS zone; empty: uat.imas.internal
+	envoyPort, busPort, farmerPort int
+	expose                         string
 }
 
 func checkRender(t *testing.T, r rendered, w want) {
 	t.Helper()
+	if w.zone == "" {
+		w.zone = "uat.imas.internal"
+	}
+	dmzPrivate, corePrivate := "dmz."+w.zone, "core."+w.zone
 	envoy := find(t, r.chart, "Deployment", "imas-dmz-nats-envoy")
 	bus := find(t, r.chart, "StatefulSet", "imas-dmz-nats-bus")
 
@@ -313,8 +318,9 @@ func checkRender(t *testing.T, r rendered, w want) {
 	if get(edge, "spec", "secretName") != "imas-envoy-dmz-tls" {
 		t.Errorf("edge Certificate writes %v", get(edge, "spec", "secretName"))
 	}
-	if got := strs(get(edge, "spec", "dnsNames")); !slices.Equal(got, []string{w.dmzFQDN}) {
-		t.Errorf("edge Certificate dnsNames %v, want [%s]", got, w.dmzFQDN)
+	// The private name sprouts use, and the public FQDN the runner checks.
+	if got := strs(get(edge, "spec", "dnsNames")); !slices.Equal(got, []string{dmzPrivate, w.dmzFQDN}) {
+		t.Errorf("edge Certificate dnsNames %v, want [%s %s]", got, dmzPrivate, w.dmzFQDN)
 	}
 	for _, c := range []obj{edge, find(t, r.manifests, "Certificate", "imas-farmerbus-tls")} {
 		if ref := get(c, "spec", "issuerRef"); get(ref, "kind") != "ClusterIssuer" || get(ref, "name") != w.issuer {
@@ -323,8 +329,9 @@ func checkRender(t *testing.T, r rendered, w want) {
 	}
 	busCert := find(t, r.manifests, "Certificate", "imas-farmerbus-tls")
 	busFQDN := "imas-dmz-nats-bus.imas-dmz.svc.cluster.local"
-	if names := strs(get(busCert, "spec", "dnsNames")); !slices.Contains(names, busFQDN) {
-		t.Errorf("bus Certificate dnsNames %v lack %s", names, busFQDN)
+	// The Service name Envoy dials and the private name farmer dials.
+	if names := strs(get(busCert, "spec", "dnsNames")); !slices.Contains(names, busFQDN) || !slices.Contains(names, dmzPrivate) || slices.Contains(names, w.dmzFQDN) {
+		t.Errorf("bus Certificate dnsNames %v: want %s and %s, not the public %s", names, busFQDN, dmzPrivate, w.dmzFQDN)
 	}
 	if ips := strs(get(busCert, "spec", "ipAddresses")); !slices.Equal(ips, []string{w.dmzIP}) {
 		t.Errorf("bus Certificate ipAddresses %v, want [%s]", ips, w.dmzIP)
@@ -349,8 +356,8 @@ func checkRender(t *testing.T, r rendered, w want) {
 	// Upstreams: farmer on the core private IP and its API port.
 	for _, name := range []string{"farmer_api", "recipe_service"} {
 		addr, port, sni := envoyCluster(t, r.envoy, name)
-		if addr != w.coreIP || port != w.farmerPort || sni != w.coreFQDN {
-			t.Errorf("Envoy cluster %s = %s:%d sni %q, want %s:%d sni %q", name, addr, port, sni, w.coreIP, w.farmerPort, w.coreFQDN)
+		if addr != w.coreIP || port != w.farmerPort || sni != corePrivate {
+			t.Errorf("Envoy cluster %s = %s:%d sni %q, want %s:%d sni %q", name, addr, port, sni, w.coreIP, w.farmerPort, corePrivate)
 		}
 	}
 	if addr, port, _ := envoyCluster(t, r.envoy, "nats_websocket"); addr != busFQDN || port != 5407 {
@@ -435,12 +442,14 @@ func checkRender(t *testing.T, r rendered, w want) {
 	}
 
 	// What the core side and enrolment read.
-	if got := get(r.outputs, "envoy", "sprout_bus_url"); got != fmt.Sprintf("wss://%s:%d/", w.dmzFQDN, w.envoyPort) {
-		t.Errorf("dmz.json sprout_bus_url %v", got)
+	if got := get(r.outputs, "envoy", "sprout_bus_url"); got != fmt.Sprintf("wss://%s:%d/", dmzPrivate, w.envoyPort) ||
+		get(r.outputs, "envoy", "host") != dmzPrivate || get(r.outputs, "envoy", "public_host") != w.dmzFQDN {
+		t.Errorf("dmz.json envoy %v: want sprouts on %s, the runner on %s", get(r.outputs, "envoy"), dmzPrivate, w.dmzFQDN)
 	}
-	if get(r.outputs, "bus", "service_name") != "imas-dmz-nats-bus" || get(r.outputs, "bus", "namespace") != "imas-dmz" ||
-		get(r.outputs, "bus", "tls_server_name") != busFQDN || get(r.outputs, "bus", "reach_address") != w.dmzIP ||
-		get(r.outputs, "bus", "reach_port") != float64(w.busPort) || get(r.outputs, "bus", "service_port") != float64(5406) {
+	if get(r.outputs, "bus", "farmerbusurl") != fmt.Sprintf("tls://%s:%d", dmzPrivate, w.busPort) ||
+		get(r.outputs, "bus", "tls_server_name") != dmzPrivate || get(r.outputs, "bus", "address") != w.dmzIP ||
+		get(r.outputs, "bus", "port") != float64(w.busPort) || get(r.outputs, "bus", "in_cluster", "fqdn") != busFQDN ||
+		get(r.outputs, "bus", "in_cluster", "port") != float64(5406) {
 		t.Errorf("dmz.json bus %v", get(r.outputs, "bus"))
 	}
 	if get(r.outputs, "chart_version") != testVersion {
@@ -452,8 +461,7 @@ func TestRenderEndpoints(t *testing.T) {
 	r := render(t, "endpoints.json")
 	checkRender(t, r, want{
 		dmzFQDN: "uatabc123-dmz.centralindia.cloudapp.azure.com", dmzIP: "10.60.1.4",
-		coreIP: "10.60.2.4", coreFQDN: "uatabc123-core.centralindia.cloudapp.azure.com",
-		issuer: "imas-uat-ca", envoyPort: 8443, busPort: 8442, farmerPort: 5405, expose: "nodeport",
+		coreIP: "10.60.2.4", issuer: "imas-uat-ca", envoyPort: 8443, busPort: 8442, farmerPort: 5405, expose: "nodeport",
 	})
 }
 
@@ -463,8 +471,7 @@ func TestRenderLoadBalancer(t *testing.T) {
 	r := render(t, "endpoints.json", "--expose", "loadbalancer")
 	checkRender(t, r, want{
 		dmzFQDN: "uatabc123-dmz.centralindia.cloudapp.azure.com", dmzIP: "10.60.1.4",
-		coreIP: "10.60.2.4", coreFQDN: "uatabc123-core.centralindia.cloudapp.azure.com",
-		issuer: "imas-uat-ca", envoyPort: 8443, busPort: 8442, farmerPort: 5405, expose: "loadbalancer",
+		coreIP: "10.60.2.4", issuer: "imas-uat-ca", envoyPort: 8443, busPort: 8442, farmerPort: 5405, expose: "loadbalancer",
 	})
 }
 
@@ -473,8 +480,7 @@ func TestRenderUAT2Endpoints(t *testing.T) {
 	r := render(t, "endpoints-uat2.json")
 	checkRender(t, r, want{
 		dmzFQDN: "uatab12cd34-dmz.centralindia.cloudapp.azure.com", dmzIP: "10.60.1.4",
-		coreIP: "10.60.2.4", coreFQDN: "uatab12cd34-core.centralindia.cloudapp.azure.com",
-		issuer: "imas-uat-ca", envoyPort: 8443, busPort: 8442, farmerPort: 5405, expose: "nodeport",
+		coreIP: "10.60.2.4", issuer: "imas-uat-ca", envoyPort: 8443, busPort: 8442, farmerPort: 5405, expose: "nodeport",
 	})
 }
 
@@ -484,8 +490,7 @@ func TestRenderTofuOutputDefaults(t *testing.T) {
 	r := render(t, "tofu-uat.json")
 	checkRender(t, r, want{
 		dmzFQDN: "uatabc123-dmz.centralindia.cloudapp.azure.com", dmzIP: "10.60.1.4",
-		coreIP: "10.60.2.4", coreFQDN: "uatabc123-core.centralindia.cloudapp.azure.com",
-		issuer: "imas-uat-ca", envoyPort: 8443, busPort: 8442, farmerPort: 5405, expose: "nodeport",
+		coreIP: "10.60.2.4", issuer: "imas-uat-ca", envoyPort: 8443, busPort: 8442, farmerPort: 5405, expose: "nodeport",
 	})
 }
 
@@ -494,8 +499,7 @@ func TestRenderTofuOutputDefaults(t *testing.T) {
 func TestRenderNodePortAndPorts(t *testing.T) {
 	r := render(t, "endpoints-nodeport.json", "--expose", "nodeport")
 	checkRender(t, r, want{
-		dmzFQDN: "dmz.uat.test", dmzIP: "172.18.0.3", coreIP: "172.18.0.4", coreFQDN: "core.uat.test",
-		issuer: "uat-root", envoyPort: 30443, busPort: 30406, farmerPort: 30405, expose: "nodeport",
+		dmzFQDN: "dmz.uat.test", dmzIP: "172.18.0.3", coreIP: "172.18.0.4", zone: "rig.internal", issuer: "uat-root", envoyPort: 30443, busPort: 30406, farmerPort: 30405, expose: "nodeport",
 	})
 }
 
@@ -560,6 +564,7 @@ func TestInstallRefuses(t *testing.T) {
 		{"bad fqdn", []string{"--render-only", "--release-tag", testTag, "--endpoints", writeJSON(t, endpointsWith(func(e obj) { e["dmz"].(obj)["fqdn"] = "dmz_host" }))}, "dmz.fqdn"},
 		{"bad port", []string{"--render-only", "--release-tag", testTag, "--endpoints", writeJSON(t, endpointsWith(func(e obj) { e["core"].(obj)["ports"] = obj{"farmer_api": 70000} }))}, "core.ports.farmer_api"},
 		{"same ports", []string{"--render-only", "--release-tag", testTag, "--endpoints", writeJSON(t, endpointsWith(func(e obj) { e["dmz"].(obj)["ports"] = obj{"envoy": 8442} }))}, "are both 8442"},
+		{"bad zone", []string{"--render-only", "--release-tag", testTag, "--endpoints", writeJSON(t, endpointsWith(func(e obj) { e["private_dns_zone"] = "uat imas" }))}, "private_dns_zone"},
 		{"bad service type", []string{"--render-only", "--release-tag", testTag, "--endpoints", writeJSON(t, endpointsWith(func(e obj) { e["dmz"].(obj)["envoy_service_type"] = "ClusterIP" }))}, "dmz.envoy_service_type"},
 		{"bad issuer", []string{"--render-only", "--release-tag", testTag, "--endpoints", writeJSON(t, endpointsWith(func(e obj) { e["cluster_issuer"] = "UAT CA" }))}, "cluster_issuer"},
 	}
@@ -581,7 +586,7 @@ type pki struct {
 	cert   tls.Certificate
 }
 
-func newPKI(t *testing.T, host string) pki {
+func newPKI(t *testing.T, host string, more ...string) pki {
 	t.Helper()
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -602,7 +607,7 @@ func newPKI(t *testing.T, host string) pki {
 		t.Fatal(err)
 	}
 	leafDER, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{
-		SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: host}, DNSNames: []string{host},
+		SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: host}, DNSNames: append([]string{host}, more...),
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}, ca, &key.PublicKey, caKey)
@@ -703,13 +708,13 @@ var opensslThree = sync.OnceValue(func() bool {
 
 // runCheck starts a fake Envoy for host with the given faults and runs
 // check.sh against it. caFile overrides the CA check.sh is given.
-func runCheck(t *testing.T, host, certHost string, faults []string, caFile string, args ...string) (int, string) {
+func runCheck(t *testing.T, host string, certHosts []string, faults []string, caFile string, args ...string) (int, string) {
 	t.Helper()
 	need(t, false, "bash", "jq", "curl", "openssl", "timeout")
 	if !opensslThree() {
 		t.Skip("OpenSSL 3 not on PATH")
 	}
-	p := newPKI(t, certHost)
+	p := newPKI(t, certHosts[0], certHosts[1:]...)
 	f := &fakeEnvoy{fill: 2 * time.Second, faults: map[string]bool{}}
 	for _, x := range faults {
 		f.faults[x] = true
@@ -739,11 +744,11 @@ func runCheck(t *testing.T, host, certHost string, faults []string, caFile strin
 }
 
 func TestCheckPassesAgainstEnvoyBehaviour(t *testing.T) {
-	code, out := runCheck(t, "dmz.uat.test", "dmz.uat.test", nil, "", "--refill-wait", "6")
+	code, out := runCheck(t, "dmz.uat.test", []string{"dmz.uat.test", "dmz.uat.imas.internal"}, nil, "", "--refill-wait", "6")
 	if code != 0 {
 		t.Fatalf("check.sh failed against a correct fake Envoy:\n%s", out)
 	}
-	for i := 1; i <= 11; i++ {
+	for i := 1; i <= 12; i++ {
 		if !regexp.MustCompile(fmt.Sprintf(`(?m)^PASS D%d `, i)).MatchString(out) {
 			t.Errorf("D%d did not pass", i)
 		}
@@ -753,9 +758,10 @@ func TestCheckPassesAgainstEnvoyBehaviour(t *testing.T) {
 func TestCheckCatchesFaults(t *testing.T) {
 	other := newPKI(t, "dmz.uat.test")
 	cases := []struct {
-		name, certHost, caFile string
-		faults                 []string
-		wantFail               []string
+		name, caFile string
+		certHosts    []string
+		faults       []string
+		wantFail     []string
 	}{
 		{name: "files route open", faults: []string{"files open"}, wantFail: []string{"D3", "D4"}},
 		{name: "forged token accepted", faults: []string{"forged accepted"}, wantFail: []string{"D4", "D6"}},
@@ -763,15 +769,16 @@ func TestCheckCatchesFaults(t *testing.T) {
 		{name: "farmer unreachable", faults: []string{"farmer down"}, wantFail: []string{"D8", "D10"}},
 		{name: "refresh shares the enroll bucket", faults: []string{"shared bucket"}, wantFail: []string{"D10"}},
 		{name: "another CA", caFile: other.caFile, wantFail: []string{"D1"}},
-		{name: "certificate for another name", certHost: "other.uat.test", wantFail: []string{"D1"}},
+		{name: "certificate for another name", certHosts: []string{"other.uat.test", "dmz.uat.imas.internal"}, wantFail: []string{"D1"}},
+		{name: "certificate without the private name", certHosts: []string{"dmz.uat.test"}, wantFail: []string{"D12"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			certHost := c.certHost
-			if certHost == "" {
-				certHost = "dmz.uat.test"
+			certHosts := c.certHosts
+			if certHosts == nil {
+				certHosts = []string{"dmz.uat.test", "dmz.uat.imas.internal"}
 			}
-			code, out := runCheck(t, "dmz.uat.test", certHost, c.faults, c.caFile, "--refill-wait", "0")
+			code, out := runCheck(t, "dmz.uat.test", certHosts, c.faults, c.caFile, "--refill-wait", "0")
 			if code == 0 {
 				t.Fatalf("check.sh passed against a fake with %q", c.name)
 			}
@@ -910,7 +917,7 @@ func TestInstallWithStubs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	const token = "bkua_uat_stub_token_value"
+	const token = "bkua_uat_stub_unused_value"
 	logFile := filepath.Join(t.TempDir(), "calls.log")
 	work := t.TempDir()
 	env := []string{
@@ -931,16 +938,12 @@ func TestInstallWithStubs(t *testing.T) {
 	calls := strings.Split(strings.TrimSpace(string(b)), "\n")
 	logText := string(b)
 
-	// The token reaches helm on stdin only.
-	for _, c := range calls {
-		if strings.Contains(c, token) && !strings.HasPrefix(c, "helm-stdin ") {
-			t.Errorf("the registry token is on a command line: %s", c)
-		}
+	// imashelm is public (owner's decision): no credential goes anywhere,
+	// even with a token in the environment.
+	if strings.Contains(logText, token) || strings.Contains(logText, "--password") || strings.Contains(logText, "--username") {
+		t.Errorf("a registry credential was passed to helm:\n%s", logText)
 	}
-	if !strings.Contains(logText, "helm-stdin "+token) {
-		t.Error("helm repo add did not get the token on stdin")
-	}
-	if !strings.Contains(logText, "helm repo add --force-update imas-uat-imashelm https://packages.buildkite.com/example-org/imashelm/helm --username buildkite --password-stdin") {
+	if !regexp.MustCompile(`(?m)^helm repo add --force-update imas-uat-imashelm https://packages\.buildkite\.com/example-org/imashelm/helm$`).MatchString(logText) {
 		t.Errorf("unexpected helm repo add:\n%s", logText)
 	}
 	if !regexp.MustCompile(`(?m)^helm pull imas-uat-imashelm/nats --version 0\.1\.0-rc\.4 --destination \S+$`).MatchString(logText) {
@@ -1006,11 +1009,11 @@ func TestInstallWithStubs(t *testing.T) {
 			t.Errorf("kubectl call without the DMZ kubeconfig: %s", c)
 		}
 	}
-	// Nothing of the Helm home (which held the token) is left in the work directory.
+	// The temporary Helm home is not left in the work directory.
 	if _, err := os.Stat(filepath.Join(work, "helm")); err == nil {
 		t.Error("a Helm home was left in the work directory")
 	}
-	if b, err := os.ReadFile(filepath.Join(work, "dmz.json")); err != nil || !bytes.Contains(b, []byte(`"sprout_bus_url": "wss://uatabc123-dmz.centralindia.cloudapp.azure.com:8443/"`)) {
+	if b, err := os.ReadFile(filepath.Join(work, "dmz.json")); err != nil || !bytes.Contains(b, []byte(`"sprout_bus_url": "wss://dmz.uat.imas.internal:8443/"`)) {
 		t.Errorf("dmz.json: %v\n%s", err, b)
 	}
 }

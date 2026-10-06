@@ -44,9 +44,8 @@
 #                         manifests and run helm template; touch no cluster
 # --chart                 a local chart, only with --render-only (tests)
 #
-# Environment: IMAS_HELM_REGISTRY_TOKEN, a Buildkite read token, only if
-# the imashelm registry is private (sent with helm repo add
-# --password-stdin, never on a command line).
+# The imashelm registry is public (owner's decision, 2026-10-06): no token
+# is taken or sent.
 #
 # Nothing here is Azure specific, so the local rig (UAT.8) runs it as is.
 set -euo pipefail
@@ -132,10 +131,8 @@ cleanup_dirs=()
 cleanup() { ((${#cleanup_dirs[@]} == 0)) || rm -rf "${cleanup_dirs[@]}"; }
 trap cleanup EXIT
 
-# Helm state of its own, so nothing leaks into or out of the runner's, and
-# kept out of the work directory: with IMAS_HELM_REGISTRY_TOKEN set,
-# repositories.yaml holds the token, and the work directory may be
-# uploaded as a run artifact.
+# Helm state of its own, so nothing leaks into or out of the runner's; a
+# temporary directory, so the work directory holds only this run's files.
 helm_home=$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/uat-dmz-helm.XXXXXX")
 cleanup_dirs+=("$helm_home")
 export HELM_CONFIG_HOME="$helm_home/config" HELM_CACHE_HOME="$helm_home/cache" \
@@ -158,13 +155,8 @@ else
 	[[ $org =~ ^[a-z0-9][a-z0-9-]*$ ]] || dmz_die "bad BUILDKITE_ORGANIZATION_SLUG '$org'"
 	chart_repo_url=${chart_repo_url:-https://packages.buildkite.com/$org/imashelm/helm}
 	[[ $chart_repo_url == https://* ]] || dmz_die "--chart-repo-url must be https"
-	repo_args=()
-	if [[ -n ${IMAS_HELM_REGISTRY_TOKEN:-} ]]; then
-		repo_args=(--username buildkite --password-stdin)
-	fi
 	dmz_log "helm repo add imas-uat-imashelm $chart_repo_url"
-	printf '%s\n' "${IMAS_HELM_REGISTRY_TOKEN:-}" |
-		helm repo add --force-update imas-uat-imashelm "$chart_repo_url" "${repo_args[@]}" >/dev/null ||
+	helm repo add --force-update imas-uat-imashelm "$chart_repo_url" >/dev/null ||
 		dmz_die "could not add the chart repository $chart_repo_url"
 	mkdir -p "$workdir/chart"
 	rm -f "$workdir/chart/nats-$version.tgz"
@@ -312,5 +304,5 @@ else
 fi
 
 kc -n "$DMZ_NAMESPACE" get pods,svc -o wide >&2 || true
-dmz_log "Ready. Envoy for $DMZ_FQDN: $where; bus for core: node port $DMZ_BUS_PORT on $DMZ_PRIVATE_IP"
+dmz_log "Ready. Envoy for $DMZ_PRIVATE_NAME (sprouts) and $DMZ_FQDN (runner): $where; bus for core: tls://$DMZ_PRIVATE_NAME:$DMZ_BUS_PORT ($DMZ_PRIVATE_IP)"
 dmz_log "outputs for the core side and enrolment: $workdir/dmz.json"

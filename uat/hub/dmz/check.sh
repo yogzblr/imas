@@ -37,6 +37,9 @@
 #   D10 /v1/refresh has its own bucket and no JWT gate: with /v1/enroll's
 #       bucket empty it still reaches farmer (401 enrollment_failed)
 #   D11 /v1/enroll's bucket refills (skipped with --refill-wait 0)
+#   D12 the same certificate verifies for the DMZ private name sprouts use
+#       (dmz.<private_dns_zone>, their farmerinterface), sent as SNI over the
+#       same connection, since the runner cannot resolve that name
 # D8, D10 and D11 need farmer running on the core hub (UAT.3b); the others
 # do not. Run it before enrolment: D9 empties /v1/enroll's bucket.
 set -uo pipefail
@@ -165,18 +168,21 @@ ws_headers=(-H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-V
 	-H "Sec-WebSocket-Key: $ws_nonce")
 
 # --- TLS ---------------------------------------------------------------------
+# s_client NAME [ARGS]: a handshake to the listener, sending and verifying NAME.
 s_client() {
-	timeout 30 openssl s_client -connect "$DMZ_CONNECT_ADDR:$port" -servername "$host" \
-		-verify_hostname "$host" -verify_return_error "$@" </dev/null 2>&1
+	local name=$1
+	shift
+	timeout 30 openssl s_client -connect "$DMZ_CONNECT_ADDR:$port" -servername "$name" \
+		-verify_hostname "$name" -verify_return_error "$@" </dev/null 2>&1
 }
-out=$(s_client -no-CAfile -no-CApath -no-CAstore -CAfile "$ca_file")
+out=$(s_client "$host" -no-CAfile -no-CApath -no-CAstore -CAfile "$ca_file")
 rc=$?
 if ((rc == 0)) && grep -q 'Verify return code: 0 (ok)' <<<"$out"; then
 	pass D1 "TLS on $host:$port verifies against the UAT CA ($(grep -m1 '^New, ' <<<"$out"))"
 else
 	fail D1 "TLS on $host:$port does not verify against the UAT CA for $host: $(grep -m1 -E 'Verify return code|verify error|errno|connect:' <<<"$out")"
 fi
-out=$(s_client)
+out=$(s_client "$host")
 rc=$?
 if ((rc != 0)) || ! grep -q 'Verify return code: 0 (ok)' <<<"$out"; then
 	pass D2 "the listener's certificate does not verify against the system store alone"
@@ -273,6 +279,14 @@ elif [[ -n $limited ]]; then
 	fi
 else
 	skip D11 "the bucket was never drained (D9 failed)"
+fi
+
+out=$(s_client "$DMZ_PRIVATE_NAME" -no-CAfile -no-CApath -no-CAstore -CAfile "$ca_file")
+rc=$?
+if ((rc == 0)) && grep -q 'Verify return code: 0 (ok)' <<<"$out"; then
+	pass D12 "the certificate also verifies for $DMZ_PRIVATE_NAME, the name sprouts use"
+else
+	fail D12 "the certificate does not verify for $DMZ_PRIVATE_NAME: $(grep -m1 -E 'Verify return code|verify error|errno|connect:' <<<"$out")"
 fi
 
 if ((failed)); then

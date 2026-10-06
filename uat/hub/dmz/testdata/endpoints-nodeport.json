@@ -1,5 +1,6 @@
 {
   "cluster_issuer": "uat-root",
+  "private_dns_zone": "rig.internal",
   "dmz": {
     "name": "dmz",
     "private_ip": "172.18.0.3",

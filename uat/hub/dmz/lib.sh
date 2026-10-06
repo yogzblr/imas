@@ -33,6 +33,10 @@ DMZ_DEFAULT_ENVOY_PORT=8443
 DMZ_DEFAULT_BUS_PORT=8442
 DMZ_DEFAULT_FARMER_API_PORT=5405
 DMZ_DEFAULT_CLUSTER_ISSUER=imas-uat-ca
+# The private DNS zone of the run (UAT.1's private_dns_zone): dmz.<zone> and
+# core.<zone> resolve to the hubs' private addresses inside the VNet. Owner's
+# decision, 2026-10-06: the SANs, farmerinterface and farmerbusurl use them.
+DMZ_DEFAULT_PRIVATE_DNS_ZONE=uat.imas.internal
 
 dmz_log() { printf '%s: %s\n' "${DMZ_PROG:-uat-dmz}" "$*" >&2; }
 dmz_die() {
@@ -78,7 +82,8 @@ _dmz_jq() { jq -r "($2) // empty | tostring" "$1"; }
 # dmz_load_endpoints FILE: read and check the endpoints file, setting
 #   DMZ_FQDN DMZ_PRIVATE_IP DMZ_PUBLIC_IP (may be empty) DMZ_ENVOY_PORT
 #   DMZ_BUS_PORT CORE_FQDN CORE_PRIVATE_IP CORE_FARMER_API_PORT
-#   DMZ_CLUSTER_ISSUER DMZ_CONNECT_ADDR
+#   DMZ_CLUSTER_ISSUER DMZ_CONNECT_ADDR DMZ_PRIVATE_DNS_ZONE
+#   DMZ_PRIVATE_NAME CORE_PRIVATE_NAME
 # The shape is the tofu output "uat" object's dmz and core entries (name,
 # private_ip, public_ip, fqdn), plus optional ports; see README.md,
 # "Endpoints file". A tofu "uat" JSON is a valid endpoints file as is.
@@ -98,6 +103,11 @@ dmz_load_endpoints() {
 	CORE_PRIVATE_IP=$(_dmz_jq "$f" '.core.private_ip')
 	CORE_FARMER_API_PORT=$(_dmz_jq "$f" ".core.ports.farmer_api // $DMZ_DEFAULT_FARMER_API_PORT")
 	DMZ_CLUSTER_ISSUER=$(_dmz_jq "$f" ".cluster_issuer // \"$DMZ_DEFAULT_CLUSTER_ISSUER\"")
+	# The names are a convention on the zone, not keys of the tofu output.
+	DMZ_PRIVATE_DNS_ZONE=$(_dmz_jq "$f" ".private_dns_zone // \"$DMZ_DEFAULT_PRIVATE_DNS_ZONE\"")
+	_dmz_is_fqdn "$DMZ_PRIVATE_DNS_ZONE" || dmz_die "endpoints: private_dns_zone '$DMZ_PRIVATE_DNS_ZONE' is not a DNS name"
+	DMZ_PRIVATE_NAME="dmz.${DMZ_PRIVATE_DNS_ZONE}"
+	CORE_PRIVATE_NAME="core.${DMZ_PRIVATE_DNS_ZONE}"
 	# How Envoy is exposed, when the file says (UAT.2's PR #130 writes it);
 	# install.sh --expose overrides it.
 	DMZ_ENVOY_SERVICE_TYPE=$(_dmz_jq "$f" '.dmz.envoy_service_type')
@@ -139,16 +149,17 @@ bus:
     tag: "${version}"
 envoy:
   upstreams:
-    # farmer's API on the core hub, reached on the core private IP.
-    # sni is the core FQDN, a DNS name; upstream TLS is not verified.
+    # farmer's API on the core hub, reached on the core private IP. sni is
+    # core's private DNS name (${CORE_PRIVATE_NAME}); upstream TLS is not
+    # verified.
     farmerAPI:
       host: "${CORE_PRIVATE_IP}"
       port: ${CORE_FARMER_API_PORT}
-      sni: "${CORE_FQDN}"
+      sni: "${CORE_PRIVATE_NAME}"
     recipeService:
       host: "${CORE_PRIVATE_IP}"
       port: ${CORE_FARMER_API_PORT}
-      sni: "${CORE_FQDN}"
+      sni: "${CORE_PRIVATE_NAME}"
 networkPolicy:
   # The chart's core rule selects pods in this cluster, which core is
   # not. Envoy's egress to farmer goes to the core private IP.
@@ -211,8 +222,9 @@ dmz_write_manifests() {
 		cat <<EOF
 # Written by uat/hub/dmz/install.sh for one run. Do not commit.
 ---
-# DMZ edge certificate: what sprouts' wss:// and HTTPS connections, and
-# check.sh, verify against the UAT CA for the DMZ FQDN.
+# DMZ edge certificate, verified against the UAT CA: sprouts connect to the
+# private name (their farmerinterface), the runner's check.sh to the public
+# FQDN.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -227,6 +239,7 @@ spec:
     kind: ClusterIssuer
     name: ${DMZ_CLUSTER_ISSUER}
   dnsNames:
+    - ${DMZ_PRIVATE_NAME}
     - ${DMZ_FQDN}
   duration: 168h
   renewBefore: 24h
@@ -239,8 +252,9 @@ spec:
     - digital signature
 ---
 # Bus certificate (bus.tls.mode=secret): tls.crt, tls.key and ca.crt.
-# Covers the bus Service names Envoy dials and farmer and saasapi verify
-# (the Service FQDN), plus the DMZ private IP and FQDN core may dial.
+# Covers the bus Service names Envoy dials, the private name farmer dials
+# and verifies (farmerbusurl tls://${DMZ_PRIVATE_NAME}:<bus node port>), and
+# the DMZ private IP.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -260,7 +274,7 @@ spec:
     - ${DMZ_BUS_NAME}.${DMZ_NAMESPACE}.svc
     - ${DMZ_BUS_FQDN}
     - ${DMZ_BUS_NAME}-0.${DMZ_BUS_NAME}-headless.${DMZ_NAMESPACE}.svc.cluster.local
-    - ${DMZ_FQDN}
+    - ${DMZ_PRIVATE_NAME}
   ipAddresses:
     - ${DMZ_PRIVATE_IP}
   duration: 168h
@@ -309,11 +323,11 @@ EOF
 	} >"$out"
 }
 
-# dmz_write_outputs OUT VERSION MODE [LB_ADDRESS]: what the core side and the enrolment
-# need from this hub, nothing secret. bus.service_* is what farmer's
-# farmerbusurl names (tls://<tls_server_name>:<service_port>, the farmer
-# chart's bus.serviceName, bus.namespace and bus.port); reach_* is where
-# packets for it must go from the core hub (README.md, "Core side").
+# dmz_write_outputs OUT VERSION MODE [LB_ADDRESS]: what the core side and the
+# enrolment need from this hub, nothing secret. envoy.host is what sprouts
+# use (farmerinterface); bus.farmerbusurl is what farmer dials, verifying
+# bus.tls_server_name; bus.in_cluster is the bus Service inside the DMZ
+# cluster, for reference (README.md, "What is assumed about the core side").
 dmz_write_outputs() {
 	local out=$1 version=$2 mode=$3 lb_address=${4:-}
 	jq -n \
@@ -321,7 +335,8 @@ dmz_write_outputs() {
 		--arg mode "$mode" \
 		--arg lb "$lb_address" \
 		--arg image "${DMZ_BUS_IMAGE_REPO}:${version}" \
-		--arg fqdn "$DMZ_FQDN" \
+		--arg private_name "$DMZ_PRIVATE_NAME" \
+		--arg public_fqdn "$DMZ_FQDN" \
 		--arg envoy_port "$DMZ_ENVOY_PORT" \
 		--arg bus_ip "$DMZ_PRIVATE_IP" \
 		--arg bus_port "$DMZ_BUS_PORT" \
@@ -333,19 +348,24 @@ dmz_write_outputs() {
 			chart_version: $version,
 			farmerbus_image: $image,
 			envoy: {
-				host: $fqdn,
+				host: $private_name,
+				public_host: $public_fqdn,
 				port: ($envoy_port | tonumber),
-				sprout_bus_url: "wss://\($fqdn):\($envoy_port)/",
+				sprout_bus_url: "wss://\($private_name):\($envoy_port)/",
 				exposure: $mode,
 				load_balancer_address: (if $lb == "" then null else $lb end)
 			},
 			bus: {
-				service_name: $bus_name,
-				namespace: $ns,
-				service_port: ($bus_svc_port | tonumber),
-				tls_server_name: $bus_fqdn,
-				reach_address: $bus_ip,
-				reach_port: ($bus_port | tonumber)
+				farmerbusurl: "tls://\($private_name):\($bus_port)",
+				tls_server_name: $private_name,
+				address: $bus_ip,
+				port: ($bus_port | tonumber),
+				in_cluster: {
+					service_name: $bus_name,
+					namespace: $ns,
+					port: ($bus_svc_port | tonumber),
+					fqdn: $bus_fqdn
+				}
 			}
 		}' >"$out"
 }
