@@ -14,8 +14,11 @@ https://{{ .Values.core.fqdn }}:{{ .Values.core.httpsPort }}
 {{- end }}
 
 {{- define "uat.validate" -}}
-{{- if not (has .Values.core.exposure (list "hostPort" "nodePort")) -}}
-{{- fail "core.exposure must be hostPort or nodePort" -}}
+{{- if hasKey .Values.core "exposure" -}}
+{{- fail "core.exposure was dropped: the edge always uses hostPorts (owner decision 2026-10-06)" -}}
+{{- end -}}
+{{- if ne (int .Values.bus.port) (int .Values.bus.remotePort) -}}
+{{- fail "bus.port must equal bus.remotePort: an ExternalName Service maps no ports" -}}
 {{- end -}}
 {{- range $k, $v := dict "core.privateIP" .Values.core.privateIP "dmz.privateIP" .Values.dmz.privateIP -}}
 {{- if not (regexMatch "^[0-9]{1,3}(\\.[0-9]{1,3}){3}$" $v) -}}

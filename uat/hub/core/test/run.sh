@@ -103,7 +103,7 @@ if gv "$ep" "$admin" v0.1.0-rc.4 >"$tmp/v1.json" 2>"$tmp/out"; then
 	  and .saasapi.jwt.keycloakJWKSURL == .saasapi.jwt.issuer + "/protocol/openid-connect/certs"
 	  and .saasapi.jwt.audience == "imas-saasapi"
 	  and .bus.sproutBusURLs == ["wss://uatabc123-dmz.centralindia.cloudapp.azure.com:8443/"]
-	  and .bus.serviceName == "imas-dmz-nats-bus" and .bus.namespace == "imas-dmz"
+	  and .bus.serviceName == "imas-dmz-nats-bus" and .bus.namespace == "imas-dmz" and .bus.port == 8442
 	  and .farmer.image.tag == "0.1.0-rc.4" and .saasapi.image.tag == "0.1.0-rc.4"
 	  and .database.migrate.image.tag == "0.1.0-rc.4"
 	  and .farmer.bootstrapAdmin.pubkey == "AC4LMP7I2FYLWGY5GIB52A4XCFFFSB2QTZ65B3A4G6OK5GYWRJSKH74C"
@@ -115,7 +115,7 @@ else
 fi
 gv "$ep2" "$admin" v1.2.3 >"$tmp/v2.json" 2>/dev/null &&
 	jq -e '.saasapi.jwt.issuer == "https://core.imas-uat.test:30444/realms/imas-uat"
-	  and .bus.sproutBusURLs == ["wss://dmz.imas-uat.test:30443/"] and .bus.serviceName == "uat-dmz-nats-bus"
+	  and .bus.sproutBusURLs == ["wss://dmz.imas-uat.test:30443/"] and .bus.serviceName == "uat-dmz-nats-bus" and .bus.port == 30406
 	  and .farmer.image.tag == "1.2.3"' "$tmp/v2.json" >/dev/null &&
 	ok "gen-values.sh: port and name overrides, non-443 issuer keeps the port" ||
 	bad "gen-values.sh: port and name overrides"
@@ -128,8 +128,10 @@ jq '.dmz.private_ip = "10.60.1.400"' "$ep" >"$tmp/bad-ip.json"
 refuse "a malformed DMZ IP is refused" "dmz.private_ip" gv "$tmp/bad-ip.json" "$admin" v0.1.0
 jq 'del(.core.fqdn)' "$ep" >"$tmp/no-fqdn.json"
 refuse "a missing core FQDN is refused" "no .core.fqdn" gv "$tmp/no-fqdn.json" "$admin" v0.1.0
-jq '.core.exposure = "LoadBalancer"' "$ep" >"$tmp/bad-exp.json"
-refuse "an unknown exposure is refused" "core.exposure" gv "$tmp/bad-exp.json" "$admin" v0.1.0
+jq '.core.exposure = "nodePort"' "$ep" >"$tmp/bad-exp.json"
+refuse "the dropped core node port mode is refused" "core.exposure must be hostPort" gv "$tmp/bad-exp.json" "$admin" v0.1.0
+jq '.dmz.private_fqdn = "-bad-"' "$ep" >"$tmp/bad-pfqdn.json"
+refuse "a malformed private name is refused" "dmz.private_fqdn" gv "$tmp/bad-pfqdn.json" "$admin" v0.1.0
 jq '.boxpub = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="' "$admin" >"$tmp/zero-admin.json"
 refuse "the chart's all-zero placeholder admin key is refused" "placeholder" gv "$ep" "$tmp/zero-admin.json" v0.1.0
 jq '.pubkey = "not-a-key"' "$admin" >"$tmp/bad-admin.json"
@@ -256,6 +258,56 @@ refuse "bind-tenant.sh refuses tenant 3" "must be 1 or 2" \
 	"$core/bind-tenant.sh" "$kubeconfig" "$ep" "$tmp/s" 3 t_abcdefghijklmnop
 refuse "token.sh refuses an unknown user" "unknown UAT user" \
 	"$core/token.sh" "$kubeconfig" "$ep" "$tmp/s" root
+
+# --- 7b. bind-tenant.sh against a fake kcadm.sh ------------------------------------
+bstate="$tmp/bstate"
+bsens="$bstate/core/sensitive"
+(umask 077 && mkdir -p "$bsens/keycloak" "$bstate/core/out")
+printf 'imas-uat-kc-admin' >"$bsens/keycloak/admin-username"
+printf 'KCADMINPASSWORD0123' >"$bsens/keycloak/admin-password"
+echo '{"tenants": {}}' >"$bstate/core/out/core.json"
+(umask 077 && jq -n '{tenants: {"1": {admin: {username: "t1-admin"}}, "2": {admin: {username: "t2-admin"}}}}' >"$bsens/keycloak.json")
+jq -n '{users: [ "t1-admin", "t1-reader", "t2-admin", "t2-reader" | {id: ("id-" + .), username: ., attributes: {}, roles: []}]}' >"$STUB_STATE/kc-users.json"
+: >"$STUB_STATE/kcadm-argv.log"
+bt() { UAT_KCADM="$stubs/fake-kcadm" PATH="$stubs:$PATH" "$core/bind-tenant.sh" "$kubeconfig" "$ep" "$bstate" "$@"; }
+users() { jq -c "$1" "$STUB_STATE/kc-users.json"; }
+T1=t_aaaaaaaaaaaaaaaa T2=t_bbbbbbbbbbbbbbbb T9=t_cccccccccccccccc
+expect "bind-tenant.sh binds tenant 1" bt 1 "$T1"
+[[ "$(users '[.users[] | select(.username | startswith("t1-")) | .attributes.organization_id[0]] | unique')" == "[\"$T1\"]" ]] &&
+	[[ "$(users '[.users[] | select(.username | startswith("t2-")) | .attributes.organization_id] | unique')" == "[null]" ]] &&
+	ok "tenant mode: t1-admin and t1-reader carry organization_id, tenant 2 untouched" || bad "tenant mode: attributes"
+jq -e --arg t "$T1" '.tenants["1"] == $t' "$bstate/core/out/core.json" >/dev/null &&
+	jq -e --arg t "$T1" '.tenants["1"].tenant_id == $t and .tenants["1"].admin.username == "t1-admin"' "$bsens/keycloak.json" >/dev/null &&
+	[[ "$(stat -c %a "$bsens/keycloak.json")" == 600 ]] &&
+	ok "tenant mode: recorded in core.json and keycloak.json (still 0600)" || bad "tenant mode: records"
+refuse "bind-tenant.sh refuses tenant 1's id for tenant 2" "already bound to tenant 1" bt 2 "$T1"
+expect "bind-tenant.sh binds tenant 2" bt 2 "$T2"
+if bt --scratch-user scratch-t1-new admin "$T9" >"$tmp/scratch.json" 2>"$tmp/out"; then
+	ok "scratch mode creates and binds a user"
+	pwf=$(jq -r .password_file "$tmp/scratch.json")
+	jq -e --arg t "$T9" '.username == "scratch-t1-new" and .tenant_id == $t and .role == "admin" and (has("password") | not)' "$tmp/scratch.json" >/dev/null &&
+		[[ "$(stat -c %a "$pwf")" == 600 ]] && ok "scratch mode: prints username, tenant, role and a 0600 password file, never the password" ||
+		bad "scratch mode: output"
+	users '.users[] | select(.username == "scratch-t1-new")' >"$tmp/su.json"
+	jq -e --arg t "$T9" --arg p "$(cat "$pwf")" '.attributes.organization_id == [$t] and (.roles | sort) == ["imas-recipes-read", "imas-recipes-write"] and .password == $p' "$tmp/su.json" >/dev/null &&
+		ok "scratch mode: both roles, organization_id and the password from its file" || bad "scratch mode: user in Keycloak"
+	! grep -qF "$(cat "$pwf")" "$STUB_STATE/kcadm-argv.log" "$STUB_STATE/calls.log" "$tmp/scratch.json" "$tmp/out" &&
+		! grep -qF KCADMINPASSWORD0123 "$STUB_STATE/calls.log" &&
+		ok "scratch mode: no password in kubectl's argv, kcadm's (user) or the output" || bad "scratch mode: a password leaked"
+	jq -e --arg t "$T9" '.scratch_users["scratch-t1-new"] == {tenant_id: $t, role: "admin"}' "$bstate/core/out/core.json" >/dev/null &&
+		ok "scratch mode: recorded in core.json scratch_users" || bad "scratch mode: core.json"
+	expect "scratch mode again for the same user and tenant" bt --scratch-user scratch-t1-new admin "$T9"
+	[[ "$(users '[.users[] | select(.username == "scratch-t1-new")] | length')" == 1 ]] && ok "scratch mode: a re-run creates no second user" || bad "scratch mode: duplicate user"
+else
+	bad "scratch mode creates and binds a user"
+	sed 's/^/      /' "$tmp/out" | tail -n 10
+fi
+expect "scratch mode: a read-only user" bt --scratch-user scratch-t1-ro readonly "$T9"
+[[ "$(users '.users[] | select(.username == "scratch-t1-ro") | .roles')" == '["imas-recipes-read"]' ]] && ok "scratch mode: readonly gets the read role only" || bad "scratch mode: readonly roles"
+refuse "scratch mode refuses to move a scratch user to another tenant" "already bound to" bt --scratch-user scratch-t1-new admin t_dddddddddddddddd
+refuse "scratch mode refuses tenant 1 or 2" "scratch users are for tenants created during a run" bt --scratch-user scratch-x admin "$T1"
+refuse "scratch mode refuses a realm user's name" "scratch user names" bt --scratch-user t1-admin admin "$T9"
+refuse "scratch mode refuses an unknown role" "admin or readonly" bt --scratch-user scratch-x owner "$T9"
 
 # --- 8. OpenBao ------------------------------------------------------------------------
 bao_bin="${BAO_BIN:-$(command -v bao || true)}"

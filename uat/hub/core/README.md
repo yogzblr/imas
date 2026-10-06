@@ -23,9 +23,9 @@ used by a release. Plan: `docs/claude-code-parallel-build-plan.md`, section 4h.
 | farmer, saasapi, PXC (1 node, 1 HAProxy), Valkey (1), OpenBao (1, standalone, file storage) | namespace `imas-core`, release `imas-core` | the **published** `deploy/helm/farmer` chart of `release_tag`, with `values/farmer-uat.yaml` and a run-specific values file from `gen-values.sh` |
 | **MinIO** | `imas-uat` | the object store, one pod, pinned image, root credential generated per run in a Secret. **AGPL-3.0, test only, never shipped, never a dependency of a released artifact** (owner decision, 2026-10-06). |
 | **Keycloak** | `imas-uat` | Apache-2.0, pinned image, **dev style**: one replica, `start-dev`, the **embedded H2 database** (`dev-file`) on a 1 GiB PVC so a pod restart keeps the tenant bindings. Realm `imas-uat` imported from `chart/files/imas-uat-realm.json`. |
-| edge proxy | `imas-uat` | one Envoy (Apache-2.0, the nats chart's pin) on the core FQDN: 443 for saasapi (`/v1/`) and Keycloak (`/realms/imas-uat/` only, never `/admin` or the master realm), and a TCP passthrough on 5405 to farmer's API for the DMZ's Envoy |
-| the DMZ bus, as seen from core | `imas-dmz` (on the core cluster) | a selectorless Service with the nats chart's bus Service name, whose endpoint is the DMZ hub's private IP, so farmer's `farmerbusurl` FQDN reaches the other cluster and the name it verifies stays the bus certificate's |
-| certificates | `imas-core`, `imas-uat` | farmer's API certificate (`tls.secretName`) and the edge's, both from the per-run UAT CA ClusterIssuer (UAT.2) |
+| edge proxy | `imas-uat` | one Envoy (Apache-2.0, the nats chart's pin), hostPorts only (owner decision 2026-10-06; there is no node port mode, the core node port range being 30000-32767), on the core FQDN: 443 for saasapi (`/v1/`) and Keycloak (`/realms/imas-uat/` only, never `/admin` or the master realm), and a TCP passthrough on 5405 to farmer's API for the DMZ's Envoy |
+| the DMZ bus, as seen from core | `imas-dmz` (on the core cluster) | an ExternalName Service with the nats chart's bus Service name, for the DMZ's private name `dmz.uat.imas.internal` (UAT.1's Private DNS zone); `bus.port` is the DMZ's bus node port 8442. farmer's `farmerbusurl` (`tls://imas-dmz-nats-bus.imas-dmz.svc.cluster.local:8442`) thus dials the private name, and the name it verifies stays the bus certificate's Service FQDN (see Open points) |
+| certificates | `imas-core`, `imas-uat` | farmer's API certificate (`tls.secretName`; SANs: its Service names, `core.uat.imas.internal`, the core FQDN and private IP) and the edge's (the core FQDN), both from the per-run UAT CA ClusterIssuer (UAT.2) |
 | NetworkPolicies | both | additive to the chart's: farmer in from the edge on 5405; farmer and saasapi out to the DMZ IP on the bus port; the edge in on 443 and, from the DMZ IP only, 5405; Keycloak in from the edge only; MinIO in from farmer and saasapi only |
 
 `chart/` holds the UAT-only pieces as a small local Helm chart
@@ -40,6 +40,7 @@ specific, so UAT.8's local rig runs them unchanged:
 install.sh   <kubeconfig> <endpoints.json> <state-dir> <release_tag>
 check.sh     <kubeconfig> <endpoints.json> <state-dir>
 bind-tenant.sh <kubeconfig> <endpoints.json> <state-dir> <1|2> <tenant_id>
+bind-tenant.sh <kubeconfig> <endpoints.json> <state-dir> --scratch-user <scratch-name> <admin|readonly> <tenant_id>
 token.sh     <kubeconfig> <endpoints.json> <state-dir> <t1-admin|t1-reader|t2-admin|t2-reader> [tests|other]
 ```
 
@@ -61,7 +62,9 @@ own with the same arguments. `gen-values.sh` reads files only.
   | `dmz.private_ip` | yes | | the bus endpoint, and the only source admitted to farmer's API |
   | `core.ports.https` | no | `443` | the edge's external HTTPS port; a port other than 443 becomes part of the issuer |
   | `core.ports.farmer_api` | no | `5405` | the edge's external farmer API port (the DMZ's Envoy dials it) |
-  | `core.exposure` | no | `hostPort` | `hostPort`, or `nodePort` (the API server's node port range must then include both ports) |
+  | `core.private_fqdn` | no | `core.uat.imas.internal` | the core's private name (the Shared contract), on farmer's certificate |
+  | `dmz.private_fqdn` | no | `dmz.uat.imas.internal` | the DMZ's private name: the bus ExternalName's target |
+  | `core.exposure` | no | `hostPort` | only `hostPort` is accepted: the node port mode was dropped (owner decision 2026-10-06) |
   | `dmz.ports.envoy` | no | `8443` | Envoy's external port (nats chart `envoy.listenerPort`) |
   | `dmz.ports.bus` | no | `8442` | the DMZ node port of the bus client port (owner decision 2026-10-06: the DMZ node port range is 8442-8443, bus on 8442). farmer and saasapi still dial `bus.port` 5406 on the core-side Service, which forwards to this port |
   | `dmz.bus_service` / `dmz.bus_namespace` | no | `imas-dmz-nats-bus` / `imas-dmz` | the nats release's bus Service (`<release>-nats-bus`) and namespace |
@@ -78,7 +81,9 @@ own with the same arguments. `gen-values.sh` reads files only.
 default StorageClass, cert-manager, the core FQDN resolving to the core
 private IP inside the cluster (so saasapi fetches Keycloak's JWKS from the
 same URL as the issuer and never dials the node's public IP), hostPort
-support in the CNI (or `core.exposure: nodePort`), and the DMZ hub's bus
+support in the CNI, cluster DNS that resolves `dmz.uat.imas.internal` (CoreDNS
+forwarding to the node's resolver, which answers from the Private DNS zone),
+and the DMZ hub's bus
 client port reachable from core. **On the runner:** kubectl, helm, jq, curl,
 openssl, go (to build `nk`), tar, sha256sum, and this repository checked out.
 
@@ -208,11 +213,32 @@ the realm can't carry it. Owner decision 2026-10-06: the harness calls
    `core.json` and as `tenants.1.tenant_id` in `keycloak.json`.
 3. Fetch a new token; it now carries `organization.id`. Same for tenant 2.
 
-`keycloak.json` carries no Keycloak admin identity. Keycloak's admin REST
-API and the master realm are reachable only from inside the cluster
-(through `kubectl exec`), never through the edge. So the tests that make
-scratch users through that API (UAT.5's T1, T4 and T5) skip, with their
-reason, unless the owner decides otherwise (an open question on PR #132).
+`keycloak.json` carries no Keycloak admin identity, and Keycloak's admin
+REST API and master realm are never on the edge (owner decision
+2026-10-06). Tenants created during a test run (UAT.5's T1, T4 and T5) get
+their users from the scratch mode of `bind-tenant.sh` instead, through
+`kubectl exec` like the rest:
+
+```
+bind-tenant.sh <kubeconfig> <endpoints.json> <state-dir> --scratch-user <name> <admin|readonly> <tenant_id>
+```
+
+- `<name>` must match `scratch-[a-z0-9][a-z0-9-]{0,50}`, so the realm's own
+  users can't be touched. `admin` gets both recipe roles, `readonly` the read
+  role. `<tenant_id>` must be a saasapi tenant_id and not tenant 1's or 2's.
+- It creates the user if absent, sets a password generated into
+  `sensitive/keycloak/scratch/<name>.password` (0600, passed to Keycloak over
+  stdin, never argv), grants the roles and sets `organization_id`.
+- It prints one JSON line and nothing secret:
+  `{"username", "tenant_id", "role", "password_file"}`. Get the token with a
+  password grant on `keycloak.json`'s `client_id`/`client_secret` and that
+  file's content, or `token.sh ... <name>`.
+- It records `scratch_users.<name> = {tenant_id, role}` in `core.json`.
+  Running it again for the same user and tenant only re-sets the password
+  from its file; a scratch user already bound to another tenant is refused
+  (use a new name). Scratch users are not deleted; they go with the run.
+- Exit status non zero, with the reason on stderr, on any refusal or
+  Keycloak error.
 
 ## check.sh
 
@@ -261,18 +287,20 @@ unless `IMAS_REQUIRE_HELM=1`.
 - **UAT.2**: the ClusterIssuer is a cert-manager CA issuer named by
   `ca.cluster_issuer`, the same CA on both hubs (farmer verifies the bus with
   it, and the DMZ's Envoy verifies farmer with it); the core FQDN resolves to
-  the core private IP in-cluster; nothing else binds 443 or 5405 on the core
-  node (the edge takes them as hostPorts), or `core.exposure` says
-  `nodePort`.
+  the core private IP in-cluster, and `dmz.uat.imas.internal` resolves too;
+  nothing else binds 443 or 5405 on the core node (the edge takes them as
+  hostPorts).
 - **UAT.3a**: the nats release's bus Service is `dmz.bus_service` in
   `dmz.bus_namespace`, its certificate carries that Service's FQDN, and the
   DMZ exposes the bus **client** port (5406, NATS over TLS) to core on node
   port 8442 (`dmz.ports.bus`; owner decision 2026-10-06). The seed Secret on the DMZ is made from the **same files**
   (`UAT_SEEDS_DIR`); see Seeds. Envoy's `farmer_api` upstream is
-  `core.private_ip:5405` (or the core FQDN) and verifies against the UAT CA;
-  farmer's certificate carries both.
-- **UAT.4**: creates the tenants with `t1-admin` and `t2-admin` tokens and
-  calls `bind-tenant.sh` after each.
+  `core.uat.imas.internal:5405` (or the core FQDN or private IP) and
+  verifies against the UAT CA; farmer's certificate carries all three.
+- **UAT.4**: creates tenants 1 and 2 with `t1-admin` and `t2-admin` tokens
+  and calls `bind-tenant.sh` after each.
+- **UAT.5**: for tenants it creates during a run (not in `core.json`), calls
+  `bind-tenant.sh --scratch-user`.
 - **UAT.5**: reads `out/core.json` and `sensitive/credentials.json`.
 - **UAT.6**: keeps `<state>/core/sensitive` out of every uploaded artifact
   except a sensitive one, and runs the DMZ and core installs with a shared
@@ -286,6 +314,21 @@ in the same run, so the seeds are files in one directory, `UAT_SEEDS_DIR`
 already there and generates only the missing ones, so whichever hub installs
 first creates them and the other reuses them. The DMZ install must read the
 same directory; nothing here can check the DMZ cluster's Secret.
+
+## Open points
+
+- **`farmerbusurl` with the private name.** The owner decided farmer's
+  `farmerbusurl` uses `dmz.uat.imas.internal`. deploy/helm/farmer builds it
+  only as `tls://<bus.serviceName>.<bus.namespace>.svc.<clusterDomain>:<bus.port>`
+  (and `farmer.extraConfig` can't override a chart-managed key), so the URL
+  string here is the Service FQDN, resolved through an ExternalName to the
+  private name. Making the URL itself the private name needs a chart change
+  (for example a `bus.url` value), outside this directory. The name farmer
+  and saasapi verify is the Service FQDN either way, which the DMZ's bus
+  certificate carries; `bus.tlsServerName` is left unset because saasapi
+  always verifies the name it dials.
+- **In-cluster resolution of the private zone** relies on CoreDNS forwarding
+  to the node's resolver (Azure's 168.63.129.16 on the hub). Not tested.
 
 ## Deferred
 

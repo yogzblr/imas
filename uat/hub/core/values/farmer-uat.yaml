@@ -15,15 +15,16 @@
 organization: imas
 
 # The DMZ bus is on the other cluster. farmer and saasapi dial
-# tls://imas-dmz-nats-bus.imas-dmz.svc.cluster.local:5406; on this cluster
-# that name is a selectorless Service whose endpoint is the DMZ hub's
-# private IP (uat/hub/core/chart, bus-endpoint.yaml). gen-values.sh
-# overrides serviceName, namespace and sproutBusURLs from the endpoints
-# file.
+# tls://imas-dmz-nats-bus.imas-dmz.svc.cluster.local:8442; on this cluster
+# that name is an ExternalName Service for dmz.uat.imas.internal, the DMZ's
+# private name (uat/hub/core/chart, bus-endpoint.yaml), and 8442 is the
+# DMZ's bus node port (owner decisions 2026-10-06). The name verified on
+# the bus certificate stays the Service FQDN. gen-values.sh overrides
+# serviceName, namespace, port and sproutBusURLs from the endpoints file.
 bus:
   serviceName: imas-dmz-nats-bus
   namespace: imas-dmz
-  port: 5406
+  port: 8442
 
 natsSeeds:
   secretName: imas-farmer-nats-seeds

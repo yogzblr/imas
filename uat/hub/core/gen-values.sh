@@ -31,6 +31,7 @@ jq -n \
 	--arg version "$version" \
 	--arg busService "$BUS_SERVICE" \
 	--arg busNamespace "$BUS_NAMESPACE" \
+	--arg busPort "$DMZ_BUS_PORT" \
 	--arg sproutBusURL "$SPROUT_BUS_URL" \
 	--arg clusterDomain "$CLUSTER_DOMAIN" \
 	--arg jwks "$KEYCLOAK_JWKS_URL" \
@@ -44,6 +45,7 @@ jq -n \
 	  bus: {
 	    serviceName: $busService,
 	    namespace: $busNamespace,
+	    port: ($busPort | tonumber),
 	    sproutBusURLs: [$sproutBusURL]
 	  },
 	  networkPolicy: {dmz: {namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": $busNamespace}}}},

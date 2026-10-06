@@ -130,6 +130,10 @@ load_endpoints() {
 	DMZ_IP=$(ep '.dmz.private_ip')
 	CORE_HTTPS_PORT=$(ep '.core.ports.https' 443)
 	CORE_FARMER_PORT=$(ep '.core.ports.farmer_api' 5405)
+	# The private names of the Shared contract (UAT.1's Azure Private DNS
+	# zone, owner decision 2026-10-06); overridable for the local rig.
+	CORE_PRIVATE_FQDN=$(ep '.core.private_fqdn' core.uat.imas.internal)
+	DMZ_PRIVATE_FQDN=$(ep '.dmz.private_fqdn' dmz.uat.imas.internal)
 	CORE_EXPOSURE=$(ep '.core.exposure' hostPort)
 	DMZ_ENVOY_PORT=$(ep '.dmz.ports.envoy' 8443)
 	DMZ_BUS_PORT=$(ep '.dmz.ports.bus' 8442)
@@ -146,8 +150,12 @@ load_endpoints() {
 	for p in "$CORE_HTTPS_PORT" "$CORE_FARMER_PORT" "$DMZ_ENVOY_PORT" "$DMZ_BUS_PORT"; do
 		valid_port "$p" || die "not a port: $p"
 	done
-	[[ "$CORE_EXPOSURE" == hostPort || "$CORE_EXPOSURE" == nodePort ]] ||
-		die "core.exposure must be hostPort or nodePort, not $CORE_EXPOSURE"
+	# Owner decision 2026-10-06: no node port mode on core (its node port
+	# range is 30000-32767); the edge always takes hostPorts.
+	[[ "$CORE_EXPOSURE" == hostPort ]] ||
+		die "core.exposure must be hostPort (the core node port mode was dropped), not $CORE_EXPOSURE"
+	valid_fqdn "$CORE_PRIVATE_FQDN" || die "core.private_fqdn is not a DNS name: $CORE_PRIVATE_FQDN"
+	valid_fqdn "$DMZ_PRIVATE_FQDN" || die "dmz.private_fqdn is not a DNS name: $DMZ_PRIVATE_FQDN"
 	valid_dns_label "$BUS_SERVICE" || die "dmz.bus_service is not a DNS label: $BUS_SERVICE"
 	valid_dns_label "$BUS_NAMESPACE" || die "dmz.bus_namespace is not a DNS label: $BUS_NAMESPACE"
 	valid_dns_label "$CA_ISSUER" || die "ca.cluster_issuer is not a valid name: $CA_ISSUER"
@@ -171,12 +179,14 @@ extras_set_args() {
 	printf '%s\n' \
 		--set-string "core.fqdn=$CORE_FQDN" \
 		--set-string "core.privateIP=$CORE_IP" \
-		--set-string "core.exposure=$CORE_EXPOSURE" \
+		--set-string "core.privateFQDN=$CORE_PRIVATE_FQDN" \
 		--set "core.httpsPort=$CORE_HTTPS_PORT" \
 		--set "core.farmerAPIPort=$CORE_FARMER_PORT" \
 		--set-string "dmz.privateIP=$DMZ_IP" \
+		--set-string "dmz.privateFQDN=$DMZ_PRIVATE_FQDN" \
 		--set-string "bus.serviceName=$BUS_SERVICE" \
 		--set-string "bus.namespace=$BUS_NAMESPACE" \
+		--set "bus.port=$DMZ_BUS_PORT" \
 		--set "bus.remotePort=$DMZ_BUS_PORT" \
 		--set-string "caIssuer.name=$CA_ISSUER" \
 		--set-string "clusterDomain=$CLUSTER_DOMAIN"

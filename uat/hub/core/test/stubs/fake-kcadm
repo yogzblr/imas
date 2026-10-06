@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# A stand-in for Keycloak's kcadm.sh, for test/run.sh only (bind-tenant.sh
+# runs it through the stub kubectl as UAT_KCADM). Just the calls
+# bind-tenant.sh makes, against $STUB_STATE/kc-users.json. Every argv is
+# appended to $STUB_STATE/kcadm-argv.log, so a test can check that no
+# password ever reaches argv.
+set -euo pipefail
+db="${STUB_STATE:?}/kc-users.json"
+[[ -f "$db" ]] || echo '{"users": []}' >"$db"
+printf '%s\n' "$*" >>"$STUB_STATE/kcadm-argv.log"
+
+verb="$1" res="${2:-}"
+shift 2 || true
+q_user="" sets=() print_id=0 uusername="" roles=()
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--config | -r | --format | --server | --realm | --user | --password) shift 2 ;;
+	-q) [[ "$2" == username=* ]] && q_user="${2#username=}"; shift 2 ;;
+	-s) sets+=("$2"); shift 2 ;;
+	--fields) shift 2 ;;
+	-i) print_id=1; shift ;;
+	--uusername) uusername="$2"; shift 2 ;;
+	--rolename) roles+=("$2"); shift 2 ;;
+	*) shift ;;
+	esac
+done
+save() { local t; t=$(jq "$@" "$db"); printf '%s' "$t" >"$db"; }
+
+case "$verb $res" in
+"config credentials") exit 0 ;;
+"get users")
+	jq -r --arg u "$q_user" '.users[] | select(.username == $u) | .id' "$db" ;;
+"create users")
+	u="" a='{}'
+	for s in "${sets[@]}"; do
+		case "$s" in
+		username=*) u="${s#username=}" ;;
+		attributes.*=*) k="${s#attributes.}"; a=$(jq --arg k "${k%%=*}" --argjson v "${k#*=}" '.[$k] = $v' <<<"$a") ;;
+		esac
+	done
+	id="id-$u"
+	save --arg id "$id" --arg u "$u" --argjson a "$a" '.users += [{id: $id, username: $u, attributes: $a, roles: []}]'
+	((print_id)) && echo "$id" ;;
+add-roles\ *)
+	for r in "${roles[@]}"; do
+		save --arg u "$uusername" --arg r "$r" '(.users[] | select(.username == $u) | .roles) |= (. + [$r] | unique)'
+	done ;;
+*)
+	case "$verb" in
+	update)
+		id="${res#users/}"
+		id="${id%%/*}"
+		if [[ "$res" == */reset-password ]]; then
+			pw=$(jq -r .value)
+			save --arg id "$id" --arg p "$pw" '(.users[] | select(.id == $id) | .password) = $p'
+		else
+			for s in "${sets[@]}"; do
+				k="${s#attributes.}"
+				save --arg id "$id" --arg k "${k%%=*}" --argjson v "${k#*=}" '(.users[] | select(.id == $id) | .attributes[$k]) = $v'
+			done
+		fi ;;
+	get)
+		id="${res#users/}"
+		jq --arg id "$id" '.users[] | select(.id == $id) | {attributes}' "$db" ;;
+	*) echo "fake kcadm: $verb $res unsupported" >&2; exit 2 ;;
+	esac ;;
+esac

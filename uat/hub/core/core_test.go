@@ -409,7 +409,7 @@ func TestFarmerChartRender(t *testing.T) {
 		"SAASAPI_RECIPES_S3_USE_SSL":       "false",
 		"SAASAPI_RECIPES_CREDENTIAL_CHECK": "true",
 		"SAASAPI_RECIPES_S3_ACCESS_KEY_ID": "secret:imas-uat-s3-saasapi/access-key-id",
-		"SAASAPI_NATS_URL":                 "tls://imas-dmz-nats-bus.imas-dmz.svc.cluster.local:5406",
+		"SAASAPI_NATS_URL":                 "tls://imas-dmz-nats-bus.imas-dmz.svc.cluster.local:8442",
 	} {
 		if se[k] != want {
 			t.Errorf("saasapi %s = %q, want %q", k, se[k], want)
@@ -437,7 +437,7 @@ func TestFarmerChartRender(t *testing.T) {
 	}
 	cfg := str(get(t, objs, "ConfigMap/imas-core-farmer"), "data", "farmer")
 	for _, want := range []string{
-		"farmerbusurl: tls://imas-dmz-nats-bus.imas-dmz.svc.cluster.local:5406",
+		"farmerbusurl: tls://imas-dmz-nats-bus.imas-dmz.svc.cluster.local:8442",
 		"sproutbusurls:\n- wss://" + dmzFQDN + ":8443/\n",
 		"rootca: /etc/imas/tls/ca.crt",
 		"AC4LMP7I2FYLWGY5GIB52A4XCFFFSB2QTZ65B3A4G6OK5GYWRJSKH74C",
@@ -535,7 +535,7 @@ func TestExtrasChartRender(t *testing.T) {
 
 	// farmer's certificate covers its Service, the core FQDN and IP.
 	cert := mustJSON(t, get(t, objs, "Certificate/imas-farmer-tls"))
-	for _, want := range []string{`"imas-core-farmer.imas-core.svc.cluster.local"`, `"` + coreFQDN + `"`, `"` + coreIP + `"`, `"name":"imas-uat-ca"`} {
+	for _, want := range []string{`"imas-core-farmer.imas-core.svc.cluster.local"`, `"core.uat.imas.internal"`, `"` + coreFQDN + `"`, `"` + coreIP + `"`, `"name":"imas-uat-ca"`} {
 		if !strings.Contains(cert, want) {
 			t.Errorf("Certificate imas-farmer-tls lacks %s", want)
 		}
@@ -544,21 +544,17 @@ func TestExtrasChartRender(t *testing.T) {
 		t.Error("the edge certificate is not for the core FQDN")
 	}
 
-	// The bus: farmer's FQDN on this cluster points at the DMZ.
-	eps := mustJSON(t, get(t, objs, "EndpointSlice/imas-dmz-nats-bus-dmz"))
-	for _, want := range []string{`"` + dmzIP + `"`, `"port":8442`, `"kubernetes.io/service-name":"imas-dmz-nats-bus"`, `"namespace":"imas-dmz"`} {
-		if !strings.Contains(eps, want) {
-			t.Errorf("bus EndpointSlice lacks %s: %s", want, eps)
-		}
-	}
+	// The bus: farmer's Service FQDN on this cluster is an ExternalName for
+	// the DMZ's private name; it dials the DMZ node port 8442 directly
+	// (owner decisions, 2026-10-06).
 	svc := get(t, objs, "Service/imas-dmz-nats-bus")
-	if dig(svc, "spec", "selector") != nil || str(svc, "metadata", "namespace") != "imas-dmz" {
-		t.Error("the bus Service must be selectorless, in imas-dmz")
+	if str(svc, "spec", "type") != "ExternalName" || str(svc, "spec", "externalName") != "dmz.uat.imas.internal" || str(svc, "metadata", "namespace") != "imas-dmz" {
+		t.Errorf("the bus Service must be an ExternalName for dmz.uat.imas.internal in imas-dmz: %s", mustJSON(t, svc))
 	}
-	// farmer dials the chart's bus.port (5406); the DMZ exposes the bus on
-	// node port 8442 (owner decision, 2026-10-06).
-	if s := mustJSON(t, svc); !strings.Contains(s, `"port":5406`) || !strings.Contains(s, `"targetPort":8442`) {
-		t.Errorf("bus Service should map 5406 to the DMZ node port 8442: %s", s)
+	for key := range objs {
+		if strings.HasPrefix(key, "EndpointSlice/") {
+			t.Errorf("%s: the bus is reached by name now, not by an EndpointSlice", key)
+		}
 	}
 	for _, key := range []string{"NetworkPolicy/imas-uat-farmer-cross-cluster", "NetworkPolicy/imas-uat-saasapi-cross-cluster"} {
 		if s := mustJSON(t, get(t, objs, key)); !strings.Contains(s, `"port":8442`) {
@@ -585,6 +581,10 @@ func TestExtrasChartRender(t *testing.T) {
 		if !strings.Contains(es, want) {
 			t.Errorf("edge lacks %s", want)
 		}
+	}
+	// No core node port mode (owner decision, 2026-10-06).
+	if t2 := str(get(t, objs, "Service/imas-uat-edge"), "spec", "type"); t2 != "ClusterIP" {
+		t.Errorf("edge Service type %q, want ClusterIP", t2)
 	}
 	envoy := str(get(t, objs, "ConfigMap/imas-uat-edge"), "data", "envoy.yaml")
 	var ec map[string]any

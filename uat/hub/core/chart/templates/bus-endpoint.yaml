@@ -1,11 +1,14 @@
 {{- include "uat.validate" . -}}
 # farmer dials tls://<bus.serviceName>.<bus.namespace>.svc.<clusterDomain>:<bus.port>
-# (deploy/helm/farmer README, "Reaching the bus") and verifies that name
-# on the bus certificate. The bus runs on the other cluster, so the same
-# Service name is recreated here, without a selector, pointing at the DMZ
-# hub's private address and the port the DMZ exposes the bus client port
-# on. The name farmer verifies stays the nats chart's own Service FQDN,
-# which its default bus SANs cover. Nothing else lives in this namespace.
+# (deploy/helm/farmer README, "Reaching the bus") and verifies that name on
+# the bus certificate; saasapi dials the same URL. The bus runs on the
+# other cluster, so the same Service name is recreated here as an
+# ExternalName for the DMZ's private name (dmz.uat.imas.internal, UAT.1's
+# Azure Private DNS zone; owner decision 2026-10-06), which cluster DNS
+# resolves through the node's resolver to the DMZ's private address. An
+# ExternalName maps no ports, so bus.port is the DMZ's bus node port
+# (8442). The name farmer and saasapi verify stays the nats chart's own
+# Service FQDN, which the DMZ's bus certificate carries (uat/hub/dmz).
 apiVersion: v1
 kind: Service
 metadata:
@@ -15,28 +18,9 @@ metadata:
     {{- include "uat.labels" . | nindent 4 }}
     app.kubernetes.io/name: imas-uat-dmz-bus
 spec:
-  type: ClusterIP
+  type: ExternalName
+  externalName: {{ .Values.dmz.privateFQDN }}
   ports:
     - name: client
       protocol: TCP
       port: {{ .Values.bus.port }}
-      targetPort: {{ .Values.bus.remotePort }}
----
-apiVersion: discovery.k8s.io/v1
-kind: EndpointSlice
-metadata:
-  name: {{ .Values.bus.serviceName }}-dmz
-  namespace: {{ .Values.bus.namespace }}
-  labels:
-    {{- include "uat.labels" . | nindent 4 }}
-    app.kubernetes.io/name: imas-uat-dmz-bus
-    kubernetes.io/service-name: {{ .Values.bus.serviceName }}
-    endpointslice.kubernetes.io/managed-by: imas-uat-core
-addressType: IPv4
-ports:
-  - name: client
-    protocol: TCP
-    port: {{ .Values.bus.remotePort }}
-endpoints:
-  - addresses: [{{ .Values.dmz.privateIP | quote }}]
-    conditions: { ready: true }

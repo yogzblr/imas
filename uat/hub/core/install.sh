@@ -153,16 +153,20 @@ rollout "deployment/$EDGE_DEPLOY" "$UAT_NS"
 # --- outputs ---------------------------------------------------------------
 # Not secret: names, URLs, the CA certificate, public keys.
 prev_tenants=$(jq -c '.tenants // {}' "$OUT_DIR/core.json" 2>/dev/null || echo '{}')
+prev_scratch=$(jq -c '.scratch_users // {}' "$OUT_DIR/core.json" 2>/dev/null || echo '{}')
 jq -n --arg tag "$release_tag" --arg version "$version" --arg ns "$CORE_NS" --arg rel "$CORE_RELEASE" \
 	--arg url "$SAASAPI_URL" --arg ca "$OUT_DIR/uat-ca.crt" --arg issuer "$KEYCLOAK_ISSUER" \
 	--arg jwks "$KEYCLOAK_JWKS_URL" --arg token "$KEYCLOAK_TOKEN_URL" --arg realm "$REALM" \
 	--arg aud "$SAASAPI_AUDIENCE" --arg client "$TESTS_CLIENT" --arg rr "$READ_ROLE" --arg wr "$WRITE_ROLE" \
 	--arg attr "$TENANT_ATTRIBUTE" --arg other "$OTHER_CLIENT" \
+	--arg cpn "$CORE_PRIVATE_FQDN" --arg dpn "$DMZ_PRIVATE_FQDN" \
 	--arg sens "$SENSITIVE_DIR" --arg bus "$SPROUT_BUS_URL" --argjson tenants "$prev_tenants" \
+	--argjson scratch "$prev_scratch" \
 	--slurpfile admin "$OUT_DIR/admin.json" '{
 	  release_tag: $tag, version: $version, namespace: $ns, release: $rel,
 	  saasapi_url: $url, internal_auth_header: "X-Internal-Auth", ca_file: $ca,
 	  sprout_bus_url: $bus,
+	  private_names: {core: $cpn, dmz: $dpn},
 	  keycloak: {issuer: $issuer, jwks_url: $jwks, token_url: $token, realm: $realm,
 	             audience: $aud, client_id: $client, read_role: $rr, write_role: $wr,
 	             tenant_claim: "organization.id", tenant_attribute: $attr,
@@ -174,6 +178,7 @@ jq -n --arg tag "$release_tag" --arg version "$version" --arg ns "$CORE_NS" --ar
 	    "t2-reader": {tenant: "2", roles: [$rr]}
 	  },
 	  tenants: $tenants,
+	  scratch_users: $scratch,
 	  bootstrap_admin: $admin[0],
 	  sensitive_dir: $sens
 	}' >"$OUT_DIR/core.json"

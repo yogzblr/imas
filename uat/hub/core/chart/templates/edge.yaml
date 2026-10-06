@@ -68,14 +68,10 @@ spec:
           ports:
             - name: https
               containerPort: 443
-              {{- if eq .Values.core.exposure "hostPort" }}
               hostPort: {{ .Values.core.httpsPort }}
-              {{- end }}
             - name: farmer-api
               containerPort: {{ .Values.farmer.apiPort }}
-              {{- if eq .Values.core.exposure "hostPort" }}
               hostPort: {{ .Values.core.farmerAPIPort }}
-              {{- end }}
           readinessProbe:
             tcpSocket: { port: https }
             periodSeconds: 10
@@ -111,25 +107,13 @@ metadata:
     {{- include "uat.labels" . | nindent 4 }}
     app.kubernetes.io/name: imas-uat-edge
 spec:
-  {{- if eq .Values.core.exposure "nodePort" }}
-  type: NodePort
-  # Keep the client address, so the farmer API rule below sees the DMZ.
-  externalTrafficPolicy: Local
-  {{- else }}
   type: ClusterIP
-  {{- end }}
   selector:
     app.kubernetes.io/name: imas-uat-edge
   ports:
     - name: https
       port: 443
       targetPort: https
-      {{- if eq .Values.core.exposure "nodePort" }}
-      nodePort: {{ .Values.core.httpsPort }}
-      {{- end }}
     - name: farmer-api
       port: {{ .Values.farmer.apiPort }}
       targetPort: farmer-api
-      {{- if eq .Values.core.exposure "nodePort" }}
-      nodePort: {{ .Values.core.farmerAPIPort }}
-      {{- end }}
