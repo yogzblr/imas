@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Stub az for access_test.sh: bastion tunnels become local listeners, Linux
+# run-commands run locally (with stubs first on PATH), Windows run-commands
+# return canned output. Behaviour comes from files in $STUB_STATE.
+set -u
+{
+  printf 'az'
+  printf ' %q' "$@"
+  echo
+} >>"$STUB_STATE/calls.log"
+
+arg() { # arg <flag> <args...>: the value after <flag>
+  local f=$1; shift
+  while [ $# -gt 0 ]; do
+    [ "$1" = "$f" ] && { echo "${2:-}"; return; }
+    shift
+  done
+}
+
+case "$1 $2 $3" in
+  "network bastion tunnel")
+    id=$(arg --target-resource-id "$@")
+    port=$(arg --port "$@")
+    rport=$(arg --resource-port "$@")
+    if grep -qxF "$id" "$STUB_STATE/fail_ids" 2>/dev/null; then
+      echo "ERROR: stub tunnel failure for $id" >&2
+      exit 1
+    fi
+    # fail_once_ids: the first start of these fails, as when another process
+    # takes the port first.
+    if grep -qxF "$id" "$STUB_STATE/fail_once_ids" 2>/dev/null; then
+      mark="$STUB_STATE/failed_once.$(printf '%s' "$id" | md5sum | cut -c1-12)"
+      if [ ! -e "$mark" ]; then
+        touch "$mark"
+        echo "ERROR: [Errno 98] Address already in use (stub)" >&2
+        exit 1
+      fi
+    fi
+    banner=""
+    [ "$rport" = 22 ] && [ ! -f "$STUB_STATE/no_banner" ] && banner="SSH-2.0-stub"
+    # Like the real az (a shell wrapper around python), the listener is a
+    # child process; close must stop both.
+    python3 -I -c '
+import socket, sys
+port, banner = int(sys.argv[1]), sys.argv[2]
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", port))
+s.listen(16)
+print("Opening tunnel on port: %d" % port, flush=True)
+while True:
+    c, _ = s.accept()
+    try:
+        if banner:
+            c.sendall((banner + "\r\n").encode())
+    except OSError:
+        pass
+    c.close()
+' "$port" "$banner" &
+    child=$!
+    trap 'kill "$child" 2>/dev/null; exit 0' TERM INT
+    wait "$child"
+    ;;
+esac
+
+case "$1 $2" in
+  "vm run-command")
+    [ -f "$STUB_STATE/runcmd_fail" ] && { echo "ERROR: stub run-command failure" >&2; exit 1; }
+    cid=$(arg --command-id "$@")
+    # The script lines are everything after --scripts.
+    lines=()
+    seen=0
+    for a in "$@"; do
+      if [ "$seen" = 1 ]; then lines+=("$a"); fi
+      [ "$a" = "--scripts" ] && seen=1
+    done
+    script=$(printf '%s\n' "${lines[@]}")
+    if [ "$cid" = RunShellScript ]; then
+      out=$(bash -c "$script" 2>"$STUB_STATE/stderr.tmp")
+      err=$(cat "$STUB_STATE/stderr.tmp")
+      [ -f "$STUB_STATE/linux_no_marker" ] && out=$(printf '%s\n' "$out" | grep -v __IMAS_VMCTL_RC__)
+      jq -n --arg m "Enable succeeded: "$'\n'"[stdout]"$'\n'"$out"$'\n\n'"[stderr]"$'\n'"$err"$'\n' \
+        '{value: [{code: "ProvisioningState/succeeded", level: "Info", message: $m}]}'
+    elif [ "$cid" = RunPowerShellScript ]; then
+      b64=$(printf '%s\n' "$script" | sed -n "s/.*FromBase64String('\([^']*\)').*/\1/p" | head -n 1)
+      printf 'decoded: %s\n' "$(printf '%s' "$b64" | base64 -d)" >>"$STUB_STATE/calls.log"
+      # shellcheck disable=SC2016 # a literal PowerShell line
+      if ! printf '%s\n' "$script" | tail -n 1 | grep -qxF 'Write-Output "__IMAS_VMCTL_RC__$__rc"'; then
+        echo "stub az: the PowerShell wrapper does not end with the exit code marker" >&2
+        exit 98
+      fi
+      rc=$(cat "$STUB_STATE/win_rc" 2>/dev/null || echo 0)
+      out="win-out"$'\r\n'"__IMAS_VMCTL_RC__$rc"$'\r\n'
+      [ -f "$STUB_STATE/win_no_marker" ] && out="win-out"$'\r\n'
+      jq -n --arg o "$out" --arg e "win-err" \
+        '{value: [{code: "ComponentStatus/StdOut/succeeded", message: $o}, {code: "ComponentStatus/StdErr/succeeded", message: $e}]}'
+    else
+      echo "stub az: unknown command id $cid" >&2
+      exit 97
+    fi
+    ;;
+  "vm restart")
+    exit "$(cat "$STUB_STATE/restart_rc" 2>/dev/null || echo 0)"
+    ;;
+  "vm get-instance-view")
+    cat "$STUB_STATE/power" 2>/dev/null || echo PowerState/running
+    ;;
+  "network bastion") ;;
+  *)
+    echo "stub az: unexpected call: $*" >&2
+    exit 99
+    ;;
+esac
