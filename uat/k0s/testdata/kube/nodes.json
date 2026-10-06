@@ -1,0 +1,16 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "metadata": {"name": "uat-hub"},
+      "status": {
+        "conditions": [
+          {"type": "MemoryPressure", "status": "False"},
+          {"type": "Ready", "status": "True"}
+        ],
+        "nodeInfo": {"kubeletVersion": "v1.36.4+k0s"}
+      }
+    }
+  ]
+}

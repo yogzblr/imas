@@ -1,0 +1,51 @@
+{
+  "run_id": "ab12cd34",
+  "region": "centralindia",
+  "resource_group": "imas-uat-ab12cd34",
+  "dmz": {
+    "name": "uat-dmz",
+    "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-ab12cd34/providers/Microsoft.Compute/virtualMachines/uat-dmz",
+    "private_ip": "10.60.1.4",
+    "public_ip": "203.0.113.10",
+    "fqdn": "uatab12cd34-dmz.centralindia.cloudapp.azure.com",
+    "admin_user": "imasadmin"
+  },
+  "core": {
+    "name": "uat-core",
+    "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-ab12cd34/providers/Microsoft.Compute/virtualMachines/uat-core",
+    "private_ip": "10.60.2.4",
+    "public_ip": "203.0.113.11",
+    "fqdn": "uatab12cd34-core.centralindia.cloudapp.azure.com",
+    "admin_user": "imasadmin"
+  },
+  "sprouts": {
+    "t1-ubuntu": {
+      "tenant": 1,
+      "os": "ubuntu",
+      "connection": "ssh",
+      "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-ab12cd34/providers/Microsoft.Compute/virtualMachines/t1-ubuntu",
+      "private_ip": "10.60.3.4",
+      "public_ip": "203.0.113.20",
+      "admin_user": "imasadmin"
+    },
+    "t1-win": {
+      "tenant": 1,
+      "os": "windows",
+      "connection": "winrm",
+      "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-ab12cd34/providers/Microsoft.Compute/virtualMachines/t1-win",
+      "private_ip": "10.60.3.6",
+      "public_ip": "203.0.113.22",
+      "admin_user": "imasadmin"
+    }
+  },
+  "bastion": {
+    "name": "imas-uat-ab12cd34-bastion",
+    "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-ab12cd34/providers/Microsoft.Network/bastionHosts/imas-uat-ab12cd34-bastion"
+  },
+  "subnets": {
+    "dmz": "10.60.1.0/24",
+    "core": "10.60.2.0/24",
+    "tenants": "10.60.3.0/24",
+    "bastion": "10.60.4.0/26"
+  }
+}

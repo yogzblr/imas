@@ -1,0 +1,32 @@
+{
+  "apiVersion": "v1",
+  "kind": "Service",
+  "metadata": {
+    "name": "imas-dmz-nats-bus",
+    "namespace": "imas-dmz"
+  },
+  "spec": {
+    "type": "ClusterIP",
+    "ports": [
+      {
+        "name": "metrics",
+        "port": 9090,
+        "targetPort": "metrics"
+      },
+      {
+        "name": "client",
+        "port": 5406,
+        "targetPort": "client"
+      },
+      {
+        "name": "websocket",
+        "port": 5407,
+        "targetPort": "websocket"
+      }
+    ],
+    "selector": {
+      "app.kubernetes.io/name": "imas-nats",
+      "app.kubernetes.io/component": "bus"
+    }
+  }
+}

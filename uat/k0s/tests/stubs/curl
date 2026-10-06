@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Test stub for curl: "-o OUT URL" copies $STUB_FIX/downloads/<basename of URL>.
+set -euo pipefail
+out="" url=""
+while (($#)); do
+  case $1 in
+    -o) out=$2 && shift 2 ;;
+    --retry | --retry-delay) shift 2 ;;
+    -*) shift ;;
+    *) url=$1 && shift ;;
+  esac
+done
+printf 'curl %s\n' "$url" >>"$STUB_LOG"
+cp "$STUB_FIX/downloads/$(basename "$url")" "$out"

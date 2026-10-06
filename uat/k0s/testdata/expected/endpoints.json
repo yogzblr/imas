@@ -1,0 +1,32 @@
+{
+  "run_id": "ab12cd34",
+  "dmz": {
+    "name": "uat-dmz",
+    "private_ip": "10.60.1.4",
+    "public_ip": "203.0.113.10",
+    "fqdn": "uatab12cd34-dmz.centralindia.cloudapp.azure.com",
+    "ports": {
+      "envoy": 443,
+      "bus_client": 5406
+    }
+  },
+  "core": {
+    "name": "uat-core",
+    "private_ip": "10.60.2.4",
+    "public_ip": "203.0.113.11",
+    "fqdn": "uatab12cd34-core.centralindia.cloudapp.azure.com",
+    "ports": {
+      "https": 443,
+      "farmer_api": 5405
+    }
+  },
+  "exposure": "NodePort",
+  "node_port_range": "443-5406",
+  "cluster_issuer": "imas-uat-ca",
+  "ca_file": "uat-ca.crt",
+  "kubeconfigs": {
+    "dmz": "dmz.kubeconfig",
+    "core": "core.kubeconfig"
+  },
+  "k0s_version": "v1.36.4+k0s.1"
+}

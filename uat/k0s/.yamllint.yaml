@@ -1,0 +1,10 @@
+---
+# yamllint settings for uat/k0s (templates, rendered files and fixtures).
+extends: default
+rules:
+  line-length:
+    max: 120
+    # A long absolute path (key, known_hosts) in a rendered file is fine.
+    allow-non-breakable-inline-mappings: true
+  comments:
+    min-spaces-from-content: 1

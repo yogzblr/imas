@@ -594,6 +594,16 @@ Docs-only PRs in the same window: #68 (this file's RAG summary), #82 (plan
 §4e, Wave 7 briefs), #91 (the SEC.5b brief), #101 (plan §4f) and #109 (plan
 §4g and the dispatcher prompt).
 
+## Azure UAT gate (plan §4h, briefs UAT.1 to UAT.8)
+
+Each brief adds its own row. Nothing in this section has run in Azure; "ready
+for review" means the static checks and stubbed tests named in the row pass,
+not that anything works on real hosts.
+
+| Item | What was built | Status |
+|---|---|---|
+| UAT.2 | `uat/k0s`. `bootstrap.sh` renders one k0sctl file per hub from the uat JSON and `access.json`: role `single`, SSH through the Bastion tunnel on 127.0.0.1 with a per-run `known_hosts`, `127.0.0.1` in the API certificate's SANs, and a CoreDNS `hosts` block (a k0s component patch) mapping the core and DMZ FQDNs to their private IPs. It then installs k0s on both hubs, fetches each kubeconfig with the tunnel's address, and waits for the node to be Ready. It adds local-path-provisioner as the default StorageClass and cert-manager, from checksum-pinned manifests. It creates one per-run self-signed UAT CA on both hubs as ClusterIssuer `imas-uat-ca` and writes `uat-ca.crt` and `endpoints.json`. All versions are in `versions.env`. Exposure is by NodePort with the range narrowed to 443-5406; `expose.sh` adds a pinned NodePort sibling Service for one chart port. `check.sh` reports and fails on an unready node, no default StorageClass, cert-manager unavailable, the issuer not Ready, a missing CoreDNS line or an unexpected node port. Ran: shellcheck, yamllint, and 216 stubbed bash tests (`uat/k0s/tests/run.sh`); `k0s config validate` and k0sctl's config parser on the rendered files, by hand. Never run against a node. Open: the core to DMZ bus port (5406 per the charts, not the websocket port the contract names), Envoy's external port (443 or 8443), and one TLS front for saasapi and Keycloak on core 443 (not built). Flags busybox (GPL-2.0, local-path's helper image, UAT only). | ready for review |
+
 ## Docs, CI and tooling merged alongside
 
 | Item | Status |
