@@ -2058,7 +2058,7 @@ what you built, what you deferred, which tests newly ran and which of them faile
 fixes, and any open question; call the security items ready for review, not done."
 ```
 
-## 4h. Azure UAT gate (UAT.1 to UAT.6)
+## 4h. Azure UAT gate (UAT.1 to UAT.7)
 
 Added 2026-10-06. **Supersedes the Terraform UAT brief in section 4a (item 5):** the
 owner chose Azure over the libvirt/KVM default, OpenTofu over Terraform (Terraform is
@@ -2088,11 +2088,76 @@ AlmaLinux 9 (stands in for RHEL, which needs a subscription to fetch; say so in 
 report) and Windows Server 2022 Core. The two tenants' sprouts of one OS get the SAME
 sproutid, so the run also proves sprout_id is unique per tenant only (CLAUDE.md).
 
+### Scenario catalogue
+
+What the gate tests, with the ids the tests and reports use. Tiers decide what a run does: smoke
+(about 10 minutes), core, resilience, ingredients, lifecycle, or all. Test functions are named
+with their tier as a prefix (TestSmoke, TestCore, TestResilience, TestIngredients,
+TestLifecycle) so a tier can be chosen with go test -run.
+
+| Id | Scenario | Tier |
+|---|---|---|
+| T1 | Create a tenant (POST /v1/tenants, 202), poll status until active | smoke, core |
+| T2 | Validation: a missing name is refused | core |
+| T3 | Status shows last_error or warning when set | core |
+| T4 | Delete: offboarding then offboarded; 409 provisioning_in_progress while provisioning | core |
+| T5 | After offboarding the tenant's keys, sprouts and bus account are cut off | core |
+| T6 | Two tenants stay separate for tenants, keys, sprouts, recipes and job logs | core |
+| K1 | Mint an enrolment key with expiry and max_uses | smoke, core |
+| K2 | A key at max_uses is refused for the next enrolment | core |
+| K3 | A revoked key is refused; sprouts already enrolled stay | core |
+| K4 | Minting is rate limited (1 per second, burst 5) | core |
+| S1 | Install the published package, enrol through Envoy, sprout connected under its own tenant | smoke, core |
+| S2 | The same sproutid in both tenants resolves to different machines | core |
+| S3 | Asset link: new 201, repeat 200, collision 409 asset_link_conflict | core |
+| S4 | Lookup by asset_ids; another tenant's ids come back unresolved without saying why | core |
+| S5 | A sprout with no box key is refused (sprout_reenroll_required); nothing is sent in plaintext | core |
+| S6 | Uninstall and reinstall on the same host re-enrols cleanly | core |
+| C1 | cmd.run succeeds on every sprout, all three OS | smoke, core |
+| C2 | A non zero exit gives command_failed with the exit code | core |
+| C3 | timeout_seconds is honoured | core |
+| C4 | Shell syntax is rejected; args, cwd and run_as work | core |
+| C5 | An unknown asset id comes back unresolved | core |
+| C6 | A stopped sprout gives sprout_unreachable | core |
+| C7 | A batch over several sprouts reports per item results | core |
+| C8 | The per tenant rate limit applies | core |
+| R1 | Recipe upload, list, fetch, delete through the API | core |
+| R2 | Read and write roles are enforced (a read only user cannot write) | core |
+| R3 | Recipes are tenant scoped | core |
+| R4 | Cook a recipe by name on a sprout | core |
+| R5 | Cook in test mode reports pending changes, then none after a real run | core |
+| R6 | Recipes with properties, templates and OS conditions over a mixed OS batch | core |
+| I.name.method | Ingredient conformance: one case per registered ingredient method (below) | ingredients |
+| L1 | Each sprout survives a reboot, reconnects and runs a job | resilience |
+| L2 | Restarting farmer: sprouts stay connected or reconnect, jobs run | resilience |
+| L3 | Restarting farmerbus and Envoy: sprouts reconnect | resilience |
+| L4 | Package upgrade from the previous release to this one keeps /etc/imas/sprout and the sproutid | lifecycle |
+| L5 | One self update cycle with the dispatch flags on (opt in, UAT only) | lifecycle |
+| X1 | No token, expired token, wrong audience, read only token on a write route: refused as documented | core |
+| X2 | A sprout presenting no gateway JWT is refused at Envoy | core |
+| X3 | A sprout cannot open a connection to core | core |
+| X4 | Cross tenant access by a tenant admin token is denied everywhere | core |
+| X5 | Sealing: plaintext cmd.run and cook are refused by a sprout | core |
+
+Ingredient conformance (UAT.7). Every ingredient package under internal/ingredients has one case
+file per method, with the OS it applies to. A case is one cycle: cook in test mode and see a pending
+change; cook for real; cook in test mode again and see none (idempotent); verify out of band with
+a cmd.run on the sprout (id, stat, systemctl or the Windows equivalent); revert. A coverage test
+fails if a registered method has neither a case nor a written reason to skip, so a new ingredient
+cannot slip in untested. Risky ingredients (firewall, network, mount, selinux, lgpo and the Windows
+update, DSC and server manager ones) use harmless changes and never touch the sprout's own
+connection. Windows Server Core may lack some features (appx, shortcuts and others): a case that
+cannot run there is skipped with the reason, and the report lists them so the owner can decide on a
+Desktop Experience image for those.
+
+Not covered by this gate: key expiry (the minimum is one hour; unit tests cover it), the web UI,
+high availability, real RHEL, scale and load.
+
 ### Shared contract (every UAT brief reads this; do not change it without the owner)
 
 - Layout of the work, one directory per brief, no overlap: uat/tofu (UAT.1), uat/k0s
   (UAT.2), uat/hub/dmz (UAT.3a), uat/hub/core (UAT.3b), uat/enroll (UAT.4), uat/tests
-  (UAT.5), and for UAT.6 the workflow .github/workflows/uat.yml, .github/workflows/
+  (UAT.5, except uat/tests/ingredients), uat/cases and uat/tests/ingredients (UAT.7), and for UAT.6 the workflow .github/workflows/uat.yml, .github/workflows/
   uat-janitor.yml and uat/scripts. uat/README.md is written by UAT.6 from the others.
 - Inputs: run_id (lowercase letters and digits, 6 to 10), release_tag (a vX.Y.Z or
   vX.Y.Z-rc.N tag; the chart, images and packages all come from this release, never
@@ -2366,26 +2431,25 @@ contract.
 Build under uat/tests, a Go package with the build tag uat so go test ./... never runs it. It reads
 the uat JSON file and the admin and Keycloak material from a directory named by an environment
 variable. Keep it in the existing Go module and add no new dependency without flagging its licence.
-Tests, each reporting the OS, the tenant and the step that failed: (1) every one of the six sprouts
-is connected, and is listed under its own tenant only; (2) a recipe round trip on each sprout: upload
-a small recipe through the saasapi recipe API with a tenant admin Keycloak token, dispatch it to that
-sprout, and assert both the file it manages and a command it runs (with the Windows equivalent), and
-read the job result back; (3) tenant isolation: tenant 1's token cannot list, dispatch to or read
-the recipes and job logs of tenant 2, and the same sproutid in both tenants resolves to different
-machines; (4) auth: no token, an expired token, a wrong audience and a read only user's token on a
-write route are refused with the documented status; a sprout presenting no gateway JWT is refused at
-Envoy; (5) reboot: restart each sprout VM (a helper that uses a command the harness gives it, not
-Azure calls from the tests) and assert it reconnects and runs a job; (6) deprovision or revoke one
-sprout and assert it is cut off, if the API supports it today, otherwise record the gap; (7) the
-dispatch flags for self update stay off, and one test, skipped unless an environment variable is
-set, runs a single self update cycle. Where something cannot be asserted from the outside, say so in
-the test file instead of faking it. Add a runner command uat/tests/run.sh that builds the test binary
-and runs it with a JUnit style summary, one line per OS and tenant, and a non zero exit on failure.
+Implement the scenarios of the Scenario catalogue in section 4h with the ids T1 to T6, K1 to K4, S1 to
+S6, C1 to C8, R1 to R6, X1 to X5 (tier core, with the smoke ones named TestSmoke) and L1 to L3 (tier
+resilience); name every test function with the tier prefix and the scenario id so a tier or one
+scenario can be chosen with go test -run, and report each failure with the id, the OS, the tenant and
+the step. Do not implement the I scenarios or L4 and L5: UAT.7 does, in uat/tests/ingredients and
+uat/cases, and will reuse your helper package, so put the API client, token, sprout lookup, batch and
+cook helpers, and the sprout command helper in a package of its own (uat/tests/harness) with a small
+documented interface, and write it for reuse. Where a scenario cannot be asserted from the outside, say
+so in the test file instead of faking it, and where the API lacks what a scenario needs (for example
+revoking a sprout), record the gap in the PR. The reboot and service restart helpers use a command the
+harness is given by the workflow, not Azure calls from the tests. Add uat/tests/run.sh that builds the
+test binary, takes a tier name (smoke, core, resilience, ingredients, lifecycle or all) and an optional
+list of ids, runs all packages under uat/tests with the uat tag, prints a JUnit style summary with one
+line per scenario id, OS and tenant, and exits non zero on failure.
 You cannot run these against a stack: run go vet and go build with the uat tag, unit tests for the
 helpers with fake servers, and say that the suite has never run against a real deployment. Scope:
-uat/tests only, plus a row in docs/BUILD-STATUS.md. Tests: go vet and go test ./... must pass, and go
-vet -tags uat ./uat/tests/... . PR: state what you built, what you deferred, and any open question;
-call it ready for review, not done."
+uat/tests only (not uat/tests/ingredients), plus a row in docs/BUILD-STATUS.md. Tests: go vet and go
+test ./... must pass, and go vet -tags uat ./uat/tests/... . PR: state what you built, what you
+deferred, and any open question; call it ready for review, not done."
 ```
 
 **UAT.6: the workflow, janitor and README (last)**
@@ -2396,7 +2460,9 @@ actually merged under uat/ (they are on main), and .github/workflows/publish-pac
 release.yml for the house style (secrets check up front, concurrency per tag, the environment
 gate). FLAG FOR SECURITY REVIEW (a workflow that holds cloud credentials).
 Build: (1) .github/workflows/uat.yml, workflow_dispatch only, inputs release_tag (required),
-region, keep_hours (default 0) and an optional list of test names; it runs in the GitHub environment
+region, keep_hours (default 0), tier (smoke, core, resilience, ingredients, lifecycle or all, default
+all), upgrade_from_tag (optional, for scenario L4) and an optional list of scenario ids, passed to
+uat/tests/run.sh; it runs in the GitHub environment
 uat (required reviewer), permission id-token write, logs in with azure/login by OIDC using the three
 environment variables, finds the runner's public address and passes it as runner_cidr, generates
 run_id, and runs in order: tofu apply (uat/tofu), k0s bootstrap, DMZ install, core install, enrolment,
@@ -2420,6 +2486,46 @@ workflow has never run, and say whether the teardown on failure was exercised or
 the two workflow files, uat/scripts, uat/README.md, and the Wave rows in docs/BUILD-STATUS.md (the
 Terraform UAT gate row becomes the Azure UAT gate row). PR: state what you built, what you deferred, and
 any open question; call it ready for review, not done."
+```
+
+**UAT.7: ingredient conformance suite and lifecycle tests (after UAT.5)**
+```
+claude --cloud "Implement UAT.7: the ingredient conformance suite and the two lifecycle scenarios of the
+UAT gate. Read section 4h of docs/claude-code-parallel-build-plan.md first, in full, including the
+Scenario catalogue and the Shared contract, then what UAT.5 merged under uat/tests (the harness package
+is yours to reuse; extend it only by adding, and list any change as a finding), the ingredient registry
+in internal/ingredients and every package under it, internal/cook for how a recipe, test mode and the
+results work, docs-site and testing/recipes for recipe syntax, and docs/design/imas-linux-parity-addendum.md
+and imas-windows-parity-addendum.md if present.
+Build: (1) Enumerate, from the code and not from memory, every registered ingredient method on every
+platform (all packages under internal/ingredients, Linux and Windows) and write the list to
+uat/cases/INVENTORY.md with the OS each applies to and its properties. (2) uat/cases: one case file per
+ingredient method, in a simple data format of your choice documented in uat/cases/README.md, with: id
+(I.name.method), the OS list, the recipe text, the out of band checks (a command to run on the sprout with
+the output or exit code expected), the revert recipe or command, and any need (reboot, network access,
+OpenBao, a Windows feature) with a written reason when a case is skipped. Cases follow the one cycle in the
+catalogue: test mode shows a pending change, a real cook, test mode shows none, a check, a revert. Use
+harmless changes for the risky ingredients (firewall, network, mount, selinux, lgpo, the Windows update,
+DSC, IIS and server manager ones): never alter the sprout's own connection, the default firewall policy, or
+anything that needs a reboot unless the case is marked and ordered last. Cover the sdb ingredient against the
+OpenBao on the core hub if the harness can reach it, otherwise mark it skipped with the reason. (3)
+uat/tests/ingredients: a runner under the uat build tag that turns every case into one subtest per sprout of a
+matching OS in tenant 1 (named TestIngredients with the id, OS and sprout), runs them in parallel across
+sprouts but in order on one sprout, and in tenant 2 repeats a small marked subset to show tenant scoping holds
+for ingredients too. Also a coverage test that fails when a registered method has neither a case nor a
+documented skip, and lists the skips with their reasons in the report. (4) Lifecycle scenarios L4 and L5
+under TestLifecycle: L4 installs the package of an earlier release (an input upgrade_from_tag; skip with a
+clear message if it is empty), enrols, then upgrades to the release under test with the package manager and
+asserts the config file and the sproutid are kept, the service is running and a job runs; L5 runs one self
+update cycle and only when an environment variable says the dispatch flags are on. Report, never fix, what an
+ingredient does wrongly: a failing case is a finding for the owner, so each failure message names the case,
+the sprout and what differed.
+You cannot run these against a real stack: run go vet and go build with the uat tag, unit tests for the case
+loader and the coverage test against a fake registry and fake sprout, and say that no case has been run on a
+real sprout and that Windows Server Core may not support some of them. Scope: uat/cases and
+uat/tests/ingredients only, plus a row in docs/BUILD-STATUS.md. Tests: go vet and go test ./... must pass, and
+go vet -tags uat ./uat/... . PR: state what you built, what you deferred, how many methods and how many cases
+and skips, and any open question; call it ready for review, not done."
 ```
 
 ---
@@ -2557,7 +2663,7 @@ agent ids.
 
 ---
 
-## 5c. Dispatcher prompt: Azure UAT gate UAT.1 to UAT.6 (Claude Code app, hosted agents)
+## 5c. Dispatcher prompt: Azure UAT gate UAT.1 to UAT.7 (Claude Code app, hosted agents)
 
 Paste into one session in the Claude Code app with the yogzblr/imas repo attached. Same
 mechanism as sections 5 and 5b. The dispatcher never merges and never edits code. Do the owner
@@ -2566,7 +2672,7 @@ run does.
 
 ```
 You are the dispatcher for the UAT briefs in section 4h of docs/claude-code-parallel-build-plan.md:
-UAT.1, UAT.2, UAT.3a, UAT.3b, UAT.4, UAT.5 and UAT.6, seven briefs in all. You start hosted agents,
+UAT.1, UAT.2, UAT.3a, UAT.3b, UAT.4, UAT.5, UAT.6 and UAT.7, eight briefs in all. You start hosted agents,
 track them and report. You do not write code, review code, merge, run anything in Azure, or approve
 anything yourself. Read CLAUDE.md and section 4h of the plan first, including the Shared contract.
 
@@ -2585,8 +2691,9 @@ me.
 Gates. A gate is satisfied only when its PR is MERGED into main, not merely open or green.
 - Round A, no gate: UAT.1, UAT.2, UAT.3a, UAT.3b, UAT.4 and UAT.5. They write to separate directories
   against the Shared contract, so start all six together.
-- Round B: UAT.6 gates all six of round A. Start it only after every one of them is merged.
-After UAT.6 merges, stop and hand back to me. Do not run the gate and do not touch Azure.
+- Round B: UAT.6 and UAT.7 each gate all six of round A (UAT.7 reuses UAT.5's harness package). Start
+  both together, only after every brief of round A is merged.
+After UAT.6 and UAT.7 are both merged, stop and hand back to me. Do not run the gate and do not touch Azure.
 
 Tracking. Use the task list as the ledger, one task per brief, with the agent id, the PR number once it
 exists, and its state (not started, running, PR open, CI red, merged, blocked). Use ListAgents to see
