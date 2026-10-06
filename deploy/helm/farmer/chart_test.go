@@ -1852,6 +1852,10 @@ func allows(np obj, direction string, ns string, podLbls map[string]any, port in
 			return true
 		}
 		for _, p := range peers {
+			// An ipBlock peer (bus.egressCIDRs) admits addresses, not pods.
+			if get(p, "ipBlock") != nil {
+				continue
+			}
 			nsSel, podSel := get(p, "namespaceSelector"), get(p, "podSelector")
 			nsOK := (nsSel == nil && own == ns) || (nsSel != nil && matches(nsSel, nsLabels(ns)))
 			// No podSelector, or an empty one ({}), selects every pod.

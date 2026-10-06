@@ -139,9 +139,15 @@ The bus Service FQDN, "<svc>.<ns>.svc.<domain>", and the URL farmer
 default certificate SANs cover the FQDN (deploy/helm/nats,
 imas-nats.bus.defaultCertHosts), and it is what both processes verify the
 bus certificate against unless bus.tlsServerName says otherwise.
+bus.host, when set, replaces the FQDN: a bus outside this cluster, whose
+certificate must then carry bus.host.
 */}}
 {{- define "imas-farmer.busFQDN" -}}
+{{- if .Values.bus.host -}}
+{{- .Values.bus.host }}
+{{- else -}}
 {{- printf "%s.%s.svc.%s" .Values.bus.serviceName .Values.bus.namespace .Values.clusterDomain }}
+{{- end -}}
 {{- end }}
 
 {{- define "imas-farmer.busURL" -}}
@@ -317,6 +323,31 @@ Bundled: this namespace's pods. External: networkPolicy.external.<dep>
 {{- $_ := set $rule "to" .peers -}}
 {{- end -}}
 {{- toYaml (list $rule) -}}
+{{- end }}
+
+{{/*
+The bus egress rule of farmer's and saasapi's NetworkPolicies, as a
+one-item YAML list, on bus.port. Peers: the nats chart's bus pods
+(networkPolicy.dmz), plus an ipBlock per bus.egressCIDRs entry. With
+bus.host and bus.egressCIDRs both set, only the ipBlocks: the selector
+can't match a bus outside the cluster. With bus.host alone the selector
+stays, so the rule matches nothing outside the cluster (README.md,
+"Reaching the bus") rather than turning into "any destination".
+*/}}
+{{- define "imas-farmer.busEgress" -}}
+- to:
+    {{- if or (not .Values.bus.host) (not .Values.bus.egressCIDRs) }}
+    - namespaceSelector:
+        {{- toYaml .Values.networkPolicy.dmz.namespaceSelector | nindent 8 }}
+      podSelector:
+        {{- toYaml .Values.networkPolicy.dmz.busPodSelector | nindent 8 }}
+    {{- end }}
+    {{- range .Values.bus.egressCIDRs }}
+    - ipBlock:
+        cidr: {{ . | quote }}
+    {{- end }}
+  ports:
+    - { protocol: TCP, port: {{ .Values.bus.port }} }
 {{- end }}
 
 {{- define "imas-farmer.dnsEgress" -}}
@@ -564,11 +595,27 @@ explanation rather than deploying something that silently can't work.
 {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- with .Values.bus.host -}}
+{{- if not (regexMatch "^[A-Za-z0-9]([-A-Za-z0-9.]*[A-Za-z0-9])?$" (toString .)) -}}
+{{- fail (printf "bus.host %q must be a bare DNS name (farmerbusurl and SAASAPI_NATS_URL are tls://<bus.host>:<bus.port>; the port is bus.port), not a URL or host:port" (toString .)) -}}
+{{- end -}}
+{{- else -}}
 {{- if not .Values.bus.serviceName -}}
-{{- fail "bus.serviceName is required: the nats chart's bus client Service (<release>-nats-bus), with bus.namespace its namespace" -}}
+{{- fail "bus.serviceName is required: the nats chart's bus client Service (<release>-nats-bus), with bus.namespace its namespace (or bus.host, for a bus outside this cluster)" -}}
 {{- end -}}
 {{- if not .Values.bus.namespace -}}
-{{- fail "bus.namespace is required" -}}
+{{- fail "bus.namespace is required (or bus.host, for a bus outside this cluster)" -}}
+{{- end -}}
+{{- end -}}
+{{- with .Values.bus.egressCIDRs -}}
+{{- if not (kindIs "slice" .) -}}
+{{- fail "bus.egressCIDRs must be a list of CIDRs" -}}
+{{- end -}}
+{{- range . -}}
+{{- if not (regexMatch "^([0-9]{1,3}[.]){3}[0-9]{1,3}/[0-9]{1,2}$|^[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*/[0-9]{1,3}$" (toString .)) -}}
+{{- fail (printf "bus.egressCIDRs entry %q must be a CIDR (an ipBlock peer, e.g. 10.20.1.4/32)" (toString .)) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- if not .Values.bus.sproutBusURLs -}}
 {{- fail "bus.sproutBusURLs is required (IMAS_SPROUT_BUS_URLS): the nats chart's Envoy wss:// address(es). Without it farmer hands enrolling sprouts an in-cluster bus address they can't reach." -}}
