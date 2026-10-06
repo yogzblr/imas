@@ -1,0 +1,48 @@
+# The UAT gate's scenario catalogue, from docs/claude-code-parallel-build-plan.md
+# section 4h. Tab-separated: id, tiers (comma separated, the first decides the
+# test-function prefix: smoke -> TestSmoke, core -> TestCore, resilience ->
+# TestResilience, ingredients -> TestIngredients, lifecycle -> TestLifecycle),
+# scenario, and the brief that implements it. uatreport reads this file to
+# select tests and to enforce the no silent green rule; TestCatalogueMatchesPlan
+# keeps it in step with the plan's table. I.* stands for every I.name.method id.
+T1	smoke,core	Create a tenant (POST /v1/tenants, 202), poll status until active	UAT.5
+T2	core	Validation: a missing name is refused	UAT.5
+T3	core	Status shows last_error or warning when set	UAT.5
+T4	core	Delete: offboarding then offboarded; 409 provisioning_in_progress while provisioning	UAT.5
+T5	core	After offboarding the tenant's keys, sprouts and bus account are cut off	UAT.5
+T6	core	Two tenants stay separate for tenants, keys, sprouts, recipes and job logs	UAT.5
+K1	smoke,core	Mint an enrolment key with expiry and max_uses	UAT.5
+K2	core	A key at max_uses is refused for the next enrolment	UAT.5
+K3	core	A revoked key is refused; sprouts already enrolled stay	UAT.5
+K4	core	Minting is rate limited (1 per second, burst 5)	UAT.5
+S1	smoke,core	Install the published package, enrol through Envoy, sprout connected under its own tenant	UAT.5
+S2	core	The same sproutid in both tenants resolves to different machines	UAT.5
+S3	core	Asset link: new 201, repeat 200, collision 409 asset_link_conflict	UAT.5
+S4	core	Lookup by asset_ids; another tenant's ids come back unresolved without saying why	UAT.5
+S5	core	A sprout with no box key is refused (sprout_reenroll_required); nothing is sent in plaintext	UAT.5
+S6	core	Uninstall and reinstall on the same host re-enrols cleanly	UAT.5
+C1	smoke,core	cmd.run succeeds on every sprout, all three OS	UAT.5
+C2	core	A non zero exit gives command_failed with the exit code	UAT.5
+C3	core	timeout_seconds is honoured	UAT.5
+C4	core	Shell syntax is rejected; args, cwd and run_as work	UAT.5
+C5	core	An unknown asset id comes back unresolved	UAT.5
+C6	core	A stopped sprout gives sprout_unreachable	UAT.5
+C7	core	A batch over several sprouts reports per item results	UAT.5
+C8	core	The per tenant rate limit applies	UAT.5
+R1	core	Recipe upload, list, fetch, delete through the API	UAT.5
+R2	core	Read and write roles are enforced (a read only user cannot write)	UAT.5
+R3	core	Recipes are tenant scoped	UAT.5
+R4	core	Cook a recipe by name on a sprout	UAT.5
+R5	core	Cook in test mode reports pending changes, then none after a real run	UAT.5
+R6	core	Recipes with properties, templates and OS conditions over a mixed OS batch	UAT.5
+I.*	ingredients	Ingredient conformance: one case per registered ingredient method	UAT.7
+L1	resilience	Each sprout survives a reboot, reconnects and runs a job	UAT.5
+L2	resilience	Restarting farmer: sprouts stay connected or reconnect, jobs run	UAT.5
+L3	resilience	Restarting farmerbus and Envoy: sprouts reconnect	UAT.5
+L4	lifecycle	Package upgrade from the previous release to this one keeps /etc/imas/sprout and the sproutid	UAT.7
+L5	lifecycle	One self update cycle with the dispatch flags on (opt in, UAT only)	UAT.7
+X1	core	No token, expired token, wrong audience, read only token on a write route: refused as documented	UAT.5
+X2	core	A sprout presenting no gateway JWT is refused at Envoy	UAT.5
+X3	core	A sprout cannot open a connection to core	UAT.5
+X4	core	Cross tenant access by a tenant admin token is denied everywhere	UAT.5
+X5	core	Sealing: plaintext cmd.run and cook are refused by a sprout	UAT.5
