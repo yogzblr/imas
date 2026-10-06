@@ -169,9 +169,9 @@ leaves the chart's own ClusterIP Services as they are:
 - The DMZ's NodePort range is 8442-8443 (UAT.2 sets it), so both node ports
   are pinned in both modes and nothing is left to allocation. 6443, 8080
   and the other ports k0s uses stay outside the range.
-- **"Via chart values" is not done** (see Open questions): the nats chart has
-  no value for a node port, and its bus Service carries the websocket port
-  too. The Services are this script's own manifests instead.
+- **The Services are this script's own manifests, not chart values**
+  (owner's decision, below): the nats chart has no value for a node port,
+  and its bus Service carries the websocket port too.
 - **LoadBalancer** needs a load balancer controller in the cluster (k0s ships
   none; in production an application gateway sits in front instead).
   `install.sh` waits up to `--timeout` for the Service's address, writes it
@@ -356,42 +356,38 @@ and 8443, which depends on UAT.2's range.
   [Private names](#private-names)). This answers where sprouts and core find
   the DMZ.
 - **`imashelm` is public:** no token. The token path is removed.
+- **Services through chart values:** "Accept install.sh's own manifests for
+  now. The bus Service carries both 5406 and 5407, and the 8442–8443 range
+  can't host a node port for 5407. A deploy/helm/nats change can be a
+  follow-up task later". So `install.sh` keeps creating both Services; the
+  `deploy/helm/nats` change (node port values, and a bus Service that can
+  expose only the client port) is a later follow-up outside this brief.
 
 ## Open questions
 
-1. **"Via chart values".** The owner's decision says the Services are owned
-   "via chart values with pinned node ports". `deploy/helm/nats` cannot do
-   that today: `envoy.service` and `bus.service` have a `type` value but no
-   node port value, and the bus Service carries both the client port (5406)
-   and the websocket port (5407), so making it a NodePort would also give
-   5407 a node port, which the 8442-8443 range has no room for and which
-   only Envoy should reach. This PR keeps the Services in `install.sh`'s own
-   manifests, with pinned node ports. Doing it through chart values needs a
-   change to `deploy/helm/nats` (node port values, and a bus Service that
-   can expose only the client port), outside this brief.
-2. **Bus port toward core.** The Shared contract says "core reaches only the
+1. **Bus port toward core.** The Shared contract says "core reaches only the
    bus websocket port on the DMZ". farmer and saasapi dial the bus's TCP
    client port, `tls://...:5406` (farmer chart, "Reaching the bus"); only
    Envoy uses the websocket port 5407, inside the DMZ cluster. Core reaches
    the client port on node port 8442 (owner's decision), so the NSG rule is
    core to 8442 (PR #135 is being updated by its owner).
-3. **The endpoints file's shape** is this brief's proposal (above); UAT.2's
+2. **The endpoints file's shape** is this brief's proposal (above); UAT.2's
    PR #130 writes nearly the same file and both are read here. UAT.3b and
    UAT.8 should read and write the same one.
-4. **Section 4h still lists "DMZ install, core install"**; the owner's
+3. **Section 4h still lists "DMZ install, core install"**; the owner's
    install-order decision needs it amended, outside this brief.
-5. **LoadBalancer in UAT.** No load balancer controller is installed on the
+4. **LoadBalancer in UAT.** No load balancer controller is installed on the
    k0s hubs, so `--expose loadbalancer` would wait and fail there; it is
    ready for a cluster that has one.
-6. **`farmerbusurl` on the private name, in the farmer chart.**
+5. **`farmerbusurl` on the private name, in the farmer chart.**
    `deploy/helm/farmer` builds `farmerbusurl` and saasapi's
    `SAASAPI_NATS_URL` as `tls://<bus.serviceName>.<bus.namespace>.svc.<clusterDomain>:<bus.port>`,
    so it cannot produce `tls://dmz.uat.imas.internal:8442` from its values.
    That is for UAT.3b (and possibly a chart change); this side only makes
    sure the bus certificate carries the name.
-7. **Private names from pods.** Envoy dials farmer by IP, so the DMZ needs no
+6. **Private names from pods.** Envoy dials farmer by IP, so the DMZ needs no
    private name resolution. Core's pods need `dmz.uat.imas.internal` to
    resolve: CoreDNS forwards to the node's resolver by default on k0s, and
    the zone is linked to the VNet, but this has not been tried.
-8. **The Shared contract** (section 4h) is to carry the private names; that
+7. **The Shared contract** (section 4h) is to carry the private names; that
    text is outside this brief.
