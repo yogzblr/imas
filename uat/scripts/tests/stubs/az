@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Stub az for uat/scripts/tests/scripts_test.sh. Logs its arguments to
+# $STUB_STATE/calls.log; its answers come from files in $STUB_STATE.
+set -u
+echo "az $*" >>"$STUB_STATE/calls.log"
+
+# arg NAME: the value after --NAME in the arguments.
+arg() {
+  local want=$1 prev=""
+  for a in "${ARGS[@]}"; do
+    [ "$prev" = "--$want" ] && { printf '%s' "$a"; return 0; }
+    prev=$a
+  done
+  return 1
+}
+ARGS=("$@")
+
+case "$1 $2" in
+  "group list")
+    tag=$(arg tag)
+    case "$tag" in
+      purpose=imas-uat)
+        [ -f "$STUB_STATE/list_fail" ] && { echo "ERROR: stub list failure" >&2; exit 1; }
+        if [ -f "$STUB_STATE/listing.json" ]; then cat "$STUB_STATE/listing.json"; else cat "$STUB_STATE/groups.json"; fi
+        ;;
+      run_id=*)
+        [ -f "$STUB_STATE/group_list_fail" ] && { echo "ERROR: stub failure" >&2; exit 1; }
+        cat "$STUB_STATE/tagged_groups" 2>/dev/null || true
+        ;;
+      *) echo "stub az: unexpected tag filter $tag" >&2; exit 99 ;;
+    esac
+    ;;
+  "group show")
+    name=$(arg name)
+    if [ -f "$STUB_STATE/show/$name" ]; then cat "$STUB_STATE/show/$name"; exit 0; fi
+    jq -e --arg n "$name" '.[] | select(.name == $n)' "$STUB_STATE/groups.json" 2>/dev/null || {
+      echo "ERROR: (ResourceGroupNotFound) $name" >&2
+      exit 3
+    }
+    ;;
+  "group delete")
+    name=$(arg name)
+    [ -f "$STUB_STATE/delete_fail/$name" ] && { echo "ERROR: stub delete failure" >&2; exit 1; }
+    jq --arg n "$name" 'map(select(.name != $n))' "$STUB_STATE/groups.json" >"$STUB_STATE/groups.json.new" &&
+      mv "$STUB_STATE/groups.json.new" "$STUB_STATE/groups.json"
+    ;;
+  "group exists")
+    # One answer per line in group_exists; the last one repeats.
+    n=$(cat "$STUB_STATE/exists_calls" 2>/dev/null || echo 0)
+    echo $((n + 1)) >"$STUB_STATE/exists_calls"
+    v=$(sed -n "$((n + 1))p" "$STUB_STATE/group_exists" 2>/dev/null)
+    [ -n "$v" ] || v=$(tail -n 1 "$STUB_STATE/group_exists" 2>/dev/null)
+    [ -n "$v" ] || v=false
+    [ "$v" = error ] && { echo "ERROR: stub failure" >&2; exit 1; }
+    echo "$v"
+    ;;
+  "resource list")
+    [ -f "$STUB_STATE/resource_list_fail" ] && { echo "ERROR: stub failure" >&2; exit 1; }
+    cat "$STUB_STATE/leftovers" 2>/dev/null || true
+    ;;
+  *)
+    echo "stub az: unexpected call: $*" >&2
+    exit 99
+    ;;
+esac

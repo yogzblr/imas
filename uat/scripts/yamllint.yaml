@@ -1,0 +1,12 @@
+---
+# yamllint settings for the UAT workflows (.github/workflows/uat.yml and
+# uat-janitor.yml) and uat/scripts. GitHub Actions' `on:` key is not a
+# boolean, and the workflows carry no document start marker, like the
+# repo's other workflows.
+extends: default
+rules:
+  document-start: disable
+  truthy:
+    check-keys: false
+  line-length:
+    max: 140
