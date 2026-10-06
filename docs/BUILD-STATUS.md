@@ -594,6 +594,15 @@ Docs-only PRs in the same window: #68 (this file's RAG summary), #82 (plan
 §4e, Wave 7 briefs), #91 (the SEC.5b brief), #101 (plan §4f) and #109 (plan
 §4g and the dispatcher prompt).
 
+## Azure UAT gate briefs (plan §4h, UAT.1 to UAT.8)
+
+Each brief adds its own row. Nothing here has run against Azure or any
+real deployment.
+
+| Item | What it built | Status |
+|---|---|---|
+| UAT.5 | Acceptance suite under `uat/tests` (build tag `uat`): T1 to T6, K1 to K4, S1 to S6, C1 to C8, R1 to R6, X1 to X5 (core, smoke ones `TestSmoke*`), L1 to L3 (resilience); `uat/tests/harness` (API client, Keycloak tokens and scratch users, `vmctl.sh` wrapper, synthetic sprouts for `/v1/enroll`, batches, cooks, host checks), reused by UAT.7; `run.sh` with a per id/OS/tenant summary, JUnit and the no silent green rule (`uatreport`, `catalogue.tsv` kept equal to the plan's table by a test); an in-memory fake stack the whole catalogue runs green against (plumbing only). Never run against a deployment. Written skips: T3, part of T4/T5/T6, S6 on Windows and after a purge, X5. API gap: no route to delete or revoke a sprout | PR open, ready for review |
+
 ## Docs, CI and tooling merged alongside
 
 | Item | Status |
