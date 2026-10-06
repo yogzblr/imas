@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Stub systemctl for access_test.sh: run-command scripts run locally in the
+# test, so the sprout service commands land here.
+echo "systemctl $*" >>"$STUB_STATE/calls.log"
+exit "$(cat "$STUB_STATE/systemctl_rc" 2>/dev/null || echo 0)"

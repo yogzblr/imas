@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Stub tofu for destroy_test.sh. Logs its arguments; behaviour comes from
+# files in $STUB_STATE.
+set -u
+echo "tofu $*" >>"$STUB_STATE/calls.log"
+for a in "$@"; do
+  case "$a" in
+    init)
+      exit "$(cat "$STUB_STATE/init_rc" 2>/dev/null || echo 0)"
+      ;;
+    destroy)
+      rc=$(cat "$STUB_STATE/destroy_rc" 2>/dev/null || echo 0)
+      if [ "$rc" -eq 0 ] && [ -f "$STUB_STATE/destroy_clears" ]; then
+        echo false >"$STUB_STATE/group_exists"
+        : >"$STUB_STATE/leftovers"
+      fi
+      exit "$rc"
+      ;;
+  esac
+done
+exit 0

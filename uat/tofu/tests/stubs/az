@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Stub az for destroy_test.sh. Logs its arguments; behaviour comes from files
+# in $STUB_STATE.
+set -u
+echo "az $*" >>"$STUB_STATE/calls.log"
+case "$1 $2" in
+  "storage account")
+    cat "$STUB_STATE/account" 2>/dev/null
+    exit 0
+    ;;
+  "group exists")
+    v=$(cat "$STUB_STATE/group_exists" 2>/dev/null || echo false)
+    [ "$v" = error ] && { echo "ERROR: stub failure" >&2; exit 1; }
+    echo "$v"
+    ;;
+  "group show")
+    cat "$STUB_STATE/group_tags" 2>/dev/null || echo '{}'
+    ;;
+  "group delete")
+    if [ -f "$STUB_STATE/delete_clears" ]; then
+      echo false >"$STUB_STATE/group_exists"
+      : >"$STUB_STATE/leftovers"
+    fi
+    exit "$(cat "$STUB_STATE/delete_rc" 2>/dev/null || echo 0)"
+    ;;
+  "resource list")
+    cat "$STUB_STATE/leftovers" 2>/dev/null
+    ;;
+  *)
+    echo "stub az: unexpected call: $*" >&2
+    exit 99
+    ;;
+esac
