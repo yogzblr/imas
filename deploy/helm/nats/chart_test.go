@@ -431,6 +431,76 @@ func TestClusteredServices(t *testing.T) {
 	}
 }
 
+// Node port exposure for a core in another cluster (the UAT DMZ hub): the
+// Envoy Service can pin its node port, and an opt-in bus "-core" Service
+// exposes the client port alone, never the websocket port. Defaults render
+// neither a pinned port nor the extra Service.
+func TestExposureServices(t *testing.T) {
+	defaults := mustRender(t)
+	if has(defaults, "Service", "-bus-core") {
+		t.Error("bus core Service rendered by default")
+	}
+	if np := get(find(t, defaults, "Service", "-envoy"), "spec", "ports", 0, "nodePort"); np != nil {
+		t.Errorf("default Envoy Service pins nodePort %v", np)
+	}
+
+	docs := mustRender(t,
+		"--set", "envoy.service.type=NodePort", "--set", "envoy.service.port=8443", "--set", "envoy.service.nodePort=8443",
+		"--set", "bus.coreService.enabled=true", "--set", "bus.coreService.nodePort=8442", "--set", "bus.coreService.port=8442",
+		"--set", "bus.coreService.externalTrafficPolicy=Local")
+	envoy := find(t, docs, "Service", "-envoy")
+	if get(envoy, "spec", "type") != "NodePort" || get(envoy, "spec", "ports", 0, "nodePort") != 8443 {
+		t.Errorf("Envoy Service: type=%v ports=%v, want NodePort with nodePort 8443", get(envoy, "spec", "type"), get(envoy, "spec", "ports"))
+	}
+	core := find(t, docs, "Service", "-bus-core")
+	ports, _ := get(core, "spec", "ports").([]any)
+	if len(ports) != 1 {
+		t.Fatalf("bus core Service ports = %v, want the client port only", ports)
+	}
+	if get(core, "spec", "type") != "NodePort" || get(core, "spec", "externalTrafficPolicy") != "Local" ||
+		get(ports[0], "port") != 8442 || get(ports[0], "nodePort") != 8442 || get(ports[0], "targetPort") != "client" {
+		t.Errorf("bus core Service spec = %v", get(core, "spec"))
+	}
+	if get(core, "spec", "selector", "app.kubernetes.io/component") != "bus" {
+		t.Errorf("bus core Service selects %v", get(core, "spec", "selector"))
+	}
+	// The ClusterIP client Service is untouched: core in-cluster and Envoy
+	// still use it, with both ports.
+	if got := servicePorts(find(t, docs, "Service", "-bus")); !slices.Equal(got, []int{5406, 5407}) {
+		t.Errorf("client Service ports = %v, want [5406 5407]", got)
+	}
+
+	// Unpinned and default port: Kubernetes picks the node port, the
+	// Service port is the client port.
+	lb := mustRender(t, "--set", "bus.coreService.enabled=true", "--set", "bus.coreService.type=LoadBalancer",
+		"--set", "bus.coreService.loadBalancerSourceRanges={10.60.2.0/24}")
+	lbCore := find(t, lb, "Service", "-bus-core")
+	if get(lbCore, "spec", "ports", 0, "nodePort") != nil || get(lbCore, "spec", "ports", 0, "port") != 5406 {
+		t.Errorf("unpinned bus core Service ports = %v", get(lbCore, "spec", "ports"))
+	}
+	if got := get(lbCore, "spec", "loadBalancerSourceRanges", 0); got != "10.60.2.0/24" {
+		t.Errorf("loadBalancerSourceRanges = %v", get(lbCore, "spec", "loadBalancerSourceRanges"))
+	}
+}
+
+func TestExposureValidation(t *testing.T) {
+	cases := []struct {
+		name, want string
+		args       []string
+	}{
+		{"envoy nodePort on ClusterIP", "envoy.service.nodePort needs envoy.service.type NodePort or LoadBalancer", []string{"--set", "envoy.service.nodePort=8443"}},
+		{"envoy nodePort out of range", "envoy.service.nodePort must be between 0 and 65535", []string{"--set", "envoy.service.type=NodePort", "--set", "envoy.service.nodePort=70000"}},
+		{"bus core Service as ClusterIP", "bus.coreService.type must be NodePort or LoadBalancer", []string{"--set", "bus.coreService.enabled=true", "--set", "bus.coreService.type=ClusterIP"}},
+		{"bus core nodePort out of range", "bus.coreService.nodePort must be between 0 and 65535", []string{"--set", "bus.coreService.enabled=true", "--set", "bus.coreService.nodePort=-1"}},
+		{"bus core port out of range", "bus.coreService.port must be between 0 and 65535", []string{"--set", "bus.coreService.enabled=true", "--set", "bus.coreService.port=70000"}},
+		{"same node port twice", "a node port belongs to one Service", []string{"--set", "envoy.service.type=NodePort", "--set", "envoy.service.nodePort=8443",
+			"--set", "bus.coreService.enabled=true", "--set", "bus.coreService.nodePort=8443"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) { mustFail(t, c.want, c.args...) })
+	}
+}
+
 // Route traffic stays between bus pods: one dedicated policy opens the
 // route port, in and out, to this StatefulSet's pods only; no other
 // policy mentions it, and Envoy cannot egress to it.

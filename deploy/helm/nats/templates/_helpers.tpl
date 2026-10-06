@@ -220,6 +220,38 @@ explanation rather than deploying something that silently can't work.
 {{- if .Values.envoy.enabled -}}
 {{- include "imas-nats.envoy.validate" . -}}
 {{- end -}}
+{{- include "imas-nats.exposure.validate" . -}}
+{{- end }}
+
+{{- /* Node ports: pinned ones must be valid and on a Service type that has
+node ports, and the two pinned ports this chart can render must differ. */ -}}
+{{- define "imas-nats.exposure.validate" -}}
+{{- $exposed := list "NodePort" "LoadBalancer" -}}
+{{- $e := .Values.envoy.service -}}
+{{- $envoyNP := int64 (default 0 $e.nodePort) -}}
+{{- if or (lt $envoyNP 0) (gt $envoyNP 65535) -}}
+{{- fail (printf "envoy.service.nodePort must be between 0 and 65535, got %d" $envoyNP) -}}
+{{- end -}}
+{{- if and (gt $envoyNP 0) (not (has $e.type $exposed)) -}}
+{{- fail (printf "envoy.service.nodePort needs envoy.service.type NodePort or LoadBalancer, got %q" $e.type) -}}
+{{- end -}}
+{{- $c := .Values.bus.coreService -}}
+{{- if $c.enabled -}}
+{{- if not (has $c.type $exposed) -}}
+{{- fail (printf "bus.coreService.type must be NodePort or LoadBalancer, got %q: a ClusterIP core Service adds nothing to the bus client Service" $c.type) -}}
+{{- end -}}
+{{- $busNP := int64 (default 0 $c.nodePort) -}}
+{{- if or (lt $busNP 0) (gt $busNP 65535) -}}
+{{- fail (printf "bus.coreService.nodePort must be between 0 and 65535, got %d" $busNP) -}}
+{{- end -}}
+{{- $port := int64 (default 0 $c.port) -}}
+{{- if or (lt $port 0) (gt $port 65535) -}}
+{{- fail (printf "bus.coreService.port must be between 0 and 65535, got %d" $port) -}}
+{{- end -}}
+{{- if and .Values.envoy.enabled (gt $busNP 0) (eq $busNP $envoyNP) -}}
+{{- fail (printf "bus.coreService.nodePort and envoy.service.nodePort are both %d: a node port belongs to one Service" $busNP) -}}
+{{- end -}}
+{{- end -}}
 {{- end }}
 
 {{- define "imas-nats.envoy.validate" -}}
