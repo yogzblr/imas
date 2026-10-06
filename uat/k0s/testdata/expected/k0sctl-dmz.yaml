@@ -57,7 +57,7 @@ spec:
             - 10.60.1.4
             - uatab12cd34-dmz.centralindia.cloudapp.azure.com
           extraArgs:
-            # Only the node ports this hub exposes (config.env; README.md,
+            # This hub's NodePort range (config.env; README.md,
             # "Exposure").
             service-node-port-range: 8442-8443
         network:

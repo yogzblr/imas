@@ -164,13 +164,12 @@ kc() {
   kubectl --kubeconfig "$kubeconfig" "$@"
 }
 
-# hub_allowed_node_ports HUB prints the node ports a hub may expose. On core
-# they are used only when uat/hub/core runs its edge with node ports instead
-# of its default hostPorts.
+# hub_allowed_node_ports HUB prints the node ports a hub may expose: Envoy's
+# and the bus's on the DMZ, none on core (hostPorts only).
 hub_allowed_node_ports() {
   case $1 in
     dmz) printf '%s\n' "$UAT_DMZ_ENVOY_PORT" "$UAT_DMZ_BUS_PORT" ;;
-    core) printf '%s\n' "$UAT_CORE_HTTPS_PORT" "$UAT_CORE_FARMER_API_PORT" ;;
+    core) ;;
     *) die "unknown hub: $1" ;;
   esac
 }

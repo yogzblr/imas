@@ -114,6 +114,15 @@ check_settings() {
       [[ " $UAT_RESERVED_NODE_PORTS " != *" $p "* ]] ||
         die "config.env: $hub port $p is a port k0s or the node uses (UAT_RESERVED_NODE_PORTS)"
     done < <(hub_allowed_node_ports "$hub")
+    while read -r p; do
+      [[ -n $p ]] || continue
+      is_port "$p" || die "config.env: bad $hub hostPort: $p"
+      [[ " $UAT_RESERVED_NODE_PORTS " != *" $p "* ]] ||
+        die "config.env: $hub hostPort $p is a port k0s or the node uses (UAT_RESERVED_NODE_PORTS)"
+      if port_in_range "$p" "$range"; then
+        die "config.env: $hub hostPort $p is inside its NodePort range $range (a node port could take it)"
+      fi
+    done < <(hub_allowed_host_ports "$hub")
     reserved_in=""
     for r in $UAT_RESERVED_NODE_PORTS; do
       if port_in_range "$r" "$range"; then reserved_in+=" $r"; fi
@@ -210,7 +219,7 @@ write_endpoints() {
             node_port_range: $drange},
       core: {name: $cn, private_ip: $cp, public_ip: $cq, fqdn: $cf,
              ports: {https: $https, farmer_api: $api},
-             exposure: "hostPorts on the uat/hub/core edge (node ports optional)",
+             exposure: "hostPorts on the uat/hub/core edge, no node ports",
              node_port_range: $crange},
       cluster_issuer: $issuer,
       ca_file: "uat-ca.crt",

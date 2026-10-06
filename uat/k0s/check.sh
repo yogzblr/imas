@@ -9,6 +9,7 @@
 #     (only with an endpoints file, which names them),
 #   - a NodePort or LoadBalancer Service uses a node port the hub does not
 #     expose (config.env),
+#     (Envoy's and the bus's on the DMZ, none on core),
 #   - a pod off the host network uses a hostPort the hub does not expose
 #     (none on the DMZ; the edge's 443 and 5405 on core).
 # It reads the clusters only; it changes nothing.
@@ -179,12 +180,13 @@ check_dns() {
 }
 
 check_node_ports() {
-  local hub=$1 k=$2 json allowed bad
+  local hub=$1 k=$2 json allowed bad shown
   if ! json=$(get_json "$k" services -A); then
     fail "$hub" "cannot list Services"
     return
   fi
-  allowed=$(hub_allowed_node_ports "$hub" | jq -R 'tonumber' | jq -sc .)
+  allowed=$(hub_allowed_node_ports "$hub" | jq -R 'select(length > 0) | tonumber' | jq -sc .)
+  shown=$(hub_allowed_node_ports "$hub" | paste -sd' ' -)
   jq -r '.items[] | select(.spec.type == "NodePort" or .spec.type == "LoadBalancer")
     | .metadata as $m | .spec.type as $t
     | (if $t == "LoadBalancer" then "  external=\((.status.loadBalancer.ingress // []) | map(.ip // .hostname) | if length == 0 then "pending" else join(",") end)" else "" end) as $lb
@@ -192,9 +194,9 @@ check_node_ports() {
     | "  svc   \($m.namespace)/\($m.name)  \($t)  \(.port) -> node port \(.nodePort)\($lb)"' <<<"$json"
   bad=$(jq -r --argjson allowed "$allowed" '[.items[] | .metadata as $m | (.spec.ports // [])[] | select(.nodePort and ((.nodePort as $p | $allowed | index($p)) | not)) | "\($m.namespace)/\($m.name):\(.nodePort)"] | join(" ")' <<<"$json")
   if [[ -n $bad ]]; then
-    fail "$hub" "node ports outside the hub's exposed ports ($(hub_allowed_node_ports "$hub" | paste -sd' ' -)): $bad"
+    fail "$hub" "node ports outside the hub's exposed ports (${shown:-none}): $bad"
   else
-    ok "node ports within $(hub_allowed_node_ports "$hub" | paste -sd' ' -)"
+    ok "node ports within ${shown:-none}"
   fi
 }
 

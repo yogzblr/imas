@@ -224,7 +224,7 @@ expect_file_has "$CASE/out/k0sctl-core.yaml" "            - 10.60.2.4"
 
 t "render: node port range"
 expect_file_has "$D" "            service-node-port-range: 8442-8443"
-expect_file_has "$CASE/out/k0sctl-core.yaml" "            service-node-port-range: 443-5405"
+expect_file_has "$CASE/out/k0sctl-core.yaml" "            service-node-port-range: 30000-32767"
 
 t "render: CoreDNS maps both FQDNs on both hubs"
 for h in dmz core; do
@@ -255,7 +255,7 @@ assert host["role"] == "single"
 assert isinstance(host["openSSH"]["port"], int)
 cfg = d["spec"]["k0s"]["config"]["spec"]
 assert "127.0.0.1" in cfg["api"]["sans"]
-assert cfg["api"]["extraArgs"]["service-node-port-range"] == {"dmz": "8442-8443", "core": "443-5405"}[sys.argv[2]]
+assert cfg["api"]["extraArgs"]["service-node-port-range"] == {"dmz": "8442-8443", "core": "30000-32767"}[sys.argv[2]]
 patch = yaml.safe_load(cfg["network"]["coreDNS"]["patches"][0]["patch"]["content"])
 assert "hosts {" in patch["data"]["Corefile"]
 PY
@@ -270,8 +270,8 @@ E="$CASE/out/endpoints.json"
 [[ $(jq -r '.dmz.ports.envoy' "$E") == 8443 ]] && pass || fail "envoy port"
 [[ $(jq -r '.dmz.node_port_range' "$E") == 8442-8443 ]] && pass || fail "dmz range"
 [[ $(jq -r '.dmz.exposure' "$E") == *"uat/hub/dmz"* ]] && pass || fail "dmz exposure owner"
-[[ $(jq -r '.core.exposure' "$E") == hostPorts* ]] && pass || fail "core exposure"
-[[ $(jq -r '.core.node_port_range' "$E") == 443-5405 ]] && pass || fail "core range"
+[[ $(jq -r '.core.exposure' "$E") == "hostPorts on the uat/hub/core edge, no node ports" ]] && pass || fail "core exposure"
+[[ $(jq -r '.core.node_port_range' "$E") == 30000-32767 ]] && pass || fail "core range"
 [[ $(jq -r '.dmz.ports.bus' "$E") == 8442 ]] && pass || fail "bus port"
 [[ $(jq -r '.core.ports.farmer_api' "$E") == 5405 ]] && pass || fail "farmer api port"
 [[ $(jq -r '.cluster_issuer' "$E") == imas-uat-ca ]] && pass || fail "issuer"
@@ -352,6 +352,12 @@ sed 's/^UAT_DMZ_BUS_PORT=.*/UAT_DMZ_BUS_PORT=9000/' "$K0S/config.env" >"$CASE/co
 UAT_K0S_CONFIG="$CASE/config-port.env" boot_render "$DATA/uat.json" "$DATA/access.json"
 expect_rc 1
 expect_err "dmz port 9000 is outside its NodePort range 8442-8443"
+
+t "render refuses: a core hostPort inside the core NodePort range"
+sed 's/^UAT_CORE_NODE_PORT_RANGE=.*/UAT_CORE_NODE_PORT_RANGE=443-5405/' "$K0S/config.env" >"$CASE/config-hp.env"
+UAT_K0S_CONFIG="$CASE/config-hp.env" boot_render "$DATA/uat.json" "$DATA/access.json"
+expect_rc 1
+expect_err "core hostPort 443 is inside its NodePort range 443-5405"
 
 t "render refuses: a reserved list without the API port"
 sed 's/^UAT_RESERVED_NODE_PORTS=.*/UAT_RESERVED_NODE_PORTS="8080"/' "$K0S/config.env" >"$CASE/config-res.env"
@@ -587,10 +593,13 @@ expect_out "dmz: node ports outside the hub's exposed ports"
 expect_out "imas-dmz/imas-dmz-nats-bus:5405"
 cp "$DATA/kube/dmz/services.json" "$CASE/fix/dmz/services.json"
 
-t "check: a core node port when the edge uses hostPorts is still one of its ports"
-jq_edit "$DATA/kube/core/services.json" "$CASE/fix/core/services.json" '.items[1].spec.type = "NodePort" | .items[1].spec.ports[0].nodePort = 5405'
+t "check: core exposes no node port (node-port mode dropped)"
 chk --out "$CASE/out"
-expect_rc 0
+expect_out "node ports within none"
+jq_edit "$DATA/kube/core/services.json" "$CASE/fix/core/services.json" '.items[1].spec.type = "NodePort" | .items[1].spec.ports[0].nodePort = 30405'
+chk --out "$CASE/out"
+expect_rc 1
+expect_out "core: node ports outside the hub's exposed ports (none): imas-core/imas-core-farmer:30405"
 cp "$DATA/kube/core/services.json" "$CASE/fix/core/services.json"
 
 t "check: hostPorts"

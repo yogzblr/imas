@@ -57,9 +57,9 @@ spec:
             - 10.60.2.4
             - uatab12cd34-core.centralindia.cloudapp.azure.com
           extraArgs:
-            # Only the node ports this hub exposes (config.env; README.md,
+            # This hub's NodePort range (config.env; README.md,
             # "Exposure").
-            service-node-port-range: 443-5405
+            service-node-port-range: 30000-32767
         network:
           provider: kuberouter
           podCIDR: 10.244.0.0/16

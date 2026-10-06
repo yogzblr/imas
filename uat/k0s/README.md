@@ -81,7 +81,7 @@ controller. Telemetry is off.
 | cert-manager | Apache-2.0 | Named in the Shared contract. |
 | local-path-provisioner | Apache-2.0 | Named in the Shared contract. |
 | kubectl | Apache-2.0 | A runner tool. |
-| **busybox** (local-path-provisioner's helper pod image) | **GPL-2.0** | **Flagged, answered by the owner on 2026-10-06: "replace busybox with a Go test binary". Not yet replaced; how is open question 2.** The upstream manifest uses busybox to create and delete volume directories. It is pulled and run unmodified as a container on the UAT hubs only. It is not linked, not shipped, and not a dependency of any released artifact. |
+| **busybox** (local-path-provisioner's helper pod image) | **GPL-2.0** | **Flagged. Owner, 2026-10-06: recorded as a UAT-only exception pending owner confirmation; this PR stays as is.** The upstream manifest uses busybox to create and delete volume directories. It is pulled and run unmodified as a container on the UAT hubs only. It is not linked, not shipped, and not a dependency of any released artifact. |
 
 ## Exposure
 
@@ -99,22 +99,25 @@ Owner decisions, 2026-10-06:
   (farmer's API, which the DMZ's Envoy dials) as hostPorts on the node.
   k0s's kube-router CNI chain includes the `portmap` plugin, so hostPorts
   work. This was checked in k0s's source for the pinned version, not on a
-  node.
+  node. Core's node-port mode is dropped: core exposes no node port, and
+  its NodePort range is Kubernetes' default, **30000-32767**.
 
 What uat/k0s does about exposure:
 
 - It sets each cluster's API server NodePort range:
   - DMZ `8442-8443`;
-  - core `443-5405`, which keeps PR #132's optional node-port mode
-    (`core.exposure: nodePort`) working.
+  - core `30000-32767`, Kubernetes' default.
 
   Neither range holds a port k0s or the node uses. bootstrap.sh refuses a
   hub port that is one (`UAT_RESERVED_NODE_PORTS`: 6443, 8080, 8132, 8133,
-  9443, 10249, 10250, 10256). It also warns if a range ever contains one.
+  9443, 10249, 10250, 10256), and warns if a range ever contains one. It
+  also refuses a hub hostPort inside that hub's NodePort range: a node port
+  that Kubernetes picks by itself could otherwise take 443 or 5405 from the
+  edge.
 - check.sh fails on any node port, or any hostPort of a pod off the host
   network, that the hub does not expose:
   - DMZ: node ports 8443 and 8442, no hostPorts.
-  - Core: 443 and 5405, as either hostPorts or node ports.
+  - Core: hostPorts 443 and 5405, no node ports.
 
 | Hub | Port | How | Who creates it | Who connects |
 |---|---|---|---|---|
@@ -275,8 +278,12 @@ traffic through a Bastion tunnel. Expect fixes after the first Azure run.
   edge is also the TLS front for saasapi and Keycloak.
 - **Who owns the Envoy and bus Services.** uat/hub/dmz (UAT.3a), from the
   chart values with pinned node ports. expose.sh is removed.
-- **busybox.** Replace it with a Go test binary. How is open question 2
-  below.
+- **The core NodePort range.** Core's node-port mode is dropped, and the
+  core range is 30000-32767.
+- **busybox.** Recorded as a UAT-only exception pending owner
+  confirmation. It stays pinned as it is. An earlier owner note asked for
+  it to be replaced with a Go test binary; the analysis of how is kept
+  below, under "busybox, for the record".
 
 ## Open questions (for the owner and the other UAT briefs)
 
@@ -291,46 +298,32 @@ traffic through a Bastion tunnel. Expect fixes after the first Azure run.
      8442, and UAT.1's network rule from core to the DMZ needs 8442.
    - farmer's `farmerbusurl` then has to name port 8442 (farmer chart
      `bus.port`). That is UAT.3b's to set; here it is only noted.
-2. **What "a Go test binary" replaces busybox with.** local-path-provisioner
-   (pinned version) runs its helper pod as `/bin/sh /script/setup` and
-   `/script/teardown` unless its `config.json` sets `setupCommand` and
-   `teardownCommand`. Those name one executable in the helper image, called
-   with `-p <dir> -s <size> -m <mode>` and the `VOL_DIR`, `VOL_MODE`, ...
-   environment variables. A Go replacement is therefore possible:
-   - a small static Go program that creates (setup) or removes (teardown)
-     the volume directory;
-   - built into a minimal image;
-   - with local-path's ConfigMap pointing `setupCommand` and
-     `teardownCommand` at it, and `helperPod.yaml` at that image.
-
-   Every part of that is outside `uat/k0s`, and each needs a decision:
-   - where the program lives in the module;
-   - which workflow builds and publishes the image, and to which registry;
-   - whether "Go test binary" means this, or something else.
-
-   Until then busybox stays pinned. Alternatives: a static
-   `no-provisioner` StorageClass with pre-created local PersistentVolumes,
-   which needs no helper pod but needs the charts' volume sizes known in
-   advance; or another provisioner.
-3. **The core NodePort range.** It stays `443-5405` so that PR #132's
-   node-port mode keeps working. With the default hostPort mode, no core
-   node port is needed. A node port that Kubernetes picks by itself inside
-   that range could take 443 or 5405 before the edge binds them as
-   hostPorts. Nothing in this setup asks for one, and check.sh would report
-   it. Narrowing the range is the owner's call, for example to match the
-   DMZ's "only what is exposed".
-4. **The endpoints file.** The contract does not fix its fields.
+2. **The endpoints file.** The contract does not fix its fields.
    `OUT/endpoints.json` is offered as that file. Its key names match what
    UAT.3a's PR #133 reads. If another brief defines a different shape,
    UAT.6 should reconcile them.
-5. **The ClusterIssuer name** (`imas-uat-ca`) and the CA file
+3. **The ClusterIssuer name** (`imas-uat-ca`) and the CA file
    (`OUT/uat-ca.crt`) are not in the contract. The hub briefs and UAT.4
    need them.
-6. **access.json shape.** It is read tolerantly (top level, `vms` or
+4. **access.json shape.** It is read tolerantly (top level, `vms` or
    `hosts`). If UAT.1 nests ports differently, `access_get` in lib.sh is the
    one place to change.
-7. **Pulls from Docker Hub** (local-path-provisioner, busybox) are anonymous
+5. **Pulls from Docker Hub** (local-path-provisioner, busybox) are anonymous
    from Azure addresses and may be rate limited. cert-manager pulls from
    quay.io.
-8. That this Kubernetes minor works with the pinned cert-manager release is
+6. That this Kubernetes minor works with the pinned cert-manager release is
    assumed, not verified.
+
+### busybox, for the record
+
+The pinned local-path-provisioner runs its helper pod as
+`/bin/sh /script/setup` and `/bin/sh /script/teardown`, unless its
+`config.json` sets `setupCommand` and `teardownCommand`. Those name one
+executable in the helper image. It is called with `-p <dir> -s <size>
+-m <mode>` and the `VOL_*` environment variables.
+
+If the exception is not confirmed, a small static Go program in a minimal
+image could do that job, with local-path's ConfigMap pointing at it. That
+needs work outside `uat/k0s`: a Go package, a Dockerfile, and a workflow
+that publishes the image to a registry. Another option is a static
+`no-provisioner` StorageClass with pre-created local volumes.
