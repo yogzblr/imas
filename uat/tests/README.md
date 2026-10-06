@@ -121,7 +121,8 @@ root core.json was found under, and the script to
 them, and without a keycloak.json `admin` for the admin REST API, those
 tests skip that part with the reason. uat/hub/core has no way to delete a
 scratch user, so they stay in the realm (and in core.json's
-`scratch_users`) until the run is torn down.
+`scratch_users`) until the run is torn down; the owner accepted that
+(2026-10-06: "no scratch-user delete; accept").
 
 `keycloak.json`:
 
@@ -259,7 +260,8 @@ Each is a written skip, listed in every report, or a comment in the test:
 
 K2, K3, S5 and T5 use synthetic sprouts: made-up NKey and box keys that do
 step 1 of `POST /v1/enroll` through Envoy and never step 2, so they are
-accepted sprouts with no box key. They stay in the tenant (saasapi has no
-route to delete a sprout); a run's tenants are thrown away with the run.
+accepted sprouts with no box key. They stay in the tenant (an API gap the
+owner recorded: no saasapi route to delete or revoke a sprout); a run's
+tenants are thrown away with the run.
 Tests leave small marker files under `/var/tmp` and `C:\Windows\Temp`
 (`imas-uat-*`) and scratch tenants that T1, T4 and T5 offboard.
