@@ -1,0 +1,18 @@
+apiVersion: v2
+name: imas-uat-core
+description: >-
+  UAT ONLY, never published or shipped. The pieces deploy/helm/farmer
+  expects to exist on the uat-core cluster: MinIO (AGPL-3.0, test only),
+  Keycloak (Apache-2.0, dev mode) with the imas-uat realm, an Envoy edge
+  proxy on the core FQDN, the DMZ bus endpoint, the cert-manager
+  certificates and the NetworkPolicies that join the two clusters.
+type: application
+version: 0.0.0-uat
+appVersion: "uat"
+kubeVersion: ">=1.30.0-0"
+annotations:
+  imas.io/uat-only: "true"
+  imas.io/security-review: required
+  # MinIO is AGPL-3.0 and accepted for UAT only (plan section 4h, owner
+  # decision 2026-10-06). Keycloak and Envoy are Apache-2.0.
+  imas.io/dependency-licenses: "minio=AGPL-3.0 (UAT only); keycloak=Apache-2.0; envoy=Apache-2.0"

@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# A stand-in for kubectl, for test/run.sh only. It keeps Secrets and
+# ConfigMaps as JSON files under $STUB_STATE/<ns>/<kind>/<name>.json, and runs
+# `exec ... -- <command>` on this machine (a local OpenBao server stands in
+# for the pod). Every call is appended to $STUB_STATE/calls.log.
+set -euo pipefail
+: "${STUB_STATE:?}"
+mkdir -p "$STUB_STATE"
+printf '%s\n' "$*" >>"$STUB_STATE/calls.log"
+
+ns=default
+args=()
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--kubeconfig) shift 2 ;;
+	-n) ns="$2"; shift 2 ;;
+	--) args+=("$@"); break ;;
+	*) args+=("$1"); shift ;;
+	esac
+done
+set -- "${args[@]}"
+
+store() { printf '%s/%s/%s/%s.json' "$STUB_STATE" "$1" "$2" "$3"; }
+
+case "${1:-}" in
+version) echo "stub" ;;
+create)
+	kind="$2" name=""
+	case "$kind" in
+	namespace) jq -n --arg n "$3" '{kind:"Namespace",metadata:{name:$n}}' ;;
+	secret)
+		name="$4"
+		shift 4
+		data='{}'
+		for a in "$@"; do
+			case "$a" in
+			--from-file=*)
+				kv="${a#--from-file=}"
+				data=$(jq --arg k "${kv%%=*}" --arg v "$(base64 -w0 <"${kv#*=}")" '.[$k] = $v' <<<"$data")
+				;;
+			esac
+		done
+		jq -n --arg n "$name" --arg ns "$ns" --argjson d "$data" '{kind:"Secret",metadata:{name:$n,namespace:$ns},data:$d}'
+		;;
+	configmap)
+		name="$3"
+		shift 3
+		data='{}'
+		for a in "$@"; do
+			case "$a" in
+			--from-file=*)
+				kv="${a#--from-file=}"
+				data=$(jq --arg k "${kv%%=*}" --rawfile v "${kv#*=}" '.[$k] = $v' <<<"$data")
+				;;
+			esac
+		done
+		jq -n --arg n "$name" --arg ns "$ns" --argjson d "$data" '{kind:"ConfigMap",metadata:{name:$n,namespace:$ns},data:$d}'
+		;;
+	*) echo "stub kubectl: create $kind unsupported" >&2; exit 2 ;;
+	esac
+	;;
+apply)
+	obj=$(cat)
+	kind=$(jq -r .kind <<<"$obj")
+	[[ "$kind" == Namespace ]] && exit 0
+	n=$(jq -r .metadata.name <<<"$obj")
+	o=$(jq -r '.metadata.namespace // "default"' <<<"$obj")
+	f=$(store "$o" "$kind" "$n")
+	mkdir -p "$(dirname "$f")"
+	printf '%s' "$obj" >"$f"
+	echo "${kind,,}/$n configured"
+	;;
+get)
+	kind="$2" name="${3:-}"
+	case "$kind" in
+	secret) kind=Secret ;;
+	configmap) kind=ConfigMap ;;
+	clusterissuer) exit 0 ;;
+	*) echo "stub kubectl: get $kind unsupported" >&2; exit 2 ;;
+	esac
+	f=$(store "$ns" "$kind" "$name")
+	[[ -f "$f" ]] || { echo "Error from server (NotFound): $name" >&2; exit 1; }
+	shift 3
+	case "$*" in
+	"-o json") cat "$f" ;;
+	"-o jsonpath={.data.root}") jq -j '.data.root' "$f" ;;
+	"-o jsonpath={.data.ca\.crt}") jq -j '.data["ca.crt"]' "$f" ;;
+	*) echo "stub kubectl: get output $* unsupported" >&2; exit 2 ;;
+	esac
+	;;
+exec)
+	shift
+	while [[ $# -gt 0 && "$1" != -- ]]; do shift; done
+	shift
+	exec "$@"
+	;;
+*) echo "stub kubectl: $* unsupported" >&2; exit 2 ;;
+esac

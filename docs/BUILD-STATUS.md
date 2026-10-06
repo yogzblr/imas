@@ -594,13 +594,11 @@ Docs-only PRs in the same window: #68 (this file's RAG summary), #82 (plan
 §4e, Wave 7 briefs), #91 (the SEC.5b brief), #101 (plan §4f) and #109 (plan
 §4g and the dispatcher prompt).
 
-## Azure UAT gate briefs (plan §4h, UAT.1 to UAT.8)
+## Azure UAT gate briefs (plan §4h)
 
-Each brief adds its own row. Nothing here has run against Azure or any
-real deployment.
-
-| Item | What it built | Status |
+| Item | What shipped | Status |
 |---|---|---|
+| UAT.3b | `uat/hub/core`: installs the published `farmer` chart of a `release_tag` on the uat-core cluster (PXC, Valkey and standalone OpenBao, one replica each) plus UAT-only MinIO (AGPL-3.0, test only), Keycloak (dev mode, embedded H2) with the `imas-uat` realm (two tenants, admin and read-only users, `organization.id` from a user attribute set by `bind-tenant.sh`), an Envoy edge on the core FQDN, the cross-cluster bus Service and NetworkPolicies; generated secrets, `nk` seeds, the release CLI's bootstrap admin, OpenBao init/unseal with the ed25519 gateway key (**UAT only: unseal keys in a Secret and a sensitive artifact**); `check.sh`. Owner decisions 2026-10-06 applied: the DMZ bus on node port 8442, hostPorts 443 and 5405 on core, a sensitive `keycloak.json` (with `tenant_attribute`) next to `core.json` and `credentials.json`, a `bind-tenant.sh --scratch-user` mode for tenants created during a run (no admin API on the edge), the bus reached by the private name `dmz.uat.imas.internal` and `core.uat.imas.internal` on farmer's certificate, and no core node port mode; flagged | ready for review, PR #132; never run against a cluster (static checks, chart renders, and the OpenBao bootstrap against a local OpenBao only) |
 | UAT.5 | Acceptance suite under `uat/tests` (build tag `uat`): T1 to T6, K1 to K4, S1 to S6, C1 to C8, R1 to R6, X1 to X5 (core, smoke ones `TestSmoke*`), L1 to L3 (resilience); `uat/tests/harness` (API client, Keycloak tokens and scratch users, `vmctl.sh` wrapper, synthetic sprouts for `/v1/enroll`, batches, cooks, host checks), reused by UAT.7; `run.sh` with a per id/OS/tenant summary, JUnit and the no silent green rule (`uatreport`, `catalogue.tsv` kept equal to the plan's table by a test); an in-memory fake stack the whole catalogue runs green against (plumbing only). Reads uat/hub/core's `core.json`, `credentials.json` and `keycloak.json` and checks tenants 1 and 2 are bound (UAT.4 binds them), per the owner's decisions of 2026-10-06; T1, T4 and T5 make users for their own tenants with `bind-tenant.sh --scratch-user` (PR #132). Never run against a deployment. Written skips: T3, part of T4/T5/T6, S6 on Windows and after a purge, X5. API gap: no saasapi route to delete or revoke a sprout; no scratch-user delete, accepted by the owner | PR #134, ready for review |
 
 ## Docs, CI and tooling merged alongside

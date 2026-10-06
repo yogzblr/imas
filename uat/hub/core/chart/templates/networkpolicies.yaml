@@ -1,0 +1,147 @@
+{{- include "uat.validate" . -}}
+{{- $farmerNS := dict "kubernetes.io/metadata.name" .Values.farmer.namespace -}}
+{{- $uatNS := dict "kubernetes.io/metadata.name" .Release.Namespace -}}
+# Additive to deploy/helm/farmer's own policies (NetworkPolicies are
+# additive). The chart admits the DMZ by pod and namespace selectors,
+# which can't match pods on another cluster, so the cross-cluster paths
+# are opened here by address, and nothing wider:
+#   - farmer: in from the edge proxy on its API port (the DMZ's Envoy
+#     reaches the edge on the core private IP); out to the DMZ private IP
+#     on the bus port.
+#   - saasapi: out to the DMZ private IP on the bus port.
+#   - the edge: in on 443 from anywhere (the NSG limits it to the runner),
+#     in on farmer's API port from the DMZ private IP only.
+#   - Keycloak: in from the edge only. MinIO: in from farmer and saasapi
+#     only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: imas-uat-farmer-cross-cluster
+  namespace: {{ .Values.farmer.namespace }}
+  labels:
+    {{- include "uat.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.farmer.name }}
+      app.kubernetes.io/instance: {{ .Values.farmer.release }}
+      app.kubernetes.io/component: farmer
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: {{ toJson $uatNS }} }
+          podSelector: { matchLabels: { app.kubernetes.io/name: imas-uat-edge } }
+      ports:
+        - { protocol: TCP, port: {{ .Values.farmer.apiPort }} }
+  egress:
+    - to:
+        - ipBlock: { cidr: {{ printf "%s/32" .Values.dmz.privateIP }} }
+      ports:
+        - { protocol: TCP, port: {{ .Values.bus.remotePort }} }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: imas-uat-saasapi-cross-cluster
+  namespace: {{ .Values.farmer.namespace }}
+  labels:
+    {{- include "uat.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.farmer.name }}
+      app.kubernetes.io/instance: {{ .Values.farmer.release }}
+      app.kubernetes.io/component: saasapi
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - ipBlock: { cidr: {{ printf "%s/32" .Values.dmz.privateIP }} }
+      ports:
+        - { protocol: TCP, port: {{ .Values.bus.remotePort }} }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: imas-uat-edge
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "uat.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: imas-uat-edge
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 443 }
+    - from:
+        - ipBlock: { cidr: {{ printf "%s/32" .Values.dmz.privateIP }} }
+        {{- range .Values.dmz.extraFarmerAPISources }}
+        - ipBlock: { cidr: {{ . }} }
+        {{- end }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.farmer.apiPort }} }
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: {{ toJson $farmerNS }} }
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Values.farmer.name }}
+              app.kubernetes.io/instance: {{ .Values.farmer.release }}
+              app.kubernetes.io/component: saasapi
+      ports:
+        - { protocol: TCP, port: {{ .Values.farmer.saasapiPort }} }
+    - to:
+        - namespaceSelector: { matchLabels: {{ toJson $farmerNS }} }
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Values.farmer.name }}
+              app.kubernetes.io/instance: {{ .Values.farmer.release }}
+              app.kubernetes.io/component: farmer
+      ports:
+        - { protocol: TCP, port: {{ .Values.farmer.apiPort }} }
+    - to:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: imas-uat-keycloak } }
+      ports:
+        - { protocol: TCP, port: 8080 }
+    {{- include "uat.dnsEgress" . | nindent 4 }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: imas-uat-keycloak
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "uat.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: imas-uat-keycloak
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: imas-uat-edge } }
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: imas-uat-minio
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "uat.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: imas-uat-minio
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: {{ toJson $farmerNS }} }
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Values.farmer.name }}
+              app.kubernetes.io/instance: {{ .Values.farmer.release }}
+      ports:
+        - { protocol: TCP, port: 9000 }
