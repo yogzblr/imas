@@ -1,0 +1,15 @@
+---
+# ansible-galaxy collection install -r uat/enroll/requirements.yml
+#
+# The collections ansible/requirements.yml installs, so one install covers
+# both files. Like Ansible itself they are GPL-3.0-or-later controller tooling:
+# they run on the runner and are never part of a released artifact. No other
+# collection is used here: community.docker was dropped (owner decision,
+# 2026-10-06); the local rig connects over SSH.
+collections:
+  # Windows sprouts: the role's win_* modules, and this directory's playbooks.
+  - name: ansible.windows
+    version: ">=2.0.0"
+  # Listed by ansible/requirements.yml for SUSE hosts.
+  - name: community.general
+    version: ">=8.0.0"

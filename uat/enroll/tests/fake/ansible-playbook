@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# An ansible-playbook stand-in for tests/test_scripts.sh: logs each call with
+# the environment enroll.sh sets, fails when the playbook's name is in
+# $FAKE_PLAYBOOK_FAIL, and for collect.yml writes the enrolled.json the real
+# play would (every sprout enrolled with the sprout ID gen-inventory.py chose).
+set -euo pipefail
+inv="" out="" pb=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+	case "${args[i]}" in
+	-i) inv="${args[i + 1]}" ;;
+	-e) [[ "${args[i + 1]}" == uat_out_dir=* ]] && out="${args[i + 1]#uat_out_dir=}" ;;
+	*.yml) pb="${args[i]}" ;;
+	esac
+done
+echo "$(basename "$pb") $* ANSIBLE_ROLES_PATH=${ANSIBLE_ROLES_PATH:-} ANSIBLE_HOST_KEY_CHECKING=${ANSIBLE_HOST_KEY_CHECKING:-}" >>"${FAKE_DIR:?}/ansible.log"
+[[ " ${FAKE_PLAYBOOK_FAIL:-} " == *" $(basename "$pb") "* ]] && { echo "fake: $pb failed" >&2; exit 2; }
+if [[ "$(basename "$pb")" == collect.yml ]]; then
+	jq '{run_id, sprouts: (.sprouts | map_values({tenant, os, sprout_id, expected_sprout_id: .sprout_id, asset_id}))}' \
+		"$(dirname "$inv")/plan.json" >"$out/enrolled.json"
+fi

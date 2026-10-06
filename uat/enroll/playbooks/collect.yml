@@ -1,0 +1,83 @@
+---
+# Runs after ansible/site.yml. Waits again with the imas_verify role (cheap
+# when the sprout is already connected; on its own it is a re-check after a
+# reboot or a re-run), reads the sprout ID each sprout enrolled with from its
+# own config file, checks it is the one the UAT expects, and writes them all
+# to {{ uat_out_dir }}/enrolled.json on the controller for wait-connected.sh.
+#
+#   ansible-playbook -i <inventory>/hosts.yml collect.yml -e uat_out_dir=<state>
+#
+# The sprout writes the ID farmer gave it back into "sproutid" when it differs
+# from the one it asked for (cmd/sprout/main.go): a mismatch here means farmer
+# suffixed it (another sprout in the tenant already held it) or the host had
+# enrolled before the seed play ran.
+- name: Check each sprout and record the sprout ID it enrolled with
+  hosts: sprouts
+  gather_facts: true
+  vars:
+    # Kept out of Jinja string literals, which treat a backslash as an escape.
+    _uat_bs: '\'
+    _uat_program_data_fallback: 'C:\ProgramData'
+    # The package's path; a variable only so tests can point it elsewhere.
+    uat_linux_config_file: /etc/imas/sprout
+  roles:
+    - role: imas_verify
+      tags: [uat_verify]
+  tasks:
+    - name: Read the sprout's config file
+      ansible.builtin.slurp:
+        src: "{{ _uat_cfg_file }}"
+      register: _uat_cfg_raw
+      no_log: true
+      vars:
+        _uat_cfg_file: >-
+          {{ (ansible_env.ProgramData | default(_uat_program_data_fallback)) ~ _uat_bs ~ 'imas' ~ _uat_bs ~ 'sprout'
+             if ansible_os_family == 'Windows' else uat_linux_config_file }}
+
+    - name: Keep the sprout ID
+      ansible.builtin.set_fact:
+        uat_enrolled_sprout_id: "{{ (_uat_cfg_raw.content | b64decode | from_yaml | default({}, true)).sproutid | default('') }}"
+
+    - name: Check it is the sprout ID the UAT expects
+      ansible.builtin.assert:
+        that:
+          - uat_enrolled_sprout_id == uat_sprout_id
+        fail_msg: >-
+          {{ inventory_hostname }} enrolled as '{{ uat_enrolled_sprout_id }}', not
+          '{{ uat_sprout_id }}'. Either farmer suffixed the ID because another
+          sprout in tenant {{ uat_tenant }} already holds '{{ uat_sprout_id }}',
+          or the host enrolled before seed-sproutid.yml ran. A fresh run starts
+          from new VMs; to retry on this one, uninstall the sprout, delete
+          /etc/imas (or %ProgramData%\imas) and delete its key in farmer first.
+        quiet: true
+      when: not (uat_skip_sprout_id_check | default(false) | bool)
+
+- name: Write the enrolled sprouts file
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Check the output directory was given
+      ansible.builtin.assert:
+        that:
+          - uat_out_dir is defined
+          - uat_out_dir | length > 0
+        fail_msg: "pass -e uat_out_dir=<state directory>"
+        quiet: true
+
+    - name: Write enrolled.json
+      ansible.builtin.copy:
+        dest: "{{ uat_out_dir }}/enrolled.json"
+        mode: "0644"
+        content: |
+          {% set out = {} %}
+          {% for h in groups['sprouts'] | default([]) if hostvars[h].uat_enrolled_sprout_id is defined %}
+          {%   set _ = out.update({h: {
+                 'tenant': hostvars[h].uat_tenant,
+                 'os': hostvars[h].uat_os,
+                 'sprout_id': hostvars[h].uat_enrolled_sprout_id,
+                 'expected_sprout_id': hostvars[h].uat_sprout_id,
+                 'asset_id': hostvars[h].uat_asset_id}}) %}
+          {% endfor %}
+          {{ {'run_id': hostvars[groups['sprouts'][0]].uat_run_id, 'sprouts': out} | to_nice_json }}

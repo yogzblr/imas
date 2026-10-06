@@ -1,0 +1,10 @@
+{
+  "uat-dmz": {"host": "127.0.0.1", "kube_port": 46443, "pids": [4101]},
+  "uat-core": {"host": "127.0.0.1", "kube_port": 46444, "pids": [4102]},
+  "t1-ubuntu": {"host": "127.0.0.1", "ssh_port": 42201, "pids": [4103]},
+  "t1-alma": {"host": "127.0.0.1", "ssh_port": 42202, "pids": [4104]},
+  "t1-win": {"host": "127.0.0.1", "winrm_port": 45986, "pids": [4105]},
+  "t2-ubuntu": {"host": "127.0.0.1", "ssh_port": 42203, "pids": [4106]},
+  "t2-alma": {"host": "127.0.0.1", "ssh_port": 42204, "pids": [4107]},
+  "t2-win": {"host": "127.0.0.1", "winrm_port": 45987, "pids": [4108]}
+}

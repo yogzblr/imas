@@ -1,0 +1,28 @@
+{
+  "dmz": {
+    "name": "dmz",
+    "private_ip": "172.18.0.2",
+    "fqdn": "dmz.imas-uat.test",
+    "ports": {
+      "envoy": 30443,
+      "bus": 30406
+    },
+    "bus_service": "uat-dmz-nats-bus",
+    "bus_namespace": "imas-dmz",
+    "private_fqdn": "dmz.rig.test"
+  },
+  "core": {
+    "name": "core",
+    "private_ip": "172.18.0.3",
+    "fqdn": "core.imas-uat.test",
+    "ports": {
+      "https": 30444,
+      "farmer_api": 30405
+    },
+    "private_fqdn": "core.rig.test"
+  },
+  "ca": {
+    "cluster_issuer": "uat-local-ca"
+  },
+  "cluster_domain": "cluster.local"
+}

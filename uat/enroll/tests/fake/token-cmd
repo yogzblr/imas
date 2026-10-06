@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# A --token-cmd stand-in for tests/test_scripts.sh: prints an unsigned token
+# whose organization.id is the tenant id it is given ($2), as the real hook
+# must after mapping tenant $1's users to that id in Keycloak. Logs its calls.
+set -euo pipefail
+b64url() { base64 | tr -d '=\n' | tr '/+' '_-'; }
+echo "$*" >>"${FAKE_DIR:?}/token-cmd.log"
+header="$(printf '{"alg":"none","typ":"JWT"}' | b64url)"
+payload="$(printf '{"sub":"admin-t%s","organization":{"id":"%s"}}' "$1" "${2:-}" | b64url)"
+printf '%s.%s.TOKSIGNATURE%s\n' "$header" "$payload" "$1"
