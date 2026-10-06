@@ -594,6 +594,12 @@ Docs-only PRs in the same window: #68 (this file's RAG summary), #82 (plan
 §4e, Wave 7 briefs), #91 (the SEC.5b brief), #101 (plan §4f) and #109 (plan
 §4g and the dispatcher prompt).
 
+## Azure UAT gate briefs (plan §4h)
+
+| Item | What shipped | Status |
+|---|---|---|
+| UAT.3b | `uat/hub/core`: installs the published `farmer` chart of a `release_tag` on the uat-core cluster (PXC, Valkey and standalone OpenBao, one replica each) plus UAT-only MinIO (AGPL-3.0, test only), Keycloak (dev mode, embedded H2) with the `imas-uat` realm (two tenants, admin and read-only users, `organization.id` from a user attribute set by `bind-tenant.sh`), an Envoy edge on the core FQDN, the cross-cluster bus Service and NetworkPolicies; generated secrets, `nk` seeds, the release CLI's bootstrap admin, OpenBao init/unseal with the ed25519 gateway key (**UAT only: unseal keys in a Secret and a sensitive artifact**); `check.sh`. Owner decisions 2026-10-06 applied: the DMZ bus on node port 8442, hostPorts 443 and 5405 on core, a sensitive `keycloak.json` (with `tenant_attribute`) next to `core.json` and `credentials.json`, a `bind-tenant.sh --scratch-user` mode for tenants created during a run (no admin API on the edge), the bus reached by the private name `dmz.uat.imas.internal` and `core.uat.imas.internal` on farmer's certificate, and no core node port mode; flagged | ready for review, PR #132; never run against a cluster (static checks, chart renders, and the OpenBao bootstrap against a local OpenBao only) |
+
 ## Docs, CI and tooling merged alongside
 
 | Item | Status |
