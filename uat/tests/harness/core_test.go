@@ -1,7 +1,7 @@
 package harness
 
 import (
-	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -181,47 +181,57 @@ func TestLoadNeedsKeycloakOrCore(t *testing.T) {
 	}
 }
 
-func TestBindTenants(t *testing.T) {
-	needShell(t)
+// keycloak.json where uat/hub/core writes it (PR #132): next to
+// credentials.json in core/sensitive.
+func TestLoadCoreSensitiveKeycloakJSON(t *testing.T) {
+	clearBindEnv(t)
+	root := stateRoot(t, `{}`)
+	writeFile(t, filepath.Join(root, "core", "sensitive", FileKeycloak), `{
+	  "issuer": "https://uatab12cd-core.centralindia.cloudapp.azure.com/realms/imas-uat",
+	  "client_id": "imas-uat-tests", "client_secret": "cs", "tenant_attribute": "organization_id",
+	  "other_audience_client": {"client_id": "imas-uat-other-audience", "client_secret": "os"},
+	  "tenants": {
+	    "1": {"admin": {"username": "t1-admin", "password": "p1"}, "readonly": {"username": "t1-reader", "password": "p2"}, "tenant_id": "t_eeeeeeeeeeeeeeee"},
+	    "2": {"admin": {"username": "t2-admin", "password": "p3"}, "readonly": {"username": "t2-reader", "password": "p4"}, "tenant_id": "t_ffffffffffffffff"}
+	  }
+	}`)
+	env, err := LoadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := env.Keycloak
+	if k.ClientSecret != "cs" || k.OtherAudienceClient == nil || k.OtherAudienceClient.ClientID != "imas-uat-other-audience" ||
+		k.OtherAudienceClient.ClientSecret != "os" || k.Admin != nil {
+		t.Errorf("keycloak %+v", k)
+	}
+	if env.TenantID(1) != "t_eeeeeeeeeeeeeeee" || env.TenantID(2) != "t_ffffffffffffffff" {
+		t.Errorf("tenants %q %q", env.TenantID(1), env.TenantID(2))
+	}
+}
+
+func TestScratchUserSeam(t *testing.T) {
 	f, _ := fakeFleet(t)
-	dir := t.TempDir()
-	log := filepath.Join(dir, "calls")
-	script := filepath.Join(dir, "bind-tenant.sh")
-	writeFile(t, script, "#!/usr/bin/env bash\necho \"$*\" >> "+ShQuote(log)+"\n[ \"$4\" != 9 ]\n")
-	if err := os.Chmod(script, 0o700); err != nil {
+	if !f.CanMakeScratchUsers() {
+		t.Fatal("the fake's keycloak.json has an admin")
+	}
+	u, err := f.ScratchUser(ctx(t), "t_gggggggggggggggg")
+	if err != nil {
 		t.Fatal(err)
 	}
-	c := context.Background()
-
-	if bound, skipped, err := f.BindTenants(c); err != nil || bound != nil || !strings.Contains(skipped, "not run") {
-		t.Errorf("disabled: %v %q %v", bound, skipped, err)
+	_ = u.Delete(ctx(t))
+	f.Tokens.cfg.Admin = nil
+	if f.CanMakeScratchUsers() {
+		t.Error("no admin, but scratch users")
 	}
-
-	f.Env.Bind = BindConfig{Script: script, Kubeconfig: "/k", Endpoints: "/e", StateDir: "/s"}
-	f.Env.Core = &CoreJSON{Tenants: map[string]string{"2": f.TenantID(2)}}
-	if _, err := f.Tokens.Tenant(c, 1, RoleAdmin); err != nil {
+	if _, err := f.ScratchUser(ctx(t), "t_x"); !errors.Is(err, ErrNoScratchUsers) || !strings.Contains(err.Error(), "create-user-and-bind") {
+		t.Errorf("%v", err)
+	}
+	if _, err := f.Tokens.Tenant(ctx(t), 1, RoleAdmin); err != nil {
 		t.Fatal(err)
 	}
-	bound, skipped, err := f.BindTenants(c)
-	if err != nil || skipped != "" || len(bound) != 1 || bound[0] != 1 {
-		t.Fatalf("bound %v %q %v", bound, skipped, err)
-	}
-	calls, _ := os.ReadFile(log)
-	if string(calls) != "/k /e /s 1 "+f.TenantID(1)+"\n" {
-		t.Errorf("calls %q", calls)
-	}
+	f.Tokens.Forget()
 	if len(f.Tokens.cache) != 0 {
-		t.Error("the token cache should be dropped after a binding")
-	}
-	// Recorded now: a second call binds nothing.
-	if bound, _, err := f.BindTenants(c); err != nil || len(bound) != 0 {
-		t.Errorf("second call %v %v", bound, err)
-	}
-
-	writeFile(t, script, "#!/usr/bin/env bash\necho 'no user t1-admin' >&2\nexit 1\n")
-	f.Env.Core = nil
-	if _, _, err := f.BindTenants(c); err == nil || !strings.Contains(err.Error(), "no user t1-admin") {
-		t.Errorf("a failing script: %v", err)
+		t.Error("Forget kept tokens")
 	}
 }
 
@@ -231,7 +241,7 @@ func TestCheckTenantClaims(t *testing.T) {
 		t.Errorf("bound tenants: %v", err)
 	}
 	f.Env.tenantIDs[2] = "t_zzzzzzzzzzzzzzzz"
-	if err := f.CheckTenantClaims(ctx(t)); err == nil || !strings.Contains(err.Error(), "bind-tenant.sh") {
+	if err := f.CheckTenantClaims(ctx(t)); err == nil || !strings.Contains(err.Error(), "UAT.4 binds") {
 		t.Errorf("an unbound tenant: %v", err)
 	}
 }

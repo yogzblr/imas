@@ -390,13 +390,13 @@ func TestRunShAgainstFakeStack(t *testing.T) {
 		t.Errorf("an unknown id must be a usage error: %d", code)
 	}
 
-	// uat/hub/core's layout (core.json, credentials.json, no keycloak.json,
+	// uat/hub/core's layout (core.json, credentials.json and keycloak.json,
 	// no Keycloak admin): smoke passes, T1 skipping the part that needs a
 	// user for the tenant it creates.
-	core := startFake("core", "core/out/core.json", "core/sensitive/credentials.json", "harness.json")
+	core := startFake("core", "core/out/core.json", "core/sensitive/credentials.json", "core/sensitive/keycloak.json", "harness.json")
 	code, out := runSh(core, "smoke")
 	if code != 0 || !strings.Contains(out, "RESULT: PASS") || !strings.Contains(out, "PASS   K1") ||
-		!strings.Contains(out, "SKIP   T1") || !strings.Contains(out, "no Keycloak admin REST identity") {
+		!strings.Contains(out, "SKIP   T1") || !strings.Contains(out, "create-user-and-bind") {
 		t.Errorf("smoke against the fake in the core layout: exit %d\n%s", code, out)
 	}
 }

@@ -12,12 +12,13 @@ import (
 
 // The core hub's outputs (UAT.3b, uat/hub/core, owner decision of
 // 2026-10-06: "#132 writes keycloak.json (with tenant_attribute),
-// core.json, credentials.json; the harness calls bind-tenant.sh once per
-// tenant"). install.sh writes <state>/core/out/core.json (not secret) and
-// <state>/core/sensitive/credentials.json (SENSITIVE); bind-tenant.sh maps
-// UAT tenant 1 or 2 to a saasapi tenant ID by setting the users' realm
-// attribute organization_id, which the test client maps to the
-// organization.id claim, and records it in core.json's tenants.
+// core.json, credentials.json"). install.sh writes
+// <state>/core/out/core.json (not secret) and, SENSITIVE,
+// <state>/core/sensitive/credentials.json and keycloak.json;
+// bind-tenant.sh, which UAT.4 runs, maps UAT tenant 1 or 2 to a saasapi
+// tenant ID by setting the users' realm attribute organization_id, which
+// the test client maps to the organization.id claim, and records it in
+// core.json's tenants and keycloak.json's tenants.<n>.tenant_id.
 const (
 	FileCore        = "core.json"
 	FileCredentials = "credentials.json"
@@ -69,9 +70,11 @@ type CredentialsJSON struct {
 	} `json:"keycloak"`
 }
 
-// BindConfig is how the harness runs uat/hub/core/bind-tenant.sh:
-//
-//	bind-tenant.sh <kubeconfig> <endpoints.json> <state-dir> <1|2> <tenant_id>
+// BindConfig holds the arguments every uat/hub/core script takes first,
+// <kubeconfig> <endpoints.json> <state-dir>, and the bind-tenant.sh path:
+// what bind-tenant.sh's create-user-and-bind mode for scratch users will
+// need once PR #132 documents it (see bind.go). The harness never binds
+// tenants 1 and 2 (UAT.4 does).
 //
 // Each field comes from harness.json's bind_tenant, else the environment
 // ($IMAS_UAT_BIND_TENANT or run.sh's default for Script,
@@ -134,6 +137,22 @@ func findCore(dir string) (*CoreJSON, string, string, error) {
 		return &core, c.path, root, nil
 	}
 	return nil, "", "", nil
+}
+
+// findKeycloakJSON returns the first keycloak.json of: the material
+// directory, <dir>/core/sensitive/ and core.json's sensitive_dir, where
+// uat/hub/core writes it (PR #132, its head 9ace6c7); "" if none.
+func findKeycloakJSON(dir string, core *CoreJSON) string {
+	paths := []string{filepath.Join(dir, FileKeycloak), filepath.Join(dir, "core", "sensitive", FileKeycloak)}
+	if core != nil && core.SensitiveDir != "" {
+		paths = append(paths, filepath.Join(core.SensitiveDir, FileKeycloak))
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
 }
 
 // findCredentials looks for credentials.json in the material directory,
@@ -202,8 +221,7 @@ func keycloakFromCore(core *CoreJSON, creds *CredentialsJSON) KeycloakConfig {
 		kc.Tenants[key] = t
 	}
 	// core.json's tenants are not copied here: they are what bind-tenant.sh
-	// last recorded, the fallback of Env.TenantID (loadTenants), and what
-	// Fleet.BindTenants compares the run's tenant IDs with.
+	// last recorded, the last fallback of Env.TenantID (loadTenants).
 	return kc
 }
 

@@ -348,10 +348,10 @@ func LoadDir(dir string) (*Env, error) {
 	}
 	env.Core, env.CorePath = core, corePath
 	var kcFile KeycloakConfig
-	_, statErr := os.Stat(filepath.Join(dir, FileKeycloak))
-	haveKC := statErr == nil
+	kcPath := findKeycloakJSON(dir, core)
+	haveKC := kcPath != ""
 	if haveKC {
-		if err := readJSON(filepath.Join(dir, FileKeycloak), &kcFile, true, false); err != nil {
+		if err := readJSON(kcPath, &kcFile, true, false); err != nil {
 			return nil, err
 		}
 	}

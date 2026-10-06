@@ -15,11 +15,6 @@
 #   IMAS_UAT_TIMEOUT      go test -timeout (default by tier: smoke 45m,
 #                         core 4h, resilience 3h, others 8h)
 #   IMAS_UAT_RELEASE_TAG  optional: the release the sprouts must run (S1)
-#   IMAS_UAT_CORE_KUBECONFIG, IMAS_UAT_ENDPOINTS
-#                         the core kubeconfig and endpoints file; with them
-#                         the tests run uat/hub/core/bind-tenant.sh once per
-#                         tenant not yet bound (IMAS_UAT_BIND_TENANT overrides
-#                         the script)
 #
 # It builds the report tool and one test binary per package under
 # uat/tests with the uat tag, runs them with the tier's -run pattern, and
@@ -64,7 +59,6 @@ fi
 IMAS_UAT_DIR=$(cd "$IMAS_UAT_DIR" && pwd)
 export IMAS_UAT_DIR
 export IMAS_UAT_VMCTL_DEFAULT="$repo/uat/access/vmctl.sh"
-export IMAS_UAT_BIND_TENANT_DEFAULT="$repo/uat/hub/core/bind-tenant.sh"
 report="${IMAS_UAT_REPORT_DIR:-$IMAS_UAT_DIR/report}"
 case "$tier" in
 smoke) default_timeout=45m ;;

@@ -46,18 +46,17 @@
 // # The material directory ($IMAS_UAT_DIR)
 //
 // uat/tests/README.md is the full description, with examples. In short:
-// uat.json (tofu output uat, required); uat/hub/core's core.json and
-// credentials.json (UAT.3b, owner decision of 2026-10-06), in the
-// directory or under core/out and core/sensitive, giving saasapi's URL and
-// secret, the CA, the Keycloak client and the tenant users; keycloak.json
-// laid over them (or alone, without core.json); optional
-// internal-auth-secret, uat-ca.pem, harness.json (endpoint, command and
-// bind_tenant overrides), tenants.json and sprouts.json. Before the tests,
-// Fleet.BindTenants runs uat/hub/core/bind-tenant.sh once per tenant not
-// yet bound and Fleet.CheckTenantClaims checks the tokens carry each
-// tenant's ID. $IMAS_UAT_VMCTL names the vmctl.sh to use;
-// $IMAS_UAT_RELEASE_TAG, when set, is the release the sprouts must be
-// running.
+// uat.json (tofu output uat, required); uat/hub/core's core.json,
+// credentials.json and keycloak.json (UAT.3b, owner decisions of
+// 2026-10-06), in the directory or under core/out and core/sensitive,
+// giving saasapi's URL and secret, the CA, the Keycloak clients and the
+// tenant users; optional internal-auth-secret, uat-ca.pem, harness.json
+// (endpoint, command and bind_tenant overrides), tenants.json and
+// sprouts.json. UAT.4 binds tenants 1 and 2; Fleet.CheckTenantClaims checks
+// their tokens carry their IDs, and Fleet.ScratchUser makes users for
+// tenants a test creates (see bind.go). $IMAS_UAT_VMCTL names the vmctl.sh
+// to use; $IMAS_UAT_RELEASE_TAG, when set, is the release the sprouts must
+// be running.
 //
 // Secrets (passwords, the internal secret, tokens, join tokens) are never
 // printed: error messages name the request and the status, not the body

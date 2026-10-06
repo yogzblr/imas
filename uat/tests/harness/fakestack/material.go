@@ -29,9 +29,9 @@ func (s *Stack) AddContractHosts() {
 // WriteCoreMaterial writes a material directory in the state-root layout
 // of uat/hub/core (UAT.3b, PR #132): uat.json and harness.json at the top,
 // core/out/core.json and core/out/uat-ca.crt (not secret), and
-// core/sensitive/credentials.json. Tenants 1 and 2 are recorded as bound,
-// as bind-tenant.sh would leave them. There is no keycloak.json and no
-// Keycloak admin, as with UAT.3b's edge.
+// core/sensitive/credentials.json and keycloak.json. Tenants 1 and 2 are
+// recorded as bound, as bind-tenant.sh leaves them after UAT.4 ran it.
+// There is no Keycloak admin, as with UAT.3b's edge.
 func (s *Stack) WriteCoreMaterial(dir, vmctl string) error {
 	if err := s.WriteMaterial(dir, vmctl); err != nil {
 		return err
@@ -71,7 +71,22 @@ func (s *Stack) WriteCoreMaterial(dir, vmctl string) error {
 		"keycloak": map[string]any{"client_secret": "", "passwords": pw,
 			"master_admin": map[string]string{"username": AdminUser, "password": AdminPassword}},
 	}
-	for path, v := range map[string]any{filepath.Join(out, "core.json"): core, filepath.Join(sens, "credentials.json"): creds} {
+	// keycloak.json as uat/hub/core writes it (PR #132, head 9ace6c7):
+	// no admin block, tenant IDs once bound.
+	tenant := func(n int) map[string]any {
+		return map[string]any{
+			"admin":     map[string]string{"username": fmt.Sprintf("t%d-admin", n), "password": "pw"},
+			"readonly":  map[string]string{"username": fmt.Sprintf("t%d-reader", n), "password": "pw"},
+			"tenant_id": TenantID(n),
+		}
+	}
+	kc := map[string]any{
+		"issuer": s.Issuer(), "client_id": ClientID, "client_secret": "", "tenant_attribute": "organization_id",
+		"other_audience_client": map[string]string{"client_id": "imas-uat-other-audience", "client_secret": ""},
+		"tenants":               map[string]any{"1": tenant(1), "2": tenant(2)},
+	}
+	for path, v := range map[string]any{filepath.Join(out, "core.json"): core, filepath.Join(sens, "credentials.json"): creds,
+		filepath.Join(sens, "keycloak.json"): kc} {
 		b, err := json.MarshalIndent(v, "", "  ")
 		if err != nil {
 			return err

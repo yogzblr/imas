@@ -32,20 +32,9 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
-	// Owner decision, 2026-10-06: the harness calls uat/hub/core's
-	// bind-tenant.sh once per tenant, so each tenant's users carry its
-	// organization.id. Then every tenant's token must carry it.
-	bound, skipped, err := fleet.BindTenants(ctx)
-	if err != nil {
-		cancel()
-		fmt.Fprintf(os.Stderr, "uat: binding the tenants: %v\n", err)
-		os.Exit(1)
-	}
-	if skipped != "" {
-		fmt.Fprintf(os.Stderr, "uat: %s; checking the tenants are bound already\n", skipped)
-	} else {
-		fmt.Fprintf(os.Stderr, "uat: bind-tenant.sh ran for tenants %v (the others were bound already)\n", bound)
-	}
+	// Owner decision, 2026-10-06: UAT.4 binds tenants 1 and 2
+	// (uat/hub/core/bind-tenant.sh); the harness only checks each tenant's
+	// token carries its ID.
 	if err := fleet.CheckTenantClaims(ctx); err != nil {
 		cancel()
 		fmt.Fprintf(os.Stderr, "uat: %v\n", err)
@@ -98,14 +87,14 @@ func token(t *testing.T, sc *harness.Scenario, tenant int, role harness.Role) st
 func scratchTenant(t *testing.T, sc *harness.Scenario, purpose string, waitActive bool) (string, string) {
 	t.Helper()
 	ctx := ctxFor(t, 15*time.Minute)
-	if !fleet.Tokens.HasAdmin() {
-		sc.Skipf("%v; this scenario needs a tenant of its own", harness.ErrNoKeycloakAdmin)
+	if !fleet.CanMakeScratchUsers() {
+		sc.Skipf("%v; this scenario needs a tenant of its own", harness.ErrNoScratchUsers)
 	}
 	sc.Step("create a scratch tenant (%s)", purpose)
 	st, r, err := fleet.API.CreateTenant(ctx, token(t, sc, 1, harness.RoleAdmin), "uat-"+purpose+"-"+harness.Nonce(6))
 	sc.Expect(r, err, 202, "", "POST /v1/tenants")
 	sc.Step("create a Keycloak user for tenant %s", st.TenantID)
-	user, err := fleet.Tokens.ScratchUser(ctx, st.TenantID)
+	user, err := fleet.ScratchUser(ctx, st.TenantID)
 	sc.NoErr(err, "creating a scratch Keycloak user")
 	t.Cleanup(func() {
 		if err := user.Delete(context.Background()); err != nil {

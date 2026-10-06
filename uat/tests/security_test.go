@@ -332,8 +332,8 @@ func TestCoreX4_CrossTenantDenied(t *testing.T) {
 			r, err := f.API.DeleteTenant(ctx, token(t, ssc, n, harness.RoleAdmin), st.TenantID)
 			ssc.Check(r, err, http.StatusForbidden, "forbidden", "DELETE another tenant with tenant %d's token", n)
 		}
-		if fleet.Tokens.HasAdmin() {
-			if user, err := fleet.Tokens.ScratchUser(ctx, st.TenantID); err == nil {
+		if fleet.CanMakeScratchUsers() {
+			if user, err := fleet.ScratchUser(ctx, st.TenantID); err == nil {
 				if tok, err := user.Token(ctx); err == nil {
 					offboard(t, st.TenantID, tok)
 				}

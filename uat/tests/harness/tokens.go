@@ -29,7 +29,7 @@ const (
 
 // ErrNoKeycloakAdmin is returned by ScratchUser when keycloak.json has no
 // admin identity.
-var ErrNoKeycloakAdmin = errors.New("no Keycloak admin REST identity (keycloak.json's admin; UAT.3b's edge doesn't route the admin API, and bind-tenant.sh binds only tenants 1 and 2), so no user can be mapped to a tenant created during the run")
+var ErrNoKeycloakAdmin = errors.New("keycloak.json has no Keycloak admin identity for the admin REST API")
 
 // Tokens gets Keycloak access tokens. Tokens are cached per user and
 // client until 30 seconds before they expire. Safe for concurrent use.

@@ -28,11 +28,11 @@ func TestSmokeT1_CreateTenant(t *testing.T) {
 	if st.Status != harness.TenantPending {
 		sc.Errorf("status %q, want pending", st.Status)
 	}
-	if !fleet.Tokens.HasAdmin() {
-		sc.Skipf("tenant %s was created (202, pending), but polling its status needs a token whose organization.id is the new ID: %v", st.TenantID, harness.ErrNoKeycloakAdmin)
+	if !fleet.CanMakeScratchUsers() {
+		sc.Skipf("tenant %s was created (202, pending), but polling its status needs a token whose organization.id is the new ID: %v", st.TenantID, harness.ErrNoScratchUsers)
 	}
 	sc.Step("create a Keycloak user for %s", st.TenantID)
-	user, err := fleet.Tokens.ScratchUser(ctx, st.TenantID)
+	user, err := fleet.ScratchUser(ctx, st.TenantID)
 	sc.NoErr(err, "creating a scratch Keycloak user")
 	t.Cleanup(func() { _ = user.Delete(cleanupCtx()) })
 	tok, err := user.Token(ctx)
@@ -107,14 +107,14 @@ func TestCoreT3_StatusErrorFields(t *testing.T) {
 
 func TestCoreT4_DeleteTenant(t *testing.T) {
 	sc := harness.Begin(t, "T4")
-	if !fleet.Tokens.HasAdmin() {
-		sc.Skipf("%v; T4 needs a tenant of its own to delete", harness.ErrNoKeycloakAdmin)
+	if !fleet.CanMakeScratchUsers() {
+		sc.Skipf("%v; T4 needs a tenant of its own to delete", harness.ErrNoScratchUsers)
 	}
 	ctx := ctxFor(t, 20*time.Minute)
 	sc.Step("create a scratch tenant")
 	st, r, err := fleet.API.CreateTenant(ctx, token(t, sc, 1, harness.RoleAdmin), "uat-t4-"+harness.Nonce(6))
 	sc.Expect(r, err, http.StatusAccepted, "", "POST /v1/tenants")
-	user, err := fleet.Tokens.ScratchUser(ctx, st.TenantID)
+	user, err := fleet.ScratchUser(ctx, st.TenantID)
 	sc.NoErr(err, "creating a scratch Keycloak user")
 	t.Cleanup(func() { _ = user.Delete(cleanupCtx()) })
 	tok, err := user.Token(ctx)
