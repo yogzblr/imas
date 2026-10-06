@@ -214,7 +214,8 @@ where Azure allows it:
 Azure checks this NSG when the Bastion is created. **The Bastion fails
 closed** (owner's decision, 2026-10-06): if Azure refuses the NSG as not
 compliant (for example because of the narrowed internet source), the apply
-fails; there is no switch to run the Bastion without an NSG. To reach a kept
+fails; there is no switch to run the Bastion without an NSG (confirmed by the
+owner: "Bastion NSG stays fail-closed"). To reach a kept
 environment from your own machine, re-apply with your address as
 `runner_cidr`; that also moves the Envoy and core 443 rules to you.
 
@@ -231,8 +232,11 @@ is linked to the VNet (auto-registration off) and holds two A records with a
 
 Every VM in the VNet resolves these through Azure's resolver (168.63.129.16),
 and so do pods whose DNS forwards to the node's resolver. Nothing outside the
-VNet can. The names are a fixed convention, not keys of `uat`, whose keys the
-Shared contract fixes; the zone is deleted with the run's resource group.
+VNet can. The names are not keys of `uat`, whose keys the Shared contract
+fixes; the owner decided (2026-10-06) that the names themselves go in the
+Shared contract, and that the Envoy and bus certificate SANs, the sprouts'
+`farmerinterface` and farmer's `farmerbusurl` use them (UAT.3a, UAT.3b,
+UAT.4). The zone is deleted with the run's resource group.
 
 ## Destroy semantics
 
