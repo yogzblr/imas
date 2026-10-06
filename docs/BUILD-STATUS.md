@@ -594,14 +594,11 @@ Docs-only PRs in the same window: #68 (this file's RAG summary), #82 (plan
 §4e, Wave 7 briefs), #91 (the SEC.5b brief), #101 (plan §4f) and #109 (plan
 §4g and the dispatcher prompt).
 
-## Azure UAT gate (plan §4h, briefs UAT.1 to UAT.8)
+## Azure UAT gate briefs (plan §4h)
 
-Each brief adds its own row. Nothing in this section has run in Azure; "ready
-for review" means the static checks and stubbed tests named in the row pass,
-not that anything works on real hosts.
-
-| Item | What was built | Status |
+| Item | What shipped | Status |
 |---|---|---|
+| UAT.3b | `uat/hub/core`: installs the published `farmer` chart of a `release_tag` on the uat-core cluster (PXC, Valkey and standalone OpenBao, one replica each) plus UAT-only MinIO (AGPL-3.0, test only), Keycloak (dev mode, embedded H2) with the `imas-uat` realm (two tenants, admin and read-only users, `organization.id` from a user attribute set by `bind-tenant.sh`), an Envoy edge on the core FQDN, the cross-cluster bus Service and NetworkPolicies; generated secrets, `nk` seeds, the release CLI's bootstrap admin, OpenBao init/unseal with the ed25519 gateway key (**UAT only: unseal keys in a Secret and a sensitive artifact**); `check.sh`. Owner decisions 2026-10-06 applied: the DMZ bus on node port 8442, hostPorts 443 and 5405 on core, a sensitive `keycloak.json` (with `tenant_attribute`) next to `core.json` and `credentials.json`, a `bind-tenant.sh --scratch-user` mode for tenants created during a run (no admin API on the edge), the bus reached by the private name `dmz.uat.imas.internal` and `core.uat.imas.internal` on farmer's certificate, and no core node port mode; flagged | ready for review, PR #132; never run against a cluster (static checks, chart renders, and the OpenBao bootstrap against a local OpenBao only) |
 | UAT.2 | `uat/k0s`. `bootstrap.sh` renders one k0sctl file per hub from the uat JSON and `access.json`: role `single`, SSH through the Bastion tunnel on 127.0.0.1 with a per-run `known_hosts`, `127.0.0.1` in the API certificate's SANs, and a CoreDNS `hosts` block (a k0s component patch) mapping the core and DMZ FQDNs to their private IPs. It then installs k0s on both hubs, fetches each kubeconfig with the tunnel's address, and waits for the node to be Ready. It adds local-path-provisioner as the default StorageClass and cert-manager, from checksum-pinned manifests. It creates one per-run self-signed UAT CA on both hubs as ClusterIssuer `imas-uat-ca` and writes `uat-ca.crt` and `endpoints.json`. All versions are in `versions.env`. Exposure follows the owner decisions of 2026-10-06: the DMZ's Envoy (node port 8443, NodePort or LoadBalancer) and bus (node port 8442) Services belong to UAT.3a, with the DMZ NodePort range 8442-8443 only; core 443 and 5405 are hostPorts on UAT.3b's edge, with no core node ports and the core range 30000-32767. uat/k0s creates no exposure Service. `check.sh` reports and fails on an unready node, no default StorageClass, cert-manager unavailable, the issuer not Ready, a missing CoreDNS line, or a node port or hostPort the hub does not expose. Ran: shellcheck, yamllint, and 212 stubbed bash tests (`uat/k0s/tests/run.sh`); `k0s config validate` and k0sctl's config parser on the rendered files, by hand. Never run against a node. busybox (local-path's helper image, GPL-2.0) is recorded as a UAT-only exception pending owner confirmation. Open: the bus node port 8442 in farmer's `farmerbusurl` (UAT.3b). | ready for review |
 
 ## Docs, CI and tooling merged alongside
