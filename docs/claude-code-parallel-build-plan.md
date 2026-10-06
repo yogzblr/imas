@@ -2199,15 +2199,29 @@ runs at tier smoke with keep_hours set, widening the tier as it goes green.
 - tofu output uat (JSON) is the interface to everything else: run_id, region,
   resource_group, dmz and core (each: name, id, private_ip, public_ip, fqdn, admin_user),
   sprouts (a map keyed by VM name: tenant 1 or 2, os ubuntu|alma|windows, connection
-  ssh|winrm|docker, id, private_ip, public_ip, admin_user), bastion (name, id), subnets. Credentials are never outputs: SSH keys are generated
+  ssh|winrm (the local rig uses ssh too; there is no docker connection), id, private_ip, public_ip, admin_user), bastion (name, id), subnets. Credentials are never outputs: SSH keys are generated
   per run and WinRM passwords are random, both held as sensitive values only.
 - Network rules (UAT.1 derives the exact ports from the Network section of
   deploy/helm/nats/README.md and the NetworkPolicy section of deploy/helm/farmer/README.md,
   and documents them): sprouts reach only Envoy in the DMZ; the DMZ reaches only the farmer
-  API port on core; core reaches only the bus websocket port on the DMZ; the internet
+  API port on core; core reaches only the farmerbus client port on the DMZ (farmer and saasapi
+  connect to farmerbus; sprouts reach the bus only through Envoy); the internet
   (runner_cidr only) reaches only 443 on core (saasapi and Keycloak) and Envoy's port on the DMZ;
   SSH, WinRM and the Kubernetes API are not open to the internet and are reached only through
   Azure Bastion. Every VM has a Standard public IP for outbound traffic only. Nothing else is open. A sprout must not be able to open a connection to core.
+- Ports and exposure (owner decisions, 2026-10-06): on the DMZ, Envoy is node port 8443 (NodePort,
+  with LoadBalancer supported) and the farmerbus client port is node port 8442; the DMZ cluster's
+  node port range is 8442-8443 only. UAT.3a's install.sh owns both Services (its own manifests for now)
+  and applies a NetworkPolicy admitting core's node address. On core, 443 (saasapi and Keycloak) and
+  5405 (farmer API) are hostPorts on the core edge; core keeps the default node port range
+  30000-32767 and has no node port mode. In production Envoy sits behind an application gateway.
+- Private DNS names (owner decision, 2026-10-06): an Azure Private DNS zone uat.imas.internal linked
+  to the VNet (UAT.1) holds dmz.uat.imas.internal and core.uat.imas.internal, pointing at the hubs'
+  private IPs. Envoy's certificate SANs, the sprouts' farmerinterface and farmerbusurl use these
+  names; sprouts reach Envoy on the DMZ private IP through dmz.uat.imas.internal. The public FQDNs stay
+  for the runner and the Keycloak issuer.
+- Install order (owner decision, 2026-10-06): core hub first, then the DMZ hub, because the bus
+  needs core's seeds when it starts; then enrolment and the tests.
 - Access interface (UAT.1 writes both scripts under uat/access; every other brief and the local
   rig use only this): tunnels.sh open <uat.json> <state-dir> starts one az network bastion tunnel in
   the background for SSH (22) on every Linux VM, WinRM over HTTPS (5986) on every Windows VM and the
@@ -2521,7 +2535,7 @@ uat/tests/run.sh; it runs in the GitHub environment
 uat (required reviewer), permission id-token write, logs in with azure/login by OIDC using the three
 environment variables, finds the runner's public address and passes it as runner_cidr, generates
 run_id, and runs in order: tofu apply (uat/tofu), opening the Bastion tunnels with uat/access/tunnels.sh
-open (after installing the Azure CLI bastion and ssh extensions), k0s bootstrap, DMZ install, core install, enrolment,
+open (after installing the Azure CLI bastion and ssh extensions), k0s bootstrap, core install, DMZ install, enrolment,
 the tests, then a step with if always() that closes the tunnels, and a final destroy step with if
 always() unless keep_hours is above zero; it uploads the
 test report and the sensitive-free outputs as artifacts and never the unseal keys or kubeconfigs. It
@@ -2600,13 +2614,14 @@ or k3d, your choice, state why and the licence), named dmz and core, on one shar
 with cert-manager and a default storage class, the UAT CA, and the hub names resolving the same way
 from the host, from inside both clusters and from the sprout containers (so the Keycloak issuer matches
 the token iss exactly; say what you did, for example host file entries written with sudo or a local
-resolver), then run the UAT.3a and UAT.3b install scripts against the two kubeconfigs from the release
+resolver), then run the UAT.3b and then the UAT.3a install scripts (core first) against the two kubeconfigs from the release
 named by release_tag. (2) Four sprout machines as systemd containers, one Ubuntu 24.04 and one
 AlmaLinux 9 per tenant, built from Dockerfiles you write from the official base images (flag the base
-image licences), started with what systemd needs, each installing the real published package through the
-UAT.4 wrapper over the docker connection; reboot is a container restart. (3) A local vmctl.sh with the
+image licences), started with what systemd needs and running sshd, each installing the real published
+package through the UAT.4 wrapper over SSH (owner decision: no docker connection plugin); reboot is a
+container restart. (3) A local vmctl.sh with the
 same interface as uat/access/vmctl.sh, built on Docker, and a script that writes the uat JSON (with the
-connection field set to docker), access.json and the endpoints file in the contract's shapes, so the UAT.4
+connection field set to ssh), access.json (each container's host and ssh_port) and the endpoints file in the contract's shapes, so the UAT.4
 wrapper and uat/tests/run.sh run unchanged. (4) run.sh in uat/lite that brings the rig up if needed,
 runs uat/tests/run.sh for the tier smoke, core or all, and reports. Windows scenarios and Windows only
 ingredient cases cannot run here: they must appear as skipped with the reason, never as passed, under the
