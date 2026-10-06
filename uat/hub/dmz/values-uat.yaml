@@ -65,7 +65,7 @@ bus:
       memory: 256Mi
   service:
     # Kept ClusterIP. Core reaches the bus through install.sh's own
-    # NodePort Service, node port 5406 (README.md, "Exposure").
+    # NodePort Service, node port 8442 (README.md, "Exposure").
     type: ClusterIP
 
 envoy:

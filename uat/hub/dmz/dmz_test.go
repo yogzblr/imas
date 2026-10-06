@@ -199,8 +199,11 @@ func render(t *testing.T, endpoints string, extra ...string) rendered {
 	need(t, true, "bash", "jq", "helm")
 	tgz := packageChart(t, testVersion, testVersion)
 	work := t.TempDir()
+	if !filepath.IsAbs(endpoints) {
+		endpoints = filepath.Join(dir(t), "testdata", endpoints)
+	}
 	args := append([]string{"--render-only", "--chart", tgz, "--release-tag", testTag,
-		"--endpoints", filepath.Join(dir(t), "testdata", endpoints), "--workdir", work}, extra...)
+		"--endpoints", endpoints, "--workdir", work}, extra...)
 	if code, _, stderr := run(t, nil, "install.sh", args...); code != 0 {
 		t.Fatalf("install.sh --render-only exited %d:\n%s", code, stderr)
 	}
@@ -415,12 +418,13 @@ func checkRender(t *testing.T, r rendered, w want) {
 		}
 		// Envoy is a NodePort on its port, or a LoadBalancer on it with
 		// the node port left to Kubernetes; the bus is always a NodePort.
+		wantType := "NodePort"
 		if e.svc == "imas-dmz-nats-envoy-edge" && w.expose == "loadbalancer" {
-			if get(s, "spec", "type") != "LoadBalancer" || get(p, "nodePort") != nil {
-				t.Errorf("Service %s: type %v nodePort %v, want LoadBalancer with no pinned node port", e.svc, get(s, "spec", "type"), get(p, "nodePort"))
-			}
-		} else if get(s, "spec", "type") != "NodePort" || get(p, "nodePort") != e.port {
-			t.Errorf("Service %s: type %v nodePort %v, want NodePort %d", e.svc, get(s, "spec", "type"), get(p, "nodePort"), e.port)
+			wantType = "LoadBalancer"
+		}
+		// The node port is pinned in both types: the DMZ range is 8442-8443.
+		if get(s, "spec", "type") != wantType || get(p, "nodePort") != e.port {
+			t.Errorf("Service %s: type %v nodePort %v, want %s with node port %d", e.svc, get(s, "spec", "type"), get(p, "nodePort"), wantType, e.port)
 		}
 		if get(s, "spec", "externalIPs") != nil {
 			t.Errorf("Service %s has externalIPs", e.svc)
@@ -449,7 +453,7 @@ func TestRenderEndpoints(t *testing.T) {
 	checkRender(t, r, want{
 		dmzFQDN: "uatabc123-dmz.centralindia.cloudapp.azure.com", dmzIP: "10.60.1.4",
 		coreIP: "10.60.2.4", coreFQDN: "uatabc123-core.centralindia.cloudapp.azure.com",
-		issuer: "imas-uat-ca", envoyPort: 8443, busPort: 5406, farmerPort: 5405, expose: "nodeport",
+		issuer: "imas-uat-ca", envoyPort: 8443, busPort: 8442, farmerPort: 5405, expose: "nodeport",
 	})
 }
 
@@ -460,7 +464,7 @@ func TestRenderLoadBalancer(t *testing.T) {
 	checkRender(t, r, want{
 		dmzFQDN: "uatabc123-dmz.centralindia.cloudapp.azure.com", dmzIP: "10.60.1.4",
 		coreIP: "10.60.2.4", coreFQDN: "uatabc123-core.centralindia.cloudapp.azure.com",
-		issuer: "imas-uat-ca", envoyPort: 8443, busPort: 5406, farmerPort: 5405, expose: "loadbalancer",
+		issuer: "imas-uat-ca", envoyPort: 8443, busPort: 8442, farmerPort: 5405, expose: "loadbalancer",
 	})
 }
 
@@ -470,7 +474,7 @@ func TestRenderUAT2Endpoints(t *testing.T) {
 	checkRender(t, r, want{
 		dmzFQDN: "uatab12cd34-dmz.centralindia.cloudapp.azure.com", dmzIP: "10.60.1.4",
 		coreIP: "10.60.2.4", coreFQDN: "uatab12cd34-core.centralindia.cloudapp.azure.com",
-		issuer: "imas-uat-ca", envoyPort: 8443, busPort: 5406, farmerPort: 5405, expose: "nodeport",
+		issuer: "imas-uat-ca", envoyPort: 8443, busPort: 8442, farmerPort: 5405, expose: "nodeport",
 	})
 }
 
@@ -481,7 +485,7 @@ func TestRenderTofuOutputDefaults(t *testing.T) {
 	checkRender(t, r, want{
 		dmzFQDN: "uatabc123-dmz.centralindia.cloudapp.azure.com", dmzIP: "10.60.1.4",
 		coreIP: "10.60.2.4", coreFQDN: "uatabc123-core.centralindia.cloudapp.azure.com",
-		issuer: "imas-uat-ca", envoyPort: 8443, busPort: 5406, farmerPort: 5405, expose: "nodeport",
+		issuer: "imas-uat-ca", envoyPort: 8443, busPort: 8442, farmerPort: 5405, expose: "nodeport",
 	})
 }
 
@@ -555,7 +559,8 @@ func TestInstallRefuses(t *testing.T) {
 		{"bad core ip", []string{"--render-only", "--release-tag", testTag, "--endpoints", writeJSON(t, endpointsWith(func(e obj) { e["core"].(obj)["private_ip"] = "10.60.2.400" }))}, "core.private_ip"},
 		{"bad fqdn", []string{"--render-only", "--release-tag", testTag, "--endpoints", writeJSON(t, endpointsWith(func(e obj) { e["dmz"].(obj)["fqdn"] = "dmz_host" }))}, "dmz.fqdn"},
 		{"bad port", []string{"--render-only", "--release-tag", testTag, "--endpoints", writeJSON(t, endpointsWith(func(e obj) { e["core"].(obj)["ports"] = obj{"farmer_api": 70000} }))}, "core.ports.farmer_api"},
-		{"same ports", []string{"--render-only", "--release-tag", testTag, "--endpoints", writeJSON(t, endpointsWith(func(e obj) { e["dmz"].(obj)["ports"] = obj{"envoy": 5406} }))}, "are both 5406"},
+		{"same ports", []string{"--render-only", "--release-tag", testTag, "--endpoints", writeJSON(t, endpointsWith(func(e obj) { e["dmz"].(obj)["ports"] = obj{"envoy": 8442} }))}, "are both 8442"},
+		{"bad service type", []string{"--render-only", "--release-tag", testTag, "--endpoints", writeJSON(t, endpointsWith(func(e obj) { e["dmz"].(obj)["envoy_service_type"] = "ClusterIP" }))}, "dmz.envoy_service_type"},
 		{"bad issuer", []string{"--render-only", "--release-tag", testTag, "--endpoints", writeJSON(t, endpointsWith(func(e obj) { e["cluster_issuer"] = "UAT CA" }))}, "cluster_issuer"},
 	}
 	for _, c := range cases {
@@ -624,14 +629,18 @@ type fakeEnvoy struct {
 	mu            sync.Mutex
 	enrollTokens  int
 	refreshTokens int
-	lastFill      time.Time
+	started       bool
+	dryAt         time.Time // when the enroll bucket ran dry; zero while it has tokens
 }
 
 func (f *fakeEnvoy) take(path string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if time.Since(f.lastFill) >= f.fill {
-		f.enrollTokens, f.refreshTokens, f.lastFill = 20, 300, time.Now()
+	// Envoy refills on a timer. The fake refills fill after the bucket ran
+	// dry instead, so a slow machine cannot top it up in the middle of
+	// check.sh's burst and turn the test flaky.
+	if !f.started || (!f.dryAt.IsZero() && time.Since(f.dryAt) >= f.fill) {
+		f.enrollTokens, f.refreshTokens, f.dryAt, f.started = 20, 300, time.Time{}, true
 	}
 	tokens := &f.enrollTokens
 	if path == "/v1/refresh" && !f.faults["shared bucket"] {
@@ -644,6 +653,9 @@ func (f *fakeEnvoy) take(path string) bool {
 		return false
 	}
 	*tokens--
+	if f.enrollTokens == 0 && f.dryAt.IsZero() {
+		f.dryAt = time.Now()
+	}
 	return true
 }
 
@@ -1052,5 +1064,27 @@ func TestInstallLoadBalancerWithStubs(t *testing.T) {
 				t.Errorf("dmz.json envoy %v (%v), want loadbalancer at %s", get(out, "envoy"), err, c.lb)
 			}
 		})
+	}
+}
+
+// With no --expose, the endpoints file's dmz.envoy_service_type decides
+// (UAT.2's PR #130 writes it); --expose overrides it.
+func TestRenderServiceTypeFromEndpoints(t *testing.T) {
+	ep := writeJSON(t, obj{
+		"dmz":  obj{"private_ip": "10.60.1.4", "fqdn": "dmz.uat.test", "envoy_service_type": "LoadBalancer"},
+		"core": obj{"private_ip": "10.60.2.4", "fqdn": "core.uat.test"},
+	})
+	for _, c := range []struct {
+		args []string
+		want string
+	}{{nil, "LoadBalancer"}, {[]string{"--expose", "nodeport"}, "NodePort"}} {
+		r := render(t, ep, c.args...)
+		s := find(t, r.manifests, "Service", "imas-dmz-nats-envoy-edge")
+		if get(s, "spec", "type") != c.want || get(s, "spec", "ports", 0, "nodePort") != 8443 {
+			t.Errorf("%v: Envoy Service %v node port %v, want %s on 8443", c.args, get(s, "spec", "type"), get(s, "spec", "ports", 0, "nodePort"), c.want)
+		}
+		if b := find(t, r.manifests, "Service", "imas-dmz-nats-bus-core"); get(b, "spec", "type") != "NodePort" || get(b, "spec", "ports", 0, "nodePort") != 8442 {
+			t.Errorf("%v: bus Service %v, want NodePort 8442", c.args, get(b, "spec"))
+		}
 	}
 }

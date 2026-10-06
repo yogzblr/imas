@@ -25,10 +25,12 @@ DMZ_BUS_CLIENT_POD_PORT=5406
 # The published farmerbus image (deploy/helm/nats values.yaml).
 DMZ_BUS_IMAGE_REPO=ghcr.io/yogzblr/imas-farmerbus
 
-# Defaults when the endpoints file names no port: the ports the nats and
-# farmer chart READMEs give.
+# Defaults when the endpoints file names no port. The DMZ node ports are the
+# owner's decisions of 2026-10-06: Envoy on node port 8443, the bus on node
+# port 8442, so the DMZ NodePort range is 8442-8443 and holds no reserved
+# port. farmer's API port is the farmer chart's.
 DMZ_DEFAULT_ENVOY_PORT=8443
-DMZ_DEFAULT_BUS_PORT=5406
+DMZ_DEFAULT_BUS_PORT=8442
 DMZ_DEFAULT_FARMER_API_PORT=5405
 DMZ_DEFAULT_CLUSTER_ISSUER=imas-uat-ca
 
@@ -96,6 +98,13 @@ dmz_load_endpoints() {
 	CORE_PRIVATE_IP=$(_dmz_jq "$f" '.core.private_ip')
 	CORE_FARMER_API_PORT=$(_dmz_jq "$f" ".core.ports.farmer_api // $DMZ_DEFAULT_FARMER_API_PORT")
 	DMZ_CLUSTER_ISSUER=$(_dmz_jq "$f" ".cluster_issuer // \"$DMZ_DEFAULT_CLUSTER_ISSUER\"")
+	# How Envoy is exposed, when the file says (UAT.2's PR #130 writes it);
+	# install.sh --expose overrides it.
+	DMZ_ENVOY_SERVICE_TYPE=$(_dmz_jq "$f" '.dmz.envoy_service_type')
+	case $DMZ_ENVOY_SERVICE_TYPE in
+	"" | NodePort | LoadBalancer) ;;
+	*) dmz_die "endpoints: dmz.envoy_service_type '$DMZ_ENVOY_SERVICE_TYPE' is not NodePort or LoadBalancer" ;;
+	esac
 
 	_dmz_is_fqdn "$DMZ_FQDN" || dmz_die "endpoints: dmz.fqdn '$DMZ_FQDN' is not a DNS name"
 	_dmz_is_fqdn "$CORE_FQDN" || dmz_die "endpoints: core.fqdn '$CORE_FQDN' is not a DNS name"
@@ -154,8 +163,9 @@ EOF
 }
 
 # _dmz_expose_service NAME COMPONENT PORT TARGETPORT TYPE
-# TYPE is NodePort (the node port is PORT) or LoadBalancer (PORT on the
-# load balancer's address; Kubernetes picks the node port behind it).
+# TYPE is NodePort or LoadBalancer (PORT on the load balancer's address).
+# The node port is PORT in both: pinned, so the DMZ's NodePort range
+# (8442-8443) is never left to allocation.
 _dmz_expose_service() {
 	local name=$1 component=$2 port=$3 target=$4 type=$5
 	cat <<EOF
@@ -183,21 +193,18 @@ spec:
       port: ${port}
       targetPort: ${target}
       protocol: TCP
-EOF
-	if [[ $type == NodePort ]]; then
-		cat <<EOF
       nodePort: ${port}
 EOF
-	fi
 }
 
 # dmz_write_manifests OUT MODE: what the chart does not render. The two
 # certificates, the two Services that expose Envoy and the bus, and the bus
 # ingress rule for core. MODE is nodeport (Envoy on node port
-# dmz.ports.envoy, 8443 by default: the owner's decision, 2026-10-06) or
-# loadbalancer (Envoy behind a LoadBalancer Service on that port). The bus
-# is a NodePort on dmz.ports.bus either way: only core dials it.
-# README.md, "Exposure".
+# dmz.ports.envoy, 8443 by default) or loadbalancer (Envoy behind a
+# LoadBalancer Service on that port, node port pinned to it too). The bus
+# is a NodePort on dmz.ports.bus (8442 by default) either way: only core
+# dials it. These Services are this script's, not UAT.2's (owner's
+# decisions, 2026-10-06). README.md, "Exposure".
 dmz_write_manifests() {
 	local out=$1 mode=$2
 	{

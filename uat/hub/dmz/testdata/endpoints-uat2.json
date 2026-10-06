@@ -7,7 +7,7 @@
     "fqdn": "uatab12cd34-dmz.centralindia.cloudapp.azure.com",
     "ports": {
       "envoy": 8443,
-      "bus_client": 5406
+      "bus_client": 8442
     }
   },
   "core": {

@@ -30,12 +30,12 @@
 #                         manifests, the render and dmz.json go (default: a
 #                         new temporary directory, printed at the end)
 # --expose                how Envoy is exposed on dmz.ports.envoy (default
-#                         8443): nodeport (the default; node port 8443 is
-#                         the owner's decision of 2026-10-06) or
-#                         loadbalancer (needs a load balancer controller;
-#                         production puts Envoy behind an application
-#                         gateway). The bus is a NodePort either way.
-#                         README.md, "Exposure"
+#                         8443): nodeport or loadbalancer (needs a load
+#                         balancer controller; production puts Envoy behind
+#                         an application gateway). Default: the endpoints
+#                         file's dmz.envoy_service_type, else nodeport. The
+#                         bus is a NodePort on dmz.ports.bus (default 8442)
+#                         either way. README.md, "Exposure"
 # --timeout               how long each wait may take (default 10m)
 # --chart-repo-url        default https://packages.buildkite.com/
 #                         $BUILDKITE_ORGANIZATION_SLUG (default yogzblr)/
@@ -62,7 +62,7 @@ usage() {
 }
 
 kubeconfig="" endpoints="" release_tag="" seeds_dir="" seeds_kubeconfig=""
-seeds_namespace=imas-core workdir="" expose=nodeport timeout=10m
+seeds_namespace=imas-core workdir="" expose="" timeout=10m
 chart_repo_url="" render_only="" chart=""
 
 while (($#)); do
@@ -97,7 +97,7 @@ done
 [[ -n $endpoints ]] || dmz_die "--endpoints is required"
 [[ -n $release_tag ]] || dmz_die "--release-tag is required"
 version=$(dmz_chart_version "$release_tag")
-[[ $expose == nodeport || $expose == loadbalancer ]] || dmz_die "--expose must be nodeport or loadbalancer, not '$expose'"
+[[ -z $expose || $expose == nodeport || $expose == loadbalancer ]] || dmz_die "--expose must be nodeport or loadbalancer, not '$expose'"
 [[ $timeout =~ ^[1-9][0-9]*[smh]$ ]] || dmz_die "--timeout '$timeout' is not a duration like 10m"
 if [[ -n $render_only ]]; then
 	[[ -z $kubeconfig && -z $seeds_dir && -z $seeds_kubeconfig ]] ||
@@ -114,6 +114,10 @@ fi
 dmz_need jq helm
 [[ -n $render_only ]] || dmz_need kubectl base64
 dmz_load_endpoints "$endpoints"
+if [[ -z $expose ]]; then
+	expose=nodeport
+	[[ $DMZ_ENVOY_SERVICE_TYPE != LoadBalancer ]] || expose=loadbalancer
+fi
 
 if [[ -z $workdir ]]; then
 	workdir=$(mktemp -d "${TMPDIR:-/tmp}/uat-dmz.XXXXXX")

@@ -33,7 +33,7 @@ the tofu `uat` JSON is itself a valid endpoints file. Extra keys are ignored.
   "cluster_issuer": "imas-uat-ca",
   "dmz":  { "name": "uat-dmz", "private_ip": "10.60.1.4", "public_ip": "203.0.113.10",
             "fqdn": "uatabc123-dmz.centralindia.cloudapp.azure.com",
-            "ports": { "envoy": 8443, "bus": 5406 } },
+            "ports": { "envoy": 8443, "bus": 8442 } },
   "core": { "name": "uat-core", "private_ip": "10.60.2.4",
             "fqdn": "uatabc123-core.centralindia.cloudapp.azure.com",
             "ports": { "farmer_api": 5405 } }
@@ -45,8 +45,9 @@ the tofu `uat` JSON is itself a valid endpoints file. Extra keys are ignored.
 | `dmz.fqdn` | yes | | the Envoy certificate's only name; SNI and Host in `check.sh` |
 | `dmz.private_ip` | yes | | the node address core dials for the bus; an IP SAN of the bus certificate |
 | `dmz.public_ip` | no | `dmz.fqdn` | where `check.sh` connects (the FQDN is still sent and verified) |
-| `dmz.ports.envoy` | no | 8443 | Envoy's node port (or load balancer port): sprouts and the runner connect here. 8443 is the owner's decision (2026-10-06) |
-| `dmz.ports.bus` (or `dmz.ports.bus_client`) | no | 5406 | the bus client node port: core connects here |
+| `dmz.ports.envoy` | no | 8443 | Envoy's node port (and load balancer port): sprouts and the runner connect here. Owner's decision, 2026-10-06 |
+| `dmz.ports.bus` (or `dmz.ports.bus_client`) | no | 8442 | the bus client node port: core connects here. Owner's decision, 2026-10-06 |
+| `dmz.envoy_service_type` | no | `NodePort` | `NodePort` or `LoadBalancer`, as UAT.2's PR #130 writes it; `install.sh --expose` overrides it |
 | `core.private_ip` | yes | | Envoy's farmer upstream; the NetworkPolicy peer for core |
 | `core.fqdn` | yes | | the SNI Envoy sends to farmer |
 | `core.ports.farmer_api` | no | 5405 | Envoy's farmer upstream port |
@@ -135,35 +136,46 @@ Fixed, so the core side can rely on them (`values-uat.yaml` sets
 
 ### Exposure
 
-**Owner's decision, 2026-10-06:** "The envoy should be behind an app gateway
-in production. For simplicity let's use 8443 as node port. It should support
-both load balancer and node port." So Envoy is a NodePort on 8443 by
-default, and a LoadBalancer is the alternative. `install.sh` adds two
-Services of its own, leaving the chart's ClusterIP Services as they are:
+The owner's decisions of 2026-10-06, verbatim:
+
+- "The envoy should be behind an app gateway in production. For simplicity
+  let's use 8443 as node port. It should support both load balancer and
+  node port."
+- "Envoy and bus Services are owned by UAT.3a install.sh via chart values
+  with pinned node ports; UAT.2 expose.sh must not create them."
+- "Option (b): bus node port 8442, DMZ node port range 8442-8443 only."
+
+So `install.sh` creates both Services, with their node ports pinned, and
+leaves the chart's own ClusterIP Services as they are:
 
 | Service | Selects | `--expose nodeport` (default) | `--expose loadbalancer` |
 |---|---|---|---|
-| `imas-dmz-nats-envoy-edge` | the Envoy pod | NodePort, node port `dmz.ports.envoy` (8443), to the `https` container port (8443) | LoadBalancer on port `dmz.ports.envoy` (8443), to the same container port; Kubernetes picks the node port behind it |
-| `imas-dmz-nats-bus-core` | the bus pod | NodePort, node port `dmz.ports.bus` (5406), to the `client` container port (5406) | the same: only core dials the bus |
+| `imas-dmz-nats-envoy-edge` | the Envoy pod | NodePort, node port `dmz.ports.envoy` (8443), to the `https` container port (8443) | LoadBalancer on port 8443, to the same container port, node port pinned to 8443 too |
+| `imas-dmz-nats-bus-core` | the bus pod | NodePort, node port `dmz.ports.bus` (8442), to the `client` container port (5406) | the same: only core dials the bus |
 
-- **NodePort** needs both ports inside the API server's
-  `--service-node-port-range`, which UAT.2 sets on k0s. 8443 is outside the
-  Kubernetes default (30000 to 32767) and outside the 443-5406 range UAT.2's
-  PR #130 sets: see Open questions.
+- The DMZ's NodePort range is 8442-8443 (UAT.2 sets it), so both node ports
+  are pinned in both modes and nothing is left to allocation. 6443, 8080
+  and the other ports k0s uses stay outside the range.
+- **"Via chart values" is not done** (see Open questions): the nats chart has
+  no value for a node port, and its bus Service carries the websocket port
+  too. The Services are this script's own manifests instead.
 - **LoadBalancer** needs a load balancer controller in the cluster (k0s ships
   none; in production an application gateway sits in front instead).
   `install.sh` waits up to `--timeout` for the Service's address, writes it
   to `dmz.json` (`envoy.load_balancer_address`), and fails, naming
   `--expose nodeport`, if none comes. `check.sh --connect <address>` then
   probes it. The DMZ FQDN must resolve to that address for sprouts.
+- Without `--expose`, the endpoints file's `dmz.envoy_service_type` picks the
+  mode, else NodePort.
 - Both Services use `externalTrafficPolicy: Local`, so traffic is not
   source-NATed: the bus rule below sees core's own address, and Envoy sees
   the client's.
 
-Section 4h restricts who reaches these ports with the NSGs (UAT.1). Inside
-the cluster, the chart's Envoy policy already admits anyone on the listener
-port, and `imas-dmz-nats-bus-uat-core` adds `core.private_ip/32` to the
-bus's client port (policies are additive; it opens nothing else).
+Section 4h restricts who reaches these ports with the NSGs (UAT.1): core to
+8442, sprouts and the runner to 8443. Inside the cluster, the chart's Envoy
+policy already admits anyone on the listener port, and
+`imas-dmz-nats-bus-uat-core` adds `core.private_ip/32` to the bus's client
+pod port, 5406 (policies are additive; it opens nothing else).
 
 ## check.sh
 
@@ -219,9 +231,12 @@ makes, and what `dmz.json` gives it.
 
 1. **The seeds are core's.** UAT.3b creates `imas-farmer-nats-seeds` in
    `imas-core` with the repo's tooling. This side copies five of its keys
-   and generates nothing. So the DMZ install runs **after** core's seed
-   Secret exists, which section 4h's workflow order ("DMZ install, core
-   install") does not give: see Open questions.
+   and generates nothing. **Owner's decision, 2026-10-06: "Install order is
+   core first, then DMZ."** So by the time this runs, the core hub and its
+   seed Secret exist, `--seeds-from-kubeconfig core.kubeconfig` is the way
+   to pass them, and D8, D10 and D11 of `check.sh` can reach farmer.
+   (Section 4h of the plan still says "DMZ install, core install"; amending
+   it is outside this brief.)
 2. **farmer's API is reachable at `core.private_ip:core.ports.farmer_api`**
    from the DMZ node, over HTTPS, and serves `/v1/enroll`, `/v1/refresh`,
    `/files/`, `/v1/sprout/update-manifest` and the JWKS at
@@ -236,9 +251,10 @@ makes, and what `dmz.json` gives it.
    chart's `bus.serviceName=imas-dmz-nats-bus`, `bus.namespace=imas-dmz`,
    `bus.port=5406` (its defaults apart from the service name). That name has
    to resolve inside the core cluster to `dmz.private_ip`, with port 5406
-   arriving at `dmz.ports.bus`; for example a namespace `imas-dmz` in the
-   core cluster with a selectorless Service `imas-dmz-nats-bus` on 5406 and
-   an EndpointSlice for `dmz.private_ip:dmz.ports.bus`. `dmz.json`'s `bus`
+   arriving at `dmz.ports.bus` (node port 8442); for example a namespace
+   `imas-dmz` in the core cluster with a selectorless Service
+   `imas-dmz-nats-bus` on 5406 and an EndpointSlice for
+   `dmz.private_ip:8442`. `dmz.json`'s `bus`
    object carries both halves. TLS: farmer and saasapi verify the bus
    Service FQDN, which the bus certificate carries; it also carries
    `dmz.private_ip` and `dmz.fqdn` in case core sets `bus.tlsServerName`
@@ -285,8 +301,9 @@ helm, bash or jq fails the render tests instead):
   image is the release's and nothing is `:latest`; the NetworkPolicy
   egress to the core IP; the exposure Services select the right pods and
   target ports that exist, Envoy as NodePort 8443 (or a LoadBalancer on
-  8443 with no pinned node port) and the bus as NodePort 5406; and
-  `dmz.json`.
+  8443, node port pinned to 8443) and the bus as NodePort 8442; and
+  `dmz.json`. `TestRenderServiceTypeFromEndpoints`: the endpoints file's
+  `dmz.envoy_service_type` picks the mode unless `--expose` is given.
 - **The install path with stub kubectl and helm** (`TestInstallWithStubs`):
   the order of the steps; the registry token reaching `helm repo add` on
   stdin only and never left in the work directory; an exact-version `helm
@@ -311,45 +328,46 @@ Also run by hand for this brief: `kubeconform -strict` (Kubernetes 1.30
 schemas, cert-manager from the CRDs catalog) on the rendered chart and the
 generated manifests, valid. **Not run:** anything against a cluster, the
 Buildkite registry, GHCR or a real Envoy; `envoy --mode validate` on the
-render (no Envoy binary here); the API server accepting node port 8443,
-which depends on UAT.2's range.
+render (no Envoy binary here); the API server accepting node ports 8442
+and 8443, which depends on UAT.2's range.
+
+## Owner's decisions (2026-10-06), answering earlier open questions
+
+- **Exposure:** Envoy on node port 8443, NodePort or LoadBalancer; the Envoy
+  and bus Services are this script's, with pinned node ports, and UAT.2's
+  `expose.sh` must not create them. The bus is on node port 8442 and the DMZ
+  NodePort range is 8442-8443 only (option (b) of UAT.2's PR #130). This
+  answers the earlier questions about 8443 falling outside UAT.2's range and
+  about two Services wanting one node port.
+- **Install order:** core first, then DMZ (assumption 1 above).
 
 ## Open questions
 
-1. **Bus port toward core.** The Shared contract says "core reaches only the
+1. **"Via chart values".** The owner's decision says the Services are owned
+   "via chart values with pinned node ports". `deploy/helm/nats` cannot do
+   that today: `envoy.service` and `bus.service` have a `type` value but no
+   node port value, and the bus Service carries both the client port (5406)
+   and the websocket port (5407), so making it a NodePort would also give
+   5407 a node port, which the 8442-8443 range has no room for and which
+   only Envoy should reach. This PR keeps the Services in `install.sh`'s own
+   manifests, with pinned node ports. Doing it through chart values needs a
+   change to `deploy/helm/nats` (node port values, and a bus Service that
+   can expose only the client port), outside this brief.
+2. **Bus port toward core.** The Shared contract says "core reaches only the
    bus websocket port on the DMZ". farmer and saasapi dial the bus's TCP
    client port, `tls://...:5406` (farmer chart, "Reaching the bus"); only
-   Envoy uses the websocket port 5407, inside the DMZ cluster. This side
-   therefore exposes 5406 to core, and the NSG (UAT.1) and UAT.2's exposure
-   note need 5406 from core, not 5407.
-2. **Order of the DMZ and core installs.** The bus needs core's seeds at
-   start, and UAT.3b creates them. Either the workflow (UAT.6) runs UAT.3b's
-   seed step (or all of it) before this install, or the seeds are made by a
-   step of their own that both hubs read. This install takes either a
-   directory or the core cluster's Secret; it never makes seeds itself.
-3. **The endpoints file's shape** is this brief's proposal (above); UAT.2,
-   UAT.3b and UAT.8 should read and write the same one.
-4. **Node port 8443 and UAT.2's range** (raised by the owner's decision).
-   UAT.2's PR #130 sets the NodePort range to 443-5406 and exposes Envoy on
-   node port 443 (its `UAT_DMZ_ENVOY_PORT`). It keeps the range below 6443 on
-   purpose, so no automatically allocated node port can land on the
-   Kubernetes API (6443), kube-router's metrics (8080) or the kubelet. Node
-   port 8443 is outside that range, so the API server would refuse this
-   Service. Including 8443 means changing UAT.2's range, which would then
-   cover 6443 and 8080 too unless the range or the allocation is handled
-   another way. Not decided here.
-5. **Two Services wanting node port 8443.** UAT.2's `uat/k0s/expose.sh`
-   (PR #130) also makes a NodePort Service for Envoy
-   (`imas-dmz-nats-envoy-np`, node port 443 there). If both it and this
-   script are run with node port 8443, the second one is refused: a node
-   port can belong to one Service only. Which brief owns the Envoy Service is
-   with the owner; this script creates `imas-dmz-nats-envoy-edge` (and
-   `imas-dmz-nats-bus-core` for 5406, which expose.sh would also create as
-   `imas-dmz-nats-bus-np`).
-6. **LoadBalancer in UAT.** No load balancer controller is installed on the
+   Envoy uses the websocket port 5407, inside the DMZ cluster. Core reaches
+   the client port on node port 8442 (owner's decision), so the NSG rule is
+   core to 8442 (PR #135 is being updated by its owner).
+3. **The endpoints file's shape** is this brief's proposal (above); UAT.2's
+   PR #130 writes nearly the same file and both are read here. UAT.3b and
+   UAT.8 should read and write the same one.
+4. **Section 4h still lists "DMZ install, core install"**; the owner's
+   install-order decision needs it amended, outside this brief.
+5. **LoadBalancer in UAT.** No load balancer controller is installed on the
    k0s hubs, so `--expose loadbalancer` would wait and fail there; it is
    ready for a cluster that has one.
-7. **Is `imashelm` private?** If it is, the workflow needs a Buildkite
+6. **Is `imashelm` private?** If it is, the workflow needs a Buildkite
    read token as `IMAS_HELM_REGISTRY_TOKEN`; the Buildkite Helm URL and the
    `buildkite` user name are from Buildkite's documentation and have not
    been tried against this registry.
