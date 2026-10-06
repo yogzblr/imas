@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A stand-in for curl that answers as saasapi and Keycloak would, for tests/test_scripts.sh.
+"""A stand-in for curl that answers as saasapi and Keycloak's token endpoint would, for tests/test_scripts.sh.
 
 Understands only the curl options lib.sh's saas_call passes. State lives in
 $FAKE_DIR. Every argv is appended to $FAKE_DIR/argv and every request to
@@ -13,11 +13,11 @@ Behaviour switches (environment):
   FAKE_429               key mints answered 429 before the first success (0)
   FAKE_CONNECT_AFTER     lookups answered connected=false before true (0)
   FAKE_LINK_CONFLICT     an asset id whose link answers 409
-  FAKE_KC_ATTR           Keycloak: the user attribute mapped to organization.id
+  FAKE_KC_CLIENT_SECRET  Keycloak: the test client's secret
 
-Keycloak's users come from $FAKE_DIR/kc-users.json on first use:
-{"<username>": {"password", "attributes": {}}}; the admin is "kcadmin" with
-password "kcadmin-pw" in realm master.
+Keycloak's users are $FAKE_DIR/kc-users.json ({"<username>": "<password>"});
+a token carries organization.id when $FAKE_DIR/kc-bindings.json maps the user
+to a tenant id (tests/fake/hub-core/bind-tenant.sh writes it).
 """
 
 import base64
@@ -105,41 +105,26 @@ def jwt(claims, sig):
     return f"{b64({'alg': 'none'})}.{b64(claims)}.{sig}"
 
 
-if path.startswith("/realms/") or path.startswith("/admin/realms/"):
-    if "kc_users" not in st:
-        with open(os.path.join(fake, "kc-users.json"), encoding="utf-8") as f:
-            st["kc_users"] = json.load(f)
-        for i, u in enumerate(sorted(st["kc_users"])):
-            st["kc_users"][u]["id"] = f"uid-{i}"
-    users = st["kc_users"]
-    attr = os.environ.get("FAKE_KC_ATTR", "tenant_id")
-    if path.endswith("/protocol/openid-connect/token"):
-        form = {k: v[0] for k, v in parse_qs(body.decode()).items()}
-        realm = path.split("/")[2]
-        if realm == "master":
-            if form.get("username") == "kcadmin" and form.get("password") == "kcadmin-pw":
-                answer(200, {"access_token": jwt({"sub": "kcadmin"}, "KCADMINSIG")})
-            answer(401, {"error": "invalid_grant"})
-        usr = users.get(form.get("username"))
-        if form.get("grant_type") != "password" or not usr or usr["password"] != form.get("password"):
-            answer(401, {"error": "invalid_grant"})
-        org = (usr.get("attributes", {}).get(attr) or [""])[0]
-        answer(200, {"access_token": jwt({"sub": form["username"], "organization": {"id": org}}, "TOKSIGNATURE")})
-    if not headers.get("authorization", "").endswith(".KCADMINSIG"):
-        answer(401, {"error": "HTTP 401 Unauthorized"})
-    parts = path.split("/")
-    if method == "GET" and parts[-1] == "users":
-        name = parse_qs(u.query).get("username", [""])[0]
-        answer(200, [{"id": v["id"], "username": k, "attributes": v.get("attributes", {})}
-                     for k, v in users.items() if k == name])
-    if method == "PUT" and parts[-2] == "users":
-        for k, v in users.items():
-            if v["id"] == parts[-1]:
-                v["attributes"] = json.loads(body)["attributes"]
-                st.setdefault("kc_puts", []).append(k)
-                answer(204, {})
-        answer(404, {"error": "User not found"})
-    answer(404, {"error": "not found"})
+if path.startswith("/realms/"):
+    # Keycloak's token endpoint: users and passwords from kc-users.json, and
+    # organization.id from kc-bindings.json, which the bind-tenant.sh stub writes.
+    with open(os.path.join(fake, "kc-users.json"), encoding="utf-8") as f:
+        users = json.load(f)
+    try:
+        with open(os.path.join(fake, "kc-bindings.json"), encoding="utf-8") as f:
+            bindings = json.load(f)
+    except FileNotFoundError:
+        bindings = {}
+    if not path.endswith("/protocol/openid-connect/token"):
+        answer(404, {"error": "not found"})
+    form = {k: v[0] for k, v in parse_qs(body.decode()).items()}
+    if (form.get("grant_type") != "password" or users.get(form.get("username")) != form.get("password")
+            or form.get("client_secret") != os.environ.get("FAKE_KC_CLIENT_SECRET")):
+        answer(401, {"error": "invalid_grant"})
+    claims = {"sub": form["username"]}
+    if form["username"] in bindings:
+        claims["organization"] = {"id": bindings[form["username"]]}
+    answer(200, {"access_token": jwt(claims, "TOKSIGNATURE")})
 
 if headers.get("x-internal-auth") != os.environ["FAKE_SECRET"]:
     answer(401, {"error": "unauthorized", "message": "unauthorized"})
@@ -154,7 +139,7 @@ if method == "POST" and parts == ["v1", "tenants"]:
     if not req.get("name"):
         answer(400, {"error": "invalid_request", "message": "name is required"})
     st["seq"] += 1
-    tid = "t_" + ("abcdefghijklmnop" + str(st["seq"]))[-16:]
+    tid = "t_" + "a" * 15 + "bcdefghijklmnopq"[st["seq"] % 16]  # t_ + 16 base32
     st["tenants"][tid] = {"name": req["name"], "polls": 0}
     answer(202, {"tenant_id": tid, "status": "pending"})
 

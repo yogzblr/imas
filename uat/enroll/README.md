@@ -19,7 +19,7 @@ a real stack**: the agent sandbox can't reach Azure or the registries.
 | `ansible/site.yml` (not here) | Step 4: installs the pinned package, enrols, and runs `imas_verify` (the role includes it) |
 | `playbooks/collect.yml` | Step 5: runs `imas_verify` again, then records each sprout's enrolled ID |
 | `wait-connected.sh` | Step 6: farmer's view through saasapi, until every sprout is connected |
-| `keycloak-token.sh` | A reference token hook: maps a new tenant id onto the tenant's Keycloak users, then prints a token (see "Tokens and the tenant id") |
+| `core-token.sh` | The token hook for the core hub: binds each new tenant with `uat/hub/core/bind-tenant.sh`, then prints a token (see "Tokens and the tenant id") |
 | `lib.sh` | Shared helpers: saasapi calls that keep credentials off command lines |
 | `requirements.yml` | Ansible collections for the controller |
 
@@ -31,10 +31,10 @@ ansible-galaxy collection install -r uat/enroll/requirements.yml
 
 uat/enroll/enroll.sh \
   --uat uat.json --access state/access.json --state state/enroll \
-  --release-tag v0.1.0-rc.4 --ca-file state/uat-ca.pem \
+  --release-tag v0.1.0-rc.4 \
   --ssh-key state/id_uat --winrm-password-file state/winrm-password \
-  --internal-auth-file state/internal-auth-secret \
-  --keycloak-json state/keycloak.json            # see "Tokens and the tenant id"
+  --core-state state --core-kubeconfig state/core.kubeconfig \
+  --endpoints state/endpoints.json               # see "Tokens and the tenant id"
 ```
 
 | Input | From | Notes |
@@ -42,12 +42,14 @@ uat/enroll/enroll.sh \
 | `--uat` | `tofu output -json uat` (UAT.1), or the local rig (UAT.8) | The contract's object: `run_id`, `dmz.fqdn`, `core.fqdn`, and `sprouts` keyed by VM name with `tenant`, `os`, `connection`, `admin_user` |
 | `--access` | `uat/access/tunnels.sh open` (UAT.1) | For each VM name, `host` (127.0.0.1) and `ssh_port` or `winrm_port`. A top-level map or one under `vms` is accepted. Not needed when every sprout's connection is `docker` |
 | `--release-tag` | the workflow input | `vX.Y.Z` or `vX.Y.Z-rc.N`. Anything else, including `latest`, is refused |
-| `--ca-file` | the UAT CA (UAT.2) | Sprouts pin it (`sproutrootca`, `sproutrootcatofu: false`); curl verifies saasapi with it too |
+| `--ca-file` | the UAT CA (UAT.2); default `core.json`'s `ca_file` with `--core-state` | Sprouts pin it (`sproutrootca`, `sproutrootcatofu: false`); curl verifies saasapi with it too |
 | `--ssh-key` | per run, sensitive (UAT.1) | Linux sprouts over SSH |
 | `--winrm-password-file` or `--winrm-password-dir` | per run, sensitive (UAT.1) | One password for every Windows VM, or a directory with one file per VM name |
-| `--internal-auth-file` | UAT.3b (the chart's `imas-saasapi-internal-auth` Secret) | saasapi's `X-Internal-Auth` shared secret, required on every route |
-| `--keycloak-json`, `--token-cmd`, or `--token-t1` and `--token-t2` | UAT.3b (Keycloak) | See below |
-| `--saasapi-url` | default `https://<core.fqdn>` | `scheme://host[:port]` with no path; `/v1/...` is appended |
+| `--core-state`, `--core-kubeconfig`, `--endpoints` (and `--core-scripts`, default `uat/hub/core`) | the `<state-dir>`, `<kubeconfig>` and `<endpoints.json>` the core hub's scripts took (UAT.3b) | Select `core-token.sh` as the token command; see below |
+| `--internal-auth-file` | default `<core-state>/core/sensitive/internal-auth-secret` (UAT.3b) | saasapi's `X-Internal-Auth` shared secret, required on every route |
+| `--token-cmd`, or `--token-t1` and `--token-t2` | instead of `--core-state` | See below |
+| `--saasapi-url` | default `core.json`'s `saasapi_url`, else `https://<core.fqdn>` | `scheme://host[:port]` with no path; `/v1/...` is appended |
+| `--docker-connection` | the local rig (UAT.8) | The connection plugin for `docker` sprouts. **No default**: see "How the sprouts are reached" |
 | `--envoy-host`, `--envoy-port` | default `dmz.fqdn` and `8443` (`envoy.listenerPort`) | Written as `farmerinterface` and `farmerapiport`. Pass the external port if UAT.2 exposes Envoy on another one |
 | `--bus-url` | optional | Pins `busurls`. By default the sprout uses the `nats_urls` farmer returns (`bus.sproutBusURLs`) |
 
@@ -88,18 +90,34 @@ saasapi accepts a tenant-scoped call only when the Keycloak token's
 when `POST /v1/tenants` succeeds. A token minted before the tenant exists
 therefore can't carry the right `organization.id`. Someone has to map the
 tenant's Keycloak users to the new id between creating the tenant and using
-it. This directory defines a hook for that, and ships one implementation:
+it.
 
-- `--keycloak-json FILE` (in `enroll.sh`) runs `keycloak-token.sh` as the hook.
-  That script reads the `keycloak.json` that `uat/tests/harness` (UAT.5)
-  reads: issuer, client, `tenant_attribute`, a realm admin identity, and
-  each tenant's admin and read-only users. Through Keycloak's admin API it
-  sets `tenant_attribute` of both users to the new tenant id, if it isn't
-  already. Then it takes the admin user's token with a password grant. It
-  assumes the realm (UAT.3b) maps that user attribute to the
-  `organization.id` claim, as `keycloak.json`'s `tenant_attribute`
-  describes, and that the realm's user profile allows the attribute. It has
-  been tested against a fake Keycloak only.
+**Owner decision (2026-10-06):** the core hub (UAT.3b, `uat/hub/core`) owns
+that binding. Its `bind-tenant.sh` is called once per tenant. It sets the
+user attribute behind `organization.id` on `t<N>-admin` and `t<N>-reader`,
+with kcadm.sh inside the Keycloak pod, and records the binding in
+`<state>/core/out/core.json`. This directory reads the files the core hub
+writes, in that hub's shape:
+
+- `out/core.json`: `saasapi_url`, `ca_file`, `keycloak.token_url` and
+  `client_id`, the `users` with their tenant and roles, and `tenants`
+  (the bindings).
+- `sensitive/credentials.json`: the test client's secret and the users'
+  passwords.
+- `sensitive/internal-auth-secret`.
+
+`keycloak.json`, which the core hub also writes, is for the harness's
+scratch users and isn't read here.
+
+- `--core-state DIR --core-kubeconfig FILE --endpoints FILE` (in
+  `enroll.sh`) runs `core-token.sh` as the token command. For each tenant it
+  calls `bind-tenant.sh <kubeconfig> <endpoints.json> <state> N <tenant_id>`
+  once, the first time it sees a tenant id that `core.json` doesn't bind
+  yet. It refuses a `core.json` that binds the tenant to another id. Then it
+  takes the token of the tenant's admin (the user holding the write role)
+  with a password grant on `keycloak.token_url`. It has been tested against
+  a stand-in `bind-tenant.sh` and a fake token endpoint, and the files'
+  shapes were taken from PR #132's `install.sh`.
 - `--token-cmd EXE`: `EXE <tenant number> <tenant id>` prints one access
   token for that tenant's admin user (both roles), whose `organization.id`
   is `<tenant id>`. Before the tenant exists it is called with an empty
@@ -122,7 +140,7 @@ the token.
 |---|---|---|
 | `ssh` (Linux) | `127.0.0.1:<ssh_port>` from `access.json`, the per run key, `become: true` | **Host key checking is off**, into a known hosts file of this run only (`StrictHostKeyChecking=no`, `UserKnownHostsFile=<state>/ssh/known_hosts`, and `HostKeyAlias=<vm>` so a key is recorded under the VM name rather than a port). Every tunnel is 127.0.0.1 on some port, the VMs are new every run, and the tunnel endpoint is Azure Bastion reached with the run's Azure login, so there is no earlier key to check against |
 | `winrm` (Windows) | `https://127.0.0.1:<winrm_port>`, NTLM, the admin user and password | **Certificate validation is ignored** (`ansible_winrm_server_cert_validation: ignore`). Through a tunnel the name we connect to is always 127.0.0.1, which never matches the certificate's name, and the WinRM listener's certificate is self-signed per VM. TLS still encrypts, and NTLM authenticates the user. This assumes UAT.1 gives Windows a WinRM HTTPS listener and makes the admin user the built-in Administrator, which Azure does for its admin account; any other local administrator is filtered by UAC over the network |
-| `docker` (local rig) | `community.docker.docker`, as root | The container is `access.json`'s `container` for the VM if set, otherwise the VM name |
+| `docker` (local rig) | the plugin named by `--docker-connection`, as root | **No default.** The owner dropped `community.docker` (2026-10-06), and which connection replaces it is an open question (below). The container is `access.json`'s `container` for the VM if set, otherwise the VM name |
 
 ## What the inventory sets
 
@@ -289,15 +307,29 @@ The Molecule scenario covers the same rpm path on Rocky 9.
 
 ## Contract gaps and assumptions (open questions)
 
-- **Token hook (UAT.3b, UAT.5, UAT.6)**: the generated tenant id has to be
-  mapped to each tenant's Keycloak users. `keycloak-token.sh` does it,
-  assuming UAT.3b's realm maps a user attribute to `organization.id` and
-  writes `keycloak.json` in the shape UAT.5's draft harness reads. If the
-  realm works differently, UAT.3b supplies its own `--token-cmd`. Without a
-  hook the run stops after creating the tenants (exit 3).
-- **Shared secret (UAT.3b)**: every saasapi call needs `X-Internal-Auth`,
-  which the brief's inputs don't name. It is assumed to be available to the
-  workflow as a file.
+- **Answered by the owner (2026-10-06):**
+  - **Tenant binding.** `uat/hub/core/bind-tenant.sh` binds each tenant
+    once, and this directory reads `core.json` and `credentials.json` in
+    the core hub's shape (`core-token.sh`).
+  - **Shared secret.** It comes from the core hub's sensitive directory.
+  - **`community.docker`.** It is dropped.
+  - **Install order.** Core first, then the DMZ. That needs no change here:
+    enrolment runs after both hubs either way.
+- **Who binds (to confirm)**: the decision says "the harness calls
+  `bind-tenant.sh` once per tenant", and the core hub's README says UAT.4
+  calls it after creating each tenant. Here the enrolment does it, through
+  `core-token.sh`, and only for a tenant `core.json` doesn't already bind.
+  A harness that calls it again with the same id gets the same binding.
+- **The local rig's connection (owner, UAT.8)**: with `community.docker`
+  gone there is no docker connection plugin. `gen-inventory.py` refuses
+  `docker` sprouts unless `--docker-connection` names one, and nothing here
+  chooses it. Possible replacements:
+  - SSH into the containers. The rig writes `connection: ssh` and ports in
+    its `access.json`, which this directory already supports; the
+    containers need sshd.
+  - A small connection plugin in the repository that wraps `docker exec`.
+  - Running the playbook inside each container with the `local`
+    connection.
 - **`access.json` shape (UAT.1)**: assumed `{"<vm>": {"host", "ssh_port" | "winrm_port", ...}}`,
   or the same under `vms`.
 - **saasapi URL (UAT.3b)**: assumed `https://<core.fqdn>` with routes at
@@ -315,8 +347,8 @@ The Molecule scenario covers the same rpm path on Rocky 9.
 
 ```sh
 python3 -m unittest discover -s uat/enroll/tests -p 'test_*.py'   # the inventory generator
-bash uat/enroll/tests/test_scripts.sh                            # the scripts, against a fake saasapi and Keycloak
-shellcheck -x uat/enroll/*.sh uat/enroll/tests/*.sh uat/enroll/tests/fake/{token-cmd,ansible-playbook,ansible-galaxy}
+bash uat/enroll/tests/test_scripts.sh                            # the scripts, against a fake saasapi, Keycloak token endpoint and bind-tenant.sh
+shellcheck -x uat/enroll/*.sh uat/enroll/tests/*.sh uat/enroll/tests/fake/{token-cmd,ansible-playbook,ansible-galaxy,hub-core/bind-tenant.sh}
 yamllint -c uat/enroll/.yamllint uat/enroll
 (cd uat/enroll && ANSIBLE_ROLES_PATH=../../ansible/roles ansible-lint)
 ```
@@ -326,7 +358,8 @@ The generator tests use `testdata/uat.json` (the Azure layout) and
 the same sprout ID per OS while IDs stay unique within a tenant, check the
 pins and connections, and check that no secret reaches the inventory. When
 `ansible-inventory` is installed, it also loads the result. The script tests
-use a stand-in for curl that answers as saasapi and Keycloak do. When the real
+use a stand-in for curl that answers as saasapi and Keycloak's token endpoint
+do, and a stand-in `bind-tenant.sh`. When the real
 `ansible-playbook` is installed and the tests run as root, they also run
 `seed-sproutid.yml` and `collect.yml` against localhost with temporary
 paths.
@@ -335,7 +368,8 @@ paths.
 
 Nothing here is a dependency of a released artifact.
 
-- Ansible and its collections (`ansible.windows`, `community.general`,
-  already used by `ansible/`, and `community.docker`, new here for the local
-  rig) are GPL-3.0-or-later controller tooling.
+- Ansible and its collections (`ansible.windows` and `community.general`,
+  both already used by `ansible/`) are GPL-3.0-or-later controller tooling.
+  No other collection is used: `community.docker` was dropped (owner
+  decision, 2026-10-06).
 - `pywinrm` (Windows sprouts) is MIT.

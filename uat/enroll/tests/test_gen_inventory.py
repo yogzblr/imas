@@ -283,7 +283,8 @@ class TestInventory(Base):
         self.assertEqual(self.hostvars()["t1-alma"]["ansible_port"], 42202)
 
     def test_docker_local_rig(self):
-        p = self.run_gen(uat=load("uat-lite.json"), access="access-lite.json")
+        p = self.run_gen(uat=load("uat-lite.json"), access="access-lite.json",
+                         extra=["--docker-connection", "example.rig.container"])
         self.assertIn("t2-ubuntu: tenant 2 ubuntu over docker as sprout ubuntu-01", p.stdout)
         hv = self.hostvars()
         self.assertEqual(hv["t1-ubuntu"]["ansible_host"], "imas-uat-lite-t1-ubuntu")
@@ -291,7 +292,8 @@ class TestInventory(Base):
         self.assertNotIn("ansible_port", hv["t1-ubuntu"])
         self.assertEqual(hv["t1-alma"]["uat_sprout_id"], hv["t2-alma"]["uat_sprout_id"])
         docker = self.yaml("group_vars/conn_docker.yml")
-        self.assertEqual(docker["ansible_connection"], "community.docker.docker")
+        self.assertEqual(docker["ansible_connection"], "example.rig.container")
+        self.assertNotIn("community.docker", self.all_output())
         self.assertEqual(docker["ansible_user"], "root")
         self.assertFalse(os.path.exists(os.path.join(self.out, "group_vars", "conn_ssh.yml")))
         self.assertFalse(os.path.exists(os.path.join(self.out, "group_vars", "windows_sprouts.yml")))
@@ -303,9 +305,22 @@ class TestInventory(Base):
         args = [
             sys.executable, SCRIPT, "--uat", self.write_json("u.json", uat), "--keys-dir", self.keys,
             "--release-tag", "v0.1.0-rc.4", "--ca-file", os.path.join(TESTDATA, "uat-ca.pem"), "--out", self.out,
+            "--docker-connection", "example.rig.container",
         ]
         p = subprocess.run(args, capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stderr)
+
+    def test_docker_needs_a_named_connection(self):
+        # community.docker was dropped (owner decision); no default replaces it.
+        p = self.run_gen(uat=load("uat-lite.json"), access="access-lite.json", expect_ok=False)
+        self.assertIn("--docker-connection", p.stderr)
+        self.assertIn("owner decision", p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.out, "hosts.yml")))
+
+    def test_docker_connection_name_checked(self):
+        p = self.run_gen(uat=load("uat-lite.json"), access="access-lite.json",
+                         extra=["--docker-connection", "rm -rf"], expect_ok=False)
+        self.assertIn("not a connection plugin name", p.stderr)
 
     @unittest.skipUnless(shutil.which("ansible-inventory"), "ansible-inventory not on PATH")
     def test_ansible_loads_it(self):

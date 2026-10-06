@@ -37,7 +37,7 @@ pass() { echo "ok   - $*"; }
 fail() { echo "FAIL - $*"; fails=$((fails + 1)); }
 check() { local d="$1"; shift; if "$@" >/dev/null; then pass "$d"; else fail "$d"; fi; }
 # no_secret FILE...: none of the secrets the fakes hand out appear.
-no_secret() { ! grep -q -E 'SEKRIT|SHHH|TOKSIGNATURE|PWSECRET|KCADMINSIG|kcadmin-pw' "$@"; }
+no_secret() { ! grep -q -E 'SEKRIT|SHHH|TOKSIGNATURE|PWSECRET|CLIENTSECRET' "$@"; }
 
 testdata="$enroll/testdata"
 printf '%s\n' "$FAKE_SECRET" >"$work/internal-auth"
@@ -151,41 +151,63 @@ fresh defaulturl
 check "saasapi URL defaults to https://<core.fqdn>" \
 	grep -q '"https://uatabc123-core.centralindia.cloudapp.azure.com/v1/tenants"' "$FAKE_DIR/argv"
 
-echo "# keycloak-token.sh"
-kc_setup() {
-	cat >"$FAKE_DIR/kc-users.json" <<'JSON'
-{"t1admin": {"password": "PWSECRET-1a"}, "t1ro": {"password": "PWSECRET-1r"},
- "t2admin": {"password": "PWSECRET-2a"}, "t2ro": {"password": "PWSECRET-2r"}}
-JSON
-	jq -n '{issuer: "https://kc.uat.test/realms/imas-uat", client_id: "uat-tests", tenant_attribute: "tenant_id",
-		admin: {realm: "master", client_id: "admin-cli", username: "kcadmin", password: "kcadmin-pw"},
-		tenants: {"1": {admin: {username: "t1admin", password: "PWSECRET-1a"}, readonly: {username: "t1ro", password: "PWSECRET-1r"}},
-		          "2": {admin: {username: "t2admin", password: "PWSECRET-2a"}, readonly: {username: "t2ro", password: "PWSECRET-2r"}}}}' \
-		>"$work/keycloak.json"
-	export UAT_KEYCLOAK_JSON="$work/keycloak.json" FAKE_KC_ATTR=tenant_id
+echo "# core-token.sh (with uat/hub/core's core.json, credentials.json and bind-tenant.sh)"
+# core_setup: a core hub state directory in the shape uat/hub/core/install.sh
+# writes, and the environment core-token.sh reads. Sets $core.
+core_setup() {
+	core="$work/$1/core-state"
+	mkdir -p "$core/core/out" "$core/core/sensitive"
+	printf 'apiVersion: v1\n' >"$work/$1/kubeconfig"
+	printf '{"core": {}}\n' >"$work/$1/endpoints.json"
+	cp "$testdata/uat-ca.pem" "$core/core/out/uat-ca.crt"
+	jq -n --arg ca "$core/core/out/uat-ca.crt" --arg sens "$core/core/sensitive" '{
+		release_tag: "v0.1.0-rc.4", saasapi_url: "https://saas.uat.test", internal_auth_header: "X-Internal-Auth", ca_file: $ca,
+		keycloak: {issuer: "https://kc.uat.test/realms/imas-uat", token_url: "https://kc.uat.test/realms/imas-uat/protocol/openid-connect/token",
+		           realm: "imas-uat", audience: "imas-saasapi", client_id: "imas-uat-tests",
+		           read_role: "imas-recipes-read", write_role: "imas-recipes-write", tenant_claim: "organization.id"},
+		users: {"t1-admin": {tenant: "1", roles: ["imas-recipes-read", "imas-recipes-write"]}, "t1-reader": {tenant: "1", roles: ["imas-recipes-read"]},
+		        "t2-admin": {tenant: "2", roles: ["imas-recipes-read", "imas-recipes-write"]}, "t2-reader": {tenant: "2", roles: ["imas-recipes-read"]}},
+		tenants: {}, sensitive_dir: $sens}' >"$core/core/out/core.json"
+	(umask 077 && jq -n --arg ias "$FAKE_SECRET" '{note: "SENSITIVE", internal_auth_secret: ($ias + "\n"),
+		keycloak: {client_secret: "CLIENTSECRET-x\n", passwords: {"t1-admin": "PWSECRET-1a\n", "t1-reader": "PWSECRET-1r\n",
+		           "t2-admin": "PWSECRET-2a\n", "t2-reader": "PWSECRET-2r\n"}}}' >"$core/core/sensitive/credentials.json"
+		printf '%s\n' "$FAKE_SECRET" >"$core/core/sensitive/internal-auth-secret")
+	jq -n '{"t1-admin": "PWSECRET-1a", "t1-reader": "PWSECRET-1r", "t2-admin": "PWSECRET-2a", "t2-reader": "PWSECRET-2r"}' >"$FAKE_DIR/kc-users.json"
+	export UAT_CORE_STATE="$core" UAT_CORE_KUBECONFIG="$work/$1/kubeconfig" UAT_CORE_ENDPOINTS="$work/$1/endpoints.json" \
+		UAT_CORE_SCRIPTS="$tests/fake/hub-core" FAKE_KC_CLIENT_SECRET="CLIENTSECRET-x"
 }
+core_unset() { unset UAT_CORE_STATE UAT_CORE_KUBECONFIG UAT_CORE_ENDPOINTS UAT_CORE_SCRIPTS; }
+
 fresh hook
-kc_setup
+core_setup hook
 rc=0
-ct --token-cmd "$tests/../keycloak-token.sh" >"$work/out" 2>"$work/err" || rc=$?
-check "create-tenants with the Keycloak hook exits 0" [ "$rc" -eq 0 ]
+ct --token-cmd "$enroll/core-token.sh" >"$work/out" 2>"$work/err" || rc=$?
+check "create-tenants with core-token.sh exits 0" [ "$rc" -eq 0 ]
 t1="$(jq -r '.["1"].tenant_id' "$state/tenants.json")"
 t2="$(jq -r '.["2"].tenant_id' "$state/tenants.json")"
-check "each tenant's admin and read-only users carry its tenant id" \
-	jq -e --arg a "$t1" --arg b "$t2" '.kc_users.t1admin.attributes.tenant_id == [$a] and .kc_users.t1ro.attributes.tenant_id == [$a]
-		and .kc_users.t2admin.attributes.tenant_id == [$b] and .kc_users.t2ro.attributes.tenant_id == [$b]' "$FAKE_DIR/state.json"
-check "each user is updated once, not on every call" jq -e '(.kc_puts | length) == 4' "$FAKE_DIR/state.json"
-check "six keys minted with the hook's tokens" jq -e '(.keys | length) == 6' "$FAKE_DIR/state.json"
-check "no password or token printed" no_secret "$work/out" "$work/err"
-check "no password or token on a curl command line" no_secret "$FAKE_DIR/argv"
-rc=0; UAT_KEYCLOAK_JSON="$work/nowhere.json" "$enroll/keycloak-token.sh" 1 >/dev/null 2>&1 || rc=$?
-check "the hook without keycloak.json fails" [ "$rc" -ne 0 ]
-rc=0; "$enroll/keycloak-token.sh" 3 >/dev/null 2>&1 || rc=$?
+check "bind-tenant.sh called once per tenant, with its tenant id" \
+	bash -c '[ "$(cat "$1")" = "1 $2
+2 $3" ]' _ "$FAKE_DIR/bind.log" "$t1" "$t2"
+check "core.json records both bindings" jq -e --arg a "$t1" --arg b "$t2" '.tenants == {"1": $a, "2": $b}' "$core/core/out/core.json"
+check "six keys minted with the bound tokens" jq -e '(.keys | length) == 6' "$FAKE_DIR/state.json"
+check "no password, client secret or token printed" no_secret "$work/out" "$work/err"
+check "none on a curl command line" no_secret "$FAKE_DIR/argv"
+ct --token-cmd "$enroll/core-token.sh" >/dev/null 2>&1
+check "a re-run binds nothing again" [ "$(wc -l <"$FAKE_DIR/bind.log")" -eq 2 ]
+tok="$("$enroll/core-token.sh" 2 "$t2")"
+claims="$(python3 -c 'import base64, json, sys; p = sys.argv[1].split(".")[1]; c = json.loads(base64.urlsafe_b64decode(p + "=" * (-len(p) % 4))); print(c["sub"], c["organization"]["id"])' "$tok")"
+check "the token is tenant 2 admin's, with organization.id" [ "$claims" = "t2-admin $t2" ]
+jq '.tenants["1"] = "t_bbbbbbbbbbbbbbbb"' "$core/core/out/core.json" >"$work/c" && mv "$work/c" "$core/core/out/core.json"
+rc=0; "$enroll/core-token.sh" 1 "$t1" >/dev/null 2>"$work/err" || rc=$?
+check "a core.json bound to another tenant id is refused" bash -c '[ "$1" -ne 0 ] && grep -q "stale core state" "$2"' _ "$rc" "$work/err"
+rc=0; "$enroll/core-token.sh" 3 >/dev/null 2>&1 || rc=$?
 check "the hook refuses tenant 3" [ "$rc" -eq 2 ]
-jq '.kc_users.t1admin.password = "changed"' "$FAKE_DIR/state.json" >"$work/s" && mv "$work/s" "$FAKE_DIR/state.json"
-rc=0; "$enroll/keycloak-token.sh" 1 "$t1" >/dev/null 2>"$work/err" || rc=$?
+rc=0; UAT_CORE_STATE="$work/nowhere" "$enroll/core-token.sh" 1 >/dev/null 2>&1 || rc=$?
+check "the hook without a core state fails" [ "$rc" -ne 0 ]
+FAKE_KC_CLIENT_SECRET=other
+rc=0; "$enroll/core-token.sh" 1 >/dev/null 2>"$work/err" || rc=$?
 check "a refused password grant is an error, saying so" bash -c '[ "$1" -ne 0 ] && grep -q "HTTP 401 invalid_grant" "$2"' _ "$rc" "$work/err"
-unset UAT_KEYCLOAK_JSON FAKE_KC_ATTR
+core_unset
 
 echo "# wait-connected.sh"
 # enrolled.json as collect.yml writes it, from gen-inventory's choices.
@@ -268,17 +290,20 @@ check "sprouts.json written" jq -e 'length == 6 and .["t1-alma"].sprout_id == "a
 check "prints no secret" no_secret "$work/out" "$work/err"
 check "the inventory holds no secret" bash -c '! grep -rqE "SEKRIT|SHHH|TOKSIGNATURE|^KEY" "$1/inventory"' _ "$state"
 
-fresh enrollkc
-kc_setup
-unset UAT_KEYCLOAK_JSON
+fresh enrollcore
+core_setup enrollcore
+core_unset
 rc=0
 "$enroll/enroll.sh" --uat "$testdata/uat.json" --access "$testdata/access.json" --state "$state" \
-	--release-tag v0.1.0-rc.4 --ca-file "$testdata/uat-ca.pem" --ssh-key "$work/id_uat" \
-	--winrm-password-file "$work/winrm" --internal-auth-file "$work/internal-auth" \
-	--keycloak-json "$work/keycloak.json" --saasapi-url https://saas.uat.test >"$work/out" 2>"$work/err" || rc=$?
-check "enroll.sh --keycloak-json runs through" bash -c '[ "$1" -eq 0 ] && jq -e "length == 6" "$2/sprouts.json"' _ "$rc" "$state"
+	--release-tag v0.1.0-rc.4 --ssh-key "$work/id_uat" --winrm-password-file "$work/winrm" \
+	--core-state "$core" --core-kubeconfig "$work/enrollcore/kubeconfig" --endpoints "$work/enrollcore/endpoints.json" \
+	--core-scripts "$tests/fake/hub-core" \
+	>"$work/out" 2>"$work/err" || rc=$?
+check "enroll.sh with the core hub's state runs through, defaults from core.json" \
+	bash -c '[ "$1" -eq 0 ] && jq -e "length == 6" "$2/sprouts.json" >/dev/null && [ "$(wc -l <"$3")" -eq 2 ]' _ "$rc" "$state" "$FAKE_DIR/bind.log"
+check "saasapi URL from core.json" jq -e '.saasapi_url == "https://saas.uat.test"' "$state/run.json"
+check "the CA from core.json pinned for the sprouts" grep -q "$core/core/out/uat-ca.crt" "$state/inventory/group_vars/sprouts.yml"
 check "and prints no secret" no_secret "$work/out" "$work/err"
-unset FAKE_KC_ATTR
 
 fresh enrollfail
 export FAKE_PLAYBOOK_FAIL=site.yml
@@ -301,12 +326,17 @@ rc=0
 check "ssh/winrm sprouts without access.json refused" bash -c '[ "$1" -ne 0 ] && grep -q -- "--access is required" "$2"' _ "$rc" "$work/err"
 
 fresh enrolllite
-printf '{"vms":{}}' >"$work/empty-access.json"
-rc=0
-"$enroll/enroll.sh" --uat "$testdata/uat-lite.json" --state "$state" --release-tag v0.1.0-rc.4 --ca-file "$testdata/uat-ca.pem" \
-	--internal-auth-file "$work/internal-auth" --token-cmd "$tests/fake/token-cmd" --saasapi-url https://saas.uat.test >/dev/null 2>"$work/err" || rc=$?
-check "the docker rig needs no access.json, SSH key or WinRM password" [ "$rc" -eq 0 ]
-check "docker connection in its inventory" grep -q '"community.docker.docker"' "$state/inventory/group_vars/conn_docker.yml"
+lite() {
+	"$enroll/enroll.sh" --uat "$testdata/uat-lite.json" --state "$state" --release-tag v0.1.0-rc.4 --ca-file "$testdata/uat-ca.pem" \
+		--internal-auth-file "$work/internal-auth" --token-cmd "$tests/fake/token-cmd" --saasapi-url https://saas.uat.test "$@"
+}
+rc=0; lite >/dev/null 2>"$work/err" || rc=$?
+check "docker sprouts without --docker-connection: refused, naming the owner decision" \
+	bash -c '[ "$1" -ne 0 ] && grep -q "community.docker is not used (owner decision)" "$2"' _ "$rc" "$work/err"
+rc=0; lite --docker-connection example.rig.container >/dev/null 2>"$work/err" || rc=$?
+check "with a connection named, the rig needs no access.json, SSH key or WinRM password" [ "$rc" -eq 0 ]
+check "that connection in its inventory" grep -q '"example.rig.container"' "$state/inventory/group_vars/conn_docker.yml"
+check "community.docker appears nowhere" bash -c '! grep -rq community.docker "$1/inventory"' _ "$state"
 
 echo "# playbooks, for real against localhost"
 if [[ -z "$real_playbook" ]]; then

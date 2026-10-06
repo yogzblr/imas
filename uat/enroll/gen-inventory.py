@@ -42,8 +42,6 @@ OSES = {
     "windows": ("win", "windows_sprouts", ("winrm",)),
 }
 
-# The local rig (UAT.8) runs the playbook into systemd containers.
-DOCKER_CONNECTION = "community.docker.docker"
 
 
 class InputError(Exception):
@@ -191,6 +189,15 @@ def build(args) -> tuple[dict, dict, dict, str | None]:
         known_hosts = os.path.abspath(args.known_hosts or os.path.join(args.out, "..", "ssh", "known_hosts"))
     if "winrm" in conns and not (args.winrm_password_file or args.winrm_password_dir):
         raise InputError("WinRM sprouts need --winrm-password-file or --winrm-password-dir")
+    if "docker" in conns and not args.docker_connection:
+        # The owner dropped community.docker (2026-10-06) and no replacement
+        # is chosen yet: name one, don't assume one.
+        raise InputError(
+            "docker sprouts need --docker-connection PLUGIN: community.docker is not used "
+            "(owner decision), and which connection replaces it is open (see README.md)"
+        )
+    if args.docker_connection and not re.match(r"^[a-z0-9_]+(\.[a-z0-9_]+)*$", args.docker_connection):
+        raise InputError(f"--docker-connection {args.docker_connection!r} is not a connection plugin name")
 
     hosts: dict[str, dict] = {}
     groups: dict[str, list[str]] = {}
@@ -306,7 +313,7 @@ def build(args) -> tuple[dict, dict, dict, str | None]:
         gv["conn_winrm"] = w
     if "conn_docker" in groups:
         gv["conn_docker"] = {
-            "ansible_connection": DOCKER_CONNECTION,
+            "ansible_connection": args.docker_connection,
             "ansible_user": "root",
             "ansible_become": False,
         }
@@ -387,6 +394,7 @@ def main(argv=None) -> int:
     ap.add_argument("--package-metadata", default="git", help="Linux package version metadata (default git)")
     ap.add_argument("--windows-msi-url", help="install this MSI instead of the NuGet feed's")
     ap.add_argument("--windows-msi-sha256", help="its SHA-256 (required with --windows-msi-url)")
+    ap.add_argument("--docker-connection", help="connection plugin for docker sprouts (no default; see README.md)")
     ap.add_argument("--verify-timeout", type=int, default=600, help="imas_verify_timeout (default 600)")
     args = ap.parse_args(argv)
     if not 0 < args.envoy_port < 65536:
