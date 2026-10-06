@@ -1,0 +1,21 @@
+id: I.selinux.enforcing
+title: 'switch SELinux to enforcing at runtime'
+os: [alma]
+skip_os:
+  ubuntu: |
+    Ubuntu uses AppArmor; SELinux isn't enabled there, so the selinux methods can only fail. They run on AlmaLinux.
+notes: |
+  Runtime mode only (setenforce): nothing in /etc/selinux/config changes, so a reboot restores the configured mode anyway. The setup records the mode and the revert restores it. Being permissive for a minute is a weakening on a throwaway UAT host only.
+alma:
+  setup: |
+    getenforce > /var/tmp/imas-uat-@NONCE@.sel
+    setenforce 0
+  recipe: |
+    steps:
+      uat selinux enforcing:
+        selinux.enforcing:
+          - name: 'runtime'
+  check: |
+    [ "$(getenforce)" = Enforcing ]
+  revert: |
+    [ -f /var/tmp/imas-uat-@NONCE@.sel ] && setenforce "$(cat /var/tmp/imas-uat-@NONCE@.sel)"; rm -f /var/tmp/imas-uat-@NONCE@.sel; true

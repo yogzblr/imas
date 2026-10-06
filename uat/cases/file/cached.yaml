@@ -1,0 +1,52 @@
+id: I.file.cached
+title: 'cache a local source file by its sha256'
+os: [ubuntu, alma, windows]
+notes: |
+  The source is a local file the setup writes (sprouts reach no file server but Envoy). The cache file is <cachedir>/<sha256>; the revert removes it, as I.file.managed's does.
+linux:
+  setup: |
+    printf 'imas uat source\n' > /var/tmp/imas-uat-src-@NONCE@
+    d=$(sed -n 's/^cachedir:[[:space:]]*//p' /etc/imas/sprout 2>/dev/null | tr -d "\"'" | head -n1)
+    [ -n "$d" ] || d=/var/cache/imas/sprout/files/provided
+    rm -f "$d/3b0f3b746a2709515206249fcc793f3c42dc7ca94ce98217dc9b52802f8b1a8c"
+  recipe: |
+    steps:
+      uat file cached:
+        file.cached:
+          - name: 'imas-uat-cached-@NONCE@'
+          - source: '/var/tmp/imas-uat-src-@NONCE@'
+          - hash: '3b0f3b746a2709515206249fcc793f3c42dc7ca94ce98217dc9b52802f8b1a8c'
+  check: |
+    d=$(sed -n 's/^cachedir:[[:space:]]*//p' /etc/imas/sprout 2>/dev/null | tr -d "\"'" | head -n1)
+    [ -n "$d" ] || d=/var/cache/imas/sprout/files/provided
+    [ "$(sha256sum "$d/3b0f3b746a2709515206249fcc793f3c42dc7ca94ce98217dc9b52802f8b1a8c" | cut -d' ' -f1)" = 3b0f3b746a2709515206249fcc793f3c42dc7ca94ce98217dc9b52802f8b1a8c ]
+  revert: |
+    d=$(sed -n 's/^cachedir:[[:space:]]*//p' /etc/imas/sprout 2>/dev/null | tr -d "\"'" | head -n1)
+    [ -n "$d" ] || d=/var/cache/imas/sprout/files/provided
+    rm -f "$d/3b0f3b746a2709515206249fcc793f3c42dc7ca94ce98217dc9b52802f8b1a8c" /var/tmp/imas-uat-src-@NONCE@
+windows:
+  setup: |
+    [IO.File]::WriteAllBytes('C:\Windows\Temp\imas-uat-src-@NONCE@', [Text.Encoding]::ASCII.GetBytes("imas uat source`n"))
+    $d = Join-Path $env:ProgramData 'imas\cache\sprout\files\provided'
+    $m = Select-String -LiteralPath (Join-Path $env:ProgramData 'imas\sprout') -Pattern '^cachedir:\s*(.+)$' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($m) { $d = $m.Matches[0].Groups[1].Value.Trim().Trim('"', "'") }
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath (Join-Path $d '3b0f3b746a2709515206249fcc793f3c42dc7ca94ce98217dc9b52802f8b1a8c')
+  recipe: |
+    steps:
+      uat file cached:
+        file.cached:
+          - name: 'imas-uat-cached-@NONCE@'
+          - source: '/Windows/Temp/imas-uat-src-@NONCE@'
+          - hash: '3b0f3b746a2709515206249fcc793f3c42dc7ca94ce98217dc9b52802f8b1a8c'
+  check: |
+    $d = Join-Path $env:ProgramData 'imas\cache\sprout\files\provided'
+    $m = Select-String -LiteralPath (Join-Path $env:ProgramData 'imas\sprout') -Pattern '^cachedir:\s*(.+)$' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($m) { $d = $m.Matches[0].Groups[1].Value.Trim().Trim('"', "'") }
+    $p = Join-Path $d '3b0f3b746a2709515206249fcc793f3c42dc7ca94ce98217dc9b52802f8b1a8c'
+    if ((Test-Path -LiteralPath $p) -and (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash -eq '3B0F3B746A2709515206249FCC793F3C42DC7CA94CE98217DC9B52802F8B1A8C') { exit 0 }
+    exit 1
+  revert: |
+    $d = Join-Path $env:ProgramData 'imas\cache\sprout\files\provided'
+    $m = Select-String -LiteralPath (Join-Path $env:ProgramData 'imas\sprout') -Pattern '^cachedir:\s*(.+)$' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($m) { $d = $m.Matches[0].Groups[1].Value.Trim().Trim('"', "'") }
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath (Join-Path $d '3b0f3b746a2709515206249fcc793f3c42dc7ca94ce98217dc9b52802f8b1a8c'), 'C:\Windows\Temp\imas-uat-src-@NONCE@'

@@ -1,0 +1,5 @@
+id: I.win_iis.started
+title: 'start an IIS website'
+needs: [windows-feature:Web-Server]
+skip: |
+  Needs the Web-Server role (IIS) and a site; Windows Server 2022 Core as the UAT image has neither, and installing IIS for the case is a large change (a listening service) the owner should decide on.

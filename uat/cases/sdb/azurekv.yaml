@@ -1,0 +1,5 @@
+id: I.sdb.azurekv
+title: 'resolve a step secret through sdb://azurekv'
+backend: sdb:azurekv
+skip: |
+  Needs an Azure Key Vault and an identity for the sprout (managed identity or service principal); UAT.1 creates neither, and the gate holds no Azure credential on a sprout.

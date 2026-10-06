@@ -1,0 +1,22 @@
+id: I.selinux.boolean_on
+title: 'turn httpd_can_sendmail on at runtime'
+os: [alma]
+skip_os:
+  ubuntu: |
+    Ubuntu uses AppArmor; SELinux isn't enabled there, so the selinux methods can only fail. They run on AlmaLinux.
+notes: |
+  A boolean for a web server the sprout doesn't run, set at runtime only (persist false). The setup records its value and the revert restores it.
+alma:
+  setup: |
+    getsebool httpd_can_sendmail | awk '{print $3}' > /var/tmp/imas-uat-@NONCE@.bool
+    setsebool httpd_can_sendmail off
+  recipe: |
+    steps:
+      uat selinux boolean_on:
+        selinux.boolean_on:
+          - name: 'httpd_can_sendmail'
+          - persist: false
+  check: |
+    getsebool httpd_can_sendmail | grep -q -- '--> on'
+  revert: |
+    [ -f /var/tmp/imas-uat-@NONCE@.bool ] && setsebool httpd_can_sendmail "$(cat /var/tmp/imas-uat-@NONCE@.bool)"; rm -f /var/tmp/imas-uat-@NONCE@.bool; true

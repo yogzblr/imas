@@ -1,0 +1,26 @@
+id: I.group.present
+title: 'create a local group'
+os: [ubuntu, alma, windows]
+tenant2: true
+linux:
+  recipe: |
+    steps:
+      uat group present:
+        group.present:
+          - name: 'iug@NONCE@'
+  check: |
+    getent group iug@NONCE@ >/dev/null
+  revert: |
+    groupdel iug@NONCE@ 2>/dev/null; true
+windows:
+  recipe: |
+    steps:
+      uat group present:
+        group.present:
+          - name: 'iug@NONCE@'
+  check: |
+    net localgroup iug@NONCE@ > $null 2>&1
+    exit $LASTEXITCODE
+  revert: |
+    net localgroup iug@NONCE@ /delete > $null 2>&1
+    exit 0

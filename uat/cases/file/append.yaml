@@ -1,0 +1,33 @@
+id: I.file.append
+title: 'append a line once'
+os: [ubuntu, alma, windows]
+linux:
+  setup: |
+    printf 'line one\n' > /var/tmp/imas-uat-@NONCE@.txt
+  recipe: |
+    steps:
+      uat file append:
+        file.append:
+          - name: '/var/tmp/imas-uat-@NONCE@.txt'
+          - text:
+              - 'imas uat @NONCE@'
+  check: |
+    grep -qx 'imas uat @NONCE@' /var/tmp/imas-uat-@NONCE@.txt && [ "$(grep -c 'imas uat @NONCE@' /var/tmp/imas-uat-@NONCE@.txt)" = 1 ] && head -n1 /var/tmp/imas-uat-@NONCE@.txt | grep -qx 'line one'
+  revert: |
+    rm -f /var/tmp/imas-uat-@NONCE@.txt
+windows:
+  setup: |
+    [IO.File]::WriteAllBytes('C:\Windows\Temp\imas-uat-@NONCE@.txt', [Text.Encoding]::ASCII.GetBytes("line one`n"))
+  recipe: |
+    steps:
+      uat file append:
+        file.append:
+          - name: 'C:\Windows\Temp\imas-uat-@NONCE@.txt'
+          - text:
+              - 'imas uat @NONCE@'
+  check: |
+    $l = Get-Content -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.txt'
+    if (@($l | Where-Object { $_ -eq 'imas uat @NONCE@' }).Count -eq 1 -and $l[0] -eq 'line one') { exit 0 }
+    exit 1
+  revert: |
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.txt'

@@ -1,0 +1,34 @@
+id: I.file.sync
+title: 'sync a directory'
+os: [ubuntu, alma, windows]
+linux:
+  setup: |
+    mkdir -p /var/tmp/imas-uat-syncsrc-@NONCE@/sub && printf 'a\n' > /var/tmp/imas-uat-syncsrc-@NONCE@/a.txt && printf 'b\n' > /var/tmp/imas-uat-syncsrc-@NONCE@/sub/b.txt
+  recipe: |
+    steps:
+      uat file sync:
+        file.sync:
+          - name: '/var/tmp/imas-uat-syncdst-@NONCE@'
+          - source: '/var/tmp/imas-uat-syncsrc-@NONCE@'
+          - mkdir: true
+  check: |
+    cmp -s /var/tmp/imas-uat-syncsrc-@NONCE@/a.txt /var/tmp/imas-uat-syncdst-@NONCE@/a.txt && cmp -s /var/tmp/imas-uat-syncsrc-@NONCE@/sub/b.txt /var/tmp/imas-uat-syncdst-@NONCE@/sub/b.txt
+  revert: |
+    rm -rf /var/tmp/imas-uat-syncsrc-@NONCE@ /var/tmp/imas-uat-syncdst-@NONCE@
+windows:
+  setup: |
+    New-Item -ItemType Directory -Force -Path 'C:\Windows\Temp\imas-uat-syncsrc-@NONCE@\sub' | Out-Null
+    [IO.File]::WriteAllBytes('C:\Windows\Temp\imas-uat-syncsrc-@NONCE@\a.txt', [Text.Encoding]::ASCII.GetBytes("a`n"))
+    [IO.File]::WriteAllBytes('C:\Windows\Temp\imas-uat-syncsrc-@NONCE@\sub\b.txt', [Text.Encoding]::ASCII.GetBytes("b`n"))
+  recipe: |
+    steps:
+      uat file sync:
+        file.sync:
+          - name: 'C:\Windows\Temp\imas-uat-syncdst-@NONCE@'
+          - source: 'C:\Windows\Temp\imas-uat-syncsrc-@NONCE@'
+          - mkdir: true
+  check: |
+    if ((Test-Path -LiteralPath 'C:\Windows\Temp\imas-uat-syncdst-@NONCE@\a.txt') -and (Test-Path -LiteralPath 'C:\Windows\Temp\imas-uat-syncdst-@NONCE@\sub\b.txt')) { exit 0 }
+    exit 1
+  revert: |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-syncsrc-@NONCE@', 'C:\Windows\Temp\imas-uat-syncdst-@NONCE@'

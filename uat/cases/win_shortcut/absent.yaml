@@ -1,0 +1,22 @@
+id: I.win_shortcut.absent
+title: 'delete a shortcut'
+os: [windows]
+notes: |
+  Uses the WScript.Shell COM object. Windows Server 2022 Core may lack parts of the shell COM surface; if it does, this case fails there and the owner decides on a Desktop Experience image (plan section 4h).
+windows:
+  setup: |
+    $s = (New-Object -ComObject WScript.Shell).CreateShortcut('C:\Windows\Temp\imas-uat-@NONCE@.lnk')
+    $s.TargetPath = 'C:\Windows\System32\notepad.exe'
+    $s.Save()
+    if (-not (Test-Path -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.lnk')) { exit 1 }
+  recipe: |
+    steps:
+      uat shortcut absent:
+        win_shortcut.absent:
+          - name: 'C:\Windows\Temp\imas-uat-@NONCE@.lnk'
+  check: |
+    if (Test-Path -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.lnk') { exit 1 }
+    exit 0
+  revert: |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.lnk'
+    exit 0

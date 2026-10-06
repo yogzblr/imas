@@ -1,0 +1,31 @@
+id: I.file.touch
+title: 'create a file with fixed timestamps'
+os: [ubuntu, alma, windows]
+notes: |
+  With atime and mtime given, a second run should change nothing. Reading the code, the test mode path creates a missing file (test mode changing the host) and the apply path reports a change on every run, so this case is expected to report both (findings from the source; not yet seen on a sprout).
+linux:
+  recipe: |
+    steps:
+      uat file touch:
+        file.touch:
+          - name: '/var/tmp/imas-uat-@NONCE@.txt'
+          - atime: '2024-01-02T03:04:05Z'
+          - mtime: '2024-01-02T03:04:05Z'
+  check: |
+    [ -f /var/tmp/imas-uat-@NONCE@.txt ] && [ "$(stat -c %Y /var/tmp/imas-uat-@NONCE@.txt)" = 1704164645 ]
+  revert: |
+    rm -f /var/tmp/imas-uat-@NONCE@.txt
+windows:
+  recipe: |
+    steps:
+      uat file touch:
+        file.touch:
+          - name: 'C:\Windows\Temp\imas-uat-@NONCE@.txt'
+          - atime: '2024-01-02T03:04:05Z'
+          - mtime: '2024-01-02T03:04:05Z'
+  check: |
+    $i = Get-Item -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.txt' -ErrorAction SilentlyContinue
+    if ($i -and ([DateTimeOffset]$i.LastWriteTimeUtc).ToUnixTimeSeconds() -eq 1704164645) { exit 0 }
+    exit 1
+  revert: |
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.txt'

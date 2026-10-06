@@ -1,0 +1,27 @@
+id: I.win_auditpol.configured
+title: 'audit ''Other Object Access Events'' for success and failure'
+os: [windows]
+notes: |
+  Adds audit events for one quiet subcategory; the setup records its setting (and clears it so the change is pending) and the revert restores it.
+windows:
+  setup: |
+    (auditpol /get /subcategory:"Other Object Access Events" /r | ConvertFrom-Csv).'Inclusion Setting' | Set-Content -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.audit'
+    auditpol /set /subcategory:"Other Object Access Events" /success:disable /failure:disable | Out-Null
+    exit $LASTEXITCODE
+  recipe: |
+    steps:
+      uat auditpol configured:
+        win_auditpol.configured:
+          - name: 'Other Object Access Events'
+          - success: true
+          - failure: true
+  check: |
+    if (((auditpol /get /subcategory:"Other Object Access Events" /r | ConvertFrom-Csv).'Inclusion Setting') -eq 'Success and Failure') { exit 0 }
+    exit 1
+  revert: |
+    $v = Get-Content -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.audit' -ErrorAction SilentlyContinue
+    $s = if ($v -match 'Success') { 'enable' } else { 'disable' }
+    $f = if ($v -match 'Failure') { 'enable' } else { 'disable' }
+    auditpol /set /subcategory:"Other Object Access Events" /success:$s /failure:$f | Out-Null
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.audit'
+    exit 0

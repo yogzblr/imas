@@ -1,0 +1,23 @@
+id: I.win_task.absent
+title: 'delete a task'
+os: [windows]
+notes: |
+  A disabled task that would run 'cmd /c exit 0' once in 2099, in its own \imas-uat folder; the revert deletes it.
+windows:
+  setup: |
+    schtasks /create /tn '\imas-uat\uat-@NONCE@' /tr 'C:\Windows\System32\cmd.exe /c exit 0' /sc once /sd 01/01/2099 /st 03:00 /ru SYSTEM /f | Out-Null
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    schtasks /change /tn '\imas-uat\uat-@NONCE@' /disable | Out-Null
+    exit $LASTEXITCODE
+  recipe: |
+    steps:
+      uat task absent:
+        win_task.absent:
+          - name: '\imas-uat\uat-@NONCE@'
+  check: |
+    schtasks /query /tn '\imas-uat\uat-@NONCE@' > $null 2>&1
+    if ($LASTEXITCODE -eq 0) { exit 1 }
+    exit 0
+  revert: |
+    schtasks /delete /tn '\imas-uat\uat-@NONCE@' /f > $null 2>&1
+    exit 0

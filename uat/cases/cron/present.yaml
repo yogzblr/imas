@@ -1,0 +1,23 @@
+id: I.cron.present
+title: 'add a root crontab entry (never due in the run: 03:17)'
+os: [ubuntu, alma]
+needs: [internet]
+notes: |
+  The setup installs cron (cronie on AlmaLinux) if the image lacks it.
+linux:
+  setup: |
+    command -v crontab >/dev/null 2>&1 || dnf -y -q install cronie || apt-get install -y -q cron
+    command -v crontab >/dev/null 2>&1
+  recipe: |
+    steps:
+      uat cron present:
+        cron.present:
+          - name: 'imas-uat-@NONCE@'
+          - user: 'root'
+          - command: '/bin/true imas-uat-@NONCE@'
+          - minute: '17'
+          - hour: '3'
+  check: |
+    crontab -l -u root | grep -qxF '17 3 * * * /bin/true imas-uat-@NONCE@'
+  revert: |
+    crontab -l -u root 2>/dev/null | grep -vF 'imas-uat-@NONCE@' | crontab -u root -

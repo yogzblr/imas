@@ -1,0 +1,25 @@
+id: I.win_psget.installed
+title: 'install the Microsoft.PowerShell.SecretManagement module'
+os: [windows]
+needs: [internet]
+timeout: 15m
+notes: |
+  Installs Microsoft.PowerShell.SecretManagement, a small Microsoft module nothing on the sprout loads, from the PowerShell Gallery (internet). The setup bootstraps the NuGet provider PowerShellGet needs (a one-time, harmless install) and the revert uninstalls the module.
+windows:
+  setup: |
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    if (-not (Get-PackageProvider -ListAvailable -Name NuGet -ErrorAction SilentlyContinue)) { Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null }
+    Uninstall-Module -Name Microsoft.PowerShell.SecretManagement -AllVersions -Force -ErrorAction SilentlyContinue
+  recipe: |
+    steps:
+      uat psget installed:
+        win_psget.installed:
+          - name: 'Microsoft.PowerShell.SecretManagement'
+          - repository: 'PSGallery'
+          - scope: 'AllUsers'
+  check: |
+    if (@(Get-Module -ListAvailable -Name Microsoft.PowerShell.SecretManagement).Count -gt 0) { exit 0 }
+    exit 1
+  revert: |
+    Uninstall-Module -Name Microsoft.PowerShell.SecretManagement -AllVersions -Force -ErrorAction SilentlyContinue
+    exit 0

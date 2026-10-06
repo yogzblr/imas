@@ -1,0 +1,41 @@
+id: I.lgpo.present
+title: 'enable a policy in a scratch registry.pol'
+os: [windows]
+notes: |
+  Harmless: the policy comes from an ADMX file the setup writes (its own namespace and key), and pol_path points at a registry.pol in the temp directory, so the machine's Group Policy files are never written. The revert deletes both files. The check reads the .pol (UTF-16) for a live Enabled value.
+windows:
+  setup: |
+    [IO.File]::WriteAllText('C:\Windows\Temp\imas-uat-@NONCE@.admx', @'
+    <?xml version="1.0" encoding="utf-8"?>
+    <policyDefinitions revision="1.0" schemaVersion="1.0" xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions">
+      <policyNamespaces><target prefix="imasuat" namespace="Imas.Uat.Policies"/></policyNamespaces>
+      <resources minRequiredRevision="1.0"/>
+      <categories><category name="UatCategory" displayName="$(string.UatCategory)"/></categories>
+      <policies>
+        <policy name="UatPolicy" class="Machine" displayName="$(string.UatPolicy)" explainText="$(string.UatPolicy_Help)" key="Software\Policies\ImasUat\@NONCE@" valueName="Enabled">
+          <parentCategory ref="UatCategory"/>
+          <enabledValue><decimal value="1"/></enabledValue>
+          <disabledValue><decimal value="0"/></disabledValue>
+        </policy>
+      </policies>
+    </policyDefinitions>
+    '@)
+  recipe: |
+    steps:
+      uat lgpo present:
+        lgpo.present:
+          - name: 'UatPolicy'
+          - admx: 'C:\Windows\Temp\imas-uat-@NONCE@.admx'
+          - class: 'machine'
+          - state: 'enabled'
+          - pol_path: 'C:\Windows\Temp\imas-uat-@NONCE@.pol'
+  check: |
+    if (-not (Test-Path -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.pol')) { exit 1 }
+    $b = [IO.File]::ReadAllBytes('C:\Windows\Temp\imas-uat-@NONCE@.pol')
+    $t = [Text.Encoding]::Unicode.GetString($b, 8, $b.Length - 8)
+    $live = $t.Contains([string][char]0 + ';Enabled' + [char]0)
+    if ($live -and $t.Contains('ImasUat')) { exit 0 }
+    exit 1
+  revert: |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.admx', 'C:\Windows\Temp\imas-uat-@NONCE@.pol'
+    exit 0

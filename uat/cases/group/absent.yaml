@@ -1,0 +1,31 @@
+id: I.group.absent
+title: 'delete a local group'
+os: [ubuntu, alma, windows]
+linux:
+  setup: |
+    groupadd iug@NONCE@
+  recipe: |
+    steps:
+      uat group absent:
+        group.absent:
+          - name: 'iug@NONCE@'
+  check: |
+    ! getent group iug@NONCE@ >/dev/null
+  revert: |
+    groupdel iug@NONCE@ 2>/dev/null; true
+windows:
+  setup: |
+    net localgroup iug@NONCE@ /add
+    exit $LASTEXITCODE
+  recipe: |
+    steps:
+      uat group absent:
+        group.absent:
+          - name: 'iug@NONCE@'
+  check: |
+    net localgroup iug@NONCE@ > $null 2>&1
+    if ($LASTEXITCODE -eq 0) { exit 1 }
+    exit 0
+  revert: |
+    net localgroup iug@NONCE@ /delete > $null 2>&1
+    exit 0

@@ -1,0 +1,21 @@
+id: I.win_servermanager.installed
+title: 'install the Telnet-Client feature'
+os: [windows]
+needs: [windows-feature:Telnet-Client]
+timeout: 20m
+notes: |
+  Telnet-Client is a small client-only feature: no service, no listening port, no reboot. The setup puts it in the starting state and the revert uninstalls it (Azure images keep the feature payload, so no source is needed).
+windows:
+  setup: |
+    Uninstall-WindowsFeature -Name Telnet-Client | Out-Null
+  recipe: |
+    steps:
+      uat servermanager installed:
+        win_servermanager.installed:
+          - name: 'Telnet-Client'
+  check: |
+    if ((Get-WindowsFeature -Name Telnet-Client).Installed) { exit 0 }
+    exit 1
+  revert: |
+    Uninstall-WindowsFeature -Name Telnet-Client | Out-Null
+    exit 0

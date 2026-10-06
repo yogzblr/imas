@@ -1,0 +1,23 @@
+id: I.pkg.cleaned
+title: 'clean the package cache'
+os: [ubuntu, alma]
+needs: [internet]
+idempotent: false
+timeout: 15m
+skip_os:
+  windows: |
+    pkg uses snack, whose only Windows manager is winget; Windows Server 2022 Core doesn't ship winget (App Installer), so every pkg method can only fail there. A Desktop Experience or Server 2025 image would be needed (owner decision).
+notes: |
+  The setup puts something in the cache (a downloaded .deb, or dnf metadata). Cleaning has no state to compare, so every run reports a change (idempotent: false). name is required by the property schema but unused.
+linux:
+  setup: |
+    if command -v apt-get >/dev/null 2>&1; then apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --download-only dos2unix >/dev/null; else dnf -q makecache >/dev/null; fi
+  recipe: |
+    steps:
+      uat pkg cleaned:
+        pkg.cleaned:
+          - name: 'cache'
+  check: |
+    if command -v apt-get >/dev/null 2>&1; then [ -z "$(ls /var/cache/apt/archives/*.deb 2>/dev/null)" ]; else [ -z "$(find /var/cache/dnf -name repomd.xml 2>/dev/null | head -n1)" ]; fi
+  revert: |
+    true

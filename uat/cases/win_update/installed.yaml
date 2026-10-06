@@ -1,0 +1,6 @@
+id: I.win_update.installed
+title: 'install a Windows update by KB'
+order: 900
+needs: [reboot, internet]
+skip: |
+  Installing a Windows update can take most of an hour and usually leaves a reboot pending; there is no harmless KB to pick that stays harmless across Patch Tuesdays. It would be a reboot case ordered last on a disposable sprout (owner decision).

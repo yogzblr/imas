@@ -1,0 +1,28 @@
+id: I.service.reloaded
+title: 'reload a service'
+os: [ubuntu, alma]
+idempotent: false
+skip_os:
+  windows: |
+    Windows services have no reload: the Windows provider returns ErrReloadNotSupported by design (internal/ingredients/service/windows), so service.reloaded can only fail there.
+notes: |
+  A throwaway unit the setup writes under /usr/local/lib/systemd/system (so masking, which writes /etc/systemd/system, doesn't collide with it) running sleep; the revert removes it. The unit's ExecReload touches a marker file. A reload happens on every run by design (idempotent: false).
+linux:
+  setup: |
+    mkdir -p /usr/local/lib/systemd/system
+    printf '[Unit]\nDescription=imas UAT throwaway service\n[Service]\nType=simple\nExecStart=/bin/sleep infinity\nExecReload=/bin/touch /var/tmp/imas-uat-@NONCE@.reloaded\n[Install]\nWantedBy=multi-user.target\n' > /usr/local/lib/systemd/system/imas-uat-@NONCE@.service
+    systemctl daemon-reload
+    systemctl start imas-uat-@NONCE@.service
+  recipe: |
+    steps:
+      uat service reloaded:
+        service.reloaded:
+          - name: 'imas-uat-@NONCE@.service'
+  check: |
+    [ -f /var/tmp/imas-uat-@NONCE@.reloaded ]
+  revert: |
+    systemctl stop imas-uat-@NONCE@.service 2>/dev/null
+    systemctl unmask imas-uat-@NONCE@.service 2>/dev/null
+    systemctl disable imas-uat-@NONCE@.service 2>/dev/null
+    rm -f /usr/local/lib/systemd/system/imas-uat-@NONCE@.service /var/tmp/imas-uat-@NONCE@.*
+    systemctl daemon-reload; true

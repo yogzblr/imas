@@ -1,0 +1,52 @@
+id: I.service.restarted
+title: 'restart a running service'
+os: [ubuntu, alma, windows]
+idempotent: false
+notes: |
+  A throwaway unit the setup writes under /usr/local/lib/systemd/system (so masking, which writes /etc/systemd/system, doesn't collide with it) running sleep; the revert removes it. A restart happens on every run by design (idempotent: false); the check sees a new invocation (Linux) or process (Windows). Start type cases use a throwaway service the setup registers with sc.exe (never started); state cases use the Print Spooler, whose start type and state the setup records and the revert restores.
+linux:
+  setup: |
+    mkdir -p /usr/local/lib/systemd/system
+    printf '[Unit]\nDescription=imas UAT throwaway service\n[Service]\nType=simple\nExecStart=/bin/sleep infinity\nExecReload=/bin/touch /var/tmp/imas-uat-@NONCE@.reloaded\n[Install]\nWantedBy=multi-user.target\n' > /usr/local/lib/systemd/system/imas-uat-@NONCE@.service
+    systemctl daemon-reload
+    systemctl start imas-uat-@NONCE@.service
+    systemctl show -p InvocationID --value imas-uat-@NONCE@.service > /var/tmp/imas-uat-@NONCE@.inv
+  recipe: |
+    steps:
+      uat service restarted:
+        service.restarted:
+          - name: 'imas-uat-@NONCE@.service'
+  check: |
+    systemctl is-active --quiet imas-uat-@NONCE@.service && [ "$(systemctl show -p InvocationID --value imas-uat-@NONCE@.service)" != "$(cat /var/tmp/imas-uat-@NONCE@.inv)" ]
+  revert: |
+    systemctl stop imas-uat-@NONCE@.service 2>/dev/null
+    systemctl unmask imas-uat-@NONCE@.service 2>/dev/null
+    systemctl disable imas-uat-@NONCE@.service 2>/dev/null
+    rm -f /usr/local/lib/systemd/system/imas-uat-@NONCE@.service /var/tmp/imas-uat-@NONCE@.*
+    systemctl daemon-reload; true
+windows:
+  setup: |
+    $s = Get-CimInstance Win32_Service -Filter "Name='Spooler'"
+    if (-not $s) { 'no Spooler service'; exit 1 }
+    "$($s.StartMode) $($s.State)" | Set-Content -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.spooler'
+    Start-Service -Name Spooler
+    (Get-CimInstance Win32_Service -Filter "Name='Spooler'").ProcessId | Set-Content -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.pid'
+  recipe: |
+    steps:
+      uat service restarted:
+        service.restarted:
+          - name: 'Spooler'
+  check: |
+    $s = Get-CimInstance Win32_Service -Filter "Name='Spooler'"
+    if ($s.State -eq 'Running' -and "$($s.ProcessId)" -ne (Get-Content -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.pid')) { exit 0 }
+    exit 1
+  revert: |
+    $p = 'C:\Windows\Temp\imas-uat-@NONCE@.spooler'
+    if (Test-Path -LiteralPath $p) {
+      $mode, $state = (Get-Content -LiteralPath $p).Split(' ')
+      $t = @{ Auto = 'Automatic'; Manual = 'Manual'; Disabled = 'Disabled' }[$mode]
+      if ($t) { Set-Service -Name Spooler -StartupType $t }
+      if ($state -eq 'Running') { Start-Service -Name Spooler } else { Stop-Service -Name Spooler -Force }
+      Remove-Item -Force -LiteralPath $p
+    }
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.pid'

@@ -1,0 +1,22 @@
+id: I.selinux.boolean_off
+title: 'turn httpd_enable_cgi off at runtime'
+os: [alma]
+skip_os:
+  ubuntu: |
+    Ubuntu uses AppArmor; SELinux isn't enabled there, so the selinux methods can only fail. They run on AlmaLinux.
+notes: |
+  A boolean for a web server the sprout doesn't run, set at runtime only (persist false). The setup records its value and the revert restores it.
+alma:
+  setup: |
+    getsebool httpd_enable_cgi | awk '{print $3}' > /var/tmp/imas-uat-@NONCE@.bool
+    setsebool httpd_enable_cgi on
+  recipe: |
+    steps:
+      uat selinux boolean_off:
+        selinux.boolean_off:
+          - name: 'httpd_enable_cgi'
+          - persist: false
+  check: |
+    getsebool httpd_enable_cgi | grep -q -- '--> off'
+  revert: |
+    [ -f /var/tmp/imas-uat-@NONCE@.bool ] && setsebool httpd_enable_cgi "$(cat /var/tmp/imas-uat-@NONCE@.bool)"; rm -f /var/tmp/imas-uat-@NONCE@.bool; true

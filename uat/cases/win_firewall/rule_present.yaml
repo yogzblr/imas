@@ -1,0 +1,21 @@
+id: I.win_firewall.rule_present
+title: 'add an inbound block rule for an unused port'
+os: [windows]
+notes: |
+  Adds one inbound block rule for TCP 65000, where nothing listens; the default policy, the profiles and the rules WinRM and the sprout rely on are untouched. The revert deletes the rule.
+windows:
+  recipe: |
+    steps:
+      uat firewall rule_present:
+        win_firewall.rule_present:
+          - name: 'imas-uat-@NONCE@'
+          - dir: 'in'
+          - action: 'block'
+          - protocol: 'TCP'
+          - localport: '65000'
+  check: |
+    netsh advfirewall firewall show rule name=imas-uat-@NONCE@ > $null 2>&1
+    exit $LASTEXITCODE
+  revert: |
+    netsh advfirewall firewall delete rule name=imas-uat-@NONCE@ > $null 2>&1
+    exit 0

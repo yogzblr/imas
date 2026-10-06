@@ -1,0 +1,22 @@
+id: I.registry.absent
+title: 'delete a value'
+os: [windows]
+notes: |
+  A key of its own under HKLM\SOFTWARE\ImasUat\<nonce>; the revert deletes it.
+windows:
+  setup: |
+    New-Item -Force -Path 'HKLM:\SOFTWARE\ImasUat\@NONCE@' | Out-Null
+    New-ItemProperty -Force -Path 'HKLM:\SOFTWARE\ImasUat\@NONCE@' -Name Probe -Value x | Out-Null
+  recipe: |
+    steps:
+      uat registry absent:
+        registry.absent:
+          - name: 'HKEY_LOCAL_MACHINE\SOFTWARE\ImasUat\@NONCE@'
+          - vname: 'Probe'
+  check: |
+    if ((Test-Path -Path 'HKLM:\SOFTWARE\ImasUat\@NONCE@') -and -not (Get-ItemProperty -Path 'HKLM:\SOFTWARE\ImasUat\@NONCE@' -Name Probe -ErrorAction SilentlyContinue)) { exit 0 }
+    exit 1
+  revert: |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -Path 'HKLM:\SOFTWARE\ImasUat\@NONCE@'
+    if (-not (Get-ChildItem -Path 'HKLM:\SOFTWARE\ImasUat' -ErrorAction SilentlyContinue)) { Remove-Item -Force -ErrorAction SilentlyContinue -Path 'HKLM:\SOFTWARE\ImasUat' }
+    exit 0

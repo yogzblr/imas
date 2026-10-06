@@ -1,0 +1,25 @@
+id: I.pkg.held
+title: 'hold dos2unix'
+os: [ubuntu, alma]
+needs: [internet]
+timeout: 15m
+skip_os:
+  windows: |
+    pkg uses snack, whose only Windows manager is winget; Windows Server 2022 Core doesn't ship winget (App Installer), so every pkg method can only fail there. A Desktop Experience or Server 2025 image would be needed (owner decision).
+notes: |
+  Uses dos2unix, a small tool in Ubuntu's archive and AlmaLinux BaseOS that nothing on the sprout depends on. The setup puts it in the state the case starts from (removing it if the image had it); the revert removes it. On AlmaLinux holds need the dnf versionlock plugin, which the setup installs.
+linux:
+  setup: |
+    if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get install -y -q dos2unix >/dev/null; else dnf -y -q install dos2unix >/dev/null; fi
+    command -v apt-get >/dev/null 2>&1 || dnf -y -q install python3-dnf-plugin-versionlock >/dev/null
+    if command -v apt-mark >/dev/null 2>&1; then apt-mark unhold dos2unix >/dev/null 2>&1; else dnf -q versionlock delete dos2unix >/dev/null 2>&1; fi; true
+  recipe: |
+    steps:
+      uat pkg held:
+        pkg.held:
+          - name: 'dos2unix'
+  check: |
+    if command -v apt-mark >/dev/null 2>&1; then apt-mark showhold | grep -qx dos2unix; else dnf -q versionlock list 2>/dev/null | grep -q '^dos2unix'; fi
+  revert: |
+    if command -v apt-mark >/dev/null 2>&1; then apt-mark unhold dos2unix >/dev/null 2>&1; else dnf -q versionlock delete dos2unix >/dev/null 2>&1; fi; true
+    if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get remove -y -q dos2unix >/dev/null 2>&1; else dnf -y -q remove dos2unix >/dev/null 2>&1; fi; true

@@ -1,0 +1,19 @@
+id: I.registry.key_present
+title: 'create a key'
+os: [windows]
+tenant2: true
+notes: |
+  A key of its own under HKLM\SOFTWARE\ImasUat\<nonce>; the revert deletes it.
+windows:
+  recipe: |
+    steps:
+      uat registry key_present:
+        registry.key_present:
+          - name: 'HKEY_LOCAL_MACHINE\SOFTWARE\ImasUat\@NONCE@'
+  check: |
+    if (Test-Path -Path 'HKLM:\SOFTWARE\ImasUat\@NONCE@') { exit 0 }
+    exit 1
+  revert: |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -Path 'HKLM:\SOFTWARE\ImasUat\@NONCE@'
+    if (-not (Get-ChildItem -Path 'HKLM:\SOFTWARE\ImasUat' -ErrorAction SilentlyContinue)) { Remove-Item -Force -ErrorAction SilentlyContinue -Path 'HKLM:\SOFTWARE\ImasUat' }
+    exit 0

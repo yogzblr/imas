@@ -1,0 +1,30 @@
+id: I.file.copy
+title: 'copy a local file'
+os: [ubuntu, alma, windows]
+linux:
+  setup: |
+    printf 'copy me @NONCE@\n' > /var/tmp/imas-uat-@NONCE@.txt
+  recipe: |
+    steps:
+      uat file copy:
+        file.copy:
+          - name: '/var/tmp/imas-uat-copy-@NONCE@.txt'
+          - source: '/var/tmp/imas-uat-@NONCE@.txt'
+  check: |
+    cmp -s /var/tmp/imas-uat-@NONCE@.txt /var/tmp/imas-uat-copy-@NONCE@.txt
+  revert: |
+    rm -f /var/tmp/imas-uat-@NONCE@.txt /var/tmp/imas-uat-copy-@NONCE@.txt
+windows:
+  setup: |
+    [IO.File]::WriteAllBytes('C:\Windows\Temp\imas-uat-@NONCE@.txt', [Text.Encoding]::ASCII.GetBytes("copy me @NONCE@`n"))
+  recipe: |
+    steps:
+      uat file copy:
+        file.copy:
+          - name: 'C:\Windows\Temp\imas-uat-copy-@NONCE@.txt'
+          - source: 'C:\Windows\Temp\imas-uat-@NONCE@.txt'
+  check: |
+    if ((Test-Path -LiteralPath 'C:\Windows\Temp\imas-uat-copy-@NONCE@.txt') -and (Get-FileHash -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.txt').Hash -eq (Get-FileHash -LiteralPath 'C:\Windows\Temp\imas-uat-copy-@NONCE@.txt').Hash) { exit 0 }
+    exit 1
+  revert: |
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.txt', 'C:\Windows\Temp\imas-uat-copy-@NONCE@.txt'

@@ -1,0 +1,5 @@
+id: I.win_dns_client.configured
+title: 'set an interface''s DNS servers'
+needs: [second-nic]
+skip: |
+  The sprout's only interface is its own connection: changing its DNS servers would break resolution of dmz.uat.imas.internal (Azure Private DNS through the platform resolver) and could cut the sprout off. A harmless case needs a second NIC on the Windows sprouts (UAT.1 change, owner decision).
