@@ -1,0 +1,16 @@
+{
+  "cluster_issuer": "uat-root",
+  "private_dns_zone": "rig.internal",
+  "dmz": {
+    "name": "dmz",
+    "private_ip": "172.18.0.3",
+    "fqdn": "dmz.uat.test",
+    "ports": { "envoy": 30443, "bus": 30406 }
+  },
+  "core": {
+    "name": "core",
+    "private_ip": "172.18.0.4",
+    "fqdn": "core.uat.test",
+    "ports": { "farmer_api": 30405 }
+  }
+}

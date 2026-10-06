@@ -1,0 +1,26 @@
+{
+  "run_id": "ab12cd34",
+  "dmz": {
+    "name": "uat-dmz",
+    "private_ip": "10.60.1.4",
+    "public_ip": "203.0.113.10",
+    "fqdn": "uatab12cd34-dmz.centralindia.cloudapp.azure.com",
+    "ports": {
+      "envoy": 8443,
+      "bus_client": 8442
+    }
+  },
+  "core": {
+    "name": "uat-core",
+    "private_ip": "10.60.2.4",
+    "public_ip": "203.0.113.11",
+    "fqdn": "uatab12cd34-core.centralindia.cloudapp.azure.com",
+    "ports": {
+      "https": 443,
+      "farmer_api": 5405
+    }
+  },
+  "exposure": "NodePort",
+  "cluster_issuer": "imas-uat-ca",
+  "ca_file": "uat-ca.crt"
+}

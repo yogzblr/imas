@@ -1,0 +1,143 @@
+# UAT values for deploy/helm/nats on the uat-dmz hub (UAT.3a).
+#
+# Static half: everything that is the same on every run. install.sh writes
+# the run-specific half (values-run.yaml: the farmerbus image tag, the
+# farmer upstream on the core private IP, the NetworkPolicy egress to it)
+# from the endpoints file and passes both, this file first.
+#
+# Layout (docs/claude-code-parallel-build-plan.md, section 4h): one
+# single-node k0s cluster on a Standard_D2s_v5 (2 vCPU, 8 GiB) holding
+# farmerbus and Envoy only. Core (farmer, saasapi) is another cluster, so
+# every core peer is an IP address, never a Service or a pod selector.
+# README.md in this directory lists what is assumed about the core side.
+
+# Fixed names, so the core side and the scripts can rely on them:
+#   bus client Service  imas-dmz-nats-bus   (farmer chart: bus.serviceName)
+#   Envoy Deployment    imas-dmz-nats-envoy
+# The release and namespace are both imas-dmz (lib.sh), as in
+# deploy/helm/farmer's TestContractWithNatsChart.
+---
+fullnameOverride: imas-dmz-nats
+
+commonLabels:
+  imas.io/purpose: imas-uat
+
+# The five seeds the bus mounts. The Secret is created by install.sh from
+# core's copies (byte-identical to farmer's; deploy/helm/nats/README.md,
+# "Seeds"). saasapi-user.nk is never copied into the DMZ.
+natsSeeds:
+  secretName: imas-farmer-nats-seeds
+  seeds:
+    OPERATOR: operator.nk
+    OPERATOR_SIGNING: operator-signing.nk
+    SYS_ACCOUNT: sys-account.nk
+    TENANT: tenant.nk
+    TENANT_SIGNING: tenant-signing.nk
+
+bus:
+  # Bus settings deploy/helm/farmer expects (its TestContractWithNatsChart):
+  # organization equals the farmer chart's organization; the client port
+  # equals its bus.port (farmer and saasapi dial tls://...:5406).
+  organization: imas
+  replicaCount: 1
+  logLevel: info
+  ports:
+    client: 5406
+    websocket: 5407
+    health: 8080
+  # Six sprouts plus core's connections. Sized with resources below.
+  maxConnections: 1024
+  tls:
+    # A cert-manager Certificate issued by the UAT ClusterIssuer
+    # (install.sh), with tls.crt, tls.key and the UAT CA as ca.crt.
+    mode: secret
+    secretName: imas-farmerbus-tls
+  persistence:
+    enabled: true
+    size: 1Gi
+    # Empty: the cluster default (local-path-provisioner, UAT.2).
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  service:
+    # Kept ClusterIP. Core reaches the bus through install.sh's own
+    # NodePort Service, node port 8442 (README.md, "Exposure").
+    type: ClusterIP
+
+envoy:
+  enabled: true
+  replicaCount: 1
+  logLevel: info
+  listenerPort: 8443
+  tls:
+    # The DMZ edge certificate: a cert-manager Certificate for the DMZ FQDN
+    # issued by the UAT ClusterIssuer (install.sh). Sprouts pin the UAT CA
+    # (sproutrootca, sproutrootcatofu false).
+    secretName: imas-envoy-dmz-tls
+  jwtAuthn:
+    issuer: imas-gateway
+    jwks:
+      source: remote
+      remote:
+        # farmer_api: https://<core private IP>:<farmer API port>
+        # /v1/.well-known/jwks.json
+        cluster: farmer_api
+        cacheDuration: 300s
+        asyncFetch:
+          enabled: true
+          # The listener opens once the first fetch has finished, whether
+          # it succeeded or not, so Envoy becomes Ready before core exists.
+          fastListener: false
+  upstreams:
+    # host and port come from the endpoints file (values-run.yaml).
+    natsWebsocket:
+      host: ""
+      port: ""
+  # Off, as in deploy/envoy/envoy.yaml: farmer's API certificate comes from
+  # core's own PKI, which this side does not know (README.md, open
+  # questions).
+  upstreamTLS:
+    caSecretName: ""
+    caConfigMapName: ""
+  # A six-sprout fleet behind one Envoy: 1 token per second, 300 burst.
+  # gatewayJwtTtlSeconds must equal farmer's gatewayjwtttl (default 24h).
+  refreshRateLimit:
+    fleetSize: 100
+    gatewayJwtTtlSeconds: 86400
+    envoyReplicas: null
+    headroom: 2
+    fillIntervalSeconds: 1
+    burstSeconds: 300
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  service:
+    # The chart's own Service stays in-cluster. install.sh exposes Envoy
+    # with a Service of its own: NodePort 8443 (the owner's decision) or a
+    # LoadBalancer (README.md, "Exposure").
+    type: ClusterIP
+    port: 443
+
+networkPolicy:
+  enabled: true
+  # Core runs in another cluster, so these selectors match nothing here.
+  # install.sh adds ipBlock rules for the core private IP instead:
+  # envoyExtraEgress (values-run.yaml) and an extra bus ingress policy.
+  core:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: imas-core
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/name: farmer
+  # Anyone may reach the listener port; the NSG limits who gets that far
+  # (sprouts and the runner, section 4h).
+  envoyIngress:
+    from: []
