@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Install the published DMZ chart (deploy/helm/nats: farmerbus and Envoy)
-# on the uat-dmz cluster, wait until both are Ready, and expose them on the
-# DMZ private IP (UAT.3a; docs/claude-code-parallel-build-plan.md, 4h).
+# on the uat-dmz cluster, wait until both are Ready, and expose Envoy (a
+# NodePort, 8443 by default, or a LoadBalancer) and the bus client port
+# (UAT.3a; docs/claude-code-parallel-build-plan.md, 4h).
 #
 # Usage:
 #   install.sh --kubeconfig FILE --endpoints FILE --release-tag vX.Y.Z[-rc.N]
 #              [--seeds-dir DIR | --seeds-from-kubeconfig FILE
 #                                 [--seeds-from-namespace NS]]
-#              [--workdir DIR] [--expose externalip|nodeport]
+#              [--workdir DIR] [--expose nodeport|loadbalancer]
 #              [--timeout DURATION] [--chart-repo-url URL]
 #   install.sh --render-only --endpoints FILE --release-tag TAG
 #              [--chart DIR|TGZ] [--workdir DIR] [--expose MODE]
@@ -28,8 +29,13 @@
 # --workdir               where the pulled chart, the generated values and
 #                         manifests, the render and dmz.json go (default: a
 #                         new temporary directory, printed at the end)
-# --expose                externalip (default) or nodeport; README.md,
-#                         "Exposure"
+# --expose                how Envoy is exposed on dmz.ports.envoy (default
+#                         8443): nodeport (the default; node port 8443 is
+#                         the owner's decision of 2026-10-06) or
+#                         loadbalancer (needs a load balancer controller;
+#                         production puts Envoy behind an application
+#                         gateway). The bus is a NodePort either way.
+#                         README.md, "Exposure"
 # --timeout               how long each wait may take (default 10m)
 # --chart-repo-url        default https://packages.buildkite.com/
 #                         $BUILDKITE_ORGANIZATION_SLUG (default yogzblr)/
@@ -56,7 +62,7 @@ usage() {
 }
 
 kubeconfig="" endpoints="" release_tag="" seeds_dir="" seeds_kubeconfig=""
-seeds_namespace=imas-core workdir="" expose=externalip timeout=10m
+seeds_namespace=imas-core workdir="" expose=nodeport timeout=10m
 chart_repo_url="" render_only="" chart=""
 
 while (($#)); do
@@ -91,7 +97,7 @@ done
 [[ -n $endpoints ]] || dmz_die "--endpoints is required"
 [[ -n $release_tag ]] || dmz_die "--release-tag is required"
 version=$(dmz_chart_version "$release_tag")
-[[ $expose == externalip || $expose == nodeport ]] || dmz_die "--expose must be externalip or nodeport, not '$expose'"
+[[ $expose == nodeport || $expose == loadbalancer ]] || dmz_die "--expose must be nodeport or loadbalancer, not '$expose'"
 [[ $timeout =~ ^[1-9][0-9]*[smh]$ ]] || dmz_die "--timeout '$timeout' is not a duration like 10m"
 if [[ -n $render_only ]]; then
 	[[ -z $kubeconfig && -z $seeds_dir && -z $seeds_kubeconfig ]] ||
@@ -187,7 +193,7 @@ grep -q "image: \"${DMZ_BUS_IMAGE_REPO}:${version}\"" "$workdir/rendered.yaml" |
 if grep -Eq 'image: "?[^"[:space:]]+:latest"?$' "$workdir/rendered.yaml"; then
 	dmz_die "the render pulls a :latest image"
 fi
-dmz_write_outputs "$workdir/dmz.json" "$version"
+dmz_write_outputs "$workdir/dmz.json" "$version" "$expose"
 
 if [[ -n $render_only ]]; then
 	dmz_log "render only: $workdir/{values-run.yaml,manifests.yaml,rendered.yaml,dmz.json}"
@@ -248,7 +254,7 @@ fi
 
 # --- 5. Certificates, exposure, the core rule -----------------------------
 kc apply -f "$workdir/manifests.yaml" >/dev/null ||
-	dmz_die "applying $workdir/manifests.yaml failed (with --expose externalip, a cluster that denies Service externalIPs needs --expose nodeport)"
+	dmz_die "applying $workdir/manifests.yaml failed (a node port must lie in the API server's --service-node-port-range, which UAT.2 sets)"
 for cert in "$DMZ_ENVOY_TLS_SECRET" "$DMZ_BUS_TLS_SECRET"; do
 	kc -n "$DMZ_NAMESPACE" wait --for=condition=Ready "certificate/$cert" --timeout="$timeout" >/dev/null ||
 		dmz_die "certificate $cert is not Ready (kubectl -n $DMZ_NAMESPACE describe certificate $cert)"
@@ -278,6 +284,29 @@ for svc in "${DMZ_FULLNAME}-envoy-edge" "${DMZ_FULLNAME}-bus-core"; do
 	[[ -n $ready ]] || dmz_die "Service $svc has no ready endpoint"
 done
 
+# A LoadBalancer is usable only once its controller has given it an address.
+if [[ $expose == loadbalancer ]]; then
+	case $timeout in
+	*s) wait_s=${timeout%s} ;;
+	*m) wait_s=$((${timeout%m} * 60)) ;;
+	*h) wait_s=$((${timeout%h} * 3600)) ;;
+	esac
+	lb_address="" waited=0
+	while :; do
+		lb_address=$(kc -n "$DMZ_NAMESPACE" get service "${DMZ_FULLNAME}-envoy-edge" \
+			-o 'jsonpath={.status.loadBalancer.ingress[0].ip}{.status.loadBalancer.ingress[0].hostname}')
+		[[ -z $lb_address && $waited -lt $wait_s ]] || break
+		sleep 5
+		waited=$((waited + 5))
+	done
+	[[ -n $lb_address ]] ||
+		dmz_die "Service ${DMZ_FULLNAME}-envoy-edge got no load balancer address within $timeout (is a load balancer controller installed? --expose nodeport needs none)"
+	dmz_write_outputs "$workdir/dmz.json" "$version" "$expose" "$lb_address"
+	where="LoadBalancer $lb_address:$DMZ_ENVOY_PORT"
+else
+	where="node port $DMZ_ENVOY_PORT on $DMZ_PRIVATE_IP"
+fi
+
 kc -n "$DMZ_NAMESPACE" get pods,svc -o wide >&2 || true
-dmz_log "Ready. Envoy: $DMZ_FQDN:$DMZ_ENVOY_PORT ($expose on $DMZ_PRIVATE_IP); bus for core: $DMZ_PRIVATE_IP:$DMZ_BUS_PORT"
+dmz_log "Ready. Envoy for $DMZ_FQDN: $where; bus for core: node port $DMZ_BUS_PORT on $DMZ_PRIVATE_IP"
 dmz_log "outputs for the core side and enrolment: $workdir/dmz.json"

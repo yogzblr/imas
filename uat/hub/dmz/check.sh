@@ -3,13 +3,17 @@
 #
 # Usage:
 #   check.sh --endpoints FILE --ca-file FILE [--kubeconfig FILE]
-#            [--refill-wait SECONDS] [--max-burst N]
+#            [--connect ADDRESS] [--refill-wait SECONDS] [--max-burst N]
 #
 # --endpoints    the same endpoints file install.sh took (README.md)
 # --ca-file      the UAT CA certificate (PEM) UAT.2 writes; the only trust
 #                anchor used, the system store is switched off
 # --kubeconfig   the DMZ cluster, used only to print pod and Service state
 #                when a check fails
+# --connect      where to connect instead of dmz.public_ip (or dmz.fqdn),
+#                e.g. the address of a LoadBalancer (install.sh --expose
+#                loadbalancer writes it to dmz.json); the DMZ FQDN is still
+#                sent and verified
 # --refill-wait  seconds to wait at the end for /v1/enroll's bucket to
 #                refill (default 75; 0 skips, and then enrolment through
 #                this Envoy is refused for up to 60s)
@@ -47,15 +51,16 @@ usage() {
 	exit 2
 }
 
-endpoints="" ca_file="" kubeconfig="" refill_wait=75 max_burst=41
+endpoints="" ca_file="" kubeconfig="" connect="" refill_wait=75 max_burst=41
 while (($#)); do
 	case $1 in
-	--endpoints | --ca-file | --kubeconfig | --refill-wait | --max-burst)
+	--endpoints | --ca-file | --kubeconfig | --connect | --refill-wait | --max-burst)
 		(($# >= 2)) || dmz_die "$1 needs a value"
 		case $1 in
 		--endpoints) endpoints=$2 ;;
 		--ca-file) ca_file=$2 ;;
 		--kubeconfig) kubeconfig=$2 ;;
+		--connect) connect=$2 ;;
 		--refill-wait) refill_wait=$2 ;;
 		--max-burst) max_burst=$2 ;;
 		esac
@@ -76,6 +81,10 @@ dmz_need jq curl openssl timeout
 openssl version | grep -q '^OpenSSL 3' || dmz_die "OpenSSL 3 is required (-no-CAstore, pkeyutl -rawin)"
 openssl x509 -in "$ca_file" -noout 2>/dev/null || dmz_die "'$ca_file' is not a PEM certificate"
 dmz_load_endpoints "$endpoints"
+if [[ -n $connect ]]; then
+	_dmz_is_ipv4 "$connect" || _dmz_is_fqdn "$connect" || dmz_die "--connect '$connect' is not an IPv4 address or a DNS name"
+	DMZ_CONNECT_ADDR=$connect
+fi
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/uat-dmz-check.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT

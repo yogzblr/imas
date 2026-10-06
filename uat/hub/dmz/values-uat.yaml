@@ -65,7 +65,7 @@ bus:
       memory: 256Mi
   service:
     # Kept ClusterIP. Core reaches the bus through install.sh's own
-    # Service on the DMZ private IP (README.md, "Exposure").
+    # NodePort Service, node port 5406 (README.md, "Exposure").
     type: ClusterIP
 
 envoy:
@@ -120,7 +120,8 @@ envoy:
       memory: 256Mi
   service:
     # The chart's own Service stays in-cluster. install.sh exposes Envoy
-    # with a Service of its own (README.md, "Exposure").
+    # with a Service of its own: NodePort 8443 (the owner's decision) or a
+    # LoadBalancer (README.md, "Exposure").
     type: ClusterIP
     port: 443
 

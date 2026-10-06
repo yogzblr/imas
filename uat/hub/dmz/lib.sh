@@ -90,7 +90,8 @@ dmz_load_endpoints() {
 	DMZ_PRIVATE_IP=$(_dmz_jq "$f" '.dmz.private_ip')
 	DMZ_PUBLIC_IP=$(_dmz_jq "$f" '.dmz.public_ip')
 	DMZ_ENVOY_PORT=$(_dmz_jq "$f" ".dmz.ports.envoy // $DMZ_DEFAULT_ENVOY_PORT")
-	DMZ_BUS_PORT=$(_dmz_jq "$f" ".dmz.ports.bus // $DMZ_DEFAULT_BUS_PORT")
+	# bus_client is the name UAT.2's endpoints file (PR #130) uses.
+	DMZ_BUS_PORT=$(_dmz_jq "$f" ".dmz.ports.bus // .dmz.ports.bus_client // $DMZ_DEFAULT_BUS_PORT")
 	CORE_FQDN=$(_dmz_jq "$f" '.core.fqdn')
 	CORE_PRIVATE_IP=$(_dmz_jq "$f" '.core.private_ip')
 	CORE_FARMER_API_PORT=$(_dmz_jq "$f" ".core.ports.farmer_api // $DMZ_DEFAULT_FARMER_API_PORT")
@@ -152,9 +153,11 @@ networkPolicy:
 EOF
 }
 
-# _dmz_expose_service NAME COMPONENT PORT TARGETPORT MODE
+# _dmz_expose_service NAME COMPONENT PORT TARGETPORT TYPE
+# TYPE is NodePort (the node port is PORT) or LoadBalancer (PORT on the
+# load balancer's address; Kubernetes picks the node port behind it).
 _dmz_expose_service() {
-	local name=$1 component=$2 port=$3 target=$4 mode=$5
+	local name=$1 component=$2 port=$3 target=$4 type=$5
 	cat <<EOF
 ---
 apiVersion: v1
@@ -167,20 +170,9 @@ metadata:
     app.kubernetes.io/managed-by: uat-hub-dmz
     imas.io/purpose: imas-uat
 spec:
-EOF
-	if [[ $mode == nodeport ]]; then
-		cat <<EOF
-  type: NodePort
-EOF
-	else
-		cat <<EOF
-  type: ClusterIP
-  externalIPs:
-    - ${DMZ_PRIVATE_IP}
-EOF
-	fi
-	cat <<EOF
-  # Local: no SNAT, so the bus policy below sees core's own address.
+  type: ${type}
+  # Local: no source NAT, so the bus policy below sees core's own address
+  # and Envoy sees the client's (its enroll rate limit and logs).
   externalTrafficPolicy: Local
   selector:
     app.kubernetes.io/name: nats
@@ -192,7 +184,7 @@ EOF
       targetPort: ${target}
       protocol: TCP
 EOF
-	if [[ $mode == nodeport ]]; then
+	if [[ $type == NodePort ]]; then
 		cat <<EOF
       nodePort: ${port}
 EOF
@@ -200,9 +192,12 @@ EOF
 }
 
 # dmz_write_manifests OUT MODE: what the chart does not render. The two
-# certificates, the two Services that expose Envoy and the bus on the DMZ
-# private IP, and the bus ingress rule for core. MODE is externalip or
-# nodeport (README.md, "Exposure").
+# certificates, the two Services that expose Envoy and the bus, and the bus
+# ingress rule for core. MODE is nodeport (Envoy on node port
+# dmz.ports.envoy, 8443 by default: the owner's decision, 2026-10-06) or
+# loadbalancer (Envoy behind a LoadBalancer Service on that port). The bus
+# is a NodePort on dmz.ports.bus either way: only core dials it.
+# README.md, "Exposure".
 dmz_write_manifests() {
 	local out=$1 mode=$2
 	{
@@ -272,8 +267,10 @@ spec:
     - client auth
     - digital signature
 EOF
-		_dmz_expose_service "${DMZ_FULLNAME}-envoy-edge" envoy "$DMZ_ENVOY_PORT" https "$mode"
-		_dmz_expose_service "${DMZ_FULLNAME}-bus-core" bus "$DMZ_BUS_PORT" client "$mode"
+		local envoy_type=NodePort
+		[[ $mode != loadbalancer ]] || envoy_type=LoadBalancer
+		_dmz_expose_service "${DMZ_FULLNAME}-envoy-edge" envoy "$DMZ_ENVOY_PORT" https "$envoy_type"
+		_dmz_expose_service "${DMZ_FULLNAME}-bus-core" bus "$DMZ_BUS_PORT" client NodePort
 		cat <<EOF
 ---
 # Core (cmd/farmer and saasapi) dials the bus client port from the core
@@ -305,15 +302,17 @@ EOF
 	} >"$out"
 }
 
-# dmz_write_outputs OUT VERSION: what the core side and the enrolment
+# dmz_write_outputs OUT VERSION MODE [LB_ADDRESS]: what the core side and the enrolment
 # need from this hub, nothing secret. bus.service_* is what farmer's
 # farmerbusurl names (tls://<tls_server_name>:<service_port>, the farmer
 # chart's bus.serviceName, bus.namespace and bus.port); reach_* is where
 # packets for it must go from the core hub (README.md, "Core side").
 dmz_write_outputs() {
-	local out=$1 version=$2
+	local out=$1 version=$2 mode=$3 lb_address=${4:-}
 	jq -n \
 		--arg version "$version" \
+		--arg mode "$mode" \
+		--arg lb "$lb_address" \
 		--arg image "${DMZ_BUS_IMAGE_REPO}:${version}" \
 		--arg fqdn "$DMZ_FQDN" \
 		--arg envoy_port "$DMZ_ENVOY_PORT" \
@@ -329,7 +328,9 @@ dmz_write_outputs() {
 			envoy: {
 				host: $fqdn,
 				port: ($envoy_port | tonumber),
-				sprout_bus_url: "wss://\($fqdn):\($envoy_port)/"
+				sprout_bus_url: "wss://\($fqdn):\($envoy_port)/",
+				exposure: $mode,
+				load_balancer_address: (if $lb == "" then null else $lb end)
 			},
 			bus: {
 				service_name: $bus_name,

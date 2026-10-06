@@ -413,16 +413,21 @@ func checkRender(t *testing.T, r rendered, w want) {
 		if get(s, "spec", "externalTrafficPolicy") != "Local" {
 			t.Errorf("Service %s externalTrafficPolicy %v, want Local", e.svc, get(s, "spec", "externalTrafficPolicy"))
 		}
-		switch w.expose {
-		case "externalip":
-			if get(s, "spec", "type") != "ClusterIP" || !slices.Equal(strs(get(s, "spec", "externalIPs")), []string{w.dmzIP}) {
-				t.Errorf("Service %s: type %v externalIPs %v, want ClusterIP on %s", e.svc, get(s, "spec", "type"), get(s, "spec", "externalIPs"), w.dmzIP)
+		// Envoy is a NodePort on its port, or a LoadBalancer on it with
+		// the node port left to Kubernetes; the bus is always a NodePort.
+		if e.svc == "imas-dmz-nats-envoy-edge" && w.expose == "loadbalancer" {
+			if get(s, "spec", "type") != "LoadBalancer" || get(p, "nodePort") != nil {
+				t.Errorf("Service %s: type %v nodePort %v, want LoadBalancer with no pinned node port", e.svc, get(s, "spec", "type"), get(p, "nodePort"))
 			}
-		case "nodeport":
-			if get(s, "spec", "type") != "NodePort" || get(p, "nodePort") != e.port || get(s, "spec", "externalIPs") != nil {
-				t.Errorf("Service %s: type %v nodePort %v, want NodePort %d", e.svc, get(s, "spec", "type"), get(p, "nodePort"), e.port)
-			}
+		} else if get(s, "spec", "type") != "NodePort" || get(p, "nodePort") != e.port {
+			t.Errorf("Service %s: type %v nodePort %v, want NodePort %d", e.svc, get(s, "spec", "type"), get(p, "nodePort"), e.port)
 		}
+		if get(s, "spec", "externalIPs") != nil {
+			t.Errorf("Service %s has externalIPs", e.svc)
+		}
+	}
+	if get(r.outputs, "envoy", "exposure") != w.expose || get(r.outputs, "envoy", "load_balancer_address") != nil {
+		t.Errorf("dmz.json envoy %v, want exposure %s and no load balancer address yet", get(r.outputs, "envoy"), w.expose)
 	}
 
 	// What the core side and enrolment read.
@@ -444,7 +449,28 @@ func TestRenderEndpoints(t *testing.T) {
 	checkRender(t, r, want{
 		dmzFQDN: "uatabc123-dmz.centralindia.cloudapp.azure.com", dmzIP: "10.60.1.4",
 		coreIP: "10.60.2.4", coreFQDN: "uatabc123-core.centralindia.cloudapp.azure.com",
-		issuer: "imas-uat-ca", envoyPort: 8443, busPort: 5406, farmerPort: 5405, expose: "externalip",
+		issuer: "imas-uat-ca", envoyPort: 8443, busPort: 5406, farmerPort: 5405, expose: "nodeport",
+	})
+}
+
+// --expose loadbalancer: Envoy behind a LoadBalancer Service on 8443, the
+// bus still a NodePort for core.
+func TestRenderLoadBalancer(t *testing.T) {
+	r := render(t, "endpoints.json", "--expose", "loadbalancer")
+	checkRender(t, r, want{
+		dmzFQDN: "uatabc123-dmz.centralindia.cloudapp.azure.com", dmzIP: "10.60.1.4",
+		coreIP: "10.60.2.4", coreFQDN: "uatabc123-core.centralindia.cloudapp.azure.com",
+		issuer: "imas-uat-ca", envoyPort: 8443, busPort: 5406, farmerPort: 5405, expose: "loadbalancer",
+	})
+}
+
+// UAT.2's endpoints file (PR #130) names the bus port bus_client.
+func TestRenderUAT2Endpoints(t *testing.T) {
+	r := render(t, "endpoints-uat2.json")
+	checkRender(t, r, want{
+		dmzFQDN: "uatab12cd34-dmz.centralindia.cloudapp.azure.com", dmzIP: "10.60.1.4",
+		coreIP: "10.60.2.4", coreFQDN: "uatab12cd34-core.centralindia.cloudapp.azure.com",
+		issuer: "imas-uat-ca", envoyPort: 8443, busPort: 5406, farmerPort: 5405, expose: "nodeport",
 	})
 }
 
@@ -455,7 +481,7 @@ func TestRenderTofuOutputDefaults(t *testing.T) {
 	checkRender(t, r, want{
 		dmzFQDN: "uatabc123-dmz.centralindia.cloudapp.azure.com", dmzIP: "10.60.1.4",
 		coreIP: "10.60.2.4", coreFQDN: "uatabc123-core.centralindia.cloudapp.azure.com",
-		issuer: "imas-uat-ca", envoyPort: 8443, busPort: 5406, farmerPort: 5405, expose: "externalip",
+		issuer: "imas-uat-ca", envoyPort: 8443, busPort: 5406, farmerPort: 5405, expose: "nodeport",
 	})
 }
 
@@ -514,7 +540,7 @@ func TestInstallRefuses(t *testing.T) {
 		{"short", []string{"--render-only", "--endpoints", good, "--release-tag", "v0.1"}, "is not vX.Y.Z"},
 		{"beta", []string{"--render-only", "--endpoints", good, "--release-tag", "v0.1.0-beta.1"}, "is not vX.Y.Z"},
 		{"leading zero", []string{"--render-only", "--endpoints", good, "--release-tag", "v01.0.0"}, "is not vX.Y.Z"},
-		{"bad expose", []string{"--render-only", "--endpoints", good, "--release-tag", testTag, "--expose", "lb"}, "--expose must be"},
+		{"bad expose", []string{"--render-only", "--endpoints", good, "--release-tag", testTag, "--expose", "externalip"}, "--expose must be nodeport or loadbalancer"},
 		{"bad timeout", []string{"--kubeconfig", kubeconfig, "--endpoints", good, "--release-tag", testTag, "--timeout", "ten"}, "is not a duration"},
 		{"no kubeconfig", []string{"--endpoints", good, "--release-tag", testTag}, "--kubeconfig is required"},
 		{"local chart on install", []string{"--kubeconfig", kubeconfig, "--endpoints", good, "--release-tag", testTag, "--chart", rc3}, "--chart is only for --render-only"},
@@ -763,6 +789,7 @@ func TestCheckRefuses(t *testing.T) {
 		{"CA not PEM", []string{"--endpoints", ep, "--ca-file", notPEM}, "not a PEM certificate"},
 		{"bad refill wait", []string{"--endpoints", ep, "--ca-file", notPEM, "--refill-wait", "1m"}, "--refill-wait"},
 		{"bad burst", []string{"--endpoints", ep, "--ca-file", notPEM, "--max-burst", "0"}, "--max-burst"},
+		{"bad connect", []string{"--endpoints", ep, "--ca-file", newPKI(t, "dmz.uat.test").caFile, "--connect", "not an address"}, "--connect 'not an address' is not"},
 		{"unknown flag", []string{"--insecure"}, "unknown argument"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -792,7 +819,7 @@ func TestLint(t *testing.T) {
 		tgz := packageChart(t, testVersion, testVersion)
 		files := []string{filepath.Join(dir(t), "values-uat.yaml")}
 		for _, c := range []struct{ endpoints, expose string }{
-			{"endpoints.json", "externalip"}, {"endpoints-nodeport.json", "nodeport"},
+			{"endpoints.json", "loadbalancer"}, {"endpoints-nodeport.json", "nodeport"},
 		} {
 			work := t.TempDir()
 			if code, _, stderr := run(t, nil, "install.sh", "--render-only", "--chart", tgz, "--release-tag", testTag,
@@ -822,6 +849,7 @@ case $args in
 	printf 'SAAUATSTUBSEED%s\n' "$(printf '%s' "$key" | tr -dc 'a-z' | tr 'a-z' 'A-Z' | head -c 20)AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" | base64 -w0
 	;;
 *"get secret imas-farmerbus-tls -o jsonpath={.data.ca"*) printf 'LS0tLS1CRUdJTg==' ;;
+*"get service imas-dmz-nats-envoy-edge -o jsonpath={.status.loadBalancer"*) printf '%s' "${STUB_LB:-}" ;;
 *"get endpointslices"*) printf '10.244.0.7' ;;
 *"create secret generic"*)
 	for a in "$@"; do
@@ -972,5 +1000,57 @@ func TestInstallWithStubs(t *testing.T) {
 	}
 	if b, err := os.ReadFile(filepath.Join(work, "dmz.json")); err != nil || !bytes.Contains(b, []byte(`"sprout_bus_url": "wss://uatabc123-dmz.centralindia.cloudapp.azure.com:8443/"`)) {
 		t.Errorf("dmz.json: %v\n%s", err, b)
+	}
+}
+
+// --expose loadbalancer waits for the controller's address and records it;
+// with no controller it fails, naming the alternative. The seed Secret is
+// taken as it is (no seed option).
+func TestInstallLoadBalancerWithStubs(t *testing.T) {
+	need(t, true, "bash", "jq", "helm", "base64")
+	realHelm, _ := exec.LookPath("helm")
+	bin := t.TempDir()
+	for name, body := range map[string]string{"kubectl": stubKubectl, "helm": stubHelm} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tgz := packageChart(t, testVersion, testVersion)
+	kubeconfig := filepath.Join(t.TempDir(), "dmz.kubeconfig")
+	if err := os.WriteFile(kubeconfig, []byte("apiVersion: v1\nkind: Config\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name, lb string
+		ok       bool
+	}{{"address", "198.51.100.7", true}, {"no controller", "", false}} {
+		t.Run(c.name, func(t *testing.T) {
+			work := t.TempDir()
+			env := []string{
+				"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"STUB_LOG=" + filepath.Join(t.TempDir(), "calls.log"), "STUB_CHART=" + tgz,
+				"REAL_HELM=" + realHelm, "STUB_LB=" + c.lb,
+			}
+			code, _, stderr := run(t, env, "install.sh", "--kubeconfig", kubeconfig, "--expose", "loadbalancer",
+				"--endpoints", filepath.Join(dir(t), "testdata", "endpoints.json"), "--release-tag", testTag,
+				"--workdir", work, "--timeout", "5s")
+			if !c.ok {
+				if code == 0 || !strings.Contains(stderr, "got no load balancer address within 5s") {
+					t.Fatalf("exit %d, want a failure naming the missing address:\n%s", code, stderr)
+				}
+				return
+			}
+			if code != 0 {
+				t.Fatalf("install.sh exited %d:\n%s", code, stderr)
+			}
+			var out obj
+			b, err := os.ReadFile(filepath.Join(work, "dmz.json"))
+			if err == nil {
+				err = json.Unmarshal(b, &out)
+			}
+			if err != nil || get(out, "envoy", "exposure") != "loadbalancer" || get(out, "envoy", "load_balancer_address") != c.lb {
+				t.Errorf("dmz.json envoy %v (%v), want loadbalancer at %s", get(out, "envoy"), err, c.lb)
+			}
+		})
 	}
 }
