@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Stub curl for uat/scripts/tests/scripts_test.sh: answers a URL with the
+# content of $STUB_STATE/curl/<host>, or fails like curl -f when there is none.
+set -u
+echo "curl $*" >>"$STUB_STATE/calls.log"
+url=${!#}
+host=${url#*://}
+host=${host%%/*}
+f="$STUB_STATE/curl/$host"
+[ -f "$f" ] || { echo "curl: (6) Could not resolve host: $host" >&2; exit 6; }
+cat "$f"

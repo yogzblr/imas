@@ -1,0 +1,81 @@
+name: UAT janitor
+
+# Deletes UAT environments whose time is up (uat/README.md, "Cleanup").
+# FLAG FOR SECURITY REVIEW: this workflow holds Azure credentials.
+#
+# Every hour, and by hand: deletes each resource group tagged
+# purpose=imas-uat whose expires_at tag has passed, and lists what it deleted
+# in the job summary (uat/scripts/janitor.sh). It never touches a group
+# without that tag, and leaves alone (with a warning) a tagged group whose
+# name, run_id tag or expires_at is not what uat/tofu writes. This is what
+# removes a kept environment (the UAT workflow's keep_hours) and any run whose
+# own destroy did not happen.
+#
+# Needs the GitHub environment "uat-janitor", with the same three variables as
+# "uat" (AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID) and a
+# federated credential for repo:yogzblr/imas:environment:uat-janitor. It has
+# no required reviewer, or the hourly run would wait for one; restrict it to
+# the branch main (scheduled runs use the default branch). See uat/README.md,
+# "Prerequisites".
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "List what would be deleted, delete nothing"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: uat-janitor
+  cancel-in-progress: false
+
+jobs:
+  janitor:
+    if: github.repository == 'yogzblr/imas'
+    environment: uat-janitor
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check variables
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          missing=()
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do
+            [ -n "${!name}" ] || missing+=("variable $name")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::missing in the uat-janitor environment: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Delete expired UAT resource groups
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN" = true ]; then
+            uat/scripts/janitor.sh run --dry-run
+          else
+            uat/scripts/janitor.sh run
+          fi
