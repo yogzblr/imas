@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# A stand-in for the released imas CLI, for test/run.sh only: just the
+# three offline auth commands admin-keys.sh runs, with fixed public keys.
+set -euo pipefail
+cfg="$HOME/.config/imas"
+mkdir -p "$cfg"
+[[ "${1:-}" == --out ]] && { mode="$2"; shift 2; } || mode=text
+case "$*" in
+"auth privkey")
+	printf 'privkey: SUFAKEPRIVATE\n' >>"$cfg/imas"
+	echo "Private key saved to config" ;;
+"auth pubkey")
+	grep -q privkey "$cfg/imas" 2>/dev/null || { echo "Error: no private key" >&2; exit 1; }
+	echo "AC4LMP7I2FYLWGY5GIB52A4XCFFFSB2QTZ65B3A4G6OK5GYWRJSKH74C" ;;
+"auth keygen")
+	[[ "$mode" == json ]] || exit 3
+	[[ ! -e "$cfg/cli-box.key" ]] || { echo '{"error":"exists"}'; exit 1; }
+	printf 'fakeboxkey' >"$cfg/cli-box.key"
+	echo '{"path":"x","user":"AC4LMP7I2FYLWGY5GIB52A4XCFFFSB2QTZ65B3A4G6OK5GYWRJSKH74C","box_pub":"Go0DiL9Y7s+Dp1mSizpp9n5xXuotDZzeqF6iGfIyt1c=","fingerprint":"box1:En7aJgL9RmBWsbYsjXXOHg"}' ;;
+*) echo "fake imas: $*" >&2; exit 2 ;;
+esac

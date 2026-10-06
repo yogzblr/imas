@@ -1,0 +1,5 @@
+# uat/hub/core scripts pass shell snippets to `kubectl exec ... sh -c`,
+# `bash -c` and jq programs in single quotes on purpose: they expand in the
+# pod or in jq, never locally.
+disable=SC2016
+source-path=SCRIPTDIR

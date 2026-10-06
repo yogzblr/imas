@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# An ansible-galaxy stand-in: every collection asked for is installed.
+[[ "$1 $2" == "collection list" ]] && printf '%s 9.9.9\n' "$3"
+exit 0

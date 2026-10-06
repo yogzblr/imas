@@ -1,0 +1,140 @@
+{{- include "uat.validate" . -}}
+# Keycloak (Apache-2.0), dev style: one replica, `start-dev`, the embedded
+# H2 database (dev-file) on a small PVC. The imas-uat realm is imported at
+# first start from files/imas-uat-realm.json, with the run's generated
+# secrets substituted from the realm env Secret (Keycloak's ${ENV}
+# placeholders). A later start skips the import (the realm exists), so the
+# tenant bindings bind-tenant.sh makes survive a restart.
+# The issuer is fixed: KC_HOSTNAME and the realm's frontendUrl are both the
+# core FQDN URL, so the token iss never depends on how a request arrived.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: imas-uat-keycloak-realm
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "uat.labels" . | nindent 4 }}
+    app.kubernetes.io/name: imas-uat-keycloak
+data:
+  imas-uat-realm.json: |-
+    {{- .Files.Get "files/imas-uat-realm.json" | nindent 4 }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: imas-uat-keycloak
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "uat.labels" . | nindent 4 }}
+    app.kubernetes.io/name: imas-uat-keycloak
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.keycloak.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.keycloak.storage }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: imas-uat-keycloak
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "uat.labels" . | nindent 4 }}
+    app.kubernetes.io/name: imas-uat-keycloak
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: imas-uat-keycloak
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: imas-uat-keycloak
+        imas.io/uat-only: "true"
+      annotations:
+        checksum/realm: {{ .Files.Get "files/imas-uat-realm.json" | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 0
+        fsGroup: 0
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: keycloak
+          image: {{ .Values.keycloak.image | quote }}
+          imagePullPolicy: IfNotPresent
+          args: ["start-dev", "--import-realm"]
+          env:
+            - name: KC_HOSTNAME
+              value: {{ include "uat.coreURL" . | quote }}
+            - name: KC_HOSTNAME_STRICT
+              value: "true"
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_HTTP_PORT
+              value: "8080"
+            - name: KC_PROXY_HEADERS
+              value: xforwarded
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+            - name: KC_DB
+              value: dev-file
+            - name: UAT_KEYCLOAK_URL
+              value: {{ include "uat.coreURL" . | quote }}
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              valueFrom: { secretKeyRef: { name: {{ .Values.keycloak.adminSecret }}, key: username } }
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .Values.keycloak.adminSecret }}, key: password } }
+          envFrom:
+            # UAT_TESTS_CLIENT_SECRET, UAT_T{1,2}_{ADMIN,READER}_PASSWORD
+            - secretRef: { name: {{ .Values.keycloak.realmEnvSecret }} }
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: management, containerPort: 9000 }
+          startupProbe:
+            httpGet: { path: /health/started, port: management }
+            periodSeconds: 5
+            failureThreshold: 120
+          readinessProbe:
+            httpGet: { path: /health/ready, port: management }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health/live, port: management }
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.keycloak.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: realm, mountPath: /opt/keycloak/data/import, readOnly: true }
+            - { name: h2, mountPath: /opt/keycloak/data/h2 }
+      volumes:
+        - name: realm
+          configMap:
+            name: imas-uat-keycloak-realm
+        - name: h2
+          persistentVolumeClaim:
+            claimName: imas-uat-keycloak
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: imas-uat-keycloak
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "uat.labels" . | nindent 4 }}
+    app.kubernetes.io/name: imas-uat-keycloak
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: imas-uat-keycloak
+  ports:
+    - { name: http, port: 8080, targetPort: http }
