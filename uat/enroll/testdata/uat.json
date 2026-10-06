@@ -1,0 +1,31 @@
+{
+  "run_id": "abc123",
+  "region": "centralindia",
+  "resource_group": "imas-uat-abc123",
+  "dmz": {
+    "name": "uat-dmz",
+    "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-abc123/providers/Microsoft.Compute/virtualMachines/uat-dmz",
+    "private_ip": "10.60.1.4",
+    "public_ip": "198.51.100.10",
+    "fqdn": "uatabc123-dmz.centralindia.cloudapp.azure.com",
+    "admin_user": "uatadmin"
+  },
+  "core": {
+    "name": "uat-core",
+    "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-abc123/providers/Microsoft.Compute/virtualMachines/uat-core",
+    "private_ip": "10.60.2.4",
+    "public_ip": "198.51.100.11",
+    "fqdn": "uatabc123-core.centralindia.cloudapp.azure.com",
+    "admin_user": "uatadmin"
+  },
+  "sprouts": {
+    "t1-ubuntu": {"tenant": 1, "os": "ubuntu", "connection": "ssh", "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-abc123/providers/Microsoft.Compute/virtualMachines/t1-ubuntu", "private_ip": "10.60.3.4", "public_ip": "198.51.100.21", "admin_user": "uatadmin"},
+    "t1-alma": {"tenant": 1, "os": "alma", "connection": "ssh", "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-abc123/providers/Microsoft.Compute/virtualMachines/t1-alma", "private_ip": "10.60.3.5", "public_ip": "198.51.100.22", "admin_user": "uatadmin"},
+    "t1-win": {"tenant": 1, "os": "windows", "connection": "winrm", "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-abc123/providers/Microsoft.Compute/virtualMachines/t1-win", "private_ip": "10.60.3.6", "public_ip": "198.51.100.23", "admin_user": "uatadmin"},
+    "t2-ubuntu": {"tenant": 2, "os": "ubuntu", "connection": "ssh", "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-abc123/providers/Microsoft.Compute/virtualMachines/t2-ubuntu", "private_ip": "10.60.3.7", "public_ip": "198.51.100.24", "admin_user": "uatadmin"},
+    "t2-alma": {"tenant": 2, "os": "alma", "connection": "ssh", "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-abc123/providers/Microsoft.Compute/virtualMachines/t2-alma", "private_ip": "10.60.3.8", "public_ip": "198.51.100.25", "admin_user": "uatadmin"},
+    "t2-win": {"tenant": 2, "os": "windows", "connection": "winrm", "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-abc123/providers/Microsoft.Compute/virtualMachines/t2-win", "private_ip": "10.60.3.9", "public_ip": "198.51.100.26", "admin_user": "uatadmin"}
+  },
+  "bastion": {"name": "imas-uat-abc123-bastion", "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-abc123/providers/Microsoft.Network/bastionHosts/imas-uat-abc123-bastion"},
+  "subnets": {"dmz": "10.60.1.0/24", "core": "10.60.2.0/24", "tenants": "10.60.3.0/24", "bastion": "10.60.4.0/26"}
+}

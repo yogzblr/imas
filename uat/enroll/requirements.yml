@@ -1,0 +1,18 @@
+---
+# ansible-galaxy collection install -r uat/enroll/requirements.yml
+#
+# The collections ansible/requirements.yml installs, plus community.docker for
+# the local rig's docker connection (UAT.8). Like the existing two, it is
+# GPL-3.0-or-later controller tooling: it runs on the runner and is never part
+# of a released artifact.
+collections:
+  # Windows sprouts: the role's win_* modules, and this directory's playbooks.
+  - name: ansible.windows
+    version: ">=2.0.0"
+  # Listed by ansible/requirements.yml for SUSE hosts; kept so one install
+  # covers both files.
+  - name: community.general
+    version: ">=8.0.0"
+  # The docker connection plugin (connection: docker in the uat JSON).
+  - name: community.docker
+    version: ">=3.0.0"
