@@ -1,13 +1,12 @@
 # tofu output -json uat is the interface to every other UAT brief (Shared
-# contract, section 4h). It holds no credential, so it is not sensitive.
+# contract, section 4h), with exactly the contract's keys (owner, 2026-10-06).
+# It holds no credential, so it is not sensitive.
 output "uat" {
   description = "The uat object of the Shared contract: run, hubs, sprouts, Bastion and subnets. No credentials."
   value = {
     run_id         = var.run_id
-    release_tag    = var.release_tag
     region         = azurerm_resource_group.run.location
     resource_group = azurerm_resource_group.run.name
-    expires_at     = local.expires_at
 
     dmz = {
       name       = azurerm_linux_virtual_machine.hub["dmz"].name
@@ -54,6 +53,7 @@ output "uat" {
 }
 
 # Credentials: never part of uat, never printed by tofu output (sensitive).
+# Owner, 2026-10-06: sensitive outputs are the accepted way to hand them over.
 # The workflow reads them with tofu output -raw into 0600 files that are never
 # uploaded as artifacts. They also live in this run's state blob.
 

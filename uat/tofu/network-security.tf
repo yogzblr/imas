@@ -8,8 +8,7 @@
 # stateful: replies to an allowed flow need no rule of their own.
 
 locals {
-  runner      = [var.runner_cidr]
-  sprout_pips = [for k in sort(keys(azurerm_public_ip.sprout)) : "${azurerm_public_ip.sprout[k].ip_address}/32"]
+  runner = [var.runner_cidr]
 
   # Shared tail of every workload NSG.
   deny_tail = [
@@ -22,7 +21,6 @@ locals {
     dmz = concat([
       { name = "AllowBastionSshKubeIn", priority = 100, direction = "Inbound", access = "Allow", protocol = "Tcp", src = [local.cidr.bastion], dst = [local.cidr.dmz], ports = ["22", "6443"] },
       { name = "AllowSproutsEnvoyPrivateIn", priority = 110, direction = "Inbound", access = "Allow", protocol = "Tcp", src = [local.cidr.tenants], dst = [local.cidr.dmz], ports = [tostring(var.envoy_port)] },
-      { name = "AllowSproutsEnvoyPublicIn", priority = 120, direction = "Inbound", access = "Allow", protocol = "Tcp", src = local.sprout_pips, dst = [local.cidr.dmz], ports = [tostring(var.envoy_port)] },
       { name = "AllowRunnerEnvoyIn", priority = 130, direction = "Inbound", access = "Allow", protocol = "Tcp", src = local.runner, dst = [local.cidr.dmz], ports = [tostring(var.envoy_port)] },
       { name = "AllowCoreBusIn", priority = 140, direction = "Inbound", access = "Allow", protocol = "Tcp", src = [local.cidr.core], dst = [local.cidr.dmz], ports = [tostring(var.bus_port)] },
       { name = "AllowFarmerApiOut", priority = 100, direction = "Outbound", access = "Allow", protocol = "Tcp", src = [local.cidr.dmz], dst = [local.cidr.core], ports = [tostring(var.farmer_api_port)] },
@@ -38,8 +36,8 @@ locals {
     tenants = concat([
       { name = "AllowBastionAdminIn", priority = 100, direction = "Inbound", access = "Allow", protocol = "Tcp", src = [local.cidr.bastion], dst = [local.cidr.tenants], ports = ["22", "5986"] },
       { name = "AllowEnvoyPrivateOut", priority = 100, direction = "Outbound", access = "Allow", protocol = "Tcp", src = [local.cidr.tenants], dst = [local.cidr.dmz], ports = [tostring(var.envoy_port)] },
-      { name = "AllowEnvoyPublicOut", priority = 110, direction = "Outbound", access = "Allow", protocol = "Tcp", src = [local.cidr.tenants], dst = ["${azurerm_public_ip.hub["dmz"].ip_address}/32"], ports = [tostring(var.envoy_port)] },
       { name = "DenyCorePublicOut", priority = 200, direction = "Outbound", access = "Deny", protocol = "*", src = ["*"], dst = ["${azurerm_public_ip.hub["core"].ip_address}/32"], ports = ["*"] },
+      { name = "DenyDmzPublicOut", priority = 210, direction = "Outbound", access = "Deny", protocol = "*", src = ["*"], dst = ["${azurerm_public_ip.hub["dmz"].ip_address}/32"], ports = ["*"] },
     ], local.deny_tail)
 
     # Azure's documented rules for AzureBastionSubnet, with the internet
@@ -59,12 +57,10 @@ locals {
       { name = "DenyAllOutbound", priority = 4096, direction = "Outbound", access = "Deny", protocol = "*", src = ["*"], dst = ["*"], ports = ["*"] },
     ]
   }
-
-  nsg_names = var.bastion_nsg_enabled ? ["dmz", "core", "tenants", "bastion"] : ["dmz", "core", "tenants"]
 }
 
 resource "azurerm_network_security_group" "subnet" {
-  for_each = toset(local.nsg_names)
+  for_each = local.nsg_rules
 
   name                = "uat-${each.key}-nsg"
   location            = azurerm_resource_group.run.location
@@ -75,7 +71,7 @@ resource "azurerm_network_security_group" "subnet" {
   # valid in the singular address and port fields, so a one-element list uses
   # the singular field and a longer list the plural one.
   dynamic "security_rule" {
-    for_each = local.nsg_rules[each.key]
+    for_each = each.value
     content {
       name                         = security_rule.value.name
       priority                     = security_rule.value.priority
@@ -100,9 +96,9 @@ resource "azurerm_subnet_network_security_group_association" "workload" {
   network_security_group_id = azurerm_network_security_group.subnet[each.key].id
 }
 
+# Owner, 2026-10-06: the Bastion fails closed. If Azure refuses this NSG,
+# the apply fails; there is no switch to run the Bastion without one.
 resource "azurerm_subnet_network_security_group_association" "bastion" {
-  count = var.bastion_nsg_enabled ? 1 : 0
-
   subnet_id                 = azurerm_subnet.bastion.id
   network_security_group_id = azurerm_network_security_group.subnet["bastion"].id
 }

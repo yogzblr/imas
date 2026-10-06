@@ -30,6 +30,7 @@ Files:
 | `versions.tf` | OpenTofu and provider versions, the `azurerm` backend, the provider settings that make destroy complete |
 | `variables.tf` | Inputs (below) |
 | `main.tf` | Resource group, tags, expiry, per-run SSH key and Windows password, VNet and subnets |
+| `dns.tf` | The private DNS zone: `dmz.<zone>` and `core.<zone>` to the hubs' private addresses |
 | `network-security.tf` | The four NSGs (rules tabled below) |
 | `vms.tf` | Public IPs, NICs, the eight VMs, the WinRM extension, the Bastion |
 | `winrm-https.ps1` | What the Windows extension runs: WinRM over HTTPS on 5986 |
@@ -61,8 +62,9 @@ From the Shared contract, plus what the brief makes a variable.
 | `windows_image` | `MicrosoftWindowsServer:WindowsServer:2022-datacenter-core-smalldisk-g2:latest` | |
 | `admin_user` | `imasuat` | On every VM |
 | `envoy_port` | `8443` | Envoy's external port on the DMZ host: 8443, the owner's decision (2026-10-06), as a NodePort. A variable so every Envoy rule moves together |
-| `farmer_api_port`, `bus_port`, `core_public_port` | `5405`, `5406`, `443` | farmer's API (Envoy's upstream), the farmerbus client port core dials, saasapi and Keycloak on core. See the network table |
-| `bastion_nsg_enabled` | `true` | See [AzureBastionSubnet](#azurebastionsubnet) |
+| `bus_port` | `8442` | The farmerbus node port core dials on the DMZ: 8442, the owner's decision (2026-10-06), so the DMZ node port range is 8442-8443 only |
+| `farmer_api_port`, `core_public_port` | `5405`, `443` | farmer's API (Envoy's upstream; the owner: "farmer ports can be anything"), saasapi and Keycloak on core. See the network table |
+| `private_dns_zone` | `uat.imas.internal` | The private DNS zone linked to the VNet (see [Private DNS](#private-dns)) |
 
 The image URNs are unverified: the owner checks them with `az vm image list
 --all --publisher <p> --offer <o> --sku <s>` before the first run.
@@ -78,10 +80,8 @@ they come from the environment (`ARM_SUBSCRIPTION_ID`, `ARM_TENANT_ID`,
 ```json
 {
   "run_id": "abc123",
-  "release_tag": "v0.1.0-rc.4",
   "region": "centralindia",
   "resource_group": "imas-uat-abc123",
-  "expires_at": "2026-10-06T16:00:00Z",
   "dmz":  { "name": "uat-dmz",  "id": "/subscriptions/.../virtualMachines/uat-dmz",  "private_ip": "10.60.1.4", "public_ip": "...", "fqdn": "uatabc123-dmz.centralindia.cloudapp.azure.com",  "admin_user": "imasuat" },
   "core": { "name": "uat-core", "id": "...", "private_ip": "10.60.2.4", "public_ip": "...", "fqdn": "uatabc123-core.centralindia.cloudapp.azure.com", "admin_user": "imasuat" },
   "sprouts": {
@@ -93,13 +93,17 @@ they come from the environment (`ARM_SUBSCRIPTION_ID`, `ARM_TENANT_ID`,
 }
 ```
 
-`release_tag` and `expires_at` are additions to the contract's list; nothing
-in it is removed or renamed. `subnets` is a map of name to `{cidr, id}`.
+The top-level keys are exactly the Shared contract's (owner's decision,
+2026-10-06: "uat output shape per the Shared contract"); `tofu test` checks
+that. The contract does not fix the shape of `subnets`; here it is a map of
+name to `{cidr, id}`. `release_tag` and `expires_at` are resource tags, not
+output keys.
 `uat/access/testdata/uat.json` is a full sample, and `tofu test` fails if its
 shape drifts from the real output.
 
 Credentials are not in `uat`. Two separate outputs hold them, both
-`sensitive`, so `tofu output` and plans print `(sensitive value)`:
+`sensitive`, so `tofu output` and plans print `(sensitive value)`. The owner
+accepted this hand-over (2026-10-06: "sensitive outputs yes"):
 
 | Output | What |
 |---|---|
@@ -121,13 +125,18 @@ each workload NSG ends with three explicit denies; only the allows above them
 pass. NSGs are stateful, so replies need no rule. Inbound rules match the VM's
 private address, including traffic that arrived on its public IP.
 
+Owner's decisions (2026-10-06) this table applies: sprouts connect to nats
+only through Envoy, on the DMZ **private** address, by a private DNS name;
+farmer and saasapi connect to farmerbus; Envoy is node port **8443** and the
+bus node port **8442**, so the DMZ node port range is 8442-8443 only; no load
+balancer.
+
 | NSG | Dir | Prio | Rule | From | To | Port | Reason |
 |---|---|---|---|---|---|---|---|
 | dmz | in | 100 | AllowBastionSshKubeIn | `10.60.4.0/26` | dmz | TCP 22, 6443 | Management only through Bastion tunnels: SSH (k0sctl) and the Kubernetes API (helm, kubectl) |
-| dmz | in | 110 | AllowSproutsEnvoyPrivateIn | tenants `10.60.3.0/24` | dmz | TCP `envoy_port` (8443) | Owner: sprouts connect to nats via Envoy, and Envoy is on 8443 as a NodePort (owner's decision, 2026-10-06). Envoy serves `/v1/enroll`, `/v1/refresh`, `/files/` and `wss://` |
-| dmz | in | 120 | AllowSproutsEnvoyPublicIn | the six sprout public IPs `/32` | dmz | TCP `envoy_port` (8443, owner's decision) | The same, when a sprout dials the DMZ FQDN, which resolves to the public IP (the Envoy certificate is for the FQDN); traffic then arrives from the sprout's own public IP |
+| dmz | in | 110 | AllowSproutsEnvoyPrivateIn | tenants `10.60.3.0/24` | dmz | TCP `envoy_port` (8443, owner's decision) | Owner: sprouts connect to nats via Envoy, on the DMZ private address (`dmz.<zone>`), and Envoy is node port 8443. Envoy serves `/v1/enroll`, `/v1/refresh`, `/files/` and `wss://` |
 | dmz | in | 130 | AllowRunnerEnvoyIn | `runner_cidr` | dmz | TCP `envoy_port` (8443, owner's decision) | The runner's Envoy checks (UAT.3a) and tests (X2) |
-| dmz | in | 140 | AllowCoreBusIn | core `10.60.2.0/24` | dmz | TCP `bus_port` (5406) | Owner: farmer and saasapi connect to farmerbus. They dial the bus at `farmerbusurl` `tls://...:5406` (nats `bus.ports.client`, farmer `bus.port`); core dials out, the bus never dials core |
+| dmz | in | 140 | AllowCoreBusIn | core `10.60.2.0/24` | dmz | TCP `bus_port` (8442, owner's decision) | Owner: farmer and saasapi connect to farmerbus, through its node port 8442. Behind it is the bus client port 5406 (nats `bus.ports.client`), which they dial at `farmerbusurl`; core dials out, the bus never dials core |
 | dmz | in | 4000 | DenyVnetIn | VirtualNetwork | any | any | Overrides `AllowVnetInBound` |
 | dmz | in | 4096 | DenyAllIn | any | any | any | Everything else, including the Azure load balancer default |
 | dmz | out | 100 | AllowFarmerApiOut | dmz | core | TCP 5405 | Envoy's upstreams `farmer_api` and `recipe_service` (5405), and its remote JWKS fetch (`/v1/.well-known/jwks.json` on the same port) |
@@ -136,46 +145,42 @@ private address, including traffic that arrived on its public IP.
 | core | in | 110 | AllowDmzFarmerApiIn | dmz `10.60.1.0/24` | core | TCP 5405 | Envoy to farmer's API (farmer `farmer.apiPort`; farmer NetworkPolicy "farmer in from the nats chart's Envoy") |
 | core | in | 120 | AllowRunnerHttpsIn | `runner_cidr` | core | TCP 443 | saasapi and Keycloak, from the runner only (Shared contract) |
 | core | in | 4000, 4096 | DenyVnetIn, DenyAllIn | | | | As for dmz. A sprout cannot open a connection to core |
-| core | out | 100 | AllowBusOut | core | dmz | TCP 5406 | farmer and saasapi to the bus (see dmz 140) |
+| core | out | 100 | AllowBusOut | core | dmz | TCP `bus_port` (8442, owner's decision) | farmer and saasapi to the bus node port (see dmz 140) |
 | core | out | 4000 | DenyVnetOut | any | VirtualNetwork | any | Core reaches nothing else in the VNet. Internet outbound (images, the Keycloak and object store are on the same host) stays allowed |
 | tenants | in | 100 | AllowBastionAdminIn | `10.60.4.0/26` | tenants | TCP 22, 5986 | SSH to Linux sprouts and WinRM over HTTPS to Windows sprouts, through Bastion tunnels only |
 | tenants | in | 4000, 4096 | DenyVnetIn, DenyAllIn | | | | Nothing else in; the sprouts' public IPs are outbound only |
 | tenants | out | 100 | AllowEnvoyPrivateOut | tenants | dmz | TCP `envoy_port` (8443, owner's decision) | Owner: sprouts connect to nats via Envoy, and to nothing else |
-| tenants | out | 110 | AllowEnvoyPublicOut | tenants | DMZ public IP `/32` | TCP `envoy_port` (8443, owner's decision) | Sprouts reach Envoy by its FQDN |
 | tenants | out | 200 | DenyCorePublicOut | any | core public IP `/32` | any | Defence in depth: a sprout must not open a connection to core, not even to its public address (core's NSG would refuse it too) |
+| tenants | out | 210 | DenyDmzPublicOut | any | DMZ public IP `/32` | any | Owner: sprouts use the DMZ private address. The DMZ NSG admits no sprout public IP either |
 | tenants | out | 4000 | DenyVnetOut | any | VirtualNetwork | any | No sprout-to-sprout or sprout-to-core traffic. Internet outbound (packages) stays allowed |
 | bastion | | | (below) | | | | Azure's documented rules |
 
-What I could not derive from the two READMEs, and what I assumed:
+What the owner decided, what I derived from the two READMEs, and what I
+assumed:
 
-1. **Core to the DMZ is 5406, the farmerbus client port (owner, 2026-10-06).**
-   The Shared contract said "core reaches only the bus websocket port on the
-   DMZ". The owner's answer: "The design is sprouts connect to nats via envoy.
-   Farmer and saaapi connect to farmerbus. So farmer ports can be anything".
-   Both chart READMEs give the port: farmer and saasapi dial `farmerbusurl`
-   `tls://...:5406` (nats `bus.ports.client`, farmer `bus.port`); the websocket
-   port 5407 is used only by Envoy inside the DMZ. So `bus_port` is 5406 and
-   5407 is not opened between subnets.
-2. **Envoy's external port is 8443 (owner, 2026-10-06).** The owner: "The
-   envoy should be behind an app gateway in production. For simplicity let's
-   use 8443 as node port. It should support both load balancer and node port".
-   So the runner (`runner_cidr` only) and the sprouts reach Envoy on the DMZ
-   host at 8443 (`envoy_port`, default 8443; it is also the chart's
-   `envoy.listenerPort`). The variable stays so a later load balancer or a
-   different port moves every Envoy rule at once. Left open (not decided
-   here): 8443 is outside Kubernetes' default NodePort range (30000 to 32767),
-   so UAT.2 must widen k0s's `service-node-port-range` or use a host port; and
-   this module creates no Azure load balancer or Application Gateway, and the
-   NSGs do not admit an `AzureLoadBalancer` health probe to 8443.
-   Other host ports: the charts give container and Service ports (farmer 5405,
-   the bus 5406); how they are exposed on the VM is UAT.2's choice, and every
-   port is a variable. `farmer_api_port` defaults to the chart's 5405; per the
-   owner, farmer's port can be anything, so set it to whatever UAT.2 and UAT.3b
-   expose. 443 on core is from the Shared contract, not the charts (saasapi's
-   own port is 8081; how saasapi and Keycloak share 443 is UAT.2 and UAT.3b's).
-3. **Which address a sprout dials.** The READMEs do not say. I allowed both the
-   DMZ private address and the DMZ public address (from the six sprout public
-   IPs only), so either works.
+1. **Core to the DMZ: the bus node port 8442 (owner, 2026-10-06).** The Shared
+   contract said "core reaches only the bus websocket port on the DMZ". The
+   owner: "The design is sprouts connect to nats via envoy. Farmer and saaapi
+   connect to farmerbus. So farmer ports can be anything", then "Option (b):
+   bus node port 8442, DMZ node port range 8442-8443 only". Behind node port
+   8442 is the bus client port 5406 (`bus.ports.client`; farmer `bus.port`,
+   `farmerbusurl`), which both chart READMEs name; the websocket port 5407 is
+   used only by Envoy inside the DMZ and is not opened between subnets.
+2. **Envoy is node port 8443 (owner, 2026-10-06).** The owner: "The envoy
+   should be behind an app gateway in production. For simplicity let's use
+   8443 as node port. It should support both load balancer and node port",
+   and later "no load balancer". So the runner (`runner_cidr` only) and the
+   sprouts reach Envoy on the DMZ host at 8443 (`envoy_port`; it is also the
+   chart's `envoy.listenerPort`). This module creates no load balancer or
+   Application Gateway. `farmer_api_port` defaults to the chart's 5405; per
+   the owner, farmer's port can be anything, so set it to whatever UAT.2 and
+   UAT.3b expose. 443 on core is from the Shared contract, not the charts
+   (saasapi's own port is 8081).
+3. **Sprouts dial the DMZ private address by a private DNS name (owner,
+   2026-10-06).** The only Envoy path from the tenants subnet is to the DMZ
+   subnet; the DMZ public address is denied to sprouts, and the DMZ NSG admits
+   no sprout public IP. The name is `dmz.<private_dns_zone>` (see [Private
+   DNS](#private-dns)).
 4. **SSH 22, WinRM 5986 and the Kubernetes API 6443** are not in the READMEs:
    22 and 5986 are the standard ports, 6443 is k0s's default.
 5. **Pod traffic.** The source rules assume traffic from a pod leaving a hub is
@@ -206,12 +211,28 @@ where Azure allows it:
 | out | 130 | AllowHttpOutbound | any | Internet | 80 |
 | out | 4096 | DenyAllOutbound | any | any | any |
 
-Azure checks this NSG when the Bastion is created. If it refuses it as not
-compliant (for example because of the narrowed internet source), apply with
-`-var bastion_nsg_enabled=false`: the Bastion then has no NSG, and the VM
-subnets still admit it only on 22, 5986 and 6443. To reach a kept environment
-from your own machine, re-apply with your address as `runner_cidr`; that also
-moves the Envoy and core 443 rules to you.
+Azure checks this NSG when the Bastion is created. **The Bastion fails
+closed** (owner's decision, 2026-10-06): if Azure refuses the NSG as not
+compliant (for example because of the narrowed internet source), the apply
+fails; there is no switch to run the Bastion without an NSG. To reach a kept
+environment from your own machine, re-apply with your address as
+`runner_cidr`; that also moves the Envoy and core 443 rules to you.
+
+### Private DNS
+
+An Azure Private DNS zone, `private_dns_zone` (default `uat.imas.internal`),
+is linked to the VNet (auto-registration off) and holds two A records with a
+60 second TTL:
+
+| Name | Resolves to |
+|---|---|
+| `dmz.uat.imas.internal` | `uat-dmz`'s private address: what sprouts use for Envoy (8443) and core for the bus (8442) |
+| `core.uat.imas.internal` | `uat-core`'s private address: what Envoy may use for farmer (5405) |
+
+Every VM in the VNet resolves these through Azure's resolver (168.63.129.16),
+and so do pods whose DNS forwards to the node's resolver. Nothing outside the
+VNet can. The names are a fixed convention, not keys of `uat`, whose keys the
+Shared contract fixes; the zone is deleted with the run's resource group.
 
 ## Destroy semantics
 
@@ -330,6 +351,7 @@ az resource list --tag run_id=<run_id> -o table   # must be empty
 | Azure Bastion `uat-bastion` | 1 | Standard SKU, 2 scale units |
 | Standard public IPs | 9 | 8 VMs and the Bastion; static |
 | VNet, subnets, NSGs, NICs | 1, 4, 4, 8 | |
+| Private DNS zone, VNet link, A records | 1, 1, 2 | `dmz` and `core` |
 | VM extensions | 2 | `winrm-https` on each Windows sprout |
 
 18 vCPUs in all: 10 in the Dsv5 family and 8 in the B family (quota is per
@@ -355,7 +377,10 @@ What ran here (no Azure access):
   and extension, the `uat` output shape and that it carries no credential, that
   `uat/access/testdata/uat.json` has the same shape, every NSG's allow list and
   ports, that 22, 5985, 5986 and 6443 are open only from `AzureBastionSubnet`,
-  the deny tail, the Bastion NSG toggle and the input validations.
+  the deny tail, that the bus is reached only on 8442 and Envoy only on 8443
+  from the DMZ private range, that sprouts are denied the DMZ and core public
+  addresses, that the Bastion NSG is always attached, that `uat` has exactly
+  the contract's keys, the private DNS records and the input validations.
 - `tests/destroy_test.sh`: `destroy.sh` against stubbed `tofu` and `az`, all
   three branches (clean destroy; fallback to `az group delete`; leftovers exit
   1), the refusal to delete a group without our tags, fail-closed on `az`

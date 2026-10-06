@@ -180,7 +180,22 @@ run "names_tags_and_layout" {
     error_message = "both Windows sprouts get the WinRM over HTTPS extension"
   }
 
-  # The uat output: the Shared contract shape.
+  assert {
+    condition = (
+      azurerm_private_dns_zone.uat.name == "uat.imas.internal" &&
+      azurerm_private_dns_zone_virtual_network_link.uat.registration_enabled == false &&
+      azurerm_private_dns_a_record.hub["dmz"].name == "dmz" &&
+      azurerm_private_dns_a_record.hub["core"].name == "core" &&
+      toset(azurerm_private_dns_a_record.hub["dmz"].records) == toset(["10.60.9.9"])
+    )
+    error_message = "dmz.<zone> and core.<zone> must resolve to the hubs' private addresses inside the VNet"
+  }
+
+  # The uat output: exactly the Shared contract's keys.
+  assert {
+    condition     = toset(keys(output.uat)) == toset(["run_id", "region", "resource_group", "dmz", "core", "sprouts", "bastion", "subnets"])
+    error_message = "uat must have exactly the Shared contract's top-level keys"
+  }
   assert {
     condition = (
       output.uat.run_id == "abc123" &&
@@ -249,8 +264,8 @@ run "network_rules" {
   }
 
   assert {
-    condition     = toset([for r in azurerm_network_security_group.subnet["tenants"].security_rule : r.name if r.direction == "Outbound" && r.access == "Allow"]) == toset(["AllowEnvoyPrivateOut", "AllowEnvoyPublicOut"])
-    error_message = "tenants: sprouts reach only Envoy inside Azure"
+    condition     = toset([for r in azurerm_network_security_group.subnet["tenants"].security_rule : r.name if r.direction == "Outbound" && r.access == "Allow"]) == toset(["AllowEnvoyPrivateOut"])
+    error_message = "tenants: sprouts reach only Envoy, on the DMZ private range"
   }
 
   assert {
@@ -276,23 +291,24 @@ run "network_rules" {
     condition = alltrue([for r in azurerm_network_security_group.subnet["core"].security_rule :
       (r.name != "AllowRunnerHttpsIn" || (r.source_address_prefix == "203.0.113.7/32" && r.destination_port_range == "443")) &&
       (r.name != "AllowDmzFarmerApiIn" || (r.source_address_prefix == "10.60.1.0/24" && r.destination_port_range == "5405")) &&
-      (r.name != "AllowBusOut" || (r.destination_address_prefix == "10.60.1.0/24" && r.destination_port_range == "5406"))
+      (r.name != "AllowBusOut" || (r.destination_address_prefix == "10.60.1.0/24" && r.destination_port_range == "8442"))
     ])
-    error_message = "core: runner on 443, DMZ on 5405, out to the bus on 5406"
+    error_message = "core: runner on 443, DMZ on 5405, out to the bus node port 8442"
   }
 
   assert {
-    condition     = toset([for r in azurerm_network_security_group.subnet["dmz"].security_rule : r.name if r.direction == "Inbound" && r.access == "Allow"]) == toset(["AllowBastionSshKubeIn", "AllowSproutsEnvoyPrivateIn", "AllowSproutsEnvoyPublicIn", "AllowRunnerEnvoyIn", "AllowCoreBusIn"])
+    condition     = toset([for r in azurerm_network_security_group.subnet["dmz"].security_rule : r.name if r.direction == "Inbound" && r.access == "Allow"]) == toset(["AllowBastionSshKubeIn", "AllowSproutsEnvoyPrivateIn", "AllowRunnerEnvoyIn", "AllowCoreBusIn"])
     error_message = "dmz: inbound only from the Bastion, sprouts, the runner and core"
   }
 
   assert {
     condition = alltrue([for r in azurerm_network_security_group.subnet["dmz"].security_rule :
-      (r.name != "AllowCoreBusIn" || (r.source_address_prefix == "10.60.2.0/24" && r.destination_port_range == "5406")) &&
+      (r.name != "AllowCoreBusIn" || (r.source_address_prefix == "10.60.2.0/24" && r.destination_port_range == "8442")) &&
+      (r.name != "AllowSproutsEnvoyPrivateIn" || (r.source_address_prefix == "10.60.3.0/24" && r.destination_port_range == "8443")) &&
       (r.name != "AllowRunnerEnvoyIn" || (r.source_address_prefix == "203.0.113.7/32" && r.destination_port_range == "8443")) &&
       (r.name != "AllowFarmerApiOut" || (r.destination_address_prefix == "10.60.2.0/24" && r.destination_port_range == "5405"))
     ])
-    error_message = "dmz: core in on 5406, runner in on 8443, out to farmer on 5405"
+    error_message = "dmz: core in on 8442, sprouts and runner in on 8443, out to farmer on 5405"
   }
 
   # No workload NSG admits SSH, WinRM or the Kubernetes API from anything but
@@ -322,8 +338,22 @@ run "network_rules" {
   }
 
   assert {
-    condition     = length(azurerm_subnet_network_security_group_association.bastion) == 1
-    error_message = "the Bastion NSG is attached by default"
+    condition = anytrue([for r in azurerm_network_security_group.subnet["tenants"].security_rule :
+      r.name == "DenyDmzPublicOut" && r.access == "Deny" && r.destination_address_prefix == "198.51.100.10/32" && r.priority < 4000
+    ])
+    error_message = "tenants: sprouts use the DMZ private address, never its public one"
+  }
+
+  assert {
+    condition = alltrue(flatten([for n in ["dmz", "core", "tenants", "bastion"] : [
+      for r in azurerm_network_security_group.subnet[n].security_rule : !contains(["5406", "5407"], coalesce(r.destination_port_range, "x"))
+    ]]))
+    error_message = "the bus is reached on its node port 8442 only; 5406 and 5407 stay inside the DMZ"
+  }
+
+  assert {
+    condition     = azurerm_subnet_network_security_group_association.bastion.subnet_id == azurerm_subnet.bastion.id
+    error_message = "the Bastion NSG is always attached (fails closed)"
   }
 }
 
@@ -340,21 +370,8 @@ run "envoy_port_moves_every_envoy_rule" {
     condition = alltrue(flatten([for n in ["dmz", "tenants"] : [
       for r in azurerm_network_security_group.subnet[n].security_rule : r.destination_port_range == "443"
       if strcontains(r.name, "Envoy")
-    ]])) && length(flatten([for n in ["dmz", "tenants"] : [for r in azurerm_network_security_group.subnet[n].security_rule : r if strcontains(r.name, "Envoy")]])) == 5
-    error_message = "all five Envoy rules must use envoy_port"
-  }
-}
-
-run "bastion_nsg_can_be_off" {
-  command = plan
-
-  variables {
-    bastion_nsg_enabled = false
-  }
-
-  assert {
-    condition     = length(azurerm_subnet_network_security_group_association.bastion) == 0 && !contains(keys(azurerm_network_security_group.subnet), "bastion")
-    error_message = "bastion_nsg_enabled=false attaches no NSG to AzureBastionSubnet"
+    ]])) && length(flatten([for n in ["dmz", "tenants"] : [for r in azurerm_network_security_group.subnet[n].security_rule : r if strcontains(r.name, "Envoy")]])) == 3
+    error_message = "all three Envoy rules must use envoy_port"
   }
 }
 

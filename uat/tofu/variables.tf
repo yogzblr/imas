@@ -177,9 +177,9 @@ variable "farmer_api_port" {
 }
 
 variable "bus_port" {
-  description = "The farmerbus client port farmer and saasapi dial on the DMZ host (nats chart bus.ports.client; farmer chart bus.port). Owner, 2026-10-06: farmer and saasapi connect to farmerbus; sprouts reach nats only through Envoy. Not the websocket port 5407."
+  description = "The farmerbus node port farmer and saasapi dial on the DMZ host. Owner, 2026-10-06: farmer and saasapi connect to farmerbus, and the bus is exposed as node port 8442 (option (b) of UAT.2 #130) so the DMZ node port range is 8442-8443 only. Behind it is the bus client port (nats chart bus.ports.client, 5406), not the websocket port 5407."
   type        = number
-  default     = 5406
+  default     = 8442
 }
 
 variable "core_public_port" {
@@ -188,8 +188,13 @@ variable "core_public_port" {
   default     = 443
 }
 
-variable "bastion_nsg_enabled" {
-  description = "Attach Azure's documented NSG to AzureBastionSubnet (default). Set false only if Azure refuses the association as not compliant; the Bastion then has no NSG and the VM subnets still only admit it on 22, 5986 and 6443."
-  type        = bool
-  default     = true
+variable "private_dns_zone" {
+  description = "Azure Private DNS zone linked to the VNet. Owner, 2026-10-06: sprouts reach Envoy on the DMZ private IP through a private DNS name; the zone holds dmz.<zone> and core.<zone> (A records to the hubs' private IPs). Resolves only inside the VNet."
+  type        = string
+  default     = "uat.imas.internal"
+
+  validation {
+    condition     = can(regex("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$", var.private_dns_zone))
+    error_message = "private_dns_zone must be a lowercase DNS name with at least two labels."
+  }
 }
