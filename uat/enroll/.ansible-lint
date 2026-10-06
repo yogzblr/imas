@@ -1,0 +1,8 @@
+---
+# cd uat/enroll && ANSIBLE_ROLES_PATH=../../ansible/roles ansible-lint
+# The playbooks include ../../ansible/roles/imas_verify, which is linted with
+# ansible/ itself, not from here.
+exclude_paths:
+  - ../../ansible/
+  - testdata/
+  - tests/
