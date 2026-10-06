@@ -7,7 +7,10 @@
 #   - the UAT ClusterIssuer is not Ready,
 #   - CoreDNS does not map the core FQDN (and the DMZ FQDN) to the private IP
 #     (only with an endpoints file, which names them),
-#   - a NodePort Service uses a node port the hub does not expose (config.env).
+#   - a NodePort or LoadBalancer Service uses a node port the hub does not
+#     expose (config.env),
+#   - a pod off the host network uses a hostPort the hub does not expose
+#     (none on the DMZ; the edge's 443 and 5405 on core).
 # It reads the clusters only; it changes nothing.
 set -euo pipefail
 
@@ -195,6 +198,29 @@ check_node_ports() {
   fi
 }
 
+check_host_ports() {
+  local hub=$1 k=$2 json allowed bad shown
+  if ! json=$(get_json "$k" pods -A); then
+    fail "$hub" "cannot list Pods"
+    return
+  fi
+  allowed=$(hub_allowed_host_ports "$hub" | jq -R 'select(length > 0) | tonumber' | jq -sc .)
+  # Pods on the host network report hostPort for every port; they are k0s's
+  # own (kube-router, kube-proxy) and not exposures, so they are left out.
+  jq -r '.items[] | select(.spec.hostNetwork != true) | .metadata as $m
+    | [(.spec.containers // [])[] | (.ports // [])[] | select(.hostPort)][]
+    | "  pod   \($m.namespace)/\($m.name)  hostPort \(.hostPort) -> \(.containerPort)"' <<<"$json"
+  bad=$(jq -r --argjson allowed "$allowed" '[.items[] | select(.spec.hostNetwork != true) | .metadata as $m
+    | (.spec.containers // [])[] | (.ports // [])[] | select(.hostPort and ((.hostPort as $p | $allowed | index($p)) | not))
+    | "\($m.namespace)/\($m.name):\(.hostPort)"] | join(" ")' <<<"$json")
+  shown=$(hub_allowed_host_ports "$hub" | paste -sd' ' -)
+  if [[ -n $bad ]]; then
+    fail "$hub" "hostPorts outside the hub's exposed ports (${shown:-none}): $bad"
+  else
+    ok "hostPorts within ${shown:-none}"
+  fi
+}
+
 main() {
   need_cmd jq kubectl
   parse_args "$@"
@@ -209,6 +235,7 @@ main() {
     check_issuer "$hub" "$k"
     check_dns "$hub" "$k"
     check_node_ports "$hub" "$k"
+    check_host_ports "$hub" "$k"
   done
   if ((${#FAILURES[@]})); then
     printf '\n%d check(s) failed:\n' "${#FAILURES[@]}"

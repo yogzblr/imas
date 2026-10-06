@@ -57,9 +57,9 @@ spec:
             - 10.60.1.4
             - uatab12cd34-dmz.centralindia.cloudapp.azure.com
           extraArgs:
-            # Node ports are the externally opened ports themselves (see
-            # config.env and README.md, "Reaching services").
-            service-node-port-range: 5406-8443
+            # Only the node ports this hub exposes (config.env; README.md,
+            # "Exposure").
+            service-node-port-range: 8442-8443
         network:
           provider: kuberouter
           podCIDR: 10.244.0.0/16

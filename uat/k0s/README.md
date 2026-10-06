@@ -3,9 +3,10 @@
 Installs a single-node [k0s](https://k0sproject.io) cluster on each hub VM of
 the Azure UAT gate. uat-dmz and uat-core become two separate clusters, each
 with the controller and the worker on its one node. It then adds what the hub
-charts need: a default StorageClass, cert-manager, a way in from outside
-without a cloud load balancer, the per-run UAT CA as a ClusterIssuer, and the
-DNS rule from the Shared contract (plan section 4h).
+charts need: a default StorageClass, cert-manager, each cluster's NodePort
+range for the ports the hubs expose (see [Exposure](#exposure)), the per-run
+UAT CA as a ClusterIssuer, and the DNS rule from the Shared contract (plan
+section 4h).
 
 It installs no application chart. The hub briefs (uat/hub/dmz, uat/hub/core)
 do that against the kubeconfigs and files written here.
@@ -44,7 +45,7 @@ Everything bootstrap.sh writes goes to `--out`:
 |---|---|---|
 | `dmz.kubeconfig`, `core.kubeconfig` | Admin kubeconfigs. Server `https://127.0.0.1:<kube_port>`, through the kube tunnel. | **Yes** (mode 600). Never upload them as workflow artifacts. |
 | `uat-ca.crt` | The UAT CA certificate. Sprouts pin it (`sproutrootca`, `sproutrootcatofu: false`) and the tests trust it. | No |
-| `endpoints.json` | The hubs' names, addresses, FQDNs and exposed ports, each hub's node port range, the Envoy Service type and the ClusterIssuer name. | No |
+| `endpoints.json` | The hubs' names, addresses, FQDNs and exposed ports, how each hub exposes them, each hub's node port range and the ClusterIssuer name. | No |
 | `k0sctl-dmz.yaml`, `k0sctl-core.yaml` | The rendered k0sctl files. They hold the key's path, not the key. | No |
 | `known_hosts` | The hubs' SSH host keys, recorded on first use for this run. | No |
 | `cache/` | The pinned add-on manifests, after their checksums were verified. | No |
@@ -80,87 +81,59 @@ controller. Telemetry is off.
 | cert-manager | Apache-2.0 | Named in the Shared contract. |
 | local-path-provisioner | Apache-2.0 | Named in the Shared contract. |
 | kubectl | Apache-2.0 | A runner tool. |
-| **busybox** (local-path-provisioner's helper pod image) | **GPL-2.0** | **Flagged: not named in the contract.** The upstream manifest uses it to create and delete volume directories. It is pulled and run unmodified as a container on the UAT hubs only. It is not linked, not shipped, and not a dependency of any released artifact. The owner decides. |
+| **busybox** (local-path-provisioner's helper pod image) | **GPL-2.0** | **Flagged, answered by the owner on 2026-10-06: "replace busybox with a Go test binary". Not yet replaced; how is open question 2.** The upstream manifest uses busybox to create and delete volume directories. It is pulled and run unmodified as a container on the UAT hubs only. It is not linked, not shipped, and not a dependency of any released artifact. |
 
-## Reaching services: NodePort (LoadBalancer for Envoy too)
+## Exposure
 
-**Choice: Services whose node port equals the port the network rules open.
-Each hub's API server NodePort range is narrowed to the ports it exposes:
-`5406-8443` on the DMZ, `443-5405` on core.** No cloud load balancer and no
-port translation.
+Owner decisions, 2026-10-06:
 
-Owner decision, 2026-10-06: Envoy uses node port **8443**, and the Envoy
-Service may be a NodePort or a LoadBalancer. Production puts Envoy behind an
-application gateway. `config.env` sets `UAT_DMZ_ENVOY_SERVICE_TYPE`, default
-`NodePort`, and `expose.sh --type` makes either type:
+- **DMZ.** uat/hub/dmz (UAT.3a) owns the Envoy and bus Services, made from
+  the chart values with pinned node ports. uat/k0s creates none of them.
+  The node ports are **8443** (Envoy) and **8442** (bus client port, which
+  core dials). The DMZ cluster's NodePort range is **8442-8443 only**.
+  Production puts Envoy behind an application gateway; the owner wants
+  NodePort and LoadBalancer both supported, which is UAT.3a's chart values'
+  job now.
+- **Core.** 443 uses hostPorts, as in UAT.3b's PR #132. That PR's edge
+  proxy takes 443 (saasapi and Keycloak behind its TLS front) and 5405
+  (farmer's API, which the DMZ's Envoy dials) as hostPorts on the node.
+  k0s's kube-router CNI chain includes the `portmap` plugin, so hostPorts
+  work. This was checked in k0s's source for the pinned version, not on a
+  node.
 
-- A LoadBalancer Service gets the same pinned node port, so the VM's port
-  8443 works either way. Its external address stays pending on k0s, which
-  has no load balancer controller, unless something in front provides one.
-- `--lb-source-range` sets `loadBalancerSourceRanges`.
+What uat/k0s does about exposure:
 
-Why NodePort and not host ports:
+- It sets each cluster's API server NodePort range:
+  - DMZ `8442-8443`;
+  - core `443-5405`, which keeps PR #132's optional node-port mode
+    (`core.exposure: nodePort`) working.
 
-- A NodePort Service works with the charts as they are. It selects the
-  charts' pods and adds nothing to them (see expose.sh below). None of the
-  charts has a hostPort or hostNetwork value. Host ports would mean patching
-  the charts' Deployments and StatefulSets after every install. They would
-  also depend on kube-router's CNI chain carrying the portmap plugin, which
-  nobody has checked on this k0s build.
-- `externalTrafficPolicy: Local` (expose.sh `--local`) keeps the client's
-  source address for Envoy. Its enroll rate limit and its logs rely on that.
-- A narrowed range lets a node port be a well-known port such as 443, and
-  keeps automatically allocated node ports near the ones in use.
-  bootstrap.sh refuses to expose a port k0s or the node uses
-  (`UAT_RESERVED_NODE_PORTS`: 6443, 8080, 8132, 8133, 9443, 10249, 10250,
-  10256). check.sh fails on any NodePort or LoadBalancer node port a hub does
-  not expose.
-- **The DMZ range now contains the Kubernetes API port.** Any range that
-  holds both 5406 and 8443 also holds 6443, as well as 8080, 8132 and 8133.
-  bootstrap.sh warns about this. The pinned node ports never take those
-  ports. A node port that Kubernetes picks by itself could, and kube-proxy
-  would then capture the API or kube-router's metrics on the node. Nothing
-  in this setup asks for one, but this is open question 2, for the owner.
-  The core range holds no reserved port.
+  Neither range holds a port k0s or the node uses. bootstrap.sh refuses a
+  hub port that is one (`UAT_RESERVED_NODE_PORTS`: 6443, 8080, 8132, 8133,
+  9443, 10249, 10250, 10256). It also warns if a range ever contains one.
+- check.sh fails on any node port, or any hostPort of a pod off the host
+  network, that the hub does not expose:
+  - DMZ: node ports 8443 and 8442, no hostPorts.
+  - Core: 443 and 5405, as either hostPorts or node ports.
 
-| Hub | Node port | Service (chart value) | Who connects | Source |
+| Hub | Port | How | Who creates it | Who connects |
 |---|---|---|---|---|
-| dmz | **8443** | Envoy, as a NodePort or LoadBalancer Service (`envoy.service.port` 443, pod `envoy.listenerPort` 8443) | sprouts, and the runner | owner decision, 2026-10-06 |
-| dmz | **5406** | bus client (`bus.ports.client`) | core (farmer and saasapi dial `farmerbusurl`, `tls://...:5406`) | nats README: Before you install, item 5; farmer README: Reaching the bus |
-| core | **443** | saasapi and Keycloak, behind one TLS front (open question 3) | the runner (the tests, the tenant scripts) | Shared contract |
-| core | **5405** | farmer API (`farmer.apiPort`) | the DMZ's Envoy (`/v1/enroll`, `/v1/refresh`, `/files/`, the JWKS) | farmer README: NetworkPolicy; nats `envoy.upstreams.farmerAPI.port` |
+| dmz | **8443** | node port (NodePort or LoadBalancer Service) | uat/hub/dmz, chart values | sprouts, and the runner |
+| dmz | **8442** | node port, to the bus client port 5406 (`bus.ports.client`) | uat/hub/dmz, chart values | core (farmer and saasapi, `farmerbusurl`) |
+| core | **443** | hostPort on the edge (saasapi and Keycloak behind its TLS front) | uat/hub/core | the runner (the tests, the tenant scripts) |
+| core | **5405** | hostPort on the edge, passed through to farmer's API (`farmer.apiPort`) | uat/hub/core | the DMZ's Envoy (`/v1/enroll`, `/v1/refresh`, `/files/`, the JWKS) |
 
-The ports live in `config.env`. `endpoints.json` repeats them for the hub
-scripts and the tests.
-
-### How a hub script exposes a Service
-
-The charts have no nodePort value, and making a chart's Service a NodePort
-would give every one of its ports a node port (the bus Service would expose
-its websocket port too). So the hub script leaves the charts' Services as
-they are (ClusterIP) and calls `expose.sh`. It adds a sibling Service,
-`<service>-np`, of type NodePort (or LoadBalancer with `--type`): same
-selector, only the chosen port, the node port pinned. expose.sh refuses any node port the hub does not expose.
-Re-running it is safe.
-
-```sh
-# DMZ (uat/hub/dmz), after helm install of deploy/helm/nats:
-uat/k0s/expose.sh --kubeconfig "$K/dmz.kubeconfig" --hub dmz \
-  --namespace imas-dmz --service <release>-nats-envoy --port https --node-port 8443 --local \
-  --type "$UAT_DMZ_ENVOY_SERVICE_TYPE"   # from uat/k0s/config.env
-uat/k0s/expose.sh --kubeconfig "$K/dmz.kubeconfig" --hub dmz \
-  --namespace imas-dmz --service <release>-nats-bus --port client --node-port 5406
-# Core (uat/hub/core), after helm install of deploy/helm/farmer:
-uat/k0s/expose.sh --kubeconfig "$K/core.kubeconfig" --hub core \
-  --namespace imas-core --service <release>-farmer --port api --node-port 5405
-```
+The ports and ranges live in `config.env`. `endpoints.json` repeats them in
+the keys uat/hub/dmz reads (`dmz.ports.envoy`, `dmz.ports.bus`,
+`core.ports.farmer_api`, `cluster_issuer`). The `expose.sh` of earlier
+revisions of this PR is removed (owner decision 0).
 
 Notes for the hub briefs, unverified:
 
-- **NetworkPolicy.** Traffic that arrives through a node port reaches a pod
-  from the node's address. That happens for every Service without
-  `externalTrafficPolicy: Local`, because kube-proxy masquerades it, and the
-  peer cluster's own egress is masqueraded as well. The charts' cross-zone
+- **NetworkPolicy.** Traffic from the other cluster arrives from that
+  node's address, because its pod egress is masqueraded. Traffic through a
+  node port without `externalTrafficPolicy: Local` is masqueraded again by
+  kube-proxy. The charts' cross-zone
   rules select peers by namespace and pod (for example nats
   `networkPolicy.core.namespaceSelector`, farmer `networkPolicy.dmz.*`). That
   can never match a pod in the other cluster, and kube-router enforces it.
@@ -241,7 +214,7 @@ in the live ConfigMap.
 
 `check.sh --out DIR` (or `--dmz-kubeconfig`, `--core-kubeconfig` and
 `--endpoints`) prints, for each hub, the nodes, StorageClasses, cert-manager
-Deployments, the issuer, the CoreDNS lines and the exposed node ports. It
+Deployments, the issuer, the CoreDNS lines, the node ports and the hostPorts. It
 exits 1, listing every failure, when:
 
 - a node is not Ready, or there is none;
@@ -249,7 +222,8 @@ exits 1, listing every failure, when:
 - one of cert-manager's three Deployments is not Available;
 - the ClusterIssuer is not Ready;
 - CoreDNS lacks a FQDN line (only with an endpoints file);
-- a node port lies outside the hub's exposed ports.
+- a node port lies outside the hub's exposed ports;
+- a pod off the host network uses a hostPort the hub does not expose.
 
 It changes nothing. bootstrap.sh runs it at the end unless `--skip-check` is
 given.
@@ -264,7 +238,7 @@ given.
 - **`tests/test-k0s.sh`**, the bash tests. k0sctl, kubectl, curl and sleep
   are stubs (`tests/stubs`), and the clusters' answers are JSON fixtures
   (`testdata/kube`). They cover:
-  - argument handling for all three scripts;
+  - argument handling for both scripts;
   - building both k0sctl files from `testdata/uat.json` and
     `testdata/access.json`, compared with `testdata/expected` (refresh with
     `UPDATE_GOLDEN=1` and review the diff);
@@ -277,9 +251,7 @@ given.
   - checksum refusal and the helper image pin;
   - the CA: a real openssl run, one CA on both hubs, reuse, and refusing two
     different CAs;
-  - every failure branch of check.sh;
-  - expose.sh's port allow-list, the NodePort or LoadBalancer Service it
-    builds, and its read-back.
+  - every failure branch of check.sh, including node ports and hostPorts.
 
 Checked by hand, outside the committed tests: the k0s binary of the pinned
 version (`k0s config validate`) accepts the rendered ClusterConfig, including
@@ -291,77 +263,74 @@ taken from the published releases.
 cluster, the CoreDNS patch taking effect, node ports on a real node, or any
 traffic through a Bastion tunnel. Expect fixes after the first Azure run.
 
+## Answered by the owner (2026-10-06)
+
+- **Envoy's port.** Node port 8443, with NodePort and LoadBalancer both
+  supported (UAT.3a's chart values).
+- **The DMZ range and the API port.** The bus moves to node port 8442 and
+  the DMZ range is `8442-8443` only. It holds no reserved port. UAT.1's
+  network rule (PR #135) and UAT.3a (PR #133) change to match; that is
+  their job, not this PR's.
+- **Core 443.** It uses hostPorts on UAT.3b's edge, as in PR #132. That
+  edge is also the TLS front for saasapi and Keycloak.
+- **Who owns the Envoy and bus Services.** uat/hub/dmz (UAT.3a), from the
+  chart values with pinned node ports. expose.sh is removed.
+- **busybox.** Replace it with a Go test binary. How is open question 2
+  below.
+
 ## Open questions (for the owner and the other UAT briefs)
 
 1. **Core to DMZ bus port.** The owner, 2026-10-06: "Farmer and saasapi
-   connect to farmerbus. So farmer ports can be anything." That is
-   consistent with what follows; the network rule is still UAT.1's to
-   change. The Shared contract says core reaches "the bus
-   websocket port on the DMZ". The charts say farmer and saasapi dial the bus
-   **client** port 5406 (`farmerbusurl`, `tls://...:5406`). The websocket
-   port 5407 is Envoy's upstream inside the DMZ, and core never uses it.
-   This brief exposes 5406 and gives 5407 no node port. UAT.1's network rule
-   from core to the DMZ needs 5406.
-2. **The DMZ NodePort range and the API port (new; for the owner).**
-   - Answered by the owner on 2026-10-06: Envoy's port is node port 8443,
-     with NodePort and LoadBalancer both supported. It is built that way.
-   - The new problem: the DMZ exposes 5406 (bus) and 8443 (Envoy), so its
-     range `5406-8443` contains 6443 (API server), 8080 (kube-router
-     metrics) and 8132/8133 (konnectivity).
-   - The ports this brief pins are never those. But Kubernetes picks a node
-     port by itself for any NodePort or LoadBalancer Service created without
-     one, and that pick could be 6443. kube-proxy would then capture the
-     node's API port, which is the kube tunnel's target. The same pick could
-     also take 8443 or 5406 before they are pinned.
-   - Mitigations in place: bootstrap.sh warns; check.sh fails on any
-     unexpected node port; expose.sh always pins.
-   - Not decided here. The options I see:
-     - (a) Keep `5406-8443` and accept the risk.
-     - (b) Move the bus node port above 6443, for example 8442 with the
-       range `8442-8443`, which holds no reserved port. The owner said
-       farmer's ports "can be anything", but this changes UAT.1's network
-       rule from core to the DMZ.
-     - (c) Move k0s's API port off 6443. This changes the Shared contract's
-       kube tunnel port.
-   - The current files implement (a) only so that they work. Changing it is
-     two lines in `config.env`.
-3. **One 443 on core for saasapi and Keycloak.** saasapi serves plain HTTP
-   (Service port 80, pod 8081: "terminate TLS in front"). Keycloak is a
-   second service on the same FQDN and port. A NodePort maps one port to one
-   Service, so core needs a small TLS-terminating front:
-   - a certificate for the core FQDN from `imas-uat-ca`;
-   - path routing: Keycloak's `/realms/`, `/resources/` and `/js/` to
-     Keycloak, everything else to saasapi;
-   - exposed with `expose.sh --hub core ... --node-port 443`.
+   connect to farmerbus. So farmer ports can be anything."
+   - The Shared contract says core reaches "the bus websocket port on the
+     DMZ".
+   - The charts say farmer and saasapi dial the bus **client** port 5406
+     (`farmerbusurl`). The websocket port 5407 is Envoy's upstream inside
+     the DMZ, and core never uses it.
+   - With the owner's decision, the client port is reached on DMZ node port
+     8442, and UAT.1's network rule from core to the DMZ needs 8442.
+   - farmer's `farmerbusurl` then has to name port 8442 (farmer chart
+     `bus.port`). That is UAT.3b's to set; here it is only noted.
+2. **What "a Go test binary" replaces busybox with.** local-path-provisioner
+   (pinned version) runs its helper pod as `/bin/sh /script/setup` and
+   `/script/teardown` unless its `config.json` sets `setupCommand` and
+   `teardownCommand`. Those name one executable in the helper image, called
+   with `-p <dir> -s <size> -m <mode>` and the `VOL_DIR`, `VOL_MODE`, ...
+   environment variables. A Go replacement is therefore possible:
+   - a small static Go program that creates (setup) or removes (teardown)
+     the volume directory;
+   - built into a minimal image;
+   - with local-path's ConfigMap pointing `setupCommand` and
+     `teardownCommand` at it, and `helperPod.yaml` at that image.
 
-   Not built here: the brief limits this part to NodePort or host ports, and
-   the front depends on UAT.3b's Service names. Proposed owner: UAT.3b.
-4. **The endpoints file.** The contract says scripts take "an endpoints file
-   (the hub names, ports and private addresses in the contract's shape)" but
-   does not fix its fields. `OUT/endpoints.json` is offered as that file. Its
-   `dmz` and `core` objects copy the uat JSON's and add `ports`. The key
-   names match what UAT.3a's PR #133 reads: `dmz.ports.envoy`,
-   `dmz.ports.bus`, `core.ports.farmer_api` and `cluster_issuer`. If another
-   brief defines a different shape, UAT.6 should reconcile them.
+   Every part of that is outside `uat/k0s`, and each needs a decision:
+   - where the program lives in the module;
+   - which workflow builds and publishes the image, and to which registry;
+   - whether "Go test binary" means this, or something else.
+
+   Until then busybox stays pinned. Alternatives: a static
+   `no-provisioner` StorageClass with pre-created local PersistentVolumes,
+   which needs no helper pod but needs the charts' volume sizes known in
+   advance; or another provisioner.
+3. **The core NodePort range.** It stays `443-5405` so that PR #132's
+   node-port mode keeps working. With the default hostPort mode, no core
+   node port is needed. A node port that Kubernetes picks by itself inside
+   that range could take 443 or 5405 before the edge binds them as
+   hostPorts. Nothing in this setup asks for one, and check.sh would report
+   it. Narrowing the range is the owner's call, for example to match the
+   DMZ's "only what is exposed".
+4. **The endpoints file.** The contract does not fix its fields.
+   `OUT/endpoints.json` is offered as that file. Its key names match what
+   UAT.3a's PR #133 reads. If another brief defines a different shape,
+   UAT.6 should reconcile them.
 5. **The ClusterIssuer name** (`imas-uat-ca`) and the CA file
-   (`OUT/uat-ca.crt`) are not in the contract. The hub briefs and UAT.4 need
-   them.
+   (`OUT/uat-ca.crt`) are not in the contract. The hub briefs and UAT.4
+   need them.
 6. **access.json shape.** It is read tolerantly (top level, `vms` or
    `hosts`). If UAT.1 nests ports differently, `access_get` in lib.sh is the
    one place to change.
 7. **Pulls from Docker Hub** (local-path-provisioner, busybox) are anonymous
    from Azure addresses and may be rate limited. cert-manager pulls from
-   quay.io. A mirror is a later step if it bites.
+   quay.io.
 8. That this Kubernetes minor works with the pinned cert-manager release is
    assumed, not verified.
-9. **Who creates the Envoy (and bus) exposure Service is still open with the
-   owner.** UAT.3a's PR #133 creates its own: `<release>-envoy-edge` and
-   `<release>-bus-core`, as externalIPs by default or NodePort 8443 and 5406
-   with `--expose nodeport`.
-   - If UAT.3a runs with `--expose nodeport` and `expose.sh` is also run for
-     Envoy, both Services ask for node port 8443. The second is refused by
-     the API server ("provided port is already allocated").
-   - With UAT.3a's externalIPs default, there is no clash: both Services
-     route the node's port 8443 to Envoy, which is redundant. check.sh does
-     not inspect externalIPs.
-   - One of the two should own it.

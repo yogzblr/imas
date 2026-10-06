@@ -102,8 +102,6 @@ check_settings() {
   done
   [[ " $UAT_RESERVED_NODE_PORTS " == *" $UAT_KUBE_API_PORT "* ]] ||
     die "config.env: UAT_RESERVED_NODE_PORTS must list the API port $UAT_KUBE_API_PORT"
-  [[ $UAT_DMZ_ENVOY_SERVICE_TYPE == NodePort || $UAT_DMZ_ENVOY_SERVICE_TYPE == LoadBalancer ]] ||
-    die "config.env: UAT_DMZ_ENVOY_SERVICE_TYPE must be NodePort or LoadBalancer"
   for hub in "${HUBS[@]}"; do
     range=$(hub_node_port_range "$hub")
     [[ $range =~ ^[1-9][0-9]*-[1-9][0-9]*$ ]] || die "config.env: bad $hub NodePort range: $range"
@@ -122,7 +120,7 @@ check_settings() {
     done
     if [[ -n $reserved_in ]]; then
       log "warning: the $hub NodePort range $range contains ports k0s or the node uses:$reserved_in." \
-        "Pinned node ports never take them; a node port Kubernetes picks by itself could (README.md, open question 2)."
+        "A node port Kubernetes picks by itself could land on one (README.md, Exposure)."
     fi
   done
   [[ $UAT_CLUSTER_ISSUER =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || die "config.env: bad UAT_CLUSTER_ISSUER"
@@ -191,7 +189,9 @@ render_hub() {
 }
 
 # write_endpoints writes the hubs' names, addresses and exposed ports for the
-# hub scripts and the tests: the uat JSON's dmz and core objects plus ports.
+# hub scripts and the tests: the uat JSON's dmz and core objects plus ports
+# (the keys uat/hub/dmz reads: dmz.ports.envoy, dmz.ports.bus,
+# core.ports.farmer_api, cluster_issuer).
 write_endpoints() {
   jq -n \
     --arg run_id "$RUN_ID" \
@@ -200,17 +200,18 @@ write_endpoints() {
     --argjson envoy "$UAT_DMZ_ENVOY_PORT" --argjson bus "$UAT_DMZ_BUS_PORT" \
     --argjson https "$UAT_CORE_HTTPS_PORT" --argjson api "$UAT_CORE_FARMER_API_PORT" \
     --arg drange "$UAT_DMZ_NODE_PORT_RANGE" --arg crange "$UAT_CORE_NODE_PORT_RANGE" \
-    --arg etype "$UAT_DMZ_ENVOY_SERVICE_TYPE" --arg issuer "$UAT_CLUSTER_ISSUER" \
+    --arg issuer "$UAT_CLUSTER_ISSUER" \
     --arg k0s "$K0S_VERSION" '
     {
       run_id: $run_id,
       dmz: {name: $dn, private_ip: $dp, public_ip: $dq, fqdn: $df,
             ports: {envoy: $envoy, bus: $bus},
-            envoy_service_type: $etype, node_port_range: $drange},
+            exposure: "node ports, Services owned by uat/hub/dmz",
+            node_port_range: $drange},
       core: {name: $cn, private_ip: $cp, public_ip: $cq, fqdn: $cf,
              ports: {https: $https, farmer_api: $api},
+             exposure: "hostPorts on the uat/hub/core edge (node ports optional)",
              node_port_range: $crange},
-      exposure: "NodePort",
       cluster_issuer: $issuer,
       ca_file: "uat-ca.crt",
       kubeconfigs: {dmz: "dmz.kubeconfig", core: "core.kubeconfig"},

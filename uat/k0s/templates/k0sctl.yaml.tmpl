@@ -57,8 +57,8 @@ spec:
             - __PRIVATE_IP__
             - __FQDN__
           extraArgs:
-            # Node ports are the externally opened ports themselves (see
-            # config.env and README.md, "Reaching services").
+            # Only the node ports this hub exposes (config.env; README.md,
+            # "Exposure").
             service-node-port-range: __NODE_PORT_RANGE__
         network:
           provider: kuberouter

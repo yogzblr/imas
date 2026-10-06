@@ -57,8 +57,8 @@ spec:
             - 10.60.2.4
             - uatab12cd34-core.centralindia.cloudapp.azure.com
           extraArgs:
-            # Node ports are the externally opened ports themselves (see
-            # config.env and README.md, "Reaching services").
+            # Only the node ports this hub exposes (config.env; README.md,
+            # "Exposure").
             service-node-port-range: 443-5405
         network:
           provider: kuberouter

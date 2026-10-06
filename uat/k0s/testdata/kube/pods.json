@@ -1,0 +1,17 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "metadata": {"name": "kube-router-abcde", "namespace": "kube-system"},
+      "spec": {
+        "hostNetwork": true,
+        "containers": [{"name": "kube-router", "ports": [{"containerPort": 8080, "hostPort": 8080}]}]
+      }
+    },
+    {
+      "metadata": {"name": "coredns-12345", "namespace": "kube-system"},
+      "spec": {"containers": [{"name": "coredns", "ports": [{"containerPort": 53}]}]}
+    }
+  ]
+}
