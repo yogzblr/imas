@@ -31,6 +31,9 @@ type Fleet struct {
 	// HTTP11 is an HTTP/1.1-only client with the run's CA, for raw
 	// requests to Envoy such as a websocket upgrade.
 	HTTP11 *http.Client
+	// BindExec, when set, replaces running bind-tenant.sh: it gets the
+	// script's arguments and returns its stdout and stderr. For tests.
+	BindExec func(ctx context.Context, args []string) (stdout, stderr []byte, err error)
 
 	prepareOnce sync.Once
 	prepareErr  error

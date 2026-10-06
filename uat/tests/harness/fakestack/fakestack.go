@@ -153,6 +153,14 @@ func (s *Stack) AddHost(vm string, tenant int, osName, sproutID string) {
 	s.sprouts[tid+"/"+sproutID] = &sprout{nkey: "U" + strings.ToUpper(hex.EncodeToString(random(27))), hasBoxKey: true, vm: vm}
 }
 
+// AddUser adds a realm user bound to tenantID with both recipe roles, the
+// way bind-tenant.sh's scratch mode leaves one.
+func (s *Stack) AddUser(name, password, tenantID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.users[name] = &user{id: newID("u"), password: password, tenantID: tenantID, roles: []string{ReadRole, WriteRole}}
+}
+
 // Host returns a copy of a host's state.
 func (s *Stack) Host(vm string) (Host, bool) {
 	s.mu.Lock()
@@ -305,8 +313,10 @@ func (s *Stack) kcAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		tid := ""
-		if v := body.Attributes[TenantAttribute]; len(v) > 0 {
-			tid = v[0]
+		for _, attr := range []string{TenantAttribute, "organization_id"} {
+			if v := body.Attributes[attr]; len(v) > 0 {
+				tid = v[0]
+			}
 		}
 		u := &user{id: newID("u"), password: body.Credentials[0].Value, tenantID: tid}
 		s.users[body.Username] = u

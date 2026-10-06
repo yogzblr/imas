@@ -360,7 +360,6 @@ func TestRunShAgainstFakeStack(t *testing.T) {
 				time.Sleep(200 * time.Millisecond)
 			}
 		}
-		time.Sleep(200 * time.Millisecond)
 		return dir
 	}
 	runSh := func(dir string, args ...string) (int, string) {
@@ -376,7 +375,7 @@ func TestRunShAgainstFakeStack(t *testing.T) {
 		}
 		return code, string(out)
 	}
-	dir := startFake("flat", "uat-ca.pem")
+	dir := startFake("flat", ".ready")
 	if code, out := runSh(dir, "smoke"); code != 0 || !strings.Contains(out, "RESULT: PASS") || !strings.Contains(out, "PASS   C1                     windows  2") {
 		t.Errorf("smoke against the fake: exit %d\n%s", code, out)
 	}
@@ -391,12 +390,12 @@ func TestRunShAgainstFakeStack(t *testing.T) {
 	}
 
 	// uat/hub/core's layout (core.json, credentials.json and keycloak.json,
-	// no Keycloak admin): smoke passes, T1 skipping the part that needs a
-	// user for the tenant it creates.
-	core := startFake("core", "core/out/core.json", "core/sensitive/credentials.json", "core/sensitive/keycloak.json", "harness.json")
+	// no Keycloak admin): smoke passes, T1 getting the user for the tenant
+	// it creates from the fake bind-tenant.sh --scratch-user.
+	core := startFake("core", ".ready")
 	code, out := runSh(core, "smoke")
 	if code != 0 || !strings.Contains(out, "RESULT: PASS") || !strings.Contains(out, "PASS   K1") ||
-		!strings.Contains(out, "SKIP   T1") || !strings.Contains(out, "create-user-and-bind") {
+		!strings.Contains(out, "PASS   T1") || strings.Contains(out, "SKIP   T1") {
 		t.Errorf("smoke against the fake in the core layout: exit %d\n%s", code, out)
 	}
 }

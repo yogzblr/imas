@@ -54,7 +54,7 @@
 // (endpoint, command and bind_tenant overrides), tenants.json and
 // sprouts.json. UAT.4 binds tenants 1 and 2; Fleet.CheckTenantClaims checks
 // their tokens carry their IDs, and Fleet.ScratchUser makes users for
-// tenants a test creates (see bind.go). $IMAS_UAT_VMCTL names the vmctl.sh
+// tenants a test creates with bind-tenant.sh --scratch-user (see bind.go). $IMAS_UAT_VMCTL names the vmctl.sh
 // to use; $IMAS_UAT_RELEASE_TAG, when set, is the release the sprouts must
 // be running.
 //

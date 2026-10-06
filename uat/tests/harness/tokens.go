@@ -242,6 +242,9 @@ type ScratchUser struct {
 	ID       string
 	TenantID string
 	User     Credentials
+	// NoDelete is set for a user bind-tenant.sh made: uat/hub/core has no
+	// way to delete one, so Delete leaves it (it dies with the run).
+	NoDelete bool
 	k        *Tokens
 }
 
@@ -250,8 +253,11 @@ func (u *ScratchUser) Token(ctx context.Context) (string, error) {
 	return u.k.Password(ctx, ClientCreds{ClientID: u.k.cfg.ClientID, ClientSecret: u.k.cfg.ClientSecret}, u.User)
 }
 
-// Delete removes the user from the realm.
+// Delete removes the user from the realm (a no-op with NoDelete).
 func (u *ScratchUser) Delete(ctx context.Context) error {
+	if u.NoDelete {
+		return nil
+	}
 	tok, err := u.k.adminToken(ctx)
 	if err != nil {
 		return err

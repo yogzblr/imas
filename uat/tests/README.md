@@ -102,14 +102,26 @@ which UAT.3b's realm maps to the `organization.id` claim.
 **Binding the tenants.** UAT.4 binds tenants 1 and 2 with
 `uat/hub/core/bind-tenant.sh`; the harness doesn't. Before any test it
 checks that each tenant's admin token carries the tenant's ID as
-`organization.id`, and stops the run, naming the tenant, if not. Tenants a
-test creates itself (T1, T4, T5) need a user bound to them: the harness is
-to use bind-tenant.sh's create-user-and-bind mode for that (owner decision),
-which PR #132 had not documented when this was written, so it isn't wired in
-yet (`Fleet.ScratchUser` is the one place it goes; `harness.json`'s
-`bind_tenant` and `$IMAS_UAT_CORE_KUBECONFIG`, `$IMAS_UAT_ENDPOINTS` and
-`$IMAS_UAT_BIND_TENANT` already give the arguments every uat/hub/core script
-takes). Until then those tests skip that part with the reason.
+`organization.id`, and stops the run, naming the tenant, if not.
+
+**Users for tenants a test creates (T1, T4, T5).** The harness runs
+bind-tenant.sh's scratch mode (PR #132):
+
+```
+bind-tenant.sh <kubeconfig> <endpoints.json> <state-dir> --scratch-user scratch-<random> admin <tenant_id>
+```
+
+It reads the JSON line the script prints (`username`, `tenant_id`, `role`,
+`password_file`) and the password from that file, then gets the user's
+tokens like any other user's. It needs the core kubeconfig
+(`$IMAS_UAT_CORE_KUBECONFIG`) and the endpoints file (`$IMAS_UAT_ENDPOINTS`),
+or harness.json's `bind_tenant`; the state directory defaults to the state
+root core.json was found under, and the script to
+`uat/hub/core/bind-tenant.sh` (`$IMAS_UAT_BIND_TENANT` overrides it). Without
+them, and without a keycloak.json `admin` for the admin REST API, those
+tests skip that part with the reason. uat/hub/core has no way to delete a
+scratch user, so they stay in the realm (and in core.json's
+`scratch_users`) until the run is torn down.
 
 `keycloak.json`:
 
@@ -148,9 +160,8 @@ What the suite assumes of the realm (UAT.3b):
   `master`) or a service account (`client_secret`, client credentials).
   UAT.3b's edge doesn't route the admin API (Keycloak is administered only
   through `kubectl exec`), so its keycloak.json has no `admin` and the
-  harness never takes credentials.json's master admin for this. On UAT.3b's
-  deployment T1 (after its 202), T4 and T5 skip until bind-tenant.sh's
-  create-user-and-bind mode is wired in (above).
+  harness never takes credentials.json's master admin for this; it uses
+  bind-tenant.sh's scratch mode instead (above).
   `tenant_attribute` is the user attribute the realm maps to
   `organization.id` (for example a user attribute mapper with the claim name
   `organization.id`; on Keycloak 24 and later the attribute has to be in the

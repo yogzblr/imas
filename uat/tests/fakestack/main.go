@@ -76,6 +76,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	// .ready tells a waiting test every file is written.
+	if err := os.WriteFile(filepath.Join(abs, ".ready"), nil, 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	fmt.Printf("fake UAT stack at %s\nexport IMAS_UAT_DIR=%s IMAS_UAT_VMCTL=%s\n", s.Server.URL, abs, vmctl)
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)

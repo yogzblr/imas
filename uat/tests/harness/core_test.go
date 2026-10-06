@@ -1,9 +1,11 @@
 package harness
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -223,7 +225,7 @@ func TestScratchUserSeam(t *testing.T) {
 	if f.CanMakeScratchUsers() {
 		t.Error("no admin, but scratch users")
 	}
-	if _, err := f.ScratchUser(ctx(t), "t_x"); !errors.Is(err, ErrNoScratchUsers) || !strings.Contains(err.Error(), "create-user-and-bind") {
+	if _, err := f.ScratchUser(ctx(t), "t_x"); !errors.Is(err, ErrNoScratchUsers) || !strings.Contains(err.Error(), EnvCoreKubeconfig) {
 		t.Errorf("%v", err)
 	}
 	if _, err := f.Tokens.Tenant(ctx(t), 1, RoleAdmin); err != nil {
@@ -243,5 +245,102 @@ func TestCheckTenantClaims(t *testing.T) {
 	f.Env.tenantIDs[2] = "t_zzzzzzzzzzzzzzzz"
 	if err := f.CheckTenantClaims(ctx(t)); err == nil || !strings.Contains(err.Error(), "UAT.4 binds") {
 		t.Errorf("an unbound tenant: %v", err)
+	}
+}
+
+// bind-tenant.sh --scratch-user (PR #132): the arguments, the JSON line,
+// the password file, and a token that carries the tenant.
+func TestScratchUserThroughBindTenant(t *testing.T) {
+	f, stack := fakeFleet(t)
+	f.Tokens.cfg.Admin = nil
+	state := t.TempDir()
+	f.Env.Bind = BindConfig{Script: "/unused", Kubeconfig: "/k", Endpoints: "/e", StateDir: state}
+	if !f.CanMakeScratchUsers() {
+		t.Fatal("bind-tenant.sh configured, but no scratch users")
+	}
+	var got []string
+	answer := func(args []string, pwFile, line string) ([]byte, []byte, error) {
+		got = args
+		if pwFile != "" {
+			if err := os.MkdirAll(filepath.Dir(pwFile), 0o700); err != nil {
+				return nil, nil, err
+			}
+			if err := os.WriteFile(pwFile, []byte("s3cret-pw\n"), 0o600); err != nil {
+				return nil, nil, err
+			}
+		}
+		return []byte(line), []byte("bound\n"), nil
+	}
+	f.BindExec = func(_ context.Context, args []string) ([]byte, []byte, error) {
+		name, tenant := args[4], args[6]
+		stack.AddUser(name, "s3cret-pw", tenant)
+		pw := filepath.Join(state, "core", "sensitive", "keycloak", "scratch", name+".password")
+		return answer(args, pw, `{"username":"`+name+`","tenant_id":"`+tenant+`","role":"admin","password_file":"`+pw+`"}`+"\n")
+	}
+	u, err := f.ScratchUser(ctx(t), "t_hhhhhhhhhhhhhhhh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 7 || got[0] != "/k" || got[1] != "/e" || got[2] != state || got[3] != "--scratch-user" ||
+		!regexp.MustCompile(`^scratch-[a-z0-9][a-z0-9-]{0,50}$`).MatchString(got[4]) || got[5] != "admin" || got[6] != "t_hhhhhhhhhhhhhhhh" {
+		t.Errorf("arguments %q", got)
+	}
+	if u.User.Password != "s3cret-pw" || !u.NoDelete || u.TenantID != "t_hhhhhhhhhhhhhhhh" {
+		t.Errorf("user %+v", u)
+	}
+	tok, err := u.Token(ctx(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ := DecodeClaims(tok)
+	if org, _ := c["organization"].(map[string]any); org["id"] != "t_hhhhhhhhhhhhhhhh" {
+		t.Errorf("token organization %v", c["organization"])
+	}
+	if err := u.Delete(ctx(t)); err != nil {
+		t.Errorf("Delete of a bind-tenant.sh user is a no-op: %v", err)
+	}
+
+	for name, exec := range map[string]func(context.Context, []string) ([]byte, []byte, error){
+		"script fails": func(context.Context, []string) ([]byte, []byte, error) {
+			return nil, []byte("t_x is tenant 1 or 2"), errors.New("exit status 1")
+		},
+		"no JSON": func(_ context.Context, args []string) ([]byte, []byte, error) { return answer(args, "", "done\n") },
+		"another user": func(_ context.Context, args []string) ([]byte, []byte, error) {
+			return answer(args, "", `{"username":"scratch-other","tenant_id":"`+args[6]+`","role":"admin","password_file":"/x"}`)
+		},
+		"no password file": func(_ context.Context, args []string) ([]byte, []byte, error) {
+			return answer(args, "", `{"username":"`+args[4]+`","tenant_id":"`+args[6]+`","role":"admin","password_file":"/nonexistent/pw"}`)
+		},
+	} {
+		f.BindExec = exec
+		if _, err := f.ScratchUser(ctx(t), "t_iiiiiiiiiiiiiiii"); err == nil {
+			t.Errorf("%s: want an error", name)
+		} else if name == "script fails" && !strings.Contains(err.Error(), "tenant 1 or 2") {
+			t.Errorf("%s: the error lacks the script's stderr: %v", name, err)
+		}
+	}
+}
+
+// The real exec path: a script with bind-tenant.sh's arguments and output.
+func TestScratchUserRunsTheScript(t *testing.T) {
+	needShell(t)
+	f, _ := fakeFleet(t)
+	dir := t.TempDir()
+	script := filepath.Join(dir, "bind-tenant.sh")
+	writeFile(t, script, `#!/usr/bin/env bash
+set -eu
+[ "$4" = --scratch-user ] || exit 2
+pwf="$3/$5.password"
+printf 'pw-from-file\n' > "$pwf"
+echo "log line" >&2
+printf '{"username":"%s","tenant_id":"%s","role":"%s","password_file":"%s"}\n' "$5" "$7" "$6" "$pwf"
+`)
+	if err := os.Chmod(script, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.Env.Bind = BindConfig{Script: script, Kubeconfig: "/k", Endpoints: "/e", StateDir: dir}
+	u, err := f.ScratchUser(ctx(t), "t_jjjjjjjjjjjjjjjj")
+	if err != nil || u.User.Password != "pw-from-file" || !strings.HasPrefix(u.User.Username, "scratch-") {
+		t.Errorf("%+v %v", u, err)
 	}
 }

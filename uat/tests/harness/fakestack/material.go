@@ -31,7 +31,9 @@ func (s *Stack) AddContractHosts() {
 // core/out/core.json and core/out/uat-ca.crt (not secret), and
 // core/sensitive/credentials.json and keycloak.json. Tenants 1 and 2 are
 // recorded as bound, as bind-tenant.sh leaves them after UAT.4 ran it.
-// There is no Keycloak admin, as with UAT.3b's edge.
+// There is no Keycloak admin, as with UAT.3b's edge; harness.json's
+// bind_tenant names a fake bind-tenant.sh with the scratch mode (it needs
+// curl).
 func (s *Stack) WriteCoreMaterial(dir, vmctl string) error {
 	if err := s.WriteMaterial(dir, vmctl); err != nil {
 		return err
@@ -85,8 +87,32 @@ func (s *Stack) WriteCoreMaterial(dir, vmctl string) error {
 		"other_audience_client": map[string]string{"client_id": "imas-uat-other-audience", "client_secret": ""},
 		"tenants":               map[string]any{"1": tenant(1), "2": tenant(2)},
 	}
+	// A bind-tenant.sh with only the scratch mode (PR #132, head e2d8ee1:
+	// same arguments, same JSON line, the password in a 0600 file), which
+	// makes the user through the fake's admin API with curl, and the
+	// kubeconfig and endpoints files it is given (never read).
+	bind := filepath.Join(dir, "bind-tenant.sh")
+	script := fmt.Sprintf(fakeBindTenant, filepath.Join(out, "uat-ca.crt"), s.Server.URL, Realm)
+	if err := os.WriteFile(bind, []byte(script), 0o700); err != nil {
+		return err
+	}
+	for _, f := range []string{"core.kubeconfig", "endpoints.json"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("{}\n"), 0o600); err != nil {
+			return err
+		}
+	}
+	hj := filepath.Join(dir, "harness.json")
+	var harness map[string]any
+	if b, err := os.ReadFile(hj); err == nil {
+		_ = json.Unmarshal(b, &harness)
+	}
+	if harness == nil {
+		harness = map[string]any{}
+	}
+	harness["bind_tenant"] = map[string]string{"script": bind, "kubeconfig": filepath.Join(dir, "core.kubeconfig"),
+		"endpoints": filepath.Join(dir, "endpoints.json"), "state_dir": dir}
 	for path, v := range map[string]any{filepath.Join(out, "core.json"): core, filepath.Join(sens, "credentials.json"): creds,
-		filepath.Join(sens, "keycloak.json"): kc} {
+		filepath.Join(sens, "keycloak.json"): kc, hj: harness} {
 		b, err := json.MarshalIndent(v, "", "  ")
 		if err != nil {
 			return err
@@ -158,3 +184,21 @@ func (s *Stack) WriteMaterial(dir, vmctl string) error {
 	}
 	return os.WriteFile(filepath.Join(dir, "uat-ca.pem"), ca, 0o600)
 }
+
+// fakeBindTenant is bind-tenant.sh's scratch mode for the fake stack.
+const fakeBindTenant = `#!/usr/bin/env bash
+# bind-tenant.sh for the fake stack: --scratch-user only.
+set -euo pipefail
+[ "${4:-}" = --scratch-user ] && [ $# -eq 7 ] || { echo "fake bind-tenant.sh: only --scratch-user" >&2; exit 2; }
+user=$5 role=$6 tenant=$7
+dir="$3/core/sensitive/keycloak/scratch"
+(umask 077 && mkdir -p "$dir")
+pwf="$dir/$user.password"
+[ -s "$pwf" ] || (umask 077 && head -c 18 /dev/urandom | base64 | tr -d '/+=\n' > "$pwf")
+printf '{"username":"%%s","enabled":true,"attributes":{"organization_id":["%%s"]},"credentials":[{"type":"password","value":"%%s"}]}' \
+	"$user" "$tenant" "$(head -n1 "$pwf")" |
+	curl -sS --fail --cacert %q -H 'Authorization: Bearer fake' -H 'Content-Type: application/json' \
+		--data-binary @- "%s/admin/realms/%s/users" >/dev/null
+echo "bound $user to $tenant" >&2
+printf '{"username":"%%s","tenant_id":"%%s","role":"%%s","password_file":"%%s"}\n' "$user" "$tenant" "$role" "$pwf"
+`
