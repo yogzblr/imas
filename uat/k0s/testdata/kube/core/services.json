@@ -7,7 +7,11 @@
       "spec": {"type": "ClusterIP", "ports": [{"name": "https", "port": 443}]}
     },
     {
-      "metadata": {"name": "edge", "namespace": "imas-uat"},
+      "metadata": {"name": "imas-core-farmer-np", "namespace": "imas-core"},
+      "spec": {"type": "NodePort", "ports": [{"name": "api", "port": 5405, "nodePort": 5405}]}
+    },
+    {
+      "metadata": {"name": "edge-np", "namespace": "imas-uat"},
       "spec": {"type": "NodePort", "ports": [{"name": "https", "port": 443, "nodePort": 443}]}
     }
   ]

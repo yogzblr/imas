@@ -44,7 +44,7 @@ Everything bootstrap.sh writes goes to `--out`:
 |---|---|---|
 | `dmz.kubeconfig`, `core.kubeconfig` | Admin kubeconfigs. Server `https://127.0.0.1:<kube_port>`, through the kube tunnel. | **Yes** (mode 600). Never upload them as workflow artifacts. |
 | `uat-ca.crt` | The UAT CA certificate. Sprouts pin it (`sproutrootca`, `sproutrootcatofu: false`) and the tests trust it. | No |
-| `endpoints.json` | The hubs' names, addresses, FQDNs and exposed ports, the node port range and the ClusterIssuer name. | No |
+| `endpoints.json` | The hubs' names, addresses, FQDNs and exposed ports, each hub's node port range, the Envoy Service type and the ClusterIssuer name. | No |
 | `k0sctl-dmz.yaml`, `k0sctl-core.yaml` | The rendered k0sctl files. They hold the key's path, not the key. | No |
 | `known_hosts` | The hubs' SSH host keys, recorded on first use for this run. | No |
 | `cache/` | The pinned add-on manifests, after their checksums were verified. | No |
@@ -82,11 +82,22 @@ controller. Telemetry is off.
 | kubectl | Apache-2.0 | A runner tool. |
 | **busybox** (local-path-provisioner's helper pod image) | **GPL-2.0** | **Flagged: not named in the contract.** The upstream manifest uses it to create and delete volume directories. It is pulled and run unmodified as a container on the UAT hubs only. It is not linked, not shipped, and not a dependency of any released artifact. The owner decides. |
 
-## Reaching services: NodePort
+## Reaching services: NodePort (LoadBalancer for Envoy too)
 
-**Choice: NodePort Services whose node port equals the port the network rules
-open, with the API server's NodePort range narrowed to `443-5406`.** No cloud
-load balancer, no port translation.
+**Choice: Services whose node port equals the port the network rules open.
+Each hub's API server NodePort range is narrowed to the ports it exposes:
+`5406-8443` on the DMZ, `443-5405` on core.** No cloud load balancer and no
+port translation.
+
+Owner decision, 2026-10-06: Envoy uses node port **8443**, and the Envoy
+Service may be a NodePort or a LoadBalancer. Production puts Envoy behind an
+application gateway. `config.env` sets `UAT_DMZ_ENVOY_SERVICE_TYPE`, default
+`NodePort`, and `expose.sh --type` makes either type:
+
+- A LoadBalancer Service gets the same pinned node port, so the VM's port
+  8443 works either way. Its external address stays pending on k0s, which
+  has no load balancer controller, unless something in front provides one.
+- `--lb-source-range` sets `loadBalancerSourceRanges`.
 
 Why NodePort and not host ports:
 
@@ -98,15 +109,23 @@ Why NodePort and not host ports:
   nobody has checked on this k0s build.
 - `externalTrafficPolicy: Local` (expose.sh `--local`) keeps the client's
   source address for Envoy. Its enroll rate limit and its logs rely on that.
-- The narrowed range lets a node port be a well-known port such as 443. It
-  also stays below the Kubernetes API (6443), so an automatically allocated
-  node port can never land on the API server or the kubelet (10250).
-  check.sh fails on any NodePort or LoadBalancer node port a hub does not
-  expose.
+- A narrowed range lets a node port be a well-known port such as 443, and
+  keeps automatically allocated node ports near the ones in use.
+  bootstrap.sh refuses to expose a port k0s or the node uses
+  (`UAT_RESERVED_NODE_PORTS`: 6443, 8080, 8132, 8133, 9443, 10249, 10250,
+  10256). check.sh fails on any NodePort or LoadBalancer node port a hub does
+  not expose.
+- **The DMZ range now contains the Kubernetes API port.** Any range that
+  holds both 5406 and 8443 also holds 6443, as well as 8080, 8132 and 8133.
+  bootstrap.sh warns about this. The pinned node ports never take those
+  ports. A node port that Kubernetes picks by itself could, and kube-proxy
+  would then capture the API or kube-router's metrics on the node. Nothing
+  in this setup asks for one, but this is open question 2, for the owner.
+  The core range holds no reserved port.
 
 | Hub | Node port | Service (chart value) | Who connects | Source |
 |---|---|---|---|---|
-| dmz | **443** | Envoy (`envoy.service.port` 443, pod `envoy.listenerPort` 8443) | sprouts, and the runner | nats README: Envoy and NetworkPolicy |
+| dmz | **8443** | Envoy, as a NodePort or LoadBalancer Service (`envoy.service.port` 443, pod `envoy.listenerPort` 8443) | sprouts, and the runner | owner decision, 2026-10-06 |
 | dmz | **5406** | bus client (`bus.ports.client`) | core (farmer and saasapi dial `farmerbusurl`, `tls://...:5406`) | nats README: Before you install, item 5; farmer README: Reaching the bus |
 | core | **443** | saasapi and Keycloak, behind one TLS front (open question 3) | the runner (the tests, the tenant scripts) | Shared contract |
 | core | **5405** | farmer API (`farmer.apiPort`) | the DMZ's Envoy (`/v1/enroll`, `/v1/refresh`, `/files/`, the JWKS) | farmer README: NetworkPolicy; nats `envoy.upstreams.farmerAPI.port` |
@@ -120,14 +139,15 @@ The charts have no nodePort value, and making a chart's Service a NodePort
 would give every one of its ports a node port (the bus Service would expose
 its websocket port too). So the hub script leaves the charts' Services as
 they are (ClusterIP) and calls `expose.sh`. It adds a sibling Service,
-`<service>-np`, of type NodePort: same selector, only the chosen port, the
-node port pinned. expose.sh refuses any node port the hub does not expose.
+`<service>-np`, of type NodePort (or LoadBalancer with `--type`): same
+selector, only the chosen port, the node port pinned. expose.sh refuses any node port the hub does not expose.
 Re-running it is safe.
 
 ```sh
 # DMZ (uat/hub/dmz), after helm install of deploy/helm/nats:
 uat/k0s/expose.sh --kubeconfig "$K/dmz.kubeconfig" --hub dmz \
-  --namespace imas-dmz --service <release>-nats-envoy --port https --node-port 443 --local
+  --namespace imas-dmz --service <release>-nats-envoy --port https --node-port 8443 --local \
+  --type "$UAT_DMZ_ENVOY_SERVICE_TYPE"   # from uat/k0s/config.env
 uat/k0s/expose.sh --kubeconfig "$K/dmz.kubeconfig" --hub dmz \
   --namespace imas-dmz --service <release>-nats-bus --port client --node-port 5406
 # Core (uat/hub/core), after helm install of deploy/helm/farmer:
@@ -251,15 +271,15 @@ given.
   - the SANs, the node port range, the CoreDNS lines and the single place
     the k0s version is set;
   - refusal of bad addresses, FQDNs carrying YAML, `$` or Corefile syntax,
-    bad users, run ids, missing tunnels, and settings that would put the API
-    port in the node port range;
+    bad users, run ids, missing tunnels, and settings that would expose a
+    port k0s uses; the warning when a range contains one;
   - the install order and kubeconfig addresses against stubs;
   - checksum refusal and the helper image pin;
   - the CA: a real openssl run, one CA on both hubs, reuse, and refusing two
     different CAs;
   - every failure branch of check.sh;
-  - expose.sh's port allow-list, the NodePort Service it builds, and its
-    read-back.
+  - expose.sh's port allow-list, the NodePort or LoadBalancer Service it
+    builds, and its read-back.
 
 Checked by hand, outside the committed tests: the k0s binary of the pinned
 version (`k0s config validate`) accepts the rendered ClusterConfig, including
@@ -268,22 +288,43 @@ config parser rejects unknown fields). The pinned manifests' checksums were
 taken from the published releases.
 
 **Not run:** k0sctl against a real host, k0s coming up, the add-ons on a
-cluster, the CoreDNS patch taking effect, NodePort 443 on a real node, or any
+cluster, the CoreDNS patch taking effect, node ports on a real node, or any
 traffic through a Bastion tunnel. Expect fixes after the first Azure run.
 
 ## Open questions (for the owner and the other UAT briefs)
 
-1. **Core to DMZ bus port.** The Shared contract says core reaches "the bus
+1. **Core to DMZ bus port.** The owner, 2026-10-06: "Farmer and saasapi
+   connect to farmerbus. So farmer ports can be anything." That is
+   consistent with what follows; the network rule is still UAT.1's to
+   change. The Shared contract says core reaches "the bus
    websocket port on the DMZ". The charts say farmer and saasapi dial the bus
    **client** port 5406 (`farmerbusurl`, `tls://...:5406`). The websocket
    port 5407 is Envoy's upstream inside the DMZ, and core never uses it.
    This brief exposes 5406 and gives 5407 no node port. UAT.1's network rule
    from core to the DMZ needs 5406.
-2. **Envoy's external port.** The contract says "Envoy's port". Here it is
-   443: the chart's `envoy.service.port`, and what a production
-   LoadBalancer edge serves. The pod listens on 8443 (`envoy.listenerPort`).
-   If UAT.1 opens 8443 instead, change `UAT_DMZ_ENVOY_PORT` and the range in
-   config.env (the range must then not reach 6443), or change UAT.1.
+2. **The DMZ NodePort range and the API port (new; for the owner).**
+   - Answered by the owner on 2026-10-06: Envoy's port is node port 8443,
+     with NodePort and LoadBalancer both supported. It is built that way.
+   - The new problem: the DMZ exposes 5406 (bus) and 8443 (Envoy), so its
+     range `5406-8443` contains 6443 (API server), 8080 (kube-router
+     metrics) and 8132/8133 (konnectivity).
+   - The ports this brief pins are never those. But Kubernetes picks a node
+     port by itself for any NodePort or LoadBalancer Service created without
+     one, and that pick could be 6443. kube-proxy would then capture the
+     node's API port, which is the kube tunnel's target. The same pick could
+     also take 8443 or 5406 before they are pinned.
+   - Mitigations in place: bootstrap.sh warns; check.sh fails on any
+     unexpected node port; expose.sh always pins.
+   - Not decided here. The options I see:
+     - (a) Keep `5406-8443` and accept the risk.
+     - (b) Move the bus node port above 6443, for example 8442 with the
+       range `8442-8443`, which holds no reserved port. The owner said
+       farmer's ports "can be anything", but this changes UAT.1's network
+       rule from core to the DMZ.
+     - (c) Move k0s's API port off 6443. This changes the Shared contract's
+       kube tunnel port.
+   - The current files implement (a) only so that they work. Changing it is
+     two lines in `config.env`.
 3. **One 443 on core for saasapi and Keycloak.** saasapi serves plain HTTP
    (Service port 80, pod 8081: "terminate TLS in front"). Keycloak is a
    second service on the same FQDN and port. A NodePort maps one port to one
@@ -298,7 +339,9 @@ traffic through a Bastion tunnel. Expect fixes after the first Azure run.
 4. **The endpoints file.** The contract says scripts take "an endpoints file
    (the hub names, ports and private addresses in the contract's shape)" but
    does not fix its fields. `OUT/endpoints.json` is offered as that file. Its
-   `dmz` and `core` objects copy the uat JSON's and add `ports`. If another
+   `dmz` and `core` objects copy the uat JSON's and add `ports`. The key
+   names match what UAT.3a's PR #133 reads: `dmz.ports.envoy`,
+   `dmz.ports.bus`, `core.ports.farmer_api` and `cluster_issuer`. If another
    brief defines a different shape, UAT.6 should reconcile them.
 5. **The ClusterIssuer name** (`imas-uat-ca`) and the CA file
    (`OUT/uat-ca.crt`) are not in the contract. The hub briefs and UAT.4 need
@@ -311,3 +354,14 @@ traffic through a Bastion tunnel. Expect fixes after the first Azure run.
    quay.io. A mirror is a later step if it bites.
 8. That this Kubernetes minor works with the pinned cert-manager release is
    assumed, not verified.
+9. **Who creates the Envoy (and bus) exposure Service is still open with the
+   owner.** UAT.3a's PR #133 creates its own: `<release>-envoy-edge` and
+   `<release>-bus-core`, as externalIPs by default or NodePort 8443 and 5406
+   with `--expose nodeport`.
+   - If UAT.3a runs with `--expose nodeport` and `expose.sh` is also run for
+     Envoy, both Services ask for node port 8443. The second is refused by
+     the API server ("provided port is already allocated").
+   - With UAT.3a's externalIPs default, there is no clash: both Services
+     route the node's port 8443 to Envoy, which is redundant. check.sh does
+     not inspect externalIPs.
+   - One of the two should own it.

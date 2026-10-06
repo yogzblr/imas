@@ -182,7 +182,11 @@ check_node_ports() {
     return
   fi
   allowed=$(hub_allowed_node_ports "$hub" | jq -R 'tonumber' | jq -sc .)
-  jq -r '.items[] | select(.spec.type == "NodePort" or .spec.type == "LoadBalancer") | .metadata as $m | .spec.ports[] | select(.nodePort) | "  svc   \($m.namespace)/\($m.name)  \(.port) -> node port \(.nodePort)"' <<<"$json"
+  jq -r '.items[] | select(.spec.type == "NodePort" or .spec.type == "LoadBalancer")
+    | .metadata as $m | .spec.type as $t
+    | (if $t == "LoadBalancer" then "  external=\((.status.loadBalancer.ingress // []) | map(.ip // .hostname) | if length == 0 then "pending" else join(",") end)" else "" end) as $lb
+    | .spec.ports[] | select(.nodePort)
+    | "  svc   \($m.namespace)/\($m.name)  \($t)  \(.port) -> node port \(.nodePort)\($lb)"' <<<"$json"
   bad=$(jq -r --argjson allowed "$allowed" '[.items[] | .metadata as $m | (.spec.ports // [])[] | select(.nodePort and ((.nodePort as $p | $allowed | index($p)) | not)) | "\($m.namespace)/\($m.name):\(.nodePort)"] | join(" ")' <<<"$json")
   if [[ -n $bad ]]; then
     fail "$hub" "node ports outside the hub's exposed ports ($(hub_allowed_node_ports "$hub" | paste -sd' ' -)): $bad"

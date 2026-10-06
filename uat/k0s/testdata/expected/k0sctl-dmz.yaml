@@ -59,7 +59,7 @@ spec:
           extraArgs:
             # Node ports are the externally opened ports themselves (see
             # config.env and README.md, "Reaching services").
-            service-node-port-range: 443-5406
+            service-node-port-range: 5406-8443
         network:
           provider: kuberouter
           podCIDR: 10.244.0.0/16

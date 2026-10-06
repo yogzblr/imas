@@ -95,16 +95,35 @@ parse_args() {
 # check_settings fails on a settings file that would render a broken cluster.
 check_settings() {
   [[ $K0S_VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+\+k0s\.[0-9]+$ ]] || die "versions.env: bad K0S_VERSION: $K0S_VERSION"
-  [[ $UAT_NODE_PORT_RANGE =~ ^[1-9][0-9]*-[1-9][0-9]*$ ]] || die "config.env: bad UAT_NODE_PORT_RANGE"
-  local lo=${UAT_NODE_PORT_RANGE%-*} hi=${UAT_NODE_PORT_RANGE#*-} p
-  ((lo < hi && hi <= 65535)) || die "config.env: bad UAT_NODE_PORT_RANGE: $UAT_NODE_PORT_RANGE"
   is_port "$UAT_KUBE_API_PORT" || die "config.env: bad UAT_KUBE_API_PORT"
-  if port_in_range "$UAT_KUBE_API_PORT" "$UAT_NODE_PORT_RANGE"; then
-    die "config.env: UAT_NODE_PORT_RANGE must not contain the API port $UAT_KUBE_API_PORT"
-  fi
-  for p in "$UAT_DMZ_ENVOY_PORT" "$UAT_DMZ_BUS_PORT" "$UAT_CORE_HTTPS_PORT" "$UAT_CORE_FARMER_API_PORT"; do
-    is_port "$p" || die "config.env: bad port: $p"
-    port_in_range "$p" "$UAT_NODE_PORT_RANGE" || die "config.env: port $p is outside UAT_NODE_PORT_RANGE"
+  local hub range lo hi p r reserved_in
+  for r in $UAT_RESERVED_NODE_PORTS; do
+    is_port "$r" || die "config.env: bad port in UAT_RESERVED_NODE_PORTS: $r"
+  done
+  [[ " $UAT_RESERVED_NODE_PORTS " == *" $UAT_KUBE_API_PORT "* ]] ||
+    die "config.env: UAT_RESERVED_NODE_PORTS must list the API port $UAT_KUBE_API_PORT"
+  [[ $UAT_DMZ_ENVOY_SERVICE_TYPE == NodePort || $UAT_DMZ_ENVOY_SERVICE_TYPE == LoadBalancer ]] ||
+    die "config.env: UAT_DMZ_ENVOY_SERVICE_TYPE must be NodePort or LoadBalancer"
+  for hub in "${HUBS[@]}"; do
+    range=$(hub_node_port_range "$hub")
+    [[ $range =~ ^[1-9][0-9]*-[1-9][0-9]*$ ]] || die "config.env: bad $hub NodePort range: $range"
+    lo=${range%-*}
+    hi=${range#*-}
+    ((lo < hi && hi <= 65535)) || die "config.env: bad $hub NodePort range: $range"
+    while read -r p; do
+      is_port "$p" || die "config.env: bad $hub port: $p"
+      port_in_range "$p" "$range" || die "config.env: $hub port $p is outside its NodePort range $range"
+      [[ " $UAT_RESERVED_NODE_PORTS " != *" $p "* ]] ||
+        die "config.env: $hub port $p is a port k0s or the node uses (UAT_RESERVED_NODE_PORTS)"
+    done < <(hub_allowed_node_ports "$hub")
+    reserved_in=""
+    for r in $UAT_RESERVED_NODE_PORTS; do
+      if port_in_range "$r" "$range"; then reserved_in+=" $r"; fi
+    done
+    if [[ -n $reserved_in ]]; then
+      log "warning: the $hub NodePort range $range contains ports k0s or the node uses:$reserved_in." \
+        "Pinned node ports never take them; a node port Kubernetes picks by itself could (README.md, open question 2)."
+    fi
   done
   [[ $UAT_CLUSTER_ISSUER =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || die "config.env: bad UAT_CLUSTER_ISSUER"
   [[ $UAT_CA_SECRET =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || die "config.env: bad UAT_CA_SECRET"
@@ -162,7 +181,7 @@ render_hub() {
     "EXTRA_SAN=$extra_san" \
     "K0S_VERSION=$K0S_VERSION" \
     "KUBE_API_PORT=$UAT_KUBE_API_PORT" \
-    "NODE_PORT_RANGE=$UAT_NODE_PORT_RANGE" \
+    "NODE_PORT_RANGE=$(hub_node_port_range "$hub")" \
     "CORE_PRIVATE_IP=${PRIV_IP[core]}" \
     "CORE_FQDN=${FQDN[core]}" \
     "DMZ_PRIVATE_IP=${PRIV_IP[dmz]}" \
@@ -180,16 +199,18 @@ write_endpoints() {
     --arg cn "${NAME[core]}" --arg cp "${PRIV_IP[core]}" --arg cq "${PUB_IP[core]}" --arg cf "${FQDN[core]}" \
     --argjson envoy "$UAT_DMZ_ENVOY_PORT" --argjson bus "$UAT_DMZ_BUS_PORT" \
     --argjson https "$UAT_CORE_HTTPS_PORT" --argjson api "$UAT_CORE_FARMER_API_PORT" \
-    --arg range "$UAT_NODE_PORT_RANGE" --arg issuer "$UAT_CLUSTER_ISSUER" \
+    --arg drange "$UAT_DMZ_NODE_PORT_RANGE" --arg crange "$UAT_CORE_NODE_PORT_RANGE" \
+    --arg etype "$UAT_DMZ_ENVOY_SERVICE_TYPE" --arg issuer "$UAT_CLUSTER_ISSUER" \
     --arg k0s "$K0S_VERSION" '
     {
       run_id: $run_id,
       dmz: {name: $dn, private_ip: $dp, public_ip: $dq, fqdn: $df,
-            ports: {envoy: $envoy, bus_client: $bus}},
+            ports: {envoy: $envoy, bus: $bus},
+            envoy_service_type: $etype, node_port_range: $drange},
       core: {name: $cn, private_ip: $cp, public_ip: $cq, fqdn: $cf,
-             ports: {https: $https, farmer_api: $api}},
+             ports: {https: $https, farmer_api: $api},
+             node_port_range: $crange},
       exposure: "NodePort",
-      node_port_range: $range,
       cluster_issuer: $issuer,
       ca_file: "uat-ca.crt",
       kubeconfigs: {dmz: "dmz.kubeconfig", core: "core.kubeconfig"},

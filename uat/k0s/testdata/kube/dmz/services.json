@@ -1,0 +1,19 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "metadata": {"name": "kubernetes", "namespace": "default"},
+      "spec": {"type": "ClusterIP", "ports": [{"name": "https", "port": 443}]}
+    },
+    {
+      "metadata": {"name": "imas-dmz-nats-envoy-np", "namespace": "imas-dmz"},
+      "spec": {"type": "LoadBalancer", "ports": [{"name": "https", "port": 443, "nodePort": 8443}]},
+      "status": {"loadBalancer": {}}
+    },
+    {
+      "metadata": {"name": "imas-dmz-nats-bus-np", "namespace": "imas-dmz"},
+      "spec": {"type": "NodePort", "ports": [{"name": "client", "port": 5406, "nodePort": 5406}]}
+    }
+  ]
+}

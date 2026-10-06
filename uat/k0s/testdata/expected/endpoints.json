@@ -6,9 +6,11 @@
     "public_ip": "203.0.113.10",
     "fqdn": "uatab12cd34-dmz.centralindia.cloudapp.azure.com",
     "ports": {
-      "envoy": 443,
-      "bus_client": 5406
-    }
+      "envoy": 8443,
+      "bus": 5406
+    },
+    "envoy_service_type": "NodePort",
+    "node_port_range": "5406-8443"
   },
   "core": {
     "name": "uat-core",
@@ -18,10 +20,10 @@
     "ports": {
       "https": 443,
       "farmer_api": 5405
-    }
+    },
+    "node_port_range": "443-5405"
   },
   "exposure": "NodePort",
-  "node_port_range": "443-5406",
   "cluster_issuer": "imas-uat-ca",
   "ca_file": "uat-ca.crt",
   "kubeconfigs": {

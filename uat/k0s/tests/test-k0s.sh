@@ -223,7 +223,8 @@ done
 expect_file_has "$CASE/out/k0sctl-core.yaml" "            - 10.60.2.4"
 
 t "render: node port range"
-expect_file_has "$D" "            service-node-port-range: 443-5406"
+expect_file_has "$D" "            service-node-port-range: 5406-8443"
+expect_file_has "$CASE/out/k0sctl-core.yaml" "            service-node-port-range: 443-5405"
 
 t "render: CoreDNS maps both FQDNs on both hubs"
 for h in dmz core; do
@@ -246,7 +247,7 @@ done
 t "render: rendered files are valid YAML"
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
   for h in dmz core; do
-    if python3 - "$CASE/out/k0sctl-$h.yaml" <<'PY'; then pass; else fail "$h: not valid YAML or wrong shape"; fi
+    if python3 - "$CASE/out/k0sctl-$h.yaml" "$h" <<'PY'; then pass; else fail "$h: not valid YAML or wrong shape"; fi
 import sys, yaml
 d = yaml.safe_load(open(sys.argv[1]))
 host = d["spec"]["hosts"][0]
@@ -254,7 +255,7 @@ assert host["role"] == "single"
 assert isinstance(host["openSSH"]["port"], int)
 cfg = d["spec"]["k0s"]["config"]["spec"]
 assert "127.0.0.1" in cfg["api"]["sans"]
-assert cfg["api"]["extraArgs"]["service-node-port-range"] == "443-5406"
+assert cfg["api"]["extraArgs"]["service-node-port-range"] == {"dmz": "5406-8443", "core": "443-5405"}[sys.argv[2]]
 patch = yaml.safe_load(cfg["network"]["coreDNS"]["patches"][0]["patch"]["content"])
 assert "hosts {" in patch["data"]["Corefile"]
 PY
@@ -266,8 +267,11 @@ fi
 t "render: endpoints.json"
 E="$CASE/out/endpoints.json"
 [[ $(jq -r '.core.fqdn' "$E") == uatab12cd34-core.centralindia.cloudapp.azure.com ]] && pass || fail "core fqdn"
-[[ $(jq -r '.dmz.ports.envoy' "$E") == 443 ]] && pass || fail "envoy port"
-[[ $(jq -r '.dmz.ports.bus_client' "$E") == 5406 ]] && pass || fail "bus port"
+[[ $(jq -r '.dmz.ports.envoy' "$E") == 8443 ]] && pass || fail "envoy port"
+[[ $(jq -r '.dmz.envoy_service_type' "$E") == NodePort ]] && pass || fail "envoy service type"
+[[ $(jq -r '.dmz.node_port_range' "$E") == 5406-8443 ]] && pass || fail "dmz range"
+[[ $(jq -r '.core.node_port_range' "$E") == 443-5405 ]] && pass || fail "core range"
+[[ $(jq -r '.dmz.ports.bus' "$E") == 5406 ]] && pass || fail "bus port"
 [[ $(jq -r '.core.ports.farmer_api' "$E") == 5405 ]] && pass || fail "farmer api port"
 [[ $(jq -r '.cluster_issuer' "$E") == imas-uat-ca ]] && pass || fail "issuer"
 
@@ -323,17 +327,35 @@ bad_access "ssh port not a number" '.["uat-dmz"].ssh_port = "22x"' "bad ssh_port
 bad_access "ssh port 0" '.["uat-dmz"].ssh_port = 0' "bad ssh_port"
 bad_access "host with a space" '.["uat-dmz"].host = "1.2.3.4 x"' "bad host"
 
-t "render refuses: a node port range that holds the API port"
-sed 's/^UAT_NODE_PORT_RANGE=.*/UAT_NODE_PORT_RANGE=443-7000/' "$K0S/config.env" >"$CASE/config-api.env"
+t "render warns: the DMZ range holds ports k0s uses (open question 2)"
+boot_render "$DATA/uat.json" "$DATA/access.json"
+expect_rc 0
+expect_err "warning: the dmz NodePort range 5406-8443 contains ports k0s or the node uses: 6443 8080 8132 8133"
+if [[ $ERR == *"the core NodePort range"* ]]; then fail "core range should hold no reserved port"; else pass; fi
+
+t "render refuses: exposing a port k0s uses"
+sed 's/^UAT_DMZ_ENVOY_PORT=.*/UAT_DMZ_ENVOY_PORT=6443/' "$K0S/config.env" >"$CASE/config-api.env"
 UAT_K0S_CONFIG="$CASE/config-api.env" boot_render "$DATA/uat.json" "$DATA/access.json"
 expect_rc 1
-expect_err "must not contain the API port"
+expect_err "dmz port 6443 is a port k0s or the node uses"
 
-t "render refuses: an exposed port outside the node port range"
-sed 's/^UAT_DMZ_BUS_PORT=.*/UAT_DMZ_BUS_PORT=5407/' "$K0S/config.env" >"$CASE/config-port.env"
+t "render refuses: an exposed port outside its hub's range"
+sed 's/^UAT_DMZ_BUS_PORT=.*/UAT_DMZ_BUS_PORT=9000/' "$K0S/config.env" >"$CASE/config-port.env"
 UAT_K0S_CONFIG="$CASE/config-port.env" boot_render "$DATA/uat.json" "$DATA/access.json"
 expect_rc 1
-expect_err "outside UAT_NODE_PORT_RANGE"
+expect_err "dmz port 9000 is outside its NodePort range 5406-8443"
+
+t "render refuses: a reserved list without the API port"
+sed 's/^UAT_RESERVED_NODE_PORTS=.*/UAT_RESERVED_NODE_PORTS="8080"/' "$K0S/config.env" >"$CASE/config-res.env"
+UAT_K0S_CONFIG="$CASE/config-res.env" boot_render "$DATA/uat.json" "$DATA/access.json"
+expect_rc 1
+expect_err "must list the API port 6443"
+
+t "render refuses: an unknown Envoy Service type"
+sed 's/^UAT_DMZ_ENVOY_SERVICE_TYPE=.*/UAT_DMZ_ENVOY_SERVICE_TYPE=ClusterIP/' "$K0S/config.env" >"$CASE/config-type.env"
+UAT_K0S_CONFIG="$CASE/config-type.env" boot_render "$DATA/uat.json" "$DATA/access.json"
+expect_rc 1
+expect_err "must be NodePort or LoadBalancer"
 
 ###############################################################################
 # bootstrap.sh: the install flow against stubs
@@ -556,12 +578,12 @@ expect_out "dmz: CoreDNS does not map uatab12cd34-core.centralindia.cloudapp.azu
 rm -f "$CASE/fix/dmz/coredns.json"
 
 t "check: a node port the hub does not expose"
-jq_edit "$DATA/kube/services.json" "$CASE/fix/dmz/services.json" '.items[1].spec.ports[0].nodePort = 5405'
+jq_edit "$DATA/kube/dmz/services.json" "$CASE/fix/dmz/services.json" '.items[2].spec.ports[0].nodePort = 5405'
 chk --out "$CASE/out"
 expect_rc 1
 expect_out "dmz: node ports outside the hub's exposed ports"
-expect_out "imas-uat/edge:5405"
-rm -f "$CASE/fix/dmz/services.json"
+expect_out "imas-dmz/imas-dmz-nats-bus-np:5405"
+cp "$DATA/kube/dmz/services.json" "$CASE/fix/dmz/services.json"
 
 t "check: API unreachable"
 mv "$CASE/fix/nodes.json" "$CASE/fix/nodes.json.off"
@@ -592,13 +614,13 @@ expect_err "bad --namespace"
 t "expose: refuses a node port the hub does not expose"
 xp --hub dmz --namespace imas-dmz --service imas-dmz-nats-bus --port client --node-port 5405
 expect_rc 1
-expect_err "node port 5405 is not one the dmz hub exposes (443 5406)"
+expect_err "node port 5405 is not one the dmz hub exposes (8443 5406)"
 expect_file_lacks "$CASE/log" " apply "
 
 t "expose: bus client port on the DMZ, as a sibling NodePort Service"
 xp --hub dmz --namespace imas-dmz --service imas-dmz-nats-bus --port client --node-port 5406
 expect_rc 0
-expect_out "imas-dmz/imas-dmz-nats-bus port client -> node port 5406 (Service imas-dmz-nats-bus-np)"
+expect_out "imas-dmz/imas-dmz-nats-bus port client -> node port 5406 (NodePort Service imas-dmz-nats-bus-np)"
 A="$CASE/state/dmz-apply-stdin.json"
 [[ $(jq -r .metadata.name "$A") == imas-dmz-nats-bus-np ]] && pass || fail "name"
 [[ $(jq -r .metadata.namespace "$A") == imas-dmz ]] && pass || fail "namespace"
@@ -617,7 +639,7 @@ expect_rc 0
 [[ $(jq -r .spec.externalTrafficPolicy "$A") == Local ]] && pass || fail "externalTrafficPolicy"
 
 t "expose: unknown port"
-xp --hub dmz --namespace imas-dmz --service imas-dmz-nats-bus --port https --node-port 443
+xp --hub dmz --namespace imas-dmz --service imas-dmz-nats-bus --port https --node-port 8443
 expect_rc 1
 expect_err "needs exactly one port named or numbered https and a selector"
 
@@ -633,6 +655,35 @@ STUB_NP_READBACK="$DATA/kube/service-readback-wrong.json" \
   xp --hub dmz --namespace imas-dmz --service imas-dmz-nats-bus --port client --node-port 5406
 expect_rc 1
 expect_err "reads back as 'NodePort 3001'"
+
+t "expose: LoadBalancer with source ranges (Envoy on 8443)"
+rm -f "$CASE/state/dmz-apply-stdin.json"
+xp --hub dmz --namespace imas-dmz --service imas-dmz-nats-bus --port client --node-port 8443 --local \
+  --type LoadBalancer --lb-source-range 203.0.113.7/32 --lb-source-range 10.60.3.0/24
+expect_rc 0
+expect_out "node port 8443 (LoadBalancer Service imas-dmz-nats-bus-np)"
+[[ $(jq -r .spec.type "$A") == LoadBalancer ]] && pass || fail "type"
+[[ $(jq -r '.spec.ports[0].nodePort' "$A") == 8443 ]] && pass || fail "node port"
+[[ $(jq -c .spec.loadBalancerSourceRanges "$A") == '["203.0.113.7/32","10.60.3.0/24"]' ]] && pass || fail "source ranges"
+[[ $(jq -r .spec.externalTrafficPolicy "$A") == Local ]] && pass || fail "externalTrafficPolicy"
+
+t "expose: NodePort has no source ranges"
+rm -f "$CASE/state/dmz-apply-stdin.json"
+xp --hub dmz --namespace imas-dmz --service imas-dmz-nats-bus --port client --node-port 8443
+expect_rc 0
+[[ $(jq -r '.spec.loadBalancerSourceRanges // "none"' "$A") == none ]] && pass || fail "source ranges on a NodePort"
+
+t "expose: bad --type and --lb-source-range"
+xp --hub dmz --namespace imas-dmz --service imas-dmz-nats-bus --port client --node-port 8443 --type ClusterIP
+expect_rc 2
+expect_err "--type must be NodePort or LoadBalancer"
+xp --hub dmz --namespace imas-dmz --service imas-dmz-nats-bus --port client --node-port 8443 --lb-source-range 1.2.3.4/32
+expect_rc 2
+expect_err "--lb-source-range needs --type LoadBalancer"
+xp --hub dmz --namespace imas-dmz --service imas-dmz-nats-bus --port client --node-port 8443 \
+  --type LoadBalancer --lb-source-range 1.2.3.400/32
+expect_rc 2
+expect_err "bad --lb-source-range"
 
 t "expose: name too long"
 xp --hub dmz --namespace imas-dmz --service imas-dmz-nats-bus --port client --node-port 5406 \

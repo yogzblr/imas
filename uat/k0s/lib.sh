@@ -173,6 +173,15 @@ hub_allowed_node_ports() {
   esac
 }
 
+# hub_node_port_range HUB prints the hub's NodePort range ("low-high").
+hub_node_port_range() {
+  case $1 in
+    dmz) printf '%s\n' "$UAT_DMZ_NODE_PORT_RANGE" ;;
+    core) printf '%s\n' "$UAT_CORE_NODE_PORT_RANGE" ;;
+    *) die "unknown hub: $1" ;;
+  esac
+}
+
 # port_in_range PORT RANGE (RANGE as "low-high").
 port_in_range() {
   local p=$1 lo=${2%-*} hi=${2#*-}
