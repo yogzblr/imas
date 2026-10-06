@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -203,8 +204,10 @@ func (s *Stack) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		// Envoy's jwt_authn: every other route needs a gateway JWT, and
 		// the fake trusts none.
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.WriteHeader(401)
-		_, _ = w.Write([]byte("Jwt is missing"))
+		_, _ = io.WriteString(w, "Jwt is missing")
 	}
 }
 
@@ -757,8 +760,13 @@ func (s *Stack) vmctl(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	code, out := s.Vmctl(verb, vm, body.String())
+	// Plain text, never sniffed as HTML: the answer is what vmctl.sh
+	// prints on a terminal, and Vmctl never echoes the request's verb or
+	// VM name back.
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Exit-Code", strconv.Itoa(code))
-	_, _ = fmt.Fprint(w, out)
+	_, _ = io.WriteString(w, out)
 }
 
 // Vmctl is what vmctl.sh <verb> <vm> [script] prints, and its exit code.
@@ -774,7 +782,7 @@ func (s *Stack) Vmctl(verb, vm, script string) (int, string) {
 	}
 	h, ok := s.hosts[vm]
 	if !ok {
-		return 2, "vmctl: no such VM " + vm + "\n"
+		return 2, "vmctl: no such VM in the fake stack\n"
 	}
 	switch verb {
 	case "restart":
@@ -788,7 +796,7 @@ func (s *Stack) Vmctl(verb, vm, script string) (int, string) {
 		return 0, ""
 	case "run":
 	default:
-		return 2, "vmctl: unknown verb " + verb + "\n"
+		return 2, "vmctl: unknown verb (want restart, stop-sprout, start-sprout or run)\n"
 	}
 	return 0, "Enable succeeded:\n[stdout]\n" + s.hostScript(h, script) + "__IMAS_UAT_RC=0\n[stderr]\n"
 }
