@@ -1,0 +1,140 @@
+# deploy/helm/farmer values for the UAT core hub (UAT.3b). UAT ONLY.
+# FLAG FOR SECURITY REVIEW: OpenBao runs initialised and unsealed by
+# uat/hub/core/openbao-bootstrap.sh, whose unseal keys are kept in a
+# Kubernetes Secret and a run artifact. Never copy this to production.
+#
+# This file is the layout; install.sh adds a second, run-specific values
+# file (gen-values.sh: the DMZ address, the Keycloak issuer on the core
+# FQDN, the bootstrap admin's public keys and the image tags), and
+# core_test.go renders the chart with both. Names here must match
+# lib/common.sh (core_test.go checks that too).
+#
+# Release imas-core in namespace imas-core: farmer is imas-core-farmer,
+# saasapi imas-core-farmer-saasapi, OpenBao imas-core-openbao.
+
+organization: imas
+
+# The DMZ bus is on the other cluster. farmer and saasapi dial
+# tls://imas-dmz-nats-bus.imas-dmz.svc.cluster.local:5406; on this cluster
+# that name is a selectorless Service whose endpoint is the DMZ hub's
+# private IP (uat/hub/core/chart, bus-endpoint.yaml). gen-values.sh
+# overrides serviceName, namespace and sproutBusURLs from the endpoints
+# file.
+bus:
+  serviceName: imas-dmz-nats-bus
+  namespace: imas-dmz
+  port: 5406
+
+natsSeeds:
+  secretName: imas-farmer-nats-seeds
+
+# farmer's API certificate and the root it verifies the bus with come from
+# the per-run UAT CA (cert-manager), the same CA the DMZ's bus and Envoy
+# use. OpenBao PKI would give farmer a root the bus doesn't chain to.
+# saasapi's bus CA (bus.ca empty) is this Secret's ca.crt.
+tls:
+  mode: secret
+  secretName: imas-farmer-tls
+
+# OpenBao: the subchart, standalone (not dev mode), one replica, file
+# storage on a PVC. Initialised and unsealed by openbao-bootstrap.sh while
+# `helm install` runs; the chart's bootstrap Job waits for it to be
+# unsealed (`until bao status`) and then uses the root token from
+# openbaoBootstrap.tokenSecretName.
+openbao:
+  enabled: true
+  injector:
+    enabled: false
+  server:
+    dev:
+      enabled: false
+    standalone:
+      enabled: true
+    ha:
+      enabled: false
+    dataStorage:
+      enabled: true
+      size: 1Gi
+    authDelegator:
+      enabled: true
+    resources:
+      requests: { cpu: 50m, memory: 128Mi }
+      limits: { memory: 512Mi }
+
+openbaoBootstrap:
+  enabled: true
+  tokenSecretName: imas-uat-openbao-root
+  tokenSecretKey: token
+
+# PXC: one node, one HAProxy (the chart's eval sizing).
+pxc:
+  enabled: true
+  pxc:
+    size: 1
+    persistence:
+      size: 8Gi
+  haproxy:
+    enabled: true
+    size: 1
+
+# Valkey: standalone, one replica.
+valkey:
+  enabled: true
+
+# MinIO (UAT only, AGPL-3.0) in namespace imas-uat. Plain HTTP inside the
+# cluster. Two buckets: recipes, and job logs (must differ).
+objectStore:
+  endpoint: imas-uat-minio.imas-uat.svc.cluster.local:9000
+  useSSL: false
+  bucket: imas-recipes
+  jobBucket: imas-jobs
+  credentialsSecret: imas-uat-s3-farmer
+  accessKeyIdKey: access-key-id
+  secretAccessKeyKey: secret-access-key
+
+farmer:
+  persistence:
+    size: 1Gi
+  bootstrapAdmin:
+    # pubkey and boxpub come from gen-values.sh (imas auth pubkey and
+    # imas auth keygen of this release, run by admin-keys.sh).
+    username: uat-admin
+
+saasapi:
+  enabled: true
+  replicaCount: 2
+  # saasapi.jwt.* come from gen-values.sh: issuer and JWKS URL on the core
+  # FQDN, audience imas-saasapi (the Keycloak client the realm defines).
+  internalAuthSecret:
+    secretName: imas-saasapi-internal-auth
+    currentKey: current
+  recipes:
+    enabled: true
+    # saasapi's own MinIO user, limited by the release's
+    # files/objectstore-policies/saasapi-recipes.json (minio-setup.sh).
+    credentialsSecret: imas-uat-s3-saasapi
+    accessKeyIdKey: access-key-id
+    secretAccessKeyKey: secret-access-key
+    credentialCheck: true
+    # The realm roles in uat/hub/core/chart/files/imas-uat-realm.json.
+    readRole: imas-recipes-read
+    writeRole: imas-recipes-write
+  # saasapi fetches Keycloak's JWKS from the core FQDN, served by the edge
+  # proxy with a certificate from the UAT CA. Go reads SSL_CERT_FILE, so
+  # the UAT CA (a public certificate, in a ConfigMap) replaces the system
+  # roots for saasapi's HTTPS clients. Its bus CA is separate
+  # (SAASAPI_NATS_CA_FILE) and its other connections are not HTTPS.
+  extraEnv:
+    - name: SSL_CERT_FILE
+      value: /etc/imas-uat-ca/ca.crt
+  extraVolumes:
+    - name: uat-ca
+      configMap:
+        name: imas-uat-ca
+  extraVolumeMounts:
+    - name: uat-ca
+      mountPath: /etc/imas-uat-ca
+      readOnly: true
+
+networkPolicy:
+  enabled: true

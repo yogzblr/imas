@@ -1,0 +1,135 @@
+{{- include "uat.validate" . -}}
+# The edge: one Envoy (Apache-2.0) on the core FQDN, the only way in from
+# outside the cluster.
+#   443  TLS with the UAT CA certificate for the core FQDN, then by path:
+#          /v1/                saasapi (plain HTTP inside the cluster)
+#          /realms/<realm>/    Keycloak, this realm only (token, JWKS,
+#                              discovery). Not /admin, not the master
+#                              realm: Keycloak administration is only
+#                              through kubectl exec (bind-tenant.sh).
+#          anything else       404
+#   5405 TCP passthrough to farmer's API (TLS end to end, farmer's own
+#        certificate), for the DMZ's Envoy only (NetworkPolicy below).
+# The container listens on the same port numbers it is exposed on, so a
+# NetworkPolicy sees 443 whether a client came through the hostPort or the
+# Service (saasapi's chart policy allows egress on 443 only).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: imas-uat-edge
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "uat.labels" . | nindent 4 }}
+    app.kubernetes.io/name: imas-uat-edge
+data:
+  envoy.yaml: |
+    {{- include "uat.edgeEnvoyConfig" . | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: imas-uat-edge
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "uat.labels" . | nindent 4 }}
+    app.kubernetes.io/name: imas-uat-edge
+spec:
+  replicas: 1
+  # hostPort: a second pod can't bind the same ports on the one node.
+  strategy: { type: Recreate }
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: imas-uat-edge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: imas-uat-edge
+        imas.io/uat-only: "true"
+      annotations:
+        checksum/config: {{ include "uat.edgeEnvoyConfig" . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile: { type: RuntimeDefault }
+        # Lets the non-root Envoy bind 443 inside its own network
+        # namespace (a namespaced "safe" sysctl), so no capability is added.
+        sysctls:
+          - { name: net.ipv4.ip_unprivileged_port_start, value: "0" }
+      containers:
+        - name: envoy
+          image: {{ .Values.edge.image | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["envoy"]
+          args: ["--config-path", "/etc/envoy/envoy.yaml", "--log-level", "info", "--disable-hot-restart"]
+          ports:
+            - name: https
+              containerPort: 443
+              {{- if eq .Values.core.exposure "hostPort" }}
+              hostPort: {{ .Values.core.httpsPort }}
+              {{- end }}
+            - name: farmer-api
+              containerPort: {{ .Values.farmer.apiPort }}
+              {{- if eq .Values.core.exposure "hostPort" }}
+              hostPort: {{ .Values.core.farmerAPIPort }}
+              {{- end }}
+          readinessProbe:
+            tcpSocket: { port: https }
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: https }
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.edge.resources | nindent 12 }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: config, mountPath: /etc/envoy, readOnly: true }
+            - { name: tls, mountPath: /etc/edge-tls, readOnly: true }
+      volumes:
+        - name: config
+          configMap:
+            name: imas-uat-edge
+        - name: tls
+          secret:
+            secretName: {{ .Values.edge.tlsSecretName }}
+            items:
+              - { key: tls.crt, path: tls.crt }
+              - { key: tls.key, path: tls.key }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: imas-uat-edge
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "uat.labels" . | nindent 4 }}
+    app.kubernetes.io/name: imas-uat-edge
+spec:
+  {{- if eq .Values.core.exposure "nodePort" }}
+  type: NodePort
+  # Keep the client address, so the farmer API rule below sees the DMZ.
+  externalTrafficPolicy: Local
+  {{- else }}
+  type: ClusterIP
+  {{- end }}
+  selector:
+    app.kubernetes.io/name: imas-uat-edge
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+      {{- if eq .Values.core.exposure "nodePort" }}
+      nodePort: {{ .Values.core.httpsPort }}
+      {{- end }}
+    - name: farmer-api
+      port: {{ .Values.farmer.apiPort }}
+      targetPort: farmer-api
+      {{- if eq .Values.core.exposure "nodePort" }}
+      nodePort: {{ .Values.core.farmerAPIPort }}
+      {{- end }}

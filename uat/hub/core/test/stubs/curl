@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# A stand-in for curl, for test/run.sh only: `-o <file> <url>` copies
+# $FAKE_RELEASE_DIR/<basename of url> to <file>; anything else fails.
+set -euo pipefail
+out="" url=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	-o) out="$2"; shift 2 ;;
+	--retry | --proto) shift 2 ;;
+	-*) shift ;;
+	*) url="$1"; shift ;;
+	esac
+done
+printf '%s\n' "$url" >>"${STUB_STATE:?}/curl.log"
+src="${FAKE_RELEASE_DIR:?}/$(basename "$url")"
+[[ -n "$out" && -f "$src" ]] || { echo "stub curl: 404 $url" >&2; exit 22; }
+cp "$src" "$out"

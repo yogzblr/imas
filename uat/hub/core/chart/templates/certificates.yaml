@@ -1,0 +1,60 @@
+{{- include "uat.validate" . -}}
+# Both from the per-run UAT CA (UAT.2's cert-manager ClusterIssuer). No
+# real certificates. cert-manager's CA issuer writes ca.crt into each
+# Secret, which is how farmer gets the root it verifies the bus with
+# (tls.mode=secret) and how install.sh gets the CA for saasapi and the
+# runner, without reading any private key.
+#
+# farmer's API certificate (tls.secretName). SANs: the farmer Service's
+# names (the chart's own default), plus the core FQDN and the core private
+# IP, so the DMZ's Envoy can verify it whichever of the three its upstream
+# names (deploy/helm/nats envoy.upstreams.farmerAPI.host / sni).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Values.farmer.tlsSecretName }}
+  namespace: {{ .Values.farmer.namespace }}
+  labels:
+    {{- include "uat.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.farmer.tlsSecretName }}
+  duration: 720h
+  renewBefore: 240h
+  privateKey: { algorithm: ECDSA, size: 256, rotationPolicy: Always }
+  usages: [digital signature, key encipherment, server auth, client auth]
+  commonName: {{ .Values.farmer.serviceName }}
+  dnsNames:
+    - {{ .Values.farmer.serviceName }}
+    - {{ printf "%s.%s" .Values.farmer.serviceName .Values.farmer.namespace }}
+    - {{ printf "%s.%s.svc" .Values.farmer.serviceName .Values.farmer.namespace }}
+    - {{ printf "%s.%s.svc.%s" .Values.farmer.serviceName .Values.farmer.namespace .Values.clusterDomain }}
+    - {{ .Values.core.fqdn }}
+  ipAddresses:
+    - {{ .Values.core.privateIP }}
+  issuerRef:
+    group: cert-manager.io
+    kind: {{ .Values.caIssuer.kind }}
+    name: {{ .Values.caIssuer.name }}
+---
+# The edge proxy's certificate: the core FQDN, which is also the Keycloak
+# issuer host.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Values.edge.tlsSecretName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "uat.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.edge.tlsSecretName }}
+  duration: 720h
+  renewBefore: 240h
+  privateKey: { algorithm: ECDSA, size: 256, rotationPolicy: Always }
+  usages: [digital signature, key encipherment, server auth]
+  commonName: {{ .Values.core.fqdn }}
+  dnsNames:
+    - {{ .Values.core.fqdn }}
+  issuerRef:
+    group: cert-manager.io
+    kind: {{ .Values.caIssuer.kind }}
+    name: {{ .Values.caIssuer.name }}

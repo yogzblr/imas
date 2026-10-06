@@ -1,0 +1,15 @@
+# yamllint for uat/hub/core: the default rules, minus line length (long
+# comments and rendered JSON) and the leading '---' (Helm output and values
+# files don't start with one). Braces inside flow maps are allowed one space.
+extends: default
+rules:
+  line-length: disable
+  document-start: disable
+  comments:
+    min-spaces-from-content: 1
+  braces:
+    max-spaces-inside: 1
+  brackets:
+    max-spaces-inside: 1
+  truthy:
+    check-keys: false

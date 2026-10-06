@@ -1,0 +1,88 @@
+# Values for the UAT-only extras chart. install.sh sets every run-specific
+# value with --set; these defaults only make `helm template` render.
+
+# The deploy/helm/farmer release this chart serves.
+farmer:
+  release: imas-core
+  namespace: imas-core
+  # app.kubernetes.io/name of farmer's and saasapi's pods (the chart name).
+  name: farmer
+  # <release>-farmer and <release>-farmer-saasapi, the chart's Services.
+  serviceName: imas-core-farmer
+  apiPort: 5405
+  saasapiServiceName: imas-core-farmer-saasapi
+  saasapiServicePort: 80
+  saasapiPort: 8081
+  # tls.secretName: issued here by cert-manager from the UAT CA.
+  tlsSecretName: imas-farmer-tls
+
+clusterDomain: cluster.local
+
+# The core hub, from the endpoints file.
+core:
+  fqdn: core.uat.invalid
+  privateIP: 10.60.2.4
+  # hostPort (default) or nodePort: how the edge proxy is reached from
+  # outside the cluster. nodePort needs the API server's node port range
+  # to include both ports.
+  exposure: hostPort
+  httpsPort: 443
+  farmerAPIPort: 5405
+
+# The DMZ hub, from the endpoints file.
+dmz:
+  privateIP: 10.60.1.4
+  # Extra sources allowed to reach farmer's API through the edge proxy
+  # (CIDRs). Empty: the DMZ private IP only.
+  extraFarmerAPISources: []
+
+# The nats chart's bus client Service, recreated on this cluster without a
+# selector so farmer's farmerbusurl FQDN resolves here and reaches the DMZ.
+bus:
+  serviceName: imas-dmz-nats-bus
+  namespace: imas-dmz
+  # bus.port in the farmer chart (the Service port farmer dials).
+  port: 5406
+  # Where the DMZ exposes the bus client port (dmz.ports.bus).
+  remotePort: 5406
+
+# cert-manager issuer of the per-run UAT CA (UAT.2).
+caIssuer:
+  kind: ClusterIssuer
+  name: imas-uat-ca
+
+minio:
+  # AGPL-3.0, UAT only. Pinned; never latest. Unverified from the agent
+  # sandbox (no registry access): confirm the tag, and add its digest.
+  image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+  rootSecret: imas-uat-minio-root
+  storage: 5Gi
+  storageClassName: ""
+  resources:
+    requests: { cpu: 50m, memory: 256Mi }
+    limits: { memory: 1Gi }
+
+keycloak:
+  # Apache-2.0. Pinned; never latest. Unverified from the agent sandbox.
+  image: quay.io/keycloak/keycloak:26.4.0
+  realm: imas-uat
+  # KC_BOOTSTRAP_ADMIN_USERNAME / _PASSWORD (master realm), generated per run.
+  adminSecret: imas-uat-keycloak-admin
+  # UAT_TESTS_CLIENT_SECRET and the four user passwords, generated per run,
+  # substituted into files/imas-uat-realm.json at import.
+  realmEnvSecret: imas-uat-keycloak-realm
+  # The embedded H2 database of start-dev (dev-file), on a small PVC so a
+  # pod restart keeps the tenant bindings.
+  storage: 1Gi
+  storageClassName: ""
+  resources:
+    requests: { cpu: 250m, memory: 768Mi }
+    limits: { memory: 1536Mi }
+
+edge:
+  # Apache-2.0; the same pin as the nats chart's Envoy (docs/INSTALL.md).
+  image: envoyproxy/envoy:v1.35.3
+  tlsSecretName: imas-uat-edge-tls
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 256Mi }
