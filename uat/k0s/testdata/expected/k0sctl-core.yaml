@@ -1,0 +1,109 @@
+---
+# k0sctl configuration for one UAT hub: a single-node k0s cluster, the
+# controller and the worker on the one VM (role "single").
+#
+# bootstrap.sh renders it once per hub. Every double-underscore token is set from
+# the uat JSON (tofu output uat), access.json (uat/access/tunnels.sh),
+# versions.env and config.env, each value is checked first (addresses, names,
+# ports, paths), and rendering fails if a token is left. Nothing secret is
+# written here: keyPath is the path of the per-run SSH key, never the key.
+apiVersion: k0sctl.k0sproject.io/v1beta1
+kind: Cluster
+metadata:
+  name: imas-uat-ab12cd34-core
+spec:
+  hosts:
+    - role: single
+      # The hub is reached only through its Azure Bastion tunnel on the
+      # runner, so k0sctl dials the tunnel's local address and port from
+      # access.json. The system OpenSSH client is used so the host key goes
+      # to a per-run known_hosts file under the alias of the VM name
+      # (accepted on first use, through the tunnel, then pinned for the run).
+      openSSH:
+        address: 127.0.0.1
+        port: 50122
+        user: imasadmin
+        keyPath: /RUN/id_test
+        options:
+          HostKeyAlias: uat-core
+          UserKnownHostsFile: /RUN/out/known_hosts
+          StrictHostKeyChecking: accept-new
+          IdentitiesOnly: "yes"
+          BatchMode: "yes"
+          ServerAliveInterval: "30"
+      # The VM's own address in the VNet (not the tunnel's).
+      privateAddress: 10.60.2.4
+  options:
+    wait:
+      enabled: true
+  k0s:
+    # Pinned in versions.env (K0S_VERSION), nowhere else.
+    version: v1.36.4+k0s.1
+    dynamicConfig: false
+    config:
+      apiVersion: k0s.k0sproject.io/v1beta1
+      kind: ClusterConfig
+      metadata:
+        name: imas-uat-ab12cd34-core
+      spec:
+        api:
+          address: 10.60.2.4
+          port: 6443
+          # kubectl and helm reach the API through the kube tunnel on
+          # 127.0.0.1, so the serving certificate must name it.
+          sans:
+            - 127.0.0.1
+            - localhost
+            - 10.60.2.4
+            - uatab12cd34-core.centralindia.cloudapp.azure.com
+          extraArgs:
+            # This hub's NodePort range (config.env; README.md,
+            # "Exposure").
+            service-node-port-range: 30000-32767
+        network:
+          provider: kuberouter
+          podCIDR: 10.244.0.0/16
+          serviceCIDR: 10.96.0.0/12
+          clusterDomain: cluster.local
+          coreDNS:
+            # The Shared contract's DNS rule: inside the cluster the core FQDN
+            # resolves to the core private IP, so a pod never dials a node's
+            # public address (the Keycloak issuer, saasapi's JWKS URL and the
+            # token iss stay one string). The DMZ FQDN maps to the DMZ
+            # private IP the same way, for core's dial to the bus. This is
+            # k0s's own Corefile with one hosts block added; k0s writes it
+            # into the coredns ConfigMap it manages, so it is not reverted.
+            patches:
+              - target:
+                  kind: ConfigMap
+                  name: coredns
+                  namespace: kube-system
+                patch:
+                  type: MergePatch
+                  content: |
+                    data:
+                      Corefile: |
+                        .:53 {
+                            errors
+                            health
+                            ready
+                            hosts {
+                                10.60.2.4 uatab12cd34-core.centralindia.cloudapp.azure.com
+                                10.60.1.4 uatab12cd34-dmz.centralindia.cloudapp.azure.com
+                                ttl 60
+                                fallthrough
+                            }
+                            kubernetes cluster.local in-addr.arpa ip6.arpa {
+                              pods insecure
+                              ttl 30
+                              fallthrough in-addr.arpa ip6.arpa
+                            }
+                            prometheus :9153
+                            forward . /etc/resolv.conf
+                            cache 30
+                            loop
+                            reload
+                            loadbalance
+                        }
+        telemetry:
+          enabled: false

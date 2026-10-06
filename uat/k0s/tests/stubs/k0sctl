@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Test stub for k0sctl: logs each call to $STUB_LOG.
+set -euo pipefail
+printf 'k0sctl %s\n' "$*" >>"$STUB_LOG"
+case ${1:-} in
+  version) printf 'version: %s\ncommit: 0000000\n' "${STUB_K0SCTL_VERSION:-v0.33.1}" ;;
+  apply) [[ -z ${STUB_K0SCTL_FAIL_APPLY:-} ]] || exit 1 ;;
+  kubeconfig)
+    cluster="" address=""
+    shift
+    while (($#)); do
+      case $1 in
+        --cluster) cluster=$2 && shift 2 ;;
+        --address) address=$2 && shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf 'apiVersion: v1\nkind: Config\nclusters:\n  - name: %s\n    cluster:\n      server: %s\n' "$cluster" "$address"
+    ;;
+  *) echo "stub k0sctl: unexpected $*" >&2 && exit 1 ;;
+esac

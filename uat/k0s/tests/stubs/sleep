@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Test stub for sleep: the tests never wait.
+exit 0
