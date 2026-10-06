@@ -596,6 +596,9 @@ explanation rather than deploying something that silently can't work.
 {{- end -}}
 {{- end -}}
 {{- with .Values.bus.host -}}
+{{- if or (regexMatch "^[0-9.]+(:[0-9]+)?$" (toString .)) (regexMatch "^\\[?[0-9A-Fa-f]*:[0-9A-Fa-f]*:[0-9A-Fa-f:.%]*\\]?(:[0-9]+)?$" (toString .)) -}}
+{{- fail (printf "bus.host %q is an IP address; it must be a DNS name, which the bus certificate carries as a DNS SAN. List the bus's addresses in bus.egressCIDRs instead." (toString .)) -}}
+{{- end -}}
 {{- if not (regexMatch "^[A-Za-z0-9]([-A-Za-z0-9.]*[A-Za-z0-9])?$" (toString .)) -}}
 {{- fail (printf "bus.host %q must be a bare DNS name (farmerbusurl and SAASAPI_NATS_URL are tls://<bus.host>:<bus.port>; the port is bus.port), not a URL or host:port" (toString .)) -}}
 {{- end -}}

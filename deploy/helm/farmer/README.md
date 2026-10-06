@@ -229,8 +229,10 @@ bus at the private name `dmz.uat.imas.internal`, on node port 8442), set
 answers on. Both URLs become `tls://<bus.host>:<bus.port>`, and
 `bus.serviceName` and `bus.namespace` are no longer required.
 
-- `bus.host` is a DNS name only: not a URL (`tls://...`) and not
-  `host:port`. The chart refuses anything else.
+- `bus.host` is a DNS name only: not a URL (`tls://...`), not
+  `host:port`, and not an IP address (IPv4 or IPv6; the bus certificate
+  carries `bus.host` as a DNS SAN, and the addresses belong in
+  `bus.egressCIDRs`). The chart refuses anything else.
 - **The bus certificate must carry `bus.host` as a SAN.** saasapi always
   verifies the name it dials; farmer does too unless `bus.tlsServerName`
   names another, which the certificate must then carry as well. The nats
@@ -245,6 +247,11 @@ answers on. Both URLs become `tls://<bus.host>:<bus.port>`, and
   `networkPolicy.enabled` farmer and saasapi can't reach it (NOTES warns).
   Without `bus.host`, `bus.egressCIDRs` entries are added next to the
   selector.
+- **`bus.egressCIDRs` is kept in step with the bus name by hand.**
+  NetworkPolicy matches addresses, not DNS names, and the chart doesn't
+  resolve `bus.host`. When the addresses behind `bus.host` change, update
+  `bus.egressCIDRs` (and upgrade the release) yourself. The owner accepted
+  this for UAT (2026-10-06).
 - `openbaoBootstrap.farmerbus.enabled` with `bus.host` needs an explicit
   `openbaoBootstrap.farmerbus.allowedNames` (including `bus.host`): the
   default names are the in-cluster bus Service's.
@@ -965,9 +972,9 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `organization` | `imas` | `farmerorganization`. Must equal the nats chart's `bus.organization`. |
 | `clusterDomain` | `cluster.local` | For the FQDNs the chart builds. |
 | `bus.serviceName` / `bus.namespace` | `""` / `imas-dmz` | The nats chart's bus client Service. Required unless `bus.host` is set. |
-| `bus.host` | `""` | A bare DNS name for a bus outside this cluster (e.g. `dmz.uat.imas.internal`). Set: `farmerbusurl` and `SAASAPI_NATS_URL` are `tls://<bus.host>:<bus.port>`, and the bus certificate must carry it as a SAN. Not a URL or `host:port`. See [A bus outside this cluster](#a-bus-outside-this-cluster-bushost). |
+| `bus.host` | `""` | A bare DNS name for a bus outside this cluster (e.g. `dmz.uat.imas.internal`). Set: `farmerbusurl` and `SAASAPI_NATS_URL` are `tls://<bus.host>:<bus.port>`, and the bus certificate must carry it as a SAN. Not a URL, `host:port` or IP address. See [A bus outside this cluster](#a-bus-outside-this-cluster-bushost). |
 | `bus.port` | `5406` | Bus client port, in `farmerbusurl` and `SAASAPI_NATS_URL` (with `bus.host`, the port it answers on, e.g. a node port). |
-| `bus.egressCIDRs` | `[]` | CIDRs rendered as `ipBlock` peers of farmer's and saasapi's bus egress rule, on `bus.port`. With `bus.host` they replace the bus pod selector; **without them the rule does not match a bus outside the cluster**. |
+| `bus.egressCIDRs` | `[]` | CIDRs rendered as `ipBlock` peers of farmer's and saasapi's bus egress rule, on `bus.port`. With `bus.host` they replace the bus pod selector; **without them the rule does not match a bus outside the cluster**. Kept in step with what `bus.host` resolves to by hand. |
 | `bus.sproutBusURLs` | `[]` | `IMAS_SPROUT_BUS_URLS`, Envoy's external `wss://` addresses. Required. |
 | `bus.ca.secretName` / `configMapName` / `key` | `""` / `""` / `ca.crt` | saasapi's bus CA. Empty: `tls.secretName`'s `ca.crt`, or fetched from OpenBao PKI in openbao mode. |
 | `bus.tlsServerName` | `""` | `farmerbustlsservername`. Empty: the bus Service FQDN, or `bus.host`. See [Reaching the bus](#reaching-the-bus). |

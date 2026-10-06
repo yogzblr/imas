@@ -170,7 +170,8 @@ func TestBusHostURLs(t *testing.T) {
 }
 
 // bus.host is a bare DNS name, like bus.tlsServerName; a URL or host:port
-// would build a broken farmerbusurl. bus.egressCIDRs entries are CIDRs.
+// would build a broken farmerbusurl, and an IP address is refused too.
+// bus.egressCIDRs entries are CIDRs.
 func TestBusHostValidation(t *testing.T) {
 	for _, bad := range []string{
 		"tls://dmz.uat.imas.internal:8442",
@@ -184,6 +185,28 @@ func TestBusHostValidation(t *testing.T) {
 		t.Run(bad, func(t *testing.T) {
 			mustFail(t, "must be a bare DNS name", append(slices.Clone(busHost), "--set-string", "bus.host="+bad)...)
 		})
+	}
+	// No IP addresses (owner decision 2026-10-06): the bus certificate
+	// carries bus.host as a DNS SAN, and addresses go in bus.egressCIDRs.
+	for _, ip := range []string{
+		"10.20.1.4",
+		"10.20.1.4:8442",
+		"127.1",
+		"fd00:20::4",
+		"::1",
+		"[fd00:20::4]",
+		"[fd00:20::4]:8442",
+		"::ffff:10.20.1.4",
+	} {
+		t.Run("ip "+ip, func(t *testing.T) {
+			mustFail(t, "is an IP address", append(slices.Clone(busHost), "--set-string", "bus.host="+ip)...)
+		})
+	}
+	// Names that merely contain digits are still DNS names.
+	for _, ok := range []string{"10-20-1-4.dmz.uat.imas.internal", "dmz1.uat.imas.internal", "a1b2"} {
+		if _, err := render(t, append(slices.Clone(busHost), "--set-string", "bus.host="+ok)...); err != nil {
+			t.Errorf("bus.host=%s refused: %v", ok, err)
+		}
 	}
 	// Without bus.host the bus Service values stay required.
 	mustFail(t, "bus.serviceName is required", "--set", "bus.serviceName=")

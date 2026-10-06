@@ -29,8 +29,8 @@ bus:
   namespace: imas-dmz
   # A bus outside this cluster: the bare DNS name farmer (farmerbusurl)
   # and saasapi (SAASAPI_NATS_URL) dial instead of the bus Service FQDN,
-  # as tls://<host>:<port>. Not a URL and not host:port; bus.port carries
-  # the port. The bus certificate must carry it as a SAN: saasapi always
+  # as tls://<host>:<port>. Not a URL, not host:port and not an IP
+  # address; bus.port carries the port. The bus certificate must carry it as a SAN: saasapi always
   # verifies the name it dials. Empty (the default): the Service FQDN.
   host: ""
   # The bus client port (the nats chart's bus.ports.client), or the port
@@ -41,7 +41,9 @@ bus:
   # so the namespace/pod selector of the bus egress rule
   # (networkPolicy.dmz) never matches it: list its addresses here. With
   # bus.host set and this list set, the rule has only these peers;
-  # without bus.host they are added next to the selector.
+  # without bus.host they are added next to the selector. NetworkPolicy
+  # can't match a DNS name: keep this in step with what bus.host resolves
+  # to by hand.
   egressCIDRs: []
   #   - 10.20.1.4/32
   # IMAS_SPROUT_BUS_URLS: the externally reachable wss:// addresses of
