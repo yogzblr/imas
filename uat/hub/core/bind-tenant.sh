@@ -68,4 +68,11 @@ done
 
 tmp=$(mktemp "$OUT_DIR/core.json.XXXXXX")
 jq --arg n "$n" --arg t "$tenant_id" '.tenants[$n] = $t' "$core_json" >"$tmp" && mv "$tmp" "$core_json"
-log "tenant $n bound to $tenant_id (recorded in $core_json); fetch new tokens to get the claim"
+# keycloak.json (sensitive, the shape uat/tests and uat/enroll read) gets
+# tenants.<n>.tenant_id too.
+kc_json="$SENSITIVE_DIR/keycloak.json"
+if [[ -s "$kc_json" ]]; then
+	tmp=$(umask 077 && mktemp "$SENSITIVE_DIR/keycloak.json.XXXXXX")
+	jq --arg n "$n" --arg t "$tenant_id" '.tenants[$n].tenant_id = $t' "$kc_json" >"$tmp" && mv "$tmp" "$kc_json"
+fi
+log "tenant $n bound to $tenant_id (recorded in $core_json and $kc_json); fetch new tokens to get the claim"

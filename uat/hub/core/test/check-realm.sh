@@ -54,8 +54,16 @@ t "no user has a pending required action (the password grant would fail)" 'all(.
 t "user profile: organization_id is admin-edit and admin-view only" \
 	"$up"' | .attributes[] | select(.name == "organization_id") | .permissions.edit == ["admin"] and .permissions.view == ["admin"]'
 t "user profile: users can edit nothing" "$up"' | all(.attributes[]; .permissions.edit == ["admin"])'
-t "no other \${...} placeholder than the six per-run values" \
-	'[.. | strings | scan("\\$\\{[^}]*\\}")] | unique | sort == ["${UAT_KEYCLOAK_URL}", "${UAT_T1_ADMIN_PASSWORD}", "${UAT_T1_READER_PASSWORD}", "${UAT_T2_ADMIN_PASSWORD}", "${UAT_T2_READER_PASSWORD}", "${UAT_TESTS_CLIENT_SECRET}"]'
+t "no other \${...} placeholder than the seven per-run values" \
+	'[.. | strings | scan("\\$\\{[^}]*\\}")] | unique | sort == ["${UAT_KEYCLOAK_URL}", "${UAT_OTHER_CLIENT_SECRET}", "${UAT_T1_ADMIN_PASSWORD}", "${UAT_T1_READER_PASSWORD}", "${UAT_T2_ADMIN_PASSWORD}", "${UAT_T2_READER_PASSWORD}", "${UAT_TESTS_CLIENT_SECRET}"]'
+# uat/tests (UAT.5) waits for a token minted at the start of a run to expire
+# (X1, up to 7 minutes), so the lifespan stays at Keycloak's default or less.
+t "access tokens live 5 minutes or less" '.accessTokenLifespan <= 300'
+other='.clients[] | select(.clientId == "imas-uat-other-audience")'
+t "other-audience client: confidential, password grant, per-run secret" \
+	"$other"' | .publicClient == false and .directAccessGrantsEnabled == true and .standardFlowEnabled == false and .secret == "${UAT_OTHER_CLIENT_SECRET}"'
+t "other-audience client adds no saasapi audience and no organization claim" \
+	"$other"' | (.protocolMappers // []) == []'
 t "self registration and password reset are off" '.registrationAllowed == false and .resetPasswordAllowed == false'
 
 ((failed == 0)) || { echo "$failed realm check(s) failed" >&2; exit 1; }

@@ -6,7 +6,7 @@
   "attributes": {
     "frontendUrl": "${UAT_KEYCLOAK_URL}"
   },
-  "accessTokenLifespan": 900,
+  "accessTokenLifespan": 300,
   "ssoSessionIdleTimeout": 1800,
   "ssoSessionMaxLifespan": 36000,
   "bruteForceProtected": true,
@@ -90,6 +90,22 @@
           }
         }
       ]
+    },
+    {
+      "clientId": "imas-uat-other-audience",
+      "name": "imas UAT: tokens WITHOUT saasapi's audience (wrong-audience test, UAT only)",
+      "enabled": true,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${UAT_OTHER_CLIENT_SECRET}",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "redirectUris": [],
+      "webOrigins": [],
+      "protocol": "openid-connect"
     }
   ],
   "users": [

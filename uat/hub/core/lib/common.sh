@@ -49,6 +49,8 @@ S3_SAASAPI_USER=imas-saasapi
 REALM=imas-uat
 SAASAPI_AUDIENCE=imas-saasapi                 # saasapi.jwt.audience
 TESTS_CLIENT=imas-uat-tests
+OTHER_CLIENT=imas-uat-other-audience        # tokens without saasapi's audience (X1)
+TENANT_ATTRIBUTE=organization_id              # user attribute mapped to organization.id
 READ_ROLE=imas-recipes-read                   # saasapi.recipes.readRole
 WRITE_ROLE=imas-recipes-write                 # saasapi.recipes.writeRole
 UAT_USERS=(t1-admin t1-reader t2-admin t2-reader)
@@ -130,7 +132,7 @@ load_endpoints() {
 	CORE_FARMER_PORT=$(ep '.core.ports.farmer_api' 5405)
 	CORE_EXPOSURE=$(ep '.core.exposure' hostPort)
 	DMZ_ENVOY_PORT=$(ep '.dmz.ports.envoy' 8443)
-	DMZ_BUS_PORT=$(ep '.dmz.ports.bus' 5406)
+	DMZ_BUS_PORT=$(ep '.dmz.ports.bus' 8442)
 	BUS_SERVICE=$(ep '.dmz.bus_service' imas-dmz-nats-bus)
 	BUS_NAMESPACE=$(ep '.dmz.bus_namespace' imas-dmz)
 	CA_ISSUER=$(ep '.ca.cluster_issuer' imas-uat-ca)
@@ -249,6 +251,31 @@ sts_ready() {
 # pxc_ready <cluster> <ns>: the PerconaXtraDBCluster reports state ready.
 pxc_ready() {
 	[[ "$(kc -n "$2" get perconaxtradbcluster "$1" -o jsonpath='{.status.state}')" == ready ]]
+}
+
+# write_keycloak_json <keycloak creds dir> <out file>: the sensitive
+# keycloak.json uat/tests and uat/enroll read. Keeps tenant_ids already
+# bound in <out file>; bind-tenant.sh adds them.
+write_keycloak_json() {
+	local prev_kc_tenants
+	prev_kc_tenants=$(jq -c '[.tenants // {} | to_entries[] | select(.value.tenant_id) | {key, value: .value.tenant_id}] | from_entries' \
+		"$2" 2>/dev/null || echo '{}')
+	(umask 077 && jq -n --arg issuer "$KEYCLOAK_ISSUER" --arg client "$TESTS_CLIENT" --arg other "$OTHER_CLIENT" \
+		--arg attr "$TENANT_ATTRIBUTE" --argjson bound "$prev_kc_tenants" \
+		--rawfile cs "$1/tests-client-secret" --rawfile os "$1/other-client-secret" \
+		--rawfile p1 "$1/t1-admin.password" --rawfile p2 "$1/t1-reader.password" \
+		--rawfile p3 "$1/t2-admin.password" --rawfile p4 "$1/t2-reader.password" '
+		def tenant($n; $a; $ap; $r; $rp):
+		  {admin: {username: $a, password: $ap}, readonly: {username: $r, password: $rp}}
+		  + (if $bound[$n] then {tenant_id: $bound[$n]} else {} end);
+		{
+		  issuer: $issuer, client_id: $client, client_secret: $cs, tenant_attribute: $attr,
+		  other_audience_client: {client_id: $other, client_secret: $os},
+		  tenants: {
+		    "1": tenant("1"; "t1-admin"; $p1; "t1-reader"; $p2),
+		    "2": tenant("2"; "t2-admin"; $p3; "t2-reader"; $p4)
+		  }
+		}' >"$2")
 }
 
 # jwt_payload <token>: the decoded payload JSON (no verification; the

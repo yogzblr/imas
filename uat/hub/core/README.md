@@ -40,7 +40,7 @@ specific, so UAT.8's local rig runs them unchanged:
 install.sh   <kubeconfig> <endpoints.json> <state-dir> <release_tag>
 check.sh     <kubeconfig> <endpoints.json> <state-dir>
 bind-tenant.sh <kubeconfig> <endpoints.json> <state-dir> <1|2> <tenant_id>
-token.sh     <kubeconfig> <endpoints.json> <state-dir> <t1-admin|t1-reader|t2-admin|t2-reader>
+token.sh     <kubeconfig> <endpoints.json> <state-dir> <t1-admin|t1-reader|t2-admin|t2-reader> [tests|other]
 ```
 
 `openbao-bootstrap.sh`, `seeds.sh`, `admin-keys.sh`, `minio-setup.sh` and
@@ -63,7 +63,7 @@ own with the same arguments. `gen-values.sh` reads files only.
   | `core.ports.farmer_api` | no | `5405` | the edge's external farmer API port (the DMZ's Envoy dials it) |
   | `core.exposure` | no | `hostPort` | `hostPort`, or `nodePort` (the API server's node port range must then include both ports) |
   | `dmz.ports.envoy` | no | `8443` | Envoy's external port (nats chart `envoy.listenerPort`) |
-  | `dmz.ports.bus` | no | `5406` | where the DMZ exposes the bus client port |
+  | `dmz.ports.bus` | no | `8442` | the DMZ node port of the bus client port (owner decision 2026-10-06: the DMZ node port range is 8442-8443, bus on 8442). farmer and saasapi still dial `bus.port` 5406 on the core-side Service, which forwards to this port |
   | `dmz.bus_service` / `dmz.bus_namespace` | no | `imas-dmz-nats-bus` / `imas-dmz` | the nats release's bus Service (`<release>-nats-bus`) and namespace |
   | `ca.cluster_issuer` | no | `imas-uat-ca` | UAT.2's cert-manager ClusterIssuer (a CA issuer: its Secrets carry `ca.crt`) |
   | `cluster_domain` | no | `cluster.local` | |
@@ -146,11 +146,18 @@ openssl, go (to build `nk`), tar, sha256sum, and this repository checked out.
   audience, test client id, role names and tenant claim, the four users
   with their tenant and roles, `tenants` (filled by `bind-tenant.sh`), the
   bootstrap admin's public keys, and where the sensitive directory is.
-- `uat-ca.crt`, `admin.json` (public keys).
+- `uat-ca.crt` (and the same file as `uat-ca.pem`, the name `uat/tests`
+  reads), `admin.json` (public keys).
 
 `<state>/core/sensitive/` (**SENSITIVE**, 0700; keep only as a sensitive
 artifact of the run):
 
+- `keycloak.json`: the shape `uat/tests` (UAT.5) and `uat/enroll` (UAT.4)
+  read (owner decision 2026-10-06): `issuer`, `client_id`, `client_secret`,
+  `tenant_attribute` (`organization_id`), `other_audience_client`, and
+  `tenants.<1|2>` with `admin` and `readonly` users and, once
+  `bind-tenant.sh` has run, `tenant_id`. It has no `admin` block (see
+  "Keycloak, tokens and tenants");
 - `credentials.json`: the BFF secret, the test client secret, the four user
   passwords, the Keycloak master admin, and pointers to the files below;
 - `admin.json` and `admin-home/.config/imas/` (the bootstrap admin's NKey
@@ -178,7 +185,11 @@ The realm `imas-uat` has:
 - the client `imas-saasapi` (the audience; bearer only, issues nothing) and
   the confidential client `imas-uat-tests` (password grant only, secret
   generated per run) with two mappers: the audience `imas-saasapi`, and the
-  user attribute `organization_id` as the claim `organization.id`;
+  user attribute `organization_id` as the claim `organization.id`; and
+  `imas-uat-other-audience` (password grant, no mappers), whose tokens lack
+  saasapi's audience, for the wrong-audience test;
+- access tokens that live 5 minutes (Keycloak's default), because the tests
+  wait for a token to expire;
 - the two realm roles, and four users: `t1-admin` and `t2-admin` (both
   roles), `t1-reader` and `t2-reader` (read only). Passwords are `${...}`
   placeholders Keycloak fills from a Secret at import; none is committed;
@@ -186,15 +197,22 @@ The realm `imas-uat` has:
   so a user can't move to another tenant.
 
 A tenant_id only exists after `POST /v1/tenants` (saasapi generates it), so
-the realm can't carry it. The flow for UAT.4:
+the realm can't carry it. Owner decision 2026-10-06: the harness calls
+`bind-tenant.sh` once per tenant. The flow:
 
 1. `token.sh ... t1-admin` (no `organization.id` yet) is enough for
    `POST /v1/tenants` and `GET /v1/versions`, which have no `{tenant_id}`.
 2. Create the tenant, then `bind-tenant.sh ... 1 <tenant_id>`: it sets
    `organization_id` on `t1-admin` and `t1-reader` (kcadm.sh inside the
    Keycloak pod, master realm, password over stdin) and records it in
-   `core.json`.
+   `core.json` and as `tenants.1.tenant_id` in `keycloak.json`.
 3. Fetch a new token; it now carries `organization.id`. Same for tenant 2.
+
+`keycloak.json` carries no Keycloak admin identity. Keycloak's admin REST
+API and the master realm are reachable only from inside the cluster
+(through `kubectl exec`), never through the edge. So the tests that make
+scratch users through that API (UAT.5's T1, T4 and T5) skip, with their
+reason, unless the owner decides otherwise (an open question on PR #132).
 
 ## check.sh
 
@@ -210,7 +228,8 @@ document gives the expected issuer and JWKS URL, and saasapi is configured
 with the same; a token for each of the four users, with that `iss`, the
 audience and the right roles; saasapi answers `GET /v1/versions` with 200
 for `t1-admin` and `t2-admin`, and 401 with no token, with no token and no
-BFF secret, with a valid token and no BFF secret, and with a forged
+BFF secret, with a valid token and no BFF secret, with a token from
+`imas-uat-other-audience` (no saasapi audience), and with a forged
 signature. Once both tenants are bound it also checks each admin reads its
 own tenant (200) and is refused on the other's (403).
 
@@ -247,8 +266,8 @@ unless `IMAS_REQUIRE_HELM=1`.
   `nodePort`.
 - **UAT.3a**: the nats release's bus Service is `dmz.bus_service` in
   `dmz.bus_namespace`, its certificate carries that Service's FQDN, and the
-  DMZ exposes the bus **client** port (5406, NATS over TLS) to core at
-  `dmz.ports.bus`. The seed Secret on the DMZ is made from the **same files**
+  DMZ exposes the bus **client** port (5406, NATS over TLS) to core on node
+  port 8442 (`dmz.ports.bus`; owner decision 2026-10-06). The seed Secret on the DMZ is made from the **same files**
   (`UAT_SEEDS_DIR`); see Seeds. Envoy's `farmer_api` upstream is
   `core.private_ip:5405` (or the core FQDN) and verifies against the UAT CA;
   farmer's certificate carries both.

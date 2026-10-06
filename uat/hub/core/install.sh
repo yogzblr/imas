@@ -47,6 +47,7 @@ mdir="$SENSITIVE_DIR/minio"
 printf '%s' imas-uat-kc-admin >"$kcdir/admin-username"
 gen_secret_file "$kcdir/admin-password"
 gen_secret_file "$kcdir/tests-client-secret" 32
+gen_secret_file "$kcdir/other-client-secret" 32
 for u in "${UAT_USERS[@]}"; do gen_secret_file "$kcdir/$u.password"; done
 printf '%s' imas-uat-root >"$mdir/root-user"
 gen_secret_file "$mdir/root-password" 32
@@ -56,6 +57,7 @@ apply_secret "$UAT_NS" "$MINIO_ROOT_SECRET" "user=$mdir/root-user" "password=$md
 apply_secret "$UAT_NS" "$KEYCLOAK_ADMIN_SECRET" "username=$kcdir/admin-username" "password=$kcdir/admin-password"
 apply_secret "$UAT_NS" "$KEYCLOAK_REALM_SECRET" \
 	"UAT_TESTS_CLIENT_SECRET=$kcdir/tests-client-secret" \
+	"UAT_OTHER_CLIENT_SECRET=$kcdir/other-client-secret" \
 	"UAT_T1_ADMIN_PASSWORD=$kcdir/t1-admin.password" \
 	"UAT_T1_READER_PASSWORD=$kcdir/t1-reader.password" \
 	"UAT_T2_ADMIN_PASSWORD=$kcdir/t2-admin.password" \
@@ -100,6 +102,7 @@ kc -n "$UAT_NS" wait certificate imas-uat-edge-tls --for=condition=Ready --timeo
 # The UAT CA, from the issued Secret's ca.crt (a public certificate).
 kc -n "$CORE_NS" get secret "$FARMER_TLS_SECRET" -o jsonpath='{.data.ca\.crt}' | base64 -d >"$OUT_DIR/uat-ca.crt"
 grep -q 'BEGIN CERTIFICATE' "$OUT_DIR/uat-ca.crt" || die "Secret $FARMER_TLS_SECRET has no ca.crt: is $CA_ISSUER a CA issuer?"
+cp "$OUT_DIR/uat-ca.crt" "$OUT_DIR/uat-ca.pem" # the name uat/tests reads
 kc -n "$CORE_NS" create configmap "$UAT_CA_CONFIGMAP" --from-file="ca.crt=$OUT_DIR/uat-ca.crt" \
 	--dry-run=client -o yaml | kc apply -f - >/dev/null
 
@@ -154,6 +157,7 @@ jq -n --arg tag "$release_tag" --arg version "$version" --arg ns "$CORE_NS" --ar
 	--arg url "$SAASAPI_URL" --arg ca "$OUT_DIR/uat-ca.crt" --arg issuer "$KEYCLOAK_ISSUER" \
 	--arg jwks "$KEYCLOAK_JWKS_URL" --arg token "$KEYCLOAK_TOKEN_URL" --arg realm "$REALM" \
 	--arg aud "$SAASAPI_AUDIENCE" --arg client "$TESTS_CLIENT" --arg rr "$READ_ROLE" --arg wr "$WRITE_ROLE" \
+	--arg attr "$TENANT_ATTRIBUTE" --arg other "$OTHER_CLIENT" \
 	--arg sens "$SENSITIVE_DIR" --arg bus "$SPROUT_BUS_URL" --argjson tenants "$prev_tenants" \
 	--slurpfile admin "$OUT_DIR/admin.json" '{
 	  release_tag: $tag, version: $version, namespace: $ns, release: $rel,
@@ -161,7 +165,8 @@ jq -n --arg tag "$release_tag" --arg version "$version" --arg ns "$CORE_NS" --ar
 	  sprout_bus_url: $bus,
 	  keycloak: {issuer: $issuer, jwks_url: $jwks, token_url: $token, realm: $realm,
 	             audience: $aud, client_id: $client, read_role: $rr, write_role: $wr,
-	             tenant_claim: "organization.id"},
+	             tenant_claim: "organization.id", tenant_attribute: $attr,
+	             other_audience_client_id: $other},
 	  users: {
 	    "t1-admin":  {tenant: "1", roles: [$rr, $wr]},
 	    "t1-reader": {tenant: "1", roles: [$rr]},
@@ -173,24 +178,35 @@ jq -n --arg tag "$release_tag" --arg version "$version" --arg ns "$CORE_NS" --ar
 	  sensitive_dir: $sens
 	}' >"$OUT_DIR/core.json"
 
+# SENSITIVE: keycloak.json, the shape uat/tests (UAT.5) and uat/enroll
+# (UAT.4) read (owner decision 2026-10-06): the issuer, the test client and
+# its secret, tenant_attribute (the user attribute the realm maps to
+# organization.id), the client whose tokens lack saasapi's audience, and
+# each tenant's admin and read-only users. tenants.<n>.tenant_id appears
+# once bind-tenant.sh has bound that tenant. No `admin` block: Keycloak's
+# admin REST API is not reachable from outside the cluster (README.md,
+# "Keycloak, tokens and tenants").
+write_keycloak_json "$kcdir" "$SENSITIVE_DIR/keycloak.json"
+
 # SENSITIVE: everything the tests need to act as the BFF, the users and the
 # CLI admin, in one file (mode 0600) next to the files it points at.
 (umask 077 && jq -n \
 	--rawfile ias "$SENSITIVE_DIR/internal-auth-secret" --rawfile cs "$kcdir/tests-client-secret" \
+	--rawfile ocs "$kcdir/other-client-secret" \
 	--rawfile p1 "$kcdir/t1-admin.password" --rawfile p2 "$kcdir/t1-reader.password" \
 	--rawfile p3 "$kcdir/t2-admin.password" --rawfile p4 "$kcdir/t2-reader.password" \
 	--rawfile kau "$kcdir/admin-username" --rawfile kap "$kcdir/admin-password" \
 	--slurpfile admin "$SENSITIVE_DIR/admin.json" --arg obao "$SENSITIVE_DIR/openbao-init.json" '{
 	  note: "SENSITIVE. UAT only, generated for this run. Never commit or upload outside the run.",
 	  internal_auth_secret: $ias,
-	  keycloak: {client_secret: $cs,
+	  keycloak: {client_secret: $cs, other_audience_client_secret: $ocs,
 	             passwords: {"t1-admin": $p1, "t1-reader": $p2, "t2-admin": $p3, "t2-reader": $p4},
 	             master_admin: {username: $kau, password: $kap}},
 	  bootstrap_admin: $admin[0],
 	  openbao_init_file: $obao
 	}' >"$SENSITIVE_DIR/credentials.json")
 
-log "outputs: $OUT_DIR/core.json (not secret), $SENSITIVE_DIR (SENSITIVE: keep as a sensitive artifact, never upload)"
+log "outputs: $OUT_DIR/core.json (not secret), $SENSITIVE_DIR/keycloak.json and credentials.json and the rest of $SENSITIVE_DIR (SENSITIVE: keep as a sensitive artifact, never upload)"
 if [[ "${SKIP_CHECK:-}" != 1 ]]; then
 	"$here/check.sh" "${common[@]}"
 fi

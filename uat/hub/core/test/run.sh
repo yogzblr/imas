@@ -135,6 +135,34 @@ refuse "the chart's all-zero placeholder admin key is refused" "placeholder" gv 
 jq '.pubkey = "not-a-key"' "$admin" >"$tmp/bad-admin.json"
 refuse "a malformed admin pubkey is refused" "NKey" gv "$ep" "$tmp/bad-admin.json" v0.1.0
 
+# keycloak.json: the shape uat/tests and uat/enroll read (owner decision
+# 2026-10-06), mode 0600, bound tenant_ids kept on a rewrite.
+kcd="$tmp/kc"
+(umask 077 && mkdir -p "$kcd")
+for f in tests-client-secret other-client-secret t1-admin.password t1-reader.password t2-admin.password t2-reader.password; do
+	printf 'secret-%s' "$f" >"$kcd/$f"
+done
+wkj() { bash -c '. "$1/lib/common.sh"; ENDPOINTS="$2"; load_endpoints; write_keycloak_json "$3" "$4"' _ "$core" "$ep" "$kcd" "$tmp/keycloak.json"; }
+if wkj 2>"$tmp/out"; then
+	jq -e '.issuer == "https://uatabc123-core.centralindia.cloudapp.azure.com/realms/imas-uat"
+	  and .client_id == "imas-uat-tests" and .client_secret == "secret-tests-client-secret"
+	  and .tenant_attribute == "organization_id"
+	  and .other_audience_client == {client_id: "imas-uat-other-audience", client_secret: "secret-other-client-secret"}
+	  and .tenants["1"] == {admin: {username: "t1-admin", password: "secret-t1-admin.password"}, readonly: {username: "t1-reader", password: "secret-t1-reader.password"}}
+	  and .tenants["2"].admin.username == "t2-admin" and .tenants["2"].readonly.username == "t2-reader"
+	  and (has("admin") | not)' "$tmp/keycloak.json" >/dev/null &&
+		ok "keycloak.json: issuer, clients, tenant_attribute, users, no admin block" || bad "keycloak.json shape"
+	[[ "$(stat -c %a "$tmp/keycloak.json")" == 600 ]] && ok "keycloak.json is 0600" || bad "keycloak.json mode"
+	jq '.tenants["2"].tenant_id = "t_abcdefghijklmnop"' "$tmp/keycloak.json" >"$tmp/kj" && cp "$tmp/kj" "$tmp/keycloak.json"
+	wkj && jq -e '.tenants["2"].tenant_id == "t_abcdefghijklmnop" and (.tenants["1"] | has("tenant_id") | not)' "$tmp/keycloak.json" >/dev/null &&
+		ok "keycloak.json: a rewrite keeps the bound tenant_id" || bad "keycloak.json: rewrite lost tenant_id"
+else
+	bad "write_keycloak_json"
+	sed 's/^/      /' "$tmp/out"
+fi
+refuse "token.sh refuses an unknown client" "tests or other" \
+	"$core/token.sh" "$kubeconfig" "$ep" "$tmp/s" t1-admin admin-cli
+
 # --- 5. seeds.sh --------------------------------------------------------------------
 state="$tmp/state"
 seeds() { PATH="$stubs:$PATH" "$core/seeds.sh" "$kubeconfig" "$ep" "$state"; }

@@ -155,6 +155,14 @@ got=$(status "" 0 /v1/versions)
 check "saasapi refuses a request with no token and no BFF secret: 401 (got $got)" test "$got" = 401
 got=$(status "${TOK[t1-admin]:-}" 0 /v1/versions)
 check "saasapi refuses a valid token without the BFF secret: 401 (got $got)" test "$got" = 401
+other_tok=$("$here/token.sh" "$KUBECONFIG_PATH" "$ENDPOINTS" "$STATE_ROOT" t1-admin other 2>/dev/null || true)
+check "Keycloak issues a token to t1-admin on $OTHER_CLIENT" test -n "$other_tok"
+if [[ -n "$other_tok" ]]; then
+	check "$OTHER_CLIENT token lacks $SAASAPI_AUDIENCE" jq -e --arg a "$SAASAPI_AUDIENCE" \
+		'(.aud // [] | if type == "array" then . else [.] end) | index($a) | not' <<<"$(jwt_payload "$other_tok")"
+	got=$(status "$other_tok" 1 /v1/versions)
+	check "saasapi refuses a token without its audience: 401 (got $got)" test "$got" = 401
+fi
 forged="${TOK[t1-admin]:-x.y.z}"
 forged="${forged%.*}.AAAA"
 got=$(status "$forged" 1 /v1/versions)

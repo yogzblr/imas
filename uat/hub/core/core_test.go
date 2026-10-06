@@ -546,7 +546,7 @@ func TestExtrasChartRender(t *testing.T) {
 
 	// The bus: farmer's FQDN on this cluster points at the DMZ.
 	eps := mustJSON(t, get(t, objs, "EndpointSlice/imas-dmz-nats-bus-dmz"))
-	for _, want := range []string{`"` + dmzIP + `"`, `"port":5406`, `"kubernetes.io/service-name":"imas-dmz-nats-bus"`, `"namespace":"imas-dmz"`} {
+	for _, want := range []string{`"` + dmzIP + `"`, `"port":8442`, `"kubernetes.io/service-name":"imas-dmz-nats-bus"`, `"namespace":"imas-dmz"`} {
 		if !strings.Contains(eps, want) {
 			t.Errorf("bus EndpointSlice lacks %s: %s", want, eps)
 		}
@@ -554,6 +554,16 @@ func TestExtrasChartRender(t *testing.T) {
 	svc := get(t, objs, "Service/imas-dmz-nats-bus")
 	if dig(svc, "spec", "selector") != nil || str(svc, "metadata", "namespace") != "imas-dmz" {
 		t.Error("the bus Service must be selectorless, in imas-dmz")
+	}
+	// farmer dials the chart's bus.port (5406); the DMZ exposes the bus on
+	// node port 8442 (owner decision, 2026-10-06).
+	if s := mustJSON(t, svc); !strings.Contains(s, `"port":5406`) || !strings.Contains(s, `"targetPort":8442`) {
+		t.Errorf("bus Service should map 5406 to the DMZ node port 8442: %s", s)
+	}
+	for _, key := range []string{"NetworkPolicy/imas-uat-farmer-cross-cluster", "NetworkPolicy/imas-uat-saasapi-cross-cluster"} {
+		if s := mustJSON(t, get(t, objs, key)); !strings.Contains(s, `"port":8442`) {
+			t.Errorf("%s doesn't open the DMZ bus node port 8442", key)
+		}
 	}
 
 	// Policies open the DMZ address only.
