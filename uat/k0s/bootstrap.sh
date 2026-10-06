@@ -219,7 +219,9 @@ write_endpoints() {
             node_port_range: $drange},
       core: {name: $cn, private_ip: $cp, public_ip: $cq, fqdn: $cf,
              ports: {https: $https, farmer_api: $api},
-             exposure: "hostPorts on the uat/hub/core edge, no node ports",
+             # Exactly "hostPort": uat/hub/core/lib/common.sh accepts
+             # nothing else (owner decision, 2026-10-06: no core node ports).
+             exposure: "hostPort",
              node_port_range: $crange},
       cluster_issuer: $issuer,
       ca_file: "uat-ca.crt",

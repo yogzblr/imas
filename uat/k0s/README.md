@@ -127,9 +127,12 @@ What uat/k0s does about exposure:
 | core | **5405** | hostPort on the edge, passed through to farmer's API (`farmer.apiPort`) | uat/hub/core | the DMZ's Envoy (`/v1/enroll`, `/v1/refresh`, `/files/`, the JWKS) |
 
 The ports and ranges live in `config.env`. `endpoints.json` repeats them in
-the keys uat/hub/dmz reads (`dmz.ports.envoy`, `dmz.ports.bus`,
-`core.ports.farmer_api`, `cluster_issuer`). The `expose.sh` of earlier
-revisions of this PR is removed (owner decision 0).
+the keys uat/hub/dmz and uat/hub/core read (`dmz.ports.envoy`,
+`dmz.ports.bus`, `core.ports.https`, `core.ports.farmer_api`,
+`cluster_issuer`). It writes `core.exposure` as exactly `hostPort`, the only
+value uat/hub/core's endpoint loader accepts. `dmz.exposure` is a
+description that no reader on main uses. The `expose.sh` of earlier
+revisions of PR #130 is removed (owner decision 0).
 
 Notes for the hub briefs, unverified:
 
