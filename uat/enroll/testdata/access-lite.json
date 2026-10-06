@@ -1,6 +1,6 @@
 {
-  "vms": {
-    "t1-ubuntu": {"container": "imas-uat-lite-t1-ubuntu"},
-    "t1-alma": {"container": "imas-uat-lite-t1-alma"}
-  }
+  "t1-ubuntu": {"host": "127.0.0.1", "ssh_port": 22221},
+  "t1-alma": {"host": "127.0.0.1", "ssh_port": 22222},
+  "t2-ubuntu": {"host": "172.30.0.23", "ssh_port": 22},
+  "t2-alma": {"host": "172.30.0.24", "ssh_port": 22}
 }

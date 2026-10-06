@@ -34,11 +34,14 @@ RELEASE_TAG_RE = re.compile(r"^v(\d+\.\d+\.\d+)(?:-(rc\.\d+))?$")
 VM_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 ORG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$")
+# The Shared contract's private DNS zone (UAT.1's private_dns_zone default).
+DEFAULT_PRIVATE_ZONE = "uat.imas.internal"
 
 # OS -> (sprout ID prefix, OS family group, connections it may use).
 OSES = {
-    "ubuntu": ("ubuntu", "linux_sprouts", ("ssh", "docker")),
-    "alma": ("alma", "linux_sprouts", ("ssh", "docker")),
+    "ubuntu": ("ubuntu", "linux_sprouts", ("ssh",)),
+    "alma": ("alma", "linux_sprouts", ("ssh",)),
     "windows": ("win", "windows_sprouts", ("winrm",)),
 }
 
@@ -125,6 +128,11 @@ def plan_sprouts(uat: dict) -> list[dict]:
         if os_name not in OSES:
             raise InputError(f"sprout {vm}: os {s.get('os')!r} is not one of {', '.join(OSES)}")
         conn = str(s.get("connection", "")).lower()
+        if conn == "docker":
+            raise InputError(
+                f"sprout {vm}: connection 'docker' is not supported: the local rig connects over SSH, "
+                "its containers running sshd (owner decision, 2026-10-06)"
+            )
         allowed = OSES[os_name][2]
         if conn not in allowed:
             raise InputError(
@@ -164,9 +172,13 @@ def build(args) -> tuple[dict, dict, dict, str | None]:
     linux_version, windows_version = package_versions(args.release_tag, args.package_metadata)
     planned = plan_sprouts(uat)
 
-    farmer_host = args.envoy_host or (uat.get("dmz") or {}).get("fqdn")
-    if not farmer_host or re.search(r"://|/|\s", farmer_host):
-        raise InputError("no Envoy host: pass --envoy-host or set dmz.fqdn in the uat JSON")
+    # Sprouts reach Envoy by the DMZ's private DNS name (owner decision,
+    # 2026-10-06): dmz.<zone> in the run's Azure Private DNS zone (UAT.1),
+    # uat.imas.internal unless the uat JSON names another zone.
+    zone = uat.get("private_dns_zone") or DEFAULT_PRIVATE_ZONE
+    farmer_host = args.envoy_host or f"dmz.{zone}"
+    if not HOST_RE.match(farmer_host):
+        raise InputError(f"Envoy host {farmer_host!r} is not a host name")
     keys_dir = os.path.abspath(args.keys_dir)
     ca_file = os.path.abspath(args.ca_file)
     if not os.path.isfile(ca_file):
@@ -189,15 +201,6 @@ def build(args) -> tuple[dict, dict, dict, str | None]:
         known_hosts = os.path.abspath(args.known_hosts or os.path.join(args.out, "..", "ssh", "known_hosts"))
     if "winrm" in conns and not (args.winrm_password_file or args.winrm_password_dir):
         raise InputError("WinRM sprouts need --winrm-password-file or --winrm-password-dir")
-    if "docker" in conns and not args.docker_connection:
-        # The owner dropped community.docker (2026-10-06) and no replacement
-        # is chosen yet: name one, don't assume one.
-        raise InputError(
-            "docker sprouts need --docker-connection PLUGIN: community.docker is not used "
-            "(owner decision), and which connection replaces it is open (see README.md)"
-        )
-    if args.docker_connection and not re.match(r"^[a-z0-9_]+(\.[a-z0-9_]+)*$", args.docker_connection):
-        raise InputError(f"--docker-connection {args.docker_connection!r} is not a connection plugin name")
 
     hosts: dict[str, dict] = {}
     groups: dict[str, list[str]] = {}
@@ -216,14 +219,12 @@ def build(args) -> tuple[dict, dict, dict, str | None]:
             # Every tunnel is 127.0.0.1 on another port, and a port may be a
             # different VM next run: record keys under the VM name instead.
             hv["ansible_ssh_extra_args"] = f"-o HostKeyAlias={vm}"
-        elif p["connection"] == "winrm":
+        else:  # winrm
             hv["ansible_host"] = entry.get("host") or "127.0.0.1"
             hv["ansible_port"] = port(entry, "winrm_port", vm)
             hv["ansible_user"] = p["admin_user"] or args.default_user
             if args.winrm_password_dir:
                 hv["ansible_password"] = lookup_file(os.path.join(os.path.abspath(args.winrm_password_dir), vm))
-        else:  # docker: the local rig's systemd containers
-            hv["ansible_host"] = entry.get("container") or vm
         hv.update(
             {
                 "imas_join_token": lookup_file(key_file),
@@ -311,12 +312,6 @@ def build(args) -> tuple[dict, dict, dict, str | None]:
         if args.winrm_password_file and not args.winrm_password_dir:
             w["ansible_password"] = lookup_file(os.path.abspath(args.winrm_password_file))
         gv["conn_winrm"] = w
-    if "conn_docker" in groups:
-        gv["conn_docker"] = {
-            "ansible_connection": args.docker_connection,
-            "ansible_user": "root",
-            "ansible_become": False,
-        }
     return inventory, gv, {"run_id": uat["run_id"], "sprouts": summary}, known_hosts
 
 
@@ -377,7 +372,7 @@ def write(path: str, text: str, mode: int = 0o644) -> None:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--uat", required=True, help="the uat JSON (tofu output -json uat)")
-    ap.add_argument("--access", help="access.json from uat/access/tunnels.sh (not needed for docker sprouts)")
+    ap.add_argument("--access", required=True, help="access.json from uat/access/tunnels.sh, or the local rig's")
     ap.add_argument("--keys-dir", required=True, help="the keys/ directory create-tenants.sh wrote")
     ap.add_argument("--release-tag", required=True, help="vX.Y.Z or vX.Y.Z-rc.N")
     ap.add_argument("--ca-file", required=True, help="the UAT CA (PEM) sprouts pin as sproutrootca")
@@ -387,14 +382,13 @@ def main(argv=None) -> int:
     ap.add_argument("--winrm-password-file", help="one WinRM password for every Windows sprout")
     ap.add_argument("--winrm-password-dir", help="a directory with one password file per Windows VM name")
     ap.add_argument("--default-user", default="uatadmin", help="login when the uat JSON has no admin_user")
-    ap.add_argument("--envoy-host", help="Envoy's name for farmerinterface (default: dmz.fqdn)")
+    ap.add_argument("--envoy-host", help="Envoy's name for farmerinterface (default: dmz.<private_dns_zone>, dmz.uat.imas.internal)")
     ap.add_argument("--envoy-port", type=int, default=8443, help="Envoy's listener port (default 8443)")
     ap.add_argument("--bus-url", action="append", default=[], help="pin a bus URL (default: farmer's)")
     ap.add_argument("--buildkite-org", help="Buildkite organization (default: the role's, yogzblr)")
     ap.add_argument("--package-metadata", default="git", help="Linux package version metadata (default git)")
     ap.add_argument("--windows-msi-url", help="install this MSI instead of the NuGet feed's")
     ap.add_argument("--windows-msi-sha256", help="its SHA-256 (required with --windows-msi-url)")
-    ap.add_argument("--docker-connection", help="connection plugin for docker sprouts (no default; see README.md)")
     ap.add_argument("--verify-timeout", type=int, default=600, help="imas_verify_timeout (default 600)")
     args = ap.parse_args(argv)
     if not 0 < args.envoy_port < 65536:

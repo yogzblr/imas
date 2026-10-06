@@ -1,11 +1,11 @@
 {
   "run_id": "lite01",
-  "dmz": {"name": "uat-dmz", "private_ip": "172.30.0.10", "fqdn": "uatlite01-dmz.uat.test", "admin_user": ""},
-  "core": {"name": "uat-core", "private_ip": "172.30.0.11", "fqdn": "uatlite01-core.uat.test", "admin_user": ""},
+  "dmz": {"name": "uat-dmz", "private_ip": "172.30.0.10", "fqdn": "uatlite01-dmz.uat.test", "admin_user": "root"},
+  "core": {"name": "uat-core", "private_ip": "172.30.0.11", "fqdn": "uatlite01-core.uat.test", "admin_user": "root"},
   "sprouts": {
-    "t1-ubuntu": {"tenant": "1", "os": "ubuntu", "connection": "docker", "id": "", "private_ip": "172.30.0.21", "admin_user": ""},
-    "t1-alma": {"tenant": "1", "os": "alma", "connection": "docker", "id": "", "private_ip": "172.30.0.22", "admin_user": ""},
-    "t2-ubuntu": {"tenant": "2", "os": "ubuntu", "connection": "docker", "id": "", "private_ip": "172.30.0.23", "admin_user": ""},
-    "t2-alma": {"tenant": "2", "os": "alma", "connection": "docker", "id": "", "private_ip": "172.30.0.24", "admin_user": ""}
+    "t1-ubuntu": {"tenant": "1", "os": "ubuntu", "connection": "ssh", "id": "", "private_ip": "172.30.0.21", "admin_user": "root"},
+    "t1-alma": {"tenant": "1", "os": "alma", "connection": "ssh", "id": "", "private_ip": "172.30.0.22", "admin_user": "root"},
+    "t2-ubuntu": {"tenant": "2", "os": "ubuntu", "connection": "ssh", "id": "", "private_ip": "172.30.0.23", "admin_user": "root"},
+    "t2-alma": {"tenant": "2", "os": "alma", "connection": "ssh", "id": "", "private_ip": "172.30.0.24", "admin_user": "root"}
   }
 }

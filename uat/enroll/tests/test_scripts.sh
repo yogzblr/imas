@@ -323,20 +323,24 @@ check "release tag latest refused" bash -c '[ "$1" -ne 0 ] && grep -q "never lat
 rc=0
 "$enroll/enroll.sh" --uat "$testdata/uat.json" --state "$state" --release-tag v0.1.0-rc.4 --ca-file "$testdata/uat-ca.pem" \
 	--internal-auth-file "$work/internal-auth" --token-cmd "$tests/fake/token-cmd" >/dev/null 2>"$work/err" || rc=$?
-check "ssh/winrm sprouts without access.json refused" bash -c '[ "$1" -ne 0 ] && grep -q -- "--access is required" "$2"' _ "$rc" "$work/err"
+check "no access.json: refused" bash -c '[ "$1" -ne 0 ] && grep -q -- "--access is required" "$2"' _ "$rc" "$work/err"
 
 fresh enrolllite
 lite() {
-	"$enroll/enroll.sh" --uat "$testdata/uat-lite.json" --state "$state" --release-tag v0.1.0-rc.4 --ca-file "$testdata/uat-ca.pem" \
-		--internal-auth-file "$work/internal-auth" --token-cmd "$tests/fake/token-cmd" --saasapi-url https://saas.uat.test "$@"
+	"$enroll/enroll.sh" --uat "$1" --access "$testdata/access-lite.json" --state "$state" --release-tag v0.1.0-rc.4 \
+		--ca-file "$testdata/uat-ca.pem" --ssh-key "$work/id_uat" --internal-auth-file "$work/internal-auth" \
+		--token-cmd "$tests/fake/token-cmd" --saasapi-url https://saas.uat.test
 }
-rc=0; lite >/dev/null 2>"$work/err" || rc=$?
-check "docker sprouts without --docker-connection: refused, naming the owner decision" \
-	bash -c '[ "$1" -ne 0 ] && grep -q "community.docker is not used (owner decision)" "$2"' _ "$rc" "$work/err"
-rc=0; lite --docker-connection example.rig.container >/dev/null 2>"$work/err" || rc=$?
-check "with a connection named, the rig needs no access.json, SSH key or WinRM password" [ "$rc" -eq 0 ]
-check "that connection in its inventory" grep -q '"example.rig.container"' "$state/inventory/group_vars/conn_docker.yml"
-check "community.docker appears nowhere" bash -c '! grep -rq community.docker "$1/inventory"' _ "$state"
+rc=0; lite "$testdata/uat-lite.json" >/dev/null 2>"$work/err" || rc=$?
+check "the local rig enrols over SSH, with no WinRM password" [ "$rc" -eq 0 ]
+check "its inventory uses ssh and no docker connection" \
+	bash -c 'grep -q "\"ssh\"" "$1/inventory/group_vars/conn_ssh.yml" && ! grep -rq docker "$1/inventory"' _ "$state"
+check "farmerinterface is the DMZ's private name" grep -q '"dmz.uat.imas.internal"' "$state/inventory/group_vars/sprouts.yml"
+fresh enrolldocker
+jq '.sprouts["t1-alma"].connection = "docker"' "$testdata/uat-lite.json" >"$work/docker.json"
+rc=0; lite "$work/docker.json" >/dev/null 2>"$work/err" || rc=$?
+check "a docker connection is refused, naming the owner decision" \
+	bash -c '[ "$1" -ne 0 ] && grep -q "the local rig connects over SSH" "$2"' _ "$rc" "$work/err"
 
 echo "# playbooks, for real against localhost"
 if [[ -z "$real_playbook" ]]; then

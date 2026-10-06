@@ -76,7 +76,7 @@ class Base(unittest.TestCase):
             "--ssh-key", self.ssh_key,
             "--winrm-password-file", self.winrm,
         ]
-        if access:
+        if access is not None:
             args += ["--access", os.path.join(TESTDATA, access) if isinstance(access, str) else self.write_json("access.json", access)]
         args += list(extra)
         p = subprocess.run([sys.executable, SCRIPT, *args], capture_output=True, text=True)
@@ -200,7 +200,8 @@ class TestInventory(Base):
     def test_group_vars(self):
         self.run_gen()
         sv = self.yaml("group_vars/sprouts.yml")
-        self.assertEqual(sv["imas_farmer_host"], "uatabc123-dmz.centralindia.cloudapp.azure.com")
+        # The DMZ's private name (owner decision), not its public FQDN.
+        self.assertEqual(sv["imas_farmer_host"], "dmz.uat.imas.internal")
         self.assertEqual(sv["imas_farmer_api_port"], 8443)
         self.assertEqual(
             sv["imas_sprout_root_ca"],
@@ -282,45 +283,38 @@ class TestInventory(Base):
         self.run_gen(access={"vms": load("access.json")})
         self.assertEqual(self.hostvars()["t1-alma"]["ansible_port"], 42202)
 
-    def test_docker_local_rig(self):
-        p = self.run_gen(uat=load("uat-lite.json"), access="access-lite.json",
-                         extra=["--docker-connection", "example.rig.container"])
-        self.assertIn("t2-ubuntu: tenant 2 ubuntu over docker as sprout ubuntu-01", p.stdout)
+    def test_private_zone_from_uat_json(self):
+        uat = load("uat.json")
+        uat["private_dns_zone"] = "run7.uat.example.internal"
+        self.run_gen(uat=uat)
+        self.assertEqual(self.yaml("group_vars/sprouts.yml")["imas_farmer_host"], "dmz.run7.uat.example.internal")
+
+    def test_bad_envoy_host(self):
+        p = self.run_gen(extra=["--envoy-host", "https://dmz.uat.imas.internal"], expect_ok=False)
+        self.assertIn("is not a host name", p.stderr)
+
+    def test_local_rig_over_ssh(self):
+        # The local rig connects over SSH to containers running sshd (owner decision).
+        p = self.run_gen(uat=load("uat-lite.json"), access="access-lite.json")
+        self.assertIn("t2-ubuntu: tenant 2 ubuntu over ssh as sprout ubuntu-01", p.stdout)
         hv = self.hostvars()
-        self.assertEqual(hv["t1-ubuntu"]["ansible_host"], "imas-uat-lite-t1-ubuntu")
-        self.assertEqual(hv["t2-ubuntu"]["ansible_host"], "t2-ubuntu")  # no container named: the VM name
-        self.assertNotIn("ansible_port", hv["t1-ubuntu"])
+        self.assertEqual((hv["t1-ubuntu"]["ansible_host"], hv["t1-ubuntu"]["ansible_port"]), ("127.0.0.1", 22221))
+        self.assertEqual((hv["t2-alma"]["ansible_host"], hv["t2-alma"]["ansible_port"]), ("172.30.0.24", 22))
+        self.assertEqual(hv["t1-alma"]["ansible_user"], "root")
         self.assertEqual(hv["t1-alma"]["uat_sprout_id"], hv["t2-alma"]["uat_sprout_id"])
-        docker = self.yaml("group_vars/conn_docker.yml")
-        self.assertEqual(docker["ansible_connection"], "example.rig.container")
-        self.assertNotIn("community.docker", self.all_output())
-        self.assertEqual(docker["ansible_user"], "root")
-        self.assertFalse(os.path.exists(os.path.join(self.out, "group_vars", "conn_ssh.yml")))
+        self.assertEqual(self.yaml("group_vars/conn_ssh.yml")["ansible_connection"], "ssh")
         self.assertFalse(os.path.exists(os.path.join(self.out, "group_vars", "windows_sprouts.yml")))
-        self.assertEqual(self.yaml("group_vars/sprouts.yml")["imas_farmer_host"], "uatlite01-dmz.uat.test")
+        self.assertFalse(os.path.exists(os.path.join(self.out, "group_vars", "conn_docker.yml")))
+        self.assertNotIn("docker", self.all_output())
+        self.assertEqual(self.yaml("group_vars/sprouts.yml")["imas_farmer_host"], "dmz.uat.imas.internal")
 
-    def test_docker_needs_no_access_file_or_credentials(self):
+    def test_docker_connection_refused(self):
         uat = load("uat-lite.json")
-        self.write_keys(uat)
-        args = [
-            sys.executable, SCRIPT, "--uat", self.write_json("u.json", uat), "--keys-dir", self.keys,
-            "--release-tag", "v0.1.0-rc.4", "--ca-file", os.path.join(TESTDATA, "uat-ca.pem"), "--out", self.out,
-            "--docker-connection", "example.rig.container",
-        ]
-        p = subprocess.run(args, capture_output=True, text=True)
-        self.assertEqual(p.returncode, 0, p.stderr)
-
-    def test_docker_needs_a_named_connection(self):
-        # community.docker was dropped (owner decision); no default replaces it.
-        p = self.run_gen(uat=load("uat-lite.json"), access="access-lite.json", expect_ok=False)
-        self.assertIn("--docker-connection", p.stderr)
+        uat["sprouts"]["t1-alma"]["connection"] = "docker"
+        p = self.run_gen(uat=uat, access="access-lite.json", expect_ok=False)
+        self.assertIn("the local rig connects over SSH", p.stderr)
         self.assertIn("owner decision", p.stderr)
         self.assertFalse(os.path.exists(os.path.join(self.out, "hosts.yml")))
-
-    def test_docker_connection_name_checked(self):
-        p = self.run_gen(uat=load("uat-lite.json"), access="access-lite.json",
-                         extra=["--docker-connection", "rm -rf"], expect_ok=False)
-        self.assertIn("not a connection plugin name", p.stderr)
 
     @unittest.skipUnless(shutil.which("ansible-inventory"), "ansible-inventory not on PATH")
     def test_ansible_loads_it(self):
@@ -369,7 +363,12 @@ class TestErrors(Base):
     def test_windows_in_docker(self):
         uat = load("uat.json")
         uat["sprouts"]["t1-win"]["connection"] = "docker"
-        self.assert_error("not supported for windows", uat=uat)
+        self.assert_error("connection 'docker' is not supported", uat=uat)
+
+    def test_linux_over_winrm(self):
+        uat = load("uat.json")
+        uat["sprouts"]["t1-alma"]["connection"] = "winrm"
+        self.assert_error("not supported for alma", uat=uat)
 
     def test_tenant_three(self):
         uat = load("uat.json")

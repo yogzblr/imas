@@ -40,7 +40,7 @@ uat/enroll/enroll.sh \
 | Input | From | Notes |
 |---|---|---|
 | `--uat` | `tofu output -json uat` (UAT.1), or the local rig (UAT.8) | The contract's object: `run_id`, `dmz.fqdn`, `core.fqdn`, and `sprouts` keyed by VM name with `tenant`, `os`, `connection`, `admin_user` |
-| `--access` | `uat/access/tunnels.sh open` (UAT.1) | For each VM name, `host` (127.0.0.1) and `ssh_port` or `winrm_port`. A top-level map or one under `vms` is accepted. Not needed when every sprout's connection is `docker` |
+| `--access` | `uat/access/tunnels.sh open` (UAT.1), or the local rig (UAT.8) | Required. For each VM name, `host` (127.0.0.1 through a tunnel) and `ssh_port` or `winrm_port`. A top-level map or one under `vms` is accepted |
 | `--release-tag` | the workflow input | `vX.Y.Z` or `vX.Y.Z-rc.N`. Anything else, including `latest`, is refused |
 | `--ca-file` | the UAT CA (UAT.2); default `core.json`'s `ca_file` with `--core-state` | Sprouts pin it (`sproutrootca`, `sproutrootcatofu: false`); curl verifies saasapi with it too |
 | `--ssh-key` | per run, sensitive (UAT.1) | Linux sprouts over SSH |
@@ -49,8 +49,7 @@ uat/enroll/enroll.sh \
 | `--internal-auth-file` | default `<core-state>/core/sensitive/internal-auth-secret` (UAT.3b) | saasapi's `X-Internal-Auth` shared secret, required on every route |
 | `--token-cmd`, or `--token-t1` and `--token-t2` | instead of `--core-state` | See below |
 | `--saasapi-url` | default `core.json`'s `saasapi_url`, else `https://<core.fqdn>` | `scheme://host[:port]` with no path; `/v1/...` is appended |
-| `--docker-connection` | the local rig (UAT.8) | The connection plugin for `docker` sprouts. **No default**: see "How the sprouts are reached" |
-| `--envoy-host`, `--envoy-port` | default `dmz.fqdn` and `8443` (`envoy.listenerPort`) | Written as `farmerinterface` and `farmerapiport`. Pass the external port if UAT.2 exposes Envoy on another one |
+| `--envoy-host`, `--envoy-port` | default `dmz.<private_dns_zone>`, i.e. `dmz.uat.imas.internal`, and `8443` | Written as `farmerinterface` and `farmerapiport`. The DMZ's private DNS name, not its public FQDN (owner decision, 2026-10-06; see "What the inventory sets") |
 | `--bus-url` | optional | Pins `busurls`. By default the sprout uses the `nats_urls` farmer returns (`bus.sproutBusURLs`) |
 
 Everything is written below `--state` (mode 0700):
@@ -138,14 +137,21 @@ the token.
 
 | `connection` | How | Notes |
 |---|---|---|
-| `ssh` (Linux) | `127.0.0.1:<ssh_port>` from `access.json`, the per run key, `become: true` | **Host key checking is off**, into a known hosts file of this run only (`StrictHostKeyChecking=no`, `UserKnownHostsFile=<state>/ssh/known_hosts`, and `HostKeyAlias=<vm>` so a key is recorded under the VM name rather than a port). Every tunnel is 127.0.0.1 on some port, the VMs are new every run, and the tunnel endpoint is Azure Bastion reached with the run's Azure login, so there is no earlier key to check against |
+| `ssh` (Linux, and every sprout of the local rig) | `host:ssh_port` from `access.json` (127.0.0.1 through a tunnel), the per run key, `become: true` | **Host key checking is off**, into a known hosts file of this run only (`StrictHostKeyChecking=no`, `UserKnownHostsFile=<state>/ssh/known_hosts`, and `HostKeyAlias=<vm>` so a key is recorded under the VM name rather than a port). Every tunnel is 127.0.0.1 on some port, the VMs are new every run, and the tunnel endpoint is Azure Bastion reached with the run's Azure login, so there is no earlier key to check against |
 | `winrm` (Windows) | `https://127.0.0.1:<winrm_port>`, NTLM, the admin user and password | **Certificate validation is ignored** (`ansible_winrm_server_cert_validation: ignore`). Through a tunnel the name we connect to is always 127.0.0.1, which never matches the certificate's name, and the WinRM listener's certificate is self-signed per VM. TLS still encrypts, and NTLM authenticates the user. This assumes UAT.1 gives Windows a WinRM HTTPS listener and makes the admin user the built-in Administrator, which Azure does for its admin account; any other local administrator is filtered by UAC over the network |
-| `docker` (local rig) | the plugin named by `--docker-connection`, as root | **No default.** The owner dropped `community.docker` (2026-10-06), and which connection replaces it is an open question (below). The container is `access.json`'s `container` for the VM if set, otherwise the VM name |
+| `docker` | refused | **Owner decision (2026-10-06):** the local rig connects over SSH, its containers running sshd, so it writes `connection: ssh` and its own `access.json`. There is no docker connection plugin, and `community.docker` is not used |
 
 ## What the inventory sets
 
-- `sprouts` (every host): `imas_farmer_host` is Envoy (`dmz.fqdn`) and
-  `imas_farmer_api_port` is 8443. `imas_sprout_root_ca` is the UAT CA, and
+- `sprouts` (every host): `imas_farmer_host` is Envoy's private DNS name,
+  `dmz.uat.imas.internal`, and `imas_farmer_api_port` is 8443. This
+  follows the owner's decision of 2026-10-06 to put the private names in
+  the Shared contract. UAT.1 creates them as an Azure Private DNS zone
+  pointing at the hubs' private addresses, and sprouts can reach Envoy
+  only there. If the uat JSON carries a top-level `private_dns_zone`, the
+  name is `dmz.<that zone>`; `--envoy-host` overrides it. Only the sprouts
+  resolve this name: the runner still reaches saasapi on the core's public
+  FQDN. `imas_sprout_root_ca` is the UAT CA, and
   with it the role writes `sproutrootca` and sets `sproutrootcatofu: false`.
   `imas_sprout_package_state` is `present` and `imas_verify_timeout` is 600.
   The role's default registries are kept: Buildkite `yogzblr`'s `imasdeb`,
@@ -315,21 +321,18 @@ The Molecule scenario covers the same rpm path on Rocky 9.
   - **`community.docker`.** It is dropped.
   - **Install order.** Core first, then the DMZ. That needs no change here:
     enrolment runs after both hubs either way.
-- **Who binds (to confirm)**: the decision says "the harness calls
-  `bind-tenant.sh` once per tenant", and the core hub's README says UAT.4
-  calls it after creating each tenant. Here the enrolment does it, through
-  `core-token.sh`, and only for a tenant `core.json` doesn't already bind.
-  A harness that calls it again with the same id gets the same binding.
-- **The local rig's connection (owner, UAT.8)**: with `community.docker`
-  gone there is no docker connection plugin. `gen-inventory.py` refuses
-  `docker` sprouts unless `--docker-connection` names one, and nothing here
-  chooses it. Possible replacements:
-  - SSH into the containers. The rig writes `connection: ssh` and ports in
-    its `access.json`, which this directory already supports; the
-    containers need sshd.
-  - A small connection plugin in the repository that wraps `docker exec`.
-  - Running the playbook inside each container with the `local`
-    connection.
+  - **Who binds.** UAT.4 binds tenants 1 and 2, here through
+    `core-token.sh`. The harness binds only tenants the run creates that
+    aren't in `core.json`.
+  - **The local rig's connection.** SSH, with sshd in the containers; no
+    docker connection plugin.
+  - **Private DNS names.** `dmz.uat.imas.internal` and
+    `core.uat.imas.internal` go in the Shared contract, and
+    `farmerinterface` uses the DMZ name.
+- **Envoy's certificate (UAT.3a, UAT.2)**: sprouts pin the UAT CA with
+  `sproutrootcatofu: false` and dial `dmz.uat.imas.internal`. Enrolment
+  fails unless Envoy's downstream certificate carries that name as a SAN,
+  which the decision assigns to the other briefs.
 - **`access.json` shape (UAT.1)**: assumed `{"<vm>": {"host", "ssh_port" | "winrm_port", ...}}`,
   or the same under `vms`.
 - **saasapi URL (UAT.3b)**: assumed `https://<core.fqdn>` with routes at
@@ -339,9 +342,13 @@ The Molecule scenario covers the same rpm path on Rocky 9.
   `--envoy-port`.
 - **WinRM (UAT.1)**: assumed an HTTPS listener, with NTLM for the built-in
   Administrator.
-- **Local rig (UAT.8)**: assumed the container is named after the VM, or
-  given as `container` in its `access.json`. It also needs systemd as PID 1
-  for the role's checks.
+- **Local rig (UAT.8)**: assumed to write `connection: ssh` for every
+  sprout, plus an `access.json` with each container's `host` and `ssh_port`,
+  and to accept the per run SSH key for `admin_user` (root works:
+  `become` is harmless there). Its containers also need systemd as PID 1
+  for the role's checks. They must resolve `dmz.uat.imas.internal`, or the
+  rig passes `--envoy-host` with a name they can resolve, which Envoy's
+  certificate must then carry.
 
 ## Tests
 
@@ -354,7 +361,7 @@ yamllint -c uat/enroll/.yamllint uat/enroll
 ```
 
 The generator tests use `testdata/uat.json` (the Azure layout) and
-`testdata/uat-lite.json` (the docker rig). They check that both tenants get
+`testdata/uat-lite.json` (the local rig, over SSH). They check that both tenants get
 the same sprout ID per OS while IDs stay unique within a tenant, check the
 pins and connections, and check that no secret reaches the inventory. When
 `ansible-inventory` is installed, it also loads the result. The script tests

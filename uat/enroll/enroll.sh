@@ -12,7 +12,7 @@
 #     [--saasapi-url URL] [--envoy-host NAME] [--envoy-port 8443] [--bus-url URL]... \
 #     [--buildkite-org ORG] [--windows-msi-url URL --windows-msi-sha256 HEX] \
 #     [--key-hours 6] [--verify-timeout 600] [--connect-timeout 600] \
-#     [--docker-connection PLUGIN] [--skip-tenants] [--no-seed-sproutid] [--ansible-dir DIR]
+#     [--skip-tenants] [--no-seed-sproutid] [--ansible-dir DIR]
 #     [-- ANSIBLE-PLAYBOOK ARGS...]
 #
 # Steps, each safe to repeat:
@@ -30,9 +30,11 @@
 # with uat/hub/core/bind-tenant.sh, and they default --internal-auth-file,
 # --saasapi-url and --ca-file from the core hub's core.json and sensitive
 # directory (see README.md, "Tokens and the tenant id").
-# --access is not needed when every sprout's connection is docker (the local
-# rig, UAT.8). Nothing secret is printed: keys, tokens, the shared secret and
-# the WinRM password stay in their files and reach Ansible through lookups.
+# Sprouts are reached over SSH or WinRM only, the local rig's (UAT.8) too:
+# its containers run sshd (owner decision, 2026-10-06). farmerinterface is the
+# DMZ's private name, dmz.uat.imas.internal, unless --envoy-host says otherwise.
+# Nothing secret is printed: keys, tokens, the shared secret and the WinRM
+# password stay in their files and reach Ansible through lookups.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,7 +49,7 @@ usage() {
 
 UAT="" ACCESS="" STATE="" RELEASE_TAG="" CA="" SSH_KEY="" WINRM_FILE="" WINRM_DIR=""
 SAAS_URL="" ENVOY_HOST="" ENVOY_PORT=8443 BUILDKITE_ORG="" MSI_URL="" MSI_SHA=""
-CORE_STATE="" CORE_SCRIPTS="" CORE_KUBECONFIG="" ENDPOINTS="" DOCKER_CONNECTION="" KEY_HOURS=6 VERIFY_TIMEOUT=600 CONNECT_TIMEOUT=600 SKIP_TENANTS=0 SEED=1
+CORE_STATE="" CORE_SCRIPTS="" CORE_KUBECONFIG="" ENDPOINTS="" KEY_HOURS=6 VERIFY_TIMEOUT=600 CONNECT_TIMEOUT=600 SKIP_TENANTS=0 SEED=1
 ANSIBLE_DIR=""
 if [[ -d "$here/../../ansible" ]]; then ANSIBLE_DIR="$(cd "$here/../../ansible" && pwd)"; fi
 auth=() bus=() playbook_args=()
@@ -66,7 +68,6 @@ while [[ $# -gt 0 ]]; do
 	--core-kubeconfig) CORE_KUBECONFIG="${2:?}"; shift 2 ;;
 	--endpoints) ENDPOINTS="${2:?}"; shift 2 ;;
 	--core-scripts) CORE_SCRIPTS="${2:?}"; shift 2 ;;
-	--docker-connection) DOCKER_CONNECTION="${2:?}"; shift 2 ;;
 	--saasapi-url) SAAS_URL="${2:?}"; shift 2 ;;
 	--envoy-host) ENVOY_HOST="${2:?}"; shift 2 ;;
 	--envoy-port) ENVOY_PORT="${2:?}"; shift 2 ;;
@@ -111,9 +112,7 @@ fi
 [[ -n "$ANSIBLE_DIR" && -f "$ANSIBLE_DIR/site.yml" && -d "$ANSIBLE_DIR/roles/imas_sprout" ]] ||
 	die "ansible/site.yml not found (pass --ansible-dir)"
 need jq python3 ansible-playbook
-if jq -e '[.sprouts[] | .connection] | any(. != "docker")' "$UAT" >/dev/null; then
-	[[ -n "$ACCESS" && -r "$ACCESS" ]] || die "--access is required for ssh and winrm sprouts (uat/access/tunnels.sh writes it)"
-fi
+[[ -n "$ACCESS" && -r "$ACCESS" ]] || die "--access is required (uat/access/tunnels.sh, or the local rig, writes it)"
 if jq -e '[.sprouts[] | .connection] | any(. == "winrm")' "$UAT" >/dev/null; then
 	ansible-galaxy collection list ansible.windows 2>/dev/null | grep -q '^ansible\.windows ' ||
 		log "warning: collection ansible.windows not found: ansible-galaxy collection install -r $here/requirements.yml"
@@ -141,14 +140,13 @@ step "2/6 inventory"
 gen=(--uat "$UAT" --keys-dir "$STATE/keys" --release-tag "$RELEASE_TAG" --ca-file "$CA"
 	--out "$STATE/inventory" --known-hosts "$STATE/ssh/known_hosts"
 	--envoy-port "$ENVOY_PORT" --verify-timeout "$VERIFY_TIMEOUT" "${bus[@]}")
-[[ -n "$ACCESS" ]] && gen+=(--access "$ACCESS")
+gen+=(--access "$ACCESS")
 [[ -n "$SSH_KEY" ]] && gen+=(--ssh-key "$SSH_KEY")
 [[ -n "$WINRM_FILE" ]] && gen+=(--winrm-password-file "$WINRM_FILE")
 [[ -n "$WINRM_DIR" ]] && gen+=(--winrm-password-dir "$WINRM_DIR")
 [[ -n "$ENVOY_HOST" ]] && gen+=(--envoy-host "$ENVOY_HOST")
 [[ -n "$BUILDKITE_ORG" ]] && gen+=(--buildkite-org "$BUILDKITE_ORG")
 [[ -n "$MSI_URL" ]] && gen+=(--windows-msi-url "$MSI_URL" --windows-msi-sha256 "$MSI_SHA")
-[[ -n "$DOCKER_CONNECTION" ]] && gen+=(--docker-connection "$DOCKER_CONNECTION")
 python3 "$here/gen-inventory.py" "${gen[@]}"
 inventory="$STATE/inventory/hosts.yml"
 
