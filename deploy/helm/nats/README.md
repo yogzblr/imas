@@ -484,6 +484,21 @@ Only these flows are allowed:
 Kubelet probes (TCP on `client`, HTTP on `health`) originate from the
 node. Most CNIs allow them regardless of policy. Check yours.
 
+### Core in another cluster
+
+When core runs in a separate cluster (the UAT gate's two hubs), it can't
+reach the bus client Service, which is ClusterIP. Set
+`bus.coreService.enabled=true` to render `<fullname>-bus-core`, a NodePort
+or LoadBalancer Service with the client port only. The websocket port
+stays off it: only Envoy, in this cluster, dials that. Pin node ports with
+`bus.coreService.nodePort` and `envoy.service.nodePort` when the cluster's
+node port range is narrow; the chart refuses the same pinned port on both.
+
+The chart's bus policy admits core by namespace and pod selector, which
+never matches a pod in another cluster. Add an `ipBlock` policy for core's
+address in that case, and set `externalTrafficPolicy: Local` so the bus
+sees that address rather than the node's.
+
 ## Values
 
 ### Top level
@@ -572,6 +587,13 @@ node. Most CNIs allow them regardless of policy. Check yours.
 | `bus.priorityClassName` | `""` | PriorityClass. |
 | `bus.service.type` | `ClusterIP` | Client Service type. Keep ClusterIP: sprouts go through Envoy. |
 | `bus.service.annotations` | `{}` | Client Service annotations. |
+| `bus.coreService.enabled` | `false` | Render `<fullname>-bus-core`, a second Service with the client port only, for a core in another cluster. See "Core in another cluster". |
+| `bus.coreService.type` | `NodePort` | `NodePort` or `LoadBalancer`. |
+| `bus.coreService.nodePort` | `0` | Pinned node port. `0` lets Kubernetes pick one. |
+| `bus.coreService.port` | `0` | Service port. `0` uses `bus.ports.client`. |
+| `bus.coreService.externalTrafficPolicy` | `""` | `Local` keeps core's source address, which an `ipBlock` policy for core needs. |
+| `bus.coreService.loadBalancerSourceRanges` | `[]` | Applies to LoadBalancer only. |
+| `bus.coreService.annotations` | `{}` | Annotations. |
 | `bus.serviceAccount.create` | `true` | Create a ServiceAccount (token automount off). |
 | `bus.serviceAccount.name` | `""` | Name. Empty uses `<fullname>-bus`. |
 | `bus.serviceAccount.annotations` | `{}` | ServiceAccount annotations. |
@@ -659,6 +681,7 @@ node. Most CNIs allow them regardless of policy. Check yours.
 | `envoy.service.annotations` | `{}` | Service annotations. |
 | `envoy.service.externalTrafficPolicy` | `""` | Applies to LoadBalancer/NodePort only. `Local` keeps client IPs for the rate limit and logs. |
 | `envoy.service.loadBalancerSourceRanges` | `[]` | Applies to LoadBalancer only. |
+| `envoy.service.nodePort` | `0` | Pinned node port, NodePort/LoadBalancer only. `0` lets Kubernetes pick one. |
 | `envoy.serviceAccount.create` | `true` | Create a ServiceAccount (token automount off). |
 | `envoy.serviceAccount.name` | `""` | Name. Empty uses `<fullname>-envoy`. |
 | `envoy.serviceAccount.annotations` | `{}` | Annotations. |

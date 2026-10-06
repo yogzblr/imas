@@ -25,6 +25,45 @@ spec:
       port: {{ .Values.bus.ports.websocket }}
       targetPort: websocket
       protocol: TCP
+{{- with .Values.bus.coreService }}
+{{- if .enabled }}
+---
+# Core in another cluster can't reach the ClusterIP above, so this exposes
+# the client port alone on a node port or load balancer. Never the
+# websocket port: only Envoy, in this cluster, dials that.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "imas-nats.bus.fullname" $ }}-core
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "imas-nats.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: bus
+  {{- with .annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .type }}
+  {{- with .externalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
+  {{- if and .loadBalancerSourceRanges (eq .type "LoadBalancer") }}
+  loadBalancerSourceRanges:
+    {{- toYaml .loadBalancerSourceRanges | nindent 4 }}
+  {{- end }}
+  selector:
+    {{- include "imas-nats.bus.selectorLabels" $ | nindent 4 }}
+  ports:
+    - name: client
+      port: {{ .port | default $.Values.bus.ports.client }}
+      targetPort: client
+      protocol: TCP
+      {{- with .nodePort }}
+      nodePort: {{ . }}
+      {{- end }}
+{{- end }}
+{{- end }}
 ---
 # Headless Service: the StatefulSet's governing Service, so every pod gets
 # a stable <pod>.<this>.<ns>.svc name. Clustered nodes dial each other's

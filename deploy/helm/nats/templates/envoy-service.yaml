@@ -29,4 +29,7 @@ spec:
       port: {{ $s.port }}
       targetPort: https
       protocol: TCP
+      {{- if and $s.nodePort (has $s.type (list "LoadBalancer" "NodePort")) }}
+      nodePort: {{ $s.nodePort }}
+      {{- end }}
 {{- end }}

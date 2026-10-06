@@ -242,6 +242,24 @@ bus:
     type: ClusterIP
     annotations: {}
 
+  coreService:
+    # -- Render a second bus Service, <fullname>-bus-core, that exposes the
+    # client port only, for a core in another cluster (it can't reach the
+    # ClusterIP above). Never the websocket port: only Envoy uses that.
+    enabled: false
+    # -- NodePort or LoadBalancer.
+    type: NodePort
+    # -- Pinned node port. 0 lets Kubernetes pick one from its range.
+    nodePort: 0
+    # -- Service port. 0 uses bus.ports.client.
+    port: 0
+    # -- externalTrafficPolicy. Local keeps core's source address, which an
+    # ipBlock NetworkPolicy for core needs.
+    externalTrafficPolicy: ""
+    # -- Applies to LoadBalancer only.
+    loadBalancerSourceRanges: []
+    annotations: {}
+
   serviceAccount:
     # -- Create a ServiceAccount for the bus.
     create: true
@@ -452,6 +470,9 @@ envoy:
     # client source IPs, which the enroll rate limit and logs rely on.
     externalTrafficPolicy: ""
     loadBalancerSourceRanges: []
+    # -- Pinned node port (NodePort/LoadBalancer only). 0 lets Kubernetes
+    # pick one from its range.
+    nodePort: 0
 
   serviceAccount:
     create: true
