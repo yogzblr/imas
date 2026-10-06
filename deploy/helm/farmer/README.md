@@ -71,7 +71,9 @@ It does **not** deploy the DMZ bus or Envoy. Those are `deploy/helm/nats`.
    `imas-farmer-nats-seeds`) must exist in the release namespace. The chart
    never generates seeds. See [Seeds](#seeds).
 3. **The nats chart**, installed or planned, so you know
-   `bus.serviceName` and `bus.namespace`, and Envoy's external `wss://`
+   `bus.serviceName` and `bus.namespace` (or, for a bus in another
+   cluster, the DNS name to dial it at, `bus.host`; see
+   [Reaching the bus](#reaching-the-bus)), and Envoy's external `wss://`
    address for `bus.sproutBusURLs`.
 4. **saasapi's inputs:**
    - the Keycloak realm (`saasapi.jwt.*`);
@@ -211,13 +213,48 @@ apart (`internal/config`):
 | farmer setting | The chart sets it to | What it does |
 |---|---|---|
 | `farmerinterface` | `0.0.0.0` | The API's bind address, and nothing else |
-| `farmerbusurl` | `tls://<bus.serviceName>.<bus.namespace>.svc.<clusterDomain>:<bus.port>` | Where farmer dials the bus: its tenant connections, its SYS connection and its resolver pushes |
-| `farmerbustlsservername` | `bus.tlsServerName`, when set | The name farmer verifies the bus certificate against. Unset (the default), it is the host of `farmerbusurl`, the bus Service FQDN (`config.BusTLSServerName()`). |
+| `farmerbusurl` | `tls://<bus.serviceName>.<bus.namespace>.svc.<clusterDomain>:<bus.port>`, or `tls://<bus.host>:<bus.port>` when `bus.host` is set | Where farmer dials the bus: its tenant connections, its SYS connection and its resolver pushes |
+| `farmerbustlsservername` | `bus.tlsServerName`, when set | The name farmer verifies the bus certificate against. Unset (the default), it is the host of `farmerbusurl`, the bus Service FQDN or `bus.host` (`config.BusTLSServerName()`). |
 
 saasapi dials the same URL (`SAASAPI_NATS_URL`) and verifies the same
-FQDN. The nats chart's default bus SANs cover it. In its
+host. The nats chart's default bus SANs cover the Service FQDN. In its
 `bus.tls.mode=secret`, or if you set `bus.tlsServerName`, make sure the bus
 certificate carries the name farmer verifies.
+
+### A bus outside this cluster (`bus.host`)
+
+When the bus runs in another cluster (the UAT core hub reaches the DMZ
+bus at the private name `dmz.uat.imas.internal`, on node port 8442), set
+`bus.host` to the bare DNS name to dial and `bus.port` to the port it
+answers on. Both URLs become `tls://<bus.host>:<bus.port>`, and
+`bus.serviceName` and `bus.namespace` are no longer required.
+
+- `bus.host` is a DNS name only: not a URL (`tls://...`), not
+  `host:port`, and not an IP address (IPv4 or IPv6; the bus certificate
+  carries `bus.host` as a DNS SAN, and the addresses belong in
+  `bus.egressCIDRs`). The chart refuses anything else.
+- **The bus certificate must carry `bus.host` as a SAN.** saasapi always
+  verifies the name it dials; farmer does too unless `bus.tlsServerName`
+  names another, which the certificate must then carry as well. The nats
+  chart's default SANs are the in-cluster Service names, so add `bus.host`
+  to the DMZ's bus certificate (NOTES prints the name).
+- **NetworkPolicy:** the bus egress rule of farmer and saasapi selects the
+  nats chart's bus pods by namespace and pod labels, which can't match a
+  bus outside this cluster. List the addresses `bus.host` resolves to in
+  `bus.egressCIDRs`: the rule then has an `ipBlock` peer per entry, on
+  `bus.port`, and no selector. **Without `bus.egressCIDRs` the egress rule
+  does not match a bus outside the cluster**, and with
+  `networkPolicy.enabled` farmer and saasapi can't reach it (NOTES warns).
+  Without `bus.host`, `bus.egressCIDRs` entries are added next to the
+  selector.
+- **`bus.egressCIDRs` is kept in step with the bus name by hand.**
+  NetworkPolicy matches addresses, not DNS names, and the chart doesn't
+  resolve `bus.host`. When the addresses behind `bus.host` change, update
+  `bus.egressCIDRs` (and upgrade the release) yourself. The owner accepted
+  this for UAT (2026-10-06).
+- `openbaoBootstrap.farmerbus.enabled` with `bus.host` needs an explicit
+  `openbaoBootstrap.farmerbus.allowedNames` (including `bus.host`): the
+  default names are the in-cluster bus Service's.
 
 There is no sidecar and no `hostAliases`. Before #18, this chart pinned
 the bus name to `0.0.0.0` and ran a loopback TCP relay to work around
@@ -862,7 +899,7 @@ state moved off local disk first.
 | Pods | Direction | Peer | Port |
 |---|---|---|---|
 | farmer | in | the nats chart's Envoy (`networkPolicy.dmz.*`) | `farmer.apiPort` (5405) |
-| farmer | out | the nats chart's bus pods | `bus.port` (5406), at `farmerbusurl` |
+| farmer | out | the nats chart's bus pods, plus `bus.egressCIDRs` (with `bus.host`, only `bus.egressCIDRs`; see [A bus outside this cluster](#a-bus-outside-this-cluster-bushost)) | `bus.port` (5406), at `farmerbusurl` |
 | farmer, saasapi | out | PXC / Valkey | 3306 / 6379 |
 | farmer | out | OpenBao | 8200 |
 | farmer | out | with `objectStore.endpoint` set: the object store (`networkPolicy.external.objectStore`, default any destination) | `objectStore.endpoint`'s port |
@@ -870,7 +907,7 @@ state moved off local disk first.
 | saasapi | in | `networkPolicy.saasapiIngress.from` (default: anyone) | `saasapi.port` (8081) |
 | saasapi | in | with `saasapi.operator`: the sprout release hook Job's pods, plus `networkPolicy.saasapiOperatorIngress.from` (default: none) | `saasapi.operator.port` (8443) |
 | saasapi | out | with `saasapi.operator`: fleetreleaser (`networkPolicy.fleetreleaser.to`, default any destination) | `fleetReleaser.url`'s port |
-| saasapi | out | the bus pods | `bus.port` |
+| saasapi | out | the bus pods, plus `bus.egressCIDRs` (as farmer) | `bus.port` |
 | saasapi | out | with `saasapi.recipes`: the object store (`networkPolicy.external.objectStore`, default any destination) | `objectStore.endpoint`'s port |
 | saasapi | out | `saasapiExtraEgress`, default HTTPS anywhere (the Keycloak JWKS). **Narrow it.** | 443 |
 | publish Job | out | OpenBao, DNS; nothing else, no ingress | 8200, 53 |
@@ -934,11 +971,13 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 |---|---|---|
 | `organization` | `imas` | `farmerorganization`. Must equal the nats chart's `bus.organization`. |
 | `clusterDomain` | `cluster.local` | For the FQDNs the chart builds. |
-| `bus.serviceName` / `bus.namespace` | `""` / `imas-dmz` | The nats chart's bus client Service. Required. |
-| `bus.port` | `5406` | Bus client port, in `farmerbusurl` and `SAASAPI_NATS_URL`. |
+| `bus.serviceName` / `bus.namespace` | `""` / `imas-dmz` | The nats chart's bus client Service. Required unless `bus.host` is set. |
+| `bus.host` | `""` | A bare DNS name for a bus outside this cluster (e.g. `dmz.uat.imas.internal`). Set: `farmerbusurl` and `SAASAPI_NATS_URL` are `tls://<bus.host>:<bus.port>`, and the bus certificate must carry it as a SAN. Not a URL, `host:port` or IP address. See [A bus outside this cluster](#a-bus-outside-this-cluster-bushost). |
+| `bus.port` | `5406` | Bus client port, in `farmerbusurl` and `SAASAPI_NATS_URL` (with `bus.host`, the port it answers on, e.g. a node port). |
+| `bus.egressCIDRs` | `[]` | CIDRs rendered as `ipBlock` peers of farmer's and saasapi's bus egress rule, on `bus.port`. With `bus.host` they replace the bus pod selector; **without them the rule does not match a bus outside the cluster**. Kept in step with what `bus.host` resolves to by hand. |
 | `bus.sproutBusURLs` | `[]` | `IMAS_SPROUT_BUS_URLS`, Envoy's external `wss://` addresses. Required. |
 | `bus.ca.secretName` / `configMapName` / `key` | `""` / `""` / `ca.crt` | saasapi's bus CA. Empty: `tls.secretName`'s `ca.crt`, or fetched from OpenBao PKI in openbao mode. |
-| `bus.tlsServerName` | `""` | `farmerbustlsservername`. Empty: the bus Service FQDN. See [Reaching the bus](#reaching-the-bus). |
+| `bus.tlsServerName` | `""` | `farmerbustlsservername`. Empty: the bus Service FQDN, or `bus.host`. See [Reaching the bus](#reaching-the-bus). |
 | `natsSeeds.secretName` | `imas-farmer-nats-seeds` | The seed Secret. Required. |
 | `natsSeeds.seeds` | the six above | `NAME: key` pairs. All six are required. |
 | `natsSeeds.extraSeeds` | `{}` | More seeds, e.g. per-tenant Account seeds. |

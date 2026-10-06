@@ -34,7 +34,17 @@ Point the nats chart (deploy/helm/nats) at this release:
   bus.organization={{ .Values.organization }}
 
 farmer (farmerbusurl) and saasapi dial the bus at {{ include "imas-farmer.busURL" . }};
+{{- if not .Values.bus.host }}
 the bus certificate must carry {{ default (include "imas-farmer.busFQDN" .) .Values.bus.tlsServerName }} as a SAN.
+{{- else }}
+the bus certificate must carry {{ .Values.bus.host }} as a SAN (bus.host: saasapi verifies the name it dials)
+{{- with .Values.bus.tlsServerName }}{{ if ne . $.Values.bus.host }}, and {{ . }} (bus.tlsServerName, the name farmer verifies){{ end }}{{ end }}.
+{{- if and .Values.networkPolicy.enabled (not .Values.bus.egressCIDRs) }}
+WARNING: bus.host is set but bus.egressCIDRs is empty. The NetworkPolicy bus egress rule
+only selects the nats chart's pods in this cluster, so farmer and saasapi can't reach a bus
+at {{ .Values.bus.host }} until you list its addresses in bus.egressCIDRs.
+{{- end }}
+{{- end }}
 
 Before farmer can start, Secret "{{ .Values.natsSeeds.secretName }}" must exist in {{ .Release.Namespace }}
 with the same seeds the nats chart mounts. This chart never generates one.
