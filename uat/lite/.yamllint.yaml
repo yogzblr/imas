@@ -1,0 +1,8 @@
+---
+# yamllint settings for uat/lite (the kind configs up.sh writes).
+extends: default
+rules:
+  line-length:
+    max: 120
+  comments:
+    min-spaces-from-content: 1

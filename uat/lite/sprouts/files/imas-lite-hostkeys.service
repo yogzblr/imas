@@ -1,0 +1,13 @@
+# uat/lite (UAT.8): every sprout container makes its own SSH host keys on
+# its first boot; the images carry none, so no two containers share a key.
+[Unit]
+Description=Generate the SSH host keys of a uat/lite sprout container
+Before=ssh.service ssh.socket sshd.service
+ConditionPathExists=!/etc/ssh/ssh_host_ed25519_key
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/ssh-keygen -A
+
+[Install]
+WantedBy=multi-user.target

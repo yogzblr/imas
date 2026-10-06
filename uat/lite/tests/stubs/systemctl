@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Test stub for systemctl inside a "container" (uat/lite tests): commands
+# vmctl.sh runs through the docker stub's bash -c land here. Logs, exits
+# $STUB_SYSTEMCTL_RC (default 0).
+printf 'systemctl %s\n' "$*" >>"$STUB_LOG"
+exit "${STUB_SYSTEMCTL_RC:-0}"

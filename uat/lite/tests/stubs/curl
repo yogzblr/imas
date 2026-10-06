@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Test stub for curl (uat/lite tests): -o OUT URL copies the fixture
+# $STUB_FIX/download to OUT.
+set -euo pipefail
+printf 'curl %s\n' "$*" >>"$STUB_LOG"
+out=""
+while (($#)); do
+	case $1 in
+	-o) out=$2 && shift 2 ;;
+	*) shift ;;
+	esac
+done
+cp "$STUB_FIX/download" "$out"

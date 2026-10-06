@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Stand-in for the dmz-install script the rig runs (uat/lite tests): logs its
+# arguments; STUB_FAIL_DMZ_INSTALL=1 makes it fail.
+printf 'dmz-install %s\n' "$*" >>"$STUB_LOG"
+[[ -z ${STUB_FAIL_DMZ_INSTALL:-} ]]

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Test stub for ssh-keygen (uat/lite tests): -f FILE writes a fake key pair.
+set -euo pipefail
+printf 'ssh-keygen %s\n' "$*" >>"$STUB_LOG"
+f=""
+while (($#)); do
+	case $1 in
+	-f) f=$2 && shift 2 ;;
+	*) shift ;;
+	esac
+done
+printf 'FAKE PRIVATE KEY\n' >"$f"
+printf 'ssh-ed25519 AAAAC3stubkey imas-uat-lite\n' >"$f.pub"

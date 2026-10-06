@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Test stub for sudo (uat/lite tests): logs, then runs the command as is.
+printf 'sudo %s\n' "$*" >>"$STUB_LOG"
+[[ ${1:-} != -n ]] || shift
+exec "$@"
