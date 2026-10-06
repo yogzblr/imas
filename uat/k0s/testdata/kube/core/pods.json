@@ -1,0 +1,27 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "metadata": {"name": "kube-router-abcde", "namespace": "kube-system"},
+      "spec": {
+        "hostNetwork": true,
+        "containers": [{"name": "kube-router", "ports": [{"containerPort": 8080, "hostPort": 8080}]}]
+      }
+    },
+    {
+      "metadata": {"name": "imas-uat-core-edge-0", "namespace": "imas-core"},
+      "spec": {
+        "containers": [
+          {
+            "name": "edge",
+            "ports": [
+              {"name": "https", "containerPort": 8443, "hostPort": 443},
+              {"name": "farmer-api", "containerPort": 5405, "hostPort": 5405}
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

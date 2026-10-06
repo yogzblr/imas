@@ -1,0 +1,7 @@
+---
+# A stand-in for cert-manager's release manifest, served by the test's curl
+# stub.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cert-manager

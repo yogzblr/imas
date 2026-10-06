@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Test stub for kubectl: logs each call to $STUB_LOG and answers reads from
+# JSON fixtures in $STUB_FIX/<hub>/ or $STUB_FIX/ (the hub is the kubeconfig's
+# basename without .kubeconfig). State goes to $STUB_STATE.
+set -euo pipefail
+hub=none
+args=()
+while (($#)); do
+  case $1 in
+    --kubeconfig) hub=$(basename "$2" .kubeconfig) && shift 2 ;;
+    --request-timeout=*) shift ;;
+    -n) shift 2 ;;
+    *) args+=("$1") && shift ;;
+  esac
+done
+printf 'kubectl %s %s\n' "$hub" "${args[*]}" >>"$STUB_LOG"
+
+fixture() {
+  local f
+  for f in "$STUB_FIX/$hub/$1" "$STUB_FIX/$1"; do
+    if [[ -f $f ]]; then
+      cat "$f"
+      return 0
+    fi
+  done
+  echo "stub kubectl: no fixture $1" >&2
+  exit 1
+}
+
+case "${args[0]:-}" in
+  get)
+    case "${args[1]:-}" in
+      nodes) fixture nodes.json ;;
+      storageclasses) fixture storageclasses.json ;;
+      deployments) fixture deployments.json ;;
+      clusterissuers) fixture clusterissuers.json ;;
+      configmap) fixture coredns.json ;;
+      services) fixture services.json ;;
+      secret)
+        # --ignore-not-found: nothing at all when the Secret is absent.
+        if [[ -f $STUB_FIX/$hub/secret.json ]]; then cat "$STUB_FIX/$hub/secret.json"; fi
+        ;;
+      pods) fixture pods.json ;;
+      *) echo "stub kubectl: unexpected get ${args[1]:-}" >&2 && exit 1 ;;
+    esac
+    ;;
+  create)
+    # create secret tls NAME --cert=F --key=F --dry-run=client -o json
+    cert="" key=""
+    for a in "${args[@]}"; do
+      case $a in
+        --cert=*) cert=${a#--cert=} ;;
+        --key=*) key=${a#--key=} ;;
+      esac
+    done
+    cp "$cert" "$STUB_STATE/$hub-secret.crt"
+    jq -n --arg c "$(base64 -w0 <"$cert")" --arg k "$(base64 -w0 <"$key")" \
+      '{apiVersion: "v1", kind: "Secret", type: "kubernetes.io/tls", data: {"tls.crt": $c, "tls.key": $k}}'
+    ;;
+  apply)
+    if [[ " ${args[*]} " == *" -f - "* ]]; then
+      cat >"$STUB_STATE/$hub-apply-stdin.json"
+    else
+      for ((i = 0; i < ${#args[@]}; i++)); do
+        if [[ ${args[i]} == -f ]]; then cp "${args[i + 1]}" "$STUB_STATE/$hub-applied-$(basename "${args[i + 1]}")"; fi
+      done
+    fi
+    ;;
+  wait | rollout | annotate) ;;
+  *) echo "stub kubectl: unexpected ${args[0]:-}" >&2 && exit 1 ;;
+esac

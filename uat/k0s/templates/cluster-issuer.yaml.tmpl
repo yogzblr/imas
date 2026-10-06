@@ -1,0 +1,14 @@
+---
+# The per-run UAT CA as a cert-manager ClusterIssuer, applied to each hub by
+# bootstrap.sh. The Secret (kubernetes.io/tls: tls.crt, tls.key) holds the
+# same self-signed root on both hubs; certificates it issues carry the root
+# as ca.crt, which the nats chart's bus TLS and the sprouts' sproutrootca use.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: __CLUSTER_ISSUER__
+  labels:
+    app.kubernetes.io/part-of: imas-uat
+spec:
+  ca:
+    secretName: __CA_SECRET__

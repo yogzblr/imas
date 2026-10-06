@@ -1,0 +1,21 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "metadata": {"name": "cert-manager"},
+      "spec": {"replicas": 1},
+      "status": {"readyReplicas": 1, "conditions": [{"type": "Available", "status": "True"}]}
+    },
+    {
+      "metadata": {"name": "cert-manager-cainjector"},
+      "spec": {"replicas": 1},
+      "status": {"readyReplicas": 1, "conditions": [{"type": "Available", "status": "True"}]}
+    },
+    {
+      "metadata": {"name": "cert-manager-webhook"},
+      "spec": {"replicas": 1},
+      "status": {"readyReplicas": 1, "conditions": [{"type": "Available", "status": "True"}]}
+    }
+  ]
+}
