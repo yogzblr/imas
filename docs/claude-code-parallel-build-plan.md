@@ -2058,7 +2058,7 @@ what you built, what you deferred, which tests newly ran and which of them faile
 fixes, and any open question; call the security items ready for review, not done."
 ```
 
-## 4h. Azure UAT gate (UAT.1 to UAT.7)
+## 4h. Azure UAT gate (UAT.1 to UAT.8)
 
 Added 2026-10-06. **Supersedes the Terraform UAT brief in section 4a (item 5):** the
 owner chose Azure over the libvirt/KVM default, OpenTofu over Terraform (Terraform is
@@ -2074,13 +2074,14 @@ repo already avoids its mc image). Existing paid Azure subscription, so no free 
 
 ### The shape
 
-Eight VMs in one resource group per run, three subnets, torn down after the run.
+Eight VMs and one Azure Bastion in one resource group per run, four subnets, torn down after the run.
 
 | Subnet | VM | Runs |
 |---|---|---|
 | dmz 10.60.1.0/24 | uat-dmz (single-node k0s) | deploy/helm/nats: farmerbus StatefulSet and the Envoy gateway |
 | core 10.60.2.0/24 | uat-core (single-node k0s) | deploy/helm/farmer: farmer, saasapi, PXC (one node), Valkey, OpenBao; plus MinIO and Keycloak |
 | tenants 10.60.3.0/24 | t1-ubuntu, t1-alma, t1-win, t2-ubuntu, t2-alma, t2-win | one sprout each, tenant 1 and tenant 2 |
+| AzureBastionSubnet 10.60.4.0/26 | Azure Bastion, Standard SKU, native client tunnelling on | the management path: SSH, WinRM and the Kubernetes API are reached only through tunnels opened with the Azure CLI |
 
 Two clusters, not one: the DMZ is a separate trust zone, as in the design. Production is
 Kubernetes, so the hubs run the real Helm charts from the published release. Ubuntu 24.04,
@@ -2153,11 +2154,34 @@ Desktop Experience image for those.
 Not covered by this gate: key expiry (the minimum is one hour; unit tests cover it), the web UI,
 high availability, real RHEL, scale and load.
 
+### How the runner reaches the VMs, and how the suite is validated
+
+Access. SSH, WinRM and the Kubernetes API are never open to the internet. The workflow opens
+Azure Bastion tunnels (az network bastion tunnel, which needs the Standard SKU) to each VM and
+port it needs, and every tool then talks to 127.0.0.1 on a local port: k0sctl and the install
+scripts over SSH, helm and kubectl over the kube tunnel (6443 on each hub), Ansible over SSH or
+WinRM. Rebooting or stopping a VM, and running a command outside the platform, use the Azure
+control plane (az vm restart, az vm run-command), which needs no network path. Every VM keeps a
+public IP for outbound traffic only (packages, images), with inbound denied. Only the product's own
+internet facing endpoints (saasapi and Keycloak on core, Envoy on the DMZ) are open, and only to
+the runner address: they stay direct because the Keycloak issuer name must match the token iss
+exactly, which a tunnel would break. Two scripts, owned by UAT.1 in uat/access, are the whole
+interface (the Shared contract has the details), so the local rig of UAT.8 can supply its own.
+
+Validating the suite. The agents cannot run anything against a stack, so the tests earn trust in
+layers: static checks and unit tests of the harness against fake servers (in each brief); the local
+rig (UAT.8), where the smoke and core tiers run on Linux in minutes on one machine for no cost,
+before any Azure run; a run against a known bad release, v0.1.0-rc.3 (its Linux packages are
+broken), which must fail at the install or at S1, then against v0.1.0-rc.4, which must pass; the
+no silent green rule (run.sh fails when no test matched the tier, or when a catalogue scenario of the
+tier neither ran nor was skipped with a written reason, and lists every skip); and the first Azure
+runs at tier smoke with keep_hours set, widening the tier as it goes green.
+
 ### Shared contract (every UAT brief reads this; do not change it without the owner)
 
-- Layout of the work, one directory per brief, no overlap: uat/tofu (UAT.1), uat/k0s
+- Layout of the work, one directory per brief, no overlap: uat/tofu and uat/access (UAT.1), uat/k0s
   (UAT.2), uat/hub/dmz (UAT.3a), uat/hub/core (UAT.3b), uat/enroll (UAT.4), uat/tests
-  (UAT.5, except uat/tests/ingredients), uat/cases and uat/tests/ingredients (UAT.7), and for UAT.6 the workflow .github/workflows/uat.yml, .github/workflows/
+  (UAT.5, except uat/tests/ingredients), uat/cases and uat/tests/ingredients (UAT.7), uat/lite (UAT.8), and for UAT.6 the workflow .github/workflows/uat.yml, .github/workflows/
   uat-janitor.yml and uat/scripts. uat/README.md is written by UAT.6 from the others.
 - Inputs: run_id (lowercase letters and digits, 6 to 10), release_tag (a vX.Y.Z or
   vX.Y.Z-rc.N tag; the chart, images and packages all come from this release, never
@@ -2173,16 +2197,28 @@ high availability, real RHEL, scale and load.
   (marketplace terms accepted once per subscription); MicrosoftWindowsServer WindowsServer
   2022-datacenter-core-smalldisk-g2.
 - tofu output uat (JSON) is the interface to everything else: run_id, region,
-  resource_group, dmz and core (each: name, private_ip, public_ip, fqdn, admin_user),
-  sprouts (a map keyed by VM name: tenant 1 or 2, os ubuntu|alma|windows, private_ip,
-  public_ip, admin_user), subnets. Credentials are never outputs: SSH keys are generated
+  resource_group, dmz and core (each: name, id, private_ip, public_ip, fqdn, admin_user),
+  sprouts (a map keyed by VM name: tenant 1 or 2, os ubuntu|alma|windows, connection
+  ssh|winrm|docker, id, private_ip, public_ip, admin_user), bastion (name, id), subnets. Credentials are never outputs: SSH keys are generated
   per run and WinRM passwords are random, both held as sensitive values only.
 - Network rules (UAT.1 derives the exact ports from the Network section of
   deploy/helm/nats/README.md and the NetworkPolicy section of deploy/helm/farmer/README.md,
   and documents them): sprouts reach only Envoy in the DMZ; the DMZ reaches only the farmer
   API port on core; core reaches only the bus websocket port on the DMZ; the internet
-  (runner_cidr only) reaches SSH or WinRM on every VM, and 443 plus Envoy's port on the two
-  hubs. Nothing else is open. A sprout must not be able to open a connection to core.
+  (runner_cidr only) reaches only 443 on core (saasapi and Keycloak) and Envoy's port on the DMZ;
+  SSH, WinRM and the Kubernetes API are not open to the internet and are reached only through
+  Azure Bastion. Every VM has a Standard public IP for outbound traffic only. Nothing else is open. A sprout must not be able to open a connection to core.
+- Access interface (UAT.1 writes both scripts under uat/access; every other brief and the local
+  rig use only this): tunnels.sh open <uat.json> <state-dir> starts one az network bastion tunnel in
+  the background for SSH (22) on every Linux VM, WinRM over HTTPS (5986) on every Windows VM and the
+  Kubernetes API (6443) on both hubs, on distinct free local ports, waits until each accepts
+  connections, and writes <state-dir>/access.json: for each VM name its host 127.0.0.1 and its ssh_port,
+  winrm_port or kube_port, plus the process ids; tunnels.sh close <state-dir> stops them and is safe to
+  repeat. vmctl.sh <uat.json> restart|stop-sprout|start-sprout|run <vm> [command] restarts a VM and
+  waits until it is back, stops or starts the sprout service, or runs a command with the Azure control
+  plane and prints its output and exit code. All Azure calls live in these two scripts. Tools that
+  need the clusters take a kubeconfig path and an endpoints file (the hub names, ports and private
+  addresses in the contract's shape) and nothing else, so the same hub scripts run on the local rig.
 - Hostnames and issuer: the Keycloak issuer URL, saasapi's SAASAPI_KEYCLOAK_JWKS_URL value
   and the token iss claim must be the same string, built on the core FQDN, and resolve to
   the core private IP from inside the cluster (CoreDNS rewrite or hostAliases) so a pod
@@ -2240,7 +2276,8 @@ only thing that stays up between runs. The Contributor role is subscription wide
 subscription for UAT only, and keep the uat environment's required reviewer on.
 
 Cost, guessed and unchecked: the two hubs dominate, roughly a dollar an hour together;
-the six sprouts add a few cents an hour. A run of 60 to 90 minutes should be a few dollars.
+the six sprouts add a few cents an hour, and the Bastion (Standard SKU, one per run) roughly a quarter of
+a dollar an hour. A run of 60 to 90 minutes should be a few dollars.
 The janitor and the budget alert exist so a stuck run cannot run for days.
 
 **UAT.1: Azure infrastructure module (OpenTofu)**
@@ -2253,13 +2290,16 @@ destroy semantics).
 Build under uat/tofu: (1) A main module taking the inputs in the contract (run_id,
 release_tag, region, runner_cidr, keep_hours, sizes, image URNs) that creates: the resource
 group imas-uat-run_id with the tags in the contract; one VNet 10.60.0.0/16 with the three
-subnets; one network security group per subnet implementing the Network rules in the
+subnets and a fourth, AzureBastionSubnet 10.60.4.0/26, holding one Azure Bastion with the Standard SKU,
+native client tunnelling on and its own Standard public IP (follow Azure's rules for NSGs on that
+subnet, or attach none, and say which); one network security group per subnet implementing the Network rules in the
 contract (derive the exact ports from the Network section of deploy/helm/nats/README.md and
 the NetworkPolicy section of deploy/helm/farmer/README.md, write them in uat/tofu/README.md
 as a table with a reason for each rule, and say which you could not derive); the two hub VMs
 (Ubuntu 24.04, Standard SSD OS disk of 64 GB and 128 GB, Standard public IP with the DNS
 label from the contract); the six sprout VMs (t1 and t2, ubuntu, alma, windows) each with
-its own Standard public IP, small OS disks, no data disks. Windows uses the Server 2022 Core
+its own Standard public IP used for outbound traffic only (inbound from the internet denied), small OS
+disks, no data disks. Windows uses the Server 2022 Core
 smalldisk image and enables WinRM over HTTPS through a custom script extension or user data;
 the Linux VMs take a per-run generated SSH key. Every NIC, public IP and OS disk is created
 with delete_option or equivalent set to delete so destroy leaves nothing; use ephemeral OS
@@ -2276,10 +2316,13 @@ with the run_id remains. (4) uat/tofu/README.md: inputs, outputs, the network ta
 owner runs the bootstrap once, how to destroy by hand, and the resource list with a rough
 size per VM. Do not hard code the subscription, tenant or client ids. Do not create any
 credential that is committed. Do not add any provider other than azurerm and random/tls.
-Tests: tofu fmt -check and tofu validate for both stacks if tofu can be installed here (say
+(5) uat/access: tunnels.sh and vmctl.sh exactly as the Access interface in the Shared contract
+defines them, with their usage in uat/access/README.md and a note on how a tunnel is closed when a job
+is cancelled. Tests: tofu fmt -check and tofu validate for both stacks if tofu can be installed here (say
 if not); a shell test with bash that runs destroy.sh against stubbed az and tofu commands to
-check its three branches; shellcheck on the scripts. You cannot reach Azure: state that the
-module has never been applied. Scope: uat/tofu only, plus a row in docs/BUILD-STATUS.md for
+check its three branches, and the same with a stubbed az for both uat/access scripts (the files they
+write and their argument handling); shellcheck on the scripts. You cannot reach Azure: state that the
+module has never been applied. Scope: uat/tofu and uat/access only, plus a row in docs/BUILD-STATUS.md for
 this brief. PR: state what you built, what you deferred, any open question, and call it ready
 for review, not done."
 ```
@@ -2292,7 +2335,10 @@ first, in full, including the Shared contract. The VMs and the tofu output uat c
 UAT.1, which is being written in parallel: code against the contract, not against UAT.1's
 files.
 Build under uat/k0s: (1) A k0sctl configuration template and a script
-uat/k0s/bootstrap.sh that, given the uat JSON from tofu output, installs k0s with k0sctl on
+uat/k0s/bootstrap.sh that, given the uat JSON from tofu output and the access.json of the Access interface (the hubs are reached
+only through Bastion tunnels on 127.0.0.1, so k0sctl uses that address and port, and k0s must list
+127.0.0.1 in its API server certificate names so kubectl and helm through the kube tunnel verify),
+installs k0s with k0sctl on
 uat-dmz and on uat-core as two separate single-node clusters (controller and worker on the
 one node), pins the k0s version in one place, fetches a kubeconfig for each cluster to a
 path the caller gives, and waits until each node is Ready. (2) The add-ons, installed by the
@@ -2322,7 +2368,8 @@ prove it comes up. Read section 4h of docs/claude-code-parallel-build-plan.md fi
 including the Shared contract, then deploy/helm/nats/README.md and deploy/envoy/README.md.
 The clusters come from UAT.2 and the core hub from UAT.3b, both being written in parallel: code
 against the contract.
-Build under uat/hub/dmz: (1) A values file for deploy/helm/nats for this layout: the Envoy
+Every script takes a kubeconfig path and an endpoints file as inputs and calls nothing Azure specific,
+because UAT.8 runs the same scripts on a local cluster. Build under uat/hub/dmz: (1) A values file for deploy/helm/nats for this layout: the Envoy
 downstream certificate issued by the UAT ClusterIssuer for the DMZ FQDN, the upstream address
 of farmer on the core private IP and the farmer API port, the bus settings the farmer chart
 expects, replica counts of one, resource requests small enough for a D2s_v5. (2) A script
@@ -2354,7 +2401,8 @@ values) and docs/api/saasapi.md for how saasapi reads a Keycloak token (issuer, 
 and how the tenant is derived). FLAG FOR SECURITY REVIEW (secret generation, OpenBao bootstrap,
 UAT identity provider). The clusters come from UAT.2, being written in parallel: code against
 the contract.
-Build under uat/hub/core: (1) MinIO as a UAT only object store (one pod, a pinned image, a
+Every script takes a kubeconfig path and an endpoints file as inputs and calls nothing Azure specific,
+because UAT.8 runs the same scripts on a local cluster. Build under uat/hub/core: (1) MinIO as a UAT only object store (one pod, a pinned image, a
 generated root credential held in a Kubernetes Secret, the recipes bucket and the jobs bucket
 named by objectStore.bucket and objectStore.jobBucket, credentials for the chart in the secret
 the chart names) and a short note in uat/hub/core/README.md that it is AGPL-3.0, test only and
@@ -2400,7 +2448,11 @@ Build under uat/enroll: (1) A script that, given the uat JSON and a Keycloak adm
 each tenant, creates tenant 1 and tenant 2 through the saasapi API and one enrolment key per
 sprout (one time keys, the tenant's own), and prints nothing secret. (2) An Ansible inventory
 generator that turns the uat JSON and the keys into an inventory for ansible/site.yml: Linux
-sprouts over SSH with the per run key, Windows sprouts over WinRM HTTPS, group variables
+sprouts over SSH with the per run key, Windows sprouts over WinRM HTTPS, all reached through the
+127.0.0.1 ports in access.json (SSH with host key checking off and a per run known hosts file, WinRM
+with certificate validation ignored because the name seen through a tunnel never matches; say so in the
+README), honouring the connection field of each sprout in the uat JSON (ssh, winrm, or docker for the
+local rig, where the playbook runs with the docker connection), group variables
 pinning the package source to the release named by release_tag (the version of imas-sprout, the
 Buildkite registries the role already uses, never latest), the Envoy address as farmerinterface,
 the UAT CA file for sproutrootca with sproutrootcatofu false, and the same sproutid for the t1
@@ -2440,11 +2492,14 @@ uat/cases, and will reuse your helper package, so put the API client, token, spr
 cook helpers, and the sprout command helper in a package of its own (uat/tests/harness) with a small
 documented interface, and write it for reuse. Where a scenario cannot be asserted from the outside, say
 so in the test file instead of faking it, and where the API lacks what a scenario needs (for example
-revoking a sprout), record the gap in the PR. The reboot and service restart helpers use a command the
-harness is given by the workflow, not Azure calls from the tests. Add uat/tests/run.sh that builds the
+revoking a sprout), record the gap in the PR. The reboot, stop and start of a sprout, and running a command
+outside the platform, go through uat/access/vmctl.sh as the Access interface defines it (a path the
+harness is given), never Azure calls from the tests, so the local rig can supply its own. Add uat/tests/run.sh that builds the
 test binary, takes a tier name (smoke, core, resilience, ingredients, lifecycle or all) and an optional
 list of ids, runs all packages under uat/tests with the uat tag, prints a JUnit style summary with one
-line per scenario id, OS and tenant, and exits non zero on failure.
+line per scenario id, OS and tenant, and exits non zero on failure. It also fails when no test matched
+the tier, or when a scenario id of the tier in the catalogue neither ran nor was skipped with a written
+reason, and it lists every skip with its reason, so a run can never be green by running nothing.
 You cannot run these against a stack: run go vet and go build with the uat tag, unit tests for the
 helpers with fake servers, and say that the suite has never run against a real deployment. Scope:
 uat/tests only (not uat/tests/ingredients), plus a row in docs/BUILD-STATUS.md. Tests: go vet and go
@@ -2465,8 +2520,10 @@ all), upgrade_from_tag (optional, for scenario L4) and an optional list of scena
 uat/tests/run.sh; it runs in the GitHub environment
 uat (required reviewer), permission id-token write, logs in with azure/login by OIDC using the three
 environment variables, finds the runner's public address and passes it as runner_cidr, generates
-run_id, and runs in order: tofu apply (uat/tofu), k0s bootstrap, DMZ install, core install, enrolment,
-the tests, and a final destroy step with if always() unless keep_hours is above zero; it uploads the
+run_id, and runs in order: tofu apply (uat/tofu), opening the Bastion tunnels with uat/access/tunnels.sh
+open (after installing the Azure CLI bastion and ssh extensions), k0s bootstrap, DMZ install, core install, enrolment,
+the tests, then a step with if always() that closes the tunnels, and a final destroy step with if
+always() unless keep_hours is above zero; it uploads the
 test report and the sensitive-free outputs as artifacts and never the unseal keys or kubeconfigs. It
 checks up front that the three Azure variables exist and that release_tag is a tag that exists and has
 a published release, and fails naming what is missing. Concurrency group per release_tag. (2) After
@@ -2477,7 +2534,10 @@ deleted; it must never touch a group without that tag. (4) uat/README.md for the
 proves and does not prove (the Helm charts run on k0s, enrolment through Envoy, tenant isolation, auth;
 not HA, not PXC clustering, not RHEL itself, not SUSE, not the internet path), the prerequisites from
 section 4h, how to run it, how to keep an environment for debugging and how it is cleaned up, how to
-read a failure by OS and tenant, and a cost note with the caveat that the numbers are guesses. Do not
+read a failure by OS and tenant, how the suite itself is validated (the local rig of UAT.8; a run against
+a known bad release, v0.1.0-rc.3, whose Linux packages are broken and which must fail at install or at
+S1, then v0.1.0-rc.4, which must pass; a smoke run with keep_hours first; the no silent green rule of
+run.sh), and a cost note with the caveat that the numbers are guesses. Do not
 change publish-packages.yml or release.yml. Do not add a trigger on release published or on schedule
 for the gate itself; the owner turns that on after it is green. Tests: actionlint if installable,
 yamllint, and a shell test of the logic you put in scripts (run id generation, runner address
@@ -2526,6 +2586,39 @@ real sprout and that Windows Server Core may not support some of them. Scope: ua
 uat/tests/ingredients only, plus a row in docs/BUILD-STATUS.md. Tests: go vet and go test ./... must pass, and
 go vet -tags uat ./uat/... . PR: state what you built, what you deferred, how many methods and how many cases
 and skips, and any open question; call it ready for review, not done."
+```
+
+**UAT.8: local rig for validating the suite without Azure (after round A)**
+```
+claude --cloud "Implement UAT.8: a local rig that runs the UAT hub scripts and the smoke and core tiers
+of the test suite on one machine with Docker, for free, so the tests can be debugged before any Azure
+run. Read section 4h of docs/claude-code-parallel-build-plan.md first, in full, then what UAT.2, UAT.3a,
+UAT.3b, UAT.4 and UAT.5 merged under uat/ (all on main): you reuse their scripts and test runner and do
+not change them; if one needs a change for the rig, list it as a finding.
+Build under uat/lite: (1) up.sh and down.sh that create and remove two local Kubernetes clusters (kind
+or k3d, your choice, state why and the licence), named dmz and core, on one shared Docker network,
+with cert-manager and a default storage class, the UAT CA, and the hub names resolving the same way
+from the host, from inside both clusters and from the sprout containers (so the Keycloak issuer matches
+the token iss exactly; say what you did, for example host file entries written with sudo or a local
+resolver), then run the UAT.3a and UAT.3b install scripts against the two kubeconfigs from the release
+named by release_tag. (2) Four sprout machines as systemd containers, one Ubuntu 24.04 and one
+AlmaLinux 9 per tenant, built from Dockerfiles you write from the official base images (flag the base
+image licences), started with what systemd needs, each installing the real published package through the
+UAT.4 wrapper over the docker connection; reboot is a container restart. (3) A local vmctl.sh with the
+same interface as uat/access/vmctl.sh, built on Docker, and a script that writes the uat JSON (with the
+connection field set to docker), access.json and the endpoints file in the contract's shapes, so the UAT.4
+wrapper and uat/tests/run.sh run unchanged. (4) run.sh in uat/lite that brings the rig up if needed,
+runs uat/tests/run.sh for the tier smoke, core or all, and reports. Windows scenarios and Windows only
+ingredient cases cannot run here: they must appear as skipped with the reason, never as passed, under the
+no silent green rule. (5) uat/lite/README.md: prerequisites (Docker, the cluster tool, helm, kubectl),
+a rough memory and CPU need, how to run it on Linux and on WSL2 with Docker Desktop (the owner uses
+WSL2 with systemd enabled; say what systemd in containers needs there and the fallback of using the WSL2
+distro itself as one Ubuntu sprout), what the rig proves and what it cannot (no Windows, no real network
+separation, one machine, no Bastion), and how to clean up.
+You cannot run Docker against a registry here: write shell tests with stubbed docker, kind, kubectl and
+helm commands for the argument handling and for the files the scripts write, run shellcheck and yamllint,
+and say that the rig has never been run. Scope: uat/lite only, plus a row in docs/BUILD-STATUS.md. PR:
+state what you built, what you deferred, and any open question; call it ready for review, not done."
 ```
 
 ---
@@ -2663,7 +2756,7 @@ agent ids.
 
 ---
 
-## 5c. Dispatcher prompt: Azure UAT gate UAT.1 to UAT.7 (Claude Code app, hosted agents)
+## 5c. Dispatcher prompt: Azure UAT gate UAT.1 to UAT.8 (Claude Code app, hosted agents)
 
 Paste into one session in the Claude Code app with the yogzblr/imas repo attached. Same
 mechanism as sections 5 and 5b. The dispatcher never merges and never edits code. Do the owner
@@ -2672,7 +2765,7 @@ run does.
 
 ```
 You are the dispatcher for the UAT briefs in section 4h of docs/claude-code-parallel-build-plan.md:
-UAT.1, UAT.2, UAT.3a, UAT.3b, UAT.4, UAT.5, UAT.6 and UAT.7, eight briefs in all. You start hosted agents,
+UAT.1, UAT.2, UAT.3a, UAT.3b, UAT.4, UAT.5, UAT.6, UAT.7 and UAT.8, nine briefs in all. You start hosted agents,
 track them and report. You do not write code, review code, merge, run anything in Azure, or approve
 anything yourself. Read CLAUDE.md and section 4h of the plan first, including the Shared contract.
 
@@ -2691,9 +2784,10 @@ me.
 Gates. A gate is satisfied only when its PR is MERGED into main, not merely open or green.
 - Round A, no gate: UAT.1, UAT.2, UAT.3a, UAT.3b, UAT.4 and UAT.5. They write to separate directories
   against the Shared contract, so start all six together.
-- Round B: UAT.6 and UAT.7 each gate all six of round A (UAT.7 reuses UAT.5's harness package). Start
-  both together, only after every brief of round A is merged.
-After UAT.6 and UAT.7 are both merged, stop and hand back to me. Do not run the gate and do not touch Azure.
+- Round B: UAT.6, UAT.7 and UAT.8 each gate all six of round A (UAT.7 reuses UAT.5's harness package,
+  UAT.8 reuses the hub, enrolment and test scripts). Start all three together, only after every brief of
+  round A is merged.
+After UAT.6, UAT.7 and UAT.8 are all merged, stop and hand back to me. Do not run the gate and do not touch Azure.
 
 Tracking. Use the task list as the ledger, one task per brief, with the agent id, the PR number once it
 exists, and its state (not started, running, PR open, CI red, merged, blocked). Use ListAgents to see
