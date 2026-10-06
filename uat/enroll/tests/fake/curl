@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""A stand-in for curl that answers as saasapi and Keycloak's token endpoint would, for tests/test_scripts.sh.
+
+Understands only the curl options lib.sh's saas_call passes. State lives in
+$FAKE_DIR. Every argv is appended to $FAKE_DIR/argv and every request to
+$FAKE_DIR/log ("METHOD PATH"), so the tests can check what was sent and that no
+secret was ever on a command line.
+
+Behaviour switches (environment):
+  FAKE_SECRET            the X-Internal-Auth value to accept (required)
+  FAKE_PENDING_POLLS     status polls answered "pending" before "active" (1)
+  FAKE_TENANT_FAILS      "1": the tenant goes to "failed" with a last_error
+  FAKE_429               key mints answered 429 before the first success (0)
+  FAKE_CONNECT_AFTER     lookups answered connected=false before true (0)
+  FAKE_LINK_CONFLICT     an asset id whose link answers 409
+  FAKE_KC_CLIENT_SECRET  Keycloak: the test client's secret
+
+Keycloak's users are $FAKE_DIR/kc-users.json ({"<username>": "<password>"});
+a token carries organization.id when $FAKE_DIR/kc-bindings.json maps the user
+to a tenant id (tests/fake/hub-core/bind-tenant.sh writes it).
+"""
+
+import base64
+import json
+import os
+import sys
+from urllib.parse import parse_qs, urlsplit
+
+fake = os.environ["FAKE_DIR"]
+state_path = os.path.join(fake, "state.json")
+args = sys.argv[1:]
+with open(os.path.join(fake, "argv"), "a", encoding="utf-8") as f:
+    f.write(json.dumps(args) + "\n")
+
+method, headers, body, out, fmt, url = "GET", {}, b"", None, "", None
+i = 0
+while i < len(args):
+    a = args[i]
+    if a in ("-X", "-H", "--data-binary", "-o", "-w", "--cacert", "--max-time"):
+        v = args[i + 1]
+        i += 2
+        if a == "-X":
+            method = v
+        elif a == "-H":
+            lines = [v]
+            if v.startswith("@"):
+                with open(v[1:], encoding="utf-8") as f:
+                    lines = f.read().splitlines()
+            for line in lines:
+                k, _, val = line.partition(": ")
+                if k.lower() in ("authorization", "x-internal-auth") and not v.startswith("@"):
+                    sys.exit("fake curl: credentials must come from a header file (-H @file)")
+                headers[k.lower()] = val
+        elif a == "--data-binary":
+            if not v.startswith("@"):
+                sys.exit("fake curl: bodies must come from a file")
+            with open(v[1:], "rb") as f:
+                body = f.read()
+            if method == "GET":
+                method = "POST"
+        elif a == "-o":
+            out = v
+        elif a == "-w":
+            fmt = v
+        continue
+    if a.startswith("http"):
+        url = a
+    i += 1
+
+try:
+    with open(state_path, encoding="utf-8") as f:
+        st = json.load(f)
+except FileNotFoundError:
+    st = {"tenants": {}, "keys": [], "links": {}, "lookups": 0, "mint_calls": 0, "seq": 0}
+
+u = urlsplit(url)
+path = u.path
+with open(os.path.join(fake, "log"), "a", encoding="utf-8") as f:
+    f.write(f"{method} {path}{'?' + u.query if u.query else ''}\n")
+
+
+def org_of(token):
+    try:
+        p = token.split(".")[1]
+        p += "=" * (-len(p) % 4)
+        return json.loads(base64.urlsafe_b64decode(p))["organization"]["id"]
+    except Exception:  # noqa: BLE001 - any malformed token is just "no org"
+        return None
+
+
+def answer(code, obj):
+    with open(state_path, "w", encoding="utf-8") as f:
+        json.dump(st, f)
+    if out:
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(obj, f)
+    if fmt == "%{http_code}":
+        sys.stdout.write(str(code))
+    sys.exit(0)
+
+
+def jwt(claims, sig):
+    def b64(o):
+        return base64.urlsafe_b64encode(json.dumps(o).encode()).decode().rstrip("=")
+    return f"{b64({'alg': 'none'})}.{b64(claims)}.{sig}"
+
+
+if path.startswith("/realms/"):
+    # Keycloak's token endpoint: users and passwords from kc-users.json, and
+    # organization.id from kc-bindings.json, which the bind-tenant.sh stub writes.
+    with open(os.path.join(fake, "kc-users.json"), encoding="utf-8") as f:
+        users = json.load(f)
+    try:
+        with open(os.path.join(fake, "kc-bindings.json"), encoding="utf-8") as f:
+            bindings = json.load(f)
+    except FileNotFoundError:
+        bindings = {}
+    if not path.endswith("/protocol/openid-connect/token"):
+        answer(404, {"error": "not found"})
+    form = {k: v[0] for k, v in parse_qs(body.decode()).items()}
+    if (form.get("grant_type") != "password" or users.get(form.get("username")) != form.get("password")
+            or form.get("client_secret") != os.environ.get("FAKE_KC_CLIENT_SECRET")):
+        answer(401, {"error": "invalid_grant"})
+    claims = {"sub": form["username"]}
+    if form["username"] in bindings:
+        claims["organization"] = {"id": bindings[form["username"]]}
+    answer(200, {"access_token": jwt(claims, "TOKSIGNATURE")})
+
+if headers.get("x-internal-auth") != os.environ["FAKE_SECRET"]:
+    answer(401, {"error": "unauthorized", "message": "unauthorized"})
+auth = headers.get("authorization", "")
+if not auth.startswith("Bearer "):
+    answer(401, {"error": "unauthorized", "message": "unauthorized"})
+org = org_of(auth[len("Bearer "):])
+parts = [p for p in path.split("/") if p]
+req = json.loads(body) if body else {}
+
+if method == "POST" and parts == ["v1", "tenants"]:
+    if not req.get("name"):
+        answer(400, {"error": "invalid_request", "message": "name is required"})
+    st["seq"] += 1
+    tid = "t_" + "a" * 15 + "bcdefghijklmnopq"[st["seq"] % 16]  # t_ + 16 base32
+    st["tenants"][tid] = {"name": req["name"], "polls": 0}
+    answer(202, {"tenant_id": tid, "status": "pending"})
+
+if len(parts) >= 3 and parts[:2] == ["v1", "tenants"]:
+    tid = parts[2]
+    if org != tid:
+        answer(403, {"error": "forbidden", "message": "forbidden"})
+    t = st["tenants"].get(tid)
+    if t is None:
+        answer(404, {"error": "tenant_not_found", "message": "no such tenant"})
+    rest = parts[3:]
+    if method == "GET" and rest == ["status"]:
+        t["polls"] += 1
+        if os.environ.get("FAKE_TENANT_FAILS") == "1":
+            answer(200, {"tenant_id": tid, "status": "failed", "last_error": "farmer refused the account"})
+        pending = int(os.environ.get("FAKE_PENDING_POLLS", "1"))
+        answer(200, {"tenant_id": tid, "status": "active" if t["polls"] > pending else "pending"})
+    if method == "POST" and rest == ["enrollment-keys"]:
+        st["mint_calls"] += 1
+        if st["mint_calls"] <= int(os.environ.get("FAKE_429", "0")):
+            answer(429, {"error": "rate_limited", "message": "slow down"})
+        n = len(st["keys"]) + 1
+        kid = f"ek_{n:04d}"
+        st["keys"].append({"tenant_id": tid, "key_id": kid, "request": req})
+        answer(200, {"key_id": kid, "registration_key": f"{kid}.SEKRIT{n:04d}xyz",
+                     "expires_at": "2026-10-06T18:00:00Z", "max_uses": req.get("max_uses")})
+    if method == "POST" and len(rest) == 3 and rest[0] == "sprouts" and rest[2] == "asset-link":
+        sid, aid = rest[1], req.get("asset_id")
+        if aid == os.environ.get("FAKE_LINK_CONFLICT"):
+            answer(409, {"error": "asset_link_conflict", "message": "conflict"})
+        if st["links"].get(aid) == [tid, sid]:
+            answer(200, {"sprout_id": sid, "asset_id": aid})
+        st["links"][aid] = [tid, sid]
+        answer(201, {"sprout_id": sid, "asset_id": aid})
+    if method == "GET" and rest == ["sprouts"]:
+        st["lookups"] += 1
+        connected = st["lookups"] > int(os.environ.get("FAKE_CONNECT_AFTER", "0"))
+        results, unresolved = [], []
+        for aid in parse_qs(u.query).get("asset_ids", [""])[0].split(","):
+            link = st["links"].get(aid)
+            if link and link[0] == tid:
+                results.append({"sprout_id": link[1], "asset_id": aid, "key_state": "accepted", "connected": connected})
+            else:
+                unresolved.append(aid)
+        answer(200, {"results": results, "unresolved": unresolved})
+
+answer(404, {"error": "not_found"})

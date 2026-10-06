@@ -1,0 +1,156 @@
+---
+# Runs before ansible/site.yml. Seeds the sprout ID the UAT expects
+# (uat_sprout_id, from gen-inventory.py: ubuntu-01, alma-01, win-01 in BOTH
+# tenants) into the sprout's config file, so the sprout asks farmer for that
+# ID when it enrolls.
+#
+# Why this is needed: the sprout asks for the ID in its config key "sproutid"
+# and, when that is empty, for its normalized hostname (internal/pki/pki.go,
+# GetSproutID and createSproutID); farmer takes it as asked unless another
+# sprout in the same tenant holds it (resolveEnrollSproutID). The imas_sprout
+# role has no variable for "sproutid", but it keeps every key of the config
+# file it doesn't manage, and both packages keep an existing config file:
+# the deb and rpm mark /etc/imas/sprout config|noreplace (dpkg keeps it under
+# the apt module's force-confold, rpm writes the packaged one as .rpmnew) and
+# the MSI's config component is NeverOverwrite. So a file written here, before
+# the package is installed, survives the install and the role.
+#
+# Only a sprout that hasn't enrolled is touched: an enrolled sprout keeps the
+# ID farmer gave it, whatever this play wants. collect.yml then checks the ID
+# each sprout actually enrolled with.
+- name: Seed the sprout ID the UAT expects
+  hosts: sprouts
+  gather_facts: true
+  vars:
+    # Kept out of Jinja string literals, which treat a backslash as an escape.
+    _uat_bs: '\'
+    _uat_program_data_fallback: 'C:\ProgramData'
+    # The packages' paths; variables only so tests can point them elsewhere.
+    uat_linux_config_file: /etc/imas/sprout
+    uat_linux_jwt_file: /etc/imas/pki/sprout/sprout.jwt
+  tasks:
+    - name: Check the sprout ID
+      ansible.builtin.assert:
+        that:
+          - uat_sprout_id is defined
+          - uat_sprout_id is match('^[a-z0-9][a-z0-9_-]*$')
+        fail_msg: "uat_sprout_id must come from gen-inventory.py; got '{{ uat_sprout_id | default('') }}'"
+        quiet: true
+
+    - name: Seed on Linux
+      when: ansible_os_family != 'Windows'
+      block:
+        - name: Check whether the sprout is already enrolled
+          ansible.builtin.stat:
+            path: "{{ uat_linux_jwt_file }}"
+          register: _uat_jwt
+
+        - name: Check for a config file
+          ansible.builtin.stat:
+            path: "{{ uat_linux_config_file }}"
+          register: _uat_cfg_stat
+
+        # It may hold a join token from an earlier, unfinished run.
+        - name: Read the config file
+          ansible.builtin.slurp:
+            src: "{{ uat_linux_config_file }}"
+          register: _uat_cfg_raw
+          when: _uat_cfg_stat.stat.exists
+          no_log: true
+
+        - name: Parse the config file
+          ansible.builtin.set_fact:
+            _uat_cfg: "{{ (_uat_cfg_raw.content | b64decode | from_yaml | default({}, true)) if _uat_cfg_stat.stat.exists else {} }}"
+          no_log: true
+
+        - name: Report an enrolled sprout
+          ansible.builtin.debug:
+            msg: "already enrolled as '{{ _uat_cfg.sproutid | default('') }}'; its sprout ID is not changed"
+          when: _uat_jwt.stat.exists
+
+        - name: Create /etc/imas
+          ansible.builtin.file:
+            path: "{{ uat_linux_config_file | dirname }}"
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+          when: not _uat_jwt.stat.exists
+
+        - name: Write the sprout ID into the config file
+          ansible.builtin.copy:
+            content: "{{ _uat_cfg | combine({'sproutid': uat_sprout_id}) | to_nice_yaml(indent=2) }}"
+            dest: "{{ uat_linux_config_file }}"
+            owner: root
+            group: root
+            mode: "0600"
+          when:
+            - not _uat_jwt.stat.exists
+            - _uat_cfg.sproutid | default('') != uat_sprout_id
+          no_log: true
+
+    - name: Seed on Windows
+      when: ansible_os_family == 'Windows'
+      vars:
+        _uat_root: "{{ (ansible_env.ProgramData | default(_uat_program_data_fallback)) ~ _uat_bs ~ 'imas' }}"
+      block:
+        - name: Check whether the sprout is already enrolled
+          ansible.windows.win_stat:
+            path: "{{ _uat_root }}\\pki\\sprout\\sprout.jwt"
+            get_checksum: false
+          register: _uat_jwt
+
+        # The DACL the MSI sets (MsiLockPermissionsEx) and the sprout repairs on
+        # every start (internal/config/paths_windows.go, sproutConfigRootSDDL),
+        # owned by Administrators: SYSTEM and Administrators only, so the join
+        # token the role writes here later is never readable by other users.
+        - name: Create the sprout's config root, SYSTEM and Administrators only
+          ansible.windows.win_powershell:
+            parameters:
+              Dir: "{{ _uat_root }}"
+              Sddl: "O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+            script: |
+              [CmdletBinding()]
+              param([string]$Dir, [string]$Sddl)
+              $ErrorActionPreference = 'Stop'
+              $Ansible.Changed = $false
+              if (-not (Test-Path -LiteralPath $Dir)) {
+                New-Item -ItemType Directory -Path $Dir | Out-Null
+                $acl = Get-Acl -LiteralPath $Dir
+                $acl.SetSecurityDescriptorSddlForm($Sddl)
+                Set-Acl -LiteralPath $Dir -AclObject $acl
+                $Ansible.Changed = $true
+              }
+          when: not _uat_jwt.stat.exists
+
+        - name: Check for a config file
+          ansible.windows.win_stat:
+            path: "{{ _uat_root }}\\sprout"
+            get_checksum: false
+          register: _uat_cfg_stat
+
+        - name: Read the config file
+          ansible.builtin.slurp:
+            src: "{{ _uat_root }}\\sprout"
+          register: _uat_cfg_raw
+          when: _uat_cfg_stat.stat.exists
+          no_log: true
+
+        - name: Parse the config file
+          ansible.builtin.set_fact:
+            _uat_cfg: "{{ (_uat_cfg_raw.content | b64decode | from_yaml | default({}, true)) if _uat_cfg_stat.stat.exists else {} }}"
+          no_log: true
+
+        - name: Report an enrolled sprout
+          ansible.builtin.debug:
+            msg: "already enrolled as '{{ _uat_cfg.sproutid | default('') }}'; its sprout ID is not changed"
+          when: _uat_jwt.stat.exists
+
+        - name: Write the sprout ID into the config file
+          ansible.windows.win_copy:
+            content: "{{ _uat_cfg | combine({'sproutid': uat_sprout_id}) | to_nice_yaml(indent=2) }}"
+            dest: "{{ _uat_root }}\\sprout"
+          when:
+            - not _uat_jwt.stat.exists
+            - _uat_cfg.sproutid | default('') != uat_sprout_id
+          no_log: true
