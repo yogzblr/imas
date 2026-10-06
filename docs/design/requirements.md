@@ -42,5 +42,8 @@ Status and delivery detail live in `docs/BUILD-STATUS.md`, not here.
 21. Licensing: dependencies are Apache-2.0 or MIT by default. Accepted
     exceptions: Percona XtraDB Cluster (GPLv2, commercial arrangement) and
     MPL-2.0 dependencies generally, including OpenBao and its Go client
-    (used unmodified, or modifications shared). Any other license is
+    (used unmodified, or modifications shared). UAT-only exception:
+    busybox (GPL-2.0), pulled unmodified as local-path-provisioner's
+    helper pod image on the throwaway UAT k0s hubs; never linked, shipped
+    or a dependency of a released artifact. Any other license is
     flagged before adoption.
