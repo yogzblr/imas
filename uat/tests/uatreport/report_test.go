@@ -333,31 +333,40 @@ func TestRunShAgainstFakeStack(t *testing.T) {
 			t.Skipf("no %s", tool)
 		}
 	}
-	dir := t.TempDir()
 	bin := filepath.Join(t.TempDir(), "fakestack")
 	build := exec.Command("go", "build", "-o", bin, "./uat/tests/fakestack")
 	build.Dir = filepath.Join("..", "..", "..")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("building the fake stack: %v\n%s", err, out)
 	}
-	fake := exec.Command(bin, "-dir", dir)
-	if err := fake.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = fake.Process.Kill(); _ = fake.Wait() })
-	deadline := time.Now().Add(3 * time.Minute)
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "uat-ca.pem")); err == nil {
-			break
+	// startFake serves a fake stack whose material is in the given layout
+	// and returns its directory once every file is written.
+	startFake := func(layout string, ready ...string) string {
+		dir := t.TempDir()
+		fake := exec.Command(bin, "-dir", dir, "-layout", layout)
+		if err := fake.Start(); err != nil {
+			t.Fatal(err)
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("the fake stack didn't start")
+		t.Cleanup(func() { _ = fake.Process.Kill(); _ = fake.Wait() })
+		deadline := time.Now().Add(3 * time.Minute)
+		for _, f := range ready {
+			for {
+				if _, err := os.Stat(filepath.Join(dir, f)); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("the fake stack (%s) didn't start", layout)
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
 		}
 		time.Sleep(200 * time.Millisecond)
+		return dir
 	}
-	runSh := func(args ...string) (int, string) {
+	runSh := func(dir string, args ...string) (int, string) {
 		cmd := exec.Command("bash", append([]string{filepath.Join("..", "run.sh")}, args...)...)
-		cmd.Env = append(os.Environ(), "IMAS_UAT_DIR="+dir, "IMAS_UAT_REPORT_DIR="+filepath.Join(dir, "report-"+args[0]), "IMAS_UAT_VMCTL=")
+		cmd.Env = append(os.Environ(), "IMAS_UAT_DIR="+dir, "IMAS_UAT_REPORT_DIR="+filepath.Join(dir, "report-"+args[0]),
+			"IMAS_UAT_VMCTL=", "IMAS_UAT_BIND_TENANT=", "IMAS_UAT_CORE_KUBECONFIG=", "IMAS_UAT_ENDPOINTS=")
 		out, err := cmd.CombinedOutput()
 		code := 0
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -367,16 +376,27 @@ func TestRunShAgainstFakeStack(t *testing.T) {
 		}
 		return code, string(out)
 	}
-	if code, out := runSh("smoke"); code != 0 || !strings.Contains(out, "RESULT: PASS") || !strings.Contains(out, "PASS   C1                     windows  2") {
+	dir := startFake("flat", "uat-ca.pem")
+	if code, out := runSh(dir, "smoke"); code != 0 || !strings.Contains(out, "RESULT: PASS") || !strings.Contains(out, "PASS   C1                     windows  2") {
 		t.Errorf("smoke against the fake: exit %d\n%s", code, out)
 	}
-	if code, out := runSh("resilience", "L2"); code != 0 || !strings.Contains(out, "PASS   L2") {
+	if code, out := runSh(dir, "resilience", "L2"); code != 0 || !strings.Contains(out, "PASS   L2") {
 		t.Errorf("L2 against the fake: exit %d\n%s", code, out)
 	}
-	if code, out := runSh("lifecycle"); code != 1 || !strings.Contains(out, "NO TEST MATCHED") || !strings.Contains(out, "MISS   L4") {
+	if code, out := runSh(dir, "lifecycle"); code != 1 || !strings.Contains(out, "NO TEST MATCHED") || !strings.Contains(out, "MISS   L4") {
 		t.Errorf("lifecycle has no tests yet and must fail: exit %d\n%s", code, out)
 	}
-	if code, _ := runSh("core", "Q7"); code != 2 {
+	if code, _ := runSh(dir, "core", "Q7"); code != 2 {
 		t.Errorf("an unknown id must be a usage error: %d", code)
+	}
+
+	// uat/hub/core's layout (core.json, credentials.json, no keycloak.json,
+	// no Keycloak admin): smoke passes, T1 skipping the part that needs a
+	// user for the tenant it creates.
+	core := startFake("core", "core/out/core.json", "core/sensitive/credentials.json", "harness.json")
+	code, out := runSh(core, "smoke")
+	if code != 0 || !strings.Contains(out, "RESULT: PASS") || !strings.Contains(out, "PASS   K1") ||
+		!strings.Contains(out, "SKIP   T1") || !strings.Contains(out, "no Keycloak admin REST identity") {
+		t.Errorf("smoke against the fake in the core layout: exit %d\n%s", code, out)
 	}
 }

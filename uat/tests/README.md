@@ -73,15 +73,40 @@ UAT.3b and UAT.4 produce. Keep it out of git and out of uploaded artifacts:
 it holds credentials. The harness never prints a password, secret, token or
 join token.
 
+**Owner decision (2026-10-06):** "#132 writes keycloak.json (with
+tenant_attribute), core.json, credentials.json; the harness calls
+bind-tenant.sh once per tenant; #131 and #134 read that shape." So the
+directory is normally uat/hub/core's state root, or a copy of its outputs:
+
 | File | Required | Content |
 |---|---|---|
 | `uat.json` | yes | `tofu output -json uat` (the Shared contract's shape; a `{"value": ...}` wrapper is accepted). `sprouts.<vm>.tenant` may be a number or a string. |
-| `keycloak.json` | yes | see below |
-| `internal-auth-secret` | yes | saasapi's `X-Internal-Auth` secret (`INTERNAL_AUTH_SECRET_CURRENT`), the BFF's credential |
-| `uat-ca.pem` | no | the run's CA, which issued the saasapi, Keycloak and Envoy certificates; absent: the system roots |
+| `core.json`, or `core/out/core.json` | yes, unless `keycloak.json` says it all | uat/hub/core's (UAT.3b) non-secret outputs: `saasapi_url`, `ca_file`, `keycloak` (issuer, client_id, read_role, write_role), `users` (each with its tenant and roles), `tenants` (what `bind-tenant.sh` bound) and `sensitive_dir` |
+| `credentials.json`, or `core/sensitive/credentials.json`, or `<sensitive_dir>/credentials.json` | with core.json | uat/hub/core's SENSITIVE file: `internal_auth_secret` (saasapi's `X-Internal-Auth`), `keycloak.client_secret` and `keycloak.passwords` per user |
+| `keycloak.json` | no (yes without core.json) | laid over what core.json gives, field by field; see below |
+| `internal-auth-secret` | no | wins over credentials.json's `internal_auth_secret` |
+| `uat-ca.pem` | no | the run's CA; else harness.json's `ca_file`; else core.json's `ca_file`; else the system roots |
 | `harness.json` | no | overrides, below |
-| `tenants.json` | no | `{"1": "t_...", "2": "t_..."}` (or `{"1": {"tenant_id": ...}}`), when keycloak.json doesn't carry the tenant IDs |
+| `tenants.json` | no | `{"1": "t_...", "2": "t_..."}` (or `{"1": {"tenant_id": ...}}`): the tenants UAT.4 created, when keycloak.json doesn't carry them; core.json's `tenants` is the last fallback |
 | `sprouts.json` | no | `{"t1-ubuntu": {"sprout_id": "ubuntu-01", "asset_id": "..."}}`; without it the sprout ID is read on the host from the sprout's gateway JWT (its `sprout_id` claim, never the token itself) and the asset ID is `uat-<run_id>-<vm>` |
+
+From core.json, a user holding the write role is its tenant's admin
+(`t1-admin`, `t2-admin`) and one holding only the read role its read only
+user (`t1-reader`, `t2-reader`); the tenant attribute is `organization_id`,
+which UAT.3b's realm maps to the `organization.id` claim.
+
+**Binding the tenants.** Before any test, the run calls
+`uat/hub/core/bind-tenant.sh <kubeconfig> <endpoints.json> <state-dir> <n>
+<tenant_id>` once for each tenant whose ID core.json's `tenants` doesn't
+already record, then fetches fresh tokens. It needs the core kubeconfig
+(`$IMAS_UAT_CORE_KUBECONFIG`) and the endpoints file (`$IMAS_UAT_ENDPOINTS`),
+or harness.json's `bind_tenant`; the state directory defaults to the state
+root core.json was found under, and the script to
+`uat/hub/core/bind-tenant.sh` (`$IMAS_UAT_BIND_TENANT` overrides it).
+Without them the run binds nothing and relies on an earlier binding (UAT.4).
+Either way it then checks that each tenant's admin token carries the
+tenant's ID as `organization.id`, and stops before any test if not, naming
+the tenant.
 
 `keycloak.json`:
 
@@ -90,7 +115,7 @@ join token.
   "issuer": "https://uat<run_id>-core.<region>.cloudapp.azure.com/realms/imas-uat",
   "client_id": "imas-uat-tests",
   "client_secret": "optional, for a confidential client",
-  "tenant_attribute": "tenant_id",
+  "tenant_attribute": "organization_id",
   "admin": {"realm": "master", "client_id": "admin-cli", "username": "...", "password": "..."},
   "other_audience_client": {"client_id": "...", "client_secret": "optional"},
   "tenants": {
@@ -99,6 +124,11 @@ join token.
   }
 }
 ```
+
+Every field is optional when core.json is there; a field that is set wins
+over core.json's. PR #132's own keycloak.json was not yet pushed when this
+was written: the harness reads the fields above and ignores others, and a
+mismatch is an open question in PR #134, not something to guess.
 
 What the suite assumes of the realm (UAT.3b):
 
@@ -112,6 +142,11 @@ What the suite assumes of the realm (UAT.3b):
 - `admin` (optional) can create and delete users in the test realm through
   the admin REST API, either the bootstrap admin (password grant in
   `master`) or a service account (`client_secret`, client credentials).
+  UAT.3b's edge doesn't route the admin API (Keycloak is administered only
+  through `kubectl exec`), so the harness never takes credentials.json's
+  master admin for this; with UAT.3b's deployment T1 (after its 202), T4
+  and T5 skip with that reason. How they should get a token for a tenant
+  created during the run is an open question in PR #134.
   `tenant_attribute` is the user attribute the realm maps to
   `organization.id` (for example a user attribute mapper with the claim name
   `organization.id`; on Keycloak 24 and later the attribute has to be in the
@@ -136,6 +171,7 @@ What the suite assumes of the realm (UAT.3b):
   "internal_auth_secret_file": "internal-auth-secret",
   "vmctl": "/path/to/vmctl.sh",
   "core_probe_ports": [22, 443, 3306, 5405, 6443, 8081, 8200],
+  "bind_tenant": {"script": "uat/hub/core/bind-tenant.sh", "kubeconfig": "...", "endpoints": "...", "state_dir": "..."},
   "restart": {
     "farmer":    {"vm": "uat-core", "command": "..."},
     "farmerbus": {"vm": "uat-dmz",  "command": "..."},

@@ -40,6 +40,7 @@ exit "${code:-1}"
 
 func main() {
 	dir := flag.String("dir", "", "directory to write the material into (created if missing)")
+	layout := flag.String("layout", "flat", "flat (keycloak.json and friends) or core (uat/hub/core's core.json and credentials.json)")
 	flag.Parse()
 	if *dir == "" {
 		fmt.Fprintln(os.Stderr, "usage: fakestack -dir DIR")
@@ -58,12 +59,20 @@ func main() {
 	defer s.Close()
 	s.AddContractHosts()
 	vmctl := filepath.Join(abs, "vmctl.sh")
-	script := fmt.Sprintf(vmctlScript, filepath.Join(abs, "uat-ca.pem"), s.Server.URL)
+	ca := filepath.Join(abs, "uat-ca.pem")
+	if *layout == "core" {
+		ca = filepath.Join(abs, "core", "out", "uat-ca.crt")
+	}
+	script := fmt.Sprintf(vmctlScript, ca, s.Server.URL)
 	if err := os.WriteFile(vmctl, []byte(script), 0o700); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if err := s.WriteMaterial(abs, vmctl); err != nil {
+	write := s.WriteMaterial
+	if *layout == "core" {
+		write = s.WriteCoreMaterial
+	}
+	if err := write(abs, vmctl); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

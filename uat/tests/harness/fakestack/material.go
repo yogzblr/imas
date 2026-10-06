@@ -26,6 +26,63 @@ func (s *Stack) AddContractHosts() {
 	}
 }
 
+// WriteCoreMaterial writes a material directory in the state-root layout
+// of uat/hub/core (UAT.3b, PR #132): uat.json and harness.json at the top,
+// core/out/core.json and core/out/uat-ca.crt (not secret), and
+// core/sensitive/credentials.json. Tenants 1 and 2 are recorded as bound,
+// as bind-tenant.sh would leave them. There is no keycloak.json and no
+// Keycloak admin, as with UAT.3b's edge.
+func (s *Stack) WriteCoreMaterial(dir, vmctl string) error {
+	if err := s.WriteMaterial(dir, vmctl); err != nil {
+		return err
+	}
+	for _, f := range []string{"keycloak.json", "internal-auth-secret", "uat-ca.pem"} {
+		_ = os.Remove(filepath.Join(dir, f))
+	}
+	out, sens := filepath.Join(dir, "core", "out"), filepath.Join(dir, "core", "sensitive")
+	for _, d := range []string{out, sens} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return err
+		}
+	}
+	ca := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: s.Server.Certificate().Raw})
+	if err := os.WriteFile(filepath.Join(out, "uat-ca.crt"), ca, 0o644); err != nil {
+		return err
+	}
+	users := map[string]any{}
+	pw := map[string]string{}
+	for n := 1; n <= 2; n++ {
+		users[fmt.Sprintf("t%d-admin", n)] = map[string]any{"tenant": fmt.Sprint(n), "roles": []string{ReadRole, WriteRole}}
+		users[fmt.Sprintf("t%d-reader", n)] = map[string]any{"tenant": fmt.Sprint(n), "roles": []string{ReadRole}}
+		pw[fmt.Sprintf("t%d-admin", n)], pw[fmt.Sprintf("t%d-reader", n)] = "pw", "pw"
+	}
+	core := map[string]any{
+		"release_tag": "v0.0.0-fake", "saasapi_url": s.Server.URL, "internal_auth_header": "X-Internal-Auth",
+		"ca_file": filepath.Join(out, "uat-ca.crt"),
+		"keycloak": map[string]string{"issuer": s.Issuer(), "token_url": s.Issuer() + "/protocol/openid-connect/token",
+			"realm": Realm, "audience": Audience, "client_id": ClientID, "read_role": ReadRole, "write_role": WriteRole,
+			"tenant_claim": "organization.id"},
+		"users":         users,
+		"tenants":       map[string]string{"1": TenantID(1), "2": TenantID(2)},
+		"sensitive_dir": sens,
+	}
+	creds := map[string]any{
+		"note": "SENSITIVE", "internal_auth_secret": InternalSecret + "\n",
+		"keycloak": map[string]any{"client_secret": "", "passwords": pw,
+			"master_admin": map[string]string{"username": AdminUser, "password": AdminPassword}},
+	}
+	for path, v := range map[string]any{filepath.Join(out, "core.json"): core, filepath.Join(sens, "credentials.json"): creds} {
+		b, err := json.MarshalIndent(v, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // WriteMaterial writes a material directory (uat/tests/README.md) for the
 // stack into dir: uat.json, keycloak.json, internal-auth-secret,
 // uat-ca.pem and harness.json. vmctl, if not empty, is written into
@@ -59,8 +116,8 @@ func (s *Stack) WriteMaterial(dir, vmctl string) error {
 			"admin":                 map[string]string{"realm": "master", "client_id": "admin-cli", "username": AdminUser, "password": AdminPassword},
 			"other_audience_client": map[string]string{"client_id": "other-client"},
 			"tenants": map[string]any{
-				"1": map[string]any{"tenant_id": TenantID(1), "admin": map[string]string{"username": "t1-admin", "password": "pw"}, "readonly": map[string]string{"username": "t1-ro", "password": "pw"}},
-				"2": map[string]any{"tenant_id": TenantID(2), "admin": map[string]string{"username": "t2-admin", "password": "pw"}, "readonly": map[string]string{"username": "t2-ro", "password": "pw"}},
+				"1": map[string]any{"tenant_id": TenantID(1), "admin": map[string]string{"username": "t1-admin", "password": "pw"}, "readonly": map[string]string{"username": "t1-reader", "password": "pw"}},
+				"2": map[string]any{"tenant_id": TenantID(2), "admin": map[string]string{"username": "t2-admin", "password": "pw"}, "readonly": map[string]string{"username": "t2-reader", "password": "pw"}},
 			},
 		},
 		"harness.json": map[string]any{"saasapi_url": s.Server.URL, "envoy_url": s.Server.URL},

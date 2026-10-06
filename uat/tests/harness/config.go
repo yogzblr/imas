@@ -200,6 +200,8 @@ type Settings struct {
 	// Restart overrides the commands of DefaultRestartCommands, keyed
 	// "farmer", "farmerbus" and "envoy".
 	Restart map[string]RestartCommand `json:"restart,omitempty"`
+	// BindTenant says how to run uat/hub/core/bind-tenant.sh.
+	BindTenant BindConfig `json:"bind_tenant,omitempty"`
 }
 
 // SproutOverride is one entry of sprouts.json, keyed by VM name.
@@ -280,7 +282,12 @@ type Env struct {
 	SaaSAPIURL string
 	EnvoyURL   string
 	// Sprouts in a stable order: tenant, OS, VM name.
-	Sprouts   []Sprout
+	Sprouts []Sprout
+	// Core is uat/hub/core's core.json when one was found, at CorePath.
+	Core     *CoreJSON
+	CorePath string
+	// Bind is how to run bind-tenant.sh; see BindConfig.
+	Bind      BindConfig
 	tenantIDs map[int]string
 }
 
@@ -325,11 +332,36 @@ func LoadDir(dir string) (*Env, error) {
 	if env.UAT, err = ParseUAT(raw); err != nil {
 		return nil, fmt.Errorf("harness: %s: %w", env.UATFile, err)
 	}
-	if err := readJSON(filepath.Join(dir, FileKeycloak), &env.Keycloak, true, false); err != nil {
-		return nil, err
-	}
 	if err := readJSON(filepath.Join(dir, FileSettings), &env.Settings, false, true); err != nil {
 		return nil, err
+	}
+
+	// Keycloak: uat/hub/core's core.json and credentials.json, with
+	// keycloak.json, when there is one, laid over them.
+	core, corePath, stateRoot, err := findCore(dir)
+	if err != nil {
+		return nil, err
+	}
+	creds, err := findCredentials(dir, core)
+	if err != nil {
+		return nil, err
+	}
+	env.Core, env.CorePath = core, corePath
+	var kcFile KeycloakConfig
+	_, statErr := os.Stat(filepath.Join(dir, FileKeycloak))
+	haveKC := statErr == nil
+	if haveKC {
+		if err := readJSON(filepath.Join(dir, FileKeycloak), &kcFile, true, false); err != nil {
+			return nil, err
+		}
+	}
+	switch {
+	case core != nil:
+		env.Keycloak = mergeKeycloak(keycloakFromCore(core, creds), kcFile)
+	case haveKC:
+		env.Keycloak = kcFile
+	default:
+		return nil, fmt.Errorf("harness: %s has neither keycloak.json nor core.json (uat/hub/core's out/core.json, here or under core/out/)", dir)
 	}
 
 	secretFile := env.Settings.InternalAuthSecretFile
@@ -337,16 +369,46 @@ func LoadDir(dir string) (*Env, error) {
 		secretFile = FileInternalAuth
 	}
 	secret, err := os.ReadFile(resolve(dir, secretFile))
-	if err != nil {
-		return nil, fmt.Errorf("harness: reading saasapi's internal auth secret: %w", err)
+	switch {
+	case err == nil:
+		env.InternalAuth = strings.TrimSpace(string(secret))
+	case errors.Is(err, os.ErrNotExist) && env.Settings.InternalAuthSecretFile == "" && creds != nil:
+		env.InternalAuth = strings.TrimSpace(creds.InternalAuthSecret)
+	default:
+		return nil, fmt.Errorf("harness: reading saasapi's internal auth secret (%s, or internal_auth_secret in credentials.json): %w", secretFile, err)
 	}
-	env.InternalAuth = strings.TrimSpace(string(secret))
 	if env.InternalAuth == "" {
-		return nil, fmt.Errorf("harness: %s is empty", secretFile)
+		return nil, fmt.Errorf("harness: saasapi's internal auth secret is empty")
 	}
 
-	if env.CAPool, err = loadCA(dir, env.Settings.CAFile); err != nil {
+	caFile := env.Settings.CAFile
+	if caFile == "" && core != nil && core.CAFile != "" {
+		if _, err := os.Stat(filepath.Join(dir, FileCA)); err != nil {
+			caFile = core.CAFile
+			if !filepath.IsAbs(caFile) {
+				caFile = filepath.Join(filepath.Dir(corePath), caFile)
+			}
+		}
+	}
+	if env.CAPool, err = loadCA(dir, caFile); err != nil {
 		return nil, err
+	}
+
+	env.Bind = env.Settings.BindTenant
+	if v := os.Getenv(EnvBindTenant); v != "" {
+		env.Bind.Script = v
+	}
+	if env.Bind.Script == "" {
+		env.Bind.Script = os.Getenv(EnvBindTenantDefault)
+	}
+	if env.Bind.Kubeconfig == "" {
+		env.Bind.Kubeconfig = os.Getenv(EnvCoreKubeconfig)
+	}
+	if env.Bind.Endpoints == "" {
+		env.Bind.Endpoints = os.Getenv(EnvEndpoints)
+	}
+	if env.Bind.StateDir == "" {
+		env.Bind.StateDir = stateRoot
 	}
 
 	env.VMCtlPath = os.Getenv(EnvVMCtl)
@@ -359,6 +421,9 @@ func LoadDir(dir string) (*Env, error) {
 	env.ReleaseTag = os.Getenv(EnvReleaseTag)
 
 	env.SaaSAPIURL = strings.TrimRight(env.Settings.SaaSAPIURL, "/")
+	if env.SaaSAPIURL == "" && core != nil {
+		env.SaaSAPIURL = strings.TrimRight(core.SaaSAPIURL, "/")
+	}
 	if env.SaaSAPIURL == "" && env.UAT.Core.FQDN != "" {
 		env.SaaSAPIURL = "https://" + env.UAT.Core.FQDN
 	}
@@ -459,9 +524,16 @@ func (e *Env) loadTenants() error {
 			e.tenantIDs[n] = id
 		}
 	}
+	if e.Core != nil {
+		for key, id := range e.Core.Tenants {
+			if n, err := strconv.Atoi(key); err == nil && id != "" && e.tenantIDs[n] == "" {
+				e.tenantIDs[n] = id
+			}
+		}
+	}
 	for _, n := range []int{1, 2} {
 		if e.tenantIDs[n] == "" {
-			return fmt.Errorf("harness: no tenant ID for tenant %d: set tenants.%d.tenant_id in keycloak.json or %q in tenants.json", n, n, strconv.Itoa(n))
+			return fmt.Errorf("harness: no tenant ID for tenant %d: set tenants.%d.tenant_id in keycloak.json, %q in tenants.json, or bind it with bind-tenant.sh (core.json's tenants)", n, n, strconv.Itoa(n))
 		}
 	}
 	return nil

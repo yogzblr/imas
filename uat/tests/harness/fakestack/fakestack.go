@@ -116,7 +116,7 @@ type tenantRec struct {
 
 // New starts a stack on a TLS httptest server. Tenants 1 and 2 exist and
 // are active; each has an admin user (both recipe roles) and a read only
-// user, "t<n>-admin" and "t<n>-ro", with password "pw".
+// user, "t<n>-admin" and "t<n>-reader" (UAT.3b's names), with password "pw".
 func New() *Stack {
 	s := &Stack{
 		signKey: random(32), tenants: map[string]*tenantRec{}, users: map[string]*user{},
@@ -128,7 +128,7 @@ func New() *Stack {
 		id := TenantID(n)
 		s.tenants[id] = &tenantRec{name: fmt.Sprintf("uat-%d", n), status: "active"}
 		s.users[fmt.Sprintf("t%d-admin", n)] = &user{id: newID("u"), password: "pw", tenantID: id, roles: []string{ReadRole, WriteRole}}
-		s.users[fmt.Sprintf("t%d-ro", n)] = &user{id: newID("u"), password: "pw", tenantID: id, roles: []string{ReadRole}}
+		s.users[fmt.Sprintf("t%d-reader", n)] = &user{id: newID("u"), password: "pw", tenantID: id, roles: []string{ReadRole}}
 	}
 	s.Server = httptest.NewTLSServer(http.HandlerFunc(s.serve))
 	return s

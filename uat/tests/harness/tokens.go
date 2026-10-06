@@ -29,7 +29,7 @@ const (
 
 // ErrNoKeycloakAdmin is returned by ScratchUser when keycloak.json has no
 // admin identity.
-var ErrNoKeycloakAdmin = errors.New("keycloak.json has no admin identity, so no user can be made for a tenant created during the run")
+var ErrNoKeycloakAdmin = errors.New("no Keycloak admin REST identity (keycloak.json's admin; UAT.3b's edge doesn't route the admin API, and bind-tenant.sh binds only tenants 1 and 2), so no user can be mapped to a tenant created during the run")
 
 // Tokens gets Keycloak access tokens. Tokens are cached per user and
 // client until 30 seconds before they expire. Safe for concurrent use.
@@ -57,6 +57,14 @@ func NewTokens(cfg KeycloakConfig, hc *http.Client) (*Tokens, error) {
 		return nil, err
 	}
 	return &Tokens{cfg: cfg, http: hc, base: base, realm: realm, now: time.Now, cache: map[string]cachedToken{}}, nil
+}
+
+// Forget drops every cached token, so the next ones are fetched afresh
+// (after bind-tenant.sh changed the users' organization.id).
+func (k *Tokens) Forget() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.cache = map[string]cachedToken{}
 }
 
 // TenantUser returns the configured user of a tenant and role.

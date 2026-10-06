@@ -31,7 +31,26 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "uat: %v\n", err)
 		os.Exit(1)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+	// Owner decision, 2026-10-06: the harness calls uat/hub/core's
+	// bind-tenant.sh once per tenant, so each tenant's users carry its
+	// organization.id. Then every tenant's token must carry it.
+	bound, skipped, err := fleet.BindTenants(ctx)
+	if err != nil {
+		cancel()
+		fmt.Fprintf(os.Stderr, "uat: binding the tenants: %v\n", err)
+		os.Exit(1)
+	}
+	if skipped != "" {
+		fmt.Fprintf(os.Stderr, "uat: %s; checking the tenants are bound already\n", skipped)
+	} else {
+		fmt.Fprintf(os.Stderr, "uat: bind-tenant.sh ran for tenants %v (the others were bound already)\n", bound)
+	}
+	if err := fleet.CheckTenantClaims(ctx); err != nil {
+		cancel()
+		fmt.Fprintf(os.Stderr, "uat: %v\n", err)
+		os.Exit(1)
+	}
 	earlyToken, err = fleet.Tokens.Fresh(ctx, 1, harness.RoleAdmin)
 	cancel()
 	if err != nil {
