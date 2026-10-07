@@ -2,7 +2,6 @@ package ingredients
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -245,7 +244,7 @@ func Replay(t testing.TB, o *Outcome) {
 		case "skip":
 			t.Skip(l.Text)
 		default:
-			t.Error(fmt.Sprintf("unknown outcome line %q: %s", l.Kind, l.Text))
+			t.Errorf("unknown outcome line %q: %s", l.Kind, l.Text)
 		}
 	}
 }
