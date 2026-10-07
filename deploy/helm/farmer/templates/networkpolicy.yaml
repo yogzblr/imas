@@ -33,13 +33,7 @@ spec:
       ports:
         - { protocol: TCP, port: {{ .Values.farmer.apiPort }} }
   egress:
-    - to:
-        - namespaceSelector:
-            {{- toYaml $np.dmz.namespaceSelector | nindent 12 }}
-          podSelector:
-            {{- toYaml $np.dmz.busPodSelector | nindent 12 }}
-      ports:
-        - { protocol: TCP, port: {{ .Values.bus.port }} }
+    {{- include "imas-farmer.busEgress" . | nindent 4 }}
     {{- include "imas-farmer.depEgress" $pxc | nindent 4 }}
     {{- if $hasValkey }}
     {{- include "imas-farmer.depEgress" $valkey | nindent 4 }}
@@ -97,13 +91,7 @@ spec:
         {{- end }}
     {{- end }}
   egress:
-    - to:
-        - namespaceSelector:
-            {{- toYaml $np.dmz.namespaceSelector | nindent 12 }}
-          podSelector:
-            {{- toYaml $np.dmz.busPodSelector | nindent 12 }}
-      ports:
-        - { protocol: TCP, port: {{ .Values.bus.port }} }
+    {{- include "imas-farmer.busEgress" . | nindent 4 }}
     {{- include "imas-farmer.depEgress" $pxc | nindent 4 }}
     {{- if $hasValkey }}
     {{- include "imas-farmer.depEgress" $valkey | nindent 4 }}

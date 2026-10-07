@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Stub gh for uat/scripts/tests/scripts_test.sh: only `gh api` on the tag and
+# release endpoints. $STUB_STATE/tags lists existing tags, one per line;
+# $STUB_STATE/releases has "<tag> <draft>" lines.
+set -u
+echo "gh $*" >>"$STUB_STATE/calls.log"
+[ "$1" = api ] || { echo "stub gh: unexpected call: $*" >&2; exit 99; }
+path=$2
+case "$path" in
+  repos/*/git/ref/tags/*)
+    tag=${path##*/git/ref/tags/}
+    grep -qxF -- "$tag" "$STUB_STATE/tags" 2>/dev/null || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+    echo "refs/tags/$tag"
+    ;;
+  repos/*/releases/tags/*)
+    tag=${path##*/releases/tags/}
+    line=$(grep -E "^$(printf '%s' "$tag" | sed 's/[.]/\\./g') " "$STUB_STATE/releases" 2>/dev/null | head -n 1)
+    [ -n "$line" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+    echo "${line#* }"
+    ;;
+  *) echo "stub gh: unexpected path $path" >&2; exit 99 ;;
+esac

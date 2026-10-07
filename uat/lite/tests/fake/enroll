@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Stand-in for uat/enroll/enroll.sh (uat/lite tests): logs its arguments and
+# writes tenants.json and sprouts.json into --state, in uat/enroll's shapes,
+# for every sprout of --uat.
+set -euo pipefail
+printf 'enroll %s\n' "$*" >>"$STUB_LOG"
+[[ -z ${STUB_FAIL_ENROLL:-} ]] || exit 1
+uat="" state=""
+while (($#)); do
+	case $1 in
+	--uat) uat=$2 && shift 2 ;;
+	--state) state=$2 && shift 2 ;;
+	*) shift ;;
+	esac
+done
+mkdir -p "$state"
+echo '{"1": {"tenant_id": "t_aaaaaaaaaaaaaaaa", "name": "uat-1", "status": "active"}, "2": {"tenant_id": "t_bbbbbbbbbbbbbbbb", "name": "uat-2", "status": "active"}}' >"$state/tenants.json"
+jq '. as $u | $u.sprouts | with_entries(.value = {sprout_id: ((.key | sub("^t[12]-"; "")) + "-01"), asset_id: ("uat-" + $u.run_id + "-" + .key)})' \
+	"$uat" >"$state/sprouts.json"

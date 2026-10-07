@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Test stub for kubectl (uat/lite tests). Logs each call as
+# "kubectl <hub> <args>" to $STUB_LOG, the hub being the kubeconfig's
+# basename without .kubeconfig. Keeps each hub's CoreDNS ConfigMap and what
+# was applied under $STUB_STATE/kube. Knobs:
+#   STUB_NO_DEFAULT_SC=1          no default StorageClass
+#   STUB_APISERVER_ARGS           the API server's flags (default the DMZ
+#                                 range --service-node-port-range=8442-8443)
+set -euo pipefail
+s="$STUB_STATE/kube"
+mkdir -p "$s"
+hub=none
+args=()
+while (($#)); do
+	case $1 in
+	--kubeconfig) hub=$(basename "$2" .kubeconfig) && shift 2 ;;
+	-n) shift 2 ;;
+	*) args+=("$1") && shift ;;
+	esac
+done
+printf 'kubectl %s %s\n' "$hub" "${args[*]}" >>"$STUB_LOG"
+
+coredns="$s/$hub-coredns.json"
+if [[ ! -f $coredns ]]; then
+	jq -n '{apiVersion: "v1", kind: "ConfigMap", metadata: {name: "coredns", namespace: "kube-system"},
+		data: {Corefile: ".:53 {\n    errors\n    health {\n       lameduck 5s\n    }\n    ready\n    kubernetes cluster.local in-addr.arpa ip6.arpa {\n       pods insecure\n       fallthrough in-addr.arpa ip6.arpa\n       ttl 30\n    }\n    prometheus :9153\n    forward . /etc/resolv.conf {\n       max_concurrent 1000\n    }\n    cache 30\n    loop\n    reload\n    loadbalance\n}\n"}}' >"$coredns"
+fi
+
+case "${args[0]:-} ${args[1]:-}" in
+"get storageclass")
+	if [[ -n ${STUB_NO_DEFAULT_SC:-} ]]; then
+		echo '{"items": [{"metadata": {"name": "standard"}}]}'
+	else
+		echo '{"items": [{"metadata": {"name": "standard", "annotations": {"storageclass.kubernetes.io/is-default-class": "true"}}}]}'
+	fi
+	;;
+"get pods")
+	jq -n --arg a "${STUB_APISERVER_ARGS---service-node-port-range=8442-8443}" \
+		'{items: [{spec: {containers: [{command: (["kube-apiserver", "--secure-port=6443"] + ($a | split(" ") | map(select(. != ""))))}]}}]}'
+	;;
+"get configmap")
+	cat "$coredns"
+	;;
+"replace -f")
+	in=$(cat)
+	if [[ $(jq -r '.metadata.name' <<<"$in") == coredns ]]; then
+		printf '%s\n' "$in" >"$coredns"
+	fi
+	;;
+"create secret")
+	cert="" key=""
+	for a in "${args[@]}"; do
+		case $a in
+		--cert=*) cert=${a#--cert=} ;;
+		--key=*) key=${a#--key=} ;;
+		esac
+	done
+	jq -n --arg c "$(base64 -w0 <"$cert")" --arg k "$(base64 -w0 <"$key")" \
+		'{apiVersion: "v1", kind: "Secret", type: "kubernetes.io/tls", metadata: {name: "imas-uat-ca"}, data: {"tls.crt": $c, "tls.key": $k}}'
+	;;
+apply\ *)
+	n=$(find "$s" -name "$hub-applied-*" | wc -l)
+	out="$s/$hub-applied-$((n + 1))"
+	file=""
+	for ((i = 0; i < ${#args[@]}; i++)); do
+		[[ ${args[i]} != -f ]] || file=${args[i + 1]}
+	done
+	if [[ $file == - ]]; then cat >"$out"; else cp "$file" "$out"; fi
+	;;
+*)
+	# wait, rollout status/restart, version: succeed.
+	:
+	;;
+esac

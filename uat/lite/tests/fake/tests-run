@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Stand-in for uat/tests/run.sh (uat/lite tests): logs its arguments and the
+# IMAS_UAT_* environment, writes a summary.txt in uatreport's format into
+# $IMAS_UAT_REPORT_DIR ($STUB_SUMMARY if set, else a canned one) and exits
+# $STUB_TESTS_RC (default 0).
+set -euo pipefail
+printf 'tests-run %s\n' "$*" >>"$STUB_LOG"
+printf 'tests-env dir=%s vmctl=%s release=%s kube=%s endpoints=%s\n' "$IMAS_UAT_DIR" "$IMAS_UAT_VMCTL" \
+	"$IMAS_UAT_RELEASE_TAG" "$IMAS_UAT_CORE_KUBECONFIG" "$IMAS_UAT_ENDPOINTS" >>"$STUB_LOG"
+mkdir -p "$IMAS_UAT_REPORT_DIR"
+if [[ -n ${STUB_SUMMARY:-} ]]; then
+	cp "$STUB_SUMMARY" "$IMAS_UAT_REPORT_DIR/summary.txt"
+else
+	cat >"$IMAS_UAT_REPORT_DIR/summary.txt" <<SUM
+UAT summary, tier $1
+STATUS ID                     OS       TENANT  SECONDS  DETAIL
+PASS   T1                     -        -           1.0  
+PASS   C1                     ubuntu   1           4.2  
+PASS   C1                     alma     1           4.1  
+PASS   C1                     ubuntu   2           4.0  
+PASS   C1                     alma     2           3.9  
+PASS   S2                     ubuntu   -           9.0  
+SKIP   X5                     -        -           0.0  a plaintext cmd.run or cook can only reach a sprout through the bus
+
+Skipped (1), with their reasons:
+  X5 os=- tenant=-: a plaintext cmd.run or cook can only reach a sprout through the bus
+
+lines: 6 pass, 0 fail, 1 skip; missing scenarios: 0; top-level tests run: 4
+RESULT: PASS
+SUM
+fi
+cat "$IMAS_UAT_REPORT_DIR/summary.txt"
+exit "${STUB_TESTS_RC:-0}"

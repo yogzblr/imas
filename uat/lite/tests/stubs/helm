@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Test stub for helm (uat/lite tests): up.sh only checks it is installed.
+printf 'helm %s\n' "$*" >>"$STUB_LOG"
+echo 'version.BuildInfo{Version:"v3.16.0"}'

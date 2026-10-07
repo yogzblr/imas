@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Test stub for kind (uat/lite tests). Logs every call (with
+# KIND_EXPERIMENTAL_DOCKER_NETWORK) to $STUB_LOG. A created cluster is a
+# marker under $STUB_STATE/kind and a node container in the docker stub's
+# state, on the network kind was told to use, at .130 and up of its subnet,
+# with the extraPortMappings of the config as port bindings.
+set -euo pipefail
+k="$STUB_STATE/kind"
+d="$STUB_STATE/docker"
+mkdir -p "$k" "$d/containers"
+printf 'kind %s [KIND_EXPERIMENTAL_DOCKER_NETWORK=%s]\n' "$*" "${KIND_EXPERIMENTAL_DOCKER_NETWORK:-}" >>"$STUB_LOG"
+
+kubeconfig() {
+	cat <<KC
+apiVersion: v1
+kind: Config
+clusters:
+  - cluster:
+      server: https://127.0.0.1:$(cat "$k/$1")
+    name: kind-$1
+KC
+}
+
+case "${1:-} ${2:-}" in
+"version ")
+	echo "kind ${STUB_KIND_VERSION:-v0.30.0} go1.24.0 linux/amd64"
+	;;
+"get clusters")
+	for f in "$k"/*; do
+		[[ -f $f && $f != *.config ]] && basename "$f"
+	done
+	exit 0
+	;;
+"get kubeconfig")
+	[[ $3 == --name && -f $k/$4 ]] || exit 1
+	kubeconfig "$4"
+	;;
+"create cluster")
+	shift 2
+	name="" config="" kc=""
+	while (($#)); do
+		case $1 in
+		--name) name=$2 && shift 2 ;;
+		--config) config=$2 && shift 2 ;;
+		--kubeconfig) kc=$2 && shift 2 ;;
+		--wait) shift 2 ;;
+		*) echo "stub kind: unexpected $1" >&2 && exit 1 ;;
+		esac
+	done
+	[[ -z ${STUB_KIND_CREATE_FAIL:-} ]] || exit 1
+	net=${KIND_EXPERIMENTAL_DOCKER_NETWORK:-kind}
+	nf="$d/networks/$net.json"
+	[[ -f $nf ]] || { echo "stub kind: no network $net" >&2; exit 1; }
+	n=$(find "$k" -maxdepth 1 -type f ! -name '*.config' | wc -l)
+	prefix=$(jq -r '.IPAM.Config[0].Subnet | sub("\\.0/24$"; "")' "$nf")
+	cp "$config" "$k/$name.config"
+	echo $((40001 + n)) >"$k/$name"
+	ports=$(awk '/hostPort:/ {print $2}' "$config" | jq -R . | jq -s 'map({key: (. + "/tcp"), value: [{HostPort: .}]}) | from_entries')
+	jq -n --arg n "$name-control-plane" --arg net "$net" --arg ip "$prefix.$((130 + n))" --arg c "$name" --argjson pb "$ports" '{
+		Name: ("/" + $n), Config: {Hostname: $n, Labels: {"io.x-k8s.kind.cluster": $c}},
+		State: {Running: true}, HostConfig: {PortBindings: $pb},
+		NetworkSettings: {Networks: {($net): {IPAddress: $ip}}}}' >"$d/containers/$name-control-plane.json"
+	[[ -z $kc ]] || kubeconfig "$name" >"$kc"
+	;;
+"delete cluster")
+	[[ $3 == --name ]] || exit 1
+	rm -f "$k/$4" "$k/$4.config" "$d/containers/$4-control-plane.json"
+	;;
+*)
+	echo "stub kind: unexpected $*" >&2
+	exit 1
+	;;
+esac

@@ -34,6 +34,14 @@ silently editing a reviewed policy.
 {{- if and $bs.farmerbus.enabled (not $bs.farmerbus.serviceAccountName) -}}
 {{- fail "openbaoBootstrap.farmerbus.serviceAccountName is required: the nats chart's bus ServiceAccount (<release>-nats-bus)" -}}
 {{- end -}}
+{{- if and $bs.farmerbus.enabled .Values.bus.host -}}
+{{- if not $bs.farmerbus.allowedNames -}}
+{{- fail (printf "openbaoBootstrap.farmerbus.allowedNames is required with bus.host: its default is the in-cluster bus Service's names, and the bus certificate must carry bus.host (%s), which farmer and saasapi dial. List every name the bus certificate carries, bus.host among them." .Values.bus.host) -}}
+{{- end -}}
+{{- if not .Values.bus.namespace -}}
+{{- fail "bus.namespace is required with openbaoBootstrap.farmerbus.enabled: the imas-farmerbus Kubernetes auth role binds the bus ServiceAccount in that namespace" -}}
+{{- end -}}
+{{- end -}}
 {{- if not $bs.tokenSecretName }}
 # The dev server's root token, which is already in values
 # (openbao.server.dev.devRootToken). Eval only.

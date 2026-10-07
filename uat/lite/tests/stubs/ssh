@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Test stub for ssh (uat/lite tests): logs the call and runs the remote
+# command (the last argument) locally with bash.
+printf 'ssh %s\n' "$*" >>"$STUB_LOG"
+[[ -z ${STUB_SSH_FAIL:-} ]] || exit 255
+exec bash -c "${*: -1}" </dev/null

@@ -1,0 +1,424 @@
+name: UAT gate
+
+# The Azure UAT gate (docs/claude-code-parallel-build-plan.md, section 4h;
+# uat/README.md). FLAG FOR SECURITY REVIEW: this workflow holds Azure
+# credentials (GitHub OIDC, Contributor on the UAT subscription).
+#
+# One run builds one environment from the published release named by
+# release_tag, tests it and tears it down:
+#   tofu apply (uat/tofu) -> Bastion tunnels (uat/access) -> k0s on both hubs
+#   (uat/k0s) -> core hub (uat/hub/core) -> DMZ hub (uat/hub/dmz) -> tenants
+#   and sprouts (uat/enroll) -> tests (uat/tests/run.sh) -> close tunnels ->
+#   upload the report -> destroy (uat/tofu/destroy.sh) -> verify teardown.
+# Core is installed before the DMZ: the bus needs core's seeds when it starts
+# (owner decision, 2026-10-06).
+#
+# By hand only (workflow_dispatch). There is deliberately no trigger on a
+# published release or on a schedule: the owner adds one once the gate is
+# green. The hourly janitor (uat-janitor.yml) deletes any run whose destroy
+# did not happen, after its expires_at tag.
+#
+# Needs, in the GitHub environment "uat" (required reviewer, deployment
+# branch main):
+#   variable AZURE_CLIENT_ID        the imas-uat-github application (no secret:
+#   variable AZURE_TENANT_ID        login is by OIDC with a federated credential
+#   variable AZURE_SUBSCRIPTION_ID  for repo:yogzblr/imas:environment:uat)
+#   variable UAT_TFSTATE_STORAGE_ACCOUNT  optional: the state account the
+#                                   uat/tofu/bootstrap stack made; looked up by
+#                                   its tag in imas-uat-state when unset
+# The "Check inputs and variables" step fails first, naming whatever is
+# missing. Nothing that holds a credential is uploaded: the SSH key, the WinRM
+# password, the kubeconfigs, OpenBao's unseal keys and root token, the seeds
+# and the enrolment keys stay on the runner, which is discarded with the job.
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release to test: vX.Y.Z or vX.Y.Z-rc.N, an existing tag with a published release"
+        required: true
+        type: string
+      region:
+        description: "Azure region (sizes and quota confirmed there)"
+        required: false
+        default: centralindia
+        type: string
+      keep_hours:
+        description: "Keep the environment this many hours after the run (0 destroys it at the end; at most 168)"
+        required: false
+        default: 0
+        type: number
+      tier:
+        description: "Test tier"
+        required: false
+        default: all
+        type: choice
+        options: [all, smoke, core, resilience, ingredients, lifecycle]
+      upgrade_from_tag:
+        description: "Earlier release for scenario L4 (package upgrade); empty skips L4"
+        required: false
+        default: ""
+        type: string
+      scenarios:
+        description: "Optional scenario ids of the tier, separated by spaces or commas (e.g. C1 X4)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  # GitHub OIDC for azure/login and OpenTofu's azurerm provider and backend.
+  id-token: write
+
+# One run per release at a time. Runs of different releases can overlap; each
+# needs the full vCPU quota (18) in the region.
+concurrency:
+  group: uat-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  uat:
+    if: github.repository == 'yogzblr/imas'
+    environment: uat
+    runs-on: ubuntu-latest
+    # GitHub hosted jobs stop at 6 hours. The run's expires_at is set past
+    # that (check-inputs.sh, run_budget_hours), so the janitor never deletes a
+    # live run.
+    timeout-minutes: 350
+    env:
+      # OpenTofu (azurerm provider and backend) logs in by OIDC on its own,
+      # with the job's ID token; nothing here is a secret.
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TFSTATE_RESOURCE_GROUP: imas-uat-state
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Every input and variable, checked before anything is created. Inputs
+      # reach scripts through env only, never through ${{ }} in a script.
+      - name: Check inputs and variables
+        id: inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          REGION: ${{ inputs.region }}
+          KEEP_HOURS: ${{ inputs.keep_hours }}
+          TIER: ${{ inputs.tier }}
+          UPGRADE_FROM_TAG: ${{ inputs.upgrade_from_tag }}
+          SCENARIOS: ${{ inputs.scenarios }}
+        run: uat/scripts/check-inputs.sh
+
+      # The run's working directories. STATE holds the run's files, several of
+      # them credentials (see collect-artifacts.sh); SECRETS holds the tofu
+      # credentials. Both are 0700 and never uploaded.
+      - name: Prepare directories
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/uat-state" "$RUNNER_TEMP/uat-secrets" "$RUNNER_TEMP/bin" "$RUNNER_TEMP/uat-artifacts"
+          {
+            echo "STATE=$RUNNER_TEMP/uat-state"
+            echo "SECRETS=$RUNNER_TEMP/uat-secrets"
+            echo "ARTIFACTS=$RUNNER_TEMP/uat-artifacts"
+          } >>"$GITHUB_ENV"
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # The version uat/tofu was validated with. No wrapper: tofu output -raw
+      # must print the bare value.
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.11.5
+          tofu_wrapper: false
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v4.3.0
+
+      # k0sctl and kubectl at the versions and checksums uat/k0s pins;
+      # Ansible for uat/enroll (pywinrm for the Windows sprouts).
+      - name: Install k0sctl, kubectl and Ansible
+        run: |
+          set -euo pipefail
+          uat/k0s/install-tools.sh "$RUNNER_TEMP/bin"
+          python -m pip install --upgrade pip
+          pip install 'ansible-core>=2.15' pywinrm
+          ansible-galaxy collection install -r uat/enroll/requirements.yml
+          tofu version
+          helm version
+          ansible --version
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # The only internet source the run's network rules let in.
+      - name: Find the runner's public address
+        id: runner
+        run: |
+          set -euo pipefail
+          cidr=$(uat/scripts/runner-cidr.sh)
+          echo "runner_cidr=$cidr" >>"$GITHUB_OUTPUT"
+          echo "runner_cidr $cidr"
+
+      - name: Generate run_id
+        id: runid
+        env:
+          RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
+          REGION: ${{ steps.inputs.outputs.region }}
+          TIER: ${{ steps.inputs.outputs.tier }}
+          KEEP_HOURS: ${{ steps.inputs.outputs.keep_hours }}
+          RUN_BUDGET_HOURS: ${{ steps.inputs.outputs.run_budget_hours }}
+          UPGRADE_FROM_TAG: ${{ steps.inputs.outputs.upgrade_from_tag }}
+          SCENARIOS: ${{ steps.inputs.outputs.scenarios }}
+          RUNNER_CIDR: ${{ steps.runner.outputs.runner_cidr }}
+        run: |
+          set -euo pipefail
+          id=$(uat/scripts/run-id.sh)
+          echo "run_id=$id" >>"$GITHUB_OUTPUT"
+          echo "RUN_ID=$id" >>"$GITHUB_ENV"
+          jq -n --arg run_id "$id" --arg release_tag "$RELEASE_TAG" --arg region "$REGION" \
+            --arg tier "$TIER" --argjson keep_hours "$KEEP_HOURS" --argjson run_budget_hours "$RUN_BUDGET_HOURS" \
+            --arg upgrade_from_tag "$UPGRADE_FROM_TAG" \
+            --arg scenarios "$SCENARIOS" --arg runner_cidr "$RUNNER_CIDR" \
+            --arg github_run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" \
+            --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '$ARGS.named' >"$STATE/run.json"
+          echo "run_id $id: resource group imas-uat-$id"
+
+      # State goes to the bootstrap storage account, one blob per run, so a
+      # kept run can be destroyed later by hand or by the janitor.
+      - name: tofu apply (uat/tofu)
+        id: apply
+        env:
+          TFSTATE_STORAGE_ACCOUNT: ${{ vars.UAT_TFSTATE_STORAGE_ACCOUNT }}
+          TF_VAR_release_tag: ${{ steps.inputs.outputs.release_tag }}
+          TF_VAR_region: ${{ steps.inputs.outputs.region }}
+          TF_VAR_keep_hours: ${{ steps.inputs.outputs.keep_hours }}
+          TF_VAR_run_budget_hours: ${{ steps.inputs.outputs.run_budget_hours }}
+          TF_VAR_runner_cidr: ${{ steps.runner.outputs.runner_cidr }}
+        run: |
+          set -euo pipefail
+          account=${TFSTATE_STORAGE_ACCOUNT:-}
+          if [ -z "$account" ]; then
+            account=$(az storage account list --resource-group "$TFSTATE_RESOURCE_GROUP" \
+              --query "[?tags.purpose=='imas-uat-state'].name | [0]" -o tsv)
+          fi
+          if [ -z "$account" ]; then
+            echo "::error::no tofu state storage account in $TFSTATE_RESOURCE_GROUP: apply uat/tofu/bootstrap once (uat/README.md)"
+            exit 1
+          fi
+          echo "TFSTATE_STORAGE_ACCOUNT=$account" >>"$GITHUB_ENV"
+          export TF_VAR_run_id="$RUN_ID"
+          tofu -chdir=uat/tofu init -input=false \
+            -backend-config="resource_group_name=$TFSTATE_RESOURCE_GROUP" \
+            -backend-config="storage_account_name=$account" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=imas-uat/$RUN_ID.tfstate"
+          tofu -chdir=uat/tofu apply -auto-approve -input=false -no-color
+          tofu -chdir=uat/tofu output -json uat >"$STATE/uat.json"
+          jq -e --arg rg "imas-uat-$RUN_ID" '.resource_group == $rg' "$STATE/uat.json" >/dev/null
+
+      # The per-run credentials, into 0600 files that are never uploaded. The
+      # password is masked before it is used anywhere.
+      - name: Fetch the run's credentials
+        run: |
+          set -euo pipefail
+          umask 077
+          tofu -chdir=uat/tofu output -raw ssh_private_key >"$SECRETS/ssh_key"
+          while IFS= read -r line; do
+            case "$line" in -----*) ;; ?????*) echo "::add-mask::$line" ;; esac
+          done <"$SECRETS/ssh_key"
+          pw=$(tofu -chdir=uat/tofu output -raw windows_admin_password)
+          echo "::add-mask::$pw"
+          printf '%s' "$pw" >"$SECRETS/winrm_password"
+          unset pw
+
+      - name: Azure CLI extensions (bastion, ssh)
+        run: |
+          set -euo pipefail
+          az extension add --name bastion --upgrade --yes
+          az extension add --name ssh --upgrade --yes
+          az extension list --query "[].{name:name, version:version}" -o table
+
+      - name: Open the Bastion tunnels (uat/access)
+        id: tunnels
+        run: uat/access/tunnels.sh open "$STATE/uat.json" "$STATE/access"
+
+      - name: k0s on both hubs (uat/k0s)
+        run: |
+          uat/k0s/bootstrap.sh --uat "$STATE/uat.json" --access "$STATE/access/access.json" \
+            --ssh-key "$SECRETS/ssh_key" --out "$STATE/k0s"
+
+      - name: Core hub (uat/hub/core)
+        env:
+          RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
+        run: |
+          uat/hub/core/install.sh "$STATE/k0s/core.kubeconfig" "$STATE/k0s/endpoints.json" \
+            "$STATE/hub" "$RELEASE_TAG"
+
+      # The bus gets core's seeds straight from core's Secret.
+      - name: DMZ hub (uat/hub/dmz)
+        env:
+          RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
+        run: |
+          uat/hub/dmz/install.sh --kubeconfig "$STATE/k0s/dmz.kubeconfig" \
+            --endpoints "$STATE/k0s/endpoints.json" --release-tag "$RELEASE_TAG" \
+            --seeds-from-kubeconfig "$STATE/k0s/core.kubeconfig" --workdir "$STATE/dmz"
+
+      # Before enrolment: its rate limit check empties /v1/enroll's bucket and
+      # waits for the refill.
+      - name: DMZ check
+        run: |
+          uat/hub/dmz/check.sh --endpoints "$STATE/k0s/endpoints.json" \
+            --ca-file "$STATE/k0s/uat-ca.crt" --kubeconfig "$STATE/k0s/dmz.kubeconfig"
+
+      - name: Tenants and enrolment (uat/enroll)
+        env:
+          RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
+        run: |
+          uat/enroll/enroll.sh --uat "$STATE/uat.json" --access "$STATE/access/access.json" \
+            --state "$STATE/enroll" --release-tag "$RELEASE_TAG" \
+            --ssh-key "$SECRETS/ssh_key" --winrm-password-file "$SECRETS/winrm_password" \
+            --core-state "$STATE/hub" --core-kubeconfig "$STATE/k0s/core.kubeconfig" \
+            --endpoints "$STATE/k0s/endpoints.json"
+
+      - name: Test material
+        run: |
+          uat/scripts/material.sh "$STATE/uat.json" "$STATE/k0s/endpoints.json" \
+            "$STATE/enroll" "$STATE/hub"
+
+      # vmctl.sh (reboots, run-command) calls Azure during the tests, possibly
+      # hours after the first login: log in again for a fresh token.
+      - name: Azure login again (before the tests)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # go test's own timeout stays under the step's, so a slow run still
+      # writes its report.
+      - name: Tests (uat/tests/run.sh)
+        id: tests
+        timeout-minutes: 180
+        env:
+          TIER: ${{ steps.inputs.outputs.tier }}
+          SCENARIOS: ${{ steps.inputs.outputs.scenarios }}
+          IMAS_UAT_RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
+          # Scenario L4 (UAT.7): the earlier release to upgrade from; empty skips L4.
+          IMAS_UAT_UPGRADE_FROM_TAG: ${{ steps.inputs.outputs.upgrade_from_tag }}
+        run: |
+          set -euo pipefail
+          export IMAS_UAT_DIR="$STATE/hub"
+          export IMAS_UAT_REPORT_DIR="$STATE/report"
+          export IMAS_UAT_CORE_KUBECONFIG="$STATE/k0s/core.kubeconfig"
+          export IMAS_UAT_ENDPOINTS="$STATE/k0s/endpoints.json"
+          if [ "$TIER" = smoke ]; then export IMAS_UAT_TIMEOUT=45m; else export IMAS_UAT_TIMEOUT=165m; fi
+          read -r -a ids <<<"$SCENARIOS"
+          uat/tests/run.sh "$TIER" "${ids[@]}"
+
+      - name: Close the Bastion tunnels
+        if: always() && steps.tunnels.outcome != 'skipped'
+        run: uat/access/tunnels.sh close "$STATE/access"
+
+      # Allowlisted, non-secret files only, scanned for anything that looks
+      # like a credential (a match fails this step and is not uploaded).
+      - name: Collect the report and outputs
+        id: collect
+        if: always() && steps.runid.outcome == 'success'
+        run: uat/scripts/collect-artifacts.sh "$STATE" "$ARTIFACTS"
+
+      - name: Upload the test report
+        if: always() && steps.collect.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: uat-report-${{ steps.runid.outputs.run_id }}
+          path: ${{ runner.temp }}/uat-artifacts/report
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload the outputs (no credentials)
+        if: always() && steps.collect.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: uat-outputs-${{ steps.runid.outputs.run_id }}
+          path: ${{ runner.temp }}/uat-artifacts/outputs
+          if-no-files-found: warn
+          retention-days: 30
+
+      # Teardown, whatever happened above, unless keep_hours is above zero.
+      - name: Azure login again (before the destroy)
+        if: always() && steps.apply.outcome != 'skipped' && steps.inputs.outputs.destroy == 'true'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Destroy (uat/tofu/destroy.sh)
+        id: destroy
+        if: always() && steps.apply.outcome != 'skipped' && steps.inputs.outputs.destroy == 'true'
+        env:
+          TF_VAR_release_tag: ${{ steps.inputs.outputs.release_tag }}
+          TF_VAR_region: ${{ steps.inputs.outputs.region }}
+          TF_VAR_runner_cidr: ${{ steps.runner.outputs.runner_cidr }}
+        run: uat/tofu/destroy.sh "$RUN_ID"
+
+      # Independent of destroy.sh's own check: the job fails if the group or
+      # anything tagged with the run_id is left.
+      - name: Verify teardown
+        if: always() && steps.destroy.outcome != 'skipped'
+        run: uat/scripts/verify-teardown.sh "$RUN_ID"
+
+      - name: Kept environment
+        if: always() && steps.apply.outcome != 'skipped' && steps.inputs.outputs.destroy == 'false'
+        run: |
+          set -euo pipefail
+          expires=$(az group show --name "imas-uat-$RUN_ID" --query tags.expires_at -o tsv 2>/dev/null || echo unknown)
+          {
+            echo "### Environment kept: imas-uat-$RUN_ID"
+            echo
+            echo "Not destroyed (keep_hours > 0). The janitor deletes it after expires_at $expires."
+            echo "Reach it and destroy it early as uat/README.md, 'Keeping an environment', says."
+          } >>"$GITHUB_STEP_SUMMARY"
+          echo "::notice::environment imas-uat-$RUN_ID kept until $expires"
+
+      - name: Summary
+        if: always() && steps.runid.outcome == 'success'
+        env:
+          RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
+          TIER: ${{ steps.inputs.outputs.tier }}
+        run: |
+          {
+            echo "### UAT run $RUN_ID: $RELEASE_TAG, tier $TIER"
+            echo
+            if [ -s "$STATE/report/summary.txt" ]; then
+              echo '```'
+              cat "$STATE/report/summary.txt"
+              echo '```'
+            else
+              echo "No test report: the run stopped before or during the tests (see the failed step)."
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# Test stub for docker (uat/lite tests). Logs every call to $STUB_LOG and
+# keeps containers, networks and images as JSON files under
+# $STUB_STATE/docker. Behaviour knobs:
+#   STUB_DOCKER_OS          docker info's OperatingSystem (default Ubuntu 24.04 LTS)
+#   $STUB_STATE/docker/boot-<name>      answers "starting" that many times
+#                                       to systemctl is-system-running
+#   $STUB_STATE/docker/restart-ip-<name> a restart moves the container to
+#                                       this address
+#   $STUB_STATE/docker/restart-fail     docker restart fails
+set -euo pipefail
+d="$STUB_STATE/docker"
+mkdir -p "$d/containers" "$d/networks" "$d/images"
+printf 'docker %s\n' "$*" >>"$STUB_LOG"
+
+cfile() { printf '%s/containers/%s.json\n' "$d" "$1"; }
+nfile() { printf '%s/networks/%s.json\n' "$d" "$1"; }
+ifile() { printf '%s/images/%s\n' "$d" "$(printf '%s' "$1" | tr '/:' '__')"; }
+set_running() {
+	local f
+	f=$(cfile "$1")
+	jq --argjson r "$2" '.State.Running = $r' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+}
+
+cmd=${1:-}
+shift || true
+case $cmd in
+info)
+	case "${*}" in
+	*OperatingSystem*) echo "${STUB_DOCKER_OS:-Ubuntu 24.04 LTS}" ;;
+	*MemTotal*) echo 17179869184 ;;
+	*) echo "stub docker info" ;;
+	esac
+	;;
+network)
+	sub=$1
+	shift
+	case $sub in
+	inspect)
+		f=$(nfile "$1")
+		if [[ -f $f ]]; then
+			jq -s . "$f"
+		else
+			echo "[]"
+			echo "Error: No such network: $1" >&2
+			exit 1
+		fi
+		;;
+	create)
+		subnet="" range="" gw="" labels='{}'
+		while (($# > 1)); do
+			case $1 in
+			--driver) shift 2 ;;
+			--subnet) subnet=$2 && shift 2 ;;
+			--ip-range) range=$2 && shift 2 ;;
+			--gateway) gw=$2 && shift 2 ;;
+			--label) labels=$(jq --arg k "${2%%=*}" --arg v "${2#*=}" '.[$k] = $v' <<<"$labels") && shift 2 ;;
+			*) echo "stub docker network create: unexpected $1" >&2 && exit 1 ;;
+			esac
+		done
+		jq -n --arg n "$1" --arg s "$subnet" --arg r "$range" --arg g "$gw" --argjson l "$labels" \
+			'{Name: $n, IPAM: {Config: [{Subnet: $s, IPRange: $r, Gateway: $g}]}, Labels: $l, Containers: {}}' >"$(nfile "$1")"
+		echo "netid-$1"
+		;;
+	rm)
+		for c in "$d"/containers/*.json; do
+			[[ -e $c ]] || continue
+			if jq -e --arg n "$1" '.NetworkSettings.Networks | has($n)' "$c" >/dev/null; then
+				echo "Error: network $1 has active endpoints" >&2
+				exit 1
+			fi
+		done
+		rm -f "$(nfile "$1")"
+		;;
+	*) echo "stub docker network: unexpected $sub" >&2 && exit 1 ;;
+	esac
+	;;
+inspect)
+	[[ ${1:-} != --type ]] || shift 2
+	f=$(cfile "$1")
+	if [[ -f $f ]]; then
+		jq -s . "$f"
+	else
+		echo "[]"
+		echo "Error: No such container: $1" >&2
+		exit 1
+	fi
+	;;
+image)
+	sub=$1
+	shift
+	case $sub in
+	inspect) [[ -f $(ifile "$1") ]] || exit 1 ;;
+	rm) rm -f "$(ifile "$1")" ;;
+	*) echo "stub docker image: unexpected $sub" >&2 && exit 1 ;;
+	esac
+	;;
+build)
+	tag=""
+	while (($#)); do
+		case $1 in
+		-t) tag=$2 && shift 2 ;;
+		*) shift ;;
+		esac
+	done
+	touch "$(ifile "$tag")"
+	;;
+run)
+	name="" host="" net="" ip="" image="" labels='{}' hosts='[]' ports='{}' priv=false
+	while (($#)); do
+		case $1 in
+		-d) shift ;;
+		--name) name=$2 && shift 2 ;;
+		--hostname) host=$2 && shift 2 ;;
+		--network) net=$2 && shift 2 ;;
+		--ip) ip=$2 && shift 2 ;;
+		--privileged) priv=true && shift ;;
+		--cgroupns=*) shift ;;
+		--tmpfs) shift 2 ;;
+		-p)
+			IFS=: read -r hip hport cport <<<"$2"
+			ports=$(jq --arg c "$cport/tcp" --arg i "$hip" --arg p "$hport" '.[$c] = [{HostIp: $i, HostPort: $p}]' <<<"$ports")
+			shift 2
+			;;
+		--add-host) hosts=$(jq --arg h "$2" '. + [$h]' <<<"$hosts") && shift 2 ;;
+		--label) labels=$(jq --arg k "${2%%=*}" --arg v "${2#*=}" '.[$k] = $v' <<<"$labels") && shift 2 ;;
+		-*) echo "stub docker run: unexpected $1" >&2 && exit 1 ;;
+		*) image=$1 && shift ;;
+		esac
+	done
+	[[ -f $(nfile "$net") ]] || {
+		echo "stub docker run: no network $net" >&2
+		exit 125
+	}
+	jq -n --arg n "$name" --arg h "$host" --arg net "$net" --arg ip "$ip" --arg img "$image" \
+		--argjson l "$labels" --argjson eh "$hosts" --argjson pb "$ports" --argjson pr "$priv" '{
+		Name: ("/" + $n), Config: {Hostname: $h, Labels: $l, Image: $img}, State: {Running: true},
+		HostConfig: {ExtraHosts: $eh, PortBindings: $pb, Privileged: $pr},
+		NetworkSettings: {Networks: {($net): {IPAddress: $ip}}}}' >"$(cfile "$name")"
+	echo "cid-$name"
+	;;
+start)
+	[[ -f $(cfile "$1") ]] || exit 1
+	set_running "$1" true
+	;;
+restart)
+	[[ ${1:-} != -t ]] || shift 2
+	[[ -f $(cfile "$1") ]] || exit 1
+	[[ ! -e $d/restart-fail ]] || exit 1
+	set_running "$1" true
+	if [[ -f $d/restart-ip-$1 ]]; then
+		f=$(cfile "$1")
+		jq --arg ip "$(cat "$d/restart-ip-$1")" '.NetworkSettings.Networks[].IPAddress = $ip' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+	fi
+	echo "$1"
+	;;
+rm)
+	[[ ${1:-} != -f ]] || shift
+	rm -f "$(cfile "$1")"
+	;;
+ps)
+	filters=()
+	while (($#)); do
+		case $1 in
+		--filter) filters+=("${2#label=}") && shift 2 ;;
+		*) shift ;;
+		esac
+	done
+	for c in "$d"/containers/*.json; do
+		[[ -e $c ]] || continue
+		match=1
+		for f in "${filters[@]}"; do
+			jq -e --arg k "${f%%=*}" --arg v "${f#*=}" '.Config.Labels[$k] == $v' "$c" >/dev/null || match=0
+		done
+		((match)) && basename "$c" .json
+	done
+	;;
+exec)
+	stdin=0 envs=()
+	while (($#)); do
+		case $1 in
+		-i) stdin=1 && shift ;;
+		-e) envs+=("$2") && shift 2 ;;
+		*) break ;;
+		esac
+	done
+	name=$1
+	shift
+	f=$(cfile "$name")
+	[[ -f $f ]] || exit 1
+	if [[ $(jq -r '.State.Running' "$f") != true ]]; then
+		echo "Error response from daemon: container $name is not running" >&2
+		exit 1
+	fi
+	printf 'docker-exec %s env=[%s] %s\n' "$name" "${envs[*]}" "$*" >>"$STUB_LOG"
+	case "$1 ${2:-}" in
+	"systemctl is-system-running")
+		b="$d/boot-$name"
+		if [[ -s $b ]] && (($(cat "$b") > 0)); then
+			echo $(($(cat "$b") - 1)) >"$b"
+			echo starting
+			exit 1
+		fi
+		echo running
+		;;
+	"kubectl get") exit 0 ;;
+	"sh -c")
+		if [[ ${3:-} == *authorized_keys* ]]; then
+			cat >"$d/authorized_keys-$name"
+		fi
+		;;
+	"bash -c")
+		((stdin)) || exec </dev/null
+		env "${envs[@]}" bash -c "$3"
+		;;
+	*)
+		# systemctl stop|start <service> and the like: logged only.
+		:
+		;;
+	esac
+	;;
+*)
+	echo "stub docker: unexpected command $cmd" >&2
+	exit 1
+	;;
+esac

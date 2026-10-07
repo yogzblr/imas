@@ -159,8 +159,13 @@ spec:
             - name: SAASAPI_JWT_AUDIENCE
               value: {{ $s.jwt.audience | quote }}
             # The same URL as farmer's farmerbusurl. saasapi verifies the
+            {{- if .Values.bus.host }}
+            # bus certificate against its host, bus.host (a SAN the bus
+            # certificate must carry).
+            {{- else }}
             # bus certificate against its host, the Service FQDN (a SAN on
             # the nats chart's default bus certificate).
+            {{- end }}
             - name: SAASAPI_NATS_URL
               value: {{ include "imas-farmer.busURL" . | quote }}
             - name: SAASAPI_NATS_CA_FILE
