@@ -64,7 +64,7 @@ func TestLoadDir(t *testing.T) {
 	if env.InternalAuth != "s3cret" {
 		t.Errorf("internal auth %q", env.InternalAuth)
 	}
-	if env.SaaSAPIURL != "https://uatab12cd-core.centralindia.cloudapp.azure.com" || env.EnvoyURL != "https://uatab12cd-dmz.centralindia.cloudapp.azure.com" {
+	if env.SaaSAPIURL != "https://uatab12cd-core.centralindia.cloudapp.azure.com" || env.EnvoyURL != "https://uatab12cd-dmz.centralindia.cloudapp.azure.com:8443" {
 		t.Errorf("default URLs %s %s", env.SaaSAPIURL, env.EnvoyURL)
 	}
 	// keycloak.json's tenant_id wins over tenants.json; tenants.json fills
@@ -92,8 +92,11 @@ func TestLoadDir(t *testing.T) {
 		t.Errorf("no uat-ca.pem should mean the system roots")
 	}
 	host, port, err := env.SproutEnvoyHostPort()
-	if err != nil || host != "uatab12cd-dmz.centralindia.cloudapp.azure.com" || port != "443" {
-		t.Errorf("envoy %s %s %v", host, port, err)
+	if err != nil || host != "uatab12cd-dmz.centralindia.cloudapp.azure.com" || port != "8443" {
+		t.Errorf("envoy %s %s %v: Envoy is on 8443, not 443", host, port, err)
+	}
+	if env.EnvoyURL != "https://uatab12cd-dmz.centralindia.cloudapp.azure.com:8443" {
+		t.Errorf("default Envoy URL %q, want the DMZ FQDN on 8443", env.EnvoyURL)
 	}
 	if len(env.CoreProbePorts()) == 0 {
 		t.Error("no default core probe ports")
