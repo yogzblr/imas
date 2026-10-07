@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/fang"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+	"github.com/taigrr/jety"
 
 	"github.com/yogzblr/imas/cmd/imas/util"
 	"github.com/yogzblr/imas/internal/api/client"
@@ -120,4 +121,10 @@ func init() {
 // initConfig reads in config file and ENV variables if set.
 func initConfig() {
 	config.LoadConfig("imas")
+	// The config file holds the NKey private key: LoadConfig creates it
+	// 0644 in a 0755 directory, so tighten both before a key is written
+	// (and on every start, for files written by earlier versions).
+	if err := restrictConfig(jety.ConfigFileUsed()); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	}
 }

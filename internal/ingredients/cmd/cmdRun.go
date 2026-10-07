@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -12,12 +13,33 @@ import (
 )
 
 // needsShell reports whether cmd contains shell metacharacters that require
-// interpretation by /bin/sh (pipes, redirects, subshells, quotes, etc.).
-func needsShell(cmd string) bool {
-	return strings.ContainsAny(cmd, "|><$;`\"'&\\") ||
+// interpretation by a shell (pipes, redirects, subshells, quotes, etc.) on
+// this platform.
+func needsShell(cmd string) bool { return needsShellFor(runtime.GOOS, cmd) }
+
+// needsShellFor is needsShell for a given GOOS. A backslash is a shell
+// escape on Unix, but the path separator on Windows, so it doesn't count
+// there.
+func needsShellFor(goos, cmd string) bool {
+	chars := "|><$;`\"'&\\"
+	if goos == "windows" {
+		chars = "|><$;`\"'&"
+	}
+	return strings.ContainsAny(cmd, chars) ||
 		strings.Contains(cmd, "&&") ||
 		strings.Contains(cmd, "||") ||
 		strings.Contains(cmd, "\n")
+}
+
+// shellCommand is the executable and arguments that run cmd through a shell
+// on goos: /bin/sh -c on Unix, and powershell.exe on Windows, which has no
+// /bin/sh (the Windows ingredients already use powershell.exe, and it
+// parses its command line the way Go quotes it).
+func shellCommand(goos, cmd string) (string, []string) {
+	if goos == "windows" {
+		return "powershell.exe", []string{"-NoProfile", "-NonInteractive", "-Command", cmd}
+	}
+	return "/bin/sh", []string{"-c", cmd}
 }
 
 func (c Cmd) run(ctx context.Context, test bool) (cook.Result, error) {
@@ -39,8 +61,7 @@ func (c Cmd) run(ctx context.Context, test bool) (cook.Result, error) {
 	var args []string
 
 	if needsShell(cmd) {
-		executable = "/bin/sh"
-		args = []string{"-c", cmd}
+		executable, args = shellCommand(runtime.GOOS, cmd)
 	} else {
 		splitCmd := strings.Fields(cmd)
 		executable = splitCmd[0]
@@ -121,6 +142,11 @@ func (c Cmd) run(ctx context.Context, test bool) (cook.Result, error) {
 		command.Env = append(command.Env, env...)
 	}
 	if test {
+		// A cmd.run step acts on every cook, so test mode succeeds and
+		// reports the change it would make. A step that isn't Succeeded is
+		// failed by the cook engine, in test mode too.
+		result.Succeeded = true
+		result.Changed = true
 		result.Notes = append(result.Notes,
 			cook.SimpleNote("Command would have been run"))
 		return result, nil
@@ -141,6 +167,8 @@ func (c Cmd) run(ctx context.Context, test bool) (cook.Result, error) {
 	} else {
 		result.Succeeded = true
 		result.Failed = false
+		// The command ran: that is a change, as Salt's cmd.run reports it.
+		result.Changed = true
 	}
 	return result, nil
 }

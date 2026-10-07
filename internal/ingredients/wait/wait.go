@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"runtime"
 	"time"
 
 	"github.com/yogzblr/imas/internal/cook"
@@ -142,12 +143,22 @@ func (w Wait) poll(ctx context.Context, test bool) (cook.Result, error) {
 	}
 }
 
+// shellFor is the executable and arguments that run cmdStr through a shell
+// on goos: sh -c on Unix, and powershell.exe on Windows, which has no sh.
+func shellFor(goos, cmdStr string) (string, []string) {
+	if goos == "windows" {
+		return "powershell.exe", []string{"-NoProfile", "-NonInteractive", "-Command", cmdStr}
+	}
+	return "sh", []string{"-c", cmdStr}
+}
+
 // runsAsExpected runs cmdStr once and reports whether its outcome matches
 // what's being waited for (success, or failure when negate is set). Only a
 // genuine failure to invoke the shell is returned as an error; a nonzero
 // exit is a normal "not yet" result to keep polling on.
 func runsAsExpected(ctx context.Context, cmdStr string, negate bool) (bool, error) {
-	command := exec.CommandContext(ctx, "sh", "-c", cmdStr)
+	exe, args := shellFor(runtime.GOOS, cmdStr)
+	command := exec.CommandContext(ctx, exe, args...)
 	runErr := command.Run()
 	succeeded := runErr == nil
 	if runErr != nil {

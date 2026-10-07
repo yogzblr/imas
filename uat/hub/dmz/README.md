@@ -51,8 +51,9 @@ the tofu `uat` JSON is itself a valid endpoints file. Extra keys are ignored.
 | `core.private_ip` | yes | | Envoy's farmer upstream; the NetworkPolicy peer for core |
 | `core.fqdn` | yes | | checked as a DNS name (unused otherwise) |
 | `core.ports.farmer_api` | no | 5405 | Envoy's farmer upstream port |
-| `cluster_issuer` | no | `imas-uat-ca` | the cert-manager ClusterIssuer of the UAT CA (UAT.2) |
+| `cluster_issuer` (or `ca.cluster_issuer`) | no | `imas-uat-ca` | the cert-manager ClusterIssuer of the UAT CA (UAT.2). `uat/hub/core` spells it `ca.cluster_issuer`; either is read, `cluster_issuer` first |
 | `private_dns_zone` | no | `uat.imas.internal` | the run's private DNS zone (UAT.1's `private_dns_zone`). `dmz.<zone>` and `core.<zone>` are the hubs' private names; see [Private names](#private-names) |
+| `dmz.private_fqdn`, `core.private_fqdn` | no | `dmz.<zone>`, `core.<zone>` | the hubs' private names spelled out, as `uat/hub/core` reads them; an explicit one wins over the zone |
 
 The defaults are the ports in the nats and farmer chart READMEs. The shape is
 this brief's proposal: the contract names the file but does not spell it
@@ -265,11 +266,10 @@ makes, and what `dmz.json` gives it.
    `bus.farmerbusurl`). The name resolves to `dmz.private_ip` inside the
    VNet, and from core's pods if their DNS forwards to the node's resolver.
    farmer and saasapi verify that name; the bus certificate carries it, and
-   the DMZ private IP. How the farmer chart is set to this URL is UAT.3b's:
-   it builds `farmerbusurl` and `SAASAPI_NATS_URL` from `bus.serviceName`,
-   `bus.namespace` and `bus.port` as an in-cluster name (see Open
-   questions). Core's own egress policy needs an `ipBlock` for
-   `dmz.private_ip/32` on 8442, for the same reason as in 2.
+   the DMZ private IP. UAT.3b installs the farmer chart with `bus.host` set to
+   this name (read from the same endpoints file: `dmz.private_fqdn`, else
+   `dmz.<private_dns_zone>`), and with `bus.egressCIDRs` set to
+   `dmz.private_ip/32`, which opens core's egress on 8442.
 4. **Core's connections arrive from `core.private_ip`.** Pod egress leaving
    the core node is source-NATed to the node's address (true of k0s's
    default kube-router and of kind); the bus rule admits that address only.
@@ -379,12 +379,11 @@ and 8443, which depends on UAT.2's range.
 4. **LoadBalancer in UAT.** No load balancer controller is installed on the
    k0s hubs, so `--expose loadbalancer` would wait and fail there; it is
    ready for a cluster that has one.
-5. **`farmerbusurl` on the private name, in the farmer chart.**
-   `deploy/helm/farmer` builds `farmerbusurl` and saasapi's
-   `SAASAPI_NATS_URL` as `tls://<bus.serviceName>.<bus.namespace>.svc.<clusterDomain>:<bus.port>`,
-   so it cannot produce `tls://dmz.uat.imas.internal:8442` from its values.
-   That is for UAT.3b (and possibly a chart change); this side only makes
-   sure the bus certificate carries the name.
+5. **`farmerbusurl` on the private name, in the farmer chart.** Settled by
+   UAT.9: `uat/hub/core` installs the chart with `bus.host` set to the
+   DMZ's private name, so `farmerbusurl` and saasapi's `SAASAPI_NATS_URL` are
+   `tls://dmz.uat.imas.internal:8442`; this side makes sure the bus
+   certificate carries the name. Not run on a cluster.
 6. **Private names from pods.** Envoy dials farmer by IP, so the DMZ needs no
    private name resolution. Core's pods need `dmz.uat.imas.internal` to
    resolve: CoreDNS forwards to the node's resolver by default on k0s, and

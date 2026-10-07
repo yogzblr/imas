@@ -132,14 +132,16 @@ load_endpoints() {
 	CORE_FARMER_PORT=$(ep '.core.ports.farmer_api' 5405)
 	# The private names of the Shared contract (UAT.1's Azure Private DNS
 	# zone, owner decision 2026-10-06); overridable for the local rig.
-	CORE_PRIVATE_FQDN=$(ep '.core.private_fqdn' core.uat.imas.internal)
-	DMZ_PRIVATE_FQDN=$(ep '.dmz.private_fqdn' dmz.uat.imas.internal)
+	# uat/hub/dmz spells them as the zone (private_dns_zone: dmz.<zone>,
+	# core.<zone>); both forms are read, an explicit *.private_fqdn first.
+	PRIVATE_ZONE=$(ep '.private_dns_zone' uat.imas.internal)
+	CORE_PRIVATE_FQDN=$(ep '.core.private_fqdn' "core.$PRIVATE_ZONE")
+	DMZ_PRIVATE_FQDN=$(ep '.dmz.private_fqdn' "dmz.$PRIVATE_ZONE")
 	CORE_EXPOSURE=$(ep '.core.exposure' hostPort)
 	DMZ_ENVOY_PORT=$(ep '.dmz.ports.envoy' 8443)
 	DMZ_BUS_PORT=$(ep '.dmz.ports.bus' 8442)
-	BUS_SERVICE=$(ep '.dmz.bus_service' imas-dmz-nats-bus)
-	BUS_NAMESPACE=$(ep '.dmz.bus_namespace' imas-dmz)
-	CA_ISSUER=$(ep '.ca.cluster_issuer' imas-uat-ca)
+	# uat/hub/dmz spells the issuer cluster_issuer; both forms are read.
+	CA_ISSUER=$(ep '(.ca? | objects | .cluster_issuer) // .cluster_issuer' imas-uat-ca)
 	CLUSTER_DOMAIN=$(ep '.cluster_domain' cluster.local)
 
 	valid_fqdn "$CORE_FQDN" || die "core.fqdn is not a DNS name: $CORE_FQDN"
@@ -156,8 +158,6 @@ load_endpoints() {
 		die "core.exposure must be hostPort (the core node port mode was dropped), not $CORE_EXPOSURE"
 	valid_fqdn "$CORE_PRIVATE_FQDN" || die "core.private_fqdn is not a DNS name: $CORE_PRIVATE_FQDN"
 	valid_fqdn "$DMZ_PRIVATE_FQDN" || die "dmz.private_fqdn is not a DNS name: $DMZ_PRIVATE_FQDN"
-	valid_dns_label "$BUS_SERVICE" || die "dmz.bus_service is not a DNS label: $BUS_SERVICE"
-	valid_dns_label "$BUS_NAMESPACE" || die "dmz.bus_namespace is not a DNS label: $BUS_NAMESPACE"
 	valid_dns_label "$CA_ISSUER" || die "ca.cluster_issuer is not a valid name: $CA_ISSUER"
 	valid_fqdn "$CLUSTER_DOMAIN" || die "cluster_domain is not a DNS name: $CLUSTER_DOMAIN"
 
@@ -184,10 +184,7 @@ extras_set_args() {
 		--set "core.farmerAPIPort=$CORE_FARMER_PORT" \
 		--set-string "dmz.privateIP=$DMZ_IP" \
 		--set-string "dmz.privateFQDN=$DMZ_PRIVATE_FQDN" \
-		--set-string "bus.serviceName=$BUS_SERVICE" \
-		--set-string "bus.namespace=$BUS_NAMESPACE" \
 		--set "bus.port=$DMZ_BUS_PORT" \
-		--set "bus.remotePort=$DMZ_BUS_PORT" \
 		--set-string "caIssuer.name=$CA_ISSUER" \
 		--set-string "clusterDomain=$CLUSTER_DOMAIN"
 }

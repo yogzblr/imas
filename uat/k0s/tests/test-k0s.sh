@@ -275,6 +275,11 @@ E="$CASE/out/endpoints.json"
 [[ $(jq -r '.dmz.ports.bus' "$E") == 8442 ]] && pass || fail "bus port"
 [[ $(jq -r '.core.ports.farmer_api' "$E") == 5405 ]] && pass || fail "farmer api port"
 [[ $(jq -r '.cluster_issuer' "$E") == imas-uat-ca ]] && pass || fail "issuer"
+# Both readers' spellings (uat/hub/dmz and uat/hub/core), same values.
+[[ $(jq -r '.ca.cluster_issuer' "$E") == imas-uat-ca ]] && pass || fail "ca.cluster_issuer"
+[[ $(jq -r '.private_dns_zone' "$E") == uat.imas.internal ]] && pass || fail "private_dns_zone"
+[[ $(jq -r '.dmz.private_fqdn' "$E") == dmz.uat.imas.internal ]] && pass || fail "dmz.private_fqdn"
+[[ $(jq -r '.core.private_fqdn' "$E") == core.uat.imas.internal ]] && pass || fail "core.private_fqdn"
 
 # The hub briefs' own endpoint loaders, read only, against what bootstrap.sh
 # writes: they must accept it and read the same values.
@@ -307,6 +312,15 @@ if [[ -r $DMZ_LIB ]]; then
 else
   echo "skip: $DMZ_LIB not present (uat/hub/dmz loader check)"
 fi
+
+t "render: a private_dns_zone in the uat JSON names both private forms"
+jq_edit "$DATA/uat.json" "$CASE/uat-zone.json" '.private_dns_zone = "run7.example.internal"'
+boot_render "$CASE/uat-zone.json" "$DATA/access.json"
+expect_rc 0
+[[ $(jq -r '[.private_dns_zone, .dmz.private_fqdn, .core.private_fqdn] | join(" ")' "$CASE/out/endpoints.json") == \
+  "run7.example.internal dmz.run7.example.internal core.run7.example.internal" ]] && pass || fail "zone from the uat JSON"
+boot_render "$DATA/uat.json" "$DATA/access.json"
+expect_rc 0
 
 t "render: file modes"
 [[ $(stat -c %a "$D") == 600 ]] && pass || fail "k0sctl file mode $(stat -c %a "$D")"

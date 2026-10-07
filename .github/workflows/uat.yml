@@ -63,16 +63,27 @@ on:
         required: false
         default: ""
         type: string
+      dispatch_flags:
+        description: "Run L5 (self update): only if the hubs have the update dispatch flags on (sets IMAS_UAT_DISPATCH_FLAGS=on)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
   # GitHub OIDC for azure/login and OpenTofu's azurerm provider and backend.
   id-token: write
 
-# One run per release at a time. Runs of different releases can overlap; each
-# needs the full vCPU quota (18) in the region.
+# dispatch_flags only tells the tests the hubs' flags are on (saasapi
+# SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED, farmer IMAS_SELF_UPDATE_ENABLED);
+# nothing in uat/hub/core turns them on today, so L5 fails if it is ticked
+# without that set up by hand.
+#
+# One UAT run at a time, whatever the release: the subscription's quota is
+# about 18 vCPUs and one run needs all of them, so two cannot fit. A second
+# dispatch waits for the first to end.
 concurrency:
-  group: uat-${{ inputs.release_tag }}
+  group: uat
   cancel-in-progress: false
 
 jobs:
@@ -94,7 +105,7 @@ jobs:
       TFSTATE_RESOURCE_GROUP: imas-uat-state
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           persist-credentials: false
 
@@ -131,25 +142,25 @@ jobs:
           echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
         with:
           go-version-file: go.mod
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
         with:
           python-version: "3.12"
 
       # The version uat/tofu was validated with. No wrapper: tofu output -raw
       # must print the bare value.
       - name: Set up OpenTofu
-        uses: opentofu/setup-opentofu@v1
+        uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f  # v1
         with:
           tofu_version: 1.11.5
           tofu_wrapper: false
 
       - name: Set up Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4
         with:
           version: v4.3.0
 
@@ -167,7 +178,7 @@ jobs:
           ansible --version
 
       - name: Azure login (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -312,7 +323,7 @@ jobs:
       # vmctl.sh (reboots, run-command) calls Azure during the tests, possibly
       # hours after the first login: log in again for a fresh token.
       - name: Azure login again (before the tests)
-        uses: azure/login@v2
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -329,8 +340,11 @@ jobs:
           IMAS_UAT_RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
           # Scenario L4 (UAT.7): the earlier release to upgrade from; empty skips L4.
           IMAS_UAT_UPGRADE_FROM_TAG: ${{ steps.inputs.outputs.upgrade_from_tag }}
+          # The dispatch_flags input, through env only; L5 runs when it is on.
+          DISPATCH_FLAGS: ${{ inputs.dispatch_flags }}
         run: |
           set -euo pipefail
+          if [ "$DISPATCH_FLAGS" = true ]; then export IMAS_UAT_DISPATCH_FLAGS=on; fi
           export IMAS_UAT_DIR="$STATE/hub"
           export IMAS_UAT_REPORT_DIR="$STATE/report"
           export IMAS_UAT_CORE_KUBECONFIG="$STATE/k0s/core.kubeconfig"
@@ -352,7 +366,7 @@ jobs:
 
       - name: Upload the test report
         if: always() && steps.collect.outcome != 'skipped'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: uat-report-${{ steps.runid.outputs.run_id }}
           path: ${{ runner.temp }}/uat-artifacts/report
@@ -361,7 +375,7 @@ jobs:
 
       - name: Upload the outputs (no credentials)
         if: always() && steps.collect.outcome != 'skipped'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: uat-outputs-${{ steps.runid.outputs.run_id }}
           path: ${{ runner.temp }}/uat-artifacts/outputs
@@ -371,7 +385,7 @@ jobs:
       # Teardown, whatever happened above, unless keep_hours is above zero.
       - name: Azure login again (before the destroy)
         if: always() && steps.apply.outcome != 'skipped' && steps.inputs.outputs.destroy == 'true'
-        uses: azure/login@v2
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}

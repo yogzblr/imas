@@ -181,10 +181,12 @@ type Settings struct {
 	// https://<core fqdn>.
 	SaaSAPIURL string `json:"saasapi_url,omitempty"`
 	// EnvoyURL is Envoy's base URL as the runner reaches it. Default
-	// https://<dmz fqdn>.
+	// https://<dmz fqdn>:8443 (DefaultEnvoyPort: Envoy is node port 8443,
+	// owner decision 2026-10-06; 443 is core's).
 	EnvoyURL string `json:"envoy_url,omitempty"`
 	// SproutEnvoyAddress is host:port of Envoy as the sprouts reach it
-	// (the positive control of X3). Default: EnvoyURL's host and port.
+	// (the positive control of X3). Default: EnvoyURL's host and port, and
+	// DefaultEnvoyPort when EnvoyURL names none.
 	SproutEnvoyAddress string `json:"sprout_envoy_address,omitempty"`
 	// CAFile is the run's CA, relative to the material directory. Default
 	// uat-ca.pem if present, else the system roots.
@@ -429,7 +431,7 @@ func LoadDir(dir string) (*Env, error) {
 	}
 	env.EnvoyURL = strings.TrimRight(env.Settings.EnvoyURL, "/")
 	if env.EnvoyURL == "" && env.UAT.DMZ.FQDN != "" {
-		env.EnvoyURL = "https://" + env.UAT.DMZ.FQDN
+		env.EnvoyURL = "https://" + net.JoinHostPort(env.UAT.DMZ.FQDN, DefaultEnvoyPort)
 	}
 	if env.SaaSAPIURL == "" {
 		return nil, errors.New("harness: no saasapi URL: set saasapi_url in harness.json or core.fqdn in uat.json")
@@ -615,6 +617,11 @@ func (e *Env) validateKeycloak() error {
 	return nil
 }
 
+// DefaultEnvoyPort is the port Envoy answers on when nothing says
+// otherwise: the DMZ node port 8443 (Shared contract, owner decisions
+// 2026-10-06). It is not 443, which is core's saasapi and Keycloak port.
+const DefaultEnvoyPort = "8443"
+
 // SproutEnvoyHostPort is the host and port of Envoy as a sprout dials it.
 func (e *Env) SproutEnvoyHostPort() (string, string, error) {
 	if a := e.Settings.SproutEnvoyAddress; a != "" {
@@ -626,7 +633,7 @@ func (e *Env) SproutEnvoyHostPort() (string, string, error) {
 	}
 	port := u.Port()
 	if port == "" {
-		port = "443"
+		port = DefaultEnvoyPort
 	}
 	return u.Hostname(), port, nil
 }

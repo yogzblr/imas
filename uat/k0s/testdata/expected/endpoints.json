@@ -5,6 +5,7 @@
     "private_ip": "10.60.1.4",
     "public_ip": "203.0.113.10",
     "fqdn": "uatab12cd34-dmz.centralindia.cloudapp.azure.com",
+    "private_fqdn": "dmz.uat.imas.internal",
     "ports": {
       "envoy": 8443,
       "bus": 8442
@@ -17,6 +18,7 @@
     "private_ip": "10.60.2.4",
     "public_ip": "203.0.113.11",
     "fqdn": "uatab12cd34-core.centralindia.cloudapp.azure.com",
+    "private_fqdn": "core.uat.imas.internal",
     "ports": {
       "https": 443,
       "farmer_api": 5405
@@ -24,7 +26,11 @@
     "exposure": "hostPort",
     "node_port_range": "30000-32767"
   },
+  "private_dns_zone": "uat.imas.internal",
   "cluster_issuer": "imas-uat-ca",
+  "ca": {
+    "cluster_issuer": "imas-uat-ca"
+  },
   "ca_file": "uat-ca.crt",
   "kubeconfigs": {
     "dmz": "dmz.kubeconfig",

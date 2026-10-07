@@ -1,4 +1,30 @@
 id: I.win_dacl.ace_present
-title: 'win_dacl ace_present'
-skip: |
-  Finding, from the code: internal/ingredients/windacl registers win_dacl, but cmd/sprout doesn't import it (it is missing from cmd/sprout/include_windows.go), so no sprout registers win_dacl and a recipe naming it fails with "unknown ingredient" on every sprout. tools/gendocs still documents it.
+title: 'explicit allow ACE for the Users group on a temp file'
+os: [windows]
+notes: |
+  A throwaway file @NONCE@ in C:\Windows\Temp; the revert deletes it. The principal is the built-in Users group by its SID (S-1-5-32-545), so the case doesn't depend on the OS language. Only the file's own ACL is touched.
+  The rights are the numeric mask 0x120089 (FILE_GENERIC_READ), not a named right. The ingredient compares the mask it reads back with the one it wrote, and a named right is a generic one (GENERIC_READ); the case doesn't rely on how Windows stores those, so a second cook that reported a change would point at the ingredient. Not run on a Windows host yet.
+windows:
+  setup: |
+    Set-Content -LiteralPath 'C:\Windows\Temp\imas-uat-dacl-@NONCE@.txt' -Value 'imas uat @NONCE@'
+  recipe: |
+    steps:
+      uat win_dacl ace present:
+        win_dacl.ace_present:
+          - name: 'C:\Windows\Temp\imas-uat-dacl-@NONCE@.txt'
+          - object_type: 'file'
+          - principal: 'S-1-5-32-545'
+          - access_mode: 'allow'
+          - rights: '0x120089'
+  check: |
+    $f = 'C:\Windows\Temp\imas-uat-dacl-@NONCE@.txt'
+    $a = (Get-Acl -LiteralPath $f).Access | Where-Object {
+      -not $_.IsInherited -and $_.AccessControlType -eq 'Allow' -and
+      $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-5-32-545' -and
+      (([int]$_.FileSystemRights -band 0x120089) -eq 0x120089)
+    }
+    if ($a) { exit 0 }
+    exit 1
+  revert: |
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-dacl-@NONCE@.txt'
+    exit 0

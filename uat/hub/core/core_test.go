@@ -409,7 +409,7 @@ func TestFarmerChartRender(t *testing.T) {
 		"SAASAPI_RECIPES_S3_USE_SSL":       "false",
 		"SAASAPI_RECIPES_CREDENTIAL_CHECK": "true",
 		"SAASAPI_RECIPES_S3_ACCESS_KEY_ID": "secret:imas-uat-s3-saasapi/access-key-id",
-		"SAASAPI_NATS_URL":                 "tls://imas-dmz-nats-bus.imas-dmz.svc.cluster.local:8442",
+		"SAASAPI_NATS_URL":                 "tls://dmz.uat.imas.internal:8442",
 	} {
 		if se[k] != want {
 			t.Errorf("saasapi %s = %q, want %q", k, se[k], want)
@@ -437,7 +437,7 @@ func TestFarmerChartRender(t *testing.T) {
 	}
 	cfg := str(get(t, objs, "ConfigMap/imas-core-farmer"), "data", "farmer")
 	for _, want := range []string{
-		"farmerbusurl: tls://imas-dmz-nats-bus.imas-dmz.svc.cluster.local:8442",
+		"farmerbusurl: tls://dmz.uat.imas.internal:8442",
 		"sproutbusurls:\n- wss://" + dmzFQDN + ":8443/\n",
 		"rootca: /etc/imas/tls/ca.crt",
 		"AC4LMP7I2FYLWGY5GIB52A4XCFFFSB2QTZ65B3A4G6OK5GYWRJSKH74C",
@@ -445,6 +445,16 @@ func TestFarmerChartRender(t *testing.T) {
 	} {
 		if !strings.Contains(cfg, want) {
 			t.Errorf("farmer config lacks %q", want)
+		}
+	}
+
+	// The bus egress rule of farmer's and saasapi's own policies names the
+	// DMZ private address and the node port (bus.egressCIDRs), and only
+	// that: the chart's pod selector can't match a bus on another cluster.
+	for _, key := range []string{"NetworkPolicy/imas-core-farmer", "NetworkPolicy/imas-core-farmer-saasapi"} {
+		pol := mustJSON(t, get(t, objs, key))
+		if !strings.Contains(pol, `"cidr":"`+dmzIP+`/32"`) || !strings.Contains(pol, `"port":8442`) {
+			t.Errorf("%s has no bus egress to %s/32 on 8442: %s", key, dmzIP, pol)
 		}
 	}
 
@@ -544,16 +554,17 @@ func TestExtrasChartRender(t *testing.T) {
 		t.Error("the edge certificate is not for the core FQDN")
 	}
 
-	// The bus: farmer's Service FQDN on this cluster is an ExternalName for
-	// the DMZ's private name; it dials the DMZ node port 8442 directly
-	// (owner decisions, 2026-10-06).
-	svc := get(t, objs, "Service/imas-dmz-nats-bus")
-	if str(svc, "spec", "type") != "ExternalName" || str(svc, "spec", "externalName") != "dmz.uat.imas.internal" || str(svc, "metadata", "namespace") != "imas-dmz" {
-		t.Errorf("the bus Service must be an ExternalName for dmz.uat.imas.internal in imas-dmz: %s", mustJSON(t, svc))
-	}
+	// The bus is dialled by the DMZ's private name (farmer chart bus.host),
+	// on the DMZ node port 8442 (owner decisions, 2026-10-06): no Service
+	// or EndpointSlice stands in for it on this cluster.
 	for key := range objs {
-		if strings.HasPrefix(key, "EndpointSlice/") {
-			t.Errorf("%s: the bus is reached by name now, not by an EndpointSlice", key)
+		if strings.HasPrefix(key, "EndpointSlice/") || strings.HasPrefix(key, "Service/imas-dmz-nats-bus") {
+			t.Errorf("%s: the bus is reached by its private name, not through a stand-in Service", key)
+		}
+	}
+	for _, o := range objs {
+		if str(o, "kind") == "Service" && str(o, "spec", "type") == "ExternalName" {
+			t.Errorf("an ExternalName Service is left: %s", mustJSON(t, o))
 		}
 	}
 	for _, key := range []string{"NetworkPolicy/imas-uat-farmer-cross-cluster", "NetworkPolicy/imas-uat-saasapi-cross-cluster"} {
