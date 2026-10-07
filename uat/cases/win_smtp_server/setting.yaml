@@ -1,0 +1,5 @@
+id: I.win_smtp_server.setting
+title: 'set an IIS SMTP virtual server property'
+needs: [windows-feature:SMTP-Server]
+skip: |
+  Needs the deprecated SMTP-Server feature and its IIS 6 metabase WMI provider (root/MicrosoftIISv2); not on the UAT image, and installing it adds a mail service. Owner decision.

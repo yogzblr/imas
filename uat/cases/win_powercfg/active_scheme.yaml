@@ -1,0 +1,23 @@
+id: I.win_powercfg.active_scheme
+title: 'activate the High performance power scheme'
+os: [windows]
+notes: |
+  The setup records the active scheme and switches to Balanced so the change is pending; the revert re-activates the recorded scheme.
+windows:
+  setup: |
+    if ((powercfg /getactivescheme) -match '([0-9a-fA-F-]{36})') { $Matches[1] | Set-Content -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.pc' } else { exit 1 }
+    powercfg /setactive 381b4222-f694-41f0-9685-ff5bb260df2e
+    exit $LASTEXITCODE
+  recipe: |
+    steps:
+      uat powercfg active_scheme:
+        win_powercfg.active_scheme:
+          - name: '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
+  check: |
+    if ((powercfg /getactivescheme) -match '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c') { exit 0 }
+    exit 1
+  revert: |
+    $g = Get-Content -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.pc' -ErrorAction SilentlyContinue
+    if ($g) { powercfg /setactive $g }
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.pc'
+    exit 0

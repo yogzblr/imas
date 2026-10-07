@@ -1,0 +1,4 @@
+id: I.selfupdate.apply
+title: 'apply a sprout self update'
+skip: |
+  selfupdate.apply installs a new imas-sprout package, verified against farmer's signed manifest and the release catalog; as a recipe step it would replace the release under test. It is exercised the way it is meant to run, by the opt-in lifecycle scenario L5 (POST .../sprouts/updates with the dispatch flags on).

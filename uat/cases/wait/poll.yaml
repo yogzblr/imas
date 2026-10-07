@@ -1,0 +1,23 @@
+id: I.wait.poll
+title: 'poll a command until it succeeds'
+os: [ubuntu, alma, windows]
+changes: false
+pre_check: none
+notes: |
+  Polling changes nothing. Reading the code, the poll runs through sh -c, which Windows doesn't have, so the Windows run is expected to time out (a finding from the source).
+linux:
+  recipe: |
+    steps:
+      uat wait poll:
+        wait.poll:
+          - cmd: 'test -d /var/tmp'
+          - timeout: '20s'
+          - interval: '1s'
+windows:
+  recipe: |
+    steps:
+      uat wait poll:
+        wait.poll:
+          - cmd: 'hostname'
+          - timeout: '20s'
+          - interval: '2s'

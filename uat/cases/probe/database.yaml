@@ -1,0 +1,4 @@
+id: I.probe.database
+title: 'probe a database'
+skip: |
+  Finding, from the code: no database/sql driver is linked into cmd/sprout on any platform (go list -deps ./cmd/sprout shows database/sql only), so every driver name fails as unknown. There is also no database a sprout can reach in the UAT layout (sprouts reach only Envoy).

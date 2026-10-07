@@ -1,0 +1,4 @@
+id: I.win_dacl.ace_absent
+title: 'win_dacl ace_absent'
+skip: |
+  Finding, from the code: internal/ingredients/windacl registers win_dacl, but cmd/sprout doesn't import it (it is missing from cmd/sprout/include_windows.go), so no sprout registers win_dacl and a recipe naming it fails with "unknown ingredient" on every sprout. tools/gendocs still documents it.

@@ -1,0 +1,33 @@
+id: I.file.prepend
+title: 'prepend a line once'
+os: [ubuntu, alma, windows]
+linux:
+  setup: |
+    printf 'tail\n' > /var/tmp/imas-uat-@NONCE@.txt
+  recipe: |
+    steps:
+      uat file prepend:
+        file.prepend:
+          - name: '/var/tmp/imas-uat-@NONCE@.txt'
+          - text:
+              - 'head @NONCE@'
+  check: |
+    [ "$(head -n1 /var/tmp/imas-uat-@NONCE@.txt)" = 'head @NONCE@' ] && [ "$(grep -c 'head @NONCE@' /var/tmp/imas-uat-@NONCE@.txt)" = 1 ] && grep -qx tail /var/tmp/imas-uat-@NONCE@.txt
+  revert: |
+    rm -f /var/tmp/imas-uat-@NONCE@.txt
+windows:
+  setup: |
+    [IO.File]::WriteAllBytes('C:\Windows\Temp\imas-uat-@NONCE@.txt', [Text.Encoding]::ASCII.GetBytes("tail`n"))
+  recipe: |
+    steps:
+      uat file prepend:
+        file.prepend:
+          - name: 'C:\Windows\Temp\imas-uat-@NONCE@.txt'
+          - text:
+              - 'head @NONCE@'
+  check: |
+    $l = @(Get-Content -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.txt')
+    if ($l[0] -eq 'head @NONCE@' -and @($l | Where-Object { $_ -eq 'head @NONCE@' }).Count -eq 1 -and $l -contains 'tail') { exit 0 }
+    exit 1
+  revert: |
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.txt'

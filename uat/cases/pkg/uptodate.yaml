@@ -1,0 +1,4 @@
+id: I.pkg.uptodate
+title: 'upgrade every package on the host'
+skip: |
+  pkg.uptodate upgrades every package on the sprout: it can upgrade imas-sprout itself from the repository the role configured (restarting the sprout in the middle of the cook and changing the release under test) and the kernel (a reboot pending). There is no harmless form of it; the owner can run it as an ordered-last reboot case on a disposable sprout.

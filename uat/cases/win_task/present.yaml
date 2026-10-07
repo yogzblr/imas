@@ -1,0 +1,24 @@
+id: I.win_task.present
+title: 'register a disabled one-off task'
+os: [windows]
+notes: |
+  A disabled task that would run 'cmd /c exit 0' once in 2099, in its own \imas-uat folder; the revert deletes it.
+windows:
+  recipe: |
+    steps:
+      uat task present:
+        win_task.present:
+          - name: '\imas-uat\uat-@NONCE@'
+          - command: 'C:\Windows\System32\cmd.exe'
+          - arguments: '/c exit 0'
+          - trigger_type: 'once'
+          - start_date: '2099-01-01'
+          - start_time: '03:00'
+          - enabled: false
+          - description: 'imas uat @NONCE@'
+  check: |
+    schtasks /query /tn '\imas-uat\uat-@NONCE@' > $null 2>&1
+    exit $LASTEXITCODE
+  revert: |
+    schtasks /delete /tn '\imas-uat\uat-@NONCE@' /f > $null 2>&1
+    exit 0

@@ -1,0 +1,22 @@
+id: I.win_certutil.cert_absent
+title: 'remove a certificate from the Personal store (certutil)'
+os: [windows]
+notes: |
+  A throwaway self-signed public certificate (CN=imas-uat-throwaway-test-cert, thumbprint 3D0AA4D63A52B151D025D38A267B37DDBCE45D8E; its private key was discarded when it was made) goes into LocalMachine\My, the Personal store, which grants no trust. The revert removes it. The setup first removes any copy a failed run left behind.
+windows:
+  setup: |
+    [IO.File]::WriteAllBytes('C:\Windows\Temp\imas-uat-@NONCE@.cer', [Convert]::FromBase64String('MIIDMTCCAhmgAwIBAgIUArdH7zhx1sHxuN5wGngjEqybKUQwDQYJKoZIhvcNAQELBQAwJzElMCMGA1UEAwwcaW1hcy11YXQtdGhyb3dhd2F5LXRlc3QtY2VydDAgFw0yNjEwMDYxNzQ4NTJaGA8yMTI2MDkxMjE3NDg1MlowJzElMCMGA1UEAwwcaW1hcy11YXQtdGhyb3dhd2F5LXRlc3QtY2VydDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAL29OcAQybK3uN9KKRwBuNqolEa6gmsIkKodZ+PmdazFrvc5yWsvs/SguL7cbtrKidRCMtUAsyGTWNgHkoMLD8U2A3k40eJ+3dJ7Opw+Y75cZE5yyIoltPsyA/tIEbAx+HXV2ggtV3KSMXSOkGzJz/GDfdyJmvsH+A9o35ODfaftNo+q/O7kUvTIPXInSu1INiYu2F7asIgfqlWlopqRyj29oZdzsLOnnhsjkwgoLMnF5iWLjqA3EIpDNevc2GrNTjiYLrfkNkMlo/0P70DL7H7UddMJQ01G7lY1UKZTmOky24XFbxy34oofaDGFcP8iW2GpcuIhjuIPDAOB0DqlA68CAwEAAaNTMFEwHQYDVR0OBBYEFLggq+LUZZB4keLJNjIA0riLoh5pMB8GA1UdIwQYMBaAFLggq+LUZZB4keLJNjIA0riLoh5pMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEBAAukwpMpcYtHnPbhhWbqSsB45Yz/AxRsw8ojktJztL8AUo2YhctuGQR0oURA9g4cRhnm5MV2MgMVkHEeTODFoxEtSJWXvZDA8UdtQxquaLKTq7qMeo41XLUeSSEQZJwIBl+hG/+b+JMOgQI2HqflMvPl2V2D3Ejzyp3ICMbMd6J+oSTN9XxJi5lyvROCUP02Sn1Y7/pk6WchoNAzaQvNCgQHR4CGqjGaCasXunsKQBKTZy8qtyeHzTtCdJLRELwForPH/+7/h0c8Lrf9EBCdpLmyABSr74yTjKn9cHCGYzHOVgIaK9woO0g4q3vCgpfPvAovHuozIwOyfT/4eUJb0ro='))
+    Import-Certificate -FilePath 'C:\Windows\Temp\imas-uat-@NONCE@.cer' -CertStoreLocation Cert:\LocalMachine\My | Out-Null
+  recipe: |
+    steps:
+      uat certutil cert_absent:
+        win_certutil.cert_absent:
+          - name: 'imas-uat'
+          - thumbprint: '3D0AA4D63A52B151D025D38A267B37DDBCE45D8E'
+          - store: 'My'
+  check: |
+    if (Test-Path -LiteralPath 'Cert:\LocalMachine\My\3D0AA4D63A52B151D025D38A267B37DDBCE45D8E') { exit 1 }
+    exit 0
+  revert: |
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath 'Cert:\LocalMachine\My\3D0AA4D63A52B151D025D38A267B37DDBCE45D8E', 'C:\Windows\Temp\imas-uat-@NONCE@.cer'
+    exit 0

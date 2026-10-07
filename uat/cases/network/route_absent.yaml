@@ -1,0 +1,20 @@
+id: I.network.route_absent
+title: 'remove that route'
+os: [ubuntu, alma]
+notes: |
+  Never touches the sprout's own connection: everything happens on a dummy interface the setup creates (iu<nonce>), with TEST-NET addresses (198.51.100.0/24, 203.0.113.0/24, RFC 5737) that route nowhere. The connectivity guard stays at its default (on). The revert deletes the interface, which takes its addresses and routes with it.
+linux:
+  setup: |
+    ip link add iu@NONCE@ type dummy
+    ip link set iu@NONCE@ up
+    ip route add 203.0.113.0/24 dev iu@NONCE@
+  recipe: |
+    steps:
+      uat network route_absent:
+        network.route_absent:
+          - destination: '203.0.113.0/24'
+          - name: 'iu@NONCE@'
+  check: |
+    ip link show dev iu@NONCE@ >/dev/null && ! ip route show 203.0.113.0/24 | grep -q 'dev iu@NONCE@'
+  revert: |
+    ip link del iu@NONCE@ 2>/dev/null; true

@@ -1,0 +1,24 @@
+id: I.probe.http
+title: 'probe the package repository over HTTPS'
+os: [ubuntu, alma, windows]
+needs: [internet]
+changes: false
+pre_check: none
+notes: |
+  A probe changes nothing. The URL is the package repository the role installs from, which every sprout must reach for its own updates; nothing else on the internet is assumed.
+linux:
+  recipe: |
+    steps:
+      uat probe http:
+        probe.http:
+          - url: 'https://packages.buildkite.com/yogzblr/imasdeb/gpgkey'
+          - expect_body_contains: 'BEGIN PGP PUBLIC KEY'
+          - timeout: '30s'
+windows:
+  recipe: |
+    steps:
+      uat probe http:
+        probe.http:
+          - url: 'https://packages.buildkite.com/yogzblr/imasdeb/gpgkey'
+          - expect_body_contains: 'BEGIN PGP PUBLIC KEY'
+          - timeout: '30s'

@@ -1,0 +1,29 @@
+id: I.file.content
+title: 'write a file''s content'
+os: [ubuntu, alma, windows]
+tenant2: true
+linux:
+  recipe: |
+    steps:
+      uat file content:
+        file.content:
+          - name: '/var/tmp/imas-uat-@NONCE@.txt'
+          - text:
+              - 'imas uat @NONCE@ tenant @TENANT@'
+  check: |
+    [ "$(cat /var/tmp/imas-uat-@NONCE@.txt)" = 'imas uat @NONCE@ tenant @TENANT@' ]
+  revert: |
+    rm -f /var/tmp/imas-uat-@NONCE@.txt
+windows:
+  recipe: |
+    steps:
+      uat file content:
+        file.content:
+          - name: 'C:\Windows\Temp\imas-uat-@NONCE@.txt'
+          - text:
+              - 'imas uat @NONCE@ tenant @TENANT@'
+  check: |
+    if ((Test-Path -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.txt') -and [IO.File]::ReadAllText('C:\Windows\Temp\imas-uat-@NONCE@.txt') -eq "imas uat @NONCE@ tenant @TENANT@`n") { exit 0 }
+    exit 1
+  revert: |
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.txt'

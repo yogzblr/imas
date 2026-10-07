@@ -1,0 +1,23 @@
+id: I.mount.mounted
+title: 'mount a small tmpfs (not persisted)'
+os: [ubuntu, alma]
+notes: |
+  Harmless: a 1 MiB tmpfs on a directory under /var/tmp; fstab entries carry noauto so a reboot never mounts them. The revert unmounts, removes the fstab line and the directory.
+linux:
+  recipe: |
+    steps:
+      uat mount mounted:
+        mount.mounted:
+          - name: '/var/tmp/imas-uat-mnt-@NONCE@'
+          - device: 'tmpfs'
+          - fstype: 'tmpfs'
+          - opts:
+              - 'size=1m'
+          - persist: false
+          - makedirs: true
+  check: |
+    findmnt -n -t tmpfs /var/tmp/imas-uat-mnt-@NONCE@ >/dev/null && ! grep -q '/var/tmp/imas-uat-mnt-@NONCE@' /etc/fstab
+  revert: |
+    umount /var/tmp/imas-uat-mnt-@NONCE@ 2>/dev/null
+    sed -i '\#/var/tmp/imas-uat-mnt-@NONCE@#d' /etc/fstab
+    rmdir /var/tmp/imas-uat-mnt-@NONCE@ 2>/dev/null; true

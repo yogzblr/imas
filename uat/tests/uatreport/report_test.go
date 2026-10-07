@@ -382,8 +382,8 @@ func TestRunShAgainstFakeStack(t *testing.T) {
 	if code, out := runSh(dir, "resilience", "L2"); code != 0 || !strings.Contains(out, "PASS   L2") {
 		t.Errorf("L2 against the fake: exit %d\n%s", code, out)
 	}
-	if code, out := runSh(dir, "lifecycle"); code != 1 || !strings.Contains(out, "NO TEST MATCHED") || !strings.Contains(out, "MISS   L4") {
-		t.Errorf("lifecycle has no tests yet and must fail: exit %d\n%s", code, out)
+	if code, out := runSh(dir, "lifecycle"); code != 0 || !strings.Contains(out, "SKIP   L4") || !strings.Contains(out, "SKIP   L5") || !strings.Contains(out, "upgrade_from_tag is empty") {
+		t.Errorf("lifecycle (UAT.7) must report L4 and L5 skipped with their reasons, without upgrade_from_tag or the dispatch flags: exit %d\n%s", code, out)
 	}
 	if code, _ := runSh(dir, "core", "Q7"); code != 2 {
 		t.Errorf("an unknown id must be a usage error: %d", code)

@@ -1,0 +1,20 @@
+id: I.firewall.table_present
+title: 'add an nftables table of its own'
+os: [ubuntu, alma]
+needs: [internet]
+notes: |
+  Harmless by construction: everything lives in a table of its own (inet imas_uat_<nonce>), its chain has no hook, so no packet ever traverses it; the host's own tables, chains, default policy and firewalld are never touched. The revert deletes the table. nft is used for the checks (the setup installs nftables if missing).
+linux:
+  setup: |
+    command -v nft >/dev/null 2>&1 || dnf -y -q install nftables >/dev/null 2>&1 || apt-get install -y -q nftables >/dev/null 2>&1
+    command -v nft >/dev/null
+  recipe: |
+    steps:
+      uat firewall table_present:
+        firewall.table_present:
+          - name: 'imas_uat_@NONCE@'
+          - family: 'inet'
+  check: |
+    nft list table inet imas_uat_@NONCE@ >/dev/null 2>&1
+  revert: |
+    nft delete table inet imas_uat_@NONCE@ 2>/dev/null; true

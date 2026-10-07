@@ -1,0 +1,21 @@
+id: I.win_shortcut.present
+title: 'create a shortcut'
+os: [windows]
+notes: |
+  Uses the WScript.Shell COM object. Windows Server 2022 Core may lack parts of the shell COM surface; if it does, this case fails there and the owner decides on a Desktop Experience image (plan section 4h).
+windows:
+  recipe: |
+    steps:
+      uat shortcut present:
+        win_shortcut.present:
+          - name: 'C:\Windows\Temp\imas-uat-@NONCE@.lnk'
+          - target: 'C:\Windows\System32\notepad.exe'
+          - description: 'imas uat @NONCE@'
+  check: |
+    if (-not (Test-Path -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.lnk')) { exit 1 }
+    $s = (New-Object -ComObject WScript.Shell).CreateShortcut('C:\Windows\Temp\imas-uat-@NONCE@.lnk')
+    if ($s.TargetPath -eq 'C:\Windows\System32\notepad.exe') { exit 0 }
+    exit 1
+  revert: |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.lnk'
+    exit 0

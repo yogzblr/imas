@@ -1,0 +1,5 @@
+id: I.sdb.gcpsm
+title: 'resolve a step secret through sdb://gcpsm'
+backend: sdb:gcpsm
+skip: |
+  Needs Google Secret Manager and Google credentials on the sprout; the gate runs only in Azure.

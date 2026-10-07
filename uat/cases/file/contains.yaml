@@ -1,0 +1,37 @@
+id: I.file.contains
+title: 'assert a file contains a line (no change)'
+os: [ubuntu, alma, windows]
+changes: false
+pre_check: present
+notes: |
+  An assertion method: it succeeds when the file already holds the text and changes nothing.
+linux:
+  setup: |
+    printf 'alpha\nimas uat @NONCE@\nomega\n' > /var/tmp/imas-uat-@NONCE@.txt
+  recipe: |
+    steps:
+      uat file contains:
+        file.contains:
+          - name: '/var/tmp/imas-uat-@NONCE@.txt'
+          - text:
+              - 'imas uat @NONCE@'
+  check: |
+    grep -qx 'imas uat @NONCE@' /var/tmp/imas-uat-@NONCE@.txt && [ "$(wc -l < /var/tmp/imas-uat-@NONCE@.txt)" -eq 3 ]
+  revert: |
+    rm -f /var/tmp/imas-uat-@NONCE@.txt
+windows:
+  setup: |
+    [IO.File]::WriteAllBytes('C:\Windows\Temp\imas-uat-@NONCE@.txt', [Text.Encoding]::ASCII.GetBytes("alpha`nimas uat @NONCE@`nomega`n"))
+  recipe: |
+    steps:
+      uat file contains:
+        file.contains:
+          - name: 'C:\Windows\Temp\imas-uat-@NONCE@.txt'
+          - text:
+              - 'imas uat @NONCE@'
+  check: |
+    $l = @(Get-Content -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.txt')
+    if ($l.Count -eq 3 -and $l[1] -eq 'imas uat @NONCE@') { exit 0 }
+    exit 1
+  revert: |
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.txt'

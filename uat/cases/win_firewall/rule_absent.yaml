@@ -1,0 +1,21 @@
+id: I.win_firewall.rule_absent
+title: 'delete that rule'
+os: [windows]
+notes: |
+  Adds one inbound block rule for TCP 65000, where nothing listens; the default policy, the profiles and the rules WinRM and the sprout rely on are untouched. The revert deletes the rule.
+windows:
+  setup: |
+    netsh advfirewall firewall add rule name=imas-uat-@NONCE@ dir=in action=block protocol=TCP localport=65000 | Out-Null
+    exit $LASTEXITCODE
+  recipe: |
+    steps:
+      uat firewall rule_absent:
+        win_firewall.rule_absent:
+          - name: 'imas-uat-@NONCE@'
+  check: |
+    netsh advfirewall firewall show rule name=imas-uat-@NONCE@ > $null 2>&1
+    if ($LASTEXITCODE -eq 0) { exit 1 }
+    exit 0
+  revert: |
+    netsh advfirewall firewall delete rule name=imas-uat-@NONCE@ > $null 2>&1
+    exit 0

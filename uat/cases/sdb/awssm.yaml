@@ -1,0 +1,5 @@
+id: I.sdb.awssm
+title: 'resolve a step secret through sdb://awssm'
+backend: sdb:awssm
+skip: |
+  Needs AWS Secrets Manager and AWS credentials on the sprout; the gate runs only in Azure.

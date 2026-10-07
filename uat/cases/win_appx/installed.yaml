@@ -1,0 +1,4 @@
+id: I.win_appx.installed
+title: 'install an Appx package'
+skip: |
+  Needs a signed .appx/.msix package and the AppX deployment stack, which Windows Server 2022 Core lacks; there is no harmless package to install. A Desktop Experience image would be needed (owner decision, plan section 4h).

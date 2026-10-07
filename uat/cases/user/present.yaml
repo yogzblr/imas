@@ -1,0 +1,33 @@
+id: I.user.present
+title: 'create a local user'
+os: [ubuntu, alma, windows]
+notes: |
+  Windows needs a cleartext password for a new account; the throwaway account gets a per-case one in the recipe (stored in the tenant's recipe bucket for the run) and is deleted by the revert.
+linux:
+  recipe: |
+    steps:
+      uat user present:
+        user.present:
+          - name: 'iuu@NONCE@'
+          - comment: 'imas uat'
+          - shell: '/bin/sh'
+          - createhome: false
+  check: |
+    [ "$(getent passwd iuu@NONCE@ | cut -d: -f5)" = 'imas uat' ]
+  revert: |
+    userdel -r iuu@NONCE@ 2>/dev/null; userdel iuu@NONCE@ 2>/dev/null; true
+windows:
+  recipe: |
+    steps:
+      uat user present:
+        user.present:
+          - name: 'iuu@NONCE@'
+          - comment: 'imas uat'
+          - password: 'Uat-@NONCE@-Pw1!'
+  check: |
+    $x = Get-CimInstance Win32_UserAccount -Filter "LocalAccount=True AND Name='iuu@NONCE@'"
+    if ($x -and $x.Description -eq 'imas uat') { exit 0 }
+    exit 1
+  revert: |
+    net user iuu@NONCE@ /delete > $null 2>&1
+    exit 0

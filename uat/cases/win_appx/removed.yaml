@@ -1,0 +1,4 @@
+id: I.win_appx.removed
+title: 'remove an Appx package'
+skip: |
+  Windows Server 2022 Core has no provisioned Appx packages to remove and lacks the AppX deployment stack; a Desktop Experience image would be needed (owner decision, plan section 4h).

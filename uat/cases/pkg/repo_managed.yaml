@@ -1,0 +1,42 @@
+id: I.pkg.repo_managed
+title: 'add a local repository that serves nothing'
+os: [ubuntu, alma]
+needs: [internet]
+timeout: 15m
+skip_os:
+  windows: |
+    pkg uses snack, whose only Windows manager is winget; Windows Server 2022 Core doesn't ship winget (App Installer), so every pkg method can only fail there. A Desktop Experience or Server 2025 image would be needed (owner decision).
+notes: |
+  The repository is an empty local one the setup builds: a trusted file: repository on Ubuntu (add-apt-repository), a disabled one on AlmaLinux (dnf config-manager --add-repo with a .repo file), so no package ever comes from it. The revert removes it.
+ubuntu:
+  setup: |
+    d=/var/tmp/imas-uat-repo-@NONCE@
+    mkdir -p $d && : > $d/Packages && (cd $d && apt-ftparchive release . > Release)
+    command -v add-apt-repository >/dev/null
+  recipe: |
+    steps:
+      uat pkg repo_managed:
+        pkg.repo_managed:
+          - name: 'imas-uat-@NONCE@'
+          - url: 'deb [trusted=yes] file:/var/tmp/imas-uat-repo-@NONCE@ ./'
+  check: |
+    grep -rqsF 'imas-uat-repo-@NONCE@' /etc/apt/sources.list /etc/apt/sources.list.d/
+  revert: |
+    grep -lrsF 'imas-uat-repo-@NONCE@' /etc/apt/sources.list.d/ | xargs -r rm -f
+    sed -i '/imas-uat-repo-@NONCE@/d' /etc/apt/sources.list 2>/dev/null
+    rm -rf /var/tmp/imas-uat-repo-@NONCE@; true
+alma:
+  setup: |
+    mkdir -p /var/tmp/imas-uat-repo-@NONCE@
+    printf '[imas-uat-@NONCE@]\nname=imas-uat-@NONCE@\nbaseurl=file:///var/tmp/imas-uat-repo-@NONCE@\nenabled=0\ngpgcheck=0\n' > /var/tmp/imas-uat-@NONCE@.repo
+    dnf -q config-manager --help >/dev/null 2>&1 || dnf -y -q install dnf-plugins-core >/dev/null
+  recipe: |
+    steps:
+      uat pkg repo_managed:
+        pkg.repo_managed:
+          - name: 'imas-uat-@NONCE@'
+          - url: '/var/tmp/imas-uat-@NONCE@.repo'
+  check: |
+    [ -f /etc/yum.repos.d/imas-uat-@NONCE@.repo ]
+  revert: |
+    rm -rf /etc/yum.repos.d/imas-uat-@NONCE@.repo /var/tmp/imas-uat-@NONCE@.repo /var/tmp/imas-uat-repo-@NONCE@

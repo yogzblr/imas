@@ -1,0 +1,26 @@
+id: I.file.directory
+title: 'create a directory with a mode'
+os: [ubuntu, alma, windows]
+tenant2: true
+linux:
+  recipe: |
+    steps:
+      uat file directory:
+        file.directory:
+          - name: '/var/tmp/imas-uat-dir-@NONCE@-t@TENANT@'
+          - dir_mode: '750'
+  check: |
+    [ -d /var/tmp/imas-uat-dir-@NONCE@-t@TENANT@ ] && [ "$(stat -c %a /var/tmp/imas-uat-dir-@NONCE@-t@TENANT@)" = 750 ]
+  revert: |
+    rm -rf /var/tmp/imas-uat-dir-@NONCE@-t@TENANT@
+windows:
+  recipe: |
+    steps:
+      uat file directory:
+        file.directory:
+          - name: 'C:\Windows\Temp\imas-uat-dir-@NONCE@-t@TENANT@'
+  check: |
+    if (Test-Path -LiteralPath 'C:\Windows\Temp\imas-uat-dir-@NONCE@-t@TENANT@' -PathType Container) { exit 0 }
+    exit 1
+  revert: |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-dir-@NONCE@-t@TENANT@'

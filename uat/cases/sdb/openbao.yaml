@@ -1,0 +1,5 @@
+id: I.sdb.openbao
+title: 'resolve a step secret through sdb://openbao'
+backend: sdb:openbao
+skip: |
+  The sprout-side OpenBao backend reads a customer's OpenBao with a client certificate (IMAS_SDB_OPENBAO_ADDR and a cert/key in the sprout's environment). The only OpenBao in the UAT layout is the core hub's, which serves farmer's Transit key, has no cert auth mount for sprouts, and which no sprout can reach: sprouts reach only Envoy, by the Shared contract's network rules (scenario X3). Covering it needs an OpenBao reachable from the tenant subnet with cert auth and a KV secret (owner decision).

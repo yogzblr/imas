@@ -1,0 +1,28 @@
+id: I.win_dsc.applied
+title: 'apply a compiled DSC configuration that writes one file'
+os: [windows]
+needs: [winrm-local]
+timeout: 15m
+notes: |
+  The setup compiles a configuration with the built-in PSDesiredStateConfiguration module: one File resource writing a scratch file. Start-DscConfiguration talks to the local LCM over WinRM, which the UAT Windows sprouts have on. The revert removes the configuration documents from the LCM and deletes the file.
+windows:
+  setup: |
+    Configuration ImasUat {
+      Import-DscResource -ModuleName PSDesiredStateConfiguration
+      Node localhost { File Marker { DestinationPath = 'C:\Windows\Temp\imas-uat-dsc-@NONCE@.txt'; Contents = 'imas uat @NONCE@'; Ensure = 'Present' } }
+    }
+    ImasUat -OutputPath 'C:\Windows\Temp\imas-uat-dsc-@NONCE@' | Out-Null
+    if (-not (Test-Path -LiteralPath 'C:\Windows\Temp\imas-uat-dsc-@NONCE@\localhost.mof')) { exit 1 }
+  recipe: |
+    steps:
+      uat dsc applied:
+        win_dsc.applied:
+          - name: 'imas-uat'
+          - path: 'C:\Windows\Temp\imas-uat-dsc-@NONCE@'
+  check: |
+    if ((Test-Path -LiteralPath 'C:\Windows\Temp\imas-uat-dsc-@NONCE@.txt') -and (Get-Content -Raw -LiteralPath 'C:\Windows\Temp\imas-uat-dsc-@NONCE@.txt') -match 'imas uat @NONCE@') { exit 0 }
+    exit 1
+  revert: |
+    Remove-DscConfigurationDocument -Stage Current, Previous, Pending -Force -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-dsc-@NONCE@', 'C:\Windows\Temp\imas-uat-dsc-@NONCE@.txt'
+    exit 0

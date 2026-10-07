@@ -1,0 +1,5 @@
+id: I.win_snmp.community_absent
+title: 'remove an SNMP community'
+needs: [windows-feature:SNMP-Service]
+skip: |
+  The ValidCommunities key exists only with the SNMP-Service feature; not on the UAT image, and installing SNMP adds a UDP 161 listener. Owner decision.

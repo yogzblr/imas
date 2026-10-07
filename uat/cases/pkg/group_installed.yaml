@@ -1,0 +1,25 @@
+id: I.pkg.group_installed
+title: 'install the package group ''Console Internet Tools'''
+os: [alma]
+needs: [internet]
+timeout: 20m
+skip_os:
+  windows: |
+    pkg uses snack, whose only Windows manager is winget; Windows Server 2022 Core doesn't ship winget (App Installer), so every pkg method can only fail there. A Desktop Experience or Server 2025 image would be needed (owner decision).
+  ubuntu: |
+    snack's apt manager has no package groups (no Grouper), so pkg.group_installed can only fail on the Debian family.
+notes: |
+  A small dnf group of console tools. The setup checks the group exists in AlmaLinux 9's repositories; the revert removes it.
+alma:
+  setup: |
+    dnf -q group info 'Console Internet Tools' >/dev/null 2>&1 || { echo 'no such dnf group'; exit 1; }
+    dnf -y -q group remove 'Console Internet Tools' >/dev/null 2>&1; true
+  recipe: |
+    steps:
+      uat pkg group_installed:
+        pkg.group_installed:
+          - name: 'Console Internet Tools'
+  check: |
+    dnf -q group list --installed 2>/dev/null | grep -qF 'Console Internet Tools'
+  revert: |
+    dnf -y -q group remove 'Console Internet Tools' >/dev/null 2>&1; true

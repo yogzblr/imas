@@ -1,0 +1,40 @@
+id: I.file.managed
+title: 'manage a file from a local source with a mode'
+os: [ubuntu, alma, windows]
+notes: |
+  mode is checked on Linux only. Reading the code, managed rewrites the file and reports a change on every real run and ignores user, group and mode, so this case is expected to report non-idempotence and the mode (a finding for the owner, from the source; not yet seen on a sprout).
+linux:
+  setup: |
+    printf 'imas uat source\n' > /var/tmp/imas-uat-src-@NONCE@
+  recipe: |
+    steps:
+      uat file managed:
+        file.managed:
+          - name: '/var/tmp/imas-uat-@NONCE@.txt'
+          - source: '/var/tmp/imas-uat-src-@NONCE@'
+          - source_hash: '3b0f3b746a2709515206249fcc793f3c42dc7ca94ce98217dc9b52802f8b1a8c'
+          - mode: '640'
+  check: |
+    cmp -s /var/tmp/imas-uat-src-@NONCE@ /var/tmp/imas-uat-@NONCE@.txt && [ "$(stat -c %a /var/tmp/imas-uat-@NONCE@.txt)" = 640 ]
+  revert: |
+    d=$(sed -n 's/^cachedir:[[:space:]]*//p' /etc/imas/sprout 2>/dev/null | tr -d "\"'" | head -n1)
+    [ -n "$d" ] || d=/var/cache/imas/sprout/files/provided
+    rm -f /var/tmp/imas-uat-@NONCE@.txt /var/tmp/imas-uat-src-@NONCE@ "$d/3b0f3b746a2709515206249fcc793f3c42dc7ca94ce98217dc9b52802f8b1a8c"
+windows:
+  setup: |
+    [IO.File]::WriteAllBytes('C:\Windows\Temp\imas-uat-src-@NONCE@', [Text.Encoding]::ASCII.GetBytes("imas uat source`n"))
+  recipe: |
+    steps:
+      uat file managed:
+        file.managed:
+          - name: 'C:\Windows\Temp\imas-uat-@NONCE@.txt'
+          - source: '/Windows/Temp/imas-uat-src-@NONCE@'
+          - source_hash: '3b0f3b746a2709515206249fcc793f3c42dc7ca94ce98217dc9b52802f8b1a8c'
+  check: |
+    if ((Test-Path -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.txt') -and (Get-FileHash -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.txt').Hash -eq '3B0F3B746A2709515206249FCC793F3C42DC7CA94CE98217DC9B52802F8B1A8C') { exit 0 }
+    exit 1
+  revert: |
+    $d = Join-Path $env:ProgramData 'imas\cache\sprout\files\provided'
+    $m = Select-String -LiteralPath (Join-Path $env:ProgramData 'imas\sprout') -Pattern '^cachedir:\s*(.+)$' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($m) { $d = $m.Matches[0].Groups[1].Value.Trim().Trim('"', "'") }
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.txt', 'C:\Windows\Temp\imas-uat-src-@NONCE@', (Join-Path $d '3b0f3b746a2709515206249fcc793f3c42dc7ca94ce98217dc9b52802f8b1a8c')

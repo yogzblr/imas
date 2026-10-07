@@ -1,0 +1,20 @@
+id: I.cron.absent
+title: 'remove a root crontab entry'
+os: [ubuntu, alma]
+needs: [internet]
+linux:
+  setup: |
+    command -v crontab >/dev/null 2>&1 || dnf -y -q install cronie || apt-get install -y -q cron
+    command -v crontab >/dev/null 2>&1
+    (crontab -l -u root 2>/dev/null; echo '# IMAS_CRON_ID:imas-uat-@NONCE@'; echo '17 3 * * * /bin/true imas-uat-@NONCE@') | crontab -u root -
+  recipe: |
+    steps:
+      uat cron absent:
+        cron.absent:
+          - name: 'imas-uat-@NONCE@'
+          - user: 'root'
+          - command: '/bin/true imas-uat-@NONCE@'
+  check: |
+    ! crontab -l -u root 2>/dev/null | grep -qF '/bin/true imas-uat-@NONCE@'
+  revert: |
+    crontab -l -u root 2>/dev/null | grep -vF 'imas-uat-@NONCE@' | crontab -u root -

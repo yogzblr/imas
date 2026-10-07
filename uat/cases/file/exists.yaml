@@ -1,0 +1,32 @@
+id: I.file.exists
+title: 'assert a file exists (no change)'
+os: [ubuntu, alma, windows]
+changes: false
+pre_check: present
+notes: |
+  An assertion method: it fails when the file is missing and changes nothing.
+linux:
+  setup: |
+    printf 'x\n' > /var/tmp/imas-uat-@NONCE@.txt
+  recipe: |
+    steps:
+      uat file exists:
+        file.exists:
+          - name: '/var/tmp/imas-uat-@NONCE@.txt'
+  check: |
+    [ -f /var/tmp/imas-uat-@NONCE@.txt ]
+  revert: |
+    rm -f /var/tmp/imas-uat-@NONCE@.txt
+windows:
+  setup: |
+    [IO.File]::WriteAllBytes('C:\Windows\Temp\imas-uat-@NONCE@.txt', [Text.Encoding]::ASCII.GetBytes("x`n"))
+  recipe: |
+    steps:
+      uat file exists:
+        file.exists:
+          - name: 'C:\Windows\Temp\imas-uat-@NONCE@.txt'
+  check: |
+    if (Test-Path -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.txt') { exit 0 }
+    exit 1
+  revert: |
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.txt'

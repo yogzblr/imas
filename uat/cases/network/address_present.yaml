@@ -1,0 +1,19 @@
+id: I.network.address_present
+title: 'add a TEST-NET address to the dummy interface'
+os: [ubuntu, alma]
+notes: |
+  Never touches the sprout's own connection: everything happens on a dummy interface the setup creates (iu<nonce>), with TEST-NET addresses (198.51.100.0/24, 203.0.113.0/24, RFC 5737) that route nowhere. The connectivity guard stays at its default (on). The revert deletes the interface, which takes its addresses and routes with it.
+linux:
+  setup: |
+    ip link add iu@NONCE@ type dummy
+    ip link set iu@NONCE@ up
+  recipe: |
+    steps:
+      uat network address_present:
+        network.address_present:
+          - name: 'iu@NONCE@'
+          - address: '198.51.100.7/32'
+  check: |
+    ip -o addr show dev iu@NONCE@ | grep -q '198.51.100.7/32'
+  revert: |
+    ip link del iu@NONCE@ 2>/dev/null; true

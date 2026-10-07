@@ -1,0 +1,27 @@
+id: I.cmd.run
+title: 'run a command that creates a marker file'
+os: [ubuntu, alma, windows]
+idempotent: false
+notes: |
+  cmd.run runs on every cook by design, so the second real cook runs it again (idempotent: false). A command that ran is a change (as Salt reports it). Windows uses forward slashes and no shell characters: reading the code, a command with any of |><$;`"'&\ is run through /bin/sh, which Windows doesn't have. Reading the code, test mode returns a result that isn't Succeeded and the real run never sets Changed, so this case is expected to report both (findings from the source).
+linux:
+  recipe: |
+    steps:
+      uat cmd run:
+        cmd.run:
+          - name: 'touch /var/tmp/imas-uat-@NONCE@.cmd'
+  check: |
+    [ -f /var/tmp/imas-uat-@NONCE@.cmd ]
+  revert: |
+    rm -f /var/tmp/imas-uat-@NONCE@.cmd
+windows:
+  recipe: |
+    steps:
+      uat cmd run:
+        cmd.run:
+          - name: 'powershell.exe -NoProfile -NonInteractive -Command New-Item -ItemType File -Force -Path C:/Windows/Temp/imas-uat-@NONCE@.cmd'
+  check: |
+    if (Test-Path -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.cmd') { exit 0 }
+    exit 1
+  revert: |
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.cmd'

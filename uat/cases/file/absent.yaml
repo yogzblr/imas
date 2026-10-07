@@ -1,0 +1,28 @@
+id: I.file.absent
+title: 'delete a file'
+os: [ubuntu, alma, windows]
+linux:
+  setup: |
+    printf 'x\n' > /var/tmp/imas-uat-@NONCE@.txt
+  recipe: |
+    steps:
+      uat file absent:
+        file.absent:
+          - name: '/var/tmp/imas-uat-@NONCE@.txt'
+  check: |
+    [ ! -e /var/tmp/imas-uat-@NONCE@.txt ]
+  revert: |
+    rm -f /var/tmp/imas-uat-@NONCE@.txt
+windows:
+  setup: |
+    [IO.File]::WriteAllBytes('C:\Windows\Temp\imas-uat-@NONCE@.txt', [Text.Encoding]::ASCII.GetBytes("x`n"))
+  recipe: |
+    steps:
+      uat file absent:
+        file.absent:
+          - name: 'C:\Windows\Temp\imas-uat-@NONCE@.txt'
+  check: |
+    if (Test-Path -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.txt') { exit 1 }
+    exit 0
+  revert: |
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.txt'

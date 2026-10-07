@@ -1,0 +1,32 @@
+id: I.user.exists
+title: 'assert a local user exists (no change)'
+os: [ubuntu, alma, windows]
+changes: false
+pre_check: present
+linux:
+  setup: |
+    useradd -M iuu@NONCE@
+  recipe: |
+    steps:
+      uat user exists:
+        user.exists:
+          - name: 'iuu@NONCE@'
+  check: |
+    getent passwd iuu@NONCE@ >/dev/null
+  revert: |
+    userdel -r iuu@NONCE@ 2>/dev/null; userdel iuu@NONCE@ 2>/dev/null; true
+windows:
+  setup: |
+    net user iuu@NONCE@ 'Uat-@NONCE@-Pw1!' /add
+    exit $LASTEXITCODE
+  recipe: |
+    steps:
+      uat user exists:
+        user.exists:
+          - name: 'iuu@NONCE@'
+  check: |
+    net user iuu@NONCE@ > $null 2>&1
+    exit $LASTEXITCODE
+  revert: |
+    net user iuu@NONCE@ /delete > $null 2>&1
+    exit 0

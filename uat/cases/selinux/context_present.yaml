@@ -1,0 +1,21 @@
+id: I.selinux.context_present
+title: 'label a scratch file'
+os: [alma]
+skip_os:
+  ubuntu: |
+    Ubuntu uses AppArmor; SELinux isn't enabled there, so the selinux methods can only fail. They run on AlmaLinux.
+notes: |
+  Relabels a file the setup creates under /var/tmp; the revert deletes it.
+alma:
+  setup: |
+    printf 'x\n' > /var/tmp/imas-uat-@NONCE@.ctx
+  recipe: |
+    steps:
+      uat selinux context_present:
+        selinux.context_present:
+          - name: '/var/tmp/imas-uat-@NONCE@.ctx'
+          - context: 'system_u:object_r:httpd_sys_content_t:s0'
+  check: |
+    [ "$(stat -c %C /var/tmp/imas-uat-@NONCE@.ctx)" = system_u:object_r:httpd_sys_content_t:s0 ]
+  revert: |
+    rm -f /var/tmp/imas-uat-@NONCE@.ctx

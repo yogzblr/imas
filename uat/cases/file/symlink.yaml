@@ -1,0 +1,33 @@
+id: I.file.symlink
+title: 'create a symbolic link'
+os: [ubuntu, alma, windows]
+notes: |
+  On Windows the sprout runs as LocalSystem, which holds the symbolic link privilege.
+linux:
+  setup: |
+    printf 'target\n' > /var/tmp/imas-uat-@NONCE@.txt
+  recipe: |
+    steps:
+      uat file symlink:
+        file.symlink:
+          - name: '/var/tmp/imas-uat-link-@NONCE@'
+          - target: '/var/tmp/imas-uat-@NONCE@.txt'
+  check: |
+    [ -L /var/tmp/imas-uat-link-@NONCE@ ] && [ "$(readlink /var/tmp/imas-uat-link-@NONCE@)" = /var/tmp/imas-uat-@NONCE@.txt ]
+  revert: |
+    rm -f /var/tmp/imas-uat-link-@NONCE@ /var/tmp/imas-uat-@NONCE@.txt
+windows:
+  setup: |
+    [IO.File]::WriteAllBytes('C:\Windows\Temp\imas-uat-@NONCE@.txt', [Text.Encoding]::ASCII.GetBytes("target`n"))
+  recipe: |
+    steps:
+      uat file symlink:
+        file.symlink:
+          - name: 'C:\Windows\Temp\imas-uat-link-@NONCE@'
+          - target: 'C:\Windows\Temp\imas-uat-@NONCE@.txt'
+  check: |
+    $i = Get-Item -LiteralPath 'C:\Windows\Temp\imas-uat-link-@NONCE@' -ErrorAction SilentlyContinue
+    if ($i -and $i.LinkType -eq 'SymbolicLink' -and @($i.Target)[0] -eq 'C:\Windows\Temp\imas-uat-@NONCE@.txt') { exit 0 }
+    exit 1
+  revert: |
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-link-@NONCE@', 'C:\Windows\Temp\imas-uat-@NONCE@.txt'

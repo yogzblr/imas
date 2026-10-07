@@ -1,0 +1,33 @@
+id: I.file.line
+title: 'ensure a line in a file'
+os: [ubuntu, alma, windows]
+linux:
+  setup: |
+    printf 'alpha\nbeta\n' > /var/tmp/imas-uat-@NONCE@.txt
+  recipe: |
+    steps:
+      uat file line:
+        file.line:
+          - name: '/var/tmp/imas-uat-@NONCE@.txt'
+          - mode: 'ensure'
+          - content: 'gamma @NONCE@'
+  check: |
+    [ "$(grep -cx 'gamma @NONCE@' /var/tmp/imas-uat-@NONCE@.txt)" = 1 ] && grep -qx alpha /var/tmp/imas-uat-@NONCE@.txt && grep -qx beta /var/tmp/imas-uat-@NONCE@.txt
+  revert: |
+    rm -f /var/tmp/imas-uat-@NONCE@.txt
+windows:
+  setup: |
+    [IO.File]::WriteAllBytes('C:\Windows\Temp\imas-uat-@NONCE@.txt', [Text.Encoding]::ASCII.GetBytes("alpha`nbeta`n"))
+  recipe: |
+    steps:
+      uat file line:
+        file.line:
+          - name: 'C:\Windows\Temp\imas-uat-@NONCE@.txt'
+          - mode: 'ensure'
+          - content: 'gamma @NONCE@'
+  check: |
+    $l = @(Get-Content -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.txt')
+    if (@($l | Where-Object { $_ -eq 'gamma @NONCE@' }).Count -eq 1 -and $l -contains 'alpha' -and $l -contains 'beta') { exit 0 }
+    exit 1
+  revert: |
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.txt'
