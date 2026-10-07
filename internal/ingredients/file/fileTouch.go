@@ -75,6 +75,7 @@ func (f File) touch(ctx context.Context, test bool) (cook.Result, error) {
 		}, ErrModifyRoot
 	}
 	stt, err := os.Stat(name)
+	created := false
 	if errors.Is(err, os.ErrNotExist) {
 		needsMkdirs := false
 		fileDir := filepath.Dir(name)
@@ -90,15 +91,16 @@ func (f File) touch(ctx context.Context, test bool) (cook.Result, error) {
 				},
 			}, ErrPathNotFound
 		}
+		if test {
+			// Test mode changes nothing: not the directory, not the file.
+			return cook.Result{
+				Succeeded: true, Failed: false,
+				Changed: true, Notes: []fmt.Stringer{
+					cook.Snprintf("file `%s` to be created with provided timestamps", name),
+				},
+			}, nil
+		}
 		if needsMkdirs {
-			if test {
-				return cook.Result{
-					Succeeded: true, Failed: false,
-					Changed: true, Notes: []fmt.Stringer{
-						cook.Snprintf("file `%s` to be created with provided timestamps", name),
-					},
-				}, nil
-			}
 			dirErr = os.MkdirAll(fileDir, 0o755)
 			if dirErr != nil {
 				return cook.Result{
@@ -119,6 +121,7 @@ func (f File) touch(ctx context.Context, test bool) (cook.Result, error) {
 			}, errCreate
 		}
 		f.Close()
+		created = true
 		stt, _ = os.Stat(name)
 	}
 	omt := stt.ModTime()
@@ -163,6 +166,17 @@ func (f File) touch(ctx context.Context, test bool) (cook.Result, error) {
 				Changed: true, Notes: notes,
 			}, nil
 		}
+	}
+
+	if !created && omt.Equal(mTime) && oat.Equal(aTime) {
+		// Both timestamps are already what was asked for (test mode
+		// returned above): nothing to change, and no change to report.
+		return cook.Result{
+			Succeeded: true, Failed: false,
+			Changed: false, Notes: []fmt.Stringer{
+				cook.Snprintf("file `%s` already has provided timestamps", name),
+			},
+		}, nil
 	}
 
 	err = os.Chtimes(name, aTime, mTime)
