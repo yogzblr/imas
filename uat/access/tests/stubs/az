@@ -3,11 +3,21 @@
 # run-commands run locally (with stubs first on PATH), Windows run-commands
 # return canned output. Behaviour comes from files in $STUB_STATE.
 set -u
-{
-  printf 'az'
-  printf ' %q' "$@"
-  echo
-} >>"$STUB_STATE/calls.log"
+# log_line <text>: appends one line to calls.log in a single write, under an
+# flock when available. Stubs run concurrently (tunnels.sh starts every tunnel
+# at once), and a line written in pieces can be glued to another stub's.
+log_line() {
+  if command -v flock >/dev/null 2>&1; then
+    { flock 9; printf '%s\n' "$1" >&9; } 9>>"$STUB_STATE/calls.log"
+  else
+    printf '%s\n' "$1" >>"$STUB_STATE/calls.log"
+  fi
+}
+line=az
+for a in "$@"; do
+  line+=" $(printf '%q' "$a")"
+done
+log_line "$line"
 
 arg() { # arg <flag> <args...>: the value after <flag>
   local f=$1; shift
@@ -83,7 +93,7 @@ case "$1 $2" in
         '{value: [{code: "ProvisioningState/succeeded", level: "Info", message: $m}]}'
     elif [ "$cid" = RunPowerShellScript ]; then
       b64=$(printf '%s\n' "$script" | sed -n "s/.*FromBase64String('\([^']*\)').*/\1/p" | head -n 1)
-      printf 'decoded: %s\n' "$(printf '%s' "$b64" | base64 -d)" >>"$STUB_STATE/calls.log"
+      log_line "decoded: $(printf '%s' "$b64" | base64 -d)"
       # shellcheck disable=SC2016 # a literal PowerShell line
       if ! printf '%s\n' "$script" | tail -n 1 | grep -qxF 'Write-Output "__IMAS_VMCTL_RC__$__rc"'; then
         echo "stub az: the PowerShell wrapper does not end with the exit code marker" >&2

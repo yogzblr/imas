@@ -2,7 +2,17 @@
 # Stub az for destroy_test.sh. Logs its arguments; behaviour comes from files
 # in $STUB_STATE.
 set -u
-echo "az $*" >>"$STUB_STATE/calls.log"
+# log_line <text>: appends one line to calls.log in a single write, under an
+# flock when available. Stubs run concurrently (tunnels.sh starts every tunnel
+# at once), and a line written in pieces can be glued to another stub's.
+log_line() {
+  if command -v flock >/dev/null 2>&1; then
+    { flock 9; printf '%s\n' "$1" >&9; } 9>>"$STUB_STATE/calls.log"
+  else
+    printf '%s\n' "$1" >>"$STUB_STATE/calls.log"
+  fi
+}
+log_line "az $*"
 case "$1 $2" in
   "storage account")
     cat "$STUB_STATE/account" 2>/dev/null
