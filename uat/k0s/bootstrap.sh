@@ -133,6 +133,7 @@ check_settings() {
     fi
   done
   [[ $UAT_CLUSTER_ISSUER =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || die "config.env: bad UAT_CLUSTER_ISSUER"
+  is_fqdn "$UAT_PRIVATE_DNS_ZONE" || die "config.env: bad UAT_PRIVATE_DNS_ZONE"
   [[ $UAT_CA_SECRET =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || die "config.env: bad UAT_CA_SECRET"
   [[ $UAT_CA_DAYS =~ ^[1-9][0-9]*$ ]] || die "config.env: bad UAT_CA_DAYS"
 }
@@ -200,9 +201,18 @@ render_hub() {
 # write_endpoints writes the hubs' names, addresses and exposed ports for the
 # hub scripts and the tests: the uat JSON's dmz and core objects plus ports
 # (the keys uat/hub/dmz reads: dmz.ports.envoy, dmz.ports.bus,
-# core.ports.farmer_api, cluster_issuer).
+# core.ports.farmer_api, cluster_issuer, private_dns_zone). The two hub
+# readers use different spellings for the issuer and the private names
+# (uat/hub/dmz: cluster_issuer, private_dns_zone; uat/hub/core:
+# ca.cluster_issuer, dmz.private_fqdn, core.private_fqdn), so both forms are
+# written, with the same values.
 write_endpoints() {
+  local zone
+  zone=$(jq -r '.private_dns_zone // empty' "$UAT_JSON")
+  [[ -n $zone ]] || zone=$UAT_PRIVATE_DNS_ZONE
+  is_fqdn "$zone" || die "uat JSON: bad private_dns_zone: $zone"
   jq -n \
+    --arg zone "$zone" \
     --arg run_id "$RUN_ID" \
     --arg dn "${NAME[dmz]}" --arg dp "${PRIV_IP[dmz]}" --arg dq "${PUB_IP[dmz]}" --arg df "${FQDN[dmz]}" \
     --arg cn "${NAME[core]}" --arg cp "${PRIV_IP[core]}" --arg cq "${PUB_IP[core]}" --arg cf "${FQDN[core]}" \
@@ -214,16 +224,20 @@ write_endpoints() {
     {
       run_id: $run_id,
       dmz: {name: $dn, private_ip: $dp, public_ip: $dq, fqdn: $df,
+            private_fqdn: ("dmz." + $zone),
             ports: {envoy: $envoy, bus: $bus},
             exposure: "node ports, Services owned by uat/hub/dmz",
             node_port_range: $drange},
       core: {name: $cn, private_ip: $cp, public_ip: $cq, fqdn: $cf,
+             private_fqdn: ("core." + $zone),
              ports: {https: $https, farmer_api: $api},
              # Exactly "hostPort": uat/hub/core/lib/common.sh accepts
              # nothing else (owner decision, 2026-10-06: no core node ports).
              exposure: "hostPort",
              node_port_range: $crange},
+      private_dns_zone: $zone,
       cluster_issuer: $issuer,
+      ca: {cluster_issuer: $issuer},
       ca_file: "uat-ca.crt",
       kubeconfigs: {dmz: "dmz.kubeconfig", core: "core.kubeconfig"},
       k0s_version: $k0s

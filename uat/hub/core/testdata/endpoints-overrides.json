@@ -7,8 +7,6 @@
       "envoy": 30443,
       "bus": 30406
     },
-    "bus_service": "uat-dmz-nats-bus",
-    "bus_namespace": "imas-dmz",
     "private_fqdn": "dmz.rig.test"
   },
   "core": {

@@ -103,7 +103,8 @@ if gv "$ep" "$admin" v0.1.0-rc.4 >"$tmp/v1.json" 2>"$tmp/out"; then
 	  and .saasapi.jwt.keycloakJWKSURL == .saasapi.jwt.issuer + "/protocol/openid-connect/certs"
 	  and .saasapi.jwt.audience == "imas-saasapi"
 	  and .bus.sproutBusURLs == ["wss://uatabc123-dmz.centralindia.cloudapp.azure.com:8443/"]
-	  and .bus.serviceName == "imas-dmz-nats-bus" and .bus.namespace == "imas-dmz" and .bus.port == 8442
+	  and .bus.host == "dmz.uat.imas.internal" and .bus.egressCIDRs == ["10.60.1.4/32"] and .bus.port == 8442
+	  and (.bus | has("serviceName") | not)
 	  and .farmer.image.tag == "0.1.0-rc.4" and .saasapi.image.tag == "0.1.0-rc.4"
 	  and .database.migrate.image.tag == "0.1.0-rc.4"
 	  and .farmer.bootstrapAdmin.pubkey == "AC4LMP7I2FYLWGY5GIB52A4XCFFFSB2QTZ65B3A4G6OK5GYWRJSKH74C"
@@ -115,10 +116,28 @@ else
 fi
 gv "$ep2" "$admin" v1.2.3 >"$tmp/v2.json" 2>/dev/null &&
 	jq -e '.saasapi.jwt.issuer == "https://core.imas-uat.test:30444/realms/imas-uat"
-	  and .bus.sproutBusURLs == ["wss://dmz.imas-uat.test:30443/"] and .bus.serviceName == "uat-dmz-nats-bus" and .bus.port == 30406
+	  and .bus.sproutBusURLs == ["wss://dmz.imas-uat.test:30443/"] and .bus.host == "dmz.rig.test" and .bus.egressCIDRs == ["172.18.0.2/32"] and .bus.port == 30406
 	  and .farmer.image.tag == "1.2.3"' "$tmp/v2.json" >/dev/null &&
 	ok "gen-values.sh: port and name overrides, non-443 issuer keeps the port" ||
 	bad "gen-values.sh: port and name overrides"
+# The two readers spell the issuer and the private names differently
+# (uat/hub/dmz: cluster_issuer, private_dns_zone; uat/hub/core: ca.cluster_issuer,
+# *.private_fqdn). An endpoints file with only one form must give the same
+# values here, and the bus host is the DMZ private name in every case.
+readvals() { bash -c '. "$1/lib/common.sh"; ENDPOINTS="$2"; load_endpoints; printf "%s %s %s" "$CA_ISSUER" "$DMZ_PRIVATE_FQDN" "$CORE_PRIVATE_FQDN"' _ "$core" "$1"; }
+jq '. + {cluster_issuer: "dmz-form-ca", private_dns_zone: "zone.test"}' "$ep" >"$tmp/form-dmz.json"
+[[ "$(readvals "$tmp/form-dmz.json" 2>&1)" == "dmz-form-ca dmz.zone.test core.zone.test" ]] &&
+	ok "endpoints with only cluster_issuer and private_dns_zone are read" || bad "endpoints with only the dmz-form keys"
+jq '. + {ca: {cluster_issuer: "core-form-ca"}} | .dmz.private_fqdn = "dmz.core-form.test" | .core.private_fqdn = "core.core-form.test"' "$ep" >"$tmp/form-core.json"
+[[ "$(readvals "$tmp/form-core.json" 2>&1)" == "core-form-ca dmz.core-form.test core.core-form.test" ]] &&
+	ok "endpoints with only ca.cluster_issuer and *.private_fqdn are read" || bad "endpoints with only the core-form keys"
+jq '. + {cluster_issuer: "dmz-form-ca", ca: {cluster_issuer: "core-form-ca"}, private_dns_zone: "zone.test"} | .dmz.private_fqdn = "dmz.explicit.test"' "$ep" >"$tmp/form-both.json"
+[[ "$(readvals "$tmp/form-both.json" 2>&1)" == "core-form-ca dmz.explicit.test core.zone.test" ]] &&
+	ok "ca.cluster_issuer and an explicit private_fqdn win over the other form" || bad "endpoints with both forms"
+[[ "$(readvals "$ep" 2>&1)" == "imas-uat-ca dmz.uat.imas.internal core.uat.imas.internal" ]] &&
+	ok "endpoints with neither form get the defaults" || bad "endpoints with neither form"
+gv "$tmp/form-dmz.json" "$admin" v0.1.0 2>/dev/null | jq -e '.bus.host == "dmz.zone.test"' >/dev/null &&
+	ok "gen-values.sh: bus.host follows the zone form" || bad "gen-values.sh: bus.host with the zone form"
 refuse "release_tag latest is refused" "never latest" gv "$ep" "$admin" latest
 refuse "release_tag without v is refused" "vX.Y.Z" gv "$ep" "$admin" 0.1.0
 refuse "release_tag with a build suffix is refused" "vX.Y.Z" gv "$ep" "$admin" v0.1.0-beta.1

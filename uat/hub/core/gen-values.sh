@@ -29,8 +29,8 @@ boxpub=$(jq -r '.boxpub // empty' "$admin_json")
 
 jq -n \
 	--arg version "$version" \
-	--arg busService "$BUS_SERVICE" \
-	--arg busNamespace "$BUS_NAMESPACE" \
+	--arg busHost "$DMZ_PRIVATE_FQDN" \
+	--arg busCIDR "$DMZ_IP/32" \
 	--arg busPort "$DMZ_BUS_PORT" \
 	--arg sproutBusURL "$SPROUT_BUS_URL" \
 	--arg clusterDomain "$CLUSTER_DOMAIN" \
@@ -43,12 +43,11 @@ jq -n \
 	'{
 	  clusterDomain: $clusterDomain,
 	  bus: {
-	    serviceName: $busService,
-	    namespace: $busNamespace,
+	    host: $busHost,
 	    port: ($busPort | tonumber),
+	    egressCIDRs: [$busCIDR],
 	    sproutBusURLs: [$sproutBusURL]
 	  },
-	  networkPolicy: {dmz: {namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": $busNamespace}}}},
 	  farmer: {
 	    image: {tag: $version},
 	    bootstrapAdmin: {pubkey: $pubkey, boxpub: $boxpub, username: $adminName}

@@ -102,12 +102,18 @@ dmz_load_endpoints() {
 	CORE_FQDN=$(_dmz_jq "$f" '.core.fqdn')
 	CORE_PRIVATE_IP=$(_dmz_jq "$f" '.core.private_ip')
 	CORE_FARMER_API_PORT=$(_dmz_jq "$f" ".core.ports.farmer_api // $DMZ_DEFAULT_FARMER_API_PORT")
-	DMZ_CLUSTER_ISSUER=$(_dmz_jq "$f" ".cluster_issuer // \"$DMZ_DEFAULT_CLUSTER_ISSUER\"")
+	# uat/hub/core spells the issuer ca.cluster_issuer; both forms are read
+	# (cluster_issuer first), so one endpoints file serves both hubs.
+	DMZ_CLUSTER_ISSUER=$(_dmz_jq "$f" "(.cluster_issuer // (.ca? | objects | .cluster_issuer)) // \"$DMZ_DEFAULT_CLUSTER_ISSUER\"")
 	# The names are a convention on the zone, not keys of the tofu output.
+	# uat/hub/core reads them as dmz.private_fqdn and core.private_fqdn: an
+	# explicit one wins, else dmz.<zone> and core.<zone>.
 	DMZ_PRIVATE_DNS_ZONE=$(_dmz_jq "$f" ".private_dns_zone // \"$DMZ_DEFAULT_PRIVATE_DNS_ZONE\"")
 	_dmz_is_fqdn "$DMZ_PRIVATE_DNS_ZONE" || dmz_die "endpoints: private_dns_zone '$DMZ_PRIVATE_DNS_ZONE' is not a DNS name"
-	DMZ_PRIVATE_NAME="dmz.${DMZ_PRIVATE_DNS_ZONE}"
-	CORE_PRIVATE_NAME="core.${DMZ_PRIVATE_DNS_ZONE}"
+	DMZ_PRIVATE_NAME=$(_dmz_jq "$f" ".dmz.private_fqdn // \"dmz.${DMZ_PRIVATE_DNS_ZONE}\"")
+	CORE_PRIVATE_NAME=$(_dmz_jq "$f" ".core.private_fqdn // \"core.${DMZ_PRIVATE_DNS_ZONE}\"")
+	_dmz_is_fqdn "$DMZ_PRIVATE_NAME" || dmz_die "endpoints: dmz.private_fqdn '$DMZ_PRIVATE_NAME' is not a DNS name"
+	_dmz_is_fqdn "$CORE_PRIVATE_NAME" || dmz_die "endpoints: core.private_fqdn '$CORE_PRIVATE_NAME' is not a DNS name"
 	# How Envoy is exposed, when the file says (UAT.2's PR #130 writes it);
 	# install.sh --expose overrides it.
 	DMZ_ENVOY_SERVICE_TYPE=$(_dmz_jq "$f" '.dmz.envoy_service_type')

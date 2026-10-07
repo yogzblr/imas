@@ -503,6 +503,41 @@ func TestRenderNodePortAndPorts(t *testing.T) {
 	})
 }
 
+// uat/hub/core spells the issuer ca.cluster_issuer and the private names
+// dmz.private_fqdn and core.private_fqdn; a file with only those keys (no
+// cluster_issuer, no private_dns_zone) must read the same here, and the
+// bus certificate must carry the name core dials as bus.host.
+func TestRenderCoreFormKeys(t *testing.T) {
+	ep := writeJSON(t, endpointsWith(func(e obj) {
+		e["ca"] = obj{"cluster_issuer": "core-form-ca"}
+		e["dmz"].(obj)["private_fqdn"] = "dmz.form.test"
+		e["core"].(obj)["private_fqdn"] = "core.form.test"
+	}))
+	r := render(t, ep)
+	checkRender(t, r, want{
+		dmzFQDN: "dmz.uat.test", dmzIP: "10.60.1.4", coreIP: "10.60.2.4", zone: "form.test", issuer: "core-form-ca",
+		envoyPort: 8443, busPort: 8442, farmerPort: 5405, expose: "nodeport",
+	})
+}
+
+// An explicit private_fqdn wins over the zone, and cluster_issuer over
+// ca.cluster_issuer, as in uat/hub/core.
+func TestRenderExplicitPrivateNameBeatsZone(t *testing.T) {
+	ep := writeJSON(t, endpointsWith(func(e obj) {
+		e["private_dns_zone"] = "zone.test"
+		e["dmz"].(obj)["private_fqdn"] = "dmz.explicit.test"
+	}))
+	r := render(t, ep)
+	busCert := find(t, r.manifests, "Certificate", "imas-farmerbus-tls")
+	names := strs(get(busCert, "spec", "dnsNames"))
+	if !slices.Contains(names, "dmz.explicit.test") || slices.Contains(names, "dmz.zone.test") {
+		t.Errorf("bus Certificate dnsNames %v: want dmz.explicit.test (the name core dials), not dmz.zone.test", names)
+	}
+	if got := get(r.outputs, "bus", "farmerbusurl"); got != "tls://dmz.explicit.test:8442" {
+		t.Errorf("farmerbusurl %v, want tls://dmz.explicit.test:8442", got)
+	}
+}
+
 func writeJSON(t *testing.T, v any) string {
 	t.Helper()
 	b, err := json.Marshal(v)

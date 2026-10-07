@@ -9,7 +9,7 @@
 #       (admin-keys.sh, the release's own imas CLI)
 #    3. the published farmer chart of release_tag, pulled and checked
 #    4. the UAT-only pieces (chart/): MinIO, Keycloak with the imas-uat
-#       realm, the edge proxy, the DMZ bus endpoint, certificates, policies
+#       realm, the edge proxy, certificates, policies
 #    5. MinIO buckets, users and policies (minio-setup.sh)
 #    6. the farmer chart, with OpenBao initialised and unsealed while the
 #       install runs (openbao-bootstrap.sh)
@@ -39,7 +39,7 @@ kc get clusterissuer "$CA_ISSUER" >/dev/null 2>&1 ||
 	die "ClusterIssuer $CA_ISSUER not found: the UAT CA (UAT.2) must exist first"
 
 # --- 1. namespaces and generated credentials --------------------------------
-ensure_ns "$CORE_NS" "$UAT_NS" "$BUS_NAMESPACE"
+ensure_ns "$CORE_NS" "$UAT_NS"
 
 kcdir="$SENSITIVE_DIR/keycloak"
 mdir="$SENSITIVE_DIR/minio"
@@ -92,7 +92,7 @@ tar -xzf "$chart_tgz" -O farmer/files/objectstore-policies/saasapi-recipes.json 
 	die "$chart_tgz has no files/objectstore-policies/saasapi-recipes.json"
 
 # --- 4. the UAT-only pieces --------------------------------------------------
-log "installing $EXTRAS_RELEASE (MinIO, Keycloak, edge proxy, bus endpoint, certificates)"
+log "installing $EXTRAS_RELEASE (MinIO, Keycloak, edge proxy, certificates)"
 mapfile -t extras_args < <(extras_set_args)
 hc upgrade --install "$EXTRAS_RELEASE" "$here/chart" -n "$UAT_NS" --wait --timeout 20m "${extras_args[@]}" >&2 ||
 	die "the UAT-only chart did not become ready (kubectl -n $UAT_NS get pods)"
