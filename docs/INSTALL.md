@@ -43,9 +43,22 @@ If you have questions, [open an issue](https://github.com/yogzblr/imas/issues/ne
 Each release publishes signed multi-arch (amd64, arm64) container images to
 GHCR: `ghcr.io/yogzblr/imas-{farmer,sprout,saasapi,farmerbus,fleetreleaser}`,
 tagged with the release version (no leading `v`) and `latest`. The Helm charts
-(`farmer`, `nats`) are published to the Buildkite Helm registry `imashelm`
-with the same version, and default to the matching image tag. Verify
-signatures as described in [`SECURITY.md`](../SECURITY.md).
+(`farmer`, `nats`) are published to GHCR as OCI charts,
+`oci://ghcr.io/yogzblr/charts/farmer` and `oci://ghcr.io/yogzblr/charts/nats`,
+with the same version, and default to the matching image tag. Pull one with
+an exact version (a pre-release needs it too; Helm 3.8 or later, or 4):
+
+```sh
+helm pull oci://ghcr.io/yogzblr/charts/farmer --version 0.1.0-rc.5 --destination .
+```
+
+If the pull is refused, the chart package may still be private: the owner
+makes each chart package public once, in its GHCR package settings, after the
+first push. The Buildkite Helm registry `imashelm` is superseded for charts
+and no longer receives them. Verify signatures as described in
+[`SECURITY.md`](../SECURITY.md); the charts are signed by digest the same
+way (identity: `publish-packages.yml`, see
+[`docs/RELEASING.md`](RELEASING.md)).
 
 To build every binary from source, run `make` on Linux (or `GOOS=linux make`
 elsewhere); binaries land in `bin/`. You need a Go toolchain

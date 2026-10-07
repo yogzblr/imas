@@ -247,6 +247,13 @@ It needs:
 | `BUILDKITE_PACKAGES_TOKEN` | secret (repo or `goreleaser` environment) | Buildkite API access token with Read Packages + Write Packages |
 | `BUILDKITE_ORGANIZATION_SLUG` | variable | org that owns the three registries |
 
+The Helm charts are no longer in this list. They go to GHCR as OCI charts
+(`oci://ghcr.io/yogzblr/charts/{farmer,nats}`), pushed and cosign-signed by
+the same workflow's last steps; `packaging/buildkite/publish-helm.sh` was
+removed and the Buildkite `imashelm` registry is superseded for charts
+(`docs/RELEASING.md`, "Helm charts on GHCR"). `only_helm` skips the uploads
+above and publishes only the charts.
+
 `DRY_RUN=1` lists what would be uploaded. If a package type is missing, or an
 upload returns non-2xx (including a duplicate version), the job fails.
 Re-running `workflow_dispatch` for a tag whose packages partly made it up will

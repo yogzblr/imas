@@ -5,6 +5,22 @@ trust chain: the DMZ-facing NATS bus and the Envoy gateway in front of it.
 Read [Security review notes](#security-review-notes) before exposing it
 to anything. Treat the defaults as a non-production starting point.
 
+## The published chart
+
+Each release pushes this chart to GitHub Container Registry as an OCI chart,
+signed by digest with keyless cosign (`docs/RELEASING.md`, "Helm charts on
+GHCR"). Pull it anonymously, at an exact version (no `--devel`, no range;
+Helm 3.8 or later, or 4):
+
+```sh
+helm pull oci://ghcr.io/yogzblr/charts/nats --version 0.1.0-rc.5 --destination .
+```
+
+The chart `version` and `appVersion` are the release version without its `v`.
+If the pull is refused, the chart package may still be private: the owner
+makes each chart package public once, in its GHCR package settings, after the
+first push. The Buildkite `imashelm` registry is superseded for charts.
+
 It deploys:
 
 - **The bus.** `cmd/farmerbus` runs as a StatefulSet. It is the DMZ half
