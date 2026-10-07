@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 # Stub systemctl for access_test.sh: run-command scripts run locally in the
 # test, so the sprout service commands land here.
-echo "systemctl $*" >>"$STUB_STATE/calls.log"
+# log_line <text>: appends one line to calls.log in a single write, under an
+# flock when available. Stubs run concurrently (tunnels.sh starts every tunnel
+# at once), and a line written in pieces can be glued to another stub's.
+log_line() {
+  if command -v flock >/dev/null 2>&1; then
+    { flock 9; printf '%s\n' "$1" >&9; } 9>>"$STUB_STATE/calls.log"
+  else
+    printf '%s\n' "$1" >>"$STUB_STATE/calls.log"
+  fi
+}
+log_line "systemctl $*"
 exit "$(cat "$STUB_STATE/systemctl_rc" 2>/dev/null || echo 0)"
