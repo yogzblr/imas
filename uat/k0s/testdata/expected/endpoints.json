@@ -21,7 +21,7 @@
       "https": 443,
       "farmer_api": 5405
     },
-    "exposure": "hostPorts on the uat/hub/core edge, no node ports",
+    "exposure": "hostPort",
     "node_port_range": "30000-32767"
   },
   "cluster_issuer": "imas-uat-ca",

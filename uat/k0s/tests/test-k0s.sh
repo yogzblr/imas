@@ -270,11 +270,43 @@ E="$CASE/out/endpoints.json"
 [[ $(jq -r '.dmz.ports.envoy' "$E") == 8443 ]] && pass || fail "envoy port"
 [[ $(jq -r '.dmz.node_port_range' "$E") == 8442-8443 ]] && pass || fail "dmz range"
 [[ $(jq -r '.dmz.exposure' "$E") == *"uat/hub/dmz"* ]] && pass || fail "dmz exposure owner"
-[[ $(jq -r '.core.exposure' "$E") == "hostPorts on the uat/hub/core edge, no node ports" ]] && pass || fail "core exposure"
+[[ $(jq -r '.core.exposure' "$E") == hostPort ]] && pass || fail "core.exposure is not exactly hostPort"
 [[ $(jq -r '.core.node_port_range' "$E") == 30000-32767 ]] && pass || fail "core range"
 [[ $(jq -r '.dmz.ports.bus' "$E") == 8442 ]] && pass || fail "bus port"
 [[ $(jq -r '.core.ports.farmer_api' "$E") == 5405 ]] && pass || fail "farmer api port"
 [[ $(jq -r '.cluster_issuer' "$E") == imas-uat-ca ]] && pass || fail "issuer"
+
+# The hub briefs' own endpoint loaders, read only, against what bootstrap.sh
+# writes: they must accept it and read the same values.
+t "render: uat/hub/core's endpoint loader accepts endpoints.json"
+CORE_LIB="$K0S/../hub/core/lib/common.sh"
+if [[ -r $CORE_LIB ]]; then
+  if got=$(bash -c 'set -euo pipefail; source "$1"; ENDPOINTS=$2; load_endpoints
+      printf "%s %s %s %s %s %s %s" "$CORE_EXPOSURE" "$CORE_FQDN" "$CORE_IP" \
+        "$CORE_HTTPS_PORT" "$CORE_FARMER_PORT" "$DMZ_ENVOY_PORT" "$DMZ_BUS_PORT"' _ "$CORE_LIB" "$E" 2>&1); then
+    want="hostPort uatab12cd34-core.centralindia.cloudapp.azure.com 10.60.2.4 443 5405 8443 8442"
+    [[ $got == "$want" ]] && pass || fail "uat/hub/core read '$got', want '$want'"
+  else
+    fail "uat/hub/core's load_endpoints refused endpoints.json: $got"
+  fi
+else
+  echo "skip: $CORE_LIB not present (uat/hub/core loader check)"
+fi
+
+t "render: uat/hub/dmz's endpoint loader accepts endpoints.json"
+DMZ_LIB="$K0S/../hub/dmz/lib.sh"
+if [[ -r $DMZ_LIB ]]; then
+  if got=$(bash -c 'set -euo pipefail; source "$1"; dmz_load_endpoints "$2"
+      printf "%s %s %s %s %s" "$DMZ_FQDN" "$DMZ_ENVOY_PORT" "$DMZ_BUS_PORT" "$CORE_FARMER_API_PORT" "$DMZ_CLUSTER_ISSUER"' \
+      _ "$DMZ_LIB" "$E" 2>&1); then
+    want="uatab12cd34-dmz.centralindia.cloudapp.azure.com 8443 8442 5405 imas-uat-ca"
+    [[ $got == "$want" ]] && pass || fail "uat/hub/dmz read '$got', want '$want'"
+  else
+    fail "uat/hub/dmz's dmz_load_endpoints refused endpoints.json: $got"
+  fi
+else
+  echo "skip: $DMZ_LIB not present (uat/hub/dmz loader check)"
+fi
 
 t "render: file modes"
 [[ $(stat -c %a "$D") == 600 ]] && pass || fail "k0sctl file mode $(stat -c %a "$D")"
