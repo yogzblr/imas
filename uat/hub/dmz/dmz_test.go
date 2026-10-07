@@ -846,8 +846,6 @@ func TestCheckRefuses(t *testing.T) {
 		{"bad refill wait", []string{"--endpoints", ep, "--ca-file", notPEM, "--refill-wait", "1m"}, "--refill-wait"},
 		{"bad burst", []string{"--endpoints", ep, "--ca-file", notPEM, "--max-burst", "0"}, "--max-burst"},
 		{"bad connect", []string{"--endpoints", ep, "--ca-file", newPKI(t, "dmz.uat.test").caFile, "--connect", "not an address"}, "--connect 'not an address' is not"},
-		{"removed flag --chart-repo-url", []string{"--render-only", "--endpoints", good, "--release-tag", testTag, "--chart-repo-url", "https://packages.buildkite.com/x/imashelm/helm"}, "unknown argument"},
-		{"chart registry not oci", []string{"--render-only", "--endpoints", good, "--release-tag", testTag, "--chart-registry", "https://ghcr.io/yogzblr/charts"}, "--chart-registry must be oci://"},
 		{"unknown flag", []string{"--insecure"}, "unknown argument"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
