@@ -74,19 +74,23 @@ uat/hub/dmz/install.sh --kubeconfig dmz.kubeconfig --endpoints endpoints.json \
 1. **Pulls the chart of the release.** The chart version and the farmerbus
    image tag are both `release_tag` without its leading `v`; the tag must
    be `vX.Y.Z` or `vX.Y.Z-rc.N`, so `latest` can never get in. The chart
-   comes from the Buildkite Helm registry the release publishes to
-   (`packaging/buildkite/publish-helm.sh`, `docs/RELEASING.md`):
+   comes from GitHub Container Registry as an OCI chart, which
+   `publish-packages.yml` pushes (`docs/RELEASING.md`):
 
    ```
-   https://packages.buildkite.com/<org>/imashelm/helm
+   oci://ghcr.io/yogzblr/charts/nats
    ```
 
-   with `<org>` from `BUILDKITE_ORGANIZATION_SLUG` (default `yogzblr`, the
-   org `ansible/README.md` uses), or `--chart-repo-url`. It is added as
-   `imas-uat-imashelm` in a temporary Helm home (removed on exit), then
-   `helm pull imas-uat-imashelm/nats --version <X.Y.Z[-rc.N]>`. The pulled
-   `.tgz` is kept in the work directory. **`imashelm` is public** (owner's
-   decision, 2026-10-06): no token is taken or sent.
+   `--chart-registry OCI_BASE` changes the base (default
+   `oci://ghcr.io/yogzblr/charts`; it replaces `--chart-repo-url`, which no
+   longer exists). The script runs `helm pull <base>/nats --version
+   <X.Y.Z[-rc.N]> --destination <workdir>/chart` with an empty registry
+   config, so it is **anonymous**: no login and no token, and a login the
+   runner happens to have is not used. The pulled `.tgz` is kept in the work
+   directory. If the pull fails, the chart package may still be private: the
+   owner makes each chart package public once, in its GHCR package settings,
+   after the first push. Needs Helm 3.8 or later (or 4). The Buildkite
+   `imashelm` registry is superseded for charts.
    **Pre-releases:** an exact `--version` selects `0.1.0-rc.4` like any
    other version. Helm leaves pre-releases out only when it resolves a
    range or "the newest" (that is what `--devel` is for), and this script
@@ -355,7 +359,7 @@ and 8443, which depends on UAT.2's range.
   used for the SANs, `farmerinterface` and `farmerbusurl` (see
   [Private names](#private-names)). This answers where sprouts and core find
   the DMZ.
-- **`imashelm` is public:** no token. The token path is removed.
+- **Chart registry:** GHCR (OCI), pulled anonymously; no token. The Buildkite `imashelm` token path was removed earlier, and the registry is superseded for charts (UAT.10).
 - **Services through chart values:** "Accept install.sh's own manifests for
   now. The bus Service carries both 5406 and 5407, and the 8442–8443 range
   can't host a node port for 5407. A deploy/helm/nats change can be a
