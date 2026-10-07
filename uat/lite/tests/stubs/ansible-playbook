@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Test stub for ansible-playbook (uat/lite tests): up.sh only checks it is installed.
+printf 'ansible-playbook %s\n' "$*" >>"$STUB_LOG"
