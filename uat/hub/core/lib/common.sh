@@ -60,8 +60,10 @@ REPO_OWNER=yogzblr
 REPO_NAME=imas
 
 # Where the published farmer chart comes from (README.md, "Release
-# inputs"). A public Buildkite Helm registry: no credentials.
-IMAS_HELM_REPO_URL="${IMAS_HELM_REPO_URL:-https://packages.buildkite.com/yogzblr/imashelm/helm}"
+# inputs"): OCI charts on GHCR, pulled anonymously (the owner makes each
+# chart package public once). docs/RELEASING.md. Replaces IMAS_HELM_REPO_URL
+# and the Buildkite imashelm registry.
+IMAS_HELM_OCI_BASE="${IMAS_HELM_OCI_BASE:-oci://ghcr.io/yogzblr/charts}"
 IMAS_RELEASE_BASE_URL="${IMAS_RELEASE_BASE_URL:-https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download}"
 
 log() { printf '[uat/hub/core] %s\n' "$*" >&2; }
@@ -194,6 +196,22 @@ release_version() {
 	[[ "$1" =~ ^v([0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?)$ ]] ||
 		die "release_tag must be vX.Y.Z or vX.Y.Z-rc.N (never latest), got: $1"
 	printf '%s' "${BASH_REMATCH[1]}"
+}
+
+# helm_pull_chart <name> <version> <dest-dir>: pulls
+# $IMAS_HELM_OCI_BASE/<name> at exactly <version> into <dest-dir>, with no
+# credentials: an empty registry config keeps a runner's own login out of
+# it, and no --devel or range is ever used. Needs a Helm that pulls oci://
+# (Helm 3.8 or later, and 4).
+helm_pull_chart() {
+	local name="$1" version="$2" dest="$3" base cfg
+	base="${IMAS_HELM_OCI_BASE%/}"
+	[[ "$base" == oci://?* ]] || die "IMAS_HELM_OCI_BASE must be oci://HOST/PATH, got: $IMAS_HELM_OCI_BASE"
+	mkdir -p "$dest" "$STATE_DIR/helm"
+	cfg="$STATE_DIR/helm/anonymous-registry.json"
+	printf '{}\n' >"$cfg"
+	helm pull "$base/$name" --version "$version" --destination "$dest" --registry-config "$cfg" ||
+		die "can't pull chart $base/$name:$version. Was release v$version published? The chart package may still be private: the owner makes each chart package public once, in its GHCR package settings, after the first push (docs/RELEASING.md)"
 }
 
 kc() { kubectl --kubeconfig "$KUBECONFIG_PATH" "$@"; }
