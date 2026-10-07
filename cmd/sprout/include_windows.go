@@ -9,6 +9,7 @@ import (
 	_ "github.com/yogzblr/imas/internal/ingredients/winappx"
 	_ "github.com/yogzblr/imas/internal/ingredients/winauditpol"
 	_ "github.com/yogzblr/imas/internal/ingredients/wincertutil"
+	_ "github.com/yogzblr/imas/internal/ingredients/windacl"
 	_ "github.com/yogzblr/imas/internal/ingredients/windnsclient"
 	_ "github.com/yogzblr/imas/internal/ingredients/windsc"
 	_ "github.com/yogzblr/imas/internal/ingredients/winfirewall"

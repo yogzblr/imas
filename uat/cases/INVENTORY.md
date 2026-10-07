@@ -10,7 +10,7 @@ Every ingredient method a sprout registers, read from the code: the packages
 GOOS with CGO off, as the sprout is built. Linux means the Ubuntu 24.04 and
 AlmaLinux 9 sprouts of the UAT gate; Windows means Windows Server 2022 Core.
 
-**100 methods** in 32 ingredients: 46 on both platforms, 22 on Linux only, 32 on Windows only.
+**104 methods** in 33 ingredients: 46 on both platforms, 22 on Linux only, 36 on Windows only.
 Each has a case file `uat/cases/<ingredient>/<method>.yaml` (format: [README.md](README.md)).
 
 Properties: `*` marks a required one. A note says when they couldn't be read
@@ -229,6 +229,17 @@ Package `internal/ingredients/wincertutil`, type `Cert`.
 | `I.win_certutil.cert_absent` | Windows | `name`* string, `thumbprint`* string, `store` string, `timeout` string |
 | `I.win_certutil.cert_present` | Windows | `name`* string, `path`* string, `thumbprint`* string, `store` string, `timeout` string |
 
+## win_dacl
+
+Package `internal/ingredients/windacl`, type `Dacl`.
+
+| Case id | OS | Properties |
+|---|---|---|
+| `I.win_dacl.ace_absent` | Windows | `name`* string, `object_type`* string, `principal`* string, `access_mode`* string |
+| `I.win_dacl.ace_present` | Windows | `name`* string, `object_type`* string, `principal`* string, `access_mode`* string, `rights`* string, `propagation` string |
+| `I.win_dacl.inheritance_disabled` | Windows | `name`* string, `object_type`* string, `copy_inherited` bool |
+| `I.win_dacl.inheritance_enabled` | Windows | `name`* string, `object_type`* string |
+
 ## win_dns_client
 
 Package `internal/ingredients/windnsclient`, type `Interface`.
@@ -340,19 +351,6 @@ Package `internal/ingredients/winupdate`, type `Update`.
 | Case id | OS | Properties |
 |---|---|---|
 | `I.win_update.installed` | Windows | `kb_ids`* []string, `search_criteria` string, `accept_eula` bool |
-
-## Registered by a package no sprout imports
-
-These packages call `RegisterAllMethods`, but `cmd/sprout` doesn't import them on
-any platform, so a recipe naming them fails with "unknown ingredient" on every
-sprout. Their cases are skips that say so (a finding for the owner).
-
-| Case id | Built for | Package | Properties |
-|---|---|---|---|
-| `I.win_dacl.ace_absent` | Windows | `internal/ingredients/windacl` | `name`* string, `object_type`* string, `principal`* string, `access_mode`* string |
-| `I.win_dacl.ace_present` | Windows | `internal/ingredients/windacl` | `name`* string, `object_type`* string, `principal`* string, `access_mode`* string, `rights`* string, `propagation` string |
-| `I.win_dacl.inheritance_disabled` | Windows | `internal/ingredients/windacl` | `name`* string, `object_type`* string, `copy_inherited` bool |
-| `I.win_dacl.inheritance_enabled` | Windows | `internal/ingredients/windacl` | `name`* string, `object_type`* string |
 
 ## Registries the ingredients delegate to
 
