@@ -589,6 +589,8 @@ func TestInstallRefuses(t *testing.T) {
 		{"local chart on install", []string{"--kubeconfig", kubeconfig, "--endpoints", good, "--release-tag", testTag, "--chart", rc3}, "--chart is only for --render-only"},
 		{"render with kubeconfig", []string{"--render-only", "--kubeconfig", kubeconfig, "--endpoints", good, "--release-tag", testTag}, "touches no cluster"},
 		{"two seed sources", []string{"--kubeconfig", kubeconfig, "--endpoints", good, "--release-tag", testTag, "--seeds-dir", "/x", "--seeds-from-kubeconfig", kubeconfig}, "not both"},
+		{"removed flag --chart-repo-url", []string{"--render-only", "--endpoints", good, "--release-tag", testTag, "--chart-repo-url", "https://packages.buildkite.com/x/imashelm/helm"}, "unknown argument"},
+		{"chart registry not oci", []string{"--render-only", "--endpoints", good, "--release-tag", testTag, "--chart-registry", "https://ghcr.io/yogzblr/charts"}, "--chart-registry must be oci://"},
 		{"unknown flag", []string{"--render-only", "--endpoints", good, "--release-tag", testTag, "--wait"}, "unknown argument"},
 		{"dangling flag", []string{"--render-only", "--endpoints"}, "needs a value"},
 		{"chart version", []string{"--render-only", "--chart", rc3, "--endpoints", good, "--release-tag", testTag}, "chart version is '0.1.0-rc.3', want 0.1.0-rc.4"},
@@ -920,11 +922,11 @@ exit 0
 const stubHelm = `#!/usr/bin/env bash
 printf 'helm %s\n' "$*" >>"$STUB_LOG"
 case $1 in
-repo)
-	stdin=$(cat)
-	printf 'helm-stdin %s\n' "$stdin" >>"$STUB_LOG"
-	;;
 pull)
+	if [[ ${STUB_PULL_FAIL:-} == 1 ]]; then
+		echo "Error: unauthorized: authentication required" >&2
+		exit 1
+	fi
 	while (($#)); do
 		if [[ $1 == --destination ]]; then cp "$STUB_CHART" "$2/"; fi
 		shift
@@ -952,13 +954,13 @@ func TestInstallWithStubs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	const token = "bkua_uat_stub_unused_value"
 	logFile := filepath.Join(t.TempDir(), "calls.log")
 	work := t.TempDir()
 	env := []string{
 		"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"STUB_LOG=" + logFile, "STUB_CHART=" + tgz, "REAL_HELM=" + realHelm,
-		"IMAS_HELM_REGISTRY_TOKEN=" + token, "BUILDKITE_ORGANIZATION_SLUG=example-org",
+		// Neither a Buildkite token nor an organisation is read any more.
+		"IMAS_HELM_REGISTRY_TOKEN=bkua_uat_stub_unused_value", "BUILDKITE_ORGANIZATION_SLUG=example-org",
 	}
 	code, _, stderr := run(t, env, "install.sh", "--kubeconfig", kubeconfig,
 		"--endpoints", filepath.Join(dir(t), "testdata", "endpoints.json"), "--release-tag", testTag,
@@ -973,16 +975,17 @@ func TestInstallWithStubs(t *testing.T) {
 	calls := strings.Split(strings.TrimSpace(string(b)), "\n")
 	logText := string(b)
 
-	// imashelm is public (owner's decision): no credential goes anywhere,
-	// even with a token in the environment.
-	if strings.Contains(logText, token) || strings.Contains(logText, "--password") || strings.Contains(logText, "--username") {
-		t.Errorf("a registry credential was passed to helm:\n%s", logText)
+	// The chart comes from GHCR as an OCI chart, anonymously: no login, no
+	// credential, and nothing from the Buildkite registry's settings.
+	if strings.Contains(logText, "bkua_uat_stub_unused_value") || strings.Contains(logText, "--password") ||
+		strings.Contains(logText, "--username") || strings.Contains(logText, "registry login") {
+		t.Errorf("a registry credential or login reached helm:\n%s", logText)
 	}
-	if !regexp.MustCompile(`(?m)^helm repo add --force-update imas-uat-imashelm https://packages\.buildkite\.com/example-org/imashelm/helm$`).MatchString(logText) {
-		t.Errorf("unexpected helm repo add:\n%s", logText)
+	if strings.Contains(logText, "helm repo ") || strings.Contains(logText, "buildkite") {
+		t.Errorf("the old Helm repository path is still used:\n%s", logText)
 	}
-	if !regexp.MustCompile(`(?m)^helm pull imas-uat-imashelm/nats --version 0\.1\.0-rc\.4 --destination \S+$`).MatchString(logText) {
-		t.Errorf("no exact-version helm pull:\n%s", logText)
+	if !regexp.MustCompile(`(?m)^helm pull oci://ghcr\.io/yogzblr/charts/nats --version 0\.1\.0-rc\.4 --destination \S+ --registry-config \S+$`).MatchString(logText) {
+		t.Errorf("no exact-version helm pull of the OCI chart:\n%s", logText)
 	}
 	if strings.Contains(logText, "--devel") {
 		t.Error("helm was called with --devel")
@@ -1124,5 +1127,53 @@ func TestRenderServiceTypeFromEndpoints(t *testing.T) {
 		if b := find(t, r.manifests, "Service", "imas-dmz-nats-bus-core"); get(b, "spec", "type") != "NodePort" || get(b, "spec", "ports", 0, "nodePort") != 8442 {
 			t.Errorf("%v: bus Service %v, want NodePort 8442", c.args, get(b, "spec"))
 		}
+	}
+}
+
+// --chart-registry changes where the chart is pulled from (a trailing slash
+// is dropped); a failed pull names the likely cause: the chart package is
+// still private until the owner makes it public (docs/RELEASING.md).
+func TestInstallChartRegistryAndPullFailure(t *testing.T) {
+	need(t, true, "bash", "jq", "helm", "base64")
+	realHelm, _ := exec.LookPath("helm")
+	bin := t.TempDir()
+	for name, body := range map[string]string{"kubectl": stubKubectl, "helm": stubHelm} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tgz := packageChart(t, testVersion, testVersion)
+	kubeconfig := filepath.Join(t.TempDir(), "dmz.kubeconfig")
+	if err := os.WriteFile(kubeconfig, []byte("apiVersion: v1\nkind: Config\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name string
+		fail bool
+	}{{"custom registry", false}, {"pull fails", true}} {
+		t.Run(c.name, func(t *testing.T) {
+			logFile := filepath.Join(t.TempDir(), "calls.log")
+			env := []string{
+				"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"STUB_LOG=" + logFile, "STUB_CHART=" + tgz, "REAL_HELM=" + realHelm,
+			}
+			if c.fail {
+				env = append(env, "STUB_PULL_FAIL=1")
+			}
+			code, _, stderr := run(t, env, "install.sh", "--kubeconfig", kubeconfig, "--timeout", "5s",
+				"--endpoints", filepath.Join(dir(t), "testdata", "endpoints.json"), "--release-tag", testTag,
+				"--chart-registry", "oci://registry.example/team/charts/", "--workdir", t.TempDir())
+			b, _ := os.ReadFile(logFile)
+			if !strings.Contains(string(b), "helm pull oci://registry.example/team/charts/nats --version 0.1.0-rc.4 ") {
+				t.Errorf("--chart-registry not used:\n%s", b)
+			}
+			if c.fail {
+				for _, want := range []string{"could not pull chart oci://registry.example/team/charts/nats:0.1.0-rc.4", "may still be private", "owner makes each chart package public", "GHCR package settings"} {
+					if code == 0 || !strings.Contains(stderr, want) {
+						t.Errorf("exit %d, stderr:\n%s\nwant %q", code, stderr, want)
+					}
+				}
+			}
+		})
 	}
 }

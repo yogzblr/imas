@@ -67,15 +67,16 @@ kind documents as experimental (k3d has a `--network` flag).
 | Docker (Engine on Linux, or Docker Desktop) | everything | cgroup v2 for the systemd containers |
 | kind v0.30 or later | the two clusters | `versions.env` pins the node image |
 | kubectl | `up.sh`, the hub scripts | within one minor version of the kind node image (Kubernetes 1.34) |
-| helm 3 | the hub scripts | |
+| helm 3.8 or later (or 4) | the hub scripts | `helm pull oci://` needs 3.8 |
 | jq, curl, openssl, awk, sha256sum, base64, tar | the scripts | |
 | ssh, ssh-keygen | enrolment over SSH | |
 | Go | `uat/tests/run.sh` builds the tests; `uat/hub/core` builds `nk` | the repository's Go version |
 | python3, ansible-core 2.15 or later | `uat/enroll` | `ansible-galaxy collection install -r uat/enroll/requirements.yml` |
 | sudo | the hub names in `/etc/hosts` | or `--hosts-file none` and add the lines yourself |
 
-Outbound internet from the host and the containers: the release's chart
-(Buildkite `imashelm`), images (GHCR, quay.io, Docker Hub), the `imas` CLI
+Outbound internet from the host and the containers: the release's charts
+(GHCR, as OCI charts, pulled anonymously: the owner makes each chart package
+public once), images (GHCR, quay.io, Docker Hub), the `imas` CLI
 (GitHub releases), the sprout packages (Buildkite `imasdeb`, `imasrpm`), and
 the Ubuntu and AlmaLinux mirrors.
 

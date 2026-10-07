@@ -71,19 +71,11 @@ apply_secret "$CORE_NS" "$INTERNAL_AUTH_SECRET" "current=$SENSITIVE_DIR/internal
 "$here/admin-keys.sh" "${common[@]}" "$release_tag"
 
 # --- 3. the published farmer chart ------------------------------------------
-helm_home="$STATE_DIR/helm"
-mkdir -p "$helm_home/cache"
-hrepo=(--repository-config "$helm_home/repositories.yaml" --repository-cache "$helm_home/cache")
-helm repo add imashelm "$IMAS_HELM_REPO_URL" --force-update "${hrepo[@]}" >/dev/null ||
-	die "can't add the imashelm Helm repository at $IMAS_HELM_REPO_URL"
 chart_dir="$STATE_DIR/chart"
 chart_tgz="$chart_dir/farmer-$version.tgz"
 if [[ ! -s "$chart_tgz" ]]; then
-	mkdir -p "$chart_dir"
-	# An exact --version selects a pre-release (0.1.0-rc.4) as well; no
-	# --devel, which would also admit a range.
-	helm pull imashelm/farmer --version "$version" --destination "$chart_dir" "${hrepo[@]}" ||
-		die "farmer chart $version is not in $IMAS_HELM_REPO_URL"
+	# Exact version, anonymous, no --devel (helm_pull_chart, lib/common.sh).
+	helm_pull_chart farmer "$version" "$chart_dir"
 fi
 chart_meta=$(tar -xzf "$chart_tgz" -O farmer/Chart.yaml)
 grep -qx "version: $version" <<<"$chart_meta" || die "$chart_tgz is not chart version $version"

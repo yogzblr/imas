@@ -10,6 +10,7 @@
 #   6. admin-keys.sh against a stub curl and a fake imas CLI (checksum
 #      check, key reuse, file modes)
 #   7. bind-tenant.sh, token.sh and install.sh argument checks
+#      (7c: helm_pull_chart, the oci:// chart pull, against a stub helm)
 #   8. openbao-bootstrap.sh and saasapi-secrets.sh against a real local
 #      OpenBao server, when a bao binary is on PATH or in $BAO_BIN (skipped,
 #      and said so, otherwise)
@@ -327,6 +328,45 @@ refuse "scratch mode refuses to move a scratch user to another tenant" "already 
 refuse "scratch mode refuses tenant 1 or 2" "scratch users are for tenants created during a run" bt --scratch-user scratch-x admin "$T1"
 refuse "scratch mode refuses a realm user's name" "scratch user names" bt --scratch-user t1-admin admin "$T9"
 refuse "scratch mode refuses an unknown role" "admin or readonly" bt --scratch-user scratch-x owner "$T9"
+
+# --- 7c. helm_pull_chart (the OCI chart pull of install.sh) ----------------------
+# A stub helm that records its argv and writes the chart into --destination,
+# or fails like GHCR does for a package that is still private.
+mkdir -p "$tmp/helmbin"
+cat >"$tmp/helmbin/helm" <<'STUB'
+#!/usr/bin/env bash
+printf 'helm %s\n' "$*" >>"$HELM_STUB_LOG"
+[[ "${HELM_STUB_FAIL:-}" != 1 ]] || { echo "Error: unauthorized: authentication required" >&2; exit 1; }
+while (($#)); do
+	[[ "$1" != --destination ]] || : >"$2/farmer-fake.tgz"
+	shift
+done
+STUB
+chmod +x "$tmp/helmbin/helm"
+export HELM_STUB_LOG="$tmp/helm.log"
+# pull: helm_pull_chart farmer 0.1.0-rc.5 in a subshell, so die only ends that.
+pull() {
+	(
+		STATE_DIR="$tmp/pullstate"
+		# shellcheck source=../lib/common.sh
+		. "$core/lib/common.sh"
+		PATH="$tmp/helmbin:$PATH" helm_pull_chart farmer 0.1.0-rc.5 "$tmp/pulled"
+	)
+}
+: >"$HELM_STUB_LOG"
+expect "helm_pull_chart: pulls the default OCI chart" pull
+grep -qxF "helm pull oci://ghcr.io/yogzblr/charts/farmer --version 0.1.0-rc.5 --destination $tmp/pulled --registry-config $tmp/pullstate/helm/anonymous-registry.json" "$HELM_STUB_LOG" &&
+	ok "helm_pull_chart: exact version, OCI reference, anonymous registry config" || bad "helm_pull_chart: unexpected helm call ($(cat "$HELM_STUB_LOG"))"
+! grep -qE -- '--devel|helm repo|registry login|--password|--username' "$HELM_STUB_LOG" &&
+	ok "helm_pull_chart: no --devel, no repo add, no login" || bad "helm_pull_chart: forbidden helm option"
+[[ -f "$tmp/pulled/farmer-fake.tgz" ]] && ok "helm_pull_chart: the chart lands in the destination" || bad "helm_pull_chart: no chart written"
+: >"$HELM_STUB_LOG"
+IMAS_HELM_OCI_BASE=oci://registry.example/x/charts/ expect "helm_pull_chart: IMAS_HELM_OCI_BASE is honoured (trailing slash dropped)" pull
+grep -qF "helm pull oci://registry.example/x/charts/farmer --version 0.1.0-rc.5 " "$HELM_STUB_LOG" &&
+	ok "helm_pull_chart: custom base used" || bad "helm_pull_chart: custom base ignored ($(cat "$HELM_STUB_LOG"))"
+IMAS_HELM_OCI_BASE=https://packages.buildkite.com/yogzblr/imashelm/helm refuse "helm_pull_chart: a non-OCI base is refused" 'must be oci://' pull
+HELM_STUB_FAIL=1 refuse "helm_pull_chart: a failed pull says the package may still be private" \
+	'may still be private.*owner makes each chart package public.*GHCR package settings' pull
 
 # --- 8. OpenBao ------------------------------------------------------------------------
 bao_bin="${BAO_BIN:-$(command -v bao || true)}"

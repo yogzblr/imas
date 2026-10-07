@@ -9,7 +9,7 @@
 #              [--seeds-dir DIR | --seeds-from-kubeconfig FILE
 #                                 [--seeds-from-namespace NS]]
 #              [--workdir DIR] [--expose nodeport|loadbalancer]
-#              [--timeout DURATION] [--chart-repo-url URL]
+#              [--timeout DURATION] [--chart-registry OCI_BASE]
 #   install.sh --render-only --endpoints FILE --release-tag TAG
 #              [--chart DIR|TGZ] [--workdir DIR] [--expose MODE]
 #
@@ -37,15 +37,18 @@
 #                         bus is a NodePort on dmz.ports.bus (default 8442)
 #                         either way. README.md, "Exposure"
 # --timeout               how long each wait may take (default 10m)
-# --chart-repo-url        default https://packages.buildkite.com/
-#                         $BUILDKITE_ORGANIZATION_SLUG (default yogzblr)/
-#                         imashelm/helm
+# --chart-registry        OCI base the chart is pulled from, default
+#                         oci://ghcr.io/yogzblr/charts (the chart is
+#                         <base>/nats). Replaces --chart-repo-url, which is
+#                         gone
 # --render-only           pull (or take --chart), write the values and
 #                         manifests and run helm template; touch no cluster
 # --chart                 a local chart, only with --render-only (tests)
 #
-# The imashelm registry is public (owner's decision, 2026-10-06): no token
-# is taken or sent.
+# The chart is pulled anonymously (no login, no token): the owner makes the
+# chart package public once in its GHCR package settings after the first
+# push (docs/RELEASING.md). The Buildkite imashelm registry is superseded
+# for charts.
 #
 # Nothing here is Azure specific, so the local rig (UAT.8) runs it as is.
 set -euo pipefail
@@ -62,12 +65,12 @@ usage() {
 
 kubeconfig="" endpoints="" release_tag="" seeds_dir="" seeds_kubeconfig=""
 seeds_namespace=imas-core workdir="" expose="" timeout=10m
-chart_repo_url="" render_only="" chart=""
+chart_registry="" render_only="" chart=""
 
 while (($#)); do
 	case $1 in
 	--kubeconfig | --endpoints | --release-tag | --seeds-dir | --seeds-from-kubeconfig | \
-		--seeds-from-namespace | --workdir | --expose | --timeout | --chart-repo-url | --chart)
+		--seeds-from-namespace | --workdir | --expose | --timeout | --chart-registry | --chart)
 		(($# >= 2)) || dmz_die "$1 needs a value"
 		case $1 in
 		--kubeconfig) kubeconfig=$2 ;;
@@ -79,7 +82,7 @@ while (($#)); do
 		--workdir) workdir=$2 ;;
 		--expose) expose=$2 ;;
 		--timeout) timeout=$2 ;;
-		--chart-repo-url) chart_repo_url=$2 ;;
+		--chart-registry) chart_registry=$2 ;;
 		--chart) chart=$2 ;;
 		esac
 		shift 2
@@ -145,26 +148,25 @@ chart_field() {
 	helm show chart "$1" | sed -n "s/^$2:[[:space:]]*//p" | head -n1 | tr -d "\"'"
 }
 
-# --- 1. The chart, from the release's registry --------------------------
+# --- 1. The chart, from the release's OCI registry --------------------------
 if [[ -n $chart ]]; then
 	[[ -e $chart ]] || dmz_die "chart '$chart' not found"
 	chart_ref=$chart
 	dmz_log "using the local chart $chart (render only)"
 else
-	org=${BUILDKITE_ORGANIZATION_SLUG:-yogzblr}
-	[[ $org =~ ^[a-z0-9][a-z0-9-]*$ ]] || dmz_die "bad BUILDKITE_ORGANIZATION_SLUG '$org'"
-	chart_repo_url=${chart_repo_url:-https://packages.buildkite.com/$org/imashelm/helm}
-	[[ $chart_repo_url == https://* ]] || dmz_die "--chart-repo-url must be https"
-	dmz_log "helm repo add imas-uat-imashelm $chart_repo_url"
-	helm repo add --force-update imas-uat-imashelm "$chart_repo_url" >/dev/null ||
-		dmz_die "could not add the chart repository $chart_repo_url"
+	chart_registry=${chart_registry:-oci://ghcr.io/yogzblr/charts}
+	chart_registry=${chart_registry%/}
+	[[ $chart_registry == oci://?* ]] || dmz_die "--chart-registry must be oci://HOST/PATH, not '$chart_registry'"
 	mkdir -p "$workdir/chart"
 	rm -f "$workdir/chart/nats-$version.tgz"
-	# An exact --version selects a pre-release (0.1.0-rc.4) too: Helm skips
-	# pre-releases only when resolving a range or the newest version. No
-	# --devel, no range, so nothing but this version can be pulled.
-	helm pull imas-uat-imashelm/nats --version "$version" --destination "$workdir/chart" ||
-		dmz_die "chart nats $version is not in $chart_repo_url (was release $release_tag published?)"
+	# Anonymous: an empty registry config keeps any login of the runner's
+	# out of it. An exact --version selects a pre-release (0.1.0-rc.5) too.
+	# No --devel, no range, so nothing but this version can be pulled.
+	printf '{}\n' >"$helm_home/anonymous-registry.json"
+	dmz_log "helm pull $chart_registry/nats --version $version"
+	helm pull "$chart_registry/nats" --version "$version" --destination "$workdir/chart" \
+		--registry-config "$helm_home/anonymous-registry.json" ||
+		dmz_die "could not pull chart $chart_registry/nats:$version (was release $release_tag published? The chart package may still be private: the owner makes each chart package public once, in its GHCR package settings, after the first push; docs/RELEASING.md)"
 	chart_ref="$workdir/chart/nats-$version.tgz"
 	[[ -f $chart_ref ]] || dmz_die "helm pull did not write $chart_ref"
 fi

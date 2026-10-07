@@ -8,13 +8,18 @@ name: Publish packages
 #     imas.sprout.windows       the winget manifests pointing at it
 #
 # After the packages are up (so the sprout repos already hold the release),
-# it also packages the Helm charts and uploads them to the Buildkite Helm
-# registry (imashelm):
+# it also packages the Helm charts and pushes them to GitHub Container
+# Registry as OCI charts (UAT.10; the Buildkite Helm registry imashelm is
+# superseded for charts and is left alone):
 #   farmer  deploy/helm/farmer   with files/sprout-release.json (the sprout
 #                                release the chart registers, API design §2.5)
-#   nats    deploy/helm/nats
+#                                -> oci://ghcr.io/yogzblr/charts/farmer
+#   nats    deploy/helm/nats     -> oci://ghcr.io/yogzblr/charts/nats
 # Chart version and appVersion are the release version, which is also the
-# tag of the GHCR images the charts default to. Before anything is published
+# tag of the GHCR images the charts default to (0.1.0-rc.5 for v0.1.0-rc.5).
+# Each pushed chart is signed by digest with keyless cosign. A chart
+# package is private after its first push: the owner makes it public once,
+# in its GHCR package settings (docs/RELEASING.md). Before anything is published
 # the keyless cosign signatures are verified: the checksums bundle and each
 # imas-* image on GHCR must have been signed by release.yml on a v* tag.
 #
@@ -26,10 +31,11 @@ name: Publish packages
 # failed publish for a tag. Packages are taken from the release's assets and
 # checked against its checksums.txt.
 #
-# Needs (repo, or the "goreleaser" environment):
+# Needs (repo, or the "goreleaser" environment), unless only_helm is set
+# (the charts go to GHCR with the run's GITHUB_TOKEN, nothing else):
 #   secret   BUILDKITE_PACKAGES_TOKEN     Buildkite API access token with the
 #                                         Read Packages and Write Packages scopes
-#   variable BUILDKITE_ORGANIZATION_SLUG  org owning imasrpm/imasdeb/imasnget/imashelm
+#   variable BUILDKITE_ORGANIZATION_SLUG  org owning imasrpm/imasdeb/imasnget
 on:
   release:
     types: [published]
@@ -40,7 +46,7 @@ on:
         required: true
         type: string
       only_helm:
-        description: "Re-run after a partial publish: skip the rpm, deb, NuGet and winget uploads (already in Buildkite) and publish only the Helm charts"
+        description: "Re-run after a partial publish: skip the rpm, deb, NuGet and winget uploads (already in Buildkite) and publish only the Helm charts (to GHCR)"
         required: false
         default: false
         type: boolean
@@ -60,6 +66,12 @@ jobs:
       (github.event_name == 'workflow_dispatch' || !github.event.release.prerelease)
     environment: goreleaser
     runs-on: ubuntu-latest
+    # Only this job writes packages (the Helm charts, to GHCR) and signs
+    # (keyless cosign needs the OIDC token); the workflow default stays read.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
     steps:
@@ -67,10 +79,14 @@ jobs:
         env:
           BUILDKITE_PACKAGES_TOKEN: ${{ secrets.BUILDKITE_PACKAGES_TOKEN }}
           BUILDKITE_ORGANIZATION_SLUG: ${{ vars.BUILDKITE_ORGANIZATION_SLUG }}
+          ONLY_HELM: ${{ inputs.only_helm }}
         run: |
           missing=()
-          [ -n "$BUILDKITE_PACKAGES_TOKEN" ] || missing+=("secret BUILDKITE_PACKAGES_TOKEN")
-          [ -n "$BUILDKITE_ORGANIZATION_SLUG" ] || missing+=("variable BUILDKITE_ORGANIZATION_SLUG")
+          # The charts go to GHCR, so only_helm needs no Buildkite setting.
+          if [ "$ONLY_HELM" != "true" ]; then
+            [ -n "$BUILDKITE_PACKAGES_TOKEN" ] || missing+=("secret BUILDKITE_PACKAGES_TOKEN")
+            [ -n "$BUILDKITE_ORGANIZATION_SLUG" ] || missing+=("variable BUILDKITE_ORGANIZATION_SLUG")
+          fi
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "::error::missing: ${missing[*]}"
             exit 1
@@ -192,8 +208,42 @@ jobs:
             helm package "$chart" --version "$version" --app-version "$version" --destination dist/charts
           done
 
-      - name: Publish Helm charts to Buildkite Packages
+      # OCI charts on GHCR: oci://ghcr.io/yogzblr/charts/<chart>:<version>.
+      # helm push takes the chart name and version from the package, so a
+      # pre-release such as 0.1.0-rc.5 becomes the tag 0.1.0-rc.5 (only "+"
+      # is rewritten, to "_"; the release versions have none). The login
+      # password goes through stdin, never argv. docker login gives cosign
+      # (which reads the Docker config, not Helm's) the same credential, as
+      # in the verify step above. Unlike Buildkite, GHCR does not reject a
+      # version it already holds: pushing again moves the tag, so a tag is
+      # never reused (docs/RELEASING.md).
+      - name: Publish Helm charts to GHCR (OCI) and sign them
         env:
-          BUILDKITE_PACKAGES_TOKEN: ${{ secrets.BUILDKITE_PACKAGES_TOKEN }}
-          BUILDKITE_ORGANIZATION_SLUG: ${{ vars.BUILDKITE_ORGANIZATION_SLUG }}
-        run: ./packaging/buildkite/publish-helm.sh dist/charts
+          GH_TOKEN: ${{ github.token }}
+          GH_ACTOR: ${{ github.actor }}
+          OCI_BASE: oci://ghcr.io/yogzblr/charts
+          IDENTITY: ^https://github\.com/yogzblr/imas/\.github/workflows/publish-packages\.yml@.+$
+          ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          printf '%s' "$GH_TOKEN" | helm registry login ghcr.io --username "$GH_ACTOR" --password-stdin
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
+          shopt -s nullglob
+          charts=(dist/charts/*.tgz)
+          [ "${#charts[@]}" -eq 2 ] || { echo "::error::expected 2 packaged charts, found ${#charts[@]}"; exit 1; }
+          for pkg in "${charts[@]}"; do
+            name="$(basename "$pkg" ".tgz")"
+            name="${name%-"$version"}"
+            case "$name" in farmer|nats) ;; *) echo "::error::unexpected chart package $pkg"; exit 1 ;; esac
+            helm push "$pkg" "$OCI_BASE" 2>&1 | tee "push-$name.log"
+            digest="$(sed -n 's/^Digest: *//p' "push-$name.log" | tail -n 1)"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no digest in the helm push output for $name"; exit 1; }
+            ref="${OCI_BASE#oci://}/${name}"
+            # Keyless, by digest, as release.yml signs the images: the
+            # identity is this workflow (see docs/RELEASING.md to verify).
+            cosign sign --yes "${ref}@${digest}"
+            cosign verify "${ref}@${digest}" \
+              --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" >/dev/null
+            echo "pushed and signed oci://${ref}:${version} (${digest})"
+          done

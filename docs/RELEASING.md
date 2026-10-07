@@ -31,7 +31,8 @@ sprout release it was tested with (API design §2.5).
   move `latest`, and `publish-packages.yml` skips them unless you dispatch it
   for that tag by hand.
 - Tags are annotated and immutable. Never move or reuse one: Buildkite
-  registries reject a package or chart version they already hold, and
+  registries reject a package version they already hold, GHCR would let a
+  chart tag be pushed again (and so moved), and
   signatures are bound to the tag. A bad release is fixed forward with the
   next patch, and withdrawn with the revoke call (below).
 - The tag is the only source of the version. Everything derives from it,
@@ -42,7 +43,7 @@ sprout release it was tested with (API design §2.5).
   | Binaries / `-X main.Tag` | `vX.Y.Z` |
   | rpm, deb, apk, MSI, winget | `X.Y.Z` |
   | Images `ghcr.io/yogzblr/imas-*` | `X.Y.Z` (and `latest` for finals) |
-  | Helm charts `farmer`, `nats` | chart `version` and `appVersion` = `X.Y.Z` |
+  | Helm charts `farmer`, `nats` (OCI, `oci://ghcr.io/yogzblr/charts/<chart>`) | chart `version` and `appVersion` = `X.Y.Z`, which is also the OCI tag |
 
 ## Settings
 
@@ -59,9 +60,15 @@ neither signs (`--skip=sign`) nor publishes.
 | `BUILDKITE_ORGANIZATION_SLUG` | variable | `publish-packages.yml`; the org owning the registries below |
 
 Each workflow checks its own names first and fails naming any that are
-missing. The Buildkite organisation needs four registries: `imasrpm` (Red
-Hat), `imasdeb` (Debian), `imasnget` (NuGet, **public**: winget downloads
-the MSI from it anonymously) and `imashelm` (a **Helm** registry, not Helm OCI: `publish-helm.sh` uploads with the REST API, which only the standard Helm type accepts; the registry type cannot be changed after creation). If the `goreleaser`
+missing (with **only_helm** the Buildkite names are not required: the charts
+go to GHCR with the run's `GITHUB_TOKEN`). The Buildkite organisation needs
+three registries: `imasrpm` (Red Hat), `imasdeb` (Debian) and `imasnget`
+(NuGet, **public**: winget downloads the MSI from it anonymously). The Helm
+charts no longer go to Buildkite: the `imashelm` registry (a standard Helm
+registry that has returned HTTP 500 for its `index.yaml` for hours, so
+nothing could `helm pull` from it) is **superseded for charts** and left as
+it is; `packaging/buildkite/publish-helm.sh` is removed. The charts go to
+GHCR; see [Helm charts on GHCR](#helm-charts-on-ghcr). If the `goreleaser`
 environment has deployment branch or tag rules, they must allow `v*` tags
 (Release, and Publish packages on a published release) and `main`
 (Publish packages run by hand).
@@ -112,8 +119,9 @@ What a release carries, for version `X.Y.Z` (tag `vX.Y.Z`):
    GPG signature and its `.sigstore.json` bundle.
 4. Review the draft (changelog, assets, the six images on GHCR).
 5. **Publish the release.** `publish-packages.yml` then verifies the cosign
-   signatures, uploads rpm/deb/winget to Buildkite, and last packages and
-   uploads the `farmer` and `nats` charts to `imashelm`, with the sprout
+   signatures, uploads rpm/deb/winget to Buildkite, and last packages the
+   `farmer` and `nats` charts, pushes them to GHCR as OCI charts and signs
+   them (see [Helm charts on GHCR](#helm-charts-on-ghcr)), with the sprout
    release (version, `min_sprout_version`, packages) stamped into the
    farmer chart. The stamp fails if the floor is above the tag.
 6. Run the Terraform UAT gate against that tag (installs the published
@@ -125,7 +133,51 @@ What a release carries, for version `X.Y.Z` (tag `vX.Y.Z`):
 To re-run a failed publish: Actions, **Publish packages**, *Run workflow*
 with the tag. If the rpm, deb and NuGet uploads already succeeded and only the
 Helm step failed, tick **only_helm** so those are not uploaded again (Buildkite
-rejects a version it already holds).
+rejects a version it already holds). **only_helm** keeps its meaning: it skips
+the rpm, deb, NuGet and winget uploads and publishes only the charts, now to
+GHCR.
+
+## Helm charts on GHCR
+
+Since UAT.10 the charts are OCI charts on GitHub Container Registry, not in
+the Buildkite `imashelm` registry:
+
+- `oci://ghcr.io/yogzblr/charts/farmer` and `oci://ghcr.io/yogzblr/charts/nats`,
+  at the release version without the `v` (`0.1.0-rc.5` for `v0.1.0-rc.5`).
+  `helm push` takes name and version from the package, and a pre-release
+  version is an ordinary OCI tag (only `+` would be rewritten, to `_`).
+- `publish-packages.yml` logs in with `helm registry login ghcr.io` (the
+  run's `GITHUB_TOKEN`, password on stdin), pushes each packaged chart, and
+  signs each by digest with keyless cosign (the same installation and OIDC
+  issuer as the images). Only that job has `packages: write` and
+  `id-token: write`. Prereleases are still published only by hand
+  (`workflow_dispatch`).
+- **Consumers pull anonymously, by exact version**:
+  `helm pull oci://ghcr.io/yogzblr/charts/farmer --version 0.1.0-rc.5
+  --destination DIR`. No `helm login`, no `--devel`, no range. `uat/hub/core`
+  reads the base from `IMAS_HELM_OCI_BASE` and `uat/hub/dmz` from
+  `--chart-registry OCI_BASE`, both defaulting to
+  `oci://ghcr.io/yogzblr/charts`. They replace `IMAS_HELM_REPO_URL` and
+  `--chart-repo-url`, which were removed rather than kept as a second way.
+- **Owner, once per chart package, after the first push:** a package pushed
+  by a workflow is **private**. In GitHub, *Packages*, `charts/farmer` and
+  `charts/nats`, *Package settings*, *Change visibility*, set **Public**.
+  Until then an anonymous `helm pull` fails and the UAT install scripts say
+  the chart package may still be private. Check, too, that each package
+  is linked to this repository (*Connect repository*) so that later pushes by
+  this workflow's `GITHUB_TOKEN` are accepted; this has not been tried.
+- **Verify a signature** (identity is `publish-packages.yml`; a run by hand
+  from a branch signs under that branch's ref, so the ref is not pinned):
+
+  ```sh
+  cosign verify ghcr.io/yogzblr/charts/farmer@sha256:<digest> \
+    --certificate-identity-regexp '^https://github\.com/yogzblr/imas/\.github/workflows/publish-packages\.yml@.+$' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  ```
+
+  The digest is in the publish run's log (`pushed and signed ...`).
+- GHCR does not reject a tag that exists: pushing again moves it. Never
+  re-push a released chart version; fix forward with the next tag.
 
 ## First release checklist
 
@@ -134,7 +186,7 @@ step's result differs from "look for", stop and fix by PR before going on.
 `TAG=v0.1.0-rc.1` and `V=0.1.0-rc.1` below.
 
 1. **Settings.** Check every name under [Settings](#settings) exists on the
-   repository or the `goreleaser` environment, the four Buildkite registries
+   repository or the `goreleaser` environment, the three Buildkite registries
    exist (`imasnget` public), and any environment deployment rules allow
    `v*` tags and `main`.
    *Look for:* nothing to fix. A missing name otherwise fails a later step
@@ -209,15 +261,19 @@ step's result differs from "look for", stop and fix by PR before going on.
    `imasrpm` and `imasdeb`, then the NuGet pushes and the anonymous
    installer download check; `stamp-sprout-release.sh` writes
    `sprout-release.json`, `helm lint` passes for both charts, and
-   `farmer-0.1.0-rc.1.tgz` and `nats-0.1.0-rc.1.tgz` go up to `imashelm`.
-   Buildkite rejects a version it already holds, so if this fails part-way,
-   delete what was uploaded for `0.1.0-rc.1` in Buildkite before running it
-   again, or fix forward with `v0.1.0-rc.2`.
+   `farmer-0.1.0-rc.1.tgz` and `nats-0.1.0-rc.1.tgz` are pushed to
+   `oci://ghcr.io/yogzblr/charts` and signed (`pushed and signed ...`).
+   Buildkite rejects a package version it already holds, so if the rpm/deb
+   upload fails part-way, delete what was uploaded for `0.1.0-rc.1` in
+   Buildkite before running it again, or fix forward with `v0.1.0-rc.2`. A
+   failed chart push can be repeated with **only_helm**. After the first
+   successful push, make each chart package public once (see
+   [Helm charts on GHCR](#helm-charts-on-ghcr)).
 10. **Install from the registries** on a scratch host: the rpm or deb from
     `imasrpm`/`imasdeb` (package version `0.1.0~rc.1+git`, which sorts
     before the final's `0.1.0+git`), and the
-    chart with an explicit `--version 0.1.0-rc.1` (Helm skips pre-release
-    charts without it, or `--devel`).
+    chart with `helm pull oci://ghcr.io/yogzblr/charts/farmer --version
+    0.1.0-rc.1` (an exact version; nothing else selects a pre-release).
     *Look for:* the packages install and the services start; the farmer
     chart's `files/sprout-release.json` names `v0.1.0-rc.1`. Then run the
     Terraform UAT gate against this tag (step 6 of [Steps](#steps)).

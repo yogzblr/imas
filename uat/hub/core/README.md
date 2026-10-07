@@ -72,7 +72,8 @@ own with the same arguments. `gen-values.sh` reads files only.
   | `cluster_domain` | no | `cluster.local` | |
 
 - **Environment** (all optional): `UAT_SEEDS_DIR` (see Seeds),
-  `IMAS_HELM_REPO_URL` (default `https://packages.buildkite.com/yogzblr/imashelm/helm`),
+  `IMAS_HELM_OCI_BASE` (default `oci://ghcr.io/yogzblr/charts`; the farmer chart is
+  `<base>/farmer`; it replaces `IMAS_HELM_REPO_URL`, which is no longer read),
   `IMAS_RELEASE_BASE_URL` (default the GitHub releases of yogzblr/imas),
   `HELM_TIMEOUT` (default `45m`), `OPENBAO_KEY_SHARES` / `OPENBAO_KEY_THRESHOLD`
   (default 3 / 2), `SKIP_CHECK=1` (install.sh doesn't run check.sh).
@@ -106,10 +107,15 @@ openssl, go (to build `nk`), tar, sha256sum, and this repository checked out.
    `imas auth keygen` in a HOME of its own. Public halves go to the chart
    (`farmer.bootstrapAdmin`); the private material stays in
    `sensitive/admin-home`.
-4. **The chart**: `helm pull imashelm/farmer --version <tag without v>` from
-   the Buildkite Helm registry the release publishes to, and checks its
-   `version` and `appVersion`. An exact `--version` selects a pre-release
-   (`0.1.0-rc.4`) as well, so no `--devel` is used.
+4. **The chart**: `helm pull oci://ghcr.io/yogzblr/charts/farmer --version
+   <tag without v> --destination <dir>`, anonymously (an empty registry
+   config, so no login of the runner's is used), and checks its `version`
+   and `appVersion`. The version is exact, so a pre-release
+   (`0.1.0-rc.5`) is selected and no `--devel` or range is used. Needs Helm
+   3.8 or later (or 4). If the pull fails, the chart package may still be
+   private: the owner makes each chart package public once, in its GHCR
+   package settings, after the first push (`docs/RELEASING.md`). The
+   Buildkite `imashelm` registry is superseded for charts.
 5. **UAT-only pieces** (`chart/`), waits for them and for both certificates,
    and copies the UAT CA (the issued Secret's `ca.crt`, a public certificate)
    to the ConfigMap `imas-uat-ca` and `out/uat-ca.crt`.
