@@ -810,6 +810,12 @@ func registerTenantHandlers(nc *nats.Conn, tenantID string) error {
 	jobs.RegisterNatsConn(tenantID, nc)
 	facts.RegisterFarmerListener(tenantID, nc)
 
+	// Sprouts' periodic heartbeat keeps their Valkey "connected" key fresh
+	// (CONNECT sets it once; internal/heartbeat).
+	if err := heartbeat.RegisterTenant(nc, tenantID); err != nil {
+		return fmt.Errorf("failed to subscribe sprout heartbeats for tenant %s: %w", tenantID, err)
+	}
+
 	if err := natsapi.Subscribe(nc, tenantID); err != nil {
 		return fmt.Errorf("failed to subscribe NATS API handlers for tenant %s: %w", tenantID, err)
 	}
