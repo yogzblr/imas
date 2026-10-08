@@ -32,6 +32,9 @@ builds:
       - "386"
       - arm64
       - arm
+    # Static: the service images are FROM scratch, which has no libc/loader.
+    env:
+      - CGO_ENABLED=0
     ldflags:
       - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
     tags:
@@ -46,6 +49,9 @@ builds:
       - "386"
       - arm64
       - arm
+    # Static: the service images are FROM scratch, which has no libc/loader.
+    env:
+      - CGO_ENABLED=0
     ldflags:
       - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
     tags:
@@ -105,6 +111,9 @@ builds:
       - "386"
       - arm64
       - arm
+    # Static: the service images are FROM scratch, which has no libc/loader.
+    env:
+      - CGO_ENABLED=0
     ldflags:
       - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
     tags:
@@ -119,6 +128,9 @@ builds:
       - "386"
       - arm64
       - arm
+    # Static: the service images are FROM scratch, which has no libc/loader.
+    env:
+      - CGO_ENABLED=0
     ldflags:
       - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
     tags:
