@@ -229,35 +229,38 @@ func TestInvalidate_OnLeavingAccepted(t *testing.T) {
 func TestAcceptedMarkers_SameSproutIDInTwoTenantsIndependent(t *testing.T) {
 	newTestPKIDB(t)
 	mr := newTestValkey(t)
-	pki.OnSproutLeftAccepted(Invalidate)
-	t.Cleanup(func() { pki.OnSproutLeftAccepted(nil) })
-	var calls atomic.Int64
-	countingVerify(&calls)
 	tenantA, tenantB := pki.CurrentTenantID(), "t_b"
 	acceptSprout(t, tenantA, "web-01", "UHBWEB01")
-	// Not accepted in B yet: A's marker must not vouch for it.
-	if err := pki.UnacceptNKey(tenantB, "web-01", "UHBWEB01B"); err != nil {
-		t.Fatal(err)
+	// Tenant B has no tenant row in the test PKI database (and "t_b" is not
+	// a real tenant ID), so its database check is faked; A's is the real one.
+	var acceptedInB atomic.Bool
+	verifySprout = func(tenant, id string) error {
+		if tenant == tenantB {
+			if acceptedInB.Load() {
+				return nil
+			}
+			return pki.ErrSproutIDNotFound
+		}
+		return pki.VerifySproutInTenant(tenant, id)
 	}
 	subj := pki.SproutHeartbeatSubject("web-01")
+
+	// Not accepted in B yet: A's marker must not vouch for it.
 	handleHeartbeat(tenantA, subj)
 	handleHeartbeat(tenantB, subj)
 	if !mr.Exists(acceptedKeyFor(tenantA, "web-01")) || mr.Exists(acceptedKeyFor(tenantB, "web-01")) || mr.Exists(keyFor(tenantB, "web-01")) {
 		t.Fatalf("keys = %v; want only tenant A's", mr.Keys())
 	}
-	if err := pki.AcceptNKey(tenantB, "web-01"); err != nil {
-		t.Fatal(err)
-	}
+	acceptedInB.Store(true)
 	handleHeartbeat(tenantB, subj)
 	if len(mr.Keys()) != 4 {
 		t.Fatalf("keys = %v; want presence and marker for both tenants", mr.Keys())
 	}
-	if err := pki.DenyNKey(tenantB, "web-01"); err != nil {
-		t.Fatal(err)
-	}
+	// Dropping B's keys (what the left-accepted hook does) leaves A's.
+	Invalidate(tenantB, "web-01")
 	want := fmt.Sprint([]string{acceptedKeyFor(tenantA, "web-01"), keyFor(tenantA, "web-01")})
 	got := mr.Keys()
 	if len(got) != 2 || !(mr.Exists(acceptedKeyFor(tenantA, "web-01")) && mr.Exists(keyFor(tenantA, "web-01"))) {
-		t.Fatalf("keys after denying tenant B's sprout = %v; want tenant A's %s", got, want)
+		t.Fatalf("keys after invalidating tenant B's sprout = %v; want tenant A's %s", got, want)
 	}
 }
