@@ -61,7 +61,13 @@ jobs:
       - name: Test with race detection and coverage
         env:
           IMAS_REQUIRE_HELM: "1"
-        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+        run: |
+          set +e
+          go test -race -coverprofile=coverage.out -covermode=atomic ./... > test.out 2>&1
+          rc=$?
+          grep -nE '^(--- FAIL|FAIL|panic:)|WARNING: DATA RACE' test.out | head -10 | sed 's/%/%25/g' | while IFS= read -r l; do echo "::error::${l:0:900}"; done
+          grep -nE '_test\.go:[0-9]+|^\s+(heartbeat|pki)\.' test.out | head -10 | sed 's/%/%25/g' | while IFS= read -r l; do echo "::warning::${l:0:900}"; done
+          exit $rc
 
       - name: Upload coverage to Codecov
         if: matrix.go-version == '1.26.x'
