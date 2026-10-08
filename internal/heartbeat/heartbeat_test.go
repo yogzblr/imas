@@ -17,6 +17,7 @@ package heartbeat
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,6 +47,11 @@ func newTestPKIDB(t *testing.T) {
 		t.Fatalf("migrating pki test db: %v", err)
 	}
 	pki.SetDB(gdb)
+	t.Cleanup(func() { // TEMPORARY diagnostic
+		if t.Failed() {
+			fmt.Printf("\n::error::DIAG heartbeat test failed: %s\n", t.Name())
+		}
+	})
 	t.Cleanup(func() { pki.SetDB(nil) })
 
 	dir := t.TempDir()

@@ -1,6 +1,7 @@
 package pki
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 )
@@ -9,6 +10,11 @@ import (
 // way a sprout leaves the accepted state, and not for accepting one.
 func TestOnSproutLeftAccepted(t *testing.T) {
 	setupTestPKI(t)
+	t.Cleanup(func() { // TEMPORARY diagnostic
+		if t.Failed() {
+			fmt.Printf("\n::error::DIAG pki test failed: %s\n", t.Name())
+		}
+	})
 	var mu sync.Mutex
 	var got [][2]string
 	OnSproutLeftAccepted(func(tenantID, sproutID string) {
