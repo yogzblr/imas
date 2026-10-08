@@ -300,6 +300,9 @@ jq -e --arg t "$T1" '.tenants["1"] == $t' "$bstate/core/out/core.json" >/dev/nul
 	jq -e --arg t "$T1" '.tenants["1"].tenant_id == $t and .tenants["1"].admin.username == "t1-admin"' "$bsens/keycloak.json" >/dev/null &&
 	[[ "$(stat -c %a "$bsens/keycloak.json")" == 600 ]] &&
 	ok "tenant mode: recorded in core.json and keycloak.json (still 0600)" || bad "tenant mode: records"
+grep -qF 'users/id-t1-admin?userProfileMetadata=true' "$STUB_STATE/kcadm-argv.log" &&
+	ok "tenant mode: the read-back asks for userProfileMetadata=true (Keycloak 26.4 hides admin-only attributes from a plain GET)" ||
+	bad "tenant mode: the read-back must use userProfileMetadata=true"
 refuse "bind-tenant.sh refuses tenant 1's id for tenant 2" "already bound to tenant 1" bt 2 "$T1"
 expect "bind-tenant.sh binds tenant 2" bt 2 "$T2"
 if bt --scratch-user scratch-t1-new admin "$T9" >"$tmp/scratch.json" 2>"$tmp/out"; then
