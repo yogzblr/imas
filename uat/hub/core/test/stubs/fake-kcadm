@@ -61,6 +61,7 @@ add-roles\ *)
 		fi ;;
 	get)
 		id="${res#users/}"
+		id="${id%%\?*}" # users/<id>?userProfileMetadata=true
 		jq --arg id "$id" '.users[] | select(.id == $id) | {attributes}' "$db" ;;
 	*) echo "fake kcadm: $verb $res unsupported" >&2; exit 2 ;;
 	esac ;;

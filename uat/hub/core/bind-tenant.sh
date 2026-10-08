@@ -101,13 +101,17 @@ update_json() {
 }
 
 # set_org <user>: organization_id := $tenant_id, then reads it back.
+# The read-back asks for userProfileMetadata=true: Keycloak 26.4 leaves an
+# attribute whose user-profile view permission is admin-only out of a plain
+# GET users/<id>, so without it the attribute looks unset right after a
+# successful update (found on the first local-rig run).
 set_org() {
 	local out
 	out=$(kcadm "
 		id=\$(\"\$k\" get users --config \"\$cfg\" -r $REALM -q username=$1 -q exact=true --fields id --format csv --noquotes)
 		[ -n \"\$id\" ] || { echo 'no user $1' >&2; exit 1; }
 		\"\$k\" update users/\$id --config \"\$cfg\" -r $REALM -s 'attributes.$TENANT_ATTRIBUTE=[\"$tenant_id\"]'
-		\"\$k\" get users/\$id --config \"\$cfg\" -r $REALM --fields attributes") ||
+		\"\$k\" get \"users/\$id?userProfileMetadata=true\" --config \"\$cfg\" -r $REALM") ||
 		die "could not set $TENANT_ATTRIBUTE on $1"
 	[[ "$(jq -r --arg a "$TENANT_ATTRIBUTE" '.attributes[$a][0] // empty' <<<"$out")" == "$tenant_id" ]] ||
 		die "$1 does not have $TENANT_ATTRIBUTE $tenant_id after the update"
