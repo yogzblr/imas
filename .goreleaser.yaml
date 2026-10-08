@@ -427,6 +427,7 @@ nfpms:
               mode: 0644
         scripts:
           postinstall: ./packaging/scripts/imas-sprout-deb-postinstall.sh
+          preremove: ./packaging/scripts/imas-sprout-deb-prerm.sh
       rpm:
         contents:
           # noreplace: the sprout writes its own state (sproutid, an emptied
@@ -456,6 +457,7 @@ nfpms:
               mode: 0644
         scripts:
           postinstall: ./packaging/scripts/imas-sprout-rpm-postinstall.sh
+          preremove: ./packaging/scripts/imas-sprout-rpm-preun.sh
 
 # Container images: GHCR only, linux/amd64 + linux/arm64, one multi-arch
 # manifest per image, signed keyless with cosign (docker_signs below).

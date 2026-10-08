@@ -205,12 +205,12 @@ booted as PID 1 in both. Every step gave the same result on both:
 |---|---|
 | install | unit enabled, not started; the script's "and start" comment is wrong |
 | upgrade while running | old process keeps running (same PID); no restart |
-| remove | process keeps running from the deleted binary; the `multi-user.target.wants` symlink is left dangling |
+| remove | (as found before UAT.11) process kept running from the deleted binary and the `multi-user.target.wants` symlink was left dangling; since UAT.11 a `preremove` script (`imas-sprout-deb-prerm.sh`, `imas-sprout-rpm-preun.sh`) stops and disables the service on remove/erase but not on upgrade |
 | vendor preset | `disable *` on both; `systemctl enable` overrides it on both |
 
 The last three rows are gaps in the shared scripts, not SUSE differences:
-there's no `preun`/`postun` to stop or disable the service, and no
-try-restart on upgrade. SUSE's packaging guidelines prefer the
+there's no `postun`, and no try-restart on upgrade. (The missing stop/disable on remove is fixed by the sprout
+remove scripts, UAT.11.) SUSE's packaging guidelines prefer the
 `%service_add_*`/`%service_del_*` macros, which follow presets. nfpm
 can't use rpm macros, though, and that's a policy choice rather than
 something that breaks.
