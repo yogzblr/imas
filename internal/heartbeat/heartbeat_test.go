@@ -75,7 +75,7 @@ func connectEventJSON(t *testing.T, accountPub, userPub string) []byte {
 
 func TestKeyFor(t *testing.T) {
 	got := keyFor("acme", "sprout-1")
-	want := "imas:heartbeat:acme:sprout-1"
+	want := "imas:heartbeat:{acme:sprout-1}"
 	if got != want {
 		t.Errorf("keyFor() = %q, want %q", got, want)
 	}

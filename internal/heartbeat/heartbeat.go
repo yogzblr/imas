@@ -1,5 +1,5 @@
 // Package heartbeat answers "is this sprout online" for GetSprout and
-// ListSprouts with a single Valkey read (key imas:heartbeat:<tenant>:
+// ListSprouts with a single Valkey read (key imas:heartbeat:{<tenant>:
 // <sprout_id>) instead of a live round trip to the sprout, which is what
 // the old app-level heartbeat (internal/natsapi's probeSprout, a
 // synchronous request/reply ping with a 3s worst-case timeout — see
@@ -99,7 +99,7 @@ const acceptedPrefix = "imas:accepted:"
 // ID is unique per tenant only. The presence key (keyFor) keeps its name
 // and meaning and its TTL; the marker is separate and long-lived.
 func acceptedKeyFor(tenant, sproutID string) string {
-	return acceptedPrefix + tenant + ":" + sproutID
+	return acceptedPrefix + slotTag(tenant, sproutID)
 }
 
 // client is the shared Valkey client. Nil until SetClient is called.
@@ -109,8 +109,15 @@ var client valkey.Client
 // through. Call once at startup.
 func SetClient(c valkey.Client) { client = c }
 
+// slotTag is the part of both keys inside the braces: Valkey hashes only
+// that part, so a sprout's presence key and acceptance marker share a slot
+// (needed by refreshScript) and still differ per (tenant, sprout).
+func slotTag(tenant, sproutID string) string {
+	return "{" + tenant + ":" + sproutID + "}"
+}
+
 func keyFor(tenant, sproutID string) string {
-	return keyPrefix + tenant + ":" + sproutID
+	return keyPrefix + slotTag(tenant, sproutID)
 }
 
 // IsOnline reports whether sproutID, within tenantID, currently holds a
@@ -263,10 +270,10 @@ var verifySprout = pki.VerifySproutInTenant
 // acceptance marker exists. KEYS[1] is the marker, KEYS[2] the presence
 // key, ARGV[1] the presence TTL in seconds. It returns 1 if it refreshed
 // and 0 (touching nothing) if the marker is absent. Both keys are passed as
-// KEYS but hash to different slots (the presence key's name is fixed), so
-// this needs a standalone or single-shard Valkey, which is what is
-// deployed today; a Valkey Cluster would need the two keys to share a hash
-// tag.
+// KEYS, so they must hash to one slot: valkey-go rejects a multi-key command
+// over different slots client-side, even against a standalone server (it
+// panics). keyFor and acceptedKeyFor therefore share the hash tag
+// "{tenant:sprout}" (see slotTag).
 var refreshScript = valkey.NewLuaScript(`
 if redis.call('EXISTS', KEYS[1]) == 1 then
   redis.call('SET', KEYS[2], '1', 'EX', ARGV[1])

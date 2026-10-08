@@ -34,7 +34,7 @@ import (
 func newOnlineSproutStore(t *testing.T, tenantID, sproutID string) *miniredis.Miniredis {
 	t.Helper()
 	mr := miniredis.RunT(t)
-	if err := mr.Set("imas:heartbeat:"+tenantID+":"+sproutID, "1"); err != nil {
+	if err := mr.Set("imas:heartbeat:{"+tenantID+":"+sproutID+"}", "1"); err != nil {
 		t.Fatalf("setting heartbeat key: %v", err)
 	}
 	return mr

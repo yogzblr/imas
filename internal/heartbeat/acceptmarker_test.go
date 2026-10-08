@@ -1,6 +1,6 @@
 package heartbeat
 
-// Tests for the Valkey acceptance marker (imas:accepted:<tenant>:<sprout>):
+// Tests for the Valkey acceptance marker (imas:accepted:{<tenant>:<sprout>}):
 // farmer keeps no state of its own for the accepted-sprout check.
 
 import (
@@ -25,11 +25,11 @@ func countingVerify(n *atomic.Int64) {
 }
 
 func TestAcceptedKeyFor(t *testing.T) {
-	if got, want := acceptedKeyFor("acme", "web-01"), "imas:accepted:acme:web-01"; got != want {
+	if got, want := acceptedKeyFor("acme", "web-01"), "imas:accepted:{acme:web-01}"; got != want {
 		t.Errorf("acceptedKeyFor = %q, want %q", got, want)
 	}
-	if keyFor("acme", "web-01") != "imas:heartbeat:acme:web-01" {
-		t.Error("the presence key's name changed")
+	if keyFor("acme", "web-01") != "imas:heartbeat:{acme:web-01}" {
+		t.Error("unexpected presence key name")
 	}
 	if AcceptedTTL <= TTL {
 		t.Errorf("AcceptedTTL %s must be longer than the presence TTL %s", AcceptedTTL, TTL)
