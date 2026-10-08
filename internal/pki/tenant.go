@@ -782,6 +782,33 @@ func ReloadNKeysForTenant(tenantID string) error {
 	return nil
 }
 
+// ResyncProvisionedTenants runs ReloadNKeysForTenant for every provisioned
+// tenant other than the legacy one, which ReloadNKeys covers. Farmer calls
+// it once at startup, before it connects each tenant to the bus: the
+// mintOrReuseUserJWT re-mint inside syncTenantSprouts is what gives an
+// already-enrolled sprout a User JWT with a permission added in a newer
+// release (for example the heartbeat publish grant), and without this
+// call it would only run when a sprout next enrolls or is accepted. A
+// failure for one tenant is logged by ReloadNKeysForTenant and does not
+// stop the others; the errors are returned joined.
+func ResyncProvisionedTenants() error {
+	ids, err := ListProvisionedTenantIDs()
+	if err != nil {
+		return err
+	}
+	legacy := CurrentTenantID()
+	var errs []error
+	for _, id := range ids {
+		if id == legacy {
+			continue
+		}
+		if err := ReloadNKeysForTenant(id); err != nil {
+			errs = append(errs, fmt.Errorf("tenant %s: %w", id, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // tenantIDsProvisionedOnDisk lists every tenant ID with Account material on
 // disk under tenantsRootDir, by directory name. Used by ConfigureNats
 // (nats.go) to seed the bus resolver with every provisioned tenant's
