@@ -22,6 +22,7 @@ package pki
 import (
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"gorm.io/gorm"
@@ -233,9 +234,39 @@ func revokedNKeys(tenantID string) (map[string]int64, error) {
 }
 
 func setStateInTenant(tenantID, id, state string) error {
-	return db.Model(&nkeyRow{}).
+	err := db.Model(&nkeyRow{}).
 		Where("tenant_id = ? AND sprout_id = ?", tenantID, id).
 		Update("state", state).Error
+	if err == nil && state != stateAccepted {
+		notifySproutLeftAccepted(tenantID, id)
+	}
+	return err
+}
+
+// sproutLeftAcceptedHook is the single subscriber OnSproutLeftAccepted
+// installs.
+var sproutLeftAcceptedHook atomic.Pointer[func(tenantID, sproutID string)]
+
+// OnSproutLeftAccepted registers fn to be called, synchronously, after a
+// sprout of a tenant has been moved out of the accepted state (DenyNKey,
+// UnacceptNKey, RejectNKey) or deleted (DeleteNKey). cmd/farmer uses it to
+// drop internal/heartbeat's Valkey acceptance marker and presence key at
+// once, without internal/pki depending on internal/heartbeat (which imports
+// this package). Like OnTenantProvisioned/OnTenantDeprovisioned it keeps
+// only the most recently registered callback; nil removes it. fn must not
+// block for long: it runs inside the state change.
+func OnSproutLeftAccepted(fn func(tenantID, sproutID string)) {
+	if fn == nil {
+		sproutLeftAcceptedHook.Store(nil)
+		return
+	}
+	sproutLeftAcceptedHook.Store(&fn)
+}
+
+func notifySproutLeftAccepted(tenantID, sproutID string) {
+	if p := sproutLeftAcceptedHook.Load(); p != nil {
+		(*p)(tenantID, sproutID)
+	}
 }
 
 // SproutIDForNKey looks up the accepted sprout ID owning nkey within

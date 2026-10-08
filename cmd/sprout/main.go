@@ -348,6 +348,9 @@ func ConnectSprout(ctx context.Context, done chan<- struct{}) {
 	// After natsInit's subscriptions, so a push arriving during the pull
 	// is seen and wins over it.
 	go syncStagedRecipe(ctx, cook.SyncOnStartup)
+	// Keeps farmer's "connected" key for this sprout fresh while the
+	// connection stays up (internal/heartbeat); stops with ctx.
+	startHeartbeat(ctx, nc, bus.UserJWT)
 	// Expire old local job logs written by cook runs on this sprout.
 	jobs.StartSproutReaper(ctx, jobLogDir, jobLogTTL)
 	<-ctx.Done()

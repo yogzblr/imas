@@ -67,11 +67,39 @@ func sproutPermissions(id string) jwt.Permissions {
 			// JWT. Already-enrolled sprouts get it through the
 			// mintOrReuseUserJWT re-mint on their next refresh and restart.
 			SproutShellPublishGrant(id),
+			// Periodic liveness heartbeat (internal/heartbeat): exactly
+			// this sprout's own subject, never a wildcard, so one sprout
+			// can't make another look online. Farmer takes the sprout ID
+			// from the subject, never the body, and only refreshes a key
+			// for an accepted sprout of the tenant the message arrived
+			// in. Outside imas.sprouts.<id>.>, so the sprout never
+			// receives its own heartbeats. A User JWT minted before this
+			// grant is re-minted on the next sync (mintOrReuseUserJWT
+			// compares the whole permission set).
+			SproutHeartbeatSubject(id),
 		}},
 		Sub: jwt.Permission{Allow: jwt.StringList{
 			"imas.sprouts." + id + ".>",
 		}},
 	}
+}
+
+// SproutHeartbeatSubjectPrefix is the subject prefix sprout heartbeats are
+// published under: imas.heartbeat.sprout.<id>, in the sprout's tenant
+// Account. No fixed token sits where a sprout ID does, so
+// reservedSproutIDs needs no entry for it.
+const SproutHeartbeatSubjectPrefix = "imas.heartbeat.sprout."
+
+// SproutHeartbeatSubjectPattern is the single-token wildcard farmer
+// subscribes to, per tenant connection, to receive every sprout's
+// heartbeat. Farmer must still derive the sprout ID from the subject's
+// last token and validate it (IsValidSproutID).
+const SproutHeartbeatSubjectPattern = SproutHeartbeatSubjectPrefix + "*"
+
+// SproutHeartbeatSubject is where sprout id publishes its periodic
+// heartbeat, and the only heartbeat subject its User JWT may publish to.
+func SproutHeartbeatSubject(id string) string {
+	return SproutHeartbeatSubjectPrefix + id
 }
 
 // SproutLogSubjectPrefix is the subject prefix sprout id publishes its log
