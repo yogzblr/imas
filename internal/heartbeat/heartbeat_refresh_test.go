@@ -32,10 +32,12 @@ func newTestValkey(t *testing.T) *miniredis.Miniredis {
 		t.Fatalf("creating valkey client: %v", err)
 	}
 	SetClient(c)
-	prev := ttl
+	prev, prevCache := ttl, acceptedSprouts
 	ttl = testTTL
+	// A fresh cache per test: the PKI database is per test too.
+	acceptedSprouts = newAcceptCache(DefaultAcceptCacheTTL, DefaultAcceptCacheMax, pki.VerifySproutInTenant)
 	t.Cleanup(func() {
-		ttl = prev
+		ttl, acceptedSprouts = prev, prevCache
 		SetClient(nil)
 		c.Close()
 	})

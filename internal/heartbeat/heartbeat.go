@@ -32,7 +32,8 @@
 // body, takes the sprout ID from the subject's last token, validates it
 // (pki.IsValidSproutID) and refreshes the key only if
 // pki.VerifySproutInTenant says that sprout is accepted in the tenant of
-// the connection it arrived on. A sprout's User JWT can publish only its
+// the connection it arrived on (a positive answer is cached for
+// DefaultAcceptCacheTTL; acceptcache.go). A sprout's User JWT can publish only its
 // own subject (pki.sproutPermissions), so one sprout cannot keep another
 // looking online. A heartbeat from an unaccepted, unknown or other
 // tenant's sprout is dropped silently.
@@ -225,7 +226,9 @@ func sproutIDFromHeartbeatSubject(subject string) (string, bool) {
 }
 
 // handleHeartbeat refreshes the key for the sprout named by subject, if it
-// is an accepted sprout of tenantID. tenantID comes from the connection
+// is an accepted sprout of tenantID, through acceptedSprouts (a bounded
+// cache of positive results; see acceptcache.go for what staleness that
+// accepts). tenantID comes from the connection
 // the message arrived on (a tenant's Account), never from the message.
 // Anything else is dropped without logging: it is not an error, just a
 // message this package has nothing to do with.
@@ -237,7 +240,7 @@ func handleHeartbeat(tenantID, subject string) {
 	if !ok {
 		return
 	}
-	if err := pki.VerifySproutInTenant(tenantID, sproutID); err != nil {
+	if err := acceptedSprouts.check(tenantID, sproutID); err != nil {
 		if !errors.Is(err, pki.ErrSproutIDNotFound) && !errors.Is(err, pki.ErrSproutIDInvalid) &&
 			!errors.Is(err, pki.ErrTenantNotFound) && !errors.Is(err, pki.ErrTenantIDInvalid) {
 			log.Warnf("heartbeat: checking sprout %s (tenant %s): %v", sproutID, tenantID, err)
