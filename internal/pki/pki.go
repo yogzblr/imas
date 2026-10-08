@@ -235,7 +235,7 @@ func DeleteNKey(tenantID, id string) error {
 	if !IsValidSproutID(id) {
 		return ErrSproutIDInvalid
 	}
-	return db.Transaction(func(tx *gorm.DB) error {
+	err := db.Transaction(func(tx *gorm.DB) error {
 		found, err := retireSproutTx(tx, tenantID, id, "")
 		if err != nil {
 			return err
@@ -245,6 +245,10 @@ func DeleteNKey(tenantID, id string) error {
 		}
 		return nil
 	})
+	if err == nil {
+		notifySproutLeftAccepted(tenantID, id)
+	}
+	return err
 }
 
 func DenyNKey(tenantID, id string) error {
