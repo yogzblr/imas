@@ -32,12 +32,10 @@ func newTestValkey(t *testing.T) *miniredis.Miniredis {
 		t.Fatalf("creating valkey client: %v", err)
 	}
 	SetClient(c)
-	prev, prevCache := ttl, acceptedSprouts
+	prev, prevAccepted, prevJitter, prevVerify := ttl, acceptedTTL, acceptedJitter, verifySprout
 	ttl = testTTL
-	// A fresh cache per test: the PKI database is per test too.
-	acceptedSprouts = newAcceptCache(DefaultAcceptCacheTTL, DefaultAcceptCacheMax, pki.VerifySproutInTenant)
 	t.Cleanup(func() {
-		ttl, acceptedSprouts = prev, prevCache
+		ttl, acceptedTTL, acceptedJitter, verifySprout = prev, prevAccepted, prevJitter, prevVerify
 		SetClient(nil)
 		c.Close()
 	})
@@ -257,8 +255,10 @@ func TestHeartbeat_IgnoresUnacceptedOtherTenantAndInvalid(t *testing.T) {
 	}
 	eventually(t, "control heartbeat sets its key", func() bool { return IsOnline(context.Background(), tenant, "web-01") })
 
-	if keys := mr.Keys(); len(keys) != 1 || keys[0] != keyFor(tenant, "web-01") {
-		t.Fatalf("keys = %v; want only %q", keys, keyFor(tenant, "web-01"))
+	// Only the control sprout has keys: its presence key and its marker.
+	want := map[string]bool{keyFor(tenant, "web-01"): true, acceptedKeyFor(tenant, "web-01"): true}
+	if keys := mr.Keys(); len(keys) != len(want) || !want[keys[0]] || !want[keys[1]] {
+		t.Fatalf("keys = %v; want only %v", keys, want)
 	}
 	for _, c := range []struct{ tenant, id string }{
 		{tenant, "web-02"}, {tenant, "web-03"}, {"t_b", "web-03"}, {"t_b", "web-01"},

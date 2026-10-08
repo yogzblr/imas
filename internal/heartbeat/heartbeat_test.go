@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -36,7 +37,7 @@ import (
 // internal/pki's own test setup.
 func newTestPKIDB(t *testing.T) {
 	t.Helper()
-	dsn := "file:" + t.Name() + "-pki?mode=memory&cache=shared"
+	dsn := "file:" + strings.ReplaceAll(t.Name(), "/", "_") + "-pki?mode=memory&cache=shared"
 	gdb, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("opening pki test db: %v", err)

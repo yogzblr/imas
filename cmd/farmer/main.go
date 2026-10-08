@@ -456,6 +456,9 @@ func initValkeyClient() {
 		return
 	}
 	heartbeat.SetClient(client)
+	// A sprout that is denied, rejected, unaccepted or deleted loses its
+	// Valkey acceptance marker and presence key at once, on every replica.
+	pki.OnSproutLeftAccepted(heartbeat.Invalidate)
 	pki.SetReplayCacheClient(client)
 	handlers.SetReadinessValkey(client)
 }
