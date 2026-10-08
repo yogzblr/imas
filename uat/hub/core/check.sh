@@ -118,10 +118,19 @@ check "saasapi SAASAPI_JWT_AUDIENCE is $SAASAPI_AUDIENCE" jq -e --arg a "$SAASAP
 # status <token or ""> <send BFF secret: 1|0> <path>: the HTTP status only.
 # Secrets go in header files on process substitution, not argv.
 status() {
-	local tok="$1" bff="$2" path="$3" hdr=()
+	local tok="$1" bff="$2" path="$3" hdr=() tokhdr="" code
 	if [[ "$bff" == 1 ]]; then hdr+=(-H "@$ias.hdr"); fi
-	if [[ -n "$tok" ]]; then hdr+=(-H @<(printf 'Authorization: Bearer %s\n' "$tok")); fi
-	curl_tls -o /dev/null -w '%{http_code}' "${hdr[@]}" "$SAASAPI_URL$path" 2>/dev/null || echo 000
+	if [[ -n "$tok" ]]; then
+		# A real file, not -H @<(...): a process substitution stored in an
+		# array is closed before curl runs, so curl sent no Authorization
+		# header at all (older curl silently, newer curl with an error).
+		tokhdr=$(umask 077 && mktemp "${TMPDIR:-/tmp}/imas-uat-auth.XXXXXX")
+		printf 'Authorization: Bearer %s\n' "$tok" >"$tokhdr"
+		hdr+=(-H "@$tokhdr")
+	fi
+	code=$(curl_tls -o /dev/null -w '%{http_code}' "${hdr[@]}" "$SAASAPI_URL$path" 2>/dev/null) || code=000
+	[[ -z "$tokhdr" ]] || rm -f "$tokhdr"
+	printf '%s' "$code"
 }
 (umask 077 && printf 'X-Internal-Auth: %s\n' "$(cat "$ias")" >"$ias.hdr")
 trap 'rm -f "$ias.hdr"' EXIT
