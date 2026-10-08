@@ -17,7 +17,9 @@ TimeoutStopSec=30
 
 # Security settings
 NoNewPrivileges=false
-PrivateTmp=true
+# No PrivateTmp: the sprout manages the host, so what a recipe writes under
+# /tmp or /var/tmp must be the host's own files, visible to admins and to
+# other services (a private /tmp hid every such file from them).
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
