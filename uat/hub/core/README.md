@@ -21,7 +21,7 @@ used by a release. Plan: `docs/claude-code-parallel-build-plan.md`, section 4h.
 | Piece | Where | What |
 |---|---|---|
 | farmer, saasapi, PXC (1 node, 1 HAProxy), Valkey (1), OpenBao (1, standalone, file storage) | namespace `imas-core`, release `imas-core` | the **published** `deploy/helm/farmer` chart of `release_tag`, with `values/farmer-uat.yaml` and a run-specific values file from `gen-values.sh` |
-| **MinIO** | `imas-uat` | the object store, one pod, pinned image, root credential generated per run in a Secret. **AGPL-3.0, test only, never shipped, never a dependency of a released artifact** (owner decision, 2026-10-06). |
+| **RustFS** (resources still named `imas-uat-minio`) | `imas-uat` | the object store, one pod, pinned image, root credential generated per run in a Secret. Apache-2.0. It replaced MinIO (AGPL-3.0); the UAT-only exception is withdrawn (requirements.md item 21). With `object_store.mode` `external` nothing is deployed here (see "External S3"). |
 | **Keycloak** | `imas-uat` | Apache-2.0, pinned image, **dev style**: one replica, `start-dev`, the **embedded H2 database** (`dev-file`) on a 1 GiB PVC so a pod restart keeps the tenant bindings. Realm `imas-uat` imported from `chart/files/imas-uat-realm.json`. |
 | edge proxy | `imas-uat` | one Envoy (Apache-2.0, the nats chart's pin), hostPorts only (owner decision 2026-10-06; there is no node port mode, the core node port range being 30000-32767), on the core FQDN: 443 for saasapi (`/v1/`) and Keycloak (`/realms/imas-uat/` only, never `/admin` or the master realm), and a TCP passthrough on 5405 to farmer's API for the DMZ's Envoy |
 | the DMZ bus, as seen from core | no object of its own | the farmer chart is installed with `bus.host` set to the DMZ's private name (`dmz.uat.imas.internal` by default, read from the endpoints file by `gen-values.sh`; UAT.1's Private DNS zone), `bus.port` the DMZ's bus node port 8442 and `bus.egressCIDRs` the DMZ private address, so `farmerbusurl` and `SAASAPI_NATS_URL` are `tls://dmz.uat.imas.internal:8442` and both verify that name, which the DMZ's bus certificate carries as a SAN. (This replaces the ExternalName Service of earlier versions.) |
@@ -70,6 +70,10 @@ own with the same arguments. `gen-values.sh` reads files only.
   | `dmz.ports.bus` | no | `8442` | the DMZ node port of the bus client port (owner decision 2026-10-06: the DMZ node port range is 8442-8443, bus on 8442). `bus.port` of the farmer chart: farmer and saasapi dial `bus.host` on it |
   | `ca.cluster_issuer` | no | `imas-uat-ca` | UAT.2's cert-manager ClusterIssuer (a CA issuer: its Secrets carry `ca.crt`). `uat/hub/dmz` spells it `cluster_issuer`; either is read, `ca.cluster_issuer` first |
   | `cluster_domain` | no | `cluster.local` | |
+  | `object_store.mode` | no | `rustfs` | `rustfs`: RustFS is deployed in `imas-uat` and `minio-setup.sh` provisions it. `external`: an S3 endpoint you run; nothing is deployed or provisioned (see "External S3") |
+  | `object_store.endpoint` | external: yes | `imas-uat-minio.imas-uat.svc.cluster.local:9000` | `host[:port]`, no scheme: farmer's `objectStore.endpoint` and saasapi's recipe store |
+  | `object_store.use_ssl` | no | `false` | `true` or `false`: `objectStore.useSSL` |
+  | `object_store.egress_cidrs` | no | `[]` | IPv4 CIDRs: narrows farmer's and saasapi's object store egress (`networkPolicy.external.objectStore`). Empty: any destination, on the endpoint's port |
 
 - **Environment** (all optional): `UAT_SEEDS_DIR` (see Seeds),
   `IMAS_HELM_OCI_BASE` (default `oci://ghcr.io/yogzblr/charts`; the farmer chart is
@@ -119,14 +123,15 @@ openssl, go (to build `nk`), tar, sha256sum, and this repository checked out.
 5. **UAT-only pieces** (`chart/`), waits for them and for both certificates,
    and copies the UAT CA (the issued Secret's `ca.crt`, a public certificate)
    to the ConfigMap `imas-uat-ca` and `out/uat-ca.crt`.
-6. **MinIO** (`minio-setup.sh`): buckets `imas-recipes` (`objectStore.bucket`)
+6. **Object store** (`minio-setup.sh`, RustFS): buckets `imas-recipes` (`objectStore.bucket`)
    and `imas-jobs` (`objectStore.jobBucket`); user `imas-farmer` with both
    buckets; user `imas-saasapi` with the **release chart's own**
    `files/objectstore-policies/saasapi-recipes.json`; the Secrets
    `imas-uat-s3-farmer` (`objectStore.credentialsSecret`) and
    `imas-uat-s3-saasapi` (`saasapi.recipes.credentialsSecret`). It uses the
-   `mc` inside the MinIO server image through `kubectl exec`, so no `mc`
-   image is pulled and the MinIO root credential never leaves its pod.
+   `curl` inside the RustFS server image through `kubectl exec` (signed with
+   `--aws-sigv4` against RustFS's admin API), so no client image is pulled
+   and the RustFS root credential never leaves its pod.
    saasapi's startup credential check then proves the saasapi user is
    limited.
 7. **The farmer chart** (`helm upgrade --install`, no `--wait`, as the chart
@@ -344,14 +349,47 @@ same directory; nothing here can check the DMZ cluster's Secret.
   and scenario L5 (self update) needs more setup.
 - Signature verification of the release's `checksums.txt` (cosign or GPG)
   before trusting the CLI archive; only the SHA-256 is checked.
-- Image digests for MinIO, Keycloak and Envoy (tags are pinned; the agent
+- Image digests for RustFS, Keycloak and Envoy (tags are pinned; the agent
   sandbox could not reach the registries to read digests).
 - Narrowing the chart's default saasapi egress (HTTPS anywhere) to the
   edge.
 
+## External S3
+
+The S3 endpoint is a variable. To use an S3 service you run instead of the
+bundled RustFS (for example [Versity Gateway](https://github.com/versity/versitygw),
+Apache-2.0, which fronts POSIX storage, Azure Blob and other S3 servers),
+set in the endpoints file:
+
+```json
+"object_store": {"mode": "external", "endpoint": "s3gw.example.internal:7070",
+                 "use_ssl": true, "egress_cidrs": ["10.70.0.0/24"]}
+```
+
+In this mode `install.sh` deploys no object store, skips `minio-setup.sh`
+and its rollout and check, and applies the two Secrets the farmer chart
+names from four files you place first, under `<state-dir>/sensitive/s3/`:
+`farmer-access-key-id`, `farmer-secret-access-key`, `saasapi-access-key-id`
+and `saasapi-secret-access-key` (no trailing newline). You also provide the
+buckets `imas-recipes` and `imas-jobs` and the two users.
+
+What the service must do, because imas relies on it (RustFS 1.0.1 was
+checked for each; a gateway has to be checked too):
+
+- Conditional PUT: `If-None-Match: *` and `If-Match: <etag>` answered 412
+  on a failed precondition (recipe and audit writes).
+- saasapi's user limited to `tenants/*/recipes/*` (read, write, delete),
+  list with that prefix, and `PutObject` only on `tenants/*/recipe-audit/*`,
+  per `deploy/helm/farmer/files/objectstore-policies/saasapi-recipes.json`.
+  saasapi's startup check (`saasapi.recipes.credentialCheck`) proves that
+  limit holds. A gateway without per-prefix policies is expected to fail
+  it; that is a finding, not something to switch off quietly.
+- Requests to the given `host[:port]` (no scheme), the way minio-go sends
+  them to a non-AWS endpoint.
+
 ## Licences
 
-MinIO: AGPL-3.0, UAT only (above). Keycloak and Envoy: Apache-2.0. OpenBao
+RustFS: Apache-2.0 (it replaced MinIO, AGPL-3.0). Keycloak and Envoy: Apache-2.0. OpenBao
 (MPL-2.0), PXC (GPLv2) and Valkey (BSD-3-Clause) are the farmer chart's
 recorded exceptions. `nk` is part of `github.com/nats-io/nkeys` (Apache-2.0),
 already a dependency. No new Go dependency.

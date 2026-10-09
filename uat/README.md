@@ -364,7 +364,7 @@ OpenTofu and the azurerm, random and tls providers (MPL-2.0), the Azure CLI
 and its extensions (MIT), k0s, k0sctl, kubectl, cert-manager,
 local-path-provisioner, Helm and Keycloak (Apache-2.0), Ansible (GPL-3.0,
 controller tooling), pywinrm (MIT), and in the environment PXC (GPLv2) and
-OpenBao (MPL-2.0) (recorded exceptions), MinIO (AGPL-3.0, UAT only) and
+OpenBao (MPL-2.0) (recorded exceptions), RustFS (Apache-2.0, the UAT object store) and
 busybox (GPL-2.0, UAT only, pending owner confirmation). The workflows use the
 GitHub actions `actions/*`, `azure/login`, `azure/setup-helm` and
 `opentofu/setup-opentofu`, which run on the runner only (their licences were

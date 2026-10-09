@@ -40,6 +40,9 @@ jq -n \
 	--arg pubkey "$pubkey" \
 	--arg boxpub "$boxpub" \
 	--arg adminName "$BOOTSTRAP_ADMIN_NAME" \
+	--arg s3Endpoint "$S3_ENDPOINT" \
+	--argjson s3SSL "$S3_USE_SSL" \
+	--argjson s3CIDRs "$S3_EGRESS_CIDRS" \
 	'{
 	  clusterDomain: $clusterDomain,
 	  bus: {
@@ -56,5 +59,9 @@ jq -n \
 	    image: {tag: $version},
 	    jwt: {keycloakJWKSURL: $jwks, issuer: $issuer, audience: $audience}
 	  },
-	  database: {migrate: {image: {tag: $version}}}
-	}'
+	  database: {migrate: {image: {tag: $version}}},
+	  objectStore: {endpoint: $s3Endpoint, useSSL: $s3SSL}
+	}
+	+ (if ($s3CIDRs | length) > 0
+	   then {networkPolicy: {external: {objectStore: ($s3CIDRs | map({ipBlock: {cidr: .}}))}}}
+	   else {} end)'

@@ -45,6 +45,9 @@ Status and delivery detail live in `docs/BUILD-STATUS.md`, not here.
     (used unmodified, or modifications shared). UAT-only exceptions,
     run unmodified on the throwaway UAT hubs and never linked, shipped
     or a dependency of a released artifact: busybox (GPL-2.0), as
-    local-path-provisioner's helper pod image on the UAT k0s hubs; and
-    MinIO (AGPL-3.0), as the UAT object store on the core hub. Any other
-    license is flagged before adoption.
+    local-path-provisioner's helper pod image on the UAT k0s hubs. The
+    UAT object store on the core hub is RustFS (Apache-2.0), which
+    replaced MinIO (AGPL-3.0, no longer used; its UAT-only exception is
+    withdrawn, 2026-10-09). The S3 endpoint is configurable, so any
+    Apache-2.0 or MIT S3 service (for example Versity Gateway) can stand
+    in. Any other license is flagged before adoption.

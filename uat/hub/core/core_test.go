@@ -612,3 +612,95 @@ func TestExtrasChartRender(t *testing.T) {
 		t.Error("edge upstreams are not the farmer chart's Services")
 	}
 }
+
+// withObjectStore writes a copy of testdata/endpoints.json with the given
+// object_store object and returns its path.
+func withObjectStore(t *testing.T, os_ map[string]any) string {
+	t.Helper()
+	var ep map[string]any
+	readJSON(t, endpointsFile, &ep)
+	ep["object_store"] = os_
+	b, err := json.Marshal(ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "endpoints.json")
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestObjectStoreEndpointVariable: the S3 endpoint is a variable
+// (object_store.* in the endpoints file). The default is RustFS in imas-uat;
+// "external" deploys no store and points farmer and saasapi at the given
+// endpoint, with egress narrowed to the given CIDRs.
+func TestObjectStoreEndpointVariable(t *testing.T) {
+	requireTools(t, "helm", "bash", "jq")
+
+	// Default: unchanged behaviour.
+	var def map[string]any
+	readJSON(t, runValues(t), &def)
+	if got := str(def, "objectStore", "endpoint"); got != "imas-uat-minio.imas-uat.svc.cluster.local:9000" {
+		t.Errorf("default objectStore.endpoint %q", got)
+	}
+	if dig(def, "objectStore", "useSSL") != false {
+		t.Error("default objectStore.useSSL is not false")
+	}
+	if dig(def, "networkPolicy") != nil {
+		t.Error("default run values narrow the object store egress")
+	}
+
+	// External.
+	ext := withObjectStore(t, map[string]any{
+		"mode": "external", "endpoint": "s3gw.example.internal:7070", "use_ssl": true,
+		"egress_cidrs": []string{"10.70.0.0/24"},
+	})
+	out := run(t, "bash", "gen-values.sh", ext, adminFile, releaseTag)
+	var v map[string]any
+	if err := json.Unmarshal(out, &v); err != nil {
+		t.Fatal(err)
+	}
+	if got := str(v, "objectStore", "endpoint"); got != "s3gw.example.internal:7070" {
+		t.Errorf("objectStore.endpoint %q", got)
+	}
+	if dig(v, "objectStore", "useSSL") != true {
+		t.Error("objectStore.useSSL is not true")
+	}
+	if s := mustJSON(t, dig(v, "networkPolicy", "external", "objectStore")); s != `[{"ipBlock":{"cidr":"10.70.0.0/24"}}]` {
+		t.Errorf("networkPolicy.external.objectStore = %s", s)
+	}
+	setArgs := strings.Fields(string(run(t, "bash", "-c",
+		`set -euo pipefail; . lib/common.sh; ENDPOINTS="$1"; load_endpoints; extras_set_args`, "_", ext)))
+	objs := docs(t, run(t, "helm", append([]string{"template", "imas-uat-core", "chart", "-n", "imas-uat", "--kube-version", "1.31.0"}, setArgs...)...))
+	for _, key := range []string{"Deployment/imas-uat-minio", "Service/imas-uat-minio", "PersistentVolumeClaim/imas-uat-rustfs-data", "NetworkPolicy/imas-uat-minio"} {
+		if _, ok := objs[key]; ok {
+			t.Errorf("external mode still renders %s", key)
+		}
+	}
+	// The default still renders the store.
+	defArgs := strings.Fields(string(run(t, "bash", "-c",
+		`set -euo pipefail; . lib/common.sh; ENDPOINTS="$1"; load_endpoints; extras_set_args`, "_", endpointsFile)))
+	defObjs := docs(t, run(t, "helm", append([]string{"template", "imas-uat-core", "chart", "-n", "imas-uat", "--kube-version", "1.31.0"}, defArgs...)...))
+	for _, key := range []string{"Deployment/imas-uat-minio", "Service/imas-uat-minio", "PersistentVolumeClaim/imas-uat-rustfs-data", "NetworkPolicy/imas-uat-minio"} {
+		get(t, defObjs, key)
+	}
+}
+
+// TestObjectStoreEndpointRejected: bad object_store input stops load_endpoints.
+func TestObjectStoreEndpointRejected(t *testing.T) {
+	requireTools(t, "bash", "jq")
+	for name, o := range map[string]map[string]any{
+		"unknown mode":          {"mode": "minio"},
+		"external, no endpoint": {"mode": "external"},
+		"scheme in endpoint":    {"endpoint": "https://s3.example.internal"},
+		"bad use_ssl":           {"use_ssl": "yes"},
+		"bad cidr":              {"egress_cidrs": []string{"not-a-cidr"}},
+	} {
+		p := withObjectStore(t, o)
+		cmd := exec.Command("bash", "-c", `set -euo pipefail; . lib/common.sh; ENDPOINTS="$1"; load_endpoints`, "_", p)
+		if out, err := cmd.CombinedOutput(); err == nil {
+			t.Errorf("%s: load_endpoints accepted it: %s", name, out)
+		}
+	}
+}
