@@ -1,8 +1,9 @@
 {{- include "uat.validate" . -}}
-# MinIO: the UAT-only object store (AGPL-3.0; test only, never shipped,
-# never a dependency of a released artifact). One pod, one PVC, root
+# RustFS: the UAT object store (Apache-2.0). One pod, one PVC, root
 # credential from a Secret install.sh generates. Buckets, users and
-# policies are made by minio-setup.sh with the mc inside this image.
+# policies are made by minio-setup.sh with the curl inside this image,
+# through RustFS's admin API. The resource names keep the "minio" spelling
+# (imas-uat-minio, values key "minio") so nothing that names them changes.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -44,34 +45,34 @@ spec:
       enableServiceLinks: false
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
-        fsGroup: 1000
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
         seccompProfile: { type: RuntimeDefault }
       containers:
-        - name: minio
+        - name: rustfs
           image: {{ .Values.minio.image | quote }}
           imagePullPolicy: IfNotPresent
-          command: ["minio"]
-          args: ["server", "/data", "--address", ":9000", "--console-address", "127.0.0.1:9001"]
           env:
-            - name: MINIO_ROOT_USER
+            - name: RUSTFS_ACCESS_KEY
               valueFrom: { secretKeyRef: { name: {{ .Values.minio.rootSecret }}, key: user } }
-            - name: MINIO_ROOT_PASSWORD
+            - name: RUSTFS_SECRET_KEY
               valueFrom: { secretKeyRef: { name: {{ .Values.minio.rootSecret }}, key: password } }
-            - name: MINIO_BROWSER
-              value: "off"
-            - name: HOME
-              value: /tmp
-            - name: MC_CONFIG_DIR
-              value: /tmp/.mc
+            - name: RUSTFS_VOLUMES
+              value: /data
+            - name: RUSTFS_ADDRESS
+              value: ":9000"
+            - name: RUSTFS_CONSOLE_ENABLE
+              value: "false"
+            - name: RUSTFS_OBS_LOG_DIRECTORY
+              value: /logs
           ports:
             - { name: s3, containerPort: 9000 }
           readinessProbe:
-            httpGet: { path: /minio/health/ready, port: s3 }
+            httpGet: { path: /health/ready, port: s3 }
             periodSeconds: 10
           livenessProbe:
-            httpGet: { path: /minio/health/live, port: s3 }
+            httpGet: { path: /health/live, port: s3 }
             periodSeconds: 20
           resources:
             {{- toYaml .Values.minio.resources | nindent 12 }}
@@ -82,12 +83,15 @@ spec:
           volumeMounts:
             - { name: data, mountPath: /data }
             - { name: tmp, mountPath: /tmp }
+            - { name: logs, mountPath: /logs }
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: imas-uat-minio
         - name: tmp
           emptyDir: { sizeLimit: 64Mi }
+        - name: logs
+          emptyDir: { sizeLimit: 256Mi }
 ---
 apiVersion: v1
 kind: Service

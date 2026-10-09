@@ -54,9 +54,10 @@ caIssuer:
   name: imas-uat-ca
 
 minio:
-  # AGPL-3.0, UAT only. Pinned; never latest. Unverified from the agent
-  # sandbox (no registry access): confirm the tag, and add its digest.
-  image: docker.io/bitnamilegacy/minio:2025.7.23-debian-12-r3
+  # RustFS (Apache-2.0), replacing MinIO (AGPL-3.0). Pinned; never latest.
+  # SPIKE: set this to the tag validated with validate-rustfs.sh (and add
+  # its digest) before running the rig; "1.0.1" is a placeholder to confirm.
+  image: docker.io/rustfs/rustfs:1.0.1
   rootSecret: imas-uat-minio-root
   storage: 5Gi
   storageClassName: ""

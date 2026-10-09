@@ -21,7 +21,7 @@ used by a release. Plan: `docs/claude-code-parallel-build-plan.md`, section 4h.
 | Piece | Where | What |
 |---|---|---|
 | farmer, saasapi, PXC (1 node, 1 HAProxy), Valkey (1), OpenBao (1, standalone, file storage) | namespace `imas-core`, release `imas-core` | the **published** `deploy/helm/farmer` chart of `release_tag`, with `values/farmer-uat.yaml` and a run-specific values file from `gen-values.sh` |
-| **MinIO** | `imas-uat` | the object store, one pod, pinned image, root credential generated per run in a Secret. **AGPL-3.0, test only, never shipped, never a dependency of a released artifact** (owner decision, 2026-10-06). |
+| **RustFS** (resources still named `imas-uat-minio`) | `imas-uat` | the object store, one pod, pinned image, root credential generated per run in a Secret. Apache-2.0. **SPIKE** replacing MinIO (AGPL-3.0, UAT-only exception, owner decision 2026-10-06), which stays recorded until RustFS is adopted. |
 | **Keycloak** | `imas-uat` | Apache-2.0, pinned image, **dev style**: one replica, `start-dev`, the **embedded H2 database** (`dev-file`) on a 1 GiB PVC so a pod restart keeps the tenant bindings. Realm `imas-uat` imported from `chart/files/imas-uat-realm.json`. |
 | edge proxy | `imas-uat` | one Envoy (Apache-2.0, the nats chart's pin), hostPorts only (owner decision 2026-10-06; there is no node port mode, the core node port range being 30000-32767), on the core FQDN: 443 for saasapi (`/v1/`) and Keycloak (`/realms/imas-uat/` only, never `/admin` or the master realm), and a TCP passthrough on 5405 to farmer's API for the DMZ's Envoy |
 | the DMZ bus, as seen from core | no object of its own | the farmer chart is installed with `bus.host` set to the DMZ's private name (`dmz.uat.imas.internal` by default, read from the endpoints file by `gen-values.sh`; UAT.1's Private DNS zone), `bus.port` the DMZ's bus node port 8442 and `bus.egressCIDRs` the DMZ private address, so `farmerbusurl` and `SAASAPI_NATS_URL` are `tls://dmz.uat.imas.internal:8442` and both verify that name, which the DMZ's bus certificate carries as a SAN. (This replaces the ExternalName Service of earlier versions.) |
@@ -119,14 +119,15 @@ openssl, go (to build `nk`), tar, sha256sum, and this repository checked out.
 5. **UAT-only pieces** (`chart/`), waits for them and for both certificates,
    and copies the UAT CA (the issued Secret's `ca.crt`, a public certificate)
    to the ConfigMap `imas-uat-ca` and `out/uat-ca.crt`.
-6. **MinIO** (`minio-setup.sh`): buckets `imas-recipes` (`objectStore.bucket`)
+6. **Object store** (`minio-setup.sh`, RustFS): buckets `imas-recipes` (`objectStore.bucket`)
    and `imas-jobs` (`objectStore.jobBucket`); user `imas-farmer` with both
    buckets; user `imas-saasapi` with the **release chart's own**
    `files/objectstore-policies/saasapi-recipes.json`; the Secrets
    `imas-uat-s3-farmer` (`objectStore.credentialsSecret`) and
    `imas-uat-s3-saasapi` (`saasapi.recipes.credentialsSecret`). It uses the
-   `mc` inside the MinIO server image through `kubectl exec`, so no `mc`
-   image is pulled and the MinIO root credential never leaves its pod.
+   `curl` inside the RustFS server image through `kubectl exec` (signed with
+   `--aws-sigv4` against RustFS's admin API), so no client image is pulled
+   and the RustFS root credential never leaves its pod.
    saasapi's startup credential check then proves the saasapi user is
    limited.
 7. **The farmer chart** (`helm upgrade --install`, no `--wait`, as the chart
@@ -344,14 +345,14 @@ same directory; nothing here can check the DMZ cluster's Secret.
   and scenario L5 (self update) needs more setup.
 - Signature verification of the release's `checksums.txt` (cosign or GPG)
   before trusting the CLI archive; only the SHA-256 is checked.
-- Image digests for MinIO, Keycloak and Envoy (tags are pinned; the agent
+- Image digests for RustFS, Keycloak and Envoy (tags are pinned; the agent
   sandbox could not reach the registries to read digests).
 - Narrowing the chart's default saasapi egress (HTTPS anywhere) to the
   edge.
 
 ## Licences
 
-MinIO: AGPL-3.0, UAT only (above). Keycloak and Envoy: Apache-2.0. OpenBao
+RustFS: Apache-2.0 (SPIKE; the MinIO AGPL-3.0 UAT exception stays recorded until adoption). Keycloak and Envoy: Apache-2.0. OpenBao
 (MPL-2.0), PXC (GPLv2) and Valkey (BSD-3-Clause) are the farmer chart's
 recorded exceptions. `nk` is part of `github.com/nats-io/nkeys` (Apache-2.0),
 already a dependency. No new Go dependency.

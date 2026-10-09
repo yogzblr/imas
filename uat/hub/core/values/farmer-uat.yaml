@@ -81,7 +81,7 @@ pxc:
 valkey:
   enabled: true
 
-# MinIO (UAT only, AGPL-3.0) in namespace imas-uat. Plain HTTP inside the
+# RustFS (Apache-2.0; SPIKE replacing MinIO) in namespace imas-uat. Plain HTTP inside the
 # cluster. Two buckets: recipes, and job logs (must differ).
 objectStore:
   endpoint: imas-uat-minio.imas-uat.svc.cluster.local:9000
