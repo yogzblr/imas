@@ -942,6 +942,15 @@ func ConnectFarmer(ctx context.Context, done chan<- struct{}) {
 	// platform-level operation, so one listener is all this ever needs.
 	initSystemAccountListeners()
 
+	// Re-sync every provisioned tenant's sprouts onto the current
+	// permission set before connecting: ReloadNKeys above covers only the
+	// legacy tenant, so without this an already-enrolled sprout of any
+	// other tenant keeps the User JWT it was minted with (no heartbeat
+	// grant after an upgrade) until it next enrolls. Not fatal.
+	if err := pki.ResyncProvisionedTenants(); err != nil {
+		log.Errorf("Failed to re-sync provisioned tenants' NATS auth state: %v", err)
+	}
+
 	ids, err := pki.ListProvisionedTenantIDs()
 	if err != nil {
 		log.Errorf("Failed to list provisioned tenants for connection bootstrap: %v", err)
