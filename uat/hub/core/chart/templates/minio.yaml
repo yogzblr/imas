@@ -52,6 +52,7 @@ spec:
         - name: minio
           image: {{ .Values.minio.image | quote }}
           imagePullPolicy: IfNotPresent
+          command: ["minio"]
           args: ["server", "/data", "--address", ":9000", "--console-address", "127.0.0.1:9001"]
           env:
             - name: MINIO_ROOT_USER
