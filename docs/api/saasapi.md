@@ -267,6 +267,7 @@ Update rollouts (below) add their own. Items failed before they were sent:
 | `update_already_in_progress` | no longer written (a second rollout is now refused with `409 update_in_progress`); items stored before that keep it |
 | `rollout_halted` | the rollout can't continue: an earlier wave failed its gate, or, for a resumed rollout, the version is no longer registered or a row's signature no longer verifies |
 | `sprout_reenroll_required` | farmer refused to send the update: the sprout has no payload-encryption key on record (as above) |
+| `self_update_disabled` | farmer refused the update unrun: its self-update switch (`IMAS_SELF_UPDATE_ENABLED`) is off. Not retried; an operator has to turn it on and start a new rollout |
 
 And for items that were sent: `unresponsive_after_update` (the sprout didn't
 come back on the target version in time), `facts_clock_skew` (its report is

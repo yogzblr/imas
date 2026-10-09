@@ -491,9 +491,11 @@ func TestReplyUpdate_FarmerCodes(t *testing.T) {
 	item := AssetActionItem{AssetID: "a1", SproutID: "web-01"}
 	for code, want := range map[controlplane.ErrorCode]map[string]any{
 		"rollout_window_closed": failedUpdate(errCodeRolloutWindowClosed),
-		"self_update_disabled":  failedUpdate(string(controlplane.ErrorInternal)),
-		"farmer_busy":           requeueUpdate(),
-		"something_new":         failedUpdate(string(controlplane.ErrorInternal)),
+		// Not sent again, and not hidden as internal_error: the operator has to
+		// turn farmer's switch on.
+		"self_update_disabled": failedUpdate(errCodeSelfUpdateDisabled),
+		"farmer_busy":          requeueUpdate(),
+		"something_new":        failedUpdate(string(controlplane.ErrorInternal)),
 		// Not sent again: it would be refused until the sprout re-enrolls.
 		"sprout_reenroll_required": failedUpdate(errCodeSproutReenrollRequired),
 	} {

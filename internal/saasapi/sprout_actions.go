@@ -137,6 +137,12 @@ const (
 	// it would be refused the same way until the sprout is re-enrolled.
 	// The same string farmer replies with (farmerCodeSproutReenrollRequired).
 	errCodeSproutReenrollRequired = "sprout_reenroll_required"
+	// errCodeSelfUpdateDisabled: farmer's self-update switch
+	// (IMAS_SELF_UPDATE_ENABLED) is off, so it refused the update unrun. It
+	// never ran, and it isn't sent again: farmer refuses every update until
+	// an operator turns the switch on. The same string farmer replies with
+	// (farmerCodeSelfUpdateDisabled).
+	errCodeSelfUpdateDisabled = "self_update_disabled"
 )
 
 // Codes farmer's internal.sprout.action replies with besides
@@ -145,11 +151,11 @@ const (
 // SEC.5's scope.
 const (
 	// farmerCodeSelfUpdateDisabled: farmer's IMAS_SELF_UPDATE_ENABLED is
-	// off, so it refused the self_update unrun. Stored as internal_error
-	// (with this reason logged): a new item code must first be added to
-	// docs/api/saasapi.md and the OpenAPI enum (TestItemErrorCodesDocumented),
-	// which were outside SEC.5's scope.
-	farmerCodeSelfUpdateDisabled = "self_update_disabled"
+	// off, so it refused the self_update unrun. Stored as
+	// errCodeSelfUpdateDisabled, the same string (documented in
+	// docs/api/saasapi.md and the OpenAPI enum, which
+	// TestItemErrorCodesDocumented checks).
+	farmerCodeSelfUpdateDisabled = errCodeSelfUpdateDisabled
 	// farmerCodeRolloutWindowClosed: farmer found now outside the
 	// tenant's rollout window and refused the self_update unrun. The same
 	// string as errCodeRolloutWindowClosed.
@@ -187,6 +193,7 @@ var actionErrorMessages = map[string]string{
 	errCodeTenantNotActive:        "the tenant was no longer active when the action was due to be sent, so it was not sent",
 	errCodeExpiredNotSent:         "the action could not be sent in time after it was accepted, so it expired and was never sent",
 	errCodeSproutReenrollRequired: "the sprout has no payload-encryption key on record, so the action was not sent; re-enroll the sprout",
+	errCodeSelfUpdateDisabled:     "self-update is turned off on farmer, so the update was not sent",
 
 	// Fleet update rollouts (fleet_update_dispatch.go).
 	errCodeRolloutHalted:           "an earlier wave of this rollout did not fully succeed, so the update was not sent to this sprout",
@@ -1019,8 +1026,8 @@ func replyUpdate(batch AssetActionBatch, item AssetActionItem, data []byte) map[
 		return requeueUpdate()
 	case reply.Status == controlplane.StatusFailed && reply.ErrorCode == farmerCodeSelfUpdateDisabled:
 		log.Errorf("saasapi: farmer refused batch %s asset %s (tenant %s): self_update is disabled on farmer (IMAS_SELF_UPDATE_ENABLED); recorded as %s",
-			batch.ID, item.AssetID, batch.TenantID, controlplane.ErrorInternal)
-		return failedUpdate(string(controlplane.ErrorInternal))
+			batch.ID, item.AssetID, batch.TenantID, errCodeSelfUpdateDisabled)
+		return failedUpdate(errCodeSelfUpdateDisabled)
 	case reply.Status == controlplane.StatusFailed && reply.ErrorCode == farmerCodeSproutReenrollRequired:
 		log.Warnf("saasapi: farmer refused batch %s asset %s (tenant %s): sprout %s has no payload-encryption key on record and must be re-enrolled; nothing was sent; recorded as %s",
 			batch.ID, item.AssetID, batch.TenantID, item.SproutID, errCodeSproutReenrollRequired)

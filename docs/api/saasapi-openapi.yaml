@@ -1305,6 +1305,7 @@ components:
                   - no_release_for_platform
                   - below_min_sprout_version
                   - sprout_newer_than_target
+                  - self_update_disabled
                   - facts_clock_skew
               message: { type: string, description: The fixed message for `error`. }
 
