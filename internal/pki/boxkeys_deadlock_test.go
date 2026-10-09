@@ -2,18 +2,20 @@ package pki
 
 import (
 	"errors"
+	"fmt"
 	"testing"
+
+	"github.com/go-sql-driver/mysql"
 )
 
-// driverErr is an error with go-sql-driver's message, which starts with a
-// capital "Error NNNN" (staticcheck ST1005 flags that in errors.New).
-type driverErr string
-
-func (e driverErr) Error() string { return string(e) }
+// driverError is the error go-sql-driver returns for a MySQL error number.
+func driverError(number uint16, message string) error {
+	return &mysql.MySQLError{Number: number, SQLState: [5]byte{'4', '0', '0', '0', '1'}, Message: message}
+}
 
 // errDeadlock is what go-sql-driver returns for ER_LOCK_DEADLOCK; PXC returns
 // it too for a Galera certification conflict.
-var errDeadlock error = driverErr("Error 1213 (40001): Deadlock found when trying to get lock; try restarting transaction")
+var errDeadlock = driverError(1213, "Deadlock found when trying to get lock; try restarting transaction")
 
 func fastDeadlockRetries(t *testing.T) {
 	t.Helper()
@@ -30,9 +32,12 @@ func TestIsDeadlockError(t *testing.T) {
 	}{
 		{"nil", nil, false},
 		{"deadlock", errDeadlock, true},
-		{"wrapped deadlock", errors.Join(errors.New("write box key"), errDeadlock), true},
-		{"duplicate entry", driverErr("Error 1062 (23000): Duplicate entry"), false},
-		{"lock wait timeout", driverErr("Error 1205 (HY000): Lock wait timeout exceeded"), false},
+		{"wrapped deadlock", fmt.Errorf("write box key: %w", errDeadlock), true},
+		{"joined deadlock", errors.Join(errors.New("write box key"), errDeadlock), true},
+		{"duplicate entry", driverError(1062, "Duplicate entry"), false},
+		{"lock wait timeout", driverError(1205, "Lock wait timeout exceeded"), false},
+		// The number is what counts, not the text.
+		{"text only", errors.New("Error 1213 (40001): Deadlock found"), false},
 		{"other", errors.New("connection refused"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

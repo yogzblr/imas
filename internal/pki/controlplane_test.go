@@ -33,6 +33,48 @@ type cliUser struct {
 	keyFile string
 }
 
+func TestReleaseSealedMessage(t *testing.T) {
+	mr := withTestReplayCache(t)
+	id, _ := payloadbox.NewID()
+	if err := ClaimSealedMessage(t.Context(), "t_1", "UALICE", id); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReleaseSealedMessage(t.Context(), "t_1", "UALICE", id); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	// Free again, and claimable once more, once.
+	if err := ClaimSealedMessage(t.Context(), "t_1", "UALICE", id); err != nil {
+		t.Errorf("claim after a release: %v", err)
+	}
+	if err := ClaimSealedMessage(t.Context(), "t_1", "UALICE", id); !errors.Is(err, ErrSealedReplayed) {
+		t.Errorf("second claim after a release: %v", err)
+	}
+	// Only that tenant, principal and ID: another tenant's claim stays.
+	other, _ := payloadbox.NewID()
+	if err := ClaimSealedMessage(t.Context(), "t_2", "UALICE", other); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReleaseSealedMessage(t.Context(), "t_1", "UALICE", other); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClaimSealedMessage(t.Context(), "t_2", "UALICE", other); !errors.Is(err, ErrSealedReplayed) {
+		t.Errorf("another tenant's claim was released: %v", err)
+	}
+	// Nothing to release is not an error.
+	if err := ReleaseSealedMessage(t.Context(), "t_1", "UALICE", "ab12cd"); err != nil {
+		t.Errorf("release of an absent claim: %v", err)
+	}
+	for _, bad := range [][3]string{{"t:1", "U", id}, {"t_1", "", id}, {"t_1", "U", "a b"}} {
+		if err := ReleaseSealedMessage(t.Context(), bad[0], bad[1], bad[2]); !errors.Is(err, ErrSealedClaimUnavailable) {
+			t.Errorf("%v: %v", bad, err)
+		}
+	}
+	mr.SetError("down")
+	if err := ReleaseSealedMessage(t.Context(), "t_1", "UALICE", id); !errors.Is(err, ErrSealedClaimUnavailable) {
+		t.Errorf("Valkey down: %v", err)
+	}
+}
+
 // setupCLIStore wires up the farmer side for CLI box keys: the PKI and
 // rbac stores, an admin role, the tenant key mock and a Valkey stand-in.
 func setupCLIStore(t *testing.T) *miniredis.Miniredis {

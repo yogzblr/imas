@@ -33,9 +33,9 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
-	"strings"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
@@ -215,12 +215,16 @@ func retryOnDeadlock(write func() error) error {
 	return err
 }
 
-// isDeadlockError reports whether err is error 1213. Matched on
-// go-sql-driver's fixed "Error 1213" message prefix rather than its typed
-// *mysql.MySQLError, to avoid importing the driver directly here (it's
-// MPL-2.0; see CLAUDE.md's licensing rule), as internal/jobs does.
+// mysqlDeadlock is MySQL's ER_LOCK_DEADLOCK.
+const mysqlDeadlock = 1213
+
+// isDeadlockError reports whether err is, or wraps, the driver's error
+// number 1213. The number is checked, not the message text. The driver is
+// MPL-2.0, used unmodified as internal/migrations already does
+// (CLAUDE.md, licensing).
 func isDeadlockError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "Error 1213")
+	var me *mysql.MySQLError
+	return errors.As(err, &me) && me.Number == mysqlDeadlock
 }
 
 // revokeSproutBoxKeysTx revokes every box key of sproutID in tenantID
