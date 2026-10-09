@@ -10,7 +10,8 @@ design doc named in your task.
   exceptions: Percona XtraDB Cluster (GPLv2, commercial arrangement) and
   MPL-2.0 dependencies generally, including OpenBao and its Go client,
   used unmodified or with changes shared (docs/design/requirements.md
-  item 21). UAT-only exceptions: busybox and MinIO (same item 21).
+  item 21). UAT-only exception: busybox (same item 21). The UAT object
+  store is RustFS (Apache-2.0); MinIO (AGPL-3.0) is not used.
   Flag any other license before adding it as a dependency,
   don't just add it.
 - Sprout updates install from the repository configured in the sprout,
