@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"time"
 
 	nats "github.com/nats-io/nats.go"
 
@@ -34,4 +35,34 @@ func startHeartbeat(ctx context.Context, nc *nats.Conn, userJWT string) {
 		return
 	}
 	go heartbeat.RunSprout(ctx, nc, sproutID, heartbeat.Interval)
+}
+
+// staleJWTRefreshTimeout bounds the one refresh refreshStaleUserJWT makes
+// before the sprout connects.
+const staleJWTRefreshTimeout = 20 * time.Second
+
+// refreshStaleUserJWT asks farmer for a fresh User JWT when the persisted
+// one lacks the heartbeat grant, so a sprout whose package was upgraded
+// connects with the re-minted JWT on that very start. Without it the
+// refresher, which sleeps until the gateway JWT is due, fetches the
+// re-minted JWT hours or days later and the sprout needs another restart
+// to use it, meanwhile showing as disconnected 5 minutes after each
+// connect. Only a sprout with a stale JWT refreshes early, so a fleet-wide
+// restart does not turn into a refresh stampede. Best effort: any failure
+// is logged and the sprout connects with the JWT it has; the refresher
+// still handles everything else, fatal pin errors included. It reports
+// whether a refresh was made and succeeded.
+func refreshStaleUserJWT(ctx context.Context, id string, load func() (string, error), refresh func(context.Context) (string, error)) bool {
+	userJWT, err := load()
+	if err != nil || heartbeatPermitted(userJWT, id) {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, staleJWTRefreshTimeout)
+	defer cancel()
+	if _, err := refresh(ctx); err != nil {
+		log.Warnf("refreshing the User JWT before connecting failed, connecting with the one on disk: %v", err)
+		return false
+	}
+	log.Infof("this sprout's User JWT predates the heartbeat grant; refreshed it from farmer before connecting")
+	return true
 }
