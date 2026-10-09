@@ -241,8 +241,8 @@ func TestValuesMatchLib(t *testing.T) {
 		}
 	}
 	for _, img := range []string{str(extras, "minio", "image"), str(extras, "keycloak", "image"), str(extras, "edge", "image")} {
-		if !regexp.MustCompile(`^[a-z0-9./-]+:[A-Za-z0-9._-]+$`).MatchString(img) || strings.HasSuffix(img, ":latest") {
-			t.Errorf("image %q is not pinned to a tag", img)
+		if !regexp.MustCompile(`^[a-z0-9./-]+:[A-Za-z0-9._-]+(@sha256:[0-9a-f]{64})?$`).MatchString(img) || strings.HasSuffix(img, ":latest") {
+			t.Errorf("image %q is not pinned to a tag (or tag@sha256 digest)", img)
 		}
 	}
 }
