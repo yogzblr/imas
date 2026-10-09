@@ -5,9 +5,15 @@ import (
 	"testing"
 )
 
+// driverErr is an error with go-sql-driver's message, which starts with a
+// capital "Error NNNN" (staticcheck ST1005 flags that in errors.New).
+type driverErr string
+
+func (e driverErr) Error() string { return string(e) }
+
 // errDeadlock is what go-sql-driver returns for ER_LOCK_DEADLOCK; PXC returns
 // it too for a Galera certification conflict.
-var errDeadlock = errors.New("Error 1213 (40001): Deadlock found when trying to get lock; try restarting transaction")
+var errDeadlock error = driverErr("Error 1213 (40001): Deadlock found when trying to get lock; try restarting transaction")
 
 func fastDeadlockRetries(t *testing.T) {
 	t.Helper()
@@ -25,8 +31,8 @@ func TestIsDeadlockError(t *testing.T) {
 		{"nil", nil, false},
 		{"deadlock", errDeadlock, true},
 		{"wrapped deadlock", errors.Join(errors.New("write box key"), errDeadlock), true},
-		{"duplicate entry", errors.New("Error 1062 (23000): Duplicate entry"), false},
-		{"lock wait timeout", errors.New("Error 1205 (HY000): Lock wait timeout exceeded"), false},
+		{"duplicate entry", driverErr("Error 1062 (23000): Duplicate entry"), false},
+		{"lock wait timeout", driverErr("Error 1205 (HY000): Lock wait timeout exceeded"), false},
 		{"other", errors.New("connection refused"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
