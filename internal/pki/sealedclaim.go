@@ -96,3 +96,27 @@ func ClaimSealedMessage(ctx context.Context, tenantID, principal, msgID string) 
 		return fmt.Errorf("%w: %w", ErrSealedClaimUnavailable, err)
 	}
 }
+
+// ReleaseSealedMessage gives back a claim ClaimSealedMessage made, so the
+// message ID can be claimed again. Only for a caller whose own claim
+// succeeded and whose work then failed without effect: the claim stands for
+// "this message was acted on", and it was not. Never for a claim someone
+// else may hold, which is why ErrSealedReplayed is no reason to call it.
+// Releasing a claim that is not there (it expired, or was never made) is
+// not an error. The caller refuses the request either way, so a failure to
+// release only leaves the claim to expire after SealedClaimTTL.
+func ReleaseSealedMessage(ctx context.Context, tenantID, principal, msgID string) error {
+	if !claimComponentOK(tenantID) || !claimComponentOK(principal) || !claimComponentOK(msgID) {
+		return fmt.Errorf("%w: malformed claim", ErrSealedClaimUnavailable)
+	}
+	if replayClient == nil {
+		return fmt.Errorf("%w: no Valkey client configured", ErrSealedClaimUnavailable)
+	}
+	ctx, cancel := context.WithTimeout(ctx, replayCacheTimeout)
+	defer cancel()
+	cmd := replayClient.B().Del().Key(SealedClaimKey(tenantID, principal, msgID)).Build()
+	if err := replayClient.Do(ctx, cmd).Error(); err != nil {
+		return fmt.Errorf("%w: %w", ErrSealedClaimUnavailable, err)
+	}
+	return nil
+}

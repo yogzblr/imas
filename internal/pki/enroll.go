@@ -725,6 +725,10 @@ func verifyEnrollProof(tenantID, sproutID, nkeyPub, sproutPub string, proof []by
 	return msg.ID, nil
 }
 
+// upsertBoxKeyActive writes the sprout's first box key. A variable so a test
+// can fail the write.
+var upsertBoxKeyActive = upsertSproutBoxKeyActive
+
 // recordProvenSproutBoxKey verifies proof (verifyEnrollProof), claims its
 // message ID once cluster-wide (ClaimSealedMessage, failing closed
 // without Valkey), and records sproutPub as sproutID's active box key,
@@ -770,7 +774,17 @@ func recordProvenSproutBoxKey(ctx context.Context, tenantID, sproutID, nkeyPub, 
 	if err := ClaimSealedMessage(ctx, tenantID, sproutID, bindingID); err != nil {
 		return fmt.Errorf("enroll_binding already used or unclaimable: %w", err)
 	}
-	if err := upsertSproutBoxKeyActive(tenantID, sproutID, sproutPub); err != nil {
+	if err := upsertBoxKeyActive(tenantID, sproutID, sproutPub); err != nil {
+		// Nothing was recorded and no gateway JWT goes out, so the binding
+		// has not been acted on: give it back, or the sprout's only way to
+		// a box key (this binding, until it expires) is spent by a
+		// transient database error and it has to be enrolled again with a
+		// new token. The proof's claim stays: the sprout builds a fresh
+		// proof for every attempt, so a retry does not need it, and a
+		// captured proof stays unusable.
+		if rerr := ReleaseSealedMessage(context.WithoutCancel(ctx), tenantID, sproutID, bindingID); rerr != nil {
+			log.Warnf("enroll: could not release the enroll_binding of sprout %s in tenant %s after a failed box key write (a retry has to wait until it expires or the sprout be enrolled again): %v", sproutID, tenantID, rerr)
+		}
 		return err
 	}
 	log.Infof("enroll: sprout %s in tenant %s proved possession of its payload-encryption key; recorded it", sproutID, tenantID)
