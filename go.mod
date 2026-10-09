@@ -1,6 +1,6 @@
 module github.com/yogzblr/imas
 
-go 1.26.6
+go 1.26.9
 
 replace github.com/mattn/go-localereader v0.0.1 => github.com/taigrr/go-localereader v0.0.2
 
