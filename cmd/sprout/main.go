@@ -217,6 +217,7 @@ func runSprout(parent context.Context, joinToken string, handleSignals bool) {
 		// the pins enrollment wrote.
 		log.Warnf("no persisted gateway JWT: %v", err)
 	}
+	refreshStaleUserJWT(ctx, sproutID, pki.LoadSproutUserJWT, pki.RefreshGatewayJWT)
 	go func() {
 		// A refresher error means farmer's tenant X25519 key, tenant ID or
 		// sprout ID no longer matches the one pinned at enrollment, or the
