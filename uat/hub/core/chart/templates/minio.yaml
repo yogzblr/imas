@@ -4,10 +4,12 @@
 # policies are made by minio-setup.sh with the curl inside this image,
 # through RustFS's admin API. The resource names keep the "minio" spelling
 # (imas-uat-minio, values key "minio") so nothing that names them changes.
+# The volume has its own name (imas-uat-rustfs-data): a volume MinIO wrote
+# (uid 1000) is not writable by RustFS (uid 10001), so it must not be reused.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: imas-uat-minio
+  name: imas-uat-rustfs-data
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "uat.labels" . | nindent 4 }}
@@ -87,7 +89,7 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim:
-            claimName: imas-uat-minio
+            claimName: imas-uat-rustfs-data
         - name: tmp
           emptyDir: { sizeLimit: 64Mi }
         - name: logs
