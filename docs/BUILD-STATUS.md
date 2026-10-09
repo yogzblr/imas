@@ -741,7 +741,7 @@ row starts with its brief ID ("docs" for a docs-only PR).
 | #133 | 10-06 | **UAT.3a**: DMZ hub install and checks (`uat/hub/dmz`) | Azure UAT gate briefs |
 | #134 | 10-06 | **UAT.5**: acceptance suite, harness and `run.sh` | Azure UAT gate briefs |
 | #135 | 10-06 | **UAT.1**: Azure infrastructure (OpenTofu) and Bastion access scripts. Flagged for security review | Azure UAT gate briefs |
-| #136 | 10-06 | **UAT**: busybox and MinIO recorded as UAT-only licence exceptions (item 21, `CLAUDE.md`); MinIO's was withdrawn by #161 | Requirement 21 |
+| #136 | 10-06 | **UAT**: busybox and MinIO recorded as UAT-only licence exceptions (item 21, `CLAUDE.md`); MinIO's was withdrawn by #161, and `CLAUDE.md` updated to match by #165 | Requirement 21 |
 | #137 | 10-06 | **UAT**: nats chart node port values for the DMZ hub | Azure UAT gate briefs |
 | #140 | 10-06 | **UAT**: the owner's 2026-10-06 decisions recorded in plan §4h | Azure UAT gate briefs |
 | #141 | 10-06 | **UAT**: `bus.host` override for the farmer chart's bus URL | Azure UAT gate briefs |
@@ -1593,17 +1593,14 @@ touched `internal/pki` and `cmd/farmer` was not read back. `docs/INSTALL.md`,
 `docs-site/` and `docs/api/saasapi.md` were not reviewed for the UAT changes.
 
 **Findings.**
-1. `CLAUDE.md` line 13 still lists MinIO as a UAT-only exception;
-   `requirements.md` item 21 withdrew it on 2026-10-09 (PR #161). `CLAUDE.md` was
-   not edited by this refresh.
-2. Open issues #138 (`imas auth privkey --out json` exits 1 even on success),
+1. Open issues #138 (`imas auth privkey --out json` exits 1 even on success),
    #139 (the CLI writes its config file, which holds the private key, as 0644;
    UAT.9 tightens it after load) and #142 (intermittent
    `TestSealedShellReplayedHandshakes`) are not tracked in Open items.
-3. The Go toolchain: `go.mod` requires 1.26.9 (PR #159), which the sandbox
+2. The Go toolchain: `go.mod` requires 1.26.9 (PR #159), which the sandbox
    cannot fetch, so `go test ./uat/...` could not run for the open PR #163.
-4. After PR #163 the core hub is installed in two steps (`install.sh`, then
+3. After PR #163 the core hub is installed in two steps (`install.sh`, then
    `finish.sh` once the DMZ is up); `uat/README.md` and `uat/hub/core/README.md`
    are updated in that PR.
-5. Left over from the RustFS change: manifests and values still use `minio` in
+4. Left over from the RustFS change: manifests and values still use `minio` in
    names and keys; the external S3 mode has not been run against a gateway.
