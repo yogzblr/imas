@@ -228,7 +228,8 @@ until you remove them (`sudo apt-get purge imas-sprout`, then the
 8. **The hubs**, from the release named by `--release-tag`:
    `uat/hub/core/install.sh <kube/core.kubeconfig> <endpoints.json> <state> <tag>`,
    then `uat/hub/dmz/install.sh --seeds-from-kubeconfig <kube/core.kubeconfig> ...`,
-   then `uat/hub/dmz/check.sh --connect <the DMZ node or 127.0.0.1>`. A
+   then `uat/hub/core/finish.sh` (same arguments as core's install.sh; farmer
+   and saasapi need the DMZ bus), then `uat/hub/dmz/check.sh --connect <the DMZ node or 127.0.0.1>`. A
    release already installed is not installed again (`--reinstall`).
 9. **Enrolment**: `uat/enroll/enroll.sh --core-state <state> ...` with the
    rig's `uat.json`, `access.json` and SSH key; `tenants.json` and
@@ -291,7 +292,7 @@ ones you may want: `LITE_RUN_ID` (lite01), `LITE_STATE`, `LITE_HOST_ACCESS`
 `LITE_SPROUTS`, `LITE_HOST_SPROUT` and its port and user, `LITE_CA_DAYS`,
 `LITE_WAIT_TIMEOUT`. `up.sh` saves them in `rig.json`; later runs of
 `up.sh`, `run.sh` and `down.sh` on that state use the saved ones, and `up.sh`
-refuses to switch host access on a built rig. `LITE_CORE_INSTALL`,
+refuses to switch host access on a built rig. `LITE_CORE_INSTALL`, `LITE_CORE_FINISH`,
 `LITE_DMZ_INSTALL`, `LITE_DMZ_CHECK`, `LITE_ENROLL`, `LITE_TESTS_RUN` and
 `LITE_UP` exist for the tests.
 

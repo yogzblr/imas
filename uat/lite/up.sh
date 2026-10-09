@@ -12,7 +12,8 @@
 #      AlmaLinux 9 per tenant, built from sprouts/*.Dockerfile;
 #   5. uat.json, access.json, endpoints.json and harness.json
 #      (write-material.sh);
-#   6. uat/hub/core/install.sh, then uat/hub/dmz/install.sh and check.sh,
+#   6. uat/hub/core/install.sh, uat/hub/dmz/install.sh, uat/hub/core/finish.sh
+#      (farmer and saasapi need the DMZ bus) and the DMZ check.sh,
 #      from the release named by --release-tag (core first: the bus needs
 #      core's seeds);
 #   7. uat/enroll/enroll.sh: tenants 1 and 2, and the published imas-sprout
@@ -85,6 +86,7 @@ lite_check_settings
 
 # The scripts the rig runs unchanged. The overrides exist for the tests.
 CORE_INSTALL=${LITE_CORE_INSTALL:-$REPO_DIR/uat/hub/core/install.sh}
+CORE_FINISH=${LITE_CORE_FINISH:-$REPO_DIR/uat/hub/core/finish.sh}
 DMZ_INSTALL=${LITE_DMZ_INSTALL:-$REPO_DIR/uat/hub/dmz/install.sh}
 DMZ_CHECK=${LITE_DMZ_CHECK:-$REPO_DIR/uat/hub/dmz/check.sh}
 ENROLL=${LITE_ENROLL:-$REPO_DIR/uat/enroll/enroll.sh}
@@ -477,6 +479,15 @@ install_dmz() {
 	lite_stage_mark dmz "$release_tag"
 }
 
+# finish_core: farmer and saasapi need the DMZ bus, so core's install.sh does
+# not wait for them; this does, once the DMZ is up, then registers the sprout
+# release and runs core's check.sh (SKIP_CHECK=1 under --skip-checks).
+finish_core() {
+	lite_log "core: uat/hub/core/finish.sh $release_tag"
+	SKIP_CHECK=$((skip_checks ? 1 : 0)) "$CORE_FINISH" "$(lite_kubeconfig core)" "$LITE_STATE/endpoints.json" \
+		"$LITE_STATE" "$release_tag" || lite_die "core: uat/hub/core/finish.sh failed"
+}
+
 check_dmz() {
 	local connect=$DMZ_IP
 	[[ $LITE_ACCESS_MODE != published ]] || connect=$LITE_PUBLISH_ADDRESS
@@ -536,9 +547,11 @@ main() {
 		lite_log "--skip-hubs: stopping before the hub installs"
 		return 0
 	fi
-	install_core || true
-	local dmz_ran=0
+	local core_ran=0 dmz_ran=0
+	if install_core; then core_ran=1; fi
 	if install_dmz; then dmz_ran=1; fi
+	# Only after an install: it helm-upgrades core and runs core's check.sh.
+	if ((core_ran || dmz_ran)); then finish_core; fi
 	# check.sh drains /v1/enroll's bucket (then waits for the refill), so it
 	# runs once after an install, before enrolment, as its README says.
 	if ((dmz_ran && !skip_checks)); then

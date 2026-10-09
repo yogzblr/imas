@@ -144,9 +144,11 @@ names the piece):
 5. **Bastion tunnels** (`uat/access/tunnels.sh open`, after `az extension add`
    for `bastion` and `ssh`).
 6. **k0s** on both hubs (`uat/k0s/bootstrap.sh`).
-7. **Core hub** (`uat/hub/core/install.sh`, which ends with its `check.sh`),
+7. **Core hub** (`uat/hub/core/install.sh`),
    then the **DMZ hub** (`uat/hub/dmz/install.sh`, seeds copied from core's
-   Secret) and the **DMZ check** (`check.sh`, before enrolment because it
+   Secret), then **core's second half** (`uat/hub/core/finish.sh`: farmer and
+   saasapi need the DMZ bus, so it waits for them, registers the sprout
+   release and runs core's `check.sh`) and the **DMZ check** (`check.sh`, before enrolment because it
    empties and then waits out Envoy's enrolment rate limit). Core comes first
    because the bus needs core's seeds when it starts.
 8. **Tenants and enrolment** (`uat/enroll/enroll.sh`).
