@@ -81,7 +81,7 @@ run with `dispatch_flags` off does not need it.
 | ID | Item | RAG | Next step |
 |---|---|---|---|
 | P18 | **Fleet signing keyring is a placeholder** (L5) | Amber | `packaging/etc/fleet-signing-keys.json` is `{}` and is packaged (`.goreleaser.yaml`). A sprout with an empty keyring fails closed, so self-update cannot work on a released package until the real keyring is installed; nothing in the release hooks, CI or `packaging/test` (`check-package-contents.sh` checks that the path exists, `test-windows-packaging.sh` that the MSI holds the repo's bytes) checks the content with `ParseKeyring`. Add that check to the release, and install the real keyring before the Azure self-update cycle (L4, L5 tests). Related and open: L3 (the staging directory and keyring are checked by mode, not owner or symlink), L6, L7, I4, I5. |
-| P20 | **The UAT never registers the sprout release** | Amber | `uat/hub/core/values/farmer-uat.yaml` leaves `saasapi.operator.enabled` off, and the chart registers a release only when it is on (`sproutRelease.registers`, `_helpers.tpl`). So the registration hook never runs on the rig, and `finish.sh`'s second `helm upgrade` is a no-op (its output says "NOT registered"). Fleet-update dispatch and self-update need a registered release. Decide: enable the operator plane in the UAT values (it needs a TLS Secret, a bearer token and a fleet-releaser token), or register the release another way, or drop the `finish.sh` step. Then check it on the rig. |
+| P20 | **The UAT never registers the sprout release** | Amber | **Decision (owner, 2026-10-09): option A for the first Azure run: leave it unregistered, `dispatch_flags` off. Option C (below) is required before fleet-update dispatch or self-update is turned on anywhere, and before production.** `uat/hub/core/values/farmer-uat.yaml` leaves `saasapi.operator.enabled` off, and the chart registers a release only when it is on (`sproutRelease.registers`, `_helpers.tpl`). So the registration hook never runs on the rig, and `finish.sh`'s second `helm upgrade` is a no-op (its output says "NOT registered"). Fleet-update dispatch and self-update need a registered release. Option C is: enable the operator plane in the UAT values. That needs a TLS Secret for the operator listener (with the CA the registration Job verifies it with), an operator bearer-token Secret of its own, a fleet-releaser token Secret and `fleetReleaser.url` pointing at a running `cmd/fleetreleaser`, which nothing in `uat/hub` deploys today (with its signing key; see P18). Then check on the rig that the release registers. Until then `finish.sh`'s registration step does nothing in UAT. |
 | P3 | **Human security review of the flagged work** | Amber | Nothing records one. Scope: the sealing work (J.1 to J.5), SEC.* fixes, SCALE.2, PKI.1 and PKI.2, SH.1, REC.1, FIX.1 to FIX.5, the box-key write retry (PR #171), UAT.1 and UAT.6 (Azure credentials), UAT.12 and UAT.13 (a sprout publish permission and its startup path). Record who, when, scope and what was accepted. **Owed before `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` or `IMAS_SELF_UPDATE_ENABLED` is turned on anywhere.** |
 
 **Pre-flight for the first Azure run** (it costs money, so do the free checks first):
@@ -169,6 +169,10 @@ Only the PR for this file. Checked 2026-10-09.
 - **UAT object store is RustFS** (Apache-2.0), pinned by digest; MinIO (AGPL-3.0)
   is not used and its licence exception is withdrawn (`requirements.md` item 21).
   The S3 endpoint is the `object_store` setting in the endpoints file.
+- **First Azure run without a registered sprout release** (owner, 2026-10-09, P20
+  option A): `dispatch_flags` off. Registration through the operator plane
+  (P20 option C) is required before dispatch or self-update is enabled, and
+  before production.
 - **Sealed only, no downgrade:** a sprout with no box key is refused, not
   downgraded (owner, 2026-10-04).
 - **B6 accepted:** forged "no responders" on `internal.sprout.action` (owner, PR #97).
@@ -191,3 +195,4 @@ Pre-releases `v0.1.0-rc.1` to `-rc.10` exist; `rc.4` was the first good one and
 - 2026-10-09: S1 split into S1a (before the first Azure run) and S1b (before dispatch or self-update); pre-flight list for the first Azure run added.
 - 2026-10-09: first from-scratch rig run on rc.9: install order works; enrolment failed on a database deadlock (P19, PR #171); `finish.sh`'s registration found to be a no-op under the UAT values (P20). Second run, enrolling one host at a time: smoke and core passed on the Linux sprouts; P2 removed. #138 and `self_update_disabled` (PRs #169, #170) removed from P14, P11 and P17.
 - 2026-10-09: rc.10 cut (includes #171); a from-scratch rig run on it passed smoke and core. P19 lowered to Amber: the rc.10 run saw no deadlock, so the fix is not yet proven. PR #173: `up.sh` refreshes each sprout's package index before enrolment.
+- 2026-10-09: P20 decision recorded (option A now, option C before dispatch or production).
