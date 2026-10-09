@@ -202,6 +202,10 @@ t_up_direct() {
 	check "core finish args" has "$STUB_LOG" "core-finish $S/kube/core.kubeconfig $S/endpoints.json $S $TAG SKIP_CHECK=0"
 	check "core finish after the dmz install" log_order "dmz-install" "core-finish"
 	check "core finish before enrolment" log_order "core-finish" "enroll --uat"
+	check "ubuntu sprouts refresh apt" has "$STUB_LOG" "docker-exec imas-lite-t1-ubuntu env=[] sh -c apt-get update -qq"
+	check "alma sprouts refresh dnf" has "$STUB_LOG" "docker-exec imas-lite-t2-alma env=[] sh -c dnf clean all -q && dnf makecache -q"
+	check "package index refreshed before enrolment" log_order "apt-get update -qq" "enroll --uat"
+	check "every sprout refreshed once" test "$(count "$STUB_LOG" 'env=[] sh -c apt-get update -qq')" = 2 -a "$(count "$STUB_LOG" 'env=[] sh -c dnf clean all -q')" = 2
 	check "dmz install before its check" log_order "dmz-install" "dmz-check"
 	check "check before enrolment" log_order "dmz-check" "enroll --uat"
 	check "material before the hubs" log_order "docker run -d --name imas-lite-t2-alma" "core-install"

@@ -231,7 +231,10 @@ until you remove them (`sudo apt-get purge imas-sprout`, then the
    then `uat/hub/core/finish.sh` (same arguments as core's install.sh; farmer
    and saasapi need the DMZ bus), then `uat/hub/dmz/check.sh --connect <the DMZ node or 127.0.0.1>`. A
    release already installed is not installed again (`--reinstall`).
-9. **Enrolment**: `uat/enroll/enroll.sh --core-state <state> ...` with the
+9. **Enrolment**: first each sprout's package index is refreshed
+   (`apt-get update`, or `dnf clean all` and `dnf makecache`), so a release
+   published since the sprout last looked is found (a failure only warns).
+   Then `uat/enroll/enroll.sh --core-state <state> ...` with the
    rig's `uat.json`, `access.json` and SSH key; `tenants.json` and
    `sprouts.json` are linked into the state directory, which is the tests'
    material directory (`IMAS_UAT_DIR`).
