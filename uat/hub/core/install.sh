@@ -84,7 +84,7 @@ tar -xzf "$chart_tgz" -O farmer/files/objectstore-policies/saasapi-recipes.json 
 	die "$chart_tgz has no files/objectstore-policies/saasapi-recipes.json"
 
 # --- 4. the UAT-only pieces --------------------------------------------------
-log "installing $EXTRAS_RELEASE (MinIO, Keycloak, edge proxy, certificates)"
+log "installing $EXTRAS_RELEASE (RustFS unless external S3, Keycloak, edge proxy, certificates)"
 mapfile -t extras_args < <(extras_set_args)
 hc upgrade --install "$EXTRAS_RELEASE" "$here/chart" -n "$UAT_NS" --wait --timeout 20m "${extras_args[@]}" >&2 ||
 	die "the UAT-only chart did not become ready (kubectl -n $UAT_NS get pods)"
@@ -98,8 +98,25 @@ cp "$OUT_DIR/uat-ca.crt" "$OUT_DIR/uat-ca.pem" # the name uat/tests reads
 kc -n "$CORE_NS" create configmap "$UAT_CA_CONFIGMAP" --from-file="ca.crt=$OUT_DIR/uat-ca.crt" \
 	--dry-run=client -o yaml | kc apply -f - >/dev/null
 
-# --- 5. MinIO ----------------------------------------------------------------
-"$here/minio-setup.sh" "${common[@]}" "$chart_dir/saasapi-recipes.json"
+# --- 5. the object store -----------------------------------------------------
+if [[ "$S3_MODE" == rustfs ]]; then
+	"$here/minio-setup.sh" "${common[@]}" "$chart_dir/saasapi-recipes.json"
+else
+	# External S3 (object_store.mode external): buckets, users and policies
+	# are the operator's. The four credential files below are theirs too;
+	# they become the two Secrets the farmer chart names.
+	s3dir="$SENSITIVE_DIR/s3"
+	for f in farmer saasapi; do
+		for k in access-key-id secret-access-key; do
+			[[ -s "$s3dir/$f-$k" ]] || die "object_store.mode is external: $s3dir/$f-$k is missing (README.md, \"External S3\")"
+		done
+	done
+	apply_secret "$CORE_NS" "$S3_FARMER_SECRET" \
+		"access-key-id=$s3dir/farmer-access-key-id" "secret-access-key=$s3dir/farmer-secret-access-key"
+	apply_secret "$CORE_NS" "$S3_SAASAPI_SECRET" \
+		"access-key-id=$s3dir/saasapi-access-key-id" "secret-access-key=$s3dir/saasapi-secret-access-key"
+	log "external S3 at $S3_ENDPOINT: Secrets $S3_FARMER_SECRET and $S3_SAASAPI_SECRET applied from $s3dir"
+fi
 
 # --- 6. the farmer chart, with OpenBao bootstrapped alongside ----------------
 "$here/gen-values.sh" "$ENDPOINTS" "$OUT_DIR/admin.json" "$release_tag" >"$STATE_DIR/values-run.json"
@@ -138,7 +155,7 @@ wait_for 300 "HAProxy statefulset $PXC_CLUSTER-haproxy" sts_ready "$PXC_CLUSTER-
 rollout "deployment/$VALKEY_DEPLOY" "$CORE_NS"
 rollout "deployment/$FARMER_FULLNAME" "$CORE_NS" 900s
 rollout "deployment/$SAASAPI_FULLNAME" "$CORE_NS" 900s
-rollout "deployment/$MINIO_SVC" "$UAT_NS"
+[[ "$S3_MODE" == rustfs ]] && rollout "deployment/$MINIO_SVC" "$UAT_NS"
 rollout "deployment/$KEYCLOAK_DEPLOY" "$UAT_NS"
 rollout "deployment/$EDGE_DEPLOY" "$UAT_NS"
 

@@ -81,8 +81,10 @@ pxc:
 valkey:
   enabled: true
 
-# RustFS (Apache-2.0; SPIKE replacing MinIO) in namespace imas-uat. Plain HTTP inside the
-# cluster. Two buckets: recipes, and job logs (must differ).
+# RustFS (Apache-2.0) in namespace imas-uat. Plain HTTP inside the cluster.
+# endpoint and useSSL are overridden per run by gen-values.sh from the
+# endpoints file's object_store (README.md, "External S3"). Two buckets:
+# recipes, and job logs (must differ).
 objectStore:
   endpoint: imas-uat-minio.imas-uat.svc.cluster.local:9000
   useSSL: false

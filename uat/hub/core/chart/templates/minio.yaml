@@ -1,4 +1,5 @@
 {{- include "uat.validate" . -}}
+{{- if .Values.minio.enabled }}
 # RustFS: the UAT object store (Apache-2.0). One pod, one PVC, root
 # credential from a Secret install.sh generates. Buckets, users and
 # policies are made by minio-setup.sh with the curl inside this image,
@@ -109,3 +110,4 @@ spec:
     app.kubernetes.io/name: imas-uat-minio
   ports:
     - { name: s3, port: 9000, targetPort: s3 }
+{{- end }}

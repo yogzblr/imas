@@ -2,7 +2,7 @@ apiVersion: v2
 name: imas-uat-core
 description: >-
   UAT ONLY, never published or shipped. The pieces deploy/helm/farmer
-  expects to exist on the uat-core cluster: RustFS object store (Apache-2.0; SPIKE replacing MinIO),
+  expects to exist on the uat-core cluster: RustFS object store (Apache-2.0; optional, see object_store.mode),
   Keycloak (Apache-2.0, dev mode) with the imas-uat realm, an Envoy edge
   proxy on the core FQDN, the DMZ bus endpoint, the cert-manager
   certificates and the NetworkPolicies that join the two clusters.
@@ -13,7 +13,7 @@ kubeVersion: ">=1.30.0-0"
 annotations:
   imas.io/uat-only: "true"
   imas.io/security-review: required
-  # SPIKE: RustFS (Apache-2.0) replaces MinIO (AGPL-3.0, UAT-only exception
-  # of 2026-10-06, requirements.md item 21). The exception stays recorded
-  # until the owner adopts RustFS. Keycloak and Envoy are Apache-2.0.
+  # RustFS (Apache-2.0) replaced MinIO (AGPL-3.0): the UAT-only exception
+  # of 2026-10-06 is withdrawn (requirements.md item 21). Keycloak and
+  # Envoy are Apache-2.0.
   imas.io/dependency-licenses: "rustfs=Apache-2.0; keycloak=Apache-2.0; envoy=Apache-2.0"

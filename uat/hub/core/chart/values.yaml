@@ -54,9 +54,11 @@ caIssuer:
   name: imas-uat-ca
 
 minio:
-  # RustFS (Apache-2.0), replacing MinIO (AGPL-3.0). Pinned; never latest.
-  # SPIKE: set this to the tag validated with validate-rustfs.sh (and add
-  # its digest) before running the rig; "1.0.1" is a placeholder to confirm.
+  # false: no object store is deployed (object_store.mode external).
+  enabled: true
+  # RustFS (Apache-2.0), which replaced MinIO (AGPL-3.0). Pinned; never
+  # latest. 1.0.1 passed the rig (smoke 10/10, core 58/0/3, 2026-10-09).
+  # TODO: add its digest (Docker Hub is not reachable from the agent sandbox).
   image: docker.io/rustfs/rustfs:1.0.1
   rootSecret: imas-uat-minio-root
   storage: 5Gi

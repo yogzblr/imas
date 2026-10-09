@@ -145,11 +145,30 @@ load_endpoints() {
 	# uat/hub/dmz spells the issuer cluster_issuer; both forms are read.
 	CA_ISSUER=$(ep '(.ca? | objects | .cluster_issuer) // .cluster_issuer' imas-uat-ca)
 	CLUSTER_DOMAIN=$(ep '.cluster_domain' cluster.local)
+	# The S3 object store farmer and saasapi use. "rustfs" (default): the
+	# chart deploys RustFS in imas-uat and minio-setup.sh provisions it.
+	# "external": an S3 endpoint you run (e.g. Versity Gateway in front of
+	# Azure Blob); nothing is deployed or provisioned, see README.md.
+	S3_MODE=$(ep '.object_store.mode' rustfs)
+	S3_ENDPOINT=$(ep '.object_store.endpoint' "$MINIO_SVC.$UAT_NS.svc.cluster.local:9000")
+	S3_USE_SSL=$(ep '.object_store.use_ssl' false)
+	S3_EGRESS_CIDRS=$(jq -c '(.object_store.egress_cidrs // [])' "$ENDPOINTS")
 
 	valid_fqdn "$CORE_FQDN" || die "core.fqdn is not a DNS name: $CORE_FQDN"
 	valid_fqdn "$DMZ_FQDN" || die "dmz.fqdn is not a DNS name: $DMZ_FQDN"
 	valid_ipv4 "$CORE_IP" || die "core.private_ip is not an IPv4 address: $CORE_IP"
 	valid_ipv4 "$DMZ_IP" || die "dmz.private_ip is not an IPv4 address: $DMZ_IP"
+	case "$S3_MODE" in
+	rustfs) ;;
+	external) jq -e '.object_store.endpoint | strings | length > 0' "$ENDPOINTS" >/dev/null ||
+		die "object_store.mode is external: object_store.endpoint (host[:port]) is required" ;;
+	*) die "object_store.mode must be rustfs or external, got: $S3_MODE" ;;
+	esac
+	[[ "$S3_ENDPOINT" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$ ]] ||
+		die "object_store.endpoint is not host[:port] (no scheme, no path): $S3_ENDPOINT"
+	[[ "$S3_USE_SSL" == true || "$S3_USE_SSL" == false ]] || die "object_store.use_ssl must be true or false"
+	jq -e 'type == "array" and all(.[]; type == "string" and test("^[0-9.]+/[0-9]{1,2}$"))' <<<"$S3_EGRESS_CIDRS" >/dev/null ||
+		die "object_store.egress_cidrs must be a list of IPv4 CIDRs"
 	local p
 	for p in "$CORE_HTTPS_PORT" "$CORE_FARMER_PORT" "$DMZ_ENVOY_PORT" "$DMZ_BUS_PORT"; do
 		valid_port "$p" || die "not a port: $p"
@@ -188,7 +207,8 @@ extras_set_args() {
 		--set-string "dmz.privateFQDN=$DMZ_PRIVATE_FQDN" \
 		--set "bus.port=$DMZ_BUS_PORT" \
 		--set-string "caIssuer.name=$CA_ISSUER" \
-		--set-string "clusterDomain=$CLUSTER_DOMAIN"
+		--set-string "clusterDomain=$CLUSTER_DOMAIN" \
+		--set "minio.enabled=$([[ $S3_MODE == rustfs ]] && echo true || echo false)"
 }
 
 # release_version <tag>: vX.Y.Z or vX.Y.Z-rc.N (the contract) -> X.Y.Z[-rc.N].
