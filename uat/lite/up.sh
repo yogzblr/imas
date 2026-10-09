@@ -16,8 +16,9 @@
 #      (farmer and saasapi need the DMZ bus) and the DMZ check.sh,
 #      from the release named by --release-tag (core first: the bus needs
 #      core's seeds);
-#   7. uat/enroll/enroll.sh: tenants 1 and 2, and the published imas-sprout
-#      package on every sprout over SSH.
+#   7. refresh each sprout's package metadata (apt-get update, dnf makecache),
+#      then uat/enroll/enroll.sh: tenants 1 and 2, and the published
+#      imas-sprout package on every sprout over SSH.
 #
 # Usage: up.sh --release-tag vX.Y.Z[-rc.N] [--state DIR] [--run-id ID]
 #              [--host-access auto|direct|published] [--hosts-file FILE|none]
@@ -496,10 +497,34 @@ check_dmz() {
 		--kubeconfig "$(lite_kubeconfig dmz)" --connect "$connect" || lite_die "dmz: uat/hub/dmz/check.sh failed"
 }
 
+# refresh_sprout_caches: a sprout that already has the imas repository keeps
+# the package index it fetched earlier, so a release published since then is
+# "no available installation candidate" until the index is refreshed. A
+# fresh container has no imas repository yet (the role adds it and updates
+# apt itself), so this changes nothing there. Not fatal: the install says
+# what is wrong if the index really is stale. The host sprout
+# (LITE_HOST_SPROUT) is the user's own machine and is left alone.
+refresh_sprout_caches() {
+	local vm c cmd
+	for vm in $LITE_SPROUTS; do
+		lite_is_host_sprout "$vm" && continue
+		c=$(lite_sprout_container "$vm")
+		if [[ $(lite_sprout_os "$vm") == ubuntu ]]; then
+			cmd='apt-get update -qq'
+		else
+			cmd='dnf clean all -q && dnf makecache -q'
+		fi
+		lite_log "$vm: refreshing the package index ($cmd)"
+		docker exec "$c" sh -c "$cmd" >/dev/null ||
+			lite_log "warning: $vm: could not refresh the package index; a release published since its last refresh may not be found"
+	done
+}
+
 enroll() {
 	if ((!reinstall)) && lite_stage_done enroll "$release_tag"; then
 		lite_log "enrolment: $release_tag already enrolled (--reinstall to run it again)"
 	else
+		refresh_sprout_caches
 		lite_log "enrolment: uat/enroll/enroll.sh $release_tag"
 		"$ENROLL" --uat "$LITE_STATE/uat.json" --access "$LITE_STATE/access.json" \
 			--state "$LITE_STATE/enroll" --release-tag "$release_tag" \
