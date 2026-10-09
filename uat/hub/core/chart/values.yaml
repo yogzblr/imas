@@ -58,8 +58,8 @@ minio:
   enabled: true
   # RustFS (Apache-2.0), which replaced MinIO (AGPL-3.0). Pinned; never
   # latest. 1.0.1 passed the rig (smoke 10/10, core 58/0/3, 2026-10-09).
-  # TODO: add its digest (Docker Hub is not reachable from the agent sandbox).
-  image: docker.io/rustfs/rustfs:1.0.1
+  # The digest is the one that pulled on the rig; it wins over the tag.
+  image: docker.io/rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
   rootSecret: imas-uat-minio-root
   storage: 5Gi
   storageClassName: ""
