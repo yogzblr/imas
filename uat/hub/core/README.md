@@ -38,6 +38,7 @@ specific, so UAT.8's local rig runs them unchanged:
 
 ```
 install.sh   <kubeconfig> <endpoints.json> <state-dir> <release_tag>
+finish.sh    <kubeconfig> <endpoints.json> <state-dir> <release_tag>   (after the DMZ hub)
 check.sh     <kubeconfig> <endpoints.json> <state-dir>
 bind-tenant.sh <kubeconfig> <endpoints.json> <state-dir> <1|2> <tenant_id>
 bind-tenant.sh <kubeconfig> <endpoints.json> <state-dir> --scratch-user <scratch-name> <admin|readonly> <tenant_id>
@@ -80,7 +81,7 @@ own with the same arguments. `gen-values.sh` reads files only.
   `<base>/farmer`; it replaces `IMAS_HELM_REPO_URL`, which is no longer read),
   `IMAS_RELEASE_BASE_URL` (default the GitHub releases of yogzblr/imas),
   `HELM_TIMEOUT` (default `45m`), `OPENBAO_KEY_SHARES` / `OPENBAO_KEY_THRESHOLD`
-  (default 3 / 2), `SKIP_CHECK=1` (install.sh doesn't run check.sh).
+  (default 3 / 2), `SKIP_CHECK=1` (finish.sh doesn't run check.sh).
 
 **What the cluster must already have (UAT.2):** the ClusterIssuer above, a
 default StorageClass, cert-manager, the core FQDN resolving to the core
@@ -150,8 +151,19 @@ openssl, go (to build `nk`), tar, sha256sum, and this repository checked out.
    `imas-saasapi-nats` (seed and published JWT) and `imas-saasapi-box`
    (`priv` of `saasapi-box` and `platform_pub`, never `platform`).
 9. Waits for OpenBao (Ready means unsealed), the PXC cluster, its pxc and
-   haproxy StatefulSets, Valkey, farmer, saasapi, MinIO, Keycloak and the
-   edge; writes the outputs; runs `check.sh`.
+   haproxy StatefulSets, Valkey, MinIO, Keycloak and the edge; writes the
+   outputs. It does not wait for farmer or saasapi, and installs the chart
+   with `sproutRelease.register=false`: both need the DMZ's NATS bus (farmer's
+   `/ready` latches once it has connected to it, saasapi exits at startup
+   without it), and the registration hook POSTs to saasapi.
+
+## finish.sh (after the DMZ hub)
+
+Run it once `uat/hub/dmz/install.sh` has finished, with the same arguments as
+`install.sh`. It waits for the farmer and saasapi rollouts, registers the
+sprout release (`helm upgrade --reuse-values --set sproutRelease.register=true`;
+the chart's post-upgrade hooks are idempotent, as for any re-run of
+`install.sh`), then runs `check.sh` unless `SKIP_CHECK=1`. Safe to re-run.
 
 ## Outputs
 

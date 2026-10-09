@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Stand-in for core's finish.sh (uat/lite tests): logs its arguments and
+# SKIP_CHECK; STUB_FAIL_CORE_FINISH=1 makes it fail.
+printf 'core-finish %s SKIP_CHECK=%s\n' "$*" "${SKIP_CHECK:-}" >>"$STUB_LOG"
+[[ -z ${STUB_FAIL_CORE_FINISH:-} ]]

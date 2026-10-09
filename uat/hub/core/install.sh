@@ -14,7 +14,11 @@
 #    6. the farmer chart, with OpenBao initialised and unsealed while the
 #       install runs (openbao-bootstrap.sh)
 #    7. saasapi's two hand-made Secrets (saasapi-secrets.sh)
-#    8. waits for every workload, writes the outputs, runs check.sh
+#    8. waits for the workloads core owns and writes the outputs
+# It does NOT wait for farmer or saasapi, register the sprout release, or run
+# check.sh: farmer's /ready and saasapi's startup both need the DMZ's NATS bus,
+# which the DMZ install (uat/hub/dmz/install.sh) creates after this script.
+# finish.sh does those three things once the DMZ is up.
 # Chart and images are the release's version (release_tag without the v),
 # never latest. Calls nothing Azure specific: UAT.8 runs it on a local
 # cluster. Re-running it upgrades in place and keeps every generated
@@ -124,7 +128,10 @@ helm_log="$STATE_DIR/helm-install.log"
 log "installing $CORE_RELEASE from $chart_tgz (timeout $HELM_TIMEOUT; log $helm_log)"
 # No --wait: saasapi starts only once step 7's Secrets exist, and those
 # come from this install's own hooks (chart README, "Eval install").
+# sproutRelease.register=false: the registration hook POSTs to saasapi, which
+# is not Ready until the DMZ bus exists, so finish.sh turns it on afterwards.
 hc upgrade --install "$CORE_RELEASE" "$chart_tgz" -n "$CORE_NS" --timeout "$HELM_TIMEOUT" \
+	--set sproutRelease.register=false \
 	-f "$here/values/farmer-uat.yaml" -f "$STATE_DIR/values-run.json" >"$helm_log" 2>&1 &
 helm_pid=$!
 trap 'kill "$helm_pid" 2>/dev/null || true' EXIT
@@ -153,8 +160,7 @@ wait_for 900 "PXC cluster $PXC_CLUSTER ready" pxc_ready "$PXC_CLUSTER" "$CORE_NS
 wait_for 300 "PXC statefulset $PXC_CLUSTER-pxc" sts_ready "$PXC_CLUSTER-pxc" "$CORE_NS"
 wait_for 300 "HAProxy statefulset $PXC_CLUSTER-haproxy" sts_ready "$PXC_CLUSTER-haproxy" "$CORE_NS"
 rollout "deployment/$VALKEY_DEPLOY" "$CORE_NS"
-rollout "deployment/$FARMER_FULLNAME" "$CORE_NS" 900s
-rollout "deployment/$SAASAPI_FULLNAME" "$CORE_NS" 900s
+# farmer and saasapi are waited for in finish.sh, after the DMZ install.
 [[ "$S3_MODE" == rustfs ]] && rollout "deployment/$MINIO_SVC" "$UAT_NS"
 rollout "deployment/$KEYCLOAK_DEPLOY" "$UAT_NS"
 rollout "deployment/$EDGE_DEPLOY" "$UAT_NS"
@@ -221,6 +227,5 @@ write_keycloak_json "$kcdir" "$SENSITIVE_DIR/keycloak.json"
 	}' >"$SENSITIVE_DIR/credentials.json")
 
 log "outputs: $OUT_DIR/core.json (not secret), $SENSITIVE_DIR/keycloak.json and credentials.json and the rest of $SENSITIVE_DIR (SENSITIVE: keep as a sensitive artifact, never upload)"
-if [[ "${SKIP_CHECK:-}" != 1 ]]; then
-	"$here/check.sh" "${common[@]}"
-fi
+log "core installed. Next: the DMZ hub, then finish.sh (waits for farmer and saasapi, registers the sprout release, runs check.sh)"
+

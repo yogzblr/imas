@@ -70,7 +70,7 @@ EOF
 		LITE_SUBNET STUB_DOCKER_OS STUB_APISERVER_ARGS STUB_NO_DEFAULT_SC STUB_TESTS_RC STUB_SUMMARY
 	export LITE_STATE=$T/state LITE_HOSTS_FILE=$T/hosts LITE_POLL_SECONDS=0 LITE_SUDO=sudo \
 		LITE_K0S_VERSIONS=$T/k0s-versions.env VMCTL_POLL_SECONDS=0 \
-		LITE_CORE_INSTALL=$LITE/tests/fake/core-install LITE_DMZ_INSTALL=$LITE/tests/fake/dmz-install \
+		LITE_CORE_INSTALL=$LITE/tests/fake/core-install LITE_CORE_FINISH=$LITE/tests/fake/core-finish LITE_DMZ_INSTALL=$LITE/tests/fake/dmz-install \
 		LITE_DMZ_CHECK=$LITE/tests/fake/dmz-check LITE_ENROLL=$LITE/tests/fake/enroll \
 		LITE_TESTS_RUN=$LITE/tests/fake/tests-run
 	S=$T/state
@@ -199,6 +199,9 @@ t_up_direct() {
 	check "dmz check args" has "$STUB_LOG" "dmz-check --endpoints $S/endpoints.json --ca-file $S/uat-ca.pem --kubeconfig $S/kube/dmz.kubeconfig --connect 172.29.88.131"
 	check "enroll args" has "$STUB_LOG" "enroll --uat $S/uat.json --access $S/access.json --state $S/enroll --release-tag $TAG --ssh-key $S/ssh/id_ed25519 --core-state $S --core-kubeconfig $S/kube/core.kubeconfig --endpoints $S/endpoints.json"
 	check "core before dmz" log_order "core-install" "dmz-install"
+	check "core finish args" has "$STUB_LOG" "core-finish $S/kube/core.kubeconfig $S/endpoints.json $S $TAG SKIP_CHECK=0"
+	check "core finish after the dmz install" log_order "dmz-install" "core-finish"
+	check "core finish before enrolment" log_order "core-finish" "enroll --uat"
 	check "dmz install before its check" log_order "dmz-install" "dmz-check"
 	check "check before enrolment" log_order "dmz-check" "enroll --uat"
 	check "material before the hubs" log_order "docker run -d --name imas-lite-t2-alma" "core-install"
@@ -224,6 +227,7 @@ t_up_rerun() {
 	check "no second container" hasnt "$STUB_LOG" "docker run"
 	check "no second image build" hasnt "$STUB_LOG" "docker build"
 	check "no second core install" hasnt "$STUB_LOG" "core-install"
+	check "no second core finish" hasnt "$STUB_LOG" "core-finish"
 	check "no second dmz check" hasnt "$STUB_LOG" "dmz-check"
 	check "no second enrolment" hasnt "$STUB_LOG" "enroll --uat"
 	check "one hosts block" test "$(count "$T/hosts" "# BEGIN imas-uat-lite")" = 1
@@ -318,6 +322,7 @@ t_up_options() {
 	check "--skip-hubs installs nothing" hasnt "$STUB_LOG" "core-install"
 	rc_is 0 up --skip-enroll --skip-checks
 	check "--skip-checks" hasnt "$STUB_LOG" "dmz-check"
+	check "--skip-checks reaches core finish" has "$STUB_LOG" "SKIP_CHECK=1"
 	check "--skip-enroll" hasnt "$STUB_LOG" "enroll --uat"
 	check "hubs installed" has "$STUB_LOG" "dmz-install"
 	: >"$STUB_LOG"

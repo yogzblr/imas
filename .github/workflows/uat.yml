@@ -298,6 +298,15 @@ jobs:
             --endpoints "$STATE/k0s/endpoints.json" --release-tag "$RELEASE_TAG" \
             --seeds-from-kubeconfig "$STATE/k0s/core.kubeconfig" --workdir "$STATE/dmz"
 
+      # farmer and saasapi need the DMZ bus, so core's install.sh does not wait
+      # for them: this does, registers the sprout release and runs core's check.
+      - name: Core hub, second half (uat/hub/core/finish.sh)
+        env:
+          RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
+        run: |
+          uat/hub/core/finish.sh "$STATE/k0s/core.kubeconfig" "$STATE/k0s/endpoints.json" \
+            "$STATE/hub" "$RELEASE_TAG"
+
       # Before enrolment: its rate limit check empties /v1/enroll's bucket and
       # waits for the refill.
       - name: DMZ check
