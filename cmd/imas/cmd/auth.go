@@ -255,6 +255,24 @@ var authExplainCmd = &cobra.Command{
 	},
 }
 
+// privkeyJSONResult is `imas auth privkey --output json`'s output and exit
+// code: the status object, and 0 on success or 1 on failure. (It used to exit 1
+// after printing "success": true, so scripts that checked the exit code treated
+// a created key as a failure.)
+func privkeyJSONResult(err error) (string, int) {
+	status := struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error"`
+	}{Success: err == nil}
+	code := 0
+	if err != nil {
+		status.Error = err.Error()
+		code = 1
+	}
+	jw, _ := json.Marshal(status)
+	return string(jw), code
+}
+
 var authPrivKeyCmd = &cobra.Command{
 	Use:   "privkey",
 	Short: "Create a private key for the imas CLI",
@@ -264,16 +282,11 @@ var authPrivKeyCmd = &cobra.Command{
 
 		switch outputMode {
 		case "json":
-			status := struct {
-				Success bool   `json:"success"`
-				Error   string `json:"error"`
-			}{Success: err == nil}
-			if err != nil {
-				status.Error = err.Error()
+			out, code := privkeyJSONResult(err)
+			fmt.Println(out)
+			if code != 0 {
+				os.Exit(code)
 			}
-			jw, _ := json.Marshal(status)
-			fmt.Println(string(jw))
-			os.Exit(1)
 			return
 		case "":
 			fallthrough
