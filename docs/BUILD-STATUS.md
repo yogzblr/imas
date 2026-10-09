@@ -64,14 +64,32 @@ not defeat it.
 
 ### S1 Blocking
 
-Stops the Azure run, or must be done before fleet-update dispatch or self-update is turned on anywhere. Do these first, in this order.
+Two kinds. **S1a** stops the first Azure run. **S1b** is needed only before
+fleet-update dispatch or self-update is turned on anywhere, which includes an
+Azure run that sets `dispatch_flags` (the L4 and L5 self-update tests); a first
+run with `dispatch_flags` off does not need it.
+
+**S1a, before the first Azure run**
 
 | ID | Item | RAG | Next step |
 |---|---|---|---|
 | P2 | **Prove PR #163 on a rig started from scratch** | Amber | `up.sh` now installs core, then the DMZ, then `finish.sh` (farmer and saasapi need the DMZ bus; the release-registration hook runs from `finish.sh` as a second `helm upgrade --reuse-values`). Unit tests pass (298) but `go test ./uat/...` could not run in the sandbox (Go 1.26), and no fresh-rig run exists. Run `down.sh`, then `up.sh --release-tag <tag>`, then smoke and core. Check that the second helm upgrade re-runs the other hooks cleanly. Do this before P1. |
 | P1 | **Azure UAT gate: the run** | **Red** | Built and validated on the local rig only. Owner prerequisites in plan §4h: OIDC identity, the `uat` and `uat-janitor` environments, quota, image terms. Then dispatch `uat.yml`. Only Azure can run X3 (network separation), the Windows lines and the janitor's teardown. Validation order in `uat/README.md`: local rig, a kept smoke run, `v0.1.0-rc.3` failing, a good tag passing. |
+
+**S1b, before dispatch or self-update is enabled**
+
+| ID | Item | RAG | Next step |
+|---|---|---|---|
 | P18 | **Fleet signing keyring is a placeholder** (L5) | Amber | `packaging/etc/fleet-signing-keys.json` is `{}` and is packaged (`.goreleaser.yaml`). A sprout with an empty keyring fails closed, so self-update cannot work on a released package until the real keyring is installed; nothing in the release hooks, CI or `packaging/test` (`check-package-contents.sh` checks that the path exists, `test-windows-packaging.sh` that the MSI holds the repo's bytes) checks the content with `ParseKeyring`. Add that check to the release, and install the real keyring before the Azure self-update cycle (L4, L5 tests). Related and open: L3 (the staging directory and keyring are checked by mode, not owner or symlink), L6, L7, I4, I5. |
 | P3 | **Human security review of the flagged work** | Amber | Nothing records one. Scope: the sealing work (J.1 to J.5), SEC.* fixes, SCALE.2, PKI.1 and PKI.2, SH.1, REC.1, FIX.1 to FIX.5, UAT.1 and UAT.6 (Azure credentials), UAT.12 and UAT.13 (a sprout publish permission and its startup path). Record who, when, scope and what was accepted. **Owed before `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` or `IMAS_SELF_UPDATE_ENABLED` is turned on anywhere.** |
+
+**Pre-flight for the first Azure run** (it costs money, so do the free checks first):
+1. P2, a from-scratch rig run of PR #163.
+2. Checked 2026-10-09: `actionlint` and `yamllint -s` pass on `uat.yml` and `uat-janitor.yml`; the `uat/lite` (298) and `uat/k0s` (221) shell tests pass. **Not run in the sandbox** (no Go 1.26.9, no OpenTofu): `go test ./uat/...`, `tofu validate` and `tofu test`, and the `uat/enroll` suite. Run them where the toolchains exist.
+3. Cheap fixes worth landing first because a confusing failure inside a paid run is expensive: #138 (P14) and the `TestItemErrorCodesDocumented` blind spot (P17).
+4. Run order in `uat/README.md`: a kept smoke run first, then `v0.1.0-rc.3` failing, then a good tag passing, with `dispatch_flags` off and `keep_hours` 0 unless debugging.
+5. Cost controls in place before dispatching: the subscription budget in the bootstrap stack, the `uat-janitor` environment, quota for the Windows VM size, image terms, the OIDC identity.
+6. Expect the first run to find something the rig cannot: Bastion tunnels, k0s over the tunnels, private DNS and NSG rules, WinRM and the Windows MSI have never run anywhere.
 
 ### S2 High
 
@@ -169,3 +187,4 @@ Pre-releases `v0.1.0-rc.1` to `-rc.9` exist; `rc.4` was the first good one and
 - 2026-10-09: pending items re-checked against the code. P4, P5, P11 and P14 updated with what the code shows; "Review findings re-checked" added (31 Lows and Infos).
 - 2026-10-09: tests read for the open findings; P12 and P14 updated, P17 (test gaps) added.
 - 2026-10-09: pending items re-ordered by severity (S1 to S4); P18 split out of the review findings (L5).
+- 2026-10-09: S1 split into S1a (before the first Azure run) and S1b (before dispatch or self-update); pre-flight list for the first Azure run added.
