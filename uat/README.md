@@ -57,6 +57,11 @@ From section 4h, "Owner prerequisites", plus what the janitor needs. Run the
 `az` commands in Azure Cloud Shell as the subscription Owner. Keep this
 subscription for UAT only: the GitHub identity is Contributor on all of it.
 
+Steps 1 to 3 and the first federated credential of step 7 (the Azure side of the OIDC identity) can be done by
+`uat/scripts/azure-owner-setup.sh`: it runs `az login` if needed, shows the subscription, asks before it
+changes anything, does each step only if it is not already done, and prints the three GitHub variables
+(`--help` lists the options, including `--accept-image-terms`). It works in WSL.
+
 1. **Resource providers**: `Microsoft.Compute`, `Microsoft.Network`,
    `Microsoft.Storage`, `Microsoft.Authorization`, `Microsoft.Consumption`
    (`az provider register --namespace ...`).

@@ -46,7 +46,7 @@ func run(t *testing.T, cwd, name string, args ...string) {
 }
 
 var scriptFiles = []string{
-	"check-inputs.sh", "collect-artifacts.sh", "janitor.sh", "material.sh",
+	"azure-owner-setup.sh", "check-inputs.sh", "collect-artifacts.sh", "janitor.sh", "material.sh",
 	"run-id.sh", "runner-cidr.sh", "verify-teardown.sh",
 	"tests/scripts_test.sh", "tests/stubs/az", "tests/stubs/gh", "tests/stubs/curl",
 }
