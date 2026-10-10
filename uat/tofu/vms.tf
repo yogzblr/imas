@@ -109,8 +109,8 @@ resource "azurerm_linux_virtual_machine" "hub" {
 }
 
 # Linux sprouts: Ubuntu 24.04 and AlmaLinux 9. Small Standard SSD OS disks, no
-# data disks. No ephemeral OS disk: B1ms's 4 GiB temp disk is smaller than
-# either image.
+# data disks. No ephemeral OS disk: the B-series v2 sizes have no
+# local temp disk to hold one.
 resource "azurerm_linux_virtual_machine" "sprout" {
   for_each = local.linux_sprouts
 
@@ -157,8 +157,8 @@ resource "azurerm_linux_virtual_machine" "sprout" {
   boot_diagnostics {}
 }
 
-# Windows sprouts: Server 2022 Core smalldisk. No ephemeral OS disk: B2s's
-# 8 GiB temp disk is smaller than the 30 GB image.
+# Windows sprouts: Server 2022 Core smalldisk. No ephemeral OS disk: the B-series v2
+# sizes have no local temp disk to hold one.
 resource "azurerm_windows_virtual_machine" "sprout" {
   for_each = local.windows_sprouts
 

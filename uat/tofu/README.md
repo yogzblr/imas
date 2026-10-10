@@ -53,7 +53,7 @@ From the Shared contract, plus what the brief makes a variable.
 | `keep_hours` | `0` | 0 to 168. Above 0 the workflow skips the final destroy and the janitor deletes the group after `expires_at` |
 | `run_budget_hours` | `4` | `expires_at` = time of the first apply + `run_budget_hours` + `keep_hours`, so even a run whose destroy never ran is collected by the janitor |
 | `dmz_size`, `core_size` | `Standard_D2s_v5`, `Standard_D8s_v5` | |
-| `linux_sprout_size`, `windows_sprout_size` | `Standard_B1ms`, `Standard_B2s` | |
+| `linux_sprout_size`, `windows_sprout_size` | `Standard_B2ls_v2`, `Standard_B2ls_v2` | 2 vCPU, 4 GiB. Changed from `Standard_B1ms` and `Standard_B2s` on 2026-10-10: the owner's subscription does not offer those two in `centralindia`, only the v2 B-series |
 | `dmz_os_disk_gb`, `core_os_disk_gb` | `64`, `128` | Standard SSD |
 | `sprout_os_disk_gb` | `30` | Standard SSD; cannot be smaller than the image (30 GB for Ubuntu and the Windows smalldisk image) |
 | `ubuntu_image` | `Canonical:ubuntu-24_04-lts:server:latest` | Hubs and Ubuntu sprouts |
@@ -259,8 +259,7 @@ UAT.4). The zone is deleted with the run's resource group.
   the first time a VNet is made in a region. It is free, untagged, shared, and
   never deleted by these scripts.
 - **No ephemeral OS disks.** None of the default sizes supports one with these
-  images: Dsv5 sizes have no local temp disk or cache, and the temp disks of
-  B1ms (4 GiB) and B2s (8 GiB) are smaller than the 30 GB images.
+  images: Dsv5 and the B-series v2 sizes have no local temp disk or cache.
 
 ## Bootstrap, once
 
@@ -350,16 +349,17 @@ az resource list --tag run_id=<run_id> -o table   # must be empty
 |---|---|---|
 | `uat-dmz` | 1 | Standard_D2s_v5: 2 vCPU, 8 GiB; 64 GB Standard SSD |
 | `uat-core` | 1 | Standard_D8s_v5: 8 vCPU, 32 GiB; 128 GB Standard SSD |
-| `t1-ubuntu`, `t2-ubuntu`, `t1-alma`, `t2-alma` | 4 | Standard_B1ms: 1 vCPU, 2 GiB; 30 GB Standard SSD |
-| `t1-win`, `t2-win` | 2 | Standard_B2s: 2 vCPU, 4 GiB; 30 GB Standard SSD |
+| `t1-ubuntu`, `t2-ubuntu`, `t1-alma`, `t2-alma` | 4 | Standard_B2ls_v2: 2 vCPU, 4 GiB; 30 GB Standard SSD |
+| `t1-win`, `t2-win` | 2 | Standard_B2ls_v2: 2 vCPU, 4 GiB; 30 GB Standard SSD |
 | Azure Bastion `uat-bastion` | 1 | Standard SKU, 2 scale units |
 | Standard public IPs | 9 | 8 VMs and the Bastion; static |
 | VNet, subnets, NSGs, NICs | 1, 4, 4, 8 | |
 | Private DNS zone, VNet link, A records | 1, 1, 2 | `dmz` and `core` |
 | VM extensions | 2 | `winrm-https` on each Windows sprout |
 
-18 vCPUs in all: 10 in the Dsv5 family and 8 in the B family (quota is per
-family and per region; section 4h). Costs are the guesses in section 4h.
+22 vCPUs in all: 10 in the Dsv5 family and 12 in the family of Standard_B2ls_v2
+(`az vm list-skus --location <region> --size Standard_B2ls_v2 --query [0].family`;
+quota is per family and per region; section 4h). Costs are the guesses in section 4h.
 
 Windows sprouts: patching is `Manual` with automatic updates off, so Windows
 Update does not reboot a VM in the middle of a run. WinRM: `winrm-https.ps1`

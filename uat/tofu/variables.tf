@@ -79,13 +79,13 @@ variable "core_size" {
 variable "linux_sprout_size" {
   description = "VM size of the four Linux sprouts."
   type        = string
-  default     = "Standard_B1ms"
+  default     = "Standard_B2ls_v2"
 }
 
 variable "windows_sprout_size" {
   description = "VM size of the two Windows sprouts."
   type        = string
-  default     = "Standard_B2s"
+  default     = "Standard_B2ls_v2"
 }
 
 variable "dmz_os_disk_gb" {
