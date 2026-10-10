@@ -143,8 +143,9 @@ resource "azurerm_linux_virtual_machine" "sprout" {
     version   = local.images[each.value.os][3]
   }
 
-  # The AlmaLinux marketplace image has a purchase plan whose terms the owner
-  # accepts once per subscription.
+  # Off by default (alma_image_has_plan): Azure refuses almalinux:almalinux-x86_64:9-gen2
+  # with a plan ("doesn't require plan information"). The owner still accepts the
+  # marketplace terms once per subscription.
   dynamic "plan" {
     for_each = each.value.os == "alma" && var.alma_image_has_plan ? [1] : []
     content {

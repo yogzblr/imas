@@ -58,7 +58,7 @@ From the Shared contract, plus what the brief makes a variable.
 | `sprout_os_disk_gb` | `30` | Standard SSD; cannot be smaller than the image (30 GB for Ubuntu and the Windows smalldisk image) |
 | `ubuntu_image` | `Canonical:ubuntu-24_04-lts:server:latest` | Hubs and Ubuntu sprouts |
 | `alma_image` | `almalinux:almalinux-x86_64:9-gen2:latest` | Marketplace image; terms accepted once (section 4h) |
-| `alma_image_has_plan` | `true` | Adds the purchase plan (publisher, offer as product, sku as name) |
+| `alma_image_has_plan` | `false` | Adds the purchase plan (publisher, offer as product, sku as name). Off because Azure refuses this image with a plan: "doesn't require plan information" (first Azure run, 2026-10-10). The marketplace terms are still accepted once |
 | `windows_image` | `MicrosoftWindowsServer:WindowsServer:2022-datacenter-core-smalldisk-g2:latest` | |
 | `admin_user` | `imasuat` | On every VM |
 | `envoy_port` | `8443` | Envoy's external port on the DMZ host: 8443, the owner's decision (2026-10-06), as a NodePort. A variable so every Envoy rule moves together |

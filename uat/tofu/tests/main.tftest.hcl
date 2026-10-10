@@ -163,11 +163,11 @@ run "names_tags_and_layout" {
 
   assert {
     condition = (
-      length(azurerm_linux_virtual_machine.sprout["t1-alma"].plan) == 1 &&
-      azurerm_linux_virtual_machine.sprout["t1-alma"].plan[0].product == "almalinux-x86_64" &&
+      length(azurerm_linux_virtual_machine.sprout["t1-alma"].plan) == 0 &&
+      length(azurerm_linux_virtual_machine.sprout["t2-alma"].plan) == 0 &&
       length(azurerm_linux_virtual_machine.sprout["t1-ubuntu"].plan) == 0
     )
-    error_message = "only the AlmaLinux sprouts carry the marketplace plan"
+    error_message = "no sprout carries a marketplace plan by default (Azure refuses one for the AlmaLinux image)"
   }
 
   assert {
@@ -385,6 +385,23 @@ run "keep_hours_pushes_expiry" {
   assert {
     condition     = timecmp(azurerm_resource_group.run.tags["expires_at"], timeadd(plantimestamp(), "27h")) > 0
     error_message = "expires_at must be the first apply + run_budget_hours (4) + keep_hours"
+  }
+}
+
+run "alma_plan_opt_in" {
+  command = apply
+
+  variables {
+    alma_image_has_plan = true
+  }
+
+  assert {
+    condition = (
+      length(azurerm_linux_virtual_machine.sprout["t1-alma"].plan) == 1 &&
+      azurerm_linux_virtual_machine.sprout["t1-alma"].plan[0].product == "almalinux-x86_64" &&
+      length(azurerm_linux_virtual_machine.sprout["t1-ubuntu"].plan) == 0
+    )
+    error_message = "alma_image_has_plan = true puts the plan on the AlmaLinux sprouts only"
   }
 }
 
