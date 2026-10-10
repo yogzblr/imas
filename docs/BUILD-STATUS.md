@@ -182,7 +182,7 @@ Only the PR for this file. Checked 2026-10-09.
 ## Releases
 
 Pre-releases `v0.1.0-rc.1` to `-rc.11` exist; `rc.4` was the first good one and
-`rc.11` (2026-10-09, adds the typed 1213 check and the binding release, PR #176, on top of the retry in rc.10) is the current one. Rig on rc.11 (owner, 2026-10-10): smoke passed on the Linux sprouts; core not yet reported. No stable release has been cut.
+`rc.11` (2026-10-09, adds the typed 1213 check and the binding release, PR #176, on top of the retry in rc.10) is the current one. Rig on rc.11 (owner, 2026-10-10): smoke and core passed on the Linux sprouts (the 18 Windows and X3 lines are SKIP on the rig). No stable release has been cut.
 
 ## Change log
 
@@ -197,4 +197,4 @@ Pre-releases `v0.1.0-rc.1` to `-rc.11` exist; `rc.4` was the first good one and
 - 2026-10-09: rc.10 cut (includes #171); a from-scratch rig run on it passed smoke and core. P19 lowered to Amber: the rc.10 run saw no deadlock, so the fix is not yet proven. PR #173: `up.sh` refreshes each sprout's package index before enrolment.
 - 2026-10-09: P20 decision recorded (option A now, option C before dispatch or production).
 - 2026-10-09: P3 partial review record: owner decided the four review questions on PR #171 (retry the whole transaction, six attempts, check the error number, release the binding); the last two are PR #176 (merged).
-- 2026-10-10: rc.11 cut (includes #176). Smoke on a rig running rc.11 passed on the Linux sprouts; the P19 retry fired twice and both enrolments completed (see P19), which is why it stays open only for the lock cause, other transactions and the six-VM run.
+- 2026-10-10: rc.11 cut (includes #176). Smoke and core on a rig running rc.11 passed on the Linux sprouts; the P19 retry fired twice and both enrolments completed (see P19), which is why it stays open only for the lock cause, other transactions and the six-VM run.
