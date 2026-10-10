@@ -267,6 +267,27 @@ echo 1 >"$STUB_STATE/restart_rc"
 v "$uat" restart uat-dmz
 if [ "$rc" -eq 255 ]; then ok "vmctl: a failed az vm restart gives 255"; else nok "vmctl: restart failure (rc=$rc)" "$err"; fi
 
+# An expired Azure login: with the relogin hook vmctl logs in again and
+# repeats the call; without it the failure stays.
+cat >"$work/relogin" <<'RELOGIN'
+#!/usr/bin/env bash
+echo relogin >>"$STUB_STATE/calls.log"
+touch "$STUB_STATE/relogin_done"
+RELOGIN
+chmod +x "$work/relogin"
+new_case vexpired
+touch "$STUB_STATE/expired"
+UAT_AZ_RELOGIN="$work/relogin" v "$uat" run t1-ubuntu 'echo after-relogin'
+if [ "$rc" -eq 0 ] && [ "$out" = "after-relogin" ] && [ "$(calls | grep -c '^relogin$')" -eq 1 ]; then
+  ok "vmctl: an expired login is renewed once and the call repeated"
+else nok "vmctl: expired login with hook (rc=$rc)" "$(calls) $err"; fi
+new_case vexpired2
+touch "$STUB_STATE/expired"
+v "$uat" run t1-ubuntu 'echo x'
+if [ "$rc" -eq 255 ] && printf '%s' "$err" | grep -q AADSTS700024; then
+  ok "vmctl: without the hook an expired login fails (255) and says why"
+else nok "vmctl: expired login without hook (rc=$rc)" "$err"; fi
+
 echo
 echo "access_test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

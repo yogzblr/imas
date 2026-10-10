@@ -75,6 +75,12 @@ esac
 
 case "$1 $2" in
   "vm run-command")
+    # expired: fails like an OIDC session past its validity until the
+    # relogin stub has run.
+    if [ -f "$STUB_STATE/expired" ] && [ ! -f "$STUB_STATE/relogin_done" ]; then
+      echo "ERROR: AADSTS700024: Client assertion is not within its valid time range. (stub)" >&2
+      exit 1
+    fi
     [ -f "$STUB_STATE/runcmd_fail" ] && { echo "ERROR: stub run-command failure" >&2; exit 1; }
     cid=$(arg --command-id "$@")
     # The script lines are everything after --scripts.

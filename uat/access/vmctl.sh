@@ -31,6 +31,9 @@
 #
 # Environment:
 #   AZ                    az command (default az)
+#   UAT_AZ_RELOGIN        a command (uat/access/az-relogin.sh in the gate) that
+#                         logs az in again; run once, and the az call repeated,
+#                         when az fails with AADSTS700024 (expired session)
 #   VMCTL_SPROUT_SERVICE  service name (default imas-sprout, as packaged)
 #   VMCTL_WAIT_SECONDS    restart wait (default 600)
 #   VMCTL_POLL_SECONDS    restart poll interval (default 10)
@@ -68,6 +71,27 @@ esac
 command -v jq >/dev/null 2>&1 || { log "jq is not on PATH"; exit 2; }
 command -v "$AZ" >/dev/null 2>&1 || { log "$AZ is not on PATH"; exit 2; }
 
+# az_run <az args>: "$AZ" with the args; when it fails with AADSTS700024 and
+# UAT_AZ_RELOGIN is set, logs in again and repeats the call once. stdout is
+# az's; its stderr goes to our stderr.
+az_run() {
+  local errf rc=0
+  errf=$(mktemp)
+  "$AZ" "$@" 2>"$errf" || rc=$?
+  if [ "$rc" -ne 0 ] && [ -n "${UAT_AZ_RELOGIN:-}" ] && grep -q AADSTS700024 "$errf"; then
+    log "the Azure login expired; logging in again"
+    if "$UAT_AZ_RELOGIN" >&2; then
+      rc=0
+      "$AZ" "$@" 2>"$errf" || rc=$?
+    else
+      log "logging in again failed"
+    fi
+  fi
+  cat "$errf" >&2
+  rm -f "$errf"
+  return "$rc"
+}
+
 # Look the VM up: kind (hub or sprout), resource id and OS.
 lookup=$(jq -r --arg vm "$vm" '
   if .dmz.name == $vm then ["hub", .dmz.id, "ubuntu"]
@@ -88,7 +112,7 @@ run_remote() {
   remote_err=""
   remote_rc=255
   if [ "$os" = windows ]; then
-    json=$("$AZ" vm run-command invoke --ids "$vm_id" --command-id RunPowerShellScript -o json --scripts \
+    json=$(az_run vm run-command invoke --ids "$vm_id" --command-id RunPowerShellScript -o json --scripts \
       "\$__c = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$b64'))" \
       "\$global:LASTEXITCODE = 0; \$__ok = \$true" \
       "try { & ([ScriptBlock]::Create(\$__c)); \$__ok = \$? } catch { Write-Error \$_; \$__ok = \$false }" \
@@ -97,7 +121,7 @@ run_remote() {
     remote_out=$(printf '%s' "$json" | jq -r '[.value[]? | select(.code | test("StdOut"))][0].message // ""' | tr -d '\r')
     remote_err=$(printf '%s' "$json" | jq -r '[.value[]? | select(.code | test("StdErr"))][0].message // ""' | tr -d '\r')
   else
-    json=$("$AZ" vm run-command invoke --ids "$vm_id" --command-id RunShellScript -o json --scripts \
+    json=$(az_run vm run-command invoke --ids "$vm_id" --command-id RunShellScript -o json --scripts \
       "__imas_cmd=\$(printf '%s' '$b64' | base64 -d)" \
       "bash -c \"\$__imas_cmd\" </dev/null" \
       "echo \"$marker\$?\"") || return 1
@@ -152,14 +176,14 @@ case "$action" in
     ;;
   restart)
     log "restarting $vm"
-    if ! "$AZ" vm restart --ids "$vm_id" -o none; then
+    if ! az_run vm restart --ids "$vm_id" -o none; then
       log "az vm restart failed for $vm"
       exit 255
     fi
     deadline=$((SECONDS + wait_seconds))
     probe="exit 0"
     while :; do
-      power=$("$AZ" vm get-instance-view --ids "$vm_id" \
+      power=$(az_run vm get-instance-view --ids "$vm_id" \
         --query "instanceView.statuses[?starts_with(code, 'PowerState/')].code | [0]" -o tsv 2>/dev/null || true)
       if [ "$power" = "PowerState/running" ] && run_remote "$probe" && [ "$remote_rc" = 0 ]; then
         log "$vm is back"
