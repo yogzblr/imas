@@ -103,7 +103,7 @@ if gv "$ep" "$admin" v0.1.0-rc.4 >"$tmp/v1.json" 2>"$tmp/out"; then
 	  .saasapi.jwt.issuer == "https://uatabc123-core.centralindia.cloudapp.azure.com/realms/imas-uat"
 	  and .saasapi.jwt.keycloakJWKSURL == .saasapi.jwt.issuer + "/protocol/openid-connect/certs"
 	  and .saasapi.jwt.audience == "imas-saasapi"
-	  and .bus.sproutBusURLs == ["wss://uatabc123-dmz.centralindia.cloudapp.azure.com:8443/"]
+	  and .bus.sproutBusURLs == ["wss://dmz.uat.imas.internal:8443/"]
 	  and .bus.host == "dmz.uat.imas.internal" and .bus.egressCIDRs == ["10.60.1.4/32"] and .bus.port == 8442
 	  and (.bus | has("serviceName") | not)
 	  and .farmer.image.tag == "0.1.0-rc.4" and .saasapi.image.tag == "0.1.0-rc.4"
@@ -117,7 +117,7 @@ else
 fi
 gv "$ep2" "$admin" v1.2.3 >"$tmp/v2.json" 2>/dev/null &&
 	jq -e '.saasapi.jwt.issuer == "https://core.imas-uat.test:30444/realms/imas-uat"
-	  and .bus.sproutBusURLs == ["wss://dmz.imas-uat.test:30443/"] and .bus.host == "dmz.rig.test" and .bus.egressCIDRs == ["172.18.0.2/32"] and .bus.port == 30406
+	  and .bus.sproutBusURLs == ["wss://dmz.rig.test:30443/"] and .bus.host == "dmz.rig.test" and .bus.egressCIDRs == ["172.18.0.2/32"] and .bus.port == 30406
 	  and .farmer.image.tag == "1.2.3"' "$tmp/v2.json" >/dev/null &&
 	ok "gen-values.sh: port and name overrides, non-443 issuer keeps the port" ||
 	bad "gen-values.sh: port and name overrides"

@@ -190,7 +190,11 @@ load_endpoints() {
 	KEYCLOAK_JWKS_URL="$KEYCLOAK_ISSUER/protocol/openid-connect/certs"
 	KEYCLOAK_TOKEN_URL="$KEYCLOAK_ISSUER/protocol/openid-connect/token"
 	SAASAPI_URL="$CORE_BASE_URL"
-	SPROUT_BUS_URL="wss://$DMZ_FQDN:$DMZ_ENVOY_PORT/"
+	# Sprouts sit in the tenants subnet, which may reach the DMZ private range only
+	# (the NSG denies its DMZ public IP), so they get the private name, as the
+	# enrolment does for farmerinterface. The first Azure run (2026-10-10) timed
+	# out dialling the public name.
+	SPROUT_BUS_URL="wss://$DMZ_PRIVATE_FQDN:$DMZ_ENVOY_PORT/"
 }
 
 # extras_set_args: the --set flags (one per line) that give uat/hub/core/chart
