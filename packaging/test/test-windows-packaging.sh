@@ -163,6 +163,11 @@ check "START_SERVICE is a secure property; upgrade properties kept" \
 	awk -F'\t' '$1=="SecureCustomProperties" && (";"$2";") ~ /;START_SERVICE;/ && (";"$2";") ~ /;WIX_UPGRADE_DETECTED;/ && (";"$2";") ~ /;WIX_SAME_VERSION_UPGRADE_DETECTED;/ {f=1} END {exit !f}' <<<"$(table "$msi" Property)"
 check "config root locked to SYSTEM + Administrators" \
 	awk -F'\t' '$2=="IMASDATADIR" && $3=="CreateFolder" && $4=="D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" {f=1} END {exit !f}' <<<"$(table "$msi" MsiLockPermissionsEx)"
+# The column names are fixed by Windows Installer. A wrong one (SDDL for
+# SDDLText) passes every value check above and fails the install on Windows
+# with error 2235 and 1603; the first Azure run found it.
+check "MsiLockPermissionsEx columns are the ones Windows Installer reads" \
+	bash -c "msiinfo export '$msi' MsiLockPermissionsEx | head -n 1 | tr -d '\r' | grep -qx 'MsiLockPermissionsEx	LockObject	Table	SDDLText	Condition'"
 check "failure actions: restart x3 after 5s, on the service component" \
 	awk -F'\t' '$2=="imas-sprout" && $7=="1[~]1[~]1" && $8=="5000[~]5000[~]5000" && $9=="SproutExecutable" {f=1} END {exit !f}' <<<"$(table "$msi" MsiServiceConfigFailureActions)"
 check "MsiConfigureServices sequenced between InstallServices and StartServices" \

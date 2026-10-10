@@ -55,9 +55,9 @@ msibuild "$msi" -q "UPDATE \`Component\` SET \`Attributes\` = $cfg WHERE \`Compo
 msibuild "$msi" -q "UPDATE \`Component\` SET \`Attributes\` = $data WHERE \`Component\` = 'SproutDataDir'"
 msibuild "$msi" -q "UPDATE \`Component\` SET \`Attributes\` = $cache WHERE \`Component\` = 'SproutCacheDir'"
 
-msibuild "$msi" -q "CREATE TABLE \`MsiLockPermissionsEx\` (\`MsiLockPermissionsEx\` CHAR(72) NOT NULL, \`LockObject\` CHAR(72) NOT NULL, \`Table\` CHAR(32) NOT NULL, \`SDDL\` CHAR(0) NOT NULL, \`Condition\` CHAR(255) PRIMARY KEY \`MsiLockPermissionsEx\`)"
+msibuild "$msi" -q "CREATE TABLE \`MsiLockPermissionsEx\` (\`MsiLockPermissionsEx\` CHAR(72) NOT NULL, \`LockObject\` CHAR(72) NOT NULL, \`Table\` CHAR(32) NOT NULL, \`SDDLText\` CHAR(0) NOT NULL, \`Condition\` CHAR(255) PRIMARY KEY \`MsiLockPermissionsEx\`)"
 # LockObject for Table=CreateFolder is the CreateFolder row's Directory_.
-msibuild "$msi" -q "INSERT INTO \`MsiLockPermissionsEx\` (\`MsiLockPermissionsEx\`, \`LockObject\`, \`Table\`, \`SDDL\`) VALUES ('SproutDataDirAcl', 'IMASDATADIR', 'CreateFolder', '$SDDL')"
+msibuild "$msi" -q "INSERT INTO \`MsiLockPermissionsEx\` (\`MsiLockPermissionsEx\`, \`LockObject\`, \`Table\`, \`SDDLText\`) VALUES ('SproutDataDirAcl', 'IMASDATADIR', 'CreateFolder', '$SDDL')"
 
 msibuild "$msi" -q "CREATE TABLE \`MsiServiceConfigFailureActions\` (\`MsiServiceConfigFailureActions\` CHAR(72) NOT NULL, \`Name\` CHAR(255) NOT NULL LOCALIZABLE, \`Event\` SHORT NOT NULL, \`ResetPeriod\` LONG, \`RebootMessage\` CHAR(255) LOCALIZABLE, \`Command\` CHAR(255) LOCALIZABLE, \`Actions\` CHAR(255), \`DelayActions\` CHAR(255), \`Component_\` CHAR(72) NOT NULL PRIMARY KEY \`MsiServiceConfigFailureActions\`)"
 # Event 5 = msidbServiceConfigEventInstall (1) | Reinstall (4). Actions 1 =
