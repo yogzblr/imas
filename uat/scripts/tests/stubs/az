@@ -58,6 +58,72 @@ case "$1 $2" in
     [ -f "$STUB_STATE/resource_list_fail" ] && { echo "ERROR: stub failure" >&2; exit 1; }
     cat "$STUB_STATE/leftovers" 2>/dev/null || true
     ;;
+  "account show")
+    # Login state: with not_logged_in present, the CLI is logged out until
+    # az login has run. The answers are plain values, as with -o tsv.
+    if [ -f "$STUB_STATE/not_logged_in" ] && [ ! -f "$STUB_STATE/logged_in" ]; then
+      echo "ERROR: Please run 'az login' to setup account." >&2
+      exit 1
+    fi
+    case "$(arg query)" in
+      "") echo '{"id": "stub"}' ;;
+      id) cat "$STUB_STATE/subscription" 2>/dev/null || echo 11111111-1111-1111-1111-111111111111 ;;
+      name) echo "UAT subscription" ;;
+      tenantId) echo 22222222-2222-2222-2222-222222222222 ;;
+      *) echo "stub az: unexpected account query" >&2; exit 99 ;;
+    esac
+    ;;
+  "account set") arg subscription >"$STUB_STATE/subscription" ;;
+  "login "*) touch "$STUB_STATE/logged_in" ;;
+  "provider register") ;;
+  "ad app")
+    case "$3" in
+      list) cat "$STUB_STATE/app_ids" 2>/dev/null || true ;;
+      create)
+        echo 33333333-3333-3333-3333-333333333333 >"$STUB_STATE/app_ids"
+        echo 33333333-3333-3333-3333-333333333333
+        ;;
+      federated-credential)
+        case "$4" in
+          list) cat "$STUB_STATE/fed_subjects" 2>/dev/null || true ;;
+          create)
+            [ -f "$STUB_STATE/fed_fail" ] && { echo "ERROR: stub failure" >&2; exit 1; }
+            arg parameters | jq -r .subject >>"$STUB_STATE/fed_subjects"
+            ;;
+          *) echo "stub az: unexpected call: $*" >&2; exit 99 ;;
+        esac
+        ;;
+      *) echo "stub az: unexpected call: $*" >&2; exit 99 ;;
+    esac
+    ;;
+  "ad sp")
+    case "$3" in
+      show)
+        [ -f "$STUB_STATE/sp_exists" ] || { echo "ERROR: service principal not found" >&2; exit 1; }
+        echo 44444444-4444-4444-4444-444444444444
+        ;;
+      create) touch "$STUB_STATE/sp_exists" ;;
+      *) echo "stub az: unexpected call: $*" >&2; exit 99 ;;
+    esac
+    ;;
+  "role assignment")
+    case "$3" in
+      list) if [ -f "$STUB_STATE/role_assigned" ]; then echo 1; else echo 0; fi ;;
+      create)
+        # role_fail_times: the first N creates fail, as a new service
+        # principal does while it is not visible yet.
+        n=$(cat "$STUB_STATE/role_fail_times" 2>/dev/null || echo 0)
+        if [ "$n" -gt 0 ]; then
+          echo $((n - 1)) >"$STUB_STATE/role_fail_times"
+          echo "ERROR: PrincipalNotFound" >&2
+          exit 1
+        fi
+        touch "$STUB_STATE/role_assigned"
+        ;;
+      *) echo "stub az: unexpected call: $*" >&2; exit 99 ;;
+    esac
+    ;;
+  "vm image") ;;
   *)
     echo "stub az: unexpected call: $*" >&2
     exit 99

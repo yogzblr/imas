@@ -512,6 +512,97 @@ check "nothing tagged: exit 0, nothing deleted" test "$rc" -eq 0 -a -n "$(grep '
 if bash "$scripts/janitor.sh" bogus 2>/dev/null; then nok "an unknown command is a usage error"; else ok "an unknown command is a usage error"; fi
 
 ###############################################################################
+echo "# azure-owner-setup.sh"
+# srun ARGS...: runs the script with the stubs first on PATH and no waiting.
+srun() {
+  out=$(PATH="$stubs:$PATH" SETUP_RETRY_SLEEP=0 bash "$scripts/azure-owner-setup.sh" "$@" 2>&1 </dev/null)
+  rc=$?
+}
+created() { grep -c -e 'ad app create' -e 'ad sp create' -e 'role assignment create' -e 'federated-credential create' "$STUB_STATE/calls.log" || true; }
+
+
+new_state setup_fresh
+srun --yes
+check "a fresh subscription: exit 0" test "$rc" -eq 0
+check "... creates the app registration" grep -q -- 'az ad app create --display-name imas-uat-github' "$STUB_STATE/calls.log"
+check "... creates the service principal" grep -q -- 'az ad sp create --id 33333333' "$STUB_STATE/calls.log"
+check "... assigns Contributor on the subscription by object id" grep -q -- 'role assignment create --assignee-object-id 44444444-4444-4444-4444-444444444444 --assignee-principal-type ServicePrincipal --role Contributor --scope /subscriptions/11111111-1111-1111-1111-111111111111' "$STUB_STATE/calls.log"
+check "... registers the five resource providers" test "$(grep -c 'az provider register' "$STUB_STATE/calls.log")" -eq 5
+check "... adds the federated credentials of uat and uat-janitor" test "$(sort "$STUB_STATE/fed_subjects" | tr '\n' ' ')" = "repo:yogzblr/imas:environment:uat repo:yogzblr/imas:environment:uat-janitor "
+check "... prints the three variables" test "$(grep -c -e '^  AZURE_CLIENT_ID=33333333-3333-3333-3333-333333333333$' -e '^  AZURE_TENANT_ID=22222222-2222-2222-2222-222222222222$' -e '^  AZURE_SUBSCRIPTION_ID=11111111-1111-1111-1111-111111111111$' <<<"$out")" -eq 3
+check "... and the service principal's object id" grep -q '^  44444444-4444-4444-4444-444444444444$' <<<"$out"
+check "... does not accept the marketplace terms unasked" test -z "$(grep 'vm image terms' "$STUB_STATE/calls.log")"
+check "... asks for no secret: no password or secret is created" test -z "$(grep -i -e 'credential reset' -e 'password' -e 'secret' "$STUB_STATE/calls.log")"
+
+first=$(created)
+srun --yes
+check "the first run created five things: app, service principal, role, two credentials" test "$first" -eq 5
+check "a second run: exit 0" test "$rc" -eq 0
+check "... creates nothing more" test "$(created)" -eq 5
+check "... says it is already done, five times" test "$(grep -c 'already there' <<<"$out")" -eq 5
+
+new_state setup_login
+touch "$STUB_STATE/not_logged_in"
+srun --yes
+check "logged out: it runs a device code login first" grep -q -- 'az login --use-device-code' "$STUB_STATE/calls.log"
+check "... and then carries on" test "$rc" -eq 0 -a -f "$STUB_STATE/sp_exists"
+
+new_state setup_loggedin
+srun --yes
+check "already logged in: no login" test -z "$(grep 'az login' "$STUB_STATE/calls.log")"
+
+new_state setup_nojanitor
+srun --yes --no-janitor --repo someone/else
+check "--no-janitor and --repo: only the uat subject, for that repository" test "$(cat "$STUB_STATE/fed_subjects")" = "repo:someone/else:environment:uat"
+
+new_state setup_terms
+srun --yes --accept-image-terms
+check "--accept-image-terms accepts the AlmaLinux terms" grep -q -- 'az vm image terms accept --publisher almalinux --offer almalinux-x86_64 --plan 9-gen2' "$STUB_STATE/calls.log"
+
+new_state setup_sub
+srun --yes --subscription 55555555-5555-5555-5555-555555555555
+check "--subscription selects it and uses it for the role scope" grep -q -- '--scope /subscriptions/55555555-5555-5555-5555-555555555555' "$STUB_STATE/calls.log"
+
+new_state setup_noconfirm
+srun
+check "no --yes and no answer: exit 1, nothing changed" test "$rc" -eq 1 -a "$(created)" -eq 0 -a -z "$(grep 'provider register' "$STUB_STATE/calls.log")"
+check "... says it was not confirmed" grep -q 'not confirmed' <<<"$out"
+
+new_state setup_confirm
+out=$(echo y | PATH="$stubs:$PATH" SETUP_RETRY_SLEEP=0 bash "$scripts/azure-owner-setup.sh" 2>&1)
+rc=$?
+check "answering y proceeds" test "$rc" -eq 0 -a -f "$STUB_STATE/role_assigned"
+
+new_state setup_retry
+echo 2 >"$STUB_STATE/role_fail_times"
+srun --yes
+check "a role assignment that fails twice is retried and then succeeds" test "$rc" -eq 0 -a -f "$STUB_STATE/role_assigned" -a "$(grep -c 'role assignment create' "$STUB_STATE/calls.log")" -eq 3
+
+new_state setup_retry_fail
+echo 99 >"$STUB_STATE/role_fail_times"
+srun --yes
+check "a role assignment that never works: exit 1, six tries, no credential created" test "$rc" -eq 1 -a "$(grep -c 'role assignment create' "$STUB_STATE/calls.log")" -eq 6 -a -z "$(grep 'federated-credential create' "$STUB_STATE/calls.log")"
+
+new_state setup_twoapps
+printf '%s\n' aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb >"$STUB_STATE/app_ids"
+srun --yes
+check "two app registrations of that name: exit 1, nothing created" test "$rc" -eq 1 -a "$(created)" -eq 0
+
+new_state setup_badargs
+srun --subscription not-a-guid
+check "a malformed subscription id is refused" test "$rc" -eq 1
+srun --repo 'bad repo'
+check "a malformed repository is refused" test "$rc" -eq 1
+srun --bogus
+check "an unknown argument is refused" test "$rc" -eq 1
+check "... and no az call was made" test ! -s "$STUB_STATE/calls.log"
+
+new_state setup_fedfail
+touch "$STUB_STATE/fed_fail"
+srun --yes
+check "a failed federated credential: exit 1" test "$rc" -eq 1
+
+###############################################################################
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
