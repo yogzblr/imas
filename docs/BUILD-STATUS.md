@@ -74,7 +74,7 @@ run with `dispatch_flags` off does not need it.
 | ID | Item | RAG | Next step |
 |---|---|---|---|
 | P1 | **Azure UAT gate: the run** | **Red** | Built and validated on the local rig only. Owner prerequisites in plan §4h: OIDC identity, the `uat` and `uat-janitor` environments, quota, image terms. Then dispatch `uat.yml`. Only Azure can run X3 (network separation), the Windows lines and the janitor's teardown. Validation order in `uat/README.md`: local rig, a kept smoke run, `v0.1.0-rc.3` failing, a good tag passing. |
-| P19 | **Box-key write deadlocks when sprouts enrol together** (found by the first from-scratch rig run) | Amber | Three of four sprouts enrolled in the same second got `Error 1213: Deadlock found` from `upsertSproutBoxKeyActive` (`internal/pki/boxkeys.go`); the proof and binding were already claimed, so each had to be deleted and enrolled again. **Fixed by PR #171 (retry on 1213), in `v0.1.0-rc.10`.** Rig run on rc.10 (2026-10-09, owner): smoke 10 of 10 and core passed on the Linux sprouts. Farmer's log on that run: 0 refused box-key proofs and 0 `1213` errors, so the race did not happen and the run does not prove the fix (whether enrolment was parallel was not recorded). Close it after a run where the retry is seen to fire, or a concurrent-enrolment test on a real PXC (the Azure run enrols six VMs at once). Owner decisions 2026-10-09: the typed error-number check and releasing the enroll binding on a failed write are PR #176 (merged, in no release yet). Still open: drop the gap-locking revoke for a first key, the same retry for other `internal/pki` transactions, a test on a real PXC with concurrent enrolments. |
+| P19 | **Box-key write deadlocks when sprouts enrol together** (found by the first from-scratch rig run) | Amber | Three of four sprouts enrolled in the same second got `Error 1213: Deadlock found` from `upsertSproutBoxKeyActive` (`internal/pki/boxkeys.go`); the proof and binding were already claimed, so each had to be deleted and enrolled again. **Fixed by PR #171 (retry on 1213), in `v0.1.0-rc.10`.** Rig run on rc.10 (2026-10-09, owner): smoke 10 of 10 and core passed on the Linux sprouts. Farmer's log on that run: 0 refused box-key proofs and 0 `1213` errors, so the race did not happen and the run does not prove the fix (whether enrolment was parallel was not recorded). Close it after a run where the retry is seen to fire, or a concurrent-enrolment test on a real PXC (the Azure run enrols six VMs at once). Owner decisions 2026-10-09: the typed error-number check and releasing the enroll binding on a failed write are PR #176 (merged, in `v0.1.0-rc.11`). Still open: drop the gap-locking revoke for a first key, the same retry for other `internal/pki` transactions, a test on a real PXC with concurrent enrolments. |
 
 **S1b, before dispatch or self-update is enabled**
 
@@ -181,8 +181,8 @@ Only the PR for this file. Checked 2026-10-09.
 
 ## Releases
 
-Pre-releases `v0.1.0-rc.1` to `-rc.10` exist; `rc.4` was the first good one and
-`rc.10` (2026-10-09, with the box-key write retry, PR #171) is the current one on the rig. No stable release has been cut.
+Pre-releases `v0.1.0-rc.1` to `-rc.11` exist; `rc.4` was the first good one and
+`rc.11` (2026-10-09, adds the typed 1213 check and the binding release, PR #176, on top of the retry in rc.10) is the current one. Rig on rc.11 (owner, 2026-10-10): smoke passed on the Linux sprouts; core not yet reported. No stable release has been cut.
 
 ## Change log
 
@@ -197,3 +197,4 @@ Pre-releases `v0.1.0-rc.1` to `-rc.10` exist; `rc.4` was the first good one and
 - 2026-10-09: rc.10 cut (includes #171); a from-scratch rig run on it passed smoke and core. P19 lowered to Amber: the rc.10 run saw no deadlock, so the fix is not yet proven. PR #173: `up.sh` refreshes each sprout's package index before enrolment.
 - 2026-10-09: P20 decision recorded (option A now, option C before dispatch or production).
 - 2026-10-09: P3 partial review record: owner decided the four review questions on PR #171 (retry the whole transaction, six attempts, check the error number, release the binding); the last two are PR #176 (merged).
+- 2026-10-10: rc.11 cut (includes #176). Smoke on a rig running rc.11 passed on the Linux sprouts; whether the P19 retry fired was not checked, so P19 stays open.
