@@ -132,9 +132,9 @@ variable "alma_image" {
 }
 
 variable "alma_image_has_plan" {
-  description = "The AlmaLinux marketplace image carries a purchase plan (publisher, offer as product, sku as name). Set false only for an image without one."
+  description = "Send a purchase plan (publisher, offer as product, sku as name) with the AlmaLinux image. False by default: Azure refuses almalinux:almalinux-x86_64:9-gen2 with a plan (\"doesn't require plan information\", found by the first Azure run on 2026-10-10). Set true only for an image that has one."
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "windows_image" {
