@@ -156,6 +156,26 @@ ACL and start condition take effect, upgrading,
 uninstalling, and `winget install`. The first real release tag is also the
 first run of the whole release pipeline.
 
+### Parse-checking the PowerShell by hand
+
+No CI job has PowerShell yet. On a Windows machine, from a WSL checkout:
+
+```sh
+python3 packaging/test/extract-powershell.py /mnt/c/temp/ps
+```
+
+then, in PowerShell:
+
+```powershell
+Get-ChildItem C:\temp\ps | ForEach-Object {
+  $e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$e)
+  if ($e) { $_.Name; $e | ForEach-Object { "  line $($_.Extent.StartLineNumber): $($_.Message)" } }
+}
+```
+
+It prints nothing when every script parses. It would have caught the
+`"$IndexUrl:"` mistake before the Azure run did.
+
 ## Windows: winget via NuGet
 
 The `imasnget` Buildkite registry is a public NuGet feed. It carries two
