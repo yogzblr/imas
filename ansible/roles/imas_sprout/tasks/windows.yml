@@ -107,6 +107,20 @@
     arguments: /norestart
     expected_return_code: [0, 3010]
 
+# Restart on failure (systemd's Restart=always, RestartSec=5). Not in the MSI:
+# Windows Installer was denied applying it (packaging/windows/msi-postprocess.sh).
+- name: Restart the service when it fails
+  ansible.windows.win_powershell:
+    script: |
+      $ErrorActionPreference = 'Stop'
+      $Ansible.Changed = $false
+      $q = (sc.exe qfailure imas-sprout) -join "`n"
+      $restarts = ([regex]::Matches($q, 'RESTART -- Delay = 5000')).Count
+      if ($q -match 'RESET_PERIOD[^:]*:\s*86400' -and $restarts -eq 3) { return }
+      $out = sc.exe failure imas-sprout reset= 86400 actions= restart/5000/restart/5000/restart/5000
+      if ($LASTEXITCODE -ne 0) { throw "sc.exe failure failed: $out" }
+      $Ansible.Changed = $true
+
 - name: Read the sprout's config file
   ansible.builtin.slurp:
     src: "{{ _imas_sprout_config_file }}"

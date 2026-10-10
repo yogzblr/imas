@@ -130,10 +130,13 @@ asks for using `msibuild`:
   `<Condition>` there; a WiX build on Windows gets the element instead), and
   `START_SERVICE` in `SecureCustomProperties` (wixl ignores `Secure`);
 * `MsiLockPermissionsEx`: the `%ProgramData%\imas` ACL;
-* `MsiServiceConfigFailureActions` + `MsiConfigureServices`: restart on
-  failure. This is the equivalent of systemd's `Restart=always`.
+Not in the MSI: restart on failure (systemd's `Restart=always`). Windows
+Installer was denied (error 1939, "Error: 5", status 1603) applying an
+`MsiServiceConfigFailureActions` row, so the `imas_sprout` Ansible role sets it
+after the install with `sc.exe failure`, and `imas-sprout install` sets it
+too. An MSI-only install has no restart policy.
 
-Both tables need Windows Installer 5.0, which Windows Server 2016 has.
+The ACL table needs Windows Installer 5.0, which Windows Server 2016 has.
 
 wixl implements `AllowSameVersionUpgrades` as a separate
 `WIX_SAME_VERSION_UPGRADE_DETECTED` property, which the start condition
@@ -149,7 +152,7 @@ official schema.
 
 Not tested yet, because it needs a Windows host: installing the MSI (nothing
 has installed it on any Windows host, Server 2016 included), whether the
-ACL, failure actions and start condition take effect, upgrading,
+ACL and start condition take effect, upgrading,
 uninstalling, and `winget install`. The first real release tag is also the
 first run of the whole release pipeline.
 

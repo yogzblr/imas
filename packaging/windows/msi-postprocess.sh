@@ -14,10 +14,14 @@
 #      token, NKey seed and X25519 key would be readable by any user. Give
 #      %ProgramData%\imas a protected DACL: SYSTEM and Administrators only,
 #      inherited by everything the installer and the sprout create below it.
-#   3. MsiServiceConfigFailureActions (MSI 5.0). The SCM equivalent of the
-#      systemd unit's Restart=always/RestartSec=5: restart the service 5s
-#      after it dies (e.g. the log.Fatalf paths in cmd/sprout/main.go). The
-#      same settings as `imas-sprout install` (cmd/sprout/internal/winservice).
+#   3. NOT the service's failure actions. An MsiServiceConfigFailureActions
+#      row that restarts the service made Windows Installer fail the install
+#      (error 1939, "Error: 5" access denied, status 1603) on Windows in the
+#      Azure UAT run, for every encoding tried; the same MSI without the row
+#      installs. Restart-on-failure (the systemd unit's Restart=always,
+#      RestartSec=5) is set after the install instead: by the imas_sprout
+#      Ansible role (sc.exe failure) and by `imas-sprout install`
+#      (cmd/sprout/internal/winservice).
 #   4. The SproutServiceStart component's condition (wixl rejects
 #      <Condition> in a component): start the service at the end of the
 #      install only on an upgrade (including a same-version one) or with
@@ -58,15 +62,6 @@ msibuild "$msi" -q "UPDATE \`Component\` SET \`Attributes\` = $cache WHERE \`Com
 msibuild "$msi" -q "CREATE TABLE \`MsiLockPermissionsEx\` (\`MsiLockPermissionsEx\` CHAR(72) NOT NULL, \`LockObject\` CHAR(72) NOT NULL, \`Table\` CHAR(32) NOT NULL, \`SDDLText\` CHAR(0) NOT NULL, \`Condition\` CHAR(255) PRIMARY KEY \`MsiLockPermissionsEx\`)"
 # LockObject for Table=CreateFolder is the CreateFolder row's Directory_.
 msibuild "$msi" -q "INSERT INTO \`MsiLockPermissionsEx\` (\`MsiLockPermissionsEx\`, \`LockObject\`, \`Table\`, \`SDDLText\`) VALUES ('SproutDataDirAcl', 'IMASDATADIR', 'CreateFolder', '$SDDL')"
-
-msibuild "$msi" -q "CREATE TABLE \`MsiServiceConfigFailureActions\` (\`MsiServiceConfigFailureActions\` CHAR(72) NOT NULL, \`Name\` CHAR(255) NOT NULL LOCALIZABLE, \`Event\` SHORT NOT NULL, \`ResetPeriod\` LONG, \`RebootMessage\` CHAR(255) LOCALIZABLE, \`Command\` CHAR(255) LOCALIZABLE, \`Actions\` CHAR(255), \`DelayActions\` CHAR(255), \`Component_\` CHAR(72) NOT NULL PRIMARY KEY \`MsiServiceConfigFailureActions\`)"
-# Event 5 = msidbServiceConfigEventInstall (1) | Reinstall (4). Actions 1 =
-# SC_ACTION_RESTART; the SCM repeats the last action for later failures.
-# DelayActions in ms. ResetPeriod (s) clears the failure count after a day.
-msibuild "$msi" -q "INSERT INTO \`MsiServiceConfigFailureActions\` (\`MsiServiceConfigFailureActions\`, \`Name\`, \`Event\`, \`ResetPeriod\`, \`Actions\`, \`DelayActions\`, \`Component_\`) VALUES ('SproutFailureActions', 'imas-sprout', 5, 86400, '1[~]1[~]1', '5000[~]5000[~]5000', 'SproutExecutable')"
-# MsiConfigureServices runs the table above; standard slot is between
-# InstallServices (5800) and StartServices (5900).
-msibuild "$msi" -q "INSERT INTO \`InstallExecuteSequence\` (\`Action\`, \`Condition\`, \`Sequence\`) VALUES ('MsiConfigureServices', 'VersionNT >= 601', 5850)"
 
 # Keep in sync with the <Condition> in imas-sprout.wxs.
 readonly START_CONDITION='WIX_UPGRADE_DETECTED OR WIX_SAME_VERSION_UPGRADE_DETECTED OR START_SERVICE = "1"'
