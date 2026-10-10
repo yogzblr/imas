@@ -438,7 +438,7 @@ func TestFarmerChartRender(t *testing.T) {
 	cfg := str(get(t, objs, "ConfigMap/imas-core-farmer"), "data", "farmer")
 	for _, want := range []string{
 		"farmerbusurl: tls://dmz.uat.imas.internal:8442",
-		"sproutbusurls:\n- wss://" + dmzFQDN + ":8443/\n",
+		"sproutbusurls:\n- wss://dmz.uat.imas.internal:8443/\n",
 		"rootca: /etc/imas/tls/ca.crt",
 		"AC4LMP7I2FYLWGY5GIB52A4XCFFFSB2QTZ65B3A4G6OK5GYWRJSKH74C",
 		"Go0DiL9Y7s+Dp1mSizpp9n5xXuotDZzeqF6iGfIyt1c=",

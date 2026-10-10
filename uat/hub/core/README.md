@@ -59,7 +59,7 @@ own with the same arguments. `gen-values.sh` reads files only.
   |---|---|---|---|
   | `core.fqdn` | yes | | Keycloak issuer, saasapi URL, edge and farmer certificates |
   | `core.private_ip` | yes | | farmer certificate IP SAN |
-  | `dmz.fqdn` | yes | | `bus.sproutBusURLs` (`wss://<dmz.fqdn>:<envoy port>/`) |
+  | `dmz.fqdn` | yes | | the public name (not used for `bus.sproutBusURLs`, see below) |
   | `dmz.private_ip` | yes | | the bus endpoint, and the only source admitted to farmer's API |
   | `core.ports.https` | no | `443` | the edge's external HTTPS port; a port other than 443 becomes part of the issuer |
   | `core.ports.farmer_api` | no | `5405` | the edge's external farmer API port (the DMZ's Envoy dials it) |
