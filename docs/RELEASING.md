@@ -213,10 +213,12 @@ step's result differs from "look for", stop and fix by PR before going on.
    `packaging/helm/min-sprout-version` (`v0.0.0` today, which is fine).
 5. **Tag:** `git tag -a v0.1.0-rc.1 -m "imas v0.1.0-rc.1" <commit> && git
    push origin v0.1.0-rc.1`.
-   *Look for:* the tag on GitHub, and **no** workflow starting: the `push:
-   tags` trigger in `release.yml` is still off.
-6. **Actions, Release, Run workflow, Use workflow from: tag
-   `v0.1.0-rc.1`.**
+   *Look for:* the tag on GitHub and a **Release** run starting by itself
+   (the `push: tags` trigger has been on since `v0.1.0-rc.4`, see step 11).
+6. **Approve the Release run.** Its job uses the `goreleaser` environment, so
+   it waits for approval: open the run, *Review deployments*, approve. (To
+   run it by hand instead: Actions, Release, Run workflow, Use workflow from:
+   tag `v0.1.0-rc.1`.)
    *Look for:* `Check the ref` and `Check release secrets` pass; `Import GPG
    key` prints the fingerprint from step 2; GoReleaser
    logs `using tags ... current=v0.1.0-rc.1` (pinned from the ref through
