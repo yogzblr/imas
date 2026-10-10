@@ -94,6 +94,7 @@ func SRun(cmd apitypes.CmdRun) (apitypes.CmdRun, error) {
 		if err != nil {
 			envMutex.Unlock()
 			cmd.Error = err
+			cmd.ErrCode = -1
 			return cmd, err
 		}
 	} else {
@@ -116,6 +117,12 @@ func SRun(cmd apitypes.CmdRun) (apitypes.CmdRun, error) {
 
 	if cmd.RunAs != "" {
 		if err := setRunAs(command, cmd.RunAs); err != nil {
+			// The command never ran. Without these two fields the reply
+			// would carry exit code 0 and no error, and farmer would
+			// report a refused run_as (every run_as on Windows) as a
+			// success (UAT scenario C4).
+			cmd.Error = err
+			cmd.ErrCode = -1
 			return cmd, err
 		}
 	}

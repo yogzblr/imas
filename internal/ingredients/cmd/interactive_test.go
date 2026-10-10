@@ -219,3 +219,16 @@ func TestFRunWithoutNATSConnection(t *testing.T) {
 		t.Error("expected error for a tenant with no registered NATS connection")
 	}
 }
+
+// A run_as that can't be applied (an unknown user here; every user on
+// Windows) means the command never ran: the result must say so, not look
+// like an exit-0 success (UAT scenario C4 on Windows).
+func TestSRunRunAsFailureIsReported(t *testing.T) {
+	res, err := SRun(apitypes.CmdRun{Command: "echo", Args: []string{"x"}, RunAs: "no-such-user-imas-c4"})
+	if err == nil {
+		t.Fatal("want an error for an unusable run_as")
+	}
+	if res.ErrCode == 0 || res.Error == nil {
+		t.Fatalf("result looks like a success: errcode %d, error %v", res.ErrCode, res.Error)
+	}
+}
