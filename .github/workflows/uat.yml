@@ -247,7 +247,21 @@ jobs:
             -backend-config="storage_account_name=$account" \
             -backend-config="container_name=tfstate" \
             -backend-config="key=imas-uat/$RUN_ID.tfstate"
-          tofu -chdir=uat/tofu apply -auto-approve -input=false -no-color
+          # Azure sometimes refuses a change to the virtual network while the
+          # Bastion host (about 13 minutes) is still being created:
+          # "409 AnotherOperationInProgress". The apply is idempotent, so run
+          # it again, but only for that error, and at most three times.
+          for attempt in 1 2 3; do
+            if tofu -chdir=uat/tofu apply -auto-approve -input=false -no-color 2>&1 | tee "$STATE/apply.log"; then
+              break
+            fi
+            if [ "$attempt" -lt 3 ] && grep -q 'AnotherOperationInProgress' "$STATE/apply.log"; then
+              echo "::warning::Azure reported AnotherOperationInProgress; running tofu apply again (attempt $((attempt + 1)) of 3)"
+              sleep 60
+              continue
+            fi
+            exit 1
+          done
           tofu -chdir=uat/tofu output -json uat >"$STATE/uat.json"
           jq -e --arg rg "imas-uat-$RUN_ID" '.resource_group == $rg' "$STATE/uat.json" >/dev/null
 
