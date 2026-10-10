@@ -366,7 +366,7 @@ t_readers() {
 		parse_common_args usage "$S/kube/core.kubeconfig" "$S/endpoints.json" "$T/corestate"
 		echo "$KEYCLOAK_ISSUER|$SAASAPI_URL|$SPROUT_BUS_URL|$CORE_IP|$DMZ_IP|$CORE_PRIVATE_FQDN|$DMZ_PRIVATE_FQDN|$CA_ISSUER|$DMZ_BUS_PORT|$CORE_EXPOSURE"
 	)
-	check "uat/hub/core reads endpoints.json: $got" test "$got" = "https://uatlite01-core.imas-lite.test/realms/imas-uat|https://uatlite01-core.imas-lite.test|wss://uatlite01-dmz.imas-lite.test:8443/|172.29.88.130|172.29.88.131|core.uat.imas.internal|dmz.uat.imas.internal|imas-uat-ca|8442|hostPort"
+	check "uat/hub/core reads endpoints.json: $got" test "$got" = "https://uatlite01-core.imas-lite.test/realms/imas-uat|https://uatlite01-core.imas-lite.test|wss://dmz.uat.imas.internal:8443/|172.29.88.130|172.29.88.131|core.uat.imas.internal|dmz.uat.imas.internal|imas-uat-ca|8442|hostPort"
 	if command -v python3 >/dev/null 2>&1; then
 		mkdir -p "$T/keys"
 		for vm in t1-ubuntu t1-alma t2-ubuntu t2-alma; do printf 'key-%s\n' "$vm" >"$T/keys/$vm.key"; done
