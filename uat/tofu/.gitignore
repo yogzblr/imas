@@ -1,7 +1,6 @@
 # Local tofu working files. State lives in the bootstrap storage account,
-# never here. The provider lock file is not committed yet (see README.md).
+# never here. The provider lock files ARE committed (see README.md).
 .terraform/
-.terraform.lock.hcl
 *.tfstate
 *.tfstate.*
 *.tfplan

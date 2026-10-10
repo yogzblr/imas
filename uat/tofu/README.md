@@ -399,10 +399,14 @@ cd uat/tofu && tofu init -backend=false && tofu validate && tofu test
 cd bootstrap && tofu init -backend=false && tofu validate
 ```
 
-The provider lock file is not committed yet: it was generated from HashiCorp's
-release zips through a local mirror, and its hashes may not match what the
-OpenTofu registry serves. Commit it after the first `tofu init` against the
-registry (`tofu providers lock -platform=linux_amd64 -platform=darwin_arm64`).
+The provider lock files (`uat/tofu/.terraform.lock.hcl` and
+`uat/tofu/bootstrap/.terraform.lock.hcl`) are committed, so every run uses the
+provider versions that were tested. They were generated on 2026-10-10 by
+`tofu init` against the OpenTofu registry and then
+`tofu providers lock -platform=linux_amd64 -platform=darwin_arm64`; GitHub's
+runners use `linux_amd64`. To change a provider version, edit the constraint,
+run `tofu init -upgrade -backend=false` and the `providers lock` command above
+in both directories, and commit the lock files with the change.
 
 ## Licences
 
