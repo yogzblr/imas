@@ -74,9 +74,12 @@ changes anything, does each step only if it is not already done, and prints the 
    Confirm the three image URNs first with `az vm image list --all ...`
    (`uat/tofu/README.md`, Inputs).
 4. **Quota and sizes** in the region (default `centralindia`):
-   Standard_D2s_v5, Standard_D8s_v5, Standard_B1ms and Standard_B2s available;
-   18 vCPUs in all, 10 in the Dsv5 family and 8 in the B family. Two runs at
-   once (two different releases) need twice that.
+   Standard_D2s_v5, Standard_D8s_v5 and Standard_B2ls_v2 available;
+   22 vCPUs in all, 10 in the Dsv5 family and 12 in the family of
+   Standard_B2ls_v2 (find its name with `az vm list-skus --location <region>
+   --size Standard_B2ls_v2 --query [0].family`; `az vm list-usage` shows the
+   quota), so Total Regional vCPUs must be at least 22. Two runs at once (two
+   different releases) need twice that.
 5. **The bootstrap stack**, by hand, once: `uat/tofu/bootstrap` (state storage
    account with Entra-only access, a `CanNotDelete` lock, the monthly budget
    alert). Give the GitHub identity `Storage Blob Data Contributor` on the
@@ -353,7 +356,7 @@ the pricing calculator and watch the budget alert.** From section 4h:
 | Item | Rough cost |
 |---|---|
 | The two hubs (D8s_v5 core, D2s_v5 DMZ) | about $1 an hour together |
-| The six sprouts (four B1ms, two B2s) | a few cents an hour |
+| The six sprouts (all Standard_B2ls_v2) | a few cents an hour |
 | Azure Bastion, Standard SKU | about $0.25 to $0.30 an hour |
 | Nine Standard public IPs, disks, DNS zone | cents an hour |
 | A smoke or core run (60 to 90 minutes) | a few dollars |

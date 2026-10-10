@@ -90,6 +90,7 @@ run with `dispatch_flags` off does not need it.
 3. Cheap fixes worth landing first because a confusing failure inside a paid run is expensive: #138 and `self_update_disabled` are done (PRs #169, #170); P19 is the one that matters now.
 4. Run order in `uat/README.md`: a kept smoke run first, then `v0.1.0-rc.3` failing, then a good tag passing, with `dispatch_flags` off and `keep_hours` 0 unless debugging.
 5. Cost controls in place before dispatching: the subscription budget in the bootstrap stack, the `uat-janitor` environment, quota for the Windows VM size, image terms, the OIDC identity.
+   Found 2026-10-10 on the owner's subscription (`centralindia`): `Standard_B1ms` and `Standard_B2s` are not offered, only the v2 B-series, so all six sprouts now default to `Standard_B2ls_v2` (2 vCPU, 4 GiB; PR for this change). The vCPU need is 22 in total: 10 in the Dsv5 family and 12 in the B2ls_v2 family. The owner's quota there is 0 for Dsv5 and 10 in total, so an increase must be approved before the first run (open).
 6. Expect the first run to find something the rig cannot: Bastion tunnels, k0s over the tunnels, private DNS and NSG rules, WinRM and the Windows MSI have never run anywhere.
 
 ### S2 High
@@ -199,3 +200,4 @@ Pre-releases `v0.1.0-rc.1` to `-rc.11` exist; `rc.4` was the first good one and
 - 2026-10-09: P3 partial review record: owner decided the four review questions on PR #171 (retry the whole transaction, six attempts, check the error number, release the binding); the last two are PR #176 (merged).
 - 2026-10-10: rc.11 cut (includes #176). Smoke and core on a rig running rc.11 passed on the Linux sprouts; the P19 retry fired twice and both enrolments completed (see P19), which is why it stays open only for the lock cause, other transactions and the six-VM run.
 - 2026-10-10: offline UAT checks run on the owner's machine (see pre-flight item 2); provider lock files committed for `uat/tofu` and `uat/tofu/bootstrap`.
+- 2026-10-10: sprout VM defaults changed from B1ms and B2s to Standard_B2ls_v2 (not offered in centralindia for the owner's subscription); quota of 22 vCPUs still to be approved.

@@ -2191,7 +2191,7 @@ runs at tier smoke with keep_hours set, widening the tier as it goes green.
 - Names: resource group imas-uat-<run_id>; every resource tagged purpose=imas-uat,
   run_id, expires_at (RFC 3339, UTC). Public DNS labels uat<run_id>-dmz and uat<run_id>-core
   under <region>.cloudapp.azure.com. Sizes are variables: dmz Standard_D2s_v5, core
-  Standard_D8s_v5, Linux sprouts Standard_B1ms, Windows sprouts Standard_B2s.
+  Standard_D8s_v5, Linux and Windows sprouts Standard_B2ls_v2 (changed from B1ms and B2s on 2026-10-10: the owner's subscription offers only the v2 B-series in centralindia).
 - Image URNs are variables, verified by the owner with az vm image list (agents cannot
   reach Azure): Canonical ubuntu-24_04-lts server; almalinux almalinux-x86_64 9-gen2
   (marketplace terms accepted once per subscription); MicrosoftWindowsServer WindowsServer
@@ -2282,9 +2282,9 @@ az vm image terms accept --publisher almalinux --offer almalinux-x86_64 --plan 9
 
 Then: in the repo create the GitHub environment uat with a required reviewer (you), a
 deployment rule for the branch main, and the three variables above. Check in your region
-that Standard_D2s_v5, Standard_D8s_v5, Standard_B1ms and Standard_B2s are available and
-that the quotas cover 18 vCPUs in total (D2s 2 + D8s 8 in the Dsv5 family, 4 B1ms + 2 B2s x 2
-in the B family; quotas are per family as well as per region), and request more if not. Run uat/tofu/bootstrap once by hand when UAT.1 has merged: it
+that Standard_D2s_v5, Standard_D8s_v5 and Standard_B2ls_v2 are available and
+that the quotas cover 22 vCPUs in total (D2s 2 + D8s 8 in the Dsv5 family, 6 B2ls_v2 x 2
+in its family; quotas are per family as well as per region), and request more if not. Run uat/tofu/bootstrap once by hand when UAT.1 has merged: it
 creates the small persistent resource group (state storage account, budget alert), the
 only thing that stays up between runs. The Contributor role is subscription wide: keep this
 subscription for UAT only, and keep the uat environment's required reviewer on.

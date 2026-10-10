@@ -155,10 +155,10 @@ run "names_tags_and_layout" {
     condition = (
       length(azurerm_linux_virtual_machine.sprout) == 4 &&
       length(azurerm_windows_virtual_machine.sprout) == 2 &&
-      alltrue([for v in values(azurerm_linux_virtual_machine.sprout) : v.size == "Standard_B1ms" && v.disable_password_authentication]) &&
-      alltrue([for v in values(azurerm_windows_virtual_machine.sprout) : v.size == "Standard_B2s"])
+      alltrue([for v in values(azurerm_linux_virtual_machine.sprout) : v.size == "Standard_B2ls_v2" && v.disable_password_authentication]) &&
+      alltrue([for v in values(azurerm_windows_virtual_machine.sprout) : v.size == "Standard_B2ls_v2"])
     )
-    error_message = "six sprouts: four Linux B1ms with key-only SSH, two Windows B2s"
+    error_message = "six sprouts: four Linux B2ls_v2 with key-only SSH, two Windows B2ls_v2"
   }
 
   assert {
