@@ -12,8 +12,8 @@
   Property/@Secure. packaging/windows/msi-postprocess.sh (run by
   build-msi.sh) fixes up the built MSI with msibuild: it sets the component
   attributes and the start condition described below, marks START_SERVICE
-  secure, and adds the directory ACL and the service's failure actions as
-  MSI 5.0 tables. Keep the attributes here anyway so a WiX build on Windows
+  secure, and adds the directory ACL as an MSI 5.0 table (the
+  service's restart-on-failure is not in the MSI: see msi-postprocess.sh). Keep the attributes here anyway so a WiX build on Windows
   honours them without the post-process step.
 
   Layout:

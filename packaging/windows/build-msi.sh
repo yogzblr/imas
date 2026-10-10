@@ -14,7 +14,7 @@
 #      at those relative paths next to the rendered .wxs;
 #   3. runs `wixl -a x64` there, then packaging/windows/msi-postprocess.sh on
 #      the result (what wixl can't express: component attributes, the start
-#      condition, the directory ACL and the service failure actions);
+#      condition and the directory ACL);
 #   4. writes OUT/imas-sprout-VERSION-windows-x64.msi, the name the msi pipe
 #      produced, by an atomic rename: on any failure no MSI is left in OUT.
 #

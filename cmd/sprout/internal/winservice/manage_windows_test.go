@@ -189,8 +189,9 @@ func TestStopAndWait(t *testing.T) {
 	})
 }
 
-// The service Install creates must match the MSI's ServiceInstall row and
-// MsiServiceConfigFailureActions table (packaging/windows/).
+// The service Install creates must match the MSI's ServiceInstall row
+// (packaging/windows/); the recovery settings are not in the MSI, see
+// msi-postprocess.sh.
 func TestServiceConfigMatchesMSI(t *testing.T) {
 	c := serviceConfig(Config{Name: "imas-sprout", DisplayName: "imas Sprout", Description: "imas remote control agent"})
 	if c.ServiceType != windows.SERVICE_WIN32_OWN_PROCESS || c.StartType != mgr.StartAutomatic ||
