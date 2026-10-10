@@ -31,7 +31,7 @@
       [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
       $index = Invoke-RestMethod -Uri $IndexUrl -UseBasicParsing
       $base = @($index.resources | Where-Object { "$($_.'@type')" -like 'PackageBaseAddress*' })[0].'@id'
-      if (-not $base) { throw "no PackageBaseAddress in $IndexUrl: is the feed public?" }
+      if (-not $base) { throw "no PackageBaseAddress in ${IndexUrl}: is the feed public?" }
       $base = $base.TrimEnd('/') + '/'
       $id = $PackageId.ToLowerInvariant()
       if (-not $Version) {
