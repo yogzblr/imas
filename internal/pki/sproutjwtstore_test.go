@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -297,6 +298,40 @@ func TestEnrollConcurrentReplicas(t *testing.T) {
 	})
 }
 
+// Concurrent calls on one replica (one owner prefix) still mint once: each
+// call holds the lease under its own token.
+func TestSproutJWTConcurrentCallsOneReplica(t *testing.T) {
+	const n = 8
+	e := newSproutJWTEnv(t)
+	pub := e.accept(t, "t1", "web-1")
+	r := e.replica("replica-a", true)
+	results := make([]string, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results[i], errs[i] = r.mintOrReuse(context.Background(), "t1", "web-1", pub)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	for i := range n {
+		if errs[i] != nil {
+			t.Fatalf("call %d: %v", i, errs[i])
+		}
+		if results[i] != results[0] {
+			t.Fatalf("call %d got a different JWT", i)
+		}
+	}
+	if got := e.signs.Load(); got != 1 {
+		t.Errorf("signer used %d times on one replica, want 1", got)
+	}
+}
+
 // Brief §6 test 2.
 func TestEnrollReplicaKilledMidMint(t *testing.T) {
 	e := newSproutJWTEnv(t)
@@ -319,7 +354,7 @@ func TestEnrollReplicaKilledMidMint(t *testing.T) {
 	if r.UserPubkey != nil || r.ObjectKey != nil {
 		t.Fatalf("A's row was updated although A died before the UPDATE: %+v", r)
 	}
-	if r.LeaseOwner == nil || *r.LeaseOwner != "replica-a" {
+	if r.LeaseOwner == nil || !strings.HasPrefix(*r.LeaseOwner, "replica-a-") {
 		t.Fatalf("A's lease is not left behind: %+v", r)
 	}
 

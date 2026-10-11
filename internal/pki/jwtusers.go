@@ -444,10 +444,12 @@ type sproutJWTStore struct {
 	db      *gorm.DB
 	objects sproutJWTObjects
 	leases  *lease.Leases
-	owner   string
-	issuer  sproutJWTIssuer
-	now     func() time.Time
-	sleep   func(ctx context.Context, d time.Duration) error
+	// owner is this replica's lease owner prefix; each mintOrReuse call
+	// takes the lease under its own token (callOwner).
+	owner  string
+	issuer sproutJWTIssuer
+	now    func() time.Time
+	sleep  func(ctx context.Context, d time.Duration) error
 	// afterPut, if set, runs after the object PUT and before the row
 	// UPDATE. Tests only: an error stands for the replica dying there, so
 	// mintLeased returns it without updating the row or releasing the
@@ -520,6 +522,17 @@ func replicaOwner() string {
 		replicaOwnerID = host + "-" + hex.EncodeToString(b[:])
 	})
 	return replicaOwnerID
+}
+
+// callOwner is the lease owner of one mintOrReuse call: the replica's
+// owner plus a random token. Two calls on one replica must not share an
+// owner, or the second would take the first's lease as its own (Acquire
+// lets the holder re-take it) and both would mint; and a mint outliving
+// its lease could release or overwrite a later one.
+func (s *sproutJWTStore) callOwner() string {
+	var b [6]byte
+	_, _ = rand.Read(b[:])
+	return s.owner + "-" + hex.EncodeToString(b[:])
 }
 
 // defaultSproutJWTStore is the store on the package's database and
@@ -675,6 +688,7 @@ func (s *sproutJWTStore) mintOrReuse(ctx context.Context, tenantID, sproutID, pu
 	perms := sproutPermissions(sproutID)
 	key := []any{tenantID, sproutID}
 
+	owner := s.callOwner()
 	deadline := s.now().Add(sproutJWTPollWait)
 	inserted := false
 	for {
@@ -689,12 +703,12 @@ func (s *sproutJWTStore) mintOrReuse(ctx context.Context, tenantID, sproutID, pu
 			}
 			inserted = true
 		}
-		got, err := s.leases.Acquire(ctx, lease.SproutUserJWT, key, s.owner, sproutJWTLeaseTTL)
+		got, err := s.leases.Acquire(ctx, lease.SproutUserJWT, key, owner, sproutJWTLeaseTTL)
 		if err != nil {
 			return "", fmt.Errorf("pki: taking sprout JWT lease: %w", err)
 		}
 		if got {
-			return s.mintLeased(ctx, tenantID, sproutID, pubkey, perms)
+			return s.mintLeased(ctx, tenantID, sproutID, pubkey, owner, perms)
 		}
 		if !s.now().Before(deadline) {
 			return "", fmt.Errorf("sprout %s in tenant %s: %w", sproutID, tenantID, ErrSproutJWTBusy)
@@ -709,14 +723,14 @@ func (s *sproutJWTStore) mintOrReuse(ctx context.Context, tenantID, sproutID, pu
 // have minted while this one waited), else mints, PUTs and records the
 // JWT. It releases the lease on return, even if ctx was cancelled (the
 // caller went away), so a retry need not wait for lease_until.
-func (s *sproutJWTStore) mintLeased(ctx context.Context, tenantID, sproutID, pubkey string, perms jwt.Permissions) (string, error) {
+func (s *sproutJWTStore) mintLeased(ctx context.Context, tenantID, sproutID, pubkey, owner string, perms jwt.Permissions) (string, error) {
 	key := []any{tenantID, sproutID}
 	died := false
 	defer func() {
 		if died {
 			return
 		}
-		if _, err := s.leases.Release(context.WithoutCancel(ctx), lease.SproutUserJWT, key, s.owner); err != nil {
+		if _, err := s.leases.Release(context.WithoutCancel(ctx), lease.SproutUserJWT, key, owner); err != nil {
 			log.Debugf("pki: releasing sprout JWT lease for %s in tenant %s: %v", sproutID, tenantID, err)
 		}
 	}()
@@ -748,7 +762,7 @@ func (s *sproutJWTStore) mintLeased(ctx context.Context, tenantID, sproutID, pub
 		}
 	}
 	r := s.db.WithContext(ctx).Model(&sproutUserJWTRow{}).
-		Where("tenant_id = ? AND sprout_id = ? AND lease_owner = ?", tenantID, sproutID, s.owner).
+		Where("tenant_id = ? AND sprout_id = ? AND lease_owner = ?", tenantID, sproutID, owner).
 		UpdateColumns(map[string]any{
 			"object_key":  objKey,
 			"user_pubkey": pubkey,
