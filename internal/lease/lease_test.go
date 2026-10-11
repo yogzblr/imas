@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -361,5 +362,49 @@ func TestDefaultClock(t *testing.T) {
 	got := readJob(t, gdb, "j")
 	if got.Until == nil || got.Until.Before(before.Add(time.Minute).Add(-time.Millisecond)) {
 		t.Fatalf("lease_until = %v, want about now+1m", got.Until)
+	}
+}
+
+// MySQL counts changed rows, so an UPDATE writing the values a row already
+// holds reports zero rows. sqlite counts matched rows and never does, so
+// this forces RowsAffected to 0 after every UPDATE: Acquire and Renew must
+// then decide from the row itself, holding only what this owner wrote.
+func TestZeroChangedRowsFallsBackToReadingTheRow(t *testing.T) {
+	gdb := openTestDB(t)
+	var zero atomic.Bool
+	if err := gdb.Callback().Update().After("gorm:update").Register("lease_test:zero_rows", func(d *gorm.DB) {
+		if zero.Load() {
+			d.RowsAffected = 0
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clk := newFakeClock()
+	ctx := context.Background()
+	seedJob(t, gdb, "j")
+	l := New(gdb, clk.Now)
+	key := []any{"j"}
+
+	ok, err := l.Acquire(ctx, JobLeases, key, "a", time.Minute)
+	mustBool(t, ok, err, true, "A acquires")
+	zero.Store(true)
+
+	ok, err = l.Acquire(ctx, JobLeases, key, "a", time.Minute)
+	mustBool(t, ok, err, true, "A re-acquires, zero rows reported")
+	ok, err = l.Renew(ctx, JobLeases, key, "a", time.Minute)
+	mustBool(t, ok, err, true, "A renews, zero rows reported")
+	clk.Advance(10 * time.Second)
+	ok, err = l.Renew(ctx, JobLeases, key, "a", time.Minute)
+	mustBool(t, ok, err, true, "A renews later, zero rows reported")
+	if got := readJob(t, gdb, "j"); !got.Until.Equal(clk.Now().Add(time.Minute)) {
+		t.Fatalf("lease_until = %v, want %v", got.Until, clk.Now().Add(time.Minute))
+	}
+
+	ok, err = l.Acquire(ctx, JobLeases, key, "b", time.Minute)
+	mustBool(t, ok, err, false, "B acquires A's live lease, zero rows reported")
+	ok, err = l.Renew(ctx, JobLeases, key, "b", time.Minute)
+	mustBool(t, ok, err, false, "B renews A's lease, zero rows reported")
+	if got := readJob(t, gdb, "j"); got.Owner == nil || *got.Owner != "a" {
+		t.Fatalf("owner = %v, want a", got.Owner)
 	}
 }
