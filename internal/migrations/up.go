@@ -62,7 +62,7 @@ func Up(ctx context.Context, db *sql.DB, s Set, logf func(format string, args ..
 	for _, r := range results {
 		if r.Error == nil {
 			res.Applied = append(res.Applied, r.Source.Version)
-			res.To = r.Source.Version
+			res.To = max(res.To, r.Source.Version) // an out-of-order version is below From
 			logf("%s: applied %s in %s", s.name, r.Source.Path, r.Duration)
 		}
 	}

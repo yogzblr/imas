@@ -37,9 +37,9 @@ var jobLeasesColumns = map[string]string{
 var sproutJWTColumns = map[string]string{
 	"tenant_id":   "varchar(64) null=NO",
 	"sprout_id":   "varchar(253) null=NO",
-	"object_key":  "varchar(512) null=NO",
-	"user_pubkey": "varchar(64) null=NO",
-	"jwt_sha256":  "char(64) null=NO",
+	"object_key":  "varchar(512) null=YES",
+	"user_pubkey": "varchar(64) null=YES",
+	"jwt_sha256":  "char(64) null=YES",
 	"expires_at":  "datetime(3) null=YES",
 	"lease_owner": "varchar(128) null=YES",
 	"lease_until": "datetime(3) null=YES",
@@ -273,10 +273,40 @@ func TestMySQLSproutUserJWT(t *testing.T) {
 		t.Errorf("longest sprout ID and object key: %v", err)
 	}
 
+	// A new sprout's first mint (brief §4.2 step 2): the row is inserted
+	// with its key only, before the JWT exists, then the lease is taken
+	// with one conditional UPDATE. Two replicas: both inserts succeed (the
+	// second is ignored), one lease wins.
+	for range 2 {
+		if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO sprout_user_jwt (tenant_id, sprout_id) VALUES ('t_a', 'new')"); err != nil {
+			t.Fatalf("pending row: %v", err)
+		}
+	}
+	const acquire = `UPDATE sprout_user_jwt SET lease_owner = ?, lease_until = NOW(3) + INTERVAL 30 SECOND
+		WHERE tenant_id = 't_a' AND sprout_id = 'new' AND (lease_owner IS NULL OR lease_until < NOW(3) OR lease_owner = ?)`
+	for _, c := range []struct {
+		owner string
+		want  int64
+	}{{"replica-a", 1}, {"replica-b", 0}} {
+		r, err := db.ExecContext(ctx, acquire, c.owner, c.owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n, _ := r.RowsAffected(); n != c.want {
+			t.Errorf("%s taking the mint lease: %d rows, want %d", c.owner, n, c.want)
+		}
+	}
+	var pub sql.NullString
+	var updated sql.NullTime
+	if err := db.QueryRowContext(ctx, "SELECT user_pubkey, updated_at FROM sprout_user_jwt WHERE tenant_id = 't_a' AND sprout_id = 'new'").Scan(&pub, &updated); err != nil ||
+		pub.Valid || !updated.Valid {
+		t.Errorf("pending row: user_pubkey %v, updated_at %v, %v; want NULL and set", pub, updated, err)
+	}
+
 	reRunFrom(t, db, 5)
 	checkColumns(t, db, "after a re-run", "sprout_user_jwt", sproutJWTColumns, "tenant_id", "sprout_id")
 	var n int
-	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sprout_user_jwt").Scan(&n); err != nil || n != 3 {
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sprout_user_jwt").Scan(&n); err != nil || n != 4 {
 		t.Fatalf("rows after a re-run: %d, %v", n, err)
 	}
 }

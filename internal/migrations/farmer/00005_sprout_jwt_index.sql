@@ -15,7 +15,11 @@
 --
 -- lease_owner and lease_until are the row lease that serialises minting
 -- across farmer replicas: a replica inserts the row if missing and takes
--- the lease with one conditional UPDATE, as for job_leases (00004).
+-- the lease with one conditional UPDATE, as for job_leases (00004). So a
+-- sprout's first row is inserted before its JWT exists, with only
+-- (tenant_id, sprout_id): object_key, user_pubkey and jwt_sha256 are NULL
+-- until the first mint, and updated_at defaults to the insert time. A NULL
+-- user_pubkey matches no key, so a pending row is never reused as a JWT.
 --
 -- sprout_id is varchar(253), as in pki_nkeys (00001): that is the longest
 -- sprout ID farmer accepts (internal/pki maxSproutIDLen). object_key is
@@ -29,12 +33,12 @@
 CREATE TABLE IF NOT EXISTS `sprout_user_jwt` (
   `tenant_id` varchar(64) NOT NULL,
   `sprout_id` varchar(253) NOT NULL,
-  `object_key` varchar(512) NOT NULL,
-  `user_pubkey` varchar(64) NOT NULL,
-  `jwt_sha256` char(64) NOT NULL,
+  `object_key` varchar(512) DEFAULT NULL,
+  `user_pubkey` varchar(64) DEFAULT NULL,
+  `jwt_sha256` char(64) DEFAULT NULL,
   `expires_at` datetime(3) DEFAULT NULL,
   `lease_owner` varchar(128) DEFAULT NULL,
   `lease_until` datetime(3) DEFAULT NULL,
-  `updated_at` datetime(3) NOT NULL,
+  `updated_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   PRIMARY KEY (`tenant_id`,`sprout_id`)
 ) ENGINE=InnoDB;

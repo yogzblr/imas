@@ -713,8 +713,8 @@ func TestMySQLOutOfOrderVersionApplied(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := Up(ctx, db, after, t.Logf)
-	if err != nil || !slices.Equal(res.Applied, []int64{2}) {
-		t.Fatalf("out-of-order run: %+v, %v", res, err)
+	if err != nil || !slices.Equal(res.Applied, []int64{2}) || res.From != 3 || res.To != 3 {
+		t.Fatalf("out-of-order run: %+v, %v; want 2 applied, From and To 3", res, err)
 	}
 	var n int
 	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'b'").Scan(&n); err != nil || n != 1 {
