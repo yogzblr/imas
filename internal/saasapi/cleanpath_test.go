@@ -126,9 +126,7 @@ func TestRejectUncleanPathsKeepsTenant(t *testing.T) {
 
 func TestOperatorHandlerRejectsUncleanPaths(t *testing.T) {
 	gdb := newFleetTestDB(t)
-	withTestFleetKeys(t)
-	signer := &fakeSigner{}
-	p := &operatorPlane{tokens: [][]byte{[]byte(testOperatorToken)}, signer: signer}
+	p := &operatorPlane{tokens: [][]byte{[]byte(testOperatorToken)}}
 	h := p.handler()
 
 	body := releaseBody("v2.4.1", "v2.0.0", debPkg("amd64", sumA))
@@ -143,8 +141,8 @@ func TestOperatorHandlerRejectsUncleanPaths(t *testing.T) {
 			t.Errorf("POST %s = %d %v, want 400 invalid_request", path, code, resp)
 		}
 	}
-	if signer.n() != 0 || countRows(t, gdb) != 0 {
-		t.Fatalf("unclean paths: %d signing call(s), %d row(s)", signer.n(), countRows(t, gdb))
+	if countRows(t, gdb) != 0 {
+		t.Fatalf("unclean paths: %d row(s)", countRows(t, gdb))
 	}
 
 	// The canonical route still works through the guard.

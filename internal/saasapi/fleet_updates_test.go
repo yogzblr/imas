@@ -23,6 +23,9 @@ func newFleetTestDB(t *testing.T) *gorm.DB {
 		if err := gdb.Where("1 = 1").Delete(&FleetVersion{}).Error; err != nil {
 			t.Fatalf("clearing fleet_versions: %v", err)
 		}
+		if err := gdb.Where("1 = 1").Delete(&FleetReleaseChecksums{}).Error; err != nil {
+			t.Fatalf("clearing fleet_release_checksums: %v", err)
+		}
 	}
 	empty()
 	t.Cleanup(empty)
@@ -34,8 +37,8 @@ func mustPublishVersion(t *testing.T, gdb *gorm.DB, version string, releasedAt t
 	return mustPublishVersionFor(t, gdb, version, "linux", "amd64", releasedAt)
 }
 
-// mustPublishVersionFor registers version's package for osName/arch, signed
-// with the test fleet key, as the operator plane would.
+// mustPublishVersionFor registers version's package for osName/arch, as the
+// operator plane would.
 func mustPublishVersionFor(t *testing.T, gdb *gorm.DB, version, osName, arch string, releasedAt time.Time) FleetVersion {
 	t.Helper()
 	id, err := newID("fv_")
@@ -58,7 +61,6 @@ func mustPublishVersionFor(t *testing.T, gdb *gorm.DB, version, osName, arch str
 		ReleasedAt:       releasedAt.UTC(),
 		Notes:            "notes for " + version,
 	}
-	v.Signature = signTestRelease(t, v)
 	if err := gdb.Create(&v).Error; err != nil {
 		t.Fatalf("publishing %s %s/%s: %v", version, osName, arch, err)
 	}

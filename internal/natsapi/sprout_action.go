@@ -39,17 +39,15 @@ package natsapi
 //
 // self_update (design doc §1.8, §2.3, §2.5) adds a third check before
 // dispatch (checkSelfUpdateRelease): the request names only a version,
-// and farmer re-verifies it against the release catalog it reads
+// and farmer checks it again against the release catalog it reads
 // read-only (internal/fleetcatalog). The version must be the sprout's
-// tenant's approved_version, registered and not revoked, and every row of
-// it must verify against the imas-fleet-signing public key farmer reads
-// from OpenBao Transit with its READ-ONLY token (SetFleetKeySource). The
-// SaaS API checked it too, but it can also write saas.fleet_versions, so
-// farmer doesn't take its word for it. A version that passes goes to the
-// sprout as a one-step cook job (the selfupdate ingredient) carrying only
-// the version, over the same tenant connection; the sprout fetches its
-// own signed row from farmer and verifies it again, against the keyring
-// shipped in its package.
+// tenant's approved_version, registered and not revoked. The SaaS API
+// checked it too, but farmer doesn't take its word for it. A version that
+// passes goes to the sprout as a one-step cook job (the selfupdate
+// ingredient) carrying only the version, over the same tenant connection;
+// the sprout fetches its own manifest from farmer and verifies the
+// release's signed checksums.txt against the keyring shipped in its
+// package — the only signature check (signing design D20).
 //
 // Security review 2026-10 (SEC.5) added, for self_update: farmer's own
 // switch, IMAS_SELF_UPDATE_ENABLED (default false; L1), checked before
@@ -97,17 +95,8 @@ var (
 	requireSproutBoxKey  = cook.RequireSproutBoxKey
 )
 
-// fleetKeys is the imas-fleet-signing public key source self_update
-// verifies releases against, set once at startup by SetFleetKeySource
-// (cmd/farmer). While it's nil every self_update is refused.
-var fleetKeys fleetsign.KeySetSource
-
-// SetFleetKeySource installs the read-only key source self_update
-// verifies release signatures against.
-func SetFleetKeySource(src fleetsign.KeySetSource) { fleetKeys = src }
-
-// selfUpdateVerifyTimeout bounds the catalog and Transit key reads behind
-// a self_update check (keys normally served from the source's cache).
+// selfUpdateVerifyTimeout bounds the catalog reads behind a self_update
+// check.
 const selfUpdateVerifyTimeout = 15 * time.Second
 
 const auditActionSproutAction = controlplane.SubjectSproutAction
@@ -643,27 +632,23 @@ func runSproutSelfUpdate(req controlplane.SproutActionRequest, reply controlplan
 // maxSelfUpdateVersionLen matches saas.fleet_versions.version.
 const maxSelfUpdateVersionLen = 64
 
-// checkSelfUpdateRelease re-verifies version against the release catalog
+// checkSelfUpdateRelease checks version against the release catalog
 // farmer reads read-only (internal/fleetcatalog: saas.fleet_versions and
 // saas.tenant_update_policy) before anything reaches a sprout of
-// tenantID. saasapi checked the same, but it can also write those tables,
-// so farmer doesn't take its word for it. version must be:
+// tenantID. saasapi checked the same, but farmer doesn't take its word
+// for it. version must be:
 //
 //   - canonical semver;
 //   - tenantID's approved_version;
 //   - registered (at least one row), and not revoked (no row revoked);
-//   - signed: EVERY row of it verifies against the imas-fleet-signing key
-//     set farmer reads from OpenBao Transit with its READ-ONLY token
-//     (SetFleetKeySource). One bad row refuses the whole version, though
-//     this sprout would fetch only its own OS/arch row: a version with a
-//     forged row is not a release CloudXP signed;
 //   - inside the tenant's rollout window now, if its policy sets one
 //     (rollout_window_closed otherwise), as saasapi's policyRefusal checks
 //     it (checkRolloutWindow).
 //
-// The sprout then fetches and verifies its own row a third time, against
-// the keyring shipped in its package. A refusal is invalid_request; a
-// catalog or key read that fails is internal_error.
+// No signature is checked here: the sprout fetches its own manifest and
+// verifies the release's signed checksums.txt against the keyring shipped
+// in its package (D20). A refusal is invalid_request; a catalog read that
+// fails is internal_error.
 func checkSelfUpdateRelease(ctx context.Context, tenantID, version string) (controlplane.ErrorCode, error) {
 	refuse := func(format string, args ...any) (controlplane.ErrorCode, error) {
 		return controlplane.ErrorInvalidRequest, fmt.Errorf("%w: self_update %s for tenant %q refused: %s",
@@ -675,10 +660,6 @@ func checkSelfUpdateRelease(ctx context.Context, tenantID, version string) (cont
 	cat := fleetcatalog.Current()
 	if cat == nil {
 		return controlplane.ErrorInternal, errors.New("self_update refused: no release catalog configured (farmer has no PXC handle)")
-	}
-	src := fleetKeys
-	if src == nil {
-		return controlplane.ErrorInternal, errors.New("self_update refused: no fleet signing key source configured (IMAS_FLEETSIGN_OPENBAO_*)")
 	}
 
 	approved, ok, err := cat.ApprovedVersion(ctx, tenantID)
@@ -698,21 +679,13 @@ func checkSelfUpdateRelease(ctx context.Context, tenantID, version string) (cont
 	if len(rows) == 0 {
 		return refuse("not registered in saas.fleet_versions")
 	}
-	ks, err := src.KeySet(ctx)
-	if err != nil {
-		return controlplane.ErrorInternal, fmt.Errorf("self_update refused: reading fleet signing keys: %w", err)
-	}
 	for _, row := range rows {
-		m := row.Manifest
-		key := m.OS + "/" + m.Arch + "/" + row.PackageType
+		key := row.OS + "/" + row.Arch + "/" + row.PackageType
 		switch {
 		case row.Revoked:
 			return refuse("revoked (row %s)", key)
-		case m.Version != version:
-			return refuse("catalog returned a row for %s", m.Version)
-		}
-		if err := ks.Verify(m); err != nil {
-			return refuse("row %s does not verify: %v", key, err)
+		case row.Version != version:
+			return refuse("catalog returned a row for %s", row.Version)
 		}
 	}
 	return "", nil

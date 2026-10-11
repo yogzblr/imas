@@ -2,8 +2,7 @@ package handlers
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -17,68 +16,43 @@ import (
 
 // --- fixtures ---
 
-// staticFleetKeys is a fleetsign.KeySetSource over a fixed key set,
-// standing in for farmer's read-only Transit client (internal/fleetsign's
-// own tests cover that client).
-type staticFleetKeys struct {
-	ks  fleetsign.KeySet
-	err error
-}
-
-func (s staticFleetKeys) KeySet(context.Context) (fleetsign.KeySet, error) { return s.ks, s.err }
-
-// installFleetKey installs a fresh imas-fleet-signing stand-in as the
-// fleet key source (staticFleetKeys) and returns its private half.
-func installFleetKey(t *testing.T) ed25519.PrivateKey {
+// wireManifest is a well-formed manifest for version on os/arch as a
+// .deb, as fleetcatalog.SQL would return it: the release's checksums.txt
+// and a base64 signature. Farmer never verifies the signature, so any
+// bytes do.
+func wireManifest(t *testing.T, version, os, arch string) fleetsign.Manifest {
 	t.Helper()
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	name, err := fleetsign.ExpectedFileName(version, os, arch, "deb")
 	if err != nil {
 		t.Fatal(err)
 	}
-	ks, err := fleetsign.NewKeySet([]fleetsign.PublicKey{{Version: 1, Key: pub}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	orig := fleetKeySource
-	SetFleetKeySource(staticFleetKeys{ks: ks})
-	t.Cleanup(func() { SetFleetKeySource(orig) })
-	return priv
-}
-
-func signedManifest(t *testing.T, priv ed25519.PrivateKey, version, os, arch string) fleetsign.LegacyManifest {
-	t.Helper()
-	m := fleetsign.LegacyManifest{
+	return fleetsign.Manifest{
 		Version:          version,
 		OS:               os,
 		Arch:             arch,
-		FileName:         "imas-sprout_" + strings.TrimPrefix(version, "v") + "_" + os + "_" + arch + ".deb",
-		ChecksumSHA256:   strings.Repeat("ab", 32),
+		PackageType:      "deb",
 		MinSproutVersion: "v1.0.0",
+		ChecksumsTxt:     strings.Repeat("ab", 32) + "  " + name + "\n",
+		ChecksumsSig:     base64.StdEncoding.EncodeToString([]byte("detached signature bytes")),
 	}
-	msg, err := m.Message()
-	if err != nil {
-		t.Fatal(err)
-	}
-	m.Signature = fleetsign.EncodeSignature(1, ed25519.Sign(priv, msg))
-	return m
 }
 
 // fakeManifestStore answers from rows keyed the same way the SQL does:
 // tenant approval first, then (version, os, arch, package_type).
 type fakeManifestStore struct {
 	approved map[string]string // tenant_id -> approved_version
-	rows     map[[4]string]fleetsign.LegacyManifest
+	rows     map[[4]string]fleetsign.Manifest
 	err      error
 	calls    int
 }
 
-func (f *fakeManifestStore) ApprovedManifest(_ context.Context, tenantID, os, arch, packageType, version string) (fleetsign.LegacyManifest, bool, error) {
+func (f *fakeManifestStore) ApprovedManifest(_ context.Context, tenantID, os, arch, packageType, version string) (fleetsign.Manifest, bool, error) {
 	f.calls++
 	if f.err != nil {
-		return fleetsign.LegacyManifest{}, false, f.err
+		return fleetsign.Manifest{}, false, f.err
 	}
 	if f.approved[tenantID] != version {
-		return fleetsign.LegacyManifest{}, false, nil
+		return fleetsign.Manifest{}, false, nil
 	}
 	m, ok := f.rows[[4]string{version, os, arch, packageType}]
 	return m, ok, nil
@@ -107,12 +81,11 @@ const acmeQuery = "os=linux&arch=amd64&package_type=deb&version=v2.4.1"
 
 // --- handler ---
 
-func TestUpdateManifest_ServesApprovedSignedRow(t *testing.T) {
-	priv := installFleetKey(t)
-	want := signedManifest(t, priv, "v2.4.1", "linux", "amd64")
+func TestUpdateManifest_ServesApprovedRelease(t *testing.T) {
+	want := wireManifest(t, "v2.4.1", "linux", "amd64")
 	installStore(t, &fakeManifestStore{
 		approved: map[string]string{"t_acme": "v2.4.1"},
-		rows:     map[[4]string]fleetsign.LegacyManifest{{"v2.4.1", "linux", "amd64", "deb"}: want},
+		rows:     map[[4]string]fleetsign.Manifest{{"v2.4.1", "linux", "amd64", "deb"}: want},
 	})
 
 	rec := manifestRequest(t, &acmeWeb01, acmeQuery)
@@ -122,23 +95,37 @@ func TestUpdateManifest_ServesApprovedSignedRow(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
 		t.Errorf("Content-Type %q", ct)
 	}
-	// fleetsign.LegacyParseManifest refuses any field beyond the seven signed
-	// ones, so this is also the "no URL, nothing unsigned" check.
-	got, err := fleetsign.LegacyParseManifest(rec.Body.Bytes())
+	// fleetsign.ParseManifest refuses any key beyond the wire contract's
+	// seven, so this is also the "no URL, no file name" check.
+	got, err := fleetsign.ParseManifest(rec.Body.Bytes())
 	if err != nil {
 		t.Fatalf("response is not a strict manifest: %v\n%s", err, rec.Body)
 	}
-	if got != want {
+	if got.Version != want.Version || got.OS != want.OS || got.Arch != want.Arch || got.PackageType != want.PackageType ||
+		got.MinSproutVersion != want.MinSproutVersion || got.ChecksumsTxt != want.ChecksumsTxt || got.ChecksumsSig != want.ChecksumsSig {
 		t.Errorf("got %+v, want %+v", got, want)
+	}
+	var keys map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &keys); err != nil {
+		t.Fatal(err)
+	}
+	wantKeys := []string{"version", "os", "arch", "package_type", "min_sprout_version", "checksums_txt", "checksums_sig"}
+	if len(keys) != len(wantKeys) {
+		t.Errorf("response has %d keys, want exactly %v: %s", len(keys), wantKeys, rec.Body)
+	}
+	for _, k := range wantKeys {
+		if _, ok := keys[k]; !ok {
+			t.Errorf("response lacks %q: %s", k, rec.Body)
+		}
 	}
 	assertNoURL(t, rec.Body.Bytes())
 }
 
 // assertNoURL fails if a manifest response carries a URL (requirements
 // item 20, API design §1.8). It checks the JSON keys and the string values
-// except signature and checksum_sha256: those are random base64 and hex,
-// which can spell "url" or "http" by chance. "://" can never appear in
-// either encoding, so the whole body is also checked for it.
+// except checksums_sig: it is random base64, which can spell "url" or
+// "http" by chance. "://" can never appear in base64, so the whole body is
+// also checked for it.
 func assertNoURL(t *testing.T, body []byte) {
 	t.Helper()
 	if strings.Contains(string(body), "://") {
@@ -156,7 +143,7 @@ func assertNoURL(t *testing.T, body []byte) {
 		if mentionsURL(k) {
 			t.Errorf("response has a URL-like key %q: %s", k, body)
 		}
-		if k == "signature" || k == "checksum_sha256" {
+		if k == "checksums_sig" {
 			continue
 		}
 		if s, ok := v.(string); ok && mentionsURL(s) {
@@ -165,48 +152,41 @@ func assertNoURL(t *testing.T, body []byte) {
 	}
 }
 
-// TestUpdateManifest_RefusesRowsThatFailChecks: a row the store returns
-// is still not served unless it is well-formed, matches the request and
-// carries a signature that verifies. Each refusal is the generic 404.
+// TestUpdateManifest_RefusesRowsThatFailChecks: a manifest the store
+// returns is still not served unless it matches the request and is well
+// formed. Each refusal is the generic 404. Farmer verifies no signature
+// (D20), so a manifest with a bad one is the sprout's to refuse.
 func TestUpdateManifest_RefusesRowsThatFailChecks(t *testing.T) {
-	priv := installFleetKey(t)
-	_, otherPriv, _ := ed25519.GenerateKey(rand.Reader)
-
-	good := signedManifest(t, priv, "v2.4.1", "linux", "amd64")
-	unsigned := good
-	unsigned.Signature = ""
-	tampered := good
-	tampered.ChecksumSHA256 = strings.Repeat("cd", 32)
-	wrongKey := signedManifest(t, otherPriv, "v2.4.1", "linux", "amd64")
-	wrongArch := signedManifest(t, priv, "v2.4.1", "linux", "arm64")
-	invalid := good
-	invalid.FileName = "../evil"
-	// Signed and otherwise valid, but an .rpm stored under package_type
-	// deb: package_type isn't signed, so the file name must agree with it.
-	rpmAsDeb := good
-	rpmAsDeb.FileName = "imas-sprout_2.4.1_linux_amd64.rpm"
-	if msg, err := rpmAsDeb.Message(); err == nil {
-		rpmAsDeb.Signature = fleetsign.EncodeSignature(1, ed25519.Sign(priv, msg))
-	}
-
-	for name, row := range map[string]fleetsign.LegacyManifest{
-		"unsigned":                     unsigned,
-		"tampered checksum":            tampered,
-		"signed by another key":        wrongKey,
-		"row for another arch":         wrongArch,
-		"invalid field":                invalid,
-		"file of another package type": rpmAsDeb,
-		"malformed signature form":     func() fleetsign.LegacyManifest { m := good; m.Signature = "garbage"; return m }(),
+	good := wireManifest(t, "v2.4.1", "linux", "amd64")
+	with := func(f func(*fleetsign.Manifest)) fleetsign.Manifest { m := good; f(&m); return m }
+	for name, row := range map[string]fleetsign.Manifest{
+		"row for another arch":        wireManifest(t, "v2.4.1", "linux", "arm64"),
+		"row for another version":     wireManifest(t, "v2.4.2", "linux", "amd64"),
+		"row of another package type": with(func(m *fleetsign.Manifest) { m.PackageType = "rpm" }),
+		"no checksums":                with(func(m *fleetsign.Manifest) { m.ChecksumsTxt = "" }),
+		"no signature":                with(func(m *fleetsign.Manifest) { m.ChecksumsSig = "" }),
+		"signature not base64":        with(func(m *fleetsign.Manifest) { m.ChecksumsSig = "not base64!" }),
+		"min_sprout_version above":    with(func(m *fleetsign.Manifest) { m.MinSproutVersion = "v9.0.0" }),
+		"oversize checksums":          with(func(m *fleetsign.Manifest) { m.ChecksumsTxt = strings.Repeat("a", fleetsign.MaxChecksumsTxt+1) }),
+		"invalid min_sprout_version":  with(func(m *fleetsign.Manifest) { m.MinSproutVersion = "1.0" }),
 	} {
 		t.Run(name, func(t *testing.T) {
 			installStore(t, &fakeManifestStore{
 				approved: map[string]string{"t_acme": "v2.4.1"},
-				rows:     map[[4]string]fleetsign.LegacyManifest{{"v2.4.1", "linux", "amd64", "deb"}: row},
+				rows:     map[[4]string]fleetsign.Manifest{{"v2.4.1", "linux", "amd64", "deb"}: row},
 			})
 			rec := manifestRequest(t, &acmeWeb01, acmeQuery)
 			assertGenericNotFound(t, rec)
 		})
 	}
+}
+
+// TestUpdateManifest_CatalogMissIsNotFound: no row (another tenant's
+// approval, an unknown version, a version without checksums) is the
+// generic 404.
+func TestUpdateManifest_CatalogMissIsNotFound(t *testing.T) {
+	installStore(t, &fakeManifestStore{approved: map[string]string{"t_acme": "v2.4.1"}})
+	assertGenericNotFound(t, manifestRequest(t, &acmeWeb01, acmeQuery))
 }
 
 func assertGenericNotFound(t *testing.T, rec *httptest.ResponseRecorder) {
@@ -220,10 +200,9 @@ func assertGenericNotFound(t *testing.T, rec *httptest.ResponseRecorder) {
 }
 
 func TestUpdateManifest_UnavailableIsNotCached(t *testing.T) {
-	priv := installFleetKey(t)
 	store := &fakeManifestStore{
 		approved: map[string]string{"t_acme": "v2.4.1"},
-		rows:     map[[4]string]fleetsign.LegacyManifest{{"v2.4.1", "linux", "amd64", "deb"}: signedManifest(t, priv, "v2.4.1", "linux", "amd64")},
+		rows:     map[[4]string]fleetsign.Manifest{{"v2.4.1", "linux", "amd64", "deb"}: wireManifest(t, "v2.4.1", "linux", "amd64")},
 		err:      errors.New("pxc down"),
 	}
 	installStore(t, store)
@@ -237,40 +216,14 @@ func TestUpdateManifest_UnavailableIsNotCached(t *testing.T) {
 	}
 }
 
-func TestUpdateManifest_FailsClosedWithoutStoreOrKeys(t *testing.T) {
-	t.Run("no store", func(t *testing.T) {
-		installFleetKey(t)
-		installStore(t, nil)
-		if rec := manifestRequest(t, &acmeWeb01, acmeQuery); rec.Code != http.StatusServiceUnavailable {
-			t.Errorf("got %d, want 503", rec.Code)
-		}
-	})
-	t.Run("no fleet key source", func(t *testing.T) {
-		priv := installFleetKey(t)
-		installStore(t, &fakeManifestStore{
-			approved: map[string]string{"t_acme": "v2.4.1"},
-			rows:     map[[4]string]fleetsign.LegacyManifest{{"v2.4.1", "linux", "amd64", "deb"}: signedManifest(t, priv, "v2.4.1", "linux", "amd64")},
-		})
-		SetFleetKeySource(nil)
-		if rec := manifestRequest(t, &acmeWeb01, acmeQuery); rec.Code != http.StatusServiceUnavailable {
-			t.Errorf("got %d, want 503 (never served unverified)", rec.Code)
-		}
-	})
-	t.Run("key set unavailable", func(t *testing.T) {
-		priv := installFleetKey(t)
-		installStore(t, &fakeManifestStore{
-			approved: map[string]string{"t_acme": "v2.4.1"},
-			rows:     map[[4]string]fleetsign.LegacyManifest{{"v2.4.1", "linux", "amd64", "deb"}: signedManifest(t, priv, "v2.4.1", "linux", "amd64")},
-		})
-		SetFleetKeySource(staticFleetKeys{err: errors.New("transit down")})
-		if rec := manifestRequest(t, &acmeWeb01, acmeQuery); rec.Code != http.StatusServiceUnavailable {
-			t.Errorf("got %d, want 503", rec.Code)
-		}
-	})
+func TestUpdateManifest_FailsClosedWithoutStore(t *testing.T) {
+	installStore(t, nil)
+	if rec := manifestRequest(t, &acmeWeb01, acmeQuery); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("got %d, want 503", rec.Code)
+	}
 }
 
 func TestUpdateManifest_RequiresIdentity(t *testing.T) {
-	installFleetKey(t)
 	installStore(t, &fakeManifestStore{})
 	for name, id := range map[string]*SproutIdentity{
 		"none":           nil,
@@ -287,7 +240,6 @@ func TestUpdateManifest_RequiresIdentity(t *testing.T) {
 }
 
 func TestUpdateManifest_BadQuery(t *testing.T) {
-	installFleetKey(t)
 	store := &fakeManifestStore{}
 	installStore(t, store)
 	for _, q := range []string{
@@ -324,11 +276,10 @@ func TestUpdateManifest_BadQuery(t *testing.T) {
 }
 
 func TestUpdateManifest_CachesPerTenant(t *testing.T) {
-	priv := installFleetKey(t)
-	row := signedManifest(t, priv, "v2.4.1", "linux", "amd64")
+	row := wireManifest(t, "v2.4.1", "linux", "amd64")
 	store := &fakeManifestStore{
 		approved: map[string]string{"t_acme": "v2.4.1"},
-		rows:     map[[4]string]fleetsign.LegacyManifest{{"v2.4.1", "linux", "amd64", "deb"}: row},
+		rows:     map[[4]string]fleetsign.Manifest{{"v2.4.1", "linux", "amd64", "deb"}: row},
 	}
 	installStore(t, store)
 
@@ -356,7 +307,7 @@ func TestManifestCache_ExpiryAndBound(t *testing.T) {
 	c := &manifestCache{}
 	now := time.Now()
 	k := manifestCacheKey{tenantID: "t_acme", os: "linux", arch: "amd64", version: "v2.4.1"}
-	m := fleetsign.LegacyManifest{Version: "v2.4.1"}
+	m := fleetsign.Manifest{Version: "v2.4.1"}
 
 	c.put(k, m, true, now)
 	if _, found, ok := c.get(k, now.Add(manifestCacheTTL-time.Second)); !ok || !found {
@@ -365,7 +316,7 @@ func TestManifestCache_ExpiryAndBound(t *testing.T) {
 	if _, _, ok := c.get(k, now.Add(manifestCacheTTL)); ok {
 		t.Error("positive entry served at its TTL")
 	}
-	c.put(k, fleetsign.LegacyManifest{}, false, now)
+	c.put(k, fleetsign.Manifest{}, false, now)
 	if _, _, ok := c.get(k, now.Add(manifestNegativeCacheTTL)); ok {
 		t.Error("negative entry served at its TTL")
 	}
@@ -429,10 +380,9 @@ func TestSproutLimiter_EvictsIdleBuckets(t *testing.T) {
 }
 
 func TestUpdateManifest_RateLimited(t *testing.T) {
-	priv := installFleetKey(t)
 	store := &fakeManifestStore{
 		approved: map[string]string{"t_acme": "v2.4.1"},
-		rows:     map[[4]string]fleetsign.LegacyManifest{{"v2.4.1", "linux", "amd64", "deb"}: signedManifest(t, priv, "v2.4.1", "linux", "amd64")},
+		rows:     map[[4]string]fleetsign.Manifest{{"v2.4.1", "linux", "amd64", "deb"}: wireManifest(t, "v2.4.1", "linux", "amd64")},
 	}
 	installStore(t, store)
 

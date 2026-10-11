@@ -2,11 +2,10 @@
 // official Go client, github.com/openbao/openbao/api/v2 (MPL-2.0, used
 // unmodified; accepted by docs/design/requirements.md item 21).
 //
-// Every farmer, saasapi and fleetreleaser OpenBao identity (TLS issuance
-// in internal/certs, tenant box keys in internal/pki, the gateway signer
-// in internal/gatewayjwt, the read-only fleet key in internal/fleetsign,
-// the KV writer in internal/openbaokv, and cmd/fleetreleaser's signer)
-// is configured from its own IMAS_<NAME>_OPENBAO_* environment block and
+// Every farmer and saasapi OpenBao identity (TLS issuance in
+// internal/certs, tenant box keys in internal/pki, the gateway signer in
+// internal/gatewayjwt, and the KV writer in internal/openbaokv) is
+// configured from its own IMAS_<NAME>_OPENBAO_* environment block and
 // built here, so they share one implementation of:
 //
 //   - the client itself: built from api.NewConfig, which ignores every

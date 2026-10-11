@@ -239,9 +239,6 @@ func TestSweepRollouts_RecheckedBeforeResumedWave(t *testing.T) {
 		{"no longer registered", func(f rolloutFixture) {
 			f.gdb.Where("version = ?", "v2.4.1").Delete(&FleetVersion{})
 		}, errCodeRolloutHalted},
-		{"signature no longer verifies", func(f rolloutFixture) {
-			f.gdb.Model(&FleetVersion{}).Where("version = ?", "v2.4.1").Update("checksum_sha256", "ab"+fmt.Sprintf("%062d", 0))
-		}, errCodeRolloutHalted},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRolloutFixture(t, 2)

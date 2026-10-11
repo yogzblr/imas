@@ -3,8 +3,12 @@
 // hook Job using farmer's own image, that registers the sprout release the
 // chart carries with saasapi's operator plane
 // (POST /v1/operator/fleet-releases; API design §2.5,
-// docs/api/saasapi-operator-openapi.yaml). saasapi has fleetreleaser sign
-// each new package and stores the rows.
+// docs/api/saasapi-operator-openapi.yaml). The release carries its
+// GPG-signed checksums.txt and checksums.txt.sig; saasapi checks
+// checksums.txt against the packages and stores the rows and both files.
+// Nothing here or in saasapi verifies or makes a signature: the sprout
+// verifies checksums.txt against the keyring in its package (signing
+// design D20).
 //
 // It reads everything from files the Job mounts: the request body the
 // chart rendered, the operator bearer token, and the CA saasapi's operator
@@ -23,9 +27,10 @@
 //	1  saasapi unreachable, or 408/429/5xx, on every attempt
 //
 // FLAG FOR SECURITY REVIEW: this process presents the operator token,
-// with which any well-formed release above fleetreleaser's floor can be
-// signed. It never prints, logs or forwards it: no proxy, no redirects,
-// and only the given CA is trusted.
+// with which any well-formed release can be registered (a sprout still
+// installs only a package whose signed checksums.txt verifies against its
+// own keyring). It never prints, logs or forwards it: no proxy, no
+// redirects, and only the given CA is trusted.
 package sproutrelease
 
 import (
@@ -89,6 +94,10 @@ type Release struct {
 	Channel          string    `json:"channel"`
 	MinSproutVersion string    `json:"min_sprout_version"`
 	Packages         []Package `json:"packages"`
+	// ChecksumsTxt is the release's checksums.txt, verbatim.
+	ChecksumsTxt string `json:"checksums_txt"`
+	// ChecksumsSig is checksums.txt.sig in standard base64.
+	ChecksumsSig string `json:"checksums_sig"`
 }
 
 // Package is one OS/arch/package-type entry of a Release.
@@ -141,7 +150,7 @@ func parse(args []string, stderr io.Writer) (options, int) {
 	attempts := fs.String("attempts", envOr(EnvAttempts, "8"), "attempts for no answer, 408, 429 and 5xx (env "+EnvAttempts+")")
 	initial := fs.String("initial-backoff", envOr(EnvInitialBackoff, "5s"), "wait after the first retryable failure, doubling (env "+EnvInitialBackoff+")")
 	maxB := fs.String("max-backoff", envOr(EnvMaxBackoff, "60s"), "longest wait between attempts (env "+EnvMaxBackoff+")")
-	timeout := fs.String("request-timeout", envOr(EnvRequestTimeout, "10m"), "deadline for one request; a registration makes up to 16 signing calls (env "+EnvRequestTimeout+")")
+	timeout := fs.String("request-timeout", envOr(EnvRequestTimeout, "10m"), "deadline for one request (env "+EnvRequestTimeout+")")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "Usage: farmer %s [flags]\n\n", Command)
 		fmt.Fprintf(stderr, "Registers a sprout release with saasapi's operator plane (POST %s).\n\n", RegisterPath)
@@ -257,8 +266,7 @@ func run(ctx context.Context, o options, stdout, stderr io.Writer, sleep func(co
 }
 
 // registerURL checks base is https://host[:port] with no path, query or
-// credentials (as saasapi checks its fleetreleaser URL) and appends
-// RegisterPath.
+// credentials and appends RegisterPath.
 func registerURL(base string) (string, error) {
 	u, err := url.Parse(base)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
@@ -302,8 +310,9 @@ func readRequest(path string) ([]byte, Release, error) {
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, rel, fmt.Errorf("request %s: more than one JSON value", path)
 	}
-	if rel.Version == "" || rel.Channel == "" || rel.MinSproutVersion == "" || len(rel.Packages) == 0 {
-		return nil, rel, fmt.Errorf("request %s: version, channel, min_sprout_version and at least one package are required", path)
+	if rel.Version == "" || rel.Channel == "" || rel.MinSproutVersion == "" || len(rel.Packages) == 0 ||
+		rel.ChecksumsTxt == "" || rel.ChecksumsSig == "" {
+		return nil, rel, fmt.Errorf("request %s: version, channel, min_sprout_version, at least one package, checksums_txt and checksums_sig are required", path)
 	}
 	return b, rel, nil
 }

@@ -1,10 +1,10 @@
 package api
 
 import (
-	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -26,10 +26,6 @@ import (
 // JWT check, and the production SQL over farmer's handle
 // (handlers.SetReadinessDB), with saas.* in an attached SQLite database.
 
-type fleetKeys fleetsign.KeySet
-
-func (k fleetKeys) KeySet(context.Context) (fleetsign.KeySet, error) { return fleetsign.KeySet(k), nil }
-
 // manifestFixture is a saas schema with:
 //
 //	t_acme    approved v2.4.1  (rows linux/amd64, linux/arm64, windows/amd64)
@@ -38,50 +34,36 @@ func (k fleetKeys) KeySet(context.Context) (fleetsign.KeySet, error) { return fl
 //	t_none    no policy row
 //	t_null    policy row, approved_version NULL
 //
-// every row signed by the installed fleet key.
+// each version with its checksums.txt (listing every one of its rows)
+// and a base64 signature. Farmer verifies no signature (D20), so any
+// bytes do.
 type manifestFixture struct {
 	srv  *httptest.Server
 	gw   testGatewayKey
-	rows map[string]fleetsign.LegacyManifest // "version os arch" -> served manifest
+	rows map[string]fleetsign.Manifest // "version os arch pkg" -> served manifest
 }
 
 func newManifestFixture(t *testing.T) *manifestFixture {
 	t.Helper()
 	gw := installGatewayKey(t)
 
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ks, err := fleetsign.NewKeySet([]fleetsign.PublicKey{{Version: 1, Key: pub}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	handlers.SetFleetKeySource(fleetKeys(ks))
-	t.Cleanup(func() { handlers.SetFleetKeySource(nil) })
-
 	db := newSaasTestDB(t)
-	f := &manifestFixture{gw: gw, rows: map[string]fleetsign.LegacyManifest{}}
+	f := &manifestFixture{gw: gw, rows: map[string]fleetsign.Manifest{}}
+	checksums := map[string]string{} // version -> checksums.txt
+	type row struct{ version, os, arch, pkg string }
+	var rows []row
 	insertPkg := func(version, os, arch, pkg string, revoked bool) {
-		sum := sha256.Sum256([]byte(version + os + arch + pkg))
-		m := fleetsign.LegacyManifest{
-			Version:          version,
-			OS:               os,
-			Arch:             arch,
-			FileName:         fmt.Sprintf("imas-sprout_%s_%s_%s.%s", strings.TrimPrefix(version, "v"), os, arch, pkg),
-			ChecksumSHA256:   hex.EncodeToString(sum[:]),
-			MinSproutVersion: "v1.0.0",
-		}
-		msg, err := m.Message()
+		name, err := fleetsign.ExpectedFileName(version, os, arch, pkg)
 		if err != nil {
 			t.Fatal(err)
 		}
-		m.Signature = fleetsign.EncodeSignature(1, ed25519.Sign(priv, msg))
+		sum := sha256.Sum256([]byte(version + os + arch + pkg))
 		exec(t, db, `INSERT INTO saas.fleet_versions
 			(id, version, os, arch, package_type, file_name, checksum_sha256, min_sprout_version, signature, revoked, released_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			version+os+arch+pkg, m.Version, m.OS, m.Arch, pkg, m.FileName, m.ChecksumSHA256, m.MinSproutVersion, m.Signature, revoked, time.Now())
-		f.rows[version+" "+os+" "+arch+" "+pkg] = m
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)`,
+			version+os+arch+pkg, version, os, arch, pkg, name, hex.EncodeToString(sum[:]), "v1.0.0", revoked, time.Now())
+		checksums[version] += hex.EncodeToString(sum[:]) + "  " + name + "\n"
+		rows = append(rows, row{version, os, arch, pkg})
 	}
 	insert := func(version, os, arch string, revoked bool) {
 		insertPkg(version, os, arch, defaultPackageType(os), revoked)
@@ -93,6 +75,17 @@ func newManifestFixture(t *testing.T) *manifestFixture {
 	insert("v2.4.1", "windows", "amd64", false)
 	insert("v2.5.0", "linux", "amd64", false)
 	insert("v2.3.0", "linux", "amd64", true)
+	for version, txt := range checksums {
+		sig := base64.StdEncoding.EncodeToString([]byte("signature over the checksums of " + version))
+		exec(t, db, `INSERT INTO saas.fleet_release_checksums (version, checksums_txt, checksums_sig, created_at) VALUES (?, ?, ?, ?)`,
+			version, txt, sig, time.Now())
+		for _, r := range rows {
+			if r.version == version {
+				f.rows[r.version+" "+r.os+" "+r.arch+" "+r.pkg] = fleetsign.Manifest{Version: version, OS: r.os, Arch: r.arch,
+					PackageType: r.pkg, MinSproutVersion: "v1.0.0", ChecksumsTxt: txt, ChecksumsSig: sig}
+			}
+		}
+	}
 	for tenant, version := range map[string]any{
 		"t_acme": "v2.4.1", "t_other": "v2.5.0", "t_revoked": "v2.3.0", "t_null": nil,
 	} {
@@ -108,8 +101,8 @@ func newManifestFixture(t *testing.T) *manifestFixture {
 }
 
 // newSaasTestDB opens an in-memory SQLite database with an attached
-// "saas" database holding fleet_versions and tenant_update_policy in the
-// columns internal/migrations/saas gives them, so the production query's
+// "saas" database holding fleet_versions, fleet_release_checksums and
+// tenant_update_policy in the columns internal/migrations/saas gives them, so the production query's
 // schema-qualified names resolve. One connection: ATTACH is
 // per-connection.
 func newSaasTestDB(t *testing.T) *gorm.DB {
@@ -140,6 +133,11 @@ func newSaasTestDB(t *testing.T) *gorm.DB {
 		released_at datetime NOT NULL,
 		notes text,
 		UNIQUE (version, os, arch, package_type))`)
+	exec(t, db, `CREATE TABLE saas.fleet_release_checksums (
+		version varchar(64) PRIMARY KEY,
+		checksums_txt mediumtext NOT NULL,
+		checksums_sig text NOT NULL,
+		created_at datetime NOT NULL)`)
 	exec(t, db, `CREATE TABLE saas.tenant_update_policy (
 		tenant_id varchar(32) PRIMARY KEY,
 		approved_version varchar(64) DEFAULT NULL,
@@ -155,6 +153,12 @@ func exec(t *testing.T, db *gorm.DB, sql string, args ...any) {
 	if err := db.Exec(sql, args...).Error; err != nil {
 		t.Fatalf("%s: %v", sql, err)
 	}
+}
+
+// sameManifest compares every wire field.
+func sameManifest(a, b fleetsign.Manifest) bool {
+	return a.Version == b.Version && a.OS == b.OS && a.Arch == b.Arch && a.PackageType == b.PackageType &&
+		a.MinSproutVersion == b.MinSproutVersion && a.ChecksumsTxt == b.ChecksumsTxt && a.ChecksumsSig == b.ChecksumsSig
 }
 
 func (f *manifestFixture) bearer(t *testing.T, tenantID, sproutID string) string {
@@ -207,11 +211,11 @@ func TestUpdateManifestRoute_ServesOwnTenantsApprovedRow(t *testing.T) {
 		if code != http.StatusOK {
 			t.Fatalf("%s/%s: got %d %s, want 200", c.os, c.arch, code, body)
 		}
-		got, err := fleetsign.LegacyParseManifest([]byte(body))
+		got, err := fleetsign.ParseManifest([]byte(body))
 		if err != nil {
 			t.Fatalf("%s/%s: not a strict manifest: %v", c.os, c.arch, err)
 		}
-		if want := f.rows["v2.4.1 "+c.os+" "+c.arch+" "+defaultPackageType(c.os)]; got != want {
+		if want := f.rows["v2.4.1 "+c.os+" "+c.arch+" "+defaultPackageType(c.os)]; !sameManifest(got, want) {
 			t.Errorf("%s/%s: got %+v, want %+v", c.os, c.arch, got, want)
 		}
 	}
@@ -226,11 +230,11 @@ func TestUpdateManifestRoute_PackageTypeSelectsRow(t *testing.T) {
 		if code != http.StatusOK {
 			t.Fatalf("%s: got %d %s", pkg, code, body)
 		}
-		got, err := fleetsign.LegacyParseManifest([]byte(body))
+		got, err := fleetsign.ParseManifest([]byte(body))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if want := f.rows["v2.4.1 linux amd64 "+pkg]; got != want || !strings.HasSuffix(got.FileName, "."+pkg) {
+		if want := f.rows["v2.4.1 linux amd64 "+pkg]; !sameManifest(got, want) || got.PackageType != pkg {
 			t.Errorf("%s: got %+v, want %+v", pkg, got, want)
 		}
 	}
@@ -248,14 +252,14 @@ func TestUpdateManifestRoute_NoURLInResponse(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("got %d", code)
 	}
-	m, err := fleetsign.LegacyParseManifest([]byte(body))
+	m, err := fleetsign.ParseManifest([]byte(body))
 	if err != nil {
-		t.Fatalf("response has fields beyond the signed manifest: %v\n%s", err, body)
+		t.Fatalf("response has fields beyond the manifest: %v\n%s", err, body)
 	}
-	// The signature is base64 under a key generated per run, so it can
-	// spell "url" or "repo" by chance; ParseManifest has already checked
-	// its format. Search everything else.
-	lower := strings.ToLower(strings.Replace(body, m.Signature, "", 1))
+	// The signature is base64, so it could spell "url" or "repo" by
+	// chance; ParseManifest has already checked its format. Search
+	// everything else.
+	lower := strings.ToLower(strings.Replace(body, m.ChecksumsSig, "", 1))
 	for _, s := range []string{"url", "http", "://", "artifact", "repo"} {
 		if strings.Contains(lower, s) {
 			t.Errorf("response contains %q: %s", s, body)

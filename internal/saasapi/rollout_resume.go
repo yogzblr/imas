@@ -109,9 +109,8 @@ func rolloutTenantCheck(d *gorm.DB, batch AssetActionBatch) string {
 }
 
 // rolloutRegistrationCheck is a resumed rollout's extra check before each
-// wave: the target version still has catalog rows, every one of them
-// verifies against the fleet signing key (selfUpdateParams), and they
-// still build exactly the params the batch was created with. Revocation
+// wave: the target version still has catalog rows (selfUpdateParams),
+// and they still build exactly the params the batch was created with. Revocation
 // and the tenant's policy are rolloutPolicyCheck's, the tenant's status
 // rolloutTenantCheck's. It returns "" to go ahead, rollout_halted if a
 // check fails, or internal_error if the catalog can't be read.

@@ -2,16 +2,15 @@ package natsapi
 
 // self_update on internal.sprout.action (design doc §1.8, §2.3, §2.5;
 // FLAG FOR SECURITY REVIEW): the request names only a version, and farmer
-// re-verifies it against the release catalog it reads read-only
+// checks it again against the release catalog it reads read-only
 // (internal/fleetcatalog) before anything reaches a sprout: the version
-// must be the sprout's tenant's approved_version, registered, not revoked,
-// and every row of it must verify against the imas-fleet-signing key.
-// Refusals are invalid_request; nothing is dispatched.
+// must be the sprout's tenant's approved_version, registered and not
+// revoked. No signature is checked here: the sprout verifies the release's
+// signed checksums.txt itself (D20). Refusals are invalid_request; nothing
+// is dispatched.
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -33,40 +32,25 @@ const (
 	suTenant  = "t_1"
 )
 
-type staticKeys struct {
-	ks  fleetsign.KeySet
-	err error
-}
-
-func (s staticKeys) KeySet(context.Context) (fleetsign.KeySet, error) { return s.ks, s.err }
-
 func ptr(s string) *string { return &s }
 
 // suCatalog is a real fleetcatalog.SQL over a SQLite saas schema, with
-// suVersion registered as a deb, an rpm and an MSI, all signed by priv,
-// and suTenant approving it. It is installed for the test, with a key
-// source holding priv's public key.
+// suVersion registered as a deb, an rpm and an MSI, and suTenant
+// approving it. It is installed for the test.
 type suCatalog struct {
-	t    *testing.T
-	db   *gorm.DB
-	priv ed25519.PrivateKey
+	t  *testing.T
+	db *gorm.DB
 }
 
 func newSUCatalog(t *testing.T) (*suCatalog, func(fleetcatalog.Row), func(tenant string, version *string)) {
 	t.Helper()
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ks, _ := fleetsign.NewKeySet([]fleetsign.PublicKey{{Version: 1, Key: pub}})
 	db := fleetcatalogtest.Open(t)
-	origCat, origKeys := fleetcatalog.Current(), fleetKeys
+	origCat := fleetcatalog.Current()
 	fleetcatalog.Install(fleetcatalog.New(db))
-	SetFleetKeySource(staticKeys{ks: ks})
 	enableSelfUpdate(t)
-	t.Cleanup(func() { fleetcatalog.Install(origCat); SetFleetKeySource(origKeys) })
+	t.Cleanup(func() { fleetcatalog.Install(origCat) })
 
-	c := &suCatalog{t: t, db: db, priv: priv}
+	c := &suCatalog{t: t, db: db}
 	add := func(r fleetcatalog.Row) { fleetcatalogtest.AddRow(t, db, r) }
 	approve := func(tenant string, version *string) { fleetcatalogtest.Approve(t, db, tenant, version) }
 	for _, p := range [][3]string{{"linux", "amd64", "deb"}, {"linux", "amd64", "rpm"}, {"windows", "amd64", "msi"}} {
@@ -77,7 +61,7 @@ func newSUCatalog(t *testing.T) (*suCatalog, func(fleetcatalog.Row), func(tenant
 }
 
 func (c *suCatalog) row(version, os, arch, pkg string) fleetcatalog.Row {
-	return fleetcatalogtest.Signed(c.t, c.priv, version, os, arch, pkg)
+	return fleetcatalogtest.Release(c.t, version, os, arch, pkg)
 }
 
 func suRequest(t *testing.T, tenantID, sproutID string, params any) []byte {
@@ -98,9 +82,9 @@ func assertRefused(t *testing.T, reply controlplane.SproutActionReply, rec *disp
 	}
 }
 
-// TestSelfUpdate_ApprovedSignedVersionDispatches: the happy path, and the
+// TestSelfUpdate_ApprovedVersionDispatches: the happy path, and the
 // dispatch is told only the version.
-func TestSelfUpdate_ApprovedSignedVersionDispatches(t *testing.T) {
+func TestSelfUpdate_ApprovedVersionDispatches(t *testing.T) {
 	rec := stubSproutActionDispatch(t, func(string, string) error { return nil })
 	newSUCatalog(t)
 
@@ -116,7 +100,7 @@ func TestSelfUpdate_ApprovedSignedVersionDispatches(t *testing.T) {
 
 // TestSelfUpdate_ExtraFieldsRejected: a caller still sending the pre-FU.7
 // params (artifact URL, checksum, signature), or anything else besides
-// the version, gets invalid_request, even for an approved, signed version.
+// the version, gets invalid_request, even for an approved version.
 func TestSelfUpdate_ExtraFieldsRejected(t *testing.T) {
 	newSUCatalog(t)
 	for name, params := range map[string]any{
@@ -135,12 +119,8 @@ func TestSelfUpdate_ExtraFieldsRejected(t *testing.T) {
 }
 
 // TestSelfUpdate_RefusedBeforeDispatch: every catalog refusal, and every
-// failure to read the catalog or keys. Each fails before dispatch.
+// failure to read the catalog. Each fails before dispatch.
 func TestSelfUpdate_RefusedBeforeDispatch(t *testing.T) {
-	_, otherPriv, _ := ed25519.GenerateKey(rand.Reader)
-	otherPub, _, _ := ed25519.GenerateKey(rand.Reader)
-	otherKeys, _ := fleetsign.NewKeySet([]fleetsign.PublicKey{{Version: 1, Key: otherPub}})
-
 	cases := []struct {
 		name    string
 		tenant  string // default suTenant
@@ -167,34 +147,14 @@ func TestSelfUpdate_RefusedBeforeDispatch(t *testing.T) {
 			setup: func(c *suCatalog, add func(fleetcatalog.Row), _ func(string, *string)) {
 				add(c.row("v2.5.0", "linux", "amd64", "deb"))
 			}},
-		{name: "one row among several signed by an untrusted key", version: suVersion, want: controlplane.ErrorInvalidRequest,
+		{name: "one row among several revoked", version: suVersion, want: controlplane.ErrorInvalidRequest,
 			setup: func(c *suCatalog, add func(fleetcatalog.Row), _ func(string, *string)) {
-				add(fleetcatalogtest.Signed(c.t, otherPriv, suVersion, "linux", "arm64", "deb"))
-			}},
-		{name: "one row among several tampered after signing", version: suVersion, want: controlplane.ErrorInvalidRequest,
-			setup: func(c *suCatalog, add func(fleetcatalog.Row), _ func(string, *string)) {
-				r := c.row(suVersion, "linux", "arm64", "rpm")
-				r.Manifest.ChecksumSHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+				r := c.row(suVersion, "linux", "arm64", "deb")
+				r.Revoked = true
 				add(r)
-			}},
-		{name: "one row among several unsigned", version: suVersion, want: controlplane.ErrorInvalidRequest,
-			setup: func(c *suCatalog, add func(fleetcatalog.Row), _ func(string, *string)) {
-				r := c.row(suVersion, "linux", "386", "deb")
-				r.Manifest.Signature = ""
-				add(r)
-			}},
-		{name: "every row signed by a key farmer doesn't trust", version: suVersion, want: controlplane.ErrorInvalidRequest,
-			setup: func(*suCatalog, func(fleetcatalog.Row), func(string, *string)) {
-				SetFleetKeySource(staticKeys{ks: otherKeys})
 			}},
 		{name: "no catalog installed", version: suVersion, want: controlplane.ErrorInternal,
 			setup: func(*suCatalog, func(fleetcatalog.Row), func(string, *string)) { fleetcatalog.Install(nil) }},
-		{name: "no key source configured", version: suVersion, want: controlplane.ErrorInternal,
-			setup: func(*suCatalog, func(fleetcatalog.Row), func(string, *string)) { SetFleetKeySource(nil) }},
-		{name: "Transit unreachable", version: suVersion, want: controlplane.ErrorInternal,
-			setup: func(*suCatalog, func(fleetcatalog.Row), func(string, *string)) {
-				SetFleetKeySource(staticKeys{err: errors.New("dial tcp: refused")})
-			}},
 		{name: "catalog read fails", version: suVersion, want: controlplane.ErrorInternal,
 			setup: func(c *suCatalog, _ func(fleetcatalog.Row), _ func(string, *string)) {
 				fleetcatalog.Install(failingCatalog{})
@@ -361,8 +321,8 @@ type failingCatalog struct{}
 
 var errCatalogDown = errors.New("pxc: connection refused")
 
-func (failingCatalog) ApprovedManifest(context.Context, string, string, string, string, string) (fleetsign.LegacyManifest, bool, error) {
-	return fleetsign.LegacyManifest{}, false, errCatalogDown
+func (failingCatalog) ApprovedManifest(context.Context, string, string, string, string, string) (fleetsign.Manifest, bool, error) {
+	return fleetsign.Manifest{}, false, errCatalogDown
 }
 func (failingCatalog) ApprovedVersion(context.Context, string) (string, bool, error) {
 	return "", false, errCatalogDown

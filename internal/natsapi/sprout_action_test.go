@@ -50,10 +50,10 @@ func (d *dispatchRecorder) all() []dispatchCall {
 func stubSproutActionDispatch(t *testing.T, verify func(string, string) error) *dispatchRecorder {
 	t.Helper()
 	origV, origR, origC, origT := verifySproutInTenant, dispatchCmdRun, dispatchCook, triggerCook
-	origS, origK, origB := dispatchSelfUpdate, fleetKeys, requireSproutBoxKey
+	origS, origB := dispatchSelfUpdate, requireSproutBoxKey
 	t.Cleanup(func() {
 		verifySproutInTenant, dispatchCmdRun, dispatchCook, triggerCook = origV, origR, origC, origT
-		dispatchSelfUpdate, fleetKeys, requireSproutBoxKey = origS, origK, origB
+		dispatchSelfUpdate, requireSproutBoxKey = origS, origB
 	})
 	requireSproutBoxKey = func(string, string, string) error { return nil }
 

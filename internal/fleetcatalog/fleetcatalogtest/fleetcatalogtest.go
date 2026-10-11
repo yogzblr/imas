@@ -1,13 +1,13 @@
 // Package fleetcatalogtest is a SQLite stand-in for the two saas tables
 // farmer reads the release catalog from (internal/fleetcatalog), for
 // tests: an in-memory database with an attached "saas" database holding
-// fleet_versions and tenant_update_policy in the columns
+// fleet_versions, fleet_release_checksums and tenant_update_policy in the
+// columns
 // internal/migrations/saas gives them, so the production queries'
 // schema-qualified names resolve unchanged.
 package fleetcatalogtest
 
 import (
-	"crypto/ed25519"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +57,11 @@ func Open(t testing.TB) *gorm.DB {
 		released_at datetime NOT NULL,
 		notes text,
 		UNIQUE (version, os, arch, package_type))`)
+	exec(t, db, `CREATE TABLE saas.fleet_release_checksums (
+		version varchar(64) PRIMARY KEY,
+		checksums_txt mediumtext NOT NULL,
+		checksums_sig text NOT NULL,
+		created_at datetime NOT NULL)`)
 	exec(t, db, `CREATE TABLE saas.tenant_update_policy (
 		tenant_id varchar(32) PRIMARY KEY,
 		approved_version varchar(64) DEFAULT NULL,
@@ -70,12 +75,19 @@ func Open(t testing.TB) *gorm.DB {
 // AddRow inserts r, as saasapi's release registration would.
 func AddRow(t testing.TB, db *gorm.DB, r fleetcatalog.Row) {
 	t.Helper()
-	m := r.Manifest
 	exec(t, db, `INSERT INTO saas.fleet_versions
 		(id, version, os, arch, package_type, file_name, checksum_sha256, min_sprout_version, signature, revoked, released_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		m.Version+"/"+m.OS+"/"+m.Arch+"/"+r.PackageType, m.Version, m.OS, m.Arch, r.PackageType, m.FileName,
-		m.ChecksumSHA256, m.MinSproutVersion, m.Signature, r.Revoked, time.Now())
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)`,
+		r.Version+"/"+r.OS+"/"+r.Arch+"/"+r.PackageType, r.Version, r.OS, r.Arch, r.PackageType, r.FileName,
+		r.ChecksumSHA256, r.MinSproutVersion, r.Revoked, time.Now())
+}
+
+// AddChecksums stores version's checksums.txt and its base64 signature,
+// as saasapi's release registration would.
+func AddChecksums(t testing.TB, db *gorm.DB, version, checksumsTxt, checksumsSig string) {
+	t.Helper()
+	exec(t, db, `INSERT INTO saas.fleet_release_checksums (version, checksums_txt, checksums_sig, created_at) VALUES (?, ?, ?, ?)`,
+		version, checksumsTxt, checksumsSig, time.Now())
 }
 
 // Approve sets tenantID's approved_version (nil: a policy row approving
@@ -138,24 +150,23 @@ func Revoke(t testing.TB, db *gorm.DB, version string) {
 	exec(t, db, `UPDATE saas.fleet_versions SET revoked = 1 WHERE version = ?`, version)
 }
 
-// Signed returns a row for version on os/arch/packageType, signed by priv
-// as key version 1.
-func Signed(t testing.TB, priv ed25519.PrivateKey, version, os, arch, packageType string) fleetcatalog.Row {
+// Release returns a row for version on os/arch/packageType, named as
+// fleetsign.ExpectedFileName names it.
+func Release(t testing.TB, version, os, arch, packageType string) fleetcatalog.Row {
 	t.Helper()
-	m := fleetsign.LegacyManifest{
-		Version:          version,
-		OS:               os,
-		Arch:             arch,
-		FileName:         "imas-sprout_" + strings.TrimPrefix(version, "v") + "_" + os + "_" + arch + "." + packageType,
-		ChecksumSHA256:   strings.Repeat("ab", 32),
-		MinSproutVersion: "v0.1.0",
-	}
-	msg, err := m.Message()
+	name, err := fleetsign.ExpectedFileName(version, os, arch, packageType)
 	if err != nil {
 		t.Fatal(err)
 	}
-	m.Signature = fleetsign.EncodeSignature(1, ed25519.Sign(priv, msg))
-	return fleetcatalog.Row{Manifest: m, PackageType: packageType}
+	return fleetcatalog.Row{
+		Version:          version,
+		OS:               os,
+		Arch:             arch,
+		PackageType:      packageType,
+		FileName:         name,
+		ChecksumSHA256:   strings.Repeat("ab", 32),
+		MinSproutVersion: "v0.1.0",
+	}
 }
 
 func exec(t testing.TB, db *gorm.DB, q string, args ...any) {

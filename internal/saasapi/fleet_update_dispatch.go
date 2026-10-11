@@ -5,12 +5,15 @@
 // SetFleetUpdateDispatchEnabled(true) has been called before NewRouter
 // (Config.FleetUpdateDispatchEnabled, SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED),
 // and the handlers check the flag again themselves. With the flag off,
-// neither route exists. The path behind it is complete: cmd/fleetreleaser
-// signs each saas.fleet_versions row (§2.5); saasapi (selfUpdateParams)
-// verifies every row of the target version before creating a rollout and
-// sends farmer only {version}; farmer re-verifies that version against the
-// catalog before dispatching it (internal/natsapi, checkSelfUpdateRelease);
-// and the sprout fetches, verifies and installs its own OS/arch row (§2.6,
+// neither route exists. The path behind it is complete: the release's
+// checksums.txt is GPG-signed by the release workflow and registered with
+// its saas.fleet_versions rows (§2.5, fleet_releases.go); saasapi checks
+// the target version is registered, not revoked and approved before
+// creating a rollout and sends farmer only {version}; farmer checks that
+// version against the catalog again before dispatching it
+// (internal/natsapi, checkSelfUpdateRelease); and the sprout fetches its
+// own OS/arch manifest, verifies the signed checksums.txt against the
+// keyring in its package, and installs (§2.6,
 // internal/ingredients/selfupdate). Turning it on is a deployment decision,
 // made by the Terraform UAT gate, not by this code.
 //
@@ -21,9 +24,8 @@
 // all for rollout safety (§2.3):
 //
 //   - The caller names a target_version, not action params. The version
-//     must be in CloudXP's own catalog (saas.fleet_versions), not
-//     revoked, and every one of its OS/arch rows must carry a signature
-//     that verifies. The farmer params carry only the version: each sprout
+//     must be in CloudXP's own catalog (saas.fleet_versions) and not
+//     revoked. The farmer params carry only the version: each sprout
 //     resolves and verifies its own OS/arch manifest (§2.3, §2.6). The
 //     caller can't supply a URL, file name or checksum.
 //   - The version must be the tenant's approved_version
@@ -101,7 +103,6 @@ import (
 
 	"github.com/yogzblr/imas/internal/controlplane"
 	"github.com/yogzblr/imas/internal/fleetcatalog"
-	"github.com/yogzblr/imas/internal/fleetsign"
 	log "github.com/yogzblr/imas/internal/log"
 )
 
@@ -256,18 +257,6 @@ type fleetUpdateRequest struct {
 // farmerSelfUpdate is the params of a self_update internal.sprout.action:
 // only the version (design doc §1.8). Farmer refuses any other field.
 type farmerSelfUpdate = controlplane.SelfUpdateParams
-
-// fleetKeys is the READ-ONLY imas-fleet-signing key source catalog rows
-// are verified against before a rollout is created (§2.5). Set once at
-// startup by SetFleetKeySource; while nil, every rollout is refused.
-var fleetKeys fleetsign.KeySetSource
-
-// SetFleetKeySource installs the key source. Like SetDB, call it once at
-// startup. The OpenBao token behind it (IMAS_FLEETSIGN_OPENBAO_*) must
-// carry only the read-only imas-fleet-verify policy: saasapi can write
-// saas.fleet_versions, so it must never also be able to sign rows
-// (deploy/fleetreleaser/README.md).
-func SetFleetKeySource(src fleetsign.KeySetSource) { fleetKeys = src }
 
 // rolloutResponse describes a rollout batch in the GET response. It's
 // omitted for §1.5 batches.
@@ -438,34 +427,22 @@ func parseUpdateGate(w http.ResponseWriter, gate string) (string, bool) {
 }
 
 // selfUpdateParams builds the farmer params for a rollout to one version,
-// given all of its saas.fleet_versions rows (one per OS/arch). Every row must
-// carry a signature that verifies against the imas-fleet-signing key
-// (read-only) over its own manifest fields; one that doesn't, an empty
-// signature included, refuses the whole rollout rather than sending it to
-// part of a fleet. Revocation is rolloutPolicyCheck's to report. Farmer
-// and the sprout each verify again; this is the early, whole-batch
-// refusal, not the only one.
+// given all of its saas.fleet_versions rows (one per OS/arch/package
+// type): there must be at least one, all of that version. Revocation is
+// rolloutPolicyCheck's to report. saasapi verifies no signature (signing
+// design D20): the sprout verifies the release's signed checksums.txt
+// itself, against the keyring shipped in its package.
 //
 // The params carry the version only: each sprout fetches and verifies
 // the manifest for its own OS and arch (§2.6), so no URL, file name,
 // checksum or signature travels in the command.
-func selfUpdateParams(ctx context.Context, rows []FleetVersion) (json.RawMessage, error) {
+func selfUpdateParams(_ context.Context, rows []FleetVersion) (json.RawMessage, error) {
 	if len(rows) == 0 {
 		return nil, errors.New("no catalog rows")
-	}
-	if fleetKeys == nil {
-		return nil, errors.New("no fleet signing key source configured; refusing to dispatch unverified releases")
-	}
-	ks, err := fleetKeys.KeySet(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("reading fleet signing keys: %w", err)
 	}
 	for _, row := range rows {
 		if row.Version != rows[0].Version {
 			return nil, fmt.Errorf("rows of different versions (%s, %s)", rows[0].Version, row.Version)
-		}
-		if err := ks.Verify(row.Manifest()); err != nil {
-			return nil, fmt.Errorf("%s signature: %w", row.releaseKey(), err)
 		}
 	}
 	return json.Marshal(farmerSelfUpdate{Version: rows[0].Version})
