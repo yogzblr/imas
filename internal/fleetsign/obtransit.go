@@ -1,5 +1,8 @@
 package fleetsign
 
+// Deprecated: removed in P22 slice 2 (see legacy.go). Kept because
+// farmer, saasapi and cmd/fleetreleaser still import it.
+
 // This file is a READ-ONLY OpenBao Transit client for the
 // imas-fleet-signing key, used by farmer (to re-check a release's
 // signature before serving an update manifest or dispatching a
@@ -289,7 +292,7 @@ func (s *TransitKeySource) KeySet(ctx context.Context) (KeySet, error) {
 
 // Verify checks m's signature against the key set Transit currently
 // serves.
-func (s *TransitKeySource) Verify(ctx context.Context, m Manifest) error {
+func (s *TransitKeySource) Verify(ctx context.Context, m LegacyManifest) error {
 	ks, err := s.KeySet(ctx)
 	if err != nil {
 		return err

@@ -145,7 +145,7 @@ func (AssetLink) TableName() string { return "asset_links" }
 // changed afterwards except to revoke it.
 //
 // Version, OS, Arch, FileName, ChecksumSHA256 and MinSproutVersion are
-// exactly the six signed fields of fleetsign.Manifest. There is no URL:
+// exactly the six signed fields of fleetsign.LegacyManifest. There is no URL:
 // the sprout downloads FileName from the repository configured in the
 // sprout itself (requirement 20).
 type FleetVersion struct {
@@ -164,7 +164,7 @@ type FleetVersion struct {
 	ChecksumSHA256   string `gorm:"column:checksum_sha256;size:64;not null" json:"checksum_sha256"`
 	MinSproutVersion string `gorm:"column:min_sprout_version;size:64;not null" json:"min_sprout_version"`
 	// Signature is cmd/fleetreleaser's Ed25519 signature over the
-	// fleetsign.Manifest canonical message (imas-fleet-manifest-v1|
+	// fleetsign.LegacyManifest canonical message (imas-fleet-manifest-v1|
 	// version|os|arch|file_name|checksum_sha256|min_sprout_version), in
 	// fleetsign.EncodeSignature's "v<key version>:<base64>" format (§2.5).
 	// "" is always refused — by saasapi, by farmer, and by the sprout —
@@ -187,8 +187,8 @@ func (r FleetVersion) releaseKey() string {
 }
 
 // Manifest returns r's signed manifest entry, signature included.
-func (r FleetVersion) Manifest() fleetsign.Manifest {
-	return fleetsign.Manifest{
+func (r FleetVersion) Manifest() fleetsign.LegacyManifest {
+	return fleetsign.LegacyManifest{
 		Version:          r.Version,
 		OS:               r.OS,
 		Arch:             r.Arch,

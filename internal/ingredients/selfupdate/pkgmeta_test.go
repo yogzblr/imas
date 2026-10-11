@@ -20,7 +20,6 @@ import (
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
-	"github.com/yogzblr/imas/internal/fleetsign"
 )
 
 type (
@@ -28,10 +27,9 @@ type (
 	urlError     = url.Error
 )
 
-// fleetsignManifest is a manifest for version as the fixture signs it.
-func fleetsignManifest(version string) fleetsign.Manifest {
-	return fleetsign.Manifest{Version: version, OS: "linux", Arch: "amd64", FileName: testFileDeb,
-		ChecksumSHA256: sha(pkgBytes), MinSproutVersion: "v2.0.0"}
+// verifiedRelease is the release prepare verifies for version.
+func verifiedRelease(version string) release {
+	return release{Version: version, FileName: testFileDeb, ChecksumSHA256: sha(pkgBytes), MinSproutVersion: "v2.0.0"}
 }
 
 // prodQueryCommand is the real queryCommand, before any fixture swaps it.
@@ -196,12 +194,13 @@ func TestApply_PrereleaseVersions(t *testing.T) {
 			f := newFixture(t)
 			pc.setup(t, f)
 			f.manifest.Version = "v2.5.0-rc.1"
+			f.manifest.FileName = strings.Replace(f.manifest.FileName, "2.4.1", "2.5.0-rc.1", 1)
 			f.pkgMeta[sha(pkgBytes)] = genuinePkg("v2.5.0-rc.1")
 			res, err := step(t, target("v2.5.0-rc.1")).Apply(context.Background())
 			if err != nil || !res.Succeeded {
 				t.Fatalf("Apply = %+v, %v", res, err)
 			}
-			if !notesContain(res, "matches the signed manifest") {
+			if !notesContain(res, "matches the verified release") {
 				t.Errorf("notes %v don't record the metadata check", res.Notes)
 			}
 			if _, _, installs := f.counts(); installs != 1 {
@@ -216,13 +215,13 @@ func TestApply_PrereleaseVersions(t *testing.T) {
 		})
 		// A prerelease manifest is refused for an MSI, even though the
 		// MSI's ProductVersion (2.5.0) matches its MAJOR.MINOR.PATCH.
-		if _, _, err := verifyPackageIdentity(context.Background(), p, "x.msi", fleetsignManifest("v2.5.0-rc.1")); !errors.Is(err, ErrPrereleaseOnWindows) {
+		if _, _, err := verifyPackageIdentity(context.Background(), p, "x.msi", verifiedRelease("v2.5.0-rc.1")); !errors.Is(err, ErrPrereleaseOnWindows) {
 			t.Errorf("rc manifest, 2.5.0 MSI: %v, want ErrPrereleaseOnWindows", err)
 		}
-		if _, _, err := verifyPackageIdentity(context.Background(), p, "x.msi", fleetsignManifest("v2.5.0")); err != nil {
+		if _, _, err := verifyPackageIdentity(context.Background(), p, "x.msi", verifiedRelease("v2.5.0")); err != nil {
 			t.Errorf("v2.5.0 manifest, 2.5.0 MSI: %v", err)
 		}
-		if _, _, err := verifyPackageIdentity(context.Background(), p, "x.msi", fleetsignManifest("v2.5.1")); !errors.Is(err, ErrPackageMismatch) {
+		if _, _, err := verifyPackageIdentity(context.Background(), p, "x.msi", verifiedRelease("v2.5.1")); !errors.Is(err, ErrPackageMismatch) {
 			t.Errorf("v2.5.1 manifest, 2.5.0 MSI: %v, want ErrPackageMismatch", err)
 		}
 	})
@@ -377,7 +376,7 @@ func TestReadPackageIdentity_RealDpkgDeb(t *testing.T) {
 		if v, err := packageSemver(pkgDeb, id); err != nil || v != tc.want {
 			t.Errorf("%s: packageSemver = %s, %v; want %s", tc.version, v, err, tc.want)
 		}
-		_, _, err = verifyPackageIdentity(context.Background(), p, deb, fleetsignManifest(testTarget))
+		_, _, err = verifyPackageIdentity(context.Background(), p, deb, verifiedRelease(testTarget))
 		if wantOK := tc.name == "imas-sprout" && tc.want == testTarget; (err == nil) != wantOK {
 			t.Errorf("%s %s against a %s manifest: %v", tc.name, tc.version, testTarget, err)
 		}

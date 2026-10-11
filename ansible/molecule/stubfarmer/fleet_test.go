@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -35,7 +33,8 @@ const testRelease = `{"version":"v0.2.0","os":"linux","arch":"amd64","package_ty
 
 const testQuery = "os=linux&arch=amd64&package_type=deb&version=v0.2.0"
 
-// TestUpdateManifest: a registered release is served, signed by the key in
+// TestUpdateManifest: a registered release is served, its checksums.txt
+// signed by the key in
 // the keyring the stub writes, only to a gateway JWT the stub minted, and
 // only for the package type asked.
 func TestUpdateManifest(t *testing.T) {
@@ -58,12 +57,20 @@ func TestUpdateManifest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("not a strict manifest: %v", err)
 	}
-	ring, err := fleetsign.ParseKeyring(f.fleet.keyringJSON())
+	ring, err := fleetsign.ParseArmoredKeyring(f.fleet.keyringJSON())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ring.Verify(m); err != nil {
-		t.Errorf("manifest doesn't verify against the stub's keyring: %v", err)
+	if err := ring.VerifyChecksums([]byte(m.ChecksumsTxt), m.Signature()); err != nil {
+		t.Errorf("checksums.txt doesn't verify against the stub's keyring: %v", err)
+	}
+	sums, err := fleetsign.ParseChecksums([]byte(m.ChecksumsTxt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, _ := fleetsign.ExpectedFileName(m.Version, m.OS, m.Arch, m.PackageType)
+	if sum, ok := sums.Sum(name); !ok || sum != strings.Repeat("0123456789abcdef", 4) {
+		t.Errorf("checksums.txt line for %s = %q, %v", name, sum, ok)
 	}
 
 	for name, c := range map[string]struct {
@@ -89,12 +96,12 @@ func TestUntrustedRelease(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("release = %d %s", rec.Code, rec.Body)
 	}
-	var m fleetsign.Manifest
-	if err := json.NewDecoder(bytes.NewReader(rec.Body.Bytes())).Decode(&m); err != nil {
+	m, err := fleetsign.ParseManifest(rec.Body.Bytes())
+	if err != nil {
 		t.Fatal(err)
 	}
-	ring, _ := fleetsign.ParseKeyring(f.fleet.keyringJSON())
-	if err := ring.Verify(m); err == nil {
+	ring, _ := fleetsign.ParseArmoredKeyring(f.fleet.keyringJSON())
+	if err := ring.VerifyChecksums([]byte(m.ChecksumsTxt), m.Signature()); err == nil {
 		t.Error("an untrusted release verified")
 	}
 }

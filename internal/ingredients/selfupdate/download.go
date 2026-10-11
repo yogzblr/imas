@@ -34,7 +34,7 @@ import (
 //     names, and every redirect.
 //
 // Nothing a download returns is trusted until its SHA-256 matches the
-// signed manifest: the indexes only say where to look.
+// signed checksums.txt: the indexes only say where to look.
 
 const (
 	// maxPackageBytes caps a downloaded package (and the .nupkg carrying
@@ -121,7 +121,7 @@ func (e *httpStatusError) Error() string {
 }
 
 // download fetches u into dest (which must not exist) and checks its
-// SHA-256 against wantSHA256, the signed manifest's checksum. The file is
+// SHA-256 against wantSHA256, the signed checksums.txt line's hash. The file is
 // removed again on any error, so a file left at dest has exactly the
 // signed bytes.
 func (r repo) download(ctx context.Context, u *url.URL, dest, wantSHA256 string) error {

@@ -6,7 +6,6 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/ecdsa"
-	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
@@ -33,6 +32,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ProtonMail/go-crypto/openpgp"
+	"github.com/ProtonMail/go-crypto/openpgp/armor"
+	"github.com/ProtonMail/go-crypto/openpgp/packet"
 	"github.com/klauspost/compress/zstd"
 	"golang.org/x/mod/semver"
 
@@ -48,7 +50,7 @@ const (
 	testTarget    = "v2.4.1"
 	testFileDeb   = "imas-sprout_2.4.1_linux_amd64.deb"
 	testFileRPM   = "imas-sprout_2.4.1_linux_amd64.rpm"
-	testFileMSI   = "imas-sprout-2.4.1-windows-amd64.msi"
+	testFileMSI   = "imas-sprout-2.4.1-windows-x64.msi"
 	testRepoToken = "repo-secret"
 )
 
@@ -66,15 +68,33 @@ type call struct {
 	env  []string
 }
 
+// testRelease is the release the fixture's farmer serves: the manifest's
+// fields, and the checksums.txt line for the package (FileName,
+// ChecksumSHA256), which serveManifest writes into a checksums.txt among
+// other release files and signs.
+type testRelease struct {
+	Version, OS, Arch, MinSproutVersion string
+	// PackageType defaults to FileName's extension.
+	PackageType              string
+	FileName, ChecksumSHA256 string
+}
+
 // fixture stands up a farmer (its own CA, pinned as SproutRootCA) serving
 // manifests, a separate HTTPS repository, a shipped keyring, and fake
 // installers, and records what reaches each of them.
 type fixture struct {
 	t *testing.T
 
-	priv     ed25519.PrivateKey
-	keyID    int
-	manifest fleetsign.Manifest // signed in serveManifest unless rawManifest is set
+	// signer signs checksums.txt; the shipped keyring holds trusted.
+	signer, trusted *openpgp.Entity
+	manifest        testRelease
+	// checksumsTxt, if set, is signed and served instead of the one built
+	// from manifest.
+	checksumsTxt []byte
+	// tamper, if set, changes checksums.txt after it is signed.
+	tamper func([]byte) []byte
+	// extraKeys are added to the manifest JSON.
+	extraKeys map[string]string
 	// rawManifest, if set, is served verbatim instead.
 	rawManifest  []byte
 	farmerStatus int // 0: 200 with the manifest
@@ -185,11 +205,11 @@ func (f *fixture) fakeQuery(_ context.Context, name string, args []string) ([]by
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	f := &fixture{t: t, keyID: 1, repoBody: pkgBytes,
+	f := &fixture{t: t, repoBody: pkgBytes,
 		pkgMeta: map[string]fakePkg{sha(pkgBytes): genuinePkg(testTarget)}, dbInstalled: "2.4.0+git"}
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	f.priv = priv
-	f.manifest = fleetsign.Manifest{
+	f.trusted = newReleaseKey(t)
+	f.signer = f.trusted
+	f.manifest = testRelease{
 		Version: testTarget, OS: "linux", Arch: "amd64", FileName: testFileDeb,
 		ChecksumSHA256: sha(pkgBytes), MinSproutVersion: "v2.0.0",
 	}
@@ -209,8 +229,8 @@ func newFixture(t *testing.T) *fixture {
 
 	rootCA := filepath.Join(dir, "tls-rootca.pem")
 	writeFile(t, rootCA, f.farmerCAPEM, 0o644)
-	keyring := filepath.Join(dir, "fleet-signing-keys.json")
-	writeFile(t, keyring, keyringJSON(1, pub), 0o644)
+	keyring := filepath.Join(dir, "fleet-signing-keys.asc")
+	writeFile(t, keyring, armoredKeyring(t, f.trusted), 0o644)
 
 	saveConfig(t)
 	config.SproutRootCA = rootCA
@@ -417,23 +437,82 @@ func (f *fixture) serveManifest(w http.ResponseWriter, r *http.Request) {
 	}
 	body := f.rawManifest
 	if body == nil {
-		body, _ = json.Marshal(f.signed(f.manifest))
+		body = f.wireManifest()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(body)
 }
 
-// signed returns m with a signature by f's key, unless m already has one.
-func (f *fixture) signed(m fleetsign.Manifest) fleetsign.Manifest {
-	if m.Signature != "" {
-		return m
+// wireManifest is the manifest JSON farmer sends: f.manifest's fields,
+// and checksums.txt signed by f.signer.
+func (f *fixture) wireManifest() []byte {
+	r := f.manifest
+	txt := f.checksumsTxt
+	if txt == nil {
+		txt = []byte(strings.Repeat("4", 64) + "  imas_2.4.1_linux_amd64.tar.gz\n" +
+			r.ChecksumSHA256 + "  " + r.FileName + "\n" +
+			strings.Repeat("5", 64) + "  imas-sprout_2.4.1_linux_arm64.deb\n")
 	}
-	msg, err := m.Message()
+	sig := detachSign(f.t, f.signer, txt)
+	if f.tamper != nil {
+		txt = f.tamper(bytes.Clone(txt))
+	}
+	pkgType := r.PackageType
+	if pkgType == "" {
+		pkgType = strings.TrimPrefix(filepath.Ext(r.FileName), ".")
+	}
+	obj := map[string]string{
+		"version": r.Version, "os": r.OS, "arch": r.Arch, "package_type": pkgType,
+		"min_sprout_version": r.MinSproutVersion, "checksums_txt": string(txt),
+		"checksums_sig": base64.StdEncoding.EncodeToString(sig),
+	}
+	for k, v := range f.extraKeys {
+		obj[k] = v
+	}
+	b, err := json.Marshal(obj)
 	if err != nil {
-		f.t.Fatalf("manifest message: %v", err)
+		f.t.Fatal(err)
 	}
-	m.Signature = fleetsign.EncodeSignature(f.keyID, ed25519.Sign(f.priv, msg))
-	return m
+	return b
+}
+
+// newReleaseKey is a throwaway release signing key (Ed25519).
+func newReleaseKey(t *testing.T) *openpgp.Entity {
+	t.Helper()
+	e, err := openpgp.NewEntity("imas release test", "", "release@example.invalid", &packet.Config{Algorithm: packet.PubKeyAlgoEdDSA})
+	if err != nil {
+		t.Fatalf("NewEntity: %v", err)
+	}
+	return e
+}
+
+// armoredKeyring is the keyring file the sprout package ships, holding es.
+func armoredKeyring(t *testing.T, es ...*openpgp.Entity) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w, err := armor.Encode(&buf, openpgp.PublicKeyType, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range es {
+		if err := e.Serialize(w); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// detachSign is the release's gpg --detach-sign over txt.
+func detachSign(t *testing.T, e *openpgp.Entity, txt []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := openpgp.DetachSign(&buf, e, bytes.NewReader(txt), nil); err != nil {
+		t.Fatalf("DetachSign: %v", err)
+	}
+	return buf.Bytes()
 }
 
 // runDeferred runs what the step left to run after its result is
@@ -614,8 +693,7 @@ func TestApply_WindowsMSI_LaunchesMsiexecDetachedAfterReport(t *testing.T) {
 // TestRefusals covers every refusal: none of them downloads anything
 // or runs an installer.
 func TestRefusals(t *testing.T) {
-	otherPub, otherPriv, _ := ed25519.GenerateKey(rand.Reader)
-	_ = otherPub
+	other := newReleaseKey(t)
 	cases := []struct {
 		name   string
 		target string
@@ -631,38 +709,30 @@ func TestRefusals(t *testing.T) {
 		}},
 		{name: "min_sprout_version above running", target: testTarget, wantFarmer: true, want: ErrBelowMinSproutVersion,
 			setup: func(f *fixture) { f.manifest.MinSproutVersion = "v2.4.1" }},
-		{name: "unsigned manifest", target: testTarget, wantFarmer: true, want: fleetsign.ErrMissingSignature,
+		{name: "no signature", target: testTarget, wantFarmer: true, want: fleetsign.ErrInvalidManifest,
+			setup: func(f *fixture) { f.extraKeys = map[string]string{"checksums_sig": ""} }},
+		{name: "signed by a key not in the keyring", target: testTarget, wantFarmer: true, want: fleetsign.ErrBadSignature,
+			setup: func(f *fixture) { f.signer = other }},
+		{name: "checksums.txt altered after signing", target: testTarget, wantFarmer: true, want: fleetsign.ErrBadSignature,
 			setup: func(f *fixture) {
-				m := f.manifest
-				b, _ := json.Marshal(m) // Signature ""
-				f.rawManifest = b
+				f.tamper = func(b []byte) []byte {
+					return bytes.Replace(b, []byte(sha(pkgBytes)), []byte(strings.Repeat("a", 64)), 1)
+				}
 			}},
-		{name: "signed by a key not in the keyring", target: testTarget, wantFarmer: true, want: fleetsign.ErrUnknownKeyVersion,
-			setup: func(f *fixture) { f.keyID, f.priv = 2, otherPriv }},
-		{name: "signed by the wrong key under a trusted id", target: testTarget, wantFarmer: true, want: fleetsign.ErrInvalidSignature,
-			setup: func(f *fixture) { f.priv = otherPriv }},
-		{name: "checksum altered after signing", target: testTarget, wantFarmer: true, want: fleetsign.ErrInvalidSignature,
+		{name: "signed checksums.txt is malformed", target: testTarget, wantFarmer: true, want: fleetsign.ErrBadChecksums,
 			setup: func(f *fixture) {
-				m := f.signed(f.manifest)
-				m.ChecksumSHA256 = strings.Repeat("a", 64)
-				f.manifest = m
+				f.checksumsTxt = []byte(sha(pkgBytes) + "  " + testFileDeb + "\n" + strings.ToUpper(sha(pkgBytes)) + "  other.deb\n")
 			}},
-		{name: "min_sprout_version lowered after signing", target: testTarget, wantFarmer: true, want: fleetsign.ErrInvalidSignature,
-			setup: func(f *fixture) {
-				f.manifest.MinSproutVersion = "v2.4.1"
-				m := f.signed(f.manifest)
-				m.MinSproutVersion = "v1.0.0"
-				f.manifest = m
-			}},
+		{name: "signed checksums.txt has no line for this package", target: testTarget, wantFarmer: true, want: fleetsign.ErrNotInChecksums,
+			setup: func(f *fixture) { f.manifest.FileName = "imas-sprout_2.4.1_linux_amd64v3.deb" }},
+		{name: "farmer sends a file_name", target: testTarget, wantFarmer: true, want: fleetsign.ErrInvalidManifest,
+			setup: func(f *fixture) { f.extraKeys = map[string]string{"file_name": testFileDeb} }},
 		{name: "manifest for another arch", target: testTarget, wantFarmer: true, want: ErrManifestMismatch,
 			setup: func(f *fixture) { f.manifest.Arch = "arm64" }},
 		{name: "manifest for another version", target: testTarget, wantFarmer: true, want: ErrManifestMismatch,
 			setup: func(f *fixture) { f.manifest.Version = "v2.5.0" }},
 		{name: "manifest with an unknown field", target: testTarget, wantFarmer: true, want: fleetsign.ErrInvalidManifest,
-			setup: func(f *fixture) {
-				b, _ := json.Marshal(f.signed(f.manifest))
-				f.rawManifest = append(b[:len(b)-1], []byte(`,"url":"https://evil.example/x.deb"}`)...)
-			}},
+			setup: func(f *fixture) { f.extraKeys = map[string]string{"url": "https://evil.example/x.deb"} }},
 		{name: "farmer has no manifest", target: testTarget, wantFarmer: true, want: ErrNoManifest,
 			setup: func(f *fixture) { f.farmerStatus = http.StatusNotFound }},
 		{name: "rpm on a debian sprout", target: testTarget, wantFarmer: true, want: ErrPackageTypeMismatch,
@@ -678,8 +748,10 @@ func TestRefusals(t *testing.T) {
 		{name: "apt dist malformed", target: testTarget, want: ErrRepoNotConfigured,
 			setup: func(*fixture) { config.SproutUpdateRepoDist = "any" }},
 		{name: "keyring missing", target: testTarget, want: os.ErrNotExist,
-			setup: func(*fixture) { config.SproutFleetSigningKeyring = filepath.Join(os.TempDir(), "no-such-keyring.json") }},
-		{name: "keyring empty", target: testTarget, want: errAny,
+			setup: func(*fixture) { config.SproutFleetSigningKeyring = filepath.Join(os.TempDir(), "no-such-keyring.asc") }},
+		{name: "keyring empty", target: testTarget, want: fleetsign.ErrNoKeys,
+			setup: func(*fixture) { writeFile(t, config.SproutFleetSigningKeyring, nil, 0o644) }},
+		{name: "keyring is the pre-P22 JSON placeholder", target: testTarget, want: fleetsign.ErrNoKeys,
 			setup: func(*fixture) { writeFile(t, config.SproutFleetSigningKeyring, []byte("{}"), 0o644) }},
 		{name: "unsupported OS", target: testTarget, want: ErrUnsupportedPlatform,
 			setup: func(*fixture) { goos = "darwin" }},
@@ -717,6 +789,73 @@ func TestRefusals(t *testing.T) {
 			}
 			if !tc.wantFarmer && tc.want != errAny && farmer != 0 {
 				t.Errorf("refusal asked farmer %d times; it should be refused first", farmer)
+			}
+		})
+	}
+}
+
+// TestPrepare_GPGChecksums is the P22 verification through prepare: the
+// signed checksums.txt line for the file name the sprout derives is the
+// only source of the expected SHA-256, and a download with any other hash
+// is never installed.
+func TestPrepare_GPGChecksums(t *testing.T) {
+	other := newReleaseKey(t)
+	cases := []struct {
+		name  string
+		setup func(*fixture)
+		want  error // nil: prepare succeeds
+		// download: run Apply too, and expect this error from it.
+		download error
+	}{
+		{name: "good", download: nil},
+		{name: "tampered checksums.txt", want: fleetsign.ErrBadSignature, setup: func(f *fixture) {
+			f.tamper = func(b []byte) []byte { b[0] ^= 1; return b }
+		}},
+		{name: "wrong key", want: fleetsign.ErrBadSignature, setup: func(f *fixture) { f.signer = other }},
+		{name: "file name absent from checksums.txt", want: fleetsign.ErrNotInChecksums, setup: func(f *fixture) {
+			f.manifest.FileName = "imas-sprout_2.4.1_linux_amd64.rpm"
+			f.manifest.PackageType = "deb"
+		}},
+		{name: "farmer sends a file_name key", want: fleetsign.ErrInvalidManifest, setup: func(f *fixture) {
+			f.extraKeys = map[string]string{"file_name": "evil.deb"}
+		}},
+		{name: "downloaded file has another SHA-256 than the signed line", download: ErrChecksumMismatch, setup: func(f *fixture) {
+			// The index lists the signed hash; the bytes served aren't it.
+			f.repoBody = []byte("not the signed package")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			if tc.setup != nil {
+				tc.setup(f)
+			}
+			pl, err := step(t, target(testTarget)).(SelfUpdate).prepare(context.Background())
+			if tc.want != nil {
+				if !errors.Is(err, tc.want) {
+					t.Fatalf("prepare = %v, want %v", err, tc.want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("prepare: %v", err)
+			}
+			want := release{Version: testTarget, FileName: testFileDeb, ChecksumSHA256: sha(pkgBytes), MinSproutVersion: "v2.0.0"}
+			if pl.manifest != want {
+				t.Fatalf("prepare verified %+v, want %+v", pl.manifest, want)
+			}
+			_, err = step(t, target(testTarget)).Apply(context.Background())
+			if tc.download == nil {
+				if err != nil {
+					t.Fatalf("Apply: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.download) {
+				t.Fatalf("Apply = %v, want %v", err, tc.download)
+			}
+			if _, _, installs := f.counts(); installs != 0 {
+				t.Errorf("installed %d times", installs)
 			}
 		})
 	}
@@ -1097,10 +1236,6 @@ func exitError(t *testing.T, code int) error {
 	return err
 }
 
-func keyringJSON(id int, pub ed25519.PublicKey) []byte {
-	return []byte(fmt.Sprintf(`{"%d": %q}`, id, base64.StdEncoding.EncodeToString(pub)))
-}
-
 func writeFile(t *testing.T, path string, data []byte, mode os.FileMode) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -1173,22 +1308,18 @@ func newCAServer(t *testing.T, h http.Handler) (*httptest.Server, []byte) {
 	return ts, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
 }
 
-// TestShippedKeyring: the keyring the packages install is either the
-// fail-closed placeholder {} or a keyring the sprout can load, so a
-// malformed key added at release time fails here, not on the fleet.
+// TestShippedKeyring: the keyring the packages install
+// (/etc/imas/fleet-signing-keys.asc, built from the repo's
+// gpg-public-key.asc, D21) is one the sprout can load, so a malformed key
+// change fails here, not on the fleet.
 func TestShippedKeyring(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "..", "packaging", "etc", "fleet-signing-keys.json"))
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "gpg-public-key.asc"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(data)) == "{}" {
-		if _, err := fleetsign.ParseKeyring(data); err == nil {
-			t.Fatal("the empty placeholder keyring parsed; it must refuse every update")
-		}
-		return
-	}
-	if _, err := fleetsign.ParseKeyring(data); err != nil {
-		t.Fatalf("shipped keyring does not parse: %v", err)
+	k, err := fleetsign.ParseArmoredKeyring(data)
+	if err != nil || k.Len() == 0 {
+		t.Fatalf("shipped keyring: %d keys, %v", k.Len(), err)
 	}
 }
 

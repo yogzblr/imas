@@ -142,7 +142,7 @@ func Revoke(t testing.TB, db *gorm.DB, version string) {
 // as key version 1.
 func Signed(t testing.TB, priv ed25519.PrivateKey, version, os, arch, packageType string) fleetcatalog.Row {
 	t.Helper()
-	m := fleetsign.Manifest{
+	m := fleetsign.LegacyManifest{
 		Version:          version,
 		OS:               os,
 		Arch:             arch,

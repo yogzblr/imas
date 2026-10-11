@@ -31,8 +31,8 @@ const (
 	testFloor         = "v2.0.0"
 )
 
-func testManifest() fleetsign.Manifest {
-	return fleetsign.Manifest{
+func testManifest() fleetsign.LegacyManifest {
+	return fleetsign.LegacyManifest{
 		Version:          "v2.4.1",
 		OS:               "linux",
 		Arch:             "amd64",
@@ -43,7 +43,7 @@ func testManifest() fleetsign.Manifest {
 }
 
 // signBody is the POST /v1/sign body saasapi sends for m.
-func signBody(m fleetsign.Manifest) string {
+func signBody(m fleetsign.LegacyManifest) string {
 	b, _ := json.Marshal(map[string]string{
 		"version": m.Version, "os": m.OS, "arch": m.Arch, "file_name": m.FileName,
 		"checksum_sha256": m.ChecksumSHA256, "min_sprout_version": m.MinSproutVersion,
@@ -295,15 +295,15 @@ func TestSign_RefusesVersionAtOrBelowFloor(t *testing.T) {
 func TestSign_RejectsInvalidManifest(t *testing.T) {
 	m := newMockTransit(t)
 	h := newTestService(t, m, "signer")
-	for name, mutate := range map[string]func(*fleetsign.Manifest){
-		"uppercase checksum":     func(e *fleetsign.Manifest) { e.ChecksumSHA256 = strings.ToUpper(testChecksum) },
-		"path in file_name":      func(e *fleetsign.Manifest) { e.FileName = "../imas-sprout.deb" },
-		"min above version":      func(e *fleetsign.Manifest) { e.MinSproutVersion = "v9.0.0" },
-		"non-canonical version":  func(e *fleetsign.Manifest) { e.Version = "v2.4" },
-		"separator in os":        func(e *fleetsign.Manifest) { e.OS = "linux|amd64" },
-		"empty arch":             func(e *fleetsign.Manifest) { e.Arch = "" },
-		"uppercase os":           func(e *fleetsign.Manifest) { e.OS = "Linux" },
-		"whitespace in checksum": func(e *fleetsign.Manifest) { e.ChecksumSHA256 = " " + testChecksum },
+	for name, mutate := range map[string]func(*fleetsign.LegacyManifest){
+		"uppercase checksum":     func(e *fleetsign.LegacyManifest) { e.ChecksumSHA256 = strings.ToUpper(testChecksum) },
+		"path in file_name":      func(e *fleetsign.LegacyManifest) { e.FileName = "../imas-sprout.deb" },
+		"min above version":      func(e *fleetsign.LegacyManifest) { e.MinSproutVersion = "v9.0.0" },
+		"non-canonical version":  func(e *fleetsign.LegacyManifest) { e.Version = "v2.4" },
+		"separator in os":        func(e *fleetsign.LegacyManifest) { e.OS = "linux|amd64" },
+		"empty arch":             func(e *fleetsign.LegacyManifest) { e.Arch = "" },
+		"uppercase os":           func(e *fleetsign.LegacyManifest) { e.OS = "Linux" },
+		"whitespace in checksum": func(e *fleetsign.LegacyManifest) { e.ChecksumSHA256 = " " + testChecksum },
 	} {
 		e := testManifest()
 		mutate(&e)

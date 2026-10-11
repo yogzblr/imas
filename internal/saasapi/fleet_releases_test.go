@@ -43,7 +43,7 @@ var (
 // key unless told to refuse, fail, or sign with some other key.
 type fakeSigner struct {
 	mu     sync.Mutex
-	calls  []fleetsign.Manifest
+	calls  []fleetsign.LegacyManifest
 	refuse *signRefusedError
 	err    error
 	// failAfter, when > 0, makes calls after the first failAfter fail.
@@ -52,7 +52,7 @@ type fakeSigner struct {
 	wrongKey bool
 }
 
-func (f *fakeSigner) Sign(_ context.Context, m fleetsign.Manifest) (string, error) {
+func (f *fakeSigner) Sign(_ context.Context, m fleetsign.LegacyManifest) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, m)
@@ -606,7 +606,7 @@ func newFakeFleetReleaser(t *testing.T) *fakeFleetReleaser {
 		if f.reply != nil && f.reply(w, fields) {
 			return
 		}
-		m := fleetsign.Manifest{Version: fields["version"], OS: fields["os"], Arch: fields["arch"], FileName: fields["file_name"],
+		m := fleetsign.LegacyManifest{Version: fields["version"], OS: fields["os"], Arch: fields["arch"], FileName: fields["file_name"],
 			ChecksumSHA256: fields["checksum_sha256"], MinSproutVersion: fields["min_sprout_version"]}
 		msg, err := m.Message()
 		if err != nil {

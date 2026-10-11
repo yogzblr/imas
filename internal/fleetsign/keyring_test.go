@@ -242,12 +242,12 @@ func TestSmallOrderY_MatchesCurve(t *testing.T) {
 	}
 }
 
-func TestParseManifest_Strict(t *testing.T) {
+func TestLegacyParseManifest_Strict(t *testing.T) {
 	_, priv := newTestKey(t, 1)
 	signed := signForTest(t, priv, 1, testManifest())
 	good, _ := json.Marshal(signed)
-	if _, err := ParseManifest(good); err != nil {
-		t.Fatalf("ParseManifest(%s): %v", good, err)
+	if _, err := LegacyParseManifest(good); err != nil {
+		t.Fatalf("LegacyParseManifest(%s): %v", good, err)
 	}
 	withField := func(extra string) string {
 		return strings.TrimSuffix(string(good), "}") + "," + extra + "}"
@@ -272,19 +272,19 @@ func TestParseManifest_Strict(t *testing.T) {
 		"missing min version":   without("min_sprout_version"),
 		"trailing data":         string(good) + `{}`,
 		"invalid field":         strings.Replace(string(good), `"os":"linux"`, `"os":"Linux"`, 1),
-		"oversized":             string(good) + strings.Repeat(" ", maxManifestJSON),
+		"oversized":             string(good) + strings.Repeat(" ", maxLegacyManifestJSON),
 	}
 	for name, in := range cases {
-		if _, err := ParseManifest([]byte(in)); !errors.Is(err, ErrInvalidManifest) {
-			t.Errorf("%s: ParseManifest(%.80s...) = %v, want ErrInvalidManifest", name, in, err)
+		if _, err := LegacyParseManifest([]byte(in)); !errors.Is(err, ErrInvalidManifest) {
+			t.Errorf("%s: LegacyParseManifest(%.80s...) = %v, want ErrInvalidManifest", name, in, err)
 		}
 	}
 	// An empty signature parses (it is a well-formed manifest) but never
 	// verifies.
 	unsigned := strings.Replace(string(good), signed.Signature, "", 1)
-	m, err := ParseManifest([]byte(unsigned))
+	m, err := LegacyParseManifest([]byte(unsigned))
 	if err != nil {
-		t.Fatalf("ParseManifest(unsigned): %v", err)
+		t.Fatalf("LegacyParseManifest(unsigned): %v", err)
 	}
 	ring, _ := NewKeyring([]PublicKey{{Version: 1, Key: priv.Public().(ed25519.PublicKey)}})
 	if err := ring.Verify(m); !errors.Is(err, ErrMissingSignature) {

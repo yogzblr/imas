@@ -14,14 +14,14 @@ import (
 	"golang.org/x/mod/semver"
 
 	"github.com/yogzblr/imas/internal/cook"
-	"github.com/yogzblr/imas/internal/fleetsign"
 )
 
-// Binding the package to the signed manifest (security review 2026-10,
-// M1). The manifest signs a version and a SHA-256, and the repository's
-// index is searched for that hash (repo.go), but the hash alone says
-// nothing about which package the bytes are: a signed row for v3.0.0 can
-// carry the checksum of the genuine, older imas-sprout_2.0.0 .deb that the
+// Binding the package to the signed release (security review 2026-10,
+// M1). The release's GPG-signed checksums.txt gives the SHA-256 of the
+// file name the sprout derived for the target version, and the
+// repository's index is searched for that hash (repo.go), but the hash
+// alone says nothing about which package the bytes are: a signed line can
+// carry the checksum of a genuine, older imas-sprout package that the
 // repository still holds (or of any other package in a general-purpose
 // mirror). So, after the hash check and before the installer runs, the
 // sprout reads the package's own metadata with the platform's tools and
@@ -89,8 +89,8 @@ const (
 )
 
 // ErrPackageMismatch: the package's own metadata does not name
-// imas-sprout at the signed manifest's version.
-var ErrPackageMismatch = errors.New("selfupdate: the package's own metadata does not match the signed manifest")
+// imas-sprout at the verified target version.
+var ErrPackageMismatch = errors.New("selfupdate: the package's own metadata does not match the verified release")
 
 // Seams for tests. Production code always uses these values.
 var (
@@ -330,7 +330,7 @@ func manifestComparable(pkgType, version string) string {
 // matched the signed checksum, to be imas-sprout at m's version. It
 // returns the identity (for the post-install check) and a note for the
 // job.
-func verifyPackageIdentity(ctx context.Context, p platform, file string, m fleetsign.Manifest) (pkgIdentity, fmt.Stringer, error) {
+func verifyPackageIdentity(ctx context.Context, p platform, file string, m release) (pkgIdentity, fmt.Stringer, error) {
 	id, err := readPackageIdentity(ctx, p, file)
 	if err != nil {
 		return id, nil, err
@@ -346,10 +346,10 @@ func verifyPackageIdentity(ctx context.Context, p platform, file string, m fleet
 		return id, nil, err
 	}
 	if want := manifestComparable(p.pkgType, m.Version); v != want {
-		return id, nil, fmt.Errorf("%w: the package is %s %s (%s), but the signed manifest is for %s",
+		return id, nil, fmt.Errorf("%w: the package is %s %s (%s), but the verified release is %s",
 			ErrPackageMismatch, sproutPackageName, id.version, v, m.Version)
 	}
-	return id, cook.Snprintf("package metadata: %s, version %s (%s) matches the signed manifest", sproutPackageName, id.version, v), nil
+	return id, cook.Snprintf("package metadata: %s, version %s (%s) matches the verified release", sproutPackageName, id.version, v), nil
 }
 
 // verifyInstalled checks, after a Linux installer exited successfully,

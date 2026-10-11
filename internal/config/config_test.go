@@ -1478,7 +1478,7 @@ func TestLoadConfig_SproutUpdateRepoSettings(t *testing.T) {
 			if name == "unset" && SproutUpdateRepoFormat+SproutUpdateRepoDist+SproutUpdateRepoPackageID != "" {
 				t.Errorf("unset: format, dist, package id = %q, %q, %q", SproutUpdateRepoFormat, SproutUpdateRepoDist, SproutUpdateRepoPackageID)
 			}
-			if want := filepath.Join(tmpRoot, "fleet-signing-keys.json"); SproutFleetSigningKeyring != want {
+			if want := filepath.Join(tmpRoot, "fleet-signing-keys.asc"); SproutFleetSigningKeyring != want {
 				t.Errorf("SproutFleetSigningKeyring = %q, want %q", SproutFleetSigningKeyring, want)
 			}
 		})

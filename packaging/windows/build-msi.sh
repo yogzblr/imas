@@ -10,8 +10,9 @@
 #      (Major, Minor, Patch, Version, MsiArch, Binary), failing on any
 #      template action it does not handle;
 #   2. stages a temp directory holding imas-sprout.exe,
-#      packaging/etc/imas-sprout.conf and packaging/etc/fleet-signing-keys.json
-#      at those relative paths next to the rendered .wxs;
+#      packaging/etc/imas-sprout.conf and gpg-public-key.asc (the update
+#      keyring, installed as fleet-signing-keys.asc) at those relative paths
+#      next to the rendered .wxs;
 #   3. runs `wixl -a x64` there, then packaging/windows/msi-postprocess.sh on
 #      the result (what wixl can't express: component attributes, the start
 #      condition and the directory ACL);
@@ -91,7 +92,7 @@ fi
 
 [[ -f "$binary" ]] || die "no such binary: $binary"
 [[ "$(head -c 2 "$binary")" == "MZ" ]] || die "not a Windows executable: $binary"
-for f in "$wxs" "$postprocess" "$repo/packaging/etc/imas-sprout.conf" "$repo/packaging/etc/fleet-signing-keys.json"; do
+for f in "$wxs" "$postprocess" "$repo/packaging/etc/imas-sprout.conf" "$repo/gpg-public-key.asc"; do
 	[[ -f "$f" ]] || die "missing $f"
 done
 
@@ -109,7 +110,8 @@ trap cleanup EXIT
 stage="$work/stage"
 mkdir -p "$stage/packaging/etc"
 cp "$binary" "$stage/imas-sprout.exe"
-cp "$repo/packaging/etc/imas-sprout.conf" "$repo/packaging/etc/fleet-signing-keys.json" "$stage/packaging/etc/"
+cp "$repo/packaging/etc/imas-sprout.conf" "$stage/packaging/etc/"
+cp "$repo/gpg-public-key.asc" "$stage/gpg-public-key.asc"
 
 # --- render ----------------------------------------------------------------
 # Stands in for the goreleaser template engine on the few actions the .wxs
