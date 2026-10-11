@@ -129,7 +129,9 @@ func main() {
 		log.Flush()
 		os.Exit(code)
 	}
-	fmt.Printf("Starting Farmer (core) with bus URL %s\n", config.FarmerBusURL)
+	// stdout carries only audit JSON lines (initAuditLogger); this goes
+	// to stderr with the rest of the terminal log.
+	fmt.Fprintf(os.Stderr, "Starting Farmer (core) with bus URL %s\n", config.FarmerBusURL)
 	defer log.Flush()
 	initRecipeLimits()
 	initStorage()
