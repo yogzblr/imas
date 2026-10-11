@@ -27,6 +27,7 @@ Goal: no person and no pod ever holds a private signing key; farmer and the bus 
 | D7 | Test policy: do not test external components (OpenBao, NATS, PXC/Galera, Valkey, object store) beyond what their official documentation states. Our tests target the horizontal scalability and correctness of our own code: farmer, sprout, bus (farmerbus), saasapi. |
 | D8 | OpenBao version pinned to 2.7.1 (released 2026-10-01, security fixes). A second (DR) seal is out of scope: availability comes from using a highly available external signing vault/KMS. |
 | D9 | **Fleet update trust uses the release's GPG signature, not a Transit key (owner, 2026-10-11).** The release already publishes `checksums.txt` with a detached GPG signature. The sprout verifies that, with the GPG public key shipped in its package. `imas-fleet-signing`, `fleetreleaser` and the Ed25519 manifest signature are retired. See section 4.1. |
+| D10 | **Farmer, saasapi and the bus are stateless (owner, 2026-10-11).** They carry no PersistentVolumeClaim and keep no state that is not rebuilt from the shared services at start. State lives only in the replicated external services (PXC, OpenBao, Valkey, object store), which keep their own local volumes and their own replication. For the bus this means the Account JWT store (`NewDirAccResolver` under `/var/lib/imas/farmerbus` today) is no longer on a volume: a new or restarted bus node gets the operator JWT from the ConfigMap and every Account JWT back from the source of truth (resolver mode to be decided, BUILD-STATUS P23). |
 
 ## 3. Terms
 
@@ -149,6 +150,7 @@ Object store rules: separate private bucket, farmer-only credentials, SSE, never
 - Bus (`ConfigureBusNats`, `seedResolverFromCore`): load the published operator JWT and SYS public key instead of deriving the trust chain from seeds.
 - Remove the six-seed Secret (`natsSeeds`) for signing keys; keep SYS user and SaaS API user seeds.
 - Stop writing `account.nk`, `account-signing.nk`, per-sprout JWT files, farmer JWT files to the PVC; farmer NKey and rotation state to PXC or Secret.
+- Statelessness (D10): remove the farmer PVC and the bus `volumeClaimTemplates`; the bus rebuilds its Account JWT store at start; saasapi already holds no volume.
 - Chart: replace dev-mode OpenBao with HA Raft plus seal config; rewrite the bootstrap Job; remove the `farmer.replicaCount == 1` validation after the state work is done.
 - UAT: static-key seal, fresh keys per run (no import).
 
