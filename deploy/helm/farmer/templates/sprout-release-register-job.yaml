@@ -6,15 +6,18 @@
 Sprout release registration (docs/design/cloudxp-machine-manager-api-design.md
 §2.5, FU.5): `farmer register-sprout-release` (internal/sproutrelease), in
 farmer's own image, POSTs files/sprout-release.json (version and
-min_sprout_version stamped at release time), with this chart's channel, to
-saasapi's operator plane. saasapi has fleetreleaser sign each new OS/arch
-package and stores the rows. Rendered only when the chart carries a stamped
-release and saasapi's operator plane is on; NOTES says why otherwise.
+min_sprout_version stamped at release time, and the release's GPG-signed
+checksums.txt with its signature), with this chart's channel, to saasapi's
+operator plane. saasapi signs and verifies nothing: it stores the rows and
+the checksums.txt and signature as given. Rendered only when the chart
+carries a stamped release and saasapi's operator plane is on; NOTES says
+why otherwise.
 
 FLAG FOR SECURITY REVIEW: this Job's pod presents the operator token. With
-it, anyone can get any well-formed release above fleetreleaser's floor
-signed (deploy/fleetreleaser/README.md, "What the split does not stop").
-So the pod gets that one Secret key and nothing else: a ServiceAccount of
+it, anyone can register any well-formed release whose checksums.txt they
+supply; a sprout installs only what verifies against its packaged keyring
+(signing design D20). So the pod gets that one Secret key and nothing
+else: a ServiceAccount of
 its own with no RBAC, no API token, no OpenBao role; only ca.crt from the
 operator TLS Secret; egress to saasapi's operator port and DNS only.
 */}}

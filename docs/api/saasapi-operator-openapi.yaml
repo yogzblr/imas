@@ -28,12 +28,12 @@ info:
     constant time. The BFF's `X-Internal-Auth` secret and Keycloak JWTs
     are not accepted. Every failure is the same 401.
 
-    **Signing.** saasapi never signs. For each package not yet registered
-    it calls `cmd/fleetreleaser` (`POST /v1/sign`), the only holder of
-    Transit sign on `imas-fleet-signing`, which validates the entry,
-    refuses a version at or below its configured floor, and returns the
-    signature. saasapi verifies every signature against the read-only key
-    set before writing anything.
+    **Trust.** saasapi signs nothing and verifies no signature. The
+    release's GPG-signed `checksums.txt` is the trust root: the request
+    carries it verbatim with `checksums.txt.sig`, saasapi checks that
+    every package matches a line of it and stores both, and the sprout
+    alone verifies the signature against its packaged keyring
+    (docs/design/imas-openbao-signing-design.md D9, D20).
 
     **Errors.** `{"error": "<code>", "message": "<text>", "details": {...}}`.
     404 for an unregistered path and 405 for a wrong method come from Go's
@@ -52,23 +52,29 @@ paths:
       operationId: RegisterFleetRelease
       summary: Register a sprout release (idempotent)
       description: |
-        Validates the release, compares it with what is registered for the
-        version, has fleetreleaser sign each new OS/arch package, verifies
-        each signature, and writes the new rows in one transaction.
+        Validates the release, parses `checksums_txt` whole with the
+        sprout's strict rules, checks each package's `file_name` and
+        `checksum_sha256` against its line, compares the release with what
+        is registered for the version, and writes the new rows (and the
+        version's checksums row, if it has none yet) in one transaction.
+        The GPG signature is not verified here; the sprout verifies it.
 
         - Releases are immutable: an OS/arch already registered with a
           different `package_type`, `file_name` or `checksum_sha256`, or a
-          different `min_sprout_version` for the version, is 409
-          `release_conflict`, and nothing changes.
-        - The same contents again is a 200 no-op that doesn't call
-          fleetreleaser, so re-running the hook (helm upgrade, helm
-          rollback) is always safe.
+          different `min_sprout_version`, `checksums_txt` or
+          `checksums_sig` for the version, is 409 `release_conflict`, and
+          nothing changes.
+        - The same contents again is a 200 no-op, so re-running the hook
+          (helm upgrade, helm rollback) is always safe.
         - Packages for an OS/arch the version doesn't have yet are added
           (201). Registered rows absent from the request are left alone.
         - A revoked version takes no new packages (409 `version_revoked`);
           re-registering its existing contents is a 200 no-op that leaves
           it revoked.
-        - Any signing failure stores nothing.
+        - A version registered before P22 (rows but no checksums) gets
+          its checksums stored by a matching re-registration (201,
+          `created` 0).
+        - Any failure stores nothing.
       requestBody:
         required: true
         content:
@@ -86,7 +92,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/FleetReleaseResponse" }
         "400":
-          description: "`invalid_request` (not one JSON object of the right shape, unknown field) or `invalid_release` (a field fails validation)."
+          description: "`invalid_request` (not one JSON object of the right shape, unknown field, over 512 KiB) or `invalid_release` (a field fails validation, including a missing or oversize `checksums_txt` or `checksums_sig`, or `checksums_sig` that isn't standard padded base64)."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -98,23 +104,16 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "422":
           description: |
-            `signing_refused`: fleetreleaser declined to sign, e.g. a
-            version at or below its floor. `details.signer_error` and
-            `details.signer_message` carry its code and message.
+            `invalid_checksums`: a line of `checksums_txt` breaks the
+            sprout's rules (not `<64 lowercase hex>  <file name>`, or a
+            duplicate file name); the message names the line number.
+            `checksums_mismatch`: a package's `file_name` is not a line of
+            `checksums_txt`, or its `checksum_sha256` differs from that
+            line's hash; the message names the file.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "500": { $ref: "#/components/responses/InternalError" }
-        "502":
-          description: "`signer_unavailable`: fleetreleaser failed, or returned a signature that doesn't verify."
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-        "503":
-          description: "`signing_unavailable`: the read-only fleet signing key source isn't configured or can't be read."
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
 
   /v1/operator/fleet-releases/{version}/revoke:
     parameters:
@@ -166,7 +165,7 @@ components:
       description: |
         The operator token from a mounted Secret file. Distinct from the
         BFF's shared secret (saasapi refuses to start the operator plane
-        if they are equal) and from saasapi's fleetreleaser token.
+        if they are equal, current or previous).
 
   responses:
     Unauthorized:
@@ -193,20 +192,35 @@ components:
     FleetReleaseRequest:
       type: object
       additionalProperties: false
-      required: [version, channel, min_sprout_version, packages]
+      required: [version, channel, min_sprout_version, packages, checksums_txt, checksums_sig]
       properties:
         version: { type: string, maxLength: 64, description: "Canonical semver with a leading v, e.g. v2.4.1 or v2.5.0-rc.1." }
         channel:
           type: string
           pattern: "^[a-z][a-z0-9_-]{0,31}$"
           description: Validated and logged; not stored (saas.fleet_versions has no column for it).
-        min_sprout_version: { type: string, maxLength: 64, description: "The oldest sprout that may update to this release; at most version. Signed." }
+        min_sprout_version: { type: string, maxLength: 64, description: "The oldest sprout that may update to this release; at most version. Unsigned farmer policy, enforced by the sprout." }
         packages:
           type: array
           minItems: 1
           maxItems: 16
           description: At most one package per os/arch.
           items: { $ref: "#/components/schemas/FleetReleasePackage" }
+        checksums_txt:
+          type: string
+          minLength: 1
+          description: |
+            The release's `checksums.txt`, verbatim (1 byte to 128 KiB).
+            Every non-empty line must match
+            `^[0-9a-f]{64}  [A-Za-z0-9][A-Za-z0-9._+~-]*$`, with no
+            duplicate file name, and every package must be a line of it.
+        checksums_sig:
+          type: string
+          minLength: 1
+          description: |
+            `checksums.txt.sig` (the GPG detached signature) in standard
+            padded base64, decoding to 1 byte to 8 KiB. Stored, not
+            verified by saasapi.
 
     FleetReleasePackage:
       type: object
@@ -236,11 +250,10 @@ components:
           type: array
           items:
             type: object
-            required: [os, arch, package_type, file_name, checksum_sha256, signature]
+            required: [os, arch, package_type, file_name, checksum_sha256]
             properties:
               os: { type: string }
               arch: { type: string }
               package_type: { type: string }
               file_name: { type: string }
               checksum_sha256: { type: string }
-              signature: { type: string, description: "fleetreleaser's v<key version>:<base64> Ed25519 signature." }

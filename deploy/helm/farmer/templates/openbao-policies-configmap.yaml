@@ -3,10 +3,8 @@
 # The OpenBao ACL policies the bootstrap Job writes, one file per policy
 # (the file name is the policy name).
 #
-# FLAG FOR SECURITY REVIEW. These three are verbatim copies of reviewed
-# sources, and chart_test.go fails if they drift:
-#   imas-fleet-signer.hcl, imas-fleet-verify.hcl
-#       deploy/fleetreleaser/policies/
+# FLAG FOR SECURITY REVIEW. This one is a verbatim copy of a reviewed
+# source, and chart_test.go fails if it drifts:
 #   imas-saasapi-cred-publisher.hcl
 #       deploy/farmer/README.md, "OpenBao policy" (the only KV-write grant)
 # The imas-farmer-* ones are rendered from the values they name.

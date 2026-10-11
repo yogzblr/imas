@@ -12,13 +12,12 @@ of the date noted in its own header comment.)*
 |---|---|---|
 | **farmer** (`cmd/farmer`) | non-DMZ core | dispatches recipes to sprouts over NATS, owns the `farmer` schema in PXC |
 | **saasapi** (`cmd/saasapi`) | non-DMZ core | the tenant-facing control-plane API — see [SaaS API reference](./api-reference.md) |
-| **fleetreleaser** (`cmd/fleetreleaser`) | non-DMZ core | the only signer of fleet (sprout update) manifests; a stateless TLS service saasapi calls, with no database access |
 | **migrate** (`cmd/migrate`) | non-DMZ core, Helm hook Job | creates the schemas and applies versioned goose migrations before farmer and saasapi start or upgrade |
 | **farmerbus** (NATS) + **Envoy** | DMZ | the only thing sprouts ever connect to; Envoy validates a gateway JWT before traffic reaches nats-server |
 | **sprout** (`cmd/sprout`) | managed VM / bare-metal host | the managed endpoint; connects outbound to the DMZ, applies recipes locally via [ingredients](./ingredients/index.md) |
 | **imas CLI** (`cmd/imas`) | operator's machine | talks to saasapi/farmer to create tenants, enrollment keys, and dispatch recipes |
 
-Only farmer, saasapi, fleetreleaser and the migration Job live in the non-DMZ core; the connection is always
+Only farmer, saasapi and the migration Job live in the non-DMZ core; the connection is always
 outbound from core to the DMZ bus, never the reverse.
 
 ## Tenancy and identity
@@ -45,7 +44,7 @@ index, cache and map in the codebase keys on `(tenant_id, sprout_id)`.
 | **PXC** (Percona XtraDB Cluster / MySQL 8) | durable metadata: PKI, RBAC, tenant accounts, sprout X25519 public keys | `farmer` and `saas` schemas, one PXC cluster; farmer has read access to the `saas` schema |
 | **Valkey Cluster** | heartbeat / connection-state | fed from NATS connection lifecycle events; no tenant hash-tagging |
 | **Object storage** (S3-compatible) | job logs, recipes | two separate buckets |
-| **OpenBao** | operator/account signing keys, TLS cert issuance, per-tenant X25519 keypairs, fleet-release signing keys | see [`imas-sdb-secrets-design.md`](https://github.com/yogzblr/imas/blob/main/docs/design/imas-sdb-secrets-design.md), [`imas-payload-encryption-design.md`](https://github.com/yogzblr/imas/blob/main/docs/design/imas-payload-encryption-design.md) |
+| **OpenBao** | operator/account signing keys, TLS cert issuance, per-tenant X25519 keypairs (fleet releases are trusted by their GPG-signed `checksums.txt`, not an OpenBao key) | see [`imas-sdb-secrets-design.md`](https://github.com/yogzblr/imas/blob/main/docs/design/imas-sdb-secrets-design.md), [`imas-payload-encryption-design.md`](https://github.com/yogzblr/imas/blob/main/docs/design/imas-payload-encryption-design.md) |
 
 PXC (GPLv2, under commercial Percona agreement) and OpenBao (MPL-2.0) are the
 two accepted exceptions to the project's Apache-2.0/MIT-only default for

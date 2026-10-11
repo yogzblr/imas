@@ -271,7 +271,7 @@ type rolloutResponse struct {
 //
 // The request is checked in this order: the tenant is active; the body is
 // valid; target_version is in the catalog (else 400 unknown_version) with
-// every row's signature valid (else 500); it's the tenant's
+// rows of that one version (else 500); it's the tenant's
 // approved_version (else 409 version_not_approved); it isn't revoked (else
 // 409 version_revoked); now is inside the tenant's rollout window if one is
 // set (else 409 outside_rollout_window). Each resolved sprout is then

@@ -53,8 +53,7 @@ spec:
 #        with saasapi.operator: the sprout release hook Job's pods (plus
 #        networkPolicy.saasapiOperatorIngress.from) -> the operator port
 #   out: the bus (client port), PXC, Valkey, DNS; OpenBao only for the
-#        fleet key client or the bus CA fetch; fleetreleaser with
-#        saasapi.operator; the object store with saasapi.recipes; plus
+#        bus CA fetch; the object store with saasapi.recipes; plus
 #        networkPolicy.saasapiExtraEgress (default: HTTPS anywhere, for the
 #        Keycloak JWKS)
 # Sealed internal.* (J.4) adds no path: it rides the bus connection, and
@@ -96,11 +95,8 @@ spec:
     {{- if $hasValkey }}
     {{- include "imas-farmer.depEgress" $valkey | nindent 4 }}
     {{- end }}
-    {{- if include "imas-farmer.saasapi.needsOpenBao" . }}
+    {{- if include "imas-farmer.saasapi.fetchCA" . }}
     {{- include "imas-farmer.openbaoEgress" . | nindent 4 }}
-    {{- end }}
-    {{- if .Values.saasapi.operator.enabled }}
-    {{- include "imas-farmer.depEgress" (dict "bundled" false "peers" $np.fleetreleaser.to "port" (include "imas-farmer.saasapi.fleetReleaserPort" .)) | nindent 4 }}
     {{- end }}
     {{- if .Values.saasapi.recipes.enabled }}
     {{- include "imas-farmer.depEgress" (dict "bundled" false "peers" $np.external.objectStore "port" (include "imas-farmer.objectStorePort" .)) | nindent 4 }}

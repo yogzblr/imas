@@ -14,11 +14,6 @@ silently editing a reviewed policy.
 {{- if and $p.enabled (or (ne $p.kvMount "secret") (ne (trimAll "/" $p.kvPath) "platform/imas/saasapi-nats-user")) -}}
 {{- fail "openbaoBootstrap writes files/openbao-policies/imas-saasapi-cred-publisher.hcl, which grants secret/data/platform/imas/saasapi-nats-user only. Keep credentialPublisher.kvMount=secret and kvPath=platform/imas/saasapi-nats-user, or change the policy (and its review) together with them." -}}
 {{- end -}}
-{{- range $fs := list .Values.farmer.openbao.fleetSign .Values.saasapi.openbao.fleetSign -}}
-{{- if or (ne $fs.transitMount "transit") (ne $fs.keyName "imas-fleet-signing") -}}
-{{- fail "openbaoBootstrap writes the reviewed imas-fleet-verify.hcl, which names transit/keys/imas-fleet-signing. Keep *.openbao.fleetSign.transitMount=transit and keyName=imas-fleet-signing." -}}
-{{- end -}}
-{{- end -}}
 {{- $ns := .Release.Namespace -}}
 {{- $farmerSA := include "imas-farmer.farmer.serviceAccountName" . -}}
 {{- $ob := .Values.farmer.openbao -}}
@@ -107,12 +102,9 @@ spec:
 
               has_mount() { bao secrets list | grep -q "^$1/ "; }
               has_mount transit || bao secrets enable -path=transit transit
-              # Gateway JWT key (farmer signs), and the fleet signing key
-              # (only cmd/fleetreleaser signs; farmer and saasapi verify).
+              # Gateway JWT key (farmer signs).
               bao read transit/keys/{{ $ob.gateway.keyName }} >/dev/null 2>&1 \
                 || bao write -f transit/keys/{{ $ob.gateway.keyName }} type=ed25519
-              bao read transit/keys/imas-fleet-signing >/dev/null 2>&1 \
-                || bao write -f transit/keys/imas-fleet-signing type=ed25519 exportable=false allow_plaintext_backup=false
               {{- range $kvMounts }}
               has_mount {{ . }} || bao secrets enable -path={{ . }} -version=2 kv
               {{- end }}
@@ -160,11 +152,7 @@ spec:
               role {{ .Values.tls.openbao.k8sRole }} {{ $farmerSA }} {{ $ns }} imas-farmer-certs {{ $bs.tokenTTL }} {{ $bs.tokenMaxTTL }}
               {{- end }}
               role {{ $ob.gateway.k8sRole }} {{ $farmerSA }} {{ $ns }} imas-farmer-gateway {{ $bs.tokenTTL }} {{ $bs.tokenMaxTTL }}
-              role {{ $ob.fleetSign.k8sRole }} {{ $farmerSA }} {{ $ns }} imas-fleet-verify {{ $bs.tokenTTL }} {{ $bs.tokenMaxTTL }}
               role {{ $ob.tenantBox.k8sRole }} {{ $farmerSA }} {{ $ns }} imas-farmer-tenantbox {{ $bs.tokenTTL }} {{ $bs.tokenMaxTTL }}
-              {{- if include "imas-farmer.saasapi.fleetVerify" . }}
-              role {{ .Values.saasapi.openbao.fleetSign.k8sRole }} {{ include "imas-farmer.saasapi.serviceAccountName" . }} {{ $ns }} imas-fleet-verify {{ $bs.tokenTTL }} {{ $bs.tokenMaxTTL }}
-              {{- end }}
               {{- if $p.enabled }}
               # deploy/farmer/README.md: a run makes two KV calls; 5m is plenty.
               role {{ $p.k8sRole }} {{ $p.serviceAccountName }} {{ $ns }} imas-saasapi-cred-publisher 5m 5m
@@ -176,8 +164,6 @@ spec:
               {{- if $bs.farmerbus.enabled }}
               role imas-farmerbus {{ $bs.farmerbus.serviceAccountName }} {{ .Values.bus.namespace }} imas-farmerbus-certs {{ $bs.tokenTTL }} {{ $bs.tokenMaxTTL }}
               {{- end }}
-              # imas-fleet-signer is written for cmd/fleetreleaser, which this
-              # chart doesn't deploy: no role here binds it.
               echo "OpenBao bootstrap complete"
           env:
             - name: BAO_ADDR

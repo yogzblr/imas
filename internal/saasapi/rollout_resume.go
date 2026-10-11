@@ -14,9 +14,8 @@
 //     dispatch time. The gate must pass before anything else is sent.
 //   - Only items still queued are sent, in request order, in waves of the
 //     original size. Before every wave the tenant's policy, the version's
-//     revocation, and its registration (catalog rows whose signatures
-//     verify) are checked again, as CreateFleetUpdateBatch and farmer's
-//     re-verification do, and before every wave and item that the tenant
+//     revocation, and its registration (it still has catalog rows) are
+//     checked again, as CreateFleetUpdateBatch and farmer's own check do, and before every wave and item that the tenant
 //     is still active, as a live rollout does.
 //   - Items in dispatching are never re-sent: the sprout deduplicates
 //     nothing, so a second send could update (or, for a §1.5 batch, run a

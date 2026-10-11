@@ -169,13 +169,6 @@ spec:
             {{- include "imas-farmer.openbaoEnv" (dict "root" $ "prefix" "IMAS_GATEWAY_OPENBAO" "k8sRole" $ob.gateway.k8sRole "tokenKey" $ob.gateway.tokenSecretKey) | nindent 12 }}
             - name: IMAS_GATEWAY_OPENBAO_TRANSIT_MOUNT
               value: {{ $ob.gateway.transitMount | quote }}
-            # Fleet signing key, READ-ONLY (imas-fleet-verify). Never an
-            # IMAS_FLEETRELEASER_* variable here.
-            {{- include "imas-farmer.openbaoEnv" (dict "root" $ "prefix" "IMAS_FLEETSIGN_OPENBAO" "k8sRole" $ob.fleetSign.k8sRole "tokenKey" $ob.fleetSign.tokenSecretKey) | nindent 12 }}
-            - name: IMAS_FLEETSIGN_OPENBAO_TRANSIT_MOUNT
-              value: {{ $ob.fleetSign.transitMount | quote }}
-            - name: IMAS_FLEETSIGN_TRANSIT_KEY
-              value: {{ $ob.fleetSign.keyName | quote }}
             # Tenant X25519 keypair (KV v2).
             {{- include "imas-farmer.openbaoEnv" (dict "root" $ "prefix" "IMAS_TENANTBOX_OPENBAO" "k8sRole" $ob.tenantBox.k8sRole "tokenKey" $ob.tenantBox.tokenSecretKey) | nindent 12 }}
             - name: IMAS_TENANTBOX_OPENBAO_KV_MOUNT
