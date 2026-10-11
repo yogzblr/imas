@@ -131,8 +131,37 @@ func TestUpdateManifest_ServesApprovedSignedRow(t *testing.T) {
 	if got != want {
 		t.Errorf("got %+v, want %+v", got, want)
 	}
-	if lower := strings.ToLower(rec.Body.String()); strings.Contains(lower, "url") || strings.Contains(lower, "http") {
-		t.Errorf("response mentions a URL: %s", rec.Body)
+	assertNoURL(t, rec.Body.Bytes())
+}
+
+// assertNoURL fails if a manifest response carries a URL (requirements
+// item 20, API design §1.8). It checks the JSON keys and the string values
+// except signature and checksum_sha256: those are random base64 and hex,
+// which can spell "url" or "http" by chance. "://" can never appear in
+// either encoding, so the whole body is also checked for it.
+func assertNoURL(t *testing.T, body []byte) {
+	t.Helper()
+	if strings.Contains(string(body), "://") {
+		t.Errorf("response mentions a URL: %s", body)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(body, &fields); err != nil {
+		t.Fatalf("response is not a JSON object: %v\n%s", err, body)
+	}
+	mentionsURL := func(s string) bool {
+		s = strings.ToLower(s)
+		return strings.Contains(s, "url") || strings.Contains(s, "http")
+	}
+	for k, v := range fields {
+		if mentionsURL(k) {
+			t.Errorf("response has a URL-like key %q: %s", k, body)
+		}
+		if k == "signature" || k == "checksum_sha256" {
+			continue
+		}
+		if s, ok := v.(string); ok && mentionsURL(s) {
+			t.Errorf("response field %q mentions a URL: %q", k, s)
+		}
 	}
 }
 
