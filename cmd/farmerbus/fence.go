@@ -155,7 +155,8 @@ func (f *fence) gate(next func(tls.ConnectionState) error) func(tls.ConnectionSt
 func (f *fence) start(srv *nats_server.Server, sysUser pki.BusSysUser) error {
 	f.srv = srv
 	// An in-process pipe: no listener, so neither the TLS gate nor TLS
-	// itself applies. sysUser is the bus's ephemeral SYS user
+	// itself applies. sysUser is the bus fence user: its seed from the
+	// BUS_FENCE_USER Secret, its JWT from the trust directory
 	// (pki.ConfigureBusNats).
 	nc, err := nats.Connect(nats.DefaultURL,
 		nats.InProcessServer(srv),

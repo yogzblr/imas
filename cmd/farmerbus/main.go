@@ -102,9 +102,10 @@ func main() {
 // PXC-backed accept/deny/reject state — state this DMZ-side process has no
 // business holding a database connection to.
 //
-// pki.ConfigureBusNats seeds the resolver with nothing but a SYS bootstrap
-// Account JWT that any SYS Account JWT core signs outranks; the bus mints
-// no tenant Account (internal/pki/busauth.go). It learns every Account
+// pki.ConfigureBusNats reads only the public trust directory and seeds the
+// resolver with nothing but its SYS Account JWT, which any SYS Account JWT
+// core signs outranks; the bus holds no trust chain key and mints nothing
+// (internal/pki/busauth.go). It learns every Account
 // from core, which pushes them all whenever its SYS connection connects
 // or reconnects and pushes each change as it happens, over the network to
 // $SYS.REQ.CLAIMS.UPDATE; a clustered node also pulls them from its peers
@@ -129,6 +130,9 @@ func RunNATSServer() {
 		log.Info("NATS bus started")
 	}
 }
+
+// errNoFenceUser is a clustered bus started without a fence user.
+var errNoFenceUser = errors.New("farmerbus: a clustered bus needs a fence user: set IMAS_NATS_BUS_FENCE_USER_SEED_FILE (Secret key BUS_FENCE_USER) and bus-fence-user.jwt in the NATS trust")
 
 // busNode is one running bus: the server and, when clustered, its fence.
 type busNode struct {
@@ -163,10 +167,14 @@ func getBusNode() *busNode  { nodeMu.Lock(); defer nodeMu.Unlock(); return curNo
 // startBus starts the embedded server from opts (pki.ConfigureBusNats's
 // output). With cl non-nil it adds authenticated routes (cluster.go) and a
 // fence (fence.go) that keeps clients out until this node has quorum and
-// has synced its resolver from its peers.
+// has synced its resolver from its peers; the fence connects as sysUser,
+// so a clustered bus without a fence user is refused.
 func startBus(opts nats_server.Options, sysUser pki.BusSysUser, cl *clusterConfig, timing fenceTiming) (*busNode, error) {
 	var f *fence
 	if cl != nil {
+		if !sysUser.Configured() {
+			return nil, errNoFenceUser
+		}
 		if err := applyCluster(&opts, cl); err != nil {
 			return nil, err
 		}
