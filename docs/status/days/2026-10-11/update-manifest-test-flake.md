@@ -1,0 +1,1 @@
+change: Fixed a flaky update-manifest handler test: its "no URL" check matched "url"/"http" inside the random base64 signature (seen in CI on PR #199). It now checks JSON keys and non-signature/checksum values, plus "://" over the whole body.
