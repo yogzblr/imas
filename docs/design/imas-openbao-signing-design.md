@@ -96,7 +96,7 @@ What this changes and what it does not:
 - A compromised farmer can still choose which signed release a tenant gets (an older signed version), but cannot create an unsigned one. Downgrade protection stays on the sprout.
 - Rotation: the keyring holds more than one GPG key. A new key ships in a release signed by the old one; the old key is removed only when no approved version needs it. Same rule as the Ed25519 keyring.
 
-Open points: the GPG parsing library (`github.com/ProtonMail/go-crypto` is already an indirect dependency, BSD-3-Clause; confirm against the licence policy before it becomes direct); whether to also verify the cosign bundle (not needed for the sprout, which has no network path to Sigstore); how a customer who mirrors packages supplies their own signed checksums (they republish the same signed file).
+Licence decision (owner, 2026-10-11): BSD-3-Clause is acceptable, so `github.com/ProtonMail/go-crypto` (already an indirect dependency) may become a direct dependency for GPG verification; record it in `DEPENDENCIES.md`. Open points: whether to also verify the cosign bundle (not needed for the sprout, which has no network path to Sigstore); how a customer who mirrors packages supplies their own signed checksums (they republish the same signed file).
 
 Release check (P18): the release workflow fails if the shipped keyring file is empty or does not parse, and if `checksums.txt.sig` does not verify against it.
 
