@@ -55,11 +55,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	jwt "github.com/nats-io/jwt/v2"
 	nats_server "github.com/nats-io/nats-server/v2/server"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 
+	"github.com/yogzblr/imas/internal/accountrank"
 	log "github.com/yogzblr/imas/internal/log"
 	"github.com/yogzblr/imas/internal/pki"
 )
@@ -89,7 +89,7 @@ type fence struct {
 	resolver *nats_server.DirAccResolver
 	// trusted issuers for pulled Account JWTs: the operator and its
 	// signing keys.
-	issuers map[string]bool
+	issuers []string
 
 	mu       sync.Mutex
 	nc       *nats.Conn
@@ -130,12 +130,10 @@ func (f *fence) install(opts *nats_server.Options) error {
 		return fmt.Errorf("fence: account resolver is %T, want the full (*DirAccResolver)", opts.AccountResolver)
 	}
 	f.resolver = dr
-	f.issuers = map[string]bool{}
+	f.issuers = nil
 	for _, op := range opts.TrustedOperators {
-		f.issuers[op.Subject] = true
-		for _, k := range op.SigningKeys {
-			f.issuers[k] = true
-		}
+		f.issuers = append(f.issuers, op.Subject)
+		f.issuers = append(f.issuers, op.SigningKeys...)
 	}
 	return nil
 }
@@ -464,10 +462,8 @@ func (f *fence) pull(peers map[string]bool) error {
 	return nil
 }
 
-// claimRank orders Account JWTs for one account: newest issued-at first;
-// at the same issued-at a locked-out JWT (connection limit 0) beats a live
-// one, so a tie never re-opens a tenant; the JWT text breaks any remaining
-// tie so every node picks the same winner.
+// claimRank orders Account JWTs for one account; the order is
+// accountrank.Better (newest issued-at, then lock-out, then JWT text).
 type claimRank struct {
 	iat    int64
 	locked bool
@@ -475,27 +471,17 @@ type claimRank struct {
 }
 
 func (a claimRank) beats(b claimRank) bool {
-	if a.iat != b.iat {
-		return a.iat > b.iat
-	}
-	if a.locked != b.locked {
-		return a.locked
-	}
-	return a.raw > b.raw
+	return accountrank.Better(
+		accountrank.Claim{IAT: a.iat, LockedOut: a.locked, Raw: a.raw},
+		accountrank.Claim{IAT: b.iat, LockedOut: b.locked, Raw: b.raw})
 }
 
 func (f *fence) rank(id, theJWT string) (claimRank, error) {
-	ac, err := jwt.DecodeAccountClaims(theJWT)
+	iat, _, locked, err := accountrank.Rank(theJWT, f.issuers, id)
 	if err != nil {
 		return claimRank{}, err
 	}
-	if ac.Subject != id {
-		return claimRank{}, fmt.Errorf("subject %s does not match", ac.Subject)
-	}
-	if !f.issuers[ac.Issuer] {
-		return claimRank{}, fmt.Errorf("issuer %s is not the trusted operator", ac.Issuer)
-	}
-	return claimRank{iat: ac.IssuedAt, locked: ac.Limits.Conn == 0, raw: theJWT}, nil
+	return claimRank{iat: iat, locked: locked, raw: theJWT}, nil
 }
 
 // merge stores the best of cands (the peers' JWTs for id, possibly
