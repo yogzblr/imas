@@ -75,7 +75,6 @@ var (
 	// A single path component: no '/', '\\', '%', '?', '#', ':' or
 	// whitespace, and it can't start with '.', so it is never "." or "..".
 	reFileName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+~-]*$`)
-	reSHA256   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // manifestKeys is the wire contract's key set.
