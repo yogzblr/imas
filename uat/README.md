@@ -57,17 +57,26 @@ From section 4h, "Owner prerequisites", plus what the janitor needs. Run the
 `az` commands in Azure Cloud Shell as the subscription Owner. Keep this
 subscription for UAT only: the GitHub identity is Contributor on all of it.
 
-Steps 1 to 3 and the first federated credential of step 7 (the Azure side of the OIDC identity) can be done by
+Steps 1 to 3 and the federated credentials of steps 2 and 7 (the Azure side of the OIDC identity) can be done by
 `uat/scripts/azure-owner-setup.sh`: it runs `az login` if needed, shows the subscription, asks before it
 changes anything, does each step only if it is not already done, and prints the three GitHub variables
-(`--help` lists the options, including `--accept-image-terms`). It works in WSL.
+(`--help` lists the options, including `--accept-image-terms`). It works in WSL. It looks up the owner and
+repository ids with the GitHub CLI (`gh auth login` first), or takes `--owner-id` and `--repo-id`, and it deletes
+a credential with the old plain subject `repo:OWNER/REPO:environment:...`, which never matches.
+
+> **The OIDC subject carries ids.** This repository's token subject is
+> `repo:yogzblr@16265408/imas@1388858987:environment:uat`, not
+> `repo:yogzblr/imas:environment:uat`; with the plain form the Azure login
+> fails (found on the first Azure run). Find the ids with
+> `gh api repos/yogzblr/imas --jq '.owner.id, .id'`. Use this form for every
+> credential below, the janitor's too.
 
 1. **Resource providers**: `Microsoft.Compute`, `Microsoft.Network`,
    `Microsoft.Storage`, `Microsoft.Authorization`, `Microsoft.Consumption`
    (`az provider register --namespace ...`).
 2. **The GitHub OIDC identity** `imas-uat-github`: an app registration and its
    service principal, Contributor on the subscription, and a federated
-   credential for `repo:yogzblr/imas:environment:uat` (the commands are in
+   credential for `repo:yogzblr@16265408/imas@1388858987:environment:uat` (the commands are in
    section 4h). No client secret exists anywhere.
 3. **AlmaLinux marketplace terms**, once per subscription:
    `az vm image terms accept --publisher almalinux --offer almalinux-x86_64 --plan 9-gen2`.
@@ -98,7 +107,7 @@ changes anything, does each step only if it is not already done, and prints the 
    az ad app federated-credential create --id "$APP" --parameters '{
      "name": "imas-uat-janitor-env",
      "issuer": "https://token.actions.githubusercontent.com",
-     "subject": "repo:yogzblr/imas:environment:uat-janitor",
+     "subject": "repo:yogzblr@16265408/imas@1388858987:environment:uat-janitor",
      "audiences": ["api://AzureADTokenExchange"]}'
    ```
 

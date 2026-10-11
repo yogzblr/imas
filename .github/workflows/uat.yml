@@ -22,7 +22,7 @@ name: UAT gate
 # branch main):
 #   variable AZURE_CLIENT_ID        the imas-uat-github application (no secret:
 #   variable AZURE_TENANT_ID        login is by OIDC with a federated credential
-#   variable AZURE_SUBSCRIPTION_ID  for repo:yogzblr/imas:environment:uat)
+#   variable AZURE_SUBSCRIPTION_ID  for repo:yogzblr@16265408/imas@1388858987:environment:uat)
 #   variable UAT_TFSTATE_STORAGE_ACCOUNT  optional: the state account the
 #                                   uat/tofu/bootstrap stack made; looked up by
 #                                   its tag in imas-uat-state when unset

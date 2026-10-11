@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
-# Stub gh for uat/scripts/tests/scripts_test.sh: only `gh api` on the tag and
-# release endpoints. $STUB_STATE/tags lists existing tags, one per line;
+# Stub gh for uat/scripts/tests/scripts_test.sh: `gh api` on the tag and
+# release endpoints, and on repos/OWNER/REPO (the ids). $STUB_STATE/tags lists existing tags, one per line;
 # $STUB_STATE/releases has "<tag> <draft>" lines.
 set -u
 echo "gh $*" >>"$STUB_STATE/calls.log"
 [ "$1" = api ] || { echo "stub gh: unexpected call: $*" >&2; exit 99; }
 path=$2
+if [[ $path =~ ^repos/[^/]+/[^/]+$ ]]; then
+  # `gh api repos/OWNER/REPO --jq '.owner.id, .id'`: the owner id, then the repository id.
+  [ -f "$STUB_STATE/gh_repo_fail" ] && { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+  printf '%s\n%s\n' 16265408 1388858987
+  exit 0
+fi
 case "$path" in
   repos/*/git/ref/tags/*)
     tag=${path##*/git/ref/tags/}
