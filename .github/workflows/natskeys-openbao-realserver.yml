@@ -1,0 +1,109 @@
+name: natskeys OpenBao real server
+
+# Runs the TestOpenBao* tests of internal/pki/natskeys
+# (openbao_integration_test.go: Transit-backed NATS signing, the P21
+# policies, soft delete) against a real OpenBao dev server. The tests
+# skip themselves unless IMAS_TEST_OPENBAO_ADDR and _TOKEN are set, so
+# the plain `go test ./...` in ci.yml never runs them.
+#
+# OpenBao only, as in sdb-openbao-realserver.yml (CLAUDE.md,
+# "Licensing").
+#
+# The tests set the server up themselves with the root token: a Transit
+# mount and policies under random names, removed when done. This
+# workflow only provides the server, on plain HTTP bound to loopback.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "internal/pki/natskeys/**"
+      - "internal/openbao/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/natskeys-openbao-realserver.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "internal/pki/natskeys/**"
+      - "internal/openbao/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/natskeys-openbao-realserver.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Same pin as sdb-openbao-realserver.yml; bump both together.
+  OPENBAO_VERSION: "2.7.1"
+  OPENBAO_SHA256: "0e2f1ce10d124e03112b50dd2fbec6b78003783253bc3a91587938f39d1e2243"
+
+jobs:
+  realserver:
+    name: natskeys TestOpenBao* (OpenBao)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: 1.26.x
+          check-latest: true
+
+      - name: Install OpenBao ${{ env.OPENBAO_VERSION }}
+        run: |
+          set -euo pipefail
+          tarball="openbao_${OPENBAO_VERSION}_linux_amd64.tar.gz"
+          cd "$RUNNER_TEMP"
+          curl -fsSL --retry 3 -o "$tarball" \
+            "https://github.com/openbao/openbao/releases/download/v${OPENBAO_VERSION}/${tarball}"
+          echo "${OPENBAO_SHA256}  ${tarball}" | sha256sum --check --strict
+          mkdir -p bin
+          tar -xzf "$tarball" -C bin bao
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Start OpenBao dev server
+        run: |
+          set -euo pipefail
+          # A fresh root token per run, masked in the log (dev mode prints
+          # it at startup).
+          token="$(openssl rand -hex 24)"
+          echo "::add-mask::$token"
+          nohup bao server -dev \
+            -dev-root-token-id="$token" \
+            -dev-listen-address=127.0.0.1:8200 \
+            > "$RUNNER_TEMP/bao.log" 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8200/v1/sys/health > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8200/v1/sys/health
+          echo
+          {
+            echo "IMAS_TEST_OPENBAO_ADDR=http://127.0.0.1:8200"
+            echo "IMAS_TEST_OPENBAO_TOKEN=$token"
+          } >> "$GITHUB_ENV"
+
+      - name: Run TestOpenBao*
+        run: |
+          set -euo pipefail
+          go test -count=1 -v -run '^TestOpenBao' ./internal/pki/natskeys \
+            | tee "$RUNNER_TEMP/test.log"
+          # A missing variable makes the tests skip, which go test reports
+          # as ok; only a pass counts. TestOpenBaoSlashKeyNames may skip
+          # by design (it records an answer).
+          for t in TestOpenBaoSignerWithNatsServer TestOpenBaoPolicyEnforcement TestOpenBaoSoftDeleteBlocksSigning; do
+            grep -q -- "--- PASS: $t " "$RUNNER_TEMP/test.log"
+          done
+
+      - name: OpenBao server log
+        if: failure()
+        run: cat "$RUNNER_TEMP/bao.log" || true
