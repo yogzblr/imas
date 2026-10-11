@@ -19,7 +19,7 @@ Each block is `key: value` lines (one line per value; escape a pipe as `\|`):
 | `item` | A pending item ID, `P<number>`. |
 | `action` | With `item`: `add`, `update` or `close`. |
 | `section` | `add` only: the table's heading, `S1`, `S2`, `S3`, `S4` or `Planned`. |
-| `sub` | `add` only, for `S1`: `S1a` or `S1b`. |
+| `sub` | `add` only, for `S1`: `S1a`, `S1b` or `S1c`. |
 | `title`, `rag`, `next` | The row's Item, RAG and Next step cells. `add` needs all three plus `section`; `update` changes only the ones given. |
 | `next-append` | `update`: text added to the end of the Next step cell (skipped if it is already there). |
 
@@ -42,7 +42,7 @@ rag: Red
 next: Build it; see the design doc.
 ```
 
-Fragments of one day apply in file-name order. If your fragment changes an item that another fragment of the same day adds or rewrites, give yours a name that sorts after it (for example a `z-` prefix), or an `add` will overwrite your `update`.
+Fragments of one day apply in file-name order. If your fragment changes an item that another fragment of the same day adds or rewrites, give yours a name that sorts after it (for example a `z-` prefix), or the roll-up fails: an `update` that sorts before the `add` of a new item names an item that does not exist yet, and an `add` of an existing row that sorts after your `update` overwrites your fields.
 
 Check a fragment before you push: `scripts/status/rollup.py --check`.
 

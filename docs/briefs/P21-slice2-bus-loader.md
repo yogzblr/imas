@@ -163,7 +163,7 @@ Ready is false at process start. Algorithm `loadAll(ctx)`:
 1. Wait for the node connection and for S3 (`objectstore.WaitReady` semantics, but loop forever; section 5.7).
 2. List `accounts/` (paged, 1000). Target set T = all `*.jwt` keys. If the SYS account key (from trust ConfigMap `sys-account.pub`) is not in T: stay not-ready, status "bucket not initialised", retry after backoff. (The fence and the server need the SYS account; with a missing SYS object the cluster cannot form trust.)
 3. For each key in T not yet applied at that ETag, with concurrency IMAS_LOADER_PUSH_CONCURRENCY and rate IMAS_LOADER_PUSH_RATE: Get; validate (4.2); compare iat with `applied` (5.5); if newer, push (5.6).
-4. Re-list. If any key is new or has a changed ETag versus what this pass processed, repeat from step 3 (tenants added during start-up are picked up here, bounded by pass count 20 per run, after which it proceeds and leaves the rest to the timer/event).
+4. Re-list. If any key is new or has a changed ETag versus what this pass processed, repeat from step 3 (tenants added during start-up are picked up here, bounded by pass count 20 per run; after the 20th pass with keys still unprocessed or changed, the loader stays NOT ready, sets /status to "initial load incomplete", waits one backoff interval and starts a new run from step 2. It never becomes Ready with unprocessed keys).
 5. Own-node check: `ListIDs` (one `$SYS.REQ.CLAIMS.LIST` request, taking the reply whose server id equals `nc.ConnectedServerId()`) and verify every pub in T that the loader applied is present. A missing one is re-pushed once; still missing: not ready.
 6. Ready := true when step 4 finds no unprocessed or changed keys AND step 5 passes. "Loaded count matches" therefore means: every key in the final listing T has been fetched and validated, applied-or-held-at-equal-or-newer iat, pushed where needed, and confirmed present in the own node's CLAIMS.LIST reply. Keys that failed validation are excluded from T but are listed in /status and counted; if the SYS key is invalid, not ready.
 Once Ready, it stays Ready (section 5.7 for S3 outages). Ready is NOT cleared by new tenants; those are applied by event/timer.
@@ -240,7 +240,7 @@ Introduce `func persistAccountJWT(path, accountPub, jwt string) error` in intern
 ### 7.3 Order on every change
 1. Sign (iat made strictly greater via `waitPastIssuedAt` on EVERY re-sign, not only lock-outs; extend tenant.go:664-668's use to the other signers).
 2. Persist locally (the PVC copy stays until slice 3 removes it).
-3. PUT `accounts/<pub>.jwt` (refuse to regress: before writing, read the existing object; if its iat is greater, do not overwrite, log, return an error).
+3. PUT `accounts/<pub>.jwt`, inside one per-account critical section that covers the read of the existing object, the iat comparison and the PUT: an in-process `sync.Mutex` per account public key held in the publisher (farmer is a single replica until slice 3 drops `replicaCount == 1`; slice 3 replaces this mutex with a per-account PXC row lease from `internal/lease`, same critical section). If the existing object's iat is greater, do not overwrite, log, return an error. Test (7.3-T): two concurrent `Publish` calls for one account with iat 10 and iat 20, forced to interleave so the older one reaches the PUT last; the object must end at iat 20.
 4. PUT `accounts/index` with a fresh token.
 5. Push to all nodes and wait (7.4).
 6. Publish the event (4.3).

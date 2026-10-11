@@ -155,9 +155,12 @@ Build:
    write `''` to it; add a code comment that a later migration drops it.
 2. Register endpoint (`fleetReleaseRequest`): add `checksums_txt` and `checksums_sig`
    (both required, same size limits as the contract). saasapi does not verify the
-   GPG signature (D20). It does require, for each package, that `file_name` is a
-   line in `checksums_txt` and that its hash equals `checksum_sha256`; mismatch is
-   422 with a message naming the file. Same version re-registered with identical
+   GPG signature (D20). Before storing anything it parses the whole `checksums_txt` with
+   the same strict rules as the sprout (contract step 4: every non-empty line must be
+   well formed, no duplicate file name, no uppercase hash); any bad line is 422 naming
+   the line number. It also requires, for each package, that `file_name` is a line in
+   `checksums_txt` and that its hash equals `checksum_sha256`; mismatch is 422 with a
+   message naming the file. Same version re-registered with identical
    content is a no-op 200; different content is the existing 409 conflict path.
    Remove `releaseSigner`, `fleetReleaserClient` and every `signRelease` call.
 3. `fleetcatalog.ApprovedManifest` returns the wire manifest: it joins the
@@ -190,7 +193,8 @@ Build:
 
 Tests:
 - Migration test; register endpoint table test (good; missing sig; hash mismatch;
-  file not in checksums; oversize; replay identical; replay different = 409).
+  file not in checksums; a malformed extra line; a duplicate extra file name; oversize;
+  replay identical; replay different = 409).
 - Handler test: response has exactly the seven keys; a catalog miss is 404.
 - Stamp script test: a fixture dist directory with a throwaway key signs
   `checksums.txt`; good case; tampered file; wrong key; missing sig. Skip with a

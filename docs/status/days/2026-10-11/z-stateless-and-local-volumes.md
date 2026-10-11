@@ -2,7 +2,7 @@ change: Owner decision: farmer, saasapi and the bus must be stateless (no PVC; s
 ---
 item: P21
 action: update
-next-append: **Stateless rule (owner, 2026-10-11, design D10): farmer, saasapi and the bus carry no PVC. The bus's Account JWT store (`NewDirAccResolver`, `/var/lib/imas/farmerbus`) must be rebuilt at start from the source of truth; decide the resolver mode (P23).**
+next-append: **Stateless rule (owner, 2026-10-11, design D10): farmer, saasapi and the bus carry no PVC. The bus's Account JWT store (`NewDirAccResolver`, `/var/lib/imas/farmerbus`) is rebuilt at start by the per-node sidecar account loader from the object store (design D11, `docs/briefs/P21-slice2-bus-loader.md`); no resolver-mode decision is left for P23.**
 ---
 item: P24
 action: update

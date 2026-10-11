@@ -6,4 +6,4 @@ next-append: **Stateless bus (owner, 2026-10-11, design D11): per-node account l
 ---
 item: P23
 action: update
-next-append: **Also prove (design §9.1 and §9.2): a bus node started empty becomes ready only after loading every account, a missed event is repaired by the timer, all bus nodes restarted with farmer down, `localCooks` survives a replica change, and the hourly jobs do not run twice.**
+next-append: **Also prove (design §9.1 and §9.2): a bus node started empty becomes ready only after loading every account, a missed event is repaired by the timer, all bus nodes restarted with farmer down, the merged prepare-and-trigger cook call works with no shared state, and the hourly jobs do not run twice.**

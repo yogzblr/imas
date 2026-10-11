@@ -14,7 +14,7 @@ Binding (from the owner):
 - Farmer NKey is a shared Kubernetes Secret (via ESO, like natsSeeds).
 - SaaS API credential rotation state goes to PXC.
 - Audit goes to stdout as JSON; Fluent Bit ships it; default retention 30 days.
-- `localCooks` becomes a PXC row with TTL (D13) - see owner decision 2 for a simpler alternative.
+- `localCooks` is removed: prepare and trigger become one call with no shared state (D22, owner decision 2). No `prepared_cooks` table.
 - Per-replica background jobs get a row lease or are made idempotent.
 - `recipeTenantLocks` becomes a row lease or optimistic version check.
 - Farmer per-tenant bus connections reconnect after the 30-attempt limit, connect lazily, close when idle.
@@ -66,7 +66,7 @@ Line numbers are from the current tree.
 
 | State | Location | Class | Change |
 |---|---|---|---|
-| `localCooks` | internal/natsapi/cook.go:131-166, read at 176-207 (`awaitCookTrigger`); prepare at sprout_action.go:586, trigger at 601 in same handler | (c) | see owner decision 2; default: collapse prepare+trigger so no map is needed; fallback: PXC row `farmer.prepared_cooks` with TTL |
+| `localCooks` | internal/natsapi/cook.go:131-166, read at 176-207 (`awaitCookTrigger`); prepare at sprout_action.go:586, trigger at 601 in same handler | (c) | collapse prepare+trigger into one call so no map is needed (D22); no table |
 | `recipeTenantLocks` | internal/saasapi/recipes.go:599-605, 741-746 (`PutConditional` already used) | (c) | optimistic: rely on `PutConditional` ETag and retry; remove in-process mutex map |
 | Cohort membership cache | internal/rbac/cohort.go:149-169, 324-353 | (c) | acceptable per replica only if bounded TTL; add TTL (default 30s) and invalidation by PXC `updated_at` version check |
 | `cohort_refresher` | internal/natsapi/cohort_refresher.go | (c) | row lease `cohort_refresher` |
@@ -121,7 +121,7 @@ CREATE TABLE IF NOT EXISTS farmer.sprout_user_jwt (
   PRIMARY KEY (tenant_id, sprout_id)
 );
 
--- farmer/00006_prepared_cooks.sql   (only if owner decision 2 picks the PXC row)
+-- farmer/00006_prepared_cooks.sql   (NOT BUILT: decision 2 chose the merged call; do not create this migration or table)
 CREATE TABLE IF NOT EXISTS farmer.prepared_cooks (
   tenant_id VARCHAR(64) NOT NULL, jid VARCHAR(64) NOT NULL,
   payload   MEDIUMBLOB NOT NULL, expires_at DATETIME(3) NOT NULL,
