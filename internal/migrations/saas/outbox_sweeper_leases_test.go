@@ -39,15 +39,15 @@ var outboxColumns = map[string]string{
 	"asset_action_items.planned_at_target": "tinyint(1) null=NO default=0",
 }
 
-// The migration is in the embedded set, is its newest, only adds, and
-// guards every step so a re-run changes nothing.
+// The migration is in the embedded set, only adds, and guards every step
+// so a re-run changes nothing.
 func TestOutboxLeasesMigrationShape(t *testing.T) {
 	b, err := fs.ReadFile(migrations.Saas.FS(), outboxLeasesFile)
 	if err != nil {
 		t.Fatalf("%s is not in the embedded saas set: %v", outboxLeasesFile, err)
 	}
-	if migrations.Saas.Latest() != 6 {
-		t.Fatalf("saas Latest = %d, want 6", migrations.Saas.Latest())
+	if migrations.Saas.Latest() < 6 {
+		t.Fatalf("saas Latest = %d, want at least 6", migrations.Saas.Latest())
 	}
 	if migrations.Saas.CompatibleFrom() != 1 {
 		t.Fatalf("saas CompatibleFrom = %d: an expand-only migration must not raise it", migrations.Saas.CompatibleFrom())
@@ -185,7 +185,7 @@ func TestMySQLOutboxLeases(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := migrations.Up(ctx, db, migrations.Saas, t.Logf)
-	if err != nil || len(res.Applied) != int(migrations.Saas.Latest())-5 || res.Applied[0] != 6 {
+	if err != nil || len(res.Applied) != countFrom(t, 6) || res.Applied[0] != 6 {
 		t.Fatalf("re-run: %+v, %v", res, err)
 	}
 	check("after a re-run")

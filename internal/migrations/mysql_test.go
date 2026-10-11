@@ -154,6 +154,17 @@ func (e *mysqlEnv) migrateAll(t *testing.T) (farmer, saas UpResult) {
 	return farmer, saas
 }
 
+// countVersions is how many migrations a set has. Versions may have a
+// gap (saas 00007 belongs to P22 slice 2), so Latest is not a count.
+func countVersions(t *testing.T, s Set) int {
+	t.Helper()
+	v, err := Versions(s.FS())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(v)
+}
+
 func mysqlErrNumber(err error) uint16 {
 	var me *mysql.MySQLError
 	if errors.As(err, &me) {
@@ -165,10 +176,10 @@ func mysqlErrNumber(err error) uint16 {
 func TestMySQLUpFreshAndAgain(t *testing.T) {
 	e := newMySQLEnv(t)
 	f, s := e.migrateAll(t)
-	if f.From != 0 || f.To != Farmer.Latest() || int64(len(f.Applied)) != Farmer.Latest() {
+	if f.From != 0 || f.To != Farmer.Latest() || len(f.Applied) != countVersions(t, Farmer) {
 		t.Fatalf("farmer: %+v", f)
 	}
-	if s.From != 0 || s.To != Saas.Latest() || int64(len(s.Applied)) != Saas.Latest() {
+	if s.From != 0 || s.To != Saas.Latest() || len(s.Applied) != countVersions(t, Saas) {
 		t.Fatalf("saas: %+v", s)
 	}
 
@@ -222,6 +233,24 @@ func TestMySQLGrants(t *testing.T) {
 		t.Fatalf("saas reading farmer: %v", err)
 	}
 
+	// P21 slice 3's tables follow the same rule: farmer owns its leases
+	// and the sprout JWT index, saas its credential state, and farmer
+	// reads prev_pub for the SYS account's revocations.
+	for who, q := range map[string]struct {
+		db  *sql.DB
+		sql string
+	}{
+		"farmer taking a job lease":         {farmer, "UPDATE job_leases SET lease_owner = 'r1', lease_until = NOW(3) WHERE name = 'jobs_expiry'"},
+		"farmer indexing a sprout JWT":      {farmer, "INSERT INTO sprout_user_jwt (tenant_id, sprout_id, object_key, user_pubkey, jwt_sha256, updated_at) VALUES ('t1', 's1', 'k', 'U', REPEAT('a', 64), NOW(3))"},
+		"saas recording its credential":     {saas, "INSERT INTO saasapi_credential_state (id, current_pub, rotated_at, version) VALUES (1, 'U', NOW(3), 1)"},
+		"farmer reading saas's prev_pub":    {farmer, "SELECT prev_pub FROM `" + s.Schema + "`.saasapi_credential_state"},
+		"saas reading the sprout JWT index": {saas, "SELECT COUNT(*) FROM `" + f.Schema + "`.sprout_user_jwt"},
+	} {
+		if _, err := q.db.ExecContext(ctx, q.sql); err != nil {
+			t.Fatalf("%s: %v", who, err)
+		}
+	}
+
 	r, err := farmer.ExecContext(ctx, "UPDATE `"+s.Schema+"`.enrollment_keys SET used_count = used_count + 1, last_used_at = NOW() WHERE key_id = 'k1' AND used_count < max_uses")
 	if err != nil {
 		t.Fatalf("farmer redeeming an enrollment key: %v", err)
@@ -245,6 +274,9 @@ func TestMySQLGrants(t *testing.T) {
 		"saas updating farmer":            {saas, "UPDATE `" + f.Schema + "`.pki_nkeys SET state = 'x'"},
 		"saas dropping a farmer table":    {saas, "DROP TABLE `" + f.Schema + "`.props"},
 		"saas writing farmer's lock":      {saas, "DELETE FROM `" + f.Schema + "`." + LockTable},
+		"saas taking a farmer job lease":  {saas, "UPDATE `" + f.Schema + "`.job_leases SET lease_owner = 'x'"},
+		"saas writing the sprout JWTs":    {saas, "DELETE FROM `" + f.Schema + "`.sprout_user_jwt"},
+		"farmer rotating saas's key":      {farmer, "UPDATE `" + s.Schema + "`.saasapi_credential_state SET version = version + 1"},
 		"farmer writing saas's versions":  {farmer, "DELETE FROM `" + s.Schema + "`." + VersionTable},
 		"farmer raising saas's floor":     {farmer, "UPDATE `" + s.Schema + "`." + InfoTable + " SET min_compatible_version = 99"},
 		"saas granting itself on farmer":  {saas, "GRANT INSERT ON `" + f.Schema + "`.* TO " + userSpec(s.User)},
@@ -256,6 +288,13 @@ func TestMySQLGrants(t *testing.T) {
 		}
 	}
 }
+
+// noModelYet are tables a migration creates before any GORM model
+// describes them: P21 slice 3's state tables (farmer 00004, 00005, saas
+// 00008), whose code lands in later PRs of that slice. Each is compared
+// with AutoMigrate again once its model exists; its own migration test
+// pins its shape until then.
+var noModelYet = []string{"job_leases", "sprout_user_jwt", "saasapi_credential_state"}
 
 // TestMySQLBaselineMatchesGORMModels: the baseline creates exactly the
 // tables, columns and indexes AutoMigrate creates from today's models, so
@@ -279,7 +318,7 @@ func TestMySQLBaselineMatchesGORMModels(t *testing.T) {
 			}
 			want := describeSchema(t, e.root, viaGORM)
 			got := describeSchema(t, e.root, viaGoose)
-			for _, own := range []string{VersionTable, InfoTable} {
+			for _, own := range append([]string{VersionTable, InfoTable}, noModelYet...) {
 				got = slices.DeleteFunc(got, func(l string) bool { return strings.HasPrefix(l, own+" ") })
 			}
 			if d := diffLines(want, got); d != "" {
