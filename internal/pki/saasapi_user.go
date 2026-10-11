@@ -133,10 +133,13 @@ func saasAPIUserJWTIsCurrent(uc *jwt.UserClaims, pub, sysAccountPub string) bool
 // credential has been persisted: the returned JWT/seed are still valid,
 // and the caller should log rather than abort.
 func EnsureSaaSAPICredential() (userJWT string, seed []byte, err error) {
-	// ensureNatsAuth takes authMu itself; call it first, then take authMu
-	// for the section below that reads and rewrites sys-account.jwt — the
-	// same file ensureNatsAuth reads under that lock.
-	mat, err := ensureNatsAuth()
+	// ensurePlatformAuth takes authMu itself; call it first, then take
+	// authMu for the section below that reads and rewrites
+	// sys-account.jwt — the same file ensurePlatformAuth seeds under that
+	// lock. Only the platform part is needed (the SaaS API credential Job
+	// signs with the SYS account key alone); the SYS user is loaded only
+	// for a push.
+	mat, err := ensurePlatformAuth()
 	if err != nil {
 		return "", nil, fmt.Errorf("bootstrapping NATS auth material: %w", err)
 	}
@@ -146,6 +149,12 @@ func EnsureSaaSAPICredential() (userJWT string, seed []byte, err error) {
 		return "", nil, err
 	}
 	if push {
+		authMu.Lock()
+		uerr := ensureSysUserLocked(mat)
+		authMu.Unlock()
+		if uerr != nil {
+			return signed, seed, fmt.Errorf("pushing the SYS Account JWT (SaaS API key rotation) to the bus resolver: %w", uerr)
+		}
 		if perr := pushAccountUpdate(mat, sysJWT); perr != nil {
 			return signed, seed, fmt.Errorf("pushing the SYS Account JWT (SaaS API key rotation) to the bus resolver: %w", perr)
 		}
@@ -176,7 +185,7 @@ func ensureSaaSAPICredentialLocked(mat *natsAuthMaterial) (userJWT string, seed 
 
 	// Re-read the SYS Account JWT from disk under authMu rather than
 	// trusting mat's snapshot: another EnsureSaaSAPICredential call may
-	// have added a revocation since ensureNatsAuth returned.
+	// have added a revocation since ensurePlatformAuth returned.
 	sysBytes, err := os.ReadFile(sysAccountJWTPath())
 	if err != nil {
 		return "", nil, "", false, fmt.Errorf("reading the SYS Account JWT: %w", err)

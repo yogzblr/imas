@@ -25,6 +25,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/pki/pkitest"
 )
 
 // testDBSeq numbers newTestDB's databases.
@@ -85,7 +86,13 @@ func setupTestPKI(t *testing.T) {
 	config.CertHosts = []string{"127.0.0.1"}
 
 	generateTestCerts(t, tmpDir)
+	testTransit = pkitest.Farmer(t)
 }
+
+// testTransit is the fake Transit setupTestPKI signs through: the
+// platform keys, the trust directory and the SYS_USER seed
+// (pkitest.Farmer).
+var testTransit *pkitest.Transit
 
 // generateTestCerts creates a self-signed CA and leaf certificate for
 // ConfigureNats to load during ReloadNKeys.
@@ -1157,6 +1164,8 @@ func TestConfigureNats_ValidConfig(t *testing.T) {
 	config.RootCA = caFile
 	config.CertFile = leafCertFile
 	config.KeyFile = leafKeyFile
+	config.FarmerPKI = filepath.Join(tmpDir, "pki") + "/"
+	pkitest.Farmer(t)
 
 	opts := ConfigureNats()
 	if opts.Host != "127.0.0.1" {

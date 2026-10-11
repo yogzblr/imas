@@ -214,7 +214,7 @@ func relockForPushAll(mat *natsAuthMaterial, tenantID string) (signed string, ok
 			return "", false, nil
 		}
 	}
-	signed, err = signLockedOutTenantJWT(mat, tenantID, row.Name)
+	signed, err = signLockedOutTenantJWT(mat, row)
 	if err != nil {
 		return "", false, err
 	}

@@ -18,6 +18,8 @@ import (
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/openbaokv"
+	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/pki/pkitest"
 )
 
 const testToken = "s.publisher"
@@ -97,33 +99,29 @@ type jobEnv struct {
 
 // setupJobEnv reproduces the reference Job's environment
 // (deploy/farmer/saasapi-credential-publish-job.yaml): an empty PKI
-// directory, the SYS Account and SaaS API seeds mounted as files from the
-// same Secret farmer uses, and a token-authenticated OpenBao client.
+// directory, the NATS trust directory and a Transit identity that signs
+// as the SYS account (a fake Transit, pkitest), the SaaS API seed mounted
+// as a file from the same Secret farmer uses, and a token-authenticated
+// OpenBao client for the KV write.
 func setupJobEnv(t *testing.T, openbaoURL string) jobEnv {
 	t.Helper()
 	config.FarmerPKI = filepath.Join(t.TempDir(), "pki") + "/"
 	config.FarmerOrganization = "imas-test"
 
+	tr := pkitest.Farmer(t)
+	sysPub, err := os.ReadFile(filepath.Join(tr.TrustDir, pki.TrustSysAccountPub))
+	if err != nil {
+		t.Fatal(err)
+	}
 	seedDir := t.TempDir()
-	sysKP, _ := nkeys.CreateAccount()
-	sysSeed, _ := sysKP.Seed()
-	sysPub, _ := sysKP.PublicKey()
 	saasKP, _ := nkeys.CreateUser()
 	saasSeed, _ := saasKP.Seed()
 	saasPub, _ := saasKP.PublicKey()
-	sysFile := filepath.Join(seedDir, "sys-account.nk")
 	saasFile := filepath.Join(seedDir, "saasapi-user.nk")
-	if err := os.WriteFile(sysFile, sysSeed, 0o600); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.WriteFile(saasFile, saasSeed, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"OPERATOR", "OPERATOR_SIGNING", "SYS_ACCOUNT", "SYS_USER", "TENANT", "TENANT_SIGNING", "SAASAPI_USER"} {
-		t.Setenv("IMAS_NATS_"+name+"_SEED", "")
-		t.Setenv("IMAS_NATS_"+name+"_SEED_FILE", "")
-	}
-	t.Setenv("IMAS_NATS_SYS_ACCOUNT_SEED_FILE", sysFile)
+	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED", "")
 	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED_FILE", saasFile)
 
 	t.Setenv(openbaokv.EnvOpenBaoAddr, openbaoURL)
@@ -132,7 +130,7 @@ func setupJobEnv(t *testing.T, openbaoURL string) jobEnv {
 	t.Setenv(openbaokv.EnvOpenBaoToken, testToken)
 	t.Setenv(openbaokv.EnvOpenBaoCACert, "")
 	t.Setenv(EnvKVPath, "")
-	return jobEnv{sysPub: sysPub, saasPub: saasPub, saasSeed: saasSeed}
+	return jobEnv{sysPub: string(sysPub), saasPub: saasPub, saasSeed: saasSeed}
 }
 
 func TestRun_MintsAndPublishesToConfiguredPath(t *testing.T) {
@@ -166,7 +164,7 @@ func TestRun_MintsAndPublishesToConfiguredPath(t *testing.T) {
 		t.Fatalf("published JWT doesn't verify: %v", err)
 	}
 	if uc.Subject != env.saasPub || uc.Issuer != env.sysPub || uc.IssuerAccount != "" {
-		t.Fatalf("JWT sub=%s iss=%s issuer_account=%q, want the SaaS API key signed directly by the mounted SYS Account key",
+		t.Fatalf("JWT sub=%s iss=%s issuer_account=%q, want the SaaS API key signed directly by the trust's SYS Account key",
 			uc.Subject, uc.Issuer, uc.IssuerAccount)
 	}
 	if !reflect.DeepEqual(uc.Pub.Allow, jwt.StringList{"internal.tenant.provision", "internal.tenant.deprovision", "internal.sprout.action"}) ||
@@ -230,18 +228,18 @@ func TestRun_UsageErrors(t *testing.T) {
 	}
 }
 
-// A Job missing its SYS Account seed mount must fail without minting
-// under a random key or touching OpenBao.
-func TestRun_MissingSYSSeedFailsClosed(t *testing.T) {
+// A Job missing its NATS trust mount must fail without minting or
+// touching OpenBao.
+func TestRun_MissingNATSTrustFailsClosed(t *testing.T) {
 	m, ts := startMockOpenBao(t)
 	setupJobEnv(t, ts.URL)
-	t.Setenv("IMAS_NATS_SYS_ACCOUNT_SEED_FILE", "")
+	t.Setenv(pki.NATSTrustDirEnv, t.TempDir())
 
 	var stderr bytes.Buffer
 	if code := Run([]string{"-kv-path", "p"}, &stderr); code != 1 {
 		t.Fatalf("Run = %d, want 1", code)
 	}
-	if !strings.Contains(stderr.String(), "IMAS_NATS_SYS_ACCOUNT_SEED_FILE") {
+	if !strings.Contains(stderr.String(), pki.NATSTrustDirEnv) {
 		t.Errorf("expected the error to name the missing mount's env var, got: %s", stderr.String())
 	}
 	if n := len(m.requests()); n != 0 {

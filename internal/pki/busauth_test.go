@@ -17,23 +17,33 @@ import (
 	"github.com/nats-io/nkeys"
 
 	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/pki/natskeys"
 )
 
 // shareSeedsWithBus points the bus at core's operator, operator signing
-// and SYS account seeds through IMAS_NATS_*_SEED_FILE, as the chart's seed
-// Secret does, and returns core's material.
+// and SYS account keys through IMAS_NATS_*_SEED_FILE, as seeds exported
+// from the fake Transit (the bus still takes seeds), and returns core's
+// material.
 func shareSeedsWithBus(t *testing.T) *natsAuthMaterial {
 	t.Helper()
 	mat, err := ensureNatsAuth()
 	if err != nil {
 		t.Fatalf("ensureNatsAuth: %v", err)
 	}
-	for name, file := range map[string]string{
-		"OPERATOR":         "operator.nk",
-		"OPERATOR_SIGNING": "operator-signing.nk",
-		"SYS_ACCOUNT":      "sys-account.nk",
+	dir := t.TempDir()
+	for name, key := range map[string]struct {
+		transit string
+		prefix  nkeys.PrefixByte
+	}{
+		"OPERATOR":         {natskeys.OperatorKey(), nkeys.PrefixByteOperator},
+		"OPERATOR_SIGNING": {natskeys.OperatorSigningKey(), nkeys.PrefixByteOperator},
+		"SYS_ACCOUNT":      {natskeys.SysAccountKey(), nkeys.PrefixByteAccount},
 	} {
-		t.Setenv("IMAS_NATS_"+name+"_SEED_FILE", filepath.Join(natsAuthDir(), file))
+		p := filepath.Join(dir, name+".nk")
+		if err := os.WriteFile(p, testTransit.Seed(t, key.transit, key.prefix), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("IMAS_NATS_"+name+"_SEED_FILE", p)
 	}
 	return mat
 }

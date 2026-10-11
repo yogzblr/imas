@@ -28,6 +28,7 @@ import (
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/pki/pkitest"
 )
 
 // newTestPKIDB wires up an in-memory PKI store, plus the minimal config
@@ -50,6 +51,7 @@ func newTestPKIDB(t *testing.T) {
 
 	dir := t.TempDir()
 	config.FarmerPKI = dir + "/"
+	pkitest.Farmer(t) // the NATS trust chain in a fake Transit
 	farmerPubFile := filepath.Join(dir, "farmer.pub")
 	if err := os.WriteFile(farmerPubFile, []byte("UFAKE_FARMER_KEY_FOR_TESTING"), 0o600); err != nil {
 		t.Fatal(err)

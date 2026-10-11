@@ -42,6 +42,7 @@ import (
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/pki/pkitest"
 	"github.com/yogzblr/imas/internal/props"
 )
 
@@ -68,6 +69,7 @@ func setupTenantIsolationPKI(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	config.FarmerPKI = filepath.Join(tmpDir, "pki") + "/"
+	pkitest.Farmer(t) // the NATS trust chain in a fake Transit
 	config.NKeyFarmerPubFile = filepath.Join(tmpDir, "farmer.pub")
 	config.FarmerInterface = "127.0.0.1"
 	config.FarmerBusPort = "0"

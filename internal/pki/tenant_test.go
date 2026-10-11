@@ -41,14 +41,14 @@ func TestProvisionTenant_InvalidTenantID(t *testing.T) {
 func TestEnsureTenantAccount_DistinctAccountsPerTenant(t *testing.T) {
 	setupTestPKI(t)
 
-	matA, tamA, provisionedA, err := ensureTenantAccount("t_a", "Tenant A")
+	matA, tamA, provisionedA, err := ensureTenantAccount("t_a", "Tenant A", true)
 	if err != nil {
 		t.Fatalf("ensureTenantAccount(t_a): %v", err)
 	}
 	if !provisionedA {
 		t.Error("expected t_a to be reported as newly provisioned")
 	}
-	matB, tamB, provisionedB, err := ensureTenantAccount("t_b", "Tenant B")
+	matB, tamB, provisionedB, err := ensureTenantAccount("t_b", "Tenant B", true)
 	if err != nil {
 		t.Fatalf("ensureTenantAccount(t_b): %v", err)
 	}
@@ -69,7 +69,7 @@ func TestEnsureTenantAccount_DistinctAccountsPerTenant(t *testing.T) {
 	}
 
 	// Calling again must be idempotent: same Account, not re-provisioned.
-	_, tamA2, provisionedAgain, err := ensureTenantAccount("t_a", "ignored on repeat")
+	_, tamA2, provisionedAgain, err := ensureTenantAccount("t_a", "ignored on repeat", true)
 	if err != nil {
 		t.Fatalf("second ensureTenantAccount(t_a): %v", err)
 	}
@@ -84,13 +84,13 @@ func TestEnsureTenantAccount_DistinctAccountsPerTenant(t *testing.T) {
 func TestEnsureTenantAccount_RefusesDeletedTenant(t *testing.T) {
 	setupTestPKI(t)
 
-	if _, _, _, err := ensureTenantAccount("t_gone", "Gone Inc"); err != nil {
+	if _, _, _, err := ensureTenantAccount("t_gone", "Gone Inc", true); err != nil {
 		t.Fatalf("initial provision: %v", err)
 	}
 	if err := markTenantDeleted("t_gone"); err != nil {
 		t.Fatalf("markTenantDeleted: %v", err)
 	}
-	if _, _, _, err := ensureTenantAccount("t_gone", "Gone Inc"); err == nil {
+	if _, _, _, err := ensureTenantAccount("t_gone", "Gone Inc", true); err == nil {
 		t.Fatal("expected ensureTenantAccount to refuse a deprovisioned tenant")
 	}
 }

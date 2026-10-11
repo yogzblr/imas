@@ -68,7 +68,7 @@ func useExternalSaaSAPISeed(t *testing.T) (pub string, seed []byte) {
 
 func clearExternalSeedEnv(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{"SYS_ACCOUNT", saasAPIUserSeedName} {
+	for _, name := range []string{saasAPIUserSeedName} {
 		t.Setenv(externalSeedEnvPrefix+name+"_SEED", "")
 		t.Setenv(externalSeedEnvPrefix+name+"_SEED_FILE", "")
 	}
@@ -193,16 +193,18 @@ func TestPublishSaaSAPICredential_RefusesToGenerateKeyMaterial(t *testing.T) {
 	setupTestPKI(t)
 	clearExternalSeedEnv(t)
 
-	// Fresh PKI dir, no SYS Account key: a Job misconfigured without the
-	// SYS seed mount must not mint under a random SYS key.
+	// No NATS trust mounted: a Job misconfigured without the trust
+	// ConfigMap must not mint at all.
 	useExternalSaaSAPISeed(t)
+	t.Setenv(NATSTrustDirEnv, t.TempDir())
 	store := &fakeCredStore{}
 	if _, err := PublishSaaSAPICredential(context.Background(), store); !errors.Is(err, ErrSaaSAPIKeyMaterialMissing) {
-		t.Fatalf("missing SYS key: expected ErrSaaSAPIKeyMaterialMissing, got %v", err)
+		t.Fatalf("missing NATS trust: expected ErrSaaSAPIKeyMaterialMissing, got %v", err)
 	}
 
-	// SYS key present, no SaaS API seed: must not mint for a random key
+	// Trust present, no SaaS API seed: must not mint for a random key
 	// nobody else holds.
+	t.Setenv(NATSTrustDirEnv, testTransit.TrustDir)
 	clearExternalSeedEnv(t)
 	if _, err := ensureNatsAuth(); err != nil {
 		t.Fatal(err)

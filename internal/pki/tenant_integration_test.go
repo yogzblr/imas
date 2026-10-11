@@ -323,11 +323,8 @@ func TestDeprovisionTenant_LockOutHasNewerIssuedAt(t *testing.T) {
 	if err := DeprovisionTenant(tenantID); err != nil {
 		t.Fatalf("DeprovisionTenant: %v", err)
 	}
-	tam, err = loadTenantAccountMaterial(tenantID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	locked, err := jwt.DecodeAccountClaims(tam.jwt)
+	// The tenant's keys are retired: read the lockout from disk.
+	locked, err := jwt.DecodeAccountClaims(readFile(t, tenantAccountJWTPath(tenantID)))
 	if err != nil {
 		t.Fatal(err)
 	}

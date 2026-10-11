@@ -410,11 +410,8 @@ func TestDeprovisionTenant_RetryRepairsLiveBus(t *testing.T) {
 // value is used as the iat.
 func pushLiveJWT(t *testing.T, mat *natsAuthMaterial, tenantID string, iat int64) {
 	t.Helper()
-	tam, err := loadTenantAccountMaterial(tenantID)
-	if err != nil {
-		t.Fatalf("loadTenantAccountMaterial: %v", err)
-	}
-	ac, err := jwt.DecodeAccountClaims(tam.jwt)
+	// The tenant's keys are retired by now: start from the JWT on disk.
+	ac, err := jwt.DecodeAccountClaims(readFile(t, tenantAccountJWTPath(tenantID)))
 	if err != nil {
 		t.Fatal(err)
 	}
