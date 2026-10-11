@@ -105,8 +105,8 @@ docker run -d --name e2e-farmer --network "$net" --network-alias farmer --networ
 	/work/bin/stubfarmer -addr :5405 -nats-port 5406 -hosts farmer -nats-urls tls://farmer:5406 \
 	-join-token "$join_token" -state-dir /work/state \
 	-repo-proxy-to http://e2e-nexus:8081 -repo-proxy-addr :8443 -repo-hosts repo >/dev/null
-for _ in $(seq 1 30); do [[ -s "$work/state/fleet-signing-keys.json" && -s "$work/state/repo-ca.pem" ]] && break; sleep 1; done
-[[ -s "$work/state/fleet-signing-keys.json" ]] || { docker logs e2e-farmer; die "the stub farmer did not start"; }
+for _ in $(seq 1 30); do [[ -s "$work/state/fleet-signing-keys.asc" && -s "$work/state/repo-ca.pem" ]] && break; sleep 1; done
+[[ -s "$work/state/fleet-signing-keys.asc" ]] || { docker logs e2e-farmer; die "the stub farmer did not start"; }
 
 farmer() { # farmer METHOD PATH [JSON]
 	curl -sS --noproxy '*' --fail-with-body --cacert "$work/state/ca.pem" --resolve "farmer:$farmer_port:127.0.0.1" \
@@ -135,8 +135,8 @@ contents:
     dst: /etc/imas/sprout
     type: config|noreplace
     file_info: {mode: 0644}
-  - src: $work/state/fleet-signing-keys.json
-    dst: /etc/imas/fleet-signing-keys.json
+  - src: $work/state/fleet-signing-keys.asc
+    dst: /etc/imas/fleet-signing-keys.asc
     file_info: {mode: 0644}
   - dst: /var/cache/imas/sprout
     type: dir

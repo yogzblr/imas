@@ -100,8 +100,8 @@ Releases use GoReleaser OSS; there is no goreleaser-pro `msi` pipe. The
    the `.Runtime.Goos "windows"` (WiX toolset only) blocks. Any other
    template action fails the build;
 2. stages `imas-sprout.exe`, `packaging/etc/imas-sprout.conf` and
-   `packaging/etc/fleet-signing-keys.json` at those relative paths next to the
-   rendered `.wxs`, with modification times set to the commit timestamp;
+   `gpg-public-key.asc` (installed as `fleet-signing-keys.asc`) at those
+   relative paths next to the rendered `.wxs`, with modification times set to the commit timestamp;
 3. runs `wixl -a x64` (`apt-get install wixl msitools`), then
    `msi-postprocess.sh`;
 4. writes `dist/imas-sprout-<version>-windows-x64.msi`, by an atomic rename,
