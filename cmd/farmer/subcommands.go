@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 
+	"github.com/yogzblr/imas/internal/natsbootstrap"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/sproutrelease"
 )
@@ -17,6 +18,10 @@ import (
 //   - ensure-controlplane-box-keys: the chart's control-plane keygen hook
 //     (internal/pki controlplanekeys.go, J.1). FLAG FOR SECURITY REVIEW.
 //     It reads only its own IMAS_CPBOX_OPENBAO_* environment.
+//   - bootstrap-nats-trust: the nats-trust init container of the
+//     chart's OpenBao bootstrap Job (internal/natsbootstrap, P21).
+//     FLAG FOR SECURITY REVIEW. It reads only its own IMAS_NATSBOOT_*
+//     environment.
 func runPreConfigSubcommand(args []string, stdout, stderr io.Writer) (code int, ok bool) {
 	if len(args) == 0 {
 		return 0, false
@@ -26,6 +31,8 @@ func runPreConfigSubcommand(args []string, stdout, stderr io.Writer) (code int, 
 		return sproutrelease.Run(args[1:], stdout, stderr), true
 	case pki.ControlPlaneBoxKeysCommand:
 		return pki.RunControlPlaneBoxKeys(args[1:], stderr), true
+	case natsbootstrap.Command:
+		return natsbootstrap.Run(args[1:], stderr), true
 	}
 	return 0, false
 }
