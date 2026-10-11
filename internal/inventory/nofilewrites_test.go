@@ -42,20 +42,23 @@ var scannedDirs = []string{
 // fileWriteCalls are the calls that create or write a file or directory,
 // by import path and function name.
 var fileWriteCalls = map[string][]string{
-	"os":        {"WriteFile", "Create", "CreateTemp", "OpenFile", "MkdirAll"},
+	"os":        {"WriteFile", "Create", "CreateTemp", "OpenFile", "Mkdir", "MkdirAll", "MkdirTemp"},
 	"io/ioutil": {"WriteFile", "TempFile"},
 }
 
 // allowedFileWrites lists the calls that only touch the temp dir, as
-// "path:function:call" (path from the repository root, function the
-// enclosing func or Type.Method, call as pkg.Name). Line numbers are left
-// out so unrelated edits don't churn the list. Empty while report-only.
+// "path:function:call#n" (path from the repository root, function the
+// enclosing func or Type.Method, call as pkg.Name, n counting that call's
+// uses in the function from 1 in source order). n gives each call its own
+// entry, so allowing one temp-dir write doesn't also allow a second write
+// of the same kind in that function. Line numbers are left out so
+// unrelated edits don't churn the list. Empty while report-only.
 var allowedFileWrites = []string{}
 
 // fileWrite is one call found in the scanned source.
 type fileWrite struct {
 	pos string // path:line, for the report
-	key string // path:function:call, as allowedFileWrites spells it
+	key string // path:function:call#n, as allowedFileWrites spells it
 }
 
 // TestNoFileWrittenOutsideTmp reads the scanned trees' source and lists
@@ -168,6 +171,7 @@ func fileWritesIn(fset *token.FileSet, f *ast.File, rel string) []fileWrite {
 		case *ast.GenDecl:
 			fn = "var"
 		}
+		seen := map[string]int{} // function:call -> uses so far
 		ast.Inspect(decl, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
@@ -185,10 +189,11 @@ func fileWritesIn(fset *token.FileSet, f *ast.File, rel string) []fileWrite {
 			if !ok || !slices.Contains(fileWriteCalls[p], sel.Sel.Name) {
 				return true
 			}
-			pkg := p[strings.LastIndex(p, "/")+1:]
+			callID := fn + ":" + p[strings.LastIndex(p, "/")+1:] + "." + sel.Sel.Name
+			seen[callID]++
 			out = append(out, fileWrite{
 				pos: rel + ":" + strconv.Itoa(fset.Position(call.Pos()).Line),
-				key: rel + ":" + fn + ":" + pkg + "." + sel.Sel.Name,
+				key: rel + ":" + callID + "#" + strconv.Itoa(seen[callID]),
 			})
 			return true
 		})
@@ -222,8 +227,8 @@ func funcName(d *ast.FuncDecl) string {
 }
 
 // The scanner itself: it finds calls through renamed imports, names the
-// enclosing function or method, and ignores look-alikes from other
-// packages.
+// enclosing function or method, numbers repeated calls in one function,
+// and ignores look-alikes from other packages.
 func TestScanFileWritesFindsCalls(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "pkg")
@@ -250,7 +255,12 @@ func (s *store) save() {
 	_ = ioutil.WriteFile("/var/lib/y", nil, 0o600)
 }
 
-func mk() { _ = stdos.MkdirAll("/var/lib/z", 0o755) }
+func mk() {
+	_ = stdos.MkdirAll("/var/lib/z", 0o755)
+	_ = stdos.Mkdir("/var/lib/m", 0o755)
+	_, _ = stdos.MkdirTemp("/var/lib", "t")
+	_ = stdos.MkdirAll("/var/lib/z2", 0o755)
+}
 
 func notAWrite() { _ = os.WriteFile("a", nil, 0) }
 `
@@ -265,9 +275,12 @@ func notAWrite() { _ = os.WriteFile("a", nil, 0) }
 		keys = append(keys, w.key)
 	}
 	want := []string{
-		"pkg/a.go:store.save:os.WriteFile",
-		"pkg/a.go:store.save:ioutil.WriteFile",
-		"pkg/a.go:mk:os.MkdirAll",
+		"pkg/a.go:store.save:os.WriteFile#1",
+		"pkg/a.go:store.save:ioutil.WriteFile#1",
+		"pkg/a.go:mk:os.MkdirAll#1",
+		"pkg/a.go:mk:os.Mkdir#1",
+		"pkg/a.go:mk:os.MkdirTemp#1",
+		"pkg/a.go:mk:os.MkdirAll#2",
 	}
 	if !slices.Equal(keys, want) {
 		t.Fatalf("found %q, want %q", keys, want)
