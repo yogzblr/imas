@@ -33,6 +33,9 @@ Goal: no person and no pod ever holds a private signing key; farmer and the bus 
 | D13 | **Stateless feature choices (owner, 2026-10-11, all as recommended).** Accounts go in their own private bucket. The loader's event is a broadcast subject on the bus plus the timed reconcile. Sprout JWT mint-or-reuse uses a PXC row lease (no dependence on conditional PUT). The farmer NKey is a shared Secret. `localCooks` becomes a short-lived PXC row with a TTL. Audit logs go to stdout as JSON and a log shipper collects them (destination and retention are still the owner's to set). Order of work: P22, then P21 in slices: Transit signer and bootstrap, accounts bucket and loader, farmer state, then dropping the `replicaCount == 1` rule. |
 | D14 | **OpenBao image (owner, 2026-10-11).** Our OpenBao 2.7.1 image carries the seals for AWS KMS, Azure Key Vault, GCP Cloud KMS and KMIP. At 2.7.1 the first three are external plugins (installed into the image from `openbao-plugins`, pinned by digest or checksum); KMIP is documented as built in (confirm from the 2.7.1 image). PKCS#11 and the other plugins are not included. |
 | D15 | **Object storage speaks the S3 protocol (owner, 2026-10-11).** No code depends on one vendor. Versity Gateway is an optional component for Azure Blob. The UAT uses RustFS. |
+| D16 | **Audit and service logs (owner, 2026-10-11).** Fluent Bit (Apache-2.0) runs on the nodes as the log shipper and sends to the S3 object store by default. Farmer and saasapi write JSON to stdout and keep no log files on a volume. Retention and immutability of the log bucket are still the owner's to set. |
+| D17 | **Production seal is Azure Key Vault (owner, 2026-10-11).** The image still carries AWS KMS, GCP Cloud KMS and KMIP (D14), so a customer can pick another. UAT uses the static seal. |
+| D18 | **Production object store is Versity Gateway in front of Azure Blob (owner, 2026-10-11).** The Helm chart gets Versity Gateway as an optional component, off by default (D15: the code only speaks S3). Licence to be confirmed against the licence policy and recorded in `DEPENDENCIES.md` before it ships. |
 
 ## 3. Terms
 
@@ -218,8 +221,8 @@ Not tested by us: OpenBao unseal and seal providers, snapshot restore, NATS clus
 ## 12. Open items
 
 - Pinning the three KMS plugins in the image (digest or checksum) and confirming KMIP is built into the 2.7.1 image (D14).
-- Audit log destination and retention (D13);
-- Which production seal (customer or CloudXP choice); KMIP server selection is the operator's, per OpenBao's KMIP page.
+- Retention and immutability (for example object lock) of the log bucket (D16);
+- KMIP server selection, if a customer chooses KMIP, is the operator's, per OpenBao's KMIP page.
 - Farmer NKey and credential-rotation state: PXC or Secret.
 - Audit logs with several farmer replicas: per-pod files plus a shipper, or object storage.
 - None for fleet update trust: the GPG library is decided (BSD-3 accepted) and UAT uses the production path (section 4.1).
