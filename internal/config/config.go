@@ -753,6 +753,14 @@ func LoadConfig(binary string) {
 			BusReconnectBase = jety.GetDuration("busreconnectbase")
 			BusReconnectCap = jety.GetDuration("busreconnectcap")
 			SproutFleetSigningKeyring = jety.GetString("sproutfleetsigningkeyring")
+			// WriteConfig persists defaults, so a sprout first configured
+			// before P22 carries the old JSON keyring default, which the
+			// package no longer ships. Move exactly that value to the new
+			// default; any other configured path is the admin's choice.
+			if SproutFleetSigningKeyring == filepath.Join(systemConfigRoot, "fleet-signing-keys.json") {
+				SproutFleetSigningKeyring = filepath.Join(systemConfigRoot, "fleet-signing-keys.asc")
+				jety.Set("sproutfleetsigningkeyring", SproutFleetSigningKeyring)
+			}
 			SproutUpdateRepoURL = strings.TrimSpace(jety.GetString("sproutupdaterepourl"))
 			SproutUpdateRepoToken = strings.TrimSpace(jety.GetString("sproutupdaterepotoken"))
 			SproutUpdateRepoFormat = strings.TrimSpace(jety.GetString("sproutupdaterepoformat"))

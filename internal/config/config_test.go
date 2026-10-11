@@ -1485,6 +1485,49 @@ func TestLoadConfig_SproutUpdateRepoSettings(t *testing.T) {
 	}
 }
 
+// TestLoadConfig_MigratesLegacyKeyringDefault: a sprout whose config file
+// holds the pre-P22 default keyring path (WriteConfig persists defaults)
+// moves to the .asc default and saves it; a path the admin chose stays.
+func TestLoadConfig_MigratesLegacyKeyringDefault(t *testing.T) {
+	for name, tc := range map[string]struct {
+		configured func(root string) string
+		want       func(root string) string
+	}{
+		"legacy default": {
+			func(root string) string { return filepath.Join(root, "fleet-signing-keys.json") },
+			func(root string) string { return filepath.Join(root, "fleet-signing-keys.asc") },
+		},
+		"admin path": {
+			func(string) string { return "/opt/keys/fleet-signing-keys.json" },
+			func(string) string { return "/opt/keys/fleet-signing-keys.json" },
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tmpRoot := t.TempDir()
+			cfgFile := writeTempConfig(t, tmpRoot, "sprout", "sproutid: s1\nsproutfleetsigningkeyring: "+tc.configured(tmpRoot)+"\n")
+			resetForBinaryTest(t, tmpRoot)
+			jety.SetConfigType("yaml")
+			jety.SetConfigFile(cfgFile)
+			_ = jety.ReadInConfig()
+			SproutFleetSigningKeyring = "stale"
+
+			LoadConfig("sprout")
+
+			want := tc.want(tmpRoot)
+			if SproutFleetSigningKeyring != want {
+				t.Errorf("SproutFleetSigningKeyring = %q, want %q", SproutFleetSigningKeyring, want)
+			}
+			data, err := os.ReadFile(cfgFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), want) {
+				t.Errorf("config file does not persist %q:\n%s", want, data)
+			}
+		})
+	}
+}
+
 // SEC.7d: the staged recipe clock skew tolerance defaults to a minute
 // (farmer replicas' clock margin), is capped at five, and anything that
 // isn't a duration in that range falls back to the default.
