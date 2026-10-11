@@ -1,0 +1,18 @@
+# Migrated from the BUILD-STATUS change log on 2026-10-12, in order.
+change: reset. The old BUILD-STATUS (Waves 0 to 7, UAT briefs, PR ledger #36 to #165) moved to `archive/BUILD-STATUS-2026-10-09.md`; this file now tracks pending items only.
+---
+change: pending items re-checked against the code. P4, P5, P11 and P14 updated with what the code shows; "Review findings re-checked" added (31 Lows and Infos).
+---
+change: tests read for the open findings; P12 and P14 updated, P17 (test gaps) added.
+---
+change: pending items re-ordered by severity (S1 to S4); P18 split out of the review findings (L5).
+---
+change: S1 split into S1a (before the first Azure run) and S1b (before dispatch or self-update); pre-flight list for the first Azure run added.
+---
+change: first from-scratch rig run on rc.9: install order works; enrolment failed on a database deadlock (P19, PR #171); `finish.sh`'s registration found to be a no-op under the UAT values (P20). Second run, enrolling one host at a time: smoke and core passed on the Linux sprouts; P2 removed. #138 and `self_update_disabled` (PRs #169, #170) removed from P14, P11 and P17.
+---
+change: rc.10 cut (includes #171); a from-scratch rig run on it passed smoke and core. P19 lowered to Amber: the rc.10 run saw no deadlock, so the fix is not yet proven. PR #173: `up.sh` refreshes each sprout's package index before enrolment.
+---
+change: P20 decision recorded (option A now, option C before dispatch or production).
+---
+change: P3 partial review record: owner decided the four review questions on PR #171 (retry the whole transaction, six attempts, check the error number, release the binding); the last two are PR #176 (merged).

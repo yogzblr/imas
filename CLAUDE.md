@@ -34,6 +34,10 @@ design doc named in your task.
   consider the task done.
 - Commit messages: `<workstream-id>: <what>` (e.g. `B: mint sprout JWT
   via nats-io/jwt/v2`).
+- Do not edit `docs/BUILD-STATUS.md` in a PR. Add a status fragment,
+  `docs/status/days/YYYY-MM-DD/<topic>.md`, for any item you add, change or
+  close (format in `docs/status/README.md`; check with
+  `scripts/status/rollup.py --check`). A daily roll-up applies it.
 - Open a PR when done. In the PR description, state what you built,
   what you deliberately left out or deferred, and any open question.
 
