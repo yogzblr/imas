@@ -48,10 +48,13 @@ var (
 	ErrKeyNotHardened = errors.New("natskeys: transit key is not hardened (exportable, plaintext backup, imported or derived)")
 	ErrKeyType        = errors.New("natskeys: transit key is not a usable ed25519 key")
 	ErrSignFailed     = errors.New("natskeys: transit sign failed")
-	ErrSignTimeout    = errors.New("natskeys: transit sign timed out")
-	ErrBadSignature   = errors.New("natskeys: transit returned a bad signature")
-	ErrNotConfigured  = errors.New("natskeys: openbao transit not configured")
-	ErrClosed         = errors.New("natskeys: key store closed")
+	// ErrSignTimeout is any Transit request (sign, or a key read, create
+	// or soft delete) that timed out on every attempt, or a caller's
+	// deadline; it wraps context.DeadlineExceeded.
+	ErrSignTimeout   = errors.New("natskeys: transit request timed out")
+	ErrBadSignature  = errors.New("natskeys: transit returned a bad signature")
+	ErrNotConfigured = errors.New("natskeys: openbao transit not configured")
+	ErrClosed        = errors.New("natskeys: key store closed")
 
 	errK8sJWTUnavailable = errors.New("natskeys: openbao kubernetes auth: could not read service account token")
 	errK8sAuthFailed     = errors.New("natskeys: openbao kubernetes auth login failed")
@@ -299,7 +302,7 @@ func (info *keyInfo) publicKey(name string) (int, ed25519.PublicKey, error) {
 }
 
 // call runs one request with the retry policy: up to maxAttempts on a
-// network error, 429 or 5xx; never on 400 or 404; on 403 with
+// network error (a per-attempt timeout included), 429 or 5xx; never on 400 or 404; on 403 with
 // kubernetes auth, one fresh login and one more try. Each attempt is
 // bounded by the store's timeout. The int is the number of attempts.
 func (s *TransitKeyStore) call(ctx context.Context, req func(context.Context) error) (int, error) {
@@ -315,7 +318,9 @@ func (s *TransitKeyStore) call(ctx context.Context, req func(context.Context) er
 		if ctx.Err() != nil {
 			return attempt, ctxError(ctx.Err())
 		}
-		if timedOut {
+		// A request that ran out of its per-attempt time is a network
+		// error: retried, and ErrSignTimeout only after the last attempt.
+		if timedOut && attempt >= maxAttempts {
 			return attempt, fmt.Errorf("%w: %w", ErrSignTimeout, context.DeadlineExceeded)
 		}
 		code := openbao.StatusCode(err)
@@ -325,7 +330,7 @@ func (s *TransitKeyStore) call(ctx context.Context, req func(context.Context) er
 			attempt-- // the re-login try is extra, not one of the three
 			continue
 		}
-		if !retryable(code, err) || attempt >= maxAttempts {
+		if (!timedOut && !retryable(code, err)) || attempt >= maxAttempts {
 			return attempt, err
 		}
 		d := s.backoff[min(attempt-1, len(s.backoff)-1)]

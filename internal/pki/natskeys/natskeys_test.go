@@ -761,8 +761,11 @@ func TestSignTimeout(t *testing.T) {
 	if !errors.Is(err, ErrSignTimeout) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want ErrSignTimeout wrapping context.DeadlineExceeded", err)
 	}
+	if got := f.Count(natskeystest.OpSign); got != maxAttempts {
+		t.Errorf("timed-out sign: %d requests, want %d (a timeout is retried)", got, maxAttempts)
+	}
 	if time.Since(start) > 2*time.Second {
-		t.Errorf("timed-out sign took %v (retried?)", time.Since(start))
+		t.Errorf("timed-out sign took %v", time.Since(start))
 	}
 
 	// The caller's deadline returns early whatever the store allows.
