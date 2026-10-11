@@ -29,6 +29,10 @@ Goal: no person and no pod ever holds a private signing key; farmer and the bus 
 | D9 | **Fleet update trust uses the release's GPG signature, not a Transit key (owner, 2026-10-11).** The release already publishes `checksums.txt` with a detached GPG signature. The sprout verifies that, with the GPG public key shipped in its package. `imas-fleet-signing`, `fleetreleaser` and the Ed25519 manifest signature are retired. See section 4.1. |
 | D10 | **Farmer, saasapi and the bus are stateless (owner, 2026-10-11).** They carry no PersistentVolumeClaim and keep no state that is not rebuilt from the shared services at start. State lives only in the replicated external services (PXC, OpenBao, Valkey, object store), which keep their own local volumes and their own replication. For the bus this means the Account JWT store (`NewDirAccResolver` under `/var/lib/imas/farmerbus` today) is no longer on a volume: a new or restarted bus node gets the operator JWT from the ConfigMap and every Account JWT back from the source of truth (decided in D11). |
 | D11 | **Bus Account JWTs come from the object store through a per-node loader (owner, 2026-10-11).** Farmer writes each Account JWT to a private bucket when it creates or changes a tenant. Every bus node runs a loader that reads the bucket at start and pushes the JWTs to its own node over the system account (the server does not enforce files dropped into its resolver directory, so the push path is the only way in). The node reports ready only after the loader has finished. After that the loader keeps up with an event broadcast by farmer (every node must get it, so a plain subject subscription, not a queue group) and a timed reconcile against a version object in the bucket, which covers a missed event. The resolver directory is an `emptyDir`. Details in section 9.1. |
+| D12 | **Fleet update trust choices (owner, 2026-10-11, all as recommended).** (1) The existing release GPG key signs `checksums.txt` and is the sprout trust root; it moves to the `goreleaser` environment. (2) The sprout does not enforce key expiry; rotate by shipping a new keyring in a package the old key signed. (3) Registration downloads `checksums.txt` and its `.sig` from the configured release URL (GitHub by default; a customer mirror is a different URL). (4) The version floor stays in saasapi's registration check and the sprout keeps its downgrade refusal. (5) `fleetreleaser`, the Transit key `imas-fleet-signing` and its OpenBao policies are retired in the same change, including the chart and the UAT. |
+| D13 | **Stateless feature choices (owner, 2026-10-11, all as recommended).** Accounts go in their own private bucket. The loader's event is a broadcast subject on the bus plus the timed reconcile. Sprout JWT mint-or-reuse uses a PXC row lease (no dependence on conditional PUT). The farmer NKey is a shared Secret. `localCooks` becomes a short-lived PXC row with a TTL. Audit logs go to stdout as JSON and a log shipper collects them (destination and retention are still the owner's to set). Order of work: P22, then P21 in slices: Transit signer and bootstrap, accounts bucket and loader, farmer state, then dropping the `replicaCount == 1` rule. |
+| D14 | **OpenBao image (owner, 2026-10-11).** Our OpenBao 2.7.1 image carries the seals for AWS KMS, Azure Key Vault, GCP Cloud KMS and KMIP. At 2.7.1 the first three are external plugins (installed into the image from `openbao-plugins`, pinned by digest or checksum); KMIP is documented as built in (confirm from the 2.7.1 image). PKCS#11 and the other plugins are not included. |
+| D15 | **Object storage speaks the S3 protocol (owner, 2026-10-11).** No code depends on one vendor. Versity Gateway is an optional component for Azure Blob. The UAT uses RustFS. |
 
 ## 3. Terms
 
@@ -143,7 +147,7 @@ Provisioning must be the only path that creates tenant keys (no wildcard create 
 
 Sprout generates its keys locally. Farmer verifies the join token, asks the tenant signing key (Transit) for the User JWT and the gateway key for the gateway JWT, writes the User JWT to the private object-store bucket, records the sprout in PXC, and returns both JWTs. No per-sprout push to the bus (the sprout presents its own JWT).
 Lifetimes (checked in `internal/pki`): the NATS User JWT is minted with no expiry (no `Expires` is set; the tenant Account JWT also has none), so it lives until revoked through the Account's revocation list. The gateway JWT is short-lived (`gatewayjwtttl`, default 24 h) and the sprout refreshes it through the sealed `POST /v1/refresh`; refresh never redeems a join token. Rotating User JWTs is not needed for revocation to work, and adding expiry would require a refresh path for the NATS JWT that does not exist. Decision D5: keep User JWTs until revoked.
-Object store rules: separate private bucket, farmer-only credentials, SSE, never served by `/files/`; conditional PUT or PXC row lock for mint-or-reuse (CONFIRM store support); no bucket listing, iterate PXC rows.
+Object store rules: separate private bucket, farmer-only credentials, SSE, never served by `/files/`; PXC row lease for mint-or-reuse (D13), so the store needs no conditional PUT; no bucket listing, iterate PXC rows.
 
 ## 9. Code and chart changes
 
@@ -213,7 +217,8 @@ Not tested by us: OpenBao unseal and seal providers, snapshot restore, NATS clus
 
 ## 12. Open items
 
-- Which KMS plugins to bake into the OpenBao 2.7.1 image and how to pin them.
+- Pinning the three KMS plugins in the image (digest or checksum) and confirming KMIP is built into the 2.7.1 image (D14).
+- Audit log destination and retention (D13);
 - Which production seal (customer or CloudXP choice); KMIP server selection is the operator's, per OpenBao's KMIP page.
 - Farmer NKey and credential-rotation state: PXC or Secret.
 - Audit logs with several farmer replicas: per-pod files plus a shipper, or object storage.
