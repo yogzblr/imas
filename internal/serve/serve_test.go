@@ -528,6 +528,26 @@ func TestMuxCohortsValidateRoute(t *testing.T) {
 	}
 }
 
+// TestMuxNoAuditRoutes: the audit query routes are gone (P21 slice 3,
+// owner decision 1); audit is read in the log platform. Their paths now
+// get what any unknown path gets (the UI fallback), not a NATS proxy.
+func TestMuxNoAuditRoutes(t *testing.T) {
+	mux := NewMux()
+	get := func(path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		return rec
+	}
+	unknown := get("/api/v1/no-such-route")
+	for _, path := range []string{"/api/v1/audit/dates", "/api/v1/audit?date=2025-01-01"} {
+		rec := get(path)
+		if rec.Code != unknown.Code || rec.Header().Get("Content-Type") != unknown.Header().Get("Content-Type") {
+			t.Errorf("GET %s = %d %q, want what an unknown path gets: %d %q", path,
+				rec.Code, rec.Header().Get("Content-Type"), unknown.Code, unknown.Header().Get("Content-Type"))
+		}
+	}
+}
+
 func TestMuxRecipesRoutes(t *testing.T) {
 	mux := NewMux()
 
@@ -547,43 +567,6 @@ func TestMuxRecipesRoutes(t *testing.T) {
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("recipes get: expected 502, got %d", rec.Code)
-	}
-}
-
-func TestMuxAuditRoutes(t *testing.T) {
-	mux := NewMux()
-
-	// List audit dates
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/audit/dates", nil)
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("audit dates: expected 502, got %d", rec.Code)
-	}
-
-	// Query audit log
-	req = httptest.NewRequest(http.MethodGet, "/api/v1/audit?date=2025-01-01&action=cook", nil)
-	rec = httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("audit query: expected 502, got %d", rec.Code)
-	}
-}
-
-func TestHandleNATSProxyWithQueryParams(t *testing.T) {
-	handler := HandleNATSProxyWithQuery("audit.query")
-
-	// With query parameters
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/audit?date=2025-03-15&action=cook&pubkey=ABC&limit=10&failed_only=true", nil)
-	rec := httptest.NewRecorder()
-
-	handler(rec, req)
-
-	// No NATS connection, should get 502
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("expected status 502, got %d", rec.Code)
 	}
 }
 
@@ -894,35 +877,6 @@ func TestMuxLogsRoute(t *testing.T) {
 	// It should return 200 with an empty logs array.
 	if rec.Code != http.StatusOK {
 		t.Fatalf("logs: expected 200, got %d", rec.Code)
-	}
-}
-
-func TestHandleNATSProxyWithQueryNoParams(t *testing.T) {
-	handler := HandleNATSProxyWithQuery("audit.query")
-
-	// No query parameters at all
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/audit", nil)
-	rec := httptest.NewRecorder()
-
-	handler(rec, req)
-
-	// With no NATS connection, should get 502
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("expected status 502, got %d", rec.Code)
-	}
-}
-
-func TestHandleNATSProxyWithQueryInvalidLimit(t *testing.T) {
-	handler := HandleNATSProxyWithQuery("audit.query")
-
-	// Invalid limit (not a number) — should be ignored gracefully
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/audit?limit=abc", nil)
-	rec := httptest.NewRecorder()
-
-	handler(rec, req)
-
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("expected status 502, got %d", rec.Code)
 	}
 }
 

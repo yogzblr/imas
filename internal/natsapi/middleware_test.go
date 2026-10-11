@@ -96,8 +96,8 @@ func TestAuthorize(t *testing.T) {
 		params             json.RawMessage
 		want               error
 	}{
-		{"admin, admin method", MethodAuditDates, "UADMIN", nil, nil},
-		{"viewer, admin method", MethodAuditDates, "UVIEWER", nil, rbac.ErrAccessDenied},
+		{"admin, admin method", MethodAuthRemoveUser, "UADMIN", nil, nil},
+		{"viewer, admin method", MethodAuthRemoveUser, "UVIEWER", nil, rbac.ErrAccessDenied},
 		{"viewer, admin method, params naming the admin", MethodAuthAddUser, "UVIEWER", json.RawMessage(`{"token":"UADMIN","pubkey":"UADMIN"}`), rbac.ErrAccessDenied},
 		{"viewer, read", MethodJobsGet, "UVIEWER", nil, nil},
 		{"unknown user", MethodJobsGet, "UNOBODY", nil, rbac.ErrAccessDenied},
@@ -198,7 +198,6 @@ func TestViewerRoleNATSAccess(t *testing.T) {
 		"jobs.cancel",
 		"pki.list", "pki.accept", "pki.reject", "pki.deny", "pki.unaccept", "pki.delete",
 		"auth.users", "auth.users.add", "auth.users.remove",
-		"audit.dates", "audit.query",
 	}
 	for _, method := range deniedMethods {
 		action := NATSMethodAction(method)
@@ -227,13 +226,12 @@ func TestOperatorRoleNATSAccess(t *testing.T) {
 		}
 	}
 
-	// Methods the operator should be denied (PKI + user management + audit,
+	// Methods the operator should be denied (PKI + user management,
 	// and shell, which only a role that names it grants)
 	deniedMethods := []string{
 		"shell.open",
 		"pki.list", "pki.accept", "pki.reject", "pki.deny", "pki.unaccept", "pki.delete",
 		"auth.users", "auth.users.add", "auth.users.remove",
-		"audit.dates", "audit.query",
 	}
 	for _, method := range deniedMethods {
 		action := NATSMethodAction(method)

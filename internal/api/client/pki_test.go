@@ -6,7 +6,6 @@ import (
 	"github.com/nats-io/nats.go"
 
 	apitypes "github.com/yogzblr/imas/internal/api/types"
-	"github.com/yogzblr/imas/internal/audit"
 	"github.com/yogzblr/imas/internal/jobs"
 	"github.com/yogzblr/imas/internal/pki"
 )
@@ -447,30 +446,6 @@ func TestGetSproutProps_BadJSON(t *testing.T) {
 	mockBadJSONHandler(t, NatsConn, "imas.api.props.getall")
 
 	_, err := GetSproutProps("web-01")
-	if err == nil {
-		t.Fatal("expected unmarshal error")
-	}
-}
-
-func TestListAuditDates_BadJSON(t *testing.T) {
-	cleanup := startTestNATS(t)
-	defer cleanup()
-
-	mockBadJSONHandler(t, NatsConn, "imas.api.audit.dates")
-
-	_, err := ListAuditDates()
-	if err == nil {
-		t.Fatal("expected unmarshal error")
-	}
-}
-
-func TestQueryAudit_BadJSON(t *testing.T) {
-	cleanup := startTestNATS(t)
-	defer cleanup()
-
-	mockBadJSONHandler(t, NatsConn, "imas.api.audit.query")
-
-	_, err := QueryAudit(audit.QueryParams{Date: "2026-03-18"})
 	if err == nil {
 		t.Fatal("expected unmarshal error")
 	}

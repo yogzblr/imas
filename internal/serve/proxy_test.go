@@ -521,40 +521,6 @@ func TestHandleUserRemoveProxy_NATSError(t *testing.T) {
 	}
 }
 
-func TestHandleNATSProxyWithQuery_Success(t *testing.T) {
-	cleanup := startTestNATS(t)
-	defer cleanup()
-
-	mockMethod(t, client.NatsConn, "audit.query", []map[string]string{
-		{"action": "cook", "user": "admin"},
-	})
-
-	handler := HandleNATSProxyWithQuery("audit.query")
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/audit?date=2026-01-01&action=cook&pubkey=ABC&limit=10&failed_only=true", nil)
-	rec := httptest.NewRecorder()
-	handler(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rec.Code)
-	}
-}
-
-func TestHandleNATSProxyWithQuery_NATSError(t *testing.T) {
-	cleanup := startTestNATS(t)
-	defer cleanup()
-
-	mockMethodError(t, client.NatsConn, "audit.query", "audit unavailable")
-
-	handler := HandleNATSProxyWithQuery("audit.query")
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/audit?date=2026-01-01", nil)
-	rec := httptest.NewRecorder()
-	handler(rec, req)
-
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("expected 502, got %d", rec.Code)
-	}
-}
-
 func TestHandlePropsDeleteProxy_Success(t *testing.T) {
 	cleanup := startTestNATS(t)
 	defer cleanup()

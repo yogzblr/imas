@@ -511,26 +511,21 @@ func TestSealedRotateKeyThroughRouter(t *testing.T) {
 func TestSealedRouterAudit(t *testing.T) {
 	f := startSealedFarmer(t)
 	u := newSealedCLIUser(t)
-	dir := t.TempDir()
-	logger, err := audit.NewLogger(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer logger.Close()
-	audit.SetGlobal(logger)
+	buf := &auditBuffer{}
+	audit.SetGlobal(audit.NewLogger(buf))
 	defer audit.SetGlobal(nil)
 	audit.SetLevel(audit.LevelAll)
 	defer audit.SetLevel(audit.LevelWrite)
 
 	_, _ = f.call(MethodPropsSet, map[string]string{"sprout_id": "web-1", "name": "a", "value": "b", "token": "x", "pubkey": "USOMEONEELSE"})
-	q, err := logger.Query(audit.QueryParams{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(q.Entries) == 0 {
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if lines[0] == "" {
 		t.Fatal("nothing audited")
 	}
-	e := q.Entries[len(q.Entries)-1]
+	var e audit.Entry
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &e); err != nil {
+		t.Fatal(err)
+	}
 	if e.Pubkey != u.id || e.Action != MethodPropsSet || e.RoleName != "admin" || len(e.Targets) != 1 || e.Targets[0] != "web-1" {
 		t.Fatalf("audit entry %+v", e)
 	}

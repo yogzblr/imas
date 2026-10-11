@@ -350,9 +350,10 @@ func TestReadOnlyMethods(t *testing.T) {
 		}
 	}
 	// The design's 19, plus recipes.list and recipes.get (owner decision,
-	// PR #95).
-	if len(readOnlyMethods) != 21 {
-		t.Errorf("%d read-only methods, want the design's 19 and the two recipe reads", len(readOnlyMethods))
+	// PR #95), less audit.dates and audit.query (removed, P21 slice 3
+	// owner decision 1).
+	if len(readOnlyMethods) != 19 {
+		t.Errorf("%d read-only methods, want the design's 19 and the two recipe reads, less the two audit reads", len(readOnlyMethods))
 	}
 	for _, m := range []string{MethodCohortsRefresh, MethodAuthAddUser, MethodAuthRemoveUser, MethodAuthLogin,
 		MethodCmdRun, MethodCook, MethodShellOpen, MethodPKIRotateTenantBoxKey, MethodAuthRotateKey,
@@ -361,7 +362,7 @@ func TestReadOnlyMethods(t *testing.T) {
 			t.Errorf("%s is not treated as mutating", m)
 		}
 	}
-	for _, m := range []string{MethodJobsList, MethodAuditQuery, MethodPKIList, MethodRecipesList, MethodRecipesGet} {
+	for _, m := range []string{MethodJobsList, MethodPKIList, MethodRecipesList, MethodRecipesGet} {
 		if IsMutatingMethod(m) {
 			t.Errorf("%s is treated as mutating", m)
 		}

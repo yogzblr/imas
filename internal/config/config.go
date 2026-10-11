@@ -122,7 +122,6 @@ var (
 	APIReadTimeout       time.Duration
 	APIWriteTimeout      time.Duration
 	AuditLevel           string
-	AuditLogDir          string
 	CacheDir             string
 	CertFile             string
 	CertHosts            []string
@@ -488,7 +487,9 @@ func LoadConfig(binary string) {
 		err := jety.ReadInConfig()
 
 		if errors.Is(err, jety.ErrConfigFileNotFound) || errors.Is(err, jety.ErrConfigFileEmpty) {
-			log.Println("Config file not found, will create default config")
+			if binary != string(BinaryFarmer) {
+				log.Println("Config file not found, will create default config")
+			}
 			switch binary {
 			case "imas":
 				dirname, errHomeDir := os.UserHomeDir()
@@ -505,14 +506,11 @@ func LoadConfig(binary string) {
 					log.Fatal(err)
 				}
 			case "farmer":
-				if mkErr := os.MkdirAll(systemConfigRoot, 0o755); mkErr != nil {
-					log.Fatal(mkErr)
-				}
-				cfgFile := filepath.Join(systemConfigRoot, "farmer")
-				_, err = os.Create(cfgFile)
-				if err != nil {
-					log.Fatal(err)
-				}
+				// Farmer never writes its config: it runs with a read-only
+				// root filesystem and gets its config from a read-only
+				// ConfigMap. Without a file it runs on defaults and the
+				// environment.
+				log.Printf("%s not found: farmer runs on defaults and the environment", filepath.Join(systemConfigRoot, "farmer"))
 			case "sprout":
 				if mkErr := os.MkdirAll(systemConfigRoot, 0o755); mkErr != nil {
 					log.Fatal(mkErr)
@@ -558,7 +556,6 @@ func LoadConfig(binary string) {
 			jety.SetDefault("certfile", filepath.Join(systemConfigRoot, "pki/farmer/tls-cert.pem"))
 			jety.SetDefault("farmerpki", filepath.Join(systemConfigRoot, "pki/farmer")+"/")
 			jety.SetDefault("keyfile", filepath.Join(systemConfigRoot, "pki/farmer/tls-key.pem"))
-			jety.SetDefault("auditlogdir", "/var/log/imas/audit")
 			jety.SetDefault("auditlevel", "write")
 			jety.SetDefault("joblogdir", "/var/cache/imas/farmer/jobs")
 			jety.SetDefault("joblogttl", 30*24*time.Hour) // 30 days default
@@ -778,7 +775,14 @@ func LoadConfig(binary string) {
 				log.Errorf("failed to restrict %s to mode %o: %v", cfgFile, sproutConfigMode, err)
 			}
 		}
-		jety.WriteConfig()
+		// Farmer (and farmerbus, which loads the farmer config) never
+		// writes its config file: see above. The other binaries persist
+		// their defaults, and a failure to do so is reported, not ignored.
+		if binary != string(BinaryFarmer) {
+			if err := jety.WriteConfig(); err != nil {
+				log.Errorf("config: writing the %s config file: %v", binary, err)
+			}
+		}
 	})
 	logLevel := jety.GetString("loglevel")
 	switch logLevel {
@@ -803,7 +807,6 @@ func LoadConfig(binary string) {
 	APIReadTimeout = jety.GetDuration("apireadtimeout")
 	APIWriteTimeout = jety.GetDuration("apiwritetimeout")
 	AuditLevel = jety.GetString("auditlevel")
-	AuditLogDir = jety.GetString("auditlogdir")
 	CacheDir = jety.GetString("cachedir")
 	CertFile = jety.GetString("certfile")
 	CertHosts = jety.GetStringSlice("certhosts")

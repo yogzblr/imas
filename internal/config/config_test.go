@@ -948,16 +948,69 @@ func TestLoadConfig_SproutCreatesConfigIfMissing(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_FarmerCreatesConfigIfMissing(t *testing.T) {
+// TestLoadConfig_FarmerNeverCreatesConfig: with no config file, farmer
+// runs on defaults and creates nothing under the config root, which is
+// read-only in the chart.
+func TestLoadConfig_FarmerNeverCreatesConfig(t *testing.T) {
 	tmpRoot := t.TempDir()
-	// Don't create the farmer config file — LoadConfig should create it.
 	resetForBinaryTest(t, tmpRoot)
 
 	LoadConfig("farmer")
 
-	cfgFile := filepath.Join(tmpRoot, "farmer")
-	if _, err := os.Stat(cfgFile); os.IsNotExist(err) {
-		t.Error("LoadConfig should create the farmer config file")
+	entries, err := os.ReadDir(tmpRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("LoadConfig(farmer) created %v under the config root", entries)
+	}
+	if FarmerAPIPort != "5405" {
+		t.Errorf("FarmerAPIPort = %q, want the default 5405", FarmerAPIPort)
+	}
+}
+
+// TestLoadConfig_FarmerNeverRewritesConfig: an existing farmer config file
+// is read, never written back: jety.WriteConfig would add every default
+// and environment value (IMAS_PXC_DSN included) to it.
+func TestLoadConfig_FarmerNeverRewritesConfig(t *testing.T) {
+	tmpRoot := t.TempDir()
+	const content = "farmerapiport: \"8080\"\n"
+	cfgFile := writeTempConfig(t, tmpRoot, "farmer", content)
+	before, err := os.Stat(cfgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("IMAS_PXC_DSN", "user:secret@tcp(pxc:3306)/farmer")
+	resetForBinaryTest(t, tmpRoot)
+	jety.SetConfigType("yaml")
+	jety.SetConfigFile(cfgFile)
+	_ = jety.ReadInConfig()
+
+	LoadConfig("farmer")
+
+	if FarmerAPIPort != "8080" {
+		t.Errorf("FarmerAPIPort = %q, want 8080 from the file", FarmerAPIPort)
+	}
+	got, err := os.ReadFile(cfgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != content {
+		t.Errorf("config file rewritten to %q, want it unchanged", got)
+	}
+	after, err := os.Stat(cfgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Errorf("config file mtime changed: %v -> %v", before.ModTime(), after.ModTime())
+	}
+	entries, err := os.ReadDir(tmpRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("config root holds %v, want only the farmer file", entries)
 	}
 }
 

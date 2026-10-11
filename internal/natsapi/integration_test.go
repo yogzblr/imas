@@ -267,13 +267,7 @@ func TestSubscribeWithAuditLogging(t *testing.T) {
 	tenantID := pki.CurrentTenantID()
 	defer ClearNatsConn(tenantID)
 
-	dir := t.TempDir()
-	logger, err := audit.NewLogger(dir)
-	if err != nil {
-		t.Fatalf("NewLogger: %v", err)
-	}
-	defer logger.Close()
-	audit.SetGlobal(logger)
+	audit.SetGlobal(audit.NewLogger(&auditBuffer{}))
 	defer audit.SetGlobal(nil)
 
 	jetyCleanup := setupJetyDangerouslyAllowRoot(t, true)

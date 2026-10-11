@@ -17,7 +17,6 @@ func TestSubjectReturnsFullSubject(t *testing.T) {
 		{MethodAuthWhoAmI, "imas.api.auth.whoami"},
 		{MethodCook, "imas.api.cook"},
 		{MethodShellOpen, "imas.api.shell.open"},
-		{MethodAuditQuery, "imas.api.audit.query"},
 	}
 
 	for _, tt := range tests {
@@ -102,5 +101,21 @@ func TestCookTriggerSubject(t *testing.T) {
 	want := "imas.api.cook.trigger.20260326-abc123"
 	if got != want {
 		t.Errorf("cook trigger = %q, want %q", got, want)
+	}
+}
+
+// TestNoAuditQueryMethods: audit.dates and audit.query are gone (P21
+// slice 3, owner decision 1): no route, and not in the method list.
+func TestNoAuditQueryMethods(t *testing.T) {
+	routes := apiRoutes()
+	for _, m := range []string{"audit.dates", "audit.query"} {
+		if _, ok := routes[m]; ok {
+			t.Errorf("%s is still routed", m)
+		}
+		for _, known := range AllMethods() {
+			if known == m {
+				t.Errorf("%s is still in AllMethods", m)
+			}
+		}
 	}
 }

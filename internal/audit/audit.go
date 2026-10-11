@@ -1,25 +1,31 @@
 // Package audit provides per-user audit logging for imas farmer actions.
 //
 // Every authenticated API action (cook, key accept, job cancel, prop changes,
-// etc.) is recorded as a JSONL entry with the user's identity, timestamp,
+// etc.) is recorded as one JSON line with the user's identity, timestamp,
 // action type, and relevant targets.
 //
-// The audit log is append-only and written to a configurable directory
-// (default: /var/log/imas/audit/). Files are rotated daily.
+// Records go to stdout, never to a file: farmer runs with a read-only root
+// filesystem and no volume of its own. The log shipper (Fluent Bit) picks
+// the lines up from the container's stdout, and audit is queried in the log
+// platform, which keeps it for 30 days by default. Each line carries
+// "kind":"audit", which tells it apart from the process's other logs.
 package audit
 
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 )
 
+// Kind is the "kind" field of every audit line.
+const Kind = "audit"
+
 // Entry represents a single audit log record.
 type Entry struct {
-	Timestamp  time.Time       `json:"timestamp"`
+	Timestamp  time.Time       `json:"ts"`
 	Username   string          `json:"username,omitempty"`
 	Pubkey     string          `json:"pubkey"`
 	RoleName   string          `json:"role"`
@@ -30,30 +36,35 @@ type Entry struct {
 	Error      string          `json:"error,omitempty"`
 }
 
-// Logger writes audit entries to JSONL files.
+// line is an Entry as written: Kind first, then the Entry's fields.
+type line struct {
+	Kind string `json:"kind"`
+	Entry
+}
+
+// Logger writes audit entries as JSON lines to one writer.
 type Logger struct {
-	mu      sync.Mutex
-	dir     string
-	file    *os.File
-	current string // current file date (YYYY-MM-DD)
+	mu sync.Mutex
+	w  io.Writer
 }
 
-// NewLogger creates an audit logger that writes to the given directory.
-// The directory is created if it does not exist.
-func NewLogger(dir string) (*Logger, error) {
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return nil, fmt.Errorf("audit: create dir %s: %w", dir, err)
+// NewLogger returns an audit logger that writes to w, or to stdout when w
+// is nil.
+func NewLogger(w io.Writer) *Logger {
+	if w == nil {
+		w = os.Stdout
 	}
-	return &Logger{dir: dir}, nil
+	return &Logger{w: w}
 }
 
-// Log writes an audit entry to the current day's log file.
+// Log writes entry as one JSON line. Lines are written whole: concurrent
+// calls never interleave.
 func (l *Logger) Log(entry Entry) error {
 	if entry.Timestamp.IsZero() {
 		entry.Timestamp = time.Now().UTC()
 	}
 
-	data, err := json.Marshal(entry)
+	data, err := json.Marshal(line{Kind: Kind, Entry: entry})
 	if err != nil {
 		return fmt.Errorf("audit: marshal entry: %w", err)
 	}
@@ -61,53 +72,8 @@ func (l *Logger) Log(entry Entry) error {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
-
-	if err := l.ensureFile(); err != nil {
-		return err
-	}
-
-	_, err = l.file.Write(data)
-	return err
-}
-
-// Close closes the underlying file.
-func (l *Logger) Close() error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.file != nil {
-		err := l.file.Close()
-		l.file = nil
-		l.current = ""
-		return err
+	if _, err := l.w.Write(data); err != nil {
+		return fmt.Errorf("audit: write entry: %w", err)
 	}
 	return nil
-}
-
-// ensureFile opens or rotates the log file based on the current date.
-// Must be called with l.mu held.
-func (l *Logger) ensureFile() error {
-	today := time.Now().UTC().Format("2006-01-02")
-	if l.file != nil && l.current == today {
-		return nil
-	}
-
-	if l.file != nil {
-		l.file.Close()
-		l.file = nil
-	}
-
-	path := filepath.Join(l.dir, fmt.Sprintf("audit-%s.jsonl", today))
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640)
-	if err != nil {
-		return fmt.Errorf("audit: open %s: %w", path, err)
-	}
-
-	l.file = f
-	l.current = today
-	return nil
-}
-
-// Dir returns the configured audit log directory.
-func (l *Logger) Dir() string {
-	return l.dir
 }

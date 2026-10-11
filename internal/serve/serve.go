@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/yogzblr/imas/internal/api/client"
@@ -85,10 +84,6 @@ func NewMux() *http.ServeMux {
 	// shaped into the {"recipes": [...]} and RecipeContent bodies the UI reads.
 	mux.HandleFunc("GET /api/v1/recipes", HandleRecipesList)
 	mux.HandleFunc("GET /api/v1/recipes/{id...}", HandleRecipeGet)
-
-	// Audit
-	mux.HandleFunc("GET /api/v1/audit/dates", HandleNATSProxy("audit.dates"))
-	mux.HandleFunc("GET /api/v1/audit", HandleNATSProxyWithQuery("audit.query"))
 
 	// Log streaming (WebSocket + REST)
 	mux.HandleFunc("GET /api/v1/logs/stream", HandleLogStream)
@@ -242,47 +237,6 @@ func HandlePropsAllProxy(method string) http.HandlerFunc {
 		}
 		params := map[string]string{"sprout_id": id}
 		result, err := client.NatsRequest(method, params)
-		if err != nil {
-			WriteJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write(result)
-	}
-}
-
-// HandleNATSProxyWithQuery returns a handler that converts URL query parameters
-// into a JSON payload and forwards to a NATS subject. Supports: date, action,
-// pubkey, limit, failed_only query parameters (for audit queries).
-func HandleNATSProxyWithQuery(method string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		params := make(map[string]any)
-		q := r.URL.Query()
-		if v := q.Get("date"); v != "" {
-			params["date"] = v
-		}
-		if v := q.Get("action"); v != "" {
-			params["action"] = v
-		}
-		if v := q.Get("pubkey"); v != "" {
-			params["pubkey"] = v
-		}
-		if v := q.Get("limit"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil {
-				params["limit"] = n
-			}
-		}
-		if q.Get("failed_only") == "true" {
-			params["failed_only"] = true
-		}
-
-		var reqParams any
-		if len(params) > 0 {
-			reqParams = params
-		}
-
-		result, err := client.NatsRequest(method, reqParams)
 		if err != nil {
 			WriteJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return
