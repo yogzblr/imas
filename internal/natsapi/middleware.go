@@ -61,10 +61,6 @@ var natsActionMap = map[string]rbac.Action{
 	MethodAuthResetKey:   rbac.ActionAdmin,
 	MethodAuthExplain:    rbac.ActionUserRead,
 	MethodAuthRotateKey:  rbac.ActionUserRead,
-
-	// Audit
-	MethodAuditDates: rbac.ActionAdmin,
-	MethodAuditQuery: rbac.ActionAdmin,
 }
 
 // selfMethods are about the caller themselves, so any user whose sealed

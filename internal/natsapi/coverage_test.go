@@ -182,19 +182,6 @@ func TestSetCohortRegistry(t *testing.T) {
 
 // --- auditError type ---
 
-func TestAuditErrorType(t *testing.T) {
-	err := errAuditNotConfigured
-	if err.Error() != "audit logging not configured" {
-		t.Errorf("Error() = %q, want %q", err.Error(), "audit logging not configured")
-	}
-
-	// Verify it satisfies the error interface.
-	var e error = err
-	if e.Error() != "audit logging not configured" {
-		t.Errorf("error interface: %q", e.Error())
-	}
-}
-
 // --- checkScopedAccess ---
 
 func TestCheckScopedAccessDangerouslyAllowRoot(t *testing.T) {

@@ -78,8 +78,6 @@ var readOnlyMethods = map[string]bool{
 	MethodAuthWhoAmI:      true,
 	MethodAuthListUsers:   true,
 	MethodAuthExplain:     true,
-	MethodAuditDates:      true,
-	MethodAuditQuery:      true,
 	MethodRecipesList:     true,
 	MethodRecipesGet:      true,
 }

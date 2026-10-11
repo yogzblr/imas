@@ -172,13 +172,6 @@ func TestPrintRecipesTable_LongNames(t *testing.T) {
 
 // --- Audit display ---
 
-func TestAuditDatesFlags(t *testing.T) {
-	// Already tested in cmd_test.go but let's verify the command exists
-	if cmdAuditDates.Run == nil {
-		t.Fatal("audit dates should have Run set")
-	}
-}
-
 // --- Init command ---
 
 func TestInitCommand_Exists(t *testing.T) {

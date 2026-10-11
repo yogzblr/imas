@@ -1,12 +1,9 @@
 package audit
 
 import (
+	"bytes"
 	"encoding/json"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
-	"time"
 )
 
 func TestIsReadOnly(t *testing.T) {
@@ -118,31 +115,17 @@ func TestExtractTargets(t *testing.T) {
 // audited by the sealed router with the user it verified (see
 // TestSealedRouterAudit in internal/natsapi).
 func TestLogActionWithGlobal(t *testing.T) {
-	dir := t.TempDir()
-	logger, err := NewLogger(dir)
-	if err != nil {
-		t.Fatalf("NewLogger: %v", err)
-	}
-	defer logger.Close()
-
-	SetGlobal(logger)
+	var buf bytes.Buffer
+	SetGlobal(NewLogger(&buf))
 	defer SetGlobal(nil)
 
 	params := json.RawMessage(`{"token":"test-token","sprout_id":"web-1","username":"mallory"}`)
-	err = LogAction("pki.accept", params, nil, nil)
-	if err != nil {
+	if err := LogAction("pki.accept", params, nil, nil); err != nil {
 		t.Fatalf("LogAction: %v", err)
 	}
 
-	today := time.Now().UTC().Format("2006-01-02")
-	path := filepath.Join(dir, "audit-"+today+".jsonl")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-
 	var got Entry
-	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &got); err != nil {
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 
@@ -246,20 +229,13 @@ func TestSetAndGetLevel(t *testing.T) {
 }
 
 func TestLogActionReadOnlySkipped(t *testing.T) {
-	dir := t.TempDir()
-	logger, err := NewLogger(dir)
-	if err != nil {
-		t.Fatalf("NewLogger: %v", err)
-	}
-	defer logger.Close()
-
-	SetGlobal(logger)
+	var buf bytes.Buffer
+	SetGlobal(NewLogger(&buf))
 	defer SetGlobal(nil)
 
 	// Read-only actions should still work via LogAction (the caller
 	// in router.go skips them, but LogAction itself doesn't reject them)
-	err = LogAction("version", nil, nil, nil)
-	if err != nil {
+	if err := LogAction("version", nil, nil, nil); err != nil {
 		t.Fatalf("LogAction: %v", err)
 	}
 }

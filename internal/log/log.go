@@ -34,9 +34,56 @@ func init() {
 		ReportCaller:    true,
 	})
 	charm.SetLevel(charmlog.DebugLevel)
+	f, err := ParseFormat(os.Getenv(EnvLogFormat))
+	if err != nil {
+		charm.Warnf("%v; using %s", err, FormatText)
+	}
+	charm.SetFormatter(f.charmFormatter())
 
 	logger = mux.Default()
 	logger.SubLoggers = append(logger.SubLoggers, newCharmAdapter(charm))
+}
+
+// EnvLogFormat selects the terminal logger's format at startup: "text"
+// (the default) or "json", one JSON object per line for a log shipper.
+// Audit records go to stdout as JSON whatever this says (internal/audit);
+// the terminal logger writes to stderr.
+const EnvLogFormat = "IMAS_LOG_FORMAT"
+
+// Format is the terminal logger's output format.
+type Format string
+
+const (
+	FormatText Format = "text"
+	FormatJSON Format = "json"
+)
+
+// ParseFormat parses an IMAS_LOG_FORMAT value. Empty means text; an
+// unknown value is an error, and text is returned with it.
+func ParseFormat(s string) (Format, error) {
+	switch f := Format(strings.ToLower(strings.TrimSpace(s))); f {
+	case "", FormatText:
+		return FormatText, nil
+	case FormatJSON:
+		return FormatJSON, nil
+	default:
+		return FormatText, fmt.Errorf("log: %s=%q: want %s or %s", EnvLogFormat, s, FormatText, FormatJSON)
+	}
+}
+
+func (f Format) charmFormatter() charmlog.Formatter {
+	if f == FormatJSON {
+		return charmlog.JSONFormatter
+	}
+	return charmlog.TextFormatter
+}
+
+// SetFormat sets the terminal logger's format. The NATS backend is
+// unaffected.
+func SetFormat(f Format) {
+	mu.Lock()
+	defer mu.Unlock()
+	charm.SetFormatter(f.charmFormatter())
 }
 
 // SetLogLevel sets the minimum log level for the charm terminal logger.

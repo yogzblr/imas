@@ -7,7 +7,6 @@ package natsapi
 
 import (
 	apitypes "github.com/yogzblr/imas/internal/api/types"
-	"github.com/yogzblr/imas/internal/audit"
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/jobs"
 	"github.com/yogzblr/imas/internal/pki"
@@ -118,10 +117,6 @@ const (
 	// internal/natsapi shell.go). It replaced the plaintext shell.start
 	// (J.5), which is gone.
 	MethodShellOpen = "shell.open"
-
-	// Audit
-	MethodAuditDates = "audit.dates"
-	MethodAuditQuery = "audit.query"
 )
 
 // Subject returns the full NATS subject for a given API method.
@@ -206,9 +201,6 @@ type RecipesGetRequest struct {
 	Name string `json:"name"`
 }
 
-// AuditQueryRequest holds query parameters for audit log searches.
-type AuditQueryRequest = audit.QueryParams
-
 // ──────────────────────────────────────────────
 // Response types
 // ──────────────────────────────────────────────
@@ -284,12 +276,6 @@ type CohortsValidateResponse = CohortValidateResponse
 // ShellOpenResponse is farmer's sealed answer to it.
 type ShellOpenResponse = shell.OpenResult
 
-// AuditDatesResponse is a list of dates with audit entries.
-type AuditDatesResponse = []string
-
-// AuditQueryResponse is the result of an audit log query.
-type AuditQueryResponse = audit.QueryResult
-
 // ──────────────────────────────────────────────
 // Generic response envelope
 // ──────────────────────────────────────────────
@@ -317,6 +303,5 @@ func AllMethods() []string {
 		MethodAuthResetKey, MethodAuthRotateKey,
 		MethodRecipesList, MethodRecipesGet,
 		MethodShellOpen,
-		MethodAuditDates, MethodAuditQuery,
 	}
 }

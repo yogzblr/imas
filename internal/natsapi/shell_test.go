@@ -59,7 +59,7 @@ type shellEnv struct {
 	spy      *busSpy
 	sproutP  *permErrs
 	sprPub   string
-	audit    string
+	audit    *auditBuffer
 }
 
 // permErrs collects the sprout connection's async errors (permission
@@ -274,13 +274,9 @@ func startShellEnv(t *testing.T) *shellEnv {
 	env.user = newSealedCLIUserIn(t, env.tenant)
 	intauth.CurrentPolicy().Users.SetUsername(env.user.id, "alice")
 
-	env.audit = t.TempDir()
-	logger, err := audit.NewLogger(env.audit)
-	if err != nil {
-		t.Fatal(err)
-	}
-	audit.SetGlobal(logger)
-	t.Cleanup(func() { audit.SetGlobal(nil); logger.Close() })
+	env.audit = &auditBuffer{}
+	audit.SetGlobal(audit.NewLogger(env.audit))
+	t.Cleanup(func() { audit.SetGlobal(nil) })
 
 	t.Cleanup(func() {
 		// Both return only once every session goroutine has finished, so
@@ -438,17 +434,28 @@ func TestSealedShellEndToEnd(t *testing.T) {
 	}
 }
 
-func readAudit(t *testing.T, dir string) string {
+func readAudit(t *testing.T, b *auditBuffer) string {
 	t.Helper()
-	var all strings.Builder
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		if err == nil {
-			all.Write(b)
-		}
-	}
-	return all.String()
+	return b.String()
+}
+
+// auditBuffer collects audit lines for a test; session goroutines write
+// while the test reads.
+type auditBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *auditBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *auditBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // A sprout refuses a plaintext start (from the bus, or anything else)

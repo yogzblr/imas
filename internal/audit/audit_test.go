@@ -1,40 +1,94 @@
 package audit
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
-	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
-func TestNewLogger(t *testing.T) {
+// decodeLines parses every line of out as a JSON object.
+func decodeLines(t *testing.T, out string) []map[string]any {
+	t.Helper()
+	var got []map[string]any
+	for _, l := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(l), &m); err != nil {
+			t.Fatalf("line %q is not a JSON object: %v", l, err)
+		}
+		got = append(got, m)
+	}
+	return got
+}
+
+// TestAuditWritesJSONToStdout is test 10 of the slice 3 brief: a logger
+// built with no writer writes one JSON line per event to stdout, with the
+// required fields, and creates no file.
+func TestAuditWritesJSONToStdout(t *testing.T) {
 	dir := t.TempDir()
-	subdir := filepath.Join(dir, "nested", "audit")
+	t.Chdir(dir)
 
-	logger, err := NewLogger(subdir)
+	r, w, err := os.Pipe()
 	if err != nil {
-		t.Fatalf("NewLogger(%q): %v", subdir, err)
+		t.Fatal(err)
 	}
-	defer logger.Close()
+	stdout := os.Stdout
+	os.Stdout = w
+	logger := NewLogger(nil)
+	os.Stdout = stdout
 
-	info, err := os.Stat(subdir)
-	if err != nil {
-		t.Fatalf("directory not created: %v", err)
+	for _, e := range []Entry{
+		{Pubkey: "UADMIN", RoleName: "admin", Action: "cook", Targets: []string{"web-1"}, Success: true},
+		{Username: "alice", Pubkey: "UALICE", RoleName: "dev", Action: "pki.accept", Success: false, Error: "denied"},
+	} {
+		if err := logger.Log(e); err != nil {
+			t.Fatalf("Log: %v", err)
+		}
 	}
-	if !info.IsDir() {
-		t.Fatal("expected directory")
+	w.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lines := decodeLines(t, string(out))
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2: %q", len(lines), out)
+	}
+	for i, m := range lines {
+		for _, k := range []string{"ts", "kind", "pubkey", "role", "action", "success"} {
+			if _, ok := m[k]; !ok {
+				t.Errorf("line %d has no %q: %v", i, k, m)
+			}
+		}
+		if m["kind"] != Kind {
+			t.Errorf("line %d kind = %v, want %q", i, m["kind"], Kind)
+		}
+		if _, err := time.Parse(time.RFC3339Nano, m["ts"].(string)); err != nil {
+			t.Errorf("line %d ts %v: %v", i, m["ts"], err)
+		}
+	}
+	if lines[0]["action"] != "cook" || lines[1]["error"] != "denied" {
+		t.Errorf("lines out of order or wrong: %v", lines)
+	}
+
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 0 {
+		t.Errorf("audit created files in the working directory: %v", files)
 	}
 }
 
 func TestLogEntry(t *testing.T) {
-	dir := t.TempDir()
-	logger, err := NewLogger(dir)
-	if err != nil {
-		t.Fatalf("NewLogger: %v", err)
-	}
-	defer logger.Close()
+	var buf bytes.Buffer
+	logger := NewLogger(&buf)
 
 	entry := Entry{
 		Timestamp: time.Date(2026, 3, 10, 5, 30, 0, 0, time.UTC),
@@ -44,220 +98,102 @@ func TestLogEntry(t *testing.T) {
 		Targets:   []string{"web-1", "web-2"},
 		Success:   true,
 	}
-
 	if err := logger.Log(entry); err != nil {
 		t.Fatalf("Log: %v", err)
 	}
 
-	// Read the file
-	today := time.Now().UTC().Format("2006-01-02")
-	path := filepath.Join(dir, "audit-"+today+".jsonl")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 1 {
-		t.Fatalf("expected 1 line, got %d", len(lines))
+	want := `{"kind":"audit","ts":"2026-03-10T05:30:00Z","pubkey":"APUBKEY123","role":"admin","action":"cook","targets":["web-1","web-2"],"success":true}` + "\n"
+	if buf.String() != want {
+		t.Errorf("line = %s\nwant   %s", buf.String(), want)
 	}
 
 	var got Entry
-	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if got.Pubkey != "APUBKEY123" {
-		t.Errorf("pubkey = %q, want APUBKEY123", got.Pubkey)
-	}
-	if got.Action != "cook" {
-		t.Errorf("action = %q, want cook", got.Action)
-	}
-	if len(got.Targets) != 2 {
-		t.Errorf("targets = %v, want [web-1 web-2]", got.Targets)
-	}
-	if !got.Success {
-		t.Error("success = false, want true")
+	if !got.Timestamp.Equal(entry.Timestamp) || got.Action != "cook" || len(got.Targets) != 2 {
+		t.Errorf("round trip = %+v", got)
 	}
 }
 
-func TestLogMultipleEntries(t *testing.T) {
-	dir := t.TempDir()
-	logger, err := NewLogger(dir)
-	if err != nil {
-		t.Fatalf("NewLogger: %v", err)
-	}
-	defer logger.Close()
+func TestLogWithErrorAndParams(t *testing.T) {
+	var buf bytes.Buffer
+	logger := NewLogger(&buf)
 
-	for i := 0; i < 5; i++ {
-		err := logger.Log(Entry{
-			Pubkey:   "APUBKEY",
-			RoleName: "dev",
-			Action:   "props.set",
-			Success:  true,
-		})
-		if err != nil {
-			t.Fatalf("Log entry %d: %v", i, err)
-		}
-	}
-
-	today := time.Now().UTC().Format("2006-01-02")
-	path := filepath.Join(dir, "audit-"+today+".jsonl")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 5 {
-		t.Fatalf("expected 5 lines, got %d", len(lines))
-	}
-}
-
-func TestLogWithError(t *testing.T) {
-	dir := t.TempDir()
-	logger, err := NewLogger(dir)
-	if err != nil {
-		t.Fatalf("NewLogger: %v", err)
-	}
-	defer logger.Close()
-
-	entry := Entry{
-		Pubkey:   "APUBKEY456",
-		RoleName: "readonly",
-		Action:   "pki.accept",
-		Targets:  []string{"db-1"},
-		Success:  false,
-		Error:    "access denied",
-	}
-
-	if err := logger.Log(entry); err != nil {
-		t.Fatalf("Log: %v", err)
-	}
-
-	today := time.Now().UTC().Format("2006-01-02")
-	path := filepath.Join(dir, "audit-"+today+".jsonl")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-
-	var got Entry
-	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &got); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
-	}
-	if got.Error != "access denied" {
-		t.Errorf("error = %q, want 'access denied'", got.Error)
-	}
-	if got.Success {
-		t.Error("success = true, want false")
-	}
-}
-
-func TestLogWithParams(t *testing.T) {
-	dir := t.TempDir()
-	logger, err := NewLogger(dir)
-	if err != nil {
-		t.Fatalf("NewLogger: %v", err)
-	}
-	defer logger.Close()
-
-	params, _ := json.Marshal(map[string]string{"recipe": "nginx.sls"})
-	entry := Entry{
-		Pubkey:     "APUBKEY789",
-		RoleName:   "sre",
+	err := logger.Log(Entry{
+		Username:   "bob",
+		Pubkey:     "UBOB",
+		RoleName:   "viewer",
 		Action:     "cook",
-		Parameters: params,
-		Success:    true,
-	}
-
-	if err := logger.Log(entry); err != nil {
-		t.Fatalf("Log: %v", err)
-	}
-
-	today := time.Now().UTC().Format("2006-01-02")
-	path := filepath.Join(dir, "audit-"+today+".jsonl")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-
-	var got Entry
-	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &got); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
-	}
-
-	var gotParams map[string]string
-	if err := json.Unmarshal(got.Parameters, &gotParams); err != nil {
-		t.Fatalf("Unmarshal params: %v", err)
-	}
-	if gotParams["recipe"] != "nginx.sls" {
-		t.Errorf("params.recipe = %q, want nginx.sls", gotParams["recipe"])
-	}
-}
-
-func TestLogDefaultTimestamp(t *testing.T) {
-	dir := t.TempDir()
-	logger, err := NewLogger(dir)
-	if err != nil {
-		t.Fatalf("NewLogger: %v", err)
-	}
-	defer logger.Close()
-
-	before := time.Now().UTC()
-	err = logger.Log(Entry{
-		Pubkey:   "APUBKEY",
-		RoleName: "admin",
-		Action:   "version",
-		Success:  true,
+		Parameters: json.RawMessage(`{"recipe":"web"}`),
+		Error:      "permission denied",
 	})
 	if err != nil {
 		t.Fatalf("Log: %v", err)
 	}
-	after := time.Now().UTC()
-
-	today := time.Now().UTC().Format("2006-01-02")
-	path := filepath.Join(dir, "audit-"+today+".jsonl")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
 
 	var got Entry
-	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &got); err != nil {
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-
-	if got.Timestamp.Before(before) || got.Timestamp.After(after) {
-		t.Errorf("timestamp %v not between %v and %v", got.Timestamp, before, after)
+	if got.Success || got.Error != "permission denied" || got.Username != "bob" {
+		t.Errorf("entry = %+v", got)
+	}
+	if string(got.Parameters) != `{"recipe":"web"}` {
+		t.Errorf("params = %s", got.Parameters)
 	}
 }
 
-func TestClose(t *testing.T) {
-	dir := t.TempDir()
-	logger, err := NewLogger(dir)
-	if err != nil {
-		t.Fatalf("NewLogger: %v", err)
-	}
+func TestLogDefaultTimestamp(t *testing.T) {
+	var buf bytes.Buffer
+	logger := NewLogger(&buf)
 
-	// Log something to open a file
-	err = logger.Log(Entry{Action: "test", Success: true})
-	if err != nil {
+	before := time.Now().UTC()
+	if err := logger.Log(Entry{Action: "test"}); err != nil {
 		t.Fatalf("Log: %v", err)
 	}
+	after := time.Now().UTC()
 
-	if err := logger.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	var got Entry
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
 	}
+	if got.Timestamp.Before(before) || got.Timestamp.After(after) {
+		t.Errorf("timestamp %v not within [%v, %v]", got.Timestamp, before, after)
+	}
+}
 
-	// Closing again should be safe
-	if err := logger.Close(); err != nil {
-		t.Fatalf("second Close: %v", err)
-	}
+// TestLogConcurrentLinesWhole: lines from concurrent callers never
+// interleave, so every line the shipper reads is one whole record.
+func TestLogConcurrentLinesWhole(t *testing.T) {
+	var buf bytes.Buffer
+	logger := NewLogger(&buf)
 
-	// Logging after close should reopen
-	err = logger.Log(Entry{Action: "test2", Success: true})
-	if err != nil {
-		t.Fatalf("Log after Close: %v", err)
+	const n = 50
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := logger.Log(Entry{Pubkey: "UPUB", Action: "props.set", Success: true}); err != nil {
+				t.Errorf("Log: %v", err)
+			}
+		}()
 	}
-	logger.Close()
+	wg.Wait()
+
+	if got := len(decodeLines(t, buf.String())); got != n {
+		t.Errorf("got %d lines, want %d", got, n)
+	}
+}
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
+
+func TestLogWriteError(t *testing.T) {
+	err := NewLogger(failWriter{}).Log(Entry{Action: "cook"})
+	if err == nil || !strings.Contains(err.Error(), "broken pipe") {
+		t.Errorf("Log error = %v, want the write error", err)
+	}
 }

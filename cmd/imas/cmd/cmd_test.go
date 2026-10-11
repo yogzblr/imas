@@ -88,27 +88,6 @@ func TestFormatStatus(t *testing.T) {
 
 // --- formatBytes ---
 
-func TestFormatBytes(t *testing.T) {
-	tests := []struct {
-		input    int64
-		expected string
-	}{
-		{0, "0 B"},
-		{512, "512 B"},
-		{1023, "1023 B"},
-		{1024, "1.0 KB"},
-		{1536, "1.5 KB"},
-		{1048576, "1.0 MB"},
-		{1572864, "1.5 MB"},
-	}
-	for _, tt := range tests {
-		got := formatBytes(tt.input)
-		if got != tt.expected {
-			t.Errorf("formatBytes(%d) = %q, want %q", tt.input, got, tt.expected)
-		}
-	}
-}
-
 // --- formatSize (recipes) ---
 
 func TestFormatSize(t *testing.T) {
@@ -470,7 +449,7 @@ func TestRootCommand_HasExpectedSubcommands(t *testing.T) {
 		"version", "cook", "cmd", "test", "keys",
 		"tail", "sprouts", "jobs", "auth", "init",
 		"cohorts", "recipes", "roles", "users", "ssh",
-		"serve", "audit",
+		"serve",
 	}
 	commands := rootCmd.Commands()
 	names := make(map[string]bool)
@@ -481,6 +460,11 @@ func TestRootCommand_HasExpectedSubcommands(t *testing.T) {
 		if !names[name] {
 			t.Errorf("root command missing subcommand %q", name)
 		}
+	}
+	// imas audit is gone (P21 slice 3, owner decision 1): audit is read
+	// in the log platform.
+	if names["audit"] {
+		t.Error("root command still has the audit subcommand")
 	}
 }
 
@@ -575,19 +559,6 @@ func TestUsersCommand_HasSubcommands(t *testing.T) {
 	}
 }
 
-func TestAuditCommand_HasSubcommands(t *testing.T) {
-	expected := []string{"dates", "list"}
-	names := make(map[string]bool)
-	for _, c := range cmdAudit.Commands() {
-		names[c.Name()] = true
-	}
-	for _, name := range expected {
-		if !names[name] {
-			t.Errorf("audit command missing subcommand %q", name)
-		}
-	}
-}
-
 // --- Flag validation ---
 
 func TestJobsListFlags(t *testing.T) {
@@ -669,20 +640,6 @@ func TestSproutsListFlags(t *testing.T) {
 
 	if f := flags.Lookup("online"); f == nil {
 		t.Error("sprouts list missing --online flag")
-	}
-}
-
-func TestAuditListFlags(t *testing.T) {
-	flags := cmdAuditList.Flags()
-
-	for _, name := range []string{"date", "action", "pubkey", "limit", "failed"} {
-		if f := flags.Lookup(name); f == nil {
-			t.Errorf("audit list missing --%s flag", name)
-		}
-	}
-
-	if f := flags.Lookup("limit"); f != nil && f.DefValue != "50" {
-		t.Errorf("audit list --limit default = %q, want 50", f.DefValue)
 	}
 }
 
@@ -1058,24 +1015,6 @@ func TestPrintJobDetail_WithStartedAndDurationButNoInvoker(t *testing.T) {
 	}
 	if strings.Contains(out, "User:") {
 		t.Error("User should not appear when InvokedBy is empty")
-	}
-}
-
-func TestFormatBytes_EdgeCases(t *testing.T) {
-	tests := []struct {
-		input    int64
-		expected string
-	}{
-		{1, "1 B"},
-		{1024, "1.0 KB"},
-		{1025, "1.0 KB"},
-		{2097152, "2.0 MB"},
-	}
-	for _, tt := range tests {
-		got := formatBytes(tt.input)
-		if got != tt.expected {
-			t.Errorf("formatBytes(%d) = %q, want %q", tt.input, got, tt.expected)
-		}
 	}
 }
 

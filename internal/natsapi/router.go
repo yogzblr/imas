@@ -98,10 +98,6 @@ var routes = map[string]handler{
 	// Recipes
 	MethodRecipesList: handleRecipesList,
 	MethodRecipesGet:  handleRecipesGet,
-
-	// Audit
-	MethodAuditDates: handleAuditList,
-	MethodAuditQuery: handleAuditQuery,
 }
 
 // userRoutes are the methods whose handlers need the verified caller:

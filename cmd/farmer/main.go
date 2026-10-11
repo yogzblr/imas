@@ -129,7 +129,9 @@ func main() {
 		log.Flush()
 		os.Exit(code)
 	}
-	fmt.Printf("Starting Farmer (core) with bus URL %s\n", config.FarmerBusURL)
+	// stdout carries only audit JSON lines (initAuditLogger); this goes
+	// to stderr with the rest of the terminal log.
+	fmt.Fprintf(os.Stderr, "Starting Farmer (core) with bus URL %s\n", config.FarmerBusURL)
 	defer log.Flush()
 	initRecipeLimits()
 	initStorage()
@@ -139,7 +141,7 @@ func main() {
 	initValkeyClient()
 	props.LoadStaticProps(config.StaticProps())
 	loadCohortRegistry()
-	createConfigRoot()
+	requireConfigRoot()
 	initAuditLogger()
 	loadAuthPolicy()
 	pki.SetupPKIFarmer()
@@ -540,20 +542,13 @@ func pushAllAccounts(why string) {
 	log.Infof("SYS listener %s: pushed all %d Account JWTs to the bus", why, n)
 }
 
+// initAuditLogger sends audit records to stdout as JSON lines, for the
+// log shipper; nothing is written to a file (see internal/audit).
 func initAuditLogger() {
-	auditDir := config.AuditLogDir
-	if auditDir == "" {
-		auditDir = "/var/log/imas/audit"
-	}
-	logger, err := audit.NewLogger(auditDir)
-	if err != nil {
-		log.Errorf("Failed to initialize audit logger at %s: %v", auditDir, err)
-		return
-	}
-	audit.SetGlobal(logger)
+	audit.SetGlobal(audit.NewLogger(os.Stdout))
 	level := audit.ParseLevel(config.AuditLevel)
 	audit.SetLevel(level)
-	log.Infof("Audit logging enabled: %s (level: %s)", auditDir, level)
+	log.Infof("Audit logging to stdout (level: %s)", level)
 }
 
 func loadAuthPolicy() {
@@ -584,21 +579,24 @@ func loadCohortRegistry() {
 	}
 }
 
-func createConfigRoot() {
-	ConfigRoot := config.ConfigRoot
-	_, err := os.Stat(ConfigRoot)
-	if err == nil {
-		return
+// requireConfigRoot stops farmer when the config root is missing or not
+// a directory. Farmer never creates it: the root filesystem is read-only
+// and the config arrives as a mounted ConfigMap.
+func requireConfigRoot() {
+	if err := checkConfigRoot(config.ConfigRoot); err != nil {
+		log.Fatalf("%v", err)
 	}
-	if os.IsNotExist(err) {
-		err = os.MkdirAll(ConfigRoot, os.ModePerm)
-		if err != nil {
-			log.Panicf("failed to create config directory: %v", err)
-		}
-	} else {
+}
 
-		log.Panicf("unexpected error checking config directory: %v", err)
+func checkConfigRoot(root string) error {
+	info, err := os.Stat(root)
+	if err != nil {
+		return fmt.Errorf("config root %s: %w", root, err)
 	}
+	if !info.IsDir() {
+		return fmt.Errorf("config root %s is not a directory", root)
+	}
+	return nil
 }
 
 // StartAPIServer starts the farmer's HTTPS server. It handles PKI
