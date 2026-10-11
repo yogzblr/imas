@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -685,5 +686,45 @@ func TestMySQLWaitForSchema(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestMySQLOutOfOrderVersionApplied: a migration whose version is below
+// one already applied (saas 00007 landing after 00008) is applied, not
+// refused, and the recorded version stays the newest.
+func TestMySQLOutOfOrderVersionApplied(t *testing.T) {
+	e := newMySQLEnv(t)
+	db := e.schemaDB(t, "t_ooo_"+suffix(t))
+	ctx := context.Background()
+	mig := func(table string) *fstest.MapFile {
+		return &fstest.MapFile{Data: []byte("-- +goose Up\nCREATE TABLE IF NOT EXISTS `" + table + "` (`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB;\n")}
+	}
+	fsys := fstest.MapFS{"m/00001_a.sql": mig("a"), "m/00003_c.sql": mig("c")}
+	before, err := newSet("ooo", fsys, "m", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err := Up(ctx, db, before, t.Logf); err != nil || !slices.Equal(res.Applied, []int64{1, 3}) {
+		t.Fatalf("first run: %+v, %v", res, err)
+	}
+	fsys["m/00002_b.sql"] = mig("b")
+	after, err := newSet("ooo", fsys, "m", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := Up(ctx, db, after, t.Logf)
+	if err != nil || !slices.Equal(res.Applied, []int64{2}) {
+		t.Fatalf("out-of-order run: %+v, %v", res, err)
+	}
+	var n int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'b'").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("table b: %d, %v", n, err)
+	}
+	st, err := ReadState(ctx, db)
+	if err != nil || st.Version != 3 {
+		t.Fatalf("state %+v, %v; want version 3", st, err)
+	}
+	if res, err := Up(ctx, db, after, t.Logf); err != nil || len(res.Applied) != 0 {
+		t.Fatalf("third run: %+v, %v", res, err)
 	}
 }
