@@ -5,11 +5,18 @@
 # for UAT only. It is not used by any workflow.
 #
 #   azure-owner-setup.sh [--subscription ID] [--repo OWNER/REPO]
+#                        [--owner-id N --repo-id N]
 #                        [--no-janitor] [--accept-image-terms] [--yes]
 #
 #   --subscription ID     the subscription to use (default: the az CLI's
 #                         current one, after az login)
 #   --repo OWNER/REPO     the GitHub repository (default yogzblr/imas)
+#   --owner-id N          the numeric id of the repository's owner, and
+#   --repo-id N           the numeric id of the repository. Default: looked up
+#                         with `gh api repos/OWNER/REPO` (the GitHub CLI,
+#                         logged in with access to the repository). Both
+#                         appear in the federated credentials' subjects, see
+#                         step 6.
 #   --no-janitor          do not add the federated credential of the
 #                         uat-janitor environment
 #   --accept-image-terms  also accept the AlmaLinux marketplace terms
@@ -27,15 +34,20 @@
 #   4. creates the app registration imas-uat-github and its service principal;
 #   5. gives the service principal Contributor on the subscription;
 #   6. adds the federated credentials, which are the only link between Azure
-#      and GitHub: subjects repo:OWNER/REPO:environment:uat and, unless
-#      --no-janitor, repo:OWNER/REPO:environment:uat-janitor. No client secret
-#      is created.
+#      and GitHub: subjects
+#      repo:OWNER@OWNER_ID/REPO@REPO_ID:environment:uat and, unless
+#      --no-janitor, ...:environment:uat-janitor. GitHub's OIDC token of this
+#      repository carries the owner and repository ids in its subject; the
+#      plain form repo:OWNER/REPO:environment:uat does not match it and the
+#      login fails. A credential with that plain subject (an earlier version
+#      of this script created it) is deleted, since it can never match. No
+#      client secret is created.
 # It then prints the three values for the GitHub environments' variables and
 # the service principal's object id for the bootstrap stack
 # (uat/tofu/README.md, "Bootstrap, once"). It never prints a secret, and
 # creates none.
 #
-# Environment: AZ (default az); SETUP_RETRY_SLEEP (seconds between the retries
+# Environment: AZ (default az); GH (default gh); SETUP_RETRY_SLEEP (seconds between the retries
 # of the role assignment, default 10; a new service principal can take a
 # while to be visible).
 #
@@ -45,9 +57,12 @@ set -euo pipefail
 
 prog=$(basename "$0")
 az_cmd=${AZ:-az}
+gh_cmd=${GH:-gh}
 app_name=imas-uat-github
 repo=yogzblr/imas
 sub=""
+owner_id=""
+repo_id=""
 janitor=1
 terms=0
 yes=0
@@ -73,6 +88,16 @@ while [ $# -gt 0 ]; do
       repo=$2
       shift
       ;;
+    --owner-id)
+      [ $# -ge 2 ] || die "--owner-id needs a value"
+      owner_id=$2
+      shift
+      ;;
+    --repo-id)
+      [ $# -ge 2 ] || die "--repo-id needs a value"
+      repo_id=$2
+      shift
+      ;;
     --no-janitor) janitor=0 ;;
     --accept-image-terms) terms=1 ;;
     --yes) yes=1 ;;
@@ -90,12 +115,29 @@ done
 
 guid='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 [[ $repo =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "--repo must be OWNER/REPO, got '$repo'"
+[[ -z $owner_id || $owner_id =~ ^[0-9]+$ ]] || die "--owner-id must be a number, got '$owner_id'"
+[[ -z $repo_id || $repo_id =~ ^[0-9]+$ ]] || die "--repo-id must be a number, got '$repo_id'"
 if [ -n "$sub" ]; then
   [[ $sub =~ $guid ]] || die "--subscription must be a subscription id (a GUID), got '$sub'"
 fi
 
 command -v "$az_cmd" >/dev/null 2>&1 ||
   die "the Azure CLI ($az_cmd) is not installed; see https://learn.microsoft.com/cli/azure/install-azure-cli-linux"
+
+# The owner and repository ids for the subjects of the federated credentials.
+if [ -z "$owner_id" ] || [ -z "$repo_id" ]; then
+  command -v "$gh_cmd" >/dev/null 2>&1 ||
+    die "the GitHub CLI ($gh_cmd) is not installed: install and log in to it, or pass --owner-id and --repo-id (gh api repos/$repo --jq '.owner.id, .id')"
+  ids=$("$gh_cmd" api "repos/$repo" --jq '.owner.id, .id') ||
+    die "cannot read repos/$repo with the GitHub CLI: log in with 'gh auth login', or pass --owner-id and --repo-id"
+  owner_id=$(sed -n 1p <<<"$ids")
+  repo_id=$(sed -n 2p <<<"$ids")
+fi
+[[ $owner_id =~ ^[0-9]+$ ]] || die "unexpected owner id: '$owner_id'"
+[[ $repo_id =~ ^[0-9]+$ ]] || die "unexpected repository id: '$repo_id'"
+owner=${repo%%/*}
+name=${repo#*/}
+subject_prefix="repo:$owner@$owner_id/$name@$repo_id:environment:"
 
 # 1. Login.
 if ! "$az_cmd" account show >/dev/null 2>&1; then
@@ -122,8 +164,9 @@ echo "This will, where it is not already done:"
 echo "  - register five resource providers;"
 echo "  - create the app registration and service principal $app_name;"
 echo "  - give it the Contributor role on the WHOLE subscription (use a subscription for UAT only);"
-echo "  - add a federated credential for repo:$repo:environment:uat"
-[ "$janitor" -eq 1 ] && echo "  - add a federated credential for repo:$repo:environment:uat-janitor"
+echo "  - add a federated credential for ${subject_prefix}uat"
+[ "$janitor" -eq 1 ] && echo "  - add a federated credential for ${subject_prefix}uat-janitor"
+echo "  - delete a federated credential with the plain subject repo:$repo:environment:... if there is one (it never matches)"
 [ "$terms" -eq 1 ] && echo "  - accept the AlmaLinux marketplace terms"
 echo
 if [ "$yes" -ne 1 ]; then
@@ -189,16 +232,29 @@ else
 fi
 
 # 6. The federated credentials.
-existing=$("$az_cmd" ad app federated-credential list --id "$app_id" --query "[].subject" -o tsv) ||
+creds=$("$az_cmd" ad app federated-credential list --id "$app_id" --query "[].[name,subject]" -o tsv) ||
   die "cannot list the federated credentials"
 
 # ensure_federated NAME ENVIRONMENT
 ensure_federated() {
-  local name=$1 env=$2 subject params
-  subject="repo:$repo:environment:$env"
-  if grep -Fxq -- "$subject" <<<"$existing"; then
+  local name=$1 env=$2 subject plain params cname csub
+  subject="${subject_prefix}$env"
+  plain="repo:$repo:environment:$env"
+  # A credential with the plain subject can never match: delete it (it may
+  # also hold the name the new credential needs).
+  while IFS=$'\t' read -r cname csub; do
+    [ "$csub" = "$plain" ] || continue
+    "$az_cmd" ad app federated-credential delete --id "$app_id" --federated-credential-id "$cname" ||
+      die "cannot delete the stale federated credential $cname (subject $plain)"
+    echo "federated credential $cname with the plain subject for $env: deleted"
+    creds=$(grep -vxF -- "$cname"$'\t'"$csub" <<<"$creds" || true)
+  done <<<"$creds"
+  if awk -F'\t' -v s="$subject" '$2 == s { found = 1 } END { exit !found }' <<<"$creds"; then
     echo "federated credential for $env: already there"
     return 0
+  fi
+  if awk -F'\t' -v n="$name" '$1 == n { found = 1 } END { exit !found }' <<<"$creds"; then
+    die "a federated credential named $name already exists with another subject; delete it in the portal or with az and run again"
   fi
   params=$(printf '{"name": "%s", "issuer": "https://token.actions.githubusercontent.com", "subject": "%s", "audiences": ["api://AzureADTokenExchange"]}' "$name" "$subject")
   "$az_cmd" ad app federated-credential create --id "$app_id" --parameters "$params" -o none ||

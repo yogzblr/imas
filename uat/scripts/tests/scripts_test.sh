@@ -528,7 +528,7 @@ check "... creates the app registration" grep -q -- 'az ad app create --display-
 check "... creates the service principal" grep -q -- 'az ad sp create --id 33333333' "$STUB_STATE/calls.log"
 check "... assigns Contributor on the subscription by object id" grep -q -- 'role assignment create --assignee-object-id 44444444-4444-4444-4444-444444444444 --assignee-principal-type ServicePrincipal --role Contributor --scope /subscriptions/11111111-1111-1111-1111-111111111111' "$STUB_STATE/calls.log"
 check "... registers the five resource providers" test "$(grep -c 'az provider register' "$STUB_STATE/calls.log")" -eq 5
-check "... adds the federated credentials of uat and uat-janitor" test "$(sort "$STUB_STATE/fed_subjects" | tr '\n' ' ')" = "repo:yogzblr/imas:environment:uat repo:yogzblr/imas:environment:uat-janitor "
+check "... adds the federated credentials of uat and uat-janitor" test "$(sort "$STUB_STATE/fed_subjects" | tr '\n' ' ')" = "repo:yogzblr@16265408/imas@1388858987:environment:uat repo:yogzblr@16265408/imas@1388858987:environment:uat-janitor "
 check "... prints the three variables" test "$(grep -c -e '^  AZURE_CLIENT_ID=33333333-3333-3333-3333-333333333333$' -e '^  AZURE_TENANT_ID=22222222-2222-2222-2222-222222222222$' -e '^  AZURE_SUBSCRIPTION_ID=11111111-1111-1111-1111-111111111111$' <<<"$out")" -eq 3
 check "... and the service principal's object id" grep -q '^  44444444-4444-4444-4444-444444444444$' <<<"$out"
 check "... does not accept the marketplace terms unasked" test -z "$(grep 'vm image terms' "$STUB_STATE/calls.log")"
@@ -553,7 +553,8 @@ check "already logged in: no login" test -z "$(grep 'az login' "$STUB_STATE/call
 
 new_state setup_nojanitor
 srun --yes --no-janitor --repo someone/else
-check "--no-janitor and --repo: only the uat subject, for that repository" test "$(cat "$STUB_STATE/fed_subjects")" = "repo:someone/else:environment:uat"
+check "--no-janitor and --repo: only the uat subject, with that repository's ids" test "$(cat "$STUB_STATE/fed_subjects")" = "repo:someone@16265408/else@1388858987:environment:uat"
+check "... the ids came from gh api repos/someone/else" grep -q -- 'gh api repos/someone/else' "$STUB_STATE/calls.log"
 
 new_state setup_terms
 srun --yes --accept-image-terms
@@ -596,6 +597,36 @@ check "a malformed repository is refused" test "$rc" -eq 1
 srun --bogus
 check "an unknown argument is refused" test "$rc" -eq 1
 check "... and no az call was made" test ! -s "$STUB_STATE/calls.log"
+
+new_state setup_ids_flags
+srun --yes --owner-id 7 --repo-id 9
+check "--owner-id and --repo-id: used, and gh is not called" test "$rc" -eq 0 -a "$(sort "$STUB_STATE/fed_subjects" | head -n 1)" = "repo:yogzblr@7/imas@9:environment:uat" -a -z "$(grep '^gh ' "$STUB_STATE/calls.log")"
+srun --yes --owner-id x --repo-id 9
+check "a non-numeric owner id is refused" test "$rc" -eq 1
+
+new_state setup_gh_fail
+touch "$STUB_STATE/gh_repo_fail"
+srun --yes
+check "gh cannot read the repository: exit 1, nothing changed, names the flags" test "$rc" -eq 1 -a "$(created)" -eq 0 -a -z "$(grep 'provider register' "$STUB_STATE/calls.log")" && grep -q -- '--owner-id' <<<"$out"
+
+new_state setup_stale
+printf 'imas-uat-env\trepo:yogzblr/imas:environment:uat\nimas-uat-janitor-env\trepo:yogzblr/imas:environment:uat-janitor\n' >"$STUB_STATE/fed_creds"
+srun --yes
+check "stale plain-subject credentials: exit 0" test "$rc" -eq 0
+check "... both are deleted by name" test "$(grep -c 'federated-credential delete' "$STUB_STATE/calls.log")" -eq 2 -a "$(grep -c -e 'federated-credential-id imas-uat-env$' -e 'federated-credential-id imas-uat-janitor-env$' "$STUB_STATE/calls.log")" -eq 2
+check "... and replaced by the ID-based ones" test "$(sort "$STUB_STATE/fed_subjects" | tr '\n' ' ')" = "repo:yogzblr@16265408/imas@1388858987:environment:uat repo:yogzblr@16265408/imas@1388858987:environment:uat-janitor "
+srun --yes
+check "... a second run deletes nothing more" test "$(grep -c 'federated-credential delete' "$STUB_STATE/calls.log")" -eq 2
+
+new_state setup_hand_made
+printf 'my-uat\trepo:yogzblr@16265408/imas@1388858987:environment:uat\nmy-janitor\trepo:yogzblr@16265408/imas@1388858987:environment:uat-janitor\nold\trepo:yogzblr/imas:environment:uat\n' >"$STUB_STATE/fed_creds"
+srun --yes
+check "credentials made by hand with the right subjects are kept; the plain one is deleted" test "$rc" -eq 0 -a "$(grep -c 'federated-credential create' "$STUB_STATE/calls.log")" -eq 0 -a "$(grep -c 'federated-credential delete' "$STUB_STATE/calls.log")" -eq 1
+
+new_state setup_name_taken
+printf 'imas-uat-env\trepo:other/thing:environment:uat\n' >"$STUB_STATE/fed_creds"
+srun --yes
+check "the name taken by an unrelated subject: exit 1, not deleted" test "$rc" -eq 1 -a -z "$(grep 'federated-credential delete' "$STUB_STATE/calls.log")"
 
 new_state setup_fedfail
 touch "$STUB_STATE/fed_fail"

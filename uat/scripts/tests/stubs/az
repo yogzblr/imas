@@ -84,11 +84,23 @@ case "$1 $2" in
         echo 33333333-3333-3333-3333-333333333333
         ;;
       federated-credential)
+        # fed_creds: "<name><TAB><subject>" lines; fed_subjects: the subjects only.
         case "$4" in
-          list) cat "$STUB_STATE/fed_subjects" 2>/dev/null || true ;;
+          list) cat "$STUB_STATE/fed_creds" 2>/dev/null || true ;;
           create)
             [ -f "$STUB_STATE/fed_fail" ] && { echo "ERROR: stub failure" >&2; exit 1; }
-            arg parameters | jq -r .subject >>"$STUB_STATE/fed_subjects"
+            p=$(arg parameters)
+            printf '%s\t%s\n' "$(jq -r .name <<<"$p")" "$(jq -r .subject <<<"$p")" >>"$STUB_STATE/fed_creds"
+            jq -r .subject <<<"$p" >>"$STUB_STATE/fed_subjects"
+            ;;
+          delete)
+            id=$(arg federated-credential-id)
+            [ -f "$STUB_STATE/fed_delete_fail" ] && { echo "ERROR: stub failure" >&2; exit 1; }
+            if [ -f "$STUB_STATE/fed_creds" ]; then
+              grep -v "^${id}	" "$STUB_STATE/fed_creds" >"$STUB_STATE/fed_creds.new" || true
+              mv "$STUB_STATE/fed_creds.new" "$STUB_STATE/fed_creds"
+              cut -f2 "$STUB_STATE/fed_creds" >"$STUB_STATE/fed_subjects"
+            fi
             ;;
           *) echo "stub az: unexpected call: $*" >&2; exit 99 ;;
         esac

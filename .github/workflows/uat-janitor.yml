@@ -13,7 +13,9 @@ name: UAT janitor
 #
 # Needs the GitHub environment "uat-janitor", with the same three variables as
 # "uat" (AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID) and a
-# federated credential for repo:yogzblr/imas:environment:uat-janitor. It has
+# federated credential for
+# repo:yogzblr@16265408/imas@1388858987:environment:uat-janitor (the ids form,
+# see uat/README.md). It has
 # no required reviewer, or the hourly run would wait for one; restrict it to
 # the branch main (scheduled runs use the default branch). See uat/README.md,
 # "Prerequisites".
