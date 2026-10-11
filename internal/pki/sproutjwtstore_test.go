@@ -37,6 +37,7 @@ type countingKP struct {
 	signs *atomic.Int64
 }
 
+// Sign counts the call and signs.
 func (k countingKP) Sign(b []byte) ([]byte, error) {
 	k.signs.Add(1)
 	return k.KeyPair.Sign(b)
@@ -60,18 +61,21 @@ type testClock struct {
 	t  time.Time
 }
 
+// Now returns the clock's time.
 func (c *testClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.t
 }
 
+// Advance moves the clock on by d.
 func (c *testClock) Advance(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.t = c.t.Add(d)
 }
 
+// newSproutJWTEnv opens the shared database, bucket and account key.
 func newSproutJWTEnv(t *testing.T) *sproutJWTEnv {
 	t.Helper()
 	gdb, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "farmer.db")),
@@ -149,6 +153,7 @@ func (e *sproutJWTEnv) accept(t *testing.T, tenant, sprout string) string {
 	return pub
 }
 
+// row reads the sprout_user_jwt row of tenant/sprout.
 func (e *sproutJWTEnv) row(t *testing.T, tenant, sprout string) sproutUserJWTRow {
 	t.Helper()
 	var r sproutUserJWTRow
@@ -158,6 +163,7 @@ func (e *sproutJWTEnv) row(t *testing.T, tenant, sprout string) sproutUserJWTRow
 	return r
 }
 
+// countRows counts sprout_user_jwt rows.
 func (e *sproutJWTEnv) countRows(t *testing.T) int64 {
 	t.Helper()
 	var n int64
@@ -299,9 +305,12 @@ func TestEnrollReplicaKilledMidMint(t *testing.T) {
 	a := e.replica("replica-a", false)
 	ctxA, cancelA := context.WithCancel(context.Background())
 	defer cancelA()
-	a.afterPut = cancelA // killed after the PUT, before the row UPDATE
-	if _, err := a.mintOrReuse(ctxA, "t1", "web-1", pub); err == nil {
-		t.Fatal("replica A finished its mint despite being killed")
+	errKilled := errors.New("replica A killed")
+	// Killed after the PUT, before the row UPDATE: its context is gone
+	// and it never releases the lease.
+	a.afterPut = func() error { cancelA(); return errKilled }
+	if _, err := a.mintOrReuse(ctxA, "t1", "web-1", pub); !errors.Is(err, errKilled) {
+		t.Fatalf("replica A: err = %v, want it killed mid-mint", err)
 	}
 	if got := len(e.srv.Keys()); got != 1 {
 		t.Fatalf("after A: %d objects, want A's one", got)
@@ -554,7 +563,9 @@ func TestGrantEnrolledSproutGrantsOnlyThatKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_ = grantEnrolledSprout("t_g", enrolled) // the push fails: no bus
+	if err := grantEnrolledSprout("t_g", enrolled); !errors.Is(err, errAccountPushFailed) {
+		t.Fatalf("grant with no bus: err = %v, want only the push to fail", err)
+	}
 	b, err := os.ReadFile(tenantAccountJWTPath("t_g"))
 	if err != nil {
 		t.Fatal(err)
@@ -576,4 +587,32 @@ func TestGrantEnrolledSproutGrantsOnlyThatKey(t *testing.T) {
 	if err := grantEnrolledSprout("t_g", replaced); !errors.Is(err, ErrNKeyRevoked) {
 		t.Errorf("granting a revoked NKey: err = %v, want ErrNKeyRevoked", err)
 	}
+	// A refused grant fails enrolment; a failed push alone does not.
+	if err := acceptEnrolledNKey("t_g", "web-2", replaced); !errors.Is(err, ErrNKeyRevoked) {
+		t.Errorf("acceptEnrolledNKey with a revoked NKey: err = %v, want ErrNKeyRevoked", err)
+	}
+	if err := acceptEnrolledNKey("t_g", "web-3", mk()); err != nil {
+		t.Errorf("acceptEnrolledNKey with only the push failing: %v", err)
+	}
+}
+
+// A caller that goes away after taking the lease still releases it, so a
+// retry is not held off until lease_until.
+func TestSproutJWTLeaseReleasedOnCancelledContext(t *testing.T) {
+	e := newSproutJWTEnv(t)
+	pub := e.accept(t, "t1", "web-1")
+	a := e.replica("replica-a", false)
+	ctx, cancel := context.WithCancel(context.Background())
+	a.afterPut = func() error { cancel(); return nil }
+	if _, err := a.mintOrReuse(ctx, "t1", "web-1", pub); err == nil {
+		t.Fatal("mint finished with its context cancelled before the row UPDATE")
+	}
+	if r := e.row(t, "t1", "web-1"); r.LeaseOwner != nil {
+		t.Fatalf("lease still held by %s after the caller went away", *r.LeaseOwner)
+	}
+	b := e.replica("replica-b", false)
+	if _, err := b.mintOrReuse(context.Background(), "t1", "web-1", pub); err != nil {
+		t.Fatalf("retry without waiting for lease_until: %v", err)
+	}
+	e.checkStored(t, "t1", "web-1", pub)
 }

@@ -956,9 +956,29 @@ func acceptEnrolledNKey(tenantID, id, nkey string) error {
 		return err
 	}
 	if err := grantEnrolledSprout(tenantID, nkey); err != nil {
-		log.Errorf("failed to grant enrolled sprout %s on tenant %s's Account: %v", id, tenantID, err)
+		if !errors.Is(err, errAccountPushFailed) {
+			return fmt.Errorf("granting enrolled sprout %s on tenant %s's Account: %w", id, tenantID, err)
+		}
+		// The Account JWT is signed and stored; only the push failed.
+		// The bus catches up on the next push, as before.
+		log.Errorf("failed to push tenant %s's Account after granting enrolled sprout %s: %v", tenantID, id, err)
 	}
 	return nil
+}
+
+// errAccountPushFailed marks a grantEnrolledSprout error that happened
+// only in the bus push, after the Account JWT was signed and stored.
+var errAccountPushFailed = errors.New("pushing the tenant Account JWT failed")
+
+// pushGranted pushes a granted Account JWT, marking a plain push failure
+// with errAccountPushFailed. A tenant deprovisioned meanwhile is returned
+// as is: enrolment must fail then.
+func pushGranted(mat *natsAuthMaterial, tenantID, accountJWT string) error {
+	err := pushLiveTenantAccount(mat, tenantID, accountJWT)
+	if err == nil || errors.Is(err, ErrTenantDeprovisioned) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", errAccountPushFailed, err)
 }
 
 // grantEnrolledSprout puts one enrolled sprout's NKey on tenantID's
@@ -968,8 +988,10 @@ func acceptEnrolledNKey(tenantID, id, nkey string) error {
 // farmer's own User JWT for it. Otherwise only this NKey is granted
 // (its revocation cleared) and the tenant's revoked list (PXC) applied,
 // so a replaced key stays revoked; enrolment no longer re-syncs every
-// sprout of the tenant (P21 slice 3 §4.2). FLAG FOR SECURITY REVIEW: this
-// is what lets the sprout's User JWT authenticate.
+// sprout of the tenant (P21 slice 3 §4.2). Any error but a failed push
+// (errAccountPushFailed) means the NKey may not be granted, so enrolment
+// fails. FLAG FOR SECURITY REVIEW: this is what lets the sprout's User
+// JWT authenticate.
 func grantEnrolledSprout(tenantID, nkey string) error {
 	mat, tam, provisioned, err := ensureTenantAccount(tenantID, "", false)
 	if err != nil {
@@ -979,7 +1001,7 @@ func grantEnrolledSprout(tenantID, nkey string) error {
 		if _, err := syncTenantSprouts(mat, tam, tenantID); err != nil {
 			return err
 		}
-		return pushLiveTenantAccount(mat, tenantID, tam.jwt)
+		return pushGranted(mat, tenantID, tam.jwt)
 	}
 	revoked, err := revokedNKeys(tenantID)
 	if err != nil {
@@ -1006,5 +1028,5 @@ func grantEnrolledSprout(tenantID, nkey string) error {
 	if err := writeFileAtomic(tenantAccountJWTPath(tenantID), []byte(signed), 0o600); err != nil {
 		return err
 	}
-	return pushLiveTenantAccount(mat, tenantID, signed)
+	return pushGranted(mat, tenantID, signed)
 }

@@ -420,6 +420,7 @@ type sproutUserJWTRow struct {
 	UpdatedAt  time.Time  `gorm:"column:updated_at;not null;autoUpdateTime:false"`
 }
 
+// TableName is the table the row lives in.
 func (sproutUserJWTRow) TableName() string { return string(lease.SproutUserJWT) }
 
 // SproutJWTModels returns the model of the sprout_user_jwt table, for
@@ -448,8 +449,10 @@ type sproutJWTStore struct {
 	now     func() time.Time
 	sleep   func(ctx context.Context, d time.Duration) error
 	// afterPut, if set, runs after the object PUT and before the row
-	// UPDATE (tests: a replica killed mid-mint).
-	afterPut func()
+	// UPDATE. Tests only: an error stands for the replica dying there, so
+	// mintLeased returns it without updating the row or releasing the
+	// lease.
+	afterPut func() error
 }
 
 var (
@@ -540,6 +543,7 @@ func defaultSproutJWTStore() (*sproutJWTStore, error) {
 	}, nil
 }
 
+// sleepCtx waits d, or until ctx is done.
 func sleepCtx(ctx context.Context, d time.Duration) error {
 	t := time.NewTimer(d)
 	defer t.Stop()
@@ -654,6 +658,7 @@ func (s *sproutJWTStore) checkEligible(tenantID, sproutID, pubkey string) error 
 	return nil
 }
 
+// mintOrReuse is MintOrReuseUserJWT on this replica's store.
 func (s *sproutJWTStore) mintOrReuse(ctx context.Context, tenantID, sproutID, pubkey string) (string, error) {
 	if !IsValidTenantID(tenantID) {
 		return "", ErrTenantIDInvalid
@@ -702,12 +707,16 @@ func (s *sproutJWTStore) mintOrReuse(ctx context.Context, tenantID, sproutID, pu
 
 // mintLeased runs with the lease held: it re-reads (another replica may
 // have minted while this one waited), else mints, PUTs and records the
-// JWT. It releases the lease on return; on a cancelled context the
-// release fails too and the lease lapses at lease_until.
+// JWT. It releases the lease on return, even if ctx was cancelled (the
+// caller went away), so a retry need not wait for lease_until.
 func (s *sproutJWTStore) mintLeased(ctx context.Context, tenantID, sproutID, pubkey string, perms jwt.Permissions) (string, error) {
 	key := []any{tenantID, sproutID}
+	died := false
 	defer func() {
-		if _, err := s.leases.Release(ctx, lease.SproutUserJWT, key, s.owner); err != nil {
+		if died {
+			return
+		}
+		if _, err := s.leases.Release(context.WithoutCancel(ctx), lease.SproutUserJWT, key, s.owner); err != nil {
 			log.Debugf("pki: releasing sprout JWT lease for %s in tenant %s: %v", sproutID, tenantID, err)
 		}
 	}()
@@ -733,7 +742,10 @@ func (s *sproutJWTStore) mintLeased(ctx context.Context, tenantID, sproutID, pub
 		return "", fmt.Errorf("pki: storing sprout JWT: %w", err)
 	}
 	if s.afterPut != nil {
-		s.afterPut()
+		if err := s.afterPut(); err != nil {
+			died = true
+			return "", err
+		}
 	}
 	r := s.db.WithContext(ctx).Model(&sproutUserJWTRow{}).
 		Where("tenant_id = ? AND sprout_id = ? AND lease_owner = ?", tenantID, sproutID, s.owner).
