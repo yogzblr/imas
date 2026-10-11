@@ -91,7 +91,7 @@ Flow:
 What this changes and what it does not:
 
 - It fixes P18 once the real GPG public key is in the package, and a release check parses the keyring (below). It removes the per-rig key mismatch: the key is the release key, not one made by each OpenBao.
-- It removes P20 option C's need to deploy `fleetreleaser` and its signing key. The UAT still needs the operator plane, a TLS Secret and a token to register a release, and a UAT keyring that matches the key that signed the UAT build.
+- It removes P20 option C's need to deploy `fleetreleaser` and its signing key. The UAT still needs the operator plane, a TLS Secret and a token to register a release. It needs no special keyring: UAT installs the `rc` packages from the same release workflow, signed with the same release GPG key, so it follows the production path (owner, 2026-10-11).
 - Custody moves from Transit/HSM to the GPG key in CI secrets. It must be a dedicated release key with a passphrase, available only to the `goreleaser` environment (protected tag/environment). Its compromise lets an attacker sign any update: revocation means shipping a new keyring in a package that the old key signed.
 - A compromised farmer can still choose which signed release a tenant gets (an older signed version), but cannot create an unsigned one. Downgrade protection stays on the sprout.
 - Rotation: the keyring holds more than one GPG key. A new key ships in a release signed by the old one; the old key is removed only when no approved version needs it. Same rule as the Ed25519 keyring.
@@ -180,5 +180,5 @@ Not tested by us: OpenBao unseal and seal providers, snapshot restore, NATS clus
 - Which production seal (customer or CloudXP choice); KMIP server selection is the operator's, per OpenBao's KMIP page.
 - Farmer NKey and credential-rotation state: PXC or Secret.
 - Audit logs with several farmer replicas: per-pod files plus a shipper, or object storage.
-- GPG verification library and licence check; UAT keyring for the release key (section 4.1).
+- None for fleet update trust: the GPG library is decided (BSD-3 accepted) and UAT uses the production path (section 4.1).
 - Single-writer lock mechanism for provisioning and rotation (PXC `GET_LOCK` or lease).
