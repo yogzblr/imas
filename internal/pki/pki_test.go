@@ -25,6 +25,8 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/objectstore"
+	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
 	"github.com/yogzblr/imas/internal/pki/pkitest"
 )
 
@@ -47,7 +49,8 @@ func newTestDB(t *testing.T) *gorm.DB {
 	if sqlDB, err := gdb.DB(); err == nil {
 		t.Cleanup(func() { _ = sqlDB.Close() })
 	}
-	if err := gdb.AutoMigrate(Models()...); err != nil {
+	// sprout_user_jwt comes from migration farmer 00005, not Models().
+	if err := gdb.AutoMigrate(append(Models(), &sproutUserJWTRow{})...); err != nil {
 		t.Fatalf("migrating test db: %v", err)
 	}
 	SetDB(gdb)
@@ -87,6 +90,21 @@ func setupTestPKI(t *testing.T) {
 
 	generateTestCerts(t, tmpDir)
 	testTransit = pkitest.Farmer(t)
+	useTestSproutJWTStore(t)
+}
+
+// useTestSproutJWTStore installs a fake S3 bucket as the sprout JWT store
+// and returns it.
+func useTestSproutJWTStore(t *testing.T) *objectstoretest.Server {
+	t.Helper()
+	srv := objectstoretest.NewServer(t)
+	s, err := objectstore.Open(srv.Config())
+	if err != nil {
+		t.Fatalf("opening the fake sprout JWT bucket: %v", err)
+	}
+	SetSproutJWTStore(s)
+	t.Cleanup(func() { SetSproutJWTStore(nil) })
+	return srv
 }
 
 // testTransit is the fake Transit setupTestPKI signs through: the

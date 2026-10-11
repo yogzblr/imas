@@ -104,6 +104,7 @@ import (
 	"sync"
 	"time"
 
+	jwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
 
 	"github.com/yogzblr/imas/internal/config"
@@ -597,10 +598,10 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 	// path above (recordProvenSproutBoxKey), once this response has told
 	// it the tenant key to seal its proof to.
 
-	signedJWT, err := GetSproutUserJWTForTenant(row.TenantID, sproutID)
+	signedJWT, err := MintOrReuseUserJWT(ctx, row.TenantID, sproutID, nkeyPub)
 	if err != nil {
-		log.Errorf("enroll: sprout %s accepted but no readable JWT: %v", sproutID, err)
-		return nil, ErrEnrollmentFailed
+		log.Errorf("enroll: sprout %s accepted but its User JWT could not be minted or read: %v", sproutID, err)
+		return nil, enrollJWTError(err)
 	}
 	// A sprout re-enrolling after an interrupted first attempt may
 	// already have pinned an earlier tenant key; see reissueExistingIdentity.
@@ -810,18 +811,31 @@ func replayExistingEnrollment(ctx context.Context, tenantID, sproutID, nkeyPub s
 	return res, nil
 }
 
-// reissueExistingIdentity returns an accepted sprout's existing NATS User
-// JWT and the tenant X25519 public key, and, if withGateway, a freshly
-// minted gateway JWT. Shared by the enrollment replay path and
+// enrollJWTError is the error Enroll and RefreshSprout return when the
+// sprout's User JWT could not be minted or read. It is always
+// ErrEnrollmentFailed; when another replica held the mint lease
+// (ErrSproutJWTBusy) it wraps that too, so a caller can tell a retryable
+// failure (503 with Retry-After) from a refusal.
+func enrollJWTError(err error) error {
+	if errors.Is(err, ErrSproutJWTBusy) {
+		return fmt.Errorf("%w: %w", ErrEnrollmentFailed, ErrSproutJWTBusy)
+	}
+	return ErrEnrollmentFailed
+}
+
+// reissueExistingIdentity returns an accepted sprout's NATS User JWT
+// (MintOrReuseUserJWT: the stored one, or a fresh one if none is stored
+// for its accepted NKey with the current permissions), the tenant X25519
+// public key and, if withGateway, a freshly minted gateway JWT. Shared by the enrollment replay path and
 // RefreshSprout. Callers must have verified and claimed the request
 // first, and pass withGateway only for a request that proved possession
 // of the sprout's box key (a sprout_pub_proof or a sealed refresh): an
 // NKey signature alone is not enough, since the bus can obtain one.
 func reissueExistingIdentity(ctx context.Context, tenantID, sproutID, nkeyPub string, withGateway bool) (*EnrollResult, error) {
-	existingJWT, err := GetSproutUserJWTForTenant(tenantID, sproutID)
+	existingJWT, err := MintOrReuseUserJWT(ctx, tenantID, sproutID, nkeyPub)
 	if err != nil {
-		log.Errorf("enroll: sprout %s has an accepted nkey but no readable JWT: %v", sproutID, err)
-		return nil, ErrEnrollmentFailed
+		log.Errorf("enroll: sprout %s has an accepted nkey but its User JWT could not be minted or read: %v", sproutID, err)
+		return nil, enrollJWTError(err)
 	}
 	tenantPub, err := GetTenantX25519PublicKey(tenantID)
 	if err != nil {
@@ -933,16 +947,64 @@ func resolveEnrollSproutID(tenantID, hostname, nkeyPub string) (string, error) {
 // one write, scoped to tenantID (the enrollment key's own tenant — see
 // Enroll). Unlike the legacy Unaccept-then-admin-Accept flow, presenting a
 // valid, unexhausted join token *is* the authorization decision here —
-// there's no separate pending-review step to go through first. Reloads via
-// ReloadNKeysForTenant (tenant.go), not the legacy current-tenant
-// ReloadNKeys — this lazily provisions tenantID's own NATS Account (mint +
-// push) the first time it's ever seen, which is what actually makes a
-// freshly-enrolled sprout's User JWT valid against the bus.
+// there's no separate pending-review step to go through first. It then
+// grants just this sprout's NKey on the tenant's Account
+// (grantEnrolledSprout), not a re-sync of every sprout of the tenant; the
+// sprout's User JWT is minted by Enroll (MintOrReuseUserJWT).
 func acceptEnrolledNKey(tenantID, id, nkey string) error {
-	defer func() {
-		if err := ReloadNKeysForTenant(tenantID); err != nil {
-			log.Errorf("failed to reload NATS auth for enrolled sprout %s in tenant %s: %v", id, tenantID, err)
+	if err := upsertNKeyRow(nkeyRow{TenantID: tenantID, SproutID: id, NKey: nkey, State: stateAccepted}); err != nil {
+		return err
+	}
+	if err := grantEnrolledSprout(tenantID, nkey); err != nil {
+		log.Errorf("failed to grant enrolled sprout %s on tenant %s's Account: %v", id, tenantID, err)
+	}
+	return nil
+}
+
+// grantEnrolledSprout puts one enrolled sprout's NKey on tenantID's
+// Account and pushes the Account JWT if that changed it. A tenant first
+// seen here is provisioned lazily (ensureTenantAccount) and gets one full
+// sync and push, as ReloadNKeysForTenant does, which also mints the
+// farmer's own User JWT for it. Otherwise only this NKey is granted
+// (its revocation cleared) and the tenant's revoked list (PXC) applied,
+// so a replaced key stays revoked; enrolment no longer re-syncs every
+// sprout of the tenant (P21 slice 3 §4.2). FLAG FOR SECURITY REVIEW: this
+// is what lets the sprout's User JWT authenticate.
+func grantEnrolledSprout(tenantID, nkey string) error {
+	mat, tam, provisioned, err := ensureTenantAccount(tenantID, "", false)
+	if err != nil {
+		return err
+	}
+	if provisioned {
+		if _, err := syncTenantSprouts(mat, tam, tenantID); err != nil {
+			return err
 		}
-	}()
-	return upsertNKeyRow(nkeyRow{TenantID: tenantID, SproutID: id, NKey: nkey, State: stateAccepted})
+		return pushLiveTenantAccount(mat, tenantID, tam.jwt)
+	}
+	revoked, err := revokedNKeys(tenantID)
+	if err != nil {
+		return err
+	}
+	if _, isRevoked := revoked[nkey]; isRevoked {
+		return fmt.Errorf("pki: NKey is revoked in tenant %s: %w", tenantID, ErrNKeyRevoked)
+	}
+	ac, err := jwt.DecodeAccountClaims(tam.jwt)
+	if err != nil {
+		return err
+	}
+	changed := ensureUserGranted(ac, nkey)
+	if applyRevokedNKeys(ac, revoked) {
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	signed, err := ac.Encode(mat.operatorSigningKP)
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(tenantAccountJWTPath(tenantID), []byte(signed), 0o600); err != nil {
+		return err
+	}
+	return pushLiveTenantAccount(mat, tenantID, signed)
 }
