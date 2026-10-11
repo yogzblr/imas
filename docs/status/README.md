@@ -42,6 +42,8 @@ rag: Red
 next: Build it; see the design doc.
 ```
 
+Fragments of one day apply in file-name order. If your fragment changes an item that another fragment of the same day adds or rewrites, give yours a name that sorts after it (for example a `z-` prefix), or an `add` will overwrite your `update`.
+
 Check a fragment before you push: `scripts/status/rollup.py --check`.
 
 ## The daily roll-up
