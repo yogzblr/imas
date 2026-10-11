@@ -128,6 +128,7 @@ func TestCheck(t *testing.T) {
 	}{
 		{"fresh schema", State{}, ErrSchemaBehind},
 		{"one behind", State{Version: 4, Floor: 3}, ErrSchemaBehind},
+		{"current, a lower version missing", State{Version: 5, Floor: 3, Missing: 4}, ErrSchemaBehind},
 		{"current", State{Version: 5, Floor: 3}, nil},
 		{"current, floor unrecorded", State{Version: 5}, nil},
 		{"floor at this binary", State{Version: 5, Floor: 5}, nil},
@@ -141,6 +142,36 @@ func TestCheck(t *testing.T) {
 				t.Fatalf("Check(%+v) = %v, want %v", tc.st, err, tc.want)
 			}
 		})
+	}
+}
+
+// TestSetMissing: the lowest of the set's own versions, up to Latest and
+// below the schema's newest, that isn't applied.
+func TestSetMissing(t *testing.T) {
+	s := Set{name: "test", versions: []int64{1, 2, 4, 5, 7}, latest: 5, compatibleFrom: 1}
+	applied := func(vs ...int64) map[int64]bool {
+		m := map[int64]bool{0: true} // goose's own version 0 row
+		for _, v := range vs {
+			m[v] = true
+		}
+		return m
+	}
+	for _, tc := range []struct {
+		name    string
+		applied map[int64]bool
+		version int64
+		want    int64
+	}{
+		{"all applied", applied(1, 2, 4, 5), 5, 0},
+		{"gap below newest", applied(1, 4, 5), 5, 2},
+		{"lowest gap reported", applied(5), 5, 1},
+		{"a version not in the set (3) is not looked for", applied(1, 2, 4, 5), 5, 0},
+		{"above Latest is another binary's", applied(1, 2, 4, 5, 8), 8, 0},
+		{"behind: not this check's to report", applied(1, 2), 2, 0},
+	} {
+		if got := s.missing(tc.applied, tc.version); got != tc.want {
+			t.Errorf("%s: missing = %d, want %d", tc.name, got, tc.want)
+		}
 	}
 }
 

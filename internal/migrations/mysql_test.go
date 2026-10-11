@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -154,6 +155,17 @@ func (e *mysqlEnv) migrateAll(t *testing.T) (farmer, saas UpResult) {
 	return farmer, saas
 }
 
+// countVersions is how many migrations a set has. Versions may have a
+// gap (saas 00007 belongs to P22 slice 2), so Latest is not a count.
+func countVersions(t *testing.T, s Set) int {
+	t.Helper()
+	v, err := Versions(s.FS())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(v)
+}
+
 func mysqlErrNumber(err error) uint16 {
 	var me *mysql.MySQLError
 	if errors.As(err, &me) {
@@ -165,10 +177,10 @@ func mysqlErrNumber(err error) uint16 {
 func TestMySQLUpFreshAndAgain(t *testing.T) {
 	e := newMySQLEnv(t)
 	f, s := e.migrateAll(t)
-	if f.From != 0 || f.To != Farmer.Latest() || int64(len(f.Applied)) != Farmer.Latest() {
+	if f.From != 0 || f.To != Farmer.Latest() || len(f.Applied) != countVersions(t, Farmer) {
 		t.Fatalf("farmer: %+v", f)
 	}
-	if s.From != 0 || s.To != Saas.Latest() || int64(len(s.Applied)) != Saas.Latest() {
+	if s.From != 0 || s.To != Saas.Latest() || len(s.Applied) != countVersions(t, Saas) {
 		t.Fatalf("saas: %+v", s)
 	}
 
@@ -222,6 +234,24 @@ func TestMySQLGrants(t *testing.T) {
 		t.Fatalf("saas reading farmer: %v", err)
 	}
 
+	// P21 slice 3's tables follow the same rule: farmer owns its leases
+	// and the sprout JWT index, saas its credential state, and farmer
+	// reads prev_pub for the SYS account's revocations.
+	for who, q := range map[string]struct {
+		db  *sql.DB
+		sql string
+	}{
+		"farmer taking a job lease":         {farmer, "UPDATE job_leases SET lease_owner = 'r1', lease_until = NOW(3) WHERE name = 'jobs_expiry'"},
+		"farmer indexing a sprout JWT":      {farmer, "INSERT INTO sprout_user_jwt (tenant_id, sprout_id, object_key, user_pubkey, jwt_sha256, updated_at) VALUES ('t1', 's1', 'k', 'U', REPEAT('a', 64), NOW(3))"},
+		"saas recording its credential":     {saas, "INSERT INTO saasapi_credential_state (id, current_pub, rotated_at, version) VALUES (1, 'U', NOW(3), 1)"},
+		"farmer reading saas's prev_pub":    {farmer, "SELECT prev_pub FROM `" + s.Schema + "`.saasapi_credential_state"},
+		"saas reading the sprout JWT index": {saas, "SELECT COUNT(*) FROM `" + f.Schema + "`.sprout_user_jwt"},
+	} {
+		if _, err := q.db.ExecContext(ctx, q.sql); err != nil {
+			t.Fatalf("%s: %v", who, err)
+		}
+	}
+
 	r, err := farmer.ExecContext(ctx, "UPDATE `"+s.Schema+"`.enrollment_keys SET used_count = used_count + 1, last_used_at = NOW() WHERE key_id = 'k1' AND used_count < max_uses")
 	if err != nil {
 		t.Fatalf("farmer redeeming an enrollment key: %v", err)
@@ -245,6 +275,9 @@ func TestMySQLGrants(t *testing.T) {
 		"saas updating farmer":            {saas, "UPDATE `" + f.Schema + "`.pki_nkeys SET state = 'x'"},
 		"saas dropping a farmer table":    {saas, "DROP TABLE `" + f.Schema + "`.props"},
 		"saas writing farmer's lock":      {saas, "DELETE FROM `" + f.Schema + "`." + LockTable},
+		"saas taking a farmer job lease":  {saas, "UPDATE `" + f.Schema + "`.job_leases SET lease_owner = 'x'"},
+		"saas writing the sprout JWTs":    {saas, "DELETE FROM `" + f.Schema + "`.sprout_user_jwt"},
+		"farmer rotating saas's key":      {farmer, "UPDATE `" + s.Schema + "`.saasapi_credential_state SET version = version + 1"},
 		"farmer writing saas's versions":  {farmer, "DELETE FROM `" + s.Schema + "`." + VersionTable},
 		"farmer raising saas's floor":     {farmer, "UPDATE `" + s.Schema + "`." + InfoTable + " SET min_compatible_version = 99"},
 		"saas granting itself on farmer":  {saas, "GRANT INSERT ON `" + f.Schema + "`.* TO " + userSpec(s.User)},
@@ -256,6 +289,13 @@ func TestMySQLGrants(t *testing.T) {
 		}
 	}
 }
+
+// noModelYet are tables a migration creates before any GORM model
+// describes them: P21 slice 3's state tables (farmer 00004, 00005, saas
+// 00008), whose code lands in later PRs of that slice. Each is compared
+// with AutoMigrate again once its model exists; its own migration test
+// pins its shape until then.
+var noModelYet = []string{"job_leases", "sprout_user_jwt", "saasapi_credential_state"}
 
 // TestMySQLBaselineMatchesGORMModels: the baseline creates exactly the
 // tables, columns and indexes AutoMigrate creates from today's models, so
@@ -279,7 +319,7 @@ func TestMySQLBaselineMatchesGORMModels(t *testing.T) {
 			}
 			want := describeSchema(t, e.root, viaGORM)
 			got := describeSchema(t, e.root, viaGoose)
-			for _, own := range []string{VersionTable, InfoTable} {
+			for _, own := range append([]string{VersionTable, InfoTable}, noModelYet...) {
 				got = slices.DeleteFunc(got, func(l string) bool { return strings.HasPrefix(l, own+" ") })
 			}
 			if d := diffLines(want, got); d != "" {
@@ -646,5 +686,63 @@ func TestMySQLWaitForSchema(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestMySQLOutOfOrderVersionApplied: a migration whose version is below
+// one already applied (saas 00007 landing after 00008) is applied, not
+// refused, and the recorded version stays the newest.
+func TestMySQLOutOfOrderVersionApplied(t *testing.T) {
+	e := newMySQLEnv(t)
+	db := e.schemaDB(t, "t_ooo_"+suffix(t))
+	ctx := context.Background()
+	mig := func(table string) *fstest.MapFile {
+		return &fstest.MapFile{Data: []byte("-- +goose Up\nCREATE TABLE IF NOT EXISTS `" + table + "` (`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB;\n")}
+	}
+	fsys := fstest.MapFS{"m/00001_a.sql": mig("a"), "m/00003_c.sql": mig("c")}
+	before, err := newSet("ooo", fsys, "m", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err := Up(ctx, db, before, t.Logf); err != nil || !slices.Equal(res.Applied, []int64{1, 3}) {
+		t.Fatalf("first run: %+v, %v", res, err)
+	}
+	fsys["m/00002_b.sql"] = mig("b")
+	after, err := newSet("ooo", fsys, "m", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Before the run: the binary built with 2 is not ready, although the
+	// schema's version (3) is its Latest, and WaitForSchema keeps waiting.
+	st, err := after.ReadState(ctx, db)
+	if err != nil || st.Missing != 2 || !errors.Is(after.Check(st), ErrSchemaBehind) {
+		t.Fatalf("before applying 2: state %+v, Check %v, %v; want Missing 2 and ErrSchemaBehind", st, after.Check(st), err)
+	}
+	wctx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	if err := WaitForSchema(wctx, db, after, t.Logf); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("WaitForSchema with 2 missing: %v, want it still waiting", err)
+	}
+	// The binary built without 2 is judged by its own versions.
+	if st, err := before.ReadState(ctx, db); err != nil || st.Missing != 0 || before.Check(st) != nil {
+		t.Fatalf("binary without 2: state %+v, %v", st, err)
+	}
+	res, err := Up(ctx, db, after, t.Logf)
+	if err != nil || !slices.Equal(res.Applied, []int64{2}) || res.From != 3 || res.To != 3 {
+		t.Fatalf("out-of-order run: %+v, %v; want 2 applied, From and To 3", res, err)
+	}
+	var n int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'b'").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("table b: %d, %v", n, err)
+	}
+	st, err = after.ReadState(ctx, db)
+	if err != nil || st.Version != 3 || st.Missing != 0 || after.Check(st) != nil {
+		t.Fatalf("state %+v, %v; want version 3, nothing missing", st, err)
+	}
+	if err := WaitForSchema(ctx, db, after, t.Logf); err != nil {
+		t.Fatalf("WaitForSchema after applying 2: %v", err)
+	}
+	if res, err := Up(ctx, db, after, t.Logf); err != nil || len(res.Applied) != 0 {
+		t.Fatalf("third run: %+v, %v", res, err)
 	}
 }

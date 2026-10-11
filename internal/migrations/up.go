@@ -46,7 +46,12 @@ func Up(ctx context.Context, db *sql.DB, s Set, logf func(format string, args ..
 	if err := raiseFloor(ctx, db, s.compatibleFrom); err != nil {
 		return res, fmt.Errorf("%s: %w", s.name, err)
 	}
-	p, err := goose.NewProvider(goose.DialectMySQL, db, s.fsys, goose.WithDisableGlobalRegistry(true))
+	// Out of order allowed: versions are reserved per workstream and can
+	// merge out of order (saas 00008 can land before 00007), so a version
+	// below one already applied is applied, not refused. A migration that
+	// lands this way must not depend on the ones numbered above it.
+	p, err := goose.NewProvider(goose.DialectMySQL, db, s.fsys, goose.WithDisableGlobalRegistry(true),
+		goose.WithAllowOutofOrder(true))
 	if err != nil {
 		return res, fmt.Errorf("%s: %w", s.name, err)
 	}
@@ -57,7 +62,7 @@ func Up(ctx context.Context, db *sql.DB, s Set, logf func(format string, args ..
 	for _, r := range results {
 		if r.Error == nil {
 			res.Applied = append(res.Applied, r.Source.Version)
-			res.To = r.Source.Version
+			res.To = max(res.To, r.Source.Version) // an out-of-order version is below From
 			logf("%s: applied %s in %s", s.name, r.Source.Path, r.Duration)
 		}
 	}

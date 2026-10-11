@@ -207,7 +207,7 @@ func check(ctx context.Context, cfg checkConfig, stdout io.Writer, logf func(str
 		if err := waitForServer(ctx, db, cfg.wait, "PXC as "+m.cfg.User, logf); err != nil {
 			return err
 		}
-		st, err := migrations.ReadState(ctx, db)
+		st, err := m.set.ReadState(ctx, db)
 		if err != nil {
 			return fmt.Errorf("%s schema: %w", m.set.Name(), err)
 		}

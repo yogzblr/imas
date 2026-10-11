@@ -130,7 +130,7 @@ func TestMySQLRolloutClaimedAt(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := migrations.Up(ctx, db, migrations.Saas, t.Logf)
-	if err != nil || len(res.Applied) != int(migrations.Saas.Latest())-4 || res.Applied[0] != 5 {
+	if err != nil || len(res.Applied) != countFrom(t, 5) || res.Applied[0] != 5 {
 		t.Fatalf("re-run: %+v, %v", res, err)
 	}
 	if got := column(); got != want {
@@ -166,6 +166,24 @@ func TestMySQLRolloutClaimedAt(t *testing.T) {
 		cur.RolloutClaimedAt == nil || !cur.RolloutClaimedAt.Equal(claimed) {
 		t.Fatalf("after the previous model's Save: %+v, %v", cur, err)
 	}
+}
+
+// countFrom is how many saas migrations are version v or later. Versions
+// have a gap (saas 00007 belongs to P22 slice 2 and lands separately), so
+// Latest is not a count.
+func countFrom(t *testing.T, v int64) int {
+	t.Helper()
+	all, err := migrations.Versions(migrations.Saas.FS())
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, x := range all {
+		if x >= v {
+			n++
+		}
+	}
+	return n
 }
 
 func open(t *testing.T, cfg *mysql.Config) *sql.DB {

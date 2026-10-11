@@ -72,6 +72,7 @@ const InfoTable = "imas_schema_info"
 type Set struct {
 	name           string
 	fsys           fs.FS
+	versions       []int64 // every file's version, ascending
 	latest         int64
 	compatibleFrom int64
 }
@@ -107,7 +108,7 @@ func newSet(name string, fsys fs.FS, dir string, compatibleFrom int64) (Set, err
 	if compatibleFrom < 1 || compatibleFrom > latest {
 		return Set{}, fmt.Errorf("migrations %s: compatibleFrom %d is outside 1..%d", name, compatibleFrom, latest)
 	}
-	return Set{name: name, fsys: sub, latest: latest, compatibleFrom: compatibleFrom}, nil
+	return Set{name: name, fsys: sub, versions: versions, latest: latest, compatibleFrom: compatibleFrom}, nil
 }
 
 // Versions returns the version of each NNNNN_name.sql file in fsys, in
@@ -159,6 +160,12 @@ type State struct {
 	// Floor is the oldest binary schema version the schema still
 	// supports, 0 when none is recorded.
 	Floor int64
+	// Missing is the lowest of a set's own versions, up to its Latest,
+	// that isn't applied although a newer one is; 0 when there is none.
+	// Only Set.ReadState fills it: versions can be applied out of order
+	// (saas 00008 before 00007), so Version alone can't show a gap below
+	// it, as after a `migrate up` that failed on the lower version.
+	Missing int64
 }
 
 var (
@@ -172,18 +179,76 @@ var (
 )
 
 // Check reports whether a binary carrying this set can run against a
-// schema in state st: the schema is at least at Latest, and its floor
-// doesn't exclude Latest. A schema ahead of Latest is fine as long as
+// schema in state st: the schema is at least at Latest, none of the
+// set's versions up to Latest is missing below it, and its floor doesn't
+// exclude Latest. A schema ahead of Latest is fine as long as
 // the floor allows it; that's the rollback case.
 func (s Set) Check(st State) error {
 	switch {
 	case st.Version < s.latest:
 		return fmt.Errorf("%s: %w: schema version %d, this binary needs %d", s.name, ErrSchemaBehind, st.Version, s.latest)
+	case st.Missing != 0:
+		return fmt.Errorf("%s: %w: schema version %d lacks migration %d, which this binary needs", s.name, ErrSchemaBehind, st.Version, st.Missing)
 	case st.Floor > s.latest:
 		return fmt.Errorf("%s: %w: schema version %d supports binaries built for %d or later, this binary is built for %d",
 			s.name, ErrSchemaTooNew, st.Version, st.Floor, s.latest)
 	}
 	return nil
+}
+
+// ReadState is the package's ReadState plus Missing: which of this set's
+// versions, up to Latest, the schema lacks. A version above Latest is
+// another binary's and isn't looked for, so a rollback's older binary is
+// judged by its own migrations only.
+func (s Set) ReadState(ctx context.Context, db *sql.DB) (State, error) {
+	st, err := ReadState(ctx, db)
+	if err != nil || st.Version == 0 {
+		return st, err
+	}
+	applied, err := appliedVersions(ctx, db)
+	if err != nil {
+		return st, err
+	}
+	st.Missing = s.missing(applied, st.Version)
+	return st, nil
+}
+
+// missing is the lowest of the set's versions up to Latest, and below
+// version (the schema's newest), that applied lacks; 0 if none.
+func (s Set) missing(applied map[int64]bool, version int64) int64 {
+	for _, v := range s.versions {
+		if v > s.latest || v >= version {
+			break
+		}
+		if !applied[v] {
+			return v
+		}
+	}
+	return 0
+}
+
+// appliedVersions reads every applied version from goose's table, by the
+// same rule ReadState's Version uses. The table exists: the caller saw a
+// version in it.
+func appliedVersions(ctx context.Context, db *sql.DB) (map[int64]bool, error) {
+	rows, err := db.QueryContext(ctx, "SELECT v.version_id FROM `"+VersionTable+"` v"+
+		" WHERE v.is_applied AND v.id = (SELECT MAX(w.id) FROM `"+VersionTable+"` w WHERE w.version_id = v.version_id)")
+	if err != nil {
+		return nil, fmt.Errorf("reading applied schema versions: %w", err)
+	}
+	defer rows.Close()
+	applied := map[int64]bool{}
+	for rows.Next() {
+		var v int64
+		if err := rows.Scan(&v); err != nil {
+			return nil, fmt.Errorf("reading applied schema versions: %w", err)
+		}
+		applied[v] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading applied schema versions: %w", err)
+	}
+	return applied, nil
 }
 
 // ReadState reads st from the schema db is connected to, without
@@ -242,7 +307,7 @@ const (
 // migration runs after them, and during an upgrade a pod can start
 // before the hook Job finishes.
 func WaitForSchema(ctx context.Context, db *sql.DB, s Set, logf func(format string, args ...any)) error {
-	return waitForSchema(ctx, func(ctx context.Context) (State, error) { return ReadState(ctx, db) }, s, logf, waitInitial, waitMax)
+	return waitForSchema(ctx, func(ctx context.Context) (State, error) { return s.ReadState(ctx, db) }, s, logf, waitInitial, waitMax)
 }
 
 func waitForSchema(ctx context.Context, read func(context.Context) (State, error), s Set,
