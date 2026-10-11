@@ -543,6 +543,7 @@ func TestRunUsageErrors(t *testing.T) {
 		{"kubernetes auth with token file", map[string]string{natskeys.EnvPrefixBoot + natskeys.EnvOpenBaoAuthMethod: "kubernetes"}, nil},
 		{"bad kv path", map[string]string{EnvKVCopy: "true", EnvKVPath: "a/../b"}, nil},
 		{"bad fence user", map[string]string{EnvBusFenceUserPub: "not-a-key"}, nil},
+		{"no openbao address", map[string]string{natskeys.EnvPrefixBoot + natskeys.EnvOpenBaoAddr: ""}, nil},
 		{"extra argument", nil, []string{"extra"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -556,6 +557,9 @@ func TestRunUsageErrors(t *testing.T) {
 			}
 			if e.transit.Count(natskeystest.OpCreateKey) != 0 || e.kube.writeCount() != 0 {
 				t.Error("a configuration error still created keys or wrote the configmap")
+			}
+			if _, err := os.Stat(e.tokenFile); tc.args == nil && !os.IsNotExist(err) {
+				t.Errorf("token file still present after a configuration error (stat err %v)", err)
 			}
 		})
 	}

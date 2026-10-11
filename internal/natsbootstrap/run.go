@@ -136,18 +136,28 @@ func Run(args []string, stderr io.Writer) int {
 	return 0
 }
 
-func run(ctx context.Context, out io.Writer) error {
+func run(ctx context.Context, out io.Writer) (err error) {
+	tokenFile := os.Getenv(EnvTokenFile)
+	token, haveToken, err := readTokenFile(tokenFile)
+	if err != nil {
+		return err
+	}
+	if haveToken {
+		// The file goes on every return from here, a configuration
+		// error included: this is an init container, so when it fails
+		// the main container (which revokes by accessor) never runs.
+		defer func() {
+			if rmErr := os.Remove(tokenFile); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+				err = errors.Join(err, fmt.Errorf("removing the bootstrap token file: %w", rmErr))
+			}
+		}()
+	}
 	cmName := os.Getenv(EnvTrustConfigMap)
 	if cmName == "" {
 		cmName = DefaultTrustConfigMap
 	}
 	if !configMapNameMatcher.MatchString(cmName) {
 		return fmt.Errorf("%w: %s=%q is not a valid ConfigMap name", errUsage, EnvTrustConfigMap, cmName)
-	}
-	tokenFile := os.Getenv(EnvTokenFile)
-	token, haveToken, err := readTokenFile(tokenFile)
-	if err != nil {
-		return err
 	}
 	if !haveToken {
 		kube, err := inClusterKube()
@@ -193,7 +203,7 @@ func run(ctx context.Context, out io.Writer) error {
 	}()
 	// The token goes whatever happened: it can sign with the operator
 	// identity key. The main container also revokes it by accessor.
-	return errors.Join(err, revokeToken(ctx, out, ob, tokenFile))
+	return errors.Join(err, revokeToken(ctx, out, ob))
 }
 
 // readTokenFile returns the token in path. An unset path or a missing
@@ -395,22 +405,17 @@ func copyToKV(ctx context.Context, ob *openbao.Client, mount, path string, files
 	return true, nil
 }
 
-// revokeToken revokes the bootstrap token (auth/token/revoke-self) and
-// removes its handoff file. It runs on a context of its own so a run
-// that hit its deadline still revokes.
-func revokeToken(ctx context.Context, out io.Writer, ob *openbao.Client, tokenFile string) error {
+// revokeToken revokes the bootstrap token (auth/token/revoke-self). It
+// runs on a context of its own so a run that hit its deadline still
+// revokes.
+func revokeToken(ctx context.Context, out io.Writer, ob *openbao.Client) error {
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	var errs []error
 	if _, err := ob.Post(rctx, "auth/token/revoke-self", nil); err != nil {
-		errs = append(errs, fmt.Errorf("revoking the bootstrap token: %w", err))
-	} else {
-		fmt.Fprintln(out, "bootstrap token revoked")
+		return fmt.Errorf("revoking the bootstrap token: %w", err)
 	}
-	if err := os.Remove(tokenFile); err != nil && !errors.Is(err, os.ErrNotExist) {
-		errs = append(errs, fmt.Errorf("removing the bootstrap token file: %w", err))
-	}
-	return errors.Join(errs...)
+	fmt.Fprintln(out, "bootstrap token revoked")
+	return nil
 }
 
 func bytesMap(m map[string]string) map[string][]byte {
