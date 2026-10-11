@@ -132,7 +132,7 @@ Keys follow the (tenant_id, sprout_id) rule from CLAUDE.md.
 
 saas schema (written by saasapi):
 ```sql
--- saas/00007_saasapi_credential_state.sql
+-- saas/00008_saasapi_credential_state.sql   (P22 slice 2 owns saas 00007; this one is 00008)
 CREATE TABLE IF NOT EXISTS saas.saasapi_credential_state (
   id            TINYINT      NOT NULL PRIMARY KEY,   -- single row, id=1
   current_pub   VARCHAR(64)  NOT NULL,
@@ -227,7 +227,7 @@ Location: package-level tests alongside code, using sqlite GORM AutoMigrate, min
 ## 7. Implementation order (one PR each)
 
 1. Inventory guard: add `TestNoFileWrittenOutsideTmp` static allow-list in report-only mode, plus `internal/lease` package with fake-clock tests. Green: `go test ./...`.
-2. Migrations (farmer 00004-00005 [+00006], saas 00007) and migration tests. Green: migrations tests, MySQL gated run in CI.
+2. Migrations (farmer 00004-00005 [+00006], saas 00008) and migration tests. Green: migrations tests, MySQL gated run in CI.
 3. Config/logging: JSON log format, audit to stdout, LoadConfig no-write, createConfigRoot removal, owner decision 1 applied. Green: audit and config tests.
 4. Seeds: SYS_USER and farmer NKey from Secret (chart and code). Green: chart render tests, farmer start test with read-only root.
 5. Sprout JWT store + lease (needs slice 1/2 interfaces merged). Green: tests 1-3.
