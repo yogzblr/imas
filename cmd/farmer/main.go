@@ -144,6 +144,11 @@ func main() {
 	requireConfigRoot()
 	initAuditLogger()
 	loadAuthPolicy()
+	// Fail fast without NATS signing: the trust ConfigMap must be mounted,
+	// OpenBao Transit reachable, and its platform keys the trust's.
+	if err := pki.CheckNATSAuth(context.Background()); err != nil {
+		log.Fatalf("NATS signing is not usable: %v", err)
+	}
 	pki.SetupPKIFarmer()
 	if err := certs.GenCert(); err != nil {
 		log.Fatalf("failed to generate TLS certificates: %v", err)

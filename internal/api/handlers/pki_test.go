@@ -29,6 +29,7 @@ import (
 	apitypes "github.com/yogzblr/imas/internal/api/types"
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/pki/pkitest"
 )
 
 // setupPKIDirs wires up an in-memory PKI store (see internal/pki/store.go)
@@ -71,6 +72,7 @@ func setupPKIDirs(t *testing.T) string {
 
 	dir := t.TempDir()
 	config.FarmerPKI = dir + "/"
+	pkitest.Farmer(t) // the NATS trust chain in a fake Transit
 
 	// Create a fake farmer NKey pub file so ReloadNKeys doesn't crash.
 	farmerKP, err := nkeys.CreateUser()

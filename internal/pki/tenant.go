@@ -33,7 +33,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 
@@ -54,15 +53,15 @@ func IsValidTenantID(id string) bool {
 }
 
 // tenantAccountMaterial is one tenant's NATS Account trust material:
-// its own Account keypair, a delegated signing key (so the Account's own
-// root key need not be online at runtime, mirroring the
-// operator/operator-signing split in jwtauth.go), and the current signed
-// Account JWT.
+// its Account public key (the Transit key nats-tacct-<id>, which never
+// signs), a delegated signing pair (Transit key nats-tsign-<id>, mirroring
+// the operator/operator-signing split in jwtauth.go), and the current
+// signed Account JWT.
 type tenantAccountMaterial struct {
-	kp        nkeys.KeyPair
-	signingKP nkeys.KeyPair
-	pub       string
-	jwt       string
+	signingKP  nkeys.KeyPair
+	signingPub string
+	pub        string
+	jwt        string
 }
 
 func tenantsRootDir() string {
@@ -78,10 +77,6 @@ func tenantAuthDir(id string) string {
 	return filepath.Join(tenantsRootDir(), id)
 }
 
-func tenantAccountKeyPath(id string) string { return filepath.Join(tenantAuthDir(id), "account.nk") }
-func tenantAccountSigningKeyPath(id string) string {
-	return filepath.Join(tenantAuthDir(id), "account-signing.nk")
-}
 func tenantAccountJWTPath(id string) string { return filepath.Join(tenantAuthDir(id), "account.jwt") }
 func tenantSproutJWTDir(id string) string   { return filepath.Join(tenantAuthDir(id), "sprouts") }
 
@@ -109,19 +104,6 @@ func sproutJWTPathForTenant(tenantID, sproutID string) string {
 	return filepath.Join(tenantSproutJWTDir(tenantID), sproutID+".jwt")
 }
 
-// externalSeedNameForTenant derives an env-var-safe name for
-// loadOrCreateSeed's external-seed override (loadExternalSeed in
-// jwtauth.go), following the same IMAS_NATS_<NAME>_SEED[_FILE] convention
-// the fixed platform-wide identities use — e.g. tenant ID "t_8f2a" maps to
-// IMAS_NATS_TENANT_T_8F2A_SEED_FILE. Not expected to be set for most
-// tenants today (this is groundwork for OpenBao/per-tenant secret custody,
-// workstream F), but keeps the override mechanism available uniformly
-// rather than only for the handful of fixed identities jwtauth.go names
-// directly.
-func externalSeedNameForTenant(tenantID string) string {
-	return "TENANT_" + strings.ToUpper(strings.ReplaceAll(tenantID, "-", "_"))
-}
-
 // tenantAuthMu guards concurrent bootstrap/persistence of any tenant's
 // Account material below (a pki_tenants row plus its on-disk Account
 // keys/JWT) — the tenant-scoped counterpart to jwtauth.go's authMu, which
@@ -134,12 +116,16 @@ func externalSeedNameForTenant(tenantID string) string {
 // Go's sync.Mutex isn't reentrant.
 var tenantAuthMu sync.Mutex
 
-// ensureTenantAccountMaterial loads tenantID's Account keys/JWT from disk,
-// minting and persisting whatever's missing — idempotent, but relies on the
-// caller already holding tenantAuthMu (every call site in this file does,
-// via ensureTenantAccountLocked or loadTenantAccountMaterial) for safety
-// under concurrent calls for the same tenant.
-func ensureTenantAccountMaterial(mat *natsAuthMaterial, tenantID, name string) (*tenantAccountMaterial, bool, error) {
+// ensureTenantAccountMaterial loads tenantID's Account keys from Transit
+// and its Account JWT from disk, minting and persisting the JWT if it is
+// missing — idempotent, but relies on the caller already holding
+// tenantAuthMu (every call site in this file does, via
+// ensureTenantAccountLocked or loadTenantAccountMaterial) for safety
+// under concurrent calls for the same tenant. Only provisioning passes
+// create, which creates the tenant's two Transit keys when they don't
+// exist; otherwise a missing key is an error wrapping
+// natskeys.ErrKeyNotFound and nothing is created.
+func ensureTenantAccountMaterial(mat *natsAuthMaterial, tenantID, name string, create bool) (*tenantAccountMaterial, bool, error) {
 	if err := os.MkdirAll(tenantAuthDir(tenantID), 0o700); err != nil {
 		return nil, false, err
 	}
@@ -150,23 +136,26 @@ func ensureTenantAccountMaterial(mat *natsAuthMaterial, tenantID, name string) (
 	tam := &tenantAccountMaterial{}
 	ctx := context.Background()
 
+	getKey := natsKeys.keyPair
+	if create {
+		getKey = natsKeys.ensureKeyPair
+	}
 	var err error
-	tam.kp, err = natsKeys.ensureKeyPair(ctx, natsKeyRef{role: natsKeyTenantAccount, tenantID: tenantID})
+	tam.signingKP, err = getKey(ctx, natsKeyRef{role: natsKeyTenantSigning, tenantID: tenantID})
 	if err != nil {
 		return nil, false, err
 	}
-	tam.pub, err = tam.kp.PublicKey()
+	if tam.signingPub, err = tam.signingKP.PublicKey(); err != nil {
+		return nil, false, err
+	}
+	accountKP, err := getKey(ctx, natsKeyRef{role: natsKeyTenantAccount, tenantID: tenantID})
 	if err != nil {
 		return nil, false, err
 	}
-	tam.signingKP, err = natsKeys.ensureKeyPair(ctx, natsKeyRef{role: natsKeyTenantSigning, tenantID: tenantID})
-	if err != nil {
+	if tam.pub, err = accountKP.PublicKey(); err != nil {
 		return nil, false, err
 	}
-	signingPub, err := tam.signingKP.PublicKey()
-	if err != nil {
-		return nil, false, err
-	}
+	signingPub := tam.signingPub
 
 	minted := false
 	needJWT := true
@@ -197,12 +186,9 @@ func ensureTenantAccountMaterial(mat *natsAuthMaterial, tenantID, name string) (
 
 // loadTenantAccountMaterial loads a tenant's Account material without
 // creating a new pki_tenants row — used where the caller expects the
-// tenant to already be provisioned (ConfigureNats' resolver-seeding loop)
-// and a missing tenant should surface as an error rather than silently
-// registering one. It does still fill in any missing key/JWT *file* for an
-// already-registered tenant, the same as ensureTenantAccountLocked, since a
-// partially-written tenant directory (e.g. a prior crash mid-provision)
-// should self-heal rather than wedge the resolver.
+// tenant to already be provisioned (PushAllAccounts) and a missing tenant
+// should surface as an error rather than silently registering one. It
+// never creates Transit keys: a tenant whose keys are missing is an error.
 func loadTenantAccountMaterial(tenantID string) (*tenantAccountMaterial, error) {
 	mat, err := ensureNatsAuth()
 	if err != nil {
@@ -213,7 +199,7 @@ func loadTenantAccountMaterial(tenantID string) (*tenantAccountMaterial, error) 
 	}
 	tenantAuthMu.Lock()
 	defer tenantAuthMu.Unlock()
-	tam, _, err := ensureTenantAccountMaterial(mat, tenantID, tenantID)
+	tam, _, err := ensureTenantAccountMaterial(mat, tenantID, tenantID, false)
 	return tam, err
 }
 
@@ -225,7 +211,13 @@ func loadTenantAccountMaterial(tenantID string) (*tenantAccountMaterial, error) 
 // material was newly created by this call — callers use it to decide
 // whether a resolver push is required even if syncing sprouts found
 // nothing to change.
-func ensureTenantAccount(tenantID, nameHint string) (mat *natsAuthMaterial, tam *tenantAccountMaterial, provisioned bool, err error) {
+//
+// createKeys is true only for ProvisionTenant: it creates the tenant's
+// Transit keys if they don't exist. Enrollment and resync pass false and
+// create keys only when this call registered the tenant (a first
+// enrollment, which provisions it lazily); for an already-registered
+// tenant a missing key is an error.
+func ensureTenantAccount(tenantID, nameHint string, createKeys bool) (mat *natsAuthMaterial, tam *tenantAccountMaterial, provisioned bool, err error) {
 	if !IsValidTenantID(tenantID) {
 		return nil, nil, false, ErrTenantIDInvalid
 	}
@@ -236,7 +228,7 @@ func ensureTenantAccount(tenantID, nameHint string) (mat *natsAuthMaterial, tam 
 	if err != nil {
 		return nil, nil, false, err
 	}
-	tam, provisioned, err = ensureTenantAccountLocked(mat, tenantID, nameHint)
+	tam, provisioned, err = ensureTenantAccountLocked(mat, tenantID, nameHint, createKeys)
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -288,7 +280,7 @@ func OnTenantDeprovisioned(fn func(tenantID string)) { tenantDeprovisionedHook =
 // platform-wide operator/SYS material) is already in hand — split out so
 // loadTenantAccountMaterial can reuse the same tenantAuthMu-guarded section
 // without re-deriving mat.
-func ensureTenantAccountLocked(mat *natsAuthMaterial, tenantID, nameHint string) (tam *tenantAccountMaterial, provisioned bool, err error) {
+func ensureTenantAccountLocked(mat *natsAuthMaterial, tenantID, nameHint string, createKeys bool) (tam *tenantAccountMaterial, provisioned bool, err error) {
 	tenantAuthMu.Lock()
 	defer tenantAuthMu.Unlock()
 
@@ -321,7 +313,7 @@ func ensureTenantAccountLocked(mat *natsAuthMaterial, tenantID, nameHint string)
 	}
 	nameHint = row.Name
 
-	tam, minted, err := ensureTenantAccountMaterial(mat, tenantID, nameHint)
+	tam, minted, err := ensureTenantAccountMaterial(mat, tenantID, nameHint, createKeys || provisioned)
 	if err != nil {
 		return nil, false, err
 	}
@@ -354,7 +346,7 @@ func ensureTenantAccountLocked(mat *natsAuthMaterial, tenantID, nameHint string)
 // the ordering this gives). A tenant already deleted when the call starts
 // is refused before anything is pushed (ensureTenantAccountLocked).
 func ProvisionTenant(tenantID, name string) error {
-	mat, tam, _, err := ensureTenantAccount(tenantID, name)
+	mat, tam, _, err := ensureTenantAccount(tenantID, name, true)
 	if err != nil {
 		log.Errorf("failed to provision tenant %q: %v", tenantID, err)
 		return err
@@ -382,8 +374,12 @@ func ProvisionTenant(tenantID, name string) error {
 // DeprovisionTenant reverses ProvisionTenant: it marks tenantID deleted in
 // the pki_tenants registry and pushes a locked-out Account JWT to the
 // resolver (see lockOutAccount), so the bus closes the tenant's live
-// connections and refuses new ones, effective immediately. It does not
-// delete on-disk key material or sprout state.
+// connections and refuses new ones, effective immediately. Once the
+// lockout is on the bus it retires (soft-deletes) the tenant's two
+// Transit keys, so nothing can sign for the tenant again; an operator can
+// restore them (soft-delete-restore) or purge them after the retention
+// window. It does not delete on-disk JWTs or sprout state. A failed
+// retire is returned; calling DeprovisionTenant again retries it.
 //
 // It is also the repair for a bus that still holds a live JWT for a
 // deleted tenant (a crash between marking the row and pushing, or a lost
@@ -424,6 +420,29 @@ func DeprovisionTenant(tenantID string) error {
 	// connection, and closes one a late provision copy may have opened.
 	if tenantDeprovisionedHook != nil {
 		go tenantDeprovisionedHook(tenantID)
+	}
+	return retireTenantKeys(tenantID)
+}
+
+// retireTenantKeys soft-deletes tenantID's account and signing keys in
+// Transit. Idempotent: a missing or already retired key is success. The
+// legacy current tenant is never retired: its keys sign for the farmer's
+// own legacy Account (ensureNatsAuth), which a deprovision of that ID
+// does not end.
+func retireTenantKeys(tenantID string) error {
+	if tenantID == currentTenantID() {
+		return nil
+	}
+	ctx := context.Background()
+	var errs []error
+	for _, role := range []natsKeyRole{natsKeyTenantSigning, natsKeyTenantAccount} {
+		if err := natsKeys.retireKey(ctx, natsKeyRef{role: role, tenantID: tenantID}); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		log.Errorf("tenant %q is locked out but its NATS keys were not all retired: %v", tenantID, err)
+		return err
 	}
 	return nil
 }
@@ -492,33 +511,49 @@ func deprovisionTenantLocked(mat *natsAuthMaterial, tenantID string) (signedJWT 
 			return "", wasDeleted, ErrTenantNotFound
 		}
 	}
-	signed, err := signLockedOutTenantJWT(mat, tenantID, row.Name)
+	signed, err := signLockedOutTenantJWT(mat, row)
 	if err != nil {
 		return "", false, err
 	}
 	return signed, wasDeleted, nil
 }
 
-// signLockedOutTenantJWT re-signs tenantID's Account JWT locked out (see
+// signLockedOutTenantJWT re-signs row's Account JWT locked out (see
 // lockOutAccount) as of now and persists it to disk, replacing whatever is
 // there: the on-disk JWT may be live again if a provision on this replica
 // re-signed it after an earlier lockout (syncTenantSprouts writes it
-// outside tenantAuthMu). The caller must hold tenantAuthMu and must
-// already have seen the tenant's row marked deleted.
-func signLockedOutTenantJWT(mat *natsAuthMaterial, tenantID, name string) (string, error) {
-	tam, _, err := ensureTenantAccountMaterial(mat, tenantID, name)
-	if err != nil {
+// outside tenantAuthMu). It needs no tenant key, only the operator
+// signing key: it starts from the Account JWT on disk or, when that is
+// missing or about another key, from minimal claims for row.AccountPub.
+// So a tenant whose Transit keys were retired can still be locked out
+// again. The caller must hold tenantAuthMu and must already have seen
+// the tenant's row marked deleted.
+func signLockedOutTenantJWT(mat *natsAuthMaterial, row *tenantRow) (string, error) {
+	tenantID := row.ID
+	var ac *jwt.AccountClaims
+	if b, err := os.ReadFile(tenantAccountJWTPath(tenantID)); err == nil {
+		if c, derr := jwt.DecodeAccountClaims(string(b)); derr == nil &&
+			(row.AccountPub == "" || c.Subject == row.AccountPub) {
+			ac = c
+		}
+	} else if !os.IsNotExist(err) {
 		return "", err
 	}
-	ac, err := jwt.DecodeAccountClaims(tam.jwt)
-	if err != nil {
-		return "", fmt.Errorf("pki: decoding tenant %q's Account JWT: %w", tenantID, err)
+	if ac == nil {
+		if row.AccountPub == "" {
+			return "", fmt.Errorf("pki: tenant %q has neither an Account JWT nor a recorded Account public key to lock out", tenantID)
+		}
+		ac = jwt.NewAccountClaims(row.AccountPub)
+		ac.Name = row.Name
 	}
 	waitPastIssuedAt(ac.IssuedAt)
 	lockOutAccount(ac, time.Now())
 	signed, err := ac.Encode(mat.operatorSigningKP)
 	if err != nil {
 		return "", fmt.Errorf("pki: re-signing tenant %q's Account JWT locked out: %w", tenantID, err)
+	}
+	if err := os.MkdirAll(tenantAuthDir(tenantID), 0o700); err != nil {
+		return "", err
 	}
 	if err := writeFileAtomic(tenantAccountJWTPath(tenantID), []byte(signed), 0o600); err != nil {
 		return "", err
@@ -541,7 +576,7 @@ func relockIfDeletedLocked(mat *natsAuthMaterial, tenantID string) (signedJWT st
 	if !row.Deleted {
 		return "", false, nil
 	}
-	signed, err := signLockedOutTenantJWT(mat, tenantID, row.Name)
+	signed, err := signLockedOutTenantJWT(mat, row)
 	if err != nil {
 		return "", true, err
 	}
@@ -762,7 +797,7 @@ func syncTenantSprouts(mat *natsAuthMaterial, tam *tenantAccountMaterial, tenant
 // anything changed. Called by enroll.go for every enrollment, keyed by the
 // enrollment key's own tenant, not config.FarmerOrganization.
 func ReloadNKeysForTenant(tenantID string) error {
-	mat, tam, provisioned, err := ensureTenantAccount(tenantID, "")
+	mat, tam, provisioned, err := ensureTenantAccount(tenantID, "", false)
 	if err != nil {
 		log.Errorf("failed to bootstrap NATS auth material for tenant %s: %v", tenantID, err)
 		return err

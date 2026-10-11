@@ -24,6 +24,7 @@ import (
 	"github.com/yogzblr/imas/internal/gatewayjwt"
 	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/pki/pkitest"
 )
 
 const (
@@ -57,6 +58,7 @@ func useRealGatewaySubjectCheck(t *testing.T) *gorm.DB {
 	// whatever it writes out of the source tree.
 	origPKI := config.FarmerPKI
 	config.FarmerPKI = t.TempDir() + "/"
+	pkitest.Farmer(t) // the NATS trust chain in a fake Transit
 	t.Cleanup(func() { config.FarmerPKI = origPKI })
 
 	orig := gatewaySubjectCheck

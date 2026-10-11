@@ -20,6 +20,7 @@ import (
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/pki/pkitest"
 )
 
 // setupNatsAPIPKI wires up an in-memory PKI store (see
@@ -51,6 +52,7 @@ func setupNatsAPIPKI(t *testing.T) string {
 	tmpDir := t.TempDir()
 	pkiDir := filepath.Join(tmpDir, "pki") + "/"
 	config.FarmerPKI = pkiDir
+	pkitest.Farmer(t) // the NATS trust chain in a fake Transit
 
 	// Dummy farmer pub key so ReloadNKeys doesn't fatal.
 	farmerPubFile := filepath.Join(tmpDir, "farmer.pub")

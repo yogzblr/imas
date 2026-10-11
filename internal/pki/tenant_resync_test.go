@@ -28,7 +28,7 @@ func TestResyncProvisionedTenants_RemintsOldSproutJWTs(t *testing.T) {
 		}
 
 		// Overwrite the JWT with one carrying the old permission set.
-		_, tam, _, err := ensureTenantAccount(tenantID, "")
+		_, tam, _, err := ensureTenantAccount(tenantID, "", true)
 		if err != nil {
 			t.Fatal(err)
 		}

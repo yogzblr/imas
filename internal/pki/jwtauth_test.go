@@ -54,17 +54,8 @@ func TestEnsureNatsAuth_BootstrapsAndIsIdempotent(t *testing.T) {
 		t.Error("operator JWT changed across ensureNatsAuth calls without cause")
 	}
 
-	// Seeds must be persisted with restrictive permissions.
-	for _, name := range []string{"operator.nk", "operator-signing.nk", "sys-account.nk", "sys-user.nk", "tenant.nk", "tenant-signing.nk"} {
-		info, statErr := os.Stat(filepath.Join(natsAuthDir(), name))
-		if statErr != nil {
-			t.Errorf("expected %s to exist: %v", name, statErr)
-			continue
-		}
-		if info.Mode().Perm() != 0o600 {
-			t.Errorf("%s has perm %v, want 0600", name, info.Mode().Perm())
-		}
-	}
+	// No trust chain seed is written: those keys live only in Transit.
+	assertNoRemovedSeedFiles(t)
 }
 
 func TestLoadOrCreateSeed_ExternalSeedFile(t *testing.T) {

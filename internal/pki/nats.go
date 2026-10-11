@@ -130,7 +130,13 @@ func baseNatsOptions() nats_server.Options {
 }
 
 // seedResolverFromCore adds ConfigureNats's auth: the operator, SYSTEM
-// account and a full resolver seeded from core's on-disk material.
+// account and a full resolver seeded from core's material. The operator
+// JWT and SYS account come from the trust directory (through
+// ensureNatsAuth, which also gives the legacy tenant's Account); every
+// provisioned tenant's Account JWT is read from the file core persisted,
+// without touching that tenant's Transit keys, so seeding never creates
+// or needs them. A missing or unusable tenant Account JWT is skipped;
+// core's next push supplies it.
 func seedResolverFromCore(NatsConfig *nats_server.Options) {
 	mat, err := ensureNatsAuth()
 	if err != nil {
@@ -153,6 +159,10 @@ func seedResolverFromCore(NatsConfig *nats_server.Options) {
 	if err := resolver.Store(mat.tenantPub, mat.tenantJWT); err != nil {
 		log.Panicf("nats: failed to seed the tenant account into the resolver: %v", err)
 	}
+	operatorSigningPub, err := mat.operatorSigningKP.PublicKey()
+	if err != nil {
+		log.Panicf("nats: operator signing key: %v", err)
+	}
 
 	// Seed every additionally-provisioned tenant's Account too (workstream
 	// E, FLAG FOR SECURITY REVIEW: tenant isolation correctness) — the
@@ -162,25 +172,26 @@ func seedResolverFromCore(NatsConfig *nats_server.Options) {
 	// exist, and every one of them needs to be in the resolver from the
 	// moment this bus node starts, not just the tenant that happens to be
 	// "current" for this process. This is a filesystem scan
-	// (tenantIDsProvisionedOnDisk), not a pki_tenants/PXC query: this
-	// function runs in both cmd/farmer (has a PXC connection) and
-	// cmd/farmerbus (deliberately does not — see that binary's
-	// RunNATSServer doc comment), and a database dependency here would
-	// panic the bus binary. A failure loading one tenant's material is
-	// logged and skipped rather than panicking the whole server — a bad
-	// on-disk file for one tenant shouldn't take down every other tenant's
-	// bus access.
+	// (tenantIDsProvisionedOnDisk), not a pki_tenants/PXC query. A failure
+	// loading one tenant's JWT is logged and skipped rather than panicking
+	// the whole server — a bad on-disk file for one tenant shouldn't take
+	// down every other tenant's bus access.
 	ids, err := tenantIDsProvisionedOnDisk()
 	if err != nil {
 		log.Errorf("nats: failed to list provisioned tenants for resolver seeding: %v", err)
 	}
 	for _, id := range ids {
-		tam, tErr := loadTenantAccountMaterial(id)
-		if tErr != nil {
-			log.Errorf("nats: failed to load Account material for tenant %q, skipping resolver seed: %v", id, tErr)
+		b, err := os.ReadFile(tenantAccountJWTPath(id))
+		if err != nil {
+			log.Errorf("nats: failed to read tenant %q's Account JWT, skipping resolver seed: %v", id, err)
 			continue
 		}
-		if err := resolver.Store(tam.pub, tam.jwt); err != nil {
+		ac, err := jwt.DecodeAccountClaims(string(b))
+		if err != nil || ac.Issuer != operatorSigningPub {
+			log.Errorf("nats: tenant %q's Account JWT is invalid or not issued by the operator signing key, skipping resolver seed: %v", id, err)
+			continue
+		}
+		if err := resolver.Store(ac.Subject, string(b)); err != nil {
 			log.Errorf("nats: failed to seed tenant %q's account into the resolver: %v", id, err)
 		}
 	}

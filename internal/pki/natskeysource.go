@@ -1,29 +1,28 @@
 package pki
 
-// Key pair provider seam (P21 slice 1 PR4a,
-// docs/briefs/P21-slice1-transit-signer.md §7 item 4). Every key pair of
-// the NATS trust chain that the farmer signs with (operator, operator
-// signing, SYS account, legacy tenant account and signing, per-tenant
-// account and signing) is obtained through natsKeys, so PR4b can swap
-// the seed files for OpenBao Transit pairs (internal/pki/natskeys) by
-// changing where the pairs come from, not how they are used.
-//
-// The only implementation here is seedNATSKeys, which is exactly the
-// behaviour before the seam: loadOrCreateSeed with the same file paths
-// and IMAS_NATS_<NAME>_SEED[_FILE] names. User-kind seeds (SYS_USER,
-// SAASAPI_USER) are not trust chain keys and do not go through it.
+// Where the farmer's NATS trust chain key pairs come from (P21 slice 1,
+// docs/briefs/P21-slice1-transit-signer.md §2). Every key pair the farmer
+// signs with (operator signing, SYS account, legacy and per-tenant
+// account signing) and every account identity whose public key it needs
+// is an OpenBao Transit key, reached through natskeys. No operator,
+// operator-signing, SYS account, tenant or tenant-signing seed exists in
+// the farmer any more; old seed files are simply not read (design D6).
+// User-kind seeds (SYS_USER, SAASAPI_USER) are not trust chain keys and
+// do not go through here.
 //
 // FLAG FOR SECURITY REVIEW: these pairs sign every NATS account and user
 // JWT the farmer issues.
 
 import (
-	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
-	"path/filepath"
+	"sync"
 
 	"github.com/nats-io/nkeys"
+
+	"github.com/yogzblr/imas/internal/pki/natskeys"
 )
 
 // natsKeyRole is one role of the NATS trust chain.
@@ -64,9 +63,8 @@ func (r natsKeyRole) prefix() nkeys.PrefixByte {
 }
 
 // natsKeyRef names one key pair of the trust chain. tenantID is set only
-// for the per-tenant roles; empty means the legacy single tenant
-// (jwtauth.go's tenant.nk / tenant-signing.nk). The platform roles
-// ignore it.
+// for the per-tenant roles; empty means the legacy single tenant, whose
+// keys are named after currentTenantID(). The platform roles ignore it.
 type natsKeyRef struct {
 	role     natsKeyRole
 	tenantID string
@@ -79,73 +77,171 @@ func (k natsKeyRef) String() string {
 	return k.role.String() + "/" + k.tenantID
 }
 
-// natsKeyProvider supplies the trust chain's key pairs. Its shape follows
-// natskeys.KeyStore so the Transit store can sit behind it in PR4b.
+// transitName is the Transit key name of k (natskeys/names.go).
+func (k natsKeyRef) transitName() (string, error) {
+	tenant := k.tenantID
+	if tenant == "" {
+		tenant = currentTenantID()
+	}
+	switch k.role {
+	case natsKeyOperator:
+		return natskeys.OperatorKey(), nil
+	case natsKeyOperatorSigning:
+		return natskeys.OperatorSigningKey(), nil
+	case natsKeySysAccount:
+		return natskeys.SysAccountKey(), nil
+	case natsKeyTenantAccount:
+		return natskeys.TenantAccountKey(tenant), nil
+	case natsKeyTenantSigning:
+		return natskeys.TenantSigningKey(tenant), nil
+	}
+	return "", fmt.Errorf("pki: unknown NATS key role %v", k.role)
+}
+
+// natsKeyProvider supplies the trust chain's key pairs.
 type natsKeyProvider interface {
-	// keyPair returns the pair for an existing key and fails if the key
-	// does not exist.
+	// keyPair returns the pair for an existing key and fails (wrapping
+	// natskeys.ErrKeyNotFound) if the key does not exist.
 	keyPair(ctx context.Context, k natsKeyRef) (nkeys.KeyPair, error)
 	// ensureKeyPair returns the pair, creating the key if it does not
-	// exist.
+	// exist. Only tenant provisioning calls it.
 	ensureKeyPair(ctx context.Context, k natsKeyRef) (nkeys.KeyPair, error)
+	// retireKey soft-deletes the key; a missing or already retired key
+	// is success.
+	retireKey(ctx context.Context, k natsKeyRef) error
+	// store is the underlying key store, for trust verification.
+	store() (natskeys.KeyStore, error)
 }
 
 // natsKeys is the provider the farmer signs with. It is set only at
 // start-up (and in tests), never while signing is in progress.
-var natsKeys natsKeyProvider = seedNATSKeys{}
+var natsKeys natsKeyProvider = &transitNATSKeys{getenv: os.Getenv}
 
-// seedNATSKeys keeps each key as an NKey seed: an external seed
-// (IMAS_NATS_<NAME>_SEED_FILE or _SEED) or, failing that, a 0600 file
-// under natsAuthDir.
-type seedNATSKeys struct{}
-
-// seedLocation maps a key to its seed file and external seed name, the
-// arguments jwtauth.go and tenant.go passed to loadOrCreateSeed.
-func seedLocation(k natsKeyRef) (path, name string, err error) {
-	switch k.role {
-	case natsKeyOperator:
-		return filepath.Join(natsAuthDir(), "operator.nk"), "OPERATOR", nil
-	case natsKeyOperatorSigning:
-		return filepath.Join(natsAuthDir(), "operator-signing.nk"), "OPERATOR_SIGNING", nil
-	case natsKeySysAccount:
-		return filepath.Join(natsAuthDir(), "sys-account.nk"), "SYS_ACCOUNT", nil
-	case natsKeyTenantAccount:
-		if k.tenantID == "" {
-			return filepath.Join(natsAuthDir(), "tenant.nk"), "TENANT", nil
-		}
-		return tenantAccountKeyPath(k.tenantID), externalSeedNameForTenant(k.tenantID), nil
-	case natsKeyTenantSigning:
-		if k.tenantID == "" {
-			return filepath.Join(natsAuthDir(), "tenant-signing.nk"), "TENANT_SIGNING", nil
-		}
-		return tenantAccountSigningKeyPath(k.tenantID), externalSeedNameForTenant(k.tenantID) + "_SIGNING", nil
-	}
-	return "", "", fmt.Errorf("pki: unknown NATS key role %v", k.role)
+// natsSignEnvSuffixes are the IMAS_NATSSIGN_* settings the store is built
+// from (natskeys.ConfigFromEnv and internal/openbao).
+var natsSignEnvSuffixes = []string{
+	natskeys.EnvOpenBaoAddr, natskeys.EnvOpenBaoCACert, natskeys.EnvOpenBaoAuthMethod,
+	natskeys.EnvOpenBaoToken, natskeys.EnvOpenBaoK8sRole, natskeys.EnvOpenBaoK8sMount,
+	natskeys.EnvOpenBaoK8sJWTPath, natskeys.EnvOpenBaoNamespace, natskeys.EnvOpenBaoTransitMount,
+	natskeys.EnvTimeout, natskeys.EnvBatchMax, natskeys.EnvWorkers,
 }
 
-func (seedNATSKeys) ensureKeyPair(_ context.Context, k natsKeyRef) (nkeys.KeyPair, error) {
-	path, name, err := seedLocation(k)
+// transitNATSKeys builds a natskeys.TransitKeyStore from the farmer's
+// IMAS_NATSSIGN_* environment on first use and caches the pairs it hands
+// out (a pair pins its key version and caches its public key, so reusing
+// it costs no request). The store is rebuilt, and the cache dropped, when
+// that environment changes, which only tests do.
+type transitNATSKeys struct {
+	getenv func(string) string
+
+	mu    sync.Mutex
+	envFP [sha256.Size]byte
+	ks    *natskeys.TransitKeyStore
+	pairs map[string]nkeys.KeyPair
+}
+
+func (p *transitNATSKeys) fingerprint() [sha256.Size]byte {
+	h := sha256.New()
+	for _, s := range natsSignEnvSuffixes {
+		fmt.Fprintf(h, "%s=%s\x00", s, p.getenv(natskeys.EnvPrefixSign+s))
+	}
+	var fp [sha256.Size]byte
+	copy(fp[:], h.Sum(nil))
+	return fp
+}
+
+// current returns the store for the present environment, building it
+// when needed.
+func (p *transitNATSKeys) current() (*natskeys.TransitKeyStore, error) {
+	fp := p.fingerprint()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.ks != nil && p.envFP == fp {
+		return p.ks, nil
+	}
+	cfg, err := natskeys.ConfigFromEnv(natskeys.EnvPrefixSign, p.getenv)
+	if err != nil {
+		return nil, fmt.Errorf("pki: NATS signing: %w", err)
+	}
+	ks, err := natskeys.NewTransitKeyStore(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("pki: NATS signing: %w", err)
+	}
+	if p.ks != nil {
+		p.ks.Close()
+	}
+	p.ks, p.envFP, p.pairs = ks, fp, map[string]nkeys.KeyPair{}
+	return ks, nil
+}
+
+func (p *transitNATSKeys) store() (natskeys.KeyStore, error) { return p.current() }
+
+func (p *transitNATSKeys) cached(ks *natskeys.TransitKeyStore, name string) nkeys.KeyPair {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.ks != ks {
+		return nil
+	}
+	return p.pairs[name]
+}
+
+func (p *transitNATSKeys) remember(ks *natskeys.TransitKeyStore, name string, kp nkeys.KeyPair) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.ks == ks {
+		p.pairs[name] = kp
+	}
+}
+
+func (p *transitNATSKeys) get(ctx context.Context, k natsKeyRef, create bool) (nkeys.KeyPair, error) {
+	name, err := k.transitName()
 	if err != nil {
 		return nil, err
 	}
-	create := nkeys.CreateAccount
-	if k.role.prefix() == nkeys.PrefixByteOperator {
-		create = nkeys.CreateOperator
-	}
-	return loadOrCreateSeed(path, name, create)
-}
-
-func (seedNATSKeys) keyPair(_ context.Context, k natsKeyRef) (nkeys.KeyPair, error) {
-	path, name, err := seedLocation(k)
+	ks, err := p.current()
 	if err != nil {
 		return nil, err
 	}
-	if kp, ok, err := loadExternalSeed(name); ok {
-		return kp, err
+	if kp := p.cached(ks, name); kp != nil {
+		return kp, nil
 	}
-	b, err := os.ReadFile(path)
+	var kp nkeys.KeyPair
+	if create {
+		kp, err = ks.EnsureKeyPair(ctx, name, k.role.prefix())
+	} else {
+		kp, err = ks.KeyPair(ctx, name, k.role.prefix())
+	}
 	if err != nil {
 		return nil, fmt.Errorf("pki: NATS key %v: %w", k, err)
 	}
-	return nkeys.FromSeed(bytes.TrimSpace(b))
+	p.remember(ks, name, kp)
+	return kp, nil
+}
+
+func (p *transitNATSKeys) keyPair(ctx context.Context, k natsKeyRef) (nkeys.KeyPair, error) {
+	return p.get(ctx, k, false)
+}
+
+func (p *transitNATSKeys) ensureKeyPair(ctx context.Context, k natsKeyRef) (nkeys.KeyPair, error) {
+	return p.get(ctx, k, true)
+}
+
+func (p *transitNATSKeys) retireKey(ctx context.Context, k natsKeyRef) error {
+	name, err := k.transitName()
+	if err != nil {
+		return err
+	}
+	ks, err := p.current()
+	if err != nil {
+		return err
+	}
+	p.mu.Lock()
+	if p.ks == ks {
+		delete(p.pairs, name)
+	}
+	p.mu.Unlock()
+	if err := ks.RetireKey(ctx, name); err != nil {
+		return fmt.Errorf("pki: retiring NATS key %v: %w", k, err)
+	}
+	return nil
 }

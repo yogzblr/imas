@@ -57,6 +57,7 @@ import (
 	"github.com/yogzblr/imas/internal/natsapi"
 	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/pki/pkitest"
 	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 )
 
@@ -101,6 +102,7 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 	// pki.ConfigureNats/ProvisionTenant/ConnectSystemAccount read.
 	tmp := t.TempDir()
 	config.FarmerPKI = filepath.Join(tmp, "pki") + "/"
+	pkitest.Farmer(t) // the NATS trust chain in a fake Transit
 	config.FarmerInterface = "127.0.0.1"
 	// -1, not "0": nats-server maps Port 0 to the default 4222, which
 	// collides with other packages' test buses under a parallel
@@ -520,20 +522,20 @@ func TestProvisioningBridge_EndToEnd_FarmerFailureMovesTenantToFailed(t *testing
 
 // TestProvisioningBridge_EndToEnd_DeleteNeverProvisionedTenant: a tenant
 // whose provisioning failed before farmer recorded anything (here, a
-// corrupted operator seed makes the real pki.ProvisionTenant fail before
+// corrupted NATS trust makes the real pki.ProvisionTenant fail before
 // it writes a pki_tenants row) is offboarded on DELETE — the real
 // pki.DeprovisionTenant finds nothing to tear down, and GET status answers
 // 200 with the fixed warning message rather than leaving it stuck in
 // offboarding.
 func TestProvisioningBridge_EndToEnd_DeleteNeverProvisionedTenant(t *testing.T) {
 	env := newE2EEnv(t)
-	operatorSeed := filepath.Join(config.FarmerPKI, "nats-auth", "operator.nk")
-	good, err := os.ReadFile(operatorSeed)
+	trustFile := filepath.Join(pki.NATSTrustDir(), pki.TrustOperatorSigningPub)
+	good, err := os.ReadFile(trustFile)
 	if err != nil {
-		t.Fatalf("reading operator seed: %v", err)
+		t.Fatalf("reading the trust: %v", err)
 	}
-	if err := os.WriteFile(operatorSeed, []byte("not-a-seed"), 0o600); err != nil {
-		t.Fatalf("corrupting operator seed: %v", err)
+	if err := os.WriteFile(trustFile, []byte("not-a-key"), 0o644); err != nil {
+		t.Fatalf("corrupting the trust: %v", err)
 	}
 
 	tenantID := env.createTenant(t, "Never Provisioned Co")
@@ -544,8 +546,8 @@ func TestProvisioningBridge_EndToEnd_DeleteNeverProvisionedTenant(t *testing.T) 
 		t.Fatal("expected farmer to have recorded nothing for the tenant")
 	}
 
-	if err := os.WriteFile(operatorSeed, good, 0o600); err != nil {
-		t.Fatalf("restoring operator seed: %v", err)
+	if err := os.WriteFile(trustFile, good, 0o644); err != nil {
+		t.Fatalf("restoring the trust: %v", err)
 	}
 	deprovResults := env.observe(t, controlplane.SubjectTenantDeprovisionedWildcard)
 	if w := env.do(t, "DELETE", "/v1/tenants/"+tenantID, tenantID, ""); w.Code != http.StatusAccepted {
