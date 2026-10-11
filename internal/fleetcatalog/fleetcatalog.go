@@ -36,7 +36,7 @@ import (
 // Row is one saas.fleet_versions row: the signed manifest, plus the two
 // unsigned columns a reader needs.
 type Row struct {
-	Manifest    fleetsign.Manifest
+	Manifest    fleetsign.LegacyManifest
 	PackageType string
 	Revoked     bool
 }
@@ -47,7 +47,7 @@ type Catalog interface {
 	// packageType), signature included, only if it is not revoked and
 	// version is tenantID's approved_version. found is false for every
 	// other case; err is only for a failed read.
-	ApprovedManifest(ctx context.Context, tenantID, os, arch, packageType, version string) (m fleetsign.Manifest, found bool, err error)
+	ApprovedManifest(ctx context.Context, tenantID, os, arch, packageType, version string) (m fleetsign.LegacyManifest, found bool, err error)
 	// ApprovedVersion returns tenantID's approved_version. ok is false if
 	// the tenant has no policy row or approved none.
 	ApprovedVersion(ctx context.Context, tenantID string) (version string, ok bool, err error)
@@ -80,15 +80,15 @@ const approvedManifestQuery = `SELECT fv.version, fv.os, fv.arch, fv.file_name,
  WHERE p.tenant_id = ? AND fv.version = ? AND fv.os = ? AND fv.arch = ?
    AND fv.package_type = ? AND fv.revoked = FALSE`
 
-func (s SQL) ApprovedManifest(ctx context.Context, tenantID, os, arch, packageType, version string) (fleetsign.Manifest, bool, error) {
-	var m fleetsign.Manifest
+func (s SQL) ApprovedManifest(ctx context.Context, tenantID, os, arch, packageType, version string) (fleetsign.LegacyManifest, bool, error) {
+	var m fleetsign.LegacyManifest
 	err := s.db.WithContext(ctx).Raw(approvedManifestQuery, tenantID, version, os, arch, packageType).Row().
 		Scan(&m.Version, &m.OS, &m.Arch, &m.FileName, &m.ChecksumSHA256, &m.MinSproutVersion, &m.Signature)
 	if errors.Is(err, sql.ErrNoRows) {
-		return fleetsign.Manifest{}, false, nil
+		return fleetsign.LegacyManifest{}, false, nil
 	}
 	if err != nil {
-		return fleetsign.Manifest{}, false, err
+		return fleetsign.LegacyManifest{}, false, err
 	}
 	return m, true, nil
 }

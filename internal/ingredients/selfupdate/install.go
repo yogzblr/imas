@@ -117,7 +117,7 @@ func installPackage(ctx context.Context, p platform, file, version, msiLog strin
 		// The packages are unsigned (the Ansible role checks the
 		// repository metadata's signature instead), and a local file has
 		// no repository metadata: what vouches for these bytes is the
-		// signed manifest's SHA-256, checked before this runs. No
+		// signed checksums.txt SHA-256, checked before this runs. No
 		// --oldpackage: zypper then refuses an older package (by skipping
 		// it, with exit 0, which verifyInstalled catches).
 		args = []string{"--non-interactive", "--no-refresh", "install", "--allow-unsigned-rpm", file}

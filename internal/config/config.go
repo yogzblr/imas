@@ -214,14 +214,15 @@ var (
 	SproutRootCATOFU bool
 
 	// SproutFleetSigningKeyring ("sproutfleetsigningkeyring", sprout only)
-	// is the imas-fleet-signing public keyring the selfupdate ingredient
-	// verifies every update manifest against (fleetsign.LoadKeyring,
-	// design doc §2.5): a JSON object of key id to base64 Ed25519 public
-	// key, shipped in the sprout package (packaging/etc/
-	// fleet-signing-keys.json) and replaced by every package upgrade.
-	// Default: fleet-signing-keys.json in the config root
-	// (/etc/imas/fleet-signing-keys.json, %ProgramData%\imas\
-	// fleet-signing-keys.json on Windows).
+	// is the release GPG public keyring the selfupdate ingredient verifies
+	// every release's checksums.txt signature against
+	// (fleetsign.LoadArmoredKeyring, signing design D9, D21): one or more
+	// ASCII-armored OpenPGP public keys, built from the repo's
+	// gpg-public-key.asc, shipped in the sprout package and replaced by
+	// every package upgrade.
+	// Default: fleet-signing-keys.asc in the config root
+	// (/etc/imas/fleet-signing-keys.asc, %ProgramData%\imas\
+	// fleet-signing-keys.asc on Windows).
 	SproutFleetSigningKeyring string
 
 	// SproutUpdateRepoURL ("sproutupdaterepourl", sprout only) is the
@@ -708,7 +709,7 @@ func LoadConfig(binary string) {
 			jety.SetDefault("sproutpki", filepath.Join(systemConfigRoot, "pki/sprout")+string(filepath.Separator))
 			jety.SetDefault("sproutrootca", filepath.Join(systemConfigRoot, "pki/sprout/tls-rootca.pem"))
 			jety.SetDefault("sproutrootcatofu", true)
-			jety.SetDefault("sproutfleetsigningkeyring", filepath.Join(systemConfigRoot, "fleet-signing-keys.json"))
+			jety.SetDefault("sproutfleetsigningkeyring", filepath.Join(systemConfigRoot, "fleet-signing-keys.asc"))
 			jety.SetDefault("nkeysproutpubfile", filepath.Join(systemConfigRoot, "pki/sprout/sprout.nkey.pub"))
 			jety.SetDefault("joblogdir", defaultSproutJobLogDir())
 			jety.SetDefault("joblogttl", 30*24*time.Hour) // 30 days default
@@ -752,6 +753,14 @@ func LoadConfig(binary string) {
 			BusReconnectBase = jety.GetDuration("busreconnectbase")
 			BusReconnectCap = jety.GetDuration("busreconnectcap")
 			SproutFleetSigningKeyring = jety.GetString("sproutfleetsigningkeyring")
+			// WriteConfig persists defaults, so a sprout first configured
+			// before P22 carries the old JSON keyring default, which the
+			// package no longer ships. Move exactly that value to the new
+			// default; any other configured path is the admin's choice.
+			if SproutFleetSigningKeyring == filepath.Join(systemConfigRoot, "fleet-signing-keys.json") {
+				SproutFleetSigningKeyring = filepath.Join(systemConfigRoot, "fleet-signing-keys.asc")
+				jety.Set("sproutfleetsigningkeyring", SproutFleetSigningKeyring)
+			}
 			SproutUpdateRepoURL = strings.TrimSpace(jety.GetString("sproutupdaterepourl"))
 			SproutUpdateRepoToken = strings.TrimSpace(jety.GetString("sproutupdaterepotoken"))
 			SproutUpdateRepoFormat = strings.TrimSpace(jety.GetString("sproutupdaterepoformat"))

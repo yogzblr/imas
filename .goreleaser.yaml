@@ -385,8 +385,8 @@ nfpms:
           # The self_update trust root (packaging/etc/fleet-signing-keys.md).
           # Deliberately not a config file: every upgrade replaces it, which is
           # how a signing key rotation reaches the fleet.
-          - src: ./packaging/etc/fleet-signing-keys.json
-            dst: /etc/imas/fleet-signing-keys.json
+          - src: ./gpg-public-key.asc
+            dst: /etc/imas/fleet-signing-keys.asc
             file_info:
               mode: 0644
           - dst: /var/cache/imas/sprout
@@ -412,8 +412,8 @@ nfpms:
           # The self_update trust root (packaging/etc/fleet-signing-keys.md).
           # Deliberately not a config file: every upgrade replaces it, which is
           # how a signing key rotation reaches the fleet.
-          - src: ./packaging/etc/fleet-signing-keys.json
-            dst: /etc/imas/fleet-signing-keys.json
+          - src: ./gpg-public-key.asc
+            dst: /etc/imas/fleet-signing-keys.asc
             file_info:
               mode: 0644
           - dst: /var/cache/imas/sprout
@@ -442,8 +442,8 @@ nfpms:
           # The self_update trust root (packaging/etc/fleet-signing-keys.md).
           # Deliberately not a config file: every upgrade replaces it, which is
           # how a signing key rotation reaches the fleet.
-          - src: ./packaging/etc/fleet-signing-keys.json
-            dst: /etc/imas/fleet-signing-keys.json
+          - src: ./gpg-public-key.asc
+            dst: /etc/imas/fleet-signing-keys.asc
             file_info:
               mode: 0644
           - dst: /var/cache/imas/sprout
@@ -773,6 +773,10 @@ checksum:
 signs:
   - id: gpg
     cmd: gpg2
+    # checksums.txt.sig: the sprout's update trust (P22, signing design D9)
+    # verifies it against the keyring the packages ship
+    # (/etc/imas/fleet-signing-keys.asc, built from gpg-public-key.asc).
+    signature: "${artifact}.sig"
     args:
       - "--batch"
       - "-u"

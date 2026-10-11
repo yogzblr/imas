@@ -634,7 +634,7 @@ func main() {
 		log.Fatal(err)
 	}
 	f.connected = func() []string { return connectedNKeys(bus) }
-	if err := os.WriteFile(filepath.Join(*stateDir, "fleet-signing-keys.json"), f.fleet.keyringJSON(), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(*stateDir, "fleet-signing-keys.asc"), f.fleet.keyringJSON(), 0o644); err != nil {
 		log.Fatal(err)
 	}
 	if f.nc, err = f.connectBus(strings.Split(*hosts, ",")[0], *natsPort, tm); err != nil {

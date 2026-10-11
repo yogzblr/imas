@@ -42,7 +42,7 @@ func (k fleetKeys) KeySet(context.Context) (fleetsign.KeySet, error) { return fl
 type manifestFixture struct {
 	srv  *httptest.Server
 	gw   testGatewayKey
-	rows map[string]fleetsign.Manifest // "version os arch" -> served manifest
+	rows map[string]fleetsign.LegacyManifest // "version os arch" -> served manifest
 }
 
 func newManifestFixture(t *testing.T) *manifestFixture {
@@ -61,10 +61,10 @@ func newManifestFixture(t *testing.T) *manifestFixture {
 	t.Cleanup(func() { handlers.SetFleetKeySource(nil) })
 
 	db := newSaasTestDB(t)
-	f := &manifestFixture{gw: gw, rows: map[string]fleetsign.Manifest{}}
+	f := &manifestFixture{gw: gw, rows: map[string]fleetsign.LegacyManifest{}}
 	insertPkg := func(version, os, arch, pkg string, revoked bool) {
 		sum := sha256.Sum256([]byte(version + os + arch + pkg))
-		m := fleetsign.Manifest{
+		m := fleetsign.LegacyManifest{
 			Version:          version,
 			OS:               os,
 			Arch:             arch,
@@ -207,7 +207,7 @@ func TestUpdateManifestRoute_ServesOwnTenantsApprovedRow(t *testing.T) {
 		if code != http.StatusOK {
 			t.Fatalf("%s/%s: got %d %s, want 200", c.os, c.arch, code, body)
 		}
-		got, err := fleetsign.ParseManifest([]byte(body))
+		got, err := fleetsign.LegacyParseManifest([]byte(body))
 		if err != nil {
 			t.Fatalf("%s/%s: not a strict manifest: %v", c.os, c.arch, err)
 		}
@@ -226,7 +226,7 @@ func TestUpdateManifestRoute_PackageTypeSelectsRow(t *testing.T) {
 		if code != http.StatusOK {
 			t.Fatalf("%s: got %d %s", pkg, code, body)
 		}
-		got, err := fleetsign.ParseManifest([]byte(body))
+		got, err := fleetsign.LegacyParseManifest([]byte(body))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -248,7 +248,7 @@ func TestUpdateManifestRoute_NoURLInResponse(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("got %d", code)
 	}
-	m, err := fleetsign.ParseManifest([]byte(body))
+	m, err := fleetsign.LegacyParseManifest([]byte(body))
 	if err != nil {
 		t.Fatalf("response has fields beyond the signed manifest: %v\n%s", err, body)
 	}

@@ -1,52 +1,34 @@
-// Package fleetsign is the sprout release trust root: the Manifest a
-// sprout installs from, the one canonical string it is signed over
-// (Manifest.Message), the signature encoding stored in
-// saas.fleet_versions.signature, and Ed25519 verification against either
-// the Keyring shipped in the sprout package (what a sprout trusts) or the
-// imas-fleet-signing key versions read from OpenBao Transit (what farmer,
-// saasapi and fleetreleaser check against). See
-// docs/design/cloudxp-machine-manager-api-design.md §2.5 and §2.6.
+// Package fleetsign is the sprout release trust root (signing design D9,
+// D12, D19, D20, D21; P22): the update manifest farmer serves a sprout
+// (Manifest, GET /v1/sprout/update-manifest), and the sprout's
+// verification of it against the release GPG keyring shipped in its
+// package (gpg.go).
 //
-// The signed message is
+// A release publishes checksums.txt (one "<sha256>  <file name>" line per
+// release file) and checksums.txt.sig, a detached OpenPGP signature over
+// its exact bytes made with the release key. Farmer relays both verbatim;
+// the sprout is the only verifier (D20). It checks the signature against
+// the keys in its own keyring file (LoadArmoredKeyring), parses the file
+// strictly (ParseChecksums), derives the package file name itself
+// (ExpectedFileName) and takes the expected SHA-256 from that one line.
+// Nothing farmer sends names a URL or a file name: the sprout downloads
+// from the repository configured in the sprout itself (requirement 20).
 //
-//	imas-fleet-manifest-v1|version|os|arch|file_name|checksum_sha256|min_sprout_version
+// FLAG FOR SECURITY REVIEW. This package contains no signing code: the
+// release key signs checksums.txt in the release workflow, never here.
+// TestNoSigningCodeInPackage keeps the shape honest.
 //
-// (a domain-separation tag, then the fields) and contains no URL: the sprout downloads FileName from the repository
-// configured in the sprout itself (requirement 20).
-//
-// FLAG FOR SECURITY REVIEW. This package is imported by farmer, saasapi
-// and sprout, and deliberately contains no signing code at all: the only
-// holder of Transit sign capability on imas-fleet-signing is
-// cmd/fleetreleaser, a separate binary with its own OpenBao identity.
-// That split is enforced by OpenBao policy (deploy/fleetreleaser/), not
-// by this package's shape — TestNoSigningCodeInPackage only keeps the
-// shape honest.
-//
-// There is no JWKS form of the fleet key: CL.1 removed the enrollment
-// pin, the live key fetch and farmer's fleet-signing JWKS route (§2.5),
-// and CL.4 removed the encoding and handler they used. Keyring never
-// touches the network.
+// legacy.go and obtransit.go hold the pre-P22 Ed25519 / OpenBao Transit
+// manifest signature, kept only until P22 slice 2 moves farmer, saasapi
+// and natsapi off it.
 package fleetsign
 
-import (
-	"crypto/ed25519"
-	"encoding/base64"
-	"errors"
-	"fmt"
-	"sort"
-	"strconv"
-	"strings"
-)
-
-// DefaultTransitKeyName is the OpenBao Transit key sprout releases are
-// signed with: Ed25519, non-exportable, and distinct from
-// internal/gatewayjwt's imas-gateway-jwt key.
-const DefaultTransitKeyName = "imas-fleet-signing"
+import "errors"
 
 // The one-step job farmer sends a sprout for a self_update action: the
 // sprout's selfupdate ingredient (internal/ingredients/selfupdate), method
-// apply, with the manifest fields and signature as its properties. Shared
-// here so farmer doesn't import the ingredient package to name it.
+// apply, with the target version as its only property read. Shared here
+// so farmer doesn't import the ingredient package to name it.
 const (
 	SelfUpdateIngredient   = "selfupdate"
 	SelfUpdateMethod       = "apply"
@@ -57,127 +39,22 @@ const (
 )
 
 var (
-	// ErrInvalidManifest: a field can't be part of a canonical message, so
-	// the manifest can be neither signed nor verified.
+	// ErrInvalidManifest: the manifest isn't well formed (ParseManifest),
+	// or a field can't name a release (ExpectedFileName).
 	ErrInvalidManifest = errors.New("fleetsign: invalid manifest fields")
-	// ErrMissingSignature: the row has no signature (for example a
-	// fleet_versions row written before the signature column existed).
-	// Always a refusal, never a fallback to checksum-only trust.
-	ErrMissingSignature = errors.New("fleetsign: manifest has no signature")
-	// ErrMalformedSignature: the signature isn't "v<version>:<base64>".
-	ErrMalformedSignature = errors.New("fleetsign: malformed signature")
-	// ErrUnknownKeyVersion: the signature names a key version the key set
-	// or keyring doesn't hold (not shipped, or retired).
-	ErrUnknownKeyVersion = errors.New("fleetsign: signature key version not in key set")
-	// ErrInvalidSignature: the signature doesn't verify.
-	ErrInvalidSignature = errors.New("fleetsign: signature verification failed")
-	// ErrNoKeys: the key set is empty.
+	// ErrNoKeys: the keyring holds no usable key.
 	ErrNoKeys = errors.New("fleetsign: no fleet signing keys")
+	// ErrBadSignature: checksums.txt.sig is empty, malformed, or doesn't
+	// verify over the exact checksums.txt bytes against any key in the
+	// keyring, or the signing key is revoked.
+	ErrBadSignature = errors.New("fleetsign: checksums.txt signature does not verify against the fleet signing keyring")
+	// ErrBadChecksums: checksums.txt is empty or has a malformed line, an
+	// uppercase hash, a path in a file name, or a duplicate file name.
+	ErrBadChecksums = errors.New("fleetsign: malformed checksums.txt")
+	// ErrNotInChecksums: checksums.txt has no line for the file name the
+	// sprout derived.
+	ErrNotInChecksums = errors.New("fleetsign: package file is not listed in checksums.txt")
+	// ErrChecksumsTooLarge: checksums.txt is over MaxChecksumsTxt, or its
+	// signature over MaxChecksumsSig.
+	ErrChecksumsTooLarge = errors.New("fleetsign: checksums.txt or its signature is too large")
 )
-
-// EncodeSignature renders a raw Ed25519 signature made by Transit key
-// version keyVersion as stored in saas.fleet_versions.signature:
-// "v<keyVersion>:<standard base64>". It's Transit's own
-// "vault:v<N>:<base64>" format without the product prefix, so the key
-// version a verifier must use travels with the signature.
-func EncodeSignature(keyVersion int, sig []byte) string {
-	return "v" + strconv.Itoa(keyVersion) + ":" + base64.StdEncoding.EncodeToString(sig)
-}
-
-// DecodeSignature parses EncodeSignature's format. An empty string is
-// ErrMissingSignature, not ErrMalformedSignature, so callers can tell an
-// un-migrated row from a corrupted one in their logs; both are refusals.
-func DecodeSignature(s string) (keyVersion int, sig []byte, err error) {
-	if s == "" {
-		return 0, nil, ErrMissingSignature
-	}
-	ver, b64, ok := strings.Cut(s, ":")
-	if !ok || !strings.HasPrefix(ver, "v") {
-		return 0, nil, ErrMalformedSignature
-	}
-	keyVersion, err = strconv.Atoi(ver[1:])
-	if err != nil || keyVersion < 1 || ver[1:] != strconv.Itoa(keyVersion) {
-		return 0, nil, ErrMalformedSignature
-	}
-	sig, err = base64.StdEncoding.Strict().DecodeString(b64)
-	if err != nil || len(sig) != ed25519.SignatureSize {
-		return 0, nil, ErrMalformedSignature
-	}
-	return keyVersion, sig, nil
-}
-
-// PublicKey is one version of the imas-fleet-signing Transit key.
-type PublicKey struct {
-	Version int
-	Key     ed25519.PublicKey
-}
-
-// KeySet is every imas-fleet-signing key version a verifier trusts,
-// sorted by ascending Version.
-type KeySet []PublicKey
-
-// NewKeySet validates keys and returns them as a sorted KeySet. It
-// rejects an empty set, a non-positive or duplicate version, a key that
-// isn't ed25519.PublicKeySize bytes, and a weak key (checkPublicKey).
-func NewKeySet(keys []PublicKey) (KeySet, error) {
-	if len(keys) == 0 {
-		return nil, ErrNoKeys
-	}
-	seen := make(map[int]bool, len(keys))
-	ks := make(KeySet, 0, len(keys))
-	for _, k := range keys {
-		if k.Version < 1 {
-			return nil, fmt.Errorf("fleetsign: key version %d is not positive", k.Version)
-		}
-		if seen[k.Version] {
-			return nil, fmt.Errorf("fleetsign: duplicate key version %d", k.Version)
-		}
-		if len(k.Key) != ed25519.PublicKeySize {
-			return nil, fmt.Errorf("fleetsign: key version %d is %d bytes, want %d", k.Version, len(k.Key), ed25519.PublicKeySize)
-		}
-		if err := checkPublicKey(k.Key); err != nil {
-			return nil, fmt.Errorf("fleetsign: key version %d: %w", k.Version, err)
-		}
-		seen[k.Version] = true
-		ks = append(ks, PublicKey{Version: k.Version, Key: append(ed25519.PublicKey(nil), k.Key...)})
-	}
-	sort.Slice(ks, func(i, j int) bool { return ks[i].Version < ks[j].Version })
-	return ks, nil
-}
-
-// Verify checks m.Signature (EncodeSignature's format) over m's
-// canonical message (Manifest.Message) against the key version the
-// signature names. Every failure is an error: there is no path on which a
-// missing or bad signature, or an invalid field, is accepted.
-func (ks KeySet) Verify(m Manifest) error {
-	if len(ks) == 0 {
-		return ErrNoKeys
-	}
-	msg, err := m.Message()
-	if err != nil {
-		return err
-	}
-	return ks.verifyMessage(msg, m.Signature)
-}
-
-// verifyMessage is the one signature check behind KeySet.Verify and
-// Keyring.Verify: decode the signature, pick the key it names, verify.
-// Callers build msg with Manifest.Message; it is separate only so the
-// captured real-OpenBao signatures (openbao_response_test.go) can be
-// checked over the exact bytes they were made over.
-func (ks KeySet) verifyMessage(msg []byte, signature string) error {
-	keyVersion, sig, err := DecodeSignature(signature)
-	if err != nil {
-		return err
-	}
-	for _, k := range ks {
-		if k.Version != keyVersion {
-			continue
-		}
-		if len(k.Key) != ed25519.PublicKeySize || !ed25519.Verify(k.Key, msg, sig) {
-			return ErrInvalidSignature
-		}
-		return nil
-	}
-	return fmt.Errorf("%w: v%d", ErrUnknownKeyVersion, keyVersion)
-}

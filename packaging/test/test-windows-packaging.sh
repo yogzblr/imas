@@ -52,11 +52,11 @@ check "package description carries the full version" bash -c "msiinfo suminfo '$
 # Windows Server 2016, the oldest supported Windows, has Windows Installer 5.0.
 check "needs Windows Installer 5.0, no newer" bash -c "msiinfo suminfo '$msi' | grep -qx 'Version: 500 (1f4)'"
 check "installs the fleet signing keyring" \
-	awk -F'\t' '$1=="SproutFleetKeyringFile" && $3=="fleet-signing-keys.json" {f=1} END {exit !f}' <<<"$(table "$msi" File)"
+	awk -F'\t' '$1=="SproutFleetKeyringFile" && $3=="fleet-signing-keys.asc" {f=1} END {exit !f}' <<<"$(table "$msi" File)"
 check "the MSI's files are the inputs" bash -c "msiextract -C '$work/x' '$msi' >/dev/null &&
 	cmp -s '$work/x/imas/imas-sprout.exe' '$work/imas-sprout.exe' &&
 	cmp -s '$work/x/imas/sprout' '$repo/packaging/etc/imas-sprout.conf' &&
-	cmp -s '$work/x/imas/fleet-signing-keys.json' '$repo/packaging/etc/fleet-signing-keys.json'"
+	cmp -s '$work/x/imas/fleet-signing-keys.asc' '$repo/gpg-public-key.asc'"
 "$bm" --binary "$work/imas-sprout.exe" --version 1.2.3-rc.1 --out "$work/msi2" --timestamp 1700000000 >/dev/null
 check "same inputs and --timestamp: identical cabinet" \
 	test "$(msiinfo extract "$msi" sprout.cab | sha256sum)" = "$(msiinfo extract "$work/msi2/$(basename "$msi")" sprout.cab | sha256sum)"
@@ -107,7 +107,8 @@ check "a failing post-process leaves no MSI" bash -c "
 # the packaging tree with one added.
 mkdir -p "$work/tree/packaging/windows" "$work/tree/packaging/etc"
 cp "$repo/packaging/windows/build-msi.sh" "$repo/packaging/windows/msi-postprocess.sh" "$work/tree/packaging/windows/"
-cp "$repo/packaging/etc/imas-sprout.conf" "$repo/packaging/etc/fleet-signing-keys.json" "$work/tree/packaging/etc/"
+cp "$repo/packaging/etc/imas-sprout.conf" "$work/tree/packaging/etc/"
+cp "$repo/gpg-public-key.asc" "$work/tree/"
 sed 's/Manufacturer=.imas.>/Manufacturer="{{ .Env.VENDOR }}">/' "$repo/packaging/windows/imas-sprout.wxs" >"$work/tree/packaging/windows/imas-sprout.wxs"
 check "test .wxs has the extra action" grep -q '{{ .Env.VENDOR }}' "$work/tree/packaging/windows/imas-sprout.wxs"
 check "build-msi rejects an unhandled template action" bash -c "

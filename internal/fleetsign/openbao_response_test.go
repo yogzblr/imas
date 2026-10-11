@@ -19,12 +19,12 @@ package fleetsign
 //
 // Don't regenerate them from Go code or edit them by hand; recapture
 // them from a real server. The sign fixtures were captured over the
-// pre-FU.0 message (capturedSignInput), not over a Manifest: they prove
+// pre-FU.0 message (capturedSignInput), not over a LegacyManifest: they prove
 // Transit's key and signature encodings round-trip through
 // ParseTransitEd25519PublicKey and EncodeSignature, which the message
 // change doesn't touch. Recapture them over testManifest().Message()
 // when a v2.7.0 server is to hand; TestOpenBaoLive_TransitKeySource
-// already signs a Manifest live.
+// already signs a LegacyManifest live.
 
 import (
 	"bytes"
@@ -116,12 +116,12 @@ func TestTransitKeySource_RealOpenBaoResponse(t *testing.T) {
 		if err := ks.verifyMessage([]byte(capturedSignInput), sig); err != nil {
 			t.Errorf("%s: OpenBao's own signature doesn't verify: %v", name, err)
 		}
-		// The same signature is not valid for any Manifest: the old
+		// The same signature is not valid for any LegacyManifest: the old
 		// message is not accepted in any form.
 		m := testManifest()
 		m.Signature = sig
 		if err := ks.Verify(m); !errors.Is(err, ErrInvalidSignature) {
-			t.Errorf("%s: pre-FU.0 signature accepted for a Manifest: %v", name, err)
+			t.Errorf("%s: pre-FU.0 signature accepted for a LegacyManifest: %v", name, err)
 		}
 	}
 }

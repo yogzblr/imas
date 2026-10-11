@@ -1,7 +1,7 @@
 package handlers
 
 // GET /v1/sprout/update-manifest?os=&arch=&package_type=&version= —
-// design doc §2.6. Serves a sprout the signed fleetsign.Manifest for its
+// design doc §2.6. Serves a sprout the signed fleetsign.LegacyManifest for its
 // own tenant's approved sprout version, for one OS, arch and package type
 // (deb, rpm or msi: one linux/amd64 binary ships as both a .deb and an
 // .rpm). Authenticated with the sprout's gateway JWT by Auth
@@ -9,7 +9,7 @@ package handlers
 // sprout_id) on the request context
 // (WithSproutIdentity); the tenant is never read from the request.
 //
-// The manifest has no URL (fleetsign.Manifest, requirement 20): the
+// The manifest has no URL (fleetsign.LegacyManifest, requirement 20): the
 // sprout builds the download URL from the repository configured in the
 // sprout itself plus file_name, and verifies the signature against the
 // keyring shipped in its package. Farmer only selects which signed row
@@ -84,7 +84,7 @@ type UpdateManifestStore interface {
 	// version is the approved_version in tenantID's
 	// saas.tenant_update_policy row. found is false for every other
 	// case; err is only for a failed read.
-	ApprovedManifest(ctx context.Context, tenantID, os, arch, packageType, version string) (m fleetsign.Manifest, found bool, err error)
+	ApprovedManifest(ctx context.Context, tenantID, os, arch, packageType, version string) (m fleetsign.LegacyManifest, found bool, err error)
 }
 
 // The PXC-backed store is fleetcatalog.SQL: the catalog read shared with
@@ -127,7 +127,7 @@ func currentManifestStore() UpdateManifestStore {
 	return manifestStore
 }
 
-// Query parameter shapes. They match fleetsign.Manifest.Validate, so a
+// Query parameter shapes. They match fleetsign.LegacyManifest.Validate, so a
 // value that could never name a row is a 400 rather than a lookup.
 var reManifestOSArch = regexp.MustCompile(`^[a-z0-9][a-z0-9_]{0,31}$`)
 
@@ -229,39 +229,39 @@ func manifestQuery(r *http.Request) (osName, arch, pkgType, version string, ok b
 // reported as not found; an unsigned row is never served. err is
 // returned only when the answer is unknown (store or key set
 // unavailable), and is not cached.
-func lookupApprovedManifest(ctx context.Context, key manifestCacheKey) (fleetsign.Manifest, bool, error) {
+func lookupApprovedManifest(ctx context.Context, key manifestCacheKey) (fleetsign.LegacyManifest, bool, error) {
 	store := currentManifestStore()
 	if store == nil {
-		return fleetsign.Manifest{}, false, errors.New("update manifest store not configured")
+		return fleetsign.LegacyManifest{}, false, errors.New("update manifest store not configured")
 	}
 	m, found, err := store.ApprovedManifest(ctx, key.tenantID, key.os, key.arch, key.packageType, key.version)
 	if err != nil || !found {
-		return fleetsign.Manifest{}, false, err
+		return fleetsign.LegacyManifest{}, false, err
 	}
 	if m.Version != key.version || m.OS != key.os || m.Arch != key.arch ||
 		!strings.HasSuffix(m.FileName, "."+key.packageType) {
 		log.Errorf("update-manifest: store returned %s %s/%s %s for %s %s/%s %s; refusing",
 			m.Version, m.OS, m.Arch, m.FileName, key.version, key.os, key.arch, key.packageType)
-		return fleetsign.Manifest{}, false, nil
+		return fleetsign.LegacyManifest{}, false, nil
 	}
 	if err := m.Validate(); err != nil {
 		log.Errorf("update-manifest: fleet_versions row %s %s/%s is invalid; refusing: %v", m.Version, m.OS, m.Arch, err)
-		return fleetsign.Manifest{}, false, nil
+		return fleetsign.LegacyManifest{}, false, nil
 	}
 	if m.Signature == "" {
 		log.Errorf("update-manifest: fleet_versions row %s %s/%s has no signature; refusing", m.Version, m.OS, m.Arch)
-		return fleetsign.Manifest{}, false, nil
+		return fleetsign.LegacyManifest{}, false, nil
 	}
 	if fleetKeySource == nil {
-		return fleetsign.Manifest{}, false, errors.New("fleet signing key source not configured")
+		return fleetsign.LegacyManifest{}, false, errors.New("fleet signing key source not configured")
 	}
 	ks, err := fleetKeySource.KeySet(ctx)
 	if err != nil {
-		return fleetsign.Manifest{}, false, err
+		return fleetsign.LegacyManifest{}, false, err
 	}
 	if err := ks.Verify(m); err != nil {
 		log.Errorf("update-manifest: fleet_versions row %s %s/%s fails signature verification; refusing: %v", m.Version, m.OS, m.Arch, err)
-		return fleetsign.Manifest{}, false, nil
+		return fleetsign.LegacyManifest{}, false, nil
 	}
 	return m, true, nil
 }
@@ -297,7 +297,7 @@ type manifestCacheKey struct {
 }
 
 type manifestCacheEntry struct {
-	m       fleetsign.Manifest
+	m       fleetsign.LegacyManifest
 	found   bool
 	expires time.Time
 }
@@ -310,17 +310,17 @@ type manifestCache struct {
 var updateManifests = &manifestCache{}
 
 // get returns key's cached answer; ok is false on a miss or expiry.
-func (c *manifestCache) get(key manifestCacheKey, now time.Time) (m fleetsign.Manifest, found, ok bool) {
+func (c *manifestCache) get(key manifestCacheKey, now time.Time) (m fleetsign.LegacyManifest, found, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, hit := c.entries[key]
 	if !hit || !now.Before(e.expires) {
-		return fleetsign.Manifest{}, false, false
+		return fleetsign.LegacyManifest{}, false, false
 	}
 	return e.m, e.found, true
 }
 
-func (c *manifestCache) put(key manifestCacheKey, m fleetsign.Manifest, found bool, now time.Time) {
+func (c *manifestCache) put(key manifestCacheKey, m fleetsign.LegacyManifest, found bool, now time.Time) {
 	ttl := manifestNegativeCacheTTL
 	if found {
 		ttl = manifestCacheTTL

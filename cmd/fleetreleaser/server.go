@@ -118,7 +118,7 @@ func (s *signService) requireCaller(inner http.Handler) http.Handler {
 // signResponse is POST /v1/sign's 200 body.
 type signResponse struct {
 	// Signature is fleetsign.EncodeSignature's "v<key version>:<base64>"
-	// over the request's fleetsign.Manifest.Message.
+	// over the request's fleetsign.LegacyManifest.Message.
 	Signature string `json:"signature"`
 }
 
@@ -169,7 +169,7 @@ func (s *signService) handleSign(w http.ResponseWriter, r *http.Request) {
 
 // signAndVerify has Transit sign m's canonical message and checks the
 // result against Transit's own key set before returning it.
-func signAndVerify(ctx context.Context, s releaseSigner, m fleetsign.Manifest) (string, int, error) {
+func signAndVerify(ctx context.Context, s releaseSigner, m fleetsign.LegacyManifest) (string, int, error) {
 	msg, err := m.Message()
 	if err != nil {
 		return "", 0, err
@@ -191,9 +191,9 @@ func signAndVerify(ctx context.Context, s releaseSigner, m fleetsign.Manifest) (
 }
 
 // signRequestFields maps each POST /v1/sign body key to its manifest
-// field: the six signed fields of fleetsign.Manifest, spelled as its JSON
+// field: the six signed fields of fleetsign.LegacyManifest, spelled as its JSON
 // tags. There is no signature key on the way in.
-func signRequestFields(m *fleetsign.Manifest) map[string]*string {
+func signRequestFields(m *fleetsign.LegacyManifest) map[string]*string {
 	return map[string]*string{
 		"version": &m.Version, "os": &m.OS, "arch": &m.Arch, "file_name": &m.FileName,
 		"checksum_sha256": &m.ChecksumSHA256, "min_sprout_version": &m.MinSproutVersion,
@@ -208,43 +208,43 @@ var errBadSignRequest = errors.New("body must be one JSON object with exactly th
 // nothing after it. Anything else is refused rather than guessed at: no
 // field rides along unsigned, and what is signed is exactly what was
 // sent.
-func decodeSignRequest(body io.Reader) (fleetsign.Manifest, error) {
-	var m fleetsign.Manifest
+func decodeSignRequest(body io.Reader) (fleetsign.LegacyManifest, error) {
+	var m fleetsign.LegacyManifest
 	dst := signRequestFields(&m)
 	seen := make(map[string]bool, len(dst))
 	dec := json.NewDecoder(body)
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
-		return fleetsign.Manifest{}, errBadSignRequest
+		return fleetsign.LegacyManifest{}, errBadSignRequest
 	}
 	for dec.More() {
 		tok, err := dec.Token()
 		if err != nil {
-			return fleetsign.Manifest{}, errBadSignRequest
+			return fleetsign.LegacyManifest{}, errBadSignRequest
 		}
 		key, _ := tok.(string)
 		p, known := dst[key]
 		if !known || seen[key] {
-			return fleetsign.Manifest{}, errBadSignRequest
+			return fleetsign.LegacyManifest{}, errBadSignRequest
 		}
 		seen[key] = true
 		tok, err = dec.Token()
 		if err != nil {
-			return fleetsign.Manifest{}, errBadSignRequest
+			return fleetsign.LegacyManifest{}, errBadSignRequest
 		}
 		v, isString := tok.(string)
 		if !isString {
-			return fleetsign.Manifest{}, errBadSignRequest
+			return fleetsign.LegacyManifest{}, errBadSignRequest
 		}
 		*p = v
 	}
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
-		return fleetsign.Manifest{}, errBadSignRequest
+		return fleetsign.LegacyManifest{}, errBadSignRequest
 	}
 	if _, err := dec.Token(); err != io.EOF {
-		return fleetsign.Manifest{}, errBadSignRequest
+		return fleetsign.LegacyManifest{}, errBadSignRequest
 	}
 	if len(seen) != len(dst) {
-		return fleetsign.Manifest{}, errBadSignRequest
+		return fleetsign.LegacyManifest{}, errBadSignRequest
 	}
 	return m, nil
 }

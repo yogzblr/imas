@@ -361,8 +361,8 @@ type failingCatalog struct{}
 
 var errCatalogDown = errors.New("pxc: connection refused")
 
-func (failingCatalog) ApprovedManifest(context.Context, string, string, string, string, string) (fleetsign.Manifest, bool, error) {
-	return fleetsign.Manifest{}, false, errCatalogDown
+func (failingCatalog) ApprovedManifest(context.Context, string, string, string, string, string) (fleetsign.LegacyManifest, bool, error) {
+	return fleetsign.LegacyManifest{}, false, errCatalogDown
 }
 func (failingCatalog) ApprovedVersion(context.Context, string) (string, bool, error) {
 	return "", false, errCatalogDown

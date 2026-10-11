@@ -24,10 +24,22 @@ const manifestPath = "/v1/sprout/update-manifest"
 
 const (
 	manifestTimeout = 30 * time.Second
-	// maxManifestBody bounds the response read; fleetsign.ParseManifest
-	// refuses anything over 4 KiB anyway.
-	maxManifestBody = 8 << 10
+	// maxManifestBody bounds the response read: fleetsign.ParseManifest's
+	// 256 KiB limit (checksums.txt is up to 128 KiB), plus a trailing
+	// newline's worth of slack.
+	maxManifestBody = 256<<10 + 1<<10
 )
+
+// release is the update prepare verified: the target version, the file
+// name the sprout derived itself (fleetsign.ExpectedFileName), and that
+// file's SHA-256 from the line of the GPG-verified checksums.txt. Nothing
+// in it is a farmer-chosen file name or checksum.
+type release struct {
+	Version          string
+	FileName         string
+	ChecksumSHA256   string
+	MinSproutVersion string
+}
 
 // Seams for tests. Production code always uses these values.
 var (
@@ -75,11 +87,12 @@ func farmerClient() (*http.Client, error) {
 	}, nil
 }
 
-// fetchManifest asks farmer for the signed manifest for version on p's
-// OS, arch and package type (one linux/amd64 binary ships as both a .deb
-// and an .rpm). It checks only that the response is a well-formed manifest
-// for exactly what was asked (fleetsign.ParseManifest plus field
-// equality); the caller verifies the signature. Farmer answers 404 for
+// fetchManifest asks farmer for the manifest for version on p's OS, arch
+// and package type (one linux/amd64 binary ships as both a .deb and an
+// .rpm). It checks only that the response is a well-formed manifest for
+// the asked version, OS and arch (fleetsign.ParseManifest plus field
+// equality); the caller checks the package type and verifies the
+// signature over checksums.txt. Farmer answers 404 for
 // every reason it has nothing to serve (not approved for this tenant,
 // revoked, no package for this OS/arch), and that is ErrNoManifest.
 func fetchManifest(ctx context.Context, p platform, version string) (fleetsign.Manifest, error) {

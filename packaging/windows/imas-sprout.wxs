@@ -20,7 +20,7 @@
     %ProgramFiles%\imas\imas-sprout.exe       binary
     %ProgramData%\imas\                       config root (SYSTEM + Administrators only)
     %ProgramData%\imas\sprout                 config file (same name as /etc/imas/sprout)
-    %ProgramData%\imas\fleet-signing-keys.json  update signing keyring (as /etc/imas/fleet-signing-keys.json)
+    %ProgramData%\imas\fleet-signing-keys.asc  update signing keyring (as /etc/imas/fleet-signing-keys.asc)
     %ProgramData%\imas\cache\sprout\          cache (as /var/cache/imas/sprout)
   The sprout creates the rest of %ProgramData%\imas (pki\, state\, logs\)
   itself; see internal/config/paths_windows.go, which must agree with this.
@@ -167,7 +167,8 @@
               KeyPath='yes' />
           </Component>
           <!-- The self_update trust root (packaging/etc/fleet-signing-keys.md):
-               the public keys update manifests are verified against. Neither
+               the release GPG public keys (the repo's gpg-public-key.asc) a
+               release's checksums.txt signature is verified against. Neither
                NeverOverwrite nor Permanent, unlike the config: every upgrade
                replaces it, which is how a signing key rotation reaches the
                fleet. It inherits IMASDATADIR's SYSTEM/Administrators-only
@@ -176,9 +177,9 @@
           <Component Id='SproutFleetKeyring' Guid='650D322E-19F1-4427-AEE8-5F1CC29A7BA3' Win64='$(var.Win64)'>
             <File
               Id='SproutFleetKeyringFile'
-              Name='fleet-signing-keys.json'
+              Name='fleet-signing-keys.asc'
               DiskId='1'
-              Source='packaging/etc/fleet-signing-keys.json'
+              Source='gpg-public-key.asc'
               KeyPath='yes' />
           </Component>
           <Directory Id='IMASCACHEDIR' Name='cache'>

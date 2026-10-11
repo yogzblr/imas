@@ -64,7 +64,7 @@ for f in "$dist"/imas-sprout_*_linux_*.{deb,rpm,apk} \
   base="$(basename "$f")"
   case "$base" in
     imas-sprout_*) name=imas-sprout
-      req=(usr/bin/imas-sprout etc/imas/sprout etc/imas/fleet-signing-keys.json var/cache/imas/sprout) ;;
+      req=(usr/bin/imas-sprout etc/imas/sprout etc/imas/fleet-signing-keys.asc var/cache/imas/sprout) ;;
     imas-farmer_*) name=imas-farmer
       req=(usr/bin/imas-farmer etc/imas/farmer etc/imas/pki/farmer var/cache/imas/farmer) ;;
     *) name=imas

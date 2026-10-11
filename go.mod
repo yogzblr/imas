@@ -6,6 +6,7 @@ replace github.com/mattn/go-localereader v0.0.1 => github.com/taigrr/go-localere
 
 require (
 	filippo.io/edwards25519 v1.2.0
+	github.com/ProtonMail/go-crypto v1.5.2
 	github.com/alicebob/miniredis/v2 v2.39.0
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
@@ -62,7 +63,6 @@ require (
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/ProtonMail/go-crypto v1.4.1 // indirect
 	github.com/antithesishq/antithesis-sdk-go v0.7.2 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect

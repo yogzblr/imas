@@ -203,7 +203,7 @@ func TestSproutUpdateManifest_ThroughRealEnvoy(t *testing.T) {
 	handlers.SetFleetKeySource(fleetKeys(ks))
 	t.Cleanup(func() { handlers.SetFleetKeySource(nil) })
 
-	want := fleetsign.Manifest{
+	want := fleetsign.LegacyManifest{
 		Version:          "v2.4.1",
 		OS:               "linux",
 		Arch:             "amd64",
@@ -280,7 +280,7 @@ func TestSproutUpdateManifest_ThroughRealEnvoy(t *testing.T) {
 		if code != http.StatusOK {
 			t.Fatalf("GET %s through Envoy: %d %q, want 200 from farmer", manifestPath, code, body)
 		}
-		got, err := fleetsign.ParseManifest([]byte(body))
+		got, err := fleetsign.LegacyParseManifest([]byte(body))
 		if err != nil {
 			t.Fatalf("ParseManifest(%q): %v", body, err)
 		}

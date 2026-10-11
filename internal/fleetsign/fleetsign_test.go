@@ -14,8 +14,8 @@ import (
 
 const testChecksum = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 
-func testManifest() Manifest {
-	return Manifest{
+func testManifest() LegacyManifest {
+	return LegacyManifest{
 		Version:          "v2.4.1",
 		OS:               "linux",
 		Arch:             "amd64",
@@ -28,7 +28,7 @@ func testManifest() Manifest {
 // signForTest plays cmd/fleetreleaser's role with a local key, so the
 // verify path is tested against a real Ed25519 signature over the real
 // canonical message. It returns m with Signature set.
-func signForTest(t *testing.T, priv ed25519.PrivateKey, keyVersion int, m Manifest) Manifest {
+func signForTest(t *testing.T, priv ed25519.PrivateKey, keyVersion int, m LegacyManifest) LegacyManifest {
 	t.Helper()
 	msg, err := m.Message()
 	if err != nil {
@@ -87,11 +87,11 @@ func TestVerify_DomainTagRequired(t *testing.T) {
 
 // No URL anywhere: not in the type, not in the message.
 func TestManifest_HasNoURL(t *testing.T) {
-	typ := reflect.TypeOf(Manifest{})
+	typ := reflect.TypeOf(LegacyManifest{})
 	for i := 0; i < typ.NumField(); i++ {
 		f := typ.Field(i)
 		if strings.Contains(strings.ToLower(f.Name+f.Tag.Get("json")), "url") {
-			t.Errorf("Manifest field %s (%s) looks like a URL", f.Name, f.Tag.Get("json"))
+			t.Errorf("LegacyManifest field %s (%s) looks like a URL", f.Name, f.Tag.Get("json"))
 		}
 	}
 	msg, _ := testManifest().Message()
@@ -101,45 +101,45 @@ func TestManifest_HasNoURL(t *testing.T) {
 }
 
 func TestMessage_RejectsAmbiguousOrInvalidFields(t *testing.T) {
-	cases := map[string]func(*Manifest){
-		"empty version":               func(m *Manifest) { m.Version = "" },
-		"empty os":                    func(m *Manifest) { m.OS = "" },
-		"empty arch":                  func(m *Manifest) { m.Arch = "" },
-		"empty file_name":             func(m *Manifest) { m.FileName = "" },
-		"empty checksum":              func(m *Manifest) { m.ChecksumSHA256 = "" },
-		"empty min_sprout_version":    func(m *Manifest) { m.MinSproutVersion = "" },
-		"pipe in version":             func(m *Manifest) { m.Version = "v2.4.1|x" },
-		"pipe in os":                  func(m *Manifest) { m.OS = "linux|amd64" },
-		"pipe in arch":                func(m *Manifest) { m.Arch = "amd64|" },
-		"pipe in file_name":           func(m *Manifest) { m.FileName = "a|b.deb" },
-		"pipe in checksum":            func(m *Manifest) { m.ChecksumSHA256 = testChecksum[:63] + "|" },
-		"pipe in min_sprout_version":  func(m *Manifest) { m.MinSproutVersion = "v2.0.0|" },
-		"newline in version":          func(m *Manifest) { m.Version = "v2.4.1\n" },
-		"NUL in file_name":            func(m *Manifest) { m.FileName = "a\x00.deb" },
-		"DEL in os":                   func(m *Manifest) { m.OS = "linux\x7f" },
-		"C1 control in arch":          func(m *Manifest) { m.Arch = "amd\u008564" },
-		"tab in min_sprout_version":   func(m *Manifest) { m.MinSproutVersion = "v2.0.0\t" },
-		"version without v":           func(m *Manifest) { m.Version = "2.4.1" },
-		"version shorthand":           func(m *Manifest) { m.Version = "v2.4" },
-		"version with build metadata": func(m *Manifest) { m.Version = "v2.4.1+abc" },
-		"version not semver":          func(m *Manifest) { m.Version = "latest" },
-		"version too long":            func(m *Manifest) { m.Version = "v2.4.1-" + strings.Repeat("a", maxVersionLen) },
-		"min_sprout_version invalid":  func(m *Manifest) { m.MinSproutVersion = "v2" },
-		"min above version":           func(m *Manifest) { m.MinSproutVersion = "v2.4.2" },
-		"uppercase os":                func(m *Manifest) { m.OS = "Linux" },
-		"space in arch":               func(m *Manifest) { m.Arch = "amd 64" },
-		"os too long":                 func(m *Manifest) { m.OS = strings.Repeat("l", maxOSArchLen+1) },
-		"path in file_name":           func(m *Manifest) { m.FileName = "../../etc/passwd" },
-		"slash in file_name":          func(m *Manifest) { m.FileName = "pool/main/imas.deb" },
-		"backslash in file_name":      func(m *Manifest) { m.FileName = "..\\imas.msi" },
-		"dot file_name":               func(m *Manifest) { m.FileName = ".." },
-		"query in file_name":          func(m *Manifest) { m.FileName = "imas.deb?x=1" },
-		"percent in file_name":        func(m *Manifest) { m.FileName = "imas%2f.deb" },
-		"colon in file_name":          func(m *Manifest) { m.FileName = "c:imas.msi" },
-		"file_name too long":          func(m *Manifest) { m.FileName = strings.Repeat("a", maxFileNameLen+1) },
-		"uppercase checksum":          func(m *Manifest) { m.ChecksumSHA256 = strings.ToUpper(testChecksum) },
-		"short checksum":              func(m *Manifest) { m.ChecksumSHA256 = testChecksum[:62] },
-		"non-hex checksum":            func(m *Manifest) { m.ChecksumSHA256 = strings.Repeat("z", 64) },
+	cases := map[string]func(*LegacyManifest){
+		"empty version":               func(m *LegacyManifest) { m.Version = "" },
+		"empty os":                    func(m *LegacyManifest) { m.OS = "" },
+		"empty arch":                  func(m *LegacyManifest) { m.Arch = "" },
+		"empty file_name":             func(m *LegacyManifest) { m.FileName = "" },
+		"empty checksum":              func(m *LegacyManifest) { m.ChecksumSHA256 = "" },
+		"empty min_sprout_version":    func(m *LegacyManifest) { m.MinSproutVersion = "" },
+		"pipe in version":             func(m *LegacyManifest) { m.Version = "v2.4.1|x" },
+		"pipe in os":                  func(m *LegacyManifest) { m.OS = "linux|amd64" },
+		"pipe in arch":                func(m *LegacyManifest) { m.Arch = "amd64|" },
+		"pipe in file_name":           func(m *LegacyManifest) { m.FileName = "a|b.deb" },
+		"pipe in checksum":            func(m *LegacyManifest) { m.ChecksumSHA256 = testChecksum[:63] + "|" },
+		"pipe in min_sprout_version":  func(m *LegacyManifest) { m.MinSproutVersion = "v2.0.0|" },
+		"newline in version":          func(m *LegacyManifest) { m.Version = "v2.4.1\n" },
+		"NUL in file_name":            func(m *LegacyManifest) { m.FileName = "a\x00.deb" },
+		"DEL in os":                   func(m *LegacyManifest) { m.OS = "linux\x7f" },
+		"C1 control in arch":          func(m *LegacyManifest) { m.Arch = "amd\u008564" },
+		"tab in min_sprout_version":   func(m *LegacyManifest) { m.MinSproutVersion = "v2.0.0\t" },
+		"version without v":           func(m *LegacyManifest) { m.Version = "2.4.1" },
+		"version shorthand":           func(m *LegacyManifest) { m.Version = "v2.4" },
+		"version with build metadata": func(m *LegacyManifest) { m.Version = "v2.4.1+abc" },
+		"version not semver":          func(m *LegacyManifest) { m.Version = "latest" },
+		"version too long":            func(m *LegacyManifest) { m.Version = "v2.4.1-" + strings.Repeat("a", maxVersionLen) },
+		"min_sprout_version invalid":  func(m *LegacyManifest) { m.MinSproutVersion = "v2" },
+		"min above version":           func(m *LegacyManifest) { m.MinSproutVersion = "v2.4.2" },
+		"uppercase os":                func(m *LegacyManifest) { m.OS = "Linux" },
+		"space in arch":               func(m *LegacyManifest) { m.Arch = "amd 64" },
+		"os too long":                 func(m *LegacyManifest) { m.OS = strings.Repeat("l", maxOSArchLen+1) },
+		"path in file_name":           func(m *LegacyManifest) { m.FileName = "../../etc/passwd" },
+		"slash in file_name":          func(m *LegacyManifest) { m.FileName = "pool/main/imas.deb" },
+		"backslash in file_name":      func(m *LegacyManifest) { m.FileName = "..\\imas.msi" },
+		"dot file_name":               func(m *LegacyManifest) { m.FileName = ".." },
+		"query in file_name":          func(m *LegacyManifest) { m.FileName = "imas.deb?x=1" },
+		"percent in file_name":        func(m *LegacyManifest) { m.FileName = "imas%2f.deb" },
+		"colon in file_name":          func(m *LegacyManifest) { m.FileName = "c:imas.msi" },
+		"file_name too long":          func(m *LegacyManifest) { m.FileName = strings.Repeat("a", maxFileNameLen+1) },
+		"uppercase checksum":          func(m *LegacyManifest) { m.ChecksumSHA256 = strings.ToUpper(testChecksum) },
+		"short checksum":              func(m *LegacyManifest) { m.ChecksumSHA256 = testChecksum[:62] },
+		"non-hex checksum":            func(m *LegacyManifest) { m.ChecksumSHA256 = strings.Repeat("z", 64) },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -153,7 +153,7 @@ func TestMessage_RejectsAmbiguousOrInvalidFields(t *testing.T) {
 }
 
 func TestMessage_AcceptsRealPackageNames(t *testing.T) {
-	for _, m := range []Manifest{
+	for _, m := range []LegacyManifest{
 		{Version: "v2.4.1", OS: "linux", Arch: "arm64", FileName: "imas-sprout-2.4.1-1.aarch64.rpm"},
 		{Version: "v2.5.0-rc.1", OS: "linux", Arch: "amd64", FileName: "imas-sprout_2.5.0~rc.1_amd64.deb", MinSproutVersion: "v2.5.0-rc.1"},
 		{Version: "v2.4.1", OS: "windows", Arch: "amd64", FileName: "imas-sprout_2.4.1_windows_amd64.msi"},
@@ -216,9 +216,9 @@ func TestVerify_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	parsed, err := ParseManifest(body)
+	parsed, err := LegacyParseManifest(body)
 	if err != nil {
-		t.Fatalf("ParseManifest(%s): %v", body, err)
+		t.Fatalf("LegacyParseManifest(%s): %v", body, err)
 	}
 	if parsed != signed {
 		t.Fatalf("ParseManifest = %+v, want %+v", parsed, signed)
@@ -238,18 +238,18 @@ func TestVerify_TamperOfEveryField(t *testing.T) {
 	ring, _ := NewKeyring([]PublicKey{pub})
 	signed := signForTest(t, priv, 1, testManifest())
 
-	tampered := map[string]func(*Manifest){
-		"version":   func(m *Manifest) { m.Version = "v2.4.2" },
-		"os":        func(m *Manifest) { m.OS = "windows" },
-		"arch":      func(m *Manifest) { m.Arch = "arm64" },
-		"file_name": func(m *Manifest) { m.FileName = "imas-sprout_2.4.1_arm64.deb" },
-		"checksum_sha256": func(m *Manifest) {
+	tampered := map[string]func(*LegacyManifest){
+		"version":   func(m *LegacyManifest) { m.Version = "v2.4.2" },
+		"os":        func(m *LegacyManifest) { m.OS = "windows" },
+		"arch":      func(m *LegacyManifest) { m.Arch = "arm64" },
+		"file_name": func(m *LegacyManifest) { m.FileName = "imas-sprout_2.4.1_arm64.deb" },
+		"checksum_sha256": func(m *LegacyManifest) {
 			m.ChecksumSHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 		},
-		"min_sprout_version": func(m *Manifest) { m.MinSproutVersion = "v2.1.0" },
+		"min_sprout_version": func(m *LegacyManifest) { m.MinSproutVersion = "v2.1.0" },
 	}
 	// The table must cover every signed field, so a field added to
-	// Manifest without a tamper case fails here.
+	// LegacyManifest without a tamper case fails here.
 	for _, kv := range signed.fields() {
 		if _, ok := tampered[kv.name]; !ok {
 			t.Errorf("no tamper case for signed field %q", kv.name)
@@ -332,7 +332,7 @@ func TestKeyring_RotationTwoKeys(t *testing.T) {
 	next := testManifest()
 	next.Version = "v2.5.0"
 	next = signForTest(t, priv2, 2, next)
-	for name, m := range map[string]Manifest{"signed by v1": old, "signed by v2": next} {
+	for name, m := range map[string]LegacyManifest{"signed by v1": old, "signed by v2": next} {
 		if err := ring.Verify(m); err != nil {
 			t.Errorf("%s: Verify = %v", name, err)
 		}
@@ -445,7 +445,8 @@ func TestNoSigningCodeInPackage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, forbidden := range []string{"/sign/", "ed25519.Sign(", "ed25519.PrivateKey", "/rotate"} {
+		for _, forbidden := range []string{"/sign/", "ed25519.Sign(", "ed25519.PrivateKey", "/rotate",
+			"DetachSign", "openpgp.Sign(", "NewEntity", "NewSignerPrivateKey", ".SignUserId", ".SignKey"} {
 			if strings.Contains(string(src), forbidden) {
 				t.Errorf("%s contains %q: fleetsign must stay verify-only", f, forbidden)
 			}

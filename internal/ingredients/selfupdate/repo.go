@@ -19,7 +19,6 @@ import (
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/yogzblr/imas/internal/config"
-	"github.com/yogzblr/imas/internal/fleetsign"
 )
 
 // Where the package file is found in the configured repository. The
@@ -39,7 +38,7 @@ import (
 //   - nuget: the service index's PackageBaseAddress (flat container),
 //     <id>/<version>/<id>.<version>.nupkg, which holds the MSI at its root
 //     under the signed file name (build-winget-nupkg.sh).
-//   - flat: <url>/<file_name>, for a mirror that serves files by name.
+//   - flat: <url>/<file name>, for a mirror that serves files by name.
 
 // Repository formats (config.SproutUpdateRepoFormat).
 const (
@@ -170,7 +169,7 @@ func (r repo) String() string {
 // fetchPackage finds m's package in the repository and writes it to dest,
 // checked against the signed checksum. dir is a private staging
 // directory for intermediate files.
-func (r repo) fetchPackage(ctx context.Context, m fleetsign.Manifest, dir, dest string) (*url.URL, error) {
+func (r repo) fetchPackage(ctx context.Context, m release, dir, dest string) (*url.URL, error) {
 	switch r.format {
 	case repoFlat:
 		u, err := resolveRef(r.base, m.FileName)

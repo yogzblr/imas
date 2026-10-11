@@ -2,55 +2,74 @@ package fleetsign
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"regexp"
-	"strings"
 
 	"golang.org/x/mod/semver"
 )
 
-// Manifest is one saas.fleet_versions row as farmer serves it to a sprout
-// (GET /v1/sprout/update-manifest, design doc §2.6): the sprout package
-// for one version, OS and arch, and fleetreleaser's signature over it.
+// Manifest is farmer's 200 response to GET /v1/sprout/update-manifest
+// (the P22 wire contract): one release for one OS, arch and package
+// type, with the release's checksums.txt and its detached signature
+// relayed verbatim. Every value is a JSON string and these seven keys are
+// the only ones.
 //
-// There is deliberately no URL. The sprout builds the download URL from
-// the repository configured in the sprout itself plus FileName
-// (requirement 20, §1.8), so nothing a farmer, a saas.fleet_versions
-// writer or the bus can change decides where code is fetched from; the
-// signed checksum decides what may be installed.
+// There is deliberately no URL, file name or checksum field. The sprout
+// derives the package file name itself (ExpectedFileName), takes its
+// SHA-256 from the signed checksums.txt (ArmoredKeyring.VerifyChecksums,
+// ParseChecksums), and downloads from the repository configured in the
+// sprout (requirement 20, §1.8). MinSproutVersion is unsigned (D19): it
+// is farmer policy, enforced by the sprout.
 type Manifest struct {
 	Version          string `json:"version"`
 	OS               string `json:"os"`
 	Arch             string `json:"arch"`
-	FileName         string `json:"file_name"`
-	ChecksumSHA256   string `json:"checksum_sha256"`
+	PackageType      string `json:"package_type"`
 	MinSproutVersion string `json:"min_sprout_version"`
-	// Signature is EncodeSignature's "v<key version>:<base64>" over
-	// Message(). It is not part of the signed message.
-	Signature string `json:"signature"`
+	// ChecksumsTxt is the release's checksums.txt, byte for byte.
+	ChecksumsTxt string `json:"checksums_txt"`
+	// ChecksumsSig is checksums.txt.sig in standard padded base64.
+	ChecksumsSig string `json:"checksums_sig"`
+
+	// sig is ChecksumsSig decoded, set by ParseManifest.
+	sig []byte
 }
 
-// MessageDomain is the domain-separation tag every manifest message
-// starts with (Message).
-const MessageDomain = "imas-fleet-manifest-v1"
+// Signature returns the decoded checksums.txt.sig bytes ParseManifest
+// read from ChecksumsSig. It is nil on a Manifest ParseManifest didn't
+// return.
+func (m Manifest) Signature() []byte { return m.sig }
 
 // Field limits. Version sizes match saas.fleet_versions.version.
 const (
 	maxVersionLen  = 64
 	maxOSArchLen   = 32
 	maxFileNameLen = 255
-	// maxManifestJSON bounds ParseManifest's input: every field at its
-	// limit plus the signature and JSON syntax is well under 1 KiB.
-	maxManifestJSON = 4 << 10
+	// MaxChecksumsTxt and MaxChecksumsSig bound checksums.txt and its
+	// decoded signature (the wire contract).
+	MaxChecksumsTxt = 128 << 10
+	MaxChecksumsSig = 8 << 10
+	// maxManifestJSON bounds ParseManifest's input: checksums.txt at its
+	// limit, JSON-escaped, plus the base64 signature and the short fields.
+	maxManifestJSON = 256 << 10
+)
+
+// Package types a Manifest can name: the sprout's own (platform.go in
+// internal/ingredients/selfupdate).
+const (
+	PackageTypeDeb = "deb"
+	PackageTypeRPM = "rpm"
+	PackageTypeMSI = "msi"
 )
 
 // Per-field allowlists. They are stricter than "no separator, no control
 // character" on purpose: every field is used by the sprout to build a
 // URL, a local path or a version comparison, so anything outside these
-// sets is refused at the signer rather than discovered on a fleet.
+// sets is refused rather than discovered on a fleet.
 var (
 	reOSArch = regexp.MustCompile(`^[a-z0-9][a-z0-9_]*$`)
 	// A single path component: no '/', '\\', '%', '?', '#', ':' or
@@ -59,127 +78,36 @@ var (
 	reSHA256   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
-// fields returns the signed fields in canonical order, with their JSON
-// names. Message, Validate and ParseManifest all read this one list, so
-// there is exactly one definition of what is signed.
-func (m Manifest) fields() [6]struct{ name, value string } {
-	return [6]struct{ name, value string }{
-		{"version", m.Version},
-		{"os", m.OS},
-		{"arch", m.Arch},
-		{"file_name", m.FileName},
-		{"checksum_sha256", m.ChecksumSHA256},
-		{"min_sprout_version", m.MinSproutVersion},
+// manifestKeys is the wire contract's key set.
+func (m *Manifest) manifestKeys() map[string]*string {
+	return map[string]*string{
+		"version": &m.Version, "os": &m.OS, "arch": &m.Arch, "package_type": &m.PackageType,
+		"min_sprout_version": &m.MinSproutVersion, "checksums_txt": &m.ChecksumsTxt,
+		"checksums_sig": &m.ChecksumsSig,
 	}
 }
 
-// Message returns the canonical bytes a manifest is signed over:
+// ParseManifest decodes the JSON a sprout receives from farmer strictly:
+// one JSON object, every value a string, the seven keys exactly as
+// Manifest's JSON tags spell them (no case folding, unlike
+// encoding/json), no duplicate, missing or unknown key, nothing after the
+// object, at most 256 KiB. It then validates the fields (Validate) and
+// decodes the signature (Signature).
 //
-//	imas-fleet-manifest-v1|version|os|arch|file_name|checksum_sha256|min_sprout_version
-//
-// The leading MessageDomain is a fixed domain-separation tag: it binds
-// the signature to this purpose and format version, so bytes signed with
-// imas-fleet-signing for anything else (including the pre-FU.0
-// version|artifact_url|checksum_sha256 message) can never verify as a
-// manifest. A future format change gets a new tag, not a reinterpretation
-// of this one.
-//
-// It is the one encoder shared by the signer (cmd/fleetreleaser) and
-// every verifier (KeySet.Verify, Keyring.Verify). Fields are validated
-// first (Validate) and never normalized: a value the signer would have to
-// rewrite to accept, such as an uppercase checksum, is refused, so the
-// bytes signed are exactly the bytes a verifier rebuilds. Because no
-// field may contain '|', the encoding is unambiguous.
-//
-// min_sprout_version is signed along with the five fields §2.5 lists, so
-// a manifest's floor can't be lowered (or raised) without breaking the
-// signature.
-func (m Manifest) Message() ([]byte, error) {
-	if err := m.Validate(); err != nil {
-		return nil, err
-	}
-	f := m.fields()
-	parts := make([]string, 0, len(f)+1)
-	parts = append(parts, MessageDomain)
-	for _, kv := range f {
-		parts = append(parts, kv.value)
-	}
-	return []byte(strings.Join(parts, "|")), nil
-}
-
-// Validate checks every signed field (not Signature):
-//
-//   - no field is empty, contains '|' or a control character;
-//   - version and min_sprout_version are canonical semver with a leading
-//     'v' and no build metadata ("v2.4.1", "v2.5.0-rc.1"), at most 64
-//     characters, and min_sprout_version <= version;
-//   - os and arch are lowercase [a-z0-9_], at most 32 characters;
-//   - file_name is a single file name from [A-Za-z0-9._+~-] that starts
-//     with a letter or digit, at most 255 characters;
-//   - checksum_sha256 is exactly 64 lowercase hex characters.
-func (m Manifest) Validate() error {
-	for _, kv := range m.fields() {
-		if kv.value == "" {
-			return fmt.Errorf("%w: %s is empty", ErrInvalidManifest, kv.name)
-		}
-		if strings.ContainsRune(kv.value, '|') {
-			return fmt.Errorf("%w: %s contains '|'", ErrInvalidManifest, kv.name)
-		}
-		for _, c := range kv.value {
-			if c < 0x20 || c == 0x7f || (c >= 0x80 && c < 0xa0) {
-				return fmt.Errorf("%w: %s contains a control character", ErrInvalidManifest, kv.name)
-			}
-		}
-	}
-	for _, kv := range []struct{ name, value string }{
-		{"version", m.Version}, {"min_sprout_version", m.MinSproutVersion},
-	} {
-		if len(kv.value) > maxVersionLen {
-			return fmt.Errorf("%w: %s is longer than %d characters", ErrInvalidManifest, kv.name, maxVersionLen)
-		}
-		if !semver.IsValid(kv.value) || semver.Canonical(kv.value) != kv.value {
-			return fmt.Errorf("%w: %s %q is not a canonical semver version (vMAJOR.MINOR.PATCH[-PRERELEASE])", ErrInvalidManifest, kv.name, kv.value)
-		}
-	}
-	if semver.Compare(m.MinSproutVersion, m.Version) > 0 {
-		return fmt.Errorf("%w: min_sprout_version %s is above version %s", ErrInvalidManifest, m.MinSproutVersion, m.Version)
-	}
-	for _, kv := range []struct{ name, value string }{{"os", m.OS}, {"arch", m.Arch}} {
-		if len(kv.value) > maxOSArchLen || !reOSArch.MatchString(kv.value) {
-			return fmt.Errorf("%w: %s %q is not lowercase [a-z0-9_] of at most %d characters", ErrInvalidManifest, kv.name, kv.value, maxOSArchLen)
-		}
-	}
-	if len(m.FileName) > maxFileNameLen || !reFileName.MatchString(m.FileName) {
-		return fmt.Errorf("%w: file_name %q is not a plain file name", ErrInvalidManifest, m.FileName)
-	}
-	if !reSHA256.MatchString(m.ChecksumSHA256) {
-		return fmt.Errorf("%w: checksum_sha256 is not 64 lowercase hex characters", ErrInvalidManifest)
-	}
-	return nil
-}
-
-// ParseManifest decodes the JSON a sprout receives from farmer (§2.6)
-// strictly: one JSON object, every value a string, the seven field names
-// exactly as Manifest's JSON tags spell them (no case folding, unlike
-// encoding/json), no duplicate, missing or unknown key, nothing after
-// the object, at most 4 KiB. The fields are then validated (Validate).
-//
-// ParseManifest does not verify the signature; call Keyring.Verify on
-// the result. An unknown key is refused rather than ignored so that no
-// field can ride along unsigned and later be trusted by a newer reader.
+// ParseManifest does not verify anything cryptographically; the caller
+// runs ArmoredKeyring.VerifyChecksums on ChecksumsTxt and Signature(). An
+// unknown key (a file_name, a URL, a checksum) is refused rather than
+// ignored, so nothing unsigned can ride along and later be trusted by a
+// newer reader.
 func ParseManifest(data []byte) (Manifest, error) {
 	if len(data) > maxManifestJSON {
 		return Manifest{}, fmt.Errorf("%w: manifest is larger than %d bytes", ErrInvalidManifest, maxManifestJSON)
 	}
-	obj, err := parseFlatStringObject(data, 8)
+	var m Manifest
+	dst := m.manifestKeys()
+	obj, err := parseFlatStringObject(data, len(dst)+1)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("%w: %w", ErrInvalidManifest, err)
-	}
-	var m Manifest
-	dst := map[string]*string{
-		"version": &m.Version, "os": &m.OS, "arch": &m.Arch, "file_name": &m.FileName,
-		"checksum_sha256": &m.ChecksumSHA256, "min_sprout_version": &m.MinSproutVersion,
-		"signature": &m.Signature,
 	}
 	for k, v := range obj {
 		p, ok := dst[k]
@@ -196,7 +124,84 @@ func ParseManifest(data []byte) (Manifest, error) {
 	if err := m.Validate(); err != nil {
 		return Manifest{}, err
 	}
+	m.sig, _ = base64.StdEncoding.Strict().DecodeString(m.ChecksumsSig) // Validate decoded it
 	return m, nil
+}
+
+// Validate checks every field:
+//
+//   - version and min_sprout_version are canonical semver with a leading
+//     'v' and no build metadata ("v2.4.1", "v2.5.0-rc.1"), at most 64
+//     characters, and min_sprout_version <= version;
+//   - os and arch are lowercase [a-z0-9_], at most 32 characters;
+//   - package_type is deb, rpm or msi;
+//   - checksums_txt is 1 byte to MaxChecksumsTxt (ErrChecksumsTooLarge
+//     above it);
+//   - checksums_sig is standard padded base64 of 1 byte to
+//     MaxChecksumsSig (ErrChecksumsTooLarge above it).
+//
+// It doesn't parse checksums.txt: that is done after the signature over
+// it verifies (ParseChecksums).
+func (m Manifest) Validate() error {
+	for _, kv := range []struct{ name, value string }{
+		{"version", m.Version}, {"min_sprout_version", m.MinSproutVersion},
+	} {
+		if err := checkVersion(kv.name, kv.value); err != nil {
+			return err
+		}
+	}
+	if semver.Compare(m.MinSproutVersion, m.Version) > 0 {
+		return fmt.Errorf("%w: min_sprout_version %s is above version %s", ErrInvalidManifest, m.MinSproutVersion, m.Version)
+	}
+	for _, kv := range []struct{ name, value string }{{"os", m.OS}, {"arch", m.Arch}} {
+		if err := checkOSArch(kv.name, kv.value); err != nil {
+			return err
+		}
+	}
+	switch m.PackageType {
+	case PackageTypeDeb, PackageTypeRPM, PackageTypeMSI:
+	default:
+		return fmt.Errorf("%w: package_type %q is not deb, rpm or msi", ErrInvalidManifest, m.PackageType)
+	}
+	switch {
+	case m.ChecksumsTxt == "":
+		return fmt.Errorf("%w: checksums_txt is empty", ErrInvalidManifest)
+	case len(m.ChecksumsTxt) > MaxChecksumsTxt:
+		return fmt.Errorf("%w: checksums_txt is larger than %d bytes", ErrChecksumsTooLarge, MaxChecksumsTxt)
+	}
+	sig, err := base64.StdEncoding.Strict().DecodeString(m.ChecksumsSig)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w: checksums_sig is not standard padded base64", ErrInvalidManifest)
+	case len(sig) == 0:
+		return fmt.Errorf("%w: checksums_sig is empty", ErrInvalidManifest)
+	case len(sig) > MaxChecksumsSig:
+		return fmt.Errorf("%w: checksums_sig decodes to more than %d bytes", ErrChecksumsTooLarge, MaxChecksumsSig)
+	}
+	return nil
+}
+
+// checkVersion requires a canonical semver release tag: leading 'v', no
+// build metadata, at most maxVersionLen characters.
+func checkVersion(name, v string) error {
+	if v == "" {
+		return fmt.Errorf("%w: %s is empty", ErrInvalidManifest, name)
+	}
+	if len(v) > maxVersionLen {
+		return fmt.Errorf("%w: %s is longer than %d characters", ErrInvalidManifest, name, maxVersionLen)
+	}
+	if !semver.IsValid(v) || semver.Canonical(v) != v {
+		return fmt.Errorf("%w: %s %q is not a canonical semver version (vMAJOR.MINOR.PATCH[-PRERELEASE])", ErrInvalidManifest, name, v)
+	}
+	return nil
+}
+
+// checkOSArch requires lowercase [a-z0-9_] of at most maxOSArchLen.
+func checkOSArch(name, v string) error {
+	if len(v) > maxOSArchLen || !reOSArch.MatchString(v) {
+		return fmt.Errorf("%w: %s %q is not lowercase [a-z0-9_] of at most %d characters", ErrInvalidManifest, name, v, maxOSArchLen)
+	}
+	return nil
 }
 
 // parseFlatStringObject decodes data as exactly one JSON object whose

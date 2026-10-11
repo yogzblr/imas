@@ -1,18 +1,20 @@
 package main
 
 // Fleet update support, for the self-update end-to-end test
-// (testing/selfupdate-e2e): just enough of farmer, saasapi and
-// fleetreleaser for a packaged imas-sprout to receive a self_update job
-// and install the signed release from a real package repository.
+// (testing/selfupdate-e2e): just enough of farmer, saasapi and the release
+// workflow for a packaged imas-sprout to receive a self_update job and
+// install the signed release from a real package repository (P22: the
+// release's GPG-signed checksums.txt).
 //
-//   - The stub holds the imas-fleet-signing key itself (key version 1) and
-//     writes its public half as the sprout keyring file
-//     (-state-dir/fleet-signing-keys.json), which the test ships in the
-//     packages it builds, the way a release stamps
-//     packaging/etc/fleet-signing-keys.json.
-//   - POST /_stub/release signs and registers a manifest, as saasapi's
-//     operator plane does with fleetreleaser. "signer": "untrusted" signs
-//     with a key no keyring holds instead, for the refusal tests.
+//   - The stub holds a release GPG key itself and writes its armored
+//     public key as the sprout keyring file (keyringJSON; main.go writes
+//     it under -state-dir), which the test ships in the packages it
+//     builds, the way the packages ship gpg-public-key.asc.
+//   - POST /_stub/release registers a release, as the release workflow
+//     and saasapi's operator plane do: it writes a checksums.txt with the
+//     package's line, signs it with the release key, and stores the wire
+//     manifest farmer serves. "signer": "untrusted" signs with a key no
+//     keyring holds instead, for the refusal tests.
 //   - GET /v1/sprout/update-manifest serves a registered manifest to a
 //     sprout presenting a gateway JWT the stub minted, like farmer's
 //     handler (one tenant, every version approved).
@@ -29,8 +31,8 @@ package main
 // store: SproutRootCA and the repository's trust root stay separate.
 
 import (
+	"bytes"
 	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -40,6 +42,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ProtonMail/go-crypto/openpgp"
+	"github.com/ProtonMail/go-crypto/openpgp/armor"
+	"github.com/ProtonMail/go-crypto/openpgp/packet"
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	jwxjwt "github.com/lestrrat-go/jwx/v2/jwt"
 	"github.com/nats-io/nats.go"
@@ -53,7 +58,9 @@ import (
 // fleetState is the stub's release catalog and what it has seen sprouts
 // report.
 type fleetState struct {
-	trusted, untrusted ed25519.PrivateKey
+	// trusted is the release key the keyring holds; untrusted is not in
+	// it.
+	trusted, untrusted *openpgp.Entity
 
 	mu        sync.Mutex
 	releases  map[releaseKey]fleetsign.Manifest
@@ -63,8 +70,15 @@ type fleetState struct {
 
 type releaseKey struct{ version, os, arch, packageType string }
 
-func newFleetState(trusted ed25519.PrivateKey) (*fleetState, error) {
-	_, untrusted, err := ed25519.GenerateKey(rand.Reader)
+// newFleetState makes the stub's release keys. Its argument is main.go's
+// pre-P22 Ed25519 fleet key, which nothing uses any more; main.go stops
+// passing it in P22 slice 2.
+func newFleetState(_ ed25519.PrivateKey) (*fleetState, error) {
+	trusted, err := newReleaseKey()
+	if err != nil {
+		return nil, err
+	}
+	untrusted, err := newReleaseKey()
 	if err != nil {
 		return nil, err
 	}
@@ -77,18 +91,38 @@ func newFleetState(trusted ed25519.PrivateKey) (*fleetState, error) {
 	}, nil
 }
 
-// keyringJSON is the sprout keyring (fleetsign.ParseKeyring) holding the
-// trusted key as key id 1.
-func (s *fleetState) keyringJSON() []byte {
-	pub := s.trusted.Public().(ed25519.PublicKey)
-	b, _ := json.Marshal(map[string]string{"1": base64.StdEncoding.EncodeToString(pub)})
-	return b
+func newReleaseKey() (*openpgp.Entity, error) {
+	return openpgp.NewEntity("imas stub release key", "", "release@stubfarmer.invalid", &packet.Config{Algorithm: packet.PubKeyAlgoEdDSA})
 }
 
-// releaseRequest is POST /_stub/release's body.
+// keyringJSON is the sprout keyring (fleetsign.ParseArmoredKeyring): the
+// trusted release key, ASCII-armored. The name is pre-P22 (main.go still
+// calls it); the content is no longer JSON.
+func (s *fleetState) keyringJSON() []byte {
+	var buf bytes.Buffer
+	w, err := armor.Encode(&buf, openpgp.PublicKeyType, nil)
+	if err != nil {
+		return nil
+	}
+	if err := s.trusted.Serialize(w); err != nil {
+		return nil
+	}
+	if err := w.Close(); err != nil {
+		return nil
+	}
+	return buf.Bytes()
+}
+
+// releaseRequest is POST /_stub/release's body: the release's identity
+// and the package's checksums.txt line (file_name, checksum_sha256).
 type releaseRequest struct {
-	fleetsign.Manifest
-	PackageType string `json:"package_type"`
+	Version          string `json:"version"`
+	OS               string `json:"os"`
+	Arch             string `json:"arch"`
+	PackageType      string `json:"package_type"`
+	MinSproutVersion string `json:"min_sprout_version"`
+	FileName         string `json:"file_name"`
+	ChecksumSHA256   string `json:"checksum_sha256"`
 	// Signer is "trusted" (default) or "untrusted".
 	Signer string `json:"signer"`
 }
@@ -99,9 +133,8 @@ func (f *farmer) release(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	m := req.Manifest
-	msg, err := m.Message()
-	if err != nil {
+	txt := []byte(req.ChecksumSHA256 + "  " + req.FileName + "\n")
+	if _, err := fleetsign.ParseChecksums(txt); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -109,11 +142,24 @@ func (f *farmer) release(w http.ResponseWriter, r *http.Request) {
 	if req.Signer == "untrusted" {
 		key = f.fleet.untrusted
 	}
-	m.Signature = fleetsign.EncodeSignature(1, ed25519.Sign(key, msg))
+	var sig bytes.Buffer
+	if err := openpgp.DetachSign(&sig, key, bytes.NewReader(txt), nil); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	m := fleetsign.Manifest{
+		Version: req.Version, OS: req.OS, Arch: req.Arch, PackageType: req.PackageType,
+		MinSproutVersion: req.MinSproutVersion, ChecksumsTxt: string(txt),
+		ChecksumsSig: base64.StdEncoding.EncodeToString(sig.Bytes()),
+	}
+	if err := m.Validate(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	f.fleet.mu.Lock()
-	f.fleet.releases[releaseKey{m.Version, m.OS, m.Arch, req.PackageType}] = m
+	f.fleet.releases[releaseKey{m.Version, m.OS, m.Arch, m.PackageType}] = m
 	f.fleet.mu.Unlock()
-	log.Printf("fleet: registered %s %s/%s %s (%s), signed by the %s key", m.Version, m.OS, m.Arch, req.PackageType, m.FileName, signerName(req.Signer))
+	log.Printf("fleet: registered %s %s/%s %s (%s), signed by the %s key", m.Version, m.OS, m.Arch, m.PackageType, req.FileName, signerName(req.Signer))
 	writeJSON(w, m)
 }
 

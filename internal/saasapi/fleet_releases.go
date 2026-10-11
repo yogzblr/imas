@@ -80,7 +80,7 @@ var packageTypeOS = map[string]string{"deb": "linux", "rpm": "linux", "msi": "wi
 // releaseSigner signs one manifest entry. *fleetReleaserClient is the real
 // one; tests substitute a local key.
 type releaseSigner interface {
-	Sign(ctx context.Context, m fleetsign.Manifest) (signature string, err error)
+	Sign(ctx context.Context, m fleetsign.LegacyManifest) (signature string, err error)
 }
 
 // operatorPlane is the operator listener's state, built once by
@@ -682,7 +682,7 @@ func validFleetReleaserURL(s string) error {
 
 // Sign sends m's six signed fields (no signature) and returns
 // fleetreleaser's signature. The caller verifies it.
-func (c *fleetReleaserClient) Sign(ctx context.Context, m fleetsign.Manifest) (string, error) {
+func (c *fleetReleaserClient) Sign(ctx context.Context, m fleetsign.LegacyManifest) (string, error) {
 	body, err := json.Marshal(map[string]string{
 		"version": m.Version, "os": m.OS, "arch": m.Arch, "file_name": m.FileName,
 		"checksum_sha256": m.ChecksumSHA256, "min_sprout_version": m.MinSproutVersion,
