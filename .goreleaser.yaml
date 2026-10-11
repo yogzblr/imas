@@ -177,6 +177,20 @@ builds:
       - arm64
     ldflags:
       - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
+  # Service binary: the bus node's account loader sidecar, shipped in the
+  # farmerbus image as a second binary (docs/briefs/P21-slice2-bus-loader.md §3).
+  - main: ./cmd/farmerbus-loader/
+    id: "farmerbus-loader"
+    binary: "{{.ProjectName}}-farmerbus-loader"
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
   # Service binary: container image + release archive. The Helm chart's
   # schema migration hook Job (deploy/helm/farmer, "Migrations").
   - main: ./cmd/migrate/
@@ -544,7 +558,7 @@ dockers:
   - id: farmerbus-amd64
     goos: linux
     goarch: amd64
-    ids: [farmerbus]
+    ids: [farmerbus, farmerbus-loader]
     image_templates:
       - "ghcr.io/yogzblr/imas-farmerbus:{{ .Version }}-amd64"
     dockerfile: docker/goreleaser.farmerbus.dockerfile
@@ -559,7 +573,7 @@ dockers:
   - id: farmerbus-arm64
     goos: linux
     goarch: arm64
-    ids: [farmerbus]
+    ids: [farmerbus, farmerbus-loader]
     image_templates:
       - "ghcr.io/yogzblr/imas-farmerbus:{{ .Version }}-arm64"
     dockerfile: docker/goreleaser.farmerbus.dockerfile
