@@ -777,6 +777,17 @@ func (s *sproutJWTStore) mintLeased(ctx context.Context, tenantID, sproutID, pub
 		// The lease lapsed and another replica took it: its row wins.
 		return "", fmt.Errorf("sprout %s in tenant %s: lease lost while minting: %w", sproutID, tenantID, ErrSproutJWTBusy)
 	}
+	// Check again, after signing: a deny, delete or revocation that
+	// committed before this read is caught here, and one that commits
+	// after it is revoked on the Account at or after this JWT's issue
+	// time, which the bus then refuses (a revocation covers every JWT
+	// issued at or before it). Lifecycle changes don't take the mint
+	// lease, so without this a sprout denied while its JWT was being
+	// minted could be handed one issued after its revocation. The stored
+	// object is never served: every caller checks eligibility first.
+	if err := s.checkEligible(tenantID, sproutID, pubkey); err != nil {
+		return "", fmt.Errorf("pki: sprout %s in tenant %s changed state while its JWT was minted: %w", sproutID, tenantID, err)
+	}
 	return signed, nil
 }
 

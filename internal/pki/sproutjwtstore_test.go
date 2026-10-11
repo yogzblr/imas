@@ -651,3 +651,36 @@ func TestSproutJWTLeaseReleasedOnCancelledContext(t *testing.T) {
 	}
 	e.checkStored(t, "t1", "web-1", pub)
 }
+
+// A sprout denied or revoked while its JWT is being minted is not handed
+// the JWT: eligibility is checked again after signing.
+func TestSproutJWTDeniedDuringMintNotReturned(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(e *sproutJWTEnv, pub string) error
+	}{
+		{"denied", func(e *sproutJWTEnv, _ string) error {
+			return e.db.Model(&nkeyRow{}).Where("tenant_id = ? AND sprout_id = ?", "t1", "web-1").Update("state", stateDenied).Error
+		}},
+		{"deleted and revoked", func(e *sproutJWTEnv, pub string) error {
+			if err := e.db.Create(&revokedNKeyRow{TenantID: "t1", NKey: pub, SproutID: "web-1", RevokedAt: 1}).Error; err != nil {
+				return err
+			}
+			return e.db.Where("tenant_id = ? AND sprout_id = ?", "t1", "web-1").Delete(&nkeyRow{}).Error
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newSproutJWTEnv(t)
+			pub := e.accept(t, "t1", "web-1")
+			r := e.replica("replica-a", false)
+			r.afterPut = func() error { return tc.change(e, pub) }
+			got, err := r.mintOrReuse(context.Background(), "t1", "web-1", pub)
+			if err == nil || got != "" {
+				t.Fatalf("got a JWT (err %v) for a sprout %s during its mint", err, tc.name)
+			}
+			if _, err := r.mintOrReuse(context.Background(), "t1", "web-1", pub); err == nil {
+				t.Fatal("a later call served the JWT stored during the mint")
+			}
+		})
+	}
+}
