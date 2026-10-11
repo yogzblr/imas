@@ -41,13 +41,12 @@ func natsInit(ctx context.Context, nc *nats.Conn) error {
 		log.Tracef("Successfully published startup message on `%s`.", startupEvent)
 	}
 
-	// Publish system facts on startup.
-	sysFacts := facts.Collect()
-	sysFacts.SproutID = sproutID
-	factsB, _ := json.Marshal(sysFacts)
-	if pubErr := nc.Publish("imas.sprouts."+sproutID+".facts", factsB); pubErr != nil {
+	// Publish system facts on startup, then keep re-publishing them: farmer's
+	// props for them expire (see factsloop.go).
+	if pubErr := publishFacts(nc, sproutID); pubErr != nil {
 		log.Errorf("failed to publish system facts: %v", pubErr)
 	}
+	go runFactsRepublisher(ctx, nc, sproutID, factsRepublishInterval)
 
 	// Respond to on-demand facts requests from the farmer.
 	_, err = nc.Subscribe("imas.sprouts."+sproutID+".facts.request", func(m *nats.Msg) {
