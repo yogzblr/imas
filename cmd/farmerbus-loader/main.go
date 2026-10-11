@@ -299,7 +299,11 @@ func serveHealth(ctx context.Context, port string, mux http.Handler) error {
 		<-ctx.Done()
 		_ = hs.Close()
 	}()
-	go func() { _ = hs.Serve(ln) }()
+	go func() {
+		if err := hs.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Errorf("farmerbus-loader: health server: %v", err)
+		}
+	}()
 	return nil
 }
 
