@@ -712,6 +712,21 @@ func TestMySQLOutOfOrderVersionApplied(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Before the run: the binary built with 2 is not ready, although the
+	// schema's version (3) is its Latest, and WaitForSchema keeps waiting.
+	st, err := after.ReadState(ctx, db)
+	if err != nil || st.Missing != 2 || !errors.Is(after.Check(st), ErrSchemaBehind) {
+		t.Fatalf("before applying 2: state %+v, Check %v, %v; want Missing 2 and ErrSchemaBehind", st, after.Check(st), err)
+	}
+	wctx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	if err := WaitForSchema(wctx, db, after, t.Logf); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("WaitForSchema with 2 missing: %v, want it still waiting", err)
+	}
+	// The binary built without 2 is judged by its own versions.
+	if st, err := before.ReadState(ctx, db); err != nil || st.Missing != 0 || before.Check(st) != nil {
+		t.Fatalf("binary without 2: state %+v, %v", st, err)
+	}
 	res, err := Up(ctx, db, after, t.Logf)
 	if err != nil || !slices.Equal(res.Applied, []int64{2}) || res.From != 3 || res.To != 3 {
 		t.Fatalf("out-of-order run: %+v, %v; want 2 applied, From and To 3", res, err)
@@ -720,9 +735,12 @@ func TestMySQLOutOfOrderVersionApplied(t *testing.T) {
 	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'b'").Scan(&n); err != nil || n != 1 {
 		t.Fatalf("table b: %d, %v", n, err)
 	}
-	st, err := ReadState(ctx, db)
-	if err != nil || st.Version != 3 {
-		t.Fatalf("state %+v, %v; want version 3", st, err)
+	st, err = after.ReadState(ctx, db)
+	if err != nil || st.Version != 3 || st.Missing != 0 || after.Check(st) != nil {
+		t.Fatalf("state %+v, %v; want version 3, nothing missing", st, err)
+	}
+	if err := WaitForSchema(ctx, db, after, t.Logf); err != nil {
+		t.Fatalf("WaitForSchema after applying 2: %v", err)
 	}
 	if res, err := Up(ctx, db, after, t.Logf); err != nil || len(res.Applied) != 0 {
 		t.Fatalf("third run: %+v, %v", res, err)
