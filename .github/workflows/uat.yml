@@ -365,6 +365,12 @@ jobs:
           IMAS_UAT_UPGRADE_FROM_TAG: ${{ steps.inputs.outputs.upgrade_from_tag }}
           # The dispatch_flags input, through env only; L5 runs when it is on.
           DISPATCH_FLAGS: ${{ inputs.dispatch_flags }}
+          # An az session from the OIDC login stops renewing after about ten
+          # minutes (AADSTS700024); vmctl.sh runs this and repeats the call.
+          UAT_AZ_RELOGIN: ${{ github.workspace }}/uat/access/az-relogin.sh
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
         run: |
           set -euo pipefail
           if [ "$DISPATCH_FLAGS" = true ]; then export IMAS_UAT_DISPATCH_FLAGS=on; fi

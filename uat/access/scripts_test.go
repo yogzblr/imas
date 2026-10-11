@@ -51,5 +51,5 @@ func TestAccessScripts(t *testing.T) {
 
 func TestShellcheck(t *testing.T) {
 	need(t, "shellcheck")
-	run(t, "shellcheck", "tunnels.sh", "vmctl.sh", "tests/access_test.sh", "tests/stubs/az", "tests/stubs/systemctl")
+	run(t, "shellcheck", "tunnels.sh", "vmctl.sh", "az-relogin.sh", "tests/access_test.sh", "tests/stubs/az", "tests/stubs/systemctl")
 }
