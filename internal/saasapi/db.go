@@ -68,14 +68,15 @@ func checkDSN(dsn string) error {
 
 // Models is every table this package owns (tenants, provisioning_jobs,
 // enrollment_keys, asset_links, asset_action_batches, asset_action_items
-// — design doc §4.2; fleet_versions, tenant_update_policy — §4.3). The
+// — design doc §4.2; fleet_versions, fleet_release_checksums,
+// tenant_update_policy — §4.3). The
 // schema itself comes from internal/migrations' saas set; this list is
 // what that set's baseline is checked against (internal/migrations'
 // tests).
 func Models() []any {
 	return []any{&Tenant{}, &ProvisioningJob{}, &EnrollmentKey{}, &AssetLink{},
 		&AssetActionBatch{}, &AssetActionItem{},
-		&FleetVersion{}, &TenantUpdatePolicy{}}
+		&FleetVersion{}, &FleetReleaseChecksums{}, &TenantUpdatePolicy{}}
 }
 
 // migrateSchema creates Models' tables in a test's sqlite database. Tests

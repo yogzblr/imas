@@ -265,7 +265,7 @@ Update rollouts (below) add their own. Items failed before they were sent:
 | `rollout_window_closed` | the rollout window ended before the item's wave |
 | `tenant_not_active` | the tenant stopped being `active` before the item's wave (a resumed rollout) |
 | `update_already_in_progress` | no longer written (a second rollout is now refused with `409 update_in_progress`); items stored before that keep it |
-| `rollout_halted` | the rollout can't continue: an earlier wave failed its gate, or, for a resumed rollout, the version is no longer registered or a row's signature no longer verifies |
+| `rollout_halted` | the rollout can't continue: an earlier wave failed its gate, or, for a resumed rollout, the version is no longer registered or its rows no longer build the batch's params |
 | `sprout_reenroll_required` | farmer refused to send the update: the sprout has no payload-encryption key on record (as above) |
 | `self_update_disabled` | farmer refused the update unrun: its self-update switch (`IMAS_SELF_UPDATE_ENABLED`) is off. Not retried; an operator has to turn it on and start a new rollout |
 
@@ -281,10 +281,10 @@ codes a live one would.
 version, OS and arch, newest first: `version`, `os`, `arch`,
 `package_type`, `file_name`, `checksum_sha256`, `min_sprout_version`,
 `revoked`, `released_at`, `notes`. There is no URL: a sprout downloads
-`file_name` from the repository configured in the sprout itself. The
-signature is not returned. Rows are written only by the operator plane
-(below), and each is signed by `cmd/fleetreleaser` with the
-`imas-fleet-signing` Transit key ([`deploy/fleetreleaser/README.md`](../../deploy/fleetreleaser/README.md)).
+`file_name` from the repository configured in the sprout itself. Rows are
+written only by the operator plane (below), together with the release's
+GPG-signed `checksums.txt`, which the sprout alone verifies
+([signing design](../design/imas-openbao-signing-design.md) D9, D20).
 
 `GET`/`PATCH .../update-policy` read and set the tenant's
 `approved_version`, `auto_update` and rollout window. `null` clears a field.
@@ -403,11 +403,11 @@ logged.
 >
 > The path behind it is complete: saasapi sends farmer only the target
 > version for a `self_update`; farmer re-verifies that version against the
-> release catalog (approved by the tenant, registered, not revoked, every
-> row signed) and sends the sprout a one-step job carrying only the
-> version (FU.7); the sprout fetches its own signed manifest from farmer
-> (design doc §2.6, FU.1) and installs from its configured repository
-> (FU.2). Waves are health-gated (FU.6, below). Turning the flag on is a
+> release catalog (approved by the tenant, registered, not revoked) and
+> sends the sprout a one-step job carrying only the version (FU.7); the
+> sprout fetches its own manifest from farmer (design doc §2.6, FU.1),
+> verifies the release's GPG-signed checksums.txt against the keyring in
+> its package, and installs from its configured repository (FU.2). Waves are health-gated (FU.6, below). Turning the flag on is a
 > deployment decision, made by the Terraform UAT gate; saasapi logs a
 > warning at startup when it is on.
 
@@ -418,8 +418,8 @@ so the contract is on record for when it's enabled. With the flag on:
   is 1–25 and defaults to 5. `gate` is `job_status` (the default) or
   `dispatch`. `probe` is rejected, because the probe health signal it needs
   doesn't exist yet.
-- `target_version` must be in the catalog with every OS/arch row's Ed25519
-  signature valid (`500` otherwise), be the tenant's `approved_version`
+- `target_version` must be in the catalog (`400 unknown_version`; no
+  signature is checked here), be the tenant's `approved_version`
   (`409 version_not_approved`), not be revoked (`409 version_revoked`), and
   now must be inside the rollout window (`409 outside_rollout_window`).
 - **One rollout in progress per tenant.** While any `self_update` batch of
@@ -506,16 +506,14 @@ so the contract is on record for when it's enabled. With the flag on:
   still `queued` go out in waves of the original `batch_size` and `gate`.
   Before every resumed wave, approval, the window and revocation are
   checked as before, and also that the tenant is still `active`
-  (`tenant_not_active`) and the version is still registered with every
-  row's signature valid (`rollout_halted`). A resumed rollout reports the
+  (`tenant_not_active`) and the version is still registered with the rows
+  the batch was created from (`rollout_halted`). A resumed rollout reports the
   same codes a live one would; `rollout_halted` alone means it can't
   continue. An item left in `dispatching` is never re-sent: it fails with
   `dispatch_outcome_unknown` 75 seconds after its recorded dispatch (the
   reply wait plus margin), which fails the gate, halts the rest and frees
   the tenant's rollout slot. Queued rollout items don't expire: they wait
   for their wave by design, and every wave re-checks the policy instead.
-- saasapi also needs `IMAS_FLEETSIGN_OPENBAO_*` (read-only fleet key) with the
-  flag on, or it refuses to start.
 - Rate limit: one request per 10 seconds, burst 2, per pod.
 
 ## Outbox sweeper
@@ -550,11 +548,10 @@ credential. The tenant API has no `/v1/operator/...` routes, and the
 operator listener has no tenant routes.
 
 `cmd/saasapi` starts it when `SAASAPI_OPERATOR_LISTEN_ADDR` is set, after
-`SetDB` and `SetFleetKeySource`, and serves it with TLS next to the tenant
-API. The read-only fleet key (`IMAS_FLEETSIGN_OPENBAO_*`) is then required,
-as with the dispatch flag on. Any operator setting it can't use (a missing
-or unreadable certificate or token file, a non-https fleetreleaser URL, an
-operator token equal to another credential) stops saasapi at startup. If
+`SetDB`, and serves it with TLS next to the tenant API. It reads no signing
+key: saasapi signs nothing and verifies no fleet signature. Any operator
+setting it can't use (a missing or unreadable certificate or token file, an
+operator token equal to the BFF secret) stops saasapi at startup. If
 either listener fails, both are shut down and saasapi exits non-zero; on
 SIGTERM both are shut down together, with 15 seconds for in-flight requests.
 A registration cut off by that is safe to retry: its rows are written in
@@ -569,8 +566,8 @@ one transaction, and re-registering a stored release is a 200 no-op.
 constant time with the token in `SAASAPI_OPERATOR_TOKEN_FILE` and, during a
 rotation, `SAASAPI_OPERATOR_TOKEN_PREVIOUS_FILE`. Nothing else is
 accepted: not the BFF's `X-Internal-Auth` secret, not a Keycloak JWT.
-saasapi refuses to start the operator plane if the operator token equals the
-BFF secret or its own fleetreleaser token. Every failure is the same
+saasapi refuses to start the operator plane if the operator token equals
+`INTERNAL_AUTH_SECRET_CURRENT` or `_PREVIOUS`. Every failure is the same
 `401 unauthorized`. The intended caller is the farmer Helm release's
 post-install/post-upgrade hook Job (FU.5).
 
@@ -586,7 +583,9 @@ post-install/post-upgrade hook Job (FU.5).
       "file_name": "imas-sprout_2.4.1_amd64.deb", "checksum_sha256": "<64 lowercase hex>" },
     { "os": "windows", "arch": "amd64", "package_type": "msi",
       "file_name": "imas-sprout_2.4.1_amd64.msi", "checksum_sha256": "<64 lowercase hex>" }
-  ]
+  ],
+  "checksums_txt": "<checksums.txt, verbatim>",
+  "checksums_sig": "<checksums.txt.sig, standard padded base64>"
 }
 ```
 
@@ -597,21 +596,30 @@ post-install/post-upgrade hook Job (FU.5).
   `deb` or `rpm` (`os: linux`) or `msi` (`os: windows`) and `file_name` ends
   in `.<package_type>`; at most one package per `os`/`arch`/`package_type`
   (a linux/amd64 release has both a `deb` and an `rpm`), 1 to 16 of
-  them; `channel` is `[a-z][a-z0-9_-]{0,31}`. Unknown fields are refused.
+  them; `channel` is `[a-z][a-z0-9_-]{0,31}`; `checksums_txt` is 1 byte to
+  128 KiB and `checksums_sig` is standard padded base64 decoding to 1 byte
+  to 8 KiB, both required. Unknown fields are refused; the body limit is
+  512 KiB.
+- `checksums_txt` is parsed whole with the sprout's strict rules (every
+  non-empty line `<64 lowercase hex>  <file name>`, no duplicate file
+  name): any bad line is `422 invalid_checksums`, naming the line number.
+  Each package's `file_name` must be a line of it with `checksum_sha256` as
+  its hash, else `422 checksums_mismatch`, naming the file. saasapi does not
+  verify the GPG signature (the sprout is the only verifier) and signs
+  nothing.
 - Releases are immutable. If an `os`/`arch`/`package_type` is already
   registered for the version with a different `file_name` or
   `checksum_sha256`, or the version has a different `min_sprout_version`,
-  the request is `409 release_conflict` and nothing changes.
-- Same version, same contents: `200` with `"created": 0`, without calling
-  fleetreleaser. Re-running the hook is always safe.
-- Packages for an `os`/`arch`/`package_type` the version doesn't have yet are signed by
-  `cmd/fleetreleaser` (one call each), every signature is checked against
-  the read-only `imas-fleet-signing` key set, and the new rows are written in
-  one transaction: `201`. Any failure stores nothing: fleetreleaser
-  declining (for example a version at or below its floor) is
-  `422 signing_refused` with its code in `details.signer_error`; a signer
-  error or a signature that doesn't verify is `502 signer_unavailable`; no
-  read-only key source is `503 signing_unavailable`.
+  `checksums_txt` or `checksums_sig`, the request is `409 release_conflict`
+  and nothing changes.
+- Same version, same contents: `200` with `"created": 0`. Re-running the
+  hook is always safe.
+- Packages for an `os`/`arch`/`package_type` the version doesn't have yet
+  are written in one transaction, with the version's checksums
+  (`saas.fleet_release_checksums`) if it has none yet: `201`. A version
+  registered before P22 (rows, no checksums) gets its checksums stored by a
+  matching re-registration (`201`, `"created": 0`). Any failure stores
+  nothing.
 - A revoked version takes no new packages (`409 version_revoked`);
   re-registering its existing contents is a `200` no-op that leaves it
   revoked.
@@ -620,7 +628,7 @@ post-install/post-upgrade hook Job (FU.5).
 
 The response describes every row of the version after the request:
 `version`, `min_sprout_version`, `revoked`, `created` and `packages`
-(each with its `signature`).
+(`os`, `arch`, `package_type`, `file_name`, `checksum_sha256`).
 
 **`POST /v1/operator/fleet-releases/{version}/revoke`** marks every row of the
 version revoked: no rollout of it is created or continued, no tenant can
@@ -657,13 +665,9 @@ error, never a silent default.
 | `SAASAPI_OUTBOX_ACTION_MAX_AGE` | `15m` | a queued action item not sent this long after its POST fails with `expired_not_sent`, never sent; `1m`–`1h` |
 | `SAASAPI_OUTBOX_MAX_ATTEMPTS` | `5` | publishes of a job, or dispatches of an item, before it is failed; `1`–`50` |
 | `SAASAPI_OUTBOX_LEASE_TTL` | `2m` | how long a lease lasts unrenewed: how soon a dead pod's batch or rollout is taken over; `15s`–`1h` |
-| `SAASAPI_OPERATOR_LISTEN_ADDR` | empty (off) | operator plane HTTPS listener; with it set, the next five are required |
+| `SAASAPI_OPERATOR_LISTEN_ADDR` | empty (off) | operator plane HTTPS listener; with it set, the certificate, key and `SAASAPI_OPERATOR_TOKEN_FILE` are required |
 | `SAASAPI_OPERATOR_TLS_CERT_FILE` / `_KEY_FILE` | — | the operator listener's certificate and key |
 | `SAASAPI_OPERATOR_TOKEN_FILE` / `_PREVIOUS_FILE` | — / empty | operator bearer token(s), as mounted Secret files |
-| `SAASAPI_FLEETRELEASER_URL` | — | `cmd/fleetreleaser`'s `https://host:port` |
-| `SAASAPI_FLEETRELEASER_TOKEN_FILE` | — | the token saasapi presents to fleetreleaser, as a file |
-| `SAASAPI_FLEETRELEASER_CA_FILE` | system roots | CA bundle for fleetreleaser's certificate |
-| `IMAS_FLEETSIGN_OPENBAO_*`, `IMAS_FLEETSIGN_TRANSIT_KEY` | — | read-only view of the fleet signing key (`internal/fleetsign`); required with the dispatch flag on or the operator plane on |
 | `SAASAPI_RECIPES_S3_ENDPOINT` | empty (off) | the recipe bucket's S3/MinIO `host:port`; with it set, the next three are required |
 | `SAASAPI_RECIPES_S3_BUCKET`, `SAASAPI_RECIPES_S3_ACCESS_KEY_ID` | — | the recipe bucket (farmer's `IMAS_S3_BUCKET`) and saasapi's **own** access key id, limited to `tenants/*/recipes/*` |
 | `SAASAPI_RECIPES_S3_SECRET_ACCESS_KEY_FILE` | — | its secret key, as a mounted file |

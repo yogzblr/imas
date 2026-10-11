@@ -13,14 +13,12 @@ import (
 	"fmt"
 	"net/http"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/valkey-io/valkey-go"
 
-	"github.com/yogzblr/imas/internal/fleetsign"
 	"github.com/yogzblr/imas/internal/heartbeat"
 	log "github.com/yogzblr/imas/internal/log"
 	"github.com/yogzblr/imas/internal/migrations"
@@ -115,17 +113,6 @@ func main() {
 	saasapi.SetBus(nc)
 	log.Infof("saasapi: connected to the NATS bus at %s", nc.ConnectedUrl())
 
-	// Before NewOperatorServer, whose registration handler verifies every
-	// signature against this key source.
-	keys, err := fleetKeySource(cfg)
-	if err != nil {
-		log.Fatalf("saasapi: %v", err)
-	}
-	if keys != nil {
-		saasapi.SetFleetKeySource(keys)
-		log.Infof("saasapi: fleet signing key source configured (read-only, Transit key %s)", keys.KeyName())
-	}
-
 	// Plain HTTP: TLS termination is assumed to happen at the gateway
 	// (Envoy, workstream H) in front of this service, consistent with the
 	// design doc's architecture diagram (§0) showing CloudXP/tenants
@@ -185,39 +172,10 @@ func newRouter(cfg saasapi.Config) *http.ServeMux {
 	return saasapi.NewRouter()
 }
 
-// fleetKeySource builds saasapi's READ-ONLY view of the
-// imas-fleet-signing Transit key (IMAS_FLEETSIGN_OPENBAO_*, design doc
-// §2.5). POST .../sprouts/updates verifies each catalog row against it,
-// and the operator plane's release registration verifies every signature
-// fleetreleaser returns against it before storing one. It is nil when
-// neither fleet update dispatch nor the operator plane is on, and an
-// error when either is on but it isn't configured: a replica that
-// accepted rollouts or registrations it couldn't verify would refuse
-// every one of them anyway. The token must carry only the
-// imas-fleet-verify policy — saasapi already writes saas.fleet_versions
-// and must never also be able to sign it (deploy/fleetreleaser/README.md).
-func fleetKeySource(cfg saasapi.Config) (*fleetsign.TransitKeySource, error) {
-	var needs []string
-	if cfg.FleetUpdateDispatchEnabled {
-		needs = append(needs, "fleet update dispatch")
-	}
-	if cfg.OperatorListenAddr != "" {
-		needs = append(needs, "the operator plane")
-	}
-	if len(needs) == 0 {
-		return nil, nil
-	}
-	src, err := fleetsign.NewTransitKeySourceFromEnv()
-	if err != nil {
-		return nil, fmt.Errorf("%s is enabled but the fleet signing key isn't configured: %w", strings.Join(needs, " and "), err)
-	}
-	return src, nil
-}
-
 // newOperatorServer builds the operator-plane HTTPS server (release
 // registration, design doc §2.5) when SAASAPI_OPERATOR_LISTEN_ADDR is
-// set, and returns nil when it isn't. Call it after saasapi.SetDB and
-// saasapi.SetFleetKeySource: its handlers use both.
+// set, and returns nil when it isn't. Call it after saasapi.SetDB: its
+// handlers use the database.
 func newOperatorServer(cfg saasapi.Config) (*http.Server, error) {
 	if cfg.OperatorListenAddr == "" {
 		return nil, nil

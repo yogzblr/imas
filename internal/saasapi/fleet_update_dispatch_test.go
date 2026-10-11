@@ -44,7 +44,6 @@ func newUpdateTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("creating farmer.props: %v", err)
 	}
 	enableFleetUpdateDispatch(t)
-	withTestFleetKeys(t)
 	return gdb
 }
 
@@ -331,29 +330,6 @@ func TestCreateFleetUpdateBatch_Validation(t *testing.T) {
 	gdb.Model(&AssetActionBatch{}).Where("tenant_id IN ?", []string{tid, other, windowed, pending}).Count(&n)
 	if n != 0 {
 		t.Fatalf("%d batches written for rejected requests", n)
-	}
-}
-
-func TestCreateFleetUpdateBatch_UnusableCatalogEntry(t *testing.T) {
-	gdb := newUpdateTestDB(t)
-	tid := mustCreateActiveTenant(t, gdb)
-	// Rows that could only be in the table by a write that skipped
-	// registration: a malformed checksum, and a file name with a path.
-	for _, v := range []FleetVersion{
-		{ID: "fv_sum", Version: "v8.0.1", OS: "linux", Arch: "amd64", PackageType: "deb", FileName: "imas-sprout_8.0.1_amd64.deb",
-			ChecksumSHA256: "abc", MinSproutVersion: "v0.0.0", Signature: "v1:" + strings.Repeat("A", 86) + "=="},
-		{ID: "fv_path", Version: "v8.0.2", OS: "linux", Arch: "amd64", PackageType: "deb", FileName: "../imas-sprout.deb",
-			ChecksumSHA256: strings.Repeat("ab", 32), MinSproutVersion: "v0.0.0", Signature: "v1:" + strings.Repeat("A", 86) + "=="},
-	} {
-		v.ReleasedAt = time.Now()
-		if err := gdb.Create(&v).Error; err != nil {
-			t.Fatal(err)
-		}
-		mustApprove(t, gdb, tid, v.Version)
-		code, resp := postUpdates(t, tid, map[string]any{"asset_ids": []string{"a1"}, "target_version": v.Version})
-		if code != 500 || resp["error"] != "internal_error" || strings.Contains(fmt.Sprint(resp), "imas-sprout") {
-			t.Fatalf("%s: %d %v", v.Version, code, resp)
-		}
 	}
 }
 
@@ -1060,7 +1036,7 @@ func TestFleetUpdate_MixedPlatformsResolvePerSprout(t *testing.T) {
 }
 
 // mustPublishRelease registers v (Version, OS, Arch, PackageType and
-// MinSproutVersion set by the caller) signed with the test fleet key.
+// MinSproutVersion set by the caller).
 func mustPublishRelease(t *testing.T, gdb *gorm.DB, v FleetVersion) {
 	t.Helper()
 	id, err := newID("fv_")
@@ -1071,7 +1047,6 @@ func mustPublishRelease(t *testing.T, gdb *gorm.DB, v FleetVersion) {
 	v.FileName = "imas-sprout_" + strings.TrimPrefix(v.Version, "v") + "_" + v.OS + "_" + v.Arch + "." + v.PackageType
 	v.ChecksumSHA256 = strings.Repeat("cd", 32)
 	v.ReleasedAt = time.Now().UTC()
-	v.Signature = signTestRelease(t, v)
 	if err := gdb.Create(&v).Error; err != nil {
 		t.Fatalf("registering %s %s: %v", v.Version, v.releaseKey(), err)
 	}
@@ -1361,5 +1336,31 @@ func TestFleetUpdate_JobStatusGateIgnoresOtherTenantsIndexRows(t *testing.T) {
 	}
 	if it := got.Items[1]; it.Status != ActionItemFailed || it.Error != errCodeRolloutHalted {
 		t.Errorf("upd-02 = %+v, want failed rollout_halted", it)
+	}
+}
+
+func TestSelfUpdateParams(t *testing.T) {
+	v := FleetVersion{Version: "v1.0.0", OS: "linux", Arch: "amd64", PackageType: "deb"}
+	w := v
+	w.OS, w.PackageType = "windows", "msi"
+	params, err := selfUpdateParams(t.Context(), []FleetVersion{v, w})
+	if err != nil {
+		t.Fatalf("valid rows refused: %v", err)
+	}
+	// Only the version: no URL, file name, checksum or signature.
+	if string(params) != `{"version":"v1.0.0"}` {
+		t.Fatalf("params = %s", params)
+	}
+	// And it is exactly what farmer accepts.
+	if p, err := controlplane.DecodeSelfUpdateParams(params); err != nil || p.Version != "v1.0.0" {
+		t.Fatalf("farmer's decoder refuses saasapi's params %s: %v", params, err)
+	}
+	if _, err := selfUpdateParams(t.Context(), nil); err == nil {
+		t.Fatal("params built from no rows")
+	}
+	other := w
+	other.Version = "v1.0.1"
+	if _, err := selfUpdateParams(t.Context(), []FleetVersion{v, other}); err == nil {
+		t.Fatal("params built from rows of two versions")
 	}
 }

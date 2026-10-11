@@ -188,8 +188,7 @@ func TestParseTransitEd25519PublicKey(t *testing.T) {
 //	  go test ./internal/gatewayjwt -run TestOpenBaoLive -v
 //
 // and is skipped otherwise. It mounts Transit at a fresh random path and
-// removes the mount when done. Same env vars as cmd/fleetreleaser's
-// TestOpenBaoEnforcesReadOnlyFleetKey.
+// removes the mount when done.
 func TestOpenBaoLive_JWKSServesMintedTokenKey(t *testing.T) {
 	addr, rootToken := os.Getenv("IMAS_TEST_OPENBAO_ADDR"), os.Getenv("IMAS_TEST_OPENBAO_TOKEN")
 	if addr == "" || rootToken == "" {

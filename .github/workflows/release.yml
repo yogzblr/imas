@@ -20,7 +20,7 @@ name: Release
 # This creates a draft GitHub release (archives, rpm/deb/apk, the MSI,
 # checksums.txt with its GPG .sig and cosign .sigstore.json) and pushes the
 # signed multi-arch images to GHCR
-# (ghcr.io/yogzblr/imas-{farmer,sprout,saasapi,farmerbus,fleetreleaser,migrate}).
+# (ghcr.io/yogzblr/imas-{farmer,sprout,saasapi,farmerbus,migrate}).
 # Publishing that release (a maintainer's review step) is what uploads the OS
 # packages and then the Helm charts to Buildkite: see publish-packages.yml.
 on:

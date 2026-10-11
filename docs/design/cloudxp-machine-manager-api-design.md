@@ -206,21 +206,22 @@ configured **in the sprout**, exactly as the Ansible role `imas_sprout`
 installs them (apt / rpm / zypper repositories, or the Windows feed or MSI
 URL; requirement 20). imas does not host or serve artifacts and an update
 command never carries an artifact URL. What imas controls is the
-**manifest**: which versions exist, their per-OS/arch file names and
-checksums, and which version each tenant may run. The sprout:
+**manifest**: which versions exist, each release's GPG-signed
+`checksums.txt`, and which version each tenant may run. The sprout:
 
 1. asks farmer for the update manifest for its own OS/arch over the
    authenticated recipe HTTP endpoint (JWT, `SproutRootCA`-pinned), §2.6;
-2. verifies the manifest signature against the public keyring shipped with
-   the sprout package (§2.5);
-3. downloads the named file from its **configured repo** over ordinary
+2. verifies `checksums.txt.sig` against the GPG keyring shipped with the
+   sprout package and derives its own package file name (§2.5);
+3. downloads that file from its **configured repo** over ordinary
    HTTPS using the OS trust store (`SproutRootCA` is *not* used for this
    hop; the repo is an external host) and its configured proxy, with no
    JWT and, for private repos, the same repo token the Ansible role
    supports;
-4. checks the file's SHA-256 against the signed manifest and only then
-   installs it from that local file (`dpkg -i`, `rpm -U`, `msiexec`), so
-   the installed bytes are exactly what imas signed. Repo package
+4. checks the file's SHA-256 against its line in the signed
+   `checksums.txt` and only then installs it from that local file
+   (`dpkg -i`, `rpm -U`, `msiexec`), so the installed bytes are exactly
+   what the release signed. Repo package
    signatures (GPG) are checked in addition, not instead.
 
 Release registration is wired into the **farmer Helm release** (§2.5): the
@@ -231,8 +232,9 @@ CI call into saasapi.
 **Status (2026-10-02).** Built and merged: the sprout-side fetch, verify and
 install (items 1–4, Linux paths tested end to end against a real
 repository; the Windows MSI path is tested with `msiexec` mocked), farmer's
-manifest endpoint (§2.6), release registration and `fleetreleaser` as a
-signing service (§2.5), the Helm release hook, per-OS/arch `fleet_versions`,
+manifest endpoint (§2.6), release registration (§2.5; since P22 slice 2
+the trust root is the release's GPG-signed `checksums.txt`, not a Transit
+signature), the Helm release hook, per-OS/arch `fleet_versions`,
 the version floor, and the health-gated waves (§2.3). The dispatch routes
 below, `POST /tenants/{tenant_id}/sprouts/updates` and its poll endpoint,
 are **still behind `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` (default off)**
@@ -362,7 +364,7 @@ alongside `cmd.run`/`cook` (§1.8):
 
 The command is sealed like other dispatches (`box1`, purpose-bound) and
 carries **no** artifact URL, checksum or signature. The sprout resolves
-those itself from the signed manifest (§2.6) and its own configured repo
+those itself from the manifest and its signed `checksums.txt` (§2.6) and its own configured repo
 (§1.8). Farmer still checks the sprout's stored `tenant_id` against the
 caller's before dispatch.
 
@@ -377,18 +379,18 @@ farmer at all** — the failure mode is categorically worse. Before any
   ordinary actions (default wave 5, max 25) — don't inherit the
   general-purpose defaults.
 - **Install goes through the OS installer, from a verified local file.**
-  The sprout verifies the manifest signature and the file SHA-256 first,
+  The sprout verifies the `checksums.txt` signature and the file SHA-256 first,
   then installs (`dpkg -i`, `rpm -U`, `msiexec`). The package manager,
   not custom swap code, owns replacement, service restart and file
   placement, so `internal/update`'s backup/rename/restore scaffolding is
   retired rather than finished. Windows relies on the MSI's own
   in-use-file handling.
 - **Downgrade and replay protection.** The sprout refuses any version
-  lower than the one it runs unless the signed manifest carries an
-  explicit, signed `allow_downgrade` for that version. `allow_downgrade`
-  is not in the manifest format yet; adding it means a new message tag
-  (§2.5). Each manifest also carries a signed `min_sprout_version`
-  (§2.5), the oldest sprout the current farmer still supports.
+  lower than the one it runs. There is no `allow_downgrade`; adding one
+  would need a signed carrier, since the manifest's own fields are
+  unsigned. Each manifest also carries `min_sprout_version`, the oldest
+  sprout the current farmer still supports: unsigned farmer policy that
+  the sprout enforces (signing design D19).
 - **Health-based gating.** A wave is complete only when each sprout
   reconnects and reports the *new* version (from facts), not merely when
   the command was acked. Waves reuse the batch-and-gate mechanism
@@ -420,84 +422,63 @@ Unlike everything else in §2, this route is deliberately **not** on the privile
 
 Contains the **gateway signing key's** public key only (see `imas-nats-jwt-auth-design.md`'s key-custody section) — one entry, or two during the gateway key's own rotation overlap window (old + new `kid`). Never grows with tenant count: this is not a per-tenant Account-key JWKS, since Envoy's `jwt_authn` check never needs tenant granularity. Farmer already holds this public key (fetched from OpenBao alongside the signing operation itself), so this route is a pure data-transformation read, no new secret access.
 
-### 2.5 Fleet release signing — one signer, Helm-driven registration
+### 2.5 Fleet release trust — GPG-signed checksums.txt, Helm-driven registration
 
-A `saas.fleet_versions` row is trusted because it is signed, not because
-of who wrote it. The signature is Ed25519 over the canonical string
+A release is trusted because its `checksums.txt` carries a valid GPG
+signature from the release key, not because of who stored it or served
+it. GoReleaser publishes `checksums.txt` (every package and the MSI) and
+its detached signature `checksums.txt.sig`; the sprout verifies that
+signature with the keyring shipped in its package
+(`/etc/imas/fleet-signing-keys.asc`, built from the repo's
+`gpg-public-key.asc`). Detail and rationale:
+[`imas-openbao-signing-design.md`](imas-openbao-signing-design.md) §4.1
+(D9, D12, D19, D20, D21).
 
-```
-imas-fleet-manifest-v1|version|os|arch|file_name|checksum_sha256|min_sprout_version
-```
-
-built by `internal/fleetsign` (`Manifest.Message`), the one encoder shared
-by the signer and every verifier.
-
-- **Six signed fields, every manifest field but the signature.**
-  `min_sprout_version` is signed so that nobody between fleetreleaser and
-  the sprout (farmer included) can lower the floor and let a sprout too
-  old for a release take it, or raise it to strand sprouts.
-- **Deliberately no URL.** The URL comes from the sprout's own repo
+- **The sprout is the only verifier** (D20). saasapi and farmer verify no
+  signature and hold no fleet signing key; there is no Transit key and no
+  signing service on this path.
+- **The sprout derives its own file name** from its OS, arch, package type
+  and the version (`imas-sprout_<version without v>_linux_<arch>.<deb|rpm>`,
+  `imas-sprout-<version without v>-windows-<x64|x86|arch>.msi`), takes
+  that one line's hash from the strictly parsed `checksums.txt` (every
+  non-empty line `<64 lowercase hex>  <file name>`, no duplicates), and
+  requires the downloaded file's SHA-256 to match.
+- **Deliberately no URL.** The package comes from the sprout's own repo
   config.
-- **A domain-separation tag** (`imas-fleet-manifest-v1`) comes first.
-  Nothing else signed with this key, including the earlier
-  `version|artifact_url|checksum_sha256` message, can verify as a
-  manifest. A format change gets a new tag.
-- **Strict validation, never normalization.** Each field is validated
-  before signing or verifying:
-  - no field may be empty or contain `|` or a control character;
-  - `version` and `min_sprout_version` are canonical semver with a
-    leading `v`, and `min_sprout_version` ≤ `version`;
-  - `os` and `arch` are lowercase `[a-z0-9_]`;
-  - `file_name` is a single plain file name;
-  - `checksum_sha256` is 64 lowercase hex characters.
-
-  A value is never rewritten to make it pass (an uppercase checksum is
-  refused, not lowercased).
-
-The signature is made with the OpenBao Transit key `imas-fleet-signing`
-(non-exportable, separate from the gateway JWT key) and stored as
-`signature = "v<key version>:<base64>"`.
+- **`min_sprout_version` and the approved version are unsigned farmer
+  policy** (D19). A compromised farmer can choose which signed release a
+  sprout may take, never an unsigned one; the sprout keeps its downgrade
+  refusal.
+- **Strict validation, never normalization.** A value is never rewritten
+  to make it pass (an uppercase checksum is refused, not lowercased).
 
 **Registration flow.** The farmer Helm chart carries the sprout release
-(`sprout.release`: version, channel, and per-OS/arch package name, file
-name, sha256 — from the goreleaser `checksums.txt` of that release).
+(`sprout.release`: version, channel, per-OS/arch package type, file name,
+sha256, and `checksums_txt` / `checksums_sig`), written by
+`packaging/helm/stamp-sprout-release.sh`, which verifies
+`checksums.txt.sig` with `gpg` against `gpg-public-key.asc` first.
 
 1. A `post-upgrade` (and `post-install`) Helm hook Job calls saasapi's
    operator-plane release-registration endpoint. It is not tenant-facing
    and uses an operator credential.
-2. saasapi validates the entry (well-formed, version above the floor, and
-   optionally that the file in the configured repo matches the checksum).
-3. saasapi calls `fleetreleaser` to sign.
-4. saasapi writes the signed rows to `saas.fleet_versions`; saasapi is the
-   only writer of the `saas` schema.
-5. Registering the same version with the same checksums is a no-op (so
+2. saasapi validates the entry, parses `checksums_txt` with the sprout's
+   rules, and requires every package's `file_name` and `checksum_sha256`
+   to be a line of it. It does not verify the signature.
+3. saasapi writes the rows to `saas.fleet_versions` and the two files,
+   verbatim, to `saas.fleet_release_checksums`, in one transaction;
+   saasapi is the only writer of the `saas` schema.
+4. Registering the same version with the same content is a no-op (so
    `helm upgrade` re-runs are safe); the same version with different
-   checksums is rejected.
+   content is rejected (409).
 
-| Who | Transit access on `imas-fleet-signing` | Does |
-|---|---|---|
-| `cmd/fleetreleaser` | **sign** + read public key (`imas-fleet-signer`) | A stateless internal signing API. Only saasapi may call it (mTLS or a service token). It has **no DB access**. It signs a canonical manifest entry and enforces format and version-floor rules. |
-| saasapi | read + verify only (`imas-fleet-verify`) | Calls the signer, stores the result, and refuses to create a rollout (§1.8) from a row whose signature is missing or invalid. |
-| farmer | read + verify only (`imas-fleet-verify`, its own role) | Serves the manifest to sprouts (§2.6) read-only from `saas.fleet_versions`; re-verifies before it dispatches a `self_update`. |
-| sprout | none | Verifies manifests against the public keyring **shipped in its package/config** (a key ID list), not fetched over NATS. |
-
-**Why the split.** saasapi has PXC write access to `saas.fleet_versions`
-(§4.1). If the same identity could also sign with Transit, one compromised
-saasapi process could publish a "release" every sprout would install. So
-writing a row and signing it stay two trust boundaries with two OpenBao
-policies and two tokens: fleetreleaser is the only signer and is a separate
-binary; saasapi and farmer are read-only, enforced by OpenBao
-(`TestOpenBaoEnforcesReadOnlyFleetKey`). A missing signature is always a
-refusal, at every hop, with no checksum-only fallback.
-
-**Key rotation.** The keyring shipped with the sprout is the trust root, so
-a new key version is added to the keyring in a sprout release signed by the
-old key, and retired only after no approved tenant version depends on it
-(`deploy/fleetreleaser/README.md`, "Rotating the key"). Farmer never hands
-a sprout a fleet signing key: there is no key-set request over NATS, no
-`fleet_signing_jwks` in the enrollment response (§3.2) and no fleet-signing
-JWKS endpoint (all removed in CL.1), which keeps the bus and farmer out of
-the sprout's trust chain for releases.
+**Key rotation.** The keyring shipped with the sprout is the trust root.
+A new GPG key is added to the keyring in a sprout release signed by the
+old key, and the old key is removed only when no approved version needs
+it. Key expiry is not enforced; a revoked key is refused. Farmer never
+hands a sprout a fleet signing key: there is no key-set request over
+NATS, no `fleet_signing_jwks` in the enrollment response (§3.2) and no
+fleet-signing JWKS endpoint (all removed in CL.1), which keeps the bus
+and farmer out of the sprout's trust chain for releases.
 
 **Withdrawing a version.** `helm rollback` does not unregister a sprout
 version; sprouts already on it keep it because they refuse downgrades. A bad
@@ -514,11 +495,12 @@ authenticated with the sprout JWT (requirement 11). Farmer reads
 §4.1) and returns the row for the caller's tenant, OS, arch and package
 type (`deb`, `rpm` or `msi`; one linux/amd64 binary ships as both a .deb
 and an .rpm, so a release has one row per OS, arch and package type), only
-for a version the tenant has approved. Response: `version`, `os`, `arch`,
-`file_name`, `checksum_sha256`, `min_sprout_version`, `signature`. There is
-no URL; the sprout finds the package in its configured repository by
-reading that repository's own index (apt `Packages`, rpm `repodata`, NuGet
-flat container) for the entry with the signed `checksum_sha256`.
+for a version the tenant has approved and that has a
+`saas.fleet_release_checksums` row. Response: exactly `version`, `os`,
+`arch`, `package_type`, `min_sprout_version`, `checksums_txt` and
+`checksums_sig` (base64). There is no URL, file name or checksum; farmer
+verifies no signature. The sprout verifies `checksums_sig`, derives its
+file name, and downloads it from its configured repository (§2.5).
 
 ## 3. Sprout enrollment flow
 
@@ -641,7 +623,9 @@ asset_action_items    (batch_id, asset_id, sprout_id, jid, status)
 fleet_versions        (id, version, os, arch, package_type, file_name, checksum_sha256,
                         min_sprout_version, signature, revoked, released_at, notes)
                         -- one row per OS/arch/package type; UNIQUE(version, os, arch, package_type)
-                        -- signature: produced only by cmd/fleetreleaser, stored by saasapi (§2.5)
+                        -- signature: unused since P22, written as ''; a later migration drops it
+fleet_release_checksums (version PK, checksums_txt MEDIUMTEXT, checksums_sig TEXT, created_at)
+                        -- the release's checksums.txt and base64 checksums.txt.sig, verbatim (§2.5)
 tenant_update_policy  (tenant_id PK, approved_version, auto_update BOOLEAN,
                         rollout_window_start, rollout_window_end, updated_at)
 ```

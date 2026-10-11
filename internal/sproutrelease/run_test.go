@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -31,7 +32,9 @@ const testRequest = `{
   "min_sprout_version": "v1.0.0",
   "packages": [
     {"os": "linux", "arch": "amd64", "package_type": "deb", "file_name": "imas-sprout_1.2.3_linux_amd64.deb", "checksum_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
-  ]
+  ],
+  "checksums_txt": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  imas-sprout_1.2.3_linux_amd64.deb\n",
+  "checksums_sig": "c2lnbmF0dXJl"
 }
 `
 
@@ -231,6 +234,12 @@ func TestRegisterConfigErrors(t *testing.T) {
 		}},
 		{"no min_sprout_version", "min_sprout_version", func(o *options) {
 			o.requestFile = writeFile(t, "r.json", strings.Replace(testRequest, `"min_sprout_version": "v1.0.0",`, "", 1))
+		}},
+		{"no checksums_txt", "checksums_txt", func(o *options) {
+			o.requestFile = writeFile(t, "r.json", regexp.MustCompile(`"checksums_txt": "[^"]*"`).ReplaceAllString(testRequest, `"checksums_txt": ""`))
+		}},
+		{"empty checksums_sig", "checksums_sig", func(o *options) {
+			o.requestFile = writeFile(t, "r.json", strings.Replace(testRequest, `"c2lnbmF0dXJl"`, `""`, 1))
 		}},
 		{"two JSON values", "more than one JSON value", func(o *options) { o.requestFile = writeFile(t, "r.json", testRequest+"{}") }},
 		{"empty token", "operator token", func(o *options) { o.tokenFile = writeFile(t, "t", "") }},

@@ -76,12 +76,11 @@ tags:
       off, which is the default, neither route exists and both paths
       return the ServeMux's plain-text 404. Turning it on is a deployment
       decision: saasapi sends farmer only the target version, farmer
-      re-verifies it against the release catalog before dispatching, and
-      the sprout fetches its own signed manifest (design doc §2.6) and
-      installs from its configured repository. saasapi logs a warning at
-      startup when the flag is on.
-      With the flag on, saasapi also needs the read-only fleet signing key
-      (`IMAS_FLEETSIGN_OPENBAO_*`) or it refuses to start.
+      re-checks it against the release catalog before dispatching, and
+      the sprout fetches its own manifest (design doc §2.6), verifies the
+      release's GPG-signed checksums.txt itself and installs from its
+      configured repository. saasapi logs a warning at startup when the
+      flag is on.
 
 paths:
   /v1/tenants:
@@ -509,8 +508,9 @@ paths:
         One entry per version, OS and arch, newest first, not paginated.
         The same catalog for every tenant, so there is no organization
         check. Rows are written only by the operator plane's release
-        registration, each signed by `cmd/fleetreleaser`. The signature is
-        not exposed, and there is no URL: a sprout downloads `file_name`
+        registration, with the release's GPG-signed checksums.txt (not
+        exposed here; the sprout alone verifies it). There is no URL: a
+        sprout downloads `file_name`
         from its own configured repository. Revoked versions are listed
         with `revoked: true`.
       responses:
@@ -802,8 +802,8 @@ paths:
 
         Checks, in order, before anything is written: tenant active; body
         valid (strict decode, 64 KiB cap); `target_version` in the catalog
-        with every OS/arch row's Ed25519 signature valid against
-        `imas-fleet-signing`; it is the tenant's `approved_version`; it is
+        (no signature is checked here); it is the tenant's
+        `approved_version`; it is
         not revoked; now is inside the rollout window, if one is set. The
         farmer params carry only the version: each sprout resolves its own
         OS/arch manifest, so one batch may span OS and arch. From each
@@ -862,7 +862,7 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500":
-          description: "`internal_error`, including a catalog entry whose rows fail the manifest or signature checks, or sprout facts that couldn't be read."
+          description: "`internal_error`, including sprout facts that couldn't be read."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

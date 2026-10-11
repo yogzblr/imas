@@ -163,69 +163,13 @@ func TestNewRouterOutboxSettings(t *testing.T) {
 	}
 }
 
-// clearFleetSignEnv unsets the IMAS_FLEETSIGN_* settings for the test, so
-// the developer's environment can't configure a key source behind its back.
-func clearFleetSignEnv(t *testing.T) {
-	t.Helper()
-	for _, kv := range os.Environ() {
-		if name, _, _ := strings.Cut(kv, "="); strings.HasPrefix(name, "IMAS_FLEETSIGN_") {
-			t.Setenv(name, "")
-			os.Unsetenv(name)
-		}
-	}
-}
-
-// TestFleetKeySource: the read-only fleet key source is built only when
-// fleet update dispatch or the operator plane is on, and is then
-// required: either one without IMAS_FLEETSIGN_OPENBAO_* is a startup
-// error, which main makes fatal.
-func TestFleetKeySource(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		dispatch   bool
-		operator   string
-		configured bool
-		wantSource bool
-		wantErr    string
-	}{
-		{name: "both off, unconfigured"},
-		{name: "both off, configured", configured: true},
-		{name: "dispatch on, unconfigured", dispatch: true, wantErr: "fleet update dispatch is enabled"},
-		{name: "operator on, unconfigured", operator: ":8443", wantErr: "the operator plane is enabled"},
-		{name: "both on, unconfigured", dispatch: true, operator: ":8443", wantErr: "fleet update dispatch and the operator plane is enabled"},
-		{name: "dispatch on, configured", dispatch: true, configured: true, wantSource: true},
-		{name: "operator on, configured", operator: ":8443", configured: true, wantSource: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			clearFleetSignEnv(t)
-			if tc.configured {
-				t.Setenv("IMAS_FLEETSIGN_OPENBAO_ADDR", "https://openbao.example.invalid:8200")
-				t.Setenv("IMAS_FLEETSIGN_OPENBAO_TOKEN", "hvs.verify-only")
-			}
-			src, err := fleetKeySource(saasapi.Config{FleetUpdateDispatchEnabled: tc.dispatch, OperatorListenAddr: tc.operator})
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err = %v, want one containing %q", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("err = %v", err)
-			}
-			if got := src != nil; got != tc.wantSource {
-				t.Fatalf("key source built = %t, want %t", got, tc.wantSource)
-			}
-		})
-	}
-}
-
 const (
-	testOperatorToken      = "operator-token-0123456789abcdefghijklmnop"
-	testFleetReleaserToken = "fleetreleaser-token-0123456789abcdefghijkl"
+	testOperatorToken = "operator-token-0123456789abcdefghijklmnop"
+	testOtherToken    = "other-token-0123456789abcdefghijklmnopqrst"
 )
 
-// operatorEnv sets the SAASAPI_OPERATOR_* and SAASAPI_FLEETRELEASER_*
-// settings the farmer chart sets with saasapi.operator.enabled, listening
+// operatorEnv sets the SAASAPI_OPERATOR_* settings the farmer chart sets
+// with saasapi.operator.enabled, listening
 // on addr with a fresh self-signed certificate, and returns the
 // certificate so a client can trust it.
 func operatorEnv(t *testing.T, addr string) *x509.Certificate {
@@ -261,8 +205,6 @@ func operatorEnv(t *testing.T, addr string) *x509.Certificate {
 	t.Setenv("SAASAPI_OPERATOR_TLS_CERT_FILE", write("tls.crt", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})))
 	t.Setenv("SAASAPI_OPERATOR_TLS_KEY_FILE", write("tls.key", pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})))
 	t.Setenv("SAASAPI_OPERATOR_TOKEN_FILE", write("operator-token", []byte(testOperatorToken+"\n")))
-	t.Setenv("SAASAPI_FLEETRELEASER_URL", "https://fleetreleaser.imas.svc:8443")
-	t.Setenv("SAASAPI_FLEETRELEASER_TOKEN_FILE", write("fleetreleaser-token", []byte(testFleetReleaserToken)))
 	return cert
 }
 
@@ -394,7 +336,7 @@ func TestServeOperatorPlane(t *testing.T) {
 		// The operator routes are served, and only for the operator token
 		// (a wrong one is refused before the handler touches the database).
 		{"POST", "/v1/operator/fleet-releases", "", http.StatusUnauthorized},
-		{"POST", "/v1/operator/fleet-releases", testFleetReleaserToken, http.StatusUnauthorized},
+		{"POST", "/v1/operator/fleet-releases", testOtherToken, http.StatusUnauthorized},
 		{"POST", "/v1/operator/fleet-releases/v2.4.1/revoke", "", http.StatusUnauthorized},
 		// The tenant API's routes aren't.
 		{"GET", "/v1/versions", "", http.StatusNotFound},

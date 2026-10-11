@@ -8,7 +8,7 @@ mocked:
 |---|---|
 | Package repository | Sonatype Nexus Repository Community Edition: signed apt and yum hosted repositories, no anonymous access, a read-only `buildkite` user whose password is the repo token |
 | Repository TLS | A proxy in front of Nexus (stub farmer `-repo-proxy-to`) with its own CA, installed in the sprout host's OS trust store |
-| farmer, saasapi, fleetreleaser | The Molecule stub farmer (`ansible/molecule/stubfarmer`): enrollment, the bus, a signed manifest on `GET /v1/sprout/update-manifest`, and the `self_update` cook job sealed to the sprout as farmer seals it |
+| farmer, saasapi | The Molecule stub farmer (`ansible/molecule/stubfarmer`): enrollment, the bus, a manifest carrying the release's GPG-signed `checksums.txt` on `GET /v1/sprout/update-manifest`, and the `self_update` cook job sealed to the sprout as farmer seals it |
 | Sprout host | systemd containers (Debian 12, Rocky 9) where `imas-sprout` v0.1.0 is installed from Nexus by apt/dnf, as the Ansible role installs it |
 
 It checks the update to v0.2.0 (job result, installed package version,

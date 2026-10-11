@@ -323,12 +323,6 @@ farmer:
       keyName: imas-gateway-jwt
       k8sRole: imas-farmer-gateway
       tokenSecretKey: gateway-token
-    # Read-only view of the fleet signing key (imas-fleet-verify.hcl).
-    fleetSign:
-      transitMount: transit
-      keyName: imas-fleet-signing
-      k8sRole: imas-farmer-fleet-verify
-      tokenSecretKey: farmer-fleetsign-token
     # Tenant X25519 keypairs in KV v2: one secret per tenant at
     # <kvMount>/data/<kvPath>/tenants/<tenant_id>. Nothing is read or
     # written at <kvPath> itself; there is no shared keypair.
@@ -446,8 +440,8 @@ saasapi:
     platformPubKey: SAASAPI_PLATFORM_BOX_PUB
   # POST .../sprouts/updates. The sprout-side update path is built, but
   # leave this off until the security review and the release UAT gate are
-  # done (docs/BUILD-STATUS.md). On needs the fleetSign client below, and
-  # farmer.selfUpdate.enabled, or farmer refuses every update.
+  # done (docs/BUILD-STATUS.md). On needs farmer.selfUpdate.enabled, or
+  # farmer refuses every update.
   fleetUpdateDispatch:
     enabled: false
     # SAASAPI_FLEET_UPDATE_CLOCK_SKEW: how far saasapi's and farmer's
@@ -501,11 +495,11 @@ saasapi:
   # §2.5): sprout release registration and revoke, on its own HTTPS
   # listener and its own Service (<release>-saasapi-operator), never the
   # one the gateway routes to. The sprout release hook Job (sproutRelease
-  # below) is its only in-cluster caller. On also turns on the fleetSign
-  # client below. NOTE: cmd/saasapi does not start this listener yet
-  # (README.md, "Known gaps"); leave it off until it does.
-  # FLAG FOR SECURITY REVIEW: the operator token can get any well-formed
-  # release above fleetreleaser's floor signed.
+  # below) is its only in-cluster caller. cmd/saasapi starts this listener
+  # when SAASAPI_OPERATOR_LISTEN_ADDR is set (which this switch sets).
+  # FLAG FOR SECURITY REVIEW: the operator token can register any
+  # well-formed release whose checksums.txt it supplies; a sprout installs
+  # only what verifies against its packaged keyring.
   operator:
     enabled: false
     port: 8443
@@ -523,24 +517,8 @@ saasapi:
       secretName: ""
       currentKey: current
       previousKey: ""
-    # cmd/fleetreleaser, the only signer (deploy/fleetreleaser/README.md).
-    fleetReleaser:
-      # SAASAPI_FLEETRELEASER_URL: https://host[:port], no path.
-      url: ""
-      # SAASAPI_FLEETRELEASER_TOKEN_FILE: the caller token saasapi presents.
-      tokenSecretName: ""
-      tokenKey: token
-      # Optional ConfigMap with fleetreleaser's CA (system roots otherwise).
-      caConfigMap: ""
-      caKey: ca.crt
     service:
       annotations: {}
-  openbao:
-    fleetSign:
-      transitMount: transit
-      keyName: imas-fleet-signing
-      k8sRole: imas-saasapi-fleet-verify
-      tokenSecretKey: saasapi-fleetsign-token
   # Tenant recipe upload (REC.1, API design §1.6; FLAG FOR SECURITY
   # REVIEW): PUT/GET/DELETE /v1/tenants/{tenant_id}/recipes/{name}. saasapi
   # writes tenants' recipes to objectStore.bucket at objectStore.endpoint
@@ -739,7 +717,7 @@ sproutRelease:
     attempts: 8
     initialDelaySeconds: 5
     maxDelaySeconds: 60
-  # Per request. One registration makes up to 16 fleetreleaser calls.
+  # Per request.
   requestTimeoutSeconds: 600
   # Pod retries after the in-pod ones run out. A 409 or other refusal
   # fails the Job at once (podFailurePolicy), whatever this says.
@@ -776,7 +754,7 @@ externalSecrets:
 
 # ---------------------------------------------------------------------------
 # Eval OpenBao setup: a post-install/post-upgrade Job that enables Transit
-# (imas-gateway-jwt, imas-fleet-signing), KV v2, PKI (tls.mode=openbao)
+# (imas-gateway-jwt), KV v2, PKI (tls.mode=openbao)
 # and kubernetes auth, writes the policies in files/openbao-policies and
 # creates one role per client. Only with openbao.enabled. It never writes
 # NATS seeds.
@@ -860,10 +838,6 @@ networkPolicy:
   # for the revoke call). Empty: the hook Job only.
   saasapiOperatorIngress:
     from: []
-  # saasapi -> cmd/fleetreleaser, on saasapi.operator.fleetReleaser.url's
-  # port. Empty: any destination, on that port only.
-  fleetreleaser:
-    to: []
   # Extra egress rules, added to the ones above. saasapi's default allows
   # HTTPS anywhere for the Keycloak JWKS fetch; narrow it to your Keycloak.
   # farmer's object store needs nothing here (external.objectStore).

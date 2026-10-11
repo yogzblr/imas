@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
 # Write the sprout release manifest the farmer chart carries (API design
-# §2.5): version, min_sprout_version and, per OS/arch, the package file
-# name and SHA-256 of every imas-sprout package in the release. The chart's
+# §2.5): version, min_sprout_version, per OS/arch the package file name and
+# SHA-256 of every imas-sprout package in the release, and the release's
+# GPG-signed checksums.txt with its detached signature (P22). The chart's
 # release hook (deploy/helm/farmer, templates/sprout-release-register-job.yaml)
-# sends it, with the chart's channel, to saasapi to be signed and
-# registered; the sprout later installs the named file from its own
-# configured repo and checks it against this hash.
+# sends it, with the chart's channel, to saasapi to be registered; the
+# sprout later verifies checksums.txt against the keyring in its package,
+# installs its package from its own configured repo and checks it against
+# the signed hash.
+#
+# Before stamping, the script verifies dist/checksums.txt.sig over
+# dist/checksums.txt with gpg, in a temporary GNUPGHOME holding only the
+# release keyring (--keyring-asc, default gpg-public-key.asc at the repo
+# root), and fails on a bad signature. Key expiry is not enforced (signing
+# design D12.2); a revoked key is refused.
 #
 # Output: {"version": "vX.Y.Z", "min_sprout_version": "vA.B.C",
-# "packages": [{os, arch, package_type, file_name, checksum_sha256}, ...]}.
+# "packages": [{os, arch, package_type, file_name, checksum_sha256}, ...],
+# "checksums_txt": "<checksums.txt verbatim>",
+# "checksums_sig": "<checksums.txt.sig, standard base64>"}.
 # Both versions are canonical semver with the leading "v", verbatim, as
 # saasapi and internal/fleetsign require (they never normalize). Package
 # file names carry the version without it.
@@ -18,9 +28,12 @@
 # ships under the tag like everything else. It must be at most the
 # release's version, by semver precedence.
 #
-# Usage: stamp-sprout-release.sh <dist-dir> <tag> <out-file> [<min-sprout-version-file>]
-#   <dist-dir>  directory holding the release's *.rpm, *.deb, *.msi and the
-#               checksums.txt they were verified against
+# Usage: stamp-sprout-release.sh [--keyring-asc <file>] <dist-dir> <tag> <out-file> [<min-sprout-version-file>]
+#   --keyring-asc  the ASCII-armored release public key(s); default
+#               gpg-public-key.asc at the repo root
+#   <dist-dir>  directory holding the release's *.rpm, *.deb, *.msi, the
+#               checksums.txt they were verified against and its detached
+#               signature checksums.txt.sig
 #   <tag>       release tag, vX.Y.Z or vX.Y.Z-PRERELEASE (canonical semver: no
 #               build metadata, no leading zeros)
 #   <out-file>  e.g. deploy/helm/farmer/files/sprout-release.json
@@ -31,13 +44,19 @@
 # manifest would silently never be offered to the fleet.
 set -euo pipefail
 
-dist="${1:?usage: $0 <dist-dir> <tag> <out-file>}"
-tag="${2:?usage: $0 <dist-dir> <tag> <out-file>}"
-out="${3:?usage: $0 <dist-dir> <tag> <out-file>}"
+die() { echo "stamp-sprout-release: $*" >&2; exit 1; }
+
+keyring="$(dirname "$0")/../../gpg-public-key.asc"
+if [[ "${1:-}" == --keyring-asc ]]; then
+	keyring="${2:?usage: $0 [--keyring-asc <file>] <dist-dir> <tag> <out-file>}"
+	shift 2
+fi
+
+dist="${1:?usage: $0 [--keyring-asc <file>] <dist-dir> <tag> <out-file>}"
+tag="${2:?usage: $0 [--keyring-asc <file>] <dist-dir> <tag> <out-file>}"
+out="${3:?usage: $0 [--keyring-asc <file>] <dist-dir> <tag> <out-file>}"
 
 min_file="${4:-$(dirname "$0")/min-sprout-version}"
-
-die() { echo "stamp-sprout-release: $*" >&2; exit 1; }
 
 canonical='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
 
@@ -86,7 +105,21 @@ min="$(tr -d '[:space:]' <<<"$lines")"
 [[ "$min" =~ $canonical ]] || die "min_sprout_version '$min' in $min_file is not canonical semver (want vX.Y.Z or vX.Y.Z-PRERELEASE)"
 [[ "$(semver_cmp "$min" "$tag")" != 1 ]] || die "min_sprout_version $min ($min_file) is above the release's version $tag"
 [[ -f "$dist/checksums.txt" ]] || die "no $dist/checksums.txt"
+[[ -f "$dist/checksums.txt.sig" ]] || die "no $dist/checksums.txt.sig"
+[[ -f "$keyring" ]] || die "no release keyring $keyring"
 command -v jq >/dev/null || die "jq not found"
+command -v gpg >/dev/null || die "gpg not found"
+
+# Verify checksums.txt.sig against the release keyring alone: a fresh
+# GNUPGHOME with nothing else imported, removed on exit.
+gnupghome="$(mktemp -d)"
+trap 'rm -rf "$gnupghome"' EXIT
+GNUPGHOME="$gnupghome" gpg --batch --quiet --import "$keyring" 2>/dev/null || die "cannot import the release keyring $keyring"
+status="$(GNUPGHOME="$gnupghome" gpg --batch --status-fd 1 --verify "$dist/checksums.txt.sig" "$dist/checksums.txt" 2>/dev/null)" \
+	|| die "checksums.txt.sig does not verify over checksums.txt against $keyring"
+grep -q '^\[GNUPG:\] REVKEYSIG ' <<<"$status" && die "checksums.txt.sig was made by a revoked key"
+grep -qE '^\[GNUPG:\] (GOODSIG|EXPKEYSIG) ' <<<"$status" \
+	|| die "checksums.txt.sig does not verify over checksums.txt against $keyring"
 
 entries=()
 shopt -s nullglob
@@ -118,5 +151,7 @@ for t in deb rpm msi; do
 done
 
 mkdir -p "$(dirname "$out")"
-printf '%s\n' "${entries[@]}" | jq -s --arg v "$tag" --arg min "$min" '{version: $v, min_sprout_version: $min, packages: (. | sort_by(.os, .arch, .package_type))}' > "$out"
+printf '%s\n' "${entries[@]}" | jq -s --arg v "$tag" --arg min "$min" \
+	--rawfile sums "$dist/checksums.txt" --arg sig "$(base64 -w0 "$dist/checksums.txt.sig")" \
+	'{version: $v, min_sprout_version: $min, packages: (. | sort_by(.os, .arch, .package_type)), checksums_txt: $sums, checksums_sig: $sig}' > "$out"
 echo "stamp-sprout-release: $tag (min_sprout_version $min), ${#entries[@]} packages -> $out"

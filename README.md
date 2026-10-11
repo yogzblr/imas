@@ -48,7 +48,7 @@ Many systems struggle with installing Python dependencies properly, and with so 
 imas runs in two tiers, with the managed hosts outside both:
 
 - **DMZ:** `farmerbus` (the NATS bus) behind an Envoy gateway. These are the only things sprouts ever connect to.
-- **Core (non-DMZ):** `farmer` (the API, job dispatch and tenant provisioning), `saasapi` (the multi-tenant control-plane API) and `fleetreleaser` (signs sprout update manifests), with PXC, Valkey, OpenBao and object storage. The core connects out to the bus; the bus never connects in.
+- **Core (non-DMZ):** `farmer` (the API, job dispatch and tenant provisioning), and `saasapi` (the multi-tenant control-plane API), with PXC, Valkey, OpenBao and object storage. The core connects out to the bus; the bus never connects in.
 - **Sprouts:** the `sprout` daemon on each managed system (a 'sprout'), enrolled into one tenant.
 
 The `imas` CLI is optional: it talks to farmer's TLS API and to the bus.

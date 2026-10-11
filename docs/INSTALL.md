@@ -41,7 +41,7 @@ If you have questions, [open an issue](https://github.com/yogzblr/imas/issues/ne
 | `imas` CLI | `cmd/imas` | operator machine | release archives |
 
 Each release publishes signed multi-arch (amd64, arm64) container images to
-GHCR: `ghcr.io/yogzblr/imas-{farmer,sprout,saasapi,farmerbus,fleetreleaser}`,
+GHCR: `ghcr.io/yogzblr/imas-{farmer,sprout,saasapi,farmerbus,migrate}`,
 tagged with the release version (no leading `v`) and `latest`. The Helm charts
 (`farmer`, `nats`) are published to GHCR as OCI charts,
 `oci://ghcr.io/yogzblr/charts/farmer` and `oci://ghcr.io/yogzblr/charts/nats`,
@@ -71,7 +71,7 @@ The core needs these before farmer can enroll a single sprout:
 | Service | Used by | Required? |
 |---|---|---|
 | **PXC** (Percona XtraDB Cluster / MySQL 8) with a `farmer` and a `saas` schema | farmer (`IMAS_PXC_DSN`), saasapi (`SAASAPI_DSN`) | farmer exits at startup without it. The grants are design doc §5.1; see [`deploy/helm/farmer/README.md`](../deploy/helm/farmer/README.md), "PXC". |
-| **OpenBao** | farmer: PKI (API certificate), Transit `imas-gateway-jwt` (gateway JWTs), Transit `imas-fleet-signing` (read-only), KV v2 `secret/imas/tenant-x25519/tenants/<tenant>` (one payload-encryption keypair per tenant, generated fresh; nothing is read at `secret/imas/tenant-x25519` itself) | farmer starts without the Transit keys, but `POST /v1/enroll` fails closed until both are configured. Without OpenBao PKI you must place farmer's certificate and key yourself. |
+| **OpenBao** | farmer: PKI (API certificate), Transit `imas-gateway-jwt` (gateway JWTs), KV v2 `secret/imas/tenant-x25519/tenants/<tenant>` (one payload-encryption keypair per tenant, generated fresh; nothing is read at `secret/imas/tenant-x25519` itself) | farmer starts without the Transit key, but `POST /v1/enroll` fails closed until it is configured. Without OpenBao PKI you must place farmer's certificate and key yourself. |
 | **Valkey** | farmer (heartbeats, enrollment replay cache), saasapi (rate limits, `connected`) | `/v1/enroll` and `/v1/refresh` fail closed without it. Give farmer and saasapi the same address list. |
 | **S3-compatible object storage** | farmer: recipes and job logs, in two different buckets; saasapi: tenant recipe uploads, with its own credential | recipe and job requests fail until it's configured. The Helm chart opens farmer's egress to `objectStore.endpoint`'s port by itself. |
 | **Keycloak** | saasapi verifies the end-user JWTs the BFF forwards | saasapi won't authenticate anything without it. |
@@ -128,7 +128,7 @@ READMEs are the full reference; this is the order to do things in.
    `TestContractWithNatsChart` in the core chart checks that the two
    charts' settings line up.
 5. **Check it:** `kubectl logs` for farmer should show the gateway JWT
-   signer and fleet signing key configured, and a connection to the bus.
+   signer configured and a connection to the bus.
    saasapi logs `connected to the NATS bus`.
 
 Then [create a tenant](#create-a-tenant-and-an-enrollment-key).
@@ -189,14 +189,12 @@ that client's policy:
 Environment=IMAS_CERTS_OPENBAO_ADDR=https://openbao:8200
 Environment=IMAS_CERTS_OPENBAO_ROLE=imas-farmer
 Environment=IMAS_GATEWAY_OPENBAO_ADDR=https://openbao:8200
-Environment=IMAS_FLEETSIGN_OPENBAO_ADDR=https://openbao:8200
 Environment=IMAS_TENANTBOX_OPENBAO_ADDR=https://openbao:8200
 # ...and each client's _TOKEN (or _AUTH_METHOD=kubernetes), _CACERT, etc.
 ```
 
-Every client (`IMAS_CERTS_`, `IMAS_GATEWAY_`, `IMAS_FLEETSIGN_`,
-`IMAS_TENANTBOX_`, and outside farmer `IMAS_SAASAPI_CRED_` and
-`IMAS_FLEETRELEASER_`) takes the same `<prefix>OPENBAO_*` set: `ADDR`
+Every client (`IMAS_CERTS_`, `IMAS_GATEWAY_`, `IMAS_TENANTBOX_`, and
+outside farmer `IMAS_SAASAPI_CRED_`) takes the same `<prefix>OPENBAO_*` set: `ADDR`
 (required); `AUTH_METHOD`, `token` (default, with `TOKEN`) or `kubernetes`
 (with `K8S_ROLE`, and optionally `K8S_MOUNT`, default `kubernetes`, and
 `K8S_JWT_PATH`, default the pod's service account token); `CACERT`, a PEM
@@ -521,12 +519,12 @@ The provider ignores `VAULT_*` and `BAO_*` variables, so a
 `VAULT_HTTP_PROXY` or `BAO_HTTP_PROXY` set for other tools has no effect on
 it.
 
-### farmer, saasapi and fleetreleaser
+### farmer and saasapi
 
 The platform's OpenBao clients (every `IMAS_*_OPENBAO_*` identity) also
 follow `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`, and ignore
 `BAO_HTTP_PROXY` and `BAO_PROXY_ADDR`. Wherever you set a proxy in the
-environment of farmer, saasapi, fleetreleaser or the credential publish
+environment of farmer, saasapi or the credential publish
 Job, put the platform OpenBao's host (the host in `*_OPENBAO_ADDR`) in
 `NO_PROXY`, unless the proxy is meant to reach it. With the Helm charts,
 the proxy variables go in `farmer.extraEnv` or `saasapi.extraEnv`; the

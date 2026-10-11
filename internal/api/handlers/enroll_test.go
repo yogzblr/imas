@@ -269,14 +269,12 @@ func assertEnrollFailed(t *testing.T, w *httptest.ResponseRecorder) {
 	}
 }
 
-// Enrollment hands out no fleet signing key (a sprout trusts the keyring
-// shipped in its package, design doc §2.5), so it neither reads the
-// read-only Transit key nor depends on it being configured.
+// Enrollment hands out no fleet signing key: a sprout trusts the keyring
+// shipped in its package (design doc §2.5).
 func TestEnroll_NoFleetSigningKeyInResponse(t *testing.T) {
 	setupPKIDirs(t)
 	withFakeGatewaySigner(t)
 	withFakeTenantBoxOpenBao(t)
-	SetFleetKeySource(nil)
 
 	t.Cleanup(pki.UseInMemoryJoinToken("ek_fleet.secret", pki.CurrentTenantID(), 1))
 	kp, _ := nkeys.CreateUser()

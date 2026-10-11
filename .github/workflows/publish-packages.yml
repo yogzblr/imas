@@ -102,9 +102,13 @@ jobs:
         with:
           ref: ${{ env.TAG }}
 
-      # checksums.txt.sigstore.json is a release asset only because
-      # .goreleaser.yaml's release.ids lists the signs IDs (gpg, cosign);
-      # without them GoReleaser leaves the signatures off the release.
+      # checksums.txt.sig and checksums.txt.sigstore.json are release
+      # assets only because .goreleaser.yaml's release.ids lists the signs
+      # IDs (gpg, cosign); without them GoReleaser leaves the signatures off
+      # the release. checksums.txt.sig is verified against the repo's
+      # gpg-public-key.asc alone, in a throwaway GNUPGHOME: it is what every
+      # sprout verifies before it installs an update (P22), and
+      # stamp-sprout-release.sh checks it again. Public key only, no secret.
       - name: Download release assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -112,7 +116,13 @@ jobs:
           set -euo pipefail
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dist \
             --pattern '*.rpm' --pattern '*.deb' --pattern '*.msi' --pattern checksums.txt \
-            --pattern 'checksums.txt.sigstore.json'
+            --pattern checksums.txt.sig --pattern 'checksums.txt.sigstore.json'
+          GNUPGHOME="$(mktemp -d)"
+          export GNUPGHOME
+          gpg --batch --quiet --import gpg-public-key.asc
+          gpg --batch --verify dist/checksums.txt.sig dist/checksums.txt
+          rm -rf "$GNUPGHOME"
+          unset GNUPGHOME
           (cd dist && sha256sum --check --ignore-missing --strict checksums.txt)
           # --ignore-missing passes on an empty directory: make sure every
           # downloaded package was actually listed. (A missing package type
@@ -139,7 +149,7 @@ jobs:
             --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" \
             dist/checksums.txt
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
-          for img in farmer sprout saasapi farmerbus fleetreleaser migrate; do
+          for img in farmer sprout saasapi farmerbus migrate; do
             cosign verify "ghcr.io/yogzblr/imas-${img}:${TAG#v}" \
               --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" >/dev/null
             echo "verified imas-${img}:${TAG#v}"

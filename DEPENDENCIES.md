@@ -40,9 +40,9 @@ unmodified, or any change to it is shared. For MPL-2.0 modules
 them are listed here so the decision can be made on the full list.
 
 Every module in the build whose licence is anything other than Apache-2.0 or
-MIT, and which of the seven binaries (sprout, farmer, saasapi, farmerbus,
-fleetreleaser, migrate, imas CLI) links it, on any platform the release
-builds. "All seven" means every one of them. imas's own code is 0BSD
+MIT, and which of the six binaries (sprout, farmer, saasapi, farmerbus,
+migrate, imas CLI) links it, on any platform the release
+builds. "All six" means every one of them. imas's own code is 0BSD
 ([LICENSE](LICENSE)) and is not listed.
 
 | Module | Licence | Linked by |
@@ -56,39 +56,39 @@ builds. "All seven" means every one of them. imas's own code is 0BSD
 | `github.com/emirpasic/gods` | BSD-2-Clause; its AVL tree ISC | sprout |
 | `github.com/glebarez/go-sqlite` | BSD-3-Clause | none: only `internal/fleetcatalog/fleetcatalogtest`, a test helper, imports it (through `github.com/glebarez/sqlite`, MIT) |
 | `github.com/go-git/gcfg` | BSD-3-Clause | sprout |
-| `github.com/go-jose/go-jose/v4` | Apache-2.0; its `json` package BSD-3-Clause | sprout, farmer, saasapi, farmerbus, fleetreleaser, imas CLI |
+| `github.com/go-jose/go-jose/v4` | Apache-2.0; its `json` package BSD-3-Clause | sprout, farmer, saasapi, farmerbus, imas CLI |
 | `github.com/go-sql-driver/mysql` | MPL-2.0 | farmer, saasapi, migrate |
 | `github.com/gogrlx/snack` | 0BSD | sprout |
 | `github.com/google/uuid` | BSD-3-Clause | sprout, farmer, imas CLI |
 | `github.com/gorilla/websocket` | BSD-2-Clause | imas CLI |
-| `github.com/hashicorp/errwrap` | MPL-2.0 | sprout, farmer, saasapi, farmerbus, fleetreleaser, imas CLI |
-| `github.com/hashicorp/go-cleanhttp` | MPL-2.0 | sprout, farmer, saasapi, farmerbus, fleetreleaser, imas CLI |
-| `github.com/hashicorp/go-multierror` | MPL-2.0 | sprout, farmer, saasapi, farmerbus, fleetreleaser, imas CLI |
-| `github.com/hashicorp/go-retryablehttp` | MPL-2.0 | sprout, farmer, saasapi, farmerbus, fleetreleaser, imas CLI |
-| `github.com/hashicorp/go-secure-stdlib/parseutil` | MPL-2.0 | sprout, farmer, saasapi, farmerbus, fleetreleaser, imas CLI |
-| `github.com/hashicorp/go-secure-stdlib/strutil` | MPL-2.0 | sprout, farmer, saasapi, farmerbus, fleetreleaser, imas CLI |
-| `github.com/hashicorp/go-sockaddr` | MPL-2.0 | sprout, farmer, saasapi, farmerbus, fleetreleaser, imas CLI |
-| `github.com/hashicorp/hcl` | MPL-2.0 | sprout, farmer, saasapi, farmerbus, fleetreleaser, imas CLI |
-| `github.com/klauspost/compress` | Apache-2.0, BSD-3-Clause (`s2`, `internal/snapref`, parts of the root LICENSE), MIT (`zstd/internal/xxhash`) | all seven |
+| `github.com/hashicorp/errwrap` | MPL-2.0 | sprout, farmer, saasapi, farmerbus, imas CLI |
+| `github.com/hashicorp/go-cleanhttp` | MPL-2.0 | sprout, farmer, saasapi, farmerbus, imas CLI |
+| `github.com/hashicorp/go-multierror` | MPL-2.0 | sprout, farmer, saasapi, farmerbus, imas CLI |
+| `github.com/hashicorp/go-retryablehttp` | MPL-2.0 | sprout, farmer, saasapi, farmerbus, imas CLI |
+| `github.com/hashicorp/go-secure-stdlib/parseutil` | MPL-2.0 | sprout, farmer, saasapi, farmerbus, imas CLI |
+| `github.com/hashicorp/go-secure-stdlib/strutil` | MPL-2.0 | sprout, farmer, saasapi, farmerbus, imas CLI |
+| `github.com/hashicorp/go-sockaddr` | MPL-2.0 | sprout, farmer, saasapi, farmerbus, imas CLI |
+| `github.com/hashicorp/hcl` | MPL-2.0 | sprout, farmer, saasapi, farmerbus, imas CLI |
+| `github.com/klauspost/compress` | Apache-2.0, BSD-3-Clause (`s2`, `internal/snapref`, parts of the root LICENSE), MIT (`zstd/internal/xxhash`) | all six |
 | `github.com/klauspost/crc32` | BSD-3-Clause | sprout, farmer, imas CLI |
 | `github.com/nats-io/nats-server/v2` | Apache-2.0; `internal/fastrand` BSD-3-Clause | sprout, farmer, saasapi, farmerbus, imas CLI |
-| `github.com/openbao/openbao/api/v2` | MPL-2.0 | sprout, farmer, saasapi, farmerbus, fleetreleaser, imas CLI |
+| `github.com/openbao/openbao/api/v2` | MPL-2.0 | sprout, farmer, saasapi, farmerbus, imas CLI |
 | `github.com/remyoudompheng/bigfft` | BSD-3-Clause | none: only `internal/fleetcatalog/fleetcatalogtest`, a test helper, imports it (through `github.com/glebarez/sqlite`, MIT) |
 | `github.com/spf13/pflag` | BSD-3-Clause | imas CLI |
 | `github.com/taigrr/jety` | 0BSD | sprout, farmer, saasapi, farmerbus, imas CLI |
-| `github.com/taigrr/log-mux` | 0BSD | all seven |
-| `github.com/taigrr/log-nats/v2` | 0BSD | all seven |
+| `github.com/taigrr/log-mux` | 0BSD | all six |
+| `github.com/taigrr/log-nats/v2` | 0BSD | all six |
 | `github.com/taigrr/openrc` | 0BSD | sprout |
 | `github.com/taigrr/systemctl` | 0BSD | sprout |
 | `github.com/zeebo/xxh3` | BSD-2-Clause | sprout, farmer, imas CLI |
-| `golang.org/x/crypto` | BSD-3-Clause | all seven |
-| `golang.org/x/mod` | BSD-3-Clause | sprout, farmer, saasapi, fleetreleaser |
-| `golang.org/x/net` | BSD-3-Clause | sprout, farmer, saasapi, farmerbus, fleetreleaser, imas CLI |
+| `golang.org/x/crypto` | BSD-3-Clause | all six |
+| `golang.org/x/mod` | BSD-3-Clause | sprout, farmer, saasapi |
+| `golang.org/x/net` | BSD-3-Clause | sprout, farmer, saasapi, farmerbus, imas CLI |
 | `golang.org/x/sync` | BSD-3-Clause | sprout, farmer, saasapi, migrate, imas CLI |
-| `golang.org/x/sys` | BSD-3-Clause | all seven |
+| `golang.org/x/sys` | BSD-3-Clause | all six |
 | `golang.org/x/term` | BSD-3-Clause | imas CLI |
-| `golang.org/x/text` | BSD-3-Clause | sprout, farmer, saasapi, farmerbus, fleetreleaser, imas CLI |
-| `golang.org/x/time` | BSD-3-Clause | sprout, farmer, saasapi, farmerbus, fleetreleaser, imas CLI |
+| `golang.org/x/text` | BSD-3-Clause | sprout, farmer, saasapi, farmerbus, imas CLI |
+| `golang.org/x/time` | BSD-3-Clause | sprout, farmer, saasapi, farmerbus, imas CLI |
 | `gopkg.in/warnings.v0` | BSD-2-Clause | sprout |
 | `modernc.org/libc` | BSD-3-Clause; its `LICENSE-3RD-PARTY.md` adds notices for code taken from Go (BSD-3-Clause), musl (MIT), go-netdb and nixpkgs | none: only `internal/fleetcatalog/fleetcatalogtest`, a test helper, imports it (through `github.com/glebarez/sqlite`, MIT) |
 | `modernc.org/mathutil` | BSD-3-Clause | none: only `internal/fleetcatalog/fleetcatalogtest`, a test helper, imports it (through `github.com/glebarez/sqlite`, MIT) |

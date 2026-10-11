@@ -74,7 +74,7 @@ curl -LO https://github.com/yogzblr/imas/releases/download/v1.0.0/checksums.txt.
 cosign verify-blob --bundle checksums.txt.sigstore.json \
   --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" checksums.txt
 
-# A container image (farmer, sprout, saasapi, farmerbus, fleetreleaser)
+# A container image (farmer, sprout, saasapi, farmerbus, migrate)
 cosign verify ghcr.io/yogzblr/imas-farmer:1.0.0 \
   --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER"
 ```

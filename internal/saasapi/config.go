@@ -93,10 +93,7 @@ import (
 //   - SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED: "true" registers POST
 //     .../sprouts/updates and its status endpoint (design doc §1.8).
 //     Default false; turning it on is a deployment decision. Any value
-//     strconv.ParseBool doesn't accept is a startup error. With it on, the
-//     read-only fleet signing key client must also be configured
-//     (IMAS_FLEETSIGN_OPENBAO_*, internal/fleetsign; design doc §2.5), or
-//     saasapi refuses to start.
+//     strconv.ParseBool doesn't accept is a startup error.
 //   - SAASAPI_FLEET_UPDATE_CLOCK_SKEW: how far saasapi's clock and a
 //     farmer node's may differ when the rollout's wave gate judges whether
 //     a sprout's report postdates its update's dispatch (rolloutClockSkew),
@@ -150,10 +147,9 @@ import (
 // The operator plane (fleet_releases.go, design doc §2.5): release
 // registration and revocation, served on its own HTTPS listener and never
 // on the tenant API's. Off unless SAASAPI_OPERATOR_LISTEN_ADDR is set;
-// with it set, every other setting below except the *_PREVIOUS_FILE and
-// CA ones is required, and so is the read-only fleet signing key client
-// (IMAS_FLEETSIGN_OPENBAO_*). Secrets are taken only as paths to mounted
-// Secret files, read once at startup, like the NATS seed:
+// with it set, every other setting below except the *_PREVIOUS_FILE one is
+// required. Secrets are taken only as paths to mounted Secret files, read
+// once at startup, like the NATS seed:
 //
 //   - SAASAPI_OPERATOR_LISTEN_ADDR: e.g. ":8443". Keep it off the
 //     gateway's routes; only the farmer Helm release's hook Job calls it.
@@ -162,12 +158,6 @@ import (
 //   - SAASAPI_OPERATOR_TOKEN_FILE / SAASAPI_OPERATOR_TOKEN_PREVIOUS_FILE:
 //     the operator bearer token, and the previous one during a rotation.
 //     Must differ from the BFF's INTERNAL_AUTH_SECRET_* values.
-//   - SAASAPI_FLEETRELEASER_URL: cmd/fleetreleaser's base URL, https only,
-//     e.g. "https://fleetreleaser.imas.svc:8443".
-//   - SAASAPI_FLEETRELEASER_TOKEN_FILE: the bearer token saasapi presents
-//     to fleetreleaser.
-//   - SAASAPI_FLEETRELEASER_CA_FILE: optional PEM bundle for
-//     fleetreleaser's certificate; the system roots otherwise.
 //
 // Tenant recipe upload (recipes.go, REC.1): SAASAPI_RECIPES_* (the object
 // store credential, roles, caps and write rate limit) and the
@@ -255,9 +245,6 @@ type Config struct {
 	OperatorTLSKeyFile        string
 	OperatorTokenFile         string
 	OperatorTokenPreviousFile string
-	FleetReleaserURL          string
-	FleetReleaserTokenFile    string
-	FleetReleaserCAFile       string
 
 	// Recipes configures tenant recipe upload (recipes.go), passed to
 	// ConfigureRecipes before NewRouter. See RecipeSettings for its
@@ -308,9 +295,6 @@ func LoadConfig() (Config, error) {
 		OperatorTLSKeyFile:        os.Getenv("SAASAPI_OPERATOR_TLS_KEY_FILE"),
 		OperatorTokenFile:         os.Getenv("SAASAPI_OPERATOR_TOKEN_FILE"),
 		OperatorTokenPreviousFile: os.Getenv("SAASAPI_OPERATOR_TOKEN_PREVIOUS_FILE"),
-		FleetReleaserURL:          os.Getenv("SAASAPI_FLEETRELEASER_URL"),
-		FleetReleaserTokenFile:    os.Getenv("SAASAPI_FLEETRELEASER_TOKEN_FILE"),
-		FleetReleaserCAFile:       os.Getenv("SAASAPI_FLEETRELEASER_CA_FILE"),
 
 		Recipes: DefaultRecipeSettings(),
 	}
@@ -427,21 +411,18 @@ func loadOutboxSweeperSettings(s *OutboxSweeperSettings) error {
 }
 
 // validateOperator checks that every required operator-plane setting is
-// present and the fleetreleaser URL is https. Files are read later, by
-// NewOperatorServer.
+// present. Files are read later, by NewOperatorServer.
 func (c Config) validateOperator() error {
 	for name, v := range map[string]string{
-		"SAASAPI_OPERATOR_TLS_CERT_FILE":   c.OperatorTLSCertFile,
-		"SAASAPI_OPERATOR_TLS_KEY_FILE":    c.OperatorTLSKeyFile,
-		"SAASAPI_OPERATOR_TOKEN_FILE":      c.OperatorTokenFile,
-		"SAASAPI_FLEETRELEASER_URL":        c.FleetReleaserURL,
-		"SAASAPI_FLEETRELEASER_TOKEN_FILE": c.FleetReleaserTokenFile,
+		"SAASAPI_OPERATOR_TLS_CERT_FILE": c.OperatorTLSCertFile,
+		"SAASAPI_OPERATOR_TLS_KEY_FILE":  c.OperatorTLSKeyFile,
+		"SAASAPI_OPERATOR_TOKEN_FILE":    c.OperatorTokenFile,
 	} {
 		if v == "" {
 			return fmt.Errorf("saasapi: %s is required when SAASAPI_OPERATOR_LISTEN_ADDR is set", name)
 		}
 	}
-	return validFleetReleaserURL(c.FleetReleaserURL)
+	return nil
 }
 
 // validateRateLimit rejects settings that would silently disable or

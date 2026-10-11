@@ -100,7 +100,7 @@ What a release carries, for version `X.Y.Z` (tag `vX.Y.Z`):
   `imas-sprout-X.Y.Z-windows-x64.msi`, `checksums.txt`, its GPG signature
   `checksums.txt.sig` and its cosign bundle `checksums.txt.sigstore.json`
   (47 files).
-- Images: `ghcr.io/yogzblr/imas-{farmer,sprout,saasapi,farmerbus,fleetreleaser,migrate}:X.Y.Z`,
+- Images: `ghcr.io/yogzblr/imas-{farmer,sprout,saasapi,farmerbus,migrate}:X.Y.Z`,
   each a linux/amd64 + linux/arm64 manifest list, cosign-signed; `:latest`
   moves for finals only.
 - The keyless cosign signer identity, which `publish-packages.yml` and
@@ -124,13 +124,18 @@ What a release carries, for version `X.Y.Z` (tag `vX.Y.Z`):
    This builds everything, pushes and cosign-signs the images, and creates a
    **draft** GitHub release with the archives, packages, `checksums.txt`, its
    GPG signature and its `.sigstore.json` bundle.
-4. Review the draft (changelog, assets, the six images on GHCR).
+4. Review the draft (changelog, assets, the five images on GHCR).
 5. **Publish the release.** `publish-packages.yml` then verifies the cosign
-   signatures, uploads rpm/deb/winget to Buildkite, and last packages the
+   signatures and `checksums.txt.sig` (with `gpg`, against the repo's
+   `gpg-public-key.asc`, before `sha256sum --check`), uploads rpm/deb/winget
+   to Buildkite, and last packages the
    `farmer` and `nats` charts, pushes them to GHCR as OCI charts and signs
    them (see [Helm charts on GHCR](#helm-charts-on-ghcr)), with the sprout
-   release (version, `min_sprout_version`, packages) stamped into the
-   farmer chart. The stamp fails if the floor is above the tag.
+   release (version, `min_sprout_version`, packages, and `checksums.txt`
+   with its signature, which the stamp verifies with `gpg` against
+   `gpg-public-key.asc` and the sprout verifies again before an update)
+   stamped into the farmer chart. The stamp fails if the floor is above the
+   tag or the signature doesn't verify.
 6. Run the Terraform UAT gate against that tag (installs the published
    packages with the Ansible role on real hosts).
 7. Roll out: `helm upgrade` the farmer chart. Its post-upgrade hook registers
@@ -200,16 +205,19 @@ step's result differs from "look for", stop and fix by PR before going on.
    with `missing ...`.
 2. **The GPG public key.** Commit the public half of the key in
    `GPG_PRIVATE_KEY` to the repository and make `SECURITY.md` match it:
-   today it gives fingerprint `3F62 7C68 … E4DD` and links
-   `https://raw.githubusercontent.com/yogzblr/imas/master/gpg-public-key.asc`
-   (no such file yet, and the branch is `main`).
+   the committed key gives fingerprint
+   `84F4 5E90 19CF D4B2 3D38 142B CCEB CDB6 41F0 41EB`, the same file every
+   sprout package installs as `/etc/imas/fleet-signing-keys.asc` and that
+   `publish-packages.yml` and `stamp-sprout-release.sh` verify
+   `checksums.txt.sig` against, and its link is
+   `https://raw.githubusercontent.com/yogzblr/imas/main/gpg-public-key.asc`.
    *Look for:* `gpg --show-keys <file>` on the committed key prints the
    fingerprint `SECURITY.md` gives, and the link in `SECURITY.md` downloads
    it. An rc can go out before this, but users cannot check its `.sig`
    until then.
 3. **Optional pre-flight: Actions, Snapshot Build, Run workflow on `main`.**
    Builds everything the release builds, images included, without signing
-   or publishing and without secrets. *Look for:* six images built (amd64
+   or publishing and without secrets. *Look for:* five images built (amd64
    and arm64), the MSI hook output, `release succeeded`. The GPG secrets and
    cosign signing are first exercised in step 6.
 4. **`main` is green on the commit you tag**, including the `go.mod and
@@ -246,7 +254,7 @@ step's result differs from "look for", stop and fix by PR before going on.
    ISSUER=https://token.actions.githubusercontent.com
    cosign verify-blob --bundle checksums.txt.sigstore.json \
      --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" checksums.txt
-   for img in farmer sprout saasapi farmerbus fleetreleaser migrate; do
+   for img in farmer sprout saasapi farmerbus migrate; do
      cosign verify "ghcr.io/yogzblr/imas-$img:$V" \
        --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" >/dev/null &&
      docker buildx imagetools inspect "ghcr.io/yogzblr/imas-$img:$V" | grep -E 'Platform: +linux/(amd64|arm64)'
@@ -266,7 +274,7 @@ step's result differs from "look for", stop and fix by PR before going on.
    `v0.1.0-rc.1`. This is the deliberate publish of a pre-release.
    *Look for:* `Check publish secrets` passes; `sha256sum --check` prints
    `OK` for every package; the cosign step prints `verified imas-<img>:0.1.0-rc.1`
-   six times; one MSI, the winget nupkgs built; rpm and deb uploads to
+   five times; one MSI, the winget nupkgs built; rpm and deb uploads to
    `imasrpm` and `imasdeb`, then the NuGet pushes and the anonymous
    installer download check; `stamp-sprout-release.sh` writes
    `sprout-release.json`, `helm lint` passes for both charts, and

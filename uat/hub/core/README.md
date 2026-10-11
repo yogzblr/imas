@@ -357,8 +357,8 @@ same directory; nothing here can check the DMZ cluster's Secret.
 ## Deferred
 
 - The sprout release registration hook and saasapi's operator plane stay
-  off (no `cmd/fleetreleaser` here), so this hub registers no sprout release
-  and scenario L5 (self update) needs more setup.
+  off here, so this hub registers no sprout release and scenario L5 (self
+  update) needs more setup.
 - Signature verification of the release's `checksums.txt` (cosign or GPG)
   before trusting the CLI archive; only the SHA-256 is checked.
 - Image digests for RustFS, Keycloak and Envoy (tags are pinned; the agent

@@ -1,7 +1,7 @@
 // Package farmerchart tests the deploy/helm/farmer Helm chart by rendering
 // it with the helm CLI and asserting on the manifests, including that it
 // stays in step with the reviewed reference files it was built from
-// (deploy/farmer, deploy/saasapi, deploy/fleetreleaser/policies). The tests
+// (deploy/farmer, deploy/saasapi). The tests
 // skip when helm is not on PATH, so `go test ./...` stays green on
 // machines without it; run them locally with helm v3 installed.
 //
@@ -18,6 +18,8 @@ package farmerchart
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -423,7 +425,6 @@ func TestValidationFailures(t *testing.T) {
 		// would point a client outside them are refused.
 		{"bootstrap non-dev without token", "openbaoBootstrap.tokenSecretName is required", []string{"--set", "openbao.server.dev.enabled=false"}},
 		{"bootstrap moved publisher path", "Keep credentialPublisher.kvMount=secret", []string{"--set", "credentialPublisher.kvPath=other/path"}},
-		{"bootstrap renamed fleet key", "Keep *.openbao.fleetSign.transitMount=transit", []string{"--set", "farmer.openbao.fleetSign.keyName=other"}},
 		{"bootstrap farmerbus without SA", "farmerbus.serviceAccountName is required", []string{"--set", "openbaoBootstrap.farmerbus.enabled=true"}},
 	}
 	for _, tc := range cases {
@@ -614,19 +615,8 @@ func TestExternalSecretsMatchReference(t *testing.T) {
 	}
 }
 
-// The reviewed policies travel into the chart verbatim.
+// The reviewed policy travels into the chart verbatim.
 func TestPoliciesMatchReference(t *testing.T) {
-	for _, name := range []string{"imas-fleet-signer.hcl", "imas-fleet-verify.hcl"} {
-		want := repoFile(t, filepath.Join("deploy/fleetreleaser/policies", name))
-		got, err := os.ReadFile(filepath.Join(chartDir(t), "files", "openbao-policies", name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Equal(got, want) {
-			t.Errorf("files/openbao-policies/%s differs from deploy/fleetreleaser/policies/%s", name, name)
-		}
-	}
-
 	// The publisher's policy is the ```hcl block in deploy/farmer/README.md
 	// ("The Job's policy ... allows this and nothing else").
 	readme := string(repoFile(t, "deploy/farmer/README.md"))
@@ -642,12 +632,15 @@ func TestPoliciesMatchReference(t *testing.T) {
 		t.Errorf("imas-saasapi-cred-publisher.hcl:\n%s\nREADME:\n%s", policyStatements(string(got)), policyStatements(m[1]))
 	}
 
-	// And the ConfigMap the bootstrap reads carries them unchanged.
+	// And the ConfigMap the bootstrap reads carries it unchanged.
 	cm := find(t, mustRender(t), "ConfigMap", "t-farmer-openbao-policies")
-	for _, name := range []string{"imas-fleet-signer.hcl", "imas-fleet-verify.hcl", "imas-saasapi-cred-publisher.hcl"} {
-		want, _ := os.ReadFile(filepath.Join(chartDir(t), "files", "openbao-policies", name))
-		if strings.TrimSuffix(get(cm, "data", name).(string), "\n") != strings.TrimSuffix(string(want), "\n") {
-			t.Errorf("ConfigMap %s differs from the file", name)
+	if strings.TrimSuffix(get(cm, "data", "imas-saasapi-cred-publisher.hcl").(string), "\n") != strings.TrimSuffix(string(got), "\n") {
+		t.Error("ConfigMap imas-saasapi-cred-publisher.hcl differs from the file")
+	}
+	// The retired fleet signing policies (P22 slice 2) are gone.
+	for name := range get(cm, "data").(obj) {
+		if strings.HasPrefix(name, "imas-fleet-") {
+			t.Errorf("ConfigMap still carries %s", name)
 		}
 	}
 }
@@ -663,8 +656,8 @@ func policyStatements(hcl string) string {
 	return strings.Join(out, "\n")
 }
 
-// The farmer-only policies: exact paths, no wildcards, nothing on the
-// fleet signing key's sign path or the publisher's KV path. The one
+// The farmer-only policies: exact paths, no wildcards, nothing on another
+// Transit key's sign path or the publisher's KV path. The one
 // exception is the tenantbox policy's per-tenant path, whose last
 // segment is the tenant ID: a single "+" (exactly one segment), never
 // "*", and only there.
@@ -734,13 +727,12 @@ func bootstrapRolesFor(t *testing.T, docs []obj, jobName string) map[string][]st
 // One role per client, one policy per role, each bound only to the
 // ServiceAccount that client runs as. The publisher's role (the only KV
 // write) is bound to the publisher's ServiceAccount alone, with a short
-// TTL; nothing binds the fleet signer policy.
+// TTL.
 func TestBootstrapRoles(t *testing.T) {
 	roles := bootstrapRoles(t, mustRender(t))
 	want := map[string][]string{
 		"imas-farmer-certs":           {"t-farmer", "imas-core", "imas-farmer-certs", "20m", "1h"},
 		"imas-farmer-gateway":         {"t-farmer", "imas-core", "imas-farmer-gateway", "20m", "1h"},
-		"imas-farmer-fleet-verify":    {"t-farmer", "imas-core", "imas-fleet-verify", "20m", "1h"},
 		"imas-farmer-tenantbox":       {"t-farmer", "imas-core", "imas-farmer-tenantbox", "20m", "1h"},
 		"imas-saasapi-cred-publisher": {"imas-saasapi-cred-publisher", "imas-core", "imas-saasapi-cred-publisher", "5m", "5m"},
 		// On by default since J.4.
@@ -754,18 +746,16 @@ func TestBootstrapRoles(t *testing.T) {
 			t.Errorf("role %s = %v, want %v", name, roles[name], w)
 		}
 	}
-	for name, r := range roles {
-		if r[2] == "imas-fleet-signer" {
-			t.Errorf("role %s binds the fleet signer policy", name)
-		}
-	}
 
-	// Fleet dispatch adds saasapi's verify-only role; tls.mode=secret drops
-	// farmer's PKI role.
-	roles = bootstrapRoles(t, mustRender(t, "--set", "saasapi.fleetUpdateDispatch.enabled=true", "--set", "tls.mode=secret"))
-	if !slices.Equal(roles["imas-saasapi-fleet-verify"], []string{"t-farmer-saasapi", "imas-core", "imas-fleet-verify", "20m", "1h"}) {
-		t.Errorf("saasapi fleet verify role = %v", roles["imas-saasapi-fleet-verify"])
+	// Fleet dispatch and the operator plane add no role (saasapi has none:
+	// release trust is the GPG-signed checksums.txt the sprout verifies);
+	// tls.mode=secret drops farmer's PKI role.
+	job := find(t, mustRender(t, append([]string{"--set", "saasapi.fleetUpdateDispatch.enabled=true", "--set", "tls.mode=secret"}, operatorArgs...)...), "Job", "t-farmer-openbao-bootstrap")
+	script := get(container(t, job, "bootstrap"), "args", 0).(string)
+	if strings.Contains(script, "imas-fleet") || strings.Contains(script, "t-farmer-saasapi") {
+		t.Errorf("bootstrap still creates a fleet key or a saasapi role:\n%s", script)
 	}
+	roles = bootstrapRolesFor(t, []obj{job}, "t-farmer-openbao-bootstrap")
 	if _, ok := roles["imas-farmer-certs"]; ok {
 		t.Error("PKI role created in tls.mode=secret")
 	}
@@ -773,9 +763,11 @@ func TestBootstrapRoles(t *testing.T) {
 
 // farmer never holds the KV-write identity: no IMAS_SAASAPI_CRED_* env,
 // none of its roles is the publisher's, and its ServiceAccount isn't the
-// publisher's. Same for saasapi.
+// publisher's. Same for saasapi. Neither gets a fleet key or signer
+// client, whatever is turned on.
 func TestFarmerNeverGetsPublisherIdentity(t *testing.T) {
-	for _, args := range [][]string{nil, {"-f", ciValues(t, "external-values.yaml")}, {"-f", ciValues(t, "token-auth-values.yaml")}} {
+	withOperator := append([]string{"--set", "saasapi.fleetUpdateDispatch.enabled=true"}, operatorArgs...)
+	for _, args := range [][]string{nil, {"-f", ciValues(t, "external-values.yaml")}, {"-f", ciValues(t, "token-auth-values.yaml")}, withOperator} {
 		docs := mustRender(t, args...)
 		for _, name := range []string{"t-farmer", "t-farmer-saasapi"} {
 			d := find(t, docs, "Deployment", name)
@@ -786,7 +778,11 @@ func TestFarmerNeverGetsPublisherIdentity(t *testing.T) {
 				env, _ := c.(obj)["env"].([]any)
 				for _, e := range env {
 					n := e.(obj)["name"].(string)
-					if strings.HasPrefix(n, "IMAS_SAASAPI_CRED_") || strings.HasPrefix(n, "IMAS_FLEETRELEASER_") {
+					if strings.HasPrefix(n, "IMAS_SAASAPI_CRED_") {
+						t.Errorf("%s has %s", name, n)
+					}
+					// The retired fleet key and signer clients (P22 slice 2).
+					if strings.HasPrefix(n, "IMAS_FLEETSIGN_") || strings.HasPrefix(n, "IMAS_FLEETRELEASER_") || strings.HasPrefix(n, "SAASAPI_FLEETRELEASER_") {
 						t.Errorf("%s has %s", name, n)
 					}
 					if strings.HasSuffix(n, "_K8S_ROLE") && e.(obj)["value"] == "imas-saasapi-cred-publisher" {
@@ -1350,7 +1346,7 @@ func TestSharedDependencies(t *testing.T) {
 			}
 		}
 		env := envValues(container(t, farmerDeploy(t, docs), "farmer"))
-		for _, k := range []string{"IMAS_GATEWAY_OPENBAO_ADDR", "IMAS_FLEETSIGN_OPENBAO_ADDR", "IMAS_TENANTBOX_OPENBAO_ADDR"} {
+		for _, k := range []string{"IMAS_GATEWAY_OPENBAO_ADDR", "IMAS_TENANTBOX_OPENBAO_ADDR"} {
 			if env[k] != "https://openbao.openbao.svc:8200" {
 				t.Errorf("%s = %q", k, env[k])
 			}
@@ -1658,7 +1654,7 @@ func TestTokenAuth(t *testing.T) {
 	f := envMap(container(t, farmerDeploy(t, docs), "farmer"))
 	for name, key := range map[string]string{
 		"IMAS_CERTS_OPENBAO_TOKEN": "certs-token", "IMAS_GATEWAY_OPENBAO_TOKEN": "gateway-token",
-		"IMAS_FLEETSIGN_OPENBAO_TOKEN": "farmer-fleetsign-token", "IMAS_TENANTBOX_OPENBAO_TOKEN": "tenantbox-token",
+		"IMAS_TENANTBOX_OPENBAO_TOKEN": "tenantbox-token",
 	} {
 		ref := get(f[name], "valueFrom", "secretKeyRef").(obj)
 		if ref["name"] != "imas-core-openbao-tokens" || ref["key"] != key {
@@ -1672,7 +1668,7 @@ func TestTokenAuth(t *testing.T) {
 		t.Error("token auth still mounts a projected token")
 	}
 	s := envMap(container(t, find(t, docs, "Deployment", "t-farmer-saasapi"), "saasapi"))
-	if get(s["IMAS_FLEETSIGN_OPENBAO_TOKEN"], "valueFrom", "secretKeyRef", "key") != "saasapi-fleetsign-token" || s["SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED"]["value"] != "true" {
+	if s["SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED"]["value"] != "true" {
 		t.Errorf("saasapi fleet dispatch env: %v", s)
 	}
 	p := envMap(container(t, find(t, docs, "Job", "t-farmer-saasapi-credential-publish"), "publish"))
@@ -2041,19 +2037,33 @@ var operatorArgs = []string{
 	"--set", "saasapi.operator.enabled=true",
 	"--set", "saasapi.operator.tls.secretName=saasapi-operator-tls",
 	"--set", "saasapi.operator.token.secretName=saasapi-operator-token",
-	"--set", "saasapi.operator.fleetReleaser.url=https://fleetreleaser.imas-signer.svc:9443",
-	"--set", "saasapi.operator.fleetReleaser.tokenSecretName=saasapi-fleetreleaser-token",
 }
 
 // registerArgs turns the hook on: with a stamped release, the operator
 // plane is all it needs.
 var registerArgs = operatorArgs
 
+// testChecksumsSig stands in for checksums.txt.sig, base64: the chart
+// passes it through and never verifies it (only the sprout does).
+const testChecksumsSig = "iQEzBAABCAAdFiEEdGVzdCBzaWduYXR1cmUgb25seQ=="
+
+// testChecksumsTxt is the release's checksums.txt for testRelease.
+func testChecksumsTxt(t *testing.T) string {
+	t.Helper()
+	v := chartAppVersion(t)
+	return fmt.Sprintf("%[2]s  imas-sprout_%[1]s_linux_amd64.deb\n%[3]s  imas-sprout_%[1]s_linux_amd64.rpm\n%[4]s  imas-sprout-%[1]s-windows-x64.msi\n",
+		v, strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64))
+}
+
 // testRelease is what packaging/helm/stamp-sprout-release.sh writes, for
 // the chart's own appVersion.
 func testRelease(t *testing.T) string {
 	t.Helper()
 	v := chartAppVersion(t)
+	sums, err := json.Marshal(testChecksumsTxt(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	return fmt.Sprintf(`{
   "version": "v%[1]s",
   "min_sprout_version": "v0.1.0",
@@ -2061,9 +2071,11 @@ func testRelease(t *testing.T) string {
     {"os": "linux", "arch": "amd64", "package_type": "deb", "file_name": "imas-sprout_%[1]s_linux_amd64.deb", "checksum_sha256": "%[2]s"},
     {"os": "linux", "arch": "amd64", "package_type": "rpm", "file_name": "imas-sprout_%[1]s_linux_amd64.rpm", "checksum_sha256": "%[3]s"},
     {"os": "windows", "arch": "amd64", "package_type": "msi", "file_name": "imas-sprout-%[1]s-windows-x64.msi", "checksum_sha256": "%[4]s"}
-  ]
+  ],
+  "checksums_txt": %[5]s,
+  "checksums_sig": "%[6]s"
 }
-`, v, strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64))
+`, v, strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64), sums, testChecksumsSig)
 }
 
 // releaseChart is strippedChart with files/sprout-release.json set to
@@ -2244,8 +2256,8 @@ func TestSproutReleaseRegisterJob(t *testing.T) {
 		t.Errorf("release mount %v", c["volumeMounts"])
 	}
 
-	// The body: the stamped release verbatim, plus channel and
-	// min_sprout_version, and nothing else.
+	// The body: the stamped release verbatim (checksums.txt and its
+	// signature included), plus channel, and nothing else.
 	cm := find(t, docs, "ConfigMap", "t-farmer-sprout-release")
 	var body, stamped map[string]any
 	if err := yaml.Unmarshal([]byte(get(cm, "data", "request.json").(string)), &body); err != nil {
@@ -2257,6 +2269,9 @@ func TestSproutReleaseRegisterJob(t *testing.T) {
 	stamped["channel"] = "stable"
 	if yamlString(t, body) != yamlString(t, stamped) {
 		t.Errorf("request body:\n%s\nwant:\n%s", yamlString(t, body), yamlString(t, stamped))
+	}
+	if body["checksums_txt"] != testChecksumsTxt(t) || body["checksums_sig"] != testChecksumsSig {
+		t.Errorf("request body checksums_txt %q / checksums_sig %q: not passed through", body["checksums_txt"], body["checksums_sig"])
 	}
 	if len(get(cm, "data").(obj)) != 1 {
 		t.Errorf("ConfigMap data %v: want request.json only", get(cm, "data"))
@@ -2369,30 +2384,30 @@ func TestSproutReleaseSecretWiring(t *testing.T) {
 		t.Error("the registrar's ServiceAccount is bound to an OpenBao role")
 	}
 
-	// saasapi: the listener's key pair (not ca.crt), the token, and the
-	// fleetreleaser client.
+	// saasapi: the listener's key pair (not ca.crt) and the token; no
+	// signer client and no fleet key client (P22 slice 2).
 	sd := find(t, docs, "Deployment", "t-farmer-saasapi")
 	sc := container(t, sd, "saasapi")
 	senv := envValues(sc)
 	for k, v := range map[string]string{
-		"SAASAPI_OPERATOR_LISTEN_ADDR":     ":8443",
-		"SAASAPI_OPERATOR_TLS_CERT_FILE":   "/var/run/secrets/imas/operator-tls/tls.crt",
-		"SAASAPI_OPERATOR_TLS_KEY_FILE":    "/var/run/secrets/imas/operator-tls/tls.key",
-		"SAASAPI_OPERATOR_TOKEN_FILE":      "/var/run/secrets/imas/operator-token/current",
-		"SAASAPI_FLEETRELEASER_URL":        "https://fleetreleaser.imas-signer.svc:9443",
-		"SAASAPI_FLEETRELEASER_TOKEN_FILE": "/var/run/secrets/imas/fleetreleaser/token",
-		"IMAS_FLEETSIGN_OPENBAO_K8S_ROLE":  "imas-saasapi-fleet-verify",
+		"SAASAPI_OPERATOR_LISTEN_ADDR":   ":8443",
+		"SAASAPI_OPERATOR_TLS_CERT_FILE": "/var/run/secrets/imas/operator-tls/tls.crt",
+		"SAASAPI_OPERATOR_TLS_KEY_FILE":  "/var/run/secrets/imas/operator-tls/tls.key",
+		"SAASAPI_OPERATOR_TOKEN_FILE":    "/var/run/secrets/imas/operator-token/current",
 	} {
 		if senv[k] != v {
 			t.Errorf("saasapi %s = %q, want %q", k, senv[k], v)
 		}
 	}
-	for _, k := range []string{"SAASAPI_OPERATOR_TOKEN_PREVIOUS_FILE", "SAASAPI_FLEETRELEASER_CA_FILE"} {
-		if _, ok := senv[k]; ok {
-			t.Errorf("%s set without its value", k)
-		}
+	if _, ok := senv["SAASAPI_OPERATOR_TOKEN_PREVIOUS_FILE"]; ok {
+		t.Error("SAASAPI_OPERATOR_TOKEN_PREVIOUS_FILE set without its value")
 	}
 	svols := byName(podSpec(sd)["volumes"])
+	for _, v := range []string{"openbao-auth", "openbao-ca"} {
+		if _, ok := byName(sc["volumeMounts"])[v]; ok {
+			t.Errorf("saasapi container mounts %s: it has no OpenBao client", v)
+		}
+	}
 	if got := yamlString(t, get(svols["operator-tls"], "secret", "items")); got != yamlString(t, []obj{{"key": "tls.crt", "path": "tls.crt"}, {"key": "tls.key", "path": "tls.key"}}) {
 		t.Errorf("saasapi operator-tls items %s", got)
 	}
@@ -2409,26 +2424,23 @@ func TestSproutReleaseSecretWiring(t *testing.T) {
 			t.Errorf("%v %v references the operator token Secret", d["kind"], n)
 		}
 	}
-	// The verify-only role follows the operator plane.
-	if roles := bootstrapRoles(t, docs); roles["imas-saasapi-fleet-verify"] == nil {
-		t.Error("no imas-saasapi-fleet-verify role for the operator plane's key client")
+	// No OpenBao role follows the operator plane.
+	for name, r := range bootstrapRoles(t, docs) {
+		if r[0] == "t-farmer-saasapi" {
+			t.Errorf("role %s is bound to saasapi", name)
+		}
 	}
 
-	t.Run("rotation and fleetreleaser CA", func(t *testing.T) {
+	t.Run("rotation", func(t *testing.T) {
 		sd := find(t, mustRenderRelease(t, testRelease(t), append(slices.Clone(registerArgs),
-			"--set", "saasapi.operator.token.previousKey=previous",
-			"--set", "saasapi.operator.fleetReleaser.caConfigMap=fleetreleaser-ca")...), "Deployment", "t-farmer-saasapi")
+			"--set", "saasapi.operator.token.previousKey=previous")...), "Deployment", "t-farmer-saasapi")
 		senv := envValues(container(t, sd, "saasapi"))
-		if senv["SAASAPI_OPERATOR_TOKEN_PREVIOUS_FILE"] != "/var/run/secrets/imas/operator-token/previous" ||
-			senv["SAASAPI_FLEETRELEASER_CA_FILE"] != "/var/run/secrets/imas/fleetreleaser-ca/ca.crt" {
+		if senv["SAASAPI_OPERATOR_TOKEN_PREVIOUS_FILE"] != "/var/run/secrets/imas/operator-token/previous" {
 			t.Errorf("env %v", senv)
 		}
 		vols := byName(podSpec(sd)["volumes"])
 		if got := yamlString(t, get(vols["operator-token"], "secret", "items")); got != yamlString(t, []obj{{"key": "current", "path": "current"}, {"key": "previous", "path": "previous"}}) {
 			t.Errorf("operator-token items %s", got)
-		}
-		if get(vols["fleetreleaser-ca"], "configMap", "name") != "fleetreleaser-ca" {
-			t.Errorf("fleetreleaser-ca volume %v", vols["fleetreleaser-ca"])
 		}
 	})
 }
@@ -2470,7 +2482,6 @@ func TestSproutReleaseNetworkPolicy(t *testing.T) {
 			{"saasapi in another namespace", "elsewhere", saasapi, 8443},
 			{"OpenBao", "openbao", obj{"app.kubernetes.io/name": "openbao"}, 8200},
 			{"the bus", "imas-dmz", obj{"app.kubernetes.io/name": "nats", "app.kubernetes.io/component": "bus"}, 5406},
-			{"fleetreleaser", "imas-signer", obj{"app.kubernetes.io/name": "fleetreleaser"}, 9443},
 		} {
 			if allows(np, "egress", c.ns, c.pod, c.port) {
 				t.Errorf("%v: egress allowed to %s", args, c.what)
@@ -2496,9 +2507,9 @@ func TestSproutReleaseNetworkPolicy(t *testing.T) {
 	if !allows(snp, "ingress", "anywhere", obj{"any": "pod"}, 8081) {
 		t.Error("saasapi's API port lost its default ingress")
 	}
-	// saasapi -> fleetreleaser, on the URL's port.
-	if got := egressPorts(snp); !slices.Contains(got, 9443) {
-		t.Errorf("saasapi egress ports %v: no fleetreleaser", got)
+	// The operator plane adds no saasapi egress (it calls no signer).
+	if got, base := egressPorts(snp), egressPorts(find(t, mustRender(t), "NetworkPolicy", "t-farmer-saasapi")); !slices.Equal(got, base) {
+		t.Errorf("saasapi egress ports %v with the operator plane, %v without", got, base)
 	}
 	if allows(snp, "egress", "anywhere", obj{"any": "pod"}, 8443) {
 		t.Error("saasapi egress opened on the operator port")
@@ -2522,6 +2533,8 @@ func TestSproutReleaseValidation(t *testing.T) {
 		{"version not the chart's", "ship under one tag", strings.Replace(rel, `"version": "v`+v, `"version": "v`+v+"-rc.1", 1), registerArgs},
 		{"unknown field", `unexpected field "channel"`, strings.Replace(rel, `"packages"`, `"channel": "x", "packages"`, 1), registerArgs},
 		{"no packages", "has no packages", fmt.Sprintf(`{"version": "v%s", "min_sprout_version": "v0.1.0", "packages": []}`, v), registerArgs},
+		{"no checksums_txt", "has no checksums_txt", regexp.MustCompile(`"checksums_txt": "[^"]*",`).ReplaceAllString(rel, ""), registerArgs},
+		{"empty checksums_sig", "has no checksums_sig", strings.Replace(rel, `"checksums_sig": "`+testChecksumsSig+`"`, `"checksums_sig": ""`, 1), registerArgs},
 		{"not JSON", "is not a JSON object", "version: v" + v, registerArgs},
 		{"SA is the publisher's", "another workload's ServiceAccount", rel, append(slices.Clone(registerArgs), "--set", "sproutRelease.serviceAccountName=imas-saasapi-cred-publisher")},
 		{"SA is saasapi's", "another workload's ServiceAccount", rel, append(slices.Clone(registerArgs), "--set", "sproutRelease.serviceAccountName=t-farmer-saasapi")},
@@ -2530,11 +2543,8 @@ func TestSproutReleaseValidation(t *testing.T) {
 		{"no operator TLS", "saasapi.operator.tls.secretName is required", "", append(slices.Clone(operatorArgs), "--set", "saasapi.operator.tls.secretName=")},
 		{"no operator token", "saasapi.operator.token.secretName is required", "", append(slices.Clone(operatorArgs), "--set", "saasapi.operator.token.secretName=")},
 		{"token Secret is the BFF's", "must be a Secret of its own", "", append(slices.Clone(operatorArgs), "--set", "saasapi.operator.token.secretName=imas-saasapi-internal-auth")},
-		{"token Secret is fleetreleaser's", "must be a Secret of its own", "", append(slices.Clone(operatorArgs), "--set", "saasapi.operator.token.secretName=saasapi-fleetreleaser-token")},
+		{"token Secret is the NATS credential's", "must be a Secret of its own", "", append(slices.Clone(operatorArgs), "--set", "saasapi.operator.token.secretName=imas-saasapi-nats")},
 		{"previousKey equals currentKey", "previousKey must differ", "", append(slices.Clone(operatorArgs), "--set", "saasapi.operator.token.previousKey=current")},
-		{"http fleetreleaser", "must be https://host[:port]", "", append(slices.Clone(operatorArgs), "--set", "saasapi.operator.fleetReleaser.url=http://fleetreleaser:8443")},
-		{"fleetreleaser path", "must be https://host[:port]", "", append(slices.Clone(operatorArgs), "--set", "saasapi.operator.fleetReleaser.url=https://fleetreleaser:8443/v1/sign")},
-		{"no fleetreleaser token", "fleetReleaser.tokenSecretName is required", "", append(slices.Clone(operatorArgs), "--set", "saasapi.operator.fleetReleaser.tokenSecretName=")},
 		{"operator port is the API port", "must differ from saasapi.port", "", append(slices.Clone(operatorArgs), "--set", "saasapi.operator.port=8081")},
 	}
 	for _, tc := range cases {
@@ -2550,44 +2560,179 @@ func TestSproutReleaseValidation(t *testing.T) {
 	}
 }
 
+// releaseKey is a throwaway GPG signing key for the stamp script's tests,
+// in a GNUPGHOME of its own (short, under the system temp dir: gpg-agent's
+// socket path has a length limit). It returns the home and the armored
+// public key file. No private key is checked in.
+func releaseKey(t *testing.T) (home, publicASC string) {
+	t.Helper()
+	if _, err := exec.LookPath("gpg"); err != nil {
+		skipUnlessRequired(t, "gpg not on PATH; skipping the stamp script tests")
+	}
+	home, err := os.MkdirTemp("", "gh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		exec.Command("gpgconf", "--homedir", home, "--kill", "all").Run()
+		os.RemoveAll(home)
+	})
+	if err := os.Chmod(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gpg := func(args ...string) []byte {
+		cmd := exec.Command("gpg", append([]string{"--homedir", home, "--batch", "--quiet"}, args...)...)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("gpg %v: %v", args, err)
+		}
+		return out
+	}
+	gpg("--passphrase", "", "--quick-gen-key", "imas release test <release@example.invalid>", "ed25519", "sign", "never")
+	publicASC = filepath.Join(t.TempDir(), "gpg-public-key.asc")
+	if err := os.WriteFile(publicASC, gpg("--armor", "--export"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return home, publicASC
+}
+
+// signChecksums writes dir/checksums.txt.sig, a binary detached signature
+// over dir/checksums.txt made with home's key.
+func signChecksums(t *testing.T, home, dir string) {
+	t.Helper()
+	sig := filepath.Join(dir, "checksums.txt.sig")
+	os.Remove(sig)
+	if out, err := exec.Command("gpg", "--homedir", home, "--batch", "--quiet", "--detach-sign",
+		"-o", sig, filepath.Join(dir, "checksums.txt")).CombinedOutput(); err != nil {
+		t.Fatalf("signing checksums.txt: %v: %s", err, out)
+	}
+}
+
+// writeDist writes a release's packages and checksums.txt for version (no
+// "v") into a new directory, unsigned.
+func writeDist(t *testing.T, version string) string {
+	t.Helper()
+	dir := t.TempDir()
+	var sums strings.Builder
+	for _, name := range []string{
+		"imas-sprout_" + version + "_linux_amd64.deb", "imas-sprout_" + version + "_linux_amd64.rpm",
+		"imas-sprout_" + version + "_linux_arm64.rpm", "imas-sprout-" + version + "-windows-x64.msi",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command("sha256sum", filepath.Join(dir, name)).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(&sums, "%s  %s\n", strings.Fields(string(out))[0], name)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "checksums.txt"), []byte(sums.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func stampScript(t *testing.T) string {
+	return filepath.Join(chartDir(t), "..", "..", "..", "packaging", "helm", "stamp-sprout-release.sh")
+}
+
+func stampTools(t *testing.T) {
+	t.Helper()
+	for _, tool := range []string{"bash", "jq", "sha256sum", "base64"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			skipUnlessRequired(t, tool+" not on PATH")
+		}
+	}
+}
+
+// TestStampScriptVerifiesSignature: the stamp script verifies
+// checksums.txt.sig against the keyring it is given, alone, before it
+// writes anything, and carries checksums.txt and its signature into the
+// output.
+func TestStampScriptVerifiesSignature(t *testing.T) {
+	stampTools(t)
+	home, asc := releaseKey(t)
+	otherHome, _ := releaseKey(t)
+	const tag = "v1.2.3"
+	run := func(t *testing.T, dir string) (string, error) {
+		out := filepath.Join(t.TempDir(), "sprout-release.json")
+		if b, err := exec.Command("bash", stampScript(t), "--keyring-asc", asc, dir, tag, out).CombinedOutput(); err != nil {
+			if _, statErr := os.Stat(out); statErr == nil {
+				t.Errorf("a failed stamp wrote %s", out)
+			}
+			return "", fmt.Errorf("%v: %s", err, b)
+		}
+		b, err := os.ReadFile(out)
+		return string(b), err
+	}
+
+	t.Run("good", func(t *testing.T) {
+		dir := writeDist(t, "1.2.3")
+		signChecksums(t, home, dir)
+		out, err := run(t, dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var file struct {
+			ChecksumsTxt string `json:"checksums_txt"`
+			ChecksumsSig string `json:"checksums_sig"`
+		}
+		if err := json.Unmarshal([]byte(out), &file); err != nil {
+			t.Fatal(err)
+		}
+		txt, _ := os.ReadFile(filepath.Join(dir, "checksums.txt"))
+		sig, _ := os.ReadFile(filepath.Join(dir, "checksums.txt.sig"))
+		if file.ChecksumsTxt != string(txt) {
+			t.Errorf("checksums_txt %q, want checksums.txt verbatim %q", file.ChecksumsTxt, txt)
+		}
+		if want := base64Std(sig); file.ChecksumsSig != want {
+			t.Errorf("checksums_sig %q, want %q", file.ChecksumsSig, want)
+		}
+	})
+	for name, tc := range map[string]struct {
+		prep func(t *testing.T, dir string)
+		want string
+	}{
+		"tampered checksums.txt": {func(t *testing.T, dir string) {
+			signChecksums(t, home, dir)
+			f, _ := os.OpenFile(filepath.Join(dir, "checksums.txt"), os.O_APPEND|os.O_WRONLY, 0)
+			f.WriteString(strings.Repeat("0", 64) + "  extra.tar.gz\n")
+			f.Close()
+		}, "does not verify"},
+		"signed by another key": {func(t *testing.T, dir string) { signChecksums(t, otherHome, dir) }, "does not verify"},
+		"missing signature":     {func(*testing.T, string) {}, "checksums.txt.sig"},
+		"garbage signature": {func(t *testing.T, dir string) {
+			os.WriteFile(filepath.Join(dir, "checksums.txt.sig"), []byte("not a signature"), 0o644)
+		}, "does not verify"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := writeDist(t, "1.2.3")
+			tc.prep(t, dir)
+			if _, err := run(t, dir); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("stamp = %v, want a failure mentioning %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func base64Std(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
+
 // packaging/helm/stamp-sprout-release.sh's output is what the chart
 // registers: both versions keep their "v", min_sprout_version comes from
 // packaging/helm/min-sprout-version and is at most the version by semver
 // precedence, and the result renders as is.
 func TestStampedReleaseRenders(t *testing.T) {
 	helmBin(t)
-	for _, tool := range []string{"bash", "jq", "sha256sum"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			skipUnlessRequired(t, tool+" not on PATH")
-		}
-	}
-	stampScript := filepath.Join(chartDir(t), "..", "..", "..", "packaging", "helm", "stamp-sprout-release.sh")
-	// dist writes a release's packages and checksums.txt for version (no "v").
-	dist := func(t *testing.T, version string) string {
-		dir := t.TempDir()
-		var sums strings.Builder
-		for _, name := range []string{
-			"imas-sprout_" + version + "_linux_amd64.deb", "imas-sprout_" + version + "_linux_amd64.rpm",
-			"imas-sprout_" + version + "_linux_arm64.rpm", "imas-sprout-" + version + "-windows-x64.msi",
-		} {
-			if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			out, err := exec.Command("sha256sum", filepath.Join(dir, name)).Output()
-			if err != nil {
-				t.Fatal(err)
-			}
-			fmt.Fprintf(&sums, "%s  %s\n", strings.Fields(string(out))[0], name)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "checksums.txt"), []byte(sums.String()), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return dir
-	}
-	// stamp runs the script; minFile "" means the repo's own.
+	stampTools(t)
+	home, asc := releaseKey(t)
+	// stamp runs the script on a signed release; minFile "" means the
+	// repo's own.
 	stamp := func(t *testing.T, tag, minFile string) (string, error) {
+		dir := writeDist(t, strings.TrimPrefix(tag, "v"))
+		signChecksums(t, home, dir)
 		out := filepath.Join(t.TempDir(), "sprout-release.json")
-		args := []string{stampScript, dist(t, strings.TrimPrefix(tag, "v")), tag, out}
+		args := []string{stampScript(t), "--keyring-asc", asc, dir, tag, out}
 		if minFile != "" {
 			args = append(args, minFile)
 		}

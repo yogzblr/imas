@@ -14,9 +14,8 @@
 //     dispatch time. The gate must pass before anything else is sent.
 //   - Only items still queued are sent, in request order, in waves of the
 //     original size. Before every wave the tenant's policy, the version's
-//     revocation, and its registration (catalog rows whose signatures
-//     verify) are checked again, as CreateFleetUpdateBatch and farmer's
-//     re-verification do, and before every wave and item that the tenant
+//     revocation, and its registration (it still has catalog rows) are
+//     checked again, as CreateFleetUpdateBatch and farmer's own check do, and before every wave and item that the tenant
 //     is still active, as a live rollout does.
 //   - Items in dispatching are never re-sent: the sprout deduplicates
 //     nothing, so a second send could update (or, for a §1.5 batch, run a
@@ -109,9 +108,8 @@ func rolloutTenantCheck(d *gorm.DB, batch AssetActionBatch) string {
 }
 
 // rolloutRegistrationCheck is a resumed rollout's extra check before each
-// wave: the target version still has catalog rows, every one of them
-// verifies against the fleet signing key (selfUpdateParams), and they
-// still build exactly the params the batch was created with. Revocation
+// wave: the target version still has catalog rows (selfUpdateParams),
+// and they still build exactly the params the batch was created with. Revocation
 // and the tenant's policy are rolloutPolicyCheck's, the tenant's status
 // rolloutTenantCheck's. It returns "" to go ahead, rollout_halted if a
 // check fails, or internal_error if the catalog can't be read.

@@ -192,35 +192,23 @@ func TestSproutUpdateManifest_ThroughRealEnvoy(t *testing.T) {
 	handlers.SetGatewaySigner(transittest.NewSigner(t, priv))
 	t.Cleanup(func() { handlers.SetGatewaySigner(nil) })
 
-	fleetPub, fleetPriv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ks, err := fleetsign.NewKeySet([]fleetsign.PublicKey{{Version: 1, Key: fleetPub}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	handlers.SetFleetKeySource(fleetKeys(ks))
-	t.Cleanup(func() { handlers.SetFleetKeySource(nil) })
-
-	want := fleetsign.LegacyManifest{
+	const fileName, sum = "imas-sprout_2.4.1_linux_amd64.deb", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	want := fleetsign.Manifest{
 		Version:          "v2.4.1",
 		OS:               "linux",
 		Arch:             "amd64",
-		FileName:         "imas-sprout_2.4.1_linux_amd64.deb",
-		ChecksumSHA256:   strings.Repeat("0123456789abcdef", 4),
+		PackageType:      "deb",
 		MinSproutVersion: "v1.0.0",
+		ChecksumsTxt:     sum + "  " + fileName + "\n",
+		ChecksumsSig:     "c2lnbmF0dXJlIGJ5dGVz",
 	}
-	msg, err := want.Message()
-	if err != nil {
-		t.Fatal(err)
-	}
-	want.Signature = fleetsign.EncodeSignature(1, ed25519.Sign(fleetPriv, msg))
 	db := newSaasTestDB(t)
 	exec(t, db, `INSERT INTO saas.fleet_versions
 		(id, version, os, arch, package_type, file_name, checksum_sha256, min_sprout_version, signature, revoked, released_at)
-		VALUES ('r1', ?, ?, ?, 'deb', ?, ?, ?, ?, 0, ?)`,
-		want.Version, want.OS, want.Arch, want.FileName, want.ChecksumSHA256, want.MinSproutVersion, want.Signature, time.Now())
+		VALUES ('r1', ?, ?, ?, 'deb', ?, ?, ?, '', 0, ?)`,
+		want.Version, want.OS, want.Arch, fileName, sum, want.MinSproutVersion, time.Now())
+	exec(t, db, `INSERT INTO saas.fleet_release_checksums (version, checksums_txt, checksums_sig, created_at) VALUES (?, ?, ?, ?)`,
+		want.Version, want.ChecksumsTxt, want.ChecksumsSig, time.Now())
 	exec(t, db, `INSERT INTO saas.tenant_update_policy (tenant_id, approved_version, auto_update) VALUES (?, 'v2.4.1', 0)`, tenantID)
 	handlers.SetReadinessDB(db)
 	t.Cleanup(func() { handlers.SetReadinessDB(nil) })
@@ -273,18 +261,18 @@ func TestSproutUpdateManifest_ThroughRealEnvoy(t *testing.T) {
 		return resp.StatusCode, strings.TrimSpace(string(body))
 	}
 
-	t.Run("valid gateway JWT: routed to farmer, signed manifest served", func(t *testing.T) {
+	t.Run("valid gateway JWT: routed to farmer, manifest served", func(t *testing.T) {
 		before, wsBefore := snapshot()
 		tok := mint(t, priv, tenantID, sproutID, time.Now().Add(time.Hour))
 		code, body := get(t, "Bearer "+tok)
 		if code != http.StatusOK {
 			t.Fatalf("GET %s through Envoy: %d %q, want 200 from farmer", manifestPath, code, body)
 		}
-		got, err := fleetsign.LegacyParseManifest([]byte(body))
+		got, err := fleetsign.ParseManifest([]byte(body))
 		if err != nil {
 			t.Fatalf("ParseManifest(%q): %v", body, err)
 		}
-		if got != want {
+		if !sameManifest(got, want) {
 			t.Errorf("manifest = %+v, want %+v", got, want)
 		}
 		after, wsAfter := snapshot()

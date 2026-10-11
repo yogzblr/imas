@@ -9,7 +9,7 @@ EVAL DEPENDENCIES deployed by this release:
 {{- if .Values.openbao.enabled }}
   - OpenBao{{ if .Values.openbao.server.dev.enabled }} in DEV MODE: in memory, unsealed, root token in values. A restart
     of its pod wipes keys, policies and roles; `helm upgrade` re-runs the bootstrap,
-    but the gateway and fleet keys (and the eval CA) are new ones{{ end }}.
+    but the gateway key (and the eval CA) are new ones{{ end }}.
 {{- end }}
 {{- if .Values.pxc.enabled }}
   - PXC ({{ .Values.pxc.pxc.size }} node(s)).

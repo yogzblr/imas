@@ -1,10 +1,6 @@
 package saasapi
 
-import (
-	"time"
-
-	"github.com/yogzblr/imas/internal/fleetsign"
-)
+import "time"
 
 // TenantStatus is the tenant lifecycle state exposed by GET
 // /tenants/{tenant_id}/status (design doc §1.1).
@@ -131,23 +127,24 @@ func (AssetLink) TableName() string { return "asset_links" }
 
 // FleetVersion is the `saas.fleet_versions` table (design doc §4.3,
 // §1.8, §2.5): CloudXP's own catalog of sprout releases, one row per
-// version, OS and arch. It is deliberately not upstream imas's GitHub
-// release feed — a version only becomes approvable by a tenant once
-// CloudXP has registered it here.
+// version, OS, arch and package type. It is deliberately not upstream
+// imas's GitHub release feed — a version only becomes approvable by a
+// tenant once CloudXP has registered it here.
 //
 // The catalog is global, not per tenant: every tenant chooses from the
 // same list, and tenant_update_policy records which version each tenant
 // has approved. Rows are written only by the operator-plane release
-// registration (fleet_releases.go): saasapi validates the entry, has
-// cmd/fleetreleaser — the only holder of sign capability on the
-// imas-fleet-signing Transit key — sign each row, checks the signature
-// against the read-only key set, and stores it. A registered row is never
-// changed afterwards except to revoke it.
+// registration (fleet_releases.go), together with the version's
+// FleetReleaseChecksums row. A registered row is never changed afterwards
+// except to revoke it.
 //
-// Version, OS, Arch, FileName, ChecksumSHA256 and MinSproutVersion are
-// exactly the six signed fields of fleetsign.LegacyManifest. There is no URL:
-// the sprout downloads FileName from the repository configured in the
-// sprout itself (requirement 20).
+// The trust root is the release's GPG-signed checksums.txt
+// (FleetReleaseChecksums, P22), which the sprout verifies itself (signing
+// design D20). FileName and ChecksumSHA256 are what the registration
+// checked against that checksums.txt; the sprout derives the file name
+// and takes the hash from the signed file, never from these columns.
+// There is no URL: the sprout downloads from the repository configured in
+// the sprout itself (requirement 20).
 type FleetVersion struct {
 	ID      string `gorm:"column:id;primaryKey;size:32" json:"-"`
 	Version string `gorm:"column:version;size:64;not null;uniqueIndex:idx_fleet_versions_version_os_arch_type,priority:1" json:"version"`
@@ -156,20 +153,13 @@ type FleetVersion struct {
 	// PackageType is the installer the sprout uses for FileName: deb,
 	// rpm or msi. Part of the row's key, since one linux/amd64 binary
 	// ships as both a .deb and an .rpm; a sprout asks for its own type.
-	// Not signed: the sprout picks its installer from its own OS, refuses
-	// a FileName that isn't its own type, and the signed FileName and
-	// checksum decide what is installed.
 	PackageType      string `gorm:"column:package_type;size:16;not null;uniqueIndex:idx_fleet_versions_version_os_arch_type,priority:4" json:"package_type"`
 	FileName         string `gorm:"column:file_name;size:255;not null" json:"file_name"`
 	ChecksumSHA256   string `gorm:"column:checksum_sha256;size:64;not null" json:"checksum_sha256"`
 	MinSproutVersion string `gorm:"column:min_sprout_version;size:64;not null" json:"min_sprout_version"`
-	// Signature is cmd/fleetreleaser's Ed25519 signature over the
-	// fleetsign.LegacyManifest canonical message (imas-fleet-manifest-v1|
-	// version|os|arch|file_name|checksum_sha256|min_sprout_version), in
-	// fleetsign.EncodeSignature's "v<key version>:<base64>" format (§2.5).
-	// "" is always refused — by saasapi, by farmer, and by the sprout —
-	// never treated as checksum-only trust. Not part of GET /versions'
-	// response.
+	// Signature held the pre-P22 per-row Ed25519 signature. Unused since
+	// P22 slice 2: registration writes '', nothing reads it, and a later
+	// migration drops the column.
 	Signature string `gorm:"column:signature;size:128;not null;default:''" json:"-"`
 	// Revoked withdraws the version (every row of it at once, POST
 	// /v1/operator/fleet-releases/{version}/revoke): no manifest is served
@@ -186,20 +176,25 @@ func (r FleetVersion) releaseKey() string {
 	return r.OS + "/" + r.Arch + "/" + r.PackageType
 }
 
-// Manifest returns r's signed manifest entry, signature included.
-func (r FleetVersion) Manifest() fleetsign.LegacyManifest {
-	return fleetsign.LegacyManifest{
-		Version:          r.Version,
-		OS:               r.OS,
-		Arch:             r.Arch,
-		FileName:         r.FileName,
-		ChecksumSHA256:   r.ChecksumSHA256,
-		MinSproutVersion: r.MinSproutVersion,
-		Signature:        r.Signature,
-	}
+func (FleetVersion) TableName() string { return "fleet_versions" }
+
+// FleetReleaseChecksums is the `saas.fleet_release_checksums` table
+// (migration 00007, P22): one row per release version holding the
+// release's checksums.txt byte for byte and checksums.txt.sig in standard
+// padded base64, as registered with the version's FleetVersion rows.
+// saasapi checks checksums.txt's shape and that it lists every
+// registered package with its checksum, but never verifies the signature:
+// the sprout is the only verifier (signing design D20). Farmer serves both
+// in GET /v1/sprout/update-manifest (internal/fleetcatalog). A row is
+// never changed after it is written.
+type FleetReleaseChecksums struct {
+	Version      string    `gorm:"column:version;primaryKey;size:64"`
+	ChecksumsTxt string    `gorm:"column:checksums_txt;type:mediumtext;not null"`
+	ChecksumsSig string    `gorm:"column:checksums_sig;type:text;not null"`
+	CreatedAt    time.Time `gorm:"column:created_at;not null"`
 }
 
-func (FleetVersion) TableName() string { return "fleet_versions" }
+func (FleetReleaseChecksums) TableName() string { return "fleet_release_checksums" }
 
 // TenantUpdatePolicy is the `saas.tenant_update_policy` table (design doc
 // §4.3, §1.8): one row per tenant, keyed by tenant_id alone since it holds

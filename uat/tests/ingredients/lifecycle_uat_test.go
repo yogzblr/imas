@@ -221,7 +221,7 @@ func TestLifecycleL5_SelfUpdate(t *testing.T) {
 			}
 		}
 		if !listed {
-			sc.Fatalf("release %s is not in the fleet catalog (or is revoked): register it with cmd/fleetreleaser before L5", target)
+			sc.Fatalf("release %s is not in the fleet catalog (or is revoked): register it (the farmer chart's sprout release hook) before L5", target)
 		}
 
 		cur, cfgSHA, cfgID := installEarlier(ctx, f, sc, sp, from)

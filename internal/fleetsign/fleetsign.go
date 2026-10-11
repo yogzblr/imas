@@ -17,10 +17,6 @@
 // FLAG FOR SECURITY REVIEW. This package contains no signing code: the
 // release key signs checksums.txt in the release workflow, never here.
 // TestNoSigningCodeInPackage keeps the shape honest.
-//
-// legacy.go and obtransit.go hold the pre-P22 Ed25519 / OpenBao Transit
-// manifest signature, kept only until P22 slice 2 moves farmer, saasapi
-// and natsapi off it.
 package fleetsign
 
 import "errors"

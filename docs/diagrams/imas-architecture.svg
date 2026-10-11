@@ -188,9 +188,9 @@
   <text x="1292" y="569" class="small">farmer API certificate (IMAS_CERTS_*)</text>
   <text x="1292" y="591" class="small" font-weight="700">Transit imas-gateway-jwt</text>
   <text x="1292" y="606" class="small">farmer signs gateway JWTs (IMAS_GATEWAY_*)</text>
-  <text x="1292" y="628" class="small" font-weight="700">Transit imas-fleet-signing</text>
-  <text x="1292" y="643" class="small">read-only for farmer and saasapi (verify);</text>
-  <text x="1292" y="658" class="small">only cmd/fleetreleaser signs</text>
+  <text x="1292" y="628" class="small" font-weight="700">Fleet releases: not in OpenBao</text>
+  <text x="1292" y="643" class="small">GPG-signed checksums.txt, verified</text>
+  <text x="1292" y="658" class="small">by the sprout only</text>
   <text x="1292" y="680" class="small" font-weight="700">KV v2 …/tenant-x25519/tenants/+</text>
   <text x="1292" y="695" class="small">X25519 keypair per tenant (IMAS_TENANTBOX_*)</text>
   <text x="1292" y="717" class="small" font-weight="700">KV: SaaS API NATS credential</text>

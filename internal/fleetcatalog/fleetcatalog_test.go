@@ -2,30 +2,34 @@ package fleetcatalog_test
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/yogzblr/imas/internal/fleetcatalog"
 	"github.com/yogzblr/imas/internal/fleetcatalog/fleetcatalogtest"
+	"github.com/yogzblr/imas/internal/fleetsign"
 )
 
 func ptr(s string) *string { return &s }
 
 func TestSQL(t *testing.T) {
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	db := fleetcatalogtest.Open(t)
-	deb := fleetcatalogtest.Signed(t, priv, "v2.4.1", "linux", "amd64", "deb")
-	rpm := fleetcatalogtest.Signed(t, priv, "v2.4.1", "linux", "amd64", "rpm")
-	msi := fleetcatalogtest.Signed(t, priv, "v2.4.1", "windows", "amd64", "msi")
-	for _, r := range []fleetcatalog.Row{msi, rpm, deb, fleetcatalogtest.Signed(t, priv, "v2.5.0", "linux", "amd64", "deb")} {
+	deb := fleetcatalogtest.Release(t, "v2.4.1", "linux", "amd64", "deb")
+	rpm := fleetcatalogtest.Release(t, "v2.4.1", "linux", "amd64", "rpm")
+	msi := fleetcatalogtest.Release(t, "v2.4.1", "windows", "amd64", "msi")
+	for _, r := range []fleetcatalog.Row{msi, rpm, deb, fleetcatalogtest.Release(t, "v2.5.0", "linux", "amd64", "deb"),
+		fleetcatalogtest.Release(t, "v2.6.0", "linux", "amd64", "deb")} {
 		fleetcatalogtest.AddRow(t, db, r)
 	}
+	const txt241, sig241 = "checksums of v2.4.1\n", "c2lnMjQx"
+	fleetcatalogtest.AddChecksums(t, db, "v2.4.1", txt241, sig241)
+	fleetcatalogtest.AddChecksums(t, db, "v2.5.0", "checksums of v2.5.0\n", "c2lnMjUw")
+	// v2.6.0 has no checksums row: registered before P22.
 	fleetcatalogtest.Approve(t, db, "t_acme", ptr("v2.4.1"))
 	fleetcatalogtest.Approve(t, db, "t_other", ptr("v2.5.0"))
 	fleetcatalogtest.Approve(t, db, "t_null", nil)
+	fleetcatalogtest.Approve(t, db, "t_old", ptr("v2.6.0"))
 	cat := fleetcatalog.New(db)
 	ctx := t.Context()
 
@@ -59,11 +63,17 @@ func TestSQL(t *testing.T) {
 	})
 	t.Run("ApprovedManifest", func(t *testing.T) {
 		m, found, err := cat.ApprovedManifest(ctx, "t_acme", "linux", "amd64", "rpm", "v2.4.1")
-		if err != nil || !found || m != rpm.Manifest {
-			t.Fatalf("got %+v %v %v", m, found, err)
+		want := fleetsign.Manifest{Version: "v2.4.1", OS: "linux", Arch: "amd64", PackageType: "rpm",
+			MinSproutVersion: rpm.MinSproutVersion, ChecksumsTxt: txt241, ChecksumsSig: sig241}
+		if err != nil || !found || m.Version != want.Version || m.OS != want.OS || m.Arch != want.Arch ||
+			m.PackageType != want.PackageType || m.MinSproutVersion != want.MinSproutVersion ||
+			m.ChecksumsTxt != want.ChecksumsTxt || m.ChecksumsSig != want.ChecksumsSig {
+			t.Fatalf("got %+v %v %v, want %+v", m, found, err, want)
 		}
-		// Another tenant's approval, a revoked version, no policy: none.
-		for _, c := range [][2]string{{"t_acme", "v2.5.0"}, {"t_other", "v2.5.0"}, {"t_other", "v2.4.1"}, {"t_null", "v2.4.1"}} {
+		// Another tenant's approval, a revoked version, no policy, a
+		// version without checksums: none.
+		for _, c := range [][2]string{{"t_acme", "v2.5.0"}, {"t_other", "v2.5.0"}, {"t_other", "v2.4.1"}, {"t_null", "v2.4.1"},
+			{"t_old", "v2.6.0"}} {
 			if _, found, err := cat.ApprovedManifest(ctx, c[0], "linux", "amd64", "deb", c[1]); err != nil || found {
 				t.Errorf("%s %s: found %v, %v", c[0], c[1], found, err)
 			}
