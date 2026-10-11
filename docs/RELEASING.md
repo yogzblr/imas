@@ -48,8 +48,13 @@ sprout release it was tested with (API design §2.5).
 ## Settings
 
 `release.yml` and `publish-packages.yml` run in the GitHub environment
-**`goreleaser`**, so each secret or variable below can be set on the
-repository or on that environment. `snapshot.yml` needs none of them: it
+**`goreleaser`**. **Policy (owner, 2026-10-11): the secrets below, above all
+`GPG_PRIVATE_KEY` and `GPG_PASSPHRASE`, live only on the `goreleaser`
+environment, never at repository level.** A repository secret is readable by
+any workflow someone with write access adds on a branch, and it skips the
+reviewer gate. The sprouts trust this key for updates (BUILD-STATUS P22), so
+move them to the environment and delete the repository copies. Variables may
+stay where they are. `snapshot.yml` needs none of them: it
 neither signs (`--skip=sign`) nor publishes.
 
 | Name | Kind | Used by |
@@ -72,6 +77,8 @@ GHCR; see [Helm charts on GHCR](#helm-charts-on-ghcr). If the `goreleaser`
 environment has deployment branch or tag rules, they must allow `v*` tags
 (Release, and Publish packages on a published release) and `main`
 (Publish packages run by hand).
+
+**Reviewer handover.** The environment's required reviewer is the owner today (one maintainer, Prevent self-review off). When a second maintainer joins, add them as a reviewer and turn Prevent self-review on, so a person other than the one who pushed the tag approves the release. The key needs no change for that: it is held by the environment, not by a person.
 
 **Manual gate (set 2026-10-05).** The `goreleaser` environment has the
 repository owner as a **required reviewer**, with **Prevent self-review**
