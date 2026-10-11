@@ -312,6 +312,11 @@ func (p *operatorPlane) registerFleetRelease(w http.ResponseWriter, r *http.Requ
 	if writeReleaseConflict(w, req.Version, err) {
 		return
 	}
+	if err != nil {
+		log.Errorf("saasapi: planning fleet release %s: %v", req.Version, err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to check the release")
+		return
+	}
 	if len(create) == 0 && !needSums {
 		log.Infof("saasapi: fleet release %s (channel %s) already registered; nothing to do", req.Version, req.Channel)
 		writeJSON(w, http.StatusOK, releaseResponse(existing, 0))
@@ -539,6 +544,24 @@ func planRelease(requested []FleetVersion, sums FleetReleaseChecksums, existing 
 	if revoked && len(create) > 0 {
 		return nil, false, &releaseConflict{"version_revoked", fmt.Sprintf(
 			"version %s has been revoked and takes no new packages; register a new version", requested[0].Version)}
+	}
+	// The checksums row is about to be added to a version with rows (one
+	// registered before P22, or by a request this one raced): every row
+	// already there must be a line of it with its own hash, or farmer
+	// would serve those rows a manifest whose checksums.txt the sprout can
+	// only refuse, and the checksums row can never change.
+	if existingSums == nil && len(existing) > 0 {
+		parsed, err := fleetsign.ParseChecksums([]byte(sums.ChecksumsTxt))
+		if err != nil {
+			return nil, false, err
+		}
+		for _, row := range existing {
+			if sum, ok := parsed.Sum(row.FileName); !ok || sum != row.ChecksumSHA256 {
+				return nil, false, &releaseConflict{"release_conflict", fmt.Sprintf(
+					"version %s is registered for %s with file %s, which checksums_txt does not list with that checksum; releases are immutable, register a new version",
+					sums.Version, row.releaseKey(), row.FileName)}
+			}
+		}
 	}
 	return create, existingSums == nil, nil
 }

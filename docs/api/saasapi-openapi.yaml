@@ -802,8 +802,8 @@ paths:
 
         Checks, in order, before anything is written: tenant active; body
         valid (strict decode, 64 KiB cap); `target_version` in the catalog
-        (every OS/arch row passing the manifest checks; no signature is
-        checked here); it is the tenant's `approved_version`; it is
+        (no signature is checked here); it is the tenant's
+        `approved_version`; it is
         not revoked; now is inside the rollout window, if one is set. The
         farmer params carry only the version: each sprout resolves its own
         OS/arch manifest, so one batch may span OS and arch. From each
@@ -862,7 +862,7 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500":
-          description: "`internal_error`, including a catalog entry whose rows fail the manifest checks, or sprout facts that couldn't be read."
+          description: "`internal_error`, including sprout facts that couldn't be read."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

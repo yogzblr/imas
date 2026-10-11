@@ -495,8 +495,8 @@ saasapi:
   # §2.5): sprout release registration and revoke, on its own HTTPS
   # listener and its own Service (<release>-saasapi-operator), never the
   # one the gateway routes to. The sprout release hook Job (sproutRelease
-  # below) is its only in-cluster caller. NOTE: cmd/saasapi does not start
-  # this listener yet (README.md, "Known gaps"); leave it off until it does.
+  # below) is its only in-cluster caller. cmd/saasapi starts this listener
+  # when SAASAPI_OPERATOR_LISTEN_ADDR is set (which this switch sets).
   # FLAG FOR SECURITY REVIEW: the operator token can register any
   # well-formed release whose checksums.txt it supplies; a sprout installs
   # only what verifies against its packaged keyring.

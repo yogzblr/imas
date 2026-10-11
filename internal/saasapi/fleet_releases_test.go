@@ -316,6 +316,39 @@ func TestRegisterFleetRelease_AddsChecksumsToPreP22Version(t *testing.T) {
 	}
 }
 
+// Adding checksums to a pre-P22 version: every row already registered must
+// be a line of checksums_txt with its own hash, even one the request
+// doesn't name, or nothing is stored (409).
+func TestRegisterFleetRelease_PreP22ChecksumsMustCoverStoredRows(t *testing.T) {
+	gdb, h := newOperatorTest(t)
+	for _, v := range []FleetVersion{
+		{ID: "fv_deb", Version: "v2.4.1", OS: "linux", Arch: "amd64", PackageType: "deb",
+			FileName: "imas-sprout_2.4.1_linux_amd64.deb", ChecksumSHA256: sumA, MinSproutVersion: "v2.0.0", ReleasedAt: time.Now()},
+		{ID: "fv_msi", Version: "v2.4.1", OS: "windows", Arch: "amd64", PackageType: "msi",
+			FileName: "imas-sprout-2.4.1-windows-x64.msi", ChecksumSHA256: sumC, MinSproutVersion: "v2.0.0", ReleasedAt: time.Now()},
+	} {
+		if err := gdb.Create(&v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, body := range map[string]fleetReleaseRequest{
+		"stored msi not listed":        releaseBody("v2.4.1", "v2.0.0", debPkg("amd64", sumA)),
+		"stored msi with another hash": releaseBody("v2.4.1", "v2.0.0", debPkg("amd64", sumA)).withSums(debPkg("amd64", sumA), msiPkg(sumB)),
+	} {
+		if code, resp := register(t, h, body); code != http.StatusConflict || resp["error"] != "release_conflict" ||
+			!strings.Contains(resp["message"].(string), "windows/amd64/msi") {
+			t.Errorf("%s: %d %v, want 409 release_conflict naming windows/amd64/msi", name, code, resp)
+		}
+	}
+	if sums := releaseChecksums(t, gdb, "v2.4.1"); sums != nil {
+		t.Fatalf("checksums stored for a version they don't cover: %+v", sums)
+	}
+	full := releaseBody("v2.4.1", "v2.0.0", debPkg("amd64", sumA)).withSums(debPkg("amd64", sumA), msiPkg(sumC))
+	if code, resp := register(t, h, full); code != http.StatusCreated {
+		t.Fatalf("checksums covering every stored row = %d %v, want 201", code, resp)
+	}
+}
+
 // Same version, same contents: a 200 no-op, so re-running the Helm hook
 // is safe.
 func TestRegisterFleetRelease_SameReleaseIsNoOp(t *testing.T) {

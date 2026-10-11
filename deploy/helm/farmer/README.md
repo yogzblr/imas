@@ -606,8 +606,8 @@ NOTES says which one is missing and nothing is registered:
 - the chart has `files/sprout-release.json` (a chart from a source
   checkout doesn't, so a dev install skips the hook);
 - `sproutRelease.register` (default on);
-- `saasapi.enabled` and `saasapi.operator.enabled` (default off: see
-  [Known gaps](#known-gaps)).
+- `saasapi.enabled` and `saasapi.operator.enabled` (default off: the
+  operator plane needs its TLS and token Secrets).
 
 **What it sends.** The stamped release verbatim, plus
 `sproutRelease.channel` (default `stable`).
@@ -1183,21 +1183,13 @@ from source and no cluster:
   - the SQL against a real MySQL server;
   - the migrate hook Jobs (rendering and `go test` only; `cmd/migrate`
     itself has its own tests against MySQL in `internal/migrations`);
-  - the sprout release hook against a real saasapi, which can't serve the
-    operator plane yet (Known gaps), and `podFailurePolicy` failing the Job
-    on exit 2.
+  - the sprout release hook against a real saasapi, and `podFailurePolicy`
+    failing the Job on exit 2.
 
 ## Known gaps
 
-1. **`cmd/saasapi` doesn't start the operator plane yet.**
-   `NewOperatorServer` and its configuration exist in `internal/saasapi`,
-   but `main` never calls it (`docs/api/saasapi.md`, "Operator plane"). Until
-   it does, `saasapi.operator.enabled=true` configures a listener nothing
-   serves, and the sprout release hook fails its release after its retries
-   (saasapi not reachable). So both stay off by default, and a published
-   chart says in NOTES that its sprout release was not registered.
-2. **Horizontal farmer scaling** needs FarmerPKI off local disk.
-3. **saasapi runs in the release namespace.** The reference put its
+1. **Horizontal farmer scaling** needs FarmerPKI off local disk.
+2. **saasapi runs in the release namespace.** The reference put its
    ExternalSecret in a separate `saasapi` namespace. Here saasapi shares a
    namespace with farmer's seed Secret, but it mounts only its own
    credential Secret. Whoever can create pods in this namespace could
