@@ -26,7 +26,7 @@ Goal: no person and no pod ever holds a private signing key; farmer and the bus 
 | D6 | No production environment exists. New keys everywhere, no key import or migration. |
 | D7 | Test policy: do not test external components (OpenBao, NATS, PXC/Galera, Valkey, object store) beyond what their official documentation states. Our tests target the horizontal scalability and correctness of our own code: farmer, sprout, bus (farmerbus), saasapi. |
 | D8 | OpenBao version pinned to 2.7.1 (released 2026-10-01, security fixes). A second (DR) seal is out of scope: availability comes from using a highly available external signing vault/KMS. |
-| D9 | The fleet signing key (which signs update manifests) is a different key from the NATS keys and is **not fixed by this design alone**. See section 4.1. |
+| D9 | **Fleet update trust uses the release's GPG signature, not a Transit key (owner, 2026-10-11).** The release already publishes `checksums.txt` with a detached GPG signature. The sprout verifies that, with the GPG public key shipped in its package. `imas-fleet-signing`, `fleetreleaser` and the Ed25519 manifest signature are retired. See section 4.1. |
 
 ## 3. Terms
 
@@ -69,24 +69,36 @@ Packaging consequence: the OpenBao image we ship must be 2.7.1 plus the KMS plug
 | Tenant signing key | farmer provisioning | Transit `nats/tenants/<id>/signing` | Signs sprout, CLI and farmer User JWTs for the tenant |
 | Tenant Account identity key | farmer provisioning | Transit `nats/tenants/<id>/account` (public key only is needed day to day) | Account JWT subject |
 | Gateway JWT key | existing bootstrap job | Transit | Gateway JWTs, published as JWKS |
-| Fleet signing key | existing bootstrap job | Transit, `fleetreleaser` signs only | Update manifests |
+| Release GPG key (replaces the fleet signing key) | release engineering | CI secret, dedicated and passphrase-protected; public half in the sprout package | Signs `checksums.txt` for each release (section 4.1) |
 | Tenant box keypair (X25519) | farmer | OpenBao KV (unchanged) | Payload sealing |
 | SYS user and SaaS API user NKeys | farmer / saasapi | Kubernetes Secret (connection identity, cheap to revoke) | Connecting to the bus |
 | Sprout NKey and box key | sprout | Sprout host | Identity, sealing |
 
-### 4.1 Fleet signing key and the blank sprout keyring (BUILD-STATUS P18)
+### 4.1 Fleet update trust (BUILD-STATUS P18, P20, P22)
 
-`packaging/etc/fleet-signing-keys.json` is `{}` and is packaged into every sprout release. That file is the sprout's trust root for self-update: the **public** half of `imas-fleet-signing`, read from Transit. The NATS Transit work in this document does not change it, for two reasons:
+**Decision D9.** Update integrity comes from the release's GPG-signed `checksums.txt`. Today `.goreleaser.yaml` already builds `checksums.txt` (all packages plus the MSI) and signs it with `gpg2 --detach-sign` (`checksums.txt.sig`; a keyless cosign bundle is also produced). The Transit key `imas-fleet-signing`, the `fleetreleaser` service and the Ed25519 manifest signature are no longer needed for this path.
 
-1. The keyring is filled in when the packages are built, by a person or a release step reading the public key. Moving the NATS keys into Transit does not touch that step.
-2. Today the bootstrap Job creates `imas-fleet-signing` in each environment's own OpenBao. A UAT rig builds a fresh OpenBao every run, so it gets a fresh key. A package built earlier carries a different (or empty) keyring and fails closed.
+Why the sprout needs a signature at all: it installs with `dpkg -i` / `rpm -U` on a downloaded file, which checks no repository signature. The SHA-256 is the only integrity check, so the thing that carries the hash must be signed by a key farmer does not control. A GPG `.sig` sent by farmer is useless unless the verifying public key is already on the sprout, so the key ships in the package.
 
-What fixes it (proposal, owner to decide):
+Flow:
 
-- Keep the fleet key in the long-lived external signing vault (the same vault D1/D8 assume is highly available), not in a per-environment OpenBao. `fleetreleaser` signs with it; nothing else can.
-- Read its public versions once (`transit/keys/imas-fleet-signing`, `keys.<N>.public_key`), commit them to `packaging/etc/fleet-signing-keys.json` (public data), and review that change like a trust-root change.
-- Add a release check that runs `fleetsign.ParseKeyring` on the file and fails the build if it is empty or invalid (BUILD-STATUS P18).
-- UAT needs a decision: either the UAT signs with a standing UAT fleet key whose public half is in the keyring used for UAT builds, or the Azure run installs a UAT keyring on the sprouts. Pick one before the self-update tests (L4, L5).
+1. Release: GoReleaser publishes `checksums.txt` and `checksums.txt.sig`, signed with the release GPG key (CI secret `GPG_PRIVATE_KEY`; the signature is checked in the release workflow before publish).
+2. Registration (operator plane): saasapi stores, per version, the verbatim `checksums.txt` and `checksums.txt.sig` bytes. It no longer calls `fleetreleaser`. It validates the signature against the public key before storing, as a sanity check only; the sprout is the verifier.
+3. Update: the sprout asks farmer for the manifest for its approved version (as today). Farmer returns the signed `checksums.txt` bytes, the `.sig`, and the `file_name` it should install.
+4. The sprout verifies the `.sig` over the exact `checksums.txt` bytes with the GPG public keys in `fleet-signing-keys` (now a GPG keyring file), finds the line for `file_name`, downloads from the repository configured in the sprout, and requires the SHA-256 to match.
+5. The sprout derives the expected `file_name` itself from its own OS, arch, package type and the version, and refuses a different name. This replaces the OS, arch and version binding the old manifest signed. `min_sprout_version` and the tenant's approved version stay farmer policy (not signed); the sprout keeps its downgrade refusal (`dpkg --refuse-downgrade`, version comparison).
+
+What this changes and what it does not:
+
+- It fixes P18 once the real GPG public key is in the package, and a release check parses the keyring (below). It removes the per-rig key mismatch: the key is the release key, not one made by each OpenBao.
+- It removes P20 option C's need to deploy `fleetreleaser` and its signing key. The UAT still needs the operator plane, a TLS Secret and a token to register a release, and a UAT keyring that matches the key that signed the UAT build.
+- Custody moves from Transit/HSM to the GPG key in CI secrets. It must be a dedicated release key with a passphrase, available only to the `goreleaser` environment (protected tag/environment). Its compromise lets an attacker sign any update: revocation means shipping a new keyring in a package that the old key signed.
+- A compromised farmer can still choose which signed release a tenant gets (an older signed version), but cannot create an unsigned one. Downgrade protection stays on the sprout.
+- Rotation: the keyring holds more than one GPG key. A new key ships in a release signed by the old one; the old key is removed only when no approved version needs it. Same rule as the Ed25519 keyring.
+
+Open points: the GPG parsing library (`github.com/ProtonMail/go-crypto` is already an indirect dependency, BSD-3-Clause; confirm against the licence policy before it becomes direct); whether to also verify the cosign bundle (not needed for the sprout, which has no network path to Sigstore); how a customer who mirrors packages supplies their own signed checksums (they republish the same signed file).
+
+Release check (P18): the release workflow fails if the shipped keyring file is empty or does not parse, and if `checksums.txt.sig` does not verify against it.
 
 Key naming for rotation: create a new key name per rotation (`signing-v2`) rather than a new Transit version, because a new version changes the public key and the Account JWT must list it.
 
@@ -96,7 +108,7 @@ Key naming for rotation: create a new key name per rotation (`signing-v2`) rathe
 2. Operators run `init` with `-recovery-shares=3 -recovery-threshold=2` and PGP-encrypted output, one key per operator. Output is not stored in the cluster.
 3. Bootstrap Job (one-time, run with the initial root token, then the token is revoked):
    - enable Transit, KV v2, PKI, Kubernetes auth, an audit device;
-   - create Transit keys: operator, operator-signing, sys-account, gateway, fleet;
+   - create Transit keys: operator, operator-signing, sys-account, gateway;
    - build the operator JWT (names operator-signing key and SYS account), sign it with the operator identity key via Transit, sign the SYS Account JWT with operator-signing;
    - write the operator JWT, SYS account public key and operator public key to a ConfigMap (public data);
    - write policies (section 6);
@@ -112,7 +124,6 @@ Key naming for rotation: create a new key name per rotation (`signing-v2`) rathe
 | bootstrap (temporary) | create keys, write policies, sign operator JWT |
 | farmer | `sign` on operator-signing, sys-account, `tenants/*/signing`; create `tenants/*` keys; read public keys; KV tenant box paths |
 | saasapi | none on nats keys |
-| fleetreleaser | `sign` on fleet key only |
 | bus | none (reads the ConfigMap) |
 | everyone else | read public key where needed |
 
@@ -169,5 +180,5 @@ Not tested by us: OpenBao unseal and seal providers, snapshot restore, NATS clus
 - Which production seal (customer or CloudXP choice); KMIP server selection is the operator's, per OpenBao's KMIP page.
 - Farmer NKey and credential-rotation state: PXC or Secret.
 - Audit logs with several farmer replicas: per-pod files plus a shipper, or object storage.
-- Where the fleet signing key lives (section 4.1) and how UAT gets a matching keyring.
+- GPG verification library and licence check; UAT keyring for the release key (section 4.1).
 - Single-writer lock mechanism for provisioning and rotation (PXC `GET_LOCK` or lease).
