@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/yogzblr/imas/internal/openbao"
 )
@@ -154,7 +155,31 @@ func (d *dispatcher) dispatch(batch []*signJob) {
 			continue
 		default:
 		}
-		d.send(d.ctx, k, groups[k])
+		ctx, cancel := groupContext(d.ctx, groups[k])
+		d.send(ctx, k, groups[k])
+		cancel()
+	}
+}
+
+// groupContext is parent, also cancelled once every job's caller has
+// gone, so a worker doesn't spend its retries on signs nobody waits for.
+func groupContext(parent context.Context, jobs []*signJob) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	remaining := atomic.Int64{}
+	remaining.Store(int64(len(jobs)))
+	stops := make([]func() bool, len(jobs))
+	for i, j := range jobs {
+		stops[i] = context.AfterFunc(j.ctx, func() {
+			if remaining.Add(-1) == 0 {
+				cancel()
+			}
+		})
+	}
+	return ctx, func() {
+		for _, stop := range stops {
+			stop()
+		}
+		cancel()
 	}
 }
 
@@ -197,6 +222,7 @@ func (s *TransitKeyStore) signGroup(ctx context.Context, key groupKey, jobs []*s
 	})
 	if err != nil {
 		if ctx.Err() != nil {
+			// Closed, or every caller has gone (they read nothing).
 			fail(ErrClosed)
 			return
 		}

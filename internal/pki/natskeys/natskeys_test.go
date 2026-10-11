@@ -814,3 +814,31 @@ func TestCloseFailsPendingSigns(t *testing.T) {
 		t.Errorf("second Close: %v", err)
 	}
 }
+
+func TestAbandonedGroupFreesWorker(t *testing.T) {
+	f := natskeystest.New(t)
+	f.NewKey(SysAccountKey())
+	s := newStore(t, f, func(c *Config) { c.Workers = 1; c.Timeout = time.Minute })
+	kp := mustPair(t, s, SysAccountKey(), nkeys.PrefixByteAccount)
+	gate := make(chan struct{})
+	t.Cleanup(func() { close(gate) })
+	f.SetSignGate(gate)
+
+	// The only caller gives up while its sign is in flight...
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { _, err := kp.(ContextSigner).SignContext(ctx, []byte("abandoned")); done <- err }()
+	waitFor(t, func() bool { return f.Count(natskeystest.OpSign) == 1 })
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("abandoned sign: %v", err)
+	}
+	// ...so the worker drops it at once instead of waiting out the
+	// store's one-minute timeout, and serves the next sign.
+	f.SetSignGate(nil)
+	sctx, scancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer scancel()
+	if _, err := kp.(ContextSigner).SignContext(sctx, []byte("next")); err != nil {
+		t.Fatalf("sign after an abandoned one: %v", err)
+	}
+}
