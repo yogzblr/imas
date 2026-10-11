@@ -259,6 +259,18 @@ func (c *Client) Token(ctx context.Context) (string, error) {
 	return c.k8sLoginLocked(ctx)
 }
 
+// ResetToken drops the cached kubernetes-auth login token, so the next
+// Token call logs in again. For a caller OpenBao refused with 403 on a
+// token that should still be valid (its role's policies changed, or it
+// was revoked): the cached lease alone would keep sending it. A static
+// token has nothing cached and is unaffected.
+func (c *Client) ResetToken() {
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
+	c.authToken = ""
+	c.authExpiry = time.Time{}
+}
+
 // k8sLoginLocked logs in to the kubernetes auth method (POST
 // auth/<mount>/login with {"role", "jwt"}) and caches the token until
 // 80% of its lease has passed. Callers must hold c.authMu.
@@ -298,6 +310,12 @@ func (c *Client) Read(ctx context.Context, path string, query url.Values) (*api.
 // Put is PUT /v1/<path> with body as JSON.
 func (c *Client) Put(ctx context.Context, path string, body any) (*api.Secret, error) {
 	return c.request(ctx, http.MethodPut, path, nil, body)
+}
+
+// Delete is DELETE /v1/<path>, for endpoints that take no body
+// (Transit's keys/<name>/soft-delete).
+func (c *Client) Delete(ctx context.Context, path string) (*api.Secret, error) {
+	return c.request(ctx, http.MethodDelete, path, nil, nil)
 }
 
 // Post is POST /v1/<path> with body as JSON. OpenBao treats POST and PUT
