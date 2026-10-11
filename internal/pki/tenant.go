@@ -27,6 +27,7 @@ package pki
 // on, not a tenant boundary itself; see jwtauth.go's own security-review
 // note on operator key custody, which applies identically here.
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -147,10 +148,10 @@ func ensureTenantAccountMaterial(mat *natsAuthMaterial, tenantID, name string) (
 	}
 
 	tam := &tenantAccountMaterial{}
-	seedName := externalSeedNameForTenant(tenantID)
+	ctx := context.Background()
 
 	var err error
-	tam.kp, err = loadOrCreateSeed(tenantAccountKeyPath(tenantID), seedName, nkeys.CreateAccount)
+	tam.kp, err = natsKeys.ensureKeyPair(ctx, natsKeyRef{role: natsKeyTenantAccount, tenantID: tenantID})
 	if err != nil {
 		return nil, false, err
 	}
@@ -158,7 +159,7 @@ func ensureTenantAccountMaterial(mat *natsAuthMaterial, tenantID, name string) (
 	if err != nil {
 		return nil, false, err
 	}
-	tam.signingKP, err = loadOrCreateSeed(tenantAccountSigningKeyPath(tenantID), seedName+"_SIGNING", nkeys.CreateAccount)
+	tam.signingKP, err = natsKeys.ensureKeyPair(ctx, natsKeyRef{role: natsKeyTenantSigning, tenantID: tenantID})
 	if err != nil {
 		return nil, false, err
 	}

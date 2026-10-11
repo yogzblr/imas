@@ -17,6 +17,7 @@ package pki
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -113,9 +114,10 @@ func ensureNatsAuth() (*natsAuthMaterial, error) {
 	}
 
 	mat := &natsAuthMaterial{}
+	ctx := context.Background()
 
 	var err error
-	mat.operatorKP, err = loadOrCreateSeed(filepath.Join(dir, "operator.nk"), "OPERATOR", nkeys.CreateOperator)
+	mat.operatorKP, err = natsKeys.ensureKeyPair(ctx, natsKeyRef{role: natsKeyOperator})
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +125,7 @@ func ensureNatsAuth() (*natsAuthMaterial, error) {
 	if err != nil {
 		return nil, err
 	}
-	mat.operatorSigningKP, err = loadOrCreateSeed(filepath.Join(dir, "operator-signing.nk"), "OPERATOR_SIGNING", nkeys.CreateOperator)
+	mat.operatorSigningKP, err = natsKeys.ensureKeyPair(ctx, natsKeyRef{role: natsKeyOperatorSigning})
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +134,7 @@ func ensureNatsAuth() (*natsAuthMaterial, error) {
 		return nil, err
 	}
 
-	mat.sysAccountKP, err = loadOrCreateSeed(filepath.Join(dir, "sys-account.nk"), "SYS_ACCOUNT", nkeys.CreateAccount)
+	mat.sysAccountKP, err = natsKeys.ensureKeyPair(ctx, natsKeyRef{role: natsKeySysAccount})
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +143,7 @@ func ensureNatsAuth() (*natsAuthMaterial, error) {
 		return nil, err
 	}
 
-	mat.tenantKP, err = loadOrCreateSeed(filepath.Join(dir, "tenant.nk"), "TENANT", nkeys.CreateAccount)
+	mat.tenantKP, err = natsKeys.ensureKeyPair(ctx, natsKeyRef{role: natsKeyTenantAccount})
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +151,7 @@ func ensureNatsAuth() (*natsAuthMaterial, error) {
 	if err != nil {
 		return nil, err
 	}
-	mat.tenantSigningKP, err = loadOrCreateSeed(filepath.Join(dir, "tenant-signing.nk"), "TENANT_SIGNING", nkeys.CreateAccount)
+	mat.tenantSigningKP, err = natsKeys.ensureKeyPair(ctx, natsKeyRef{role: natsKeyTenantSigning})
 	if err != nil {
 		return nil, err
 	}
