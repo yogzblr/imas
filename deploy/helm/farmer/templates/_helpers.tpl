@@ -650,16 +650,20 @@ explanation rather than deploying something that silently can't work.
 {{- if not $nk.secretName -}}
 {{- fail "farmer.nkeySecret.secretName is required: farmer's NKey seed, shared by every replica (IMAS_FARMER_NKEY_SEED_FILE). Neither farmer nor this chart generates it (see README.md, \"Seeds\")." -}}
 {{- end -}}
-{{- if not (regexMatch "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" (toString $nk.secretName)) -}}
+{{- if or (gt (len (toString $nk.secretName)) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" (toString $nk.secretName))) -}}
 {{- fail (printf "farmer.nkeySecret.secretName %q is not a valid Secret name" (toString $nk.secretName)) -}}
 {{- end -}}
-{{- if not (regexMatch "^[-._a-zA-Z0-9]+$" (toString $nk.key)) -}}
+{{- if or (not (regexMatch "^[-._a-zA-Z0-9]+$" (toString $nk.key))) (has (toString $nk.key) (list "." "..")) (hasPrefix ".." (toString $nk.key)) -}}
 {{- fail (printf "farmer.nkeySecret.key %q is not a valid Secret key" (toString $nk.key)) -}}
 {{- end -}}
 {{- if not (hasPrefix "/" (toString $nk.mountPath)) -}}
 {{- fail (printf "farmer.nkeySecret.mountPath %q must be an absolute path" (toString $nk.mountPath)) -}}
 {{- end -}}
-{{- if eq (trimSuffix "/" (toString $nk.mountPath)) (trimSuffix "/" (toString .Values.natsSeeds.mountPath)) -}}
+{{- $nkPath := trimSuffix "/" (toString $nk.mountPath) -}}
+{{- if or (eq $nkPath "") (eq $nkPath "/tmp") (hasPrefix "/tmp/" $nkPath) -}}
+{{- fail (printf "farmer.nkeySecret.mountPath %q must not be /, /tmp or under /tmp: it would hide farmer's writable tmp volume (farmerpki)" (toString $nk.mountPath)) -}}
+{{- end -}}
+{{- if eq $nkPath (trimSuffix "/" (toString .Values.natsSeeds.mountPath)) -}}
 {{- fail "farmer.nkeySecret.mountPath must differ from natsSeeds.mountPath" -}}
 {{- end -}}
 {{- if has $nk.secretName (list .Values.natsSeeds.secretName .Values.saasapi.natsCredentials.secretName) -}}
