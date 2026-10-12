@@ -193,6 +193,7 @@ func writeEnrollError(w http.ResponseWriter, err error) {
 	writeEnrollFailed(w)
 }
 
+// writeEnrollFailure writes the generic enrollment failure body with status.
 func writeEnrollFailure(w http.ResponseWriter, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

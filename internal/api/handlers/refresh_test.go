@@ -314,6 +314,8 @@ func withPKIRefreshSprout(t *testing.T, err error) {
 	t.Cleanup(func() { pkiRefreshSprout = orig })
 }
 
+// postWellFormedRefresh posts a refresh request that passes the handler's
+// own validation, so the outcome is whatever pkiRefreshSprout returns.
 func postWellFormedRefresh(t *testing.T) *httptest.ResponseRecorder {
 	t.Helper()
 	kp, err := nkeys.CreateUser()

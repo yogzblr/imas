@@ -311,6 +311,8 @@ func withPKIEnroll(t *testing.T, err error) {
 // sprout's User JWT mint lease (enrollJWTError).
 var errBusyEnroll = fmt.Errorf("%w: %w", pki.ErrEnrollmentFailed, pki.ErrSproutJWTBusy)
 
+// postValidEnroll posts a well-formed, signed enroll request for a fresh
+// NKey and returns the recorded response.
 func postValidEnroll(t *testing.T) *httptest.ResponseRecorder {
 	t.Helper()
 	kp, err := nkeys.CreateUser()
