@@ -2,8 +2,9 @@
 #
 # Static half: everything that is the same on every run. install.sh writes
 # the run-specific half (values-run.yaml: the farmerbus image tag, the
-# farmer upstream on the core private IP, the NetworkPolicy egress to it)
-# from the endpoints file and passes both, this file first.
+# farmer upstream on the core private IP, the NetworkPolicy egress to it;
+# values-accounts.yaml: the accounts bucket endpoint and the bus egress to
+# it) from the endpoints file and passes all three, this file first.
 #
 # Layout (docs/claude-code-parallel-build-plan.md, section 4h): one
 # single-node k0s cluster on a Standard_D2s_v5 (2 vCPU, 8 GiB) holding
@@ -52,11 +53,6 @@ bus:
     # (install.sh), with tls.crt, tls.key and the UAT CA as ca.crt.
     mode: secret
     secretName: imas-farmerbus-tls
-  persistence:
-    enabled: true
-    size: 1Gi
-    # Empty: the cluster default (local-path-provisioner, UAT.2).
-    storageClassName: ""
   resources:
     requests:
       cpu: 50m
@@ -67,6 +63,19 @@ bus:
     # Kept ClusterIP. Core reaches the bus through install.sh's own
     # NodePort Service, node port 8442 (README.md, "Exposure").
     type: ClusterIP
+
+# The accounts bucket on the core hub's RustFS (uat/hub/core/minio-setup.sh
+# creates it and the read-only credential). The endpoint and the egress
+# rule are run-specific (values-accounts.yaml). Plain HTTP, as core's own
+# RustFS clients use. No PVC: the bus pod's loader sidecar rebuilds the
+# resolver from this bucket at every start.
+accountStore:
+  useSSL: false
+  bucket: imas-accounts
+  # install.sh creates both Secrets (--accounts-reader-dir, --loader-seed).
+  credentialsSecret: imas-bus-accounts-reader
+loader:
+  sysUserSecret: imas-bus-loader-sys-user
 
 envoy:
   enabled: true

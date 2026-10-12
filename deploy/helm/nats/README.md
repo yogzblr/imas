@@ -57,6 +57,11 @@ separate `deploy/helm/farmer` chart.
    [NATS trust](#nats-trust). For `bus.replicaCount > 1`, also **a seed
    Secret** with the fence user's seed (`natsSeeds.secretName`). The chart
    never generates one. See [Seeds](#seeds).
+   The trust must carry `bus-loader-user.jwt`. Also **the accounts
+   bucket and the loader's two Secrets** (`accountStore.credentialsSecret`,
+   read-only, and `loader.sysUserSecret`), plus `accountStore.endpoint`
+   and `networkPolicy.accountStoreEgress`. See
+   [Accounts bucket and loader](#accounts-bucket-and-loader).
 2. **A bus TLS certificate.** Either a `kubernetes.io/tls` Secret with
    `ca.crt`, or OpenBao PKI. See [Bus TLS](#bus-tls).
 3. **A DMZ edge certificate** for Envoy (`envoy.tls.secretName`). This is
@@ -74,7 +79,8 @@ separate `deploy/helm/farmer` chart.
    | farmer's `farmerorganization` equals `bus.organization` | `organization` |
    | farmer dials this bus at `tls://<release>-nats-bus.<ns>.svc.cluster.local:5406` (farmer's `farmerbusurl`) | `bus.serviceName` (`<release>-nats-bus`), `bus.namespace`, `bus.port` |
    | the bus certificate carries the name farmer verifies (the host of `farmerbusurl`, or `farmerbustlsservername`) | `bus.tlsServerName` (empty: the FQDN, which the default SANs cover) |
-   | the trust ConfigMap is a copy of the core release's | `natsTrust.configMapName`; for a cluster, `natsTrust.busFenceUserPub` (the public key of this chart's `BUS_FENCE_USER` seed) |
+   | the trust ConfigMap is a copy of the core release's | `natsTrust.configMapName`; `natsTrust.busLoaderUserPub` (the public key of this chart's `loader.sysUserSecret` seed); for a cluster, `natsTrust.busFenceUserPub` (the public key of this chart's `BUS_FENCE_USER` seed) |
+   | farmer writes the accounts bucket this chart's loader reads | the accounts bucket settings of P21 slice 2 PR 2 (not yet on `main`) |
    | `IMAS_SPROUT_BUS_URLS` lists Envoy's external `wss://` address | `bus.sproutBusURLs` |
    | core's NetworkPolicy: egress to the bus on 5406, ingress from this chart's Envoy on 5405 | `networkPolicy.dmz.*` (rendered by that chart) |
    | Envoy's `farmer_api` upstream is farmer's Service | here: `envoy.upstreams.farmerAPI.host=<core release>-farmer.<core ns>.svc.cluster.local` |
@@ -101,7 +107,9 @@ separate `deploy/helm/farmer` chart.
 
 ```sh
 helm install imas-dmz deploy/helm/nats -n imas-dmz \
-  --set bus.image.repository=<registry>/imas-farmerbus --set bus.image.tag=<tag>
+  --set accountStore.endpoint=<s3 host:port> \
+  --set networkPolicy.accountStoreEgress.cidr=<s3 address>/32 \
+  --set networkPolicy.accountStoreEgress.port=<s3 port>
 ```
 
 ## NATS trust
@@ -117,6 +125,7 @@ bootstrap Job writes (`internal/pki/natstrust.go`, `busauth.go`):
 | `operator.jwt`, `operator.pub`, `operator-signing.pub` | the trust anchor |
 | `sys-account.pub`, `sys-account.jwt` | the system account, seeded into the resolver before core's first push; every SYS Account JWT core pushes is newer and replaces it |
 | `bus-fence-user.jwt` | a clustered bus's fence user (see [Seeds](#seeds)) |
+| `bus-loader-user.jwt` | every bus pod's account loader (see [Accounts bucket and loader](#accounts-bucket-and-loader)) |
 
 The chart mounts `natsTrust.configMapName` read-only at
 `/var/run/imas/nats-trust` (`IMAS_NATS_TRUST_DIR`). It is required: the
@@ -135,7 +144,7 @@ kubectl -n imas-core get configmap imas-nats-trust -o json \
 For a bus in another cluster, use the core cluster's kubeconfig for the
 `get` and the DMZ cluster's for the `apply`. The trust anchor never
 changes once bootstrapped (the bootstrap refuses to replace it), so the
-copy only changes when a fence user is added.
+copy only changes when a fence or loader user is added.
 
 ## Seeds
 
@@ -170,12 +179,74 @@ has them. The removed trust chain seeds (`OPERATOR`, `OPERATOR_SIGNING`,
 not be left in the DMZ: drop them from `natsSeeds`, the Secret and
 OpenBao.
 
-The bus writes nothing to its PVC but the resolver's JWT store.
+The bus has no PVC. Its resolver's JWT store is an `emptyDir`, rebuilt
+from the accounts bucket at every start (next section).
 
 `/etc/imas/farmer` is mounted read-only on purpose. `config.LoadConfig`
 folds **every** environment variable into its config and ends with
 `jety.WriteConfig()`, which would otherwise write them all back into that
 file. For the same reason the pods set `enableServiceLinks: false`.
+
+## Accounts bucket and loader
+
+The bus is stateless (P21 slice 2): no PVC, and the resolver directory
+(`/var/lib/imas/farmerbus`) is an `emptyDir`. Each bus pod runs a second
+container, `loader` (`/farmerbus-loader`, shipped in the farmerbus
+image), that rebuilds it:
+
+- farmer writes every Account JWT to `accounts/<account pub>.jwt` in the
+  accounts bucket (`accountStore.bucket`, default `imas-accounts`) and
+  bumps `accounts/index`, then publishes `imas.bus.accounts.changed` in
+  the SYS account;
+- the loader lists the bucket, validates each JWT against the trusted
+  operator keys, and pushes it to **its own** node only
+  (`tls://127.0.0.1:<bus.ports.client>`, verifying the bus certificate
+  as the bus Service's FQDN), never an older one than it has applied;
+- it then follows the event and polls `accounts/index` every
+  `accountStore.reconcileInterval`, with a full listing every
+  `accountStore.fullResyncInterval`.
+
+The pod is Ready only when **both** containers are, and the loader's
+`/readyz` (on `loader.healthPort`, 8081) is 503 until the node holds
+every Account in the bucket. A new or replaced node therefore takes no
+traffic until it is loaded, and a rolling update or a drain (the PDB) waits
+for it. If the object store is down while a pod starts, that pod never
+becomes Ready and a rollout halts while the other pods keep serving. A
+loader that has loaded once stays Ready through an object store outage
+and keeps the JWTs it holds (owner decision D-2 (a)).
+
+Before you install, create two Secrets in this namespace (the chart never
+creates either):
+
+1. **`accountStore.credentialsSecret`** (default
+   `imas-bus-accounts-reader`), keys `access-key-id` and
+   `secret-access-key` (`accountStore.accessKeyIdKey`,
+   `secretAccessKeyKey`): a credential that can **only get and list** the
+   accounts bucket. The loader probes it at start and refuses to run if it
+   can put or delete. It must not be farmer's writer credential, nor
+   reach the recipe or job buckets.
+2. **`loader.sysUserSecret`** (default `imas-bus-loader-sys-user`), key
+   `user.nk` (`loader.sysUserSeedKey`): an NKey user seed. Generate it
+   offline (`nk -gen user -pubout`), store it in OpenBao for ESO to sync
+   here, set the core chart's `natsTrust.busLoaderUserPub` to its public
+   key and upgrade the core release: its bootstrap mints
+   `bus-loader-user.jwt` (publish `$SYS.REQ.CLAIMS.UPDATE`,
+   `$SYS.REQ.CLAIMS.LIST` and `$SYS.REQ.ACCOUNT.*.CLAIMS.LOOKUP`;
+   subscribe `_INBOX.>` and `imas.bus.accounts.changed`; nothing else)
+   into the trust ConfigMap. Then copy the trust here
+   ([NATS trust](#nats-trust)). Use a different key from the fence
+   user's.
+
+Set `accountStore.endpoint` (`host:port`, no scheme) and, with
+NetworkPolicies on, `networkPolicy.accountStoreEgress` (the endpoint's
+address as a `/32` and its port). Rendering fails without them.
+
+Both Secrets and the bus CA reach the `loader` container only; farmerbus
+mounts neither. In `bus.tls.mode=secret` the loader gets `ca.crt` alone
+from the bus TLS Secret. In `openbao` mode the CA exists only in
+farmerbus's in-memory `tls` volume, which also holds the bus key, so the
+loader mounts that volume read-only (see
+[Security review notes](#security-review-notes)).
 
 ## Bus TLS
 
@@ -255,7 +326,15 @@ two nodes would stop both. When `replicaCount > 1` the chart renders:
   `NAME`, `PORT`, `ROUTES` (every node, this one included, as
   `tls://<pod>.<headless>.<ns>.svc.cluster.local:<port>`), `ADVERTISE`
   (this pod's own headless name), `ROUTE_USER` and
-  `ROUTE_PASSWORD_FILE`, plus `IMAS_BUS_SERVER_NAME` (the pod name).
+  `ROUTE_PASSWORD_FILE`, plus `IMAS_BUS_SERVER_NAME` (the pod name),
+- `IMAS_BUS_CLUSTER_SIZE_FILE`: key `replicas` of the
+  `<fullname>-bus-topology` ConfigMap (always rendered, equal to
+  `replicaCount`), mounted as a directory so kubelet updates it in place.
+  The fence's majority check uses it, never below the number of routes,
+  and keeps the last good value if the file is missing or bad. It is not
+  in the pod checksum: a Helm scale rolls the pods anyway, because
+  `IMAS_BUS_CLUSTER_ROUTES` changes. `kubectl scale` and an HPA are
+  unsupported (the routes would not follow) but fail closed.
 
 The shape follows `docs/design/imas-1m-scale-plan.md` Phase 2: a
 full-mesh core-NATS cluster with the "full" account resolver. Nothing
@@ -283,11 +362,10 @@ here claims a throughput or connection figure; none has been measured.
    default `certHosts` already list them and OpenBao PKI roles set
    `client_flag` by default; check yours. In `secret` mode, add the
    per-pod names to the cert-manager `Certificate`.
-3. **Persistence** must stay on (render fails otherwise). A node keeps
-   the Account JWTs it was pushed across restarts; one that starts empty
-   serves nobody until its pull from its peers has brought them all in,
-   and if every node starts empty they come back only once core
-   reconnects and pushes them (see below).
+3. **No persistence.** Every node starts on an empty resolver directory
+   and its loader rebuilds it from the accounts bucket
+   ([Accounts bucket and loader](#accounts-bucket-and-loader)), so a node,
+   or every node at once, comes back with farmer down.
 4. **Fence user.** `natsSeeds.seeds.BUS_FENCE_USER` and the matching
    `bus-fence-user.jwt` in the trust ConfigMap (render fails without the
    seed, farmerbus without either). See [Seeds](#seeds).
@@ -311,7 +389,15 @@ through its Service and sprouts through Envoy.
 
 ### How an Account JWT reaches every node
 
-Core pushes each Account JWT once, to `$SYS.REQ.CLAIMS.UPDATE` on
+The accounts bucket is the source every node rebuilds from: each pod's
+loader pushes every Account JWT in it into its own node before the pod is
+Ready, and then applies changes from farmer's event and its own timer
+([Accounts bucket and loader](#accounts-bucket-and-loader)). A node that
+missed a push from core therefore catches up from the bucket at the next
+event or reconcile at the latest, and a node or a whole cluster that
+starts empty is filled from the bucket, with or without core.
+
+Core also pushes each Account JWT once, to `$SYS.REQ.CLAIMS.UPDATE` on
 whichever bus node its SYS connection landed on (`internal/pki/resolver.go`).
 Every node subscribes to that subject, so the push reaches that node and
 every node it has a **direct** route to; NATS routes don't forward a
@@ -329,8 +415,7 @@ Core also pushes **every** Account JWT (SYS, the legacy tenant, every
 provisioned tenant, and a fresh lock-out for every deprovisioned one)
 whenever its SYS connection to the bus connects or reconnects
 (`pki.PushAllAccounts`), and keeps pushing them at start-up until the bus
-accepts them. That is how a bus, or a whole cluster, that starts on
-empty volumes learns them. After each push it re-reads the Account JWT
+accepts them. After each push it re-reads the Account JWT
 and pushes again if it changed meanwhile, so a deny or key rotation
 racing it can't be undone by the older copy it read first (the bus
 applies claims pushes in arrival order).
@@ -364,11 +449,11 @@ What that means for a tenant:
 | Event | Outcome |
 |---|---|
 | Provisioned while a node is down | Pushed to the live nodes. The returning node is fenced until its pull brings the Account in. |
-| Locked out while a node is down | Same. The returning node starts from its PVC, which still holds the live Account JWT, and serves nobody until its pull merged the lock-out. Merging closes the tenant's connections at once. |
+| Locked out while a node is down | Same. The returning node starts empty; its loader applies the lock-out from the bucket before the pod is Ready, and the fence keeps it from serving until its pull has merged its peers' JWTs too. |
 | Provisioned or locked out while one node is cut off | The cut-off node lost its majority and is fenced: it dropped its clients and refuses new ones, including the push. The majority side applies the push. On heal the node pulls before it serves. |
 | Locked out during a partial mesh (two nodes lost their link but both still reach a third) | The two that lost each other fence after the grace. Only the node that sees everyone serves and takes the push. |
 | Locked out while no node can take the push (all down or all fenced) | The push fails and `DeprovisionTenant` returns an error. Retrying it signs and pushes a fresh lock-out. Core's next connect or reconnect to the bus also pushes one, for every deprovisioned tenant. |
-| A node restarts on an empty volume (scale-out, a replaced PVC) | It has only the SYS bootstrap, so it is fenced until its pull has brought in every Account from its peers. Nothing it holds can outrank what core pushed. |
+| A node restarts (every restart is on an empty volume, as is a scale-out) | It has only the SYS bootstrap. Its loader fills it from the bucket, and the fence keeps it from serving until its pull has brought in every Account from its peers. Nothing it holds can outrank what core pushed. |
 
 Merges are fail-closed on ties: if two JWTs for one Account carry the
 same issued-at, the locked-out one wins. Lock-outs are also signed at a
@@ -505,13 +590,18 @@ Only these flows are allowed:
 | bus | in | this release's Envoy | `bus.ports.websocket` (5407) |
 | bus | in/out | other pods of this bus StatefulSet, same namespace, via the separate `-routes` policy (only if `replicaCount > 1`) | `bus.cluster.port` (6222) |
 | bus | out | DNS | 53/UDP+TCP |
+| bus | out | the accounts bucket's endpoint (`networkPolicy.accountStoreEgress.cidr`), the loader's S3 reads | `networkPolicy.accountStoreEgress.port` (443) |
 | bus | out | OpenBao (only in `bus.tls.mode=openbao`) | `networkPolicy.openbao.port` |
 | Envoy | in | `networkPolicy.envoyIngress.from` (default: anyone) | `envoy.listenerPort` (8443) |
 | Envoy | out | bus pods | `bus.ports.websocket` |
 | Envoy | out | core | `envoy.upstreams.farmerAPI.port` and `recipeService.port` (5405) |
 | Envoy | out | DNS | 53/UDP+TCP |
 
-- The bus never opens a connection into the core network.
+- The bus opens one connection into the core network: the loader's S3
+  reads from the accounts bucket, to the one address and port in
+  `networkPolicy.accountStoreEgress` (owner decision D-1 (a): the same
+  object store core uses, with a read-only credential scoped to the
+  accounts bucket). It opens nothing else there.
 - The route port is in no policy but `-routes`. Neither Envoy nor core
   can reach it, and neither the bus client Service nor the Envoy Service
   exposes it. NetworkPolicies are additive, so another policy in the
@@ -521,8 +611,8 @@ Only these flows are allowed:
 - If `jwks.remote.cluster=jwks` points outside the cluster, add a rule
   through `networkPolicy.envoyExtraEgress`.
 
-Kubelet probes (TCP on `client`, HTTP on `health`) originate from the
-node. Most CNIs allow them regardless of policy. Check yours.
+Kubelet probes (TCP on `client`, HTTP on `health` and on the loader's
+`loader-health`) originate from the node. Most CNIs allow them regardless of policy. Check yours.
 
 ### Core in another cluster
 
@@ -562,7 +652,36 @@ sees that address rather than the node's.
 
 | Key | Default | Description |
 |---|---|---|
-| `natsTrust.configMapName` | `imas-nats-trust` | The trust ConfigMap in this namespace, copied from the core release's. Required. See [NATS trust](#nats-trust). |
+| `natsTrust.configMapName` | `imas-nats-trust` | The trust ConfigMap in this namespace, copied from the core release's. Required; must carry `bus-loader-user.jwt`. See [NATS trust](#nats-trust). |
+
+### `accountStore`
+
+| Key | Default | Description |
+|---|---|---|
+| `accountStore.endpoint` | `""` | S3 endpoint, `host:port` without a scheme. Required. |
+| `accountStore.useSSL` | `true` | TLS to the endpoint. |
+| `accountStore.bucket` | `imas-accounts` | The accounts bucket. Required. |
+| `accountStore.credentialsSecret` | `imas-bus-accounts-reader` | Existing Secret with the read-only (get and list) accounts credential. Required. |
+| `accountStore.accessKeyIdKey` | `access-key-id` | Key of the access key ID in that Secret. |
+| `accountStore.secretAccessKeyKey` | `secret-access-key` | Key of the secret access key in that Secret. |
+| `accountStore.reconcileInterval` | `30s` | How often the loader polls `accounts/index` (±20% jitter). |
+| `accountStore.fullResyncInterval` | `5m` | How often the loader lists the whole bucket. |
+| `accountStore.eventSubject` | `imas.bus.accounts.changed` | farmer's broadcast subject. The loader user may subscribe to the default only. |
+
+### `loader`
+
+| Key | Default | Description |
+|---|---|---|
+| `loader.image.*` | empty repository | Loader image. Empty repository uses the bus image, which ships `/farmerbus-loader`. |
+| `loader.healthPort` | `8081` | `/healthz`, `/readyz`, `/status`. Must differ from every bus port. |
+| `loader.sysUserSecret` | `imas-bus-loader-sys-user` | Existing Secret with the loader's SYS user seed. Required. |
+| `loader.sysUserSeedKey` | `user.nk` | Key of the seed in that Secret. |
+| `loader.resources` | 50m CPU and 64Mi requests, 256Mi limit | Container resources. |
+| `loader.securityContext` | non-root, read-only root, no privilege escalation, drop ALL | Container securityContext. |
+| `loader.readinessProbe` | HTTP `/readyz`, every 5s, 3 failures | Ready once the initial load is complete. |
+| `loader.startupProbe` | HTTP `/healthz`, 5s × 120 | Startup probe. |
+| `loader.livenessProbe` | HTTP `/healthz`, every 20s | Liveness probe. |
+| `loader.extraEnv` | `[]` | Extra env, e.g. `IMAS_LOADER_PUSH_RATE` (default 200/s) or `IMAS_LOADER_PUSH_CONCURRENCY` (8). |
 
 ### `bus`
 
@@ -608,11 +727,6 @@ sees that address rather than the node's.
 | `bus.tls.openbao.k8sAudience` | `openbao` | Audience of the projected ServiceAccount token (10-minute expiry). |
 | `bus.tls.openbao.tokenSecretName` | `""` | token auth: the Secret holding the token. |
 | `bus.tls.openbao.tokenSecretKey` | `token` | token auth: the key in that Secret. |
-| `bus.persistence.enabled` | `true` | Keep FarmerPKI (resolver store) on a PVC per node. Off uses `emptyDir`, so pushed Account JWTs are lost on restart. Required when `replicaCount > 1`. |
-| `bus.persistence.size` | `1Gi` | PVC size. |
-| `bus.persistence.storageClassName` | `""` | StorageClass. Empty uses the default. |
-| `bus.persistence.accessModes` | `[ReadWriteOnce]` | PVC access modes. |
-| `bus.persistence.annotations` | `{}` | Annotations on the volumeClaimTemplate. |
 | `bus.resources` | 100m CPU and 128Mi requests, 512Mi limit | Container resources. |
 | `bus.podSecurityContext` | non-root 65532, fsGroup 65532, RuntimeDefault seccomp | Pod securityContext. |
 | `bus.securityContext` | read-only root, no privilege escalation, drop ALL | Container securityContext. |
@@ -743,15 +857,21 @@ sees that address rather than the node's.
 | `networkPolicy.openbao.namespaceSelector` | `kubernetes.io/metadata.name: openbao` | OpenBao namespace. Used only in `bus.tls.mode=openbao`. |
 | `networkPolicy.openbao.podSelector` | `{}` | OpenBao pods. |
 | `networkPolicy.openbao.port` | `8200` | OpenBao port. |
+| `networkPolicy.accountStoreEgress.cidr` | `""` | The accounts bucket endpoint's address, as a CIDR (a `/32`). Required while `networkPolicy.enabled`. |
+| `networkPolicy.accountStoreEgress.port` | `443` | The endpoint's TCP port. |
 | `networkPolicy.busExtraEgress` | `[]` | Extra egress rules for bus pods. |
 | `networkPolicy.envoyExtraEgress` | `[]` | Extra egress rules for Envoy pods, for example an external JWKS host. |
 
 ## Testing the chart
 
 ```sh
-helm lint deploy/helm/nats
+for f in deploy/helm/nats/ci/*.yaml; do helm lint --strict deploy/helm/nats -f "$f"; done
 go test ./deploy/helm/nats/   # renders with the helm CLI; skips if helm isn't on PATH
 ```
+
+The chart has no default for `accountStore.endpoint` and
+`networkPolicy.accountStoreEgress.cidr`, so a bare `helm lint` reports
+the missing values; the `ci/` files set them.
 
 `ci/*-values.yaml` follow the chart-testing convention.
 
@@ -801,6 +921,21 @@ rendered openbao-mode config (that chart's README, "Verification status"):
   can publish claims requests as SYS, as the bus itself can), never a key
   that signs accounts. Remove the old trust chain seeds from `natsSeeds`,
   the DMZ Secret and OpenBao.
+- **The account loader** (P21 slice 2) is a second SYS account user in
+  every bus pod, granted only claims update, list and lookup requests,
+  `_INBOX.>` and the accounts event. It validates every JWT against the
+  trusted operator keys before pushing, so a tampered bucket cannot
+  install an Account the operator did not sign, and never pushes an
+  older JWT than it applied; a bucket rolled back to older valid JWTs is
+  still a rollback for a node that starts empty (farmer's reconcile
+  repairs the bucket). Its S3 credential must be read-only; it checks
+  that at start. The bus's network policy gains S3 egress to that one
+  endpoint.
+- **openbao mode exposes the bus key to the loader container.** The CA
+  the loader verifies the node with exists only in farmerbus's in-memory
+  `tls` volume, next to the bus key, and the loader mounts it read-only.
+  Same pod and user, so no new principal, but a compromised loader can
+  read the bus key. Secret mode projects `ca.crt` alone.
 - **Cluster routes** (`replicaCount > 1`) carry every tenant's traffic
   and the SYS account's claims updates. They need mutual TLS, a
   certificate naming a route host, and the route password. They are

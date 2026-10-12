@@ -1133,6 +1133,7 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `natsSeeds.extraSeeds` | `{}` | More user-kind seeds. |
 | `natsTrust.configMapName` | `imas-nats-trust` | The trust ConfigMap the bootstrap writes and farmer and the publish Job mount. |
 | `natsTrust.busFenceUserPub` | `""` | The nats chart's fence user public key (`U...`); set, the bootstrap mints `bus-fence-user.jwt`. |
+| `natsTrust.busLoaderUserPub` | `""` | The nats chart's account loader user public key (`U...`, the public half of its `loader.sysUserSecret` seed); set, the bootstrap mints `bus-loader-user.jwt`, which every bus pod's loader needs. Must differ from `busFenceUserPub`. |
 | `natsTrust.kvCopy.enabled` | `false` | Also copy the trust to `secret/data/platform/imas/nats-trust`. |
 | `farmer.openbao.natsSign.*` | role `imas-farmer-natssign`, `transit`, `15s`, `64`, `4`, `30` | farmer's NATS signer: `k8sRole`, `tokenSecretKey`, `transitMount` (must be `transit`), `timeout`, `batchMax`, `workers` (`IMAS_NATSSIGN_*`), and `retiredTenantKeyRetentionDays` for the purge runbook. |
 | `credentialPublisher.natsSign.*` | role `imas-natssign-publisher` | The publish Job's NATS signer role and token key. |

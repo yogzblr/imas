@@ -61,8 +61,10 @@ var noAdmin = []string{"--set", "farmer.bootstrapAdmin.pubkey=", "--set", "farme
 const (
 	// A bus fence user public key (natsTrust.busFenceUserPub).
 	testFenceUserPub = "UAHJPA3T2QKVRDQ2JUZM5MDQHLVJGEIY7WQF7OUN5RF4XN7WTWDOAKJE"
-	testAdminPubkey  = "AB3CQ7X5ZV2JMR4FZYPG2ZLNZ6QX6S7HCLRT5JH4PO5ILHMYXM2AXUNG"
-	testAdminBoxpub  = "2O0Y4D6rpqfWAeY+pn2AFOP0AkFqm2t8dNVO3uYFQUQ="
+	// A bus account loader user public key (natsTrust.busLoaderUserPub).
+	testLoaderUserPub = "UBLERZOUVUNJFGALFNZSLNGQ5SYD7I3SPCPF3IHZ7UR3HTMV5I2OIGP2"
+	testAdminPubkey   = "AB3CQ7X5ZV2JMR4FZYPG2ZLNZ6QX6S7HCLRT5JH4PO5ILHMYXM2AXUNG"
+	testAdminBoxpub   = "2O0Y4D6rpqfWAeY+pn2AFOP0AkFqm2t8dNVO3uYFQUQ="
 )
 
 func chartDir(t *testing.T) string {
@@ -407,6 +409,8 @@ func TestValidationFailures(t *testing.T) {
 		{"keygen takes publisher signer", "controlPlaneBoxKeys.k8sRole", []string{"--set", "controlPlaneBoxKeys.k8sRole=imas-natssign-publisher"}},
 		{"bad trust configmap", "natsTrust.configMapName", []string{"--set", "natsTrust.configMapName=Bad_Name"}},
 		{"bad fence user pub", "natsTrust.busFenceUserPub", []string{"--set", "natsTrust.busFenceUserPub=" + testAdminPubkey}},
+		{"bad loader user pub", "natsTrust.busLoaderUserPub", []string{"--set", "natsTrust.busLoaderUserPub=" + testAdminPubkey}},
+		{"loader user is the fence user", "must be different keys", []string{"--set", "natsTrust.busFenceUserPub=" + testFenceUserPub, "--set", "natsTrust.busLoaderUserPub=" + testFenceUserPub}},
 		{"bad seed name", "must match", []string{"--set", "natsSeeds.extraSeeds.bad-name=x.nk"}},
 		{"two farmers", "farmer.replicaCount must be 1", []string{"--set", "farmer.replicaCount=2"}},
 		{"bare number window", "must be a quoted duration", []string{"--set", "farmer.jobs.reconcileWindow=7200"}},
@@ -2011,8 +2015,11 @@ func allows(np obj, direction string, ns string, podLbls map[string]any, port in
 func TestContractWithNatsChart(t *testing.T) {
 	helmBin(t)
 	farmerFQDN := "imas-core-farmer.imas-core.svc.cluster.local"
-	dmz, err := renderAs(t, "imas-dmz", "imas-dmz", filepath.Join(chartDir(t), "..", "nats"),
-		"--set", "bus.tls.mode=openbao", "--set", "envoy.upstreams.farmerAPI.host="+farmerFQDN)
+	// The values the nats chart has no default for: its accounts bucket.
+	natsRequired := []string{"--set", "accountStore.endpoint=s3.imas-core.svc.cluster.local:9000",
+		"--set", "networkPolicy.accountStoreEgress.cidr=10.20.0.10/32"}
+	dmz, err := renderAs(t, "imas-dmz", "imas-dmz", filepath.Join(chartDir(t), "..", "nats"), append(slices.Clone(natsRequired),
+		"--set", "bus.tls.mode=openbao", "--set", "envoy.upstreams.farmerAPI.host="+farmerFQDN)...)
 	if err != nil {
 		t.Fatalf("nats chart: %v", err)
 	}
@@ -2090,8 +2097,8 @@ func TestContractWithNatsChart(t *testing.T) {
 	}
 	// A clustered bus's fence user: the bootstrap mints its JWT from the
 	// public key set here, and the bus mounts the seed.
-	dmzCl, err := renderAs(t, "imas-dmz", "imas-dmz", filepath.Join(chartDir(t), "..", "nats"),
-		"--set", "bus.replicaCount=3", "--set", "bus.cluster.auth.secretName=r", "--set", "natsSeeds.seeds.BUS_FENCE_USER=bus-fence-user.nk")
+	dmzCl, err := renderAs(t, "imas-dmz", "imas-dmz", filepath.Join(chartDir(t), "..", "nats"), append(slices.Clone(natsRequired),
+		"--set", "bus.replicaCount=3", "--set", "bus.cluster.auth.secretName=r", "--set", "natsSeeds.seeds.BUS_FENCE_USER=bus-fence-user.nk")...)
 	if err != nil {
 		t.Fatalf("nats chart, clustered: %v", err)
 	}
@@ -2104,6 +2111,20 @@ func TestContractWithNatsChart(t *testing.T) {
 	}
 	if v := envValues(initContainer(t, find(t, coreFence, "Job", "imas-core-farmer-openbao-bootstrap"), "nats-trust"))["IMAS_NATSBOOT_BUS_FENCE_USER_PUB"]; v != testFenceUserPub {
 		t.Errorf("IMAS_NATSBOOT_BUS_FENCE_USER_PUB = %q", v)
+	}
+	// Every bus pod's account loader: the bootstrap mints its JWT into the
+	// trust ConfigMap from the public key set here, and the loader reads
+	// it there by its pki.TrustBusLoaderUserJWT name.
+	loaderEnv := envValues(container(t, bus, "loader"))
+	if want := farmerEnv["IMAS_NATS_TRUST_DIR"] + "/bus-loader-user.jwt"; loaderEnv["IMAS_LOADER_SYS_USER_JWT_FILE"] != want {
+		t.Errorf("IMAS_LOADER_SYS_USER_JWT_FILE = %q, want %q", loaderEnv["IMAS_LOADER_SYS_USER_JWT_FILE"], want)
+	}
+	coreLoader, err := renderAs(t, "imas-core", "imas-core", strippedChart(t), append(slices.Clone(required), "--set", "natsTrust.busLoaderUserPub="+testLoaderUserPub)...)
+	if err != nil {
+		t.Fatalf("farmer chart with a loader user: %v", err)
+	}
+	if v := envValues(initContainer(t, find(t, coreLoader, "Job", "imas-core-farmer-openbao-bootstrap"), "nats-trust"))["IMAS_NATSBOOT_BUS_LOADER_USER_PUB"]; v != testLoaderUserPub {
+		t.Errorf("IMAS_NATSBOOT_BUS_LOADER_USER_PUB = %q", v)
 	}
 	// Network: each side's policy admits the other on the right port.
 	dmzBusNP := find(t, dmz, "NetworkPolicy", "imas-dmz-nats-bus")
@@ -3341,6 +3362,14 @@ func TestBootstrapJobStructure(t *testing.T) {
 	}
 	if _, ok := envValues(initContainer(t, job, "nats-trust"))["IMAS_NATSBOOT_KV_COPY"]; ok {
 		t.Error("KV copy on by default")
+	}
+	// The loader user likewise (P21 slice 2).
+	nt = initContainer(t, find(t, mustRender(t, "--set", "natsTrust.busLoaderUserPub="+testLoaderUserPub), "Job", "t-farmer-openbao-bootstrap"), "nats-trust")
+	if env := envValues(nt); env["IMAS_NATSBOOT_BUS_LOADER_USER_PUB"] != testLoaderUserPub {
+		t.Errorf("nats-trust env with loader user: %v", env)
+	}
+	if _, ok := envValues(initContainer(t, job, "nats-trust"))["IMAS_NATSBOOT_BUS_LOADER_USER_PUB"]; ok {
+		t.Error("loader user set by default")
 	}
 }
 

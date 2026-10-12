@@ -8,6 +8,7 @@ package natschart
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -32,6 +34,15 @@ func chartDir(t *testing.T) string {
 	return filepath.Dir(file)
 }
 
+// requiredArgs are the values the chart has no default for (the accounts
+// bucket's endpoint and its egress); render passes them before the
+// caller's own, so a test can still override or clear them.
+var requiredArgs = []string{
+	"--set", "accountStore.endpoint=s3.imas-core.example.internal:9000",
+	"--set", "networkPolicy.accountStoreEgress.cidr=10.20.0.10/32",
+	"--set", "networkPolicy.accountStoreEgress.port=9000",
+}
+
 // render runs `helm template` and returns the parsed documents, or the
 // combined output as an error when rendering fails.
 func render(t *testing.T, args ...string) ([]obj, error) {
@@ -44,7 +55,7 @@ func render(t *testing.T, args ...string) ([]obj, error) {
 		t.Skip("helm not on PATH; skipping chart rendering tests")
 	}
 	cmd := exec.Command(helm, append([]string{"template", "t", chartDir(t),
-		"--namespace", "imas-dmz", "--kube-version", "1.30.0"}, args...)...)
+		"--namespace", "imas-dmz", "--kube-version", "1.30.0"}, append(slices.Clone(requiredArgs), args...)...)...)
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
 	if err := cmd.Run(); err != nil {
@@ -298,7 +309,6 @@ func TestValidationFailures(t *testing.T) {
 		{"cluster without route credentials", "bus.cluster.auth.secretName is required", []string{"--set", "bus.replicaCount=3"}},
 		{"two-node cluster", "bus.replicaCount=2 is refused", []string{"--set", "bus.replicaCount=2", "--set", "bus.cluster.auth.secretName=r"}},
 		{"cluster on an image without routes", "routesSupported=false", []string{"--set", "bus.replicaCount=3", "--set", "bus.cluster.auth.secretName=r", "--set", "bus.cluster.routesSupported=false"}},
-		{"cluster without persistence", "bus.persistence.enabled must be true", []string{"--set", "bus.replicaCount=3", "--set", "bus.cluster.auth.secretName=r", "--set", "bus.persistence.enabled=false"}},
 		{"bad route password key", "passwordKey", []string{"--set", "bus.replicaCount=3", "--set", "bus.cluster.auth.secretName=r", "--set", "bus.cluster.auth.passwordKey=a/b"}},
 		{"zero max connections", "bus.maxConnections must be a whole number >= 1", []string{"--set", "bus.maxConnections=0"}},
 		{"negative max connections", "bus.maxConnections must be a whole number >= 1", []string{"--set", "bus.maxConnections=-1"}},
@@ -316,6 +326,10 @@ func TestValidationFailures(t *testing.T) {
 		{"refresh fractional headroom", "refreshRateLimit.headroom must be a whole number", []string{"--set", "envoy.refreshRateLimit.headroom=1.5"}},
 		{"refresh burst below interval", "burstSeconds must be >= fillIntervalSeconds", []string{"--set", "envoy.refreshRateLimit.fillIntervalSeconds=10", "--set", "envoy.refreshRateLimit.burstSeconds=5"}},
 		{"refresh max below per-fill", "maxTokens must be >= tokensPerFill", []string{"--set", "envoy.refreshRateLimit.tokensPerFill=50", "--set", "envoy.refreshRateLimit.maxTokens=10"}},
+		{"loader health port on a bus port", "loader.healthPort 8080 is already a bus port", []string{"--set", "loader.healthPort=8080"}},
+		{"bad reconcile interval", "accountStore.reconcileInterval", []string{"--set", "accountStore.reconcileInterval=often"}},
+		{"bad event subject", "accountStore.eventSubject", []string{"--set", "accountStore.eventSubject=imas.>"}},
+		{"same reader secret keys", "must be different keys", []string{"--set", "accountStore.secretAccessKeyKey=access-key-id"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) { mustFail(t, tc.want, tc.args...) })
@@ -617,7 +631,7 @@ func policyPorts(np obj, direction string) []int {
 
 // Bus <-> core traffic is limited to the documented ports: core -> bus
 // client port, Envoy -> bus websocket port, Envoy -> farmer API port. The
-// bus has no egress except DNS.
+// bus has no egress except DNS and the accounts bucket.
 func TestNetworkPolicyPorts(t *testing.T) {
 	docs := mustRender(t)
 	bus := find(t, docs, "NetworkPolicy", "-bus")
@@ -633,8 +647,8 @@ func TestNetworkPolicyPorts(t *testing.T) {
 		get(ingress[1], "ports", 0, "port") != 5407 {
 		t.Errorf("envoy -> bus rule wrong: %v", ingress[1])
 	}
-	if got := policyPorts(bus, "egress"); !slices.Equal(got, []int{53, 53}) {
-		t.Errorf("bus egress ports = %v, want DNS only", got)
+	if got := policyPorts(bus, "egress"); !slices.Equal(got, []int{53, 53, 9000}) {
+		t.Errorf("bus egress ports = %v, want DNS and the accounts bucket only", got)
 	}
 
 	envoy := find(t, docs, "NetworkPolicy", "-envoy")
@@ -647,7 +661,7 @@ func TestNetworkPolicyPorts(t *testing.T) {
 
 	// openbao mode opens exactly one more egress, to OpenBao.
 	docs = mustRender(t, "--set", "bus.tls.mode=openbao")
-	if got := policyPorts(find(t, docs, "NetworkPolicy", "-bus"), "egress"); !slices.Equal(got, []int{53, 53, 8200}) {
+	if got := policyPorts(find(t, docs, "NetworkPolicy", "-bus"), "egress"); !slices.Equal(got, []int{53, 53, 9000, 8200}) {
 		t.Errorf("openbao-mode bus egress ports = %v", got)
 	}
 }
@@ -863,4 +877,269 @@ func TestRoutesMatchReferenceEnvoyConfig(t *testing.T) {
 			t.Errorf("jwt_authn %s: chart %v, reference %v", k, gotJA[k], refJA[k])
 		}
 	}
+}
+
+// namedContainer returns the pod template's container called name.
+func namedContainer(t *testing.T, workload obj, name string) obj {
+	t.Helper()
+	for _, c := range get(workload, "spec", "template", "spec", "containers").([]any) {
+		if c.(obj)["name"] == name {
+			return c.(obj)
+		}
+	}
+	t.Fatalf("no container %q", name)
+	return nil
+}
+
+func volumeByName(sts obj, name string) obj {
+	for _, v := range get(sts, "spec", "template", "spec", "volumes").([]any) {
+		if v.(obj)["name"] == name {
+			return v.(obj)
+		}
+	}
+	return nil
+}
+
+func mountPaths(c obj) map[string]string {
+	m := map[string]string{}
+	for _, v := range c["volumeMounts"].([]any) {
+		m[v.(obj)["name"].(string)] = v.(obj)["mountPath"].(string)
+	}
+	return m
+}
+
+// The bus keeps no volume (P21 slice 2): the resolver's store is an
+// emptyDir, rebuilt by the loader from the accounts bucket.
+func TestNoPersistentVolumeClaim(t *testing.T) {
+	for _, args := range [][]string{nil, clusteredArgs} {
+		sts := find(t, mustRender(t, args...), "StatefulSet", "-bus")
+		if v := get(sts, "spec", "volumeClaimTemplates"); v != nil {
+			t.Errorf("volumeClaimTemplates rendered: %v", v)
+		}
+		if v := get(sts, "spec", "persistentVolumeClaimRetentionPolicy"); v != nil {
+			t.Errorf("persistentVolumeClaimRetentionPolicy rendered: %v", v)
+		}
+		data := volumeByName(sts, "data")
+		if data == nil || data["emptyDir"] == nil {
+			t.Errorf("data volume is not an emptyDir: %v", data)
+		}
+		if got := mountPaths(container(t, sts))["data"]; got != "/var/lib/imas/farmerbus" {
+			t.Errorf("data mounted at %q", got)
+		}
+	}
+}
+
+func TestLoaderSidecarRendered(t *testing.T) {
+	sts := find(t, mustRender(t), "StatefulSet", "-bus")
+	if c := container(t, sts); c["name"] != "farmerbus" {
+		t.Fatalf("first container is %v, want farmerbus", c["name"])
+	}
+	l := namedContainer(t, sts, "loader")
+	if get(l, "image") != "ghcr.io/yogzblr/imas-farmerbus:0.1.0" {
+		t.Errorf("loader image = %v, want the bus image", get(l, "image"))
+	}
+	if cmd := get(l, "command").([]any); len(cmd) != 1 || cmd[0] != "/farmerbus-loader" {
+		t.Errorf("loader command = %v", cmd)
+	}
+	env := envMap(l)
+	for k, want := range map[string]string{
+		"IMAS_LOADER_S3_ENDPOINT":               "s3.imas-core.example.internal:9000",
+		"IMAS_LOADER_S3_USE_SSL":                "true",
+		"IMAS_LOADER_S3_BUCKET":                 "imas-accounts",
+		"IMAS_LOADER_S3_ACCESS_KEY_ID_FILE":     "/var/run/secrets/imas/accounts-reader/access-key-id",
+		"IMAS_LOADER_S3_SECRET_ACCESS_KEY_FILE": "/var/run/secrets/imas/accounts-reader/secret-access-key",
+		"IMAS_LOADER_NATS_URL":                  "tls://127.0.0.1:5406",
+		"IMAS_LOADER_NATS_SERVER_NAME":          "t-nats-bus.imas-dmz.svc.cluster.local",
+		"IMAS_LOADER_CA_FILE":                   "/var/run/imas/loader-ca/ca.crt",
+		"IMAS_NATS_TRUST_DIR":                   "/var/run/imas/nats-trust",
+		"IMAS_LOADER_SYS_USER_JWT_FILE":         "/var/run/imas/nats-trust/bus-loader-user.jwt",
+		"IMAS_LOADER_SYS_USER_SEED_FILE":        "/var/run/secrets/imas/loader/user.nk",
+		"IMAS_LOADER_EVENT_SUBJECT":             "imas.bus.accounts.changed",
+		"IMAS_LOADER_RECONCILE_INTERVAL":        "30s",
+		"IMAS_LOADER_FULL_RESYNC_INTERVAL":      "5m",
+		"IMAS_LOADER_HEALTH_PORT":               "8081",
+	} {
+		if env[k] != want {
+			t.Errorf("loader %s = %q, want %q", k, env[k], want)
+		}
+	}
+	for k := range env {
+		if strings.HasSuffix(k, "_SEED") || strings.HasSuffix(k, "SECRET_ACCESS_KEY") {
+			t.Errorf("loader secret passed as env var %s; only a _FILE path is allowed", k)
+		}
+	}
+	if !slices.Contains(containerPorts(l), 8081) {
+		t.Errorf("loader ports = %v", containerPorts(l))
+	}
+	for probe, path := range map[string]string{"readinessProbe": "/readyz", "startupProbe": "/healthz", "livenessProbe": "/healthz"} {
+		if get(l, probe, "httpGet", "path") != path || get(l, probe, "httpGet", "port") != "loader-health" {
+			t.Errorf("loader %s = %v", probe, l[probe])
+		}
+	}
+	if get(l, "readinessProbe", "periodSeconds") != 5 || get(l, "readinessProbe", "failureThreshold") != 3 ||
+		get(l, "startupProbe", "periodSeconds") != 5 || get(l, "startupProbe", "failureThreshold") != 120 {
+		t.Errorf("loader probe timing: readiness %v, startup %v", l["readinessProbe"], l["startupProbe"])
+	}
+	sc := l["securityContext"]
+	if get(sc, "readOnlyRootFilesystem") != true || get(sc, "runAsNonRoot") != true ||
+		get(sc, "allowPrivilegeEscalation") != false || get(sc, "capabilities", "drop", 0) != "ALL" {
+		t.Errorf("loader securityContext = %v", sc)
+	}
+	mounts := map[string]bool{}
+	for _, v := range l["volumeMounts"].([]any) {
+		mounts[v.(obj)["name"].(string)] = true
+		if v.(obj)["readOnly"] != true {
+			t.Errorf("loader mount %v is writable", v)
+		}
+	}
+	for _, want := range []string{"nats-trust", "loader-sys-user", "accounts-reader", "loader-ca"} {
+		if !mounts[want] {
+			t.Errorf("loader does not mount %s: %v", want, mounts)
+		}
+	}
+	if mounts["tls"] || mounts["data"] || mounts["nats-seeds"] {
+		t.Errorf("loader mounts more than it needs: %v", mounts)
+	}
+	// The loader's credentials reach the loader only, and each volume
+	// projects only the keys it names.
+	for name := range mountPaths(container(t, sts)) {
+		if name == "loader-sys-user" || name == "accounts-reader" || name == "loader-ca" {
+			t.Errorf("farmerbus mounts the loader's %s", name)
+		}
+	}
+	for name, want := range map[string][]string{
+		"loader-sys-user": {"user.nk"},
+		"accounts-reader": {"access-key-id", "secret-access-key"},
+		"loader-ca":       {"ca.crt"},
+	} {
+		v := volumeByName(sts, name)
+		var keys []string
+		for _, it := range get(v, "secret", "items").([]any) {
+			keys = append(keys, get(it, "key").(string))
+		}
+		if !slices.Equal(keys, want) {
+			t.Errorf("volume %s projects %v, want %v", name, keys, want)
+		}
+	}
+	for name, secret := range map[string]string{
+		"loader-sys-user": "imas-bus-loader-sys-user", "accounts-reader": "imas-bus-accounts-reader", "loader-ca": "imas-farmerbus-tls",
+	} {
+		if got := get(volumeByName(sts, name), "secret", "secretName"); got != secret {
+			t.Errorf("volume %s from Secret %v, want %s", name, got, secret)
+		}
+	}
+
+	// openbao mode: the CA is only in farmerbus's in-memory tls volume.
+	sts = find(t, mustRender(t, "--set", "bus.tls.mode=openbao"), "StatefulSet", "-bus")
+	l = namedContainer(t, sts, "loader")
+	if got := envMap(l)["IMAS_LOADER_CA_FILE"]; got != "/var/run/imas/tls/tls-rootca.pem" {
+		t.Errorf("openbao-mode IMAS_LOADER_CA_FILE = %q", got)
+	}
+	if got := mountPaths(l)["tls"]; got != "/var/run/imas/tls" {
+		t.Errorf("openbao-mode loader tls mount = %q", got)
+	}
+
+	// Overrides: its own image, plain HTTP to the store, another port.
+	sts = find(t, mustRender(t, "--set", "loader.image.repository=example.com/loader", "--set", "loader.image.tag=1.2.3",
+		"--set", "accountStore.useSSL=false", "--set", "loader.healthPort=9091"), "StatefulSet", "-bus")
+	l = namedContainer(t, sts, "loader")
+	env = envMap(l)
+	if get(l, "image") != "example.com/loader:1.2.3" || env["IMAS_LOADER_S3_USE_SSL"] != "false" ||
+		env["IMAS_LOADER_HEALTH_PORT"] != "9091" || !slices.Contains(containerPorts(l), 9091) {
+		t.Errorf("loader overrides not applied: image %v, env %v", get(l, "image"), env)
+	}
+}
+
+// The topology ConfigMap carries the replica count the fence reads, equal
+// to the StatefulSet's replicas and the number of routes, and is mounted
+// as a directory (no subPath) so kubelet updates it in place.
+func TestTopologyConfigMapReplicasMatch(t *testing.T) {
+	for _, n := range []int{1, 3, 5} {
+		args := []string{"--set", fmt.Sprintf("bus.replicaCount=%d", n)}
+		if n > 1 {
+			args = append(slices.Clone(clusteredArgs), args...)
+		}
+		docs := mustRender(t, args...)
+		cm := find(t, docs, "ConfigMap", "-bus-topology")
+		sts := find(t, docs, "StatefulSet", "-bus")
+		if get(cm, "data", "replicas") != strconv.Itoa(n) || get(sts, "spec", "replicas") != n {
+			t.Errorf("n=%d: topology replicas %v, StatefulSet replicas %v", n, get(cm, "data", "replicas"), get(sts, "spec", "replicas"))
+		}
+		c := container(t, sts)
+		env := envMap(c)
+		if n == 1 {
+			if _, ok := env["IMAS_BUS_CLUSTER_SIZE_FILE"]; ok {
+				t.Error("single node sets IMAS_BUS_CLUSTER_SIZE_FILE")
+			}
+			continue
+		}
+		if routes := strings.Split(env["IMAS_BUS_CLUSTER_ROUTES"], ","); len(routes) != n {
+			t.Errorf("n=%d: %d routes", n, len(routes))
+		}
+		if env["IMAS_BUS_CLUSTER_SIZE_FILE"] != "/var/run/imas/bus-topology/replicas" {
+			t.Errorf("IMAS_BUS_CLUSTER_SIZE_FILE = %q", env["IMAS_BUS_CLUSTER_SIZE_FILE"])
+		}
+		for _, m := range c["volumeMounts"].([]any) {
+			if m.(obj)["name"] == "bus-topology" && (m.(obj)["mountPath"] != "/var/run/imas/bus-topology" || m.(obj)["subPath"] != nil) {
+				t.Errorf("topology mount = %v", m)
+			}
+		}
+		if get(volumeByName(sts, "bus-topology"), "configMap", "name") != "t-nats-bus-topology" {
+			t.Errorf("bus-topology volume = %v", volumeByName(sts, "bus-topology"))
+		}
+		// Not in the checksum: only the bus config is.
+		ann := get(sts, "spec", "template", "metadata", "annotations").(obj)
+		for k := range ann {
+			if strings.Contains(k, "topology") {
+				t.Errorf("topology ConfigMap in the pod annotations: %s", k)
+			}
+		}
+	}
+}
+
+func TestAccountStoreEgress(t *testing.T) {
+	bus := find(t, mustRender(t, "--set", "networkPolicy.accountStoreEgress.cidr=192.0.2.7/32",
+		"--set", "networkPolicy.accountStoreEgress.port=443"), "NetworkPolicy", "-bus")
+	egress := get(bus, "spec", "egress").([]any)
+	var found bool
+	for _, r := range egress {
+		if get(r, "to", 0, "ipBlock", "cidr") == "192.0.2.7/32" {
+			found = get(r, "ports", 0, "port") == 443 && get(r, "ports", 0, "protocol") == "TCP" && len(get(r, "ports").([]any)) == 1
+		}
+	}
+	if !found {
+		t.Errorf("no egress rule to 192.0.2.7/32 on 443/TCP: %v", egress)
+	}
+	if got := policyPorts(bus, "egress"); !slices.Equal(got, []int{53, 53, 443}) {
+		t.Errorf("bus egress ports = %v, want DNS and 443", got)
+	}
+	// No NetworkPolicy, no egress value needed.
+	mustRender(t, "--set", "networkPolicy.enabled=false", "--set", "networkPolicy.accountStoreEgress.cidr=")
+}
+
+func TestValidationAccountStoreRequired(t *testing.T) {
+	cases := []struct {
+		name, want string
+		args       []string
+	}{
+		{"no endpoint", "accountStore.endpoint is required", []string{"--set", "accountStore.endpoint="}},
+		{"endpoint with scheme", "without a scheme", []string{"--set", "accountStore.endpoint=https://s3.example.com"}},
+		{"endpoint port too large", "accountStore.endpoint port must be between 1 and 65535", []string{"--set", "accountStore.endpoint=s3.example.com:99999"}},
+		{"endpoint port zero", "accountStore.endpoint port must be between 1 and 65535", []string{"--set", "accountStore.endpoint=s3.example.com:0"}},
+		{"no bucket", "accountStore.bucket is required", []string{"--set", "accountStore.bucket="}},
+		{"bad bucket", "not a valid S3 bucket name", []string{"--set", "accountStore.bucket=Imas_Accounts"}},
+		{"no reader secret", "accountStore.credentialsSecret is required", []string{"--set", "accountStore.credentialsSecret="}},
+		{"bad reader key", "accountStore.accessKeyIdKey", []string{"--set", "accountStore.accessKeyIdKey=a/b"}},
+		{"no loader secret", "loader.sysUserSecret is required", []string{"--set", "loader.sysUserSecret="}},
+		{"bad loader seed key", "loader.sysUserSeedKey", []string{"--set", "loader.sysUserSeedKey=a/b"}},
+		{"no egress cidr", "networkPolicy.accountStoreEgress.cidr is required", []string{"--set", "networkPolicy.accountStoreEgress.cidr="}},
+		{"bad egress cidr", "is not a CIDR", []string{"--set", "networkPolicy.accountStoreEgress.cidr=s3.example.com"}},
+		{"bad egress port", "accountStoreEgress.port must be", []string{"--set", "networkPolicy.accountStoreEgress.port=0"}},
+		{"no trust configmap", "natsTrust.configMapName", []string{"--set", "natsTrust.configMapName="}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) { mustFail(t, tc.want, tc.args...) })
+	}
+	// A cluster renders without any persistence value.
+	mustRender(t, clusteredArgs...)
 }

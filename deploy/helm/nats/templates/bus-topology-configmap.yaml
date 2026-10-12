@@ -1,0 +1,18 @@
+{{- include "imas-nats.validate" . -}}
+# The cluster size the fence's majority check reads
+# (IMAS_BUS_CLUSTER_SIZE_FILE, cmd/farmerbus fence.go). Mounted as a
+# directory, not a subPath, so kubelet updates it in place; deliberately
+# not in the pod's checksum annotation, so a change here alone does not
+# roll the pods (a Helm scale still does: IMAS_BUS_CLUSTER_ROUTES is in
+# the pod template). farmerbus never lets it lower the size below the
+# route count, so a stale or missing file fails closed.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "imas-nats.bus.fullname" . }}-topology
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-nats.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bus
+data:
+  replicas: {{ .Values.bus.replicaCount | int | toString | quote }}

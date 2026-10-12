@@ -1,5 +1,8 @@
 # chart-testing: 3-node bus with authenticated routes. The route password
 # Secret must exist in the test namespace (see README.md, "Clustering").
+natsSeeds:
+  seeds:
+    BUS_FENCE_USER: bus-fence-user.nk
 bus:
   replicaCount: 3
   cluster:
@@ -10,3 +13,9 @@ bus:
     openbao:
       authMethod: token
       tokenSecretName: farmerbus-openbao-token
+# The accounts bucket is required (the bus keeps no volume).
+accountStore:
+  endpoint: s3.imas-core.example.internal:443
+networkPolicy:
+  accountStoreEgress:
+    cidr: 10.20.0.10/32

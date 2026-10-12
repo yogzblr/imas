@@ -51,6 +51,9 @@ the tofu `uat` JSON is itself a valid endpoints file. Extra keys are ignored.
 | `core.private_ip` | yes | | Envoy's farmer upstream; the NetworkPolicy peer for core |
 | `core.fqdn` | yes | | checked as a DNS name (unused otherwise) |
 | `core.ports.farmer_api` | no | 5405 | Envoy's farmer upstream port |
+| `dmz.account_store.endpoint` | no | `<core.private_ip>:9000` | the accounts bucket's S3 endpoint the bus's loader sidecar reads (`host:port`, no scheme). Core's RustFS must be reachable there from the DMZ |
+| `dmz.account_store.use_ssl` | no | `false` | TLS to that endpoint |
+| `dmz.account_store.egress_cidr` | when the endpoint is a DNS name | for an IP endpoint, that IP as a `/32`; none for a DNS name (`install.sh` does not resolve it, so supply the CIDR) | the bus NetworkPolicy's one egress rule into core |
 | `cluster_issuer` (or `ca.cluster_issuer`) | no | `imas-uat-ca` | the cert-manager ClusterIssuer of the UAT CA (UAT.2). `uat/hub/core` spells it `ca.cluster_issuer`; either is read, `cluster_issuer` first |
 | `private_dns_zone` | no | `uat.imas.internal` | the run's private DNS zone (UAT.1's `private_dns_zone`). `dmz.<zone>` and `core.<zone>` are the hubs' private names; see [Private names](#private-names) |
 | `dmz.private_fqdn`, `core.private_fqdn` | no | `dmz.<zone>`, `core.<zone>` | the hubs' private names spelled out, as `uat/hub/core` reads them; an explicit one wins over the zone |
@@ -66,7 +69,9 @@ shape, only `dmz_load_endpoints` in `lib.sh` changes.
 
 ```sh
 uat/hub/dmz/install.sh --kubeconfig dmz.kubeconfig --endpoints endpoints.json \
-  --release-tag v0.1.0-rc.4 --seeds-from-kubeconfig core.kubeconfig --workdir out/dmz
+  --release-tag v0.1.0-rc.4 --seeds-from-kubeconfig core.kubeconfig \
+  --accounts-reader-dir <core state-dir>/sensitive/s3/accounts-reader \
+  --loader-seed loader-user.nk --workdir out/dmz
 ```
 
 `--help` lists every option. In order, it:
@@ -101,7 +106,8 @@ uat/hub/dmz/install.sh --kubeconfig dmz.kubeconfig --endpoints endpoints.json \
    `envoyproxy/envoy:v1.35.3`, not an imas image.
 2. **Writes the run's values and manifests** into the work directory:
    `values-run.yaml` (image tag, farmer upstream, NetworkPolicy egress to
-   core), `manifests.yaml` (two Certificates, two Services, one
+   core), `values-accounts.yaml` (the accounts bucket endpoint and the bus
+   egress to it), `manifests.yaml` (two Certificates, two Services, one
    NetworkPolicy), then renders the chart offline into `rendered.yaml` and
    refuses a render that runs another farmerbus image or any `:latest`.
 3. **Checks the cluster** (UAT.2's part): reachable, cert-manager present,
@@ -116,9 +122,18 @@ uat/hub/dmz/install.sh --kubeconfig dmz.kubeconfig --endpoints endpoints.json \
    never enters the DMZ. With neither option the Secret must already exist.
    Nothing is printed and nothing is written outside a 0700 temporary
    directory that is removed.
+   Then **the bus loader's two Secrets** (P21 slice 2; the bus has no PVC):
+   `imas-bus-accounts-reader` from `--accounts-reader-dir` (the read-only
+   accounts credential `uat/hub/core/minio-setup.sh` leaves in
+   `<state-dir>/sensitive/s3/accounts-reader`) and
+   `imas-bus-loader-sys-user` (key `user.nk`) from `--loader-seed` (an
+   `nk -gen user` seed whose public key is core's
+   `natsTrust.busLoaderUserPub`). Without an option the Secret must already
+   exist.
 5. **Applies the manifests** and waits for both certificates.
 6. **Installs** release `imas-dmz` in namespace `imas-dmz` with
-   `values-uat.yaml` then `values-run.yaml`, and waits for the StatefulSet
+   `values-uat.yaml`, `values-run.yaml` then `values-accounts.yaml`, and
+   waits for the StatefulSet
    and the Deployment to roll out, both pods to be Ready, and both exposure
    Services to have a ready endpoint.
 7. With `--expose loadbalancer`, **waits for the load balancer's address**

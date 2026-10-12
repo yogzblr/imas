@@ -44,13 +44,109 @@ natsSeeds:
 
 # The public NATS trust: the ConfigMap the core chart's OpenBao bootstrap
 # Job writes (operator.jwt, operator.pub, operator-signing.pub,
-# sys-account.pub, sys-account.jwt, bus-fence-user.jwt). Public data only.
+# sys-account.pub, sys-account.jwt, bus-fence-user.jwt, bus-loader-user.jwt).
+# Public data only. The loader needs bus-loader-user.jwt on every bus.
 # It lives in the core release's namespace; copy it into this namespace
 # by hand or pipeline (README.md, "NATS trust"). Mounted at
 # /var/run/imas/nats-trust (IMAS_NATS_TRUST_DIR); the bus pods wait for it.
 natsTrust:
   # -- Name of the trust ConfigMap in this namespace.
   configMapName: imas-nats-trust
+
+# The accounts bucket (P21 slice 2): farmer writes every Account JWT to
+# accounts/<account pub>.jwt and bumps accounts/index; each bus pod's
+# loader sidecar (cmd/farmerbus-loader) reads them with a read-only
+# credential and pushes them into its own node. The bus keeps no volume:
+# its resolver directory is an emptyDir, rebuilt from this bucket at every
+# start. S3 protocol only (RustFS in UAT, Versity Gateway in production).
+accountStore:
+  # -- S3 endpoint, host:port without a scheme (IMAS_LOADER_S3_ENDPOINT).
+  # Required. The same store core uses (owner decision D-1 (a)); the bus
+  # NetworkPolicy opens egress to networkPolicy.accountStoreEgress only.
+  endpoint: ""
+  # -- TLS to the endpoint (IMAS_LOADER_S3_USE_SSL).
+  useSSL: true
+  # -- The accounts bucket. Required. Not the recipe or job bucket.
+  bucket: imas-accounts
+  # -- Existing Secret with the READ-ONLY accounts credential (get and
+  # list on this bucket only; the loader refuses to start if it can put or
+  # delete). The chart never creates it. It is mounted into the loader
+  # container only, never into farmerbus.
+  credentialsSecret: imas-bus-accounts-reader
+  # -- Key holding the access key ID in that Secret.
+  accessKeyIdKey: access-key-id
+  # -- Key holding the secret access key in that Secret.
+  secretAccessKeyKey: secret-access-key
+  # -- How often the loader polls accounts/index (+-20% jitter).
+  reconcileInterval: 30s
+  # -- How often the loader lists the whole bucket regardless of the index.
+  fullResyncInterval: 5m
+  # -- Farmer's broadcast subject in the SYS account. The loader's SYS
+  # user JWT may subscribe to imas.bus.accounts.changed only, so changing
+  # this needs a matching grant.
+  eventSubject: imas.bus.accounts.changed
+
+# The account loader sidecar in every bus pod (cmd/farmerbus-loader). It
+# connects to its own node only, over TLS on 127.0.0.1, as a SYS account
+# user whose JWT is bus-loader-user.jwt in the trust ConfigMap (the core
+# chart's bootstrap mints it from natsTrust.busLoaderUserPub there) and
+# whose seed is sysUserSecret below. The pod is Ready only when both
+# farmerbus and the loader are: a node is not Ready until it holds every
+# Account in the bucket.
+loader:
+  # -- Loader image. Empty repository: the bus image (the loader ships in
+  # it as /farmerbus-loader).
+  image:
+    repository: ""
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  # -- /healthz, /readyz and /status (IMAS_LOADER_HEALTH_PORT). No
+  # NetworkPolicy rule opens it.
+  healthPort: 8081
+  # -- Existing Secret with the loader's SYS user NKey seed. The chart
+  # never generates it. Mounted into the loader container only.
+  sysUserSecret: imas-bus-loader-sys-user
+  # -- Key holding the seed in that Secret.
+  sysUserSeedKey: user.nk
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  securityContext:
+    runAsNonRoot: true
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+  # -- Readiness: the initial load is complete (every Account in the
+  # bucket is on this node). A loader that has loaded once stays Ready
+  # through an object store outage (owner decision D-2 (a)).
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: loader-health
+    periodSeconds: 5
+    failureThreshold: 3
+  # -- Startup: the process runs. Ten minutes, so a slow first connection
+  # does not restart the loader.
+  startupProbe:
+    httpGet:
+      path: /healthz
+      port: loader-health
+    periodSeconds: 5
+    failureThreshold: 120
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: loader-health
+    periodSeconds: 20
+    failureThreshold: 3
+  # -- Extra env vars for the loader container (for example
+  # IMAS_LOADER_PUSH_RATE or IMAS_LOADER_PUSH_CONCURRENCY).
+  extraEnv: []
 
 bus:
   image:
@@ -173,21 +269,6 @@ bus:
       tokenSecretName: ""
       # -- token auth: key in tokenSecretName.
       tokenSecretKey: token
-
-  persistence:
-    # -- Persist FarmerPKI (the resolver's store of pushed JWTs) per node.
-    # Without it, pushed Account JWTs are lost on restart until core
-    # pushes again. Required when replicaCount > 1 (see README.md,
-    # "Clustering").
-    enabled: true
-    # -- PVC size per bus node.
-    size: 1Gi
-    # -- StorageClass. Empty uses the cluster default.
-    storageClassName: ""
-    accessModes:
-      - ReadWriteOnce
-    # -- Extra annotations on the volumeClaimTemplate.
-    annotations: {}
 
   # -- Resource requests/limits for the bus container.
   resources:
@@ -527,6 +608,12 @@ networkPolicy:
         kubernetes.io/metadata.name: openbao
     podSelector: {}
     port: 8200
+  # -- The bus pods' egress to accountStore.endpoint (the loader's S3
+  # reads): one CIDR and one TCP port. cidr is required while
+  # networkPolicy.enabled; make it the store's address alone (a /32).
+  accountStoreEgress:
+    cidr: ""
+    port: 443
   # -- Extra egress rules for the bus pods.
   busExtraEgress: []
   # -- Extra egress rules for the Envoy pods (e.g. an external JWKS host).

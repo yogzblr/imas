@@ -4,9 +4,12 @@
 # DMZ bus. Allowed, and nothing else:
 #   in:  core (cmd/farmer)  -> client port   (NATS over TLS; core dials out)
 #   in:  this chart's Envoy -> websocket port (sprouts' wss://, post-jwt_authn)
-#   out: DNS; OpenBao only in bus.tls.mode=openbao
+#   out: DNS; the accounts bucket's endpoint (the loader sidecar's S3
+#        reads; networkPolicy.accountStoreEgress); OpenBao only in
+#        bus.tls.mode=openbao
 # The route port is opened only by the "-routes" policy below, and only
-# between bus pods. The bus never opens a connection into the core network.
+# between bus pods. The accounts bucket is the bus's only connection into
+# the core network (owner decision D-1 (a)), on that one address and port.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -45,6 +48,11 @@ spec:
       ports:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
+    - to:
+        - ipBlock:
+            cidr: {{ $np.accountStoreEgress.cidr }}
+      ports:
+        - { protocol: TCP, port: {{ int $np.accountStoreEgress.port }} }
     {{- if eq .Values.bus.tls.mode "openbao" }}
     - to:
         - namespaceSelector:

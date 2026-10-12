@@ -89,6 +89,15 @@ app.kubernetes.io/component: envoy
 {{- end -}}
 {{- end }}
 
+{{/* The loader's image: loader.image when it names a repository, else the bus image. */}}
+{{- define "imas-nats.loader.image" -}}
+{{- if .Values.loader.image.repository -}}
+{{- include "imas-nats.image" (dict "image" .Values.loader.image "appVersion" .Chart.AppVersion) -}}
+{{- else -}}
+{{- include "imas-nats.image" (dict "image" .Values.bus.image "appVersion" .Chart.AppVersion) -}}
+{{- end -}}
+{{- end }}
+
 {{- define "imas-nats.clusterDomain" -}}
 cluster.local
 {{- end }}
@@ -191,13 +200,11 @@ explanation rather than deploying something that silently can't work.
 {{- if not (regexMatch "^[-._a-zA-Z0-9]+$" (toString .Values.bus.cluster.auth.passwordKey)) -}}
 {{- fail (printf "bus.cluster.auth.passwordKey %q is not a valid Secret key" .Values.bus.cluster.auth.passwordKey) -}}
 {{- end -}}
-{{- if not .Values.bus.persistence.enabled -}}
-{{- fail "bus.persistence.enabled must be true when bus.replicaCount > 1: a node without a PVC starts with no Account JWTs on every restart and serves nobody until it has pulled them all from its peers, and a restart of every node loses them until core reconnects and pushes them again (see README.md, \"Clustering\")." -}}
-{{- end -}}
 {{- if not (get $seeds "BUS_FENCE_USER") -}}
 {{- fail "natsSeeds.seeds.BUS_FENCE_USER is required when bus.replicaCount > 1: a clustered bus's fence connects as that SYS account user, and farmerbus refuses to start without it (README.md, \"Clustering\")" -}}
 {{- end -}}
 {{- end -}}
+{{- include "imas-nats.accountStore.validate" . -}}
 {{- if not (has .Values.bus.tls.mode (list "secret" "openbao")) -}}
 {{- fail (printf "bus.tls.mode must be \"secret\" or \"openbao\", got %q" .Values.bus.tls.mode) -}}
 {{- end -}}
@@ -222,6 +229,79 @@ explanation rather than deploying something that silently can't work.
 {{- include "imas-nats.envoy.validate" . -}}
 {{- end -}}
 {{- include "imas-nats.exposure.validate" . -}}
+{{- end }}
+
+{{- /* The accounts bucket and its loader sidecar (P21 slice 2). The bus
+keeps no volume, so without a reachable bucket and a loader credential a
+node would start, and stay, with no Account but SYS. */ -}}
+{{- define "imas-nats.accountStore.validate" -}}
+{{- $a := .Values.accountStore -}}
+{{- $l := .Values.loader -}}
+{{- if not $a.endpoint -}}
+{{- fail "accountStore.endpoint is required: the bus has no volume, and each node's loader rebuilds its Account JWT store from the accounts bucket at every start (README.md, \"Accounts bucket and loader\")" -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9]([-A-Za-z0-9.]*[A-Za-z0-9])?(:[0-9]{1,5})?$" (toString $a.endpoint)) -}}
+{{- fail (printf "accountStore.endpoint %q must be host or host:port, without a scheme or path" (toString $a.endpoint)) -}}
+{{- end -}}
+{{- $epParts := splitList ":" (toString $a.endpoint) -}}
+{{- if eq (len $epParts) 2 -}}
+{{- $epPort := int (last $epParts) -}}
+{{- if or (lt $epPort 1) (gt $epPort 65535) -}}
+{{- fail (printf "accountStore.endpoint port must be between 1 and 65535, got %s" (last $epParts)) -}}
+{{- end -}}
+{{- end -}}
+{{- if not $a.bucket -}}
+{{- fail "accountStore.bucket is required" -}}
+{{- end -}}
+{{- if not (regexMatch "^[a-z0-9][-a-z0-9.]{1,61}[a-z0-9]$" (toString $a.bucket)) -}}
+{{- fail (printf "accountStore.bucket %q is not a valid S3 bucket name" (toString $a.bucket)) -}}
+{{- end -}}
+{{- if not $a.credentialsSecret -}}
+{{- fail "accountStore.credentialsSecret is required: the loader's read-only accounts credential, which this chart never generates" -}}
+{{- end -}}
+{{- range $k := list "accessKeyIdKey" "secretAccessKeyKey" -}}
+{{- if not (regexMatch "^[-._a-zA-Z0-9]+$" (toString (get $a $k))) -}}
+{{- fail (printf "accountStore.%s %q is not a valid Secret key" $k (toString (get $a $k))) -}}
+{{- end -}}
+{{- end -}}
+{{- if eq (toString $a.accessKeyIdKey) (toString $a.secretAccessKeyKey) -}}
+{{- fail "accountStore.accessKeyIdKey and secretAccessKeyKey must be different keys" -}}
+{{- end -}}
+{{- range $k := list "reconcileInterval" "fullResyncInterval" -}}
+{{- if not (regexMatch "^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$" (toString (get $a $k))) -}}
+{{- fail (printf "accountStore.%s %q is not a Go duration such as 30s or 5m" $k (toString (get $a $k))) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*$" (toString $a.eventSubject)) -}}
+{{- fail (printf "accountStore.eventSubject %q is not a literal NATS subject" (toString $a.eventSubject)) -}}
+{{- end -}}
+{{- if not $l.sysUserSecret -}}
+{{- fail "loader.sysUserSecret is required: the Secret with the loader's SYS user NKey seed, which this chart never generates (README.md, \"Accounts bucket and loader\")" -}}
+{{- end -}}
+{{- if not (regexMatch "^[-._a-zA-Z0-9]+$" (toString $l.sysUserSeedKey)) -}}
+{{- fail (printf "loader.sysUserSeedKey %q is not a valid Secret key" (toString $l.sysUserSeedKey)) -}}
+{{- end -}}
+{{- $hp := int $l.healthPort -}}
+{{- if or (lt $hp 1) (gt $hp 65535) -}}
+{{- fail (printf "loader.healthPort must be between 1 and 65535, got %v" $l.healthPort) -}}
+{{- end -}}
+{{- $p := .Values.bus.ports -}}
+{{- if has $hp (list (int $p.client) (int $p.websocket) (int $p.health) (int .Values.bus.cluster.port)) -}}
+{{- fail (printf "loader.healthPort %d is already a bus port: the loader shares the pod's network namespace with farmerbus" $hp) -}}
+{{- end -}}
+{{- if .Values.networkPolicy.enabled -}}
+{{- $e := .Values.networkPolicy.accountStoreEgress -}}
+{{- if not $e.cidr -}}
+{{- fail "networkPolicy.accountStoreEgress.cidr is required when networkPolicy.enabled: the bus pods' only egress besides DNS is to the accounts bucket's endpoint (README.md, \"NetworkPolicy\")" -}}
+{{- end -}}
+{{- if not (regexMatch "^[0-9a-fA-F.:]+/[0-9]{1,3}$" (toString $e.cidr)) -}}
+{{- fail (printf "networkPolicy.accountStoreEgress.cidr %q is not a CIDR" (toString $e.cidr)) -}}
+{{- end -}}
+{{- $ep := int $e.port -}}
+{{- if or (lt $ep 1) (gt $ep 65535) -}}
+{{- fail (printf "networkPolicy.accountStoreEgress.port must be between 1 and 65535, got %v" $e.port) -}}
+{{- end -}}
+{{- end -}}
 {{- end }}
 
 {{- /* Node ports: pinned ones must be valid and on a Service type that has

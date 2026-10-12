@@ -5,6 +5,14 @@
 # buckets, a user for farmer and a user for saasapi, each with its own
 # policy, and the two Kubernetes Secrets the farmer chart names
 # (objectStore.credentialsSecret, saasapi.recipes.credentialsSecret).
+# Also the accounts bucket of the stateless bus (P21 slice 2): a writer
+# user for farmer (get, put and list on that bucket only; Secret
+# imas-farmer-accounts-writer in the core namespace) and a reader user for
+# the DMZ bus's loader sidecar (get and list only). The reader's
+# credential is left in <state-dir>/sensitive/s3/accounts-reader for
+# uat/hub/dmz/install.sh --accounts-reader-dir: it belongs in the DMZ
+# cluster, never in core's. Neither accounts user can reach the recipe or
+# job bucket, and farmer's recipe user cannot reach the accounts bucket.
 # FLAG FOR SECURITY REVIEW.
 #
 # <saasapi-policy.json> is files/objectstore-policies/saasapi-recipes.json
@@ -28,6 +36,13 @@ parse_common_args "minio-setup.sh <kubeconfig> <endpoints.json> <state-dir> <saa
 [[ $# -ge 4 && -f "$4" ]] || die "usage: minio-setup.sh <kubeconfig> <endpoints.json> <state-dir> <saasapi-policy.json>"
 saasapi_policy_src="$4"
 need_cmd kubectl jq
+
+# The accounts bucket (docs/briefs/P21-slice2-bus-loader.md §4.1) and its
+# two users. Names match the nats chart's accountStore and §4.6.
+ACCOUNTS_BUCKET=imas-accounts
+S3_ACCOUNTS_WRITER_USER=imas-farmer-accounts
+S3_ACCOUNTS_READER_USER=imas-bus-accounts-reader
+S3_ACCOUNTS_WRITER_SECRET=imas-farmer-accounts-writer
 
 grep -q RECIPE_BUCKET "$saasapi_policy_src" || die "$saasapi_policy_src has no RECIPE_BUCKET placeholder"
 
@@ -62,7 +77,8 @@ bucket() {
 }
 bucket "$RECIPE_BUCKET"
 bucket "$JOB_BUCKET"
-log "buckets $RECIPE_BUCKET and $JOB_BUCKET exist"
+bucket "$ACCOUNTS_BUCKET"
+log "buckets $RECIPE_BUCKET, $JOB_BUCKET and $ACCOUNTS_BUCKET exist"
 
 # policy <name> <json on stdin>
 policy() {
@@ -75,6 +91,22 @@ policy() {
 sed -e "s/RECIPE_BUCKET/$RECIPE_BUCKET/g" -e "s/JOB_BUCKET/$JOB_BUCKET/g" "$here/minio/farmer-policy.json" |
 	policy imas-uat-farmer
 sed -e "s/RECIPE_BUCKET/$RECIPE_BUCKET/g" "$saasapi_policy_src" | policy imas-uat-saasapi-recipes
+# accounts_policy <object actions as a JSON array>: list on the accounts
+# bucket plus those actions on its objects, nothing else.
+accounts_policy() {
+	jq -n --arg b "$ACCOUNTS_BUCKET" --argjson obj "$1" '{
+		Version: "2012-10-17",
+		Statement: [
+			{Sid: "AccountsBucket", Effect: "Allow", Action: ["s3:GetBucketLocation", "s3:ListBucket"],
+			 Resource: ["arn:aws:s3:::\($b)"]},
+			{Sid: "AccountsObjects", Effect: "Allow", Action: $obj,
+			 Resource: ["arn:aws:s3:::\($b)/*"]}
+		]}'
+}
+# Farmer writes accounts/<pub>.jwt and accounts/index; objects are never
+# deleted (a deprovision is a newer lock-out JWT), so no s3:DeleteObject.
+accounts_policy '["s3:GetObject", "s3:PutObject"]' | policy imas-uat-accounts-writer
+accounts_policy '["s3:GetObject"]' | policy imas-uat-accounts-reader
 
 # user <name> <policy> <secret file>: creates or updates the user and
 # attaches exactly that policy.
@@ -96,11 +128,22 @@ printf '%s' "$S3_FARMER_USER" >"$s3dir/farmer-access-key-id"
 printf '%s' "$S3_SAASAPI_USER" >"$s3dir/saasapi-access-key-id"
 gen_secret_file "$s3dir/farmer-secret-access-key" 24
 gen_secret_file "$s3dir/saasapi-secret-access-key" 24
+printf '%s' "$S3_ACCOUNTS_WRITER_USER" >"$s3dir/accounts-writer-access-key-id"
+gen_secret_file "$s3dir/accounts-writer-secret-access-key" 24
+reader_dir="$s3dir/accounts-reader"
+(umask 077 && mkdir -p "$reader_dir")
+printf '%s' "$S3_ACCOUNTS_READER_USER" >"$reader_dir/access-key-id"
+gen_secret_file "$reader_dir/secret-access-key" 24
 
 user "$S3_FARMER_USER" imas-uat-farmer "$s3dir/farmer-secret-access-key"
 user "$S3_SAASAPI_USER" imas-uat-saasapi-recipes "$s3dir/saasapi-secret-access-key"
+user "$S3_ACCOUNTS_WRITER_USER" imas-uat-accounts-writer "$s3dir/accounts-writer-secret-access-key"
+user "$S3_ACCOUNTS_READER_USER" imas-uat-accounts-reader "$reader_dir/secret-access-key"
 
 apply_secret "$CORE_NS" "$S3_FARMER_SECRET" \
 	"access-key-id=$s3dir/farmer-access-key-id" "secret-access-key=$s3dir/farmer-secret-access-key"
 apply_secret "$CORE_NS" "$S3_SAASAPI_SECRET" \
 	"access-key-id=$s3dir/saasapi-access-key-id" "secret-access-key=$s3dir/saasapi-secret-access-key"
+apply_secret "$CORE_NS" "$S3_ACCOUNTS_WRITER_SECRET" \
+	"access-key-id=$s3dir/accounts-writer-access-key-id" "secret-access-key=$s3dir/accounts-writer-secret-access-key"
+log "accounts reader credential for the DMZ bus: $reader_dir (uat/hub/dmz/install.sh --accounts-reader-dir)"

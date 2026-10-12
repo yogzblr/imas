@@ -221,10 +221,10 @@ func render(t *testing.T, endpoints string, extra ...string) rendered {
 	if err := yaml.Unmarshal([]byte(cfg), &r.envoy); err != nil {
 		t.Fatalf("parsing the rendered envoy.yaml: %v", err)
 	}
-	// helm lint, with the same two values files install.sh passes.
-	values := filepath.Join(work, "values-run.yaml")
-	cmd := exec.Command("helm", "lint", tgz, "--namespace", "imas-dmz", "--kube-version", "1.30.0",
-		"-f", filepath.Join(dir(t), "values-uat.yaml"), "-f", values)
+	// helm lint, with the same three values files install.sh passes.
+	cmd := exec.Command("helm", "lint", "--strict", tgz, "--namespace", "imas-dmz", "--kube-version", "1.30.0",
+		"-f", filepath.Join(dir(t), "values-uat.yaml"), "-f", filepath.Join(work, "values-run.yaml"),
+		"-f", filepath.Join(work, "values-accounts.yaml"))
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("helm lint with the UAT values: %v\n%s", err, b)
 	}
@@ -905,6 +905,7 @@ case $args in
 	printf 'SAAUATSTUBSEED%s\n' "$(printf '%s' "$key" | tr -dc 'a-z' | tr 'a-z' 'A-Z' | head -c 20)AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" | base64 -w0
 	;;
 *"get secret imas-farmerbus-tls -o jsonpath={.data.ca"*) printf 'LS0tLS1CRUdJTg==' ;;
+*"get secret imas-bus-accounts-reader -o jsonpath="* | *"get secret imas-bus-loader-sys-user -o jsonpath="*) printf 'eA==' ;;
 *"get service imas-dmz-nats-envoy-edge -o jsonpath={.status.loadBalancer"*) printf '%s' "${STUB_LB:-}" ;;
 *"get endpointslices"*) printf '10.244.0.7' ;;
 *"create secret generic"*)
@@ -954,6 +955,17 @@ func TestInstallWithStubs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The loader's credentials, as minio-setup.sh and the operator leave them.
+	readerDir := t.TempDir()
+	for name, v := range map[string]string{"access-key-id": "imas-bus-accounts-reader", "secret-access-key": "uatreadersecretvalue"} {
+		if err := os.WriteFile(filepath.Join(readerDir, name), []byte(v), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	loaderSeed := filepath.Join(t.TempDir(), "loader.nk")
+	if err := os.WriteFile(loaderSeed, []byte("SUAUATSTUBLOADERSEEDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	logFile := filepath.Join(t.TempDir(), "calls.log")
 	work := t.TempDir()
 	env := []string{
@@ -964,7 +976,8 @@ func TestInstallWithStubs(t *testing.T) {
 	}
 	code, _, stderr := run(t, env, "install.sh", "--kubeconfig", kubeconfig,
 		"--endpoints", filepath.Join(dir(t), "testdata", "endpoints.json"), "--release-tag", testTag,
-		"--seeds-from-kubeconfig", coreKubeconfig, "--workdir", work)
+		"--seeds-from-kubeconfig", coreKubeconfig, "--workdir", work,
+		"--accounts-reader-dir", readerDir, "--loader-seed", loaderSeed)
 	if code != 0 {
 		t.Fatalf("install.sh exited %d:\n%s", code, stderr)
 	}
@@ -1008,6 +1021,17 @@ func TestInstallWithStubs(t *testing.T) {
 		t.Errorf("the operator seed reached the DMZ Secret %d times, want once", n)
 	}
 
+	// The loader's two Secrets, from exactly those files.
+	for _, want := range []string{
+		"seedfile --from-file=access-key-id imas-bus-accounts-reader",
+		"seedfile --from-file=secret-access-key uatreadersecretvalue",
+		"seedfile --from-file=user.nk SUAUATSTUBLOADERSEED",
+	} {
+		if !strings.Contains(logText, want) {
+			t.Errorf("no %q in the calls:\n%s", want, logText)
+		}
+	}
+
 	// Order: issuer checked, seeds, certificates Ready, then the chart, then
 	// the rollouts and the exposure endpoints.
 	idx := func(sub string) int {
@@ -1022,6 +1046,8 @@ func TestInstallWithStubs(t *testing.T) {
 	order := []string{
 		"get clusterissuer imas-uat-ca",
 		"create secret generic imas-farmer-nats-seeds",
+		"create secret generic imas-bus-accounts-reader",
+		"create secret generic imas-bus-loader-sys-user",
 		"apply -f " + filepath.Join(work, "manifests.yaml"),
 		"wait --for=condition=Ready certificate/imas-envoy-dmz-tls",
 		"helm upgrade --install imas-dmz " + filepath.Join(work, "chart", "nats-"+testVersion+".tgz"),
@@ -1036,7 +1062,7 @@ func TestInstallWithStubs(t *testing.T) {
 		}
 	}
 	up := calls[idx("helm upgrade --install")]
-	for _, want := range []string{"--namespace imas-dmz", "-f " + filepath.Join(dir(t), "values-uat.yaml") + " -f " + filepath.Join(work, "values-run.yaml"), "--kubeconfig " + kubeconfig} {
+	for _, want := range []string{"--namespace imas-dmz", "-f " + filepath.Join(dir(t), "values-uat.yaml") + " -f " + filepath.Join(work, "values-run.yaml") + " -f " + filepath.Join(work, "values-accounts.yaml"), "--kubeconfig " + kubeconfig} {
 		if !strings.Contains(up, want) {
 			t.Errorf("helm upgrade lacks %q: %s", want, up)
 		}
@@ -1173,6 +1199,114 @@ func TestInstallChartRegistryAndPullFailure(t *testing.T) {
 						t.Errorf("exit %d, stderr:\n%s\nwant %q", code, stderr, want)
 					}
 				}
+			}
+		})
+	}
+}
+
+// The bus's account loader (P21 slice 2): the accounts bucket on the core
+// hub's object store, no PVC, and bus egress to that one address.
+func TestRenderAccountStore(t *testing.T) {
+	envOf := func(c obj) map[string]any {
+		m := map[string]any{}
+		for _, e := range get(c, "env").([]any) {
+			m[get(e, "name").(string)] = get(e, "value")
+		}
+		return m
+	}
+	egressTo := func(r rendered, cidr string, port int) bool {
+		for _, rule := range get(find(t, r.chart, "NetworkPolicy", "imas-dmz-nats-bus"), "spec", "egress").([]any) {
+			if get(rule, "to", 0, "ipBlock", "cidr") == cidr && get(rule, "ports", 0, "port") == port {
+				return true
+			}
+		}
+		return false
+	}
+	for _, c := range []struct {
+		name, endpoint, cidr string
+		port                 int
+		ssl                  string
+		mut                  func(obj)
+	}{
+		{"default: core private IP", "10.60.2.4:9000", "10.60.2.4/32", 9000, "false", func(obj) {}},
+		{"explicit", "s3.core.uat.test:443", "10.60.2.9/32", 443, "true", func(e obj) {
+			e["dmz"].(obj)["account_store"] = obj{"endpoint": "s3.core.uat.test:443", "use_ssl": true, "egress_cidr": "10.60.2.9/32"}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := render(t, writeJSON(t, endpointsWith(c.mut)))
+			bus := find(t, r.chart, "StatefulSet", "imas-dmz-nats-bus")
+			if v := get(bus, "spec", "volumeClaimTemplates"); v != nil {
+				t.Errorf("the UAT bus still has a PVC: %v", v)
+			}
+			env := envOf(byName(get(bus, "spec", "template", "spec", "containers"), "loader"))
+			if env["IMAS_LOADER_S3_ENDPOINT"] != c.endpoint || env["IMAS_LOADER_S3_USE_SSL"] != c.ssl ||
+				env["IMAS_LOADER_S3_BUCKET"] != "imas-accounts" {
+				t.Errorf("loader S3 env: %v", env)
+			}
+			if !egressTo(r, c.cidr, c.port) {
+				t.Errorf("no bus egress to %s on %d", c.cidr, c.port)
+			}
+		})
+	}
+	need(t, true, "bash", "jq", "helm")
+	tgz := packageChart(t, testVersion, testVersion)
+	for _, c := range []struct {
+		name string
+		mut  func(obj)
+		want string
+	}{
+		{"name without cidr", func(e obj) { e["dmz"].(obj)["account_store"] = obj{"endpoint": "s3.core.uat.test:443"} }, "set dmz.account_store.egress_cidr"},
+		{"scheme", func(e obj) { e["dmz"].(obj)["account_store"] = obj{"endpoint": "https://10.60.2.4:9000"} }, "is not host:port"},
+		{"bad ssl", func(e obj) { e["dmz"].(obj)["account_store"] = obj{"use_ssl": "yes"} }, "use_ssl must be true or false"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			code, _, stderr := run(t, nil, "install.sh", "--render-only", "--chart", tgz, "--release-tag", testTag,
+				"--endpoints", writeJSON(t, endpointsWith(c.mut)), "--workdir", t.TempDir())
+			if code == 0 || !strings.Contains(stderr, c.want) {
+				t.Fatalf("exit %d, want a failure naming %q:\n%s", code, c.want, stderr)
+			}
+		})
+	}
+}
+
+// --loader-seed must be exactly one user seed: a valid first line followed
+// by anything (even an unterminated second line) is refused.
+func TestInstallRefusesBadLoaderSeed(t *testing.T) {
+	need(t, true, "bash", "jq", "helm", "base64")
+	realHelm, _ := exec.LookPath("helm")
+	bin := t.TempDir()
+	for name, body := range map[string]string{"kubectl": stubKubectl, "helm": stubHelm} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tgz := packageChart(t, testVersion, testVersion)
+	kubeconfig := filepath.Join(t.TempDir(), "dmz.kubeconfig")
+	if err := os.WriteFile(kubeconfig, []byte("apiVersion: v1\nkind: Config\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const seed = "SUAUATSTUBLOADERSEEDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	for name, body := range map[string]string{
+		"trailing junk":   seed + "\njunk",
+		"two newlines":    seed + "\n\n",
+		"account seed":    "SAAUATSTUBLOADERSEEDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n",
+		"leading content": "x\n" + seed + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := filepath.Join(t.TempDir(), "loader.nk")
+			if err := os.WriteFile(f, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			env := []string{
+				"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"STUB_LOG=" + filepath.Join(t.TempDir(), "calls.log"), "STUB_CHART=" + tgz, "REAL_HELM=" + realHelm,
+			}
+			code, _, stderr := run(t, env, "install.sh", "--kubeconfig", kubeconfig,
+				"--endpoints", filepath.Join(dir(t), "testdata", "endpoints.json"), "--release-tag", testTag,
+				"--workdir", t.TempDir(), "--loader-seed", f)
+			if code == 0 || !strings.Contains(stderr, "is not one NKey user seed") {
+				t.Fatalf("exit %d, want the seed refused:\n%s", code, stderr)
 			}
 		})
 	}
