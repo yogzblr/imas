@@ -8,7 +8,7 @@ next-append: **Built (2026-10-12): A1 #203 and A2 #205 merged.** Waiting on the 
 item: P21
 action: update
 rag: Amber
-next-append: **Built (2026-10-12), tracking issue 197: 25 of 26 units merged (B1 to B8, C1 and C3 to C7, D1 to D9, plus follow-ups F1 and #216, #218, #220, #226).** Left: C2, the farmer account publisher (not yet a PR). Until C2 merges the bus loader reads the accounts bucket but farmer does not write it, so bus account delivery does not work end to end. Owner decisions made during the build: decision 2 farmer Transit policy as merged in #215 (accepted cost: farmer can create a Transit key of any name; it signs only with `nats-tsign-*`); the loader SYS user also gets publish on the claims lookup subject; the trust ConfigMap is `imas-nats-trust`; the bus keeps the fence user; the trust bootstrap mints the loader SYS user JWT; the farmer NKey is its own Secret `imas-farmer-nkey`. Follow-up work is P26 to P28.
+next-append: **Built (2026-10-12), tracking issue 197: 25 of 26 units merged across P22 and P21; for P21, 23 of 24 (B1 to B8, C1 and C3 to C7, D1 to D9), and for P22 both (A1, A2). Follow-ups F1 and #216, #218, #220, #226 are separate.** Left: C2, the farmer account publisher (not yet a PR). Until C2 merges the bus loader reads the accounts bucket but farmer does not write it, so bus account delivery does not work end to end. Owner decisions made during the build: decision 2 farmer Transit policy as merged in #215 (accepted cost: farmer can create a Transit key of any name; it signs only with `nats-tsign-*`); the loader SYS user also gets publish on the claims lookup subject; the trust ConfigMap is `imas-nats-trust`; the bus keeps the fence user; the trust bootstrap mints the loader SYS user JWT; the farmer NKey is its own Secret `imas-farmer-nkey`. Follow-up work is P26 to P28.
 ---
 item: P23
 action: update
@@ -16,7 +16,7 @@ next-append: **Unblocked by the P21 build (2026-10-12) except for C2.** The vali
 ---
 item: P3
 action: update
-next-append: **Added to the review scope (2026-10-12):** the P21 build as merged (no unit PR was described as safe to merge). Specific points: farmer can create a Transit key of any name on the transit mount (B7, decision 2); the bus loader can read the bus TLS private key in OpenBao TLS mode (C6); the UAT bootstrap uses a short-lived root-policy token per run instead of a quorum root token (B8, UAT only).
+next-append: **Added to the review scope (2026-10-12):** the P21 build as merged (no unit PR was described as safe to merge). Specific points: farmer can create a Transit key of any name on the transit mount, and soft-delete any key on it that an exact deny does not cover, including keys other clients keep on the shared mount (B7, decision 2); the bus loader can read the bus TLS private key in OpenBao TLS mode (C6); the UAT bootstrap uses a short-lived root-policy token per run instead of a quorum root token (B8, UAT only).
 ---
 item: P26
 action: add
