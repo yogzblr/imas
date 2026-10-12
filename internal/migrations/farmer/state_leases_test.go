@@ -10,7 +10,6 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"io/fs"
-	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -18,6 +17,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/yogzblr/imas/internal/migrations"
+	"github.com/yogzblr/imas/internal/migrations/mysqltest"
 )
 
 const (
@@ -93,14 +93,7 @@ func TestStateLeasesMigrationShape(t *testing.T) {
 // and returns a pool on it.
 func newSchema(t *testing.T, prefix string) (*sql.DB, *mysql.Config) {
 	t.Helper()
-	dsn := os.Getenv("IMAS_TEST_MYSQL_ROOT_DSN")
-	if dsn == "" {
-		t.Skip("IMAS_TEST_MYSQL_ROOT_DSN not set; skipping the MySQL tests")
-	}
-	cfg, err := mysql.ParseDSN(dsn)
-	if err != nil {
-		t.Fatal("IMAS_TEST_MYSQL_ROOT_DSN: not a valid DSN")
-	}
+	cfg := mysqltest.RootConfig(t)
 	sfx := make([]byte, 4)
 	if _, err := rand.Read(sfx); err != nil {
 		t.Fatal(err)

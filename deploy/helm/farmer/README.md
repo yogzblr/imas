@@ -615,12 +615,37 @@ Each OpenBao client runs under its own role and gets exactly one policy.
   `nats-tsign-*`), and could soft-delete a key another client later adds
   to that mount; give such a key an exact deny in the policy, or its own
   mount.
+- **Accepted: farmer can soft-delete another client's Transit key**
+  (owner decision 2, #215; goes to the security review, P3). What a farmer
+  token may do on the `transit` mount, per key name, as OpenBao's ACL
+  answers it (`TestOpenBaoFarmerPolicyKeySet` asserts exactly this table,
+  through `sys/capabilities-self`, and fails if the policy changes it):
+
+  | Key | create | read | sign | soft-delete |
+  |---|---|---|---|---|
+  | `nats-operator` | no | yes | no | no (exact deny) |
+  | `nats-operator-signing`, `nats-sys-account` | no | yes | yes | no (exact deny) |
+  | `imas-gateway-jwt` | yes (an existing key is left unchanged) | yes | no | no (exact deny) |
+  | `nats-tsign-<tenant>` | yes | yes | yes | yes |
+  | `nats-tacct-<tenant>` | yes | yes | no | yes |
+  | any other name | yes | yes | no | **yes** |
+
+  For every name it is refused rotate, config, trim, hard delete, export,
+  backup, restore and soft-delete-restore. So a key another client keeps
+  on this mount without an exact deny here can be soft-deleted by farmer,
+  and then signs nothing for that client until someone with a token other
+  than farmer's restores it (`soft-delete-restore`, within the retention
+  window). The test does that to a key it creates. Keep other clients'
+  keys off this mount, or add an exact
+  `transit/keys/<name>/soft-delete` deny for each to
+  `imas-farmer-natssign.hcl` and a row to the test.
 - **The NATS policies are files, checked against a real OpenBao.**
   `openbao_policy_test.go` runs them in
   `.github/workflows/natskeys-openbao-realserver.yml`: the bootstrap
   policy creates and signs with the platform keys and can't rotate or
   reconfigure them; farmer's creates, signs with and soft-deletes tenant
-  keys and is refused rotate, config, hard delete and restore; the publish
+  keys and is refused rotate, config, hard delete and restore, and its
+  whole per-key-name capability set is pinned (table above); the publish
   Job's signs with the SYS key only. They name the `transit` mount, so
   `farmer.openbao.natsSign.transitMount` other than `transit` is refused.
 - **Sharing a CA with the nats chart.** With
@@ -1420,9 +1445,10 @@ from source and no cluster:
   - farmer booting against PXC, including `pki.ReloadNKeys`, which needs
     PXC;
   - the Kubernetes auth login itself;
-  - the SQL against a real MySQL server;
-  - the migrate hook Jobs (rendering and `go test` only; `cmd/migrate`
-    itself has its own tests against MySQL in `internal/migrations`);
+  - the migrate hook Jobs (rendering and `go test` only). The SQL itself
+    is tested against a real PXC (the image this chart runs): `cmd/migrate`,
+    the migration sets and the lease and sweeper SQL, in CI's test job
+    (`.github/workflows/ci.yml`, `IMAS_TEST_MYSQL_ROOT_DSN`);
   - the sprout release hook against a real saasapi, and `podFailurePolicy`
     failing the Job on exit 2.
 

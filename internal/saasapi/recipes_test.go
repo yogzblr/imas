@@ -694,6 +694,29 @@ func TestRecipePutConflictAfterRetries(t *testing.T) {
 	}
 }
 
+// TestRecipeWriteConflictDocumented: the 409 recipe_write_conflict body
+// PutRecipe writes is the one docs/api/saasapi.md and the OpenAPI spec show.
+func TestRecipeWriteConflictDocumented(t *testing.T) {
+	body, err := json.Marshal(errorResponse{Error: "recipe_write_conflict", Message: recipeWriteConflictMessage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := os.ReadFile("../../docs/api/saasapi.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(ref), string(body)) {
+		t.Errorf("docs/api/saasapi.md does not show the 409 body %s", body)
+	}
+	spec, err := os.ReadFile("../../docs/api/saasapi-openapi.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(spec), `value: { error: recipe_write_conflict, message: "`+recipeWriteConflictMessage+`" }`) {
+		t.Error("the OpenAPI PutRecipe 409 example does not match the body PutRecipe writes")
+	}
+}
+
 func TestRecipeRoles(t *testing.T) {
 	e := newRecipeEnv(t, nil)
 	wantStatus(t, e.put(e.tA, "app", recipeBody("x"), ""), http.StatusCreated, "")

@@ -28,6 +28,9 @@
 #     (it can sign with none of them but nats-tsign-*), and could
 #     soft-delete a key another client adds here later; give such a
 #     client an exact deny below, or a mount of its own.
+#     openbao_policy_test.go's TestOpenBaoFarmerPolicyKeySet pins what this
+#     policy allows per key name (README.md, "Accepted: farmer can
+#     soft-delete another client's Transit key"); change both together.
 #   - Sign with tenant signing keys only; the tenant account key never
 #     signs (the account JWT is signed by operator-signing).
 #   - No export, backup or restore path.

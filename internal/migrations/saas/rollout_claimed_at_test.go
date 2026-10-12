@@ -13,7 +13,6 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"io/fs"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +23,7 @@ import (
 	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/yogzblr/imas/internal/migrations"
+	"github.com/yogzblr/imas/internal/migrations/mysqltest"
 	"github.com/yogzblr/imas/internal/saasapi"
 )
 
@@ -77,14 +77,7 @@ func (tenantUpdatePolicyFU6) TableName() string { return "tenant_update_policy" 
 // no-op; and the previous release's model reads and writes the table with
 // the column present, leaving it alone.
 func TestMySQLRolloutClaimedAt(t *testing.T) {
-	dsn := os.Getenv("IMAS_TEST_MYSQL_ROOT_DSN")
-	if dsn == "" {
-		t.Skip("IMAS_TEST_MYSQL_ROOT_DSN not set; skipping the MySQL tests")
-	}
-	cfg, err := mysql.ParseDSN(dsn)
-	if err != nil {
-		t.Fatal("IMAS_TEST_MYSQL_ROOT_DSN: not a valid DSN")
-	}
+	cfg := mysqltest.RootConfig(t)
 	ctx := context.Background()
 	sfx := make([]byte, 4)
 	if _, err := rand.Read(sfx); err != nil {

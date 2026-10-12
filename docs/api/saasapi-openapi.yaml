@@ -714,10 +714,13 @@ paths:
         "403": { $ref: "#/components/responses/RecipeForbidden" }
         "404": { $ref: "#/components/responses/TenantNotFound" }
         "409":
-          description: "`recipe_quota_exceeded` (`details.quota`: `count` or `total_bytes`; `details.limit`), `tenant_not_active`, or `recipe_write_conflict` (concurrent writes kept landing first: the write was re-read and retried 3 times and lost each time; get the recipe again and resend)."
+          description: "`recipe_quota_exceeded` (`details.quota`: `count` or `total_bytes`; `details.limit`), `tenant_not_active`, or `recipe_write_conflict` (concurrent writes kept landing first: the write lost its compare-and-swap, was re-read and retried 3 times and lost each time; nothing was stored and the body has no `details`; get the recipe again and resend)."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                recipe_write_conflict:
+                  value: { error: recipe_write_conflict, message: "the recipe kept being changed by other requests at the same time: get it again and resend" }
         "412": { $ref: "#/components/responses/RecipePreconditionFailed" }
         "413":
           description: "`recipe_too_large` (`details.max`)."

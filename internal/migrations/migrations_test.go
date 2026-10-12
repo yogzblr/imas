@@ -231,3 +231,23 @@ func TestWaitForSchemaTooNewKeepsWaiting(t *testing.T) {
 		t.Fatalf("last retry logged %q, want it to name %q", last, ErrSchemaTooNew)
 	}
 }
+
+// TestCompatibleFromReviewed pins each set's latest version and floor as
+// last reviewed (see the comment on farmerCompatibleFrom). A new migration
+// fails it until someone decides whether an older binary still runs
+// against it, raises the floor if not, and records the decision there and
+// here.
+func TestCompatibleFromReviewed(t *testing.T) {
+	for _, c := range []struct {
+		set           Set
+		latest, floor int64
+	}{
+		{Farmer, 5, 2}, // 00004 and 00005 only add tables (P21 slice 3)
+		{Saas, 8, 1},   // 00007 and 00008 only add tables (P22 slice 2, P21 slice 3)
+	} {
+		if c.set.Latest() != c.latest || c.set.compatibleFrom != c.floor {
+			t.Errorf("%s: latest %d, compatibleFrom %d; reviewed at latest %d, compatibleFrom %d: review the new migration's effect on older binaries",
+				c.set.name, c.set.Latest(), c.set.compatibleFrom, c.latest, c.floor)
+		}
+	}
+}

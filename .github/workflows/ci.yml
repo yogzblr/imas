@@ -18,6 +18,25 @@ jobs:
       matrix:
         go-version: ["1.26.x"]
 
+    # A single-node PXC, the image and tag deploy/helm/farmer runs, for the
+    # tests gated on IMAS_TEST_MYSQL_ROOT_DSN (the migration sets,
+    # cmd/migrate, the lease and sweeper SQL; internal/migrations/mysqltest).
+    # The health check pings over TCP, which PXC's init-time server does not
+    # listen on, so the job starts only once the real server is up. The root
+    # password is a throwaway for this job's container.
+    services:
+      pxc:
+        image: percona/percona-xtradb-cluster:8.4.8-8.1
+        env:
+          MYSQL_ROOT_PASSWORD: imas-ci
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pimas-ci --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 60
+
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -57,10 +76,13 @@ jobs:
 
       # IMAS_REQUIRE_HELM=1 turns every chart-test skip (no helm, charts/
       # not populated, a missing tool) into a failure, so this job can't
-      # pass without having rendered the charts.
+      # pass without having rendered the charts. IMAS_TEST_MYSQL_ROOT_DSN
+      # runs the MySQL tests against the pxc service; set, they fail rather
+      # than skip if it does not answer.
       - name: Test with race detection and coverage
         env:
           IMAS_REQUIRE_HELM: "1"
+          IMAS_TEST_MYSQL_ROOT_DSN: "root:imas-ci@tcp(127.0.0.1:3306)/"
         run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Upload coverage to Codecov

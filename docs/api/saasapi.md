@@ -376,6 +376,21 @@ echoing the body:
 | 502 | `recipe_store_unavailable` | the object store failed |
 | 503 | `audit_unavailable`, `recipes_not_configured`, `recipe_validation_busy` | the change couldn't be audited, so it wasn't made; storage off; too many validations at once |
 
+`409 recipe_write_conflict` is returned only by `PUT`, when the write lost
+its compare-and-swap to a concurrent writer four times in a row (the first
+attempt and 3 retries, each re-reading the recipe and re-checking the
+caller's precondition and the quota). Nothing was stored; the audit log has a
+`failed` record with code `recipe_write_conflict`. The body carries no
+`details`:
+
+```json
+{"error":"recipe_write_conflict","message":"the recipe kept being changed by other requests at the same time: get it again and resend"}
+```
+
+Get the recipe again and resend with its new `ETag` in `If-Match`. If a
+retry finds that the precondition no longer holds (another writer changed the
+version the caller named), the answer is `412 precondition_failed` instead.
+
 Includes are not checked at upload: a missing include fails at cook time.
 Props are empty during validation, so a template that only fails for some
 prop values passes here and fails at cook time.

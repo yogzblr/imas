@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -310,4 +311,111 @@ func TestOpenBaoSysSignerPolicy(t *testing.T) {
 	if _, err := signer.EnsureKeyPair(ctx, natskeys.TenantSigningKey("acme"), nkeys.PrefixByteAccount); openbao.StatusCode(err) != http.StatusForbidden {
 		t.Errorf("sys signer creating a tenant key: %v, want 403", err)
 	}
+}
+
+// farmerKeyOps are the Transit operations on one key name, each as the
+// path and capability OpenBao checks for it.
+var farmerKeyOps = []struct {
+	op, path, capability string
+}{
+	{"create", "keys/%s", "update"},
+	{"read", "keys/%s", "read"},
+	{"sign", "sign/%s", "update"},
+	{"soft-delete", "keys/%s/soft-delete", "delete"},
+	{"soft-delete-restore", "keys/%s/soft-delete-restore", "update"},
+	{"rotate", "keys/%s/rotate", "update"},
+	{"config", "keys/%s/config", "update"},
+	{"trim", "keys/%s/trim", "update"},
+	{"hard-delete", "keys/%s", "delete"},
+	{"export", "export/signing-key/%s", "read"},
+	{"backup", "backup/%s", "read"},
+	{"restore", "restore/%s", "update"},
+}
+
+// TestOpenBaoFarmerPolicyKeySet lists what a farmer token may do with each
+// kind of key name on the Transit mount, as OpenBao's own ACL evaluation
+// answers it (sys/capabilities-self), and asserts exactly the set the
+// merged imas-farmer-natssign policy allows (owner decision 2, #215; the
+// single-segment form of 2026-10-12). Any change to the policy that adds or
+// removes an operation for any of these names fails it. It then shows the
+// accepted cost on a real key: farmer soft-deletes a key another client
+// keeps on the mount (deploy/helm/farmer/README.md, security review P3).
+func TestOpenBaoFarmerPolicyKeySet(t *testing.T) {
+	s := newPolicyServer(t)
+	token := s.policyToken("imas-farmer-natssign.hcl")
+
+	tsign, tacct := natskeys.TenantSigningKey("acme"), natskeys.TenantAccountKey("acme")
+	want := map[string][]string{
+		// The platform keys: read; sign with operator-signing and SYS
+		// only (never the operator identity); exact denies on soft delete.
+		natskeys.OperatorKey():        {"read"},
+		natskeys.OperatorSigningKey(): {"read", "sign"},
+		natskeys.SysAccountKey():      {"read", "sign"},
+		// The gateway key: keys/+ reaches it (create on an existing key
+		// changes nothing, checked below); the exact deny keeps it from
+		// being soft-deleted.
+		"imas-gateway-jwt": {"create", "read"},
+		// Tenant keys: created at provisioning, soft-deleted at
+		// offboarding; only the signing key signs.
+		tsign: {"create", "read", "sign", "soft-delete"},
+		tacct: {"create", "read", "soft-delete"},
+		// Any other name (the accepted cost): create, read and soft
+		// delete, never sign.
+		"other-client-key": {"create", "read", "soft-delete"},
+		"nats-tsignx":      {"create", "read", "soft-delete"},
+	}
+	// Never, for any name: rotate, config, trim, hard delete, export,
+	// backup, restore, soft-delete-restore.
+	for name, ops := range want {
+		paths := make([]string, 0, len(farmerKeyOps))
+		for _, o := range farmerKeyOps {
+			paths = append(paths, s.mount+"/"+fmt.Sprintf(o.path, name))
+		}
+		status, body := s.admin.Call(token, http.MethodPost, "sys/capabilities-self", map[string]any{"paths": paths})
+		if status != http.StatusOK {
+			t.Fatalf("capabilities-self: %d %s", status, body)
+		}
+		var caps map[string]any
+		if err := json.Unmarshal(body, &caps); err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, o := range farmerKeyOps {
+			p := s.mount + "/" + fmt.Sprintf(o.path, name)
+			list, _ := caps[p].([]any)
+			for _, c := range list {
+				if c == o.capability || c == "root" {
+					got = append(got, o.op)
+					break
+				}
+			}
+		}
+		if strings.Join(got, ",") != strings.Join(ops, ",") {
+			t.Errorf("farmer on %q may %v, want exactly %v", name, got, ops)
+		}
+	}
+
+	// On real keys: create on the existing gateway key changes nothing,
+	// and the gateway key is not soft-deleted.
+	s.admin.Must(http.MethodPost, s.mount+"/keys/imas-gateway-jwt", map[string]any{"type": "ed25519"})
+	if status, body := s.admin.Call(token, http.MethodPost, s.mount+"/keys/imas-gateway-jwt", map[string]any{"type": "ed25519"}); status/100 != 2 {
+		t.Fatalf("farmer create on the existing imas-gateway-jwt: %d %s, want 2xx and no change", status, body)
+	}
+	if v, del := s.keyState("imas-gateway-jwt"); v != 1 || del {
+		t.Errorf("imas-gateway-jwt after farmer's create: version %d, deletion_allowed %v", v, del)
+	}
+	s.refused("farmer", token, []refusedCall{{http.MethodDelete, "/keys/imas-gateway-jwt/soft-delete", nil}})
+
+	// The accepted cost: a key another client keeps here, with no exact
+	// deny, is soft-deleted by a farmer token (and can then no longer
+	// sign for that client). Restoring it needs a token other than
+	// farmer's.
+	s.admin.Must(http.MethodPost, s.mount+"/keys/other-client-key", map[string]any{"type": "ed25519"})
+	if status, body := s.admin.Call(token, http.MethodDelete, s.mount+"/keys/other-client-key/soft-delete", nil); status/100 != 2 {
+		t.Fatalf("farmer soft-deleting another client's key: %d %s; the accepted cost in the README no longer holds, update it", status, body)
+	}
+	if status, _ := s.admin.Call("", http.MethodPost, s.mount+"/sign/other-client-key", map[string]any{"input": "eA=="}); status/100 == 2 {
+		t.Error("a soft-deleted key still signs")
+	}
+	s.refused("farmer", token, []refusedCall{{http.MethodPost, "/keys/other-client-key/soft-delete-restore", nil}})
 }
