@@ -1,1 +1,2 @@
 change: D5 follow-up: the `sprout_user_jwt` model declares `jwt_sha256` as `char(64)`, matching migration farmer 00005; its sizes already matched. The table stays out of the migration baseline check only because sqlite test databases cannot carry the `updated_at` default.
+pr: 220
