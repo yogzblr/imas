@@ -1,6 +1,8 @@
 {{- include "imas-farmer.validate" . -}}
 {{- $tlsDir := include "imas-farmer.tlsDir" . -}}
-{{- $pki := "/var/lib/imas/farmer/pki" -}}
+{{- /* Under the tmp emptyDir: farmer keeps no state on disk, and what it
+still writes to farmerpki is per replica and made again at start. */ -}}
+{{- $pki := "/tmp/farmer/pki" -}}
 {{- $managed := dict
   "loglevel" .Values.farmer.logLevel
   "farmerinterface" "0.0.0.0"
@@ -12,9 +14,6 @@
   "farmerpki" (printf "%s/" $pki)
   "nkeyfarmerpubfile" (printf "%s/farmer.nkey.pub" $pki)
   "nkeyfarmerprivfile" (printf "%s/farmer.nkey" $pki)
-  "auditlogdir" "/var/lib/imas/farmer/audit"
-  "joblogdir" "/var/cache/imas/farmer/jobs"
-  "propsdir" "/var/cache/imas/farmer/props"
   "gatewaytransitkeyname" .Values.farmer.openbao.gateway.keyName
   "gatewayjwtttl" .Values.farmer.gatewayJWTTTL
   "sproutbusurls" .Values.bus.sproutBusURLs

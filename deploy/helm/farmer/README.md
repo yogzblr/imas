@@ -27,8 +27,8 @@ first push. The Buildkite `imashelm` registry is superseded for charts.
 It deploys imas's non-DMZ core:
 
 - **farmer** (`cmd/farmer`, `ConnectFarmer()`): the API, the job, facts and
-  cook subscribers, and tenant provisioning. It runs as one replica on a
-  PVC (see [Why one farmer replica](#why-one-farmer-replica)).
+  cook subscribers, and tenant provisioning. It is stateless and runs as
+  two replicas by default (see [Farmer is stateless](#farmer-is-stateless)).
 - **saasapi** (`cmd/saasapi`): the customer-facing SaaS API.
 - **The SaaS API credential hand-off**: the `farmer publish-saasapi-credential`
   Job, its ServiceAccount and its NetworkPolicy, from
@@ -1029,22 +1029,48 @@ writes, and enforces the enrollment-key rate limit across pods
 Neither client does auth or TLS yet, so the bundled Valkey has neither.
 Restrict network access to it.
 
-## Why one farmer replica
+## Farmer is stateless
 
-FarmerPKI is on one ReadWriteOnce PVC (kept on uninstall). It holds:
+Farmer keeps no state on local disk, so it has no PVC and any number of
+replicas can run (`farmer.replicaCount`, default 2). Everything it keeps is
+in the shared services, and the replicas take turns through PXC row leases
+(a conditional `UPDATE` of `lease_owner`/`lease_until`, never `GET_LOCK`,
+which is local to one PXC node):
 
-- `nats-auth/`: JWTs and the resolver state farmer pushes (no private
-  key of the trust chain since P21 slice 1: those are Transit keys, and
-  the operator and SYS account JWTs come from the trust ConfigMap);
-- the SaaS API credential, and the state `EnsureSaaSAPICredential` uses to
-  detect and revoke a rotated key;
-- farmer's own NKey;
-- the audit logs.
+- **NATS signing keys**: OpenBao Transit keys; Account JWTs are signed when
+  needed and never stored.
+- **Sprout User JWTs**: in the private bucket `objectStore.sproutJWTBucket`
+  (`IMAS_S3_SPROUT_JWT_BUCKET`), under `<tenant>/<sprout>/<sha256>.jwt`,
+  indexed by `farmer.sprout_user_jwt` on `(tenant_id, sprout_id)`. That row's
+  lease makes one replica mint a sprout's JWT and the others reuse it.
+  Without the bucket every enrolment fails (NOTES warns).
+- **SaaS API credential rotation state**: `saas.saasapi_credential_state`.
+- **Hourly jobs** (job expiry, the cohort refresher, the account push per
+  tenant): one replica at a time under a `farmer.job_leases` row
+  (`farmer.jobs.leaseTTL`, `IMAS_JOB_LEASE_TTL`, default 120s).
+- **Job logs**: the job bucket. **Audit**: JSON lines on stdout, whatever
+  `farmer.logFormat` says, shipped by the node's log agent.
+- **Per-tenant bus connections**: opened on first use on each replica,
+  reconnecting without limit. One is closed once it has been unused for
+  `farmer.tenantConnections.idleTTL` (10m) and its tenant has had no sprout
+  heartbeat for `farmer.tenantConnections.heartbeatWindow` (15m), so a tenant
+  with online sprouts stays subscribed on every replica.
 
-A second replica would mint and push from a divergent copy. The chart
-therefore renders `replicas: 1` with `strategy: Recreate`, and refuses
-`farmer.replicaCount` other than 1. Horizontal core scaling needs that
-state moved off local disk first.
+The pod's root filesystem is read-only. Its only writable volumes are the
+`tmp` emptyDir and the TLS directory. `farmerpki` points into `tmp`: what
+farmer still writes there (its own NKey and the JWTs it signs for its own
+connections) is per replica and made again at every start; nothing there
+outlives the pod.
+
+Farmer and saasapi roll one pod at a time (`RollingUpdate`,
+`maxUnavailable: 0`, `maxSurge: 1`), and a PodDisruptionBudget (`farmer.pdb`, `minAvailable: 1`,
+rendered only with more than one replica) keeps one up through a drain. With
+no `farmer.affinity` set, a preferred pod anti-affinity on
+`kubernetes.io/hostname` puts the replicas on different nodes;
+`farmer.topologySpreadConstraints` adds zone spread where you want it.
+
+Rate limits that are kept per replica (saasapi's rate limiter, the update
+manifest limiter) allow N times the configured rate with N replicas.
 
 ## NetworkPolicy
 
@@ -1154,15 +1180,21 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `database.migrate.wait` / `backoffLimit` / `activeDeadlineSeconds` | `15m` / `2` / `1800` | How long to wait for PXC; the Job's retry and time budget. |
 | `database.migrate.argoCDHooks` | `true` | Argo CD hook annotations. See [Migrations](#migrations). |
 | `objectStore.*` | empty | `IMAS_S3_*`. `jobBucket` must differ from `bucket`. |
+| `objectStore.sproutJWTBucket` | `""` | `IMAS_S3_SPROUT_JWT_BUCKET`: the private bucket of sprout User JWTs. Must differ from `bucket` and `jobBucket`. Empty: every enrolment fails, and NOTES says so. |
 | `farmer.image.*` | `ghcr.io/yogzblr/imas-farmer` | Also the publish Job's image. |
-| `farmer.replicaCount` | `1` | Must be 1. |
+| `farmer.replicaCount` | `2` | At least 1. See [Farmer is stateless](#farmer-is-stateless). |
 | `farmer.logLevel` / `apiPort` / `gatewayJWTTTL` | `info` / `5405` / `24h` | `loglevel`, `farmerapiport`, `gatewayjwtttl`. |
+| `farmer.logFormat` / `saasapi.logFormat` | `json` / `json` | `IMAS_LOG_FORMAT`: `json` or `text`. |
+| `farmer.pdb.enabled` / `minAvailable` | `true` / `1` | farmer's PodDisruptionBudget; only with `replicaCount` > 1. |
+| `farmer.affinity` / `topologySpreadConstraints` | `{}` / `[]` | Empty affinity: preferred anti-affinity on `kubernetes.io/hostname` over farmer's pods. |
 | `farmer.bootstrapAdmin.pubkey` | `""` | The first imas CLI admin's NKey public key (`imas auth pubkey`), rendered as `users.admin`. Required, with `boxpub`, unless `skip`: see [Bootstrap admin](#bootstrap-admin). |
 | `farmer.bootstrapAdmin.boxpub` | `""` | Required with `pubkey`: the CLI box public key the admin's `imas auth keygen` printed. Farmer imports it once at start; the database is authoritative after that (J.3). |
 | `farmer.bootstrapAdmin.username` | `""` | Optional name for listings and audit entries. |
 | `farmer.bootstrapAdmin.skip` | `false` | `true` renders no admin and lifts the requirement. Only when farmer's database already holds an admin; not with `pubkey`, `boxpub` or `username`. NOTES says so. |
 | `farmer.adminPubKeys` | `[]` | Removed in J.3: rendering fails if set. An admin with no CLI box key can't make a request; use `farmer.bootstrapAdmin`. |
 | `farmer.jobs.reconcileWindow` | `"2h"` | `IMAS_JOB_RECONCILE_WINDOW` (`deploy/farmer/values.job-reconcile.yaml`). |
+| `farmer.jobs.leaseTTL` | `""` | `IMAS_JOB_LEASE_TTL`: lease TTL of the hourly jobs, a quoted Go duration. Empty: farmer's 120s. |
+| `farmer.tenantConnections.idleTTL` / `heartbeatWindow` | `"10m"` / `"15m"` | `IMAS_TENANT_CONN_IDLE_TTL` / `IMAS_TENANT_CONN_HEARTBEAT_WINDOW`: a tenant bus connection is closed once unused this long and with no sprout heartbeat in the window. Quoted Go durations. |
 | `farmer.recipes.templateLimits.maxSourceBytes` | `262144` | `IMAS_RECIPE_MAX_SOURCE_BYTES`: largest recipe source farmer reads or renders. |
 | `farmer.recipes.templateLimits.maxRenderedBytes` | `1048576` | `IMAS_RECIPE_MAX_RENDERED_BYTES`: largest output of one recipe render. |
 | `farmer.recipes.templateLimits.maxValueBytes` | `262144` | `IMAS_RECIPE_MAX_VALUE_BYTES`: largest string one template function returns; at most `maxRenderedBytes`. |
@@ -1173,7 +1205,6 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `farmer.openbao.{gateway,tenantBox}.*` | see values.yaml | Mount, key or path, role, and token key per client. |
 | `farmer.extraConfig` | `{}` | Extra `/etc/imas/farmer` keys. Chart-managed keys win. |
 | `farmer.extraEnv` | `[]` | Extra env vars for farmer, e.g. the optional `*_OPENBAO_NAMESPACE` (see [OpenBao](#openbao)) or `HTTPS_PROXY`/`NO_PROXY`. Never a raw `IMAS_NATS_*_SEED` or any `IMAS_SAASAPI_CRED_OPENBAO_*`. |
-| `farmer.persistence.*` | 1Gi RWO, kept | FarmerPKI and audit logs. |
 | `saasapi.enabled` / `replicaCount` / `port` | `true` / `2` / `8081` | |
 | `saasapi.jwt.*` | `""` | Keycloak JWKS URL, issuer and audience. Required. |
 | `saasapi.internalAuthSecret.*` | `imas-saasapi-internal-auth` | `INTERNAL_AUTH_SECRET_CURRENT`/`_PREVIOUS`. |
@@ -1332,8 +1363,7 @@ from source and no cluster:
 
 ## Known gaps
 
-1. **Horizontal farmer scaling** needs FarmerPKI off local disk.
-2. **saasapi runs in the release namespace.** The reference put its
+1. **saasapi runs in the release namespace.** The reference put its
    ExternalSecret in a separate `saasapi` namespace. Here saasapi shares a
    namespace with farmer's seed Secret, but it mounts only its own
    credential Secret. Whoever can create pods in this namespace could

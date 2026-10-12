@@ -1,4 +1,4 @@
-imas core: farmer (1 replica){{ if .Values.saasapi.enabled }} and saasapi ({{ .Values.saasapi.replicaCount }} replica(s)){{ end }}.
+imas core: farmer ({{ .Values.farmer.replicaCount }} replica(s), stateless){{ if .Values.saasapi.enabled }} and saasapi ({{ .Values.saasapi.replicaCount }} replica(s)){{ end }}.
 
 FLAG FOR SECURITY REVIEW: this release carries the OpenBao write policy for
 the SaaS API credential hand-off. See the chart README's "Security review
@@ -44,6 +44,13 @@ WARNING: bus.host is set but bus.egressCIDRs is empty. The NetworkPolicy bus egr
 only selects the nats chart's pods in this cluster, so farmer and saasapi can't reach a bus
 at {{ .Values.bus.host }} until you list its addresses in bus.egressCIDRs.
 {{- end }}
+{{- end }}
+
+{{- if not .Values.objectStore.sproutJWTBucket }}
+
+WARNING: objectStore.sproutJWTBucket is empty, so farmer has no IMAS_S3_SPROUT_JWT_BUCKET and
+every sprout enrolment fails: sprout User JWTs are kept only in that private bucket. Set it
+to a bucket other than objectStore.bucket and objectStore.jobBucket.
 {{- end }}
 
 Before farmer can start, Secret "{{ .Values.natsSeeds.secretName }}" must exist in {{ .Release.Namespace }}

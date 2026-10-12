@@ -12,12 +12,15 @@ metadata:
     {{- include "imas-farmer.labels" . | nindent 4 }}
     app.kubernetes.io/component: farmer
 spec:
-  # Always 1 (see the validation in _helpers.tpl), and Recreate: FarmerPKI
-  # is a ReadWriteOnce volume, and two farmers must never mint from it at
-  # once.
+  # Stateless (README.md, "Farmer is stateless"): replicas share PXC,
+  # Valkey, OpenBao and the object store. One new pod at a time, and no
+  # old one goes before its replacement is ready.
   replicas: {{ .Values.farmer.replicaCount }}
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       {{- include "imas-farmer.farmer.selectorLabels" . | nindent 6 }}
@@ -60,8 +63,21 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.farmer.affinity }}
       affinity:
+        {{- if .Values.farmer.affinity }}
+        {{- toYaml .Values.farmer.affinity | nindent 8 }}
+        {{- else }}
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "imas-farmer.farmer.selectorLabels" . | nindent 20 }}
+        {{- end }}
+      {{- with .Values.farmer.topologySpreadConstraints }}
+      topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
@@ -106,6 +122,11 @@ spec:
             - name: IMAS_S3_JOB_BUCKET
               value: {{ . | quote }}
             {{- end }}
+            {{- with $os.sproutJWTBucket }}
+            # Sprout User JWTs (internal/pki MintOrReuseUserJWT); private.
+            - name: IMAS_S3_SPROUT_JWT_BUCKET
+              value: {{ . | quote }}
+            {{- end }}
             {{- if $os.credentialsSecret }}
             - name: IMAS_S3_ACCESS_KEY_ID
               valueFrom:
@@ -122,6 +143,26 @@ spec:
             null or "" emits nothing; the type is checked in validate. */}}
             {{- with .Values.farmer.jobs.reconcileWindow }}
             - name: IMAS_JOB_RECONCILE_WINDOW
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.farmer.jobs.leaseTTL }}
+            - name: IMAS_JOB_LEASE_TTL
+              value: {{ . | quote }}
+            {{- end }}
+            # Per-tenant bus connections: idle close (owner decision 3 of
+            # docs/briefs/P21-slice3-farmer-saasapi-state.md).
+            {{- with .Values.farmer.tenantConnections }}
+            {{- with .idleTTL }}
+            - name: IMAS_TENANT_CONN_IDLE_TTL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .heartbeatWindow }}
+            - name: IMAS_TENANT_CONN_HEARTBEAT_WINDOW
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.farmer.logFormat }}
+            - name: IMAS_LOG_FORMAT
               value: {{ . | quote }}
             {{- end }}
             {{- /* Recipe template render limits; types checked in validate,
@@ -208,10 +249,10 @@ spec:
               mountPath: /etc/imas/farmer
               subPath: farmer
               readOnly: true
-            - name: data
-              mountPath: /var/lib/imas/farmer
-            - name: cache
-              mountPath: /var/cache/imas/farmer
+            # The only writable volume besides tls; nothing on it outlives
+            # the pod. farmerpki points here: what farmer still writes
+            # there (its NKey and the JWTs it signs for itself) is per
+            # replica and made again at start.
             - name: tmp
               mountPath: /tmp
             - name: nats-seeds
@@ -231,16 +272,6 @@ spec:
         - name: config
           configMap:
             name: {{ include "imas-farmer.fullname" . }}
-        - name: data
-          {{- if .Values.farmer.persistence.enabled }}
-          persistentVolumeClaim:
-            claimName: {{ default (printf "%s-data" (include "imas-farmer.fullname" .)) .Values.farmer.persistence.existingClaim }}
-          {{- else }}
-          emptyDir: {}
-          {{- end }}
-        - name: cache
-          emptyDir:
-            sizeLimit: 1Gi
         - name: tmp
           emptyDir:
             sizeLimit: 64Mi

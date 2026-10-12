@@ -203,10 +203,10 @@ func TestSaasapiPDB(t *testing.T) {
 			t.Errorf("%v: PDB selector matches farmer's pods", tc.args)
 		}
 	}
-	// farmer is held at one replica and gets no PDB.
+	// The only other PDB is farmer's own (TestFarmerPDBRendered).
 	for _, d := range mustRender(t) {
-		if d["kind"] == "PodDisruptionBudget" && get(d, "metadata", "name") != "t-farmer-saasapi" {
-			t.Errorf("unexpected PDB %v", get(d, "metadata", "name"))
+		if n := get(d, "metadata", "name"); d["kind"] == "PodDisruptionBudget" && n != "t-farmer-saasapi" && n != "t-farmer" {
+			t.Errorf("unexpected PDB %v", n)
 		}
 	}
 }

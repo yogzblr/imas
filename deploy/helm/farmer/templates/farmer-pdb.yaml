@@ -1,0 +1,15 @@
+{{- if and .Values.farmer.pdb.enabled (gt (int .Values.farmer.replicaCount) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "imas-farmer.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: farmer
+spec:
+  minAvailable: {{ .Values.farmer.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "imas-farmer.farmer.selectorLabels" . | nindent 6 }}
+{{- end }}
