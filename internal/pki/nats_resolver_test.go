@@ -1,6 +1,7 @@
 package pki
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	nats_server "github.com/nats-io/nats-server/v2/server"
+	"github.com/nats-io/nkeys"
 
 	"github.com/yogzblr/imas/internal/config"
 )
@@ -69,3 +71,42 @@ func mustSysAccountPub(t *testing.T) string {
 	}
 	return mat.sysAccountPub
 }
+
+// A seeding failure panics (ConfigureNats has no error return) without
+// leaving the resolver's directory behind.
+func TestConfigureNatsRemovesResolverDirOnPanic(t *testing.T) {
+	setupTestPKI(t)
+	useRealFarmerKey(t)
+	mat, err := ensureNatsAuth()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", t.TempDir())
+	// An operator signing key without a public key fails seeding after
+	// the resolver's directory exists.
+	mat.operatorSigningKP = noPubKeyPair{mat.operatorSigningKP}
+	config.FarmerBusPort = "-1"
+	opts := baseNatsOptions()
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("seeding without the operator signing public key did not panic")
+			}
+		}()
+		seedResolverWith(&opts, mat)
+	}()
+	left, err := os.ReadDir(os.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range left {
+		if strings.HasPrefix(e.Name(), "imas-bus-resolver-") {
+			t.Fatalf("resolver directory %s left after the panic", e.Name())
+		}
+	}
+}
+
+// noPubKeyPair is a key pair whose public key cannot be read.
+type noPubKeyPair struct{ nkeys.KeyPair }
+
+func (noPubKeyPair) PublicKey() (string, error) { return "", errors.New("no public key") }

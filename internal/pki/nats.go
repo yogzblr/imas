@@ -147,6 +147,11 @@ func seedResolverFromCore(NatsConfig *nats_server.Options) {
 	if err != nil {
 		log.Panicf("nats: failed to bootstrap decentralized JWT auth material: %v", err)
 	}
+	seedResolverWith(NatsConfig, mat)
+}
+
+// seedResolverWith is seedResolverFromCore with core's material given.
+func seedResolverWith(NatsConfig *nats_server.Options, mat *natsAuthMaterial) {
 	opClaims, err := jwt.DecodeOperatorClaims(mat.operatorJWT)
 	if err != nil {
 		log.Panicf("nats: failed to decode operator JWT: %v", err)
@@ -158,6 +163,14 @@ func seedResolverFromCore(NatsConfig *nats_server.Options) {
 	if err != nil {
 		log.Panicf("nats: failed to create the account resolver: %v", err)
 	}
+	// Until the options hold it (the server's Shutdown closes it then), a
+	// panic below must not leave its directory behind.
+	handedOver := false
+	defer func() {
+		if !handedOver {
+			resolver.Close()
+		}
+	}()
 	if err := resolver.Store(mat.sysAccountPub, mat.sysAccountJWT); err != nil {
 		log.Panicf("nats: failed to seed the SYS account into the resolver: %v", err)
 	}
@@ -201,6 +214,7 @@ func seedResolverFromCore(NatsConfig *nats_server.Options) {
 		}
 	}
 	NatsConfig.AccountResolver = resolver
+	handedOver = true
 }
 
 // tempDirResolver is a full account resolver over a directory of its
