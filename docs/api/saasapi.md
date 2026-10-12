@@ -361,7 +361,8 @@ echoing the body:
 | 400 | `invalid_recipe_name`, `invalid_precondition` | bad name; malformed `If-Match`/`If-None-Match` |
 | 409 | `recipe_quota_exceeded` | over the tenant's recipe count or total size (`details.quota`: `count` or `total_bytes`) |
 | 409 | `tenant_not_active` | the tenant isn't active |
-| 412 | `precondition_failed` | the precondition didn't hold, including a concurrent write that landed first |
+| 409 | `recipe_write_conflict` | concurrent writes kept landing first: the write lost its compare-and-swap, was re-read and retried 3 times, and lost each time |
+| 412 | `precondition_failed` | the precondition didn't hold, including when a concurrent write landed first and the re-read no longer matches it |
 | 413 | `recipe_too_large` | over `IMAS_RECIPE_MAX_SOURCE_BYTES` (256 KiB by default) |
 | 415 | `unsupported_media_type` | another `Content-Type` or charset |
 | 422 | `recipe_empty`, `recipe_not_utf8`, `recipe_not_text` | empty, not UTF-8, control characters |
