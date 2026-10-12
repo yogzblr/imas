@@ -51,7 +51,7 @@ func handleSproutsList(c apiCaller, params json.RawMessage) (any, error) {
 		if err == nil {
 			info.NKey = nkey
 		}
-		if e.state == "accepted" && natsConnFor(tenantID) != nil {
+		if e.state == "accepted" {
 			info.Connected = probeSprout(tenantID, e.id)
 		}
 		sprouts = append(sprouts, info)
@@ -103,7 +103,7 @@ func handleSproutsGet(tenantID string, params json.RawMessage) (any, error) {
 		NKey:     nkey,
 	}
 
-	if keyState == "accepted" && natsConnFor(tenantID) != nil {
+	if keyState == "accepted" {
 		info.Connected = probeSprout(tenantID, km.SproutID)
 	}
 
@@ -119,9 +119,6 @@ func handleSproutsGet(tenantID string, params json.RawMessage) (any, error) {
 // instead of a round trip to the sprout. See
 // docs/design/imas-master-plan.md Phase 1.
 func probeSprout(tenantID, sproutID string) bool {
-	if natsConnFor(tenantID) == nil {
-		return false
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	return heartbeat.IsOnline(ctx, tenantID, sproutID)

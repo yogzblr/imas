@@ -2,6 +2,7 @@ package natsapi
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/yogzblr/imas/internal/jobs"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/rbac"
+	"github.com/yogzblr/imas/internal/tenantconn"
 )
 
 // --- jety test helpers ---
@@ -48,7 +50,7 @@ func TestHandleCmdRunRegisteredSprout(t *testing.T) {
 
 	// cmd.FRun will try to use NATS — nil conn means it will error, but
 	// we cover the validation-pass and goroutine spawn paths.
-	ClearNatsConn(pki.CurrentTenantID())
+	SetConnGetter(nil)
 
 	params := json.RawMessage(`{"target":[{"id":"sprout-exec"}],"action":{"command":"echo hello"}}`)
 	result, err := handleCmdRun(pki.CurrentTenantID(), params)
@@ -86,7 +88,7 @@ func TestHandleTestPingRegisteredSprout(t *testing.T) {
 	pkiDir := setupNatsAPIPKI(t)
 	writeNKey(t, pkiDir, "accepted", "sprout-ping", "UKEY_PING")
 
-	ClearNatsConn(pki.CurrentTenantID())
+	SetConnGetter(nil)
 
 	params := json.RawMessage(`{"target":[{"id":"sprout-ping"}],"action":{"ping":true}}`)
 	result, err := handleTestPing(pki.CurrentTenantID(), params)
@@ -128,15 +130,15 @@ func TestHandleCookRegisteredSproutNoNATS(t *testing.T) {
 	pkiDir := setupNatsAPIPKI(t)
 	writeNKey(t, pkiDir, "accepted", "sprout-cook-valid", "UKEY_COOK_VALID")
 
-	ClearNatsConn(pki.CurrentTenantID())
+	SetConnGetter(nil)
 
 	params := json.RawMessage(`{"target":[{"id":"sprout-cook-valid"}],"action":{"recipe":"webserver.nginx"}}`)
 	_, err := handleCook(apiCaller{TenantID: pki.CurrentTenantID()}, params)
 	if err == nil {
 		t.Fatal("expected error when NATS not available")
 	}
-	if err.Error() != "NATS connection not available" {
-		t.Errorf("error = %q, want 'NATS connection not available'", err.Error())
+	if !errors.Is(err, tenantconn.ErrNoGetter) {
+		t.Errorf("error = %v, want tenantconn.ErrNoGetter", err)
 	}
 }
 
@@ -243,7 +245,7 @@ func TestHandleSproutsListDangerouslyAllowRoot(t *testing.T) {
 	pkiDir := setupNatsAPIPKI(t)
 	writeNKey(t, pkiDir, "accepted", "sprout-dar", "UKEY_DAR")
 
-	ClearNatsConn(pki.CurrentTenantID())
+	SetConnGetter(nil)
 
 	cleanup := setupJetyDangerouslyAllowRoot(t, true)
 	defer cleanup()
@@ -373,7 +375,7 @@ func TestSubscribeNilConn(t *testing.T) {
 // --- probeSprout with nil conn ---
 
 func TestProbeSproutNilConn(t *testing.T) {
-	ClearNatsConn(pki.CurrentTenantID())
+	SetConnGetter(nil)
 
 	if probeSprout("acme", "any-sprout") {
 		t.Error("expected false for nil NATS conn")

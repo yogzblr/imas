@@ -6,6 +6,12 @@
 // from (internal/api/handlers/ready.go) is unit-testable — package main
 // can't be, since its init() loads farmer's config from /etc/imas.
 //
+// A Registry is farmer's one source of tenant connections: every package
+// that sends to a tenant's bus is handed it as a ConnGetter (getter.go)
+// and calls Get on every use. No other package keeps a connection by
+// tenant, so nothing reports a tenant "not connected" except a failed
+// dial.
+//
 // Connections are lazy, kept while in use, and closed when idle
 // (docs/briefs/P21-slice3-farmer-saasapi-state.md §4.5 and owner decision
 // 3):
@@ -57,12 +63,6 @@ type Config struct {
 	// HeartbeatWindow: a connection that saw a sprout heartbeat within
 	// this long is never closed by Sweep, however long it has been unused.
 	HeartbeatWindow time.Duration
-	// OnDrop runs when a tenant's connection leaves the Registry (Drop,
-	// Sweep, or the connection closing), before the connection is closed,
-	// while the Registry's lock is held: it must be quick and must not
-	// call back into the Registry. cmd/farmer clears the tenant from the
-	// packages that keep their own per-tenant connection maps.
-	OnDrop func(tenantID string)
 	// OnClosed runs, in its own goroutine, when a registered connection
 	// closed without the Registry closing it. The entry is already gone.
 	OnClosed func(tenantID string)
@@ -136,9 +136,6 @@ func (r *Registry) Get(ctx context.Context, tenantID string) (*nats.Conn, error)
 		// Closed, and its ClosedHandler hasn't run yet: forget it now and
 		// dial (the handler then finds the entry gone or replaced).
 		delete(r.conns, tenantID)
-		if r.cfg.OnDrop != nil {
-			r.cfg.OnDrop(tenantID)
-		}
 	}
 	if c, ok := r.inflight[tenantID]; ok {
 		r.mu.Unlock()
@@ -163,19 +160,9 @@ func (r *Registry) Get(ctx context.Context, tenantID string) (*nats.Conn, error)
 	delete(r.inflight, tenantID)
 	switch {
 	case err != nil:
-		// A dialer that failed after registering some handlers may have
-		// left nc in those packages' maps; the tenant has no entry, so
-		// clearing them is safe.
-		if r.cfg.OnDrop != nil {
-			r.cfg.OnDrop(tenantID)
-		}
+		// Nothing to record: the next Get dials again.
 	case c.dropped:
-		// The dialer may already have handed nc to the packages that keep
-		// their own maps; clear them like any other drop.
 		err = ErrDropped
-		if r.cfg.OnDrop != nil {
-			r.cfg.OnDrop(tenantID)
-		}
 	default:
 		now := r.cfg.Now()
 		r.conns[tenantID] = &entry{nc: nc, lastUse: now}
@@ -283,9 +270,6 @@ func (r *Registry) drop(tenantID string, only *nats.Conn, all bool) bool {
 		return false
 	}
 	delete(r.conns, tenantID)
-	if r.cfg.OnDrop != nil {
-		r.cfg.OnDrop(tenantID)
-	}
 	r.mu.Unlock()
 	if e.nc != nil {
 		e.nc.Close()
@@ -316,9 +300,6 @@ func (r *Registry) Sweep() []string {
 			continue
 		}
 		delete(r.conns, id)
-		if r.cfg.OnDrop != nil {
-			r.cfg.OnDrop(id)
-		}
 		tenants = append(tenants, id)
 		conns = append(conns, e.nc)
 	}

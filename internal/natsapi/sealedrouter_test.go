@@ -58,10 +58,10 @@ func startSealedFarmer(t *testing.T) *sealedFarmer {
 	env := setupSealedEnv(t)
 	nc, cleanup := startEmbeddedNATS(t)
 	t.Cleanup(cleanup)
+	useConn(t, nc)
 	if err := Subscribe(nc, "t_1"); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ClearNatsConn("t_1") })
 	return &sealedFarmer{env: env, nc: nc}
 }
 

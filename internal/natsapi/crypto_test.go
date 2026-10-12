@@ -110,7 +110,7 @@ func openAsSprout(sprout sproutKeypair, tenantID string, tenantPub *[32]byte, sp
 func TestPublishEncryptedTo_NoConnection(t *testing.T) {
 	setupCryptoTest(t)
 	enrollSprout(t, pki.CurrentTenantID(), "web-01", newSproutKeypair(t))
-	ClearNatsConn(pki.CurrentTenantID())
+	SetConnGetter(nil)
 
 	if err := PublishEncryptedTo(pki.CurrentTenantID(), "web-01", "imas.sprouts.web-01.test", payloadbox.PurposeCmdRunRequest, map[string]string{"msg": "hi"}); err == nil {
 		t.Fatal("expected an error when no NATS connection is available")
@@ -125,8 +125,7 @@ func TestPublishEncryptedTo_SproutOpensIt(t *testing.T) {
 
 	nc, cleanup := startEmbeddedNATS(t)
 	t.Cleanup(cleanup)
-	SetNatsConn(tenantID, nc)
-	t.Cleanup(func() { ClearNatsConn(tenantID) })
+	useConn(t, nc)
 	sub, err := nc.SubscribeSync("imas.sprouts.web-01.test")
 	if err != nil {
 		t.Fatal(err)

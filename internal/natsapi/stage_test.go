@@ -17,6 +17,7 @@ import (
 	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
 	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/tenantconn/tenantconntest"
 )
 
 // testRecipeStore is the binary-wide recipe store TestMain installs in
@@ -222,10 +223,8 @@ func TestHandleCook_SproutReplacedMidDispatch(t *testing.T) {
 	writeNKey(t, "", "accepted", "web-01", "UKEY_OLD")
 	writeNKey(t, "", "accepted", "web-02", "UKEY_WEB02")
 	writeNKey(t, "", "unaccepted", "web-01_1", "UKEY_NEW")
-	SetNatsConn(tenant, nc)
-	defer ClearNatsConn(tenant)
-	cook.RegisterFarmerNatsConn(tenant, nc)
-	defer cook.UnregisterFarmerNatsConn(tenant)
+	useConn(t, nc)
+	tenantconntest.Use(t, cook.SetFarmerConnGetter, tenantconntest.Fixed(nc))
 
 	setupSealedEnv(t)
 	// web-02 has a box key on record, so its staged copy and push are

@@ -12,7 +12,7 @@ func TestHandleHealth(t *testing.T) {
 	defer func() { farmerStartTime = origStart }()
 
 	// No NATS connection — should report degraded.
-	ClearNatsConn("")
+	SetConnGetter(nil)
 
 	result, err := handleHealth("", nil)
 	if err != nil {
@@ -46,8 +46,7 @@ func TestHandleHealthOK(t *testing.T) {
 	nc, cleanup := startEmbeddedNATS(t)
 	defer cleanup()
 
-	SetNatsConn("", nc)
-	defer ClearNatsConn("")
+	useConn(t, nc)
 
 	result, err := handleHealth("", nil)
 	if err != nil {
@@ -68,7 +67,7 @@ func TestHandleHealthUptime(t *testing.T) {
 	farmerStartTime = time.Now().Add(-30 * time.Second)
 	defer func() { farmerStartTime = origStart }()
 
-	ClearNatsConn("")
+	SetConnGetter(nil)
 
 	result, err := handleHealth("", nil)
 	if err != nil {

@@ -250,10 +250,10 @@ func startShellEnv(t *testing.T) *shellEnv {
 		t.Fatal(err)
 	}
 	env.farmer = dialBus(t, url, farmerJWT, farmerSeed)
+	useConn(t, env.farmer)
 	if err := Subscribe(env.farmer, env.tenant); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ClearNatsConn(env.tenant) })
 	// The CLI's User JWT carries the same allow-all set as farmer's
 	// (jwtusers.go's allowAllPermissions), so it connects with farmer's.
 	env.cli = dialBus(t, url, farmerJWT, farmerSeed)

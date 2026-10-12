@@ -8,10 +8,12 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +25,7 @@ import (
 	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/pki/pkitest"
+	"github.com/yogzblr/imas/internal/tenantconn"
 )
 
 // setupNatsAPIPKI wires up an in-memory PKI store (see
@@ -436,7 +439,7 @@ func TestHandleSproutsListEmpty(t *testing.T) {
 	setupNatsAPIPKI(t)
 
 	// Ensure no NATS conn for probe.
-	ClearNatsConn(pki.CurrentTenantID())
+	SetConnGetter(nil)
 
 	result, err := handleSproutsList(apiCaller{TenantID: pki.CurrentTenantID()}, nil)
 	if err != nil {
@@ -455,7 +458,7 @@ func TestHandleSproutsListEmpty(t *testing.T) {
 func TestHandleSproutsListWithSprouts(t *testing.T) {
 	pkiDir := setupNatsAPIPKI(t)
 
-	ClearNatsConn(pki.CurrentTenantID())
+	SetConnGetter(nil)
 
 	writeNKey(t, pkiDir, "accepted", "sprout-alpha", "UKEY_ALPHA")
 	writeNKey(t, pkiDir, "unaccepted", "sprout-beta", "UKEY_BETA")
@@ -489,7 +492,7 @@ func TestHandleSproutsListWithSprouts(t *testing.T) {
 func TestHandleSproutsGetFound(t *testing.T) {
 	pkiDir := setupNatsAPIPKI(t)
 
-	ClearNatsConn(pki.CurrentTenantID())
+	SetConnGetter(nil)
 
 	writeNKey(t, pkiDir, "accepted", "sprout-found", "UKEY_FOUND")
 
@@ -585,22 +588,26 @@ func TestResolveKeyState(t *testing.T) {
 // --- probeSprout tests ---
 
 func TestProbeSproutNoConn(t *testing.T) {
-	ClearNatsConn(pki.CurrentTenantID())
+	SetConnGetter(nil)
 
 	if probeSprout("acme", "any-sprout") {
 		t.Error("expected false when natsConn is nil")
 	}
 }
 
-// --- SetNatsConn test ---
+// --- SetConnGetter test ---
 
-func TestSetNatsConn(t *testing.T) {
-	tenantID := pki.CurrentTenantID()
-	defer ClearNatsConn(tenantID)
-
-	SetNatsConn(tenantID, nil)
-	if natsConnFor(tenantID) != nil {
-		t.Error("expected nil after SetNatsConn(tenantID, nil)")
+// With no getter installed, a handler's connection lookup fails with
+// tenantconn.ErrNoGetter, not a "not connected" error: that one is only
+// for a failed dial.
+func TestSetConnGetterNil(t *testing.T) {
+	SetConnGetter(nil)
+	_, err := tenantConn(pki.CurrentTenantID())
+	if !errors.Is(err, tenantconn.ErrNoGetter) {
+		t.Fatalf("tenantConn with no getter: err = %v, want ErrNoGetter", err)
+	}
+	if strings.Contains(err.Error(), "not connected") {
+		t.Errorf("tenantConn with no getter: err = %q, must not say not connected", err)
 	}
 }
 
@@ -713,15 +720,15 @@ func TestHandleCookNoNATSConn(t *testing.T) {
 	writeNKey(t, pkiDir, "accepted", "sprout-cook", "UKEY_COOK")
 	// Register the sprout as having an NKey to pass the existence check.
 
-	ClearNatsConn(pki.CurrentTenantID())
+	SetConnGetter(nil)
 
 	params := json.RawMessage(`{"target":[{"id":"sprout-cook"}],"action":{"recipe":"test.sls"}}`)
 	_, err := handleCook(apiCaller{TenantID: pki.CurrentTenantID()}, params)
 	if err == nil {
 		t.Fatal("expected error when NATS not available")
 	}
-	if err.Error() != "NATS connection not available" {
-		t.Errorf("error = %q, want 'NATS connection not available'", err.Error())
+	if !errors.Is(err, tenantconn.ErrNoGetter) {
+		t.Errorf("error = %v, want tenantconn.ErrNoGetter", err)
 	}
 }
 

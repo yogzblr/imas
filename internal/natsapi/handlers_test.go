@@ -308,7 +308,7 @@ func TestHandleJobsCancelNoNATS(t *testing.T) {
 	writeTestJob(t, obj, "sprout-c", "jid-cancel", steps)
 
 	// Ensure no NATS connection.
-	ClearNatsConn(props.CurrentTenantID())
+	SetConnGetter(nil)
 
 	params := json.RawMessage(`{"jid":"jid-cancel"}`)
 	_, err := handleJobsCancel(apiCaller{TenantID: props.CurrentTenantID()}, params)

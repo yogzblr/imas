@@ -205,10 +205,7 @@ func TestGetDialFailure(t *testing.T) {
 // Drop is deprovisioning: it removes a registered, pending or mid-dial
 // tenant and closes its connection.
 func TestDrop(t *testing.T) {
-	var dropped []string
-	r, _, _ := newTestRegistry(t, startTestNATS(t), func(c *Config) {
-		c.OnDrop = func(id string) { dropped = append(dropped, id) }
-	})
+	r, _, _ := newTestRegistry(t, startTestNATS(t), nil)
 	nc := mustGet(t, r, "tenant-a")
 	r.MarkPending("tenant-b")
 
@@ -225,19 +222,13 @@ func TestDrop(t *testing.T) {
 		t.Error("Drop(missing) = true, want false")
 	}
 	assertCounts(t, r, 0, 0)
-	if len(dropped) != 1 || dropped[0] != "tenant-a" {
-		t.Errorf("OnDrop called for %v, want [tenant-a]", dropped)
-	}
 }
 
 // A tenant dropped while its dial is in progress is not registered: the
 // new connection is closed and Get reports ErrDropped.
 func TestDropDuringDial(t *testing.T) {
 	ns := startTestNATS(t)
-	var dropped atomic.Int32
-	r, d, _ := newTestRegistry(t, ns, func(c *Config) {
-		c.OnDrop = func(string) { dropped.Add(1) }
-	})
+	r, d, _ := newTestRegistry(t, ns, nil)
 	d.gate = make(chan struct{})
 	errc := make(chan error, 1)
 	go func() {
@@ -251,9 +242,6 @@ func TestDropDuringDial(t *testing.T) {
 		t.Fatalf("Get: err = %v, want ErrDropped", err)
 	}
 	assertCounts(t, r, 0, 0)
-	if dropped.Load() != 1 {
-		t.Errorf("OnDrop calls = %d, want 1", dropped.Load())
-	}
 }
 
 // Test 7 (brief §6): a connection that closes is forgotten through the
@@ -262,10 +250,8 @@ func TestDropDuringDial(t *testing.T) {
 func TestTenantBusReconnectsAfterMax(t *testing.T) {
 	ns := startTestNATS(t)
 	closedFor := make(chan string, 1)
-	var dropped atomic.Int32
 	r, d, _ := newTestRegistry(t, ns, func(c *Config) {
 		c.OnClosed = func(id string) { closedFor <- id }
-		c.OnDrop = func(string) { dropped.Add(1) }
 	})
 	first := mustGet(t, r, "tenant-a")
 	// What nats.go does once a connection is closed for good.
@@ -279,9 +265,6 @@ func TestTenantBusReconnectsAfterMax(t *testing.T) {
 		t.Fatal("OnClosed never fired")
 	}
 	assertCounts(t, r, 0, 0)
-	if dropped.Load() != 1 {
-		t.Errorf("OnDrop calls = %d, want 1", dropped.Load())
-	}
 	second := mustGet(t, r, "tenant-a")
 	if second == first || second.IsClosed() {
 		t.Fatal("Get after close returned the closed connection")

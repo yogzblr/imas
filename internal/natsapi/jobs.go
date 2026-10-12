@@ -201,9 +201,9 @@ func handleJobsCancel(c apiCaller, params json.RawMessage) (any, error) {
 
 	// The cancel goes out on the caller's own tenant connection, to the
 	// sprout of that tenant that ran the job.
-	nc := natsConnFor(tenantID)
-	if nc == nil {
-		return nil, fmt.Errorf("NATS connection not available")
+	nc, err := tenantConn(tenantID)
+	if err != nil {
+		return nil, err
 	}
 
 	if err := nc.Publish(subject, cancelMsg); err != nil {

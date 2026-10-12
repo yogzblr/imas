@@ -43,9 +43,9 @@ func handlePKIRotateBoxKey(tenantID string, params json.RawMessage) (any, error)
 	if !registered {
 		return nil, fmt.Errorf("unknown sprout: %s", km.SproutID)
 	}
-	nc := natsConnFor(tenantID)
-	if nc == nil {
-		return nil, fmt.Errorf("NATS connection not available")
+	nc, err := tenantConn(tenantID)
+	if err != nil {
+		return nil, err
 	}
 	if err := nc.Publish(SproutSubject(km.SproutID, SproutBoxKeyRotateCmd), nil); err != nil {
 		return nil, fmt.Errorf("failed to publish rotate instruction: %w", err)

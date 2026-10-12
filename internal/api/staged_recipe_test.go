@@ -26,6 +26,7 @@ import (
 	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
+	"github.com/yogzblr/imas/internal/tenantconn/tenantconntest"
 )
 
 // TestStagedRecipeKey_UnderGatewayPrefix: the key cook stages a sprout's
@@ -130,10 +131,7 @@ func newStagingTestServerWithRecipes(t *testing.T, extra map[string]string, tena
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { sub.Unsubscribe() })
-	for _, tenant := range tenants {
-		cook.RegisterFarmerNatsConn(tenant, nc)
-		t.Cleanup(func() { cook.UnregisterFarmerNatsConn(tenant) })
-	}
+	tenantconntest.Use(t, cook.SetFarmerConnGetter, tenantconntest.Fixed(nc))
 
 	srv := httptest.NewServer(NewRouter(""))
 	t.Cleanup(srv.Close)

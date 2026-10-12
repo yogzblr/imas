@@ -25,6 +25,7 @@ import (
 	"github.com/yogzblr/imas/internal/fleetsign"
 	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/tenantconn/tenantconntest"
 )
 
 const (
@@ -241,8 +242,7 @@ func TestSelfUpdate_ThroughRealDispatch(t *testing.T) {
 	setupNatsAPIPKI(t)
 	legacy := pki.CurrentTenantID()
 	writeNKey(t, "", "accepted", "web-01", "UKEY_WEB01")
-	cook.RegisterFarmerNatsConn(legacy, nc)
-	defer cook.UnregisterFarmerNatsConn(legacy)
+	tenantconntest.Use(t, cook.SetFarmerConnGetter, tenantconntest.Fixed(nc))
 	_, _, approve := newSUCatalog(t)
 	approve(legacy, ptr(suVersion))
 	saas := dialSaaSAPI(t, nc)

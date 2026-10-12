@@ -44,7 +44,9 @@ Only two of its Accounts could host the new credential:
   tenant's sprouts, farmer (`allowAllPermissions()` = `imas.>` and
   `_INBOX.>`), and imas CLI admins (same permissions). Since Option A
   (`imas-tenant-context-threading.md`), it is one tenant among many. It
-  has its own entry in `cmd/farmer/main.go`'s `tenantConns`, and its
+  has its own entry in `cmd/farmer/main.go`'s `tenantRegistry` (the
+  `internal/tenantconn` registry every package gets tenant connections
+  from), and its
   handlers run bound to `pki.CurrentTenantID()`.
 
 No Account in the codebase has an export or import configured (see

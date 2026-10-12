@@ -62,6 +62,15 @@ Tests: with a fake `ConnGetter` that closes a tenant's connection (as the idle s
 does), a cook dispatch, a sprout action and an audit call for that tenant succeed by
 redialing; a dial failure returns the dial error; two concurrent calls share one dial.
 
+As built (E2): `ConnGetter` is declared once, in `internal/tenantconn` (with
+`GetterFunc` and `Source`, the holder each package keeps its installed getter in);
+cmd/farmer's `installConnGetter` hands the registry to `natsapi`, `cook` and the `cmd`
+and `test` ingredients. Audit holds no connection (it writes JSON lines to stdout,
+D3), so "an audit call" is the audit record of the sprout action, which must record a
+success after the redial. The registry's `OnDrop` hook, which only existed to clear
+the per-package maps, is removed. The tests use the real `tenantconn.Registry` with a
+counting dialer and close the connection with its own `Sweep`.
+
 ## E3: no local JWT or key files in farmer (P27.2)
 
 Needs E2 and E6 merged. Scope: `internal/pki`, `cmd/farmer`,

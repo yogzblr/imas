@@ -28,8 +28,8 @@ func TestSubscribe_UsesQueueGroup(t *testing.T) {
 	defer cleanup()
 
 	tenantID := pki.CurrentTenantID()
-	defer ClearNatsConn(tenantID)
 
+	useConn(t, nc)
 	if err := Subscribe(nc, tenantID); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -84,8 +84,8 @@ func TestSubscribe_QueueGroupIsSharedAcrossRoutes(t *testing.T) {
 	defer cleanup()
 
 	tenantID := pki.CurrentTenantID()
-	defer ClearNatsConn(tenantID)
 
+	useConn(t, nc)
 	if err := Subscribe(nc, tenantID); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}

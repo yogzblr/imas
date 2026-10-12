@@ -10,6 +10,7 @@ import (
 
 	apitypes "github.com/yogzblr/imas/internal/api/types"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/tenantconn/tenantconntest"
 )
 
 // startTestNATS starts an embedded NATS server and returns a connection plus cleanup.
@@ -62,8 +63,7 @@ func TestFPingSuccess(t *testing.T) {
 	conn, cleanup := startTestNATS(t)
 	defer cleanup()
 	const tenantID = "t_test"
-	RegisterFarmerNatsConn(tenantID, conn)
-	defer UnregisterFarmerNatsConn(tenantID)
+	tenantconntest.Use(t, SetFarmerConnGetter, tenantconntest.Fixed(conn))
 
 	target := pki.KeyManager{SproutID: "sprout-1"}
 	topic := "imas.sprouts." + target.SproutID + ".test.ping"
@@ -106,8 +106,7 @@ func TestFPingTimeout(t *testing.T) {
 	conn, cleanup := startTestNATS(t)
 	defer cleanup()
 	const tenantID = "t_test"
-	RegisterFarmerNatsConn(tenantID, conn)
-	defer UnregisterFarmerNatsConn(tenantID)
+	tenantconntest.Use(t, SetFarmerConnGetter, tenantconntest.Fixed(conn))
 
 	// No subscriber — the request should time out.
 	target := pki.KeyManager{SproutID: "no-such-sprout"}
@@ -130,8 +129,7 @@ func TestFPingInvalidResponse(t *testing.T) {
 	conn, cleanup := startTestNATS(t)
 	defer cleanup()
 	const tenantID = "t_test"
-	RegisterFarmerNatsConn(tenantID, conn)
-	defer UnregisterFarmerNatsConn(tenantID)
+	tenantconntest.Use(t, SetFarmerConnGetter, tenantconntest.Fixed(conn))
 
 	target := pki.KeyManager{SproutID: "bad-sprout"}
 	topic := "imas.sprouts." + target.SproutID + ".test.ping"
@@ -158,8 +156,7 @@ func TestFPingSetsFieldsCorrectly(t *testing.T) {
 	conn, cleanup := startTestNATS(t)
 	defer cleanup()
 	const tenantID = "t_test"
-	RegisterFarmerNatsConn(tenantID, conn)
-	defer UnregisterFarmerNatsConn(tenantID)
+	tenantconntest.Use(t, SetFarmerConnGetter, tenantconntest.Fixed(conn))
 
 	target := pki.KeyManager{SproutID: "field-check"}
 	topic := "imas.sprouts." + target.SproutID + ".test.ping"
@@ -195,8 +192,7 @@ func TestFPingDifferentSproutIDs(t *testing.T) {
 	conn, cleanup := startTestNATS(t)
 	defer cleanup()
 	const tenantID = "t_test"
-	RegisterFarmerNatsConn(tenantID, conn)
-	defer UnregisterFarmerNatsConn(tenantID)
+	tenantconntest.Use(t, SetFarmerConnGetter, tenantconntest.Fixed(conn))
 
 	ids := []string{"alpha", "beta-123", "sprout.with.dots"}
 	for _, id := range ids {

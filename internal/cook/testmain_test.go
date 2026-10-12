@@ -27,7 +27,7 @@ import (
 // so prop fixtures written via the existing bare props.SetProp calls stay
 // visible once tenantID is threaded through the render chain. Distinct
 // from cook_coverage_test.go's own testTenantID ("t_test"), which scopes
-// SendCookEvent's farmerConnFor NATS connection lookup instead — an
+// the tenant SendCookEvent asks its connection getter for instead — an
 // unrelated concern that predates this constant.
 const testPropsTenantID = "default"
 

@@ -34,7 +34,7 @@ func TestHandleSproutsList_AcceptedSprouts(t *testing.T) {
 	pkiDir := setupNatsAPIPKI(t)
 	setDangerouslyAllowRoot(t, true)
 	// Ensure natsConn is nil so probeSprout is skipped.
-	ClearNatsConn(pki.CurrentTenantID())
+	SetConnGetter(nil)
 
 	nkey := generateTestNKey(t)
 	writeTestSproutKey(t, pkiDir, "accepted", "web-01", nkey)
@@ -66,7 +66,7 @@ func TestHandleSproutsList_AcceptedSprouts(t *testing.T) {
 func TestHandleSproutsList_MixedStates(t *testing.T) {
 	pkiDir := setupNatsAPIPKI(t)
 	setDangerouslyAllowRoot(t, true)
-	ClearNatsConn(pki.CurrentTenantID())
+	SetConnGetter(nil)
 
 	writeTestSproutKey(t, pkiDir, "accepted", "prod-01", generateTestNKey(t))
 	writeTestSproutKey(t, pkiDir, "unaccepted", "staging-01", generateTestNKey(t))
@@ -98,7 +98,7 @@ func TestHandleSproutsList_MixedStates(t *testing.T) {
 func TestHandleSproutsList_MultipleSameState(t *testing.T) {
 	pkiDir := setupNatsAPIPKI(t)
 	setDangerouslyAllowRoot(t, true)
-	ClearNatsConn(pki.CurrentTenantID())
+	SetConnGetter(nil)
 
 	writeTestSproutKey(t, pkiDir, "accepted", "web-01", generateTestNKey(t))
 	writeTestSproutKey(t, pkiDir, "accepted", "web-02", generateTestNKey(t))
@@ -120,7 +120,7 @@ func TestHandleSproutsList_MultipleSameState(t *testing.T) {
 
 func TestHandleSproutsGet_Found(t *testing.T) {
 	pkiDir := setupNatsAPIPKI(t)
-	ClearNatsConn(pki.CurrentTenantID())
+	SetConnGetter(nil)
 
 	nkey := generateTestNKey(t)
 	writeTestSproutKey(t, pkiDir, "accepted", "db-01", nkey)
@@ -148,7 +148,7 @@ func TestHandleSproutsGet_Found(t *testing.T) {
 
 func TestHandleSproutsGet_NotFound(t *testing.T) {
 	setupNatsAPIPKI(t)
-	ClearNatsConn(pki.CurrentTenantID())
+	SetConnGetter(nil)
 
 	params, _ := json.Marshal(pki.KeyManager{SproutID: "nonexistent"})
 	_, err := handleSproutsGet(pki.CurrentTenantID(), params)
@@ -162,7 +162,7 @@ func TestHandleSproutsGet_NotFound(t *testing.T) {
 
 func TestHandleSproutsGet_InvalidID(t *testing.T) {
 	setupNatsAPIPKI(t)
-	ClearNatsConn(pki.CurrentTenantID())
+	SetConnGetter(nil)
 
 	params, _ := json.Marshal(pki.KeyManager{SproutID: "INVALID-CAPS"})
 	_, err := handleSproutsGet(pki.CurrentTenantID(), params)
@@ -185,7 +185,7 @@ func TestHandleSproutsGet_InvalidJSON(t *testing.T) {
 
 func TestHandleSproutsGet_EmptyParams(t *testing.T) {
 	setupNatsAPIPKI(t)
-	ClearNatsConn(pki.CurrentTenantID())
+	SetConnGetter(nil)
 
 	_, err := handleSproutsGet(pki.CurrentTenantID(), nil)
 	if err == nil {
@@ -195,7 +195,7 @@ func TestHandleSproutsGet_EmptyParams(t *testing.T) {
 
 func TestHandleSproutsGet_UnacceptedSprout(t *testing.T) {
 	pkiDir := setupNatsAPIPKI(t)
-	ClearNatsConn(pki.CurrentTenantID())
+	SetConnGetter(nil)
 
 	nkey := generateTestNKey(t)
 	writeTestSproutKey(t, pkiDir, "unaccepted", "pending-01", nkey)
@@ -256,7 +256,7 @@ func TestResolveKeyState_Unknown(t *testing.T) {
 // --- probeSprout tests ---
 
 func TestProbeSprout_NilConn(t *testing.T) {
-	ClearNatsConn(pki.CurrentTenantID())
+	SetConnGetter(nil)
 
 	if probeSprout("acme", "any-sprout") {
 		t.Error("expected false when natsConn is nil")

@@ -12,6 +12,10 @@ import (
 	"github.com/nats-io/nats-server/v2/server"
 	nats "github.com/nats-io/nats.go"
 
+	apitypes "github.com/yogzblr/imas/internal/api/types"
+	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients/cmd"
+	"github.com/yogzblr/imas/internal/ingredients/test"
 	"github.com/yogzblr/imas/internal/natsapi"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/tenantconn"
@@ -250,5 +254,38 @@ func TestWatchTenantActivityKeepsTenantOpen(t *testing.T) {
 				t.Fatalf("Sweep with no activity for 16m closed %v, want [tenant-a]", got)
 			}
 		})
+	}
+}
+
+// installConnGetter makes the tenant registry the one source of tenant
+// connections for every package that sends to a tenant's bus: each asks
+// it on use, and a failed dial comes back as that package's error.
+func TestInstallConnGetterReachesEverySender(t *testing.T) {
+	boom := errors.New("dial failed")
+	var mu sync.Mutex
+	var asked []string
+	installConnGetter(tenantconn.GetterFunc(func(_ context.Context, tenantID string) (*nats.Conn, error) {
+		mu.Lock()
+		asked = append(asked, tenantID)
+		mu.Unlock()
+		return nil, boom
+	}))
+	t.Cleanup(func() { installConnGetter(nil) })
+
+	target := pki.KeyManager{SproutID: "web-01"}
+	checks := map[string]error{
+		"natsapi": natsapi.PublishEncryptedTo("t_a", "web-01", "imas.sprouts.web-01.x", "p", nil),
+		"cook":    cook.NudgeSprout("t_b", "web-01"),
+	}
+	_, checks["cmd"] = cmd.FRun("t_c", target, apitypes.CmdRun{Command: "uptime"})
+	_, checks["test"] = test.FPing("t_d", target, apitypes.PingPong{})
+	for pkg, err := range checks {
+		if !errors.Is(err, boom) {
+			t.Errorf("%s: err = %v, want the getter's dial error", pkg, err)
+		}
+	}
+	slices.Sort(asked)
+	if want := []string{"t_a", "t_b", "t_c", "t_d"}; !slices.Equal(asked, want) {
+		t.Errorf("getter asked for %v, want %v", asked, want)
 	}
 }

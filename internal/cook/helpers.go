@@ -11,13 +11,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"unicode/utf8"
 
 	"github.com/nats-io/nats.go"
 	"gopkg.in/yaml.v3"
 
 	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/tenantconn"
 )
 
 // conn is the single connection a sprout process registers via
@@ -30,38 +30,17 @@ func RegisterNatsConn(n *nats.Conn) {
 	conn = n
 }
 
-// farmerConns holds farmer's own per-tenant NATS connections — the
-// counterpart to conn above, but keyed by tenant since a single farmer
-// process now holds one connection per tenant (see
-// docs/design/imas-tenant-context-threading.md's Option A). Only
-// SendCookEvent (farmer's outbound leg, farmercook.go) reads this; sprout
-// never calls RegisterFarmerNatsConn.
-var (
-	farmerConnMu sync.RWMutex
-	farmerConns  = map[string]*nats.Conn{}
-)
+// farmerBus is where SendCookEvent and NudgeSprout get a tenant's NATS
+// connection: farmer's tenantconn.Registry, installed by cmd/farmer
+// (SetFarmerConnGetter). Every send asks it again, so a tenant whose
+// connection the idle sweeper closed is dialled again. Sprout never
+// installs one.
+var farmerBus tenantconn.Source
 
-// RegisterFarmerNatsConn installs tenantID's NATS connection for
-// SendCookEvent to trigger cooks through. Called once per tenant
-// connection by cmd/farmer/main.go.
-func RegisterFarmerNatsConn(tenantID string, n *nats.Conn) {
-	farmerConnMu.Lock()
-	defer farmerConnMu.Unlock()
-	farmerConns[tenantID] = n
-}
-
-// UnregisterFarmerNatsConn removes tenantID's connection — called when
-// that tenant is deprovisioned and its connection closed.
-func UnregisterFarmerNatsConn(tenantID string) {
-	farmerConnMu.Lock()
-	defer farmerConnMu.Unlock()
-	delete(farmerConns, tenantID)
-}
-
-func farmerConnFor(tenantID string) *nats.Conn {
-	farmerConnMu.RLock()
-	defer farmerConnMu.RUnlock()
-	return farmerConns[tenantID]
+// SetFarmerConnGetter installs the getter SendCookEvent and NudgeSprout
+// get a tenant's connection from: cmd/farmer's tenant registry.
+func SetFarmerConnGetter(g tenantconn.ConnGetter) {
+	farmerBus.Set(g)
 }
 
 func makeRecipeSteps(recipes map[string]interface{}) ([]*Step, error) {

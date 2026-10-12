@@ -20,6 +20,7 @@ import (
 	"github.com/yogzblr/imas/internal/ingredients/cmd"
 	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/tenantconn/tenantconntest"
 )
 
 type dispatchCall struct {
@@ -346,8 +347,7 @@ func TestSproutAction_CmdRunThroughRealHandler(t *testing.T) {
 	legacy := pki.CurrentTenantID()
 	writeNKey(t, "", "accepted", "web-01", "UKEY_WEB01")
 	writeNKey(t, "", "accepted", "offline-01", "UKEY_OFFLINE")
-	cmd.RegisterFarmerNatsConn(legacy, nc)
-	defer cmd.UnregisterFarmerNatsConn(legacy)
+	tenantconntest.Use(t, cmd.SetFarmerConnGetter, tenantconntest.Fixed(nc))
 	saas := dialSaaSAPI(t, nc)
 
 	// Both sprouts have a box key on record: cmd.run is sealed only, and
@@ -401,8 +401,7 @@ func TestSproutAction_CookThroughRealHandler(t *testing.T) {
 	setupNatsAPIPKI(t)
 	legacy := pki.CurrentTenantID()
 	writeNKey(t, "", "accepted", "web-01", "UKEY_WEB01")
-	SetNatsConn(legacy, nc)
-	defer ClearNatsConn(legacy)
+	useConn(t, nc)
 
 	if err := RegisterSproutAction(nc); err != nil {
 		t.Fatalf("RegisterSproutAction: %v", err)
@@ -424,7 +423,7 @@ func TestSproutAction_CookThroughRealHandler(t *testing.T) {
 	}
 
 	// No tenant connection: handleCook can't dispatch.
-	ClearNatsConn(legacy)
+	SetConnGetter(nil)
 	reply = handleSproutAction(mustJSON(t, controlplane.SproutActionRequest{
 		TenantID: legacy,
 		SproutID: "web-01",

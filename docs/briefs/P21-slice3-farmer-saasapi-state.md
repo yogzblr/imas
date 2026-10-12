@@ -74,7 +74,7 @@ Line numbers are from the current tree.
 | jobs status index | internal/jobs/status_index.go:286 | (b) | CONFIRM idempotent; wrap in same lease if it is periodic |
 | sprout reaper, CLI store | internal/jobs/sproutreaper.go, clistore.go | (b) | sprout/CLI only |
 | Heartbeat $SYS subscriptions (non-queue) | internal/heartbeat/heartbeat.go:155-198 | (c) | every replica processes every event; writes to PXC must be idempotent upserts (CONFIRM they are); queue sub at 234-239 is fine |
-| Tenant connection registry (tenantconn.Registry, natsConns, farmerConns) | internal/tenantconn/registry.go; cmd/farmer/main.go:720-989 | (c) | lazy connect, reconnect forever, idle close (section 4.5) |
+| Tenant connection registry (tenantconn.Registry; since E2 the only holder of tenant connections, which natsapi, cook and the cmd and test ingredients get through its Get) | internal/tenantconn/registry.go; cmd/farmer/main.go:720-989 | (c) | lazy connect, reconnect forever, idle close (section 4.5) |
 | Valkey replay/claim caches (pki/tenantbox.go, platformbox.go, store.go:248, sealedclaim.go, payloadbox/replay.go) | pki | (b) | already Valkey |
 | update manifest cache and limiter | internal/api/handlers/update_manifest.go | (c) | per-replica cache is safe; limiter becomes N x limit; document, no change (see owner decisions: none needed) |
 | saasapi rate limiter | internal/saasapi/middleware.go:183, router.go:40,80,92 | (c) | same: per-replica, document effective limit = N x configured |

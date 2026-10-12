@@ -30,6 +30,7 @@ import (
 	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
+	"github.com/yogzblr/imas/internal/tenantconn/tenantconntest"
 )
 
 type sealedEnv struct {
@@ -117,8 +118,7 @@ func setupSealed(t *testing.T, tenant string) *sealedEnv {
 
 	url := startTestNATS(t)
 	env.farmer, env.sprout = connect(t, url), connect(t, url)
-	RegisterFarmerNatsConn(tenant, env.farmer)
-	t.Cleanup(func() { UnregisterFarmerNatsConn(tenant) })
+	tenantconntest.Use(t, SetFarmerConnGetter, tenantconntest.Fixed(env.farmer))
 	if _, err := env.sprout.Subscribe(cmdRunSubject(env.sproutID), func(m *nats.Msg) {
 		m.RespondMsg(RespondCmdRun(env.sproutID, m))
 	}); err != nil {

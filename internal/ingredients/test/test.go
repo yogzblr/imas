@@ -1,9 +1,9 @@
 package test
 
 import (
-	"sync"
-
 	nats "github.com/nats-io/nats.go"
+
+	"github.com/yogzblr/imas/internal/tenantconn"
 )
 
 // nc is the single connection a sprout process registers via
@@ -16,35 +16,15 @@ func RegisterNatsConn(n *nats.Conn) {
 	nc = n
 }
 
-// farmerConns holds farmer's own per-tenant NATS connections — the
-// counterpart to nc above, keyed by tenant since a single farmer process
-// now holds one connection per tenant (see
-// docs/design/imas-tenant-context-threading.md's Option A). Only FPing
-// (farmer's outbound leg) reads this.
-var (
-	farmerConnMu sync.RWMutex
-	farmerConns  = map[string]*nats.Conn{}
-)
+// farmerBus is where FPing (farmer's outbound leg) gets a tenant's NATS
+// connection: farmer's tenantconn.Registry, installed by cmd/farmer
+// (SetFarmerConnGetter). Every send asks it again, so a tenant whose
+// connection the idle sweeper closed is dialled again. Sprout never
+// installs one.
+var farmerBus tenantconn.Source
 
-// RegisterFarmerNatsConn installs tenantID's NATS connection for FPing to
-// dispatch pings through. Called once per tenant connection by
-// cmd/farmer/main.go.
-func RegisterFarmerNatsConn(tenantID string, n *nats.Conn) {
-	farmerConnMu.Lock()
-	defer farmerConnMu.Unlock()
-	farmerConns[tenantID] = n
-}
-
-// UnregisterFarmerNatsConn removes tenantID's connection — called when
-// that tenant is deprovisioned and its connection closed.
-func UnregisterFarmerNatsConn(tenantID string) {
-	farmerConnMu.Lock()
-	defer farmerConnMu.Unlock()
-	delete(farmerConns, tenantID)
-}
-
-func farmerConnFor(tenantID string) *nats.Conn {
-	farmerConnMu.RLock()
-	defer farmerConnMu.RUnlock()
-	return farmerConns[tenantID]
+// SetFarmerConnGetter installs the getter FPing gets a tenant's connection
+// from: cmd/farmer's tenant registry.
+func SetFarmerConnGetter(g tenantconn.ConnGetter) {
+	farmerBus.Set(g)
 }

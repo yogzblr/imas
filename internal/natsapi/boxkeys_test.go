@@ -19,7 +19,7 @@ func TestHandlePKIRotateBoxKey_NoConnection(t *testing.T) {
 	writeNKey(t, "", "accepted", "web-01", "UKEY_WEB01")
 
 	tenantID := pki.CurrentTenantID()
-	ClearNatsConn(tenantID)
+	SetConnGetter(nil)
 
 	if _, err := handlePKIRotateBoxKey(tenantID, json.RawMessage(`{"id":"web-01"}`)); err == nil {
 		t.Fatal("expected an error when no NATS connection is available")
@@ -61,8 +61,7 @@ func TestHandlePKIRotateBoxKey_PublishesInstructionOnly(t *testing.T) {
 	nc, cleanup := startEmbeddedNATS(t)
 	t.Cleanup(cleanup)
 	tenantID := pki.CurrentTenantID()
-	SetNatsConn(tenantID, nc)
-	t.Cleanup(func() { ClearNatsConn(tenantID) })
+	useConn(t, nc)
 
 	sub, err := nc.SubscribeSync(SproutSubject("web-01", SproutBoxKeyRotateCmd))
 	if err != nil {
