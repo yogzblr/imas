@@ -33,37 +33,31 @@ chart can still apply these by hand, as before.
 | `values.job-reconcile.yaml` | Values block for the job reconcile window (see the last section) |
 | `deployment.env.job-reconcile.yaml` | Template fragment to paste under the farmer container's `env:` list |
 
-## Part 1: the SYS Account seed on farmer (deploy config only)
+## Part 1: farmer's user seeds and NATS trust (deploy config only)
 
-No code change is needed. `ensureNatsAuth` loads the SYS Account key with
-`loadOrCreateSeed(path, "SYS_ACCOUNT", nkeys.CreateAccount)`, the same way
-it loads every other key. That function already prefers an externally
-supplied seed and never writes one back to disk. farmer's Deployment needs
-the following (the exact patch is in
-`farmer-deployment-nats-seeds.patch.yaml`; `deploy/helm/farmer` renders it
-from `natsSeeds`):
+Since P21 slice 1 (`docs/briefs/P21-slice1-transit-signer.md`) the SYS
+Account key, like every other key of the NATS trust chain, is an OpenBao
+Transit key: farmer signs through Transit as `imas-farmer-natssign`
+(`IMAS_NATSSIGN_OPENBAO_*`) and reads the operator and SYS account JWTs
+and public keys from the trust ConfigMap the OpenBao bootstrap Job writes.
+No `SYS_ACCOUNT` seed exists any more. farmer's Deployment needs (the
+exact patch is in `farmer-deployment-nats-seeds.patch.yaml`;
+`deploy/helm/farmer` renders it from `natsSeeds`, `natsTrust` and
+`farmer.openbao.natsSign`):
 
 | What | Value |
 |---|---|
-| Volume | `nats-seeds`: `secret.secretName: imas-farmer-nats-seeds`, `items`: `sys-account.nk` and `saasapi-user.nk`, `defaultMode: 0440` |
+| Volume | `nats-seeds`: `secret.secretName: imas-farmer-nats-seeds`, `items`: `sys-user.nk` and `saasapi-user.nk`, `defaultMode: 0440` |
 | Mount | `/var/run/secrets/imas/nats`, `readOnly: true` |
-| Env var | `IMAS_NATS_SYS_ACCOUNT_SEED_FILE=/var/run/secrets/imas/nats/sys-account.nk` |
-| Env var (already planned in the design doc) | `IMAS_NATS_SAASAPI_USER_SEED_FILE=/var/run/secrets/imas/nats/saasapi-user.nk` |
-| Secret source | ESO `ExternalSecret` `imas-farmer-nats-seeds`, which reads the ops-owned seed path in OpenBao |
+| Env var | `IMAS_NATS_SYS_USER_SEED_FILE=/var/run/secrets/imas/nats/sys-user.nk` (farmer's SYS account user; required, never generated) |
+| Env var | `IMAS_NATS_SAASAPI_USER_SEED_FILE=/var/run/secrets/imas/nats/saasapi-user.nk` |
+| Volume and mount | `nats-trust`: ConfigMap `imas-nats-trust` at `/var/run/imas/nats-trust`, `readOnly: true`; `IMAS_NATS_TRUST_DIR` |
+| Env vars | `IMAS_NATSSIGN_OPENBAO_*`, role `imas-farmer-natssign` |
+| Secret source | ESO `ExternalSecret` `imas-farmer-nats-seeds`, which reads the ops-owned seed path in OpenBao (properties `sys_user`, `saasapi_user`) |
 
-Two things to get right when you roll this out:
-
-- **Import the existing seed. Don't generate a new one.** On an install
-  that is already running, put farmer's current
-  `{FarmerPKI}/nats-auth/sys-account.nk` into OpenBao. A new SYS seed
-  means a new SYS Account public key. `operator.jwt` names the system
-  account, so it gets re-minted, and every bus node still configured with
-  the old one stops trusting it.
-- **farmerbus needs the same SYS seed.** `ConfigureNats` runs
-  `ensureNatsAuth` in both binaries and seeds the SYS Account into the
-  resolver. If farmer's copy comes from OpenBao, farmerbus's copy must
-  come from there too: same Secret, same env var. Otherwise the two
-  processes end up with different SYS Accounts.
+The old `operator`, `operator_signing`, `sys_account`, `tenant` and
+`tenant_signing` seeds are not read by anything; delete them from the
+seed path (design D6: no migration).
 
 ## Part 2: `farmer publish-saasapi-credential`, run as a Job
 
@@ -87,10 +81,12 @@ error.
 
 ### Why an emptyDir, not farmer's PKI volume
 
-The Job mounts the same seed Secret as farmer, with only the two keys it
-needs projected, plus an **emptyDir** at `/etc/imas`. The subcommand
-refuses to run unless both the SYS Account key and the SaaS API key are
-supplied externally or already on disk. It will not mint under a key it
+The Job mounts the same seed Secret as farmer, with only the SaaS API's
+key projected, the trust ConfigMap, and an **emptyDir** at `/etc/imas`.
+It signs with the SYS Account's Transit key as `imas-natssign-publisher`
+(policy `imas-nats-sys-signer`: that key only). The subcommand refuses to
+run unless the trust directory and the SaaS API key are supplied
+externally or already on disk. It will not mint under a key it
 generated itself, because saasapi would then crash-loop on its next
 restart. With a fresh emptyDir, the following holds:
 
@@ -104,9 +100,8 @@ restart. With a fresh emptyDir, the following holds:
 - **No second writer on farmer's PKI files.** `authMu` locks within one
   process only, so a Job sharing farmer's volume could race farmer on
   `sys-account.jwt`. Farmer's volume is also typically ReadWriteOnce.
-- **Other keys are harmless.** The Operator and tenant keys that
-  `ensureNatsAuth` generates inside the emptyDir never leave the pod and
-  never sign anything that leaves it.
+- **No other key.** The Job holds no trust chain key; the SYS account
+  JWT it starts from is the trust ConfigMap's.
 
 Running the subcommand against farmer's real PKI directory also works: it
 behaves exactly like farmer's boot call, including the push. The

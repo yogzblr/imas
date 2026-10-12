@@ -1,5 +1,5 @@
 {{- include "imas-nats.validate" . -}}
-{{- $seeds := fromYaml (include "imas-nats.seeds" .) -}}
+{{- $seeds := fromYaml (include "imas-nats.seeds" .) | default (dict) -}}
 {{- $tlsDir := include "imas-nats.bus.tlsDir" . -}}
 {{- $ob := .Values.bus.tls.openbao -}}
 {{- $clustered := gt (int .Values.bus.replicaCount) 1 -}}
@@ -110,9 +110,14 @@ spec:
               protocol: TCP
             {{- end }}
           env:
-            # Seeds: one IMAS_NATS_<NAME>_SEED_FILE per mounted key. The
-            # _FILE form only: a raw IMAS_NATS_<NAME>_SEED env var would be
-            # folded into the jety config and is inherited by children.
+            # The public trust (pki.ConfigureBusNats): the operator JWT,
+            # SYS account and, clustered, the fence user's JWT.
+            - name: IMAS_NATS_TRUST_DIR
+              value: /var/run/imas/nats-trust
+            # Seeds (BUS_FENCE_USER only): one IMAS_NATS_<NAME>_SEED_FILE
+            # per mounted key. The _FILE form only: a raw
+            # IMAS_NATS_<NAME>_SEED env var would be folded into the jety
+            # config and is inherited by children.
             {{- range $name, $key := $seeds }}
             - name: IMAS_NATS_{{ $name }}_SEED_FILE
               value: {{ printf "%s/%s" $.Values.natsSeeds.mountPath $key | quote }}
@@ -204,9 +209,14 @@ spec:
               readOnly: true
             - name: data
               mountPath: /var/lib/imas/farmerbus
+            - name: nats-trust
+              mountPath: /var/run/imas/nats-trust
+              readOnly: true
+            {{- if $seeds }}
             - name: nats-seeds
               mountPath: {{ .Values.natsSeeds.mountPath }}
               readOnly: true
+            {{- end }}
             {{- if $clustered }}
             - name: route-auth
               mountPath: {{ $cl.auth.mountPath }}
@@ -237,17 +247,23 @@ spec:
         - name: config
           configMap:
             name: {{ include "imas-nats.bus.fullname" . }}
+        # Public data only. Copied into this namespace from the core
+        # release's (README.md, "NATS trust"); the pod waits for it.
+        - name: nats-trust
+          configMap:
+            name: {{ .Values.natsTrust.configMapName }}
+        {{- if $seeds }}
         - name: nats-seeds
           secret:
             secretName: {{ .Values.natsSeeds.secretName }}
             defaultMode: 0440
-            # Only the listed keys, even if the Secret carries others (e.g.
-            # saasapi-user.nk, which the bus has no use for).
+            # Only the listed keys, even if the Secret carries others.
             items:
               {{- range $name, $key := $seeds }}
               - key: {{ $key | quote }}
                 path: {{ $key | quote }}
               {{- end }}
+        {{- end }}
         {{- if $clustered }}
         - name: route-auth
           secret:

@@ -83,8 +83,11 @@ It does **not** deploy the DMZ bus or Envoy. Those are `deploy/helm/nats`.
    `charts/` is gitignored. Use `helm dependency update` only to move a pin,
    and commit the new lock.
 2. **The seed Secret** (`natsSeeds.secretName`, default
-   `imas-farmer-nats-seeds`) must exist in the release namespace. The chart
-   never generates seeds. See [Seeds](#seeds).
+   `imas-farmer-nats-seeds`) must exist in the release namespace, with the
+   two user seeds `sys-user.nk` and `saasapi-user.nk`. The chart never
+   generates seeds. See [Seeds](#seeds). The NATS trust chain itself
+   (operator, operator-signing, SYS account and tenant keys) is created in
+   OpenBao Transit by the bootstrap Job; see [NATS trust](#nats-trust).
 3. **The nats chart**, installed or planned, so you know
    `bus.serviceName` and `bus.namespace` (or, for a bus in another
    cluster, the DNS name to dial it at, `bus.host`; see
@@ -134,15 +137,10 @@ never be anyone's. NOTES warns while it is set. Replace it.
 
 ```sh
 kubectl create namespace imas-core
-# Seeds for a NEW install only (never on an existing one, see "Seeds").
-# `nk` is github.com/nats-io/nkeys/nk. Create the same Secret in the nats
-# chart's namespace too.
+# The two user seeds (see "Seeds"). `nk` is github.com/nats-io/nkeys/nk.
+# The trust chain keys are created in OpenBao Transit by the bootstrap Job.
 kubectl -n imas-core create secret generic imas-farmer-nats-seeds \
-  --from-literal=operator.nk="$(nk -gen operator)" \
-  --from-literal=operator-signing.nk="$(nk -gen operator)" \
-  --from-literal=sys-account.nk="$(nk -gen account)" \
-  --from-literal=tenant.nk="$(nk -gen account)" \
-  --from-literal=tenant-signing.nk="$(nk -gen account)" \
+  --from-literal=sys-user.nk="$(nk -gen user)" \
   --from-literal=saasapi-user.nk="$(nk -gen user)"
 kubectl -n imas-core create secret generic imas-saasapi-internal-auth \
   --from-literal=current="$(openssl rand -hex 32)"
@@ -156,6 +154,15 @@ helm install imas-core deploy/helm/farmer -n imas-core -f deploy/helm/farmer/ci/
   --set farmer.bootstrapAdmin.pubkey=<imas auth pubkey> --set farmer.bootstrapAdmin.boxpub=<imas auth keygen's box key> \
   --set farmer.image.repository=<registry>/imas-farmer --set saasapi.image.repository=<registry>/imas-saasapi \
   --set database.migrate.image.repository=<registry>/imas-migrate
+```
+
+Then copy the public NATS trust the bootstrap Job wrote into the nats
+chart's namespace ([NATS trust](#nats-trust)):
+
+```sh
+kubectl -n imas-core get configmap imas-nats-trust -o json \
+  | jq '{apiVersion, kind, data, metadata: {name: .metadata.name}}' \
+  | kubectl -n imas-dmz apply -f -
 ```
 
 Then, because the eval install has no ESO, deliver saasapi's credential by
@@ -187,7 +194,9 @@ What to expect on first install:
   short). Until then farmer and saasapi wait for their schema.
 - The OpenBao bootstrap, control-plane keygen and publish Jobs are hooks
   too. Helm waits for them, so `helm install` needs the seed Secret in
-  place, or it times out.
+  place, or it times out. farmer waits (`ContainerCreating`) until the
+  bootstrap Job has written the trust ConfigMap, then checks it against
+  Transit at start.
 - saasapi's pods wait (`ContainerCreating`, or `CreateContainerConfigError`
   in their events) until both `imas-saasapi-nats` and `imas-saasapi-box`
   exist. That is expected: they don't crash-loop, and they start once the
@@ -199,7 +208,11 @@ What to expect on first install:
   time and not only in pod events.
 - **Dev-mode OpenBao is in memory.** If its pod restarts, the keys, the
   eval CA, the policies and the roles are gone. `helm upgrade` re-runs the
-  bootstrap, but it mints a *new* gateway key and a new CA.
+  bootstrap, but it mints a *new* gateway key and a new CA, and the NATS
+  platform keys it would create no longer match the trust ConfigMap: the
+  bootstrap refuses to replace a trust anchor (`ErrTrustWouldChange`).
+  Delete the `imas-nats-trust` ConfigMap (and its DMZ copy) and every
+  tenant's provisioning to start over.
 
 ### Production (everything external)
 
@@ -278,33 +291,127 @@ the bus name to `0.0.0.0` and ran a loopback TCP relay to work around
 This was checked against the real `farmerbus` with farmer's own config and
 bus code (see [Verification status](#verification-status)).
 `TestContractWithNatsChart` keeps the URL, the verified name, the SANs,
-the seeds and the NetworkPolicy selectors in step with `deploy/helm/nats`.
+the trust ConfigMap and the NetworkPolicy selectors in step with
+`deploy/helm/nats`.
 
 ## Seeds
 
-farmer mounts the six `natsSeeds.seeds` from the Secret, each as an
+Since P21 slice 1 only **user-kind** seeds remain. The operator,
+operator-signing, SYS account and tenant keys are OpenBao Transit keys
+([NATS trust](#nats-trust)); no seed of theirs exists, and none is read.
+
+farmer mounts the two `natsSeeds.seeds` from the Secret, each as an
 `IMAS_NATS_<NAME>_SEED_FILE`. It never uses the raw `_SEED` form, and it
 projects only the listed keys. This is
 `deploy/farmer/farmer-deployment-nats-seeds.patch.yaml`, driven from
-values. All six are required:
+values. Both are required:
 
-- `SYS_ACCOUNT` and `SAASAPI_USER`: the patch's two. The publish Job mounts
-  only these.
-- `OPERATOR`, `OPERATOR_SIGNING`, `TENANT` and `TENANT_SIGNING`: the nats
-  chart's bus mints its trust chain from the same seeds, so farmer's copies
-  must be byte-identical (`deploy/helm/nats/README.md`, "Seeds").
+- `SYS_USER`: farmer's user in the SYS account, for its resolver
+  connection to the bus. farmer refuses to start without it and never
+  generates one.
+- `SAASAPI_USER`: the SaaS API's user key, whose JWT farmer mints. The
+  publish Job mounts only this one.
 
-**Import the existing seeds. Don't generate new ones.** On an install that
-is already running, put farmer's current `{FarmerPKI}/nats-auth/*.nk` into
-OpenBao. A new SYS seed means a new SYS Account public key. `operator.jwt`
-names the system account, so it gets re-minted, and every bus node still
-configured with the old one stops trusting it (`deploy/farmer/README.md`).
+The old seeds (`OPERATOR`, `OPERATOR_SIGNING`, `SYS_ACCOUNT`, `TENANT`,
+`TENANT_SIGNING`) are refused at render time. Delete them from the Secret
+and from OpenBao KV: nothing reads them, and a private key nobody uses is
+still a private key to lose (design D6: no migration, the old seeds just
+stop being read).
 
-`externalSecrets.enabled` renders `deploy/farmer/externalsecrets.yaml`,
-extended to all six seeds. Each seed's property is its name in lowercase:
-`sys_account`, `saasapi_user`, `operator`, `operator_signing`, `tenant`,
-`tenant_signing`. It also renders `imas-saasapi-nats`: saasapi's seed from
+`externalSecrets.enabled` renders `deploy/farmer/externalsecrets.yaml`:
+each seed's property is its name in lowercase, `sys_user` and
+`saasapi_user`. It also renders `imas-saasapi-nats`: saasapi's seed from
 the seed path, and the published JWT from `credentialPublisher.kvPath`.
+
+## NATS trust
+
+FLAG FOR SECURITY REVIEW. The NATS trust chain (P21 slice 1,
+`docs/briefs/P21-slice1-transit-signer.md`) lives in OpenBao Transit:
+
+| Transit key | NKey | Signs | Who may sign with it |
+|---|---|---|---|
+| `nats-operator` | operator identity | the operator JWT | the bootstrap Job's handoff token only |
+| `nats-operator-signing` | operator signing key | account JWTs | farmer |
+| `nats-sys-account` | SYS account | SYS users (farmer's, the SaaS API's, the bus fence user) | farmer, the publish Job |
+| `nats-tsign-<tenant>` | tenant signing key | the tenant's user JWTs | farmer |
+| `nats-tacct-<tenant>` | tenant account identity | nothing | nobody |
+
+Every key is `ed25519`, `exportable=false`, `allow_plaintext_backup=false`;
+farmer refuses one that isn't.
+
+**The bootstrap Job** (`openbaoBootstrap`) creates the three platform keys
+and the public trust on every install and upgrade, idempotently:
+
+1. `prepare` (`bao`, root token) configures OpenBao, writes the
+   policies, and mints one orphan, non-renewable 10-minute token with the
+   ephemeral policy `imas-nats-bootstrap` into a memory-backed volume.
+2. `nats-trust` (`farmer bootstrap-nats-trust`, farmer's image) creates the
+   keys, mints the operator JWT, the SYS account JWT and, with
+   `natsTrust.busFenceUserPub`, the bus fence user JWT, and writes them
+   with the three public keys to the ConfigMap `natsTrust.configMapName`
+   (default `imas-nats-trust`). It never replaces an existing anchor, and
+   revokes its token before it exits. Its ServiceAccount
+   (`<release>-farmer-openbao-bootstrap`, `templates/nats-trust-rbac.yaml`)
+   may create ConfigMaps and get, update and patch only the trust one; its
+   token is mounted in this container alone.
+3. `bootstrap` (`bao`) writes the roles, revokes the handoff token by
+   accessor, deletes `imas-nats-bootstrap`, and last revokes its own token
+   ([OpenBao bootstrap token](#openbao-bootstrap-token)).
+
+**The trust ConfigMap** holds public data only (`operator.jwt`,
+`operator.pub`, `operator-signing.pub`, `sys-account.pub`,
+`sys-account.jwt`, `bus-fence-user.jwt`). farmer and the publish Job mount
+it at `/var/run/imas/nats-trust` (`IMAS_NATS_TRUST_DIR`). **The nats chart's
+bus needs a copy in its namespace**, made by hand or by your pipeline
+(owner decision 2026-10-11 (c)); see the command under
+[Eval install](#eval-install-everything-bundled) and
+`deploy/helm/nats/README.md`, "NATS trust". Copy it again after adding a
+fence user. `natsTrust.kvCopy.enabled` also copies it to OpenBao KV v2 at
+`secret/data/platform/imas/nats-trust`, for a pipeline to read.
+
+**A clustered bus** needs a fence user: generate a user seed for the nats
+chart (`BUS_FENCE_USER`), set its public key here as
+`natsTrust.busFenceUserPub`, upgrade, and copy the trust again.
+
+### OpenBao bootstrap token
+
+`openbaoBootstrap.tokenSecretName` names a Secret with a root token
+generated from the recovery quorum. With `openbaoBootstrap.revokeToken`
+(default) the Job revokes it when done, so no standing admin remains
+(owner decision 2026-10-11 (a)). Then:
+
+- **Delete the Secret** after the run. The reference is optional: without
+  it, every later upgrade's Job configures nothing, and only checks that
+  the trust ConfigMap is complete. A Secret still holding the revoked
+  token fails the Job with a message saying so.
+- **A policy or role change** (an upgrade that changes one of the files
+  in `files/openbao-policies` or a role) needs a fresh root token from the
+  recovery quorum in that Secret for the upgrade's Job.
+
+Dev mode (`openbao.server.dev.enabled`) never revokes the dev root token.
+
+### Purging retired tenant keys
+
+Offboarding (`DeprovisionTenant`) soft-deletes the tenant's two Transit
+keys after the lock-out push: they can no longer sign, but stay readable
+and restorable (owner decision 2026-10-11 (b)). farmer never hard-deletes
+a key, and its policy can't. An operator purges them after
+`farmer.openbao.natsSign.retiredTenantKeyRetentionDays` (default 30), with
+an admin token:
+
+```sh
+days=$(helm get values imas-core -n imas-core -a -o json | jq '.farmer.openbao.natsSign.retiredTenantKeyRetentionDays')
+# For each offboarded tenant <id> whose offboarding is older than $days
+# (saasapi's tenant records say when):
+for k in nats-tsign-<id> nats-tacct-<id>; do
+  bao read -field=soft_deleted transit/keys/$k   # must print true
+  bao write transit/keys/$k/config deletion_allowed=true
+  bao delete transit/keys/$k
+done
+```
+
+Within the window, `bao write -f transit/keys/<name>/soft-delete-restore`
+brings a key back.
 
 ## The SaaS API credential hand-off
 
@@ -319,7 +426,8 @@ The chart keeps every property the reference README requires:
   OpenBao bootstrap. The Argo CD `PostSync` annotations are included.
 - It uses farmer's image and tag, the `publish-saasapi-credential` args,
   and an **emptyDir** at `/etc/imas`.
-- It mounts only `sys-account.nk` and `saasapi-user.nk`.
+- It mounts only `saasapi-user.nk`, and the trust ConfigMap. It signs
+  through Transit as `imas-natssign-publisher` (SYS account key only).
 - Its ServiceAccount `imas-saasapi-cred-publisher` has no RBAC and no token
   automount. OpenBao login uses a 10-minute projected token with audience
   `openbao`.
@@ -441,8 +549,11 @@ Each OpenBao client runs under its own role and gets exactly one policy.
 |---|---|---|---|
 | farmer, API certificate (`tls.mode=openbao`) | `IMAS_CERTS_OPENBAO_*` | `imas-farmer-certs` (`tls.openbao.k8sRole`) | `imas-farmer-certs`: `pki/issue/imas-farmer` |
 | farmer, gateway JWT signer | `IMAS_GATEWAY_OPENBAO_*` | `imas-farmer-gateway` | `imas-farmer-gateway`: sign and read on `transit/*/imas-gateway-jwt` only |
+| farmer, NATS signer (P21 slice 1) | `IMAS_NATSSIGN_OPENBAO_*` | `imas-farmer-natssign` (`farmer.openbao.natsSign.k8sRole`) | `imas-farmer-natssign` (file): read the three platform keys, sign with `nats-operator-signing` and `nats-sys-account`, never `nats-operator`; create and read keys on `transit/keys/+` (one path segment, so never `rotate` or `config`), soft-delete on `transit/keys/+/soft-delete` except the platform and gateway keys, sign with `nats-tsign-*` only |
 | farmer, tenant box keypairs | `IMAS_TENANTBOX_OPENBAO_*` | `imas-farmer-tenantbox` | `imas-farmer-tenantbox`: KV v2 read/write on `secret/data/imas/tenant-x25519/tenants/+` (one secret per tenant), and read only on `.../platform` and `.../controlplane-pub` (J.1), nothing else |
 | the publish Job | `IMAS_SAASAPI_CRED_OPENBAO_*` | `imas-saasapi-cred-publisher` | `imas-saasapi-cred-publisher` (reviewed copy) |
+| the publish Job, NATS signer | `IMAS_NATSSIGN_OPENBAO_*` | `imas-natssign-publisher` (`credentialPublisher.natsSign.k8sRole`) | `imas-nats-sys-signer` (file): read the three platform keys, sign with `nats-sys-account` only |
+| the bootstrap Job's `nats-trust` | `IMAS_NATSBOOT_OPENBAO_*` | none: a 10-minute handoff token | `imas-nats-bootstrap` (file, ephemeral): create and read the three platform keys (exact paths), sign with all three, revoke itself; deleted by the Job |
 | the control-plane keygen Job (`controlPlaneBoxKeys.enabled`, on by default since J.4) | `IMAS_CPBOX_OPENBAO_*` | `imas-controlplane-box-keygen` | `imas-controlplane-box-keygen`: create and read on `.../platform` and `.../saasapi-box`, create, read and update on `.../controlplane-pub` |
 
 - **Shared connection settings.** `openbaoClient.addr`, `caConfigMap` and
@@ -456,10 +567,33 @@ Each OpenBao client runs under its own role and gets exactly one policy.
     auth;
   - creates the `imas-gateway-jwt` Transit key;
   - writes every file in `files/openbao-policies` plus the farmer policies;
+  - creates the NATS platform keys and the trust ConfigMap
+    ([NATS trust](#nats-trust));
   - creates the roles above.
 
-  Each role gets `token_no_default_policy=true`, and the publisher's TTL is
-  5m. The bootstrap never writes NATS seeds.
+  Each role gets `token_no_default_policy=true`, and the publisher's TTLs
+  are 5m. The bootstrap never writes NATS seeds.
+- **The tenant-key policy shape** (FLAG FOR SECURITY REVIEW). Creating a
+  Transit key needs `update` on `transit/keys/<name>`, and `update` on a
+  `transit/keys/nats-tsign-*` glob also reaches `<name>/rotate` and
+  `<name>/config`. On OpenBao 2.7.1 no deny can take those back: a rule
+  whose first wildcard comes later in the path always outranks one whose
+  wildcard comes earlier, and a `*` in the middle of a path is a literal
+  (`openbao_policy_test.go` shows rotate, config and a hard delete going
+  through). So `imas-farmer-natssign` uses `transit/keys/+`, which matches
+  one path segment and nothing below it. The cost: farmer can create keys
+  of any name on the `transit` mount (it can sign with none outside
+  `nats-tsign-*`), and could soft-delete a key another client later adds
+  to that mount; give such a key an exact deny in the policy, or its own
+  mount.
+- **The NATS policies are files, checked against a real OpenBao.**
+  `openbao_policy_test.go` runs them in
+  `.github/workflows/natskeys-openbao-realserver.yml`: the bootstrap
+  policy creates and signs with the platform keys and can't rotate or
+  reconfigure them; farmer's creates, signs with and soft-deletes tenant
+  keys and is refused rotate, config, hard delete and restore; the publish
+  Job's signs with the SYS key only. They name the `transit` mount, so
+  `farmer.openbao.natsSign.transitMount` other than `transit` is refused.
 - **Sharing a CA with the nats chart.** With
   `openbaoBootstrap.farmerbus.enabled`, it also creates the nats chart's
   `imas-farmerbus` PKI role and a Kubernetes auth role bound to the bus's
@@ -899,7 +1033,9 @@ Restrict network access to it.
 
 FarmerPKI is on one ReadWriteOnce PVC (kept on uninstall). It holds:
 
-- `nats-auth/`: JWTs and the resolver state farmer pushes;
+- `nats-auth/`: JWTs and the resolver state farmer pushes (no private
+  key of the trust chain since P21 slice 1: those are Transit keys, and
+  the operator and SYS account JWTs come from the trust ConfigMap);
 - the SaaS API credential, and the state `EnsureSaaSAPICredential` uses to
   detect and revoke a rotated key;
 - farmer's own NKey;
@@ -993,15 +1129,22 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `bus.ca.secretName` / `configMapName` / `key` | `""` / `""` / `ca.crt` | saasapi's bus CA. Empty: `tls.secretName`'s `ca.crt`, or fetched from OpenBao PKI in openbao mode. |
 | `bus.tlsServerName` | `""` | `farmerbustlsservername`. Empty: the bus Service FQDN, or `bus.host`. See [Reaching the bus](#reaching-the-bus). |
 | `natsSeeds.secretName` | `imas-farmer-nats-seeds` | The seed Secret. Required. |
-| `natsSeeds.seeds` | the six above | `NAME: key` pairs. All six are required. |
-| `natsSeeds.extraSeeds` | `{}` | More seeds, e.g. per-tenant Account seeds. |
+| `natsSeeds.seeds` | `SYS_USER`, `SAASAPI_USER` | `NAME: key` pairs. Both are required; the removed trust chain seeds are refused. |
+| `natsSeeds.extraSeeds` | `{}` | More user-kind seeds. |
+| `natsTrust.configMapName` | `imas-nats-trust` | The trust ConfigMap the bootstrap writes and farmer and the publish Job mount. |
+| `natsTrust.busFenceUserPub` | `""` | The nats chart's fence user public key (`U...`); set, the bootstrap mints `bus-fence-user.jwt`. |
+| `natsTrust.kvCopy.enabled` | `false` | Also copy the trust to `secret/data/platform/imas/nats-trust`. |
+| `farmer.openbao.natsSign.*` | role `imas-farmer-natssign`, `transit`, `15s`, `64`, `4`, `30` | farmer's NATS signer: `k8sRole`, `tokenSecretKey`, `transitMount` (must be `transit`), `timeout`, `batchMax`, `workers` (`IMAS_NATSSIGN_*`), and `retiredTenantKeyRetentionDays` for the purge runbook. |
+| `credentialPublisher.natsSign.*` | role `imas-natssign-publisher` | The publish Job's NATS signer role and token key. |
+| `openbaoBootstrap.revokeToken` | `true` | Revoke the bootstrap token when done (never in dev mode). |
+| `networkPolicy.external.kubeApi` | `cidrs: []`, `ports: [443, 6443]` | The bootstrap Job's egress to the Kubernetes API. |
 | `tls.mode` | `openbao` | `secret` (`tls.secretName`) or `openbao` (`tls.openbao.*`). |
 | `tls.certHosts` | `[]` | openbao mode SANs. Empty: the farmer Service's names. |
 | `openbaoClient.addr` | `""` | Empty with `openbao.enabled`: this release's OpenBao. Required otherwise. |
 | `openbaoClient.caConfigMap` / `caKey` | `""` / `ca.crt` | OpenBao's CA (`*_OPENBAO_CACERT`). |
 | `openbaoClient.authMethod` | `kubernetes` | Or `token`, which uses `tokenSecretName` with per-client keys. |
 | `openbaoClient.k8sMount` / `k8sAudience` | `kubernetes` / `openbao` | Kubernetes auth mount, and the projected token's audience. |
-| `openbaoTools.image` | `quay.io/openbao/openbao:2.6.3` | The bao CLI, for the bootstrap Job and the CA fetch. |
+| `openbaoTools.image` | `quay.io/openbao/openbao:2.7.1` | The bao CLI, for the bootstrap Job and the CA fetch. |
 | `database.host` / `port` / `params` | `""` / `3306` / `parseTime=true&charset=utf8mb4&loc=UTC` | PXC. Empty host with `pxc.enabled`: its HAProxy Service. |
 | `database.farmer.*` / `database.saasapi.*` | `farmer`/`farmer_svc`, `saas`/`saas_svc` | Schemas and users. |
 | `database.existingSecret` | `""` | Both DSNs (`existingSecretKeys`). Required without `pxc.enabled`. |
@@ -1219,6 +1362,14 @@ exceptions, all subcharts and none of them Go dependencies:
     Secrets.
   - With an external OpenBao, the ops repo's roles must match the table
     above. Check with `bao token capabilities` as described.
+- **The NATS trust chain** ([NATS trust](#nats-trust)). No pod holds a
+  private key of it: farmer and the publish Job sign through Transit, each
+  with its own role and policy, and only the bootstrap Job's short-lived,
+  self-revoking handoff token may sign with the operator identity. The
+  bootstrap Job's own ServiceAccount may write ConfigMaps in this
+  namespace (create can't be narrowed by name), so the namespace-access
+  rule above covers it too. farmer's tenant-key policy lets it create keys
+  of any name on the `transit` mount (see [OpenBao](#openbao)).
 - **Dev-mode OpenBao is not a security boundary.** Its root token is
   `root`, it's in values, and it's in a Secret the bootstrap reads. Eval
   only.

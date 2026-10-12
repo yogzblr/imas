@@ -73,12 +73,11 @@ spec:
               containerPort: {{ .Values.farmer.apiPort }}
               protocol: TCP
           env:
-            # Seeds: one IMAS_NATS_<NAME>_SEED_FILE per mounted key, the
-            # _FILE form only (deploy/farmer/farmer-deployment-nats-seeds.patch.yaml).
-            # !! On an existing install these must be farmer's CURRENT
-            # {FarmerPKI}/nats-auth seeds imported into OpenBao, never new
-            # ones: a new SYS seed re-mints operator.jwt and every bus node
-            # stops trusting it (deploy/farmer/README.md).
+            # User seeds (SYS_USER, SAASAPI_USER): one
+            # IMAS_NATS_<NAME>_SEED_FILE per mounted key, the _FILE form
+            # only (deploy/farmer/farmer-deployment-nats-seeds.patch.yaml).
+            # The trust chain keys are Transit keys (IMAS_NATSSIGN_* below)
+            # and have no seed.
             {{- range $name, $key := $seeds }}
             - name: IMAS_NATS_{{ $name }}_SEED_FILE
               value: {{ printf "%s/%s" $.Values.natsSeeds.mountPath $key | quote }}
@@ -169,6 +168,12 @@ spec:
             {{- include "imas-farmer.openbaoEnv" (dict "root" $ "prefix" "IMAS_GATEWAY_OPENBAO" "k8sRole" $ob.gateway.k8sRole "tokenKey" $ob.gateway.tokenSecretKey) | nindent 12 }}
             - name: IMAS_GATEWAY_OPENBAO_TRANSIT_MOUNT
               value: {{ $ob.gateway.transitMount | quote }}
+            # NATS trust chain signer (P21 slice 1): signs through Transit
+            # (operator-signing, SYS account, tenant signing keys), never
+            # with the operator identity key; and the public trust from the
+            # ConfigMap natsTrust.configMapName. farmer refuses to start
+            # without either (pki.CheckNATSAuth).
+            {{- include "imas-farmer.natsSignEnv" (dict "root" $ "k8sRole" $ob.natsSign.k8sRole "tokenKey" $ob.natsSign.tokenSecretKey) | nindent 12 }}
             # Tenant X25519 keypair (KV v2).
             {{- include "imas-farmer.openbaoEnv" (dict "root" $ "prefix" "IMAS_TENANTBOX_OPENBAO" "k8sRole" $ob.tenantBox.k8sRole "tokenKey" $ob.tenantBox.tokenSecretKey) | nindent 12 }}
             - name: IMAS_TENANTBOX_OPENBAO_KV_MOUNT
@@ -212,6 +217,7 @@ spec:
             - name: nats-seeds
               mountPath: {{ .Values.natsSeeds.mountPath }}
               readOnly: true
+            {{- include "imas-farmer.natsTrustVolumeMount" . | nindent 12 }}
             - name: tls
               mountPath: {{ $tlsDir }}
               {{- if eq .Values.tls.mode "secret" }}
@@ -248,6 +254,8 @@ spec:
               - key: {{ $key | quote }}
                 path: {{ $key | quote }}
               {{- end }}
+        # Public trust only; written by the bootstrap Job.
+        {{- include "imas-farmer.natsTrustVolume" . | nindent 8 }}
         {{- if eq .Values.tls.mode "secret" }}
         - name: tls
           secret:

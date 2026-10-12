@@ -193,7 +193,9 @@ func TestDefaultsRender(t *testing.T) {
 }
 
 // The chart must never create key material: no Secret of any kind, and
-// seeds only ever reach the process as _SEED_FILE paths.
+// seeds only ever reach the process as _SEED_FILE paths. Since P21 slice
+// 1 the bus holds no trust chain seed: a single node mounts none, a
+// cluster only the fence user's (BUS_FENCE_USER).
 func TestSeedsAreReferencesOnly(t *testing.T) {
 	docs := mustRender(t)
 	for _, d := range docs {
@@ -202,18 +204,28 @@ func TestSeedsAreReferencesOnly(t *testing.T) {
 		}
 	}
 	sts := find(t, docs, "StatefulSet", "-bus")
-	env := envMap(container(t, sts))
-	for name, key := range map[string]string{
-		"OPERATOR": "operator.nk", "OPERATOR_SIGNING": "operator-signing.nk",
-		"SYS_ACCOUNT": "sys-account.nk", "TENANT": "tenant.nk", "TENANT_SIGNING": "tenant-signing.nk",
-	} {
-		if got := env["IMAS_NATS_"+name+"_SEED_FILE"]; got != "/var/run/secrets/imas/nats/"+key {
-			t.Errorf("IMAS_NATS_%s_SEED_FILE = %q", name, got)
+	for k := range envMap(container(t, sts)) {
+		if strings.HasSuffix(k, "_SEED") || strings.HasSuffix(k, "_SEED_FILE") {
+			t.Errorf("single-node bus has seed env var %s; it needs none", k)
 		}
+	}
+	for _, v := range get(sts, "spec", "template", "spec", "volumes").([]any) {
+		if v.(obj)["name"] == "nats-seeds" {
+			t.Errorf("single-node bus mounts a seed volume: %v", v)
+		}
+	}
+
+	sts = find(t, mustRender(t, clusteredArgs...), "StatefulSet", "-bus")
+	env := envMap(container(t, sts))
+	if got := env["IMAS_NATS_BUS_FENCE_USER_SEED_FILE"]; got != "/var/run/secrets/imas/nats/bus-fence-user.nk" {
+		t.Errorf("IMAS_NATS_BUS_FENCE_USER_SEED_FILE = %q", got)
 	}
 	for k := range env {
 		if strings.HasSuffix(k, "_SEED") {
 			t.Errorf("raw seed env var %s rendered; only _SEED_FILE is allowed", k)
+		}
+		if strings.HasSuffix(k, "_SEED_FILE") && k != "IMAS_NATS_BUS_FENCE_USER_SEED_FILE" {
+			t.Errorf("bus has seed env var %s; only the fence user's", k)
 		}
 	}
 	var seedVol obj
@@ -225,16 +237,50 @@ func TestSeedsAreReferencesOnly(t *testing.T) {
 	if seedVol == nil || get(seedVol, "secret", "secretName") != "imas-farmer-nats-seeds" {
 		t.Fatalf("nats-seeds volume not sourced from imas-farmer-nats-seeds: %v", seedVol)
 	}
-	// Only the listed keys are projected (not e.g. saasapi-user.nk).
-	if n := len(get(seedVol, "secret", "items").([]any)); n != 5 {
-		t.Errorf("seed volume projects %d keys, want 5", n)
+	// Only the listed key is projected (not e.g. farmer's sys-user.nk).
+	if items := get(seedVol, "secret", "items").([]any); len(items) != 1 || get(items[0], "key") != "bus-fence-user.nk" {
+		t.Errorf("seed volume projects %v, want bus-fence-user.nk only", items)
+	}
+}
+
+// The bus reads the public trust ConfigMap (P21 slice 1): mounted
+// read-only at IMAS_NATS_TRUST_DIR, from natsTrust.configMapName.
+func TestNatsTrustMounts(t *testing.T) {
+	for _, args := range [][]string{nil, {"--set", "natsTrust.configMapName=dmz-trust"}} {
+		want := "imas-nats-trust"
+		if args != nil {
+			want = "dmz-trust"
+		}
+		sts := find(t, mustRender(t, args...), "StatefulSet", "-bus")
+		c := container(t, sts)
+		if got := envMap(c)["IMAS_NATS_TRUST_DIR"]; got != "/var/run/imas/nats-trust" {
+			t.Errorf("IMAS_NATS_TRUST_DIR = %q", got)
+		}
+		mounted := false
+		for _, m := range c["volumeMounts"].([]any) {
+			if m.(obj)["name"] == "nats-trust" {
+				mounted = m.(obj)["mountPath"] == "/var/run/imas/nats-trust" && m.(obj)["readOnly"] == true
+			}
+		}
+		if !mounted {
+			t.Error("trust ConfigMap not mounted read-only at /var/run/imas/nats-trust")
+		}
+		found := false
+		for _, v := range get(sts, "spec", "template", "spec", "volumes").([]any) {
+			if v.(obj)["name"] == "nats-trust" {
+				found = get(v, "configMap", "name") == want && get(v, "configMap", "optional") == nil
+			}
+		}
+		if !found {
+			t.Errorf("nats-trust volume is not the required ConfigMap %s", want)
+		}
 	}
 }
 
 func TestExtraSeeds(t *testing.T) {
-	docs := mustRender(t, "--set", "natsSeeds.extraSeeds.TENANT_T_8F2A=tenant-t-8f2a.nk")
+	docs := mustRender(t, "--set", "natsSeeds.extraSeeds.EXTRA_USER=extra-user.nk")
 	env := envMap(container(t, find(t, docs, "StatefulSet", "-bus")))
-	if env["IMAS_NATS_TENANT_T_8F2A_SEED_FILE"] != "/var/run/secrets/imas/nats/tenant-t-8f2a.nk" {
+	if env["IMAS_NATS_EXTRA_USER_SEED_FILE"] != "/var/run/secrets/imas/nats/extra-user.nk" {
 		t.Errorf("extra seed not wired: %v", env)
 	}
 }
@@ -244,9 +290,11 @@ func TestValidationFailures(t *testing.T) {
 		name, want string
 		args       []string
 	}{
-		{"no seed secret", "natsSeeds.secretName is required", []string{"--set", "natsSeeds.secretName="}},
-		{"missing operator seed", "natsSeeds.seeds.OPERATOR is required", []string{"--set", "natsSeeds.seeds.OPERATOR=null"}},
-		{"missing tenant signing seed", "natsSeeds.seeds.TENANT_SIGNING is required", []string{"--set", "natsSeeds.seeds.TENANT_SIGNING="}},
+		{"no seed secret", "natsSeeds.secretName is required", []string{"--set", "natsSeeds.secretName=", "--set", "natsSeeds.seeds.BUS_FENCE_USER=f.nk"}},
+		{"removed operator seed", "natsSeeds seed OPERATOR was removed", []string{"--set", "natsSeeds.seeds.OPERATOR=operator.nk"}},
+		{"removed tenant signing seed", "natsSeeds seed TENANT_SIGNING was removed", []string{"--set", "natsSeeds.extraSeeds.TENANT_SIGNING=tenant-signing.nk"}},
+		{"cluster without fence user", "natsSeeds.seeds.BUS_FENCE_USER is required", []string{"--set", "bus.replicaCount=3", "--set", "bus.cluster.auth.secretName=r"}},
+		{"bad trust configmap", "natsTrust.configMapName", []string{"--set", "natsTrust.configMapName=Bad_Name"}},
 		{"bad seed name", "must match", []string{"--set", "natsSeeds.extraSeeds.bad-name=x.nk"}},
 		{"bad tenant id", "not a valid tenant ID", []string{"--set", "bus.organization=imas farmer"}},
 		{"cluster without route credentials", "bus.cluster.auth.secretName is required", []string{"--set", "bus.replicaCount=3"}},
@@ -324,7 +372,8 @@ func TestBusConfigFile(t *testing.T) {
 	}
 }
 
-var clusteredArgs = []string{"--set", "bus.replicaCount=3", "--set", "bus.cluster.auth.secretName=farmerbus-route-auth"}
+var clusteredArgs = []string{"--set", "bus.replicaCount=3", "--set", "bus.cluster.auth.secretName=farmerbus-route-auth",
+	"--set", "natsSeeds.seeds.BUS_FENCE_USER=bus-fence-user.nk"}
 
 func TestClustered(t *testing.T) {
 	docs := mustRender(t, clusteredArgs...)

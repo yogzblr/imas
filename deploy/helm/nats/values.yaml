@@ -12,33 +12,44 @@ fullnameOverride: ""
 # -- Labels added to every resource the chart renders.
 commonLabels: {}
 
-# NKey seeds for the decentralized-JWT trust chain.
+# The bus's only secret: the fence user's NKey seed (P21 slice 1).
 #
-# The chart NEVER generates a seed. It only mounts keys from an existing
-# Secret, which is normally synced from OpenBao by External Secrets Operator
-# (same shape as deploy/farmer/externalsecrets.yaml, target
-# "imas-farmer-nats-seeds"). Each entry below becomes one file in the
-# mounted volume and one IMAS_NATS_<NAME>_SEED_FILE env var, which
-# internal/pki/jwtauth.go's loadExternalSeed() reads in preference to
-# anything on disk. An externally supplied seed is never written back to
-# disk.
+# The bus holds no key of the NATS trust chain: the operator,
+# operator-signing, SYS account and tenant keys are OpenBao Transit keys
+# on the core side, and the bus trusts the public trust ConfigMap
+# (natsTrust below). A clustered bus (bus.replicaCount > 1) needs one user
+# seed, BUS_FENCE_USER: the SYS account user its fence connects as
+# (cmd/farmerbus fence.go), whose JWT (bus-fence-user.jwt) the core
+# chart's bootstrap mints from the seed's public key
+# (natsTrust.busFenceUserPub there). The chart NEVER generates a seed: it
+# mounts keys from an existing Secret (normally synced from OpenBao by
+# External Secrets Operator). Each entry becomes one file in the mounted
+# volume and one IMAS_NATS_<NAME>_SEED_FILE env var.
 natsSeeds:
-  # -- Name of the existing Secret holding the seeds. Required.
+  # -- Name of the existing Secret holding the seeds. Required when
+  # seeds lists anything.
   secretName: imas-farmer-nats-seeds
   # -- Where the seed files are mounted in the bus container.
   mountPath: /var/run/secrets/imas/nats
-  # -- Seed name -> key in the Secret. All five are required and must be
-  # byte-identical to the seeds cmd/farmer uses (see README.md, "Seeds").
-  # The <NAME> part is the suffix of IMAS_NATS_<NAME>_SEED_FILE.
-  seeds:
-    OPERATOR: operator.nk
-    OPERATOR_SIGNING: operator-signing.nk
-    SYS_ACCOUNT: sys-account.nk
-    TENANT: tenant.nk
-    TENANT_SIGNING: tenant-signing.nk
-  # -- Additional seeds, same shape (e.g. a per-tenant Account seed:
-  # TENANT_T_8F2A: tenant-t-8f2a.nk). Keys are env-var suffixes.
+  # -- Seed name -> key in the Secret. BUS_FENCE_USER is required when
+  # bus.replicaCount > 1; a single node needs none (and must have none
+  # unless the trust carries bus-fence-user.jwt: farmerbus refuses a
+  # fence user configured in part). OPERATOR, OPERATOR_SIGNING,
+  # SYS_ACCOUNT, TENANT and TENANT_SIGNING are refused: nothing reads them.
+  seeds: {}
+  #   BUS_FENCE_USER: bus-fence-user.nk
+  # -- Additional user-kind seeds, same shape.
   extraSeeds: {}
+
+# The public NATS trust: the ConfigMap the core chart's OpenBao bootstrap
+# Job writes (operator.jwt, operator.pub, operator-signing.pub,
+# sys-account.pub, sys-account.jwt, bus-fence-user.jwt). Public data only.
+# It lives in the core release's namespace; copy it into this namespace
+# by hand or pipeline (README.md, "NATS trust"). Mounted at
+# /var/run/imas/nats-trust (IMAS_NATS_TRUST_DIR); the bus pods wait for it.
+natsTrust:
+  # -- Name of the trust ConfigMap in this namespace.
+  configMapName: imas-nats-trust
 
 bus:
   image:
