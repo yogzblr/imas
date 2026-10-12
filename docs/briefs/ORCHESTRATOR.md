@@ -39,8 +39,14 @@ A unit may start only when every unit in "Needs" is merged to main.
 | D7 | same, PR 7 | D6 |
 | D8 | same, PR 8 | D7 |
 | D9 | same, PR 9 | D8, C6, B7 |
+| E1 | `E-followups.md` E1 | none |
+| E2 | `E-followups.md` E2 | none |
+| E3 | `E-followups.md` E3 | C2, E2 |
+| E4 | `E-followups.md` E4 | none |
+| E5 | `E-followups.md` E5 | E1 |
+| Z | `E-followups.md` Z | every other unit |
 
-First wave (no needs): A1, B1, C1, D1, D2. Why the order: P22 first (design D13);
+First wave of the original build (no needs): A1, B1, C1, D1, D2. Units A to D are merged except C2 (PR 229 is open); the follow-up units E1 to E5 and Z are launched in the same way, C2 first by rule 10. Why the order: P22 first (design D13);
 A2 and the P21 slice 1 chart work both edit the farmer bootstrap Job and policies, so
 A2 lands before B3 and B7; P22 slice 2 owns saas migration 00007 and slice 3's saas
 migration is 00008; B5 and C2 both edit `internal/pki`, so C2 waits for B5.
@@ -48,7 +54,7 @@ migration is 00008; B5 and C2 both edit `internal/pki`, so C2 waits for B5.
 ## Rules the orchestrator follows
 
 1. At most 5 sessions run at once. Never run two units at once if the briefs'
-   file scopes overlap; when unsure, run them one after the other.
+   file scopes overlap; when unsure, run them one after the other (but see rule 10).
 2. Sessions are launched from main as it is when the unit becomes ready, on branch
    `build/<ID>` (for example `build/A1`).
 3. The orchestrator never merges, never approves, never pushes to a unit's branch,
@@ -57,12 +63,20 @@ migration is 00008; B5 and C2 both edit `internal/pki`, so C2 waits for B5.
 4. A unit is done when its PR is merged. The orchestrator checks with
    `gh api repos/yogzblr/imas/pulls?state=all&head=yogzblr:build/<ID>` (REST only;
    GraphQL is blocked in these sessions).
-5. If a session reports it is blocked, or its PR says it left something out that a later
-   unit needs, the orchestrator stops launching units that depend on it and tells the
-   owner in one message: unit, reason, what it needs. It does not guess a fix.
-6. If a brief and the code disagree (a file or function the brief names does not
-   exist), that is a brief error. The orchestrator tells the owner; it does not let
-   the session improvise across units.
+5. Zero open items. A unit's PR may not defer, skip or note anything for later. If a
+   merged-ready PR (or the session's final message) says something was left out,
+   not verified, or needs a follow-up, the orchestrator does not report it to the
+   owner. It relaunches the same unit on the same branch with the instruction
+   "Finish the items you listed as left out, then rerun every check", up to 2 times.
+   Only after the third attempt does it tell the owner, with the unit, the item and
+   the reason the session gave.
+6. A wrong brief is not an open item. If a brief and the code disagree, the session
+   decides by this order: (1) the numbered owner decisions D1 to D22 and the
+   "Owner decisions" section of its brief; (2) the code on main; (3) the smallest
+   change that keeps main building, deployable and tested. It records the call under
+   "Brief corrections" in the PR and commits the fix to the brief file in the same PR.
+   The only reason to stop is a conflict with a numbered owner decision; then the
+   orchestrator tells the owner in one message.
 7. Progress lives in one GitHub issue titled `Build orchestration P22 and P21`,
    created through `gh api repos/yogzblr/imas/issues`, with the table above as a
    checklist and the PR number next to each unit. The orchestrator edits that
@@ -70,7 +84,17 @@ migration is 00008; B5 and C2 both edit `internal/pki`, so C2 waits for B5.
 8. If it cannot launch hosted sessions, it prints each session prompt for the owner
    to paste, one block per ready unit, and waits.
 9. It reports to the owner only: units launched, PRs opened (number and one line),
-   units blocked, and the next units waiting on a merge. No narration between.
+   and the next units waiting on a merge. A report never contains a list of open
+   points. The only other message is a conflict with a numbered owner decision, or
+   a unit that is still incomplete after rule 5's third attempt.
+10. Critical path first. When more units are ready than the cap allows, launch the one
+    that most others wait on (the longest chain behind it) before the rest. A unit
+    that is ready is never held back more than once because of a file overlap with a
+    unit that started later; the later one waits instead.
+11. Main stays deployable. Every unit must leave `helm template` for every chart
+    with the repo's ci/ and uat/ values, the UAT render, and `go test ./...` passing on
+    its own branch. A unit that needs chart or values changes to keep that true makes
+    them in the same PR, even if the brief put them in a later unit.
 
 ## Orchestrator prompt
 
@@ -100,21 +124,34 @@ Paste this into a Claude Code session started in the yogzblr/imas repo on main.
     Session prompt, per unit (fill in ID, title, brief file, section):
 
     Implement unit ID (title) in yogzblr/imas. Read CLAUDE.md first, then the whole
-    of docs/briefs/BRIEF-FILE, then build only SECTION. The brief and its Owner
-    decisions section are final: do not reopen a decision and do not ask questions
-    in the PR. Where the brief is silent, choose the smallest option that matches the
-    surrounding code and list it under Choices I made. Work on a new branch named
-    build/ID from main. Touch only the files the section names; if you need another
-    file, stop and say why in the PR instead of editing it. Before you open the PR:
-    go build, go vet and go test must pass for ./..., CGO_ENABLED=0 go build ./...
-    must pass, and any chart tests the section lists must pass. Do not edit
-    docs/BUILD-STATUS.md; add the status fragment docs/status/days/YYYY-MM-DD/z-ID.md
-    (format in docs/status/README.md, check with scripts/status/rollup.py --check).
-    Commit messages start with ID: . Open the PR with FLAG FOR SECURITY REVIEW at
-    the very top, then the sections Built, Deliberately not done, Choices I made and
-    Files outside scope. Say ready for review, never done or safe to merge. After the
-    PR is open, read the CodeRabbit comments once: fix the valid ones, reply to the
-    others with a reason, and resolve each thread.
+    of docs/briefs/BRIEF-FILE, then build SECTION completely. The brief and its
+    Owner decisions section are final: do not reopen a decision and do not ask
+    questions in the PR. Work on a new branch named build/ID from main.
+
+    The files the section names are the minimum, not the limit. You own the unit end to
+    end: when you add, rename, remove or change a name, path, key, env var, value,
+    flag, route, table or file, run a repo-wide search for the old and the new name
+    across code, charts, uat/, deploy/, docs/, scripts and .github/workflows, and
+    update every hit so that nothing is left stale. Where the brief is silent or wrong,
+    decide in this order: the numbered owner decisions D1 to D22 and the brief's
+    Owner decisions section; the code on main; the smallest change that keeps main
+    building, deployable and tested. Fix a wrong brief in the same PR.
+
+    Do not leave anything for later. No deferred items, no follow-ups, no TODO, no
+    skipped test, no note that something was not verified. If a check cannot run in your
+    session, find another way to check it (a fake, a rendered chart, a container) and say
+    what you ran. Before you open the PR: go build, go vet and go test pass for ./... ;
+    CGO_ENABLED=0 go build ./... passes; helm template passes for every chart with
+    its ci and uat values; scripts/status/rollup.py --check passes; the search in the
+    previous paragraph is clean. Do not edit docs/BUILD-STATUS.md; add the status
+    fragment docs/status/days/YYYY-MM-DD/z-ID.md. Commit messages start with ID: .
+
+    Open the PR with FLAG FOR SECURITY REVIEW at the very top, then the sections
+    Built, Verified (each command and its result), Consumers updated (the names you
+    searched for and the files you changed) and Brief corrections. Say ready for
+    review, never done or safe to merge. After the PR is open, read the CodeRabbit
+    comments once: fix the valid ones, reply to the others with a reason, resolve each
+    thread.
 
 ## Session values, copy per unit
 
@@ -146,3 +183,9 @@ Paste this into a Claude Code session started in the yogzblr/imas repo on main.
 | D7 | P21 slice 3 PR7: job leases, recipe writes, merged cook call | P21-slice3-farmer-saasapi-state.md | section 7, PR 7 |
 | D8 | P21 slice 3 PR8: tenant bus connections | P21-slice3-farmer-saasapi-state.md | section 7, PR 8 |
 | D9 | P21 slice 3 PR9: farmer chart, replicas and PDB | P21-slice3-farmer-saasapi-state.md | section 7, PR 9 |
+| E1 | P26: make the UAT work after the stateless build | E-followups.md | E1 |
+| E2 | P27: every package gets tenant connections from the registry | E-followups.md | E2 |
+| E3 | P27: no local JWT or key files in farmer | E-followups.md | E3 |
+| E4 | P27: loadtest without trust seeds; sprout honours Retry-After | E-followups.md | E4 |
+| E5 | P28: docs, CI, flake and earlier reports | E-followups.md | E5 |
+| Z | Final gate: nothing left open | E-followups.md | Z |
