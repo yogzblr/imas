@@ -27,6 +27,10 @@ PXC_CLUSTER=imas-core-pxc         # StatefulSets <cluster>-pxc, <cluster>-haprox
 PXC_ROOT_SECRET=imas-core-pxc-secrets
 VALKEY_DEPLOY=imas-core-valkey
 SEEDS_SECRET=imas-farmer-nats-seeds        # natsSeeds.secretName: SYS_USER, SAASAPI_USER
+FARMER_NKEY_SECRET=imas-farmer-nkey         # farmer.nkeySecret.secretName (the chart default)
+FARMER_NKEY_KEY=farmer.nk                    # farmer.nkeySecret.key (the chart default)
+LOADER_SEED_FILE=bus-loader-user.nk          # the DMZ bus loader's SYS user seed: a file in SEEDS_DIR, never a core Secret
+LOADER_PUB_FILE=bus-loader-user.pub          # its public key in OUT_DIR: natsTrust.busLoaderUserPub (gen-values.sh)
 NATS_TRUST_CONFIGMAP=imas-nats-trust          # natsTrust.configMapName (public; the DMZ copies it)
 INTERNAL_AUTH_SECRET=imas-saasapi-internal-auth
 SAASAPI_NATS_SECRET=imas-saasapi-nats
@@ -45,6 +49,9 @@ KEYCLOAK_DEPLOY=imas-uat-keycloak
 EDGE_DEPLOY=imas-uat-edge
 RECIPE_BUCKET=imas-recipes                    # objectStore.bucket
 JOB_BUCKET=imas-jobs                          # objectStore.jobBucket
+SPROUT_JWT_BUCKET=imas-sprout-jwts            # objectStore.sproutJWTBucket
+ACCOUNTS_BUCKET=imas-accounts                 # accountStore.bucket (the farmer and nats chart default)
+S3_ACCOUNTS_WRITER_SECRET=imas-farmer-accounts-writer # accountStore.credentialsSecret (the chart default)
 S3_FARMER_USER=imas-farmer
 S3_SAASAPI_USER=imas-saasapi
 REALM=imas-uat
@@ -330,8 +337,10 @@ write_keycloak_json() {
 
 # Design T4 (docs/design/imas-openbao-signing-design.md section 11), as the
 # check script reads it: the keys the trust ConfigMap must carry, and the
-# Transit keys the chart's bootstrap Job creates.
-NATS_TRUST_KEYS=(operator.jwt operator.pub operator-signing.pub sys-account.pub sys-account.jwt)
+# Transit keys the chart's bootstrap Job creates. bus-loader-user.jwt is
+# there because the UAT sets natsTrust.busLoaderUserPub (seeds.sh,
+# gen-values.sh): the DMZ bus's loader connects with it.
+NATS_TRUST_KEYS=(operator.jwt operator.pub operator-signing.pub sys-account.pub sys-account.jwt bus-loader-user.jwt)
 NATS_PLATFORM_KEYS=(nats-operator nats-operator-signing nats-sys-account)
 
 # openbao_t4 <root token file> <bootstrap token file>: the OpenBao half of

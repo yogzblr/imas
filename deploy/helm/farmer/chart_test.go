@@ -739,13 +739,21 @@ func TestFarmerMatchesSeedPatch(t *testing.T) {
 		for _, it := range get(g, "secret", "items").([]any) {
 			items[it.(obj)["key"].(string)] = it.(obj)["path"].(string)
 		}
-		for _, it := range get(v, "secret", "items").([]any) {
+		refItems := get(v, "secret", "items").([]any)
+		for _, it := range refItems {
 			if items[it.(obj)["key"].(string)] != it.(obj)["path"] {
 				t.Errorf("volume %s: item %v missing", name, it)
 			}
 		}
-		if len(items) != 2 {
-			t.Errorf("seed volume projects %d keys, want the 2 in natsSeeds.seeds", len(items))
+		// Exactly the reference's keys: the two in natsSeeds.seeds, and
+		// farmer.nk alone in farmer's NKey volume.
+		if len(items) != len(refItems) {
+			t.Errorf("volume %s projects %d keys, reference %d", name, len(items), len(refItems))
+		}
+	}
+	for _, name := range []string{"nats-seeds", "farmer-nkey"} {
+		if _, ok := byName(get(ref, "spec", "template", "spec", "volumes"))[name]; !ok {
+			t.Errorf("the reference patch has no volume %s", name)
 		}
 	}
 }

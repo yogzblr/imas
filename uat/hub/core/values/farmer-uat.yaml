@@ -33,6 +33,10 @@ bus:
 natsSeeds:
   secretName: imas-farmer-nats-seeds
 
+# natsTrust.busLoaderUserPub (the DMZ bus loader's SYS user, whose seed
+# seeds.sh makes as bus-loader-user.nk) is run-specific: gen-values.sh sets
+# it from seeds.sh's public key file, so the bootstrap Job also mints
+# bus-loader-user.jwt into the trust ConfigMap the DMZ copies.
 natsTrust:
   configMapName: imas-nats-trust
 
@@ -44,8 +48,18 @@ tls:
   mode: secret
   secretName: imas-farmer-tls
 
-# OpenBao: the subchart, standalone (not dev mode), one replica, file
-# storage on a PVC. Initialised and unsealed by openbao-bootstrap.sh while
+# OpenBao: the subchart, standalone (not dev mode), one replica, single-node
+# raft storage on the data PVC. OpenBao 2.7.1 has no "file" storage
+# backend, so the subchart's default standalone config (storage "file")
+# does not start; this one replaces it. node_id is fixed, and api_addr and
+# cluster_addr are the pod's Service addresses: the client Service
+# imas-core-openbao and, for the cluster port, the pod's name on the
+# headless Service imas-core-openbao-internal (release imas-core in
+# namespace imas-core, lib/common.sh). The subchart also exports
+# BAO_API_ADDR and BAO_CLUSTER_ADDR, which win over the config file, so
+# server.ha.apiAddr and server.ha.clusterAddr carry the same two addresses
+# (the subchart reads them in standalone mode too); core_test.go checks
+# they agree. Initialised and unsealed by openbao-bootstrap.sh while
 # `helm install` runs; the chart's bootstrap Job waits for it to be
 # unsealed (`until bao status`) and then uses the root token from
 # openbaoBootstrap.tokenSecretName.
@@ -58,8 +72,26 @@ openbao:
       enabled: false
     standalone:
       enabled: true
+      config: |
+        ui = true
+
+        listener "tcp" {
+          tls_disable     = 1
+          address         = "[::]:8200"
+          cluster_address = "[::]:8201"
+        }
+
+        storage "raft" {
+          path    = "/openbao/data"
+          node_id = "imas-core-openbao-0"
+        }
+
+        api_addr     = "http://imas-core-openbao.imas-core.svc:8200"
+        cluster_addr = "https://imas-core-openbao-0.imas-core-openbao-internal.imas-core.svc:8201"
     ha:
       enabled: false
+      apiAddr: http://imas-core-openbao.imas-core.svc:8200
+      clusterAddr: https://imas-core-openbao-0.imas-core-openbao-internal.imas-core.svc:8201
     dataStorage:
       enabled: true
       size: 1Gi
@@ -95,20 +127,26 @@ valkey:
 
 # RustFS (Apache-2.0) in namespace imas-uat. Plain HTTP inside the cluster.
 # endpoint and useSSL are overridden per run by gen-values.sh from the
-# endpoints file's object_store (README.md, "External S3"). Two buckets:
-# recipes, and job logs (must differ).
+# endpoints file's object_store (README.md, "External S3"). Three buckets,
+# all different: recipes, job logs, and the private sprout User JWT bucket
+# (IMAS_S3_SPROUT_JWT_BUCKET; the chart has no default name, and enrolment
+# fails without it). minio-setup.sh creates all three. The accounts bucket
+# is the chart's accountStore default (imas-accounts), with its own writer
+# credential (accountStore.credentialsSecret, also from minio-setup.sh).
 objectStore:
   endpoint: imas-uat-minio.imas-uat.svc.cluster.local:9000
   useSSL: false
   bucket: imas-recipes
   jobBucket: imas-jobs
+  sproutJWTBucket: imas-sprout-jwts
   credentialsSecret: imas-uat-s3-farmer
   accessKeyIdKey: access-key-id
   secretAccessKeyKey: secret-access-key
 
+# farmer is stateless (no PVC): its NKey comes from Secret imas-farmer-nkey,
+# key farmer.nk (the chart's farmer.nkeySecret defaults), which seeds.sh
+# creates.
 farmer:
-  persistence:
-    size: 1Gi
   bootstrapAdmin:
     # pubkey and boxpub come from gen-values.sh (imas auth pubkey and
     # imas auth keygen of this release, run by admin-keys.sh).

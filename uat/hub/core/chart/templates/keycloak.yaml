@@ -17,7 +17,7 @@ metadata:
     app.kubernetes.io/name: imas-uat-keycloak
 data:
   imas-uat-realm.json: |-
-    {{- .Files.Get "files/imas-uat-realm.json" | nindent 4 }}
+    {{- .Files.Get "files/imas-uat-realm.json" | trimSuffix "\n" | nindent 4 }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

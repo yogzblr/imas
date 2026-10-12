@@ -195,7 +195,7 @@ t_up_direct() {
 	check "harness.json bind_tenant" jqt "$h" ".bind_tenant == {script: \"$REPO/uat/hub/core/bind-tenant.sh\", kubeconfig: \"$S/kube/core.kubeconfig\", endpoints: \"$S/endpoints.json\", state_dir: \"$S\"}"
 
 	check "core install args" has "$STUB_LOG" "core-install $S/kube/core.kubeconfig $S/endpoints.json $S $TAG"
-	check "dmz install args" has "$STUB_LOG" "dmz-install --kubeconfig $S/kube/dmz.kubeconfig --endpoints $S/endpoints.json --release-tag $TAG --seeds-from-kubeconfig $S/kube/core.kubeconfig --workdir $S/dmz"
+	check "dmz install args" has "$STUB_LOG" "dmz-install --kubeconfig $S/kube/dmz.kubeconfig --endpoints $S/endpoints.json --release-tag $TAG --seeds-from-kubeconfig $S/kube/core.kubeconfig --loader-seed $S/core/sensitive/seeds/bus-loader-user.nk --accounts-reader-dir $S/core/sensitive/s3/accounts-reader --workdir $S/dmz"
 	check "dmz check args" has "$STUB_LOG" "dmz-check --endpoints $S/endpoints.json --ca-file $S/uat-ca.pem --kubeconfig $S/kube/dmz.kubeconfig --connect 172.29.88.131"
 	check "enroll args" has "$STUB_LOG" "enroll --uat $S/uat.json --access $S/access.json --state $S/enroll --release-tag $TAG --ssh-key $S/ssh/id_ed25519 --core-state $S --core-kubeconfig $S/kube/core.kubeconfig --endpoints $S/endpoints.json"
 	check "core before dmz" log_order "core-install" "dmz-install"

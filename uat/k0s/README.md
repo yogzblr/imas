@@ -99,7 +99,9 @@ Owner decisions, 2026-10-06:
   (farmer's API, which the DMZ's Envoy dials) as hostPorts on the node.
   k0s's kube-router CNI chain includes the `portmap` plugin, so hostPorts
   work. This was checked in k0s's source for the pinned version, not on a
-  node. Core's node-port mode is dropped: core exposes no node port, and
+  node. RustFS (uat/hub/core) also takes 9000 as a hostPort: the DMZ bus's
+  account loader reads the accounts bucket there, read-only (design D22).
+  Core's node-port mode is dropped: core exposes no node port, and
   its NodePort range is Kubernetes' default, **30000-32767**.
 
 What uat/k0s does about exposure:
@@ -113,11 +115,11 @@ What uat/k0s does about exposure:
   9443, 10249, 10250, 10256), and warns if a range ever contains one. It
   also refuses a hub hostPort inside that hub's NodePort range: a node port
   that Kubernetes picks by itself could otherwise take 443 or 5405 from the
-  edge.
+  edge, or 9000 from RustFS.
 - check.sh fails on any node port, or any hostPort of a pod off the host
   network, that the hub does not expose:
   - DMZ: node ports 8443 and 8442, no hostPorts.
-  - Core: hostPorts 443 and 5405, no node ports.
+  - Core: hostPorts 443, 5405 and 9000, no node ports.
 
 | Hub | Port | How | Who creates it | Who connects |
 |---|---|---|---|---|
@@ -125,6 +127,7 @@ What uat/k0s does about exposure:
 | dmz | **8442** | node port, to the bus client port 5406 (`bus.ports.client`) | uat/hub/dmz, chart values | core (farmer and saasapi, `farmerbusurl`) |
 | core | **443** | hostPort on the edge (saasapi and Keycloak behind its TLS front) | uat/hub/core | the runner (the tests, the tenant scripts) |
 | core | **5405** | hostPort on the edge, passed through to farmer's API (`farmer.apiPort`) | uat/hub/core | the DMZ's Envoy (`/v1/enroll`, `/v1/refresh`, `/files/`, the JWKS) |
+| core | **9000** | hostPort on RustFS's S3 port (`minio.hostPort`; `UAT_CORE_ACCOUNTS_STORE_PORT`) | uat/hub/core | the DMZ bus's account loader (the accounts bucket, read-only) |
 
 The ports and ranges live in `config.env`. `endpoints.json` repeats them in
 the keys uat/hub/dmz and uat/hub/core read (`dmz.ports.envoy`,

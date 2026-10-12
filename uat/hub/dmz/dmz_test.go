@@ -1561,3 +1561,115 @@ func TestCheckBusFromTrustOnly(t *testing.T) {
 		})
 	}
 }
+
+// unknownValueKeys lists the paths in uat that the chart's values.yaml does
+// not have. A chart value that is a non-empty map is walked; anything else
+// (a scalar, a list, an empty map or null) accepts whatever is below it.
+func unknownValueKeys(uat, chart obj, prefix string) []string {
+	var out []string
+	for k, v := range uat {
+		c, ok := chart[k]
+		if !ok {
+			out = append(out, prefix+k)
+			continue
+		}
+		um, uok := v.(obj)
+		cm, cok := c.(obj)
+		if uok && cok && len(cm) > 0 {
+			out = append(out, unknownValueKeys(um, cm, prefix+k+".")...)
+		}
+	}
+	return out
+}
+
+func readValues(t *testing.T, path string) obj {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// values-uat.yaml is one document after a leading comment block.
+	var v obj
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	for {
+		var d obj
+		if err := dec.Decode(&d); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		if d != nil {
+			v = d
+		}
+	}
+	return v
+}
+
+// TestUATValuesMatchChartAndCore: every key values-uat.yaml sets exists in
+// deploy/helm/nats/values.yaml (the chart has no schema, so a dropped key
+// would be ignored without a word), and the loader's side of the accounts
+// bucket matches what the core hub makes: the bucket name, the two Secret
+// names install.sh creates, and the port the core hub's RustFS answers the
+// DMZ on (uat/hub/core chart minio.hostPort, uat/tofu accounts_store_port),
+// which install.sh's default endpoint <core private IP>:9000 uses.
+func TestUATValuesMatchChartAndCore(t *testing.T) {
+	root := filepath.Join(dir(t), "..", "..", "..")
+	uat := readValues(t, filepath.Join(dir(t), "values-uat.yaml"))
+	chart := readValues(t, filepath.Join(root, "deploy", "helm", "nats", "values.yaml"))
+	if bad := unknownValueKeys(uat, chart, ""); len(bad) > 0 {
+		t.Errorf("values-uat.yaml sets keys deploy/helm/nats/values.yaml does not have: %v", bad)
+	}
+	if bad := unknownValueKeys(obj{"bus": obj{"persistence": obj{"size": "1Gi"}}}, chart, ""); len(bad) != 1 || bad[0] != "bus.persistence" {
+		t.Errorf("unknownValueKeys missed bus.persistence: %v", bad)
+	}
+
+	lib, err := os.ReadFile(filepath.Join(root, "uat", "hub", "core", "lib", "common.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	coreConst := func(name string) string {
+		m := regexp.MustCompile(`(?m)^` + name + `=([A-Za-z0-9._-]+)`).FindSubmatch(lib)
+		if m == nil {
+			t.Fatalf("uat/hub/core/lib/common.sh has no %s", name)
+		}
+		return string(m[1])
+	}
+	install, err := os.ReadFile(filepath.Join(dir(t), "install.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dmzConst := func(name string) string {
+		m := regexp.MustCompile(`(?m)^` + name + `=([A-Za-z0-9._-]+)`).FindSubmatch(install)
+		if m == nil {
+			t.Fatalf("install.sh has no %s", name)
+		}
+		return string(m[1])
+	}
+	for path, want := range map[string]string{
+		"accountStore.bucket":            coreConst("ACCOUNTS_BUCKET"),
+		"accountStore.credentialsSecret": dmzConst("DMZ_ACCOUNTS_READER_SECRET"),
+		"loader.sysUserSecret":           dmzConst("DMZ_LOADER_SECRET"),
+	} {
+		keys := []any{}
+		for _, k := range strings.Split(path, ".") {
+			keys = append(keys, k)
+		}
+		if got, _ := get(uat, keys...).(string); got != want {
+			t.Errorf("values-uat.yaml %s = %q, want %q", path, got, want)
+		}
+	}
+	if !strings.Contains(string(install), `"${CORE_PRIVATE_IP}:9000"`) {
+		t.Error("install.sh's default accounts endpoint is no longer <core private IP>:9000")
+	}
+	coreValues := readValues(t, filepath.Join(root, "uat", "hub", "core", "chart", "values.yaml"))
+	if got := get(coreValues, "minio", "hostPort"); got != 9000 {
+		t.Errorf("uat/hub/core chart minio.hostPort = %v, want 9000 (this hub's default accounts endpoint)", got)
+	}
+	tf, err := os.ReadFile(filepath.Join(root, "uat", "tofu", "variables.tf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`(?s)variable "accounts_store_port" \{.*?default\s*=\s*9000\s*\n`).Match(tf) {
+		t.Error("uat/tofu accounts_store_port no longer defaults to 9000")
+	}
+}

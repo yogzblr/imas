@@ -7,7 +7,9 @@
 #   3. the realm file's jq checks (check-realm.sh)
 #   4. gen-values.sh and lib/common.sh input handling
 #   5. seeds.sh against a stub kubectl (real nk, built from go.mod): the
-#      two user seeds, SYS_USER and SAASAPI_USER
+#      user seeds SYS_USER and SAASAPI_USER (Secret imas-farmer-nats-seeds),
+#      farmer's NKey (Secret imas-farmer-nkey) and the DMZ bus loader's
+#      seed (a file only) with its public key
 #   6. admin-keys.sh against a stub curl and a fake imas CLI (checksum
 #      check, key reuse, file modes)
 #   7. bind-tenant.sh, token.sh and install.sh argument checks
@@ -97,7 +99,8 @@ expect "realm jq checks" "$here/check-realm.sh"
 
 # --- 4. gen-values and endpoints --------------------------------------------------
 admin="$core/testdata/admin.json"
-gv() { "$core/gen-values.sh" "$@"; }
+loader_pub="$core/testdata/bus-loader-user.pub"
+gv() { "$core/gen-values.sh" "$@" "$loader_pub"; }
 if gv "$ep" "$admin" v0.1.0-rc.4 >"$tmp/v1.json" 2>"$tmp/out"; then
 	ok "gen-values.sh renders the contract's endpoints"
 	jq -e '
@@ -110,9 +113,10 @@ if gv "$ep" "$admin" v0.1.0-rc.4 >"$tmp/v1.json" 2>"$tmp/out"; then
 	  and .farmer.image.tag == "0.1.0-rc.4" and .saasapi.image.tag == "0.1.0-rc.4"
 	  and .database.migrate.image.tag == "0.1.0-rc.4"
 	  and .farmer.bootstrapAdmin.pubkey == "AC4LMP7I2FYLWGY5GIB52A4XCFFFSB2QTZ65B3A4G6OK5GYWRJSKH74C"
-	  and .farmer.bootstrapAdmin.username == "uat-admin"' "$tmp/v1.json" >/dev/null &&
-		ok "gen-values.sh: issuer, JWKS, audience, bus, tags and admin" ||
-		bad "gen-values.sh: issuer, JWKS, audience, bus, tags and admin"
+	  and .farmer.bootstrapAdmin.username == "uat-admin"
+	  and .natsTrust.busLoaderUserPub == $lp' --arg lp "$(cat "$loader_pub")" "$tmp/v1.json" >/dev/null &&
+		ok "gen-values.sh: issuer, JWKS, audience, bus, tags, admin and loader key" ||
+		bad "gen-values.sh: issuer, JWKS, audience, bus, tags, admin and loader key"
 else
 	bad "gen-values.sh renders the contract's endpoints"
 fi
@@ -157,6 +161,10 @@ jq '.boxpub = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="' "$admin" >"$tmp/ze
 refuse "the chart's all-zero placeholder admin key is refused" "placeholder" gv "$ep" "$tmp/zero-admin.json" v0.1.0
 jq '.pubkey = "not-a-key"' "$admin" >"$tmp/bad-admin.json"
 refuse "a malformed admin pubkey is refused" "NKey" gv "$ep" "$tmp/bad-admin.json" v0.1.0
+printf 'SUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' >"$tmp/seed-as-pub"
+refuse "a loader key that is not a user public key is refused" "not an NKey user public key" \
+	"$core/gen-values.sh" "$ep" "$admin" v0.1.0 "$tmp/seed-as-pub"
+refuse "gen-values.sh needs the loader key file" "usage: gen-values.sh" "$core/gen-values.sh" "$ep" "$admin" v0.1.0
 
 # keycloak.json: the shape uat/tests and uat/enroll read (owner decision
 # 2026-10-06), mode 0600, bound tenant_ids kept on a rewrite.
@@ -191,44 +199,67 @@ state="$tmp/state"
 seeds() { PATH="$stubs:$PATH" "$core/seeds.sh" "$kubeconfig" "$ep" "$state"; }
 if command -v go >/dev/null; then
 	if seeds >"$tmp/out" 2>&1; then
-		ok "seeds.sh generates the two user seeds with nk"
+		ok "seeds.sh generates the user seeds with nk"
 		sd="$state/core/sensitive/seeds"
+		all_seeds=(sys-user.nk saasapi-user.nk farmer.nk bus-loader-user.nk)
 		good=1
-		for k in sys-user.nk saasapi-user.nk; do
+		for k in "${all_seeds[@]}"; do
 			[[ "$(cat "$sd/$k")" =~ ^SU[A-Z2-7]{56}$ ]] || good=0
 			[[ "$(stat -c %a "$sd/$k")" == 600 ]] || good=0
 		done
-		[[ "$(for f in "$sd"/*.nk; do cat "$f"; echo; done | sort -u | wc -l)" -eq 2 ]] || good=0
+		[[ "$(for f in "$sd"/*.nk; do cat "$f"; echo; done | sort -u | wc -l)" -eq 4 ]] || good=0
 		[[ "$(wc -c <"$sd/sys-user.nk")" -eq 58 ]] || good=0
-		((good)) && ok "seeds: user seeds, distinct, mode 0600, no newline" || bad "seeds: types, distinctness or modes"
-		[[ -z "$(find "$sd" -name '*.nk' ! -name sys-user.nk ! -name saasapi-user.nk)" ]] &&
+		((good)) && ok "seeds: four user seeds, distinct, mode 0600, no newline" || bad "seeds: types, distinctness or modes"
+		[[ -z "$(find "$sd" -name '*.nk' ! -name sys-user.nk ! -name saasapi-user.nk ! -name farmer.nk ! -name bus-loader-user.nk)" ]] &&
 			ok "seeds: no trust chain seed generated (P21 slice 1: those are Transit keys)" || bad "seeds: a removed seed was generated"
 		[[ "$(stat -c %a "$state/core/sensitive")" == 700 ]] && ok "sensitive dir is 0700" || bad "sensitive dir is 0700"
 		sec="$STUB_STATE/imas-core/Secret/imas-farmer-nats-seeds.json"
 		jq -e --arg su "$(base64 -w0 <"$sd/sys-user.nk")" '(.data | keys | sort) == ["saasapi-user.nk","sys-user.nk"] and .data["sys-user.nk"] == $su' "$sec" >/dev/null &&
 			ok "seeds: Secret imas-core/imas-farmer-nats-seeds holds exactly the two files" || bad "seeds: Secret content"
+		nksec="$STUB_STATE/imas-core/Secret/imas-farmer-nkey.json"
+		jq -e --arg fk "$(base64 -w0 <"$sd/farmer.nk")" '(.data | keys) == ["farmer.nk"] and .data["farmer.nk"] == $fk' "$nksec" >/dev/null &&
+			ok "seeds: Secret imas-core/imas-farmer-nkey holds farmer.nk only (farmer.nkeySecret)" || bad "seeds: farmer NKey Secret content"
+		! grep -rqF "$(base64 -w0 <"$sd/bus-loader-user.nk")" "$STUB_STATE/imas-core" &&
+			ok "seeds: the loader seed is in no core Secret (it goes to the DMZ)" || bad "seeds: the loader seed reached a core Secret"
+		lpub="$state/core/out/bus-loader-user.pub"
+		[[ -s "$lpub" && "$(cat "$lpub")" == "$("$state/core/bin/nk" -inkey "$sd/bus-loader-user.nk" -pubout)" && "$(cat "$lpub")" =~ ^U[A-Z2-7]{55}$ ]] &&
+			ok "seeds: out/bus-loader-user.pub is the loader seed's public key" || bad "seeds: loader public key file"
 		! grep -q 'S[OAU][A-Z2-7]\{56\}' "$STUB_STATE/calls.log" && ok "seeds: no seed in any kubectl argument" || bad "seeds: a seed reached argv"
-		expect "seeds.sh again: existing Secret matches, nothing replaced" seeds
+		expect "seeds.sh again: existing Secrets match, nothing replaced" seeds
 		cp "$sd/sys-user.nk" "$tmp/sys-user.nk"
 		rm "$sd/sys-user.nk"
 		expect "seeds.sh restores a missing local seed from the Secret" seeds
 		cmp -s "$sd/sys-user.nk" "$tmp/sys-user.nk" && ok "seeds: restored seed is byte-identical" || bad "seeds: restored seed differs"
+		cp "$sd/farmer.nk" "$tmp/farmer.nk"
+		rm "$sd/farmer.nk"
+		expect "seeds.sh restores farmer.nk from imas-farmer-nkey" seeds
+		cmp -s "$sd/farmer.nk" "$tmp/farmer.nk" && ok "seeds: restored farmer.nk is byte-identical" || bad "seeds: restored farmer.nk differs"
 		printf 'SUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' >"$sd/sys-user.nk"
 		refuse "seeds.sh refuses to replace an existing install's seeds" "refusing to replace" seeds
 		cp "$tmp/sys-user.nk" "$sd/sys-user.nk"
+		printf 'SUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' >"$sd/farmer.nk"
+		refuse "seeds.sh refuses to replace an existing farmer NKey" "farmer.nk in .* differs from Secret imas-core/imas-farmer-nkey" seeds
+		cp "$tmp/farmer.nk" "$sd/farmer.nk"
+		# A cluster installed before imas-farmer-nkey existed: the seeds
+		# Secret is kept as is and the farmer NKey Secret is created.
+		rm "$nksec" "$sd/farmer.nk"
+		cp "$sec" "$tmp/seeds-secret.json"
+		expect "seeds.sh adds imas-farmer-nkey to an install that has only the seeds Secret" seeds
+		[[ -s "$nksec" ]] && cmp -s "$sec" "$tmp/seeds-secret.json" &&
+			ok "seeds: imas-farmer-nkey created, imas-farmer-nats-seeds untouched" || bad "seeds: adding imas-farmer-nkey"
 		# A seed directory that already holds one seed: it is kept, the
-		# other generated.
+		# others generated.
 		state2="$tmp/state2" shared="$tmp/shared-seeds"
 		(umask 077 && mkdir -p "$shared" && cp "$sd/sys-user.nk" "$shared/")
 		rm -rf "$STUB_STATE/imas-core"
 		if UAT_SEEDS_DIR="$shared" PATH="$stubs:$PATH" "$core/seeds.sh" "$kubeconfig" "$ep" "$state2" >"$tmp/out" 2>&1 &&
-			cmp -s "$shared/sys-user.nk" "$sd/sys-user.nk" && [[ $(find "$shared" -name '*.nk' | wc -l) -eq 2 ]]; then
+			cmp -s "$shared/sys-user.nk" "$sd/sys-user.nk" && [[ $(find "$shared" -name '*.nk' | wc -l) -eq 4 ]]; then
 			ok "seeds: UAT_SEEDS_DIR seeds are reused, missing ones generated"
 		else
 			bad "seeds: UAT_SEEDS_DIR reuse"
 		fi
 	else
-		bad "seeds.sh generates the two user seeds with nk"
+		bad "seeds.sh generates the user seeds with nk"
 		sed 's/^/      /' "$tmp/out" | tail -n 10
 	fi
 else

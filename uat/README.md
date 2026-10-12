@@ -162,12 +162,16 @@ names the piece):
    for `bastion` and `ssh`).
 6. **k0s** on both hubs (`uat/k0s/bootstrap.sh`).
 7. **Core hub** (`uat/hub/core/install.sh`),
-   then the **DMZ hub** (`uat/hub/dmz/install.sh`, seeds copied from core's
-   Secret), then **core's second half** (`uat/hub/core/finish.sh`: farmer and
+   then the **DMZ hub** (`uat/hub/dmz/install.sh`: core's public NATS trust
+   copied from its ConfigMap; the bus loader's seed and the read-only
+   accounts credential from core's state directory, `--loader-seed` and
+   `--accounts-reader-dir`), then **core's second half** (`uat/hub/core/finish.sh`: farmer and
    saasapi need the DMZ bus, so it waits for them, registers the sprout
    release and runs core's `check.sh`) and the **DMZ check** (`check.sh`, before enrolment because it
    empties and then waits out Envoy's enrolment rate limit). Core comes first
-   because the bus needs core's seeds when it starts.
+   because the bus needs core's trust (with the loader's JWT), the loader's
+   seed and the accounts bucket (on core's RustFS, which the DMZ reads on
+   port 9000) when it starts.
 8. **Tenants and enrolment** (`uat/enroll/enroll.sh`).
 9. **Test material** (`uat/scripts/material.sh`) and a second Azure login,
    then **the tests** (`uat/tests/run.sh <tier> [ids]`).

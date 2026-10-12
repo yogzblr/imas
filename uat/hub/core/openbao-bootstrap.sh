@@ -2,7 +2,8 @@
 # openbao-bootstrap.sh <kubeconfig> <endpoints.json> <state-dir>
 #
 # Initialises and unseals the farmer chart's OpenBao subchart (standalone,
-# file storage; values/farmer-uat.yaml turns dev mode off), enables the
+# single-node raft storage; values/farmer-uat.yaml turns dev mode off and
+# sets the raft config), waits for the raft node to become active, enables the
 # Transit engine and creates the Ed25519 key the gateway JWT needs under
 # the name the chart expects (farmer.openbao.gateway.keyName,
 # imas-gateway-jwt), then hands the chart's own bootstrap Job a token
@@ -113,7 +114,15 @@ if [[ "$(jq -r .sealed <<<"$st")" == true ]]; then
 	st=$(status_json)
 	[[ "$(jq -r .sealed <<<"$st")" == false ]] || die "OpenBao is still sealed after $threshold keys"
 fi
-log "OpenBao is initialised and unsealed"
+# Single-node raft: once unsealed, the node elects itself leader and only
+# then serves writes (until then they fail with "local node not active").
+active() {
+	local s
+	s=$(status_json) || return 1
+	jq -e '.sealed == false and (.ha_enabled != true or .is_self == true)' <<<"$s" >/dev/null
+}
+wait_for 120 "OpenBao raft node active" active
+log "OpenBao is initialised, unsealed and active"
 
 # Transit and the gateway JWT key. The chart's bootstrap Job makes the same
 # checks before it creates anything, so whichever runs first wins and the

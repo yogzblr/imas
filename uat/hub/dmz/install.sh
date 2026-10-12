@@ -35,10 +35,12 @@
 # --accounts-reader-dir   a directory with access-key-id and
 #                         secret-access-key: the read-only accounts bucket
 #                         credential the bus's loader sidecar uses (uat/hub/
-#                         core/minio-setup.sh writes it to
-#                         <state-dir>/sensitive/s3/accounts-reader). Without
-#                         it, Secret imas-bus-accounts-reader must exist here
-# --loader-seed           the loader's SYS user NKey seed file (SU...); its
+#                         core/minio-setup.sh writes it to <core state-dir>/
+#                         core/sensitive/s3/accounts-reader). Without it,
+#                         Secret imas-bus-accounts-reader must exist here
+# --loader-seed           the loader's SYS user NKey seed file (SU...;
+#                         uat/hub/core/seeds.sh writes it to <core state-dir>/
+#                         core/sensitive/seeds/bus-loader-user.nk); its
 #                         public key is core's natsTrust.busLoaderUserPub.
 #                         Without it, Secret imas-bus-loader-sys-user must
 #                         exist here

@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 # minio-setup.sh <kubeconfig> <endpoints.json> <state-dir> <saasapi-policy.json>
 #
-# Inside the UAT RustFS object store (Apache-2.0): the recipe and job
-# buckets, a user for farmer and a user for saasapi, each with its own
-# policy, and the two Kubernetes Secrets the farmer chart names
-# (objectStore.credentialsSecret, saasapi.recipes.credentialsSecret).
+# Inside the UAT RustFS object store (Apache-2.0): the recipe, job and
+# sprout JWT buckets (objectStore.bucket, .jobBucket, .sproutJWTBucket), a
+# user for farmer (recipes and jobs, and get and put on the sprout JWT
+# bucket) and a user for saasapi, each with its own policy, and the two
+# Kubernetes Secrets the farmer chart names (objectStore.credentialsSecret,
+# saasapi.recipes.credentialsSecret).
 # Also the accounts bucket of the stateless bus (P21 slice 2): a writer
 # user for farmer (get, put and list on that bucket only; Secret
 # imas-farmer-accounts-writer in the core namespace) and a reader user for
-# the DMZ bus's loader sidecar (get and list only). The reader's
-# credential is left in <state-dir>/sensitive/s3/accounts-reader for
-# uat/hub/dmz/install.sh --accounts-reader-dir: it belongs in the DMZ
-# cluster, never in core's. Neither accounts user can reach the recipe or
+# the DMZ bus's loader sidecar (get and list only), which reaches RustFS
+# from the DMZ on its hostPort (chart/, minio.hostPort; the one DMZ-to-core
+# object store path). The reader's credential is left in
+# <state-dir>/core/sensitive/s3/accounts-reader for uat/hub/dmz/install.sh
+# --accounts-reader-dir: it belongs in the DMZ cluster, never in core's. Neither accounts user can reach the recipe or
 # job bucket, and farmer's recipe user cannot reach the accounts bucket.
 # FLAG FOR SECURITY REVIEW.
 #
@@ -37,12 +40,11 @@ parse_common_args "minio-setup.sh <kubeconfig> <endpoints.json> <state-dir> <saa
 saasapi_policy_src="$4"
 need_cmd kubectl jq
 
-# The accounts bucket (docs/briefs/P21-slice2-bus-loader.md §4.1) and its
-# two users. Names match the nats chart's accountStore and §4.6.
-ACCOUNTS_BUCKET=imas-accounts
+# The accounts bucket's two users (docs/briefs/P21-slice2-bus-loader.md
+# §4.1, §4.6). The bucket and the writer's Secret are ACCOUNTS_BUCKET and
+# S3_ACCOUNTS_WRITER_SECRET in lib/common.sh (the charts' accountStore).
 S3_ACCOUNTS_WRITER_USER=imas-farmer-accounts
 S3_ACCOUNTS_READER_USER=imas-bus-accounts-reader
-S3_ACCOUNTS_WRITER_SECRET=imas-farmer-accounts-writer
 
 grep -q RECIPE_BUCKET "$saasapi_policy_src" || die "$saasapi_policy_src has no RECIPE_BUCKET placeholder"
 
@@ -77,8 +79,9 @@ bucket() {
 }
 bucket "$RECIPE_BUCKET"
 bucket "$JOB_BUCKET"
+bucket "$SPROUT_JWT_BUCKET"
 bucket "$ACCOUNTS_BUCKET"
-log "buckets $RECIPE_BUCKET, $JOB_BUCKET and $ACCOUNTS_BUCKET exist"
+log "buckets $RECIPE_BUCKET, $JOB_BUCKET, $SPROUT_JWT_BUCKET and $ACCOUNTS_BUCKET exist"
 
 # policy <name> <json on stdin>
 policy() {
@@ -88,7 +91,8 @@ policy() {
 	[[ "$c" == 200 ]] || die "RustFS add-canned-policy $1: http $c"
 	log "RustFS policy $1 written"
 }
-sed -e "s/RECIPE_BUCKET/$RECIPE_BUCKET/g" -e "s/JOB_BUCKET/$JOB_BUCKET/g" "$here/minio/farmer-policy.json" |
+sed -e "s/RECIPE_BUCKET/$RECIPE_BUCKET/g" -e "s/JOB_BUCKET/$JOB_BUCKET/g" -e "s/SPROUT_JWT_BUCKET/$SPROUT_JWT_BUCKET/g" \
+	"$here/minio/farmer-policy.json" |
 	policy imas-uat-farmer
 sed -e "s/RECIPE_BUCKET/$RECIPE_BUCKET/g" "$saasapi_policy_src" | policy imas-uat-saasapi-recipes
 # accounts_policy <object actions as a JSON array>: list on the accounts
