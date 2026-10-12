@@ -317,7 +317,7 @@ jobs:
           uat/hub/dmz/install.sh --kubeconfig "$STATE/k0s/dmz.kubeconfig" \
             --endpoints "$STATE/k0s/endpoints.json" --release-tag "$RELEASE_TAG" \
             --seeds-from-kubeconfig "$STATE/k0s/core.kubeconfig" \
-            --loader-seed "$STATE/hub/core/sensitive/seeds/bus-loader-user.nk" \
+            --loader-seed "${UAT_SEEDS_DIR:-$STATE/hub/core/sensitive/seeds}/bus-loader-user.nk" \
             --accounts-reader-dir "$STATE/hub/core/sensitive/s3/accounts-reader" \
             --workdir "$STATE/dmz"
 

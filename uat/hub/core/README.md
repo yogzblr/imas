@@ -410,8 +410,11 @@ Four user seeds exist, as files in `UAT_SEEDS_DIR` (default
 already there and generates only the missing ones. The DMZ bus itself needs
 no seed (P21 slice 1): it starts from the public trust ConfigMap, which
 carries no secret; only its loader sidecar holds `bus-loader-user.nk`, in
-the DMZ's own Secret. A lost loader seed is simply a new loader user: the
-next install sets its public key and the DMZ install replaces its Secret.
+the DMZ's own Secret. Once the trust ConfigMap carries
+`bus-loader-user.jwt`, which is never re-minted (design T4), `seeds.sh`
+refuses to regenerate a missing loader seed (restore it from the DMZ
+Secret `imas-bus-loader-sys-user`, key `user.nk`) and refuses a seed whose
+public key is not the one that JWT names.
 
 ## Open points
 

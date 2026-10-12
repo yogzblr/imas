@@ -247,6 +247,24 @@ if command -v go >/dev/null; then
 		expect "seeds.sh adds imas-farmer-nkey to an install that has only the seeds Secret" seeds
 		[[ -s "$nksec" ]] && cmp -s "$sec" "$tmp/seeds-secret.json" &&
 			ok "seeds: imas-farmer-nkey created, imas-farmer-nats-seeds untouched" || bad "seeds: adding imas-farmer-nkey"
+		# The loader seed once the trust names it (bus-loader-user.jwt):
+		# kept, a missing one refused, one for another key refused.
+		b64url() { base64 -w0 | tr '+/' '-_' | tr -d '='; }
+		ljwt="$(printf '{"alg":"ed25519-nkey"}' | b64url).$(jq -nc --arg s "$(cat "$lpub")" '{sub: $s}' | b64url).c2ln"
+		mkdir -p "$STUB_STATE/imas-core/ConfigMap"
+		jq -n --arg j "$ljwt" '{kind:"ConfigMap",metadata:{name:"imas-nats-trust",namespace:"imas-core"},data:{"bus-loader-user.jwt":$j}}' \
+			>"$STUB_STATE/imas-core/ConfigMap/imas-nats-trust.json"
+		expect "seeds.sh with a trust naming this loader: seed kept" seeds
+		cp "$sd/bus-loader-user.nk" "$tmp/loader.nk"
+		rm "$sd/bus-loader-user.nk"
+		refuse "seeds.sh refuses to regenerate a loader seed the trust already names" "restore the seed .*never regenerate" seeds
+		[[ ! -e "$sd/bus-loader-user.nk" ]] && ok "seeds: no new loader seed written" || bad "seeds: a new loader seed was written"
+		"$state/core/bin/nk" -gen user | tr -d '\n' >"$sd/bus-loader-user.nk"
+		chmod 600 "$sd/bus-loader-user.nk"
+		refuse "seeds.sh refuses a loader seed for another key than the trust's" "refusing a loader seed the bus would not accept" seeds
+		cp "$tmp/loader.nk" "$sd/bus-loader-user.nk"
+		expect "seeds.sh with the restored loader seed" seeds
+		rm "$STUB_STATE/imas-core/ConfigMap/imas-nats-trust.json"
 		# A seed directory that already holds one seed: it is kept, the
 		# others generated.
 		state2="$tmp/state2" shared="$tmp/shared-seeds"

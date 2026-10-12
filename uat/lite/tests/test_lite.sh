@@ -66,7 +66,7 @@ EOF
 	printf '127.0.0.1 localhost\n::1 localhost\n' >"$T/hosts"
 	cp "$T/hosts" "$T/hosts.orig"
 	export PATH="$LITE/tests/stubs:$PATH" HOME=$T/home
-	unset XDG_STATE_HOME LITE_RUN_ID LITE_HOST_ACCESS LITE_HOST_SPROUT LITE_SPROUTS LITE_NETWORK \
+	unset UAT_SEEDS_DIR XDG_STATE_HOME LITE_RUN_ID LITE_HOST_ACCESS LITE_HOST_SPROUT LITE_SPROUTS LITE_NETWORK \
 		LITE_SUBNET STUB_DOCKER_OS STUB_APISERVER_ARGS STUB_NO_DEFAULT_SC STUB_TESTS_RC STUB_SUMMARY
 	export LITE_STATE=$T/state LITE_HOSTS_FILE=$T/hosts LITE_POLL_SECONDS=0 LITE_SUDO=sudo \
 		LITE_K0S_VERSIONS=$T/k0s-versions.env VMCTL_POLL_SECONDS=0 \
@@ -244,6 +244,9 @@ t_up_rerun() {
 	: >"$STUB_LOG"
 	rc_is 0 "$LITE/up.sh" --release-tag v0.1.0-rc.5
 	check "a new release installs again" bash -c "grep -q 'core-install.* v0.1.0-rc.5' '$STUB_LOG'"
+	: >"$STUB_LOG"
+	UAT_SEEDS_DIR=$T/seeds rc_is 0 up --reinstall
+	check "the dmz install takes the loader seed from UAT_SEEDS_DIR" has "$STUB_LOG" "--loader-seed $T/seeds/bus-loader-user.nk "
 	# A stopped sprout is started again, not replaced.
 	jq '.State.Running = false' "$STUB_STATE/docker/containers/imas-lite-t1-alma.json" >"$T/c" &&
 		mv "$T/c" "$STUB_STATE/docker/containers/imas-lite-t1-alma.json"

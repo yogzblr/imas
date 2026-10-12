@@ -9,7 +9,8 @@
 #   - farmer's NKey (farmer.nk) in Secret farmer.nkeySecret.secretName
 #     (imas-farmer-nkey), the one seed every farmer replica mounts;
 #   - the DMZ bus loader's SYS user (bus-loader-user.nk). It is a file only,
-#     never a core Secret: uat/hub/dmz/install.sh --loader-seed puts it in
+#     never a core Secret, and never regenerated once the trust ConfigMap
+#     names a loader (see below): uat/hub/dmz/install.sh --loader-seed puts it in
 #     the DMZ cluster. Its public key goes to <state-dir>/core/out/
 #     bus-loader-user.pub (not secret), which gen-values.sh turns into
 #     natsTrust.busLoaderUserPub, so the chart's bootstrap Job mints
@@ -111,14 +112,29 @@ ensure_secret() {
 ensure_secret "$SEEDS_SECRET"
 ensure_secret "$FARMER_NKEY_SECRET"
 
-# The loader's seed: no core Secret to restore it from, so a lost file is
-# a new loader user. gen-values.sh then sets the new public key, the
-# bootstrap Job mints its JWT, and uat/hub/dmz/install.sh --loader-seed
-# replaces the DMZ Secret: the two always come from this one file.
+# The loader's seed: no core Secret holds it. Before the first install it
+# is generated here; gen-values.sh sets its public key, the bootstrap Job
+# mints bus-loader-user.jwt into the trust ConfigMap, and
+# uat/hub/dmz/install.sh --loader-seed puts it in the DMZ Secret. Once the
+# trust exists it is never rewritten (design T4: a re-run of the bootstrap
+# Job only checks it), so a new loader seed would have no JWT: with a trust
+# that names a loader, a missing seed is an error (restore it from the DMZ
+# Secret) and a seed for another key is refused.
 loader_seed="$SEEDS_DIR/$LOADER_SEED_FILE"
+trust_loader_jwt=$(kc -n "$CORE_NS" get configmap "$NATS_TRUST_CONFIGMAP" -o json 2>/dev/null |
+	jq -r '.data["bus-loader-user.jwt"] // empty' || true)
+trust_loader=""
+if [[ -n "$trust_loader_jwt" ]]; then
+	trust_loader=$(jwt_payload "$trust_loader_jwt" | jq -r '.sub // empty') ||
+		die "ConfigMap $CORE_NS/$NATS_TRUST_CONFIGMAP has a bus-loader-user.jwt that is not a JWT"
+	[[ -s "$loader_seed" ]] ||
+		die "$loader_seed is missing, but ConfigMap $CORE_NS/$NATS_TRUST_CONFIGMAP already carries bus-loader-user.jwt for $trust_loader, which is never re-minted: restore the seed (the DMZ's Secret imas-bus-loader-sys-user, key user.nk), never regenerate it"
+fi
 ensure_seed "$loader_seed"
 build_nk
 pub=$("$nk" -inkey "$loader_seed" -pubout | tr -d '\n') || die "nk -pubout failed for $LOADER_SEED_FILE"
 [[ "$pub" =~ ^U[A-Z2-7]{55}$ ]] || die "$LOADER_SEED_FILE's public key '$pub' is not an NKey user key"
+[[ -z "$trust_loader" || "$trust_loader" == "$pub" ]] ||
+	die "$loader_seed is for $pub, but the trust's bus-loader-user.jwt is for $trust_loader: refusing a loader seed the bus would not accept"
 printf '%s\n' "$pub" >"$OUT_DIR/$LOADER_PUB_FILE"
 log "bus loader user $pub ($OUT_DIR/$LOADER_PUB_FILE; seed $loader_seed for uat/hub/dmz/install.sh --loader-seed)"
