@@ -175,10 +175,28 @@ func TestWatchTenantActivityKeepsTenantOpen(t *testing.T) {
 	}
 	t.Cleanup(ns.Shutdown)
 
+	// Touch and TouchHeartbeat read the registry's clock under its lock,
+	// so a clock that signals once armed tells the test the observer ran;
+	// Sweep then waits on the same lock until the touch is recorded.
 	var mu sync.Mutex
 	now := time.Unix(1_700_000_000, 0)
-	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	var touched chan struct{}
+	clock := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		if touched != nil {
+			close(touched)
+			touched = nil
+		}
+		return now
+	}
 	advance := func(d time.Duration) { mu.Lock(); now = now.Add(d); mu.Unlock() }
+	arm := func() <-chan struct{} {
+		mu.Lock()
+		defer mu.Unlock()
+		touched = make(chan struct{})
+		return touched
+	}
 
 	for _, tc := range []struct{ name, subject string }{
 		{"heartbeat", pki.SproutHeartbeatSubjectPrefix + "sprout-1"},
@@ -209,17 +227,21 @@ func TestWatchTenantActivityKeepsTenantOpen(t *testing.T) {
 			}
 			t.Cleanup(pub.Close)
 
+			// The observer's subscriptions are on the server before the
+			// publish.
+			if err := nc.Flush(); err != nil {
+				t.Fatalf("flush: %v", err)
+			}
 			advance(11 * time.Minute)
+			observed := arm()
 			if err := pub.Publish(tc.subject, nil); err != nil {
 				t.Fatalf("publish: %v", err)
 			}
-			if err := pub.Flush(); err != nil {
-				t.Fatalf("flush: %v", err)
+			select {
+			case <-observed:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("the %s observer never touched the registry", tc.name)
 			}
-			if err := nc.Flush(); err != nil { // the observer has run by now
-				t.Fatalf("flush: %v", err)
-			}
-			time.Sleep(50 * time.Millisecond)
 			if got := r.Sweep(); len(got) != 0 {
 				t.Fatalf("Sweep closed %v right after a %s", got, tc.name)
 			}
