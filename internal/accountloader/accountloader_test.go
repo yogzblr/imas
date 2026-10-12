@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -58,6 +59,30 @@ func TestLoadAllReadyOnlyAfterEveryKeyPushed(t *testing.T) {
 	st := l.Status()
 	if st.Target != 6 || st.Applied != 6 || st.State != StateReady || st.LastIndexToken != "T0" {
 		t.Errorf("status = %+v", st)
+	}
+}
+
+// Ready() and Status() agree: no snapshot taken while the initial load
+// finishes reports ready with any state other than StateReady.
+func TestReadyImpliesReadyState(t *testing.T) {
+	for range 50 {
+		tr, b, node := newTrust(t), newBucket(t), newFakeNode()
+		seed(t, tr, b, 3)
+		l := newLoader(t, fastConfig(tr, b.src(t), node))
+		run(t, l)
+		deadline := time.Now().Add(10 * time.Second)
+		for !l.Ready() {
+			if time.Now().After(deadline) {
+				t.Fatal("loader not ready within 10s")
+			}
+			runtime.Gosched()
+			if st := l.Status(); st.Ready && st.State != StateReady {
+				t.Fatalf("status = %+v: ready with state %q", st, st.State)
+			}
+		}
+		if st := l.Status(); st.State != StateReady {
+			t.Fatalf("Ready() is true but status = %+v", st)
+		}
 	}
 }
 

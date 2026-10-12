@@ -1,0 +1,1 @@
+change: E2 follow-up: the account loader records its ready state before setting the ready flag, so `/status` can no longer report ready while "starting" (the CI flake in `TestLoadAllReadyOnlyAfterEveryKeyPushed`; new `TestReadyImpliesReadyState`). `TestOpenBaoSlashKeyNames` records OpenBao's answer instead of skipping.
