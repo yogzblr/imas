@@ -87,8 +87,9 @@ func LoadBusNats() (nats_server.Options, BusSysUser, error) {
 	if err != nil {
 		return nats_server.Options{}, BusSysUser{}, fmt.Errorf("pki: create the account resolver: %w", err)
 	}
-	// Store is saveIfNewer: a SYS Account JWT core pushed earlier (and
-	// this node kept on its volume) is newer than the trust's and stays.
+	// Store is saveIfNewer: a SYS Account JWT already in the resolver
+	// directory (an emptyDir, so only after a container restart within
+	// the pod) is newer than the trust's and stays.
 	if err := resolver.Store(trust.SysAccountPub, trust.SysAccountJWT); err != nil {
 		return nats_server.Options{}, BusSysUser{}, fmt.Errorf("pki: seed the SYS account into the resolver: %w", err)
 	}
