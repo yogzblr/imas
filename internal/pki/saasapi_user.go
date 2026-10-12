@@ -298,7 +298,7 @@ type SaaSAPICredentialState struct {
 // (migration saas 00008). The table comes from the migration; this model
 // is only how the code reads and writes it.
 type saasAPICredentialStateRow struct {
-	ID         int        `gorm:"column:id;primaryKey;autoIncrement:false"`
+	ID         int        `gorm:"column:id;primaryKey;autoIncrement:false;type:tinyint"`
 	CurrentPub string     `gorm:"column:current_pub;size:64;not null"`
 	PrevPub    *string    `gorm:"column:prev_pub;size:64"`
 	RotatedAt  time.Time  `gorm:"column:rotated_at;not null;autoUpdateTime:false"`
