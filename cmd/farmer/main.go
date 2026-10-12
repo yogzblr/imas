@@ -173,10 +173,11 @@ func main() {
 	// SYS Account (docs/design/imas-internal-api-account.md) — and revoke
 	// the key saasapi rotated out, read from saas.saasapi_credential_state
 	// (prev_pub). The JWT reaches the saasapi Deployment through the
-	// publish-saasapi-credential Job, not from here. Not fatal: an error
-	// here is either a failed push of a key-rotation revocation (retried
-	// at the next boot; the credential is still minted) or a bootstrap
-	// problem that ReloadNKeys above will have surfaced too.
+	// publish-saasapi-credential Job, not from here. Not fatal: this logs
+	// and carries on. A failed push of a key-rotation revocation still
+	// mints the credential and is retried at the next boot; any other
+	// error (NATS auth bootstrap, the SaaS API seed, the SYS Account JWT)
+	// means no credential was minted this boot.
 	if _, _, err := pki.EnsureSaaSAPICredential(); err != nil {
 		log.Errorf("SaaS API NATS credential: %v", err)
 	}
