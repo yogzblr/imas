@@ -243,6 +243,13 @@ node would start, and stay, with no Account but SYS. */ -}}
 {{- if not (regexMatch "^[A-Za-z0-9]([-A-Za-z0-9.]*[A-Za-z0-9])?(:[0-9]{1,5})?$" (toString $a.endpoint)) -}}
 {{- fail (printf "accountStore.endpoint %q must be host or host:port, without a scheme or path" (toString $a.endpoint)) -}}
 {{- end -}}
+{{- $epParts := splitList ":" (toString $a.endpoint) -}}
+{{- if eq (len $epParts) 2 -}}
+{{- $epPort := int (last $epParts) -}}
+{{- if or (lt $epPort 1) (gt $epPort 65535) -}}
+{{- fail (printf "accountStore.endpoint port must be between 1 and 65535, got %s" (last $epParts)) -}}
+{{- end -}}
+{{- end -}}
 {{- if not $a.bucket -}}
 {{- fail "accountStore.bucket is required" -}}
 {{- end -}}

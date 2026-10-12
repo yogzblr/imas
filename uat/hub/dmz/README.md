@@ -53,7 +53,7 @@ the tofu `uat` JSON is itself a valid endpoints file. Extra keys are ignored.
 | `core.ports.farmer_api` | no | 5405 | Envoy's farmer upstream port |
 | `dmz.account_store.endpoint` | no | `<core.private_ip>:9000` | the accounts bucket's S3 endpoint the bus's loader sidecar reads (`host:port`, no scheme). Core's RustFS must be reachable there from the DMZ |
 | `dmz.account_store.use_ssl` | no | `false` | TLS to that endpoint |
-| `dmz.account_store.egress_cidr` | with a DNS name as endpoint | the endpoint's IP as a `/32` | the bus NetworkPolicy's one egress rule into core |
+| `dmz.account_store.egress_cidr` | when the endpoint is a DNS name | for an IP endpoint, that IP as a `/32`; none for a DNS name (`install.sh` does not resolve it, so supply the CIDR) | the bus NetworkPolicy's one egress rule into core |
 | `cluster_issuer` (or `ca.cluster_issuer`) | no | `imas-uat-ca` | the cert-manager ClusterIssuer of the UAT CA (UAT.2). `uat/hub/core` spells it `ca.cluster_issuer`; either is read, `cluster_issuer` first |
 | `private_dns_zone` | no | `uat.imas.internal` | the run's private DNS zone (UAT.1's `private_dns_zone`). `dmz.<zone>` and `core.<zone>` are the hubs' private names; see [Private names](#private-names) |
 | `dmz.private_fqdn`, `core.private_fqdn` | no | `dmz.<zone>`, `core.<zone>` | the hubs' private names spelled out, as `uat/hub/core` reads them; an explicit one wins over the zone |

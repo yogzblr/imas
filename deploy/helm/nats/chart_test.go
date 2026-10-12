@@ -1124,6 +1124,8 @@ func TestValidationAccountStoreRequired(t *testing.T) {
 	}{
 		{"no endpoint", "accountStore.endpoint is required", []string{"--set", "accountStore.endpoint="}},
 		{"endpoint with scheme", "without a scheme", []string{"--set", "accountStore.endpoint=https://s3.example.com"}},
+		{"endpoint port too large", "accountStore.endpoint port must be between 1 and 65535", []string{"--set", "accountStore.endpoint=s3.example.com:99999"}},
+		{"endpoint port zero", "accountStore.endpoint port must be between 1 and 65535", []string{"--set", "accountStore.endpoint=s3.example.com:0"}},
 		{"no bucket", "accountStore.bucket is required", []string{"--set", "accountStore.bucket="}},
 		{"bad bucket", "not a valid S3 bucket name", []string{"--set", "accountStore.bucket=Imas_Accounts"}},
 		{"no reader secret", "accountStore.credentialsSecret is required", []string{"--set", "accountStore.credentialsSecret="}},

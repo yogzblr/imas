@@ -1269,3 +1269,45 @@ func TestRenderAccountStore(t *testing.T) {
 		})
 	}
 }
+
+// --loader-seed must be exactly one user seed: a valid first line followed
+// by anything (even an unterminated second line) is refused.
+func TestInstallRefusesBadLoaderSeed(t *testing.T) {
+	need(t, true, "bash", "jq", "helm", "base64")
+	realHelm, _ := exec.LookPath("helm")
+	bin := t.TempDir()
+	for name, body := range map[string]string{"kubectl": stubKubectl, "helm": stubHelm} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tgz := packageChart(t, testVersion, testVersion)
+	kubeconfig := filepath.Join(t.TempDir(), "dmz.kubeconfig")
+	if err := os.WriteFile(kubeconfig, []byte("apiVersion: v1\nkind: Config\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const seed = "SUAUATSTUBLOADERSEEDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	for name, body := range map[string]string{
+		"trailing junk":   seed + "\njunk",
+		"two newlines":    seed + "\n\n",
+		"account seed":    "SAAUATSTUBLOADERSEEDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n",
+		"leading content": "x\n" + seed + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := filepath.Join(t.TempDir(), "loader.nk")
+			if err := os.WriteFile(f, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			env := []string{
+				"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"STUB_LOG=" + filepath.Join(t.TempDir(), "calls.log"), "STUB_CHART=" + tgz, "REAL_HELM=" + realHelm,
+			}
+			code, _, stderr := run(t, env, "install.sh", "--kubeconfig", kubeconfig,
+				"--endpoints", filepath.Join(dir(t), "testdata", "endpoints.json"), "--release-tag", testTag,
+				"--workdir", t.TempDir(), "--loader-seed", f)
+			if code == 0 || !strings.Contains(stderr, "is not one NKey user seed") {
+				t.Fatalf("exit %d, want the seed refused:\n%s", code, stderr)
+			}
+		})
+	}
+}

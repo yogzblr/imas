@@ -336,8 +336,13 @@ else
 	dmz_log "accounts reader credential: using the existing Secret $DMZ_NAMESPACE/$DMZ_ACCOUNTS_READER_SECRET"
 fi
 if [[ -n $loader_seed ]]; then
-	{ (($(wc -l <"$loader_seed") <= 1)) && grep -Eq '^SU[A-Z2-7]{50,}$' "$loader_seed"; } ||
+	# The whole file: one seed and at most one final newline, nothing else
+	# (the Secret carries the file byte for byte).
+	seed=$(<"$loader_seed")
+	size=$(wc -c <"$loader_seed")
+	{ [[ $seed =~ ^SU[A-Z2-7]{50,}$ ]] && ((size == ${#seed} || size == ${#seed} + 1)); } ||
 		dmz_die "--loader-seed $loader_seed is not one NKey user seed"
+	unset seed
 	dmz_log "loader SYS user seed: from $loader_seed"
 	apply_loader_secret "$DMZ_LOADER_SECRET" "user.nk=$loader_seed"
 else
