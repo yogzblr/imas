@@ -217,6 +217,10 @@ spec:
             - name: IMAS_NATSBOOT_BUS_FENCE_USER_PUB
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.natsTrust.busLoaderUserPub }}
+            - name: IMAS_NATSBOOT_BUS_LOADER_USER_PUB
+              value: {{ . | quote }}
+            {{- end }}
             {{- if .Values.natsTrust.kvCopy.enabled }}
             - name: IMAS_NATSBOOT_KV_COPY
               value: "true"

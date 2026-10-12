@@ -4,6 +4,9 @@
 {{- $ob := .Values.bus.tls.openbao -}}
 {{- $clustered := gt (int .Values.bus.replicaCount) 1 -}}
 {{- $cl := .Values.bus.cluster -}}
+{{- $as := .Values.accountStore -}}
+{{- $ld := .Values.loader -}}
+{{- $trustDir := "/var/run/imas/nats-trust" -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -113,7 +116,7 @@ spec:
             # The public trust (pki.ConfigureBusNats): the operator JWT,
             # SYS account and, clustered, the fence user's JWT.
             - name: IMAS_NATS_TRUST_DIR
-              value: /var/run/imas/nats-trust
+              value: {{ $trustDir }}
             # Seeds (BUS_FENCE_USER only): one IMAS_NATS_<NAME>_SEED_FILE
             # per mounted key. The _FILE form only: a raw
             # IMAS_NATS_<NAME>_SEED env var would be folded into the jety
@@ -150,6 +153,10 @@ spec:
               value: {{ $cl.auth.user | quote }}
             - name: IMAS_BUS_CLUSTER_ROUTE_PASSWORD_FILE
               value: {{ printf "%s/%s" $cl.auth.mountPath $cl.auth.passwordKey | quote }}
+            # The fence's cluster size: key "replicas" of the topology
+            # ConfigMap, never below the route count.
+            - name: IMAS_BUS_CLUSTER_SIZE_FILE
+              value: /var/run/imas/bus-topology/replicas
             {{- end }}
             {{- if eq .Values.bus.tls.mode "openbao" }}
             - name: IMAS_CERTS_OPENBAO_ADDR
@@ -210,7 +217,7 @@ spec:
             - name: data
               mountPath: /var/lib/imas/farmerbus
             - name: nats-trust
-              mountPath: /var/run/imas/nats-trust
+              mountPath: {{ $trustDir }}
               readOnly: true
             {{- if $seeds }}
             - name: nats-seeds
@@ -220,6 +227,9 @@ spec:
             {{- if $clustered }}
             - name: route-auth
               mountPath: {{ $cl.auth.mountPath }}
+              readOnly: true
+            - name: bus-topology
+              mountPath: /var/run/imas/bus-topology
               readOnly: true
             {{- end }}
             {{- if eq .Values.bus.tls.mode "secret" }}
@@ -242,6 +252,106 @@ spec:
             {{- end }}
             {{- with .Values.bus.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
+        # The account loader (cmd/farmerbus-loader, P21 slice 2): reads
+        # every Account JWT from the accounts bucket and pushes it into
+        # this pod's node over 127.0.0.1. A regular container, not an init
+        # or native sidecar: it pushes through the running server. The pod
+        # is Ready only once this container is, i.e. once the node holds
+        # every Account in the bucket. Only this container holds the S3
+        # read credential and the loader's SYS user seed; farmerbus has
+        # neither.
+        - name: loader
+          image: {{ include "imas-nats.loader.image" . | quote }}
+          imagePullPolicy: {{ default .Values.bus.image.pullPolicy $ld.image.pullPolicy }}
+          command: ["/farmerbus-loader"]
+          ports:
+            - name: loader-health
+              containerPort: {{ $ld.healthPort }}
+              protocol: TCP
+          env:
+            - name: IMAS_LOADER_S3_ENDPOINT
+              value: {{ $as.endpoint | quote }}
+            - name: IMAS_LOADER_S3_USE_SSL
+              value: {{ $as.useSSL | toString | quote }}
+            - name: IMAS_LOADER_S3_BUCKET
+              value: {{ $as.bucket | quote }}
+            - name: IMAS_LOADER_S3_ACCESS_KEY_ID_FILE
+              value: {{ printf "/var/run/secrets/imas/accounts-reader/%s" $as.accessKeyIdKey | quote }}
+            - name: IMAS_LOADER_S3_SECRET_ACCESS_KEY_FILE
+              value: {{ printf "/var/run/secrets/imas/accounts-reader/%s" $as.secretAccessKeyKey | quote }}
+            # Its own node only, never the Service. The TLS name is the
+            # bus Service's, which the bus certificate carries.
+            - name: IMAS_LOADER_NATS_URL
+              value: {{ printf "tls://127.0.0.1:%d" (int .Values.bus.ports.client) | quote }}
+            - name: IMAS_LOADER_NATS_SERVER_NAME
+              value: {{ include "imas-nats.bus.serviceFQDN" . | quote }}
+            - name: IMAS_LOADER_CA_FILE
+              {{- if eq .Values.bus.tls.mode "secret" }}
+              value: /var/run/imas/loader-ca/ca.crt
+              {{- else }}
+              value: {{ printf "%s/tls-rootca.pem" $tlsDir | quote }}
+              {{- end }}
+            # The SYS user JWT the core bootstrap mints (bus-loader-user.jwt
+            # in the trust); the seed from loader.sysUserSecret.
+            - name: IMAS_NATS_TRUST_DIR
+              value: {{ $trustDir }}
+            - name: IMAS_LOADER_SYS_USER_JWT_FILE
+              value: {{ printf "%s/bus-loader-user.jwt" $trustDir }}
+            - name: IMAS_LOADER_SYS_USER_SEED_FILE
+              value: {{ printf "/var/run/secrets/imas/loader/%s" $ld.sysUserSeedKey | quote }}
+            - name: IMAS_LOADER_EVENT_SUBJECT
+              value: {{ $as.eventSubject | quote }}
+            - name: IMAS_LOADER_RECONCILE_INTERVAL
+              value: {{ $as.reconcileInterval | quote }}
+            - name: IMAS_LOADER_FULL_RESYNC_INTERVAL
+              value: {{ $as.fullResyncInterval | quote }}
+            - name: IMAS_LOADER_HEALTH_PORT
+              value: {{ $ld.healthPort | quote }}
+            {{- with $ld.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with $ld.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $ld.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $ld.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $ld.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $ld.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: nats-trust
+              mountPath: {{ $trustDir }}
+              readOnly: true
+            - name: loader-sys-user
+              mountPath: /var/run/secrets/imas/loader
+              readOnly: true
+            - name: accounts-reader
+              mountPath: /var/run/secrets/imas/accounts-reader
+              readOnly: true
+            {{- if eq .Values.bus.tls.mode "secret" }}
+            - name: loader-ca
+              mountPath: /var/run/imas/loader-ca
+              readOnly: true
+            {{- else }}
+            # openbao mode: the CA farmerbus fetched at start lives only in
+            # its in-memory tls volume, so the loader reads it there
+            # (read-only). That volume also holds the bus key.
+            - name: tls
+              mountPath: {{ $tlsDir }}
+              readOnly: true
             {{- end }}
       volumes:
         - name: config
@@ -272,7 +382,27 @@ spec:
             items:
               - key: {{ $cl.auth.passwordKey | quote }}
                 path: {{ $cl.auth.passwordKey | quote }}
+        - name: bus-topology
+          configMap:
+            name: {{ include "imas-nats.bus.fullname" . }}-topology
         {{- end }}
+        # The loader's secrets: only the listed keys of each.
+        - name: loader-sys-user
+          secret:
+            secretName: {{ $ld.sysUserSecret }}
+            defaultMode: 0440
+            items:
+              - key: {{ $ld.sysUserSeedKey | quote }}
+                path: {{ $ld.sysUserSeedKey | quote }}
+        - name: accounts-reader
+          secret:
+            secretName: {{ $as.credentialsSecret }}
+            defaultMode: 0440
+            items:
+              - key: {{ $as.accessKeyIdKey | quote }}
+                path: {{ $as.accessKeyIdKey | quote }}
+              - key: {{ $as.secretAccessKeyKey | quote }}
+                path: {{ $as.secretAccessKeyKey | quote }}
         {{- if eq .Values.bus.tls.mode "secret" }}
         - name: tls
           secret:
@@ -281,6 +411,14 @@ spec:
             items:
               - { key: tls.crt, path: tls.crt }
               - { key: tls.key, path: tls.key }
+              - { key: ca.crt, path: ca.crt }
+        # The same Secret's CA alone, for the loader: it never sees the
+        # bus key.
+        - name: loader-ca
+          secret:
+            secretName: {{ .Values.bus.tls.secretName }}
+            defaultMode: 0440
+            items:
               - { key: ca.crt, path: ca.crt }
         {{- else }}
         # Issued from OpenBao PKI at every start (internal/certs.GenCert);
@@ -305,33 +443,10 @@ spec:
                   expirationSeconds: 600
         {{- end }}
         {{- end }}
-        {{- if not .Values.bus.persistence.enabled }}
+        # The resolver's JWT store (FarmerPKI) and nats.log. No PVC: the
+        # loader rebuilds the store from the accounts bucket at every start.
         - name: data
           emptyDir: {}
-        {{- end }}
         {{- with .Values.bus.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-  {{- if .Values.bus.persistence.enabled }}
-  persistentVolumeClaimRetentionPolicy:
-    whenDeleted: Retain
-    whenScaled: Retain
-  volumeClaimTemplates:
-    - metadata:
-        name: data
-        labels:
-          {{- include "imas-nats.bus.selectorLabels" . | nindent 10 }}
-        {{- with .Values.bus.persistence.annotations }}
-        annotations:
-          {{- toYaml . | nindent 10 }}
-        {{- end }}
-      spec:
-        accessModes:
-          {{- toYaml .Values.bus.persistence.accessModes | nindent 10 }}
-        {{- with .Values.bus.persistence.storageClassName }}
-        storageClassName: {{ . }}
-        {{- end }}
-        resources:
-          requests:
-            storage: {{ .Values.bus.persistence.size }}
-  {{- end }}

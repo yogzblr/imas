@@ -1,0 +1,4 @@
+change: P21 slice 2 PR 6 (C6): the bus chart drops its PVC (the resolver directory is an emptyDir) and runs the account loader sidecar in every bus pod (read-only accounts bucket credential and the loader SYS user seed in the loader container only; JWT `bus-loader-user.jwt` from `imas-nats-trust`), renders the `-bus-topology` ConfigMap the fence's cluster size reads, opens bus egress to the accounts bucket endpoint only, and validates the new required values; the farmer chart passes `natsTrust.busLoaderUserPub` to the trust bootstrap; UAT DMZ values and install create the loader's Secrets; `minio-setup.sh` creates the accounts bucket with a writer and a reader user. Flagged for security review.
+item: P21
+action: update
+next-append: **Slice 2 PR 6 (C6), ready for review:** chart, UAT and minio-setup wiring for the stateless bus and its loader; PR 7 removes the leftovers.

@@ -8,6 +8,7 @@
 #   install.sh --kubeconfig FILE --endpoints FILE --release-tag vX.Y.Z[-rc.N]
 #              [--seeds-dir DIR | --seeds-from-kubeconfig FILE
 #                                 [--seeds-from-namespace NS]]
+#              [--accounts-reader-dir DIR] [--loader-seed FILE]
 #              [--workdir DIR] [--expose nodeport|loadbalancer]
 #              [--timeout DURATION] [--chart-registry OCI_BASE]
 #   install.sh --render-only --endpoints FILE --release-tag TAG
@@ -26,6 +27,16 @@
 #                         Secret (imas-farmer-nats-seeds in --seeds-from-
 #                         namespace, default imas-core) instead
 #                         With neither, the Secret must already exist here.
+# --accounts-reader-dir   a directory with access-key-id and
+#                         secret-access-key: the read-only accounts bucket
+#                         credential the bus's loader sidecar uses (uat/hub/
+#                         core/minio-setup.sh writes it to
+#                         <state-dir>/sensitive/s3/accounts-reader). Without
+#                         it, Secret imas-bus-accounts-reader must exist here
+# --loader-seed           the loader's SYS user NKey seed file (SU...); its
+#                         public key is core's natsTrust.busLoaderUserPub.
+#                         Without it, Secret imas-bus-loader-sys-user must
+#                         exist here
 # --workdir               where the pulled chart, the generated values and
 #                         manifests, the render and dmz.json go (default: a
 #                         new temporary directory, printed at the end)
@@ -54,6 +65,10 @@
 set -euo pipefail
 
 DMZ_PROG=install.sh
+# The loader's Secrets (values-uat.yaml accountStore.credentialsSecret and
+# loader.sysUserSecret).
+DMZ_ACCOUNTS_READER_SECRET=imas-bus-accounts-reader
+DMZ_LOADER_SECRET=imas-bus-loader-sys-user
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 . "$here/lib.sh"
@@ -65,12 +80,13 @@ usage() {
 
 kubeconfig="" endpoints="" release_tag="" seeds_dir="" seeds_kubeconfig=""
 seeds_namespace=imas-core workdir="" expose="" timeout=10m
-chart_registry="" render_only="" chart=""
+chart_registry="" render_only="" chart="" reader_dir="" loader_seed=""
 
 while (($#)); do
 	case $1 in
 	--kubeconfig | --endpoints | --release-tag | --seeds-dir | --seeds-from-kubeconfig | \
-		--seeds-from-namespace | --workdir | --expose | --timeout | --chart-registry | --chart)
+		--seeds-from-namespace | --workdir | --expose | --timeout | --chart-registry | --chart | \
+		--accounts-reader-dir | --loader-seed)
 		(($# >= 2)) || dmz_die "$1 needs a value"
 		case $1 in
 		--kubeconfig) kubeconfig=$2 ;;
@@ -79,6 +95,8 @@ while (($#)); do
 		--seeds-dir) seeds_dir=$2 ;;
 		--seeds-from-kubeconfig) seeds_kubeconfig=$2 ;;
 		--seeds-from-namespace) seeds_namespace=$2 ;;
+		--accounts-reader-dir) reader_dir=$2 ;;
+		--loader-seed) loader_seed=$2 ;;
 		--workdir) workdir=$2 ;;
 		--expose) expose=$2 ;;
 		--timeout) timeout=$2 ;;
@@ -102,8 +120,8 @@ version=$(dmz_chart_version "$release_tag")
 [[ -z $expose || $expose == nodeport || $expose == loadbalancer ]] || dmz_die "--expose must be nodeport or loadbalancer, not '$expose'"
 [[ $timeout =~ ^[1-9][0-9]*[smh]$ ]] || dmz_die "--timeout '$timeout' is not a duration like 10m"
 if [[ -n $render_only ]]; then
-	[[ -z $kubeconfig && -z $seeds_dir && -z $seeds_kubeconfig ]] ||
-		dmz_die "--render-only touches no cluster: drop --kubeconfig and the seed options"
+	[[ -z $kubeconfig && -z $seeds_dir && -z $seeds_kubeconfig && -z $reader_dir && -z $loader_seed ]] ||
+		dmz_die "--render-only touches no cluster: drop --kubeconfig, the seed and the loader credential options"
 else
 	[[ -n $kubeconfig ]] || dmz_die "--kubeconfig is required"
 	[[ -r $kubeconfig ]] || dmz_die "kubeconfig '$kubeconfig' is not readable"
@@ -111,6 +129,8 @@ else
 	[[ -z $seeds_dir || -z $seeds_kubeconfig ]] || dmz_die "give --seeds-dir or --seeds-from-kubeconfig, not both"
 	[[ -z $seeds_kubeconfig || -r $seeds_kubeconfig ]] || dmz_die "kubeconfig '$seeds_kubeconfig' is not readable"
 	[[ $seeds_namespace =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || dmz_die "bad namespace '$seeds_namespace'"
+	[[ -z $reader_dir || -d $reader_dir ]] || dmz_die "--accounts-reader-dir '$reader_dir' is not a directory"
+	[[ -z $loader_seed || -r $loader_seed ]] || dmz_die "--loader-seed '$loader_seed' is not readable"
 fi
 
 dmz_need jq helm
@@ -148,6 +168,39 @@ chart_field() {
 	helm show chart "$1" | sed -n "s/^$2:[[:space:]]*//p" | head -n1 | tr -d "\"'"
 }
 
+# The accounts bucket the bus's loader reads (P21 slice 2): the core hub's
+# object store, reached on dmz.account_store.endpoint (default the core
+# private IP, port 9000), and the bus egress to exactly that address.
+# write_accounts_values OUT: passed after values-run.yaml.
+write_accounts_values() {
+	local out=$1 endpoint use_ssl cidr host port
+	endpoint=$(jq -r --arg d "${CORE_PRIVATE_IP}:9000" '.dmz.account_store.endpoint // $d' "$endpoints")
+	use_ssl=$(jq -r '.dmz.account_store.use_ssl // false' "$endpoints")
+	[[ $endpoint =~ ^([A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?):([0-9]{1,5})$ ]] ||
+		dmz_die "endpoints: dmz.account_store.endpoint '$endpoint' is not host:port (no scheme)"
+	host=${BASH_REMATCH[1]} port=${BASH_REMATCH[3]}
+	((port >= 1 && port <= 65535)) || dmz_die "endpoints: dmz.account_store.endpoint port $port is not a port"
+	[[ $use_ssl == true || $use_ssl == false ]] || dmz_die "endpoints: dmz.account_store.use_ssl must be true or false"
+	if [[ $host =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+		cidr=$(jq -r --arg d "$host/32" '.dmz.account_store.egress_cidr // $d' "$endpoints")
+	else
+		cidr=$(jq -r '.dmz.account_store.egress_cidr // empty' "$endpoints")
+		[[ -n $cidr ]] || dmz_die "endpoints: dmz.account_store.endpoint '$endpoint' is a name: set dmz.account_store.egress_cidr to its address"
+	fi
+	[[ $cidr =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]{1,2}$ ]] || dmz_die "endpoints: dmz.account_store.egress_cidr '$cidr' is not an IPv4 CIDR"
+	cat >"$out" <<EOF
+# Written by uat/hub/dmz/install.sh for one run. Do not commit.
+---
+accountStore:
+  endpoint: "${endpoint}"
+  useSSL: ${use_ssl}
+networkPolicy:
+  accountStoreEgress:
+    cidr: "${cidr}"
+    port: ${port}
+EOF
+}
+
 # --- 1. The chart, from the release's OCI registry --------------------------
 if [[ -n $chart ]]; then
 	[[ -e $chart ]] || dmz_die "chart '$chart' not found"
@@ -177,8 +230,9 @@ got_app=$(chart_field "$chart_ref" appVersion)
 
 # --- 2. Values, manifests, render ----------------------------------------
 dmz_write_run_values "$workdir/values-run.yaml" "$version"
+write_accounts_values "$workdir/values-accounts.yaml"
 dmz_write_manifests "$workdir/manifests.yaml" "$expose"
-values=(-f "$here/values-uat.yaml" -f "$workdir/values-run.yaml")
+values=(-f "$here/values-uat.yaml" -f "$workdir/values-run.yaml" -f "$workdir/values-accounts.yaml")
 
 # An offline render of exactly what step 6 installs, kept for the record and
 # checked below. The Kubernetes version only satisfies the chart's
@@ -248,6 +302,47 @@ else
 			dmz_die "Secret $DMZ_NAMESPACE/$DMZ_SEEDS_SECRET lacks $key: pass --seeds-dir or --seeds-from-kubeconfig (core's seeds; README.md, \"Seeds\")"
 	done
 	dmz_log "seeds: using the existing Secret $DMZ_NAMESPACE/$DMZ_SEEDS_SECRET"
+fi
+
+# --- 4b. The loader's Secrets ----------------------------------------------
+# apply_loader_secret NAME KEY=FILE...: one Secret from files; contents
+# travel only through kubectl's stdin.
+apply_loader_secret() {
+	local name=$1 kv args=()
+	shift
+	for kv in "$@"; do
+		[[ -s ${kv#*=} ]] || dmz_die "${kv#*=} is missing or empty"
+		args+=("--from-file=$kv")
+	done
+	kc -n "$DMZ_NAMESPACE" create secret generic "$name" "${args[@]}" \
+		--dry-run=client -o yaml | kc apply -f - >/dev/null
+	kc -n "$DMZ_NAMESPACE" label secret "$name" imas.io/purpose=imas-uat --overwrite >/dev/null
+}
+# need_secret_keys NAME KEY...: an existing Secret with every key.
+need_secret_keys() {
+	local name=$1 key
+	shift
+	for key in "$@"; do
+		[[ -n $(kc -n "$DMZ_NAMESPACE" get secret "$name" -o "jsonpath={.data.${key//./\\.}}" 2>/dev/null) ]] ||
+			dmz_die "Secret $DMZ_NAMESPACE/$name lacks $key: pass --accounts-reader-dir and --loader-seed (README.md, \"Accounts bucket and loader\")"
+	done
+}
+if [[ -n $reader_dir ]]; then
+	dmz_log "accounts reader credential: from $reader_dir"
+	apply_loader_secret "$DMZ_ACCOUNTS_READER_SECRET" \
+		"access-key-id=$reader_dir/access-key-id" "secret-access-key=$reader_dir/secret-access-key"
+else
+	need_secret_keys "$DMZ_ACCOUNTS_READER_SECRET" access-key-id secret-access-key
+	dmz_log "accounts reader credential: using the existing Secret $DMZ_NAMESPACE/$DMZ_ACCOUNTS_READER_SECRET"
+fi
+if [[ -n $loader_seed ]]; then
+	{ (($(wc -l <"$loader_seed") <= 1)) && grep -Eq '^SU[A-Z2-7]{50,}$' "$loader_seed"; } ||
+		dmz_die "--loader-seed $loader_seed is not one NKey user seed"
+	dmz_log "loader SYS user seed: from $loader_seed"
+	apply_loader_secret "$DMZ_LOADER_SECRET" "user.nk=$loader_seed"
+else
+	need_secret_keys "$DMZ_LOADER_SECRET" user.nk
+	dmz_log "loader SYS user seed: using the existing Secret $DMZ_NAMESPACE/$DMZ_LOADER_SECRET"
 fi
 
 # --- 5. Certificates, exposure, the core rule -----------------------------

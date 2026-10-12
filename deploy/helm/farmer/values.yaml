@@ -106,6 +106,12 @@ natsTrust:
   # bootstrap also mints bus-fence-user.jwt (IMAS_NATSBOOT_BUS_FENCE_USER_PUB).
   # Required before the bus runs with bus.replicaCount > 1.
   busFenceUserPub: ""
+  # The nats chart's account loader SYS user public key (U..., from the
+  # seed ops created for its loader.sysUserSecret). Set, the bootstrap also
+  # mints bus-loader-user.jwt (IMAS_NATSBOOT_BUS_LOADER_USER_PUB), which
+  # every bus pod's loader sidecar connects with. Required before the bus
+  # runs the loader (P21 slice 2); must differ from busFenceUserPub.
+  busLoaderUserPub: ""
   # Also copy the public trust to OpenBao KV v2 at
   # secret/data/platform/imas/nats-trust (the bootstrap's ephemeral policy
   # then gets that one path). Off: the copy is by hand or pipeline.

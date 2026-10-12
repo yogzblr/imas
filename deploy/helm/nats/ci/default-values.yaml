@@ -1,1 +1,7 @@
-# chart-testing: defaults as shipped.
+# chart-testing: defaults as shipped, plus the values the chart requires.
+# The accounts bucket is required (the bus keeps no volume).
+accountStore:
+  endpoint: s3.imas-core.example.internal:443
+networkPolicy:
+  accountStoreEgress:
+    cidr: 10.20.0.10/32

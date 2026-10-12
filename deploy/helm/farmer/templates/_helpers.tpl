@@ -957,6 +957,14 @@ silently uncovered. Each signer role is its own.
 {{- fail (printf "natsTrust.busFenceUserPub %q is not an NKey user public key (U and 55 more base32 characters): the public half of the nats chart's BUS_FENCE_USER seed" (toString .)) -}}
 {{- end -}}
 {{- end -}}
+{{- with $t.busLoaderUserPub -}}
+{{- if not (regexMatch "^U[A-Z2-7]{55}$" (toString .)) -}}
+{{- fail (printf "natsTrust.busLoaderUserPub %q is not an NKey user public key (U and 55 more base32 characters): the public half of the nats chart's loader.sysUserSecret seed" (toString .)) -}}
+{{- end -}}
+{{- if eq (toString .) (toString $t.busFenceUserPub) -}}
+{{- fail "natsTrust.busLoaderUserPub and natsTrust.busFenceUserPub must be different keys: the loader and the fence are separate SYS users with separate grants" -}}
+{{- end -}}
+{{- end -}}
 {{- end }}
 
 {{/* The trust ConfigMap volume and mount (IMAS_NATS_TRUST_DIR). */}}
