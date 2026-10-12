@@ -407,13 +407,17 @@ const (
 
 // sproutUserJWTRow is a farmer.sprout_user_jwt row (migration farmer
 // 00005). The table comes from the migration; this model is only how the
-// store reads and writes it.
+// store reads and writes it. Its columns match the migration except that
+// it declares no default for updated_at, which the migration sets to
+// CURRENT_TIMESTAMP(3): sqlite, which this package's tests build the table
+// in, rejects that default, and the store always sets updated_at itself.
+// That is why internal/migrations' baseline check still skips this table.
 type sproutUserJWTRow struct {
 	TenantID   string     `gorm:"column:tenant_id;primaryKey;size:64"`
 	SproutID   string     `gorm:"column:sprout_id;primaryKey;size:253"`
 	ObjectKey  *string    `gorm:"column:object_key;size:512"`
 	UserPubkey *string    `gorm:"column:user_pubkey;size:64"`
-	JWTSHA256  *string    `gorm:"column:jwt_sha256;size:64"`
+	JWTSHA256  *string    `gorm:"column:jwt_sha256;type:char(64)"`
 	ExpiresAt  *time.Time `gorm:"column:expires_at"`
 	LeaseOwner *string    `gorm:"column:lease_owner;size:128"`
 	LeaseUntil *time.Time `gorm:"column:lease_until"`
