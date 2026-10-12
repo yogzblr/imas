@@ -2,10 +2,17 @@ package natsapi
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
+
 	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/lease"
+	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/rbac"
 )
 
@@ -92,5 +99,62 @@ func TestRefreshAllCohorts_WithStaticCohort(t *testing.T) {
 	}
 	if cached.LastRefreshed.IsZero() {
 		t.Fatal("expected non-zero LastRefreshed timestamp")
+	}
+}
+
+// TestCohortRefresherRunsOnce: four replicas tick the cohort refresher at
+// the same instant; it refreshes once per interval across them.
+func TestCohortRefresherRunsOnce(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, _ := gdb.DB()
+	sqlDB.SetMaxOpenConns(1)
+	if err := gdb.AutoMigrate(&lease.JobLease{}); err != nil {
+		t.Fatal(err)
+	}
+	pki.SetDB(gdb)
+	t.Cleanup(func() { pki.SetDB(sharedPKIDB); sqlDB.Close() })
+
+	var runs atomic.Int32
+	orig := cohortRefreshBody
+	cohortRefreshBody = func() { runs.Add(1) }
+	t.Cleanup(func() { cohortRefreshBody = orig })
+
+	var mu sync.Mutex
+	clock := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
+	now := func() time.Time { mu.Lock(); defer mu.Unlock(); return clock }
+	advance := func(d time.Duration) { mu.Lock(); clock = clock.Add(d); mu.Unlock() }
+	const interval = 10 * time.Minute
+	tick := func() {
+		var wg sync.WaitGroup
+		for range 4 {
+			wg.Add(1)
+			go func() { defer wg.Done(); refreshCohortsLeased(context.Background(), interval, now) }()
+		}
+		wg.Wait()
+	}
+
+	tick()
+	if got := runs.Load(); got != 1 {
+		t.Fatalf("first tick refreshed %d times, want 1", got)
+	}
+	advance(interval / 2)
+	tick()
+	if got := runs.Load(); got != 1 {
+		t.Fatalf("within the interval: %d refreshes in all, want 1", got)
+	}
+	advance(interval / 2)
+	tick()
+	if got := runs.Load(); got != 2 {
+		t.Fatalf("after the interval: %d refreshes in all, want 2", got)
+	}
+	var row lease.JobLease
+	if err := gdb.Where("name = ?", cohortRefreshJobName).Take(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.LastRunAt == nil || !row.LastRunAt.Equal(now()) {
+		t.Fatalf("last_run_at = %v, want %v", row.LastRunAt, now())
 	}
 }

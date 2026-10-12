@@ -25,6 +25,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/lease"
 	"github.com/yogzblr/imas/internal/objectstore"
 	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
 	"github.com/yogzblr/imas/internal/pki/pkitest"
@@ -49,8 +50,9 @@ func newTestDB(t *testing.T) *gorm.DB {
 	if sqlDB, err := gdb.DB(); err == nil {
 		t.Cleanup(func() { _ = sqlDB.Close() })
 	}
-	// sprout_user_jwt comes from migration farmer 00005, not Models().
-	if err := gdb.AutoMigrate(append(Models(), &sproutUserJWTRow{})...); err != nil {
+	// sprout_user_jwt and job_leases come from migrations farmer 00005
+	// and 00004, not Models().
+	if err := gdb.AutoMigrate(append(Models(), &sproutUserJWTRow{}, &lease.JobLease{})...); err != nil {
 		t.Fatalf("migrating test db: %v", err)
 	}
 	SetDB(gdb)

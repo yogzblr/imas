@@ -83,14 +83,13 @@ import (
 	"github.com/yogzblr/imas/internal/pki"
 )
 
-// verifySproutInTenant, dispatchCmdRun, dispatchCook and triggerCook are
+// verifySproutInTenant, dispatchCmdRun and dispatchCook are
 // indirections so handler-level unit tests can stub the pki check and the
 // dispatch. Production code always runs the real functions.
 var (
 	verifySproutInTenant = pki.VerifySproutInTenant
 	dispatchCmdRun       = handleCmdRun
-	dispatchCook         = prepareSaaSAPICook
-	triggerCook          = triggerLocalCook
+	dispatchCook         = runSaaSAPICook
 	dispatchSelfUpdate   = sendSelfUpdate
 	requireSproutBoxKey  = cook.RequireSproutBoxKey
 )
@@ -562,7 +561,7 @@ func runSproutCook(req controlplane.SproutActionRequest, reply controlplane.Spro
 		Test:   in.Test,
 		Env:    in.Env,
 	}
-	// The dispatch itself runs after this reply (triggerCook), where
+	// The dispatch itself runs in the background (runSaaSAPICook), where
 	// farmer's refusal to send to a sprout with no box key would only be
 	// logged and the item would wait for a job that never starts. Check
 	// first, so it is answered with the code instead (FIX.1). The send
@@ -582,15 +581,9 @@ func runSproutCook(req controlplane.SproutActionRequest, reply controlplane.Spro
 		reply.ErrorCode = controlplane.ErrorInternal
 		return reply, fmt.Errorf("unexpected cook result %T without a JID", res)
 	}
-	// A cook is only sent once it is triggered (the CLI subscribes to
-	// the job's events first, then sends the sealed trigger). The SaaS
+	// dispatchCook prepared and started the cook in one call: the SaaS
 	// API tracks the job through farmer.jobs rather than the event
-	// stream, so farmer triggers it itself, on this replica, without
-	// the bus (prepareSaaSAPICook, triggerLocalCook).
-	if err := triggerCook(req.TenantID, cmd.JID); err != nil {
-		reply.ErrorCode = controlplane.ErrorInternal
-		return reply, fmt.Errorf("triggering cook %s: %w", cmd.JID, err)
-	}
+	// stream, so unlike the CLI's cook it has no separate trigger.
 
 	reply.Status = controlplane.StatusDispatched
 	reply.JID = cmd.JID

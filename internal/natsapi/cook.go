@@ -126,43 +126,25 @@ func handleCook(c apiCaller, params json.RawMessage) (any, error) {
 	return plan.command, nil
 }
 
-// localCooks are SaaS API cooks prepareSaaSAPICook made, waiting for
-// triggerLocalCook on this replica, keyed on (tenant_id, jid).
-var localCooks sync.Map
+// prepareSaaSAPICookPlan is prepareCook for runSaaSAPICook; tests replace
+// it to watch the order of prepare and dispatch.
+var prepareSaaSAPICookPlan = prepareCook
 
-func localCookKey(tenantID, jid string) string { return tenantID + "\x00" + jid }
-
-// prepareSaaSAPICook is internal.sprout.action's cook (dispatchCook): the
-// same validation as a CLI cook, held on this replica until
-// triggerLocalCook. The SaaS API tracks the job through farmer.jobs, not
-// the event stream, so nothing needs to subscribe before dispatch, and the
-// trigger never goes over the bus.
-func prepareSaaSAPICook(tenantID string, params json.RawMessage) (any, error) {
-	plan, err := prepareCook(tenantID, "", params)
+// runSaaSAPICook is internal.sprout.action's cook (dispatchCook): the same
+// validation as a CLI cook, then the dispatch started at once, in the same
+// call. The SaaS API tracks the job through farmer.jobs, not the event
+// stream, so nothing needs to subscribe before dispatch and there is no
+// separate trigger: no job is held between calls, on this replica or in a
+// shared store, so any replica can serve the request whole.
+func runSaaSAPICook(tenantID string, params json.RawMessage) (any, error) {
+	plan, err := prepareSaaSAPICookPlan(tenantID, "", params)
 	if err != nil {
 		return nil, err
 	}
 	jid := cook.GenerateJobID()
-	key := localCookKey(tenantID, jid)
-	localCooks.Store(key, plan.dispatch)
-	time.AfterFunc(cookTriggerWindow, func() {
-		if _, ok := localCooks.LoadAndDelete(key); ok {
-			log.Errorf("timeout waiting for cook trigger on JID %s", jid)
-		}
-	})
+	go plan.dispatch(jid)
 	plan.command.JID = jid
 	return plan.command, nil
-}
-
-// triggerLocalCook starts the dispatch prepareSaaSAPICook held for jid in
-// tenantID (triggerCook), once.
-func triggerLocalCook(tenantID, jid string) error {
-	v, ok := localCooks.LoadAndDelete(localCookKey(tenantID, jid))
-	if !ok {
-		return fmt.Errorf("no cook %s waiting in tenant %s", jid, tenantID)
-	}
-	go v.(func(string))(jid)
-	return nil
 }
 
 // awaitCookTrigger subscribes, on this replica only, to job jid's sealed
