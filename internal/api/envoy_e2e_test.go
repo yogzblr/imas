@@ -51,6 +51,9 @@ func TestSproutDownloadsStagedRecipe_ThroughRealEnvoy(t *testing.T) {
 	key := testGatewayKey{pub: priv.Public().(ed25519.PublicKey), priv: priv}
 	handlers.SetGatewaySigner(transittest.NewSigner(t, priv))
 	t.Cleanup(func() { handlers.SetGatewaySigner(nil) })
+	// Envoy's routing and JWT checks are under test here; farmer's
+	// revocation check has its own tests (gateway_revocation_test.go).
+	acceptAnyGatewaySubject(t)
 
 	newStagingTestServer(t, tenantID)
 	s := newTestSprout(t, tenantID, sproutID)
@@ -191,6 +194,9 @@ func TestSproutUpdateManifest_ThroughRealEnvoy(t *testing.T) {
 	}
 	handlers.SetGatewaySigner(transittest.NewSigner(t, priv))
 	t.Cleanup(func() { handlers.SetGatewaySigner(nil) })
+	// Envoy's routing and JWT checks are under test here; farmer's
+	// revocation check has its own tests (gateway_revocation_test.go).
+	acceptAnyGatewaySubject(t)
 
 	const fileName, sum = "imas-sprout_2.4.1_linux_amd64.deb", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	want := fleetsign.Manifest{

@@ -151,7 +151,8 @@ func TestOpenBaoSlashKeyNames(t *testing.T) {
 	r := newRealServer(t)
 	status, body := r.admin.Call("", http.MethodPost, r.mount+"/keys/nats/operator", map[string]any{"type": "ed25519"})
 	if status/100 != 2 {
-		t.Skipf("UNVERIFIED item 1 answered: Transit refuses a key name with a slash (status %d: %s); flat names stay", status, body)
+		t.Logf("UNVERIFIED item 1 answered: Transit refuses a key name with a slash (status %d: %s); flat names stay", status, body)
+		return
 	}
 	readStatus, _ := r.admin.Call("", http.MethodGet, r.mount+"/keys/nats/operator", nil)
 	signStatus, _ := r.admin.Call("", http.MethodPost, r.mount+"/sign/nats/operator", map[string]any{"input": "aGk="})

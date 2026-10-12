@@ -338,8 +338,10 @@ func (l *Loader) loadAll(ctx context.Context) {
 	for attempt := 1; ctx.Err() == nil; attempt++ {
 		state, err := l.loadOnce(ctx, sysKey)
 		if err == nil {
-			l.ready.Store(true)
+			// State before the ready flag: anyone who sees Ready() true
+			// then reads Status() must find the state ready too.
 			l.setState(StateReady)
+			l.ready.Store(true)
 			log.Infof("accountloader: initial load complete, %d accounts", l.Status().Applied)
 			return
 		}

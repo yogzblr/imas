@@ -61,6 +61,25 @@ func TestLoadAllReadyOnlyAfterEveryKeyPushed(t *testing.T) {
 	}
 }
 
+// Ready() and Status() agree: no snapshot taken while the initial load
+// finishes reports ready with any state other than StateReady.
+func TestReadyImpliesReadyState(t *testing.T) {
+	for range 50 {
+		tr, b, node := newTrust(t), newBucket(t), newFakeNode()
+		seed(t, tr, b, 3)
+		l := newLoader(t, fastConfig(tr, b.src(t), node))
+		run(t, l)
+		for !l.Ready() {
+			if st := l.Status(); st.Ready && st.State != StateReady {
+				t.Fatalf("status = %+v: ready with state %q", st, st.State)
+			}
+		}
+		if st := l.Status(); st.State != StateReady {
+			t.Fatalf("Ready() is true but status = %+v", st)
+		}
+	}
+}
+
 func TestLoadAllWaitsForSysAccountObject(t *testing.T) {
 	tr, b, node := newTrust(t), newBucket(t), newFakeNode()
 	p := newAccountPub(t)
