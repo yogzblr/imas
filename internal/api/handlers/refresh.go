@@ -51,8 +51,14 @@ type refreshSuccessResponse struct {
 	Sealed json.RawMessage `json:"sealed"`
 }
 
+// pkiRefreshSprout is pki.RefreshSprout; a test swaps it to drive a
+// specific error through the handler.
+var pkiRefreshSprout = pki.RefreshSprout
+
 // Refresh handles POST /v1/refresh. Every failure writes the same generic
-// response as Enroll (writeEnrollFailed).
+// response as Enroll (writeEnrollFailed), except that a pki.RefreshSprout
+// failure wrapping pki.ErrSproutJWTBusy answers 503 with a Retry-After
+// (writeEnrollError).
 func Refresh(w http.ResponseWriter, r *http.Request) {
 	var req refreshRequest
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRefreshRequestBytes))
@@ -70,9 +76,9 @@ func Refresh(w http.ResponseWriter, r *http.Request) {
 		writeEnrollFailed(w)
 		return
 	}
-	sealed, err := pki.RefreshSprout(r.Context(), pki.RefreshRequest{NKeyPub: req.NKeyPub, Sealed: req.Sealed})
+	sealed, err := pkiRefreshSprout(r.Context(), pki.RefreshRequest{NKeyPub: req.NKeyPub, Sealed: req.Sealed})
 	if err != nil {
-		writeEnrollFailed(w)
+		writeEnrollError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
