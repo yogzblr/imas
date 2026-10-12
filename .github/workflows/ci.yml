@@ -102,6 +102,54 @@ jobs:
           "$RUNNER_TEMP/envoy/envoy" --version
           echo "IMAS_TEST_ENVOY_BIN=$RUNNER_TEMP/envoy/envoy" >> "$GITHUB_ENV"
 
+      # The real-OpenBao tests (internal/certs, internal/gatewayjwt,
+      # internal/pki, internal/pki/natskeys, the farmer chart's Transit
+      # policy tests, internal/ingredients/sdb/openbao) against OpenBao
+      # 2.7.1 dev servers, the version the charts pin: one on plain HTTP and
+      # one on TLS for sdb. Without their addresses they skip. The tokens are
+      # throwaways for this job's servers.
+      - name: Start OpenBao dev servers
+        env:
+          OPENBAO_VERSION: "2.7.1"
+          OPENBAO_SHA256: "0e2f1ce10d124e03112b50dd2fbec6b78003783253bc3a91587938f39d1e2243"
+        run: |
+          set -euo pipefail
+          tarball="openbao_${OPENBAO_VERSION}_linux_amd64.tar.gz"
+          cd "$RUNNER_TEMP"
+          curl -fsSL --retry 3 -o "$tarball" \
+            "https://github.com/openbao/openbao/releases/download/v${OPENBAO_VERSION}/${tarball}"
+          echo "${OPENBAO_SHA256}  ${tarball}" | sha256sum --check --strict
+          mkdir -p bin bao-tls
+          tar -xzf "$tarball" -C bin bao
+          token="$(openssl rand -hex 24)"
+          sdb_token="$(openssl rand -hex 24)"
+          echo "::add-mask::$token"
+          echo "::add-mask::$sdb_token"
+          nohup bin/bao server -dev -dev-root-token-id="$token" \
+            -dev-listen-address=127.0.0.1:8200 > bao.log 2>&1 &
+          nohup bin/bao server -dev -dev-tls -dev-root-token-id="$sdb_token" \
+            -dev-tls-cert-dir="$RUNNER_TEMP/bao-tls" \
+            -dev-listen-address=127.0.0.1:8201 > bao-tls.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8200/v1/sys/health > /dev/null &&
+              [ -f bao-tls/vault-ca.pem ] &&
+              curl -fsS --cacert bao-tls/vault-ca.pem https://127.0.0.1:8201/v1/sys/health > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8200/v1/sys/health > /dev/null
+          curl -fsS --cacert bao-tls/vault-ca.pem https://127.0.0.1:8201/v1/sys/health > /dev/null
+          {
+            echo "IMAS_TEST_OPENBAO_ADDR=http://127.0.0.1:8200"
+            echo "IMAS_TEST_OPENBAO_TOKEN=$token"
+            echo "IMAS_CERTS_TEST_OPENBAO_ADDR=http://127.0.0.1:8200"
+            echo "IMAS_CERTS_TEST_OPENBAO_TOKEN=$token"
+            echo "IMAS_TEST_SDB_OPENBAO_ADDR=https://127.0.0.1:8201"
+            echo "IMAS_TEST_SDB_OPENBAO_TOKEN=$sdb_token"
+            echo "IMAS_TEST_SDB_OPENBAO_CACERT=$RUNNER_TEMP/bao-tls/vault-ca.pem"
+          } >> "$GITHUB_ENV"
+
       # IMAS_REQUIRE_HELM=1 turns every chart-test skip (no helm, charts/
       # not populated, a missing tool) into a failure, so this job can't
       # pass without having rendered the charts. IMAS_TEST_MYSQL_ROOT_DSN

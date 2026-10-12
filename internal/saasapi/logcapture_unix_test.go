@@ -20,6 +20,11 @@ import (
 // once. dup2'ing the underlying file descriptor instead redirects every
 // writer targeting fd 2, regardless of which *os.File object it holds.
 //
+// It names fd 2 itself, not os.Stderr.Fd(): under `go test -json` the
+// testing package points the os.Stderr variable at stdout (fd 1) after
+// internal/log has taken the original, so os.Stderr.Fd() is not the
+// descriptor the logger writes to there.
+//
 // This is a test-only, self-contained technique: it does not modify
 // internal/log or any package outside internal/saasapi, per this task's
 // scope.
@@ -31,7 +36,7 @@ func captureStderr(t *testing.T, fn func()) string {
 		t.Fatalf("creating pipe: %v", err)
 	}
 
-	stderrFd := int(os.Stderr.Fd())
+	const stderrFd = 2
 	savedFd, err := syscall.Dup(stderrFd)
 	if err != nil {
 		t.Fatalf("saving stderr fd: %v", err)

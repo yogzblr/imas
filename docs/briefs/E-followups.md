@@ -283,9 +283,12 @@ Needs every other unit merged. Do not write features. On main:
 
 As built (Z): (1) every check passes on main with every gated test running:
 MySQL (PXC 8.4.8-8.1), the chart's Envoy (v1.35.3), OpenBao 2.7.1 and Valkey
-9.1.2; CI now also runs the real-Envoy and Valkey tests (`ci.yml` extracts the
-Envoy binary from the image the nats chart pins and starts a Valkey service),
-which no workflow ran before. The farmer chart's subcharts were packaged from
+9.1.2; CI's test job now also runs the real-Envoy, Valkey and real-OpenBao
+tests (`ci.yml` extracts the Envoy binary from the image the nats chart pins,
+starts a Valkey service and two OpenBao 2.7.1 dev servers); the real-Envoy,
+Valkey and `internal/certs` OpenBao tests ran in no workflow before. The
+saasapi log-capture tests failed under `go test -json` (the testing package
+points `os.Stderr` at stdout there); they now redirect fd 2 itself. The farmer chart's subcharts were packaged from
 the pinned upstream tags for the renders. (2) The stale hits were docs and
 comments that still described the pre-P21 trust model or a stateful farmer and
 bus (INSTALL.md's six seeds, both chart NOTES, the architecture diagram, the
