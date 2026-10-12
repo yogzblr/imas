@@ -8,8 +8,9 @@
 # --endpoints    the same endpoints file install.sh took (README.md)
 # --ca-file      the UAT CA certificate (PEM) UAT.2 writes; the only trust
 #                anchor used, the system store is switched off
-# --kubeconfig   the DMZ cluster, used only to print pod and Service state
-#                when a check fails
+# --kubeconfig   the DMZ cluster: D13 to D15 read the bus pods and the
+#                trust ConfigMap with it (skipped without it), and pod and
+#                Service state is printed when a check fails
 # --connect      where to connect instead of dmz.public_ip (or dmz.fqdn),
 #                e.g. the address of a LoadBalancer (install.sh --expose
 #                loadbalancer writes it to dmz.json); the DMZ FQDN is still
@@ -40,6 +41,14 @@
 #   D12 the same certificate verifies for the DMZ private name sprouts use
 #       (dmz.<private_dns_zone>, their farmerinterface), sent as SNI over the
 #       same connection, since the runner cannot resolve that name
+#   D13 (T5) the bus's farmerbus container has no trust chain seed: no
+#       IMAS_NATS_*_SEED[_FILE] but the clustered fence user's
+#   D14 (T5) ... and no OpenBao signing access (no IMAS_NATSSIGN_* or
+#       IMAS_NATSBOOT_*), and mounts the trust ConfigMap at exactly the
+#       directory IMAS_NATS_TRUST_DIR names
+#   D15 (T5) the trust ConfigMap here is a complete, public trust (no seed,
+#       the chain hangs together) and every bus pod is Ready: the bus
+#       started from the published operator JWT alone
 # D8, D10 and D11 need farmer running on the core hub (UAT.3b); the others
 # do not. Run it before enrolment: D9 empties /v1/enroll's bucket.
 set -uo pipefail
@@ -287,6 +296,63 @@ if ((rc == 0)) && grep -q 'Verify return code: 0 (ok)' <<<"$out"; then
 	pass D12 "the certificate also verifies for $DMZ_PRIVATE_NAME, the name sprouts use"
 else
 	fail D12 "the certificate does not verify for $DMZ_PRIVATE_NAME: $(grep -m1 -E 'Verify return code|verify error|errno|connect:' <<<"$out")"
+fi
+
+# --- T5: the bus starts from the public trust alone --------------------------
+if [[ -z $kubeconfig ]]; then
+	for id in D13 D14 D15; do skip "$id" "no --kubeconfig: the bus pods and the trust ConfigMap are not read"; done
+elif ! command -v kubectl >/dev/null 2>&1 || ! command -v base64 >/dev/null 2>&1; then
+	for id in D13 D14 D15; do skip "$id" "kubectl or base64 not found on PATH"; done
+else
+	kd() { kubectl --kubeconfig "$kubeconfig" -n "$DMZ_NAMESPACE" "$@"; }
+	pods=$(kd get pods -l "app.kubernetes.io/instance=$DMZ_RELEASE,app.kubernetes.io/component=bus" -o json 2>/dev/null) || pods='{"items":[]}'
+	n=$(jq '.items | length' <<<"$pods")
+	bus_env='.items[].spec.containers[] | select(.name == "farmerbus") | (.env // [])[] | .name'
+	if ((n == 0)); then
+		fail D13 "no bus pod found (app.kubernetes.io/instance=$DMZ_RELEASE, component=bus)"
+		fail D14 "no bus pod found"
+	else
+		seeds=$(jq -r "[$bus_env | select(test(\"^IMAS_NATS_.*_SEED(_FILE)?\$\")) | select(. != \"IMAS_NATS_BUS_FENCE_USER_SEED_FILE\")] | unique | join(\" \")" <<<"$pods")
+		if [[ -z $seeds ]]; then
+			pass D13 "the $n bus pod(s) carry no trust chain seed"
+		else
+			fail D13 "the bus is given seeds it must not have: $seeds"
+		fi
+		signer=$(jq -r "[$bus_env | select(test(\"^IMAS_(NATSSIGN|NATSBOOT)_\"))] | unique | join(\" \")" <<<"$pods")
+		if [[ -n $signer ]]; then
+			fail D14 "the bus has OpenBao signing settings: $signer"
+		# Each pod: the farmerbus container mounts the trust ConfigMap's
+		# volume at exactly the directory IMAS_NATS_TRUST_DIR names.
+		elif jq -e --arg cm "$DMZ_TRUST_CONFIGMAP" '
+			all(.items[];
+				.spec as $spec
+				| ($spec.containers[] | select(.name == "farmerbus")) as $bus
+				| ([$bus.env[]? | select(.name == "IMAS_NATS_TRUST_DIR") | .value][0]) as $dir
+				| $dir != null and any($spec.volumes[]?; .configMap.name? == $cm and
+					(.name as $v | any($bus.volumeMounts[]?; .name == $v and .mountPath == $dir))))' <<<"$pods" >/dev/null; then
+			pass D14 "no OpenBao signing access; the bus reads ConfigMap $DMZ_TRUST_CONFIGMAP (IMAS_NATS_TRUST_DIR)"
+		else
+			fail D14 "the bus pods do not all mount ConfigMap $DMZ_TRUST_CONFIGMAP at IMAS_NATS_TRUST_DIR"
+		fi
+	fi
+	mkdir "$tmp/trust"
+	problem=""
+	if cm=$(kd get configmap "$DMZ_TRUST_CONFIGMAP" -o json 2>/dev/null); then
+		for key in "${DMZ_TRUST_KEYS[@]}" "${DMZ_TRUST_OPTIONAL_KEYS[@]}"; do
+			jq -j --arg k "$key" '.data[$k] // empty' <<<"$cm" >"$tmp/trust/$key"
+		done
+		problem=$(dmz_trust_problem "$tmp/trust")
+	else
+		problem="ConfigMap $DMZ_NAMESPACE/$DMZ_TRUST_CONFIGMAP not found"
+	fi
+	ready=$(jq '[.items[] | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))] | length' <<<"$pods")
+	if [[ -n $problem ]]; then
+		fail D15 "the NATS trust: $problem"
+	elif ((n == 0 || ready != n)); then
+		fail D15 "$ready of $n bus pod(s) Ready"
+	else
+		pass D15 "the trust is public and complete, and all $n bus pod(s) are Ready on it"
+	fi
 fi
 
 if ((failed)); then

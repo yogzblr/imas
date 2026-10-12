@@ -112,16 +112,26 @@ uat/hub/dmz/install.sh --kubeconfig dmz.kubeconfig --endpoints endpoints.json \
    refuses a render that runs another farmerbus image or any `:latest`.
 3. **Checks the cluster** (UAT.2's part): reachable, cert-manager present,
    the ClusterIssuer Ready.
-4. **Creates the seed Secret** `imas-farmer-nats-seeds` in `imas-dmz`. The
-   bus must hold byte-identical copies of core's five seeds
-   (`deploy/helm/nats/README.md`, "Seeds"), so they come from core: either
-   `--seeds-dir` (a directory with `operator.nk`, `operator-signing.nk`,
-   `sys-account.nk`, `tenant.nk`, `tenant-signing.nk`) or
-   `--seeds-from-kubeconfig` (copied from `imas-core/imas-farmer-nats-seeds`
-   on the core cluster). Only those five keys are copied: `saasapi-user.nk`
-   never enters the DMZ. With neither option the Secret must already exist.
-   Nothing is printed and nothing is written outside a 0700 temporary
-   directory that is removed.
+4. **Copies the public NATS trust** (P21 slice 1): ConfigMap
+   `imas-nats-trust` in `imas-dmz`, the copy of the one core's OpenBao
+   bootstrap Job writes in `imas-core` (owner decision c: the DMZ bus gets
+   it by hand or pipeline; `deploy/helm/nats/README.md`, "NATS trust").
+   The bus holds no trust chain seed: the operator, operator-signing, SYS
+   account and tenant keys are Transit keys on core, and this single-node
+   bus needs no fence user, so no seed of any kind enters the DMZ. The
+   trust comes from core: either `--trust-dir` (a directory with
+   `operator.jwt`, `operator.pub`, `operator-signing.pub`,
+   `sys-account.pub`, `sys-account.jwt` and, if core minted them,
+   `bus-fence-user.jwt` and `bus-loader-user.jwt`) or
+   `--seeds-from-kubeconfig` (read from `imas-core/imas-nats-trust` on the
+   core cluster; the option keeps its pre-P21 name because the UAT
+   workflow and the local rig call it). Only those keys are copied, and
+   only after they check out: every required key present, no NKey seed
+   anywhere, the public keys of the right kind, the operator JWT
+   self-signed by `operator.pub`, listing `operator-signing.pub` and
+   naming `sys-account.pub`, and the SYS account JWT signed by
+   `operator-signing.pub`. With neither option the ConfigMap must already
+   exist here and pass the same checks.
    Then **the bus loader's two Secrets** (P21 slice 2; the bus has no PVC):
    `imas-bus-accounts-reader` from `--accounts-reader-dir` (the read-only
    accounts credential `uat/hub/core/minio-setup.sh` leaves in
@@ -244,6 +254,9 @@ what the repo's real-Envoy tests assert (`internal/pki/envoy_e2e_test.go`,
 | D10 | `POST /v1/refresh` with `{}`, while `/v1/enroll`'s bucket is empty | farmer's `401 enrollment_failed`, not 429: no JWT gate, and a bucket of its own |
 | D11 | `POST /v1/enroll` every 5 s for up to `--refill-wait` (75) s | the bucket refills and farmer answers again |
 | D12 | `openssl s_client` again, sending and verifying `dmz.<zone>` over the same connection | the certificate also verifies for the private name sprouts use (the runner cannot resolve it, so only the name changes) |
+| D13 | `kubectl get pods` of the bus (needs `--kubeconfig`) | design T5: the `farmerbus` container has no `IMAS_NATS_*_SEED` or `*_SEED_FILE` variable except the clustered fence user's |
+| D14 | the same pods | no OpenBao signing settings (`IMAS_NATSSIGN_*`, `IMAS_NATSBOOT_*`), and every pod's `farmerbus` container mounts ConfigMap `imas-nats-trust` at exactly the directory `IMAS_NATS_TRUST_DIR` names |
+| D15 | `kubectl get configmap imas-nats-trust` and the pods' Ready condition | the trust passes install.sh's checks (complete, public, the chain hangs together) and every bus pod is Ready: the bus started from the published operator JWT alone |
 
 "jwt_authn's body" means a 401 whose body starts with `Jwt ` or `Jwks `
 (Envoy's reasons: `Jwt is missing`, `Jwt verification fails`, `Jwks doesn't
@@ -251,7 +264,7 @@ have key to match kid or alg from Jwt`), so a 401 from farmer cannot pass for
 one from Envoy.
 
 D1 to D7 and D9 need only the DMZ hub. D8, D10 and D11 need farmer up on
-core. **Run it before enrolment:** D9 empties `/v1/enroll`'s bucket, and
+core. D13 to D15 read the cluster and are skipped without `--kubeconfig`. **Run it before enrolment:** D9 empties `/v1/enroll`'s bucket, and
 enrolling through this Envoy is refused with 429 until it refills; D11 waits
 for that (skip it with `--refill-wait 0` only if nothing enrols for the next
 minute). Each check prints `PASS`, `FAIL` or `SKIP` with its id; the exit
@@ -263,12 +276,13 @@ pods, Services and endpoint slices of `imas-dmz`.
 UAT.3b builds the core hub in parallel; these are the assumptions this side
 makes, and what `dmz.json` gives it.
 
-1. **The seeds are core's.** UAT.3b creates `imas-farmer-nats-seeds` in
-   `imas-core` with the repo's tooling. This side copies five of its keys
-   and generates nothing. **Owner's decision, 2026-10-06: "Install order is
-   core first, then DMZ."** So by the time this runs, the core hub and its
-   seed Secret exist, `--seeds-from-kubeconfig core.kubeconfig` is the way
-   to pass them, and D8, D10 and D11 of `check.sh` can reach farmer.
+1. **The trust is core's.** Core's OpenBao bootstrap Job writes
+   `imas-nats-trust` in `imas-core` from its Transit keys. This side copies
+   its public keys and generates nothing. **Owner's decision, 2026-10-06:
+   "Install order is core first, then DMZ."** So by the time this runs, the
+   core hub and its trust ConfigMap exist, `--seeds-from-kubeconfig
+   core.kubeconfig` is the way to pass it, and D8, D10 and D11 of
+   `check.sh` can reach farmer.
    (Section 4h of the plan still says "DMZ install, core install"; amending
    it is outside this brief.)
 2. **farmer's API is reachable at `core.private_ip:core.ports.farmer_api`**
@@ -337,9 +351,14 @@ helm, bash or jq fails the render tests instead):
 - **The install path with stub kubectl and helm** (`TestInstallWithStubs`):
   the order of the steps; no registry credential passed to helm, even
   with a token in the environment; an exact-version `helm pull` and no
-  `--devel`; only the five bus seeds read from core (never
-  `saasapi-user.nk`) and put in the DMZ Secret unchanged; every DMZ call
-  carrying the DMZ kubeconfig. `TestInstallLoadBalancerWithStubs`: the load
+  `--devel`; only the trust ConfigMap's public keys read from core and put
+  in the DMZ ConfigMap unchanged, and no seed Secret read or made; every
+  DMZ call carrying the DMZ kubeconfig. `TestInstallRefusesBadTrust`: an
+  incomplete trust, a seed in it, or a chain that does not hang together is
+  refused from each source, before anything reaches the cluster.
+  `TestCheckBusFromTrustOnly`: D13 to D15 pass on a bus started from the
+  trust alone and fail on a seed, a Transit setting, a missing trust
+  volume, a pod not Ready or a bad trust. `TestInstallLoadBalancerWithStubs`: the load
   balancer's address lands in `dmz.json`, and no address fails the
   install.
 - **Refusals** (`TestInstallRefuses`, `TestCheckRefuses`): bad tags

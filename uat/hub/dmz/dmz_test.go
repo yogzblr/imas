@@ -42,6 +42,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/jwt/v2"
+	"github.com/nats-io/nkeys"
 	"gopkg.in/yaml.v3"
 )
 
@@ -588,7 +590,10 @@ func TestInstallRefuses(t *testing.T) {
 		{"no kubeconfig", []string{"--endpoints", good, "--release-tag", testTag}, "--kubeconfig is required"},
 		{"local chart on install", []string{"--kubeconfig", kubeconfig, "--endpoints", good, "--release-tag", testTag, "--chart", rc3}, "--chart is only for --render-only"},
 		{"render with kubeconfig", []string{"--render-only", "--kubeconfig", kubeconfig, "--endpoints", good, "--release-tag", testTag}, "touches no cluster"},
-		{"two seed sources", []string{"--kubeconfig", kubeconfig, "--endpoints", good, "--release-tag", testTag, "--seeds-dir", "/x", "--seeds-from-kubeconfig", kubeconfig}, "not both"},
+		{"two trust sources", []string{"--kubeconfig", kubeconfig, "--endpoints", good, "--release-tag", testTag, "--trust-dir", "/x", "--seeds-from-kubeconfig", kubeconfig}, "not both"},
+		{"trust dir not a directory", []string{"--kubeconfig", kubeconfig, "--endpoints", good, "--release-tag", testTag, "--trust-dir", "/nonexistent-trust"}, "is not a directory"},
+		{"removed flag --seeds-dir", []string{"--kubeconfig", kubeconfig, "--endpoints", good, "--release-tag", testTag, "--seeds-dir", "/x"}, "unknown argument"},
+		{"render with trust dir", []string{"--render-only", "--endpoints", good, "--release-tag", testTag, "--trust-dir", "/x"}, "touches no cluster"},
 		{"removed flag --chart-repo-url", []string{"--render-only", "--endpoints", good, "--release-tag", testTag, "--chart-repo-url", "https://packages.buildkite.com/x/imashelm/helm"}, "unknown argument"},
 		{"chart registry not oci", []string{"--render-only", "--endpoints", good, "--release-tag", testTag, "--chart-registry", "https://ghcr.io/yogzblr/charts"}, "--chart-registry must be oci://"},
 		{"unknown flag", []string{"--render-only", "--endpoints", good, "--release-tag", testTag, "--wait"}, "unknown argument"},
@@ -897,13 +902,7 @@ const stubKubectl = `#!/usr/bin/env bash
 printf 'kubectl %s\n' "$*" >>"$STUB_LOG"
 args="$*"
 case $args in
-*"get secret imas-farmer-nats-seeds -o jsonpath={.data."*)
-	key=${args##*jsonpath=\{.data.}
-	key=${key%\}}
-	key=${key//\\/}
-	printf 'copied %s\n' "$key" >>"$STUB_LOG"
-	printf 'SAAUATSTUBSEED%s\n' "$(printf '%s' "$key" | tr -dc 'a-z' | tr 'a-z' 'A-Z' | head -c 20)AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" | base64 -w0
-	;;
+*"get configmap imas-nats-trust -o json"*) cat "${STUB_TRUST:?}" ;;
 *"get secret imas-farmerbus-tls -o jsonpath={.data.ca"*) printf 'LS0tLS1CRUdJTg==' ;;
 *"get secret imas-bus-accounts-reader -o jsonpath="* | *"get secret imas-bus-loader-sys-user -o jsonpath="*) printf 'eA==' ;;
 *"get service imas-dmz-nats-envoy-edge -o jsonpath={.status.loadBalancer"*) printf '%s' "${STUB_LB:-}" ;;
@@ -915,6 +914,12 @@ case $args in
 	printf 'apiVersion: v1\nkind: Secret\n'
 	;;
 *"apply -f -"*) cat >/dev/null ;;
+*"create configmap"*)
+	for a in "$@"; do
+		case $a in --from-file=*) f=${a#*=}; f=${f#*=}; printf 'trustfile %s %s\n' "${a%%=/*}" "$(cat "$f")" >>"$STUB_LOG" ;; esac
+	done
+	printf 'apiVersion: v1\nkind: ConfigMap\n'
+	;;
 *"create namespace"*) printf 'apiVersion: v1\nkind: Namespace\n' ;;
 esac
 exit 0
@@ -968,9 +973,12 @@ func TestInstallWithStubs(t *testing.T) {
 	}
 	logFile := filepath.Join(t.TempDir(), "calls.log")
 	work := t.TempDir()
+	trust := makeTrust(t)
+	trust["bus-loader-user.jwt"] = trust["sys-account.jwt"] // any JWT: copied when core has it
+	trustJSON := trustConfigMap(t, trust)
 	env := []string{
 		"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"STUB_LOG=" + logFile, "STUB_CHART=" + tgz, "REAL_HELM=" + realHelm,
+		"STUB_LOG=" + logFile, "STUB_CHART=" + tgz, "REAL_HELM=" + realHelm, "STUB_TRUST=" + trustJSON,
 		// Neither a Buildkite token nor an organisation is read any more.
 		"IMAS_HELM_REGISTRY_TOKEN=bkua_uat_stub_unused_value", "BUILDKITE_ORGANIZATION_SLUG=example-org",
 	}
@@ -1004,21 +1012,23 @@ func TestInstallWithStubs(t *testing.T) {
 		t.Error("helm was called with --devel")
 	}
 
-	// Only the five bus seeds are copied from core, and exactly what core holds.
+	// P21 slice 1: core's public trust ConfigMap is copied, byte for byte,
+	// and no seed Secret is read or made.
 	var copied []string
 	for _, c := range calls {
-		if k, ok := strings.CutPrefix(c, "copied "); ok {
+		if rest, ok := strings.CutPrefix(c, "trustfile --from-file="); ok {
+			k, v, _ := strings.Cut(rest, " ")
 			copied = append(copied, k)
+			if v != trust[k] {
+				t.Errorf("trust key %s reached the DMZ ConfigMap as %q, want core's %q", k, v, trust[k])
+			}
 		}
 	}
-	if want := []string{"operator.nk", "operator-signing.nk", "sys-account.nk", "tenant.nk", "tenant-signing.nk"}; !slices.Equal(copied, want) {
-		t.Errorf("copied seeds %v, want %v", copied, want)
+	if want := []string{"operator.jwt", "operator.pub", "operator-signing.pub", "sys-account.pub", "sys-account.jwt", "bus-loader-user.jwt"}; !slices.Equal(copied, want) {
+		t.Errorf("copied trust keys %v, want %v", copied, want)
 	}
-	if strings.Contains(logText, "saasapi-user") {
-		t.Error("saasapi-user.nk was read for the DMZ")
-	}
-	if n := strings.Count(logText, "seedfile --from-file=operator.nk SAAUATSTUBSEEDOPERATORNK"); n != 1 {
-		t.Errorf("the operator seed reached the DMZ Secret %d times, want once", n)
+	if strings.Contains(logText, "imas-farmer-nats-seeds") || strings.Contains(logText, ".nk SA") || strings.Contains(logText, ".nk SO") {
+		t.Errorf("a seed Secret was read or written for the DMZ:\n%s", logText)
 	}
 
 	// The loader's two Secrets, from exactly those files.
@@ -1045,7 +1055,8 @@ func TestInstallWithStubs(t *testing.T) {
 	}
 	order := []string{
 		"get clusterissuer imas-uat-ca",
-		"create secret generic imas-farmer-nats-seeds",
+		"-n imas-core get configmap imas-nats-trust -o json",
+		"create configmap imas-nats-trust",
 		"create secret generic imas-bus-accounts-reader",
 		"create secret generic imas-bus-loader-sys-user",
 		"apply -f " + filepath.Join(work, "manifests.yaml"),
@@ -1069,7 +1080,7 @@ func TestInstallWithStubs(t *testing.T) {
 	}
 	for _, c := range calls {
 		if strings.HasPrefix(c, "kubectl ") && !strings.HasPrefix(c, "kubectl --kubeconfig "+kubeconfig+" ") &&
-			!strings.HasPrefix(c, "kubectl --kubeconfig "+coreKubeconfig+" -n imas-core get secret imas-farmer-nats-seeds ") {
+			c != "kubectl --kubeconfig "+coreKubeconfig+" -n imas-core get configmap imas-nats-trust -o json" {
 			t.Errorf("kubectl call without the DMZ kubeconfig: %s", c)
 		}
 	}
@@ -1083,8 +1094,8 @@ func TestInstallWithStubs(t *testing.T) {
 }
 
 // --expose loadbalancer waits for the controller's address and records it;
-// with no controller it fails, naming the alternative. The seed Secret is
-// taken as it is (no seed option).
+// with no controller it fails, naming the alternative. The trust
+// ConfigMap is taken as it is (no trust option).
 func TestInstallLoadBalancerWithStubs(t *testing.T) {
 	need(t, true, "bash", "jq", "helm", "base64")
 	realHelm, _ := exec.LookPath("helm")
@@ -1108,7 +1119,7 @@ func TestInstallLoadBalancerWithStubs(t *testing.T) {
 			env := []string{
 				"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 				"STUB_LOG=" + filepath.Join(t.TempDir(), "calls.log"), "STUB_CHART=" + tgz,
-				"REAL_HELM=" + realHelm, "STUB_LB=" + c.lb,
+				"REAL_HELM=" + realHelm, "STUB_LB=" + c.lb, "STUB_TRUST=" + trustConfigMap(t, makeTrust(t)),
 			}
 			code, _, stderr := run(t, env, "install.sh", "--kubeconfig", kubeconfig, "--expose", "loadbalancer",
 				"--endpoints", filepath.Join(dir(t), "testdata", "endpoints.json"), "--release-tag", testTag,
@@ -1182,6 +1193,7 @@ func TestInstallChartRegistryAndPullFailure(t *testing.T) {
 			env := []string{
 				"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 				"STUB_LOG=" + logFile, "STUB_CHART=" + tgz, "REAL_HELM=" + realHelm,
+				"STUB_TRUST=" + trustConfigMap(t, makeTrust(t)),
 			}
 			if c.fail {
 				env = append(env, "STUB_PULL_FAIL=1")
@@ -1301,12 +1313,250 @@ func TestInstallRefusesBadLoaderSeed(t *testing.T) {
 			env := []string{
 				"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 				"STUB_LOG=" + filepath.Join(t.TempDir(), "calls.log"), "STUB_CHART=" + tgz, "REAL_HELM=" + realHelm,
+				"STUB_TRUST=" + trustConfigMap(t, makeTrust(t)),
 			}
 			code, _, stderr := run(t, env, "install.sh", "--kubeconfig", kubeconfig,
 				"--endpoints", filepath.Join(dir(t), "testdata", "endpoints.json"), "--release-tag", testTag,
 				"--workdir", t.TempDir(), "--loader-seed", f)
 			if code == 0 || !strings.Contains(stderr, "is not one NKey user seed") {
 				t.Fatalf("exit %d, want the seed refused:\n%s", code, stderr)
+			}
+		})
+	}
+}
+
+// makeTrust mints a public NATS trust the way core's bootstrap Job does
+// (internal/pki BootstrapNATSTrust): the operator JWT self-signed by the
+// identity key, listing the signing key and naming the SYS account, and the
+// SYS account JWT signed by the signing key. Local keys stand in for Transit.
+func makeTrust(t *testing.T) map[string]string {
+	t.Helper()
+	kp := func(create func() (nkeys.KeyPair, error)) (nkeys.KeyPair, string) {
+		k, err := create()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub, err := k.PublicKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k, pub
+	}
+	op, opPub := kp(nkeys.CreateOperator)
+	sk, skPub := kp(nkeys.CreateOperator)
+	_, sysPub := kp(nkeys.CreateAccount)
+	oc := jwt.NewOperatorClaims(opPub)
+	oc.Name = "imas-operator"
+	oc.SigningKeys.Add(skPub)
+	oc.SystemAccount = sysPub
+	opJWT, err := oc.Encode(op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ac := jwt.NewAccountClaims(sysPub)
+	ac.Name = "SYS"
+	sysJWT, err := ac.Encode(sk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[string]string{
+		"operator.jwt": opJWT, "operator.pub": opPub, "operator-signing.pub": skPub,
+		"sys-account.pub": sysPub, "sys-account.jwt": sysJWT,
+	}
+}
+
+// trustConfigMap writes files as the JSON of a ConfigMap (kubectl get -o
+// json) and returns its path.
+func trustConfigMap(t *testing.T, files map[string]string) string {
+	t.Helper()
+	return writeJSON(t, obj{"apiVersion": "v1", "kind": "ConfigMap", "metadata": obj{"name": "imas-nats-trust"}, "data": files})
+}
+
+// install.sh refuses a trust that is incomplete, carries a seed, or whose
+// chain does not hang together, from --trust-dir, from core and from an
+// existing DMZ ConfigMap alike; nothing reaches the DMZ ConfigMap.
+func TestInstallRefusesBadTrust(t *testing.T) {
+	need(t, true, "bash", "jq", "helm", "base64")
+	realHelm, _ := exec.LookPath("helm")
+	bin := t.TempDir()
+	for name, body := range map[string]string{"kubectl": stubKubectl, "helm": stubHelm} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tgz := packageChart(t, testVersion, testVersion)
+	kubeconfig := filepath.Join(t.TempDir(), "dmz.kubeconfig")
+	if err := os.WriteFile(kubeconfig, []byte("apiVersion: v1\nkind: Config\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	other := makeTrust(t)
+	seed, err := nkeys.CreateAccount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedBytes, _ := seed.Seed()
+	for _, c := range []struct {
+		name, want string
+		mutate     func(map[string]string)
+	}{
+		{"missing key", "sys-account.jwt is missing or empty", func(m map[string]string) { delete(m, "sys-account.jwt") }},
+		{"a seed in the trust", "bus-fence-user.jwt holds an NKey seed", func(m map[string]string) { m["bus-fence-user.jwt"] = string(seedBytes) }},
+		{"not a JWT", "operator.jwt is not a JWT", func(m map[string]string) { m["operator.jwt"] = "not a jwt" }},
+		{"account key as operator key", "operator-signing.pub is not an operator public key", func(m map[string]string) { m["operator-signing.pub"] = m["sys-account.pub"] }},
+		{"another operator", "operator.jwt is not the self-signed JWT of operator.pub", func(m map[string]string) { m["operator.jwt"] = other["operator.jwt"] }},
+		{"another SYS account", "operator.jwt does not name sys-account.pub", func(m map[string]string) { m["sys-account.pub"] = other["sys-account.pub"] }},
+		{"another signing key", "operator.jwt does not list operator-signing.pub", func(m map[string]string) { m["operator-signing.pub"] = other["operator-signing.pub"] }},
+		{"SYS JWT of another chain", "sys-account.jwt is not the JWT of sys-account.pub", func(m map[string]string) { m["sys-account.jwt"] = other["sys-account.jwt"] }},
+	} {
+		trust := makeTrust(t)
+		c.mutate(trust)
+		trustDir := t.TempDir()
+		for k, v := range trust {
+			if err := os.WriteFile(filepath.Join(trustDir, k), []byte(v), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for source, args := range map[string][]string{
+			"trust dir": {"--trust-dir", trustDir},
+			"core":      {"--seeds-from-kubeconfig", kubeconfig},
+			"existing":  nil,
+		} {
+			t.Run(c.name+"/"+source, func(t *testing.T) {
+				logFile := filepath.Join(t.TempDir(), "calls.log")
+				env := []string{
+					"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+					"STUB_LOG=" + logFile, "STUB_CHART=" + tgz, "REAL_HELM=" + realHelm,
+					"STUB_TRUST=" + trustConfigMap(t, trust),
+				}
+				code, _, stderr := run(t, env, "install.sh", append([]string{"--kubeconfig", kubeconfig,
+					"--endpoints", filepath.Join(dir(t), "testdata", "endpoints.json"), "--release-tag", testTag,
+					"--workdir", t.TempDir()}, args...)...)
+				if code == 0 || !strings.Contains(stderr, c.want) {
+					t.Fatalf("exit %d, want %q:\n%s", code, c.want, stderr)
+				}
+				if strings.Contains(stderr, string(seedBytes)) {
+					t.Error("the seed was printed")
+				}
+				if b, _ := os.ReadFile(logFile); bytes.Contains(b, []byte("create configmap")) || bytes.Contains(b, []byte("helm upgrade")) {
+					t.Errorf("a refused trust reached the cluster:\n%s", b)
+				}
+			})
+		}
+	}
+}
+
+// stubCheckKubectl answers check.sh's reads (D13 to D15) from STUB_PODS and
+// STUB_TRUST.
+const stubCheckKubectl = `#!/usr/bin/env bash
+case "$*" in
+*"get pods -l app.kubernetes.io/instance=imas-dmz,app.kubernetes.io/component=bus -o json"*) cat "${STUB_PODS:?}" ;;
+*"get configmap imas-nats-trust -o json"*) cat "${STUB_TRUST:?}" ;;
+esac
+exit 0
+`
+
+// busPods is the pod list a single-node bus from deploy/helm/nats with
+// values-uat.yaml reports: the trust ConfigMap mounted, no seed, Ready.
+func busPods(mutate func(pod obj)) obj {
+	pod := obj{
+		"metadata": obj{"name": "imas-dmz-nats-bus-0"},
+		"spec": obj{
+			"containers": []any{
+				obj{"name": "farmerbus", "env": []any{
+					obj{"name": "IMAS_NATS_TRUST_DIR", "value": "/var/run/imas/nats-trust"},
+					obj{"name": "IMAS_BUS_HEALTH_PORT", "value": "8080"},
+				}, "volumeMounts": []any{
+					obj{"name": "nats-trust", "mountPath": "/var/run/imas/nats-trust", "readOnly": true},
+				}},
+				obj{"name": "loader", "env": []any{obj{"name": "IMAS_NATS_TRUST_DIR", "value": "/var/run/imas/nats-trust"}}},
+			},
+			"volumes": []any{obj{"name": "nats-trust", "configMap": obj{"name": "imas-nats-trust"}}},
+		},
+		"status": obj{"conditions": []any{obj{"type": "Ready", "status": "True"}}},
+	}
+	if mutate != nil {
+		mutate(pod)
+	}
+	return obj{"items": []any{pod}}
+}
+
+func addBusEnv(name string) func(obj) {
+	return func(pod obj) {
+		c := pod["spec"].(obj)["containers"].([]any)[0].(obj)
+		c["env"] = append(c["env"].([]any), obj{"name": name, "value": "x"})
+	}
+}
+
+// D13 to D15 (design T5): with --kubeconfig, check.sh confirms the bus runs
+// from the public trust alone, and catches each way it might not.
+func TestCheckBusFromTrustOnly(t *testing.T) {
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "kubectl"), []byte(stubCheckKubectl), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	kubeconfig := filepath.Join(t.TempDir(), "dmz.kubeconfig")
+	if err := os.WriteFile(kubeconfig, []byte("apiVersion: v1\nkind: Config\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	seed, err := nkeys.CreateUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedBytes, _ := seed.Seed()
+	cases := []struct {
+		name     string
+		pods     obj
+		trust    func(map[string]string)
+		wantPass []string
+		wantFail []string
+	}{
+		{name: "from trust only", pods: busPods(nil), wantPass: []string{"D13", "D14", "D15"}},
+		{name: "fence user seed is allowed", pods: busPods(addBusEnv("IMAS_NATS_BUS_FENCE_USER_SEED_FILE")), wantPass: []string{"D13"}},
+		{name: "operator seed", pods: busPods(addBusEnv("IMAS_NATS_OPERATOR_SEED_FILE")), wantFail: []string{"D13"}},
+		{name: "raw seed", pods: busPods(addBusEnv("IMAS_NATS_SYS_ACCOUNT_SEED")), wantFail: []string{"D13"}},
+		{name: "transit signer", pods: busPods(addBusEnv("IMAS_NATSSIGN_OPENBAO_ADDR")), wantFail: []string{"D14"}},
+		{name: "no trust volume", pods: busPods(func(p obj) { p["spec"].(obj)["volumes"] = []any{} }), wantFail: []string{"D14"}},
+		{name: "trust mounted elsewhere", pods: busPods(func(p obj) {
+			c := p["spec"].(obj)["containers"].([]any)[0].(obj)
+			c["volumeMounts"] = []any{obj{"name": "nats-trust", "mountPath": "/etc/other"}}
+		}), wantFail: []string{"D14"}},
+		{name: "no trust dir variable", pods: busPods(func(p obj) {
+			c := p["spec"].(obj)["containers"].([]any)[0].(obj)
+			c["env"] = []any{}
+		}), wantFail: []string{"D14"}},
+		{name: "not ready", pods: busPods(func(p obj) {
+			p["status"] = obj{"conditions": []any{obj{"type": "Ready", "status": "False"}}}
+		}), wantFail: []string{"D15"}},
+		{name: "no bus pod", pods: obj{"items": []any{}}, wantFail: []string{"D13", "D14", "D15"}},
+		{name: "seed in the trust", pods: busPods(nil), trust: func(m map[string]string) { m["bus-loader-user.jwt"] = string(seedBytes) }, wantFail: []string{"D15"}},
+		{name: "incomplete trust", pods: busPods(nil), trust: func(m map[string]string) { delete(m, "operator.jwt") }, wantFail: []string{"D15"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			trust := makeTrust(t)
+			if c.trust != nil {
+				c.trust(trust)
+			}
+			t.Setenv("STUB_TRUST", trustConfigMap(t, trust))
+			t.Setenv("STUB_PODS", writeJSON(t, c.pods))
+			code, out := runCheck(t, "dmz.uat.test", []string{"dmz.uat.test", "dmz.uat.imas.internal"}, nil, "",
+				"--refill-wait", "0", "--kubeconfig", kubeconfig)
+			for _, id := range c.wantPass {
+				if !regexp.MustCompile(fmt.Sprintf(`(?m)^PASS %s `, id)).MatchString(out) {
+					t.Errorf("want PASS %s", id)
+				}
+			}
+			for _, id := range c.wantFail {
+				if !regexp.MustCompile(fmt.Sprintf(`(?m)^FAIL %s `, id)).MatchString(out) {
+					t.Errorf("want FAIL %s", id)
+				}
+			}
+			if (len(c.wantFail) == 0) != (code == 0) {
+				t.Errorf("exit %d with failures wanted %v", code, c.wantFail)
+			}
+			if strings.Contains(out, string(seedBytes)) {
+				t.Error("the seed was printed")
 			}
 		})
 	}

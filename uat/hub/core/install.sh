@@ -5,14 +5,16 @@
 # (README.md, "What install.sh does"):
 #    1. namespaces and the generated credentials (Kubernetes Secrets, and
 #       files under <state>/core/sensitive)
-#    2. the NATS seeds (seeds.sh) and the bootstrap admin keys
+#    2. the NATS user seeds (seeds.sh) and the bootstrap admin keys
 #       (admin-keys.sh, the release's own imas CLI)
 #    3. the published farmer chart of release_tag, pulled and checked
 #    4. the UAT-only pieces (chart/): MinIO, Keycloak with the imas-uat
 #       realm, the edge proxy, certificates, policies
 #    5. MinIO buckets, users and policies (minio-setup.sh)
 #    6. the farmer chart, with OpenBao initialised and unsealed while the
-#       install runs (openbao-bootstrap.sh)
+#       install runs (openbao-bootstrap.sh); its bootstrap Job writes the
+#       public NATS trust (ConfigMap imas-nats-trust, which the DMZ copies)
+#       and revokes the token it was handed, whose Secret then goes
 #    7. saasapi's two hand-made Secrets (saasapi-secrets.sh)
 #    8. waits for the workloads core owns and writes the outputs
 # It does NOT wait for farmer or saasapi, register the sprout release, or run
@@ -150,6 +152,18 @@ if ! wait "$helm_pid"; then
 fi
 trap - EXIT
 log "helm: $(tail -n 3 "$helm_log" | tr '\n' ' ')"
+
+# The bootstrap hook has run: it wrote the public NATS trust (which the DMZ
+# install copies next) and revoked the token it was handed, so the Secret
+# holding that token goes (owner decision a: no standing admin). A later
+# run without it only checks the trust; install.sh mints a fresh one.
+kc -n "$CORE_NS" get configmap "$NATS_TRUST_CONFIGMAP" >/dev/null 2>&1 ||
+	die "the farmer install left no ConfigMap $CORE_NS/$NATS_TRUST_CONFIGMAP (the OpenBao bootstrap Job's nats-trust step writes it)"
+# Design T4: the first trust is kept, and check.sh fails if a re-run changed it.
+if [[ ! -s "$OUT_DIR/nats-trust.json" ]]; then
+	trust_snapshot >"$OUT_DIR/nats-trust.json" || die "could not read ConfigMap $CORE_NS/$NATS_TRUST_CONFIGMAP"
+fi
+kc -n "$CORE_NS" delete secret "$OPENBAO_ROOT_SECRET" --ignore-not-found >/dev/null
 
 # --- 7. saasapi's Secrets ----------------------------------------------------
 "$here/saasapi-secrets.sh" "${common[@]}"

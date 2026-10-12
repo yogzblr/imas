@@ -5,17 +5,26 @@
 # file storage; values/farmer-uat.yaml turns dev mode off), enables the
 # Transit engine and creates the Ed25519 key the gateway JWT needs under
 # the name the chart expects (farmer.openbao.gateway.keyName,
-# imas-gateway-jwt), then hands the chart's own bootstrap Job its token
+# imas-gateway-jwt), then hands the chart's own bootstrap Job a token
 # (openbaoBootstrap.tokenSecretName). The chart's Job does the rest
-# (policies, roles, KV, the fleet key) and is idempotent.
+# (policies, roles, KV, the fleet key, the NATS platform Transit keys and
+# the trust ConfigMap) and is idempotent.
+#
+# The Job revokes the token it is handed when it is done (owner decision a,
+# no standing admin; openbaoBootstrap.revokeToken), so it is never handed
+# the root token: every run of this script mints a fresh orphan token with
+# the root policy, one hour, not renewable, and puts that in
+# imas-uat-openbao-root. That is UAT's stand-in for "a fresh root token from
+# the recovery quorum". install.sh deletes the Secret once the install's
+# hooks are done; check.sh confirms the token is revoked (design T4).
 #
 # FLAG FOR SECURITY REVIEW.
 # !!! UAT ONLY: THE UNSEAL KEYS AND THE ROOT TOKEN ARE STORED IN A        !!!
-# !!! KUBERNETES SECRET IN THE CORE NAMESPACE (imas-uat-openbao-unseal,   !!!
-# !!! imas-uat-openbao-root) AND IN <state>/core/sensitive/openbao-init.json,
-# !!! WHICH THE RUN KEEPS AS A SENSITIVE ARTIFACT. Anyone who can read     !!!
-# !!! either can unseal this OpenBao and read everything in it. That is   !!!
-# !!! acceptable for a throwaway per-run environment and nowhere else.    !!!
+# !!! KUBERNETES SECRET IN THE CORE NAMESPACE (imas-uat-openbao-unseal)   !!!
+# !!! AND IN <state>/core/sensitive/openbao-init.json, WHICH THE RUN      !!!
+# !!! KEEPS AS A SENSITIVE ARTIFACT. Anyone who can read either can       !!!
+# !!! unseal this OpenBao and read everything in it. That is acceptable   !!!
+# !!! for a throwaway per-run environment and nowhere else.               !!!
 #
 # Safe to re-run: an initialised OpenBao is not re-initialised; a sealed
 # one (after a pod restart) is unsealed with the stored keys.
@@ -37,6 +46,7 @@ fi
 init_file="$SENSITIVE_DIR/openbao-init.json"
 token_file="$SENSITIVE_DIR/openbao-root-token"
 unseal_file="$SENSITIVE_DIR/openbao-unseal-keys.json"
+bootstrap_file="$SENSITIVE_DIR/openbao-bootstrap-token"
 
 bao() { kc -n "$CORE_NS" exec -i "$OPENBAO_POD" -c openbao -- env BAO_ADDR=http://127.0.0.1:8200 bao "$@"; }
 # bao_root <command string>: runs a bao shell snippet in the pod with the
@@ -79,15 +89,16 @@ else
 	(umask 077 && kc -n "$CORE_NS" get secret "$OPENBAO_UNSEAL_SECRET" -o json |
 		jq -r '.data["unseal-keys.json"] | @base64d' >"$unseal_file") ||
 		die "OpenBao is initialised but neither $init_file nor Secret $OPENBAO_UNSEAL_SECRET exists: it can't be unsealed (rebuild the cluster)"
-	(umask 077 && kc -n "$CORE_NS" get secret "$OPENBAO_ROOT_SECRET" -o json |
-		jq -j '.data.token | @base64d' >"$token_file") ||
-		die "Secret $OPENBAO_ROOT_SECRET is missing"
+	(umask 077 && kc -n "$CORE_NS" get secret "$OPENBAO_UNSEAL_SECRET" -o json |
+		jq -je '.data["root-token"] | @base64d' >"$token_file") ||
+		die "Secret $OPENBAO_UNSEAL_SECRET has no root-token"
 fi
 jq -e '(.keys | length) >= .threshold' "$unseal_file" >/dev/null || die "unseal key file is malformed"
 
-# UAT ONLY: the unseal keys in a Kubernetes Secret, so a re-run (or a
-# person) can unseal after a pod restart without this runner's files.
-apply_secret "$CORE_NS" "$OPENBAO_UNSEAL_SECRET" "unseal-keys.json=$unseal_file"
+# UAT ONLY: the unseal keys and the root token in a Kubernetes Secret, so a
+# re-run (or a person) can unseal after a pod restart, and mint the next
+# bootstrap token, without this runner's files.
+apply_secret "$CORE_NS" "$OPENBAO_UNSEAL_SECRET" "unseal-keys.json=$unseal_file" "root-token=$token_file"
 
 st=$(status_json)
 if [[ "$(jq -r .sealed <<<"$st")" == true ]]; then
@@ -116,6 +127,11 @@ key_json=$(bao_root "
 log "transit/keys/$GATEWAY_KEY is ed25519"
 
 # Last: the chart's bootstrap Job can't start until this Secret exists, so
-# it never races the Transit setup above.
-apply_secret "$CORE_NS" "$OPENBAO_ROOT_SECRET" "token=$token_file"
-log "!!! UAT ONLY: OpenBao root token in Secret $CORE_NS/$OPENBAO_ROOT_SECRET, unseal keys in $CORE_NS/$OPENBAO_UNSEAL_SECRET"
+# it never races the Transit setup above. A fresh token every run: the Job
+# revoked the last one.
+(umask 077 && bao_root 'bao token create -orphan -policy=root -ttl=1h -explicit-max-ttl=1h -renewable=false -display-name=imas-uat-chart-bootstrap -field=token' | tr -d '\n' >"$bootstrap_file") ||
+	die "could not mint the chart's bootstrap token"
+[[ -s "$bootstrap_file" ]] || die "bao token create gave no token"
+apply_secret "$CORE_NS" "$OPENBAO_ROOT_SECRET" "token=$bootstrap_file"
+log "the chart's bootstrap Job gets a one-hour root-policy token (Secret $CORE_NS/$OPENBAO_ROOT_SECRET), which it revokes when done"
+log "!!! UAT ONLY: OpenBao unseal keys and root token in Secret $CORE_NS/$OPENBAO_UNSEAL_SECRET"

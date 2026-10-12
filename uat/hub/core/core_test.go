@@ -206,6 +206,7 @@ func TestValuesMatchLib(t *testing.T) {
 		"saasapi.recipes.writeRole":             "WRITE_ROLE",
 		"saasapi.internalAuthSecret.secretName": "INTERNAL_AUTH_SECRET",
 		"natsSeeds.secretName":                  "SEEDS_SECRET",
+		"natsTrust.configMapName":               "NATS_TRUST_CONFIGMAP",
 		"tls.secretName":                        "FARMER_TLS_SECRET",
 		"openbaoBootstrap.tokenSecretName":      "OPENBAO_ROOT_SECRET",
 		"farmer.bootstrapAdmin.username":        "BOOTSTRAP_ADMIN_NAME",
@@ -482,6 +483,44 @@ func TestFarmerChartRender(t *testing.T) {
 	}
 	if !strings.Contains(mustJSON(t, job), "transit/keys/imas-gateway-jwt type=ed25519") {
 		t.Error("the chart's bootstrap no longer names transit/keys/imas-gateway-jwt type=ed25519; openbao-bootstrap.sh must follow")
+	}
+
+	// P21 slice 1: farmer gets the two user seeds seeds.sh makes and no
+	// trust chain seed, reads the trust ConfigMap and signs through Transit.
+	for _, name := range []string{"SYS_USER", "SAASAPI_USER"} {
+		if fe["IMAS_NATS_"+name+"_SEED_FILE"] == "" {
+			t.Errorf("farmer has no IMAS_NATS_%s_SEED_FILE (seeds.sh makes it)", name)
+		}
+	}
+	for key, o := range objs {
+		for _, c := range containers(o) {
+			for name := range envOf(c) {
+				for _, gone := range []string{"OPERATOR", "OPERATOR_SIGNING", "SYS_ACCOUNT", "TENANT", "TENANT_SIGNING"} {
+					if name == "IMAS_NATS_"+gone+"_SEED_FILE" || name == "IMAS_NATS_"+gone+"_SEED" {
+						t.Errorf("%s container %v sets %s", key, c["name"], name)
+					}
+				}
+			}
+		}
+	}
+	if fe["IMAS_NATS_TRUST_DIR"] != "/var/run/imas/nats-trust" || fe["IMAS_NATSSIGN_OPENBAO_ADDR"] == "" {
+		t.Errorf("farmer IMAS_NATS_TRUST_DIR %q, IMAS_NATSSIGN_OPENBAO_ADDR %q", fe["IMAS_NATS_TRUST_DIR"], fe["IMAS_NATSSIGN_OPENBAO_ADDR"])
+	}
+	if !strings.Contains(mustJSON(t, farmer), `"name":"imas-nats-trust"`) {
+		t.Error("farmer doesn't mount ConfigMap imas-nats-trust")
+	}
+	// Design T4, as rendered: the Job's nats-trust step writes the trust
+	// ConfigMap, then the Job deletes the ephemeral policy and revokes the
+	// token openbao-bootstrap.sh handed it (check.sh confirms on the cluster).
+	container(t, job, "prepare")
+	if got := envOf(container(t, job, "nats-trust"))["IMAS_NATSBOOT_TRUST_CONFIGMAP"]; got != "imas-nats-trust" {
+		t.Errorf("nats-trust writes ConfigMap %q, want imas-nats-trust", got)
+	}
+	js := mustJSON(t, job)
+	for _, want := range []string{"bao policy delete imas-nats-bootstrap", "bao token revoke -self"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("the bootstrap Job no longer runs %q; check.sh's T4 checks assume it", want)
+		}
 	}
 
 	if !full {

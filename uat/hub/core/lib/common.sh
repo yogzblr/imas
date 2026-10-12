@@ -26,12 +26,13 @@ OPENBAO_POD=imas-core-openbao-0
 PXC_CLUSTER=imas-core-pxc         # StatefulSets <cluster>-pxc, <cluster>-haproxy
 PXC_ROOT_SECRET=imas-core-pxc-secrets
 VALKEY_DEPLOY=imas-core-valkey
-SEEDS_SECRET=imas-farmer-nats-seeds
+SEEDS_SECRET=imas-farmer-nats-seeds        # natsSeeds.secretName: SYS_USER, SAASAPI_USER
+NATS_TRUST_CONFIGMAP=imas-nats-trust          # natsTrust.configMapName (public; the DMZ copies it)
 INTERNAL_AUTH_SECRET=imas-saasapi-internal-auth
 SAASAPI_NATS_SECRET=imas-saasapi-nats
 SAASAPI_BOX_SECRET=imas-saasapi-box
-OPENBAO_ROOT_SECRET=imas-uat-openbao-root     # openbaoBootstrap.tokenSecretName
-OPENBAO_UNSEAL_SECRET=imas-uat-openbao-unseal # UAT ONLY: unseal keys in a Secret
+OPENBAO_ROOT_SECRET=imas-uat-openbao-root     # openbaoBootstrap.tokenSecretName (a per-run bootstrap token, not the root token)
+OPENBAO_UNSEAL_SECRET=imas-uat-openbao-unseal # UAT ONLY: unseal keys and root token in a Secret
 S3_FARMER_SECRET=imas-uat-s3-farmer           # objectStore.credentialsSecret
 S3_SAASAPI_SECRET=imas-uat-s3-saasapi         # saasapi.recipes.credentialsSecret
 MINIO_ROOT_SECRET=imas-uat-minio-root
@@ -325,6 +326,81 @@ write_keycloak_json() {
 		    "2": tenant("2"; "t2-admin"; $p3; "t2-reader"; $p4)
 		  }
 		}' >"$2")
+}
+
+# Design T4 (docs/design/imas-openbao-signing-design.md section 11), as the
+# check script reads it: the keys the trust ConfigMap must carry, and the
+# Transit keys the chart's bootstrap Job creates.
+NATS_TRUST_KEYS=(operator.jwt operator.pub operator-signing.pub sys-account.pub sys-account.jwt)
+NATS_PLATFORM_KEYS=(nats-operator nats-operator-signing nats-sys-account)
+
+# openbao_t4 <root token file> <bootstrap token file>: the OpenBao half of
+# design T4, run in the OpenBao pod. Prints one "PASS <what>" or
+# "FAIL <what>" line per check:
+#   - the token the chart's bootstrap Job was handed is revoked;
+#   - the ephemeral policy imas-nats-bootstrap is gone;
+#   - farmer's and the publish Job's policies, each alone, cannot sign with
+#     the operator identity key, nor update or soft-delete it;
+#   - the three platform keys are ed25519, not exportable, no plaintext
+#     backup, not imported, not derived, not soft-deleted.
+# Both tokens go over stdin, never argv. A short-lived probe token per
+# policy is minted and revoked again.
+openbao_t4() {
+	{ cat "$1"; echo; cat "$2" 2>/dev/null; echo; } |
+		kc -n "$CORE_NS" exec -i "$OPENBAO_POD" -c openbao -- /bin/sh -c '
+		IFS= read -r BAO_TOKEN; IFS= read -r boot || true
+		export BAO_TOKEN BAO_ADDR=http://127.0.0.1:8200
+		r() { printf "%s %s
+" "$1" "$2"; }
+		if [ -z "$boot" ]; then
+			r FAIL "T4: no bootstrap token recorded to check"
+		elif BAO_TOKEN="$boot" bao token lookup >/dev/null 2>&1; then
+			r FAIL "T4: the token handed to the bootstrap Job is still valid"
+		else
+			r PASS "T4: the token handed to the bootstrap Job is revoked"
+		fi
+		if bao policy read imas-nats-bootstrap >/dev/null 2>&1; then
+			r FAIL "T4: policy imas-nats-bootstrap still exists"
+		else
+			r PASS "T4: policy imas-nats-bootstrap is deleted"
+		fi
+		# One probe per policy: an explicit deny in one must not hide a
+		# grant in the other (each runs with its own policy alone).
+		for pol in imas-farmer-natssign imas-nats-sys-signer; do
+			if probe=$(bao token create -orphan -no-default-policy -policy="$pol" \
+				-ttl=2m -explicit-max-ttl=2m -renewable=false -field=token 2>/dev/null); then
+				for pc in transit/sign/nats-operator=deny transit/keys/nats-operator=read transit/keys/nats-operator/soft-delete=deny; do
+					got=$(bao token capabilities "$probe" "${pc%%=*}" 2>/dev/null || echo error)
+					if [ "$got" = "${pc#*=}" ]; then
+						r PASS "T4: $pol on ${pc%%=*}: $got"
+					else
+						r FAIL "T4: $pol on ${pc%%=*}: $got, want ${pc#*=}"
+					fi
+				done
+				bao token revoke "$probe" >/dev/null 2>&1 || r FAIL "T4: could not revoke the $pol probe token"
+			else
+				r FAIL "T4: could not mint a probe token with $pol (policy missing?)"
+			fi
+		done
+		for k in '"${NATS_PLATFORM_KEYS[*]}"'; do
+			hard=yes
+			[ "$(bao read -field=type "transit/keys/$k" 2>/dev/null)" = ed25519 ] || hard=no
+			for f in exportable allow_plaintext_backup imported_key derived soft_deleted; do
+				[ "$(bao read -field=$f "transit/keys/$k" 2>/dev/null)" = false ] || hard=no
+			done
+			if [ $hard = yes ]; then
+				r PASS "T4: transit/keys/$k is a hardened ed25519 key"
+			else
+				r FAIL "T4: transit/keys/$k is missing or not hardened (ed25519, no export, no backup, not imported, not derived, not soft-deleted)"
+			fi
+		done' 2>/dev/null || printf 'FAIL T4: could not run the checks in %s\n' "$OPENBAO_POD"
+}
+
+# trust_snapshot: the trust ConfigMap's data and resourceVersion, sorted
+# JSON (public data). install.sh keeps the first one; check.sh compares.
+trust_snapshot() {
+	kc -n "$CORE_NS" get configmap "$NATS_TRUST_CONFIGMAP" -o json |
+		jq -S '{data: .data, resourceVersion: .metadata.resourceVersion}'
 }
 
 # jwt_payload <token>: the decoded payload JSON (no verification; the
