@@ -856,12 +856,16 @@ func TestExtrasChartRender(t *testing.T) {
 }
 
 // withObjectStore writes a copy of testdata/endpoints.json with the given
-// object_store object and returns its path.
-func withObjectStore(t *testing.T, os_ map[string]any) string {
+// object_store object and returns its path. With accountStore, it also sets
+// dmz.account_store.endpoint (required in external mode).
+func withObjectStore(t *testing.T, os_ map[string]any, accountStore ...string) string {
 	t.Helper()
 	var ep map[string]any
 	readJSON(t, endpointsFile, &ep)
 	ep["object_store"] = os_
+	for _, a := range accountStore {
+		ep["dmz"].(map[string]any)["account_store"] = map[string]any{"endpoint": a}
+	}
 	b, err := json.Marshal(ep)
 	if err != nil {
 		t.Fatal(err)
@@ -897,7 +901,7 @@ func TestObjectStoreEndpointVariable(t *testing.T) {
 	ext := withObjectStore(t, map[string]any{
 		"mode": "external", "endpoint": "s3gw.example.internal:7070", "use_ssl": true,
 		"egress_cidrs": []string{"10.70.0.0/24"},
-	})
+	}, "s3gw.example.internal:7070")
 	out := run(t, "bash", "gen-values.sh", ext, adminFile, releaseTag, loaderPubFile)
 	var v map[string]any
 	if err := json.Unmarshal(out, &v); err != nil {
@@ -933,11 +937,12 @@ func TestObjectStoreEndpointVariable(t *testing.T) {
 func TestObjectStoreEndpointRejected(t *testing.T) {
 	requireTools(t, "bash", "jq")
 	for name, o := range map[string]map[string]any{
-		"unknown mode":          {"mode": "minio"},
-		"external, no endpoint": {"mode": "external"},
-		"scheme in endpoint":    {"endpoint": "https://s3.example.internal"},
-		"bad use_ssl":           {"use_ssl": "yes"},
-		"bad cidr":              {"egress_cidrs": []string{"not-a-cidr"}},
+		"unknown mode":                            {"mode": "minio"},
+		"external, no endpoint":                   {"mode": "external"},
+		"external, no dmz.account_store.endpoint": {"mode": "external", "endpoint": "s3gw.example.internal:7070"},
+		"scheme in endpoint":                      {"endpoint": "https://s3.example.internal"},
+		"bad use_ssl":                             {"use_ssl": "yes"},
+		"bad cidr":                                {"egress_cidrs": []string{"not-a-cidr"}},
 	} {
 		p := withObjectStore(t, o)
 		cmd := exec.Command("bash", "-c", `set -euo pipefail; . lib/common.sh; ENDPOINTS="$1"; load_endpoints`, "_", p)

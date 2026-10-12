@@ -168,8 +168,14 @@ load_endpoints() {
 	valid_ipv4 "$DMZ_IP" || die "dmz.private_ip is not an IPv4 address: $DMZ_IP"
 	case "$S3_MODE" in
 	rustfs) ;;
-	external) jq -e '.object_store.endpoint | strings | length > 0' "$ENDPOINTS" >/dev/null ||
-		die "object_store.mode is external: object_store.endpoint (host[:port]) is required" ;;
+	external)
+		jq -e '.object_store.endpoint | strings | length > 0' "$ENDPOINTS" >/dev/null ||
+			die "object_store.mode is external: object_store.endpoint (host[:port]) is required"
+		# farmer writes the accounts bucket on that external store; without
+		# this the DMZ loader would read <core private IP>:9000, where no
+		# RustFS runs in this mode (uat/hub/dmz, dmz.account_store).
+		jq -e '.dmz.account_store.endpoint | strings | length > 0' "$ENDPOINTS" >/dev/null ||
+			die "object_store.mode is external: dmz.account_store.endpoint (the accounts bucket's host:port as the DMZ reaches it) is required" ;;
 	*) die "object_store.mode must be rustfs or external, got: $S3_MODE" ;;
 	esac
 	[[ "$S3_ENDPOINT" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$ ]] ||

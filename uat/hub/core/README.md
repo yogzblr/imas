@@ -465,9 +465,11 @@ and `accounts-reader/secret-access-key` for the DMZ install's
 `--accounts-reader-dir` (no trailing newline). You also provide the
 buckets `imas-recipes`, `imas-jobs`, `imas-sprout-jwts` and
 `imas-accounts`, the four users with the limits `minio-setup.sh` gives
-them, and an endpoint for the accounts bucket the DMZ can reach
-(`dmz.account_store.endpoint` in uat/hub/dmz's endpoints file, and the
-matching network path).
+them, and an endpoint for the accounts bucket the DMZ can reach:
+`dmz.account_store.endpoint` in the endpoints file is required in this mode
+(`load_endpoints` stops without it, since the DMZ's default,
+`<core private IP>:9000`, is the bundled RustFS), plus the matching network
+path.
 
 What the service must do, because imas relies on it (RustFS 1.0.1 was
 checked for each; a gateway has to be checked too):
