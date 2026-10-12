@@ -1,6 +1,9 @@
 package main
 
 import (
+	"errors"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -23,6 +26,7 @@ func TestCheckAccountStore(t *testing.T) {
 		sprout string
 		want   string
 	}{
+		{"no bucket", func(a *config.AccountStoreConfig) { a.Bucket = "" }, "", "no accounts bucket"},
 		{"no endpoint", func(a *config.AccountStoreConfig) { a.Endpoint = "" }, "", "no endpoint"},
 		{"no credential", func(a *config.AccountStoreConfig) { a.SecretAccessKey = "" }, "", "no write credential"},
 		{"farmer's credential", func(a *config.AccountStoreConfig) { a.AccessKeyID = "farmer" }, "", "must not be farmer's"},
@@ -37,5 +41,26 @@ func TestCheckAccountStore(t *testing.T) {
 				t.Fatalf("got %v, want an error containing %q", err, c.want)
 			}
 		})
+	}
+}
+
+// Farmer refuses to start without the accounts bucket (E6 item 3): no
+// silent fallback to pushing the bus alone. initAccountPublisher exits
+// non-zero naming the variable; run in a child process, as it exits.
+func TestInitAccountPublisherRefusesWithoutBucket(t *testing.T) {
+	if os.Getenv("IMAS_TEST_INIT_ACCOUNT_PUBLISHER") == "1" {
+		config.AccountStore = config.AccountStoreConfig{}
+		initAccountPublisher()
+		return // not reached: initAccountPublisher must exit
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestInitAccountPublisherRefusesWithoutBucket$")
+	cmd.Env = append(os.Environ(), "IMAS_TEST_INIT_ACCOUNT_PUBLISHER=1")
+	out, err := cmd.CombinedOutput()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() == 0 {
+		t.Fatalf("farmer started without an accounts bucket (err %v):\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "no accounts bucket") || !strings.Contains(string(out), config.EnvAccountsS3Bucket) {
+		t.Fatalf("exit without the reason:\n%s", out)
 	}
 }

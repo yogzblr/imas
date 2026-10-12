@@ -12,6 +12,11 @@ openbaoClient:
   tokenSecretName: imas-core-openbao-tokens
 credentialPublisher:
   tokenSecretName: imas-publisher-openbao-token
+# The accounts bucket is required (no object store is bundled): the S3
+# endpoint farmer writes Account JWTs to, with the writer credential in
+# accountStore.credentialsSecret (default imas-farmer-accounts-writer).
+accountStore:
+  endpoint: s3.example.com:9000
 saasapi:
   fleetUpdateDispatch:
     enabled: true

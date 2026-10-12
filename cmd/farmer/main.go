@@ -488,16 +488,17 @@ func waitForObjectStore(ctx context.Context, store *objectstore.Store, what, buc
 }
 
 // initAccountPublisher installs the accounts bucket publisher
-// (pki.SetAccountPublisher) from config.AccountStore. Without a bucket
-// farmer still pushes to the bus nodes but writes no bucket, which a
-// restarted bus node's loader needs; that is logged. A bucket that is
-// not its own, or no write credential of its own, stops farmer.
+// (pki.SetAccountPublisher) from config.AccountStore. The accounts bucket
+// is required: the bus keeps no Account across a restart, and a bus node
+// started empty loads every Account from the bucket, so a farmer pushing
+// to the bus without writing the bucket would lose every Account at the
+// next bus node restart. Farmer always has a bus to push to
+// (config.FarmerBusURL defaults to farmerinterface:farmerbusport), so no
+// bucket, no endpoint, a bucket that is not its own or no write
+// credential of its own stops farmer. The only path without a publisher
+// is internal/pki's in-process test bus, which never runs this.
 func initAccountPublisher() {
 	acc := config.AccountStore
-	if acc.Bucket == "" {
-		log.Warnf("accounts bucket not configured (%s): Account JWTs are pushed to the bus nodes only, and a bus node started empty cannot load them", config.EnvAccountsS3Bucket)
-		return
-	}
 	if err := checkAccountStore(acc, os.Getenv(pki.SproutJWTBucketEnv)); err != nil {
 		log.Fatalf("accounts bucket: %v", err)
 	}
@@ -519,11 +520,14 @@ func initAccountPublisher() {
 	log.Infof("Account JWTs are published to bucket %s at %s (event %s)", acc.Bucket, acc.Endpoint, acc.EventSubject)
 }
 
-// checkAccountStore checks the accounts bucket is its own: a separate
-// bucket from the recipe, job and sprout JWT buckets, and a separate
-// credential from farmer's object store one (§4.5), on an endpoint.
+// checkAccountStore checks the accounts bucket is configured and its
+// own: a bucket on an endpoint, separate from the recipe, job and sprout
+// JWT buckets, and a separate credential from farmer's object store one
+// (§4.5).
 func checkAccountStore(acc config.AccountStoreConfig, sproutJWTBucket string) error {
 	switch {
+	case acc.Bucket == "":
+		return fmt.Errorf("no accounts bucket: set %s (the bus keeps no Account across a restart; its loaders read them from this bucket)", config.EnvAccountsS3Bucket)
 	case acc.Endpoint == "":
 		return fmt.Errorf("no endpoint: set %s or IMAS_S3_ENDPOINT", config.EnvAccountsS3Endpoint)
 	case acc.AccessKeyID == "" || acc.SecretAccessKey == "":

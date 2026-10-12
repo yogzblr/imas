@@ -264,8 +264,10 @@ objectStore:
 # chart, accountStore) reads it with a read-only credential, so a bus node
 # started empty loads every Account from here. A bucket and a write
 # credential of its own: farmer's objectStore credential must not reach it,
-# and this one must not reach the recipe, job or sprout JWT bucket. On when
-# bucket is set and there is an endpoint (endpoint or objectStore.endpoint).
+# and this one must not reach the recipe, job or sprout JWT bucket.
+# Required: the chart fails to render without a bucket and an endpoint
+# (endpoint or objectStore.endpoint), and farmer refuses to start without
+# them, since the bus keeps no Accounts of its own across a restart.
 # ---------------------------------------------------------------------------
 accountStore:
   # host[:port], no scheme. Empty: objectStore.endpoint.

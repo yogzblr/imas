@@ -9,20 +9,40 @@ import (
 // gets IMAS_ACCOUNTS_* from accountStore, with its own write credential,
 // and IMAS_BUS_EXPECTED_NODES from bus.expectedNodes.
 func TestAccountStoreEnvRendered(t *testing.T) {
-	accountsEnv := []string{"IMAS_ACCOUNTS_S3_BUCKET", "IMAS_ACCOUNTS_S3_ENDPOINT", "IMAS_ACCOUNTS_S3_USE_SSL",
-		"IMAS_ACCOUNTS_S3_ACCESS_KEY_ID", "IMAS_ACCOUNTS_S3_SECRET_ACCESS_KEY", "IMAS_ACCOUNTS_EVENT_SUBJECT", "IMAS_BUS_EXPECTED_NODES"}
+	// Rendered on every install; IMAS_ACCOUNTS_S3_USE_SSL and
+	// IMAS_BUS_EXPECTED_NODES only when set.
+	accountsEnv := []string{"IMAS_ACCOUNTS_S3_BUCKET", "IMAS_ACCOUNTS_S3_ENDPOINT",
+		"IMAS_ACCOUNTS_S3_ACCESS_KEY_ID", "IMAS_ACCOUNTS_S3_SECRET_ACCESS_KEY", "IMAS_ACCOUNTS_EVENT_SUBJECT"}
 
-	t.Run("no endpoint: off", func(t *testing.T) {
-		env := envMap(container(t, farmerDeploy(t, mustRender(t)), "farmer"))
+	// Required: farmer refuses to start without the accounts bucket, so the
+	// chart refuses to render without its bucket, endpoint or credential.
+	t.Run("required", func(t *testing.T) {
+		mustFail(t, "accountStore.endpoint (or objectStore.endpoint) is required", "--set", "accountStore.endpoint=")
+		mustFail(t, "accountStore.bucket is required", "--set", "accountStore.bucket=")
+		mustFail(t, "accountStore.credentialsSecret is required", "--set", "accountStore.credentialsSecret=")
+	})
+
+	t.Run("own endpoint", func(t *testing.T) {
+		c := container(t, farmerDeploy(t, mustRender(t)), "farmer")
+		vals := envValues(c)
+		if vals["IMAS_ACCOUNTS_S3_ENDPOINT"] != testAccountStoreEndpoint || vals["IMAS_ACCOUNTS_S3_BUCKET"] != "imas-accounts" {
+			t.Errorf("endpoint %q, bucket %q", vals["IMAS_ACCOUNTS_S3_ENDPOINT"], vals["IMAS_ACCOUNTS_S3_BUCKET"])
+		}
+		env := envMap(c)
 		for _, k := range accountsEnv {
-			if _, ok := env[k]; ok {
-				t.Errorf("%s rendered without an object store endpoint", k)
+			if _, ok := env[k]; !ok {
+				t.Errorf("%s not rendered", k)
 			}
+		}
+		if _, ok := env["IMAS_S3_ENDPOINT"]; ok {
+			t.Error("IMAS_S3_ENDPOINT rendered without objectStore.endpoint")
 		}
 	})
 
+	// objectStore sets the recipe store's endpoint and clears the accounts
+	// bucket's own, so the accounts bucket falls back to it.
 	objectStore := []string{"--set", "objectStore.endpoint=s3.imas-core.svc:9000",
-		"--set", "objectStore.credentialsSecret=imas-farmer-s3"}
+		"--set", "objectStore.credentialsSecret=imas-farmer-s3", "--set", "accountStore.endpoint="}
 
 	t.Run("defaults on the object store endpoint", func(t *testing.T) {
 		c := container(t, farmerDeploy(t, mustRender(t, objectStore...)), "farmer")

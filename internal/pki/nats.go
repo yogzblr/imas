@@ -138,17 +138,20 @@ func baseNatsOptions() nats_server.Options {
 // or needs them. A missing or unusable tenant Account JWT is skipped;
 // core's next push supplies it.
 //
-// The resolver directory (resolverStoreDir) is under FarmerPKI, so it
-// lives as long as this process's PKI directory and nothing relies on it
-// outliving that: ConfigureNats serves only the in-process test bus
-// (farmer never embeds one, and its FarmerPKI is the tmp emptyDir). Every
-// Account JWT reaches a real bus node through the accounts bucket and
-// its loader (accountpublisher.go), not through this directory.
+// The resolver's directory is its own, made by this call and removed when
+// the server closes the resolver (newTempDirResolver): ConfigureNats
+// serves only the in-process test bus, and nothing reads that directory
+// again.
 func seedResolverFromCore(NatsConfig *nats_server.Options) {
 	mat, err := ensureNatsAuth()
 	if err != nil {
 		log.Panicf("nats: failed to bootstrap decentralized JWT auth material: %v", err)
 	}
+	seedResolverWith(NatsConfig, mat)
+}
+
+// seedResolverWith is seedResolverFromCore with core's material given.
+func seedResolverWith(NatsConfig *nats_server.Options, mat *natsAuthMaterial) {
 	opClaims, err := jwt.DecodeOperatorClaims(mat.operatorJWT)
 	if err != nil {
 		log.Panicf("nats: failed to decode operator JWT: %v", err)
@@ -156,10 +159,18 @@ func seedResolverFromCore(NatsConfig *nats_server.Options) {
 	NatsConfig.TrustedOperators = []*jwt.OperatorClaims{opClaims}
 	NatsConfig.SystemAccount = mat.sysAccountPub
 
-	resolver, err := nats_server.NewDirAccResolver(resolverStoreDir(), 0, 0, nats_server.HardDelete)
+	resolver, err := newTempDirResolver()
 	if err != nil {
 		log.Panicf("nats: failed to create the account resolver: %v", err)
 	}
+	// Until the options hold it (the server's Shutdown closes it then), a
+	// panic below must not leave its directory behind.
+	handedOver := false
+	defer func() {
+		if !handedOver {
+			resolver.Close()
+		}
+	}()
 	if err := resolver.Store(mat.sysAccountPub, mat.sysAccountJWT); err != nil {
 		log.Panicf("nats: failed to seed the SYS account into the resolver: %v", err)
 	}
@@ -203,6 +214,37 @@ func seedResolverFromCore(NatsConfig *nats_server.Options) {
 		}
 	}
 	NatsConfig.AccountResolver = resolver
+	handedOver = true
+}
+
+// tempDirResolver is a full account resolver over a directory of its
+// own, which Close (called by the server's Shutdown) removes.
+type tempDirResolver struct {
+	*nats_server.DirAccResolver
+	dir string
+}
+
+// newTempDirResolver makes a fresh directory in the process's temp
+// directory and a full resolver over it.
+func newTempDirResolver() (*tempDirResolver, error) {
+	dir, err := os.MkdirTemp("", "imas-bus-resolver-")
+	if err != nil {
+		return nil, err
+	}
+	r, err := nats_server.NewDirAccResolver(dir, 0, 0, nats_server.HardDelete)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, err
+	}
+	return &tempDirResolver{DirAccResolver: r, dir: dir}, nil
+}
+
+// Close closes the resolver and removes its directory.
+func (r *tempDirResolver) Close() {
+	r.DirAccResolver.Close()
+	if err := os.RemoveAll(r.dir); err != nil {
+		log.Warnf("nats: removing the account resolver directory %s: %v", r.dir, err)
+	}
 }
 
 func SetNATSServer(s *nats_server.Server) {

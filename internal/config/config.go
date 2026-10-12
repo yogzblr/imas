@@ -468,7 +468,8 @@ var (
 	// to for the bus nodes' account loaders (docs/briefs/P21-slice2-bus-
 	// loader.md §4): its own bucket and write credential, never the
 	// recipe/job ones. Read from the IMAS_ACCOUNTS_* environment only
-	// (accountStoreFromEnv); an empty Bucket means not configured.
+	// (accountStoreFromEnv). Required by farmer: an empty Bucket means not
+	// configured, and cmd/farmer refuses to start then.
 	AccountStore AccountStoreConfig
 
 	// BusExpectedNodes (IMAS_BUS_EXPECTED_NODES) is how many bus nodes a

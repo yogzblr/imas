@@ -67,6 +67,10 @@ func natsAuthDir() string {
 	return filepath.Join(config.FarmerPKI, natsAuthSubdir)
 }
 
+// resolverStoreDir is the DMZ bus's resolver directory (LoadBusNats),
+// on cmd/farmerbus's data emptyDir; its account loader refills it from
+// the accounts bucket at every start. The in-process test bus uses a
+// directory of its own (newTempDirResolver).
 func resolverStoreDir() string {
 	return filepath.Join(natsAuthDir(), "resolver")
 }

@@ -235,7 +235,7 @@ HTTP on IMAS_LOADER_HEALTH_PORT: `/healthz` 200 while the process runs; `/readyz
 `type AccountPublisher interface { Publish(ctx, accountPub string, jwt string) error; ReconcileAll(ctx) error }` with implementation `s3AccountPublisher` (objectstore.Store for the accounts bucket with the WRITE credential, a NATS system connection, config).
 
 ### 7.2 Single choke point
-Introduce `func persistAccountJWT(path, accountPub, jwt string) error` in internal/pki, which does the existing `writeFileAtomic` and then calls the publisher. Replace the write at each site in 1.10 (jwtauth.go:208, :271; jwtusers.go:318; tenant.go:187, :522, :746; saasapi_user.go:237) with it. The publisher is a package-level injectable (`SetAccountPublisher`) set in cmd/farmer/main.go; nil in tests that do not care (no-op).
+As built (C2, PR 229; made explicit by E6, `docs/briefs/E-followups.md`): there is no write hook. The publish point is `pushAccountUpdate` in internal/pki/resolver.go, which every Account JWT that reaches the bus passes through: with a publisher installed it calls `Publish` (bucket, index, push to every node, event); without one (only the in-process test bus) it pushes to the bus nodes directly. `TestNoAccountJWTReachesBusWithoutPublisher` (internal/pki/accountpush_guard_test.go) fails if any code sends to `$SYS.REQ.CLAIMS.UPDATE` other than through it. A hook on the local file write (the `persistAccountJWT` this section first proposed) was not built: farmer mints a minimal Account JWT at boot, with none of the tenant's revocations yet, and publishing it at the write would put an un-revoked JWT with a newer iat in the bucket, which a restarted bus node would load. Such a mint reaches the bucket only through `pushAccountUpdate`, after the sync has applied the revocations. The publisher is a package-level injectable (`SetAccountPublisher`) set in cmd/farmer/main.go, and farmer refuses to start without the accounts bucket; nil only in the package's own tests.
 
 ### 7.3 Order on every change
 1. Sign (iat made strictly greater via `waitPastIssuedAt` on EVERY re-sign, not only lock-outs; extend tenant.go:664-668's use to the other signers).
@@ -251,7 +251,7 @@ New `pushToAllNodes(ctx, jwt)` in internal/pki/resolver.go replacing the single-
 
 ### 7.5 Failure policy
 - Bucket write fails (step 3 or 4): for lock-outs/revocations still push live (security first), then return an error to the caller so the API call reports failure and the operation is retried; for ordinary updates return the error without pushing. In both cases the periodic `ReconcileAll` repairs.
-- Push fails or partial: log, return nil (the bucket has it), set metric `farmer_account_push_missing_nodes`.
+- Push fails or partial: log, return nil (the bucket has it), with the log field `farmer_account_push_missing_nodes=N` (no metrics in this phase; the bucket write failures log `farmer_account_bucket_write_failed=N`; both documented in deploy/helm/farmer/README.md, "Account publisher log fields").
 - Event publish fails: log only.
 - `ReconcileAll` runs at farmer start-up (after ReloadNKeys, cmd/farmer/main.go:120-230) and inside every PushAllAccounts: it lists the bucket and PUTs any farmer-state account whose object is missing or whose iat differs (farmer state wins, since it is the signer). This also repairs a bucket rollback or lost write.
 
