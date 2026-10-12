@@ -1,4 +1,5 @@
 change: E1 (P26): the UAT works with the stateless build. Core OpenBao uses single-node raft (2.7.1 has no `file` backend; checked with the 2.7.1 image); `farmer-uat.yaml` sets `objectStore.sproutJWTBucket` (`imas-sprout-jwts`, created by `minio-setup.sh`) and drops `farmer.persistence`; `seeds.sh` creates Secret `imas-farmer-nkey` (`farmer.nk`) and the DMZ bus loader's seed, whose public key becomes `natsTrust.busLoaderUserPub`; RustFS is a hostPort (9000) open to the DMZ private address only (NetworkPolicy, NSG `accounts_store_port`, k0s host port list); `uat.yml` and the lite rig pass `--loader-seed` and `--accounts-reader-dir`; `deploy/farmer/` references carry `imas-farmer-nkey`. Guard: Go tests render both UAT hubs' values and fail on a stale or unknown key, a missing bucket, a non-raft OpenBao config or a NOTES warning. Flagged for security review.
+pr: 234
 ---
 item: P26
 action: update
