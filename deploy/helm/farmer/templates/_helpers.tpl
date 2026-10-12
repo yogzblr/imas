@@ -393,6 +393,22 @@ saasapi's recipe egress rule. */}}
 {{- default $def (regexFind ":[0-9]+$" (toString .Values.objectStore.endpoint) | trimPrefix ":") -}}
 {{- end }}
 
+{{/* "true" when farmer writes the accounts bucket: accountStore.bucket set
+and an endpoint (accountStore.endpoint, else objectStore.endpoint); ""
+otherwise. */}}
+{{- define "imas-farmer.accountStore.on" -}}
+{{- if and .Values.accountStore.bucket (or .Values.accountStore.endpoint .Values.objectStore.endpoint) -}}true{{- end -}}
+{{- end }}
+
+{{/* The port of the accounts bucket's endpoint, as objectStorePort, for
+farmer's egress rule when accountStore.endpoint is its own. */}}
+{{- define "imas-farmer.accountStorePort" -}}
+{{- $acc := .Values.accountStore -}}
+{{- $ssl := ternary .Values.objectStore.useSSL $acc.useSSL (kindIs "invalid" $acc.useSSL) -}}
+{{- $def := ternary "443" "80" (ne (toString $ssl) "false") -}}
+{{- default $def (regexFind ":[0-9]+$" (toString (default .Values.objectStore.endpoint $acc.endpoint)) | trimPrefix ":") -}}
+{{- end }}
+
 {{/*
 The sprout release this chart carries: files/sprout-release.json, written
 at release time by packaging/helm/stamp-sprout-release.sh and absent from a
@@ -755,6 +771,7 @@ explanation rather than deploying something that silently can't work.
 {{- if not (and (kindIs "string" $tl.renderTimeout) (regexMatch "^[0-9]+(\\.[0-9]+)?(ms|s|m)$" (toString $tl.renderTimeout))) -}}
 {{- fail (printf "farmer.recipes.templateLimits.renderTimeout must be a quoted duration such as \"2s\", got %v" $tl.renderTimeout) -}}
 {{- end -}}
+{{- include "imas-farmer.accountStore.validate" . -}}
 {{- $os := .Values.objectStore -}}
 {{- if and $os.bucket $os.jobBucket (eq $os.bucket $os.jobBucket) -}}
 {{- fail "objectStore.jobBucket must differ from objectStore.bucket: GET /files/ serves every key in the recipe bucket to any authenticated caller, so job logs there would be readable across sprouts and tenants" -}}
@@ -773,6 +790,33 @@ explanation rather than deploying something that silently can't work.
 {{- end -}}
 {{- if include "imas-farmer.sproutRelease.registers" . -}}
 {{- include "imas-farmer.registrar.validate" . -}}
+{{- end -}}
+{{- end }}
+
+{{/* The accounts bucket is its own (accountStore): its own bucket and
+write credential, which farmer checks again at start. */}}
+{{- define "imas-farmer.accountStore.validate" -}}
+{{- $n := .Values.bus.expectedNodes -}}
+{{- if not (or (kindIs "invalid" $n) (and (kindIs "float64" $n) (ge (float64 $n) 0.0) (eq (float64 $n) (float64 (int64 $n)))) (and (kindIs "int64" $n) (ge (int64 $n) 0)) (and (kindIs "int" $n) (ge (int $n) 0))) -}}
+{{- fail (printf "bus.expectedNodes must be a whole number, 0 or more, got %v" $n) -}}
+{{- end -}}
+{{- if include "imas-farmer.accountStore.on" . -}}
+{{- $acc := .Values.accountStore -}}
+{{- $os := .Values.objectStore -}}
+{{- if not $acc.credentialsSecret -}}
+{{- fail "accountStore.credentialsSecret is required with accountStore.bucket: farmer writes the accounts bucket with a credential of its own" -}}
+{{- end -}}
+{{- if eq (toString $acc.credentialsSecret) (toString $os.credentialsSecret) -}}
+{{- fail "accountStore.credentialsSecret must not be objectStore.credentialsSecret: the accounts bucket needs a write credential of its own, which can't reach the recipe, job or sprout JWT bucket" -}}
+{{- end -}}
+{{- range $b := list $os.bucket $os.jobBucket $os.sproutJWTBucket -}}
+{{- if and $b (eq (toString $b) (toString $acc.bucket)) -}}
+{{- fail (printf "accountStore.bucket %q must differ from objectStore.bucket, objectStore.jobBucket and objectStore.sproutJWTBucket: the accounts bucket is its own" $acc.bucket) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (or (kindIs "invalid" $acc.useSSL) (kindIs "bool" $acc.useSSL)) -}}
+{{- fail (printf "accountStore.useSSL must be true, false or null, got %v" $acc.useSSL) -}}
+{{- end -}}
 {{- end -}}
 {{- end }}
 

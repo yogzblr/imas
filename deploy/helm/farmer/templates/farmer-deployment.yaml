@@ -143,6 +143,39 @@ spec:
                   name: {{ $os.credentialsSecret }}
                   key: {{ $os.secretAccessKeyKey }}
             {{- end }}
+            {{- if include "imas-farmer.accountStore.on" . }}
+            {{- $acc := .Values.accountStore }}
+            # The accounts bucket (accountStore): farmer's own write
+            # credential, separate from IMAS_S3_*.
+            - name: IMAS_ACCOUNTS_S3_BUCKET
+              value: {{ $acc.bucket | quote }}
+            {{- with $acc.endpoint }}
+            - name: IMAS_ACCOUNTS_S3_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if not (kindIs "invalid" $acc.useSSL) }}
+            - name: IMAS_ACCOUNTS_S3_USE_SSL
+              value: {{ $acc.useSSL | toString | quote }}
+            {{- end }}
+            - name: IMAS_ACCOUNTS_S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $acc.credentialsSecret }}
+                  key: {{ $acc.accessKeyIdKey }}
+            - name: IMAS_ACCOUNTS_S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $acc.credentialsSecret }}
+                  key: {{ $acc.secretAccessKeyKey }}
+            {{- with $acc.eventSubject }}
+            - name: IMAS_ACCOUNTS_EVENT_SUBJECT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.bus.expectedNodes }}
+            - name: IMAS_BUS_EXPECTED_NODES
+              value: {{ . | toString | quote }}
+            {{- end }}
             {{- /* deploy/farmer/deployment.env.job-reconcile.yaml: absent,
             null or "" emits nothing; the type is checked in validate. */}}
             {{- with .Values.farmer.jobs.reconcileWindow }}

@@ -62,6 +62,9 @@ type tenantAccountMaterial struct {
 	signingPub string
 	pub        string
 	jwt        string
+	// minted: jwt was minted by this load and not yet pushed or
+	// published, so a re-sign need not outrank its iat.
+	minted bool
 }
 
 func tenantsRootDir() string {
@@ -178,6 +181,7 @@ func ensureTenantAccountMaterial(mat *natsAuthMaterial, tenantID, name string, c
 			return nil, false, werr
 		}
 		tam.jwt = signed
+		tam.minted = true
 		minted = true
 	}
 
@@ -775,6 +779,10 @@ func syncTenantSprouts(mat *natsAuthMaterial, tam *tenantAccountMaterial, tenant
 	}
 
 	if changed {
+		// Strictly newer iat, as in syncNatsAuth.
+		if !tam.minted {
+			waitPastIssuedAt(ac.IssuedAt)
+		}
 		signed, encErr := ac.Encode(mat.operatorSigningKP)
 		if encErr != nil {
 			return false, encErr
@@ -783,6 +791,7 @@ func syncTenantSprouts(mat *natsAuthMaterial, tam *tenantAccountMaterial, tenant
 			return false, writeErr
 		}
 		tam.jwt = signed
+		tam.minted = false
 	}
 	return changed, nil
 }

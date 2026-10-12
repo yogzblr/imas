@@ -90,6 +90,12 @@ var pushAllMu sync.Mutex
 // retries it. The SYS Account is pushed every time: it is one push, and
 // it carries the revocations.
 //
+// With an AccountPublisher installed, ReconcileAll runs first, under the
+// reconcile-accounts job lease, and every push writes the accounts bucket
+// before it reaches the bus (pushAccountUpdate); an Account JWT the
+// bucket already holds a newer copy of (another replica signed and pushed
+// it) is not pushed again.
+//
 // Every push is attempted; the errors are joined. The returned count is
 // the number of Account JWTs the bus accepted.
 func PushAllAccounts() (int, error) {
@@ -102,6 +108,12 @@ func PushAllAccounts() (int, error) {
 	}
 	var errs []error
 	pushed := 0
+	// The accounts bucket first (docs/briefs/P21-slice2-bus-loader.md
+	// §7.5): whatever this replica holds that the bucket lacks, or holds
+	// older, is written before anything is pushed.
+	if err := reconcileAccountsLeased(context.Background()); err != nil {
+		errs = append(errs, fmt.Errorf("reconciling the accounts bucket: %w", err))
+	}
 	pushCurrent := func(what, accountJWT, path string) error {
 		return pushUntilCurrent(what, accountJWT,
 			func(j string) error { return pushAccountUpdate(mat, j) },

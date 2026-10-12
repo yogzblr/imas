@@ -213,6 +213,10 @@ func main() {
 	if err := pki.CheckNATSAuth(context.Background()); err != nil {
 		log.Fatalf("NATS signing is not usable: %v", err)
 	}
+	// Every Account JWT push writes the accounts bucket first, for the
+	// bus nodes' loaders (docs/briefs/P21-slice2-bus-loader.md §7):
+	// installed before anything below pushes.
+	initAccountPublisher()
 	pki.SetupPKIFarmer()
 	if err := certs.GenCert(); err != nil {
 		log.Fatalf("failed to generate TLS certificates: %v", err)
@@ -247,6 +251,14 @@ func main() {
 	if _, _, err := pki.EnsureSaaSAPICredential(); err != nil {
 		log.Errorf("SaaS API NATS credential: %v", err)
 	}
+	// Repair the accounts bucket from what this replica now holds (a
+	// lost write, a bucket rollback). Not fatal: PushAllAccounts runs it
+	// again on every bus (re)connect.
+	reconcileCtx, cancelReconcile := context.WithTimeout(context.Background(), time.Minute)
+	if err := pki.ReconcileAccounts(reconcileCtx); err != nil {
+		log.Errorf("Reconciling the accounts bucket: %v", err)
+	}
+	cancelReconcile()
 
 	// ctx is cancelled on SIGINT/SIGTERM, driving a graceful shutdown of the
 	// cohort refresher, job reaper, every tenant's NATS connection, and the
@@ -473,6 +485,58 @@ func waitForObjectStore(ctx context.Context, store *objectstore.Store, what, buc
 		return
 	}
 	log.Infof("Connected to %s object store %s (bucket %s)", what, config.S3Endpoint, bucket)
+}
+
+// initAccountPublisher installs the accounts bucket publisher
+// (pki.SetAccountPublisher) from config.AccountStore. Without a bucket
+// farmer still pushes to the bus nodes but writes no bucket, which a
+// restarted bus node's loader needs; that is logged. A bucket that is
+// not its own, or no write credential of its own, stops farmer.
+func initAccountPublisher() {
+	acc := config.AccountStore
+	if acc.Bucket == "" {
+		log.Warnf("accounts bucket not configured (%s): Account JWTs are pushed to the bus nodes only, and a bus node started empty cannot load them", config.EnvAccountsS3Bucket)
+		return
+	}
+	if err := checkAccountStore(acc, os.Getenv(pki.SproutJWTBucketEnv)); err != nil {
+		log.Fatalf("accounts bucket: %v", err)
+	}
+	store, err := objectstore.Open(objectstore.Config{
+		Endpoint:        acc.Endpoint,
+		AccessKeyID:     acc.AccessKeyID,
+		SecretAccessKey: acc.SecretAccessKey,
+		UseSSL:          acc.UseSSL,
+		Bucket:          acc.Bucket,
+	})
+	if err != nil {
+		log.Fatalf("accounts bucket: %v", err)
+	}
+	p, err := pki.NewAccountPublisher(store, acc.EventSubject)
+	if err != nil {
+		log.Fatalf("accounts bucket: %v", err)
+	}
+	pki.SetAccountPublisher(p)
+	log.Infof("Account JWTs are published to bucket %s at %s (event %s)", acc.Bucket, acc.Endpoint, acc.EventSubject)
+}
+
+// checkAccountStore checks the accounts bucket is its own: a separate
+// bucket from the recipe, job and sprout JWT buckets, and a separate
+// credential from farmer's object store one (§4.5), on an endpoint.
+func checkAccountStore(acc config.AccountStoreConfig, sproutJWTBucket string) error {
+	switch {
+	case acc.Endpoint == "":
+		return fmt.Errorf("no endpoint: set %s or IMAS_S3_ENDPOINT", config.EnvAccountsS3Endpoint)
+	case acc.AccessKeyID == "" || acc.SecretAccessKey == "":
+		return fmt.Errorf("no write credential: set %s and %s", config.EnvAccountsS3AccessKeyID, config.EnvAccountsS3SecretAccessKey)
+	case acc.AccessKeyID == config.S3AccessKeyID:
+		return errors.New("the accounts bucket credential must not be farmer's object store credential (IMAS_S3_ACCESS_KEY_ID)")
+	}
+	for _, other := range []string{config.S3Bucket, config.S3JobBucket, sproutJWTBucket} {
+		if other != "" && acc.Bucket == other {
+			return fmt.Errorf("bucket %q is also the recipe, job or sprout JWT bucket; the accounts bucket must be its own", acc.Bucket)
+		}
+	}
+	return nil
 }
 
 // initGatewaySigner wires up the OpenBao Transit-backed signer for

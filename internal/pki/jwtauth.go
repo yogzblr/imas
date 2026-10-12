@@ -54,6 +54,9 @@ type natsAuthMaterial struct {
 	tenantPub       string
 	tenantJWT       string
 	tenantName      string
+	// tenantMinted: tenantJWT was minted by this ensureNatsAuth call and
+	// not yet pushed or published, so a re-sign need not outrank its iat.
+	tenantMinted bool
 }
 
 // authMu guards concurrent bootstrap/persistence of the auth material below
@@ -288,6 +291,7 @@ func ensureNatsAuth() (*natsAuthMaterial, error) {
 			return nil, werr
 		}
 		mat.tenantJWT = signed
+		mat.tenantMinted = true
 	}
 
 	return mat, nil
