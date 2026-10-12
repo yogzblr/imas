@@ -199,29 +199,42 @@ func newOperatorServer(cfg saasapi.Config) (*http.Server, error) {
 	return saasapi.NewOperatorServer(cfg)
 }
 
+// runServer runs one server's ListenAndServe (passed as run) and returns
+// its result. Tests replace it to delay a server's start; it's run as is
+// in production.
+var runServer = func(_ *http.Server, run func() error) error { return run() }
+
 // serve runs the tenant API server and, if operator isn't nil, the
 // operator-plane server next to it, until ctx is done or either one
 // fails (a listener that can't bind, say). Then it shuts both down
 // together, giving in-flight requests up to shutdownTimeout, and returns
 // the failure, or nil after a clean shutdown.
+//
+// serve returns only once every server goroutine has exited. Shutdown
+// alone isn't enough: one that runs before a goroutine reaches
+// net.Listen has no listener to close, and that goroutine then binds the
+// port and only closes it when Serve sees the shutdown, after Shutdown
+// has returned.
 func serve(ctx context.Context, tenant, operator *http.Server, shutdownTimeout time.Duration) error {
 	errc := make(chan error, 2)
-	go func() {
+	var running sync.WaitGroup
+	running.Go(func() {
 		log.Infof("saasapi: listening on %s", tenant.Addr)
-		if err := tenant.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		if err := runServer(tenant, tenant.ListenAndServe); !errors.Is(err, http.ErrServerClosed) {
 			errc <- fmt.Errorf("server failed: %w", err)
 		}
-	}()
+	})
 	servers := []*http.Server{tenant}
 	if operator != nil {
 		servers = append(servers, operator)
-		go func() {
+		running.Go(func() {
 			log.Infof("saasapi: operator plane listening on %s (HTTPS)", operator.Addr)
 			// The certificate is already in operator.TLSConfig.
-			if err := operator.ListenAndServeTLS("", ""); !errors.Is(err, http.ErrServerClosed) {
+			err := runServer(operator, func() error { return operator.ListenAndServeTLS("", "") })
+			if !errors.Is(err, http.ErrServerClosed) {
 				errc <- fmt.Errorf("operator plane server failed: %w", err)
 			}
-		}()
+		})
 	}
 
 	var err error
@@ -242,6 +255,10 @@ func serve(ctx context.Context, tenant, operator *http.Server, shutdownTimeout t
 		})
 	}
 	wg.Wait()
+	// Each ListenAndServe returns promptly once its server is shutting
+	// down: Shutdown closed its listener, or Serve refuses the one it
+	// opened afterwards.
+	running.Wait()
 	return err
 }
 

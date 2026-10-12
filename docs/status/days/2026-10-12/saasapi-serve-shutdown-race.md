@@ -1,0 +1,1 @@
+change: saasapi `serve` returns only after both servers' ListenAndServe goroutines have exited, not just after Shutdown: a server whose goroutine reached net.Listen after Shutdown kept its port open past serve's return (flaky `TestServeFailureStopsBoth/tenant` on PR 223). Regression test `TestServeWaitsForLateServer`.
