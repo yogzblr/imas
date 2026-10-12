@@ -93,12 +93,9 @@ func TestPublishSaaSAPICredential_WritesJWTAndPublicKeyOnly(t *testing.T) {
 	if len(store.data) != 2 || store.data[SaaSAPICredentialPublicKeyField] != pub {
 		t.Fatalf("published fields = %v, want exactly jwt + public_key", store.data)
 	}
-	onDisk, err := os.ReadFile(SaaSAPIUserJWTPath())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if store.data[SaaSAPICredentialJWTField] != string(onDisk) {
-		t.Error("published JWT differs from the one EnsureSaaSAPICredential persisted")
+	uc, err := jwt.DecodeUserClaims(store.data[SaaSAPICredentialJWTField])
+	if err != nil || uc.Subject != pub {
+		t.Fatalf("published JWT does not decode to the SaaS API key: %v", err)
 	}
 }
 
@@ -122,11 +119,8 @@ func TestPublishSaaSAPICredential_IdempotentByClaims(t *testing.T) {
 		t.Fatalf("second run: res=%+v err=%v writes=%d, want a no-op", res, err, store.writes)
 	}
 
-	// A byte-different but equivalent JWT on disk (what a Job with a fresh
-	// emptyDir mints every run) is still a no-op: equivalence is by claims.
-	if err := os.Remove(SaaSAPIUserJWTPath()); err != nil {
-		t.Fatal(err)
-	}
+	// Every run mints a byte-different but equivalent JWT; it is still a
+	// no-op, since equivalence is by claims.
 	res, err = PublishSaaSAPICredential(ctx, store)
 	if err != nil || res.Written || store.writes != 1 {
 		t.Fatalf("re-mint run: res=%+v err=%v writes=%d, want a no-op", res, err, store.writes)
@@ -260,11 +254,14 @@ func TestPublishSaaSAPICredential_PublishesDespitePushFailure(t *testing.T) {
 	setupTestPKI(t)
 	clearExternalSeedEnv(t)
 	config.FarmerBusURL = "127.0.0.1:1" // nothing listening: any push fails
-	useExternalSaaSAPISeed(t)
+	rec := useTestSaaSAPICredentialState(t)
+	oldPub, _ := useExternalSaaSAPISeed(t)
+	recordSaaSAPIKey(t, rec, oldPub)
 	if _, _, err := EnsureSaaSAPICredential(); err != nil { // old key, no push needed
 		t.Fatal(err)
 	}
-	newPub, _ := useExternalSaaSAPISeed(t) // rotate: revocation + push
+	newPub, _ := useExternalSaaSAPISeed(t)
+	recordSaaSAPIKey(t, rec, newPub) // saasapi rotates: revocation + push
 
 	store := &fakeCredStore{}
 	res, err := PublishSaaSAPICredential(context.Background(), store)
