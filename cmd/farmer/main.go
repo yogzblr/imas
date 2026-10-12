@@ -919,21 +919,39 @@ func registerTenantHandlers(nc *nats.Conn, tenantID string) error {
 	if err := heartbeat.RegisterTenant(nc, tenantID); err != nil {
 		return fmt.Errorf("failed to subscribe sprout heartbeats for tenant %s: %w", tenantID, err)
 	}
-	// The same heartbeats, outside the queue group so every replica sees
-	// each one, keep this tenant's connection open while its sprouts are
-	// online (owner decision 3). Only the arrival counts: the message is
-	// not read, and a tenant's own clients can at most keep their own
-	// tenant's connection open.
-	if _, err := nc.Subscribe(pki.SproutHeartbeatSubjectPattern, func(*nats.Msg) {
-		tenantConns.TouchHeartbeat(tenantID)
-	}); err != nil {
-		return fmt.Errorf("failed to watch sprout heartbeats for tenant %s: %w", tenantID, err)
+	if err := watchTenantActivity(nc, tenantID, tenantConns); err != nil {
+		return err
 	}
 
 	if err := natsapi.Subscribe(nc, tenantID); err != nil {
 		return fmt.Errorf("failed to subscribe NATS API handlers for tenant %s: %w", tenantID, err)
 	}
 	log.Infof("NATS API handlers registered for tenant %s", tenantID)
+	return nil
+}
+
+// watchTenantActivity subscribes nc, outside the queue groups so every
+// replica sees each message, to what keeps tenantID's connection open in
+// r (tenantconn.Registry.Sweep):
+//   - sprout heartbeats, which keep it open while the tenant's sprouts are
+//     online (owner decision 3);
+//   - NATS API requests (natsapi.SubjectPrefix), which count as use, so a
+//     long-lived CLI session on a tenant with no sprouts online isn't
+//     closed under it after the idle TTL.
+//
+// Only the arrival counts: no message is read, and a tenant's own clients
+// can at most keep their own tenant's connection open.
+func watchTenantActivity(nc *nats.Conn, tenantID string, r *tenantconn.Registry) error {
+	if _, err := nc.Subscribe(pki.SproutHeartbeatSubjectPattern, func(*nats.Msg) {
+		r.TouchHeartbeat(tenantID)
+	}); err != nil {
+		return fmt.Errorf("failed to watch sprout heartbeats for tenant %s: %w", tenantID, err)
+	}
+	if _, err := nc.Subscribe(natsapi.SubjectPrefix+">", func(*nats.Msg) {
+		r.Touch(tenantID)
+	}); err != nil {
+		return fmt.Errorf("failed to watch NATS API requests for tenant %s: %w", tenantID, err)
+	}
 	return nil
 }
 

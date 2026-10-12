@@ -1,14 +1,20 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats-server/v2/server"
 	nats "github.com/nats-io/nats.go"
+
+	"github.com/yogzblr/imas/internal/natsapi"
+	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/tenantconn"
 )
 
 // Test 7 (brief §6), farmer's half: a tenant connection never gives up
@@ -153,5 +159,74 @@ func TestBootTenants(t *testing.T) {
 	got := bootTenants([]string{"tenant-a", "tenant-b", "legacy", "tenant-c"}, "legacy", func(id string) bool { return withSprouts[id] })
 	if want := []string{"tenant-a", "tenant-c"}; !slices.Equal(got, want) {
 		t.Errorf("bootTenants = %v, want %v", got, want)
+	}
+}
+
+// A sprout heartbeat and a NATS API request on a tenant connection both
+// keep it from being swept as idle, seen by every replica's observer.
+func TestWatchTenantActivityKeepsTenantOpen(t *testing.T) {
+	ns, err := server.NewServer(&server.Options{Host: "127.0.0.1", Port: -1})
+	if err != nil {
+		t.Fatalf("start test NATS server: %v", err)
+	}
+	go ns.Start()
+	if !ns.ReadyForConnections(5 * time.Second) {
+		t.Fatal("NATS server failed to become ready")
+	}
+	t.Cleanup(ns.Shutdown)
+
+	var mu sync.Mutex
+	now := time.Unix(1_700_000_000, 0)
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	advance := func(d time.Duration) { mu.Lock(); now = now.Add(d); mu.Unlock() }
+
+	for _, tc := range []struct{ name, subject string }{
+		{"heartbeat", pki.SproutHeartbeatSubjectPrefix + "sprout-1"},
+		{"api request", natsapi.Subject("sprouts.list")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var r *tenantconn.Registry
+			r = tenantconn.New(tenantconn.Config{
+				IdleTTL:         10 * time.Minute,
+				HeartbeatWindow: 15 * time.Minute,
+				Now:             clock,
+				Dial: func(_ context.Context, id string, _ func(*nats.Conn)) (*nats.Conn, error) {
+					nc, err := nats.Connect(ns.ClientURL())
+					if err != nil {
+						return nil, err
+					}
+					return nc, watchTenantActivity(nc, id, r)
+				},
+			})
+			nc, err := r.Get(context.Background(), "tenant-a")
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			t.Cleanup(nc.Close)
+			pub, err := nats.Connect(ns.ClientURL())
+			if err != nil {
+				t.Fatalf("connect publisher: %v", err)
+			}
+			t.Cleanup(pub.Close)
+
+			advance(11 * time.Minute)
+			if err := pub.Publish(tc.subject, nil); err != nil {
+				t.Fatalf("publish: %v", err)
+			}
+			if err := pub.Flush(); err != nil {
+				t.Fatalf("flush: %v", err)
+			}
+			if err := nc.Flush(); err != nil { // the observer has run by now
+				t.Fatalf("flush: %v", err)
+			}
+			time.Sleep(50 * time.Millisecond)
+			if got := r.Sweep(); len(got) != 0 {
+				t.Fatalf("Sweep closed %v right after a %s", got, tc.name)
+			}
+			advance(16 * time.Minute)
+			if got := r.Sweep(); len(got) != 1 {
+				t.Fatalf("Sweep with no activity for 16m closed %v, want [tenant-a]", got)
+			}
+		})
 	}
 }
