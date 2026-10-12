@@ -110,8 +110,10 @@ not the generator's. Its log is `bus.log` in `-workdir`.
 
 The restart (`-restart local`, the default here) sends SIGTERM (graceful,
 like a pod delete) or, with `-restart-signal kill`, SIGKILL; `-restart-downtime`
-keeps the bus down for a while before starting it again. A node's resolver
-directory survives the restart, as a bus pod's volume does.
+keeps the bus down for a while before starting it again. The local node's
+resolver directory survives the restart. A deployed bus pod's does not (it
+is an `emptyDir`; the loader sidecar refills it from the accounts bucket),
+so this restart is closer to a container restart than to a replaced pod.
 
 The local bus does not have the clustered bus's routes or fence
 (`cmd/farmerbus/cluster.go`, `fence.go`); for those, run against deployed

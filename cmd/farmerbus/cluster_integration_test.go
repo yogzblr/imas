@@ -702,8 +702,8 @@ func TestClusterPartialMeshFences(t *testing.T) {
 }
 
 // TestClusterWipedNodeDoesNotRollBackRevocations: a node that comes back
-// on an empty volume (a StatefulSet scale-out, a replaced PVC) must not
-// re-admit anything core revoked. It starts with only the trust's SYS
+// on an empty resolver directory (every new pod: the store is an emptyDir)
+// must not re-admit anything core revoked. It starts with only the trust's SYS
 // Account JWT, which core's pushed SYS Account JWT outranks; it mints no
 // claims of its own that the cluster sync could spread.
 func TestClusterWipedNodeDoesNotRollBackRevocations(t *testing.T) {
