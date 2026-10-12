@@ -12,6 +12,8 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -49,6 +51,7 @@ import (
 	"github.com/yogzblr/imas/internal/tenantconn"
 
 	nats "github.com/nats-io/nats.go"
+	"github.com/nats-io/nkeys"
 	valkey "github.com/valkey-io/valkey-go"
 	"gorm.io/gorm"
 )
@@ -93,9 +96,71 @@ func getHeartbeatConn() *nats.Conn {
 // Option A, plus every tenant still retrying its first connect. It has its
 // own lock (see internal/tenantconn), separate from srvMu above, since it's
 // read/written from ConnectFarmer's own goroutines (boot-time enumeration,
-// pki.OnTenantProvisioned/OnTenantDeprovisioned callbacks) and GET /ready
-// independently of the API server/heartbeat state srvMu protects.
-var tenantConns = tenantconn.NewRegistry()
+// bus CONNECT events, pki.OnTenantProvisioned/OnTenantDeprovisioned
+// callbacks, the idle sweeper) and GET /ready independently of the API
+// server/heartbeat state srvMu protects. main replaces this empty one with
+// newTenantRegistry's before anything dials.
+var tenantConns = tenantconn.New(tenantconn.Config{})
+
+// Tenant bus idle policy (docs/briefs/P21-slice3-farmer-saasapi-state.md
+// §4.5, owner decision 3). A tenant connection is closed once it has been
+// unused for the idle TTL and has seen no sprout heartbeat for the
+// heartbeat window; the next use dials it again.
+const (
+	envTenantConnIdleTTL             = "IMAS_TENANT_CONN_IDLE_TTL"
+	envTenantConnHeartbeatWindow     = "IMAS_TENANT_CONN_HEARTBEAT_WINDOW"
+	defaultTenantConnIdleTTL         = 10 * time.Minute
+	defaultTenantConnHeartbeatWindow = 15 * time.Minute
+	// tenantSweepInterval is how often idle tenant connections are looked
+	// for, so one closes at most this long after it became idle.
+	tenantSweepInterval = time.Minute
+)
+
+// durationEnv reads a positive duration (time.ParseDuration syntax) from
+// the environment variable name, or def when it is unset or empty.
+func durationEnv(name string, def time.Duration) (time.Duration, error) {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s=%q: %w", name, v, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("%s=%q: must be positive", name, v)
+	}
+	return d, nil
+}
+
+// newTenantRegistry builds farmer's tenant connection registry from the
+// IMAS_TENANT_CONN_* settings, stopping farmer if one is invalid. A
+// connection that closes on its own is redialled at once (until ctx ends).
+func newTenantRegistry(ctx context.Context) *tenantconn.Registry {
+	idleTTL, err := durationEnv(envTenantConnIdleTTL, defaultTenantConnIdleTTL)
+	if err != nil {
+		log.Fatalf("tenant bus idle TTL: %v", err)
+	}
+	window, err := durationEnv(envTenantConnHeartbeatWindow, defaultTenantConnHeartbeatWindow)
+	if err != nil {
+		log.Fatalf("tenant bus heartbeat window: %v", err)
+	}
+	log.Noticef("tenant buses: connect on first use, close after %s unused with no sprout heartbeat for %s (%s, %s)",
+		idleTTL, window, envTenantConnIdleTTL, envTenantConnHeartbeatWindow)
+	return tenantconn.New(tenantconn.Config{
+		Dial:            dialTenant,
+		IdleTTL:         idleTTL,
+		HeartbeatWindow: window,
+		OnDrop:          unregisterTenant,
+		OnClosed: func(tenantID string) {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Warnf("tenant %s: NATS connection closed; reconnecting", tenantID)
+			connectTenantWithRetry(ctx, tenantID)
+		},
+	})
+}
 
 // legacyTenantReady latches true once ConnectFarmer's boot-time connection
 // for the legacy tenant is up and registered. GET /ready gates on it; see
@@ -191,6 +256,7 @@ func main() {
 	// ReloadNKeysForTenant's lazy provisioning path).
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	tenantConns = newTenantRegistry(ctx)
 	if recipeStore != nil {
 		go waitForObjectStore(ctx, recipeStore, "recipe", config.S3Bucket)
 	}
@@ -200,11 +266,13 @@ func main() {
 	// See docs/design/imas-tenant-context-threading.md's Option A: a
 	// newly-provisioned tenant (explicit ProvisionTenant, or enroll.go's
 	// lazy ReloadNKeysForTenant path) gets its own dedicated NATS
-	// connection and full registration set opened at runtime; a
-	// deprovisioned tenant's connection is closed and its registrations
-	// torn down (closing the *nats.Conn tears down every subscription
-	// registered on it in one call — no separate unsubscribe bookkeeping
-	// needed).
+	// connection and full registration set opened at runtime on the
+	// replica that provisioned it (every other replica connects it on the
+	// first bus CONNECT into the tenant's Account: see
+	// connectOnBusClientConnect); a deprovisioned tenant's connection is
+	// closed and its registrations torn down (closing the *nats.Conn tears
+	// down every subscription registered on it in one call — no separate
+	// unsubscribe bookkeeping needed).
 	pki.OnTenantProvisioned(func(tenantID string) { connectTenantWithRetry(ctx, tenantID) })
 	pki.OnTenantDeprovisioned(disconnectTenant)
 	handlers.SetTenantConnStats(readinessTenantStats)
@@ -462,7 +530,9 @@ const farmerLogSubject = "imas.logs.farmer"
 //     deprovision (natsapi.RegisterTenantProvisioning), platform-level
 //     control-plane subjects that live in the SYS Account — see
 //     docs/design/imas-internal-api-account.md;
-//   - farmer's own log shipping (log.UseNATSConn), on farmerLogSubject.
+//   - farmer's own log shipping (log.UseNATSConn), on farmerLogSubject;
+//   - lazy tenant connects: every replica connects a tenant when a client
+//     connects into that tenant's Account (connectOnBusClientConnect).
 //
 // Farmer's logs go to the SYS Account, not a tenant's: they are
 // process-wide and name every tenant's sprouts, so publishing them into
@@ -477,7 +547,7 @@ const farmerLogSubject = "imas.logs.farmer"
 // must not leave farmer permanently without these subscriptions —
 // subscriptions registered before the first successful connect are sent
 // once it connects.
-func initSystemAccountListeners() {
+func initSystemAccountListeners(ctx context.Context) {
 	nc, err := pki.ConnectSystemAccount(
 		nats.Name("imas-farmer-sys-listener"),
 		nats.RetryOnFailedConnect(true),
@@ -511,6 +581,12 @@ func initSystemAccountListeners() {
 		log.Errorf("failed to register tenant provisioning handlers: %v", err)
 		nc.Close()
 		return
+	}
+	farmerPub := farmerNKeyPublic()
+	if _, err := nc.Subscribe(busConnectSubject, func(m *nats.Msg) {
+		connectOnBusClientConnect(ctx, m.Data, farmerPub)
+	}); err != nil {
+		log.Errorf("failed to subscribe to bus CONNECT events (tenants will connect only at boot, on provisioning and on reconnect): %v", err)
 	}
 	setHeartbeatConn(nc)
 	log.Info("SYS listeners registered (heartbeat, tenant provisioning)")
@@ -692,16 +768,56 @@ func handleSIGHUP(ctx context.Context, done chan<- struct{}) {
 	}
 }
 
+// maxFarmerReconnect is no longer a limit: a tenant connection reconnects
+// forever (MaxReconnects(-1)). It is only how many failed attempts in a row
+// pass before each warning that the tenant still isn't connected.
+const maxFarmerReconnect = 30
+
+// tenantBusReconnectWait is the pause between reconnect attempts.
+const tenantBusReconnectWait = 15 * time.Second
+
+// tenantBusOptions are the nats.Connect options of tenantID's connection
+// besides its address: TLS, farmer's credential (auth), retry of the first
+// connect, reconnecting forever, and onClosed as the ClosedHandler, so the
+// registry forgets a connection that closed for good (an auth error nats.go
+// gives up on, or Close) and the next use dials again.
+func tenantBusOptions(tenantID string, tlsCfg *tls.Config, auth nats.Option, onClosed func(*nats.Conn)) []nats.Option {
+	var failed atomic.Int64
+	return []nats.Option{
+		nats.Secure(tlsCfg),
+		auth,
+		nats.RetryOnFailedConnect(true),
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(tenantBusReconnectWait),
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+			log.Warnf("Farmer lost its NATS bus connection for tenant %s, reconnecting: %v", tenantID, err)
+		}),
+		nats.ReconnectErrHandler(func(_ *nats.Conn, err error) {
+			if n := failed.Add(1); n%maxFarmerReconnect == 0 {
+				log.Warnf("Farmer still not connected to the NATS bus for tenant %s after %d attempts, still retrying: %v", tenantID, n, err)
+			}
+		}),
+		nats.ReconnectHandler(func(_ *nats.Conn) {
+			failed.Store(0)
+			log.Infof("Farmer reconnected to the NATS bus for tenant %s", tenantID)
+		}),
+		nats.ClosedHandler(func(c *nats.Conn) {
+			log.Debugf("Farmer's NATS connection for tenant %s closed", tenantID)
+			if onClosed != nil {
+				onClosed(c)
+			}
+		}),
+	}
+}
+
 // dialTenantBus opens one NATS connection authenticated as farmer's own
 // User identity under tenantID's Account (pki.FarmerUserJWTForTenant),
-// blocking until connected, ctx is cancelled, or every reconnect attempt is
-// exhausted. See docs/design/imas-tenant-context-threading.md's Option A:
+// blocking until connected, ctx is cancelled, or the connection is closed
+// for good. See docs/design/imas-tenant-context-threading.md's Option A:
 // farmer holds one such connection per tenant instead of a single
-// process-global one.
-func dialTenantBus(ctx context.Context, tenantID string) (*nats.Conn, error) {
-	var connectionAttempts atomic.Int64
-	connectionAttempts.Store(1)
-	maxFarmerReconnect := 30
+// process-global one. There is no attempt limit: the bus being away for a
+// long time only delays the connection.
+func dialTenantBus(ctx context.Context, tenantID string, onClosed func(*nats.Conn)) (*nats.Conn, error) {
 	RootCA := config.RootCA
 	BusURL := config.FarmerBusURL
 	// Not config.FarmerInterface: that is this process's API bind
@@ -741,46 +857,50 @@ func dialTenantBus(ctx context.Context, tenantID string) (*nats.Conn, error) {
 		MinVersion: tls.VersionTLS12,
 	}
 	log.Debugf("Attempting to pair farmer to the NATS bus for tenant %s.", tenantID)
-	nc, err := nats.Connect(BusURL,
-		nats.Secure(tlsCfg),
-		opt,
-		nats.RetryOnFailedConnect(true),
-		nats.MaxReconnects(maxFarmerReconnect),
-		nats.ReconnectWait(time.Second*15),
-		nats.DisconnectHandler(func(_ *nats.Conn) {
-			log.Warnf("WARN: Reconnecting farmer to NATS bus for tenant %s, attempt: %d\n", tenantID, connectionAttempts.Add(1))
-		}),
-	)
+	nc, err := nats.Connect(BusURL, tenantBusOptions(tenantID, tlsCfg, opt, onClosed)...)
 	if err != nil {
 		return nil, fmt.Errorf("connect error for tenant %s: %w", tenantID, err)
 	}
 	if nc == nil {
 		return nil, fmt.Errorf("nil NATS connection for tenant %s", tenantID)
 	}
+	// RetryOnFailedConnect: nats.Connect returns at once, reconnecting in
+	// the background, so wait here for the first connect.
 	for !nc.IsConnected() {
-		attempts := connectionAttempts.Add(1)
-		log.Debugf("Attempting to pair farmer to NATS bus for tenant %s (attempt %d/%d).", tenantID, attempts, maxFarmerReconnect)
-		if attempts >= int64(maxFarmerReconnect) {
-			nc.Close()
-			return nil, fmt.Errorf("failed to connect tenant %s to NATS %d times", tenantID, attempts)
+		if nc.IsClosed() {
+			return nil, fmt.Errorf("NATS connection for tenant %s closed before it connected: %v", tenantID, nc.LastError())
 		}
 		select {
 		case <-ctx.Done():
 			nc.Close()
 			return nil, ctx.Err()
-		case <-time.After(time.Second * 15):
+		case <-time.After(time.Second):
 		}
 	}
 	log.Debugf("Successfully joined farmer to NATS bus for tenant %s", tenantID)
 	return nc, nil
 }
 
+// dialTenant is the registry's dialer (tenantconn.Dialer): it connects
+// tenantID's bus and boots its registrations on the new connection.
+func dialTenant(ctx context.Context, tenantID string, onClosed func(*nats.Conn)) (*nats.Conn, error) {
+	nc, err := dialTenantBus(ctx, tenantID, onClosed)
+	if err != nil {
+		return nil, err
+	}
+	if err := registerTenantHandlers(nc, tenantID); err != nil {
+		nc.Close()
+		return nil, err
+	}
+	return nc, nil
+}
+
 // registerTenantHandlers boots tenantID's full registration set on nc:
 // every RegisterNatsConn-style ingredient registration plus
 // natsapi.Subscribe, each bound to tenantID (docs/design/
-// imas-tenant-context-threading.md's Option A). Records nc in tenantConns
-// on success so it can be closed later (process shutdown, or
-// disconnectTenant on deprovisioning).
+// imas-tenant-context-threading.md's Option A). It runs once per new
+// connection (the registry's dialer), so a tenant reconnected after an
+// idle close gets the same set again on its new connection.
 func registerTenantHandlers(nc *nats.Conn, tenantID string) error {
 	if _, err := nc.Subscribe("imas.sprouts.announce.>", func(m *nats.Msg) {
 		log.Infof("Received a join event (tenant %s): %s\n", tenantID, string(m.Data))
@@ -799,12 +919,39 @@ func registerTenantHandlers(nc *nats.Conn, tenantID string) error {
 	if err := heartbeat.RegisterTenant(nc, tenantID); err != nil {
 		return fmt.Errorf("failed to subscribe sprout heartbeats for tenant %s: %w", tenantID, err)
 	}
+	if err := watchTenantActivity(nc, tenantID, tenantConns); err != nil {
+		return err
+	}
 
 	if err := natsapi.Subscribe(nc, tenantID); err != nil {
 		return fmt.Errorf("failed to subscribe NATS API handlers for tenant %s: %w", tenantID, err)
 	}
 	log.Infof("NATS API handlers registered for tenant %s", tenantID)
-	tenantConns.Set(tenantID, nc)
+	return nil
+}
+
+// watchTenantActivity subscribes nc, outside the queue groups so every
+// replica sees each message, to what keeps tenantID's connection open in
+// r (tenantconn.Registry.Sweep):
+//   - sprout heartbeats, which keep it open while the tenant's sprouts are
+//     online (owner decision 3);
+//   - NATS API requests (natsapi.SubjectPrefix), which count as use, so a
+//     long-lived CLI session on a tenant with no sprouts online isn't
+//     closed under it after the idle TTL.
+//
+// Only the arrival counts: no message is read, and a tenant's own clients
+// can at most keep their own tenant's connection open.
+func watchTenantActivity(nc *nats.Conn, tenantID string, r *tenantconn.Registry) error {
+	if _, err := nc.Subscribe(pki.SproutHeartbeatSubjectPattern, func(*nats.Msg) {
+		r.TouchHeartbeat(tenantID)
+	}); err != nil {
+		return fmt.Errorf("failed to watch sprout heartbeats for tenant %s: %w", tenantID, err)
+	}
+	if _, err := nc.Subscribe(natsapi.SubjectPrefix+">", func(*nats.Msg) {
+		r.Touch(tenantID)
+	}); err != nil {
+		return fmt.Errorf("failed to watch NATS API requests for tenant %s: %w", tenantID, err)
+	}
 	return nil
 }
 
@@ -814,40 +961,41 @@ func registerTenantHandlers(nc *nats.Conn, tenantID string) error {
 // docs/design/imas-tenant-context-threading.md: only the legacy tenant's
 // connection is load-bearing enough to fail farmer startup outright (it's
 // what every existing single-tenant deployment, the HTTP admin API, and the
-// CLI all depend on); every dynamically-provisioned tenant instead degrades
-// independently — a tenant stuck retrying just can't be reached until the
-// retry succeeds, the same "not misattributed, genuinely unreachable"
-// ceiling this whole effort is about, now scoped to one tenant instead of
-// every tenant but one. This same policy applies whether the tenant was
-// enumerated at boot (ConnectFarmer) or provisioned at runtime
-// (pki.OnTenantProvisioned) — deliberately consistent between the two, per
-// the design doc's "don't leave this undecided or inconsistent" ask.
+// CLI all depend on); every other tenant instead degrades independently —
+// a tenant stuck retrying just can't be reached until the retry succeeds.
+// The same policy applies however the tenant came to be wanted: found at
+// boot, provisioned at runtime (pki.OnTenantProvisioned), a client
+// connecting into its Account, or its connection closing. One loop runs
+// per tenant: a tenant already connected or already retrying is left to
+// that. The loop stops if the tenant is dropped (deprovisioned).
 func connectTenantWithRetry(ctx context.Context, tenantID string) {
 	// Counted in GET /ready's tenants_total from here on, so a tenant that
 	// never manages to connect still shows up as the one that isn't.
-	tenantConns.MarkPending(tenantID)
+	if !tenantConns.MarkPending(tenantID) {
+		return
+	}
 	backoff := 5 * time.Second
 	const maxBackoff = 5 * time.Minute
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		nc, err := dialTenantBus(ctx, tenantID)
+		_, err := tenantConns.Get(ctx, tenantID)
 		if err == nil {
-			if regErr := registerTenantHandlers(nc, tenantID); regErr != nil {
-				log.Errorf("tenant %s: %v", tenantID, regErr)
-				nc.Close()
-			} else {
-				log.Infof("Connected farmer to NATS bus for tenant %s", tenantID)
-				return
-			}
-		} else {
-			log.Errorf("tenant %s: failed to connect to NATS bus, retrying in %s: %v", tenantID, backoff, err)
+			log.Infof("Connected farmer to NATS bus for tenant %s", tenantID)
+			return
 		}
+		if errors.Is(err, tenantconn.ErrDropped) || !tenantConns.Pending(tenantID) {
+			return
+		}
+		log.Errorf("tenant %s: failed to connect to NATS bus, retrying in %s: %v", tenantID, backoff, err)
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(backoff):
+		}
+		if !tenantConns.Pending(tenantID) {
+			return
 		}
 		if backoff *= 2; backoff > maxBackoff {
 			backoff = maxBackoff
@@ -855,35 +1003,133 @@ func connectTenantWithRetry(ctx context.Context, tenantID string) {
 	}
 }
 
-// disconnectTenant closes tenantID's NATS connection and removes it from
-// every package that registered outbound state for it — the deprovisioning
-// counterpart to connectTenantWithRetry. Closing the underlying *nats.Conn
-// tears down every subscription registered on it (natsapi's routes, the
-// box-key listener, cook/jobs/facts's listeners) in one call, so no
-// separate unsubscribe bookkeeping is needed to avoid leaked goroutines or
-// subscriptions.
-func disconnectTenant(tenantID string) {
-	nc := tenantConns.Remove(tenantID)
-	if nc == nil {
-		return
-	}
-	nc.Close()
+// unregisterTenant removes tenantID from every package that keeps its own
+// per-tenant connection map. It is the registry's OnDrop: it runs whenever
+// a tenant's connection leaves the registry (deprovisioning, idle close, or
+// the connection closing), before that connection is closed. Closing the
+// underlying *nats.Conn tears down every subscription registered on it
+// (natsapi's routes, the box-key listener, cook/jobs/facts's listeners) in
+// one call, so no separate unsubscribe bookkeeping is needed to avoid
+// leaked goroutines or subscriptions.
+func unregisterTenant(tenantID string) {
 	test.UnregisterFarmerNatsConn(tenantID)
 	cmd.UnregisterFarmerNatsConn(tenantID)
 	cook.UnregisterFarmerNatsConn(tenantID)
 	natsapi.ClearNatsConn(tenantID)
-	log.Infof("Disconnected farmer's NATS connection for tenant %s (deprovisioned)", tenantID)
+}
+
+// disconnectTenant closes tenantID's NATS connection on deprovisioning —
+// the counterpart to connectTenantWithRetry. A connect in progress for the
+// tenant stops too.
+func disconnectTenant(tenantID string) {
+	if tenantConns.Drop(tenantID) {
+		log.Infof("Disconnected farmer's NATS connection for tenant %s (deprovisioned)", tenantID)
+	}
+}
+
+// sweepIdleTenants closes idle tenant connections every interval until ctx
+// ends (tenantconn.Registry.Sweep).
+func sweepIdleTenants(ctx context.Context, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		for _, id := range tenantConns.Sweep() {
+			log.Infof("Closed farmer's idle NATS connection for tenant %s (reconnects on next use)", id)
+		}
+	}
+}
+
+// busConnectSubject is the bus's per-Account client CONNECT event, which
+// the SYS listener connection sees for every Account.
+const busConnectSubject = "$SYS.ACCOUNT.*.CONNECT"
+
+// busConnectEvent is the part of nats-server's ConnectEventMsg this file
+// reads: the client's authenticated user public key and its Account's
+// public key.
+type busConnectEvent struct {
+	Client struct {
+		User    string `json:"user"`
+		Account string `json:"acc"`
+	} `json:"client"`
+}
+
+// tenantForBusConnect returns the tenant whose Account a client just
+// connected into, from a CONNECT event. ok is false for a malformed event,
+// farmer's own connection (user farmerPub; it would otherwise make every
+// replica connect every tenant any one replica connects), and an Account
+// that tenantFor (pki.TenantIDForAccountPub) does not know as a tenant,
+// such as the SYS Account.
+func tenantForBusConnect(data []byte, farmerPub string, tenantFor func(accountPub string) (string, error)) (string, bool) {
+	var ev busConnectEvent
+	if err := json.Unmarshal(data, &ev); err != nil {
+		return "", false
+	}
+	if ev.Client.Account == "" || (farmerPub != "" && ev.Client.User == farmerPub) {
+		return "", false
+	}
+	tenantID, err := tenantFor(ev.Client.Account)
+	if err != nil {
+		return "", false
+	}
+	return tenantID, true
+}
+
+// connectOnBusClientConnect connects a tenant on this replica when a
+// client (a sprout coming online, a CLI user) connects into its Account,
+// so every replica joins the tenant's queue groups before the client's
+// requests arrive. A tenant already connected counts it as use.
+func connectOnBusClientConnect(ctx context.Context, data []byte, farmerPub string) {
+	tenantID, ok := tenantForBusConnect(data, farmerPub, pki.TenantIDForAccountPub)
+	if !ok || tenantConns.Touch(tenantID) {
+		return
+	}
+	go connectTenantWithRetry(ctx, tenantID)
+}
+
+// farmerNKeyPublic is the public key of farmer's NKey seed, the user every
+// farmer connection authenticates as; "" (logged) if it can't be read.
+func farmerNKeyPublic() string {
+	seed, err := os.ReadFile(config.NKeyFarmerPrivFile)
+	if err != nil {
+		log.Errorf("reading farmer's NKey seed: %v", err)
+		return ""
+	}
+	kp, err := nkeys.FromSeed([]byte(strings.TrimSpace(string(seed))))
+	if err != nil {
+		log.Errorf("farmer's NKey seed: %v", err)
+		return ""
+	}
+	defer kp.Wipe()
+	pub, err := kp.PublicKey()
+	if err != nil {
+		log.Errorf("farmer's NKey public key: %v", err)
+		return ""
+	}
+	return pub
+}
+
+// tenantHasAcceptedSprouts reports whether tenantID has any accepted
+// sprout in PXC. Only those tenants are connected at boot: a sprout
+// already online when this replica starts sends no new CONNECT, so its
+// tenant has to be connected for its heartbeats to be seen at all.
+var tenantHasAcceptedSprouts = func(tenantID string) bool {
+	return len(pki.GetNKeysByType(tenantID, "accepted").Sprouts) > 0
 }
 
 // ConnectFarmer connects the legacy tenant's NATS connection (fatal on
 // failure, matching this function's pre-existing behavior — see
-// connectTenantWithRetry's doc comment), then opens one additional
-// connection for every other already-provisioned tenant found in PXC, and
-// finally wires up cmd/farmer/main.go's runtime provisioning/deprovisioning
-// hooks (registered in main, before this is called, so a race with an
-// enrollment arriving immediately isn't possible) so tenants provisioned
-// later in this process's lifetime get connected too. See
-// docs/design/imas-tenant-context-threading.md's Option A.
+// connectTenantWithRetry's doc comment) and keeps it open for the life of
+// the process. Every other tenant connects lazily: at boot only the
+// provisioned tenants with accepted sprouts (bootTenants), afterwards on a
+// client CONNECT into the tenant's Account, on provisioning, or when its
+// connection closes; and each closes again once idle (sweepIdleTenants).
+// See docs/design/imas-tenant-context-threading.md's Option A and
+// docs/briefs/P21-slice3-farmer-saasapi-state.md §4.5.
 func ConnectFarmer(ctx context.Context, done chan<- struct{}) {
 	defer close(done)
 
@@ -896,6 +1142,7 @@ func ConnectFarmer(ctx context.Context, done chan<- struct{}) {
 	})
 
 	legacyTenant := pki.CurrentTenantID()
+	tenantConns.Keep(legacyTenant)
 	tenantConns.MarkPending(legacyTenant)
 	// The bus mints no Account JWTs of its own (internal/pki/busauth.go):
 	// a bus that started on an empty volume knows the legacy tenant only
@@ -904,13 +1151,13 @@ func ConnectFarmer(ctx context.Context, done chan<- struct{}) {
 	// pushing everything until it lands, while the dial retries.
 	pushCtx, stopPushing := context.WithCancel(ctx)
 	go pushAccountsUntilAccepted(pushCtx, pki.PushAllAccounts, 15*time.Second)
-	nc, err := dialTenantBus(ctx, legacyTenant)
+	_, err := tenantConns.Get(ctx, legacyTenant)
 	stopPushing()
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		log.Fatalf("Failed to connect farmer to NATS bus for the legacy tenant %s: %v", legacyTenant, err)
-	}
-	if err := registerTenantHandlers(nc, legacyTenant); err != nil {
-		log.Fatalf("%v", err)
 	}
 	legacyTenantReady.Store(true)
 
@@ -921,7 +1168,7 @@ func ConnectFarmer(ctx context.Context, done chan<- struct{}) {
 	// regardless of which Account a connection authenticated into (see
 	// internal/heartbeat's own doc comment), and tenant provisioning is a
 	// platform-level operation, so one listener is all this ever needs.
-	initSystemAccountListeners()
+	initSystemAccountListeners(ctx)
 
 	// Re-sync every provisioned tenant's sprouts onto the current
 	// permission set before connecting: ReloadNKeys above covers only the
@@ -936,27 +1183,10 @@ func ConnectFarmer(ctx context.Context, done chan<- struct{}) {
 	if err != nil {
 		log.Errorf("Failed to list provisioned tenants for connection bootstrap: %v", err)
 	}
-	for _, id := range ids {
-		// Defensive, not load-bearing: ListProvisionedTenantIDs only ever
-		// returns pki_tenants rows, and the legacy tenant
-		// (pki.CurrentTenantID()) never gets one of those — see
-		// pki.GetTenantAccountPub's own doc comment. This guards only
-		// against a dynamically-provisioned tenant ID that happens to
-		// collide with the legacy tenant's string (IsValidTenantID doesn't
-		// forbid that), which would otherwise try to open a second,
-		// redundant connection already covered by dialTenantBus above.
-		// This is a different "is this the legacy tenant" question from
-		// internal/pki's own reloadNKeysFor (pki.go) — that one picks
-		// which on-disk JWT layout/sync path to use (the flat legacy path
-		// vs. tenants/<id>/) and deliberately stays a separate check (see
-		// its own doc comment on why collapsing it would orphan the legacy
-		// tenant's sprouts) — not something this connection-bootstrap loop
-		// should also decide.
-		if id == legacyTenant {
-			continue
-		}
+	for _, id := range bootTenants(ids, legacyTenant, tenantHasAcceptedSprouts) {
 		go connectTenantWithRetry(ctx, id)
 	}
+	go sweepIdleTenants(ctx, tenantSweepInterval)
 
 	// Start the job log reaper to expire old jobs. One reaper per process,
 	// not per tenant connection: the job object store is one bucket whose
@@ -967,6 +1197,25 @@ func ConnectFarmer(ctx context.Context, done chan<- struct{}) {
 
 	<-ctx.Done()
 	closeTenantConns(tenantConns.All())
+}
+
+// bootTenants is which provisioned tenants ConnectFarmer connects at boot:
+// those with accepted sprouts (hasSprouts), since only they can have
+// sprouts online already. The legacy tenant is skipped: it is connected on
+// its own, and a provisioned tenant ID that collides with its string
+// (IsValidTenantID doesn't forbid that) must not get a second entry. This
+// is a different "is this the legacy tenant" question from internal/pki's
+// own reloadNKeysFor (pki.go), which picks the JWT sync path and
+// deliberately stays a separate check.
+func bootTenants(ids []string, legacyTenant string, hasSprouts func(string) bool) []string {
+	var out []string
+	for _, id := range ids {
+		if id == legacyTenant || !hasSprouts(id) {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
 }
 
 // closeShellSessions is natsapi.CloseShellSessions, swappable in tests.
