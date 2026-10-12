@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -302,4 +303,64 @@ func TestRefresh_ReplayRefused(t *testing.T) {
 		t.Fatalf("first: %d %s", w.Code, w.Body)
 	}
 	assertEnrollFailed(t, postRefresh(body))
+}
+
+// withPKIRefreshSprout swaps the handler's pki.RefreshSprout for one that
+// returns err.
+func withPKIRefreshSprout(t *testing.T, err error) {
+	t.Helper()
+	orig := pkiRefreshSprout
+	pkiRefreshSprout = func(context.Context, pki.RefreshRequest) (json.RawMessage, error) { return nil, err }
+	t.Cleanup(func() { pkiRefreshSprout = orig })
+}
+
+// postWellFormedRefresh posts a refresh request that passes the handler's
+// own validation, so the outcome is whatever pkiRefreshSprout returns.
+func postWellFormedRefresh(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	kp, err := nkeys.CreateUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _ := kp.PublicKey()
+	body, _ := json.Marshal(map[string]any{"nkey_pub": pub, "sealed": map[string]any{}})
+	return postRefresh(body)
+}
+
+// A busy mint lease is retryable: 503 with a Retry-After, and the same
+// generic body as every other failure.
+func TestRefresh_SproutJWTBusyIs503WithRetryAfter(t *testing.T) {
+	withPKIRefreshSprout(t, errBusyEnroll)
+	w := postWellFormedRefresh(t)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Retry-After"); got != "5" {
+		t.Errorf("Retry-After = %q, want \"5\"", got)
+	}
+	var resp enrollErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding error response: %v", err)
+	}
+	if resp.Error != "enrollment_failed" {
+		t.Errorf("expected generic enrollment_failed error, got %q", resp.Error)
+	}
+}
+
+// Every other pki.RefreshSprout failure keeps the generic 401, with no
+// Retry-After.
+func TestRefresh_OtherErrorsStay401(t *testing.T) {
+	for name, err := range map[string]error{
+		"enrollment failed": pki.ErrEnrollmentFailed,
+		"other":             errors.New("boom"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			withPKIRefreshSprout(t, err)
+			w := postWellFormedRefresh(t)
+			assertEnrollFailed(t, w)
+			if got := w.Header().Get("Retry-After"); got != "" {
+				t.Errorf("Retry-After = %q, want none", got)
+			}
+		})
+	}
 }

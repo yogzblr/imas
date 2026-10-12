@@ -6,6 +6,8 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -294,5 +296,70 @@ func TestEnroll_NoFleetSigningKeyInResponse(t *testing.T) {
 	}
 	if v, ok := raw["fleet_signing_jwks"]; ok {
 		t.Errorf("response still carries fleet_signing_jwks: %s", v)
+	}
+}
+
+// withPKIEnroll swaps the handler's pki.Enroll for one that returns err.
+func withPKIEnroll(t *testing.T, err error) {
+	t.Helper()
+	orig := pkiEnroll
+	pkiEnroll = func(context.Context, pki.EnrollRequest) (*pki.EnrollResult, error) { return nil, err }
+	t.Cleanup(func() { pkiEnroll = orig })
+}
+
+// errBusyEnroll is the error pki returns when another replica holds the
+// sprout's User JWT mint lease (enrollJWTError).
+var errBusyEnroll = fmt.Errorf("%w: %w", pki.ErrEnrollmentFailed, pki.ErrSproutJWTBusy)
+
+// postValidEnroll posts a well-formed, signed enroll request for a fresh
+// NKey and returns the recorded response.
+func postValidEnroll(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	kp, err := nkeys.CreateUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(signedEnrollRequest(t, kp, "tok", "host-1", generateTestBoxPub(t)))
+	w := httptest.NewRecorder()
+	Enroll(w, httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(body)))
+	return w
+}
+
+// A busy mint lease is retryable: 503 with a Retry-After, and the same
+// generic body as every other failure.
+func TestEnroll_SproutJWTBusyIs503WithRetryAfter(t *testing.T) {
+	withPKIEnroll(t, errBusyEnroll)
+	w := postValidEnroll(t)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Retry-After"); got != "5" {
+		t.Errorf("Retry-After = %q, want \"5\"", got)
+	}
+	var resp enrollErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding error response: %v", err)
+	}
+	if resp.Error != "enrollment_failed" {
+		t.Errorf("expected generic enrollment_failed error, got %q", resp.Error)
+	}
+}
+
+// Every other pki.Enroll failure keeps the generic 401, with no
+// Retry-After.
+func TestEnroll_OtherErrorsStay401(t *testing.T) {
+	for name, err := range map[string]error{
+		"enrollment failed": pki.ErrEnrollmentFailed,
+		"other":             errors.New("boom"),
+		"store not set":     fmt.Errorf("%w: %w", pki.ErrEnrollmentFailed, pki.ErrSproutJWTStoreNotConfigured),
+	} {
+		t.Run(name, func(t *testing.T) {
+			withPKIEnroll(t, err)
+			w := postValidEnroll(t)
+			assertEnrollFailed(t, w)
+			if got := w.Header().Get("Retry-After"); got != "" {
+				t.Errorf("Retry-After = %q, want none", got)
+			}
+		})
 	}
 }
