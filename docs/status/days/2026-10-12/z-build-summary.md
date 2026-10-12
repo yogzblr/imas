@@ -1,4 +1,4 @@
-change: P22 and P21 built by hosted sessions: 25 of 26 units merged (tracking issue 197); C2, the farmer account publisher, is still building. Open points from the build are recorded as P26 to P28.
+change: P22 and P21 built by hosted sessions: all 26 units merged (tracking issue 197), C2 last (PR 229). Open points from the build are recorded as P26 to P28.
 ---
 item: P22
 action: update
@@ -8,11 +8,11 @@ next-append: **Built (2026-10-12): A1 #203 and A2 #205 merged.** Waiting on the 
 item: P21
 action: update
 rag: Amber
-next-append: **Built (2026-10-12), tracking issue 197: 25 of 26 units merged across P22 and P21; for P21, 23 of 24 (B1 to B8, C1 and C3 to C7, D1 to D9), and for P22 both (A1, A2). Follow-ups F1 and #216, #218, #220, #226 are separate.** Left: C2, the farmer account publisher (not yet a PR). Until C2 merges the bus loader reads the accounts bucket but farmer does not write it, so bus account delivery does not work end to end. Owner decisions made during the build: decision 2 farmer Transit policy as merged in #215 (accepted cost: farmer can create a Transit key of any name; it signs only with `nats-tsign-*`); the loader SYS user also gets publish on the claims lookup subject; the trust ConfigMap is `imas-nats-trust`; the bus keeps the fence user; the trust bootstrap mints the loader SYS user JWT; the farmer NKey is its own Secret `imas-farmer-nkey`. Follow-up work is P26 to P28.
+next-append: **Built (2026-10-12), tracking issue 197: all 26 units merged: P21 24 of 24 (B1 to B8, C1 to C7, D1 to D9) and P22 2 of 2 (A1, A2). Follow-ups F1 and #216, #218, #220, #226 are separate.** C2 (PR 229) merged last: farmer now writes the accounts bucket the loader reads; its leftovers are unit E6. Owner decisions made during the build: decision 2 farmer Transit policy as merged in #215 (accepted cost: farmer can create a Transit key of any name; it signs only with `nats-tsign-*`); the loader SYS user also gets publish on the claims lookup subject; the trust ConfigMap is `imas-nats-trust`; the bus keeps the fence user; the trust bootstrap mints the loader SYS user JWT; the farmer NKey is its own Secret `imas-farmer-nkey`. Follow-up work is P26 to P28.
 ---
 item: P23
 action: update
-next-append: **Unblocked by the P21 build (2026-10-12) except for C2.** The validation tests can be written against main once C2 merges; P27 lists code gaps they will hit.
+next-append: **Unblocked by the P21 build (2026-10-12).** The validation tests can be written against main; P27 lists code gaps they will hit.
 ---
 item: P3
 action: update
