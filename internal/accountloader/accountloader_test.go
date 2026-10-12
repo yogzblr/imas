@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -69,7 +70,12 @@ func TestReadyImpliesReadyState(t *testing.T) {
 		seed(t, tr, b, 3)
 		l := newLoader(t, fastConfig(tr, b.src(t), node))
 		run(t, l)
+		deadline := time.Now().Add(10 * time.Second)
 		for !l.Ready() {
+			if time.Now().After(deadline) {
+				t.Fatal("loader not ready within 10s")
+			}
+			runtime.Gosched()
 			if st := l.Status(); st.Ready && st.State != StateReady {
 				t.Fatalf("status = %+v: ready with state %q", st, st.State)
 			}
