@@ -181,7 +181,11 @@ schema kills a statement in another, errors 1213 and 1317), and PXC's strict mod
 refuses `GET_LOCK`, so the helper serialises the tests with a lease row in schema
 `imas_mysqltest`. (4) The flake is the test: the sprout sends its CLOSE before it
 drops the session from its count, so the count read right after the CLI's session
-ended could still see the real shell (issue #142). (5) A1's `.json` path and A2's
+ended could still see the real shell (issue #142). The proof is
+`go test -race -count=20 -timeout 120m ./internal/natsapi`: since E6 every Account
+re-sign waits for the next second (`waitPastIssuedAt`), so one run of the package
+takes about 3 minutes of wall clock for 30 s of CPU, and go test's default 10-minute
+timeout, which covers all 20 runs in one binary, cannot hold them. (5) A1's `.json` path and A2's
 file list are clean on main; `compatibleFrom` stays, reasoning next to it and
 `TestMySQLOlderBinariesRunOnLatest`, `TestCompatibleFromReviewed`. (6) The test is
 `TestOpenBaoFarmerPolicyKeySet` (`sys/capabilities-self` per key name), run by
