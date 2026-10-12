@@ -41,12 +41,13 @@ A unit may start only when every unit in "Needs" is merged to main.
 | D9 | same, PR 9 | D8, C6, B7 |
 | E1 | `E-followups.md` E1 | none |
 | E2 | `E-followups.md` E2 | none |
-| E3 | `E-followups.md` E3 | C2, E2 |
+| E3 | `E-followups.md` E3 | E2, E6 |
+| E6 | `E-followups.md` E6 | none |
 | E4 | `E-followups.md` E4 | none |
 | E5 | `E-followups.md` E5 | E1 |
 | Z | `E-followups.md` Z | every other unit |
 
-First wave of the original build (no needs): A1, B1, C1, D1, D2. Units A to D are merged except C2 (PR 229 is open); the follow-up units E1 to E5 and Z are launched in the same way, C2 first by rule 10. Why the order: P22 first (design D13);
+First wave of the original build (no needs): A1, B1, C1, D1, D2. Units A to D are all merged (C2 last, as PR 229; its leftovers are E6); the follow-up units E1 to E5 and Z are launched in the same way, E6 first by rule 10 (E3 waits for it). Why the order: P22 first (design D13);
 A2 and the P21 slice 1 chart work both edit the farmer bootstrap Job and policies, so
 A2 lands before B3 and B7; P22 slice 2 owns saas migration 00007 and slice 3's saas
 migration is 00008; B5 and C2 both edit `internal/pki`, so C2 waits for B5.
@@ -190,3 +191,4 @@ Paste this into a Claude Code session started in the yogzblr/imas repo on main.
 | E4 | P27: loadtest without trust seeds; sprout honours Retry-After | E-followups.md | E4 |
 | E5 | P28: docs, CI, flake and earlier reports | E-followups.md | E5 |
 | Z | Final gate: nothing left open | E-followups.md | Z |
+| E6 | P21: finish C2, the farmer account publisher | E-followups.md | E6 |

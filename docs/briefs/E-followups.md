@@ -64,7 +64,7 @@ redialing; a dial failure returns the dial error; two concurrent calls share one
 
 ## E3: no local JWT or key files in farmer (P27.2)
 
-Needs C2 (the account publisher) and E2 merged. Scope: `internal/pki`, `cmd/farmer`,
+Needs E2 and E6 merged. Scope: `internal/pki`, `cmd/farmer`,
 `internal/config`, the file-write guard test.
 
 Decision: farmer writes no file outside the process's temp directory for anything it must
@@ -141,6 +141,49 @@ Needs E1 (both edit `uat.yml`). Scope: docs, workflows, `internal/natsapi` tests
    (signing only `nats-tsign-*`; no rotate, no config, no export, no hard delete; exact denies on
    the platform and gateway keys), and fails if the policy changes that set. Put the accepted
    cross-client soft-delete behaviour in `deploy/helm/farmer/README.md` next to the policy.
+
+## E6: finish C2, the farmer account publisher (P21)
+
+C2 (PR 229) merged with five things left open. Close each one. Scope: `internal/pki`,
+`cmd/farmer`, `internal/inventory`, `deploy/helm/farmer`, `internal/config`, docs.
+
+1. Same-second re-sign in `internal/pki/enroll.go`: `grantEnrolledSprout` re-signs the
+   Account JWT without waiting for a strictly newer iat, so a re-sign in the same second
+   has the same jti, and the loader can treat the new JWT as the one it already holds
+   (the grant is not applied). Call `waitPastIssuedAt` on the JWT being replaced before
+   its `Encode`, as the other re-signs do. Search every `Encode(` of an Account JWT in
+   `internal/pki` (`jwtauth.go`, `jwtusers.go`, `tenant.go`, `saasapi_user.go`, `enroll.go`,
+   `nats.go`) and make every one wait; add a test that fails for any that does not
+   (`TestEveryResignAdvancesIat` already exists: extend it to cover `enroll.go`).
+2. No write hook (brief 7.2). The brief's `persistAccountJWT` hook is not built, because
+   farmer mints a minimal Account JWT at boot and publishing it would put an un-revoked
+   JWT in the bucket. Decision: the publish point stays `pushAccountUpdate` (every
+   JWT that reaches the bus passes through it), and the invariant is made explicit and tested:
+   `TestNoAccountJWTReachesBusWithoutPublisher` fails if any code path calls the NATS claims
+   update directly instead of `pushAccountUpdate` (search gate: `CLAIMS.UPDATE`). Correct
+   brief 7.2 in `docs/briefs/P21-slice2-bus-loader.md` to describe what was built, and say
+   in a code comment on `pushAccountUpdate` why minimal boot mints are not published.
+3. No silent fallback. With the bus stateless, a farmer with no accounts bucket loses
+   every account when a bus node restarts. Decision: farmer refuses to start (exit with a clear
+   error) when the bus URLs are configured and the accounts store is not, except in the
+   existing in-process test/dev seam; the farmer chart fails to render when `accountStore.bucket`
+   or its endpoint (own or `objectStore.endpoint`) is empty. Update the chart README, the UAT
+   and CI values that relied on the fallback (search `accountStore`, `IMAS_ACCOUNTS_`).
+4. Metrics. Decision: no new metrics system in this phase. Keep `farmer_account_push_missing_nodes`
+   as a structured log field and add the same for `farmer_account_bucket_write_failed`; document
+   both log fields in `deploy/helm/farmer/README.md` so the log platform can alert on them
+   (Fluent Bit ships them, D16). Remove "Prometheus metrics" from any brief or doc that
+   promises them for the publisher.
+5. `internal/pki/nats.go`: `seedResolverFromCore` still uses `resolverStoreDir()`, a per-process
+   directory used only by the test bus. Replace it with a directory from `os.MkdirTemp` created
+   per call and removed on close, add the single allow-list entry in
+   `internal/inventory/nofilewrites_test.go` that the guard needs, and delete the C7 leftover
+   comment.
+6. Objects have no Content-Type (`objectstore.Put` takes none and the loader never reads it).
+   Decision: leave as is and say so in the `accountpublisher.go` doc comment; nothing else.
+
+Done when: the search gates above are clean, the new and extended tests pass under `-race`,
+both chart renders and the UAT render pass, and the brief and docs match the code.
 
 ## Z: final gate, nothing left open
 
