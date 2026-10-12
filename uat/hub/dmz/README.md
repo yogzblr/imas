@@ -255,7 +255,7 @@ what the repo's real-Envoy tests assert (`internal/pki/envoy_e2e_test.go`,
 | D11 | `POST /v1/enroll` every 5 s for up to `--refill-wait` (75) s | the bucket refills and farmer answers again |
 | D12 | `openssl s_client` again, sending and verifying `dmz.<zone>` over the same connection | the certificate also verifies for the private name sprouts use (the runner cannot resolve it, so only the name changes) |
 | D13 | `kubectl get pods` of the bus (needs `--kubeconfig`) | design T5: the `farmerbus` container has no `IMAS_NATS_*_SEED` or `*_SEED_FILE` variable except the clustered fence user's |
-| D14 | the same pods | no OpenBao signing settings (`IMAS_NATSSIGN_*`, `IMAS_NATSBOOT_*`), and every pod mounts ConfigMap `imas-nats-trust` with `IMAS_NATS_TRUST_DIR` set |
+| D14 | the same pods | no OpenBao signing settings (`IMAS_NATSSIGN_*`, `IMAS_NATSBOOT_*`), and every pod's `farmerbus` container mounts ConfigMap `imas-nats-trust` at exactly the directory `IMAS_NATS_TRUST_DIR` names |
 | D15 | `kubectl get configmap imas-nats-trust` and the pods' Ready condition | the trust passes install.sh's checks (complete, public, the chain hangs together) and every bus pod is Ready: the bus started from the published operator JWT alone |
 
 "jwt_authn's body" means a 401 whose body starts with `Jwt ` or `Jwks `

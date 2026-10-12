@@ -1465,6 +1465,8 @@ func busPods(mutate func(pod obj)) obj {
 				obj{"name": "farmerbus", "env": []any{
 					obj{"name": "IMAS_NATS_TRUST_DIR", "value": "/var/run/imas/nats-trust"},
 					obj{"name": "IMAS_BUS_HEALTH_PORT", "value": "8080"},
+				}, "volumeMounts": []any{
+					obj{"name": "nats-trust", "mountPath": "/var/run/imas/nats-trust", "readOnly": true},
 				}},
 				obj{"name": "loader", "env": []any{obj{"name": "IMAS_NATS_TRUST_DIR", "value": "/var/run/imas/nats-trust"}}},
 			},
@@ -1515,6 +1517,14 @@ func TestCheckBusFromTrustOnly(t *testing.T) {
 		{name: "raw seed", pods: busPods(addBusEnv("IMAS_NATS_SYS_ACCOUNT_SEED")), wantFail: []string{"D13"}},
 		{name: "transit signer", pods: busPods(addBusEnv("IMAS_NATSSIGN_OPENBAO_ADDR")), wantFail: []string{"D14"}},
 		{name: "no trust volume", pods: busPods(func(p obj) { p["spec"].(obj)["volumes"] = []any{} }), wantFail: []string{"D14"}},
+		{name: "trust mounted elsewhere", pods: busPods(func(p obj) {
+			c := p["spec"].(obj)["containers"].([]any)[0].(obj)
+			c["volumeMounts"] = []any{obj{"name": "nats-trust", "mountPath": "/etc/other"}}
+		}), wantFail: []string{"D14"}},
+		{name: "no trust dir variable", pods: busPods(func(p obj) {
+			c := p["spec"].(obj)["containers"].([]any)[0].(obj)
+			c["env"] = []any{}
+		}), wantFail: []string{"D14"}},
 		{name: "not ready", pods: busPods(func(p obj) {
 			p["status"] = obj{"conditions": []any{obj{"type": "Ready", "status": "False"}}}
 		}), wantFail: []string{"D15"}},

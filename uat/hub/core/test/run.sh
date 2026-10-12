@@ -473,9 +473,13 @@ if [[ -n "$bao_bin" && -x "$bao_bin" ]] && ! (exec 3<>/dev/tcp/127.0.0.1/8200) 2
 			grep -qx 'PASS T4: transit/keys/nats-operator is a hardened ed25519 key' "$tmp/t4" &&
 			ok "T4 probe: a live bootstrap token, the ephemeral policy and an exportable key all fail" ||
 			{ bad "T4 probe before the clean-up"; sed 's/^/      /' "$tmp/t4"; }
-		grep -qx 'PASS T4: farmer and publisher policies on transit/sign/nats-operator: deny' "$tmp/t4" &&
-			grep -qx 'PASS T4: farmer and publisher policies on transit/keys/nats-operator: read' "$tmp/t4" &&
-			grep -qx 'PASS T4: farmer and publisher policies on transit/keys/nats-operator/soft-delete: deny' "$tmp/t4" &&
+		good=1
+		for pol in imas-farmer-natssign imas-nats-sys-signer; do
+			grep -qx "PASS T4: $pol on transit/sign/nats-operator: deny" "$tmp/t4" &&
+				grep -qx "PASS T4: $pol on transit/keys/nats-operator: read" "$tmp/t4" &&
+				grep -qx "PASS T4: $pol on transit/keys/nats-operator/soft-delete: deny" "$tmp/t4" || good=0
+		done
+		((good)) &&
 			ok "T4 probe: the chart's farmer and publisher policies cannot sign with, update or retire the operator key" ||
 			{ bad "T4 probe: policy capabilities"; sed 's/^/      /' "$tmp/t4"; }
 		# The Job's clean-up: the ephemeral policy, then its own token.
@@ -488,6 +492,14 @@ if [[ -n "$bao_bin" && -x "$bao_bin" ]] && ! (exec 3<>/dev/tcp/127.0.0.1/8200) 2
 			ok "T4 probe: after the clean-up only the exportable key fails" ||
 			{ bad "T4 probe after the clean-up"; sed 's/^/      /' "$tmp/t4"; }
 		! grep -qF "$root" "$STUB_STATE/calls.log" "$tmp/t4" && ok "T4 probe: no token in argv or output" || bad "T4 probe: a token leaked"
+		# A grant in one policy is caught even where the other denies it.
+		{ cat "$pols/imas-nats-sys-signer.hcl"; printf '\npath "transit/keys/nats-operator/soft-delete" {\n  capabilities = ["delete"]\n}\n'; } >"$tmp/loose.hcl"
+		BAO_ADDR=http://127.0.0.1:8200 BAO_TOKEN="$root" "$bao_bin" policy write imas-nats-sys-signer "$tmp/loose.hcl" >/dev/null
+		t4 >"$tmp/t4" 2>&1
+		grep -qx 'FAIL T4: imas-nats-sys-signer on transit/keys/nats-operator/soft-delete: delete, want deny' "$tmp/t4" &&
+			grep -qx 'PASS T4: imas-farmer-natssign on transit/keys/nats-operator/soft-delete: deny' "$tmp/t4" &&
+			ok "T4 probe: a grant in the publisher policy is not hidden by the farmer policy's deny" ||
+			{ bad "T4 probe: per-policy probes"; sed 's/^/      /' "$tmp/t4"; }
 
 		# saasapi-secrets.sh: the KV entries the chart's hook Jobs would have
 		# written, then the two Secrets.

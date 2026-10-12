@@ -44,7 +44,8 @@
 #   D13 (T5) the bus's farmerbus container has no trust chain seed: no
 #       IMAS_NATS_*_SEED[_FILE] but the clustered fence user's
 #   D14 (T5) ... and no OpenBao signing access (no IMAS_NATSSIGN_* or
-#       IMAS_NATSBOOT_*), and reads the trust ConfigMap at IMAS_NATS_TRUST_DIR
+#       IMAS_NATSBOOT_*), and mounts the trust ConfigMap at exactly the
+#       directory IMAS_NATS_TRUST_DIR names
 #   D15 (T5) the trust ConfigMap here is a complete, public trust (no seed,
 #       the chain hangs together) and every bus pod is Ready: the bus
 #       started from the published operator JWT alone
@@ -320,7 +321,15 @@ else
 		signer=$(jq -r "[$bus_env | select(test(\"^IMAS_(NATSSIGN|NATSBOOT)_\"))] | unique | join(\" \")" <<<"$pods")
 		if [[ -n $signer ]]; then
 			fail D14 "the bus has OpenBao signing settings: $signer"
-		elif jq -e --arg cm "$DMZ_TRUST_CONFIGMAP" "all(.items[]; any(.spec.volumes[]?; .configMap.name? == \$cm)) and ([$bus_env] | index(\"IMAS_NATS_TRUST_DIR\"))" <<<"$pods" >/dev/null; then
+		# Each pod: the farmerbus container mounts the trust ConfigMap's
+		# volume at exactly the directory IMAS_NATS_TRUST_DIR names.
+		elif jq -e --arg cm "$DMZ_TRUST_CONFIGMAP" '
+			all(.items[];
+				.spec as $spec
+				| ($spec.containers[] | select(.name == "farmerbus")) as $bus
+				| ([$bus.env[]? | select(.name == "IMAS_NATS_TRUST_DIR") | .value][0]) as $dir
+				| $dir != null and any($spec.volumes[]?; .configMap.name? == $cm and
+					(.name as $v | any($bus.volumeMounts[]?; .name == $v and .mountPath == $dir))))' <<<"$pods" >/dev/null; then
 			pass D14 "no OpenBao signing access; the bus reads ConfigMap $DMZ_TRUST_CONFIGMAP (IMAS_NATS_TRUST_DIR)"
 		else
 			fail D14 "the bus pods do not all mount ConfigMap $DMZ_TRUST_CONFIGMAP at IMAS_NATS_TRUST_DIR"

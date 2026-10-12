@@ -339,12 +339,12 @@ NATS_PLATFORM_KEYS=(nats-operator nats-operator-signing nats-sys-account)
 # "FAIL <what>" line per check:
 #   - the token the chart's bootstrap Job was handed is revoked;
 #   - the ephemeral policy imas-nats-bootstrap is gone;
-#   - farmer's and the publish Job's policies together cannot sign with
+#   - farmer's and the publish Job's policies, each alone, cannot sign with
 #     the operator identity key, nor update or soft-delete it;
 #   - the three platform keys are ed25519, not exportable, no plaintext
 #     backup, not imported, not derived, not soft-deleted.
-# Both tokens go over stdin, never argv. A short-lived probe token with
-# the two policies is minted and revoked again.
+# Both tokens go over stdin, never argv. A short-lived probe token per
+# policy is minted and revoked again.
 openbao_t4() {
 	{ cat "$1"; echo; cat "$2" 2>/dev/null; echo; } |
 		kc -n "$CORE_NS" exec -i "$OPENBAO_POD" -c openbao -- /bin/sh -c '
@@ -364,19 +364,24 @@ openbao_t4() {
 		else
 			r PASS "T4: policy imas-nats-bootstrap is deleted"
 		fi
-		if probe=$(bao token create -orphan -no-default-policy -policy=imas-farmer-natssign 			-policy=imas-nats-sys-signer -ttl=2m -explicit-max-ttl=2m -renewable=false -field=token 2>/dev/null); then
-			for pc in transit/sign/nats-operator=deny transit/keys/nats-operator=read transit/keys/nats-operator/soft-delete=deny; do
-				got=$(bao token capabilities "$probe" "${pc%%=*}" 2>/dev/null || echo error)
-				if [ "$got" = "${pc#*=}" ]; then
-					r PASS "T4: farmer and publisher policies on ${pc%%=*}: $got"
-				else
-					r FAIL "T4: farmer and publisher policies on ${pc%%=*}: $got, want ${pc#*=}"
-				fi
-			done
-			bao token revoke "$probe" >/dev/null 2>&1 || r FAIL "T4: could not revoke the probe token"
-		else
-			r FAIL "T4: could not mint a probe token with imas-farmer-natssign and imas-nats-sys-signer (policies missing?)"
-		fi
+		# One probe per policy: an explicit deny in one must not hide a
+		# grant in the other (each runs with its own policy alone).
+		for pol in imas-farmer-natssign imas-nats-sys-signer; do
+			if probe=$(bao token create -orphan -no-default-policy -policy="$pol" \
+				-ttl=2m -explicit-max-ttl=2m -renewable=false -field=token 2>/dev/null); then
+				for pc in transit/sign/nats-operator=deny transit/keys/nats-operator=read transit/keys/nats-operator/soft-delete=deny; do
+					got=$(bao token capabilities "$probe" "${pc%%=*}" 2>/dev/null || echo error)
+					if [ "$got" = "${pc#*=}" ]; then
+						r PASS "T4: $pol on ${pc%%=*}: $got"
+					else
+						r FAIL "T4: $pol on ${pc%%=*}: $got, want ${pc#*=}"
+					fi
+				done
+				bao token revoke "$probe" >/dev/null 2>&1 || r FAIL "T4: could not revoke the $pol probe token"
+			else
+				r FAIL "T4: could not mint a probe token with $pol (policy missing?)"
+			fi
+		done
 		for k in '"${NATS_PLATFORM_KEYS[*]}"'; do
 			hard=yes
 			[ "$(bao read -field=type "transit/keys/$k" 2>/dev/null)" = ed25519 ] || hard=no
