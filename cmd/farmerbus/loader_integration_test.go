@@ -176,6 +176,12 @@ type runningLoader struct {
 // stopped at the end of the test, or by stop.
 func (e *loaderEnv) startLoader(t *testing.T, nodeURL string) *runningLoader {
 	t.Helper()
+	return e.startLoaderEvery(t, nodeURL, e.reconcile)
+}
+
+// startLoaderEvery is startLoader with its own reconcile interval.
+func (e *loaderEnv) startLoaderEvery(t *testing.T, nodeURL string, reconcile time.Duration) *runningLoader {
+	t.Helper()
 	var lp atomic.Pointer[accountloader.Loader]
 	node, err := accountloader.DialNode(accountloader.NATSConfig{
 		URL:          nodeURL,
@@ -198,7 +204,7 @@ func (e *loaderEnv) startLoader(t *testing.T, nodeURL string) *runningLoader {
 		Node:              node,
 		Trusted:           e.trusted,
 		SysAccount:        e.sysPub,
-		ReconcileInterval: e.reconcile,
+		ReconcileInterval: reconcile,
 		Backoff:           accountloader.Backoff{Min: 20 * time.Millisecond, Max: 200 * time.Millisecond},
 		PushBackoff:       accountloader.Backoff{Min: 10 * time.Millisecond, Max: 100 * time.Millisecond},
 		RequestTimeout:    5 * time.Second,
@@ -581,11 +587,13 @@ func TestLoaderOlderJWTNotApplied(t *testing.T) {
 // sprout of one tenant on each. Farmer writes an Account JWT revoking that
 // sprout (newer issued-at), bumps the index and publishes the event while
 // the link between node 2 and its loader is down, so that loader misses
-// it. Nodes 0 and 1 drop the sprout before any timer could fire; node 2
-// drops it too, its loader catches up by the timer, and a new connection
-// is refused on all three.
+// it. The loaders of nodes 0 and 1 have no timer that can fire in the
+// test, and node 2's loader stays cut off until nodes 0 and 1 have
+// dropped the sprout, so that drop is the event's work. Node 2 drops it
+// too, its loader catches up by the timer, and a new connection is
+// refused on all three.
 func TestLoaderRevokedSproutRefusedOnEveryNode(t *testing.T) {
-	const reconcile = 3 * time.Second
+	const reconcile = 500 * time.Millisecond
 	e := newLoaderEnv(t, reconcile)
 	tn := e.tr.newTenant(t, "web-01")
 	now := time.Now().Unix()
@@ -600,7 +608,11 @@ func TestLoaderRevokedSproutRefusedOnEveryNode(t *testing.T) {
 	link := newProxy(t)
 	link.setTarget(hostOf(t, c.url(2)))
 	linkURL := "tls://" + link.addr()
-	loaders := []*runningLoader{e.startLoader(t, c.url(0)), e.startLoader(t, c.url(1)), e.startLoader(t, linkURL)}
+	loaders := []*runningLoader{
+		e.startLoaderEvery(t, c.url(0), time.Hour),
+		e.startLoaderEvery(t, c.url(1), time.Hour),
+		e.startLoader(t, linkURL),
+	}
 	waitLoaded(t, loaders...)
 
 	sprouts := make([]*nats.Conn, 3)
@@ -627,18 +639,18 @@ func TestLoaderRevokedSproutRefusedOnEveryNode(t *testing.T) {
 	sys := e.sysConn(t, c.url(0))
 	e.bucket.putAccount(t, tn.pub, revoking)
 	token := e.bucket.bumpIndex(t)
-	published := time.Now()
 	publishEvent(t, sys, token, map[string]int64{tn.pub: now})
-	// Before node 2's loader is back, so the event is gone for it.
-	time.Sleep(100 * time.Millisecond)
-	link.setCut(false)
-
-	// No index timer can fire before 0.8 of an interval: dropping the
-	// sprout before then is the event's work.
-	waitAllBy(t, "nodes 0 and 1 to drop the revoked sprout before any timer", published.Add(reconcile*4/5),
+	// Only the event can push now: loaders 0 and 1 have no timer due and
+	// loader 2 has no node.
+	waitAllBy(t, "nodes 0 and 1 to drop the revoked sprout on the event", time.Now().Add(5*time.Second),
 		sprouts[0].IsClosed, sprouts[1].IsClosed)
+	if st := loaders[0].l.Status(); st.LastIndexToken == token {
+		t.Fatal("loader 0 reconciled the index during the event-only phase")
+	}
+	link.setCut(false)
 	waitFor(t, "node 2 to drop the revoked sprout", 5*reconcile, sprouts[2].IsClosed)
-	waitFor(t, "node 2's loader to apply the revocation by its timer", 5*reconcile, func() bool {
+	// Its reconnect backoff (up to 10s with jitter) comes first.
+	waitFor(t, "node 2's loader to apply the revocation by its timer", 10*time.Second, func() bool {
 		return loaders[2].l.Status().LastIndexToken == token
 	})
 	for i := range 3 {
