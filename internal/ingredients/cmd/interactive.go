@@ -15,6 +15,7 @@ import (
 
 	apitypes "github.com/yogzblr/imas/internal/api/types"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/tenantconn"
 )
 
 // nc is the single connection a sprout process registers via
@@ -28,50 +29,29 @@ func RegisterNatsConn(conn *nats.Conn) {
 	nc = conn
 }
 
-// farmerConns holds farmer's own per-tenant NATS connections — the
-// counterpart to nc above, but keyed by tenant since a single farmer
-// process now holds one connection per tenant (see
-// docs/design/imas-tenant-context-threading.md's Option A). Only FRun
-// (farmer's outbound leg) reads this; sprout never calls
-// RegisterFarmerNatsConn.
-var (
-	farmerConnMu sync.RWMutex
-	farmerConns  = map[string]*nats.Conn{}
-)
+// farmerBus is where FRun (farmer's outbound leg) gets a tenant's NATS
+// connection: farmer's tenantconn.Registry, installed by cmd/farmer
+// (SetFarmerConnGetter). Every send asks it again, so a tenant whose
+// connection the idle sweeper closed is dialled again. Sprout never
+// installs one.
+var farmerBus tenantconn.Source
 
-// RegisterFarmerNatsConn installs tenantID's NATS connection for FRun to
-// dispatch commands through. Called once per tenant connection by
-// cmd/farmer/main.go.
-func RegisterFarmerNatsConn(tenantID string, conn *nats.Conn) {
-	farmerConnMu.Lock()
-	defer farmerConnMu.Unlock()
-	farmerConns[tenantID] = conn
-}
-
-// UnregisterFarmerNatsConn removes tenantID's connection — called when
-// that tenant is deprovisioned and its connection closed.
-func UnregisterFarmerNatsConn(tenantID string) {
-	farmerConnMu.Lock()
-	defer farmerConnMu.Unlock()
-	delete(farmerConns, tenantID)
-}
-
-func farmerConnFor(tenantID string) *nats.Conn {
-	farmerConnMu.RLock()
-	defer farmerConnMu.RUnlock()
-	return farmerConns[tenantID]
+// SetFarmerConnGetter installs the getter FRun gets a tenant's connection
+// from: cmd/farmer's tenant registry.
+func SetFarmerConnGetter(g tenantconn.ConnGetter) {
+	farmerBus.Set(g)
 }
 
 var envMutex sync.Mutex
 
 // FRun runs a command on target's sprout, over tenantID's dedicated NATS
-// connection (see RegisterFarmerNatsConn) — the sprout's own tenant, not
+// connection (see SetFarmerConnGetter) — the sprout's own tenant, not
 // necessarily whichever tenant happens to be "current" for the process.
 // The request and its reply are sealed (sealed.go).
 func FRun(tenantID string, target pki.KeyManager, cmdRun apitypes.CmdRun) (apitypes.CmdRun, error) {
-	conn := farmerConnFor(tenantID)
-	if conn == nil {
-		return apitypes.CmdRun{}, fmt.Errorf("cmd: no NATS connection registered for tenant %s", tenantID)
+	conn, err := farmerBus.Conn(tenantID)
+	if err != nil {
+		return apitypes.CmdRun{}, fmt.Errorf("cmd: %w", err)
 	}
 	return frun(conn, tenantID, target, cmdRun)
 }

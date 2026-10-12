@@ -23,6 +23,7 @@ import (
 	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
+	"github.com/yogzblr/imas/internal/tenantconn/tenantconntest"
 )
 
 // eventually polls cond until it returns true or timeout passes, and
@@ -555,8 +556,7 @@ func TestRegisterNatsConn_RecordsDispatchedJobs(t *testing.T) {
 	_, conn := startTestNATSServer(t)
 	RegisterNatsConn("t_test", conn)
 	t.Cleanup(func() { cook.SetDispatchRecorder(nil) })
-	cook.RegisterFarmerNatsConn("t_test", conn)
-	t.Cleanup(func() { cook.UnregisterFarmerNatsConn("t_test") })
+	tenantconntest.Use(t, cook.SetFarmerConnGetter, tenantconntest.Fixed(conn))
 	// The dispatch is sealed only (FIX.1: a sprout with no box key is
 	// sent nothing), so the stub sprout has a box key on record and
 	// acknowledges the sealed dispatch.

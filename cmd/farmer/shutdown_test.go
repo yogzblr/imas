@@ -12,7 +12,7 @@ import (
 // Farmer's stop ends shell sessions while the tenant buses are still
 // connected, so the CLOSE frames (farmer-shutdown) can go out, and only
 // then closes them.
-func TestCloseTenantConnsEndsShellSessionsFirst(t *testing.T) {
+func TestCloseTenantBusesEndsShellSessionsFirst(t *testing.T) {
 	conns := []*nats.Conn{startTestNATS(t), startTestNATS(t)}
 	var called bool
 	closeShellSessions = func() {
@@ -24,7 +24,7 @@ func TestCloseTenantConnsEndsShellSessionsFirst(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() { closeShellSessions = natsapi.CloseShellSessions })
-	closeTenantConns(conns)
+	closeTenantBuses(conns)
 	if !called {
 		t.Fatal("farmer's stop never ended the shell sessions")
 	}
@@ -36,7 +36,7 @@ func TestCloseTenantConnsEndsShellSessionsFirst(t *testing.T) {
 }
 
 // A shell session that won't end doesn't hold up the rest of the stop.
-func TestCloseTenantConnsBoundsShellWait(t *testing.T) {
+func TestCloseTenantBusesBoundsShellWait(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
 	closeShellSessions = func() { <-release }
@@ -44,7 +44,7 @@ func TestCloseTenantConnsBoundsShellWait(t *testing.T) {
 	t.Cleanup(func() { closeShellSessions = natsapi.CloseShellSessions; shellShutdownTimeout = 5 * time.Second })
 	nc := startTestNATS(t)
 	start := time.Now()
-	closeTenantConns([]*nats.Conn{nc})
+	closeTenantBuses([]*nats.Conn{nc})
 	if d := time.Since(start); d > 5*time.Second {
 		t.Fatalf("stop waited %s on a stuck session", d)
 	}

@@ -45,9 +45,9 @@ var ErrDecryptFailed = payloadbox.ErrOpen
 // sealed replacement for natsConn.Publish(subject, plaintextJSON) at a
 // farmer->sprout payload boundary.
 func PublishEncryptedTo(tenantID, sproutID, subject, purpose string, v any) error {
-	nc := natsConnFor(tenantID)
-	if nc == nil {
-		return fmt.Errorf("natsapi: NATS connection not available")
+	nc, err := tenantConn(tenantID)
+	if err != nil {
+		return fmt.Errorf("natsapi: %w", err)
 	}
 	data, _, err := pki.SealToSprout(tenantID, sproutID, purpose, "", v)
 	if err != nil {

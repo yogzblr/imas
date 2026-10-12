@@ -30,6 +30,7 @@ import (
 	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
+	"github.com/yogzblr/imas/internal/tenantconn/tenantconntest"
 )
 
 type sealedCookEnv struct {
@@ -94,8 +95,7 @@ func setupSealedCook(t *testing.T, tenant string) *sealedCookEnv {
 	}
 	t.Cleanup(ns.Shutdown)
 	e.farmer, e.sprout = connectCookTest(t, ns.ClientURL()), connectCookTest(t, ns.ClientURL())
-	RegisterFarmerNatsConn(tenant, e.farmer)
-	t.Cleanup(func() { UnregisterFarmerNatsConn(tenant) })
+	tenantconntest.Use(t, SetFarmerConnGetter, tenantconntest.Fixed(e.farmer))
 	SetDispatchRecorder(func(_, _ string, env RecipeEnvelope) {
 		e.mu.Lock()
 		defer e.mu.Unlock()

@@ -32,6 +32,7 @@ import (
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 	"github.com/yogzblr/imas/internal/rbac"
+	"github.com/yogzblr/imas/internal/tenantconn/tenantconntest"
 )
 
 // boxKeyEnv is farmer (its real NATS API, internal/natsapi.Subscribe,
@@ -136,7 +137,7 @@ func setupBoxKeyEnv(t *testing.T) *boxKeyEnv {
 	if err := natsapi.Subscribe(e.farmer, e.tenant); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { natsapi.ClearNatsConn(e.tenant) })
+	tenantconntest.Use(t, natsapi.SetConnGetter, tenantconntest.Fixed(e.farmer))
 	if err := subscribeBoxKeyRotate(e.sprout, e.sproutID); err != nil {
 		t.Fatal(err)
 	}

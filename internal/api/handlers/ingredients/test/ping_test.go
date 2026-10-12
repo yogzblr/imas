@@ -19,6 +19,7 @@ import (
 	"github.com/yogzblr/imas/internal/config"
 	ingredtest "github.com/yogzblr/imas/internal/ingredients/test"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/tenantconn/tenantconntest"
 )
 
 // setupPingTestPKI wires up an in-memory PKI store (see
@@ -92,10 +93,9 @@ func startTestNATSServer(t *testing.T) (*nats.Conn, func()) {
 	// (the HTTP admin API's documented ceiling — see
 	// docs/design/imas-tenant-context-threading.md), so tests register the
 	// farmer-side connection under that same tenant.
-	ingredtest.RegisterFarmerNatsConn(pki.CurrentTenantID(), nc)
+	tenantconntest.Use(t, ingredtest.SetFarmerConnGetter, tenantconntest.Fixed(nc))
 
 	return nc, func() {
-		ingredtest.UnregisterFarmerNatsConn(pki.CurrentTenantID())
 		nc.Close()
 		ns.Shutdown()
 	}

@@ -22,6 +22,7 @@ import (
 	"github.com/yogzblr/imas/internal/ingredients/cmd"
 	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/tenantconn/tenantconntest"
 )
 
 // sealedStubSprout is an enrolled sprout of tenant: its box key is on
@@ -120,12 +121,9 @@ func TestSproutAction_SproutWithNoBoxKeyIsRefusedWithTheCode(t *testing.T) {
 	setupNatsAPIPKI(t)
 	tenant := pki.CurrentTenantID()
 	writeNKey(t, "", "accepted", "keyless-01", "UKEY_KEYLESS")
-	cmd.RegisterFarmerNatsConn(tenant, nc)
-	defer cmd.UnregisterFarmerNatsConn(tenant)
-	cook.RegisterFarmerNatsConn(tenant, nc)
-	defer cook.UnregisterFarmerNatsConn(tenant)
-	SetNatsConn(tenant, nc)
-	defer ClearNatsConn(tenant)
+	tenantconntest.Use(t, cmd.SetFarmerConnGetter, tenantconntest.Fixed(nc))
+	tenantconntest.Use(t, cook.SetFarmerConnGetter, tenantconntest.Fixed(nc))
+	useConn(t, nc)
 	_, _, approve := newSUCatalog(t) // turns self_update on
 	approve(tenant, ptr(suVersion))
 
@@ -164,8 +162,7 @@ func TestHandleCmdRun_KeylessTargetFailsWithTheCode(t *testing.T) {
 	tenant := pki.CurrentTenantID()
 	writeNKey(t, "", "accepted", "web-01", "UKEY_WEB01")
 	writeNKey(t, "", "accepted", "keyless-01", "UKEY_KEYLESS")
-	cmd.RegisterFarmerNatsConn(tenant, nc)
-	defer cmd.UnregisterFarmerNatsConn(tenant)
+	tenantconntest.Use(t, cmd.SetFarmerConnGetter, tenantconntest.Fixed(nc))
 	setupSealedEnv(t) // the mock OpenBao the stub sprout pins its tenant key from
 
 	stub := newSealedStubSprout(t, tenant, "web-01")
@@ -204,8 +201,7 @@ func TestHandleCookResync_KeylessTargetFailsWithTheCode(t *testing.T) {
 	setupNatsAPIPKI(t)
 	tenant := pki.CurrentTenantID()
 	writeNKey(t, "", "accepted", "keyless-01", "UKEY_KEYLESS")
-	cook.RegisterFarmerNatsConn(tenant, nc)
-	defer cook.UnregisterFarmerNatsConn(tenant)
+	tenantconntest.Use(t, cook.SetFarmerConnGetter, tenantconntest.Fixed(nc))
 	setupSealedEnv(t)
 	failOnRequest(t, nc, cook.NudgeSubject("keyless-01"))
 	nc.Flush()

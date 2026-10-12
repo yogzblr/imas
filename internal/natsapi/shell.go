@@ -316,9 +316,12 @@ func handleShellOpen(c apiCaller, params json.RawMessage) (any, error) {
 		}
 		return nil, fmt.Errorf("checking the sprout's box key: %w", err)
 	}
-	nc := natsConnFor(c.TenantID)
-	if nc == nil {
-		return nil, fmt.Errorf("NATS connection not available")
+	// The session's subscriptions live on this connection, so the whole
+	// session uses it (and ends if it closes); it is not kept past the
+	// session.
+	nc, err := tenantConn(c.TenantID)
+	if err != nil {
+		return nil, err
 	}
 
 	idle := shellIdleTimeout()

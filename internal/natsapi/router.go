@@ -151,8 +151,6 @@ const natsCoreQueueGroup = "imas-core"
 // one NATS connection per tenant (cmd/farmer/main.go's ConnectFarmer),
 // and every one of them gets its own full set of registrations.
 func Subscribe(nc *nats.Conn, tenantID string) error {
-	SetNatsConn(tenantID, nc)
-
 	for method, run := range apiRoutes() {
 		subject := Subject(method)
 		_, err := nc.QueueSubscribe(subject, natsCoreQueueGroup, func(msg *nats.Msg) {

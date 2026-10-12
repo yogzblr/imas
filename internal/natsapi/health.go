@@ -21,8 +21,8 @@ type HealthResponse struct {
 
 func handleHealth(tenantID string, _ json.RawMessage) (any, error) {
 	uptime := time.Since(farmerStartTime)
-	nc := natsConnFor(tenantID)
-	natsReady := nc != nil && nc.IsConnected()
+	nc, err := tenantConn(tenantID)
+	natsReady := err == nil && nc.IsConnected()
 
 	status := "ok"
 	if !natsReady {

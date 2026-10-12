@@ -41,6 +41,9 @@ import (
 	"github.com/yogzblr/imas/internal/objectstore"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
+
+	"github.com/yogzblr/imas/internal/tenantconn"
+	"github.com/yogzblr/imas/internal/tenantconn/tenantconntest"
 )
 
 // cookSprout is one tenant's sprout "web-01" on its own bus, recording the
@@ -68,10 +71,10 @@ func (s *cookSprout) count() int {
 }
 
 // startTenantBus starts an embedded NATS server standing in for tenant's
-// Account, registers farmer's connection for tenant on it, and answers
+// Account, returns farmer's connection to it, and answers
 // cook for sprout web-01 there with a stub sprout enrolled with its own
 // box key (cooktest), acknowledging every sealed dispatch it opens.
-func startTenantBus(t *testing.T, tenant string) *cookSprout {
+func startTenantBus(t *testing.T, tenant string) (*cookSprout, *nats.Conn) {
 	t.Helper()
 	ns, err := server.NewServer(&server.Options{Host: "127.0.0.1", Port: -1})
 	if err != nil {
@@ -91,8 +94,6 @@ func startTenantBus(t *testing.T, tenant string) *cookSprout {
 		return nc
 	}
 	farmer, sproutConn := connect(), connect()
-	cook.RegisterFarmerNatsConn(tenant, farmer)
-	t.Cleanup(func() { cook.UnregisterFarmerNatsConn(tenant) })
 
 	s := &cookSprout{Sprout: cooktest.NewSprout(t, tenant, "web-01")}
 	s.AnswerCooks(t, sproutConn, func(env cook.RecipeEnvelope) cook.Ack {
@@ -101,7 +102,7 @@ func startTenantBus(t *testing.T, tenant string) *cookSprout {
 		s.mu.Unlock()
 		return cooktest.Acknowledge(env)
 	})
-	return s
+	return s, farmer
 }
 
 func TestRecipeUploadCooksOnSameTenantOnly(t *testing.T) {
@@ -133,7 +134,18 @@ func TestRecipeUploadCooksOnSameTenantOnly(t *testing.T) {
 		t.Cleanup(func() { pki.InvalidateTenantBoxKeys(tenant) })
 	}
 
-	sproutA, sproutB := startTenantBus(t, e.tA), startTenantBus(t, e.tB)
+	sproutA, farmerA := startTenantBus(t, e.tA)
+	sproutB, farmerB := startTenantBus(t, e.tB)
+	// Farmer's tenant registry: each tenant's own bus.
+	tenantconntest.Use(t, cook.SetFarmerConnGetter, tenantconn.GetterFunc(func(_ context.Context, tenant string) (*nats.Conn, error) {
+		switch tenant {
+		case e.tA:
+			return farmerA, nil
+		case e.tB:
+			return farmerB, nil
+		}
+		return nil, fmt.Errorf("no bus for tenant %s", tenant)
+	}))
 
 	// The platform's own web.hello, which tenant A will shadow.
 	if err := farmerStore.Put(ctx, "platform/web/hello.imas", []byte("steps:\n  hello:\n    cmd.run:\n      - name: echo platform-version\n")); err != nil {

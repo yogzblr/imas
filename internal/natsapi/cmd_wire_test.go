@@ -16,6 +16,7 @@ import (
 	"github.com/yogzblr/imas/internal/ingredients/cmd"
 	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/tenantconn/tenantconntest"
 )
 
 // decodeAsCLI decodes reply, handleCmdRun's encoded result, the way the
@@ -48,8 +49,7 @@ func TestHandleCmdRun_KeylessRefusalReachesTheCLIAsText(t *testing.T) {
 	tenant := pki.CurrentTenantID()
 	writeNKey(t, "", "accepted", "web-01", "UKEY_WEB01")
 	writeNKey(t, "", "accepted", "keyless-01", "UKEY_KEYLESS")
-	cmd.RegisterFarmerNatsConn(tenant, nc)
-	defer cmd.UnregisterFarmerNatsConn(tenant)
+	tenantconntest.Use(t, cmd.SetFarmerConnGetter, tenantconntest.Fixed(nc))
 	setupSealedEnv(t)
 
 	stub := newSealedStubSprout(t, tenant, "web-01")
@@ -128,8 +128,7 @@ func TestHandleCmdRun_SproutErrorInTheSealedReplyDecodes(t *testing.T) {
 			setupNatsAPIPKI(t)
 			tenant := pki.CurrentTenantID()
 			writeNKey(t, "", "accepted", "web-01", "UKEY_WEB01")
-			cmd.RegisterFarmerNatsConn(tenant, nc)
-			defer cmd.UnregisterFarmerNatsConn(tenant)
+			tenantconntest.Use(t, cmd.SetFarmerConnGetter, tenantconntest.Fixed(nc))
 			setupSealedEnv(t)
 
 			stub := newSealedStubSprout(t, tenant, "web-01")

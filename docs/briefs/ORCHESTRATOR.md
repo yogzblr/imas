@@ -146,7 +146,9 @@ Paste this into a Claude Code session started in the yogzblr/imas repo on main.
     CGO_ENABLED=0 go build ./... passes; helm template passes for every chart with
     its ci and uat values; scripts/status/rollup.py --check passes; the search in the
     previous paragraph is clean. Do not edit docs/BUILD-STATUS.md; add the status
-    fragment docs/status/days/YYYY-MM-DD/z-ID.md. Commit messages start with ID: .
+    fragment docs/status/days/YYYY-MM-DD/zz-ID.md (zz- sorts after the day's
+    z- fragments, which may add the items it updates). Commit messages start
+    with ID: .
 
     Open the PR with FLAG FOR SECURITY REVIEW at the very top, then the sections
     Built, Verified (each command and its result), Consumers updated (the names you

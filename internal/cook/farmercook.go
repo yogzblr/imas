@@ -819,7 +819,7 @@ func ValidateRecipeSource(name string, src []byte) error {
 }
 
 // SendCookEvent triggers a recipe cook on sproutID, over tenantID's
-// dedicated NATS connection (see RegisterFarmerNatsConn) — the sprout's own
+// NATS connection (see SetFarmerConnGetter) — the sprout's own
 // tenant, not necessarily whichever tenant happens to be "current" for the
 // process. It is SendCookEventContext with context.Background().
 func SendCookEvent(tenantID, sproutID string, recipeID RecipeName, JID string, test bool, opts ...CookOption) error {
@@ -915,9 +915,9 @@ func recordDispatch(tenantID, sproutID string, env RecipeEnvelope) {
 func sendEnvelope(tenantID, sproutID string, rEnvelope RecipeEnvelope) error {
 	JID := rEnvelope.JobID
 	log.Noticef("cooking sprout %s: %s", sproutID, JID)
-	farmerConn := farmerConnFor(tenantID)
-	if farmerConn == nil {
-		return fmt.Errorf("cook: no NATS connection registered for tenant %s", tenantID)
+	farmerConn, err := farmerBus.Conn(tenantID)
+	if err != nil {
+		return fmt.Errorf("cook: %w", err)
 	}
 	req, reqID, err := cookBoundary.request(tenantID, sproutID, rEnvelope)
 	if err != nil {

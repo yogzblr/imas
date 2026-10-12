@@ -16,9 +16,9 @@ import (
 // invoked once for each of those targets.
 func FPing(tenantID string, target pki.KeyManager, ping apitypes.PingPong) (apitypes.PingPong, error) {
 	var pong apitypes.PingPong
-	conn := farmerConnFor(tenantID)
-	if conn == nil {
-		return pong, fmt.Errorf("test: no NATS connection registered for tenant %s", tenantID)
+	conn, err := farmerBus.Conn(tenantID)
+	if err != nil {
+		return pong, fmt.Errorf("test: %w", err)
 	}
 	topic := "imas.sprouts." + target.SproutID + ".test.ping"
 	ping.Ping = true

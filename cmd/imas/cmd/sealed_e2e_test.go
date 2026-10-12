@@ -44,6 +44,7 @@ import (
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 	"github.com/yogzblr/imas/internal/rbac"
+	"github.com/yogzblr/imas/internal/tenantconn/tenantconntest"
 )
 
 const e2eTenant = "t_e2e"
@@ -214,7 +215,7 @@ func TestSealedCLIEndToEnd(t *testing.T) {
 	if err := natsapi.Subscribe(farmerNC, e2eTenant); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { natsapi.ClearNatsConn(e2eTenant) })
+	tenantconntest.Use(t, natsapi.SetConnGetter, tenantconntest.Fixed(farmerNC))
 	if err := farmerNC.Flush(); err != nil {
 		t.Fatal(err)
 	}

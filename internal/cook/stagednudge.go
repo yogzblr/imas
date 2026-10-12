@@ -17,9 +17,9 @@ const nudgeTimeout = 10 * time.Second
 // dispatch they missed while disconnected, without re-dispatching. The
 // nudge and its Ack are sealed like a dispatch (sealed.go).
 func NudgeSprout(tenantID, sproutID string) error {
-	conn := farmerConnFor(tenantID)
-	if conn == nil {
-		return fmt.Errorf("cook: no NATS connection registered for tenant %s", tenantID)
+	conn, err := farmerBus.Conn(tenantID)
+	if err != nil {
+		return fmt.Errorf("cook: %w", err)
 	}
 	req, reqID, err := nudgeBoundary.request(tenantID, sproutID, nil)
 	if err != nil {

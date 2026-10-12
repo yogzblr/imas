@@ -15,6 +15,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/tenantconn/tenantconntest"
 )
 
 // testTenantID is the tenant ID startCookTestNATS registers its connection
@@ -46,9 +47,8 @@ func startCookTestNATS(t *testing.T) (*nats.Conn, func()) {
 		t.Fatalf("connect to test NATS: %v", err)
 	}
 
-	RegisterFarmerNatsConn(testTenantID, nc)
+	tenantconntest.Use(t, SetFarmerConnGetter, tenantconntest.Fixed(nc))
 	return nc, func() {
-		UnregisterFarmerNatsConn(testTenantID)
 		nc.Close()
 		ns.Shutdown()
 	}

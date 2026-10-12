@@ -19,6 +19,7 @@ import (
 	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 	"github.com/yogzblr/imas/internal/props"
 	"github.com/yogzblr/imas/internal/rbac"
+	"github.com/yogzblr/imas/internal/tenantconn/tenantconntest"
 )
 
 // newStorageTestDB migrates and installs the farmer schema the way
@@ -84,8 +85,7 @@ func TestInstalledStorageIndexesCookJobs(t *testing.T) {
 	const tenant, sprout, jid = "t_farmer", "web-01", "22222222-2222-2222-2222-222222222222"
 	jobs.RegisterNatsConn(tenant, nc)
 	t.Cleanup(func() { cook.SetDispatchRecorder(nil) })
-	cook.RegisterFarmerNatsConn(tenant, nc)
-	t.Cleanup(func() { cook.UnregisterFarmerNatsConn(tenant) })
+	tenantconntest.Use(t, cook.SetFarmerConnGetter, tenantconntest.Fixed(nc))
 	// The dispatch is sealed only (FIX.1: a sprout with no box key is
 	// sent nothing), so the stub sprout has a box key on record and
 	// acknowledges the sealed dispatch.

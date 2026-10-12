@@ -70,8 +70,10 @@ func prepareCook(tenantID, invoker string, params json.RawMessage) (*cookPlan, e
 		nkeys[target.SproutID] = nkey
 	}
 
-	if natsConnFor(tenantID) == nil {
-		return nil, fmt.Errorf("NATS connection not available")
+	// Dial the tenant now if it is idle-closed, so a bus that is away
+	// fails the request instead of every dispatch.
+	if _, err := tenantConn(tenantID); err != nil {
+		return nil, err
 	}
 
 	sproutIDs := make([]string, len(ta.Target))
@@ -118,8 +120,12 @@ func handleCook(c apiCaller, params json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	nc, err := tenantConn(c.TenantID)
+	if err != nil {
+		return nil, err
+	}
 	jid := cook.GenerateJobID()
-	if err := awaitCookTrigger(natsConnFor(c.TenantID), c.TenantID, c.UserID, jid, plan.sproutIDs, plan.dispatch); err != nil {
+	if err := awaitCookTrigger(nc, c.TenantID, c.UserID, jid, plan.sproutIDs, plan.dispatch); err != nil {
 		return nil, err
 	}
 	plan.command.JID = jid
