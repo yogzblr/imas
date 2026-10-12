@@ -475,6 +475,7 @@ func TestFarmerPDBRendered(t *testing.T) {
 	}
 }
 
+// saasapi rolls like farmer: one new pod at a time, none removed early.
 func TestSaasapiStrategyRollingUpdate(t *testing.T) {
 	assertRollingUpdate(t, "saasapi", find(t, mustRender(t), "Deployment", "t-farmer-saasapi"))
 }
@@ -620,7 +621,9 @@ func TestValidationFailures(t *testing.T) {
 		{"bad loader user pub", "natsTrust.busLoaderUserPub", []string{"--set", "natsTrust.busLoaderUserPub=" + testAdminPubkey}},
 		{"loader user is the fence user", "must be different keys", []string{"--set", "natsTrust.busFenceUserPub=" + testFenceUserPub, "--set", "natsTrust.busLoaderUserPub=" + testFenceUserPub}},
 		{"bad seed name", "must match", []string{"--set", "natsSeeds.extraSeeds.bad-name=x.nk"}},
-		{"no farmers", "farmer.replicaCount must be at least 1", []string{"--set", "farmer.replicaCount=0"}},
+		{"no farmers", "farmer.replicaCount must be a whole number of at least 1", []string{"--set", "farmer.replicaCount=0"}},
+		{"fractional farmers", "farmer.replicaCount must be a whole number of at least 1", []string{"--set-json", "farmer.replicaCount=2.5"}},
+		{"string farmers", "farmer.replicaCount must be a whole number of at least 1", []string{"--set-string", "farmer.replicaCount=2"}},
 		{"bare number idle ttl", "farmer.tenantConnections.idleTTL must be a quoted duration", []string{"--set", "farmer.tenantConnections.idleTTL=600"}},
 		{"bare number heartbeat window", "farmer.tenantConnections.heartbeatWindow must be a quoted duration", []string{"--set", "farmer.tenantConnections.heartbeatWindow=900"}},
 		{"bare number lease ttl", "farmer.jobs.leaseTTL must be a quoted duration", []string{"--set", "farmer.jobs.leaseTTL=120"}},

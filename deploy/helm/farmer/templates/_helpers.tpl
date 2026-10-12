@@ -690,8 +690,9 @@ explanation rather than deploying something that silently can't work.
 {{- if and (not .Values.pxc.enabled) (not .Values.database.existingSecret) -}}
 {{- fail "database.existingSecret is required when pxc.enabled=false: an existing Secret with farmer's and saasapi's full DSNs (database.existingSecretKeys). The chart only generates credentials for the PXC it deploys." -}}
 {{- end -}}
-{{- if lt (int .Values.farmer.replicaCount) 1 -}}
-{{- fail "farmer.replicaCount must be at least 1" -}}
+{{- $fr := .Values.farmer.replicaCount -}}
+{{- if or (not (or (kindIs "float64" $fr) (kindIs "int64" $fr) (kindIs "int" $fr))) (ne (float64 $fr) (float64 (int $fr))) (lt (int $fr) 1) -}}
+{{- fail (printf "farmer.replicaCount must be a whole number of at least 1, got %v" $fr) -}}
 {{- end -}}
 {{- with .Values.farmer.jobs.reconcileWindow -}}
 {{- if not (kindIs "string" .) -}}
