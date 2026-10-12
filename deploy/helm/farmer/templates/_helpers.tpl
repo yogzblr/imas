@@ -690,12 +690,32 @@ explanation rather than deploying something that silently can't work.
 {{- if and (not .Values.pxc.enabled) (not .Values.database.existingSecret) -}}
 {{- fail "database.existingSecret is required when pxc.enabled=false: an existing Secret with farmer's and saasapi's full DSNs (database.existingSecretKeys). The chart only generates credentials for the PXC it deploys." -}}
 {{- end -}}
-{{- if ne (int .Values.farmer.replicaCount) 1 -}}
-{{- fail "farmer.replicaCount must be 1: FarmerPKI (NATS JWTs, the SaaS API credential's rotation state, farmer's NKey) lives on one ReadWriteOnce volume, and a second replica would mint and push from a divergent copy. See README.md, \"Why one farmer replica\"." -}}
+{{- if lt (int .Values.farmer.replicaCount) 1 -}}
+{{- fail "farmer.replicaCount must be at least 1" -}}
 {{- end -}}
 {{- with .Values.farmer.jobs.reconcileWindow -}}
 {{- if not (kindIs "string" .) -}}
 {{- fail (printf "farmer.jobs.reconcileWindow must be a quoted duration such as \"2h\", got %v" .) -}}
+{{- end -}}
+{{- end -}}
+{{- $durations := dict "farmer.jobs.leaseTTL" .Values.farmer.jobs.leaseTTL -}}
+{{- with .Values.farmer.tenantConnections -}}
+{{- $_ := set $durations "farmer.tenantConnections.idleTTL" .idleTTL -}}
+{{- $_ := set $durations "farmer.tenantConnections.heartbeatWindow" .heartbeatWindow -}}
+{{- end -}}
+{{- range $k, $v := $durations -}}
+{{- if and $v (not (kindIs "string" $v)) -}}
+{{- fail (printf "%s must be a quoted duration such as \"10m\", got %v" $k $v) -}}
+{{- end -}}
+{{- end -}}
+{{- range $k, $v := dict "farmer.logFormat" .Values.farmer.logFormat "saasapi.logFormat" .Values.saasapi.logFormat -}}
+{{- if and $v (not (has (toString $v) (list "json" "text"))) -}}
+{{- fail (printf "%s must be \"json\" or \"text\" (IMAS_LOG_FORMAT), got %v" $k $v) -}}
+{{- end -}}
+{{- end -}}
+{{- with .Values.objectStore.sproutJWTBucket -}}
+{{- if or (eq . (toString $.Values.objectStore.bucket)) (eq . (toString $.Values.objectStore.jobBucket)) -}}
+{{- fail (printf "objectStore.sproutJWTBucket %q must differ from objectStore.bucket and objectStore.jobBucket: sprout User JWTs are private, and GET /files/ serves every key in the recipe bucket" .) -}}
 {{- end -}}
 {{- end -}}
 {{- $tl := .Values.farmer.recipes.templateLimits -}}

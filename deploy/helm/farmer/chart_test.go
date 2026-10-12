@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"slices"
@@ -355,8 +356,7 @@ func TestDefaultsRender(t *testing.T) {
 	docs := mustRender(t, "-f", ciValues(t, "default-values.yaml"))
 	for _, want := range []struct{ kind, name string }{
 		{"Deployment", "t-farmer"}, {"Service", "t-farmer"}, {"ConfigMap", "t-farmer"},
-		{"ServiceAccount", "t-farmer"},
-		{"PersistentVolumeClaim", "t-farmer-data"},
+		{"ServiceAccount", "t-farmer"}, {"PodDisruptionBudget", "t-farmer"},
 		{"Deployment", "t-farmer-saasapi"}, {"Service", "t-farmer-saasapi"},
 		{"ServiceAccount", "t-farmer-saasapi"}, {"PodDisruptionBudget", "t-farmer-saasapi"},
 		{"ServiceAccount", "imas-saasapi-cred-publisher"}, {"Job", "t-farmer-saasapi-credential-publish"},
@@ -373,13 +373,221 @@ func TestDefaultsRender(t *testing.T) {
 	if has(docs, "ExternalSecret", "imas-farmer-nats-seeds") {
 		t.Error("ExternalSecrets rendered with externalSecrets.enabled=false")
 	}
-	pvc := find(t, docs, "PersistentVolumeClaim", "t-farmer-data")
-	if get(pvc, "metadata", "annotations", "helm.sh/resource-policy") != "keep" {
-		t.Error("FarmerPKI PVC is not kept on uninstall")
-	}
 	d := farmerDeploy(t, docs)
-	if get(d, "spec", "replicas") != 1 || get(d, "spec", "strategy", "type") != "Recreate" {
-		t.Errorf("farmer must be 1 replica with Recreate: %v %v", get(d, "spec", "replicas"), get(d, "spec", "strategy"))
+	if get(d, "spec", "replicas") != 2 {
+		t.Errorf("farmer replicas %v, want 2 by default", get(d, "spec", "replicas"))
+	}
+	assertRollingUpdate(t, "farmer", d)
+}
+
+// assertRollingUpdate checks d rolls one new pod at a time and keeps every
+// old one until its replacement is ready.
+func assertRollingUpdate(t *testing.T, name string, d obj) {
+	t.Helper()
+	if get(d, "spec", "strategy", "type") != "RollingUpdate" ||
+		get(d, "spec", "strategy", "rollingUpdate", "maxUnavailable") != 0 ||
+		get(d, "spec", "strategy", "rollingUpdate", "maxSurge") != 1 {
+		t.Errorf("%s strategy %v, want RollingUpdate with maxUnavailable 0, maxSurge 1", name, get(d, "spec", "strategy"))
+	}
+}
+
+// P21 slice 3: farmer is stateless, so any replica count renders.
+func TestFarmerRendersWithTwoReplicas(t *testing.T) {
+	for _, n := range []int{1, 2, 3} {
+		d := farmerDeploy(t, mustRender(t, "--set", fmt.Sprintf("farmer.replicaCount=%d", n)))
+		if get(d, "spec", "replicas") != n {
+			t.Errorf("replicaCount=%d: replicas %v", n, get(d, "spec", "replicas"))
+		}
+	}
+}
+
+// No PVC anywhere in the release, and farmer mounts no claim.
+func TestFarmerHasNoPVC(t *testing.T) {
+	docs := mustRender(t, "--set", "farmer.persistence.enabled=true")
+	for _, d := range docs {
+		if d["kind"] == "PersistentVolumeClaim" {
+			t.Errorf("PVC %v rendered", get(d, "metadata", "name"))
+		}
+	}
+	for name, v := range byName(get(farmerDeploy(t, docs), "spec", "template", "spec", "volumes")) {
+		if v["persistentVolumeClaim"] != nil {
+			t.Errorf("farmer volume %s is a PVC", name)
+		}
+	}
+}
+
+// Nothing on farmer's root filesystem is writable; the only writable
+// mounts are the tmp emptyDir (which holds farmerpki) and the TLS dir.
+func TestFarmerRootFSReadOnly(t *testing.T) {
+	docs := mustRender(t)
+	c := container(t, farmerDeploy(t, docs), "farmer")
+	if get(c, "securityContext", "readOnlyRootFilesystem") != true {
+		t.Errorf("farmer securityContext %v: want readOnlyRootFilesystem", c["securityContext"])
+	}
+	vols := byName(get(farmerDeploy(t, docs), "spec", "template", "spec", "volumes"))
+	for _, m := range c["volumeMounts"].([]any) {
+		m := m.(obj)
+		name := m["name"].(string)
+		if m["readOnly"] == true || name == "tls" {
+			continue
+		}
+		if name != "tmp" {
+			t.Errorf("farmer mounts %s (%v) writable", name, m["mountPath"])
+		}
+		if vols[name]["emptyDir"] == nil {
+			t.Errorf("writable volume %s is not an emptyDir", name)
+		}
+	}
+	if pki, _ := farmerConfig(t, docs)["farmerpki"].(string); !strings.HasPrefix(pki, "/tmp/") {
+		t.Errorf("farmerpki %q is not under the tmp emptyDir", pki)
+	}
+}
+
+// farmer's PDB keeps one pod through a drain, over farmer's pods alone,
+// and is left out for one replica (it would block every drain).
+func TestFarmerPDBRendered(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want bool
+	}{
+		{nil, true},
+		{[]string{"--set", "farmer.replicaCount=1"}, false},
+		{[]string{"--set", "farmer.pdb.enabled=false"}, false},
+	} {
+		docs := mustRender(t, tc.args...)
+		if got := has(docs, "PodDisruptionBudget", "t-farmer"); got != tc.want {
+			t.Fatalf("%v: PDB rendered = %v, want %v", tc.args, got, tc.want)
+		}
+		if !tc.want {
+			continue
+		}
+		pdb := find(t, docs, "PodDisruptionBudget", "t-farmer")
+		if get(pdb, "spec", "minAvailable") != 1 || get(pdb, "spec", "maxUnavailable") != nil {
+			t.Errorf("PDB spec %v, want minAvailable 1 only", get(pdb, "spec"))
+		}
+		sel := get(pdb, "spec", "selector", "matchLabels")
+		if !reflect.DeepEqual(sel, get(farmerDeploy(t, docs), "spec", "selector", "matchLabels")) {
+			t.Errorf("PDB selector %v is not farmer's", sel)
+		}
+		if reflect.DeepEqual(sel, get(find(t, docs, "Deployment", "t-farmer-saasapi"), "spec", "selector", "matchLabels")) {
+			t.Error("farmer PDB selector matches saasapi's pods")
+		}
+	}
+}
+
+func TestSaasapiStrategyRollingUpdate(t *testing.T) {
+	assertRollingUpdate(t, "saasapi", find(t, mustRender(t), "Deployment", "t-farmer-saasapi"))
+}
+
+// NOTES says how many farmers run and warns while the sprout JWT bucket,
+// without which enrolment fails, is unset.
+func TestFarmerNotes(t *testing.T) {
+	n := notes(t, mustRenderRelease(t, ""))
+	if !strings.HasPrefix(n, "imas core: farmer (2 replica(s), stateless)") {
+		t.Errorf("NOTES header:\n%s", n)
+	}
+	if !strings.Contains(n, "WARNING: objectStore.sproutJWTBucket is empty") {
+		t.Errorf("NOTES lacks the sprout JWT bucket warning:\n%s", n)
+	}
+	n = notes(t, mustRenderRelease(t, "", "--set", "objectStore.sproutJWTBucket=sprout-jwts", "--set", "farmer.replicaCount=3"))
+	if strings.Contains(n, "sproutJWTBucket") || !strings.HasPrefix(n, "imas core: farmer (3 replica(s), stateless)") {
+		t.Errorf("NOTES with the bucket set:\n%s", n)
+	}
+}
+
+// The data and cache volumes are gone; tmp stays, size-limited.
+func TestFarmerNoDataVolume(t *testing.T) {
+	d := farmerDeploy(t, mustRender(t))
+	vols := byName(get(d, "spec", "template", "spec", "volumes"))
+	for _, name := range []string{"data", "cache"} {
+		if _, ok := vols[name]; ok {
+			t.Errorf("farmer still has volume %s", name)
+		}
+	}
+	if get(vols["tmp"], "emptyDir", "sizeLimit") == nil {
+		t.Errorf("tmp volume %v: want a size-limited emptyDir", vols["tmp"])
+	}
+	for _, m := range container(t, d, "farmer")["volumeMounts"].([]any) {
+		if p, _ := m.(obj)["mountPath"].(string); strings.HasPrefix(p, "/var/lib/imas") || strings.HasPrefix(p, "/var/cache/imas") {
+			t.Errorf("farmer mounts %s", p)
+		}
+	}
+}
+
+// Default preferred anti-affinity over farmer's own pods; an explicit
+// affinity and topologySpreadConstraints are passed through.
+func TestFarmerSpread(t *testing.T) {
+	d := farmerDeploy(t, mustRender(t))
+	spec := get(d, "spec", "template", "spec").(obj)
+	terms := get(spec, "affinity", "podAntiAffinity", "preferredDuringSchedulingIgnoredDuringExecution").([]any)
+	if len(terms) != 1 {
+		t.Fatalf("anti-affinity terms %v", terms)
+	}
+	term := terms[0].(obj)["podAffinityTerm"].(obj)
+	if term["topologyKey"] != "kubernetes.io/hostname" ||
+		!reflect.DeepEqual(get(term, "labelSelector", "matchLabels"), get(d, "spec", "selector", "matchLabels")) {
+		t.Errorf("anti-affinity term %v: want hostname over farmer's selector", term)
+	}
+	if _, ok := spec["topologySpreadConstraints"]; ok {
+		t.Error("topologySpreadConstraints rendered by default")
+	}
+	d = farmerDeploy(t, mustRender(t,
+		"--set", "farmer.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key=pool",
+		"--set", "farmer.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].operator=Exists",
+		"--set", "farmer.topologySpreadConstraints[0].maxSkew=1",
+		"--set", "farmer.topologySpreadConstraints[0].topologyKey=topology.kubernetes.io/zone",
+		"--set", "farmer.topologySpreadConstraints[0].whenUnsatisfiable=ScheduleAnyway"))
+	spec = get(d, "spec", "template", "spec").(obj)
+	if get(spec, "affinity", "podAntiAffinity") != nil || get(spec, "affinity", "nodeAffinity") == nil {
+		t.Errorf("affinity %v: want farmer.affinity as given", spec["affinity"])
+	}
+	if c, _ := spec["topologySpreadConstraints"].([]any); len(c) != 1 {
+		t.Errorf("topologySpreadConstraints %v", spec["topologySpreadConstraints"])
+	}
+}
+
+// The env vars P21 slice 3 added: the sprout JWT bucket (owner decision 7
+// of issue #197), the tenant bus idle policy, the job lease TTL and the
+// log format.
+func TestFarmerStatelessEnv(t *testing.T) {
+	docs := mustRender(t)
+	env := envMap(container(t, farmerDeploy(t, docs), "farmer"))
+	for k, want := range map[string]string{
+		"IMAS_TENANT_CONN_IDLE_TTL":         "10m",
+		"IMAS_TENANT_CONN_HEARTBEAT_WINDOW": "15m",
+		"IMAS_LOG_FORMAT":                   "json",
+	} {
+		if e, ok := env[k]; !ok || e["value"] != want {
+			t.Errorf("%s = %v, want %q", k, e, want)
+		}
+	}
+	for _, k := range []string{"IMAS_S3_SPROUT_JWT_BUCKET", "IMAS_JOB_LEASE_TTL"} {
+		if e, ok := env[k]; ok {
+			t.Errorf("%s = %v rendered while unset", k, e)
+		}
+	}
+	if v := envValues(container(t, find(t, docs, "Deployment", "t-farmer-saasapi"), "saasapi"))["IMAS_LOG_FORMAT"]; v != "json" {
+		t.Errorf("saasapi IMAS_LOG_FORMAT = %q, want json", v)
+	}
+
+	docs = mustRender(t, "--set", "objectStore.bucket=recipes", "--set", "objectStore.jobBucket=jobs",
+		"--set", "objectStore.sproutJWTBucket=sprout-jwts", "--set", "farmer.jobs.leaseTTL=90s",
+		"--set", "farmer.tenantConnections.idleTTL=5m", "--set", "farmer.tenantConnections.heartbeatWindow=30m",
+		"--set", "farmer.logFormat=text", "--set", "saasapi.logFormat=text")
+	vals := envValues(container(t, farmerDeploy(t, docs), "farmer"))
+	for k, want := range map[string]string{
+		"IMAS_S3_SPROUT_JWT_BUCKET":         "sprout-jwts",
+		"IMAS_JOB_LEASE_TTL":                "90s",
+		"IMAS_TENANT_CONN_IDLE_TTL":         "5m",
+		"IMAS_TENANT_CONN_HEARTBEAT_WINDOW": "30m",
+		"IMAS_LOG_FORMAT":                   "text",
+	} {
+		if vals[k] != want {
+			t.Errorf("%s = %q, want %q", k, vals[k], want)
+		}
+	}
+	if v := envValues(container(t, find(t, docs, "Deployment", "t-farmer-saasapi"), "saasapi"))["IMAS_LOG_FORMAT"]; v != "text" {
+		t.Errorf("saasapi IMAS_LOG_FORMAT = %q, want text", v)
 	}
 }
 
@@ -412,7 +620,14 @@ func TestValidationFailures(t *testing.T) {
 		{"bad loader user pub", "natsTrust.busLoaderUserPub", []string{"--set", "natsTrust.busLoaderUserPub=" + testAdminPubkey}},
 		{"loader user is the fence user", "must be different keys", []string{"--set", "natsTrust.busFenceUserPub=" + testFenceUserPub, "--set", "natsTrust.busLoaderUserPub=" + testFenceUserPub}},
 		{"bad seed name", "must match", []string{"--set", "natsSeeds.extraSeeds.bad-name=x.nk"}},
-		{"two farmers", "farmer.replicaCount must be 1", []string{"--set", "farmer.replicaCount=2"}},
+		{"no farmers", "farmer.replicaCount must be at least 1", []string{"--set", "farmer.replicaCount=0"}},
+		{"bare number idle ttl", "farmer.tenantConnections.idleTTL must be a quoted duration", []string{"--set", "farmer.tenantConnections.idleTTL=600"}},
+		{"bare number heartbeat window", "farmer.tenantConnections.heartbeatWindow must be a quoted duration", []string{"--set", "farmer.tenantConnections.heartbeatWindow=900"}},
+		{"bare number lease ttl", "farmer.jobs.leaseTTL must be a quoted duration", []string{"--set", "farmer.jobs.leaseTTL=120"}},
+		{"bad farmer log format", "farmer.logFormat must be", []string{"--set", "farmer.logFormat=logfmt"}},
+		{"bad saasapi log format", "saasapi.logFormat must be", []string{"--set", "saasapi.logFormat=yaml"}},
+		{"sprout jwt bucket is recipes", "objectStore.sproutJWTBucket \"recipes\" must differ", []string{"--set", "objectStore.bucket=recipes", "--set", "objectStore.sproutJWTBucket=recipes"}},
+		{"sprout jwt bucket is jobs", "objectStore.sproutJWTBucket \"jobs\" must differ", []string{"--set", "objectStore.jobBucket=jobs", "--set", "objectStore.sproutJWTBucket=jobs"}},
 		{"bare number window", "must be a quoted duration", []string{"--set", "farmer.jobs.reconcileWindow=7200"}},
 		{"string source limit", "maxSourceBytes must be a positive whole number", []string{"--set-string", "farmer.recipes.templateLimits.maxSourceBytes=1Mi"}},
 		{"zero output limit", "maxRenderedBytes must be a positive whole number", []string{"--set", "farmer.recipes.templateLimits.maxRenderedBytes=0"}},
@@ -1058,9 +1273,9 @@ func TestFarmerConfigFile(t *testing.T) {
 		t.Errorf("users = %v with farmer.bootstrapAdmin.skip", cfg["users"])
 	}
 	for k, want := range map[string]string{
-		"farmerpki": "/var/lib/imas/farmer/pki/", "nkeyfarmerprivfile": "/var/lib/imas/farmer/pki/farmer.nkey",
-		"auditlogdir": "/var/lib/imas/farmer/audit", "gatewaytransitkeyname": "imas-gateway-jwt",
-		"rootca": "/var/run/imas/tls/tls-rootca.pem",
+		"farmerpki": "/tmp/farmer/pki/", "nkeyfarmerprivfile": "/tmp/farmer/pki/farmer.nkey",
+		"gatewaytransitkeyname": "imas-gateway-jwt",
+		"rootca":                "/var/run/imas/tls/tls-rootca.pem",
 	} {
 		if cfg[k] != want {
 			t.Errorf("%s = %v, want %s", k, cfg[k], want)
@@ -1070,6 +1285,13 @@ func TestFarmerConfigFile(t *testing.T) {
 	for _, k := range []string{"pxcdsn", "valkeyaddrs", "s3secretaccesskey"} {
 		if _, ok := cfg[k]; ok {
 			t.Errorf("config file sets %s", k)
+		}
+	}
+	// No local audit, job log or props dirs: audit is stdout, job logs
+	// are in the job bucket, and farmer keeps no state on disk.
+	for _, k := range []string{"auditlogdir", "joblogdir", "propsdir"} {
+		if _, ok := cfg[k]; ok {
+			t.Errorf("config file sets %s = %v", k, cfg[k])
 		}
 	}
 	c := container(t, farmerDeploy(t, docs), "farmer")

@@ -232,8 +232,9 @@ database:
       limits: { memory: 128Mi }
 
 # ---------------------------------------------------------------------------
-# Object storage for recipes and job logs (not bundled). farmer starts
-# without it; recipe and job requests fail until it's reachable.
+# Object storage for recipes, job logs and sprout JWTs (not bundled).
+# farmer starts without it; recipe, job and enrolment requests fail until
+# it is reachable.
 # ---------------------------------------------------------------------------
 objectStore:
   endpoint: ""
@@ -242,6 +243,10 @@ objectStore:
   # Must differ from bucket: GET /files/ serves every key in the recipe
   # bucket to any authenticated caller.
   jobBucket: ""
+  # IMAS_S3_SPROUT_JWT_BUCKET: the private bucket farmer keeps sprout User
+  # JWTs in. Must differ from bucket and jobBucket. Required for
+  # enrolment: without it farmer can't hand a sprout its JWT.
+  sproutJWTBucket: ""
   # Secret with the access key pair (IMAS_S3_ACCESS_KEY_ID/_SECRET_ACCESS_KEY).
   credentialsSecret: ""
   accessKeyIdKey: access-key-id
@@ -257,10 +262,14 @@ farmer:
     digest: ""
     pullPolicy: IfNotPresent
   imagePullSecrets: []
-  # Held at 1: FarmerPKI (NATS JWTs, the SaaS API credential's rotation
-  # state, farmer's NKey) lives on one ReadWriteOnce volume. See README.md.
-  replicaCount: 1
+  # Farmer is stateless (README.md, "Farmer is stateless"): replicas share
+  # PXC, Valkey, OpenBao and the object store, and serialise through row
+  # leases. Rolled one pod at a time (RollingUpdate, maxUnavailable 0).
+  replicaCount: 2
   logLevel: info
+  # IMAS_LOG_FORMAT: json (one object per line, for the log shipper) or
+  # text.
+  logFormat: json
   apiPort: 5405
   # The first admin of the imas CLI, bootstrapped from farmer's config
   # file (users.admin in /etc/imas/farmer), never over the bus (J.3,
@@ -301,6 +310,18 @@ farmer:
   # A quoted Go duration; null or "" emits nothing (every job recorded).
   jobs:
     reconcileWindow: "2h"
+    # IMAS_JOB_LEASE_TTL: lease TTL of the hourly jobs (job expiry, cohort
+    # refresher, account push), a quoted Go duration. Empty: farmer's
+    # default, 120s.
+    leaseTTL: ""
+  # Per-tenant bus connections (connected on first use). One is closed
+  # once unused for idleTTL and with no sprout heartbeat for
+  # heartbeatWindow; the next use dials it again. Quoted Go durations.
+  tenantConnections:
+    # IMAS_TENANT_CONN_IDLE_TTL
+    idleTTL: "10m"
+    # IMAS_TENANT_CONN_HEARTBEAT_WINDOW
+    heartbeatWindow: "15m"
   # Recipe template render limits (IMAS_RECIPE_*; internal/cook's
   # "Bounded work"). Recipes are tenant-written, untrusted input, so every
   # render is capped. All five are required: sizes and iterations are
@@ -383,17 +404,6 @@ farmer:
   extraEnv: []
   extraVolumes: []
   extraVolumeMounts: []
-  persistence:
-    # FarmerPKI and audit logs. Off uses emptyDir: every restart then
-    # mints a fresh farmer NKey and loses the SaaS API credential's
-    # rotation state. Eval only.
-    enabled: true
-    existingClaim: ""
-    size: 1Gi
-    storageClassName: ""
-    accessModes: [ReadWriteOnce]
-    # helm.sh/resource-policy: keep, so an uninstall can't delete FarmerPKI.
-    keep: true
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { memory: 512Mi }
@@ -428,7 +438,10 @@ farmer:
   podLabels: {}
   nodeSelector: {}
   tolerations: []
+  # Empty: preferred pod anti-affinity on kubernetes.io/hostname, so the
+  # replicas land on different nodes where they can.
   affinity: {}
+  topologySpreadConstraints: []
   priorityClassName: ""
   service:
     type: ClusterIP
@@ -437,6 +450,10 @@ farmer:
     create: true
     name: ""
     annotations: {}
+  # Rendered only with replicaCount > 1.
+  pdb:
+    enabled: true
+    minAvailable: 1
 
 # ---------------------------------------------------------------------------
 # saasapi (cmd/saasapi)
@@ -452,6 +469,8 @@ saasapi:
   command: []
   args: []
   replicaCount: 2
+  # IMAS_LOG_FORMAT: json or text.
+  logFormat: json
   port: 8081
   # Layer-2 auth: the Keycloak realm whose end-user JWTs the BFF forwards.
   # All three are required (saasapi refuses to start without them).

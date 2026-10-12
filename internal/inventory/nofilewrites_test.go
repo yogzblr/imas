@@ -17,10 +17,10 @@ import (
 )
 
 // enforceNoFileWrites turns the guard from report-only into a failing
-// test. P21 slice 3 starts report-only (PR 1) while later PRs move each
-// write to a shared store, and switches to enforcing in its last PR, once
-// the only calls left are allow-listed temp-dir uses.
-const enforceNoFileWrites = false
+// test. P21 slice 3 started report-only (PR 1) while later PRs moved each
+// write to a shared store, and switched to enforcing in its last PR (PR
+// 9), once the only calls left were the allow-listed ones below.
+const enforceNoFileWrites = true
 
 // moduleRoot is the repository root relative to this package's directory.
 const moduleRoot = "../.."
@@ -46,14 +46,62 @@ var fileWriteCalls = map[string][]string{
 	"io/ioutil": {"WriteFile", "TempFile"},
 }
 
-// allowedFileWrites lists the calls that only touch the temp dir, as
+// allowedFileWrites lists the calls that may stay, as
 // "path:function:call#n" (path from the repository root, function the
 // enclosing func or Type.Method, call as pkg.Name, n counting that call's
 // uses in the function from 1 in source order). n gives each call its own
-// entry, so allowing one temp-dir write doesn't also allow a second write
-// of the same kind in that function. Line numbers are left out so
-// unrelated edits don't churn the list. Empty while report-only.
-var allowedFileWrites = []string{}
+// entry, so allowing one write doesn't also allow a second write of the
+// same kind in that function. Line numbers are left out so unrelated
+// edits don't churn the list.
+//
+// A call is allowed only if, in farmer and saasapi, it writes under the
+// pod's temp dir or another emptyDir, or if farmer and saasapi never run
+// it. A new write to anything that must outlive the pod goes to PXC,
+// Valkey, OpenBao or the object store instead, not onto this list.
+var allowedFileWrites = []string{
+	// farmerpki: the farmer chart points it into the tmp emptyDir
+	// (deploy/helm/farmer, farmer-configmap.yaml). What farmer writes there
+	// (the JWTs it signs for its own connections, cached Account JWTs) is
+	// per replica and made again at start; Account and sprout User JWTs'
+	// source of truth is Transit, PXC and the sprout JWT bucket.
+	"internal/pki/pki.go:SetupPKIFarmer:os.MkdirAll#1",
+	"internal/pki/jwtauth.go:ensurePlatformAuthLocked:os.MkdirAll#1",
+	"internal/pki/jwtauth.go:ensurePlatformAuthLocked:os.MkdirAll#2",
+	"internal/pki/jwtauth.go:ensurePlatformAuthLocked:os.MkdirAll#3",
+	"internal/pki/jwtusers.go:mintOrReuseUserJWT:os.MkdirAll#1",
+	"internal/pki/tenant.go:ensureTenantAccountMaterial:os.MkdirAll#1",
+	"internal/pki/tenant.go:ensureTenantAccountMaterial:os.MkdirAll#2",
+	"internal/pki/tenant.go:signLockedOutTenantJWT:os.MkdirAll#1",
+	// The atomic and write-once helpers every write under farmerpki (and
+	// the sprout's PKI dir) goes through: the temp file is made next to
+	// the target, so in farmer it is in the tmp emptyDir too.
+	"internal/pki/enrollclient.go:writeFileAtomic:os.MkdirAll#1",
+	"internal/pki/enrollclient.go:writeFileAtomic:os.CreateTemp#1",
+	"internal/pki/enrollclient.go:writeFileOnce:os.MkdirAll#1",
+	"internal/pki/enrollclient.go:writeFileOnce:os.CreateTemp#1",
+	// farmer's NKey, at nkeyfarmer*file under farmerpki (tmp emptyDir).
+	// Per replica until it is read from a mounted Secret
+	// (IMAS_FARMER_NKEY_SEED_FILE,
+	// docs/briefs/P21-slice3-farmer-saasapi-state.md §5); the sprout's own NKey
+	// otherwise.
+	"internal/certs/nkey.go:GenNKey:os.WriteFile#1",
+	"internal/certs/nkey.go:GenNKey:os.WriteFile#2",
+	// farmer's API certificate from OpenBao PKI, into the TLS dir: a
+	// memory emptyDir (tls.mode=openbao), issued again at every start.
+	"internal/certs/tls.go:writeFile:os.OpenFile#1",
+	// The sprout's PKI dir: sprout only.
+	"internal/pki/pki.go:SetupPKISprout:os.MkdirAll#1",
+	// The imas CLI's local job store: CLI only.
+	"internal/jobs/clistore.go:NewCLIStore:os.MkdirAll#1",
+	"internal/jobs/clistore.go:CLIStore.RecordJobStart:os.MkdirAll#1",
+	"internal/jobs/clistore.go:CLIStore.RecordJobStart:os.WriteFile#1",
+	"internal/jobs/clistore.go:CLIStore.RecordJobStart:os.Create#1",
+	"internal/jobs/clistore.go:CLIStore.AppendStep:os.MkdirAll#1",
+	"internal/jobs/clistore.go:CLIStore.AppendStep:os.OpenFile#1",
+	// Test fixtures (package pkitest), writing into the test's own dirs.
+	"internal/pki/pkitest/pkitest.go:Farmer:os.WriteFile#1",
+	"internal/pki/pkitest/pkitest.go:Transit.WriteTrust:os.WriteFile#1",
+}
 
 // fileWrite is one call found in the scanned source.
 type fileWrite struct {
@@ -61,10 +109,10 @@ type fileWrite struct {
 	key string // path:function:call#n, as allowedFileWrites spells it
 }
 
-// TestNoFileWrittenOutsideTmp reads the scanned trees' source and lists
-// every call that writes a file and isn't on the allow-list. Report-only
-// until enforceNoFileWrites is set; an allow-list entry that no longer
-// matches anything is reported the same way.
+// TestNoFileWrittenOutsideTmp reads the scanned trees' source and fails
+// on every call that writes a file and isn't on the allow-list (only
+// reports it while enforceNoFileWrites is false); an allow-list entry that
+// no longer matches anything is reported the same way.
 func TestNoFileWrittenOutsideTmp(t *testing.T) {
 	writes := scanFileWrites(t, moduleRoot, scannedDirs)
 
