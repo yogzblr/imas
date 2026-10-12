@@ -1,12 +1,24 @@
 package pki
 
 import (
+	"context"
+	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	jwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
+
+	"github.com/glebarez/sqlite"
+
+	"github.com/yogzblr/imas/internal/lease"
 )
 
 // TestSaaSAPIUserPermissions_ExactAllowLists pins the SaaS API User's
@@ -73,52 +85,19 @@ func TestEnsureSaaSAPICredential_MintsScopedSYSUserAndIsIdempotent(t *testing.T)
 	if !reflect.DeepEqual(uc.AllowedConnectionTypes, saasAPIUserConnectionTypes()) {
 		t.Fatalf("connection types = %v", uc.AllowedConnectionTypes)
 	}
-	if onDisk := mustReadFile(t, SaaSAPIUserJWTPath()); onDisk != userJWT {
-		t.Fatal("expected the minted JWT to be persisted to SaaSAPIUserJWTPath")
-	}
 
 	again, seedAgain, err := EnsureSaaSAPICredential()
 	if err != nil {
 		t.Fatalf("second EnsureSaaSAPICredential: %v", err)
 	}
-	if again != userJWT || string(seedAgain) != string(seed) {
-		t.Fatal("expected a second call to reuse the same JWT and seed")
+	if string(seedAgain) != string(seed) {
+		t.Fatal("expected a second call to reuse the same seed")
 	}
-}
-
-// TestEnsureSaaSAPICredential_RemintsOnPermissionDrift covers a JWT left on
-// disk from an older build with a different (here: wider) permission set
-// for the same key: it must be replaced, not reused just because the
-// subject still matches.
-func TestEnsureSaaSAPICredential_RemintsOnPermissionDrift(t *testing.T) {
-	setupTestPKI(t)
-	if _, _, err := EnsureSaaSAPICredential(); err != nil {
-		t.Fatalf("EnsureSaaSAPICredential: %v", err)
+	if uc, err := jwt.DecodeUserClaims(again); err != nil || !saasAPIUserJWTIsCurrent(uc, pub, mat.sysAccountPub) {
+		t.Fatalf("expected a second call to mint an equivalent JWT: %v", err)
 	}
-	mat, _ := ensureNatsAuth()
-	stale, _ := jwt.DecodeUserClaims(mustReadFile(t, SaaSAPIUserJWTPath()))
-	stale.Permissions = jwt.Permissions{
-		Pub: jwt.Permission{Allow: jwt.StringList{">"}},
-		Sub: jwt.Permission{Allow: jwt.StringList{">"}},
-	}
-	staleJWT, err := stale.Encode(mat.sysAccountKP)
-	if err != nil {
-		t.Fatalf("encoding stale JWT: %v", err)
-	}
-	if err := os.WriteFile(SaaSAPIUserJWTPath(), []byte(staleJWT), 0o600); err != nil {
-		t.Fatalf("writing stale JWT: %v", err)
-	}
-
-	fresh, _, err := EnsureSaaSAPICredential()
-	if err != nil {
-		t.Fatalf("EnsureSaaSAPICredential: %v", err)
-	}
-	if fresh == staleJWT {
-		t.Fatal("expected the over-broad JWT on disk to be re-minted")
-	}
-	uc, _ := jwt.DecodeUserClaims(fresh)
-	if !reflect.DeepEqual(uc.Permissions, saasAPIUserPermissions()) {
-		t.Fatalf("re-minted permissions = %+v", uc.Permissions)
+	if entries, err := os.ReadDir(filepath.Join(natsAuthDir(), "users")); err == nil && len(entries) > 0 {
+		t.Fatalf("expected no SaaS API User JWT file, found %d entries under users/", len(entries))
 	}
 }
 
@@ -155,5 +134,279 @@ func TestEnsureSaaSAPICredential_RejectsNonUserSeed(t *testing.T) {
 	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED", string(seed))
 	if _, _, err := EnsureSaaSAPICredential(); err == nil {
 		t.Fatal("expected an Account seed to be rejected as the SaaS API's User key")
+	}
+}
+
+// testSaaSAPICredentialState is the saas database farmer's
+// EnsureSaaSAPICredential reads the rotation state from in this package's
+// tests: sqlite has no saas schema to qualify the table with. Nil means
+// no row, as before saasapi records its first credential.
+var testSaaSAPICredentialState atomic.Pointer[SaaSAPICredentialRecorder]
+
+func init() {
+	readSaaSAPICredentialState = func(ctx context.Context) (*SaaSAPICredentialState, error) {
+		if r := testSaaSAPICredentialState.Load(); r != nil {
+			return r.State(ctx)
+		}
+		return nil, nil
+	}
+}
+
+// newSaaSTestDB opens a sqlite database holding the
+// saasapi_credential_state table, standing in for saasapi's saas schema.
+// One connection: sqlite serialises writers anyway.
+func newSaaSTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	gdb, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "saas.db")),
+		&gorm.Config{Logger: gormlogger.Default.LogMode(gormlogger.Silent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := gdb.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	t.Cleanup(func() { sqlDB.Close() })
+	if err := gdb.AutoMigrate(SaaSAPICredentialStateModels()...); err != nil {
+		t.Fatal(err)
+	}
+	return gdb
+}
+
+// useTestSaaSAPICredentialState installs a fresh saas database as the
+// one farmer reads the rotation state from, and returns a recorder on it.
+func useTestSaaSAPICredentialState(t *testing.T) *SaaSAPICredentialRecorder {
+	t.Helper()
+	rec := NewSaaSAPICredentialRecorder(newSaaSTestDB(t))
+	testSaaSAPICredentialState.Store(rec)
+	t.Cleanup(func() { testSaaSAPICredentialState.Store(nil) })
+	return rec
+}
+
+func recordSaaSAPIKey(t *testing.T, rec *SaaSAPICredentialRecorder, pub string) *SaaSAPICredentialState {
+	t.Helper()
+	st, _, err := rec.Record(context.Background(), pub)
+	if err != nil {
+		t.Fatalf("Record(%s): %v", pub, err)
+	}
+	return st
+}
+
+func newUserPub(t *testing.T) string {
+	t.Helper()
+	kp, err := nkeys.CreateUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _ := kp.PublicKey()
+	return pub
+}
+
+// replicaRecorder is a second saasapi replica's recorder on the same
+// database: its own lease owner and clock.
+func replicaRecorder(saasDB *gorm.DB, name string, now func() time.Time) *SaaSAPICredentialRecorder {
+	r := NewSaaSAPICredentialRecorder(saasDB)
+	r.owner = name
+	r.now = now
+	r.leases = lease.New(saasDB, now)
+	return r
+}
+
+func TestSaaSAPICredentialRecorder_FirstRecordAndNoOp(t *testing.T) {
+	rec := NewSaaSAPICredentialRecorder(newSaaSTestDB(t))
+	ctx := context.Background()
+	if st, err := rec.State(ctx); err != nil || st != nil {
+		t.Fatalf("State before any record = %+v, %v; want nil", st, err)
+	}
+	pub := newUserPub(t)
+	st, rotated, err := rec.Record(ctx, pub)
+	if err != nil || !rotated || st.CurrentPub != pub || st.PrevPub != "" || st.Version != 1 {
+		t.Fatalf("first Record = %+v, %v, %v", st, rotated, err)
+	}
+	st, rotated, err = rec.Record(ctx, pub)
+	if err != nil || rotated || st.Version != 1 {
+		t.Fatalf("Record of the current key = %+v, %v, %v; want a no-op", st, rotated, err)
+	}
+	if _, _, err := rec.Record(ctx, "not-a-key"); err == nil {
+		t.Fatal("expected an invalid key to be refused")
+	}
+	acct, _ := nkeys.CreateAccount()
+	acctPub, _ := acct.PublicKey()
+	if _, _, err := rec.Record(ctx, acctPub); err == nil {
+		t.Fatal("expected an Account key to be refused")
+	}
+}
+
+func TestSaaSAPICredentialRecorder_RotatesAndRefusesRotatingBack(t *testing.T) {
+	rec := NewSaaSAPICredentialRecorder(newSaaSTestDB(t))
+	ctx := context.Background()
+	oldPub, newPub := newUserPub(t), newUserPub(t)
+	recordSaaSAPIKey(t, rec, oldPub)
+	st, rotated, err := rec.Record(ctx, newPub)
+	if err != nil || !rotated || st.CurrentPub != newPub || st.PrevPub != oldPub || st.Version != 2 {
+		t.Fatalf("rotation = %+v, %v, %v", st, rotated, err)
+	}
+	if got, _ := rec.State(ctx); *got != *st {
+		t.Fatalf("stored state %+v, returned %+v", got, st)
+	}
+	// A replica still on the old seed must not undo the rotation.
+	if _, _, err := rec.Record(ctx, oldPub); !errors.Is(err, ErrSaaSAPICredentialRotatedOut) {
+		t.Fatalf("recording the rotated-out key: err = %v, want ErrSaaSAPICredentialRotatedOut", err)
+	}
+	if got, _ := rec.State(ctx); got.CurrentPub != newPub || got.Version != 2 {
+		t.Fatalf("state changed by a refused record: %+v", got)
+	}
+	// The lease is released after a rotation.
+	var row saasAPICredentialStateRow
+	if err := rec.db.Take(&row).Error; err != nil || row.LeaseOwner != nil || row.LeaseUntil != nil {
+		t.Fatalf("lease left held: %+v, %v", row, err)
+	}
+}
+
+// TestSaasapiCredentialRotationConcurrent is the brief's test 11: two
+// saasapi replicas rotate; the version check lets exactly one win,
+// prev_pub is set, and farmer's SYS Account revocation list includes it.
+func TestSaasapiCredentialRotationConcurrent(t *testing.T) {
+	setupTestPKI(t)
+	clearExternalSeedEnv(t)
+	rec := useTestSaaSAPICredentialState(t)
+	saasDB := rec.db
+	ctx := context.Background()
+	oldPub, _ := useExternalSaaSAPISeed(t)
+	recordSaaSAPIKey(t, rec, oldPub)
+
+	t.Run("same new key at once: one rotation", func(t *testing.T) {
+		newPub := newUserPub(t)
+		const n = 8
+		var wg sync.WaitGroup
+		var rotations, busy atomic.Int32
+		errs := make(chan error, n)
+		for i := 0; i < n; i++ {
+			r := replicaRecorder(saasDB, "replica-"+string(rune('a'+i)), time.Now)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				// A replica that loses the lease retries, as saasapi's
+				// boot would, until the key is current.
+				for {
+					_, rotated, err := r.Record(ctx, newPub)
+					if errors.Is(err, ErrSaaSAPICredentialBusy) {
+						busy.Add(1)
+						time.Sleep(time.Millisecond)
+						continue
+					}
+					if err != nil {
+						errs <- err
+					} else if rotated {
+						rotations.Add(1)
+					}
+					return
+				}
+			}()
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			t.Fatal(err)
+		}
+		if rotations.Load() != 1 {
+			t.Fatalf("%d replicas rotated, want exactly 1", rotations.Load())
+		}
+		st, err := rec.State(ctx)
+		if err != nil || st.CurrentPub != newPub || st.PrevPub != oldPub || st.Version != 2 {
+			t.Fatalf("state after concurrent rotation = %+v, %v", st, err)
+		}
+		oldPub = newPub
+	})
+
+	t.Run("lease lapses mid-rotation: the version check decides", func(t *testing.T) {
+		clock := &testClock{t: time.Now()}
+		keyA, keyB := newUserPub(t), newUserPub(t)
+		a := replicaRecorder(saasDB, "replica-a", clock.Now)
+		b := replicaRecorder(saasDB, "replica-b", clock.Now)
+		var bErr error
+		var bRotated bool
+		// A takes the lease and re-reads, then stalls past its TTL; B takes
+		// the lapsed lease and rotates first.
+		a.beforeUpdate = func() {
+			clock.Advance(saasAPICredentialLeaseTTL + time.Second)
+			_, bRotated, bErr = b.Record(ctx, keyB)
+		}
+		_, aRotated, aErr := a.Record(ctx, keyA)
+		if bErr != nil || !bRotated {
+			t.Fatalf("replica B: rotated=%v err=%v, want its rotation to win", bRotated, bErr)
+		}
+		if !errors.Is(aErr, ErrSaaSAPICredentialBusy) || aRotated {
+			t.Fatalf("replica A: rotated=%v err=%v, want ErrSaaSAPICredentialBusy", aRotated, aErr)
+		}
+		st, err := rec.State(ctx)
+		if err != nil || st.CurrentPub != keyB || st.PrevPub != oldPub || st.Version != 3 {
+			t.Fatalf("state = %+v, %v; want B's rotation from %s at version 3", st, err, oldPub)
+		}
+	})
+
+	// Farmer: its seed is the key saasapi rotates to next; the
+	// revocation list it builds includes prev_pub.
+	newPub, _ := useExternalSaaSAPISeed(t)
+	recordSaaSAPIKey(t, rec, newPub)
+	st, err := rec.State(ctx)
+	if err != nil || st.PrevPub == "" || st.CurrentPub != newPub {
+		t.Fatalf("state = %+v", st)
+	}
+	// No bus in this test: the push fails, after the SYS Account JWT is
+	// re-signed and persisted.
+	userJWT, _, _ := EnsureSaaSAPICredential()
+	if uc, err := jwt.DecodeUserClaims(userJWT); err != nil || uc.Subject != newPub {
+		t.Fatalf("minted JWT for the wrong key: %v", err)
+	}
+	sysClaims, err := jwt.DecodeAccountClaims(mustReadFile(t, sysAccountJWTPath()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := sysClaims.Revocations[st.PrevPub]; !ok {
+		t.Fatalf("SYS Account revocations %v do not include prev_pub %s", sysClaims.Revocations, st.PrevPub)
+	}
+	if _, ok := sysClaims.Revocations[newPub]; ok {
+		t.Fatal("the current key is revoked")
+	}
+}
+
+// TestEnsureSaaSAPICredential_NoStateNoRevocation: before saasapi records
+// any credential, farmer revokes nothing.
+func TestEnsureSaaSAPICredential_NoStateNoRevocation(t *testing.T) {
+	setupTestPKI(t)
+	clearExternalSeedEnv(t)
+	useTestSaaSAPICredentialState(t)
+	useExternalSaaSAPISeed(t)
+	if _, _, err := EnsureSaaSAPICredential(); err != nil {
+		t.Fatal(err)
+	}
+	sysClaims, err := jwt.DecodeAccountClaims(mustReadFile(t, sysAccountJWTPath()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sysClaims.Revocations) != 0 {
+		t.Fatalf("revocations = %v, want none", sysClaims.Revocations)
+	}
+}
+
+// TestEnsureSaaSAPICredential_StateReadErrorStillMints: a failed state
+// read is logged; the credential is still minted.
+func TestEnsureSaaSAPICredential_StateReadErrorStillMints(t *testing.T) {
+	setupTestPKI(t)
+	clearExternalSeedEnv(t)
+	orig := readSaaSAPICredentialState
+	readSaaSAPICredentialState = func(context.Context) (*SaaSAPICredentialState, error) {
+		return nil, errors.New("boom")
+	}
+	t.Cleanup(func() { readSaaSAPICredentialState = orig })
+	pub, _ := useExternalSaaSAPISeed(t)
+	userJWT, _, err := EnsureSaaSAPICredential()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uc, err := jwt.DecodeUserClaims(userJWT); err != nil || uc.Subject != pub {
+		t.Fatalf("minted JWT: %v", err)
 	}
 }

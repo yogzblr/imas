@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	jwt "github.com/nats-io/jwt/v2"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 
@@ -346,16 +347,19 @@ func TestSaaSAPICredential_SproutActionScopedOnLiveBus(t *testing.T) {
 
 // TestSaaSAPICredential_RotationRevokesPreviousKeyOnLiveBus proves that
 // rotating the SaaS API's seed (a new IMAS_NATS_SAASAPI_USER_SEED from
-// OpenBao) actually cuts off the old credential at the bus, via a
-// revocation pushed on the SYS Account JWT — not just that a new JWT gets
-// written locally.
+// OpenBao, which saasapi records in saas.saasapi_credential_state)
+// actually cuts off the old credential at the bus, via a revocation
+// pushed on the SYS Account JWT — not just that a new JWT gets minted.
 func TestSaaSAPICredential_RotationRevokesPreviousKeyOnLiveBus(t *testing.T) {
 	setupTestPKI(t)
 	defer startTestBus(t)()
+	rec := useTestSaaSAPICredentialState(t)
 
 	oldKP, _ := nkeys.CreateUser()
 	oldSeed, _ := oldKP.Seed()
+	oldPub, _ := oldKP.PublicKey()
 	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED", string(oldSeed))
+	recordSaaSAPIKey(t, rec, oldPub)
 	oldJWT, _, err := EnsureSaaSAPICredential()
 	if err != nil {
 		t.Fatalf("EnsureSaaSAPICredential (old key): %v", err)
@@ -368,7 +372,9 @@ func TestSaaSAPICredential_RotationRevokesPreviousKeyOnLiveBus(t *testing.T) {
 
 	newKP, _ := nkeys.CreateUser()
 	newSeed, _ := newKP.Seed()
+	newPub, _ := newKP.PublicKey()
 	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED", string(newSeed))
+	recordSaaSAPIKey(t, rec, newPub)
 	newJWT, _, err := EnsureSaaSAPICredential()
 	if err != nil {
 		t.Fatalf("EnsureSaaSAPICredential (rotated key): %v", err)
@@ -394,13 +400,17 @@ func TestSaaSAPICredential_RotationRevokesPreviousKeyOnLiveBus(t *testing.T) {
 	}
 	sys.Close()
 
-	// A later boot with the same (new) key is a no-op mint but still
-	// re-pushes the SYS Account JWT, since it carries a revocation.
+	// A later boot with the same (new) key mints an equivalent JWT and
+	// still re-pushes the SYS Account JWT, since it carries a revocation.
 	again, _, err := EnsureSaaSAPICredential()
 	if err != nil {
 		t.Fatalf("EnsureSaaSAPICredential (idempotent re-run): %v", err)
 	}
-	if again != newJWT {
-		t.Fatal("expected the re-run to reuse the rotated-in JWT")
+	if uc, err := jwt.DecodeUserClaims(again); err != nil || uc.Subject != newPub {
+		t.Fatalf("expected the re-run to mint for the rotated-in key: %v", err)
+	}
+	if nc, err := dialWithCreds(t, oldJWT, oldSeed); err == nil {
+		nc.Close()
+		t.Fatal("expected the rotated-out credential to stay rejected")
 	}
 }
