@@ -667,8 +667,10 @@ paths:
         restricted function map and render limits against empty placeholder
         props, YAML) and the tenant's count and total-size caps are
         checked; no refusal echoes the body. The write itself is a
-        compare-and-swap on the object read, so a concurrent writer makes
-        this 412 rather than being overwritten. Audited (never the content);
+        compare-and-swap on the object read, so a concurrent writer is never
+        overwritten: saasapi re-reads and retries up to 3 times, answering
+        412 if the precondition no longer holds and 409
+        `recipe_write_conflict` if it keeps losing. Audited (never the content);
         if the attempt can't be audited nothing is written (503
         `audit_unavailable`).
       parameters:
@@ -712,7 +714,7 @@ paths:
         "403": { $ref: "#/components/responses/RecipeForbidden" }
         "404": { $ref: "#/components/responses/TenantNotFound" }
         "409":
-          description: "`recipe_quota_exceeded` (`details.quota`: `count` or `total_bytes`; `details.limit`) or `tenant_not_active`."
+          description: "`recipe_quota_exceeded` (`details.quota`: `count` or `total_bytes`; `details.limit`), `tenant_not_active`, or `recipe_write_conflict` (concurrent writes kept landing first: the write was re-read and retried 3 times and lost each time; get the recipe again and resend)."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1014,7 +1016,8 @@ components:
       description: |
         `precondition_failed`: the recipe exists (If-None-Match: *), doesn't
         exist, or has another sha256 than If-Match names, including when a
-        concurrent write landed first. `details.current_sha256` when known.
+        concurrent write landed first and the re-read recipe no longer
+        matches. `details.current_sha256` when known.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }

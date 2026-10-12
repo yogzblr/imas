@@ -49,10 +49,10 @@ func (d *dispatchRecorder) all() []dispatchCall {
 // that succeed. verify is installed as-is when non-nil.
 func stubSproutActionDispatch(t *testing.T, verify func(string, string) error) *dispatchRecorder {
 	t.Helper()
-	origV, origR, origC, origT := verifySproutInTenant, dispatchCmdRun, dispatchCook, triggerCook
+	origV, origR, origC := verifySproutInTenant, dispatchCmdRun, dispatchCook
 	origS, origB := dispatchSelfUpdate, requireSproutBoxKey
 	t.Cleanup(func() {
-		verifySproutInTenant, dispatchCmdRun, dispatchCook, triggerCook = origV, origR, origC, origT
+		verifySproutInTenant, dispatchCmdRun, dispatchCook = origV, origR, origC
 		dispatchSelfUpdate, requireSproutBoxKey = origS, origB
 	})
 	requireSproutBoxKey = func(string, string, string) error { return nil }
@@ -75,7 +75,6 @@ func stubSproutActionDispatch(t *testing.T, verify func(string, string) error) *
 		rec.record(tenantID, params)
 		return apitypes.CmdCook{JID: "jid-1"}, nil
 	}
-	triggerCook = func(string, string) error { return nil }
 	dispatchSelfUpdate = func(tenantID, _, version string) (string, error) {
 		rec.record(tenantID, mustJSON(t, controlplane.SelfUpdateParams{Version: version}))
 		return "jid-su", nil

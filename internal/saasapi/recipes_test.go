@@ -572,7 +572,9 @@ func TestRecipeConditionalWrite(t *testing.T) {
 	wantStatus(t, w, http.StatusPreconditionFailed, "precondition_failed")
 
 	// A writer that lands between saasapi's read and its write (another
-	// replica, say) wins, and this request is 412, not a lost update.
+	// replica, say) wins, and this request is 412, not a lost update: the
+	// write fails its compare-and-swap, and the re-read finds the
+	// caller's If-Match no longer holds.
 	key := "tenants/" + e.tA + "/recipes/app.imas"
 	cur, _ := e.srv.Object(key)
 	racer := recipeBody("racer")
@@ -588,7 +590,106 @@ func TestRecipeConditionalWrite(t *testing.T) {
 		t.Fatalf("stored %q, want the concurrent writer's", got)
 	}
 	recs := e.audit.records()
-	if last := recs[len(recs)-1]; last.Outcome != recipeOutcomeFailed || last.Code != "precondition_failed" {
+	if cas := recs[len(recs)-2]; cas.Outcome != recipeOutcomeFailed || cas.Code != "precondition_failed" {
+		t.Errorf("audit record of the lost write %+v", cas)
+	}
+	if last := recs[len(recs)-1]; last.Outcome != recipeOutcomeRejected || last.Code != "precondition_failed" {
+		t.Errorf("last audit record %+v", last)
+	}
+}
+
+// TestRecipePutConcurrentWriters: eight writers replace one recipe at once
+// with If-Match: *, with no lock anywhere. Every write that succeeds was
+// conditioned on the version it read, so the successful writes form one
+// chain from the first version to the stored one: no update is lost.
+// Writers that keep losing the compare-and-swap get 409 after the retries.
+func TestRecipePutConcurrentWriters(t *testing.T) {
+	e := newRecipeEnv(t, nil)
+	v0 := recipeBody("v0")
+	wantStatus(t, e.put(e.tA, "app", v0, ""), http.StatusCreated, "")
+	tok := e.token(e.tA, recipeWriteRole)
+
+	const writers = 8
+	codes := make([]int, writers)
+	var wg sync.WaitGroup
+	for i := range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w := e.do(http.MethodPut, e.path(e.tA, "app"), tok, recipeBody(fmt.Sprintf("w%d", i)), map[string]string{"If-Match": "*"})
+			codes[i] = w.Code
+			if w.Code != http.StatusOK {
+				wantStatus(t, w, http.StatusConflict, "recipe_write_conflict")
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Successful writes, each keyed by the version it replaced.
+	next := map[string]string{}
+	wins := 0
+	for _, r := range e.audit.records() {
+		if r.Name != "app" || r.Outcome != recipeOutcomeReplaced {
+			continue
+		}
+		if prev, dup := next[r.SHA256Before]; dup {
+			t.Fatalf("two writes replaced version %s (%s and %s): an update was lost", r.SHA256Before, prev, r.SHA256After)
+		}
+		next[r.SHA256Before] = r.SHA256After
+		wins++
+	}
+	ok := 0
+	for _, c := range codes {
+		if c == http.StatusOK {
+			ok++
+		}
+	}
+	if wins != ok || wins == 0 {
+		t.Fatalf("%d replaced records, %d 200 responses (codes %v)", wins, ok, codes)
+	}
+	// Follow the chain from v0: it covers every successful write and
+	// ends at the stored recipe.
+	sha := sha256Hex([]byte(v0))
+	for range wins {
+		n, found := next[sha]
+		if !found {
+			t.Fatalf("the chain of writes breaks at %s", sha)
+		}
+		sha = n
+	}
+	stored, _ := e.srv.Object("tenants/" + e.tA + "/recipes/app.imas")
+	if got := sha256Hex([]byte(stored)); got != sha {
+		t.Fatalf("stored recipe %s, want the last write of the chain %s", got, sha)
+	}
+}
+
+// TestRecipePutConflictAfterRetries: a writer that loses the
+// compare-and-swap on every attempt (another writer always lands first)
+// re-reads and retries recipeWriteRetries times, then gets 409; the
+// stored recipe is the other writer's.
+func TestRecipePutConflictAfterRetries(t *testing.T) {
+	e := newRecipeEnv(t, nil)
+	wantStatus(t, e.put(e.tA, "app", recipeBody("v0"), ""), http.StatusCreated, "")
+	key := "tenants/" + e.tA + "/recipes/app.imas"
+	puts := 0
+	e.srv.BeforePut(func(k string) {
+		if k == key {
+			puts++
+			e.srv.Set(k, recipeBody(fmt.Sprintf("racer%d", puts)))
+		}
+	})
+	t.Cleanup(func() { e.srv.BeforePut(nil) })
+
+	w := e.do(http.MethodPut, e.path(e.tA, "app"), e.token(e.tA, recipeWriteRole), recipeBody("loser"), map[string]string{"If-Match": "*"})
+	wantStatus(t, w, http.StatusConflict, "recipe_write_conflict")
+	if puts != recipeWriteRetries+1 {
+		t.Fatalf("%d write attempts, want %d", puts, recipeWriteRetries+1)
+	}
+	if got, _ := e.srv.Object(key); got != recipeBody(fmt.Sprintf("racer%d", puts)) {
+		t.Fatalf("stored %q, want the last concurrent writer's", got)
+	}
+	recs := e.audit.records()
+	if last := recs[len(recs)-1]; last.Outcome != recipeOutcomeFailed || last.Code != "recipe_write_conflict" {
 		t.Errorf("last audit record %+v", last)
 	}
 }

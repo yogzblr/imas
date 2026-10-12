@@ -43,7 +43,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"text/template"
 	"time"
 	"unicode/utf8"
@@ -591,19 +590,18 @@ func atoiOr0(s string) int {
 	return n
 }
 
-// recipeTenantLocks serialises PUT and DELETE per tenant within this
-// process, so the quota check and the write of one request don't
-// interleave with another's. Across replicas the conditional write still
-// prevents a lost update; the caps can be exceeded by at most one recipe
-// per replica writing at the same moment.
-var recipeTenantLocks sync.Map // tenant_id -> *sync.Mutex
-
-func lockRecipeTenant(tenantID string) func() {
-	mu, _ := recipeTenantLocks.LoadOrStore(tenantID, &sync.Mutex{})
-	m := mu.(*sync.Mutex)
-	m.Lock()
-	return m.Unlock
-}
+// recipeWriteRetries is how many times PutRecipe re-reads and retries a
+// write that lost its compare-and-swap to a concurrent writer before
+// answering 409 recipe_write_conflict.
+//
+// Writes are optimistic: no lock, in this process or shared. Each attempt
+// reads the recipe, checks the caller's precondition and the quota
+// against what it read, and writes only if the object still has the ETag
+// it read (PutConditional), so no write is lost on any replica. The
+// quota check and the write are not atomic: writers to different recipes
+// of one tenant at the same moment can take it over a cap by at most one
+// recipe each.
+const recipeWriteRetries = 3
 
 // checkQuota refuses a write that would take the tenant over its recipe
 // count or total size cap, counting every object under its recipe prefix.
@@ -703,56 +701,68 @@ func (svc *recipeService) PutRecipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	unlock := lockRecipeTenant(t.tenantID)
-	defer unlock()
-	cur, err := svc.readCurrent(r.Context(), t.key)
-	if err != nil {
-		log.Errorf("saasapi: reading recipe %s of tenant %s before a write: %v", t.name, t.tenantID, err)
-		writeError(w, http.StatusBadGateway, "recipe_store_unavailable", "the recipe store could not be read")
-		return
-	}
-	if cur.exists {
-		rec.SHA256Before, rec.SizeBefore = cur.sha, cur.info.Size
-	}
-	if p := cond.check(cur); p != nil {
-		reject(p)
-		return
-	}
-	quota, err := svc.checkQuota(r.Context(), t.tenantID, cur, int64(len(body)))
-	if err != nil {
-		log.Errorf("saasapi: checking recipe quota of tenant %s: %v", t.tenantID, err)
-		writeError(w, http.StatusBadGateway, "recipe_store_unavailable", "the recipe store could not be read")
-		return
-	}
-	if quota != nil {
-		reject(quota)
-		return
-	}
-
-	// Fail closed: no change without its audit record.
-	attempt := rec
-	attempt.Outcome = recipeOutcomeAttempted
-	if err := svc.auditRecipe(r.Context(), attempt); err != nil {
-		writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "the change could not be audited, so it was not made; retry")
-		return
-	}
-
-	// The compare-and-swap: on the ETag just read, or create-only.
-	putCond := objectstore.PutCondition{IfNoneMatch: true}
-	if cur.exists {
-		putCond = objectstore.PutCondition{IfMatchETag: cur.info.ETag}
-	}
-	info, err := svc.store.PutConditional(r.Context(), t.key, body, recipeObjectContentType, putCond)
-	if err != nil {
-		rec.Outcome = recipeOutcomeFailed
-		if errors.Is(err, objectstore.ErrPreconditionFailed) {
-			rec.Code = "precondition_failed"
-			_ = svc.auditRecipe(r.Context(), rec)
-			writeError(w, http.StatusPreconditionFailed, "precondition_failed", "the recipe was changed by another request at the same time: get it again and resend")
+	var info objectstore.ObjectInfo
+	var cur currentRecipe
+	for attempt := 0; ; attempt++ {
+		cur, err = svc.readCurrent(r.Context(), t.key)
+		if err != nil {
+			log.Errorf("saasapi: reading recipe %s of tenant %s before a write: %v", t.name, t.tenantID, err)
+			writeError(w, http.StatusBadGateway, "recipe_store_unavailable", "the recipe store could not be read")
 			return
 		}
-		rec.Code = "recipe_store_unavailable"
-		_ = svc.auditRecipe(r.Context(), rec)
+		rec.SHA256Before, rec.SizeBefore = "", 0
+		if cur.exists {
+			rec.SHA256Before, rec.SizeBefore = cur.sha, cur.info.Size
+		}
+		if p := cond.check(cur); p != nil {
+			reject(p)
+			return
+		}
+		quota, err := svc.checkQuota(r.Context(), t.tenantID, cur, int64(len(body)))
+		if err != nil {
+			log.Errorf("saasapi: checking recipe quota of tenant %s: %v", t.tenantID, err)
+			writeError(w, http.StatusBadGateway, "recipe_store_unavailable", "the recipe store could not be read")
+			return
+		}
+		if quota != nil {
+			reject(quota)
+			return
+		}
+
+		// Fail closed: no change without its audit record.
+		attempted := rec
+		attempted.Outcome = recipeOutcomeAttempted
+		if err := svc.auditRecipe(r.Context(), attempted); err != nil {
+			writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "the change could not be audited, so it was not made; retry")
+			return
+		}
+
+		// The compare-and-swap: on the ETag just read, or create-only.
+		putCond := objectstore.PutCondition{IfNoneMatch: true}
+		if cur.exists {
+			putCond = objectstore.PutCondition{IfMatchETag: cur.info.ETag}
+		}
+		info, err = svc.store.PutConditional(r.Context(), t.key, body, recipeObjectContentType, putCond)
+		if err == nil {
+			break
+		}
+		failed := rec
+		failed.Outcome = recipeOutcomeFailed
+		if errors.Is(err, objectstore.ErrPreconditionFailed) {
+			// Another writer landed between the read and the write.
+			// Re-read: the caller's precondition may still hold.
+			if attempt < recipeWriteRetries {
+				failed.Code = "precondition_failed"
+				_ = svc.auditRecipe(r.Context(), failed)
+				continue
+			}
+			failed.Code = "recipe_write_conflict"
+			_ = svc.auditRecipe(r.Context(), failed)
+			writeError(w, http.StatusConflict, "recipe_write_conflict", "the recipe kept being changed by other requests at the same time: get it again and resend")
+			return
+		}
+		failed.Code = "recipe_store_unavailable"
+		_ = svc.auditRecipe(r.Context(), failed)
 		log.Errorf("saasapi: writing recipe %s of tenant %s: %v", t.name, t.tenantID, err)
 		writeError(w, http.StatusBadGateway, "recipe_store_unavailable", "the recipe store could not be written")
 		return
@@ -796,8 +806,8 @@ func (svc *recipeService) DeleteRecipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	unlock := lockRecipeTenant(t.tenantID)
-	defer unlock()
+	// No lock: S3 has no conditional delete, so this is a check then a
+	// delete, on one replica or several.
 	cur, err := svc.readCurrent(r.Context(), t.key)
 	if err != nil {
 		log.Errorf("saasapi: reading recipe %s of tenant %s before a delete: %v", t.name, t.tenantID, err)

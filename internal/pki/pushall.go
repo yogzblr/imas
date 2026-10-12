@@ -4,6 +4,7 @@ package pki
 // (busauth.go). FLAG FOR SECURITY REVIEW.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -12,8 +13,44 @@ import (
 
 	jwt "github.com/nats-io/jwt/v2"
 
+	"github.com/yogzblr/imas/internal/lease"
 	log "github.com/yogzblr/imas/internal/log"
 )
+
+// pushAllMinInterval is how long after one replica pushed a tenant's
+// Account in PushAllAccounts no replica pushes it there again.
+const pushAllMinInterval = 60 * time.Second
+
+// pushAllJobName is tenantID's farmer.job_leases row for PushAllAccounts.
+// A tenant ID is at most 32 characters, so the name fits the column.
+func pushAllJobName(tenantID string) string { return "pushall:" + tenantID }
+
+// pushAllNow is PushAllAccounts' lease clock; tests replace it.
+var pushAllNow = time.Now
+
+// JobLeases returns the farmer background job leases (farmer.job_leases)
+// on this package's database with clock now (nil: time.Now), or nil when
+// no database is installed. Farmer's periodic jobs outside this package
+// (the cohort refresher) take their lease through it.
+func JobLeases(now func() time.Time) *lease.Leases {
+	if db == nil {
+		return nil
+	}
+	return lease.New(db, now)
+}
+
+// leasedPush runs push as tenantID's share of PushAllAccounts under the
+// pushall:<tenant_id> lease: on one replica at a time, and not again
+// within pushAllMinInterval of a successful push by any replica. It
+// reports whether push ran. With no database it runs push directly.
+func leasedPush(tenantID string, push func() error) (bool, error) {
+	l := JobLeases(pushAllNow)
+	if l == nil {
+		return true, push()
+	}
+	return l.Run(context.Background(), pushAllJobName(tenantID), lease.JobTTL(), pushAllMinInterval,
+		func(context.Context) error { return push() })
+}
 
 // pushAllMu serialises PushAllAccounts runs (a reconnect can fire while
 // the previous run is still pushing).
@@ -43,6 +80,16 @@ var pushAllMu sync.Mutex
 // key rotation racing this run can't be undone by the older copy this run
 // read first.
 //
+// Every farmer replica runs this on each (re)connect. Each tenant's push
+// (live, legacy or deprovisioned) runs under its pushall:<tenant_id> row
+// lease with a 60s minimum interval (leasedPush), so N replicas
+// reconnecting together push each tenant once, not N times; a tenant
+// another replica is pushing, or pushed successfully within the
+// interval, is skipped and neither counted nor an error. A failed push
+// doesn't count toward the interval, so the next attempt on any replica
+// retries it. The SYS Account is pushed every time: it is one push, and
+// it carries the revocations.
+//
 // Every push is attempted; the errors are joined. The returned count is
 // the number of Account JWTs the bus accepted.
 func PushAllAccounts() (int, error) {
@@ -55,52 +102,60 @@ func PushAllAccounts() (int, error) {
 	}
 	var errs []error
 	pushed := 0
-	push := func(what, accountJWT string) {
-		if err := pushAccountUpdate(mat, accountJWT); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", what, err))
-			return
-		}
-		pushed++
-	}
-	pushCurrent := func(what, accountJWT, path string) {
-		err := pushUntilCurrent(what, accountJWT,
+	pushCurrent := func(what, accountJWT, path string) error {
+		return pushUntilCurrent(what, accountJWT,
 			func(j string) error { return pushAccountUpdate(mat, j) },
 			func() (string, error) { return readAccountJWTFile(path) })
-		if err != nil {
+	}
+	// leased runs a tenant's push under its lease (leasedPush). push
+	// reports whether it pushed anything; it is counted if it did and
+	// succeeded. ErrTenantDeprovisioned (pushLiveTenantAccount pushed the
+	// lock-out last) is neither counted nor an error.
+	leased := func(tenantID, what string, push func() (bool, error)) {
+		sent := false
+		_, err := leasedPush(tenantID, func() error {
+			var err error
+			sent, err = push()
+			return err
+		})
+		switch {
+		case errors.Is(err, ErrTenantDeprovisioned):
+		case err != nil:
 			errs = append(errs, fmt.Errorf("%s: %w", what, err))
-			return
+		case sent:
+			pushed++
 		}
-		pushed++
 	}
 
 	// SYS first: the bus may hold only its epoch-dated bootstrap, without
 	// core's revocations (rotated-out SaaS API keys).
-	pushCurrent("SYS account", mat.sysAccountJWT, sysAccountJWTPath())
-	pushCurrent("legacy tenant "+currentTenantID(), mat.tenantJWT, tenantJWTPath())
+	if err := pushCurrent("SYS account", mat.sysAccountJWT, sysAccountJWTPath()); err != nil {
+		errs = append(errs, fmt.Errorf("SYS account: %w", err))
+	} else {
+		pushed++
+	}
+	legacy := currentTenantID()
+	leased(legacy, "legacy tenant "+legacy, func() (bool, error) {
+		return true, pushCurrent("legacy tenant "+legacy, mat.tenantJWT, tenantJWTPath())
+	})
 
 	live, err := ListProvisionedTenantIDs()
 	if err != nil {
 		errs = append(errs, fmt.Errorf("listing provisioned tenants: %w", err))
 	}
 	for _, id := range live {
-		if id == currentTenantID() {
+		if id == legacy {
 			continue
 		}
-		tam, err := loadTenantAccountMaterial(id)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("tenant %q: %w", id, err))
-			continue
-		}
-		err = pushUntilCurrent("tenant "+id, tam.jwt,
-			func(j string) error { return pushLiveTenantAccount(mat, id, j) },
-			func() (string, error) { return readAccountJWTFile(tenantAccountJWTPath(id)) })
-		if err != nil {
-			if !errors.Is(err, ErrTenantDeprovisioned) {
-				errs = append(errs, fmt.Errorf("tenant %q: %w", id, err))
+		leased(id, fmt.Sprintf("tenant %q", id), func() (bool, error) {
+			tam, err := loadTenantAccountMaterial(id)
+			if err != nil {
+				return false, err
 			}
-			continue
-		}
-		pushed++
+			return true, pushUntilCurrent("tenant "+id, tam.jwt,
+				func(j string) error { return pushLiveTenantAccount(mat, id, j) },
+				func() (string, error) { return readAccountJWTFile(tenantAccountJWTPath(id)) })
+		})
 	}
 
 	deleted, err := listDeletedTenantIDs()
@@ -108,14 +163,13 @@ func PushAllAccounts() (int, error) {
 		errs = append(errs, fmt.Errorf("listing deprovisioned tenants: %w", err))
 	}
 	for _, id := range deleted {
-		signed, ok, err := relockForPushAll(mat, id)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("deprovisioned tenant %q: %w", id, err))
-			continue
-		}
-		if ok {
-			push("deprovisioned tenant "+id, signed)
-		}
+		leased(id, fmt.Sprintf("deprovisioned tenant %q", id), func() (bool, error) {
+			signed, ok, err := relockForPushAll(mat, id)
+			if err != nil || !ok {
+				return false, err
+			}
+			return true, pushAccountUpdate(mat, signed)
+		})
 	}
 
 	if err := errors.Join(errs...); err != nil {

@@ -4,19 +4,36 @@ import (
 	"context"
 	"time"
 
+	"github.com/yogzblr/imas/internal/lease"
 	log "github.com/yogzblr/imas/internal/log"
 	"github.com/yogzblr/imas/internal/objectstore"
 )
+
+// reapInterval is how often each replica's reaper ticks.
+const reapInterval = time.Hour
+
+// reapMinInterval is how long after one replica's run no replica runs the
+// reaper again: a little under reapInterval, so the replica that ran last
+// still runs on its next tick however its ticker drifts.
+const reapMinInterval = reapInterval - reapInterval/10
+
+// reapJobName is the reaper's farmer.job_leases row.
+const reapJobName = "jobs_expiry"
+
+// reapBody is the reaper's work; tests replace it to count runs.
+var reapBody = (*Store).reap
 
 // StartReaper launches a background goroutine that periodically removes jobs
 // with no activity for longer than the given TTL. It checks once per hour. A
 // TTL of 0 disables expiration entirely. The reaper runs until the process
 // exits; use StartReaperCtx to bind its lifetime to a context.
 //
-// Every farmer replica runs its own reaper against the shared job bucket.
-// That repeats the listing work once per replica per hour, but is otherwise
-// harmless: deleting an already-deleted object succeeds, so replicas racing
-// to expire the same job all succeed.
+// Every farmer replica ticks its own reaper, but a tick only reaps under
+// the jobs_expiry row lease (internal/lease), and only if no replica has
+// reaped within reapMinInterval, so the shared job bucket is listed once
+// per hour, not once per replica. The delete stays idempotent all the
+// same: a replica that stalls past its lease can overlap the next one,
+// and deleting an already-deleted object succeeds.
 func (s *Store) StartReaper(ttl time.Duration) {
 	s.StartReaperCtx(context.Background(), ttl)
 }
@@ -31,8 +48,8 @@ func (s *Store) StartReaperCtx(ctx context.Context, ttl time.Duration) {
 	log.Noticef("job log reaper started: ttl=%s", ttl)
 	go func() {
 		// Run once immediately on startup, then hourly.
-		s.reap(ttl)
-		ticker := time.NewTicker(1 * time.Hour)
+		s.reapLeased(ctx, ttl, time.Now)
+		ticker := time.NewTicker(reapInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -40,10 +57,25 @@ func (s *Store) StartReaperCtx(ctx context.Context, ttl time.Duration) {
 				log.Notice("job log reaper stopped")
 				return
 			case <-ticker.C:
-				s.reap(ttl)
+				s.reapLeased(ctx, ttl, time.Now)
 			}
 		}
 	}()
+}
+
+// reapLeased is one reaper tick: reap under the jobs_expiry lease on the
+// farmer database, with now as the lease clock. With no database
+// installed (SetDB never called) it reaps unconditionally.
+func (s *Store) reapLeased(ctx context.Context, ttl time.Duration, now func() time.Time) {
+	body := func(context.Context) error { reapBody(s, ttl); return nil }
+	d := db
+	if d == nil {
+		_ = body(ctx)
+		return
+	}
+	if _, err := lease.New(d, now).Run(ctx, reapJobName, lease.JobTTL(), reapMinInterval, body); err != nil {
+		log.Errorf("reaper: job lease: %v", err)
+	}
 }
 
 // reap deletes every job whose last activity is older than the TTL. Object
