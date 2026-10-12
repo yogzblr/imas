@@ -169,6 +169,9 @@ func (factsTestNoopLogger) Tracef(string, ...any)  {}
 func startTenantIsolationBus(t *testing.T) func() {
 	t.Helper()
 	opts := pki.ConfigureNats()
+	// Its resolver directory goes with the test, even if no server
+	// starts (Close is idempotent; the server's Shutdown also calls it).
+	t.Cleanup(opts.AccountResolver.Close)
 	srv, err := nats_server.NewServer(&opts)
 	if err != nil || srv == nil {
 		t.Fatalf("failed to create NATS server: %v", err)

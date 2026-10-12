@@ -25,6 +25,9 @@ func TestConfigureNatsResolverDirPerCallRemovedOnShutdown(t *testing.T) {
 	for range 2 {
 		config.FarmerBusPort = "-1"
 		opts := ConfigureNats()
+		// Its resolver directory goes with the test, even if no server
+		// starts (Close is idempotent; the server's Shutdown also calls it).
+		t.Cleanup(opts.AccountResolver.Close)
 		r, ok := opts.AccountResolver.(*tempDirResolver)
 		if !ok {
 			t.Fatalf("resolver %T, want the per-call temp dir resolver", opts.AccountResolver)

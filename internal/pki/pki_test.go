@@ -1188,6 +1188,12 @@ func TestConfigureNats_ValidConfig(t *testing.T) {
 	pkitest.Farmer(t)
 
 	opts := ConfigureNats()
+
+	// Its resolver directory goes with the test, even if no server
+
+	// starts (Close is idempotent; the server's Shutdown also calls it).
+
+	t.Cleanup(opts.AccountResolver.Close)
 	if opts.Host != "127.0.0.1" {
 		t.Errorf("expected host 127.0.0.1, got %s", opts.Host)
 	}

@@ -125,6 +125,9 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 
 	// The bus, configured exactly as farmerbus configures it.
 	opts := pki.ConfigureNats()
+	// Its resolver directory goes with the test, even if no server
+	// starts (Close is idempotent; the server's Shutdown also calls it).
+	t.Cleanup(opts.AccountResolver.Close)
 	srv, err := nats_server.NewServer(&opts)
 	if err != nil {
 		t.Fatalf("creating NATS server: %v", err)

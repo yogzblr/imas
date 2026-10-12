@@ -125,6 +125,9 @@ func startJWTBus(t *testing.T) string {
 	t.Helper()
 	config.FarmerBusPort = "-1"
 	opts := pki.ConfigureNats()
+	// Its resolver directory goes with the test, even if no server
+	// starts (Close is idempotent; the server's Shutdown also calls it).
+	t.Cleanup(opts.AccountResolver.Close)
 	opts.LogFile, opts.Trace, opts.Debug = "", false, false
 	srv, err := nats_server.NewServer(&opts)
 	if err != nil {
