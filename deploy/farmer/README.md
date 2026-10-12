@@ -98,9 +98,12 @@ restart. With a fresh emptyDir, the following holds:
   pod, so the Job never sees a rotation, never touches the SYS Account
   JWT, and never pushes. The NetworkPolicy allows egress to OpenBao and
   DNS only.
-- **Revocation stays farmer's job.** Farmer's own boot-time
-  `EnsureSaaSAPICredential` holds the persistent state. It revokes the
-  old key on rotation and pushes that revocation. The Job only publishes.
+- **Revocation stays farmer's job.** The rotation state lives in PXC,
+  in `saas.saasapi_credential_state`: saasapi records the key it runs
+  with at boot, and a new key moves the old one to `prev_pub`. Farmer's
+  boot-time `EnsureSaaSAPICredential` reads `prev_pub`, revokes it on
+  the SYS Account and pushes that revocation. The Job has no database,
+  so it never revokes anything; it only publishes.
 - **No second writer on farmer's PKI files.** `authMu` locks within one
   process only, so a Job sharing farmer's volume could race farmer on
   `sys-account.jwt`. Farmer's volume is also typically ReadWriteOnce.

@@ -169,13 +169,14 @@ func main() {
 	if err := pki.ReloadNKeys(); err != nil {
 		log.Errorf("Failed to push NATS auth state to the bus: %v", err)
 	}
-	// Mint (or confirm) the SaaS API's own NATS credential — a scoped User
-	// under the SYS Account (docs/design/imas-internal-api-account.md) —
-	// and persist it to pki.SaaSAPIUserJWTPath() for delivery to the
-	// saasapi Deployment. Not fatal: an error here is either a failed push
-	// of a key-rotation revocation (retried at the next boot; the new
-	// credential is already minted) or a bootstrap problem that
-	// ReloadNKeys above will have surfaced too.
+	// Mint the SaaS API's own NATS credential — a scoped User under the
+	// SYS Account (docs/design/imas-internal-api-account.md) — and revoke
+	// the key saasapi rotated out, read from saas.saasapi_credential_state
+	// (prev_pub). The JWT reaches the saasapi Deployment through the
+	// publish-saasapi-credential Job, not from here. Not fatal: an error
+	// here is either a failed push of a key-rotation revocation (retried
+	// at the next boot; the credential is still minted) or a bootstrap
+	// problem that ReloadNKeys above will have surfaced too.
 	if _, _, err := pki.EnsureSaaSAPICredential(); err != nil {
 		log.Errorf("SaaS API NATS credential: %v", err)
 	}

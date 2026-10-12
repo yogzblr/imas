@@ -31,6 +31,7 @@ import (
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 
+	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/pxc"
 	"github.com/yogzblr/imas/internal/saasapi"
 )
@@ -290,12 +291,19 @@ func TestMySQLGrants(t *testing.T) {
 	}
 }
 
-// noModelYet are tables a migration creates before any GORM model
-// describes them: P21 slice 3's state tables (farmer 00004, 00005, saas
-// 00008), whose code lands in later PRs of that slice. Each is compared
-// with AutoMigrate again once its model exists; its own migration test
-// pins its shape until then.
-var noModelYet = []string{"job_leases", "sprout_user_jwt", "saasapi_credential_state"}
+// noModelYet are tables a migration creates that no GORM model in the
+// baseline comparison describes: P21 slice 3's farmer state tables
+// (farmer 00004, 00005), whose code lands in later PRs of that slice.
+// Each is compared with AutoMigrate again once its model matches; its own
+// migration test pins its shape until then.
+var noModelYet = []string{"job_leases", "sprout_user_jwt"}
+
+// saasModels is every model the saas set's baseline is compared with:
+// saasapi's own tables plus saasapi_credential_state (saas 00008), whose
+// model lives in pki next to the code that reads and writes it.
+func saasModels() []any {
+	return append(saasapi.Models(), pki.SaaSAPICredentialStateModels()...)
+}
 
 // TestMySQLBaselineMatchesGORMModels: the baseline creates exactly the
 // tables, columns and indexes AutoMigrate creates from today's models, so
@@ -306,7 +314,7 @@ func TestMySQLBaselineMatchesGORMModels(t *testing.T) {
 	for _, c := range []struct {
 		set    Set
 		models []any
-	}{{Farmer, pxc.Models()}, {Saas, saasapi.Models()}} {
+	}{{Farmer, pxc.Models()}, {Saas, saasModels()}} {
 		t.Run(c.set.Name(), func(t *testing.T) {
 			viaGoose := "t_goose_" + c.set.Name() + "_" + s
 			viaGORM := "t_gorm_" + c.set.Name() + "_" + s
