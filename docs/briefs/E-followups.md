@@ -19,9 +19,11 @@ Scope: `uat/`, `deploy/farmer/`, `.github/workflows/uat.yml`, UAT docs.
    rendering the config and parsing it with the 2.7.1 image (`bao operator diagnose
    -config` or a 5-second `bao server -config` run in a container); if no container
    runtime is available in the session, state which static check you ran instead.
-2. `uat/hub/core/values/farmer-uat.yaml`: set `objectStore.sproutJWTBucket` to the
-   chart's default name for that bucket (read it from `deploy/helm/farmer/values.yaml`),
-   make `minio-setup` (RustFS) create that bucket, and remove `farmer.persistence.size`.
+2. `uat/hub/core/values/farmer-uat.yaml`: set `objectStore.sproutJWTBucket` (the chart
+   has no default name for that bucket: `deploy/helm/farmer/values.yaml` sets `""` and
+   NOTES warns; the UAT uses `imas-sprout-jwts`, next to `imas-recipes` and `imas-jobs`),
+   make `minio-setup` (RustFS) create that bucket and give farmer's user get and put on
+   it, and remove `farmer.persistence.size`.
 3. Farmer NKey: `uat/hub/core/seeds.sh` creates Secret `imas-farmer-nkey` with key
    `farmer.nk` (a user seed generated the same way the script generates the other
    seeds); the chart reads it through `farmer.nkeySecret` (D4). Add the same Secret to
@@ -96,7 +98,9 @@ nothing.
 ## E4: loadtest without trust seeds; sprout honours Retry-After (P27.3, P27.4)
 
 Scope: `tools/loadtest`, `internal/pki/enrollclient.go`, the Envoy config in
-`deploy/helm/farmer` and `uat/`, their tests and docs.
+`deploy/helm/nats` (the DMZ chart; the farmer chart has no Envoy config) and
+the reference `deploy/envoy/`, the UAT DMZ render that uses the nats chart
+(`uat/hub/dmz`), their tests and docs.
 
 1. `tools/loadtest -servers` must run against a deployed bus with no private trust key.
    Replace the use of operator-signing and SYS seeds with the real enrolment path
@@ -114,6 +118,19 @@ Scope: `tools/loadtest`, `internal/pki/enrollclient.go`, the Envoy config in
 
 Tests: a fake enrol server returning 503 with and without `Retry-After`; chart test for
 the Envoy route; loadtest builds and its unit tests pass without seed flags.
+
+As built (corrections, E4): the Envoy routes are in the nats chart
+(`templates/envoy-configmap.yaml`, `_helpers.tpl`) and `deploy/envoy/`; the UAT
+has no Envoy config of its own for these routes (the DMZ hub renders the nats
+chart; the core edge proxies farmer's API over TCP, which never retries an HTTP
+answer), so the UAT check is a test on the DMZ render. Both routes carry an
+explicit `retry_on: connect-failure,refused-stream` (one retry of a request that
+never reached farmer). "The existing attempt limit" is `enrollStep2Attempts` (5).
+"One-time enrolment keys" is the default (`-enroll-key-uses 1`); a larger value
+is allowed because key minting is rate-limited per tenant. Without a trust key
+the harness has no User that may send `test.ping` to a sprout, so against a
+deployed bus its latency probe is the sprouts' own bus round trip (NATS
+PING/PONG), and it reads no bus varz (no SYS user); `docs/loadtest.md` says so.
 
 ## E5: docs, CI, the flake and earlier reports (P28)
 

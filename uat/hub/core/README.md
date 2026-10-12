@@ -20,13 +20,13 @@ used by a release. Plan: `docs/claude-code-parallel-build-plan.md`, section 4h.
 
 | Piece | Where | What |
 |---|---|---|
-| farmer, saasapi, PXC (1 node, 1 HAProxy), Valkey (1), OpenBao (1, standalone, file storage) | namespace `imas-core`, release `imas-core` | the **published** `deploy/helm/farmer` chart of `release_tag`, with `values/farmer-uat.yaml` and a run-specific values file from `gen-values.sh` |
-| **RustFS** (resources still named `imas-uat-minio`) | `imas-uat` | the object store, one pod, pinned image, root credential generated per run in a Secret. Apache-2.0. It replaced MinIO (AGPL-3.0); the UAT-only exception is withdrawn (requirements.md item 21). With `object_store.mode` `external` nothing is deployed here (see "External S3"). |
+| farmer, saasapi, PXC (1 node, 1 HAProxy), Valkey (1), OpenBao (1, standalone, single-node raft storage) | namespace `imas-core`, release `imas-core` | the **published** `deploy/helm/farmer` chart of `release_tag`, with `values/farmer-uat.yaml` and a run-specific values file from `gen-values.sh` |
+| **RustFS** (resources still named `imas-uat-minio`) | `imas-uat` | the object store, one pod, pinned image, root credential generated per run in a Secret. Its S3 port is also hostPort 9000 (`minio.hostPort`), where the DMZ bus's account loader reads the accounts bucket. Apache-2.0. It replaced MinIO (AGPL-3.0); the UAT-only exception is withdrawn (requirements.md item 21). With `object_store.mode` `external` nothing is deployed here (see "External S3"). |
 | **Keycloak** | `imas-uat` | Apache-2.0, pinned image, **dev style**: one replica, `start-dev`, the **embedded H2 database** (`dev-file`) on a 1 GiB PVC so a pod restart keeps the tenant bindings. Realm `imas-uat` imported from `chart/files/imas-uat-realm.json`. |
 | edge proxy | `imas-uat` | one Envoy (Apache-2.0, the nats chart's pin), hostPorts only (owner decision 2026-10-06; there is no node port mode, the core node port range being 30000-32767), on the core FQDN: 443 for saasapi (`/v1/`) and Keycloak (`/realms/imas-uat/` only, never `/admin` or the master realm), and a TCP passthrough on 5405 to farmer's API for the DMZ's Envoy |
 | the DMZ bus, as seen from core | no object of its own | the farmer chart is installed with `bus.host` set to the DMZ's private name (`dmz.uat.imas.internal` by default, read from the endpoints file by `gen-values.sh`; UAT.1's Private DNS zone), `bus.port` the DMZ's bus node port 8442 and `bus.egressCIDRs` the DMZ private address, so `farmerbusurl` and `SAASAPI_NATS_URL` are `tls://dmz.uat.imas.internal:8442` and both verify that name, which the DMZ's bus certificate carries as a SAN. (This replaces the ExternalName Service of earlier versions.) |
 | certificates | `imas-core`, `imas-uat` | farmer's API certificate (`tls.secretName`; SANs: its Service names, `core.uat.imas.internal`, the core FQDN and private IP) and the edge's (the core FQDN), both from the per-run UAT CA ClusterIssuer (UAT.2) |
-| NetworkPolicies | both | additive to the chart's: farmer in from the edge on 5405; farmer and saasapi out to the DMZ IP on the bus port; the edge in on 443 and, from the DMZ IP only, 5405; Keycloak in from the edge only; MinIO in from farmer and saasapi only |
+| NetworkPolicies | both | additive to the chart's: farmer in from the edge on 5405; farmer and saasapi out to the DMZ IP on the bus port; the edge in on 443 and, from the DMZ IP only, 5405; Keycloak in from the edge only; RustFS in from farmer and saasapi, and from the DMZ IP on 9000 (the bus's account loader, read-only on the accounts bucket; design D22). Farmer's API and the accounts store are the only DMZ-to-core paths |
 
 `chart/` holds the UAT-only pieces as a small local Helm chart
 (`imas-uat-core`, never packaged or published).
@@ -101,14 +101,20 @@ openssl, go (to build `nk`), tar, sha256sum, and this repository checked out.
    0600) and puts them in Secrets. Values go from files to `kubectl create
    secret --from-file | kubectl apply`, never through argv or the log. A
    re-run keeps what exists.
-2. **Seeds** (`seeds.sh`): the two NKey user seeds the chart requires,
-   `sys-user.nk` (`SYS_USER`) and `saasapi-user.nk` (`SAASAPI_USER`), made
-   with `nk` (`github.com/nats-io/nkeys/nk`, the tool the chart README
-   names, built at this repo's own `go.mod` pin), never hand written, into
-   the Secret `imas-farmer-nats-seeds`. It refuses to replace the seeds of
-   an install that already has the Secret, and restores missing local files
-   from it. Since P21 slice 1 there is no operator, operator-signing, SYS
-   account or tenant seed: those are OpenBao Transit keys (step 7).
+2. **Seeds** (`seeds.sh`): the NKey user seeds, made with `nk`
+   (`github.com/nats-io/nkeys/nk`, the tool the chart README names, built at
+   this repo's own `go.mod` pin), never hand written: `sys-user.nk`
+   (`SYS_USER`) and `saasapi-user.nk` (`SAASAPI_USER`) into the Secret
+   `imas-farmer-nats-seeds`; farmer's NKey `farmer.nk` into the Secret
+   `imas-farmer-nkey` (the chart's `farmer.nkeySecret`, mounted by every
+   farmer replica); and the DMZ bus loader's SYS user `bus-loader-user.nk`,
+   which stays a file (the DMZ install takes it with `--loader-seed`) and
+   whose public key goes to `out/bus-loader-user.pub`, which `gen-values.sh`
+   turns into `natsTrust.busLoaderUserPub`. Each Secret is handled on its
+   own: it refuses to replace the seeds of an install that already has it,
+   and restores missing local files from it. Since P21 slice 1 there is no
+   operator, operator-signing, SYS account or tenant seed: those are
+   OpenBao Transit keys (step 7).
 3. **Bootstrap admin** (`admin-keys.sh`): downloads the `imas` CLI of
    `release_tag` from the GitHub release, checks it against the release's
    `checksums.txt`, and runs `imas auth privkey`, `imas auth pubkey` and
@@ -127,12 +133,20 @@ openssl, go (to build `nk`), tar, sha256sum, and this repository checked out.
 5. **UAT-only pieces** (`chart/`), waits for them and for both certificates,
    and copies the UAT CA (the issued Secret's `ca.crt`, a public certificate)
    to the ConfigMap `imas-uat-ca` and `out/uat-ca.crt`.
-6. **Object store** (`minio-setup.sh`, RustFS): buckets `imas-recipes` (`objectStore.bucket`)
-   and `imas-jobs` (`objectStore.jobBucket`); user `imas-farmer` with both
-   buckets; user `imas-saasapi` with the **release chart's own**
-   `files/objectstore-policies/saasapi-recipes.json`; the Secrets
-   `imas-uat-s3-farmer` (`objectStore.credentialsSecret`) and
-   `imas-uat-s3-saasapi` (`saasapi.recipes.credentialsSecret`). It uses the
+6. **Object store** (`minio-setup.sh`, RustFS): buckets `imas-recipes` (`objectStore.bucket`),
+   `imas-jobs` (`objectStore.jobBucket`), `imas-sprout-jwts`
+   (`objectStore.sproutJWTBucket`, private, the sprout User JWTs) and
+   `imas-accounts` (`accountStore.bucket`); user `imas-farmer` with the
+   recipe and job buckets and get and put on the sprout JWT bucket; user
+   `imas-saasapi` with the **release chart's own**
+   `files/objectstore-policies/saasapi-recipes.json`; user
+   `imas-farmer-accounts` (get, put and list on the accounts bucket only)
+   and user `imas-bus-accounts-reader` (get and list on it only); the
+   Secrets `imas-uat-s3-farmer` (`objectStore.credentialsSecret`),
+   `imas-uat-s3-saasapi` (`saasapi.recipes.credentialsSecret`) and
+   `imas-farmer-accounts-writer` (`accountStore.credentialsSecret`). The
+   reader's pair stays in `sensitive/s3/accounts-reader/` for the DMZ
+   install's `--accounts-reader-dir`; it never becomes a core Secret. It uses the
    `curl` inside the RustFS server image through `kubectl exec` (signed with
    `--aws-sigv4` against RustFS's admin API), so no client image is pulled
    and the RustFS root credential never leaves its pod.
@@ -141,7 +155,8 @@ openssl, go (to build `nk`), tar, sha256sum, and this repository checked out.
 7. **The farmer chart** (`helm upgrade --install`, no `--wait`, as the chart
    README says for a first install), and **while it runs**
    `openbao-bootstrap.sh`: waits for OpenBao's pod, `bao operator init`
-   (3 shares, threshold 2), unseals, enables Transit and creates
+   (3 shares, threshold 2), unseals, waits for the single-node raft node to
+   become active, enables Transit and creates
    `transit/keys/imas-gateway-jwt` as **ed25519** (the name
    `farmer.openbao.gateway.keyName` expects), then mints the token the
    chart's bootstrap Job gets and writes it to the Secret
@@ -196,7 +211,8 @@ checks the trust ConfigMap; `check.sh` then confirms it is unchanged
 - `nats-trust.json`: the trust ConfigMap's data and `resourceVersion` as the
   first install left them (public data), which `check.sh` compares against.
 - `uat-ca.crt` (and the same file as `uat-ca.pem`, the name `uat/tests`
-  reads), `admin.json` (public keys).
+  reads), `admin.json` (public keys), `bus-loader-user.pub` (the DMZ bus
+  loader's NKey public key, `natsTrust.busLoaderUserPub`).
 
 `<state>/core/sensitive/` (**SENSITIVE**, 0700; keep only as a sensitive
 artifact of the run):
@@ -214,8 +230,10 @@ artifact of the run):
 - `openbao-init.json`, `openbao-root-token`, `openbao-unseal-keys.json`,
   `openbao-bootstrap-token` (the last token handed to the chart's Job;
   revoked once the Job has run);
-- `seeds/` (unless `UAT_SEEDS_DIR` points elsewhere), `keycloak/`, `minio/`,
-  `s3/`, `internal-auth-secret`.
+- `seeds/` (unless `UAT_SEEDS_DIR` points elsewhere; `bus-loader-user.nk`
+  is the DMZ install's `--loader-seed`), `keycloak/`, `minio/`, `s3/`
+  (`s3/accounts-reader/` is the DMZ install's `--accounts-reader-dir`),
+  `internal-auth-secret`.
 
 ## Keycloak, tokens and tenants
 
@@ -290,11 +308,12 @@ bind-tenant.sh <kubeconfig> <endpoints.json> <state-dir> --scratch-user <name> <
 
 One line per check, non zero on any failure, nothing secret printed:
 farmer, saasapi, the PXC cluster and its StatefulSets, Valkey and OpenBao
-Ready (OpenBao initialised and unsealed, the gateway key ed25519), MinIO,
-Keycloak and the edge Ready, saasapi's Secrets present; **design T4**
+Ready (OpenBao initialised and unsealed, single-node raft and active, the
+gateway key ed25519), RustFS, Keycloak and the edge Ready, saasapi's
+Secrets, the seeds Secret and farmer's NKey Secret present; **design T4**
 (`docs/design/imas-openbao-signing-design.md` section 11, the OpenBao
-bootstrap Job): the trust ConfigMap `imas-nats-trust` holds the five
-required keys and no NKey seed and is byte for byte what the first install
+bootstrap Job): the trust ConfigMap `imas-nats-trust` holds the six
+required keys (with `bus-loader-user.jwt`) and no NKey seed and is byte for byte what the first install
 recorded in `out/nats-trust.json` (data and `resourceVersion`: a re-run of
 the Job, such as `finish.sh`'s upgrade, wrote nothing), no bootstrap token
 Secret is left, and in OpenBao (`openbao_t4`, root token over stdin) the
@@ -337,10 +356,15 @@ the farmer and publisher policies cannot sign with the operator key); and
 `go test ./uat/hub/core/`, which renders `deploy/helm/farmer` with
 `values/farmer-uat.yaml` plus `gen-values.sh`'s output, and `chart/` with
 `extras_set_args`, and checks the values that matter (issuer, JWKS URL and
-audience equal Keycloak's; the UAT CA for saasapi; MinIO and buckets; the
-bus URL and sprout bus URL; tls from cert-manager; release image tags; the
-OpenBao bootstrap token Secret, no dev mode; the two user seeds, no trust
-chain seed, the trust ConfigMap mounted and the Transit signer configured;
+audience equal Keycloak's; the UAT CA for saasapi; RustFS and the recipe,
+job and sprout JWT buckets; the accounts bucket and its writer Secret;
+the bus URL and sprout bus URL; tls from cert-manager; release image tags; the
+OpenBao bootstrap token Secret, no dev mode, single-node raft storage with a
+fixed node_id and api_addr and cluster_addr on the pod's Services; the two
+user seeds and farmer's NKey Secret, no trust chain seed, the trust
+ConfigMap mounted, the Transit signer configured and the loader key in the
+bootstrap; every farmer-chart key in `values/farmer-uat.yaml` known to the
+chart (so a dropped key such as `farmer.persistence` fails);
 the bootstrap Job's `prepare` and `nats-trust` steps, policy deletion and
 token revocation; one replica each; the
 certificate SANs; policies naming only the DMZ address;
@@ -361,8 +385,11 @@ unless `IMAS_REQUIRE_HELM=1`.
   two forms) as a SAN, and the
   DMZ exposes the bus **client** port (5406, NATS over TLS) to core on node
   port 8442 (`dmz.ports.bus`; owner decision 2026-10-06). The DMZ bus
-  holds no seed: `uat/hub/dmz/install.sh --seeds-from-kubeconfig` copies the
-  public trust ConfigMap `imas-nats-trust` from here. Envoy's `farmer_api` upstream is
+  holds no farmer seed: `uat/hub/dmz/install.sh --seeds-from-kubeconfig` copies the
+  public trust ConfigMap `imas-nats-trust` from here, and its loader gets
+  `--loader-seed <seeds>/bus-loader-user.nk` and `--accounts-reader-dir
+  <sensitive>/s3/accounts-reader` from this hub's state directory. It reads
+  the accounts bucket at `<core private IP>:9000` (RustFS's hostPort). Envoy's `farmer_api` upstream is
   `core.uat.imas.internal:5405` (or the core FQDN or private IP) and
   verifies against the UAT CA; farmer's certificate carries all three.
 - **UAT.4**: creates tenants 1 and 2 with `t1-admin` and `t2-admin` tokens
@@ -375,11 +402,19 @@ unless `IMAS_REQUIRE_HELM=1`.
 
 ## Seeds
 
-Only farmer's two user seeds (`sys-user.nk`, `saasapi-user.nk`) exist, as
-files in `UAT_SEEDS_DIR` (default `<state>/core/sensitive/seeds`):
-`seeds.sh` uses any seed file already there and generates only the missing
-ones. The DMZ needs none (P21 slice 1): its bus starts from the public trust
-ConfigMap, which carries no secret.
+Four user seeds exist, as files in `UAT_SEEDS_DIR` (default
+`<state>/core/sensitive/seeds`): farmer's two (`sys-user.nk`,
+`saasapi-user.nk`, Secret `imas-farmer-nats-seeds`), farmer's NKey
+(`farmer.nk`, Secret `imas-farmer-nkey`) and the DMZ bus loader's SYS user
+(`bus-loader-user.nk`, no core Secret). `seeds.sh` uses any seed file
+already there and generates only the missing ones. The DMZ bus itself needs
+no seed (P21 slice 1): it starts from the public trust ConfigMap, which
+carries no secret; only its loader sidecar holds `bus-loader-user.nk`, in
+the DMZ's own Secret. Once the trust ConfigMap carries
+`bus-loader-user.jwt`, which is never re-minted (design T4), `seeds.sh`
+refuses to regenerate a missing loader seed (restore it from the DMZ
+Secret `imas-bus-loader-sys-user`, key `user.nk`) and refuses a seed whose
+public key is not the one that JWT names.
 
 ## Open points
 
@@ -421,11 +456,20 @@ set in the endpoints file:
 ```
 
 In this mode `install.sh` deploys no object store, skips `minio-setup.sh`
-and its rollout and check, and applies the two Secrets the farmer chart
-names from four files you place first, under `<state-dir>/sensitive/s3/`:
-`farmer-access-key-id`, `farmer-secret-access-key`, `saasapi-access-key-id`
-and `saasapi-secret-access-key` (no trailing newline). You also provide the
-buckets `imas-recipes` and `imas-jobs` and the two users.
+and its rollout and check, and applies the three Secrets the farmer chart
+names from files you place first, under `<state-dir>/core/sensitive/s3/`:
+`farmer-access-key-id`, `farmer-secret-access-key`, `saasapi-access-key-id`,
+`saasapi-secret-access-key`, `accounts-writer-access-key-id` and
+`accounts-writer-secret-access-key`, plus `accounts-reader/access-key-id`
+and `accounts-reader/secret-access-key` for the DMZ install's
+`--accounts-reader-dir` (no trailing newline). You also provide the
+buckets `imas-recipes`, `imas-jobs`, `imas-sprout-jwts` and
+`imas-accounts`, the four users with the limits `minio-setup.sh` gives
+them, and an endpoint for the accounts bucket the DMZ can reach:
+`dmz.account_store.endpoint` in the endpoints file is required in this mode
+(`load_endpoints` stops without it, since the DMZ's default,
+`<core private IP>:9000`, is the bundled RustFS), plus the matching network
+path.
 
 What the service must do, because imas relies on it (RustFS 1.0.1 was
 checked for each; a gateway has to be checked too):

@@ -42,9 +42,14 @@ rag: Red
 next: Build it; see the design doc.
 ```
 
-Fragments of one day apply in file-name order. If your fragment changes an item that another fragment of the same day adds or rewrites, give yours a name that sorts after it (for example a `z-` prefix), or the roll-up fails: an `update` that sorts before the `add` of a new item names an item that does not exist yet, and an `add` of an existing row that sorts after your `update` overwrites your fields.
+Fragments of one day apply in file-name order, ignoring case (`z-E4.md`
+applies after `z-build-summary.md`). If your fragment changes an item that another fragment of the same day adds or rewrites, give yours a name that sorts after it (for example a `z-` prefix), or the roll-up fails: an `update` that sorts before the `add` of a new item names an item that does not exist yet, and an `add` of an existing row that sorts after your `update` overwrites your fields.
 
-Check a fragment before you push: `scripts/status/rollup.py --check`.
+Check a fragment before you push: `scripts/status/rollup.py --check`. It
+validates every fragment and applies every day not yet rolled up (after the
+"Last rolled up" date), in order, to a copy of `BUILD-STATUS.md`, so a
+fragment that would stop the roll-up (an `update` of a row that does not
+exist at that point) fails the check. Nothing is written.
 
 ## The daily roll-up
 

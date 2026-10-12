@@ -10,8 +10,10 @@ name: UAT gate
 #   (uat/k0s) -> core hub (uat/hub/core) -> DMZ hub (uat/hub/dmz) -> tenants
 #   and sprouts (uat/enroll) -> tests (uat/tests/run.sh) -> close tunnels ->
 #   upload the report -> destroy (uat/tofu/destroy.sh) -> verify teardown.
-# Core is installed before the DMZ: the bus needs core's seeds when it starts
-# (owner decision, 2026-10-06).
+# Core is installed before the DMZ: the bus needs core's public NATS trust
+# (with the loader's JWT), the loader's seed and the accounts bucket's
+# read-only credential when it starts, all made by the core install (owner
+# decision, 2026-10-06; P21).
 #
 # By hand only (workflow_dispatch). There is deliberately no trigger on a
 # published release or on a schedule: the owner adds one once the gate is
@@ -303,14 +305,21 @@ jobs:
           uat/hub/core/install.sh "$STATE/k0s/core.kubeconfig" "$STATE/k0s/endpoints.json" \
             "$STATE/hub" "$RELEASE_TAG"
 
-      # The bus gets core's seeds straight from core's Secret.
+      # The bus gets core's public trust straight from core's ConfigMap (no
+      # seed crosses). Its account loader gets the two credentials core's
+      # install left for it: the loader's SYS user seed (seeds.sh; its public
+      # key is core's natsTrust.busLoaderUserPub) and the read-only accounts
+      # bucket credential (minio-setup.sh), which it uses on core's RustFS.
       - name: DMZ hub (uat/hub/dmz)
         env:
           RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
         run: |
           uat/hub/dmz/install.sh --kubeconfig "$STATE/k0s/dmz.kubeconfig" \
             --endpoints "$STATE/k0s/endpoints.json" --release-tag "$RELEASE_TAG" \
-            --seeds-from-kubeconfig "$STATE/k0s/core.kubeconfig" --workdir "$STATE/dmz"
+            --seeds-from-kubeconfig "$STATE/k0s/core.kubeconfig" \
+            --loader-seed "${UAT_SEEDS_DIR:-$STATE/hub/core/sensitive/seeds}/bus-loader-user.nk" \
+            --accounts-reader-dir "$STATE/hub/core/sensitive/s3/accounts-reader" \
+            --workdir "$STATE/dmz"
 
       # farmer and saasapi need the DMZ bus, so core's install.sh does not wait
       # for them: this does, registers the sprout release and runs core's check.

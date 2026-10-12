@@ -40,7 +40,9 @@ func (k testGatewayKey) PublicKeys(context.Context) ([]gatewayjwt.TransitKeyVers
 // (useRealGatewaySubjectCheck).
 func installGatewayKey(t *testing.T) testGatewayKey {
 	t.Helper()
-	acceptAnyGatewaySubject(t)
+	origCheck := gatewaySubjectCheck
+	gatewaySubjectCheck = func(string, string, string) error { return nil }
+	t.Cleanup(func() { gatewaySubjectCheck = origCheck })
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -50,16 +52,6 @@ func installGatewayKey(t *testing.T) testGatewayKey {
 	gatewayKeys = func() gatewayjwt.PublicKeySource { return k }
 	t.Cleanup(func() { gatewayKeys = orig })
 	return k
-}
-
-// acceptAnyGatewaySubject stubs the revocation check (gatewaySubjectCheck)
-// for the rest of t: every token's NKey counts as the sprout's current
-// one. gateway_revocation_test.go tests the real check.
-func acceptAnyGatewaySubject(t *testing.T) {
-	t.Helper()
-	orig := gatewaySubjectCheck
-	gatewaySubjectCheck = func(string, string, string) error { return nil }
-	t.Cleanup(func() { gatewaySubjectCheck = orig })
 }
 
 // mint signs a gateway JWT for (tenantID, sproutID) with priv.

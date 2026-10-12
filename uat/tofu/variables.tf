@@ -182,6 +182,12 @@ variable "bus_port" {
   default     = 8442
 }
 
+variable "accounts_store_port" {
+  description = "The core hub's object store (RustFS, uat/hub/core chart/ minio.hostPort) as the DMZ bus's account loader reads it: the accounts bucket, with a read-only credential scoped to it (design D22). The only DMZ-to-core path besides farmer's API; uat/hub/dmz reads it at <core private IP>:9000 by default (dmz.account_store.endpoint)."
+  type        = number
+  default     = 9000
+}
+
 variable "core_public_port" {
   description = "saasapi and Keycloak on the core host, from the runner only (Shared contract)."
   type        = number

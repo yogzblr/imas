@@ -227,7 +227,12 @@ until you remove them (`sudo apt-get purge imas-sprout`, then the
 
 8. **The hubs**, from the release named by `--release-tag`:
    `uat/hub/core/install.sh <kube/core.kubeconfig> <endpoints.json> <state> <tag>`,
-   then `uat/hub/dmz/install.sh --seeds-from-kubeconfig <kube/core.kubeconfig> ...`,
+   then `uat/hub/dmz/install.sh --seeds-from-kubeconfig <kube/core.kubeconfig>
+   --loader-seed <state>/core/sensitive/seeds/bus-loader-user.nk
+   --accounts-reader-dir <state>/core/sensitive/s3/accounts-reader ...` (the
+   trust ConfigMap copied from core; the loader's seed and read-only accounts
+   credential that core's install left; the loader reads core's RustFS on
+   the core node's port 9000),
    then `uat/hub/core/finish.sh` (same arguments as core's install.sh; farmer
    and saasapi need the DMZ bus), then `uat/hub/dmz/check.sh --connect <the DMZ node or 127.0.0.1>`. A
    release already installed is not installed again (`--reinstall`).

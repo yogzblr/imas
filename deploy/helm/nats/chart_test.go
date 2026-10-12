@@ -21,6 +21,8 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/yogzblr/imas/internal/envoycheck"
 )
 
 type obj = map[string]any
@@ -869,6 +871,7 @@ func TestRoutesMatchReferenceEnvoyConfig(t *testing.T) {
 			{"typed_per_filter_config", "envoy.filters.http.jwt_authn", "disabled"},
 			{"typed_per_filter_config", "envoy.filters.http.jwt_authn", "requirement_name"},
 			{"typed_per_filter_config", "envoy.filters.http.local_ratelimit", "token_bucket"},
+			{"route", "retry_policy"},
 		} {
 			w, g := get(want, path...), get(got, path...)
 			if !reflect.DeepEqual(w, g) {
@@ -881,6 +884,44 @@ func TestRoutesMatchReferenceEnvoyConfig(t *testing.T) {
 		if !reflect.DeepEqual(refJA[k], gotJA[k]) {
 			t.Errorf("jwt_authn %s: chart %v, reference %v", k, gotJA[k], refJA[k])
 		}
+	}
+}
+
+// TestEnrollRoutesDoNotRetry503: Envoy must pass farmer's 503 on
+// /v1/enroll and /v1/refresh, and its Retry-After, to the sprout
+// (internal/pki/enrollclient.go), never retry it itself. Checked for the
+// chart with every ci values file and for the reference
+// deploy/envoy/envoy.yaml.
+func TestEnrollRoutesDoNotRetry503(t *testing.T) {
+	files, err := filepath.Glob(filepath.Join(chartDir(t), "ci", "*.yaml"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no ci values files: %v", err)
+	}
+	for _, f := range files {
+		cfg := envoyConfig(t, mustRender(t, "-f", f))
+		for _, p := range envoycheck.BusyRetryProblems(cfg) {
+			t.Errorf("%s: %s", filepath.Base(f), p)
+		}
+		// Not merely absent: the routes carry the explicit policy.
+		for _, r := range get(httpConnManager(cfg), "route_config", "virtual_hosts", 0, "routes").([]any) {
+			m := get(r, "match").(obj)
+			if m["prefix"] == "/v1/enroll" || m["path"] == "/v1/refresh" {
+				if on := get(r, "route", "retry_policy", "retry_on"); on != "connect-failure,refused-stream" {
+					t.Errorf("%s: %v retry_on %v", filepath.Base(f), m, on)
+				}
+			}
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(chartDir(t), "..", "..", "envoy", "envoy.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ref obj
+	if err := yaml.Unmarshal(raw, &ref); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range envoycheck.BusyRetryProblems(ref) {
+		t.Errorf("deploy/envoy/envoy.yaml: %s", p)
 	}
 }
 

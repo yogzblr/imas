@@ -476,6 +476,8 @@ install_dmz() {
 	lite_log "dmz: uat/hub/dmz/install.sh $release_tag"
 	"$DMZ_INSTALL" --kubeconfig "$(lite_kubeconfig dmz)" --endpoints "$LITE_STATE/endpoints.json" \
 		--release-tag "$release_tag" --seeds-from-kubeconfig "$(lite_kubeconfig core)" \
+		--loader-seed "${UAT_SEEDS_DIR:-$LITE_STATE/core/sensitive/seeds}/bus-loader-user.nk" \
+		--accounts-reader-dir "$LITE_STATE/core/sensitive/s3/accounts-reader" \
 		--workdir "$LITE_STATE/dmz" || lite_die "dmz: uat/hub/dmz/install.sh failed"
 	lite_stage_mark dmz "$release_tag"
 }

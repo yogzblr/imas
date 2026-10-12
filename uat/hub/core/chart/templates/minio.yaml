@@ -7,6 +7,11 @@
 # (imas-uat-minio, values key "minio") so nothing that names them changes.
 # The volume has its own name (imas-uat-rustfs-data): a volume MinIO wrote
 # (uid 1000) is not writable by RustFS (uid 10001), so it must not be reused.
+# The S3 port is also a hostPort (minio.hostPort, 9000): the DMZ bus's
+# account loader reads the accounts bucket at <core private IP>:9000 with a
+# read-only credential scoped to that bucket (design D22). The minio
+# NetworkPolicy admits the DMZ private address on it, and nothing else from
+# outside the cluster.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -70,7 +75,7 @@ spec:
             - name: RUSTFS_OBS_LOG_DIRECTORY
               value: /logs
           ports:
-            - { name: s3, containerPort: 9000 }
+            - { name: s3, containerPort: 9000, hostPort: {{ .Values.minio.hostPort }} }
           readinessProbe:
             httpGet: { path: /health/ready, port: s3 }
             periodSeconds: 10

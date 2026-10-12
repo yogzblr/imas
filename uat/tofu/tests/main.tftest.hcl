@@ -283,17 +283,18 @@ run "network_rules" {
   }
 
   assert {
-    condition     = toset([for r in azurerm_network_security_group.subnet["core"].security_rule : r.name if r.direction == "Inbound" && r.access == "Allow"]) == toset(["AllowBastionSshKubeIn", "AllowDmzFarmerApiIn", "AllowRunnerHttpsIn"])
-    error_message = "core: inbound only from the Bastion, the DMZ and the runner"
+    condition     = toset([for r in azurerm_network_security_group.subnet["core"].security_rule : r.name if r.direction == "Inbound" && r.access == "Allow"]) == toset(["AllowBastionSshKubeIn", "AllowDmzFarmerApiIn", "AllowRunnerHttpsIn", "AllowDmzAccountsStoreIn"])
+    error_message = "core: inbound only from the Bastion, the DMZ (farmer's API, the accounts store) and the runner"
   }
 
   assert {
     condition = alltrue([for r in azurerm_network_security_group.subnet["core"].security_rule :
       (r.name != "AllowRunnerHttpsIn" || (r.source_address_prefix == "203.0.113.7/32" && r.destination_port_range == "443")) &&
       (r.name != "AllowDmzFarmerApiIn" || (r.source_address_prefix == "10.60.1.0/24" && r.destination_port_range == "5405")) &&
+      (r.name != "AllowDmzAccountsStoreIn" || (r.source_address_prefix == "10.60.1.0/24" && r.destination_port_range == "9000")) &&
       (r.name != "AllowBusOut" || (r.destination_address_prefix == "10.60.1.0/24" && r.destination_port_range == "8442"))
     ])
-    error_message = "core: runner on 443, DMZ on 5405, out to the bus node port 8442"
+    error_message = "core: runner on 443, DMZ on 5405 and the accounts store 9000, out to the bus node port 8442"
   }
 
   assert {
@@ -306,9 +307,17 @@ run "network_rules" {
       (r.name != "AllowCoreBusIn" || (r.source_address_prefix == "10.60.2.0/24" && r.destination_port_range == "8442")) &&
       (r.name != "AllowSproutsEnvoyPrivateIn" || (r.source_address_prefix == "10.60.3.0/24" && r.destination_port_range == "8443")) &&
       (r.name != "AllowRunnerEnvoyIn" || (r.source_address_prefix == "203.0.113.7/32" && r.destination_port_range == "8443")) &&
-      (r.name != "AllowFarmerApiOut" || (r.destination_address_prefix == "10.60.2.0/24" && r.destination_port_range == "5405"))
+      (r.name != "AllowFarmerApiOut" || (r.destination_address_prefix == "10.60.2.0/24" && r.destination_port_range == "5405")) &&
+      (r.name != "AllowAccountsStoreOut" || (r.destination_address_prefix == "10.60.2.0/24" && r.destination_port_range == "9000"))
     ])
-    error_message = "dmz: core in on 8442, sprouts and runner in on 8443, out to farmer on 5405"
+    error_message = "dmz: core in on 8442, sprouts and runner in on 8443, out to farmer on 5405 and the accounts store on 9000"
+  }
+
+  # Design D22: exactly two DMZ-to-core paths, farmer's API and the accounts
+  # store, and nothing else.
+  assert {
+    condition     = toset([for r in azurerm_network_security_group.subnet["dmz"].security_rule : r.name if r.direction == "Outbound" && r.access == "Allow"]) == toset(["AllowFarmerApiOut", "AllowAccountsStoreOut"])
+    error_message = "dmz: outbound only to farmer's API and the accounts store"
   }
 
   # No workload NSG admits SSH, WinRM or the Kubernetes API from anything but

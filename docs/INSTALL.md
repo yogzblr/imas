@@ -339,7 +339,11 @@ If the token came from the environment or the flag, the sprout can't delete
 it and logs a warning: remove it yourself. A failed enrollment is retried
 with backoff, and retries don't spend another use of the key. Every failure
 looks the same from outside (`401 enrollment_failed`); farmer's log has the
-reason.
+reason. The one exception is a busy answer: `503` with a `Retry-After`,
+when another farmer replica is minting this sprout's User JWT. The sprout
+waits that long (5 s if the header is missing, at most 60 s, plus up to 20
+percent jitter), logs `server busy (lease held), retrying in Ns`, and tries
+again, up to 5 times per request.
 
 **Link it to your asset.** To address the sprout through the SaaS API, link
 it to your CloudXP asset id:

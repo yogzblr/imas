@@ -9,8 +9,11 @@
 //	    of docs/design/imas-1m-scale-plan.md);
 //	(d) reports bus and core memory and CPU from the metrics available.
 //
-// Without -servers it starts its own one-node bus as a child process.
-// -smoke is the CI preset. docs/loadtest.md is the manual: how to run at
+// Without -servers it starts its own one-node bus as a child process and
+// mints its sprouts' credentials from a trust chain it holds in memory.
+// With -servers it holds no trust key: it mints enrolment keys for an
+// existing tenant through the SaaS API and enrolls every sprout through
+// farmer's POST /v1/enroll (enroll.go). -smoke is the CI preset. docs/loadtest.md is the manual: how to run at
 // 10k and 100k, several generators, and what a result does and does not
 // prove.
 package main
@@ -26,6 +29,7 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -34,8 +38,11 @@ import (
 	"syscall"
 	"time"
 
+	nats "github.com/nats-io/nats.go"
+
 	"github.com/yogzblr/imas/internal/facts"
 	"github.com/yogzblr/imas/internal/natsretry"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 func main() {
@@ -56,14 +63,23 @@ func main() {
 type options struct {
 	Smoke bool
 
-	Sprouts             int
-	Servers             string
-	CAFile              string
-	OperatorSigningSeed string
-	SysAccountSeed      string
-	Tenant              string
-	IDPrefix            string
-	LockOut             bool
+	Sprouts  int
+	Servers  string
+	CAFile   string
+	Tenant   string
+	IDPrefix string
+
+	// The enrolment path (-servers).
+	SaasAPIURL       string
+	SaasAPICA        string
+	InternalAuthFile string
+	TokenFile        string
+	FarmerURL        string
+	FarmerCA         string
+	EnrollWorkers    int
+	EnrollRetries    int
+	EnrollKeyUses    int
+	EnrollKeyHours   int
 
 	ConnectRate    float64
 	ConnectWorkers int
@@ -132,12 +148,20 @@ func defineFlags(fs *flag.FlagSet, o *options) {
 
 	fs.IntVar(&o.Sprouts, "sprouts", 1000, "simulated sprout connections this generator opens")
 	fs.StringVar(&o.Servers, "servers", "", "comma-separated bus URLs (tls://host:4222); empty starts a local one-node bus")
-	fs.StringVar(&o.CAFile, "ca", "", "with -servers: PEM CA the bus certificates chain to")
-	fs.StringVar(&o.OperatorSigningSeed, "operator-signing-seed-file", "", "with -servers: the operator signing seed (IMAS_NATS_OPERATOR_SIGNING_SEED_FILE)")
-	fs.StringVar(&o.SysAccountSeed, "sys-account-seed-file", "", "with -servers: the SYS account seed (IMAS_NATS_SYS_ACCOUNT_SEED_FILE)")
-	fs.StringVar(&o.Tenant, "tenant", "", "load-test tenant (Account) name; default loadtest-<random>")
+	fs.StringVar(&o.CAFile, "ca", "", "with -servers: PEM CA the bus certificates (or Envoy's, for wss://) chain to")
+	fs.StringVar(&o.Tenant, "tenant", "", "with -servers: the existing, active tenant ID (t_...) to enroll the sprouts in; local bus: the load-test Account name, default loadtest-<random>")
 	fs.StringVar(&o.IDPrefix, "id-prefix", "", "sprout ID prefix; IDs are <prefix>-<n>; default lt<random>")
-	fs.BoolVar(&o.LockOut, "lockout", true, "with -servers: lock the load-test Account out when done, as a tenant deprovision does")
+
+	fs.StringVar(&o.SaasAPIURL, "saasapi-url", "", "with -servers: SaaS API base URL (https://host[:port]) to mint enrolment keys through")
+	fs.StringVar(&o.SaasAPICA, "saasapi-ca", "", "with -servers: PEM CA for the SaaS API's certificate; default the system roots")
+	fs.StringVar(&o.InternalAuthFile, "internal-auth-file", "", "with -servers: file holding the SaaS API's X-Internal-Auth secret")
+	fs.StringVar(&o.TokenFile, "token-file", "", "with -servers: file holding a bearer token whose organization.id is -tenant (re-read on every request)")
+	fs.StringVar(&o.FarmerURL, "farmer-url", "", "with -servers: base URL sprouts enroll at (the DMZ Envoy, https://host:port, or farmer's API directly)")
+	fs.StringVar(&o.FarmerCA, "farmer-ca", "", "with -servers: PEM CA a sprout pins for -farmer-url (its sproutrootca); default the system roots")
+	fs.IntVar(&o.EnrollWorkers, "enroll-workers", 8, "with -servers: sprouts enrolled in parallel")
+	fs.IntVar(&o.EnrollRetries, "enroll-retries", 2, "with -servers: retries of a sprout whose enrolment failed, with the same keys and token")
+	fs.IntVar(&o.EnrollKeyUses, "enroll-key-uses", 1, "with -servers: sprouts per minted enrolment key (1 to 10000); 1 is a one-time key per sprout")
+	fs.IntVar(&o.EnrollKeyHours, "enroll-key-hours", 1, "with -servers: lifetime of each minted enrolment key in hours (1 to 720); every key is revoked when the run ends")
 
 	fs.Float64Var(&o.ConnectRate, "connect-rate", 0, "new connections per second during the ramp; 0 for as fast as -connect-workers allow")
 	fs.IntVar(&o.ConnectWorkers, "connect-workers", 128, "connections dialled in parallel during the ramp")
@@ -166,7 +190,7 @@ func defineFlags(fs *flag.FlagSet, o *options) {
 	fs.DurationVar(&o.SampleInterval, "sample-interval", 5*time.Second, "how often to sample bus varz and /proc")
 	fs.Var(&o.Procs, "proc", "label=pid of a local process to sample from /proc, e.g. core=1234 (repeatable)")
 	fs.StringVar(&o.JSON, "json", "", "write the full result as JSON here (input to 'loadtest merge')")
-	fs.StringVar(&o.WorkDir, "workdir", "", "local bus working directory (certificates, seeds, bus.log); default a new temporary one")
+	fs.StringVar(&o.WorkDir, "workdir", "", "local bus working directory (certificates, trust directory, bus.log); default a new temporary one")
 	fs.StringVar(&o.BusHost, "bus-host", "127.0.0.1", "local bus listen address")
 	fs.IntVar(&o.BusPort, "bus-port", 0, "local bus port; 0 picks a free one")
 	fs.IntVar(&o.BusMaxConn, "bus-max-connections", 0, "local bus: its busmaxconnections (0 for nats-server's default of 65,536)")
@@ -232,8 +256,27 @@ func (o *options) validate() error {
 	if o.Sprouts < 1 {
 		return errors.New("-sprouts must be at least 1")
 	}
-	if o.Servers != "" && (o.CAFile == "" || o.OperatorSigningSeed == "" || o.SysAccountSeed == "") {
-		return errors.New("-servers needs -ca, -operator-signing-seed-file and -sys-account-seed-file")
+	if o.Servers != "" {
+		if o.CAFile == "" || o.SaasAPIURL == "" || o.InternalAuthFile == "" || o.TokenFile == "" || o.FarmerURL == "" || o.Tenant == "" {
+			return errors.New("-servers needs -ca, -tenant, -saasapi-url, -internal-auth-file, -token-file and -farmer-url")
+		}
+		if !pki.IsValidTenantID(o.Tenant) {
+			return fmt.Errorf("-tenant %q is not a tenant ID", o.Tenant)
+		}
+		for _, u := range []struct{ flag, v string }{{"-saasapi-url", o.SaasAPIURL}, {"-farmer-url", o.FarmerURL}} {
+			if p, err := url.Parse(u.v); err != nil || p.Scheme != "https" || p.Host == "" {
+				return fmt.Errorf("%s %q: want an https:// URL", u.flag, u.v)
+			}
+		}
+		if o.EnrollKeyUses < 1 || o.EnrollKeyUses > 10000 {
+			return errors.New("-enroll-key-uses must be 1 to 10000 (the SaaS API's max_uses range)")
+		}
+		if o.EnrollKeyHours < 1 || o.EnrollKeyHours > 720 {
+			return errors.New("-enroll-key-hours must be 1 to 720 (the SaaS API's expires_in_hours range)")
+		}
+		if o.EnrollWorkers < 1 || o.EnrollRetries < 0 {
+			return errors.New("-enroll-workers must be at least 1 and -enroll-retries not negative")
+		}
 	}
 	if o.Restart == "" {
 		o.Restart = "none"
@@ -395,9 +438,11 @@ func run(ctx context.Context, o *options) (*result, error) {
 	}
 	res := &result{Generators: []string{host}, Sprouts: o.Sprouts, StartedAt: time.Now()}
 
-	// Trust chain and bus.
+	// Trust chain, bus and the sprouts' credentials.
 	var (
 		tr      *trust
+		tf      *tenantFixture
+		creds   []sproutCred
 		servers []string
 		pool    *x509.CertPool
 		bus     *localBus
@@ -414,11 +459,11 @@ func run(ctx context.Context, o *options) (*result, error) {
 		} else if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, err
 		}
-		var seeds seedFiles
-		if tr, seeds, err = newLocalTrust(dir); err != nil {
+		var env busEnv
+		if tr, env, err = newLocalTrust(dir); err != nil {
 			return nil, fmt.Errorf("generating the trust chain: %w", err)
 		}
-		if bus, pool, err = newLocalBus(dir, o.BusHost, o.BusPort, seeds, o.BusTrace); err != nil {
+		if bus, pool, err = newLocalBus(dir, o.BusHost, o.BusPort, env, o.BusTrace); err != nil {
 			return nil, err
 		}
 		bus.maxConn = o.BusMaxConn
@@ -430,9 +475,6 @@ func run(ctx context.Context, o *options) (*result, error) {
 		servers = []string{bus.URL()}
 	} else {
 		res.Mode = "external"
-		if tr, err = loadTrust(o.OperatorSigningSeed, o.SysAccountSeed); err != nil {
-			return nil, err
-		}
 		pem, err := os.ReadFile(o.CAFile)
 		if err != nil {
 			return nil, err
@@ -450,44 +492,52 @@ func run(ctx context.Context, o *options) (*result, error) {
 	res.Servers = servers
 	tlsCfg := &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 
-	// Fixture identities.
-	tf, err := tr.newTenant(o.Tenant)
-	if err != nil {
-		return nil, err
+	if tr != nil {
+		// Fixture identities, pushed to the local bus as core pushes an
+		// Account.
+		if tf, err = tr.newTenant(o.Tenant); err != nil {
+			return nil, err
+		}
+		logf("minting %d sprout identities in tenant %s (Account %s)", o.Sprouts, tf.name, tf.accountPub)
+		t0 := time.Now()
+		if creds, err = tf.mintSprouts(o.IDPrefix, o.Sprouts); err != nil {
+			return nil, err
+		}
+		logf("minted in %s", time.Since(t0).Round(time.Millisecond))
+		logf("pushing the load-test Account to %s", strings.Join(servers, ","))
+		if err := tr.pushAccount(servers, tlsCfg, tf.accountJWT); err != nil {
+			return nil, fmt.Errorf("pushing the load-test Account: %w", err)
+		}
+	} else {
+		// The real enrolment path: no trust key in this process.
+		c, enr, revoke, err := enrollFleet(ctx, o)
+		if err != nil {
+			return nil, fmt.Errorf("enrolment: %w", err)
+		}
+		defer revoke()
+		creds, res.Enroll = c, enr
 	}
-	logf("minting %d sprout identities in tenant %s (Account %s)", o.Sprouts, tf.name, tf.accountPub)
-	t0 := time.Now()
-	creds, err := tf.mintSprouts(o.IDPrefix, o.Sprouts)
-	if err != nil {
-		return nil, err
+	if len(creds) == 0 {
+		res.Connect = connectResult{Series: newSeries()}
+		res.addEnrollFailures()
+		res.FinishedAt = time.Now()
+		res.evaluate(o.thresholds())
+		return res, nil
 	}
 	if err := pkiSanity(creds[0]); err != nil {
 		return nil, err
 	}
-	logf("minted in %s", time.Since(t0).Round(time.Millisecond))
-	logf("pushing the load-test Account to %s", strings.Join(servers, ","))
-	if err := tr.pushAccount(servers, tlsCfg, tf.accountJWT); err != nil {
-		return nil, fmt.Errorf("pushing the load-test Account: %w", err)
-	}
-	if o.Servers != "" && o.LockOut {
-		defer func() {
-			locked, err := tf.lockedOutJWT(tr)
-			if err == nil {
-				err = tr.pushAccount(servers, tlsCfg, locked)
-			}
-			if err != nil {
-				logf("WARNING: could not lock the load-test Account %s out: %v", tf.accountPub, err)
-			} else {
-				logf("locked the load-test Account out")
-			}
-		}()
-	}
 
-	sys, err := connectSys(servers, tlsCfg, tr, tf.accountJWT, logf)
-	if err != nil {
-		return nil, fmt.Errorf("SYS connection: %w", err)
+	// Bus varz needs a SYS user, which only the local bus's trust chain
+	// can mint; a deployed bus's nodes are watched with the cluster's own
+	// tools (docs/loadtest.md, "Core metrics").
+	var sys *nats.Conn
+	if tr != nil {
+		if sys, err = connectSys(servers, tlsCfg, tr, tf.accountJWT, logf); err != nil {
+			return nil, fmt.Errorf("SYS connection: %w", err)
+		}
+		defer sys.Close()
 	}
-	defer sys.Close()
 	targets := []*procTarget{{Label: "generator", PID: os.Getpid}}
 	if bus != nil {
 		targets = append(targets, &procTarget{Label: "bus (local)", PID: bus.PID})
@@ -528,26 +578,32 @@ func run(ctx context.Context, o *options) (*result, error) {
 
 	// (a) connect and hold.
 	smp.SetPhase("connect")
-	logf("connecting %d sprouts (rate %s, %d workers)", o.Sprouts, rateString(o.ConnectRate), o.ConnectWorkers)
+	logf("connecting %d sprouts (rate %s, %d workers)", len(creds), rateString(o.ConnectRate), o.ConnectWorkers)
 	res.Connect = fl.connectAll(ctx, o.ConnectRate, o.ConnectWorkers, o.ConnectRetries)
 	logf("connected %d of %d in %.1fs (%.0f/s)", res.Connect.Connected, res.Connect.Target, res.Connect.Seconds, res.Connect.RatePerSec)
+	res.addEnrollFailures()
 	if res.Connect.Connected == 0 {
 		res.FinishedAt = time.Now()
 		res.evaluate(o.thresholds())
 		return res, nil
 	}
 
-	req, err := newRequester(servers, tlsCfg, tf, o.Requesters)
-	if err != nil {
-		return nil, err
+	var probe pinger = rttProbe{}
+	var req *requester
+	res.Probe = probeBusRTT
+	if tf != nil {
+		if req, err = newRequester(servers, tlsCfg, tf, o.Requesters); err != nil {
+			return nil, err
+		}
+		defer req.Close()
+		probe, res.Probe = req, probeTestPing
 	}
-	defer req.Close()
 
 	// (b) latency while holding.
 	smp.SetPhase("hold")
 	fl.resetEvents()
-	logf("holding for %s, test.ping at %.0f/s", o.Hold, o.PingRate)
-	res.Hold = pingWindow(ctx, "hold", req, fl, o.Hold, o.PingRate, o.PingConcurrency, o.PingTimeout)
+	logf("holding for %s, %s at %.0f/s", o.Hold, res.Probe, o.PingRate)
+	res.Hold = pingWindow(ctx, "hold", probe, fl, o.Hold, o.PingRate, o.PingConcurrency, o.PingTimeout)
 	res.HoldDrops = int(fl.disconnects.Load())
 	logf("hold: p50 %.1fms p95 %.1fms p99 %.1fms, %d of %d answered", res.Hold.P50, res.Hold.P95, res.Hold.P99, res.Hold.OK, res.Hold.Sent)
 
@@ -556,10 +612,12 @@ func run(ctx context.Context, o *options) (*result, error) {
 		smp.SetPhase("restart")
 		res.Restart = restartWindow(ctx, o, fl, bus)
 		if o.After > 0 && ctx.Err() == nil && res.Restart.NotReconnected == 0 {
-			waitConnected(ctx, req, 30*time.Second)
+			if req != nil {
+				waitConnected(ctx, req, 30*time.Second)
+			}
 			smp.SetPhase("after")
-			logf("after the restart: test.ping for %s", o.After)
-			res.After = pingWindow(ctx, "after restart", req, fl, o.After, o.PingRate, o.PingConcurrency, o.PingTimeout)
+			logf("after the restart: %s for %s", res.Probe, o.After)
+			res.After = pingWindow(ctx, "after restart", probe, fl, o.After, o.PingRate, o.PingConcurrency, o.PingTimeout)
 			logf("after: p50 %.1fms p95 %.1fms p99 %.1fms, %d of %d answered", res.After.P50, res.After.P95, res.After.P99, res.After.OK, res.After.Sent)
 		}
 	}

@@ -9,6 +9,8 @@ docs/status/README.md for the fragment format.
 
     scripts/status/rollup.py --date 2026-10-11     # apply one day
     scripts/status/rollup.py --check               # validate every fragment
+                                                   # and dry-run the days not
+                                                   # yet rolled up
 
 Standard library only. Applying a day twice gives the same result.
 """
@@ -77,9 +79,16 @@ def validate(path, b):
         raise StatusError(f"{path}: block needs 'change' or 'item'")
 
 
+def fragment_order(f):
+    """A day's fragments apply in file-name order, ignoring case: z-E4.md
+    after z-build-summary.md, as the names read (plain sorting would put
+    every capital letter first)."""
+    return (f.name.casefold(), f.name)
+
+
 def load_day(root, date):
     d = root / "docs" / "status" / "days" / date
-    files = sorted(d.glob("*.md")) if d.is_dir() else []
+    files = sorted(d.glob("*.md"), key=fragment_order) if d.is_dir() else []
     return [(f, parse_fragment(f)) for f in files]
 
 
@@ -212,15 +221,45 @@ def rollup(root, date):
     return warnings
 
 
+def last_rolled(lines):
+    """The date of the last roll-up BUILD-STATUS.md records, or ""."""
+    for l in lines:
+        if LAST_RE.match(l):
+            m = re.search(r"\d{4}-\d{2}-\d{2}", l)
+            return m.group(0) if m else ""
+    return ""
+
+
 def check(root):
+    """Validate every fragment, then apply the days not yet rolled up, in
+    order, to a copy of BUILD-STATUS.md, so a fragment that would stop the
+    roll-up (an update of a row that does not exist yet at that point)
+    fails here too. Nothing is written."""
     n = 0
     base = root / "docs" / "status" / "days"
+    days = []
     for d in sorted(base.glob("*")) if base.is_dir() else []:
         if not DATE_RE.match(d.name):
             raise StatusError(f"{d}: directory name is not a date")
-        for f in sorted(d.glob("*.md")):
+        for f in sorted(d.glob("*.md"), key=fragment_order):
             parse_fragment(f)
             n += 1
+        days.append(d.name)
+    bs = root / "docs" / "BUILD-STATUS.md"
+    if not bs.is_file():
+        raise StatusError(f"{bs} not found: the roll-up needs it")
+    lines = bs.read_text().rstrip("\n").split("\n")
+    done = last_rolled(lines)
+    for date in days:
+        if date <= done:
+            continue
+        for f, blocks in load_day(root, date):
+            for b in blocks:
+                if "item" in b:
+                    try:
+                        apply_item(lines, b, lambda _w: None)
+                    except StatusError as e:
+                        raise StatusError(f"{f}: {e}")
     return n
 
 

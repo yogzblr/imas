@@ -24,8 +24,15 @@ type result struct {
 	StartedAt  time.Time `json:"started_at"`
 	FinishedAt time.Time `json:"finished_at"`
 
-	Connect connectResult  `json:"connect"`
-	Hold    *latencyResult `json:"hold"`
+	// Enroll is the enrolment phase of a run against a deployed bus;
+	// nil for the local bus, whose sprouts are minted (fixture.go).
+	Enroll  *enrollResult `json:"enroll,omitempty"`
+	Connect connectResult `json:"connect"`
+	// Probe is the latency probe the windows measured: probeTestPing
+	// (requester -> bus -> sprout and back) or probeBusRTT (a sprout's
+	// own NATS PING to its bus node); see ping.go.
+	Probe string         `json:"probe,omitempty"`
+	Hold  *latencyResult `json:"hold"`
 	// HoldDrops is sprouts that lost their connection during the hold,
 	// when nothing was restarted.
 	HoldDrops int            `json:"hold_drops"`
@@ -42,6 +49,24 @@ type result struct {
 	SlowConsumers      int64 `json:"client_slow_consumers"`
 
 	Checks []check `json:"checks"`
+}
+
+// addEnrollFailures counts the sprouts that never enrolled as sprouts
+// that never connected, under their enrolment reason, so the "sprouts
+// not connected" check covers them.
+func (r *result) addEnrollFailures() {
+	e := r.Enroll
+	if e == nil || e.Failed == 0 {
+		return
+	}
+	r.Connect.Target += e.Failed
+	r.Connect.NotConnected += e.Failed
+	if r.Connect.Reasons == nil {
+		r.Connect.Reasons = map[string]int{}
+	}
+	for k, v := range e.Reasons {
+		r.Connect.Reasons["not enrolled: "+k] += v
+	}
 }
 
 // restartResult is the bus restart window: the Phase 2 exit criterion in
@@ -153,6 +178,15 @@ func (r *result) writeText(w io.Writer) {
 	p("")
 	p("imas load test: %d sprouts, %s bus %s, generator(s) %s", r.Sprouts, r.Mode, strings.Join(r.Servers, ","), strings.Join(r.Generators, ","))
 	p("")
+	if e := r.Enroll; e != nil {
+		p("(a0) enrolment (SaaS API keys, POST /v1/enroll)")
+		p("    enrolled       %d of %d (%d failed), %d enrolment keys minted", e.Enrolled, e.Target, e.Failed, e.Keys)
+		p("    rate           %.1f/s over %.1fs", e.RatePerSec, e.Seconds)
+		for _, k := range sortedKeys(e.Reasons) {
+			p("                   %6d  %s", e.Reasons[k], k)
+		}
+		p("")
+	}
 	c := r.Connect
 	p("(a) connect")
 	p("    connected      %d of %d (%d never connected)", c.Connected, c.Target, c.NotConnected)
@@ -165,7 +199,12 @@ func (r *result) writeText(w io.Writer) {
 		p("    dropped during hold  %d", r.HoldDrops)
 	}
 	p("")
-	p("(b) test.ping round trip (requirement 10: %s)", requirement10)
+	switch r.Probe {
+	case probeBusRTT:
+		p("(b) bus round trip, a NATS PING from a sprout's own connection (no test.ping requester without a trust key; requirement 10: %s)", requirement10)
+	default:
+		p("(b) test.ping round trip (requirement 10: %s)", requirement10)
+	}
 	for _, l := range []*latencyResult{r.Hold, r.After} {
 		if l == nil {
 			continue
@@ -198,7 +237,11 @@ func (r *result) writeText(w io.Writer) {
 	}
 	p("(d) resources")
 	if len(r.Bus) == 0 {
-		p("    bus varz       none received")
+		if r.Mode == "external" {
+			p("    bus varz       not read: it needs a SYS user, which only a trust key can mint; watch the bus with the cluster's own tools")
+		} else {
+			p("    bus varz       none received")
+		}
 	}
 	for _, s := range r.Bus {
 		p("    bus %-10s mem peak %s (last %s), cpu peak %.0f%% %s, conns peak %d, subs peak %d, slow consumers %d",
@@ -271,7 +314,7 @@ func readResult(path string) (*result, error) {
 // full reconnect, and bus samples are kept per node from whichever
 // generator saw the most of them.
 func mergeResults(rs []*result) *result {
-	out := &result{Mode: rs[0].Mode, Servers: rs[0].Servers}
+	out := &result{Mode: rs[0].Mode, Servers: rs[0].Servers, Probe: rs[0].Probe}
 	out.Connect.Series = newSeries()
 	holdH, afterH := &hist{}, &hist{}
 	var hold, after *latencyResult
@@ -286,6 +329,26 @@ func mergeResults(rs []*result) *result {
 		}
 		if r.FinishedAt.After(out.FinishedAt) {
 			out.FinishedAt = r.FinishedAt
+		}
+		if e := r.Enroll; e != nil {
+			if out.Enroll == nil {
+				out.Enroll = &enrollResult{}
+			}
+			oe := out.Enroll
+			oe.Target += e.Target
+			oe.Enrolled += e.Enrolled
+			oe.Failed += e.Failed
+			oe.Keys += e.Keys
+			oe.Seconds = max(oe.Seconds, e.Seconds)
+			for k, v := range e.Reasons {
+				if oe.Reasons == nil {
+					oe.Reasons = map[string]int{}
+				}
+				oe.Reasons[k] += v
+			}
+			if oe.Seconds > 0 {
+				oe.RatePerSec = float64(oe.Enrolled) / oe.Seconds
+			}
 		}
 		c := r.Connect
 		out.Connect.Target += c.Target

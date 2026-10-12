@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net"
+	"net/http"
 	"runtime"
 	"strings"
 	"sync"
@@ -169,16 +170,23 @@ func (f *fleet) setLive(i int, v bool) {
 // Live is the number of sprouts connected now.
 func (f *fleet) Live() int { return int(f.liveCount.Load()) }
 
-// randomLive returns the ID of a connected sprout, or "" if it found none
-// in a few tries.
-func (f *fleet) randomLive() string {
+// randomLive returns the index of a connected sprout, or -1 if it found
+// none in a few tries.
+func (f *fleet) randomLive() int {
 	for range 16 {
 		i := rand.IntN(len(f.creds))
 		if f.live[i].Load() {
-			return f.creds[i].ID
+			return i
 		}
 	}
-	return ""
+	return -1
+}
+
+// conn is sprout i's connection, nil before its first connect.
+func (f *fleet) conn(i int) *nats.Conn {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.conns[i]
 }
 
 func (f *fleet) natsOptions(i int) []nats.Option {
@@ -213,6 +221,13 @@ func (f *fleet) natsOptions(i int) []nats.Option {
 			}
 		}),
 		nats.Timeout(f.opts.ConnectTimeout),
+	}
+	if c.Gateway != "" {
+		// pki.LoadSproutBus: over wss:// (Envoy) the gateway JWT goes as
+		// a bearer token on every websocket handshake. Envoy refuses a
+		// reconnect once it has expired; the harness does not refresh it.
+		h := http.Header{"Authorization": []string{"Bearer " + c.Gateway}}
+		opts = append(opts, nats.WebSocketConnectionHeaders(h))
 	}
 	if len(f.opts.SourceIPs) > 0 {
 		ip := f.opts.SourceIPs[i%len(f.opts.SourceIPs)]

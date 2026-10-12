@@ -29,7 +29,7 @@ chart can still apply these by hand, as before.
 |---|---|
 | `farmer-deployment-nats-seeds.patch.yaml` | Volume, mount, and env vars for farmer's Deployment (part 1) |
 | `saasapi-credential-publish-job.yaml` | The Job, its ServiceAccount, and its NetworkPolicy (part 2) |
-| `externalsecrets.yaml` | ESO wiring for the seeds and for the published JWT |
+| `externalsecrets.yaml` | ESO wiring for the seeds, farmer's NKey and the published JWT |
 | `values.job-reconcile.yaml` | Values block for the job reconcile window (see the last section) |
 | `deployment.env.job-reconcile.yaml` | Template fragment to paste under the farmer container's `env:` list |
 
@@ -54,6 +54,10 @@ exact patch is in `farmer-deployment-nats-seeds.patch.yaml`;
 | Volume and mount | `nats-trust`: ConfigMap `imas-nats-trust` at `/var/run/imas/nats-trust`, `readOnly: true`; `IMAS_NATS_TRUST_DIR` |
 | Env vars | `IMAS_NATSSIGN_OPENBAO_*`, role `imas-farmer-natssign` |
 | Secret source | ESO `ExternalSecret` `imas-farmer-nats-seeds`, which reads the ops-owned seed path in OpenBao (properties `sys_user`, `saasapi_user`) |
+| Volume | `farmer-nkey`: `secret.secretName: imas-farmer-nkey`, `items`: `farmer.nk`, `defaultMode: 0440` (farmer's NKey, one seed shared by every replica; `farmer.nkeySecret` in the chart) |
+| Mount | `/var/run/secrets/imas/farmer-nkey`, `readOnly: true` |
+| Env var | `IMAS_FARMER_NKEY_SEED_FILE=/var/run/secrets/imas/farmer-nkey/farmer.nk` (required, never generated) |
+| Secret source | ESO `ExternalSecret` `imas-farmer-nkey`, from the same seed path, property `farmer_nkey`; a Secret of its own, which saasapi and the Jobs never mount |
 
 The old `operator`, `operator_signing`, `sys_account`, `tenant` and
 `tenant_signing` seeds are not read by anything; delete them from the
