@@ -166,9 +166,9 @@ the matching `_SEED_FILE` variable. It never uses the raw `_SEED` form,
 never renders a Secret, and projects only the listed keys, so farmer's
 `sys-user.nk` or `saasapi-user.nk` stay out of the DMZ even if the Secret
 has them. The removed trust chain seeds (`OPERATOR`, `OPERATOR_SIGNING`,
-`SYS_ACCOUNT`, `TENANT`, `TENANT_SIGNING`) are refused: nothing reads
-them, and they must not be left in the DMZ. Delete them from the Secret
-and from OpenBao.
+`SYS_ACCOUNT`, `TENANT`, `TENANT_SIGNING`) are read by nothing and must
+not be left in the DMZ: drop them from `natsSeeds`, the Secret and
+OpenBao.
 
 The bus writes nothing to its PVC but the resolver's JWT store.
 
@@ -555,7 +555,7 @@ sees that address rather than the node's.
 |---|---|---|
 | `natsSeeds.secretName` | `imas-farmer-nats-seeds` | Existing Secret with the seeds. Required when `seeds` lists any. |
 | `natsSeeds.mountPath` | `/var/run/secrets/imas/nats` | Where the seed files are mounted. |
-| `natsSeeds.seeds` | `{}` | `NAME: secret-key`. Only `BUS_FENCE_USER` (e.g. `bus-fence-user.nk`, `IMAS_NATS_BUS_FENCE_USER_SEED_FILE`), required when `bus.replicaCount > 1`. The removed trust chain seeds are refused. |
+| `natsSeeds.seeds` | `{}` | `NAME: secret-key`. Only `BUS_FENCE_USER` (e.g. `bus-fence-user.nk`, `IMAS_NATS_BUS_FENCE_USER_SEED_FILE`), required when `bus.replicaCount > 1`. Don't list the removed trust chain seeds. |
 | `natsSeeds.extraSeeds` | `{}` | More `NAME: secret-key` pairs. `NAME` must match `^[A-Z0-9_]+$` and becomes `IMAS_NATS_<NAME>_SEED_FILE`. |
 
 ### `natsTrust`
@@ -799,8 +799,8 @@ rendered openbao-mode config (that chart's README, "Verification status"):
   signs nothing. Its only secret is a clustered bus's fence user seed, a
   SYS account user: a compromise of the bus pod exposes that user (which
   can publish claims requests as SYS, as the bus itself can), never a key
-  that signs accounts. The old trust chain seeds are refused by the
-  chart; remove them from the DMZ Secret and OpenBao.
+  that signs accounts. Remove the old trust chain seeds from `natsSeeds`,
+  the DMZ Secret and OpenBao.
 - **Cluster routes** (`replicaCount > 1`) carry every tenant's traffic
   and the SYS account's claims updates. They need mutual TLS, a
   certificate naming a route host, and the route password. They are

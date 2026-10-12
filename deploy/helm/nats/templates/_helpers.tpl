@@ -154,11 +154,6 @@ explanation rather than deploying something that silently can't work.
 {{- if and $seeds (not .Values.natsSeeds.secretName) -}}
 {{- fail "natsSeeds.secretName is required: this chart never generates NATS seeds. Point it at the Secret ESO syncs from OpenBao." -}}
 {{- end -}}
-{{- range $name := list "OPERATOR" "OPERATOR_SIGNING" "SYS_ACCOUNT" "TENANT" "TENANT_SIGNING" -}}
-{{- if hasKey $seeds $name -}}
-{{- fail (printf "natsSeeds seed %s was removed in P21 slice 1: the bus holds no trust chain key and reads the public trust ConfigMap (natsTrust) instead. Drop it from natsSeeds (README.md, \"Seeds\")." $name) -}}
-{{- end -}}
-{{- end -}}
 {{- range $name, $key := $seeds -}}
 {{- if not (regexMatch "^[A-Z0-9_]+$" $name) -}}
 {{- fail (printf "natsSeeds seed name %q must match ^[A-Z0-9_]+$ (it becomes IMAS_NATS_%s_SEED_FILE)" $name $name) -}}

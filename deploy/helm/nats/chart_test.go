@@ -291,8 +291,6 @@ func TestValidationFailures(t *testing.T) {
 		args       []string
 	}{
 		{"no seed secret", "natsSeeds.secretName is required", []string{"--set", "natsSeeds.secretName=", "--set", "natsSeeds.seeds.BUS_FENCE_USER=f.nk"}},
-		{"removed operator seed", "natsSeeds seed OPERATOR was removed", []string{"--set", "natsSeeds.seeds.OPERATOR=operator.nk"}},
-		{"removed tenant signing seed", "natsSeeds seed TENANT_SIGNING was removed", []string{"--set", "natsSeeds.extraSeeds.TENANT_SIGNING=tenant-signing.nk"}},
 		{"cluster without fence user", "natsSeeds.seeds.BUS_FENCE_USER is required", []string{"--set", "bus.replicaCount=3", "--set", "bus.cluster.auth.secretName=r"}},
 		{"bad trust configmap", "natsTrust.configMapName", []string{"--set", "natsTrust.configMapName=Bad_Name"}},
 		{"bad seed name", "must match", []string{"--set", "natsSeeds.extraSeeds.bad-name=x.nk"}},
