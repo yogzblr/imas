@@ -181,10 +181,13 @@ audience.
 **ESO's saasapi-namespace role** needs only `read` on the published path
 and on the seed path, which matches the existing ESO pattern.
 
-**What the Job holds that isn't new privilege.** The Job mounts the SYS
-Account seed, so it can mint any SYS User. That's the same NATS-signing
-power farmer already has, and it's needed to sign the JWT. What *is* new
-is the KV write, which is why that identity is kept apart from farmer's.
+**What the Job holds that isn't new privilege.** The Job holds no
+trust-chain seed. It signs through OpenBao Transit as
+`imas-natssign-publisher` (policy `imas-nats-sys-signer`), with the
+`nats-sys-account` key only, so it can mint any SYS User. That's a subset
+of the NATS-signing power farmer already has, and it's needed to sign the
+JWT. What *is* new is the KV write, which is why that identity is kept
+apart from farmer's.
 The Job also mounts the SaaS API seed only because
 `EnsureSaaSAPICredential` loads it to derive the public key. Minting
 needs only the public key, so that mount is a candidate to drop later
