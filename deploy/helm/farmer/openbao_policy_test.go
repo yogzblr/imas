@@ -398,7 +398,9 @@ func TestOpenBaoFarmerPolicyKeySet(t *testing.T) {
 	// On real keys: create on the existing gateway key changes nothing,
 	// and the gateway key is not soft-deleted.
 	s.admin.Must(http.MethodPost, s.mount+"/keys/imas-gateway-jwt", map[string]any{"type": "ed25519"})
-	s.admin.Call(token, http.MethodPost, s.mount+"/keys/imas-gateway-jwt", map[string]any{"type": "ed25519"})
+	if status, body := s.admin.Call(token, http.MethodPost, s.mount+"/keys/imas-gateway-jwt", map[string]any{"type": "ed25519"}); status/100 != 2 {
+		t.Fatalf("farmer create on the existing imas-gateway-jwt: %d %s, want 2xx and no change", status, body)
+	}
 	if v, del := s.keyState("imas-gateway-jwt"); v != 1 || del {
 		t.Errorf("imas-gateway-jwt after farmer's create: version %d, deletion_allowed %v", v, del)
 	}
