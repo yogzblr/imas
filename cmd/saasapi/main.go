@@ -13,15 +13,18 @@ import (
 	"fmt"
 	"net/http"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	jwt "github.com/nats-io/jwt/v2"
 	"github.com/valkey-io/valkey-go"
 
 	"github.com/yogzblr/imas/internal/heartbeat"
 	log "github.com/yogzblr/imas/internal/log"
 	"github.com/yogzblr/imas/internal/migrations"
+	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/saasapi"
 )
 
@@ -112,6 +115,19 @@ func main() {
 	}
 	saasapi.SetBus(nc)
 	log.Infof("saasapi: connected to the NATS bus at %s", nc.ConnectedUrl())
+
+	// Record the key this replica runs with in
+	// saas.saasapi_credential_state, after the bus accepted it and before
+	// serving: a rotation moves the previous key to prev_pub, which farmer
+	// revokes on the SYS Account (pki.EnsureSaaSAPICredential). Fail
+	// closed: a replica still on a rotated-out seed must restart and pick
+	// up the current one rather than serve with a key being revoked.
+	recordCtx, cancelRecord := context.WithTimeout(context.Background(), recordCredentialTimeout)
+	err = recordBusCredential(recordCtx, pki.NewSaaSAPICredentialRecorder(db), cfg.NATSUserJWT, sleepCtx)
+	cancelRecord()
+	if err != nil {
+		log.Fatalf("saasapi: %v", err)
+	}
 
 	// Plain HTTP: TLS termination is assumed to happen at the gateway
 	// (Envoy, workstream H) in front of this service, consistent with the
@@ -240,5 +256,62 @@ func serve(ctx context.Context, tenant, operator *http.Server, shutdownTimeout t
 func initHeartbeatClient(vc valkey.Client) {
 	if vc != nil {
 		heartbeat.SetClient(vc)
+	}
+}
+
+const (
+	// recordCredentialTimeout bounds recording this replica's NATS key at
+	// boot: longer than the rotation lease's TTL, so a replica that waits
+	// out another's lapsed lease still gets its turn.
+	recordCredentialTimeout = 45 * time.Second
+	// recordCredentialRetry is the wait between attempts while another
+	// replica holds the rotation lease.
+	recordCredentialRetry = time.Second
+)
+
+// credentialRecorder is the part of *pki.SaaSAPICredentialRecorder boot
+// uses.
+type credentialRecorder interface {
+	Record(ctx context.Context, pub string) (*pki.SaaSAPICredentialState, bool, error)
+}
+
+// recordBusCredential records the public key of userJWT, this replica's
+// NATS User credential, as the SaaS API's current key, retrying while
+// another replica holds the rotation lease (pki.ErrSaaSAPICredentialBusy)
+// until ctx ends. Any other error, a key already rotated out included,
+// is returned.
+func recordBusCredential(ctx context.Context, rec credentialRecorder, userJWT string, sleep func(context.Context, time.Duration) error) error {
+	uc, err := jwt.DecodeUserClaims(strings.TrimSpace(userJWT))
+	if err != nil {
+		return fmt.Errorf("recording the NATS credential: SAASAPI_NATS_USER_JWT: %w", err)
+	}
+	for {
+		st, rotated, err := rec.Record(ctx, uc.Subject)
+		switch {
+		case err == nil:
+			if rotated && st.PrevPub != "" {
+				log.Infof("saasapi: recorded NATS key %s, rotated from %s (version %d); farmer revokes the previous key at its next boot", st.CurrentPub, st.PrevPub, st.Version)
+			} else if rotated {
+				log.Infof("saasapi: recorded NATS key %s", st.CurrentPub)
+			}
+			return nil
+		case !errors.Is(err, pki.ErrSaaSAPICredentialBusy):
+			return fmt.Errorf("recording the NATS credential %s: %w", uc.Subject, err)
+		}
+		if serr := sleep(ctx, recordCredentialRetry); serr != nil {
+			return fmt.Errorf("recording the NATS credential %s: another replica held the rotation lease until the deadline: %w", uc.Subject, err)
+		}
+	}
+}
+
+// sleepCtx waits d, or until ctx ends.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
 	}
 }
