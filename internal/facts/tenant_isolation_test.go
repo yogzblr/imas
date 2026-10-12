@@ -177,6 +177,9 @@ func startTenantIsolationBus(t *testing.T) func() {
 		t.Fatalf("failed to create NATS server: %v", err)
 	}
 	srv.SetLogger(factsTestNoopLogger{}, false, false)
+	// Stops the server even if it never becomes ready, and before the
+	// resolver's cleanup (registered earlier, so it runs later).
+	t.Cleanup(srv.Shutdown)
 	go srv.Start()
 	if !srv.ReadyForConnections(10 * time.Second) {
 		t.Fatal("NATS server did not become ready")

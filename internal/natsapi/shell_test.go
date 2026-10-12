@@ -133,6 +133,9 @@ func startJWTBus(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Stops the server even if it never becomes ready, and before the
+	// resolver's cleanup (registered earlier, so it runs later).
+	t.Cleanup(srv.Shutdown)
 	go srv.Start()
 	if !srv.ReadyForConnections(10 * time.Second) {
 		t.Fatal("bus not ready")

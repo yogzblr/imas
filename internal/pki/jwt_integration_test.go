@@ -44,6 +44,9 @@ func startTestBus(t *testing.T) func() {
 	}
 	var noopLogger testNoopLogger
 	srv.SetLogger(noopLogger, false, false)
+	// Stops the server even if it never becomes ready, and before the
+	// resolver's cleanup (registered earlier, so it runs later).
+	t.Cleanup(srv.Shutdown)
 	go srv.Start()
 	if !srv.ReadyForConnections(10 * time.Second) {
 		t.Fatal("NATS server did not become ready")
@@ -86,6 +89,9 @@ func startTestBusWithoutLocalHandle(t *testing.T) func() {
 	}
 	var noopLogger testNoopLogger
 	srv.SetLogger(noopLogger, false, false)
+	// Stops the server even if it never becomes ready, and before the
+	// resolver's cleanup (registered earlier, so it runs later).
+	t.Cleanup(srv.Shutdown)
 	go srv.Start()
 	if !srv.ReadyForConnections(10 * time.Second) {
 		t.Fatal("NATS server did not become ready")

@@ -52,6 +52,9 @@ func TestConfigureNatsResolverDirPerCallRemovedOnShutdown(t *testing.T) {
 			t.Fatal(err)
 		}
 		srv.SetLogger(testNoopLogger{}, false, false)
+		// Stops the server even if it never becomes ready, and before the
+		// resolver's cleanup (registered earlier, so it runs later).
+		t.Cleanup(srv.Shutdown)
 		go srv.Start()
 		if !srv.ReadyForConnections(10 * time.Second) {
 			t.Fatal("test bus did not start")
