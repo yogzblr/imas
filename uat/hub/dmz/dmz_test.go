@@ -45,6 +45,8 @@ import (
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
 	"gopkg.in/yaml.v3"
+
+	"github.com/yogzblr/imas/internal/envoycheck"
 )
 
 type obj = map[string]any
@@ -287,6 +289,12 @@ func checkRender(t *testing.T, r rendered, w want) {
 	dmzPrivate, corePrivate := "dmz."+w.zone, "core."+w.zone
 	envoy := find(t, r.chart, "Deployment", "imas-dmz-nats-envoy")
 	bus := find(t, r.chart, "StatefulSet", "imas-dmz-nats-bus")
+
+	// Envoy passes farmer's busy 503 on /v1/enroll and /v1/refresh, and
+	// its Retry-After, to the sprout; it never retries it itself.
+	for _, p := range envoycheck.BusyRetryProblems(r.envoy) {
+		t.Errorf("UAT Envoy config: %s", p)
+	}
 
 	// Replicas of one, small requests, the release's image.
 	for _, wl := range []obj{envoy, bus} {

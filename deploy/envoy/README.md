@@ -74,6 +74,16 @@ Treat this as a reviewed starting point, not a drop-in production config.
   service, not this config alone.
 - **Rate limiting on `/v1/refresh`**: its own bucket, sized from the
   fleet. See "Sizing the /v1/refresh bucket" below before deploying.
+- **No retry of farmer's 503 on `/v1/enroll` and `/v1/refresh`**: farmer
+  answers 503 with a `Retry-After` when another replica holds the
+  sprout's User JWT mint lease, and the sprout waits it out
+  (`internal/pki/enrollclient.go`). Both routes retry only a request that
+  never reached farmer (`retry_on: connect-failure,refused-stream`, one
+  retry). Keep `5xx`, `gateway-error`, `reset` and
+  `retriable-status-codes` out of `retry_on` on these routes and out of
+  any virtual-host retry policy, or Envoy swallows the `Retry-After`.
+  `internal/envoytest/busy_test.go` checks it against a real Envoy;
+  `deploy/helm/nats/chart_test.go` checks this file and the chart.
 
 ## Sizing the /v1/refresh bucket
 

@@ -124,7 +124,7 @@ type localBus struct {
 	dir   string
 	host  string
 	port  int
-	files seedFiles // environment for the child (newLocalTrust)
+	files busEnv // environment for the child (newLocalTrust)
 	trace bool
 	// maxConn is the child's busmaxconnections; 0 for the default.
 	maxConn int
@@ -137,7 +137,7 @@ type localBus struct {
 
 // newLocalBus prepares dir (certificates, PKI directory) for a child bus
 // listening on host:port; port 0 picks a free one, kept across restarts.
-func newLocalBus(dir, host string, port int, files seedFiles, trace bool) (*localBus, *x509.CertPool, error) {
+func newLocalBus(dir, host string, port int, files busEnv, trace bool) (*localBus, *x509.CertPool, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, nil, err

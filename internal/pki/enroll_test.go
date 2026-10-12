@@ -367,7 +367,7 @@ func activeBoxKeyForTenant(t *testing.T, tenantID, sproutID string) string {
 }
 
 // enrollProof builds a sprout_pub_proof as the sprout's client does
-// (sproutEnrollProof), but sealed with sealer, which a test can make a
+// (sealEnrollProof), but sealed with sealer, which a test can make a
 // key other than sproutPub's private half.
 func enrollProof(t *testing.T, tenantID, sproutID, tenantPubB64, nkeyPub, sproutPubB64 string, sealer *[32]byte) json.RawMessage {
 	t.Helper()

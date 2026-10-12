@@ -1,10 +1,19 @@
 package main
 
-// The requester plays core: a few connections with core's per-tenant User
-// shape, sending test.ping to random connected sprouts at a fixed rate,
-// the request core's FPing makes (internal/ingredients/test). Each round
-// trip is requester -> bus -> sprout -> bus -> requester; core's own work
-// (the API, RBAC, PXC) is not in it.
+// The latency probes. Against the local bus the requester plays core: a
+// few connections with core's per-tenant User shape, sending test.ping to
+// random connected sprouts at a fixed rate, the request core's FPing
+// makes (internal/ingredients/test). Each round trip is requester -> bus
+// -> sprout -> bus -> requester; core's own work (the API, RBAC, PXC) is
+// not in it.
+//
+// Against a deployed bus the harness holds no trust key, so it has no
+// User that may publish to a sprout's subjects (only farmer's own
+// per-tenant User may, signed by a tenant key farmer keeps in OpenBao).
+// There the probe is the bus round trip from a random sprout's own
+// connection instead: a NATS PING answered by the bus node the sprout is
+// connected to (rttProbe), the one leg of test.ping's path a sprout's
+// grants can exercise. The report names which probe ran.
 
 import (
 	"context"
@@ -45,6 +54,59 @@ func newRequester(servers []string, tlsCfg *tls.Config, tf *tenantFixture, n int
 		r.conns = append(r.conns, nc)
 	}
 	return r, nil
+}
+
+// probeTestPing and probeBusRTT name the two probes in a result.
+const (
+	probeTestPing = "test.ping"
+	probeBusRTT   = "bus-rtt"
+)
+
+// errBadPong is a test.ping reply that isn't a pong.
+var errBadPong = errors.New("reply is not a pong")
+
+// pinger is a latency probe: pick chooses a connected sprout and returns
+// the probe to send it, or false when it found none.
+type pinger interface {
+	pick(f *fleet) (probe func(timeout time.Duration) error, ok bool)
+}
+
+// pick sends test.ping to a random connected sprout, as core does.
+func (r *requester) pick(f *fleet) (func(time.Duration) error, bool) {
+	i := f.randomLive()
+	if i < 0 {
+		return nil, false
+	}
+	id := f.creds[i].ID
+	return func(timeout time.Duration) error {
+		m, err := r.conn().Request(pingSubject(id), pingPayload, timeout)
+		if err != nil {
+			return err
+		}
+		var pong apitypes.PingPong
+		if json.Unmarshal(m.Data, &pong) != nil || !pong.Pong {
+			return errBadPong
+		}
+		return nil
+	}, true
+}
+
+var pingPayload, _ = json.Marshal(apitypes.PingPong{Ping: true})
+
+// rttProbe measures the bus round trip from a random connected sprout's
+// own connection: a NATS PING, flushed, and the bus's PONG.
+type rttProbe struct{}
+
+func (rttProbe) pick(f *fleet) (func(time.Duration) error, bool) {
+	i := f.randomLive()
+	if i < 0 {
+		return nil, false
+	}
+	nc := f.conn(i)
+	if nc == nil {
+		return nil, false
+	}
+	return func(timeout time.Duration) error { return nc.FlushTimeout(timeout) }, true
 }
 
 func (r *requester) conn() *nats.Conn {
@@ -89,15 +151,14 @@ func (l *latencyResult) summarize() {
 // failed is every ping that got no reply.
 func (l *latencyResult) failed() int64 { return l.Timeouts + l.NoResponders + l.Errors }
 
-// pingWindow sends test.ping at rate per second for d, at most
+// pingWindow sends p's probe at rate per second for d, at most
 // concurrency in flight (a tick finding them all busy is skipped and
 // counted, not queued, so a slow bus can't hide behind a growing queue).
-func pingWindow(ctx context.Context, label string, r *requester, f *fleet, d time.Duration, rate float64, concurrency int, timeout time.Duration) *latencyResult {
+func pingWindow(ctx context.Context, label string, p pinger, f *fleet, d time.Duration, rate float64, concurrency int, timeout time.Duration) *latencyResult {
 	res := &latencyResult{Label: label, TargetRate: rate, Hist: &hist{}}
 	var sent, ok, timeouts, noResp, errs, skipped atomic.Int64
 	sem := make(chan struct{}, max(concurrency, 1))
 	var wg sync.WaitGroup
-	ping, _ := json.Marshal(apitypes.PingPong{Ping: true})
 	start := time.Now()
 	end := start.Add(d)
 	interval := time.Duration(float64(time.Second) / max(rate, 0.001))
@@ -112,8 +173,8 @@ func pingWindow(ctx context.Context, label string, r *requester, f *fleet, d tim
 			case <-time.After(w):
 			}
 		}
-		id := f.randomLive()
-		if id == "" {
+		probe, found := p.pick(f)
+		if !found {
 			skipped.Add(1)
 			continue
 		}
@@ -129,15 +190,10 @@ func pingWindow(ctx context.Context, label string, r *requester, f *fleet, d tim
 			defer wg.Done()
 			defer func() { <-sem }()
 			t0 := time.Now()
-			m, err := r.conn().Request(pingSubject(id), ping, timeout)
+			err := probe(timeout)
 			rtt := time.Since(t0)
 			switch {
 			case err == nil:
-				var pong apitypes.PingPong
-				if json.Unmarshal(m.Data, &pong) != nil || !pong.Pong {
-					errs.Add(1)
-					return
-				}
 				res.Hist.Record(rtt)
 				ok.Add(1)
 			case errors.Is(err, nats.ErrTimeout):

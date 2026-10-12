@@ -48,8 +48,19 @@ func TestParseOptionsDefaultsAndErrors(t *testing.T) {
 		t.Errorf("local bus defaults: restart %q, max-p99 %s", o.Restart, o.MaxP99)
 	}
 	for _, args := range [][]string{
-		{"-servers", "tls://bus:4222"}, // no seeds or CA
-		{"-restart", "local", "-servers", "tls://b:1", "-ca", "x", "-operator-signing-seed-file", "y", "-sys-account-seed-file", "z"},
+		{"-servers", "tls://bus:4222"}, // no CA, tenant, SaaS API or farmer
+		append([]string{"-restart", "local"}, externalArgs...),
+		append(externalArgs[:len(externalArgs):len(externalArgs)], "-tenant", "not a tenant"),
+		append(externalArgs[:len(externalArgs):len(externalArgs)], "-farmer-url", "http://farmer:5405"),
+		append(externalArgs[:len(externalArgs):len(externalArgs)], "-saasapi-url", "core.example"),
+		append(externalArgs[:len(externalArgs):len(externalArgs)], "-enroll-key-uses", "0"),
+		append(externalArgs[:len(externalArgs):len(externalArgs)], "-enroll-key-uses", "10001"),
+		append(externalArgs[:len(externalArgs):len(externalArgs)], "-enroll-key-hours", "721"),
+		append(externalArgs[:len(externalArgs):len(externalArgs)], "-enroll-workers", "0"),
+		// The trust seed flags are gone: a deployed bus has no seed to give.
+		append(externalArgs[:len(externalArgs):len(externalArgs)], "-operator-signing-seed-file", "y"),
+		append(externalArgs[:len(externalArgs):len(externalArgs)], "-sys-account-seed-file", "z"),
+		append(externalArgs[:len(externalArgs):len(externalArgs)], "-lockout=false"),
 		{"-restart", "cmd"}, // no -restart-cmd
 		{"-restart", "sometimes"},
 		{"-restart-signal", "hup"},
@@ -64,13 +75,24 @@ func TestParseOptionsDefaultsAndErrors(t *testing.T) {
 			t.Errorf("parseOptions(%q) accepted", args)
 		}
 	}
-	o, err = parseOptions([]string{"-servers", "tls://b:1", "-ca", "x", "-operator-signing-seed-file", "y", "-sys-account-seed-file", "z", "-proc", "core=42"})
+	o, err = parseOptions(append(externalArgs[:len(externalArgs):len(externalArgs)], "-proc", "core=42"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if o.Restart != "none" || len(o.Procs) != 1 || o.Procs[0].Label != "core" || o.Procs[0].PID != 42 {
 		t.Errorf("external defaults: restart %q, procs %+v", o.Restart, o.Procs)
 	}
+	if o.EnrollKeyUses != 1 || o.EnrollKeyHours != 1 || o.EnrollWorkers != 8 || o.EnrollRetries != 2 {
+		t.Errorf("enrolment defaults: uses %d, hours %d, workers %d, retries %d", o.EnrollKeyUses, o.EnrollKeyHours, o.EnrollWorkers, o.EnrollRetries)
+	}
+}
+
+// externalArgs is the least a run against a deployed bus needs: no
+// trust key, only what the enrolment path takes.
+var externalArgs = []string{
+	"-servers", "tls://b:1", "-ca", "x", "-tenant", "t_loadtest1",
+	"-saasapi-url", "https://core.example", "-internal-auth-file", "a", "-token-file", "b",
+	"-farmer-url", "https://dmz.example:8443",
 }
 
 // startTestBus runs a local bus child for one test and returns it with a

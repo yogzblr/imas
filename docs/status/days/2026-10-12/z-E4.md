@@ -1,0 +1,5 @@
+change: E4 (P27.3, P27.4): `tools/loadtest -servers` holds no trust key: it mints enrolment keys for an existing tenant through the SaaS API (one-time by default, revoked at the end) and enrolls every sprout through `POST /v1/enroll` with `pki.EnrollClient`; the operator-signing, SYS seed and `-lockout` flags are gone. Against a deployed bus the latency probe is the sprouts' own bus round trip (no `test.ping` requester or bus varz without a trust key). The sprout's enrolment and refresh client honours a busy 503's `Retry-After` (5 s default, 60 s cap, up to 20 percent jitter, within the 5-attempt limit) and logs "server busy (lease held), retrying in Ns"; Envoy's `/v1/enroll` and `/v1/refresh` routes (nats chart, `deploy/envoy/`) retry only `connect-failure,refused-stream`, checked by chart, UAT and real-Envoy tests. Flagged for security review.
+---
+item: P27
+action: update
+next-append: **E4 (ready for review):** (3) and (4) built: the load harness enrolls through the SaaS API and `/v1/enroll` with no trust seed, and the sprout honours `Retry-After` on a busy 503, which Envoy no longer could retry.

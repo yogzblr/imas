@@ -45,6 +45,11 @@ See README.md, "Sizing the /v1/refresh bucket", for the math.
   route:
     cluster: farmer_api
     timeout: 30s
+    # Never retry farmer's 503: its Retry-After must reach the sprout
+    # (envoy.yaml's /v1/enroll route says why).
+    retry_policy:
+      retry_on: connect-failure,refused-stream
+      num_retries: 1
   typed_per_filter_config:
     envoy.filters.http.jwt_authn:
       "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
