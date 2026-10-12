@@ -51,6 +51,8 @@ import (
 	"net"
 	"net/http"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -82,7 +84,9 @@ type fenceTiming struct {
 var defaultFenceTiming = fenceTiming{Interval: time.Second, Grace: 3 * time.Second, ReqTimeout: 2 * time.Second}
 
 type fence struct {
-	size     int
+	// size is the configured cluster size, read on every tick
+	// (clusterSize.get in production).
+	size     func() int
 	timing   fenceTiming
 	fenced   atomic.Bool
 	srv      *nats_server.Server
@@ -102,8 +106,9 @@ type fence struct {
 	doneCh   chan struct{}
 }
 
-// newFence returns a fence for a cluster of size nodes. It starts fenced.
-func newFence(size int, timing fenceTiming) *fence {
+// newFence returns a fence for a cluster whose size size reports; it is
+// called on every evaluation. It starts fenced.
+func newFence(size func() int, timing fenceTiming) *fence {
 	f := &fence{size: size, timing: timing, stopCh: make(chan struct{}), doneCh: make(chan struct{})}
 	f.fenced.Store(true)
 	return f
@@ -229,11 +234,21 @@ func (f *fence) evaluate() {
 		f.fence("cannot read routes: " + err.Error())
 		return
 	}
-	if (len(peers)+1)*2 <= f.size {
-		f.fence(fmt.Sprintf("routed to %d of %d nodes (incl. itself), no majority", len(peers)+1, f.size))
+	size := f.size()
+	if (len(peers)+1)*2 <= size {
+		f.fence(fmt.Sprintf("routed to %d of %d nodes (incl. itself), no majority", len(peers)+1, size))
 		return
 	}
 	views, complete := f.peerViews(peers)
+	// More servers in sight than configured (a scale-up not yet in the
+	// file, or a stray node): the majority is of what is really there.
+	if n := observedServers(f.srv.ID(), peers, views); n > size {
+		size = n
+		if (len(peers)+1)*2 <= size {
+			f.fence(fmt.Sprintf("routed to %d of %d nodes seen (incl. itself), no majority", len(peers)+1, size))
+			return
+		}
+	}
 	var foreign []string
 	for p := range peers {
 		for id := range views[p] {
@@ -292,7 +307,7 @@ func (f *fence) evaluate() {
 	f.lastWhy = ""
 	f.mu.Unlock()
 	f.fenced.Store(false)
-	log.Infof("farmerbus fence: lifted; routed to %d of %d nodes and resolver synced from every peer", len(peers)+1, f.size)
+	log.Infof("farmerbus fence: lifted; routed to %d of %d nodes and resolver synced from every peer", len(peers)+1, size)
 }
 
 func (f *fence) setSynced(peers map[string]bool) {
@@ -334,6 +349,84 @@ func (f *fence) kickAll() {
 		}
 		_ = f.srv.DisconnectClientByID(c.Cid)
 	}
+}
+
+// observedServers counts the distinct servers this tick saw: this node,
+// its direct peers and every server a peer reports a route to.
+func observedServers(self string, peers map[string]bool, views map[string]map[string]bool) int {
+	seen := map[string]bool{self: true}
+	for p := range peers {
+		seen[p] = true
+	}
+	for p, v := range views {
+		seen[p] = true
+		for id := range v {
+			seen[id] = true
+		}
+	}
+	return len(seen)
+}
+
+// envClusterSizeFile names the file holding the cluster's replica count:
+// key "replicas" of the chart's bus topology ConfigMap, mounted as a
+// directory (no subPath) so kubelet updates it in place.
+const envClusterSizeFile = "IMAS_BUS_CLUSTER_SIZE_FILE"
+
+// clusterSize is the fence's view of the configured cluster size
+// (docs/briefs/P21-slice2-bus-loader.md §6.2): the replica count in
+// file, never less than the number of routes. Every failure rounds the
+// size up, never down, so the fence fails closed: a missing or
+// unparsable file keeps the last good value, and before any good value
+// the route count stands. The fence also raises it to the number of
+// servers it observes.
+type clusterSize struct {
+	routes int
+	file   string // empty: the route count only
+	read   func(string) ([]byte, error)
+
+	mu      sync.Mutex
+	last    int // last good value from file; 0 before any
+	lastErr string
+}
+
+func newClusterSize(routes int, file string, read func(string) ([]byte, error)) *clusterSize {
+	return &clusterSize{routes: routes, file: file, read: read}
+}
+
+// get re-reads the file and returns max(last good file value, routes).
+func (c *clusterSize) get() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.file != "" {
+		n, err := c.readFile()
+		switch {
+		case err != nil:
+			if msg := err.Error(); msg != c.lastErr {
+				c.lastErr = msg
+				log.Warnf("farmerbus fence: cluster size: %v; keeping %d", err, max(c.last, c.routes))
+			}
+		default:
+			if c.lastErr != "" || n != c.last {
+				log.Infof("farmerbus fence: cluster size file says %d replicas", n)
+			}
+			c.lastErr = ""
+			c.last = n
+		}
+	}
+	return max(c.last, c.routes)
+}
+
+func (c *clusterSize) readFile() (int, error) {
+	b, err := c.read(c.file)
+	if err != nil {
+		return 0, fmt.Errorf("reading %s: %w", c.file, err)
+	}
+	raw := strings.TrimSpace(string(b))
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("%s holds %q, not a positive replica count", c.file, raw)
+	}
+	return n, nil
 }
 
 // gather sends one SYS request and collects up to want replies.

@@ -17,6 +17,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
 
 	"github.com/yogzblr/imas/internal/pki"
@@ -241,7 +242,7 @@ func setup(t *testing.T) *env {
 	t.Setenv(p+natskeys.EnvOpenBaoTransitMount, "transit")
 	e.tokenFile = filepath.Join(dir, "handoff-token")
 	t.Setenv(EnvTokenFile, e.tokenFile)
-	for _, v := range []string{EnvTrustConfigMap, EnvOperatorName, EnvBusFenceUserPub, EnvKVCopy, EnvKVMount, EnvKVPath} {
+	for _, v := range []string{EnvTrustConfigMap, EnvOperatorName, EnvBusFenceUserPub, EnvBusLoaderUserPub, EnvKVCopy, EnvKVMount, EnvKVPath} {
 		t.Setenv(v, "")
 	}
 	return e
@@ -334,6 +335,56 @@ func TestRunFirstCreatesConfigMap(t *testing.T) {
 	}
 	if _, err := os.Stat(e.tokenFile); !os.IsNotExist(err) {
 		t.Errorf("token file still present (stat err %v)", err)
+	}
+}
+
+// sharedUserPub is a valid user public key for a usage-error case.
+var sharedUserPub = func() string {
+	kp, err := nkeys.CreateUser()
+	if err != nil {
+		panic(err)
+	}
+	pub, err := kp.PublicKey()
+	if err != nil {
+		panic(err)
+	}
+	return pub
+}()
+
+// The loader's SYS user JWT is minted by the bootstrap, like the fence
+// user's (issue #197 decision 6), and lands in the trust ConfigMap.
+func TestRunMintsLoaderUser(t *testing.T) {
+	e := setup(t)
+	loader := newUserPub(t)
+	t.Setenv(EnvBusFenceUserPub, newUserPub(t))
+	t.Setenv(EnvBusLoaderUserPub, loader)
+	e.writeToken(t)
+	mustRun(t)
+	data := e.kube.data(DefaultTrustConfigMap)
+	trust, err := pki.ParseNATSTrust(toBytes(data))
+	if err != nil {
+		t.Fatalf("ParseNATSTrust: %v", err)
+	}
+	uc, err := jwt.DecodeUserClaims(trust.BusLoaderUserJWT)
+	if err != nil {
+		t.Fatalf("loader user jwt: %v", err)
+	}
+	if uc.Subject != loader || uc.Issuer != trust.SysAccountPub {
+		t.Errorf("loader jwt sub/iss = %s/%s", uc.Subject, uc.Issuer)
+	}
+	if !uc.Pub.Allow.Contains("$SYS.REQ.ACCOUNT.*.CLAIMS.LOOKUP") || uc.Pub.Allow.Contains(">") {
+		t.Errorf("loader permissions = %+v", uc.Permissions)
+	}
+
+	// A second run over its own output writes nothing.
+	writes := e.kube.writeCount()
+	e.writeToken(t)
+	mustRun(t)
+	if e.kube.writeCount() != writes {
+		t.Error("second run rewrote the configmap")
+	}
+	if got := e.kube.data(DefaultTrustConfigMap)[pki.TrustBusLoaderUserJWT]; got != data[pki.TrustBusLoaderUserJWT] {
+		t.Error("second run changed the loader jwt")
 	}
 }
 
@@ -543,6 +594,8 @@ func TestRunUsageErrors(t *testing.T) {
 		{"kubernetes auth with token file", map[string]string{natskeys.EnvPrefixBoot + natskeys.EnvOpenBaoAuthMethod: "kubernetes"}, nil},
 		{"bad kv path", map[string]string{EnvKVCopy: "true", EnvKVPath: "a/../b"}, nil},
 		{"bad fence user", map[string]string{EnvBusFenceUserPub: "not-a-key"}, nil},
+		{"bad loader user", map[string]string{EnvBusLoaderUserPub: "not-a-key"}, nil},
+		{"loader user is the fence user", map[string]string{EnvBusFenceUserPub: sharedUserPub, EnvBusLoaderUserPub: sharedUserPub}, nil},
 		{"no openbao address", map[string]string{natskeys.EnvPrefixBoot + natskeys.EnvOpenBaoAddr: ""}, nil},
 		{"extra argument", nil, []string{"extra"}},
 	} {

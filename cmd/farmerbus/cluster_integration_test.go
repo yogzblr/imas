@@ -802,3 +802,30 @@ func TestClusterWipedNodeDoesNotRollBackRevocations(t *testing.T) {
 		}
 	}
 }
+
+// TestClusterFenceSizeFollowsFile: the fence's majority is of the
+// replica count in IMAS_BUS_CLUSTER_SIZE_FILE (re-read every tick), not
+// of the route list, so a node that sees 2 of a 4-replica cluster fences
+// and lifts again when the count drops (P21 slice 2 §6.2).
+func TestClusterFenceSizeFollowsFile(t *testing.T) {
+	dir := t.TempDir()
+	writeSize(t, dir, "2")
+	t.Setenv(envClusterSizeFile, filepath.Join(dir, "replicas"))
+	tr := newTrust(t)
+	c := newTestCluster(t, tr, 2)
+	c.waitReady(0, 1)
+
+	writeSize(t, dir, "4")
+	waitFor(t, "both nodes to fence on 2 of 4", 5*time.Second, func() bool {
+		return !c.nodes[0].Ready() && !c.nodes[1].Ready()
+	})
+	// A bad file keeps the last good value: still fenced.
+	writeSize(t, dir, "garbage")
+	time.Sleep(3 * testTiming.Interval)
+	if c.nodes[0].Ready() || c.nodes[1].Ready() {
+		t.Fatal("an unparsable size file lowered the cluster size")
+	}
+	// A count below the routes cannot lower it below 2: 2 of 2 is a majority.
+	writeSize(t, dir, "1")
+	c.waitReady(0, 1)
+}

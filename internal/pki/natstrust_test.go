@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/nats-io/jwt/v2"
@@ -342,5 +343,136 @@ func TestLoadNATSTrustDir(t *testing.T) {
 	t.Setenv(NATSTrustDirEnv, dir)
 	if d := NATSTrustDir(); d != dir {
 		t.Errorf("NATSTrustDir() = %q, want %q", d, dir)
+	}
+}
+
+// The bus account loader's SYS user (P21 slice 2 PR 4, issue #197
+// decisions 3 and 6): minted with exactly its grant, reused when current,
+// re-minted for a new key or a different grant.
+func TestBootstrapNATSTrustLoaderUser(t *testing.T) {
+	tr := pkitest.New(t)
+	loader := newFenceUserPub(t)
+	in := BootstrapInput{OperatorName: "imas-operator", BusFenceUserPub: newFenceUserPub(t), BusLoaderUserPub: loader}
+	first := bootstrap(t, tr, in)
+
+	uc, err := jwt.DecodeUserClaims(first.BusLoaderUserJWT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uc.Subject != loader || uc.Issuer != first.SysAccountPub || uc.IssuerAccount != "" || uc.Name != "imas-bus-loader" {
+		t.Errorf("loader jwt sub/iss/issuer_account/name = %s/%s/%q/%q", uc.Subject, uc.Issuer, uc.IssuerAccount, uc.Name)
+	}
+	wantPub := []string{"$SYS.REQ.CLAIMS.UPDATE", "$SYS.REQ.CLAIMS.LIST", "$SYS.REQ.ACCOUNT.*.CLAIMS.LOOKUP"}
+	wantSub := []string{"_INBOX.>", "imas.bus.accounts.changed"}
+	if !slices.Equal(uc.Pub.Allow, wantPub) || !slices.Equal(uc.Sub.Allow, wantSub) ||
+		len(uc.Pub.Deny) != 0 || len(uc.Sub.Deny) != 0 || uc.Resp != nil || uc.BearerToken {
+		t.Errorf("loader permissions = %+v", uc.Permissions)
+	}
+	files := first.Files()
+	if _, err := ParseNATSTrust(files); err != nil {
+		t.Fatalf("ParseNATSTrust: %v", err)
+	}
+
+	// Idempotent: nothing signed over its own output.
+	tr.Fake.ResetCounts()
+	in.Existing = files
+	if got := bootstrap(t, tr, in); got.BusLoaderUserJWT != first.BusLoaderUserJWT {
+		t.Error("second run re-minted the loader jwt")
+	}
+	if n := tr.Fake.Count(natskeystest.OpSign); n != 0 {
+		t.Errorf("second run made %d sign requests, want 0", n)
+	}
+
+	// No loader user given: a valid existing one is kept.
+	in.BusLoaderUserPub = ""
+	if got := bootstrap(t, tr, in); got.BusLoaderUserJWT != first.BusLoaderUserJWT {
+		t.Error("existing loader jwt dropped")
+	}
+
+	// A new loader key: only its JWT is re-minted.
+	in.BusLoaderUserPub = newFenceUserPub(t)
+	tr.Fake.ResetCounts()
+	got := bootstrap(t, tr, in)
+	if uc, err := jwt.DecodeUserClaims(got.BusLoaderUserJWT); err != nil || uc.Subject != in.BusLoaderUserPub {
+		t.Errorf("loader jwt not re-minted for the new user: %v", err)
+	}
+	if got.BusFenceUserJWT != first.BusFenceUserJWT || got.SysAccountJWT != first.SysAccountJWT {
+		t.Error("a new loader user changed another jwt")
+	}
+	if n := tr.Fake.Count(natskeystest.OpSign); n != 1 {
+		t.Errorf("new loader user: %d sign requests, want 1", n)
+	}
+
+	// An existing loader JWT with a wider grant (or an older one) is
+	// invalid trust, and a bootstrap replaces it with the exact grant.
+	sysKP, err := tr.Store.KeyPair(t.Context(), natskeys.SysAccountKey(), nkeys.PrefixByteAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wide := jwt.NewUserClaims(loader)
+	wide.Permissions = BusLoaderUserPermissions()
+	wide.Pub.Allow.Add("$SYS.REQ.SERVER.>")
+	wideJWT, err := wide.Encode(sysKP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := maps.Clone(files)
+	stale[TrustBusLoaderUserJWT] = []byte(wideJWT)
+	if _, err := ParseNATSTrust(stale); !errors.Is(err, ErrTrustInvalid) {
+		t.Fatalf("wider loader grant: Parse err = %v, want ErrTrustInvalid", err)
+	}
+	in.Existing, in.BusLoaderUserPub = stale, loader
+	got = bootstrap(t, tr, in)
+	if uc, err := jwt.DecodeUserClaims(got.BusLoaderUserJWT); err != nil || !loaderPermissionsExact(uc) || uc.Subject != loader {
+		t.Errorf("wider loader grant not re-minted: %v", err)
+	}
+}
+
+func TestBootstrapNATSTrustLoaderUserRejects(t *testing.T) {
+	tr := pkitest.New(t)
+	same := newFenceUserPub(t)
+	if _, err := BootstrapNATSTrust(t.Context(), tr.Store, BootstrapInput{BusFenceUserPub: same, BusLoaderUserPub: same}); !errors.Is(err, ErrTrustInvalid) {
+		t.Errorf("loader key equal to fence key: err = %v, want ErrTrustInvalid", err)
+	}
+	good := bootstrap(t, tr, BootstrapInput{})
+	if _, err := BootstrapNATSTrust(t.Context(), tr.Store, BootstrapInput{BusLoaderUserPub: good.SysAccountPub}); !errors.Is(err, ErrTrustInvalid) {
+		t.Errorf("account key as loader user: err = %v, want ErrTrustInvalid", err)
+	}
+
+	// Issued by an account other than SYS, with the right grant.
+	otherAcct, err := nkeys.CreateAccount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	uc := jwt.NewUserClaims(newFenceUserPub(t))
+	uc.Permissions = BusLoaderUserPermissions()
+	byOther, err := uc.Encode(otherAcct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := good.Files()
+	m[TrustBusLoaderUserJWT] = []byte(byOther)
+	if _, err := ParseNATSTrust(m); !errors.Is(err, ErrTrustInvalid) {
+		t.Errorf("loader user issued by another account: Parse err = %v, want ErrTrustInvalid", err)
+	}
+	if _, err := BootstrapNATSTrust(t.Context(), tr.Store, BootstrapInput{Existing: m}); !errors.Is(err, ErrTrustInvalid) {
+		t.Errorf("loader user issued by another account: Bootstrap err = %v, want ErrTrustInvalid", err)
+	}
+
+	// A narrower grant is also not the loader's grant.
+	sysKP, err := tr.Store.KeyPair(t.Context(), natskeys.SysAccountKey(), nkeys.PrefixByteAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	narrow := jwt.NewUserClaims(newFenceUserPub(t))
+	narrow.Permissions = BusLoaderUserPermissions()
+	narrow.Sub.Allow = jwt.StringList{"_INBOX.>"}
+	narrowJWT, err := narrow.Encode(sysKP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m[TrustBusLoaderUserJWT] = []byte(narrowJWT)
+	if _, err := ParseNATSTrust(m); !errors.Is(err, ErrTrustInvalid) {
+		t.Errorf("narrower loader grant: Parse err = %v, want ErrTrustInvalid", err)
 	}
 }

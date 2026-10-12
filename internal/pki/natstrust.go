@@ -3,7 +3,7 @@ package pki
 // NATS trust model (P21 slice 1, docs/briefs/P21-slice1-transit-signer.md
 // §2.1). The public half of the NATS trust chain (operator JWT, the
 // operator, operator-signing and SYS account public keys, the SYS
-// account JWT and the optional bus fence user JWT) lives in the
+// account JWT and the optional bus fence and loader user JWTs) lives in the
 // ConfigMap imas-nats-trust, mounted at IMAS_NATS_TRUST_DIR. The private
 // halves live only in OpenBao Transit (internal/pki/natskeys); the
 // bootstrap Job mints the JWTs once with BootstrapNATSTrust.
@@ -34,8 +34,29 @@ const (
 	TrustOperatorSigningPub = "operator-signing.pub"
 	TrustSysAccountPub      = "sys-account.pub"
 	TrustSysAccountJWT      = "sys-account.jwt"
-	TrustBusFenceUserJWT    = "bus-fence-user.jwt" // optional
+	TrustBusFenceUserJWT    = "bus-fence-user.jwt"  // optional
+	TrustBusLoaderUserJWT   = "bus-loader-user.jwt" // optional
 )
+
+// BusLoaderUserPermissions is the whole grant of the bus account
+// loader's SYS user (docs/briefs/P21-slice2-bus-loader.md §5.2, plus the
+// CLAIMS.LOOKUP request its account sample check sends, issue #197
+// decision 3). It is a SYS account credential, so nothing beyond this:
+// it can push and list Account JWTs on its node, look one up, receive
+// the replies and the farmer's change event.
+func BusLoaderUserPermissions() jwt.Permissions {
+	return jwt.Permissions{
+		Pub: jwt.Permission{Allow: jwt.StringList{
+			"$SYS.REQ.CLAIMS.UPDATE",
+			"$SYS.REQ.CLAIMS.LIST",
+			"$SYS.REQ.ACCOUNT.*.CLAIMS.LOOKUP",
+		}},
+		Sub: jwt.Permission{Allow: jwt.StringList{
+			"_INBOX.>",
+			"imas.bus.accounts.changed",
+		}},
+	}
+}
 
 // NATSTrustDirEnv names the directory the trust ConfigMap is mounted at;
 // DefaultNATSTrustDir applies when it is unset.
@@ -66,6 +87,7 @@ type NATSTrust struct {
 	SysAccountPub      string
 	SysAccountJWT      string
 	BusFenceUserJWT    string // empty when no fence user is configured
+	BusLoaderUserJWT   string // empty when no loader user is configured
 }
 
 // NATSTrustDir is IMAS_NATS_TRUST_DIR, or DefaultNATSTrustDir when unset.
@@ -77,7 +99,7 @@ func NATSTrustDir() string {
 }
 
 // Files is t as ConfigMap data, keyed by the Trust* names. The fence
-// user JWT is left out when empty.
+// and loader user JWTs are left out when empty.
 func (t *NATSTrust) Files() map[string][]byte {
 	m := map[string][]byte{
 		TrustOperatorJWT:        []byte(t.OperatorJWT),
@@ -89,6 +111,9 @@ func (t *NATSTrust) Files() map[string][]byte {
 	if t.BusFenceUserJWT != "" {
 		m[TrustBusFenceUserJWT] = []byte(t.BusFenceUserJWT)
 	}
+	if t.BusLoaderUserJWT != "" {
+		m[TrustBusLoaderUserJWT] = []byte(t.BusLoaderUserJWT)
+	}
 	return m
 }
 
@@ -98,8 +123,9 @@ func (t *NATSTrust) Files() map[string][]byte {
 // validation issue, the operator JWT self-signed by operator.pub, listing
 // operator-signing.pub as a signing key and sys-account.pub as the
 // system account, the SYS account JWT about sys-account.pub and issued by
-// operator-signing.pub, and the fence user JWT (if any) issued by
-// sys-account.pub. Surrounding whitespace in values is ignored.
+// operator-signing.pub, and the fence and loader user JWTs (if any)
+// issued by sys-account.pub, the loader's with exactly
+// BusLoaderUserPermissions. Surrounding whitespace in values is ignored.
 func ParseNATSTrust(files map[string][]byte) (*NATSTrust, error) {
 	get := func(k string) string { return strings.TrimSpace(string(files[k])) }
 	t := &NATSTrust{
@@ -109,6 +135,7 @@ func ParseNATSTrust(files map[string][]byte) (*NATSTrust, error) {
 		SysAccountPub:      get(TrustSysAccountPub),
 		SysAccountJWT:      get(TrustSysAccountJWT),
 		BusFenceUserJWT:    get(TrustBusFenceUserJWT),
+		BusLoaderUserJWT:   get(TrustBusLoaderUserJWT),
 	}
 	var missing []string
 	for _, kv := range []struct{ k, v string }{
@@ -139,6 +166,15 @@ func ParseNATSTrust(files map[string][]byte) (*NATSTrust, error) {
 			return nil, err
 		}
 	}
+	if t.BusLoaderUserJWT != "" {
+		uc, err := checkSysUserJWT(TrustBusLoaderUserJWT, t.BusLoaderUserJWT, t.SysAccountPub)
+		if err != nil {
+			return nil, err
+		}
+		if !loaderPermissionsExact(uc) {
+			return nil, fmt.Errorf("%w: %s does not carry exactly the loader permissions", ErrTrustInvalid, TrustBusLoaderUserJWT)
+		}
+	}
 	return t, nil
 }
 
@@ -150,6 +186,7 @@ func LoadNATSTrustDir(dir string) (*NATSTrust, error) {
 	for _, k := range []string{
 		TrustOperatorJWT, TrustOperatorPub, TrustOperatorSigningPub,
 		TrustSysAccountPub, TrustSysAccountJWT, TrustBusFenceUserJWT,
+		TrustBusLoaderUserJWT,
 	} {
 		b, err := os.ReadFile(filepath.Join(dir, k))
 		if errors.Is(err, os.ErrNotExist) {
@@ -200,6 +237,12 @@ type BootstrapInput struct {
 	// a valid one for the same key. When empty, a valid existing fence
 	// user JWT is kept.
 	BusFenceUserPub string
+	// BusLoaderUserPub is the bus account loader's public NKey (prefix
+	// U). When set, a loader user JWT for it, with exactly
+	// BusLoaderUserPermissions, is minted unless Existing holds a valid
+	// one for the same key with those permissions. When empty, a valid
+	// existing loader user JWT is kept.
+	BusLoaderUserPub string
 }
 
 // BootstrapNATSTrust returns the trust chain for the platform Transit
@@ -207,7 +250,7 @@ type BootstrapInput struct {
 // It reuses every JWT in in.Existing that decodes, verifies and matches
 // the Transit public keys, and mints only what is missing: the operator
 // JWT signed by nats-operator, the SYS account JWT signed by
-// nats-operator-signing and the fence user JWT signed by
+// nats-operator-signing and the fence and loader user JWTs signed by
 // nats-sys-account. A second run over its own output signs nothing and
 // returns byte-identical JWTs.
 //
@@ -257,6 +300,24 @@ func BootstrapNATSTrust(ctx context.Context, ks natskeys.KeyStore, in BootstrapI
 	if in.BusFenceUserPub != "" && !nkeys.IsValidPublicUserKey(in.BusFenceUserPub) {
 		return nil, fmt.Errorf("%w: bus fence user %q is not a user public key", ErrTrustInvalid, in.BusFenceUserPub)
 	}
+	loaderJWT := get(TrustBusLoaderUserJWT)
+	if loaderJWT != "" {
+		uc, err := checkSysUserJWT(TrustBusLoaderUserJWT, loaderJWT, pubs.sysAccount)
+		if err != nil {
+			return nil, err
+		}
+		// A new loader user, or a grant from an older bootstrap: not
+		// part of the anchor, re-minted.
+		if (in.BusLoaderUserPub != "" && uc.Subject != in.BusLoaderUserPub) || !loaderPermissionsExact(uc) {
+			loaderJWT = ""
+		}
+	}
+	if in.BusLoaderUserPub != "" && !nkeys.IsValidPublicUserKey(in.BusLoaderUserPub) {
+		return nil, fmt.Errorf("%w: bus loader user %q is not a user public key", ErrTrustInvalid, in.BusLoaderUserPub)
+	}
+	if in.BusLoaderUserPub != "" && in.BusLoaderUserPub == in.BusFenceUserPub {
+		return nil, fmt.Errorf("%w: the bus loader and fence users must be different keys", ErrTrustInvalid)
+	}
 
 	if opJWT == "" {
 		oc := jwt.NewOperatorClaims(pubs.operator)
@@ -281,6 +342,14 @@ func BootstrapNATSTrust(ctx context.Context, ks natskeys.KeyStore, in BootstrapI
 			return nil, fmt.Errorf("pki: sign bus fence user jwt: %w", err)
 		}
 	}
+	if loaderJWT == "" && in.BusLoaderUserPub != "" {
+		uc := jwt.NewUserClaims(in.BusLoaderUserPub)
+		uc.Name = "imas-bus-loader"
+		uc.Permissions = BusLoaderUserPermissions()
+		if loaderJWT, err = uc.Encode(pubs.sysAccountKP); err != nil {
+			return nil, fmt.Errorf("pki: sign bus loader user jwt: %w", err)
+		}
+	}
 
 	t := &NATSTrust{
 		OperatorJWT:        opJWT,
@@ -289,6 +358,7 @@ func BootstrapNATSTrust(ctx context.Context, ks natskeys.KeyStore, in BootstrapI
 		SysAccountPub:      pubs.sysAccount,
 		SysAccountJWT:      sysJWT,
 		BusFenceUserJWT:    fenceJWT,
+		BusLoaderUserJWT:   loaderJWT,
 	}
 	// Belt and braces: what is returned must load back.
 	if _, err := ParseNATSTrust(t.Files()); err != nil {
@@ -399,17 +469,47 @@ func checkSysAccountJWT(s, sysAccount, operatorSigning string) (*jwt.AccountClai
 // checkFenceUserJWT checks s is a user JWT issued directly by sysAccount
 // (no issuer_account: the SYS account has no signing keys).
 func checkFenceUserJWT(s, sysAccount string) (*jwt.UserClaims, error) {
+	return checkSysUserJWT(TrustBusFenceUserJWT, s, sysAccount)
+}
+
+// checkSysUserJWT checks s, the trust entry name, is a user JWT issued
+// directly by sysAccount.
+func checkSysUserJWT(name, s, sysAccount string) (*jwt.UserClaims, error) {
 	uc, err := jwt.DecodeUserClaims(s)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s: %v", ErrTrustInvalid, TrustBusFenceUserJWT, err)
+		return nil, fmt.Errorf("%w: %s: %v", ErrTrustInvalid, name, err)
 	}
-	if err := validateClaims(TrustBusFenceUserJWT, uc); err != nil {
+	if err := validateClaims(name, uc); err != nil {
 		return nil, err
 	}
 	if uc.Issuer != sysAccount || (uc.IssuerAccount != "" && uc.IssuerAccount != sysAccount) {
-		return nil, fmt.Errorf("%w: %s is issued by %s, not %s", ErrTrustInvalid, TrustBusFenceUserJWT, uc.Issuer, sysAccount)
+		return nil, fmt.Errorf("%w: %s is issued by %s, not %s", ErrTrustInvalid, name, uc.Issuer, sysAccount)
 	}
 	return uc, nil
+}
+
+// loaderPermissionsExact reports whether uc grants exactly
+// BusLoaderUserPermissions: the same allow lists in any order, no deny
+// list, no response permission, not a bearer token and no connection
+// type restriction.
+func loaderPermissionsExact(uc *jwt.UserClaims) bool {
+	want := BusLoaderUserPermissions()
+	same := func(a, b jwt.StringList) bool {
+		return len(a) == len(b) && subset(a, b) && subset(b, a)
+	}
+	p := uc.Permissions
+	return same(p.Pub.Allow, want.Pub.Allow) && same(p.Sub.Allow, want.Sub.Allow) &&
+		len(p.Pub.Deny) == 0 && len(p.Sub.Deny) == 0 && p.Resp == nil &&
+		!uc.BearerToken && len(uc.AllowedConnectionTypes) == 0
+}
+
+func subset(a, b jwt.StringList) bool {
+	for _, s := range a {
+		if !b.Contains(s) {
+			return false
+		}
+	}
+	return true
 }
 
 // checkExistingOperatorJWT is checkOperatorJWT for a bootstrap: a JWT

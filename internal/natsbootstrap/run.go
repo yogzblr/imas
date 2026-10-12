@@ -66,6 +66,10 @@ const (
 	// EnvBusFenceUserPub is the bus fence user's public NKey; when set, a
 	// fence user JWT for it is minted (signed by the SYS account key).
 	EnvBusFenceUserPub = natskeys.EnvPrefixBoot + "BUS_FENCE_USER_PUB"
+	// EnvBusLoaderUserPub is the bus account loader's public NKey; when
+	// set, a loader user JWT for it is minted (signed by the SYS account
+	// key, with exactly pki.BusLoaderUserPermissions).
+	EnvBusLoaderUserPub = natskeys.EnvPrefixBoot + "BUS_LOADER_USER_PUB"
 	// EnvKVCopy set to "true" also copies the public trust to OpenBao KV
 	// v2 at EnvKVMount/EnvKVPath. Default off.
 	EnvKVCopy  = natskeys.EnvPrefixBoot + "KV_COPY"
@@ -244,6 +248,13 @@ func bootstrap(ctx context.Context, out io.Writer, kube *kubeClient, cmName stri
 	if fence != "" && !nkeys.IsValidPublicUserKey(fence) {
 		return fmt.Errorf("%w: %s is not a user public key", errUsage, EnvBusFenceUserPub)
 	}
+	loader := os.Getenv(EnvBusLoaderUserPub)
+	if loader != "" && !nkeys.IsValidPublicUserKey(loader) {
+		return fmt.Errorf("%w: %s is not a user public key", errUsage, EnvBusLoaderUserPub)
+	}
+	if loader != "" && loader == fence {
+		return fmt.Errorf("%w: %s and %s must be different keys", errUsage, EnvBusLoaderUserPub, EnvBusFenceUserPub)
+	}
 	operatorName := os.Getenv(EnvOperatorName)
 	if operatorName == "" {
 		operatorName = DefaultOperatorName
@@ -266,7 +277,7 @@ func bootstrap(ctx context.Context, out io.Writer, kube *kubeClient, cmName stri
 		fmt.Fprintf(out, "transit key %s: %s\n", k.name, pub)
 	}
 
-	in := pki.BootstrapInput{OperatorName: operatorName, BusFenceUserPub: fence}
+	in := pki.BootstrapInput{OperatorName: operatorName, BusFenceUserPub: fence, BusLoaderUserPub: loader}
 	trust, written, err := writeTrust(ctx, kube, cmName, ks, in)
 	if err != nil {
 		return err
