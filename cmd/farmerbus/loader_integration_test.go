@@ -50,6 +50,8 @@ type accountsBucket struct {
 	n       int // index bumps so far
 }
 
+// newAccountsBucket starts the fake S3 server with the reader policy and
+// opens farmer's writer client on it.
 func newAccountsBucket(t *testing.T) *accountsBucket {
 	t.Helper()
 	b := &accountsBucket{srv: objectstoretest.NewServer(t)}
@@ -63,6 +65,7 @@ func newAccountsBucket(t *testing.T) *accountsBucket {
 	return b
 }
 
+// put writes key as farmer, the one writer the policy lets through.
 func (b *accountsBucket) put(t *testing.T, key, body string) {
 	t.Helper()
 	b.mu.Lock()
@@ -149,6 +152,7 @@ func newLoaderEnv(t *testing.T, reconcile time.Duration) *loaderEnv {
 	return e
 }
 
+// readTrimmedFile returns a file's content without surrounding space.
 func readTrimmedFile(t *testing.T, path string) string {
 	t.Helper()
 	b, err := os.ReadFile(path)
@@ -271,6 +275,7 @@ func signAccountAt(t *testing.T, signer nkeys.KeyPair, ac *jwt.AccountClaims, ia
 	return toSign + "." + base64.RawURLEncoding.EncodeToString(sig)
 }
 
+// iatOf is an Account JWT's issued-at.
 func iatOf(t *testing.T, accountJWT string) int64 {
 	t.Helper()
 	ac, err := jwt.DecodeAccountClaims(accountJWT)
@@ -365,6 +370,37 @@ func lookupIATs(t *testing.T, nc *nats.Conn, pub string) []int64 {
 	}
 }
 
+// waitAllBy polls every cond until each has held once, and fails at
+// deadline naming the ones that never did. A cond is only counted when it
+// held before deadline, and each is checked at least once.
+func waitAllBy(t *testing.T, what string, deadline time.Time, conds ...func() bool) {
+	t.Helper()
+	held := make([]bool, len(conds))
+	for {
+		before := time.Now().Before(deadline)
+		all := true
+		for i, cond := range conds {
+			if !held[i] {
+				held[i] = cond() && time.Now().Before(deadline)
+			}
+			all = all && held[i]
+		}
+		if all {
+			return
+		}
+		if !before || !time.Now().Before(deadline) {
+			var missing []int
+			for i, h := range held {
+				if !h {
+					missing = append(missing, i)
+				}
+			}
+			t.Fatalf("deadline passed waiting for %s: conditions %v never held", what, missing)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // hostOf is the host:port of a node's client URL.
 func hostOf(t *testing.T, u string) string {
 	t.Helper()
@@ -375,6 +411,7 @@ func hostOf(t *testing.T, u string) string {
 	return pu.Host
 }
 
+// readyzOK reports whether a /readyz endpoint answers 200.
 func readyzOK(endpoint string) bool {
 	resp, err := http.Get(endpoint)
 	if err != nil {
@@ -384,6 +421,7 @@ func readyzOK(endpoint string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
+// admitted reports whether the tenant's sprout can connect to the node.
 func (tr *trust) admitted(tn *tenant, nodeURL string) bool {
 	nc, err := tr.dialSprout(tn, []string{nodeURL}, nats.NoReconnect())
 	if err == nil {
@@ -490,12 +528,11 @@ func TestLoaderMissedEventRepairedByTimer(t *testing.T) {
 	tn := e.tr.newTenant(t, "web-01")
 	e.bucket.putAccount(t, tn.pub, e.tr.accountJWT(t, tn, false))
 	e.bucket.bumpIndex(t)
-	start := time.Now()
-	for i := range 3 {
-		waitFor(t, fmt.Sprintf("node %d to accept the new tenant's sprout", i), 5*reconcile-time.Since(start), func() bool {
-			return e.tr.admitted(tn, c.url(i))
-		})
+	admitted := make([]func() bool, 3)
+	for i := range admitted {
+		admitted[i] = func() bool { return e.tr.admitted(tn, c.url(i)) }
 	}
+	waitAllBy(t, "every node to accept the new tenant's sprout", time.Now().Add(5*reconcile), admitted...)
 	if m, err := events.NextMsg(10 * time.Millisecond); err == nil {
 		t.Fatalf("an accounts-changed event was published (%q); the test needs none", m.Data)
 	}
@@ -598,9 +635,8 @@ func TestLoaderRevokedSproutRefusedOnEveryNode(t *testing.T) {
 
 	// No index timer can fire before 0.8 of an interval: dropping the
 	// sprout before then is the event's work.
-	for i := range 2 {
-		waitFor(t, fmt.Sprintf("node %d to drop the revoked sprout", i), reconcile*4/5-time.Since(published), sprouts[i].IsClosed)
-	}
+	waitAllBy(t, "nodes 0 and 1 to drop the revoked sprout before any timer", published.Add(reconcile*4/5),
+		sprouts[0].IsClosed, sprouts[1].IsClosed)
 	waitFor(t, "node 2 to drop the revoked sprout", 5*reconcile, sprouts[2].IsClosed)
 	waitFor(t, "node 2's loader to apply the revocation by its timer", 5*reconcile, func() bool {
 		return loaders[2].l.Status().LastIndexToken == token
