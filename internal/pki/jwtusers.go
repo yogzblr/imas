@@ -326,6 +326,14 @@ func syncNatsAuth(mat *natsAuthMaterial) (bool, error) {
 	log.Tracef("Completed syncing authorized clients onto the tenant Account JWT.")
 
 	if changed {
+		// A strictly newer iat than the JWT this replaces (§7.3 step 1):
+		// the jti hashes only subject, issuer, name and iat, so a re-sign
+		// in the same second would read as the same JWT to the bus
+		// loaders and the resolver sync. A JWT minted by this same call
+		// was never published, so it needn't be outranked.
+		if !mat.tenantMinted {
+			waitPastIssuedAt(ac.IssuedAt)
+		}
 		signed, encErr := ac.Encode(mat.operatorSigningKP)
 		if encErr != nil {
 			return false, encErr
@@ -334,6 +342,7 @@ func syncNatsAuth(mat *natsAuthMaterial) (bool, error) {
 			return false, writeErr
 		}
 		mat.tenantJWT = signed
+		mat.tenantMinted = false
 	}
 	return changed, nil
 }

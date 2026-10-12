@@ -463,7 +463,44 @@ var (
 	// bucket to any authenticated caller, so job logs sharing it would be
 	// readable across sprouts and tenants.
 	S3JobBucket string
+
+	// AccountStore is the accounts bucket farmer writes every Account JWT
+	// to for the bus nodes' account loaders (docs/briefs/P21-slice2-bus-
+	// loader.md §4): its own bucket and write credential, never the
+	// recipe/job ones. Read from the IMAS_ACCOUNTS_* environment only
+	// (accountStoreFromEnv); an empty Bucket means not configured.
+	AccountStore AccountStoreConfig
+
+	// BusExpectedNodes (IMAS_BUS_EXPECTED_NODES) is how many bus nodes a
+	// claims push waits for; 0 means as many as answer a server ping.
+	BusExpectedNodes int
 )
+
+// The farmer side of the accounts bucket (docs/briefs/P21-slice2-bus-
+// loader.md §4.5).
+const (
+	EnvAccountsS3Endpoint        = "IMAS_ACCOUNTS_S3_ENDPOINT"
+	EnvAccountsS3UseSSL          = "IMAS_ACCOUNTS_S3_USE_SSL"
+	EnvAccountsS3Bucket          = "IMAS_ACCOUNTS_S3_BUCKET"
+	EnvAccountsS3AccessKeyID     = "IMAS_ACCOUNTS_S3_ACCESS_KEY_ID"
+	EnvAccountsS3SecretAccessKey = "IMAS_ACCOUNTS_S3_SECRET_ACCESS_KEY"
+	EnvAccountsEventSubject      = "IMAS_ACCOUNTS_EVENT_SUBJECT"
+	EnvBusExpectedNodes          = "IMAS_BUS_EXPECTED_NODES"
+
+	// DefaultAccountsEventSubject is the accounts-changed event subject
+	// the bus loaders subscribe to.
+	DefaultAccountsEventSubject = "imas.bus.accounts.changed"
+)
+
+// AccountStoreConfig is the accounts bucket and the event subject.
+type AccountStoreConfig struct {
+	Endpoint        string
+	UseSSL          bool
+	Bucket          string
+	AccessKeyID     string
+	SecretAccessKey string
+	EventSubject    string
+}
 
 // Binary represents the type of imas binary being configured.
 type Binary string
@@ -623,6 +660,11 @@ func LoadConfig(binary string) {
 					jety.Set("s3jobbucket", v)
 				}
 			}
+			acc, expected, err := accountStoreFromEnv(jety.GetString("s3endpoint"), jety.GetBool("s3usessl"))
+			if err != nil {
+				log.Fatalf("%v", err)
+			}
+			AccountStore, BusExpectedNodes = acc, expected
 			// The mounted Secret wins over a nkeyfarmerprivfile key left in
 			// an old config file.
 			if v := os.Getenv(EnvFarmerNKeySeedFile); v != "" {
@@ -1041,6 +1083,45 @@ func StaticProps() map[string]interface{} {
 func SetSproutID(id string) {
 	jety.Set("sproutid", id)
 	jety.WriteConfig()
+}
+
+// accountStoreFromEnv reads the accounts bucket (AccountStore) and
+// BusExpectedNodes from the IMAS_ACCOUNTS_* and IMAS_BUS_EXPECTED_NODES
+// variables. The endpoint and TLS setting default to the recipe store's
+// (s3Endpoint, s3UseSSL); the event subject to
+// DefaultAccountsEventSubject. Read straight from the environment, never
+// through jety, so the write credential is never folded into the config.
+func accountStoreFromEnv(s3Endpoint string, s3UseSSL bool) (AccountStoreConfig, int, error) {
+	c := AccountStoreConfig{
+		Endpoint:        strings.TrimSpace(os.Getenv(EnvAccountsS3Endpoint)),
+		UseSSL:          s3UseSSL,
+		Bucket:          strings.TrimSpace(os.Getenv(EnvAccountsS3Bucket)),
+		AccessKeyID:     os.Getenv(EnvAccountsS3AccessKeyID),
+		SecretAccessKey: os.Getenv(EnvAccountsS3SecretAccessKey),
+		EventSubject:    strings.TrimSpace(os.Getenv(EnvAccountsEventSubject)),
+	}
+	if c.Endpoint == "" {
+		c.Endpoint = s3Endpoint
+	}
+	if c.EventSubject == "" {
+		c.EventSubject = DefaultAccountsEventSubject
+	}
+	if v := strings.TrimSpace(os.Getenv(EnvAccountsS3UseSSL)); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return AccountStoreConfig{}, 0, fmt.Errorf("%s=%q: want true or false", EnvAccountsS3UseSSL, v)
+		}
+		c.UseSSL = b
+	}
+	expected := 0
+	if v := strings.TrimSpace(os.Getenv(EnvBusExpectedNodes)); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return AccountStoreConfig{}, 0, fmt.Errorf("%s=%q: want a whole number, 0 or more", EnvBusExpectedNodes, v)
+		}
+		expected = n
+	}
+	return c, expected, nil
 }
 
 // recipeTemplateLimitsFromEnv reads RecipeTemplateLimits from the

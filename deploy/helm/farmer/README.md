@@ -1061,6 +1061,13 @@ which is local to one PXC node):
   lease makes one replica mint a sprout's JWT and the others reuse it.
   Without the bucket every enrolment fails (NOTES warns).
 - **SaaS API credential rotation state**: `saas.saasapi_credential_state`.
+- **Account JWTs for the bus**: every Account JWT farmer pushes is first
+  written to the accounts bucket (`accountStore`, `accounts/<account>.jwt`
+  plus `accounts/index`), then pushed to every bus node, then announced on
+  `imas.bus.accounts.changed`; each bus node's account loader reads the
+  bucket, so a bus node started empty loads every Account from it. One
+  replica at a time per account, under the `account:<pub>` row of
+  `farmer.job_leases`; a newer object is never replaced by an older JWT.
 - **Hourly jobs** (job expiry, the cohort refresher, the account push per
   tenant): one replica at a time under a `farmer.job_leases` row
   (`farmer.jobs.leaseTTL`, `IMAS_JOB_LEASE_TTL`, default 120s).
@@ -1098,6 +1105,7 @@ manifest limiter) allow N times the configured rate with N replicas.
 | farmer, saasapi | out | PXC / Valkey | 3306 / 6379 |
 | farmer | out | OpenBao | 8200 |
 | farmer | out | with `objectStore.endpoint` set: the object store (`networkPolicy.external.objectStore`, default any destination) | `objectStore.endpoint`'s port |
+| farmer | out | with `accountStore.endpoint` on another port: the accounts bucket (same peers) | `accountStore.endpoint`'s port |
 | saasapi | out | OpenBao, only for the bus CA fetch | 8200 |
 | saasapi | in | `networkPolicy.saasapiIngress.from` (default: anyone) | `saasapi.port` (8081) |
 | saasapi | in | with `saasapi.operator`: the sprout release hook Job's pods, plus `networkPolicy.saasapiOperatorIngress.from` (default: none) | `saasapi.operator.port` (8443) |
@@ -1171,6 +1179,7 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `bus.sproutBusURLs` | `[]` | `IMAS_SPROUT_BUS_URLS`, Envoy's external `wss://` addresses. Required. |
 | `bus.ca.secretName` / `configMapName` / `key` | `""` / `""` / `ca.crt` | saasapi's bus CA. Empty: `tls.secretName`'s `ca.crt`, or fetched from OpenBao PKI in openbao mode. |
 | `bus.tlsServerName` | `""` | `farmerbustlsservername`. Empty: the bus Service FQDN, or `bus.host`. See [Reaching the bus](#reaching-the-bus). |
+| `bus.expectedNodes` | `0` | `IMAS_BUS_EXPECTED_NODES`: how many bus nodes a claims push waits for (the nats chart's `bus.replicaCount`). 0: the nodes that answer a server ping. A node still missing is logged; its loader applies the JWT from the accounts bucket. |
 | `natsSeeds.secretName` | `imas-farmer-nats-seeds` | The seed Secret. Required. |
 | `natsSeeds.seeds` | `SYS_USER`, `SAASAPI_USER` | `NAME: key` pairs. Both are required; the removed trust chain seeds are refused. |
 | `natsSeeds.extraSeeds` | `{}` | More user-kind seeds. |
@@ -1198,6 +1207,9 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `database.migrate.wait` / `backoffLimit` / `activeDeadlineSeconds` | `15m` / `2` / `1800` | How long to wait for PXC; the Job's retry and time budget. |
 | `database.migrate.argoCDHooks` | `true` | Argo CD hook annotations. See [Migrations](#migrations). |
 | `objectStore.*` | empty | `IMAS_S3_*`. `jobBucket` must differ from `bucket`. |
+| `accountStore.bucket` / `endpoint` / `useSSL` | `imas-accounts` / `""` / `null` | `IMAS_ACCOUNTS_S3_*`: the accounts bucket the bus loaders read (see [Farmer is stateless](#farmer-is-stateless)). On when `bucket` is set and there is an endpoint; `endpoint` and `useSSL` default to `objectStore`'s. Must differ from every `objectStore` bucket. |
+| `accountStore.credentialsSecret` / `accessKeyIdKey` / `secretAccessKeyKey` | `imas-farmer-accounts-writer` / `access-key-id` / `secret-access-key` | farmer's own write credential for the accounts bucket (get, put, list; no delete). Must not be `objectStore.credentialsSecret`. |
+| `accountStore.eventSubject` | `imas.bus.accounts.changed` | `IMAS_ACCOUNTS_EVENT_SUBJECT`; the nats chart's `accountStore.eventSubject`. |
 | `objectStore.sproutJWTBucket` | `""` | `IMAS_S3_SPROUT_JWT_BUCKET`: the private bucket of sprout User JWTs. Must differ from `bucket` and `jobBucket`. Empty: every enrolment fails, and NOTES says so. |
 | `farmer.image.*` | `ghcr.io/yogzblr/imas-farmer` | Also the publish Job's image. |
 | `farmer.replicaCount` | `2` | At least 1. See [Farmer is stateless](#farmer-is-stateless). |

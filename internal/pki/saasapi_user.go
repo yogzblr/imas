@@ -232,6 +232,9 @@ func ensureSaaSAPICredentialLocked(mat *natsAuthMaterial, state *SaaSAPICredenti
 
 	sysJWT = string(sysBytes)
 	if sysChanged {
+		// Strictly newer iat than the SYS Account JWT it replaces (see
+		// syncNatsAuth).
+		waitPastIssuedAt(sysClaims.IssuedAt)
 		sysJWT, err = sysClaims.Encode(mat.operatorSigningKP)
 		if err != nil {
 			return "", nil, "", false, fmt.Errorf("re-signing the SYS Account JWT: %w", err)

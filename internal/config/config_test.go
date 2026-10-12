@@ -1685,3 +1685,50 @@ func TestLoadConfig_FarmerNKeySeedFile(t *testing.T) {
 		}
 	})
 }
+
+// The accounts bucket settings come from the IMAS_ACCOUNTS_* environment,
+// with the endpoint and TLS falling back to the recipe store's.
+func TestAccountStoreFromEnv(t *testing.T) {
+	for _, k := range []string{EnvAccountsS3Endpoint, EnvAccountsS3UseSSL, EnvAccountsS3Bucket,
+		EnvAccountsS3AccessKeyID, EnvAccountsS3SecretAccessKey, EnvAccountsEventSubject, EnvBusExpectedNodes} {
+		t.Setenv(k, "")
+	}
+	c, n, err := accountStoreFromEnv("s3.core:9000", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := AccountStoreConfig{Endpoint: "s3.core:9000", UseSSL: false, EventSubject: DefaultAccountsEventSubject}
+	if c != want || n != 0 {
+		t.Fatalf("defaults: got %+v, %d; want %+v, 0", c, n, want)
+	}
+
+	t.Setenv(EnvAccountsS3Endpoint, "accounts.core:9443")
+	t.Setenv(EnvAccountsS3UseSSL, "true")
+	t.Setenv(EnvAccountsS3Bucket, "imas-accounts")
+	t.Setenv(EnvAccountsS3AccessKeyID, "writer")
+	t.Setenv(EnvAccountsS3SecretAccessKey, "s3cret")
+	t.Setenv(EnvAccountsEventSubject, "imas.test.changed")
+	t.Setenv(EnvBusExpectedNodes, "3")
+	c, n, err = accountStoreFromEnv("s3.core:9000", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = AccountStoreConfig{Endpoint: "accounts.core:9443", UseSSL: true, Bucket: "imas-accounts",
+		AccessKeyID: "writer", SecretAccessKey: "s3cret", EventSubject: "imas.test.changed"}
+	if c != want || n != 3 {
+		t.Fatalf("set: got %+v, %d; want %+v, 3", c, n, want)
+	}
+
+	for _, bad := range []struct{ env, val string }{
+		{EnvAccountsS3UseSSL, "yes please"},
+		{EnvBusExpectedNodes, "-1"},
+		{EnvBusExpectedNodes, "three"},
+	} {
+		t.Run(bad.env+"="+bad.val, func(t *testing.T) {
+			t.Setenv(bad.env, bad.val)
+			if _, _, err := accountStoreFromEnv("", true); err == nil || !strings.Contains(err.Error(), bad.env) {
+				t.Fatalf("want an error naming %s, got %v", bad.env, err)
+			}
+		})
+	}
+}

@@ -137,6 +137,13 @@ func baseNatsOptions() nats_server.Options {
 // without touching that tenant's Transit keys, so seeding never creates
 // or needs them. A missing or unusable tenant Account JWT is skipped;
 // core's next push supplies it.
+//
+// The resolver directory (resolverStoreDir) is under FarmerPKI, so it
+// lives as long as this process's PKI directory and nothing relies on it
+// outliving that: ConfigureNats serves only the in-process test bus
+// (farmer never embeds one, and its FarmerPKI is the tmp emptyDir). Every
+// Account JWT reaches a real bus node through the accounts bucket and
+// its loader (accountpublisher.go), not through this directory.
 func seedResolverFromCore(NatsConfig *nats_server.Options) {
 	mat, err := ensureNatsAuth()
 	if err != nil {
