@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -430,6 +431,61 @@ func TestServeFailureStopsBoth(t *testing.T) {
 				t.Errorf("the healthy server on %s is still accepting connections", healthy)
 			}
 		})
+	}
+}
+
+// TestServeWaitsForLateServer: serve returns only after every server's
+// ListenAndServe has returned, even one that starts after the shutdown
+// (a goroutine the scheduler ran late, as in a busy CI). The healthy
+// server's start is held back until the failing one has made serve shut
+// both down; without the wait, serve returned while it was still to bind
+// its port and the port stayed open after serve returned.
+func TestServeWaitsForLateServer(t *testing.T) {
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer taken.Close()
+	healthyAddr := freeAddr(t)
+	healthy := newTenantServer(healthyAddr)
+	operatorEnv(t, taken.Addr().String())
+	cfg, err := saasapi.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	opSrv, err := newOperatorServer(cfg)
+	if err != nil {
+		t.Fatalf("newOperatorServer: %v", err)
+	}
+
+	var healthyExited atomic.Bool
+	orig := runServer
+	t.Cleanup(func() { runServer = orig })
+	runServer = func(s *http.Server, run func() error) error {
+		if s != healthy {
+			return run()
+		}
+		time.Sleep(200 * time.Millisecond)
+		err := run()
+		healthyExited.Store(true)
+		return err
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- serve(context.Background(), healthy, opSrv, 5*time.Second) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "operator plane") {
+			t.Fatalf("serve = %v, want the operator plane's listen error", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve didn't return after a server failed")
+	}
+	if !healthyExited.Load() {
+		t.Error("serve returned before the late server's ListenAndServe did")
+	}
+	if !refusesConnections(healthyAddr) {
+		t.Errorf("the late server on %s is still accepting connections", healthyAddr)
 	}
 }
 
