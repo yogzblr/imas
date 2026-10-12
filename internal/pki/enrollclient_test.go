@@ -128,6 +128,36 @@ type enrollServer struct {
 	// reply farmer sealed properly) instead of the real ones.
 	refreshTenantOverride    string
 	refreshTenantPubOverride string
+	// busy holds the Retry-After of the next requests (to either path)
+	// to answer 503 before reaching farmer's code, one entry per
+	// request; noRetryAfter sends the 503 without the header.
+	busy []string
+}
+
+// noRetryAfter, as a busy entry, is a 503 without a Retry-After header.
+const noRetryAfter = "\x00none"
+
+// takeBusy reports whether this request is to be answered busy, and
+// with which Retry-After.
+func (s *enrollServer) takeBusy() (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.busy) == 0 {
+		return "", false
+	}
+	v := s.busy[0]
+	s.busy = s.busy[1:]
+	return v, true
+}
+
+// answerBusy writes farmer's busy answer (writeEnrollError's 503).
+func answerBusy(w http.ResponseWriter, retryAfter string) {
+	if retryAfter != noRetryAfter {
+		w.Header().Set("Retry-After", retryAfter)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = w.Write([]byte(`{"error":"enrollment_failed"}`))
 }
 
 // refreshOverrides returns the test's overrides of the refresh result.
@@ -205,6 +235,10 @@ func startEnrollServer(t *testing.T) *enrollServer {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		if v, ok := s.takeBusy(); ok {
+			answerBusy(w, v)
+			return
+		}
 		s.mu.Lock()
 		s.requests = append(s.requests, req)
 		natsURLs := s.natsURLs
@@ -235,6 +269,10 @@ func startEnrollServer(t *testing.T) *enrollServer {
 		var raw map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if v, ok := s.takeBusy(); ok {
+			answerBusy(w, v)
 			return
 		}
 		s.mu.Lock()

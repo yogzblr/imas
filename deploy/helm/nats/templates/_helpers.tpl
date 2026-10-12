@@ -451,11 +451,29 @@ envoyReplicas null means envoy.replicaCount. See deploy/envoy/README.md,
 {{- end -}}
 {{- end }}
 
+{{- define "imas-nats.envoy.noBusyRetryPolicy" -}}
+{{- /*
+The retry policy of the /v1/enroll and /v1/refresh routes. Envoy retries
+only a request that never reached farmer (no connection, or a stream the
+upstream refused unprocessed), once, on another farmer replica. It never
+retries a response: farmer's 503 (another replica holds the sprout's
+User JWT mint lease) carries a Retry-After the sprout must see and wait
+out (internal/pki/enrollclient.go), and a retried enrollment would be a
+second signed request anyway. So retry_on names neither 5xx,
+gateway-error nor retriable-status-codes; chart_test.go's
+TestEnrollRoutesDoNotRetry503 holds it there.
+*/ -}}
+retry_policy:
+  retry_on: connect-failure,refused-stream
+  num_retries: 1
+{{- end }}
+
 {{- define "imas-nats.envoy.refreshRoute" -}}
 - match: { path: "/v1/refresh" }
   route:
     cluster: farmer_api
     timeout: {{ .Values.envoy.routes.refreshTimeout }}
+    {{- include "imas-nats.envoy.noBusyRetryPolicy" . | nindent 4 }}
   typed_per_filter_config:
     envoy.filters.http.jwt_authn:
       "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig

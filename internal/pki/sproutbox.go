@@ -742,25 +742,19 @@ type enrollProofBody struct {
 	SproutPub string `json:"sprout_pub"`
 }
 
-// sproutEnrollProof builds the sprout's proof that it holds the private
-// half of sproutPub, its box public key, for the enrollment of nkeyPub
-// as sproutID in tenantID: a payloadbox message under
-// PurposeEnrollProof naming both keys, sealed with the box private key
-// (config.SproutBoxPrivFile) to tenantPub, the tenant key farmer's first
-// enrollment response named. See enroll.go's verifyEnrollProof for why
-// this proves possession. Nothing is pinned or persisted here.
-func sproutEnrollProof(tenantID, sproutID, tenantPub, nkeyPub, sproutPub string) (json.RawMessage, error) {
+// sealEnrollProof builds a sprout's proof that it holds priv, the private
+// half of sproutPub, its box public key, for the enrollment of nkeyPub as
+// sproutID in tenantID: a payloadbox message under PurposeEnrollProof
+// naming both keys, sealed with priv to tenantPub, the tenant key farmer's
+// first enrollment response named. See enroll.go's verifyEnrollProof for
+// why this proves possession. Nothing is pinned or persisted here.
+func sealEnrollProof(priv *[32]byte, tenantID, sproutID, tenantPub, nkeyPub, sproutPub string) (json.RawMessage, error) {
 	tp, err := DecodeBoxPubKey(tenantPub)
 	if err != nil {
 		return nil, err
 	}
-	priv, err := readBoxPrivKeyFile(config.SproutBoxPrivFile, false)
-	if err != nil {
-		return nil, err
-	}
-	defer wipe(priv[:])
 	if pub, err := boxPubFromPriv(priv); err != nil || pub != sproutPub {
-		return nil, errors.New("pki: the box key on disk is not the one being enrolled")
+		return nil, errors.New("pki: the box key is not the one being enrolled")
 	}
 	msg, err := payloadbox.NewMessage(payloadbox.PurposeEnrollProof, tenantID, sproutID, "",
 		enrollProofBody{NKeyPub: nkeyPub, SproutPub: sproutPub})

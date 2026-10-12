@@ -29,6 +29,13 @@ package pki
 //   - Refreshes carry no join token at all (their own contract,
 //     POST /v1/refresh), so a refresh can only re-issue an existing
 //     identity, never redeem a token or create a sprout.
+//   - A 503 is the one retryable answer: another farmer replica holds
+//     the sprout's User JWT mint lease. The client waits its Retry-After
+//     (5 s when absent or invalid, at most 60 s) plus up to 20 percent
+//     jitter, and retries with a freshly signed or sealed request, at most
+//     enrollStep2Attempts times (retryWhileBusy). Envoy must not retry a
+//     503 on these routes itself, or the Retry-After never reaches here
+//     (deploy/helm/nats's envoy-configmap.yaml).
 //   - nats_urls, the bus addresses the sprout will send its User JWT and
 //     gateway JWT to, must pass ValidateBusURLs (TLS schemes only, no
 //     credentials) or the whole response is refused; see busconnect.go.
@@ -68,6 +75,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -299,7 +307,68 @@ func readBoxPrivKey(path string) ([]byte, error) {
 // each request with the sprout's NKey seed, and returns the validated
 // response. It persists nothing; see PersistEnrollment. hostname is the
 // sprout ID the sprout asks for; farmer may assign a suffixed one on a
-// collision, which the response's SproutID carries.
+// collision, which the response's SproutID carries. sproutPub must be the
+// public half of the box key on disk (EnsureSproutBoxKey).
+//
+// It is EnrollClient.Enroll with the sprout's own keys (its NKey seed and
+// box key files), farmer URL and SproutRootCA-pinned client.
+func EnrollSprout(ctx context.Context, joinToken, hostname, sproutPub string) (*EnrollResponse, error) {
+	if joinToken == "" {
+		return nil, errors.New("pki: no join token configured")
+	}
+	kp, err := loadSproutNKey()
+	if err != nil {
+		return nil, err
+	}
+	defer kp.Wipe()
+	priv, err := readBoxPrivKeyFile(config.SproutBoxPrivFile, false)
+	if err != nil {
+		return nil, err
+	}
+	defer wipe(priv[:])
+	if pub, err := boxPubFromPriv(priv); err != nil || pub != sproutPub {
+		return nil, errors.New("pki: the box key on disk is not the one being enrolled")
+	}
+	nkeyClientMu.RLock()
+	client := nkeyClient
+	nkeyClientMu.RUnlock()
+	if client == nil {
+		return nil, ErrNKeyClientNotReady
+	}
+	c := &EnrollClient{HTTP: client, FarmerURL: config.FarmerURL}
+	return c.Enroll(ctx, joinToken, hostname, EnrollKeys{NKey: kp, BoxPriv: priv})
+}
+
+// EnrollKeys is the key material of one enrollment: the sprout's NKey
+// (a user key pair, which signs each request) and its X25519 box private
+// key, whose public half is enrolled as sprout_pub and whose possession
+// the second request proves. Only public halves leave the process.
+type EnrollKeys struct {
+	NKey    nkeys.KeyPair
+	BoxPriv *[32]byte
+}
+
+// EnrollClient sends enrollment requests to one farmer. A sprout has one
+// (EnrollSprout builds it from its config); tools/loadtest builds one to
+// enroll many simulated sprouts through the real enrollment path, each
+// with its own EnrollKeys.
+type EnrollClient struct {
+	// HTTP is the client requests go over: for a sprout, the
+	// SproutRootCA-pinned one LoadRootCA builds.
+	HTTP *http.Client
+	// FarmerURL is farmer's (or the DMZ Envoy's) base URL; /v1/enroll is
+	// appended.
+	FarmerURL string
+	// Timestamp returns the signing timestamp of the next request (Unix
+	// seconds). Nil uses nextSigningTimestamp, the process-wide one a
+	// sprout needs. Enroll makes its own requests' timestamps strictly
+	// increasing either way.
+	Timestamp func() int64
+}
+
+// Enroll enrolls keys through POST /v1/enroll with joinToken, asking for
+// hostname as the sprout ID, and returns the validated response. It
+// persists nothing.
 //
 // It makes two requests (enroll.go's "Proof of possession of the box
 // key"). The first issues the identity, names the tenant and its box
@@ -318,41 +387,58 @@ func readBoxPrivKey(path string) ([]byte, error) {
 // When the first request was answered from farmer's replay path (this
 // NKey was already enrolled, with a box key), there is no binding, and
 // the second request re-asserts the box key on record.
-func EnrollSprout(ctx context.Context, joinToken, hostname, sproutPub string) (*EnrollResponse, error) {
+//
+// A 503 (another farmer replica holds this sprout's User JWT mint lease)
+// is retried after its Retry-After (retryWhileBusy, busyDelay), within the
+// same attempt limit.
+func (c *EnrollClient) Enroll(ctx context.Context, joinToken, hostname string, keys EnrollKeys) (*EnrollResponse, error) {
 	if joinToken == "" {
 		return nil, errors.New("pki: no join token configured")
 	}
-	kp, err := loadSproutNKey()
-	if err != nil {
-		return nil, err
+	if keys.NKey == nil || keys.BoxPriv == nil {
+		return nil, errors.New("pki: enrollment needs the sprout's NKey and box key")
 	}
-	defer kp.Wipe()
-	nkeyPub, err := kp.PublicKey()
+	nkeyPub, err := keys.NKey.PublicKey()
 	if err != nil {
 		return nil, fmt.Errorf("pki: sprout NKey public key: %w", err)
 	}
-	first, err := postEnroll(ctx, kp, nkeyPub, joinToken, hostname, sproutPub, nil, nil)
+	sproutPub, err := boxPubFromPriv(keys.BoxPriv)
+	if err != nil {
+		return nil, err
+	}
+	var last int64
+	var first *EnrollResponse
+	err = retryWhileBusy(ctx, "/v1/enroll", func() error {
+		var err error
+		first, err = c.postEnroll(ctx, keys.NKey, nkeyPub, joinToken, hostname, sproutPub, nil, nil, &last)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
 	var second *EnrollResponse
 	for attempt := 1; ; attempt++ {
-		proof, err := sproutEnrollProof(first.TenantID, first.SproutID, first.TenantX25519Pub, nkeyPub, sproutPub)
+		proof, err := sealEnrollProof(keys.BoxPriv, first.TenantID, first.SproutID, first.TenantX25519Pub, nkeyPub, sproutPub)
 		if err != nil {
 			return nil, fmt.Errorf("pki: building the box key proof of possession: %w", err)
 		}
-		second, err = postEnroll(ctx, kp, nkeyPub, joinToken, hostname, sproutPub, proof, first.EnrollBinding)
+		second, err = c.postEnroll(ctx, keys.NKey, nkeyPub, joinToken, hostname, sproutPub, proof, first.EnrollBinding, &last)
 		if err == nil {
 			break
 		}
 		if attempt == enrollStep2Attempts || ctx.Err() != nil {
 			return nil, fmt.Errorf("pki: proving possession of the box key (if this sprout has no box key on record and its first enrollment was not completed within %s, it has to be deleted and enrolled again under a new NKey with a fresh join token): %w", EnrollBindingTTL, err)
 		}
-		log.Warnf("enroll: proving possession of the box key failed (attempt %d of %d), retrying: %v", attempt, enrollStep2Attempts, err)
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(enrollStep2RetryDelay << (attempt - 1)):
+		delay := enrollStep2RetryDelay << (attempt - 1)
+		var busy *farmerBusyError
+		if errors.As(err, &busy) {
+			delay = busyDelay(busy.retryAfter, busyJitter)
+			logBusy(busy.path, delay)
+		} else {
+			log.Warnf("enroll: proving possession of the box key failed (attempt %d of %d), retrying: %v", attempt, enrollStep2Attempts, err)
+		}
+		if err := busyWait(ctx, delay); err != nil {
+			return nil, err
 		}
 	}
 	if second.SproutID != first.SproutID || second.TenantID != first.TenantID || second.TenantX25519Pub != first.TenantX25519Pub {
@@ -363,23 +449,37 @@ func EnrollSprout(ctx context.Context, joinToken, hostname, sproutPub string) (*
 
 // enrollStep2Attempts and enrollStep2RetryDelay bound EnrollSprout's
 // retries of its second request (delays of 1s, 2s, 4s, 8s: well inside
-// EnrollBindingTTL). Variables so tests can shorten them.
+// EnrollBindingTTL). enrollStep2Attempts is also the attempt limit for a
+// request farmer answers busy (retryWhileBusy). Variables so tests can
+// shorten them.
 var (
 	enrollStep2Attempts   = 5
 	enrollStep2RetryDelay = time.Second
 )
 
+// timestamp returns the signing timestamp of the next request, strictly
+// after *last, and records it there.
+func (c *EnrollClient) timestamp(last *int64) int64 {
+	next := nextSigningTimestamp
+	if c.Timestamp != nil {
+		next = c.Timestamp
+	}
+	ts := max(next(), *last+1)
+	*last = ts
+	return ts
+}
+
 // postEnroll sends one signed POST /v1/enroll request, with proof as its
 // sprout_pub_proof and binding as its enroll_binding if set, and returns
 // the validated response. A response to a request with a proof must
 // carry a gateway JWT; one to a request without may not.
-func postEnroll(ctx context.Context, kp nkeys.KeyPair, nkeyPub, joinToken, hostname, sproutPub string, proof, binding json.RawMessage) (*EnrollResponse, error) {
+func (c *EnrollClient) postEnroll(ctx context.Context, kp nkeys.KeyPair, nkeyPub, joinToken, hostname, sproutPub string, proof, binding json.RawMessage, last *int64) (*EnrollResponse, error) {
 	req := enrollWireRequest{
 		JoinToken:      joinToken,
 		NKeyPub:        nkeyPub,
 		Hostname:       hostname,
 		SproutPub:      sproutPub,
-		Timestamp:      nextSigningTimestamp(),
+		Timestamp:      c.timestamp(last),
 		SproutPubProof: proof,
 		EnrollBinding:  binding,
 	}
@@ -390,7 +490,7 @@ func postEnroll(ctx context.Context, kp nkeys.KeyPair, nkeyPub, joinToken, hostn
 	req.NKeySig = base64.RawURLEncoding.EncodeToString(sig)
 
 	var out EnrollResponse
-	if err := postToFarmer(ctx, "/v1/enroll", req, &out); err != nil {
+	if err := postJSON(ctx, c.HTTP, c.FarmerURL, "/v1/enroll", req, &out); err != nil {
 		return nil, err
 	}
 	if err := validateEnrollResponse(&out, nkeyPub, len(proof) > 0); err != nil {
@@ -399,22 +499,127 @@ func postEnroll(ctx context.Context, kp nkeys.KeyPair, nkeyPub, joinToken, hostn
 	return &out, nil
 }
 
+// ErrFarmerBusy is what a request farmer answered 503 matches
+// (errors.Is): another farmer replica holds the sprout's User JWT mint
+// lease (pki.ErrSproutJWTBusy on farmer's side). It is retryable; the
+// answer's Retry-After says when.
+var ErrFarmerBusy = errors.New("pki: server busy (lease held)")
+
+// farmerBusyError is a 503 from farmer on path, with the wait its
+// Retry-After asked for (parseRetryAfter).
+type farmerBusyError struct {
+	path       string
+	retryAfter time.Duration
+}
+
+func (e *farmerBusyError) Error() string {
+	return fmt.Sprintf("pki: %s: server busy (lease held)", e.path)
+}
+
+func (e *farmerBusyError) Is(target error) bool { return target == ErrFarmerBusy }
+
+// defaultBusyRetryAfter is the wait for a 503 without a usable
+// Retry-After, and maxBusyRetryAfter caps the wait one may ask for. The
+// jitter busyDelay adds is up to busyJitterPercent of the wait on top.
+const (
+	defaultBusyRetryAfter = 5 * time.Second
+	maxBusyRetryAfter     = 60 * time.Second
+	busyJitterPercent     = 20
+)
+
+// parseRetryAfter reads a 503's Retry-After as whole seconds: absent,
+// not a whole number, or below 1 is defaultBusyRetryAfter (an HTTP date
+// included: farmer sends seconds), and more than maxBusyRetryAfter is
+// capped there.
+func parseRetryAfter(v string) time.Duration {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n < 1 {
+		return defaultBusyRetryAfter
+	}
+	return min(time.Duration(n)*time.Second, maxBusyRetryAfter)
+}
+
+// busyDelay is wait plus jitter of up to busyJitterPercent of it, so the
+// sprouts one busy lease turned away don't all come back in the same
+// second. jitter returns a value in [0, n).
+func busyDelay(wait time.Duration, jitter func(n int64) int64) time.Duration {
+	if n := int64(wait) * busyJitterPercent / 100; n > 0 {
+		wait += time.Duration(jitter(n + 1))
+	}
+	return wait
+}
+
+// busyJitter and busyWait are cryptoJitter and a context-aware sleep,
+// swappable in tests.
+var (
+	busyJitter = cryptoJitter
+	busyWait   = func(ctx context.Context, d time.Duration) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(d):
+			return nil
+		}
+	}
+)
+
+// logBusy logs the one message a busy answer gets, in place of the token
+// or clock hint a rejection carries.
+func logBusy(path string, delay time.Duration) {
+	log.Warnf("%s", busyMessage(path, delay))
+}
+
+// busyMessage is logBusy's message.
+func busyMessage(path string, delay time.Duration) string {
+	return fmt.Sprintf("enroll: %s: server busy (lease held), retrying in %.1fs", path, delay.Seconds())
+}
+
+// retryWhileBusy runs send, which must build a fresh request each time
+// (a new signature or sealed message: farmer accepts each only once),
+// until it returns anything but a busy answer, waiting busyDelay of the
+// answer's Retry-After between tries, at most enrollStep2Attempts tries.
+// The last busy error is returned as is.
+func retryWhileBusy(ctx context.Context, path string, send func() error) error {
+	for attempt := 1; ; attempt++ {
+		err := send()
+		var busy *farmerBusyError
+		if !errors.As(err, &busy) || attempt >= enrollStep2Attempts {
+			return err
+		}
+		delay := busyDelay(busy.retryAfter, busyJitter)
+		logBusy(path, delay)
+		if err := busyWait(ctx, delay); err != nil {
+			return err
+		}
+	}
+}
+
 // postToFarmer POSTs body as JSON to path on farmer over the
 // SproutRootCA-pinned client and decodes a 200 response into out.
 func postToFarmer(ctx context.Context, path string, body, out any) error {
-	b, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("pki: encoding %s request: %w", path, err)
-	}
 	nkeyClientMu.RLock()
 	client := nkeyClient
 	nkeyClientMu.RUnlock()
 	if client == nil {
 		return ErrNKeyClientNotReady
 	}
+	return postJSON(ctx, client, config.FarmerURL, path, body, out)
+}
+
+// postJSON POSTs body as JSON to baseURL+path over client and decodes a
+// 200 response into out. A 503 is a *farmerBusyError (ErrFarmerBusy)
+// carrying its Retry-After; any other status is a rejection.
+func postJSON(ctx context.Context, client *http.Client, baseURL, path string, body, out any) error {
+	if client == nil {
+		return ErrNKeyClientNotReady
+	}
+	b, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("pki: encoding %s request: %w", path, err)
+	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, config.FarmerURL+path, bytes.NewReader(b))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+path, bytes.NewReader(b))
 	if err != nil {
 		return fmt.Errorf("pki: building %s request: %w", path, err)
 	}
@@ -427,6 +632,11 @@ func postToFarmer(ctx context.Context, path string, body, out any) error {
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxEnrollResponseBytes))
 	if err != nil {
 		return fmt.Errorf("pki: reading %s response: %w", path, err)
+	}
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		// Retryable, unlike every other failure: say so, and not the
+		// token or clock hint below.
+		return &farmerBusyError{path: path, retryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}
 	}
 	if resp.StatusCode != http.StatusOK {
 		// Farmer returns the same generic enrollment_failed for every
@@ -749,12 +959,18 @@ func RefreshGatewayJWT(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	sealed, msgID, err := SproutSealedRefresh(sproutID, nkeyPub)
-	if err != nil {
-		return "", fmt.Errorf("pki: sealing the refresh request: %w", err)
-	}
+	// Each try seals afresh: farmer opens a sealed message only once.
 	var wire refreshWireResponse
-	if err := postToFarmer(ctx, "/v1/refresh", refreshWireRequest{NKeyPub: nkeyPub, Sealed: sealed}, &wire); err != nil {
+	var msgID string
+	err = retryWhileBusy(ctx, "/v1/refresh", func() error {
+		sealed, id, err := SproutSealedRefresh(sproutID, nkeyPub)
+		if err != nil {
+			return fmt.Errorf("pki: sealing the refresh request: %w", err)
+		}
+		msgID = id
+		return postToFarmer(ctx, "/v1/refresh", refreshWireRequest{NKeyPub: nkeyPub, Sealed: sealed}, &wire)
+	})
+	if err != nil {
 		return "", err
 	}
 	resp, err := sproutOpenRefreshReply(sproutID, msgID, wire.Sealed)

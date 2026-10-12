@@ -479,8 +479,24 @@ The Envoy config (`templates/envoy-configmap.yaml`) matches
 | `/` (everything else) | `jwt_authn` | none | `nats_websocket` (the bus) |
 
 `chart_test.go`'s `TestRoutesMatchReferenceEnvoyConfig` fails if the
-routes, their gates, clusters or buckets drift from the reference file,
+routes, their gates, clusters, retry policies or buckets drift from the reference file,
 or if `requirement_map` or `rules` do.
+
+**Envoy never retries farmer's 503 on `/v1/enroll` or `/v1/refresh`.**
+Farmer answers 503 with a `Retry-After` when another replica holds the
+sprout's User JWT mint lease; the sprout waits that long (5 s when the
+header is absent or invalid, at most 60 s, plus up to 20 percent jitter)
+and retries with a freshly signed request (`internal/pki/enrollclient.go`).
+Both routes carry `retry_policy: {retry_on: connect-failure,refused-stream,
+num_retries: 1}` (`imas-nats.envoy.noBusyRetryPolicy` in `_helpers.tpl`):
+Envoy retries, once, only a request that never reached farmer.
+`retry_on` must never name `5xx`, `gateway-error`, `reset` or
+`retriable-status-codes`, and no virtual-host retry policy may either.
+`chart_test.go`'s `TestEnrollRoutesDoNotRetry503` checks the chart with
+every `ci/` values file and the reference file
+(`internal/envoycheck`); `uat/hub/dmz/dmz_test.go` checks the UAT render;
+`internal/envoytest/busy_test.go` runs a real Envoy against a busy
+farmer.
 
 **`/v1/enroll`'s bucket is deliberately not a value.** The join token is
 its only credential, so the small budget is what bounds join-token
