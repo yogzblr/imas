@@ -4,8 +4,9 @@ package main
 // it can be restarted mid-run and so that its CPU and memory are its own,
 // not the load generator's. The child builds its server the way
 // cmd/farmerbus builds a single node: pki.ConfigureBusNats for the
-// options (TLS-only listener, operator trust, a full resolver seeded with
-// nothing but the SYS bootstrap Account), the same logger with debug and
+// options (TLS-only listener, operator trust and a full resolver seeded
+// with nothing but the SYS Account, both from the public trust directory
+// newLocalTrust writes), the same logger with debug and
 // trace on, and a graceful Shutdown on SIGTERM. The cluster code and its
 // fence live in cmd/farmerbus's main package and are not reused here;
 // clustered runs go against deployed nodes (-servers).
@@ -123,7 +124,7 @@ type localBus struct {
 	dir   string
 	host  string
 	port  int
-	seeds seedFiles
+	files seedFiles // environment for the child (newLocalTrust)
 	trace bool
 	// maxConn is the child's busmaxconnections; 0 for the default.
 	maxConn int
@@ -136,7 +137,7 @@ type localBus struct {
 
 // newLocalBus prepares dir (certificates, PKI directory) for a child bus
 // listening on host:port; port 0 picks a free one, kept across restarts.
-func newLocalBus(dir, host string, port int, seeds seedFiles, trace bool) (*localBus, *x509.CertPool, error) {
+func newLocalBus(dir, host string, port int, files seedFiles, trace bool) (*localBus, *x509.CertPool, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, nil, err
@@ -160,7 +161,7 @@ func newLocalBus(dir, host string, port int, seeds seedFiles, trace bool) (*loca
 	if err != nil {
 		return nil, nil, err
 	}
-	return &localBus{exe: exe, dir: dir, host: host, port: port, seeds: seeds, trace: trace, logFile: lf}, pool, nil
+	return &localBus{exe: exe, dir: dir, host: host, port: port, files: files, trace: trace, logFile: lf}, pool, nil
 }
 
 func (b *localBus) URL() string {
@@ -192,8 +193,8 @@ func (b *localBus) Start(ctx context.Context) error {
 	if b.maxConn != 0 {
 		cmd.Env = append(cmd.Env, envBusMaxConn+"="+strconv.Itoa(b.maxConn))
 	}
-	for name, path := range b.seeds {
-		cmd.Env = append(cmd.Env, "IMAS_NATS_"+name+"_SEED_FILE="+path)
+	for env, path := range b.files {
+		cmd.Env = append(cmd.Env, env+"="+path)
 	}
 	cmd.Stderr = b.logFile
 	out, err := cmd.StdoutPipe()

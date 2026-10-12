@@ -2,10 +2,12 @@ package main
 
 // In-process three-node bus clusters, built the way cmd/farmerbus builds
 // one node (pki.ConfigureBusNats + startBus), each node with its own resolver
-// directory and the shared trust chain supplied as external seed files,
-// like the chart's IMAS_NATS_*_SEED_FILE mounts. The test plays core: it
-// signs Account and sprout User JWTs with the same seeds and pushes them
-// over a SYS connection, as internal/pki's pushAccountUpdate does.
+// directory and the shared public trust directory the bootstrap Job writes
+// (pki.BootstrapNATSTrust over a fake Transit, pkitest), with a fence user
+// whose seed comes from IMAS_NATS_BUS_FENCE_USER_SEED_FILE, as the charts
+// mount them. The test plays core: it signs Account and sprout User JWTs
+// through the same fake Transit keys and pushes them over a SYS
+// connection, as internal/pki's pushAccountUpdate does.
 //
 // Every route goes through a per-pair TCP proxy so a test can cut any
 // link. Nodes advertise an address nothing listens on, so nats-server's
@@ -20,6 +22,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -38,6 +41,8 @@ import (
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/pki/natskeys"
+	"github.com/yogzblr/imas/internal/pki/pkitest"
 )
 
 var testTiming = fenceTiming{Interval: 100 * time.Millisecond, Grace: 500 * time.Millisecond, ReqTimeout: 500 * time.Millisecond}
@@ -54,8 +59,8 @@ type trust struct {
 	sysAccount, sysUser nkeys.KeyPair
 	sysUserJWT          string
 	caPool              *x509.CertPool
-	// legacyTenant is the TENANT seed: the Account an older bus minted
-	// claims for on an empty volume.
+	// legacyTenant is an Account key the test signs a tenant's users
+	// with directly (core's legacy tenant).
 	legacyTenant nkeys.KeyPair
 }
 
@@ -63,31 +68,46 @@ func newTrust(t *testing.T) *trust {
 	t.Helper()
 	dir := t.TempDir()
 	tr := &trust{dir: dir}
-	seeds := map[string]func() (nkeys.KeyPair, error){
-		"OPERATOR": nkeys.CreateOperator, "OPERATOR_SIGNING": nkeys.CreateOperator,
-		"SYS_ACCOUNT": nkeys.CreateAccount, "TENANT": nkeys.CreateAccount, "TENANT_SIGNING": nkeys.CreateAccount,
+	transit := pkitest.New(t)
+	ctx := t.Context()
+	var err error
+	if tr.operatorSigning, err = transit.Store.KeyPair(ctx, natskeys.OperatorSigningKey(), nkeys.PrefixByteOperator); err != nil {
+		t.Fatal(err)
 	}
-	kps := map[string]nkeys.KeyPair{}
-	for name, mk := range seeds {
-		kp, err := mk()
-		if err != nil {
+	if tr.sysAccount, err = transit.Store.KeyPair(ctx, natskeys.SysAccountKey(), nkeys.PrefixByteAccount); err != nil {
+		t.Fatal(err)
+	}
+	if tr.legacyTenant, err = nkeys.CreateAccount(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The trust directory and fence user, as the bootstrap Job and the
+	// chart's BUS_FENCE_USER Secret provide them.
+	fence, _ := nkeys.CreateUser()
+	fencePub, _ := fence.PublicKey()
+	nt, err := pki.BootstrapNATSTrust(ctx, transit.Store, pki.BootstrapInput{OperatorName: "imas-operator", BusFenceUserPub: fencePub})
+	if err != nil {
+		t.Fatalf("BootstrapNATSTrust: %v", err)
+	}
+	trustDir := filepath.Join(dir, "nats-trust")
+	if err := os.Mkdir(trustDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, b := range nt.Files() {
+		if err := os.WriteFile(filepath.Join(trustDir, name), b, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		seed, _ := kp.Seed()
-		p := filepath.Join(dir, strings.ToLower(name)+".nk")
-		if err := os.WriteFile(p, seed, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("IMAS_NATS_"+name+"_SEED_FILE", p)
-		kps[name] = kp
 	}
-	tr.operatorSigning = kps["OPERATOR_SIGNING"]
-	tr.sysAccount = kps["SYS_ACCOUNT"]
-	tr.legacyTenant = kps["TENANT"]
+	t.Setenv(pki.NATSTrustDirEnv, trustDir)
+	fenceSeedFile := filepath.Join(dir, "bus-fence-user.nk")
+	if err := os.WriteFile(fenceSeedFile, []byte(mustSeed(fence)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("IMAS_NATS_BUS_FENCE_USER_SEED_FILE", fenceSeedFile)
+
 	tr.sysUser, _ = nkeys.CreateUser()
 	pub, _ := tr.sysUser.PublicKey()
 	uc := jwt.NewUserClaims(pub)
-	var err error
 	if tr.sysUserJWT, err = uc.Encode(tr.sysAccount); err != nil {
 		t.Fatal(err)
 	}
@@ -440,6 +460,35 @@ func (c *testCluster) accountConns(i int, pub string) int {
 
 // ---- tests ----------------------------------------------------------------
 
+// TestBusFenceUserRequiredWhenClustered: startBus refuses a clustered
+// node without a fence user before it starts a server.
+func TestBusFenceUserRequiredWhenClustered(t *testing.T) {
+	tr := newTrust(t)
+	// Neither half of a fence user: no seed, no bus-fence-user.jwt.
+	t.Setenv("IMAS_NATS_BUS_FENCE_USER_SEED_FILE", "")
+	if err := os.Remove(filepath.Join(tr.dir, "nats-trust", pki.TrustBusFenceUserJWT)); err != nil {
+		t.Fatal(err)
+	}
+	config.FarmerPKI = t.TempDir() + "/"
+	opts, sysUser := pki.ConfigureBusNats()
+	if sysUser.Configured() {
+		t.Fatal("a fence user was configured without its seed")
+	}
+	cl := &clusterConfig{Name: "imas-bus", Port: -1, User: defaultRouteUser, Password: testRoutePassword, ServerName: "bus-0"}
+	if nd, err := startBus(opts, sysUser, cl, testTiming); !errors.Is(err, errNoFenceUser) {
+		if nd != nil {
+			nd.Shutdown()
+		}
+		t.Fatalf("startBus: err = %v, want errNoFenceUser", err)
+	}
+	// A single node needs none.
+	nd, err := startBus(opts, sysUser, nil, testTiming)
+	if err != nil {
+		t.Fatalf("single node without a fence user: %v", err)
+	}
+	nd.Shutdown()
+}
+
 // TestClusterMeshAndFailover: three nodes, one sprout client on each,
 // publish on one node and receive on the others; then stop a node and
 // check its client reconnects to a surviving node and still delivers.
@@ -654,10 +703,9 @@ func TestClusterPartialMeshFences(t *testing.T) {
 
 // TestClusterWipedNodeDoesNotRollBackRevocations: a node that comes back
 // on an empty volume (a StatefulSet scale-out, a replaced PVC) must not
-// re-admit anything core revoked. An older bus minted the legacy tenant's
-// and the SYS Account JWTs for itself on an empty volume, with no
-// revocations and the newest issued-at, and the cluster sync then spread
-// them to every node.
+// re-admit anything core revoked. It starts with only the trust's SYS
+// Account JWT, which core's pushed SYS Account JWT outranks; it mints no
+// claims of its own that the cluster sync could spread.
 func TestClusterWipedNodeDoesNotRollBackRevocations(t *testing.T) {
 	tr := newTrust(t)
 	c := newTestCluster(t, tr, 3)
@@ -725,9 +773,9 @@ func TestClusterWipedNodeDoesNotRollBackRevocations(t *testing.T) {
 	}
 	waitFor(t, "the good sprout to be admitted on node 2", 5*time.Second, func() bool { return admitted(good, 2) })
 
-	// Node 2 comes back on an empty volume. The next second boundary
-	// matters: anything it signed for itself would now carry a newer
-	// issued-at than core's pushes.
+	// Node 2 comes back on an empty volume, a second later: anything it
+	// signed for itself would now carry a newer issued-at than core's
+	// pushes.
 	c.stop(2)
 	time.Sleep(1100 * time.Millisecond)
 	if err := os.RemoveAll(c.pkiDirs[2]); err != nil {

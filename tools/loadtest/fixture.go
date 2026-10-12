@@ -1,7 +1,7 @@
 package main
 
 // The fixture path: simulated sprouts get their NATS credentials minted
-// here, from the operator signing and SYS account seeds, instead of from
+// here, from the operator signing and SYS account keys, instead of from
 // POST /v1/enroll. Every JWT has the shape internal/pki gives the real
 // thing:
 //
@@ -27,6 +27,7 @@ package main
 // has to be added here by hand.
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -44,6 +45,7 @@ import (
 	"github.com/nats-io/nkeys"
 
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/pki/natskeys"
 )
 
 const claimsUpdateSubject = "$SYS.REQ.CLAIMS.UPDATE"
@@ -56,39 +58,73 @@ type trust struct {
 	sysUserSeed     string
 }
 
-// seedFiles are the seed paths a local bus is started with, as the chart
-// mounts them (IMAS_NATS_<NAME>_SEED_FILE).
+// seedFiles is what a local bus is started with: environment variables
+// (full names) naming files, as the chart mounts them. Since P21 slice 1
+// the bus takes no seed, only the public trust directory
+// (IMAS_NATS_TRUST_DIR); the type keeps its name for main.go.
 type seedFiles map[string]string
 
-// newLocalTrust generates a fresh trust chain for a local bus and writes
-// its seeds to dir (mode 0600).
+// newLocalTrust generates a fresh trust chain for a local bus. The keys
+// stay in this process (localKeyStore stands in for OpenBao Transit) and
+// the public trust directory is minted from them by
+// pki.BootstrapNATSTrust, as the bootstrap Job mints it, into
+// dir/nats-trust. No seed is written.
 func newLocalTrust(dir string) (*trust, seedFiles, error) {
-	makers := map[string]func() (nkeys.KeyPair, error){
-		"OPERATOR":         nkeys.CreateOperator,
-		"OPERATOR_SIGNING": nkeys.CreateOperator,
-		"SYS_ACCOUNT":      nkeys.CreateAccount,
-	}
-	files := seedFiles{}
-	kps := map[string]nkeys.KeyPair{}
-	for name, mk := range makers {
+	ks := localKeyStore{}
+	for name, mk := range map[string]func() (nkeys.KeyPair, error){
+		natskeys.OperatorKey():        nkeys.CreateOperator,
+		natskeys.OperatorSigningKey(): nkeys.CreateOperator,
+		natskeys.SysAccountKey():      nkeys.CreateAccount,
+	} {
 		kp, err := mk()
 		if err != nil {
 			return nil, nil, err
 		}
-		seed, err := kp.Seed()
-		if err != nil {
-			return nil, nil, err
-		}
-		p := filepath.Join(dir, strings.ToLower(name)+".nk")
-		if err := os.WriteFile(p, seed, 0o600); err != nil {
-			return nil, nil, err
-		}
-		files[name] = p
-		kps[name] = kp
+		ks[name] = kp
 	}
-	tr, err := newTrust(kps["OPERATOR_SIGNING"], kps["SYS_ACCOUNT"])
-	return tr, files, err
+	nt, err := pki.BootstrapNATSTrust(context.Background(), ks, pki.BootstrapInput{OperatorName: "imas-operator"})
+	if err != nil {
+		return nil, nil, err
+	}
+	trustDir := filepath.Join(dir, "nats-trust")
+	if err := os.MkdirAll(trustDir, 0o755); err != nil {
+		return nil, nil, err
+	}
+	for name, b := range nt.Files() {
+		if err := os.WriteFile(filepath.Join(trustDir, name), b, 0o644); err != nil {
+			return nil, nil, err
+		}
+	}
+	tr, err := newTrust(ks[natskeys.OperatorSigningKey()], ks[natskeys.SysAccountKey()])
+	return tr, seedFiles{pki.NATSTrustDirEnv: trustDir}, err
 }
+
+// localKeyStore is a natskeys.KeyStore over in-memory key pairs, keyed by
+// Transit key name, for a local bus's trust chain only.
+type localKeyStore map[string]nkeys.KeyPair
+
+func (ks localKeyStore) KeyPair(_ context.Context, name string, prefix natskeys.Prefix) (nkeys.KeyPair, error) {
+	kp, ok := ks[name]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", natskeys.ErrKeyNotFound, name)
+	}
+	pub, err := kp.PublicKey()
+	if err != nil {
+		return nil, err
+	}
+	if nkeys.Prefix(pub) != prefix {
+		return nil, fmt.Errorf("%w: %s is not a %s key", natskeys.ErrKeyType, name, prefix)
+	}
+	return kp, nil
+}
+
+func (ks localKeyStore) EnsureKeyPair(ctx context.Context, name string, prefix natskeys.Prefix) (nkeys.KeyPair, error) {
+	return ks.KeyPair(ctx, name, prefix)
+}
+
+func (ks localKeyStore) RetireKey(context.Context, string) error { return nil }
+
+func (ks localKeyStore) Close() error { return nil }
 
 // loadTrust reads the operator signing and SYS account seeds of an
 // existing bus: the same files the chart mounts into farmer and the bus.

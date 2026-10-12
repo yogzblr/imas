@@ -1,52 +1,26 @@
 package pki
 
-// The DMZ bus signs no claims of its own beyond an epoch-dated SYS
-// bootstrap (busauth.go), and core pushes every Account when its SYS
-// connection (re)connects (pushall.go). FLAG FOR SECURITY REVIEW.
+// The DMZ bus reads only the public trust directory and signs nothing
+// (busauth.go), and core pushes every Account when its SYS connection
+// (re)connects (pushall.go). FLAG FOR SECURITY REVIEW.
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
-	jwt "github.com/nats-io/jwt/v2"
 	nats_server "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nkeys"
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/pki/natskeys"
+	"github.com/yogzblr/imas/internal/pki/natskeys/natskeystest"
 )
-
-// shareSeedsWithBus points the bus at core's operator, operator signing
-// and SYS account keys through IMAS_NATS_*_SEED_FILE, as seeds exported
-// from the fake Transit (the bus still takes seeds), and returns core's
-// material.
-func shareSeedsWithBus(t *testing.T) *natsAuthMaterial {
-	t.Helper()
-	mat, err := ensureNatsAuth()
-	if err != nil {
-		t.Fatalf("ensureNatsAuth: %v", err)
-	}
-	dir := t.TempDir()
-	for name, key := range map[string]struct {
-		transit string
-		prefix  nkeys.PrefixByte
-	}{
-		"OPERATOR":         {natskeys.OperatorKey(), nkeys.PrefixByteOperator},
-		"OPERATOR_SIGNING": {natskeys.OperatorSigningKey(), nkeys.PrefixByteOperator},
-		"SYS_ACCOUNT":      {natskeys.SysAccountKey(), nkeys.PrefixByteAccount},
-	} {
-		p := filepath.Join(dir, name+".nk")
-		if err := os.WriteFile(p, testTransit.Seed(t, key.transit, key.prefix), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("IMAS_NATS_"+name+"_SEED_FILE", p)
-	}
-	return mat
-}
 
 // withFarmerPKI runs fn with config.FarmerPKI pointing at dir.
 func withFarmerPKI(dir string, fn func()) {
@@ -58,6 +32,7 @@ func withFarmerPKI(dir string, fn func()) {
 
 // startBusNode starts a bus the way cmd/farmerbus does (ConfigureBusNats)
 // on its own FarmerPKI directory, and points config.FarmerBusURL at it.
+// The bus reads the trust directory pkitest.Farmer wrote for core.
 func startBusNode(t *testing.T, busDir string) (*nats_server.Server, *nats_server.DirAccResolver) {
 	t.Helper()
 	var opts nats_server.Options
@@ -81,27 +56,43 @@ func startBusNode(t *testing.T, busDir string) (*nats_server.Server, *nats_serve
 	return srv, opts.AccountResolver.(*nats_server.DirAccResolver)
 }
 
-func TestConfigureBusNats_SeedsOnlyTheSYSBootstrap(t *testing.T) {
+// T5: the bus configures itself from the trust directory alone. It makes
+// no Transit request (the fake sees none, and the bus is given no
+// IMAS_NATSSIGN_* address), seeds the resolver with exactly the trust's
+// SYS Account JWT and no tenant, and writes nothing but the resolver.
+func TestConfigureBusNatsFromTrustOnly(t *testing.T) {
 	setupTestPKI(t)
-	mat := shareSeedsWithBus(t)
-	busDir := t.TempDir()
-
-	_, dr := startBusNode(t, busDir)
-
-	sys, err := dr.LoadAcc(mat.sysAccountPub)
+	mat, err := ensureNatsAuth()
 	if err != nil {
-		t.Fatalf("SYS account missing from the bus resolver: %v", err)
+		t.Fatalf("ensureNatsAuth: %v", err)
 	}
-	sc, err := jwt.DecodeAccountClaims(sys)
+	trust, err := LoadNATSTrustDir(testTransit.TrustDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	signingPub, _ := mat.operatorSigningKP.PublicKey()
-	if sc.IssuedAt != busBootstrapIssuedAt || sc.Issuer != signingPub {
-		t.Fatalf("SYS bootstrap iat=%d iss=%s, want iat=%d iss=%s", sc.IssuedAt, sc.Issuer, busBootstrapIssuedAt, signingPub)
+	testTransit.Fake.ResetCounts()
+	t.Setenv(natskeys.EnvPrefixSign+natskeys.EnvOpenBaoAddr, "")
+	busDir := t.TempDir()
+
+	srv, dr := startBusNode(t, busDir)
+
+	for _, op := range []natskeystest.Op{natskeystest.OpSign, natskeystest.OpReadKey, natskeystest.OpCreateKey} {
+		if n := testTransit.Fake.Count(op); n != 0 {
+			t.Errorf("the bus made %d Transit %s requests", n, op)
+		}
+	}
+	if got := srv.SystemAccount().Name; got != trust.SysAccountPub {
+		t.Errorf("system account %s, want the trust's %s", got, trust.SysAccountPub)
+	}
+	sys, err := dr.LoadAcc(trust.SysAccountPub)
+	if err != nil {
+		t.Fatalf("SYS account missing from the bus resolver: %v", err)
+	}
+	if sys != trust.SysAccountJWT {
+		t.Fatal("the bus resolver holds a SYS Account JWT other than the trust's")
 	}
 	if j, _ := dr.LoadAcc(mat.tenantPub); j != "" {
-		t.Fatal("the bus seeded a legacy tenant Account JWT it minted itself")
+		t.Fatal("the bus seeded a legacy tenant Account JWT")
 	}
 	entries, err := os.ReadDir(filepath.Join(busDir, natsAuthSubdir))
 	if err != nil {
@@ -112,82 +103,165 @@ func TestConfigureBusNats_SeedsOnlyTheSYSBootstrap(t *testing.T) {
 			t.Errorf("the bus wrote %s to its nats-auth directory", e.Name())
 		}
 	}
-}
-
-func TestSignAccountClaimsAt(t *testing.T) {
-	kp, _ := nkeys.CreateOperator()
-	acctKP, _ := nkeys.CreateAccount()
-	pub, _ := acctKP.PublicKey()
-	ac := jwt.NewAccountClaims(pub)
-	ac.Name = "x"
-	tok, err := signAccountClaimsAt(ac, kp, 42)
+	rs, err := os.ReadDir(filepath.Join(busDir, natsAuthSubdir, "resolver"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	back, err := jwt.DecodeAccountClaims(tok)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if back.IssuedAt != 42 || back.Name != "x" {
-		t.Fatalf("got iat=%d name=%q", back.IssuedAt, back.Name)
-	}
-	// The jti covers the iat, so it differs from a "now" signing of the
-	// same claims, which is what lets the resolver tell the two apart.
-	now, err := jwt.NewAccountClaims(pub).Encode(kp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	nowClaims, _ := jwt.DecodeAccountClaims(now)
-	if back.ID == "" || back.ID == nowClaims.ID {
-		t.Fatalf("jti %q not derived from the chosen iat", back.ID)
-	}
-	vr := jwt.CreateValidationResults()
-	back.Validate(vr)
-	if vr.IsBlocking(true) {
-		t.Fatalf("claims don't validate: %v", vr.Errors())
+	for _, e := range rs {
+		if e.Name() != trust.SysAccountPub+".jwt" {
+			t.Errorf("the bus resolver holds %s", e.Name())
+		}
 	}
 }
 
-// An older bus minted the legacy tenant's and the SYS Account JWTs for
-// itself and stored them in its resolver. They must not survive an
-// upgrade; a JWT core pushed (different from the self-minted file) must.
-func TestConfigureBusNats_DropsSelfMintedCopiesFromOlderVersions(t *testing.T) {
+// A bus without its trust directory, or with an incomplete one, does not
+// start.
+func TestLoadBusNatsRequiresTrust(t *testing.T) {
 	setupTestPKI(t)
-	mat := shareSeedsWithBus(t)
-	busDir := t.TempDir()
-	authDir := filepath.Join(busDir, natsAuthSubdir)
-	resolverDir := filepath.Join(authDir, "resolver")
-	if err := os.MkdirAll(resolverDir, 0o700); err != nil {
+	empty := t.TempDir()
+	t.Setenv(NATSTrustDirEnv, empty)
+	withFarmerPKI(t.TempDir(), func() {
+		if _, _, err := LoadBusNats(); !errors.Is(err, ErrTrustIncomplete) {
+			t.Fatalf("empty trust dir: err = %v, want ErrTrustIncomplete", err)
+		}
+	})
+	partial := copyTrustDir(t, testTransit.TrustDir)
+	if err := os.Remove(filepath.Join(partial, TrustSysAccountJWT)); err != nil {
 		t.Fatal(err)
 	}
-	sign := func(pub, name string) string {
-		ac := jwt.NewAccountClaims(pub)
-		ac.Name = name
-		s, err := ac.Encode(mat.operatorSigningKP)
+	t.Setenv(NATSTrustDirEnv, partial)
+	withFarmerPKI(t.TempDir(), func() {
+		if _, _, err := LoadBusNats(); !errors.Is(err, ErrTrustIncomplete) {
+			t.Fatalf("trust without %s: err = %v, want ErrTrustIncomplete", TrustSysAccountJWT, err)
+		}
+	})
+}
+
+// copyTrustDir copies the trust files of src into a new directory.
+func copyTrustDir(t *testing.T, src string) string {
+	t.Helper()
+	dst := t.TempDir()
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		b, err := os.ReadFile(filepath.Join(src, e.Name()))
 		if err != nil {
 			t.Fatal(err)
 		}
-		return s
-	}
-	write := func(path, content string) {
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(dst, e.Name()), b, 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	selfTenant := sign(mat.tenantPub, "self-minted")
-	write(filepath.Join(authDir, "tenant.jwt"), selfTenant)
-	write(filepath.Join(resolverDir, mat.tenantPub+".jwt"), selfTenant)
-	// SYS: the old file is self-minted, but core pushed a different one since.
-	write(filepath.Join(authDir, "sys-account.jwt"), sign(mat.sysAccountPub, "SYS (bus-minted)"))
-	write(filepath.Join(resolverDir, mat.sysAccountPub+".jwt"), mat.sysAccountJWT)
+	return dst
+}
 
-	_, dr := startBusNode(t, busDir)
-
-	if j, _ := dr.LoadAcc(mat.tenantPub); j != "" {
-		t.Fatal("the self-minted legacy tenant JWT survived the upgrade")
+// trustWithFenceUser writes a copy of core's trust directory with a
+// bus-fence-user.jwt for a new user key, as the bootstrap Job mints it
+// (BootstrapNATSTrust with BusFenceUserPub), and returns the directory
+// and the user's seed.
+func trustWithFenceUser(t *testing.T) (dir string, seed []byte) {
+	t.Helper()
+	kp, err := nkeys.CreateUser()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if j, _ := dr.LoadAcc(mat.sysAccountPub); j != mat.sysAccountJWT {
-		t.Fatal("the SYS Account JWT core pushed was replaced")
+	pub, _ := kp.PublicKey()
+	seed, _ = kp.Seed()
+	existing, err := LoadNATSTrustDir(testTransit.TrustDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, err := BootstrapNATSTrust(t.Context(), testTransit.Store, BootstrapInput{Existing: existing.Files(), BusFenceUserPub: pub})
+	if err != nil {
+		t.Fatalf("BootstrapNATSTrust: %v", err)
+	}
+	dir = t.TempDir()
+	for name, b := range tr.Files() {
+		if err := os.WriteFile(filepath.Join(dir, name), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir, seed
+}
+
+func writeSeedFile(t *testing.T, seed []byte) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "bus-fence-user.nk")
+	if err := os.WriteFile(p, seed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// T5: the fence user is its seed from IMAS_NATS_BUS_FENCE_USER_SEED_FILE
+// paired with bus-fence-user.jwt from the trust; it connects to the bus
+// as a SYS user. Half a configuration or a mismatched pair is refused.
+func TestBusFenceUserFromSeedAndTrust(t *testing.T) {
+	setupTestPKI(t)
+	if _, err := ensureNatsAuth(); err != nil {
+		t.Fatal(err)
+	}
+	coreTrust := testTransit.TrustDir
+	fenceTrust, seed := trustWithFenceUser(t)
+	other, _ := nkeys.CreateUser()
+	otherSeed, _ := other.Seed()
+	acct, _ := nkeys.CreateAccount()
+	acctSeed, _ := acct.Seed()
+
+	load := func(trustDir, seedFile string) (BusSysUser, error) {
+		t.Setenv(NATSTrustDirEnv, trustDir)
+		t.Setenv(externalSeedEnvPrefix+busFenceUserSeedName+"_SEED_FILE", seedFile)
+		var u BusSysUser
+		var err error
+		withFarmerPKI(t.TempDir(), func() { _, u, err = LoadBusNats() })
+		return u, err
+	}
+
+	if u, err := load(coreTrust, ""); err != nil || u.Configured() {
+		t.Fatalf("no seed, no JWT: user %+v, err %v; want none, no error", u, err)
+	}
+	for _, tc := range []struct {
+		name, trust, seedFile string
+	}{
+		{"JWT without seed", fenceTrust, ""},
+		{"seed without JWT", coreTrust, writeSeedFile(t, seed)},
+		{"seed of another user", fenceTrust, writeSeedFile(t, otherSeed)},
+		{"account seed", fenceTrust, writeSeedFile(t, acctSeed)},
+		{"unreadable seed file", fenceTrust, filepath.Join(t.TempDir(), "missing.nk")},
+	} {
+		if _, err := load(tc.trust, tc.seedFile); !errors.Is(err, ErrBusFenceUser) {
+			t.Errorf("%s: err = %v, want ErrBusFenceUser", tc.name, err)
+		}
+	}
+
+	u, err := load(fenceTrust, writeSeedFile(t, seed))
+	if err != nil {
+		t.Fatalf("LoadBusNats: %v", err)
+	}
+	if !u.Configured() || u.Seed != strings.TrimSpace(string(seed)) {
+		t.Fatal("the fence user does not carry the BUS_FENCE_USER seed")
+	}
+	want, _ := os.ReadFile(filepath.Join(fenceTrust, TrustBusFenceUserJWT))
+	if u.JWT != string(want) {
+		t.Fatal("the fence user JWT is not the trust's bus-fence-user.jwt")
+	}
+
+	// And the pair is a working SYS user on a bus started from that trust.
+	startBusNode(t, t.TempDir())
+	nc, err := connectSystemAccount(&natsAuthMaterial{sysUserJWT: u.JWT, sysUserSeed: []byte(u.Seed)})
+	if err != nil {
+		t.Fatalf("fence user refused by the bus: %v", err)
+	}
+	defer nc.Close()
+	tr, err := LoadNATSTrustDir(fenceTrust)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := nc.Request(fmt.Sprintf(claimsLookupSubject, tr.SysAccountPub), nil, 5*time.Second)
+	if err != nil || string(resp.Data) != tr.SysAccountJWT {
+		t.Fatalf("fence user cannot look up the SYS account: %v", err)
 	}
 }
 
@@ -211,7 +285,10 @@ func lookupOnBus(t *testing.T, accountPub string) string {
 func TestPushAllAccounts_FreshBusLearnsEveryAccount(t *testing.T) {
 	setupTestPKI(t)
 	useRealFarmerKey(t)
-	mat := shareSeedsWithBus(t)
+	mat, err := ensureNatsAuth()
+	if err != nil {
+		t.Fatalf("ensureNatsAuth: %v", err)
+	}
 	config.FarmerBusURL = "127.0.0.1:1" // no bus yet: every push below fails
 
 	mkSprout := func(tenantID, sproutID, state string) (pub string, seed []byte) {
@@ -281,9 +358,8 @@ func TestPushAllAccounts_FreshBusLearnsEveryAccount(t *testing.T) {
 	if ac := busAccountClaims(t, "t_gone"); !isLockedOut(ac) {
 		t.Fatal("the bus doesn't hold a lock-out for the deprovisioned tenant")
 	}
-	sc, err := jwt.DecodeAccountClaims(lookupOnBus(t, mat.sysAccountPub))
-	if err != nil || sc.IssuedAt <= busBootstrapIssuedAt {
-		t.Fatalf("the bus still holds its SYS bootstrap, not core's SYS Account JWT (%v)", err)
+	if got := lookupOnBus(t, mat.sysAccountPub); got != mat.sysAccountJWT {
+		t.Fatal("the bus does not hold core's SYS Account JWT")
 	}
 }
 
@@ -292,7 +368,6 @@ func TestPushAllAccounts_FreshBusLearnsEveryAccount(t *testing.T) {
 // (nats-server would refuse every client).
 func TestConfigureBusNats_MaxConnections(t *testing.T) {
 	setupTestPKI(t)
-	shareSeedsWithBus(t)
 	prev := config.BusMaxConnections
 	t.Cleanup(func() { config.BusMaxConnections = prev })
 	for _, tc := range []struct{ set, want int }{{0, 0}, {150000, 150000}, {-1, 0}} {

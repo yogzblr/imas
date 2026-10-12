@@ -8,22 +8,54 @@ import (
 	"testing"
 
 	jwt "github.com/nats-io/jwt/v2"
+	"github.com/nats-io/nkeys"
 
 	"github.com/yogzblr/imas/internal/pki"
 )
 
 func newTestTrust(t *testing.T) *trust {
 	t.Helper()
-	tr, files, err := newLocalTrust(t.TempDir())
+	dir := t.TempDir()
+	tr, files, err := newLocalTrust(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, p := range files {
-		if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o600 {
-			t.Errorf("%s seed file %s: %v, mode %v", name, p, err, fi.Mode())
-		}
+	// The bus gets the public trust directory, as the bootstrap Job
+	// writes it, and no seed.
+	if len(files) != 1 || files[pki.NATSTrustDirEnv] == "" {
+		t.Fatalf("local bus files %v, want only %s", files, pki.NATSTrustDirEnv)
 	}
+	nt, err := pki.LoadNATSTrustDir(files[pki.NATSTrustDirEnv])
+	if err != nil {
+		t.Fatalf("trust directory: %v", err)
+	}
+	signPub, _ := tr.operatorSigning.PublicKey()
+	sysPub, _ := tr.sysAccount.PublicKey()
+	if nt.OperatorSigningPub != signPub || nt.SysAccountPub != sysPub {
+		t.Error("the trust directory names other keys than the fixture signs with")
+	}
+	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err == nil && strings.HasSuffix(p, ".nk") {
+			t.Errorf("newLocalTrust wrote a seed file %s", p)
+		}
+		return nil
+	})
 	return tr
+}
+
+// writeSeed writes kp's seed to a file in dir, as the chart's Secret
+// mounts do, for loadTrust.
+func writeSeed(t *testing.T, dir, name string, kp nkeys.KeyPair) string {
+	t.Helper()
+	seed, err := kp.Seed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, seed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 // TestTenantAccountShape checks the Account is signed and delegates the
@@ -133,11 +165,13 @@ func TestLockedOutJWTOutranksLive(t *testing.T) {
 
 func TestLoadTrust(t *testing.T) {
 	dir := t.TempDir()
-	if _, files, err := newLocalTrust(dir); err != nil {
-		t.Fatal(err)
-	} else if _, err := loadTrust(files["OPERATOR_SIGNING"], files["SYS_ACCOUNT"]); err != nil {
+	op, _ := nkeys.CreateOperator()
+	sys, _ := nkeys.CreateAccount()
+	opFile := writeSeed(t, dir, "operator_signing.nk", op)
+	sysFile := writeSeed(t, dir, "sys_account.nk", sys)
+	if _, err := loadTrust(opFile, sysFile); err != nil {
 		t.Fatalf("loadTrust: %v", err)
-	} else if _, err := loadTrust(files["SYS_ACCOUNT"], files["OPERATOR_SIGNING"]); err == nil {
+	} else if _, err := loadTrust(sysFile, opFile); err == nil {
 		t.Error("loadTrust accepted the seeds swapped")
 	}
 	if _, err := loadTrust(filepath.Join(dir, "missing"), filepath.Join(dir, "missing")); err == nil {
