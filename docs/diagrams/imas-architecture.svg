@@ -111,11 +111,11 @@
   <rect x="346" y="470" width="398" height="286" rx="6" class="box"/>
   <text x="358" y="492" class="h">farmerbus</text>
   <text x="358" y="510" class="small">cmd/farmerbus: embedded nats-server, operator mode.</text>
-  <text x="358" y="526" class="small">No PXC, no object storage, no API, no business logic.</text>
+  <text x="358" y="526" class="small">No PXC, no PVC, no API, no business logic.</text>
   <text x="358" y="550" class="small" font-weight="700">Decentralized JWT auth (docs/design/imas-nats-jwt-auth-design.md)</text>
   <text x="358" y="567" class="small">Operator → Account per tenant → User per sprout</text>
   <text x="358" y="583" class="small">SYS Account: farmer's and saasapi's own Users</text>
-  <text x="358" y="599" class="small">Tenant Accounts minted by farmer, pushed via resolver</text>
+  <text x="358" y="599" class="small">Accounts: farmer pushes them; the loader reloads from S3</text>
   <text x="358" y="623" class="small" font-weight="700">Listeners</text>
   <text x="358" y="640" class="mono">:5407</text><text x="400" y="640" class="mono">websocket</text><text x="480" y="640" class="mono">sprouts, only via Envoy</text>
   <text x="358" y="657" class="mono">:5406</text><text x="400" y="657" class="mono">TLS NATS</text><text x="480" y="657" class="mono">core (farmer, saasapi) dials in</text>
@@ -136,7 +136,7 @@
 
   <rect x="816" y="232" width="344" height="206" rx="6" class="box"/>
   <text x="828" y="254" class="h">farmer (core)</text>
-  <text x="828" y="272" class="small">cmd/farmer, ConnectFarmer(); one replica on a PVC</text>
+  <text x="828" y="272" class="small">cmd/farmer, ConnectFarmer(); stateless, 2+ replicas, no PVC</text>
   <text x="828" y="294" class="mono">:5405 HTTPS API</text>
   <text x="828" y="311" class="small">POST /v1/enroll, POST /v1/refresh, JWKS, /files/,</text>
   <text x="828" y="326" class="small">CLI API (auth by CLI pubkey)</text>

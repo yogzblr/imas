@@ -17,8 +17,10 @@ Sprouts must pin the CA that issued Secret "{{ .Values.envoy.tls.secretName }}"
 this release deliberately routes no /auth/cert/ for trust on first use.
 {{- end }}
 
-Seeds are read from Secret "{{ .Values.natsSeeds.secretName }}" and must be
-byte-identical to cmd/farmer's. This chart never generates one.
+The bus holds none of farmer's seeds. The loader's SYS user seed is read from
+Secret "{{ .Values.loader.sysUserSecret }}"{{ if .Values.natsSeeds.seeds }}, and the fence user's seed
+(BUS_FENCE_USER) from Secret "{{ .Values.natsSeeds.secretName }}"{{ end }}. This chart never
+generates one.
 
 Each bus pod runs the account loader sidecar: it reads Account JWTs from
 bucket "{{ .Values.accountStore.bucket }}" at {{ .Values.accountStore.endpoint }} with the read-only

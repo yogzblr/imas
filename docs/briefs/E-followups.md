@@ -280,3 +280,23 @@ Needs every other unit merged. Do not write features. On main:
    the evidence supports (Green only with passing evidence).
 5. PR body: Verified lists every command and its result. Anything that cannot be verified
    here is not a defect to list; if a check could not run, find another way to run it.
+
+As built (Z): (1) every check passes on main with every gated test running:
+MySQL (PXC 8.4.8-8.1), the chart's Envoy (v1.35.3), OpenBao 2.7.1 and Valkey
+9.1.2; CI now also runs the real-Envoy and Valkey tests (`ci.yml` extracts the
+Envoy binary from the image the nats chart pins and starts a Valkey service),
+which no workflow ran before. The farmer chart's subcharts were packaged from
+the pinned upstream tags for the renders. (2) The stale hits were docs and
+comments that still described the pre-P21 trust model or a stateful farmer and
+bus (INSTALL.md's six seeds, both chart NOTES, the architecture diagram, the
+signing design's "design only" status, the UAT DMZ seed comments, busauth.go
+and farmerbus comments), the file-write guard's dead report-only switch and
+an unused `CliPubNKey`; historical records (`docs/archive`, `docs/status`,
+the briefs, the security reviews) keep their wording. (3) Two of the four
+claims had no test that used both real sides; they now do:
+`TestEmptyBusNodeLoadsWhatFarmerPublished` (internal/pki) and
+`TestApply_ThroughFarmerManifestRoute` (internal/ingredients/selfupdate).
+The other two are `TestLoaderEmptyNodeReadyOnlyAfterLoadingEverything`
+(cmd/farmerbus), `TestEnrollConcurrentReplicas` and
+`TestTwoReplicasShareMintsAndRevocations` (internal/pki). (4) P21 and P22 are
+Amber, not Green: both wait on the human security review (P3).

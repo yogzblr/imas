@@ -36,6 +36,18 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 60
+      # Valkey, the image version the farmer chart's valkey subchart
+      # (0.12.0) runs, for TestValkeyLimiterRealServer
+      # (SAASAPI_TEST_VALKEY_ADDR, internal/saasapi).
+      valkey:
+        image: valkey/valkey:9.1.2
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
 
     steps:
       - name: Checkout
@@ -74,15 +86,33 @@ jobs:
           helm dependency build deploy/helm/farmer
           helm dependency build deploy/helm/nats
 
+      # The real-Envoy tests (internal/envoytest, and the *ThroughRealEnvoy
+      # tests of internal/api and internal/pki) run the shipped envoy.yaml in
+      # the Envoy the nats chart pins (envoy.image.tag in
+      # deploy/helm/nats/values.yaml); without IMAS_TEST_ENVOY_BIN they skip.
+      - name: Extract the chart's Envoy binary
+        run: |
+          set -euo pipefail
+          tag=$(sed -n '/repository: envoyproxy\/envoy/{n;s/^ *tag: *//p}' deploy/helm/nats/values.yaml)
+          test -n "$tag"
+          id=$(docker create "envoyproxy/envoy:$tag")
+          mkdir -p "$RUNNER_TEMP/envoy"
+          docker cp "$id:/usr/local/bin/envoy" "$RUNNER_TEMP/envoy/envoy"
+          docker rm "$id"
+          "$RUNNER_TEMP/envoy/envoy" --version
+          echo "IMAS_TEST_ENVOY_BIN=$RUNNER_TEMP/envoy/envoy" >> "$GITHUB_ENV"
+
       # IMAS_REQUIRE_HELM=1 turns every chart-test skip (no helm, charts/
       # not populated, a missing tool) into a failure, so this job can't
       # pass without having rendered the charts. IMAS_TEST_MYSQL_ROOT_DSN
       # runs the MySQL tests against the pxc service; set, they fail rather
-      # than skip if it does not answer.
+      # than skip if it does not answer. SAASAPI_TEST_VALKEY_ADDR runs the
+      # Valkey rate limiter test against the valkey service.
       - name: Test with race detection and coverage
         env:
           IMAS_REQUIRE_HELM: "1"
           IMAS_TEST_MYSQL_ROOT_DSN: "root:imas-ci@tcp(127.0.0.1:3306)/"
+          SAASAPI_TEST_VALKEY_ADDR: "127.0.0.1:6379"
         run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Upload coverage to Codecov

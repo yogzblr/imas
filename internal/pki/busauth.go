@@ -17,13 +17,17 @@ package pki
 //     resolver sync;
 //   - for a clustered bus, the fence user's JWT (bus-fence-user.jwt,
 //     signed by the SYS account at bootstrap). Its seed is the only
-//     secret the bus holds, a user key from the BUS_FENCE_USER Secret
-//     (IMAS_NATS_BUS_FENCE_USER_SEED_FILE).
+//     secret the farmerbus container holds, a user key from the
+//     BUS_FENCE_USER Secret (IMAS_NATS_BUS_FENCE_USER_SEED_FILE). The
+//     account loader sidecar holds its own SYS user seed and a read-only
+//     credential for the accounts bucket.
 //
 // The bus mints nothing: no tenant Account JWT, no SYS Account JWT, no
-// user. It learns every Account from core's pushes (PushAllAccounts, run
-// whenever core's SYS connection connects or reconnects) or from its
-// peers. Nothing is written to the bus's nats-auth directory except the
+// user. Every Account reaches it from its account loader
+// (cmd/farmerbus-loader), which loads the accounts bucket at start and on
+// each change; core's pushes (PushAllAccounts, run whenever core's SYS
+// connection connects or reconnects) and, when clustered, its peers only
+// get it there sooner. Nothing is written to the bus's nats-auth directory except the
 // resolver's own store.
 
 import (

@@ -98,6 +98,9 @@ type fixture struct {
 	// rawManifest, if set, is served verbatim instead.
 	rawManifest  []byte
 	farmerStatus int // 0: 200 with the manifest
+	// farmerRoute, if set, answers the manifest request instead: farmer's
+	// own handler (farmer_route_test.go).
+	farmerRoute http.Handler
 
 	farmer      *httptest.Server
 	farmerCAPEM []byte
@@ -423,6 +426,10 @@ func (f *fixture) record(dst *[]*http.Request, r *http.Request) {
 
 func (f *fixture) serveManifest(w http.ResponseWriter, r *http.Request) {
 	f.record(&f.farmerReqs, r)
+	if f.farmerRoute != nil {
+		f.farmerRoute.ServeHTTP(w, r)
+		return
+	}
 	if r.URL.Path != manifestPath {
 		http.NotFound(w, r)
 		return

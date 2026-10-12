@@ -81,12 +81,15 @@ The core needs these before farmer can enroll a single sprout:
 The two Helm charts are the tested, supported way to deploy imas. Their
 READMEs are the full reference; this is the order to do things in.
 
-1. **Create the NATS seed Secret in both namespaces.** The charts never
-   generate seeds, and farmer and the bus must hold byte-identical copies.
-   Six seeds: `operator`, `operator-signing`, `sys-account`, `tenant`,
-   `tenant-signing`, `saasapi-user`. For an existing install, import the
-   seeds farmer already has instead of generating new ones. See "Seeds" in
-   both chart READMEs.
+1. **Create the NATS user seeds.** The charts never generate them. In the
+   core namespace, Secret `imas-farmer-nats-seeds` holds `sys-user.nk`
+   (SYS_USER) and `saasapi-user.nk` (SAASAPI_USER), and Secret
+   `imas-farmer-nkey` holds farmer's own `farmer.nk`. The trust chain keys
+   (operator, operator signing, SYS account, tenant keys) are OpenBao
+   Transit keys the core chart's bootstrap creates, so no seed exists for
+   them. In the DMZ namespace, copy ConfigMap `imas-nats-trust` from core
+   and create the account loader's SYS user Secret (and `BUS_FENCE_USER`
+   for a clustered bus only). See "Seeds" in both chart READMEs.
 2. **Install the core chart**, `deploy/helm/farmer`. It deploys farmer and
    saasapi, and optionally bundled PXC, OpenBao (dev mode) and Valkey for an
    eval. `ci/default-values.yaml` is the eval example and
@@ -219,12 +222,15 @@ systemctl enable --now imas-farmer
 
 ### farmerbus
 
-No package or unit ships for farmerbus. It reads the same `farmer` config
-file and PKI directory as farmer, and needs the same NATS seeds. If you run
+No package or unit ships for farmerbus. It reads the `farmer` config file
+and holds none of farmer's seeds: it needs core's public NATS trust
+(`imas-nats-trust`), and, when clustered, the `BUS_FENCE_USER` seed; its
+account loader (`farmerbus-loader`) needs its own SYS user seed and a
+read-only credential for the accounts bucket. If you run
 it under systemd, base a unit on `packaging/systemd/imas-farmer.service`
 with `ExecStart=` pointed at the farmerbus binary. What it needs is in
 [`deploy/helm/nats/README.md`](../deploy/helm/nats/README.md) ("Seeds",
-"Bus TLS"). In production it belongs on a DMZ host, reachable by core on
+"Accounts bucket and loader", "Bus TLS"). In production it belongs on a DMZ host, reachable by core on
 `:5406` and by Envoy on `:5407`, and by nothing else.
 
 ### saasapi

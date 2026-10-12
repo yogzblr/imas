@@ -54,7 +54,8 @@ to a bucket other than objectStore.bucket and objectStore.jobBucket.
 {{- end }}
 
 Before farmer can start, Secret "{{ .Values.natsSeeds.secretName }}" must exist in {{ .Release.Namespace }}
-with the same seeds the nats chart mounts. This chart never generates one.
+with the SYS_USER and SAASAPI_USER user seeds, and Secret "{{ .Values.farmer.nkeySecret.secretName }}" with
+farmer's NKey. This chart never generates them.
 {{- if .Values.saasapi.enabled }}
 {{- $eso := and .Values.externalSecrets.enabled .Values.externalSecrets.saasapi.enabled }}
 

@@ -27,8 +27,10 @@ commonLabels:
 # tenant keys are OpenBao Transit keys on core, and a single-node bus needs
 # no fence user (BUS_FENCE_USER is for bus.replicaCount > 1). The bus
 # starts from the public trust ConfigMap imas-nats-trust, which install.sh
-# copies from core (natsTrust.configMapName, the chart default). No seed of
-# any kind is copied into the DMZ.
+# copies from core (natsTrust.configMapName, the chart default). natsSeeds
+# stays empty: the only seed in the DMZ is the loader's SYS user seed
+# (loader.sysUserSecret), which install.sh --loader-seed puts in its own
+# Secret.
 natsSeeds:
   seeds: {}
 natsTrust:

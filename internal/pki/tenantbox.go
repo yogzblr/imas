@@ -15,8 +15,8 @@
 // X25519/Curve25519 Diffie-Hellman primitive to compute a NaCl `box`
 // shared secret without the private key ever leaving Transit. Getting
 // genuine "private key never leaves OpenBao" custody for a NaCl-box
-// operation would need Transit to grow that primitive first (it doesn't
-// have one today) — tracked as a follow-up, not blocking this workstream.
+// operation would need Transit to grow that primitive first (OpenBao
+// 2.7.1, the pinned version, has none).
 // What this file gives instead: tenant_priv's *durable, at-rest* copy
 // lives in OpenBao (versioned, access-logged, ACL'd), not as a plaintext
 // file on farmer's own disk; it is read into farmer's process memory

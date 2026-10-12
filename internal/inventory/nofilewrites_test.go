@@ -17,12 +17,6 @@ import (
 	"testing"
 )
 
-// enforceNoFileWrites turns the guard from report-only into a failing
-// test. P21 slice 3 started report-only (PR 1) while later PRs moved each
-// write to a shared store, and switched to enforcing in its last PR (PR
-// 9), once the only calls left were the allow-listed ones below.
-const enforceNoFileWrites = true
-
 // moduleRoot is the repository root relative to this package's directory.
 const moduleRoot = "../.."
 
@@ -145,9 +139,10 @@ type fileWrite struct {
 }
 
 // TestNoFileWrittenOutsideTmp reads the scanned trees' source and fails
-// on every call that writes a file and isn't on the allow-list (only
-// reports it while enforceNoFileWrites is false); an allow-list entry that
-// no longer matches anything is reported the same way.
+// on every call that writes a file and isn't on the allow-list; an
+// allow-list entry that no longer matches anything fails it the same way.
+// (P21 slice 3 ran it report-only until its last PR moved every other
+// write to a shared store.)
 func TestNoFileWrittenOutsideTmp(t *testing.T) {
 	writes := scanFileWrites(t, moduleRoot, scannedDirs)
 
@@ -171,18 +166,14 @@ func TestNoFileWrittenOutsideTmp(t *testing.T) {
 	}
 	slices.Sort(stale)
 
-	report := t.Logf
-	if enforceNoFileWrites {
-		report = t.Errorf
-	}
 	for _, w := range unlisted {
-		report("file write outside the temp dir: %s (%s)", w.pos, w.key)
+		t.Errorf("file write outside the temp dir: %s (%s)", w.pos, w.key)
 	}
 	for _, a := range stale {
-		report("allow-list entry matches no call: %s", a)
+		t.Errorf("allow-list entry matches no call: %s", a)
 	}
-	t.Logf("%d file-write calls found, %d not allow-listed, %d stale allow-list entries (enforcing: %v)",
-		len(writes), len(unlisted), len(stale), enforceNoFileWrites)
+	t.Logf("%d file-write calls found, %d not allow-listed, %d stale allow-list entries",
+		len(writes), len(unlisted), len(stale))
 }
 
 // scanFileWrites parses every non-test Go file under dirs (relative to
