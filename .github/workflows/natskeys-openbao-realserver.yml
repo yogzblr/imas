@@ -2,7 +2,9 @@ name: natskeys OpenBao real server
 
 # Runs the TestOpenBao* tests of internal/pki/natskeys
 # (openbao_integration_test.go: Transit-backed NATS signing, the P21
-# policies, soft delete) against a real OpenBao dev server. The tests
+# policies, soft delete) and of deploy/helm/farmer
+# (openbao_policy_test.go: the chart's P21 policy files, owner decisions
+# of issue #197) against a real OpenBao dev server. The tests
 # skip themselves unless IMAS_TEST_OPENBAO_ADDR and _TOKEN are set, so
 # the plain `go test ./...` in ci.yml never runs them.
 #
@@ -19,6 +21,8 @@ on:
     paths:
       - "internal/pki/natskeys/**"
       - "internal/openbao/**"
+      - "deploy/helm/farmer/files/openbao-policies/**"
+      - "deploy/helm/farmer/openbao_policy_test.go"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/natskeys-openbao-realserver.yml"
@@ -27,6 +31,8 @@ on:
     paths:
       - "internal/pki/natskeys/**"
       - "internal/openbao/**"
+      - "deploy/helm/farmer/files/openbao-policies/**"
+      - "deploy/helm/farmer/openbao_policy_test.go"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/natskeys-openbao-realserver.yml"
@@ -42,7 +48,7 @@ env:
 
 jobs:
   realserver:
-    name: natskeys TestOpenBao* (OpenBao)
+    name: natskeys and chart policy TestOpenBao* (OpenBao)
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -102,6 +108,15 @@ jobs:
           # by design (it records an answer).
           for t in TestOpenBaoSignerWithNatsServer TestOpenBaoPolicyEnforcement TestOpenBaoSoftDeleteBlocksSigning; do
             grep -q -- "--- PASS: $t " "$RUNNER_TEMP/test.log"
+          done
+
+      - name: Run the chart's policy TestOpenBao*
+        run: |
+          set -euo pipefail
+          go test -count=1 -v -run '^TestOpenBao' ./deploy/helm/farmer \
+            | tee "$RUNNER_TEMP/chart-test.log"
+          for t in TestOpenBaoBootstrapPolicy TestOpenBaoFarmerPolicy TestOpenBaoSysSignerPolicy; do
+            grep -q -- "--- PASS: $t " "$RUNNER_TEMP/chart-test.log"
           done
 
       - name: OpenBao server log

@@ -7,6 +7,14 @@
 # source, and chart_test.go fails if it drifts:
 #   imas-saasapi-cred-publisher.hcl
 #       deploy/farmer/README.md, "OpenBao policy" (the only KV-write grant)
+# The P21 slice 1 NATS policies are files of their own, carried verbatim
+# (chart_test.go checks their paths):
+#   imas-farmer-natssign.hcl  farmer's Transit signer; plus a soft-delete
+#                             deny for a non-default gateway key name
+#   imas-nats-sys-signer.hcl  the publish Job's Transit signer
+#   imas-nats-bootstrap.hcl   ephemeral: the bootstrap Job's handoff token,
+#                             deleted by the Job; plus one KV grant with
+#                             natsTrust.kvCopy.enabled
 # The imas-farmer-* ones are rendered from the values they name.
 apiVersion: v1
 kind: ConfigMap
@@ -20,6 +28,22 @@ data:
   {{- range $path, $_ := .Files.Glob "files/openbao-policies/*.hcl" }}
   {{ base $path }}: |
     {{- $.Files.Get $path | trimSuffix "\n" | nindent 4 }}
+    {{- if and (eq (base $path) "imas-nats-bootstrap.hcl") $.Values.natsTrust.kvCopy.enabled }}
+
+    # natsTrust.kvCopy.enabled: the public trust copy (natsbootstrap
+    # DefaultKVMount/DefaultKVPath).
+    path "secret/data/platform/imas/nats-trust" {
+      capabilities = ["create", "update", "read"]
+    }
+    {{- end }}
+    {{- $g := $.Values.farmer.openbao.gateway }}
+    {{- if and (eq (base $path) "imas-farmer-natssign.hcl") (eq $g.transitMount "transit") (ne $g.keyName "imas-gateway-jwt") }}
+
+    # farmer.openbao.gateway.keyName: never retire the gateway key.
+    path "transit/keys/{{ $g.keyName }}/soft-delete" {
+      capabilities = ["deny"]
+    }
+    {{- end }}
   {{- end }}
   imas-farmer-gateway.hcl: |
     {{- include "imas-farmer.policy.farmerGateway" . | nindent 4 }}

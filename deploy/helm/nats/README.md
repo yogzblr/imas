@@ -51,8 +51,12 @@ separate `deploy/helm/farmer` chart.
 
 ## Before you install
 
-1. **A seed Secret** (`natsSeeds.secretName`). The chart never generates
-   one. See [Seeds](#seeds).
+1. **The NATS trust ConfigMap** (`natsTrust.configMapName`, default
+   `imas-nats-trust`) in this namespace: a copy of the one the core
+   chart's OpenBao bootstrap Job writes. Public data only. See
+   [NATS trust](#nats-trust). For `bus.replicaCount > 1`, also **a seed
+   Secret** with the fence user's seed (`natsSeeds.secretName`). The chart
+   never generates one. See [Seeds](#seeds).
 2. **A bus TLS certificate.** Either a `kubernetes.io/tls` Secret with
    `ca.crt`, or OpenBao PKI. See [Bus TLS](#bus-tls).
 3. **A DMZ edge certificate** for Envoy (`envoy.tls.secretName`). This is
@@ -70,7 +74,7 @@ separate `deploy/helm/farmer` chart.
    | farmer's `farmerorganization` equals `bus.organization` | `organization` |
    | farmer dials this bus at `tls://<release>-nats-bus.<ns>.svc.cluster.local:5406` (farmer's `farmerbusurl`) | `bus.serviceName` (`<release>-nats-bus`), `bus.namespace`, `bus.port` |
    | the bus certificate carries the name farmer verifies (the host of `farmerbusurl`, or `farmerbustlsservername`) | `bus.tlsServerName` (empty: the FQDN, which the default SANs cover) |
-   | the same seed Secret, key for key | `natsSeeds.*` |
+   | the trust ConfigMap is a copy of the core release's | `natsTrust.configMapName`; for a cluster, `natsTrust.busFenceUserPub` (the public key of this chart's `BUS_FENCE_USER` seed) |
    | `IMAS_SPROUT_BUS_URLS` lists Envoy's external `wss://` address | `bus.sproutBusURLs` |
    | core's NetworkPolicy: egress to the bus on 5406, ingress from this chart's Envoy on 5405 | `networkPolicy.dmz.*` (rendered by that chart) |
    | Envoy's `farmer_api` upstream is farmer's Service | here: `envoy.upstreams.farmerAPI.host=<core release>-farmer.<core ns>.svc.cluster.local` |
@@ -100,51 +104,73 @@ helm install imas-dmz deploy/helm/nats -n imas-dmz \
   --set bus.image.repository=<registry>/imas-farmerbus --set bus.image.tag=<tag>
 ```
 
+## NATS trust
+
+Since P21 slice 1 the bus holds **no key of the NATS trust chain** and
+talks to no OpenBao for it. The operator, operator-signing, SYS account
+and tenant keys are OpenBao Transit keys on the core side. Everything the
+bus trusts comes from the public trust ConfigMap the core chart's OpenBao
+bootstrap Job writes (`internal/pki/natstrust.go`, `busauth.go`):
+
+| Key | Used for |
+|---|---|
+| `operator.jwt`, `operator.pub`, `operator-signing.pub` | the trust anchor |
+| `sys-account.pub`, `sys-account.jwt` | the system account, seeded into the resolver before core's first push; every SYS Account JWT core pushes is newer and replaces it |
+| `bus-fence-user.jwt` | a clustered bus's fence user (see [Seeds](#seeds)) |
+
+The chart mounts `natsTrust.configMapName` read-only at
+`/var/run/imas/nats-trust` (`IMAS_NATS_TRUST_DIR`). It is required: the
+bus pods wait in `ContainerCreating` until it exists.
+
+The core chart writes it in **its own** namespace. Copy it here, by hand
+or from your pipeline, after each core bootstrap that changed it (owner
+decision 2026-10-11 (c)). It holds public data only:
+
+```sh
+kubectl -n imas-core get configmap imas-nats-trust -o json \
+  | jq '{apiVersion, kind, data, metadata: {name: .metadata.name}}' \
+  | kubectl -n imas-dmz apply -f -
+```
+
+For a bus in another cluster, use the core cluster's kubeconfig for the
+`get` and the DMZ cluster's for the `apply`. The trust anchor never
+changes once bootstrapped (the bootstrap refuses to replace it), so the
+copy only changes when a fence user is added.
+
 ## Seeds
 
-`internal/pki/jwtauth.go` resolves each NKey seed in this order:
+The bus's only secret is the **fence user's seed**, and only when it is
+clustered. A clustered node's fence connects to the node in-process as a
+user of the SYS account (`cmd/farmerbus/fence.go`); its JWT is
+`bus-fence-user.jwt` from the trust, and its seed comes from
+`natsSeeds.seeds.BUS_FENCE_USER` (`IMAS_NATS_BUS_FENCE_USER_SEED_FILE`).
+Rendering fails without it when `bus.replicaCount > 1`, and farmerbus
+refuses to start clustered without both halves. A single node needs
+neither and must not have the seed alone: farmerbus refuses a fence user
+configured in part.
 
-1. `IMAS_NATS_<NAME>_SEED_FILE`
-2. `IMAS_NATS_<NAME>_SEED`
-3. the file on disk
-4. generate and persist a new one
+To set one up:
 
-A seed supplied externally is never written back to disk. The chart
-mounts each entry of `natsSeeds.seeds` from the Secret and sets the
-matching `_SEED_FILE` variable. It never uses the raw `_SEED` form, never
-renders a Secret, and projects only the listed keys. For example,
-`saasapi-user.nk` stays out of the DMZ even if the Secret has it.
+1. Generate a user seed offline (`nk -gen user -pubout`) and store it in
+   OpenBao for ESO to sync into `natsSeeds.secretName` in this namespace,
+   under the key `natsSeeds.seeds.BUS_FENCE_USER` names
+   (`bus-fence-user.nk` by convention).
+2. Set the core chart's `natsTrust.busFenceUserPub` to its public key
+   (`U...`) and upgrade the core release: its bootstrap mints
+   `bus-fence-user.jwt` into the trust ConfigMap.
+3. Copy the trust ConfigMap here ([NATS trust](#nats-trust)), then set
+   `natsSeeds.seeds.BUS_FENCE_USER` and `bus.replicaCount`.
 
-All five default seeds are required, and rendering fails without them.
-Each must be **byte-identical to the seed cmd/farmer uses**. Here's why
-each one is needed:
+The chart mounts each entry of `natsSeeds.seeds` from the Secret and sets
+the matching `_SEED_FILE` variable. It never uses the raw `_SEED` form,
+never renders a Secret, and projects only the listed keys, so farmer's
+`sys-user.nk` or `saasapi-user.nk` stay out of the DMZ even if the Secret
+has them. The removed trust chain seeds (`OPERATOR`, `OPERATOR_SIGNING`,
+`SYS_ACCOUNT`, `TENANT`, `TENANT_SIGNING`) are read by nothing and must
+not be left in the DMZ: drop them from `natsSeeds`, the Secret and
+OpenBao.
 
-| Seed | Why the bus needs farmer's copy |
-|---|---|
-| `OPERATOR` | The bus mints its `operator.jwt` from it. A different key means a different trust anchor, so every Account JWT farmer pushes is rejected. |
-| `OPERATOR_SIGNING` | It's listed in the bus's operator JWT. farmer signs Account JWTs with it. |
-| `SYS_ACCOUNT` | It's the system account. farmer pushes claims updates as a SYS user. |
-| `TENANT`, `TENANT_SIGNING` | They form the legacy tenant Account the bus seeds at boot. farmer's own User JWT lives in this Account. farmer only pushes it when it changes, so a bus with its own tenant seed would reject farmer until then. |
-
-`deploy/farmer/externalsecrets.yaml` currently syncs only
-`sys-account.nk` and `saasapi-user.nk` into `imas-farmer-nats-seeds`. Add
-`operator.nk`, `operator-signing.nk`, `tenant.nk` and `tenant-signing.nk`
-to it, or to a DMZ-namespace ExternalSecret reading the same OpenBao
-path.
-
-**On an existing install, import farmer's current seeds from
-`{FarmerPKI}/nats-auth/`. Don't generate new ones.** The reason is the
-same as for the SYS seed in `deploy/farmer/README.md`.
-
-The bus still generates some material on its PVC, because that's what
-the binary does:
-
-- `sys-user.nk` and `.jwt`: a SYS-account user. The bus already holds
-  the SYS Account seed, so this adds no privilege.
-- The resolver's JWT store.
-
-Per-tenant Account seeds (`IMAS_NATS_TENANT_<ID>_SEED_FILE`) are
-optional. Set them through `natsSeeds.extraSeeds`.
+The bus writes nothing to its PVC but the resolver's JWT store.
 
 `/etc/imas/farmer` is mounted read-only on purpose. `config.LoadConfig`
 folds **every** environment variable into its config and ends with
@@ -262,6 +288,9 @@ here claims a throughput or connection figure; none has been measured.
    serves nobody until its pull from its peers has brought them all in,
    and if every node starts empty they come back only once core
    reconnects and pushes them (see below).
+4. **Fence user.** `natsSeeds.seeds.BUS_FENCE_USER` and the matching
+   `bus-fence-user.jwt` in the trust ConfigMap (render fails without the
+   seed, farmerbus without either). See [Seeds](#seeds).
 
 ### How routes are authenticated
 
@@ -307,14 +336,9 @@ racing it can't be undone by the older copy it read first (the bus
 applies claims pushes in arrival order).
 
 **The bus signs no claims of its own** (`internal/pki/busauth.go`). It
-holds the operator signing seed, but it mints no tenant Account JWT, and
-its only self-signed Account JWT, the SYS bootstrap the server needs
-before core's first push can land, is dated to the Unix epoch, so any
-SYS Account JWT core signs outranks it. Older buses minted the legacy
-tenant's and the SYS Account JWTs on an empty volume with the current
-time and none of core's revocations, which won the resolver sync and
-re-admitted revoked sprouts and rotated-out SaaS API keys; a bus that
-upgrades drops those copies from its resolver at start.
+holds no trust chain key at all: the SYS Account JWT it seeds into the
+resolver is the bootstrap's, from the trust ConfigMap, signed before core
+signed anything, so every SYS Account JWT core pushes outranks it.
 
 ### The fence: a node that may be stale serves nobody
 
@@ -529,14 +553,16 @@ sees that address rather than the node's.
 
 | Key | Default | Description |
 |---|---|---|
-| `natsSeeds.secretName` | `imas-farmer-nats-seeds` | Existing Secret with the NKey seeds. Required. |
+| `natsSeeds.secretName` | `imas-farmer-nats-seeds` | Existing Secret with the seeds. Required when `seeds` lists any. |
 | `natsSeeds.mountPath` | `/var/run/secrets/imas/nats` | Where the seed files are mounted. |
-| `natsSeeds.seeds.OPERATOR` | `operator.nk` | Secret key for `IMAS_NATS_OPERATOR_SEED_FILE`. Required. |
-| `natsSeeds.seeds.OPERATOR_SIGNING` | `operator-signing.nk` | Secret key for `IMAS_NATS_OPERATOR_SIGNING_SEED_FILE`. Required. |
-| `natsSeeds.seeds.SYS_ACCOUNT` | `sys-account.nk` | Secret key for `IMAS_NATS_SYS_ACCOUNT_SEED_FILE`. Required. |
-| `natsSeeds.seeds.TENANT` | `tenant.nk` | Secret key for `IMAS_NATS_TENANT_SEED_FILE`. Required. |
-| `natsSeeds.seeds.TENANT_SIGNING` | `tenant-signing.nk` | Secret key for `IMAS_NATS_TENANT_SIGNING_SEED_FILE`. Required. |
+| `natsSeeds.seeds` | `{}` | `NAME: secret-key`. Only `BUS_FENCE_USER` (e.g. `bus-fence-user.nk`, `IMAS_NATS_BUS_FENCE_USER_SEED_FILE`), required when `bus.replicaCount > 1`. Don't list the removed trust chain seeds. |
 | `natsSeeds.extraSeeds` | `{}` | More `NAME: secret-key` pairs. `NAME` must match `^[A-Z0-9_]+$` and becomes `IMAS_NATS_<NAME>_SEED_FILE`. |
+
+### `natsTrust`
+
+| Key | Default | Description |
+|---|---|---|
+| `natsTrust.configMapName` | `imas-nats-trust` | The trust ConfigMap in this namespace, copied from the core release's. Required. See [NATS trust](#nats-trust). |
 
 ### `bus`
 
@@ -768,17 +794,13 @@ rendered openbao-mode config (that chart's README, "Verification status"):
 
 ## Security review notes
 
-- **The DMZ bus holds the Operator root seed.** `ConfigureBusNats` signs
-  the operator JWT with the Operator seed, and the SYS bootstrap with
-  `OPERATOR_SIGNING`, which can sign any Account. In normal operation the
-  bus signs nothing else (no tenant Account JWTs; see
-  [Clustering](#clustering)), but a compromise of the DMZ bus pod still
-  exposes the whole trust chain. The design doc wants the
-  Operator key cold, and it wants this process to "expose as little as
-  possible". Fixing that is a code change: have farmerbus load a
-  pre-minted `operator.jwt` and the SYS Account's public key instead of
-  seeds. Until then, the seed Secret in the DMZ namespace is the most
-  sensitive object in the deployment. Restrict who can read it.
+- **The DMZ bus holds no trust chain key** (P21 slice 1). It reads the
+  operator JWT and the SYS account from the public trust ConfigMap and
+  signs nothing. Its only secret is a clustered bus's fence user seed, a
+  SYS account user: a compromise of the bus pod exposes that user (which
+  can publish claims requests as SYS, as the bus itself can), never a key
+  that signs accounts. Remove the old trust chain seeds from `natsSeeds`,
+  the DMZ Secret and OpenBao.
 - **Cluster routes** (`replicaCount > 1`) carry every tenant's traffic
   and the SYS account's claims updates. They need mutual TLS, a
   certificate naming a route host, and the route password. They are

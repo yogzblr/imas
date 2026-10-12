@@ -150,14 +150,9 @@ Render-time validation. Everything here fails the render with an
 explanation rather than deploying something that silently can't work.
 */}}
 {{- define "imas-nats.validate" -}}
-{{- if not .Values.natsSeeds.secretName -}}
-{{- fail "natsSeeds.secretName is required: this chart never generates NATS seeds. Point it at the Secret ESO syncs from OpenBao (see deploy/farmer/externalsecrets.yaml)." -}}
-{{- end -}}
 {{- $seeds := fromYaml (include "imas-nats.seeds" .) -}}
-{{- range $name := list "OPERATOR" "OPERATOR_SIGNING" "SYS_ACCOUNT" "TENANT" "TENANT_SIGNING" -}}
-{{- if not (get $seeds $name) -}}
-{{- fail (printf "natsSeeds.seeds.%s is required. Without it farmerbus generates its own %s seed on its PVC, which diverges from cmd/farmer's trust chain (see README.md, \"Seeds\")." $name $name) -}}
-{{- end -}}
+{{- if and $seeds (not .Values.natsSeeds.secretName) -}}
+{{- fail "natsSeeds.secretName is required: this chart never generates NATS seeds. Point it at the Secret ESO syncs from OpenBao." -}}
 {{- end -}}
 {{- range $name, $key := $seeds -}}
 {{- if not (regexMatch "^[A-Z0-9_]+$" $name) -}}
@@ -166,6 +161,9 @@ explanation rather than deploying something that silently can't work.
 {{- if not (regexMatch "^[-._a-zA-Z0-9]+$" (toString $key)) -}}
 {{- fail (printf "natsSeeds seed %s: secret key %q is not a valid Secret key" $name $key) -}}
 {{- end -}}
+{{- end -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$" (toString .Values.natsTrust.configMapName)) -}}
+{{- fail (printf "natsTrust.configMapName %q is not a valid ConfigMap name" (toString .Values.natsTrust.configMapName)) -}}
 {{- end -}}
 {{- if not (regexMatch "^[0-9A-Za-z_-]{1,191}$" (toString .Values.bus.organization)) -}}
 {{- fail (printf "bus.organization %q is not a valid tenant ID (^[0-9A-Za-z_-]{1,191}$, internal/pki IsValidTenantID); it names the legacy tenant and must match cmd/farmer's farmerorganization" .Values.bus.organization) -}}
@@ -195,6 +193,9 @@ explanation rather than deploying something that silently can't work.
 {{- end -}}
 {{- if not .Values.bus.persistence.enabled -}}
 {{- fail "bus.persistence.enabled must be true when bus.replicaCount > 1: a node without a PVC starts with no Account JWTs on every restart and serves nobody until it has pulled them all from its peers, and a restart of every node loses them until core reconnects and pushes them again (see README.md, \"Clustering\")." -}}
+{{- end -}}
+{{- if not (get $seeds "BUS_FENCE_USER") -}}
+{{- fail "natsSeeds.seeds.BUS_FENCE_USER is required when bus.replicaCount > 1: a clustered bus's fence connects as that SYS account user, and farmerbus refuses to start without it (README.md, \"Clustering\")" -}}
 {{- end -}}
 {{- end -}}
 {{- if not (has .Values.bus.tls.mode (list "secret" "openbao")) -}}

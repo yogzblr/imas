@@ -628,9 +628,14 @@ explanation rather than deploying something that silently can't work.
 {{- fail "natsSeeds.secretName is required: this chart never generates NATS seeds. Point it at the Secret ESO syncs from OpenBao (externalSecrets, or deploy/farmer/externalsecrets.yaml)." -}}
 {{- end -}}
 {{- $seeds := fromYaml (include "imas-farmer.seeds" .) -}}
-{{- range $name := list "OPERATOR" "OPERATOR_SIGNING" "SYS_ACCOUNT" "TENANT" "TENANT_SIGNING" "SAASAPI_USER" -}}
+{{- range $name := list "SYS_USER" "SAASAPI_USER" -}}
 {{- if not (get $seeds $name) -}}
-{{- fail (printf "natsSeeds.seeds.%s is required. Without it farmer generates its own %s seed on its PVC, which splits it from the bus's trust chain or from saasapi's credential (see README.md, \"Seeds\")." $name $name) -}}
+{{- fail (printf "natsSeeds.seeds.%s is required: farmer refuses to start without the %s user seed, and never generates one (see README.md, \"Seeds\")." $name $name) -}}
+{{- end -}}
+{{- end -}}
+{{- range $name := list "OPERATOR" "OPERATOR_SIGNING" "SYS_ACCOUNT" "TENANT" "TENANT_SIGNING" -}}
+{{- if hasKey $seeds $name -}}
+{{- fail (printf "natsSeeds seed %s was removed in P21 slice 1: the operator, operator-signing, SYS account and tenant keys are OpenBao Transit keys (farmer.openbao.natsSign) and nothing reads a %s seed. Drop it from natsSeeds and from the seed Secret (README.md, \"Seeds\")." $name $name) -}}
 {{- end -}}
 {{- end -}}
 {{- range $name, $key := $seeds -}}
@@ -657,6 +662,7 @@ explanation rather than deploying something that silently can't work.
 {{- if and (eq .Values.openbaoClient.authMethod "token") (not .Values.openbaoClient.tokenSecretName) -}}
 {{- fail "openbaoClient.tokenSecretName is required when authMethod=token" -}}
 {{- end -}}
+{{- include "imas-farmer.natsSign.validate" . -}}
 {{- if not (include "imas-farmer.dbHost" .) -}}
 {{- fail "database.host is required when pxc.enabled=false" -}}
 {{- end -}}
@@ -852,9 +858,9 @@ explanation rather than deploying something that silently can't work.
 {{- if and .Values.saasapi.enabled (eq $p.serviceAccountName (include "imas-farmer.saasapi.serviceAccountName" .)) -}}
 {{- fail "credentialPublisher.serviceAccountName must not be saasapi's ServiceAccount" -}}
 {{- end -}}
-{{- range $r := list .Values.tls.openbao.k8sRole .Values.farmer.openbao.gateway.k8sRole .Values.farmer.openbao.tenantBox.k8sRole -}}
-{{- if eq $r $p.k8sRole -}}
-{{- fail (printf "credentialPublisher.k8sRole %q is also one of farmer's OpenBao roles: the KV-write role must never be one farmer can log in with" $p.k8sRole) -}}
+{{- range $r := list .Values.tls.openbao.k8sRole .Values.farmer.openbao.gateway.k8sRole .Values.farmer.openbao.tenantBox.k8sRole .Values.farmer.openbao.natsSign.k8sRole -}}
+{{- if or (eq $r $p.k8sRole) (eq $r $p.natsSign.k8sRole) -}}
+{{- fail (printf "credentialPublisher.k8sRole %q or credentialPublisher.natsSign.k8sRole %q is also one of farmer's OpenBao roles: the publisher's roles must never be ones farmer can log in with" $p.k8sRole $p.natsSign.k8sRole) -}}
 {{- end -}}
 {{- end -}}
 {{- end }}
@@ -908,9 +914,134 @@ create the platform key and the SaaS API's private key.
 {{- if has $c.serviceAccountName $sas -}}
 {{- fail (printf "controlPlaneBoxKeys.serviceAccountName %q is another workload's ServiceAccount: the keygen Job's token can create the platform key and the SaaS API's private key, so it must be its own" $c.serviceAccountName) -}}
 {{- end -}}
-{{- range $r := list .Values.tls.openbao.k8sRole .Values.farmer.openbao.gateway.k8sRole .Values.farmer.openbao.tenantBox.k8sRole .Values.credentialPublisher.k8sRole -}}
+{{- range $r := list .Values.tls.openbao.k8sRole .Values.farmer.openbao.gateway.k8sRole .Values.farmer.openbao.tenantBox.k8sRole .Values.farmer.openbao.natsSign.k8sRole .Values.credentialPublisher.k8sRole .Values.credentialPublisher.natsSign.k8sRole -}}
 {{- if eq $r $c.k8sRole -}}
 {{- fail (printf "controlPlaneBoxKeys.k8sRole %q is another workload's OpenBao role" $c.k8sRole) -}}
 {{- end -}}
 {{- end -}}
+{{- end }}
+
+{{/*
+The NATS trust chain signer (P21 slice 1). Its policies
+(files/openbao-policies/imas-farmer-natssign.hcl, imas-nats-sys-signer.hcl,
+imas-nats-bootstrap.hcl) name the "transit" mount and the fixed key names,
+so a value that would point a client elsewhere is refused rather than
+silently uncovered. Each signer role is its own.
+*/}}
+{{- define "imas-farmer.natsSign.validate" -}}
+{{- $n := .Values.farmer.openbao.natsSign -}}
+{{- if ne (toString $n.transitMount) "transit" -}}
+{{- fail (printf "farmer.openbao.natsSign.transitMount %q: the reviewed policies in files/openbao-policies (imas-farmer-natssign, imas-nats-sys-signer, imas-nats-bootstrap) grant the transit/ mount only. Keep it \"transit\", or change the policies (and their review) with it." (toString $n.transitMount)) -}}
+{{- end -}}
+{{- if not (regexMatch "^[1-9][0-9]*(ms|s|m)$" (toString $n.timeout)) -}}
+{{- fail (printf "farmer.openbao.natsSign.timeout %q must be a positive whole number of ms, s or m, such as \"15s\" (IMAS_NATSSIGN_TIMEOUT)" (toString $n.timeout)) -}}
+{{- end -}}
+{{- range $k := list "batchMax" "workers" "retiredTenantKeyRetentionDays" -}}
+{{- $v := get $n $k -}}
+{{- if not (or (kindIs "float64" $v) (kindIs "int64" $v) (kindIs "int" $v)) -}}
+{{- fail (printf "farmer.openbao.natsSign.%s must be a positive whole number, got %v" $k $v) -}}
+{{- end -}}
+{{- if or (lt (float64 $v) 1.0) (ne (float64 $v) (float64 (int64 $v))) -}}
+{{- fail (printf "farmer.openbao.natsSign.%s must be a positive whole number, got %v" $k $v) -}}
+{{- end -}}
+{{- end -}}
+{{- if has $n.k8sRole (list .Values.tls.openbao.k8sRole .Values.farmer.openbao.gateway.k8sRole .Values.farmer.openbao.tenantBox.k8sRole) -}}
+{{- fail (printf "farmer.openbao.natsSign.k8sRole %q is another of farmer's OpenBao roles: one role per client, one policy per role" $n.k8sRole) -}}
+{{- end -}}
+{{- $t := .Values.natsTrust -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$" (toString $t.configMapName)) -}}
+{{- fail (printf "natsTrust.configMapName %q is not a valid ConfigMap name" (toString $t.configMapName)) -}}
+{{- end -}}
+{{- with $t.busFenceUserPub -}}
+{{- if not (regexMatch "^U[A-Z2-7]{55}$" (toString .)) -}}
+{{- fail (printf "natsTrust.busFenceUserPub %q is not an NKey user public key (U and 55 more base32 characters): the public half of the nats chart's BUS_FENCE_USER seed" (toString .)) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/* The trust ConfigMap volume and mount (IMAS_NATS_TRUST_DIR). */}}
+{{- define "imas-farmer.natsTrustDir" -}}
+/var/run/imas/nats-trust
+{{- end }}
+
+{{- define "imas-farmer.natsTrustVolume" -}}
+- name: nats-trust
+  configMap:
+    name: {{ .Values.natsTrust.configMapName }}
+{{- end }}
+
+{{- define "imas-farmer.natsTrustVolumeMount" -}}
+- name: nats-trust
+  mountPath: {{ include "imas-farmer.natsTrustDir" . }}
+  readOnly: true
+{{- end }}
+
+{{/*
+IMAS_NATSSIGN_* for one signer identity (internal/pki/natskeys env.go).
+Call with (dict "root" $ "k8sRole" <role> "tokenKey" <key>) plus an
+optional "tokenSecret".
+*/}}
+{{- define "imas-farmer.natsSignEnv" -}}
+{{- $n := .root.Values.farmer.openbao.natsSign -}}
+{{- include "imas-farmer.openbaoEnv" (dict "root" .root "prefix" "IMAS_NATSSIGN_OPENBAO" "k8sRole" .k8sRole "tokenKey" .tokenKey "tokenSecret" .tokenSecret) }}
+- name: IMAS_NATSSIGN_OPENBAO_TRANSIT_MOUNT
+  value: {{ $n.transitMount | quote }}
+- name: IMAS_NATSSIGN_TIMEOUT
+  value: {{ $n.timeout | quote }}
+- name: IMAS_NATSSIGN_BATCH_MAX
+  value: {{ $n.batchMax | int64 | toString | quote }}
+- name: IMAS_NATSSIGN_WORKERS
+  value: {{ $n.workers | int64 | toString | quote }}
+- name: IMAS_NATS_TRUST_DIR
+  value: {{ include "imas-farmer.natsTrustDir" .root | quote }}
+{{- end }}
+
+{{/*
+The bootstrap Job's egress rule to the Kubernetes API (its nats-trust
+container reads and writes the trust ConfigMap): networkPolicy.external.
+kubeApi.cidrs as ipBlock peers (empty: any destination), on its ports.
+*/}}
+{{- define "imas-farmer.kubeApiEgress" -}}
+{{- $k := .Values.networkPolicy.external.kubeApi -}}
+- ports:
+    {{- range $k.ports }}
+    - { protocol: TCP, port: {{ int . }} }
+    {{- end }}
+  {{- with $k.cidrs }}
+  to:
+    {{- range . }}
+    - ipBlock:
+        cidr: {{ . | quote }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+
+{{/*
+The bao containers of the bootstrap Job: address, CA, and the bootstrap
+token from openbaoBootstrap.tokenSecretName (or the dev Secret). The
+reference is optional: no Secret, no token, and the Job only checks.
+*/}}
+{{- define "imas-farmer.bootstrapBaoEnv" -}}
+{{- $bs := .Values.openbaoBootstrap -}}
+- name: BAO_ADDR
+  value: {{ include "imas-farmer.openbaoAddr" . | quote }}
+- name: BAO_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ default (printf "%s-openbao-bootstrap" (include "imas-farmer.fullname" .)) $bs.tokenSecretName }}
+      key: {{ $bs.tokenSecretKey }}
+      optional: true
+{{- if .Values.openbaoClient.caConfigMap }}
+- name: BAO_CACERT
+  value: /var/run/secrets/openbao-ca/{{ .Values.openbaoClient.caKey }}
+{{- end }}
+- name: HOME
+  value: /tmp
+{{- end }}
+
+{{/* True (non-empty) when the bootstrap Job revokes its own token:
+openbaoBootstrap.revokeToken, never in dev mode. */}}
+{{- define "imas-farmer.bootstrap.revokesToken" -}}
+{{- $dev := and .Values.openbao.server .Values.openbao.server.dev .Values.openbao.server.dev.enabled -}}
+{{- if and .Values.openbaoBootstrap.revokeToken (not $dev) -}}true{{- end -}}
 {{- end }}

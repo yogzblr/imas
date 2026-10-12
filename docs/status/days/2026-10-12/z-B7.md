@@ -1,0 +1,5 @@
+change: P21 slice 1 PR6 (unit B7): charts. The farmer chart's OpenBao bootstrap Job gains the `prepare` and `nats-trust` init containers (platform Transit keys, trust ConfigMap `imas-nats-trust`, short-lived self-revoking handoff token, ephemeral `imas-nats-bootstrap` policy deleted after the run, root token revoked when done); its own ServiceAccount and Role for the trust ConfigMap; policy files `imas-farmer-natssign`, `imas-nats-sys-signer`, `imas-nats-bootstrap`; farmer and the publish Job sign through Transit (`IMAS_NATSSIGN_*`) and mount the trust; seeds reduced to `SYS_USER` and `SAASAPI_USER` (farmer) and `BUS_FENCE_USER` (bus, clustered only); the nats chart mounts the trust ConfigMap. Real-OpenBao tests for the three policy files. Flagged for security review.
+pr: 215
+item: P21
+action: update
+next-append: **Slice 1 PR6 (B7), ready for review:** charts wired to Transit and the trust ConfigMap. The farmer tenant-key policy uses single-segment `transit/keys/+` (owner choice 2026-10-12): the glob-plus-deny form of decision (2) can't refuse rotate/config on OpenBao 2.7.1. UAT scripts, values and docs are PR7.

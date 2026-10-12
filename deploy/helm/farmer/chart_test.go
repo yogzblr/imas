@@ -59,8 +59,10 @@ var noAdmin = []string{"--set", "farmer.bootstrapAdmin.pubkey=", "--set", "farme
 
 // The bootstrap admin every render carries (FIX.3: the chart requires one).
 const (
-	testAdminPubkey = "AB3CQ7X5ZV2JMR4FZYPG2ZLNZ6QX6S7HCLRT5JH4PO5ILHMYXM2AXUNG"
-	testAdminBoxpub = "2O0Y4D6rpqfWAeY+pn2AFOP0AkFqm2t8dNVO3uYFQUQ="
+	// A bus fence user public key (natsTrust.busFenceUserPub).
+	testFenceUserPub = "UAHJPA3T2QKVRDQ2JUZM5MDQHLVJGEIY7WQF7OUN5RF4XN7WTWDOAKJE"
+	testAdminPubkey  = "AB3CQ7X5ZV2JMR4FZYPG2ZLNZ6QX6S7HCLRT5JH4PO5ILHMYXM2AXUNG"
+	testAdminBoxpub  = "2O0Y4D6rpqfWAeY+pn2AFOP0AkFqm2t8dNVO3uYFQUQ="
 )
 
 func chartDir(t *testing.T) string {
@@ -278,6 +280,19 @@ func container(t *testing.T, w obj, name string) obj {
 	return nil
 }
 
+// initContainer is container for spec.initContainers.
+func initContainer(t *testing.T, w obj, name string) obj {
+	t.Helper()
+	cs, _ := podSpec(w)["initContainers"].([]any)
+	for _, c := range cs {
+		if c.(obj)["name"] == name {
+			return c.(obj)
+		}
+	}
+	t.Fatalf("no init container %q", name)
+	return nil
+}
+
 func envMap(c obj) map[string]obj {
 	m := map[string]obj{}
 	for _, e := range c["env"].([]any) {
@@ -378,7 +393,20 @@ func TestValidationFailures(t *testing.T) {
 		{"bad organization", "not a valid tenant ID", []string{"--set", "organization=imas farmer"}},
 		{"no seed secret", "natsSeeds.secretName is required", []string{"--set", "natsSeeds.secretName="}},
 		{"missing saasapi seed", "natsSeeds.seeds.SAASAPI_USER is required", []string{"--set", "natsSeeds.seeds.SAASAPI_USER=null"}},
-		{"missing operator seed", "natsSeeds.seeds.OPERATOR is required", []string{"--set", "natsSeeds.seeds.OPERATOR="}},
+		{"missing sys user seed", "natsSeeds.seeds.SYS_USER is required", []string{"--set", "natsSeeds.seeds.SYS_USER="}},
+		{"removed operator seed", "natsSeeds seed OPERATOR was removed", []string{"--set", "natsSeeds.seeds.OPERATOR=operator.nk"}},
+		{"removed tenant seed", "natsSeeds seed TENANT_SIGNING was removed", []string{"--set", "natsSeeds.extraSeeds.TENANT_SIGNING=tenant-signing.nk"}},
+		// The NATS signer (P21 slice 1): the reviewed policies name the
+		// transit mount; one role per client.
+		{"natssign other mount", "farmer.openbao.natsSign.transitMount", []string{"--set", "farmer.openbao.natsSign.transitMount=nats"}},
+		{"natssign bad timeout", "farmer.openbao.natsSign.timeout", []string{"--set", "farmer.openbao.natsSign.timeout=15"}},
+		{"natssign zero workers", "farmer.openbao.natsSign.workers must be a positive whole number", []string{"--set", "farmer.openbao.natsSign.workers=0"}},
+		{"natssign fractional retention", "retiredTenantKeyRetentionDays must be a positive whole number", []string{"--set", "farmer.openbao.natsSign.retiredTenantKeyRetentionDays=1.5"}},
+		{"natssign shares gateway role", "is another of farmer's OpenBao roles", []string{"--set", "farmer.openbao.natsSign.k8sRole=imas-farmer-gateway"}},
+		{"publisher signer is farmer's", "is also one of farmer's OpenBao roles", []string{"--set", "credentialPublisher.natsSign.k8sRole=imas-farmer-natssign"}},
+		{"keygen takes publisher signer", "controlPlaneBoxKeys.k8sRole", []string{"--set", "controlPlaneBoxKeys.k8sRole=imas-natssign-publisher"}},
+		{"bad trust configmap", "natsTrust.configMapName", []string{"--set", "natsTrust.configMapName=Bad_Name"}},
+		{"bad fence user pub", "natsTrust.busFenceUserPub", []string{"--set", "natsTrust.busFenceUserPub=" + testAdminPubkey}},
 		{"bad seed name", "must match", []string{"--set", "natsSeeds.extraSeeds.bad-name=x.nk"}},
 		{"two farmers", "farmer.replicaCount must be 1", []string{"--set", "farmer.replicaCount=2"}},
 		{"bare number window", "must be a quoted duration", []string{"--set", "farmer.jobs.reconcileWindow=7200"}},
@@ -434,8 +462,8 @@ func TestValidationFailures(t *testing.T) {
 
 // deploy/farmer/farmer-deployment-nats-seeds.patch.yaml: every env var,
 // mount and volume the reference patch adds is on the rendered farmer
-// Deployment. The chart projects the four bus-trust seeds too (the
-// nats chart needs them byte-identical), so its items are a superset.
+// Deployment: the two user seeds (P21 slice 1), the trust ConfigMap and
+// the NATS signer's identity.
 func TestFarmerMatchesSeedPatch(t *testing.T) {
 	ref := readYAMLDocs(t, "deploy/farmer/farmer-deployment-nats-seeds.patch.yaml")[0]
 	refC := get(ref, "spec", "template", "spec", "containers", 0).(obj)
@@ -461,6 +489,12 @@ func TestFarmerMatchesSeedPatch(t *testing.T) {
 	vols := byName(podSpec(d)["volumes"])
 	for name, v := range byName(get(ref, "spec", "template", "spec", "volumes")) {
 		g := vols[name]
+		if get(v, "configMap") != nil {
+			if get(g, "configMap", "name") != get(v, "configMap", "name") {
+				t.Errorf("volume %s: got %v, reference %v", name, g, v)
+			}
+			continue
+		}
 		if get(g, "secret", "secretName") != get(v, "secret", "secretName") || get(g, "secret", "defaultMode") != get(v, "secret", "defaultMode") {
 			t.Errorf("volume %s: got %v, reference %v", name, g, v)
 		}
@@ -473,8 +507,8 @@ func TestFarmerMatchesSeedPatch(t *testing.T) {
 				t.Errorf("volume %s: item %v missing", name, it)
 			}
 		}
-		if len(items) != 6 {
-			t.Errorf("seed volume projects %d keys, want the 6 in natsSeeds.seeds", len(items))
+		if len(items) != 2 {
+			t.Errorf("seed volume projects %d keys, want the 2 in natsSeeds.seeds", len(items))
 		}
 	}
 }
@@ -483,7 +517,8 @@ func TestFarmerMatchesSeedPatch(t *testing.T) {
 // reference's own placeholders filled in (external OpenBao at the same
 // address, the same CA ConfigMap), the chart's Job, ServiceAccount and
 // NetworkPolicy match it field for field. The chart may add only
-// IMAS_SAASAPI_CRED_OPENBAO_K8S_MOUNT (its default value) and pod labels.
+// IMAS_SAASAPI_CRED_OPENBAO_K8S_MOUNT and IMAS_NATSSIGN_OPENBAO_K8S_MOUNT
+// (their default value) and pod labels.
 func TestPublishJobMatchesReference(t *testing.T) {
 	ref := readYAMLDocs(t, "deploy/farmer/saasapi-credential-publish-job.yaml")
 	refByKind := map[string]obj{}
@@ -542,7 +577,7 @@ func TestPublishJobMatchesReference(t *testing.T) {
 		}
 	}
 	for k := range got {
-		if _, ok := want[k]; !ok && k != "IMAS_SAASAPI_CRED_OPENBAO_K8S_MOUNT" {
+		if _, ok := want[k]; !ok && k != "IMAS_SAASAPI_CRED_OPENBAO_K8S_MOUNT" && k != "IMAS_NATSSIGN_OPENBAO_K8S_MOUNT" {
 			t.Errorf("env %s not in the reference", k)
 		}
 	}
@@ -608,10 +643,11 @@ func TestExternalSecretsMatchReference(t *testing.T) {
 			}
 		}
 	}
-	// The seed ExternalSecret carries every seed farmer mounts.
+	// The seed ExternalSecret carries every seed farmer mounts: the two
+	// user seeds, nothing of the trust chain.
 	es := find(t, docs, "ExternalSecret", "imas-farmer-nats-seeds")
-	if n := len(get(es, "spec", "data").([]any)); n != 6 {
-		t.Errorf("seed ExternalSecret has %d entries, want 6", n)
+	if n := len(get(es, "spec", "data").([]any)); n != 2 {
+		t.Errorf("seed ExternalSecret has %d entries, want 2", n)
 	}
 }
 
@@ -657,10 +693,18 @@ func policyStatements(hcl string) string {
 }
 
 // The farmer-only policies: exact paths, no wildcards, nothing on another
-// Transit key's sign path or the publisher's KV path. The one
-// exception is the tenantbox policy's per-tenant path, whose last
-// segment is the tenant ID: a single "+" (exactly one segment), never
-// "*", and only there.
+// Transit key's sign path or the publisher's KV path. The exceptions:
+//   - the tenantbox policy's per-tenant path, whose last segment is the
+//     tenant ID: a single "+" (exactly one segment), never "*";
+//   - imas-farmer-natssign's per-tenant Transit keys (P21 slice 1; owner
+//     choice of 2026-10-12 replacing the glob-plus-deny form of decision
+//     2026-10-11 (2), which OpenBao can't express): a single-segment
+//     keys/+ (update, read) and keys/+/soft-delete (delete), exact
+//     soft-delete denies on the platform and gateway keys, and the one
+//     "*" glob sign/nats-tsign-*. No other wildcard.
+//
+// The P21 policies that are files (imas-nats-sys-signer, the ephemeral
+// imas-nats-bootstrap) are exact paths with no wildcard at all.
 func TestFarmerPoliciesAreExact(t *testing.T) {
 	cm := find(t, mustRender(t, "--set", "openbaoBootstrap.farmerbus.enabled=true",
 		"--set", "openbaoBootstrap.farmerbus.serviceAccountName=imas-dmz-nats-bus"), "ConfigMap", "t-farmer-openbao-policies")
@@ -677,6 +721,36 @@ func TestFarmerPoliciesAreExact(t *testing.T) {
 		},
 		"imas-farmer-certs.hcl":    {`path "pki/issue/imas-farmer"`},
 		"imas-farmerbus-certs.hcl": {`path "pki/issue/imas-farmerbus"`},
+		"imas-farmer-natssign.hcl": {
+			`path "transit/keys/nats-operator"`,
+			`path "transit/keys/nats-operator-signing"`,
+			`path "transit/keys/nats-sys-account"`,
+			`path "transit/sign/nats-operator-signing"`,
+			`path "transit/sign/nats-sys-account"`,
+			`path "transit/keys/+"`,
+			`path "transit/keys/+/soft-delete"`,
+			`path "transit/keys/nats-operator/soft-delete"`,
+			`path "transit/keys/nats-operator-signing/soft-delete"`,
+			`path "transit/keys/nats-sys-account/soft-delete"`,
+			`path "transit/keys/imas-gateway-jwt/soft-delete"`,
+			`path "transit/sign/nats-tsign-*"`,
+		},
+		"imas-nats-sys-signer.hcl": {
+			`path "transit/keys/nats-operator"`,
+			`path "transit/keys/nats-operator-signing"`,
+			`path "transit/keys/nats-sys-account"`,
+			`path "transit/sign/nats-sys-account"`,
+		},
+		"imas-nats-bootstrap.hcl": {
+			`path "transit/keys/nats-operator"`,
+			`path "transit/keys/nats-operator-signing"`,
+			`path "transit/keys/nats-sys-account"`,
+			`path "transit/sign/nats-operator"`,
+			`path "transit/sign/nats-operator-signing"`,
+			`path "transit/sign/nats-sys-account"`,
+			`path "auth/token/revoke-self"`,
+			`path "auth/token/lookup-self"`,
+		},
 	}
 	for name, paths := range want {
 		body, _ := get(cm, "data", name).(string)
@@ -697,10 +771,43 @@ func TestFarmerPoliciesAreExact(t *testing.T) {
 		if name == "imas-farmer-tenantbox.hcl" {
 			stmts = strings.Replace(stmts, `imas/tenant-x25519/tenants/+"`, `imas/tenant-x25519/tenants/TENANT"`, 1)
 		}
+		if name == "imas-farmer-natssign.hcl" {
+			stmts = natssignGlobs(t, stmts)
+		}
 		if strings.ContainsAny(stmts, "*+") {
 			t.Errorf("%s has a wildcard", name)
 		}
 	}
+}
+
+// natssignGlobs checks imas-farmer-natssign's wildcard blocks and the
+// denies that fence them, and returns its statements with the wildcard
+// paths taken out, so the caller's no-wildcard check covers the rest.
+func natssignGlobs(t *testing.T, stmts string) string {
+	t.Helper()
+	blocks := policyBlocks(stmts)
+	want := map[string]string{
+		"transit/keys/+":                                 `["update", "read"]`,
+		"transit/keys/+/soft-delete":                     `["delete"]`,
+		"transit/keys/nats-operator/soft-delete":         `["deny"]`,
+		"transit/keys/nats-operator-signing/soft-delete": `["deny"]`,
+		"transit/keys/nats-sys-account/soft-delete":      `["deny"]`,
+		"transit/keys/imas-gateway-jwt/soft-delete":      `["deny"]`,
+		"transit/sign/nats-tsign-*":                      `["update"]`,
+		// Exact rules outrank keys/+: the platform keys stay read only.
+		"transit/keys/nats-operator":         `["read"]`,
+		"transit/keys/nats-operator-signing": `["read"]`,
+		"transit/keys/nats-sys-account":      `["read"]`,
+	}
+	for path, caps := range want {
+		if got := blocks[`"`+path+`"`]; got != "capabilities = "+caps {
+			t.Errorf("imas-farmer-natssign.hcl %s: %q, want capabilities = %s", path, got, caps)
+		}
+		if strings.ContainsAny(path, "*+") {
+			stmts = strings.Replace(stmts, `path "`+path+`" {`, `path "WILDCARD" {`, 1)
+		}
+	}
+	return stmts
 }
 
 // bootstrapRoles parses the bootstrap script's `role <name> <sa> <ns>
@@ -724,6 +831,15 @@ func bootstrapRolesFor(t *testing.T, docs []obj, jobName string) map[string][]st
 	return roles
 }
 
+// bootstrapScript is the bootstrap Job's whole OpenBao setup: the
+// prepare init container's script (mounts, PKI roles, auth, policies,
+// the handoff token) then the bootstrap container's (roles, clean-up).
+func bootstrapScript(t *testing.T, job obj) string {
+	t.Helper()
+	return get(initContainer(t, job, "prepare"), "args", 0).(string) + "\n" +
+		get(container(t, job, "bootstrap"), "args", 0).(string)
+}
+
 // One role per client, one policy per role, each bound only to the
 // ServiceAccount that client runs as. The publisher's role (the only KV
 // write) is bound to the publisher's ServiceAccount alone, with a short
@@ -735,6 +851,10 @@ func TestBootstrapRoles(t *testing.T) {
 		"imas-farmer-gateway":         {"t-farmer", "imas-core", "imas-farmer-gateway", "20m", "1h"},
 		"imas-farmer-tenantbox":       {"t-farmer", "imas-core", "imas-farmer-tenantbox", "20m", "1h"},
 		"imas-saasapi-cred-publisher": {"imas-saasapi-cred-publisher", "imas-core", "imas-saasapi-cred-publisher", "5m", "5m"},
+		// P21 slice 1: farmer's Transit signer, and the publisher's (SYS
+		// only). No role is ever bound to imas-nats-bootstrap.
+		"imas-farmer-natssign":    {"t-farmer", "imas-core", "imas-farmer-natssign", "20m", "1h"},
+		"imas-natssign-publisher": {"imas-saasapi-cred-publisher", "imas-core", "imas-nats-sys-signer", "5m", "5m"},
 		// On by default since J.4.
 		"imas-controlplane-box-keygen": {"imas-controlplane-box-keygen", "imas-core", "imas-controlplane-box-keygen", "5m", "5m"},
 	}
@@ -804,7 +924,7 @@ func TestFarmerNeverGetsPublisherIdentity(t *testing.T) {
 // seed, and every seed reaches a process as a _SEED_FILE path.
 func TestSeedsAreReferencesOnly(t *testing.T) {
 	docs := mustRender(t, "--set", "externalSecrets.enabled=true")
-	seedKeys := []string{"operator.nk", "operator-signing.nk", "sys-account.nk", "tenant.nk", "tenant-signing.nk", "saasapi-user.nk", "nats-user.nk"}
+	seedKeys := []string{"operator.nk", "operator-signing.nk", "sys-account.nk", "tenant.nk", "tenant-signing.nk", "sys-user.nk", "saasapi-user.nk", "nats-user.nk", "bus-fence-user.nk"}
 	for _, d := range docs {
 		if d["kind"] != "Secret" {
 			continue
@@ -816,12 +936,30 @@ func TestSeedsAreReferencesOnly(t *testing.T) {
 		}
 	}
 	env := envValues(container(t, farmerDeploy(t, docs), "farmer"))
-	for name, key := range map[string]string{
-		"OPERATOR": "operator.nk", "OPERATOR_SIGNING": "operator-signing.nk", "SYS_ACCOUNT": "sys-account.nk",
-		"TENANT": "tenant.nk", "TENANT_SIGNING": "tenant-signing.nk", "SAASAPI_USER": "saasapi-user.nk",
-	} {
+	for name, key := range map[string]string{"SYS_USER": "sys-user.nk", "SAASAPI_USER": "saasapi-user.nk"} {
 		if got := env["IMAS_NATS_"+name+"_SEED_FILE"]; got != "/var/run/secrets/imas/nats/"+key {
 			t.Errorf("IMAS_NATS_%s_SEED_FILE = %q", name, got)
+		}
+	}
+	// P21 slice 1: no trust chain seed anywhere, in any pod.
+	for _, d := range docs {
+		spec, _ := get(d, "spec", "template", "spec").(obj)
+		if spec == nil {
+			continue
+		}
+		for _, list := range []string{"containers", "initContainers"} {
+			cs, _ := spec[list].([]any)
+			for _, c := range cs {
+				ev, _ := c.(obj)["env"].([]any)
+				for _, e := range ev {
+					n := e.(obj)["name"].(string)
+					for _, gone := range []string{"OPERATOR", "OPERATOR_SIGNING", "SYS_ACCOUNT", "TENANT", "TENANT_SIGNING"} {
+						if n == "IMAS_NATS_"+gone+"_SEED_FILE" || n == "IMAS_NATS_"+gone+"_SEED" {
+							t.Errorf("%v %v sets %s", d["kind"], get(d, "metadata", "name"), n)
+						}
+					}
+				}
+			}
 		}
 	}
 	// saasapi mounts only its own seed.
@@ -1929,20 +2067,43 @@ func TestContractWithNatsChart(t *testing.T) {
 			t.Errorf("bus certhosts %v lack %s", hosts, n)
 		}
 	}
-	// Trust chain: same organization, same seed Secret, same NAME -> key
-	// for every seed the bus mounts.
+	// Trust chain (P21 slice 1): same organization; both read the trust
+	// ConfigMap of the same name (the bus's is a copy of the one the
+	// bootstrap writes), at the same IMAS_NATS_TRUST_DIR. They share no
+	// seed: the bus mounts none of farmer's.
 	if busCfg["farmerorganization"] != coreCfg["farmerorganization"] {
 		t.Errorf("farmerorganization: bus %v, core %v", busCfg["farmerorganization"], coreCfg["farmerorganization"])
 	}
 	busVols, farmerVols := byName(podSpec(bus)["volumes"]), byName(podSpec(farmer)["volumes"])
-	if get(busVols["nats-seeds"], "secret", "secretName") != get(farmerVols["nats-seeds"], "secret", "secretName") {
-		t.Error("the charts mount different seed Secrets")
+	bootEnv := envValues(initContainer(t, find(t, core, "Job", "imas-core-farmer-openbao-bootstrap"), "nats-trust"))
+	if cm := get(busVols["nats-trust"], "configMap", "name"); cm == nil || cm != get(farmerVols["nats-trust"], "configMap", "name") || cm != bootEnv["IMAS_NATSBOOT_TRUST_CONFIGMAP"] {
+		t.Errorf("trust ConfigMap: bus %v, farmer %v, bootstrap writes %v", cm, get(farmerVols["nats-trust"], "configMap", "name"), bootEnv["IMAS_NATSBOOT_TRUST_CONFIGMAP"])
 	}
 	busEnv, farmerEnv := envValues(container(t, bus, "farmerbus")), envValues(container(t, farmer, "farmer"))
-	for k, v := range busEnv {
-		if strings.HasSuffix(k, "_SEED_FILE") && farmerEnv[k] != v {
-			t.Errorf("%s: bus %q, farmer %q", k, v, farmerEnv[k])
+	if busEnv["IMAS_NATS_TRUST_DIR"] == "" || busEnv["IMAS_NATS_TRUST_DIR"] != farmerEnv["IMAS_NATS_TRUST_DIR"] {
+		t.Errorf("IMAS_NATS_TRUST_DIR: bus %q, farmer %q", busEnv["IMAS_NATS_TRUST_DIR"], farmerEnv["IMAS_NATS_TRUST_DIR"])
+	}
+	for k := range busEnv {
+		if strings.HasSuffix(k, "_SEED_FILE") {
+			t.Errorf("single-node bus has %s; it holds no seed", k)
 		}
+	}
+	// A clustered bus's fence user: the bootstrap mints its JWT from the
+	// public key set here, and the bus mounts the seed.
+	dmzCl, err := renderAs(t, "imas-dmz", "imas-dmz", filepath.Join(chartDir(t), "..", "nats"),
+		"--set", "bus.replicaCount=3", "--set", "bus.cluster.auth.secretName=r", "--set", "natsSeeds.seeds.BUS_FENCE_USER=bus-fence-user.nk")
+	if err != nil {
+		t.Fatalf("nats chart, clustered: %v", err)
+	}
+	if v := envValues(container(t, find(t, dmzCl, "StatefulSet", "imas-dmz-nats-bus"), "farmerbus"))["IMAS_NATS_BUS_FENCE_USER_SEED_FILE"]; v == "" {
+		t.Error("clustered bus has no fence user seed")
+	}
+	coreFence, err := renderAs(t, "imas-core", "imas-core", strippedChart(t), append(slices.Clone(required), "--set", "natsTrust.busFenceUserPub="+testFenceUserPub)...)
+	if err != nil {
+		t.Fatalf("farmer chart with a fence user: %v", err)
+	}
+	if v := envValues(initContainer(t, find(t, coreFence, "Job", "imas-core-farmer-openbao-bootstrap"), "nats-trust"))["IMAS_NATSBOOT_BUS_FENCE_USER_PUB"]; v != testFenceUserPub {
+		t.Errorf("IMAS_NATSBOOT_BUS_FENCE_USER_PUB = %q", v)
 	}
 	// Network: each side's policy admits the other on the right port.
 	dmzBusNP := find(t, dmz, "NetworkPolicy", "imas-dmz-nats-bus")
@@ -2002,8 +2163,7 @@ func TestContractWithNatsChart(t *testing.T) {
 	if !slices.Equal(br[:3], []string{get(podSpec(bus), "serviceAccountName").(string), "imas-dmz", "imas-farmerbus-certs"}) {
 		t.Errorf("bus login role %s = %v", busEnv["IMAS_CERTS_OPENBAO_K8S_ROLE"], br)
 	}
-	job := find(t, core, "Job", "imas-core-farmer-openbao-bootstrap")
-	script := get(container(t, job, "bootstrap"), "args", 0).(string)
+	script := bootstrapScript(t, find(t, core, "Job", "imas-core-farmer-openbao-bootstrap"))
 	if !strings.Contains(script, busEnv["IMAS_CERTS_OPENBAO_PKI_MOUNT"]+"/roles/"+busEnv["IMAS_CERTS_OPENBAO_ROLE"]) {
 		t.Errorf("bootstrap doesn't create the PKI role %s/%s the bus issues from", busEnv["IMAS_CERTS_OPENBAO_PKI_MOUNT"], busEnv["IMAS_CERTS_OPENBAO_ROLE"])
 	}
@@ -3047,4 +3207,328 @@ func TestBootstrapAdminRequired(t *testing.T) {
 	mustFail(t, "must be true or false", append(slices.Clone(noAdmin), "--set-string", "farmer.bootstrapAdmin.skip=yes")...)
 	// An explicit false is the default: still required.
 	mustFail(t, "are required", append(slices.Clone(noAdmin), "--set", "farmer.bootstrapAdmin.skip=false")...)
+}
+
+// ---------------------------------------------------------------------------
+// P21 slice 1: the Transit signer and the NATS trust (brief §4, §5)
+// ---------------------------------------------------------------------------
+
+func mountsByName(c obj) map[string]obj { return byName(c["volumeMounts"]) }
+
+// The bootstrap Job: prepare (bao) mints the handoff token into a memory
+// volume only it and nats-trust mount; nats-trust runs `farmer
+// bootstrap-nats-trust` with that token file and is the only container
+// with Kubernetes API credentials; bootstrap revokes the handoff token by
+// accessor, deletes the ephemeral policy and, outside dev mode, revokes
+// its own token last.
+func TestBootstrapJobStructure(t *testing.T) {
+	job := find(t, mustRender(t), "Job", "t-farmer-openbao-bootstrap")
+	ps := podSpec(job)
+	if ps["serviceAccountName"] != "t-farmer-openbao-bootstrap" || ps["automountServiceAccountToken"] != false {
+		t.Errorf("job identity: sa %v automount %v", ps["serviceAccountName"], ps["automountServiceAccountToken"])
+	}
+	var names []string
+	for _, c := range ps["initContainers"].([]any) {
+		names = append(names, c.(obj)["name"].(string))
+	}
+	if !slices.Equal(names, []string{"prepare", "nats-trust"}) {
+		t.Fatalf("init containers %v, want [prepare nats-trust]", names)
+	}
+	prep, nt, boot := initContainer(t, job, "prepare"), initContainer(t, job, "nats-trust"), container(t, job, "bootstrap")
+
+	vols := byName(ps["volumes"])
+	for _, v := range []string{"handoff", "accessor"} {
+		if get(vols[v], "emptyDir", "medium") != "Memory" {
+			t.Errorf("volume %s is not memory-backed: %v", v, vols[v])
+		}
+	}
+	for _, c := range []struct {
+		name               string
+		c                  obj
+		handoff, acc, kube bool
+	}{
+		{"prepare", prep, true, true, false},
+		{"nats-trust", nt, true, false, true},
+		{"bootstrap", boot, false, true, false},
+	} {
+		m := mountsByName(c.c)
+		if _, ok := m["handoff"]; ok != c.handoff {
+			t.Errorf("%s mounts handoff: %v, want %v", c.name, ok, c.handoff)
+		}
+		if _, ok := m["accessor"]; ok != c.acc {
+			t.Errorf("%s mounts accessor: %v, want %v", c.name, ok, c.acc)
+		}
+		if _, ok := m["kube-api"]; ok != c.kube {
+			t.Errorf("%s mounts kube-api: %v, want %v", c.name, ok, c.kube)
+		}
+		if get(c.c, "securityContext", "readOnlyRootFilesystem") != true {
+			t.Errorf("%s root filesystem is writable", c.name)
+		}
+	}
+	if get(mountsByName(nt)["kube-api"], "mountPath") != "/var/run/secrets/kubernetes.io/serviceaccount" {
+		t.Errorf("kube-api mount: %v", mountsByName(nt)["kube-api"])
+	}
+	srcs := get(vols["kube-api"], "projected", "sources").([]any)
+	if len(srcs) != 3 || get(srcs[0], "serviceAccountToken", "path") != "token" || get(srcs[1], "configMap", "name") != "kube-root-ca.crt" ||
+		get(srcs[2], "downwardAPI", "items", 0, "path") != "namespace" {
+		t.Errorf("kube-api volume: %v", srcs)
+	}
+
+	if !slices.Equal(anyStrings(nt["args"]), []string{"bootstrap-nats-trust"}) || !strings.HasPrefix(nt["image"].(string), "ghcr.io/yogzblr/imas-farmer:") {
+		t.Errorf("nats-trust runs %v %v", nt["image"], nt["args"])
+	}
+	env := envValues(nt)
+	for k, v := range map[string]string{
+		"IMAS_NATSBOOT_OPENBAO_AUTH_METHOD":   "token",
+		"IMAS_NATSBOOT_OPENBAO_TOKEN_FILE":    "/handoff/token",
+		"IMAS_NATSBOOT_OPENBAO_TRANSIT_MOUNT": "transit",
+		"IMAS_NATSBOOT_TRUST_CONFIGMAP":       "imas-nats-trust",
+	} {
+		if env[k] != v {
+			t.Errorf("nats-trust %s = %q, want %q", k, env[k], v)
+		}
+	}
+	for k := range env {
+		if k == "IMAS_NATSBOOT_OPENBAO_TOKEN" || k == "BAO_TOKEN" || strings.HasPrefix(k, "IMAS_NATSSIGN_") {
+			t.Errorf("nats-trust has %s; its only credential is the handoff file", k)
+		}
+	}
+	for _, c := range []obj{prep, boot} {
+		e := envMap(c)["BAO_TOKEN"]
+		if get(e, "valueFrom", "secretKeyRef", "optional") != true {
+			t.Errorf("%s BAO_TOKEN reference is not optional: %v", c["name"], e)
+		}
+	}
+
+	ps1 := get(prep, "args", 0).(string)
+	for _, want := range []string{
+		"bao token create -orphan -no-default-policy -policy=imas-nats-bootstrap",
+		"-ttl=10m -explicit-max-ttl=10m -renewable=false -field=token > /handoff/token",
+		"bao token lookup -field=accessor > /accessor/accessor",
+		`bao policy write "$(basename "$f" .hcl)" "$f"`,
+	} {
+		if !strings.Contains(ps1, want) {
+			t.Errorf("prepare script lacks %q", want)
+		}
+	}
+	bs := get(boot, "args", 0).(string)
+	revokeAcc := strings.Index(bs, `bao token revoke -accessor "$accessor"`)
+	delPolicy := strings.Index(bs, "bao policy delete imas-nats-bootstrap")
+	if revokeAcc < 0 || delPolicy < revokeAcc {
+		t.Errorf("bootstrap script must revoke the handoff token, then delete imas-nats-bootstrap:\n%s", bs)
+	}
+	// Dev mode: the root token in values is never revoked.
+	if strings.Contains(bs, "bao token revoke -self") {
+		t.Error("dev-mode bootstrap revokes the dev root token")
+	}
+
+	// Outside dev mode (an operator-supplied root token): revoked last,
+	// unless revokeToken is off.
+	prod := []string{"--set", "openbao.server.dev.enabled=false", "--set", "openbaoBootstrap.tokenSecretName=imas-openbao-root"}
+	bs = get(container(t, find(t, mustRender(t, prod...), "Job", "t-farmer-openbao-bootstrap"), "bootstrap"), "args", 0).(string)
+	if i := strings.Index(bs, "bao token revoke -self"); i < 0 || i < strings.Index(bs, "bao policy delete imas-nats-bootstrap") {
+		t.Errorf("bootstrap doesn't revoke its own token last:\n%s", bs)
+	}
+	bs = get(container(t, find(t, mustRender(t, append(prod, "--set", "openbaoBootstrap.revokeToken=false")...), "Job", "t-farmer-openbao-bootstrap"), "bootstrap"), "args", 0).(string)
+	if strings.Contains(bs, "bao token revoke -self") {
+		t.Error("revokeToken=false still revokes")
+	}
+
+	// The fence user and the KV copy reach nats-trust only when set.
+	nt = initContainer(t, find(t, mustRender(t, "--set", "natsTrust.busFenceUserPub="+testFenceUserPub, "--set", "natsTrust.kvCopy.enabled=true"), "Job", "t-farmer-openbao-bootstrap"), "nats-trust")
+	if env := envValues(nt); env["IMAS_NATSBOOT_BUS_FENCE_USER_PUB"] != testFenceUserPub || env["IMAS_NATSBOOT_KV_COPY"] != "true" {
+		t.Errorf("nats-trust env with fence user and KV copy: %v", env)
+	}
+	if _, ok := envValues(initContainer(t, job, "nats-trust"))["IMAS_NATSBOOT_KV_COPY"]; ok {
+		t.Error("KV copy on by default")
+	}
+}
+
+func anyStrings(v any) []string {
+	var out []string
+	l, _ := v.([]any)
+	for _, s := range l {
+		out = append(out, fmt.Sprint(s))
+	}
+	return out
+}
+
+// The bootstrap Job's Kubernetes identity: configmaps create, and
+// get/update/patch on the trust ConfigMap only; nothing else, no cluster
+// scope, and no other workload bound to it.
+func TestNatsTrustRBAC(t *testing.T) {
+	docs := mustRender(t, "--set", "natsTrust.configMapName=core-trust")
+	sa := find(t, docs, "ServiceAccount", "t-farmer-openbao-bootstrap")
+	if sa["automountServiceAccountToken"] != false {
+		t.Error("bootstrap ServiceAccount automounts its token")
+	}
+	role := find(t, docs, "Role", "t-farmer-openbao-bootstrap")
+	want := `- apiGroups:
+    - ""
+  resources:
+    - configmaps
+  verbs:
+    - create
+- apiGroups:
+    - ""
+  resourceNames:
+    - core-trust
+  resources:
+    - configmaps
+  verbs:
+    - get
+    - update
+    - patch
+`
+	if got := yamlString(t, role["rules"]); got != want {
+		t.Errorf("Role rules:\n%s\nwant:\n%s", got, want)
+	}
+	rb := find(t, docs, "RoleBinding", "t-farmer-openbao-bootstrap")
+	if get(rb, "roleRef", "name") != "t-farmer-openbao-bootstrap" || len(get(rb, "subjects").([]any)) != 1 ||
+		get(rb, "subjects", 0, "name") != "t-farmer-openbao-bootstrap" || get(rb, "subjects", 0, "namespace") != "imas-core" {
+		t.Errorf("RoleBinding: %v", rb)
+	}
+	for _, d := range docs {
+		if d["kind"] == "ClusterRole" || d["kind"] == "ClusterRoleBinding" {
+			t.Errorf("chart renders %s %v", d["kind"], get(d, "metadata", "name"))
+		}
+		if d["kind"] == "Role" && get(d, "metadata", "name") != "t-farmer-openbao-bootstrap" {
+			t.Errorf("unexpected Role %v", get(d, "metadata", "name"))
+		}
+	}
+	// No bootstrap, no identity.
+	off := mustRender(t, "--set", "openbaoBootstrap.enabled=false")
+	if has(off, "Role", "t-farmer-openbao-bootstrap") || has(off, "ServiceAccount", "t-farmer-openbao-bootstrap") {
+		t.Error("bootstrap RBAC rendered with openbaoBootstrap.enabled=false")
+	}
+}
+
+// farmer and the publish Job mount the trust ConfigMap read-only at
+// IMAS_NATS_TRUST_DIR; saasapi never does.
+func TestNatsTrustMounts(t *testing.T) {
+	docs := mustRender(t, "--set", "natsTrust.configMapName=core-trust")
+	for _, w := range []struct {
+		kind, name, container string
+	}{
+		{"Deployment", "t-farmer", "farmer"},
+		{"Job", "t-farmer-saasapi-credential-publish", "publish"},
+	} {
+		d := find(t, docs, w.kind, w.name)
+		c := container(t, d, w.container)
+		if envValues(c)["IMAS_NATS_TRUST_DIR"] != "/var/run/imas/nats-trust" {
+			t.Errorf("%s IMAS_NATS_TRUST_DIR = %q", w.name, envValues(c)["IMAS_NATS_TRUST_DIR"])
+		}
+		m := mountsByName(c)["nats-trust"]
+		if get(m, "mountPath") != "/var/run/imas/nats-trust" || get(m, "readOnly") != true {
+			t.Errorf("%s trust mount: %v", w.name, m)
+		}
+		v := byName(podSpec(d)["volumes"])["nats-trust"]
+		if get(v, "configMap", "name") != "core-trust" || get(v, "configMap", "optional") != nil {
+			t.Errorf("%s trust volume: %v", w.name, v)
+		}
+	}
+	for _, v := range byName(podSpec(find(t, docs, "Deployment", "t-farmer-saasapi"))["volumes"]) {
+		if get(v, "configMap", "name") == "core-trust" {
+			t.Error("saasapi mounts the NATS trust")
+		}
+	}
+}
+
+// IMAS_NATSSIGN_*: farmer signs as imas-farmer-natssign, the publish Job
+// as imas-natssign-publisher; saasapi has no signer. With token auth each
+// reads its own key of its Secret.
+func TestNatssignEnv(t *testing.T) {
+	docs := mustRender(t, "--set", "farmer.openbao.natsSign.timeout=20s", "--set", "farmer.openbao.natsSign.workers=8")
+	farmer := envValues(container(t, farmerDeploy(t, docs), "farmer"))
+	pub := envValues(container(t, find(t, docs, "Job", "t-farmer-saasapi-credential-publish"), "publish"))
+	for _, c := range []struct {
+		name string
+		env  map[string]string
+		role string
+	}{{"farmer", farmer, "imas-farmer-natssign"}, {"publish", pub, "imas-natssign-publisher"}} {
+		for k, v := range map[string]string{
+			"IMAS_NATSSIGN_OPENBAO_ADDR":          "http://t-openbao.imas-core.svc.cluster.local:8200",
+			"IMAS_NATSSIGN_OPENBAO_AUTH_METHOD":   "kubernetes",
+			"IMAS_NATSSIGN_OPENBAO_K8S_ROLE":      c.role,
+			"IMAS_NATSSIGN_OPENBAO_K8S_MOUNT":     "kubernetes",
+			"IMAS_NATSSIGN_OPENBAO_K8S_JWT_PATH":  "/var/run/secrets/openbao-auth/token",
+			"IMAS_NATSSIGN_OPENBAO_TRANSIT_MOUNT": "transit",
+			"IMAS_NATSSIGN_TIMEOUT":               "20s",
+			"IMAS_NATSSIGN_BATCH_MAX":             "64",
+			"IMAS_NATSSIGN_WORKERS":               "8",
+		} {
+			if c.env[k] != v {
+				t.Errorf("%s %s = %q, want %q", c.name, k, c.env[k], v)
+			}
+		}
+	}
+	for k := range envValues(container(t, find(t, docs, "Deployment", "t-farmer-saasapi"), "saasapi")) {
+		if strings.HasPrefix(k, "IMAS_NATSSIGN_") {
+			t.Errorf("saasapi has %s", k)
+		}
+	}
+
+	docs = mustRender(t, "-f", ciValues(t, "token-auth-values.yaml"))
+	fe := envMap(container(t, farmerDeploy(t, docs), "farmer"))["IMAS_NATSSIGN_OPENBAO_TOKEN"]
+	pe := envMap(container(t, find(t, docs, "Job", "t-farmer-saasapi-credential-publish"), "publish"))["IMAS_NATSSIGN_OPENBAO_TOKEN"]
+	if get(fe, "valueFrom", "secretKeyRef", "key") != "natssign-token" || get(pe, "valueFrom", "secretKeyRef", "key") != "natssign-publisher-token" {
+		t.Errorf("token auth: farmer %v, publisher %v", fe, pe)
+	}
+}
+
+// The bootstrap Job may reach the Kubernetes API (nats-trust writes the
+// trust ConfigMap) on networkPolicy.external.kubeApi's ports, at its
+// CIDRs when set; no other workload gets that rule.
+func TestKubeApiEgress(t *testing.T) {
+	np := find(t, mustRender(t), "NetworkPolicy", "t-farmer-openbao-bootstrap")
+	if got := egressPorts(np); !slices.Contains(got, 443) || !slices.Contains(got, 6443) {
+		t.Errorf("bootstrap egress ports %v lack the Kubernetes API's 443 and 6443", got)
+	}
+	np = find(t, mustRender(t, "--set", "networkPolicy.external.kubeApi.cidrs[0]=10.0.0.1/32", "--set", "networkPolicy.external.kubeApi.ports[0]=6443"), "NetworkPolicy", "t-farmer-openbao-bootstrap")
+	found := false
+	for _, r := range get(np, "spec", "egress").([]any) {
+		if get(r, "to", 0, "ipBlock", "cidr") == "10.0.0.1/32" {
+			found = get(r, "ports", 0, "port") == 6443 && len(get(r, "ports").([]any)) == 1
+		}
+	}
+	if !found {
+		t.Errorf("kubeApi egress rule not narrowed: %v", get(np, "spec", "egress"))
+	}
+	for _, name := range []string{"t-farmer", "t-farmer-saasapi", "imas-saasapi-cred-publisher", "imas-controlplane-box-keygen"} {
+		if slices.Contains(egressPorts(find(t, mustRender(t), "NetworkPolicy", name)), 6443) {
+			t.Errorf("%s may reach the Kubernetes API", name)
+		}
+	}
+}
+
+// The NATS policy files reach the ConfigMap verbatim; the bootstrap
+// policy gains its one KV grant only with natsTrust.kvCopy.enabled.
+func TestNatsPoliciesFromFiles(t *testing.T) {
+	cm := find(t, mustRender(t), "ConfigMap", "t-farmer-openbao-policies")
+	for _, name := range []string{"imas-farmer-natssign.hcl", "imas-nats-sys-signer.hcl", "imas-nats-bootstrap.hcl"} {
+		file, err := os.ReadFile(filepath.Join(chartDir(t), "files", "openbao-policies", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSuffix(get(cm, "data", name).(string), "\n") != strings.TrimSuffix(string(file), "\n") {
+			t.Errorf("ConfigMap %s differs from the file", name)
+		}
+	}
+	boot := get(find(t, mustRender(t, "--set", "natsTrust.kvCopy.enabled=true"), "ConfigMap", "t-farmer-openbao-policies"), "data", "imas-nats-bootstrap.hcl").(string)
+	if got := policyBlocks(boot)[`"secret/data/platform/imas/nats-trust"`]; got != `capabilities = ["create", "update", "read"]` {
+		t.Errorf("kvCopy grant: %q", got)
+	}
+}
+
+// A non-default gateway key name on the transit mount gets the same
+// soft-delete deny in imas-farmer-natssign as imas-gateway-jwt.
+func TestNatssignDeniesGatewayRetire(t *testing.T) {
+	body := get(find(t, mustRender(t, "--set", "farmer.openbao.gateway.keyName=gw2"), "ConfigMap", "t-farmer-openbao-policies"), "data", "imas-farmer-natssign.hcl").(string)
+	if got := policyBlocks(body)[`"transit/keys/gw2/soft-delete"`]; got != `capabilities = ["deny"]` {
+		t.Errorf("gw2 soft-delete: %q", got)
+	}
+	body = get(find(t, mustRender(t), "ConfigMap", "t-farmer-openbao-policies"), "data", "imas-farmer-natssign.hcl").(string)
+	if strings.Count(body, "imas-gateway-jwt/soft-delete") != 1 {
+		t.Error("default gateway key's deny appended twice")
+	}
 }

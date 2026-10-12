@@ -19,7 +19,12 @@ silently editing a reviewed policy.
 {{- $ob := .Values.farmer.openbao -}}
 {{- $pki := .Values.tls.openbao.pkiMount -}}
 {{- $needPKI := or (eq .Values.tls.mode "openbao") $bs.farmerbus.enabled -}}
-{{- $kvMounts := uniq (list $ob.tenantBox.kvMount $p.kvMount) -}}
+{{- $kvMounts := list $ob.tenantBox.kvMount $p.kvMount -}}
+{{- if .Values.natsTrust.kvCopy.enabled -}}
+{{- $kvMounts = append $kvMounts "secret" -}}
+{{- end -}}
+{{- $kvMounts = uniq $kvMounts -}}
+{{- $jobName := printf "%s-openbao-bootstrap" (include "imas-farmer.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- $busNames := $bs.farmerbus.allowedNames -}}
 {{- if not $busNames -}}
 {{- $svc := .Values.bus.serviceName -}}
@@ -39,7 +44,7 @@ silently editing a reviewed policy.
 {{- end -}}
 {{- if not $bs.tokenSecretName }}
 # The dev server's root token, which is already in values
-# (openbao.server.dev.devRootToken). Eval only.
+# (openbao.server.dev.devRootToken). Eval only; never revoked.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -56,7 +61,7 @@ stringData:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ printf "%s-openbao-bootstrap" (include "imas-farmer.fullname" .) | trunc 63 | trimSuffix "-" }}
+  name: {{ $jobName }}
   namespace: {{ $ns }}
   labels:
     {{- include "imas-farmer.labels" . | nindent 4 }}
@@ -81,28 +86,51 @@ spec:
         app.kubernetes.io/component: openbao-bootstrap
     spec:
       restartPolicy: Never
+      # Its own ServiceAccount (nats-trust-rbac.yaml): configmaps create,
+      # and get/update/patch on the trust ConfigMap only. Its token is
+      # mounted in the nats-trust container alone (kube-api volume).
+      serviceAccountName: {{ $jobName }}
       automountServiceAccountToken: false
       enableServiceLinks: false
+      {{- with .Values.farmer.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
         seccompProfile: { type: RuntimeDefault }
-      containers:
-        - name: bootstrap
+      initContainers:
+        # 1. OpenBao setup with the bootstrap token, then the handoff
+        #    token for nats-trust.
+        - name: prepare
           image: {{ include "imas-farmer.image" (dict "image" .Values.openbaoTools.image "appVersion" "") | quote }}
           imagePullPolicy: {{ .Values.openbaoTools.image.pullPolicy }}
           command: ["/bin/sh", "-ec"]
           args:
             - |
+              # Without the bootstrap token Secret (optional: owner decision
+              # a, no standing admin) nothing is configured, and nats-trust
+              # only checks that the trust ConfigMap is complete.
+              if [ -z "${BAO_TOKEN:-}" ]; then
+                echo "no bootstrap token: OpenBao is not configured by this run; nats-trust checks the trust ConfigMap"
+                exit 0
+              fi
+              umask 077
               # Idempotent: every step checks before it creates, so each
-              # upgrade re-applies policies and roles. Never writes NATS
-              # seeds: those are imported by ops, never generated.
+              # run re-applies policies and roles. Never writes NATS
+              # seeds: there are none to write.
               until bao status >/dev/null 2>&1; do echo "waiting for OpenBao at $BAO_ADDR"; sleep 3; done
+              if ! bao token lookup >/dev/null 2>&1; then
+                echo "the bootstrap token in Secret {{ default $jobName $bs.tokenSecretName }} is not valid (revoked by an earlier run?): delete the Secret, or put a fresh root token from the recovery quorum in it (README.md, \"OpenBao bootstrap token\")" >&2
+                exit 1
+              fi
 
               has_mount() { bao secrets list | grep -q "^$1/ "; }
               has_mount transit || bao secrets enable -path=transit transit
-              # Gateway JWT key (farmer signs).
+              # Gateway JWT key (farmer signs). The NATS keys are created by
+              # nats-trust (platform) and farmer (tenants), hardened.
               bao read transit/keys/{{ $ob.gateway.keyName }} >/dev/null 2>&1 \
                 || bao write -f transit/keys/{{ $ob.gateway.keyName }} type=ed25519
               {{- range $kvMounts }}
@@ -116,6 +144,118 @@ spec:
                 bao write -field=certificate {{ $pki }}/root/generate/internal \
                   common_name="imas eval root CA ({{ .Release.Name }})" ttl=87600h >/dev/null
               fi
+              {{- end }}
+
+              bao auth list | grep -q "^{{ .Values.openbaoClient.k8sMount }}/ " \
+                || bao auth enable -path={{ .Values.openbaoClient.k8sMount }} kubernetes
+              bao write auth/{{ .Values.openbaoClient.k8sMount }}/config kubernetes_host=https://kubernetes.default.svc
+
+              # Every policy, the ephemeral imas-nats-bootstrap included
+              # (the main container deletes it).
+              for f in /policies/*.hcl; do
+                bao policy write "$(basename "$f" .hcl)" "$f"
+              done
+
+              # The handoff token: orphan, no default policy, 10 minutes,
+              # not renewable, imas-nats-bootstrap only. Its accessor goes
+              # to a volume nats-trust never mounts, for the main container
+              # to revoke it by.
+              bao token create -orphan -no-default-policy -policy=imas-nats-bootstrap \
+                -ttl=10m -explicit-max-ttl=10m -renewable=false -field=token > /handoff/token
+              BAO_TOKEN="$(cat /handoff/token)" bao token lookup -field=accessor > /accessor/accessor
+              echo "handoff token minted for nats-trust"
+          env:
+            {{- include "imas-farmer.bootstrapBaoEnv" . | nindent 12 }}
+          {{- with $bs.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: policies
+              mountPath: /policies
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: handoff
+              mountPath: /handoff
+            - name: accessor
+              mountPath: /accessor
+            {{- if .Values.openbaoClient.caConfigMap }}
+            - name: openbao-ca
+              mountPath: /var/run/secrets/openbao-ca
+              readOnly: true
+            {{- end }}
+        # 2. `farmer bootstrap-nats-trust` (internal/natsbootstrap): the
+        #    three platform Transit keys and the trust ConfigMap, as the
+        #    handoff token, which it revokes and removes. Without the
+        #    token file it only checks the ConfigMap.
+        - name: nats-trust
+          # The same image, same tag, as the farmer Deployment.
+          image: {{ include "imas-farmer.farmer.image" . | quote }}
+          imagePullPolicy: {{ .Values.farmer.image.pullPolicy }}
+          args: ["bootstrap-nats-trust"] # ENTRYPOINT is /farmer
+          env:
+            - name: IMAS_NATSBOOT_OPENBAO_ADDR
+              value: {{ include "imas-farmer.openbaoAddr" . | quote }}
+            - name: IMAS_NATSBOOT_OPENBAO_AUTH_METHOD
+              value: token
+            - name: IMAS_NATSBOOT_OPENBAO_TOKEN_FILE
+              value: /handoff/token
+            {{- if .Values.openbaoClient.caConfigMap }}
+            - name: IMAS_NATSBOOT_OPENBAO_CACERT
+              value: /var/run/secrets/openbao-ca/{{ .Values.openbaoClient.caKey }}
+            {{- end }}
+            - name: IMAS_NATSBOOT_OPENBAO_TRANSIT_MOUNT
+              value: {{ $ob.natsSign.transitMount | quote }}
+            - name: IMAS_NATSBOOT_TRUST_CONFIGMAP
+              value: {{ .Values.natsTrust.configMapName | quote }}
+            {{- with .Values.natsTrust.busFenceUserPub }}
+            - name: IMAS_NATSBOOT_BUS_FENCE_USER_PUB
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.natsTrust.kvCopy.enabled }}
+            - name: IMAS_NATSBOOT_KV_COPY
+              value: "true"
+            {{- end }}
+          {{- with $bs.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: handoff
+              mountPath: /handoff
+            - name: kube-api
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+            {{- if .Values.openbaoClient.caConfigMap }}
+            - name: openbao-ca
+              mountPath: /var/run/secrets/openbao-ca
+              readOnly: true
+            {{- end }}
+      containers:
+        # 3. Roles, then clean-up: the handoff token, the ephemeral
+        #    policy, and last this Job's own token.
+        - name: bootstrap
+          image: {{ include "imas-farmer.image" (dict "image" .Values.openbaoTools.image "appVersion" "") | quote }}
+          imagePullPolicy: {{ .Values.openbaoTools.image.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              if [ -z "${BAO_TOKEN:-}" ]; then
+                echo "no bootstrap token: roles not written; the trust ConfigMap was checked"
+                exit 0
+              fi
+              until bao status >/dev/null 2>&1; do echo "waiting for OpenBao at $BAO_ADDR"; sleep 3; done
+
+              {{- if $needPKI }}
               {{- if eq .Values.tls.mode "openbao" }}
               # farmer's API certificate: its own Service names only.
               bao write {{ $pki }}/roles/{{ .Values.tls.openbao.role }} \
@@ -132,16 +272,8 @@ spec:
               {{- end }}
               {{- end }}
 
-              bao auth list | grep -q "^{{ .Values.openbaoClient.k8sMount }}/ " \
-                || bao auth enable -path={{ .Values.openbaoClient.k8sMount }} kubernetes
-              bao write auth/{{ .Values.openbaoClient.k8sMount }}/config kubernetes_host=https://kubernetes.default.svc
-
-              for f in /policies/*.hcl; do
-                bao policy write "$(basename "$f" .hcl)" "$f"
-              done
-
               # One role per client, one policy per role, no "default"
-              # policy. Never bind the publisher's role to anything else.
+              # policy. Never bind the publisher's roles to anything else.
               role() {
                 bao write "auth/{{ .Values.openbaoClient.k8sMount }}/role/$1" \
                   bound_service_account_names="$2" bound_service_account_namespaces="$3" \
@@ -153,9 +285,13 @@ spec:
               {{- end }}
               role {{ $ob.gateway.k8sRole }} {{ $farmerSA }} {{ $ns }} imas-farmer-gateway {{ $bs.tokenTTL }} {{ $bs.tokenMaxTTL }}
               role {{ $ob.tenantBox.k8sRole }} {{ $farmerSA }} {{ $ns }} imas-farmer-tenantbox {{ $bs.tokenTTL }} {{ $bs.tokenMaxTTL }}
+              # farmer's NATS signer: never the operator identity key.
+              role {{ $ob.natsSign.k8sRole }} {{ $farmerSA }} {{ $ns }} imas-farmer-natssign {{ $bs.tokenTTL }} {{ $bs.tokenMaxTTL }}
               {{- if $p.enabled }}
               # deploy/farmer/README.md: a run makes two KV calls; 5m is plenty.
               role {{ $p.k8sRole }} {{ $p.serviceAccountName }} {{ $ns }} imas-saasapi-cred-publisher 5m 5m
+              # Its NATS signer: sign with the SYS account key only.
+              role {{ $p.natsSign.k8sRole }} {{ $p.serviceAccountName }} {{ $ns }} imas-nats-sys-signer 5m 5m
               {{- end }}
               {{- if .Values.controlPlaneBoxKeys.enabled }}
               # The control-plane keygen Job: a few KV calls per run.
@@ -164,21 +300,27 @@ spec:
               {{- if $bs.farmerbus.enabled }}
               role imas-farmerbus {{ $bs.farmerbus.serviceAccountName }} {{ .Values.bus.namespace }} imas-farmerbus-certs {{ $bs.tokenTTL }} {{ $bs.tokenMaxTTL }}
               {{- end }}
+
+              # The handoff token, should nats-trust not have revoked it.
+              # A token that is already gone has no accessor to look up.
+              if [ -s /accessor/accessor ]; then
+                accessor="$(cat /accessor/accessor)"
+                if bao token lookup -accessor "$accessor" >/dev/null 2>&1; then
+                  bao token revoke -accessor "$accessor"
+                fi
+              fi
+              # Nothing may sign with the operator identity key from here on.
+              bao policy delete imas-nats-bootstrap
               echo "OpenBao bootstrap complete"
+              {{- if include "imas-farmer.bootstrap.revokesToken" . }}
+              # Last: this Job's own token (owner decision a, no standing
+              # admin). A later policy or role change needs a fresh root
+              # token from the recovery quorum.
+              bao token revoke -self
+              echo "bootstrap token revoked"
+              {{- end }}
           env:
-            - name: BAO_ADDR
-              value: {{ include "imas-farmer.openbaoAddr" . | quote }}
-            - name: BAO_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ default (printf "%s-openbao-bootstrap" (include "imas-farmer.fullname" .)) $bs.tokenSecretName }}
-                  key: {{ $bs.tokenSecretKey }}
-            {{- if .Values.openbaoClient.caConfigMap }}
-            - name: BAO_CACERT
-              value: /var/run/secrets/openbao-ca/{{ .Values.openbaoClient.caKey }}
-            {{- end }}
-            - name: HOME
-              value: /tmp
+            {{- include "imas-farmer.bootstrapBaoEnv" . | nindent 12 }}
           {{- with $bs.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -188,11 +330,11 @@ spec:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
           volumeMounts:
-            - name: policies
-              mountPath: /policies
-              readOnly: true
             - name: tmp
               mountPath: /tmp
+            - name: accessor
+              mountPath: /accessor
+              readOnly: true
             {{- if .Values.openbaoClient.caConfigMap }}
             - name: openbao-ca
               mountPath: /var/run/secrets/openbao-ca
@@ -206,6 +348,32 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 1Mi
+        # The handoff token: memory only, prepare and nats-trust only.
+        - name: handoff
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        # Its accessor: prepare and bootstrap only.
+        - name: accessor
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        # The Job's Kubernetes API credentials, for nats-trust only:
+        # what automountServiceAccountToken would mount, in one container.
+        - name: kube-api
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - { key: ca.crt, path: ca.crt }
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef: { fieldPath: metadata.namespace }
         {{- if .Values.openbaoClient.caConfigMap }}
         - name: openbao-ca
           configMap:
@@ -213,7 +381,8 @@ spec:
         {{- end }}
 {{- if .Values.networkPolicy.enabled }}
 ---
-# openbao-bootstrap talks to OpenBao and DNS only.
+# openbao-bootstrap talks to OpenBao, DNS and (nats-trust, for the trust
+# ConfigMap) the Kubernetes API only.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -231,6 +400,7 @@ spec:
   ingress: []
   egress:
     {{- include "imas-farmer.openbaoEgress" . | nindent 4 }}
+    {{- include "imas-farmer.kubeApiEgress" . | nindent 4 }}
     {{- include "imas-farmer.dnsEgress" . | nindent 4 }}
 {{- end }}
 {{- end }}
