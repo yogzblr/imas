@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	jwt "github.com/nats-io/jwt/v2"
-	"github.com/nats-io/nkeys"
 
 	"github.com/yogzblr/imas/internal/pki"
 )
@@ -41,21 +40,6 @@ func newTestTrust(t *testing.T) *trust {
 		return nil
 	})
 	return tr
-}
-
-// writeSeed writes kp's seed to a file in dir, as the chart's Secret
-// mounts do, for loadTrust.
-func writeSeed(t *testing.T, dir, name string, kp nkeys.KeyPair) string {
-	t.Helper()
-	seed, err := kp.Seed()
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := filepath.Join(dir, name)
-	if err := os.WriteFile(p, seed, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return p
 }
 
 // TestTenantAccountShape checks the Account is signed and delegates the
@@ -135,46 +119,5 @@ func TestSproutJWTShape(t *testing.T) {
 		if !strings.HasPrefix(subj, "imas.sprouts."+id+".") {
 			t.Errorf("subscription %s is outside the sprout's grant", subj)
 		}
-	}
-}
-
-func TestLockedOutJWTOutranksLive(t *testing.T) {
-	tr := newTestTrust(t)
-	tf, err := tr.newTenant("loadtest-lock")
-	if err != nil {
-		t.Fatal(err)
-	}
-	locked, err := tf.lockedOutJWT(tr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ac, err := jwt.DecodeAccountClaims(locked)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ac.IssuedAt <= tf.issuedAt {
-		t.Errorf("locked-out iat %d not after live %d", ac.IssuedAt, tf.issuedAt)
-	}
-	if ac.Limits.Conn != 0 || ac.Limits.LeafNodeConn != 0 {
-		t.Errorf("limits %+v", ac.Limits)
-	}
-	if _, ok := ac.Revocations[jwt.All]; !ok {
-		t.Error("no revocation of every user")
-	}
-}
-
-func TestLoadTrust(t *testing.T) {
-	dir := t.TempDir()
-	op, _ := nkeys.CreateOperator()
-	sys, _ := nkeys.CreateAccount()
-	opFile := writeSeed(t, dir, "operator_signing.nk", op)
-	sysFile := writeSeed(t, dir, "sys_account.nk", sys)
-	if _, err := loadTrust(opFile, sysFile); err != nil {
-		t.Fatalf("loadTrust: %v", err)
-	} else if _, err := loadTrust(sysFile, opFile); err == nil {
-		t.Error("loadTrust accepted the seeds swapped")
-	}
-	if _, err := loadTrust(filepath.Join(dir, "missing"), filepath.Join(dir, "missing")); err == nil {
-		t.Error("loadTrust accepted missing files")
 	}
 }

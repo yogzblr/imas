@@ -7,7 +7,7 @@ for:
 | | What it reports | For |
 |---|---|---|
 | (a) | Connect rate, peak connects per second, failed attempts by reason, sprouts that never connected, connections dropped while holding | Requirement 1 (1M endpoints), 7 (horizontal scale) |
-| (b) | `test.ping` round trip: p50, p95, p99, max, timeouts, compared with 300 ms | Requirement 10 |
+| (b) | Round trip: p50, p95, p99, max, timeouts, compared with 300 ms. `test.ping` on a local bus; against a deployed bus, the bus round trip from the sprouts' own connections ([why](#the-latency-probe-against-a-deployed-bus)) | Requirement 10 |
 | (c) | A bus node restarted mid-run (the whole bus when there is one node): time to full reconnect, peak reconnects per second, peak reconnect attempts per second | Phase 2 exit criterion of `docs/design/imas-1m-scale-plan.md` |
 | (d) | Bus memory, CPU, connections, subscriptions and slow consumers per node; CPU and RSS of local processes (the generator, the local bus, core if you name its PID) | Sizing; whether the generator or the bus was the bottleneck |
 
@@ -32,17 +32,22 @@ The exit status is 0 when every check passed, 1 when a check failed or the
 run was cut short, and 2 for a usage error. The text report goes to stdout,
 progress to stderr.
 
-## How the simulated sprouts authenticate: the fixture path
+## How the simulated sprouts authenticate
 
-Real enrollment (`POST /v1/enroll`) costs a join-token check, a PXC write,
-an Account re-sign and push, and a gateway JWT from OpenBao transit per
-sprout. That is the enrollment path's load, not the bus's, and it is heavy
-above about 10,000 sprouts. So the harness **mints the credentials itself**,
-with the keys the bus's trust hangs from, in the shape `internal/pki` gives
-them. For a local bus those are keys the harness makes and keeps in memory:
-an in-process key store stands in for OpenBao Transit, and the bus's
-public trust directory is minted from it by `pki.BootstrapNATSTrust`, as
-core's bootstrap Job mints it (P21 slice 1; no seed is written):
+Two paths, one per mode. Against a deployed bus (`-servers`) the harness
+holds no trust key and every sprout **enrolls for real**
+([below](#against-a-deployed-bus-the-enrolment-path)). Against the local
+bus it **mints the credentials itself** (the fixture path), because the
+local bus has no farmer to enroll with.
+
+### Against the local bus: the fixture path
+
+The harness mints the credentials with the keys the local bus's trust
+hangs from, in the shape `internal/pki` gives them. They are keys the
+harness makes and keeps in memory: an in-process key store stands in for
+OpenBao Transit, and the bus's public trust directory is minted from it by
+`pki.BootstrapNATSTrust`, as core's bootstrap Job mints it (P21 slice 1;
+no seed is written):
 
 - a **load-test tenant Account**, signed by the operator signing key, with
   its own delegated signing key (as `ensureTenantAccountMaterial` builds a
@@ -58,15 +63,17 @@ core's bootstrap Job mints it (P21 slice 1; no seed is written):
   connection pushes it again whenever it reconnects, as core's
   `PushAllAccounts` does.
 
-Each simulated sprout then connects the way `cmd/sprout` does: TLS pinned to
-the bus CA, the User JWT plus a signature over the server nonce, discovered
+In either mode, each simulated sprout connects the way `cmd/sprout` does:
+TLS pinned to the bus CA, the User JWT plus a signature over the server
+nonce (and, over `wss://`, an enrolled sprout's gateway JWT), discovered
 servers ignored, unlimited reconnects with the sprout's full-jitter backoff
 (`internal/natsretry`, same `busreconnectbase` and `busreconnectcap`
 defaults). On connect it does what `natsInit` does on the bus: publishes its
 announce and facts (this host's facts, collected once) and subscribes to the
 same seven subjects. It answers `test.ping` with the sprout's own handler
 (`test.SPing`) and `facts.request` with the facts; the other five
-subscriptions only carry the bus-side interest.
+subscriptions only carry the bus-side interest, and anything farmer sends
+on them is counted and dropped.
 
 So per connection the bus does the same work as for an enrolled sprout: TLS
 handshake, JWT and nonce verification against the Account's signing key,
@@ -78,24 +85,82 @@ that subscribes to another sprout's subject. A grant added to
 `sproutPermissions` still has to be added to `tools/loadtest/fixture.go`
 by hand: the function is unexported.
 
-### What the fixture path does not test
+### Against a deployed bus: the enrolment path
 
-- **Enrollment and refresh**: `POST /v1/enroll`, `/v1/refresh`, the join
-  token, PXC, OpenBao transit. A fleet-wide re-enrollment is not simulated.
-- **Envoy and the websocket path**: sprouts here dial the bus's TLS listener
-  directly. Envoy's `jwt_authn` check of the gateway JWT on each websocket
-  handshake, and Envoy's own CPU and connection limits, are not exercised.
-  (`-servers` accepts `wss://` URLs, but no gateway JWT is sent, so Envoy
-  would refuse them.)
-- **Core**: no farmer process is in the loop. The requesters are a stand-in
-  with core's User shape; core's API, RBAC, PXC reads and its queue group
-  are not measured, and neither is core's handling of thousands of announce,
-  CONNECT and DISCONNECT events (internal/heartbeat, Valkey).
-- **A realistic tenant Account**: a real tenant's Account JWT carries a
-  revocation entry per denied or rejected sprout; the load-test Account
-  carries none, so it is smaller.
-- **Many tenants**: every simulated sprout is in one Account (one per
-  generator). Requirement 1's tenant mix is not modelled.
+A deployed bus's trust is minted from OpenBao Transit keys that can't be
+exported (P21 slice 1), so the harness takes no operator, operator-signing
+or SYS seed, and needs none. For an existing, active tenant it:
+
+1. checks the tenant is `active` (`GET /v1/tenants/{id}/status`);
+2. mints enrolment keys through the SaaS API
+   (`POST /v1/tenants/{id}/enrollment-keys`), as the BFF does: the shared
+   `X-Internal-Auth` secret and a bearer token whose `organization.id` is
+   the tenant. By default each key is a **one-time key** (`max_uses` 1,
+   one per sprout, as `uat/enroll` mints them); `-enroll-key-uses` makes
+   each key good for up to 10,000 sprouts, which a large run needs because
+   key minting is rate-limited per tenant (1 a second, burst 5, by
+   default; the harness waits out a 429);
+3. enrolls every sprout through `POST /v1/enroll` with `internal/pki`'s own
+   client (`pki.EnrollClient`): a fresh NKey and X25519 box key per sprout,
+   made in memory and never written, the two signed requests, the box key
+   proof of possession, and a busy answer's `Retry-After` honoured as a
+   sprout honours it. A sprout whose enrolment fails is retried
+   `-enroll-retries` times with the same keys and token (farmer answers a
+   retry from its replay path without spending another use);
+4. connects each enrolled sprout with the User JWT farmer issued it and,
+   over a `wss://` URL, the gateway JWT farmer issued with it;
+5. revokes every key it minted when the run ends, however it ends.
+
+Farmer does the per-sprout work it does for a real fleet: the join-token
+check, the PXC write, the Account re-sign and push, and a gateway JWT from
+OpenBao Transit. That is the enrolment path's load, and the report shows it
+separately as **(a0)**, before the bus's (a).
+
+### The latency probe against a deployed bus
+
+Only farmer's own per-tenant User may publish to a sprout's subjects, and
+it is signed by a tenant key farmer keeps in OpenBao. The harness holds no
+such key, so against a deployed bus it plays no core requester and sends
+no `test.ping`. Its probe is the round trip from a random sprout's own
+connection to the bus node it is connected to: a NATS `PING`, flushed, and
+the node's `PONG`. That is one leg of `test.ping`'s path (requester to
+bus to sprout and back), under the same load, so it is a lower bound on
+the `test.ping` round trip, not the same number. The report heads (b)
+with which probe ran.
+
+### What the harness does not test
+
+- **Enrollment and refresh against a local bus**: there is no farmer in
+  that loop, so `POST /v1/enroll`, `/v1/refresh`, the join token, PXC and
+  OpenBao transit are measured only against a deployed bus (a0). No mode
+  simulates a gateway JWT refresh or a fleet-wide re-enrollment.
+- **Envoy's `/v1/enroll` budget**: through the DMZ Envoy, `/v1/enroll` is
+  limited to 20 requests a minute per Envoy (a fixed anti-guessing
+  budget, `deploy/helm/nats/README.md`), and an enrolment is two requests:
+  about 10 sprouts a minute per Envoy. A run of thousands of sprouts
+  points `-farmer-url` at farmer's API directly (the core edge's
+  `farmer_api` port in the UAT), not at the DMZ Envoy; enrolments refused
+  by Envoy are reported as `HTTP 429`.
+- **Envoy and the websocket path, on a local bus**: sprouts there dial the
+  bus's TLS listener directly. Against a deployed bus `-servers` may be
+  the Envoy's `wss://` URL: each sprout sends its gateway JWT on every
+  websocket handshake, so Envoy's `jwt_authn` check and Envoy's own CPU and
+  connection limits are in the loop. The harness does not refresh a
+  gateway JWT, so a run over `wss://` must end within its lifetime
+  (farmer's `gatewayjwtttl`, 24 hours by default): Envoy refuses a
+  reconnect with an expired one.
+- **Core**: on a local bus no farmer process is in the loop. The
+  requesters are a stand-in with core's User shape; core's API, RBAC, PXC
+  reads and its queue group are not measured. Against a deployed bus
+  farmer receives the sprouts' announces, facts and CONNECT and DISCONNECT
+  events, but the harness does not measure how it handles them
+  (internal/heartbeat, Valkey).
+- **A realistic tenant Account, on a local bus**: a real tenant's Account
+  JWT carries a revocation entry per denied or rejected sprout; the
+  fixture's load-test Account carries none, so it is smaller.
+- **Many tenants**: every simulated sprout of a generator is in one
+  tenant. Requirement 1's tenant mix is not modelled.
+- **Heartbeats**: the simulated sprouts send none.
 - **Real sprout work**: no cook, `cmd.run`, shell, log shipping or
   self-update traffic. Only the startup publishes and `test.ping`.
 - **Real hosts and networks**: one generator process holds thousands of
@@ -133,33 +198,41 @@ builds a trace line for every message before handing it over.
 ./loadtest \
   -servers tls://bus-0.example:5406,tls://bus-1.example:5406,tls://bus-2.example:5406 \
   -ca bus-ca.pem \
-  -operator-signing-seed-file operator-signing.nk \
-  -sys-account-seed-file sys-account.nk \
+  -tenant t_abcdefghijklmnop \
+  -saasapi-url https://core.example -saasapi-ca core-ca.pem \
+  -internal-auth-file internal-auth.secret -token-file tenant.token \
+  -farmer-url https://core.example:5405 -farmer-ca sprout-root-ca.pem \
+  -enroll-key-uses 1000 -enroll-workers 16 \
   -sprouts 10000 -connect-rate 500 -hold 5m -ping-rate 200 \
   -restart cmd -restart-cmd 'kubectl -n imas delete pod <bus-statefulset>-0' \
   -max-full-reconnect 10m -json gen1.json
 ```
 
-- The two seeds are the operator signing key and the SYS account key the
-  bus's trust (`operator.jwt`, `sys-account.jwt`) was minted with. **Since
-  P21 slice 1 a deployed bus has no such seeds:** core's bootstrap Job
-  mints the trust from OpenBao Transit keys (`nats-operator-signing`,
-  `nats-sys-account`), which can't be exported, and the nats chart refuses
-  the old `OPERATOR_SIGNING` and `SYS_ACCOUNT` seeds. So this mode works
-  only against a bus whose trust ConfigMap was minted from keys you hold as
-  seeds (a test bus set up for the run, never one bootstrapped by the
-  farmer chart). A harness mode that signs through Transit, with an
-  OpenBao role of its own, is not built. **The seeds let the holder sign
-  any tenant Account.** Run the harness only against a bus you are allowed
-  to load, from a host you would trust with those keys, and never against
-  production. Nothing is written to disk from them.
+- **No trust key.** The harness takes no seed. What it needs is what a
+  tenant's operator has: an active tenant (`-tenant`, created through the
+  SaaS API beforehand; use a tenant set aside for load tests), the SaaS
+  API's shared secret (`-internal-auth-file`) and a bearer token for that
+  tenant (`-token-file`, re-read on every request, so a token refreshed on
+  disk during a long enrolment is picked up). Both files hold one line and
+  are never logged; neither is a registration key, which the harness
+  holds in memory only.
+- `-farmer-url` is where the sprouts enroll: the DMZ Envoy, or, for more
+  than a few dozen sprouts, farmer's API directly (see Envoy's
+  `/v1/enroll` budget above). `-farmer-ca` is the CA a sprout pins for it
+  (its `sproutrootca`); both `-saasapi-ca` and `-farmer-ca` default to the
+  system roots.
+- The enrolled sprouts stay enrolled in the tenant after the run; their
+  NKeys existed only in the harness's memory, so nothing can connect as
+  them again. The keys the run minted are revoked at the end. To remove
+  the sprouts, offboard the load-test tenant
+  (`DELETE /v1/tenants/{id}`, `docs/api/saasapi.md`), which locks its
+  Account out on the bus.
 - `-servers` is the bus client port (the chart's `bus.ports.client`, 5406),
   one URL per node so that sprouts spread and the restart has somewhere to
   go. Through a single load-balanced address a sprout comes back through
-  the balancer.
-- At the end the harness pushes a locked-out copy of its Account (every
-  User revoked, no connections), as a tenant deprovision does, so the
-  load-test tenant does not stay live. `-lockout=false` skips that.
+  the balancer. It may instead be the DMZ Envoy's `wss://` URL, with `-ca`
+  the CA of Envoy's certificate (the gateway JWT goes with each
+  handshake).
 - A bus whose nodes are fenced (`/readyz` 503) refuses clients: wait for
   the cluster to be ready before starting.
 - With `-restart cmd`, the command runs through `sh -c`; the restart
@@ -172,12 +245,14 @@ builds a trace line for every message before handing it over.
 ### Core metrics
 
 Neither `cmd/farmer` nor `cmd/farmerbus` exposes a metrics endpoint (no
-NATS HTTP monitor port, no Prometheus). The harness reads each bus node's
-varz over the SYS account (`$SYS.REQ.SERVER.PING.VARZ`, which every node
-answers), and `/proc` for processes on its own host: name core with `-proc
-core=<pid>` when core runs beside the generator. In Kubernetes, watch core
-with what the cluster has (`kubectl top pod`, the metrics server, or the
-node's own monitoring) for the length of the run.
+NATS HTTP monitor port, no Prometheus). On the local bus the harness reads
+the node's varz over the SYS account (`$SYS.REQ.SERVER.PING.VARZ`), with a
+SYS user its own trust chain mints. Against a deployed bus it has no SYS
+user (only a trust key could mint one), so it reads no varz: watch the bus
+nodes and core with what the cluster has (`kubectl top pod`, the metrics
+server, or the node's own monitoring) for the length of the run. It always
+reads `/proc` for processes on its own host: name core with `-proc
+core=<pid>` when core runs beside the generator.
 
 ## Running at 10,000 sprouts
 
@@ -226,9 +301,10 @@ the bus's varz memory.) For each generator:
 | Local ports | about 28,000 per source IP and bus address with the default `ip_local_port_range`; widen it (`sysctl net.ipv4.ip_local_port_range="1024 65000"`), list several bus nodes in `-servers`, or give the host several addresses and pass them with `-source-ips` |
 | Clock | NTP-synchronised: merged per-second series assume it |
 
-**Running them together.** Give each generator its own `-id-prefix` and
-`-tenant` (the defaults are random, which is enough), the same `-servers`,
-the same `-hold`, and its own `-json`. Exactly one generator triggers the
+**Running them together.** Give each generator its own `-id-prefix` (the
+default is random, which is enough), the same `-servers` and `-tenant`
+(each generator mints and revokes its own keys), the same `-hold`, and its
+own `-json`. Enrol through farmer's API directly, not the DMZ Envoy. Exactly one generator triggers the
 restart (`-restart cmd`); the others watch for it (`-restart observe`) and
 measure their own sprouts' way back:
 
@@ -257,8 +333,12 @@ earliest first disconnect to the latest full reconnect across generators.
   connect rate well below `-connect-rate`, or the generator's CPU at its
   core count during "connect", means the generator, not the bus, set the
   pace.
-- **(b)** The round trip is requester to bus to sprout and back. Requests
-  go at a fixed rate; when `-ping-concurrency` requests are already in
+- **(a0)** Against a deployed bus: sprouts enrolled, keys minted, the
+  enrolment rate and why any failed. A sprout that never enrolled also
+  counts as never connected in (a), under "not enrolled: <reason>".
+- **(b)** On a local bus the round trip is requester to bus to sprout and
+  back; against a deployed bus it is a sprout's own `PING` to its bus node
+  (see above). Requests go at a fixed rate; when `-ping-concurrency` requests are already in
   flight, a tick is skipped and counted rather than queued. Skips mean the
   bus (or the generator) was not keeping up.
 - **(c)** Time to full reconnect runs from the first disconnect to the
@@ -298,10 +378,13 @@ that the bus got slow.
 ## What a result proves, and what it does not
 
 A run proves, for the bus it ran against, the hardware it ran on and the
-fixture path: that this many sprout-shaped connections could be opened at
-this rate and held; that `test.ping` round trips had this distribution at
-this request rate while they were held; and that after this restart they
-all came back within this time, with this peak reconnect rate.
+credential path it used (minted on a local bus, enrolled against a
+deployed one): that this many sprout-shaped connections could be opened at
+this rate and held (and, enrolled, that farmer enrolled them at this
+rate); that the probe's round trips (`test.ping`, or the bus round trip
+against a deployed bus) had this distribution at this request rate while
+they were held; and that after this restart they all came back within
+this time, with this peak reconnect rate.
 
 It does not prove:
 
@@ -311,7 +394,8 @@ It does not prove:
 - **Requirement 10 as the user sees it**: the 300 ms there is a response to
   a sprout; this measures the bus leg only. A CLI or SaaS API request adds
   core's API, RBAC and PXC time, and Envoy's hop for a websocket sprout.
-- **Requirement 7 (core scales out)**: core is not in the loop.
+- **Requirement 7 (core scales out)**: core's request path is not in the
+  loop (on a deployed bus only its enrolment is, in (a0)).
 - **Production capacity**: the bus here runs on whatever host or cluster
   the run used, under a single synthetic tenant.
 - **The scale plan's Phase 2 exit criterion**, unless the run had hundreds

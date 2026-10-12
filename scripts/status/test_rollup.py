@@ -101,6 +101,36 @@ class Rollup(unittest.TestCase):
         d = make({"a.md": "change: ok\n"})
         self.assertEqual(rollup.check(d), 1)
 
+    def test_order_ignores_case(self):
+        # A capitalised unit name sorts after the lowercase fragment that
+        # adds the row it updates, as the names read.
+        frags = {
+            "z-build-summary.md": "item: P27\naction: add\nsection: S2\ntitle: **Left**\nrag: Amber\nnext: Fix.\n",
+            "z-E4.md": "item: P27\naction: update\nnext-append: E4 built.\n",
+        }
+        d, out, _ = self.run_day(frags)
+        self.assertIn("| P27 | **Left** | Amber | Fix. E4 built. |", out)
+        self.assertEqual([f.name for f, _ in rollup.load_day(d, "2026-10-12")], ["z-build-summary.md", "z-E4.md"])
+
+    def test_check_dry_runs_pending_days(self):
+        # An update of a row nothing has added fails --check, as it would
+        # fail the roll-up; BUILD-STATUS.md is not written.
+        d = make({"a.md": "item: P99\naction: update\nnext-append: x\n"})
+        with self.assertRaises(rollup.StatusError):
+            rollup.check(d)
+        self.assertEqual((d / "docs" / "BUILD-STATUS.md").read_text(), BS)
+        # A day already rolled up is not applied again.
+        bs = d / "docs" / "BUILD-STATUS.md"
+        bs.write_text(BS.replace("## Baseline", "Last rolled up: 2026-10-12 (x).\n\n## Baseline"))
+        self.assertEqual(rollup.check(d), 1)
+        # Pending days apply in date order on top of each other.
+        bs.write_text(BS)
+        (d / "docs" / "status" / "days" / "2026-10-12" / "a.md").write_text(
+            "item: P99\naction: add\nsection: S2\ntitle: T\nrag: Red\nnext: N\n")
+        (d / "docs" / "status" / "days" / "2026-10-13").mkdir()
+        (d / "docs" / "status" / "days" / "2026-10-13" / "a.md").write_text("item: P99\naction: update\nrag: Amber\n")
+        self.assertEqual(rollup.check(d), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

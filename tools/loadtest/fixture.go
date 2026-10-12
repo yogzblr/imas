@@ -1,8 +1,11 @@
 package main
 
-// The fixture path: simulated sprouts get their NATS credentials minted
-// here, from the operator signing and SYS account keys, instead of from
-// POST /v1/enroll. Every JWT has the shape internal/pki gives the real
+// The fixture path, for the local bus only: simulated sprouts get their
+// NATS credentials minted here, from the operator signing and SYS account
+// keys of a trust chain this process generated and holds in memory,
+// instead of from POST /v1/enroll. A run against a deployed bus holds no
+// trust key and enrolls its sprouts through the real path instead
+// (enroll.go). Every JWT here has the shape internal/pki gives the real
 // thing:
 //
 //   - the tenant Account is signed by the operator signing key and
@@ -35,7 +38,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"time"
 
@@ -58,18 +60,17 @@ type trust struct {
 	sysUserSeed     string
 }
 
-// seedFiles is what a local bus is started with: environment variables
-// (full names) naming files, as the chart mounts them. Since P21 slice 1
-// the bus takes no seed, only the public trust directory
-// (IMAS_NATS_TRUST_DIR); the type keeps its name for main.go.
-type seedFiles map[string]string
+// busEnv is what a local bus is started with: environment variables
+// (full names) naming files, as the chart mounts them. The bus takes no
+// seed, only the public trust directory (IMAS_NATS_TRUST_DIR).
+type busEnv map[string]string
 
 // newLocalTrust generates a fresh trust chain for a local bus. The keys
 // stay in this process (localKeyStore stands in for OpenBao Transit) and
 // the public trust directory is minted from them by
 // pki.BootstrapNATSTrust, as the bootstrap Job mints it, into
 // dir/nats-trust. No seed is written.
-func newLocalTrust(dir string) (*trust, seedFiles, error) {
+func newLocalTrust(dir string) (*trust, busEnv, error) {
 	ks := localKeyStore{}
 	for name, mk := range map[string]func() (nkeys.KeyPair, error){
 		natskeys.OperatorKey():        nkeys.CreateOperator,
@@ -96,7 +97,7 @@ func newLocalTrust(dir string) (*trust, seedFiles, error) {
 		}
 	}
 	tr, err := newTrust(ks[natskeys.OperatorSigningKey()], ks[natskeys.SysAccountKey()])
-	return tr, seedFiles{pki.NATSTrustDirEnv: trustDir}, err
+	return tr, busEnv{pki.NATSTrustDirEnv: trustDir}, err
 }
 
 // localKeyStore is a natskeys.KeyStore over in-memory key pairs, keyed by
@@ -126,38 +127,6 @@ func (ks localKeyStore) RetireKey(context.Context, string) error { return nil }
 
 func (ks localKeyStore) Close() error { return nil }
 
-// loadTrust reads the operator signing and SYS account seeds of an
-// existing bus: the same files the chart mounts into farmer and the bus.
-func loadTrust(operatorSigningFile, sysAccountFile string) (*trust, error) {
-	read := func(path string, want nkeys.PrefixByte) (nkeys.KeyPair, error) {
-		b, err := os.ReadFile(path)
-		if err != nil {
-			return nil, err
-		}
-		kp, err := nkeys.FromSeed([]byte(strings.TrimSpace(string(b))))
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", path, err)
-		}
-		pub, err := kp.PublicKey()
-		if err != nil {
-			return nil, err
-		}
-		if nkeys.Prefix(pub) != want {
-			return nil, fmt.Errorf("%s: seed is not a %s key", path, want)
-		}
-		return kp, nil
-	}
-	op, err := read(operatorSigningFile, nkeys.PrefixByteOperator)
-	if err != nil {
-		return nil, fmt.Errorf("operator signing seed: %w", err)
-	}
-	sys, err := read(sysAccountFile, nkeys.PrefixByteAccount)
-	if err != nil {
-		return nil, fmt.Errorf("SYS account seed: %w", err)
-	}
-	return newTrust(op, sys)
-}
-
 func newTrust(operatorSigning, sysAccount nkeys.KeyPair) (*trust, error) {
 	user, err := nkeys.CreateUser()
 	if err != nil {
@@ -182,7 +151,6 @@ type tenantFixture struct {
 	signing    nkeys.KeyPair
 	signingPub string
 	accountJWT string
-	issuedAt   int64
 	coreJWT    string
 	coreSeed   string
 }
@@ -208,28 +176,10 @@ func (tr *trust) newTenant(name string) (*tenantFixture, error) {
 	if tf.accountJWT, err = ac.Encode(tr.operatorSigning); err != nil {
 		return nil, err
 	}
-	tf.issuedAt = ac.IssuedAt
 	if tf.coreJWT, tf.coreSeed, err = tf.mintUser("farmer", corePermissions()); err != nil {
 		return nil, err
 	}
 	return tf, nil
-}
-
-// lockedOutJWT re-signs the Account the way internal/pki locks out a
-// deprovisioned tenant (lockOutAccount): every User revoked, no
-// connections allowed. Its issued-at is strictly after the live JWT's, so
-// it wins in a cluster's resolver sync.
-func (tf *tenantFixture) lockedOutJWT(tr *trust) (string, error) {
-	if d := time.Until(time.Unix(tf.issuedAt+1, 0)); d > 0 {
-		time.Sleep(d)
-	}
-	ac := jwt.NewAccountClaims(tf.accountPub)
-	ac.Name = tf.name
-	ac.SigningKeys.Add(tf.signingPub)
-	ac.RevokeAt(jwt.All, time.Now())
-	ac.Limits.Conn = 0
-	ac.Limits.LeafNodeConn = 0
-	return ac.Encode(tr.operatorSigning)
 }
 
 func (tf *tenantFixture) mintUser(name string, perms jwt.Permissions) (userJWT, seed string, err error) {
@@ -247,11 +197,14 @@ func (tf *tenantFixture) mintUser(name string, perms jwt.Permissions) (userJWT, 
 	return userJWT, string(s), err
 }
 
-// sproutCred is one simulated sprout's identity.
+// sproutCred is one simulated sprout's identity. Gateway is the gateway
+// JWT farmer issued with an enrolled sprout's User JWT (none for a
+// fixture sprout); it is sent on a wss:// connection, as a sprout does.
 type sproutCred struct {
-	ID   string
-	JWT  string
-	Seed string
+	ID      string
+	JWT     string
+	Seed    string
+	Gateway string
 }
 
 // sproutID is the ID of simulated sprout i under prefix.
