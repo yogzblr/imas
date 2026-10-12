@@ -215,7 +215,7 @@ control-plane-only profile described above.
 ## Signing and delivery: how this matches the rest of the system
 
 The brief asked for the same pattern as `FarmerUserJWTForTenant`/
-`GetSproutUserJWTForTenant`, signed "via the existing OpenBao-backed
+`MintOrReuseUserJWT` (then `GetSproutUserJWTForTenant`), signed "via the existing OpenBao-backed
 signing path", and "pushed to the bus resolver the same way every other
 User JWT is delivered." Two findings qualify that wording:
 
@@ -230,8 +230,8 @@ User JWT is delivered." Two findings qualify that wording:
   (`claims.Encode(kp)`) did not change. The SaaS API User is still signed
   by the SYS Account's key (as `imas-farmer-sys-push` is), now the Transit
   key `nats-sys-account`. Its own seed is a user-kind key and stays a
-  Secret seed, resolved by `loadOrCreateSeed(..., "SAASAPI_USER", ...)`, so
-  `IMAS_NATS_SAASAPI_USER_SEED_FILE` works as before.
+  Secret seed, required and resolved by `loadRequiredSeed("SAASAPI_USER")`
+  from `IMAS_NATS_SAASAPI_USER_SEED_FILE`; farmer never generates one.
 - **User JWTs are never pushed to the resolver.** The resolver stores
   Account JWTs only. A User JWT is handed to the client, which presents it
   when it connects, and the server checks it against the issuing
@@ -274,9 +274,9 @@ still an operator choice. The intended production flow is:
    never writes the seed to its own disk, and to saasapi as a mounted
    Secret file named by `SAASAPI_NATS_NKEY_SEED_FILE`.
 3. At boot, farmer calls `pki.EnsureSaaSAPICredential()`. That mints the
-   User JWT (re-minting only if the key or permissions changed), revokes
-   and pushes the previous key if it rotated, and writes the JWT to
-   `{FarmerPKI}/nats-auth/users/saasapi.jwt`.
+   User JWT, and revokes and pushes the previous key if it rotated. It
+   writes no file: the re-signed SYS Account JWT is held in memory and
+   kept in the accounts bucket.
 4. The JWT gets into OpenBao KV. It's not secret, but it has to travel
    with the seed. `farmer publish-saasapi-credential`, run as a
    Kubernetes Job with farmer's own image, writes it to a dedicated KV v2
@@ -520,9 +520,8 @@ tenant live on the bus. The fix, in `internal/pki`:
   provision's insert wins instead, the deprovision finds that row and
   marks it deleted, and the provision's post-push re-check locks it out.
   A deprovision skips the lockout only when, read again after its mark has
-  committed, the row still records no Account and there is no
-  `account.jwt` on its disk: a provision records its Account before it
-  pushes, so one recorded between the deprovision's first read and its
+  committed, the row still records no Account: a provision records its
+  Account before it pushes, so one recorded between the deprovision's first read and its
   mark (PKI.1 follow-up, from the PR's security review) is still locked
   out.
 

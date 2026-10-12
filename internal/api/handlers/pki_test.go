@@ -36,8 +36,7 @@ import (
 
 // setupPKIDirs wires up an in-memory PKI store (see internal/pki/store.go)
 // and a miniredis-backed enrollment/refresh replay cache (see
-// internal/pki/replaycache.go) for testing and sets config.FarmerPKI. It
-// also creates a fake farmer
+// internal/pki/replaycache.go) for testing. It also creates a fake farmer
 // NKey pub file so that pki.ReloadNKeys() (called by defer in AcceptNKey,
 // DenyNKey, etc.) doesn't log.Fatal.
 // pkiTestDBSeq numbers setupPKIDirs's databases.
@@ -80,7 +79,6 @@ func setupPKIDirs(t *testing.T) string {
 	t.Cleanup(func() { pki.SetReplayCacheClient(nil) })
 
 	dir := t.TempDir()
-	config.FarmerPKI = dir + "/"
 	pkitest.Farmer(t) // the NATS trust chain in a fake Transit
 
 	// Create a fake farmer NKey pub file so ReloadNKeys doesn't crash.

@@ -47,9 +47,9 @@ func TestReloadNKeysForTenant_LazyProvisionsAndConnects(t *testing.T) {
 		t.Fatalf("expected tenant %q to be provisioned, row=%+v err=%v", tenantID, row, err)
 	}
 
-	sproutJWT, err := GetSproutUserJWTForTenant(tenantID, "web-01")
+	sproutJWT, err := sproutUserJWTForTest(tenantID, "web-01")
 	if err != nil {
-		t.Fatalf("GetSproutUserJWTForTenant: %v", err)
+		t.Fatalf("sproutUserJWTForTest: %v", err)
 	}
 	nc, err := dialAsSprout(t, sproutJWT, sproutSeed)
 	if err != nil {
@@ -98,9 +98,9 @@ func TestProvisionTenant_TwoTenantsAreIsolatedAccounts(t *testing.T) {
 	if err := ReloadNKeysForTenant("t_b"); err != nil {
 		t.Fatalf("ReloadNKeysForTenant(t_b): %v", err)
 	}
-	sproutJWT, err := GetSproutUserJWTForTenant("t_b", "web-01")
+	sproutJWT, err := sproutUserJWTForTest("t_b", "web-01")
 	if err != nil {
-		t.Fatalf("GetSproutUserJWTForTenant: %v", err)
+		t.Fatalf("sproutUserJWTForTest: %v", err)
 	}
 
 	nc, err := dialAsSprout(t, sproutJWT, sproutSeed)
@@ -135,9 +135,9 @@ func TestDeprovisionTenant_RevokesLiveBusAccess(t *testing.T) {
 	if err := ReloadNKeysForTenant(tenantID); err != nil {
 		t.Fatalf("ReloadNKeysForTenant: %v", err)
 	}
-	sproutJWT, err := GetSproutUserJWTForTenant(tenantID, "web-01")
+	sproutJWT, err := sproutUserJWTForTest(tenantID, "web-01")
 	if err != nil {
-		t.Fatalf("GetSproutUserJWTForTenant: %v", err)
+		t.Fatalf("sproutUserJWTForTest: %v", err)
 	}
 
 	if nc, err := dialAsSprout(t, sproutJWT, sproutSeed); err != nil {
@@ -181,9 +181,9 @@ func TestDeprovisionTenant_LatePushStillLocksOut(t *testing.T) {
 	if err := ReloadNKeysForTenant(tenantID); err != nil {
 		t.Fatalf("ReloadNKeysForTenant: %v", err)
 	}
-	sproutJWT, err := GetSproutUserJWTForTenant(tenantID, "web-01")
+	sproutJWT, err := sproutUserJWTForTest(tenantID, "web-01")
 	if err != nil {
-		t.Fatalf("GetSproutUserJWTForTenant: %v", err)
+		t.Fatalf("sproutUserJWTForTest: %v", err)
 	}
 
 	// A sprout that stays connected across the deprovisioning.
@@ -267,9 +267,9 @@ func TestDeprovisionTenant_RetryAfterFailedPushLocksOut(t *testing.T) {
 	if err := ReloadNKeysForTenant(tenantID); err != nil {
 		t.Fatalf("ReloadNKeysForTenant: %v", err)
 	}
-	sproutJWT, err := GetSproutUserJWTForTenant(tenantID, "web-01")
+	sproutJWT, err := sproutUserJWTForTest(tenantID, "web-01")
 	if err != nil {
-		t.Fatalf("GetSproutUserJWTForTenant: %v", err)
+		t.Fatalf("sproutUserJWTForTest: %v", err)
 	}
 
 	// The bus is unreachable for the first attempt.
@@ -323,8 +323,8 @@ func TestDeprovisionTenant_LockOutHasNewerIssuedAt(t *testing.T) {
 	if err := DeprovisionTenant(tenantID); err != nil {
 		t.Fatalf("DeprovisionTenant: %v", err)
 	}
-	// The tenant's keys are retired: read the lockout from disk.
-	locked, err := jwt.DecodeAccountClaims(readFile(t, tenantAccountJWTPath(tenantID)))
+	// The tenant's keys are retired: read the lockout this process holds.
+	locked, err := jwt.DecodeAccountClaims(heldTenantAccountJWT(t, tenantID))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,11 +7,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"time"
-
-	jwt "github.com/nats-io/jwt/v2"
 
 	"github.com/yogzblr/imas/internal/lease"
 	log "github.com/yogzblr/imas/internal/log"
@@ -75,8 +72,8 @@ var pushAllMu sync.Mutex
 // stored, so the lock-out also carries the newest issued-at, which is what
 // the resolver sync between bus nodes compares.
 //
-// Each push re-reads the Account JWT from disk once the bus has answered,
-// and pushes again if it changed (pushUntilCurrent), so a deny, reject or
+// Each push re-reads the Account JWT this process holds once the bus has
+// answered, and pushes again if it changed (pushUntilCurrent), so a deny, reject or
 // key rotation racing this run can't be undone by the older copy this run
 // read first.
 //
@@ -114,10 +111,10 @@ func PushAllAccounts() (int, error) {
 	if err := reconcileAccountsLeased(context.Background()); err != nil {
 		errs = append(errs, fmt.Errorf("reconciling the accounts bucket: %w", err))
 	}
-	pushCurrent := func(what, accountJWT, path string) error {
+	pushCurrent := func(what, accountJWT, accountPub string) error {
 		return pushUntilCurrent(what, accountJWT,
 			func(j string) error { return pushAccountUpdate(mat, j) },
-			func() (string, error) { return readAccountJWTFile(path) })
+			func() (string, error) { return currentHeldAccountJWT(accountPub, accountJWT) })
 	}
 	// leased runs a tenant's push under its lease (leasedPush). push
 	// reports whether it pushed anything; it is counted if it did and
@@ -141,14 +138,14 @@ func PushAllAccounts() (int, error) {
 
 	// SYS first: the bus may hold only its epoch-dated bootstrap, without
 	// core's revocations (rotated-out SaaS API keys).
-	if err := pushCurrent("SYS account", mat.sysAccountJWT, sysAccountJWTPath()); err != nil {
+	if err := pushCurrent("SYS account", mat.sysAccountJWT, mat.sysAccountPub); err != nil {
 		errs = append(errs, fmt.Errorf("SYS account: %w", err))
 	} else {
 		pushed++
 	}
 	legacy := currentTenantID()
 	leased(legacy, "legacy tenant "+legacy, func() (bool, error) {
-		return true, pushCurrent("legacy tenant "+legacy, mat.tenantJWT, tenantJWTPath())
+		return true, pushCurrent("legacy tenant "+legacy, mat.tenantJWT, mat.tenantPub)
 	})
 
 	live, err := ListProvisionedTenantIDs()
@@ -166,7 +163,7 @@ func PushAllAccounts() (int, error) {
 			}
 			return true, pushUntilCurrent("tenant "+id, tam.jwt,
 				func(j string) error { return pushLiveTenantAccount(mat, id, j) },
-				func() (string, error) { return readAccountJWTFile(tenantAccountJWTPath(id)) })
+				func() (string, error) { return currentHeldAccountJWT(tam.pub, tam.jwt) })
 		})
 	}
 
@@ -207,8 +204,10 @@ var testHookPushAllBeforePush func(what string)
 // one and checks again.
 //
 // This is what keeps an older copy from undoing a newer one. Every writer
-// (syncNatsAuth, syncTenantSprouts, the SaaS API key rotation, a lock-out)
-// persists its JWT before pushing it. Either the re-read sees that write,
+// in this process (syncNatsAuth, syncTenantSprouts, the SaaS API key
+// rotation, a lock-out) holds its JWT (holdAccountJWT) before pushing it;
+// a writer on another replica is ordered by the accounts bucket, which
+// takes no JWT older than the one it has (pushAccountUpdate). Either the re-read sees that write,
 // and the newer JWT is pushed after this push was answered; or the write
 // came after the re-read, so the writer's own push started after this one
 // was applied. Either way the newest JWT reaches the bus last, which is
@@ -238,26 +237,13 @@ func pushUntilCurrent(what, accountJWT string, push func(string) error, current 
 	}
 }
 
-// readAccountJWTFile reads an Account JWT that core persisted, for
-// pushUntilCurrent's re-check. It reads the file directly rather than
-// through ensureNatsAuth or ensureTenantAccountMaterial, which re-mint a
-// JWT without revocations when the file doesn't decode: the writers use
-// a plain os.WriteFile, so a read can land mid-write. An undecodable read
-// is retried briefly and then reported, never replaced.
-func readAccountJWTFile(path string) (string, error) {
-	var lastErr error
-	for i := 0; i < 5; i++ {
-		b, err := os.ReadFile(path)
-		if err == nil {
-			_, err = jwt.DecodeAccountClaims(string(b))
-		}
-		if err == nil {
-			return string(b), nil
-		}
-		lastErr = err
-		time.Sleep(20 * time.Millisecond)
+// currentHeldAccountJWT is pushUntilCurrent's re-check: the Account JWT
+// this process holds for accountPub now, or pushed when it holds none.
+func currentHeldAccountJWT(accountPub, pushed string) (string, error) {
+	if h, ok := heldAccountJWT(accountPub); ok {
+		return h.jwt, nil
 	}
-	return "", fmt.Errorf("reading %s: %w", path, lastErr)
+	return pushed, nil
 }
 
 // relockForPushAll re-signs a deprovisioned tenant's lock-out, like
@@ -276,9 +262,7 @@ func relockForPushAll(mat *natsAuthMaterial, tenantID string) (signed string, ok
 		return "", false, nil // re-provisioned since the listing
 	}
 	if row.AccountPub == "" {
-		if _, statErr := os.Stat(tenantAccountJWTPath(tenantID)); os.IsNotExist(statErr) {
-			return "", false, nil
-		}
+		return "", false, nil
 	}
 	signed, err = signLockedOutTenantJWT(mat, row)
 	if err != nil {

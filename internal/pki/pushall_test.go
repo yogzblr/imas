@@ -42,7 +42,7 @@ func TestPushAllAccounts_DenyRacingThePushStaysDenied(t *testing.T) {
 	if err := ReloadNKeysForTenant("t_race"); err != nil {
 		t.Fatalf("ReloadNKeysForTenant: %v", err)
 	}
-	tenantJWT, err := GetSproutUserJWTForTenant("t_race", "web-01")
+	tenantJWT, err := sproutUserJWTForTest("t_race", "web-01")
 	if err != nil {
 		t.Fatal(err)
 	}

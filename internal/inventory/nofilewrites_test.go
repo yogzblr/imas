@@ -9,6 +9,7 @@ import (
 	"go/token"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -46,6 +47,22 @@ var fileWriteCalls = map[string][]string{
 	"io/ioutil": {"WriteFile", "TempFile"},
 }
 
+// packageFileWriteCalls are a package's own helpers that write a file,
+// by the package's directory: a call to one is a file write as much as
+// the os call inside it, so each caller needs its own allow-list entry
+// (spelled pkg.Name, pkg the directory's last element). internal/pki's
+// two helpers are how farmer once wrote its JWTs under
+// /tmp/farmer/pki; they are now called on the sprout's and the CLI's
+// side only.
+var packageFileWriteCalls = map[string][]string{
+	"internal/pki": {"writeFileAtomic", "writeFileOnce"},
+}
+
+// farmerPKIDir is the directory farmer once kept the JWTs it signed in
+// (the chart's farmerpki). TestNoFarmerPKIDir fails on any mention of it
+// in the scanned code or the farmer chart.
+const farmerPKIDir = "/tmp/farmer"
+
 // allowedFileWrites lists the calls that may stay, as
 // "path:function:call#n" (path from the repository root, function the
 // enclosing func or Type.Method, call as pkg.Name, n counting that call's
@@ -55,34 +72,50 @@ var fileWriteCalls = map[string][]string{
 // edits don't churn the list.
 //
 // A call is allowed only if, in farmer and saasapi, it writes under the
-// pod's temp dir or another emptyDir, or if farmer and saasapi never run
-// it. A new write to anything that must outlive the pod goes to PXC,
-// Valkey, OpenBao or the object store instead, not onto this list.
+// process's temp dir (os.MkdirTemp, made at start-up or per call and
+// never read by a later process) or another emptyDir that holds nothing
+// farmer must find again, or if farmer and saasapi never run it. A new
+// write to anything that must outlive the process goes to PXC, Valkey,
+// OpenBao or the object store instead, not onto this list. Farmer writes
+// no JWT and no key at all (E3): Account JWTs are held in memory and kept
+// in the accounts bucket, sprout User JWTs in the sprout JWT bucket, and
+// the farmer's own User JWTs are signed on first use and held in memory.
 var allowedFileWrites = []string{
-	// farmerpki: the farmer chart points it into the tmp emptyDir
-	// (deploy/helm/farmer, farmer-configmap.yaml). What farmer writes there
-	// (the JWTs it signs for its own connections, cached Account JWTs) is
-	// per replica and made again at start; Account and sprout User JWTs'
-	// source of truth is Transit, PXC and the sprout JWT bucket.
+	// The DMZ bus's PKI dir (cmd/farmerbus, on its data emptyDir; the
+	// account loader refills its resolver at every start). Farmer does
+	// not call it.
 	"internal/pki/pki.go:SetupPKIFarmer:os.MkdirAll#1",
-	"internal/pki/jwtauth.go:ensurePlatformAuthLocked:os.MkdirAll#1",
-	"internal/pki/jwtauth.go:ensurePlatformAuthLocked:os.MkdirAll#2",
-	"internal/pki/jwtauth.go:ensurePlatformAuthLocked:os.MkdirAll#3",
-	"internal/pki/jwtusers.go:mintOrReuseUserJWT:os.MkdirAll#1",
-	"internal/pki/tenant.go:ensureTenantAccountMaterial:os.MkdirAll#1",
-	"internal/pki/tenant.go:ensureTenantAccountMaterial:os.MkdirAll#2",
-	"internal/pki/tenant.go:signLockedOutTenantJWT:os.MkdirAll#1",
 	// The in-process test bus's account resolver (ConfigureNats): a fresh
 	// directory in the process's temp dir per call, removed when the
 	// server closes the resolver. Farmer never embeds a bus.
 	"internal/pki/nats.go:newTempDirResolver:os.MkdirTemp#1",
-	// The atomic and write-once helpers every write under farmerpki (and
-	// the sprout's PKI dir) goes through: the temp file is made next to
-	// the target, so in farmer it is in the tmp emptyDir too.
+	// The atomic and write-once helpers (packageFileWriteCalls): the
+	// temp file is made next to the target. Their callers below are the
+	// sprout's and the CLI's.
 	"internal/pki/enrollclient.go:writeFileAtomic:os.MkdirAll#1",
 	"internal/pki/enrollclient.go:writeFileAtomic:os.CreateTemp#1",
 	"internal/pki/enrollclient.go:writeFileOnce:os.MkdirAll#1",
 	"internal/pki/enrollclient.go:writeFileOnce:os.CreateTemp#1",
+	// The sprout's PKI dir and enrolment state: sprout only.
+	"internal/pki/busconnect.go:persistBusURLs:pki.writeFileAtomic#1",
+	"internal/pki/enrollclient.go:EnsureSproutBoxKey:pki.writeFileOnce#1",
+	"internal/pki/enrollclient.go:EnsureSproutBoxKey:pki.writeFileAtomic#1",
+	"internal/pki/enrollclient.go:PersistEnrollment:pki.writeFileAtomic#1",
+	"internal/pki/enrollclient.go:PersistEnrollment:pki.writeFileAtomic#2",
+	"internal/pki/enrollclient.go:pinTenantX25519Pub:pki.writeFileOnce#1",
+	"internal/pki/enrollclient.go:RefreshGatewayJWT:pki.writeFileAtomic#1",
+	"internal/pki/enrollclient.go:RefreshGatewayJWT:pki.writeFileAtomic#2",
+	"internal/pki/sproutbox.go:pinSproutTenant:pki.writeFileOnce#1",
+	"internal/pki/sproutbox.go:pinSproutID:pki.writeFileOnce#1",
+	"internal/pki/sproutbox.go:sproutGuard:pki.writeFileAtomic#1",
+	"internal/pki/sproutbox.go:promoteSproutBoxKey:pki.writeFileAtomic#1",
+	"internal/pki/sproutbox.go:promoteSproutBoxKey:pki.writeFileAtomic#2",
+	"internal/pki/sproutbox.go:BeginSproutBoxKeyRotation:pki.writeFileOnce#1",
+	"internal/pki/sproutbox.go:reconcileTenantKeyPin:pki.writeFileAtomic#1",
+	// The root CA a sprout (TOFU) or the imas CLI fetches: not farmer.
+	"internal/pki/pki.go:FetchRootCA:pki.writeFileOnce#1",
+	// The imas CLI's box key: CLI only.
+	"internal/pki/cliboxclient.go:writeFreshBoxKey:pki.writeFileAtomic#1",
 	// The sprout's own NKey: sprout only. Farmer's NKey is the shared
 	// Secret at IMAS_FARMER_NKEY_SEED_FILE (certs.LoadFarmerNKey), and
 	// GenNKey(true) refuses before writing.
@@ -209,7 +242,9 @@ func fileWritesIn(fset *token.FileSet, f *ast.File, rel string) []fileWrite {
 		}
 		names[local] = p
 	}
-	if len(names) == 0 {
+	dir := path.Dir(rel)
+	helpers := packageFileWriteCalls[dir]
+	if len(names) == 0 && len(helpers) == 0 {
 		return nil
 	}
 	var out []fileWrite
@@ -227,19 +262,26 @@ func fileWritesIn(fset *token.FileSet, f *ast.File, rel string) []fileWrite {
 			if !ok {
 				return true
 			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
+			var callID string
+			switch fun := call.Fun.(type) {
+			case *ast.Ident:
+				if !slices.Contains(helpers, fun.Name) {
+					return true
+				}
+				callID = fn + ":" + path.Base(dir) + "." + fun.Name
+			case *ast.SelectorExpr:
+				id, ok := fun.X.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				p, ok := names[id.Name]
+				if !ok || !slices.Contains(fileWriteCalls[p], fun.Sel.Name) {
+					return true
+				}
+				callID = fn + ":" + p[strings.LastIndex(p, "/")+1:] + "." + fun.Sel.Name
+			default:
 				return true
 			}
-			id, ok := sel.X.(*ast.Ident)
-			if !ok {
-				return true
-			}
-			p, ok := names[id.Name]
-			if !ok || !slices.Contains(fileWriteCalls[p], sel.Sel.Name) {
-				return true
-			}
-			callID := fn + ":" + p[strings.LastIndex(p, "/")+1:] + "." + sel.Sel.Name
 			seen[callID]++
 			out = append(out, fileWrite{
 				pos: rel + ":" + strconv.Itoa(fset.Position(call.Pos()).Line),
@@ -314,6 +356,19 @@ func mk() {
 
 func notAWrite() { _ = os.WriteFile("a", nil, 0) }
 `
+	// A package's own write helper (packageFileWriteCalls) counts as a
+	// write in that package only.
+	pkiDir := filepath.Join(root, "internal", "pki")
+	if err := os.MkdirAll(pkiDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	helperSrc := "package pki\n\nfunc writeFileAtomic(string, []byte) error { return nil }\n\nfunc save() { _ = writeFileAtomic(\"/tmp/farmer/pki/x.jwt\", nil) }\n"
+	if err := os.WriteFile(filepath.Join(pkiDir, "h.go"), []byte(helperSrc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.go"), []byte("package pkg\n\nfunc writeFileAtomic(string) {}\n\nfunc other() { writeFileAtomic(\"x\") }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -334,5 +389,62 @@ func notAWrite() { _ = os.WriteFile("a", nil, 0) }
 	}
 	if !slices.Equal(keys, want) {
 		t.Fatalf("found %q, want %q", keys, want)
+	}
+	keys = nil
+	for _, w := range scanFileWrites(t, root, []string{"internal/pki"}) {
+		keys = append(keys, w.key)
+	}
+	if want := []string{"internal/pki/h.go:save:pki.writeFileAtomic#1"}; !slices.Equal(keys, want) {
+		t.Fatalf("found %q, want %q", keys, want)
+	}
+}
+
+// farmerPKIScanned are the farmer chart and UAT files TestNoFarmerPKIDir
+// reads besides the scanned Go trees, from the repository root: every
+// template, values file and CI values file of the chart.
+var farmerPKIScanned = []string{
+	"deploy/helm/farmer/templates",
+	"deploy/helm/farmer/values.yaml",
+	"deploy/helm/farmer/ci",
+	"uat/hub/core/values/farmer-uat.yaml",
+}
+
+// TestNoFarmerPKIDir fails on any mention of farmer's old JWT directory
+// (farmerPKIDir) in the scanned Go trees' non-test source, and on any
+// mention of it or of the farmerpki key in the farmer chart and its UAT
+// values: farmer keeps no JWT or key under /tmp/farmer/pki, nor anywhere
+// else on disk (E3). Writes under it through a helper or an os call are
+// caught by TestNoFileWrittenOutsideTmp; this catches the path itself.
+func TestNoFarmerPKIDir(t *testing.T) {
+	check := func(path string, needles ...string) {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		for _, n := range needles {
+			if strings.Contains(string(b), n) {
+				t.Errorf("%s mentions %q: farmer keeps nothing under %s", path, n, farmerPKIDir)
+			}
+		}
+	}
+	walk := func(dir string, keep func(string) bool, needles ...string) {
+		err := filepath.WalkDir(filepath.Join(moduleRoot, dir), func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !d.IsDir() && keep(p) {
+				check(p, needles...)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("scanning %s: %v", dir, err)
+		}
+	}
+	for _, dir := range scannedDirs {
+		walk(dir, func(p string) bool { return strings.HasSuffix(p, ".go") && !strings.HasSuffix(p, "_test.go") }, farmerPKIDir)
+	}
+	for _, p := range farmerPKIScanned {
+		walk(p, func(string) bool { return true }, farmerPKIDir, "farmerpki")
 	}
 }

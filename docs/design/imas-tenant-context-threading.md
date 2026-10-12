@@ -19,9 +19,10 @@ authenticated into exactly one NATS Account: the legacy "current tenant"
 Account (`natsAuthMaterial.tenantPub` in `internal/pki/jwtauth.go`, named
 by `config.FarmerOrganization`).** Concretely:
 
-- `jwtusers.go`'s `syncNatsAuth` mints farmer's own User JWT
-  (`farmerUserJWTPath()`) with `IssuerAccount = mat.tenantPub` — the one
-  legacy Account, unconditionally.
+- `jwtusers.go`'s `syncNatsAuth` minted farmer's own User JWT (then a
+  file, `farmerUserJWTPath()`; since E3 signed on first use and held in
+  memory, `pki.FarmerUserJWT`) with `IssuerAccount = mat.tenantPub` — the
+  one legacy Account, unconditionally.
 - `ConnectFarmer` connects with exactly that JWT
   (`pki.FarmerUserJWT()`) plus farmer's NKey seed, once, at process
   startup. There is no second, third, ... connection for any other
@@ -35,7 +36,8 @@ by `config.FarmerOrganization`).** Concretely:
   Account (`tenantAccountMaterial.pub`, keyed by `tenantID`, disjoint
   from `mat.tenantPub`) for every dynamically-provisioned tenant, and
   `enroll.go` issues each such tenant's sprouts a User JWT
-  (`GetSproutUserJWTForTenant`) under *that* Account — never under the
+  (`MintOrReuseUserJWT`, kept in the sprout JWT bucket) under *that*
+  Account — never under the
   legacy `mat.tenantPub`. `tenant.go`'s own header comment already notes
   it "configures no exports/imports anywhere in this file."
 

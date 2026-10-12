@@ -10,7 +10,7 @@ package main
 //     ensureTenantAccountMaterial);
 //   - each sprout User JWT is signed by that signing key, names the
 //     Account as its issuer and carries sproutPermissions (jwtusers.go's
-//     mintOrReuseUserJWT);
+//     MintOrReuseUserJWT);
 //   - the requester that plays core gets core's per-tenant "farmer" User
 //     shape, allowAllPermissions;
 //   - the Account reaches the bus the way core pushes it, a request to

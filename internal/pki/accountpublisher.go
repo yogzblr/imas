@@ -29,7 +29,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -57,6 +56,10 @@ type AccountPublisher interface {
 	// object is missing or older, then bumps the index and announces
 	// them once. It pushes nothing.
 	ReconcileAll(ctx context.Context) error
+	// Current returns the bucket's Account JWT for accountPub, or ""
+	// when there is none or the object is not a valid Account JWT of a
+	// trusted issuer for it. A failed read is an error.
+	Current(ctx context.Context, accountPub string) (string, error)
 }
 
 // ErrAccountJWTSuperseded reports that the accounts bucket already holds
@@ -322,6 +325,28 @@ func (p *s3AccountPublisher) announce(bus accountBus, accounts map[string]int64)
 	}
 }
 
+// Current implements AccountPublisher.
+func (p *s3AccountPublisher) Current(ctx context.Context, accountPub string) (string, error) {
+	key := accountloader.AccountKey(accountPub)
+	b, info, err := p.objects.GetLimitedWithInfo(ctx, key, accountloader.MaxJWTSize)
+	switch {
+	case objectstore.IsNotExist(err):
+		return "", nil
+	case errors.Is(err, objectstore.ErrObjectTooLarge):
+		log.Warnf("accounts bucket object %s is over %d bytes; not using it", key, accountloader.MaxJWTSize)
+		return "", nil
+	case err != nil:
+		return "", err
+	}
+	held, err := p.claim(string(b), accountPub)
+	if err != nil {
+		log.Warnf("accounts bucket object %s is not a valid Account JWT (%v); not using it", key, err)
+		return "", nil
+	}
+	p.remember(key, info.ETag, held)
+	return held.Raw, nil
+}
+
 // storeObject is §7.3 step 3, inside the caller's critical section: read
 // the account's object and write ac's JWT unless the object already
 // holds it or a JWT that outranks it (accountrank.Better). An object that
@@ -533,30 +558,12 @@ func (p *s3AccountPublisher) listETags(ctx context.Context) (map[string]string, 
 	}
 }
 
-// localAccountJWTs returns the Account JWTs this farmer holds: the SYS
-// Account, the legacy tenant and every tenant with an Account JWT here
-// (lock-outs included). A missing file is skipped.
+// localAccountJWTs returns the Account JWTs this farmer holds in memory
+// (heldAccountJWTs): the SYS Account, the legacy tenant and every tenant
+// it has loaded or signed, lock-outs included, minimal mints not yet
+// re-signed with their revocations left out.
 func localAccountJWTs() ([]string, error) {
-	paths := []string{sysAccountJWTPath(), tenantJWTPath()}
-	ids, err := tenantIDsProvisionedOnDisk()
-	if err != nil {
-		return nil, err
-	}
-	for _, id := range ids {
-		paths = append(paths, tenantAccountJWTPath(id))
-	}
-	var out []string
-	for _, path := range paths {
-		b, err := os.ReadFile(path)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, string(b))
-	}
-	return out, nil
+	return heldAccountJWTs(true), nil
 }
 
 // accountRowLock takes the farmer.job_leases row lease account:<pub>, so

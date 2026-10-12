@@ -93,6 +93,25 @@ Tests: two farmer replicas (two test processes with separate temp directories) m
 re-sign and revoke for one tenant; each serves the other's results; killing one loses
 nothing.
 
+As built (E3): Account JWTs (SYS, legacy tenant, every tenant, lock-outs) are held in
+memory (`internal/pki/accountjwts.go`); a replica that holds none reads the accounts
+bucket through the new `AccountPublisher.Current`, and every re-sign starts from the
+newest of the held and the bucket copy, so one replica's deny survives another's
+grant. Farmer's own User JWTs and the SYS user JWT are signed on first use and held
+in memory; sprout JWTs come only from the sprout JWT bucket (`syncTenantSprouts`
+mints none). The `SAASAPI_USER` seed is required like `SYS_USER` and never generated.
+No library in farmer needs a file path, so no start-up `os.MkdirTemp` file was added
+(the in-process test bus already uses one per call). The chart's `tmp` emptyDir stays
+as the process's temp directory under the read-only root filesystem; it no longer
+holds `farmerpki`, which the chart no longer sets. `config.FarmerPKI` and
+`writeFileAtomic` stay: the first is the DMZ bus's resolver directory (cmd/farmerbus),
+the second the sprout's and the CLI's write helper. The guard counts the helper's
+calls per caller, fails on `/tmp/farmer` in the scanned code and on `/tmp/farmer` or
+`farmerpki` in the farmer chart and its UAT values, and every `setupTestPKI` test
+fails if anything appears under the old PKI directory. The legacy tenant's Transit
+keys are created when missing, as every farmer start did before (its Account JWT file
+lived in the pod's tmp emptyDir).
+
 ## E4: loadtest without trust seeds; sprout honours Retry-After (P27.3, P27.4)
 
 Scope: `tools/loadtest`, `internal/pki/enrollclient.go`, the Envoy config in

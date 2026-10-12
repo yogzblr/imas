@@ -77,7 +77,7 @@ func clearExternalSeedEnv(t *testing.T) {
 func TestPublishSaaSAPICredential_WritesJWTAndPublicKeyOnly(t *testing.T) {
 	setupTestPKI(t)
 	clearExternalSeedEnv(t)
-	if _, err := ensureNatsAuth(); err != nil { // farmer's existing SYS key on disk
+	if _, err := ensureNatsAuth(); err != nil { // farmer's SYS key, in Transit
 		t.Fatal(err)
 	}
 	pub, _ := useExternalSaaSAPISeed(t)
@@ -209,23 +209,7 @@ func TestPublishSaaSAPICredential_RefusesToGenerateKeyMaterial(t *testing.T) {
 	if store.reads != 0 || store.writes != 0 {
 		t.Fatalf("store touched despite refusing: reads=%d writes=%d", store.reads, store.writes)
 	}
-	if _, err := os.Stat(saasAPIUserSeedPath()); !os.IsNotExist(err) {
-		t.Fatalf("a SaaS API seed was generated on disk (stat err=%v)", err)
-	}
-}
-
-func TestPublishSaaSAPICredential_AcceptsSeedsAlreadyOnDisk(t *testing.T) {
-	// Run against farmer's own PKI directory, where both keys already
-	// exist from farmer's boot: no external env needed.
-	setupTestPKI(t)
-	clearExternalSeedEnv(t)
-	if _, _, err := EnsureSaaSAPICredential(); err != nil {
-		t.Fatal(err)
-	}
-	store := &fakeCredStore{}
-	if res, err := PublishSaaSAPICredential(context.Background(), store); err != nil || !res.Written {
-		t.Fatalf("res=%+v err=%v", res, err)
-	}
+	// No seed was generated: setupTestPKI's requireNoFarmerPKIWrites.
 }
 
 func TestPublishSaaSAPICredential_StoreErrors(t *testing.T) {

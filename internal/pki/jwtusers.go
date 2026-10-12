@@ -13,13 +13,14 @@ package pki
 //     only thing that requires re-signing the Account JWT and pushing it to
 //     the resolver (see resolver.go) — that's the expensive, network-facing
 //     operation.
-//   - Each sprout/farmer/cli-admin's own signed User JWT is minted once and
-//     kept so it can be handed back out (by the enrollment and refresh
-//     endpoints) without re-signing. A sprout's is kept in the private
-//     sprout JWT bucket, indexed in PXC (MintOrReuseUserJWT, below); the
-//     farmer's and CLI admins' are still local files. Minting or reusing
-//     one never itself requires a push: the resolver never stores User
-//     JWTs, only Account JWTs.
+//   - Each sprout's own signed User JWT is minted once and kept so it can
+//     be handed back out (by the enrollment and refresh endpoints)
+//     without re-signing: in the private sprout JWT bucket, indexed in
+//     PXC (MintOrReuseUserJWT, below). The farmer's own User JWTs are
+//     signed on first use and held in memory (accountjwts.go). No User
+//     JWT is written to a file. Minting or reusing one never itself
+//     requires a push: the resolver never stores User JWTs, only Account
+//     JWTs.
 import (
 	"bytes"
 	"context"
@@ -29,7 +30,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"reflect"
 	"sync"
 	"time"
@@ -81,7 +81,7 @@ func sproutPermissions(id string) jwt.Permissions {
 			// it publishes still has to open at farmer. Before this grant
 			// shell couldn't work at all for a sprout with a per-sprout
 			// JWT. Already-enrolled sprouts get it through the
-			// mintOrReuseUserJWT re-mint on their next refresh and restart.
+			// MintOrReuseUserJWT re-mint on their next refresh and restart.
 			SproutShellPublishGrant(id),
 			// Periodic liveness heartbeat (internal/heartbeat): exactly
 			// this sprout's own subject, never a wildcard, so one sprout
@@ -90,8 +90,8 @@ func sproutPermissions(id string) jwt.Permissions {
 			// for an accepted sprout of the tenant the message arrived
 			// in. Outside imas.sprouts.<id>.>, so the sprout never
 			// receives its own heartbeats. A User JWT minted before this
-			// grant is re-minted on the next sync (mintOrReuseUserJWT
-			// compares the whole permission set).
+			// grant is re-minted where it is next served
+			// (MintOrReuseUserJWT compares the whole permission set).
 			SproutHeartbeatSubject(id),
 		}},
 		Sub: jwt.Permission{Allow: jwt.StringList{
@@ -198,54 +198,16 @@ func applyRevokedNKeys(ac *jwt.AccountClaims, revoked map[string]int64) bool {
 	return changed
 }
 
-// mintOrReuseUserJWT (re)mints a signed User JWT for pubkey under the
-// Account identified by issuerAccountPub/signingKP and persists it to
-// path, unless a JWT already on disk at path is still current (same
-// subject pubkey and permissions). Returns whether a new JWT was written.
-//
-// Comparing the permissions is what makes a change to sproutPermissions or
-// allowAllPermissions reach JWTs minted before it, on the next sync; a
-// sprout picks its re-minted JWT up through /v1/refresh.
-//
-// Parameterized by the issuing Account rather than a *natsAuthMaterial so
-// this same function serves both the legacy single "current tenant" Account
-// (syncNatsAuth, below, passing mat.tenantPub/mat.tenantSigningKP) and any
-// number of dynamically-provisioned tenant Accounts (tenant.go's
-// syncTenantSprouts, passing a *tenantAccountMaterial's fields) — workstream
-// E, FLAG FOR SECURITY REVIEW: this is exactly the seam that must never mix
-// up which Account a given sprout's User JWT gets issued under.
-func mintOrReuseUserJWT(path, pubkey, name string, perms jwt.Permissions, issuerAccountPub string, signingKP nkeys.KeyPair) (bool, error) {
-	if b, err := os.ReadFile(path); err == nil {
-		if existing, derr := jwt.DecodeUserClaims(string(b)); derr == nil && existing.Subject == pubkey &&
-			reflect.DeepEqual(existing.Permissions, perms) {
-			return false, nil
-		}
-	} else if !os.IsNotExist(err) {
-		return false, err
-	}
-	uc := jwt.NewUserClaims(pubkey)
-	uc.Name = name
-	uc.IssuerAccount = issuerAccountPub
-	uc.Permissions = perms
-	signed, err := uc.Encode(signingKP)
-	if err != nil {
-		return false, err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return false, err
-	}
-	if err := writeFileAtomic(path, []byte(signed), 0o600); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
 // syncNatsAuth recomputes the tenant Account's User JWTs and revocation
 // list from the current accept/deny/reject/unaccept directory state (the
 // same "rebuild from directory state" shape the old NKey-allow-list
-// ReloadNKeys used), re-signing and persisting the Account JWT if its
-// revocation list changed. It reports whether the Account JWT changed
-// (i.e. whether ReloadNKeys needs to push an update to the bus).
+// ReloadNKeys used), re-signing the Account JWT, and holding it in memory,
+// if its revocation list changed. It starts from the newest of the held
+// and the accounts bucket's copy (loadTenantClaims). Comparing the
+// farmer's own User JWT's permissions on its next use is what makes a
+// change to allowAllPermissions reach it (farmerUserJWT). It reports
+// whether the Account JWT changed (i.e. whether ReloadNKeys needs to push
+// an update to the bus).
 func syncNatsAuth(mat *natsAuthMaterial) (bool, error) {
 	ac, err := loadTenantClaims(mat)
 	if err != nil {
@@ -262,9 +224,6 @@ func syncNatsAuth(mat *natsAuthMaterial) (bool, error) {
 	if ensureUserGranted(ac, farmerKey) {
 		changed = true
 	}
-	if _, mintErr := mintOrReuseUserJWT(farmerUserJWTPath(), farmerKey, "farmer", allowAllPermissions(), mat.tenantPub, mat.tenantSigningKP); mintErr != nil {
-		log.Errorf("failed to mint farmer User JWT: %v", mintErr)
-	}
 
 	imasKeys, err := auth.GetPubkeysByRole("admin")
 	if err != nil {
@@ -275,9 +234,6 @@ func syncNatsAuth(mat *natsAuthMaterial) (bool, error) {
 	for _, key := range imasKeys {
 		if ensureUserGranted(ac, key) {
 			changed = true
-		}
-		if _, mintErr := mintOrReuseUserJWT(cliUserJWTPath(key), key, "imas-cli", allowAllPermissions(), mat.tenantPub, mat.tenantSigningKP); mintErr != nil {
-			log.Errorf("failed to mint imas cli User JWT for %s: %v", key, mintErr)
 		}
 	}
 
@@ -338,30 +294,35 @@ func syncNatsAuth(mat *natsAuthMaterial) (bool, error) {
 		if encErr != nil {
 			return false, encErr
 		}
-		if writeErr := writeFileAtomic(tenantJWTPath(), []byte(signed), 0o600); writeErr != nil {
-			return false, writeErr
+		if holdErr := holdAccountJWT(signed, false); holdErr != nil {
+			return false, holdErr
 		}
 		mat.tenantJWT = signed
 		mat.tenantMinted = false
+	} else {
+		// Unchanged: hold the JWT it started from (the bucket's, or a
+		// minimal mint that already is the tenant's state) as synced.
+		if holdErr := holdAccountJWT(mat.tenantJWT, false); holdErr != nil {
+			return false, holdErr
+		}
 	}
 	return changed, nil
 }
 
-// FarmerUserJWT returns the farmer's own signed User JWT, minted by
-// syncNatsAuth (via ReloadNKeys) into farmerUserJWTPath. cmd/farmer/main.go's
-// ConnectFarmer reads this to authenticate the core process's own bus
-// connection alongside its NKey seed (config.NKeyFarmerPrivFile) — the same
-// User-JWT-plus-seed shape ConnectSystemAccount uses for the SYS push
-// connection, replacing the bare-NKey connect that predates this file's JWT
-// auth model and can't satisfy a server configured with TrustedOperators.
-// ReloadNKeys must have run at least once (main() calls it during farmer
-// startup, before ConnectFarmer) so this file exists by the time it's read.
+// FarmerUserJWT returns the farmer's own signed User JWT under the legacy
+// tenant's Account, signing it on first use and holding it in memory
+// (farmerUserJWT, accountjwts.go). It is the legacy tenant's
+// FarmerUserJWTForTenant: the per-tenant bus connection authenticates
+// with it alongside the farmer's NKey seed — the same User-JWT-plus-seed
+// shape ConnectSystemAccount uses for the SYS push connection. Nothing is
+// read from or written to disk, so it works on any replica from its first
+// call.
 func FarmerUserJWT() (string, error) {
-	b, err := os.ReadFile(farmerUserJWTPath())
+	mat, err := ensureNatsAuth()
 	if err != nil {
 		return "", err
 	}
-	return string(b), nil
+	return farmerUserJWT(mat.tenantPub, mat.tenantSigningKP)
 }
 
 // Per-sprout User JWT store (P21 slice 3, docs/briefs/P21-slice3-farmer-
@@ -582,10 +543,11 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 }
 
 // tenantSproutJWTIssuer is the tenant's own Account (tenant.go) or, for
-// the legacy current tenant with no per-tenant Account material, the
-// legacy Account, matching where its sprouts' JWTs were issued before.
+// the legacy current tenant with no per-tenant Account of its own (no
+// Account recorded on its pki_tenants row), the legacy Account, matching
+// where its sprouts' JWTs were issued before.
 func tenantSproutJWTIssuer(_ context.Context, tenantID string) (string, nkeys.KeyPair, error) {
-	if _, err := os.Stat(tenantAccountJWTPath(tenantID)); err == nil || tenantID != currentTenantID() {
+	if tenantID != currentTenantID() || hasOwnTenantAccount(tenantID) {
 		tam, err := loadTenantAccountMaterial(tenantID)
 		if err != nil {
 			return "", nil, err

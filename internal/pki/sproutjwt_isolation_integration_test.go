@@ -62,7 +62,7 @@ func TestSproutJWT_CannotReachOtherSproutsSubjects(t *testing.T) {
 	jwt1, seed1 := acceptTestSprout(t, "sprout01")
 	acceptTestSprout(t, "sprout02")
 
-	farmerJWT, err := os.ReadFile(farmerUserJWTPath())
+	farmerJWT, err := farmerUserJWTBytes()
 	if err != nil {
 		t.Fatalf("reading farmer's User JWT: %v", err)
 	}

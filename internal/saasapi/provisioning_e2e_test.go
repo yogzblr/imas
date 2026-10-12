@@ -57,6 +57,8 @@ import (
 	"github.com/yogzblr/imas/internal/natsapi"
 	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/pki/natskeys"
+	"github.com/yogzblr/imas/internal/pki/natskeys/natskeystest"
 	"github.com/yogzblr/imas/internal/pki/pkitest"
 	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 )
@@ -68,6 +70,7 @@ type e2eEnv struct {
 	saasDB     *gorm.DB
 	farmerSYS  *nats.Conn
 	farmerSeed []byte
+	transit    *pkitest.Transit
 }
 
 func newE2EEnv(t *testing.T) *e2eEnv {
@@ -98,11 +101,11 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 	pki.SetDB(pkiDB)
 	t.Cleanup(func() { pki.SetDB(nil) })
 
-	// Farmer's on-disk PKI, TLS material, and NKey — the config values
-	// pki.ConfigureNats/ProvisionTenant/ConnectSystemAccount read.
+	// Farmer's TLS material and NKey — the config values
+	// pki.ConfigureNats/ProvisionTenant/ConnectSystemAccount read. Farmer
+	// keeps no PKI directory: what it signs is held in memory.
 	tmp := t.TempDir()
-	config.FarmerPKI = filepath.Join(tmp, "pki") + "/"
-	pkitest.Farmer(t) // the NATS trust chain in a fake Transit
+	env.transit = pkitest.Farmer(t) // the NATS trust chain in a fake Transit
 	config.FarmerInterface = "127.0.0.1"
 	// -1, not "0": nats-server maps Port 0 to the default 4222, which
 	// collides with other packages' test buses under a parallel
@@ -476,19 +479,15 @@ func TestProvisioningBridge_EndToEnd_PendingToActiveToOffboarded(t *testing.T) {
 }
 
 // TestProvisioningBridge_EndToEnd_FarmerFailureMovesTenantToFailed makes
-// the real pki.ProvisionTenant fail — a regular file squatting where the
-// per-tenant Account directory tree must be created, so MkdirAll fails
-// even when running as root — and checks the failure makes it all the way
-// back: the tenant ends up failed with an error recorded, not pending
-// forever. It also checks that the underlying error, whose text names a
-// farmer filesystem path, never reaches the bus, the saas schema, or the
-// external status response — only the fixed public message does.
+// the real pki.ProvisionTenant fail — OpenBao Transit refuses to create
+// the tenant's keys — and checks the failure makes it all the way back:
+// the tenant ends up failed with an error recorded, not pending forever.
+// It also checks that the underlying error, whose text names farmer's
+// Transit address and key names, never reaches the bus, the saas schema,
+// or the external status response — only the fixed public message does.
 func TestProvisioningBridge_EndToEnd_FarmerFailureMovesTenantToFailed(t *testing.T) {
 	env := newE2EEnv(t)
-	blocker := filepath.Join(config.FarmerPKI, "nats-auth", "tenants")
-	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
-		t.Fatalf("planting blocker file: %v", err)
-	}
+	env.transit.Fake.FailNext(natskeystest.OpCreateKey, http.StatusInternalServerError, 1000)
 	results := env.observe(t, controlplane.SubjectTenantProvisionedWildcard)
 
 	tenantID := env.createTenant(t, "Doomed Co")
@@ -593,11 +592,11 @@ func TestProvisioningBridge_EndToEnd_DeleteWhileProvisioningIsRejected(t *testin
 }
 
 // assertNoInternalDetail fails if s carries the farmer-side error detail
-// the failure test provokes (its text: "mkdir <FarmerPKI>/nats-auth/tenants:
-// not a directory").
+// the failure test provokes: a Transit error naming the fake's address,
+// its mount and the tenant's key names.
 func assertNoInternalDetail(t *testing.T, where, s string) {
 	t.Helper()
-	for _, leak := range []string{"not a directory", "mkdir", "nats-auth", config.FarmerPKI} {
+	for _, leak := range []string{"nats-tacct-", "nats-tsign-", "transit/", os.Getenv(natskeys.EnvPrefixSign + "OPENBAO_ADDR")} {
 		if strings.Contains(s, leak) {
 			t.Fatalf("%s leaked internal error detail (%q): %s", where, leak, s)
 		}

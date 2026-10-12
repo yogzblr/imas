@@ -42,7 +42,7 @@
 // ConnectEventMsg/DisconnectEventMsg carry ClientInfo.User, which for a
 // JWT-authenticated connection is the User JWT's subject — i.e. the
 // sprout's NKey public key (see internal/pki/jwtusers.go's
-// mintOrReuseUserJWT, which mints each sprout's User JWT with Subject =
+// MintOrReuseUserJWT, which mints each sprout's User JWT with Subject =
 // its NKey pubkey). This package reverse-looks that up via
 // pki.SproutIDForNKey, which also acts as the filter for events that
 // aren't a sprout at all (farmer's own connection, a imas CLI admin, or

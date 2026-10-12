@@ -154,9 +154,9 @@ func TestFarmerPerTenantConnections_TransportIsolation(t *testing.T) {
 	if err := ReloadNKeysForTenant(tenantB); err != nil {
 		t.Fatalf("ReloadNKeysForTenant(%s): %v", tenantB, err)
 	}
-	sproutJWT, err := GetSproutUserJWTForTenant(tenantB, "web-01")
+	sproutJWT, err := sproutUserJWTForTest(tenantB, "web-01")
 	if err != nil {
-		t.Fatalf("GetSproutUserJWTForTenant: %v", err)
+		t.Fatalf("sproutUserJWTForTest: %v", err)
 	}
 	ncSprout, err := dialAsSprout(t, sproutJWT, sproutSeed)
 	if err != nil {
@@ -281,9 +281,9 @@ func TestFarmerQueueGroupLoadBalancing_IsolatedPerTenant(t *testing.T) {
 		if err := ReloadNKeysForTenant(tenantID); err != nil {
 			t.Fatalf("ReloadNKeysForTenant(%s): %v", tenantID, err)
 		}
-		sproutJWT, err := GetSproutUserJWTForTenant(tenantID, sproutID)
+		sproutJWT, err := sproutUserJWTForTest(tenantID, sproutID)
 		if err != nil {
-			t.Fatalf("GetSproutUserJWTForTenant: %v", err)
+			t.Fatalf("sproutUserJWTForTest: %v", err)
 		}
 		nc, err := dialAsSprout(t, sproutJWT, sproutSeed)
 		if err != nil {

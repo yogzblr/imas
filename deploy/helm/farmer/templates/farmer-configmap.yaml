@@ -1,10 +1,9 @@
 {{- include "imas-farmer.validate" . -}}
 {{- $tlsDir := include "imas-farmer.tlsDir" . -}}
-{{- /* Under the tmp emptyDir: farmer keeps no state on disk, and what it
-still writes to farmerpki is per replica and made again at start. Its
-NKey is not here: it is the farmer.nkeySecret mount
+{{- /* No PKI directory: farmer keeps no state on disk and writes no JWT
+or key (the JWTs it signs are held in memory and kept in the accounts
+and sprout JWT buckets). Its NKey is the farmer.nkeySecret mount
 (IMAS_FARMER_NKEY_SEED_FILE). */ -}}
-{{- $pki := "/tmp/farmer/pki" -}}
 {{- $managed := dict
   "loglevel" .Values.farmer.logLevel
   "farmerinterface" "0.0.0.0"
@@ -13,7 +12,6 @@ NKey is not here: it is the farmer.nkeySecret mount
   "farmerbusport" (toString .Values.bus.port)
   "farmerorganization" .Values.organization
   "configroot" "/etc/imas/"
-  "farmerpki" (printf "%s/" $pki)
   "gatewaytransitkeyname" .Values.farmer.openbao.gateway.keyName
   "gatewayjwtttl" .Values.farmer.gatewayJWTTTL
   "sproutbusurls" .Values.bus.sproutBusURLs

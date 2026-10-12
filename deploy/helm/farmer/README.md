@@ -1098,11 +1098,14 @@ which is local to one PXC node):
   with online sprouts stays subscribed on every replica.
 
 The pod's root filesystem is read-only. Its only writable volumes are the
-`tmp` emptyDir and the TLS directory. `farmerpki` points into `tmp`: what
-farmer still writes there (the JWTs it signs for its own connections) is
-per replica and made again at every start; nothing there outlives the pod.
-farmer's NKey is not written: every replica reads the same seed from the
-read-only `farmer.nkeySecret` mount ([Seeds](#seeds)).
+`tmp` emptyDir (the process's temp directory) and the TLS directory.
+Farmer writes no JWT or key file: the Account JWTs it signs are held in
+memory and kept in the accounts bucket, which every replica reads, sprout
+User JWTs are in the sprout JWT bucket, and its own User JWTs are signed
+on first use and held in memory. Nothing a farmer process writes is read
+by a later one, so a replica can be killed at any time and loses
+nothing. farmer's NKey is not written either: every replica reads the
+same seed from the read-only `farmer.nkeySecret` mount ([Seeds](#seeds)).
 
 Farmer and saasapi roll one pod at a time (`RollingUpdate`,
 `maxUnavailable: 0`, `maxSurge: 1`), and a PodDisruptionBudget (`farmer.pdb`, `minAvailable: 1`,

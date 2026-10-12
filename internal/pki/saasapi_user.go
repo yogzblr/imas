@@ -23,8 +23,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"reflect"
 	"time"
 
@@ -40,16 +38,11 @@ import (
 
 const (
 	saasAPIUserName = "imas-saasapi"
-	// saasAPIUserSeedName is the loadOrCreateSeed/loadExternalSeed name,
-	// so IMAS_NATS_SAASAPI_USER_SEED_FILE / IMAS_NATS_SAASAPI_USER_SEED
-	// supply the seed externally (OpenBao via ESO) instead of farmer
-	// generating and persisting one.
+	// saasAPIUserSeedName is the loadRequiredSeed name, so
+	// IMAS_NATS_SAASAPI_USER_SEED_FILE / IMAS_NATS_SAASAPI_USER_SEED
+	// supply the seed (OpenBao via ESO); farmer never generates one.
 	saasAPIUserSeedName = "SAASAPI_USER"
 )
-
-func saasAPIUserSeedPath() string { return filepath.Join(natsAuthDir(), "saasapi-user.nk") }
-
-func sysAccountJWTPath() string { return filepath.Join(natsAuthDir(), "sys-account.jwt") }
 
 // saasAPIUserPermissions is the SaaS API's entire NATS reach: publish the
 // two tenant request subjects and internal.sprout.action; subscribe to the
@@ -123,8 +116,8 @@ func saasAPIUserJWTIsCurrent(uc *jwt.UserClaims, pub, sysAccountPub string) bool
 // Rotation: saasapi records the key it runs with in
 // saas.saasapi_credential_state (RecordSaaSAPICredential); a rotation
 // moves the old key to prev_pub. This reads that row and adds prev_pub to
-// the SYS Account JWT's revocation list, which is re-signed, persisted,
-// and pushed to the bus resolver over the same pushAccountUpdate path
+// the SYS Account JWT's revocation list, which is re-signed, held in
+// memory, and pushed to the bus resolver over the same pushAccountUpdate path
 // every tenant Account update uses — otherwise the old credential would
 // stay valid forever, since the User JWT carries no expiry. Whenever the
 // SYS Account JWT carries any revocation, it is (re-)pushed on every
@@ -138,9 +131,8 @@ func saasAPIUserJWTIsCurrent(uc *jwt.UserClaims, pub, sysAccountPub string) bool
 // and the caller should log rather than abort.
 func EnsureSaaSAPICredential() (userJWT string, seed []byte, err error) {
 	// ensurePlatformAuth takes authMu itself; call it first, then take
-	// authMu for the section below that reads and rewrites
-	// sys-account.jwt — the same file ensurePlatformAuth seeds under that
-	// lock. Only the platform part is needed (the SaaS API credential Job
+	// authMu for the section below that re-signs the SYS Account JWT —
+	// the one ensurePlatformAuth holds under that lock. Only the platform part is needed (the SaaS API credential Job
 	// signs with the SYS account key alone); the SYS user is loaded only
 	// for a push.
 	mat, err := ensurePlatformAuth()
@@ -181,7 +173,7 @@ func ensureSaaSAPICredentialLocked(mat *natsAuthMaterial, state *SaaSAPICredenti
 	authMu.Lock()
 	defer authMu.Unlock()
 
-	kp, err := loadOrCreateSeed(saasAPIUserSeedPath(), saasAPIUserSeedName, nkeys.CreateUser)
+	kp, err := loadRequiredSeed(saasAPIUserSeedName)
 	if err != nil {
 		return "", nil, "", false, fmt.Errorf("loading the SaaS API NKey seed: %w", err)
 	}
@@ -197,16 +189,22 @@ func ensureSaaSAPICredentialLocked(mat *natsAuthMaterial, state *SaaSAPICredenti
 		return "", nil, "", false, err
 	}
 
-	// Re-read the SYS Account JWT from disk under authMu rather than
-	// trusting mat's snapshot: another EnsureSaaSAPICredential call may
-	// have added a revocation since ensurePlatformAuth returned.
-	sysBytes, err := os.ReadFile(sysAccountJWTPath())
+	// Start from the newest SYS Account JWT, held or in the accounts
+	// bucket, under authMu rather than trusting mat's snapshot: another
+	// EnsureSaaSAPICredential call, here or on another replica, may have
+	// added a revocation since ensurePlatformAuth returned. A failed
+	// bucket read is an error: re-signing an older copy could drop a
+	// revocation of an earlier rotated-out key.
+	opSigningPub, err := mat.operatorSigningKP.PublicKey()
 	if err != nil {
-		return "", nil, "", false, fmt.Errorf("reading the SYS Account JWT: %w", err)
+		return "", nil, "", false, err
 	}
-	sysClaims, err := jwt.DecodeAccountClaims(string(sysBytes))
-	if err != nil || sysClaims.Subject != mat.sysAccountPub {
-		return "", nil, "", false, fmt.Errorf("SYS Account JWT on disk is invalid or doesn't match the SYS Account key: %v", err)
+	sysClaims, sysJWT, _, err := resignBase(context.Background(), mat.sysAccountPub, mat.sysAccountJWT, false, issuedBy(opSigningPub))
+	if err != nil {
+		return "", nil, "", false, fmt.Errorf("loading the SYS Account JWT: %w", err)
+	}
+	if sysClaims.Subject != mat.sysAccountPub {
+		return "", nil, "", false, fmt.Errorf("the SYS Account JWT doesn't match the SYS Account key")
 	}
 
 	sysChanged := false
@@ -230,7 +228,6 @@ func ensureSaaSAPICredentialLocked(mat *natsAuthMaterial, state *SaaSAPICredenti
 		return "", nil, "", false, err
 	}
 
-	sysJWT = string(sysBytes)
 	if sysChanged {
 		// Strictly newer iat than the SYS Account JWT it replaces (see
 		// syncNatsAuth).
@@ -239,9 +236,10 @@ func ensureSaaSAPICredentialLocked(mat *natsAuthMaterial, state *SaaSAPICredenti
 		if err != nil {
 			return "", nil, "", false, fmt.Errorf("re-signing the SYS Account JWT: %w", err)
 		}
-		if err := writeFileAtomic(sysAccountJWTPath(), []byte(sysJWT), 0o600); err != nil {
+		if err := holdAccountJWT(sysJWT, false); err != nil {
 			return "", nil, "", false, err
 		}
+		mat.sysAccountJWT = sysJWT
 	}
 	return userJWT, seed, sysJWT, sysChanged || len(sysClaims.Revocations) > 0, nil
 }
@@ -255,8 +253,8 @@ func ensureSaaSAPICredentialLocked(mat *natsAuthMaterial, state *SaaSAPICredenti
 // before the last rotation (prev_pub), when that was, and a version. Only
 // saasapi writes it (RecordSaaSAPICredential, on saasapi's own schema);
 // farmer has SELECT on saas.* and reads prev_pub in
-// EnsureSaaSAPICredential. It replaces the User JWT file farmer kept on
-// local disk and read its previous public key from.
+// EnsureSaaSAPICredential. It replaces the User JWT file farmer once kept
+// on local disk and read its previous public key from.
 //
 // A rotation takes the row lease (internal/lease), re-reads, and moves
 // current_pub to prev_pub with an UPDATE conditional on the version it

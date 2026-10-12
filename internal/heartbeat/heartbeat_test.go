@@ -50,7 +50,6 @@ func newTestPKIDB(t *testing.T) {
 	t.Cleanup(func() { pki.SetDB(nil) })
 
 	dir := t.TempDir()
-	config.FarmerPKI = dir + "/"
 	pkitest.Farmer(t) // the NATS trust chain in a fake Transit
 	farmerPubFile := filepath.Join(dir, "farmer.pub")
 	if err := os.WriteFile(farmerPubFile, []byte("UFAKE_FARMER_KEY_FOR_TESTING"), 0o600); err != nil {
