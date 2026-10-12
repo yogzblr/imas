@@ -22,7 +22,7 @@ package main
 // So the bus does the same work per CONNECT (verify the User JWT against
 // the Account's signing key, check the nonce signature, load the
 // permissions) as for an enrolled sprout. What this path skips is listed
-// in docs/loadtest.md, "What the fixture path does not test".
+// in docs/loadtest.md, "What the harness does not test".
 //
 // sproutPermissions and corePermissions are copies: internal/pki keeps
 // its own unexported. TestSproutPermissionsMatchPKI pins the copy to the
