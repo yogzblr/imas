@@ -246,19 +246,20 @@ def check(root):
             n += 1
         days.append(d.name)
     bs = root / "docs" / "BUILD-STATUS.md"
-    if bs.is_file():
-        lines = bs.read_text().rstrip("\n").split("\n")
-        done = last_rolled(lines)
-        for date in days:
-            if date <= done:
-                continue
-            for f, blocks in load_day(root, date):
-                for b in blocks:
-                    if "item" in b:
-                        try:
-                            apply_item(lines, b, lambda _w: None)
-                        except StatusError as e:
-                            raise StatusError(f"{f}: {e}")
+    if not bs.is_file():
+        raise StatusError(f"{bs} not found: the roll-up needs it")
+    lines = bs.read_text().rstrip("\n").split("\n")
+    done = last_rolled(lines)
+    for date in days:
+        if date <= done:
+            continue
+        for f, blocks in load_day(root, date):
+            for b in blocks:
+                if "item" in b:
+                    try:
+                        apply_item(lines, b, lambda _w: None)
+                    except StatusError as e:
+                        raise StatusError(f"{f}: {e}")
     return n
 
 

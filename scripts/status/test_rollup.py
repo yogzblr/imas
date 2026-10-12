@@ -130,6 +130,11 @@ class Rollup(unittest.TestCase):
         (d / "docs" / "status" / "days" / "2026-10-13").mkdir()
         (d / "docs" / "status" / "days" / "2026-10-13" / "a.md").write_text("item: P99\naction: update\nrag: Amber\n")
         self.assertEqual(rollup.check(d), 2)
+        # No BUILD-STATUS.md: the roll-up could not run, so neither does
+        # the check pass.
+        bs.unlink()
+        with self.assertRaises(rollup.StatusError):
+            rollup.check(d)
 
 
 if __name__ == "__main__":
