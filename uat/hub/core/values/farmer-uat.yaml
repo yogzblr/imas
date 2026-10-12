@@ -25,8 +25,16 @@ organization: imas
 bus:
   port: 8442
 
+# The two user seeds seeds.sh makes (SYS_USER, SAASAPI_USER: the chart's
+# default natsSeeds.seeds). The operator, operator-signing, SYS account and
+# tenant keys are OpenBao Transit keys (P21 slice 1): the bootstrap Job
+# creates the platform ones and writes the public trust to natsTrust's
+# ConfigMap, which uat/hub/dmz/install.sh copies to the DMZ bus.
 natsSeeds:
   secretName: imas-farmer-nats-seeds
+
+natsTrust:
+  configMapName: imas-nats-trust
 
 # farmer's API certificate and the root it verifies the bus with come from
 # the per-run UAT CA (cert-manager), the same CA the DMZ's bus and Envoy
@@ -61,6 +69,10 @@ openbao:
       requests: { cpu: 50m, memory: 128Mi }
       limits: { memory: 512Mi }
 
+# The token Secret holds a one-hour root-policy token openbao-bootstrap.sh
+# mints for each run, never the root token: the Job revokes it when done
+# (revokeToken, the chart default; owner decision a), and install.sh then
+# deletes the Secret. check.sh confirms both (design T4).
 openbaoBootstrap:
   enabled: true
   tokenSecretName: imas-uat-openbao-root

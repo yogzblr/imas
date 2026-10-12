@@ -5,6 +5,15 @@
 #   - farmer, saasapi, PXC (cluster, pxc and haproxy), Valkey and OpenBao
 #     (initialised, unsealed, the ed25519 gateway key) are Ready, and so
 #     are MinIO, Keycloak and the edge proxy;
+#   - design T4 (docs/design/imas-openbao-signing-design.md section 11, the
+#     OpenBao bootstrap Job): the trust ConfigMap is complete, public, and
+#     byte for byte what the first install wrote, so re-runs (finish.sh's
+#     upgrade, an install.sh re-run) wrote nothing; the token the Job was
+#     handed is revoked and its Secret gone; the ephemeral policy
+#     imas-nats-bootstrap is deleted; farmer's and the publish Job's
+#     policies cannot sign with the operator identity key; the three
+#     platform Transit keys are hardened. farmer being Ready also means
+#     its start-up check found the trust matching Transit;
 #   - the migration finished: the release is deployed (its migrate hook
 #     succeeded), no failed migrate Job is left, and both schemas carry
 #     applied goose versions;
@@ -76,6 +85,32 @@ if [[ -s "$token_file" ]]; then
 	check "transit/keys/$GATEWAY_KEY is ed25519" test "$key_type" = ed25519
 else
 	fail "transit/keys/$GATEWAY_KEY" "no root token at $token_file"
+fi
+
+# --- design T4: the OpenBao bootstrap Job ----------------------------------
+trust_now=$(trust_snapshot 2>/dev/null || true)
+[[ -n "$trust_now" ]] || trust_now='null'
+check "ConfigMap $CORE_NS/$NATS_TRUST_CONFIGMAP holds ${NATS_TRUST_KEYS[*]}" \
+	jq -e --args '. as $d | all($ARGS.positional[]; ($d.data[.] // "") | length > 0)' "${NATS_TRUST_KEYS[@]}" <<<"$trust_now"
+check "T4: ConfigMap $CORE_NS/$NATS_TRUST_CONFIGMAP holds no NKey seed" \
+	jq -e '.data | type == "object" and all(.[]; test("(^|[^A-Z2-7])S[A-Z2-7]{57}([^A-Z2-7]|$)") | not)' <<<"$trust_now"
+if [[ -s "$OUT_DIR/nats-trust.json" ]]; then
+	check "T4: the trust is byte for byte what the first install wrote (re-runs wrote nothing)" \
+		test "$trust_now" = "$(cat "$OUT_DIR/nats-trust.json")"
+else
+	fail "T4: the first trust" "no $OUT_DIR/nats-trust.json (install.sh records it)"
+fi
+secret_absent() { ! kc -n "$CORE_NS" get secret "$1" >/dev/null 2>&1; }
+check "T4: no bootstrap token Secret left ($CORE_NS/$OPENBAO_ROOT_SECRET)" secret_absent "$OPENBAO_ROOT_SECRET"
+if [[ -s "$token_file" ]]; then
+	while IFS= read -r line; do
+		case "$line" in
+		PASS\ *) pass "${line#PASS }" ;;
+		FAIL\ *) fail "${line#FAIL }" ;;
+		esac
+	done < <(openbao_t4 "$token_file" "$SENSITIVE_DIR/openbao-bootstrap-token")
+else
+	fail "T4: OpenBao checks" "no root token at $token_file"
 fi
 
 # --- migration ---------------------------------------------------------------

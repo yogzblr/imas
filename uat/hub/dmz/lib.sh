@@ -16,9 +16,15 @@ DMZ_ENVOY_NAME="${DMZ_FULLNAME}-envoy"
 DMZ_BUS_FQDN="${DMZ_BUS_NAME}.${DMZ_NAMESPACE}.svc.cluster.local"
 DMZ_ENVOY_TLS_SECRET=imas-envoy-dmz-tls
 DMZ_BUS_TLS_SECRET=imas-farmerbus-tls
-DMZ_SEEDS_SECRET=imas-farmer-nats-seeds
-# The five seeds the bus mounts (values-uat.yaml natsSeeds.seeds).
-DMZ_SEED_KEYS=(operator.nk operator-signing.nk sys-account.nk tenant.nk tenant-signing.nk)
+# The public NATS trust (P21 slice 1): the ConfigMap core's OpenBao
+# bootstrap Job writes in imas-core, copied here under the same name (the
+# nats chart's natsTrust.configMapName default). Public data only; the bus
+# holds no trust chain seed. The keys every copy must have, and the ones it
+# carries when core minted them (natsTrust.busFenceUserPub,
+# busLoaderUserPub).
+DMZ_TRUST_CONFIGMAP=imas-nats-trust
+DMZ_TRUST_KEYS=(operator.jwt operator.pub operator-signing.pub sys-account.pub sys-account.jwt)
+DMZ_TRUST_OPTIONAL_KEYS=(bus-fence-user.jwt bus-loader-user.jwt)
 # The bus client pod port from values-uat.yaml (NetworkPolicy rules name
 # pod ports), which is also the farmer chart's bus.port.
 DMZ_BUS_CLIENT_POD_PORT=5406
@@ -49,6 +55,71 @@ dmz_need() {
 	for t in "$@"; do
 		command -v "$t" >/dev/null 2>&1 || dmz_die "$t not found on PATH"
 	done
+}
+
+# _dmz_jwt_claim FILE JQ: one claim of the JWT in FILE, unverified (the bus
+# verifies; this only checks the copied chain hangs together).
+_dmz_jwt_claim() {
+	local p
+	p=$(tr -d '\n' <"$1" | cut -d. -f2 | tr '_-' '/+')
+	case $((${#p} % 4)) in
+	2) p="$p==" ;;
+	3) p="$p=" ;;
+	esac
+	printf '%s' "$p" | base64 -d 2>/dev/null | jq -r "($2) // empty | tostring" 2>/dev/null
+}
+
+# dmz_trust_problem DIR: prints why the files in DIR are not a complete,
+# public NATS trust (what core's bootstrap Job writes to imas-nats-trust),
+# or nothing when they are. Names keys, never prints a value. Needs jq and
+# base64.
+dmz_trust_problem() {
+	local dir=$1 key v op opsign sys
+	for key in "${DMZ_TRUST_KEYS[@]}"; do
+		[[ -s $dir/$key ]] || {
+			printf '%s is missing or empty' "$key"
+			return
+		}
+	done
+	for key in "${DMZ_TRUST_KEYS[@]}" "${DMZ_TRUST_OPTIONAL_KEYS[@]}"; do
+		[[ -s $dir/$key ]] || continue
+		# An NKey seed is 58 characters, a public key 56: a seed anywhere in
+		# a public ConfigMap is a leak, whatever key it sits under.
+		if grep -Eq '(^|[^A-Z2-7])S[A-Z2-7]{57}([^A-Z2-7]|$)' "$dir/$key"; then
+			printf '%s holds an NKey seed: the trust is public data only' "$key"
+			return
+		fi
+		v=$(tr -d '\n' <"$dir/$key")
+		case $key in
+		*.jwt) [[ $v =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]] || {
+			printf '%s is not a JWT' "$key"
+			return
+		} ;;
+		operator.pub | operator-signing.pub) [[ $v =~ ^O[A-Z2-7]{55}$ ]] || {
+			printf '%s is not an operator public key' "$key"
+			return
+		} ;;
+		sys-account.pub) [[ $v =~ ^A[A-Z2-7]{55}$ ]] || {
+			printf '%s is not an account public key' "$key"
+			return
+		} ;;
+		esac
+	done
+	op=$(tr -d '\n' <"$dir/operator.pub")
+	opsign=$(tr -d '\n' <"$dir/operator-signing.pub")
+	sys=$(tr -d '\n' <"$dir/sys-account.pub")
+	# The chain: the operator JWT is the identity key's own (self-signed),
+	# lists the signing key and names the SYS account; the SYS account JWT
+	# is that account's, signed by the operator signing key.
+	if [[ $(_dmz_jwt_claim "$dir/operator.jwt" .sub) != "$op" || $(_dmz_jwt_claim "$dir/operator.jwt" .iss) != "$op" ]]; then
+		printf 'operator.jwt is not the self-signed JWT of operator.pub'
+	elif [[ $(_dmz_jwt_claim "$dir/operator.jwt" '.nats.system_account') != "$sys" ]]; then
+		printf 'operator.jwt does not name sys-account.pub as its system account'
+	elif ! _dmz_jwt_claim "$dir/operator.jwt" '.nats.signing_keys' | jq -e --arg k "$opsign" 'index($k)' >/dev/null 2>&1; then
+		printf 'operator.jwt does not list operator-signing.pub as a signing key'
+	elif [[ $(_dmz_jwt_claim "$dir/sys-account.jwt" .sub) != "$sys" || $(_dmz_jwt_claim "$dir/sys-account.jwt" .iss) != "$opsign" ]]; then
+		printf 'sys-account.jwt is not the JWT of sys-account.pub signed by operator-signing.pub'
+	fi
 }
 
 # dmz_chart_version TAG: print the chart version (and image tag) for a

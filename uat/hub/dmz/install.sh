@@ -6,7 +6,7 @@
 #
 # Usage:
 #   install.sh --kubeconfig FILE --endpoints FILE --release-tag vX.Y.Z[-rc.N]
-#              [--seeds-dir DIR | --seeds-from-kubeconfig FILE
+#              [--trust-dir DIR | --seeds-from-kubeconfig FILE
 #                                 [--seeds-from-namespace NS]]
 #              [--accounts-reader-dir DIR] [--loader-seed FILE]
 #              [--workdir DIR] [--expose nodeport|loadbalancer]
@@ -20,13 +20,18 @@
 #                         "Endpoints file"); a tofu "uat" JSON works as is
 # --release-tag           the release under test. Chart version and farmerbus
 #                         image tag are both the tag without its leading v.
-# --seeds-dir             a directory with core's operator.nk,
-#                         operator-signing.nk, sys-account.nk, tenant.nk and
-#                         tenant-signing.nk (saasapi-user.nk is ignored)
-# --seeds-from-kubeconfig copy those five keys from the core cluster's seed
-#                         Secret (imas-farmer-nats-seeds in --seeds-from-
-#                         namespace, default imas-core) instead
-#                         With neither, the Secret must already exist here.
+# --trust-dir             a directory with core's public NATS trust files:
+#                         operator.jwt, operator.pub, operator-signing.pub,
+#                         sys-account.pub, sys-account.jwt and, when core
+#                         minted them, bus-fence-user.jwt and
+#                         bus-loader-user.jwt (P21 slice 1)
+# --seeds-from-kubeconfig copy those keys from the core cluster's trust
+#                         ConfigMap (imas-nats-trust in --seeds-from-
+#                         namespace, default imas-core) instead. The name
+#                         predates P21: no seed is copied any more
+#                         With neither, the ConfigMap must already exist
+#                         here. Nothing secret crosses: the bus holds no
+#                         trust chain seed
 # --accounts-reader-dir   a directory with access-key-id and
 #                         secret-access-key: the read-only accounts bucket
 #                         credential the bus's loader sidecar uses (uat/hub/
@@ -78,13 +83,13 @@ usage() {
 	exit 2
 }
 
-kubeconfig="" endpoints="" release_tag="" seeds_dir="" seeds_kubeconfig=""
+kubeconfig="" endpoints="" release_tag="" trust_dir="" seeds_kubeconfig=""
 seeds_namespace=imas-core workdir="" expose="" timeout=10m
 chart_registry="" render_only="" chart="" reader_dir="" loader_seed=""
 
 while (($#)); do
 	case $1 in
-	--kubeconfig | --endpoints | --release-tag | --seeds-dir | --seeds-from-kubeconfig | \
+	--kubeconfig | --endpoints | --release-tag | --trust-dir | --seeds-from-kubeconfig | \
 		--seeds-from-namespace | --workdir | --expose | --timeout | --chart-registry | --chart | \
 		--accounts-reader-dir | --loader-seed)
 		(($# >= 2)) || dmz_die "$1 needs a value"
@@ -92,7 +97,7 @@ while (($#)); do
 		--kubeconfig) kubeconfig=$2 ;;
 		--endpoints) endpoints=$2 ;;
 		--release-tag) release_tag=$2 ;;
-		--seeds-dir) seeds_dir=$2 ;;
+		--trust-dir) trust_dir=$2 ;;
 		--seeds-from-kubeconfig) seeds_kubeconfig=$2 ;;
 		--seeds-from-namespace) seeds_namespace=$2 ;;
 		--accounts-reader-dir) reader_dir=$2 ;;
@@ -120,13 +125,14 @@ version=$(dmz_chart_version "$release_tag")
 [[ -z $expose || $expose == nodeport || $expose == loadbalancer ]] || dmz_die "--expose must be nodeport or loadbalancer, not '$expose'"
 [[ $timeout =~ ^[1-9][0-9]*[smh]$ ]] || dmz_die "--timeout '$timeout' is not a duration like 10m"
 if [[ -n $render_only ]]; then
-	[[ -z $kubeconfig && -z $seeds_dir && -z $seeds_kubeconfig && -z $reader_dir && -z $loader_seed ]] ||
-		dmz_die "--render-only touches no cluster: drop --kubeconfig, the seed and the loader credential options"
+	[[ -z $kubeconfig && -z $trust_dir && -z $seeds_kubeconfig && -z $reader_dir && -z $loader_seed ]] ||
+		dmz_die "--render-only touches no cluster: drop --kubeconfig, the trust and the loader credential options"
 else
 	[[ -n $kubeconfig ]] || dmz_die "--kubeconfig is required"
 	[[ -r $kubeconfig ]] || dmz_die "kubeconfig '$kubeconfig' is not readable"
 	[[ -z $chart ]] || dmz_die "--chart is only for --render-only: an install always pulls the published chart"
-	[[ -z $seeds_dir || -z $seeds_kubeconfig ]] || dmz_die "give --seeds-dir or --seeds-from-kubeconfig, not both"
+	[[ -z $trust_dir || -z $seeds_kubeconfig ]] || dmz_die "give --trust-dir or --seeds-from-kubeconfig, not both"
+	[[ -z $trust_dir || -d $trust_dir ]] || dmz_die "--trust-dir '$trust_dir' is not a directory"
 	[[ -z $seeds_kubeconfig || -r $seeds_kubeconfig ]] || dmz_die "kubeconfig '$seeds_kubeconfig' is not readable"
 	[[ $seeds_namespace =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || dmz_die "bad namespace '$seeds_namespace'"
 	[[ -z $reader_dir || -d $reader_dir ]] || dmz_die "--accounts-reader-dir '$reader_dir' is not a directory"
@@ -265,44 +271,53 @@ kc wait --for=condition=Ready "clusterissuer/$DMZ_CLUSTER_ISSUER" --timeout="$ti
 kc create namespace "$DMZ_NAMESPACE" --dry-run=client -o yaml | kc apply -f - >/dev/null
 kc label namespace "$DMZ_NAMESPACE" imas.io/purpose=imas-uat --overwrite >/dev/null
 
-# --- 4. Seeds ---------------------------------------------------------------
-# apply_seed_dir DIR: the five seeds into the DMZ Secret. Contents travel
-# through a pipe only; nothing is printed.
-apply_seed_dir() {
-	local dir=$1 key args=()
-	for key in "${DMZ_SEED_KEYS[@]}"; do
-		[[ -s $dir/$key ]] || dmz_die "seed $key missing or empty in $dir"
-		if (($(wc -l <"$dir/$key") > 1)) || ! grep -Eq '^S[OAU][A-Z2-7]{50,}$' "$dir/$key"; then
-			dmz_die "seed $key in $dir is not one NKey seed"
-		fi
-		args+=("--from-file=$key=$dir/$key")
+# --- 4. The public NATS trust ----------------------------------------------
+# P21 slice 1: the bus holds no trust chain seed. It starts from the public
+# trust ConfigMap core's OpenBao bootstrap Job wrote (imas-core/
+# imas-nats-trust), copied here by hand or pipeline (owner decision c);
+# this is that copy. Only the named public keys are copied, after
+# dmz_trust_problem has checked them.
+# trust_from_json JSON DIR: the ConfigMap's known keys as files in DIR.
+trust_from_json() {
+	local json=$1 dir=$2 key
+	for key in "${DMZ_TRUST_KEYS[@]}" "${DMZ_TRUST_OPTIONAL_KEYS[@]}"; do
+		jq -j --arg k "$key" '.data[$k] // empty' <<<"$json" >"$dir/$key" ||
+			dmz_die "ConfigMap $DMZ_TRUST_CONFIGMAP: could not read $key"
 	done
-	kc -n "$DMZ_NAMESPACE" create secret generic "$DMZ_SEEDS_SECRET" "${args[@]}" \
+}
+# apply_trust_dir DIR: the trust files into the DMZ ConfigMap.
+apply_trust_dir() {
+	local dir=$1 key problem args=()
+	problem=$(dmz_trust_problem "$dir")
+	[[ -z $problem ]] || dmz_die "the NATS trust from $2: $problem"
+	for key in "${DMZ_TRUST_KEYS[@]}" "${DMZ_TRUST_OPTIONAL_KEYS[@]}"; do
+		[[ ! -s $dir/$key ]] || args+=("--from-file=$key=$dir/$key")
+	done
+	kc -n "$DMZ_NAMESPACE" create configmap "$DMZ_TRUST_CONFIGMAP" "${args[@]}" \
 		--dry-run=client -o yaml | kc apply -f - >/dev/null
-	kc -n "$DMZ_NAMESPACE" label secret "$DMZ_SEEDS_SECRET" imas.io/purpose=imas-uat --overwrite >/dev/null
+	kc -n "$DMZ_NAMESPACE" label configmap "$DMZ_TRUST_CONFIGMAP" imas.io/purpose=imas-uat --overwrite >/dev/null
 }
 
-if [[ -n $seeds_dir ]]; then
-	dmz_log "seeds: from $seeds_dir"
-	apply_seed_dir "$seeds_dir"
+trust_tmp=$(mktemp -d "${TMPDIR:-/tmp}/uat-dmz-trust.XXXXXX")
+cleanup_dirs+=("$trust_tmp")
+if [[ -n $trust_dir ]]; then
+	dmz_log "NATS trust: from $trust_dir"
+	apply_trust_dir "$trust_dir" "$trust_dir"
 elif [[ -n $seeds_kubeconfig ]]; then
-	dmz_log "seeds: copying the five bus seeds from $seeds_namespace/$DMZ_SEEDS_SECRET on the core cluster"
-	seed_tmp=$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/uat-dmz-seeds.XXXXXX")
-	cleanup_dirs+=("$seed_tmp")
-	for key in "${DMZ_SEED_KEYS[@]}"; do
-		(umask 077 && kubectl --kubeconfig "$seeds_kubeconfig" -n "$seeds_namespace" \
-			get secret "$DMZ_SEEDS_SECRET" -o "jsonpath={.data.${key//./\\.}}" | base64 -d >"$seed_tmp/$key") ||
-			dmz_die "could not read $key from $seeds_namespace/$DMZ_SEEDS_SECRET on the core cluster"
-	done
-	apply_seed_dir "$seed_tmp"
-	rm -rf "$seed_tmp"
+	dmz_log "NATS trust: copying ConfigMap $seeds_namespace/$DMZ_TRUST_CONFIGMAP from the core cluster"
+	cm=$(kubectl --kubeconfig "$seeds_kubeconfig" -n "$seeds_namespace" get configmap "$DMZ_TRUST_CONFIGMAP" -o json) ||
+		dmz_die "could not read ConfigMap $seeds_namespace/$DMZ_TRUST_CONFIGMAP on the core cluster (core's OpenBao bootstrap Job writes it: run uat/hub/core/install.sh first)"
+	trust_from_json "$cm" "$trust_tmp"
+	apply_trust_dir "$trust_tmp" "$seeds_namespace/$DMZ_TRUST_CONFIGMAP on the core cluster"
 else
-	for key in "${DMZ_SEED_KEYS[@]}"; do
-		[[ -n $(kc -n "$DMZ_NAMESPACE" get secret "$DMZ_SEEDS_SECRET" -o "jsonpath={.data.${key//./\\.}}" 2>/dev/null) ]] ||
-			dmz_die "Secret $DMZ_NAMESPACE/$DMZ_SEEDS_SECRET lacks $key: pass --seeds-dir or --seeds-from-kubeconfig (core's seeds; README.md, \"Seeds\")"
-	done
-	dmz_log "seeds: using the existing Secret $DMZ_NAMESPACE/$DMZ_SEEDS_SECRET"
+	cm=$(kc -n "$DMZ_NAMESPACE" get configmap "$DMZ_TRUST_CONFIGMAP" -o json 2>/dev/null) ||
+		dmz_die "ConfigMap $DMZ_NAMESPACE/$DMZ_TRUST_CONFIGMAP not found: pass --trust-dir or --seeds-from-kubeconfig (core's public NATS trust; deploy/helm/nats/README.md, \"NATS trust\")"
+	trust_from_json "$cm" "$trust_tmp"
+	problem=$(dmz_trust_problem "$trust_tmp")
+	[[ -z $problem ]] || dmz_die "ConfigMap $DMZ_NAMESPACE/$DMZ_TRUST_CONFIGMAP: $problem (copy core's again: --seeds-from-kubeconfig)"
+	dmz_log "NATS trust: using the existing ConfigMap $DMZ_NAMESPACE/$DMZ_TRUST_CONFIGMAP"
 fi
+rm -rf "$trust_tmp"
 
 # --- 4b. The loader's Secrets ----------------------------------------------
 # apply_loader_secret NAME KEY=FILE...: one Secret from files; contents

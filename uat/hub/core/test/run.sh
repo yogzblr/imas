@@ -6,14 +6,15 @@
 #      UAT chart
 #   3. the realm file's jq checks (check-realm.sh)
 #   4. gen-values.sh and lib/common.sh input handling
-#   5. seeds.sh against a stub kubectl (real nk, built from go.mod)
+#   5. seeds.sh against a stub kubectl (real nk, built from go.mod): the
+#      two user seeds, SYS_USER and SAASAPI_USER
 #   6. admin-keys.sh against a stub curl and a fake imas CLI (checksum
 #      check, key reuse, file modes)
 #   7. bind-tenant.sh, token.sh and install.sh argument checks
 #      (7c: helm_pull_chart, the oci:// chart pull, against a stub helm)
-#   8. openbao-bootstrap.sh and saasapi-secrets.sh against a real local
-#      OpenBao server, when a bao binary is on PATH or in $BAO_BIN (skipped,
-#      and said so, otherwise)
+#   8. openbao-bootstrap.sh, saasapi-secrets.sh and the T4 probe
+#      (openbao_t4) against a real local OpenBao server, when a bao binary
+#      is on PATH or in $BAO_BIN (skipped, and said so, otherwise)
 #   9. go test ./uat/hub/core/ (helm template and lint of the farmer chart
 #      with values/farmer-uat.yaml, and of chart/)
 # A tool that isn't installed is reported as SKIPPED, never as passed.
@@ -190,43 +191,44 @@ state="$tmp/state"
 seeds() { PATH="$stubs:$PATH" "$core/seeds.sh" "$kubeconfig" "$ep" "$state"; }
 if command -v go >/dev/null; then
 	if seeds >"$tmp/out" 2>&1; then
-		ok "seeds.sh generates the six seeds with nk"
+		ok "seeds.sh generates the two user seeds with nk"
 		sd="$state/core/sensitive/seeds"
-		declare -A pfx=([operator.nk]=SO [operator-signing.nk]=SO [sys-account.nk]=SA [tenant.nk]=SA [tenant-signing.nk]=SA [saasapi-user.nk]=SU)
 		good=1
-		for k in "${!pfx[@]}"; do
-			[[ "$(cat "$sd/$k")" =~ ^${pfx[$k]}[A-Z2-7]{56}$ ]] || good=0
+		for k in sys-user.nk saasapi-user.nk; do
+			[[ "$(cat "$sd/$k")" =~ ^SU[A-Z2-7]{56}$ ]] || good=0
 			[[ "$(stat -c %a "$sd/$k")" == 600 ]] || good=0
 		done
-		[[ "$(for f in "$sd"/*.nk; do cat "$f"; echo; done | sort -u | wc -l)" -eq 6 ]] || good=0
-		[[ "$(wc -c <"$sd/operator.nk")" -eq 58 ]] || good=0
-		((good)) && ok "seeds: right types, distinct, mode 0600, no newline" || bad "seeds: types, distinctness or modes"
+		[[ "$(for f in "$sd"/*.nk; do cat "$f"; echo; done | sort -u | wc -l)" -eq 2 ]] || good=0
+		[[ "$(wc -c <"$sd/sys-user.nk")" -eq 58 ]] || good=0
+		((good)) && ok "seeds: user seeds, distinct, mode 0600, no newline" || bad "seeds: types, distinctness or modes"
+		[[ -z "$(find "$sd" -name '*.nk' ! -name sys-user.nk ! -name saasapi-user.nk)" ]] &&
+			ok "seeds: no trust chain seed generated (P21 slice 1: those are Transit keys)" || bad "seeds: a removed seed was generated"
 		[[ "$(stat -c %a "$state/core/sensitive")" == 700 ]] && ok "sensitive dir is 0700" || bad "sensitive dir is 0700"
 		sec="$STUB_STATE/imas-core/Secret/imas-farmer-nats-seeds.json"
-		jq -e --arg op "$(base64 -w0 <"$sd/operator.nk")" '(.data | keys | sort) == ["operator-signing.nk","operator.nk","saasapi-user.nk","sys-account.nk","tenant-signing.nk","tenant.nk"] and .data["operator.nk"] == $op' "$sec" >/dev/null &&
-			ok "seeds: Secret imas-core/imas-farmer-nats-seeds holds the six files" || bad "seeds: Secret content"
+		jq -e --arg su "$(base64 -w0 <"$sd/sys-user.nk")" '(.data | keys | sort) == ["saasapi-user.nk","sys-user.nk"] and .data["sys-user.nk"] == $su' "$sec" >/dev/null &&
+			ok "seeds: Secret imas-core/imas-farmer-nats-seeds holds exactly the two files" || bad "seeds: Secret content"
 		! grep -q 'S[OAU][A-Z2-7]\{56\}' "$STUB_STATE/calls.log" && ok "seeds: no seed in any kubectl argument" || bad "seeds: a seed reached argv"
 		expect "seeds.sh again: existing Secret matches, nothing replaced" seeds
-		cp "$sd/tenant.nk" "$tmp/tenant.nk"
-		rm "$sd/tenant.nk"
+		cp "$sd/sys-user.nk" "$tmp/sys-user.nk"
+		rm "$sd/sys-user.nk"
 		expect "seeds.sh restores a missing local seed from the Secret" seeds
-		cmp -s "$sd/tenant.nk" "$tmp/tenant.nk" && ok "seeds: restored seed is byte-identical" || bad "seeds: restored seed differs"
-		printf 'SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' >"$sd/tenant.nk"
+		cmp -s "$sd/sys-user.nk" "$tmp/sys-user.nk" && ok "seeds: restored seed is byte-identical" || bad "seeds: restored seed differs"
+		printf 'SUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' >"$sd/sys-user.nk"
 		refuse "seeds.sh refuses to replace an existing install's seeds" "refusing to replace" seeds
-		cp "$tmp/tenant.nk" "$sd/tenant.nk"
-		# A seed directory shared with the DMZ install that already holds
-		# some seeds: they are kept, the rest generated.
+		cp "$tmp/sys-user.nk" "$sd/sys-user.nk"
+		# A seed directory that already holds one seed: it is kept, the
+		# other generated.
 		state2="$tmp/state2" shared="$tmp/shared-seeds"
-		(umask 077 && mkdir -p "$shared" && cp "$sd/operator.nk" "$shared/")
+		(umask 077 && mkdir -p "$shared" && cp "$sd/sys-user.nk" "$shared/")
 		rm -rf "$STUB_STATE/imas-core"
 		if UAT_SEEDS_DIR="$shared" PATH="$stubs:$PATH" "$core/seeds.sh" "$kubeconfig" "$ep" "$state2" >"$tmp/out" 2>&1 &&
-			cmp -s "$shared/operator.nk" "$sd/operator.nk" && [[ $(find "$shared" -name '*.nk' | wc -l) -eq 6 ]]; then
+			cmp -s "$shared/sys-user.nk" "$sd/sys-user.nk" && [[ $(find "$shared" -name '*.nk' | wc -l) -eq 2 ]]; then
 			ok "seeds: UAT_SEEDS_DIR seeds are reused, missing ones generated"
 		else
 			bad "seeds: UAT_SEEDS_DIR reuse"
 		fi
 	else
-		bad "seeds.sh generates the six seeds with nk"
+		bad "seeds.sh generates the two user seeds with nk"
 		sed 's/^/      /' "$tmp/out" | tail -n 10
 	fi
 else
@@ -376,9 +378,16 @@ bao_bin="${BAO_BIN:-$(command -v bao || true)}"
 if [[ -n "$bao_bin" && -x "$bao_bin" ]] && ! (exec 3<>/dev/tcp/127.0.0.1/8200) 2>/dev/null; then
 	mkdir -p "$tmp/baobin" "$tmp/baodata"
 	ln -s "$bao_bin" "$tmp/baobin/bao"
+	# Single-node raft: OpenBao 2.7.1 (the version the repo pins) has no
+	# "file" storage backend.
 	cat >"$tmp/bao.hcl" <<-EOF
-		storage "file" { path = "$tmp/baodata" }
+		storage "raft" {
+		  path    = "$tmp/baodata"
+		  node_id = "uat-core-test"
+		}
 		listener "tcp" { address = "127.0.0.1:8200" tls_disable = 1 }
+		api_addr     = "http://127.0.0.1:8200"
+		cluster_addr = "http://127.0.0.1:8201"
 		disable_mlock = true
 	EOF
 	start_bao() {
@@ -408,17 +417,25 @@ if [[ -n "$bao_bin" && -x "$bao_bin" ]] && ! (exec 3<>/dev/tcp/127.0.0.1/8200) 2
 		root=$(cat "$sens/openbao-root-token")
 		ty=$(BAO_ADDR=http://127.0.0.1:8200 BAO_TOKEN="$root" "$bao_bin" read -field=type transit/keys/imas-gateway-jwt 2>/dev/null || true)
 		[[ "$ty" == ed25519 ]] && ok "openbao: transit/keys/imas-gateway-jwt is ed25519" || bad "openbao: gateway key type ($ty)"
-		jq -e --arg t "$(printf '%s' "$root" | base64 -w0)" '.data.token == $t' \
-			"$STUB_STATE/imas-core/Secret/imas-uat-openbao-root.json" >/dev/null &&
-			ok "openbao: root token in Secret imas-uat-openbao-root (openbaoBootstrap.tokenSecretName)" || bad "openbao: root token Secret"
-		jq -e '.data["unseal-keys.json"] | @base64d | fromjson | (.keys | length) == 3 and .threshold == 2' \
+		# The chart's Job revokes the token it is handed, so it gets a
+		# per-run root-policy token, never the root token.
+		boot=$(jq -r '.data.token | @base64d' "$STUB_STATE/imas-core/Secret/imas-uat-openbao-root.json")
+		[[ -n "$boot" && "$boot" != "$root" && "$boot" == "$(cat "$sens/openbao-bootstrap-token")" && "$(stat -c %a "$sens/openbao-bootstrap-token")" == 600 ]] &&
+			ok "openbao: Secret imas-uat-openbao-root holds a bootstrap token (0600 copy kept), not the root token" || bad "openbao: bootstrap token Secret"
+		blook=$(BAO_ADDR=http://127.0.0.1:8200 BAO_TOKEN="$root" "$bao_bin" token lookup -format=json "$boot" 2>/dev/null || echo '{}')
+		jq -e '.data.policies == ["root"] and .data.orphan == true and .data.renewable == false and .data.ttl > 0 and .data.ttl <= 3600' <<<"$blook" >/dev/null &&
+			ok "openbao: the bootstrap token is an orphan root-policy token, one hour, not renewable" || bad "openbao: bootstrap token properties ($blook)"
+		jq -e --arg t "$(printf '%s' "$root" | base64 -w0)" '(.data["unseal-keys.json"] | @base64d | fromjson | (.keys | length) == 3 and .threshold == 2) and .data["root-token"] == $t' \
 			"$STUB_STATE/imas-core/Secret/imas-uat-openbao-unseal.json" >/dev/null &&
-			ok "openbao: UAT ONLY unseal keys in Secret imas-uat-openbao-unseal" || bad "openbao: unseal Secret"
+			ok "openbao: UAT ONLY unseal keys and root token in Secret imas-uat-openbao-unseal" || bad "openbao: unseal Secret"
 		! grep -qF "$root" "$STUB_STATE/calls.log" "$tmp/out" && ok "openbao: root token never in argv or output" || bad "openbao: root token leaked"
+		! grep -qF "$boot" "$STUB_STATE/calls.log" "$tmp/out" && ok "openbao: bootstrap token never in argv or output" || bad "openbao: bootstrap token leaked"
 		for k in $(jq -r '.unseal_keys_b64[]' "$sens/openbao-init.json"); do
 			grep -qF "$k" "$STUB_STATE/calls.log" "$tmp/out" && { bad "openbao: an unseal key leaked"; break; }
 		done
 		expect "openbao-bootstrap.sh again on an unsealed OpenBao changes nothing" obao
+		[[ "$(cat "$sens/openbao-bootstrap-token")" != "$boot" ]] &&
+			ok "openbao: a re-run hands the Job a fresh bootstrap token" || bad "openbao: the bootstrap token was reused"
 		# A restart seals OpenBao: the script unseals it with the stored keys.
 		stop_bao
 		start_bao
@@ -432,6 +449,45 @@ if [[ -n "$bao_bin" && -x "$bao_bin" ]] && ! (exec 3<>/dev/tcp/127.0.0.1/8200) 2
 		expect "openbao-bootstrap.sh unseals from the cluster Secrets without local files" obao
 		BAO_ADDR=http://127.0.0.1:8200 "$bao_bin" status >/dev/null 2>&1 && ok "openbao: unsealed from the Secrets" || bad "openbao: not unsealed from the Secrets"
 		mv "$tmp/init.json" "$sens/openbao-init.json"
+		[[ "$(cat "$sens/openbao-root-token")" == "$root" ]] &&
+			ok "openbao: the root token is restored from Secret imas-uat-openbao-unseal" || bad "openbao: root token not restored"
+
+		# Design T4 (openbao_t4, check.sh): stand in for the chart's Job with
+		# its own policy files, then check before and after its clean-up.
+		t4() { (
+			# shellcheck source=../lib/common.sh
+			. "$core/lib/common.sh"
+			KUBECONFIG_PATH="$kubeconfig"
+			PATH="$stubs:$tmp/baobin:$PATH" openbao_t4 "$sens/openbao-root-token" "$sens/openbao-bootstrap-token"
+		); }
+		bt() { BAO_ADDR=http://127.0.0.1:8200 BAO_TOKEN="$(cat "$sens/openbao-bootstrap-token")" "$bao_bin" "$@" >/dev/null; }
+		pols="$repo/deploy/helm/farmer/files/openbao-policies"
+		for f in imas-farmer-natssign imas-nats-sys-signer imas-nats-bootstrap; do bt policy write "$f" "$pols/$f.hcl"; done
+		bt write -f transit/keys/nats-operator type=ed25519
+		bt write -f transit/keys/nats-operator-signing type=ed25519
+		bt write -f transit/keys/nats-sys-account type=ed25519 exportable=true
+		t4 >"$tmp/t4" 2>&1
+		grep -qx 'FAIL T4: the token handed to the bootstrap Job is still valid' "$tmp/t4" &&
+			grep -qx 'FAIL T4: policy imas-nats-bootstrap still exists' "$tmp/t4" &&
+			grep -qx 'FAIL T4: transit/keys/nats-sys-account is missing or not hardened (ed25519, no export, no backup, not imported, not derived, not soft-deleted)' "$tmp/t4" &&
+			grep -qx 'PASS T4: transit/keys/nats-operator is a hardened ed25519 key' "$tmp/t4" &&
+			ok "T4 probe: a live bootstrap token, the ephemeral policy and an exportable key all fail" ||
+			{ bad "T4 probe before the clean-up"; sed 's/^/      /' "$tmp/t4"; }
+		grep -qx 'PASS T4: farmer and publisher policies on transit/sign/nats-operator: deny' "$tmp/t4" &&
+			grep -qx 'PASS T4: farmer and publisher policies on transit/keys/nats-operator: read' "$tmp/t4" &&
+			grep -qx 'PASS T4: farmer and publisher policies on transit/keys/nats-operator/soft-delete: deny' "$tmp/t4" &&
+			ok "T4 probe: the chart's farmer and publisher policies cannot sign with, update or retire the operator key" ||
+			{ bad "T4 probe: policy capabilities"; sed 's/^/      /' "$tmp/t4"; }
+		# The Job's clean-up: the ephemeral policy, then its own token.
+		bt policy delete imas-nats-bootstrap
+		bt token revoke -self
+		t4 >"$tmp/t4" 2>&1
+		grep -qx 'PASS T4: the token handed to the bootstrap Job is revoked' "$tmp/t4" &&
+			grep -qx 'PASS T4: policy imas-nats-bootstrap is deleted' "$tmp/t4" &&
+			[[ $(grep -c '^FAIL' "$tmp/t4") -eq 1 ]] && grep -q '^FAIL T4: transit/keys/nats-sys-account' "$tmp/t4" &&
+			ok "T4 probe: after the clean-up only the exportable key fails" ||
+			{ bad "T4 probe after the clean-up"; sed 's/^/      /' "$tmp/t4"; }
+		! grep -qF "$root" "$STUB_STATE/calls.log" "$tmp/t4" && ok "T4 probe: no token in argv or output" || bad "T4 probe: a token leaked"
 
 		# saasapi-secrets.sh: the KV entries the chart's hook Jobs would have
 		# written, then the two Secrets.

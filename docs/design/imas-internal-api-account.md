@@ -217,18 +217,19 @@ The brief asked for the same pattern as `FarmerUserJWTForTenant`/
 signing path", and "pushed to the bus resolver the same way every other
 User JWT is delivered." Two findings qualify that wording:
 
-- **No NATS JWT in this codebase is signed by OpenBao Transit today.** The
-  only Transit-signed token is the *gateway* JWT (`internal/gatewayjwt`).
-  Every NATS User and Account JWT, including the two functions named
-  above, is signed in-process with an `nkeys.KeyPair`. That key pair's
-  seed comes from `loadOrCreateSeed`, which already accepts an
-  OpenBao-sourced seed via ESO (`IMAS_NATS_<NAME>_SEED_FILE`/`_SEED`). The
-  SaaS API User follows that real, existing pattern exactly. It is signed
-  by the SYS Account's key (as `imas-farmer-sys-push` is), and its own
-  seed is resolved by `loadOrCreateSeed(..., "SAASAPI_USER", ...)`, so
-  `IMAS_NATS_SAASAPI_USER_SEED_FILE` works. Moving NATS JWT signing onto
-  Transit is workstream F, and applies to every NATS signer at once. We
-  didn't build a one-off Transit signer for this one credential.
+- **NATS JWTs are signed by OpenBao Transit since P21 slice 1**
+  (`docs/design/imas-openbao-signing-design.md`, `internal/pki/natskeys`).
+  When this design was written, every NATS User and Account JWT was
+  signed in-process with a seed-derived `nkeys.KeyPair`, and the SaaS API
+  User followed that pattern rather than getting a one-off Transit signer.
+  Slice 1 moved every NATS signer at once: the operator, operator-signing,
+  SYS account and tenant keys are Transit keys with no seed anywhere, and
+  the signing key pairs come from `natskeys`, so the call shapes
+  (`claims.Encode(kp)`) did not change. The SaaS API User is still signed
+  by the SYS Account's key (as `imas-farmer-sys-push` is), now the Transit
+  key `nats-sys-account`. Its own seed is a user-kind key and stays a
+  Secret seed, resolved by `loadOrCreateSeed(..., "SAASAPI_USER", ...)`, so
+  `IMAS_NATS_SAASAPI_USER_SEED_FILE` works as before.
 - **User JWTs are never pushed to the resolver.** The resolver stores
   Account JWTs only. A User JWT is handed to the client, which presents it
   when it connects, and the server checks it against the issuing
@@ -281,9 +282,11 @@ still an operator choice. The intended production flow is:
    Reloader restarts saasapi. See "JWT -> OpenBao hand-off" below.
 
 Farmer holding the SaaS API's seed (step 2) grants farmer nothing new:
-farmer already holds the SYS Account key, which can mint any SYS User. If
-that ever changes, for example once SYS signing moves to Transit, farmer
-only needs the *public* key, and step 2 can drop the farmer half.
+farmer can already sign with the SYS Account key, which can mint any SYS
+User. Since P21 slice 1 that key is the Transit key `nats-sys-account`,
+which farmer's OpenBao role may sign with (`imas-farmer-natssign`) but
+never read out. Farmer still only needs the SaaS API User's *public* key;
+dropping the farmer half of step 2 is a later change.
 
 ## SaaS API boot posture: fail closed
 
@@ -375,15 +378,15 @@ response. Putting `err.Error()` back on the bus makes that test fail.
 Closes what was the last open question here. **FLAG FOR SECURITY
 REVIEW:** this adds the repo's first OpenBao *write* policy.
 
-- **SYS Account seed: an ops change only.** The SYS Account key already
-  loads through `loadOrCreateSeed(path, "SYS_ACCOUNT", ...)` like every
-  other key, so `IMAS_NATS_SYS_ACCOUNT_SEED_FILE` pointing at an
-  ESO-mounted Secret is all it takes. farmer's Deployment isn't in this
-  repo, so the exact volume, mount path and env var are specified in
-  `deploy/farmer/farmer-deployment-nats-seeds.patch.yaml` for the ops
-  repo. farmerbus needs the same seed, and an existing install must
-  import its current `sys-account.nk` rather than generate a new one
-  (`deploy/farmer/README.md`).
+- **SYS Account key: an OpenBao Transit key since P21 slice 1.** It was
+  first an ESO-mounted seed (`IMAS_NATS_SYS_ACCOUNT_SEED_FILE`), shared
+  with farmerbus. Slice 1 removed that seed: the SYS account key is the
+  Transit key `nats-sys-account`, created by the chart's OpenBao bootstrap
+  Job, and its public key and JWT reach farmer, the publish Job and the
+  bus through the public trust ConfigMap `imas-nats-trust`. farmerbus
+  holds no private key at all. The ops-repo patch
+  (`deploy/farmer/farmer-deployment-nats-seeds.patch.yaml`) now mounts
+  only the `SYS_USER` and `SAASAPI_USER` user seeds.
 - **The JWT: a farmer subcommand run as a Job, not farmer's server.** A
   mounted Secret only flows from the secret store into the pod, so
   publishing the minted JWT needs a real KV write.
@@ -394,11 +397,14 @@ REVIEW:** this adds the repo's first OpenBao *write* policy.
   client (`internal/openbao`). It writes nothing when the published JWT is
   already current by claims. The reference Job
   (`deploy/farmer/saasapi-credential-publish-job.yaml`) runs farmer's image
-  with the same seed Secret and an emptyDir PKI directory. That means it
-  never pushes to the resolver, never reaches the bus, and never races
-  farmer on its PKI files. Revocation on rotation stays farmer's job, at
-  boot. The subcommand refuses to run if either key would have to be
-  generated.
+  with the `SAASAPI_USER` seed from the same Secret, the trust ConfigMap,
+  its own Transit signer role (`imas-natssign-publisher`, policy
+  `imas-nats-sys-signer`: sign with `nats-sys-account` only) and an
+  emptyDir PKI directory. That means it never pushes to the resolver,
+  never reaches the bus, and never races farmer on its PKI files.
+  Revocation on rotation stays farmer's job, at boot. The subcommand
+  refuses to run without the trust or the `SAASAPI_USER` seed, rather than
+  generate a key.
 - **Least privilege.** Only the Job's own OpenBao role
   (`imas-saasapi-cred-publisher`, bound to its own ServiceAccount) gets
   `create`/`update`/`read` on that one data path. farmer's server process

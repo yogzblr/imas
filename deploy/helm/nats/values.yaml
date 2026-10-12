@@ -35,8 +35,9 @@ natsSeeds:
   # bus.replicaCount > 1; a single node needs none (and must have none
   # unless the trust carries bus-fence-user.jwt: farmerbus refuses a
   # fence user configured in part). OPERATOR, OPERATOR_SIGNING,
-  # SYS_ACCOUNT, TENANT and TENANT_SIGNING are no longer read by anything:
-  # don't list them.
+  # SYS_ACCOUNT, TENANT and TENANT_SIGNING are no longer read by anything,
+  # and the chart refuses to render with them listed here or in
+  # extraSeeds.
   seeds: {}
   #   BUS_FENCE_USER: bus-fence-user.nk
   # -- Additional user-kind seeds, same shape.

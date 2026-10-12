@@ -23,17 +23,16 @@ fullnameOverride: imas-dmz-nats
 commonLabels:
   imas.io/purpose: imas-uat
 
-# The five seeds the bus mounts. The Secret is created by install.sh from
-# core's copies (byte-identical to farmer's; deploy/helm/nats/README.md,
-# "Seeds"). saasapi-user.nk is never copied into the DMZ.
+# No seeds (P21 slice 1): the operator, operator-signing, SYS account and
+# tenant keys are OpenBao Transit keys on core, and a single-node bus needs
+# no fence user (BUS_FENCE_USER is for bus.replicaCount > 1). The bus
+# starts from the public trust ConfigMap imas-nats-trust, which install.sh
+# copies from core (natsTrust.configMapName, the chart default). No seed of
+# any kind is copied into the DMZ.
 natsSeeds:
-  secretName: imas-farmer-nats-seeds
-  seeds:
-    OPERATOR: operator.nk
-    OPERATOR_SIGNING: operator-signing.nk
-    SYS_ACCOUNT: sys-account.nk
-    TENANT: tenant.nk
-    TENANT_SIGNING: tenant-signing.nk
+  seeds: {}
+natsTrust:
+  configMapName: imas-nats-trust
 
 bus:
   # Bus settings deploy/helm/farmer expects (its TestContractWithNatsChart):

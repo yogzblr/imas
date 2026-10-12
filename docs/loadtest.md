@@ -38,8 +38,11 @@ Real enrollment (`POST /v1/enroll`) costs a join-token check, a PXC write,
 an Account re-sign and push, and a gateway JWT from OpenBao transit per
 sprout. That is the enrollment path's load, not the bus's, and it is heavy
 above about 10,000 sprouts. So the harness **mints the credentials itself**,
-from the same seeds the bus and core hold, in the shape `internal/pki`
-gives them:
+with the keys the bus's trust hangs from, in the shape `internal/pki` gives
+them. For a local bus those are keys the harness makes and keeps in memory:
+an in-process key store stands in for OpenBao Transit, and the bus's
+public trust directory is minted from it by `pki.BootstrapNATSTrust`, as
+core's bootstrap Job mints it (P21 slice 1; no seed is written):
 
 - a **load-test tenant Account**, signed by the operator signing key, with
   its own delegated signing key (as `ensureTenantAccountMaterial` builds a
@@ -137,11 +140,18 @@ builds a trace line for every message before handing it over.
   -max-full-reconnect 10m -json gen1.json
 ```
 
-- The two seeds are keys `operator-signing.nk` and `sys-account.nk` of the
-  Secret the nats chart mounts (`natsSeeds.secretName`, by default
-  `imas-farmer-nats-seeds`). **They let the holder sign any tenant
-  Account.** Run the harness only against a bus you are allowed to load,
-  from a host you would trust with those keys, and never against
+- The two seeds are the operator signing key and the SYS account key the
+  bus's trust (`operator.jwt`, `sys-account.jwt`) was minted with. **Since
+  P21 slice 1 a deployed bus has no such seeds:** core's bootstrap Job
+  mints the trust from OpenBao Transit keys (`nats-operator-signing`,
+  `nats-sys-account`), which can't be exported, and the nats chart refuses
+  the old `OPERATOR_SIGNING` and `SYS_ACCOUNT` seeds. So this mode works
+  only against a bus whose trust ConfigMap was minted from keys you hold as
+  seeds (a test bus set up for the run, never one bootstrapped by the
+  farmer chart). A harness mode that signs through Transit, with an
+  OpenBao role of its own, is not built. **The seeds let the holder sign
+  any tenant Account.** Run the harness only against a bus you are allowed
+  to load, from a host you would trust with those keys, and never against
   production. Nothing is written to disk from them.
 - `-servers` is the bus client port (the chart's `bus.ports.client`, 5406),
   one URL per node so that sprouts spread and the restart has somewhere to

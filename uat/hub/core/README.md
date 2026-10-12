@@ -7,8 +7,8 @@ used by a release. Plan: `docs/claude-code-parallel-build-plan.md`, section 4h.
 > [!WARNING]
 > **UAT ONLY: OpenBao's unseal keys and root token are not protected.**
 > `openbao-bootstrap.sh` initialises the chart's OpenBao and stores **all of
-> its unseal keys and its root token** in two Kubernetes Secrets in the core
-> namespace (`imas-uat-openbao-unseal`, `imas-uat-openbao-root`) **and** in
+> its unseal keys and its root token** in a Kubernetes Secret in the core
+> namespace (`imas-uat-openbao-unseal`) **and** in
 > `<state>/core/sensitive/openbao-init.json`, which the run keeps as a
 > sensitive artifact. Anyone who can read either one can unseal this OpenBao
 > and read everything in it. That is acceptable for a throwaway environment
@@ -101,11 +101,14 @@ openssl, go (to build `nk`), tar, sha256sum, and this repository checked out.
    0600) and puts them in Secrets. Values go from files to `kubectl create
    secret --from-file | kubectl apply`, never through argv or the log. A
    re-run keeps what exists.
-2. **Seeds** (`seeds.sh`): the six NKey seeds the chart requires, made with
-   `nk` (`github.com/nats-io/nkeys/nk`, the tool the chart README names, built
-   at this repo's own `go.mod` pin), never hand written, into the Secret
-   `imas-farmer-nats-seeds`. It refuses to replace the seeds of an install
-   that already has the Secret, and restores missing local files from it.
+2. **Seeds** (`seeds.sh`): the two NKey user seeds the chart requires,
+   `sys-user.nk` (`SYS_USER`) and `saasapi-user.nk` (`SAASAPI_USER`), made
+   with `nk` (`github.com/nats-io/nkeys/nk`, the tool the chart README
+   names, built at this repo's own `go.mod` pin), never hand written, into
+   the Secret `imas-farmer-nats-seeds`. It refuses to replace the seeds of
+   an install that already has the Secret, and restores missing local files
+   from it. Since P21 slice 1 there is no operator, operator-signing, SYS
+   account or tenant seed: those are OpenBao Transit keys (step 7).
 3. **Bootstrap admin** (`admin-keys.sh`): downloads the `imas` CLI of
    `release_tag` from the GitHub release, checks it against the release's
    `checksums.txt`, and runs `imas auth privkey`, `imas auth pubkey` and
@@ -140,12 +143,25 @@ openssl, go (to build `nk`), tar, sha256sum, and this repository checked out.
    `openbao-bootstrap.sh`: waits for OpenBao's pod, `bao operator init`
    (3 shares, threshold 2), unseals, enables Transit and creates
    `transit/keys/imas-gateway-jwt` as **ed25519** (the name
-   `farmer.openbao.gateway.keyName` expects), then writes the root token
-   Secret `openbaoBootstrap.tokenSecretName` names. The chart's own bootstrap
-   Job waits for an unsealed OpenBao and for that Secret, and does the rest
-   (KV, policies, roles, the fleet key); it checks before it creates, so the
-   two never conflict. Re-running the script after a pod restart unseals
-   again, from local files or, failing that, from the Secrets.
+   `farmer.openbao.gateway.keyName` expects), then mints the token the
+   chart's bootstrap Job gets and writes it to the Secret
+   `openbaoBootstrap.tokenSecretName` names (`imas-uat-openbao-root`). That
+   is **not the root token**: the Job revokes the token it is handed when
+   it is done (owner decision a, no standing admin), so every run of the
+   script mints a fresh orphan token with the root policy, valid one hour,
+   not renewable, UAT's stand-in for "a fresh root token from the recovery
+   quorum". The root token stays in the sensitive files and
+   `imas-uat-openbao-unseal`. The chart's own bootstrap Job waits for an
+   unsealed OpenBao and for that Secret, and does the rest (KV, policies,
+   roles, the fleet key, and P21 slice 1's NATS platform Transit keys and
+   the public trust ConfigMap `imas-nats-trust`, which the DMZ install
+   copies); it checks before it creates, so the two never conflict. When
+   the install returns, `install.sh` checks the trust ConfigMap exists,
+   records it in `out/nats-trust.json` (the first install only) and
+   deletes `imas-uat-openbao-root`, whose token is revoked: later runs of
+   the Job without it only check the trust. Re-running the script after a
+   pod restart unseals again, from local files or, failing that, from the
+   Secret.
 8. **saasapi's Secrets** (`saasapi-secrets.sh`), by hand because there is no
    External Secrets here, exactly as the chart README's eval install:
    `imas-saasapi-nats` (seed and published JWT) and `imas-saasapi-box`
@@ -164,6 +180,9 @@ Run it once `uat/hub/dmz/install.sh` has finished, with the same arguments as
 sprout release (`helm upgrade --reuse-values --set sproutRelease.register=true`;
 the chart's post-upgrade hooks are idempotent, as for any re-run of
 `install.sh`), then runs `check.sh` unless `SKIP_CHECK=1`. Safe to re-run.
+The upgrade re-runs the OpenBao bootstrap Job without a token, so it only
+checks the trust ConfigMap; `check.sh` then confirms it is unchanged
+(design T4).
 
 ## Outputs
 
@@ -174,6 +193,8 @@ the chart's post-upgrade hooks are idempotent, as for any re-run of
   audience, test client id, role names and tenant claim, the four users
   with their tenant and roles, `tenants` (filled by `bind-tenant.sh`), the
   bootstrap admin's public keys, and where the sensitive directory is.
+- `nats-trust.json`: the trust ConfigMap's data and `resourceVersion` as the
+  first install left them (public data), which `check.sh` compares against.
 - `uat-ca.crt` (and the same file as `uat-ca.pem`, the name `uat/tests`
   reads), `admin.json` (public keys).
 
@@ -190,7 +211,9 @@ artifact of the run):
   passwords, the Keycloak master admin, and pointers to the files below;
 - `admin.json` and `admin-home/.config/imas/` (the bootstrap admin's NKey
   private key and CLI box key; run the CLI with `HOME=<home>`);
-- `openbao-init.json`, `openbao-root-token`, `openbao-unseal-keys.json`;
+- `openbao-init.json`, `openbao-root-token`, `openbao-unseal-keys.json`,
+  `openbao-bootstrap-token` (the last token handed to the chart's Job;
+  revoked once the Job has run);
 - `seeds/` (unless `UAT_SEEDS_DIR` points elsewhere), `keycloak/`, `minio/`,
   `s3/`, `internal-auth-secret`.
 
@@ -268,7 +291,20 @@ bind-tenant.sh <kubeconfig> <endpoints.json> <state-dir> --scratch-user <name> <
 One line per check, non zero on any failure, nothing secret printed:
 farmer, saasapi, the PXC cluster and its StatefulSets, Valkey and OpenBao
 Ready (OpenBao initialised and unsealed, the gateway key ed25519), MinIO,
-Keycloak and the edge Ready, saasapi's Secrets present; the migration
+Keycloak and the edge Ready, saasapi's Secrets present; **design T4**
+(`docs/design/imas-openbao-signing-design.md` section 11, the OpenBao
+bootstrap Job): the trust ConfigMap `imas-nats-trust` holds the five
+required keys and no NKey seed and is byte for byte what the first install
+recorded in `out/nats-trust.json` (data and `resourceVersion`: a re-run of
+the Job, such as `finish.sh`'s upgrade, wrote nothing), no bootstrap token
+Secret is left, and in OpenBao (`openbao_t4`, root token over stdin) the
+token handed to the Job is revoked, the ephemeral policy
+`imas-nats-bootstrap` is gone, a probe token with `imas-farmer-natssign`
+and `imas-nats-sys-signer` gets `deny` on `transit/sign/nats-operator` and
+on `transit/keys/nats-operator/soft-delete` and only `read` on
+`transit/keys/nats-operator`, and the three platform keys are hardened
+ed25519 keys (farmer Ready also means its start-up check matched the trust
+to Transit); the migration
 finished (the release is `deployed`, so its migrate hook succeeded, which
 also deletes that Job; no failed migrate Job is left; both schemas have an
 applied goose version, read with the PXC root password over stdin); every
@@ -292,14 +328,21 @@ no committed password); `gen-values.sh` and the endpoint validation;
 against a stub curl and a fake CLI (checksum mismatch, missing checksum,
 reuse, file modes); argument checks; `openbao-bootstrap.sh` and
 `saasapi-secrets.sh` against a **real local OpenBao** when a `bao` binary is
-in `BAO_BIN` or on PATH (init, unseal, restart, unseal from the Secrets with
-no local files, the ed25519 key, no token or key in argv or output); and
+in `BAO_BIN` or on PATH (init, unseal, restart, unseal from the Secret with
+no local files, the ed25519 key, a fresh one-hour root-policy bootstrap token
+per run that is not the root token, no token or key in argv or output; and
+`check.sh`'s T4 probe, `openbao_t4`, against the chart's own policy files:
+a live bootstrap token, the ephemeral policy and an exportable key fail,
+the farmer and publisher policies cannot sign with the operator key); and
 `go test ./uat/hub/core/`, which renders `deploy/helm/farmer` with
 `values/farmer-uat.yaml` plus `gen-values.sh`'s output, and `chart/` with
 `extras_set_args`, and checks the values that matter (issuer, JWKS URL and
 audience equal Keycloak's; the UAT CA for saasapi; MinIO and buckets; the
 bus URL and sprout bus URL; tls from cert-manager; release image tags; the
-OpenBao bootstrap token Secret, no dev mode; one replica each; the
+OpenBao bootstrap token Secret, no dev mode; the two user seeds, no trust
+chain seed, the trust ConfigMap mounted and the Transit signer configured;
+the bootstrap Job's `prepare` and `nats-trust` steps, policy deletion and
+token revocation; one replica each; the
 certificate SANs; policies naming only the DMZ address;
 the edge routes). It renders the subcharts too when `helm dependency build`
 has filled `deploy/helm/farmer/charts` (CI does), and skips without helm
@@ -317,8 +360,9 @@ unless `IMAS_REQUIRE_HELM=1`.
   (`dmz.private_fqdn`, else `dmz.<private_dns_zone>`: uat/hub/dmz reads the same
   two forms) as a SAN, and the
   DMZ exposes the bus **client** port (5406, NATS over TLS) to core on node
-  port 8442 (`dmz.ports.bus`; owner decision 2026-10-06). The seed Secret on the DMZ is made from the **same files**
-  (`UAT_SEEDS_DIR`); see Seeds. Envoy's `farmer_api` upstream is
+  port 8442 (`dmz.ports.bus`; owner decision 2026-10-06). The DMZ bus
+  holds no seed: `uat/hub/dmz/install.sh --seeds-from-kubeconfig` copies the
+  public trust ConfigMap `imas-nats-trust` from here. Envoy's `farmer_api` upstream is
   `core.uat.imas.internal:5405` (or the core FQDN or private IP) and
   verifies against the UAT CA; farmer's certificate carries all three.
 - **UAT.4**: creates tenants 1 and 2 with `t1-admin` and `t2-admin` tokens
@@ -327,17 +371,15 @@ unless `IMAS_REQUIRE_HELM=1`.
   `bind-tenant.sh --scratch-user`.
 - **UAT.5**: reads `out/core.json` and `sensitive/credentials.json`.
 - **UAT.6**: keeps `<state>/core/sensitive` out of every uploaded artifact
-  except a sensitive one, and runs the DMZ and core installs with a shared
-  `UAT_SEEDS_DIR`.
+  except a sensitive one.
 
 ## Seeds
 
-farmer's and the bus's seeds must be byte-identical. Both hubs are installed
-in the same run, so the seeds are files in one directory, `UAT_SEEDS_DIR`
-(default `<state>/core/sensitive/seeds`): `seeds.sh` uses any seed file
-already there and generates only the missing ones, so whichever hub installs
-first creates them and the other reuses them. The DMZ install must read the
-same directory; nothing here can check the DMZ cluster's Secret.
+Only farmer's two user seeds (`sys-user.nk`, `saasapi-user.nk`) exist, as
+files in `UAT_SEEDS_DIR` (default `<state>/core/sensitive/seeds`):
+`seeds.sh` uses any seed file already there and generates only the missing
+ones. The DMZ needs none (P21 slice 1): its bus starts from the public trust
+ConfigMap, which carries no secret.
 
 ## Open points
 

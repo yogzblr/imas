@@ -2221,7 +2221,10 @@ runs at tier smoke with keep_hours set, widening the tier as it goes green.
   names; sprouts reach Envoy on the DMZ private IP through dmz.uat.imas.internal. The public FQDNs stay
   for the runner and the Keycloak issuer.
 - Install order (owner decision, 2026-10-06): core hub first, then the DMZ hub, because the bus
-  needs core's seeds when it starts; then enrolment and the tests.
+  needs core's seeds when it starts; then enrolment and the tests. Since P21 slice 1 the bus holds
+  no seed: it needs core's public trust ConfigMap imas-nats-trust (written by the farmer chart's
+  OpenBao bootstrap Job from Transit keys), which uat/hub/dmz/install.sh copies from core. The
+  order stands.
 - Access interface (UAT.1 writes both scripts under uat/access; every other brief and the local
   rig use only this): tunnels.sh open <uat.json> <state-dir> starts one az network bastion tunnel in
   the background for SSH (22) on every Linux VM, WinRM over HTTPS (5986) on every Windows VM and the
@@ -2431,7 +2434,9 @@ Passwords are generated per run and never committed. (3) An OpenBao bootstrap sc
 chart's OpenBao subchart: initialise, unseal, enable the Transit engine and create the Ed25519
 key the gateway JWT needs under the name the chart expects, and create the seed Secret the
 chart requires (imas-farmer-nats-seeds or the configured name) using the repo's own tooling to
-generate seeds, not hand written keys; read the README for how. For UAT only, the unseal keys
+generate seeds, not hand written keys; read the README for how. [P21 slice 1 update: the Secret
+now holds only the SYS_USER and SAASAPI_USER user seeds; the trust chain keys are Transit keys
+the chart's bootstrap Job creates, and that Job revokes the token it is handed.] For UAT only, the unseal keys
 go into a Kubernetes Secret and a file the run keeps as a sensitive artifact: say so loudly in
 the README and the PR. (4) A values file for deploy/helm/farmer for this layout: PXC and Valkey
 and OpenBao subcharts on with one replica each, the DMZ bus address from the contract, saasapi.jwt

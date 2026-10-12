@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
 # seeds.sh <kubeconfig> <endpoints.json> <state-dir>
 #
-# Creates the six NATS NKey seeds deploy/helm/farmer requires (README,
-# "Seeds") and the Secret natsSeeds.secretName (imas-farmer-nats-seeds) in
-# the core namespace. FLAG FOR SECURITY REVIEW.
+# Creates the two NATS NKey user seeds deploy/helm/farmer requires (README,
+# "Seeds"): SYS_USER (sys-user.nk, farmer's SYS account user) and
+# SAASAPI_USER (saasapi-user.nk, saasapi's credential), and the Secret
+# natsSeeds.secretName (imas-farmer-nats-seeds) in the core namespace.
+# Since P21 slice 1 the operator, operator-signing, SYS account and tenant
+# keys are OpenBao Transit keys the chart's bootstrap Job and farmer create;
+# no seed of theirs exists anywhere, and the chart refuses them.
+# FLAG FOR SECURITY REVIEW.
 #
 # - Seeds are generated with nk (github.com/nats-io/nkeys/nk), the tool the
 #   chart README names, built from this repo's own go.mod pin of
 #   github.com/nats-io/nkeys, so they are never hand written.
 # - They live in $UAT_SEEDS_DIR (default <state-dir>/core/sensitive/seeds),
-#   one file per Secret key, mode 0600. The DMZ install (UAT.3a) must use
-#   byte-identical seeds: point both at the same directory. A seed file
-#   that already exists is used as is, never regenerated, so whichever hub
-#   installs first creates them and the other reuses them.
+#   one file per Secret key, mode 0600. A seed file that already exists is
+#   used as is, never regenerated. The DMZ needs none of them: its bus
+#   starts from the public trust ConfigMap (uat/hub/dmz/install.sh).
 # - On a cluster that already has the Secret, different local seeds are an
 #   error (the README: never replace the seeds of an existing install), and
 #   missing local files are restored from the Secret.
@@ -23,16 +27,12 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 parse_common_args "seeds.sh <kubeconfig> <endpoints.json> <state-dir>" "$@"
 need_cmd kubectl jq go base64
 
-# Secret key -> nk key type. operator seeds start SO, accounts SA, users SU.
+# Secret key -> nk key type. Users only: user seeds start SU.
 declare -A SEED_TYPES=(
-	[operator.nk]=operator
-	[operator-signing.nk]=operator
-	[sys-account.nk]=account
-	[tenant.nk]=account
-	[tenant-signing.nk]=account
+	[sys-user.nk]=user
 	[saasapi-user.nk]=user
 )
-declare -A SEED_PREFIX=([operator]=SO [account]=SA [user]=SU)
+declare -A SEED_PREFIX=([user]=SU)
 
 (umask 077 && mkdir -p "$SEEDS_DIR")
 chmod 700 "$SEEDS_DIR"
