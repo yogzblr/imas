@@ -168,7 +168,9 @@ func getBusNode() *busNode  { nodeMu.Lock(); defer nodeMu.Unlock(); return curNo
 // output). With cl non-nil it adds authenticated routes (cluster.go) and a
 // fence (fence.go) that keeps clients out until this node has quorum and
 // has synced its resolver from its peers; the fence connects as sysUser,
-// so a clustered bus without a fence user is refused.
+// so a clustered bus without a fence user is refused. The fence's cluster
+// size follows IMAS_BUS_CLUSTER_SIZE_FILE when set (clusterSize), never
+// below the number of routes.
 func startBus(opts nats_server.Options, sysUser pki.BusSysUser, cl *clusterConfig, timing fenceTiming) (*busNode, error) {
 	var f *fence
 	if cl != nil {
@@ -178,7 +180,8 @@ func startBus(opts nats_server.Options, sysUser pki.BusSysUser, cl *clusterConfi
 		if err := applyCluster(&opts, cl); err != nil {
 			return nil, err
 		}
-		f = newFence(cl.Size(), timing)
+		size := newClusterSize(cl.Size(), os.Getenv(envClusterSizeFile), os.ReadFile)
+		f = newFence(size.get, timing)
 		if err := f.install(&opts); err != nil {
 			return nil, err
 		}
