@@ -52,11 +52,13 @@ func TestSaasapiObjectStoreEgress(t *testing.T) {
 			// farmer has its own object store rule, on the same port and
 			// peers, whether or not saasapi writes recipes (FIX.3).
 			fnp := find(t, docs, "NetworkPolicy", "t-farmer")
-			osPort := 9000
-			if tc.ports[3] != 53 {
-				osPort = tc.ports[3]
+			// The accounts bucket (testAccountStoreEndpoint, 9000) gets a
+			// rule of its own when the object store is on another port.
+			osPorts := []int{9000}
+			if tc.ports[3] != 53 && tc.ports[3] != 9000 {
+				osPorts = []int{tc.ports[3], 9000}
 			}
-			if got := egressPorts(fnp); !slices.Equal(got, []int{5406, 3306, 6379, 8200, osPort, 53, 53}) {
+			if got := egressPorts(fnp); !slices.Equal(got, slices.Concat([]int{5406, 3306, 6379, 8200}, osPorts, []int{53, 53})) {
 				t.Errorf("farmer egress ports %v", got)
 			}
 			if got := get(fnp, "spec", "egress", 4, "to"); !reflect.DeepEqual(got, tc.to) {
@@ -101,18 +103,21 @@ func TestFarmerObjectStoreEgress(t *testing.T) {
 		t.Error("farmer's default policy doesn't admit exactly the object store port")
 	}
 	// The farmer chart's documented examples: the eval file has no object
-	// store (no rule), the production one gets the rule on 443 and keeps
-	// its farmerExtraEgress rule on top.
-	if got := egressPorts(find(t, mustRender(t, "-f", ciValues(t, "default-values.yaml")), "NetworkPolicy", "t-farmer")); !slices.Equal(got, []int{5406, 3306, 6379, 8200, 53, 53}) {
+	// store, only the accounts bucket (its rule on 9000); the production
+	// one gets the object store rule on 443, the accounts bucket's on 9000
+	// (testAccountStoreEndpoint), and keeps its farmerExtraEgress rule on
+	// top.
+	if got := egressPorts(find(t, mustRender(t, "-f", ciValues(t, "default-values.yaml")), "NetworkPolicy", "t-farmer")); !slices.Equal(got, []int{5406, 3306, 6379, 8200, 9000, 53, 53}) {
 		t.Errorf("eval values: farmer egress ports %v", got)
 	}
 	ext := find(t, mustRender(t, "-f", ciValues(t, "external-values.yaml")), "NetworkPolicy", "t-farmer")
-	if got := egressPorts(ext); !slices.Equal(got, []int{5406, 3306, 6379, 8200, 443, 53, 53, 443}) {
+	if got := egressPorts(ext); !slices.Equal(got, []int{5406, 3306, 6379, 8200, 443, 9000, 53, 53, 443}) {
 		t.Errorf("production values: farmer egress ports %v", got)
 	}
-	// Rules: bus, PXC, Valkey, OpenBao, object store, DNS (two ports), extra.
-	if get(ext, "spec", "egress", 4, "to") != nil || get(ext, "spec", "egress", 6, "to", 0, "ipBlock", "cidr") != "198.51.100.0/24" {
-		t.Errorf("production values: object store rule %v, extra rule %v", get(ext, "spec", "egress", 4), get(ext, "spec", "egress", 6))
+	// Rules: bus, PXC, Valkey, OpenBao, object store, accounts bucket, DNS
+	// (two ports), extra.
+	if get(ext, "spec", "egress", 4, "to") != nil || get(ext, "spec", "egress", 7, "to", 0, "ipBlock", "cidr") != "198.51.100.0/24" {
+		t.Errorf("production values: object store rule %v, extra rule %v", get(ext, "spec", "egress", 4), get(ext, "spec", "egress", 7))
 	}
 
 	// external.objectStore narrows farmer's rule and saasapi's alike.

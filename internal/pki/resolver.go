@@ -44,7 +44,20 @@ const (
 // An older JWT than the bucket's is neither written nor pushed, and is not
 // an error unless it is a lock-out (ErrAccountJWTSuperseded).
 // Without one it is a push to every bus node over a fresh connection
-// authenticated as the SYS account, failing if no node accepted it.
+// authenticated as the SYS account, failing if no node accepted it: the
+// in-process test bus (ConfigureNats) only, as cmd/farmer refuses to
+// start without the accounts bucket.
+//
+// This is the only publish point, and there is no write hook on signing
+// (brief §7.2): no code sends an Account JWT to $SYS.REQ.CLAIMS.UPDATE
+// but through here (TestNoAccountJWTReachesBusWithoutPublisher). A
+// minimal Account JWT that farmer mints at boot (ensureNatsAuth's
+// tenantMinted, ensureTenantAccountMaterial's minted) is deliberately not
+// published when it is minted: it carries none of the tenant's
+// revocations yet, and with its new iat it would outrank the revoked JWT
+// in the bucket, so a bus node that restarts would admit revoked users.
+// It reaches the bucket only through here, after syncNatsAuth or
+// syncTenantSprouts has applied the revocations.
 func pushAccountUpdate(mat *natsAuthMaterial, accountJWT string) error {
 	if p := currentAccountPublisher(); p != nil {
 		ac, err := jwt.DecodeAccountClaims(accountJWT)
@@ -64,7 +77,7 @@ func pushAccountUpdate(mat *natsAuthMaterial, accountJWT string) error {
 	defer nc.Close()
 	res, err := pushToAllNodes(nc, accountJWT, config.BusExpectedNodes)
 	if err == nil && res.missing > 0 {
-		log.Warnf("Account JWT push: %d bus nodes did not answer (farmer_account_push_missing_nodes=%d)", res.missing, res.missing)
+		log.Warnf("Account JWT push: %d bus nodes did not answer (%s=%d)", res.missing, logFieldPushMissingNodes, res.missing)
 	}
 	return err
 }

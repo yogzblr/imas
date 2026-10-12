@@ -44,7 +44,7 @@ spec:
     {{- include "imas-farmer.depEgress" (dict "bundled" false "peers" $np.external.objectStore "port" (include "imas-farmer.objectStorePort" .)) | nindent 4 }}
     {{- end }}
     {{- $accPort := include "imas-farmer.accountStorePort" . }}
-    {{- if and (include "imas-farmer.accountStore.on" .) (or (not .Values.objectStore.endpoint) (ne $accPort (include "imas-farmer.objectStorePort" .))) }}
+    {{- if or (not .Values.objectStore.endpoint) (ne $accPort (include "imas-farmer.objectStorePort" .)) }}
     {{- include "imas-farmer.depEgress" (dict "bundled" false "peers" $np.external.objectStore "port" $accPort) | nindent 4 }}
     {{- end }}
     {{- include "imas-farmer.dnsEgress" . | nindent 4 }}

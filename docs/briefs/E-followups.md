@@ -152,9 +152,11 @@ C2 (PR 229) merged with five things left open. Close each one. Scope: `internal/
    has the same jti, and the loader can treat the new JWT as the one it already holds
    (the grant is not applied). Call `waitPastIssuedAt` on the JWT being replaced before
    its `Encode`, as the other re-signs do. Search every `Encode(` of an Account JWT in
-   `internal/pki` (`jwtauth.go`, `jwtusers.go`, `tenant.go`, `saasapi_user.go`, `enroll.go`,
-   `nats.go`) and make every one wait; add a test that fails for any that does not
-   (`TestEveryResignAdvancesIat` already exists: extend it to cover `enroll.go`).
+   `internal/pki` (`jwtauth.go`, `jwtusers.go`, `tenant.go`, `saasapi_user.go`, `enroll.go`;
+   `nats.go` signs none, and `natstrust.go`'s is the bootstrap's fresh SYS mint) and make
+   every re-sign wait (a fresh `jwt.NewAccountClaims` mint replaces nothing); add a test that
+   fails for any that does not (`TestEveryResignAdvancesIat` already exists: extend it to
+   cover `enroll.go`; `TestEveryAccountResignWaitsPastIssuedAt` checks the source).
 2. No write hook (brief 7.2). The brief's `persistAccountJWT` hook is not built, because
    farmer mints a minimal Account JWT at boot and publishing it would put an un-revoked
    JWT in the bucket. Decision: the publish point stays `pushAccountUpdate` (every
@@ -166,19 +168,26 @@ C2 (PR 229) merged with five things left open. Close each one. Scope: `internal/
 3. No silent fallback. With the bus stateless, a farmer with no accounts bucket loses
    every account when a bus node restarts. Decision: farmer refuses to start (exit with a clear
    error) when the bus URLs are configured and the accounts store is not, except in the
-   existing in-process test/dev seam; the farmer chart fails to render when `accountStore.bucket`
+   existing in-process test/dev seam. Farmer always has a bus URL (`config.LoadConfig` defaults
+   `FarmerBusURL` to `farmerinterface:farmerbusport`), so cmd/farmer always requires the store;
+   the seam is internal/pki with no publisher installed (its in-process test bus). The farmer
+   chart fails to render when `accountStore.bucket`
    or its endpoint (own or `objectStore.endpoint`) is empty. Update the chart README, the UAT
    and CI values that relied on the fallback (search `accountStore`, `IMAS_ACCOUNTS_`).
 4. Metrics. Decision: no new metrics system in this phase. Keep `farmer_account_push_missing_nodes`
-   as a structured log field and add the same for `farmer_account_bucket_write_failed`; document
+   as a structured log field and add the same for `farmer_account_bucket_write_failed` (the
+   logger has no key-value API: each is a `name=value` token in the record's `msg`, as the first
+   one already was); document
    both log fields in `deploy/helm/farmer/README.md` so the log platform can alert on them
    (Fluent Bit ships them, D16). Remove "Prometheus metrics" from any brief or doc that
    promises them for the publisher.
 5. `internal/pki/nats.go`: `seedResolverFromCore` still uses `resolverStoreDir()`, a per-process
-   directory used only by the test bus. Replace it with a directory from `os.MkdirTemp` created
+   directory under FarmerPKI. Replace it there with a directory from `os.MkdirTemp` created
    per call and removed on close, add the single allow-list entry in
    `internal/inventory/nofilewrites_test.go` that the guard needs, and delete the C7 leftover
-   comment.
+   comment. `resolverStoreDir()` itself stays: it is also the DMZ bus's resolver directory
+   (`LoadBusNats`, cmd/farmerbus), on that pod's `data` emptyDir, which nats-server needs and
+   the loader refills at every start.
 6. Objects have no Content-Type (`objectstore.Put` takes none and the loader never reads it).
    Decision: leave as is and say so in the `accountpublisher.go` doc comment; nothing else.
 

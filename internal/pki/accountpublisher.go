@@ -6,6 +6,19 @@ package pki
 // is pushed to every bus node, and an accounts-changed event tells the
 // loaders to look. FLAG FOR SECURITY REVIEW: the bucket decides which
 // Account JWTs a restarted bus node trusts.
+//
+// The objects carry no Content-Type: objectstore.Put takes none, and the
+// loader reads an object's body only (internal/accountloader), never its
+// type. That is deliberate and stays so.
+//
+// Two log fields, no metrics (there is no metrics system in this phase):
+// the log platform alerts on them (deploy/helm/farmer/README.md, "Account
+// publisher log fields"). Each is a name=value token in the message:
+//   - farmer_account_push_missing_nodes=N: N bus nodes did not take a
+//     push; their loaders apply the JWT from the bucket.
+//   - farmer_account_bucket_write_failed=N: N writes to the accounts
+//     bucket failed; ReconcileAll repairs them, and an API call whose
+//     write failed reports the failure.
 
 import (
 	"context"
@@ -55,6 +68,16 @@ var ErrAccountJWTSuperseded = errors.New("pki: the accounts bucket holds a newer
 
 // errLockoutSuperseded marks a superseded lock-out, which is a failure.
 var errLockoutSuperseded = errors.New("a lock-out must be the newest Account JWT")
+
+// errBucketWrite marks a ReconcileAll failure to write the bucket.
+var errBucketWrite = errors.New("writing the accounts bucket")
+
+// The publisher's log fields (see this file's header comment), named once
+// so the README, the log platform's alerts and the code agree.
+const (
+	logFieldPushMissingNodes  = "farmer_account_push_missing_nodes"
+	logFieldBucketWriteFailed = "farmer_account_bucket_write_failed"
+)
 
 const (
 	// maxEventAccounts is the most accounts one event lists; a larger
@@ -152,8 +175,10 @@ var (
 )
 
 // SetAccountPublisher installs the publisher every Account JWT push goes
-// through (pushAccountUpdate). Nil, the default, pushes straight to the
-// bus nodes with no bucket.
+// through (pushAccountUpdate). cmd/farmer always installs one, and
+// refuses to start without the accounts bucket. Nil, the default, pushes
+// straight to the bus nodes with no bucket: this package's in-process
+// test bus only.
 func SetAccountPublisher(p AccountPublisher) {
 	accountPublisherMu.Lock()
 	defer accountPublisherMu.Unlock()
@@ -246,9 +271,10 @@ func (p *s3AccountPublisher) Publish(ctx context.Context, accountPub, accountJWT
 		// caller sees the failure, and ReconcileAll repairs the bucket.
 		err = fmt.Errorf("pki: writing Account %s to the accounts bucket: %w", accountPub, err)
 		if !tightens(ac, prev) {
+			log.Errorf("%v (%s=1); not pushed until the bucket has it", err, logFieldBucketWriteFailed)
 			return err
 		}
-		log.Errorf("%v; pushing the lock-out or revocation to the bus anyway", err)
+		log.Errorf("%v (%s=1); pushing the lock-out or revocation to the bus anyway", err, logFieldBucketWriteFailed)
 		p.pushAndAnnounce(accountPub, accountJWT, ac.IssuedAt, false)
 		return err
 	}
@@ -268,9 +294,9 @@ func (p *s3AccountPublisher) pushAndAnnounce(accountPub, accountJWT string, iat 
 	res, err := bus.pushAll(accountJWT)
 	switch {
 	case err != nil:
-		log.Errorf("pushing Account %s to the bus: %v (farmer_account_push_missing_nodes=%d); the bus loaders will apply it from the accounts bucket", accountPub, err, res.missing)
+		log.Errorf("pushing Account %s to the bus: %v (%s=%d); the bus loaders will apply it from the accounts bucket", accountPub, err, logFieldPushMissingNodes, res.missing)
 	case res.missing > 0:
-		log.Warnf("pushing Account %s: %d of %d bus nodes did not answer (farmer_account_push_missing_nodes=%d); their loaders will apply it from the accounts bucket", accountPub, res.missing, res.missing+res.acked, res.missing)
+		log.Warnf("pushing Account %s: %d of %d bus nodes did not answer (%s=%d); their loaders will apply it from the accounts bucket", accountPub, res.missing, res.missing+res.acked, logFieldPushMissingNodes, res.missing)
 	}
 	if announce {
 		p.announce(bus, map[string]int64{accountPub: iat})
@@ -451,14 +477,14 @@ func (p *s3AccountPublisher) ReconcileAll(ctx context.Context) error {
 		switch {
 		case errors.Is(err, ErrAccountJWTSuperseded):
 		case err != nil:
-			errs = append(errs, fmt.Errorf("account %s: %w", pub, err))
+			errs = append(errs, fmt.Errorf("account %s: %w: %w", pub, errBucketWrite, err))
 		case stored:
 			changed[pub] = c.IAT
 		}
 	}
 	if len(changed) > 0 {
 		if err := p.bumpIndex(ctx); err != nil {
-			errs = append(errs, err)
+			errs = append(errs, fmt.Errorf("%w: %w", errBucketWrite, err))
 		} else {
 			log.Infof("accounts bucket: wrote %d Account JWTs that were missing or older", len(changed))
 		}
@@ -468,6 +494,9 @@ func (p *s3AccountPublisher) ReconcileAll(ctx context.Context) error {
 			p.announce(bus, changed)
 			bus.close()
 		}
+	}
+	if len(errs) > 0 {
+		log.Errorf("accounts bucket reconcile: %d writes failed (%s=%d); the next reconcile retries them", len(errs), logFieldBucketWriteFailed, len(errs))
 	}
 	return errors.Join(errs...)
 }

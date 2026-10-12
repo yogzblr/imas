@@ -143,7 +143,6 @@ spec:
                   name: {{ $os.credentialsSecret }}
                   key: {{ $os.secretAccessKeyKey }}
             {{- end }}
-            {{- if include "imas-farmer.accountStore.on" . }}
             {{- $acc := .Values.accountStore }}
             # The accounts bucket (accountStore): farmer's own write
             # credential, separate from IMAS_S3_*.
@@ -170,7 +169,6 @@ spec:
             {{- with $acc.eventSubject }}
             - name: IMAS_ACCOUNTS_EVENT_SUBJECT
               value: {{ . | quote }}
-            {{- end }}
             {{- end }}
             {{- with .Values.bus.expectedNodes }}
             - name: IMAS_BUS_EXPECTED_NODES

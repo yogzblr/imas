@@ -1021,6 +1021,12 @@ func grantEnrolledSprout(tenantID, nkey string) error {
 	if !changed {
 		return nil
 	}
+	// A strictly newer iat than the JWT this replaces (see
+	// waitPastIssuedAt): signed in the same second it would have the same
+	// jti, and the bus loaders, holding the old one, would not apply the
+	// grant. tam was loaded, not minted (that is the provisioned path), so
+	// the JWT it replaces may already be in the bucket and on the bus.
+	waitPastIssuedAt(ac.IssuedAt)
 	signed, err := ac.Encode(mat.operatorSigningKP)
 	if err != nil {
 		return err

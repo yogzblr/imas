@@ -49,7 +49,14 @@ var required = []string{
 	"--set", "saasapi.jwt.audience=imas-saasapi",
 	"--set", "farmer.bootstrapAdmin.pubkey=" + testAdminPubkey,
 	"--set", "farmer.bootstrapAdmin.boxpub=" + testAdminBoxpub,
+	// The accounts bucket is required (accountStore): an endpoint of its
+	// own, as no render here sets objectStore.endpoint unless it tests it.
+	"--set", "accountStore.endpoint=" + testAccountStoreEndpoint,
 }
+
+// testAccountStoreEndpoint is the accounts bucket endpoint every render
+// carries; its port is farmer's accounts egress port.
+const testAccountStoreEndpoint = "accounts.imas-core.svc:9000"
 
 // skipAdmin replaces required's bootstrap admin with an explicit skip.
 var skipAdmin = []string{"--set", "farmer.bootstrapAdmin.pubkey=", "--set", "farmer.bootstrapAdmin.boxpub=",
@@ -2123,12 +2130,13 @@ func TestTokenAuth(t *testing.T) {
 }
 
 // NetworkPolicies: farmer only takes the DMZ Envoy on its API port and
-// only dials the bus, PXC, Valkey, OpenBao and DNS; saasapi reaches
-// OpenBao only when it needs it.
+// only dials the bus, PXC, Valkey, OpenBao, the accounts bucket
+// (testAccountStoreEndpoint's 9000) and DNS; saasapi reaches OpenBao only
+// when it needs it.
 func TestNetworkPolicy(t *testing.T) {
 	docs := mustRender(t)
 	fnp := find(t, docs, "NetworkPolicy", "t-farmer")
-	if got := egressPorts(fnp); !slices.Equal(got, []int{5406, 3306, 6379, 8200, 53, 53}) {
+	if got := egressPorts(fnp); !slices.Equal(got, []int{5406, 3306, 6379, 8200, 9000, 53, 53}) {
 		t.Errorf("farmer egress ports %v", got)
 	}
 	in := get(fnp, "spec", "ingress", 0).(obj)

@@ -730,6 +730,37 @@ func TestEveryResignAdvancesIat(t *testing.T) {
 		}
 	})
 
+	// Enrolment grants one sprout's NKey on an existing tenant's Account
+	// without a full sync (grantEnrolledSprout): it clears the NKey's
+	// revocation. Two denied sprouts re-enrol in a row, each right after
+	// the last push, and each grant must push a newer iat.
+	t.Run("grantEnrolledSprout (enroll.go)", func(t *testing.T) {
+		keys := map[string]string{}
+		for _, id := range []string{"web-c", "web-d"} {
+			kp, _ := nkeys.CreateUser()
+			pub, _ := kp.PublicKey()
+			keys[id] = pub
+			if err := upsertNKeyRow(nkeyRow{TenantID: "t_iat", SproutID: id, NKey: pub, State: stateDenied}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := ReloadNKeysForTenant("t_iat"); err != nil {
+			t.Fatal(err)
+		}
+		iats := []int64{iatIn(t, rec.last(t, tenantPub()))}
+		for _, id := range []string{"web-c", "web-d"} {
+			if err := acceptEnrolledNKey("t_iat", id, keys[id]); err != nil {
+				t.Fatal(err)
+			}
+			iats = append(iats, iatIn(t, rec.last(t, tenantPub())))
+		}
+		for i := 1; i < len(iats); i++ {
+			if iats[i] <= iats[i-1] {
+				t.Fatalf("enrolment grants pushed at iats %v, want each later than the last", iats)
+			}
+		}
+	})
+
 	t.Run("signLockedOutTenantJWT (tenant.go)", func(t *testing.T) {
 		pub := tenantPub()
 		before := iatIn(t, rec.last(t, pub))

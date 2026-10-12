@@ -72,6 +72,10 @@ var allowedFileWrites = []string{
 	"internal/pki/tenant.go:ensureTenantAccountMaterial:os.MkdirAll#1",
 	"internal/pki/tenant.go:ensureTenantAccountMaterial:os.MkdirAll#2",
 	"internal/pki/tenant.go:signLockedOutTenantJWT:os.MkdirAll#1",
+	// The in-process test bus's account resolver (ConfigureNats): a fresh
+	// directory in the process's temp dir per call, removed when the
+	// server closes the resolver. Farmer never embeds a bus.
+	"internal/pki/nats.go:newTempDirResolver:os.MkdirTemp#1",
 	// The atomic and write-once helpers every write under farmerpki (and
 	// the sprout's PKI dir) goes through: the temp file is made next to
 	// the target, so in farmer it is in the tmp emptyDir too.

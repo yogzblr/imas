@@ -150,6 +150,11 @@ kubectl -n imas-core create secret generic imas-farmer-nkey \
   --from-literal=farmer.nk="$(nk -gen user)"
 kubectl -n imas-core create secret generic imas-saasapi-internal-auth \
   --from-literal=current="$(openssl rand -hex 32)"
+# The accounts bucket's writer (accountStore): get, put and list on the
+# bucket accountStore.bucket (imas-accounts) of an S3 store you provide.
+kubectl -n imas-core create secret generic imas-farmer-accounts-writer \
+  --from-literal=access-key-id=<writer access key> \
+  --from-literal=secret-access-key=<writer secret key>
 
 helm repo add openbao https://openbao.github.io/openbao-helm
 helm repo add percona https://percona.github.io/percona-helm-charts
@@ -158,6 +163,7 @@ helm dependency build deploy/helm/farmer
 helm install imas-core deploy/helm/farmer -n imas-core -f deploy/helm/farmer/ci/default-values.yaml \
   --timeout 30m \
   --set farmer.bootstrapAdmin.pubkey=<imas auth pubkey> --set farmer.bootstrapAdmin.boxpub=<imas auth keygen's box key> \
+  --set accountStore.endpoint=<host:port of the S3 store> \
   --set farmer.image.repository=<registry>/imas-farmer --set saasapi.image.repository=<registry>/imas-saasapi \
   --set database.migrate.image.repository=<registry>/imas-migrate
 ```
@@ -190,6 +196,13 @@ kubectl -n imas-core create secret generic imas-saasapi-box \
   --from-file=saasapi-box.key=<(kubectl -n imas-core exec imas-core-openbao-0 -- env BAO_TOKEN=root bao kv get -field=priv secret/imas/tenant-x25519/saasapi-box) \
   --from-file=SAASAPI_PLATFORM_BOX_PUB=<(kubectl -n imas-core exec imas-core-openbao-0 -- env BAO_TOKEN=root bao kv get -field=platform_pub secret/imas/tenant-x25519/controlplane-pub)
 ```
+
+No object store is bundled, and the accounts bucket is required: the bus
+keeps no Account across a restart, its loaders read every Account from
+that bucket, so farmer refuses to start without it and the chart refuses to
+render without `accountStore.bucket` and an endpoint (`accountStore.endpoint`
+or `objectStore.endpoint`). `ci/default-values.yaml` carries a placeholder
+endpoint; set the real one.
 
 What to expect on first install:
 
@@ -1068,6 +1081,11 @@ which is local to one PXC node):
   bucket, so a bus node started empty loads every Account from it. One
   replica at a time per account, under the `account:<pub>` row of
   `farmer.job_leases`; a newer object is never replaced by an older JWT.
+  Required: farmer exits at start with `accounts bucket: no accounts
+  bucket` (or no endpoint, or no write credential) when it is not
+  configured, rather than pushing to the bus alone and losing every
+  Account at the next bus node restart; the chart refuses to render
+  without it. See [Account publisher log fields](#account-publisher-log-fields).
 - **Hourly jobs** (job expiry, the cohort refresher, the account push per
   tenant): one replica at a time under a `farmer.job_leases` row
   (`farmer.jobs.leaseTTL`, `IMAS_JOB_LEASE_TTL`, default 120s).
@@ -1096,6 +1114,20 @@ no `farmer.affinity` set, a preferred pod anti-affinity on
 Rate limits that are kept per replica (saasapi's rate limiter, the update
 manifest limiter) allow N times the configured rate with N replicas.
 
+### Account publisher log fields
+
+The account publisher has no metrics (there is no metrics system in this
+phase). It logs two fields that the log platform alerts on; farmer logs
+JSON to stdout (`farmer.logFormat`, default `json`) and Fluent Bit ships it
+(design D16). Each field is a `name=value` token in the log record's `msg`:
+
+| Field | Level | Logged when | Alert on |
+|---|---|---|---|
+| `farmer_account_push_missing_nodes=N` | warn (error if no node took it) | N bus nodes did not answer a push of an Account JWT after the retries. Not a failure of the call: the bucket has the JWT and those nodes' loaders apply it. | Any record, repeated: a bus node or its loader is not keeping up. |
+| `farmer_account_bucket_write_failed=N` | error | N writes to the accounts bucket failed: an Account JWT on an API call (N=1; the call reports the failure, and an ordinary update is not pushed, a lock-out or revocation is pushed anyway), or the reconcile at start and in every push-all (N accounts plus the index). The next reconcile retries. | Any record: a bus node that restarts now loads an older Account. |
+
+For example, with Fluent Bit's `grep` filter, `Regex msg farmer_account_bucket_write_failed=`.
+
 ## NetworkPolicy
 
 | Pods | Direction | Peer | Port |
@@ -1105,7 +1137,7 @@ manifest limiter) allow N times the configured rate with N replicas.
 | farmer, saasapi | out | PXC / Valkey | 3306 / 6379 |
 | farmer | out | OpenBao | 8200 |
 | farmer | out | with `objectStore.endpoint` set: the object store (`networkPolicy.external.objectStore`, default any destination) | `objectStore.endpoint`'s port |
-| farmer | out | with `accountStore.endpoint` on another port: the accounts bucket (same peers) | `accountStore.endpoint`'s port |
+| farmer | out | the accounts bucket, when `accountStore.endpoint` is its own on another port than `objectStore.endpoint`, or there is no `objectStore.endpoint` (same peers) | `accountStore.endpoint`'s port |
 | saasapi | out | OpenBao, only for the bus CA fetch | 8200 |
 | saasapi | in | `networkPolicy.saasapiIngress.from` (default: anyone) | `saasapi.port` (8081) |
 | saasapi | in | with `saasapi.operator`: the sprout release hook Job's pods, plus `networkPolicy.saasapiOperatorIngress.from` (default: none) | `saasapi.operator.port` (8443) |
@@ -1207,8 +1239,8 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `database.migrate.wait` / `backoffLimit` / `activeDeadlineSeconds` | `15m` / `2` / `1800` | How long to wait for PXC; the Job's retry and time budget. |
 | `database.migrate.argoCDHooks` | `true` | Argo CD hook annotations. See [Migrations](#migrations). |
 | `objectStore.*` | empty | `IMAS_S3_*`. `jobBucket` must differ from `bucket`. |
-| `accountStore.bucket` / `endpoint` / `useSSL` | `imas-accounts` / `""` / `null` | `IMAS_ACCOUNTS_S3_*`: the accounts bucket the bus loaders read (see [Farmer is stateless](#farmer-is-stateless)). On when `bucket` is set and there is an endpoint; `endpoint` and `useSSL` default to `objectStore`'s. Must differ from every `objectStore` bucket. |
-| `accountStore.credentialsSecret` / `accessKeyIdKey` / `secretAccessKeyKey` | `imas-farmer-accounts-writer` / `access-key-id` / `secret-access-key` | farmer's own write credential for the accounts bucket (get, put, list; no delete). Must not be `objectStore.credentialsSecret`. |
+| `accountStore.bucket` / `endpoint` / `useSSL` | `imas-accounts` / `""` / `null` | `IMAS_ACCOUNTS_S3_*`: the accounts bucket the bus loaders read (see [Farmer is stateless](#farmer-is-stateless)). Required: the chart fails to render without `bucket` and an endpoint (`endpoint`, else `objectStore.endpoint`), and farmer refuses to start without them. `endpoint` and `useSSL` default to `objectStore`'s. Must differ from every `objectStore` bucket. |
+| `accountStore.credentialsSecret` / `accessKeyIdKey` / `secretAccessKeyKey` | `imas-farmer-accounts-writer` / `access-key-id` / `secret-access-key` | farmer's own write credential for the accounts bucket (get, put, list; no delete). Required. Must not be `objectStore.credentialsSecret`. |
 | `accountStore.eventSubject` | `imas.bus.accounts.changed` | `IMAS_ACCOUNTS_EVENT_SUBJECT`; the nats chart's `accountStore.eventSubject`. |
 | `objectStore.sproutJWTBucket` | `""` | `IMAS_S3_SPROUT_JWT_BUCKET`: the private bucket of sprout User JWTs. Must differ from `bucket` and `jobBucket`. Empty: every enrolment fails, and NOTES says so. |
 | `farmer.image.*` | `ghcr.io/yogzblr/imas-farmer` | Also the publish Job's image. |

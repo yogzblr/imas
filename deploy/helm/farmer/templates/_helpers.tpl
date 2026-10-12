@@ -393,13 +393,6 @@ saasapi's recipe egress rule. */}}
 {{- default $def (regexFind ":[0-9]+$" (toString .Values.objectStore.endpoint) | trimPrefix ":") -}}
 {{- end }}
 
-{{/* "true" when farmer writes the accounts bucket: accountStore.bucket set
-and an endpoint (accountStore.endpoint, else objectStore.endpoint); ""
-otherwise. */}}
-{{- define "imas-farmer.accountStore.on" -}}
-{{- if and .Values.accountStore.bucket (or .Values.accountStore.endpoint .Values.objectStore.endpoint) -}}true{{- end -}}
-{{- end }}
-
 {{/* The port of the accounts bucket's endpoint, as objectStorePort, for
 farmer's egress rule when accountStore.endpoint is its own. */}}
 {{- define "imas-farmer.accountStorePort" -}}
@@ -793,18 +786,26 @@ explanation rather than deploying something that silently can't work.
 {{- end -}}
 {{- end }}
 
-{{/* The accounts bucket is its own (accountStore): its own bucket and
-write credential, which farmer checks again at start. */}}
+{{/* The accounts bucket (accountStore) is required and its own: a bucket,
+an endpoint (its own or objectStore.endpoint) and a write credential of
+its own, which farmer checks again at start. Without it a bus node that
+restarts loads no Account, so farmer refuses to start and this chart
+refuses to render. */}}
 {{- define "imas-farmer.accountStore.validate" -}}
 {{- $n := .Values.bus.expectedNodes -}}
 {{- if not (or (kindIs "invalid" $n) (and (kindIs "float64" $n) (ge (float64 $n) 0.0) (eq (float64 $n) (float64 (int64 $n)))) (and (kindIs "int64" $n) (ge (int64 $n) 0)) (and (kindIs "int" $n) (ge (int $n) 0))) -}}
 {{- fail (printf "bus.expectedNodes must be a whole number, 0 or more, got %v" $n) -}}
 {{- end -}}
-{{- if include "imas-farmer.accountStore.on" . -}}
 {{- $acc := .Values.accountStore -}}
 {{- $os := .Values.objectStore -}}
+{{- if not $acc.bucket -}}
+{{- fail "accountStore.bucket is required: farmer writes every Account JWT there, and a bus node that restarts loads its Accounts from it (the bus keeps none of its own)" -}}
+{{- end -}}
+{{- if not (or $acc.endpoint $os.endpoint) -}}
+{{- fail "accountStore.endpoint (or objectStore.endpoint) is required: farmer writes every Account JWT to the accounts bucket, and a bus node that restarts loads its Accounts from it (the bus keeps none of its own)" -}}
+{{- end -}}
 {{- if not $acc.credentialsSecret -}}
-{{- fail "accountStore.credentialsSecret is required with accountStore.bucket: farmer writes the accounts bucket with a credential of its own" -}}
+{{- fail "accountStore.credentialsSecret is required: farmer writes the accounts bucket with a credential of its own" -}}
 {{- end -}}
 {{- if eq (toString $acc.credentialsSecret) (toString $os.credentialsSecret) -}}
 {{- fail "accountStore.credentialsSecret must not be objectStore.credentialsSecret: the accounts bucket needs a write credential of its own, which can't reach the recipe, job or sprout JWT bucket" -}}
@@ -816,7 +817,6 @@ write credential, which farmer checks again at start. */}}
 {{- end -}}
 {{- if not (or (kindIs "invalid" $acc.useSSL) (kindIs "bool" $acc.useSSL)) -}}
 {{- fail (printf "accountStore.useSSL must be true, false or null, got %v" $acc.useSSL) -}}
-{{- end -}}
 {{- end -}}
 {{- end }}
 
