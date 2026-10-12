@@ -27,7 +27,30 @@ func TestStartCohortRefresher_DisabledOnZeroInterval(t *testing.T) {
 	<-done
 }
 
+// useJobLeaseDB installs, for this test only, a pki database holding
+// job_leases, so the refresher's lease never touches TestMain's shared
+// store. That matters: cancelling the refresher's context mid-statement
+// makes database/sql drop the connection, and a shared-cache in-memory
+// database vanishes with its last connection, taking every later test's
+// tables with it.
+func useJobLeaseDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	gdb, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, _ := gdb.DB()
+	sqlDB.SetMaxOpenConns(1)
+	if err := gdb.AutoMigrate(&lease.JobLease{}); err != nil {
+		t.Fatal(err)
+	}
+	pki.SetDB(gdb)
+	t.Cleanup(func() { pki.SetDB(sharedPKIDB); sqlDB.Close() })
+	return gdb
+}
+
 func TestStartCohortRefresher_StopsOnCancel(t *testing.T) {
+	useJobLeaseDB(t)
 	oldReg, oldOrg := cohortRegistry, config.FarmerOrganization
 	config.FarmerOrganization = t.Name()
 	defer func() { config.FarmerOrganization = oldOrg }()
@@ -105,17 +128,7 @@ func TestRefreshAllCohorts_WithStaticCohort(t *testing.T) {
 // TestCohortRefresherRunsOnce: four replicas tick the cohort refresher at
 // the same instant; it refreshes once per interval across them.
 func TestCohortRefresherRunsOnce(t *testing.T) {
-	gdb, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sqlDB, _ := gdb.DB()
-	sqlDB.SetMaxOpenConns(1)
-	if err := gdb.AutoMigrate(&lease.JobLease{}); err != nil {
-		t.Fatal(err)
-	}
-	pki.SetDB(gdb)
-	t.Cleanup(func() { pki.SetDB(sharedPKIDB); sqlDB.Close() })
+	gdb := useJobLeaseDB(t)
 
 	var runs atomic.Int32
 	orig := cohortRefreshBody
