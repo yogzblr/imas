@@ -70,13 +70,14 @@ check "OpenBao ($OPENBAO_STS) Ready" sts_ready "$OPENBAO_STS" "$CORE_NS"
 [[ "$S3_MODE" == rustfs ]] && check "RustFS Ready (UAT)" deploy_ready "$MINIO_SVC" "$UAT_NS"
 check "Keycloak Ready" deploy_ready "$KEYCLOAK_DEPLOY" "$UAT_NS"
 check "edge proxy Ready" deploy_ready "$EDGE_DEPLOY" "$UAT_NS"
-for s in "$SAASAPI_NATS_SECRET" "$SAASAPI_BOX_SECRET" "$SEEDS_SECRET" "$INTERNAL_AUTH_SECRET"; do
+for s in "$SAASAPI_NATS_SECRET" "$SAASAPI_BOX_SECRET" "$SEEDS_SECRET" "$FARMER_NKEY_SECRET" "$INTERNAL_AUTH_SECRET"; do
 	check "Secret $CORE_NS/$s exists" kc -n "$CORE_NS" get secret "$s"
 done
 
 bao_st=$(kc -n "$CORE_NS" exec "$OPENBAO_POD" -c openbao -- env BAO_ADDR=http://127.0.0.1:8200 bao status -format=json 2>/dev/null || true)
 [[ -n "$bao_st" ]] || bao_st='{}'
 check "OpenBao initialised and unsealed" jq -e '.initialized == true and .sealed == false' <<<"$bao_st"
+check "OpenBao storage is single-node raft, active" jq -e '.storage_type == "raft" and .is_self == true' <<<"$bao_st"
 token_file="$SENSITIVE_DIR/openbao-root-token"
 if [[ -s "$token_file" ]]; then
 	key_type=$(kc -n "$CORE_NS" exec -i "$OPENBAO_POD" -c openbao -- /bin/sh -ec \

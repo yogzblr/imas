@@ -27,6 +27,7 @@ import (
 const (
 	endpointsFile = "testdata/endpoints.json"
 	adminFile     = "testdata/admin.json"
+	loaderPubFile = "testdata/bus-loader-user.pub"
 	releaseTag    = "v0.1.0-rc.4"
 	version       = "0.1.0-rc.4"
 	coreFQDN      = "uatabc123-core.centralindia.cloudapp.azure.com"
@@ -200,6 +201,7 @@ func TestValuesMatchLib(t *testing.T) {
 	for path, name := range map[string]string{
 		"objectStore.bucket":                    "RECIPE_BUCKET",
 		"objectStore.jobBucket":                 "JOB_BUCKET",
+		"objectStore.sproutJWTBucket":           "SPROUT_JWT_BUCKET",
 		"objectStore.credentialsSecret":         "S3_FARMER_SECRET",
 		"saasapi.recipes.credentialsSecret":     "S3_SAASAPI_SECRET",
 		"saasapi.recipes.readRole":              "READ_ROLE",
@@ -215,6 +217,29 @@ func TestValuesMatchLib(t *testing.T) {
 			t.Errorf("%s = %q, lib/common.sh %s = %q", path, got, name, lib[name])
 		}
 	}
+	// Names the UAT takes from the farmer chart's defaults instead of
+	// setting them: seeds.sh and minio-setup.sh create what they name.
+	chartDefaults := readYAML(t, "../../../deploy/helm/farmer/values.yaml")
+	for path, name := range map[string]string{
+		"farmer.nkeySecret.secretName":   "FARMER_NKEY_SECRET",
+		"farmer.nkeySecret.key":          "FARMER_NKEY_KEY",
+		"accountStore.bucket":            "ACCOUNTS_BUCKET",
+		"accountStore.credentialsSecret": "S3_ACCOUNTS_WRITER_SECRET",
+	} {
+		if got := str(v, strings.Split(path, ".")...); got != "" {
+			t.Errorf("values/farmer-uat.yaml sets %s = %q: the UAT uses the chart default", path, got)
+		}
+		if got := str(chartDefaults, strings.Split(path, ".")...); got == "" || got != lib[name] {
+			t.Errorf("chart default %s = %q, lib/common.sh %s = %q", path, got, name, lib[name])
+		}
+	}
+	buckets := map[string]bool{}
+	for _, b := range []string{lib["RECIPE_BUCKET"], lib["JOB_BUCKET"], lib["SPROUT_JWT_BUCKET"], lib["ACCOUNTS_BUCKET"]} {
+		if buckets[b] {
+			t.Errorf("bucket %q is used twice: recipes, jobs, sprout JWTs and accounts must all differ", b)
+		}
+		buckets[b] = true
+	}
 	want := lib["MINIO_SVC"] + "." + lib["UAT_NS"] + ".svc.cluster.local:9000"
 	if got := str(v, "objectStore", "endpoint"); got != want {
 		t.Errorf("objectStore.endpoint %q, want %q", got, want)
@@ -225,6 +250,12 @@ func TestValuesMatchLib(t *testing.T) {
 	if dig(v, "objectStore", "useSSL") != false {
 		t.Error("objectStore.useSSL: MinIO is plain HTTP inside the cluster")
 	}
+	// OpenBao: single-node raft (2.7.1 has no "file" backend), node_id
+	// fixed, api_addr and cluster_addr on the pod's Services, and the
+	// subchart's BAO_API_ADDR / BAO_CLUSTER_ADDR (which win over the file)
+	// the same two addresses.
+	checkOpenBaoRaft(t, lib, str(v, "openbao", "server", "standalone", "config"),
+		str(v, "openbao", "server", "ha", "apiAddr"), str(v, "openbao", "server", "ha", "clusterAddr"))
 	extras := readYAML(t, "chart/values.yaml")
 	for path, want := range map[string]string{
 		"farmer.serviceName":        lib["FARMER_FULLNAME"],
@@ -240,6 +271,11 @@ func TestValuesMatchLib(t *testing.T) {
 		if got := str(extras, strings.Split(path, ".")...); got != want {
 			t.Errorf("chart/values.yaml %s = %q, want %q", path, got, want)
 		}
+	}
+	// The DMZ's loader reads the accounts bucket at <core private IP>:9000
+	// (uat/hub/dmz/install.sh's default, uat/tofu accounts_store_port).
+	if dig(extras, "minio", "hostPort") != 9000 {
+		t.Errorf("chart/values.yaml minio.hostPort = %v, want 9000 (uat/hub/dmz dmz.account_store.endpoint default)", dig(extras, "minio", "hostPort"))
 	}
 	for _, img := range []string{str(extras, "minio", "image"), str(extras, "keycloak", "image"), str(extras, "edge", "image")} {
 		if !regexp.MustCompile(`^[a-z0-9./-]+:[A-Za-z0-9._-]+(@sha256:[0-9a-f]{64})?$`).MatchString(img) || strings.HasSuffix(img, ":latest") {
@@ -375,7 +411,7 @@ func farmerChart(t *testing.T) (dir string, withSubcharts bool) {
 
 func runValues(t *testing.T) string {
 	t.Helper()
-	out := run(t, "bash", "gen-values.sh", endpointsFile, adminFile, releaseTag)
+	out := run(t, "bash", "gen-values.sh", endpointsFile, adminFile, releaseTag, loaderPubFile)
 	p := filepath.Join(t.TempDir(), "values-run.json")
 	if err := os.WriteFile(p, out, 0o644); err != nil {
 		t.Fatal(err)
@@ -424,14 +460,31 @@ func TestFarmerChartRender(t *testing.T) {
 	farmer := get(t, objs, "Deployment/imas-core-farmer")
 	fe := envOf(container(t, farmer, "farmer"))
 	for k, want := range map[string]string{
-		"IMAS_S3_ENDPOINT":      "imas-uat-minio.imas-uat.svc.cluster.local:9000",
-		"IMAS_S3_BUCKET":        "imas-recipes",
-		"IMAS_S3_JOB_BUCKET":    "imas-jobs",
-		"IMAS_S3_ACCESS_KEY_ID": "secret:imas-uat-s3-farmer/access-key-id",
+		"IMAS_S3_ENDPOINT":               "imas-uat-minio.imas-uat.svc.cluster.local:9000",
+		"IMAS_S3_BUCKET":                 "imas-recipes",
+		"IMAS_S3_JOB_BUCKET":             "imas-jobs",
+		"IMAS_S3_SPROUT_JWT_BUCKET":      "imas-sprout-jwts",
+		"IMAS_S3_ACCESS_KEY_ID":          "secret:imas-uat-s3-farmer/access-key-id",
+		"IMAS_ACCOUNTS_S3_BUCKET":        "imas-accounts",
+		"IMAS_ACCOUNTS_S3_ACCESS_KEY_ID": "secret:imas-farmer-accounts-writer/access-key-id",
+		"IMAS_FARMER_NKEY_SEED_FILE":     "/var/run/secrets/imas/farmer-nkey/farmer.nk",
 	} {
 		if fe[k] != want {
 			t.Errorf("farmer %s = %q, want %q", k, fe[k], want)
 		}
+	}
+	// farmer's NKey: Secret imas-farmer-nkey, key farmer.nk, which seeds.sh
+	// creates (no PVC: farmer is stateless).
+	if fj := mustJSON(t, farmer); !strings.Contains(fj, `"secretName":"imas-farmer-nkey"`) || !strings.Contains(fj, `"key":"farmer.nk"`) {
+		t.Error("farmer doesn't mount Secret imas-farmer-nkey, key farmer.nk")
+	}
+	for key := range objs {
+		if strings.HasPrefix(key, "PersistentVolumeClaim/imas-core-farmer") {
+			t.Errorf("%s: farmer is stateless", key)
+		}
+	}
+	if vct := dig(farmer, "spec", "volumeClaimTemplates"); vct != nil {
+		t.Errorf("farmer has volumeClaimTemplates %v", vct)
 	}
 	if !strings.Contains(mustJSON(t, farmer), `"secretName":"imas-farmer-tls"`) {
 		t.Error("farmer doesn't mount tls.secretName imas-farmer-tls (tls.mode=secret)")
@@ -513,8 +566,18 @@ func TestFarmerChartRender(t *testing.T) {
 	// ConfigMap, then the Job deletes the ephemeral policy and revokes the
 	// token openbao-bootstrap.sh handed it (check.sh confirms on the cluster).
 	container(t, job, "prepare")
-	if got := envOf(container(t, job, "nats-trust"))["IMAS_NATSBOOT_TRUST_CONFIGMAP"]; got != "imas-nats-trust" {
+	nte := envOf(container(t, job, "nats-trust"))
+	if got := nte["IMAS_NATSBOOT_TRUST_CONFIGMAP"]; got != "imas-nats-trust" {
 		t.Errorf("nats-trust writes ConfigMap %q, want imas-nats-trust", got)
+	}
+	// The DMZ bus loader's user: seeds.sh's public key, so the trust
+	// carries bus-loader-user.jwt.
+	lp, err := os.ReadFile(loaderPubFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := nte["IMAS_NATSBOOT_BUS_LOADER_USER_PUB"]; got == "" || got != strings.TrimSpace(string(lp)) {
+		t.Errorf("nats-trust IMAS_NATSBOOT_BUS_LOADER_USER_PUB = %q, want %s's key", got, loaderPubFile)
 	}
 	js := mustJSON(t, job)
 	for _, want := range []string{"bao policy delete imas-nats-bootstrap", "bao token revoke -self"} {
@@ -534,8 +597,12 @@ func TestFarmerChartRender(t *testing.T) {
 	if s := mustJSON(t, ob); strings.Contains(s, "-dev") || strings.Contains(s, "BAO_DEV_ROOT_TOKEN_ID") {
 		t.Error("OpenBao renders in dev mode")
 	}
-	if c := str(get(t, objs, "ConfigMap/imas-core-openbao-config"), "data", "extraconfig-from-values.hcl"); !strings.Contains(c, `storage "file"`) {
-		t.Errorf("OpenBao config is not standalone file storage:\n%s", c)
+	// The config and env the subchart renders: raft, and the addresses.
+	be := envOf(container(t, ob, "openbao"))
+	checkOpenBaoRaft(t, libConstants(t), str(get(t, objs, "ConfigMap/imas-core-openbao-config"), "data", "extraconfig-from-values.hcl"),
+		be["BAO_API_ADDR"], be["BAO_CLUSTER_ADDR"])
+	if _, ok := objs["Service/imas-core-openbao-internal"]; !ok {
+		t.Error("no Service imas-core-openbao-internal: cluster_addr names the pod on it")
 	}
 	pxc := get(t, objs, "PerconaXtraDBCluster/imas-core-pxc")
 	if dig(pxc, "spec", "pxc", "size") != 1 || dig(pxc, "spec", "haproxy", "size") != 1 {
@@ -543,6 +610,123 @@ func TestFarmerChartRender(t *testing.T) {
 	}
 	if r := dig(get(t, objs, "Deployment/imas-core-valkey"), "spec", "replicas"); r != 1 {
 		t.Errorf("Valkey replicas %v", r)
+	}
+}
+
+// checkOpenBaoRaft checks the UAT OpenBao config (values or rendered):
+// single-node raft on the data volume with a fixed node_id, and api_addr
+// and cluster_addr on the Services of release CORE_RELEASE in CORE_NS,
+// equal to the BAO_API_ADDR and BAO_CLUSTER_ADDR the pod gets (they win
+// over the file). OpenBao 2.7.1 refuses the "file" backend.
+func checkOpenBaoRaft(t *testing.T, lib map[string]string, cfg, apiEnv, clusterEnv string) {
+	t.Helper()
+	ns, sts := lib["CORE_NS"], lib["OPENBAO_STS"]
+	wantAPI := "http://" + sts + "." + ns + ".svc:8200"
+	wantCluster := "https://" + lib["OPENBAO_POD"] + "." + sts + "-internal." + ns + ".svc:8201"
+	if strings.Contains(cfg, `storage "file"`) {
+		t.Errorf("OpenBao config uses the file backend, which 2.7.1 rejects:\n%s", cfg)
+	}
+	attr := func(name string) string {
+		m := regexp.MustCompile(`(?m)^\s*` + name + `\s*=\s*"([^"]*)"`).FindStringSubmatch(cfg)
+		if m == nil {
+			return ""
+		}
+		return m[1]
+	}
+	if !regexp.MustCompile(`(?m)^\s*storage\s+"raft"\s*\{`).MatchString(cfg) || strings.Count(cfg, "storage ") != 1 {
+		t.Errorf("OpenBao config is not exactly one raft storage block:\n%s", cfg)
+	}
+	for name, want := range map[string]string{
+		"path": "/openbao/data", "node_id": lib["OPENBAO_POD"],
+		"api_addr": wantAPI, "cluster_addr": wantCluster,
+	} {
+		if got := attr(name); got != want {
+			t.Errorf("OpenBao config %s = %q, want %q", name, got, want)
+		}
+	}
+	if apiEnv != wantAPI || clusterEnv != wantCluster {
+		t.Errorf("BAO_API_ADDR %q / BAO_CLUSTER_ADDR %q differ from the config's %q / %q", apiEnv, clusterEnv, wantAPI, wantCluster)
+	}
+}
+
+// subchartKeys are passed to the farmer chart's subcharts as is; their
+// keys are the subcharts' to check.
+var subchartKeys = map[string]bool{"openbao": true, "pxc": true, "pxc-operator": true, "valkey": true}
+
+// unknownKeys lists the paths in uat that chart's values.yaml does not
+// have. A chart value that is a non-empty map is walked; anything else
+// (a scalar, a list, an empty map or null) accepts whatever is below it.
+func unknownKeys(uat, chart map[string]any, prefix string, skip map[string]bool) []string {
+	var out []string
+	for k, v := range uat {
+		if prefix == "" && skip[k] {
+			continue
+		}
+		c, ok := chart[k]
+		if !ok {
+			out = append(out, prefix+k)
+			continue
+		}
+		um, uok := v.(map[string]any)
+		cm, cok := c.(map[string]any)
+		if uok && cok && len(cm) > 0 {
+			out = append(out, unknownKeys(um, cm, prefix+k+".", nil)...)
+		}
+	}
+	return out
+}
+
+// TestUATValuesKnownToChart: every farmer-chart key the UAT sets, in
+// values/farmer-uat.yaml and in gen-values.sh's output, exists in the
+// chart's values.yaml. The chart has no schema, so a key it dropped
+// (farmer.persistence when farmer became stateless) would otherwise be
+// ignored without a word.
+func TestUATValuesKnownToChart(t *testing.T) {
+	requireTools(t, "bash", "jq")
+	chart := readYAML(t, "../../../deploy/helm/farmer/values.yaml")
+	var run map[string]any
+	readJSON(t, runValues(t), &run)
+	for name, v := range map[string]map[string]any{"values/farmer-uat.yaml": readYAML(t, "values/farmer-uat.yaml"), "gen-values.sh": run} {
+		if bad := unknownKeys(v, chart, "", subchartKeys); len(bad) > 0 {
+			t.Errorf("%s sets keys deploy/helm/farmer/values.yaml does not have: %v", name, bad)
+		}
+	}
+	if dig(readYAML(t, "values/farmer-uat.yaml"), "farmer", "persistence") != nil {
+		t.Error("values/farmer-uat.yaml still sets farmer.persistence: farmer has no PVC")
+	}
+	// The guard itself: a dropped key is caught.
+	if bad := unknownKeys(map[string]any{"farmer": map[string]any{"persistence": map[string]any{"size": "1Gi"}}}, chart, "", subchartKeys); len(bad) != 1 || bad[0] != "farmer.persistence" {
+		t.Errorf("unknownKeys missed farmer.persistence: %v", bad)
+	}
+}
+
+// TestFarmerChartNotes renders the chart's NOTES (which `helm template`
+// skips) with the UAT values: no warning about a value the UAT must set.
+func TestFarmerChartNotes(t *testing.T) {
+	requireTools(t, "helm", "bash", "jq")
+	src, _ := farmerChart(t)
+	dir := filepath.Join(t.TempDir(), "farmer")
+	if err := os.CopyFS(dir, os.DirFS(src)); err != nil {
+		t.Fatal(err)
+	}
+	notes, err := os.ReadFile(filepath.Join(dir, "templates", "NOTES.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "files", "notes-under-test.txt"), notes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cm := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: notes-under-test\ndata:\n  notes: {{ tpl (.Files.Get \"files/notes-under-test.txt\") . | quote }}\n"
+	if err := os.WriteFile(filepath.Join(dir, "templates", "notes-under-test.yaml"), []byte(cm), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	objs := docs(t, run(t, "helm", "template", "imas-core", dir, "-n", "imas-core", "--kube-version", "1.31.0",
+		"-f", "values/farmer-uat.yaml", "-f", runValues(t), "--show-only", "templates/notes-under-test.yaml"))
+	n := str(get(t, objs, "ConfigMap/notes-under-test"), "data", "notes")
+	for _, warning := range []string{"objectStore.sproutJWTBucket is empty", "bus.egressCIDRs is empty"} {
+		if strings.Contains(n, warning) {
+			t.Errorf("NOTES warns %q with the UAT values:\n%s", warning, n)
+		}
 	}
 }
 
@@ -624,6 +808,25 @@ func TestExtrasChartRender(t *testing.T) {
 		}
 	}
 
+	// RustFS: the S3 port is hostPort 9000, and its policy admits the DMZ
+	// private address there (the bus's account loader, design D22) and no
+	// other address: the one DMZ-to-core path besides farmer's API.
+	if !strings.Contains(mustJSON(t, get(t, objs, "Deployment/imas-uat-minio")), `"containerPort":9000,"hostPort":9000`) {
+		t.Error("RustFS's S3 port is not hostPort 9000")
+	}
+	mp := get(t, objs, "NetworkPolicy/imas-uat-minio")
+	var blocks []string
+	for _, r := range dig(mp, "spec", "ingress").([]any) {
+		for _, f := range dig(r, "from").([]any) {
+			if c := str(f, "ipBlock", "cidr"); c != "" {
+				blocks = append(blocks, c+" "+mustJSON(t, dig(r, "ports")))
+			}
+		}
+	}
+	if want := dmzIP + `/32 [{"port":9000,"protocol":"TCP"}]`; len(blocks) != 1 || blocks[0] != want {
+		t.Errorf("RustFS address ingress %v, want exactly [%s]", blocks, want)
+	}
+
 	// The edge: hostPorts 443 and 5405, Keycloak's realm routed, not /admin.
 	edge := get(t, objs, "Deployment/imas-uat-edge")
 	es := mustJSON(t, edge)
@@ -653,12 +856,16 @@ func TestExtrasChartRender(t *testing.T) {
 }
 
 // withObjectStore writes a copy of testdata/endpoints.json with the given
-// object_store object and returns its path.
-func withObjectStore(t *testing.T, os_ map[string]any) string {
+// object_store object and returns its path. With accountStore, it also sets
+// dmz.account_store.endpoint (required in external mode).
+func withObjectStore(t *testing.T, os_ map[string]any, accountStore ...string) string {
 	t.Helper()
 	var ep map[string]any
 	readJSON(t, endpointsFile, &ep)
 	ep["object_store"] = os_
+	for _, a := range accountStore {
+		ep["dmz"].(map[string]any)["account_store"] = map[string]any{"endpoint": a}
+	}
 	b, err := json.Marshal(ep)
 	if err != nil {
 		t.Fatal(err)
@@ -694,8 +901,8 @@ func TestObjectStoreEndpointVariable(t *testing.T) {
 	ext := withObjectStore(t, map[string]any{
 		"mode": "external", "endpoint": "s3gw.example.internal:7070", "use_ssl": true,
 		"egress_cidrs": []string{"10.70.0.0/24"},
-	})
-	out := run(t, "bash", "gen-values.sh", ext, adminFile, releaseTag)
+	}, "s3gw.example.internal:7070")
+	out := run(t, "bash", "gen-values.sh", ext, adminFile, releaseTag, loaderPubFile)
 	var v map[string]any
 	if err := json.Unmarshal(out, &v); err != nil {
 		t.Fatal(err)
@@ -730,11 +937,12 @@ func TestObjectStoreEndpointVariable(t *testing.T) {
 func TestObjectStoreEndpointRejected(t *testing.T) {
 	requireTools(t, "bash", "jq")
 	for name, o := range map[string]map[string]any{
-		"unknown mode":          {"mode": "minio"},
-		"external, no endpoint": {"mode": "external"},
-		"scheme in endpoint":    {"endpoint": "https://s3.example.internal"},
-		"bad use_ssl":           {"use_ssl": "yes"},
-		"bad cidr":              {"egress_cidrs": []string{"not-a-cidr"}},
+		"unknown mode":                            {"mode": "minio"},
+		"external, no endpoint":                   {"mode": "external"},
+		"external, no dmz.account_store.endpoint": {"mode": "external", "endpoint": "s3gw.example.internal:7070"},
+		"scheme in endpoint":                      {"endpoint": "https://s3.example.internal"},
+		"bad use_ssl":                             {"use_ssl": "yes"},
+		"bad cidr":                                {"egress_cidrs": []string{"not-a-cidr"}},
 	} {
 		p := withObjectStore(t, o)
 		cmd := exec.Command("bash", "-c", `set -euo pipefail; . lib/common.sh; ENDPOINTS="$1"; load_endpoints`, "_", p)

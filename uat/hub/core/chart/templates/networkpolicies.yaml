@@ -11,8 +11,10 @@
 #   - saasapi: out to the DMZ private IP on the bus port.
 #   - the edge: in on 443 from anywhere (the NSG limits it to the runner),
 #     in on farmer's API port from the DMZ private IP only.
-#   - Keycloak: in from the edge only. MinIO: in from farmer and saasapi
-#     only.
+#   - Keycloak: in from the edge only. RustFS ("minio"): in from farmer and
+#     saasapi, and from the DMZ private IP on its hostPort, for the bus's
+#     account loader (read-only, accounts bucket only; design D22). That
+#     and farmer's API are the only DMZ-to-core paths.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -144,6 +146,10 @@ spec:
             matchLabels:
               app.kubernetes.io/name: {{ .Values.farmer.name }}
               app.kubernetes.io/instance: {{ .Values.farmer.release }}
+      ports:
+        - { protocol: TCP, port: 9000 }
+    - from:
+        - ipBlock: { cidr: {{ printf "%s/32" .Values.dmz.privateIP }} }
       ports:
         - { protocol: TCP, port: 9000 }
 {{- end }}

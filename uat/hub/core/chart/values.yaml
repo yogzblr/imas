@@ -61,6 +61,11 @@ minio:
   # The digest is the one that pulled on the rig; it wins over the tag.
   image: docker.io/rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
   rootSecret: imas-uat-minio-root
+  # The node port the DMZ bus's account loader reads the accounts bucket on
+  # (<core private IP>:9000, uat/hub/dmz dmz.account_store.endpoint's
+  # default; uat/tofu accounts_store_port). A hostPort, as the edge's
+  # (owner decision 2026-10-06: the core node port range is 30000-32767).
+  hostPort: 9000
   storage: 5Gi
   storageClassName: ""
   resources:

@@ -64,6 +64,7 @@ From the Shared contract, plus what the brief makes a variable.
 | `envoy_port` | `8443` | Envoy's external port on the DMZ host: 8443, the owner's decision (2026-10-06), as a NodePort. A variable so every Envoy rule moves together |
 | `bus_port` | `8442` | The farmerbus node port core dials on the DMZ: 8442, the owner's decision (2026-10-06), so the DMZ node port range is 8442-8443 only |
 | `farmer_api_port`, `core_public_port` | `5405`, `443` | farmer's API (Envoy's upstream; the owner: "farmer ports can be anything"), saasapi and Keycloak on core. See the network table |
+| `accounts_store_port` | `9000` | core's RustFS as the DMZ bus's account loader reads it (`uat/hub/core` `minio.hostPort`). See the network table |
 | `private_dns_zone` | `uat.imas.internal` | The private DNS zone linked to the VNet (see [Private DNS](#private-dns)) |
 
 The image URNs are unverified: the owner checks them with `az vm image list
@@ -140,10 +141,12 @@ balancer.
 | dmz | in | 4000 | DenyVnetIn | VirtualNetwork | any | any | Overrides `AllowVnetInBound` |
 | dmz | in | 4096 | DenyAllIn | any | any | any | Everything else, including the Azure load balancer default |
 | dmz | out | 100 | AllowFarmerApiOut | dmz | core | TCP 5405 | Envoy's upstreams `farmer_api` and `recipe_service` (5405), and its remote JWKS fetch (`/v1/.well-known/jwks.json` on the same port) |
+| dmz | out | 110 | AllowAccountsStoreOut | dmz | core | TCP `accounts_store_port` (9000) | The bus's account loader reads the accounts bucket on core's RustFS, with a read-only credential scoped to that bucket (design D22; `uat/hub/core` `minio.hostPort`, `uat/hub/dmz` `dmz.account_store.endpoint`). The only other DMZ-to-core path |
 | dmz | out | 4000 | DenyVnetOut | any | VirtualNetwork | any | Overrides `AllowVnetOutBound`: the DMZ reaches nothing else in the VNet. Internet outbound (images) stays allowed |
 | core | in | 100 | AllowBastionSshKubeIn | `10.60.4.0/26` | core | TCP 22, 6443 | As for dmz |
 | core | in | 110 | AllowDmzFarmerApiIn | dmz `10.60.1.0/24` | core | TCP 5405 | Envoy to farmer's API (farmer `farmer.apiPort`; farmer NetworkPolicy "farmer in from the nats chart's Envoy") |
 | core | in | 120 | AllowRunnerHttpsIn | `runner_cidr` | core | TCP 443 | saasapi and Keycloak, from the runner only (Shared contract) |
+| core | in | 130 | AllowDmzAccountsStoreIn | dmz `10.60.1.0/24` | core | TCP `accounts_store_port` (9000) | The DMZ bus's account loader to RustFS's hostPort (see dmz out 110); the core NetworkPolicy admits the DMZ private address only, on that port |
 | core | in | 4000, 4096 | DenyVnetIn, DenyAllIn | | | | As for dmz. A sprout cannot open a connection to core |
 | core | out | 100 | AllowBusOut | core | dmz | TCP `bus_port` (8442, owner's decision) | farmer and saasapi to the bus node port (see dmz 140) |
 | core | out | 4000 | DenyVnetOut | any | VirtualNetwork | any | Core reaches nothing else in the VNet. Internet outbound (images, the Keycloak and object store are on the same host) stays allowed |

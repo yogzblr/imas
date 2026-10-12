@@ -11,7 +11,7 @@
 #     expose (config.env),
 #     (Envoy's and the bus's on the DMZ, none on core),
 #   - a pod off the host network uses a hostPort the hub does not expose
-#     (none on the DMZ; the edge's 443 and 5405 on core).
+#     (none on the DMZ; the edge's 443 and 5405 and RustFS's 9000 on core).
 # It reads the clusters only; it changes nothing.
 set -euo pipefail
 

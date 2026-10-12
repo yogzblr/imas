@@ -651,7 +651,7 @@ cp "$DATA/kube/core/services.json" "$CASE/fix/core/services.json"
 t "check: hostPorts"
 chk --out "$CASE/out"
 expect_out "pod   imas-core/imas-uat-core-edge-0  hostPort 443 -> 8443"
-expect_out "hostPorts within 443 5405"
+expect_out "hostPorts within 443 5405 9000"
 expect_out "hostPorts within none"
 if [[ $OUT == *"kube-router-abcde  hostPort"* ]]; then fail "host-network pod listed"; else pass; fi
 
@@ -666,7 +666,7 @@ t "check: a core hostPort that is not the edge's"
 jq_edit "$DATA/kube/core/pods.json" "$CASE/fix/core/pods.json" '.items[1].spec.containers[0].ports[0].hostPort = 8443'
 chk --out "$CASE/out"
 expect_rc 1
-expect_out "core: hostPorts outside the hub's exposed ports (443 5405): imas-core/imas-uat-core-edge-0:8443"
+expect_out "core: hostPorts outside the hub's exposed ports (443 5405 9000): imas-core/imas-uat-core-edge-0:8443"
 cp "$DATA/kube/core/pods.json" "$CASE/fix/core/pods.json"
 
 t "check: API unreachable"

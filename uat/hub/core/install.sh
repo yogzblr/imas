@@ -5,12 +5,14 @@
 # (README.md, "What install.sh does"):
 #    1. namespaces and the generated credentials (Kubernetes Secrets, and
 #       files under <state>/core/sensitive)
-#    2. the NATS user seeds (seeds.sh) and the bootstrap admin keys
+#    2. the NATS user seeds and farmer's NKey, with their Secrets, and the
+#       DMZ bus loader's seed (seeds.sh), and the bootstrap admin keys
 #       (admin-keys.sh, the release's own imas CLI)
 #    3. the published farmer chart of release_tag, pulled and checked
 #    4. the UAT-only pieces (chart/): MinIO, Keycloak with the imas-uat
 #       realm, the edge proxy, certificates, policies
-#    5. MinIO buckets, users and policies (minio-setup.sh)
+#    5. RustFS buckets, users and policies (minio-setup.sh): recipes, jobs,
+#       sprout JWTs and the accounts bucket with its writer and reader
 #    6. the farmer chart, with OpenBao initialised and unsealed while the
 #       install runs (openbao-bootstrap.sh); its bootstrap Job writes the
 #       public NATS trust (ConfigMap imas-nats-trust, which the DMZ copies)
@@ -109,23 +111,27 @@ if [[ "$S3_MODE" == rustfs ]]; then
 	"$here/minio-setup.sh" "${common[@]}" "$chart_dir/saasapi-recipes.json"
 else
 	# External S3 (object_store.mode external): buckets, users and policies
-	# are the operator's. The four credential files below are theirs too;
-	# they become the two Secrets the farmer chart names.
+	# are the operator's. The credential files below are theirs too; they
+	# become the three Secrets the farmer chart names. The accounts reader's
+	# pair (accounts-reader/) is for the DMZ (uat/hub/dmz/install.sh
+	# --accounts-reader-dir) and is only checked here.
 	s3dir="$SENSITIVE_DIR/s3"
-	for f in farmer saasapi; do
+	for f in farmer- saasapi- accounts-writer- accounts-reader/; do
 		for k in access-key-id secret-access-key; do
-			[[ -s "$s3dir/$f-$k" ]] || die "object_store.mode is external: $s3dir/$f-$k is missing (README.md, \"External S3\")"
+			[[ -s "$s3dir/$f$k" ]] || die "object_store.mode is external: $s3dir/$f$k is missing (README.md, \"External S3\")"
 		done
 	done
 	apply_secret "$CORE_NS" "$S3_FARMER_SECRET" \
 		"access-key-id=$s3dir/farmer-access-key-id" "secret-access-key=$s3dir/farmer-secret-access-key"
 	apply_secret "$CORE_NS" "$S3_SAASAPI_SECRET" \
 		"access-key-id=$s3dir/saasapi-access-key-id" "secret-access-key=$s3dir/saasapi-secret-access-key"
-	log "external S3 at $S3_ENDPOINT: Secrets $S3_FARMER_SECRET and $S3_SAASAPI_SECRET applied from $s3dir"
+	apply_secret "$CORE_NS" "$S3_ACCOUNTS_WRITER_SECRET" \
+		"access-key-id=$s3dir/accounts-writer-access-key-id" "secret-access-key=$s3dir/accounts-writer-secret-access-key"
+	log "external S3 at $S3_ENDPOINT: Secrets $S3_FARMER_SECRET, $S3_SAASAPI_SECRET and $S3_ACCOUNTS_WRITER_SECRET applied from $s3dir"
 fi
 
 # --- 6. the farmer chart, with OpenBao bootstrapped alongside ----------------
-"$here/gen-values.sh" "$ENDPOINTS" "$OUT_DIR/admin.json" "$release_tag" >"$STATE_DIR/values-run.json"
+"$here/gen-values.sh" "$ENDPOINTS" "$OUT_DIR/admin.json" "$release_tag" "$OUT_DIR/$LOADER_PUB_FILE" >"$STATE_DIR/values-run.json"
 helm_log="$STATE_DIR/helm-install.log"
 log "installing $CORE_RELEASE from $chart_tgz (timeout $HELM_TIMEOUT; log $helm_log)"
 # No --wait: saasapi starts only once step 7's Secrets exist, and those

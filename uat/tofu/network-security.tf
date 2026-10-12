@@ -24,12 +24,14 @@ locals {
       { name = "AllowRunnerEnvoyIn", priority = 130, direction = "Inbound", access = "Allow", protocol = "Tcp", src = local.runner, dst = [local.cidr.dmz], ports = [tostring(var.envoy_port)] },
       { name = "AllowCoreBusIn", priority = 140, direction = "Inbound", access = "Allow", protocol = "Tcp", src = [local.cidr.core], dst = [local.cidr.dmz], ports = [tostring(var.bus_port)] },
       { name = "AllowFarmerApiOut", priority = 100, direction = "Outbound", access = "Allow", protocol = "Tcp", src = [local.cidr.dmz], dst = [local.cidr.core], ports = [tostring(var.farmer_api_port)] },
+      { name = "AllowAccountsStoreOut", priority = 110, direction = "Outbound", access = "Allow", protocol = "Tcp", src = [local.cidr.dmz], dst = [local.cidr.core], ports = [tostring(var.accounts_store_port)] },
     ], local.deny_tail)
 
     core = concat([
       { name = "AllowBastionSshKubeIn", priority = 100, direction = "Inbound", access = "Allow", protocol = "Tcp", src = [local.cidr.bastion], dst = [local.cidr.core], ports = ["22", "6443"] },
       { name = "AllowDmzFarmerApiIn", priority = 110, direction = "Inbound", access = "Allow", protocol = "Tcp", src = [local.cidr.dmz], dst = [local.cidr.core], ports = [tostring(var.farmer_api_port)] },
       { name = "AllowRunnerHttpsIn", priority = 120, direction = "Inbound", access = "Allow", protocol = "Tcp", src = local.runner, dst = [local.cidr.core], ports = [tostring(var.core_public_port)] },
+      { name = "AllowDmzAccountsStoreIn", priority = 130, direction = "Inbound", access = "Allow", protocol = "Tcp", src = [local.cidr.dmz], dst = [local.cidr.core], ports = [tostring(var.accounts_store_port)] },
       { name = "AllowBusOut", priority = 100, direction = "Outbound", access = "Allow", protocol = "Tcp", src = [local.cidr.core], dst = [local.cidr.dmz], ports = [tostring(var.bus_port)] },
     ], local.deny_tail)
 

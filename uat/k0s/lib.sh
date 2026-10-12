@@ -175,11 +175,12 @@ hub_allowed_node_ports() {
 }
 
 # hub_allowed_host_ports HUB prints the hostPorts a hub may use (pods not on
-# the host network): none on the DMZ, the edge's on core.
+# the host network): none on the DMZ; on core the edge's and RustFS's (the
+# accounts bucket the DMZ bus's loader reads).
 hub_allowed_host_ports() {
   case $1 in
     dmz) ;;
-    core) printf '%s\n' "$UAT_CORE_HTTPS_PORT" "$UAT_CORE_FARMER_API_PORT" ;;
+    core) printf '%s\n' "$UAT_CORE_HTTPS_PORT" "$UAT_CORE_FARMER_API_PORT" "$UAT_CORE_ACCOUNTS_STORE_PORT" ;;
     *) die "unknown hub: $1" ;;
   esac
 }

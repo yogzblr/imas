@@ -19,9 +19,11 @@ Scope: `uat/`, `deploy/farmer/`, `.github/workflows/uat.yml`, UAT docs.
    rendering the config and parsing it with the 2.7.1 image (`bao operator diagnose
    -config` or a 5-second `bao server -config` run in a container); if no container
    runtime is available in the session, state which static check you ran instead.
-2. `uat/hub/core/values/farmer-uat.yaml`: set `objectStore.sproutJWTBucket` to the
-   chart's default name for that bucket (read it from `deploy/helm/farmer/values.yaml`),
-   make `minio-setup` (RustFS) create that bucket, and remove `farmer.persistence.size`.
+2. `uat/hub/core/values/farmer-uat.yaml`: set `objectStore.sproutJWTBucket` (the chart
+   has no default name for that bucket: `deploy/helm/farmer/values.yaml` sets `""` and
+   NOTES warns; the UAT uses `imas-sprout-jwts`, next to `imas-recipes` and `imas-jobs`),
+   make `minio-setup` (RustFS) create that bucket and give farmer's user get and put on
+   it, and remove `farmer.persistence.size`.
 3. Farmer NKey: `uat/hub/core/seeds.sh` creates Secret `imas-farmer-nkey` with key
    `farmer.nk` (a user seed generated the same way the script generates the other
    seeds); the chart reads it through `farmer.nkeySecret` (D4). Add the same Secret to

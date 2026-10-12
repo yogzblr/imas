@@ -22,6 +22,12 @@
           }
         ]
       }
+    },
+    {
+      "metadata": {"name": "imas-uat-minio-7d9f8-x2k4p", "namespace": "imas-uat"},
+      "spec": {
+        "containers": [{"name": "rustfs", "ports": [{"name": "s3", "containerPort": 9000, "hostPort": 9000}]}]
+      }
     }
   ]
 }
