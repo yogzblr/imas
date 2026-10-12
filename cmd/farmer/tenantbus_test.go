@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats-server/v2/server"
+	nats "github.com/nats-io/nats.go"
 )
 
 // Test 7 (brief §6), farmer's half: a tenant connection never gives up
