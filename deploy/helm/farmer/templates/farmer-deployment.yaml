@@ -98,6 +98,10 @@ spec:
             - name: IMAS_NATS_{{ $name }}_SEED_FILE
               value: {{ printf "%s/%s" $.Values.natsSeeds.mountPath $key | quote }}
             {{- end }}
+            # farmer's NKey: the same seed in every replica, from its own
+            # Secret (farmer.nkeySecret); farmer never generates one.
+            - name: IMAS_FARMER_NKEY_SEED_FILE
+              value: {{ printf "%s/%s" .Values.farmer.nkeySecret.mountPath .Values.farmer.nkeySecret.key | quote }}
             # Deliberately absent: every IMAS_SAASAPI_CRED_OPENBAO_* var.
             # farmer's long-running process must never be configured with
             # (or able to log in as) the KV-write identity.
@@ -251,12 +255,15 @@ spec:
               readOnly: true
             # The only writable volume besides tls; nothing on it outlives
             # the pod. farmerpki points here: what farmer still writes
-            # there (its NKey and the JWTs it signs for itself) is per
-            # replica and made again at start.
+            # there (the JWTs it signs for itself) is per replica and made
+            # again at start.
             - name: tmp
               mountPath: /tmp
             - name: nats-seeds
               mountPath: {{ .Values.natsSeeds.mountPath }}
+              readOnly: true
+            - name: farmer-nkey
+              mountPath: {{ .Values.farmer.nkeySecret.mountPath }}
               readOnly: true
             {{- include "imas-farmer.natsTrustVolumeMount" . | nindent 12 }}
             - name: tls
@@ -285,6 +292,14 @@ spec:
               - key: {{ $key | quote }}
                 path: {{ $key | quote }}
               {{- end }}
+        # farmer's NKey seed, shared by every replica; only its key.
+        - name: farmer-nkey
+          secret:
+            secretName: {{ .Values.farmer.nkeySecret.secretName }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.farmer.nkeySecret.key | quote }}
+                path: {{ .Values.farmer.nkeySecret.key | quote }}
         # Public trust only; written by the bootstrap Job.
         {{- include "imas-farmer.natsTrustVolume" . | nindent 8 }}
         {{- if eq .Values.tls.mode "secret" }}

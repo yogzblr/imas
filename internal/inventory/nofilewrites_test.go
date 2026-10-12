@@ -79,11 +79,9 @@ var allowedFileWrites = []string{
 	"internal/pki/enrollclient.go:writeFileAtomic:os.CreateTemp#1",
 	"internal/pki/enrollclient.go:writeFileOnce:os.MkdirAll#1",
 	"internal/pki/enrollclient.go:writeFileOnce:os.CreateTemp#1",
-	// farmer's NKey, at nkeyfarmer*file under farmerpki (tmp emptyDir).
-	// Per replica until it is read from a mounted Secret
-	// (IMAS_FARMER_NKEY_SEED_FILE,
-	// docs/briefs/P21-slice3-farmer-saasapi-state.md §5); the sprout's own NKey
-	// otherwise.
+	// The sprout's own NKey: sprout only. Farmer's NKey is the shared
+	// Secret at IMAS_FARMER_NKEY_SEED_FILE (certs.LoadFarmerNKey), and
+	// GenNKey(true) refuses before writing.
 	"internal/certs/nkey.go:GenNKey:os.WriteFile#1",
 	"internal/certs/nkey.go:GenNKey:os.WriteFile#2",
 	// farmer's API certificate from OpenBao PKI, into the TLS dir: a

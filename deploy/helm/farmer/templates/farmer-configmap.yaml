@@ -1,7 +1,9 @@
 {{- include "imas-farmer.validate" . -}}
 {{- $tlsDir := include "imas-farmer.tlsDir" . -}}
 {{- /* Under the tmp emptyDir: farmer keeps no state on disk, and what it
-still writes to farmerpki is per replica and made again at start. */ -}}
+still writes to farmerpki is per replica and made again at start. Its
+NKey is not here: it is the farmer.nkeySecret mount
+(IMAS_FARMER_NKEY_SEED_FILE). */ -}}
 {{- $pki := "/tmp/farmer/pki" -}}
 {{- $managed := dict
   "loglevel" .Values.farmer.logLevel
@@ -12,8 +14,6 @@ still writes to farmerpki is per replica and made again at start. */ -}}
   "farmerorganization" .Values.organization
   "configroot" "/etc/imas/"
   "farmerpki" (printf "%s/" $pki)
-  "nkeyfarmerpubfile" (printf "%s/farmer.nkey.pub" $pki)
-  "nkeyfarmerprivfile" (printf "%s/farmer.nkey" $pki)
   "gatewaytransitkeyname" .Values.farmer.openbao.gateway.keyName
   "gatewayjwtttl" .Values.farmer.gatewayJWTTTL
   "sproutbusurls" .Values.bus.sproutBusURLs

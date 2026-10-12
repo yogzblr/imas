@@ -33,6 +33,12 @@ var systemConfigRoot = defaultSystemConfigRoot()
 // file doesn't (e.g. from the Helm chart; see deploy/farmer).
 const EnvJobReconcileWindow = "IMAS_JOB_RECONCILE_WINDOW"
 
+// EnvFarmerNKeySeedFile is the path of farmer's NKey seed: a key of the
+// farmer NKey Secret every replica mounts read-only (farmer chart,
+// farmer.nkeySecret). It sets NKeyFarmerPrivFile on farmer; there is no
+// default, and farmer never generates the key (certs.LoadFarmerNKey).
+const EnvFarmerNKeySeedFile = "IMAS_FARMER_NKEY_SEED_FILE"
+
 // Recipe template render limits on farmer (RecipeTemplateLimits), set by
 // the Helm chart's farmer.recipes.templateLimits. Unset or empty keeps
 // internal/cook's default.
@@ -561,8 +567,6 @@ func LoadConfig(binary string) {
 			jety.SetDefault("joblogttl", 30*24*time.Hour) // 30 days default
 			jety.SetDefault("cohortrefreshinterval", 5*time.Minute)
 			jety.SetDefault("propsdir", "/var/cache/imas/farmer/props")
-			jety.SetDefault("nkeyfarmerpubfile", filepath.Join(systemConfigRoot, "pki/farmer/farmer.nkey.pub"))
-			jety.SetDefault("nkeyfarmerprivfile", filepath.Join(systemConfigRoot, "pki/farmer/farmer.nkey"))
 			jety.SetDefault("rootca", filepath.Join(systemConfigRoot, "pki/farmer/tls-rootca.pem"))
 			jety.SetDefault("rootcapriv", filepath.Join(systemConfigRoot, "pki/farmer/tls-rootca-key.pem"))
 			jety.SetDefault("farmerorganization", "imas farmer")
@@ -618,6 +622,11 @@ func LoadConfig(binary string) {
 				if v, found := os.LookupEnv("IMAS_S3_JOB_BUCKET"); found {
 					jety.Set("s3jobbucket", v)
 				}
+			}
+			// The mounted Secret wins over a nkeyfarmerprivfile key left in
+			// an old config file.
+			if v := os.Getenv(EnvFarmerNKeySeedFile); v != "" {
+				jety.Set("nkeyfarmerprivfile", v)
 			}
 			if jety.GetDuration("jobreconcilewindow") == 0 {
 				if v, found := os.LookupEnv(EnvJobReconcileWindow); found && v != "" {

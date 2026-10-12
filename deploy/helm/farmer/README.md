@@ -85,7 +85,10 @@ It does **not** deploy the DMZ bus or Envoy. Those are `deploy/helm/nats`.
 2. **The seed Secret** (`natsSeeds.secretName`, default
    `imas-farmer-nats-seeds`) must exist in the release namespace, with the
    two user seeds `sys-user.nk` and `saasapi-user.nk`. The chart never
-   generates seeds. See [Seeds](#seeds). The NATS trust chain itself
+   generates seeds. Next to it, **farmer's NKey Secret**
+   (`farmer.nkeySecret.secretName`, default `imas-farmer-nkey`, key
+   `farmer.nk`): one user seed that every farmer replica shares.
+   See [Seeds](#seeds). The NATS trust chain itself
    (operator, operator-signing, SYS account and tenant keys) is created in
    OpenBao Transit by the bootstrap Job; see [NATS trust](#nats-trust).
 3. **The nats chart**, installed or planned, so you know
@@ -142,6 +145,9 @@ kubectl create namespace imas-core
 kubectl -n imas-core create secret generic imas-farmer-nats-seeds \
   --from-literal=sys-user.nk="$(nk -gen user)" \
   --from-literal=saasapi-user.nk="$(nk -gen user)"
+# farmer's NKey: one seed for every replica, in a Secret of its own.
+kubectl -n imas-core create secret generic imas-farmer-nkey \
+  --from-literal=farmer.nk="$(nk -gen user)"
 kubectl -n imas-core create secret generic imas-saasapi-internal-auth \
   --from-literal=current="$(openssl rand -hex 32)"
 
@@ -312,6 +318,15 @@ values. Both are required:
 - `SAASAPI_USER`: the SaaS API's user key, whose JWT farmer mints. The
   publish Job mounts only this one.
 
+farmer's own NKey, the user every farmer bus connection authenticates as,
+is a third user seed in a Secret of its own (`farmer.nkeySecret`, default
+`imas-farmer-nkey`, key `farmer.nk`). Every replica mounts it read-only at
+`farmer.nkeySecret.mountPath` and reads it from
+`IMAS_FARMER_NKEY_SEED_FILE`, so all replicas are the same NATS user.
+farmer refuses to start without it and never generates one; the render
+fails without `secretName` and `key`, and refuses the seed Secret's or
+saasapi's credential Secret's name. No other pod mounts it.
+
 The old seeds (`OPERATOR`, `OPERATOR_SIGNING`, `SYS_ACCOUNT`, `TENANT`,
 `TENANT_SIGNING`) are refused at render time. Delete them from the Secret
 and from OpenBao KV: nothing reads them, and a private key nobody uses is
@@ -320,7 +335,8 @@ stop being read).
 
 `externalSecrets.enabled` renders `deploy/farmer/externalsecrets.yaml`:
 each seed's property is its name in lowercase, `sys_user` and
-`saasapi_user`. It also renders `imas-saasapi-nats`: saasapi's seed from
+`saasapi_user`. It also renders `farmer.nkeySecret.secretName` from the
+same seed path, property `farmer_nkey`, and `imas-saasapi-nats`: saasapi's seed from
 the seed path, and the published JWT from `credentialPublisher.kvPath`.
 
 ## NATS trust
@@ -1058,9 +1074,10 @@ which is local to one PXC node):
 
 The pod's root filesystem is read-only. Its only writable volumes are the
 `tmp` emptyDir and the TLS directory. `farmerpki` points into `tmp`: what
-farmer still writes there (its own NKey and the JWTs it signs for its own
-connections) is per replica and made again at every start; nothing there
-outlives the pod.
+farmer still writes there (the JWTs it signs for its own connections) is
+per replica and made again at every start; nothing there outlives the pod.
+farmer's NKey is not written: every replica reads the same seed from the
+read-only `farmer.nkeySecret` mount ([Seeds](#seeds)).
 
 Farmer and saasapi roll one pod at a time (`RollingUpdate`,
 `maxUnavailable: 0`, `maxSurge: 1`), and a PodDisruptionBudget (`farmer.pdb`, `minAvailable: 1`,
@@ -1157,6 +1174,7 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `natsSeeds.secretName` | `imas-farmer-nats-seeds` | The seed Secret. Required. |
 | `natsSeeds.seeds` | `SYS_USER`, `SAASAPI_USER` | `NAME: key` pairs. Both are required; the removed trust chain seeds are refused. |
 | `natsSeeds.extraSeeds` | `{}` | More user-kind seeds. |
+| `farmer.nkeySecret.secretName` / `key` / `mountPath` | `imas-farmer-nkey` / `farmer.nk` / `/var/run/secrets/imas/farmer-nkey` | farmer's NKey seed, shared by every replica (`IMAS_FARMER_NKEY_SEED_FILE`). Required; a Secret of its own. With ESO: property `farmer_nkey` of `externalSecrets.seedPath`. See [Seeds](#seeds). |
 | `natsTrust.configMapName` | `imas-nats-trust` | The trust ConfigMap the bootstrap writes and farmer and the publish Job mount. |
 | `natsTrust.busFenceUserPub` | `""` | The nats chart's fence user public key (`U...`); set, the bootstrap mints `bus-fence-user.jwt`. |
 | `natsTrust.busLoaderUserPub` | `""` | The nats chart's account loader user public key (`U...`, the public half of its `loader.sysUserSecret` seed); set, the bootstrap mints `bus-loader-user.jwt`, which every bus pod's loader needs. Must differ from `busFenceUserPub`. |
