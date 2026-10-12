@@ -23,6 +23,7 @@ import (
 
 	log "github.com/yogzblr/imas/internal/log"
 
+	"github.com/yogzblr/imas/internal/certs"
 	"github.com/yogzblr/imas/internal/config"
 )
 
@@ -584,12 +585,19 @@ func PutNKey(id string) error {
 	return nil
 }
 
+// GetPubNKey returns the sprout's or farmer's public NKey. Farmer's comes
+// from its seed, the shared Secret at IMAS_FARMER_NKEY_SEED_FILE
+// (certs.LoadFarmerNKey); with no seed file configured, as in-process
+// test harnesses run, it is read from config.NKeyFarmerPubFile.
 func GetPubNKey(keyType PubKeyType) (string, error) {
 	var pubFile string
 	switch keyType {
 	case SproutPubNKey:
 		pubFile = config.NKeySproutPubFile
 	case FarmerPubNKey:
+		if config.NKeyFarmerPrivFile != "" {
+			return certs.GetPubNKey(true)
+		}
 		pubFile = config.NKeyFarmerPubFile
 		// case CliPubNKey:
 		//	pubFile = config.NKeyImasPubFile

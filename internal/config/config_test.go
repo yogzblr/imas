@@ -1648,3 +1648,40 @@ func TestLoadConfig_SproutStagedRecipeClockSkewInvalid(t *testing.T) {
 		})
 	}
 }
+
+// Farmer's NKey seed is the mounted Secret key named by
+// IMAS_FARMER_NKEY_SEED_FILE, which wins over a key left in an old config
+// file; without it there is no default path.
+func TestLoadConfig_FarmerNKeySeedFile(t *testing.T) {
+	load := func(t *testing.T, content string) {
+		t.Helper()
+		tmpRoot := t.TempDir()
+		cfgFile := writeTempConfig(t, tmpRoot, "farmer", content)
+		resetForBinaryTest(t, tmpRoot)
+		jety.SetConfigType("yaml")
+		jety.SetConfigFile(cfgFile)
+		_ = jety.ReadInConfig()
+		LoadConfig("farmer")
+	}
+
+	t.Run("unset", func(t *testing.T) {
+		t.Cleanup(func() { resetJety(t) })
+		t.Setenv(EnvFarmerNKeySeedFile, "")
+		load(t, "")
+		if NKeyFarmerPrivFile != "" {
+			t.Errorf("NKeyFarmerPrivFile = %q, want no default", NKeyFarmerPrivFile)
+		}
+		if NKeyFarmerPubFile != "" {
+			t.Errorf("NKeyFarmerPubFile = %q, want no default", NKeyFarmerPubFile)
+		}
+	})
+	t.Run("env wins", func(t *testing.T) {
+		t.Cleanup(func() { resetJety(t) })
+		const want = "/var/run/secrets/imas/farmer-nkey/farmer.nk"
+		t.Setenv(EnvFarmerNKeySeedFile, want)
+		load(t, "nkeyfarmerprivfile: /etc/imas/pki/farmer/farmer.nkey\n")
+		if NKeyFarmerPrivFile != want {
+			t.Errorf("NKeyFarmerPrivFile = %q, want %q", NKeyFarmerPrivFile, want)
+		}
+	})
+}

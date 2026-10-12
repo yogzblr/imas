@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nkeys"
+
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/openbao/openbaotest"
 )
@@ -1227,52 +1229,111 @@ func TestRotateTLSCertsLeaseRenewalFailsReissues(t *testing.T) {
 
 // --- NKey tests (unrelated to OpenBao; unchanged) -----------------------
 
-func TestGenNKeyFarmer(t *testing.T) {
-	setupNKeyConfigDir(t)
+// Farmer's NKey is never generated: GenNKey(true) fails and writes nothing.
+func TestGenNKeyFarmerRefused(t *testing.T) {
+	dir := setupNKeyConfigDir(t)
 
-	if err := GenNKey(true); err != nil {
-		t.Fatalf("GenNKey(true) failed: %v", err)
+	if err := GenNKey(true); !errors.Is(err, ErrFarmerNKeyNotGenerated) {
+		t.Fatalf("GenNKey(true) = %v, want ErrFarmerNKeyNotGenerated", err)
 	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("GenNKey(true) wrote %d files", len(entries))
+	}
+}
 
-	// Verify pub key file was created
-	pubBytes, err := os.ReadFile(config.NKeyFarmerPubFile)
-	if err != nil {
-		t.Fatalf("failed to read farmer pub key: %v", err)
+// writeFarmerSeed writes seed into a read-only dir standing in for the
+// mounted Secret, and points config.NKeyFarmerPrivFile at it.
+func writeFarmerSeed(t *testing.T, seed []byte) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "farmer.nk")
+	if err := os.WriteFile(path, seed, 0o400); err != nil {
+		t.Fatal(err)
 	}
-	if len(pubBytes) == 0 {
-		t.Fatal("farmer pub key file is empty")
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
 	}
-	if pubBytes[0] != 'U' {
-		t.Fatalf("expected NATS user public key starting with 'U', got %c", pubBytes[0])
-	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	saved := config.NKeyFarmerPrivFile
+	t.Cleanup(func() { config.NKeyFarmerPrivFile = saved })
+	config.NKeyFarmerPrivFile = path
+	return dir
+}
 
-	// Verify priv key file was created
-	privBytes, err := os.ReadFile(config.NKeyFarmerPrivFile)
+func TestLoadFarmerNKey(t *testing.T) {
+	user, err := nkeys.CreateUser()
 	if err != nil {
-		t.Fatalf("failed to read farmer priv key: %v", err)
+		t.Fatal(err)
 	}
-	if len(privBytes) == 0 {
-		t.Fatal("farmer priv key file is empty")
-	}
-	if privBytes[0] != 'S' {
-		t.Fatalf("expected NATS seed starting with 'S', got %c", privBytes[0])
-	}
+	seed, _ := user.Seed()
+	wantPub, _ := user.PublicKey()
+	// A trailing newline, as a Secret written by hand often has.
+	dir := writeFarmerSeed(t, append(seed, '\n'))
 
-	// Verify file permissions
-	info, err := os.Stat(config.NKeyFarmerPrivFile)
+	kp, err := LoadFarmerNKey()
 	if err != nil {
-		t.Fatalf("failed to stat farmer priv key: %v", err)
+		t.Fatalf("LoadFarmerNKey: %v", err)
 	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("expected priv key permissions 0600, got %o", info.Mode().Perm())
+	defer kp.Wipe()
+	if pub, _ := kp.PublicKey(); pub != wantPub {
+		t.Errorf("public key = %s, want %s", pub, wantPub)
 	}
-	info, err = os.Stat(config.NKeyFarmerPubFile)
+	if pub, err := GetPubNKey(true); err != nil || pub != wantPub {
+		t.Errorf("GetPubNKey(true) = %q, %v, want %s", pub, err, wantPub)
+	}
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatalf("failed to stat farmer pub key: %v", err)
+		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("expected pub key permissions 0600, got %o", info.Mode().Perm())
+	if len(entries) != 1 {
+		t.Errorf("Secret dir holds %d entries, want only the seed", len(entries))
 	}
+}
+
+func TestLoadFarmerNKeyRefusals(t *testing.T) {
+	account, err := nkeys.CreateAccount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountSeed, _ := account.Seed()
+
+	t.Run("unset", func(t *testing.T) {
+		saved := config.NKeyFarmerPrivFile
+		t.Cleanup(func() { config.NKeyFarmerPrivFile = saved })
+		config.NKeyFarmerPrivFile = ""
+		_, err := LoadFarmerNKey()
+		if err == nil || !strings.Contains(err.Error(), config.EnvFarmerNKeySeedFile) {
+			t.Fatalf("err = %v, want one naming %s", err, config.EnvFarmerNKeySeedFile)
+		}
+	})
+	t.Run("missing", func(t *testing.T) {
+		saved := config.NKeyFarmerPrivFile
+		t.Cleanup(func() { config.NKeyFarmerPrivFile = saved })
+		config.NKeyFarmerPrivFile = filepath.Join(t.TempDir(), "farmer.nk")
+		if _, err := LoadFarmerNKey(); err == nil {
+			t.Fatal("no error for a missing seed")
+		}
+		if _, err := os.Stat(config.NKeyFarmerPrivFile); !os.IsNotExist(err) {
+			t.Fatal("LoadFarmerNKey created the seed")
+		}
+	})
+	t.Run("garbage", func(t *testing.T) {
+		writeFarmerSeed(t, []byte("not a seed"))
+		if _, err := LoadFarmerNKey(); err == nil {
+			t.Fatal("no error for a garbage seed")
+		}
+	})
+	t.Run("account seed", func(t *testing.T) {
+		writeFarmerSeed(t, accountSeed)
+		_, err := LoadFarmerNKey()
+		if err == nil || !strings.Contains(err.Error(), "not a user key") {
+			t.Fatalf("err = %v, want not a user key", err)
+		}
+	})
 }
 
 func TestGenNKeySprout(t *testing.T) {
@@ -1305,21 +1366,21 @@ func TestGenNKeySprout(t *testing.T) {
 func TestGenNKeyIdempotent(t *testing.T) {
 	setupNKeyConfigDir(t)
 
-	if err := GenNKey(true); err != nil {
-		t.Fatalf("GenNKey(true) failed: %v", err)
+	if err := GenNKey(false); err != nil {
+		t.Fatalf("GenNKey(false) failed: %v", err)
 	}
 
-	origPub, err := os.ReadFile(config.NKeyFarmerPubFile)
+	origPub, err := os.ReadFile(config.NKeySproutPubFile)
 	if err != nil {
 		t.Fatalf("failed to read original pub key: %v", err)
 	}
 
 	// Call again — should not regenerate
-	if err := GenNKey(true); err != nil {
-		t.Fatalf("GenNKey(true) second call failed: %v", err)
+	if err := GenNKey(false); err != nil {
+		t.Fatalf("GenNKey(false) second call failed: %v", err)
 	}
 
-	newPub, err := os.ReadFile(config.NKeyFarmerPubFile)
+	newPub, err := os.ReadFile(config.NKeySproutPubFile)
 	if err != nil {
 		t.Fatalf("failed to read pub key after second call: %v", err)
 	}
@@ -1328,41 +1389,12 @@ func TestGenNKeyIdempotent(t *testing.T) {
 	}
 }
 
-func TestGenNKeyFarmerAndSproutDistinct(t *testing.T) {
-	setupNKeyConfigDir(t)
-
-	if err := GenNKey(true); err != nil {
-		t.Fatalf("GenNKey(true) failed: %v", err)
-	}
-	if err := GenNKey(false); err != nil {
-		t.Fatalf("GenNKey(false) failed: %v", err)
-	}
-
-	farmerPub, err := os.ReadFile(config.NKeyFarmerPubFile)
-	if err != nil {
-		t.Fatalf("failed to read farmer pub key: %v", err)
-	}
-	sproutPub, err := os.ReadFile(config.NKeySproutPubFile)
-	if err != nil {
-		t.Fatalf("failed to read sprout pub key: %v", err)
-	}
-	if string(farmerPub) == string(sproutPub) {
-		t.Fatal("farmer and sprout NKeys should be distinct")
-	}
-}
-
-// The GenNKey write-failure tests below put a key file in a directory that
-// doesn't exist: os.Stat reports ENOENT (so GenNKey goes on to write, as
-// it would for a missing key) and os.WriteFile fails, because it never
-// creates parents. Unlike a chmod 0o555 directory, that also fails when
-// the tests run as root, as they do in many CI containers.
-
 func TestGenNKeyUnwritablePubDir(t *testing.T) {
 	missingDir := filepath.Join(t.TempDir(), "missing-dir")
-	config.NKeyFarmerPrivFile = filepath.Join(missingDir, "farmer.nkey")
-	config.NKeyFarmerPubFile = filepath.Join(missingDir, "farmer.pub")
+	config.NKeySproutPrivFile = filepath.Join(missingDir, "sprout.nkey")
+	config.NKeySproutPubFile = filepath.Join(missingDir, "sprout.pub")
 
-	err := GenNKey(true)
+	err := GenNKey(false)
 	if err == nil {
 		t.Fatal("GenNKey should fail when pub key directory is not writable")
 	}
@@ -1374,34 +1406,15 @@ func TestGenNKeyUnwritablePubDir(t *testing.T) {
 func TestGenNKeyUnwritablePrivDir(t *testing.T) {
 	writableDir := t.TempDir()
 	// Pub goes to a writable dir, priv to one that doesn't exist.
-	config.NKeyFarmerPubFile = filepath.Join(writableDir, "farmer.pub")
-	config.NKeyFarmerPrivFile = filepath.Join(writableDir, "missing-dir", "farmer.nkey")
+	config.NKeySproutPubFile = filepath.Join(writableDir, "sprout.pub")
+	config.NKeySproutPrivFile = filepath.Join(writableDir, "missing-dir", "sprout.nkey")
 
-	err := GenNKey(true)
+	err := GenNKey(false)
 	if err == nil {
 		t.Fatal("GenNKey should fail when priv key directory is not writable")
 	}
 	if !strings.Contains(err.Error(), "failed to write NKey private key") {
 		t.Fatalf("GenNKey failed at the wrong step: %v", err)
-	}
-}
-
-func TestGetPubNKeyFarmer(t *testing.T) {
-	setupNKeyConfigDir(t)
-
-	if err := GenNKey(true); err != nil {
-		t.Fatalf("GenNKey(true) failed: %v", err)
-	}
-
-	pubKey, err := GetPubNKey(true)
-	if err != nil {
-		t.Fatalf("GetPubNKey(true) failed: %v", err)
-	}
-	if len(pubKey) == 0 {
-		t.Fatal("GetPubNKey returned empty string")
-	}
-	if pubKey[0] != 'U' {
-		t.Fatalf("expected NATS user public key starting with 'U', got %c", pubKey[0])
 	}
 }
 
@@ -1433,11 +1446,11 @@ func TestGetPubNKeyMissing(t *testing.T) {
 func TestGenNKeySeedData(t *testing.T) {
 	setupNKeyConfigDir(t)
 
-	if err := GenNKey(true); err != nil {
-		t.Fatalf("GenNKey(true) failed: %v", err)
+	if err := GenNKey(false); err != nil {
+		t.Fatalf("GenNKey(false) failed: %v", err)
 	}
 
-	privBytes, err := os.ReadFile(config.NKeyFarmerPrivFile)
+	privBytes, err := os.ReadFile(config.NKeySproutPrivFile)
 	if err != nil {
 		t.Fatalf("failed to read priv key: %v", err)
 	}
@@ -1461,8 +1474,8 @@ func TestGenNKeyStatErrorNotENOENT(t *testing.T) {
 		t.Fatalf("failed to create dir: %v", err)
 	}
 
-	config.NKeyFarmerPrivFile = filepath.Join(noExecDir, "subdir", "farmer.nkey")
-	config.NKeyFarmerPubFile = filepath.Join(dir, "farmer.pub")
+	config.NKeySproutPrivFile = filepath.Join(noExecDir, "subdir", "sprout.nkey")
+	config.NKeySproutPubFile = filepath.Join(dir, "sprout.pub")
 
 	// Remove execute permission from noExecDir — os.Stat on the nested path
 	// returns EACCES (not ENOENT).
@@ -1471,7 +1484,7 @@ func TestGenNKeyStatErrorNotENOENT(t *testing.T) {
 	}
 	defer os.Chmod(noExecDir, 0o755)
 
-	err := GenNKey(true)
+	err := GenNKey(false)
 	if err == nil {
 		t.Fatal("GenNKey should fail when stat returns non-ENOENT error")
 	}
@@ -1481,16 +1494,16 @@ func TestGenNKeyWritePubFails(t *testing.T) {
 	// Cover GenNKey error when pub key write fails but stat returns ENOENT.
 	dir := t.TempDir()
 	// Priv file in a writable dir so stat returns ENOENT.
-	config.NKeyFarmerPrivFile = filepath.Join(dir, "farmer.nkey")
+	config.NKeySproutPrivFile = filepath.Join(dir, "sprout.nkey")
 	// The pub path is an existing directory: opening it for writing fails
 	// with EISDIR, for root too.
-	pubAsDir := filepath.Join(dir, "farmer.pub")
+	pubAsDir := filepath.Join(dir, "sprout.pub")
 	if err := os.MkdirAll(pubAsDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	config.NKeyFarmerPubFile = pubAsDir
+	config.NKeySproutPubFile = pubAsDir
 
-	err := GenNKey(true)
+	err := GenNKey(false)
 	if err == nil {
 		t.Fatal("GenNKey should fail when pub key write fails")
 	}
@@ -1504,18 +1517,18 @@ func TestGenNKeyWritePrivFails(t *testing.T) {
 	dir := t.TempDir()
 	// Priv file in a directory that doesn't exist: stat returns ENOENT,
 	// and the write fails (for root too).
-	config.NKeyFarmerPrivFile = filepath.Join(dir, "nowrite", "farmer.nkey")
+	config.NKeySproutPrivFile = filepath.Join(dir, "nowrite", "sprout.nkey")
 	// Pub file in a writable dir: the write succeeds.
-	config.NKeyFarmerPubFile = filepath.Join(dir, "farmer.pub")
+	config.NKeySproutPubFile = filepath.Join(dir, "sprout.pub")
 
-	err := GenNKey(true)
+	err := GenNKey(false)
 	if err == nil {
 		t.Fatal("GenNKey should fail when priv key write fails")
 	}
 	if !strings.Contains(err.Error(), "failed to write NKey private key") {
 		t.Fatalf("GenNKey failed at the wrong step: %v", err)
 	}
-	if _, err := os.Stat(config.NKeyFarmerPubFile); err != nil {
+	if _, err := os.Stat(config.NKeySproutPubFile); err != nil {
 		t.Fatalf("pub key should have been written before the priv write failed: %v", err)
 	}
 }

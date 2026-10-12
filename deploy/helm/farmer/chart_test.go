@@ -606,6 +606,21 @@ func TestValidationFailures(t *testing.T) {
 		{"missing saasapi seed", "natsSeeds.seeds.SAASAPI_USER is required", []string{"--set", "natsSeeds.seeds.SAASAPI_USER=null"}},
 		{"missing sys user seed", "natsSeeds.seeds.SYS_USER is required", []string{"--set", "natsSeeds.seeds.SYS_USER="}},
 		{"removed operator seed", "natsSeeds seed OPERATOR was removed", []string{"--set", "natsSeeds.seeds.OPERATOR=operator.nk"}},
+		// farmer's NKey (P21 slice 3 PR 4): a Secret of its own, required.
+		{"no farmer nkey secret", "farmer.nkeySecret.secretName is required", []string{"--set", "farmer.nkeySecret.secretName="}},
+		{"bad farmer nkey secret", "farmer.nkeySecret.secretName", []string{"--set", "farmer.nkeySecret.secretName=Bad_Name"}},
+		{"bad farmer nkey key", "farmer.nkeySecret.key", []string{"--set", "farmer.nkeySecret.key=a/b"}},
+		{"no farmer nkey key", "farmer.nkeySecret.key", []string{"--set", "farmer.nkeySecret.key="}},
+		{"dot-dot farmer nkey key", "is not a valid Secret key", []string{"--set", "farmer.nkeySecret.key=.."}},
+		{"empty-label farmer nkey secret", "is not a valid Secret name", []string{"--set", "farmer.nkeySecret.secretName=farmer..nkey"}},
+		{"farmer nkey over tmp", "must not be /, /tmp or under /tmp", []string{"--set", "farmer.nkeySecret.mountPath=/tmp"}},
+		{"farmer nkey under tmp", "must not be /, /tmp or under /tmp", []string{"--set", "farmer.nkeySecret.mountPath=/tmp/nk"}},
+		{"farmer nkey at root", "must not be /, /tmp or under /tmp", []string{"--set", "farmer.nkeySecret.mountPath=/"}},
+		{"relative farmer nkey path", "must be an absolute path", []string{"--set", "farmer.nkeySecret.mountPath=nkey"}},
+		{"farmer nkey over seeds", "must differ from natsSeeds.mountPath", []string{"--set", "farmer.nkeySecret.mountPath=/var/run/secrets/imas/nats/"}},
+		{"farmer nkey in seed secret", "must be a Secret of its own", []string{"--set", "farmer.nkeySecret.secretName=imas-farmer-nats-seeds"}},
+		{"farmer nkey in saasapi secret", "must be a Secret of its own", []string{"--set", "farmer.nkeySecret.secretName=imas-saasapi-nats"}},
+		{"box secret is farmer nkey", "is another Secret this chart mounts", []string{"--set", "saasapi.controlPlaneBox.secretName=imas-farmer-nkey"}},
 		{"removed tenant seed", "natsSeeds seed TENANT_SIGNING was removed", []string{"--set", "natsSeeds.extraSeeds.TENANT_SIGNING=tenant-signing.nk"}},
 		// The NATS signer (P21 slice 1): the reviewed policies name the
 		// transit mount; one role per client.
@@ -1146,7 +1161,7 @@ func TestFarmerNeverGetsPublisherIdentity(t *testing.T) {
 // seed, and every seed reaches a process as a _SEED_FILE path.
 func TestSeedsAreReferencesOnly(t *testing.T) {
 	docs := mustRender(t, "--set", "externalSecrets.enabled=true")
-	seedKeys := []string{"operator.nk", "operator-signing.nk", "sys-account.nk", "tenant.nk", "tenant-signing.nk", "sys-user.nk", "saasapi-user.nk", "nats-user.nk", "bus-fence-user.nk"}
+	seedKeys := []string{"operator.nk", "operator-signing.nk", "sys-account.nk", "tenant.nk", "tenant-signing.nk", "sys-user.nk", "saasapi-user.nk", "nats-user.nk", "bus-fence-user.nk", "farmer.nk"}
 	for _, d := range docs {
 		if d["kind"] != "Secret" {
 			continue
@@ -1194,6 +1209,61 @@ func TestSeedsAreReferencesOnly(t *testing.T) {
 		if get(v, "secret", "secretName") == "imas-farmer-nats-seeds" {
 			t.Error("saasapi mounts farmer's seed Secret")
 		}
+	}
+}
+
+// TestFarmerNKeyFromSecret (P21 slice 3 PR 4): every farmer replica
+// mounts the same NKey seed read-only from farmer.nkeySecret and finds it
+// at IMAS_FARMER_NKEY_SEED_FILE; no other pod mounts that Secret, and with
+// ESO it is synced from the seed path, property farmer_nkey.
+func TestFarmerNKeyFromSecret(t *testing.T) {
+	docs := mustRender(t, "--set", "externalSecrets.enabled=true")
+	d := farmerDeploy(t, docs)
+	c := container(t, d, "farmer")
+	if got, want := envValues(c)["IMAS_FARMER_NKEY_SEED_FILE"], "/var/run/secrets/imas/farmer-nkey/farmer.nk"; got != want {
+		t.Errorf("IMAS_FARMER_NKEY_SEED_FILE = %q, want %q", got, want)
+	}
+	m := mountsByName(c)["farmer-nkey"]
+	if m == nil || m["mountPath"] != "/var/run/secrets/imas/farmer-nkey" || m["readOnly"] != true {
+		t.Errorf("farmer-nkey mount = %v, want read-only at /var/run/secrets/imas/farmer-nkey", m)
+	}
+	v := byName(podSpec(d)["volumes"])["farmer-nkey"]
+	items, _ := get(v, "secret", "items").([]any)
+	if get(v, "secret", "secretName") != "imas-farmer-nkey" || len(items) != 1 ||
+		get(items[0], "key") != "farmer.nk" || get(items[0], "path") != "farmer.nk" {
+		t.Errorf("farmer-nkey volume = %v", v)
+	}
+	// Only farmer's Deployment mounts it.
+	for _, w := range docs {
+		spec, _ := get(w, "spec", "template", "spec").(obj)
+		if spec == nil || (w["kind"] == "Deployment" && get(w, "metadata", "name") == "t-farmer") {
+			continue
+		}
+		for _, vol := range byName(spec["volumes"]) {
+			if get(vol, "secret", "secretName") == "imas-farmer-nkey" {
+				t.Errorf("%v %v mounts farmer's NKey Secret", w["kind"], get(w, "metadata", "name"))
+			}
+		}
+	}
+	es := find(t, docs, "ExternalSecret", "imas-farmer-nkey")
+	data := get(es, "spec", "data").([]any)
+	if len(data) != 1 || get(data[0], "secretKey") != "farmer.nk" ||
+		get(data[0], "remoteRef", "key") != "platform/imas/nats-seeds" || get(data[0], "remoteRef", "property") != "farmer_nkey" {
+		t.Errorf("farmer NKey ExternalSecret data = %v", data)
+	}
+	if get(es, "spec", "target", "name") != "imas-farmer-nkey" {
+		t.Errorf("farmer NKey ExternalSecret target = %v", get(es, "spec", "target"))
+	}
+
+	// The values are followed.
+	docs = mustRender(t, "--set", "farmer.nkeySecret.secretName=nk", "--set", "farmer.nkeySecret.key=seed",
+		"--set", "farmer.nkeySecret.mountPath=/run/nk")
+	d = farmerDeploy(t, docs)
+	if got := envValues(container(t, d, "farmer"))["IMAS_FARMER_NKEY_SEED_FILE"]; got != "/run/nk/seed" {
+		t.Errorf("IMAS_FARMER_NKEY_SEED_FILE = %q, want /run/nk/seed", got)
+	}
+	if got := get(byName(podSpec(d)["volumes"])["farmer-nkey"], "secret", "secretName"); got != "nk" {
+		t.Errorf("farmer-nkey secretName = %v, want nk", got)
 	}
 }
 
@@ -1276,12 +1346,19 @@ func TestFarmerConfigFile(t *testing.T) {
 		t.Errorf("users = %v with farmer.bootstrapAdmin.skip", cfg["users"])
 	}
 	for k, want := range map[string]string{
-		"farmerpki": "/tmp/farmer/pki/", "nkeyfarmerprivfile": "/tmp/farmer/pki/farmer.nkey",
+		"farmerpki":             "/tmp/farmer/pki/",
 		"gatewaytransitkeyname": "imas-gateway-jwt",
 		"rootca":                "/var/run/imas/tls/tls-rootca.pem",
 	} {
 		if cfg[k] != want {
 			t.Errorf("%s = %v, want %s", k, cfg[k], want)
+		}
+	}
+	// farmer's NKey is the farmer.nkeySecret mount, not a file under
+	// farmerpki.
+	for _, k := range []string{"nkeyfarmerprivfile", "nkeyfarmerpubfile"} {
+		if _, ok := cfg[k]; ok {
+			t.Errorf("config file sets %s = %v", k, cfg[k])
 		}
 	}
 	// No connection strings in the file: they'd override the env vars.

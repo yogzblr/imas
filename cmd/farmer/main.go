@@ -51,7 +51,6 @@ import (
 	"github.com/yogzblr/imas/internal/tenantconn"
 
 	nats "github.com/nats-io/nats.go"
-	"github.com/nats-io/nkeys"
 	valkey "github.com/valkey-io/valkey-go"
 	"gorm.io/gorm"
 )
@@ -218,8 +217,10 @@ func main() {
 	if err := certs.GenCert(); err != nil {
 		log.Fatalf("failed to generate TLS certificates: %v", err)
 	}
-	if err := certs.GenNKey(true); err != nil {
-		log.Fatalf("failed to generate farmer NKey: %v", err)
+	// Every replica authenticates as the same NATS user: farmer's NKey is
+	// the shared Secret at IMAS_FARMER_NKEY_SEED_FILE, never generated.
+	if err := checkFarmerNKey(); err != nil {
+		log.Fatalf("farmer NKey: %v", err)
 	}
 	// Sync/push the current sprout accept/deny/reject state to the bus's
 	// resolver over the network (see internal/pki/nats.go's ReloadNKeys and
@@ -837,11 +838,11 @@ func dialTenantBus(ctx context.Context, tenantID string, onClosed func(*nats.Con
 	if err != nil {
 		return nil, fmt.Errorf("farmer User JWT not found for tenant %s (ReloadNKeys/ReloadNKeysForTenant/ProvisionTenant must mint it before connecting to the bus): %w", tenantID, err)
 	}
-	farmerSeed, err := os.ReadFile(config.NKeyFarmerPrivFile)
+	farmerSeed, err := farmerNKeySeed()
 	if err != nil {
 		return nil, err
 	}
-	opt := nats.UserJWTAndSeed(farmerJWT, string(farmerSeed))
+	opt := nats.UserJWTAndSeed(farmerJWT, farmerSeed)
 	certPool := x509.NewCertPool()
 	rootPEM, err := os.ReadFile(RootCA)
 	if err != nil || rootPEM == nil {
@@ -1094,23 +1095,37 @@ func connectOnBusClientConnect(ctx context.Context, data []byte, farmerPub strin
 // farmerNKeyPublic is the public key of farmer's NKey seed, the user every
 // farmer connection authenticates as; "" (logged) if it can't be read.
 func farmerNKeyPublic() string {
-	seed, err := os.ReadFile(config.NKeyFarmerPrivFile)
+	pub, err := certs.GetPubNKey(true)
 	if err != nil {
-		log.Errorf("reading farmer's NKey seed: %v", err)
-		return ""
-	}
-	kp, err := nkeys.FromSeed([]byte(strings.TrimSpace(string(seed))))
-	if err != nil {
-		log.Errorf("farmer's NKey seed: %v", err)
-		return ""
-	}
-	defer kp.Wipe()
-	pub, err := kp.PublicKey()
-	if err != nil {
-		log.Errorf("farmer's NKey public key: %v", err)
+		log.Errorf("farmer's NKey: %v", err)
 		return ""
 	}
 	return pub
+}
+
+// checkFarmerNKey fails unless farmer's NKey seed is mounted and is a
+// user key. It only reads: the seed is a read-only Secret mount.
+func checkFarmerNKey() error {
+	kp, err := certs.LoadFarmerNKey()
+	if err != nil {
+		return err
+	}
+	kp.Wipe()
+	return nil
+}
+
+// farmerNKeySeed is farmer's NKey seed, for a bus connection.
+func farmerNKeySeed() (string, error) {
+	kp, err := certs.LoadFarmerNKey()
+	if err != nil {
+		return "", err
+	}
+	defer kp.Wipe()
+	seed, err := kp.Seed()
+	if err != nil {
+		return "", err
+	}
+	return string(seed), nil
 }
 
 // tenantHasAcceptedSprouts reports whether tenantID has any accepted
