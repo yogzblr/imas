@@ -1,7 +1,6 @@
 package pki
 
 import (
-	"github.com/yogzblr/imas/internal/pki/natskeys/natskeystest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +10,7 @@ import (
 	"github.com/nats-io/nkeys"
 
 	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/pki/natskeys/natskeystest"
 )
 
 func TestEnsureNatsAuth_BootstrapsAndIsIdempotent(t *testing.T) {
