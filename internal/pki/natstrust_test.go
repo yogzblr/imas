@@ -426,6 +426,16 @@ func TestBootstrapNATSTrustLoaderUser(t *testing.T) {
 	if uc, err := jwt.DecodeUserClaims(got.BusLoaderUserJWT); err != nil || !loaderPermissionsExact(uc) || uc.Subject != loader {
 		t.Errorf("wider loader grant not re-minted: %v", err)
 	}
+	// With no loader key given, the stale grant is re-minted for the same
+	// user rather than left in the ConfigMap.
+	in.BusLoaderUserPub = ""
+	got = bootstrap(t, tr, in)
+	if uc, err := jwt.DecodeUserClaims(got.BusLoaderUserJWT); err != nil || !loaderPermissionsExact(uc) || uc.Subject != loader {
+		t.Errorf("stale loader grant without a loader key: not re-minted for the same user: %v", err)
+	}
+	if _, err := ParseNATSTrust(got.Files()); err != nil {
+		t.Errorf("result does not load back: %v", err)
+	}
 }
 
 func TestBootstrapNATSTrustLoaderUserRejects(t *testing.T) {
@@ -457,6 +467,34 @@ func TestBootstrapNATSTrustLoaderUserRejects(t *testing.T) {
 	}
 	if _, err := BootstrapNATSTrust(t.Context(), tr.Store, BootstrapInput{Existing: m}); !errors.Is(err, ErrTrustInvalid) {
 		t.Errorf("loader user issued by another account: Bootstrap err = %v, want ErrTrustInvalid", err)
+	}
+
+	// The loader key equal to a retained fence JWT's subject (no fence
+	// key given this run), and a new fence key equal to the retained
+	// loader's subject: both refused.
+	fence := newFenceUserPub(t)
+	withFence := bootstrap(t, tr, BootstrapInput{BusFenceUserPub: fence}).Files()
+	if _, err := BootstrapNATSTrust(t.Context(), tr.Store, BootstrapInput{Existing: withFence, BusLoaderUserPub: fence}); !errors.Is(err, ErrTrustInvalid) {
+		t.Errorf("loader key equal to the retained fence user: err = %v, want ErrTrustInvalid", err)
+	}
+	loader := newFenceUserPub(t)
+	withLoader := bootstrap(t, tr, BootstrapInput{BusLoaderUserPub: loader}).Files()
+	if _, err := BootstrapNATSTrust(t.Context(), tr.Store, BootstrapInput{Existing: withLoader, BusFenceUserPub: loader}); !errors.Is(err, ErrTrustInvalid) {
+		t.Errorf("fence key equal to the retained loader user: err = %v, want ErrTrustInvalid", err)
+	}
+	// Parse refuses a trust whose fence and loader JWTs share a subject.
+	sameSubj := maps.Clone(withLoader)
+	fenceKP, err := tr.Store.KeyPair(t.Context(), natskeys.SysAccountKey(), nkeys.PrefixByteAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fj, err := jwt.NewUserClaims(loader).Encode(fenceKP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameSubj[TrustBusFenceUserJWT] = []byte(fj)
+	if _, err := ParseNATSTrust(sameSubj); !errors.Is(err, ErrTrustInvalid) {
+		t.Errorf("fence and loader share a subject: Parse err = %v, want ErrTrustInvalid", err)
 	}
 
 	// A narrower grant is also not the loader's grant.

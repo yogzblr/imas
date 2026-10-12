@@ -161,10 +161,13 @@ func ParseNATSTrust(files map[string][]byte) (*NATSTrust, error) {
 	if _, err := checkSysAccountJWT(t.SysAccountJWT, t.SysAccountPub, t.OperatorSigningPub); err != nil {
 		return nil, err
 	}
+	var fencePub string
 	if t.BusFenceUserJWT != "" {
-		if _, err := checkFenceUserJWT(t.BusFenceUserJWT, t.SysAccountPub); err != nil {
+		uc, err := checkFenceUserJWT(t.BusFenceUserJWT, t.SysAccountPub)
+		if err != nil {
 			return nil, err
 		}
+		fencePub = uc.Subject
 	}
 	if t.BusLoaderUserJWT != "" {
 		uc, err := checkSysUserJWT(TrustBusLoaderUserJWT, t.BusLoaderUserJWT, t.SysAccountPub)
@@ -173,6 +176,9 @@ func ParseNATSTrust(files map[string][]byte) (*NATSTrust, error) {
 		}
 		if !loaderPermissionsExact(uc) {
 			return nil, fmt.Errorf("%w: %s does not carry exactly the loader permissions", ErrTrustInvalid, TrustBusLoaderUserJWT)
+		}
+		if uc.Subject == fencePub {
+			return nil, fmt.Errorf("%w: the bus loader and fence users must be different keys", ErrTrustInvalid)
 		}
 	}
 	return t, nil
@@ -241,7 +247,8 @@ type BootstrapInput struct {
 	// U). When set, a loader user JWT for it, with exactly
 	// BusLoaderUserPermissions, is minted unless Existing holds a valid
 	// one for the same key with those permissions. When empty, a valid
-	// existing loader user JWT is kept.
+	// existing loader user JWT is kept, re-minted for the same user if
+	// its grant differs. The loader and fence users must differ.
 	BusLoaderUserPub string
 }
 
@@ -288,6 +295,7 @@ func BootstrapNATSTrust(ctx context.Context, ks natskeys.KeyStore, in BootstrapI
 		}
 	}
 	fenceJWT := get(TrustBusFenceUserJWT)
+	fencePub := in.BusFenceUserPub // the fence user the result will carry
 	if fenceJWT != "" {
 		uc, err := checkFenceUserJWT(fenceJWT, pubs.sysAccount)
 		if err != nil {
@@ -295,27 +303,34 @@ func BootstrapNATSTrust(ctx context.Context, ks natskeys.KeyStore, in BootstrapI
 		}
 		if in.BusFenceUserPub != "" && uc.Subject != in.BusFenceUserPub {
 			fenceJWT = "" // a new fence user: not part of the anchor, re-minted
+		} else {
+			fencePub = uc.Subject
 		}
 	}
 	if in.BusFenceUserPub != "" && !nkeys.IsValidPublicUserKey(in.BusFenceUserPub) {
 		return nil, fmt.Errorf("%w: bus fence user %q is not a user public key", ErrTrustInvalid, in.BusFenceUserPub)
 	}
 	loaderJWT := get(TrustBusLoaderUserJWT)
+	loaderPub := in.BusLoaderUserPub // the loader user the result will carry
 	if loaderJWT != "" {
 		uc, err := checkSysUserJWT(TrustBusLoaderUserJWT, loaderJWT, pubs.sysAccount)
 		if err != nil {
 			return nil, err
 		}
+		if loaderPub == "" {
+			loaderPub = uc.Subject
+		}
 		// A new loader user, or a grant from an older bootstrap: not
-		// part of the anchor, re-minted.
-		if (in.BusLoaderUserPub != "" && uc.Subject != in.BusLoaderUserPub) || !loaderPermissionsExact(uc) {
+		// part of the anchor, re-minted (for the same user when none
+		// was given, so a stale grant is replaced, never left behind).
+		if uc.Subject != loaderPub || !loaderPermissionsExact(uc) {
 			loaderJWT = ""
 		}
 	}
 	if in.BusLoaderUserPub != "" && !nkeys.IsValidPublicUserKey(in.BusLoaderUserPub) {
 		return nil, fmt.Errorf("%w: bus loader user %q is not a user public key", ErrTrustInvalid, in.BusLoaderUserPub)
 	}
-	if in.BusLoaderUserPub != "" && in.BusLoaderUserPub == in.BusFenceUserPub {
+	if loaderPub != "" && loaderPub == fencePub {
 		return nil, fmt.Errorf("%w: the bus loader and fence users must be different keys", ErrTrustInvalid)
 	}
 
@@ -342,8 +357,8 @@ func BootstrapNATSTrust(ctx context.Context, ks natskeys.KeyStore, in BootstrapI
 			return nil, fmt.Errorf("pki: sign bus fence user jwt: %w", err)
 		}
 	}
-	if loaderJWT == "" && in.BusLoaderUserPub != "" {
-		uc := jwt.NewUserClaims(in.BusLoaderUserPub)
+	if loaderJWT == "" && loaderPub != "" {
+		uc := jwt.NewUserClaims(loaderPub)
 		uc.Name = "imas-bus-loader"
 		uc.Permissions = BusLoaderUserPermissions()
 		if loaderJWT, err = uc.Encode(pubs.sysAccountKP); err != nil {
