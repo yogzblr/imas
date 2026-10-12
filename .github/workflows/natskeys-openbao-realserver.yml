@@ -115,7 +115,7 @@ jobs:
           set -euo pipefail
           go test -count=1 -v -run '^TestOpenBao' ./deploy/helm/farmer \
             | tee "$RUNNER_TEMP/chart-test.log"
-          for t in TestOpenBaoBootstrapPolicy TestOpenBaoFarmerPolicy TestOpenBaoSysSignerPolicy; do
+          for t in TestOpenBaoBootstrapPolicy TestOpenBaoFarmerPolicy TestOpenBaoFarmerPolicyKeySet TestOpenBaoSysSignerPolicy; do
             grep -q -- "--- PASS: $t " "$RUNNER_TEMP/chart-test.log"
           done
 

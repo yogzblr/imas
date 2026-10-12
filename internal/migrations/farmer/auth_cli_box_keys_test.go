@@ -10,13 +10,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"io/fs"
-	"os"
 	"strings"
 	"testing"
 
-	"github.com/go-sql-driver/mysql"
-
 	"github.com/yogzblr/imas/internal/migrations"
+	"github.com/yogzblr/imas/internal/migrations/mysqltest"
 )
 
 const authBoxKeysFile = "00003_auth_users_and_cli_box_keys.sql"
@@ -60,14 +58,7 @@ func TestAuthCLIBoxKeysMigrationShape(t *testing.T) {
 // nothing, and the schema allows one active CLI key per (tenant_id,
 // user_id) and each pub once across every user and tenant.
 func TestMySQLAuthCLIBoxKeys(t *testing.T) {
-	dsn := os.Getenv("IMAS_TEST_MYSQL_ROOT_DSN")
-	if dsn == "" {
-		t.Skip("IMAS_TEST_MYSQL_ROOT_DSN not set; skipping the MySQL tests")
-	}
-	cfg, err := mysql.ParseDSN(dsn)
-	if err != nil {
-		t.Fatal("IMAS_TEST_MYSQL_ROOT_DSN: not a valid DSN")
-	}
+	cfg := mysqltest.RootConfig(t)
 	ctx := context.Background()
 	sfx := make([]byte, 4)
 	if _, err := rand.Read(sfx); err != nil {

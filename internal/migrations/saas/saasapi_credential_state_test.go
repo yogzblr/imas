@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"io/fs"
-	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -18,6 +17,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/yogzblr/imas/internal/migrations"
+	"github.com/yogzblr/imas/internal/migrations/mysqltest"
 )
 
 const credentialStateFile = "00008_saasapi_credential_state.sql"
@@ -69,14 +69,7 @@ func TestCredentialStateMigrationShape(t *testing.T) {
 // rotation's conditional UPDATE on version lets one of two writers win;
 // a re-run (goose's record of it lost) keeps the row.
 func TestMySQLCredentialState(t *testing.T) {
-	dsn := os.Getenv("IMAS_TEST_MYSQL_ROOT_DSN")
-	if dsn == "" {
-		t.Skip("IMAS_TEST_MYSQL_ROOT_DSN not set; skipping the MySQL tests")
-	}
-	cfg, err := mysql.ParseDSN(dsn)
-	if err != nil {
-		t.Fatal("IMAS_TEST_MYSQL_ROOT_DSN: not a valid DSN")
-	}
+	cfg := mysqltest.RootConfig(t)
 	ctx := context.Background()
 	sfx := make([]byte, 4)
 	if _, err := rand.Read(sfx); err != nil {

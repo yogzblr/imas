@@ -148,8 +148,21 @@ copy only changes when a fence or loader user is added.
 
 ## Seeds
 
-The bus's only secret is the **fence user's seed**, and only when it is
-clustered. A clustered node's fence connects to the node in-process as a
+The bus holds no seed of the NATS trust chain (see
+[NATS trust](#nats-trust)): no operator, signing, SYS account or tenant
+seed, so it can mint nothing. It holds at most two **user** seeds, each
+for a SYS account user whose JWT core's bootstrap minted into the trust
+ConfigMap with a narrow set of permissions:
+
+| Seed | When | Where it comes from | Mounted into |
+|---|---|---|---|
+| the loader's SYS user | always | `loader.sysUserSecret` (`user.nk`), see [Accounts bucket and loader](#accounts-bucket-and-loader) | the `loader` container only |
+| the fence user | `bus.replicaCount > 1` only | `natsSeeds.seeds.BUS_FENCE_USER` (`bus-fence-user.nk`), below | the `farmerbus` container only |
+
+Its third secret is not a seed: the read-only accounts bucket credential
+(`accountStore.credentialsSecret`), also for the loader only.
+
+A clustered node's fence connects to the node in-process as a
 user of the SYS account (`cmd/farmerbus/fence.go`); its JWT is
 `bus-fence-user.jwt` from the trust, and its seed comes from
 `natsSeeds.seeds.BUS_FENCE_USER` (`IMAS_NATS_BUS_FENCE_USER_SEED_FILE`).
@@ -932,9 +945,11 @@ rendered openbao-mode config (that chart's README, "Verification status"):
 
 - **The DMZ bus holds no trust chain key** (P21 slice 1). It reads the
   operator JWT and the SYS account from the public trust ConfigMap and
-  signs nothing. Its only secret is a clustered bus's fence user seed, a
-  SYS account user: a compromise of the bus pod exposes that user (which
-  can publish claims requests as SYS, as the bus itself can), never a key
+  signs nothing. Its secrets are two SYS account user seeds (the
+  loader's, and a clustered bus's fence user's; see [Seeds](#seeds)) and
+  the read-only accounts bucket credential: a compromise of the bus pod
+  exposes those users (which can publish claims requests as SYS, as the
+  bus itself can) and read access to the accounts bucket, never a key
   that signs accounts. Remove the old trust chain seeds from `natsSeeds`,
   the DMZ Secret and OpenBao.
 - **The account loader** (P21 slice 2) is a second SYS account user in

@@ -1,11 +1,10 @@
 package migrations
 
 // Tests against a real MySQL-compatible server, skipped unless
-// IMAS_TEST_MYSQL_ROOT_DSN names one by its root account, e.g. a
-// single-node PXC like the one deploy/helm/farmer runs:
+// IMAS_TEST_MYSQL_ROOT_DSN names one by its root account and failed if it
+// is set but the server does not answer (internal/migrations/mysqltest,
+// which shows how to run one; CI does, .github/workflows/ci.yml):
 //
-//	docker run -d --name pxc -p 3306:3306 -e MYSQL_ROOT_PASSWORD=pw \
-//	  percona/percona-xtradb-cluster:8.4.8-8.1
 //	IMAS_TEST_MYSQL_ROOT_DSN='root:pw@tcp(127.0.0.1:3306)/' go test ./internal/migrations/ ./cmd/migrate/
 //
 // Each test makes its own schemas and users, named with a random suffix,
@@ -18,8 +17,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
+	"io/fs"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -31,24 +31,15 @@ import (
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 
+	"github.com/yogzblr/imas/internal/migrations/mysqltest"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/pxc"
 	"github.com/yogzblr/imas/internal/saasapi"
 )
 
-const envRootDSN = "IMAS_TEST_MYSQL_ROOT_DSN"
-
 func rootConfig(t *testing.T) *mysql.Config {
 	t.Helper()
-	dsn := os.Getenv(envRootDSN)
-	if dsn == "" {
-		t.Skipf("%s not set; skipping the MySQL tests", envRootDSN)
-	}
-	cfg, err := mysql.ParseDSN(dsn)
-	if err != nil {
-		t.Fatalf("%s: not a valid DSN", envRootDSN)
-	}
-	cfg.DBName = ""
+	cfg := mysqltest.RootConfig(t)
 	cfg.InterpolateParams = true
 	return cfg
 }
@@ -752,5 +743,68 @@ func TestMySQLOutOfOrderVersionApplied(t *testing.T) {
 	}
 	if res, err := Up(ctx, db, after, t.Logf); err != nil || len(res.Applied) != 0 {
 		t.Fatalf("third run: %+v, %v", res, err)
+	}
+}
+
+// olderBinary is the set a binary built for schema version builtFor
+// embeds: this set's files up to that version, with the floor it shipped.
+func olderBinary(t *testing.T, s Set, builtFor, floor int64) Set {
+	t.Helper()
+	files := fstest.MapFS{}
+	entries, err := fs.ReadDir(s.FS(), ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		v, err := strconv.ParseInt(strings.SplitN(e.Name(), "_", 2)[0], 10, 64)
+		if err != nil || v > builtFor {
+			continue
+		}
+		b, err := fs.ReadFile(s.FS(), e.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		files["m/"+e.Name()] = &fstest.MapFile{Data: b}
+	}
+	old, err := newSet(s.Name(), files, "m", floor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return old
+}
+
+// TestMySQLOlderBinariesRunOnLatest: after `migrate up` to this release's
+// schema, the previous releases' farmer (built for 3 and 4, before P21
+// slice 3's 00004 and 00005) and saasapi (built for 7, before 00008) still
+// pass their schema check, as during a rolling update or after a helm
+// rollback; their tables are unchanged. See the comment on
+// farmerCompatibleFrom.
+func TestMySQLOlderBinariesRunOnLatest(t *testing.T) {
+	e := newMySQLEnv(t)
+	ctx := context.Background()
+	for _, c := range []struct {
+		set      Set
+		builtFor []int64
+	}{
+		{Farmer, []int64{3, 4}},
+		{Saas, []int64{7}},
+	} {
+		db := e.schemaDB(t, "t_older_"+c.set.Name()+"_"+suffix(t))
+		if _, err := Up(ctx, db, c.set, t.Logf); err != nil {
+			t.Fatal(err)
+		}
+		st, err := ReadState(ctx, db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range c.builtFor {
+			old := olderBinary(t, c.set, v, c.set.CompatibleFrom())
+			if old.Latest() != v {
+				t.Fatalf("%s built for %d embeds up to %d", c.set.Name(), v, old.Latest())
+			}
+			if err := old.Check(st); err != nil {
+				t.Errorf("%s built for schema %d refused the latest schema: %v", c.set.Name(), v, err)
+			}
+		}
 	}
 }

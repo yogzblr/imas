@@ -53,6 +53,23 @@ var saasFS embed.FS
 // Release N+1 drops x in migration 8 and sets compatibleFrom to 7, so
 // release N (built for 7) still passes `migrate check` after a rollback,
 // and release N-1 (built for 6, still reading x) doesn't.
+//
+// Why P21 slice 3 (farmer 00004 and 00005, saas 00008) left both floors
+// alone: each of those migrations only creates a table (job_leases,
+// sprout_user_jwt, saasapi_credential_state) and seeds rows in it. No
+// column or table an older binary reads or writes is dropped, renamed or
+// retyped, and no constraint it could violate is added to an existing
+// table. A farmer built for schema 2, 3 or 4 and a saasapi built for 1 to
+// 7 never name the new tables, so they run against the new schema exactly
+// as before: during the rolling update and after a helm rollback, which is
+// what the floor guards. What those older binaries keep on their own disk
+// (sprout JWTs, saasapi's user JWT) is state, not schema; the floor cannot
+// express it and does not need to, since an older release brings back the
+// storage it used. The floor is raised by the release whose contract
+// migration first drops something an older binary still uses, for example
+// saas fleet_versions.signature, which saasapi still writes (as an empty string) and so
+// stays until a release stops writing it. TestCompatibleFromReviewed
+// fails on any new migration until its effect on the floor is decided.
 const (
 	farmerCompatibleFrom = 2
 	saasCompatibleFrom   = 1

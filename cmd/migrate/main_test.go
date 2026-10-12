@@ -11,9 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-sql-driver/mysql"
-
 	"github.com/yogzblr/imas/internal/migrations"
+	"github.com/yogzblr/imas/internal/migrations/mysqltest"
 )
 
 func envOf(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
@@ -166,14 +165,7 @@ func TestRunUsage(t *testing.T) {
 // for IMAS_TEST_MYSQL_ROOT_DSN.
 
 func TestMySQLUpThenCheck(t *testing.T) {
-	rootDSN := os.Getenv("IMAS_TEST_MYSQL_ROOT_DSN")
-	if rootDSN == "" {
-		t.Skip("IMAS_TEST_MYSQL_ROOT_DSN not set; skipping the MySQL tests")
-	}
-	rootCfg, err := mysql.ParseDSN(rootDSN)
-	if err != nil {
-		t.Fatal("IMAS_TEST_MYSQL_ROOT_DSN: not a valid DSN")
-	}
+	rootCfg := mysqltest.RootConfig(t)
 	sfx := fmt.Sprintf("%x", time.Now().UnixNano()&0xffffffff)
 	owner := func(name, pw string) string {
 		c := rootCfg.Clone()

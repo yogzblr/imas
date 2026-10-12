@@ -15,18 +15,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/go-sql-driver/mysql"
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/yogzblr/imas/internal/controlplane"
 	"github.com/yogzblr/imas/internal/migrations"
+	"github.com/yogzblr/imas/internal/migrations/mysqltest"
 )
 
 // newMySQLSaasSchema creates a fresh schema migrated by the saas set and
@@ -34,14 +33,7 @@ import (
 // saasapi replicas. The schema is dropped when the test ends.
 func newMySQLSaasSchema(t *testing.T) (*gorm.DB, *gorm.DB) {
 	t.Helper()
-	dsn := os.Getenv("IMAS_TEST_MYSQL_ROOT_DSN")
-	if dsn == "" {
-		t.Skip("IMAS_TEST_MYSQL_ROOT_DSN not set; skipping the MySQL tests")
-	}
-	cfg, err := mysql.ParseDSN(dsn)
-	if err != nil {
-		t.Fatal("IMAS_TEST_MYSQL_ROOT_DSN: not a valid DSN")
-	}
+	cfg := mysqltest.RootConfig(t)
 	sfx := make([]byte, 4)
 	if _, err := rand.Read(sfx); err != nil {
 		t.Fatal(err)

@@ -603,6 +603,11 @@ func atoiOr0(s string) int {
 // recipe each.
 const recipeWriteRetries = 3
 
+// recipeWriteConflictMessage is the message of the 409
+// recipe_write_conflict body; docs/api/saasapi.md and the OpenAPI example
+// quote it (TestRecipeWriteConflictDocumented).
+const recipeWriteConflictMessage = "the recipe kept being changed by other requests at the same time: get it again and resend"
+
 // checkQuota refuses a write that would take the tenant over its recipe
 // count or total size cap, counting every object under its recipe prefix.
 func (svc *recipeService) checkQuota(ctx context.Context, tenantID string, cur currentRecipe, newSize int64) (*recipeProblem, error) {
@@ -758,7 +763,7 @@ func (svc *recipeService) PutRecipe(w http.ResponseWriter, r *http.Request) {
 			}
 			failed.Code = "recipe_write_conflict"
 			_ = svc.auditRecipe(r.Context(), failed)
-			writeError(w, http.StatusConflict, "recipe_write_conflict", "the recipe kept being changed by other requests at the same time: get it again and resend")
+			writeError(w, http.StatusConflict, "recipe_write_conflict", recipeWriteConflictMessage)
 			return
 		}
 		failed.Code = "recipe_store_unavailable"

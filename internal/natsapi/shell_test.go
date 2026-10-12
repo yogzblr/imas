@@ -515,12 +515,21 @@ func TestSealedShellRefusesPlaintext(t *testing.T) {
 // one replayed in time to be accepted could never be confirmed, since the
 // bus lacks the CLI's ephemeral key. A captured start replayed to the
 // sprout is refused too.
+//
+// The CLI's session ends when farmer relays the sprout's CLOSE, which the
+// sprout sends before it removes the session from its count, so the test
+// waits for both ends to drop the real session before replaying (issue
+// #142: reading the count right after run.wait could still see it). The
+// sprout counts a session before it answers its start (Sprout.spawn), so
+// once a replay's answer is in, a shell it spawned would already show:
+// the count is checked after every replay, not just at the end.
 func TestSealedShellReplayedHandshakes(t *testing.T) {
 	env := startShellEnv(t)
 	run := env.startClient(t, nil)
 	run.waitReady(t)
 	run.send(t, "exit\n")
 	run.wait(t)
+	waitFor(t, "both ends to drop the session", func() bool { return ShellTracker().Active() == 0 && env.sp.Active() == 0 })
 
 	opens := env.spy.on(Subject(MethodShellOpen))
 	starts := env.spy.on(shell.StartSubject(shellTestSprout))
@@ -538,6 +547,9 @@ func TestSealedShellReplayedHandshakes(t *testing.T) {
 		if resp.Header.Get(payloadbox.ErrorHeader) != payloadbox.ErrorCodeOpenFailed {
 			t.Fatalf("replayed open answered %v", resp.Header)
 		}
+		if ShellTracker().Active() != 0 {
+			t.Fatal("a replayed open was tracked")
+		}
 	}
 	for _, captured := range starts {
 		m := nats.NewMsg(captured.Subject)
@@ -550,9 +562,9 @@ func TestSealedShellReplayedHandshakes(t *testing.T) {
 		if resp.Header.Get(payloadbox.ErrorHeader) != payloadbox.ErrorCodeOpenFailed {
 			t.Fatalf("replayed start answered %v %q", resp.Header, resp.Data)
 		}
-	}
-	if env.sp.Active() != 0 {
-		t.Fatal("a replay spawned a shell")
+		if env.sp.Active() != 0 {
+			t.Fatal("a replay spawned a shell")
+		}
 	}
 }
 
