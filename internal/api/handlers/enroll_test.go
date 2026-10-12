@@ -307,9 +307,9 @@ func withPKIEnroll(t *testing.T, err error) {
 	t.Cleanup(func() { pkiEnroll = orig })
 }
 
-// busyEnrollErr is the error pki returns when another replica holds the
+// errBusyEnroll is the error pki returns when another replica holds the
 // sprout's User JWT mint lease (enrollJWTError).
-var busyEnrollErr = fmt.Errorf("%w: %w", pki.ErrEnrollmentFailed, pki.ErrSproutJWTBusy)
+var errBusyEnroll = fmt.Errorf("%w: %w", pki.ErrEnrollmentFailed, pki.ErrSproutJWTBusy)
 
 func postValidEnroll(t *testing.T) *httptest.ResponseRecorder {
 	t.Helper()
@@ -326,7 +326,7 @@ func postValidEnroll(t *testing.T) *httptest.ResponseRecorder {
 // A busy mint lease is retryable: 503 with a Retry-After, and the same
 // generic body as every other failure.
 func TestEnroll_SproutJWTBusyIs503WithRetryAfter(t *testing.T) {
-	withPKIEnroll(t, busyEnrollErr)
+	withPKIEnroll(t, errBusyEnroll)
 	w := postValidEnroll(t)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())

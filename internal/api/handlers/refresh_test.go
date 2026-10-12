@@ -328,7 +328,7 @@ func postWellFormedRefresh(t *testing.T) *httptest.ResponseRecorder {
 // A busy mint lease is retryable: 503 with a Retry-After, and the same
 // generic body as every other failure.
 func TestRefresh_SproutJWTBusyIs503WithRetryAfter(t *testing.T) {
-	withPKIRefreshSprout(t, busyEnrollErr)
+	withPKIRefreshSprout(t, errBusyEnroll)
 	w := postWellFormedRefresh(t)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())
