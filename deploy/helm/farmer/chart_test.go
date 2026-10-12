@@ -424,7 +424,8 @@ func TestFarmerHasNoPVC(t *testing.T) {
 }
 
 // Nothing on farmer's root filesystem is writable; the only writable
-// mounts are the tmp emptyDir (which holds farmerpki) and the TLS dir.
+// mounts are the tmp emptyDir (the process's temp directory) and the TLS
+// dir. The config sets no farmerpki: farmer keeps no JWT or key on disk.
 func TestFarmerRootFSReadOnly(t *testing.T) {
 	docs := mustRender(t)
 	c := container(t, farmerDeploy(t, docs), "farmer")
@@ -445,8 +446,8 @@ func TestFarmerRootFSReadOnly(t *testing.T) {
 			t.Errorf("writable volume %s is not an emptyDir", name)
 		}
 	}
-	if pki, _ := farmerConfig(t, docs)["farmerpki"].(string); !strings.HasPrefix(pki, "/tmp/") {
-		t.Errorf("farmerpki %q is not under the tmp emptyDir", pki)
+	if pki, ok := farmerConfig(t, docs)["farmerpki"]; ok {
+		t.Errorf("farmer config sets farmerpki = %v: farmer keeps no PKI directory", pki)
 	}
 }
 
@@ -1361,7 +1362,6 @@ func TestFarmerConfigFile(t *testing.T) {
 		t.Errorf("users = %v with farmer.bootstrapAdmin.skip", cfg["users"])
 	}
 	for k, want := range map[string]string{
-		"farmerpki":             "/tmp/farmer/pki/",
 		"gatewaytransitkeyname": "imas-gateway-jwt",
 		"rootca":                "/var/run/imas/tls/tls-rootca.pem",
 	} {
@@ -1369,8 +1369,8 @@ func TestFarmerConfigFile(t *testing.T) {
 			t.Errorf("%s = %v, want %s", k, cfg[k], want)
 		}
 	}
-	// farmer's NKey is the farmer.nkeySecret mount, not a file under
-	// farmerpki.
+	// farmer's NKey is the farmer.nkeySecret mount, not a file farmer
+	// writes.
 	for _, k := range []string{"nkeyfarmerprivfile", "nkeyfarmerpubfile"} {
 		if _, ok := cfg[k]; ok {
 			t.Errorf("config file sets %s = %v", k, cfg[k])

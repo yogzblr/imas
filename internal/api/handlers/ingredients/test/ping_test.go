@@ -42,7 +42,6 @@ func setupPingTestPKI(t *testing.T) string {
 	t.Cleanup(func() { pki.SetDB(nil) })
 
 	dir := t.TempDir()
-	config.FarmerPKI = dir + "/"
 	farmerPubFile := filepath.Join(dir, "farmer.pub")
 	if err := os.WriteFile(farmerPubFile, []byte("UFAKE_FARMER_KEY_FOR_TESTING"), 0o600); err != nil {
 		t.Fatal(err)

@@ -185,8 +185,11 @@ var (
 	// default host of FarmerBusURL and FarmerURL. It is NOT the TLS
 	// ServerName farmer or the imas CLI verifies the bus against; that is
 	// FarmerBusTLSServerName.
-	FarmerInterface       string
-	FarmerOrganization    string
+	FarmerInterface    string
+	FarmerOrganization string
+	// FarmerPKI is the DMZ bus's PKI directory (cmd/farmerbus, which loads
+	// the farmer config): its account resolver's store. Farmer itself
+	// keeps nothing there: it writes no JWT or key file at all.
 	FarmerPKI             string
 	FarmerURL             string
 	ImasRootCA            string

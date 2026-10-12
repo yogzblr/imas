@@ -2,14 +2,11 @@ package pki
 
 import (
 	"errors"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
-
-	"github.com/yogzblr/imas/internal/config"
 )
 
 func TestIsValidTenantID(t *testing.T) {
@@ -35,8 +32,8 @@ func TestProvisionTenant_InvalidTenantID(t *testing.T) {
 }
 
 // TestEnsureTenantAccount_DistinctAccountsPerTenant proves two different
-// tenants get their own, distinct Account keypair and their own on-disk
-// namespace — the structural property workstream E's tenant isolation
+// tenants get their own, distinct Account keypair and Account JWT — the
+// structural property workstream E's tenant isolation
 // rests on (FLAG FOR SECURITY REVIEW).
 func TestEnsureTenantAccount_DistinctAccountsPerTenant(t *testing.T) {
 	setupTestPKI(t)
@@ -95,41 +92,13 @@ func TestEnsureTenantAccount_RefusesDeletedTenant(t *testing.T) {
 	}
 }
 
-func TestSproutJWTPathForTenant_IsolatedPerTenant(t *testing.T) {
-	setupTestPKI(t)
-
-	pathA := sproutJWTPathForTenant("t_a", "web-01")
-	pathB := sproutJWTPathForTenant("t_b", "web-01")
-	if pathA == pathB {
-		t.Fatalf("expected the same sprout ID under different tenants to resolve to different paths, both got %q", pathA)
-	}
-}
-
-func TestGetSproutUserJWTForTenant_FallsBackToLegacyPath(t *testing.T) {
-	setupTestPKI(t)
-	config.FarmerOrganization = "legacy-tenant"
-
-	// Simulate a sprout accepted through the legacy, current-tenant-only
-	// admin path (AcceptNKey/ReloadNKeys/mintOrReuseUserJWT), which writes
-	// to sproutJWTPath, not the tenant-scoped sproutJWTPathForTenant.
-	if err := os.MkdirAll(sproutJWTDir(), 0o700); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := os.WriteFile(sproutJWTPath("legacy-sprout"), []byte("legacy-jwt"), 0o600); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	got, err := GetSproutUserJWTForTenant("legacy-tenant", "legacy-sprout")
-	if err != nil {
-		t.Fatalf("expected legacy fallback to succeed, got err=%v", err)
-	}
-	if got != "legacy-jwt" {
-		t.Errorf("expected the legacy JWT content, got %q", got)
-	}
-
-	// A different tenant must NOT see the legacy-tenant's fallback JWT.
-	if _, err := GetSproutUserJWTForTenant("other-tenant", "legacy-sprout"); err != ErrSproutIDNotFound {
-		t.Errorf("expected ErrSproutIDNotFound for a non-current tenant, got %v", err)
+// The same sprout ID under two tenants is two objects in the sprout JWT
+// bucket, never one.
+func TestSproutJWTObjectKey_IsolatedPerTenant(t *testing.T) {
+	keyA := sproutJWTObjectKey("t_a", "web-01", "sum")
+	keyB := sproutJWTObjectKey("t_b", "web-01", "sum")
+	if keyA == keyB {
+		t.Fatalf("the same sprout ID under different tenants has one bucket key, %q", keyA)
 	}
 }
 

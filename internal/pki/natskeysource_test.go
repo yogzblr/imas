@@ -9,7 +9,6 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"os"
-	"path/filepath"
 	"testing"
 
 	jwt "github.com/nats-io/jwt/v2"
@@ -24,22 +23,10 @@ import (
 // trust chain exists anywhere under the farmer's PKI directory.
 func assertNoRemovedSeedFiles(t *testing.T) {
 	t.Helper()
-	removed := map[string]bool{
-		"operator.nk": true, "operator-signing.nk": true, "sys-account.nk": true,
-		"tenant.nk": true, "tenant-signing.nk": true, "sys-user.nk": true,
-		"account.nk": true, "account-signing.nk": true,
-	}
-	err := filepath.WalkDir(config.FarmerPKI, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if removed[d.Name()] {
-			t.Errorf("seed file written: %s", path)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
+	// Farmer writes no seed, and no file at all, under its old PKI
+	// directory: it does not even exist.
+	if _, err := os.Stat(config.FarmerPKI); !os.IsNotExist(err) {
+		t.Errorf("farmer's old PKI directory %s exists (stat: %v)", config.FarmerPKI, err)
 	}
 }
 
@@ -100,9 +87,9 @@ func TestEnsureNatsAuthWritesNoRemovedSeedFiles(t *testing.T) {
 	if err != nil || tc.Issuer != trust.OperatorSigningPub {
 		t.Errorf("legacy tenant JWT not issued by the operator signing key: %v", err)
 	}
-	// The farmer's SYS copy is seeded from the trust.
-	if b, err := os.ReadFile(sysAccountJWTPath()); err != nil || string(b) != trust.SysAccountJWT {
-		t.Errorf("sys-account.jwt is not the trust's SYS account JWT (err %v)", err)
+	// The farmer's SYS copy, held in memory, is the trust's.
+	if h, ok := heldAccountJWT(trust.SysAccountPub); !ok || h.jwt != trust.SysAccountJWT || mat.sysAccountJWT != trust.SysAccountJWT {
+		t.Errorf("the held SYS account JWT is not the trust's (held %v)", ok)
 	}
 }
 
@@ -112,9 +99,7 @@ func TestEnsureNatsAuthRequiresSysUserSeed(t *testing.T) {
 	if _, err := ensureNatsAuth(); err == nil {
 		t.Fatal("ensureNatsAuth without a SYS_USER seed: want an error")
 	}
-	if _, err := os.Stat(filepath.Join(natsAuthDir(), "sys-user.nk")); !os.IsNotExist(err) {
-		t.Errorf("a SYS user seed was generated (stat err %v)", err)
-	}
+	// No seed was generated: setupTestPKI's requireNoFarmerPKIWrites.
 }
 
 func TestCheckNATSAuth(t *testing.T) {
@@ -170,7 +155,7 @@ func TestProvisionCreatesTenantKeys(t *testing.T) {
 	if want := fakePub(t, natskeys.TenantAccountKey(tenant)); row.AccountPub != want {
 		t.Errorf("recorded Account %s is not nats-tacct-%s's public key %s", row.AccountPub, tenant, want)
 	}
-	ac, err := jwt.DecodeAccountClaims(readFile(t, tenantAccountJWTPath(tenant)))
+	ac, err := jwt.DecodeAccountClaims(heldTenantAccountJWT(t, tenant))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,14 +295,13 @@ func TestLockoutWithoutTenantKeys(t *testing.T) {
 	if err := ProvisionTenant(tenant, "No Keys Co"); err != nil {
 		t.Fatalf("ProvisionTenant: %v", err)
 	}
-	// The tenant's keys are gone (an operator purged them) and so is its
-	// Account JWT file: the lockout is built from the row's Account pub
-	// and signed by the operator signing key alone.
+	// The tenant's keys are gone (an operator purged them) and this
+	// replica holds no Account JWT (a restart; no publisher, so no
+	// bucket): the lockout is built from the row's Account pub and signed
+	// by the operator signing key alone.
 	testTransit.Fake.Delete(natskeys.TenantAccountKey(tenant))
 	testTransit.Fake.Delete(natskeys.TenantSigningKey(tenant))
-	if err := os.Remove(tenantAccountJWTPath(tenant)); err != nil {
-		t.Fatal(err)
-	}
+	forgetHeldJWTs()
 	if err := DeprovisionTenant(tenant); err != nil {
 		t.Fatalf("DeprovisionTenant without tenant keys: %v", err)
 	}
@@ -341,15 +325,13 @@ func TestLockoutWithoutTenantKeys(t *testing.T) {
 func TestResolverSeedingWithoutTransit(t *testing.T) {
 	setupTestPKI(t)
 	useRealFarmerKey(t)
-	config.FarmerBusURL = "127.0.0.1:1" // no bus: the push fails, the JWT is on disk
+	config.FarmerBusURL = "127.0.0.1:1" // no bus: the push fails, the JWT is held
 
 	const tenant = "t_seeded"
 	_ = ProvisionTenant(tenant, "Seeded Co")
-	if _, err := os.Stat(tenantAccountJWTPath(tenant)); err != nil {
-		t.Fatalf("ProvisionTenant wrote no Account JWT: %v", err)
-	}
-	// Seeding reads the tenant's Account JWT file; its Transit keys are
-	// neither needed nor created.
+	heldTenantAccountJWT(t, tenant)
+	// Seeding uses the Account JWT this process holds; its Transit keys
+	// are neither needed nor created.
 	testTransit.Fake.Delete(natskeys.TenantAccountKey(tenant))
 	testTransit.Fake.Delete(natskeys.TenantSigningKey(tenant))
 	testTransit.Fake.ResetCounts()
@@ -375,13 +357,4 @@ func fakePub(t *testing.T, name string) string {
 		t.Fatal(err)
 	}
 	return string(pub)
-}
-
-func readFile(t *testing.T, path string) string {
-	t.Helper()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(b)
 }

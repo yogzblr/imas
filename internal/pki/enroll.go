@@ -104,7 +104,6 @@ import (
 	"sync"
 	"time"
 
-	jwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
 
 	"github.com/yogzblr/imas/internal/config"
@@ -503,8 +502,8 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 	}
 
 	// Defense in depth (workstream E, FLAG FOR SECURITY REVIEW): row.TenantID
-	// is about to be threaded into filesystem paths (tenantAuthDir) and PXC
-	// primary keys for the rest of this call. It's expected to already be a
+	// is about to be threaded into sprout JWT bucket keys and PXC primary
+	// keys for the rest of this call. It's expected to already be a
 	// well-formed saasapi-generated ID (idgen.go's "t_"-prefixed IDs), but
 	// this fails closed rather than trusting that invariant blindly.
 	if !IsValidTenantID(row.TenantID) {
@@ -997,7 +996,15 @@ func grantEnrolledSprout(tenantID, nkey string) error {
 	if err != nil {
 		return err
 	}
-	if provisioned {
+	// The newest of the held and the accounts bucket's Account JWT: a
+	// grant must keep every revocation another replica signed.
+	ac, _, minted, err := resignBase(context.Background(), tam.pub, tam.jwt, tam.minted, signsWith(tam.signingPub))
+	if err != nil {
+		return err
+	}
+	if provisioned || minted {
+		// A minimal Account JWT carries none of the tenant's revocations
+		// yet: a full sync applies them before anything is pushed.
 		if _, err := syncTenantSprouts(mat, tam, tenantID); err != nil {
 			return err
 		}
@@ -1009,10 +1016,6 @@ func grantEnrolledSprout(tenantID, nkey string) error {
 	}
 	if _, isRevoked := revoked[nkey]; isRevoked {
 		return fmt.Errorf("pki: NKey is revoked in tenant %s: %w", tenantID, ErrNKeyRevoked)
-	}
-	ac, err := jwt.DecodeAccountClaims(tam.jwt)
-	if err != nil {
-		return err
 	}
 	changed := ensureUserGranted(ac, nkey)
 	if applyRevokedNKeys(ac, revoked) {
@@ -1031,7 +1034,7 @@ func grantEnrolledSprout(tenantID, nkey string) error {
 	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(tenantAccountJWTPath(tenantID), []byte(signed), 0o600); err != nil {
+	if err := holdAccountJWT(signed, false); err != nil {
 		return err
 	}
 	return pushGranted(mat, tenantID, signed)

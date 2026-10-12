@@ -105,7 +105,6 @@ type jobEnv struct {
 // OpenBao client for the KV write.
 func setupJobEnv(t *testing.T, openbaoURL string) jobEnv {
 	t.Helper()
-	config.FarmerPKI = filepath.Join(t.TempDir(), "pki") + "/"
 	config.FarmerOrganization = "imas-test"
 
 	tr := pkitest.Farmer(t)
@@ -173,9 +172,8 @@ func TestRun_MintsAndPublishesToConfiguredPath(t *testing.T) {
 		t.Fatalf("unexpected permissions on the published JWT: %+v conn=%v", uc.Permissions, uc.AllowedConnectionTypes)
 	}
 
-	// Run again in a fresh pod (fresh emptyDir): nothing changed, so
-	// nothing is written — the property the post-deploy hook relies on.
-	config.FarmerPKI = filepath.Join(t.TempDir(), "pki") + "/"
+	// Run again: nothing changed, so nothing is written — the property
+	// the post-deploy hook relies on. The Job keeps nothing between runs.
 	stderr.Reset()
 	if code := Run([]string{"-kv-path", "imas/saasapi/nats-user"}, &stderr); code != 0 {
 		t.Fatalf("second Run = %d, stderr: %s", code, stderr.String())

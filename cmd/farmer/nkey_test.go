@@ -68,13 +68,12 @@ func TestFarmerNKeyFromReadOnlySecret(t *testing.T) {
 	})
 	before := listFiles(t, root)
 
-	saved := []string{config.NKeyFarmerPrivFile, config.NKeyFarmerPubFile, config.FarmerPKI}
+	saved := []string{config.NKeyFarmerPrivFile, config.NKeyFarmerPubFile}
 	t.Cleanup(func() {
-		config.NKeyFarmerPrivFile, config.NKeyFarmerPubFile, config.FarmerPKI = saved[0], saved[1], saved[2]
+		config.NKeyFarmerPrivFile, config.NKeyFarmerPubFile = saved[0], saved[1]
 	})
 	config.NKeyFarmerPrivFile = seedFile
 	config.NKeyFarmerPubFile = ""
-	config.FarmerPKI = filepath.Join(root, "etc/imas/pki/farmer") + "/"
 
 	for replica := range 2 {
 		if err := checkFarmerNKey(); err != nil {

@@ -34,7 +34,7 @@ func TestSproutJWT_BoxKeySubmitOwnSubjectOnly(t *testing.T) {
 	jwt1, seed1 := acceptTestSprout(t, "sprout01")
 	acceptTestSprout(t, "sprout02")
 
-	farmerJWT, err := os.ReadFile(farmerUserJWTPath())
+	farmerJWT, err := farmerUserJWTBytes()
 	if err != nil {
 		t.Fatalf("reading farmer's User JWT: %v", err)
 	}
@@ -108,13 +108,13 @@ func TestMintOrReuseUserJWT_AddsBoxKeySubmitGrant(t *testing.T) {
 
 	old := sproutPermissions("sprout01")
 	old.Pub.Allow.Remove(submit)
-	if _, err := mintOrReuseUserJWT(path, upub, "sprout01", old, mat.tenantPub, mat.tenantSigningKP); err != nil {
+	if _, err := mintOrReuseUserJWTFile(path, upub, "sprout01", old, mat.tenantPub, mat.tenantSigningKP); err != nil {
 		t.Fatalf("mintOrReuseUserJWT (old permissions) failed: %v", err)
 	}
 	if grants() {
 		t.Fatal("JWT minted without the boxkey.pub grant has it")
 	}
-	minted, err := mintOrReuseUserJWT(path, upub, "sprout01", sproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
+	minted, err := mintOrReuseUserJWTFile(path, upub, "sprout01", sproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
 	if err != nil {
 		t.Fatalf("mintOrReuseUserJWT (current permissions) failed: %v", err)
 	}

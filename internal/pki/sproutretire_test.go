@@ -8,7 +8,6 @@ package pki
 import (
 	"crypto/rand"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
@@ -184,11 +183,7 @@ func TestDeleteNKey_PerTenantAccountCarriesRevocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, when := range []string{"after delete", "after a rebuild"} {
-		b, err := os.ReadFile(tenantAccountJWTPath(tenant))
-		if err != nil {
-			t.Fatal(err)
-		}
-		ac, err := jwt.DecodeAccountClaims(string(b))
+		ac, err := jwt.DecodeAccountClaims(heldTenantAccountJWT(t, tenant))
 		if err != nil {
 			t.Fatal(err)
 		}

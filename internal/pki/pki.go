@@ -60,10 +60,11 @@ var reservedSproutIDs = map[string]bool{
 // maxSproutIDLen bounds a sprout ID (and the pki_nkeys.sprout_id column).
 const maxSproutIDLen = 253
 
-// SetupPKIFarmer ensures the farmer's PKI directory exists. Sprout NKey
-// lifecycle state itself now lives in PXC (see store.go) — this directory
-// is still needed for the nats-auth trust-chain material (jwtauth.go) and
-// the TLS certificate files (config.CertFile/KeyFile) that live under it.
+// SetupPKIFarmer ensures config.FarmerPKI exists: the DMZ bus's PKI
+// directory (cmd/farmerbus), which holds its account resolver's store
+// (resolverStoreDir). Farmer itself does not call it: it keeps no JWT or
+// key on disk (accountjwts.go), and sprout NKey lifecycle state lives in
+// PXC (store.go).
 func SetupPKIFarmer() {
 	FarmerPKI := config.FarmerPKI
 	_, err := os.Stat(FarmerPKI)

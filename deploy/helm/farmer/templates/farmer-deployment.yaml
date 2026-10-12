@@ -284,10 +284,10 @@ spec:
               mountPath: /etc/imas/farmer
               subPath: farmer
               readOnly: true
-            # The only writable volume besides tls; nothing on it outlives
-            # the pod. farmerpki points here: what farmer still writes
-            # there (the JWTs it signs for itself) is per replica and made
-            # again at start.
+            # The process's temp directory, the only writable volume
+            # besides tls; nothing on it outlives the pod, and farmer never
+            # reads back what an earlier process wrote. Farmer keeps no
+            # JWT or key on disk.
             - name: tmp
               mountPath: /tmp
             - name: nats-seeds

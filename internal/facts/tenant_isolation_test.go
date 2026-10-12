@@ -41,6 +41,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/pki/pkitest"
 	"github.com/yogzblr/imas/internal/props"
@@ -58,17 +59,19 @@ func setupTenantIsolationPKI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("opening pki test db: %v", err)
 	}
-	if err := gdb.AutoMigrate(pki.Models()...); err != nil {
+	if err := gdb.AutoMigrate(append(pki.Models(), pki.SproutJWTModels()...)...); err != nil {
 		t.Fatalf("migrating pki test db: %v", err)
 	}
 	pki.SetDB(gdb)
 	t.Cleanup(func() { pki.SetDB(nil) })
+	// Sprout User JWTs live in a bucket (pki.MintOrReuseUserJWT).
+	pki.SetSproutJWTStore(objectstoretest.NewStore(t))
+	t.Cleanup(func() { pki.SetSproutJWTStore(nil) })
 
 	oldOrg := config.FarmerOrganization
 	t.Cleanup(func() { config.FarmerOrganization = oldOrg })
 
 	tmpDir := t.TempDir()
-	config.FarmerPKI = filepath.Join(tmpDir, "pki") + "/"
 	pkitest.Farmer(t) // the NATS trust chain in a fake Transit
 	config.NKeyFarmerPubFile = filepath.Join(tmpDir, "farmer.pub")
 	config.FarmerInterface = "127.0.0.1"
@@ -247,9 +250,9 @@ func enrollTenantIsolationSprout(t *testing.T, tenantID, sproutID string) (jwt s
 	if err := pki.AcceptNKey(tenantID, sproutID); err != nil {
 		t.Fatalf("AcceptNKey(%s, %s): %v", tenantID, sproutID, err)
 	}
-	jwt, err = pki.GetSproutUserJWTForTenant(tenantID, sproutID)
+	jwt, err = pki.MintOrReuseUserJWT(t.Context(), tenantID, sproutID, pub)
 	if err != nil {
-		t.Fatalf("GetSproutUserJWTForTenant(%s, %s): %v", tenantID, sproutID, err)
+		t.Fatalf("MintOrReuseUserJWT(%s, %s): %v", tenantID, sproutID, err)
 	}
 	return jwt, seed
 }

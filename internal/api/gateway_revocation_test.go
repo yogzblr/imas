@@ -20,7 +20,6 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/api/handlers"
-	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/gatewayjwt"
 	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
 	"github.com/yogzblr/imas/internal/pki"
@@ -53,13 +52,9 @@ func useRealGatewaySubjectCheck(t *testing.T) *gorm.DB {
 		exec(t, gdb, `INSERT INTO pki_tenants (id, name, deleted, created_at) VALUES (?, ?, ?, ?)`, id, id, false, time.Now().Unix())
 	}
 
-	// Accept and Delete reload the tenant's NATS Account afterwards; that
-	// reload fails here (no operator material) and is only logged. Keep
-	// whatever it writes out of the source tree.
-	origPKI := config.FarmerPKI
-	config.FarmerPKI = t.TempDir() + "/"
+	// Accept and Delete reload the tenant's NATS Account afterwards, which
+	// writes no file; a failure there is only logged.
 	pkitest.Farmer(t) // the NATS trust chain in a fake Transit
-	t.Cleanup(func() { config.FarmerPKI = origPKI })
 
 	orig := gatewaySubjectCheck
 	gatewaySubjectCheck = pki.VerifyGatewaySubject

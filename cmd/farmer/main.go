@@ -230,7 +230,6 @@ func main() {
 	// bus nodes' loaders (docs/briefs/P21-slice2-bus-loader.md §7):
 	// installed before anything below pushes.
 	initAccountPublisher()
-	pki.SetupPKIFarmer()
 	if err := certs.GenCert(); err != nil {
 		log.Fatalf("failed to generate TLS certificates: %v", err)
 	}
@@ -244,9 +243,10 @@ func main() {
 	// resolver.go). This process never embeds a NATS server (pki.NatsServer
 	// stays nil here), so the push is the only way this state ever reaches
 	// the bus — the same mechanism a SIGHUP or an Accept/Deny call triggers
-	// later. It's also what mints this farmer's own User JWT (see
-	// pki.FarmerUserJWT, used by ConnectFarmer below) onto disk. A failure
-	// here is logged, not fatal: it just means the bus doesn't have the
+	// later. It writes no file: the Account JWT is held in memory and
+	// kept in the accounts bucket, and farmer's own User JWT
+	// (pki.FarmerUserJWTForTenant, used by dialTenantBus below) is signed
+	// on first use. A failure here is logged, not fatal: it just means the bus doesn't have the
 	// latest state yet, which a later SIGHUP or accept/deny call can still
 	// push successfully (e.g. if the bus process hasn't finished starting).
 	if err := pki.ReloadNKeys(); err != nil {
@@ -908,9 +908,9 @@ func dialTenantBus(ctx context.Context, tenantID string, onClosed func(*nats.Con
 	// is a separate Service whose certificate carries its DNS name.
 	busServerName := config.BusTLSServerName()
 	// Authenticate as the User identity this tenant's Account granted farmer
-	// (see internal/pki/jwtauth-design.md): the User JWT minted by
-	// ReloadNKeys/ReloadNKeysForTenant/ProvisionTenant, plus this farmer's
-	// own NKey seed (the same seed for every tenant — see
+	// (see internal/pki/jwtauth-design.md): the User JWT this replica signs
+	// with the tenant's signing key on first use and holds in memory, plus
+	// this farmer's own NKey seed (the same seed for every tenant — see
 	// pki.FarmerUserJWTForTenant's doc comment on why one NKey can hold
 	// distinct User JWTs under many Accounts). A bare NKey connect (the
 	// pre-JWT-auth shape) can't satisfy a server configured with
@@ -918,7 +918,7 @@ func dialTenantBus(ctx context.Context, tenantID string, onClosed func(*nats.Con
 	// without a JWT.
 	farmerJWT, err := pki.FarmerUserJWTForTenant(tenantID)
 	if err != nil {
-		return nil, fmt.Errorf("farmer User JWT not found for tenant %s (ReloadNKeys/ReloadNKeysForTenant/ProvisionTenant must mint it before connecting to the bus): %w", tenantID, err)
+		return nil, fmt.Errorf("signing farmer's User JWT for tenant %s: %w", tenantID, err)
 	}
 	farmerSeed, err := farmerNKeySeed()
 	if err != nil {
@@ -1250,11 +1250,10 @@ func ConnectFarmer(ctx context.Context, done chan<- struct{}) {
 	// platform-level operation, so one listener is all this ever needs.
 	initSystemAccountListeners(ctx)
 
-	// Re-sync every provisioned tenant's sprouts onto the current
-	// permission set before connecting: ReloadNKeys above covers only the
-	// legacy tenant, so without this an already-enrolled sprout of any
-	// other tenant keeps the User JWT it was minted with (no heartbeat
-	// grant after an upgrade) until it next enrolls. Not fatal.
+	// Re-sync every provisioned tenant's Account (its revocations, from
+	// PXC) before connecting: ReloadNKeys above covers only the legacy
+	// tenant. Sprout User JWTs pick up a newer permission set where they
+	// are served (pki.MintOrReuseUserJWT). Not fatal.
 	if err := pki.ResyncProvisionedTenants(); err != nil {
 		log.Errorf("Failed to re-sync provisioned tenants' NATS auth state: %v", err)
 	}

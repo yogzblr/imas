@@ -54,19 +54,22 @@ func New(t testing.TB) *Transit {
 	return &Transit{Fake: f, Store: s}
 }
 
-// Environment the farmer reads its NATS trust and SYS user from; the
+// Environment the farmer reads its NATS trust and user seeds from; the
 // values internal/pki uses (pki.NATSTrustDirEnv and its external seed
 // convention), spelled out because this package cannot import pki.
 const (
-	envTrustDir        = "IMAS_NATS_TRUST_DIR"
-	envSysUserSeedFile = "IMAS_NATS_SYS_USER_SEED_FILE"
+	envTrustDir            = "IMAS_NATS_TRUST_DIR"
+	envSysUserSeedFile     = "IMAS_NATS_SYS_USER_SEED_FILE"
+	envSaaSAPIUserSeedFile = "IMAS_NATS_SAASAPI_USER_SEED_FILE"
 )
 
 // Farmer is New plus everything else the farmer's NATS signing needs in
 // a test: the public trust directory the bootstrap Job would have
 // written (operator JWT signed by nats-operator, SYS account JWT signed
-// by nats-operator-signing) under IMAS_NATS_TRUST_DIR, and a SYS_USER
-// seed file under IMAS_NATS_SYS_USER_SEED_FILE. internal/pki finds the
+// by nats-operator-signing) under IMAS_NATS_TRUST_DIR, and SYS_USER and
+// SAASAPI_USER seed files under IMAS_NATS_SYS_USER_SEED_FILE and
+// IMAS_NATS_SAASAPI_USER_SEED_FILE: farmer requires both and generates
+// neither. internal/pki finds the
 // fake through the IMAS_NATSSIGN_* variables New sets. The fake's
 // counters are reset after the trust is minted.
 func Farmer(t testing.TB) *Transit {
@@ -77,19 +80,24 @@ func Farmer(t testing.TB) *Transit {
 	tr.WriteTrust(t)
 	t.Setenv(envTrustDir, dir)
 
-	user, err := nkeys.CreateUser()
-	if err != nil {
-		t.Fatalf("pkitest: %v", err)
+	for env, file := range map[string]string{
+		envSysUserSeedFile:     "sys-user.nk",
+		envSaaSAPIUserSeedFile: "saasapi-user.nk",
+	} {
+		user, err := nkeys.CreateUser()
+		if err != nil {
+			t.Fatalf("pkitest: %v", err)
+		}
+		seed, err := user.Seed()
+		if err != nil {
+			t.Fatalf("pkitest: %v", err)
+		}
+		seedFile := filepath.Join(t.TempDir(), file)
+		if err := os.WriteFile(seedFile, seed, 0o600); err != nil {
+			t.Fatalf("pkitest: %v", err)
+		}
+		t.Setenv(env, seedFile)
 	}
-	seed, err := user.Seed()
-	if err != nil {
-		t.Fatalf("pkitest: %v", err)
-	}
-	seedFile := filepath.Join(t.TempDir(), "sys-user.nk")
-	if err := os.WriteFile(seedFile, seed, 0o600); err != nil {
-		t.Fatalf("pkitest: %v", err)
-	}
-	t.Setenv(envSysUserSeedFile, seedFile)
 	tr.Fake.ResetCounts()
 	return tr
 }

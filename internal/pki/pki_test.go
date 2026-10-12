@@ -68,7 +68,12 @@ func setupTestPKI(t *testing.T) {
 	newTestDB(t)
 
 	tmpDir := t.TempDir()
+	// Farmer writes nothing here (E3): pointed at a directory that does
+	// not exist, which must still not exist when the test ends.
 	config.FarmerPKI = filepath.Join(tmpDir, "pki") + "/"
+	requireNoFarmerPKIWrites(t, config.FarmerPKI)
+	forgetHeldJWTs()
+	t.Cleanup(forgetHeldJWTs)
 
 	farmerPubFile := filepath.Join(tmpDir, "farmer.pub")
 	if err := os.WriteFile(farmerPubFile, []byte("UFAKE_FARMER_KEY_FOR_TESTING"), 0o600); err != nil {

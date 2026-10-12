@@ -272,6 +272,7 @@ func runBusNode() error {
 	config.FarmerInterface = os.Getenv(envBusHost)
 	config.FarmerBusPort = os.Getenv(envBusPort)
 	config.FarmerWSPort = ""
+	// The bus node's resolver store (ConfigureBusNats), as cmd/farmerbus.
 	config.FarmerPKI = filepath.Join(dir, "pki")
 	config.RootCA = filepath.Join(dir, "ca.pem")
 	config.CertFile = filepath.Join(dir, "cert.pem")

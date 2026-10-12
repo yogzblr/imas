@@ -3,7 +3,6 @@ package pki
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"reflect"
 	"sync"
@@ -96,19 +95,18 @@ func TestEnsureSaaSAPICredential_MintsScopedSYSUserAndIsIdempotent(t *testing.T)
 	if uc, err := jwt.DecodeUserClaims(again); err != nil || !saasAPIUserJWTIsCurrent(uc, pub, mat.sysAccountPub) {
 		t.Fatalf("expected a second call to mint an equivalent JWT: %v", err)
 	}
-	if entries, err := os.ReadDir(filepath.Join(natsAuthDir(), "users")); err == nil && len(entries) > 0 {
-		t.Fatalf("expected no SaaS API User JWT file, found %d entries under users/", len(entries))
-	}
+	// No User JWT file: setupTestPKI's requireNoFarmerPKIWrites.
 }
 
 // TestEnsureSaaSAPICredential_ExternalSeedIsUsedAndNeverPersisted mirrors
-// loadOrCreateSeed's contract for the production shape: the seed comes
+// loadRequiredSeed's contract for the production shape: the seed comes
 // from OpenBao via ESO, and farmer never writes a local copy of it.
 func TestEnsureSaaSAPICredential_ExternalSeedIsUsedAndNeverPersisted(t *testing.T) {
 	setupTestPKI(t)
 	kp, _ := nkeys.CreateUser()
 	seed, _ := kp.Seed()
 	pub, _ := kp.PublicKey()
+	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED_FILE", "")
 	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED", string(seed))
 
 	userJWT, gotSeed, err := EnsureSaaSAPICredential()
@@ -122,15 +120,14 @@ func TestEnsureSaaSAPICredential_ExternalSeedIsUsedAndNeverPersisted(t *testing.
 	if uc.Subject != pub {
 		t.Fatalf("subject = %s, want %s", uc.Subject, pub)
 	}
-	if _, err := os.Stat(saasAPIUserSeedPath()); !os.IsNotExist(err) {
-		t.Fatalf("expected no local seed file for an externally-supplied seed, stat err = %v", err)
-	}
+	// No local seed file: setupTestPKI's requireNoFarmerPKIWrites.
 }
 
 func TestEnsureSaaSAPICredential_RejectsNonUserSeed(t *testing.T) {
 	setupTestPKI(t)
 	kp, _ := nkeys.CreateAccount()
 	seed, _ := kp.Seed()
+	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED_FILE", "")
 	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED", string(seed))
 	if _, _, err := EnsureSaaSAPICredential(); err == nil {
 		t.Fatal("expected an Account seed to be rejected as the SaaS API's User key")
@@ -355,12 +352,12 @@ func TestSaasapiCredentialRotationConcurrent(t *testing.T) {
 		t.Fatalf("state = %+v", st)
 	}
 	// No bus in this test: the push fails, after the SYS Account JWT is
-	// re-signed and persisted.
+	// re-signed and held.
 	userJWT, _, _ := EnsureSaaSAPICredential()
 	if uc, err := jwt.DecodeUserClaims(userJWT); err != nil || uc.Subject != newPub {
 		t.Fatalf("minted JWT for the wrong key: %v", err)
 	}
-	sysClaims, err := jwt.DecodeAccountClaims(mustReadFile(t, sysAccountJWTPath()))
+	sysClaims, err := jwt.DecodeAccountClaims(heldSysAccountJWT(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +379,7 @@ func TestEnsureSaaSAPICredential_NoStateNoRevocation(t *testing.T) {
 	if _, _, err := EnsureSaaSAPICredential(); err != nil {
 		t.Fatal(err)
 	}
-	sysClaims, err := jwt.DecodeAccountClaims(mustReadFile(t, sysAccountJWTPath()))
+	sysClaims, err := jwt.DecodeAccountClaims(heldSysAccountJWT(t))
 	if err != nil {
 		t.Fatal(err)
 	}

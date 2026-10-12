@@ -38,10 +38,10 @@ type SaaSAPICredentialStore interface {
 }
 
 // ErrSaaSAPIKeyMaterialMissing means a key PublishSaaSAPICredential needs
-// is neither supplied externally nor already on disk. Minting anyway would
-// generate a fresh random key inside the Job's pod and publish a JWT for
-// it (or signed by it) that nothing else holds — breaking the saasapi
-// Deployment on its next restart — so it refuses instead.
+// is not supplied: the NATS trust directory or the SAASAPI_USER seed.
+// Farmer never generates the SaaS API's key: a key generated inside the
+// Job's pod would be published for a JWT that nothing else holds,
+// breaking the saasapi Deployment on its next restart.
 var ErrSaaSAPIKeyMaterialMissing = errors.New("SaaS API credential key material is not available")
 
 // PublishResult reports what PublishSaaSAPICredential did.
@@ -55,9 +55,9 @@ type PublishResult struct {
 }
 
 // requireSaaSAPIKeyMaterial checks that what the SaaS API User JWT
-// depends on is present rather than about to be generated: the NATS trust
-// directory (whose SYS account key, in Transit, signs it) and the SaaS
-// API's own User key, which loadOrCreateSeed would otherwise generate.
+// depends on is supplied: the NATS trust directory (whose SYS account
+// key, in Transit, signs it) and the SaaS API's own User key, from
+// IMAS_NATS_SAASAPI_USER_SEED_FILE or _SEED.
 func requireSaaSAPIKeyMaterial() error {
 	dir := NATSTrustDir()
 	if _, err := os.Stat(filepath.Join(dir, TrustSysAccountPub)); err != nil {
@@ -71,14 +71,7 @@ func requireSaaSAPIKeyMaterial() error {
 	if os.Getenv(env+"_SEED_FILE") != "" || os.Getenv(env+"_SEED") != "" {
 		return nil
 	}
-	path := saasAPIUserSeedPath()
-	if _, err := os.Stat(path); err == nil {
-		return nil
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	return fmt.Errorf("%w: set %s_SEED_FILE (or run against farmer's own PKI directory, where %s exists)",
-		ErrSaaSAPIKeyMaterialMissing, env, path)
+	return fmt.Errorf("%w: set %s_SEED_FILE", ErrSaaSAPIKeyMaterialMissing, env)
 }
 
 // PublishSaaSAPICredential runs EnsureSaaSAPICredential and hands the
@@ -87,9 +80,9 @@ func requireSaaSAPIKeyMaterial() error {
 // writes nothing.
 //
 // "Equivalent" is judged on the JWT's claims, not its bytes — the same
-// check EnsureSaaSAPICredential uses to decide whether to re-mint. A Job
-// running against an empty PKI directory (see deploy/farmer/) mints a
-// byte-different but equivalent JWT on every run; comparing bytes would
+// check EnsureSaaSAPICredential uses to decide whether to re-mint. The
+// Job keeps nothing between runs, so it mints a byte-different but
+// equivalent JWT on every run; comparing bytes would
 // write a new KV version, and restart saasapi via ESO/Reloader, every
 // time.
 //

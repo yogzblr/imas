@@ -23,7 +23,6 @@ import (
 	"github.com/nats-io/nkeys"
 
 	"github.com/yogzblr/imas/internal/config"
-	log "github.com/yogzblr/imas/internal/log"
 )
 
 const natsAuthSubdir = "nats-auth"
@@ -59,7 +58,7 @@ type natsAuthMaterial struct {
 	tenantMinted bool
 }
 
-// authMu guards concurrent bootstrap/persistence of the auth material below
+// authMu guards concurrent bootstrap/holding of the auth material below
 // (concurrent Accept/Deny/Reject calls, or a SIGHUP racing one of them).
 var authMu sync.Mutex
 
@@ -70,29 +69,11 @@ func natsAuthDir() string {
 // resolverStoreDir is the DMZ bus's resolver directory (LoadBusNats),
 // on cmd/farmerbus's data emptyDir; its account loader refills it from
 // the accounts bucket at every start. The in-process test bus uses a
-// directory of its own (newTempDirResolver).
+// directory of its own (newTempDirResolver). Farmer writes nothing under
+// config.FarmerPKI: the JWTs it signs are held in memory
+// (accountjwts.go).
 func resolverStoreDir() string {
 	return filepath.Join(natsAuthDir(), "resolver")
-}
-
-func sproutJWTDir() string {
-	return filepath.Join(config.FarmerPKI, "sprouts", "jwt")
-}
-
-func tenantJWTPath() string {
-	return filepath.Join(natsAuthDir(), "tenant.jwt")
-}
-
-func farmerUserJWTPath() string {
-	return filepath.Join(natsAuthDir(), "users", "farmer.jwt")
-}
-
-func cliUserJWTPath(pubkey string) string {
-	return filepath.Join(natsAuthDir(), "users", "cli-"+pubkey+".jwt")
-}
-
-func sproutJWTPath(id string) string {
-	return filepath.Join(sproutJWTDir(), id+".jwt")
 }
 
 // ensurePlatformAuth loads the platform part of the trust chain: the
@@ -101,10 +82,11 @@ func sproutJWTPath(id string) string {
 // Job's ConfigMap is mounted at, and the operator-signing and SYS account
 // signing pairs from Transit (read, never created), and checks the
 // pairs' public keys are the trust's. It mints nothing: the bootstrap Job
-// owns the operator and SYS account JWTs. The one thing it writes is the
-// farmer's own copy of the SYS account JWT (sys-account.jwt), seeded from
-// the trust when missing or not about the trust's SYS account; the farmer
-// re-signs that copy with its revocations (saasapi_user.go). The SaaS API
+// owns the operator and SYS account JWTs. The SYS account JWT it holds
+// (accountjwts.go) is the one this process holds, or else the accounts
+// bucket's (both only if signed by the operator signing key for the
+// trust's SYS account), or else the trust's; farmer re-signs it with its
+// revocations (saasapi_user.go). It writes no file. The SaaS API
 // credential Job needs only this.
 func ensurePlatformAuth() (*natsAuthMaterial, error) {
 	authMu.Lock()
@@ -113,17 +95,6 @@ func ensurePlatformAuth() (*natsAuthMaterial, error) {
 }
 
 func ensurePlatformAuthLocked(ctx context.Context) (*natsAuthMaterial, error) {
-	dir := natsAuthDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(filepath.Join(dir, "users"), 0o700); err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(sproutJWTDir(), 0o700); err != nil {
-		return nil, err
-	}
-
 	trust, err := LoadNATSTrustDir(NATSTrustDir())
 	if err != nil {
 		return nil, err
@@ -158,15 +129,13 @@ func ensurePlatformAuthLocked(ctx context.Context) (*natsAuthMaterial, error) {
 		}
 	}
 
-	if b, rerr := os.ReadFile(sysAccountJWTPath()); rerr == nil {
-		if ac, derr := jwt.DecodeAccountClaims(string(b)); derr == nil &&
-			ac.Subject == trust.SysAccountPub && ac.Issuer == trust.OperatorSigningPub {
-			mat.sysAccountJWT = string(b)
-		}
+	mat.sysAccountJWT, _, err = loadAccountJWT(ctx, trust.SysAccountPub, issuedBy(trust.OperatorSigningPub))
+	if err != nil {
+		return nil, err
 	}
 	if mat.sysAccountJWT == "" {
-		if werr := writeFileAtomic(sysAccountJWTPath(), []byte(trust.SysAccountJWT), 0o600); werr != nil {
-			return nil, werr
+		if err := holdAccountJWT(trust.SysAccountJWT, false); err != nil {
+			return nil, err
 		}
 		mat.sysAccountJWT = trust.SysAccountJWT
 	}
@@ -179,8 +148,9 @@ func ensurePlatformAuthLocked(ctx context.Context) (*natsAuthMaterial, error) {
 // (IMAS_NATS_SYS_USER_SEED_FILE or _SEED), required: it is a user-kind
 // key, not a trust chain key, so it stays a seed, but the farmer no
 // longer generates one. Its JWT is signed directly by the SYS account
-// key (through Transit); a dedicated signing key isn't worth the extra
-// moving part for a single, low-privilege internal user.
+// key (through Transit) on first use and held in memory
+// (accountjwts.go); a dedicated signing key isn't worth the extra moving
+// part for a single, low-privilege internal user.
 func ensureSysUserLocked(mat *natsAuthMaterial) error {
 	kp, ok, err := loadExternalSeed("SYS_USER")
 	if !ok {
@@ -199,13 +169,13 @@ func ensureSysUserLocked(mat *natsAuthMaterial) error {
 		return err
 	}
 	mat.sysUserKP = kp
-	path := filepath.Join(natsAuthDir(), "sys-user.jwt")
-	if b, rerr := os.ReadFile(path); rerr == nil {
-		if uc, derr := jwt.DecodeUserClaims(string(b)); derr == nil &&
-			uc.Subject == mat.sysUserPub && uc.Issuer == mat.sysAccountPub {
-			mat.sysUserJWT = string(b)
-			return nil
-		}
+	heldMu.Lock()
+	held := heldSysUser
+	heldMu.Unlock()
+	if uc, derr := jwt.DecodeUserClaims(held); held != "" && derr == nil &&
+		uc.Subject == mat.sysUserPub && uc.Issuer == mat.sysAccountPub {
+		mat.sysUserJWT = held
+		return nil
 	}
 	uc := jwt.NewUserClaims(mat.sysUserPub)
 	uc.Name = "imas-farmer-sys-push"
@@ -213,9 +183,9 @@ func ensureSysUserLocked(mat *natsAuthMaterial) error {
 	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(path, []byte(signed), 0o600); err != nil {
-		return err
-	}
+	heldMu.Lock()
+	heldSysUser = signed
+	heldMu.Unlock()
 	mat.sysUserJWT = signed
 	return nil
 }
@@ -227,9 +197,16 @@ func ensureSysUserLocked(mat *natsAuthMaterial) error {
 // current keys/claims).
 //
 // The legacy tenant's keys are the Transit keys nats-tacct-<id> and
-// nats-tsign-<id> for currentTenantID(). They are created only when its
-// Account JWT does not exist yet (its first creation); otherwise they are
-// only read, and a missing key is an error.
+// nats-tsign-<id> for currentTenantID(), created when missing. That is
+// what every farmer start did before E3 too: the legacy Account JWT whose
+// presence once decided it lived in the pod's tmp emptyDir, so a start
+// never found it. Unlike a provisioned tenant's (tenant.go), the legacy
+// tenant's keys are never retired.
+//
+// Its Account JWT is the one this process holds, or else the accounts
+// bucket's, or else a minimal one minted here (tenantMinted), which
+// syncNatsAuth re-signs with the tenant's revocations before it is
+// published.
 func ensureNatsAuth() (*natsAuthMaterial, error) {
 	authMu.Lock()
 	defer authMu.Unlock()
@@ -243,13 +220,7 @@ func ensureNatsAuth() (*natsAuthMaterial, error) {
 		return nil, err
 	}
 
-	getKey := natsKeys.keyPair
-	if _, serr := os.Stat(tenantJWTPath()); os.IsNotExist(serr) {
-		getKey = natsKeys.ensureKeyPair
-	} else if serr != nil {
-		return nil, serr
-	}
-	tenantKP, err := getKey(ctx, natsKeyRef{role: natsKeyTenantAccount})
+	tenantKP, err := natsKeys.ensureKeyPair(ctx, natsKeyRef{role: natsKeyTenantAccount})
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +228,7 @@ func ensureNatsAuth() (*natsAuthMaterial, error) {
 	if err != nil {
 		return nil, err
 	}
-	mat.tenantSigningKP, err = getKey(ctx, natsKeyRef{role: natsKeyTenantSigning})
+	mat.tenantSigningKP, err = natsKeys.ensureKeyPair(ctx, natsKeyRef{role: natsKeyTenantSigning})
 	if err != nil {
 		return nil, err
 	}
@@ -271,32 +242,27 @@ func ensureNatsAuth() (*natsAuthMaterial, error) {
 	}
 
 	// Tenant Account claims: signed by the operator's signing key, with its
-	// own delegated signing key used to mint every sprout/farmer/cli User
-	// JWT. Loaded (not regenerated) when present, since this file also
+	// own delegated signing key used to mint every sprout/farmer User JWT.
+	// Loaded (not regenerated) when held or in the bucket, since it also
 	// carries the live revocation list that syncNatsAuth maintains.
-	needTenantJWT := true
-	if b, rerr := os.ReadFile(tenantJWTPath()); rerr == nil {
-		if ac, derr := jwt.DecodeAccountClaims(string(b)); derr == nil &&
-			ac.Subject == mat.tenantPub &&
-			ac.SigningKeys.Contains(tenantSigningPub) {
-			mat.tenantJWT = string(b)
-			needTenantJWT = false
-		}
+	j, minted, err := loadAccountJWT(ctx, mat.tenantPub, signsWith(tenantSigningPub))
+	if err != nil {
+		return nil, err
 	}
-	if needTenantJWT {
+	if j == "" {
 		ac := jwt.NewAccountClaims(mat.tenantPub)
 		ac.Name = mat.tenantName
 		ac.SigningKeys.Add(tenantSigningPub)
-		signed, encErr := ac.Encode(mat.operatorSigningKP)
-		if encErr != nil {
-			return nil, encErr
+		if j, err = ac.Encode(mat.operatorSigningKP); err != nil {
+			return nil, err
 		}
-		if werr := writeFileAtomic(tenantJWTPath(), []byte(signed), 0o600); werr != nil {
-			return nil, werr
+		if err := holdAccountJWT(j, true); err != nil {
+			return nil, err
 		}
-		mat.tenantJWT = signed
-		mat.tenantMinted = true
+		minted = true
 	}
+	mat.tenantJWT = j
+	mat.tenantMinted = minted
 
 	return mat, nil
 }
@@ -324,11 +290,11 @@ func CheckNATSAuth(ctx context.Context) error {
 	return err
 }
 
-// externalSeedEnvPrefix namespaces the env vars loadOrCreateSeed checks
-// before touching disk, so a seed can be handed to the farmer process by
-// whatever secrets pipeline it's deployed with (e.g. Vault via External
-// Secrets Operator, materialized as a Kubernetes Secret) instead of being
-// generated and stored locally at all. IMAS_NATS_<NAME>_SEED_FILE takes a
+// externalSeedEnvPrefix namespaces the env vars a user seed is read from
+// (loadExternalSeed), so a seed is handed to the farmer process by
+// whatever secrets pipeline it's deployed with (e.g. OpenBao via External
+// Secrets Operator, materialized as a Kubernetes Secret); farmer never
+// generates or stores one. IMAS_NATS_<NAME>_SEED_FILE takes a
 // path — the shape an ESO-synced Secret normally takes once mounted into
 // the pod as a volume — and IMAS_NATS_<NAME>_SEED takes the raw seed value
 // directly, for a Secret wired in via envFrom/secretKeyRef instead. The
@@ -338,7 +304,7 @@ const externalSeedEnvPrefix = "IMAS_NATS_"
 
 // loadExternalSeed checks IMAS_NATS_<name>_SEED_FILE and IMAS_NATS_<name>_SEED
 // for an externally-supplied seed, in that order. It returns ok=false (no
-// error) when neither is set, so callers fall back to local generation.
+// error) when neither is set.
 func loadExternalSeed(name string) (kp nkeys.KeyPair, ok bool, err error) {
 	envBase := externalSeedEnvPrefix + name
 	if path := os.Getenv(envBase + "_SEED_FILE"); path != "" {
@@ -356,42 +322,29 @@ func loadExternalSeed(name string) (kp nkeys.KeyPair, ok bool, err error) {
 	return nil, false, nil
 }
 
-// loadOrCreateSeed resolves the NKey seed identified by name: first from an
-// external secret (see loadExternalSeed), then from path on disk, and only
-// generates a fresh keypair via create — persisting it to path (0600) — if
-// neither is present. A seed sourced externally is never written to path:
-// the whole point is that it doesn't get a second, farmer-local plaintext
-// copy.
-func loadOrCreateSeed(path, name string, create func() (nkeys.KeyPair, error)) (nkeys.KeyPair, error) {
-	if kp, ok, err := loadExternalSeed(name); ok {
-		return kp, err
+// loadRequiredSeed is loadExternalSeed for a seed that must be supplied:
+// farmer generates no seed and writes none (SYS_USER, SAASAPI_USER).
+func loadRequiredSeed(name string) (nkeys.KeyPair, error) {
+	kp, ok, err := loadExternalSeed(name)
+	if !ok {
+		return nil, fmt.Errorf("pki: the %s seed is required: set %s%s_SEED_FILE", name, externalSeedEnvPrefix, name)
 	}
-	if b, err := os.ReadFile(path); err == nil {
-		kp, kerr := nkeys.FromSeed(bytes.TrimSpace(b))
-		if kerr != nil {
-			return nil, kerr
-		}
-		return kp, nil
-	} else if !os.IsNotExist(err) {
-		return nil, err
-	}
-	kp, err := create()
-	if err != nil {
-		return nil, err
-	}
-	seed, err := kp.Seed()
-	if err != nil {
-		return nil, err
-	}
-	if err := writeFileAtomic(path, seed, 0o600); err != nil {
-		return nil, err
-	}
-	log.Tracef("Generated new NATS auth keypair at %s", path)
-	return kp, nil
+	return kp, err
 }
 
-// loadTenantClaims decodes the current on-disk tenant Account JWT into a
-// mutable *jwt.AccountClaims for syncNatsAuth to update in place.
+// loadTenantClaims returns the legacy tenant Account claims syncNatsAuth
+// updates in place: the newest of what this process holds and the
+// accounts bucket's copy (resignBase), or mat's own. It updates
+// mat.tenantJWT and mat.tenantMinted to match.
 func loadTenantClaims(mat *natsAuthMaterial) (*jwt.AccountClaims, error) {
-	return jwt.DecodeAccountClaims(mat.tenantJWT)
+	signingPub, err := mat.tenantSigningKP.PublicKey()
+	if err != nil {
+		return nil, err
+	}
+	ac, raw, minted, err := resignBase(context.Background(), mat.tenantPub, mat.tenantJWT, mat.tenantMinted, signsWith(signingPub))
+	if err != nil {
+		return nil, err
+	}
+	mat.tenantJWT, mat.tenantMinted = raw, minted
+	return ac, nil
 }

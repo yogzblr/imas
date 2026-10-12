@@ -320,7 +320,7 @@ func TestPushAllAccounts_FreshBusLearnsEveryAccount(t *testing.T) {
 	_ = ProvisionTenant("t_live", "Live Co")
 	_, liveSeed := mkSprout("t_live", "web-01", stateAccepted)
 	_ = ReloadNKeysForTenant("t_live")
-	liveJWT, err := GetSproutUserJWTForTenant("t_live", "web-01")
+	liveJWT, err := sproutUserJWTForTest("t_live", "web-01")
 	if err != nil {
 		t.Fatal(err)
 	}

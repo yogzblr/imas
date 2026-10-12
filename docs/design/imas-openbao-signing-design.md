@@ -158,7 +158,7 @@ Object store rules: separate private bucket, farmer-only credentials, SSE, never
 
 ## 9. Code and chart changes
 
-- Add a Transit-backed `nkeys.KeyPair` signer in `internal/pki` and replace `loadOrCreateSeed` for signing keys.
+- Add a Transit-backed `nkeys.KeyPair` signer in `internal/pki` and replace the seed loading for signing keys.
 - Bus (`ConfigureBusNats`, `seedResolverFromCore`): load the published operator JWT and SYS public key instead of deriving the trust chain from seeds.
 - Remove the six-seed Secret (`natsSeeds`) for signing keys; keep SYS user and SaaS API user seeds.
 - Stop writing `account.nk`, `account-signing.nk`, per-sprout JWT files, farmer JWT files to the PVC; farmer NKey and rotation state to PXC or Secret.
@@ -187,7 +187,7 @@ Tests (our code): a node started empty becomes ready only after loading everythi
 |---|---|---|
 | Bus | Account JWT store under `/var/lib/imas/farmerbus` on a per-node PVC; trust chain derived from the six seeds | `emptyDir` plus the loader (9.1); operator JWT and SYS public key from a ConfigMap |
 | Bus | Cluster size taken from local config (the fence in `cmd/farmerbus/fence.go`) | Make it follow the real replica count (chart value tied to the StatefulSet) |
-| Farmer | Account and signing seeds, `account.jwt`, `farmer.jwt` on the PVC | Transit keys; Account JWTs in the accounts bucket |
+| Farmer | Account and signing seeds, `account.jwt`, `farmer.jwt` on the PVC | Transit keys; Account JWTs in the accounts bucket; farmer's own User JWTs signed on first use and held in memory (E3) |
 | Farmer | Per-sprout User JWT files | Private sprout-JWT bucket |
 | Farmer | Farmer NKey, SaaS API credential rotation state | PXC (rotation state) and a Secret or Transit (NKey) |
 | Farmer | Audit logs (`internal/audit`) on the PVC | Stdout to a log shipper, or per-pod files plus a shipper; audit must not be lost with the pod |

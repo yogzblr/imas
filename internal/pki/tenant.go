@@ -18,10 +18,11 @@ package pki
 //
 // FLAG FOR SECURITY REVIEW (tenant isolation correctness): every
 // dynamically-provisioned tenant gets its own Account keypair, its own
-// Account JWT, and its own namespace of sprout/user JWTs on disk
-// (tenantAuthDir) — structurally separate from every other tenant's, the
-// same "isolation enforced by which Account a connection authenticated
-// into" property the design doc describes for the legacy single-tenant
+// Account JWT (held in memory and kept in the accounts bucket, under the
+// Account's own public key), and its sprouts' User JWTs under its own
+// tenant ID in the sprout JWT bucket — structurally separate from every
+// other tenant's, the same "isolation enforced by which Account a
+// connection authenticated into" property the design doc describes for the legacy single-tenant
 // seam. The operator (and its delegated signing key) remain shared across
 // every tenant by design — that's the trust anchor the whole chain rests
 // on, not a tenant boundary itself; see jwtauth.go's own security-review
@@ -30,8 +31,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"sync"
 	"time"
@@ -45,9 +44,8 @@ import (
 var tenantIDMatcher = regexp.MustCompile(`^[0-9A-Za-z_-]{1,191}$`)
 
 // IsValidTenantID reports whether id is safe to use both as a PXC primary
-// key and as a path component under natsAuthDir (tenantAuthDir joins it
-// directly into a filesystem path, so this also guards against path
-// traversal via a malicious/malformed tenant ID).
+// key and as an object key prefix in the sprout JWT bucket (so this also
+// guards against key traversal via a malicious/malformed tenant ID).
 func IsValidTenantID(id string) bool {
 	return tenantIDMatcher.MatchString(id)
 }
@@ -56,7 +54,7 @@ func IsValidTenantID(id string) bool {
 // its Account public key (the Transit key nats-tacct-<id>, which never
 // signs), a delegated signing pair (Transit key nats-tsign-<id>, mirroring
 // the operator/operator-signing split in jwtauth.go), and the current
-// signed Account JWT.
+// signed Account JWT (held in memory, accountjwts.go).
 type tenantAccountMaterial struct {
 	signingKP  nkeys.KeyPair
 	signingPub string
@@ -67,49 +65,9 @@ type tenantAccountMaterial struct {
 	minted bool
 }
 
-func tenantsRootDir() string {
-	return filepath.Join(natsAuthDir(), "tenants")
-}
-
-// tenantAuthDir is where a specific tenant's Account keys, Account JWT,
-// and every sprout/cli/farmer User JWT minted under that Account live —
-// the re-keyed-by-tenant counterpart to jwtauth.go's flat, single-tenant
-// natsAuthDir/sproutJWTDir. id must already be validated (IsValidTenantID)
-// by every exported entry point below before reaching here.
-func tenantAuthDir(id string) string {
-	return filepath.Join(tenantsRootDir(), id)
-}
-
-func tenantAccountJWTPath(id string) string { return filepath.Join(tenantAuthDir(id), "account.jwt") }
-func tenantSproutJWTDir(id string) string   { return filepath.Join(tenantAuthDir(id), "sprouts") }
-
-// farmerUserJWTPathForTenant is farmerUserJWTPath (jwtauth.go) re-keyed by
-// tenant — farmer's own connection identity under tenantID's Account, one
-// per dynamically-provisioned tenant, the counterpart to
-// sproutJWTPathForTenant above. See FarmerUserJWTForTenant and
-// docs/design/imas-tenant-context-threading.md's Option A: farmer opens one
-// NATS connection per tenant, each authenticated with its own User JWT
-// minted under that tenant's own Account (same underlying farmer NKey
-// identity, reused across every tenant — see mintOrReuseUserJWT's doc
-// comment on why one NKey can hold distinct User JWTs under many Accounts
-// simultaneously).
-func farmerUserJWTPathForTenant(id string) string {
-	return filepath.Join(tenantAuthDir(id), "farmer.jwt")
-}
-
-// sproutJWTPathForTenant is sproutJWTPath (jwtauth.go) re-keyed by tenant —
-// see this file's package doc comment. Two different tenants may each have
-// a sprout named "web-01"; each gets its own file under its own tenant's
-// directory, rather than colliding on config.FarmerPKI/sprouts/jwt/web-01.jwt
-// the way the legacy single-tenant path still does (deliberately — see
-// jwtauth.go, that path is unchanged).
-func sproutJWTPathForTenant(tenantID, sproutID string) string {
-	return filepath.Join(tenantSproutJWTDir(tenantID), sproutID+".jwt")
-}
-
-// tenantAuthMu guards concurrent bootstrap/persistence of any tenant's
-// Account material below (a pki_tenants row plus its on-disk Account
-// keys/JWT) — the tenant-scoped counterpart to jwtauth.go's authMu, which
+// tenantAuthMu guards concurrent bootstrap/holding of any tenant's
+// Account material below (a pki_tenants row plus its Account keys and
+// JWT) — the tenant-scoped counterpart to jwtauth.go's authMu, which
 // guards only the legacy single "current tenant"'s material and the
 // platform-wide operator/SYS material. Deliberately a separate lock rather
 // than reusing authMu: every entry point below (ensureTenantAccountLocked,
@@ -120,8 +78,9 @@ func sproutJWTPathForTenant(tenantID, sproutID string) string {
 var tenantAuthMu sync.Mutex
 
 // ensureTenantAccountMaterial loads tenantID's Account keys from Transit
-// and its Account JWT from disk, minting and persisting the JWT if it is
-// missing — idempotent, but relies on the caller already holding
+// and its Account JWT (the one this process holds, or else the accounts
+// bucket's), minting a minimal one and holding it if neither has one —
+// idempotent, but relies on the caller already holding
 // tenantAuthMu (every call site in this file does, via
 // ensureTenantAccountLocked or loadTenantAccountMaterial) for safety
 // under concurrent calls for the same tenant. Only provisioning passes
@@ -129,13 +88,6 @@ var tenantAuthMu sync.Mutex
 // exist; otherwise a missing key is an error wrapping
 // natskeys.ErrKeyNotFound and nothing is created.
 func ensureTenantAccountMaterial(mat *natsAuthMaterial, tenantID, name string, create bool) (*tenantAccountMaterial, bool, error) {
-	if err := os.MkdirAll(tenantAuthDir(tenantID), 0o700); err != nil {
-		return nil, false, err
-	}
-	if err := os.MkdirAll(tenantSproutJWTDir(tenantID), 0o700); err != nil {
-		return nil, false, err
-	}
-
 	tam := &tenantAccountMaterial{}
 	ctx := context.Background()
 
@@ -160,46 +112,46 @@ func ensureTenantAccountMaterial(mat *natsAuthMaterial, tenantID, name string, c
 	}
 	signingPub := tam.signingPub
 
-	minted := false
-	needJWT := true
-	if b, rerr := os.ReadFile(tenantAccountJWTPath(tenantID)); rerr == nil {
-		if ac, derr := jwt.DecodeAccountClaims(string(b)); derr == nil &&
-			ac.Subject == tam.pub && ac.SigningKeys.Contains(signingPub) {
-			tam.jwt = string(b)
-			needJWT = false
-		}
+	held, heldMinted, err := loadAccountJWT(ctx, tam.pub, signsWith(signingPub))
+	if err != nil {
+		return nil, false, err
 	}
-	if needJWT {
-		ac := jwt.NewAccountClaims(tam.pub)
-		ac.Name = name
-		ac.SigningKeys.Add(signingPub)
-		signed, encErr := ac.Encode(mat.operatorSigningKP)
-		if encErr != nil {
-			return nil, false, encErr
-		}
-		if werr := writeFileAtomic(tenantAccountJWTPath(tenantID), []byte(signed), 0o600); werr != nil {
-			return nil, false, werr
-		}
-		tam.jwt = signed
-		tam.minted = true
-		minted = true
+	if held != "" {
+		tam.jwt, tam.minted = held, heldMinted
+		return tam, false, nil
 	}
-
-	return tam, minted, nil
+	ac := jwt.NewAccountClaims(tam.pub)
+	ac.Name = name
+	ac.SigningKeys.Add(signingPub)
+	signed, err := ac.Encode(mat.operatorSigningKP)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := holdAccountJWT(signed, true); err != nil {
+		return nil, false, err
+	}
+	tam.jwt = signed
+	tam.minted = true
+	return tam, true, nil
 }
 
 // loadTenantAccountMaterial loads a tenant's Account material without
 // creating a new pki_tenants row — used where the caller expects the
 // tenant to already be provisioned (PushAllAccounts) and a missing tenant
-// should surface as an error rather than silently registering one. It
-// never creates Transit keys: a tenant whose keys are missing is an error.
+// should surface as an error rather than silently registering one: the
+// tenant must have a pki_tenants row with its Account recorded. It never
+// creates Transit keys: a tenant whose keys are missing is an error.
 func loadTenantAccountMaterial(tenantID string) (*tenantAccountMaterial, error) {
 	mat, err := ensureNatsAuth()
 	if err != nil {
 		return nil, err
 	}
-	if _, err := os.Stat(tenantAccountJWTPath(tenantID)); err != nil {
+	row, err := getTenantRow(tenantID)
+	if err != nil {
 		return nil, fmt.Errorf("pki: no Account material found for tenant %q: %w", tenantID, err)
+	}
+	if row.AccountPub == "" {
+		return nil, fmt.Errorf("pki: no Account material found for tenant %q: no Account recorded", tenantID)
 	}
 	tenantAuthMu.Lock()
 	defer tenantAuthMu.Unlock()
@@ -210,7 +162,7 @@ func loadTenantAccountMaterial(tenantID string) (*tenantAccountMaterial, error) 
 // ensureTenantAccount is the shared bootstrap path for ProvisionTenant and
 // ReloadNKeysForTenant: it ensures a pki_tenants row exists for tenantID
 // (creating one, named nameHint, if this is the first time this tenant has
-// ever been provisioned) and that its Account material exists on disk.
+// ever been provisioned) and that its Account material exists.
 // provisioned reports whether either the tenant row or the Account
 // material was newly created by this call — callers use it to decide
 // whether a resolver push is required even if syncing sprouts found
@@ -382,7 +334,7 @@ func ProvisionTenant(tenantID, name string) error {
 // lockout is on the bus it retires (soft-deletes) the tenant's two
 // Transit keys, so nothing can sign for the tenant again; an operator can
 // restore them (soft-delete-restore) or purge them after the retention
-// window. It does not delete on-disk JWTs or sprout state. A failed
+// window. It does not delete sprout state or stored JWTs. A failed
 // retire is returned; calling DeprovisionTenant again retries it.
 //
 // It is also the repair for a bus that still holds a live JWT for a
@@ -460,7 +412,7 @@ func retireTenantKeys(tenantID string) error {
 // The row is marked deleted before the lockout is signed, not after. On
 // one bus only the order of the pushes matters (see
 // pushLiveTenantAccount), but the resolver compares iat where it
-// reconciles copies (re-seeding from disk at bus start, a future bus
+// reconciles copies (re-seeding from the accounts bucket at bus start, a future bus
 // cluster), and this order means a provision copy that read the row as not
 // deleted signed its live JWT before this lockout. If the process fails
 // between the two steps the row is deleted but the bus is still live; a
@@ -511,9 +463,7 @@ func deprovisionTenantLocked(mat *natsAuthMaterial, tenantID string) (signedJWT 
 		return "", false, err
 	}
 	if row.AccountPub == "" {
-		if _, statErr := os.Stat(tenantAccountJWTPath(tenantID)); os.IsNotExist(statErr) {
-			return "", wasDeleted, ErrTenantNotFound
-		}
+		return "", wasDeleted, ErrTenantNotFound
 	}
 	signed, err := signLockedOutTenantJWT(mat, row)
 	if err != nil {
@@ -523,30 +473,31 @@ func deprovisionTenantLocked(mat *natsAuthMaterial, tenantID string) (signedJWT 
 }
 
 // signLockedOutTenantJWT re-signs row's Account JWT locked out (see
-// lockOutAccount) as of now and persists it to disk, replacing whatever is
-// there: the on-disk JWT may be live again if a provision on this replica
-// re-signed it after an earlier lockout (syncTenantSprouts writes it
+// lockOutAccount) as of now and holds it, replacing whatever this process
+// held: the held JWT may be live again if a provision on this replica
+// re-signed it after an earlier lockout (syncTenantSprouts holds it
 // outside tenantAuthMu). It needs no tenant key, only the operator
-// signing key: it starts from the Account JWT on disk or, when that is
-// missing or about another key, from minimal claims for row.AccountPub.
-// So a tenant whose Transit keys were retired can still be locked out
-// again. The caller must hold tenantAuthMu and must already have seen
-// the tenant's row marked deleted.
+// signing key: it starts from the newest of the held and the accounts
+// bucket's Account JWT for row.AccountPub or, when there is none (or the
+// bucket can't be read: a lock-out revokes everything whatever it starts
+// from), from minimal claims for row.AccountPub. So a tenant whose
+// Transit keys were retired can still be locked out again. The caller
+// must hold tenantAuthMu, must already have seen the tenant's row marked
+// deleted, and must have checked that row.AccountPub is set.
 func signLockedOutTenantJWT(mat *natsAuthMaterial, row *tenantRow) (string, error) {
 	tenantID := row.ID
+	if row.AccountPub == "" {
+		return "", fmt.Errorf("pki: tenant %q has no recorded Account public key to lock out", tenantID)
+	}
 	var ac *jwt.AccountClaims
-	if b, err := os.ReadFile(tenantAccountJWTPath(tenantID)); err == nil {
-		if c, derr := jwt.DecodeAccountClaims(string(b)); derr == nil &&
-			(row.AccountPub == "" || c.Subject == row.AccountPub) {
-			ac = c
-		}
-	} else if !os.IsNotExist(err) {
-		return "", err
+	base, _, err := latestAccountJWT(context.Background(), row.AccountPub, func(*jwt.AccountClaims) bool { return true })
+	if err != nil {
+		log.Warnf("locking out tenant %q: %v; signing the lock-out from minimal claims", tenantID, err)
+	}
+	if base != "" {
+		ac, _ = jwt.DecodeAccountClaims(base)
 	}
 	if ac == nil {
-		if row.AccountPub == "" {
-			return "", fmt.Errorf("pki: tenant %q has neither an Account JWT nor a recorded Account public key to lock out", tenantID)
-		}
 		ac = jwt.NewAccountClaims(row.AccountPub)
 		ac.Name = row.Name
 	}
@@ -556,10 +507,7 @@ func signLockedOutTenantJWT(mat *natsAuthMaterial, row *tenantRow) (string, erro
 	if err != nil {
 		return "", fmt.Errorf("pki: re-signing tenant %q's Account JWT locked out: %w", tenantID, err)
 	}
-	if err := os.MkdirAll(tenantAuthDir(tenantID), 0o700); err != nil {
-		return "", err
-	}
-	if err := writeFileAtomic(tenantAccountJWTPath(tenantID), []byte(signed), 0o600); err != nil {
+	if err := holdAccountJWT(signed, false); err != nil {
 		return "", err
 	}
 	return signed, nil
@@ -614,7 +562,7 @@ func relockIfDeletedLocked(mat *natsAuthMaterial, tenantID string) (signedJWT st
 // relies on the re-check seeing a deprovision's committed write: one
 // database, or PXC read and written through one node (the HAProxy
 // Service), or wsrep_sync_wait. Where the resolver orders copies by iat
-// instead (re-seeding from disk at bus start, a future bus cluster), the
+// instead (re-seeding from the accounts bucket at bus start, a future bus cluster), the
 // lockout also has to carry the later iat, which holds when replica clocks
 // agree to within the time between the two signings.
 //
@@ -712,19 +660,23 @@ func waitPastIssuedAt(prevIssuedAt int64) {
 // rebuilds tenantID's Account revocation list and mints/reuses User JWTs
 // for that tenant's own accepted/unaccepted/denied/rejected sprouts (each
 // already tenant-scoped at the nkeyRow level — see store.go), re-signing
-// and persisting the Account JWT only if its revocation list changed.
+// the Account JWT, and holding it, only if its revocation list changed. It
+// starts from the newest of the held and the accounts bucket's Account
+// JWT (resignBase), so it builds on what another replica signed. It mints
+// no User JWT: a sprout's is minted where it is served
+// (MintOrReuseUserJWT), the farmer's own on first use
+// (FarmerUserJWTForTenant).
 func syncTenantSprouts(mat *natsAuthMaterial, tam *tenantAccountMaterial, tenantID string) (bool, error) {
-	ac, err := jwt.DecodeAccountClaims(tam.jwt)
+	ac, raw, minted, err := resignBase(context.Background(), tam.pub, tam.jwt, tam.minted, signsWith(tam.signingPub))
 	if err != nil {
 		return false, err
 	}
+	tam.jwt, tam.minted = raw, minted
 
 	changed := false
 
-	// Mint/refresh farmer's own User JWT under this tenant's Account —
-	// jwtusers.go's syncNatsAuth does the same for the legacy Account.
-	// This is farmer's connection identity for the dedicated per-tenant
-	// NATS connection cmd/farmer/main.go's ConnectFarmer opens (see
+	// Farmer's own key stays unrevoked on this tenant's Account: it is
+	// farmer's connection identity for the per-tenant NATS connection (see
 	// FarmerUserJWTForTenant and docs/design/imas-tenant-context-threading.md).
 	farmerKey, err := GetPubNKey(FarmerPubNKey)
 	if err != nil {
@@ -732,9 +684,6 @@ func syncTenantSprouts(mat *natsAuthMaterial, tam *tenantAccountMaterial, tenant
 	}
 	if ensureUserGranted(ac, farmerKey) {
 		changed = true
-	}
-	if _, mintErr := mintOrReuseUserJWT(farmerUserJWTPathForTenant(tenantID), farmerKey, "farmer", allowAllPermissions(), tam.pub, tam.signingKP); mintErr != nil {
-		log.Errorf("failed to mint farmer User JWT for tenant %s: %v", tenantID, mintErr)
 	}
 
 	// See syncNatsAuth: read before granting, and fail closed.
@@ -755,10 +704,6 @@ func syncTenantSprouts(mat *natsAuthMaterial, tam *tenantAccountMaterial, tenant
 		}
 		if ensureUserGranted(ac, row.NKey) {
 			changed = true
-		}
-		path := sproutJWTPathForTenant(tenantID, s.SproutID)
-		if _, mintErr := mintOrReuseUserJWT(path, row.NKey, s.SproutID, sproutPermissions(s.SproutID), tam.pub, tam.signingKP); mintErr != nil {
-			log.Errorf("failed to mint User JWT for sprout %s in tenant %s: %v", s.SproutID, tenantID, mintErr)
 		}
 	}
 
@@ -787,11 +732,17 @@ func syncTenantSprouts(mat *natsAuthMaterial, tam *tenantAccountMaterial, tenant
 		if encErr != nil {
 			return false, encErr
 		}
-		if writeErr := writeFileAtomic(tenantAccountJWTPath(tenantID), []byte(signed), 0o600); writeErr != nil {
-			return false, writeErr
+		if holdErr := holdAccountJWT(signed, false); holdErr != nil {
+			return false, holdErr
 		}
 		tam.jwt = signed
 		tam.minted = false
+	} else {
+		// Unchanged: hold the JWT it started from (the bucket's, or a
+		// minimal mint that already is the tenant's state) as synced.
+		if holdErr := holdAccountJWT(tam.jwt, false); holdErr != nil {
+			return false, holdErr
+		}
 	}
 	return changed, nil
 }
@@ -829,13 +780,13 @@ func ReloadNKeysForTenant(tenantID string) error {
 
 // ResyncProvisionedTenants runs ReloadNKeysForTenant for every provisioned
 // tenant other than the legacy one, which ReloadNKeys covers. Farmer calls
-// it once at startup, before it connects each tenant to the bus: the
-// mintOrReuseUserJWT re-mint inside syncTenantSprouts is what gives an
-// already-enrolled sprout a User JWT with a permission added in a newer
-// release (for example the heartbeat publish grant), and without this
-// call it would only run when a sprout next enrolls or is accepted. A
-// failure for one tenant is logged by ReloadNKeysForTenant and does not
-// stop the others; the errors are returned joined.
+// it once at startup, before it connects each tenant to the bus, so each
+// tenant's Account JWT carries its current revocations from PXC and the
+// replica holds it. A sprout's User JWT with a permission added in a
+// newer release (for example the heartbeat publish grant) is re-minted
+// where it is served (MintOrReuseUserJWT compares the permissions), not
+// here. A failure for one tenant is logged by ReloadNKeysForTenant and
+// does not stop the others; the errors are returned joined.
 func ResyncProvisionedTenants() error {
 	ids, err := ListProvisionedTenantIDs()
 	if err != nil {
@@ -854,82 +805,23 @@ func ResyncProvisionedTenants() error {
 	return errors.Join(errs...)
 }
 
-// tenantIDsProvisionedOnDisk lists every tenant ID with Account material on
-// disk under tenantsRootDir, by directory name. Used by ConfigureNats
-// (nats.go) to seed the bus resolver with every provisioned tenant's
-// Account — deliberately a filesystem scan rather than a query against the
-// pki_tenants PXC table (see store.go's tenantRow): ConfigureNats runs in
-// both cmd/farmer (core, has a PXC connection) and cmd/farmerbus (the DMZ-side
-// bus process, which by design never calls pki.SetDB — see
-// cmd/farmerbus/main.go's RunNATSServer doc comment on why that process
-// has no business holding a database connection). A PXC-backed lookup here
-// would nil-panic on the bus binary; this only touches config.FarmerPKI,
-// which both binaries already read from for the platform-wide operator/SYS
-// material.
-func tenantIDsProvisionedOnDisk() ([]string, error) {
-	entries, err := os.ReadDir(tenantsRootDir())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var ids []string
-	for _, e := range entries {
-		if !e.IsDir() || !IsValidTenantID(e.Name()) {
-			continue
-		}
-		if _, err := os.Stat(tenantAccountJWTPath(e.Name())); err != nil {
-			continue
-		}
-		ids = append(ids, e.Name())
-	}
-	return ids, nil
-}
-
-// GetSproutUserJWTForTenant is GetSproutUserJWT (jwtusers.go) scoped to an
-// explicit tenant — see this file's package doc comment. Falls back to the
-// legacy flat, single-tenant path (jwtusers.go's sproutJWTPath) when
-// tenantID is the package's current-tenant seam (tenantID()) and no
-// tenant-scoped file exists yet: a sprout accepted via the legacy
-// AcceptNKey/ReloadNKeys admin path (every Accept/Deny/Reject/Unaccept
-// call still uses it, not just Enroll) mints its User JWT there, not under
-// this tenant's own directory. Without this fallback, Enroll's idempotency
-// replay (the only caller today) would wrongly report "accepted but no
-// readable JWT" for any sprout that was only ever admin-accepted, never
-// enrolled through Enroll itself.
-func GetSproutUserJWTForTenant(tenantID, sproutID string) (string, error) {
-	if !IsValidTenantID(tenantID) {
-		return "", ErrTenantIDInvalid
-	}
-	if !IsValidSproutID(sproutID) {
-		return "", ErrSproutIDInvalid
-	}
-	b, err := os.ReadFile(sproutJWTPathForTenant(tenantID, sproutID))
-	if err == nil {
-		return string(b), nil
-	}
-	if !os.IsNotExist(err) {
-		return "", err
-	}
-	if tenantID == currentTenantID() {
-		if legacy, legacyErr := os.ReadFile(sproutJWTPath(sproutID)); legacyErr == nil {
-			return string(legacy), nil
-		}
-	}
-	return "", ErrSproutIDNotFound
+// hasOwnTenantAccount reports whether tenantID has an Account of its own
+// recorded on its pki_tenants row (ensureTenantAccountLocked records it).
+// The legacy current tenant usually has none: its sprouts are under the
+// legacy Account (ensureNatsAuth).
+func hasOwnTenantAccount(tenantID string) bool {
+	row, err := getTenantRow(tenantID)
+	return err == nil && row.AccountPub != ""
 }
 
 // FarmerUserJWTForTenant is FarmerUserJWT (jwtusers.go) scoped to an
 // explicit tenant — farmer's own connection identity for the dedicated
 // per-tenant NATS connection cmd/farmer/main.go's ConnectFarmer opens (see
-// docs/design/imas-tenant-context-threading.md's Option A). Minted by
-// syncTenantSprouts (via ReloadNKeysForTenant or ProvisionTenant, both of
-// which call it) into farmerUserJWTPathForTenant. Falls back to the legacy
-// flat single-tenant path (FarmerUserJWT) when tenantID is the package's
-// current-tenant seam, mirroring GetSproutUserJWTForTenant's fallback for
-// the same reason: the legacy tenant's farmer JWT is minted by syncNatsAuth
-// into farmerUserJWTPath, not under tenants/<id>/.
+// docs/design/imas-tenant-context-threading.md's Option A). It is signed
+// with the tenant's signing key on first use and held in memory
+// (farmerUserJWT), so any replica can connect any provisioned tenant
+// without anything another process wrote. The legacy current tenant gets
+// FarmerUserJWT, under the legacy Account.
 func FarmerUserJWTForTenant(tenantID string) (string, error) {
 	if !IsValidTenantID(tenantID) {
 		return "", ErrTenantIDInvalid
@@ -937,9 +829,9 @@ func FarmerUserJWTForTenant(tenantID string) (string, error) {
 	if tenantID == currentTenantID() {
 		return FarmerUserJWT()
 	}
-	b, err := os.ReadFile(farmerUserJWTPathForTenant(tenantID))
+	tam, err := loadTenantAccountMaterial(tenantID)
 	if err != nil {
 		return "", err
 	}
-	return string(b), nil
+	return farmerUserJWT(tam.pub, tam.signingKP)
 }

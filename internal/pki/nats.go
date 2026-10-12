@@ -22,13 +22,13 @@ var (
 )
 
 // ConfigureNats builds the NATS server options for a bus node that shares
-// this process, and its FarmerPKI directory, with core: the in-process
+// this process with core: the in-process
 // core-plus-bus setup the package's tests use. Auth is decentralized JWT
 // (see docs/design/imas-nats-jwt-auth-design.md): the Operator is the
 // trust anchor, the SYSTEM account is used only to receive claims-update
 // pushes (see resolver.go), and a "full" resolver (every node holds every
 // Account JWT, appropriate at the near-term tenant count) is seeded with
-// the SYSTEM and tenant Account JWTs core holds on disk, so the server can
+// the SYSTEM and tenant Account JWTs core holds in memory, so the server can
 // validate connections from the moment it starts.
 //
 // The DMZ bus (cmd/farmerbus) uses ConfigureBusNats instead (busauth.go),
@@ -133,10 +133,10 @@ func baseNatsOptions() nats_server.Options {
 // account and a full resolver seeded from core's material. The operator
 // JWT and SYS account come from the trust directory (through
 // ensureNatsAuth, which also gives the legacy tenant's Account); every
-// provisioned tenant's Account JWT is read from the file core persisted,
+// other Account JWT core holds (heldAccountJWTs) is seeded as held,
 // without touching that tenant's Transit keys, so seeding never creates
-// or needs them. A missing or unusable tenant Account JWT is skipped;
-// core's next push supplies it.
+// or needs them. One core does not hold is not seeded; core's next push
+// supplies it.
 //
 // The resolver's directory is its own, made by this call and removed when
 // the server closes the resolver (newTempDirResolver): ConfigureNats
@@ -188,29 +188,21 @@ func seedResolverWith(NatsConfig *nats_server.Options, mat *natsAuthMaterial) {
 	// named by config.FarmerOrganization; ProvisionTenant (tenant.go) is
 	// what actually makes multiple, dynamically-created tenant Accounts
 	// exist, and every one of them needs to be in the resolver from the
-	// moment this bus node starts, not just the tenant that happens to be
-	// "current" for this process. This is a filesystem scan
-	// (tenantIDsProvisionedOnDisk), not a pki_tenants/PXC query. A failure
-	// loading one tenant's JWT is logged and skipped rather than panicking
-	// the whole server — a bad on-disk file for one tenant shouldn't take
-	// down every other tenant's bus access.
-	ids, err := tenantIDsProvisionedOnDisk()
-	if err != nil {
-		log.Errorf("nats: failed to list provisioned tenants for resolver seeding: %v", err)
-	}
-	for _, id := range ids {
-		b, err := os.ReadFile(tenantAccountJWTPath(id))
-		if err != nil {
-			log.Errorf("nats: failed to read tenant %q's Account JWT, skipping resolver seed: %v", id, err)
-			continue
-		}
-		ac, err := jwt.DecodeAccountClaims(string(b))
+	// moment this bus node starts. These are the Account JWTs this process
+	// holds (heldAccountJWTs), not a pki_tenants/PXC query. One that is
+	// not issued by the operator signing key is logged and skipped rather
+	// than panicking the whole server.
+	for _, held := range heldAccountJWTs(false) {
+		ac, err := jwt.DecodeAccountClaims(held)
 		if err != nil || ac.Issuer != operatorSigningPub {
-			log.Errorf("nats: tenant %q's Account JWT is invalid or not issued by the operator signing key, skipping resolver seed: %v", id, err)
+			log.Errorf("nats: a held Account JWT is invalid or not issued by the operator signing key, skipping resolver seed: %v", err)
 			continue
 		}
-		if err := resolver.Store(ac.Subject, string(b)); err != nil {
-			log.Errorf("nats: failed to seed tenant %q's account into the resolver: %v", id, err)
+		if ac.Subject == mat.sysAccountPub || ac.Subject == mat.tenantPub {
+			continue
+		}
+		if err := resolver.Store(ac.Subject, held); err != nil {
+			log.Errorf("nats: failed to seed Account %s into the resolver: %v", ac.Subject, err)
 		}
 	}
 	NatsConfig.AccountResolver = resolver

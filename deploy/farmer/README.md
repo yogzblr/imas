@@ -83,20 +83,21 @@ Exit code 0 means the credential was written or was already current. 1
 means minting or publishing failed. 2 means a usage or configuration
 error.
 
-### Why an emptyDir, not farmer's PKI volume
+### Why an emptyDir
 
 The Job mounts the same seed Secret as farmer, with only the SaaS API's
-key projected, the trust ConfigMap, and an **emptyDir** at `/etc/imas`.
-It signs with the SYS Account's Transit key as `imas-natssign-publisher`
-(policy `imas-nats-sys-signer`: that key only). The subcommand refuses to
-run unless the trust directory and the SaaS API key are supplied
-externally or already on disk. It will not mint under a key it
-generated itself, because saasapi would then crash-loop on its next
-restart. With a fresh emptyDir, the following holds:
+key projected, the trust ConfigMap, and an **emptyDir** at `/etc/imas`,
+where the farmer config loader creates its config file. It signs with
+the SYS Account's Transit key as `imas-natssign-publisher` (policy
+`imas-nats-sys-signer`: that key only). The subcommand refuses to run
+unless the trust directory and the SaaS API key
+(`IMAS_NATS_SAASAPI_USER_SEED_FILE`) are supplied. Neither it nor farmer
+ever generates that key, because saasapi would then crash-loop on its
+next restart. Neither writes a JWT or a key file. The following holds:
 
-- **No resolver push, and no bus access.** No earlier JWT exists in the
-  pod, so the Job never sees a rotation, never touches the SYS Account
-  JWT, and never pushes. The NetworkPolicy allows egress to OpenBao and
+- **No resolver push, and no bus access.** The Job starts from the trust
+  ConfigMap's SYS Account JWT and has no database, so it never sees a
+  rotation, never re-signs the SYS Account JWT, and never pushes. The NetworkPolicy allows egress to OpenBao and
   DNS only.
 - **Revocation stays farmer's job.** The rotation state lives in PXC,
   in `saas.saasapi_credential_state`: saasapi records the key it runs
@@ -104,15 +105,12 @@ restart. With a fresh emptyDir, the following holds:
   boot-time `EnsureSaaSAPICredential` reads `prev_pub`, revokes it on
   the SYS Account and pushes that revocation. The Job has no database,
   so it never revokes anything; it only publishes.
-- **No second writer on farmer's PKI files.** `authMu` locks within one
-  process only, so a Job sharing farmer's volume could race farmer on
-  `sys-account.jwt`. Farmer's volume is also typically ReadWriteOnce.
 - **No other key.** The Job holds no trust chain key; the SYS account
   JWT it starts from is the trust ConfigMap's.
 
-Running the subcommand against farmer's real PKI directory also works: it
-behaves exactly like farmer's boot call, including the push. The
-reference Job doesn't do this, for the reasons above.
+Farmer's own boot call does the same and, with its database and the
+accounts bucket, also revokes a rotated-out key and pushes that
+revocation.
 
 ### OpenBao policy
 

@@ -39,7 +39,7 @@ func TestSproutJWT_LogSubjectsOwnOnly(t *testing.T) {
 		t.Fatal("sprout01's User JWT should not grant sprout02's log subjects")
 	}
 
-	farmerJWT, err := os.ReadFile(farmerUserJWTPath())
+	farmerJWT, err := farmerUserJWTBytes()
 	if err != nil {
 		t.Fatalf("reading farmer's User JWT: %v", err)
 	}

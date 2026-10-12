@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,6 +35,8 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/lease"
+	"github.com/yogzblr/imas/internal/pki/natskeys"
 )
 
 // raceTenant is a provisioned tenant with one accepted, connectable
@@ -64,9 +65,9 @@ func setupRaceTenant(t *testing.T, tenantID string) raceTenant {
 	if err := ReloadNKeysForTenant(tenantID); err != nil {
 		t.Fatalf("ReloadNKeysForTenant: %v", err)
 	}
-	sproutJWT, err := GetSproutUserJWTForTenant(tenantID, "web-01")
+	sproutJWT, err := sproutUserJWTForTest(tenantID, "web-01")
 	if err != nil {
-		t.Fatalf("GetSproutUserJWTForTenant: %v", err)
+		t.Fatalf("sproutUserJWTForTest: %v", err)
 	}
 	nc, err := dialAsSprout(t, sproutJWT, seed)
 	if err != nil {
@@ -173,8 +174,8 @@ func pauseAt(tenantID string) (hook func(string), reached, release chan struct{}
 }
 
 // addDeniedSprout records a denied sprout, so the next sync adds a
-// revocation and re-signs the Account JWT instead of pushing the copy on
-// disk: the live JWT a racing provision pushes is then signed during the
+// revocation and re-signs the Account JWT instead of pushing the held
+// copy: the live JWT a racing provision pushes is then signed during the
 // race, the case that can win on iat. It also makes ReloadNKeysForTenant
 // push at all.
 func addDeniedSprout(t *testing.T, tenantID, sproutID string) {
@@ -220,14 +221,10 @@ func TestProvisionDeprovisionRace_LivePushAfterLockout(t *testing.T) {
 	}
 	assertBusLockedOut(t, rt)
 
-	// The provision re-signed the on-disk JWT live during the race; the
-	// re-check must have written the lockout back over it too.
-	b, err := os.ReadFile(tenantAccountJWTPath(rt.id))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ac, err := jwt.DecodeAccountClaims(string(b)); err != nil || !isLockedOut(ac) {
-		t.Fatalf("on-disk Account JWT is not locked out (err %v)", err)
+	// The provision re-signed the held JWT live during the race; the
+	// re-check must have held the lockout over it again.
+	if ac, err := jwt.DecodeAccountClaims(heldTenantAccountJWT(t, rt.id)); err != nil || !isLockedOut(ac) {
+		t.Fatalf("held Account JWT is not locked out (err %v)", err)
 	}
 }
 
@@ -410,8 +407,8 @@ func TestDeprovisionTenant_RetryRepairsLiveBus(t *testing.T) {
 // value is used as the iat.
 func pushLiveJWT(t *testing.T, mat *natsAuthMaterial, tenantID string, iat int64) {
 	t.Helper()
-	// The tenant's keys are retired by now: start from the JWT on disk.
-	ac, err := jwt.DecodeAccountClaims(readFile(t, tenantAccountJWTPath(tenantID)))
+	// The tenant's keys are retired by now: start from the held JWT.
+	ac, err := jwt.DecodeAccountClaims(heldTenantAccountJWT(t, tenantID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -513,8 +510,8 @@ func assertTombstone(t *testing.T, tenantID string) {
 	if err != nil || !row.Deleted || row.AccountPub != "" {
 		t.Fatalf("tenant %q row = %+v, err %v; want a deleted tombstone with no Account", tenantID, row, err)
 	}
-	if _, err := os.Stat(tenantAccountJWTPath(tenantID)); !os.IsNotExist(err) {
-		t.Fatalf("tenant %q has Account material on disk (stat err %v); a tombstone must not mint any", tenantID, err)
+	if testTransit.Fake.Has(natskeys.TenantAccountKey(tenantID)) || testTransit.Fake.Has(natskeys.TenantSigningKey(tenantID)) {
+		t.Fatalf("tenant %q has Account keys; a tombstone must not mint any", tenantID)
 	}
 }
 
@@ -608,8 +605,8 @@ func TestDeprovisionTenant_RowCreatedAfterLookup(t *testing.T) {
 }
 
 // A deprovision that read the row before a provision on another replica
-// recorded the tenant's Account, and has no account.jwt on its own disk
-// (per-replica volumes with shared keys): the provision has already pushed
+// recorded the tenant's Account, and holds no Account JWT for it (keys
+// shared in Transit): the provision has already pushed
 // a live JWT and re-checked before the mark. The "nothing to lock out"
 // decision must use the Account recorded after the mark, not the stale
 // read, or the deleted tenant stays live on the bus.
@@ -622,14 +619,12 @@ func TestDeprovisionTenant_AccountRecordedBeforeMark(t *testing.T) {
 		t.Fatal(err)
 	}
 	// What this replica sees when its deprovision starts: the row without
-	// an Account yet, and no account.jwt on its own disk (the keys are
-	// shared, as with externally supplied seeds).
+	// an Account yet, and no Account JWT held (the keys are shared, in
+	// Transit).
 	if err := db.Model(&tenantRow{}).Where("id = ?", rt.id).Update("account_pub", "").Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(tenantAccountJWTPath(rt.id)); err != nil {
-		t.Fatal(err)
-	}
+	forgetHeldJWTs()
 	// The other replica records the Account (its live JWT is already on the
 	// bus) between this deprovision's read and its mark.
 	testHookDeprovisionAfterLookup = func(id string) {
@@ -668,7 +663,7 @@ func newFileTestDB(t *testing.T, path string) {
 	if gdb == nil {
 		t.Fatalf("opening %s", path)
 	}
-	if err := gdb.AutoMigrate(Models()...); err != nil {
+	if err := gdb.AutoMigrate(append(Models(), &sproutUserJWTRow{}, &lease.JobLease{})...); err != nil {
 		t.Fatalf("migrating test db: %v", err)
 	}
 	SetDB(gdb)
@@ -692,21 +687,18 @@ func openFileDB(path string) *gorm.DB {
 // TestProvisionDeprovisionRace_TwoProcesses runs the late provision copy in
 // a second process (this test binary, re-executed as
 // TestRaceReplicaHelper), the way it runs on another farmer replica: its
-// own tenantAuthMu, sharing only the database and the bus. "shared" gives
-// both processes one PKI directory; "copied" gives the second process its
-// own copy (same keys, separate account.jwt files), as replicas with
-// externally supplied seeds and their own volumes would have.
+// own tenantAuthMu, sharing only the database, Transit and the bus. Each
+// process has its own temp directory and holds its own Account JWTs in
+// memory; neither writes a file the other could read.
 func TestProvisionDeprovisionRace_TwoProcesses(t *testing.T) {
 	for _, pause := range []string{"before", "after"} {
-		for _, disk := range []string{"shared", "copied"} {
-			t.Run(pause+"_push_"+disk+"_disk", func(t *testing.T) {
-				runTwoProcessRace(t, pause, disk)
-			})
-		}
+		t.Run(pause+"_push", func(t *testing.T) {
+			runTwoProcessRace(t, pause)
+		})
 	}
 }
 
-func runTwoProcessRace(t *testing.T, pause, disk string) {
+func runTwoProcessRace(t *testing.T, pause string) {
 	setupTestPKI(t)
 	dbPath := filepath.Join(t.TempDir(), "farmer.db")
 	newFileTestDB(t, dbPath)
@@ -717,11 +709,7 @@ func runTwoProcessRace(t *testing.T, pause, disk string) {
 	rt := setupRaceTenant(t, "t_two_procs")
 	addDeniedSprout(t, rt.id, "web-02")
 
-	childPKI := config.FarmerPKI
-	if disk == "copied" {
-		childPKI = filepath.Join(t.TempDir(), "pki") + "/"
-		copyDir(t, config.FarmerPKI, childPKI)
-	}
+	childPKI := filepath.Join(t.TempDir(), "pki") + "/"
 
 	toChildR, toChildW, err := os.Pipe()
 	if err != nil {
@@ -825,6 +813,10 @@ func TestRaceReplicaHelper(t *testing.T) {
 	}
 
 	err := ProvisionTenant(tenantID, "Race Co")
+	if _, serr := os.Stat(config.FarmerPKI); !os.IsNotExist(serr) {
+		fmt.Fprintln(toParent, "RESULT the second replica wrote under "+config.FarmerPKI)
+		return
+	}
 	switch {
 	case errors.Is(err, ErrTenantDeprovisioned):
 		fmt.Fprintln(toParent, "RESULT deprovisioned")
@@ -832,30 +824,5 @@ func TestRaceReplicaHelper(t *testing.T) {
 		fmt.Fprintln(toParent, "RESULT nil")
 	default:
 		fmt.Fprintln(toParent, "RESULT error: "+strings.ReplaceAll(err.Error(), "\n", " "))
-	}
-}
-
-func copyDir(t *testing.T, src, dst string) {
-	t.Helper()
-	err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		target := filepath.Join(dst, rel)
-		if d.IsDir() {
-			return os.MkdirAll(target, 0o700)
-		}
-		b, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(target, b, 0o600)
-	})
-	if err != nil {
-		t.Fatalf("copying %s to %s: %v", src, dst, err)
 	}
 }

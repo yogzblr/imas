@@ -75,7 +75,7 @@ func setupBoxKeyEnv(t *testing.T) *boxKeyEnv {
 	t.Cleanup(func() { pki.InvalidateTenantBoxKeys(e.tenant) })
 
 	dir := t.TempDir()
-	saved := []*string{&config.FarmerPKI, &config.NKeyFarmerPubFile, &config.SproutBoxPrivFile, &config.SproutBoxPubFile, &config.SproutTenantX25519PubFile}
+	saved := []*string{&config.NKeyFarmerPubFile, &config.SproutBoxPrivFile, &config.SproutBoxPubFile, &config.SproutTenantX25519PubFile}
 	old := make([]string, len(saved))
 	for i, p := range saved {
 		old[i] = *p
@@ -87,7 +87,6 @@ func setupBoxKeyEnv(t *testing.T) *boxKeyEnv {
 		}
 		config.BoxKeyGraceDuration = oldGrace
 	})
-	config.FarmerPKI = filepath.Join(dir, "farmer") + "/"
 	// Registering the sprout reloads farmer's NATS auth, which needs one.
 	config.NKeyFarmerPubFile = filepath.Join(dir, "farmer.nkey.pub")
 	if err := os.WriteFile(config.NKeyFarmerPubFile, []byte("UFAKE_FARMER_KEY_FOR_TESTING"), 0o600); err != nil {

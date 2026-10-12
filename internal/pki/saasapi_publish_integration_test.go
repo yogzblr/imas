@@ -13,8 +13,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
@@ -23,7 +21,6 @@ import (
 	jwt "github.com/nats-io/jwt/v2"
 	nats "github.com/nats-io/nats.go"
 
-	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/openbaokv"
 )
 
@@ -77,7 +74,6 @@ func TestPublishSaaSAPICredential_JobTopologyOnLiveBus(t *testing.T) {
 	setupTestPKI(t)
 	clearExternalSeedEnv(t)
 	defer startTestBus(t)()
-	farmerPKI := config.FarmerPKI
 
 	// Farmer's boot: the SaaS API seed arrives from OpenBao via ESO as a
 	// mounted file; farmer mints its own copy of the credential, the one
@@ -92,11 +88,9 @@ func TestPublishSaaSAPICredential_JobTopologyOnLiveBus(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The Job's pod: farmer's image, a fresh emptyDir PKI directory, and
-	// the SYS Account seed mounted from the same Secret as farmer's.
-	jobPKI := filepath.Join(t.TempDir(), "job-pki") + "/"
-	config.FarmerPKI = jobPKI
-	t.Setenv("IMAS_NATS_SYS_ACCOUNT_SEED_FILE", filepath.Join(farmerPKI, natsAuthSubdir, "sys-account.nk"))
+	// The Job's pod: farmer's image, a fresh process holding nothing, the
+	// same SaaS API seed file, and the SYS account key in Transit.
+	forgetHeldJWTs()
 
 	const kvPath = "platform/imas/saasapi-nats-user"
 	calls, kvURL := startKVMock(t, "s.job-token")
@@ -154,15 +148,11 @@ func TestPublishSaaSAPICredential_JobTopologyOnLiveBus(t *testing.T) {
 		t.Fatalf("published credential differs from farmer's:\n job:    %+v\n farmer: %+v", pc, farmerClaims)
 	}
 
-	// The Job must never have generated a SaaS API or SYS key of its own.
-	for _, f := range []string{"saasapi-user.nk", "sys-account.nk"} {
-		if _, err := os.Stat(filepath.Join(jobPKI, natsAuthSubdir, f)); !os.IsNotExist(err) {
-			t.Errorf("Job generated %s locally (stat err=%v)", f, err)
-		}
-	}
+	// The Job never generates a key or writes a file of its own
+	// (setupTestPKI's requireNoFarmerPKIWrites).
 
 	// A re-run from a fresh pod is a no-op: a read, no write.
-	config.FarmerPKI = filepath.Join(t.TempDir(), "job-pki-2") + "/"
+	forgetHeldJWTs()
 	res, err = PublishSaaSAPICredential(context.Background(), secret)
 	if err != nil || res.Written {
 		t.Fatalf("re-run: res=%+v err=%v, want a no-op", res, err)
@@ -173,7 +163,6 @@ func TestPublishSaaSAPICredential_JobTopologyOnLiveBus(t *testing.T) {
 
 	// What saasapi would receive from ESO works on the real bus, scoped
 	// exactly like farmer's copy.
-	config.FarmerPKI = farmerPKI
 	farmer, err := ConnectSystemAccount()
 	if err != nil {
 		t.Fatalf("ConnectSystemAccount: %v", err)

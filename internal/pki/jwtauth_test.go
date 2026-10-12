@@ -3,12 +3,14 @@ package pki
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	jwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
 
 	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/pki/natskeys/natskeystest"
 )
 
 func TestEnsureNatsAuth_BootstrapsAndIsIdempotent(t *testing.T) {
@@ -58,62 +60,62 @@ func TestEnsureNatsAuth_BootstrapsAndIsIdempotent(t *testing.T) {
 	assertNoRemovedSeedFiles(t)
 }
 
-func TestLoadOrCreateSeed_ExternalSeedFile(t *testing.T) {
+func TestLoadRequiredSeed_SeedFile(t *testing.T) {
 	setupTestPKI(t)
 
-	kp, err := nkeys.CreateOperator()
+	kp, err := nkeys.CreateUser()
 	if err != nil {
-		t.Fatalf("failed to create operator NKey: %v", err)
+		t.Fatalf("failed to create user NKey: %v", err)
 	}
 	wantPub, _ := kp.PublicKey()
 	seed, _ := kp.Seed()
 
-	seedFile := filepath.Join(t.TempDir(), "operator.seed")
+	seedFile := filepath.Join(t.TempDir(), "saasapi-user.seed")
 	if err := os.WriteFile(seedFile, seed, 0o600); err != nil {
 		t.Fatalf("failed to write seed file: %v", err)
 	}
-	t.Setenv("IMAS_NATS_OPERATOR_SEED_FILE", seedFile)
+	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED_FILE", seedFile)
 
-	localPath := filepath.Join(t.TempDir(), "operator.nk")
-	got, err := loadOrCreateSeed(localPath, "OPERATOR", nkeys.CreateOperator)
+	got, err := loadRequiredSeed("SAASAPI_USER")
 	if err != nil {
-		t.Fatalf("loadOrCreateSeed failed: %v", err)
+		t.Fatalf("loadRequiredSeed failed: %v", err)
 	}
-	gotPub, _ := got.PublicKey()
-	if gotPub != wantPub {
-		t.Errorf("expected the externally-supplied operator key %q, got %q", wantPub, gotPub)
-	}
-	if _, statErr := os.Stat(localPath); !os.IsNotExist(statErr) {
-		t.Error("expected no local copy to be written when the seed comes from an external file")
+	if gotPub, _ := got.PublicKey(); gotPub != wantPub {
+		t.Errorf("expected the externally-supplied key %q, got %q", wantPub, gotPub)
 	}
 }
 
-func TestLoadOrCreateSeed_ExternalSeedEnvVar(t *testing.T) {
+func TestLoadRequiredSeed_EnvVar(t *testing.T) {
 	setupTestPKI(t)
 
-	kp, err := nkeys.CreateAccount()
-	if err != nil {
-		t.Fatalf("failed to create account NKey: %v", err)
-	}
+	kp, _ := nkeys.CreateUser()
 	wantPub, _ := kp.PublicKey()
 	seed, _ := kp.Seed()
-	t.Setenv("IMAS_NATS_TENANT_SEED", string(seed))
+	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED_FILE", "")
+	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED", string(seed))
 
-	localPath := filepath.Join(t.TempDir(), "tenant.nk")
-	got, err := loadOrCreateSeed(localPath, "TENANT", nkeys.CreateAccount)
+	got, err := loadRequiredSeed("SAASAPI_USER")
 	if err != nil {
-		t.Fatalf("loadOrCreateSeed failed: %v", err)
+		t.Fatalf("loadRequiredSeed failed: %v", err)
 	}
-	gotPub, _ := got.PublicKey()
-	if gotPub != wantPub {
-		t.Errorf("expected the externally-supplied tenant key %q, got %q", wantPub, gotPub)
-	}
-	if _, statErr := os.Stat(localPath); !os.IsNotExist(statErr) {
-		t.Error("expected no local copy to be written when the seed comes from an env var")
+	if gotPub, _ := got.PublicKey(); gotPub != wantPub {
+		t.Errorf("expected the externally-supplied key %q, got %q", wantPub, gotPub)
 	}
 }
 
-func TestLoadOrCreateSeed_SeedFileTakesPrecedenceOverEnvVar(t *testing.T) {
+// Farmer never generates a seed: a missing one is an error, and nothing
+// is written (setupTestPKI checks the old PKI directory stays absent).
+func TestLoadRequiredSeed_MissingIsAnError(t *testing.T) {
+	setupTestPKI(t)
+	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED_FILE", "")
+	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED", "")
+
+	if _, err := loadRequiredSeed("SAASAPI_USER"); err == nil || !strings.Contains(err.Error(), "IMAS_NATS_SAASAPI_USER_SEED_FILE") {
+		t.Fatalf("loadRequiredSeed without a seed: err = %v, want one naming IMAS_NATS_SAASAPI_USER_SEED_FILE", err)
+	}
+}
+
+func TestLoadRequiredSeed_SeedFileTakesPrecedenceOverEnvVar(t *testing.T) {
 	setupTestPKI(t)
 
 	fileKP, _ := nkeys.CreateUser()
@@ -130,9 +132,9 @@ func TestLoadOrCreateSeed_SeedFileTakesPrecedenceOverEnvVar(t *testing.T) {
 	t.Setenv("IMAS_NATS_SYS_USER_SEED_FILE", seedFile)
 	t.Setenv("IMAS_NATS_SYS_USER_SEED", string(envSeed))
 
-	got, err := loadOrCreateSeed(filepath.Join(t.TempDir(), "sys-user.nk"), "SYS_USER", nkeys.CreateUser)
+	got, err := loadRequiredSeed("SYS_USER")
 	if err != nil {
-		t.Fatalf("loadOrCreateSeed failed: %v", err)
+		t.Fatalf("loadRequiredSeed failed: %v", err)
 	}
 	gotPub, _ := got.PublicKey()
 	if gotPub != filePub {
@@ -201,7 +203,7 @@ func TestMintOrReuseUserJWT(t *testing.T) {
 	upub, _ := ukp.PublicKey()
 	path := filepath.Join(t.TempDir(), "sprout.jwt")
 
-	minted, err := mintOrReuseUserJWT(path, upub, "sprout01", sproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
+	minted, err := mintOrReuseUserJWTFile(path, upub, "sprout01", sproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
 	if err != nil {
 		t.Fatalf("mintOrReuseUserJWT failed: %v", err)
 	}
@@ -224,7 +226,7 @@ func TestMintOrReuseUserJWT(t *testing.T) {
 	}
 
 	// Calling again for the same pubkey should reuse the file, not re-mint.
-	minted, err = mintOrReuseUserJWT(path, upub, "sprout01", sproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
+	minted, err = mintOrReuseUserJWTFile(path, upub, "sprout01", sproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
 	if err != nil {
 		t.Fatalf("mintOrReuseUserJWT (reuse) failed: %v", err)
 	}
@@ -235,7 +237,7 @@ func TestMintOrReuseUserJWT(t *testing.T) {
 	// A different pubkey at the same path must trigger a re-mint.
 	ukp2, _ := nkeys.CreateUser()
 	upub2, _ := ukp2.PublicKey()
-	minted, err = mintOrReuseUserJWT(path, upub2, "sprout01", sproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
+	minted, err = mintOrReuseUserJWTFile(path, upub2, "sprout01", sproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
 	if err != nil {
 		t.Fatalf("mintOrReuseUserJWT (rotate) failed: %v", err)
 	}
@@ -259,14 +261,14 @@ func TestMintOrReuseUserJWT_RemintsOnPermissionDrift(t *testing.T) {
 
 	old := sproutPermissions("sprout01")
 	old.Pub.Allow.Remove(sproutLogPublishGrant("sprout01"))
-	if _, err := mintOrReuseUserJWT(path, upub, "sprout01", old, mat.tenantPub, mat.tenantSigningKP); err != nil {
+	if _, err := mintOrReuseUserJWTFile(path, upub, "sprout01", old, mat.tenantPub, mat.tenantSigningKP); err != nil {
 		t.Fatalf("mintOrReuseUserJWT (old permissions) failed: %v", err)
 	}
 	if SproutUserJWTGrantsLogs(mustReadFile(t, path), "sprout01") {
 		t.Fatal("JWT minted without the log grant reports it")
 	}
 
-	minted, err := mintOrReuseUserJWT(path, upub, "sprout01", sproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
+	minted, err := mintOrReuseUserJWTFile(path, upub, "sprout01", sproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
 	if err != nil {
 		t.Fatalf("mintOrReuseUserJWT (current permissions) failed: %v", err)
 	}
@@ -311,10 +313,8 @@ func TestGetSproutUserJWT(t *testing.T) {
 	if uc.IssuerAccount != mat.tenantPub {
 		t.Errorf("returned JWT issuer account = %q, want the legacy tenant's %q", uc.IssuerAccount, mat.tenantPub)
 	}
-	// Minted into the bucket, never to the old local file.
-	if _, err := os.Stat(sproutJWTPath("sprout01")); !os.IsNotExist(err) {
-		t.Errorf("sprout JWT file exists (stat err %v); want it only in the bucket", err)
-	}
+	// Minted into the bucket, never to a local file (setupTestPKI's
+	// requireNoFarmerPKIWrites).
 	again, err := GetSproutUserJWT("sprout01")
 	if err != nil || again != got {
 		t.Errorf("second GetSproutUserJWT = %v, want the stored JWT reused", err)
@@ -347,14 +347,7 @@ func TestFarmerUserJWT(t *testing.T) {
 		t.Fatalf("failed to write test farmer NKey public key: %v", err)
 	}
 
-	if _, err := FarmerUserJWT(); err == nil {
-		t.Error("expected an error before ReloadNKeys has minted the farmer's User JWT")
-	}
-
-	if err := ReloadNKeys(); err != nil {
-		t.Fatalf("ReloadNKeys failed: %v", err)
-	}
-
+	// Signed on first use, on any replica: nothing has to run first.
 	got, err := FarmerUserJWT()
 	if err != nil {
 		t.Fatalf("FarmerUserJWT failed: %v", err)
@@ -365,6 +358,31 @@ func TestFarmerUserJWT(t *testing.T) {
 	}
 	if uc.Subject != farmerPub {
 		t.Errorf("returned JWT subject = %q, want %q", uc.Subject, farmerPub)
+	}
+	mat, err := ensureNatsAuth()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uc.IssuerAccount != mat.tenantPub {
+		t.Errorf("returned JWT issuer account = %q, want the legacy tenant's %q", uc.IssuerAccount, mat.tenantPub)
+	}
+	// Held: a second call signs nothing.
+	testTransit.Fake.ResetCounts()
+	again, err := FarmerUserJWT()
+	if err != nil || again != got {
+		t.Errorf("second FarmerUserJWT = %v, want the held JWT", err)
+	}
+	if n := testTransit.Fake.Count(natskeystest.OpSign); n != 0 {
+		t.Errorf("second FarmerUserJWT signed %d times", n)
+	}
+	// A restart holds nothing: it signs a fresh one, which still works.
+	forgetHeldJWTs()
+	fresh, err := FarmerUserJWT()
+	if err != nil {
+		t.Fatalf("FarmerUserJWT after a restart: %v", err)
+	}
+	if uc, err := jwt.DecodeUserClaims(fresh); err != nil || uc.Subject != farmerPub {
+		t.Errorf("FarmerUserJWT after a restart: %v", err)
 	}
 }
 

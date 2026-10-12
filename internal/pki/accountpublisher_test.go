@@ -627,6 +627,8 @@ func (r *recordingPublisher) Publish(_ context.Context, pub, j string) error {
 
 func (*recordingPublisher) ReconcileAll(context.Context) error { return nil }
 
+func (*recordingPublisher) Current(context.Context, string) (string, error) { return "", nil }
+
 func (r *recordingPublisher) last(t *testing.T, pub string) string {
 	t.Helper()
 	r.mu.Lock()
@@ -714,6 +716,7 @@ func TestEveryResignAdvancesIat(t *testing.T) {
 			kp, _ := nkeys.CreateUser()
 			seed, _ := kp.Seed()
 			pub, _ := kp.PublicKey()
+			t.Setenv("IMAS_NATS_SAASAPI_USER_SEED_FILE", "")
 			t.Setenv("IMAS_NATS_SAASAPI_USER_SEED", string(seed))
 			recordSaaSAPIKey(t, state, pub)
 			if _, _, err := EnsureSaaSAPICredential(); err != nil {

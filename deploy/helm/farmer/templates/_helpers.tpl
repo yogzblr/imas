@@ -670,7 +670,7 @@ explanation rather than deploying something that silently can't work.
 {{- end -}}
 {{- $nkPath := trimSuffix "/" (toString $nk.mountPath) -}}
 {{- if or (eq $nkPath "") (eq $nkPath "/tmp") (hasPrefix "/tmp/" $nkPath) -}}
-{{- fail (printf "farmer.nkeySecret.mountPath %q must not be /, /tmp or under /tmp: it would hide farmer's writable tmp volume (farmerpki)" (toString $nk.mountPath)) -}}
+{{- fail (printf "farmer.nkeySecret.mountPath %q must not be /, /tmp or under /tmp: it would hide farmer's writable tmp volume (the process's temp directory)" (toString $nk.mountPath)) -}}
 {{- end -}}
 {{- if eq $nkPath (trimSuffix "/" (toString .Values.natsSeeds.mountPath)) -}}
 {{- fail "farmer.nkeySecret.mountPath must differ from natsSeeds.mountPath" -}}

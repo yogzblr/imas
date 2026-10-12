@@ -12,7 +12,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -566,7 +565,7 @@ func TestSproutJWTBucketMustBePrivate(t *testing.T) {
 // grantEnrolledSprout, for a tenant that already exists, grants only the
 // enrolled NKey (clears its revocation) and applies the tenant's revoked
 // list, and refuses a revoked NKey. No bus runs here, so the push fails;
-// the re-signed Account JWT is on disk before it.
+// the re-signed Account JWT is held before it.
 func TestGrantEnrolledSproutGrantsOnlyThatKey(t *testing.T) {
 	setupTestPKI(t)
 	if _, _, _, err := ensureTenantAccount("t_g", "Tenant G", true); err != nil {
@@ -591,7 +590,7 @@ func TestGrantEnrolledSproutGrantsOnlyThatKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writeFileAtomic(tenantAccountJWTPath("t_g"), []byte(signed), 0o600); err != nil {
+	if err := holdAccountJWT(signed, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Create(&revokedNKeyRow{TenantID: "t_g", NKey: replaced, SproutID: "old", RevokedAt: time.Now().Unix()}).Error; err != nil {
@@ -601,11 +600,7 @@ func TestGrantEnrolledSproutGrantsOnlyThatKey(t *testing.T) {
 	if err := grantEnrolledSprout("t_g", enrolled); !errors.Is(err, errAccountPushFailed) {
 		t.Fatalf("grant with no bus: err = %v, want only the push to fail", err)
 	}
-	b, err := os.ReadFile(tenantAccountJWTPath("t_g"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := jwt.DecodeAccountClaims(string(b))
+	got, err := jwt.DecodeAccountClaims(heldTenantAccountJWT(t, "t_g"))
 	if err != nil {
 		t.Fatal(err)
 	}
