@@ -19,6 +19,8 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/objectstore"
+	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/pki/pkitest"
 )
@@ -36,10 +38,17 @@ func setupNatsAPIPKI(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("opening pki test db: %v", err)
 	}
-	if err := gdb.AutoMigrate(pki.Models()...); err != nil {
+	if err := gdb.AutoMigrate(append(pki.Models(), pki.SproutJWTModels()...)...); err != nil {
 		t.Fatalf("migrating pki test db: %v", err)
 	}
 	pki.SetDB(gdb)
+	// Sprout User JWTs live in a bucket (pki.MintOrReuseUserJWT).
+	sproutJWTs, err := objectstore.Open(objectstoretest.NewServer(t).Config())
+	if err != nil {
+		t.Fatalf("opening the fake sprout JWT bucket: %v", err)
+	}
+	pki.SetSproutJWTStore(sproutJWTs)
+	t.Cleanup(func() { pki.SetSproutJWTStore(nil) })
 	t.Cleanup(func() {
 		pki.SetDB(sharedPKIDB)
 		// A shared-cache in-memory DB lives as long as any connection to

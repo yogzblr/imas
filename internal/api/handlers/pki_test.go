@@ -28,6 +28,8 @@ import (
 
 	apitypes "github.com/yogzblr/imas/internal/api/types"
 	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/objectstore"
+	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/pki/pkitest"
 )
@@ -55,11 +57,18 @@ func setupPKIDirs(t *testing.T) string {
 	if sqlDB, err := gdb.DB(); err == nil {
 		t.Cleanup(func() { _ = sqlDB.Close() })
 	}
-	if err := gdb.AutoMigrate(pki.Models()...); err != nil {
+	if err := gdb.AutoMigrate(append(pki.Models(), pki.SproutJWTModels()...)...); err != nil {
 		t.Fatalf("migrating pki test db: %v", err)
 	}
 	pki.SetDB(gdb)
 	t.Cleanup(func() { pki.SetDB(nil) })
+	// Sprout User JWTs live in a bucket (pki.MintOrReuseUserJWT).
+	sproutJWTs, err := objectstore.Open(objectstoretest.NewServer(t).Config())
+	if err != nil {
+		t.Fatalf("opening the fake sprout JWT bucket: %v", err)
+	}
+	pki.SetSproutJWTStore(sproutJWTs)
+	t.Cleanup(func() { pki.SetSproutJWTStore(nil) })
 
 	mr := miniredis.RunT(t)
 	vc, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{mr.Addr()}, DisableCache: true})

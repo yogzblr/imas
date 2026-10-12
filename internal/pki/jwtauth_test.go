@@ -293,8 +293,8 @@ func TestGetSproutUserJWT(t *testing.T) {
 
 	ukp, _ := nkeys.CreateUser()
 	upub, _ := ukp.PublicKey()
-	if _, err := mintOrReuseUserJWT(sproutJWTPath("sprout01"), upub, "sprout01", sproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP); err != nil {
-		t.Fatalf("mintOrReuseUserJWT failed: %v", err)
+	if err := upsertNKeyRow(nkeyRow{TenantID: currentTenantID(), SproutID: "sprout01", NKey: upub, State: stateAccepted}); err != nil {
+		t.Fatalf("upsertNKeyRow failed: %v", err)
 	}
 
 	got, err := GetSproutUserJWT("sprout01")
@@ -307,6 +307,17 @@ func TestGetSproutUserJWT(t *testing.T) {
 	}
 	if uc.Subject != upub {
 		t.Errorf("returned JWT subject = %q, want %q", uc.Subject, upub)
+	}
+	if uc.IssuerAccount != mat.tenantPub {
+		t.Errorf("returned JWT issuer account = %q, want the legacy tenant's %q", uc.IssuerAccount, mat.tenantPub)
+	}
+	// Minted into the bucket, never to the old local file.
+	if _, err := os.Stat(sproutJWTPath("sprout01")); !os.IsNotExist(err) {
+		t.Errorf("sprout JWT file exists (stat err %v); want it only in the bucket", err)
+	}
+	again, err := GetSproutUserJWT("sprout01")
+	if err != nil || again != got {
+		t.Errorf("second GetSproutUserJWT = %v, want the stored JWT reused", err)
 	}
 
 	if _, err := GetSproutUserJWT("no-such-sprout"); err != ErrSproutIDNotFound {
