@@ -132,6 +132,16 @@ Needs E1 (both edit `uat.yml`). Scope: docs, workflows, `internal/natsapi` tests
    new schema (farmer 00004 to 00005 and saas 00008); write the reasoning in the PR and
    the code comment next to `compatibleFrom`, and change it if required.
 
+6. Farmer Transit policy test. OpenBao 2.7.1 cannot deny under the tenant-key glob, so
+   the merged policy (decision 2, #215) lets a farmer token create and soft-delete any key
+   on the transit mount that an exact deny does not cover, including keys other clients keep
+   there. That is an accepted cost and goes to the security review (P3). Make it
+   visible and fixed in place: add a real-OpenBao policy test that lists the key names a farmer
+   token can create, soft-delete and sign with, asserts the exact set the merged policy allows
+   (signing only `nats-tsign-*`; no rotate, no config, no export, no hard delete; exact denies on
+   the platform and gateway keys), and fails if the policy changes that set. Put the accepted
+   cross-client soft-delete behaviour in `deploy/helm/farmer/README.md` next to the policy.
+
 ## Z: final gate, nothing left open
 
 Needs every other unit merged. Do not write features. On main:

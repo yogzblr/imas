@@ -126,7 +126,8 @@ Paste this into a Claude Code session started in the yogzblr/imas repo on main.
     Implement unit ID (title) in yogzblr/imas. Read CLAUDE.md first, then the whole
     of docs/briefs/BRIEF-FILE, then build SECTION completely. The brief and its
     Owner decisions section are final: do not reopen a decision and do not ask
-    questions in the PR. Work on a new branch named build/ID from main.
+    questions in the PR. On the first attempt, create build/ID from main. On a retry,
+    check out the existing build/ID branch and continue from its tip.
 
     The files the section names are the minimum, not the limit. You own the unit end to
     end: when you add, rename, remove or change a name, path, key, env var, value,
