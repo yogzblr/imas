@@ -4,8 +4,11 @@ package ingredients
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -170,11 +173,23 @@ type updatePolicy struct {
 
 // TestLifecycleL5_SelfUpdate runs one self update cycle, only when
 // IMAS_UAT_DISPATCH_FLAGS says the dispatch flags are on (opt in, UAT
-// only): one tenant 1 Linux sprout is put on the earlier release, the
-// tenant approves the release under test, POST .../sprouts/updates sends
-// it, and the item must succeed (the sprout reconnects reporting the
-// target), with the package, the config, the sprout ID and a job checked
-// on the host afterwards.
+// only; the workflow's dispatch_flags turns them on in the core hub): one
+// tenant 1 Linux sprout is put on the earlier release, the tenant approves
+// the release under test, POST .../sprouts/updates sends it, and the item
+// must succeed (the sprout reconnects reporting the target), with the
+// package, the config, the sprout ID and a job checked on the host
+// afterwards.
+//
+// Then the P22 trust path: the sprout's keyring (/etc/imas/fleet-signing-
+// keys.asc) is the repo's gpg-public-key.asc, the one it verified the
+// release's GPG-signed checksums.txt with; and a release whose checksums.txt
+// was altered is refused. The test registers the release's packages and
+// checksums.txt under a scratch version through the operator API, its
+// version rewritten in every file name, with the release's own
+// checksums.txt.sig (uat/hub/core/operator-release.sh post-altered),
+// approves it and rolls it out: the item must fail, the sprout's job log
+// must say the signature did not verify, nothing may be downloaded or
+// staged, and the sprout must still run the release under test.
 func TestLifecycleL5_SelfUpdate(t *testing.T) {
 	sc := harness.Begin(t, "L5")
 	if !FlagOn(os.Getenv(EnvDispatchFlags)) {
@@ -259,22 +274,7 @@ func TestLifecycleL5_SelfUpdate(t *testing.T) {
 		sc.NoErr(r.Decode(&created), "decoding the batch id")
 
 		sc.Step("wait for the rollout (batch %s)", created.BatchID)
-		var b harness.Batch
-		deadline := time.Now().Add(40 * time.Minute)
-		for {
-			r, err = f.API.Do(ctx, harness.Request{Method: http.MethodGet, Path: harness.TenantPath(tid, "sprouts", "updates", created.BatchID), Token: tok})
-			if err == nil && r.Status == http.StatusOK && r.Decode(&b) == nil && b.Status == harness.BatchCompleted {
-				break
-			}
-			if time.Now().After(deadline) {
-				sc.Fatalf("the rollout didn't complete in 40 minutes: last answer %s, items %+v", r, b.Items)
-			}
-			select {
-			case <-ctx.Done():
-				sc.Fatalf("waiting for the rollout: %v", ctx.Err())
-			case <-time.After(15 * time.Second):
-			}
-		}
+		b := waitRollout(ctx, f, sc, tid, created.BatchID)
 		sc.ExpectItem(&b, sp, harness.ItemSucceeded, "")
 
 		sc.Step("the sprout runs %s with its config and identity kept", target)
@@ -301,5 +301,102 @@ func TestLifecycleL5_SelfUpdate(t *testing.T) {
 		if got := harness.ClaimString(claims, "sprout_id"); got != sp.SproutID {
 			sc.Errorf("sprout_id after the self update %q, want %q", got, sp.SproutID)
 		}
+
+		// --- P22: the keyring, and a release with an altered checksums.txt.
+		sc.Step("the sprout's keyring %s is the repo's %s", SproutFleetKeyring, RepoFleetKeyring)
+		repoKeyring, err := os.ReadFile(filepath.Join(repoRoot(sc), RepoFleetKeyring))
+		sc.NoErr(err, "reading the repo's %s", RepoFleetKeyring)
+		res, err = f.OnHost(ctx, sp, harness.HostScript{Linux: RefusalCheckScript("none")})
+		sc.NoErr(err, "reading the keyring on the host")
+		if got, read := res.Value("KEYRING_SHA"); got != fmt.Sprintf("%x", sha256.Sum256(repoKeyring)) {
+			sc.Errorf("%s on the host has sha256 %q (read: %v), want the repo's %s, %x", SproutFleetKeyring, got, read, RepoFleetKeyring, sha256.Sum256(repoKeyring))
+		}
+
+		scratch, err := AlteredScratchVersion(target)
+		sc.NoErr(err, "the scratch version")
+		if !f.CanReachOperatorAPI() {
+			sc.Fatalf("%v", harness.ErrNoOperatorAPI)
+		}
+		sc.Step("register %s with %s's checksums.txt altered and its signature kept (operator API)", scratch, target)
+		ans, err := f.PostAlteredRelease(ctx, scratch)
+		sc.NoErr(err, "operator-release.sh post-altered %s", scratch)
+		if ans.Status != http.StatusOK && ans.Status != http.StatusCreated {
+			sc.Fatalf("the operator API refused the altered pair for %s: %d %s (saasapi checks only its form, never the signature)", scratch, ans.Status, ans.Body)
+		}
+		sc.Step("approve %s for tenant 1 and roll it out", scratch)
+		r, err = f.API.Do(ctx, harness.Request{Method: http.MethodPatch, Path: harness.TenantPath(tid, "update-policy"), Token: tok,
+			Body: map[string]any{"approved_version": scratch, "auto_update": false}})
+		sc.Expect(r, err, http.StatusOK, "", "PATCH update-policy approved_version=%s", scratch)
+		r, err = f.API.Do(ctx, harness.Request{Method: http.MethodPost, Path: harness.TenantPath(tid, "sprouts", "updates"), Token: tok,
+			Body: map[string]any{"asset_ids": []string{sp.AssetID}, "target_version": scratch, "batch_size": 1}})
+		sc.Expect(r, err, http.StatusAccepted, "", "POST .../sprouts/updates to %s", scratch)
+		var altered struct {
+			BatchID string `json:"batch_id"`
+		}
+		sc.NoErr(r.Decode(&altered), "decoding the batch id")
+		ab := waitRollout(ctx, f, sc, tid, altered.BatchID)
+		it := sc.ExpectItem(&ab, sp, harness.ItemFailed, "job_failed")
+		if !jidRe.MatchString(it.JID) {
+			sc.Fatalf("the refused update's item has no usable jid (%q): %s", it.JID, it)
+		}
+
+		sc.Step("the sprout refused %s: the signature did not verify, nothing was downloaded or installed", scratch)
+		res, err = f.OnHost(ctx, sp, harness.HostScript{Linux: RefusalCheckScript(it.JID)})
+		sc.NoErr(err, "reading the refused job on the host")
+		logTail, _ := res.Value("JOBLOG_TAIL")
+		if v, _ := res.Value("JOBLOG"); v != "present" {
+			sc.Errorf("no job log %s/%s.jsonl on the sprout", SproutJobLogDir, it.JID)
+		}
+		if v, _ := res.Value("SIG_REFUSED"); v != "yes" {
+			sc.Errorf("the refused job's log does not say %q: %s", SignatureRefusalMsg, logTail)
+		}
+		if v, _ := res.Value("DOWNLOADED"); v != "no" {
+			sc.Errorf("the refused job downloaded a package: %s", logTail)
+		}
+		if v, _ := res.Value("STAGED"); v != "0" {
+			sc.Errorf("%s holds %s entries after the refusal, want none", SproutStageDir, v)
+		}
+		if v, _ := res.Value("PKG_VERSION"); !PackageVersionIs(v, target) {
+			sc.Errorf("after the refusal the package version is %q, want release %s still", v, target)
+		}
+		sc.NoErr(f.WaitRuns(ctx, []harness.Sprout{sp}, harness.DefaultConnectTimeout), "a job after the refused update")
 	})
+}
+
+// waitRollout polls an update batch until it completes (40 minutes at most).
+func waitRollout(ctx context.Context, f *harness.Fleet, sc *harness.Scenario, tid, batchID string) harness.Batch {
+	tok, err := f.Admin(ctx, 1)
+	sc.NoErr(err, "tenant 1's admin token")
+	var b harness.Batch
+	var r *harness.Response
+	deadline := time.Now().Add(40 * time.Minute)
+	for {
+		r, err = f.API.Do(ctx, harness.Request{Method: http.MethodGet, Path: harness.TenantPath(tid, "sprouts", "updates", batchID), Token: tok})
+		if err == nil && r.Status == http.StatusOK && r.Decode(&b) == nil && b.Status == harness.BatchCompleted {
+			return b
+		}
+		if time.Now().After(deadline) {
+			sc.Fatalf("the rollout %s didn't complete in 40 minutes: last answer %s, items %+v", batchID, r, b.Items)
+		}
+		select {
+		case <-ctx.Done():
+			sc.Fatalf("waiting for the rollout %s: %v", batchID, ctx.Err())
+		case <-time.After(15 * time.Second):
+		}
+	}
+}
+
+// repoRoot is the repository checkout the tests run from (the directory
+// holding go.mod above this package).
+func repoRoot(sc *harness.Scenario) string {
+	dir, err := os.Getwd()
+	sc.NoErr(err, "the working directory")
+	for d := dir; ; d = filepath.Dir(d) {
+		if _, err := os.Stat(filepath.Join(d, "go.mod")); err == nil {
+			return d
+		}
+		if filepath.Dir(d) == d {
+			sc.Fatalf("no go.mod above %s", dir)
+		}
+	}
 }

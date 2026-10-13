@@ -19,7 +19,8 @@
 #      is on PATH or in $BAO_BIN (skipped, and said so, otherwise)
 #   8b. finish.sh and operator-release.sh against stub kubectl, helm and
 #      curl (test/finish_test.sh): a failed registration Job fails it, and
-#      the operator API's answer decides
+#      the operator API's answer decides; validate-rustfs.sh against a curl
+#      that answers with the UAT policies (test/rustfs_test.sh)
 #   9. go test ./uat/hub/core/ (helm template and lint of the farmer chart
 #      with values/farmer-uat.yaml, and of chart/)
 # A tool that isn't installed is reported as SKIPPED, never as passed.
@@ -79,7 +80,7 @@ ep2="$core/testdata/endpoints-overrides.json"
 
 # --- 1. shellcheck --------------------------------------------------------------
 if command -v shellcheck >/dev/null; then
-	expect "shellcheck" bash -c 'cd "$1" && shellcheck -x ./*.sh lib/common.sh test/*.sh test/stubs/* test/finish-stubs/*' _ "$core"
+	expect "shellcheck" bash -c 'cd "$1" && shellcheck -x ./*.sh lib/common.sh test/*.sh test/stubs/* test/finish-stubs/* test/rustfs-stubs/*' _ "$core"
 else
 	skip "shellcheck (not installed)"
 fi
@@ -139,6 +140,15 @@ IMAS_UAT_DISPATCH_FLAGS=off gv "$ep" "$admin" v1.2.3 2>/dev/null |
 	ok "gen-values.sh: IMAS_UAT_DISPATCH_FLAGS=off keeps both off" || bad "gen-values.sh: IMAS_UAT_DISPATCH_FLAGS=off"
 refuse "gen-values.sh: an unknown IMAS_UAT_DISPATCH_FLAGS is refused" "must be on or off" \
 	env IMAS_UAT_DISPATCH_FLAGS=maybe "$core/gen-values.sh" "$ep" "$admin" v1.2.3 "$loader_pub"
+# status_line: check.sh's "must refuse" checks compare status and error code.
+sl() { printf '%s' "$2" >"$tmp/body"; bash -c '. "$1/lib/common.sh"; status_line "$2" "$3"' _ "$core" "$1" "$tmp/body"; }
+[[ "$(sl 401 '{"error":"unauthorized","message":"unauthorized"}')" == "401 unauthorized" ]] &&
+	[[ "$(sl 403 '{"error":"forbidden","message":"forbidden"}')" == "403 forbidden" ]] &&
+	[[ "$(sl 200 '{"versions":[]}')" == 200 ]] &&
+	[[ "$(sl 401 '<html>401 Authorization Required</html>')" == 401 ]] &&
+	[[ "$(sl 401 '')" == 401 ]] &&
+	[[ "$(sl 401 '{"error":"Bad Thing; rm -rf"}')" == 401 ]] &&
+	ok "status_line: saasapi's error code after the status, nothing for any other body" || bad "status_line"
 # The two readers spell the issuer and the private names differently
 # (uat/hub/dmz: cluster_issuer, private_dns_zone; uat/hub/core: ca.cluster_issuer,
 # *.private_fqdn). An endpoints file with only one form must give the same
@@ -612,6 +622,7 @@ fi
 
 # --- 8b. finish.sh ------------------------------------------------------------------
 expect "finish.sh and operator-release.sh (test/finish_test.sh)" bash "$here/finish_test.sh"
+expect "validate-rustfs.sh (test/rustfs_test.sh)" bash "$here/rustfs_test.sh"
 
 # --- 9. go test ---------------------------------------------------------------------
 if command -v go >/dev/null; then

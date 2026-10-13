@@ -2,7 +2,12 @@ package ingredients
 
 import (
 	"os/exec"
+	"strings"
 	"testing"
+
+	"golang.org/x/mod/semver"
+
+	"github.com/yogzblr/imas/uat/tests/harness"
 )
 
 func TestParseReleaseTag(t *testing.T) {
@@ -76,6 +81,60 @@ func TestFlagOn(t *testing.T) {
 	for v, want := range map[string]bool{"on": true, "TRUE": true, "1": true, "yes": true, "": false, "off": false, "0": false} {
 		if FlagOn(v) != want {
 			t.Errorf("FlagOn(%q)", v)
+		}
+	}
+}
+
+func TestAlteredScratchVersion(t *testing.T) {
+	for tag, want := range map[string]string{
+		"v0.2.0-rc.4": "v0.2.1-uat.altered",
+		"v1.9.9":      "v1.9.10-uat.altered",
+		"v0.1.0":      "v0.1.1-uat.altered",
+	} {
+		got, err := AlteredScratchVersion(tag)
+		if err != nil || got != want {
+			t.Errorf("AlteredScratchVersion(%q) = %q, %v; want %q", tag, got, err, want)
+		}
+		// Above the release, so the sprout's downgrade check passes and
+		// only the signature can refuse it.
+		if semver.Compare(got, tag) <= 0 {
+			t.Errorf("%s is not above %s", got, tag)
+		}
+	}
+	if _, err := AlteredScratchVersion("latest"); err == nil {
+		t.Error("a bad tag is accepted")
+	}
+}
+
+// TestRefusalCheckScript runs the L5 refusal check under sh: valid POSIX
+// sh, every value printed, and a hostile jid stays one quoted word.
+func TestRefusalCheckScript(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	for _, jid := range []string{"jid_0123", "x'; touch /tmp/pwned; '"} {
+		s := RefusalCheckScript(jid)
+		if out, err := exec.Command(sh, "-n", "-c", s).CombinedOutput(); err != nil {
+			t.Errorf("jid %q: %v: %s", jid, err, out)
+		}
+		if !strings.Contains(s, harness.ShQuote(SproutJobLogDir+"/"+jid+".jsonl")) {
+			t.Errorf("jid %q is not quoted in the script", jid)
+		}
+	}
+	out, err := exec.Command(sh, "-c", RefusalCheckScript("no-such-job")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	res := harness.ParseRunOutput(out)
+	for k, want := range map[string]string{"JOBLOG": "absent", "SIG_REFUSED": "no", "DOWNLOADED": "no"} {
+		if got, _ := res.Value(k); got != want {
+			t.Errorf("%s = %q, want %q (output %s)", k, got, want, out)
+		}
+	}
+	for _, k := range []string{"STAGED", "PKG_VERSION", "KEYRING_SHA", "JOBLOG_TAIL"} {
+		if _, ok := res.Value(k); !ok {
+			t.Errorf("%s not printed (output %s)", k, out)
 		}
 	}
 }

@@ -24,7 +24,8 @@ catalogue, the owner prerequisites); this page is the owner's guide to it.
 | Enrolment through Envoy, with a pinned UAT CA, one-time keys, and sprouts reaching the bus only through Envoy | Real RHEL: AlmaLinux 9 stands in for it (same dnf and rpm path; no subscription, RHUI or FIPS; see `uat/enroll/README.md`) |
 | Tenant isolation: two tenants with the same sprout IDs (`ubuntu-01`, `alma-01`, `win-01`) resolve to different machines, and nothing crosses (T6, S2, S4, R3, X4) | SUSE and zypper: out of scope for this gate (add one more tenant VM later) |
 | Auth: Keycloak tokens checked by saasapi (issuer, audience, roles, `organization.id`), the BFF shared secret, Envoy's `jwt_authn` gate, sealing (X1 to X5) | The internet path: sprouts reach Envoy on the DMZ's private address, and Envoy sits behind no application gateway or public load balancer |
-| Commands, recipes and cooks on every OS (C1 to C8, R1 to R6), resilience to reboots and restarts (L1 to L3), and with UAT.7 every ingredient method and the package upgrade (I.*, L4) | Scale and load, the web UI, key expiry (the minimum is an hour; unit tests cover it), the self update cycle (L5) unless its dispatch flags are on, a Windows host with Desktop Experience |
+| Commands, recipes and cooks on every OS (C1 to C8, R1 to R6), resilience to reboots and restarts (L1 to L3), and with UAT.7 every ingredient method and the package upgrade (I.*, L4) |
+| The sprout release of `release_tag` registers through saasapi's operator plane with its GPG-signed `checksums.txt` and signature (`finish.sh` fails otherwise); with `dispatch_flags`, a sprout on an earlier release self-updates to it, verifying the signature against its packaged keyring, and refuses a release whose `checksums.txt` was altered (L5) | That the flags are safe outside UAT: they stay off until the security review | Scale and load, the web UI, key expiry (the minimum is an hour; unit tests cover it), the self update cycle (L5) unless `dispatch_flags` is ticked, a Windows host with Desktop Experience |
 
 What runs where (section 4h, "The shape"): one resource group per run,
 `imas-uat-<run_id>`, with a VNet of four subnets, an Azure Bastion (Standard,
@@ -140,13 +141,14 @@ Then approve the `uat` deployment when GitHub asks (the required reviewer).
 
 | Input | Default | Meaning |
 |---|---|---|
-| `release_tag` | required | `vX.Y.Z` or `vX.Y.Z-rc.N`. It must be a tag with a published (not draft) release; the chart, the images, the packages and the CLI all come from it |
+| `release_tag` | required | `vX.Y.Z` or `vX.Y.Z-rc.N`. It must be a tag with a published (not draft), GPG-signed release (assets `checksums.txt` and `checksums.txt.sig`); the chart, the images, the packages and the CLI all come from it. It is the chart reference too: the core hub installs the farmer chart published with it, which carries the stamped sprout release `finish.sh` registers |
 | `region` | `centralindia` | Azure region |
 | `keep_hours` | `0` | `0` destroys at the end. Above 0 (at most 168) skips the destroy and keeps the environment for debugging; the janitor deletes it later |
 | `tier` | `all` | `smoke` (about 10 minutes of tests), `core` (includes smoke), `resilience`, `ingredients`, `lifecycle` or `all` |
 | `upgrade_from_tag` | empty | An earlier release for L4 (the package upgrade, UAT.7). Empty: L4 skips with that reason. Passed to the tests as `IMAS_UAT_UPGRADE_FROM_TAG` |
 | `scenarios` | empty | Scenario ids of the tier, separated by spaces or commas (`C1 X4`), passed to `uat/tests/run.sh`. Ingredient ids (`I.file.managed`) go in an `ingredients` run of their own |
 | `hub_nodes` | `1` | k0s nodes per hub. `1` is the single-node run. `3` is the HA run (P24): `uat/tofu` gets `core_node_count=3`, `dmz_node_count=3` and `core_node_size=Standard_D4s_v5` (3 core nodes of D4s_v5, 3 DMZ nodes of D2s_v5, each hub behind load balancers; `uat/tofu/README.md`, "HA topology"), which needs 18 Dsv5 vCPU of quota |
+| `dispatch_flags` | `false` | `true` turns the fleet update flags on in the core hub (saasapi `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED`, farmer `IMAS_SELF_UPDATE_ENABLED`, through the chart values `saasapi.fleetUpdateDispatch.enabled` and `farmer.selfUpdate.enabled`) and runs L5; `false` leaves both off and L5 skips. Passed as `IMAS_UAT_DISPATCH_FLAGS=on\|off` to the core install and the tests. UAT only |
 
 What the run does, in order (each step is a step of the job, so the failed one
 names the piece):
@@ -154,7 +156,9 @@ names the piece):
 1. **Check inputs and variables** (`uat/scripts/check-inputs.sh`): the three
    Azure variables are set and are GUIDs; `release_tag` (and
    `upgrade_from_tag`) is a release tag that exists and has a published
-   release; region, `keep_hours`, tier, `hub_nodes` and scenario ids are well formed. Every
+   release, and `release_tag`'s release is GPG signed (`checksums.txt.sig`);
+   region, `keep_hours`, tier, `hub_nodes`, `dispatch_flags` and scenario ids
+   are well formed. Every
    problem is reported at once, by name, and nothing is created.
 2. Tools: Go, Python, OpenTofu 1.11.5, Helm v4.3.0, k0sctl and kubectl at
    `uat/k0s` pins, Ansible with pywinrm.
@@ -174,13 +178,18 @@ names the piece):
 5. **Bastion tunnels** (`uat/access/tunnels.sh open`, after `az extension add`
    for `bastion` and `ssh`).
 6. **k0s** on both hubs (`uat/k0s/bootstrap.sh`).
-7. **Core hub** (`uat/hub/core/install.sh`),
+7. **Core hub** (`uat/hub/core/install.sh`: the release's published chart,
+   checked to carry the stamped sprout release; the operator plane on; the
+   dispatch flags as asked; `validate-rustfs.sh` proves each scoped RustFS
+   credential),
    then the **DMZ hub** (`uat/hub/dmz/install.sh`: core's public NATS trust
    copied from its ConfigMap; the bus loader's seed and the read-only
    accounts credential from core's state directory, `--loader-seed` and
    `--accounts-reader-dir`), then **core's second half** (`uat/hub/core/finish.sh`: farmer and
    saasapi need the DMZ bus, so it waits for them, registers the sprout
-   release and runs core's `check.sh`) and the **DMZ check** (`check.sh`, before enrolment because it
+   release (the hook Job must complete, and saasapi's operator API must then
+   hold `release_tag` with its GPG-signed `checksums.txt` and signature, or
+   the step fails) and runs core's `check.sh`) and the **DMZ check** (`check.sh`, before enrolment because it
    empties and then waits out Envoy's enrolment rate limit). Core comes first
    because the bus needs core's trust (with the loader's JWT), the loader's
    seed and the accounts bucket (on core's RustFS, which the DMZ reads on

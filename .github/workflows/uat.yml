@@ -230,7 +230,8 @@ jobs:
           jq -n --arg run_id "$id" --arg release_tag "$RELEASE_TAG" --arg region "$REGION" \
             --arg tier "$TIER" --argjson keep_hours "$KEEP_HOURS" --argjson run_budget_hours "$RUN_BUDGET_HOURS" \
             --arg upgrade_from_tag "$UPGRADE_FROM_TAG" \
-            --arg scenarios "$SCENARIOS" --argjson hub_nodes "$HUB_NODES" --arg dispatch_flags "$DISPATCH_FLAGS" --arg runner_cidr "$RUNNER_CIDR" \
+            --arg scenarios "$SCENARIOS" --argjson hub_nodes "$HUB_NODES" --arg dispatch_flags "$DISPATCH_FLAGS" \
+            --arg runner_cidr "$RUNNER_CIDR" \
             --arg github_run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" \
             --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '$ARGS.named' >"$STATE/run.json"

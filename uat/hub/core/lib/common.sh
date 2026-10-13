@@ -427,6 +427,17 @@ trust_snapshot() {
 		jq -S '{data: .data, resourceVersion: .metadata.resourceVersion}'
 }
 
+# status_line <http code> <body file>: the code, and after a space the error
+# code of saasapi's JSON error body ({"error": "...", "message": "..."}) when
+# the body is one: "401 unauthorized", "403 forbidden", "200". check.sh's
+# "must refuse" checks compare it whole, so a refusal from anything but
+# saasapi (an HTML 401 from a proxy, an empty body) does not pass.
+status_line() {
+	local err
+	err=$(jq -r 'if type == "object" and (.error | type == "string") and (.error | test("^[a-z_]{1,64}$")) then .error else empty end' "$2" 2>/dev/null || true)
+	printf '%s%s' "$1" "${err:+ $err}"
+}
+
 # jwt_payload <token>: the decoded payload JSON (no verification; the
 # check script uses it to compare claims, saasapi does the verifying).
 jwt_payload() {

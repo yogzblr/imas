@@ -327,6 +327,50 @@ func TestFinishScript(t *testing.T) {
 	t.Logf("%s", out)
 }
 
+// TestValidateRustFS runs test/rustfs_test.sh: validate-rustfs.sh's put,
+// get and list matrix over the four scoped credentials, against a curl that
+// answers with the UAT policies, and two deliberate policy holes it must
+// name (P13).
+func TestValidateRustFS(t *testing.T) {
+	for _, tool := range []string{"bash", "jq", "openssl", "sha256sum"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not on PATH", tool)
+		}
+	}
+	out, err := exec.Command("bash", "test/rustfs_test.sh").CombinedOutput()
+	if err != nil {
+		t.Fatalf("test/rustfs_test.sh: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
+// TestStatusLine: check.sh's "must refuse" checks compare the status and
+// the error code of saasapi's JSON body (P13), so a 401 from anything but
+// saasapi does not pass as saasapi's refusal.
+func TestStatusLine(t *testing.T) {
+	for _, tool := range []string{"bash", "jq"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not on PATH", tool)
+		}
+	}
+	for _, c := range []struct{ code, body, want string }{
+		{"401", `{"error":"unauthorized","message":"unauthorized"}`, "401 unauthorized"},
+		{"403", `{"error":"forbidden","message":"forbidden"}`, "403 forbidden"},
+		{"200", `{"versions":[]}`, "200"},
+		{"401", `<html>401 Authorization Required</html>`, "401"},
+		{"401", ``, "401"},
+		{"401", `{"error":"Bad Thing; rm -rf"}`, "401"},
+	} {
+		f := filepath.Join(t.TempDir(), "body")
+		if err := os.WriteFile(f, []byte(c.body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := string(run(t, "bash", "-c", `. lib/common.sh; status_line "$1" "$2"`, "_", c.code, f)); got != c.want {
+			t.Errorf("status_line %s %q = %q, want %q", c.code, c.body, got, c.want)
+		}
+	}
+}
+
 // TestShellcheck lints every script and stub of uat/hub/core.
 func TestShellcheck(t *testing.T) {
 	if _, err := exec.LookPath("shellcheck"); err != nil {
@@ -336,7 +380,7 @@ func TestShellcheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, g := range []string{"test/*.sh", "test/stubs/*", "test/finish-stubs/*"} {
+	for _, g := range []string{"test/*.sh", "test/stubs/*", "test/finish-stubs/*", "test/rustfs-stubs/*"} {
 		more, _ := filepath.Glob(g)
 		files = append(files, more...)
 	}

@@ -22,9 +22,18 @@
 #     with, and its tokens carry that iss, saasapi's audience and the roles;
 #   - saasapi answers GET /v1/versions with each tenant admin's Keycloak
 #     token (and the BFF secret), and refuses a request with no token,
-#     with no BFF secret, with neither, and with a forged token;
+#     with no BFF secret, with neither, and with a forged token: each
+#     refusal is checked by status and by the error code of saasapi's JSON
+#     body ({"error": "unauthorized"}), so a 401 from anything else (the
+#     edge proxy, a wrong route) fails the check. saasapi gives every
+#     authentication failure the one code on purpose (internal/saasapi
+#     middleware.go): the reason is in its log, never on the wire;
 #   - once bind-tenant.sh has run: each admin reads its own tenant and is
-#     refused on the other's.
+#     refused on the other's (403, error code forbidden);
+#   - the operator plane is on (P20 option C): its listener address, TLS
+#     Secret and token Secret, and the fleet update flags are what the
+#     install was asked for (core.json dispatch_flags: saasapi
+#     SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED, farmer IMAS_SELF_UPDATE_ENABLED).
 # Prints one line per check and exits non zero if any failed. Nothing
 # secret is printed.
 set -euo pipefail
@@ -70,7 +79,7 @@ check "OpenBao ($OPENBAO_STS) Ready" sts_ready "$OPENBAO_STS" "$CORE_NS"
 [[ "$S3_MODE" == rustfs ]] && check "RustFS Ready (UAT)" deploy_ready "$RUSTFS_SVC" "$UAT_NS"
 check "Keycloak Ready" deploy_ready "$KEYCLOAK_DEPLOY" "$UAT_NS"
 check "edge proxy Ready" deploy_ready "$EDGE_DEPLOY" "$UAT_NS"
-for s in "$SAASAPI_NATS_SECRET" "$SAASAPI_BOX_SECRET" "$SEEDS_SECRET" "$FARMER_NKEY_SECRET" "$INTERNAL_AUTH_SECRET"; do
+for s in "$SAASAPI_NATS_SECRET" "$SAASAPI_BOX_SECRET" "$SEEDS_SECRET" "$FARMER_NKEY_SECRET" "$INTERNAL_AUTH_SECRET" "$OPERATOR_TLS_SECRET" "$OPERATOR_TOKEN_SECRET"; do
 	check "Secret $CORE_NS/$s exists" kc -n "$CORE_NS" get secret "$s"
 done
 
@@ -150,11 +159,26 @@ check "saasapi SAASAPI_JWT_ISSUER is the Keycloak issuer" jq -e --arg i "$KEYCLO
 check "saasapi SAASAPI_KEYCLOAK_JWKS_URL is on the core FQDN" jq -e --arg j "$KEYCLOAK_JWKS_URL" '.SAASAPI_KEYCLOAK_JWKS_URL == $j' <<<"$saas_env"
 check "saasapi SAASAPI_JWT_AUDIENCE is $SAASAPI_AUDIENCE" jq -e --arg a "$SAASAPI_AUDIENCE" '.SAASAPI_JWT_AUDIENCE == $a' <<<"$saas_env"
 
+# --- operator plane and fleet update flags ------------------------------------
+check "saasapi runs its operator listener (SAASAPI_OPERATOR_LISTEN_ADDR on :$SAASAPI_OPERATOR_PORT)" \
+	jq -e --arg p ":$SAASAPI_OPERATOR_PORT" '(.SAASAPI_OPERATOR_LISTEN_ADDR // "") | endswith($p)' <<<"$saas_env"
+dispatch=$(jq -r '.dispatch_flags // "off"' "$core_json")
+want_flag=false
+[[ "$dispatch" != on ]] || want_flag=true
+farmer_env=$(kc -n "$CORE_NS" get deployment "$FARMER_FULLNAME" -o json |
+	jq '[.spec.template.spec.containers[] | select(.name == "farmer") | .env[] | {(.name): .value}] | add')
+check "saasapi SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED is $want_flag (dispatch_flags $dispatch)" \
+	jq -e --arg w "$want_flag" '.SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED == $w' <<<"$saas_env"
+check "farmer IMAS_SELF_UPDATE_ENABLED is $want_flag (dispatch_flags $dispatch)" \
+	jq -e --arg w "$want_flag" '.IMAS_SELF_UPDATE_ENABLED == $w' <<<"$farmer_env"
+
 # --- tokens and saasapi -------------------------------------------------------
-# status <token or ""> <send BFF secret: 1|0> <path>: the HTTP status only.
-# Secrets go in header files on process substitution, not argv.
+# status <token or ""> <send BFF secret: 1|0> <path>: the HTTP status, and
+# after a space the error code of saasapi's JSON error body when there is
+# one ("401 unauthorized", "403 forbidden", "200"). Secrets go in header
+# files, not argv.
 status() {
-	local tok="$1" bff="$2" path="$3" hdr=() tokhdr="" code
+	local tok="$1" bff="$2" path="$3" hdr=() tokhdr="" code body
 	if [[ "$bff" == 1 ]]; then hdr+=(-H "@$ias.hdr"); fi
 	if [[ -n "$tok" ]]; then
 		# A real file, not -H @<(...): a process substitution stored in an
@@ -164,9 +188,11 @@ status() {
 		printf 'Authorization: Bearer %s\n' "$tok" >"$tokhdr"
 		hdr+=(-H "@$tokhdr")
 	fi
-	code=$(curl_tls -o /dev/null -w '%{http_code}' "${hdr[@]}" "$SAASAPI_URL$path" 2>/dev/null) || code=000
+	body=$(umask 077 && mktemp "${TMPDIR:-/tmp}/imas-uat-body.XXXXXX")
+	code=$(curl_tls -o "$body" -w '%{http_code}' "${hdr[@]}" "$SAASAPI_URL$path" 2>/dev/null) || code=000
 	[[ -z "$tokhdr" ]] || rm -f "$tokhdr"
-	printf '%s' "$code"
+	status_line "$code" "$body"
+	rm -f "$body"
 }
 (umask 077 && printf 'X-Internal-Auth: %s\n' "$(cat "$ias")" >"$ias.hdr")
 trap 'rm -f "$ias.hdr"' EXIT
@@ -195,23 +221,23 @@ for u in t1-admin t2-admin; do
 	check "saasapi answers $u's token: GET /v1/versions is 200 (got $got)" test "$got" = 200
 done
 got=$(status "" 1 /v1/versions)
-check "saasapi refuses a request with no token: 401 (got $got)" test "$got" = 401
+check "saasapi refuses a request with no token: 401 unauthorized (got $got)" test "$got" = "401 unauthorized"
 got=$(status "" 0 /v1/versions)
-check "saasapi refuses a request with no token and no BFF secret: 401 (got $got)" test "$got" = 401
+check "saasapi refuses a request with no token and no BFF secret: 401 unauthorized (got $got)" test "$got" = "401 unauthorized"
 got=$(status "${TOK[t1-admin]:-}" 0 /v1/versions)
-check "saasapi refuses a valid token without the BFF secret: 401 (got $got)" test "$got" = 401
+check "saasapi refuses a valid token without the BFF secret: 401 unauthorized (got $got)" test "$got" = "401 unauthorized"
 other_tok=$("$here/token.sh" "$KUBECONFIG_PATH" "$ENDPOINTS" "$STATE_ROOT" t1-admin other 2>/dev/null || true)
 check "Keycloak issues a token to t1-admin on $OTHER_CLIENT" test -n "$other_tok"
 if [[ -n "$other_tok" ]]; then
 	check "$OTHER_CLIENT token lacks $SAASAPI_AUDIENCE" jq -e --arg a "$SAASAPI_AUDIENCE" \
 		'(.aud // [] | if type == "array" then . else [.] end) | index($a) | not' <<<"$(jwt_payload "$other_tok")"
 	got=$(status "$other_tok" 1 /v1/versions)
-	check "saasapi refuses a token without its audience: 401 (got $got)" test "$got" = 401
+	check "saasapi refuses a token without its audience: 401 unauthorized (got $got)" test "$got" = "401 unauthorized"
 fi
 forged="${TOK[t1-admin]:-x.y.z}"
 forged="${forged%.*}.AAAA"
 got=$(status "$forged" 1 /v1/versions)
-check "saasapi refuses a token with a bad signature: 401 (got $got)" test "$got" = 401
+check "saasapi refuses a token with a bad signature: 401 unauthorized (got $got)" test "$got" = "401 unauthorized"
 
 # Tenant scoping, once UAT.4 has created the tenants and bind-tenant.sh has
 # mapped them.
@@ -223,11 +249,11 @@ if [[ -n "$t1" && -n "$t2" ]]; then
 	got=$(status "${TOK[t1-admin]:-}" 1 "/v1/tenants/$t1")
 	check "t1-admin reads tenant 1: 200 (got $got)" test "$got" = 200
 	got=$(status "${TOK[t1-admin]:-}" 1 "/v1/tenants/$t2")
-	check "t1-admin is refused on tenant 2: 403 (got $got)" test "$got" = 403
+	check "t1-admin is refused on tenant 2: 403 forbidden (got $got)" test "$got" = "403 forbidden"
 	got=$(status "${TOK[t2-admin]:-}" 1 "/v1/tenants/$t2")
 	check "t2-admin reads tenant 2: 200 (got $got)" test "$got" = 200
 	got=$(status "${TOK[t2-admin]:-}" 1 "/v1/tenants/$t1")
-	check "t2-admin is refused on tenant 1: 403 (got $got)" test "$got" = 403
+	check "t2-admin is refused on tenant 1: 403 forbidden (got $got)" test "$got" = "403 forbidden"
 else
 	printf 'SKIP  tenant scoping: tenants not bound yet (UAT.4 creates them; bind-tenant.sh maps them)\n'
 fi
