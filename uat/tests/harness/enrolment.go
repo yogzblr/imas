@@ -166,8 +166,13 @@ func (fe *FullEnroller) Replay(ctx context.Context, e *Enrolment) error {
 	return nil
 }
 
+// client is a sprout's client for one enrolment. Its timestamps are the
+// clock's: Enroll keeps one sprout's requests strictly increasing, and
+// sprouts of different NKeys never sign the same payload, so the
+// process-wide bumping a single sprout needs would only push the many
+// sprouts of a burst (HA6) ahead of the clock.
 func (fe *FullEnroller) client() *pki.EnrollClient {
-	return &pki.EnrollClient{HTTP: fe.HTTP, FarmerURL: fe.EnvoyURL}
+	return &pki.EnrollClient{HTTP: fe.HTTP, FarmerURL: fe.EnvoyURL, Timestamp: func() int64 { return time.Now().Unix() }}
 }
 
 // Duplicates checks that the enrolments name distinct sprouts, NKeys,
