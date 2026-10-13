@@ -405,7 +405,9 @@ write_endpoints() {
 
 check_k0sctl_version() {
   local have
-  have=$(k0sctl version 2>/dev/null | awk '$1 == "version:" {print $2; exit}')
+  # awk reads to the end: exiting at the first match could leave k0sctl
+  # writing to a closed pipe, and pipefail would end the script with 141.
+  have=$(k0sctl version 2>/dev/null | awk '$1 == "version:" && v == "" {v = $2} END {print v}')
   [[ $have == "$K0SCTL_VERSION" ]] ||
     die "k0sctl ${have:-unknown} found, versions.env pins $K0SCTL_VERSION (uat/k0s/install-tools.sh installs it)"
 }
