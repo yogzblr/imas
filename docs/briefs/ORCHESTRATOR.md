@@ -46,6 +46,13 @@ A unit may start only when every unit in "Needs" is merged to main.
 | E4 | `E-followups.md` E4 | none |
 | E5 | `E-followups.md` E5 | E1 |
 | Z | `E-followups.md` Z | every other unit |
+| R1 | `H-azure-next-runs.md` R1 | none |
+| H1 | `H-azure-next-runs.md` H1 | none |
+| H2 | `H-azure-next-runs.md` H2 | H1 |
+| H3 | `H-azure-next-runs.md` H3 | none |
+| H4 | `H-azure-next-runs.md` H4 | H2, H3 |
+| H5 | `H-azure-next-runs.md` H5 | R1, H4 |
+| H6 | `H-azure-next-runs.md` H6 | R1, H1, H2, H3, H4, H5 |
 
 First wave of the original build (no needs): A1, B1, C1, D1, D2. Units A to D are all merged (C2 last, as PR 229; its leftovers are E6); the follow-up units E1 to E5 and Z are launched in the same way, E6 first by rule 10 (E3 waits for it). Why the order: P22 first (design D13);
 A2 and the P21 slice 1 chart work both edit the farmer bootstrap Job and policies, so
@@ -194,3 +201,10 @@ Paste this into a Claude Code session started in the yogzblr/imas repo on main.
 | E5 | P28: docs, CI, flake and earlier reports | E-followups.md | E5 |
 | Z | Final gate: nothing left open | E-followups.md | Z |
 | E6 | P21: finish C2, the farmer account publisher | E-followups.md | E6 |
+| R1 | P20, P13: UAT registers the release and turns the update path on | H-azure-next-runs.md | R1 |
+| H1 | P24: tofu for 3 + 3 nodes | H-azure-next-runs.md | H1 |
+| H2 | P24: k0s with 3 controller+worker nodes on etcd | H-azure-next-runs.md | H2 |
+| H3 | P25: Versity Gateway chart component | H-azure-next-runs.md | H3 |
+| H4 | P24: HA hub values and scripts | H-azure-next-runs.md | H4 |
+| H5 | P23, P24: the ha test tier | H-azure-next-runs.md | H5 |
+| H6 | Final gate for the next runs, runbook | H-azure-next-runs.md | H6 |
