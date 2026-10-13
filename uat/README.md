@@ -33,7 +33,10 @@ native tunnelling), `uat-dmz` (single-node k0s, the nats chart), `uat-core`
 six sprouts: `t1-ubuntu`, `t1-alma`, `t1-win`, `t2-ubuntu`, `t2-alma`,
 `t2-win`. SSH, WinRM and the Kubernetes API are reached only through Bastion
 tunnels; only Envoy (8443 on the DMZ) and 443 on core are open, and only to
-the runner's own address.
+the runner's own address. The HA run (`hub_nodes` 3, P24) makes each hub three k0s
+nodes over the region's zones, `uat-dmz-1` to `uat-dmz-3` and `uat-core-1` to
+`uat-core-3`, behind an internal and a public Standard load balancer
+(`uat/tofu/README.md`, "HA topology").
 
 ## The pieces
 
@@ -87,8 +90,11 @@ a credential with the old plain subject `repo:OWNER/REPO:environment:...`, which
    22 vCPUs in all, 10 in the Dsv5 family and 12 in the family of
    Standard_B2ls_v2 (find its name with `az vm list-skus --location <region>
    --size Standard_B2ls_v2 --query [0].family`; `az vm list-usage` shows the
-   quota), so Total Regional vCPUs must be at least 22. Two runs at once (two
-   different releases) need twice that.
+   quota), so Total Regional vCPUs must be at least 22. The HA run
+   (`hub_nodes` 3) needs Standard_D4s_v5 too and 18 Dsv5 vCPU plus the 12
+   B2ls_v2 (owner, 2026-10-13), 30 in all. The workflow checks this before
+   it creates anything (`uat/tofu/quota-check.sh`). One run at a time (the
+   workflow's concurrency group).
 5. **The bootstrap stack**, by hand, once: `uat/tofu/bootstrap` (state storage
    account with Entra-only access, a `CanNotDelete` lock, the monthly budget
    alert). Give the GitHub identity `Storage Blob Data Contributor` on the
@@ -140,6 +146,7 @@ Then approve the `uat` deployment when GitHub asks (the required reviewer).
 | `tier` | `all` | `smoke` (about 10 minutes of tests), `core` (includes smoke), `resilience`, `ingredients`, `lifecycle` or `all` |
 | `upgrade_from_tag` | empty | An earlier release for L4 (the package upgrade, UAT.7). Empty: L4 skips with that reason. Passed to the tests as `IMAS_UAT_UPGRADE_FROM_TAG` |
 | `scenarios` | empty | Scenario ids of the tier, separated by spaces or commas (`C1 X4`), passed to `uat/tests/run.sh`. Ingredient ids (`I.file.managed`) go in an `ingredients` run of their own |
+| `hub_nodes` | `1` | k0s nodes per hub. `1` is the single-node run. `3` is the HA run (P24): `uat/tofu` gets `core_node_count=3`, `dmz_node_count=3` and `core_node_size=Standard_D4s_v5` (3 core nodes of D4s_v5, 3 DMZ nodes of D2s_v5, each hub behind load balancers; `uat/tofu/README.md`, "HA topology"), which needs 18 Dsv5 vCPU of quota |
 
 What the run does, in order (each step is a step of the job, so the failed one
 names the piece):
@@ -147,7 +154,7 @@ names the piece):
 1. **Check inputs and variables** (`uat/scripts/check-inputs.sh`): the three
    Azure variables are set and are GUIDs; `release_tag` (and
    `upgrade_from_tag`) is a release tag that exists and has a published
-   release; region, `keep_hours`, tier and scenario ids are well formed. Every
+   release; region, `keep_hours`, tier, `hub_nodes` and scenario ids are well formed. Every
    problem is reported at once, by name, and nothing is created.
 2. Tools: Go, Python, OpenTofu 1.11.5, Helm v4.3.0, k0sctl and kubectl at
    `uat/k0s` pins, Ansible with pywinrm.
@@ -156,8 +163,14 @@ names the piece):
    must answer and all must agree, and the address must be public), and a
    fresh **run_id** (`run-id.sh`: 8 characters, a letter first).
 4. **tofu apply** (`uat/tofu`), state in the bootstrap account at
-   `imas-uat/<run_id>.tfstate`. The per-run SSH key and Windows password go to
-   0600 files on the runner, masked in the log.
+   `imas-uat/<run_id>.tfstate`. A plan and `uat/tofu/quota-check.sh` come
+   first: the step fails before anything is created, naming the quota family
+   and the vCPUs needed, in use and the limit to request, when the region's
+   quota cannot hold the run; the apply applies exactly that checked plan
+   (a retry plans and checks again). The per-run SSH key and Windows password go to
+   0600 files on the runner, masked in the log; `uat.json` and
+   `ha_node_names.json` (the VMs the HA tests stop) go to the run's state
+   directory.
 5. **Bastion tunnels** (`uat/access/tunnels.sh open`, after `az extension add`
    for `bastion` and `ssh`).
 6. **k0s** on both hubs (`uat/k0s/bootstrap.sh`).
@@ -197,7 +210,7 @@ no silent green rule). Use `smoke`, `core` or `resilience` until then.
 | Artifact | Contents |
 |---|---|
 | `uat-report-<run_id>` | `summary.txt` (one line per scenario, OS and tenant), `junit.xml`, `events.json` (`go test -json`), `build.log` |
-| `uat-outputs-<run_id>` | `run.json` (this run's inputs), `uat.json` (tofu output, no credentials), `k0s/endpoints.json`, the UAT CA certificate, the rendered k0sctl files, `hub/core/out/core.json` and `admin.json` (public keys), `hub/harness.json`, `dmz/dmz.json`, `enroll/{run,tenants,keys,sprouts,sprouts-detail}.json` |
+| `uat-outputs-<run_id>` | `run.json` (this run's inputs), `uat.json` (tofu output, no credentials), `ha_node_names.json` (tofu output), `k0s/endpoints.json`, the UAT CA certificate, the rendered k0sctl files, `hub/core/out/core.json` and `admin.json` (public keys), `hub/harness.json`, `dmz/dmz.json`, `enroll/{run,tenants,keys,sprouts,sprouts-detail}.json` |
 
 Never uploaded: the SSH key, the WinRM password, the kubeconfigs, OpenBao's
 unseal keys and root token, the NKey seeds, the bootstrap admin's private
@@ -233,7 +246,10 @@ tofu output -json uat >/tmp/uat-$RUN.json
 (umask 077; tofu output -raw ssh_private_key >/tmp/uat-$RUN.key)
 # The NSGs admit only the runner's old address. Let yours in (this also moves
 # the Envoy and core 443 rules to you); keep the run's release_tag, region,
-# keep_hours and run_budget_hours (all in the outputs artifact's run.json).
+# keep_hours, run_budget_hours and hub_nodes (all in the outputs artifact's
+# run.json). For an HA run (hub_nodes 3) also pass -var core_node_count=3
+# -var dmz_node_count=3 -var core_node_size=Standard_D4s_v5, or the apply
+# removes the extra nodes.
 tofu apply -var run_id=$RUN -var release_tag=<tag> -var region=<region> -var keep_hours=<hours> \
   -var run_budget_hours=<3 or 7> -var runner_cidr=$(curl -4 -s https://api.ipify.org)/32
 cd ../..
@@ -369,6 +385,7 @@ the pricing calculator and watch the budget alert.** From section 4h:
 | Item | Rough cost |
 |---|---|
 | The two hubs (D8s_v5 core, D2s_v5 DMZ) | about $1 an hour together |
+| The HA hubs instead (3 x D4s_v5 core, 3 x D2s_v5 DMZ, 4 Standard load balancers) | about $2 an hour together (18 vCPU against 10) |
 | The six sprouts (all Standard_B2ls_v2) | a few cents an hour |
 | Azure Bastion, Standard SKU | about $0.25 to $0.30 an hour |
 | Nine Standard public IPs, disks, DNS zone | cents an hour |

@@ -12,7 +12,8 @@
 #   <out-dir>/report/    the test report: summary.txt, junit.xml, events.json,
 #                        build.log (uat/tests/run.sh)
 #   <out-dir>/outputs/   run.json (this run's inputs), uat.json (tofu output
-#                        uat, no credentials), k0s/endpoints.json,
+#                        uat, no credentials), ha_node_names.json (tofu
+#                        output ha_node_names), k0s/endpoints.json,
 #                        k0s/uat-ca.crt, k0s/k0sctl-{dmz,core}.yaml,
 #                        hub/core/out/{core,admin}.json and uat-ca.crt,
 #                        hub/harness.json, dmz/dmz.json,
@@ -39,6 +40,7 @@ report_files=(
 output_files=(
   run.json
   uat.json
+  ha_node_names.json
   k0s/endpoints.json
   k0s/uat-ca.crt
   k0s/k0sctl-dmz.yaml

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Stub az for destroy_test.sh. Logs its arguments; behaviour comes from files
-# in $STUB_STATE.
+# Stub az for destroy_test.sh and quota_test.sh. Logs its arguments;
+# behaviour comes from files in $STUB_STATE.
 set -u
 # log_line <text>: appends one line to calls.log in a single write, under an
 # flock when available. Stubs run concurrently (tunnels.sh starts every tunnel
@@ -35,6 +35,15 @@ case "$1 $2" in
     ;;
   "resource list")
     cat "$STUB_STATE/leftovers" 2>/dev/null
+    ;;
+  "vm list-skus")
+    # quota_test.sh: the whole SKU list; quota-check.sh picks the size.
+    [ -f "$STUB_STATE/skus_fail" ] && { echo "ERROR: stub failure" >&2; exit 1; }
+    cat "$STUB_STATE/skus.json"
+    ;;
+  "vm list-usage")
+    [ -f "$STUB_STATE/usage_fail" ] && { echo "ERROR: stub failure" >&2; exit 1; }
+    cat "$STUB_STATE/usage.json"
     ;;
   *)
     echo "stub az: unexpected call: $*" >&2

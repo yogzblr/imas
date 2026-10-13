@@ -62,16 +62,43 @@ variable "run_budget_hours" {
   }
 }
 
-# Sizes (Shared contract).
+# Sizes and node counts (Shared contract; brief H-azure-next-runs.md H1).
+# A hub of one node is the single-node plumbing run, unchanged. More nodes
+# make the HA topology (P24): every node of the hub behind an internal load
+# balancer for the k0s API and the hub's private ports, and a public one for
+# the hub's public port. Owner, 2026-10-13: the HA run is 3 core nodes of
+# Standard_D4s_v5 and 3 DMZ nodes of Standard_D2s_v5.
 
-variable "dmz_size" {
-  description = "VM size of uat-dmz."
+variable "dmz_node_count" {
+  description = "Number of DMZ nodes. 1 (default) is the single-node run, unchanged: one VM uat-dmz with its own public IP. 3 or 5 (etcd needs an odd number) is the HA topology: uat-dmz-1 to uat-dmz-N behind load balancers."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = contains([1, 3, 5], var.dmz_node_count)
+    error_message = "dmz_node_count must be 1, 3 or 5 (etcd needs an odd number of members)."
+  }
+}
+
+variable "core_node_count" {
+  description = "Number of core nodes. 1 (default) is the single-node run, unchanged: one VM uat-core. 3 or 5 is the HA topology: uat-core-1 to uat-core-N behind load balancers."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = contains([1, 3, 5], var.core_node_count)
+    error_message = "core_node_count must be 1, 3 or 5 (etcd needs an odd number of members)."
+  }
+}
+
+variable "dmz_node_size" {
+  description = "VM size of every DMZ node. The HA run keeps the default (owner, 2026-10-13)."
   type        = string
   default     = "Standard_D2s_v5"
 }
 
-variable "core_size" {
-  description = "VM size of uat-core."
+variable "core_node_size" {
+  description = "VM size of every core node. The HA run sets Standard_D4s_v5 (owner, 2026-10-13), so 3 core and 3 DMZ nodes need 18 Dsv5 vCPU."
   type        = string
   default     = "Standard_D8s_v5"
 }
@@ -89,13 +116,13 @@ variable "windows_sprout_size" {
 }
 
 variable "dmz_os_disk_gb" {
-  description = "OS disk of uat-dmz, Standard SSD."
+  description = "OS disk of every DMZ node, Standard SSD."
   type        = number
   default     = 64
 }
 
 variable "core_os_disk_gb" {
-  description = "OS disk of uat-core, Standard SSD."
+  description = "OS disk of every core node, Standard SSD."
   type        = number
   default     = 128
 }
@@ -195,7 +222,7 @@ variable "core_public_port" {
 }
 
 variable "private_dns_zone" {
-  description = "Azure Private DNS zone linked to the VNet. Owner, 2026-10-06: sprouts reach Envoy on the DMZ private IP through a private DNS name; the zone holds dmz.<zone> and core.<zone> (A records to the hubs' private IPs). Resolves only inside the VNet."
+  description = "Azure Private DNS zone linked to the VNet. Owner, 2026-10-06: sprouts reach Envoy on the DMZ private IP through a private DNS name; the zone holds dmz.<zone> and core.<zone> (A records to the hubs' private IPs, or their internal load balancers on an HA hub), <hub>-api.<zone> and one record per hub node (dns.tf). Resolves only inside the VNet."
   type        = string
   default     = "uat.imas.internal"
 

@@ -17,7 +17,11 @@ in one resource group, `imas-uat-<run_id>`, and destroys it afterwards:
   Standard public IP), the only path to SSH, WinRM and the Kubernetes API;
 - the two hubs, `uat-dmz` and `uat-core`, and the six sprouts, `t1-ubuntu`,
   `t1-alma`, `t1-win`, `t2-ubuntu`, `t2-alma` and `t2-win`, each with its own
-  Standard public IP.
+  Standard public IP;
+- with `core_node_count` or `dmz_node_count` above 1, the HA topology of P24
+  (see [HA topology](#ha-topology)): that hub becomes `uat-<hub>-1` to
+  `uat-<hub>-N`, spread over the region's availability zones, behind an
+  internal and a public Standard load balancer.
 
 `bootstrap/` holds the only pieces that stay up between runs: the state
 storage and a budget alert. `destroy.sh` tears a run down and proves nothing is
@@ -32,12 +36,14 @@ Files:
 | `main.tf` | Resource group, tags, expiry, per-run SSH key and Windows password, VNet and subnets |
 | `dns.tf` | The private DNS zone: `dmz.<zone>` and `core.<zone>` to the hubs' private addresses |
 | `network-security.tf` | The four NSGs (rules tabled below) |
-| `vms.tf` | Public IPs, NICs, the eight VMs, the WinRM extension, the Bastion |
+| `vms.tf` | Public IPs, NICs, the hub nodes and sprouts, the WinRM extension, the Bastion |
+| `lb.tf` | The load balancers of an HA hub (none for a single node) |
+| `quota-check.sh` | Run before `tofu apply`: fails with the vCPU numbers when the region's quota cannot hold the VMs the plan creates |
 | `winrm-https.ps1` | What the Windows extension runs: WinRM over HTTPS on 5986 |
 | `outputs.tf` | `uat` (the contract object) and the two sensitive credential outputs |
 | `destroy.sh` | Teardown helper |
 | `bootstrap/` | The persistent stack, applied once by the owner |
-| `tests/` | `main.tftest.hcl` (tofu test, mocked providers), `destroy_test.sh` and its stubs |
+| `tests/` | `main.tftest.hcl` (tofu test, mocked providers), `destroy_test.sh`, `quota_test.sh`, their stubs and `testdata/` (plan, SKU and usage fixtures) |
 | `scripts_test.go` | Runs the shell tests, shellcheck and `tofu fmt -check` from `go test ./...` when the tools are on PATH |
 
 ## Inputs
@@ -52,9 +58,10 @@ From the Shared contract, plus what the brief makes a variable.
 | `runner_cidr` | required | One `/32`, the only internet source let in (Envoy, 443 on core, 443 on the Bastion) |
 | `keep_hours` | `0` | 0 to 168. Above 0 the workflow skips the final destroy and the janitor deletes the group after `expires_at` |
 | `run_budget_hours` | `4` | `expires_at` = time of the first apply + `run_budget_hours` + `keep_hours`, so even a run whose destroy never ran is collected by the janitor |
-| `dmz_size`, `core_size` | `Standard_D2s_v5`, `Standard_D8s_v5` | |
+| `dmz_node_count`, `core_node_count` | `1`, `1` | 1, 3 or 5 (etcd needs an odd number). 1 is the single-node run, unchanged; the HA run (P24, owner 2026-10-13) sets 3 and 3 (workflow input `hub_nodes`) |
+| `dmz_node_size`, `core_node_size` | `Standard_D2s_v5`, `Standard_D8s_v5` | Size of every node of the hub. The HA run sets `core_node_size = Standard_D4s_v5` (owner, 2026-10-13); the DMZ keeps its default. Renamed from `dmz_size` and `core_size` |
 | `linux_sprout_size`, `windows_sprout_size` | `Standard_B2ls_v2`, `Standard_B2ls_v2` | 2 vCPU, 4 GiB. Changed from `Standard_B1ms` and `Standard_B2s` on 2026-10-10: the owner's subscription does not offer those two in `centralindia`, only the v2 B-series |
-| `dmz_os_disk_gb`, `core_os_disk_gb` | `64`, `128` | Standard SSD |
+| `dmz_os_disk_gb`, `core_os_disk_gb` | `64`, `128` | Per node, Standard SSD |
 | `sprout_os_disk_gb` | `30` | Standard SSD; cannot be smaller than the image (30 GB for Ubuntu and the Windows smalldisk image) |
 | `ubuntu_image` | `Canonical:ubuntu-24_04-lts:server:latest` | Hubs and Ubuntu sprouts |
 | `alma_image` | `almalinux:almalinux-x86_64:9-gen2:latest` | Marketplace image; terms accepted once (section 4h) |
@@ -83,8 +90,10 @@ they come from the environment (`ARM_SUBSCRIPTION_ID`, `ARM_TENANT_ID`,
   "run_id": "abc123",
   "region": "centralindia",
   "resource_group": "imas-uat-abc123",
-  "dmz":  { "name": "uat-dmz",  "id": "/subscriptions/.../virtualMachines/uat-dmz",  "private_ip": "10.60.1.4", "public_ip": "...", "fqdn": "uatabc123-dmz.centralindia.cloudapp.azure.com",  "admin_user": "imasuat" },
-  "core": { "name": "uat-core", "id": "...", "private_ip": "10.60.2.4", "public_ip": "...", "fqdn": "uatabc123-core.centralindia.cloudapp.azure.com", "admin_user": "imasuat" },
+  "dmz":  { "name": "uat-dmz",  "id": "/subscriptions/.../virtualMachines/uat-dmz",  "private_ip": "10.60.1.4", "public_ip": "...", "fqdn": "uatabc123-dmz.centralindia.cloudapp.azure.com",  "admin_user": "imasuat",
+            "node_names": ["uat-dmz"], "node_ids": ["..."], "node_private_ips": ["10.60.1.4"], "api_address": "10.60.1.4", "api_fqdn": "dmz-api.uat.imas.internal" },
+  "core": { "name": "uat-core", "id": "...", "private_ip": "10.60.2.4", "public_ip": "...", "fqdn": "uatabc123-core.centralindia.cloudapp.azure.com", "admin_user": "imasuat",
+            "node_names": ["uat-core"], "node_ids": ["..."], "node_private_ips": ["10.60.2.4"], "api_address": "10.60.2.4", "api_fqdn": "core-api.uat.imas.internal" },
   "sprouts": {
     "t1-ubuntu": { "tenant": 1, "os": "ubuntu",  "connection": "ssh",   "id": "...", "private_ip": "...", "public_ip": "...", "admin_user": "imasuat" },
     "t1-win":    { "tenant": 1, "os": "windows", "connection": "winrm", "id": "...", "private_ip": "...", "public_ip": "...", "admin_user": "imasuat" }
@@ -100,7 +109,25 @@ that. The contract does not fix the shape of `subnets`; here it is a map of
 name to `{cidr, id}`. `release_tag` and `expires_at` are resource tags, not
 output keys.
 `uat/access/testdata/uat.json` is a full sample, and `tofu test` fails if its
-shape drifts from the real output.
+shape drifts from the real output; `uat/access/testdata/uat-ha.json` is the
+same for the HA run (3 + 3 nodes).
+
+Hub fields. `name`, `id` and `private_ip` are the hub's first node (its only
+node in the single-node run); `public_ip` and `fqdn` are what the runner
+reaches: the node's public IP, or the hub's public load balancer on an HA hub.
+P24 added, for every node count:
+
+| Field | What |
+|---|---|
+| `node_names`, `node_ids`, `node_private_ips` | Every node of the hub, as lists in node order (`["uat-dmz"]`, or `["uat-dmz-1", "uat-dmz-2", "uat-dmz-3"]`) |
+| `api_address` | The stable private address of the hub's k0s API: the node's own address on a single node, the internal load balancer's (host `.250` of the hub's subnet) on an HA hub. On an HA hub it also carries the hub's private ports |
+| `api_fqdn` | `<hub>-api.<private_dns_zone>`, which resolves to `api_address` |
+
+A separate output, `ha_node_names`, lists per hub the VMs the HA tests stop:
+`{"core": ["uat-core-1", "uat-core-2", "uat-core-3"], "dmz": [...]}` for the
+HA run, empty lists for a single-node hub. It is not in `uat` because the
+Shared contract fixes `uat`'s top-level keys; the workflow writes it to
+`ha_node_names.json` next to `uat.json`.
 
 Credentials are not in `uat`. Two separate outputs hold them, both
 `sensitive`, so `tofu output` and plans print `(sensitive value)`. The owner
@@ -130,7 +157,8 @@ Owner's decisions (2026-10-06) this table applies: sprouts connect to nats
 only through Envoy, on the DMZ **private** address, by a private DNS name;
 farmer and saasapi connect to farmerbus; Envoy is node port **8443** and the
 bus node port **8442**, so the DMZ node port range is 8442-8443 only; no load
-balancer.
+balancer in the single-node run (the HA run adds them, owner 2026-10-13; see
+[HA topology](#ha-topology)).
 
 | NSG | Dir | Prio | Rule | From | To | Port | Reason |
 |---|---|---|---|---|---|---|---|
@@ -174,8 +202,9 @@ assumed:
    8443 as node port. It should support both load balancer and node port",
    and later "no load balancer". So the runner (`runner_cidr` only) and the
    sprouts reach Envoy on the DMZ host at 8443 (`envoy_port`; it is also the
-   chart's `envoy.listenerPort`). This module creates no load balancer or
-   Application Gateway. `farmer_api_port` defaults to the chart's 5405; per
+   chart's `envoy.listenerPort`). The single-node run creates no load
+   balancer or Application Gateway; the HA run puts Standard load balancers
+   in front of the node ports (owner, 2026-10-13; [HA topology](#ha-topology)). `farmer_api_port` defaults to the chart's 5405; per
    the owner, farmer's port can be anything, so set it to whatever UAT.2 and
    UAT.3b expose. 443 on core is from the Shared contract, not the charts
    (saasapi's own port is 8081).
@@ -225,13 +254,15 @@ environment from your own machine, re-apply with your address as
 ### Private DNS
 
 An Azure Private DNS zone, `private_dns_zone` (default `uat.imas.internal`),
-is linked to the VNet (auto-registration off) and holds two A records with a
-60 second TTL:
+is linked to the VNet (auto-registration off) and holds these A records, each
+with a 60 second TTL:
 
 | Name | Resolves to |
 |---|---|
-| `dmz.uat.imas.internal` | `uat-dmz`'s private address: what sprouts use for Envoy (8443) and core for the bus (8442) |
-| `core.uat.imas.internal` | `uat-core`'s private address: what Envoy may use for farmer (5405) |
+| `dmz.uat.imas.internal` | `uat-dmz`'s private address (on an HA DMZ, its internal load balancer): what sprouts use for Envoy (8443) and core for the bus (8442) |
+| `core.uat.imas.internal` | `uat-core`'s private address (on an HA core, its internal load balancer): what Envoy may use for farmer (5405) |
+| `dmz-api.uat.imas.internal`, `core-api.uat.imas.internal` | The hub's k0s API address (`uat` `<hub>.api_address`): the same address as `<hub>.uat.imas.internal` |
+| `<node>.uat.imas.internal` | Every hub node by its VM name (`uat-dmz`, `uat-core`, or `uat-dmz-1` to `uat-dmz-N` and `uat-core-1` to `uat-core-N`) |
 
 Every VM in the VNet resolves these through Azure's resolver (168.63.129.16),
 and so do pods whose DNS forwards to the node's resolver. Nothing outside the
@@ -241,12 +272,83 @@ Shared contract, and that the Envoy and bus certificate SANs, the sprouts'
 `farmerinterface` and farmer's `farmerbusurl` use them (UAT.3a, UAT.3b,
 UAT.4). The zone is deleted with the run's resource group.
 
+## HA topology
+
+`core_node_count` and `dmz_node_count` (default 1) set the nodes per hub. A
+hub of one node is the single-node run, unchanged: one VM, its own public IP
+with the hub's DNS label, no zone, no load balancer, the NSG rules above.
+With more nodes (the HA run is 3 and 3, owner 2026-10-13; P24):
+
+- **Nodes.** `uat-<hub>-1` to `uat-<hub>-N`, all of `<hub>_node_size`, placed
+  round the region's availability zones (node 1 in zone 1, node 2 in zone 2,
+  ...). The zones come from the `azurerm_location` data source; in a region
+  without zones the nodes get none. Each node keeps its own Standard public
+  IP, without a DNS label, for outbound traffic only.
+- **Internal load balancer** `uat-<hub>-ilb`, Standard SKU, a static frontend
+  at host `.250` of the hub's subnet (zone-redundant where the region has
+  zones), backend pool every node of the hub. Rules, each TCP to the same
+  port with a TCP health probe on that port (every 5 s, out after 2 misses):
+  the k0s API 6443 and the hub's private ports, Envoy `envoy_port` and the
+  bus `bus_port` on the DMZ, farmer `farmer_api_port` and the accounts store
+  `accounts_store_port` on core. `<hub>.<zone>` and `<hub>-api.<zone>` point
+  at it, so sprouts, the other hub and the Bastion tunnels keep one address
+  while a node is stopped.
+- **Public load balancer** `uat-<hub>-lb`, Standard SKU, on a zone-redundant
+  Standard public IP `uat-<hub>-lb-pip` that carries the hub's DNS label
+  (`uat<run_id>-<hub>`). It replaces the single node's public IP for the
+  runner's port: `envoy_port` on the DMZ, `core_public_port` on core (the
+  ports the hubs publish today, from `network-security.tf` and `dns.tf`).
+- Every rule disables outbound SNAT (the nodes' own IPs do outbound), keeps
+  idle connections 30 minutes (NATS and WebSocket) and resets them with a TCP
+  RST after that.
+- **NSG.** Every single-node rule stays. An HA hub adds, inside its own
+  subnet both ways: TCP 179 (kube-router BGP), 2379-2380 (etcd), 6443 (API),
+  8132 (konnectivity), 9443 (k0s join API), 10250 (kubelet) and UDP 5555
+  (kube-router's FOU overlay; Azure drops IP-in-IP inside a VNet, so the pod
+  overlay must be UDP), and the load balancer's health probes
+  (`AzureLoadBalancer`, which `DenyAllIn` would drop) on the load-balanced
+  ports. The tenants' deny rules cover every public IP of the hub (nodes and
+  load balancer). The table:
+
+| NSG | Dir | Prio | Rule | From | To | Port |
+|---|---|---|---|---|---|---|
+| dmz, core | in | 150 | AllowHubNodesTcpIn | the hub's subnet | the hub's subnet | TCP 179, 2379-2380, 6443, 8132, 9443, 10250 |
+| dmz, core | in | 151 | AllowHubNodesUdpIn | the hub's subnet | the hub's subnet | UDP 5555 |
+| dmz | in | 160 | AllowLoadBalancerProbeIn | AzureLoadBalancer | dmz | TCP 6443, `envoy_port`, `bus_port` |
+| core | in | 160 | AllowLoadBalancerProbeIn | AzureLoadBalancer | core | TCP 6443, `farmer_api_port`, `accounts_store_port`, `core_public_port` |
+| dmz, core | out | 150 | AllowHubNodesTcpOut | the hub's subnet | the hub's subnet | as 150 in |
+| dmz, core | out | 151 | AllowHubNodesUdpOut | the hub's subnet | the hub's subnet | UDP 5555 |
+
+- **Private DNS.** `<hub>.<zone>` and `<hub>-api.<zone>` resolve to the
+  internal load balancer; every node has `<node>.<zone>`.
+- **Azure limitation.** An internal load balancer drops a flow from a backend
+  node to its own frontend when the flow lands on that same node. A node of
+  the hub must therefore not use `api_address` to reach its own hub's API;
+  k0s's node-local load balancing does not (brief H2).
+- **Quota.** `quota-check.sh` runs before every apply in the workflow:
+
+```sh
+tofu plan -out=run.tfplan && tofu show -json run.tfplan >plan.json
+uat/tofu/quota-check.sh plan.json centralindia
+```
+
+It sums the vCPUs of every VM the plan creates per quota family (`az vm
+list-skus`) and checks each family and the region's total against `az vm
+list-usage`; a shortfall exits 1 naming the family, the vCPUs needed, in use,
+the limit and the limit to request. A size the subscription may not use in
+the region, or in a zone the plan puts a VM in, fails too. It fails closed
+(exit 2) when `az` cannot answer.
+
 ## Destroy semantics
 
 - **Disks.** OS disks go with their VM: the provider feature
   `delete_os_disk_on_deletion = true` (set explicitly in `versions.tf`). There
   are no data disks.
-- **NICs and public IPs** are tofu resources, destroyed with the VM.
+- **NICs and public IPs** are tofu resources, destroyed with the VM. So are
+  an HA hub's load balancers, their backend pools, probes and rules, the NIC
+  pool associations and the load balancers' public IPs; all carry the run's
+  tags, so `destroy.sh` and `uat/scripts/verify-teardown.sh` find any that
+  remain.
   `azurerm_linux_virtual_machine` and `azurerm_windows_virtual_machine` have no
   per-NIC `delete_option` attribute (that is an ARM property of the legacy
   resource), so this, plus the next point, is the equivalent.
@@ -313,7 +415,11 @@ tofu init \
   -backend-config=storage_account_name=<from the bootstrap output> \
   -backend-config=container_name=tfstate \
   -backend-config=key=imas-uat/$RUN.tfstate
-tofu apply -var run_id=$RUN -var release_tag=v0.1.0-rc.4 -var runner_cidr=<your address>/32
+VARS="-var run_id=$RUN -var release_tag=v0.1.0-rc.4 -var runner_cidr=<your address>/32"
+# The HA run adds: -var core_node_count=3 -var dmz_node_count=3 -var core_node_size=Standard_D4s_v5
+tofu plan $VARS -out=run.tfplan && tofu show -json run.tfplan > plan.json
+./quota-check.sh plan.json centralindia && rm -f plan.json
+tofu apply run.tfplan
 tofu output -json uat > uat.json
 ```
 
@@ -357,10 +463,19 @@ az resource list --tag run_id=<run_id> -o table   # must be empty
 | Azure Bastion `uat-bastion` | 1 | Standard SKU, 2 scale units |
 | Standard public IPs | 9 | 8 VMs and the Bastion; static |
 | VNet, subnets, NSGs, NICs | 1, 4, 4, 8 | |
-| Private DNS zone, VNet link, A records | 1, 1, 2 | `dmz` and `core` |
+| Private DNS zone, VNet link, A records | 1, 1, 6 | `dmz`, `core`, `dmz-api`, `core-api`, `uat-dmz`, `uat-core` |
 | VM extensions | 2 | `winrm-https` on each Windows sprout |
 
-22 vCPUs in all: 10 in the Dsv5 family and 12 in the family of Standard_B2ls_v2
+The HA run (3 + 3) replaces the two hubs with `uat-dmz-1` to `uat-dmz-3`
+(Standard_D2s_v5) and `uat-core-1` to `uat-core-3` (Standard_D4s_v5: 4 vCPU,
+16 GiB; 128 GB), adds 2 Standard public IPs (the public load balancers), 4
+Standard load balancers (with their backend pools, probes and rules), 4 more
+NICs and public IPs, and 4 more node records in the private zone (10 A
+records). It needs 18 Dsv5 vCPU instead of 10 (owner,
+2026-10-13: request 18 Dsv5 plus the 12 B2ls_v2 vCPU the sprouts use), 30 in
+all.
+
+Single-node run: 22 vCPUs in all: 10 in the Dsv5 family and 12 in the family of Standard_B2ls_v2
 (`az vm list-skus --location <region> --size Standard_B2ls_v2 --query [0].family`;
 quota is per family and per region; section 4h). Costs are the guesses in section 4h.
 
@@ -388,10 +503,23 @@ What ran here (no Azure access):
   from the DMZ private range, that sprouts are denied the DMZ and core public
   addresses, that the Bastion NSG is always attached, that `uat` has exactly
   the contract's keys, the private DNS records and the input validations.
+- `tofu test` also covers the HA topology (P24) with both variable sets
+  planned and applied on mocks: node names, sizes and zones, the zone-less
+  region fallback, the load balancers, their rules and probes, backend pool
+  members, the added NSG rules and that every single-node rule is kept, that
+  management ports are open only to the Bastion, the hub's own nodes and the
+  probe, the private DNS records, the `uat` and `ha_node_names` outputs, one
+  hub HA and the other single, and the node count validation.
 - `tests/destroy_test.sh`: `destroy.sh` against stubbed `tofu` and `az`, all
   three branches (clean destroy; fallback to `az group delete`; leftovers exit
-  1), the refusal to delete a group without our tags, fail-closed on `az`
-  errors, `--skip-init` and argument handling.
+  1, including an HA run's load balancers), the refusal to delete a group
+  without our tags, fail-closed on `az` errors, `--skip-init` and argument
+  handling.
+- `tests/quota_test.sh`: `quota-check.sh` against a stubbed `az` with the
+  single-node and HA plans: both fit, the HA run against today's 10 Dsv5 is
+  refused with the numbers, vCPUs in use, the regional total, a size or zone
+  the subscription may not use, a missing size, a plan creating no VM,
+  fail-closed on `az` errors and argument handling.
 - shellcheck on every script.
 
 `go test ./uat/tofu/` runs the shell test, shellcheck and `tofu fmt -check` when

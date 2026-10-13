@@ -90,13 +90,42 @@ Tests: the repo's tofu tests (`uat/tofu/tests`, `scripts_test.go`) updated; `tof
 `tofu plan` with both variable sets render (use the repo's fake-provider approach if the tests
 cannot reach Azure); counts, zones, rules and outputs asserted.
 
+Corrections made while building H1 (2026-10-13; the code on main and the error windows above
+decide):
+- The size variables were `core_size` and `dmz_size`; they are renamed to `core_node_size` and
+  `dmz_node_size` (defaults unchanged). The node counts accept 1, 3 or 5 (etcd quorum).
+- The internal load balancer of an HA hub carries the hub's private ports as well as the API
+  (DMZ: Envoy 8443, bus 8442; core: farmer 5405, accounts store 9000), and `<hub>.<zone>`
+  points at it: with a node's own address, stopping that node would cut sprouts, enrolment and
+  the core-to-bus path, against the node-stop window.
+- Core gets a public load balancer too (443), not only the DMZ: the runner reaches saasapi on
+  core 443, and the node-stop test stops a core node.
+- The health probes come from `AzureLoadBalancer`, which the NSGs' `DenyAllIn` drops, so an HA
+  hub adds a probe rule on the load-balanced ports.
+- The CNI ports: the k0s config uses kube-router; Azure drops IP-in-IP inside a VNet, so the
+  NSG opens kube-router's BGP (TCP 179) and its FOU overlay (UDP 5555), and H2 sets the
+  overlay to FOU (below).
+- `ha_node_names` is its own tofu output (per hub, the nodes of an HA hub): the `uat` output
+  keeps the Shared contract's top-level keys; each hub object gains `node_names`, `node_ids`,
+  `node_private_ips`, `api_address` and `api_fqdn`.
+- The workflow takes one input, `hub_nodes` (1 or 3), checked and mapped to the tofu variables
+  by `uat/scripts/check-inputs.sh` (3 sets `core_node_size=Standard_D4s_v5`).
+- `tofu validate` takes no variables; both variable sets are planned and applied on mocked
+  providers by `tofu test`.
+
 ## H2: k0s with 3 controller+worker nodes on etcd (P24 item 2)
 
 Needs H1. Scope: `uat/k0s` and its tests, `uat/access`, `.github/workflows/uat.yml` (the k0s step).
 
 1. k0sctl config template for N nodes: every node `controller+worker`, etcd as the datastore
    (not kine on SQLite), `spec.api.externalAddress` the load balancer address and the load
-   balancer name in `sans`; single-node mode unchanged when N is 1.
+   balancer name in `sans`; single-node mode unchanged when N is 1. The address is the `uat`
+   output's `<hub>.api_address` and its name `<hub>.api_fqdn` (H1). Two Azure facts H1 found:
+   Azure drops IP-in-IP inside a VNet, so kube-router's pod overlay must be FOU
+   (`overlay-type` full, `overlay-encap` fou, UDP 5555, which H1 opens between a hub's nodes);
+   and an internal load balancer drops a flow from a backend to its own frontend when it lands
+   on that node, so a node reaches its own hub's API on its own address or through k0s
+   node-local load balancing, never through `api_address`.
 2. `bootstrap.sh` and `check.sh`: remove the single-node assumptions (hostPort and NodePort
    handling run against all nodes; kubeconfig uses the external address; waits are for N nodes
    Ready and for etcd to have N members). `check.sh` fails when the hub has fewer Ready nodes
@@ -138,7 +167,7 @@ Needs H2 and H3. Scope: `uat/hub/core`, `uat/hub/dmz`, `uat/tests/harness` where
 hub layout, `uat/README.md`.
 
 1. A values overlay per hub for the HA run (`values-ha.yaml`, selected by the node count
-   input): farmer, saasapi, Envoy and the bus at 3 replicas with `topologySpreadConstraints`
+   input, the workflow's `hub_nodes` from H1): farmer, saasapi, Envoy and the bus at 3 replicas with `topologySpreadConstraints`
    over nodes (maxSkew 1, `DoNotSchedule`), PodDisruptionBudgets on, bus 3 nodes with the
    `emptyDir` resolver directory; PXC 3 nodes with no `unsafeFlags`; OpenBao 3-node raft
    (replacing single-node raft, `retry_join` between pods, auto-unseal as the UAT already

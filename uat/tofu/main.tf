@@ -24,19 +24,63 @@ locals {
     bastion = "10.60.4.0/26"
   }
 
+  # private_ports are what other subnets reach on the hub's private address
+  # (sprouts and core to the DMZ, the DMZ to core); public_ports what the
+  # runner reaches on its public address (network-security.tf). A hub of
+  # several nodes carries both on load balancers (lb.tf), with the k0s API.
   hubs = {
     dmz = {
-      name      = "uat-dmz"
-      size      = var.dmz_size
-      disk_gb   = var.dmz_os_disk_gb
-      dns_label = "uat${var.run_id}-dmz"
+      name          = "uat-dmz"
+      count         = var.dmz_node_count
+      size          = var.dmz_node_size
+      disk_gb       = var.dmz_os_disk_gb
+      dns_label     = "uat${var.run_id}-dmz"
+      private_ports = [var.envoy_port, var.bus_port]
+      public_ports  = [var.envoy_port]
     }
     core = {
-      name      = "uat-core"
-      size      = var.core_size
-      disk_gb   = var.core_os_disk_gb
-      dns_label = "uat${var.run_id}-core"
+      name          = "uat-core"
+      count         = var.core_node_count
+      size          = var.core_node_size
+      disk_gb       = var.core_os_disk_gb
+      dns_label     = "uat${var.run_id}-core"
+      private_ports = [var.farmer_api_port, var.accounts_store_port]
+      public_ports  = [var.core_public_port]
     }
+  }
+
+  # The hubs with more than one node: the HA topology.
+  ha_hubs = { for k, h in local.hubs : k => h if h.count > 1 }
+
+  # The k0s API on every hub node (k0s's default), behind the internal load
+  # balancer of an HA hub.
+  kube_api_port = 6443
+
+  # The region's availability zones, from the provider (empty where the
+  # region has none). The nodes of an HA hub go round them; a single node
+  # gets no zone, as before.
+  zones = sort(distinct([for z in data.azurerm_location.run.zone_mappings : z.logical_zone]))
+
+  # One entry per hub VM, keyed by VM name: uat-dmz and uat-core for a hub of
+  # one node (unchanged), uat-<hub>-1 to uat-<hub>-N for an HA hub. The
+  # single node keeps the hub's public DNS label; on an HA hub it moves to the
+  # public load balancer.
+  hub_nodes = merge([
+    for k, h in local.hubs : {
+      for i in range(h.count) : (h.count == 1 ? h.name : "${h.name}-${i + 1}") => {
+        hub       = k
+        index     = i
+        size      = h.size
+        disk_gb   = h.disk_gb
+        zone      = h.count > 1 && length(local.zones) > 0 ? local.zones[i % length(local.zones)] : null
+        dns_label = h.count == 1 ? h.dns_label : null
+      }
+    }
+  ]...)
+
+  # Node names per hub, in index order.
+  hub_node_names = {
+    for k, h in local.hubs : k => [for i in range(h.count) : (h.count == 1 ? h.name : "${h.name}-${i + 1}")]
   }
 
   # Both tenants get one sprout of each OS. The VM name is the key everywhere
@@ -68,6 +112,12 @@ resource "terraform_data" "created_at" {
   lifecycle {
     ignore_changes = [input]
   }
+}
+
+# Zones of the region (logical zone names, "1" to "3"); an empty list where
+# the region has none.
+data "azurerm_location" "run" {
+  location = var.region
 }
 
 resource "azurerm_resource_group" "run" {
@@ -115,8 +165,9 @@ resource "azurerm_subnet" "workload" {
   virtual_network_name = azurerm_virtual_network.uat.name
   address_prefixes     = [each.value]
 
-  # Every VM has its own Standard public IP for outbound traffic; Azure's
-  # implicit default outbound access is not used.
+  # Every VM has its own Standard public IP for outbound traffic (the nodes
+  # of an HA hub too: the load balancers' rules disable outbound SNAT);
+  # Azure's implicit default outbound access is not used.
   default_outbound_access_enabled = false
 }
 

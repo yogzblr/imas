@@ -8,7 +8,12 @@
     "private_ip": "10.60.1.4",
     "public_ip": "203.0.113.10",
     "fqdn": "uatab12cd34-dmz.centralindia.cloudapp.azure.com",
-    "admin_user": "imasadmin"
+    "admin_user": "imasadmin",
+    "node_names": ["uat-dmz"],
+    "node_ids": ["/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-ab12cd34/providers/Microsoft.Compute/virtualMachines/uat-dmz"],
+    "node_private_ips": ["10.60.1.4"],
+    "api_address": "10.60.1.4",
+    "api_fqdn": "dmz-api.uat.imas.internal"
   },
   "core": {
     "name": "uat-core",
@@ -16,7 +21,12 @@
     "private_ip": "10.60.2.4",
     "public_ip": "203.0.113.11",
     "fqdn": "uatab12cd34-core.centralindia.cloudapp.azure.com",
-    "admin_user": "imasadmin"
+    "admin_user": "imasadmin",
+    "node_names": ["uat-core"],
+    "node_ids": ["/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-ab12cd34/providers/Microsoft.Compute/virtualMachines/uat-core"],
+    "node_private_ips": ["10.60.2.4"],
+    "api_address": "10.60.2.4",
+    "api_fqdn": "core-api.uat.imas.internal"
   },
   "sprouts": {
     "t1-ubuntu": {

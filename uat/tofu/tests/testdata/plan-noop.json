@@ -1,0 +1,22 @@
+{
+ "format_version": "1.2",
+ "resource_changes": [
+  {
+   "address": "azurerm_linux_virtual_machine.hub[\"uat-dmz\"]",
+   "mode": "managed",
+   "type": "azurerm_linux_virtual_machine",
+   "name": "hub",
+   "change": {
+    "actions": [
+     "no-op"
+    ],
+    "before": null,
+    "after": {
+     "size": "Standard_D2s_v5",
+     "zone": null,
+     "name": "azurerm_linux_virtual_machine.hub[\"uat-dmz\"]"
+    }
+   }
+  }
+ ]
+}

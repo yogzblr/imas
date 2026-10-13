@@ -10,6 +10,30 @@
 locals {
   runner = [var.runner_cidr]
 
+  # Node to node inside an HA hub (P24): k0s's own ports (docs.k0sproject.io,
+  # "Networking": etcd peer and client 2380 and 2379, the API 6443, the
+  # controller join API 9443, konnectivity 8132, kubelet 10250) and the CNI
+  # the k0s config uses, kube-router (uat/k0s/templates/k0sctl.yaml.tmpl):
+  # BGP between the nodes on TCP 179 and its pod overlay. Azure drops
+  # IP-in-IP inside a VNet, so the overlay is kube-router's FOU encapsulation
+  # on UDP 5555 (its default port), not IPIP.
+  k0s_node_tcp_ports = ["179", "2379-2380", "6443", "8132", "9443", "10250"]
+  k0s_node_udp_ports = ["5555"]
+
+  # The rules an HA hub adds to its NSG; none for a single node, whose NSG is
+  # unchanged. AzureLoadBalancer is the health probes' source (168.63.129.16):
+  # DenyAllIn would otherwise drop them, as it overrides Azure's
+  # AllowAzureLoadBalancerInBound default.
+  ha_rules = {
+    for k, h in local.hubs : k => [for r in [
+      { name = "AllowHubNodesTcpIn", priority = 150, direction = "Inbound", access = "Allow", protocol = "Tcp", src = [local.cidr[k]], dst = [local.cidr[k]], ports = local.k0s_node_tcp_ports },
+      { name = "AllowHubNodesUdpIn", priority = 151, direction = "Inbound", access = "Allow", protocol = "Udp", src = [local.cidr[k]], dst = [local.cidr[k]], ports = local.k0s_node_udp_ports },
+      { name = "AllowLoadBalancerProbeIn", priority = 160, direction = "Inbound", access = "Allow", protocol = "Tcp", src = ["AzureLoadBalancer"], dst = [local.cidr[k]], ports = [for p in distinct(concat([local.kube_api_port], h.private_ports, h.public_ports)) : tostring(p)] },
+      { name = "AllowHubNodesTcpOut", priority = 150, direction = "Outbound", access = "Allow", protocol = "Tcp", src = [local.cidr[k]], dst = [local.cidr[k]], ports = local.k0s_node_tcp_ports },
+      { name = "AllowHubNodesUdpOut", priority = 151, direction = "Outbound", access = "Allow", protocol = "Udp", src = [local.cidr[k]], dst = [local.cidr[k]], ports = local.k0s_node_udp_ports },
+    ] : r if h.count > 1]
+  }
+
   # Shared tail of every workload NSG.
   deny_tail = [
     { name = "DenyVnetIn", priority = 4000, direction = "Inbound", access = "Deny", protocol = "*", src = ["VirtualNetwork"], dst = ["*"], ports = ["*"] },
@@ -25,7 +49,7 @@ locals {
       { name = "AllowCoreBusIn", priority = 140, direction = "Inbound", access = "Allow", protocol = "Tcp", src = [local.cidr.core], dst = [local.cidr.dmz], ports = [tostring(var.bus_port)] },
       { name = "AllowFarmerApiOut", priority = 100, direction = "Outbound", access = "Allow", protocol = "Tcp", src = [local.cidr.dmz], dst = [local.cidr.core], ports = [tostring(var.farmer_api_port)] },
       { name = "AllowAccountsStoreOut", priority = 110, direction = "Outbound", access = "Allow", protocol = "Tcp", src = [local.cidr.dmz], dst = [local.cidr.core], ports = [tostring(var.accounts_store_port)] },
-    ], local.deny_tail)
+    ], local.ha_rules.dmz, local.deny_tail)
 
     core = concat([
       { name = "AllowBastionSshKubeIn", priority = 100, direction = "Inbound", access = "Allow", protocol = "Tcp", src = [local.cidr.bastion], dst = [local.cidr.core], ports = ["22", "6443"] },
@@ -33,13 +57,13 @@ locals {
       { name = "AllowRunnerHttpsIn", priority = 120, direction = "Inbound", access = "Allow", protocol = "Tcp", src = local.runner, dst = [local.cidr.core], ports = [tostring(var.core_public_port)] },
       { name = "AllowDmzAccountsStoreIn", priority = 130, direction = "Inbound", access = "Allow", protocol = "Tcp", src = [local.cidr.dmz], dst = [local.cidr.core], ports = [tostring(var.accounts_store_port)] },
       { name = "AllowBusOut", priority = 100, direction = "Outbound", access = "Allow", protocol = "Tcp", src = [local.cidr.core], dst = [local.cidr.dmz], ports = [tostring(var.bus_port)] },
-    ], local.deny_tail)
+    ], local.ha_rules.core, local.deny_tail)
 
     tenants = concat([
       { name = "AllowBastionAdminIn", priority = 100, direction = "Inbound", access = "Allow", protocol = "Tcp", src = [local.cidr.bastion], dst = [local.cidr.tenants], ports = ["22", "5986"] },
       { name = "AllowEnvoyPrivateOut", priority = 100, direction = "Outbound", access = "Allow", protocol = "Tcp", src = [local.cidr.tenants], dst = [local.cidr.dmz], ports = [tostring(var.envoy_port)] },
-      { name = "DenyCorePublicOut", priority = 200, direction = "Outbound", access = "Deny", protocol = "*", src = ["*"], dst = ["${azurerm_public_ip.hub["core"].ip_address}/32"], ports = ["*"] },
-      { name = "DenyDmzPublicOut", priority = 210, direction = "Outbound", access = "Deny", protocol = "*", src = ["*"], dst = ["${azurerm_public_ip.hub["dmz"].ip_address}/32"], ports = ["*"] },
+      { name = "DenyCorePublicOut", priority = 200, direction = "Outbound", access = "Deny", protocol = "*", src = ["*"], dst = [for ip in local.hub_public_ips.core : "${ip}/32"], ports = ["*"] },
+      { name = "DenyDmzPublicOut", priority = 210, direction = "Outbound", access = "Deny", protocol = "*", src = ["*"], dst = [for ip in local.hub_public_ips.dmz : "${ip}/32"], ports = ["*"] },
     ], local.deny_tail)
 
     # Azure's documented rules for AzureBastionSubnet, with the internet

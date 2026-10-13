@@ -1,7 +1,11 @@
-# Eight VMs and one Azure Bastion. Every public IP is Standard and static.
-# The hubs' public IPs carry the DNS labels from the Shared contract and take
-# the runner's traffic to Envoy and to 443 on core; the sprouts' are for
-# outbound traffic only (their NSG denies every inbound flow from the internet).
+# The hub nodes (one per hub by default, eight VMs in all; core_node_count
+# and dmz_node_count make an HA hub of several), six sprouts and one Azure
+# Bastion. Every public IP is Standard and static. A single hub node's public
+# IP carries the hub's DNS label from the Shared contract and takes the
+# runner's traffic to Envoy and to 443 on core; on an HA hub the label and
+# that traffic move to the hub's public load balancer (lb.tf) and each node's
+# own public IP is for outbound traffic only, like the sprouts' (their NSG
+# denies every inbound flow from the internet).
 #
 # Destroy: NICs and public IPs are their own resources, OS disks go with their
 # VM (provider feature delete_os_disk_on_deletion), there are no data disks,
@@ -9,9 +13,9 @@
 # README.md, "Destroy semantics".
 
 resource "azurerm_public_ip" "hub" {
-  for_each = local.hubs
+  for_each = local.hub_nodes
 
-  name                = "${each.value.name}-pip"
+  name                = "${each.key}-pip"
   location            = azurerm_resource_group.run.location
   resource_group_name = azurerm_resource_group.run.name
   allocation_method   = "Static"
@@ -32,16 +36,16 @@ resource "azurerm_public_ip" "sprout" {
 }
 
 resource "azurerm_network_interface" "hub" {
-  for_each = local.hubs
+  for_each = local.hub_nodes
 
-  name                = "${each.value.name}-nic"
+  name                = "${each.key}-nic"
   location            = azurerm_resource_group.run.location
   resource_group_name = azurerm_resource_group.run.name
   tags                = local.tags
 
   ip_configuration {
     name                          = "primary"
-    subnet_id                     = azurerm_subnet.workload[each.key].id
+    subnet_id                     = azurerm_subnet.workload[each.value.hub].id
     private_ip_address_allocation = "Dynamic"
     public_ip_address_id          = azurerm_public_ip.hub[each.key].id
   }
@@ -69,16 +73,20 @@ resource "azurerm_network_interface" "sprout" {
   depends_on = [azurerm_subnet_network_security_group_association.workload]
 }
 
-# Hubs: Ubuntu 24.04, single-node k0s each (UAT.2). Standard SSD OS disks.
-# No ephemeral OS disk: Dsv5 sizes have no local temp disk or cache to hold one.
+# Hub nodes: Ubuntu 24.04, one k0s cluster per hub (UAT.2; several
+# controller+worker nodes on an HA hub, P24). Standard SSD OS disks. The nodes
+# of an HA hub go round the region's zones (local.zones); a single node has no
+# zone. No ephemeral OS disk: Dsv5 sizes have no local temp disk or cache to
+# hold one.
 resource "azurerm_linux_virtual_machine" "hub" {
-  for_each = local.hubs
+  for_each = local.hub_nodes
 
-  name                            = each.value.name
-  computer_name                   = each.value.name
+  name                            = each.key
+  computer_name                   = each.key
   location                        = azurerm_resource_group.run.location
   resource_group_name             = azurerm_resource_group.run.name
   size                            = each.value.size
+  zone                            = each.value.zone
   admin_username                  = var.admin_user
   disable_password_authentication = true
   network_interface_ids           = [azurerm_network_interface.hub[each.key].id]
@@ -90,7 +98,7 @@ resource "azurerm_linux_virtual_machine" "hub" {
   }
 
   os_disk {
-    name                 = "${each.value.name}-osdisk"
+    name                 = "${each.key}-osdisk"
     caching              = "ReadWrite"
     storage_account_type = "StandardSSD_LRS"
     disk_size_gb         = each.value.disk_gb

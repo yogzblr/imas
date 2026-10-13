@@ -8,7 +8,9 @@
 #   vmctl.sh <uat.json> start-sprout <vm>
 #   vmctl.sh <uat.json> run          <vm> <command...>
 #
-# <vm> is a VM name from uat.json: uat-dmz, uat-core or a key of sprouts.
+# <vm> is a VM name from uat.json: a hub node (uat-dmz and uat-core, or on an
+# HA hub uat-dmz-1 to uat-dmz-N and uat-core-1 to uat-core-N: the hub's
+# node_names) or a key of sprouts.
 #
 # restart       az vm restart, then waits until the VM runs and its guest agent
 #               answers a run-command (the guest is back), up to
@@ -92,12 +94,14 @@ az_run() {
   return "$rc"
 }
 
-# Look the VM up: kind (hub or sprout), resource id and OS.
+# Look the VM up: kind (hub or sprout), resource id and OS. A hub's VMs are
+# its node_names and node_ids (every node of an HA hub, P24), or its name and
+# id where uat.json has no node lists.
 lookup=$(jq -r --arg vm "$vm" '
-  if .dmz.name == $vm then ["hub", .dmz.id, "ubuntu"]
-  elif .core.name == $vm then ["hub", .core.id, "ubuntu"]
-  elif (.sprouts // {}) | has($vm) then ["sprout", .sprouts[$vm].id, .sprouts[$vm].os]
-  else empty end
+  ( [ (.dmz, .core) | objects
+      | [(.node_names // [.name]), (.node_ids // [.id])] | transpose[]
+      | select(.[0] == $vm) | ["hub", .[1], "ubuntu"] ] | first )
+  // (if (.sprouts // {}) | has($vm) then ["sprout", .sprouts[$vm].id, .sprouts[$vm].os] else empty end)
   | @tsv' "$uat") || { log "$uat is not valid JSON"; exit 2; }
 [ -n "$lookup" ] || { log "no VM named '$vm' in $uat"; exit 2; }
 IFS=$'\t' read -r kind vm_id os <<<"$lookup"

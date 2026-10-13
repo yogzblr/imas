@@ -14,10 +14,17 @@
 #   KEEP_HOURS         0 to 168, a whole number (default 0)
 #   TIER               smoke, core, resilience, ingredients, lifecycle or all
 #   SCENARIOS          optional scenario ids, separated by spaces or commas
+#   HUB_NODES          nodes per hub: 1 (default, the single-node run) or 3
+#                      (the HA run: 3 core and 3 DMZ k0s nodes, P24)
 #   GITHUB_REPOSITORY  owner/repo, for the tag and release lookups (gh api)
 #
 # Writes, when GITHUB_OUTPUT is set, the normalised values as step outputs:
-#   release_tag region keep_hours tier upgrade_from_tag scenarios
+#   release_tag region keep_hours tier upgrade_from_tag scenarios hub_nodes
+#   core_node_count, dmz_node_count
+#                      uat/tofu's node counts (both equal hub_nodes)
+#   core_node_size     uat/tofu's core_node_size: Standard_D4s_v5 for the HA
+#                      run (owner, 2026-10-13), empty for one node (the tofu
+#                      default stays); the DMZ keeps its default size either way
 #   destroy            true when keep_hours is 0 (the final destroy runs)
 #   run_budget_hours   how long the janitor waits before the run's own
 #                      expires_at, before keep_hours: 3 for smoke, else 7
@@ -104,6 +111,16 @@ case "$tier" in
   *) problem "input tier '$tier' must be smoke, core, resilience, ingredients, lifecycle or all" ;;
 esac
 
+hub_nodes=${HUB_NODES:-1}
+case "$hub_nodes" in
+  1) core_node_size="" ;;
+  3) core_node_size=Standard_D4s_v5 ;;
+  *)
+    problem "input hub_nodes '$hub_nodes' must be 1 (single-node run) or 3 (HA run)"
+    core_node_size=""
+    ;;
+esac
+
 # Scenario ids reach uat/tests/run.sh as separate arguments, so only plain ids
 # get through; run.sh itself rejects an id that is not in the tier.
 scenarios=""
@@ -141,6 +158,10 @@ keep_hours=$keep_hours
 tier=$tier
 upgrade_from_tag=$upgrade_from_tag
 scenarios=$scenarios
+hub_nodes=$hub_nodes
+core_node_count=$hub_nodes
+dmz_node_count=$hub_nodes
+core_node_size=$core_node_size
 destroy=$destroy
 run_budget_hours=$run_budget_hours
 EOF
