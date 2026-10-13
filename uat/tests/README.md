@@ -6,11 +6,13 @@ It runs against a deployed stack from the runner, through the product's own
 endpoints (saasapi, Keycloak, Envoy) and, for anything outside the platform,
 through `uat/access/vmctl.sh`. It never calls Azure itself.
 
-**Status: it has never run against a real deployment.** It builds and vets
-with the `uat` tag, its helpers have unit tests against fake servers, and the
-whole catalogue runs green against the in-memory fake in
-`harness/fakestack`, which proves the plumbing and nothing about the product.
-Expect fix rounds after the first real runs (local rig, then Azure).
+**Status: it has run once on Azure** (UAT run 38107290465, 2026-10-11, the
+single-node run, before the stateless build). The `ha` tier and L5 with the
+dispatch flags have not run on a real deployment yet: Run 3 and Run 2 of
+`uat/RUNBOOK.md` are their first runs. It builds and vets with the `uat` tag,
+its helpers have unit tests against fake servers, and the whole catalogue
+runs green against the in-memory fake in `harness/fakestack`, which proves
+the plumbing and nothing about the product.
 
 ## Layout
 

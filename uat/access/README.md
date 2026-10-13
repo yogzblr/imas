@@ -6,8 +6,10 @@ section 4h of `docs/claude-code-parallel-build-plan.md`). Every Azure call of
 the gate lives here; the hub, enrolment and test briefs call only these, so the
 local rig (UAT.8) can supply its own `vmctl.sh` with the same interface.
 
-**Never run against Azure.** Both scripts are tested against a stubbed `az`
-only (see [Tests](#tests)).
+**Ran once on Azure** (UAT run 38107290465, 2026-10-11: the tunnels of a
+single-node run). The HA run's API tunnels by IP and `vmctl.sh stop-vm` and
+`start-vm` run first in Run 3 of `uat/RUNBOOK.md`; offline both scripts are
+tested against a stubbed `az` (see [Tests](#tests)).
 
 Requirements: bash, `jq`, coreutils (`timeout`, `base64`), `setsid` (util-linux;
 without it the tunnels are started with `nohup`), and the Azure CLI logged in to

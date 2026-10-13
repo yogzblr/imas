@@ -8,19 +8,21 @@ report and tears everything down. The design is section 4h of
 catalogue, the owner prerequisites); this page is the owner's guide to it.
 
 > [!IMPORTANT]
-> **The gate has never run.** Every piece was written by agents that could not
-> reach Azure, the registries or a cluster. Static checks, unit tests and
-> tests against stubs and fakes ran (each directory's README says which);
-> nothing ran end to end. Expect fix rounds after the first real runs. The
-> workflow and the janitor are **flagged for security review** (they hold
-> Azure credentials): treat them as ready for review, not as done.
+> **The gate has run once on Azure:** run 38107290465 (2026-10-11, on main
+> at `2fe395c8`) passed, before the stateless build (P21) and the GPG fleet
+> update trust (P22). The next two runs, the single-node gate again with the
+> fleet update path on (Run 2) and the HA run on 3 + 3 nodes (Run 3), have
+> their exact inputs, owner prerequisites and what each proves in
+> [`RUNBOOK.md`](RUNBOOK.md). The workflow and the janitor are **flagged for
+> security review** (they hold Azure credentials): treat them as ready for
+> review, not as done.
 
 ## What the gate proves, and what it does not
 
 | Proves (when green) | Does not prove |
 |---|---|
-| The published Helm charts of the release install and run on Kubernetes (k0s): `deploy/helm/farmer` on core (farmer, saasapi, PXC, Valkey, OpenBao) and `deploy/helm/nats` on the DMZ (farmerbus, Envoy), with the release's own images and never `latest` | High availability: every hub is one node, every workload one replica |
-| The published OS packages install from the Buildkite repositories with the Ansible role, on Ubuntu 24.04, AlmaLinux 9 and Windows Server 2022 Core | PXC clustering (one PXC node), the clustered bus, failover |
+| The published Helm charts of the release install and run on Kubernetes (k0s): `deploy/helm/farmer` on core (farmer, saasapi, PXC, Valkey, OpenBao) and `deploy/helm/nats` on the DMZ (farmerbus, Envoy), with the release's own images and never `latest` | High availability on the single-node run (`hub_nodes` 1): every hub is one node, each stateful service one pod. The HA run (`hub_nodes` 3, [HA run](#ha-run)) is the one that proves it |
+| The published OS packages install from the Buildkite repositories with the Ansible role, on Ubuntu 24.04, AlmaLinux 9 and Windows Server 2022 Core | On the single-node run: PXC clustering (one PXC node), the clustered bus, failover (the HA run covers them) |
 | Enrolment through Envoy, with a pinned UAT CA, one-time keys, and sprouts reaching the bus only through Envoy | Real RHEL: AlmaLinux 9 stands in for it (same dnf and rpm path; no subscription, RHUI or FIPS; see `uat/enroll/README.md`) |
 | Tenant isolation: two tenants with the same sprout IDs (`ubuntu-01`, `alma-01`, `win-01`) resolve to different machines, and nothing crosses (T6, S2, S4, R3, X4) | SUSE and zypper: out of scope for this gate (add one more tenant VM later) |
 | Auth: Keycloak tokens checked by saasapi (issuer, audience, roles, `organization.id`), the BFF shared secret, Envoy's `jwt_authn` gate, sealing (X1 to X5) | The internet path: sprouts reach Envoy on the DMZ's private address, and Envoy sits behind no application gateway or public load balancer |
@@ -51,8 +53,8 @@ etcd (`uat/k0s/README.md`, "HA hubs").
 | `uat/hub/dmz` | UAT.3a | The DMZ hub: nats chart (farmerbus, Envoy), its exposure and `check.sh` |
 | `uat/enroll` | UAT.4 | Tenants 1 and 2, one-time keys, the Ansible inventory, enrolment, waiting for farmer to see every sprout |
 | `uat/tests` | UAT.5 | The acceptance suite (`run.sh`, the harness, the report) |
-| `uat/cases`, `uat/tests/ingredients` | UAT.7 | Ingredient conformance and L4/L5 (not merged at the time of writing) |
-| `uat/lite` | UAT.8 | The local rig (not merged at the time of writing) |
+| `uat/cases`, `uat/tests/ingredients` | UAT.7 | Ingredient conformance and L4/L5 |
+| `uat/lite` | UAT.8 | The local rig |
 | `uat/scripts` | UAT.6 | The workflow's helpers: input checks, run id, runner address, test material, artifact allowlist, teardown check, janitor |
 | `.github/workflows/uat.yml`, `uat-janitor.yml` | UAT.6 | The gate and the janitor |
 
@@ -140,6 +142,8 @@ gh workflow run uat.yml --ref main -f release_tag=v0.1.0-rc.4 -f tier=smoke -f k
 
 Then approve the `uat` deployment when GitHub asks (the required reviewer).
 
+The inputs of the next two runs (Run 2, Run 3) are in [`RUNBOOK.md`](RUNBOOK.md).
+
 | Input | Default | Meaning |
 |---|---|---|
 | `release_tag` | required | `vX.Y.Z` or `vX.Y.Z-rc.N`. It must be a tag with a published (not draft), GPG-signed release (assets `checksums.txt` and `checksums.txt.sig`); the chart, the images, the packages and the CLI all come from it. It is the chart reference too: the core hub installs the farmer chart published with it, which carries the stamped sprout release `finish.sh` registers |
@@ -220,10 +224,6 @@ alone takes about ten), 10 minutes of smoke tests, 15 to 20 minutes of
 teardown. A GitHub-hosted job stops at 6 hours: the job's timeout is 350
 minutes and the test step's 180 (`go test -timeout` 165m), so a tier `all`
 run that needs longer than that has to be split into tier runs.
-
-**Until UAT.7 merges, the tiers `ingredients`, `lifecycle` and `all` fail by
-design**: `run.sh` fails a tier whose catalogue scenarios have no test (the
-no silent green rule). Use `smoke`, `core` or `resilience` until then.
 
 ### Artifacts
 

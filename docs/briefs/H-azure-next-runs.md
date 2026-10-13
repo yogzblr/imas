@@ -373,3 +373,16 @@ candidate tag, the security review before the dispatch flags are used outside UA
 run proves, and how to read the report. Status fragment: P20 and P13 updated, P24 and P23
 built and awaiting the run (Amber), P25 first half built (Fluent Bit still open), P1 left
 awaiting the runs.
+
+Corrections made while building H6 (2026-10-13; the code on main and the published releases decide):
+- "`tofu validate` for 1 and 3 nodes": `tofu validate` takes no variables (H1). The gate runs it once
+  and runs `tofu test`, which plans and applies `uat/tofu` with both variable sets on mocked providers.
+- "A signed release candidate tag" is two. The latest published release, `v0.1.0-rc.13`, was tagged
+  before P22, and L5's earlier sprout must already verify the GPG signature, so the runbook asks for
+  `v0.1.0-rc.14` (Run 2's `upgrade_from_tag`) and `v0.1.0-rc.15` (both runs' `release_tag`), each on
+  its own commit of main after this unit.
+- "GPG secrets in the `goreleaser` environment only" was the policy of `docs/RELEASING.md`, but
+  `release.yml` still said "repo or environment" secrets; its comments and the release checklist now
+  say environment only.
+- Stale status lines in the UAT READMEs ("never run", UAT.7 and UAT.8 "not merged") are fixed: run
+  38107290465 passed on Azure, and both briefs are merged.
