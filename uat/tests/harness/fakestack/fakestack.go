@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	natsjwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
 
 	"github.com/yogzblr/imas/internal/pki"
@@ -73,6 +74,8 @@ type sprout struct {
 	nkey      string
 	hasBoxKey bool
 	vm        string
+	boxPub    string
+	userJWT   string
 }
 
 type item struct {
@@ -107,7 +110,49 @@ type Stack struct {
 	recipeStore map[string]recipe // tenantID/name
 	limiter     map[string]*bucket
 	tokenTTL    time.Duration
+	accounts    map[string]nkeys.KeyPair // tenantID -> the tenant's Account key
+	tenantBox   map[string]string        // tenantID -> its X25519 public key
+	outageUntil time.Time
+	cutUntil    time.Time
+
+	// ActionBurst is the per-tenant batch bucket's size (refilled 1 per
+	// second; default 5, saasapi's). The ha tier's own tests raise it
+	// to post batches faster than the real cadence.
+	ActionBurst int
+	// RemintOnReplay makes a repeated enrolment mint a new User JWT
+	// instead of reusing the one issued: the duplicate the ha tier
+	// checks for (design T6).
+	RemintOnReplay bool
+	// DuplicateRuns runs every cmd.run twice on the host: the duplicate
+	// work the ha tier checks for (design T8).
+	DuplicateRuns bool
 }
+
+// Outage makes saasapi and /v1/enroll answer 503 for d, the way a stack
+// whose serving pods are gone answers through its load balancer.
+func (s *Stack) Outage(d time.Duration) {
+	s.mu.Lock()
+	s.outageUntil = time.Now().Add(d)
+	s.mu.Unlock()
+}
+
+// CutSprouts disconnects every sprout for d: lookups say not connected
+// and cmd.run items fail sprout_unreachable, as while their bus node is
+// gone.
+func (s *Stack) CutSprouts(d time.Duration) {
+	s.mu.Lock()
+	s.cutUntil = time.Now().Add(d)
+	s.mu.Unlock()
+}
+
+func (s *Stack) down() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return time.Now().Before(s.outageUntil)
+}
+
+// cut reports whether sprouts are cut off; s.mu is held.
+func (s *Stack) cut() bool { return time.Now().Before(s.cutUntil) }
 
 type tenantRec struct {
 	name, status string
@@ -123,6 +168,7 @@ func New() *Stack {
 		keys: map[string]*key{}, sprouts: map[string]*sprout{}, links: map[string]string{},
 		batches: map[string]*batch{}, hosts: map[string]*Host{}, recipeStore: map[string]recipe{},
 		limiter: map[string]*bucket{}, tokenTTL: 90 * time.Second,
+		accounts: map[string]nkeys.KeyPair{}, tenantBox: map[string]string{}, ActionBurst: 5,
 	}
 	for n := 1; n <= 2; n++ {
 		id := TenantID(n)
@@ -196,6 +242,12 @@ func writeErr(w http.ResponseWriter, status int, code, msg string) {
 }
 
 func (s *Stack) serve(w http.ResponseWriter, r *http.Request) {
+	if s.down() && strings.HasPrefix(r.URL.Path, "/v1/") {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(503)
+		_, _ = io.WriteString(w, "no healthy upstream")
+		return
+	}
 	switch p := r.URL.Path; {
 	case strings.HasSuffix(p, "/protocol/openid-connect/token"):
 		s.token(w, r)
@@ -345,12 +397,14 @@ func (s *Stack) kcAdmin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Stack) enroll(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		JoinToken string `json:"join_token"`
-		NKeyPub   string `json:"nkey_pub"`
-		Hostname  string `json:"hostname"`
-		SproutPub string `json:"sprout_pub"`
-		Timestamp int64  `json:"timestamp"`
-		NKeySig   string `json:"nkey_sig"`
+		JoinToken      string          `json:"join_token"`
+		NKeyPub        string          `json:"nkey_pub"`
+		Hostname       string          `json:"hostname"`
+		SproutPub      string          `json:"sprout_pub"`
+		Timestamp      int64           `json:"timestamp"`
+		NKeySig        string          `json:"nkey_sig"`
+		SproutPubProof json.RawMessage `json:"sprout_pub_proof"`
+		EnrollBinding  json.RawMessage `json:"enroll_binding"`
 	}
 	fail := func() { writeJSON(w, 401, map[string]string{"error": "enrollment_failed"}) }
 	if json.NewDecoder(r.Body).Decode(&req) != nil {
@@ -371,16 +425,96 @@ func (s *Stack) enroll(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 	keyID, secret, _ := strings.Cut(req.JoinToken, ".")
 	k, ok := s.keys[keyID]
-	if !ok || k.secret != secret || k.revoked || time.Now().After(k.expires) || k.used >= k.maxUses ||
-		s.tenants[k.tenantID] == nil || s.tenants[k.tenantID].status != "active" {
+	if !ok || k.secret != secret || s.tenants[k.tenantID] == nil || s.tenants[k.tenantID].status != "active" {
 		fail()
 		return
 	}
-	k.used++
-	id := strings.ReplaceAll(req.Hostname, ".", "-")
-	s.sprouts[k.tenantID+"/"+id] = &sprout{nkey: req.NKeyPub}
-	writeJSON(w, 200, map[string]any{"sprout_id": id, "tenant_id": k.tenantID, "jwt": "fake-user-jwt", "nkey_identity": req.NKeyPub,
-		"tenant_x25519_pub": base64.StdEncoding.EncodeToString(random(32)), "enroll_binding": map[string]any{"v": 2}})
+	// The replay path: this NKey is enrolled in the key's tenant already.
+	// No token is spent; the identity is reissued (its User JWT reused),
+	// and a box key proof records the box key, or must name the one on
+	// record.
+	id, sp := s.sproutByNKey(k.tenantID, req.NKeyPub)
+	if sp == nil {
+		if k.revoked || time.Now().After(k.expires) || k.used >= k.maxUses || len(req.SproutPubProof) > 0 {
+			fail()
+			return
+		}
+		k.used++
+		id = strings.ReplaceAll(req.Hostname, ".", "-")
+		for n := 2; s.sprouts[k.tenantID+"/"+id] != nil; n++ {
+			id = strings.ReplaceAll(req.Hostname, ".", "-") + "_" + strconv.Itoa(n)
+		}
+		sp = &sprout{nkey: req.NKeyPub}
+		s.sprouts[k.tenantID+"/"+id] = sp
+	}
+	if sp.userJWT == "" || s.RemintOnReplay {
+		sp.userJWT = s.userJWT(k.tenantID, req.NKeyPub, id)
+	}
+	resp := map[string]any{"sprout_id": id, "tenant_id": k.tenantID, "jwt": sp.userJWT, "nkey_identity": req.NKeyPub,
+		"tenant_x25519_pub": s.tenantBoxPub(k.tenantID), "nats_urls": []string{"wss://bus.fake.invalid:443"}}
+	switch {
+	case len(req.SproutPubProof) > 0:
+		if sp.hasBoxKey && sp.boxPub != req.SproutPub {
+			fail()
+			return
+		}
+		sp.hasBoxKey, sp.boxPub = true, req.SproutPub
+		resp["gateway_jwt"] = s.mintGateway(req.NKeyPub, k.tenantID, id)
+	case sp.boxPub == "":
+		resp["enroll_binding"] = map[string]any{"v": 2}
+	}
+	writeJSON(w, 200, resp)
+}
+
+// sproutByNKey finds a tenant's sprout by its NKey; s.mu is held.
+func (s *Stack) sproutByNKey(tenantID, nkey string) (string, *sprout) {
+	for key, sp := range s.sprouts {
+		if sp.nkey == nkey && strings.HasPrefix(key, tenantID+"/") {
+			return strings.TrimPrefix(key, tenantID+"/"), sp
+		}
+	}
+	return "", nil
+}
+
+// userJWT mints a NATS User JWT for nkey under the tenant's Account; s.mu
+// is held.
+func (s *Stack) userJWT(tenantID, nkey, sproutID string) string {
+	akp, ok := s.accounts[tenantID]
+	if !ok {
+		var err error
+		if akp, err = nkeys.CreateAccount(); err != nil {
+			panic(err)
+		}
+		s.accounts[tenantID] = akp
+	}
+	uc := natsjwt.NewUserClaims(nkey)
+	uc.Name = sproutID
+	tok, err := uc.Encode(akp)
+	if err != nil {
+		panic(err)
+	}
+	return tok
+}
+
+// tenantBoxPub is the tenant's X25519 public key, made once; s.mu is held.
+func (s *Stack) tenantBoxPub(tenantID string) string {
+	if p, ok := s.tenantBox[tenantID]; ok {
+		return p
+	}
+	p := base64.StdEncoding.EncodeToString(random(32))
+	s.tenantBox[tenantID] = p
+	return p
+}
+
+// mintGateway is a gateway JWT naming the sprout's NKey; s.mu is held.
+func (s *Stack) mintGateway(nkey, tenantID, sproutID string) string {
+	h := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	b, _ := json.Marshal(map[string]any{"iss": "imas-gateway", "sub": nkey, "tenant_id": tenantID, "sprout_id": sproutID,
+		"exp": time.Now().Add(time.Hour).Unix(), "jti": base32ish(12)})
+	in := h + "." + base64.RawURLEncoding.EncodeToString(b)
+	m := hmac.New(sha256.New, s.signKey)
+	m.Write([]byte(in))
+	return in + "." + base64.RawURLEncoding.EncodeToString(m.Sum(nil))
 }
 
 // --- saasapi ------------------------------------------------------------------
@@ -648,7 +782,7 @@ func (s *Stack) lookup(w http.ResponseWriter, r *http.Request, tid string) {
 			continue
 		}
 		connected := false
-		if h, ok := s.hosts[sp.vm]; ok && !h.Stopped {
+		if h, ok := s.hosts[sp.vm]; ok && !h.Stopped && !s.cut() {
 			connected = true
 		}
 		results = append(results, map[string]any{"sprout_id": id, "asset_id": a, "key_state": "accepted", "connected": connected})
@@ -702,7 +836,7 @@ func (s *Stack) postBatch(w http.ResponseWriter, r *http.Request, tid string, t 
 		writeErr(w, 400, "unsupported_action", "action.type must be cmd.run or cook")
 		return
 	}
-	if s.limited("actions/"+tid, 5) {
+	if s.limited("actions/"+tid, s.ActionBurst) {
 		writeErr(w, 429, "rate_limited", "rate limited")
 		return
 	}
@@ -720,7 +854,7 @@ func (s *Stack) postBatch(w http.ResponseWriter, r *http.Request, tid string, t 
 			it = item{AssetID: a, Status: "unresolved"}
 		case !sp.hasBoxKey:
 			it.Status, it.Error, it.Message = "failed", "sprout_reenroll_required", "re-enroll the sprout"
-		case s.hosts[sp.vm] == nil || s.hosts[sp.vm].Stopped:
+		case s.hosts[sp.vm] == nil || s.hosts[sp.vm].Stopped || s.cut():
 			it.Status, it.Error, it.Message = "failed", "sprout_unreachable", "unreachable"
 		case body.Action.Type == "cmd.run":
 			status, code, errCode := s.runCmd(s.hosts[sp.vm], cmd.Cmd, cmd.CWD, cmd.RunAs, cmd.Args, cmd.Timeout)

@@ -2092,9 +2092,11 @@ sproutid, so the run also proves sprout_id is unique per tenant only (CLAUDE.md)
 ### Scenario catalogue
 
 What the gate tests, with the ids the tests and reports use. Tiers decide what a run does: smoke
-(about 10 minutes), core, resilience, ingredients, lifecycle, or all. Test functions are named
+(about 10 minutes), core, resilience, ingredients, lifecycle, ha, or all. Test functions are named
 with their tier as a prefix (TestSmoke, TestCore, TestResilience, TestIngredients,
-TestLifecycle) so a tier can be chosen with go test -run.
+TestLifecycle, TestHA) so a tier can be chosen with go test -run. The ha tier (HA1 to HA6, brief
+H5 of docs/briefs/H-azure-next-runs.md) runs on the HA run's hubs (workflow input hub_nodes 3) and
+skips, saying so, on the single-node run.
 
 | Id | Scenario | Tier |
 |---|---|---|
@@ -2139,6 +2141,12 @@ TestLifecycle) so a tier can be chosen with go test -run.
 | X3 | A sprout cannot open a connection to core | core |
 | X4 | Cross tenant access by a tenant admin token is denied everywhere | core |
 | X5 | Sealing: plaintext cmd.run and cook are refused by a sprout | core |
+| HA1 | Pod kill under load (farmer, saasapi, Envoy, each bus pod): no call fails after 3 retries, sprouts back within 30 s, no duplicate JWT or box key, a restarted bus node ready only with every account | ha |
+| HA2 | Node stop under load (a core node, then a DMZ node): served by other pods within 60 s, PXC, OpenBao and Valkey serve on two replicas, the node and its pods Ready within 10 minutes of the start, no data lost | ha |
+| HA3 | Rolling restart of farmer, saasapi and the bus by helm upgrade: sprouts stay enrolled, no call fails after 3 retries, the core check (design T4) passes after it | ha |
+| HA4 | A bus node deleted with its emptyDir comes back ready from the object store alone while farmer is scaled to 0 | ha |
+| HA5 | A lost account event on one bus node is repaired by the loader's timer within the reconcile period; every bus node refuses the revoked sprout | ha |
+| HA6 | Enrolment at Envoy's admitted rate into tenants provisioned at once, across the farmer replicas: no duplicate identity, every account on every bus node | ha |
 
 Ingredient conformance (UAT.7). Every ingredient package under internal/ingredients has one case
 file per method, with the OS it applies to. A case is one cycle: cook in test mode and see a pending
@@ -2152,7 +2160,7 @@ cannot run there is skipped with the reason, and the report lists them so the ow
 Desktop Experience image for those.
 
 Not covered by this gate: key expiry (the minimum is one hour; unit tests cover it), the web UI,
-high availability, real RHEL, scale and load.
+real RHEL, scale and load. High availability is the ha tier's (HA1 to HA6), on the HA run only.
 
 ### How the runner reaches the VMs, and how the suite is validated
 
@@ -2234,9 +2242,10 @@ runs at tier smoke with keep_hours set, widening the tier as it goes green.
   winrm_port or kube_port, plus the process ids (on the HA run, P24, every hub node gets its SSH and
   kube tunnels, and each hub one more kube tunnel to its API address, keyed dmz-api and core-api;
   uat/access/README.md); tunnels.sh close <state-dir> stops them and is safe to
-  repeat. vmctl.sh <uat.json> restart|stop-sprout|start-sprout|run <vm> [command] restarts a VM and
-  waits until it is back, stops or starts the sprout service, or runs a command with the Azure control
-  plane and prints its output and exit code. All Azure calls live in these two scripts. Tools that
+  repeat. vmctl.sh <uat.json> restart|stop-sprout|start-sprout|stop-vm|start-vm|run <vm> [command]
+  restarts a VM and waits until it is back, stops or starts the sprout service, stops or starts a hub
+  node's VM (the ha tier's node stop, brief H5), or runs a command with the Azure control plane and
+  prints its output and exit code. All Azure calls live in these two scripts. Tools that
   need the clusters take a kubeconfig path and an endpoints file (the hub names, ports and private
   addresses in the contract's shape) and nothing else, so the same hub scripts run on the local rig.
 - Hostnames and issuer: the Keycloak issuer URL, saasapi's SAASAPI_KEYCLOAK_JWKS_URL value

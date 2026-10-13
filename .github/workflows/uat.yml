@@ -8,7 +8,8 @@ name: UAT gate
 # release_tag, tests it and tears it down:
 #   tofu apply (uat/tofu) -> Bastion tunnels (uat/access) -> k0s on both hubs
 #   (uat/k0s) -> core hub (uat/hub/core) -> DMZ hub (uat/hub/dmz) -> tenants
-#   and sprouts (uat/enroll) -> tests (uat/tests/run.sh) -> close tunnels ->
+#   and sprouts (uat/enroll) -> tests (uat/tests/run.sh) -> start any stopped
+#   HA hub VM (the ha tier stops them) -> close tunnels ->
 #   upload the report -> destroy (uat/tofu/destroy.sh) -> verify teardown.
 # Core is installed before the DMZ: the bus needs core's public NATS trust
 # (with the loader's JWT), the loader's seed and the accounts bucket's
@@ -50,11 +51,11 @@ on:
         default: 0
         type: number
       tier:
-        description: "Test tier"
+        description: "Test tier (ha: the HA tests HA1 to HA6, needs hub_nodes 3)"
         required: false
         default: all
         type: choice
-        options: [all, smoke, core, resilience, ingredients, lifecycle]
+        options: [all, smoke, core, resilience, ingredients, lifecycle, ha]
       upgrade_from_tag:
         description: "Earlier release for scenario L4 (package upgrade); empty skips L4"
         required: false
@@ -457,6 +458,8 @@ jobs:
           IMAS_UAT_DISPATCH_FLAGS: ${{ steps.inputs.outputs.dispatch_flags }}
           # An az session from the OIDC login stops renewing after about ten
           # minutes (AADSTS700024); vmctl.sh runs this and repeats the call.
+          # The ha tier stops and starts hub VMs through vmctl.sh (stop-vm,
+          # start-vm) with this login too.
           UAT_AZ_RELOGIN: ${{ github.workspace }}/uat/access/az-relogin.sh
           AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
@@ -467,9 +470,31 @@ jobs:
           export IMAS_UAT_REPORT_DIR="$STATE/report"
           export IMAS_UAT_CORE_KUBECONFIG="$STATE/k0s/core.kubeconfig"
           export IMAS_UAT_ENDPOINTS="$STATE/k0s/endpoints.json"
+          # The ha tier: the DMZ cluster, and the DMZ chart uat/hub/dmz pulled
+          # (HA3's helm upgrade; the core chart is in the core state directory).
+          export IMAS_UAT_DMZ_KUBECONFIG="$STATE/k0s/dmz.kubeconfig"
+          export IMAS_UAT_DMZ_CHART="$STATE/dmz/chart/nats-${IMAS_UAT_RELEASE_TAG#v}.tgz"
           if [ "$TIER" = smoke ]; then export IMAS_UAT_TIMEOUT=45m; else export IMAS_UAT_TIMEOUT=165m; fi
           read -r -a ids <<<"$SCENARIOS"
           uat/tests/run.sh "$TIER" "${ids[@]}"
+
+      # A failed or timed out HA2 (node stop) can leave a hub VM stopped. Start
+      # every node of an HA hub again (a running VM just answers), so the
+      # report, a kept environment and the destroy find the hubs whole.
+      - name: Start the HA hubs' VMs
+        if: always() && steps.tests.outcome != 'skipped' && steps.inputs.outputs.hub_nodes == '3'
+        env:
+          UAT_AZ_RELOGIN: ${{ github.workspace }}/uat/access/az-relogin.sh
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS= read -r vm; do
+            uat/access/vmctl.sh "$STATE/uat.json" start-vm "$vm" || status=1
+          done < <(jq -r '.core[], .dmz[]' "$STATE/ha_node_names.json")
+          exit "$status"
 
       - name: Close the Bastion tunnels
         if: always() && steps.tunnels.outcome != 'skipped'

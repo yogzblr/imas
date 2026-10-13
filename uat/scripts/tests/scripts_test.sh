@@ -280,6 +280,12 @@ for t in smoke core resilience ingredients lifecycle all; do
   run_inputs TIER="$t"
   check "tier $t is accepted" test "$rc" -eq 0
 done
+inputs_state tier-ha
+run_inputs TIER=ha HUB_NODES=3
+check "tier ha is accepted on the HA run, with a 7 hour budget" test "$rc" -eq 0 -a -n "$(grep -x 'tier=ha' "$STUB_STATE/github_output")" -a -n "$(grep -x 'run_budget_hours=7' "$STUB_STATE/github_output")"
+inputs_state tier-ha-1
+run_inputs TIER=ha
+check "tier ha on one node per hub is refused, saying why" test "$rc" -eq 1 -a -n "$(grep -F 'input tier ha needs hub_nodes 3' <<<"$out")"
 inputs_state tier-smoke
 run_inputs TIER=smoke
 check "a smoke run gets a 3 hour budget" grep -qx "run_budget_hours=3" "$STUB_STATE/github_output"

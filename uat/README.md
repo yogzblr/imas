@@ -145,7 +145,7 @@ Then approve the `uat` deployment when GitHub asks (the required reviewer).
 | `release_tag` | required | `vX.Y.Z` or `vX.Y.Z-rc.N`. It must be a tag with a published (not draft), GPG-signed release (assets `checksums.txt` and `checksums.txt.sig`); the chart, the images, the packages and the CLI all come from it. It is the chart reference too: the core hub installs the farmer chart published with it, which carries the stamped sprout release `finish.sh` registers |
 | `region` | `centralindia` | Azure region |
 | `keep_hours` | `0` | `0` destroys at the end. Above 0 (at most 168) skips the destroy and keeps the environment for debugging; the janitor deletes it later |
-| `tier` | `all` | `smoke` (about 10 minutes of tests), `core` (includes smoke), `resilience`, `ingredients`, `lifecycle` or `all` |
+| `tier` | `all` | `smoke` (about 10 minutes of tests), `core` (includes smoke), `resilience`, `ingredients`, `lifecycle`, `ha` (the HA tests HA1 to HA6; needs `hub_nodes` 3, see [HA run](#ha-run)) or `all` |
 | `upgrade_from_tag` | empty | An earlier release for L4 (the package upgrade, UAT.7). Empty: L4 skips with that reason. Passed to the tests as `IMAS_UAT_UPGRADE_FROM_TAG` |
 | `scenarios` | empty | Scenario ids of the tier, separated by spaces or commas (`C1 X4`), passed to `uat/tests/run.sh`. Ingredient ids (`I.file.managed`) go in an `ingredients` run of their own |
 | `hub_nodes` | `1` | k0s nodes per hub. `1` is the single-node run. `3` is the HA run (P24): `uat/tofu` gets `core_node_count=3`, `dmz_node_count=3` and `core_node_size=Standard_D4s_v5` (3 core nodes of D4s_v5, 3 DMZ nodes of D2s_v5, each hub behind load balancers; `uat/tofu/README.md`, "HA topology"), which needs 18 Dsv5 vCPU of quota |
@@ -206,7 +206,9 @@ names the piece):
 8. **Tenants and enrolment** (`uat/enroll/enroll.sh`).
 9. **Test material** (`uat/scripts/material.sh`) and a second Azure login,
    then **the tests** (`uat/tests/run.sh <tier> [ids]`).
-10. Always: **close the tunnels**, **collect and upload** the report and the
+10. Always: on an HA run, **start every hub VM** (`vmctl.sh start-vm` on each
+    name of `ha_node_names.json`, so a node stop that failed half way leaves no
+    VM stopped), then **close the tunnels**, **collect and upload** the report and the
     outputs, then, unless `keep_hours` is above 0, a third Azure login,
     **destroy** (`uat/tofu/destroy.sh`) and **verify teardown**
     (`verify-teardown.sh`), each of which fails the job when something is
@@ -297,6 +299,17 @@ Gateway's Secrets from them, its root credential and the four users' pairs
 `validate-object-store.sh` then proves each user's reach through the
 gateway. The DMZ's bus loader reads the accounts bucket on core's private
 address, port 9000, where the core edge proxy passes it to the gateway.
+
+**The `ha` tier** (`tier=ha`, or `all`; `uat/tests/README.md`, "The ha
+tier") runs HA1 to HA6 against these hubs, from the runner, with kubectl on
+both clusters (through the API tunnels), `vmctl.sh stop-vm` and `start-vm`
+for the node stop, and helm on the charts the hubs were installed from: pod
+kills, a core node and a DMZ node stopped, a rolling restart, an empty bus
+node, a lost account event and parallel enrolment, each checked against the
+owner's error windows (brief H-azure-next-runs.md, Owner decisions). Its
+node stop picks a node by the rule above. `check-inputs.sh` refuses
+`tier=ha` with `hub_nodes` 1, and on the single-node run every HA scenario
+skips, saying so.
 
 **Load balancers.** Each HA hub's private address is its internal load
 balancer (`api_address`), so the other hub and the sprouts keep one address

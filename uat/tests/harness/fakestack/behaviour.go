@@ -277,6 +277,12 @@ func (s *Stack) runCmd(h *Host, cmd, cwd, runAs string, args []string, timeout i
 		if runAs != "" {
 			h.Owners[p] = runAs
 		}
+	case exe == "sh" && len(args) == 2 && args[0] == "-c" && appendRe.MatchString(args[1]):
+		m := appendRe.FindStringSubmatch(args[1])
+		s.appendLine(h, m[2], m[1], "\n")
+	case exe == "cmd.exe" && len(args) == 2 && args[0] == "/c" && winAppendRe.MatchString(args[1]):
+		m := winAppendRe.FindStringSubmatch(args[1])
+		s.appendLine(h, m[2], m[1], "\r\n")
 	case exe == "powershell.exe" && strings.Contains(full, "New-Item"):
 		if m := psPathRe.FindStringSubmatch(full); m != nil {
 			p := join(cwd, strings.ReplaceAll(m[1], "''", "'"))
@@ -289,6 +295,31 @@ func (s *Stack) runCmd(h *Host, cmd, cwd, runAs string, args []string, timeout i
 		return "failed", code, "command_failed"
 	}
 	return "succeeded", 0, ""
+}
+
+// appendRe and winAppendRe are the ha tier's marker commands
+// (harness.MarkerCmd): append a word to a file.
+var (
+	appendRe    = regexp.MustCompile(`^echo ([a-z0-9]+) >> '([^']+)'$`)
+	winAppendRe = regexp.MustCompile(`^echo ([a-z0-9]+)>>(\S+)$`)
+)
+
+// appendLine appends a line to a host file, twice with DuplicateRuns.
+// s.mu is held.
+func (s *Stack) appendLine(h *Host, p, word, eol string) {
+	runs := 1
+	if s.DuplicateRuns {
+		runs = 2
+	}
+	for i := 0; i < runs; i++ {
+		h.Files[p] += word + eol
+	}
+	h.MTimes[p] = time.Now().Unix()
+	if h.OS == "windows" {
+		h.Owners[p] = `NT AUTHORITY\SYSTEM`
+	} else {
+		h.Owners[p] = "root"
+	}
 }
 
 // --- host scripts -------------------------------------------------------------------

@@ -120,6 +120,8 @@ or fails, its exit trap stops every tunnel it had started.
 uat/access/vmctl.sh <uat.json> restart      <vm>
 uat/access/vmctl.sh <uat.json> stop-sprout  <vm>
 uat/access/vmctl.sh <uat.json> start-sprout <vm>
+uat/access/vmctl.sh <uat.json> stop-vm      <vm>
+uat/access/vmctl.sh <uat.json> start-vm     <vm>
 uat/access/vmctl.sh <uat.json> run          <vm> <command...>
 ```
 
@@ -128,12 +130,15 @@ uat/access/vmctl.sh <uat.json> run          <vm> <command...>
 `uat-dmz-1` to `uat-dmz-N` and `uat-core-1` to `uat-core-N` on an HA hub,
 each by its own entry of `node_ids`), or the hub's `name` where the file has
 no node lists. Everything goes through the
-Azure control plane (`az vm restart`, `az vm get-instance-view`, `az vm
-run-command invoke`); no network path to the VM is needed.
+Azure control plane (`az vm restart`, `az vm stop`, `az vm start`, `az vm
+get-instance-view`, `az vm run-command invoke`); no network path to the VM is
+needed.
 
 | Action | What it does | Exit status |
 |---|---|---|
 | `restart` | `az vm restart`, then waits until the power state is running and a trivial run-command succeeds (the guest agent answers), up to `VMCTL_WAIT_SECONDS` (default 600), polling every `VMCTL_POLL_SECONDS` (default 10) | 0 when back, 255 otherwise |
+| `stop-vm` | `az vm stop` (powered off, still allocated, so it starts again quickly) on a hub node, then waits until the power state is stopped, up to `VMCTL_WAIT_SECONDS`: the `ha` tier's node stop (`uat/tests`, HA2). Hub nodes only; a sprout is refused | 0 when stopped, 255 otherwise |
+| `start-vm` | `az vm start` on a hub node, then waits as `restart` does. Hub nodes only. The workflow also runs it on every HA hub node after the tests, so a node stop that failed half way leaves no VM stopped | 0 when back, 255 otherwise |
 | `stop-sprout`, `start-sprout` | `systemctl stop|start imas-sprout` on Linux, `Stop-Service`/`Start-Service imas-sprout` on Windows (`VMCTL_SPROUT_SERVICE` overrides the name). Sprouts only; a hub is refused | the command's |
 | `run` | Runs `<command...>`, joined with spaces, as root with bash on Linux or as SYSTEM with PowerShell on Windows. Prints its stdout on stdout and its stderr on stderr, then `vmctl.sh: exit_code=N` on stderr | the command's (`N`) |
 
@@ -161,8 +166,10 @@ exit, close stopping the tunnels and their children and
 removing the files, close being repeatable and never killing an unrelated pid,
 a failed tunnel, a tunnel without an SSH banner, docker sprouts, and for
 `vmctl.sh` the exit codes, stdout and stderr, quoting, the service commands on
-both OSes, the hub refusal, restart and its failures, and every node of an HA
-hub resolved by its own id. Sample input: `testdata/uat.json` (single-node) and
+both OSes, the hub refusal, restart and its failures, `stop-vm` and `start-vm`
+(waiting for the power state and the guest, a VM that never stops, a failed
+`az vm stop`, the refusal of a sprout), and every node of an HA hub resolved
+by its own id. Sample input: `testdata/uat.json` (single-node) and
 `testdata/uat-ha.json` (3 + 3 nodes); the `tofu test` in `uat/tofu` keeps
 both in the shape of the real output. shellcheck runs on every script.
 

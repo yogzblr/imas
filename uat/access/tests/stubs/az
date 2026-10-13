@@ -120,6 +120,15 @@ case "$1 $2" in
   "vm restart")
     exit "$(cat "$STUB_STATE/restart_rc" 2>/dev/null || echo 0)"
     ;;
+  "vm stop")
+    # stop_noeffect: Azure accepts the stop but the VM keeps running.
+    [ -f "$STUB_STATE/stop_noeffect" ] || echo PowerState/stopped >"$STUB_STATE/power"
+    exit "$(cat "$STUB_STATE/stop_rc" 2>/dev/null || echo 0)"
+    ;;
+  "vm start")
+    rm -f "$STUB_STATE/power"
+    exit "$(cat "$STUB_STATE/start_rc" 2>/dev/null || echo 0)"
+    ;;
   "vm get-instance-view")
     cat "$STUB_STATE/power" 2>/dev/null || echo PowerState/running
     ;;

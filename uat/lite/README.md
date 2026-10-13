@@ -246,7 +246,9 @@ until you remove them (`sudo apt-get purge imas-sprout`, then the
 
 ## vmctl.sh
 
-Same interface as `uat/access/vmctl.sh`:
+Same interface as `uat/access/vmctl.sh`, without its `stop-vm` and
+`start-vm` (a usage error here): only the `ha` tier stops a hub node, and
+it skips on the rig's single-node hubs.
 
 ```sh
 uat/lite/vmctl.sh <uat.json> restart|stop-sprout|start-sprout <vm>

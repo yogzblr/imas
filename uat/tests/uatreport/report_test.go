@@ -318,8 +318,9 @@ func TestRunCommand(t *testing.T) {
 }
 
 // TestRunShAgainstFakeStack runs uat/tests/run.sh for real (build, test
-// binary, report) against the fake stack, for the smoke tier and one
-// scenario of the resilience tier. It builds the uat-tagged test binary,
+// binary, report) against the fake stack, for the smoke tier, one
+// scenario of the resilience tier, and the ha tier (which skips on the
+// fake's single-node hubs). It builds the uat-tagged test binary,
 // so it takes a while; -short skips it.
 func TestRunShAgainstFakeStack(t *testing.T) {
 	if testing.Short() {
@@ -365,7 +366,7 @@ func TestRunShAgainstFakeStack(t *testing.T) {
 	runSh := func(dir string, args ...string) (int, string) {
 		cmd := exec.Command("bash", append([]string{filepath.Join("..", "run.sh")}, args...)...)
 		cmd.Env = append(os.Environ(), "IMAS_UAT_DIR="+dir, "IMAS_UAT_REPORT_DIR="+filepath.Join(dir, "report-"+args[0]),
-			"IMAS_UAT_VMCTL=", "IMAS_UAT_BIND_TENANT=", "IMAS_UAT_CORE_KUBECONFIG=", "IMAS_UAT_ENDPOINTS=")
+			"IMAS_UAT_VMCTL=", "IMAS_UAT_BIND_TENANT=", "IMAS_UAT_CORE_KUBECONFIG=", "IMAS_UAT_ENDPOINTS=", "IMAS_UAT_DMZ_KUBECONFIG=")
 		out, err := cmd.CombinedOutput()
 		code := 0
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -384,6 +385,12 @@ func TestRunShAgainstFakeStack(t *testing.T) {
 	}
 	if code, out := runSh(dir, "lifecycle"); code != 0 || !strings.Contains(out, "SKIP   L4") || !strings.Contains(out, "SKIP   L5") || !strings.Contains(out, "upgrade_from_tag is empty") {
 		t.Errorf("lifecycle (UAT.7) must report L4 and L5 skipped with their reasons, without upgrade_from_tag or the dispatch flags: exit %d\n%s", code, out)
+	}
+	// The fake's hubs are one node each: every ha scenario skips, saying
+	// why, and the tier passes (skipped with a reason is accounted for).
+	if code, out := runSh(dir, "ha"); code != 0 || !strings.Contains(out, "RESULT: PASS") ||
+		strings.Count(out, "the ha tier needs the HA run") < 6 || !strings.Contains(out, "SKIP   HA6") {
+		t.Errorf("ha against the single-node fake: exit %d\n%s", code, out)
 	}
 	if code, _ := runSh(dir, "core", "Q7"); code != 2 {
 		t.Errorf("an unknown id must be a usage error: %d", code)

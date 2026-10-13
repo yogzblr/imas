@@ -64,7 +64,7 @@ func (r *Report) Failed() bool {
 }
 
 var (
-	topLevel  = regexp.MustCompile(`^Test(Smoke|Core|Resilience|Ingredients|Lifecycle)([A-Z][0-9]+)?(?:_|$|[A-Z])`)
+	topLevel  = regexp.MustCompile(`^Test(Smoke|Core|Resilience|Ingredients|Lifecycle|HA)([A-Z]{1,2}[0-9]+)?(?:_|$|[A-Z])`)
 	osRe      = regexp.MustCompile(`(?:^|[^a-z])(ubuntu|alma|windows|win)(?:$|[^a-z])`)
 	tenantRe  = regexp.MustCompile(`(?:^|[^a-z0-9])t([0-9]+)(?:$|[^0-9])`)
 	ingredRe  = regexp.MustCompile(`I\.[a-z0-9_]+(?:\.[a-z0-9_]+)+`)
