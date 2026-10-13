@@ -19,8 +19,10 @@
 #                refill (default 75; 0 skips, and then enrolment through
 #                this Envoy is refused for up to 60s)
 # --max-burst    most /v1/enroll requests sent to drain its bucket
-#                (default 41: two buckets of 20, in case a refill lands
-#                mid-burst, plus one)
+#                (default 41 per Envoy: two buckets of 20, in case a
+#                refill lands mid-burst, plus one. An HA DMZ runs one Envoy
+#                per node behind a load balancer, each with its own bucket,
+#                so 121 for three nodes)
 #
 # What it checks, against deploy/envoy/envoy.yaml's header and the nats
 # chart (deploy/helm/nats/templates/envoy-configmap.yaml):
@@ -63,7 +65,7 @@ usage() {
 	exit 2
 }
 
-endpoints="" ca_file="" kubeconfig="" connect="" refill_wait=75 max_burst=41
+endpoints="" ca_file="" kubeconfig="" connect="" refill_wait=75 max_burst=""
 while (($#)); do
 	case $1 in
 	--endpoints | --ca-file | --kubeconfig | --connect | --refill-wait | --max-burst)
@@ -86,13 +88,16 @@ done
 [[ -n $ca_file ]] || dmz_die "--ca-file is required"
 [[ -r $ca_file ]] || dmz_die "CA file '$ca_file' is not readable"
 [[ $refill_wait =~ ^[0-9]+$ ]] || dmz_die "--refill-wait must be a whole number of seconds"
-[[ $max_burst =~ ^[1-9][0-9]*$ ]] || dmz_die "--max-burst must be a whole number of 1 or more"
+[[ -z $max_burst || $max_burst =~ ^[1-9][0-9]*$ ]] || dmz_die "--max-burst must be a whole number of 1 or more"
 [[ -z $kubeconfig || -r $kubeconfig ]] || dmz_die "kubeconfig '$kubeconfig' is not readable"
 
 dmz_need jq curl openssl timeout
 openssl version | grep -q '^OpenSSL 3' || dmz_die "OpenSSL 3 is required (-no-CAstore, pkeyutl -rawin)"
 openssl x509 -in "$ca_file" -noout 2>/dev/null || dmz_die "'$ca_file' is not a PEM certificate"
 dmz_load_endpoints "$endpoints"
+# One Envoy per DMZ node (values-ha.yaml on an HA hub), one bucket each.
+envoys=$DMZ_NODE_COUNT
+max_burst=${max_burst:-$((40 * envoys + 1))}
 if [[ -n $connect ]]; then
 	_dmz_is_ipv4 "$connect" || _dmz_is_fqdn "$connect" || dmz_die "--connect '$connect' is not an IPv4 address or a DNS name"
 	DMZ_CONNECT_ADDR=$connect
@@ -248,14 +253,14 @@ for ((i = 1; i <= max_burst; i++)); do
 done
 if [[ -n $limited && $body == *local_rate_limited* ]]; then
 	note=""
-	((passed_before <= 20)) || note=" (more than 20: a refill tick may have landed mid-burst)"
+	((passed_before <= 20 * envoys)) || note=" (more than $((20 * envoys)): a refill tick may have landed mid-burst)"
 	pass D9 "POST /v1/enroll is rate limited: 429 \"$body\" after $passed_before answered request(s)$note"
 elif [[ -n $limited ]]; then
 	fail D9 "POST /v1/enroll: 429 without Envoy's local_rate_limited body: \"$body\""
 elif ((i <= max_burst)); then
 	fail D9 "POST /v1/enroll: got $code \"$body\" during the burst, want farmer's 401 or Envoy's 429"
 else
-	fail D9 "POST /v1/enroll: no 429 after $max_burst requests (bucket should be 20 per 60s)"
+	fail D9 "POST /v1/enroll: no 429 after $max_burst requests (bucket should be 20 per 60s per Envoy, $envoys Envoy(s))"
 fi
 
 http POST /v1/refresh -H 'Content-Type: application/json' --data '{}'

@@ -48,10 +48,14 @@ the tofu `uat` JSON is itself a valid endpoints file. Extra keys are ignored.
 | `dmz.ports.envoy` | no | 8443 | Envoy's node port (and load balancer port): sprouts and the runner connect here. Owner's decision, 2026-10-06 |
 | `dmz.ports.bus` (or `dmz.ports.bus_client`) | no | 8442 | the bus client node port: core connects here. Owner's decision, 2026-10-06 |
 | `dmz.envoy_service_type` | no | `NodePort` | `NodePort` or `LoadBalancer`, as UAT.2's PR #130 writes it; `install.sh --expose` overrides it |
-| `core.private_ip` | yes | | Envoy's farmer upstream; the NetworkPolicy peer for core |
+| `core.private_ip` | yes | | core's first node: Envoy's farmer upstream and the NetworkPolicy peer for core when the fields below are absent |
 | `core.fqdn` | yes | | checked as a DNS name (unused otherwise) |
 | `core.ports.farmer_api` | no | 5405 | Envoy's farmer upstream port |
-| `dmz.account_store.endpoint` | no | `<core.private_ip>:9000` | the accounts bucket's S3 endpoint the bus's loader sidecar reads (`host:port`, no scheme). The default is core's RustFS on its hostPort 9000 (`uat/hub/core` `rustfs.hostPort`), which core's NetworkPolicy and NSG (`uat/tofu` `accounts_store_port`) open to the DMZ private address only |
+| `dmz.nodes` (or `dmz.node_names`), `dmz.node_private_ips` | no | one node at `dmz.private_ip` | every DMZ node (`uat/k0s` writes them from tofu, P24): more than one makes an HA DMZ (`values-ha.yaml`, [HA DMZ hub](#ha-dmz-hub)); the addresses are IP SANs of the bus certificate |
+| `dmz.api_address` | no | `dmz.private_ip` | the DMZ's private address (its internal load balancer on an HA hub): an IP SAN of the bus certificate, `dmz.json`'s `bus.address` |
+| `core.node_private_ips` | no | `[core.private_ip]` | every core node: core's traffic to the bus comes from them (the bus NetworkPolicy's sources) |
+| `core.api_address` | no | `core.private_ip` | core's private address (its internal load balancer on an HA hub): Envoy's farmer upstream and its egress rule, and the accounts endpoint's default host |
+| `dmz.account_store.endpoint` | no | `<core.api_address>:9000` | the accounts bucket's S3 endpoint the bus's loader sidecar reads (`host:port`, no scheme). The default is core's RustFS on its hostPort 9000 (`uat/hub/core` `core.accountsStorePort`), which core's NetworkPolicy and NSG (`uat/tofu` `accounts_store_port`) open to the DMZ nodes only. On an HA core hub (P24) the same address and port reach Versity Gateway through core's edge proxy, and `<core.private_ip>` is core's `api_address` (its internal load balancer) |
 | `dmz.account_store.use_ssl` | no | `false` | TLS to that endpoint |
 | `dmz.account_store.egress_cidr` | when the endpoint is a DNS name | for an IP endpoint, that IP as a `/32`; none for a DNS name (`install.sh` does not resolve it, so supply the CIDR) | the bus NetworkPolicy's one egress rule into core |
 | `cluster_issuer` (or `ca.cluster_issuer`) | no | `imas-uat-ca` | the cert-manager ClusterIssuer of the UAT CA (UAT.2). `uat/hub/core` spells it `ca.cluster_issuer`; either is read, `cluster_issuer` first |
@@ -71,8 +75,11 @@ shape, only `dmz_load_endpoints` in `lib.sh` changes.
 uat/hub/dmz/install.sh --kubeconfig dmz.kubeconfig --endpoints endpoints.json \
   --release-tag v0.1.0-rc.4 --seeds-from-kubeconfig core.kubeconfig \
   --accounts-reader-dir <core state-dir>/core/sensitive/s3/accounts-reader \
-  --loader-seed <core state-dir>/core/sensitive/seeds/bus-loader-user.nk --workdir out/dmz
+  --loader-seed <core state-dir>/core/sensitive/seeds/bus-loader-user.nk \
+  [--fence-seed <core state-dir>/core/sensitive/seeds/bus-fence-user.nk] --workdir out/dmz
 ```
+
+`--fence-seed` is read on an HA DMZ only (see [HA DMZ hub](#ha-dmz-hub)).
 
 `--help` lists every option. In order, it:
 
@@ -220,8 +227,39 @@ leaves the chart's own ClusterIP Services as they are:
 Section 4h restricts who reaches these ports with the NSGs (UAT.1): core to
 8442, sprouts and the runner to 8443. Inside the cluster, the chart's Envoy
 policy already admits anyone on the listener port, and
-`imas-dmz-nats-bus-uat-core` adds `core.private_ip/32` to the bus's client
-pod port, 5406 (policies are additive; it opens nothing else).
+`imas-dmz-nats-bus-uat-core` adds each core node's address
+(`core.node_private_ips`, else `core.private_ip`) as a `/32` to the bus's
+client pod port, 5406, and on an HA DMZ the Azure health probe's source
+(168.63.129.16/32), so every node with a bus pod stays in the internal load
+balancer's rule (policies are additive; it opens nothing else).
+
+## HA DMZ hub
+
+When the endpoints file lists several DMZ nodes (`dmz.nodes`; the
+workflow's `hub_nodes` 3; brief H4, P24), `install.sh`:
+
+- passes `values-ha.yaml` after `values-uat.yaml`: the bus a three-node NATS
+  cluster (`bus.replicaCount` 3, the fence user's seed from Secret
+  `imas-bus-fence-user`, the route password from Secret
+  `imas-bus-route-auth`) and Envoy 3 replicas, each spread one per node
+  (maxSkew 1, `DoNotSchedule`) with a PodDisruptionBudget. The bus keeps no
+  volume: its resolver directory is the chart's `emptyDir`, rebuilt by the
+  loader from the accounts bucket at every start;
+- issues the bus certificate for every bus pod's headless name (routes are
+  mutual TLS and verify them) and every DMZ address;
+- refuses to install a trust without `bus-fence-user.jwt` (core mints it
+  from `natsTrust.busFenceUserPub`, which `uat/hub/core` sets for an HA DMZ),
+  makes `imas-bus-fence-user` from `--fence-seed` (or keeps the existing
+  Secret), and generates the route password once (64 hex characters,
+  `openssl rand`; it never leaves the DMZ cluster);
+- points Envoy's farmer upstream, its egress rule and the loader's accounts
+  endpoint at core's private address (`core.api_address`, core's internal
+  load balancer on an HA core hub), and admits core's traffic from every
+  core node and the probe.
+
+`check.sh`'s enrolment burst defaults to 41 per Envoy (one per DMZ node),
+since a load balancer spreads the requests over Envoys that each keep their
+own bucket.
 
 ## check.sh
 
@@ -253,7 +291,7 @@ what the repo's real-Envoy tests assert (`internal/pki/envoy_e2e_test.go`,
 | D6 | the same with the forged token | 401 with jwt_authn's body |
 | D7 | `GET /v1/sprout/update-manifest`, no token | 401 with jwt_authn's body (route 2b) |
 | D8 | `POST /v1/enroll` with `{}` | farmer's own `401 {"error":"enrollment_failed"}` (`internal/api/handlers/enroll.go`): no JWT gate, and Envoy reaches farmer. 502, 503 or 504 is reported as farmer unreachable |
-| D9 | `POST /v1/enroll` repeatedly, at most `--max-burst` (41) times | Envoy answers `429 local_rate_limited`. Its bucket holds 20 and refills 20 every 60 s, so it should come after at most 20 answered requests; a refill landing mid-burst can let 40 through, which is reported but passes |
+| D9 | `POST /v1/enroll` repeatedly, at most `--max-burst` (41 per Envoy, one Envoy per DMZ node) times | Envoy answers `429 local_rate_limited`. Each Envoy's bucket holds 20 and refills 20 every 60 s, so it should come after at most 20 answered requests per Envoy; a refill landing mid-burst can let twice that through, which is reported but passes |
 | D10 | `POST /v1/refresh` with `{}`, while `/v1/enroll`'s bucket is empty | farmer's `401 enrollment_failed`, not 429: no JWT gate, and a bucket of its own |
 | D11 | `POST /v1/enroll` every 5 s for up to `--refill-wait` (75) s | the bucket refills and farmer answers again |
 | D12 | `openssl s_client` again, sending and verifying `dmz.<zone>` over the same connection | the certificate also verifies for the private name sprouts use (the runner cannot resolve it, so only the name changes) |
@@ -375,7 +413,20 @@ helm, bash or jq fails the render tests instead):
   `/v1/refresh` bucket, present another CA's certificate, a certificate for
   another name, or one without the private name each fail the right checks.
 - **Lint** (`TestLint`): `shellcheck -x` on the scripts and `yamllint -s` on
-  `values-uat.yaml` and the generated values and manifests.
+  `values-uat.yaml`, `values-ha.yaml` and the generated values and manifests
+  (an HA render among them).
+- **HA DMZ** (`dmz_ha_test.go`, with `uat/k0s`'s HA endpoints):
+  `TestRenderHA` (bus and Envoy 3 replicas spread one per node with PDBs, no
+  volume claim and the resolver on an `emptyDir`, the fence and route
+  Secrets, every bus pod and DMZ address on the bus certificate with client
+  auth, the bus ingress from the three core nodes and the probe, Envoy and
+  the loader on core's internal load balancer, `dmz.json`);
+  `TestRenderSingleNodeHasNoHAPieces`; `TestInstallHAWithStubs` (a trust
+  without the fence user's JWT refused before the chart, the fence and route
+  Secrets made, the route password 64 hex characters, `values-ha.yaml` in
+  the upgrade, existing Secrets kept); `TestCheckEnrollBurstFollowsEnvoys`
+  (three fake Envoys behind a round-robin balancer: the default burst drains
+  them, 41 does not).
 
 Also run by hand for this brief: `kubeconform -strict` (Kubernetes 1.30
 schemas, cert-manager from the CRDs catalog) on the rendered chart and the
