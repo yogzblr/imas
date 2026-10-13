@@ -44,8 +44,10 @@ T="tenants/$run_id/recipes"
 
 # The program each exec runs: line 1 of stdin is the access key, line 2 the
 # secret key (empty: the pod's root credential), the rest one probe per
-# line, "<allow|deny|any> <METHOD> <path> <label>". The body of a PUT is a
-# fixed string; the root credential's DELETEs accept any answer.
+# line, "<allow|deny|gone> <METHOD> <path> <label>". The body of a PUT is a
+# fixed string. gone is the root credential's cleanup DELETE: 200 or 204
+# (deleted), or 404 (never written, as for a refused put); anything else is a
+# probe object left behind, and fails the script.
 # shellcheck disable=SC2016
 probe_sh='
 IFS= read -r ak; IFS= read -r sk
@@ -60,7 +62,7 @@ while read -r want m p label; do
 	c=$(curl -sS -o /dev/null -w "%{http_code}" -X "$m" "$@" --aws-sigv4 "aws:amz:us-east-1:s3" \
 		--user "$ak:$sk" "http://127.0.0.1:9000$p" 2>/dev/null) || c=000
 	case "$want:$c" in
-	allow:200 | allow:204 | deny:403 | any:*) echo "PASS $label (http $c)" ;;
+	allow:200 | allow:204 | deny:403 | gone:200 | gone:204 | gone:404) echo "PASS $label (http $c)" ;;
 	*) echo "FAIL $label: http $c, want $want" ;;
 	esac
 done
@@ -103,10 +105,15 @@ probes "accounts reader" "$s3dir/accounts-reader/access-key-id" "$s3dir/accounts
 cleanup=()
 for o in "$R/$P/recipe" "$R/$T/recipe" "$J/$P/job" "$W/$P/jwt" "$A/$P/account" \
 	"$R/$P/saasapi" "$J/$P/saasapi" "$A/$P/saasapi" "$A/$P/farmer" "$R/$P/writer" "$A/$P/reader"; do
-	cleanup+=("any DELETE /$o delete $o")
+	cleanup+=("gone DELETE /$o delete $o")
 done
-if ! { printf '\n\n'; printf '%s\n' "${cleanup[@]}"; } |
-	kc -n "$UAT_NS" exec -i "deploy/$RUSTFS_SVC" -c rustfs -- /bin/sh -ec "$probe_sh" >/dev/null 2>&1; then
+if out=$({ printf '\n\n'; printf '%s\n' "${cleanup[@]}"; } |
+	kc -n "$UAT_NS" exec -i "deploy/$RUSTFS_SVC" -c rustfs -- /bin/sh -ec "$probe_sh" 2>/dev/null); then
+	# Only the failed deletes are reported: they are probe objects left behind.
+	while IFS= read -r line; do
+		[[ "$line" == FAIL\ * ]] && results+=("FAIL root cleanup: ${line#FAIL }")
+	done <<<"$out"
+else
 	results+=("FAIL root: could not delete the probe objects under $P/ and $T/")
 fi
 

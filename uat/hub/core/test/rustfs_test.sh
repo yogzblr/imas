@@ -66,6 +66,11 @@ FAKE_RUSTFS_BREAK=farmer-accounts vr "$ep" && bad "farmer reading the accounts b
 	{ grep -qF 'FAIL  farmer: list on imas-accounts: http 200, want deny' "$state/out" &&
 		ok "farmer listing the accounts bucket fails, named" || { bad "farmer-accounts: wrong output"; tail -n 3 "$state/out"; }; }
 
+setup root-delete
+FAKE_RUSTFS_BREAK=root-delete vr "$ep" && bad "probe objects left behind pass" ||
+	{ grep -qF 'FAIL  root cleanup: delete imas-recipes/' "$state/out" && grep -q '11 of 43 checks failed' "$state/out" &&
+		ok "a cleanup DELETE that fails is reported and fails the script" || { bad "root-delete: wrong output"; tail -n 3 "$state/out"; }; }
+
 setup nocreds
 rm "$state/core/sensitive/s3/accounts-reader/secret-access-key"
 vr "$ep" && bad "missing credentials pass" ||
