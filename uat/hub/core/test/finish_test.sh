@@ -33,7 +33,9 @@ kubeconfig="$tmp/kubeconfig"
 echo "apiVersion: v1" >"$kubeconfig"
 ep="$core/testdata/endpoints.json"
 tag=v0.1.0-rc.4
-export FS_TOKEN=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+# A per-run dummy token (generated, so no token-shaped literal sits in the repo).
+FS_TOKEN=$(openssl rand -hex 32)
+export FS_TOKEN
 
 # The request the chart's hook sends (ConfigMap imas-core-farmer-sprout-release).
 deb=imas-sprout_0.1.0-rc.4_linux_amd64.deb

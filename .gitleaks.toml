@@ -27,4 +27,8 @@ regexes = [
   # The dummy root secret key of internal/versitysetup's tests (H3): a
   # fixture for a fake S3 gateway, never a credential anywhere.
   '''rootSecret\s*=\s*"root-secret-key-0123456789"''',
+  # The dummy operator token of uat/hub/core/test/finish_test.sh (R1) as
+  # first committed (490868b); generated per run since, but that commit
+  # stays in history. A stub's value, never a credential anywhere.
+  '''FS_TOKEN=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef''',
 ]
