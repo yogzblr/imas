@@ -267,26 +267,33 @@ jobs:
             -backend-config="container_name=tfstate" \
             -backend-config="key=imas-uat/$RUN_ID.tfstate"
           # Quota first: the VMs this plan creates against the region's vCPU
-          # quota per family and in all.
-          tofu -chdir=uat/tofu plan -input=false -no-color -out="$STATE/quota.tfplan" >"$STATE/quota-plan.log" 2>&1 \
-            || { tail -n 50 "$STATE/quota-plan.log"; exit 1; }
-          tofu -chdir=uat/tofu show -json "$STATE/quota.tfplan" >"$STATE/quota-plan.json"
-          rm -f "$STATE/quota.tfplan"
-          rc=0
-          uat/tofu/quota-check.sh "$STATE/quota-plan.json" "$TF_VAR_region" || rc=$?
-          rm -f "$STATE/quota-plan.json"
-          [ "$rc" -eq 0 ] || exit "$rc"
+          # quota per family and in all. The apply applies exactly this plan.
+          plan_and_check_quota() {
+            tofu -chdir=uat/tofu plan -input=false -no-color -out="$STATE/run.tfplan" >"$STATE/plan.log" 2>&1 \
+              || { tail -n 50 "$STATE/plan.log"; return 1; }
+            tofu -chdir=uat/tofu show -json "$STATE/run.tfplan" >"$STATE/plan.json"
+            local rc=0
+            uat/tofu/quota-check.sh "$STATE/plan.json" "$TF_VAR_region" || rc=$?
+            rm -f "$STATE/plan.json"
+            return "$rc"
+          }
+          # The plan file holds state values; it never outlives this step.
+          trap 'rm -f "$STATE/run.tfplan" "$STATE/plan.json"' EXIT
+          plan_and_check_quota
           # Azure sometimes refuses a change to the virtual network while the
           # Bastion host (about 13 minutes) is still being created:
-          # "409 AnotherOperationInProgress". The apply is idempotent, so run
-          # it again, but only for that error, and at most three times.
+          # "409 AnotherOperationInProgress". The apply is idempotent, so plan
+          # again (checking the quota on the new plan) and apply that, but
+          # only for that error, and at most three times.
           for attempt in 1 2 3; do
-            if tofu -chdir=uat/tofu apply -auto-approve -input=false -no-color 2>&1 | tee "$STATE/apply.log"; then
+            if tofu -chdir=uat/tofu apply -input=false -no-color "$STATE/run.tfplan" 2>&1 | tee "$STATE/apply.log"; then
               break
             fi
             if [ "$attempt" -lt 3 ] && grep -q 'AnotherOperationInProgress' "$STATE/apply.log"; then
-              echo "::warning::Azure reported AnotherOperationInProgress; running tofu apply again (attempt $((attempt + 1)) of 3)"
+              echo "::warning::Azure reported AnotherOperationInProgress; planning and applying again (attempt $((attempt + 1)) of 3)"
+              rm -f "$STATE/run.tfplan"
               sleep 60
+              plan_and_check_quota
               continue
             fi
             exit 1

@@ -166,7 +166,8 @@ names the piece):
    `imas-uat/<run_id>.tfstate`. A plan and `uat/tofu/quota-check.sh` come
    first: the step fails before anything is created, naming the quota family
    and the vCPUs needed, in use and the limit to request, when the region's
-   quota cannot hold the run. The per-run SSH key and Windows password go to
+   quota cannot hold the run; the apply applies exactly that checked plan
+   (a retry plans and checks again). The per-run SSH key and Windows password go to
    0600 files on the runner, masked in the log; `uat.json` and
    `ha_node_names.json` (the VMs the HA tests stop) go to the run's state
    directory.
