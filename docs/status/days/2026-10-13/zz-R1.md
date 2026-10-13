@@ -1,4 +1,5 @@
 change: R1 (P20 option C, P13): the UAT turns saasapi's operator plane on and registers the sprout release; `finish.sh` fails unless the registration Job completes and the operator API then holds the release with its GPG-signed `checksums.txt` and signature; `dispatch_flags` turns the fleet update flags on through the chart values; L5 checks the packaged keyring and that a release with an altered `checksums.txt` is refused; `check.sh` asserts refusal codes; `validate-rustfs.sh`; Keycloak and Envoy pinned by digest; the UAT's `minio` names are now `rustfs`.
+pr: 246
 item: P20
 action: update
 title: **UAT registers the sprout release (option C), awaiting Run 2**
