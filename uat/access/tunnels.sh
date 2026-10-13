@@ -6,18 +6,23 @@
 #   tunnels.sh close <state-dir>
 #
 # open starts one `az network bastion tunnel` in the background for
-#   SSH (22)            on every Linux VM (both hubs, and sprouts with connection ssh),
+#   SSH (22)            on every Linux VM (every hub node, and sprouts with
+#                       connection ssh),
 #   WinRM HTTPS (5986)  on every Windows VM (sprouts with connection winrm),
-#   Kubernetes API (6443) on both hubs,
+#   Kubernetes API (6443) on every hub node, and on an HA hub (more than one
+#                       node) also on the hub's API address (uat
+#                       <hub>.api_address, the internal load balancer), by
+#                       IP (the Bastion's IP-based connection),
 # each on its own free local port on 127.0.0.1, waits until each accepts
 # connections (an SSH tunnel must also return the server's SSH banner), and
 # writes <state-dir>/access.json:
 #
 #   { "<vm name>": { "host": "127.0.0.1", "ssh_port": N, "kube_port": N,
-#                    "winrm_port": N, "pids": [ ... ] }, ... }
+#                    "winrm_port": N, "pids": [ ... ] }, ...,
+#     "<hub>-api": { "host": "127.0.0.1", "kube_port": N, "pids": [ ... ] } }
 #
-# with only the ports that VM has. Sprouts with connection docker (the local
-# rig) are skipped. If any tunnel fails, open stops every tunnel it started,
+# with only the ports that VM has; "dmz-api" and "core-api" only for an HA
+# hub. Sprouts with connection docker (the local rig) are skipped. If any tunnel fails, open stops every tunnel it started,
 # writes no access.json and exits non zero.
 #
 # close stops every tunnel listed in <state-dir>/tunnels.pids (only processes
@@ -127,20 +132,33 @@ cmd_open() {
   rg=$(jq -er '.resource_group' "$uat") || die "$uat has no resource_group"
   bastion=$(jq -er '.bastion.name' "$uat") || die "$uat has no bastion.name"
 
-  # One line per tunnel: vm, kind, remote port, VM resource id.
+  # One line per tunnel: target name, kind, remote port, target. The target
+  # is "id:<VM resource id>" or, for an HA hub's API address, "ip:<address>".
+  # A hub's nodes are node_names and node_ids (uat/tofu, P24), or its name
+  # and id where the file has no node lists.
   local targets
   targets=$(jq -er '
     def need(f): if (f // "") == "" then error("missing field") else f end;
+    def ipv4: if test("^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$")
+      then . else error("not an IPv4 address: \(.)") end;
     ( ["dmz", "core"][] as $h | .[$h]
-      | (need(.name)) as $n | (need(.id)) as $id
-      | ([$n, "ssh", 22, $id], [$n, "kube", 6443, $id]) ),
+      | (if (.node_names // null) == null then [need(.name)] else .node_names end) as $names
+      | (if (.node_ids // null) == null then [need(.id)] else .node_ids end) as $ids
+      | if ($names | length) == 0 or ($names | length) != ($ids | length)
+        then error("\($h): node_names and node_ids differ") else . end
+      | ( range($names | length) as $i
+          | ($names[$i] | need(.)) as $n | ("id:" + ($ids[$i] | need(.))) as $id
+          | ([$n, "ssh", 22, $id], [$n, "kube", 6443, $id]) ),
+        ( if ($names | length) > 1
+          then ["\($h)-api", "kube", 6443, ("ip:" + (need(.api_address) | ipv4))]
+          else empty end ) ),
     ( .sprouts // {} | to_entries[]
       | .key as $n | .value as $s
-      | if $s.connection == "ssh" then [$n, "ssh", 22, need($s.id)]
-        elif $s.connection == "winrm" then [$n, "winrm", 5986, need($s.id)]
+      | if $s.connection == "ssh" then [$n, "ssh", 22, "id:" + need($s.id)]
+        elif $s.connection == "winrm" then [$n, "winrm", 5986, "id:" + need($s.id)]
         elif $s.connection == "docker" then empty
         else error("sprout \($n): unknown connection \($s.connection)") end )
-    | @tsv' "$uat") || die "$uat does not have the uat shape (dmz, core, sprouts with connection and id)"
+    | @tsv' "$uat") || die "$uat does not have the uat shape (dmz, core with nodes, ids and an HA hub's api_address, sprouts with connection and id)"
 
   mkdir -p "$dir/logs"
   if [ -f "$dir/tunnels.pids" ]; then
@@ -190,15 +208,23 @@ cmd_open() {
     ports[i]=$next_port
     next_port=$((next_port + 1))
     log="$dir/logs/${vms[$i]}-${kinds[$i]}.log"
+    # A VM by its resource id; an HA hub's API address by IP (the Bastion's
+    # IP-based connection, uat/tofu ip_connect_enabled).
+    local -a target
+    case ${ids[$i]} in
+      id:*) target=(--target-resource-id "${ids[$i]#id:}") ;;
+      ip:*) target=(--target-ip-address "${ids[$i]#ip:}") ;;
+      *) die "internal error: bad tunnel target ${ids[$i]}" ;;
+    esac
     # setsid gives the tunnel its own process group, so close can stop az and
     # its python child together. The tunnel outlives this script on purpose.
     if command -v setsid >/dev/null 2>&1; then
       setsid "$AZ" network bastion tunnel --name "$bastion" --resource-group "$rg" \
-        --target-resource-id "${ids[$i]}" --resource-port "${rports[$i]}" --port "${ports[$i]}" \
+        "${target[@]}" --resource-port "${rports[$i]}" --port "${ports[$i]}" \
         </dev/null >>"$log" 2>&1 &
     else
       nohup "$AZ" network bastion tunnel --name "$bastion" --resource-group "$rg" \
-        --target-resource-id "${ids[$i]}" --resource-port "${rports[$i]}" --port "${ports[$i]}" \
+        "${target[@]}" --resource-port "${rports[$i]}" --port "${ports[$i]}" \
         </dev/null >>"$log" 2>&1 &
     fi
     pids[i]=$!

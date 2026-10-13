@@ -5,6 +5,7 @@
     {
       "metadata": {"name": "kube-router-abcde", "namespace": "kube-system"},
       "spec": {
+        "nodeName": "uat-hub",
         "hostNetwork": true,
         "containers": [{"name": "kube-router", "ports": [{"containerPort": 8080, "hostPort": 8080}]}]
       }
@@ -12,6 +13,7 @@
     {
       "metadata": {"name": "imas-uat-core-edge-0", "namespace": "imas-core"},
       "spec": {
+        "nodeName": "uat-hub",
         "containers": [
           {
             "name": "edge",
@@ -26,6 +28,7 @@
     {
       "metadata": {"name": "imas-uat-rustfs-7d9f8-x2k4p", "namespace": "imas-uat"},
       "spec": {
+        "nodeName": "uat-hub",
         "containers": [{"name": "rustfs", "ports": [{"name": "s3", "containerPort": 9000, "hostPort": 9000}]}]
       }
     }

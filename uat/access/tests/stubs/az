@@ -29,7 +29,9 @@ arg() { # arg <flag> <args...>: the value after <flag>
 
 case "$1 $2 $3" in
   "network bastion tunnel")
+    # A VM by its resource id, or an address by IP (--target-ip-address).
     id=$(arg --target-resource-id "$@")
+    [ -n "$id" ] || id=$(arg --target-ip-address "$@")
     port=$(arg --port "$@")
     rport=$(arg --resource-port "$@")
     if grep -qxF "$id" "$STUB_STATE/fail_ids" 2>/dev/null; then

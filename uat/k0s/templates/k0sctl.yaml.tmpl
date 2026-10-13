@@ -1,38 +1,25 @@
 ---
-# k0sctl configuration for one UAT hub: a single-node k0s cluster, the
-# controller and the worker on the one VM (role "single").
+# k0sctl configuration for one UAT hub, a k0s cluster on the hub's nodes.
+#   - One node (the single-node run): the controller and the worker on the one
+#     VM (role "single"), kine on SQLite as the datastore. Unchanged by P24.
+#   - N nodes (3 or 5, the HA run, P24): every node "controller+worker",
+#     etcd as the datastore (N members), node-local load balancing to the
+#     API, kube-router's pod overlay over FOU (README.md, "HA hubs").
 #
 # bootstrap.sh renders it once per hub. Every double-underscore token is set from
 # the uat JSON (tofu output uat), access.json (uat/access/tunnels.sh),
 # versions.env and config.env, each value is checked first (addresses, names,
-# ports, paths), and rendering fails if a token is left. Nothing secret is
-# written here: keyPath is the path of the per-run SSH key, never the key.
+# ports, paths), and rendering fails if a token is left. A token alone on its
+# line is a block bootstrap.sh builds (the hosts from k0sctl-host.yaml.tmpl,
+# the SANs, the CoreDNS lines), or nothing for a single node. Nothing secret
+# is written here: keyPath is the path of the per-run SSH key, never the key.
 apiVersion: k0sctl.k0sproject.io/v1beta1
 kind: Cluster
 metadata:
   name: __CLUSTER_NAME__
 spec:
   hosts:
-    - role: single
-      # The hub is reached only through its Azure Bastion tunnel on the
-      # runner, so k0sctl dials the tunnel's local address and port from
-      # access.json. The system OpenSSH client is used so the host key goes
-      # to a per-run known_hosts file under the alias of the VM name
-      # (accepted on first use, through the tunnel, then pinned for the run).
-      openSSH:
-        address: __ACCESS_HOST__
-        port: __SSH_PORT__
-        user: __ADMIN_USER__
-        keyPath: __SSH_KEY__
-        options:
-          HostKeyAlias: __HOST_ALIAS__
-          UserKnownHostsFile: __KNOWN_HOSTS__
-          StrictHostKeyChecking: accept-new
-          IdentitiesOnly: "yes"
-          BatchMode: "yes"
-          ServerAliveInterval: "30"
-      # The VM's own address in the VNet (not the tunnel's).
-      privateAddress: __PRIVATE_IP__
+__HOSTS__
   options:
     wait:
       enabled: true
@@ -47,31 +34,40 @@ spec:
         name: __CLUSTER_NAME__
       spec:
         api:
-          address: __PRIVATE_IP__
+          # One node: the VM's private IP. N nodes: no address here, so each
+          # controller binds its own private IP (k0sctl sets only the etcd
+          # peer address per host), and no externalAddress: k0s forbids one
+          # with node-local load balancing, and with one set kube-proxy,
+          # konnectivity and the controller joins would dial the internal
+          # load balancer, which drops a node's flow to itself (README.md).
+__API_ADDRESS__
           port: __KUBE_API_PORT__
-          # kubectl and helm reach the API through the kube tunnel on
-          # 127.0.0.1, so the serving certificate must name it.
+          # kubectl and helm reach the API through a kube tunnel on
+          # 127.0.0.1 (on an HA hub, the tunnel to the hub's internal load
+          # balancer, whose address and private name are listed too), so the
+          # serving certificate must name it.
           sans:
-            - 127.0.0.1
-            - __EXTRA_SAN__
-            - __PRIVATE_IP__
-            - __FQDN__
+__SANS__
           extraArgs:
             # This hub's NodePort range (config.env; README.md,
             # "Exposure").
             service-node-port-range: __NODE_PORT_RANGE__
+__STORAGE__
         network:
           provider: kuberouter
+__KUBE_ROUTER__
           podCIDR: 10.244.0.0/16
           serviceCIDR: 10.96.0.0/12
           clusterDomain: cluster.local
           coreDNS:
             # The Shared contract's DNS rule: inside the cluster the core FQDN
-            # resolves to the core private IP, so a pod never dials a node's
-            # public address (the Keycloak issuer, saasapi's JWKS URL and the
-            # token iss stay one string). The DMZ FQDN maps to the DMZ
-            # private IP the same way, for core's dial to the bus. This is
-            # k0s's own Corefile with one hosts block added; k0s writes it
+            # resolves to a core private address, so a pod never dials a
+            # node's public address (the Keycloak issuer, saasapi's JWKS URL
+            # and the token iss stay one string). The DMZ FQDN maps the same
+            # way, for core's dial to the bus. A hub's own FQDN maps to its
+            # nodes' addresses, the other hub's to that hub's stable private
+            # address (its api_address; one address for a single node). This
+            # is k0s's own Corefile with one hosts block added; k0s writes it
             # into the coredns ConfigMap it manages, so it is not reverted.
             patches:
               - target:
@@ -88,8 +84,7 @@ spec:
                             health
                             ready
                             hosts {
-                                __CORE_PRIVATE_IP__ __CORE_FQDN__
-                                __DMZ_PRIVATE_IP__ __DMZ_FQDN__
+__COREDNS_HOSTS__
                                 ttl 60
                                 fallthrough
                             }

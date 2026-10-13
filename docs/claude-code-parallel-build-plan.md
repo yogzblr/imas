@@ -2231,7 +2231,9 @@ runs at tier smoke with keep_hours set, widening the tier as it goes green.
   the background for SSH (22) on every Linux VM, WinRM over HTTPS (5986) on every Windows VM and the
   Kubernetes API (6443) on both hubs, on distinct free local ports, waits until each accepts
   connections, and writes <state-dir>/access.json: for each VM name its host 127.0.0.1 and its ssh_port,
-  winrm_port or kube_port, plus the process ids; tunnels.sh close <state-dir> stops them and is safe to
+  winrm_port or kube_port, plus the process ids (on the HA run, P24, every hub node gets its SSH and
+  kube tunnels, and each hub one more kube tunnel to its API address, keyed dmz-api and core-api;
+  uat/access/README.md); tunnels.sh close <state-dir> stops them and is safe to
   repeat. vmctl.sh <uat.json> restart|stop-sprout|start-sprout|run <vm> [command] restarts a VM and
   waits until it is back, stops or starts the sprout service, or runs a command with the Azure control
   plane and prints its output and exit code. All Azure calls live in these two scripts. Tools that

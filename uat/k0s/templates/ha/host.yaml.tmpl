@@ -1,0 +1,10 @@
+      # Every node of an HA hub runs workloads as well (P24), so k0s puts
+      # no control-plane taint on it.
+      noTaints: true
+      # kube-router's FOU overlay needs the fou kernel module, now and after
+      # a reboot (the node-stop tests restart a node).
+      hooks:
+        apply:
+          before:
+            - echo fou | sudo tee /etc/modules-load.d/imas-uat-fou.conf
+            - sudo modprobe fou

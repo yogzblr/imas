@@ -26,15 +26,25 @@ port:
 
 | VM | Remote port | access.json key |
 |---|---|---|
-| `uat-dmz`, `uat-core` | 22 | `ssh_port` |
-| `uat-dmz`, `uat-core` | 6443 | `kube_port` |
+| every hub node (`uat-dmz`, `uat-core`; on an HA hub `uat-dmz-1` to `uat-dmz-N`, `uat-core-1` to `uat-core-N`) | 22 | `ssh_port` |
+| every hub node | 6443 | `kube_port` |
+| an HA hub's API address (`uat.json` `<hub>.api_address`, the internal load balancer), by IP | 6443 | `kube_port` of `dmz-api`, `core-api` |
 | sprouts with `connection: ssh` (Linux) | 22 | `ssh_port` |
 | sprouts with `connection: winrm` (Windows) | 5986 | `winrm_port` |
 | sprouts with `connection: docker` (local rig) | none | not listed |
 
-A hub's tunnels go to the VM `uat.json` names as the hub's `name` and `id`:
-the only node of a single-node hub, the first node (`uat-dmz-1`,
-`uat-core-1`) of an HA hub (P24; `uat/tofu`, "HA topology").
+A hub's nodes are its `node_names` and `node_ids` in `uat.json` (P24;
+`uat/tofu`, "HA topology"), each tunnelled by its own id, or the hub's `name`
+and `id` where the file has no node lists: the only node of a single-node
+hub. Every node gets its own SSH tunnel (k0sctl installs each one,
+`uat/k0s`) and kube tunnel (that node's API server, for the VM-stop tests).
+An HA hub (more than one node) also gets one kube tunnel to its
+`api_address`, through the Bastion's IP-based connection
+(`--target-ip-address`; `uat/tofu` turns `ip_connect_enabled` on for an HA
+run). That tunnel reaches whichever node's API server is up, so it keeps
+working while a node is stopped; `uat/k0s` writes it into the hub's
+kubeconfig. A single-node hub gets no such entry: its API address is the
+node's own.
 
 Each tunnel gets its own free port on 127.0.0.1, starting at
 `TUNNEL_PORT_BASE` (default 20100, below the ephemeral port ranges of Linux,
@@ -55,7 +65,16 @@ writes `<state-dir>/access.json`:
 }
 ```
 
-The top-level keys are exactly the VM names, and a VM has only the ports it
+On an HA run each hub node has its own entry (`uat-dmz-1` and so on, with
+`ssh_port` and `kube_port`), and each hub one more:
+
+```json
+  "dmz-api":   { "host": "127.0.0.1", "kube_port": 20120, "pids": [4120] },
+  "core-api":  { "host": "127.0.0.1", "kube_port": 20121, "pids": [4121] }
+```
+
+The top-level keys are exactly the VM names, plus `dmz-api` and `core-api`
+(`host`, `kube_port`, `pids`) for an HA hub, and a VM has only the ports it
 gets. Other files in `<state-dir>`: `tunnels.pids` (one line per tunnel: pid,
 VM, kind, local port) and `logs/<vm>-<kind>.log` (each tunnel's output).
 
@@ -134,6 +153,9 @@ run-command runs the generated script locally with a stub `systemctl`, and a
 Windows run-command checks the PowerShell wrapper and returns canned output.
 It covers argument handling, the access.json content (names, hosts, ports by
 OS, distinct ports, skipping a busy port, live pids, the exact `az` arguments),
+an HA uat.json (SSH and kube tunnels to every node by its own id, one tunnel
+per hub to its `api_address` by IP, and refusal of a bad or missing
+`api_address` or of node lists of different lengths),
 refusal of a second open, a tunnel restarted on a new port after an early
 exit, close stopping the tunnels and their children and
 removing the files, close being repeatable and never killing an unrelated pid,

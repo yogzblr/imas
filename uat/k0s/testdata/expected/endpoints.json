@@ -11,7 +11,16 @@
       "bus": 8442
     },
     "exposure": "node ports, Services owned by uat/hub/dmz",
-    "node_port_range": "8442-8443"
+    "node_port_range": "8442-8443",
+    "nodes": [
+      "uat-dmz"
+    ],
+    "node_private_ips": [
+      "10.60.1.4"
+    ],
+    "api_address": "10.60.1.4",
+    "api_fqdn": "dmz-api.uat.imas.internal",
+    "datastore": "kine"
   },
   "core": {
     "name": "uat-core",
@@ -24,7 +33,16 @@
       "farmer_api": 5405
     },
     "exposure": "hostPort",
-    "node_port_range": "30000-32767"
+    "node_port_range": "30000-32767",
+    "nodes": [
+      "uat-core"
+    ],
+    "node_private_ips": [
+      "10.60.2.4"
+    ],
+    "api_address": "10.60.2.4",
+    "api_fqdn": "core-api.uat.imas.internal",
+    "datastore": "kine"
   },
   "private_dns_zone": "uat.imas.internal",
   "cluster_issuer": "imas-uat-ca",

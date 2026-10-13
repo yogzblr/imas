@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
-# uat/k0s/bootstrap.sh: install a single-node k0s cluster on each UAT hub
-# (uat-dmz and uat-core, two separate clusters) and the add-ons the charts
-# need, then set up the per-run UAT CA. See README.md.
+# uat/k0s/bootstrap.sh: install a k0s cluster on each UAT hub (dmz and core,
+# two separate clusters) and the add-ons the charts need, then set up the
+# per-run UAT CA. See README.md.
 #
-# Every hub is reached only through its Azure Bastion tunnel on the runner, as
-# access.json (uat/access/tunnels.sh open) describes: k0sctl over SSH on the
-# tunnel's ssh_port, kubectl over the kube tunnel's kube_port. Nothing here
-# calls Azure.
+# A hub of one node (the single-node run) gets a single-node cluster (role
+# single, kine). A hub of 3 or 5 nodes (the HA run, P24) gets every node as
+# controller+worker on etcd, with node-local load balancing and kube-router's
+# FOU overlay (README.md, "HA hubs").
+#
+# Every node is reached only through its Azure Bastion tunnels on the runner,
+# as access.json (uat/access/tunnels.sh open) describes: k0sctl over SSH on
+# each node's ssh_port, kubectl over the hub's API tunnel (the node's
+# kube_port on a single node, the <hub>-api entry's on an HA hub). Nothing
+# here calls Azure.
 set -euo pipefail
 umask 077
 
@@ -16,7 +22,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 usage() {
   cat <<'EOF'
 Usage: bootstrap.sh --uat FILE --access FILE --ssh-key FILE --out DIR
-                    [--timeout SECONDS] [--render-only] [--skip-check]
+                    [--nodes N] [--timeout SECONDS] [--render-only] [--skip-check]
 
   --uat FILE        the uat JSON (tofu output -json uat)
   --access FILE     access.json written by uat/access/tunnels.sh open
@@ -27,7 +33,11 @@ Usage: bootstrap.sh --uat FILE --access FILE --ssh-key FILE --out DIR
                       endpoints.json                     hub names, addresses, ports
                       k0sctl-dmz.yaml, k0sctl-core.yaml  rendered k0sctl files
                       known_hosts                        the hubs' SSH host keys
-  --timeout SECONDS how long to wait for each node, rollout and issuer (900)
+  --nodes N         every hub must have N nodes in the uat JSON (the
+                    workflow's hub_nodes input); without it any count
+                    config.env allows is taken
+  --timeout SECONDS how long to wait for the nodes, etcd, each rollout and
+                    the issuer (900)
   --render-only     write the k0sctl files and endpoints.json, then stop
                     (no k0sctl, kubectl or network)
   --skip-check      do not run check.sh at the end
@@ -48,13 +58,14 @@ ACCESS_JSON=""
 SSH_KEY=""
 OUT_DIR=""
 TIMEOUT=900
+WANT_NODES=""
 RENDER_ONLY=0
 SKIP_CHECK=0
 
 parse_args() {
   while (($#)); do
     case $1 in
-      --uat | --access | --ssh-key | --out | --timeout)
+      --uat | --access | --ssh-key | --out | --timeout | --nodes)
         (($# >= 2)) || usage_error "$1 needs a value"
         case $1 in
           --uat) UAT_JSON=$2 ;;
@@ -62,6 +73,7 @@ parse_args() {
           --ssh-key) SSH_KEY=$2 ;;
           --out) OUT_DIR=$2 ;;
           --timeout) TIMEOUT=$2 ;;
+          --nodes) WANT_NODES=$2 ;;
         esac
         shift 2
         ;;
@@ -77,6 +89,7 @@ parse_args() {
   [[ -n $SSH_KEY ]] || usage_error "--ssh-key is required"
   [[ -n $OUT_DIR ]] || usage_error "--out is required"
   [[ $TIMEOUT =~ ^[1-9][0-9]*$ ]] || usage_error "--timeout must be a positive number of seconds"
+  [[ -z $WANT_NODES || $WANT_NODES =~ ^[1-9][0-9]*$ ]] || usage_error "--nodes must be a positive number"
 
   local f
   for f in "$UAT_JSON" "$ACCESS_JSON"; do
@@ -136,17 +149,39 @@ check_settings() {
   is_fqdn "$UAT_PRIVATE_DNS_ZONE" || die "config.env: bad UAT_PRIVATE_DNS_ZONE"
   [[ $UAT_CA_SECRET =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || die "config.env: bad UAT_CA_SECRET"
   [[ $UAT_CA_DAYS =~ ^[1-9][0-9]*$ ]] || die "config.env: bad UAT_CA_DAYS"
+  is_port "$UAT_KUBE_ROUTER_FOU_PORT" || die "config.env: bad UAT_KUBE_ROUTER_FOU_PORT"
+  [[ " $UAT_RESERVED_NODE_PORTS " == *" $UAT_KUBE_ROUTER_FOU_PORT "* ]] ||
+    die "config.env: UAT_RESERVED_NODE_PORTS must list the FOU port $UAT_KUBE_ROUTER_FOU_PORT"
+  [[ $UAT_HUB_NODE_COUNTS =~ ^[1-9][0-9]*( [1-9][0-9]*)*$ ]] || die "config.env: bad UAT_HUB_NODE_COUNTS"
 }
 
-# read_inputs fills the per-hub values from the uat JSON and access.json,
-# checking each one.
-declare -A NAME PRIV_IP PUB_IP FQDN ADMIN HOST SSH_PORT KUBE_PORT
+# read_inputs fills the per-hub and per-node values from the uat JSON and
+# access.json, checking each one.
+#   per hub:  NAME PRIV_IP PUB_IP FQDN ADMIN (the contract's hub fields, the
+#             first node on an HA hub), NODES and NODE_IPS (space-separated,
+#             in node order), NODE_COUNT, API_ADDR and API_FQDN (the hub's
+#             stable API address and name), HOST and KUBE_PORT (the API
+#             tunnel kubectl uses)
+#   per node: NODE_HOST NODE_SSH_PORT (the node's SSH tunnel)
+declare -A NAME PRIV_IP PUB_IP FQDN ADMIN HOST KUBE_PORT NODES NODE_IPS NODE_COUNT API_ADDR API_FQDN
+declare -A NODE_HOST NODE_SSH_PORT
 RUN_ID=""
+
+# check_list HUB FIELD fails unless a hub's field is absent or a list of
+# strings; read_list HUB FIELD then prints its items, one per line.
+check_list() {
+  jq -e --arg h "$1" --arg f "$2" '.[$h][$f] | . == null or (type == "array" and all(.[]; type == "string"))' \
+    "$UAT_JSON" >/dev/null 2>&1 || die "uat JSON: $1.$2 must be a list of strings"
+}
+read_list() { jq -r --arg h "$1" --arg f "$2" '.[$h][$f] // [] | .[]' "$UAT_JSON"; }
+
 read_inputs() {
   RUN_ID=$(uat_get "$UAT_JSON" .run_id)
   is_run_id "$RUN_ID" || die "uat JSON: run_id must be 6 to 10 lowercase letters and digits: $RUN_ID"
 
-  local hub v
+  local hub v n i api_entry
+  local -a names ips
+  declare -A seen=()
   for hub in "${HUBS[@]}"; do
     NAME[$hub]=$(uat_get "$UAT_JSON" ".$hub.name")
     is_vm_name "${NAME[$hub]}" || die "uat JSON: bad $hub.name: ${NAME[$hub]}"
@@ -159,43 +194,157 @@ read_inputs() {
     ADMIN[$hub]=$(uat_get "$UAT_JSON" ".$hub.admin_user")
     is_user "${ADMIN[$hub]}" || die "uat JSON: bad $hub.admin_user: ${ADMIN[$hub]}"
 
-    v=$(access_get "$ACCESS_JSON" "${NAME[$hub]}" host)
-    is_ipv4 "$v" || is_fqdn "$v" || [[ $v == localhost ]] || die "access.json: bad host for ${NAME[$hub]}: $v"
-    HOST[$hub]=$v
-    SSH_PORT[$hub]=$(access_get "$ACCESS_JSON" "${NAME[$hub]}" ssh_port)
-    is_port "${SSH_PORT[$hub]}" || die "access.json: bad ssh_port for ${NAME[$hub]}: ${SSH_PORT[$hub]}"
-    KUBE_PORT[$hub]=$(access_get "$ACCESS_JSON" "${NAME[$hub]}" kube_port)
-    is_port "${KUBE_PORT[$hub]}" || die "access.json: bad kube_port for ${NAME[$hub]}: ${KUBE_PORT[$hub]}"
+    # The nodes (uat/tofu, P24): node_names and node_private_ips, or the
+    # hub's own name and address where the file has no node lists. The
+    # first node is the hub's name and private_ip.
+    check_list "$hub" node_names
+    check_list "$hub" node_private_ips
+    mapfile -t names < <(read_list "$hub" node_names)
+    mapfile -t ips < <(read_list "$hub" node_private_ips)
+    if ((${#names[@]} == 0 && ${#ips[@]} == 0)); then
+      names=("${NAME[$hub]}")
+      ips=("${PRIV_IP[$hub]}")
+    fi
+    n=${#names[@]}
+    ((n == ${#ips[@]})) || die "uat JSON: $hub.node_names and $hub.node_private_ips differ in length"
+    [[ " $UAT_HUB_NODE_COUNTS " == *" $n "* ]] ||
+      die "uat JSON: $hub has $n nodes; a hub has one of: $UAT_HUB_NODE_COUNTS (etcd needs an odd number)"
+    [[ -z $WANT_NODES || $n == "$WANT_NODES" ]] ||
+      die "uat JSON: $hub has $n nodes, --nodes asks for $WANT_NODES (is uat.json from this run's tofu apply?)"
+    [[ ${names[0]} == "${NAME[$hub]}" && ${ips[0]} == "${PRIV_IP[$hub]}" ]] ||
+      die "uat JSON: $hub.name and $hub.private_ip must be the first node's"
+    for ((i = 0; i < n; i++)); do
+      is_vm_name "${names[i]}" || die "uat JSON: bad $hub node name: ${names[i]}"
+      is_ipv4 "${ips[i]}" || die "uat JSON: bad $hub node address: ${ips[i]}"
+      [[ -z ${seen[${names[i]}]:-} ]] || die "uat JSON: node ${names[i]} appears twice"
+      [[ -z ${seen[ip-${ips[i]}]:-} ]] || die "uat JSON: node address ${ips[i]} appears twice"
+      seen[${names[i]}]=1
+      seen[ip-${ips[i]}]=1
+    done
+    NODES[$hub]=${names[*]}
+    NODE_IPS[$hub]=${ips[*]}
+    NODE_COUNT[$hub]=$n
+
+    # The hub's stable API address and its private name (uat/tofu H1): the
+    # internal load balancer on an HA hub, the node itself on a single node.
+    API_ADDR[$hub]=$(jq -r ".$hub.api_address // empty" "$UAT_JSON")
+    API_FQDN[$hub]=$(jq -r ".$hub.api_fqdn // empty" "$UAT_JSON")
+    if ((n == 1)); then
+      [[ -n ${API_ADDR[$hub]} ]] || API_ADDR[$hub]=${PRIV_IP[$hub]}
+    else
+      [[ -n ${API_ADDR[$hub]} ]] || die "uat JSON: $hub has $n nodes but no api_address"
+      [[ -n ${API_FQDN[$hub]} ]] || die "uat JSON: $hub has $n nodes but no api_fqdn"
+      [[ " ${NODE_IPS[$hub]} " != *" ${API_ADDR[$hub]} "* ]] ||
+        die "uat JSON: $hub.api_address must be the load balancer's, not a node's: ${API_ADDR[$hub]}"
+    fi
+    is_ipv4 "${API_ADDR[$hub]}" || die "uat JSON: bad $hub.api_address: ${API_ADDR[$hub]}"
+    [[ -z ${API_FQDN[$hub]} ]] || is_fqdn "${API_FQDN[$hub]}" || die "uat JSON: bad $hub.api_fqdn: ${API_FQDN[$hub]}"
+
+    # Each node's SSH tunnel.
+    for v in ${NODES[$hub]}; do
+      NODE_HOST[$v]=$(access_get "$ACCESS_JSON" "$v" host)
+      is_tunnel_host "${NODE_HOST[$v]}" || die "access.json: bad host for $v: ${NODE_HOST[$v]}"
+      NODE_SSH_PORT[$v]=$(access_get "$ACCESS_JSON" "$v" ssh_port)
+      is_port "${NODE_SSH_PORT[$v]}" || die "access.json: bad ssh_port for $v: ${NODE_SSH_PORT[$v]}"
+    done
+    # The API tunnel: the node's own kube tunnel on a single node, the
+    # tunnel to the hub's API address (access.json "<hub>-api",
+    # uat/access/tunnels.sh) on an HA hub.
+    if ((n == 1)); then api_entry=${NAME[$hub]}; else api_entry="$hub-api"; fi
+    HOST[$hub]=$(access_get "$ACCESS_JSON" "$api_entry" host)
+    is_tunnel_host "${HOST[$hub]}" || die "access.json: bad host for $api_entry: ${HOST[$hub]}"
+    KUBE_PORT[$hub]=$(access_get "$ACCESS_JSON" "$api_entry" kube_port)
+    is_port "${KUBE_PORT[$hub]}" || die "access.json: bad kube_port for $api_entry: ${KUBE_PORT[$hub]}"
   done
   [[ ${NAME[dmz]} != "${NAME[core]}" ]] || die "uat JSON: dmz and core have the same name"
 }
 
+is_tunnel_host() { is_ipv4 "$1" || is_fqdn "$1" || [[ $1 == localhost ]]; }
+
+# is_ha HUB: the hub has more than one node.
+is_ha() { ((NODE_COUNT[$1] > 1)); }
+
 cluster_name() { printf 'imas-uat-%s-%s\n' "$RUN_ID" "$1"; }
 
+# render_hub HUB writes OUT/k0sctl-HUB.yaml: one host per node (role single
+# for one node, controller+worker for an HA hub) and the hub's ClusterConfig.
 render_hub() {
-  local hub=$1 extra_san=${HOST[$1]}
+  local hub=$1 extra_san=${HOST[$1]} tmp hosts="" sans="" dns="" role ha_host="" node i other
+  local api_address="" storage="" kube_router=""
+  local -a names ips list
+  read -ra names <<<"${NODES[$hub]}"
+  read -ra ips <<<"${NODE_IPS[$hub]}"
+  tmp=$(mktemp "$OUT_DIR/.render.XXXXXX")
+
+  if is_ha "$hub"; then
+    role=controller+worker
+    ha_host=$(read_block "$K0S_DIR/templates/ha/host.yaml.tmpl")
+    storage=$(read_block "$K0S_DIR/templates/ha/storage.yaml.tmpl")
+    render_template "$K0S_DIR/templates/ha/network.yaml.tmpl" "$tmp" "FOU_PORT=$UAT_KUBE_ROUTER_FOU_PORT"
+    kube_router=$(read_block "$tmp")
+  else
+    role=single
+    api_address="          address: ${PRIV_IP[$hub]}"
+  fi
+
+  for ((i = 0; i < ${#names[@]}; i++)); do
+    node=${names[i]}
+    render_template "$K0S_DIR/templates/k0sctl-host.yaml.tmpl" "$tmp" \
+      "ROLE=$role" \
+      "HA_HOST=$ha_host" \
+      "ACCESS_HOST=${NODE_HOST[$node]}" \
+      "SSH_PORT=${NODE_SSH_PORT[$node]}" \
+      "ADMIN_USER=${ADMIN[$hub]}" \
+      "SSH_KEY=$SSH_KEY" \
+      "HOST_ALIAS=$node" \
+      "KNOWN_HOSTS=$OUT_DIR/known_hosts" \
+      "PRIVATE_IP=${ips[i]}"
+    hosts+="${hosts:+$'\n'}$(read_block "$tmp")"
+  done
+
   # 127.0.0.1 is always in the SANs; a different tunnel host is added too.
+  # A single node: its private IP and the hub's FQDN, as before P24. An HA
+  # hub: the internal load balancer's address and private name, then every
+  # node's private IP and the hub's FQDN.
   [[ $extra_san != 127.0.0.1 ]] || extra_san=localhost
+  list=(127.0.0.1 "$extra_san")
+  if is_ha "$hub"; then list+=("${API_ADDR[$hub]}" "${API_FQDN[$hub]}"); fi
+  list+=("${ips[@]}" "${FQDN[$hub]}")
+  declare -A dup=()
+  for i in "${list[@]}"; do
+    [[ -z ${dup[$i]:-} ]] || continue
+    dup[$i]=1
+    sans+="${sans:+$'\n'}            - $i"
+  done
+
+  # CoreDNS: core's line(s) first, then the DMZ's. This hub's FQDN maps to
+  # each of its nodes (a pod never dials its own hub's internal load
+  # balancer, which drops a node's flow to itself); the other hub's FQDN to
+  # that hub's stable private address.
+  for other in core dmz; do
+    if [[ $other == "$hub" ]]; then
+      for i in ${NODE_IPS[$other]}; do
+        dns+="${dns:+$'\n'}                                $i ${FQDN[$other]}"
+      done
+    else
+      dns+="${dns:+$'\n'}                                ${API_ADDR[$other]} ${FQDN[$other]}"
+    fi
+  done
+
   render_template "$K0S_DIR/templates/k0sctl.yaml.tmpl" "$OUT_DIR/k0sctl-$hub.yaml" \
     "CLUSTER_NAME=$(cluster_name "$hub")" \
-    "ACCESS_HOST=${HOST[$hub]}" \
-    "SSH_PORT=${SSH_PORT[$hub]}" \
-    "ADMIN_USER=${ADMIN[$hub]}" \
-    "SSH_KEY=$SSH_KEY" \
-    "HOST_ALIAS=${NAME[$hub]}" \
-    "KNOWN_HOSTS=$OUT_DIR/known_hosts" \
-    "PRIVATE_IP=${PRIV_IP[$hub]}" \
-    "FQDN=${FQDN[$hub]}" \
-    "EXTRA_SAN=$extra_san" \
+    "HOSTS=$hosts" \
+    "API_ADDRESS=$api_address" \
+    "SANS=$sans" \
+    "STORAGE=$storage" \
+    "KUBE_ROUTER=$kube_router" \
+    "COREDNS_HOSTS=$dns" \
     "K0S_VERSION=$K0S_VERSION" \
     "KUBE_API_PORT=$UAT_KUBE_API_PORT" \
-    "NODE_PORT_RANGE=$(hub_node_port_range "$hub")" \
-    "CORE_PRIVATE_IP=${PRIV_IP[core]}" \
-    "CORE_FQDN=${FQDN[core]}" \
-    "DMZ_PRIVATE_IP=${PRIV_IP[dmz]}" \
-    "DMZ_FQDN=${FQDN[dmz]}"
+    "NODE_PORT_RANGE=$(hub_node_port_range "$hub")"
+  rm -f "$tmp"
   chmod 600 "$OUT_DIR/k0sctl-$hub.yaml"
-  log "rendered $OUT_DIR/k0sctl-$hub.yaml"
+  log "rendered $OUT_DIR/k0sctl-$hub.yaml (${#names[@]} node(s), role $role)"
 }
 
 # write_endpoints writes the hubs' names, addresses and exposed ports for the
@@ -205,7 +354,9 @@ render_hub() {
 # readers use different spellings for the issuer and the private names
 # (uat/hub/dmz: cluster_issuer, private_dns_zone; uat/hub/core:
 # ca.cluster_issuer, dmz.private_fqdn, core.private_fqdn), so both forms are
-# written, with the same values.
+# written, with the same values. Each hub also carries its nodes (names and
+# private IPs), its API address and name, and its datastore (kine for one
+# node, etcd for an HA hub); check.sh reads the node count and the datastore.
 write_endpoints() {
   local zone
   zone=$(jq -r '.private_dns_zone // empty' "$UAT_JSON")
@@ -220,21 +371,27 @@ write_endpoints() {
     --argjson https "$UAT_CORE_HTTPS_PORT" --argjson api "$UAT_CORE_FARMER_API_PORT" \
     --arg drange "$UAT_DMZ_NODE_PORT_RANGE" --arg crange "$UAT_CORE_NODE_PORT_RANGE" \
     --arg issuer "$UAT_CLUSTER_ISSUER" \
-    --arg k0s "$K0S_VERSION" '
+    --arg k0s "$K0S_VERSION" \
+    --arg dnodes "${NODES[dmz]}" --arg dips "${NODE_IPS[dmz]}" --arg dapi "${API_ADDR[dmz]}" --arg dapif "${API_FQDN[dmz]}" \
+    --arg cnodes "${NODES[core]}" --arg cips "${NODE_IPS[core]}" --arg capi "${API_ADDR[core]}" --arg capif "${API_FQDN[core]}" '
+    def nodes($names; $ips; $api; $apif):
+      ($names | split(" ")) as $n
+      | {nodes: $n, node_private_ips: ($ips | split(" ")), api_address: $api, api_fqdn: $apif,
+         datastore: (if ($n | length) > 1 then "etcd" else "kine" end)};
     {
       run_id: $run_id,
-      dmz: {name: $dn, private_ip: $dp, public_ip: $dq, fqdn: $df,
+      dmz: ({name: $dn, private_ip: $dp, public_ip: $dq, fqdn: $df,
             private_fqdn: ("dmz." + $zone),
             ports: {envoy: $envoy, bus: $bus},
             exposure: "node ports, Services owned by uat/hub/dmz",
-            node_port_range: $drange},
-      core: {name: $cn, private_ip: $cp, public_ip: $cq, fqdn: $cf,
+            node_port_range: $drange} + nodes($dnodes; $dips; $dapi; $dapif)),
+      core: ({name: $cn, private_ip: $cp, public_ip: $cq, fqdn: $cf,
              private_fqdn: ("core." + $zone),
              ports: {https: $https, farmer_api: $api},
              # Exactly "hostPort": uat/hub/core/lib/common.sh accepts
              # nothing else (owner decision, 2026-10-06: no core node ports).
              exposure: "hostPort",
-             node_port_range: $crange},
+             node_port_range: $crange} + nodes($cnodes; $cips; $capi; $capif)),
       private_dns_zone: $zone,
       cluster_issuer: $issuer,
       ca: {cluster_issuer: $issuer},
@@ -255,22 +412,32 @@ check_k0sctl_version() {
 
 kubeconfig_of() { printf '%s/%s.kubeconfig\n' "$OUT_DIR" "$1"; }
 
-wait_node_ready() {
-  local hub=$1 k deadline n
+# wait_nodes_ready HUB waits until every node of the hub has registered and
+# is Ready, and on an HA hub until etcd has a joined member per node.
+wait_nodes_ready() {
+  local hub=$1 k deadline n want=${NODE_COUNT[$1]}
   k=$(kubeconfig_of "$hub")
   deadline=$((SECONDS + TIMEOUT))
-  until n=$(kc "$k" get nodes -o json 2>/dev/null | jq '.items | length') && ((n > 0)); do
-    ((SECONDS < deadline)) || die "$hub: no node registered within ${TIMEOUT}s"
+  until n=$(kc "$k" get nodes -o json 2>/dev/null | jq '.items | length') && ((n >= want)); do
+    ((SECONDS < deadline)) || die "$hub: ${n:-0} of $want node(s) registered within ${TIMEOUT}s"
     sleep 5
   done
   kc "$k" wait --for=condition=Ready node --all --timeout="$((deadline - SECONDS > 0 ? deadline - SECONDS : 1))s" >&2 ||
-    die "$hub: node not Ready within ${TIMEOUT}s"
-  log "$hub: node Ready"
+    die "$hub: nodes not Ready within ${TIMEOUT}s"
+  log "$hub: $want node(s) Ready"
+  is_ha "$hub" || return 0
+  # k0s's EtcdMember objects (etcd.k0sproject.io), one per controller that
+  # joined etcd.
+  until n=$(kc "$k" get etcdmembers.etcd.k0sproject.io -o json 2>/dev/null | jq "$ETCD_JOINED") && ((n >= want)); do
+    ((SECONDS < deadline)) || die "$hub: etcd has ${n:-0} of $want members joined after ${TIMEOUT}s"
+    sleep 5
+  done
+  log "$hub: etcd has $want members"
 }
 
 install_cluster() {
   local hub=$1 cfg="$OUT_DIR/k0sctl-$1.yaml" tmp
-  log "$hub: installing k0s $K0S_VERSION on ${NAME[$hub]} through ${HOST[$hub]}:${SSH_PORT[$hub]}"
+  log "$hub: installing k0s $K0S_VERSION on ${NODES[$hub]// /, } (${NODE_COUNT[$hub]} node(s))"
   k0sctl apply --config "$cfg" >&2 || die "$hub: k0sctl apply failed"
 
   tmp=$(mktemp "$OUT_DIR/.kubeconfig.XXXXXX")
@@ -286,7 +453,7 @@ install_cluster() {
   chmod 600 "$tmp"
   mv -f "$tmp" "$(kubeconfig_of "$hub")"
   log "$hub: kubeconfig at $(kubeconfig_of "$hub") (server https://${HOST[$hub]}:${KUBE_PORT[$hub]})"
-  wait_node_ready "$hub"
+  wait_nodes_ready "$hub"
 }
 
 # pin_helper_image SRC DST rewrites the local-path helper pod's untagged

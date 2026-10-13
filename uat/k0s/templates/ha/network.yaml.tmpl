@@ -1,0 +1,16 @@
+          # Azure drops IP-in-IP inside a VNet, so the pod overlay between
+          # nodes is FOU over UDP __FOU_PORT__, which uat/tofu opens between a
+          # hub's nodes.
+          kuberouter:
+            extraArgs:
+              overlay-type: full
+              overlay-encap: fou
+              overlay-encap-port: "__FOU_PORT__"
+          # A node reaches the API on its own address (the kubelet of a
+          # controller+worker node) or through k0s's node-local load
+          # balancer on 127.0.0.1, which balances over every controller's
+          # own address (kube-proxy, konnectivity), never through the
+          # internal load balancer.
+          nodeLocalLoadBalancing:
+            enabled: true
+            type: EnvoyProxy
