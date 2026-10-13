@@ -1,0 +1,147 @@
+[
+ {
+  "name": "Standard_D2s_v5",
+  "family": "standardDSv5Family",
+  "resourceType": "virtualMachines",
+  "locations": [
+   "centralindia"
+  ],
+  "locationInfo": [
+   {
+    "location": "centralindia",
+    "zones": [
+     "1",
+     "2",
+     "3"
+    ]
+   }
+  ],
+  "capabilities": [
+   {
+    "name": "MemoryGB",
+    "value": "8"
+   },
+   {
+    "name": "vCPUs",
+    "value": "2"
+   }
+  ],
+  "restrictions": []
+ },
+ {
+  "name": "Standard_D4s_v5",
+  "family": "standardDSv5Family",
+  "resourceType": "virtualMachines",
+  "locations": [
+   "centralindia"
+  ],
+  "locationInfo": [
+   {
+    "location": "centralindia",
+    "zones": [
+     "1",
+     "2",
+     "3"
+    ]
+   }
+  ],
+  "capabilities": [
+   {
+    "name": "MemoryGB",
+    "value": "8"
+   },
+   {
+    "name": "vCPUs",
+    "value": "4"
+   }
+  ],
+  "restrictions": []
+ },
+ {
+  "name": "Standard_D8s_v5",
+  "family": "standardDSv5Family",
+  "resourceType": "virtualMachines",
+  "locations": [
+   "centralindia"
+  ],
+  "locationInfo": [
+   {
+    "location": "centralindia",
+    "zones": [
+     "1",
+     "2",
+     "3"
+    ]
+   }
+  ],
+  "capabilities": [
+   {
+    "name": "MemoryGB",
+    "value": "8"
+   },
+   {
+    "name": "vCPUs",
+    "value": "8"
+   }
+  ],
+  "restrictions": []
+ },
+ {
+  "name": "Standard_B2ls_v2",
+  "family": "standardBsv2Family",
+  "resourceType": "virtualMachines",
+  "locations": [
+   "centralindia"
+  ],
+  "locationInfo": [
+   {
+    "location": "centralindia",
+    "zones": [
+     "1",
+     "2",
+     "3"
+    ]
+   }
+  ],
+  "capabilities": [
+   {
+    "name": "MemoryGB",
+    "value": "8"
+   },
+   {
+    "name": "vCPUs",
+    "value": "2"
+   }
+  ],
+  "restrictions": []
+ },
+ {
+  "name": "Standard_D2s_v5_promo",
+  "family": "standardDSv5Family",
+  "resourceType": "virtualMachines",
+  "locations": [
+   "centralindia"
+  ],
+  "locationInfo": [
+   {
+    "location": "centralindia",
+    "zones": [
+     "1",
+     "2",
+     "3"
+    ]
+   }
+  ],
+  "capabilities": [
+   {
+    "name": "MemoryGB",
+    "value": "8"
+   },
+   {
+    "name": "vCPUs",
+    "value": "2"
+   }
+  ],
+  "restrictions": []
+ }
+]

@@ -65,6 +65,12 @@ on:
         required: false
         default: ""
         type: string
+      hub_nodes:
+        description: "k0s nodes per hub: 1 is the single-node run, 3 the HA run (3 core D4s_v5 and 3 DMZ D2s_v5 nodes: 18 Dsv5 vCPU)"
+        required: false
+        default: "1"
+        type: choice
+        options: ["1", "3"]
       dispatch_flags:
         description: "Run L5 (self update): only if the hubs have the update dispatch flags on (sets IMAS_UAT_DISPATCH_FLAGS=on)"
         required: false
@@ -81,9 +87,11 @@ permissions:
 # nothing in uat/hub/core turns them on today, so L5 fails if it is ticked
 # without that set up by hand.
 #
-# One UAT run at a time, whatever the release: the subscription's quota is
-# about 18 vCPUs and one run needs all of them, so two cannot fit. A second
-# dispatch waits for the first to end.
+# One UAT run at a time, whatever the release: a run needs most of the
+# subscription's quota (the single-node run 10 Dsv5 and 12 B2ls_v2 vCPU, the
+# HA run, hub_nodes 3, 18 Dsv5 and 12 B2ls_v2), so two cannot fit. A second
+# dispatch waits for the first to end. The apply step checks the quota first
+# (uat/tofu/quota-check.sh) and fails with the numbers when it is short.
 concurrency:
   group: uat
   cancel-in-progress: false
@@ -126,6 +134,7 @@ jobs:
           TIER: ${{ inputs.tier }}
           UPGRADE_FROM_TAG: ${{ inputs.upgrade_from_tag }}
           SCENARIOS: ${{ inputs.scenarios }}
+          HUB_NODES: ${{ inputs.hub_nodes }}
         run: uat/scripts/check-inputs.sh
 
       # The run's working directories. STATE holds the run's files, several of
@@ -205,6 +214,7 @@ jobs:
           RUN_BUDGET_HOURS: ${{ steps.inputs.outputs.run_budget_hours }}
           UPGRADE_FROM_TAG: ${{ steps.inputs.outputs.upgrade_from_tag }}
           SCENARIOS: ${{ steps.inputs.outputs.scenarios }}
+          HUB_NODES: ${{ steps.inputs.outputs.hub_nodes }}
           RUNNER_CIDR: ${{ steps.runner.outputs.runner_cidr }}
         run: |
           set -euo pipefail
@@ -214,14 +224,16 @@ jobs:
           jq -n --arg run_id "$id" --arg release_tag "$RELEASE_TAG" --arg region "$REGION" \
             --arg tier "$TIER" --argjson keep_hours "$KEEP_HOURS" --argjson run_budget_hours "$RUN_BUDGET_HOURS" \
             --arg upgrade_from_tag "$UPGRADE_FROM_TAG" \
-            --arg scenarios "$SCENARIOS" --arg runner_cidr "$RUNNER_CIDR" \
+            --arg scenarios "$SCENARIOS" --argjson hub_nodes "$HUB_NODES" --arg runner_cidr "$RUNNER_CIDR" \
             --arg github_run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" \
             --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '$ARGS.named' >"$STATE/run.json"
           echo "run_id $id: resource group imas-uat-$id"
 
       # State goes to the bootstrap storage account, one blob per run, so a
-      # kept run can be destroyed later by hand or by the janitor.
+      # kept run can be destroyed later by hand or by the janitor. The quota
+      # check plans first and stops before anything is created when the
+      # subscription cannot hold the run's VMs.
       - name: tofu apply (uat/tofu)
         id: apply
         env:
@@ -231,6 +243,9 @@ jobs:
           TF_VAR_keep_hours: ${{ steps.inputs.outputs.keep_hours }}
           TF_VAR_run_budget_hours: ${{ steps.inputs.outputs.run_budget_hours }}
           TF_VAR_runner_cidr: ${{ steps.runner.outputs.runner_cidr }}
+          TF_VAR_core_node_count: ${{ steps.inputs.outputs.core_node_count }}
+          TF_VAR_dmz_node_count: ${{ steps.inputs.outputs.dmz_node_count }}
+          CORE_NODE_SIZE: ${{ steps.inputs.outputs.core_node_size }}
         run: |
           set -euo pipefail
           account=${TFSTATE_STORAGE_ACCOUNT:-}
@@ -244,11 +259,23 @@ jobs:
           fi
           echo "TFSTATE_STORAGE_ACCOUNT=$account" >>"$GITHUB_ENV"
           export TF_VAR_run_id="$RUN_ID"
+          # Empty for one node: uat/tofu's default size stays.
+          if [ -n "$CORE_NODE_SIZE" ]; then export TF_VAR_core_node_size="$CORE_NODE_SIZE"; fi
           tofu -chdir=uat/tofu init -input=false \
             -backend-config="resource_group_name=$TFSTATE_RESOURCE_GROUP" \
             -backend-config="storage_account_name=$account" \
             -backend-config="container_name=tfstate" \
             -backend-config="key=imas-uat/$RUN_ID.tfstate"
+          # Quota first: the VMs this plan creates against the region's vCPU
+          # quota per family and in all.
+          tofu -chdir=uat/tofu plan -input=false -no-color -out="$STATE/quota.tfplan" >"$STATE/quota-plan.log" 2>&1 \
+            || { tail -n 50 "$STATE/quota-plan.log"; exit 1; }
+          tofu -chdir=uat/tofu show -json "$STATE/quota.tfplan" >"$STATE/quota-plan.json"
+          rm -f "$STATE/quota.tfplan"
+          rc=0
+          uat/tofu/quota-check.sh "$STATE/quota-plan.json" "$TF_VAR_region" || rc=$?
+          rm -f "$STATE/quota-plan.json"
+          [ "$rc" -eq 0 ] || exit "$rc"
           # Azure sometimes refuses a change to the virtual network while the
           # Bastion host (about 13 minutes) is still being created:
           # "409 AnotherOperationInProgress". The apply is idempotent, so run
@@ -266,6 +293,8 @@ jobs:
           done
           tofu -chdir=uat/tofu output -json uat >"$STATE/uat.json"
           jq -e --arg rg "imas-uat-$RUN_ID" '.resource_group == $rg' "$STATE/uat.json" >/dev/null
+          # The VMs the HA tests stop (empty lists for a single-node hub).
+          tofu -chdir=uat/tofu output -json ha_node_names >"$STATE/ha_node_names.json"
 
       # The per-run credentials, into 0600 files that are never uploaded. The
       # password is masked before it is used anywhere.
@@ -436,6 +465,8 @@ jobs:
           TF_VAR_release_tag: ${{ steps.inputs.outputs.release_tag }}
           TF_VAR_region: ${{ steps.inputs.outputs.region }}
           TF_VAR_runner_cidr: ${{ steps.runner.outputs.runner_cidr }}
+          TF_VAR_core_node_count: ${{ steps.inputs.outputs.core_node_count }}
+          TF_VAR_dmz_node_count: ${{ steps.inputs.outputs.dmz_node_count }}
         run: uat/tofu/destroy.sh "$RUN_ID"
 
       # Independent of destroy.sh's own check: the job fails if the group or

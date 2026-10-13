@@ -8,7 +8,12 @@
     "private_ip": "10.60.1.4",
     "public_ip": "198.51.100.10",
     "fqdn": "uatabc123-dmz.centralindia.cloudapp.azure.com",
-    "admin_user": "uatadmin"
+    "admin_user": "uatadmin",
+    "node_names": ["uat-dmz"],
+    "node_ids": ["/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-abc123/providers/Microsoft.Compute/virtualMachines/uat-dmz"],
+    "node_private_ips": ["10.60.1.4"],
+    "api_address": "10.60.1.4",
+    "api_fqdn": "dmz-api.uat.imas.internal"
   },
   "core": {
     "name": "uat-core",
@@ -16,7 +21,12 @@
     "private_ip": "10.60.2.4",
     "public_ip": "198.51.100.11",
     "fqdn": "uatabc123-core.centralindia.cloudapp.azure.com",
-    "admin_user": "uatadmin"
+    "admin_user": "uatadmin",
+    "node_names": ["uat-core"],
+    "node_ids": ["/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-abc123/providers/Microsoft.Compute/virtualMachines/uat-core"],
+    "node_private_ips": ["10.60.2.4"],
+    "api_address": "10.60.2.4",
+    "api_fqdn": "core-api.uat.imas.internal"
   },
   "sprouts": {
     "t1-ubuntu": {"tenant": 1, "os": "ubuntu", "connection": "ssh", "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-abc123/providers/Microsoft.Compute/virtualMachines/t1-ubuntu", "private_ip": "10.60.3.4", "public_ip": "198.51.100.21", "admin_user": "uatadmin"},

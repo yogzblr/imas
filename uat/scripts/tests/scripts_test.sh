@@ -174,6 +174,22 @@ check "outputs: destroy=true with keep_hours 0" grep -qx "destroy=true" "$STUB_S
 check "outputs: run_budget_hours=7 for tier all" grep -qx "run_budget_hours=7" "$STUB_STATE/github_output"
 check "outputs: release_tag" grep -qx "release_tag=v0.1.0-rc.4" "$STUB_STATE/github_output"
 
+check "outputs: one node per hub by default" grep -qx "core_node_count=1" "$STUB_STATE/github_output"
+check "outputs: dmz_node_count=1 by default" grep -qx "dmz_node_count=1" "$STUB_STATE/github_output"
+check "outputs: no core_node_size for one node (the tofu default stays)" grep -qx "core_node_size=" "$STUB_STATE/github_output"
+
+inputs_state ha
+run_inputs HUB_NODES=3
+check "hub_nodes 3 passes" test "$rc" -eq 0
+check "outputs: 3 core nodes" grep -qx "core_node_count=3" "$STUB_STATE/github_output"
+check "outputs: 3 DMZ nodes" grep -qx "dmz_node_count=3" "$STUB_STATE/github_output"
+check "outputs: core nodes of Standard_D4s_v5 for the HA run" grep -qx "core_node_size=Standard_D4s_v5" "$STUB_STATE/github_output"
+check "outputs: hub_nodes=3" grep -qx "hub_nodes=3" "$STUB_STATE/github_output"
+
+inputs_state badnodes
+run_inputs HUB_NODES=2
+check "hub_nodes 2 fails, named" test "$rc" -eq 1 -a -n "$(grep -F "input hub_nodes '2' must be 1" <<<"$out")"
+
 inputs_state vars
 run_inputs AZURE_CLIENT_ID= AZURE_TENANT_ID= AZURE_SUBSCRIPTION_ID=
 check "missing Azure variables fail" test "$rc" -eq 1
@@ -314,6 +330,7 @@ echo "PASS C1 ubuntu 1" >"$s/report/summary.txt"
 echo '<testsuites/>' >"$s/report/junit.xml"
 echo '{"Action":"pass","Test":"TestSmokeC1_CmdRunEverySprout","Output":"token minted for t1-admin (password grant)"}' >"$s/report/events.json"
 cp "$testdata/uat.json" "$s/uat.json"
+echo '{"core":["uat-core-1","uat-core-2","uat-core-3"],"dmz":["uat-dmz-1","uat-dmz-2","uat-dmz-3"]}' >"$s/ha_node_names.json"
 cp "$testdata/endpoints.json" "$s/k0s/endpoints.json"
 printf -- '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n' >"$s/k0s/uat-ca.crt"
 echo 'hosts: [{ssh: {keyPath: /tmp/x/ssh_key}}]' >"$s/k0s/k0sctl-dmz.yaml"
@@ -338,7 +355,7 @@ check "collect succeeds on a run's state" test "$rc" -eq 0
 listing=$(cd "$o" && find . -type f | sort)
 expected=$(printf '%s\n' ./outputs/dmz/dmz.json ./outputs/enroll/keys.json ./outputs/enroll/sprouts.json \
   ./outputs/hub/core/out/core.json ./outputs/k0s/endpoints.json ./outputs/k0s/k0sctl-dmz.yaml ./outputs/k0s/uat-ca.crt \
-  ./outputs/run.json ./outputs/uat.json ./report/events.json ./report/junit.xml ./report/summary.txt | sort)
+  ./outputs/ha_node_names.json ./outputs/run.json ./outputs/uat.json ./report/events.json ./report/junit.xml ./report/summary.txt | sort)
 check "exactly the allowlisted, present, regular files are copied" test "$listing" = "$expected"
 [ "$listing" = "$expected" ] || diff <(echo "$expected") <(echo "$listing")
 check "no private key, kubeconfig, unseal key, seed or enrolment key in the output" \
@@ -390,6 +407,19 @@ echo false >"$STUB_STATE/group_exists"
 echo "/subscriptions/x/resourceGroups/NetworkWatcherRG/providers/Microsoft.Network/publicIPAddresses/stray" >"$STUB_STATE/leftovers"
 vt abc123
 check "a resource tagged run_id elsewhere: exit 1, listed" test "$rc" -eq 1 -a -n "$(grep -F 'publicIPAddresses/stray' <<<"$out")"
+
+# The HA topology's own resources (P24, uat/tofu/lb.tf): load balancers and
+# their public IP, each tagged with the run_id, are listed like any other.
+new_state vt-ha
+echo false >"$STUB_STATE/group_exists"
+printf '%s\n' \
+  "/subscriptions/x/resourceGroups/imas-uat-abc123/providers/Microsoft.Network/loadBalancers/uat-core-ilb" \
+  "/subscriptions/x/resourceGroups/imas-uat-abc123/providers/Microsoft.Network/loadBalancers/uat-dmz-lb" \
+  "/subscriptions/x/resourceGroups/imas-uat-abc123/providers/Microsoft.Network/publicIPAddresses/uat-dmz-lb-pip" >"$STUB_STATE/leftovers"
+vt abc123
+check "HA leftovers (load balancers, their public IP): exit 1, each listed" test "$rc" -eq 1 -a \
+  -n "$(grep -F 'loadBalancers/uat-core-ilb' <<<"$out")" -a -n "$(grep -F 'loadBalancers/uat-dmz-lb' <<<"$out")" -a \
+  -n "$(grep -F 'publicIPAddresses/uat-dmz-lb-pip' <<<"$out")"
 
 new_state vt-taggedgroup
 echo false >"$STUB_STATE/group_exists"

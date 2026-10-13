@@ -9,6 +9,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 tunnels="$here/../tunnels.sh"
 vmctl="$here/../vmctl.sh"
 uat="$here/../testdata/uat.json"
+uat_ha="$here/../testdata/uat-ha.json"
 stubs="$here/stubs"
 
 pass=0
@@ -266,6 +267,22 @@ rm -f "$STUB_STATE/power"
 echo 1 >"$STUB_STATE/restart_rc"
 v "$uat" restart uat-dmz
 if [ "$rc" -eq 255 ]; then ok "vmctl: a failed az vm restart gives 255"; else nok "vmctl: restart failure (rc=$rc)" "$err"; fi
+
+# An HA hub (P24): every node is a VM vmctl knows, by its own id.
+new_case vha
+core2_id=$(jq -r '.core.node_ids[1]' "$uat_ha")
+v "$uat_ha" restart uat-core-2
+if [ "$rc" -eq 0 ] && calls | grep -qx -- "az vm restart --ids $core2_id -o none"; then ok "vmctl: restart of an HA node uses that node's id"; else nok "vmctl: HA node restart (rc=$rc)" "$(calls) $err"; fi
+dmz3_id=$(jq -r '.dmz.node_ids[2]' "$uat_ha")
+v "$uat_ha" run uat-dmz-3 echo on-node-3
+if [ "$rc" -eq 0 ] && [ "$out" = "on-node-3" ] && calls | grep -q -- "--ids $dmz3_id --command-id RunShellScript"; then ok "vmctl: run on an HA node"; else nok "vmctl: HA node run (rc=$rc)" "$(calls) $err"; fi
+before=$(calls | wc -l)
+v "$uat_ha" stop-sprout uat-dmz-2
+if [ "$rc" -eq 2 ] && [ "$(calls | wc -l)" -eq "$before" ]; then ok "vmctl: stop-sprout refuses an HA hub node"; else nok "vmctl: stop-sprout on an HA node (rc=$rc)" "$err"; fi
+v "$uat_ha" run uat-dmz true
+if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -q "no VM named"; then ok "vmctl: an HA hub has no VM named uat-dmz"; else nok "vmctl: uat-dmz on HA (rc=$rc)" "$err"; fi
+v "$uat_ha" run t2-alma echo sprout
+if [ "$rc" -eq 0 ] && [ "$out" = "sprout" ]; then ok "vmctl: sprouts still resolve with an HA uat.json"; else nok "vmctl: sprout on HA json (rc=$rc)" "$err"; fi
 
 # An expired Azure login: with the relogin hook vmctl logs in again and
 # repeats the call; without it the failure stays.

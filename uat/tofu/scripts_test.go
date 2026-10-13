@@ -1,6 +1,6 @@
 // Package tofu runs the checks of the UAT.1 OpenTofu stacks that need no
-// Azure account: the destroy.sh test against stubbed tofu and az, shellcheck
-// on the scripts, and tofu fmt -check. Each check skips when its tool is not
+// Azure account: the destroy.sh and quota-check.sh tests against stubbed tofu
+// and az, shellcheck on the scripts, and tofu fmt -check. Each check skips when its tool is not
 // on PATH, so `go test ./...` stays green on a machine without them. tofu
 // validate and tofu test need the providers and are run by hand (README.md).
 package tofu
@@ -50,9 +50,14 @@ func TestDestroyScript(t *testing.T) {
 	run(t, "bash", "tests/destroy_test.sh")
 }
 
+func TestQuotaCheckScript(t *testing.T) {
+	need(t, "bash", "jq")
+	run(t, "bash", "tests/quota_test.sh")
+}
+
 func TestShellcheck(t *testing.T) {
 	need(t, "shellcheck")
-	run(t, "shellcheck", "destroy.sh", "tests/destroy_test.sh", "tests/stubs/az", "tests/stubs/tofu")
+	run(t, "shellcheck", "destroy.sh", "quota-check.sh", "tests/destroy_test.sh", "tests/quota_test.sh", "tests/stubs/az", "tests/stubs/tofu")
 }
 
 func TestTofuFmt(t *testing.T) {

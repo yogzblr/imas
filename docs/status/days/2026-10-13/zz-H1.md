@@ -1,0 +1,5 @@
+change: H1 (P24 item 1): `uat/tofu` builds the HA topology on request: `core_node_count` and `dmz_node_count` (default 1, the single-node run unchanged; 3 for the HA run), `core_node_size`/`dmz_node_size` (renamed from `core_size`/`dmz_size`), nodes spread over the region's zones, per HA hub an internal Standard load balancer (k0s API and the hub's private ports) and a public one (the runner's port), node-to-node NSG rules (etcd, API, join, konnectivity, kubelet, kube-router BGP and FOU) and the probe rule, private DNS for the API addresses and every node, `uat` hub fields `node_names`, `node_ids`, `node_private_ips`, `api_address`, `api_fqdn`, the `ha_node_names` output, and `quota-check.sh` before every apply. Workflow input `hub_nodes` (1 or 3). Tested with mocked providers (`tofu test`, both variable sets) and a stubbed `az`; Run 3 applies it.
+---
+item: P24
+action: update
+next-append: **H1 built (2026-10-13):** tofu for 3 + 3 nodes (zones, internal and public Standard load balancers, NSG and private DNS, node and API outputs, `ha_node_names`, quota check before apply; workflow input `hub_nodes`). Awaits H2 (k0s on 3 nodes) and the HA run.

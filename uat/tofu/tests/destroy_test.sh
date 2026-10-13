@@ -81,6 +81,21 @@ run_destroy abc123
 if [ "$rc" -eq 1 ]; then ok "leftover tagged resource exits 1"; else nok "leftover exits 1 (rc=$rc)" "$out"; fi
 if printf '%s' "$out" | grep -q "publicIPAddresses/stray"; then ok "leftovers are listed"; else nok "leftovers listed" "$out"; fi
 
+# Branch 3c: the HA topology's resources (P24, lb.tf) left behind: listed,
+# exit 1. They carry the run's tags like every other resource.
+new_case ha_leftovers
+echo 1 >"$STUB_STATE/destroy_rc"
+echo false >"$STUB_STATE/group_exists"
+printf '%s\n' \
+  "/subscriptions/x/resourceGroups/elsewhere/providers/Microsoft.Network/loadBalancers/uat-core-ilb" \
+  "/subscriptions/x/resourceGroups/elsewhere/providers/Microsoft.Network/loadBalancers/uat-dmz-lb" \
+  "/subscriptions/x/resourceGroups/elsewhere/providers/Microsoft.Network/publicIPAddresses/uat-dmz-lb-pip" >"$STUB_STATE/leftovers"
+run_destroy abc123
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q "loadBalancers/uat-core-ilb" &&
+  printf '%s' "$out" | grep -q "loadBalancers/uat-dmz-lb" && printf '%s' "$out" | grep -q "publicIPAddresses/uat-dmz-lb-pip"; then
+  ok "HA load balancers and their public IP left behind exit 1, listed"
+else nok "HA leftovers (rc=$rc)" "$out"; fi
+
 # Branch 3b: the group survives az group delete.
 new_case undeletable
 echo 1 >"$STUB_STATE/destroy_rc"

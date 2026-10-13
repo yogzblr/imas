@@ -47,6 +47,36 @@ mock_provider "azurerm" {
       id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-abc123/providers/Microsoft.Compute/virtualMachines/mockwin"
     }
   }
+  mock_resource "azurerm_lb" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-abc123/providers/Microsoft.Network/loadBalancers/mock"
+    }
+  }
+  mock_resource "azurerm_lb_backend_address_pool" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-abc123/providers/Microsoft.Network/loadBalancers/mock/backendAddressPools/mock"
+    }
+  }
+  mock_resource "azurerm_lb_probe" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-abc123/providers/Microsoft.Network/loadBalancers/mock/probes/mock"
+    }
+  }
+  mock_resource "azurerm_lb_rule" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-abc123/providers/Microsoft.Network/loadBalancers/mock/loadBalancingRules/mock"
+    }
+  }
+  # centralindia has three zones.
+  mock_data "azurerm_location" {
+    defaults = {
+      zone_mappings = [
+        { logical_zone = "1", physical_zone = "centralindia-az1" },
+        { logical_zone = "2", physical_zone = "centralindia-az2" },
+        { logical_zone = "3", physical_zone = "centralindia-az3" },
+      ]
+    }
+  }
   mock_resource "azurerm_bastion_host" {
     defaults = {
       id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-abc123/providers/Microsoft.Network/bastionHosts/uat-bastion"
@@ -103,8 +133,8 @@ run "names_tags_and_layout" {
 
   assert {
     condition = (
-      azurerm_public_ip.hub["dmz"].domain_name_label == "uatabc123-dmz" &&
-      azurerm_public_ip.hub["core"].domain_name_label == "uatabc123-core"
+      azurerm_public_ip.hub["uat-dmz"].domain_name_label == "uatabc123-dmz" &&
+      azurerm_public_ip.hub["uat-core"].domain_name_label == "uatabc123-core"
     )
     error_message = "hub DNS labels must be uat<run_id>-dmz and uat<run_id>-core"
   }
@@ -142,11 +172,11 @@ run "names_tags_and_layout" {
 
   assert {
     condition = (
-      azurerm_linux_virtual_machine.hub["dmz"].size == "Standard_D2s_v5" &&
-      azurerm_linux_virtual_machine.hub["core"].size == "Standard_D8s_v5" &&
-      azurerm_linux_virtual_machine.hub["dmz"].os_disk[0].disk_size_gb == 64 &&
-      azurerm_linux_virtual_machine.hub["core"].os_disk[0].disk_size_gb == 128 &&
-      azurerm_linux_virtual_machine.hub["core"].os_disk[0].storage_account_type == "StandardSSD_LRS"
+      azurerm_linux_virtual_machine.hub["uat-dmz"].size == "Standard_D2s_v5" &&
+      azurerm_linux_virtual_machine.hub["uat-core"].size == "Standard_D8s_v5" &&
+      azurerm_linux_virtual_machine.hub["uat-dmz"].os_disk[0].disk_size_gb == 64 &&
+      azurerm_linux_virtual_machine.hub["uat-core"].os_disk[0].disk_size_gb == 128 &&
+      azurerm_linux_virtual_machine.hub["uat-core"].os_disk[0].storage_account_type == "StandardSSD_LRS"
     )
     error_message = "hub sizes and disks must match the brief"
   }
@@ -189,6 +219,41 @@ run "names_tags_and_layout" {
       toset(azurerm_private_dns_a_record.hub["dmz"].records) == toset(["10.60.9.9"])
     )
     error_message = "dmz.<zone> and core.<zone> must resolve to the hubs' private addresses inside the VNet"
+  }
+
+  # One node per hub by default: the single-node run, unchanged. No load
+  # balancer, no zone, the hub's DNS label on the node's own public IP.
+  assert {
+    condition = (
+      toset(keys(azurerm_linux_virtual_machine.hub)) == toset(["uat-dmz", "uat-core"]) &&
+      alltrue([for v in values(azurerm_linux_virtual_machine.hub) : v.zone == null]) &&
+      length(azurerm_lb.internal) == 0 && length(azurerm_lb.public) == 0 && length(azurerm_public_ip.hub_lb) == 0 &&
+      length(azurerm_lb_rule.hub) == 0 && length(azurerm_network_interface_backend_address_pool_association.hub) == 0
+    )
+    error_message = "the default is one VM per hub, uat-dmz and uat-core, with no zone and no load balancer"
+  }
+
+  assert {
+    condition = (
+      tolist(output.uat.dmz.node_names) == tolist(["uat-dmz"]) &&
+      tolist(output.uat.core.node_names) == tolist(["uat-core"]) &&
+      tolist(output.uat.dmz.node_private_ips) == tolist(["10.60.9.9"]) &&
+      output.uat.dmz.api_address == "10.60.9.9" &&
+      output.uat.core.api_fqdn == "core-api.uat.imas.internal" &&
+      output.uat.dmz.public_ip == "198.51.100.10" &&
+      output.uat.dmz.fqdn == "mocked.centralindia.cloudapp.azure.com" &&
+      length(output.ha_node_names.core) == 0 && length(output.ha_node_names.dmz) == 0
+    )
+    error_message = "single node: the API address is the node's own, and no VM is an HA test target"
+  }
+
+  assert {
+    condition = (
+      toset(keys(azurerm_private_dns_a_record.hub_node)) == toset(["uat-dmz", "uat-core"]) &&
+      azurerm_private_dns_a_record.hub_api["dmz"].name == "dmz-api" &&
+      toset(azurerm_private_dns_a_record.hub_api["core"].records) == toset(["10.60.9.9"])
+    )
+    error_message = "private DNS has <hub>-api and one record per node"
   }
 
   # The uat output: exactly the Shared contract's keys.
@@ -237,6 +302,7 @@ run "sample_uat_json_matches_output" {
     condition = (
       toset(keys(output.uat)) == toset(keys(jsondecode(file("../access/testdata/uat.json")))) &&
       toset(keys(output.uat.dmz)) == toset(keys(jsondecode(file("../access/testdata/uat.json")).dmz)) &&
+      toset(keys(output.uat.core)) == toset(keys(jsondecode(file("../access/testdata/uat.json")).core)) &&
       toset(keys(output.uat.sprouts)) == toset(keys(jsondecode(file("../access/testdata/uat.json")).sprouts)) &&
       toset(keys(output.uat.sprouts["t1-win"])) == toset(keys(jsondecode(file("../access/testdata/uat.json")).sprouts["t1-win"])) &&
       toset(keys(output.uat.bastion)) == toset(keys(jsondecode(file("../access/testdata/uat.json")).bastion)) &&
@@ -442,4 +508,274 @@ run "bad_release_tag" {
   }
 
   expect_failures = [var.release_tag]
+}
+
+# The HA run (owner, 2026-10-13): 3 core nodes of Standard_D4s_v5 and 3 DMZ
+# nodes of Standard_D2s_v5, spread over the region's three zones, each hub
+# behind an internal load balancer (k0s API and private ports) and a public
+# one (the runner's port).
+run "ha_three_plus_three" {
+  command = apply
+
+  variables {
+    core_node_count = 3
+    dmz_node_count  = 3
+    core_node_size  = "Standard_D4s_v5"
+  }
+
+  assert {
+    condition = (
+      toset(keys(azurerm_linux_virtual_machine.hub)) == toset(["uat-core-1", "uat-core-2", "uat-core-3", "uat-dmz-1", "uat-dmz-2", "uat-dmz-3"]) &&
+      alltrue([for n in ["uat-core-1", "uat-core-2", "uat-core-3"] : azurerm_linux_virtual_machine.hub[n].size == "Standard_D4s_v5" && azurerm_linux_virtual_machine.hub[n].os_disk[0].disk_size_gb == 128]) &&
+      alltrue([for n in ["uat-dmz-1", "uat-dmz-2", "uat-dmz-3"] : azurerm_linux_virtual_machine.hub[n].size == "Standard_D2s_v5" && azurerm_linux_virtual_machine.hub[n].os_disk[0].disk_size_gb == 64])
+    )
+    error_message = "HA: three core nodes of D4s_v5 and three DMZ nodes of D2s_v5, named uat-<hub>-1 to 3"
+  }
+
+  assert {
+    condition = (
+      tolist([for n in ["uat-core-1", "uat-core-2", "uat-core-3"] : azurerm_linux_virtual_machine.hub[n].zone]) == tolist(["1", "2", "3"]) &&
+      tolist([for n in ["uat-dmz-1", "uat-dmz-2", "uat-dmz-3"] : azurerm_linux_virtual_machine.hub[n].zone]) == tolist(["1", "2", "3"]) &&
+      alltrue([for v in values(azurerm_linux_virtual_machine.sprout) : v.zone == null])
+    )
+    error_message = "HA: each hub's nodes go one per zone; sprouts stay unzoned"
+  }
+
+  assert {
+    condition = (
+      length(azurerm_linux_virtual_machine.sprout) == 4 && length(azurerm_windows_virtual_machine.sprout) == 2 &&
+      length(azurerm_public_ip.hub) == 6 &&
+      alltrue([for p in values(azurerm_public_ip.hub) : p.domain_name_label == null]) &&
+      azurerm_public_ip.hub_lb["dmz"].domain_name_label == "uatabc123-dmz" &&
+      azurerm_public_ip.hub_lb["core"].domain_name_label == "uatabc123-core" &&
+      alltrue([for p in values(azurerm_public_ip.hub_lb) : p.sku == "Standard" && p.allocation_method == "Static" && toset(p.zones) == toset(["1", "2", "3"])])
+    )
+    error_message = "HA: the hub DNS labels move to zone-redundant load balancer IPs; node IPs are outbound only"
+  }
+
+  assert {
+    condition = (
+      alltrue([for lb in concat(values(azurerm_lb.internal), values(azurerm_lb.public)) : lb.sku == "Standard"]) &&
+      azurerm_lb.internal["core"].frontend_ip_configuration[0].private_ip_address == "10.60.2.250" &&
+      azurerm_lb.internal["dmz"].frontend_ip_configuration[0].private_ip_address == "10.60.1.250" &&
+      azurerm_lb.internal["dmz"].frontend_ip_configuration[0].private_ip_address_allocation == "Static" &&
+      toset(azurerm_lb.internal["dmz"].frontend_ip_configuration[0].zones) == toset(["1", "2", "3"]) &&
+      azurerm_lb.internal["core"].name == "uat-core-ilb" && azurerm_lb.public["dmz"].name == "uat-dmz-lb"
+    )
+    error_message = "HA: per hub a Standard internal load balancer on host .250 of its subnet and a Standard public one"
+  }
+
+  assert {
+    condition = toset(keys(azurerm_lb_rule.hub)) == toset([
+      "core-internal-6443", "core-internal-5405", "core-internal-9000", "core-public-443",
+      "dmz-internal-6443", "dmz-internal-8443", "dmz-internal-8442", "dmz-public-8443",
+    ])
+    error_message = "HA: the k0s API and each hub's private ports on the internal load balancer, the runner's port on the public one"
+  }
+
+  assert {
+    condition = alltrue([for k, r in azurerm_lb_rule.hub :
+      r.protocol == "Tcp" && r.frontend_port == r.backend_port && r.disable_outbound_snat &&
+      azurerm_lb_probe.hub[k].port == r.backend_port && azurerm_lb_probe.hub[k].protocol == "Tcp" &&
+      r.frontend_ip_configuration_name == (strcontains(k, "-internal-") ? "internal" : "public")
+    ])
+    error_message = "HA: every rule is TCP, port to the same port, with a TCP probe on that port and no outbound SNAT"
+  }
+
+  assert {
+    condition = (
+      length(azurerm_network_interface_backend_address_pool_association.hub) == 12 &&
+      length(azurerm_lb_backend_address_pool.hub) == 4 &&
+      toset(keys(azurerm_network_interface_backend_address_pool_association.hub)) == toset(flatten([
+        for n in ["uat-core-1", "uat-core-2", "uat-core-3", "uat-dmz-1", "uat-dmz-2", "uat-dmz-3"] : ["${n}-internal", "${n}-public"]
+      ]))
+    )
+    error_message = "HA: every node of a hub is in both of its hub's backend pools"
+  }
+
+  # NSG: node to node inside each hub and the probes, on top of every
+  # single-node rule.
+  assert {
+    condition = alltrue([for n in ["dmz", "core"] :
+      length([for r in azurerm_network_security_group.subnet[n].security_rule : r if contains(["AllowHubNodesTcpIn", "AllowHubNodesUdpIn", "AllowLoadBalancerProbeIn", "AllowHubNodesTcpOut", "AllowHubNodesUdpOut"], r.name)]) == 5
+    ])
+    error_message = "HA: each hub NSG adds node-to-node rules both ways and the probe rule"
+  }
+
+  assert {
+    condition = (
+      toset([for r in azurerm_network_security_group.subnet["core"].security_rule : r.name if r.direction == "Inbound" && r.access == "Allow"]) == toset(["AllowBastionSshKubeIn", "AllowDmzFarmerApiIn", "AllowRunnerHttpsIn", "AllowDmzAccountsStoreIn", "AllowHubNodesTcpIn", "AllowHubNodesUdpIn", "AllowLoadBalancerProbeIn"]) &&
+      toset([for r in azurerm_network_security_group.subnet["dmz"].security_rule : r.name if r.direction == "Inbound" && r.access == "Allow"]) == toset(["AllowBastionSshKubeIn", "AllowSproutsEnvoyPrivateIn", "AllowRunnerEnvoyIn", "AllowCoreBusIn", "AllowHubNodesTcpIn", "AllowHubNodesUdpIn", "AllowLoadBalancerProbeIn"]) &&
+      toset([for r in azurerm_network_security_group.subnet["dmz"].security_rule : r.name if r.direction == "Outbound" && r.access == "Allow"]) == toset(["AllowFarmerApiOut", "AllowAccountsStoreOut", "AllowHubNodesTcpOut", "AllowHubNodesUdpOut"])
+    )
+    error_message = "HA: every single-node rule is kept, and only the node-to-node and probe rules are added"
+  }
+
+  assert {
+    condition = alltrue(flatten([for n in ["dmz", "core"] : [
+      for r in azurerm_network_security_group.subnet[n].security_rule : (
+        (r.name != "AllowHubNodesTcpIn" && r.name != "AllowHubNodesTcpOut") ||
+        (r.protocol == "Tcp" && r.source_address_prefix == (n == "dmz" ? "10.60.1.0/24" : "10.60.2.0/24") && r.destination_address_prefix == r.source_address_prefix &&
+        toset(r.destination_port_ranges) == toset(["179", "2379-2380", "6443", "8132", "9443", "10250"]))
+        ) && (
+        (r.name != "AllowHubNodesUdpIn" && r.name != "AllowHubNodesUdpOut") ||
+        (r.protocol == "Udp" && r.source_address_prefix == r.destination_address_prefix && r.destination_port_range == "5555")
+      )
+    ]]))
+    error_message = "HA: node to node inside the hub only: etcd 2379-2380, API 6443, join 9443, konnectivity 8132, kubelet 10250, kube-router BGP 179 and FOU 5555/udp"
+  }
+
+  assert {
+    condition = (
+      anytrue([for r in azurerm_network_security_group.subnet["core"].security_rule :
+        r.name == "AllowLoadBalancerProbeIn" && r.source_address_prefix == "AzureLoadBalancer" && toset(r.destination_port_ranges) == toset(["6443", "5405", "9000", "443"])
+      ]) &&
+      anytrue([for r in azurerm_network_security_group.subnet["dmz"].security_rule :
+        r.name == "AllowLoadBalancerProbeIn" && r.source_address_prefix == "AzureLoadBalancer" && toset(r.destination_port_ranges) == toset(["6443", "8443", "8442"])
+      ])
+    )
+    error_message = "HA: the health probes reach exactly the load-balanced ports"
+  }
+
+  # Management ports still only from the Bastion, apart from the hub's own
+  # nodes (etcd and API peers) and the load balancer's probe.
+  assert {
+    condition = alltrue(flatten([for n in ["dmz", "core", "tenants"] : [
+      for r in azurerm_network_security_group.subnet[n].security_rule :
+      contains(["10.60.4.0/26", "AzureLoadBalancer", n == "dmz" ? "10.60.1.0/24" : (n == "core" ? "10.60.2.0/24" : "none")], r.source_address_prefix)
+      if r.direction == "Inbound" && r.access == "Allow" && length(setintersection(toset(concat(r.destination_port_ranges == null ? [] : tolist(r.destination_port_ranges), r.destination_port_range == null ? [] : [r.destination_port_range])), toset(["22", "5985", "5986", "6443", "*"]))) > 0
+    ]]))
+    error_message = "HA: management ports open to the Bastion, the hub's own nodes and the load balancer probe only"
+  }
+
+  assert {
+    condition = (
+      toset(azurerm_private_dns_a_record.hub["dmz"].records) == toset(["10.60.1.250"]) &&
+      toset(azurerm_private_dns_a_record.hub["core"].records) == toset(["10.60.2.250"]) &&
+      toset(azurerm_private_dns_a_record.hub_api["dmz"].records) == toset(["10.60.1.250"]) &&
+      toset(azurerm_private_dns_a_record.hub_api["core"].records) == toset(["10.60.2.250"]) &&
+      toset(keys(azurerm_private_dns_a_record.hub_node)) == toset(["uat-core-1", "uat-core-2", "uat-core-3", "uat-dmz-1", "uat-dmz-2", "uat-dmz-3"])
+    )
+    error_message = "HA: <hub> and <hub>-api resolve to the internal load balancer, and every node has its own record"
+  }
+
+  assert {
+    condition = (
+      toset(keys(output.uat)) == toset(["run_id", "region", "resource_group", "dmz", "core", "sprouts", "bastion", "subnets"]) &&
+      tolist(output.uat.core.node_names) == tolist(["uat-core-1", "uat-core-2", "uat-core-3"]) &&
+      tolist(output.uat.dmz.node_names) == tolist(["uat-dmz-1", "uat-dmz-2", "uat-dmz-3"]) &&
+      length(output.uat.core.node_ids) == 3 && length(output.uat.dmz.node_private_ips) == 3 &&
+      output.uat.core.name == "uat-core-1" &&
+      output.uat.core.api_address == "10.60.2.250" &&
+      output.uat.dmz.api_address == "10.60.1.250" &&
+      output.uat.dmz.api_fqdn == "dmz-api.uat.imas.internal" &&
+      tolist(output.ha_node_names.core) == tolist(["uat-core-1", "uat-core-2", "uat-core-3"]) &&
+      tolist(output.ha_node_names.dmz) == tolist(["uat-dmz-1", "uat-dmz-2", "uat-dmz-3"])
+    )
+    error_message = "HA: uat keeps the contract's keys and lists every node, the API addresses, and the VMs the HA tests stop"
+  }
+
+  # uat/access/testdata/uat-ha.json is the HA sample the access scripts test
+  # against; it must keep the shape of the real HA output.
+  assert {
+    condition = (
+      toset(keys(output.uat)) == toset(keys(jsondecode(file("../access/testdata/uat-ha.json")))) &&
+      toset(keys(output.uat.dmz)) == toset(keys(jsondecode(file("../access/testdata/uat-ha.json")).dmz)) &&
+      toset(keys(output.uat.core)) == toset(keys(jsondecode(file("../access/testdata/uat-ha.json")).core)) &&
+      length(jsondecode(file("../access/testdata/uat-ha.json")).core.node_names) == length(output.uat.core.node_names)
+    )
+    error_message = "uat/access/testdata/uat-ha.json no longer has the shape of the HA output uat"
+  }
+}
+
+# Both variable sets plan (brief H1: tofu plan with the single-node and the HA
+# variables).
+run "ha_plan" {
+  command = plan
+
+  variables {
+    core_node_count = 3
+    dmz_node_count  = 3
+    core_node_size  = "Standard_D4s_v5"
+  }
+
+  assert {
+    condition     = length(azurerm_linux_virtual_machine.hub) == 6 && length(azurerm_lb_rule.hub) == 8
+    error_message = "the HA variables plan six hub nodes and eight load-balancing rules"
+  }
+}
+
+run "single_node_plan" {
+  command = plan
+
+  assert {
+    condition     = length(azurerm_linux_virtual_machine.hub) == 2 && length(azurerm_lb_rule.hub) == 0
+    error_message = "the default variables plan one node per hub and no load balancer"
+  }
+}
+
+# A region without zones: the nodes and load balancer frontends get none.
+run "ha_region_without_zones" {
+  command = apply
+
+  variables {
+    core_node_count = 3
+    dmz_node_count  = 3
+  }
+
+  override_data {
+    target = data.azurerm_location.run
+    values = {
+      zone_mappings = []
+    }
+  }
+
+  assert {
+    condition = (
+      alltrue([for v in values(azurerm_linux_virtual_machine.hub) : v.zone == null]) &&
+      alltrue([for p in values(azurerm_public_ip.hub_lb) : p.zones == null || length(p.zones) == 0]) &&
+      alltrue([for lb in values(azurerm_lb.internal) : lb.frontend_ip_configuration[0].zones == null || length(lb.frontend_ip_configuration[0].zones) == 0])
+    )
+    error_message = "without zones in the region, nothing is zonal"
+  }
+}
+
+# Only one hub in HA: the other keeps its single node, load balancer free.
+run "ha_core_only" {
+  command = apply
+
+  variables {
+    core_node_count = 3
+  }
+
+  assert {
+    condition = (
+      toset(keys(azurerm_lb.internal)) == toset(["core"]) &&
+      tolist(output.uat.dmz.node_names) == tolist(["uat-dmz"]) &&
+      length(output.ha_node_names.dmz) == 0 &&
+      length(output.ha_node_names.core) == 3 &&
+      length([for r in azurerm_network_security_group.subnet["dmz"].security_rule : r if startswith(r.name, "AllowHubNodes")]) == 0
+    )
+    error_message = "a hub of one node is unchanged when the other hub is HA"
+  }
+}
+
+run "bad_core_node_count" {
+  command = plan
+
+  variables {
+    core_node_count = 2
+  }
+
+  expect_failures = [var.core_node_count]
+}
+
+run "bad_dmz_node_count" {
+  command = plan
+
+  variables {
+    dmz_node_count = 0
+  }
+
+  expect_failures = [var.dmz_node_count]
 }

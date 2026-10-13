@@ -32,6 +32,10 @@ port:
 | sprouts with `connection: winrm` (Windows) | 5986 | `winrm_port` |
 | sprouts with `connection: docker` (local rig) | none | not listed |
 
+A hub's tunnels go to the VM `uat.json` names as the hub's `name` and `id`:
+the only node of a single-node hub, the first node (`uat-dmz-1`,
+`uat-core-1`) of an HA hub (P24; `uat/tofu`, "HA topology").
+
 Each tunnel gets its own free port on 127.0.0.1, starting at
 `TUNNEL_PORT_BASE` (default 20100, below the ephemeral port ranges of Linux,
 macOS and Windows, so outgoing connections do not take them) and skipping any port something already
@@ -100,7 +104,11 @@ uat/access/vmctl.sh <uat.json> start-sprout <vm>
 uat/access/vmctl.sh <uat.json> run          <vm> <command...>
 ```
 
-`<vm>` is `uat-dmz`, `uat-core` or a sprout name. Everything goes through the
+`<vm>` is a hub node or a sprout name. The hub nodes are each hub's
+`node_names` in `uat.json` (`uat-dmz` and `uat-core` in the single-node run,
+`uat-dmz-1` to `uat-dmz-N` and `uat-core-1` to `uat-core-N` on an HA hub,
+each by its own entry of `node_ids`), or the hub's `name` where the file has
+no node lists. Everything goes through the
 Azure control plane (`az vm restart`, `az vm get-instance-view`, `az vm
 run-command invoke`); no network path to the VM is needed.
 
@@ -131,9 +139,10 @@ exit, close stopping the tunnels and their children and
 removing the files, close being repeatable and never killing an unrelated pid,
 a failed tunnel, a tunnel without an SSH banner, docker sprouts, and for
 `vmctl.sh` the exit codes, stdout and stderr, quoting, the service commands on
-both OSes, the hub refusal, restart and its failures. Sample input:
-`testdata/uat.json` (the `tofu test` in `uat/tofu` keeps it in the shape of the
-real output). shellcheck runs on every script.
+both OSes, the hub refusal, restart and its failures, and every node of an HA
+hub resolved by its own id. Sample input: `testdata/uat.json` (single-node) and
+`testdata/uat-ha.json` (3 + 3 nodes); the `tofu test` in `uat/tofu` keeps
+both in the shape of the real output. shellcheck runs on every script.
 
 ```sh
 bash uat/access/tests/access_test.sh
