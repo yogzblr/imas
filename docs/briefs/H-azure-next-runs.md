@@ -329,6 +329,38 @@ Tests: the harness unit tests with the fake stack (`uat/tests/fakestack`) for th
 window assertions (a test where the fake takes 45 s and one where it takes 90 s) and the VM
 stop/start wrapper (fake `az`).
 
+Corrections made while building H5 (2026-10-13; the code on main, the pinned charts and the error
+windows above decide):
+- The ids are HA1 to HA6 in tier `ha`; catalogue ids may now have two capitals, and the test
+  functions are `TestHA<id>_...` (`TestHAHA1_PodKill`), the other tiers' pattern. HA6 is added:
+  design T2 and T3 need a burst (enrolment at Envoy's admitted rate, 20 requests per 60 s per
+  Envoy, into three tenants created at once), which one enrolment every 10 s is not. The other Ts
+  map onto HA1 to HA5 and the core tier (`uat/tests/README.md`); T4 is HA3 running
+  `uat/hub/core/check.sh` after its `helm upgrade`.
+- "A step that stops and starts VMs": the tests never call Azure (UAT.5's Access rule), so
+  `vmctl.sh` gains `stop-vm` and `start-vm` (hub nodes only) and the tests step's login and relogin
+  hook serve them; the workflow adds a step after the tests that runs `start-vm` on every HA hub
+  node, so a failed node stop leaves no VM stopped. `check-inputs.sh` refuses `tier=ha` with
+  `hub_nodes` 1 (every scenario would skip).
+- HA2's core node: the bus runs on the DMZ, so the core stop takes a node with a farmer pod and a
+  PXC, OpenBao and Valkey pod (not Valkey's primary, nor Keycloak, as H4 says), and the DMZ stop a
+  node with a bus pod and an Envoy.
+- HA5's block: a NetworkPolicy cannot block a subject, NetworkPolicies only allow (the chart's bus
+  policy would still admit everything), kube-router keeps connections already open, and cutting a
+  bus pod's routes fences the node (`cmd/farmerbus/fence.go`), which also stops its loader pushing.
+  So the chart's bus policy is patched to exclude the pod, a policy of its own carries every rule
+  but the egress to the account store's port, and the core edge proxy is restarted to cut the
+  loader's open connections: its fetch of the event's account fails and is left to the timer. The
+  test fails if the change reaches the blocked loader before the block is lifted.
+- "A sprout revoked": saasapi has no route to revoke one sprout (the API gap UAT.5 recorded), so
+  the sprout is revoked by offboarding its scratch tenant: farmer's locked-out Account JWT revokes
+  every user of it.
+- "No duplicate sprout JWT or box key": the loops enrol with the sprout's own two-step client, so
+  farmer records each box key; no two enrolments may share a sprout, NKey, box key, User JWT or
+  gateway JWT, and each, enrolled again with its keys, must get the same sprout and User JWT.
+- The harness's own tests run the windows scaled (one second is 100 ms) against the fake stack,
+  which now does both enrolment requests and can fail its routes or cut its sprouts for a time.
+
 ## H6: final gate for the next runs
 
 Needs every other unit in this file. No features. On main: `go build`, `go vet`,
