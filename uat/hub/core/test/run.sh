@@ -17,6 +17,9 @@
 #   8. openbao-bootstrap.sh, saasapi-secrets.sh and the T4 probe
 #      (openbao_t4) against a real local OpenBao server, when a bao binary
 #      is on PATH or in $BAO_BIN (skipped, and said so, otherwise)
+#   8b. finish.sh and operator-release.sh against stub kubectl, helm and
+#      curl (test/finish_test.sh): a failed registration Job fails it, and
+#      the operator API's answer decides
 #   9. go test ./uat/hub/core/ (helm template and lint of the farmer chart
 #      with values/farmer-uat.yaml, and of chart/)
 # A tool that isn't installed is reported as SKIPPED, never as passed.
@@ -76,7 +79,7 @@ ep2="$core/testdata/endpoints-overrides.json"
 
 # --- 1. shellcheck --------------------------------------------------------------
 if command -v shellcheck >/dev/null; then
-	expect "shellcheck" bash -c 'cd "$1" && shellcheck -x ./*.sh lib/common.sh test/*.sh test/stubs/*' _ "$core"
+	expect "shellcheck" bash -c 'cd "$1" && shellcheck -x ./*.sh lib/common.sh test/*.sh test/stubs/* test/finish-stubs/*' _ "$core"
 else
 	skip "shellcheck (not installed)"
 fi
@@ -126,6 +129,16 @@ gv "$ep2" "$admin" v1.2.3 >"$tmp/v2.json" 2>/dev/null &&
 	  and .farmer.image.tag == "1.2.3"' "$tmp/v2.json" >/dev/null &&
 	ok "gen-values.sh: port and name overrides, non-443 issuer keeps the port" ||
 	bad "gen-values.sh: port and name overrides"
+jq -e '.farmer.selfUpdate.enabled == false and .saasapi.fleetUpdateDispatch.enabled == false' "$tmp/v1.json" >/dev/null &&
+	ok "gen-values.sh: dispatch flags off by default" || bad "gen-values.sh: dispatch flags off by default"
+IMAS_UAT_DISPATCH_FLAGS=on gv "$ep" "$admin" v1.2.3 2>/dev/null |
+	jq -e '.farmer.selfUpdate.enabled == true and .saasapi.fleetUpdateDispatch.enabled == true' >/dev/null &&
+	ok "gen-values.sh: IMAS_UAT_DISPATCH_FLAGS=on turns both flags on" || bad "gen-values.sh: IMAS_UAT_DISPATCH_FLAGS=on"
+IMAS_UAT_DISPATCH_FLAGS=off gv "$ep" "$admin" v1.2.3 2>/dev/null |
+	jq -e '.farmer.selfUpdate.enabled == false and .saasapi.fleetUpdateDispatch.enabled == false' >/dev/null &&
+	ok "gen-values.sh: IMAS_UAT_DISPATCH_FLAGS=off keeps both off" || bad "gen-values.sh: IMAS_UAT_DISPATCH_FLAGS=off"
+refuse "gen-values.sh: an unknown IMAS_UAT_DISPATCH_FLAGS is refused" "must be on or off" \
+	env IMAS_UAT_DISPATCH_FLAGS=maybe "$core/gen-values.sh" "$ep" "$admin" v1.2.3 "$loader_pub"
 # The two readers spell the issuer and the private names differently
 # (uat/hub/dmz: cluster_issuer, private_dns_zone; uat/hub/core: ca.cluster_issuer,
 # *.private_fqdn). An endpoints file with only one form must give the same
@@ -551,7 +564,7 @@ if [[ -n "$bao_bin" && -x "$bao_bin" ]] && ! (exec 3<>/dev/tcp/127.0.0.1/8200) 2
 			{ bad "T4 probe: per-policy probes"; sed 's/^/      /' "$tmp/t4"; }
 
 		# saasapi-secrets.sh: the KV entries the chart's hook Jobs would have
-		# written, then the two Secrets.
+		# written, then the two Secrets and the operator token's.
 		b() { BAO_ADDR=http://127.0.0.1:8200 BAO_TOKEN="$root" "$bao_bin" "$@" >/dev/null; }
 		b secrets enable -path=secret -version=2 kv
 		b kv put secret/platform/imas/saasapi-nats-user jwt=eyJ.fake.jwt public_key=UFAKE
@@ -570,6 +583,20 @@ if [[ -n "$bao_bin" && -x "$bao_bin" ]] && ! (exec 3<>/dev/tcp/127.0.0.1/8200) 2
 				ok "saasapi-secrets: imas-saasapi-box has exactly priv and platform_pub" || bad "saasapi-secrets: imas-saasapi-box"
 			! grep -rq PLATFORM_PRIVATE "$STUB_STATE" "$ostate" && ok "saasapi-secrets: the platform private key is never read" || bad "saasapi-secrets: platform key read"
 			[[ -z "$(find "$ostate/core/sensitive" -name 'saasapi-secrets.*')" ]] && ok "saasapi-secrets: temporary files removed" || bad "saasapi-secrets: temporary files left"
+			opt="$ostate/core/sensitive/saasapi-operator-token"
+			optok="$STUB_STATE/imas-core/Secret/imas-saasapi-operator-token.json"
+			[[ "$(cat "$opt" 2>/dev/null)" =~ ^[0-9a-f]{64}$ && "$(stat -c %a "$opt")" == 600 ]] &&
+				jq -e --arg t "$(cat "$opt")" '(.data | keys) == ["current"] and (.data.current | @base64d) == $t' "$optok" >/dev/null &&
+				ok "saasapi-secrets: the operator token (64 hex, 0600) is Secret imas-saasapi-operator-token key current" ||
+				bad "saasapi-secrets: the operator token Secret"
+			first=$(cat "$opt" 2>/dev/null)
+			PATH="$stubs:$tmp/baobin:$PATH" "$core/saasapi-secrets.sh" "$kubeconfig" "$ep" "$ostate" >/dev/null 2>&1 &&
+				[[ "$(cat "$opt")" == "$first" ]] && ok "saasapi-secrets: a re-run keeps the operator token" ||
+				bad "saasapi-secrets: a re-run changed the operator token"
+			cp "$opt" "$ostate/core/sensitive/internal-auth-secret"
+			refuse "saasapi-secrets: an operator token equal to the BFF secret is refused" "equals the BFF secret" \
+				env PATH="$stubs:$tmp/baobin:$PATH" "$core/saasapi-secrets.sh" "$kubeconfig" "$ep" "$ostate"
+			rm -f "$ostate/core/sensitive/internal-auth-secret"
 		else
 			bad "saasapi-secrets.sh runs"
 			sed 's/^/      /' "$tmp/out" | tail -n 10
@@ -582,6 +609,9 @@ if [[ -n "$bao_bin" && -x "$bao_bin" ]] && ! (exec 3<>/dev/tcp/127.0.0.1/8200) 2
 else
 	skip "openbao-bootstrap.sh and saasapi-secrets.sh against a real OpenBao (no bao binary in BAO_BIN or PATH, or 127.0.0.1:8200 is taken)"
 fi
+
+# --- 8b. finish.sh ------------------------------------------------------------------
+expect "finish.sh and operator-release.sh (test/finish_test.sh)" bash "$here/finish_test.sh"
 
 # --- 9. go test ---------------------------------------------------------------------
 if command -v go >/dev/null; then

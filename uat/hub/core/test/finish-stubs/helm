@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# A stand-in for helm, for test/finish_test.sh only. upgrade exits FS_HELM_RC
+# (a failed registration hook Job fails the upgrade, as in helm); get hooks
+# prints the registration Job unless FS_NO_HOOK=1.
+set -euo pipefail
+printf 'helm %s\n' "$*" >>"${FS_STATE:?}/calls.log"
+args=()
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--kubeconfig | -n) shift 2 ;;
+	*) args+=("$1"); shift ;;
+	esac
+done
+set -- "${args[@]}"
+case "$1 ${2:-}" in
+"upgrade imas-core")
+	if [[ "${FS_HELM_RC:-0}" != 0 ]]; then
+		echo "Error: UPGRADE FAILED: post-upgrade hooks failed: 1 error occurred: job imas-core-farmer-sprout-release-register failed: BackoffLimitExceeded" >&2
+		exit "$FS_HELM_RC"
+	fi
+	echo "Release \"imas-core\" has been upgraded."
+	;;
+"get hooks")
+	[[ "${FS_NO_HOOK:-}" == 1 ]] || printf -- '---\n# Source: farmer/templates/sprout-release-register-job.yaml\napiVersion: batch/v1\nkind: Job\nmetadata:\n  name: imas-core-farmer-sprout-release-register\n'
+	;;
+*) echo "finish stub helm: $* unsupported" >&2; exit 2 ;;
+esac

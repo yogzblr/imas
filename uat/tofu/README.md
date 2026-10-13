@@ -71,7 +71,7 @@ From the Shared contract, plus what the brief makes a variable.
 | `envoy_port` | `8443` | Envoy's external port on the DMZ host: 8443, the owner's decision (2026-10-06), as a NodePort. A variable so every Envoy rule moves together |
 | `bus_port` | `8442` | The farmerbus node port core dials on the DMZ: 8442, the owner's decision (2026-10-06), so the DMZ node port range is 8442-8443 only |
 | `farmer_api_port`, `core_public_port` | `5405`, `443` | farmer's API (Envoy's upstream; the owner: "farmer ports can be anything"), saasapi and Keycloak on core. See the network table |
-| `accounts_store_port` | `9000` | core's RustFS as the DMZ bus's account loader reads it (`uat/hub/core` `minio.hostPort`). See the network table |
+| `accounts_store_port` | `9000` | core's RustFS as the DMZ bus's account loader reads it (`uat/hub/core` `rustfs.hostPort`). See the network table |
 | `private_dns_zone` | `uat.imas.internal` | The private DNS zone linked to the VNet (see [Private DNS](#private-dns)) |
 
 The image URNs are unverified: the owner checks them with `az vm image list
@@ -169,7 +169,7 @@ balancer in the single-node run (the HA run adds them, owner 2026-10-13; see
 | dmz | in | 4000 | DenyVnetIn | VirtualNetwork | any | any | Overrides `AllowVnetInBound` |
 | dmz | in | 4096 | DenyAllIn | any | any | any | Everything else, including the Azure load balancer default |
 | dmz | out | 100 | AllowFarmerApiOut | dmz | core | TCP 5405 | Envoy's upstreams `farmer_api` and `recipe_service` (5405), and its remote JWKS fetch (`/v1/.well-known/jwks.json` on the same port) |
-| dmz | out | 110 | AllowAccountsStoreOut | dmz | core | TCP `accounts_store_port` (9000) | The bus's account loader reads the accounts bucket on core's RustFS, with a read-only credential scoped to that bucket (design D22; `uat/hub/core` `minio.hostPort`, `uat/hub/dmz` `dmz.account_store.endpoint`). The only other DMZ-to-core path |
+| dmz | out | 110 | AllowAccountsStoreOut | dmz | core | TCP `accounts_store_port` (9000) | The bus's account loader reads the accounts bucket on core's RustFS, with a read-only credential scoped to that bucket (design D22; `uat/hub/core` `rustfs.hostPort`, `uat/hub/dmz` `dmz.account_store.endpoint`). The only other DMZ-to-core path |
 | dmz | out | 4000 | DenyVnetOut | any | VirtualNetwork | any | Overrides `AllowVnetOutBound`: the DMZ reaches nothing else in the VNet. Internet outbound (images) stays allowed |
 | core | in | 100 | AllowBastionSshKubeIn | `10.60.4.0/26` | core | TCP 22, 6443 | As for dmz |
 | core | in | 110 | AllowDmzFarmerApiIn | dmz `10.60.1.0/24` | core | TCP 5405 | Envoy to farmer's API (farmer `farmer.apiPort`; farmer NetworkPolicy "farmer in from the nats chart's Envoy") |
@@ -219,7 +219,7 @@ assumed:
    SNATed to the node's address (kube-router's default pod egress in k0s).
    Azure drops a packet whose source is not the NIC's address anyway.
 6. **Same-host flows** need no NSG rule: on core, farmer and saasapi to PXC,
-   Valkey, OpenBao and MinIO, and saasapi to Keycloak's JWKS (the core FQDN
+   Valkey, OpenBao and RustFS, and saasapi to Keycloak's JWKS (the core FQDN
    resolves to core's private IP in the cluster); on the DMZ, Envoy to the bus
    on 5407. The bus's OpenBao TLS mode (`bus.tls.mode=openbao`, DMZ to OpenBao
    8200 on core) is **not** opened; the UAT CA is from cert-manager.

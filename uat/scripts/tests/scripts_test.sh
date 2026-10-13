@@ -152,7 +152,8 @@ GUID3=01234567-89ab-cdef-0123-456789abcdef
 inputs_state() {
   new_state "inputs-$1"
   printf '%s\n' v0.1.0-rc.3 v0.1.0-rc.4 v0.1.0-rc.5 >"$STUB_STATE/tags"
-  printf '%s\n' "v0.1.0-rc.3 false" "v0.1.0-rc.4 false" "v0.1.0-rc.5 true" >"$STUB_STATE/releases"
+  printf '%s\n' "v0.1.0-rc.3 false" "v0.1.0-rc.4 false checksums.txt,checksums.txt.sig,imas-sprout_0.1.0-rc.4_linux_amd64.deb" \
+    "v0.1.0-rc.5 true checksums.txt,checksums.txt.sig" >"$STUB_STATE/releases"
 }
 # run_inputs VAR=VALUE...: check-inputs.sh with a full, valid environment, the
 # given variables overriding it.
@@ -210,6 +211,33 @@ inputs_state norelease
 echo v0.1.0-rc.6 >>"$STUB_STATE/tags"
 run_inputs RELEASE_TAG=v0.1.0-rc.6
 check "a tag without a release fails, named" test "$rc" -eq 1 -a -n "$(grep -F 'v0.1.0-rc.6 has no published release' <<<"$out")"
+
+inputs_state unsigned
+echo v0.1.0-rc.7 >>"$STUB_STATE/tags"
+echo "v0.1.0-rc.7 false checksums.txt" >>"$STUB_STATE/releases"
+run_inputs RELEASE_TAG=v0.1.0-rc.7
+check "a release without checksums.txt.sig fails, named" test "$rc" -eq 1 -a -n "$(grep -F 'v0.1.0-rc.7 is not GPG signed' <<<"$out")"
+inputs_state nosums
+echo v0.1.0-rc.7 >>"$STUB_STATE/tags"
+echo "v0.1.0-rc.7 false checksums.txt.sig" >>"$STUB_STATE/releases"
+run_inputs RELEASE_TAG=v0.1.0-rc.7
+check "a release without checksums.txt fails, named" test "$rc" -eq 1 -a -n "$(grep -F 'v0.1.0-rc.7 is not GPG signed' <<<"$out")"
+inputs_state upgrade-unsigned
+run_inputs UPGRADE_FROM_TAG=v0.1.0-rc.3
+check "upgrade_from_tag need not be signed (it is installed from the repository, never registered)" test "$rc" -eq 0
+
+inputs_state dispatch-default
+run_inputs
+check "outputs: dispatch_flags=off by default" grep -qx "dispatch_flags=off" "$STUB_STATE/github_output"
+inputs_state dispatch-on
+run_inputs DISPATCH_FLAGS=true
+check "outputs: dispatch_flags=on for true" test "$rc" -eq 0 -a -n "$(grep -x 'dispatch_flags=on' "$STUB_STATE/github_output")"
+inputs_state dispatch-off
+run_inputs DISPATCH_FLAGS=false
+check "outputs: dispatch_flags=off for false" test "$rc" -eq 0 -a -n "$(grep -x 'dispatch_flags=off' "$STUB_STATE/github_output")"
+inputs_state dispatch-bad
+run_inputs DISPATCH_FLAGS=yes
+check "dispatch_flags yes fails, named" test "$rc" -eq 1 -a -n "$(grep -F "input dispatch_flags 'yes' must be true or false" <<<"$out")"
 
 inputs_state draft
 run_inputs RELEASE_TAG=v0.1.0-rc.5

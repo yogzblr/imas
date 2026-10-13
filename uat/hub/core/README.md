@@ -21,7 +21,7 @@ used by a release. Plan: `docs/claude-code-parallel-build-plan.md`, section 4h.
 | Piece | Where | What |
 |---|---|---|
 | farmer, saasapi, PXC (1 node, 1 HAProxy), Valkey (1), OpenBao (1, standalone, single-node raft storage) | namespace `imas-core`, release `imas-core` | the **published** `deploy/helm/farmer` chart of `release_tag`, with `values/farmer-uat.yaml` and a run-specific values file from `gen-values.sh` |
-| **RustFS** (resources still named `imas-uat-minio`) | `imas-uat` | the object store, one pod, pinned image, root credential generated per run in a Secret. Its S3 port is also hostPort 9000 (`minio.hostPort`), where the DMZ bus's account loader reads the accounts bucket. Apache-2.0. It replaced MinIO (AGPL-3.0); the UAT-only exception is withdrawn (requirements.md item 21). With `object_store.mode` `external` nothing is deployed here (see "External S3"). |
+| **RustFS** (`imas-uat-rustfs`) | `imas-uat` | the object store, one pod, pinned image, root credential generated per run in a Secret. Its S3 port is also hostPort 9000 (`rustfs.hostPort`), where the DMZ bus's account loader reads the accounts bucket. Apache-2.0. It replaced MinIO (AGPL-3.0); the UAT-only exception is withdrawn (requirements.md item 21). With `object_store.mode` `external` nothing is deployed here (see "External S3"). |
 | **Keycloak** | `imas-uat` | Apache-2.0, pinned image, **dev style**: one replica, `start-dev`, the **embedded H2 database** (`dev-file`) on a 1 GiB PVC so a pod restart keeps the tenant bindings. Realm `imas-uat` imported from `chart/files/imas-uat-realm.json`. |
 | edge proxy | `imas-uat` | one Envoy (Apache-2.0, the nats chart's pin), hostPorts only (owner decision 2026-10-06; there is no node port mode, the core node port range being 30000-32767), on the core FQDN: 443 for saasapi (`/v1/`) and Keycloak (`/realms/imas-uat/` only, never `/admin` or the master realm), and a TCP passthrough on 5405 to farmer's API for the DMZ's Envoy |
 | the DMZ bus, as seen from core | no object of its own | the farmer chart is installed with `bus.host` set to the DMZ's private name (`dmz.uat.imas.internal` by default, read from the endpoints file by `gen-values.sh`; UAT.1's Private DNS zone), `bus.port` the DMZ's bus node port 8442 and `bus.egressCIDRs` the DMZ private address, so `farmerbusurl` and `SAASAPI_NATS_URL` are `tls://dmz.uat.imas.internal:8442` and both verify that name, which the DMZ's bus certificate carries as a SAN. (This replaces the ExternalName Service of earlier versions.) |
@@ -45,7 +45,7 @@ bind-tenant.sh <kubeconfig> <endpoints.json> <state-dir> --scratch-user <scratch
 token.sh     <kubeconfig> <endpoints.json> <state-dir> <t1-admin|t1-reader|t2-admin|t2-reader> [tests|other]
 ```
 
-`openbao-bootstrap.sh`, `seeds.sh`, `admin-keys.sh`, `minio-setup.sh` and
+`openbao-bootstrap.sh`, `seeds.sh`, `admin-keys.sh`, `rustfs-setup.sh` and
 `saasapi-secrets.sh` are the steps `install.sh` runs, each runnable on its
 own with the same arguments. `gen-values.sh` reads files only.
 
@@ -71,8 +71,8 @@ own with the same arguments. `gen-values.sh` reads files only.
   | `dmz.ports.bus` | no | `8442` | the DMZ node port of the bus client port (owner decision 2026-10-06: the DMZ node port range is 8442-8443, bus on 8442). `bus.port` of the farmer chart: farmer and saasapi dial `bus.host` on it |
   | `ca.cluster_issuer` | no | `imas-uat-ca` | UAT.2's cert-manager ClusterIssuer (a CA issuer: its Secrets carry `ca.crt`). `uat/hub/dmz` spells it `cluster_issuer`; either is read, `ca.cluster_issuer` first |
   | `cluster_domain` | no | `cluster.local` | |
-  | `object_store.mode` | no | `rustfs` | `rustfs`: RustFS is deployed in `imas-uat` and `minio-setup.sh` provisions it. `external`: an S3 endpoint you run; nothing is deployed or provisioned (see "External S3") |
-  | `object_store.endpoint` | external: yes | `imas-uat-minio.imas-uat.svc.cluster.local:9000` | `host[:port]`, no scheme: farmer's `objectStore.endpoint` and saasapi's recipe store |
+  | `object_store.mode` | no | `rustfs` | `rustfs`: RustFS is deployed in `imas-uat` and `rustfs-setup.sh` provisions it. `external`: an S3 endpoint you run; nothing is deployed or provisioned (see "External S3") |
+  | `object_store.endpoint` | external: yes | `imas-uat-rustfs.imas-uat.svc.cluster.local:9000` | `host[:port]`, no scheme: farmer's `objectStore.endpoint` and saasapi's recipe store |
   | `object_store.use_ssl` | no | `false` | `true` or `false`: `objectStore.useSSL` |
   | `object_store.egress_cidrs` | no | `[]` | IPv4 CIDRs: narrows farmer's and saasapi's object store egress (`networkPolicy.external.objectStore`). Empty: any destination, on the endpoint's port |
 
@@ -95,7 +95,7 @@ openssl, go (to build `nk`), tar, sha256sum, and this repository checked out.
 
 ## What install.sh does, in order
 
-1. Namespaces; generates the run's credentials (MinIO root, Keycloak admin,
+1. Namespaces; generates the run's credentials (RustFS root, Keycloak admin,
    the test client secret, four user passwords, saasapi's BFF secret) with
    `openssl rand`, keeps them under `<state>/core/sensitive` (0700, files
    0600) and puts them in Secrets. Values go from files to `kubectl create
@@ -133,7 +133,7 @@ openssl, go (to build `nk`), tar, sha256sum, and this repository checked out.
 5. **UAT-only pieces** (`chart/`), waits for them and for both certificates,
    and copies the UAT CA (the issued Secret's `ca.crt`, a public certificate)
    to the ConfigMap `imas-uat-ca` and `out/uat-ca.crt`.
-6. **Object store** (`minio-setup.sh`, RustFS): buckets `imas-recipes` (`objectStore.bucket`),
+6. **Object store** (`rustfs-setup.sh`, RustFS): buckets `imas-recipes` (`objectStore.bucket`),
    `imas-jobs` (`objectStore.jobBucket`), `imas-sprout-jwts`
    (`objectStore.sproutJWTBucket`, private, the sprout User JWTs) and
    `imas-accounts` (`accountStore.bucket`); user `imas-farmer` with the
@@ -182,7 +182,7 @@ openssl, go (to build `nk`), tar, sha256sum, and this repository checked out.
    `imas-saasapi-nats` (seed and published JWT) and `imas-saasapi-box`
    (`priv` of `saasapi-box` and `platform_pub`, never `platform`).
 9. Waits for OpenBao (Ready means unsealed), the PXC cluster, its pxc and
-   haproxy StatefulSets, Valkey, MinIO, Keycloak and the edge; writes the
+   haproxy StatefulSets, Valkey, RustFS, Keycloak and the edge; writes the
    outputs. It does not wait for farmer or saasapi, and installs the chart
    with `sproutRelease.register=false`: both need the DMZ's NATS bus (farmer's
    `/ready` latches once it has connected to it, saasapi exits at startup
@@ -231,7 +231,7 @@ artifact of the run):
   `openbao-bootstrap-token` (the last token handed to the chart's Job;
   revoked once the Job has run);
 - `seeds/` (unless `UAT_SEEDS_DIR` points elsewhere; `bus-loader-user.nk`
-  is the DMZ install's `--loader-seed`), `keycloak/`, `minio/`, `s3/`
+  is the DMZ install's `--loader-seed`), `keycloak/`, `rustfs/`, `s3/`
   (`s3/accounts-reader/` is the DMZ install's `--accounts-reader-dir`),
   `internal-auth-secret`.
 
@@ -455,7 +455,7 @@ set in the endpoints file:
                  "use_ssl": true, "egress_cidrs": ["10.70.0.0/24"]}
 ```
 
-In this mode `install.sh` deploys no object store, skips `minio-setup.sh`
+In this mode `install.sh` deploys no object store, skips `rustfs-setup.sh`
 and its rollout and check, and applies the three Secrets the farmer chart
 names from files you place first, under `<state-dir>/core/sensitive/s3/`:
 `farmer-access-key-id`, `farmer-secret-access-key`, `saasapi-access-key-id`,
@@ -464,7 +464,7 @@ names from files you place first, under `<state-dir>/core/sensitive/s3/`:
 and `accounts-reader/secret-access-key` for the DMZ install's
 `--accounts-reader-dir` (no trailing newline). You also provide the
 buckets `imas-recipes`, `imas-jobs`, `imas-sprout-jwts` and
-`imas-accounts`, the four users with the limits `minio-setup.sh` gives
+`imas-accounts`, the four users with the limits `rustfs-setup.sh` gives
 them, and an endpoint for the accounts bucket the DMZ can reach:
 `dmz.account_store.endpoint` in the endpoints file is required in this mode
 (`load_endpoints` stops without it, since the DMZ's default,

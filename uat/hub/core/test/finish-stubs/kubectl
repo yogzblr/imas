@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# A stand-in for kubectl, for test/finish_test.sh only: the reads and waits
+# finish.sh and operator-release.sh make, answered from FS_* variables.
+# Every call is appended to $FS_STATE/calls.log.
+set -euo pipefail
+: "${FS_STATE:?}"
+printf 'kubectl %s\n' "$*" >>"$FS_STATE/calls.log"
+args=()
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--kubeconfig | -n) shift 2 ;;
+	*) args+=("$1"); shift ;;
+	esac
+done
+set -- "${args[@]}"
+job=imas-core-farmer-sprout-release-register
+case "$*" in
+"get deployment "*) exit 0 ;;
+"rollout status "*) exit "${FS_ROLLOUT_RC:-0}" ;;
+"get jobs -o name") [[ "${FS_JOB_STATE:-absent}" == absent ]] || echo "job.batch/$job" ;;
+"get job $job -o json")
+	case "${FS_JOB_STATE:-absent}" in
+	absent) echo "Error from server (NotFound): jobs.batch \"$job\" not found" >&2; exit 1 ;;
+	failed) echo '{"status":{"failed":2,"conditions":[{"type":"Failed","status":"True","reason":"BackoffLimitExceeded"}]}}' ;;
+	running) echo '{"status":{"active":1}}' ;;
+	esac
+	;;
+"wait job/$job --for=condition=complete "*) exit "${FS_WAIT_RC:-0}" ;;
+"logs "*) echo "register: POST /v1/operator/fleet-releases: 409 release_conflict" ;;
+"get configmap imas-core-farmer-sprout-release -o json")
+	[[ -n "${FS_REQUEST:-}" ]] || { echo "Error from server (NotFound)" >&2; exit 1; }
+	jq -n --rawfile r "$FS_REQUEST" '{data: {"request.json": $r}}'
+	;;
+"get secret imas-saasapi-operator-tls -o jsonpath={.data.ca\.crt}")
+	printf -- '-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n' | base64 -w0
+	;;
+"port-forward service/imas-core-farmer-saasapi-operator :8443")
+	echo "Forwarding from 127.0.0.1:40123 -> 8443"
+	exec sleep 60
+	;;
+*) echo "finish stub kubectl: $* unsupported" >&2; exit 2 ;;
+esac

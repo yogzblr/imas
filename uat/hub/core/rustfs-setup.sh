@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# minio-setup.sh <kubeconfig> <endpoints.json> <state-dir> <saasapi-policy.json>
+# rustfs-setup.sh <kubeconfig> <endpoints.json> <state-dir> <saasapi-policy.json>
 #
 # Inside the UAT RustFS object store (Apache-2.0): the recipe, job and
 # sprout JWT buckets (objectStore.bucket, .jobBucket, .sproutJWTBucket), a
@@ -11,7 +11,7 @@
 # user for farmer (get, put and list on that bucket only; Secret
 # imas-farmer-accounts-writer in the core namespace) and a reader user for
 # the DMZ bus's loader sidecar (get and list only), which reaches RustFS
-# from the DMZ on its hostPort (chart/, minio.hostPort; the one DMZ-to-core
+# from the DMZ on its hostPort (chart/, rustfs.hostPort; the one DMZ-to-core
 # object store path). The reader's credential is left in
 # <state-dir>/core/sensitive/s3/accounts-reader for uat/hub/dmz/install.sh
 # --accounts-reader-dir: it belongs in the DMZ cluster, never in core's. Neither accounts user can reach the recipe or
@@ -35,8 +35,8 @@ set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/common.sh
 . "$here/lib/common.sh"
-parse_common_args "minio-setup.sh <kubeconfig> <endpoints.json> <state-dir> <saasapi-policy.json>" "$@"
-[[ $# -ge 4 && -f "$4" ]] || die "usage: minio-setup.sh <kubeconfig> <endpoints.json> <state-dir> <saasapi-policy.json>"
+parse_common_args "rustfs-setup.sh <kubeconfig> <endpoints.json> <state-dir> <saasapi-policy.json>" "$@"
+[[ $# -ge 4 && -f "$4" ]] || die "usage: rustfs-setup.sh <kubeconfig> <endpoints.json> <state-dir> <saasapi-policy.json>"
 saasapi_policy_src="$4"
 need_cmd kubectl jq
 
@@ -54,7 +54,7 @@ grep -q RECIPE_BUCKET "$saasapi_policy_src" || die "$saasapi_policy_src has no R
 # x-amz-content-sha256), prints the HTTP status code on the last line and
 # any response body before it.
 rustfs_sh() {
-	kc -n "$UAT_NS" exec -i "deploy/$MINIO_SVC" -c rustfs -- /bin/sh -ec '
+	kc -n "$UAT_NS" exec -i "deploy/$RUSTFS_SVC" -c rustfs -- /bin/sh -ec '
 rf() {
 	m=$1; p=$2; f=${3:-}
 	if [ -n "$f" ]; then h=$(sha256sum "$f" | cut -d" " -f1); set -- --data-binary "@$f" -H "Content-Type: application/json"
@@ -92,7 +92,7 @@ policy() {
 	log "RustFS policy $1 written"
 }
 sed -e "s/RECIPE_BUCKET/$RECIPE_BUCKET/g" -e "s/JOB_BUCKET/$JOB_BUCKET/g" -e "s/SPROUT_JWT_BUCKET/$SPROUT_JWT_BUCKET/g" \
-	"$here/minio/farmer-policy.json" |
+	"$here/rustfs/farmer-policy.json" |
 	policy imas-uat-farmer
 sed -e "s/RECIPE_BUCKET/$RECIPE_BUCKET/g" "$saasapi_policy_src" | policy imas-uat-saasapi-recipes
 # accounts_policy <object actions as a JSON array>: list on the accounts

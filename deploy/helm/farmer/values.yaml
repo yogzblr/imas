@@ -281,7 +281,7 @@ accountStore:
   bucket: imas-accounts
   # Secret with the writer's access key pair (IMAS_ACCOUNTS_S3_ACCESS_KEY_ID/
   # _SECRET_ACCESS_KEY): get, put and list on the bucket, no delete. UAT:
-  # uat/hub/core/minio-setup.sh creates it. Must not be
+  # uat/hub/core/rustfs-setup.sh creates it. Must not be
   # objectStore.credentialsSecret.
   credentialsSecret: imas-farmer-accounts-writer
   accessKeyIdKey: access-key-id

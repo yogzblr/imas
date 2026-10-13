@@ -4,7 +4,7 @@
 # Confirms the core hub is up, after install.sh:
 #   - farmer, saasapi, PXC (cluster, pxc and haproxy), Valkey and OpenBao
 #     (initialised, unsealed, the ed25519 gateway key) are Ready, and so
-#     are MinIO, Keycloak and the edge proxy;
+#     are RustFS, Keycloak and the edge proxy;
 #   - design T4 (docs/design/imas-openbao-signing-design.md section 11, the
 #     OpenBao bootstrap Job): the trust ConfigMap is complete, public, and
 #     byte for byte what the first install wrote, so re-runs (finish.sh's
@@ -67,7 +67,7 @@ check "PXC statefulset $PXC_CLUSTER-pxc Ready" sts_ready "$PXC_CLUSTER-pxc" "$CO
 check "PXC HAProxy $PXC_CLUSTER-haproxy Ready" sts_ready "$PXC_CLUSTER-haproxy" "$CORE_NS"
 check "Valkey ($VALKEY_DEPLOY) Ready" deploy_ready "$VALKEY_DEPLOY" "$CORE_NS"
 check "OpenBao ($OPENBAO_STS) Ready" sts_ready "$OPENBAO_STS" "$CORE_NS"
-[[ "$S3_MODE" == rustfs ]] && check "RustFS Ready (UAT)" deploy_ready "$MINIO_SVC" "$UAT_NS"
+[[ "$S3_MODE" == rustfs ]] && check "RustFS Ready (UAT)" deploy_ready "$RUSTFS_SVC" "$UAT_NS"
 check "Keycloak Ready" deploy_ready "$KEYCLOAK_DEPLOY" "$UAT_NS"
 check "edge proxy Ready" deploy_ready "$EDGE_DEPLOY" "$UAT_NS"
 for s in "$SAASAPI_NATS_SECRET" "$SAASAPI_BOX_SECRET" "$SEEDS_SECRET" "$FARMER_NKEY_SECRET" "$INTERNAL_AUTH_SECRET"; do

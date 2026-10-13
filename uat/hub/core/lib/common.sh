@@ -17,7 +17,7 @@
 # --- names (one place; core_test.go checks values/farmer-uat.yaml agrees) ---
 CORE_NS=imas-core                 # farmer chart namespace
 CORE_RELEASE=imas-core            # farmer chart release name
-UAT_NS=imas-uat                   # MinIO, Keycloak, the edge proxy
+UAT_NS=imas-uat                   # RustFS, Keycloak, the edge proxy
 EXTRAS_RELEASE=imas-uat-core      # release of uat/hub/core/chart
 FARMER_FULLNAME=imas-core-farmer  # chart fullname for release imas-core
 SAASAPI_FULLNAME=imas-core-farmer-saasapi
@@ -35,16 +35,22 @@ NATS_TRUST_CONFIGMAP=imas-nats-trust          # natsTrust.configMapName (public;
 INTERNAL_AUTH_SECRET=imas-saasapi-internal-auth
 SAASAPI_NATS_SECRET=imas-saasapi-nats
 SAASAPI_BOX_SECRET=imas-saasapi-box
+SAASAPI_OPERATOR_FULLNAME=imas-core-farmer-saasapi-operator  # saasapi's operator Service (<saasapi fullname>-operator)
+SAASAPI_OPERATOR_PORT=8443                    # saasapi.operator.port (the chart default)
+OPERATOR_TLS_SECRET=imas-saasapi-operator-tls # saasapi.operator.tls.secretName: cert-manager, from the UAT CA (chart/)
+OPERATOR_TOKEN_SECRET=imas-saasapi-operator-token # saasapi.operator.token.secretName (key current; saasapi-secrets.sh)
+OPERATOR_TOKEN_FILE=saasapi-operator-token    # its copy in SENSITIVE_DIR (finish.sh, operator-release.sh)
+SPROUT_RELEASE_CONFIGMAP=imas-core-farmer-sprout-release # the registration hook's request body (request.json)
 OPENBAO_ROOT_SECRET=imas-uat-openbao-root     # openbaoBootstrap.tokenSecretName (a per-run bootstrap token, not the root token)
 OPENBAO_UNSEAL_SECRET=imas-uat-openbao-unseal # UAT ONLY: unseal keys and root token in a Secret
 S3_FARMER_SECRET=imas-uat-s3-farmer           # objectStore.credentialsSecret
 S3_SAASAPI_SECRET=imas-uat-s3-saasapi         # saasapi.recipes.credentialsSecret
-MINIO_ROOT_SECRET=imas-uat-minio-root
+RUSTFS_ROOT_SECRET=imas-uat-rustfs-root
 KEYCLOAK_ADMIN_SECRET=imas-uat-keycloak-admin
 KEYCLOAK_REALM_SECRET=imas-uat-keycloak-realm
 UAT_CA_CONFIGMAP=imas-uat-ca
 FARMER_TLS_SECRET=imas-farmer-tls             # tls.secretName
-MINIO_SVC=imas-uat-minio
+RUSTFS_SVC=imas-uat-rustfs
 KEYCLOAK_DEPLOY=imas-uat-keycloak
 EDGE_DEPLOY=imas-uat-edge
 RECIPE_BUCKET=imas-recipes                    # objectStore.bucket
@@ -154,11 +160,11 @@ load_endpoints() {
 	CA_ISSUER=$(ep '(.ca? | objects | .cluster_issuer) // .cluster_issuer' imas-uat-ca)
 	CLUSTER_DOMAIN=$(ep '.cluster_domain' cluster.local)
 	# The S3 object store farmer and saasapi use. "rustfs" (default): the
-	# chart deploys RustFS in imas-uat and minio-setup.sh provisions it.
+	# chart deploys RustFS in imas-uat and rustfs-setup.sh provisions it.
 	# "external": an S3 endpoint you run (e.g. Versity Gateway in front of
 	# Azure Blob); nothing is deployed or provisioned, see README.md.
 	S3_MODE=$(ep '.object_store.mode' rustfs)
-	S3_ENDPOINT=$(ep '.object_store.endpoint' "$MINIO_SVC.$UAT_NS.svc.cluster.local:9000")
+	S3_ENDPOINT=$(ep '.object_store.endpoint' "$RUSTFS_SVC.$UAT_NS.svc.cluster.local:9000")
 	S3_USE_SSL=$(ep '.object_store.use_ssl' false)
 	S3_EGRESS_CIDRS=$(jq -c '(.object_store.egress_cidrs // [])' "$ENDPOINTS")
 
@@ -204,6 +210,9 @@ load_endpoints() {
 	KEYCLOAK_JWKS_URL="$KEYCLOAK_ISSUER/protocol/openid-connect/certs"
 	KEYCLOAK_TOKEN_URL="$KEYCLOAK_ISSUER/protocol/openid-connect/token"
 	SAASAPI_URL="$CORE_BASE_URL"
+	# saasapi's operator listener, in-cluster only (the name on its
+	# certificate, chart/templates/certificates.yaml).
+	OPERATOR_FQDN="$SAASAPI_OPERATOR_FULLNAME.$CORE_NS.svc.$CLUSTER_DOMAIN"
 	# Sprouts sit in the tenants subnet, which may reach the DMZ private range only
 	# (the NSG denies its DMZ public IP), so they get the private name, as the
 	# enrolment does for farmerinterface. The first Azure run (2026-10-10) timed
@@ -226,7 +235,7 @@ extras_set_args() {
 		--set "bus.port=$DMZ_BUS_PORT" \
 		--set-string "caIssuer.name=$CA_ISSUER" \
 		--set-string "clusterDomain=$CLUSTER_DOMAIN" \
-		--set "minio.enabled=$([[ $S3_MODE == rustfs ]] && echo true || echo false)"
+		--set "rustfs.enabled=$([[ $S3_MODE == rustfs ]] && echo true || echo false)"
 }
 
 # release_version <tag>: vX.Y.Z or vX.Y.Z-rc.N (the contract) -> X.Y.Z[-rc.N].

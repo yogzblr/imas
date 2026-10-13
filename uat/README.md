@@ -29,7 +29,7 @@ catalogue, the owner prerequisites); this page is the owner's guide to it.
 What runs where (section 4h, "The shape"): one resource group per run,
 `imas-uat-<run_id>`, with a VNet of four subnets, an Azure Bastion (Standard,
 native tunnelling), `uat-dmz` (single-node k0s, the nats chart), `uat-core`
-(single-node k0s, the farmer chart plus MinIO and Keycloak, both UAT only) and
+(single-node k0s, the farmer chart plus RustFS and Keycloak, both UAT only) and
 six sprouts: `t1-ubuntu`, `t1-alma`, `t1-win`, `t2-ubuntu`, `t2-alma`,
 `t2-win`. SSH, WinRM and the Kubernetes API are reached only through Bastion
 tunnels; only Envoy (8443 on the DMZ) and 443 on core are open, and only to
@@ -45,7 +45,7 @@ nodes over the region's zones, `uat-dmz-1` to `uat-dmz-3` and `uat-core-1` to
 | `uat/tofu` | UAT.1 | The OpenTofu module of one run, the bootstrap stack (state storage, budget), `destroy.sh` |
 | `uat/access` | UAT.1 | `tunnels.sh` (Bastion tunnels) and `vmctl.sh` (reboot, stop and start a sprout, run a command): every Azure call of the gate |
 | `uat/k0s` | UAT.2 | k0s on both hubs, local-path storage, cert-manager, the per-run UAT CA, the endpoints file |
-| `uat/hub/core` | UAT.3b | The core hub: farmer chart, OpenBao bootstrap, MinIO, Keycloak, the edge |
+| `uat/hub/core` | UAT.3b | The core hub: farmer chart, OpenBao bootstrap, RustFS, Keycloak, the edge |
 | `uat/hub/dmz` | UAT.3a | The DMZ hub: nats chart (farmerbus, Envoy), its exposure and `check.sh` |
 | `uat/enroll` | UAT.4 | Tenants 1 and 2, one-time keys, the Ansible inventory, enrolment, waiting for farmer to see every sprout |
 | `uat/tests` | UAT.5 | The acceptance suite (`run.sh`, the harness, the report) |
@@ -214,7 +214,7 @@ no silent green rule). Use `smoke`, `core` or `resilience` until then.
 
 Never uploaded: the SSH key, the WinRM password, the kubeconfigs, OpenBao's
 unseal keys and root token, the NKey seeds, the bootstrap admin's private
-keys, the Keycloak and MinIO credentials, the BFF secret and the enrolment
+keys, the Keycloak and RustFS credentials, the BFF secret and the enrolment
 keys. `collect-artifacts.sh` copies by an allowlist and then scans every copied
 file for private keys, kubeconfig credentials, JWTs, NKey seeds and JSON
 passwords, secrets, tokens or unseal keys; a match is removed and fails the
@@ -261,7 +261,7 @@ ssh -i /tmp/uat-$RUN.key -p <ssh_port of uat-core> imasuat@127.0.0.1 sudo k0s ku
 The Kubernetes API is on each hub's `kube_port`; `sudo k0s kubeconfig admin`
 on a hub prints an admin kubeconfig (point its server at
 `https://127.0.0.1:<kube_port>`). The generated passwords (Keycloak users,
-MinIO, the BFF secret) are in Kubernetes Secrets on core (`uat/hub/core/README.md`);
+RustFS, the BFF secret) are in Kubernetes Secrets on core (`uat/hub/core/README.md`);
 OpenBao's unseal keys and root token are in `imas-uat-openbao-unseal` and
 `imas-uat-openbao-root`. `uat/access/vmctl.sh` works from your machine with an
 `az login`. Close your tunnels with `uat/access/tunnels.sh close /tmp/uat-$RUN-access`

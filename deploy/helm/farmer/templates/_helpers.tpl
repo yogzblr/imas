@@ -541,7 +541,7 @@ projected:
 The createBuckets plan (internal/versitysetup Plan): each bucket the
 gateway serves and the Allow statements of its policy, per user, scoped to
 that bucket as in design D22 and the UAT's RustFS policies
-(uat/hub/core/minio-setup.sh). saasapi's statements are
+(uat/hub/core/rustfs-setup.sh). saasapi's statements are
 files/objectstore-policies/saasapi-recipes.json, the same reviewed policy.
 */}}
 {{- define "imas-farmer.versity.plan" -}}

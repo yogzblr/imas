@@ -1,15 +1,15 @@
 {{- include "uat.validate" . -}}
-{{- if .Values.minio.enabled }}
+{{- if .Values.rustfs.enabled }}
 # RustFS: the UAT object store (Apache-2.0). One pod, one PVC, root
 # credential from a Secret install.sh generates. Buckets, users and
-# policies are made by minio-setup.sh with the curl inside this image,
-# through RustFS's admin API. The resource names keep the "minio" spelling
-# (imas-uat-minio, values key "minio") so nothing that names them changes.
-# The volume has its own name (imas-uat-rustfs-data): a volume MinIO wrote
+# policies are made by rustfs-setup.sh with the curl inside this image,
+# through RustFS's admin API. Resources are imas-uat-rustfs, values key
+# "rustfs" (P13 retired the old "minio" names).
+# The volume is imas-uat-rustfs-data: a volume the MinIO it replaced wrote
 # (uid 1000) is not writable by RustFS (uid 10001), so it must not be reused.
-# The S3 port is also a hostPort (minio.hostPort, 9000): the DMZ bus's
+# The S3 port is also a hostPort (rustfs.hostPort, 9000): the DMZ bus's
 # account loader reads the accounts bucket at <core private IP>:9000 with a
-# read-only credential scoped to that bucket (design D22). The minio
+# read-only credential scoped to that bucket (design D22). The rustfs
 # NetworkPolicy admits the DMZ private address on it, and nothing else from
 # outside the cluster.
 apiVersion: v1
@@ -19,34 +19,34 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "uat.labels" . | nindent 4 }}
-    app.kubernetes.io/name: imas-uat-minio
+    app.kubernetes.io/name: imas-uat-rustfs
 spec:
   accessModes: [ReadWriteOnce]
-  {{- with .Values.minio.storageClassName }}
+  {{- with .Values.rustfs.storageClassName }}
   storageClassName: {{ . }}
   {{- end }}
   resources:
     requests:
-      storage: {{ .Values.minio.storage }}
+      storage: {{ .Values.rustfs.storage }}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: imas-uat-minio
+  name: imas-uat-rustfs
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "uat.labels" . | nindent 4 }}
-    app.kubernetes.io/name: imas-uat-minio
+    app.kubernetes.io/name: imas-uat-rustfs
 spec:
   replicas: 1
   strategy: { type: Recreate }
   selector:
     matchLabels:
-      app.kubernetes.io/name: imas-uat-minio
+      app.kubernetes.io/name: imas-uat-rustfs
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: imas-uat-minio
+        app.kubernetes.io/name: imas-uat-rustfs
         imas.io/uat-only: "true"
     spec:
       automountServiceAccountToken: false
@@ -59,13 +59,13 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: rustfs
-          image: {{ .Values.minio.image | quote }}
+          image: {{ .Values.rustfs.image | quote }}
           imagePullPolicy: IfNotPresent
           env:
             - name: RUSTFS_ACCESS_KEY
-              valueFrom: { secretKeyRef: { name: {{ .Values.minio.rootSecret }}, key: user } }
+              valueFrom: { secretKeyRef: { name: {{ .Values.rustfs.rootSecret }}, key: user } }
             - name: RUSTFS_SECRET_KEY
-              valueFrom: { secretKeyRef: { name: {{ .Values.minio.rootSecret }}, key: password } }
+              valueFrom: { secretKeyRef: { name: {{ .Values.rustfs.rootSecret }}, key: password } }
             - name: RUSTFS_VOLUMES
               value: /data
             - name: RUSTFS_ADDRESS
@@ -75,7 +75,7 @@ spec:
             - name: RUSTFS_OBS_LOG_DIRECTORY
               value: /logs
           ports:
-            - { name: s3, containerPort: 9000, hostPort: {{ .Values.minio.hostPort }} }
+            - { name: s3, containerPort: 9000, hostPort: {{ .Values.rustfs.hostPort }} }
           readinessProbe:
             httpGet: { path: /health/ready, port: s3 }
             periodSeconds: 10
@@ -83,7 +83,7 @@ spec:
             httpGet: { path: /health/live, port: s3 }
             periodSeconds: 20
           resources:
-            {{- toYaml .Values.minio.resources | nindent 12 }}
+            {{- toYaml .Values.rustfs.resources | nindent 12 }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -104,15 +104,15 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: imas-uat-minio
+  name: imas-uat-rustfs
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "uat.labels" . | nindent 4 }}
-    app.kubernetes.io/name: imas-uat-minio
+    app.kubernetes.io/name: imas-uat-rustfs
 spec:
   type: ClusterIP
   selector:
-    app.kubernetes.io/name: imas-uat-minio
+    app.kubernetes.io/name: imas-uat-rustfs
   ports:
     - { name: s3, port: 9000, targetPort: s3 }
 {{- end }}

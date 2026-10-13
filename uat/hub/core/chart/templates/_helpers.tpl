@@ -22,7 +22,7 @@ https://{{ .Values.core.fqdn }}:{{ .Values.core.httpsPort }}
 {{- fail (printf "%s must be an IPv4 address" $k) -}}
 {{- end -}}
 {{- end -}}
-{{- if contains "latest" (printf "%s %s %s" .Values.minio.image .Values.keycloak.image .Values.edge.image) -}}
+{{- if contains "latest" (printf "%s %s %s" .Values.rustfs.image .Values.keycloak.image .Values.edge.image) -}}
 {{- fail "UAT images are pinned: never latest" -}}
 {{- end -}}
 {{- end }}

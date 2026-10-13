@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -212,13 +213,15 @@ func TestValuesMatchLib(t *testing.T) {
 		"tls.secretName":                        "FARMER_TLS_SECRET",
 		"openbaoBootstrap.tokenSecretName":      "OPENBAO_ROOT_SECRET",
 		"farmer.bootstrapAdmin.username":        "BOOTSTRAP_ADMIN_NAME",
+		"saasapi.operator.tls.secretName":       "OPERATOR_TLS_SECRET",
+		"saasapi.operator.token.secretName":     "OPERATOR_TOKEN_SECRET",
 	} {
 		if got := str(v, strings.Split(path, ".")...); got == "" || got != lib[name] {
 			t.Errorf("%s = %q, lib/common.sh %s = %q", path, got, name, lib[name])
 		}
 	}
 	// Names the UAT takes from the farmer chart's defaults instead of
-	// setting them: seeds.sh and minio-setup.sh create what they name.
+	// setting them: seeds.sh and rustfs-setup.sh create what they name.
 	chartDefaults := readYAML(t, "../../../deploy/helm/farmer/values.yaml")
 	for path, name := range map[string]string{
 		"farmer.nkeySecret.secretName":   "FARMER_NKEY_SECRET",
@@ -240,15 +243,36 @@ func TestValuesMatchLib(t *testing.T) {
 		}
 		buckets[b] = true
 	}
-	want := lib["MINIO_SVC"] + "." + lib["UAT_NS"] + ".svc.cluster.local:9000"
+	want := lib["RUSTFS_SVC"] + "." + lib["UAT_NS"] + ".svc.cluster.local:9000"
 	if got := str(v, "objectStore", "endpoint"); got != want {
 		t.Errorf("objectStore.endpoint %q, want %q", got, want)
+	}
+	// P20 option C: the operator plane is on, so the registration hook can
+	// run; the token's key is the one saasapi-secrets.sh writes. The
+	// dispatch flags are off in the layout; gen-values.sh sets them.
+	if dig(v, "saasapi", "operator", "enabled") != true {
+		t.Error("saasapi.operator.enabled must be true: finish.sh registers the sprout release through it")
+	}
+	if got := str(v, "saasapi", "operator", "token", "currentKey"); got != "current" {
+		t.Errorf("saasapi.operator.token.currentKey %q, want current (saasapi-secrets.sh)", got)
+	}
+	if dig(v, "farmer", "selfUpdate", "enabled") != false || dig(v, "saasapi", "fleetUpdateDispatch", "enabled") != false {
+		t.Error("values/farmer-uat.yaml must leave both dispatch flags off: gen-values.sh turns them on from dispatch_flags")
+	}
+	if chartPort, _ := dig(chartDefaults, "saasapi", "operator", "port").(int); strconv.Itoa(chartPort) != lib["SAASAPI_OPERATOR_PORT"] {
+		t.Errorf("saasapi.operator.port chart default %v, lib/common.sh SAASAPI_OPERATOR_PORT %q", chartPort, lib["SAASAPI_OPERATOR_PORT"])
+	}
+	if lib["SAASAPI_OPERATOR_FULLNAME"] != lib["SAASAPI_FULLNAME"]+"-operator" {
+		t.Errorf("SAASAPI_OPERATOR_FULLNAME %q, want %q (imas-farmer.saasapi.operatorFullname)", lib["SAASAPI_OPERATOR_FULLNAME"], lib["SAASAPI_FULLNAME"]+"-operator")
+	}
+	if lib["SPROUT_RELEASE_CONFIGMAP"] != lib["FARMER_FULLNAME"]+"-sprout-release" {
+		t.Errorf("SPROUT_RELEASE_CONFIGMAP %q, want %q (sprout-release-register-job.yaml)", lib["SPROUT_RELEASE_CONFIGMAP"], lib["FARMER_FULLNAME"]+"-sprout-release")
 	}
 	if dig(v, "openbao", "server", "dev", "enabled") != false {
 		t.Error("openbao.server.dev.enabled must be false: the UAT OpenBao is initialised and unsealed for real")
 	}
 	if dig(v, "objectStore", "useSSL") != false {
-		t.Error("objectStore.useSSL: MinIO is plain HTTP inside the cluster")
+		t.Error("objectStore.useSSL: RustFS is plain HTTP inside the cluster")
 	}
 	// OpenBao: single-node raft (2.7.1 has no "file" backend), node_id
 	// fixed, api_addr and cluster_addr on the pod's Services, and the
@@ -258,15 +282,17 @@ func TestValuesMatchLib(t *testing.T) {
 		str(v, "openbao", "server", "ha", "apiAddr"), str(v, "openbao", "server", "ha", "clusterAddr"))
 	extras := readYAML(t, "chart/values.yaml")
 	for path, want := range map[string]string{
-		"farmer.serviceName":        lib["FARMER_FULLNAME"],
-		"farmer.saasapiServiceName": lib["SAASAPI_FULLNAME"],
-		"farmer.namespace":          lib["CORE_NS"],
-		"farmer.release":            lib["CORE_RELEASE"],
-		"farmer.tlsSecretName":      lib["FARMER_TLS_SECRET"],
-		"minio.rootSecret":          lib["MINIO_ROOT_SECRET"],
-		"keycloak.realm":            lib["REALM"],
-		"keycloak.adminSecret":      lib["KEYCLOAK_ADMIN_SECRET"],
-		"keycloak.realmEnvSecret":   lib["KEYCLOAK_REALM_SECRET"],
+		"farmer.serviceName":                lib["FARMER_FULLNAME"],
+		"farmer.saasapiServiceName":         lib["SAASAPI_FULLNAME"],
+		"farmer.namespace":                  lib["CORE_NS"],
+		"farmer.release":                    lib["CORE_RELEASE"],
+		"farmer.tlsSecretName":              lib["FARMER_TLS_SECRET"],
+		"farmer.operatorTLSSecretName":      lib["OPERATOR_TLS_SECRET"],
+		"farmer.saasapiOperatorServiceName": lib["SAASAPI_OPERATOR_FULLNAME"],
+		"rustfs.rootSecret":                 lib["RUSTFS_ROOT_SECRET"],
+		"keycloak.realm":                    lib["REALM"],
+		"keycloak.adminSecret":              lib["KEYCLOAK_ADMIN_SECRET"],
+		"keycloak.realmEnvSecret":           lib["KEYCLOAK_REALM_SECRET"],
 	} {
 		if got := str(extras, strings.Split(path, ".")...); got != want {
 			t.Errorf("chart/values.yaml %s = %q, want %q", path, got, want)
@@ -274,13 +300,49 @@ func TestValuesMatchLib(t *testing.T) {
 	}
 	// The DMZ's loader reads the accounts bucket at <core private IP>:9000
 	// (uat/hub/dmz/install.sh's default, uat/tofu accounts_store_port).
-	if dig(extras, "minio", "hostPort") != 9000 {
-		t.Errorf("chart/values.yaml minio.hostPort = %v, want 9000 (uat/hub/dmz dmz.account_store.endpoint default)", dig(extras, "minio", "hostPort"))
+	if dig(extras, "rustfs", "hostPort") != 9000 {
+		t.Errorf("chart/values.yaml rustfs.hostPort = %v, want 9000 (uat/hub/dmz dmz.account_store.endpoint default)", dig(extras, "rustfs", "hostPort"))
 	}
-	for _, img := range []string{str(extras, "minio", "image"), str(extras, "keycloak", "image"), str(extras, "edge", "image")} {
-		if !regexp.MustCompile(`^[a-z0-9./-]+:[A-Za-z0-9._-]+(@sha256:[0-9a-f]{64})?$`).MatchString(img) || strings.HasSuffix(img, ":latest") {
-			t.Errorf("image %q is not pinned to a tag (or tag@sha256 digest)", img)
+	for _, img := range []string{str(extras, "rustfs", "image"), str(extras, "keycloak", "image"), str(extras, "edge", "image")} {
+		if !regexp.MustCompile(`^[a-z0-9./-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$`).MatchString(img) || strings.Contains(img, ":latest") {
+			t.Errorf("image %q is not pinned to a tag and its sha256 digest (P13)", img)
 		}
+	}
+}
+
+// TestFinishScript runs test/finish_test.sh: finish.sh against stub
+// kubectl, helm and curl. It fails when the registration Job fails, when no
+// Job rendered or one is left failed or unfinished, and unless the operator
+// API then holds release_tag exactly as the chart stamped it (R1).
+func TestFinishScript(t *testing.T) {
+	for _, tool := range []string{"bash", "jq", "base64"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not on PATH", tool)
+		}
+	}
+	out, err := exec.Command("bash", "test/finish_test.sh").CombinedOutput()
+	if err != nil {
+		t.Fatalf("test/finish_test.sh: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
+// TestShellcheck lints every script and stub of uat/hub/core.
+func TestShellcheck(t *testing.T) {
+	if _, err := exec.LookPath("shellcheck"); err != nil {
+		t.Skip("shellcheck not on PATH")
+	}
+	files, err := filepath.Glob("*.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range []string{"test/*.sh", "test/stubs/*", "test/finish-stubs/*"} {
+		more, _ := filepath.Glob(g)
+		files = append(files, more...)
+	}
+	files = append(files, "lib/common.sh")
+	if out, err := exec.Command("shellcheck", append([]string{"-x"}, files...)...).CombinedOutput(); err != nil {
+		t.Errorf("shellcheck: %v\n%s", err, out)
 	}
 }
 
@@ -430,7 +492,7 @@ func TestFarmerChartRender(t *testing.T) {
 	run(t, "helm", append([]string{"lint", chart, "--kube-version", "1.31.0"}, args[5:]...)...)
 
 	// saasapi: Keycloak issuer, JWKS and audience on the core FQDN; the UAT
-	// CA for that HTTPS fetch; the recipe roles of the realm; MinIO.
+	// CA for that HTTPS fetch; the recipe roles of the realm; RustFS.
 	saasapi := get(t, objs, "Deployment/imas-core-farmer-saasapi")
 	se := envOf(container(t, saasapi, "saasapi"))
 	for k, want := range map[string]string{
@@ -440,7 +502,7 @@ func TestFarmerChartRender(t *testing.T) {
 		"SSL_CERT_FILE":                    "/etc/imas-uat-ca/ca.crt",
 		"SAASAPI_RECIPES_READ_ROLE":        "imas-recipes-read",
 		"SAASAPI_RECIPES_WRITE_ROLE":       "imas-recipes-write",
-		"SAASAPI_RECIPES_S3_ENDPOINT":      "imas-uat-minio.imas-uat.svc.cluster.local:9000",
+		"SAASAPI_RECIPES_S3_ENDPOINT":      "imas-uat-rustfs.imas-uat.svc.cluster.local:9000",
 		"SAASAPI_RECIPES_S3_BUCKET":        "imas-recipes",
 		"SAASAPI_RECIPES_JOB_BUCKET":       "imas-jobs",
 		"SAASAPI_RECIPES_S3_USE_SSL":       "false",
@@ -460,7 +522,7 @@ func TestFarmerChartRender(t *testing.T) {
 	farmer := get(t, objs, "Deployment/imas-core-farmer")
 	fe := envOf(container(t, farmer, "farmer"))
 	for k, want := range map[string]string{
-		"IMAS_S3_ENDPOINT":               "imas-uat-minio.imas-uat.svc.cluster.local:9000",
+		"IMAS_S3_ENDPOINT":               "imas-uat-rustfs.imas-uat.svc.cluster.local:9000",
 		"IMAS_S3_BUCKET":                 "imas-recipes",
 		"IMAS_S3_JOB_BUCKET":             "imas-jobs",
 		"IMAS_S3_SPROUT_JWT_BUCKET":      "imas-sprout-jwts",
@@ -676,6 +738,121 @@ func unknownKeys(uat, chart map[string]any, prefix string, skip map[string]bool)
 	return out
 }
 
+// stampedFarmerChart is a copy of deploy/helm/farmer as the release
+// publishes it for releaseTag: appVersion the release's version and the
+// stamped files/sprout-release.json (packaging/helm/stamp-sprout-release.sh)
+// that finish.sh's `helm upgrade --set sproutRelease.register=true`
+// registers.
+func stampedFarmerChart(t *testing.T) string {
+	t.Helper()
+	src, _ := farmerChart(t)
+	dir := filepath.Join(t.TempDir(), "farmer")
+	if err := os.CopyFS(dir, os.DirFS(src)); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "Chart.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b = regexp.MustCompile(`(?m)^appVersion: .*$`).ReplaceAll(b, []byte(`appVersion: "`+version+`"`))
+	if err := os.WriteFile(filepath.Join(dir, "Chart.yaml"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deb := "imas-sprout_" + version + "_linux_amd64.deb"
+	rel := map[string]any{
+		"version":            releaseTag,
+		"min_sprout_version": "v0.0.1",
+		"packages": []map[string]string{{"os": "linux", "arch": "amd64", "package_type": "deb",
+			"file_name": deb, "checksum_sha256": strings.Repeat("a", 64)}},
+		"checksums_txt": strings.Repeat("a", 64) + "  " + deb + "\n",
+		"checksums_sig": "c2lnbmF0dXJl",
+	}
+	if err := os.WriteFile(filepath.Join(dir, "files", "sprout-release.json"), []byte(mustJSON(t, rel)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// renderCore renders chart (a stamped farmer chart) as install.sh and
+// finish.sh do: values/farmer-uat.yaml, gen-values.sh's output with
+// IMAS_UAT_DISPATCH_FLAGS=flags, and --set sproutRelease.register=register.
+func renderCore(t *testing.T, chart, flags string, register bool) map[string]map[string]any {
+	t.Helper()
+	cmd := exec.Command("bash", "gen-values.sh", endpointsFile, adminFile, releaseTag, loaderPubFile)
+	cmd.Env = append(os.Environ(), "IMAS_UAT_DISPATCH_FLAGS="+flags)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("gen-values.sh with IMAS_UAT_DISPATCH_FLAGS=%s: %v", flags, err)
+	}
+	p := filepath.Join(t.TempDir(), "values-run.json")
+	if err := os.WriteFile(p, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return docs(t, run(t, "helm", "template", "imas-core", chart, "-n", "imas-core", "--kube-version", "1.31.0",
+		"-f", "values/farmer-uat.yaml", "-f", p, "--set", "sproutRelease.register="+strconv.FormatBool(register)))
+}
+
+// TestFarmerChartRenderOperatorAndFlags (P20 option C, R1): with the UAT
+// values the operator plane is on, so finish.sh's upgrade renders the
+// registration hook Job, wired to the operator TLS Secret's ca.crt and the
+// token Secret saasapi-secrets.sh makes; install.sh's register=false renders
+// none. dispatch_flags on turns both fleet update flags on, off leaves both
+// off.
+func TestFarmerChartRenderOperatorAndFlags(t *testing.T) {
+	requireTools(t, "helm", "bash", "jq")
+	lib := libConstants(t)
+	chart := stampedFarmerChart(t)
+	for _, c := range []struct {
+		flags string
+		want  string
+	}{{"on", "true"}, {"off", "false"}, {"", "false"}} {
+		objs := renderCore(t, chart, c.flags, true)
+		se := envOf(container(t, get(t, objs, "Deployment/"+lib["SAASAPI_FULLNAME"]), "saasapi"))
+		fe := envOf(container(t, get(t, objs, "Deployment/"+lib["FARMER_FULLNAME"]), "farmer"))
+		if se["SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED"] != c.want || fe["IMAS_SELF_UPDATE_ENABLED"] != c.want {
+			t.Errorf("IMAS_UAT_DISPATCH_FLAGS=%q: SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=%q, IMAS_SELF_UPDATE_ENABLED=%q, want both %s",
+				c.flags, se["SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED"], fe["IMAS_SELF_UPDATE_ENABLED"], c.want)
+		}
+		if se["SAASAPI_OPERATOR_LISTEN_ADDR"] == "" {
+			t.Errorf("IMAS_UAT_DISPATCH_FLAGS=%q: saasapi has no SAASAPI_OPERATOR_LISTEN_ADDR: the operator plane is off", c.flags)
+		}
+		sj := mustJSON(t, get(t, objs, "Deployment/"+lib["SAASAPI_FULLNAME"]))
+		for _, secret := range []string{lib["OPERATOR_TLS_SECRET"], lib["OPERATOR_TOKEN_SECRET"]} {
+			if !strings.Contains(sj, `"secretName":"`+secret+`"`) {
+				t.Errorf("saasapi does not mount Secret %s", secret)
+			}
+		}
+		svc := get(t, objs, "Service/"+lib["SAASAPI_OPERATOR_FULLNAME"])
+		if !strings.Contains(mustJSON(t, dig(svc, "spec", "ports")), `"port":`+lib["SAASAPI_OPERATOR_PORT"]) {
+			t.Errorf("Service %s does not serve port %s", lib["SAASAPI_OPERATOR_FULLNAME"], lib["SAASAPI_OPERATOR_PORT"])
+		}
+		job := get(t, objs, "Job/"+lib["FARMER_FULLNAME"]+"-sprout-release-register")
+		je := envOf(container(t, job, "register"))
+		if want := "https://" + lib["SAASAPI_OPERATOR_FULLNAME"] + ".imas-core.svc.cluster.local:" + lib["SAASAPI_OPERATOR_PORT"]; je["IMAS_SPROUT_RELEASE_SAASAPI_URL"] != want {
+			t.Errorf("registration Job URL %q, want %q (the name on the operator certificate)", je["IMAS_SPROUT_RELEASE_SAASAPI_URL"], want)
+		}
+		jj := mustJSON(t, job)
+		for _, want := range []string{`"secretName":"` + lib["OPERATOR_TOKEN_SECRET"] + `"`, `"key":"current"`, `"secretName":"` + lib["OPERATOR_TLS_SECRET"] + `"`, `"key":"ca.crt"`} {
+			if !strings.Contains(jj, want) {
+				t.Errorf("registration Job lacks %s", want)
+			}
+		}
+		req := str(get(t, objs, "ConfigMap/"+lib["SPROUT_RELEASE_CONFIGMAP"]), "data", "request.json")
+		var body map[string]any
+		if err := json.Unmarshal([]byte(req), &body); err != nil || body["version"] != releaseTag || body["checksums_sig"] != "c2lnbmF0dXJl" {
+			t.Errorf("ConfigMap %s request.json %q: want release %s with its checksums_sig (%v)", lib["SPROUT_RELEASE_CONFIGMAP"], req, releaseTag, err)
+		}
+	}
+	// install.sh's first install: no registration yet (saasapi is not up
+	// until the DMZ bus is).
+	objs := renderCore(t, chart, "off", false)
+	for key := range objs {
+		if strings.Contains(key, "sprout-release") {
+			t.Errorf("sproutRelease.register=false still renders %s", key)
+		}
+	}
+}
+
 // TestUATValuesKnownToChart: every farmer-chart key the UAT sets, in
 // values/farmer-uat.yaml and in gen-values.sh's output, exists in the
 // chart's values.yaml. The chart has no schema, so a key it dropped
@@ -773,6 +950,15 @@ func TestExtrasChartRender(t *testing.T) {
 			t.Errorf("Certificate imas-farmer-tls lacks %s", want)
 		}
 	}
+	// saasapi's operator listener: the operator Service's names only, from
+	// the UAT CA (whose ca.crt the registration Job verifies it with).
+	opCert := get(t, objs, "Certificate/imas-saasapi-operator-tls")
+	if got := mustJSON(t, dig(opCert, "spec", "dnsNames")); got != `["imas-core-farmer-saasapi-operator","imas-core-farmer-saasapi-operator.imas-core","imas-core-farmer-saasapi-operator.imas-core.svc","imas-core-farmer-saasapi-operator.imas-core.svc.cluster.local"]` {
+		t.Errorf("operator certificate dnsNames %s", got)
+	}
+	if str(opCert, "metadata", "namespace") != "imas-core" || str(opCert, "spec", "secretName") != "imas-saasapi-operator-tls" || str(opCert, "spec", "issuerRef", "name") != "imas-uat-ca" {
+		t.Errorf("operator certificate: %s", mustJSON(t, opCert))
+	}
 	if !strings.Contains(mustJSON(t, get(t, objs, "Certificate/imas-uat-edge-tls")), `"`+coreFQDN+`"`) {
 		t.Error("the edge certificate is not for the core FQDN")
 	}
@@ -811,10 +997,10 @@ func TestExtrasChartRender(t *testing.T) {
 	// RustFS: the S3 port is hostPort 9000, and its policy admits the DMZ
 	// private address there (the bus's account loader, design D22) and no
 	// other address: the one DMZ-to-core path besides farmer's API.
-	if !strings.Contains(mustJSON(t, get(t, objs, "Deployment/imas-uat-minio")), `"containerPort":9000,"hostPort":9000`) {
+	if !strings.Contains(mustJSON(t, get(t, objs, "Deployment/imas-uat-rustfs")), `"containerPort":9000,"hostPort":9000`) {
 		t.Error("RustFS's S3 port is not hostPort 9000")
 	}
-	mp := get(t, objs, "NetworkPolicy/imas-uat-minio")
+	mp := get(t, objs, "NetworkPolicy/imas-uat-rustfs")
 	var blocks []string
 	for _, r := range dig(mp, "spec", "ingress").([]any) {
 		for _, f := range dig(r, "from").([]any) {
@@ -887,7 +1073,7 @@ func TestObjectStoreEndpointVariable(t *testing.T) {
 	// Default: unchanged behaviour.
 	var def map[string]any
 	readJSON(t, runValues(t), &def)
-	if got := str(def, "objectStore", "endpoint"); got != "imas-uat-minio.imas-uat.svc.cluster.local:9000" {
+	if got := str(def, "objectStore", "endpoint"); got != "imas-uat-rustfs.imas-uat.svc.cluster.local:9000" {
 		t.Errorf("default objectStore.endpoint %q", got)
 	}
 	if dig(def, "objectStore", "useSSL") != false {
@@ -919,7 +1105,7 @@ func TestObjectStoreEndpointVariable(t *testing.T) {
 	setArgs := strings.Fields(string(run(t, "bash", "-c",
 		`set -euo pipefail; . lib/common.sh; ENDPOINTS="$1"; load_endpoints; extras_set_args`, "_", ext)))
 	objs := docs(t, run(t, "helm", append([]string{"template", "imas-uat-core", "chart", "-n", "imas-uat", "--kube-version", "1.31.0"}, setArgs...)...))
-	for _, key := range []string{"Deployment/imas-uat-minio", "Service/imas-uat-minio", "PersistentVolumeClaim/imas-uat-rustfs-data", "NetworkPolicy/imas-uat-minio"} {
+	for _, key := range []string{"Deployment/imas-uat-rustfs", "Service/imas-uat-rustfs", "PersistentVolumeClaim/imas-uat-rustfs-data", "NetworkPolicy/imas-uat-rustfs"} {
 		if _, ok := objs[key]; ok {
 			t.Errorf("external mode still renders %s", key)
 		}
@@ -928,7 +1114,7 @@ func TestObjectStoreEndpointVariable(t *testing.T) {
 	defArgs := strings.Fields(string(run(t, "bash", "-c",
 		`set -euo pipefail; . lib/common.sh; ENDPOINTS="$1"; load_endpoints; extras_set_args`, "_", endpointsFile)))
 	defObjs := docs(t, run(t, "helm", append([]string{"template", "imas-uat-core", "chart", "-n", "imas-uat", "--kube-version", "1.31.0"}, defArgs...)...))
-	for _, key := range []string{"Deployment/imas-uat-minio", "Service/imas-uat-minio", "PersistentVolumeClaim/imas-uat-rustfs-data", "NetworkPolicy/imas-uat-minio"} {
+	for _, key := range []string{"Deployment/imas-uat-rustfs", "Service/imas-uat-rustfs", "PersistentVolumeClaim/imas-uat-rustfs-data", "NetworkPolicy/imas-uat-rustfs"} {
 		get(t, defObjs, key)
 	}
 }
