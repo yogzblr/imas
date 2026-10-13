@@ -17,7 +17,9 @@
 #   UPGRADE_FROM_TAG   optional, the same checks; must differ from RELEASE_TAG
 #   REGION             Azure region name (default centralindia)
 #   KEEP_HOURS         0 to 168, a whole number (default 0)
-#   TIER               smoke, core, resilience, ingredients, lifecycle or all
+#   TIER               smoke, core, resilience, ingredients, lifecycle, ha or
+#                      all; ha needs HUB_NODES 3 (the ha tier tests the HA
+#                      run's hubs and skips every scenario on one node)
 #   SCENARIOS          optional scenario ids, separated by spaces or commas
 #   HUB_NODES          nodes per hub: 1 (default, the single-node run) or 3
 #                      (the HA run: 3 core and 3 DMZ k0s nodes, P24)
@@ -125,8 +127,8 @@ keep_hours=$((10#$keep_hours))
 
 tier=${TIER:-all}
 case "$tier" in
-  smoke | core | resilience | ingredients | lifecycle | all) ;;
-  *) problem "input tier '$tier' must be smoke, core, resilience, ingredients, lifecycle or all" ;;
+  smoke | core | resilience | ingredients | lifecycle | ha | all) ;;
+  *) problem "input tier '$tier' must be smoke, core, resilience, ingredients, lifecycle, ha or all" ;;
 esac
 
 hub_nodes=${HUB_NODES:-1}
@@ -138,6 +140,10 @@ case "$hub_nodes" in
     core_node_size=""
     ;;
 esac
+
+if [ "$tier" = ha ] && [ "$hub_nodes" != 3 ]; then
+  problem "input tier ha needs hub_nodes 3: the ha tier tests the HA run's hubs, and a single-node run would skip every scenario"
+fi
 
 dispatch_flags=off
 case "${DISPATCH_FLAGS:-false}" in

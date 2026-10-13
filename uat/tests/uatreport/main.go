@@ -34,7 +34,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("uatreport "+cmd, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	catalogue := fs.String("catalogue", "", "catalogue.tsv")
-	tier := fs.String("tier", "", "smoke, core, resilience, ingredients, lifecycle or all")
+	tier := fs.String("tier", "", "smoke, core, resilience, ingredients, lifecycle, ha or all")
 	junit := fs.String("junit", "", "write a JUnit XML report here (summarize)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2

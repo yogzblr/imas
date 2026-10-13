@@ -322,6 +322,31 @@ if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -q "no VM named"; then ok "vmctl
 v "$uat_ha" run t2-alma echo sprout
 if [ "$rc" -eq 0 ] && [ "$out" = "sprout" ]; then ok "vmctl: sprouts still resolve with an HA uat.json"; else nok "vmctl: sprout on HA json (rc=$rc)" "$err"; fi
 
+# stop-vm and start-vm (the ha tier's node stop): hub nodes only.
+new_case vstopvm
+core3_id=$(jq -r '.core.node_ids[2]' "$uat_ha")
+v "$uat_ha" stop-vm uat-core-3
+if [ "$rc" -eq 0 ] && calls | grep -qx -- "az vm stop --ids $core3_id -o none" && calls | grep -q "vm get-instance-view --ids $core3_id"; then
+  ok "vmctl: stop-vm stops the node by its id and waits for PowerState/stopped"
+else nok "vmctl: stop-vm (rc=$rc)" "$(calls) $err"; fi
+v "$uat_ha" start-vm uat-core-3
+if [ "$rc" -eq 0 ] && calls | grep -qx -- "az vm start --ids $core3_id -o none" && calls | grep -q "vm run-command invoke --ids $core3_id" && printf '%s' "$err" | grep -q "is back"; then
+  ok "vmctl: start-vm starts the node and waits until its guest answers"
+else nok "vmctl: start-vm (rc=$rc)" "$(calls) $err"; fi
+touch "$STUB_STATE/stop_noeffect"
+v "$uat_ha" stop-vm uat-dmz-2
+if [ "$rc" -eq 255 ] && printf '%s' "$err" | grep -q "not stopped after"; then ok "vmctl: a VM that does not stop gives 255"; else nok "vmctl: stop-vm timeout (rc=$rc)" "$err"; fi
+rm -f "$STUB_STATE/stop_noeffect"
+echo 1 >"$STUB_STATE/stop_rc"
+v "$uat_ha" stop-vm uat-dmz-2
+if [ "$rc" -eq 255 ] && printf '%s' "$err" | grep -q "az vm stop failed"; then ok "vmctl: a failed az vm stop gives 255"; else nok "vmctl: stop-vm failure (rc=$rc)" "$err"; fi
+rm -f "$STUB_STATE/stop_rc"
+before=$(calls | wc -l)
+v "$uat_ha" stop-vm t1-ubuntu
+if [ "$rc" -eq 2 ] && [ "$(calls | wc -l)" -eq "$before" ]; then ok "vmctl: stop-vm refuses a sprout VM"; else nok "vmctl: stop-vm on a sprout (rc=$rc)" "$err"; fi
+v "$uat_ha" start-vm uat-dmz-1 extra
+if [ "$rc" -eq 2 ]; then ok "vmctl: start-vm takes no command"; else nok "vmctl: start-vm usage (rc=$rc)" "$err"; fi
+
 # An expired Azure login: with the relogin hook vmctl logs in again and
 # repeats the call; without it the failure stays.
 cat >"$work/relogin" <<'RELOGIN'

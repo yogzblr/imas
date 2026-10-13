@@ -38,6 +38,16 @@
 //     need no real host.
 //   - Fleet (fleet.go): the sprouts of the run, asset links, batches with
 //     rate-limit retries, cooks, waiting for connections.
+//   - The ha tier (P24, brief H5): Kube (kube.go) runs kubectl on a hub's
+//     cluster; HA (ha.go, Fleet.HA) has both clusters, the hubs' fixed
+//     names, the node a node stop picks, the stateful services' checks,
+//     the loaders' /status, the HA5 NetworkPolicy block, helm upgrade and
+//     the core check; StartLoops and Window (loops.go) run the traffic
+//     loops and check the owner's error windows; Fleet.TrafficPlan
+//     (traffic.go) builds the loops over the run's sprouts; FullEnroller
+//     and Enrolment (enrolment.go) enrol complete sprouts and check
+//     mint-or-reuse; BusConnect (busconn.go) connects one to a bus node;
+//     VMCtl.StopVM and StartVM stop and start a hub node.
 //   - Scenario (scenario.go): failure messages of the form
 //     "[C1 os=ubuntu tenant=1 vm=t1-ubuntu step=wait for the batch] ...",
 //     and subtest names (t1, t1-ubuntu) that uat/tests/uatreport turns into

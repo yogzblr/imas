@@ -16,7 +16,7 @@ Expect fix rounds after the first real runs (local rig, then Azure).
 
 | Path | What |
 |---|---|
-| `*_test.go` (build tag `uat`) | the scenarios T1 to T6, K1 to K4, S1 to S6, C1 to C8, R1 to R6, X1 to X5 (tier core, the smoke ones named `TestSmoke`) and L1 to L3 (tier resilience) |
+| `*_test.go` (build tag `uat`) | the scenarios T1 to T6, K1 to K4, S1 to S6, C1 to C8, R1 to R6, X1 to X5 (tier core, the smoke ones named `TestSmoke`), L1 to L3 (tier resilience) and HA1 to HA6 (tier ha, `ha_test.go`) |
 | `harness/` | the reusable helpers (no build tag; unit tested in `go test ./...`); the package comment is the interface |
 | `harness/fakestack/`, `fakestack/` | an in-memory fake of the stack and a command that serves it with a material directory and a `vmctl.sh` |
 | `uatreport/` | turns a tier and ids into a `-run` pattern, and test2json events into the summary, JUnit and the exit status |
@@ -33,10 +33,11 @@ IMAS_UAT_DIR=/path/to/material uat/tests/run.sh ingredients I.file.managed
 ```
 
 Tiers: `smoke`, `core` (includes the smoke scenarios), `resilience`,
-`ingredients`, `lifecycle`, `all`. Ids must belong to the tier; ingredient ids
+`ingredients`, `lifecycle`, `ha`, `all`. Ids must belong to the tier; ingredient ids
 (`I.name.method`) go in a run of their own. Test functions are named
 `Test<Tier><Id>_<What>` (`TestSmokeC1_CmdRunEverySprout`,
-`TestCoreX4_CrossTenantDenied`, `TestResilienceL2_FarmerRestart`), so
+`TestCoreX4_CrossTenantDenied`, `TestResilienceL2_FarmerRestart`,
+`TestHAHA1_PodKill`), so
 `go test -tags uat -run '^TestCoreX4_' ./uat/tests` works too.
 
 | Variable | Meaning |
@@ -44,7 +45,10 @@ Tiers: `smoke`, `core` (includes the smoke scenarios), `resilience`,
 | `IMAS_UAT_DIR` | required: the material directory below |
 | `IMAS_UAT_VMCTL` | the `vmctl.sh` to use; else harness.json's `vmctl`; else `uat/access/vmctl.sh` |
 | `IMAS_UAT_REPORT_DIR` | where the report goes (default `$IMAS_UAT_DIR/report`) |
-| `IMAS_UAT_TIMEOUT` | `go test -timeout` (default: smoke 45m, core 4h, resilience 3h, others 8h) |
+| `IMAS_UAT_TIMEOUT` | `go test -timeout` (default: smoke 45m, core 4h, resilience and ha 3h, others 8h) |
+| `IMAS_UAT_DMZ_KUBECONFIG` | the ha tier: the DMZ cluster's kubeconfig (the core one is `IMAS_UAT_CORE_KUBECONFIG`, below) |
+| `IMAS_UAT_DMZ_CHART`, `IMAS_UAT_CORE_CHART` | the ha tier (HA3's `helm upgrade`): the nats chart uat/hub/dmz installed, and the farmer chart uat/hub/core installed (default `<state>/core/chart/farmer-<version>.tgz`) |
+| `IMAS_UAT_CORE_CHECK` | the ha tier: `uat/hub/core/check.sh`, which HA3 runs after the upgrade (run.sh's default) |
 | `IMAS_UAT_RELEASE_TAG` | optional: S1 then checks the installed package is this release |
 
 `run.sh` builds the report tool and one test binary per package under
@@ -206,7 +210,8 @@ them if its hubs are named or reached otherwise.
 ## vmctl.sh, as the harness uses it
 
 The Access interface of the Shared contract:
-`vmctl.sh <uat.json> restart|stop-sprout|start-sprout|run <vm> [command]`.
+`vmctl.sh <uat.json> restart|stop-sprout|start-sprout|stop-vm|start-vm|run <vm> [command]`
+(`stop-vm` and `start-vm`, a hub node's VM, for the ha tier's node stop).
 The harness passes `$IMAS_UAT_DIR/uat.json` and the VM name from uat.json
 (the hubs by their `dmz.name` and `core.name`). For `run` it passes one
 argument, a script it wraps so that the script's own exit status comes back
@@ -265,3 +270,69 @@ owner recorded: no saasapi route to delete or revoke a sprout); a run's
 tenants are thrown away with the run.
 Tests leave small marker files under `/var/tmp` and `C:\Windows\Temp`
 (`imas-uat-*`) and scratch tenants that T1, T4 and T5 offboard.
+
+## The ha tier (HA1 to HA6)
+
+Brief H5 of `docs/briefs/H-azure-next-runs.md` (P24 item 6, P23). It runs
+only on the HA run (`hub_nodes` 3: three core and three DMZ k0s nodes,
+`uat/README.md` "HA run"); on one node per hub every scenario skips, saying
+so. Besides saasapi, Envoy and `vmctl.sh` it uses, from the runner: kubectl
+on both clusters (`IMAS_UAT_CORE_KUBECONFIG`, `IMAS_UAT_DMZ_KUBECONFIG`;
+`kubectl port-forward` to reach a bus node's client port and its loader's
+`/status`, which no NetworkPolicy opens to anything else), helm on the charts
+the hubs were installed from (HA3), and `uat/hub/core/check.sh` (HA3).
+`harness.json` may set the same in `"ha": {"core_kubeconfig",
+"dmz_kubeconfig", "core_chart", "dmz_chart", "core_check"}`.
+
+**The loops.** While a scenario takes something away, loops make an API call
+every second (an asset lookup, the tenants in turn), enrol a new sprout every
+10 s (both requests of `/v1/enroll` through Envoy, with the sprout's own
+client, so farmer records its box key and issues its JWTs), run `cmd.run`
+every 5 s on every sprout of the run (each run appending a fresh word to a
+marker file), and, in HA2, create a recipe every 15 s. Each call gets 3
+client retries after 1 s, 2 s and 4 s. Every scenario logs its timings: the
+moments (pod deleted, VM stopped), each loop's calls, retries, failures and
+longest outage, and each sprout's longest outage.
+
+**The owner's windows** (the brief's Owner decisions):
+
+| Window | Holds when |
+|---|---|
+| pod kill (HA1) | no call fails after its 3 retries, and every sprout seen down (not connected, or a `cmd.run` failing on it) is seen up again within 30 s |
+| node stop (HA2) | after any failed call, a call of the same kind (API, enrolment, `cmd.run`, recipe) succeeds within 60 s, and every sprout seen down is up again within 60 s |
+| rolling restart (HA3) | no call fails after its 3 retries |
+
+After the loops, every scenario that enrolled checks that no two enrolments
+share a sprout, NKey, box key, User JWT or gateway JWT, and enrols each
+again with its own keys: farmer must answer with the same sprout and the
+same User JWT (one JWT per sprout across the farmer replicas; its box key
+proof accepted, so the box key on record is the one it proved). The marker
+files must hold each `cmd.run`'s word once (once for a succeeded item, never
+twice for any).
+
+| Id | What it does |
+|---|---|
+| HA1 | For farmer, saasapi, Envoy and each bus pod in turn: delete one pod under the loops, wait for its replacement, run 45 s more. The pod kill window. For a bus pod, its loader's `/status` is read every half second from the moment the new pod runs: whenever the loader (or its container) is ready it must hold every account it targets, and it ends holding as many as the other loaders. |
+| HA2 | Stop the VM of a core node (`vmctl.sh stop-vm`): one hosting a farmer pod and a PXC, OpenBao and Valkey pod, never Valkey's primary or Keycloak; then a DMZ node hosting a bus pod and an Envoy. The node stop window, with the node stopped for 150 s. With the core node stopped, PXC (Galera Primary, ready, cluster size 2), OpenBao (two unsealed, one active) and Valkey (both answer, the primary has one replica) serve. Then `start-vm`: the node Ready, every pod on it Ready and nothing of the hub Pending within 10 minutes of the start; the stateful services back at three; the recipes and sprouts created during the stop all there (read back, enrolled again). |
+| HA3 | `helm upgrade --reuse-values` of the core release (farmer and saasapi pod annotation) and the DMZ release (the bus's), with `--wait`, under the loops. The rolling restart window; every farmer, saasapi and bus pod replaced; every sprout still resolving to its sprout, accepted, and running a job; then `uat/hub/core/check.sh` passes (design T4: the bootstrap Job stayed idempotent through the upgrade). |
+| HA4 | Enrol a sprout, scale farmer to 0, delete one bus pod (its `emptyDir` goes with it): it must come back Ready, its loader holding every account, from the object store alone, and accept the sprout. Farmer is scaled back and every sprout runs a job. |
+| HA5 | A sprout in a scratch tenant connects to every bus node. One bus pod's loader is kept from the object store by a NetworkPolicy (the chart's bus policy excludes that pod; a policy of its own carries every rule but the egress to the account store's port), and the core edge proxy is restarted so the loader's open connections are cut; the loader must then report object store errors. A new account is created (a scratch tenant, with a sprout) and the first sprout revoked (its tenant offboarded: farmer's locked-out Account JWT revokes every user). The other loaders take it; the blocked one must not. The block is lifted: within the reconcile period (the loader's `IMAS_LOADER_RECONCILE_INTERVAL`, ±20%, plus 30 s for a request) its timer must apply both (same index, every account, two more pushes). Then every bus node refuses the revoked sprout and accepts the new tenant's. |
+| HA6 | Create three tenants at once, then for a minute enrol a sprout every 60 s / (10 × Envoys) (Envoy admits 20 `/v1/enroll` requests per 60 s each; an enrolment is two), the tenants and tenant 1 in turn, all in flight together across the farmer replicas. Every enrolment succeeds, no identity is duplicated, each enrols again to the same JWT, and every new tenant's account is on every bus node (its sprout connects to each). |
+
+**Design tests T1 to T8** (`docs/design/imas-openbao-signing-design.md`,
+section 11), one to one onto the scenarios that cover them:
+
+| T | Proves | Covered by |
+|---|---|---|
+| T1 | a JWT signed through the Transit-backed signer is accepted by nats-server | S1 and C1 (every sprout connects with its farmer-issued JWT and runs a job); HA5 and HA6 (sprouts enrolled during the run connect to each bus node directly) |
+| T2 | farmer's enrolment path at the planned rate with N farmer replicas | HA6 (enrolment at Envoy's admitted rate across the three farmer replicas) |
+| T3 | N farmer replicas provision tenants and enrol without divergence (no duplicate keys, Account JWT on every bus node) | HA6 (three tenants at once, parallel enrolments, every account on every bus node); HA1 (no duplicate JWT or box key while farmer pods are killed) |
+| T4 | the bootstrap Job is idempotent; root and bootstrap tokens revoked; operator-identity sign permission removed | HA3 (`uat/hub/core/check.sh`'s T4 checks after a `helm upgrade` that re-runs the hooks); the same checks run at every install (`finish.sh`) |
+| T5 | bus nodes start and authenticate from the published operator JWT alone, no private keys | HA4 (a bus node started empty with farmer at 0 loads every account and authenticates a sprout); HA1 (each bus pod restarted) |
+| T6 | the sprout User JWT mint-or-reuse is safe across replicas | HA1, HA2, HA3 and HA6 (each enrolment, repeated, gets the same JWT; no JWT shared) |
+| T7 | bus node add and remove with sprouts reconnecting through jitter, no storm | HA1 (each bus pod removed and re-added) and HA2 (a DMZ node and its bus node removed and re-added): every sprout back within the window, no call failing |
+| T8 | SaaS API replicas: batch actions and provisioning with the outbox, no duplicate work | HA1 (a saasapi pod killed under the `cmd.run` loop: every batch's command ran once, by the marker files), HA3 (saasapi rolled), HA6 (tenants provisioned at once) |
+
+Every T is covered by a scenario above, so none was added beyond HA1 to HA6
+(HA6 is the one the brief's list did not have: T2 and T3 need a burst, which
+the loops' one enrolment every 10 s is not).

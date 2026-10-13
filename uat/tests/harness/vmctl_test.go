@@ -277,3 +277,21 @@ func TestHostScriptShapes(t *testing.T) {
 		t.Error("quoting")
 	}
 }
+
+func TestVMCtlStopAndStartVM(t *testing.T) {
+	v, log := fakeVMCtl(t, `case "$2" in
+stop-vm) exit 0;;
+start-vm) echo "uat-core-9 not back" >&2; exit 255;;
+esac`)
+	c := context.Background()
+	if err := v.StopVM(c, "uat-core-2"); err != nil {
+		t.Errorf("stop-vm: %v", err)
+	}
+	if err := v.StartVM(c, "uat-core-9"); err == nil || !strings.Contains(err.Error(), "vmctl.sh start-vm uat-core-9 exited 255") {
+		t.Errorf("start-vm: %v", err)
+	}
+	calls, _ := os.ReadFile(log)
+	if string(calls) != "/run/uat.json|stop-vm|uat-core-2\n/run/uat.json|start-vm|uat-core-9\n" {
+		t.Errorf("calls:\n%s", calls)
+	}
+}

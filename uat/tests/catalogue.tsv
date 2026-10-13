@@ -1,7 +1,8 @@
 # The UAT gate's scenario catalogue, from docs/claude-code-parallel-build-plan.md
 # section 4h. Tab-separated: id, tiers (comma separated, the first decides the
 # test-function prefix: smoke -> TestSmoke, core -> TestCore, resilience ->
-# TestResilience, ingredients -> TestIngredients, lifecycle -> TestLifecycle),
+# TestResilience, ingredients -> TestIngredients, lifecycle -> TestLifecycle,
+# ha -> TestHA),
 # scenario, and the brief that implements it. uatreport reads this file to
 # select tests and to enforce the no silent green rule; TestCatalogueMatchesPlan
 # keeps it in step with the plan's table. I.* stands for every I.name.method id.
@@ -46,3 +47,9 @@ X2	core	A sprout presenting no gateway JWT is refused at Envoy	UAT.5
 X3	core	A sprout cannot open a connection to core	UAT.5
 X4	core	Cross tenant access by a tenant admin token is denied everywhere	UAT.5
 X5	core	Sealing: plaintext cmd.run and cook are refused by a sprout	UAT.5
+HA1	ha	Pod kill under load (farmer, saasapi, Envoy, each bus pod): no call fails after 3 retries, sprouts back within 30 s, no duplicate JWT or box key, a restarted bus node ready only with every account	H5
+HA2	ha	Node stop under load (a core node, then a DMZ node): served by other pods within 60 s, PXC, OpenBao and Valkey serve on two replicas, the node and its pods Ready within 10 minutes of the start, no data lost	H5
+HA3	ha	Rolling restart of farmer, saasapi and the bus by helm upgrade: sprouts stay enrolled, no call fails after 3 retries, the core check (design T4) passes after it	H5
+HA4	ha	A bus node deleted with its emptyDir comes back ready from the object store alone while farmer is scaled to 0	H5
+HA5	ha	A lost account event on one bus node is repaired by the loader's timer within the reconcile period; every bus node refuses the revoked sprout	H5
+HA6	ha	Enrolment at Envoy's admitted rate into tenants provisioned at once, across the farmer replicas: no duplicate identity, every account on every bus node	H5

@@ -28,7 +28,7 @@ func TestCatalogueMatchesPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	row := regexp.MustCompile(`^\| ([A-Z][0-9]+|I\.name\.method) \| (.+) \| ([a-z, ]+) \|$`)
+	row := regexp.MustCompile(`^\| ([A-Z]{1,2}[0-9]+|I\.name\.method) \| (.+) \| ([a-z, ]+) \|$`)
 	in := false
 	plan := map[string]Scenario{}
 	sc := bufio.NewScanner(f)
@@ -78,10 +78,10 @@ func TestCatalogueMatchesPlan(t *testing.T) {
 	}
 }
 
-var testFunc = regexp.MustCompile(`(?m)^func (Test(Smoke|Core|Resilience|Ingredients|Lifecycle)([A-Z][0-9]+)?(_\w*)?)\(t \*testing\.T\)`)
+var testFunc = regexp.MustCompile(`(?m)^func (Test(Smoke|Core|Resilience|Ingredients|Lifecycle|HA)([A-Z]{1,2}[0-9]+)?(_\w*)?)\(t \*testing\.T\)`)
 
 // TestEveryScenarioHasATest checks, from the source, that each UAT.5
-// scenario has exactly one test function, named with the prefix of its
+// and H5 scenario has exactly one test function, named with the prefix of its
 // first tier and its id, and that no test function claims an id the
 // catalogue doesn't have.
 func TestEveryScenarioHasATest(t *testing.T) {
@@ -114,7 +114,7 @@ func TestEveryScenarioHasATest(t *testing.T) {
 		}
 	}
 	for _, s := range cat.Scenarios {
-		if s.Owner != "UAT.5" {
+		if s.Owner != "UAT.5" && s.Owner != "H5" {
 			continue
 		}
 		switch len(found[s.ID]) {
@@ -163,7 +163,7 @@ func TestRunPatterns(t *testing.T) {
 		"TestSmokeT1_CreateTenant", "TestCoreT2_TenantValidation", "TestCoreC2_NonZeroExit",
 		"TestCoreC20_Imaginary", "TestResilienceL1_RebootSurvived", "TestLifecycleL4_Upgrade",
 		"TestIngredients", "TestIngredients/I.file.managed/t1-ubuntu", "TestIngredients/I.file.managed_x",
-		"TestIngredientsCoverage", "TestHarnessUnit",
+		"TestIngredientsCoverage", "TestHarnessUnit", "TestHAHA1_PodKill", "TestHAHA1_PodKill/farmer", "TestHAHA5_LostEvent",
 	}
 	for _, c := range []struct {
 		tier string
@@ -179,6 +179,9 @@ func TestRunPatterns(t *testing.T) {
 		{"smoke", []string{"T1"}, []string{"TestSmokeT1_CreateTenant"}},
 		{"all", []string{"L1"}, []string{"TestResilienceL1_RebootSurvived"}},
 		{"ingredients", []string{"I.file.managed"}, []string{"TestIngredients", "TestIngredients/I.file.managed/t1-ubuntu"}},
+		{"ha", nil, []string{"TestHAHA1_PodKill", "TestHAHA1_PodKill/farmer", "TestHAHA5_LostEvent"}},
+		{"ha", []string{"HA5"}, []string{"TestHAHA5_LostEvent"}},
+		{"all", []string{"HA1"}, []string{"TestHAHA1_PodKill", "TestHAHA1_PodKill/farmer"}},
 	} {
 		sel, err := cat.Select(c.tier, c.ids)
 		if err != nil {
@@ -199,7 +202,7 @@ func TestRunPatterns(t *testing.T) {
 		}
 	}
 	all, _ := cat.Select("all", nil)
-	if p := cat.RunPattern(all); p != "^Test(?:Smoke|Core|Resilience|Ingredients|Lifecycle)" {
+	if p := cat.RunPattern(all); p != "^Test(?:Smoke|Core|Resilience|Ingredients|Lifecycle|HA)" {
 		t.Errorf("all: %q", p)
 	}
 }
@@ -217,6 +220,8 @@ func TestSelectErrors(t *testing.T) {
 		{"core", []string{"I.*"}},
 		{"core", []string{"I.file.managed"}},
 		{"all", []string{"C2", "I.file.managed"}},
+		{"core", []string{"HA1"}},
+		{"ha", []string{"L1"}},
 	} {
 		if _, err := cat.Select(c.tier, c.ids); err == nil {
 			t.Errorf("%s %v should be refused", c.tier, c.ids)
@@ -238,7 +243,10 @@ func TestSelectErrors(t *testing.T) {
 		t.Error("tier ingredients")
 	}
 	every, _ := cat.Select("all", nil)
-	if !cat.ExpectsIngredients(every) || len(cat.Expected(every)) != 40 {
+	if ha, _ := cat.Select("ha", nil); len(cat.Expected(ha)) != 6 || cat.ExpectsIngredients(ha) {
+		t.Errorf("tier ha expects %d scenarios, want 6", len(cat.Expected(ha)))
+	}
+	if !cat.ExpectsIngredients(every) || len(cat.Expected(every)) != 46 {
 		t.Errorf("tier all expects %d", len(cat.Expected(every)))
 	}
 }

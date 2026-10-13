@@ -3,7 +3,7 @@
 # (docs/claude-code-parallel-build-plan.md, section 4h; uat/tests/README.md).
 #
 # Usage: uat/tests/run.sh <tier> [scenario id ...]
-#   tier  smoke, core, resilience, ingredients, lifecycle or all
+#   tier  smoke, core, resilience, ingredients, lifecycle, ha or all
 #   ids   catalogue ids of that tier (T1 C2 ...), or ingredient ids
 #         (I.file.managed ...) on their own
 #
@@ -13,13 +13,18 @@
 #                         else uat/access/vmctl.sh)
 #   IMAS_UAT_REPORT_DIR   where the report goes (default $IMAS_UAT_DIR/report)
 #   IMAS_UAT_TIMEOUT      go test -timeout (default by tier: smoke 45m,
-#                         core 4h, resilience 3h, others 8h)
+#                         core 4h, resilience and ha 3h, others 8h)
 #   IMAS_UAT_RELEASE_TAG  optional: the release the sprouts must run (S1)
 #   IMAS_UAT_CORE_KUBECONFIG, IMAS_UAT_ENDPOINTS
 #                         the core kubeconfig and endpoints file: with them,
 #                         T1, T4 and T5 make users for the tenants they create
 #                         with uat/hub/core/bind-tenant.sh --scratch-user
 #                         (IMAS_UAT_BIND_TENANT overrides the script)
+#   IMAS_UAT_DMZ_KUBECONFIG, IMAS_UAT_DMZ_CHART, IMAS_UAT_CORE_CHART,
+#   IMAS_UAT_CORE_CHECK   the ha tier: the DMZ kubeconfig, the charts the
+#                         hubs were installed from (HA3's helm upgrade; the
+#                         core one defaults to the state directory's) and
+#                         uat/hub/core/check.sh (default; HA3 runs it)
 #
 # It builds the report tool and one test binary per package under
 # uat/tests with the uat tag, runs them with the tier's -run pattern, and
@@ -43,7 +48,7 @@ usage() {
 tier=$1
 shift
 case "$tier" in
-smoke | core | resilience | ingredients | lifecycle | all) ;;
+smoke | core | resilience | ingredients | lifecycle | ha | all) ;;
 -h | --help) usage ;;
 *)
 	echo "run.sh: unknown tier '$tier'" >&2
@@ -65,11 +70,12 @@ IMAS_UAT_DIR=$(cd "$IMAS_UAT_DIR" && pwd)
 export IMAS_UAT_DIR
 export IMAS_UAT_VMCTL_DEFAULT="$repo/uat/access/vmctl.sh"
 export IMAS_UAT_BIND_TENANT_DEFAULT="$repo/uat/hub/core/bind-tenant.sh"
+export IMAS_UAT_CORE_CHECK_DEFAULT="$repo/uat/hub/core/check.sh"
 report="${IMAS_UAT_REPORT_DIR:-$IMAS_UAT_DIR/report}"
 case "$tier" in
 smoke) default_timeout=45m ;;
 core) default_timeout=4h ;;
-resilience) default_timeout=3h ;;
+resilience | ha) default_timeout=3h ;;
 *) default_timeout=8h ;;
 esac
 timeout="${IMAS_UAT_TIMEOUT:-$default_timeout}"

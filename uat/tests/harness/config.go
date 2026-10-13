@@ -254,6 +254,8 @@ type Settings struct {
 	Restart map[string]RestartCommand `json:"restart,omitempty"`
 	// BindTenant says how to run uat/hub/core/bind-tenant.sh.
 	BindTenant BindConfig `json:"bind_tenant,omitempty"`
+	// HA says how the ha tier reaches the hubs' clusters (HAConfig).
+	HA HAConfig `json:"ha,omitempty"`
 }
 
 // SproutOverride is one entry of sprouts.json, keyed by VM name.
@@ -339,7 +341,9 @@ type Env struct {
 	Core     *CoreJSON
 	CorePath string
 	// Bind is how to run bind-tenant.sh; see BindConfig.
-	Bind      BindConfig
+	Bind BindConfig
+	// HA is how the ha tier reaches the hubs' clusters; see HAConfig.
+	HA        HAConfig
 	tenantIDs map[int]string
 }
 
@@ -462,6 +466,8 @@ func LoadDir(dir string) (*Env, error) {
 	if env.Bind.StateDir == "" {
 		env.Bind.StateDir = stateRoot
 	}
+
+	env.HA = resolveHAConfig(env.Settings.HA, env.Bind, core, stateRoot)
 
 	env.VMCtlPath = os.Getenv(EnvVMCtl)
 	if env.VMCtlPath == "" && env.Settings.VMCtl != "" {

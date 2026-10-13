@@ -6,6 +6,8 @@
 #   vmctl.sh <uat.json> restart      <vm>
 #   vmctl.sh <uat.json> stop-sprout  <vm>
 #   vmctl.sh <uat.json> start-sprout <vm>
+#   vmctl.sh <uat.json> stop-vm      <vm>
+#   vmctl.sh <uat.json> start-vm     <vm>
 #   vmctl.sh <uat.json> run          <vm> <command...>
 #
 # <vm> is a VM name from uat.json: a hub node (uat-dmz and uat-core, or on an
@@ -17,6 +19,10 @@
 #               VMCTL_WAIT_SECONDS.
 # stop-sprout   stops the sprout service (systemd unit or Windows service
 # start-sprout  imas-sprout) on a sprout VM; refused for the hubs.
+# stop-vm       az vm stop (powered off, still allocated) on a hub node, then
+#               waits until Azure reports it stopped, up to VMCTL_WAIT_SECONDS:
+#               the ha tier's node stop (uat/tests, HA2); refused for sprouts.
+# start-vm      az vm start on a hub node, then waits as restart does.
 # run           runs <command...> (joined with spaces) with az vm run-command:
 #               bash on Linux, PowerShell on Windows, as root or SYSTEM.
 #               Prints the command's stdout on stdout and its stderr on stderr,
@@ -26,7 +32,7 @@
 #               4096 bytes of each stream.
 #
 # Exit status: the command's for run, stop-sprout and start-sprout; 0 for a
-# restart that came back; 2 on a usage error or an unknown VM; 255 when Azure
+# restart or start-vm that came back and a stop-vm that stopped; 2 on a usage error or an unknown VM; 255 when Azure
 # could not run the command or gave no exit code.
 #
 # All Azure calls of the UAT gate live here and in tunnels.sh.
@@ -37,8 +43,8 @@
 #                         logs az in again; run once, and the az call repeated,
 #                         when az fails with AADSTS700024 (expired session)
 #   VMCTL_SPROUT_SERVICE  service name (default imas-sprout, as packaged)
-#   VMCTL_WAIT_SECONDS    restart wait (default 600)
-#   VMCTL_POLL_SECONDS    restart poll interval (default 10)
+#   VMCTL_WAIT_SECONDS    restart, stop-vm and start-vm wait (default 600)
+#   VMCTL_POLL_SECONDS    their poll interval (default 10)
 set -euo pipefail
 
 prog=$(basename "$0")
@@ -50,7 +56,7 @@ marker="__IMAS_VMCTL_RC__"
 
 usage() {
   cat >&2 <<EOF
-usage: $prog <uat.json> restart|stop-sprout|start-sprout <vm>
+usage: $prog <uat.json> restart|stop-sprout|start-sprout|stop-vm|start-vm <vm>
        $prog <uat.json> run <vm> <command...>
 EOF
   exit 2
@@ -64,7 +70,7 @@ action=$2
 vm=$3
 shift 3
 case "$action" in
-  restart | stop-sprout | start-sprout) [ $# -eq 0 ] || usage ;;
+  restart | stop-sprout | start-sprout | stop-vm | start-vm) [ $# -eq 0 ] || usage ;;
   run) [ $# -ge 1 ] || usage ;;
   *) log "unknown action '$action'"; usage ;;
 esac
@@ -158,6 +164,30 @@ exec_remote() {
   exit "$remote_rc"
 }
 
+# power_state: the VM's PowerState/... code, empty when Azure did not say.
+power_state() {
+  az_run vm get-instance-view --ids "$vm_id" \
+    --query "instanceView.statuses[?starts_with(code, 'PowerState/')].code | [0]" -o tsv 2>/dev/null || true
+}
+
+# wait_back: waits until the VM runs and its guest agent answers a
+# run-command, up to VMCTL_WAIT_SECONDS; exits 0 when it does, 255 if not.
+wait_back() {
+  local deadline=$((SECONDS + wait_seconds)) probe="exit 0" power
+  while :; do
+    power=$(power_state)
+    if [ "$power" = "PowerState/running" ] && run_remote "$probe" && [ "$remote_rc" = 0 ]; then
+      log "$vm is back"
+      exit 0
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      log "$vm not back after ${wait_seconds}s (power state '${power:-unknown}')"
+      exit 255
+    fi
+    sleep "$poll_seconds"
+  done
+}
+
 case "$action" in
   run)
     exec_remote "$*"
@@ -184,17 +214,31 @@ case "$action" in
       log "az vm restart failed for $vm"
       exit 255
     fi
+    wait_back
+    ;;
+  stop-vm | start-vm)
+    if [ "$kind" != hub ]; then
+      log "$action works on hub nodes only; $vm is a sprout"
+      exit 2
+    fi
+    verb=${action%-vm}
+    log "${verb/stop/stopp}ing $vm"
+    if ! az_run vm "$verb" --ids "$vm_id" -o none; then
+      log "az vm $verb failed for $vm"
+      exit 255
+    fi
+    if [ "$verb" = start ]; then
+      wait_back
+    fi
     deadline=$((SECONDS + wait_seconds))
-    probe="exit 0"
     while :; do
-      power=$(az_run vm get-instance-view --ids "$vm_id" \
-        --query "instanceView.statuses[?starts_with(code, 'PowerState/')].code | [0]" -o tsv 2>/dev/null || true)
-      if [ "$power" = "PowerState/running" ] && run_remote "$probe" && [ "$remote_rc" = 0 ]; then
-        log "$vm is back"
+      power=$(power_state)
+      if [ "$power" = "PowerState/stopped" ]; then
+        log "$vm is stopped"
         exit 0
       fi
       if [ "$SECONDS" -ge "$deadline" ]; then
-        log "$vm not back after ${wait_seconds}s (power state '${power:-unknown}')"
+        log "$vm not stopped after ${wait_seconds}s (power state '${power:-unknown}')"
         exit 255
       fi
       sleep "$poll_seconds"

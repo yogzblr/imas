@@ -37,6 +37,9 @@ const (
 
 // CoreJSON is the part of uat/hub/core's out/core.json the harness reads.
 type CoreJSON struct {
+	// Version is the release the hub runs, without its leading v: the
+	// version of the farmer chart install.sh pulled (chart/farmer-<version>.tgz).
+	Version    string `json:"version"`
 	SaaSAPIURL string `json:"saasapi_url"`
 	CAFile     string `json:"ca_file"`
 	Keycloak   struct {

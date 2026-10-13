@@ -11,7 +11,7 @@ import (
 )
 
 // Tiers, in the order the plan lists them.
-var tiers = []string{"smoke", "core", "resilience", "ingredients", "lifecycle"}
+var tiers = []string{"smoke", "core", "resilience", "ingredients", "lifecycle", "ha"}
 
 // prefixOfTier is the test-function prefix of each tier's own scenarios
 // (plan section 4h, Scenario catalogue).
@@ -21,6 +21,7 @@ var prefixOfTier = map[string]string{
 	"resilience":  "Resilience",
 	"ingredients": "Ingredients",
 	"lifecycle":   "Lifecycle",
+	"ha":          "HA",
 }
 
 // ingredientWildcard is the catalogue row standing for every I.name.method
@@ -58,7 +59,8 @@ type Catalogue struct {
 	byID      map[string]Scenario
 }
 
-var staticID = regexp.MustCompile(`^[A-Z][0-9]+$`)
+// staticID is a catalogue id: one or two capitals and a number (C2, HA1).
+var staticID = regexp.MustCompile(`^[A-Z]{1,2}[0-9]+$`)
 
 // IngredientID matches an ingredient conformance id, I.<name>.<method>.
 var IngredientID = regexp.MustCompile(`^I\.[a-z0-9_]+(\.[a-z0-9_]+)+$`)
@@ -145,7 +147,7 @@ type Selection struct {
 // Select validates a tier and ids against the catalogue.
 func (c *Catalogue) Select(tier string, ids []string) (*Selection, error) {
 	if !ValidTier(tier) {
-		return nil, fmt.Errorf("unknown tier %q: want smoke, core, resilience, ingredients, lifecycle or all", tier)
+		return nil, fmt.Errorf("unknown tier %q: want smoke, core, resilience, ingredients, lifecycle, ha or all", tier)
 	}
 	sel := &Selection{Tier: tier, All: len(ids) == 0}
 	seen := map[string]bool{}

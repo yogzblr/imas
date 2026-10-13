@@ -25,10 +25,11 @@ const rcKey = "RC"
 // VMCtl runs uat/access/vmctl.sh, the Access interface of the plan's
 // Shared contract:
 //
-//	vmctl.sh <uat.json> restart|stop-sprout|start-sprout|run <vm> [command]
+//	vmctl.sh <uat.json> restart|stop-sprout|start-sprout|stop-vm|start-vm|run <vm> [command]
 //
 // It restarts a VM and waits until it is back, stops or starts the sprout
-// service, or runs a command and prints its output and exit code. The
+// service, stops or starts a hub node's VM (the ha tier's node stop), or
+// runs a command and prints its output and exit code. The
 // harness never calls Azure itself, so the local rig (UAT.8) can supply a
 // vmctl.sh of its own. Calls to one VM are serialized: Azure's
 // run-command refuses a second command on a VM while one is running.
@@ -131,6 +132,14 @@ func (v *VMCtl) StopSprout(ctx context.Context, vm string) error {
 func (v *VMCtl) StartSprout(ctx context.Context, vm string) error {
 	return v.simple(ctx, "start-sprout", vm)
 }
+
+// StopVM powers a hub node's VM off and waits until Azure reports it
+// stopped (vmctl.sh stop-vm; the ha tier's node stop, HA2).
+func (v *VMCtl) StopVM(ctx context.Context, vm string) error { return v.simple(ctx, "stop-vm", vm) }
+
+// StartVM starts a hub node's VM and waits until it runs and its guest
+// answers (vmctl.sh start-vm).
+func (v *VMCtl) StartVM(ctx context.Context, vm string) error { return v.simple(ctx, "start-vm", vm) }
 
 // RunResult is what a host script printed.
 type RunResult struct {
