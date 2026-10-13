@@ -236,5 +236,10 @@ Record each run in a status fragment (`docs/status/README.md`): the run id,
 the commit and tag, the result, and what it closes. A green Run 2 moves P20
 and P13 towards closing and is the re-run P1 waits for; a green Run 3 is
 the validation P24 and P23 wait for, and the Azure check of the Versity
-half of P25. A failed run is fixed forward with a new release candidate and
-the same inputs; tags never move.
+half of P25. A failed run is fixed forward, as tags never move: cut the next
+release candidate (`v0.1.0-rc.16`, and so on) from main with the fix,
+publish it as in section 1, and dispatch again with `release_tag` set to
+that new candidate and the other inputs unchanged. Run 2 keeps
+`v0.1.0-rc.14` as `upgrade_from_tag` (any published release cut after P22
+will do, as long as it is older than `release_tag`); Run 3 uses the
+candidate Run 2 passed.
