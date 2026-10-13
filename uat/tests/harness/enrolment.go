@@ -63,10 +63,14 @@ type FullEnroller struct {
 }
 
 // NewFullEnroller returns an enroller over a copy of hc whose transport
-// waits out 429s.
+// waits out 429s. The copy has no client timeout, which would count the
+// waits too; each request stays bounded by its context (the sprout
+// client's 30 s per request, in which Envoy's bucket, a token every 3 s
+// per Envoy, refills several times).
 func NewFullEnroller(envoyURL string, hc *http.Client) *FullEnroller {
 	fe := &FullEnroller{EnvoyURL: strings.TrimRight(envoyURL, "/"), RateLimitBudget: 3 * time.Minute}
 	c := *hc
+	c.Timeout = 0
 	base := c.Transport
 	if base == nil {
 		base = http.DefaultTransport

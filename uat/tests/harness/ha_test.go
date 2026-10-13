@@ -379,6 +379,7 @@ func TestHelmUpgradeAndCoreCheck(t *testing.T) {
 		t.Error("no check.sh must be an error")
 	}
 	// A real script: its exit status decides.
+	needShell(t)
 	dir := t.TempDir()
 	p := filepath.Join(dir, "check.sh")
 	_ = os.WriteFile(p, []byte("#!/bin/sh\necho \"FAIL  T4: $3\"\nexit 1\n"), 0o700)

@@ -25,7 +25,9 @@ func TestFullEnrollerWaitsOutRateLimits(t *testing.T) {
 		_, _ = w.Write([]byte("ok"))
 	}))
 	defer srv.Close()
-	fe := NewFullEnroller(srv.URL+"/", srv.Client())
+	hc := srv.Client()
+	hc.Timeout = 3 * time.Second // shorter than the waits below: the enroller must not keep it
+	fe := NewFullEnroller(srv.URL+"/", hc)
 	if fe.EnvoyURL != srv.URL {
 		t.Errorf("the trailing slash must go: %s", fe.EnvoyURL)
 	}

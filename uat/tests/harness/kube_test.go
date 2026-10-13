@@ -144,6 +144,7 @@ func TestKubeCommands(t *testing.T) {
 }
 
 func TestKubePortForward(t *testing.T) {
+	needShell(t)
 	dir := t.TempDir()
 	script := filepath.Join(dir, "kubectl")
 	body := "#!/bin/sh\necho \"$@\" > " + filepath.Join(dir, "args") + "\necho 'Forwarding from 127.0.0.1:43211 -> 5406'\nexec sleep 30\n"
