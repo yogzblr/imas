@@ -64,6 +64,9 @@ accountStore:
   # -- S3 endpoint, host:port without a scheme (IMAS_LOADER_S3_ENDPOINT).
   # Required. The same store core uses (owner decision D-1 (a)); the bus
   # NetworkPolicy opens egress to networkPolicy.accountStoreEgress only.
+  # With the farmer chart's versity.enabled: its gateway Service,
+  # <core release>-farmer-versity.<core namespace>.svc.<domain>:7070,
+  # useSSL false.
   endpoint: ""
   # -- TLS to the endpoint (IMAS_LOADER_S3_USE_SSL).
   useSSL: true

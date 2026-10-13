@@ -17,7 +17,7 @@ func TestAccountStoreEnvRendered(t *testing.T) {
 	// Required: farmer refuses to start without the accounts bucket, so the
 	// chart refuses to render without its bucket, endpoint or credential.
 	t.Run("required", func(t *testing.T) {
-		mustFail(t, "accountStore.endpoint (or objectStore.endpoint) is required", "--set", "accountStore.endpoint=")
+		mustFail(t, "accountStore.endpoint (or objectStore.endpoint, or versity.enabled) is required", "--set", "accountStore.endpoint=")
 		mustFail(t, "accountStore.bucket is required", "--set", "accountStore.bucket=")
 		mustFail(t, "accountStore.credentialsSecret is required", "--set", "accountStore.credentialsSecret=")
 	})

@@ -253,6 +253,11 @@ creates either):
 Set `accountStore.endpoint` (`host:port`, no scheme) and, with
 NetworkPolicies on, `networkPolicy.accountStoreEgress` (the endpoint's
 address as a `/32` and its port). Rendering fails without them.
+With the farmer chart's Versity Gateway (`versity.enabled`), the endpoint
+is its Service, `<core release>-farmer-versity.<core namespace>.svc.<domain>:7070`,
+with `accountStore.useSSL=false`, and the credential is the pair in its
+`versity.accountsReader.credentialsSecret` (deploy/helm/farmer README,
+"Versity Gateway"; the core release's NOTES print the values).
 
 Both Secrets and the bus CA reach the `loader` container only; farmerbus
 mounts neither. In `bus.tls.mode=secret` the loader gets `ca.crt` alone

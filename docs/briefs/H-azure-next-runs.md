@@ -161,6 +161,24 @@ Tests: chart tests render with `versity.enabled` true and false; the S3 endpoint
 references, NetworkPolicy and bucket job are asserted; a values-schema/validation test fails
 when `versity.enabled` is true without the Azure credential Secret.
 
+Corrections found while building H3 (2026-10-13; built as below):
+
+- The chart has four object store credentials, not one per bucket: `farmer`
+  (`objectStore.credentialsSecret`, which already covers the recipe, job **and sprout JWT**
+  buckets; there is no separate sprout JWT credential), `accounts-writer`
+  (`accountStore.credentialsSecret`), `accounts-reader` (new
+  `versity.accountsReader.credentialsSecret`, the DMZ loader's pair) and `saasapi-recipes`
+  (`saasapi.recipes.credentialsSecret`). Those are the gateway's users.
+- Helm cannot render the gateway's IAM file from Secrets it does not read, so each gateway pod's
+  init container writes it (`farmer versity-iam`, `internal/versitysetup`) into a memory-backed
+  volume the gateway mounts read-only. The bucket hook is `farmer versity-buckets`; the scoping
+  is per-bucket policies naming the users' access key IDs (Versity's internal IAM has no
+  per-user policy). `versity.createBuckets` is the Job's settings map.
+- The bus is the nats chart's: the farmer chart cannot set its S3 endpoint. NOTES prints the
+  nats chart's `accountStore.*` values for the gateway; H4 wires them in UAT.
+- The gateway's Service is plain HTTP in the cluster (the S3 clients have no custom-CA setting);
+  with `versity.enabled`, `objectStore.endpoint` must stay empty (set, the render fails).
+
 ## H4: HA hub values and wiring (P24 items 3 and 4)
 
 Needs H2 and H3. Scope: `uat/hub/core`, `uat/hub/dmz`, `uat/tests/harness` where it reads the

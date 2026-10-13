@@ -385,21 +385,297 @@ saasapi's operator plane (internal/saasapi NewOperatorServer, API design
 {{- printf "%s.%s.svc.%s" (include "imas-farmer.saasapi.operatorFullname" .) .Release.Namespace .Values.clusterDomain }}
 {{- end }}
 
-{{/* The port in objectStore.endpoint (host[:port], no scheme; with none,
-443 under useSSL, else 80), for farmer's object store egress rule and
+{{/*
+The Versity Gateway (versity.enabled; design D18): the S3 front of Azure
+Blob. Its Service is the default S3 endpoint of farmer, saasapi and the
+accounts bucket: objectStore.endpoint and accountStore.endpoint, when
+empty, mean the gateway, and either still overrides it.
+*/}}
+{{- define "imas-farmer.versity.fullname" -}}
+{{- printf "%s-versity" (include "imas-farmer.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/* Its pods' own name label, like the publisher's: the nats chart's bus
+NetworkPolicy admits core by app.kubernetes.io/name, and the gateway never
+dials the bus. */}}
+{{- define "imas-farmer.versity.selectorLabels" -}}
+app.kubernetes.io/name: imas-versity
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: versity
+{{- end }}
+
+{{- define "imas-farmer.versity.bucketsSelectorLabels" -}}
+app.kubernetes.io/name: imas-versity
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: versity-buckets
+{{- end }}
+
+{{- define "imas-farmer.versity.image" -}}
+{{- include "imas-farmer.image" (dict "image" .Values.versity.image "appVersion" "") -}}
+{{- end }}
+
+{{/* host:port of the gateway's Service. */}}
+{{- define "imas-farmer.versity.endpoint" -}}
+{{- printf "%s.%s.svc.%s:%v" (include "imas-farmer.versity.fullname" .) .Release.Namespace .Values.clusterDomain .Values.versity.port -}}
+{{- end }}
+
+{{/* True (non-empty) when the recipe, job and sprout JWT buckets are the
+gateway's: versity.enabled and objectStore.endpoint left empty. */}}
+{{- define "imas-farmer.s3UsesVersity" -}}
+{{- if and .Values.versity.enabled (not .Values.objectStore.endpoint) -}}true{{- end -}}
+{{- end }}
+
+{{/* True (non-empty) when the accounts bucket is the gateway's: neither
+accountStore.endpoint nor objectStore.endpoint set, versity.enabled. */}}
+{{- define "imas-farmer.accountsUseVersity" -}}
+{{- if and (include "imas-farmer.s3UsesVersity" .) (not .Values.accountStore.endpoint) -}}true{{- end -}}
+{{- end }}
+
+{{/* The S3 endpoint farmer (IMAS_S3_ENDPOINT) and saasapi's recipe
+upload use: objectStore.endpoint, or the gateway's Service. */}}
+{{- define "imas-farmer.s3Endpoint" -}}
+{{- if include "imas-farmer.s3UsesVersity" . -}}
+{{- include "imas-farmer.versity.endpoint" . -}}
+{{- else -}}
+{{- .Values.objectStore.endpoint -}}
+{{- end -}}
+{{- end }}
+
+{{/* "true" or "false": objectStore.useSSL, or false for the gateway's
+Service (plain HTTP inside the cluster; README.md, "Versity Gateway"). */}}
+{{- define "imas-farmer.s3UseSSL" -}}
+{{- if include "imas-farmer.s3UsesVersity" . -}}false{{- else -}}{{ ne (toString .Values.objectStore.useSSL) "false" }}{{- end -}}
+{{- end }}
+
+{{/* The port in the S3 endpoint (host[:port], no scheme; with none, 443
+under useSSL, else 80), for farmer's object store egress rule and
 saasapi's recipe egress rule. */}}
 {{- define "imas-farmer.objectStorePort" -}}
-{{- $def := ternary "443" "80" (ne (toString .Values.objectStore.useSSL) "false") -}}
-{{- default $def (regexFind ":[0-9]+$" (toString .Values.objectStore.endpoint) | trimPrefix ":") -}}
+{{- $def := ternary "443" "80" (eq (include "imas-farmer.s3UseSSL" .) "true") -}}
+{{- default $def (regexFind ":[0-9]+$" (include "imas-farmer.s3Endpoint" .) | trimPrefix ":") -}}
 {{- end }}
 
 {{/* The port of the accounts bucket's endpoint, as objectStorePort, for
 farmer's egress rule when accountStore.endpoint is its own. */}}
 {{- define "imas-farmer.accountStorePort" -}}
 {{- $acc := .Values.accountStore -}}
-{{- $ssl := ternary .Values.objectStore.useSSL $acc.useSSL (kindIs "invalid" $acc.useSSL) -}}
-{{- $def := ternary "443" "80" (ne (toString $ssl) "false") -}}
-{{- default $def (regexFind ":[0-9]+$" (toString (default .Values.objectStore.endpoint $acc.endpoint)) | trimPrefix ":") -}}
+{{- $ssl := ternary (include "imas-farmer.s3UseSSL" .) (toString $acc.useSSL) (kindIs "invalid" $acc.useSSL) -}}
+{{- $def := ternary "443" "80" (ne $ssl "false") -}}
+{{- default $def (regexFind ":[0-9]+$" (toString (default (include "imas-farmer.s3Endpoint" .) $acc.endpoint)) | trimPrefix ":") -}}
+{{- end }}
+
+{{/* The egress peers of the object store rules: the gateway's pods when
+the store is the gateway (s3UsesVersity), else
+networkPolicy.external.objectStore. .versity selects which. */}}
+{{- define "imas-farmer.objectStorePeers" -}}
+{{- if .versity -}}
+{{- toYaml (list (dict "podSelector" (dict "matchLabels" (fromYaml (include "imas-farmer.versity.selectorLabels" .root))))) -}}
+{{- else if .root.Values.networkPolicy.external.objectStore -}}
+{{- toYaml .root.Values.networkPolicy.external.objectStore -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+The gateway's users (versitysetup readUsers): name -> the Secret and keys
+its credential comes from. farmer (objectStore.credentialsSecret: the
+recipe, job and sprout JWT buckets) and saasapi-recipes (with
+saasapi.recipes.enabled) when the S3 store is the gateway; the accounts
+writer (accountStore.credentialsSecret) and the DMZ bus's accounts reader
+(versity.accountsReader) when the accounts bucket is.
+*/}}
+{{- define "imas-farmer.versity.users" -}}
+{{- $u := dict -}}
+{{- $os := .Values.objectStore -}}
+{{- if include "imas-farmer.s3UsesVersity" . -}}
+{{- $_ := set $u "farmer" (dict "secret" $os.credentialsSecret "id" $os.accessKeyIdKey "key" $os.secretAccessKeyKey "value" "objectStore.credentialsSecret") -}}
+{{- $r := .Values.saasapi.recipes -}}
+{{- if and .Values.saasapi.enabled $r.enabled -}}
+{{- $_ := set $u "saasapi-recipes" (dict "secret" $r.credentialsSecret "id" $r.accessKeyIdKey "key" $r.secretAccessKeyKey "value" "saasapi.recipes.credentialsSecret") -}}
+{{- end -}}
+{{- end -}}
+{{- if include "imas-farmer.accountsUseVersity" . -}}
+{{- $acc := .Values.accountStore -}}
+{{- $_ := set $u "accounts-writer" (dict "secret" $acc.credentialsSecret "id" $acc.accessKeyIdKey "key" $acc.secretAccessKeyKey "value" "accountStore.credentialsSecret") -}}
+{{- $rd := .Values.versity.accountsReader -}}
+{{- $_ := set $u "accounts-reader" (dict "secret" $rd.credentialsSecret "id" $rd.accessKeyIdKey "key" $rd.secretAccessKeyKey "value" "versity.accountsReader.credentialsSecret") -}}
+{{- end -}}
+{{- toYaml $u -}}
+{{- end }}
+
+{{/* The projected volume of the gateway's users: <user>/access-key-id
+and, with .secrets, <user>/secret-access-key. */}}
+{{- define "imas-farmer.versity.usersVolume" -}}
+{{- $users := fromYaml (include "imas-farmer.versity.users" .root) -}}
+projected:
+  defaultMode: 0440
+  sources:
+    {{- range $name := keys $users | sortAlpha }}
+    {{- $c := get $users $name }}
+    - secret:
+        name: {{ $c.secret }}
+        items:
+          - { key: {{ $c.id }}, path: {{ $name }}/access-key-id }
+          {{- if $.secrets }}
+          - { key: {{ $c.key }}, path: {{ $name }}/secret-access-key }
+          {{- end }}
+    {{- end }}
+{{- end }}
+
+{{/* The root credential's projected volume (access-key-id, and with
+.secrets secret-access-key). */}}
+{{- define "imas-farmer.versity.rootVolume" -}}
+{{- $r := .root.Values.versity.rootCredentials -}}
+projected:
+  defaultMode: 0440
+  sources:
+    - secret:
+        name: {{ $r.secretName }}
+        items:
+          - { key: {{ $r.accessKeyIdKey }}, path: access-key-id }
+          {{- if .secrets }}
+          - { key: {{ $r.secretAccessKeyKey }}, path: secret-access-key }
+          {{- end }}
+{{- end }}
+
+{{/*
+The createBuckets plan (internal/versitysetup Plan): each bucket the
+gateway serves and the Allow statements of its policy, per user, scoped to
+that bucket as in design D22 and the UAT's RustFS policies
+(uat/hub/core/minio-setup.sh). saasapi's statements are
+files/objectstore-policies/saasapi-recipes.json, the same reviewed policy.
+*/}}
+{{- define "imas-farmer.versity.plan" -}}
+{{- $os := .Values.objectStore -}}
+{{- $buckets := list -}}
+{{- if include "imas-farmer.s3UsesVersity" . -}}
+{{- $listS := list "s3:GetBucketLocation" "s3:ListBucket" -}}
+{{- $rw := list "s3:GetObject" "s3:PutObject" "s3:DeleteObject" -}}
+{{- $recipes := list
+  (dict "sid" "FarmerBucket" "user" "farmer" "actions" $listS "resources" (list (printf "arn:aws:s3:::%s" $os.bucket)))
+  (dict "sid" "FarmerObjects" "user" "farmer" "actions" $rw "resources" (list (printf "arn:aws:s3:::%s/*" $os.bucket))) -}}
+{{- $r := .Values.saasapi.recipes -}}
+{{- if and .Values.saasapi.enabled $r.enabled -}}
+{{- $pol := .Files.Get "files/objectstore-policies/saasapi-recipes.json" | replace "RECIPE_BUCKET" (toString $os.bucket) | fromJson -}}
+{{- range $pol.Statement -}}
+{{- $st := dict "sid" (printf "Saasapi%s" .Sid) "user" "saasapi-recipes" "actions" .Action "resources" .Resource -}}
+{{- with .Condition -}}
+{{- $_ := set $st "condition" . -}}
+{{- end -}}
+{{- $recipes = append $recipes $st -}}
+{{- end -}}
+{{- end -}}
+{{- $buckets = append $buckets (dict "name" $os.bucket "statements" $recipes) -}}
+{{- $buckets = append $buckets (dict "name" $os.jobBucket "statements" (list
+  (dict "sid" "FarmerBucket" "user" "farmer" "actions" $listS "resources" (list (printf "arn:aws:s3:::%s" $os.jobBucket)))
+  (dict "sid" "FarmerObjects" "user" "farmer" "actions" $rw "resources" (list (printf "arn:aws:s3:::%s/*" $os.jobBucket))))) -}}
+{{- $buckets = append $buckets (dict "name" $os.sproutJWTBucket "statements" (list
+  (dict "sid" "FarmerBucket" "user" "farmer" "actions" $listS "resources" (list (printf "arn:aws:s3:::%s" $os.sproutJWTBucket)))
+  (dict "sid" "FarmerSproutJWTs" "user" "farmer" "actions" (list "s3:GetObject" "s3:PutObject") "resources" (list (printf "arn:aws:s3:::%s/*" $os.sproutJWTBucket))))) -}}
+{{- end -}}
+{{- if include "imas-farmer.accountsUseVersity" . -}}
+{{- $b := .Values.accountStore.bucket -}}
+{{- $listS := list "s3:GetBucketLocation" "s3:ListBucket" -}}
+{{- /* farmer writes accounts/<pub>.jwt and accounts/index and never
+deletes (a deprovision is a newer lock-out JWT); the loader only reads. */ -}}
+{{- $buckets = append $buckets (dict "name" $b "statements" (list
+  (dict "sid" "AccountsWriterBucket" "user" "accounts-writer" "actions" $listS "resources" (list (printf "arn:aws:s3:::%s" $b)))
+  (dict "sid" "AccountsWriterObjects" "user" "accounts-writer" "actions" (list "s3:GetObject" "s3:PutObject") "resources" (list (printf "arn:aws:s3:::%s/*" $b)))
+  (dict "sid" "AccountsReaderBucket" "user" "accounts-reader" "actions" $listS "resources" (list (printf "arn:aws:s3:::%s" $b)))
+  (dict "sid" "AccountsReaderObjects" "user" "accounts-reader" "actions" (list "s3:GetObject") "resources" (list (printf "arn:aws:s3:::%s/*" $b))))) -}}
+{{- end -}}
+{{- dict "buckets" $buckets | toPrettyJson -}}
+{{- end }}
+
+{{/*
+versity.enabled: the gateway's settings and every credential and bucket it
+serves. Called from imas-farmer.validate.
+*/}}
+{{- define "imas-farmer.versity.validate" -}}
+{{- $v := .Values.versity -}}
+{{- if not (include "imas-farmer.s3UsesVersity" .) -}}
+{{- fail "versity.enabled with objectStore.endpoint set: the gateway would serve no bucket. Leave objectStore.endpoint (and accountStore.endpoint) empty to use the gateway, or turn versity.enabled off to use another S3 endpoint" -}}
+{{- end -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" (toString $v.image.digest)) -}}
+{{- fail "versity.image.digest must be the image's sha256 digest (sha256:<64 hex>): the gateway image is pinned by digest" -}}
+{{- end -}}
+{{- if not (and (kindIs "float64" $v.replicas) (ge (float64 $v.replicas) 1.0) (eq (float64 $v.replicas) (float64 (int64 $v.replicas)))) -}}
+{{- if not (and (or (kindIs "int64" $v.replicas) (kindIs "int" $v.replicas)) (ge (int64 $v.replicas) 1)) -}}
+{{- fail (printf "versity.replicas must be a whole number, 1 or more, got %v" $v.replicas) -}}
+{{- end -}}
+{{- end -}}
+{{- $az := $v.azure -}}
+{{- if not $az.credentialsSecret -}}
+{{- fail "versity.azure.credentialsSecret is required with versity.enabled: the Secret holding the Azure storage account name and key the gateway stores the buckets in (README.md, \"Versity Gateway\")" -}}
+{{- end -}}
+{{- if or (not $az.accountNameKey) (not $az.accountKeyKey) -}}
+{{- fail "versity.azure.accountNameKey and versity.azure.accountKeyKey are required with versity.enabled" -}}
+{{- end -}}
+{{- if and $az.endpoint (not (regexMatch "^https://[^/\\s]+/?$" (toString $az.endpoint))) -}}
+{{- fail (printf "versity.azure.endpoint must be an https:// Blob service URL with no path, got %q" $az.endpoint) -}}
+{{- end -}}
+{{- $root := $v.rootCredentials -}}
+{{- if not $root.secretName -}}
+{{- fail "versity.rootCredentials.secretName is required with versity.enabled: the gateway's root S3 credential, which only the gateway and the createBuckets Job hold" -}}
+{{- end -}}
+{{- if or (not $root.accessKeyIdKey) (not $root.secretAccessKeyKey) -}}
+{{- fail "versity.rootCredentials.accessKeyIdKey and secretAccessKeyKey are required with versity.enabled" -}}
+{{- end -}}
+{{- $users := fromYaml (include "imas-farmer.versity.users" .) -}}
+{{- $seen := dict -}}
+{{- range $name := keys $users | sortAlpha -}}
+{{- $c := get $users $name -}}
+{{- if not $c.secret -}}
+{{- fail (printf "%s is required with versity.enabled: the gateway's %s user is created from it" $c.value $name) -}}
+{{- end -}}
+{{- if or (not $c.id) (not $c.key) -}}
+{{- fail (printf "the access key ID and secret key names of %s are required with versity.enabled" $c.value) -}}
+{{- end -}}
+{{- if eq (toString $c.secret) (toString $root.secretName) -}}
+{{- fail (printf "%s must not be versity.rootCredentials.secretName: the root credential belongs to the gateway and the createBuckets Job alone" $c.value) -}}
+{{- end -}}
+{{- if hasKey $seen (toString $c.secret) -}}
+{{- fail (printf "%s and %s are the same Secret: every gateway user needs a credential of its own, scoped to its own buckets (design D22)" (get $seen (toString $c.secret)) $c.value) -}}
+{{- end -}}
+{{- $_ := set $seen (toString $c.secret) $c.value -}}
+{{- end -}}
+{{- if eq (toString $az.credentialsSecret) (toString $root.secretName) -}}
+{{- fail "versity.azure.credentialsSecret must not be versity.rootCredentials.secretName" -}}
+{{- end -}}
+{{- if hasKey $seen (toString $az.credentialsSecret) -}}
+{{- fail (printf "versity.azure.credentialsSecret must not be %s: the Azure account key belongs to the gateway alone" (get $seen (toString $az.credentialsSecret))) -}}
+{{- end -}}
+{{- $os := .Values.objectStore -}}
+{{- $names := dict "objectStore.bucket" $os.bucket "objectStore.jobBucket" $os.jobBucket "objectStore.sproutJWTBucket" $os.sproutJWTBucket -}}
+{{- if include "imas-farmer.accountsUseVersity" . -}}
+{{- $_ := set $names "accountStore.bucket" .Values.accountStore.bucket -}}
+{{- end -}}
+{{- range $k := keys $names | sortAlpha -}}
+{{- $b := toString (get $names $k) -}}
+{{- if not $b -}}
+{{- fail (printf "%s is required with versity.enabled: the createBuckets Job creates it on the gateway" $k) -}}
+{{- end -}}
+{{- if or (not (regexMatch "^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$" $b)) (contains "--" $b) -}}
+{{- fail (printf "%s %q is not a bucket name Azure Blob takes as a container name: 3 to 63 of a-z 0-9 and -, no leading, trailing or double hyphen" $k $b) -}}
+{{- end -}}
+{{- end -}}
+{{- $sa := toString $v.createBuckets.serviceAccountName -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $sa) -}}
+{{- fail (printf "versity.createBuckets.serviceAccountName %q is not a valid ServiceAccount name" $sa) -}}
+{{- end -}}
+{{- range $other := list (include "imas-farmer.farmer.serviceAccountName" .) (include "imas-farmer.saasapi.serviceAccountName" .) .Values.credentialPublisher.serviceAccountName .Values.controlPlaneBoxKeys.serviceAccountName .Values.sproutRelease.serviceAccountName (include "imas-farmer.versity.fullname" .) -}}
+{{- if eq $sa (toString $other) -}}
+{{- fail (printf "versity.createBuckets.serviceAccountName %q is another workload's ServiceAccount: the createBuckets Job gets one of its own, with no RBAC and no token" $sa) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (and (kindIs "string" $v.createBuckets.timeout) (regexMatch "^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$" (toString $v.createBuckets.timeout))) -}}
+{{- fail (printf "versity.createBuckets.timeout must be a Go duration such as \"10m\", got %v" $v.createBuckets.timeout) -}}
+{{- end -}}
+{{- if not (eq (toString $v.port) (toString (int $v.port))) -}}
+{{- fail (printf "versity.port must be a port number, got %v" $v.port) -}}
+{{- end -}}
+{{- if or (lt (int $v.port) 1024) (gt (int $v.port) 65535) -}}
+{{- fail (printf "versity.port must be 1024 to 65535 (the gateway runs as non-root), got %v" $v.port) -}}
+{{- end -}}
 {{- end }}
 
 {{/*
@@ -765,6 +1041,9 @@ explanation rather than deploying something that silently can't work.
 {{- fail (printf "farmer.recipes.templateLimits.renderTimeout must be a quoted duration such as \"2s\", got %v" $tl.renderTimeout) -}}
 {{- end -}}
 {{- include "imas-farmer.accountStore.validate" . -}}
+{{- if .Values.versity.enabled -}}
+{{- include "imas-farmer.versity.validate" . -}}
+{{- end -}}
 {{- $os := .Values.objectStore -}}
 {{- if and $os.bucket $os.jobBucket (eq $os.bucket $os.jobBucket) -}}
 {{- fail "objectStore.jobBucket must differ from objectStore.bucket: GET /files/ serves every key in the recipe bucket to any authenticated caller, so job logs there would be readable across sprouts and tenants" -}}
@@ -801,8 +1080,8 @@ refuses to render. */}}
 {{- if not $acc.bucket -}}
 {{- fail "accountStore.bucket is required: farmer writes every Account JWT there, and a bus node that restarts loads its Accounts from it (the bus keeps none of its own)" -}}
 {{- end -}}
-{{- if not (or $acc.endpoint $os.endpoint) -}}
-{{- fail "accountStore.endpoint (or objectStore.endpoint) is required: farmer writes every Account JWT to the accounts bucket, and a bus node that restarts loads its Accounts from it (the bus keeps none of its own)" -}}
+{{- if not (or $acc.endpoint (include "imas-farmer.s3Endpoint" .)) -}}
+{{- fail "accountStore.endpoint (or objectStore.endpoint, or versity.enabled) is required: farmer writes every Account JWT to the accounts bucket, and a bus node that restarts loads its Accounts from it (the bus keeps none of its own)" -}}
 {{- end -}}
 {{- if not $acc.credentialsSecret -}}
 {{- fail "accountStore.credentialsSecret is required: farmer writes the accounts bucket with a credential of its own" -}}
@@ -875,8 +1154,8 @@ refuses to render. */}}
 {{- if eq (toString $r.credentialsSecret) (toString .Values.objectStore.credentialsSecret) -}}
 {{- fail "saasapi.recipes.credentialsSecret must not be objectStore.credentialsSecret: farmer's credential can write sprouts/ and the platform recipe prefix, saasapi's must only reach tenants/*/recipes/*" -}}
 {{- end -}}
-{{- if or (not .Values.objectStore.endpoint) (not .Values.objectStore.bucket) -}}
-{{- fail "saasapi.recipes.enabled needs objectStore.endpoint and objectStore.bucket: saasapi writes the bucket farmer cooks from" -}}
+{{- if or (not (include "imas-farmer.s3Endpoint" .)) (not .Values.objectStore.bucket) -}}
+{{- fail "saasapi.recipes.enabled needs objectStore.endpoint (or versity.enabled) and objectStore.bucket: saasapi writes the bucket farmer cooks from" -}}
 {{- end -}}
 {{- if and $r.credentialCheck (not .Values.objectStore.jobBucket) -}}
 {{- fail "objectStore.jobBucket is required with saasapi.recipes.enabled and saasapi.recipes.credentialCheck: saasapi's startup check makes sure its recipe credential can't reach farmer's job bucket (SAASAPI_RECIPES_JOB_BUCKET), and refuses to start without knowing which bucket that is" -}}

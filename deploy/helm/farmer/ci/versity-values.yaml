@@ -1,0 +1,37 @@
+# chart-testing: the eval install with the Versity Gateway in front of
+# Azure Blob (versity.enabled, design D18) as the object store of farmer,
+# saasapi's recipe upload and the accounts bucket. objectStore.endpoint
+# and accountStore.endpoint stay empty: the chart points them at the
+# gateway's Service. Every Secret named here is created by ops (README.md,
+# "Versity Gateway").
+bus:
+  serviceName: imas-dmz-nats-bus
+  sproutBusURLs:
+    - wss://bus.imas.example.com:443/
+objectStore:
+  bucket: imas-recipes
+  jobBucket: imas-jobs
+  sproutJWTBucket: imas-sprout-jwts
+  credentialsSecret: imas-s3-farmer
+versity:
+  enabled: true
+  azure:
+    credentialsSecret: imas-versity-azure
+  rootCredentials:
+    secretName: imas-versity-root
+  accountsReader:
+    credentialsSecret: imas-bus-accounts-reader
+saasapi:
+  jwt:
+    keycloakJWKSURL: https://keycloak.example.com/realms/cloudxp/protocol/openid-connect/certs
+    issuer: https://keycloak.example.com/realms/cloudxp
+    audience: imas-saasapi
+  recipes:
+    enabled: true
+    credentialsSecret: imas-s3-saasapi
+# The bootstrap admin is required (FIX.3). PLACEHOLDERS, as in
+# default-values.yaml: farmer refuses the all-zero box key.
+farmer:
+  bootstrapAdmin:
+    pubkey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    boxpub: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=

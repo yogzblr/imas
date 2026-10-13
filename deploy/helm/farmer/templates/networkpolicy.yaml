@@ -9,8 +9,9 @@
 #   out: the bus (client port, farmerbusurl), PXC, Valkey, OpenBao, the
 #        object store (objectStore.endpoint's port, peers
 #        networkPolicy.external.objectStore) when objectStore.endpoint is
-#        set, the accounts bucket's port too when it differs (same
-#        peers), DNS, plus networkPolicy.farmerExtraEgress
+#        set, or the Versity Gateway's pods on its port with
+#        versity.enabled, the accounts bucket's port and peers too when
+#        they differ, DNS, plus networkPolicy.farmerExtraEgress
 # Core only ever dials out to the DMZ; the bus never dials in.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -40,12 +41,14 @@ spec:
     {{- include "imas-farmer.depEgress" $valkey | nindent 4 }}
     {{- end }}
     {{- include "imas-farmer.openbaoEgress" . | nindent 4 }}
-    {{- if .Values.objectStore.endpoint }}
-    {{- include "imas-farmer.depEgress" (dict "bundled" false "peers" $np.external.objectStore "port" (include "imas-farmer.objectStorePort" .)) | nindent 4 }}
+    {{- $s3Versity := include "imas-farmer.s3UsesVersity" . }}
+    {{- $accVersity := include "imas-farmer.accountsUseVersity" . }}
+    {{- if include "imas-farmer.s3Endpoint" . }}
+    {{- include "imas-farmer.depEgress" (dict "bundled" false "peers" (fromYamlArray (include "imas-farmer.objectStorePeers" (dict "root" . "versity" $s3Versity))) "port" (include "imas-farmer.objectStorePort" .)) | nindent 4 }}
     {{- end }}
     {{- $accPort := include "imas-farmer.accountStorePort" . }}
-    {{- if or (not .Values.objectStore.endpoint) (ne $accPort (include "imas-farmer.objectStorePort" .)) }}
-    {{- include "imas-farmer.depEgress" (dict "bundled" false "peers" $np.external.objectStore "port" $accPort) | nindent 4 }}
+    {{- if or (not (include "imas-farmer.s3Endpoint" .)) (ne $accPort (include "imas-farmer.objectStorePort" .)) (ne $s3Versity $accVersity) }}
+    {{- include "imas-farmer.depEgress" (dict "bundled" false "peers" (fromYamlArray (include "imas-farmer.objectStorePeers" (dict "root" . "versity" $accVersity))) "port" $accPort) | nindent 4 }}
     {{- end }}
     {{- include "imas-farmer.dnsEgress" . | nindent 4 }}
     {{- with $np.farmerExtraEgress }}
@@ -58,7 +61,8 @@ spec:
 #        with saasapi.operator: the sprout release hook Job's pods (plus
 #        networkPolicy.saasapiOperatorIngress.from) -> the operator port
 #   out: the bus (client port), PXC, Valkey, DNS; OpenBao only for the
-#        bus CA fetch; the object store with saasapi.recipes; plus
+#        bus CA fetch; the object store (or the Versity Gateway) with
+#        saasapi.recipes; plus
 #        networkPolicy.saasapiExtraEgress (default: HTTPS anywhere, for the
 #        Keycloak JWKS)
 # Sealed internal.* (J.4) adds no path: it rides the bus connection, and
@@ -104,7 +108,7 @@ spec:
     {{- include "imas-farmer.openbaoEgress" . | nindent 4 }}
     {{- end }}
     {{- if .Values.saasapi.recipes.enabled }}
-    {{- include "imas-farmer.depEgress" (dict "bundled" false "peers" $np.external.objectStore "port" (include "imas-farmer.objectStorePort" .)) | nindent 4 }}
+    {{- include "imas-farmer.depEgress" (dict "bundled" false "peers" (fromYamlArray (include "imas-farmer.objectStorePeers" (dict "root" . "versity" (include "imas-farmer.s3UsesVersity" .)))) "port" (include "imas-farmer.objectStorePort" .)) | nindent 4 }}
     {{- end }}
     {{- include "imas-farmer.dnsEgress" . | nindent 4 }}
     {{- with $np.saasapiExtraEgress }}

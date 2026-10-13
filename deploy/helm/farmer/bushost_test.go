@@ -80,7 +80,7 @@ const defaultBusEgress = `  egress:
 // main; this pins the parts bus.host touches.)
 func TestBusHostUnsetUnchanged(t *testing.T) {
 	const url = "tls://imas-dmz-nats-bus.imas-dmz.svc.cluster.local:5406"
-	for _, f := range []string{"default-values.yaml", "external-values.yaml", "token-auth-values.yaml"} {
+	for _, f := range []string{"default-values.yaml", "external-values.yaml", "token-auth-values.yaml", "versity-values.yaml"} {
 		t.Run(f, func(t *testing.T) {
 			args := []string{"-f", ciValues(t, f)}
 			docs := mustRender(t, args...)

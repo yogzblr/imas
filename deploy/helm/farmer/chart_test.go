@@ -665,7 +665,7 @@ func TestValidationFailures(t *testing.T) {
 		// Recipe upload (REC.1): saasapi's own, separate credential.
 		{"recipes without credential", "saasapi.recipes.credentialsSecret is required", []string{"--set", "saasapi.recipes.enabled=true", "--set", "objectStore.endpoint=minio:9000", "--set", "objectStore.bucket=recipes"}},
 		{"recipes with farmer's credential", "must not be objectStore.credentialsSecret", []string{"--set", "saasapi.recipes.enabled=true", "--set", "objectStore.endpoint=minio:9000", "--set", "objectStore.bucket=recipes", "--set", "objectStore.credentialsSecret=s3", "--set", "saasapi.recipes.credentialsSecret=s3"}},
-		{"recipes without bucket", "needs objectStore.endpoint and objectStore.bucket", []string{"--set", "saasapi.recipes.enabled=true", "--set", "saasapi.recipes.credentialsSecret=saasapi-s3"}},
+		{"recipes without bucket", "needs objectStore.endpoint (or versity.enabled) and objectStore.bucket", []string{"--set", "saasapi.recipes.enabled=true", "--set", "saasapi.recipes.credentialsSecret=saasapi-s3"}},
 		{"one recipe role", "readRole and writeRole must both be set and differ", []string{"--set", "saasapi.recipes.writeRole=imas-recipes-read"}},
 		{"fractional recipe cap", "saasapi.recipes.maxCount must be a positive whole number", []string{"--set", "saasapi.recipes.maxCount=1.5"}},
 		{"zero recipe burst", "saasapi.recipes.writeRateLimit.burst must be a whole number", []string{"--set", "saasapi.recipes.writeRateLimit.burst=0"}},
@@ -3502,7 +3502,7 @@ func TestBootstrapAdminRequired(t *testing.T) {
 	mustFail(t, "set farmer.bootstrapAdmin.skip=true instead", noAdmin...)
 	// Every documented example carries one, on its own (without required,
 	// whose --set would win over the file).
-	for _, f := range []string{"default-values.yaml", "external-values.yaml", "token-auth-values.yaml"} {
+	for _, f := range []string{"default-values.yaml", "external-values.yaml", "token-auth-values.yaml", "versity-values.yaml"} {
 		docs, err := runHelm(t, strippedChart(t), "-f", ciValues(t, f))
 		if err != nil {
 			t.Fatalf("ci/%s: %v", f, err)

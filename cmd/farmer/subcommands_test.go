@@ -9,6 +9,7 @@ import (
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 	"github.com/yogzblr/imas/internal/sproutrelease"
+	"github.com/yogzblr/imas/internal/versitysetup"
 )
 
 // The pre-config subcommands are dispatched, by the names the chart's
@@ -28,6 +29,19 @@ func TestRunPreConfigSubcommandDispatch(t *testing.T) {
 	code, ok := runPreConfigSubcommand([]string{sproutrelease.Command, "-no-such-flag"}, &bytes.Buffer{}, &stderr)
 	if !ok || code != 2 {
 		t.Errorf("register-sprout-release with a bad flag: ok=%v code=%d %s", ok, code, stderr.String())
+	}
+	// The Versity Gateway commands (chart_test.go checks the names the
+	// init container and the createBuckets Job run): a call without its
+	// flags is a usage error, not the server.
+	if versitysetup.IAMCommand != "versity-iam" || versitysetup.BucketsCommand != "versity-buckets" {
+		t.Fatalf("subcommand names changed: %q %q", versitysetup.IAMCommand, versitysetup.BucketsCommand)
+	}
+	for _, name := range []string{versitysetup.IAMCommand, versitysetup.BucketsCommand} {
+		stderr.Reset()
+		code, ok := runPreConfigSubcommand([]string{name}, &bytes.Buffer{}, &stderr)
+		if !ok || code != 2 {
+			t.Errorf("%s with no flags: ok=%v code=%d %s", name, ok, code, stderr.String())
+		}
 	}
 }
 
