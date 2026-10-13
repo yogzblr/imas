@@ -164,6 +164,11 @@ boot --uat "$DATA/uat.json" --access "$DATA/access.json" --ssh-key "$CASE/id_tes
 expect_rc 2
 expect_err "--timeout must be"
 
+t "bootstrap: bad --nodes"
+boot --uat "$DATA/uat.json" --access "$DATA/access.json" --ssh-key "$CASE/id_test" --out "$CASE/out" --nodes three
+expect_rc 2
+expect_err "--nodes must be a positive number"
+
 t "bootstrap: out path with a space"
 boot --uat "$DATA/uat.json" --access "$DATA/access.json" --ssh-key "$CASE/id_test" --out "$CASE/o u t"
 expect_rc 2
@@ -358,7 +363,7 @@ bad_uat "admin user" '.dmz.admin_user = "root;id"' "bad dmz.admin_user"
 bad_uat "run_id too short" '.run_id = "ab1"' "run_id must be"
 bad_uat "run_id upper case" '.run_id = "AB12CD34"' "run_id must be"
 bad_uat "missing core" 'del(.core)' "missing or not a scalar: .core.name"
-bad_uat "same name for both hubs" '.core.name = "uat-dmz"' "same name"
+bad_uat "same name for both hubs" '.core.name = "uat-dmz" | .core.node_names = ["uat-dmz"]' "node uat-dmz appears twice"
 bad_uat "public IP not an address" '.dmz.public_ip = "nope"' "bad dmz.public_ip"
 
 bad_access() { # bad_access LABEL JQ_FILTER EXPECTED_ERROR
@@ -383,7 +388,7 @@ t "render warns: a range holding ports k0s uses"
 sed 's/^UAT_DMZ_NODE_PORT_RANGE=.*/UAT_DMZ_NODE_PORT_RANGE=5406-8443/' "$K0S/config.env" >"$CASE/config-wide.env"
 UAT_K0S_CONFIG="$CASE/config-wide.env" boot_render "$DATA/uat.json" "$DATA/access.json"
 expect_rc 0
-expect_err "warning: the dmz NodePort range 5406-8443 contains ports k0s or the node uses: 6443 8080 8132 8133"
+expect_err "warning: the dmz NodePort range 5406-8443 contains ports k0s or the node uses: 5555 6443 7132 7443 8080 8132 8133"
 if [[ $ERR == *"the core NodePort range"* ]]; then fail "core range should hold no reserved port"; else pass; fi
 
 t "render refuses: exposing a port k0s uses"
@@ -650,7 +655,7 @@ cp "$DATA/kube/core/services.json" "$CASE/fix/core/services.json"
 
 t "check: hostPorts"
 chk --out "$CASE/out"
-expect_out "pod   imas-core/imas-uat-core-edge-0  hostPort 443 -> 8443"
+expect_out "pod   imas-core/imas-uat-core-edge-0  node uat-hub  hostPort 443 -> 8443"
 expect_out "hostPorts within 443 5405 9000"
 expect_out "hostPorts within none"
 if [[ $OUT == *"kube-router-abcde  hostPort"* ]]; then fail "host-network pod listed"; else pass; fi
@@ -675,6 +680,282 @@ chk --out "$CASE/out"
 expect_rc 1
 expect_out "cannot list nodes"
 mv "$CASE/fix/nodes.json.off" "$CASE/fix/nodes.json"
+
+###############################################################################
+# HA hubs (P24, brief H2): 3 controller+worker nodes on etcd per hub
+###############################################################################
+HA_UAT="$DATA/uat-ha.json"
+HA_ACCESS="$DATA/access-ha.json"
+
+fresh_case harender
+t "ha render: 3 + 3 nodes"
+boot_render "$HA_UAT" "$HA_ACCESS"
+expect_rc 0
+for f in k0sctl-dmz.yaml k0sctl-core.yaml endpoints.json; do
+  t "ha render: golden ${f%.*}-ha.${f##*.}"
+  g="$DATA/expected/${f%.*}-ha.${f##*.}"
+  if [[ ${UPDATE_GOLDEN:-} == 1 ]]; then
+    normalise "$CASE/out/$f" >"$g"
+  fi
+  if diff -u "$g" <(normalise "$CASE/out/$f") >"$CASE/diff"; then
+    pass
+  else
+    fail "differs from $g:
+$(head -40 "$CASE/diff")"
+  fi
+done
+
+HC="$CASE/out/k0sctl-core.yaml"
+HD="$CASE/out/k0sctl-dmz.yaml"
+t "ha render: every node is controller+worker, untainted, through its own tunnel"
+[[ $(grep -c '^    - role: controller+worker$' "$HC") == 3 ]] && pass || fail "core: want 3 controller+worker hosts"
+[[ $(grep -c '^      noTaints: true$' "$HC") == 3 ]] && pass || fail "core: want noTaints on 3 hosts"
+expect_file_lacks "$HC" "role: single"
+for p in 50122 50123 50124; do expect_file_has "$HC" "        port: $p"; done
+for n in uat-core-1 uat-core-2 uat-core-3; do expect_file_has "$HC" "          HostKeyAlias: $n"; done
+for ip in 10.60.2.4 10.60.2.5 10.60.2.6; do expect_file_has "$HC" "      privateAddress: $ip"; done
+for n in uat-dmz-1 uat-dmz-2 uat-dmz-3; do expect_file_has "$HD" "          HostKeyAlias: $n"; done
+
+t "ha render: etcd, no externalAddress, no shared api.address"
+expect_file_has "$HC" "          type: etcd"
+if grep -qE '^ *externalAddress:' "$HC"; then fail "an HA hub sets no spec.api.externalAddress"; else pass; fi
+if grep -qE '^          address:' "$HC"; then fail "an HA hub must not set one spec.api.address for every node"; else pass; fi
+expect_file_has "$HC" "          port: 6443"
+
+t "ha render: the load balancer's address and name are SANs, with every node"
+sans=$(sed -n '/^          sans:/,/^          extraArgs:/p' "$HC")
+for s2 in "- 127.0.0.1" "- 10.60.2.250" "- core-api.uat.imas.internal" "- 10.60.2.4" "- 10.60.2.5" "- 10.60.2.6" "- uatabc123-core.centralindia.cloudapp.azure.com"; do
+  if [[ $sans == *"$s2"* ]]; then pass; else fail "core SANs lack $s2: $sans"; fi
+done
+expect_file_has "$HD" "            - dmz-api.uat.imas.internal"
+
+t "ha render: kube-router FOU overlay on config.env's port, which uat/tofu opens"
+fou=$(sed -n 's/^UAT_KUBE_ROUTER_FOU_PORT=//p' "$K0S/config.env")
+expect_file_has "$HC" "              overlay-encap: fou"
+expect_file_has "$HC" "              overlay-type: full"
+expect_file_has "$HC" "              overlay-encap-port: \"$fou\""
+if grep -qE "k0s_node_udp_ports *= *\[\"$fou\"\]" "$K0S/../tofu/network-security.tf"; then pass; else fail "uat/tofu does not open UDP $fou between a hub's nodes"; fi
+expect_file_has "$HC" "            - sudo modprobe fou"
+
+t "ha render: node-local load balancing on"
+expect_file_has "$HC" "          nodeLocalLoadBalancing:"
+expect_file_has "$HC" "            type: EnvoyProxy"
+
+t "ha render: CoreDNS maps the own FQDN to each node, the other hub's to its api_address"
+for ip in 10.60.2.4 10.60.2.5 10.60.2.6; do
+  expect_file_has "$HC" "$ip uatabc123-core.centralindia.cloudapp.azure.com"
+  expect_file_lacks "$HD" "$ip uatabc123-core.centralindia.cloudapp.azure.com"
+done
+expect_file_has "$HC" "10.60.1.250 uatabc123-dmz.centralindia.cloudapp.azure.com"
+expect_file_has "$HD" "10.60.2.250 uatabc123-core.centralindia.cloudapp.azure.com"
+for ip in 10.60.1.4 10.60.1.5 10.60.1.6; do expect_file_has "$HD" "$ip uatabc123-dmz.centralindia.cloudapp.azure.com"; done
+
+t "ha render: no k0sctl expansion or leftover token"
+for h in dmz core; do
+  # shellcheck disable=SC2016 # a literal dollar sign
+  expect_file_lacks "$CASE/out/k0sctl-$h.yaml" '$'
+  if grep -qE '__[A-Z0-9_]+__' "$CASE/out/k0sctl-$h.yaml"; then fail "token left in $h"; else pass; fi
+done
+
+t "ha render: rendered files are valid YAML of the right shape"
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
+  for h in dmz core; do
+    if python3 - "$CASE/out/k0sctl-$h.yaml" "$h" <<'PY'; then pass; else fail "$h: not valid YAML or wrong shape"; fi
+import sys, yaml
+d = yaml.safe_load(open(sys.argv[1]))
+hosts = d["spec"]["hosts"]
+assert len(hosts) == 3 and all(h["role"] == "controller+worker" and h["noTaints"] is True for h in hosts)
+assert all(h["hooks"]["apply"]["before"] for h in hosts)
+assert len({h["openSSH"]["port"] for h in hosts}) == 3
+cfg = d["spec"]["k0s"]["config"]["spec"]
+assert cfg["storage"] == {"type": "etcd"}
+assert "address" not in cfg["api"] and "externalAddress" not in cfg["api"]
+assert cfg["network"]["nodeLocalLoadBalancing"] == {"enabled": True, "type": "EnvoyProxy"}
+assert cfg["network"]["kuberouter"]["extraArgs"]["overlay-encap"] == "fou"
+assert {"dmz": "dmz-api.uat.imas.internal", "core": "core-api.uat.imas.internal"}[sys.argv[2]] in cfg["api"]["sans"]
+PY
+  done
+else
+  echo "skip: python3 yaml module not available (YAML parse check)"
+fi
+
+t "ha render: endpoints.json carries the nodes, API address and datastore"
+E="$CASE/out/endpoints.json"
+[[ $(jq -r '.core.nodes | join(" ")' "$E") == "uat-core-1 uat-core-2 uat-core-3" ]] && pass || fail "core nodes"
+[[ $(jq -r '.dmz.node_private_ips | join(" ")' "$E") == "10.60.1.4 10.60.1.5 10.60.1.6" ]] && pass || fail "dmz node ips"
+[[ $(jq -r '[.dmz.datastore, .core.datastore] | join(" ")' "$E") == "etcd etcd" ]] && pass || fail "datastore"
+[[ $(jq -r '[.dmz.api_address, .core.api_fqdn] | join(" ")' "$E") == "10.60.1.250 core-api.uat.imas.internal" ]] && pass || fail "api address and name"
+[[ $(jq -r '.core.exposure' "$E") == hostPort ]] && pass || fail "core.exposure"
+
+t "ha render: one HA hub and one single node"
+jq_edit "$HA_UAT" "$CASE/mixed.json" '.dmz = {name: "uat-dmz", id: "x", private_ip: "10.60.1.4", public_ip: "198.51.100.30",
+  fqdn: "uatabc123-dmz.centralindia.cloudapp.azure.com", admin_user: "imasuat", node_names: ["uat-dmz"],
+  node_ids: ["x"], node_private_ips: ["10.60.1.4"], api_address: "10.60.1.4", api_fqdn: "dmz-api.uat.imas.internal"}'
+jq '. + {"uat-dmz": .["uat-dmz-1"]}' "$HA_ACCESS" >"$CASE/mixed-access.json"
+boot_render "$CASE/mixed.json" "$CASE/mixed-access.json"
+expect_rc 0
+expect_file_has "$CASE/out/k0sctl-dmz.yaml" "    - role: single"
+expect_file_has "$CASE/out/k0sctl-core.yaml" "10.60.1.4 uatabc123-dmz.centralindia.cloudapp.azure.com"
+[[ $(jq -r '.dmz.datastore' "$CASE/out/endpoints.json") == kine ]] && pass || fail "single dmz keeps kine"
+
+bad_ha() { # bad_ha LABEL JQ_FILTER EXPECTED_ERROR [ACCESS_FILTER]
+  t "ha render refuses: $1"
+  jq_edit "$HA_UAT" "$CASE/bad-ha.json" "$2"
+  jq_edit "$HA_ACCESS" "$CASE/bad-ha-access.json" "${4:-.}"
+  boot_render "$CASE/bad-ha.json" "$CASE/bad-ha-access.json"
+  expect_rc 1
+  expect_err "$3"
+}
+bad_ha "two nodes (etcd needs an odd number)" '.core.node_names |= .[:2] | .core.node_private_ips |= .[:2]' "core has 2 nodes"
+bad_ha "node lists of different lengths" '.dmz.node_private_ips |= .[:2]' "differ in length"
+bad_ha "no api_address" 'del(.core.api_address)' "core has 3 nodes but no api_address"
+bad_ha "no api_fqdn" 'del(.dmz.api_fqdn)' "dmz has 3 nodes but no api_fqdn"
+bad_ha "api_address is a node's" '.core.api_address = "10.60.2.5"' "must be the load balancer's"
+bad_ha "api_fqdn carrying YAML" '.core.api_fqdn = "a.b\n  x: 1"' "bad core.api_fqdn"
+bad_ha "a node address out of range" '.dmz.node_private_ips[2] = "10.60.1.256"' "bad dmz node address"
+bad_ha "a bad node name" '.core.node_names[1] = "Uat_Core"' "bad core node name"
+bad_ha "a node twice" '.core.node_names[2] = "uat-core-2"' "node uat-core-2 appears twice"
+bad_ha "the hub's name is not the first node" '.dmz.name = "uat-dmz-2"' "must be the first node's"
+bad_ha "node_names not a list of strings" '.dmz.node_names = "uat-dmz-1"' "dmz.node_names must be a list of strings"
+bad_ha "no API tunnel" '.' "no host for VM core-api" 'del(.["core-api"])'
+t "ha render: --nodes matches the hubs"
+boot --uat "$HA_UAT" --access "$HA_ACCESS" --ssh-key "$CASE/id_test" --out "$CASE/out" --render-only --nodes 3
+expect_rc 0
+t "ha render refuses: --nodes differs from the uat JSON"
+boot --uat "$HA_UAT" --access "$HA_ACCESS" --ssh-key "$CASE/id_test" --out "$CASE/out" --render-only --nodes 1
+expect_rc 1
+expect_err "dmz has 3 nodes, --nodes asks for 1"
+boot --uat "$DATA/uat.json" --access "$DATA/access.json" --ssh-key "$CASE/id_test" --out "$CASE/out" --render-only --nodes 3
+expect_rc 1
+expect_err "dmz has 1 nodes, --nodes asks for 3"
+
+bad_ha "a node without its SSH tunnel" '.' "no ssh_port for VM uat-dmz-3" 'del(.["uat-dmz-3"].ssh_port)'
+
+###############################################################################
+# HA hubs: the install flow against stubs
+###############################################################################
+ha_fix() { # 3-node answers for both hubs
+  local h
+  for h in dmz core; do cp "$DATA/kube/ha/$h/"*.json "$CASE/fix/$h/"; done
+}
+ha_full() { boot --uat "$HA_UAT" --access "$HA_ACCESS" --ssh-key "$CASE/id_test" --out "$CASE/out" "$@"; }
+
+fresh_case haflow
+ha_fix
+t "ha flow: both hubs, kubeconfig through the API tunnel, waits for 3 nodes and 3 etcd members"
+ha_full --skip-check
+expect_rc 0
+expect_log_order "$CASE/log" \
+  "k0sctl apply --config $CASE/out/k0sctl-dmz.yaml" \
+  "k0sctl kubeconfig --config $CASE/out/k0sctl-dmz.yaml --cluster imas-uat-abc123-dmz --address https://127.0.0.1:56450" \
+  "kubectl dmz get nodes" \
+  "kubectl dmz wait --for=condition=Ready node --all" \
+  "kubectl dmz get etcdmembers.etcd.k0sproject.io" \
+  "k0sctl apply --config $CASE/out/k0sctl-core.yaml" \
+  "k0sctl kubeconfig --config $CASE/out/k0sctl-core.yaml --cluster imas-uat-abc123-core --address https://127.0.0.1:56550" \
+  "kubectl core get etcdmembers.etcd.k0sproject.io"
+expect_err "dmz: 3 node(s) Ready"
+expect_err "core: etcd has 3 members"
+expect_file_has "$CASE/out/core.kubeconfig" "server: https://127.0.0.1:56550"
+[[ $(grep -c '^k0sctl apply' "$CASE/log") == 2 ]] && pass || fail "want one k0sctl apply per hub"
+
+t "ha flow: with the check at the end"
+fresh_case haflowcheck
+ha_fix
+ha_full
+expect_rc 0
+expect_out "etcd: 3 members joined"
+expect_out "3 node(s) Ready, the hub has 3"
+expect_out "both hubs pass"
+
+t "ha flow: fewer nodes than the hub has"
+fresh_case hafewnodes
+ha_fix
+jq_edit "$DATA/kube/ha/core/nodes.json" "$CASE/fix/core/nodes.json" '.items |= .[:2]'
+ha_full --skip-check --timeout 1
+expect_rc 1
+expect_err "core: 2 of 3 node(s) registered within 1s"
+
+t "ha flow: etcd short of a member"
+fresh_case haetcd
+ha_fix
+jq_edit "$DATA/kube/ha/dmz/etcdmembers.json" "$CASE/fix/dmz/etcdmembers.json" '.items[2].status.conditions[0].status = "False"'
+ha_full --skip-check --timeout 1
+expect_rc 1
+expect_err "dmz: etcd has 2 of 3 members joined after 1s"
+expect_file_lacks "$CASE/log" "k0sctl apply --config $CASE/out/k0sctl-core.yaml"
+
+###############################################################################
+# HA hubs: check.sh
+###############################################################################
+fresh_case hacheck
+ha_fix
+mkdir -p "$CASE/out"
+: >"$CASE/out/dmz.kubeconfig"
+: >"$CASE/out/core.kubeconfig"
+boot_render "$HA_UAT" "$HA_ACCESS" >/dev/null
+t "ha check: healthy"
+chk --out "$CASE/out"
+expect_rc 0
+expect_out "node  uat-core-3  Ready=True"
+expect_out "etcd  uat-dmz-2  10.60.1.5  Joined=True"
+expect_out "CoreDNS: uatabc123-core.centralindia.cloudapp.azure.com -> 10.60.2.6"
+expect_out "CoreDNS: uatabc123-dmz.centralindia.cloudapp.azure.com -> 10.60.1.250"
+
+t "ha check: a node not Ready"
+jq_edit "$DATA/kube/ha/core/nodes.json" "$CASE/fix/core/nodes.json" '.items[1].status.conditions[1].status = "False"'
+chk --out "$CASE/out"
+expect_rc 1
+expect_out "core: node not Ready: uat-core-2"
+expect_out "core: 2 of 3 nodes Ready"
+cp "$DATA/kube/ha/core/nodes.json" "$CASE/fix/core/nodes.json"
+
+t "ha check: a node missing"
+jq_edit "$DATA/kube/ha/dmz/nodes.json" "$CASE/fix/dmz/nodes.json" '.items |= .[1:]'
+chk --out "$CASE/out"
+expect_rc 1
+expect_out "dmz: 2 of 3 nodes Ready"
+cp "$DATA/kube/ha/dmz/nodes.json" "$CASE/fix/dmz/nodes.json"
+
+t "ha check: an etcd member missing"
+jq_edit "$DATA/kube/ha/core/etcdmembers.json" "$CASE/fix/core/etcdmembers.json" '.items |= .[:2]'
+chk --out "$CASE/out"
+expect_rc 1
+expect_out "core: etcd has 2 of 3 members joined"
+cp "$DATA/kube/ha/core/etcdmembers.json" "$CASE/fix/core/etcdmembers.json"
+
+t "ha check: an etcd member that left"
+jq_edit "$DATA/kube/ha/dmz/etcdmembers.json" "$CASE/fix/dmz/etcdmembers.json" '.items[0].status.conditions[0].status = "False"'
+chk --out "$CASE/out"
+expect_rc 1
+expect_out "dmz: etcd has 2 of 3 members joined"
+cp "$DATA/kube/ha/dmz/etcdmembers.json" "$CASE/fix/dmz/etcdmembers.json"
+
+t "ha check: etcd members cannot be listed"
+mv "$CASE/fix/core/etcdmembers.json" "$CASE/fix/core/etcdmembers.off"
+chk --out "$CASE/out"
+expect_rc 1
+expect_out "core: cannot list etcd members"
+mv "$CASE/fix/core/etcdmembers.off" "$CASE/fix/core/etcdmembers.json"
+
+t "ha check: CoreDNS lacks one node of the own hub"
+jq_edit "$DATA/kube/ha/core/coredns.json" "$CASE/fix/core/coredns.json" '.data.Corefile |= sub("10.60.2.5 [^\n]*\n"; "")'
+chk --out "$CASE/out"
+expect_rc 1
+expect_out "core: CoreDNS does not map uatabc123-core.centralindia.cloudapp.azure.com to 10.60.2.5"
+cp "$DATA/kube/ha/core/coredns.json" "$CASE/fix/core/coredns.json"
+
+t "ha check: CoreDNS maps the other hub to a node instead of its api_address"
+jq_edit "$DATA/kube/ha/dmz/coredns.json" "$CASE/fix/dmz/coredns.json" '.data.Corefile |= sub("10.60.2.250 "; "10.60.2.4 ")'
+chk --out "$CASE/out"
+expect_rc 1
+expect_out "dmz: CoreDNS does not map uatabc123-core.centralindia.cloudapp.azure.com to 10.60.2.250"
+cp "$DATA/kube/ha/dmz/coredns.json" "$CASE/fix/dmz/coredns.json"
+
+t "ha check: a single-node endpoints file expects one node and no etcd"
+chk --out "$CASE/out" --endpoints "$WORK/check/out/endpoints.json"
+if [[ $OUT == *"etcd  "* ]]; then fail "etcd checked for a single-node hub"; else pass; fi
+expect_out "3 node(s) Ready, the hub has 1"
 
 ###############################################################################
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

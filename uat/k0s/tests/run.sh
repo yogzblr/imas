@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # uat/k0s/tests/run.sh: every static check and test for uat/k0s.
-#   ShellCheck on the scripts and stubs, yamllint on the templates and the
-#   golden rendered files, then tests/test-k0s.sh.
+#   ShellCheck on the scripts and stubs, yamllint on the golden rendered
+#   files, then tests/test-k0s.sh.
 # A missing shellcheck or yamllint is reported as skipped, never as passed;
 # REQUIRE_LINTERS=1 makes a missing one a failure.
 set -uo pipefail
@@ -27,7 +27,9 @@ fi
 
 if command -v yamllint >/dev/null 2>&1; then
   echo "== yamllint"
-  yamllint -s -c "$K0S/.yamllint.yaml" "$K0S/.yamllint.yaml" "$K0S/templates" \
+  # The templates are not YAML until rendered; the golden files are what
+  # they render to.
+  yamllint -s -c "$K0S/.yamllint.yaml" "$K0S/.yamllint.yaml" \
     "$K0S"/testdata/expected/*.yaml "$K0S"/testdata/downloads/*.yaml && echo ok || rc=1
 else
   skip yamllint

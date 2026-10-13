@@ -15,6 +15,8 @@ in one resource group, `imas-uat-<run_id>`, and destroys it afterwards:
   `10.60.4.0/26`, one network security group per subnet;
 - one Azure Bastion (Standard SKU, native client tunnelling on, its own
   Standard public IP), the only path to SSH, WinRM and the Kubernetes API;
+  on an HA run also IP-based connection (`ip_connect_enabled`), for the
+  tunnel to each HA hub's API address (`uat/access`);
 - the two hubs, `uat-dmz` and `uat-core`, and the six sprouts, `t1-ubuntu`,
   `t1-alma`, `t1-win`, `t2-ubuntu`, `t2-alma` and `t2-win`, each with its own
   Standard public IP;
@@ -324,7 +326,13 @@ With more nodes (the HA run is 3 and 3, owner 2026-10-13; P24):
 - **Azure limitation.** An internal load balancer drops a flow from a backend
   node to its own frontend when the flow lands on that same node. A node of
   the hub must therefore not use `api_address` to reach its own hub's API;
-  k0s's node-local load balancing does not (brief H2).
+  k0s's node-local load balancing does not, and `uat/k0s` sets no
+  `externalAddress` (`uat/k0s/README.md`, "HA hubs").
+- **Bastion.** On an HA run the Bastion allows IP-based connections
+  (`ip_connect_enabled`), so `uat/access/tunnels.sh` opens a kube tunnel to
+  each HA hub's `api_address`, which is no VM. The NSG rules above already
+  admit the Bastion subnet on 6443 to the hub's subnet, and a load balancer
+  keeps the client's address. The single-node run keeps it off.
 - **Quota.** `quota-check.sh` runs before every apply in the workflow:
 
 ```sh
@@ -460,7 +468,7 @@ az resource list --tag run_id=<run_id> -o table   # must be empty
 | `uat-core` | 1 | Standard_D8s_v5: 8 vCPU, 32 GiB; 128 GB Standard SSD |
 | `t1-ubuntu`, `t2-ubuntu`, `t1-alma`, `t2-alma` | 4 | Standard_B2ls_v2: 2 vCPU, 4 GiB; 30 GB Standard SSD |
 | `t1-win`, `t2-win` | 2 | Standard_B2ls_v2: 2 vCPU, 4 GiB; 30 GB Standard SSD |
-| Azure Bastion `uat-bastion` | 1 | Standard SKU, 2 scale units |
+| Azure Bastion `uat-bastion` | 1 | Standard SKU, 2 scale units; IP-based connection on an HA run only |
 | Standard public IPs | 9 | 8 VMs and the Bastion; static |
 | VNet, subnets, NSGs, NICs | 1, 4, 4, 8 | |
 | Private DNS zone, VNet link, A records | 1, 1, 6 | `dmz`, `core`, `dmz-api`, `core-api`, `uat-dmz`, `uat-core` |
@@ -508,8 +516,9 @@ What ran here (no Azure access):
   region fallback, the load balancers, their rules and probes, backend pool
   members, the added NSG rules and that every single-node rule is kept, that
   management ports are open only to the Bastion, the hub's own nodes and the
-  probe, the private DNS records, the `uat` and `ha_node_names` outputs, one
-  hub HA and the other single, and the node count validation.
+  probe, the private DNS records, the `uat` and `ha_node_names` outputs, the
+  Bastion's IP-based connection (on with an HA hub, off in the single-node
+  run), one hub HA and the other single, and the node count validation.
 - `tests/destroy_test.sh`: `destroy.sh` against stubbed `tofu` and `az`, all
   three branches (clean destroy; fallback to `az group delete`; leftovers exit
   1, including an HA run's load balancers), the refusal to delete a group

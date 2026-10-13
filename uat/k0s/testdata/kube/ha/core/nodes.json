@@ -1,0 +1,66 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "metadata": {
+        "name": "uat-core-1"
+      },
+      "status": {
+        "conditions": [
+          {
+            "type": "MemoryPressure",
+            "status": "False"
+          },
+          {
+            "type": "Ready",
+            "status": "True"
+          }
+        ],
+        "nodeInfo": {
+          "kubeletVersion": "v1.36.4+k0s"
+        }
+      }
+    },
+    {
+      "metadata": {
+        "name": "uat-core-2"
+      },
+      "status": {
+        "conditions": [
+          {
+            "type": "MemoryPressure",
+            "status": "False"
+          },
+          {
+            "type": "Ready",
+            "status": "True"
+          }
+        ],
+        "nodeInfo": {
+          "kubeletVersion": "v1.36.4+k0s"
+        }
+      }
+    },
+    {
+      "metadata": {
+        "name": "uat-core-3"
+      },
+      "status": {
+        "conditions": [
+          {
+            "type": "MemoryPressure",
+            "status": "False"
+          },
+          {
+            "type": "Ready",
+            "status": "True"
+          }
+        ],
+        "nodeInfo": {
+          "kubeletVersion": "v1.36.4+k0s"
+        }
+      }
+    }
+  ]
+}

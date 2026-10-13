@@ -188,6 +188,44 @@ if [ "$rc" -eq 0 ] && [ "$(jq -r 'keys | join(",")' "$state/access.json")" = "ua
 else nok "tunnels: docker sprouts (rc=$rc)" "$out"; fi
 t close "$state"
 
+# An HA hub (P24, brief H2): SSH and kube tunnels to every node by its own
+# id, and one kube tunnel per hub to its API address by IP.
+new_case ha
+jq '.sprouts |= with_entries(.value.connection = "docker")' "$uat_ha" >"$work/ha.json"
+t open "$work/ha.json" "$state"
+a="$state/access.json"
+if [ "$rc" -eq 0 ] && [ "$(jq -r 'keys | join(",")' "$a")" = "core-api,dmz-api,uat-core-1,uat-core-2,uat-core-3,uat-dmz-1,uat-dmz-2,uat-dmz-3" ]; then
+  ok "tunnels: an HA hub gets every node and its API address"
+else nok "tunnels: HA keys (rc=$rc)" "$out $(cat "$a" 2>/dev/null)"; fi
+if jq -e '[to_entries[] | select(.key | startswith("uat-")) | .value] | length == 6 and all(.ssh_port and .kube_port)' "$a" >/dev/null; then
+  ok "tunnels: every HA node gets ssh_port and kube_port"
+else nok "tunnels: HA node ports" "$(cat "$a")"; fi
+if jq -e '[.["dmz-api"], .["core-api"]] | all(.kube_port and (.ssh_port | not) and (.pids | length) == 1)' "$a" >/dev/null; then
+  ok "tunnels: the API address entries have kube_port only"
+else nok "tunnels: API entries" "$(cat "$a")"; fi
+if calls | grep -q -- "network bastion tunnel --name uat-bastion --resource-group imas-uat-abc123 --target-ip-address 10.60.1.250 --resource-port 6443 --port $(jq '.["dmz-api"].kube_port' "$a")" &&
+  calls | grep -q -- "--target-ip-address 10.60.2.250 --resource-port 6443 --port $(jq '.["core-api"].kube_port' "$a")"; then
+  ok "tunnels: the API tunnel targets the hub's api_address by IP"
+else nok "tunnels: API tunnel arguments" "$(calls)"; fi
+core3_id=$(jq -r '.core.node_ids[2]' "$uat_ha")
+if calls | grep -q -- "--target-resource-id $core3_id --resource-port 22 --port $(jq '.["uat-core-3"].ssh_port' "$a")" &&
+  calls | grep -q -- "--target-resource-id $core3_id --resource-port 6443 --port $(jq '.["uat-core-3"].kube_port' "$a")"; then
+  ok "tunnels: each HA node's tunnels target that node's id"
+else nok "tunnels: HA node ids" "$(calls)"; fi
+if [ "$(calls | grep -c -- 'network bastion tunnel')" -eq 14 ]; then ok "tunnels: fourteen tunnels for 3 + 3 nodes"; else nok "tunnels: HA tunnel count" "$(calls)"; fi
+t close "$state"
+
+new_case ha_bad
+jq '.dmz.api_address = "10.60.1.250; id"' "$uat_ha" >"$work/ha-bad.json"
+t open "$work/ha-bad.json" "$state"
+if [ "$rc" -ne 0 ] && ! calls | grep -q "bastion tunnel"; then ok "tunnels: a bad api_address fails before any tunnel"; else nok "tunnels: bad api_address (rc=$rc)" "$out"; fi
+jq 'del(.core.api_address)' "$uat_ha" >"$work/ha-noapi.json"
+t open "$work/ha-noapi.json" "$state"
+if [ "$rc" -ne 0 ] && ! calls | grep -q "bastion tunnel"; then ok "tunnels: an HA hub without api_address fails before any tunnel"; else nok "tunnels: no api_address (rc=$rc)" "$out"; fi
+jq '.dmz.node_ids |= .[:2]' "$uat_ha" >"$work/ha-ids.json"
+t open "$work/ha-ids.json" "$state"
+if [ "$rc" -ne 0 ] && ! calls | grep -q "bastion tunnel"; then ok "tunnels: node_names and node_ids of different lengths fail"; else nok "tunnels: node list lengths (rc=$rc)" "$out"; fi
+
 # ------------------------------------------------------------------ vmctl.sh
 
 new_case vargs

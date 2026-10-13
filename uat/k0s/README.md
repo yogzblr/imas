@@ -1,8 +1,10 @@
-# uat/k0s: the two UAT hub clusters (UAT.2)
+# uat/k0s: the two UAT hub clusters (UAT.2, P24)
 
-Installs a single-node [k0s](https://k0sproject.io) cluster on each hub VM of
-the Azure UAT gate. uat-dmz and uat-core become two separate clusters, each
-with the controller and the worker on its one node. It then adds what the hub
+Installs a [k0s](https://k0sproject.io) cluster on each hub of the Azure UAT
+gate. The DMZ and core become two separate clusters. In the single-node run
+each hub is one VM with the controller and the worker on it (role `single`).
+In the HA run (workflow input `hub_nodes` 3, P24) each hub is three VMs, every
+one a controller+worker on etcd (see [HA hubs](#ha-hubs)). It then adds what the hub
 charts need: a default StorageClass, cert-manager, each cluster's NodePort
 range for the ports the hubs expose (see [Exposure](#exposure)), the per-run
 UAT CA as a ClusterIssuer, and the DNS rule from the Shared contract (plan
@@ -11,8 +13,10 @@ section 4h).
 It installs no application chart. The hub briefs (uat/hub/dmz, uat/hub/core)
 do that against the kubeconfigs and files written here.
 
-**Status: none of this has run against a real node.** The agent that wrote it
-could not reach Azure. What was checked is listed under [Tests](#tests).
+**Status.** The single-node clusters have run on Azure: the gate's smoke and
+core tiers passed on them (rc.11 to rc.13, 2026-10-09 to 2026-10-11). The HA
+hubs are for the HA run (Run 3); what was checked for them is listed under
+[Tests](#tests).
 
 ## Usage
 
@@ -23,14 +27,16 @@ uat/k0s/bootstrap.sh \
   --uat uat.json \
   --access "$STATE/access.json" \
   --ssh-key "$STATE/hub_ssh_key" \
-  --out "$STATE/k0s"
+  --out "$STATE/k0s" \
+  --nodes 1                             # or 3: the workflow's hub_nodes
 uat/k0s/check.sh --out "$STATE/k0s"     # again at any time; read only
 ```
 
 | Input | From |
 |---|---|
-| `--uat` | `tofu output -json uat`. Reads `run_id` and, for `dmz` and `core`: `name`, `private_ip`, `public_ip`, `fqdn`, `admin_user`. |
-| `--access` | `access.json` from `uat/access/tunnels.sh open`. Reads, for each hub's VM name, `host`, `ssh_port` and `kube_port`. The entries may sit at the top level or under a `vms` or `hosts` object. |
+| `--uat` | `tofu output -json uat`. Reads `run_id` and, for `dmz` and `core`: `name`, `private_ip`, `public_ip`, `fqdn`, `admin_user`, `node_names` and `node_private_ips` (the hub's nodes, in order; without them the hub is its `name` and `private_ip`), `api_address` and `api_fqdn` (the hub's stable API address and its private name; required on an HA hub). A hub has 1, 3 or 5 nodes (`UAT_HUB_NODE_COUNTS`), and its `name` and `private_ip` are its first node's. |
+| `--access` | `access.json` from `uat/access/tunnels.sh open`. Reads, for each node, `host` and `ssh_port`; for the hub's API tunnel, `host` and `kube_port` of the node's entry on a single node or of the `dmz-api` or `core-api` entry on an HA hub. The entries may sit at the top level or under a `vms` or `hosts` object. |
+| `--nodes` | Optional. Every hub must have this many nodes (the workflow passes `hub_nodes`), so a stale `uat.json` is refused. |
 | `--ssh-key` | The per-run SSH private key for `admin_user`. A sensitive tofu value, so it is passed as a file and never written into the uat JSON. |
 
 Everything read from these files is checked before it is used: IPv4
@@ -43,9 +49,9 @@ Everything bootstrap.sh writes goes to `--out`:
 
 | File | What | Sensitive |
 |---|---|---|
-| `dmz.kubeconfig`, `core.kubeconfig` | Admin kubeconfigs. Server `https://127.0.0.1:<kube_port>`, through the kube tunnel. | **Yes** (mode 600). Never upload them as workflow artifacts. |
+| `dmz.kubeconfig`, `core.kubeconfig` | Admin kubeconfigs. Server `https://127.0.0.1:<kube_port>`, through the hub's API tunnel (on an HA hub the one to its internal load balancer, so it keeps working while a node is stopped). | **Yes** (mode 600). Never upload them as workflow artifacts. |
 | `uat-ca.crt` | The UAT CA certificate. Sprouts pin it (`sproutrootca`, `sproutrootcatofu: false`) and the tests trust it. | No |
-| `endpoints.json` | The hubs' names, addresses, FQDNs and exposed ports, how each hub exposes them, each hub's node port range and the ClusterIssuer name. | No |
+| `endpoints.json` | The hubs' names, addresses, FQDNs and exposed ports, how each hub exposes them, each hub's node port range, nodes (`nodes`, `node_private_ips`), API address (`api_address`, `api_fqdn`) and datastore (`kine` or `etcd`), and the ClusterIssuer name. | No |
 | `k0sctl-dmz.yaml`, `k0sctl-core.yaml` | The rendered k0sctl files. They hold the key's path, not the key. | No |
 | `known_hosts` | The hubs' SSH host keys, recorded on first use for this run. | No |
 | `cache/` | The pinned add-on manifests, after their checksums were verified. | No |
@@ -58,7 +64,7 @@ add-on applies are idempotent, and an existing UAT CA is reused (see below).
 
 | Piece | How | Pinned in |
 |---|---|---|
-| k0s, role `single` | k0sctl, over SSH through the Bastion tunnel. The node downloads k0s itself. | `versions.env` `K0S_VERSION`, the only place it is set (a test checks that) |
+| k0s, role `single` (one node) or `controller+worker` on every node (HA hub) | k0sctl, over SSH through each node's Bastion tunnel. The nodes download k0s themselves. | `versions.env` `K0S_VERSION`, the only place it is set (a test checks that) |
 | local-path-provisioner, the default StorageClass `local-path` | The release manifest, SHA-256 checked, applied, and the class annotated default. Volumes go under `/opt/local-path-provisioner` on the OS disk. The upstream helper pod image is untagged, so it is pinned (`LOCAL_PATH_HELPER_IMAGE`). | `versions.env` |
 | cert-manager, CRDs included | The release's static manifest, SHA-256 checked, server-side apply. | `versions.env` |
 | UAT CA and ClusterIssuer `imas-uat-ca` | See [The UAT CA](#the-uat-ca). | `config.env` |
@@ -71,7 +77,63 @@ k0s keeps its defaults where nothing above says otherwise: kube-router as the
 CNI (it also enforces NetworkPolicy), kube-proxy in iptables mode, pod CIDR
 10.244.0.0/16 and service CIDR 10.96.0.0/12 (neither overlaps the VNet
 10.60.0.0/16), and kine on SQLite as the datastore of a single-node
-controller. Telemetry is off.
+controller. Telemetry is off. An HA hub changes the datastore, the overlay
+and the API path ([HA hubs](#ha-hubs)).
+
+## HA hubs
+
+A hub with more than one node (3 in the HA run; 5 is accepted too, etcd needs
+an odd number) is rendered from the same template
+(`templates/k0sctl.yaml.tmpl`, with `templates/k0sctl-host.yaml.tmpl` per
+node and the fragments in `templates/ha/`). A hub of one node renders
+the same configuration as before P24 (only the comments changed).
+
+- **Every node `controller+worker`**, with `noTaints: true`: every node
+  runs the hub's workloads as well (P24: three replicas spread over the
+  nodes).
+- **etcd** (`spec.storage.type: etcd`), one member per node. k0sctl sets each
+  member's peer address to the node's `privateAddress`. kine on SQLite cannot
+  serve several controllers.
+- **The API address.** `spec.api` sets neither `address` (each controller
+  binds its own private IP) nor `externalAddress`. The internal load
+  balancer's address (`api_address`) and private name (`api_fqdn`) are in
+  `spec.api.sans` with every node's IP, so the runner verifies the server
+  through the tunnel to the load balancer. k0s rejects `externalAddress`
+  with node-local load balancing (`k0s config validate`: "node-local load
+  balancing cannot be used in conjunction with an external Kubernetes API
+  server address"), and with `externalAddress` set k0s points kube-proxy,
+  the konnectivity agents and the controller join tokens at it: through the
+  internal load balancer, which drops a node's flow to its own frontend
+  (Azure) and carries neither konnectivity (8132) nor the join API (9443).
+- **Node-local load balancing** (`spec.network.nodeLocalLoadBalancing`,
+  Envoy): kube-proxy and the konnectivity agents reach the API through a
+  load balancer on each node's loopback (7443, 7132) over every controller's
+  own address; the kubelet of a controller+worker node uses its own API
+  server. So no node ever reaches its hub's API through `api_address`.
+- **The pod overlay is FOU.** Azure drops IP-in-IP inside a VNet, so
+  kube-router runs with `overlay-type: full`, `overlay-encap: fou` and
+  `overlay-encap-port` `UAT_KUBE_ROUTER_FOU_PORT` (5555, UDP), which
+  `uat/tofu` opens between a hub's nodes (a test checks both agree). A
+  k0sctl hook loads the `fou` kernel module on each node before k0s starts
+  and lists it in `/etc/modules-load.d`, so a restarted node has it too.
+- **CoreDNS.** In each cluster the hub's own FQDN maps to every one of its
+  nodes and the other hub's FQDN to that hub's `api_address` (its internal
+  load balancer, which carries the private ports and keeps one address
+  while a node is stopped). A pod never dials its own hub's internal load
+  balancer.
+- **Waits.** bootstrap.sh waits until the hub has as many Ready nodes as
+  `node_names` lists, then until k0s's `EtcdMember` objects
+  (`etcdmembers.etcd.k0sproject.io`) show that many members joined. check.sh
+  fails on fewer of either.
+- **Access.** k0sctl dials every node through its own SSH tunnel
+  (`HostKeyAlias` the node's name). The kubeconfig's server is the tunnel to
+  the hub's API address (`dmz-api`, `core-api` in access.json,
+  `uat/access/README.md`).
+
+NodePorts and hostPorts work the same on every node: kube-proxy serves a
+node port on each node, and a hostPort pod takes its port on the node it runs
+on. check.sh reads every pod and Service of the cluster, whatever its node,
+and prints each hostPort pod's node.
 
 ### Licences
 
@@ -186,6 +248,11 @@ clusters:
 <dmz.private_ip>   <dmz.fqdn>
 ```
 
+On an HA hub the lines differ per cluster: the hub's own FQDN has one line
+per node (`<node private IP> <fqdn>`), the other hub's FQDN one line to that
+hub's `api_address` ([HA hubs](#ha-hubs)). With one node per hub both are
+the lines above.
+
 The contract requires the core line in both clusters. That way Keycloak's
 issuer URL, saasapi's `SAASAPI_KEYCLOAK_JWKS_URL` and the token's `iss` can be
 one string built on the core FQDN, and a pod never dials a node's public
@@ -212,25 +279,32 @@ in the live ConfigMap.
   the run. A port that is reused by another tunnel cannot confuse it. The
   admin user needs passwordless sudo, which Azure's Linux images give.
 - The API server certificate lists `127.0.0.1` (and the tunnel host when it
-  is something else), the private IP and the FQDN in `spec.api.sans`. So
+  is something else), the private IP and the FQDN in `spec.api.sans` (on an
+  HA hub also the load balancer's address and name, and every node's IP). So
   kubectl and helm verify the server through the kube tunnel without
   `--insecure-skip-tls-verify`. `k0sctl kubeconfig --address
   https://127.0.0.1:<kube_port>` writes that address into the kubeconfig.
-- `spec.api.address` and the host's `privateAddress` are the VM's private IP,
-  never the tunnel's.
+- `spec.api.address` (single node only) and each host's `privateAddress` are
+  the VM's private IP, never the tunnel's.
 
 ## check.sh
 
 `check.sh --out DIR` (or `--dmz-kubeconfig`, `--core-kubeconfig` and
-`--endpoints`) prints, for each hub, the nodes, StorageClasses, cert-manager
-Deployments, the issuer, the CoreDNS lines, the node ports and the hostPorts. It
-exits 1, listing every failure, when:
+`--endpoints`) prints, for each hub, the nodes, the etcd members (HA hub),
+StorageClasses, cert-manager Deployments, the issuer, the CoreDNS lines, the
+node ports and the hostPorts (with each pod's node). It exits 1, listing every
+failure, when:
 
 - a node is not Ready, or there is none;
+- fewer nodes are Ready than the hub has (`nodes` in the endpoints file; 1
+  without one);
+- on an HA hub (datastore `etcd` in the endpoints file), fewer etcd members
+  have joined than the hub has nodes, or they cannot be listed;
 - there is no default StorageClass, or more than one;
 - one of cert-manager's three Deployments is not Available;
 - the ClusterIssuer is not Ready;
-- CoreDNS lacks a FQDN line (only with an endpoints file);
+- CoreDNS lacks a FQDN line (only with an endpoints file): the hub's own
+  FQDN for each of its nodes, the other hub's for its `api_address`;
 - a node port lies outside the hub's exposed ports;
 - a pod off the host network uses a hostPort the hub does not expose.
 
@@ -242,35 +316,56 @@ given.
 `uat/k0s/tests/run.sh` runs:
 
 - **shellcheck** on every script and test stub.
-- **yamllint** (`.yamllint.yaml`) on the templates, the golden rendered files
-  and the test manifests.
+- **yamllint** (`.yamllint.yaml`) on the golden rendered files (what every
+  template renders to, single-node and HA) and the test manifests. The
+  templates themselves are not YAML until rendered (a block token sits at
+  the start of its line).
 - **`tests/test-k0s.sh`**, the bash tests. k0sctl, kubectl, curl and sleep
   are stubs (`tests/stubs`), and the clusters' answers are JSON fixtures
   (`testdata/kube`). They cover:
   - argument handling for both scripts;
   - building both k0sctl files from `testdata/uat.json` and
-    `testdata/access.json`, compared with `testdata/expected` (refresh with
-    `UPDATE_GOLDEN=1` and review the diff);
+    `testdata/access.json`, and the HA ones from `testdata/uat-ha.json` and
+    `testdata/access-ha.json` (3 + 3 nodes), compared with
+    `testdata/expected` (`*-ha.*` for HA; refresh with `UPDATE_GOLDEN=1` and
+    review the diff);
+  - for an HA hub: three controller+worker hosts without taints, each
+    through its own tunnel, etcd, no `externalAddress` and no shared
+    `address`, the load balancer's address and name in the SANs, the FOU
+    overlay on the port `uat/tofu` opens, node-local load balancing, the
+    CoreDNS lines per cluster, `endpoints.json`'s nodes and datastore, a mix
+    of one HA hub and one single node, and refusal of an even node count,
+    node lists of different lengths, a missing or node-owned `api_address`,
+    a bad `api_fqdn`, a missing API tunnel or node tunnel, and `--nodes`
+    that differs from the uat JSON;
   - the SANs, the node port range, the CoreDNS lines and the single place
     the k0s version is set;
   - refusal of bad addresses, FQDNs carrying YAML, `$` or Corefile syntax,
     bad users, run ids, missing tunnels, and settings that would expose a
     port k0s uses; the warning when a range contains one;
-  - the install order and kubeconfig addresses against stubs;
+  - the install order and kubeconfig addresses against stubs, and on an HA
+    hub the kubeconfig through the API tunnel, the wait for every node and
+    every etcd member, and its failures (a node short, a member not
+    joined);
   - checksum refusal and the helper image pin;
   - the CA: a real openssl run, one CA on both hubs, reuse, and refusing two
     different CAs;
-  - every failure branch of check.sh, including node ports and hostPorts.
+  - every failure branch of check.sh, including node ports and hostPorts,
+    and on an HA hub a node not Ready or missing, an etcd member missing,
+    left or not listable, and a CoreDNS line missing or pointing at a node
+    instead of the other hub's `api_address`.
 
-Checked by hand, outside the committed tests: the k0s binary of the pinned
-version (`k0s config validate`) accepts the rendered ClusterConfig, including
-the CoreDNS patch block. The pinned k0sctl parses the rendered file (its
-config parser rejects unknown fields). The pinned manifests' checksums were
-taken from the published releases.
+`go test ./uat/k0s/` runs `tests/test-k0s.sh`, shellcheck and yamllint (each
+skipped when its tool is missing).
 
-**Not run:** k0sctl against a real host, k0s coming up, the add-ons on a
-cluster, the CoreDNS patch taking effect, node ports on a real node, or any
-traffic through a Bastion tunnel. Expect fixes after the first Azure run.
+Checked with the pinned binaries, outside the committed tests (P24, 2026-10-13):
+`k0s config validate` of the k0s that `versions.env` pins accepts the
+rendered ClusterConfig of both hubs, single-node and HA, and refuses the HA
+one with `externalAddress` added; the pinned k0sctl's own parser (`yaml.UnmarshalStrict`
+into its `Cluster`) and `Validate` accept all four rendered files (3 unique
+controller+worker hosts with the hooks, and the single host). The pinned
+manifests' checksums were taken from the published releases. The single-node
+clusters have run on Azure (see Status).
 
 ## Answered by the owner (2026-10-06)
 

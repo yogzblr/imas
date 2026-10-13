@@ -165,9 +165,10 @@ run "names_tags_and_layout" {
     condition = (
       azurerm_bastion_host.uat.sku == "Standard" &&
       azurerm_bastion_host.uat.tunneling_enabled == true &&
-      azurerm_bastion_host.uat.shareable_link_enabled == false
+      azurerm_bastion_host.uat.shareable_link_enabled == false &&
+      azurerm_bastion_host.uat.ip_connect_enabled == false
     )
-    error_message = "Bastion must be Standard with native client tunnelling on"
+    error_message = "Bastion must be Standard with native client tunnelling on, and no IP-based connection in the single-node run"
   }
 
   assert {
@@ -533,6 +534,11 @@ run "ha_three_plus_three" {
   }
 
   assert {
+    condition     = azurerm_bastion_host.uat.ip_connect_enabled == true
+    error_message = "HA: the Bastion allows IP-based connections (the tunnel to each hub's api_address, uat/access)"
+  }
+
+  assert {
     condition = (
       tolist([for n in ["uat-core-1", "uat-core-2", "uat-core-3"] : azurerm_linux_virtual_machine.hub[n].zone]) == tolist(["1", "2", "3"]) &&
       tolist([for n in ["uat-dmz-1", "uat-dmz-2", "uat-dmz-3"] : azurerm_linux_virtual_machine.hub[n].zone]) == tolist(["1", "2", "3"]) &&
@@ -757,6 +763,11 @@ run "ha_core_only" {
       length([for r in azurerm_network_security_group.subnet["dmz"].security_rule : r if startswith(r.name, "AllowHubNodes")]) == 0
     )
     error_message = "a hub of one node is unchanged when the other hub is HA"
+  }
+
+  assert {
+    condition     = azurerm_bastion_host.uat.ip_connect_enabled == true
+    error_message = "one HA hub is enough for the Bastion's IP-based connection"
   }
 }
 

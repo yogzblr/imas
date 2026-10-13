@@ -168,6 +168,28 @@ Needs H1. Scope: `uat/k0s` and its tests, `uat/access`, `.github/workflows/uat.y
 Tests: the existing k0s script tests with a 3-node fixture; template rendering for 1 and 3
 nodes; `check.sh` negative cases.
 
+Corrections made while building H2 (2026-10-13; the code on main, the pinned k0s and k0sctl, and
+this item's own rule that a node never reaches its API through `api_address` decide):
+- No `spec.api.externalAddress`. The pinned k0s (`uat/k0s/versions.env`) rejects it together with node-local load
+  balancing (`k0s config validate`: "node-local load balancing cannot be used in conjunction with
+  an external Kubernetes API server address"), and with it set k0s points kube-proxy, the
+  konnectivity agents (8132) and the controller join tokens (9443) at it: through the internal load
+  balancer, which drops a node's flow to its own frontend and carries neither 8132 nor 9443. So
+  node-local load balancing is on, no `spec.api.address` is shared (each controller binds its own
+  private IP), and `api_address` and `api_fqdn` are in `spec.api.sans` with every node's IP. The
+  runner's kubeconfig points at the tunnel to `api_address` ("kubeconfig uses the external address").
+- The Bastion tunnel to `api_address` needs the Bastion's IP-based connection (`az network bastion
+  tunnel --target-ip-address`); `uat/tofu` turns `ip_connect_enabled` on for an HA run (off in the
+  single-node run). access.json gains `dmz-api` and `core-api` (`kube_port`); every hub node keeps
+  its own SSH and kube tunnels.
+- CoreDNS: in each cluster the hub's own FQDN maps to every one of its nodes and the other hub's
+  FQDN to that hub's `api_address`, so a pod never dials its own hub's internal load balancer; one
+  node per hub gives the lines of before.
+- The etcd member count is read from k0s's `EtcdMember` objects (`etcdmembers.etcd.k0sproject.io`).
+  The workflow's k0s step passes `hub_nodes` as `bootstrap.sh --nodes`, which refuses a `uat.json`
+  whose hubs have another node count. The FOU module is loaded by a k0sctl hook (and listed in
+  `/etc/modules-load.d`, for the node-stop tests).
+
 ## H3: Versity Gateway as an optional chart component (P25 first half)
 
 Scope: `deploy/helm/farmer` (templates, values, README, chart tests), `DEPENDENCIES.md`.

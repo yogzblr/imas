@@ -242,6 +242,9 @@ resource "azurerm_public_ip" "bastion" {
   tags                = local.tags
 }
 
+# ip_connect_enabled: IP-based connection, on an HA run only.
+# uat/access/tunnels.sh reaches an HA hub's k0s API on its internal load
+# balancer address (uat <hub>.api_address), which is no VM resource (brief H2).
 resource "azurerm_bastion_host" "uat" {
   name                   = "uat-bastion"
   location               = azurerm_resource_group.run.location
@@ -251,7 +254,7 @@ resource "azurerm_bastion_host" "uat" {
   tunneling_enabled      = true
   copy_paste_enabled     = false
   file_copy_enabled      = false
-  ip_connect_enabled     = false
+  ip_connect_enabled     = length(local.ha_hubs) > 0
   shareable_link_enabled = false
   tags                   = local.tags
 

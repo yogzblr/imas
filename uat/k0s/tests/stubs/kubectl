@@ -41,6 +41,7 @@ case "${args[0]:-}" in
         if [[ -f $STUB_FIX/$hub/secret.json ]]; then cat "$STUB_FIX/$hub/secret.json"; fi
         ;;
       pods) fixture pods.json ;;
+      etcdmembers.etcd.k0sproject.io) fixture etcdmembers.json ;;
       *) echo "stub kubectl: unexpected get ${args[1]:-}" >&2 && exit 1 ;;
     esac
     ;;

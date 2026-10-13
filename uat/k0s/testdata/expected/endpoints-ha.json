@@ -1,0 +1,66 @@
+{
+  "run_id": "abc123",
+  "dmz": {
+    "name": "uat-dmz-1",
+    "private_ip": "10.60.1.4",
+    "public_ip": "198.51.100.30",
+    "fqdn": "uatabc123-dmz.centralindia.cloudapp.azure.com",
+    "private_fqdn": "dmz.uat.imas.internal",
+    "ports": {
+      "envoy": 8443,
+      "bus": 8442
+    },
+    "exposure": "node ports, Services owned by uat/hub/dmz",
+    "node_port_range": "8442-8443",
+    "nodes": [
+      "uat-dmz-1",
+      "uat-dmz-2",
+      "uat-dmz-3"
+    ],
+    "node_private_ips": [
+      "10.60.1.4",
+      "10.60.1.5",
+      "10.60.1.6"
+    ],
+    "api_address": "10.60.1.250",
+    "api_fqdn": "dmz-api.uat.imas.internal",
+    "datastore": "etcd"
+  },
+  "core": {
+    "name": "uat-core-1",
+    "private_ip": "10.60.2.4",
+    "public_ip": "198.51.100.31",
+    "fqdn": "uatabc123-core.centralindia.cloudapp.azure.com",
+    "private_fqdn": "core.uat.imas.internal",
+    "ports": {
+      "https": 443,
+      "farmer_api": 5405
+    },
+    "exposure": "hostPort",
+    "node_port_range": "30000-32767",
+    "nodes": [
+      "uat-core-1",
+      "uat-core-2",
+      "uat-core-3"
+    ],
+    "node_private_ips": [
+      "10.60.2.4",
+      "10.60.2.5",
+      "10.60.2.6"
+    ],
+    "api_address": "10.60.2.250",
+    "api_fqdn": "core-api.uat.imas.internal",
+    "datastore": "etcd"
+  },
+  "private_dns_zone": "uat.imas.internal",
+  "cluster_issuer": "imas-uat-ca",
+  "ca": {
+    "cluster_issuer": "imas-uat-ca"
+  },
+  "ca_file": "uat-ca.crt",
+  "kubeconfigs": {
+    "dmz": "dmz.kubeconfig",
+    "core": "core.kubeconfig"
+  },
+  "k0s_version": "v1.36.4+k0s.1"
+}

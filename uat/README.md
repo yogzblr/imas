@@ -37,7 +37,8 @@ tunnels; only Envoy (8443 on the DMZ) and 443 on core are open, and only to
 the runner's own address. The HA run (`hub_nodes` 3, P24) makes each hub three k0s
 nodes over the region's zones, `uat-dmz-1` to `uat-dmz-3` and `uat-core-1` to
 `uat-core-3`, behind an internal and a public Standard load balancer
-(`uat/tofu/README.md`, "HA topology").
+(`uat/tofu/README.md`, "HA topology"), each node a k0s controller+worker on
+etcd (`uat/k0s/README.md`, "HA hubs").
 
 ## The pieces
 
@@ -176,8 +177,11 @@ names the piece):
    `ha_node_names.json` (the VMs the HA tests stop) go to the run's state
    directory.
 5. **Bastion tunnels** (`uat/access/tunnels.sh open`, after `az extension add`
-   for `bastion` and `ssh`).
-6. **k0s** on both hubs (`uat/k0s/bootstrap.sh`).
+   for `bastion` and `ssh`): SSH and the Kubernetes API on every hub node, and
+   on an HA run also each hub's API address (`dmz-api`, `core-api`).
+6. **k0s** on both hubs (`uat/k0s/bootstrap.sh --nodes <hub_nodes>`): one
+   single-node cluster per hub, or on the HA run three controller+worker nodes
+   per hub on etcd, waiting for every node Ready and every etcd member joined.
 7. **Core hub** (`uat/hub/core/install.sh`: the release's published chart,
    checked to carry the stamped sprout release; the operator plane on; the
    dispatch flags as asked; `validate-rustfs.sh` proves each scoped RustFS
@@ -267,9 +271,12 @@ jq . /tmp/uat-$RUN-access/access.json      # local ports per VM
 ssh -i /tmp/uat-$RUN.key -p <ssh_port of uat-core> imasuat@127.0.0.1 sudo k0s kubectl get pods -A
 ```
 
-The Kubernetes API is on each hub's `kube_port`; `sudo k0s kubeconfig admin`
-on a hub prints an admin kubeconfig (point its server at
-`https://127.0.0.1:<kube_port>`). The generated passwords (Keycloak users,
+On an HA run the VMs are `uat-core-1` to `uat-core-3` and `uat-dmz-1` to
+`uat-dmz-3`. The Kubernetes API is on each hub node's `kube_port`, and on an
+HA run on the `core-api` and `dmz-api` entries' `kube_port` too (the hub's
+internal load balancer, which keeps answering while a node is stopped);
+`sudo k0s kubeconfig admin` on a hub node prints an admin kubeconfig (point
+its server at `https://127.0.0.1:<kube_port>`). The generated passwords (Keycloak users,
 RustFS, the BFF secret) are in Kubernetes Secrets on core (`uat/hub/core/README.md`);
 OpenBao's unseal keys and root token are in `imas-uat-openbao-unseal` and
 `imas-uat-openbao-root`. `uat/access/vmctl.sh` works from your machine with an

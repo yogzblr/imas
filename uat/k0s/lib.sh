@@ -107,7 +107,9 @@ access_get() {
 # --- rendering -------------------------------------------------------------
 
 # render_template TEMPLATE OUT KEY=VALUE... replaces each __KEY__ token with
-# VALUE and fails if a token is left. Values must already be checked.
+# VALUE and fails if a token is left. Values must already be checked. A value
+# may span lines (a block built from checked values); a token alone on its
+# line whose value is empty takes its line with it.
 render_template() {
   local tmpl=$1 out=$2 content kv key val left
   shift 2
@@ -120,11 +122,21 @@ render_template() {
     key=${kv%%=*}
     val=${kv#*=}
     [[ $key =~ ^[A-Z0-9_]+$ ]] || die "bad template key: $key"
+    if [[ -z $val ]]; then
+      content=$(grep -vxF -- "__${key}__" <<<"$content" || true)
+    fi
     content=${content//__${key}__/$val}
   done
   left=$(grep -oE '__[A-Z0-9_]+__' <<<"$content" | sort -u | tr '\n' ' ' || true)
   [[ -z $left ]] || die "template $tmpl: tokens left unreplaced: $left"
   printf '%s\n' "$content" >"$out"
+}
+
+# read_block FILE prints a template fragment without its trailing newline,
+# as a value for render_template.
+read_block() {
+  [[ -r "$1" ]] || die "template not readable: $1"
+  printf '%s' "$(<"$1")"
 }
 
 # --- pinned downloads ------------------------------------------------------
@@ -163,6 +175,11 @@ kc() {
   shift
   kubectl --kubeconfig "$kubeconfig" "$@"
 }
+
+# ETCD_JOINED is a jq filter counting k0s's EtcdMember objects
+# (etcdmembers.etcd.k0sproject.io) whose Joined condition is True.
+# shellcheck disable=SC2034 # used by the scripts that source this file
+ETCD_JOINED='[.items[] | select((.status.conditions // []) | any(.type == "Joined" and .status == "True"))] | length'
 
 # hub_allowed_node_ports HUB prints the node ports a hub may expose: Envoy's
 # and the bus's on the DMZ, none on core (hostPorts only).

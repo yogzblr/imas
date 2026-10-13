@@ -336,10 +336,16 @@ jobs:
         id: tunnels
         run: uat/access/tunnels.sh open "$STATE/uat.json" "$STATE/access"
 
+      # One node per hub: a single-node cluster each (kine). hub_nodes 3: three
+      # controller+worker nodes per hub on etcd, kubectl through the tunnel
+      # to each hub's API address (uat/k0s README.md, "HA hubs"). --nodes
+      # refuses a uat.json whose hubs have another node count.
       - name: k0s on both hubs (uat/k0s)
+        env:
+          HUB_NODES: ${{ steps.inputs.outputs.hub_nodes }}
         run: |
           uat/k0s/bootstrap.sh --uat "$STATE/uat.json" --access "$STATE/access/access.json" \
-            --ssh-key "$SECRETS/ssh_key" --out "$STATE/k0s"
+            --ssh-key "$SECRETS/ssh_key" --out "$STATE/k0s" --nodes "$HUB_NODES"
 
       # release_tag is the chart reference as well: install.sh pulls the
       # farmer chart published with that tag (it carries the stamped sprout

@@ -1,0 +1,57 @@
+{
+  "apiVersion": "etcd.k0sproject.io/v1beta1",
+  "kind": "EtcdMemberList",
+  "items": [
+    {
+      "metadata": {
+        "name": "uat-dmz-1"
+      },
+      "status": {
+        "peerAddress": "10.60.1.4",
+        "memberID": "1a2b3c4d5e6f7a8b",
+        "reconcileStatus": "Success",
+        "conditions": [
+          {
+            "type": "Joined",
+            "status": "True",
+            "lastTransitionTime": "2026-10-13T08:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "metadata": {
+        "name": "uat-dmz-2"
+      },
+      "status": {
+        "peerAddress": "10.60.1.5",
+        "memberID": "2a2b3c4d5e6f7a8b",
+        "reconcileStatus": "Success",
+        "conditions": [
+          {
+            "type": "Joined",
+            "status": "True",
+            "lastTransitionTime": "2026-10-13T08:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "metadata": {
+        "name": "uat-dmz-3"
+      },
+      "status": {
+        "peerAddress": "10.60.1.6",
+        "memberID": "3a2b3c4d5e6f7a8b",
+        "reconcileStatus": "Success",
+        "conditions": [
+          {
+            "type": "Joined",
+            "status": "True",
+            "lastTransitionTime": "2026-10-13T08:00:00Z"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,220 @@
+---
+# k0sctl configuration for one UAT hub, a k0s cluster on the hub's nodes.
+#   - One node (the single-node run): the controller and the worker on the one
+#     VM (role "single"), kine on SQLite as the datastore. Unchanged by P24.
+#   - N nodes (3 or 5, the HA run, P24): every node "controller+worker",
+#     etcd as the datastore (N members), node-local load balancing to the
+#     API, kube-router's pod overlay over FOU (README.md, "HA hubs").
+#
+# bootstrap.sh renders it once per hub. Every double-underscore token is set from
+# the uat JSON (tofu output uat), access.json (uat/access/tunnels.sh),
+# versions.env and config.env, each value is checked first (addresses, names,
+# ports, paths), and rendering fails if a token is left. A token alone on its
+# line is a block bootstrap.sh builds (the hosts from k0sctl-host.yaml.tmpl,
+# the SANs, the CoreDNS lines), or nothing for a single node. Nothing secret
+# is written here: keyPath is the path of the per-run SSH key, never the key.
+apiVersion: k0sctl.k0sproject.io/v1beta1
+kind: Cluster
+metadata:
+  name: imas-uat-abc123-dmz
+spec:
+  hosts:
+    - role: controller+worker
+      # Every node of an HA hub runs workloads as well (P24), so k0s puts
+      # no control-plane taint on it.
+      noTaints: true
+      # kube-router's FOU overlay needs the fou kernel module, now and after
+      # a reboot (the node-stop tests restart a node).
+      hooks:
+        apply:
+          before:
+            - echo fou | sudo tee /etc/modules-load.d/imas-uat-fou.conf
+            - sudo modprobe fou
+      # The hub is reached only through its Azure Bastion tunnels on the
+      # runner, so k0sctl dials the node's tunnel address and port from
+      # access.json. The system OpenSSH client is used so the host key goes
+      # to a per-run known_hosts file under the alias of the VM name
+      # (accepted on first use, through the tunnel, then pinned for the run).
+      openSSH:
+        address: 127.0.0.1
+        port: 50022
+        user: imasuat
+        keyPath: /RUN/id_test
+        options:
+          HostKeyAlias: uat-dmz-1
+          UserKnownHostsFile: /RUN/out/known_hosts
+          StrictHostKeyChecking: accept-new
+          IdentitiesOnly: "yes"
+          BatchMode: "yes"
+          ServerAliveInterval: "30"
+      # The VM's own address in the VNet (not the tunnel's).
+      privateAddress: 10.60.1.4
+    - role: controller+worker
+      # Every node of an HA hub runs workloads as well (P24), so k0s puts
+      # no control-plane taint on it.
+      noTaints: true
+      # kube-router's FOU overlay needs the fou kernel module, now and after
+      # a reboot (the node-stop tests restart a node).
+      hooks:
+        apply:
+          before:
+            - echo fou | sudo tee /etc/modules-load.d/imas-uat-fou.conf
+            - sudo modprobe fou
+      # The hub is reached only through its Azure Bastion tunnels on the
+      # runner, so k0sctl dials the node's tunnel address and port from
+      # access.json. The system OpenSSH client is used so the host key goes
+      # to a per-run known_hosts file under the alias of the VM name
+      # (accepted on first use, through the tunnel, then pinned for the run).
+      openSSH:
+        address: 127.0.0.1
+        port: 50023
+        user: imasuat
+        keyPath: /RUN/id_test
+        options:
+          HostKeyAlias: uat-dmz-2
+          UserKnownHostsFile: /RUN/out/known_hosts
+          StrictHostKeyChecking: accept-new
+          IdentitiesOnly: "yes"
+          BatchMode: "yes"
+          ServerAliveInterval: "30"
+      # The VM's own address in the VNet (not the tunnel's).
+      privateAddress: 10.60.1.5
+    - role: controller+worker
+      # Every node of an HA hub runs workloads as well (P24), so k0s puts
+      # no control-plane taint on it.
+      noTaints: true
+      # kube-router's FOU overlay needs the fou kernel module, now and after
+      # a reboot (the node-stop tests restart a node).
+      hooks:
+        apply:
+          before:
+            - echo fou | sudo tee /etc/modules-load.d/imas-uat-fou.conf
+            - sudo modprobe fou
+      # The hub is reached only through its Azure Bastion tunnels on the
+      # runner, so k0sctl dials the node's tunnel address and port from
+      # access.json. The system OpenSSH client is used so the host key goes
+      # to a per-run known_hosts file under the alias of the VM name
+      # (accepted on first use, through the tunnel, then pinned for the run).
+      openSSH:
+        address: 127.0.0.1
+        port: 50024
+        user: imasuat
+        keyPath: /RUN/id_test
+        options:
+          HostKeyAlias: uat-dmz-3
+          UserKnownHostsFile: /RUN/out/known_hosts
+          StrictHostKeyChecking: accept-new
+          IdentitiesOnly: "yes"
+          BatchMode: "yes"
+          ServerAliveInterval: "30"
+      # The VM's own address in the VNet (not the tunnel's).
+      privateAddress: 10.60.1.6
+  options:
+    wait:
+      enabled: true
+  k0s:
+    # Pinned in versions.env (K0S_VERSION), nowhere else.
+    version: v1.36.4+k0s.1
+    dynamicConfig: false
+    config:
+      apiVersion: k0s.k0sproject.io/v1beta1
+      kind: ClusterConfig
+      metadata:
+        name: imas-uat-abc123-dmz
+      spec:
+        api:
+          # One node: the VM's private IP. N nodes: no address here, so each
+          # controller binds its own private IP (k0sctl sets only the etcd
+          # peer address per host), and no externalAddress: k0s forbids one
+          # with node-local load balancing, and with one set kube-proxy,
+          # konnectivity and the controller joins would dial the internal
+          # load balancer, which drops a node's flow to itself (README.md).
+          port: 6443
+          # kubectl and helm reach the API through a kube tunnel on
+          # 127.0.0.1 (on an HA hub, the tunnel to the hub's internal load
+          # balancer, whose address and private name are listed too), so the
+          # serving certificate must name it.
+          sans:
+            - 127.0.0.1
+            - localhost
+            - 10.60.1.250
+            - dmz-api.uat.imas.internal
+            - 10.60.1.4
+            - 10.60.1.5
+            - 10.60.1.6
+            - uatabc123-dmz.centralindia.cloudapp.azure.com
+          extraArgs:
+            # This hub's NodePort range (config.env; README.md,
+            # "Exposure").
+            service-node-port-range: 8442-8443
+        # etcd, one member per node (k0sctl sets each member's peer address
+        # to the node's privateAddress), not kine on SQLite.
+        storage:
+          type: etcd
+        network:
+          provider: kuberouter
+          # Azure drops IP-in-IP inside a VNet, so the pod overlay between
+          # nodes is FOU over UDP 5555, which uat/tofu opens between a
+          # hub's nodes.
+          kuberouter:
+            extraArgs:
+              overlay-type: full
+              overlay-encap: fou
+              overlay-encap-port: "5555"
+          # A node reaches the API on its own address (the kubelet of a
+          # controller+worker node) or through k0s's node-local load
+          # balancer on 127.0.0.1, which balances over every controller's
+          # own address (kube-proxy, konnectivity), never through the
+          # internal load balancer.
+          nodeLocalLoadBalancing:
+            enabled: true
+            type: EnvoyProxy
+          podCIDR: 10.244.0.0/16
+          serviceCIDR: 10.96.0.0/12
+          clusterDomain: cluster.local
+          coreDNS:
+            # The Shared contract's DNS rule: inside the cluster the core FQDN
+            # resolves to a core private address, so a pod never dials a
+            # node's public address (the Keycloak issuer, saasapi's JWKS URL
+            # and the token iss stay one string). The DMZ FQDN maps the same
+            # way, for core's dial to the bus. A hub's own FQDN maps to its
+            # nodes' addresses, the other hub's to that hub's stable private
+            # address (its api_address; one address for a single node). This
+            # is k0s's own Corefile with one hosts block added; k0s writes it
+            # into the coredns ConfigMap it manages, so it is not reverted.
+            patches:
+              - target:
+                  kind: ConfigMap
+                  name: coredns
+                  namespace: kube-system
+                patch:
+                  type: MergePatch
+                  content: |
+                    data:
+                      Corefile: |
+                        .:53 {
+                            errors
+                            health
+                            ready
+                            hosts {
+                                10.60.2.250 uatabc123-core.centralindia.cloudapp.azure.com
+                                10.60.1.4 uatabc123-dmz.centralindia.cloudapp.azure.com
+                                10.60.1.5 uatabc123-dmz.centralindia.cloudapp.azure.com
+                                10.60.1.6 uatabc123-dmz.centralindia.cloudapp.azure.com
+                                ttl 60
+                                fallthrough
+                            }
+                            kubernetes cluster.local in-addr.arpa ip6.arpa {
+                              pods insecure
+                              ttl 30
+                              fallthrough in-addr.arpa ip6.arpa
+                            }
+                            prometheus :9153
+                            forward . /etc/resolv.conf
+                            cache 30
+                            loop
+                            reload
+                            loadbalance
+                        }
+        telemetry:
+          enabled: false

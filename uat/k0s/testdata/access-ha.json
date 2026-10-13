@@ -1,0 +1,12 @@
+{
+  "uat-dmz-1": {"host": "127.0.0.1", "ssh_port": 50022, "kube_port": 56443, "pids": [4101, 4102]},
+  "uat-dmz-2": {"host": "127.0.0.1", "ssh_port": 50023, "kube_port": 56444, "pids": [4103, 4104]},
+  "uat-dmz-3": {"host": "127.0.0.1", "ssh_port": 50024, "kube_port": 56445, "pids": [4105, 4106]},
+  "dmz-api": {"host": "127.0.0.1", "kube_port": 56450, "pids": [4107]},
+  "uat-core-1": {"host": "127.0.0.1", "ssh_port": 50122, "kube_port": 56543, "pids": [4111, 4112]},
+  "uat-core-2": {"host": "127.0.0.1", "ssh_port": 50123, "kube_port": 56544, "pids": [4113, 4114]},
+  "uat-core-3": {"host": "127.0.0.1", "ssh_port": 50124, "kube_port": 56545, "pids": [4115, 4116]},
+  "core-api": {"host": "127.0.0.1", "kube_port": 56550, "pids": [4117]},
+  "t1-ubuntu": {"host": "127.0.0.1", "ssh_port": 50222, "pids": [4121]},
+  "t1-win": {"host": "127.0.0.1", "winrm_port": 55986, "pids": [4122]}
+}
