@@ -1,4 +1,5 @@
 change: H6 (final gate for the next Azure runs): on main after R1 and H1 to H5, `go build`, `go vet`, `go test -race ./...` (with PXC 8.4.8-8.1, Valkey 9.1.2, Envoy 1.35.3 and OpenBao 2.7.1 behind the gated tests, as CI runs them) and `CGO_ENABLED=0 go build ./...` pass; `helm template` passes for `deploy/helm/farmer` and `deploy/helm/nats` with every ci/ values file (`versity-values.yaml` included) and for both UAT hubs single-node and with the HA overlays (`values-ha.yaml`, Versity on); `tofu validate`, and `tofu test` planning and applying `uat/tofu` for 1 and 3 nodes per hub on mocked providers, pass. Runbook `uat/RUNBOOK.md`: the owner prerequisites (GPG secrets on the `goreleaser` environment only, a `v*` tag ruleset, two signed release candidates cut after P22, the quota, the security review before the dispatch flags leave UAT), the exact dispatch inputs of Run 2 and Run 3, what each proves and how to read the report. Stale "never run" and "not merged" lines in the UAT READMEs fixed. Flagged for security review.
+pr: 250
 ---
 item: P20
 action: update
