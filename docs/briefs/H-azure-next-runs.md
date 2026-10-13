@@ -64,6 +64,38 @@ across `uat/`, `deploy/`, `docs/`, `.github/`. Tests: the existing Go tests that
 UAT hubs must cover the new values (flags on and off, operator on); a test that `finish.sh`
 fails when the registration Job fails (using the repo's script-test pattern).
 
+Corrections made while building R1 (2026-10-13; the code on main decides):
+- The operator listener's TLS Secret (`imas-saasapi-operator-tls`, with `ca.crt`) is a cert-manager
+  Certificate from the UAT CA in `uat/hub/core/chart`, as farmer's API certificate already is, not
+  a file `seeds.sh` makes; `saasapi-secrets.sh` makes the token Secret (`imas-saasapi-operator-token`,
+  key `current`) and keeps the token in `sensitive/saasapi-operator-token`.
+- The chart reference and the tag were already one input: `install.sh` pulls the farmer chart
+  published with `release_tag`. R1 adds the checks: `check-inputs.sh` fails when the release has no
+  `checksums.txt` and `checksums.txt.sig`, and `install.sh` when the chart carries no stamped
+  `files/sprout-release.json` for the tag.
+- The operator API has no read route. `operator-release.sh verify` (through `kubectl port-forward`,
+  the operator NetworkPolicy admitting only the hook Job) sends the hook's own request again:
+  releases are immutable, so only a 200 with nothing created proves the version is stored with the
+  stamped `checksums.txt` and signature (a 201 means it was not; a 409 that something else is).
+- saasapi gives every authentication failure one error code, `unauthorized`, on purpose (the reason
+  is only logged). `check.sh` asserts the status with the error code of saasapi's JSON body
+  (`401 unauthorized`, `403 forbidden`), which tells saasapi's refusal from any other hop's.
+- `dispatch_flags` reaches the scripts as `IMAS_UAT_DISPATCH_FLAGS=on|off` (`check-inputs.sh`
+  output), read by `gen-values.sh` for the values and recorded in `core.json`, which `check.sh`
+  compares with the Deployments' env.
+- A refused self update fails its item with saasapi's `job_failed` (there is no finer code); L5
+  reads the reason from the sprout's own job log (`/var/cache/imas/sprout/jobs/<jid>.jsonl`). The
+  scratch version is the release's next patch with `-uat.altered` (above the release, so only the
+  signature can refuse it); the altered pair is the release's packages and `checksums.txt` with the
+  version rewritten in every file name, and the release's own signature.
+- Keycloak's digest is read from Docker Hub's `keycloak/keycloak` (the project's own mirror; the
+  session could not reach quay.io), so the image moves there. The Envoy digest pins the DMZ's Envoy
+  too (`uat/hub/dmz/values-uat.yaml`, `envoy.image.digest`).
+- The `minio` search gate: the UAT's own names are now `rustfs` (`imas-uat-rustfs`,
+  `rustfs-setup.sh`, `rustfs/farmer-policy.json`, values key `rustfs`, `RUSTFS_*`), closing that P13
+  leftover. `minio-go` (the S3 client library), the farmer chart's examples for a customer's MinIO,
+  the history in `docs/status/` and finished briefs keep the word.
+
 ## H1: tofu for 3 + 3 nodes (P24 item 1)
 
 Scope: `uat/tofu`, `.github/workflows/uat.yml` (inputs and outputs only), `uat/access`.
