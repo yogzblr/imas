@@ -68,19 +68,23 @@ func TestRootConfigSerializes(t *testing.T) {
 		t.Run("nested", func(t *testing.T) {
 			RootConfig(t) // shares the hold, does not wait for itself
 		})
-		if free := isFreeLock(t, cfg); free {
-			t.Fatal("the lock is free while a test holds it")
+		if !heldByUs(t, cfg) {
+			t.Fatal("this process does not hold the lock while a test holds it")
 		}
 	})
 	if cfg == nil {
 		t.Skip("skipped")
 	}
-	if free := isFreeLock(t, cfg); !free {
-		t.Fatal("the lock is still held after the test ended")
+	// Another package's test process may take the lease the moment it is
+	// released (go test runs packages in parallel), so the check is that
+	// this process let it go, not that nobody holds it.
+	if heldByUs(t, cfg) {
+		t.Fatal("this process still holds the lock after the test ended")
 	}
 }
 
-func isFreeLock(t *testing.T, cfg *mysql.Config) bool {
+// heldByUs reports whether this process's holder has the lease now.
+func heldByUs(t *testing.T, cfg *mysql.Config) bool {
 	t.Helper()
 	c, err := mysql.NewConnector(cfg)
 	if err != nil {
@@ -89,10 +93,10 @@ func isFreeLock(t *testing.T, cfg *mysql.Config) bool {
 	db := sql.OpenDB(c)
 	defer db.Close()
 	var n int
-	if err := db.QueryRow("SELECT COUNT(*) FROM `" + lockSchema + "`.`" + lockTable + "` WHERE id = 1 AND until > NOW(3)").Scan(&n); err != nil {
+	if err := db.QueryRow("SELECT COUNT(*) FROM `"+lockSchema+"`.`"+lockTable+"` WHERE id = 1 AND holder = ? AND until > NOW(3)", holder).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	return n == 0
+	return n == 1
 }
 
 // A second holder (another package's test process) does not get the lease
