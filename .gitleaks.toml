@@ -24,4 +24,7 @@ regexes = [
   # probe_test.go) as first committed (2569cbe); replaced since by a
   # positional literal, but that commit stays in history.
   '''Key:\s*"sprouts/probe/missing"''',
+  # The dummy root secret key of internal/versitysetup's tests (H3): a
+  # fixture for a fake S3 gateway, never a credential anywhere.
+  '''rootSecret\s*=\s*"root-secret-key-0123456789"''',
 ]
