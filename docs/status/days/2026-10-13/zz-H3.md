@@ -1,4 +1,5 @@
 change: H3 built: Versity Gateway as an optional farmer chart component (`versity.enabled`, off by default), the S3 endpoint of farmer, saasapi and the accounts bucket when on; users from the component Secrets, buckets and policies by a hook Job.
+pr: 244
 item: P25
 action: update
 rag: Amber
