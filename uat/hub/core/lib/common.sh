@@ -22,15 +22,18 @@ EXTRAS_RELEASE=imas-uat-core      # release of uat/hub/core/chart
 FARMER_FULLNAME=imas-core-farmer  # chart fullname for release imas-core
 SAASAPI_FULLNAME=imas-core-farmer-saasapi
 OPENBAO_STS=imas-core-openbao
-OPENBAO_POD=imas-core-openbao-0
+OPENBAO_POD=imas-core-openbao-0   # the only pod, or the HA run's first raft node (init runs here)
+OPENBAO_INTERNAL_SVC=imas-core-openbao-internal # the subchart's headless Service (raft peers' names)
 PXC_CLUSTER=imas-core-pxc         # StatefulSets <cluster>-pxc, <cluster>-haproxy
 PXC_ROOT_SECRET=imas-core-pxc-secrets
-VALKEY_DEPLOY=imas-core-valkey
+VALKEY_NAME=imas-core-valkey      # a Deployment (single node) or, replicated, a StatefulSet whose pod 0 is the primary
 SEEDS_SECRET=imas-farmer-nats-seeds        # natsSeeds.secretName: SYS_USER, SAASAPI_USER
 FARMER_NKEY_SECRET=imas-farmer-nkey         # farmer.nkeySecret.secretName (the chart default)
 FARMER_NKEY_KEY=farmer.nk                    # farmer.nkeySecret.key (the chart default)
 LOADER_SEED_FILE=bus-loader-user.nk          # the DMZ bus loader's SYS user seed: a file in SEEDS_DIR, never a core Secret
 LOADER_PUB_FILE=bus-loader-user.pub          # its public key in OUT_DIR: natsTrust.busLoaderUserPub (gen-values.sh)
+FENCE_SEED_FILE=bus-fence-user.nk            # a clustered DMZ bus's fence user seed (HA run): a file in SEEDS_DIR, never a core Secret
+FENCE_PUB_FILE=bus-fence-user.pub            # its public key in OUT_DIR: natsTrust.busFenceUserPub (gen-values.sh)
 NATS_TRUST_CONFIGMAP=imas-nats-trust          # natsTrust.configMapName (public; the DMZ copies it)
 INTERNAL_AUTH_SECRET=imas-saasapi-internal-auth
 SAASAPI_NATS_SECRET=imas-saasapi-nats
@@ -42,9 +45,16 @@ OPERATOR_TOKEN_SECRET=imas-saasapi-operator-token # saasapi.operator.token.secre
 OPERATOR_TOKEN_FILE=saasapi-operator-token    # its copy in SENSITIVE_DIR (finish.sh, operator-release.sh)
 SPROUT_RELEASE_CONFIGMAP=imas-core-farmer-sprout-release # the registration hook's request body (request.json)
 OPENBAO_ROOT_SECRET=imas-uat-openbao-root     # openbaoBootstrap.tokenSecretName (a per-run bootstrap token, not the root token)
-OPENBAO_UNSEAL_SECRET=imas-uat-openbao-unseal # UAT ONLY: unseal keys and root token in a Secret
+OPENBAO_UNSEAL_SECRET=imas-uat-openbao-unseal # UAT ONLY: unseal (HA: recovery) keys and root token in a Secret
+OPENBAO_SEAL_SECRET=imas-uat-openbao-seal     # UAT ONLY, HA run: the static seal key every OpenBao pod unseals itself with
+OPENBAO_SEAL_KEY_ID=imas-uat-1                # its key ID (seal "static" current_key_id, values/values-ha.yaml)
 S3_FARMER_SECRET=imas-uat-s3-farmer           # objectStore.credentialsSecret
 S3_SAASAPI_SECRET=imas-uat-s3-saasapi         # saasapi.recipes.credentialsSecret
+S3_ACCOUNTS_READER_SECRET=imas-uat-s3-accounts-reader # versity.accountsReader.credentialsSecret (HA run; the DMZ holds the same pair)
+VERSITY_FULLNAME=imas-core-farmer-versity     # the farmer chart's Versity Gateway Deployment and Service (versity.enabled, HA run)
+VERSITY_PORT=7070                             # versity.port (the chart default)
+VERSITY_AZURE_SECRET=imas-uat-versity-azure   # versity.azure.credentialsSecret: account-name, account-key (uat/tofu object_store)
+VERSITY_ROOT_SECRET=imas-uat-versity-root     # versity.rootCredentials.secretName (generated per run)
 RUSTFS_ROOT_SECRET=imas-uat-rustfs-root
 KEYCLOAK_ADMIN_SECRET=imas-uat-keycloak-admin
 KEYCLOAK_REALM_SECRET=imas-uat-keycloak-realm
@@ -58,8 +68,11 @@ JOB_BUCKET=imas-jobs                          # objectStore.jobBucket
 SPROUT_JWT_BUCKET=imas-sprout-jwts            # objectStore.sproutJWTBucket
 ACCOUNTS_BUCKET=imas-accounts                 # accountStore.bucket (the farmer and nats chart default)
 S3_ACCOUNTS_WRITER_SECRET=imas-farmer-accounts-writer # accountStore.credentialsSecret (the chart default)
-S3_FARMER_USER=imas-farmer
+S3_FARMER_USER=imas-farmer                    # the S3 users' access key IDs (RustFS and Versity Gateway alike)
 S3_SAASAPI_USER=imas-saasapi
+S3_ACCOUNTS_WRITER_USER=imas-farmer-accounts  # the accounts bucket's writer (farmer's accountStore)
+S3_ACCOUNTS_READER_USER=imas-bus-accounts-reader # ... and its reader (the DMZ bus's loader)
+VERSITY_ROOT_USER=imas-uat-versity-root       # Versity Gateway's root access key ID (HA run)
 REALM=imas-uat
 SAASAPI_AUDIENCE=imas-saasapi                 # saasapi.jwt.audience
 TESTS_CLIENT=imas-uat-tests
@@ -168,12 +181,54 @@ load_endpoints() {
 	S3_USE_SSL=$(ep '.object_store.use_ssl' false)
 	S3_EGRESS_CIDRS=$(jq -c '(.object_store.egress_cidrs // [])' "$ENDPOINTS")
 
+	# The hubs' layout (uat/k0s endpoints.json, from tofu's uat output):
+	# every node's private address, and the hub's private address, which
+	# <hub>.<private_dns_zone> resolves to (api_address: the node's own on a
+	# single node, the internal load balancer's on an HA hub). Traffic the
+	# other hub sends arrives from one of its nodes' addresses; traffic sent to
+	# the other hub goes to its private address. A file without the fields
+	# (one node, written before P24) means one node at private_ip.
+	CORE_NODE_IPS=$(jq -c '(.core.node_private_ips // [.core.private_ip]) | map(tostring)' "$ENDPOINTS")
+	DMZ_NODE_IPS=$(jq -c '(.dmz.node_private_ips // [.dmz.private_ip]) | map(tostring)' "$ENDPOINTS")
+	CORE_NODE_COUNT=$(jq -r '((.core.nodes // .core.node_names // [.core.name]) | length)' "$ENDPOINTS")
+	DMZ_NODE_COUNT=$(jq -r '((.dmz.nodes // .dmz.node_names // [.dmz.name]) | length)' "$ENDPOINTS")
+	CORE_ADDR=$(ep '.core.api_address' "$CORE_IP")
+	DMZ_ADDR=$(ep '.dmz.api_address' "$DMZ_IP")
+	# The accounts store's port on the core hub's private address (the DMZ
+	# bus's loader reads the accounts bucket there; uat/tofu
+	# accounts_store_port).
+	CORE_ACCOUNTS_STORE_PORT=$(ep '.core.ports.accounts_store' 9000)
+
 	valid_fqdn "$CORE_FQDN" || die "core.fqdn is not a DNS name: $CORE_FQDN"
 	valid_fqdn "$DMZ_FQDN" || die "dmz.fqdn is not a DNS name: $DMZ_FQDN"
 	valid_ipv4 "$CORE_IP" || die "core.private_ip is not an IPv4 address: $CORE_IP"
 	valid_ipv4 "$DMZ_IP" || die "dmz.private_ip is not an IPv4 address: $DMZ_IP"
+	local n
+	for n in "$CORE_NODE_COUNT" "$DMZ_NODE_COUNT"; do
+		[[ "$n" == 1 || "$n" == 3 || "$n" == 5 ]] || die "a hub has 1, 3 or 5 nodes (uat/tofu), the endpoints file says $n"
+	done
+	[[ "$(jq -r 'length' <<<"$CORE_NODE_IPS")" == "$CORE_NODE_COUNT" ]] || die "core.node_private_ips does not list every core node"
+	[[ "$(jq -r 'length' <<<"$DMZ_NODE_IPS")" == "$DMZ_NODE_COUNT" ]] || die "dmz.node_private_ips does not list every DMZ node"
+	local ip
+	for ip in $(jq -r '.[]' <<<"$CORE_NODE_IPS") $(jq -r '.[]' <<<"$DMZ_NODE_IPS") "$CORE_ADDR" "$DMZ_ADDR"; do
+		valid_ipv4 "$ip" || die "a hub node or API address is not an IPv4 address: $ip"
+	done
+	# HA_CORE: the core hub has several nodes, so install.sh adds the HA
+	# overlay (values/values-ha.yaml) and the object store is Versity Gateway
+	# in front of the run's Azure Blob account (design D18; brief H4).
+	HA_CORE=false
+	((CORE_NODE_COUNT > 1)) && HA_CORE=true
+	if [[ $HA_CORE == true ]]; then
+		jq -e '.object_store.mode | . == null or . == "versity"' "$ENDPOINTS" >/dev/null ||
+			die "the core hub has $CORE_NODE_COUNT nodes: its object store is Versity Gateway (object_store.mode versity or unset), not $S3_MODE"
+		S3_MODE=versity
+		S3_ENDPOINT="$VERSITY_FULLNAME.$CORE_NS.svc.$CLUSTER_DOMAIN:$VERSITY_PORT"
+		S3_USE_SSL=false
+	fi
 	case "$S3_MODE" in
 	rustfs) ;;
+	versity)
+		[[ $HA_CORE == true ]] || die "object_store.mode versity is the HA run's (a core hub of several nodes)" ;;
 	external)
 		jq -e '.object_store.endpoint | strings | length > 0' "$ENDPOINTS" >/dev/null ||
 			die "object_store.mode is external: object_store.endpoint (host[:port]) is required"
@@ -182,7 +237,7 @@ load_endpoints() {
 		# RustFS runs in this mode (uat/hub/dmz, dmz.account_store).
 		jq -e '.dmz.account_store.endpoint | strings | length > 0' "$ENDPOINTS" >/dev/null ||
 			die "object_store.mode is external: dmz.account_store.endpoint (the accounts bucket's host:port as the DMZ reaches it) is required" ;;
-	*) die "object_store.mode must be rustfs or external, got: $S3_MODE" ;;
+	*) die "object_store.mode must be rustfs or external (versity on an HA core hub), got: $S3_MODE" ;;
 	esac
 	[[ "$S3_ENDPOINT" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$ ]] ||
 		die "object_store.endpoint is not host[:port] (no scheme, no path): $S3_ENDPOINT"
@@ -190,7 +245,7 @@ load_endpoints() {
 	jq -e 'type == "array" and all(.[]; type == "string" and test("^[0-9.]+/[0-9]{1,2}$"))' <<<"$S3_EGRESS_CIDRS" >/dev/null ||
 		die "object_store.egress_cidrs must be a list of IPv4 CIDRs"
 	local p
-	for p in "$CORE_HTTPS_PORT" "$CORE_FARMER_PORT" "$DMZ_ENVOY_PORT" "$DMZ_BUS_PORT"; do
+	for p in "$CORE_HTTPS_PORT" "$CORE_FARMER_PORT" "$DMZ_ENVOY_PORT" "$DMZ_BUS_PORT" "$CORE_ACCOUNTS_STORE_PORT"; do
 		valid_port "$p" || die "not a port: $p"
 	done
 	# Owner decision 2026-10-06: no node port mode on core (its node port
@@ -226,16 +281,44 @@ load_endpoints() {
 extras_set_args() {
 	printf '%s\n' \
 		--set-string "core.fqdn=$CORE_FQDN" \
-		--set-string "core.privateIP=$CORE_IP" \
+		--set-string "core.privateIP=$CORE_ADDR" \
+		--set-json "core.nodeIPs=$CORE_NODE_IPS" \
+		--set "core.accountsStorePort=$CORE_ACCOUNTS_STORE_PORT" \
 		--set-string "core.privateFQDN=$CORE_PRIVATE_FQDN" \
 		--set "core.httpsPort=$CORE_HTTPS_PORT" \
 		--set "core.farmerAPIPort=$CORE_FARMER_PORT" \
-		--set-string "dmz.privateIP=$DMZ_IP" \
+		--set-string "dmz.privateIP=$DMZ_ADDR" \
+		--set-json "dmz.nodeIPs=$DMZ_NODE_IPS" \
 		--set-string "dmz.privateFQDN=$DMZ_PRIVATE_FQDN" \
 		--set "bus.port=$DMZ_BUS_PORT" \
 		--set-string "caIssuer.name=$CA_ISSUER" \
 		--set-string "clusterDomain=$CLUSTER_DOMAIN" \
-		--set "rustfs.enabled=$([[ $S3_MODE == rustfs ]] && echo true || echo false)"
+		--set "rustfs.enabled=$([[ $S3_MODE == rustfs ]] && echo true || echo false)" \
+		--set "versity.enabled=$([[ $S3_MODE == versity ]] && echo true || echo false)" \
+		--set "edge.replicas=$CORE_NODE_COUNT" \
+		--set "loadBalancerProbe.enabled=$HA_CORE"
+}
+
+# farmer_values_files: the -f arguments (one per line) of the farmer chart:
+# values/farmer-uat.yaml, then on an HA core hub values/values-ha.yaml. The
+# run's own values (gen-values.sh) come after these.
+farmer_values_files() {
+	local here_dir
+	here_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+	printf '%s\n' -f "$here_dir/values/farmer-uat.yaml"
+	[[ $HA_CORE == true ]] && printf '%s\n' -f "$here_dir/values/values-ha.yaml"
+	return 0
+}
+
+# valkey_ready: Valkey is a Deployment on one node and
+# a StatefulSet replicated: every replica of whichever exists is Ready.
+valkey_ready() {
+	if kc -n "$CORE_NS" get statefulset "$VALKEY_NAME" >/dev/null 2>&1; then
+		sts_ready "$VALKEY_NAME" "$CORE_NS"
+	else
+		kc -n "$CORE_NS" get deployment "$VALKEY_NAME" -o json |
+			jq -e '(.spec.replicas // 0) > 0 and (.status.readyReplicas // 0) == .spec.replicas' >/dev/null
+	fi
 }
 
 # release_version <tag>: vX.Y.Z or vX.Y.Z-rc.N (the contract) -> X.Y.Z[-rc.N].

@@ -40,9 +40,10 @@ Files:
 | `network-security.tf` | The four NSGs (rules tabled below) |
 | `vms.tf` | Public IPs, NICs, the hub nodes and sprouts, the WinRM extension, the Bastion |
 | `lb.tf` | The load balancers of an HA hub (none for a single node) |
+| `object-store.tf` | The HA run's Azure Blob account for the farmer chart's Versity Gateway (none when core has one node) |
 | `quota-check.sh` | Run before `tofu apply`: fails with the vCPU numbers when the region's quota cannot hold the VMs the plan creates |
 | `winrm-https.ps1` | What the Windows extension runs: WinRM over HTTPS on 5986 |
-| `outputs.tf` | `uat` (the contract object) and the two sensitive credential outputs |
+| `outputs.tf` | `uat` (the contract object), `ha_node_names`, `object_store` and the sensitive credential outputs |
 | `destroy.sh` | Teardown helper |
 | `bootstrap/` | The persistent stack, applied once by the owner |
 | `tests/` | `main.tftest.hcl` (tofu test, mocked providers), `destroy_test.sh`, `quota_test.sh`, their stubs and `testdata/` (plan, SKU and usage fixtures) |
@@ -73,7 +74,7 @@ From the Shared contract, plus what the brief makes a variable.
 | `envoy_port` | `8443` | Envoy's external port on the DMZ host: 8443, the owner's decision (2026-10-06), as a NodePort. A variable so every Envoy rule moves together |
 | `bus_port` | `8442` | The farmerbus node port core dials on the DMZ: 8442, the owner's decision (2026-10-06), so the DMZ node port range is 8442-8443 only |
 | `farmer_api_port`, `core_public_port` | `5405`, `443` | farmer's API (Envoy's upstream; the owner: "farmer ports can be anything"), saasapi and Keycloak on core. See the network table |
-| `accounts_store_port` | `9000` | core's RustFS as the DMZ bus's account loader reads it (`uat/hub/core` `rustfs.hostPort`). See the network table |
+| `accounts_store_port` | `9000` | core's RustFS (Versity Gateway through core's edge proxy on an HA core hub) as the DMZ bus's account loader reads it (`uat/hub/core` `core.accountsStorePort`). See the network table |
 | `private_dns_zone` | `uat.imas.internal` | The private DNS zone linked to the VNet (see [Private DNS](#private-dns)) |
 
 The image URNs are unverified: the owner checks them with `az vm image list
@@ -131,7 +132,14 @@ HA run, empty lists for a single-node hub. It is not in `uat` because the
 Shared contract fixes `uat`'s top-level keys; the workflow writes it to
 `ha_node_names.json` next to `uat.json`.
 
-Credentials are not in `uat`. Two separate outputs hold them, both
+A third, `object_store`, names the HA run's Azure Blob account
+(`object-store.tf`): `{"account_name": "imasuat<run_id>", "blob_endpoint":
+"https://imasuat<run_id>.blob.core.windows.net/"}`, or `null` when the core
+hub has one node (the single-node run keeps RustFS on core). The workflow
+writes the name, with the key below, to the files `uat/hub/core/install.sh`
+reads (`<state>/core/sensitive/azure-blob/`).
+
+Credentials are not in `uat`. Separate outputs hold them, all
 `sensitive`, so `tofu output` and plans print `(sensitive value)`. The owner
 accepted this hand-over (2026-10-06: "sensitive outputs yes"):
 
@@ -139,6 +147,7 @@ accepted this hand-over (2026-10-06: "sensitive outputs yes"):
 |---|---|
 | `ssh_private_key` | RSA 4096 private key (OpenSSH format) for `admin_user` on every Linux VM, generated per run by the `tls` provider |
 | `windows_admin_password` | 24 random characters for `admin_user` on both Windows sprouts, generated per run by the `random` provider |
+| `object_store_account_key` | The HA run's storage account key, which Versity Gateway signs in to Azure Blob with (`versity.azure.credentialsSecret`); empty when the core hub has one node |
 
 The workflow reads them with `tofu output -raw <name>` into `0600` files (masking
 the password with `::add-mask::` first) and never uploads them. They also live
@@ -171,7 +180,7 @@ balancer in the single-node run (the HA run adds them, owner 2026-10-13; see
 | dmz | in | 4000 | DenyVnetIn | VirtualNetwork | any | any | Overrides `AllowVnetInBound` |
 | dmz | in | 4096 | DenyAllIn | any | any | any | Everything else, including the Azure load balancer default |
 | dmz | out | 100 | AllowFarmerApiOut | dmz | core | TCP 5405 | Envoy's upstreams `farmer_api` and `recipe_service` (5405), and its remote JWKS fetch (`/v1/.well-known/jwks.json` on the same port) |
-| dmz | out | 110 | AllowAccountsStoreOut | dmz | core | TCP `accounts_store_port` (9000) | The bus's account loader reads the accounts bucket on core's RustFS, with a read-only credential scoped to that bucket (design D22; `uat/hub/core` `rustfs.hostPort`, `uat/hub/dmz` `dmz.account_store.endpoint`). The only other DMZ-to-core path |
+| dmz | out | 110 | AllowAccountsStoreOut | dmz | core | TCP `accounts_store_port` (9000) | The bus's account loader reads the accounts bucket on core's RustFS, with a read-only credential scoped to that bucket (design D22; `uat/hub/core` `core.accountsStorePort`, `uat/hub/dmz` `dmz.account_store.endpoint`). The only other DMZ-to-core path |
 | dmz | out | 4000 | DenyVnetOut | any | VirtualNetwork | any | Overrides `AllowVnetOutBound`: the DMZ reaches nothing else in the VNet. Internet outbound (images) stays allowed |
 | core | in | 100 | AllowBastionSshKubeIn | `10.60.4.0/26` | core | TCP 22, 6443 | As for dmz |
 | core | in | 110 | AllowDmzFarmerApiIn | dmz `10.60.1.0/24` | core | TCP 5405 | Envoy to farmer's API (farmer `farmer.apiPort`; farmer NetworkPolicy "farmer in from the nats chart's Envoy") |
@@ -333,6 +342,17 @@ With more nodes (the HA run is 3 and 3, owner 2026-10-13; P24):
   each HA hub's `api_address`, which is no VM. The NSG rules above already
   admit the Bastion subnet on 6443 to the hub's subnet, and a load balancer
   keeps the client's address. The single-node run keeps it off.
+- **Object store** (P24, brief H4; design D18). When core has more than one
+  node, a StorageV2 account `imasuat<run_id>` in the run's group: zone
+  redundant (locally redundant in a region without zones), HTTPS only, TLS
+  1.2, no anonymous blob access, the run's tags, so destroy and its teardown
+  check cover it. The farmer chart's Versity Gateway serves it as S3 with the
+  account key. The account only: the containers are the buckets the chart's
+  `createBuckets` Job creates through the gateway (a container made here would
+  be a bucket the gateway's root does not own, which the Job refuses). It
+  holds only the run's recipes, job logs, sprout JWTs and Account JWTs, is
+  reached over the internet on 443 (the nodes' own outbound IPs), and goes
+  with the resource group.
 - **Quota.** `quota-check.sh` runs before every apply in the workflow:
 
 ```sh
@@ -479,7 +499,7 @@ The HA run (3 + 3) replaces the two hubs with `uat-dmz-1` to `uat-dmz-3`
 16 GiB; 128 GB), adds 2 Standard public IPs (the public load balancers), 4
 Standard load balancers (with their backend pools, probes and rules), 4 more
 NICs and public IPs, and 4 more node records in the private zone (10 A
-records). It needs 18 Dsv5 vCPU instead of 10 (owner,
+records) and the storage account `imasuat<run_id>` (no vCPU). It needs 18 Dsv5 vCPU instead of 10 (owner,
 2026-10-13: request 18 Dsv5 plus the 12 B2ls_v2 vCPU the sprouts use), 30 in
 all.
 
@@ -518,7 +538,9 @@ What ran here (no Azure access):
   management ports are open only to the Bastion, the hub's own nodes and the
   probe, the private DNS records, the `uat` and `ha_node_names` outputs, the
   Bastion's IP-based connection (on with an HA hub, off in the single-node
-  run), one hub HA and the other single, and the node count validation.
+  run), one hub HA and the other single, the node count validation, and the
+  object store account (one, tagged, HTTPS only, private, ZRS or LRS without
+  zones, the `object_store` and key outputs; none in the single-node run).
 - `tests/destroy_test.sh`: `destroy.sh` against stubbed `tofu` and `az`, all
   three branches (clean destroy; fallback to `az group delete`; leftovers exit
   1, including an HA run's load balancers), the refusal to delete a group

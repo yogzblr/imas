@@ -309,6 +309,9 @@ jobs:
           jq -e --arg rg "imas-uat-$RUN_ID" '.resource_group == $rg' "$STATE/uat.json" >/dev/null
           # The VMs the HA tests stop (empty lists for a single-node hub).
           tofu -chdir=uat/tofu output -json ha_node_names >"$STATE/ha_node_names.json"
+          # The HA run's Azure Blob account for Versity Gateway (null in the
+          # single-node run, which keeps RustFS). Name only; the key is below.
+          tofu -chdir=uat/tofu output -json object_store >"$STATE/object_store.json"
 
       # The per-run credentials, into 0600 files that are never uploaded. The
       # password is masked before it is used anywhere.
@@ -324,6 +327,18 @@ jobs:
           echo "::add-mask::$pw"
           printf '%s' "$pw" >"$SECRETS/winrm_password"
           unset pw
+          # The HA run's storage account (uat/tofu object-store.tf): its name
+          # and key for Versity Gateway, where uat/hub/core/install.sh reads
+          # them (<state>/core/sensitive/azure-blob). The key is masked first.
+          if [ "$(jq -r 'type' "$STATE/object_store.json")" = object ]; then
+            blob="$STATE/hub/core/sensitive/azure-blob"
+            mkdir -p "$blob"
+            key=$(tofu -chdir=uat/tofu output -raw object_store_account_key)
+            echo "::add-mask::$key"
+            printf '%s' "$key" >"$blob/account-key"
+            unset key
+            jq -j .account_name "$STATE/object_store.json" >"$blob/account-name"
+          fi
 
       - name: Azure CLI extensions (bastion, ssh)
         run: |
@@ -350,7 +365,11 @@ jobs:
       # release_tag is the chart reference as well: install.sh pulls the
       # farmer chart published with that tag (it carries the stamped sprout
       # release finish.sh registers). IMAS_UAT_DISPATCH_FLAGS sets the fleet
-      # update flags in the chart values (gen-values.sh).
+      # update flags in the chart values (gen-values.sh). hub_nodes 3: the
+      # endpoints file lists three core nodes, so install.sh adds the HA
+      # overlay (values/values-ha.yaml) and runs Versity Gateway over the
+      # Azure Blob account whose name and key the credentials step wrote
+      # (uat/README.md, "HA run").
       - name: Core hub (uat/hub/core)
         env:
           RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
@@ -363,7 +382,11 @@ jobs:
       # seed crosses). Its account loader gets the two credentials core's
       # install left for it: the loader's SYS user seed (seeds.sh; its public
       # key is core's natsTrust.busLoaderUserPub) and the read-only accounts
-      # bucket credential (rustfs-setup.sh), which it uses on core's RustFS.
+      # bucket credential (rustfs-setup.sh, or install.sh for Versity
+      # Gateway on the HA run), which it uses on core's object store. A
+      # clustered bus (hub_nodes 3) also gets its fence user's seed
+      # (seeds.sh; core's natsTrust.busFenceUserPub); install.sh ignores the
+      # file for a single-node bus.
       - name: DMZ hub (uat/hub/dmz)
         env:
           RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
@@ -373,6 +396,7 @@ jobs:
             --seeds-from-kubeconfig "$STATE/k0s/core.kubeconfig" \
             --loader-seed "${UAT_SEEDS_DIR:-$STATE/hub/core/sensitive/seeds}/bus-loader-user.nk" \
             --accounts-reader-dir "$STATE/hub/core/sensitive/s3/accounts-reader" \
+            --fence-seed "${UAT_SEEDS_DIR:-$STATE/hub/core/sensitive/seeds}/bus-fence-user.nk" \
             --workdir "$STATE/dmz"
 
       # farmer and saasapi need the DMZ bus, so core's install.sh does not wait

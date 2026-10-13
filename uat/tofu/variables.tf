@@ -210,7 +210,7 @@ variable "bus_port" {
 }
 
 variable "accounts_store_port" {
-  description = "The core hub's object store (RustFS, uat/hub/core chart/ rustfs.hostPort) as the DMZ bus's account loader reads it: the accounts bucket, with a read-only credential scoped to it (design D22). The only DMZ-to-core path besides farmer's API; uat/hub/dmz reads it at <core private IP>:9000 by default (dmz.account_store.endpoint)."
+  description = "The core hub's object store (RustFS, or Versity Gateway through the edge proxy on an HA core hub; uat/hub/core chart/ core.accountsStorePort) as the DMZ bus's account loader reads it: the accounts bucket, with a read-only credential scoped to it (design D22). The only DMZ-to-core path besides farmer's API; uat/hub/dmz reads it at <core private IP>:9000 by default (dmz.account_store.endpoint)."
   type        = number
   default     = 9000
 }

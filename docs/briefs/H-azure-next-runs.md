@@ -257,6 +257,46 @@ hub layout, `uat/README.md`.
 Tests: both hubs render with the HA overlay; asserted: replica counts, spread, PDBs, PXC 3
 without `unsafeFlags`, OpenBao 3 peers, Versity on, no PVC for farmer, saasapi, bus.
 
+Corrections made while building H4 (2026-10-13; the code on main, the pinned charts and OpenBao
+2.7.1, and the error windows above decide):
+- The overlays are `uat/hub/core/values/values-ha.yaml` and `uat/hub/dmz/values-ha.yaml`. No new
+  input selects them: the endpoints file `uat/k0s` writes lists each hub's nodes (H2), and a hub
+  of several nodes gets its overlay.
+- "Auto-unseal as the UAT already does": the UAT did not auto-unseal; `openbao-bootstrap.sh`
+  unsealed the one pod with Shamir keys, which a pod restarted by a test would never get. The HA
+  overlay uses OpenBao's static seal (since 2.4; checked on 2.7.1 with three raft servers): a
+  32-byte key `install.sh` generates once into Secret `imas-uat-openbao-seal`, mounted by every
+  pod, so each pod unseals itself on every start and rejoins. `openbao-bootstrap.sh` initialises
+  pod 0 once with recovery keys and waits for three unsealed voters. The single-node run keeps
+  its Shamir unseal.
+- Valkey: the pinned valkey-io chart (0.12.0) has only a replicated mode (a primary, pod 0, and
+  replicas; no Sentinel, no cluster mode). That is what the overlay uses with 3 pods. The replicas
+  serve reads while the primary's node is down, but writes wait for it, so H5's node-stop picks a
+  node holding a replica, not the primary (`core.json` `topology.valkey_primary`), as "a replica
+  of each stateful service" already says.
+- Tofu creates the storage account only (`uat/tofu/object-store.tf`, outputs `object_store` and
+  the sensitive `object_store_account_key`), not the containers: the chart's `createBuckets` Job
+  creates the buckets through the gateway, which keeps each bucket's owner on the container, and
+  refuses a container it does not own. The workflow writes the name and key to
+  `<state>/hub/core/sensitive/azure-blob/` for `install.sh`.
+- The DMZ's account loader reaches the gateway, whose Service is in-cluster plain HTTP, through
+  the core edge proxy: a TCP passthrough on the accounts store port (9000) of every core node, so
+  the DMZ keeps reading `<core address>:9000`. `rustfs.hostPort` became `core.accountsStorePort`
+  (RustFS's hostPort or the edge's). `validate-rustfs.sh` became `validate-object-store.sh`, which
+  checks the gateway's users through `kubectl port-forward` the same way.
+- "Envoy at 3 replicas" covers the core edge proxy too: one per core node (hostPorts, so
+  `maxSurge` 0), or the core load balancers would find no listener on two of the nodes.
+- A clustered bus needs what the brief did not list: its fence user (seed made by `seeds.sh`,
+  public key in `natsTrust.busFenceUserPub`, the DMZ Secret from `install.sh --fence-seed`), a
+  route password (generated in the DMZ cluster) and every bus pod's name on the bus certificate.
+- Cross-cluster NetworkPolicies: traffic to the other hub goes to its private address (its
+  internal load balancer), traffic from it arrives from its nodes' addresses, and the Azure
+  health probe (168.63.129.16) must reach every load-balanced port where a pod listens, or the
+  node drops out of the rule. The DMZ check's enrolment burst scales with the Envoys, each of
+  which keeps its own bucket behind the load balancer.
+- Keycloak (UAT only) stays one pod on an H2 file volume; `uat/README.md` "HA run" names it, with
+  Valkey's primary, as the pieces the node-stop test does not stop.
+
 ## H5: the `ha` test tier (P24 item 6, P23)
 
 Needs R1 and H4. Scope: `uat/tests` (new `ha_test.go`, harness, `catalogue.tsv`, `run.sh`),

@@ -57,6 +57,26 @@ type CoreJSON struct {
 	// bound them to.
 	Tenants      map[string]string `json:"tenants"`
 	SensitiveDir string            `json:"sensitive_dir"`
+	// Topology is the hubs' layout install.sh deployed (P24): absent in a
+	// core.json written before it, which means one node per hub.
+	Topology *CoreTopology `json:"topology,omitempty"`
+}
+
+// CoreTopology is core.json's topology: the node counts, the hubs' private
+// addresses, the object store and Valkey's primary pod. On an HA core hub
+// (values/values-ha.yaml) Valkey is a primary and two replicas; the primary
+// pod's node stopped stops Valkey writes until it returns, so a node-stop
+// test stops another node (uat/README.md, "HA run").
+type CoreTopology struct {
+	HA          bool   `json:"ha"`
+	CoreNodes   int    `json:"core_nodes"`
+	DMZNodes    int    `json:"dmz_nodes"`
+	CoreAddress string `json:"core_address"`
+	DMZAddress  string `json:"dmz_address"`
+	// ObjectStore is rustfs, external or versity (Versity Gateway over
+	// Azure Blob, the HA run).
+	ObjectStore   string `json:"object_store"`
+	ValkeyPrimary string `json:"valkey_primary"`
 }
 
 // CredentialsJSON is the part of uat/hub/core's sensitive/credentials.json

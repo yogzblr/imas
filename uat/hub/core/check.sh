@@ -5,6 +5,11 @@
 #   - farmer, saasapi, PXC (cluster, pxc and haproxy), Valkey and OpenBao
 #     (initialised, unsealed, the ed25519 gateway key) are Ready, and so
 #     are RustFS, Keycloak and the edge proxy;
+#   - on an HA core hub (several core nodes; values/values-ha.yaml): farmer,
+#     saasapi and Versity Gateway run 3 replicas on 3 different nodes, the
+#     edge one per node, PXC 3 nodes and 3 HAProxy, Valkey a primary and 2
+#     replicas, and OpenBao 3 raft pods, every one unsealed (static seal)
+#     and a voter;
 #   - design T4 (docs/design/imas-openbao-signing-design.md section 11, the
 #     OpenBao bootstrap Job): the trust ConfigMap is complete, public, and
 #     byte for byte what the first install wrote, so re-runs (finish.sh's
@@ -74,11 +79,37 @@ check "saasapi ($SAASAPI_FULLNAME) Ready" deploy_ready "$SAASAPI_FULLNAME" "$COR
 check "PXC cluster $PXC_CLUSTER state ready" pxc_ready "$PXC_CLUSTER" "$CORE_NS"
 check "PXC statefulset $PXC_CLUSTER-pxc Ready" sts_ready "$PXC_CLUSTER-pxc" "$CORE_NS"
 check "PXC HAProxy $PXC_CLUSTER-haproxy Ready" sts_ready "$PXC_CLUSTER-haproxy" "$CORE_NS"
-check "Valkey ($VALKEY_DEPLOY) Ready" deploy_ready "$VALKEY_DEPLOY" "$CORE_NS"
+check "Valkey ($VALKEY_NAME) Ready" valkey_ready
 check "OpenBao ($OPENBAO_STS) Ready" sts_ready "$OPENBAO_STS" "$CORE_NS"
 [[ "$S3_MODE" == rustfs ]] && check "RustFS Ready (UAT)" deploy_ready "$RUSTFS_SVC" "$UAT_NS"
 check "Keycloak Ready" deploy_ready "$KEYCLOAK_DEPLOY" "$UAT_NS"
 check "edge proxy Ready" deploy_ready "$EDGE_DEPLOY" "$UAT_NS"
+
+# --- HA core hub --------------------------------------------------------------
+# replicas_on_nodes <kind> <name> <ns> <n>: n replicas, all Ready, and the
+# pods (by the workload's own selector) on n different nodes.
+replicas_on_nodes() {
+	local obj sel
+	obj=$(kc -n "$3" get "$1" "$2" -o json) || return 1
+	jq -e --argjson n "$4" '.spec.replicas == $n and (.status.readyReplicas // 0) == $n' <<<"$obj" >/dev/null || return 1
+	sel=$(jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")' <<<"$obj")
+	kc -n "$3" get pods -l "$sel" -o json |
+		jq -e --argjson n "$4" '[.items[] | select(.metadata.deletionTimestamp == null) | .spec.nodeName] | (length == $n) and (unique | length == $n)' >/dev/null
+}
+if [[ $HA_CORE == true ]]; then
+	check "HA: farmer runs 3 replicas on 3 nodes" replicas_on_nodes deployment "$FARMER_FULLNAME" "$CORE_NS" 3
+	check "HA: saasapi runs 3 replicas on 3 nodes" replicas_on_nodes deployment "$SAASAPI_FULLNAME" "$CORE_NS" 3
+	check "HA: Versity Gateway runs 3 replicas on 3 nodes" replicas_on_nodes deployment "$VERSITY_FULLNAME" "$CORE_NS" 3
+	check "HA: the edge proxy runs one pod on each of the $CORE_NODE_COUNT nodes" replicas_on_nodes deployment "$EDGE_DEPLOY" "$UAT_NS" "$CORE_NODE_COUNT"
+	check "HA: OpenBao runs 3 raft pods on 3 nodes" replicas_on_nodes statefulset "$OPENBAO_STS" "$CORE_NS" 3
+	check "HA: PXC runs 3 nodes on 3 nodes" replicas_on_nodes statefulset "$PXC_CLUSTER-pxc" "$CORE_NS" 3
+	check "HA: PXC HAProxy runs 3 pods on 3 nodes" replicas_on_nodes statefulset "$PXC_CLUSTER-haproxy" "$CORE_NS" 3
+	check "HA: Valkey runs a primary and 2 replicas on 3 nodes" replicas_on_nodes statefulset "$VALKEY_NAME" "$CORE_NS" 3
+	for ((i = 0; i < 3; i++)); do
+		st=$(kc -n "$CORE_NS" exec "$OPENBAO_STS-$i" -c openbao -- env BAO_ADDR=http://127.0.0.1:8200 bao status -format=json 2>/dev/null || true)
+		check "HA: OpenBao $OPENBAO_STS-$i unsealed by the static seal" jq -e '.initialized == true and .sealed == false and .type == "static"' <<<"${st:-{\}}"
+	done
+fi
 for s in "$SAASAPI_NATS_SECRET" "$SAASAPI_BOX_SECRET" "$SEEDS_SECRET" "$FARMER_NKEY_SECRET" "$INTERNAL_AUTH_SECRET" "$OPERATOR_TLS_SECRET" "$OPERATOR_TOKEN_SECRET"; do
 	check "Secret $CORE_NS/$s exists" kc -n "$CORE_NS" get secret "$s"
 done
@@ -86,8 +117,16 @@ done
 bao_st=$(kc -n "$CORE_NS" exec "$OPENBAO_POD" -c openbao -- env BAO_ADDR=http://127.0.0.1:8200 bao status -format=json 2>/dev/null || true)
 [[ -n "$bao_st" ]] || bao_st='{}'
 check "OpenBao initialised and unsealed" jq -e '.initialized == true and .sealed == false' <<<"$bao_st"
-check "OpenBao storage is single-node raft, active" jq -e '.storage_type == "raft" and .is_self == true' <<<"$bao_st"
 token_file="$SENSITIVE_DIR/openbao-root-token"
+if [[ $HA_CORE == true ]]; then
+	voters=$(kc -n "$CORE_NS" exec -i "$OPENBAO_POD" -c openbao -- /bin/sh -ec \
+		'IFS= read -r BAO_TOKEN || [ -n "$BAO_TOKEN" ]; export BAO_TOKEN BAO_ADDR=http://127.0.0.1:8200; bao operator raft list-peers -format=json' \
+		<"$token_file" 2>/dev/null || true)
+	check "HA: OpenBao storage is raft with 3 voters and a leader" \
+		jq -e '[.data.config.servers[] | select(.voter)] | length == 3 and (map(select(.leader)) | length == 1)' <<<"${voters:-{\}}"
+else
+	check "OpenBao storage is single-node raft, active" jq -e '.storage_type == "raft" and .is_self == true' <<<"$bao_st"
+fi
 if [[ -s "$token_file" ]]; then
 	key_type=$(kc -n "$CORE_NS" exec -i "$OPENBAO_POD" -c openbao -- /bin/sh -ec \
 		'IFS= read -r BAO_TOKEN || [ -n "$BAO_TOKEN" ]; export BAO_TOKEN BAO_ADDR=http://127.0.0.1:8200; bao read -field=type transit/keys/'"$GATEWAY_KEY" \

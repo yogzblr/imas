@@ -189,7 +189,7 @@ What uat/k0s does about exposure:
 | dmz | **8442** | node port, to the bus client port 5406 (`bus.ports.client`) | uat/hub/dmz, chart values | core (farmer and saasapi, `farmerbusurl`) |
 | core | **443** | hostPort on the edge (saasapi and Keycloak behind its TLS front) | uat/hub/core | the runner (the tests, the tenant scripts) |
 | core | **5405** | hostPort on the edge, passed through to farmer's API (`farmer.apiPort`) | uat/hub/core | the DMZ's Envoy (`/v1/enroll`, `/v1/refresh`, `/files/`, the JWKS) |
-| core | **9000** | hostPort on RustFS's S3 port (`rustfs.hostPort`; `UAT_CORE_ACCOUNTS_STORE_PORT`) | uat/hub/core | the DMZ bus's account loader (the accounts bucket, read-only) |
+| core | **9000** | hostPort on RustFS's S3 port (`core.accountsStorePort`; `UAT_CORE_ACCOUNTS_STORE_PORT`); on an HA core hub the edge proxy's, to Versity Gateway | uat/hub/core | the DMZ bus's account loader (the accounts bucket, read-only) |
 
 The ports and ranges live in `config.env`. `endpoints.json` repeats them in
 the keys uat/hub/dmz and uat/hub/core read (`dmz.ports.envoy`,

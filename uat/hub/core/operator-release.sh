@@ -96,7 +96,9 @@ post-altered)
 esac
 
 # The operator Service through a local port kubectl picks.
-kc -n "$CORE_NS" port-forward "service/$SAASAPI_OPERATOR_FULLNAME" ":$SAASAPI_OPERATOR_PORT" >"$tmp/pf.log" 2>&1 &
+# kubectl itself in the background (not the kc function), so $! is its own
+# pid and killing it ends the tunnel.
+kubectl --kubeconfig "$KUBECONFIG_PATH" -n "$CORE_NS" port-forward "service/$SAASAPI_OPERATOR_FULLNAME" ":$SAASAPI_OPERATOR_PORT" >"$tmp/pf.log" 2>&1 &
 pf_pid=$!
 lport=""
 for _ in $(seq 1 60); do

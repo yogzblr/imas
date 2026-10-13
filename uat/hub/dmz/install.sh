@@ -9,6 +9,7 @@
 #              [--trust-dir DIR | --seeds-from-kubeconfig FILE
 #                                 [--seeds-from-namespace NS]]
 #              [--accounts-reader-dir DIR] [--loader-seed FILE]
+#              [--fence-seed FILE]
 #              [--workdir DIR] [--expose nodeport|loadbalancer]
 #              [--timeout DURATION] [--chart-registry OCI_BASE]
 #   install.sh --render-only --endpoints FILE --release-tag TAG
@@ -44,6 +45,15 @@
 #                         public key is core's natsTrust.busLoaderUserPub.
 #                         Without it, Secret imas-bus-loader-sys-user must
 #                         exist here
+# --fence-seed            a clustered bus's fence user NKey seed file (SU...;
+#                         uat/hub/core/seeds.sh writes it to <core state-dir>/
+#                         core/sensitive/seeds/bus-fence-user.nk when the DMZ
+#                         has several nodes); its public key is core's
+#                         natsTrust.busFenceUserPub. Read only on an HA DMZ
+#                         (endpoints dmz.nodes longer than one), where
+#                         without it Secret imas-bus-fence-user must exist
+#                         here; a single-node bus has no fence user and the
+#                         option is ignored
 # --workdir               where the pulled chart, the generated values and
 #                         manifests, the render and dmz.json go (default: a
 #                         new temporary directory, printed at the end)
@@ -68,6 +78,14 @@
 # push (docs/RELEASING.md). The Buildkite imashelm registry is superseded
 # for charts.
 #
+# HA DMZ hub (the endpoints file lists several DMZ nodes; the workflow's
+# hub_nodes 3; brief H4): values-ha.yaml goes after values-uat.yaml (a
+# three-node bus cluster and three Envoys, one of each per node), the bus
+# certificate names every bus pod, core's traffic is admitted from every
+# core node, and two more Secrets are made: the fence user's seed
+# (--fence-seed) and the cluster's route password (generated here once,
+# kept in the cluster only).
+#
 # Nothing here is Azure specific, so the local rig (UAT.8) runs it as is.
 set -euo pipefail
 
@@ -76,6 +94,10 @@ DMZ_PROG=install.sh
 # loader.sysUserSecret).
 DMZ_ACCOUNTS_READER_SECRET=imas-bus-accounts-reader
 DMZ_LOADER_SECRET=imas-bus-loader-sys-user
+# A clustered bus's (values-ha.yaml natsSeeds.secretName and
+# bus.cluster.auth.secretName).
+DMZ_FENCE_SECRET=imas-bus-fence-user
+DMZ_ROUTE_SECRET=imas-bus-route-auth
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 . "$here/lib.sh"
@@ -87,13 +109,13 @@ usage() {
 
 kubeconfig="" endpoints="" release_tag="" trust_dir="" seeds_kubeconfig=""
 seeds_namespace=imas-core workdir="" expose="" timeout=10m
-chart_registry="" render_only="" chart="" reader_dir="" loader_seed=""
+chart_registry="" render_only="" chart="" reader_dir="" loader_seed="" fence_seed=""
 
 while (($#)); do
 	case $1 in
 	--kubeconfig | --endpoints | --release-tag | --trust-dir | --seeds-from-kubeconfig | \
 		--seeds-from-namespace | --workdir | --expose | --timeout | --chart-registry | --chart | \
-		--accounts-reader-dir | --loader-seed)
+		--accounts-reader-dir | --loader-seed | --fence-seed)
 		(($# >= 2)) || dmz_die "$1 needs a value"
 		case $1 in
 		--kubeconfig) kubeconfig=$2 ;;
@@ -104,6 +126,7 @@ while (($#)); do
 		--seeds-from-namespace) seeds_namespace=$2 ;;
 		--accounts-reader-dir) reader_dir=$2 ;;
 		--loader-seed) loader_seed=$2 ;;
+		--fence-seed) fence_seed=$2 ;;
 		--workdir) workdir=$2 ;;
 		--expose) expose=$2 ;;
 		--timeout) timeout=$2 ;;
@@ -127,7 +150,7 @@ version=$(dmz_chart_version "$release_tag")
 [[ -z $expose || $expose == nodeport || $expose == loadbalancer ]] || dmz_die "--expose must be nodeport or loadbalancer, not '$expose'"
 [[ $timeout =~ ^[1-9][0-9]*[smh]$ ]] || dmz_die "--timeout '$timeout' is not a duration like 10m"
 if [[ -n $render_only ]]; then
-	[[ -z $kubeconfig && -z $trust_dir && -z $seeds_kubeconfig && -z $reader_dir && -z $loader_seed ]] ||
+	[[ -z $kubeconfig && -z $trust_dir && -z $seeds_kubeconfig && -z $reader_dir && -z $loader_seed && -z $fence_seed ]] ||
 		dmz_die "--render-only touches no cluster: drop --kubeconfig, the trust and the loader credential options"
 else
 	[[ -n $kubeconfig ]] || dmz_die "--kubeconfig is required"
@@ -142,8 +165,11 @@ else
 fi
 
 dmz_need jq helm
-[[ -n $render_only ]] || dmz_need kubectl base64
+[[ -n $render_only ]] || dmz_need kubectl base64 openssl
 dmz_load_endpoints "$endpoints"
+if [[ -z $render_only && $DMZ_HA == true ]]; then
+	[[ -z $fence_seed || -r $fence_seed ]] || dmz_die "--fence-seed '$fence_seed' is not readable (the DMZ hub has $DMZ_NODE_COUNT nodes: a clustered bus needs its fence user's seed)"
+fi
 if [[ -z $expose ]]; then
 	expose=nodeport
 	[[ $DMZ_ENVOY_SERVICE_TYPE != LoadBalancer ]] || expose=loadbalancer
@@ -178,11 +204,13 @@ chart_field() {
 
 # The accounts bucket the bus's loader reads (P21 slice 2): the core hub's
 # object store, reached on dmz.account_store.endpoint (default the core
-# private IP, port 9000), and the bus egress to exactly that address.
+# hub's private address, port 9000: RustFS, or on an HA core hub Versity
+# Gateway through core's edge proxy), and the bus egress to exactly that
+# address.
 # write_accounts_values OUT: passed after values-run.yaml.
 write_accounts_values() {
 	local out=$1 endpoint use_ssl cidr host port
-	endpoint=$(jq -r --arg d "${CORE_PRIVATE_IP}:9000" '.dmz.account_store.endpoint // $d' "$endpoints")
+	endpoint=$(jq -r --arg d "${CORE_ADDR}:9000" '.dmz.account_store.endpoint // $d' "$endpoints")
 	use_ssl=$(jq -r '.dmz.account_store.use_ssl // false' "$endpoints")
 	[[ $endpoint =~ ^([A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?):([0-9]{1,5})$ ]] ||
 		dmz_die "endpoints: dmz.account_store.endpoint '$endpoint' is not host:port (no scheme)"
@@ -240,7 +268,9 @@ got_app=$(chart_field "$chart_ref" appVersion)
 dmz_write_run_values "$workdir/values-run.yaml" "$version"
 write_accounts_values "$workdir/values-accounts.yaml"
 dmz_write_manifests "$workdir/manifests.yaml" "$expose"
-values=(-f "$here/values-uat.yaml" -f "$workdir/values-run.yaml" -f "$workdir/values-accounts.yaml")
+values=(-f "$here/values-uat.yaml")
+[[ $DMZ_HA != true ]] || values+=(-f "$here/values-ha.yaml")
+values+=(-f "$workdir/values-run.yaml" -f "$workdir/values-accounts.yaml")
 
 # An offline render of exactly what step 6 installs, kept for the record and
 # checked below. The Kubernetes version only satisfies the chart's
@@ -341,7 +371,7 @@ need_secret_keys() {
 	shift
 	for key in "$@"; do
 		[[ -n $(kc -n "$DMZ_NAMESPACE" get secret "$name" -o "jsonpath={.data.${key//./\\.}}" 2>/dev/null) ]] ||
-			dmz_die "Secret $DMZ_NAMESPACE/$name lacks $key: pass --accounts-reader-dir and --loader-seed (README.md, \"Accounts bucket and loader\")"
+			dmz_die "Secret $DMZ_NAMESPACE/$name lacks $key: pass --accounts-reader-dir and --loader-seed (and --fence-seed on an HA DMZ) (README.md, \"Accounts bucket and loader\")"
 	done
 }
 if [[ -n $reader_dir ]]; then
@@ -365,6 +395,33 @@ if [[ -n $loader_seed ]]; then
 else
 	need_secret_keys "$DMZ_LOADER_SECRET" user.nk
 	dmz_log "loader SYS user seed: using the existing Secret $DMZ_NAMESPACE/$DMZ_LOADER_SECRET"
+fi
+# A clustered bus (HA DMZ): the fence user's seed and the route password.
+if [[ $DMZ_HA == true ]]; then
+	[[ -n $(kc -n "$DMZ_NAMESPACE" get configmap "$DMZ_TRUST_CONFIGMAP" -o 'jsonpath={.data.bus-fence-user\.jwt}' 2>/dev/null) ]] ||
+		dmz_die "the DMZ hub has $DMZ_NODE_COUNT nodes, but the NATS trust has no bus-fence-user.jwt: core's install must set natsTrust.busFenceUserPub (uat/hub/core/seeds.sh and gen-values.sh do for an HA DMZ)"
+	if [[ -n $fence_seed ]]; then
+		seed=$(<"$fence_seed")
+		size=$(wc -c <"$fence_seed")
+		{ [[ $seed =~ ^SU[A-Z2-7]{50,}$ ]] && ((size == ${#seed} || size == ${#seed} + 1)); } ||
+			dmz_die "--fence-seed $fence_seed is not one NKey user seed"
+		unset seed
+		dmz_log "bus fence user seed: from $fence_seed"
+		apply_loader_secret "$DMZ_FENCE_SECRET" "bus-fence-user.nk=$fence_seed"
+	else
+		need_secret_keys "$DMZ_FENCE_SECRET" bus-fence-user.nk
+		dmz_log "bus fence user seed: using the existing Secret $DMZ_NAMESPACE/$DMZ_FENCE_SECRET"
+	fi
+	if [[ -z $(kc -n "$DMZ_NAMESPACE" get secret "$DMZ_ROUTE_SECRET" -o 'jsonpath={.data.route-password}' 2>/dev/null) ]]; then
+		route_tmp=$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/uat-dmz-route.XXXXXX")
+		cleanup_dirs+=("$route_tmp")
+		(umask 077 && openssl rand -hex 32 | tr -d '\n' >"$route_tmp/route-password")
+		apply_loader_secret "$DMZ_ROUTE_SECRET" "route-password=$route_tmp/route-password"
+		rm -rf "$route_tmp"
+		dmz_log "bus route password: generated into Secret $DMZ_NAMESPACE/$DMZ_ROUTE_SECRET"
+	else
+		dmz_log "bus route password: keeping the existing Secret $DMZ_NAMESPACE/$DMZ_ROUTE_SECRET"
+	fi
 fi
 
 # --- 5. Certificates, exposure, the core rule -----------------------------
@@ -419,9 +476,9 @@ if [[ $expose == loadbalancer ]]; then
 	dmz_write_outputs "$workdir/dmz.json" "$version" "$expose" "$lb_address"
 	where="LoadBalancer $lb_address:$DMZ_ENVOY_PORT"
 else
-	where="node port $DMZ_ENVOY_PORT on $DMZ_PRIVATE_IP"
+	where="node port $DMZ_ENVOY_PORT on $DMZ_NODE_COUNT node(s), private address $DMZ_ADDR"
 fi
 
 kc -n "$DMZ_NAMESPACE" get pods,svc -o wide >&2 || true
-dmz_log "Ready. Envoy for $DMZ_PRIVATE_NAME (sprouts) and $DMZ_FQDN (runner): $where; bus for core: tls://$DMZ_PRIVATE_NAME:$DMZ_BUS_PORT ($DMZ_PRIVATE_IP)"
+dmz_log "Ready. Envoy for $DMZ_PRIVATE_NAME (sprouts) and $DMZ_FQDN (runner): $where; bus for core: tls://$DMZ_PRIVATE_NAME:$DMZ_BUS_PORT ($DMZ_ADDR)"
 dmz_log "outputs for the core side and enrolment: $workdir/dmz.json"

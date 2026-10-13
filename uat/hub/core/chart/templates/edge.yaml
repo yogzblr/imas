@@ -10,6 +10,12 @@
 #          anything else       404
 #   5405 TCP passthrough to farmer's API (TLS end to end, farmer's own
 #        certificate), for the DMZ's Envoy only (NetworkPolicy below).
+#   9000 with versity.enabled (an HA core hub): TCP passthrough to Versity
+#        Gateway's S3 port, for the DMZ bus's account loader only (the
+#        accounts bucket, read-only credential; core.accountsStorePort).
+# edge.replicas pods (one per core node on an HA hub), spread one per node
+# with DoNotSchedule: they take the same hostPorts, so two never share a
+# node, and every node answers its load balancers' rules.
 # The container listens on the same port numbers it is exposed on, so a
 # NetworkPolicy sees 443 whether a client came through the hostPort or the
 # Service (saasapi's chart policy allows egress on 443 only).
@@ -34,9 +40,16 @@ metadata:
     {{- include "uat.labels" . | nindent 4 }}
     app.kubernetes.io/name: imas-uat-edge
 spec:
-  replicas: 1
-  # hostPort: a second pod can't bind the same ports on the one node.
+  replicas: {{ .Values.edge.replicas }}
+  # hostPort: a second pod can't bind the same ports on the same node, so
+  # the old pod goes before its replacement starts (one at a time).
+  {{- if gt (int .Values.edge.replicas) 1 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 0, maxUnavailable: 1 }
+  {{- else }}
   strategy: { type: Recreate }
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/name: imas-uat-edge
@@ -50,6 +63,15 @@ spec:
     spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
+      {{- if gt (int .Values.edge.replicas) 1 }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: imas-uat-edge
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 101
@@ -72,6 +94,11 @@ spec:
             - name: farmer-api
               containerPort: {{ .Values.farmer.apiPort }}
               hostPort: {{ .Values.core.farmerAPIPort }}
+            {{- if .Values.versity.enabled }}
+            - name: accounts-s3
+              containerPort: {{ .Values.core.accountsStorePort }}
+              hostPort: {{ .Values.core.accountsStorePort }}
+            {{- end }}
           readinessProbe:
             tcpSocket: { port: https }
             periodSeconds: 10
@@ -117,3 +144,20 @@ spec:
     - name: farmer-api
       port: {{ .Values.farmer.apiPort }}
       targetPort: farmer-api
+{{- if gt (int .Values.edge.replicas) 1 }}
+---
+# Voluntary disruptions (a drain) take one edge pod at a time.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: imas-uat-edge
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "uat.labels" . | nindent 4 }}
+    app.kubernetes.io/name: imas-uat-edge
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: imas-uat-edge
+{{- end }}

@@ -7,8 +7,9 @@
 #
 # farmer's API certificate (tls.secretName). SANs: the farmer Service's
 # names (the chart's own default), the core private name
-# (core.uat.imas.internal, the Shared contract), the core FQDN and the core
-# private IP, so the DMZ's Envoy can verify it whichever its upstream names
+# (core.uat.imas.internal, the Shared contract), the core FQDN, the core
+# private address (the internal load balancer's on an HA hub) and every core
+# node's address, so the DMZ's Envoy can verify it whichever its upstream names
 # (deploy/helm/nats envoy.upstreams.farmerAPI.host / sni).
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -32,7 +33,9 @@ spec:
     - {{ .Values.core.privateFQDN }}
     - {{ .Values.core.fqdn }}
   ipAddresses:
-    - {{ .Values.core.privateIP }}
+    {{- range (uniq (prepend (default (list) .Values.core.nodeIPs) .Values.core.privateIP)) }}
+    - {{ . }}
+    {{- end }}
   issuerRef:
     group: cert-manager.io
     kind: {{ .Values.caIssuer.kind }}

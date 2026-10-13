@@ -300,8 +300,8 @@ func TestValuesMatchLib(t *testing.T) {
 	}
 	// The DMZ's loader reads the accounts bucket at <core private IP>:9000
 	// (uat/hub/dmz/install.sh's default, uat/tofu accounts_store_port).
-	if dig(extras, "rustfs", "hostPort") != 9000 {
-		t.Errorf("chart/values.yaml rustfs.hostPort = %v, want 9000 (uat/hub/dmz dmz.account_store.endpoint default)", dig(extras, "rustfs", "hostPort"))
+	if dig(extras, "core", "accountsStorePort") != 9000 {
+		t.Errorf("chart/values.yaml core.accountsStorePort = %v, want 9000 (uat/hub/dmz dmz.account_store.endpoint default)", dig(extras, "core", "accountsStorePort"))
 	}
 	for _, img := range []string{str(extras, "rustfs", "image"), str(extras, "keycloak", "image"), str(extras, "edge", "image")} {
 		if !regexp.MustCompile(`^[a-z0-9./-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$`).MatchString(img) || strings.Contains(img, ":latest") {
@@ -327,19 +327,20 @@ func TestFinishScript(t *testing.T) {
 	t.Logf("%s", out)
 }
 
-// TestValidateRustFS runs test/rustfs_test.sh: validate-rustfs.sh's put,
-// get and list matrix over the four scoped credentials, against a curl that
-// answers with the UAT policies, and two deliberate policy holes it must
-// name (P13).
-func TestValidateRustFS(t *testing.T) {
+// TestValidateObjectStore runs test/object_store_test.sh:
+// validate-object-store.sh's put, get and list matrix over the four scoped
+// credentials, against a curl that answers with the UAT policies, for RustFS
+// (in its pod) and for Versity Gateway (through a port-forward, HA run), and
+// the deliberate policy holes it must name (P13).
+func TestValidateObjectStore(t *testing.T) {
 	for _, tool := range []string{"bash", "jq", "openssl", "sha256sum"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("%s not on PATH", tool)
 		}
 	}
-	out, err := exec.Command("bash", "test/rustfs_test.sh").CombinedOutput()
+	out, err := exec.Command("bash", "test/object_store_test.sh").CombinedOutput()
 	if err != nil {
-		t.Fatalf("test/rustfs_test.sh: %v\n%s", err, out)
+		t.Fatalf("test/object_store_test.sh: %v\n%s", err, out)
 	}
 	t.Logf("%s", out)
 }
@@ -380,7 +381,7 @@ func TestShellcheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, g := range []string{"test/*.sh", "test/stubs/*", "test/finish-stubs/*", "test/rustfs-stubs/*"} {
+	for _, g := range []string{"test/*.sh", "test/stubs/*", "test/finish-stubs/*", "test/object-store-stubs/*"} {
 		more, _ := filepath.Glob(g)
 		files = append(files, more...)
 	}
@@ -907,7 +908,12 @@ func TestUATValuesKnownToChart(t *testing.T) {
 	chart := readYAML(t, "../../../deploy/helm/farmer/values.yaml")
 	var run map[string]any
 	readJSON(t, runValues(t), &run)
-	for name, v := range map[string]map[string]any{"values/farmer-uat.yaml": readYAML(t, "values/farmer-uat.yaml"), "gen-values.sh": run} {
+	var haRun map[string]any
+	readJSON(t, haRunValues(t), &haRun)
+	for name, v := range map[string]map[string]any{
+		"values/farmer-uat.yaml": readYAML(t, "values/farmer-uat.yaml"), "gen-values.sh": run,
+		"values/values-ha.yaml": readYAML(t, "values/values-ha.yaml"), "gen-values.sh (HA)": haRun,
+	} {
 		if bad := unknownKeys(v, chart, "", subchartKeys); len(bad) > 0 {
 			t.Errorf("%s sets keys deploy/helm/farmer/values.yaml does not have: %v", name, bad)
 		}

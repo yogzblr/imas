@@ -89,3 +89,21 @@ output "windows_admin_password" {
   value       = random_password.windows_admin.result
   sensitive   = true
 }
+
+# The HA run's object store (object-store.tf): the Azure Blob account the
+# farmer chart's Versity Gateway serves as S3. null in the single-node run
+# (RustFS on the core hub). Not part of uat, whose top-level keys the Shared
+# contract fixes; the workflow writes it next to uat.json. No credential.
+output "object_store" {
+  description = "The HA run's Azure Blob account for Versity Gateway: account_name and blob_endpoint; null when the core hub has one node."
+  value = local.object_store_enabled ? {
+    account_name  = azurerm_storage_account.object_store[0].name
+    blob_endpoint = azurerm_storage_account.object_store[0].primary_blob_endpoint
+  } : null
+}
+
+output "object_store_account_key" {
+  description = "The HA run's Azure Blob account key (versity.azure.credentialsSecret); empty when the core hub has one node."
+  value       = local.object_store_enabled ? azurerm_storage_account.object_store[0].primary_access_key : ""
+  sensitive   = true
+}

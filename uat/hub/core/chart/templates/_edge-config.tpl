@@ -3,6 +3,7 @@
 {{- $saasapi := printf "%s.%s.svc.%s" .Values.farmer.saasapiServiceName .Values.farmer.namespace .Values.clusterDomain -}}
 {{- $farmer := printf "%s.%s.svc.%s" .Values.farmer.serviceName .Values.farmer.namespace .Values.clusterDomain -}}
 {{- $keycloak := printf "imas-uat-keycloak.%s.svc.%s" .Release.Namespace .Values.clusterDomain -}}
+{{- $versity := printf "%s.%s.svc.%s" .Values.versity.serviceName .Values.farmer.namespace .Values.clusterDomain -}}
 static_resources:
   listeners:
     - name: https
@@ -53,6 +54,17 @@ static_resources:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
                 stat_prefix: farmer_api
                 cluster: farmer_api
+    {{- if .Values.versity.enabled }}
+    - name: accounts_s3
+      address: { socket_address: { address: 0.0.0.0, port_value: {{ .Values.core.accountsStorePort }} } }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.tcp_proxy
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+                stat_prefix: accounts_s3
+                cluster: versity
+    {{- end }}
   clusters:
     - name: saasapi
       type: STRICT_DNS
@@ -78,4 +90,14 @@ static_resources:
         endpoints:
           - lb_endpoints:
               - endpoint: { address: { socket_address: { address: {{ $farmer }}, port_value: {{ .Values.farmer.apiPort }} } } }
+    {{- if .Values.versity.enabled }}
+    - name: versity
+      type: STRICT_DNS
+      connect_timeout: 5s
+      load_assignment:
+        cluster_name: versity
+        endpoints:
+          - lb_endpoints:
+              - endpoint: { address: { socket_address: { address: {{ $versity }}, port_value: {{ .Values.versity.port }} } } }
+    {{- end }}
 {{- end }}

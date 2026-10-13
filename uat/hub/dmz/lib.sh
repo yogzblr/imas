@@ -155,6 +155,16 @@ _dmz_jq() { jq -r "($2) // empty | tostring" "$1"; }
 #   DMZ_BUS_PORT CORE_FQDN CORE_PRIVATE_IP CORE_FARMER_API_PORT
 #   DMZ_CLUSTER_ISSUER DMZ_CONNECT_ADDR DMZ_PRIVATE_DNS_ZONE
 #   DMZ_PRIVATE_NAME CORE_PRIVATE_NAME
+# and the hubs' layout (uat/k0s endpoints.json, from tofu's uat output; P24):
+#   DMZ_NODE_COUNT  the DMZ's nodes (dmz.nodes; 1 without the field)
+#   DMZ_NODE_IPS    their private addresses, space separated
+#   DMZ_ADDR        the DMZ's private address (dmz.api_address: the node's
+#                   own, or the internal load balancer's on an HA hub)
+#   CORE_ADDR       the core hub's, the same way: where Envoy reaches
+#                   farmer and the loader the accounts store
+#   CORE_NODE_IPS   the core nodes' private addresses, space separated:
+#                   where core's traffic to the bus comes from
+#   DMZ_HA          true when the DMZ has several nodes
 # The shape is the tofu output "uat" object's dmz and core entries (name,
 # private_ip, public_ip, fqdn), plus optional ports; see README.md,
 # "Endpoints file". A tofu "uat" JSON is a valid endpoints file as is.
@@ -209,7 +219,33 @@ dmz_load_endpoints() {
 	# Where the runner (and a sprout) connects: the public address when
 	# there is one, so the check does not depend on public DNS.
 	DMZ_CONNECT_ADDR=${DMZ_PUBLIC_IP:-$DMZ_FQDN}
+
+	DMZ_NODE_COUNT=$(jq -r '(.dmz.nodes // .dmz.node_names // [.dmz.name]) | length' "$f")
+	DMZ_NODE_IPS=$(jq -r '(.dmz.node_private_ips // [.dmz.private_ip]) | map(tostring) | join(" ")' "$f")
+	CORE_NODE_IPS=$(jq -r '(.core.node_private_ips // [.core.private_ip]) | map(tostring) | join(" ")' "$f")
+	DMZ_ADDR=$(_dmz_jq "$f" ".dmz.api_address // \"$DMZ_PRIVATE_IP\"")
+	CORE_ADDR=$(_dmz_jq "$f" ".core.api_address // \"$CORE_PRIVATE_IP\"")
+	case $DMZ_NODE_COUNT in
+	1 | 3 | 5) ;;
+	*) dmz_die "endpoints: the DMZ hub has 1, 3 or 5 nodes (uat/tofu), not $DMZ_NODE_COUNT" ;;
+	esac
+	local ip n=0
+	for ip in $DMZ_NODE_IPS; do
+		_dmz_is_ipv4 "$ip" || dmz_die "endpoints: dmz.node_private_ips holds '$ip', not an IPv4 address"
+		n=$((n + 1))
+	done
+	((n == DMZ_NODE_COUNT)) || dmz_die "endpoints: dmz.node_private_ips does not list every DMZ node"
+	for ip in $CORE_NODE_IPS "$DMZ_ADDR" "$CORE_ADDR"; do
+		_dmz_is_ipv4 "$ip" || dmz_die "endpoints: a node or hub address is not an IPv4 address: '$ip'"
+	done
+	DMZ_HA=false
+	((DMZ_NODE_COUNT == 1)) || DMZ_HA=true
 }
+
+# The source address of Azure's load balancer health probes: on an HA DMZ the
+# bus node port sits behind the internal load balancer, whose probe must reach
+# a bus pod on every node (NetworkPolicy), or the node drops out of the rule.
+DMZ_LB_PROBE_CIDR=168.63.129.16/32
 
 # dmz_write_run_values OUT VERSION: the run-specific values, passed after
 # values-uat.yaml.
@@ -226,24 +262,25 @@ bus:
     tag: "${version}"
 envoy:
   upstreams:
-    # farmer's API on the core hub, reached on the core private IP. sni is
-    # core's private DNS name (${CORE_PRIVATE_NAME}); upstream TLS is not
-    # verified.
+    # farmer's API on the core hub, reached on the core hub's private
+    # address (its node's, or its internal load balancer's on an HA hub:
+    # ${CORE_ADDR}). sni is core's private DNS name (${CORE_PRIVATE_NAME});
+    # upstream TLS is not verified.
     farmerAPI:
-      host: "${CORE_PRIVATE_IP}"
+      host: "${CORE_ADDR}"
       port: ${CORE_FARMER_API_PORT}
       sni: "${CORE_PRIVATE_NAME}"
     recipeService:
-      host: "${CORE_PRIVATE_IP}"
+      host: "${CORE_ADDR}"
       port: ${CORE_FARMER_API_PORT}
       sni: "${CORE_PRIVATE_NAME}"
 networkPolicy:
   # The chart's core rule selects pods in this cluster, which core is
-  # not. Envoy's egress to farmer goes to the core private IP.
+  # not. Envoy's egress to farmer goes to the core hub's private address.
   envoyExtraEgress:
     - to:
         - ipBlock:
-            cidr: ${CORE_PRIVATE_IP}/32
+            cidr: ${CORE_ADDR}/32
       ports:
         - protocol: TCP
           port: ${CORE_FARMER_API_PORT}
@@ -330,8 +367,9 @@ spec:
 ---
 # Bus certificate (bus.tls.mode=secret): tls.crt, tls.key and ca.crt.
 # Covers the bus Service names Envoy dials, the private name farmer dials
-# and verifies (farmerbusurl tls://${DMZ_PRIVATE_NAME}:<bus node port>), and
-# the DMZ private IP.
+# and verifies (farmerbusurl tls://${DMZ_PRIVATE_NAME}:<bus node port>),
+# every bus pod's headless name (a clustered bus's routes verify them, with
+# client auth), and the DMZ's private address and node addresses.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -350,10 +388,10 @@ spec:
     - ${DMZ_BUS_NAME}.${DMZ_NAMESPACE}
     - ${DMZ_BUS_NAME}.${DMZ_NAMESPACE}.svc
     - ${DMZ_BUS_FQDN}
-    - ${DMZ_BUS_NAME}-0.${DMZ_BUS_NAME}-headless.${DMZ_NAMESPACE}.svc.cluster.local
+$(for ((i = 0; i < DMZ_NODE_COUNT; i++)); do printf '    - %s-%d.%s-headless.%s.svc.cluster.local\n' "$DMZ_BUS_NAME" "$i" "$DMZ_BUS_NAME" "$DMZ_NAMESPACE"; done)
     - ${DMZ_PRIVATE_NAME}
   ipAddresses:
-    - ${DMZ_PRIVATE_IP}
+$(printf '%s %s' "$DMZ_ADDR" "$DMZ_NODE_IPS" | tr ' ' '\n' | awk '!seen[$0]++ {print "    - " $0}')
   duration: 168h
   renewBefore: 24h
   privateKey:
@@ -372,8 +410,11 @@ EOF
 		cat <<EOF
 ---
 # Core (cmd/farmer and saasapi) dials the bus client port from the core
-# hub, which no pod selector can name. NetworkPolicies are additive: this
-# adds one source to the chart's bus policy and opens nothing else.
+# hub, which no pod selector can name: its traffic arrives from the core
+# nodes' addresses. On an HA DMZ the load balancer's health probe too, so
+# every node with a bus pod stays in the bus's load-balancing rule.
+# NetworkPolicies are additive: this adds those sources to the chart's bus
+# policy and opens nothing else.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -391,8 +432,8 @@ spec:
     - Ingress
   ingress:
     - from:
-        - ipBlock:
-            cidr: ${CORE_PRIVATE_IP}/32
+$(for ip in $CORE_NODE_IPS; do printf '        - ipBlock:\n            cidr: %s/32\n' "$ip"; done)
+$([[ $DMZ_HA != true ]] || printf '        - ipBlock:\n            cidr: %s\n' "$DMZ_LB_PROBE_CIDR")
       ports:
         - protocol: TCP
           port: ${DMZ_BUS_CLIENT_POD_PORT}
@@ -415,7 +456,8 @@ dmz_write_outputs() {
 		--arg private_name "$DMZ_PRIVATE_NAME" \
 		--arg public_fqdn "$DMZ_FQDN" \
 		--arg envoy_port "$DMZ_ENVOY_PORT" \
-		--arg bus_ip "$DMZ_PRIVATE_IP" \
+		--arg bus_ip "$DMZ_ADDR" \
+		--argjson nodes "$DMZ_NODE_COUNT" \
 		--arg bus_port "$DMZ_BUS_PORT" \
 		--arg bus_fqdn "$DMZ_BUS_FQDN" \
 		--arg bus_name "$DMZ_BUS_NAME" \
@@ -424,6 +466,7 @@ dmz_write_outputs() {
 		'{
 			chart_version: $version,
 			farmerbus_image: $image,
+			nodes: $nodes,
 			envoy: {
 				host: $private_name,
 				public_host: $public_fqdn,

@@ -67,6 +67,13 @@ mock_provider "azurerm" {
       id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-abc123/providers/Microsoft.Network/loadBalancers/mock/loadBalancingRules/mock"
     }
   }
+  mock_resource "azurerm_storage_account" {
+    defaults = {
+      id                    = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/imas-uat-abc123/providers/Microsoft.Storage/storageAccounts/imasuatabc123"
+      primary_blob_endpoint = "https://imasuatabc123.blob.core.windows.net/"
+      primary_access_key    = "mock-key"
+    }
+  }
   # centralindia has three zones.
   mock_data "azurerm_location" {
     defaults = {
@@ -681,6 +688,32 @@ run "ha_three_plus_three" {
     error_message = "HA: uat keeps the contract's keys and lists every node, the API addresses, and the VMs the HA tests stop"
   }
 
+  # The object store of the HA run (object-store.tf, brief H4): one Azure
+  # Blob account, the run's own, for the farmer chart's Versity Gateway.
+  assert {
+    condition = (
+      length(azurerm_storage_account.object_store) == 1 &&
+      azurerm_storage_account.object_store[0].name == "imasuatabc123" &&
+      azurerm_storage_account.object_store[0].resource_group_name == "imas-uat-abc123" &&
+      azurerm_storage_account.object_store[0].account_replication_type == "ZRS" &&
+      azurerm_storage_account.object_store[0].https_traffic_only_enabled == true &&
+      azurerm_storage_account.object_store[0].min_tls_version == "TLS1_2" &&
+      azurerm_storage_account.object_store[0].allow_nested_items_to_be_public == false &&
+      azurerm_storage_account.object_store[0].tags["purpose"] == "imas-uat" &&
+      azurerm_storage_account.object_store[0].tags["run_id"] == "abc123"
+    )
+    error_message = "HA: one tagged, HTTPS-only, private, zone-redundant storage account imasuat<run_id> for Versity Gateway"
+  }
+
+  assert {
+    condition = (
+      output.object_store.account_name == "imasuatabc123" &&
+      output.object_store.blob_endpoint == "https://imasuatabc123.blob.core.windows.net/" &&
+      nonsensitive(output.object_store_account_key) == "mock-key"
+    )
+    error_message = "HA: object_store names the account and its blob endpoint; the key is a sensitive output of its own"
+  }
+
   # uat/access/testdata/uat-ha.json is the HA sample the access scripts test
   # against; it must keep the shape of the real HA output.
   assert {
@@ -715,8 +748,8 @@ run "single_node_plan" {
   command = plan
 
   assert {
-    condition     = length(azurerm_linux_virtual_machine.hub) == 2 && length(azurerm_lb_rule.hub) == 0
-    error_message = "the default variables plan one node per hub and no load balancer"
+    condition     = length(azurerm_linux_virtual_machine.hub) == 2 && length(azurerm_lb_rule.hub) == 0 && length(azurerm_storage_account.object_store) == 0 && output.object_store == null
+    error_message = "the default variables plan one node per hub, no load balancer and no storage account (RustFS)"
   }
 }
 
@@ -740,9 +773,10 @@ run "ha_region_without_zones" {
     condition = (
       alltrue([for v in values(azurerm_linux_virtual_machine.hub) : v.zone == null]) &&
       alltrue([for p in values(azurerm_public_ip.hub_lb) : p.zones == null || length(p.zones) == 0]) &&
-      alltrue([for lb in values(azurerm_lb.internal) : lb.frontend_ip_configuration[0].zones == null || length(lb.frontend_ip_configuration[0].zones) == 0])
+      alltrue([for lb in values(azurerm_lb.internal) : lb.frontend_ip_configuration[0].zones == null || length(lb.frontend_ip_configuration[0].zones) == 0]) &&
+      azurerm_storage_account.object_store[0].account_replication_type == "LRS"
     )
-    error_message = "without zones in the region, nothing is zonal"
+    error_message = "without zones in the region, nothing is zonal and the storage account is locally redundant"
   }
 }
 
@@ -760,6 +794,7 @@ run "ha_core_only" {
       tolist(output.uat.dmz.node_names) == tolist(["uat-dmz"]) &&
       length(output.ha_node_names.dmz) == 0 &&
       length(output.ha_node_names.core) == 3 &&
+      length(azurerm_storage_account.object_store) == 1 &&
       length([for r in azurerm_network_security_group.subnet["dmz"].security_rule : r if startswith(r.name, "AllowHubNodes")]) == 0
     )
     error_message = "a hub of one node is unchanged when the other hub is HA"

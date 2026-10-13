@@ -225,10 +225,15 @@ func render(t *testing.T, endpoints string, extra ...string) rendered {
 	if err := yaml.Unmarshal([]byte(cfg), &r.envoy); err != nil {
 		t.Fatalf("parsing the rendered envoy.yaml: %v", err)
 	}
-	// helm lint, with the same three values files install.sh passes.
-	cmd := exec.Command("helm", "lint", "--strict", tgz, "--namespace", "imas-dmz", "--kube-version", "1.30.0",
-		"-f", filepath.Join(dir(t), "values-uat.yaml"), "-f", filepath.Join(work, "values-run.yaml"),
-		"-f", filepath.Join(work, "values-accounts.yaml"))
+	// helm lint, with the same values files install.sh passes (the HA
+	// overlay on a DMZ of several nodes).
+	lintArgs := []string{"lint", "--strict", tgz, "--namespace", "imas-dmz", "--kube-version", "1.30.0",
+		"-f", filepath.Join(dir(t), "values-uat.yaml")}
+	if n, _ := r.outputs["nodes"].(float64); n > 1 {
+		lintArgs = append(lintArgs, "-f", filepath.Join(dir(t), "values-ha.yaml"))
+	}
+	lintArgs = append(lintArgs, "-f", filepath.Join(work, "values-run.yaml"), "-f", filepath.Join(work, "values-accounts.yaml"))
+	cmd := exec.Command("helm", lintArgs...)
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("helm lint with the UAT values: %v\n%s", err, b)
 	}
@@ -760,16 +765,43 @@ var opensslThree = sync.OnceValue(func() bool {
 // check.sh against it. caFile overrides the CA check.sh is given.
 func runCheck(t *testing.T, host string, certHosts []string, faults []string, caFile string, args ...string) (int, string) {
 	t.Helper()
+	return runCheckN(t, 1, host, certHosts, faults, caFile, args...)
+}
+
+// roundRobin stands in for the load balancer in front of an HA DMZ: each
+// request goes to the next Envoy, each with its own buckets.
+type roundRobin struct {
+	mu     sync.Mutex
+	envoys []*fakeEnvoy
+	next   int
+}
+
+func (b *roundRobin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	b.mu.Lock()
+	e := b.envoys[b.next%len(b.envoys)]
+	b.next++
+	b.mu.Unlock()
+	e.ServeHTTP(w, r)
+}
+
+// runCheckN is runCheck against nodes fake Envoys behind a round-robin
+// balancer, with an endpoints file that lists that many DMZ nodes.
+func runCheckN(t *testing.T, nodes int, host string, certHosts []string, faults []string, caFile string, args ...string) (int, string) {
+	t.Helper()
 	need(t, false, "bash", "jq", "curl", "openssl", "timeout")
 	if !opensslThree() {
 		t.Skip("OpenSSL 3 not on PATH")
 	}
 	p := newPKI(t, certHosts[0], certHosts[1:]...)
-	f := &fakeEnvoy{fill: 2 * time.Second, faults: map[string]bool{}}
-	for _, x := range faults {
-		f.faults[x] = true
+	lb := &roundRobin{}
+	for i := 0; i < nodes; i++ {
+		f := &fakeEnvoy{fill: 2 * time.Second, faults: map[string]bool{}}
+		for _, x := range faults {
+			f.faults[x] = true
+		}
+		lb.envoys = append(lb.envoys, f)
 	}
-	srv := httptest.NewUnstartedServer(f)
+	srv := httptest.NewUnstartedServer(lb)
 	// Clients that reject the certificate abort the handshake on purpose.
 	srv.Config.ErrorLog = log.New(io.Discard, "", 0)
 	srv.TLS = &tls.Config{Certificates: []tls.Certificate{p.cert}, NextProtos: []string{"http/1.1"}}
@@ -781,8 +813,17 @@ func runCheck(t *testing.T, host string, certHosts []string, faults []string, ca
 	}
 	var portNum int
 	fmt.Sscan(port, &portNum)
+	dmz := obj{"private_ip": "10.60.1.4", "public_ip": "127.0.0.1", "fqdn": host, "ports": obj{"envoy": portNum}}
+	if nodes > 1 {
+		names, ips := []any{}, []any{}
+		for i := 0; i < nodes; i++ {
+			names = append(names, fmt.Sprintf("uat-dmz-%d", i+1))
+			ips = append(ips, fmt.Sprintf("10.60.1.%d", i+4))
+		}
+		dmz["nodes"], dmz["node_private_ips"], dmz["api_address"] = names, ips, "10.60.1.250"
+	}
 	ep := writeJSON(t, obj{
-		"dmz":  obj{"private_ip": "10.60.1.4", "public_ip": "127.0.0.1", "fqdn": host, "ports": obj{"envoy": portNum}},
+		"dmz":  dmz,
 		"core": obj{"private_ip": "10.60.2.4", "fqdn": "core.uat.test"},
 	})
 	if caFile == "" {
@@ -886,13 +927,15 @@ func TestLint(t *testing.T) {
 	t.Run("yamllint", func(t *testing.T) {
 		need(t, false, "yamllint", "jq", "helm")
 		tgz := packageChart(t, testVersion, testVersion)
-		files := []string{filepath.Join(dir(t), "values-uat.yaml")}
+		files := []string{filepath.Join(dir(t), "values-uat.yaml"), filepath.Join(dir(t), "values-ha.yaml")}
 		for _, c := range []struct{ endpoints, expose string }{
-			{"endpoints.json", "loadbalancer"}, {"endpoints-nodeport.json", "nodeport"},
+			{filepath.Join(dir(t), "testdata", "endpoints.json"), "loadbalancer"},
+			{filepath.Join(dir(t), "testdata", "endpoints-nodeport.json"), "nodeport"},
+			{haEndpoints(t), "nodeport"},
 		} {
 			work := t.TempDir()
 			if code, _, stderr := run(t, nil, "install.sh", "--render-only", "--chart", tgz, "--release-tag", testTag,
-				"--endpoints", filepath.Join(dir(t), "testdata", c.endpoints), "--expose", c.expose, "--workdir", work); code != 0 {
+				"--endpoints", c.endpoints, "--expose", c.expose, "--workdir", work); code != 0 {
 				t.Fatalf("install.sh --render-only: %s", stderr)
 			}
 			files = append(files, filepath.Join(work, "values-run.yaml"), filepath.Join(work, "manifests.yaml"))
@@ -1618,14 +1661,18 @@ func readValues(t *testing.T, path string) obj {
 // would be ignored without a word), and the loader's side of the accounts
 // bucket matches what the core hub makes: the bucket name, the two Secret
 // names install.sh creates, and the port the core hub's RustFS answers the
-// DMZ on (uat/hub/core chart rustfs.hostPort, uat/tofu accounts_store_port),
-// which install.sh's default endpoint <core private IP>:9000 uses.
+// DMZ on (uat/hub/core chart core.accountsStorePort, uat/tofu
+// accounts_store_port), which install.sh's default endpoint <core private
+// address>:9000 uses.
 func TestUATValuesMatchChartAndCore(t *testing.T) {
 	root := filepath.Join(dir(t), "..", "..", "..")
 	uat := readValues(t, filepath.Join(dir(t), "values-uat.yaml"))
 	chart := readValues(t, filepath.Join(root, "deploy", "helm", "nats", "values.yaml"))
 	if bad := unknownValueKeys(uat, chart, ""); len(bad) > 0 {
 		t.Errorf("values-uat.yaml sets keys deploy/helm/nats/values.yaml does not have: %v", bad)
+	}
+	if bad := unknownValueKeys(readValues(t, filepath.Join(dir(t), "values-ha.yaml")), chart, ""); len(bad) > 0 {
+		t.Errorf("values-ha.yaml sets keys deploy/helm/nats/values.yaml does not have: %v", bad)
 	}
 	if bad := unknownValueKeys(obj{"bus": obj{"persistence": obj{"size": "1Gi"}}}, chart, ""); len(bad) != 1 || bad[0] != "bus.persistence" {
 		t.Errorf("unknownValueKeys missed bus.persistence: %v", bad)
@@ -1666,12 +1713,12 @@ func TestUATValuesMatchChartAndCore(t *testing.T) {
 			t.Errorf("values-uat.yaml %s = %q, want %q", path, got, want)
 		}
 	}
-	if !strings.Contains(string(install), `"${CORE_PRIVATE_IP}:9000"`) {
-		t.Error("install.sh's default accounts endpoint is no longer <core private IP>:9000")
+	if !strings.Contains(string(install), `"${CORE_ADDR}:9000"`) {
+		t.Error("install.sh's default accounts endpoint is no longer <core private address>:9000")
 	}
 	coreValues := readValues(t, filepath.Join(root, "uat", "hub", "core", "chart", "values.yaml"))
-	if got := get(coreValues, "rustfs", "hostPort"); got != 9000 {
-		t.Errorf("uat/hub/core chart rustfs.hostPort = %v, want 9000 (this hub's default accounts endpoint)", got)
+	if got := get(coreValues, "core", "accountsStorePort"); got != 9000 {
+		t.Errorf("uat/hub/core chart core.accountsStorePort = %v, want 9000 (this hub's default accounts endpoint)", got)
 	}
 	// P13: the DMZ's Envoy is pinned by digest, the same image as the core
 	// edge (uat/hub/core chart edge.image, repository:tag@digest).
