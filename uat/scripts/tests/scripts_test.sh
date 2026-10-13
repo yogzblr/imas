@@ -359,6 +359,7 @@ echo '<testsuites/>' >"$s/report/junit.xml"
 echo '{"Action":"pass","Test":"TestSmokeC1_CmdRunEverySprout","Output":"token minted for t1-admin (password grant)"}' >"$s/report/events.json"
 cp "$testdata/uat.json" "$s/uat.json"
 echo '{"core":["uat-core-1","uat-core-2","uat-core-3"],"dmz":["uat-dmz-1","uat-dmz-2","uat-dmz-3"]}' >"$s/ha_node_names.json"
+echo '{"account_name":"imasuatabc123","blob_endpoint":"https://imasuatabc123.blob.core.windows.net/"}' >"$s/object_store.json"
 cp "$testdata/endpoints.json" "$s/k0s/endpoints.json"
 printf -- '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n' >"$s/k0s/uat-ca.crt"
 echo 'hosts: [{ssh: {keyPath: /tmp/x/ssh_key}}]' >"$s/k0s/k0sctl-dmz.yaml"
@@ -374,6 +375,7 @@ echo '{"run_id":"abc123","release_tag":"v0.1.0-rc.4"}' >"$s/run.json"
 fake_pem "OPENSSH " >"$s/secrets/ssh_key"
 echo 'users: [{user: {client-key-data: QUJD}}]' >"$s/k0s/dmz.kubeconfig"
 echo '{"unseal_keys_b64":["placeholder"],"root_token":"placeholder"}' >"$s/hub/core/sensitive/openbao-init.json"
+mkdir -p "$s/hub/core/sensitive/azure-blob" && echo 'bW9jay1henVyZS1rZXk=' >"$s/hub/core/sensitive/azure-blob/account-key"
 fake_nkey SU >"$s/hub/core/sensitive/seeds/sys-user.nk"
 echo 'k_1.secret' >"$s/enroll/keys/t1-ubuntu.key"
 echo '{"t1-ubuntu":{"host":"127.0.0.1"}}' >"$s/access/access.json"
@@ -383,11 +385,11 @@ check "collect succeeds on a run's state" test "$rc" -eq 0
 listing=$(cd "$o" && find . -type f | sort)
 expected=$(printf '%s\n' ./outputs/dmz/dmz.json ./outputs/enroll/keys.json ./outputs/enroll/sprouts.json \
   ./outputs/hub/core/out/core.json ./outputs/k0s/endpoints.json ./outputs/k0s/k0sctl-dmz.yaml ./outputs/k0s/uat-ca.crt \
-  ./outputs/ha_node_names.json ./outputs/run.json ./outputs/uat.json ./report/events.json ./report/junit.xml ./report/summary.txt | sort)
+  ./outputs/ha_node_names.json ./outputs/object_store.json ./outputs/run.json ./outputs/uat.json ./report/events.json ./report/junit.xml ./report/summary.txt | sort)
 check "exactly the allowlisted, present, regular files are copied" test "$listing" = "$expected"
 [ "$listing" = "$expected" ] || diff <(echo "$expected") <(echo "$listing")
 check "no private key, kubeconfig, unseal key, seed or enrolment key in the output" \
-  test -z "$(grep -rlE 'PRIVATE KEY|client-key-data|unseal|SUAAAA|k_1\.secret' "$o")"
+  test -z "$(grep -rlE 'PRIVATE KEY|client-key-data|unseal|SUAAAA|k_1\.secret|bW9jay1henVyZS1rZXk' "$o")"
 check "a symlink in the allowlist (to the SSH key) is not followed" test ! -e "$o/outputs/enroll/tenants.json"
 
 leak_case() { # leak_case NAME STATE-REL OUT-REL CONTENT
