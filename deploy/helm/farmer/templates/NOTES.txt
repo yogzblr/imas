@@ -32,6 +32,18 @@ Point the nats chart (deploy/helm/nats) at this release:
   envoy.upstreams.farmerAPI.port={{ .Values.farmer.apiPort }}
   networkPolicy.core.namespaceSelector.matchLabels."kubernetes\.io/metadata\.name"={{ .Release.Namespace }}
   bus.organization={{ .Values.organization }}
+{{- if include "imas-farmer.accountsUseVersity" . }}
+  accountStore.endpoint={{ include "imas-farmer.versity.endpoint" . }}
+  accountStore.useSSL=false
+  accountStore.credentialsSecret=<a Secret in the DMZ namespace with the pair in "{{ .Values.versity.accountsReader.credentialsSecret }}">
+{{- end }}
+{{- if .Values.versity.enabled }}
+
+Versity Gateway: {{ int64 .Values.versity.replicas }} replica(s) in front of Azure Blob (Secret "{{ .Values.versity.azure.credentialsSecret }}"),
+the S3 endpoint {{ include "imas-farmer.versity.endpoint" . }} (plain HTTP) of farmer{{ if and .Values.saasapi.enabled .Values.saasapi.recipes.enabled }}, saasapi{{ end }}{{ if include "imas-farmer.accountsUseVersity" . }} and the accounts bucket{{ end }}.
+Hook Job {{ printf "%s-buckets" (include "imas-farmer.versity.fullname" .) | trunc 63 | trimSuffix "-" }} (post-install, post-upgrade) creates the buckets and writes their
+policies; the gateway's users come from the component Secrets (README, "Versity Gateway").
+{{- end }}
 
 farmer (farmerbusurl) and saasapi dial the bus at {{ include "imas-farmer.busURL" . }};
 {{- if not .Values.bus.host }}

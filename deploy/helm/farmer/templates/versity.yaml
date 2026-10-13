@@ -1,0 +1,288 @@
+{{- if .Values.versity.enabled }}
+{{- include "imas-farmer.validate" . -}}
+{{- $v := .Values.versity -}}
+{{- $np := .Values.networkPolicy -}}
+{{- /*
+The Versity Gateway (design D18; values.yaml, versity; README.md, "Versity
+Gateway"): an S3 gateway in front of Azure Blob, the S3 endpoint farmer,
+saasapi and the DMZ bus's account loader use when versity.enabled.
+Stateless: the buckets live in Azure Blob (their policies as container
+metadata), the users in an IAM file each pod's init container writes from
+the component Secrets at start, read-only after that, so every replica
+serves the same users and none writes shared state.
+FLAG FOR SECURITY REVIEW: the pods hold the Azure account key, the root
+credential and every component's object store credential.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "imas-farmer.versity.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: versity
+# No RBAC and no token: the gateway never talks to the Kubernetes API.
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "imas-farmer.versity.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: versity
+spec:
+  replicas: {{ int64 $v.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "imas-farmer.versity.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "imas-farmer.versity.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/part-of: imas
+        {{- with $v.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # A changed user set (a component turned on or off, a renamed
+        # Secret) rolls the pods, so each IAM file is rewritten.
+        checksum/users: {{ include "imas-farmer.versity.users" . | sha256sum }}
+        {{- with $v.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "imas-farmer.versity.fullname" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with (concat $v.imagePullSecrets .Values.farmer.imagePullSecrets | uniq) }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $v.podSecurityContext | nindent 8 }}
+      {{- with $v.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with $v.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $v.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $v.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      topologySpreadConstraints:
+        {{- if $v.topologySpreadConstraints }}
+        {{- toYaml $v.topologySpreadConstraints | nindent 8 }}
+        {{- else }}
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "imas-farmer.versity.selectorLabels" . | nindent 14 }}
+        {{- end }}
+      initContainers:
+        # `farmer versity-iam` (internal/versitysetup): the IAM file from
+        # the users' Secrets, into a memory-backed volume the gateway
+        # mounts read-only. farmer's image, as the chart's hook Jobs.
+        - name: iam
+          image: {{ include "imas-farmer.farmer.image" . | quote }}
+          imagePullPolicy: {{ .Values.farmer.image.pullPolicy }}
+          args:
+            - versity-iam
+            - -users-dir=/var/run/secrets/imas/versity-users
+            - -root-dir=/var/run/secrets/imas/versity-root
+            - -out=/var/run/imas/versity-iam
+          securityContext:
+            {{- toYaml $v.securityContext | nindent 12 }}
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+          volumeMounts:
+            - name: users
+              mountPath: /var/run/secrets/imas/versity-users
+              readOnly: true
+            # The root's access key ID only, so no user can take it.
+            - name: root-id
+              mountPath: /var/run/secrets/imas/versity-root
+              readOnly: true
+            - name: iam
+              mountPath: /var/run/imas/versity-iam
+      containers:
+        - name: gateway
+          image: {{ include "imas-farmer.versity.image" . | quote }}
+          imagePullPolicy: {{ $v.image.pullPolicy }}
+          # The image's entrypoint runs `versitygw <args>`; global flags
+          # come from VGW_* and ROOT_*, the backend's from AZ_*.
+          args: ["azure"]
+          env:
+            - name: VGW_PORT
+              value: {{ printf ":%v" $v.port | quote }}
+            - name: VGW_REGION
+              value: {{ $v.region | quote }}
+            - name: VGW_HEALTH
+              value: {{ $v.healthPath | quote }}
+            - name: VGW_IAM_DIR
+              value: /var/run/imas/versity-iam
+            - name: ROOT_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $v.rootCredentials.secretName }}
+                  key: {{ $v.rootCredentials.accessKeyIdKey }}
+            - name: ROOT_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $v.rootCredentials.secretName }}
+                  key: {{ $v.rootCredentials.secretAccessKeyKey }}
+            - name: AZ_ACCOUNT_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $v.azure.credentialsSecret }}
+                  key: {{ $v.azure.accountNameKey }}
+            - name: AZ_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $v.azure.credentialsSecret }}
+                  key: {{ $v.azure.accountKeyKey }}
+            {{- with $v.azure.endpoint }}
+            - name: AZ_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with $v.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: s3
+              containerPort: {{ $v.port }}
+              protocol: TCP
+          readinessProbe:
+            httpGet: { path: {{ $v.healthPath | quote }}, port: s3, scheme: HTTP }
+            {{- toYaml $v.readinessProbe | nindent 12 }}
+          livenessProbe:
+            httpGet: { path: {{ $v.healthPath | quote }}, port: s3, scheme: HTTP }
+            {{- toYaml $v.livenessProbe | nindent 12 }}
+          securityContext:
+            {{- toYaml $v.securityContext | nindent 12 }}
+          {{- with $v.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: iam
+              mountPath: /var/run/imas/versity-iam
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: users
+          {{- include "imas-farmer.versity.usersVolume" (dict "root" . "secrets" true) | nindent 10 }}
+        - name: root-id
+          {{- include "imas-farmer.versity.rootVolume" (dict "root" . "secrets" false) | nindent 10 }}
+        # Holds every user's secret key: memory, never the node's disk.
+        - name: iam
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "imas-farmer.versity.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: versity
+  {{- with $v.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $v.service.type }}
+  selector:
+    {{- include "imas-farmer.versity.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: s3
+      port: {{ $v.port }}
+      targetPort: s3
+      protocol: TCP
+{{- if and $v.pdb.enabled (gt (int64 $v.replicas) 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "imas-farmer.versity.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: versity
+spec:
+  maxUnavailable: {{ $v.pdb.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "imas-farmer.versity.selectorLabels" . | nindent 6 }}
+{{- end }}
+{{- if $np.enabled }}
+---
+# The gateway. Allowed, and nothing else:
+#   in:  farmer, saasapi (with saasapi.recipes), the createBuckets Job, the
+#        nats chart's bus pods in this cluster (networkPolicy.dmz; the
+#        account loader) and versity.networkPolicy.extraIngressFrom -> S3
+#   out: Azure Blob on 443 (versity.networkPolicy.azureEgress; empty: any
+#        destination on 443), DNS
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "imas-farmer.versity.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: versity
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "imas-farmer.versity.selectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "imas-farmer.farmer.selectorLabels" . | nindent 14 }}
+        {{- if and .Values.saasapi.enabled .Values.saasapi.recipes.enabled }}
+        - podSelector:
+            matchLabels:
+              {{- include "imas-farmer.saasapi.selectorLabels" . | nindent 14 }}
+        {{- end }}
+        - podSelector:
+            matchLabels:
+              {{- include "imas-farmer.versity.bucketsSelectorLabels" . | nindent 14 }}
+        {{- if include "imas-farmer.accountsUseVersity" . }}
+        - namespaceSelector:
+            {{- toYaml $np.dmz.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml $np.dmz.busPodSelector | nindent 12 }}
+        {{- end }}
+        {{- with $v.networkPolicy.extraIngressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - { protocol: TCP, port: {{ $v.port }} }
+  egress:
+    {{- include "imas-farmer.depEgress" (dict "bundled" false "peers" $v.networkPolicy.azureEgress "port" 443) | nindent 4 }}
+    {{- include "imas-farmer.dnsEgress" . | nindent 4 }}
+{{- end }}
+{{- end }}

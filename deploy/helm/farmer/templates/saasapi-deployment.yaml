@@ -304,11 +304,11 @@ spec:
             # limited by its policy to tenants/*/recipes/* (and PutObject on
             # tenants/*/recipe-audit/*). The secret key only as a file.
             - name: SAASAPI_RECIPES_S3_ENDPOINT
-              value: {{ $.Values.objectStore.endpoint | quote }}
+              value: {{ include "imas-farmer.s3Endpoint" $ | quote }}
             - name: SAASAPI_RECIPES_S3_BUCKET
               value: {{ $.Values.objectStore.bucket | quote }}
             - name: SAASAPI_RECIPES_S3_USE_SSL
-              value: {{ $.Values.objectStore.useSSL | toString | quote }}
+              value: {{ include "imas-farmer.s3UseSSL" $ | quote }}
             - name: SAASAPI_RECIPES_S3_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:

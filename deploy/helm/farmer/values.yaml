@@ -237,11 +237,14 @@ database:
       limits: { memory: 128Mi }
 
 # ---------------------------------------------------------------------------
-# Object storage for recipes, job logs and sprout JWTs (not bundled).
+# Object storage for recipes, job logs and sprout JWTs (not bundled, unless
+# versity.enabled puts the Versity Gateway in front of Azure Blob).
 # farmer starts without it; recipe, job and enrolment requests fail until
 # it is reachable.
 # ---------------------------------------------------------------------------
 objectStore:
+  # host[:port], no scheme. Empty with versity.enabled: the gateway's
+  # Service (and useSSL is ignored: plain HTTP in the cluster).
   endpoint: ""
   useSSL: true
   bucket: ""
@@ -270,7 +273,8 @@ objectStore:
 # them, since the bus keeps no Accounts of its own across a restart.
 # ---------------------------------------------------------------------------
 accountStore:
-  # host[:port], no scheme. Empty: objectStore.endpoint.
+  # host[:port], no scheme. Empty: objectStore.endpoint (the Versity
+  # Gateway's Service with versity.enabled).
   endpoint: ""
   # null: objectStore.useSSL.
   useSSL: null
@@ -285,6 +289,151 @@ accountStore:
   # IMAS_ACCOUNTS_EVENT_SUBJECT: the accounts-changed event farmer
   # publishes in the SYS Account; the nats chart's accountStore.eventSubject.
   eventSubject: imas.bus.accounts.changed
+
+# ---------------------------------------------------------------------------
+# Versity Gateway (design D18; README.md, "Versity Gateway"): an optional
+# S3 gateway in front of Azure Blob, the production object store. Off by
+# default (the code only speaks S3: any S3 endpoint works, D15).
+#
+# On, it is the S3 endpoint of farmer, saasapi and the accounts bucket:
+# objectStore.endpoint and accountStore.endpoint must be left empty, and
+# the chart points them at the gateway's Service
+# (<release>-farmer-versity.<namespace>.svc:<port>, plain HTTP inside the
+# cluster; objectStore.useSSL is then ignored). Set objectStore.endpoint to
+# use another S3 endpoint instead (and leave this off). The DMZ bus's
+# account loader reads the accounts bucket through the same Service (the
+# nats chart's accountStore.endpoint) with versity.accountsReader's
+# credential.
+#
+# Users: one per component credential, written into the gateway's IAM
+# file from these Secrets by an init container (`farmer versity-iam`):
+#   farmer           objectStore.credentialsSecret: the recipe, job and
+#                    sprout JWT buckets
+#   saasapi-recipes  saasapi.recipes.credentialsSecret (with
+#                    saasapi.recipes.enabled): tenants/*/recipes/* of the
+#                    recipe bucket (files/objectstore-policies/)
+#   accounts-writer  accountStore.credentialsSecret: get, put, list on
+#                    the accounts bucket
+#   accounts-reader  versity.accountsReader.credentialsSecret: get, list
+#                    on the accounts bucket (the DMZ bus, design D22)
+# Every user is role "user": it reaches only what its buckets' policies
+# grant. The createBuckets hook Job creates the buckets (Azure Blob
+# containers) with the root credential and writes those policies.
+# FLAG FOR SECURITY REVIEW: the gateway holds the Azure account key and
+# every object store credential.
+# ---------------------------------------------------------------------------
+versity:
+  enabled: false
+  # Apache-2.0 (DEPENDENCIES.md). Pinned by digest (the render fails
+  # without one); the tag is informational.
+  image:
+    repository: docker.io/versity/versitygw
+    tag: "v1.8.0"
+    digest: "sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499"
+    pullPolicy: IfNotPresent
+  imagePullSecrets: []
+  replicas: 2
+  # The S3 port of the pods and the Service (VGW_PORT). 1024 or above:
+  # the gateway runs as non-root.
+  port: 7070
+  # VGW_REGION: the region the gateway signs and answers for.
+  region: us-east-1
+  # VGW_HEALTH: the gateway's health endpoint (GET, no credential), which
+  # the probes call.
+  healthPath: /_/health
+  # The Azure Blob backend (`versitygw azure`).
+  azure:
+    # Existing Secret with the storage account name and key
+    # (AZ_ACCOUNT_NAME, AZ_ACCESS_KEY). Required when enabled.
+    credentialsSecret: ""
+    accountNameKey: account-name
+    accountKeyKey: account-key
+    # AZ_ENDPOINT: the Blob service URL. Empty:
+    # https://<account>.blob.core.windows.net/.
+    endpoint: ""
+  # Existing Secret with the gateway's root S3 credential
+  # (ROOT_ACCESS_KEY_ID / ROOT_SECRET_ACCESS_KEY). Only the gateway and
+  # the createBuckets Job mount it; no component uses it. Required when
+  # enabled; must differ from every user's Secret.
+  rootCredentials:
+    secretName: ""
+    accessKeyIdKey: access-key-id
+    secretAccessKeyKey: secret-access-key
+  # The DMZ bus's read-only accounts credential (the nats chart's
+  # accountStore.credentialsSecret holds the same pair, in the DMZ
+  # namespace). Required when the accounts bucket is the gateway's.
+  accountsReader:
+    credentialsSecret: ""
+    accessKeyIdKey: access-key-id
+    secretAccessKeyKey: secret-access-key
+  # The hook Job (`farmer versity-buckets`, post-install/post-upgrade)
+  # that creates objectStore.bucket, .jobBucket, .sproutJWTBucket and
+  # accountStore.bucket on the gateway and writes their bucket policies.
+  # Every run replaces the policies with the chart's, so a removed grant
+  # goes too. Bucket names must be valid Azure Blob container names.
+  createBuckets:
+    # Fixed name, no RBAC, no API token.
+    serviceAccountName: imas-versity-buckets
+    # In-pod deadline, retries for a gateway still starting included.
+    timeout: 10m
+    backoffLimit: 2
+    # `helm install/upgrade --timeout` must be at least this long.
+    activeDeadlineSeconds: 900
+    ttlSecondsAfterFinished: 3600
+    argoCDHooks: true
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { memory: 128Mi }
+  extraEnv: []
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 512Mi }
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile: { type: RuntimeDefault }
+  securityContext:
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities: { drop: ["ALL"] }
+  readinessProbe:
+    periodSeconds: 10
+    timeoutSeconds: 5
+  livenessProbe:
+    periodSeconds: 20
+    timeoutSeconds: 5
+    failureThreshold: 3
+  # Reloader rolls the gateway when a credential Secret changes (the IAM
+  # file is written at pod start).
+  podAnnotations:
+    reloader.stakater.com/auto: "true"
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Empty: spread over nodes (kubernetes.io/hostname, maxSkew 1,
+  # ScheduleAnyway).
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  service:
+    type: ClusterIP
+    annotations: {}
+  # Rendered only with replicas > 1.
+  pdb:
+    enabled: true
+    maxUnavailable: 1
+  networkPolicy:
+    # Peers allowed in on the S3 port besides farmer, saasapi, the
+    # createBuckets Job and the nats chart's bus pods in this cluster
+    # (networkPolicy.dmz): e.g. the DMZ nodes' addresses as ipBlock
+    # peers when the bus runs in another cluster.
+    extraIngressFrom: []
+    # Peers of the Azure Blob egress rule (443). Empty: any destination,
+    # on 443 only. Narrow it to the storage account's addresses (or a
+    # private endpoint's) as ipBlock peers.
+    azureEgress: []
 
 # ---------------------------------------------------------------------------
 # farmer (cmd/farmer)

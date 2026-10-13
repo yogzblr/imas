@@ -109,5 +109,16 @@ Notes on the MPL-2.0 modules:
 
 None of the modules above needs CGO.
 
+## Deployed components
+
+Images the Helm charts run that are not part of the Go build:
+
+| Component | Licence | Where |
+|---|---|---|
+| Versity Gateway (`versitygw`, `docker.io/versity/versitygw`, pinned by digest) | Apache-2.0 | `deploy/helm/farmer`, optional (`versity.enabled`, off by default): the S3 gateway in front of Azure Blob, the production object store (design D18) |
+
+The chart subcharts (OpenBao, PXC, Valkey) and their licences are listed in
+`deploy/helm/farmer/README.md`, "Licensing".
+
 [go.mod]: go.mod
 [dependencies]: dependencies

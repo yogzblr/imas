@@ -73,7 +73,7 @@ The core needs these before farmer can enroll a single sprout:
 | **PXC** (Percona XtraDB Cluster / MySQL 8) with a `farmer` and a `saas` schema | farmer (`IMAS_PXC_DSN`), saasapi (`SAASAPI_DSN`) | farmer exits at startup without it. The grants are design doc §5.1; see [`deploy/helm/farmer/README.md`](../deploy/helm/farmer/README.md), "PXC". |
 | **OpenBao** | farmer: PKI (API certificate), Transit `imas-gateway-jwt` (gateway JWTs), KV v2 `secret/imas/tenant-x25519/tenants/<tenant>` (one payload-encryption keypair per tenant, generated fresh; nothing is read at `secret/imas/tenant-x25519` itself) | farmer starts without the Transit key, but `POST /v1/enroll` fails closed until it is configured. Without OpenBao PKI you must place farmer's certificate and key yourself. |
 | **Valkey** | farmer (heartbeats, enrollment replay cache), saasapi (rate limits, `connected`) | `/v1/enroll` and `/v1/refresh` fail closed without it. Give farmer and saasapi the same address list. |
-| **S3-compatible object storage** | farmer: recipes and job logs, in two different buckets; saasapi: tenant recipe uploads, with its own credential | recipe and job requests fail until it's configured. The Helm chart opens farmer's egress to `objectStore.endpoint`'s port by itself. |
+| **S3-compatible object storage** | farmer: recipes and job logs, in two different buckets; saasapi: tenant recipe uploads, with its own credential | recipe and job requests fail until it's configured. The Helm chart opens farmer's egress to `objectStore.endpoint`'s port by itself. For Azure Blob, the core chart can run Versity Gateway in front of it (`versity.enabled`), which then is the S3 endpoint and creates the buckets and their users. |
 | **Keycloak** | saasapi verifies the end-user JWTs the BFF forwards | saasapi won't authenticate anything without it. |
 
 ## Install on Kubernetes (recommended)
@@ -106,6 +106,11 @@ READMEs are the full reference; this is the order to do things in.
    With `objectStore.endpoint` set, farmer's NetworkPolicy opens egress to
    that port itself; `networkPolicy.external.objectStore` narrows it to
    your object store's peers (it narrows saasapi's recipe rule too).
+   With Azure Blob as the store, turn on the chart's Versity Gateway
+   instead (`versity.enabled`, `ci/versity-values.yaml`, the chart
+   README's "Versity Gateway"): leave `objectStore.endpoint` and
+   `accountStore.endpoint` empty and the chart points farmer, saasapi and
+   the accounts bucket at it.
    Database schemas are created and migrated by the chart itself: a single
    hook Job (`imas-migrate`, goose migrations) runs before upgrades and
    rollbacks, and after install when PXC is bundled, and farmer and saasapi

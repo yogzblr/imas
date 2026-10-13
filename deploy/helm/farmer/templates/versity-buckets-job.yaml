@@ -1,0 +1,153 @@
+{{- if .Values.versity.enabled }}
+{{- include "imas-farmer.validate" . -}}
+{{- $v := .Values.versity -}}
+{{- $c := $v.createBuckets -}}
+{{- /*
+versity.createBuckets: `farmer versity-buckets` (internal/versitysetup)
+creates every bucket the gateway serves (Azure Blob containers) with the
+gateway's root credential and writes each bucket's policy from the plan
+below, naming the users by their access key IDs. It mounts the users'
+access key IDs only, never their secret keys.
+FLAG FOR SECURITY REVIEW: the Job holds the gateway's root credential, and
+the policies it writes are what keep each component in its own buckets.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-buckets" (include "imas-farmer.versity.fullname" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: versity-buckets
+data:
+  # internal/versitysetup Plan: each statement is an Allow for one user
+  # (by name; the Job puts its access key ID in the Principal).
+  buckets.json: |
+    {{- include "imas-farmer.versity.plan" . | nindent 4 }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $c.serviceAccountName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: versity-buckets
+# No RBAC and no token: the Job only talks to the gateway.
+automountServiceAccountToken: false
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-buckets" (include "imas-farmer.versity.fullname" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: versity-buckets
+  annotations:
+    # After the gateway Deployment exists (every post-* hook runs after
+    # the release's resources); the Job retries until the gateway
+    # answers. Every upgrade re-runs it: missing buckets are created and
+    # every policy is rewritten from the plan.
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "1"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    {{- if $c.argoCDHooks }}
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    {{- end }}
+spec:
+  backoffLimit: {{ $c.backoffLimit }}
+  activeDeadlineSeconds: {{ $c.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ $c.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "imas-farmer.versity.bucketsSelectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/plan: {{ include "imas-farmer.versity.plan" . | sha256sum }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ $c.serviceAccountName }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with .Values.farmer.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: buckets
+          # The same image, same tag, as the farmer Deployment.
+          image: {{ include "imas-farmer.farmer.image" . | quote }}
+          imagePullPolicy: {{ .Values.farmer.image.pullPolicy }}
+          args: # ENTRYPOINT is /farmer
+            - versity-buckets
+            - {{ printf "-endpoint=%s" (include "imas-farmer.versity.endpoint" .) | quote }}
+            - {{ printf "-region=%s" $v.region | quote }}
+            - -root-dir=/var/run/secrets/imas/versity-root
+            - -users-dir=/var/run/secrets/imas/versity-users
+            - -plan=/etc/imas/versity/buckets.json
+            - {{ printf "-timeout=%s" $c.timeout | quote }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          {{- with $c.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: root
+              mountPath: /var/run/secrets/imas/versity-root
+              readOnly: true
+            - name: user-ids
+              mountPath: /var/run/secrets/imas/versity-users
+              readOnly: true
+            - name: plan
+              mountPath: /etc/imas/versity
+              readOnly: true
+      volumes:
+        - name: root
+          {{- include "imas-farmer.versity.rootVolume" (dict "root" . "secrets" true) | nindent 10 }}
+        # Access key IDs only: the policies name users, they never need a
+        # user's secret key.
+        - name: user-ids
+          {{- include "imas-farmer.versity.usersVolume" (dict "root" . "secrets" false) | nindent 10 }}
+        - name: plan
+          configMap:
+            name: {{ printf "%s-buckets" (include "imas-farmer.versity.fullname" .) | trunc 63 | trimSuffix "-" }}
+---
+# The Job talks to the gateway and DNS, nothing else. Rendered with the
+# Job whatever networkPolicy.enabled says, like the other hook Jobs'.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $c.serviceAccountName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: versity-buckets
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "imas-farmer.versity.bucketsSelectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress: []
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "imas-farmer.versity.selectorLabels" . | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: {{ $v.port }} }
+    {{- include "imas-farmer.dnsEgress" . | nindent 4 }}
+{{- end }}

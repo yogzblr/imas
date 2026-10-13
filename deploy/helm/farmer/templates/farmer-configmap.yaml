@@ -15,7 +15,7 @@ and sprout JWT buckets). Its NKey is the farmer.nkeySecret mount
   "gatewaytransitkeyname" .Values.farmer.openbao.gateway.keyName
   "gatewayjwtttl" .Values.farmer.gatewayJWTTTL
   "sproutbusurls" .Values.bus.sproutBusURLs
-  "s3usessl" .Values.objectStore.useSSL
+  "s3usessl" (eq (include "imas-farmer.s3UseSSL" .) "true")
 -}}
 {{- if eq .Values.tls.mode "secret" }}
 {{- $_ := set $managed "certfile" (printf "%s/tls.crt" $tlsDir) }}
