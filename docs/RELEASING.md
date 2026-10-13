@@ -197,8 +197,9 @@ For the first tag, `v0.1.0-rc.1`. Nothing below has been run yet; where a
 step's result differs from "look for", stop and fix by PR before going on.
 `TAG=v0.1.0-rc.1` and `V=0.1.0-rc.1` below.
 
-1. **Settings.** Check every name under [Settings](#settings) exists on the
-   repository or the `goreleaser` environment, the three Buildkite registries
+1. **Settings.** Check every name under [Settings](#settings) exists where
+   that section says (the GPG secrets on the `goreleaser` environment only,
+   no repository copy), the three Buildkite registries
    exist (`imasnget` public), and any environment deployment rules allow
    `v*` tags and `main`.
    *Look for:* nothing to fix. A missing name otherwise fails a later step

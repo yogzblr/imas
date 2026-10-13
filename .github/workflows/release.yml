@@ -1,8 +1,9 @@
 name: Release
 
 # Runs on every pushed vX.Y.Z tag, and by hand (workflow_dispatch, Use
-# workflow from: the tag). It needs GPG_PRIVATE_KEY/GPG_PASSPHRASE (repo or
-# "goreleaser" environment secrets; the "Check release secrets" step fails
+# workflow from: the tag). It needs GPG_PRIVATE_KEY/GPG_PASSPHRASE (secrets
+# of the "goreleaser" environment only, never at repository level: owner
+# policy of 2026-10-11, docs/RELEASING.md "Settings"; the "Check release secrets" step fails
 # fast, naming whatever is missing). The tag trigger was kept off until a
 # release had been run by hand and checked: v0.1.0-rc.4 (2026-10-05) was the
 # first one whose packages were right (docs/RELEASING.md, "First release
@@ -75,7 +76,7 @@ jobs:
             [ -n "${!name}" ] || missing+=("$name")
           done
           if [ "${#missing[@]}" -gt 0 ]; then
-            echo "::error::missing repo/environment secrets: ${missing[*]}"
+            echo "::error::missing goreleaser environment secrets: ${missing[*]}"
             exit 1
           fi
 

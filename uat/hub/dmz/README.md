@@ -5,10 +5,11 @@ gateway), on the `uat-dmz` cluster, waits until both are Ready, exposes them
 on the DMZ address, and checks the gateway from the runner. It is one step of
 the Azure UAT gate (`docs/claude-code-parallel-build-plan.md`, section 4h).
 
-**Status: never run against a cluster.** The scripts were written against the
-Shared contract while the clusters (UAT.2) and the core hub (UAT.3b) were
-being written in parallel. What was checked offline is under
-[Tests](#tests); expect fix rounds after the first real run.
+**Status: ran once on Azure, single node.** Azure UAT run 38107290465
+(2026-10-11) installed and checked this hub, before the stateless build
+(P21). The HA DMZ (`values-ha.yaml`, a 3-node bus and 3 Envoys) has not run
+on a cluster yet: Run 3 of `uat/RUNBOOK.md` is its first run. What is
+checked offline is under [Tests](#tests).
 
 Nothing here is Azure specific. Every script takes a kubeconfig and an
 endpoints file, so the local rig (UAT.8) runs the same scripts.
