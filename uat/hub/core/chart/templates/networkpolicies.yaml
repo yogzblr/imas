@@ -11,7 +11,7 @@
 #   - saasapi: out to the DMZ private IP on the bus port.
 #   - the edge: in on 443 from anywhere (the NSG limits it to the runner),
 #     in on farmer's API port from the DMZ private IP only.
-#   - Keycloak: in from the edge only. RustFS ("minio"): in from farmer and
+#   - Keycloak: in from the edge only. RustFS: in from farmer and
 #     saasapi, and from the DMZ private IP on its hostPort, for the bus's
 #     account loader (read-only, accounts bucket only; design D22). That
 #     and farmer's API are the only DMZ-to-core paths.
@@ -125,19 +125,19 @@ spec:
         - podSelector: { matchLabels: { app.kubernetes.io/name: imas-uat-edge } }
       ports:
         - { protocol: TCP, port: 8080 }
-{{- if .Values.minio.enabled }}
+{{- if .Values.rustfs.enabled }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: imas-uat-minio
+  name: imas-uat-rustfs
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "uat.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: imas-uat-minio
+      app.kubernetes.io/name: imas-uat-rustfs
   policyTypes: ["Ingress"]
   ingress:
     - from:

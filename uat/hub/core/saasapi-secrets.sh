@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 # saasapi-secrets.sh <kubeconfig> <endpoints.json> <state-dir>
 #
-# The two Secrets saasapi waits for, made by hand because this UAT install
+# The Secrets saasapi waits for, made by hand because this UAT install
 # runs no External Secrets Operator (deploy/helm/farmer README, "Eval
 # install"): imas-saasapi-nats (saasapi's NATS seed and the User JWT the
 # publish Job wrote to OpenBao) and imas-saasapi-box (saasapi's box
 # private key and the platform public key the keygen Job wrote). Exactly
-# the fields the README names, and never <base>/platform.
+# the fields the README names, and never <base>/platform. And the operator
+# plane's bearer token (saasapi.operator.token, P20 option C): a random
+# 64-character token, generated once per run into
+# <state>/core/sensitive/saasapi-operator-token and kept on re-runs, in
+# Secret imas-saasapi-operator-token (key current), a Secret of its own
+# (the chart refuses a shared one). The operator listener's TLS Secret is
+# cert-manager's (chart/templates/certificates.yaml).
 # FLAG FOR SECURITY REVIEW.
 #
 # Run after `helm install` returns (its post-install hooks write the KV
@@ -43,3 +49,11 @@ apply_secret "$CORE_NS" "$SAASAPI_NATS_SECRET" \
 	"nats-user.nk=$SEEDS_DIR/saasapi-user.nk" "SAASAPI_NATS_USER_JWT=$tmp/jwt"
 apply_secret "$CORE_NS" "$SAASAPI_BOX_SECRET" \
 	"saasapi-box.key=$tmp/box.key" "SAASAPI_PLATFORM_BOX_PUB=$tmp/platform.pub"
+
+# saasapi refuses an operator token equal to the BFF's secret; two random
+# draws never are, but a hand-edited state directory could be.
+gen_secret_file "$SENSITIVE_DIR/$OPERATOR_TOKEN_FILE" 32
+if cmp -s "$SENSITIVE_DIR/$OPERATOR_TOKEN_FILE" "$SENSITIVE_DIR/internal-auth-secret"; then
+	die "$SENSITIVE_DIR/$OPERATOR_TOKEN_FILE equals the BFF secret: delete it and re-run"
+fi
+apply_secret "$CORE_NS" "$OPERATOR_TOKEN_SECRET" "current=$SENSITIVE_DIR/$OPERATOR_TOKEN_FILE"

@@ -51,7 +51,7 @@ the tofu `uat` JSON is itself a valid endpoints file. Extra keys are ignored.
 | `core.private_ip` | yes | | Envoy's farmer upstream; the NetworkPolicy peer for core |
 | `core.fqdn` | yes | | checked as a DNS name (unused otherwise) |
 | `core.ports.farmer_api` | no | 5405 | Envoy's farmer upstream port |
-| `dmz.account_store.endpoint` | no | `<core.private_ip>:9000` | the accounts bucket's S3 endpoint the bus's loader sidecar reads (`host:port`, no scheme). The default is core's RustFS on its hostPort 9000 (`uat/hub/core` `minio.hostPort`), which core's NetworkPolicy and NSG (`uat/tofu` `accounts_store_port`) open to the DMZ private address only |
+| `dmz.account_store.endpoint` | no | `<core.private_ip>:9000` | the accounts bucket's S3 endpoint the bus's loader sidecar reads (`host:port`, no scheme). The default is core's RustFS on its hostPort 9000 (`uat/hub/core` `rustfs.hostPort`), which core's NetworkPolicy and NSG (`uat/tofu` `accounts_store_port`) open to the DMZ private address only |
 | `dmz.account_store.use_ssl` | no | `false` | TLS to that endpoint |
 | `dmz.account_store.egress_cidr` | when the endpoint is a DNS name | for an IP endpoint, that IP as a `/32`; none for a DNS name (`install.sh` does not resolve it, so supply the CIDR) | the bus NetworkPolicy's one egress rule into core |
 | `cluster_issuer` (or `ca.cluster_issuer`) | no | `imas-uat-ca` | the cert-manager ClusterIssuer of the UAT CA (UAT.2). `uat/hub/core` spells it `ca.cluster_issuer`; either is read, `cluster_issuer` first |
@@ -102,8 +102,8 @@ uat/hub/dmz/install.sh --kubeconfig dmz.kubeconfig --endpoints endpoints.json \
    never does either, so nothing but the named version can be pulled. The
    pulled chart's `version` and `appVersion` are both checked against the
    tag, and the farmerbus image tag is set explicitly as well. Envoy's
-   image is the chart's pinned
-   `envoyproxy/envoy:v1.35.3`, not an imas image.
+   image is the chart's `envoyproxy/envoy:v1.35.3`, not an imas image,
+   pinned by digest in `values-uat.yaml` (`envoy.image.digest`).
 2. **Writes the run's values and manifests** into the work directory:
    `values-run.yaml` (image tag, farmer upstream, NetworkPolicy egress to
    core), `values-accounts.yaml` (the accounts bucket endpoint and the bus
@@ -135,7 +135,7 @@ uat/hub/dmz/install.sh --kubeconfig dmz.kubeconfig --endpoints endpoints.json \
    exist here and pass the same checks.
    Then **the bus loader's two Secrets** (P21 slice 2; the bus has no PVC):
    `imas-bus-accounts-reader` from `--accounts-reader-dir` (the read-only
-   accounts credential `uat/hub/core/minio-setup.sh` leaves in
+   accounts credential `uat/hub/core/rustfs-setup.sh` leaves in
    `<core state-dir>/core/sensitive/s3/accounts-reader`) and
    `imas-bus-loader-sys-user` (key `user.nk`) from `--loader-seed` (the
    `nk -gen user` seed `uat/hub/core/seeds.sh` leaves in

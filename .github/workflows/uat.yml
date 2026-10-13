@@ -72,7 +72,7 @@ on:
         type: choice
         options: ["1", "3"]
       dispatch_flags:
-        description: "Run L5 (self update): only if the hubs have the update dispatch flags on (sets IMAS_UAT_DISPATCH_FLAGS=on)"
+        description: "Turn the fleet update dispatch flags on in the core hub (UAT only) and run L5, the self update"
         required: false
         default: false
         type: boolean
@@ -82,10 +82,14 @@ permissions:
   # GitHub OIDC for azure/login and OpenTofu's azurerm provider and backend.
   id-token: write
 
-# dispatch_flags only tells the tests the hubs' flags are on (saasapi
-# SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED, farmer IMAS_SELF_UPDATE_ENABLED);
-# nothing in uat/hub/core turns them on today, so L5 fails if it is ticked
-# without that set up by hand.
+# dispatch_flags turns the fleet update flags on: check-inputs.sh maps it to
+# IMAS_UAT_DISPATCH_FLAGS (on or off), which the core hub install reads
+# (uat/hub/core/gen-values.sh sets saasapi.fleetUpdateDispatch.enabled, i.e.
+# SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED, and farmer.selfUpdate.enabled, i.e.
+# IMAS_SELF_UPDATE_ENABLED, both from it; off leaves both off) and the tests
+# read (L5 runs when it is on). The release itself is always registered
+# (finish.sh), so the catalog lists it either way. UAT only: the flags stay
+# off outside UAT until the security review.
 #
 # One UAT run at a time, whatever the release: a run needs most of the
 # subscription's quota (the single-node run 10 Dsv5 and 12 B2ls_v2 vCPU, the
@@ -135,6 +139,7 @@ jobs:
           UPGRADE_FROM_TAG: ${{ inputs.upgrade_from_tag }}
           SCENARIOS: ${{ inputs.scenarios }}
           HUB_NODES: ${{ inputs.hub_nodes }}
+          DISPATCH_FLAGS: ${{ inputs.dispatch_flags }}
         run: uat/scripts/check-inputs.sh
 
       # The run's working directories. STATE holds the run's files, several of
@@ -215,6 +220,7 @@ jobs:
           UPGRADE_FROM_TAG: ${{ steps.inputs.outputs.upgrade_from_tag }}
           SCENARIOS: ${{ steps.inputs.outputs.scenarios }}
           HUB_NODES: ${{ steps.inputs.outputs.hub_nodes }}
+          DISPATCH_FLAGS: ${{ steps.inputs.outputs.dispatch_flags }}
           RUNNER_CIDR: ${{ steps.runner.outputs.runner_cidr }}
         run: |
           set -euo pipefail
@@ -224,7 +230,8 @@ jobs:
           jq -n --arg run_id "$id" --arg release_tag "$RELEASE_TAG" --arg region "$REGION" \
             --arg tier "$TIER" --argjson keep_hours "$KEEP_HOURS" --argjson run_budget_hours "$RUN_BUDGET_HOURS" \
             --arg upgrade_from_tag "$UPGRADE_FROM_TAG" \
-            --arg scenarios "$SCENARIOS" --argjson hub_nodes "$HUB_NODES" --arg runner_cidr "$RUNNER_CIDR" \
+            --arg scenarios "$SCENARIOS" --argjson hub_nodes "$HUB_NODES" --arg dispatch_flags "$DISPATCH_FLAGS" \
+            --arg runner_cidr "$RUNNER_CIDR" \
             --arg github_run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" \
             --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '$ARGS.named' >"$STATE/run.json"
@@ -334,9 +341,14 @@ jobs:
           uat/k0s/bootstrap.sh --uat "$STATE/uat.json" --access "$STATE/access/access.json" \
             --ssh-key "$SECRETS/ssh_key" --out "$STATE/k0s"
 
+      # release_tag is the chart reference as well: install.sh pulls the
+      # farmer chart published with that tag (it carries the stamped sprout
+      # release finish.sh registers). IMAS_UAT_DISPATCH_FLAGS sets the fleet
+      # update flags in the chart values (gen-values.sh).
       - name: Core hub (uat/hub/core)
         env:
           RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
+          IMAS_UAT_DISPATCH_FLAGS: ${{ steps.inputs.outputs.dispatch_flags }}
         run: |
           uat/hub/core/install.sh "$STATE/k0s/core.kubeconfig" "$STATE/k0s/endpoints.json" \
             "$STATE/hub" "$RELEASE_TAG"
@@ -345,7 +357,7 @@ jobs:
       # seed crosses). Its account loader gets the two credentials core's
       # install left for it: the loader's SYS user seed (seeds.sh; its public
       # key is core's natsTrust.busLoaderUserPub) and the read-only accounts
-      # bucket credential (minio-setup.sh), which it uses on core's RustFS.
+      # bucket credential (rustfs-setup.sh), which it uses on core's RustFS.
       - name: DMZ hub (uat/hub/dmz)
         env:
           RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
@@ -358,7 +370,9 @@ jobs:
             --workdir "$STATE/dmz"
 
       # farmer and saasapi need the DMZ bus, so core's install.sh does not wait
-      # for them: this does, registers the sprout release and runs core's check.
+      # for them: this does, registers the sprout release (and fails unless
+      # saasapi's operator API then holds it with its GPG-signed checksums.txt
+      # and signature) and runs core's check.
       - name: Core hub, second half (uat/hub/core/finish.sh)
         env:
           RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
@@ -408,8 +422,9 @@ jobs:
           IMAS_UAT_RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
           # Scenario L4 (UAT.7): the earlier release to upgrade from; empty skips L4.
           IMAS_UAT_UPGRADE_FROM_TAG: ${{ steps.inputs.outputs.upgrade_from_tag }}
-          # The dispatch_flags input, through env only; L5 runs when it is on.
-          DISPATCH_FLAGS: ${{ inputs.dispatch_flags }}
+          # on or off (check-inputs.sh, from dispatch_flags): the flags the core
+          # hub was installed with; L5 runs when it is on.
+          IMAS_UAT_DISPATCH_FLAGS: ${{ steps.inputs.outputs.dispatch_flags }}
           # An az session from the OIDC login stops renewing after about ten
           # minutes (AADSTS700024); vmctl.sh runs this and repeats the call.
           UAT_AZ_RELOGIN: ${{ github.workspace }}/uat/access/az-relogin.sh
@@ -418,7 +433,6 @@ jobs:
           AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
         run: |
           set -euo pipefail
-          if [ "$DISPATCH_FLAGS" = true ]; then export IMAS_UAT_DISPATCH_FLAGS=on; fi
           export IMAS_UAT_DIR="$STATE/hub"
           export IMAS_UAT_REPORT_DIR="$STATE/report"
           export IMAS_UAT_CORE_KUBECONFIG="$STATE/k0s/core.kubeconfig"

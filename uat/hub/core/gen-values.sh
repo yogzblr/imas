@@ -7,6 +7,12 @@
 # public output ({"pubkey", "boxpub", ...}); bus-loader-user.pub is the DMZ
 # bus loader's NKey public key seeds.sh writes (natsTrust.busLoaderUserPub).
 # Nothing secret goes in here.
+#
+# IMAS_UAT_DISPATCH_FLAGS (the workflow input dispatch_flags: on or off,
+# default off; true/yes/1 and false/no/0 too) sets both fleet update switches the same way:
+# farmer.selfUpdate.enabled (IMAS_SELF_UPDATE_ENABLED) and
+# saasapi.fleetUpdateDispatch.enabled (SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED).
+# Anything else is refused, so a typo never leaves them half on.
 set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/common.sh
@@ -22,6 +28,13 @@ loader_pub_file="$4"
 [[ -f "$loader_pub_file" ]] || die "bus loader public key file not found: $loader_pub_file (seeds.sh writes it)"
 need_cmd jq
 load_endpoints
+
+# The spellings uat/tests reads the same variable with (ingredients.FlagOn).
+case "${IMAS_UAT_DISPATCH_FLAGS:-off}" in
+on | true | yes | 1) dispatch=true ;;
+off | false | no | 0) dispatch=false ;;
+*) die "IMAS_UAT_DISPATCH_FLAGS must be on or off, got: ${IMAS_UAT_DISPATCH_FLAGS}" ;;
+esac
 
 pubkey=$(jq -r '.pubkey // empty' "$admin_json")
 boxpub=$(jq -r '.boxpub // empty' "$admin_json")
@@ -50,6 +63,7 @@ jq -n \
 	--arg s3Endpoint "$S3_ENDPOINT" \
 	--argjson s3SSL "$S3_USE_SSL" \
 	--argjson s3CIDRs "$S3_EGRESS_CIDRS" \
+	--argjson dispatch "$dispatch" \
 	'{
 	  clusterDomain: $clusterDomain,
 	  bus: {
@@ -60,11 +74,13 @@ jq -n \
 	  },
 	  farmer: {
 	    image: {tag: $version},
-	    bootstrapAdmin: {pubkey: $pubkey, boxpub: $boxpub, username: $adminName}
+	    bootstrapAdmin: {pubkey: $pubkey, boxpub: $boxpub, username: $adminName},
+	    selfUpdate: {enabled: $dispatch}
 	  },
 	  saasapi: {
 	    image: {tag: $version},
-	    jwt: {keycloakJWKSURL: $jwks, issuer: $issuer, audience: $audience}
+	    jwt: {keycloakJWKSURL: $jwks, issuer: $issuer, audience: $audience},
+	    fleetUpdateDispatch: {enabled: $dispatch}
 	  },
 	  natsTrust: {busLoaderUserPub: $loaderPub},
 	  database: {migrate: {image: {tag: $version}}},

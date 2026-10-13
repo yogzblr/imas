@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Stub gh for uat/scripts/tests/scripts_test.sh: `gh api` on the tag and
 # release endpoints, and on repos/OWNER/REPO (the ids). $STUB_STATE/tags lists existing tags, one per line;
-# $STUB_STATE/releases has "<tag> <draft>" lines.
+# $STUB_STATE/releases has "<tag> <draft> [asset,asset,...]" lines; a release
+# lookup answers {draft, assets: [{name}]} through the call's --jq filter,
+# as gh does.
 set -u
 echo "gh $*" >>"$STUB_STATE/calls.log"
 [ "$1" = api ] || { echo "stub gh: unexpected call: $*" >&2; exit 99; }
@@ -22,7 +24,14 @@ case "$path" in
     tag=${path##*/releases/tags/}
     line=$(grep -E "^$(printf '%s' "$tag" | sed 's/[.]/\\./g') " "$STUB_STATE/releases" 2>/dev/null | head -n 1)
     [ -n "$line" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
-    echo "${line#* }"
+    read -r _ draft assets <<<"$line"
+    filter=.
+    while [ $# -gt 0 ]; do
+      if [ "$1" = --jq ]; then filter=$2; fi
+      shift
+    done
+    jq -n -r --argjson draft "$draft" --arg assets "${assets:-}" \
+      '{draft: $draft, assets: ($assets | split(",") | map(select(. != "") | {name: .}))}' | jq -r "$filter"
     ;;
   *) echo "stub gh: unexpected path $path" >&2; exit 99 ;;
 esac

@@ -8,21 +8,29 @@
 #    2. the NATS user seeds and farmer's NKey, with their Secrets, and the
 #       DMZ bus loader's seed (seeds.sh), and the bootstrap admin keys
 #       (admin-keys.sh, the release's own imas CLI)
-#    3. the published farmer chart of release_tag, pulled and checked
-#    4. the UAT-only pieces (chart/): MinIO, Keycloak with the imas-uat
-#       realm, the edge proxy, certificates, policies
-#    5. RustFS buckets, users and policies (minio-setup.sh): recipes, jobs,
-#       sprout JWTs and the accounts bucket with its writer and reader
+#    3. the published farmer chart of release_tag, pulled and checked: its
+#       version, and the stamped sprout release it carries
+#       (files/sprout-release.json, which finish.sh registers)
+#    4. the UAT-only pieces (chart/): RustFS, Keycloak with the imas-uat
+#       realm, the edge proxy, certificates (farmer's, the edge's and
+#       saasapi's operator listener's), policies
+#    5. RustFS buckets, users and policies (rustfs-setup.sh): recipes, jobs,
+#       sprout JWTs and the accounts bucket with its writer and reader, then
+#       validate-rustfs.sh proves each scoped credential's reach
 #    6. the farmer chart, with OpenBao initialised and unsealed while the
 #       install runs (openbao-bootstrap.sh); its bootstrap Job writes the
 #       public NATS trust (ConfigMap imas-nats-trust, which the DMZ copies)
 #       and revokes the token it was handed, whose Secret then goes
-#    7. saasapi's two hand-made Secrets (saasapi-secrets.sh)
+#    7. saasapi's hand-made Secrets (saasapi-secrets.sh), the operator
+#       token's among them
 #    8. waits for the workloads core owns and writes the outputs
 # It does NOT wait for farmer or saasapi, register the sprout release, or run
 # check.sh: farmer's /ready and saasapi's startup both need the DMZ's NATS bus,
 # which the DMZ install (uat/hub/dmz/install.sh) creates after this script.
 # finish.sh does those three things once the DMZ is up.
+# IMAS_UAT_DISPATCH_FLAGS (on or off, default off; the workflow input
+# dispatch_flags) sets the fleet update flags in the chart values
+# (gen-values.sh) and is recorded in core.json, which check.sh compares.
 # Chart and images are the release's version (release_tag without the v),
 # never latest. Calls nothing Azure specific: UAT.8 runs it on a local
 # cluster. Re-running it upgrades in place and keeps every generated
@@ -40,7 +48,12 @@ need_cmd kubectl helm jq curl openssl go tar sha256sum base64 awk sed
 HELM_TIMEOUT="${HELM_TIMEOUT:-45m}"
 common=("$KUBECONFIG_PATH" "$ENDPOINTS" "$STATE_ROOT")
 
-log "release $release_tag (chart and images $version); core $CORE_FQDN ($CORE_IP), DMZ $DMZ_FQDN ($DMZ_IP)"
+case "${IMAS_UAT_DISPATCH_FLAGS:-off}" in
+on | true | yes | 1) dispatch_flags=on ;;
+off | false | no | 0) dispatch_flags=off ;;
+*) die "IMAS_UAT_DISPATCH_FLAGS must be on or off, got: ${IMAS_UAT_DISPATCH_FLAGS}" ;;
+esac
+log "release $release_tag (chart and images $version); core $CORE_FQDN ($CORE_IP), DMZ $DMZ_FQDN ($DMZ_IP); fleet update dispatch flags $dispatch_flags"
 log "issuer $KEYCLOAK_ISSUER; sprout bus URL $SPROUT_BUS_URL"
 kc version >/dev/null 2>&1 || die "can't reach the cluster with $KUBECONFIG_PATH"
 kc get clusterissuer "$CA_ISSUER" >/dev/null 2>&1 ||
@@ -50,7 +63,7 @@ kc get clusterissuer "$CA_ISSUER" >/dev/null 2>&1 ||
 ensure_ns "$CORE_NS" "$UAT_NS"
 
 kcdir="$SENSITIVE_DIR/keycloak"
-mdir="$SENSITIVE_DIR/minio"
+mdir="$SENSITIVE_DIR/rustfs"
 (umask 077 && mkdir -p "$kcdir" "$mdir")
 printf '%s' imas-uat-kc-admin >"$kcdir/admin-username"
 gen_secret_file "$kcdir/admin-password"
@@ -61,7 +74,7 @@ printf '%s' imas-uat-root >"$mdir/root-user"
 gen_secret_file "$mdir/root-password" 32
 gen_secret_file "$SENSITIVE_DIR/internal-auth-secret" 32
 
-apply_secret "$UAT_NS" "$MINIO_ROOT_SECRET" "user=$mdir/root-user" "password=$mdir/root-password"
+apply_secret "$UAT_NS" "$RUSTFS_ROOT_SECRET" "user=$mdir/root-user" "password=$mdir/root-password"
 apply_secret "$UAT_NS" "$KEYCLOAK_ADMIN_SECRET" "username=$kcdir/admin-username" "password=$kcdir/admin-password"
 apply_secret "$UAT_NS" "$KEYCLOAK_REALM_SECRET" \
 	"UAT_TESTS_CLIENT_SECRET=$kcdir/tests-client-secret" \
@@ -90,6 +103,15 @@ grep -qx "version: $version" <<<"$chart_meta" || die "$chart_tgz is not chart ve
 grep -Eqx "appVersion: \"?$version\"?" <<<"$chart_meta" || die "$chart_tgz appVersion is not $version"
 tar -xzf "$chart_tgz" -O farmer/files/objectstore-policies/saasapi-recipes.json >"$chart_dir/saasapi-recipes.json" ||
 	die "$chart_tgz has no files/objectstore-policies/saasapi-recipes.json"
+# The published chart carries the sprout release finish.sh registers
+# (files/sprout-release.json, stamped at release time with the GPG-signed
+# checksums.txt and its signature); a chart without it would register
+# nothing, so stop here rather than after the whole install.
+tar -xzf "$chart_tgz" -O farmer/files/sprout-release.json >"$chart_dir/sprout-release.json" 2>/dev/null ||
+	die "$chart_tgz has no files/sprout-release.json: it is not a release-stamped chart (packaging/helm/stamp-sprout-release.sh)"
+jq -e --arg v "$release_tag" '.version == $v and (.checksums_txt | type == "string" and length > 0) and (.checksums_sig | type == "string" and length > 0)' \
+	"$chart_dir/sprout-release.json" >/dev/null ||
+	die "$chart_tgz files/sprout-release.json is not release $release_tag with checksums_txt and checksums_sig"
 
 # --- 4. the UAT-only pieces --------------------------------------------------
 log "installing $EXTRAS_RELEASE (RustFS unless external S3, Keycloak, edge proxy, certificates)"
@@ -97,6 +119,7 @@ mapfile -t extras_args < <(extras_set_args)
 hc upgrade --install "$EXTRAS_RELEASE" "$here/chart" -n "$UAT_NS" --wait --timeout 20m "${extras_args[@]}" >&2 ||
 	die "the UAT-only chart did not become ready (kubectl -n $UAT_NS get pods)"
 kc -n "$CORE_NS" wait certificate "$FARMER_TLS_SECRET" --for=condition=Ready --timeout=300s >&2
+kc -n "$CORE_NS" wait certificate "$OPERATOR_TLS_SECRET" --for=condition=Ready --timeout=300s >&2
 kc -n "$UAT_NS" wait certificate imas-uat-edge-tls --for=condition=Ready --timeout=300s >&2
 
 # The UAT CA, from the issued Secret's ca.crt (a public certificate).
@@ -108,7 +131,8 @@ kc -n "$CORE_NS" create configmap "$UAT_CA_CONFIGMAP" --from-file="ca.crt=$OUT_D
 
 # --- 5. the object store -----------------------------------------------------
 if [[ "$S3_MODE" == rustfs ]]; then
-	"$here/minio-setup.sh" "${common[@]}" "$chart_dir/saasapi-recipes.json"
+	"$here/rustfs-setup.sh" "${common[@]}" "$chart_dir/saasapi-recipes.json"
+	"$here/validate-rustfs.sh" "${common[@]}"
 else
 	# External S3 (object_store.mode external): buckets, users and policies
 	# are the operator's. The credential files below are theirs too; they
@@ -181,7 +205,7 @@ wait_for 300 "PXC statefulset $PXC_CLUSTER-pxc" sts_ready "$PXC_CLUSTER-pxc" "$C
 wait_for 300 "HAProxy statefulset $PXC_CLUSTER-haproxy" sts_ready "$PXC_CLUSTER-haproxy" "$CORE_NS"
 rollout "deployment/$VALKEY_DEPLOY" "$CORE_NS"
 # farmer and saasapi are waited for in finish.sh, after the DMZ install.
-[[ "$S3_MODE" == rustfs ]] && rollout "deployment/$MINIO_SVC" "$UAT_NS"
+[[ "$S3_MODE" == rustfs ]] && rollout "deployment/$RUSTFS_SVC" "$UAT_NS"
 rollout "deployment/$KEYCLOAK_DEPLOY" "$UAT_NS"
 rollout "deployment/$EDGE_DEPLOY" "$UAT_NS"
 
@@ -196,9 +220,10 @@ jq -n --arg tag "$release_tag" --arg version "$version" --arg ns "$CORE_NS" --ar
 	--arg attr "$TENANT_ATTRIBUTE" --arg other "$OTHER_CLIENT" \
 	--arg cpn "$CORE_PRIVATE_FQDN" --arg dpn "$DMZ_PRIVATE_FQDN" \
 	--arg sens "$SENSITIVE_DIR" --arg bus "$SPROUT_BUS_URL" --argjson tenants "$prev_tenants" \
-	--argjson scratch "$prev_scratch" \
+	--argjson scratch "$prev_scratch" --arg dispatch "$dispatch_flags" \
 	--slurpfile admin "$OUT_DIR/admin.json" '{
 	  release_tag: $tag, version: $version, namespace: $ns, release: $rel,
+	  dispatch_flags: $dispatch,
 	  saasapi_url: $url, internal_auth_header: "X-Internal-Auth", ca_file: $ca,
 	  sprout_bus_url: $bus,
 	  private_names: {core: $cpn, dmz: $dpn},

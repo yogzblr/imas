@@ -8,7 +8,12 @@
 #   AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
 #                      the uat environment's variables (GUIDs)
 #   RELEASE_TAG        required: vX.Y.Z or vX.Y.Z-rc.N, an existing tag with a
-#                      published (not draft) GitHub release
+#                      published (not draft) GitHub release that is GPG
+#                      signed: it has the checksums.txt and checksums.txt.sig
+#                      assets (P22). Its published farmer chart, the one the
+#                      core hub installs, carries the stamped sprout release
+#                      finish.sh registers, so the tag is the chart reference
+#                      too
 #   UPGRADE_FROM_TAG   optional, the same checks; must differ from RELEASE_TAG
 #   REGION             Azure region name (default centralindia)
 #   KEEP_HOURS         0 to 168, a whole number (default 0)
@@ -16,10 +21,16 @@
 #   SCENARIOS          optional scenario ids, separated by spaces or commas
 #   HUB_NODES          nodes per hub: 1 (default, the single-node run) or 3
 #                      (the HA run: 3 core and 3 DMZ k0s nodes, P24)
+#   DISPATCH_FLAGS     true or false (default false): the workflow input
+#                      dispatch_flags, which turns the fleet update flags on
+#                      in the hubs' values (uat/hub/core/gen-values.sh) and
+#                      tells the tests they are on
 #   GITHUB_REPOSITORY  owner/repo, for the tag and release lookups (gh api)
 #
 # Writes, when GITHUB_OUTPUT is set, the normalised values as step outputs:
 #   release_tag region keep_hours tier upgrade_from_tag scenarios hub_nodes
+#   dispatch_flags     on or off: IMAS_UAT_DISPATCH_FLAGS for the core hub
+#                      install and the tests
 #   core_node_count, dmz_node_count
 #                      uat/tofu's node counts (both equal hub_nodes)
 #   core_node_size     uat/tofu's core_node_size: Standard_D4s_v5 for the HA
@@ -55,10 +66,12 @@ done
 repo=${GITHUB_REPOSITORY:-}
 [ -n "$repo" ] || problem "GITHUB_REPOSITORY is not set (run this inside GitHub Actions)"
 
-# check_release INPUT TAG: TAG is a release tag, exists, and has a published
-# release.
+# check_release INPUT TAG [signed]: TAG is a release tag, exists, and has a
+# published release; with "signed", the release also carries checksums.txt
+# and its detached GPG signature checksums.txt.sig (the sprout installs only
+# what that signature verifies, and finish.sh registers both).
 check_release() {
-  local input=$1 tag=$2 draft
+  local input=$1 tag=$2 want_signed=${3:-} info draft has_sums has_sig
   if ! [[ "$tag" =~ $tag_re ]]; then
     problem "input $input '$tag' is not a release tag (want vX.Y.Z or vX.Y.Z-rc.N)"
     return
@@ -68,12 +81,17 @@ check_release() {
     problem "input $input: tag $tag does not exist in $repo"
     return
   fi
-  if ! draft=$(gh api "repos/$repo/releases/tags/$tag" --jq .draft 2>/dev/null); then
+  if ! info=$(gh api "repos/$repo/releases/tags/$tag" \
+    --jq '[(.draft | tostring), ([.assets[]?.name] | index("checksums.txt") != null | tostring), ([.assets[]?.name] | index("checksums.txt.sig") != null | tostring)] | join(" ")' 2>/dev/null); then
     problem "input $input: tag $tag has no published release in $repo (a draft release does not count)"
     return
   fi
+  read -r draft has_sums has_sig <<<"$info"
   if [ "$draft" != "false" ]; then
     problem "input $input: the release for $tag is still a draft; publish it first"
+  fi
+  if [ "$want_signed" = signed ] && { [ "$has_sums" != true ] || [ "$has_sig" != true ]; }; then
+    problem "input $input: the release for $tag is not GPG signed (it needs the checksums.txt and checksums.txt.sig assets; docs/RELEASING.md): the sprout release it registers could not be verified"
   fi
 }
 
@@ -81,7 +99,7 @@ release_tag=${RELEASE_TAG:-}
 if [ -z "$release_tag" ]; then
   problem "input release_tag is empty"
 else
-  check_release release_tag "$release_tag"
+  check_release release_tag "$release_tag" signed
 fi
 
 upgrade_from_tag=${UPGRADE_FROM_TAG:-}
@@ -119,6 +137,13 @@ case "$hub_nodes" in
     problem "input hub_nodes '$hub_nodes' must be 1 (single-node run) or 3 (HA run)"
     core_node_size=""
     ;;
+esac
+
+dispatch_flags=off
+case "${DISPATCH_FLAGS:-false}" in
+  true) dispatch_flags=on ;;
+  false | "") ;;
+  *) problem "input dispatch_flags '${DISPATCH_FLAGS}' must be true or false" ;;
 esac
 
 # Scenario ids reach uat/tests/run.sh as separate arguments, so only plain ids
@@ -159,6 +184,7 @@ tier=$tier
 upgrade_from_tag=$upgrade_from_tag
 scenarios=$scenarios
 hub_nodes=$hub_nodes
+dispatch_flags=$dispatch_flags
 core_node_count=$hub_nodes
 dmz_node_count=$hub_nodes
 core_node_size=$core_node_size

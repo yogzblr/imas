@@ -1134,7 +1134,7 @@ With `versity.enabled=true` the chart renders:
 ### Users and bucket policies
 
 One user per component credential, scoped as in design D22 and the UAT's
-RustFS policies (`uat/hub/core/minio-setup.sh`):
+RustFS policies (`uat/hub/core/rustfs-setup.sh`):
 
 | User | Secret (`access-key-id`, `secret-access-key` by default) | Grants |
 |---|---|---|

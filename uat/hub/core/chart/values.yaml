@@ -15,6 +15,12 @@ farmer:
   saasapiPort: 8081
   # tls.secretName: issued here by cert-manager from the UAT CA.
   tlsSecretName: imas-farmer-tls
+  # saasapi's operator plane (saasapi.operator, P20 option C): its Service
+  # (<saasapi fullname>-operator) and saasapi.operator.tls.secretName,
+  # issued here from the UAT CA. The registration hook Job verifies the
+  # listener with this Secret's ca.crt.
+  saasapiOperatorServiceName: imas-core-farmer-saasapi-operator
+  operatorTLSSecretName: imas-saasapi-operator-tls
 
 clusterDomain: cluster.local
 
@@ -53,14 +59,14 @@ caIssuer:
   kind: ClusterIssuer
   name: imas-uat-ca
 
-minio:
+rustfs:
   # false: no object store is deployed (object_store.mode external).
   enabled: true
   # RustFS (Apache-2.0), which replaced MinIO (AGPL-3.0). Pinned; never
   # latest. 1.0.1 passed the rig (smoke 10/10, core 58/0/3, 2026-10-09).
   # The digest is the one that pulled on the rig; it wins over the tag.
   image: docker.io/rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
-  rootSecret: imas-uat-minio-root
+  rootSecret: imas-uat-rustfs-root
   # The node port the DMZ bus's account loader reads the accounts bucket on
   # (<core private IP>:9000, uat/hub/dmz dmz.account_store.endpoint's
   # default; uat/tofu accounts_store_port). A hostPort, as the edge's
@@ -73,8 +79,11 @@ minio:
     limits: { memory: 1Gi }
 
 keycloak:
-  # Apache-2.0. Pinned; never latest. Unverified from the agent sandbox.
-  image: quay.io/keycloak/keycloak:26.4.0
+  # Apache-2.0. Pinned by tag and digest (P13); never latest. Docker Hub's
+  # keycloak/keycloak, the project's own mirror of quay.io/keycloak/keycloak,
+  # because its digest could be read from the registry: the image index
+  # (linux/amd64 and linux/arm64) of 26.4.0, read 2026-10-13.
+  image: docker.io/keycloak/keycloak:26.4.0@sha256:5f3fb534cde6bf006d79f5912473e5d2c828c707cdfc52e16972803aca9d43dd
   realm: imas-uat
   # KC_BOOTSTRAP_ADMIN_USERNAME / _PASSWORD (master realm), generated per run.
   adminSecret: imas-uat-keycloak-admin
@@ -90,8 +99,10 @@ keycloak:
     limits: { memory: 1536Mi }
 
 edge:
-  # Apache-2.0; the same pin as the nats chart's Envoy (docs/INSTALL.md).
-  image: envoyproxy/envoy:v1.35.3
+  # Apache-2.0; the same version as the nats chart's Envoy (docs/INSTALL.md),
+  # pinned by digest too (P13): the image index of v1.35.3 on Docker Hub,
+  # read 2026-10-13; uat/hub/dmz/values-uat.yaml pins the DMZ's Envoy to it.
+  image: envoyproxy/envoy:v1.35.3@sha256:4d496918618a7ebd6c71ae8285e31ebff092f3a0a5ad642d50decf4a54eb2456
   tlsSecretName: imas-uat-edge-tls
   resources:
     requests: { cpu: 50m, memory: 64Mi }

@@ -968,7 +968,7 @@ func TestInstallWithStubs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// The loader's credentials, as minio-setup.sh and the operator leave them.
+	// The loader's credentials, as rustfs-setup.sh and the operator leave them.
 	readerDir := t.TempDir()
 	for name, v := range map[string]string{"access-key-id": "imas-bus-accounts-reader", "secret-access-key": "uatreadersecretvalue"} {
 		if err := os.WriteFile(filepath.Join(readerDir, name), []byte(v), 0o600); err != nil {
@@ -1618,7 +1618,7 @@ func readValues(t *testing.T, path string) obj {
 // would be ignored without a word), and the loader's side of the accounts
 // bucket matches what the core hub makes: the bucket name, the two Secret
 // names install.sh creates, and the port the core hub's RustFS answers the
-// DMZ on (uat/hub/core chart minio.hostPort, uat/tofu accounts_store_port),
+// DMZ on (uat/hub/core chart rustfs.hostPort, uat/tofu accounts_store_port),
 // which install.sh's default endpoint <core private IP>:9000 uses.
 func TestUATValuesMatchChartAndCore(t *testing.T) {
 	root := filepath.Join(dir(t), "..", "..", "..")
@@ -1670,8 +1670,18 @@ func TestUATValuesMatchChartAndCore(t *testing.T) {
 		t.Error("install.sh's default accounts endpoint is no longer <core private IP>:9000")
 	}
 	coreValues := readValues(t, filepath.Join(root, "uat", "hub", "core", "chart", "values.yaml"))
-	if got := get(coreValues, "minio", "hostPort"); got != 9000 {
-		t.Errorf("uat/hub/core chart minio.hostPort = %v, want 9000 (this hub's default accounts endpoint)", got)
+	if got := get(coreValues, "rustfs", "hostPort"); got != 9000 {
+		t.Errorf("uat/hub/core chart rustfs.hostPort = %v, want 9000 (this hub's default accounts endpoint)", got)
+	}
+	// P13: the DMZ's Envoy is pinned by digest, the same image as the core
+	// edge (uat/hub/core chart edge.image, repository:tag@digest).
+	digest, _ := get(uat, "envoy", "image", "digest").(string)
+	edge, _ := get(coreValues, "edge", "image").(string)
+	chartImage := fmt.Sprintf("%v:%v", get(chart, "envoy", "image", "repository"), get(chart, "envoy", "image", "tag"))
+	if !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(digest) {
+		t.Errorf("values-uat.yaml envoy.image.digest %q is not a sha256 digest", digest)
+	} else if edge != chartImage+"@"+digest {
+		t.Errorf("uat/hub/core chart edge.image %q, want the DMZ's Envoy %s@%s", edge, chartImage, digest)
 	}
 	tf, err := os.ReadFile(filepath.Join(root, "uat", "tofu", "variables.tf"))
 	if err != nil {

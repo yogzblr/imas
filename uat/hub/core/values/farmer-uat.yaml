@@ -130,11 +130,11 @@ valkey:
 # endpoints file's object_store (README.md, "External S3"). Three buckets,
 # all different: recipes, job logs, and the private sprout User JWT bucket
 # (IMAS_S3_SPROUT_JWT_BUCKET; the chart has no default name, and enrolment
-# fails without it). minio-setup.sh creates all three. The accounts bucket
+# fails without it). rustfs-setup.sh creates all three. The accounts bucket
 # is the chart's accountStore default (imas-accounts), with its own writer
-# credential (accountStore.credentialsSecret, also from minio-setup.sh).
+# credential (accountStore.credentialsSecret, also from rustfs-setup.sh).
 objectStore:
-  endpoint: imas-uat-minio.imas-uat.svc.cluster.local:9000
+  endpoint: imas-uat-rustfs.imas-uat.svc.cluster.local:9000
   useSSL: false
   bucket: imas-recipes
   jobBucket: imas-jobs
@@ -151,6 +151,12 @@ farmer:
     # pubkey and boxpub come from gen-values.sh (imas auth pubkey and
     # imas auth keygen of this release, run by admin-keys.sh).
     username: uat-admin
+  # IMAS_SELF_UPDATE_ENABLED. Off here; gen-values.sh turns it on, with
+  # saasapi.fleetUpdateDispatch.enabled, when the workflow input
+  # dispatch_flags is true (IMAS_UAT_DISPATCH_FLAGS=on). UAT only: both stay
+  # off anywhere else until the security review.
+  selfUpdate:
+    enabled: false
 
 saasapi:
   enabled: true
@@ -160,10 +166,30 @@ saasapi:
   internalAuthSecret:
     secretName: imas-saasapi-internal-auth
     currentKey: current
+  # SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED: set by gen-values.sh with
+  # farmer.selfUpdate.enabled (above), from dispatch_flags.
+  fleetUpdateDispatch:
+    enabled: false
+  # The operator plane (P20 option C): the listener the sprout release hook
+  # Job registers the release on, so finish.sh's
+  # `helm upgrade --set sproutRelease.register=true` really registers it.
+  # tls: a cert-manager Certificate from the UAT CA (chart/
+  # templates/certificates.yaml) for the operator Service's FQDN, whose
+  # ca.crt the hook Job verifies the listener with. token: a random token
+  # saasapi-secrets.sh generates, in a Secret of its own (key current); the
+  # copy in <state>/core/sensitive/saasapi-operator-token is what finish.sh
+  # and operator-release.sh present. FLAG FOR SECURITY REVIEW.
+  operator:
+    enabled: true
+    tls:
+      secretName: imas-saasapi-operator-tls
+    token:
+      secretName: imas-saasapi-operator-token
+      currentKey: current
   recipes:
     enabled: true
-    # saasapi's own MinIO user, limited by the release's
-    # files/objectstore-policies/saasapi-recipes.json (minio-setup.sh).
+    # saasapi's own RustFS user, limited by the release's
+    # files/objectstore-policies/saasapi-recipes.json (rustfs-setup.sh).
     credentialsSecret: imas-uat-s3-saasapi
     accessKeyIdKey: access-key-id
     secretAccessKeyKey: secret-access-key

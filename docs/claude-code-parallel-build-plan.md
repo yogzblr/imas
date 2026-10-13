@@ -2133,7 +2133,7 @@ TestLifecycle) so a tier can be chosen with go test -run.
 | L2 | Restarting farmer: sprouts stay connected or reconnect, jobs run | resilience |
 | L3 | Restarting farmerbus and Envoy: sprouts reconnect | resilience |
 | L4 | Package upgrade from the previous release to this one keeps /etc/imas/sprout and the sproutid | lifecycle |
-| L5 | One self update cycle with the dispatch flags on (opt in, UAT only) | lifecycle |
+| L5 | One self update cycle with the dispatch flags on (dispatch_flags, UAT only): GPG signature verified against the packaged keyring, a release with an altered checksums.txt refused | lifecycle |
 | X1 | No token, expired token, wrong audience, read only token on a write route: refused as documented | core |
 | X2 | A sprout presenting no gateway JWT is refused at Envoy | core |
 | X3 | A sprout cannot open a connection to core | core |

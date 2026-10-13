@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# A stand-in for the curl in the RustFS image, for test/rustfs_test.sh only:
+# answers validate-rustfs.sh's signed calls with the status the UAT policies
+# (rustfs-setup.sh) give, by access key, method and path. FAKE_RUSTFS_BREAK
+# names one deliberate fault: reader-put lets the accounts reader write,
+# farmer-accounts lets farmer list the accounts bucket, root-delete makes the
+# root credential's cleanup DELETEs fail (500).
+set -euo pipefail
+m=GET user="" url=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	-X) m="$2"; shift 2 ;;
+	--user) user="${2%%:*}"; shift 2 ;;
+	-o | -w | -H | --data-binary | --aws-sigv4) shift 2 ;;
+	-*) shift ;;
+	*) url="$1"; shift ;;
+	esac
+done
+printf '%s %s %s\n' "$user" "$m" "$url" >>"${STUB_STATE:?}/rustfs-curl.log"
+p=${url#http://127.0.0.1:9000/}
+bucket=${p%%[/?]*}
+allow=no
+case "$user" in
+"$RUSTFS_ACCESS_KEY")
+	allow=yes
+	if [[ "${FAKE_RUSTFS_BREAK:-}" == root-delete && "$m" == DELETE ]]; then
+		printf 500
+		exit 0
+	fi
+	;;
+imas-farmer)
+	case "$bucket" in imas-recipes | imas-jobs | imas-sprout-jwts) allow=yes ;; esac
+	[[ "${FAKE_RUSTFS_BREAK:-}" != farmer-accounts || "$bucket" != imas-accounts || "$m" != GET ]] || allow=yes
+	;;
+imas-saasapi)
+	[[ "$bucket" == imas-recipes && ("$p" == imas-recipes/tenants/*/recipes/* || "$p" == *"prefix=tenants/"*"/recipes/"*) ]] && allow=yes
+	;;
+imas-farmer-accounts) [[ "$bucket" == imas-accounts ]] && allow=yes ;;
+imas-bus-accounts-reader)
+	[[ "$bucket" == imas-accounts && "$m" == GET ]] && allow=yes
+	[[ "${FAKE_RUSTFS_BREAK:-}" != reader-put || "$bucket" != imas-accounts ]] || allow=yes
+	;;
+esac
+if [[ "$allow" == yes ]]; then
+	[[ "$m" == DELETE ]] && printf 204 || printf 200
+else
+	printf 403
+fi

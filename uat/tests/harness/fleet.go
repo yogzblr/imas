@@ -34,6 +34,9 @@ type Fleet struct {
 	// BindExec, when set, replaces running bind-tenant.sh: it gets the
 	// script's arguments and returns its stdout and stderr. For tests.
 	BindExec func(ctx context.Context, args []string) (stdout, stderr []byte, err error)
+	// OperatorExec, when set, replaces running operator-release.sh the
+	// same way (operator.go). For tests.
+	OperatorExec func(ctx context.Context, args []string) (stdout, stderr []byte, err error)
 
 	prepareOnce sync.Once
 	prepareErr  error

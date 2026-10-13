@@ -145,8 +145,12 @@ cases from somewhere else.
 
 Lifecycle (in the same package): **L4** needs `IMAS_UAT_UPGRADE_FROM_TAG`
 (the workflow input `upgrade_from_tag`) and skips without it. **L5** runs
-only with `IMAS_UAT_DISPATCH_FLAGS=on` (saasapi with
-`SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=true` and farmer with
-`IMAS_SELF_UPDATE_ENABLED=true`) plus `IMAS_UAT_UPGRADE_FROM_TAG` and
-`IMAS_UAT_RELEASE_TAG`. Both run on the Linux sprouts of tenant 1. Windows is
-a skip with the reason, as in S6.
+only with `IMAS_UAT_DISPATCH_FLAGS=on` (the workflow input `dispatch_flags`,
+which also turns on saasapi's `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED` and
+farmer's `IMAS_SELF_UPDATE_ENABLED` in the core hub) plus
+`IMAS_UAT_UPGRADE_FROM_TAG` and `IMAS_UAT_RELEASE_TAG`. Besides the update
+itself it checks the sprout's keyring is the repo's `gpg-public-key.asc` and
+that a release with an altered `checksums.txt` (registered under a scratch
+version through `uat/hub/core/operator-release.sh post-altered`) is refused,
+with nothing downloaded or installed. Both run on the Linux sprouts of
+tenant 1. Windows is a skip with the reason, as in S6.

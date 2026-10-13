@@ -40,7 +40,7 @@ L1	resilience	Each sprout survives a reboot, reconnects and runs a job	UAT.5
 L2	resilience	Restarting farmer: sprouts stay connected or reconnect, jobs run	UAT.5
 L3	resilience	Restarting farmerbus and Envoy: sprouts reconnect	UAT.5
 L4	lifecycle	Package upgrade from the previous release to this one keeps /etc/imas/sprout and the sproutid	UAT.7
-L5	lifecycle	One self update cycle with the dispatch flags on (opt in, UAT only)	UAT.7
+L5	lifecycle	One self update cycle with the dispatch flags on (dispatch_flags, UAT only): GPG signature verified against the packaged keyring, a release with an altered checksums.txt refused	UAT.7
 X1	core	No token, expired token, wrong audience, read only token on a write route: refused as documented	UAT.5
 X2	core	A sprout presenting no gateway JWT is refused at Envoy	UAT.5
 X3	core	A sprout cannot open a connection to core	UAT.5

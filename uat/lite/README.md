@@ -88,7 +88,7 @@ sudo sysctl fs.inotify.max_user_instances=512 fs.inotify.max_user_watches=524288
 ```
 
 **Rough size, a guess, not measured:** 8 CPUs, 16 GiB of memory for Docker,
-40 GB of free disk. The core cluster dominates: PXC, Keycloak (Java), MinIO,
+40 GB of free disk. The core cluster dominates: PXC, Keycloak (Java), RustFS,
 OpenBao, Valkey, farmer and saasapi, plus cert-manager and a control plane in
 each cluster. The four sprouts add a few hundred MiB in all.
 
