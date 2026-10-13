@@ -480,9 +480,9 @@ func TestHAHA4_EmptyBusNode(t *testing.T) {
 		if p.Name != victim.Name {
 			continue
 		}
-		addr, stop, err := h.BusAddr(ctx, p)
+		addr, name, stop, err := h.BusAddr(ctx, p)
 		sc.NoErr(err, "forwarding to %s", p.Name)
-		err = harness.BusConnect(ctx, addr, f.Env.CAPool, e)
+		err = harness.BusConnect(ctx, addr, name, f.Env.CAPool, e)
 		stop()
 		if err != nil {
 			sc.Errorf("%s with farmer at 0: %v", p.Name, err)

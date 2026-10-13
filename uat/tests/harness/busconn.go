@@ -24,20 +24,18 @@ var ErrBusRefused = errors.New("the bus node refused the sprout's credentials")
 // refused them; any other error that the connection failed for another
 // reason (TLS, a fenced node, the network).
 //
-// The node's certificate is verified against pool, the run's CA, but not
-// against a host name: the address is a local forward, not one of the
-// names on the certificate.
-func BusConnect(ctx context.Context, addr string, pool *x509.CertPool, e *Enrolment) error {
+// The node's certificate is verified against pool, the run's CA, for
+// serverName: the address is a local forward, so the name is the one the
+// node's own loader uses to dial it on 127.0.0.1 (BusServerName).
+func BusConnect(ctx context.Context, addr, serverName string, pool *x509.CertPool, e *Enrolment) error {
+	if serverName == "" {
+		return errors.New("no TLS server name for the bus node")
+	}
 	seed, err := e.Seed()
 	if err != nil {
 		return err
 	}
-	tcfg := &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		// Verified below, by chain only.
-		InsecureSkipVerify: true, //nolint:gosec // VerifyConnection checks the chain against the run's CA
-		VerifyConnection:   verifyChain(pool),
-	}
+	tcfg := &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool, ServerName: serverName}
 	timeout := 20 * time.Second
 	if d, ok := ctx.Deadline(); ok && time.Until(d) < timeout {
 		timeout = time.Until(d)
@@ -76,20 +74,4 @@ func refused(err error) bool {
 	}
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "authorization violation") || strings.Contains(s, "maximum account active connections")
-}
-
-// verifyChain checks a server certificate chains to pool, without a host
-// name check.
-func verifyChain(pool *x509.CertPool) func(tls.ConnectionState) error {
-	return func(cs tls.ConnectionState) error {
-		if len(cs.PeerCertificates) == 0 {
-			return errors.New("the bus node sent no certificate")
-		}
-		inter := x509.NewCertPool()
-		for _, c := range cs.PeerCertificates[1:] {
-			inter.AddCert(c)
-		}
-		_, err := cs.PeerCertificates[0].Verify(x509.VerifyOptions{Roots: pool, Intermediates: inter})
-		return err
-	}
 }

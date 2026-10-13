@@ -104,6 +104,9 @@ func enrolledUnder(t *testing.T, akp nkeys.KeyPair) *Enrolment {
 	return e
 }
 
+// busName is the bus Service name on testCA's certificate.
+const busName = "imas-dmz-nats-bus.imas-dmz.svc"
+
 func TestBusConnect(t *testing.T) {
 	pool, cert := testCA(t)
 	akp, _ := nkeys.CreateAccount()
@@ -111,20 +114,27 @@ func TestBusConnect(t *testing.T) {
 	c, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
-	if err := BusConnect(c, busNode(t, cert, akp), pool, e); err != nil {
+	if err := BusConnect(c, busNode(t, cert, akp), busName, pool, e); err != nil {
 		t.Fatalf("a sprout of a known account must be accepted: %v", err)
 	}
-	err := BusConnect(c, busNode(t, cert, akp, e.NKeyPub), pool, e)
+	err := BusConnect(c, busNode(t, cert, akp, e.NKeyPub), busName, pool, e)
 	if !errors.Is(err, ErrBusRefused) {
 		t.Fatalf("a revoked sprout must be refused with ErrBusRefused, got %v", err)
 	}
 	other, _ := nkeys.CreateAccount()
-	if err := BusConnect(c, busNode(t, cert, other), pool, e); !errors.Is(err, ErrBusRefused) {
+	if err := BusConnect(c, busNode(t, cert, other), busName, pool, e); !errors.Is(err, ErrBusRefused) {
 		t.Fatalf("a sprout of an account the node lacks must be refused, got %v", err)
 	}
 	otherPool, _ := testCA(t)
-	err = BusConnect(c, busNode(t, cert, akp), otherPool, e)
+	err = BusConnect(c, busNode(t, cert, akp), busName, otherPool, e)
 	if err == nil || errors.Is(err, ErrBusRefused) {
 		t.Fatalf("a node whose certificate the CA did not sign is a connection error, not a refusal: %v", err)
+	}
+	err = BusConnect(c, busNode(t, cert, akp), "other.imas-dmz.svc", pool, e)
+	if err == nil || errors.Is(err, ErrBusRefused) {
+		t.Fatalf("a certificate without the server name is a connection error, not a refusal: %v", err)
+	}
+	if err := BusConnect(c, busNode(t, cert, akp), "", pool, e); err == nil {
+		t.Fatal("no server name must be refused")
 	}
 }

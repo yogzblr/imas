@@ -173,3 +173,13 @@ func TestKubePortForward(t *testing.T) {
 		t.Errorf("a failed forward must say why: %v", err)
 	}
 }
+
+func TestBusServerName(t *testing.T) {
+	p := Pod{Name: "imas-dmz-nats-bus-0", Env: map[string]map[string]string{LoaderContainer: {"IMAS_LOADER_NATS_SERVER_NAME": "imas-dmz-nats-bus.imas-dmz.svc.cluster.local"}}}
+	if n, err := BusServerName(p); err != nil || n != "imas-dmz-nats-bus.imas-dmz.svc.cluster.local" {
+		t.Errorf("%q %v", n, err)
+	}
+	if _, err := BusServerName(Pod{Name: "x"}); err == nil {
+		t.Error("a pod without the loader's server name must be an error")
+	}
+}

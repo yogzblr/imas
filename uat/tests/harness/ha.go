@@ -313,18 +313,32 @@ func (h *HA) BusPods(ctx context.Context) ([]Pod, error) {
 	return Live(pods), err
 }
 
+// BusServerName is the TLS name a bus pod's certificate is checked for
+// when it is dialled on a local address: the one its loader dials its own
+// node with (IMAS_LOADER_NATS_SERVER_NAME, the bus Service's name, which
+// the bus certificate carries).
+func BusServerName(p Pod) (string, error) {
+	if n := p.Env[LoaderContainer]["IMAS_LOADER_NATS_SERVER_NAME"]; n != "" {
+		return n, nil
+	}
+	return "", fmt.Errorf("bus pod %s: the loader has no IMAS_LOADER_NATS_SERVER_NAME", p.Name)
+}
+
 // BusAddr forwards to a bus pod's client port and returns the local
-// address.
-func (h *HA) BusAddr(ctx context.Context, pod Pod) (string, func(), error) {
+// address and the TLS name to verify its certificate for.
+func (h *HA) BusAddr(ctx context.Context, pod Pod) (addr, serverName string, stop func(), err error) {
 	port := pod.Ports[BusContainer]["client"]
 	if port == 0 {
-		return "", nil, fmt.Errorf("bus pod %s has no port named client", pod.Name)
+		return "", "", nil, fmt.Errorf("bus pod %s has no port named client", pod.Name)
+	}
+	if serverName, err = BusServerName(pod); err != nil {
+		return "", "", nil, err
 	}
 	local, stop, err := h.DMZ.PortForward(ctx, DMZNamespace, pod.Name, port)
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
-	return "127.0.0.1:" + strconv.Itoa(local), stop, nil
+	return "127.0.0.1:" + strconv.Itoa(local), serverName, stop, nil
 }
 
 // ConnectEveryBusNode connects e to every bus pod and returns, by pod, nil
@@ -336,11 +350,11 @@ func (h *HA) ConnectEveryBusNode(ctx context.Context, e *Enrolment) (map[string]
 	}
 	out := map[string]error{}
 	for _, p := range pods {
-		addr, stop, err := h.BusAddr(ctx, p)
+		addr, name, stop, err := h.BusAddr(ctx, p)
 		if err != nil {
 			return nil, err
 		}
-		out[p.Name] = BusConnect(ctx, addr, h.Fleet.Env.CAPool, e)
+		out[p.Name] = BusConnect(ctx, addr, name, h.Fleet.Env.CAPool, e)
 		stop()
 	}
 	return out, nil
