@@ -32,7 +32,6 @@ type PubKeyType int
 const (
 	SproutPubNKey PubKeyType = iota
 	FarmerPubNKey
-	CliPubNKey
 )
 
 // sproutMatcher is the shape of a sprout ID: lowercase letters, digits,
@@ -600,8 +599,8 @@ func GetPubNKey(keyType PubKeyType) (string, error) {
 			return certs.GetPubNKey(true)
 		}
 		pubFile = config.NKeyFarmerPubFile
-		// case CliPubNKey:
-		//	pubFile = config.NKeyImasPubFile
+	default:
+		return "", fmt.Errorf("pki: unknown public key type %d", keyType)
 	}
 	pubKeyBytes, err := os.ReadFile(pubFile)
 	if err != nil {

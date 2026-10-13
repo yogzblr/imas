@@ -15,7 +15,7 @@
 #   6. uat/hub/core/install.sh, uat/hub/dmz/install.sh, uat/hub/core/finish.sh
 #      (farmer and saasapi need the DMZ bus) and the DMZ check.sh,
 #      from the release named by --release-tag (core first: the bus needs
-#      core's seeds);
+#      core's trust ConfigMap, the loader's seed and the accounts bucket);
 #   7. refresh each sprout's package metadata (apt-get update, dnf makecache),
 #      then uat/enroll/enroll.sh: tenants 1 and 2, and the published
 #      imas-sprout package on every sprout over SSH.

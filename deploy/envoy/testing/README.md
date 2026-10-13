@@ -30,8 +30,11 @@ the sprout talks only to Envoy.
   farmer. A validly signed token for another sprout passes Envoy and is
   refused by farmer's scoping.
 
-OpenBao Transit is mocked (`internal/gatewayjwt/transittest`). Both tests
-are skipped unless `IMAS_TEST_ENVOY_BIN` is set:
+OpenBao Transit is mocked (`internal/gatewayjwt/transittest`). These
+tests, and `internal/envoytest/busy_test.go`, are skipped unless
+`IMAS_TEST_ENVOY_BIN` is set. CI sets it: `.github/workflows/ci.yml`
+copies the binary out of the Envoy image the nats chart pins
+(`envoy.image.tag`). By hand:
 
 ```
 curl -Lo envoy https://github.com/envoyproxy/envoy/releases/download/v1.34.1/envoy-1.34.1-linux-x86_64

@@ -36,6 +36,18 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 60
+      # Valkey, the image version the farmer chart's valkey subchart
+      # (0.12.0) runs, for TestValkeyLimiterRealServer
+      # (SAASAPI_TEST_VALKEY_ADDR, internal/saasapi).
+      valkey:
+        image: valkey/valkey:9.1.2
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
 
     steps:
       - name: Checkout
@@ -74,15 +86,81 @@ jobs:
           helm dependency build deploy/helm/farmer
           helm dependency build deploy/helm/nats
 
+      # The real-Envoy tests (internal/envoytest, and the *ThroughRealEnvoy
+      # tests of internal/api and internal/pki) run the shipped envoy.yaml in
+      # the Envoy the nats chart pins (envoy.image.tag in
+      # deploy/helm/nats/values.yaml); without IMAS_TEST_ENVOY_BIN they skip.
+      - name: Extract the chart's Envoy binary
+        run: |
+          set -euo pipefail
+          tag=$(sed -n '/repository: envoyproxy\/envoy/{n;s/^ *tag: *//p}' deploy/helm/nats/values.yaml)
+          test -n "$tag"
+          id=$(docker create "envoyproxy/envoy:$tag")
+          mkdir -p "$RUNNER_TEMP/envoy"
+          docker cp "$id:/usr/local/bin/envoy" "$RUNNER_TEMP/envoy/envoy"
+          docker rm "$id"
+          "$RUNNER_TEMP/envoy/envoy" --version
+          echo "IMAS_TEST_ENVOY_BIN=$RUNNER_TEMP/envoy/envoy" >> "$GITHUB_ENV"
+
+      # The real-OpenBao tests (internal/certs, internal/gatewayjwt,
+      # internal/pki, internal/pki/natskeys, the farmer chart's Transit
+      # policy tests, internal/ingredients/sdb/openbao) against OpenBao
+      # 2.7.1 dev servers, the version the charts pin: one on plain HTTP and
+      # one on TLS for sdb. Without their addresses they skip. The tokens are
+      # throwaways for this job's servers.
+      - name: Start OpenBao dev servers
+        env:
+          OPENBAO_VERSION: "2.7.1"
+          OPENBAO_SHA256: "0e2f1ce10d124e03112b50dd2fbec6b78003783253bc3a91587938f39d1e2243"
+        run: |
+          set -euo pipefail
+          tarball="openbao_${OPENBAO_VERSION}_linux_amd64.tar.gz"
+          cd "$RUNNER_TEMP"
+          curl -fsSL --retry 3 -o "$tarball" \
+            "https://github.com/openbao/openbao/releases/download/v${OPENBAO_VERSION}/${tarball}"
+          echo "${OPENBAO_SHA256}  ${tarball}" | sha256sum --check --strict
+          mkdir -p bin bao-tls
+          tar -xzf "$tarball" -C bin bao
+          token="$(openssl rand -hex 24)"
+          sdb_token="$(openssl rand -hex 24)"
+          echo "::add-mask::$token"
+          echo "::add-mask::$sdb_token"
+          nohup bin/bao server -dev -dev-root-token-id="$token" \
+            -dev-listen-address=127.0.0.1:8200 > bao.log 2>&1 &
+          nohup bin/bao server -dev -dev-tls -dev-root-token-id="$sdb_token" \
+            -dev-tls-cert-dir="$RUNNER_TEMP/bao-tls" \
+            -dev-listen-address=127.0.0.1:8201 > bao-tls.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8200/v1/sys/health > /dev/null &&
+              [ -f bao-tls/vault-ca.pem ] &&
+              curl -fsS --cacert bao-tls/vault-ca.pem https://127.0.0.1:8201/v1/sys/health > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8200/v1/sys/health > /dev/null
+          curl -fsS --cacert bao-tls/vault-ca.pem https://127.0.0.1:8201/v1/sys/health > /dev/null
+          {
+            echo "IMAS_TEST_OPENBAO_ADDR=http://127.0.0.1:8200"
+            echo "IMAS_TEST_OPENBAO_TOKEN=$token"
+            echo "IMAS_CERTS_TEST_OPENBAO_ADDR=http://127.0.0.1:8200"
+            echo "IMAS_CERTS_TEST_OPENBAO_TOKEN=$token"
+            echo "IMAS_TEST_SDB_OPENBAO_ADDR=https://127.0.0.1:8201"
+            echo "IMAS_TEST_SDB_OPENBAO_TOKEN=$sdb_token"
+            echo "IMAS_TEST_SDB_OPENBAO_CACERT=$RUNNER_TEMP/bao-tls/vault-ca.pem"
+          } >> "$GITHUB_ENV"
+
       # IMAS_REQUIRE_HELM=1 turns every chart-test skip (no helm, charts/
       # not populated, a missing tool) into a failure, so this job can't
       # pass without having rendered the charts. IMAS_TEST_MYSQL_ROOT_DSN
       # runs the MySQL tests against the pxc service; set, they fail rather
-      # than skip if it does not answer.
+      # than skip if it does not answer. SAASAPI_TEST_VALKEY_ADDR runs the
+      # Valkey rate limiter test against the valkey service.
       - name: Test with race detection and coverage
         env:
           IMAS_REQUIRE_HELM: "1"
           IMAS_TEST_MYSQL_ROOT_DSN: "root:imas-ci@tcp(127.0.0.1:3306)/"
+          SAASAPI_TEST_VALKEY_ADDR: "127.0.0.1:6379"
         run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Upload coverage to Codecov

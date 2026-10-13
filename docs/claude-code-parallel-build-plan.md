@@ -2222,7 +2222,8 @@ runs at tier smoke with keep_hours set, widening the tier as it goes green.
   for the runner and the Keycloak issuer.
 - Install order (owner decision, 2026-10-06): core hub first, then the DMZ hub, because the bus
   needs core's seeds when it starts; then enrolment and the tests. Since P21 slice 1 the bus holds
-  no seed: it needs core's public trust ConfigMap imas-nats-trust (written by the farmer chart's
+  no trust chain or farmer seed (since slice 2 only its account loader's SYS user seed, from core's
+  seeds.sh): it needs core's public trust ConfigMap imas-nats-trust (written by the farmer chart's
   OpenBao bootstrap Job from Transit keys), which uat/hub/dmz/install.sh copies from core. The
   order stands.
 - Access interface (UAT.1 writes both scripts under uat/access; every other brief and the local

@@ -810,12 +810,9 @@ func TestGetPubNKey_MissingFile(t *testing.T) {
 	}
 }
 
-func TestGetPubNKey_CliKeyType(t *testing.T) {
-	// CliPubNKey is not yet implemented — pubFile will be empty string,
-	// which should fail with a file read error.
-	_, err := GetPubNKey(CliPubNKey)
-	if err == nil {
-		t.Error("expected error for unimplemented CliPubNKey type")
+func TestGetPubNKey_UnknownKeyType(t *testing.T) {
+	if _, err := GetPubNKey(PubKeyType(99)); err == nil {
+		t.Error("expected error for an unknown key type")
 	}
 }
 

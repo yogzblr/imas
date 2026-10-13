@@ -105,11 +105,12 @@ func main() {
 // pki.ConfigureBusNats reads only the public trust directory and seeds the
 // resolver with nothing but its SYS Account JWT, which any SYS Account JWT
 // core signs outranks; the bus holds no trust chain key and mints nothing
-// (internal/pki/busauth.go). It learns every Account
-// from core, which pushes them all whenever its SYS connection connects
-// or reconnects and pushes each change as it happens, over the network to
-// $SYS.REQ.CLAIMS.UPDATE; a clustered node also pulls them from its peers
-// (fence.go). No restart or local reload is needed on this side for an
+// (internal/pki/busauth.go). Its account loader sidecar
+// (cmd/farmerbus-loader) loads every Account from the accounts bucket at
+// start and on each change; core also pushes them all whenever its SYS
+// connection connects or reconnects and pushes each change as it happens,
+// over the network to $SYS.REQ.CLAIMS.UPDATE, and a clustered node also
+// pulls them from its peers (fence.go). No restart or local reload is needed on this side for an
 // ACL change.
 func RunNATSServer() {
 	opts, sysUser := pki.ConfigureBusNats()

@@ -118,7 +118,8 @@ uat/hub/dmz/install.sh --kubeconfig dmz.kubeconfig --endpoints endpoints.json \
    it by hand or pipeline; `deploy/helm/nats/README.md`, "NATS trust").
    The bus holds no trust chain seed: the operator, operator-signing, SYS
    account and tenant keys are Transit keys on core, and this single-node
-   bus needs no fence user, so no seed of any kind enters the DMZ. The
+   bus needs no fence user, so no trust chain or farmer seed enters the
+   DMZ; the only seed there is the account loader's SYS user seed (below). The
    trust comes from core: either `--trust-dir` (a directory with
    `operator.jwt`, `operator.pub`, `operator-signing.pub`,
    `sys-account.pub`, `sys-account.jwt` and, if core minted them,
@@ -354,7 +355,8 @@ helm, bash or jq fails the render tests instead):
   the order of the steps; no registry credential passed to helm, even
   with a token in the environment; an exact-version `helm pull` and no
   `--devel`; only the trust ConfigMap's public keys read from core and put
-  in the DMZ ConfigMap unchanged, and no seed Secret read or made; every
+  in the DMZ ConfigMap unchanged, and no farmer or trust chain seed Secret
+  read or made (only the loader's); every
   DMZ call carrying the DMZ kubeconfig. `TestInstallRefusesBadTrust`: an
   incomplete trust, a seed in it, or a chain that does not hang together is
   refused from each source, before anything reaches the cluster.
@@ -399,9 +401,11 @@ and 8443, which depends on UAT.2's range.
 - **Services through chart values:** "Accept install.sh's own manifests for
   now. The bus Service carries both 5406 and 5407, and the 8442–8443 range
   can't host a node port for 5407. A deploy/helm/nats change can be a
-  follow-up task later". So `install.sh` keeps creating both Services; the
-  `deploy/helm/nats` change (node port values, and a bus Service that can
-  expose only the client port) is a later follow-up outside this brief.
+  follow-up task later". So `install.sh` keeps creating both Services.
+  The nats chart has since gained the values for it (`bus.coreService`, a
+  client-port-only bus Service, and `envoy.service.nodePort`); the UAT
+  keeps `install.sh`'s Services as the owner decided, and the chart's own
+  Services stay ClusterIP in `values-uat.yaml`.
 
 ## Open questions
 

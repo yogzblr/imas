@@ -193,10 +193,12 @@ trust-chain seed. It signs through OpenBao Transit as
 of the NATS-signing power farmer already has, and it's needed to sign the
 JWT. What *is* new is the KV write, which is why that identity is kept
 apart from farmer's.
-The Job also mounts the SaaS API seed only because
-`EnsureSaaSAPICredential` loads it to derive the public key. Minting
-needs only the public key, so that mount is a candidate to drop later
-(see the PR's follow-ups).
+The Job also mounts the SaaS API seed because
+`EnsureSaaSAPICredential` loads it to derive the public key and to check
+that it is a user key. The seed never leaves the pod: only the JWT and
+the public key are published. The mount stays: a separate public-key
+input would be a second copy of the key that could disagree with the
+seed farmer and saasapi actually use.
 
 ### When to run it: automatically after every farmer deployment
 

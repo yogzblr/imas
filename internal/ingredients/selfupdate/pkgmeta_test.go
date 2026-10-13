@@ -167,10 +167,10 @@ func TestApply_RefusesPackageMetadataMismatch(t *testing.T) {
 		"with an epoch":            func() fakePkg { p := genuinePkg(testTarget); p.version = "1:" + p.version; p.epoch = "1"; return p }(),
 	} {
 		for _, pc := range platformCases {
+			if (name == "prerelease of the target" || name == "with an epoch") && pc.goos == "windows" {
+				continue // an MSI ProductVersion carries no prerelease or epoch
+			}
 			t.Run(name+"/"+pc.name, func(t *testing.T) {
-				if (name == "prerelease of the target" || name == "with an epoch") && pc.goos == "windows" {
-					t.Skip("an MSI ProductVersion carries no prerelease or epoch")
-				}
 				f := newFixture(t)
 				pc.setup(t, f)
 				f.pkgMeta[sha(pkgBytes)] = meta
