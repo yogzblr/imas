@@ -7,8 +7,8 @@
 # "rustfs" (P13 retired the old "minio" names).
 # The volume is imas-uat-rustfs-data: a volume the MinIO it replaced wrote
 # (uid 1000) is not writable by RustFS (uid 10001), so it must not be reused.
-# The S3 port is also a hostPort (rustfs.hostPort, 9000): the DMZ bus's
-# account loader reads the accounts bucket at <core private IP>:9000 with a
+# The S3 port is also a hostPort (core.accountsStorePort, 9000): the DMZ
+# bus's account loader reads the accounts bucket at <core private IP>:9000 with a
 # read-only credential scoped to that bucket (design D22). The rustfs
 # NetworkPolicy admits the DMZ private address on it, and nothing else from
 # outside the cluster.
@@ -75,7 +75,7 @@ spec:
             - name: RUSTFS_OBS_LOG_DIRECTORY
               value: /logs
           ports:
-            - { name: s3, containerPort: 9000, hostPort: {{ .Values.rustfs.hostPort }} }
+            - { name: s3, containerPort: 9000, hostPort: {{ .Values.core.accountsStorePort }} }
           readinessProbe:
             httpGet: { path: /health/ready, port: s3 }
             periodSeconds: 10

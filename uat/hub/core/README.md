@@ -21,7 +21,7 @@ used by a release. Plan: `docs/claude-code-parallel-build-plan.md`, section 4h.
 | Piece | Where | What |
 |---|---|---|
 | farmer, saasapi, PXC (1 node, 1 HAProxy), Valkey (1), OpenBao (1, standalone, single-node raft storage) | namespace `imas-core`, release `imas-core` | the **published** `deploy/helm/farmer` chart of `release_tag`, with `values/farmer-uat.yaml` and a run-specific values file from `gen-values.sh` |
-| **RustFS** (`imas-uat-rustfs`) | `imas-uat` | the object store, one pod, pinned image, root credential generated per run in a Secret. Its S3 port is also hostPort 9000 (`rustfs.hostPort`), where the DMZ bus's account loader reads the accounts bucket. Apache-2.0. It replaced MinIO (AGPL-3.0); the UAT-only exception is withdrawn (requirements.md item 21). With `object_store.mode` `external` nothing is deployed here (see "External S3"). |
+| **RustFS** (`imas-uat-rustfs`) | `imas-uat` | the object store, one pod, pinned image, root credential generated per run in a Secret. Its S3 port is also hostPort 9000 (`core.accountsStorePort`), where the DMZ bus's account loader reads the accounts bucket. Apache-2.0. It replaced MinIO (AGPL-3.0); the UAT-only exception is withdrawn (requirements.md item 21). With `object_store.mode` `external` nothing is deployed here (see "External S3"). |
 | **Keycloak** | `imas-uat` | Apache-2.0, image pinned by tag and digest (Docker Hub's `keycloak/keycloak`, the project's mirror of quay.io), **dev style**: one replica, `start-dev`, the **embedded H2 database** (`dev-file`) on a 1 GiB PVC so a pod restart keeps the tenant bindings. Realm `imas-uat` imported from `chart/files/imas-uat-realm.json`. |
 | edge proxy | `imas-uat` | one Envoy (Apache-2.0, the nats chart's version, pinned by digest as the DMZ's Envoy is), hostPorts only (owner decision 2026-10-06; there is no node port mode, the core node port range being 30000-32767), on the core FQDN: 443 for saasapi (`/v1/`) and Keycloak (`/realms/imas-uat/` only, never `/admin` or the master realm), and a TCP passthrough on 5405 to farmer's API for the DMZ's Envoy |
 | the DMZ bus, as seen from core | no object of its own | the farmer chart is installed with `bus.host` set to the DMZ's private name (`dmz.uat.imas.internal` by default, read from the endpoints file by `gen-values.sh`; UAT.1's Private DNS zone), `bus.port` the DMZ's bus node port 8442 and `bus.egressCIDRs` the DMZ private address, so `farmerbusurl` and `SAASAPI_NATS_URL` are `tls://dmz.uat.imas.internal:8442` and both verify that name, which the DMZ's bus certificate carries as a SAN. (This replaces the ExternalName Service of earlier versions.) |
@@ -42,7 +42,7 @@ specific, so UAT.8's local rig runs them unchanged:
 install.sh   <kubeconfig> <endpoints.json> <state-dir> <release_tag>
 finish.sh    <kubeconfig> <endpoints.json> <state-dir> <release_tag>   (after the DMZ hub)
 check.sh     <kubeconfig> <endpoints.json> <state-dir>
-validate-rustfs.sh <kubeconfig> <endpoints.json> <state-dir>
+validate-object-store.sh <kubeconfig> <endpoints.json> <state-dir>
 operator-release.sh <kubeconfig> <endpoints.json> <state-dir> verify <release_tag>
 operator-release.sh <kubeconfig> <endpoints.json> <state-dir> post-altered <scratch_version>
 bind-tenant.sh <kubeconfig> <endpoints.json> <state-dir> <1|2> <tenant_id>
@@ -51,7 +51,7 @@ token.sh     <kubeconfig> <endpoints.json> <state-dir> <t1-admin|t1-reader|t2-ad
 ```
 
 `openbao-bootstrap.sh`, `seeds.sh`, `admin-keys.sh`, `rustfs-setup.sh`,
-`validate-rustfs.sh` and `saasapi-secrets.sh` are the steps `install.sh`
+`validate-object-store.sh` and `saasapi-secrets.sh` are the steps `install.sh`
 runs, each runnable on its own with the same arguments. `gen-values.sh`
 reads files only. `operator-release.sh` is saasapi's operator API from
 outside the cluster: `verify` is `finish.sh`'s registration check, and
@@ -164,13 +164,15 @@ openssl, go (to build `nk`), tar, sha256sum, and this repository checked out.
    `--aws-sigv4` against RustFS's admin API), so no client image is pulled
    and the RustFS root credential never leaves its pod.
    saasapi's startup credential check then proves the saasapi user is
-   limited. Then **`validate-rustfs.sh`** proves every scoped credential:
+   limited. Then **`validate-object-store.sh`** proves every scoped credential:
    with each user's own key it puts, gets and lists in the recipe, job,
    sprout JWT and accounts buckets and expects 200 where the policy allows
    the call and 403 where it does not (32 calls; probe objects under a
    per-run prefix, deleted with the root credential afterwards). Any
    mismatch fails the install. (Checked against RustFS 1.0.1: 32 of 32, and
-   a reader given the writer's policy is caught.)
+   a reader given the writer's policy is caught.) On an HA core hub this
+   step makes Versity Gateway's Secrets instead, and the same validation
+   runs through the gateway after step 7 (see "HA core hub").
 7. **The farmer chart** (`helm upgrade --install`, no `--wait`, as the chart
    README says for a first install), and **while it runs**
    `openbao-bootstrap.sh`: waits for OpenBao's pod, `bao operator init`
@@ -243,12 +245,17 @@ checks the trust ConfigMap; `check.sh` then confirms it is unchanged
   `ca_file`, the Keycloak `issuer`, `jwks_url`, `token_url`, realm,
   audience, test client id, role names and tenant claim, the four users
   with their tenant and roles, `tenants` (filled by `bind-tenant.sh`), the
-  bootstrap admin's public keys, and where the sensitive directory is.
+  bootstrap admin's public keys, where the sensitive directory is, and
+  `topology` (P24): `ha`, `core_nodes`, `dmz_nodes`, `core_address` and
+  `dmz_address` (the hubs' private addresses), `object_store` (`rustfs`,
+  `external` or `versity`) and `valkey_primary` (the pod whose node must
+  not be stopped while Valkey writes are needed).
 - `nats-trust.json`: the trust ConfigMap's data and `resourceVersion` as the
   first install left them (public data), which `check.sh` compares against.
 - `uat-ca.crt` (and the same file as `uat-ca.pem`, the name `uat/tests`
   reads), `admin.json` (public keys), `bus-loader-user.pub` (the DMZ bus
-  loader's NKey public key, `natsTrust.busLoaderUserPub`).
+  loader's NKey public key, `natsTrust.busLoaderUserPub`) and, with several
+  DMZ nodes, `bus-fence-user.pub` (`natsTrust.busFenceUserPub`).
 
 `<state>/core/sensitive/` (**SENSITIVE**, 0700; keep only as a sensitive
 artifact of the run):
@@ -263,14 +270,74 @@ artifact of the run):
   passwords, the Keycloak master admin, and pointers to the files below;
 - `admin.json` and `admin-home/.config/imas/` (the bootstrap admin's NKey
   private key and CLI box key; run the CLI with `HOME=<home>`);
-- `openbao-init.json`, `openbao-root-token`, `openbao-unseal-keys.json`,
-  `openbao-bootstrap-token` (the last token handed to the chart's Job;
-  revoked once the Job has run);
+- `openbao-init.json`, `openbao-root-token`, `openbao-unseal-keys.json`
+  (`openbao-recovery-keys.json` and `openbao-seal.key`, the static seal key,
+  on an HA core hub), `openbao-bootstrap-token` (the last token handed to the
+  chart's Job; revoked once the Job has run);
 - `seeds/` (unless `UAT_SEEDS_DIR` points elsewhere; `bus-loader-user.nk`
-  is the DMZ install's `--loader-seed`), `keycloak/`, `rustfs/`, `s3/`
-  (`s3/accounts-reader/` is the DMZ install's `--accounts-reader-dir`),
+  is the DMZ install's `--loader-seed`, `bus-fence-user.nk` its
+  `--fence-seed` with several DMZ nodes), `keycloak/`, `rustfs/`, `s3/`
+  (`s3/accounts-reader/` is the DMZ install's `--accounts-reader-dir`;
+  `s3/versity-root/` the gateway's root credential on an HA core hub),
+  `azure-blob/` (HA run: the storage account's name and key, written by the
+  workflow),
   `internal-auth-secret`, `saasapi-operator-token` (the operator plane's
   bearer token).
+
+## HA core hub
+
+When the endpoints file lists several core nodes (`core.nodes`, written by
+`uat/k0s` from tofu's `node_names`; the workflow's `hub_nodes` 3), the same
+scripts install the HA layout of brief H4 (P24 items 3 and 4); no option
+selects it. `lib/common.sh` reads the layout (`CORE_NODE_COUNT`,
+`DMZ_NODE_COUNT`, every node's address, and each hub's private address,
+`api_address`: the internal load balancer's) and:
+
+- **Values.** `farmer_values_files` adds `values/values-ha.yaml` after
+  `values/farmer-uat.yaml`: farmer, saasapi and Versity Gateway 3 replicas
+  spread one per node (maxSkew 1, `DoNotSchedule`) with PodDisruptionBudgets
+  (farmer `minAvailable` 2); PXC 3 nodes and 3 HAProxy with no
+  `unsafeFlags`; OpenBao 3 raft pods (`retry_join` to each pod's headless
+  name, `setNodeId`, each pod its own `api_addr`) with the static seal;
+  Valkey's replicated mode (a primary, pod 0, and 2 replicas); the stateful
+  volumes on `local-path`; Versity Gateway on, `objectStore.endpoint`
+  empty. `gen-values.sh` points the bus egress at the DMZ's private address,
+  and with several DMZ nodes sets `bus.expectedNodes` and
+  `natsTrust.busFenceUserPub` (from `seeds.sh`'s `bus-fence-user.pub`).
+- **The UAT-only chart** (`extras_set_args`): one edge per core node
+  (spread, `maxSurge` 0 for the hostPorts, a PDB), farmer's certificate for
+  every core address, the policies naming the DMZ's nodes as sources and its
+  private address as the bus's destination, the Azure probe source
+  (168.63.129.16) on farmer's API and the accounts store, and instead of
+  RustFS the edge's TCP passthrough on 9000 to Versity Gateway for the DMZ
+  bus's loader (Versity's policy lets the edge in).
+- **OpenBao.** `install.sh` makes the static seal key once (`openssl rand
+  32`, Secret `imas-uat-openbao-seal`, key `seal.key`). `openbao-bootstrap.sh`
+  initialises pod 0 with recovery keys (3 shares, threshold 2), keeps them and
+  the root token like the single-node run's unseal keys (Secret
+  `imas-uat-openbao-unseal`, keys `recovery-keys.json` and `root-token`),
+  waits for every pod unsealed and every pod a raft voter, and runs the
+  Transit setup and the bootstrap token on the active node. Every pod
+  unseals itself on every start, so a restarted or rescheduled pod needs no
+  script. **UAT ONLY**: the seal key sits in a Secret next to the data.
+- **Versity Gateway.** `install.sh` makes its Secrets before the chart:
+  `imas-uat-versity-azure` (`account-name`, `account-key`, from
+  `sensitive/azure-blob/`, which the workflow writes from tofu's
+  `object_store` outputs; missing files stop the install),
+  `imas-uat-versity-root` (generated) and the four users' pairs (the same
+  files and Secrets as RustFS's, plus `imas-uat-s3-accounts-reader`, the
+  gateway's copy of the DMZ reader's pair). After the chart, whose
+  `createBuckets` Job made the buckets and policies,
+  `validate-object-store.sh` runs its 32 probes through `kubectl
+  port-forward` to the gateway's Service and cleans up with the gateway's
+  root credential.
+- **Waits and checks.** `install.sh` waits for every replica (Valkey as a
+  StatefulSet, the gateway's rollout); `check.sh` adds, per workload, the
+  replica count and one pod per node, every OpenBao pod unsealed by the
+  static seal, and three raft voters with a leader.
+
+The local volumes and what a stopped node means for the stateful services
+are in `uat/README.md`, "HA run".
 
 ## Keycloak, tokens and tenants
 
@@ -398,13 +465,20 @@ per run that is not the root token, no token or key in argv or output; and
 `check.sh`'s T4 probe, `openbao_t4`, against the chart's own policy files:
 a live bootstrap token, the ephemeral policy and an exportable key fail,
 the farmer and publisher policies cannot sign with the operator key); and
+`openbao-bootstrap.sh` on an HA core hub against **three real local OpenBao
+servers** with the static seal and `retry_join` (pod 0 initialised with
+recovery keys, three unsealed voters, the gateway key read through every
+pod, a restarted pod unsealing itself, the root token restored from the
+Secret); `seeds.sh` with three DMZ nodes (the fence user's seed);
 `test/finish_test.sh`: `finish.sh` and `operator-release.sh` against stub
 kubectl, helm and curl (a failed registration Job fails it with the Job's
 logs and without asking the operator API; no hook, a Job left failed or
 unfinished, a 201, a 409, another release's chart or a missing package fail
-it; the token never in argv; `post-altered`'s body); `test/rustfs_test.sh`:
-`validate-rustfs.sh` against a curl answering with the UAT policies, and two
-deliberate policy holes it must name; and
+it; the token never in argv; `post-altered`'s body);
+`test/object_store_test.sh`: `validate-object-store.sh` against a curl
+answering with the UAT policies, for RustFS (in its pod) and for Versity
+Gateway (through the port-forward), and the deliberate policy holes it must
+name; and
 `go test ./uat/hub/core/` (which also runs those two scripts, shellcheck and
 `status_line`), which renders `deploy/helm/farmer` with
 `values/farmer-uat.yaml` plus `gen-values.sh`'s output, and `chart/` with
@@ -424,7 +498,15 @@ certificate SANs; policies naming only the DMZ address;
 the edge routes; with a release-stamped copy of the chart, the operator
 plane on, the registration Job wired to the operator TLS Secret's `ca.crt`
 and the token Secret, none rendered with `register=false`, and both fleet
-update flags on for `IMAS_UAT_DISPATCH_FLAGS=on` and off otherwise). It renders the subcharts too when `helm dependency build`
+update flags on for `IMAS_UAT_DISPATCH_FLAGS=on` and off otherwise), and
+the HA renders (`core_ha_test.go`, with `uat/k0s`'s HA endpoints: the
+values files follow the node count; `gen-values.sh`'s HA values and its
+refusals; the farmer chart with `values/values-ha.yaml`: replicas, spread,
+PDBs, no PVC for farmer, saasapi and the gateway, PXC 3 without
+`unsafeFlags`, OpenBao's three peers and static seal, Valkey replicated,
+Versity on with install.sh's Secrets and as the S3 endpoint, the fence
+user's key; `chart/` with one edge per node, the passthrough to the
+gateway and the policies naming every DMZ node and the probe). It renders the subcharts too when `helm dependency build`
 has filled `deploy/helm/farmer/charts` (CI does), and skips without helm
 unless `IMAS_REQUIRE_HELM=1`.
 
@@ -445,7 +527,8 @@ unless `IMAS_REQUIRE_HELM=1`.
   public trust ConfigMap `imas-nats-trust` from here, and its loader gets
   `--loader-seed <seeds>/bus-loader-user.nk` and `--accounts-reader-dir
   <sensitive>/s3/accounts-reader` from this hub's state directory. It reads
-  the accounts bucket at `<core private IP>:9000` (RustFS's hostPort). Envoy's `farmer_api` upstream is
+  the accounts bucket at `<core private address>:9000` (RustFS's hostPort,
+  or on an HA core hub the edge's passthrough to Versity Gateway). Envoy's `farmer_api` upstream is
   `core.uat.imas.internal:5405` (or the core FQDN or private IP) and
   verifies against the UAT CA; farmer's certificate carries all three.
 - **UAT.4**: creates tenants 1 and 2 with `t1-admin` and `t2-admin` tokens
@@ -471,6 +554,10 @@ the DMZ's own Secret. Once the trust ConfigMap carries
 refuses to regenerate a missing loader seed (restore it from the DMZ
 Secret `imas-bus-loader-sys-user`, key `user.nk`) and refuses a seed whose
 public key is not the one that JWT names.
+With several DMZ nodes (a clustered bus) a fifth exists, the bus's fence
+user (`bus-fence-user.nk`, no core Secret; the DMZ install's
+`--fence-seed`, Secret `imas-bus-fence-user` there), handled the same way
+against `bus-fence-user.jwt`.
 
 ## Open points
 

@@ -11,7 +11,7 @@
 # user for farmer (get, put and list on that bucket only; Secret
 # imas-farmer-accounts-writer in the core namespace) and a reader user for
 # the DMZ bus's loader sidecar (get and list only), which reaches RustFS
-# from the DMZ on its hostPort (chart/, rustfs.hostPort; the one DMZ-to-core
+# from the DMZ on its hostPort (chart/, core.accountsStorePort; the one DMZ-to-core
 # object store path). The reader's credential is left in
 # <state-dir>/core/sensitive/s3/accounts-reader for uat/hub/dmz/install.sh
 # --accounts-reader-dir: it belongs in the DMZ cluster, never in core's. Neither accounts user can reach the recipe or
@@ -40,11 +40,10 @@ parse_common_args "rustfs-setup.sh <kubeconfig> <endpoints.json> <state-dir> <sa
 saasapi_policy_src="$4"
 need_cmd kubectl jq
 
-# The accounts bucket's two users (docs/briefs/P21-slice2-bus-loader.md
-# §4.1, §4.6). The bucket and the writer's Secret are ACCOUNTS_BUCKET and
-# S3_ACCOUNTS_WRITER_SECRET in lib/common.sh (the charts' accountStore).
-S3_ACCOUNTS_WRITER_USER=imas-farmer-accounts
-S3_ACCOUNTS_READER_USER=imas-bus-accounts-reader
+# The accounts bucket's two users are S3_ACCOUNTS_WRITER_USER and
+# S3_ACCOUNTS_READER_USER, its bucket and writer Secret ACCOUNTS_BUCKET and
+# S3_ACCOUNTS_WRITER_SECRET (lib/common.sh; docs/briefs/
+# P21-slice2-bus-loader.md §4.1, §4.6).
 
 grep -q RECIPE_BUCKET "$saasapi_policy_src" || die "$saasapi_policy_src has no RECIPE_BUCKET placeholder"
 

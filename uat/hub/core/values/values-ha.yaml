@@ -1,0 +1,210 @@
+# deploy/helm/farmer values for the HA core hub (P24, brief
+# H-azure-next-runs.md H4). UAT ONLY. An overlay: install.sh passes it after
+# values/farmer-uat.yaml when the core hub has more than one node (the
+# endpoints file's core.nodes; the workflow input hub_nodes 3), and before
+# the run's own values (gen-values.sh). The single-node run never reads it.
+# FLAG FOR SECURITY REVIEW: OpenBao unseals itself with a static seal key
+# held in a Kubernetes Secret (UAT only; see openbao below).
+#
+# Layout on three controller+worker k0s nodes (uat/k0s, etcd):
+#   - stateless, three replicas spread one per node (maxSkew 1,
+#     DoNotSchedule), with a PodDisruptionBudget: farmer, saasapi and
+#     Versity Gateway. None carries a volume.
+#   - stateful, three replicas, each on its own node, on the nodes' local
+#     volumes (StorageClass local-path, uat/k0s): PXC (3 nodes, 3 HAProxy),
+#     OpenBao (3-node raft), Valkey (a primary and two replicas). A pod whose
+#     node is stopped stays down, with its volume, until the node returns;
+#     the replicas on the other nodes serve meanwhile (uat/README.md, "HA
+#     run").
+#   - the object store: Versity Gateway in front of the run's Azure Blob
+#     account (design D18; uat/tofu object-store.tf), instead of RustFS.
+# Names must match lib/common.sh (core_test.go checks them).
+
+farmer:
+  replicaCount: 3
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: farmer
+          app.kubernetes.io/instance: imas-core
+          app.kubernetes.io/component: farmer
+      # Count this revision's pods only, so a rolling update can place its
+      # surge pod (maxUnavailable 0) next to the old ones.
+      matchLabelKeys: [pod-template-hash]
+  # Two of three stay up through a voluntary disruption (a node drain).
+  pdb:
+    enabled: true
+    minAvailable: 2
+
+saasapi:
+  replicaCount: 3
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: farmer
+          app.kubernetes.io/instance: imas-core
+          app.kubernetes.io/component: saasapi
+      matchLabelKeys: [pod-template-hash]
+  pdb:
+    enabled: true
+    maxUnavailable: 1
+
+# OpenBao: three raft nodes (the subchart's HA mode with integrated storage)
+# instead of the single standalone node. Pod N is node imas-core-openbao-N
+# (setNodeId); each joins the others through retry_join on the headless
+# Service. Every pod unseals itself, on every start, with the static seal
+# (OpenBao 2.4 and later): an AES-256 key in Secret imas-uat-openbao-seal,
+# which install.sh generates once and keeps (<state>/core/sensitive/
+# openbao-seal.key). openbao-bootstrap.sh initialises pod 0 once (recovery
+# keys, not unseal keys) and waits for all three to be unsealed raft voters.
+# The single-node run unseals with Shamir keys instead (values/
+# farmer-uat.yaml, openbao-bootstrap.sh). UAT ONLY: anyone who can read the
+# seal Secret and a raft volume can read everything in this OpenBao
+# (docs/design/imas-openbao-signing-design.md, "Static seal (test)").
+openbao:
+  server:
+    standalone:
+      enabled: false
+    ha:
+      enabled: true
+      replicas: 3
+      # null: each pod's own addresses (the subchart's defaults: the pod IP
+      # for api_addr, https://<pod>.imas-core-openbao-internal:8201 for
+      # cluster_addr), not pod 0's, which values/farmer-uat.yaml sets for the
+      # single node.
+      apiAddr: null
+      clusterAddr: null
+      raft:
+        enabled: true
+        setNodeId: true
+        config: |
+          ui = true
+
+          listener "tcp" {
+            tls_disable     = 1
+            address         = "[::]:8200"
+            cluster_address = "[::]:8201"
+          }
+
+          storage "raft" {
+            path = "/openbao/data"
+
+            retry_join {
+              leader_api_addr = "http://imas-core-openbao-0.imas-core-openbao-internal.imas-core.svc:8200"
+            }
+            retry_join {
+              leader_api_addr = "http://imas-core-openbao-1.imas-core-openbao-internal.imas-core.svc:8200"
+            }
+            retry_join {
+              leader_api_addr = "http://imas-core-openbao-2.imas-core-openbao-internal.imas-core.svc:8200"
+            }
+          }
+
+          seal "static" {
+            current_key_id = "imas-uat-1"
+            current_key    = "file:///openbao/seal/seal.key"
+          }
+
+          service_registration "kubernetes" {}
+      disruptionBudget:
+        enabled: true
+        maxUnavailable: 1
+    # Clients reach only unsealed pods (a standby forwards to the active one).
+    service:
+      publishNotReadyAddresses: false
+    dataStorage:
+      storageClass: local-path
+    volumes:
+      - name: seal
+        secret:
+          secretName: imas-uat-openbao-seal
+          # Readable by the pod's group (fsGroup), not world.
+          defaultMode: 0440
+    volumeMounts:
+      - name: seal
+        mountPath: /openbao/seal
+        readOnly: true
+
+# PXC: three nodes and three HAProxy, the operator's supported minimum, so
+# no unsafeFlags (null removes the chart's eval flags for one node). The
+# operator keeps each on its own node (antiAffinityTopologyKey
+# kubernetes.io/hostname, the pxc-db default) with a PodDisruptionBudget.
+pxc:
+  unsafeFlags: null
+  pxc:
+    size: 3
+    persistence:
+      storageClass: local-path
+  haproxy:
+    size: 3
+
+# Valkey: the valkey-io chart's replicated mode (0.12.0 has no Sentinel or
+# cluster mode): a StatefulSet of a primary (pod 0, behind Service
+# imas-core-valkey, which farmer and saasapi use) and two replicas that
+# follow it, each on its own node with a local volume. A replica's loss
+# changes nothing; the primary's node stopped stops Valkey writes until it
+# returns (uat/README.md, "HA run").
+valkey:
+  replica:
+    enabled: true
+    replicas: 2
+    persistence:
+      size: 1Gi
+      storageClass: local-path
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: valkey
+          app.kubernetes.io/instance: imas-core
+  podDisruptionBudget:
+    enabled: true
+    maxUnavailable: 1
+
+# The object store: Versity Gateway in front of the run's Azure Blob account
+# (uat/tofu object_store). objectStore.endpoint and accountStore.endpoint stay
+# empty, so farmer, saasapi and the accounts bucket use the gateway's Service
+# (gen-values.sh writes objectStore.endpoint "" over values/farmer-uat.yaml's
+# RustFS). The Secrets are install.sh's: the Azure account name and key from
+# the tofu outputs, the root credential and the accounts reader's pair
+# generated per run (the DMZ bus's loader holds the same reader pair). The
+# DMZ reaches the accounts bucket through the edge proxy on the core hub's
+# private address, port 9000 (uat/hub/core chart/, versity.enabled), so the
+# edge's pods are let in on the S3 port.
+objectStore:
+  endpoint: ""
+versity:
+  enabled: true
+  replicas: 3
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: imas-versity
+          app.kubernetes.io/instance: imas-core
+          app.kubernetes.io/component: versity
+      matchLabelKeys: [pod-template-hash]
+  azure:
+    credentialsSecret: imas-uat-versity-azure
+  rootCredentials:
+    secretName: imas-uat-versity-root
+  accountsReader:
+    credentialsSecret: imas-uat-s3-accounts-reader
+  networkPolicy:
+    extraIngressFrom:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: imas-uat
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: imas-uat-edge

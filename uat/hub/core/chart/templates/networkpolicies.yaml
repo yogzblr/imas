@@ -6,15 +6,22 @@
 # which can't match pods on another cluster, so the cross-cluster paths
 # are opened here by address, and nothing wider:
 #   - farmer: in from the edge proxy on its API port (the DMZ's Envoy
-#     reaches the edge on the core private IP); out to the DMZ private IP
-#     on the bus port.
-#   - saasapi: out to the DMZ private IP on the bus port.
+#     reaches the edge on the core private address); out to the DMZ private
+#     address on the bus port.
+#   - saasapi: out to the DMZ private address on the bus port.
 #   - the edge: in on 443 from anywhere (the NSG limits it to the runner),
-#     in on farmer's API port from the DMZ private IP only.
+#     in on farmer's API port from the DMZ's nodes only; with
+#     versity.enabled, in on the accounts store port from the DMZ's nodes
+#     only and out to Versity Gateway's S3 port.
 #   - Keycloak: in from the edge only. RustFS: in from farmer and
-#     saasapi, and from the DMZ private IP on its hostPort, for the bus's
+#     saasapi, and from the DMZ's nodes on its hostPort, for the bus's
 #     account loader (read-only, accounts bucket only; design D22). That
 #     and farmer's API are the only DMZ-to-core paths.
+# The DMZ's private address (dmz.privateIP: its node's, or its internal load
+# balancer's on an HA hub) is where traffic to the DMZ goes; the DMZ's
+# traffic arrives from its nodes' addresses (dmz.nodeIPs). On an HA core hub
+# (loadBalancerProbe.enabled) the Azure health probes are admitted on the
+# load-balanced ports too (uat.dmzPeers).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -77,12 +84,18 @@ spec:
     - ports:
         - { protocol: TCP, port: 443 }
     - from:
-        - ipBlock: { cidr: {{ printf "%s/32" .Values.dmz.privateIP }} }
+        {{- include "uat.dmzPeers" . | trim | nindent 8 }}
         {{- range .Values.dmz.extraFarmerAPISources }}
         - ipBlock: { cidr: {{ . }} }
         {{- end }}
       ports:
         - { protocol: TCP, port: {{ .Values.farmer.apiPort }} }
+    {{- if .Values.versity.enabled }}
+    - from:
+        {{- include "uat.dmzPeers" . | trim | nindent 8 }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.core.accountsStorePort }} }
+    {{- end }}
   egress:
     - to:
         - namespaceSelector: { matchLabels: {{ toJson $farmerNS }} }
@@ -106,6 +119,17 @@ spec:
         - podSelector: { matchLabels: { app.kubernetes.io/name: imas-uat-keycloak } }
       ports:
         - { protocol: TCP, port: 8080 }
+    {{- if .Values.versity.enabled }}
+    - to:
+        - namespaceSelector: { matchLabels: {{ toJson $farmerNS }} }
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: imas-versity
+              app.kubernetes.io/instance: {{ .Values.farmer.release }}
+              app.kubernetes.io/component: versity
+      ports:
+        - { protocol: TCP, port: {{ .Values.versity.port }} }
+    {{- end }}
     {{- include "uat.dnsEgress" . | nindent 4 }}
 ---
 apiVersion: networking.k8s.io/v1
@@ -149,7 +173,7 @@ spec:
       ports:
         - { protocol: TCP, port: 9000 }
     - from:
-        - ipBlock: { cidr: {{ printf "%s/32" .Values.dmz.privateIP }} }
+        {{- include "uat.dmzPeers" . | trim | nindent 8 }}
       ports:
         - { protocol: TCP, port: 9000 }
 {{- end }}

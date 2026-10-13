@@ -16,7 +16,8 @@
 #       saasapi's operator listener's), policies
 #    5. RustFS buckets, users and policies (rustfs-setup.sh): recipes, jobs,
 #       sprout JWTs and the accounts bucket with its writer and reader, then
-#       validate-rustfs.sh proves each scoped credential's reach
+#       validate-object-store.sh proves each scoped credential's reach. On an
+#       HA core hub, Versity Gateway's Secrets instead (below)
 #    6. the farmer chart, with OpenBao initialised and unsealed while the
 #       install runs (openbao-bootstrap.sh); its bootstrap Job writes the
 #       public NATS trust (ConfigMap imas-nats-trust, which the DMZ copies)
@@ -24,6 +25,22 @@
 #    7. saasapi's hand-made Secrets (saasapi-secrets.sh), the operator
 #       token's among them
 #    8. waits for the workloads core owns and writes the outputs
+# HA core hub (the endpoints file lists several core nodes; the workflow's
+# hub_nodes 3; brief H4): the farmer chart also gets values/values-ha.yaml
+# (three replicas of farmer, saasapi and Versity Gateway spread over the
+# nodes, PXC 3, OpenBao 3-node raft with the static seal, Valkey replicated,
+# all on the nodes' local volumes) and the UAT-only chart runs one edge per
+# node. Before the chart, step 1 also makes OpenBao's static seal key
+# (Secret imas-uat-openbao-seal; <state>/core/sensitive/openbao-seal.key)
+# and step 5 Versity Gateway's Secrets instead of provisioning RustFS: the
+# Azure Blob account's name and key (from <state>/core/sensitive/
+# azure-blob/, which the workflow writes from uat/tofu's object_store
+# outputs), the gateway's root credential and the four users' pairs (the
+# accounts reader's for the DMZ too, at sensitive/s3/accounts-reader as
+# before). After the chart (its createBuckets Job has made the buckets and
+# their policies), validate-object-store.sh proves each credential through
+# the gateway. FLAG FOR SECURITY REVIEW: the seal key and the Azure key are
+# UAT-only Secrets in the core namespace.
 # It does NOT wait for farmer or saasapi, register the sprout release, or run
 # check.sh: farmer's /ready and saasapi's startup both need the DMZ's NATS bus,
 # which the DMZ install (uat/hub/dmz/install.sh) creates after this script.
@@ -53,7 +70,7 @@ on | true | yes | 1) dispatch_flags=on ;;
 off | false | no | 0) dispatch_flags=off ;;
 *) die "IMAS_UAT_DISPATCH_FLAGS must be on or off, got: ${IMAS_UAT_DISPATCH_FLAGS}" ;;
 esac
-log "release $release_tag (chart and images $version); core $CORE_FQDN ($CORE_IP), DMZ $DMZ_FQDN ($DMZ_IP); fleet update dispatch flags $dispatch_flags"
+log "release $release_tag (chart and images $version); core $CORE_FQDN ($CORE_ADDR, $CORE_NODE_COUNT node(s)), DMZ $DMZ_FQDN ($DMZ_ADDR, $DMZ_NODE_COUNT node(s)); object store $S3_MODE; fleet update dispatch flags $dispatch_flags"
 log "issuer $KEYCLOAK_ISSUER; sprout bus URL $SPROUT_BUS_URL"
 kc version >/dev/null 2>&1 || die "can't reach the cluster with $KUBECONFIG_PATH"
 kc get clusterissuer "$CA_ISSUER" >/dev/null 2>&1 ||
@@ -86,6 +103,29 @@ apply_secret "$UAT_NS" "$KEYCLOAK_REALM_SECRET" \
 # The BFF's shared secret (saasapi.internalAuthSecret): the tests stand in
 # for the BFF, so they get it too (sensitive outputs).
 apply_secret "$CORE_NS" "$INTERNAL_AUTH_SECRET" "current=$SENSITIVE_DIR/internal-auth-secret"
+
+if [[ $HA_CORE == true ]]; then
+	# OpenBao's static seal key (values/values-ha.yaml): 32 random bytes,
+	# made once and kept, as every raft pod unseals itself with it. UAT ONLY.
+	seal_key="$SENSITIVE_DIR/openbao-seal.key"
+	[[ -s "$seal_key" ]] || (umask 077 && openssl rand 32 >"$seal_key")
+	[[ "$(wc -c <"$seal_key")" -eq 32 ]] || die "$seal_key is not a 32-byte key"
+	apply_secret "$CORE_NS" "$OPENBAO_SEAL_SECRET" "seal.key=$seal_key"
+	# Versity Gateway's Azure Blob account (uat/tofu object_store; the
+	# workflow writes the files, the key masked) and its root credential.
+	blob="$SENSITIVE_DIR/azure-blob"
+	for f in account-name account-key; do
+		[[ -s "$blob/$f" ]] || die "an HA core hub's object store is Versity Gateway over Azure Blob: $blob/$f is missing (uat/tofu outputs object_store and object_store_account_key; README.md, \"HA run\")"
+	done
+	[[ "$(cat "$blob/account-name")" =~ ^[a-z0-9]{3,24}$ ]] || die "$blob/account-name is not an Azure storage account name"
+	apply_secret "$CORE_NS" "$VERSITY_AZURE_SECRET" "account-name=$blob/account-name" "account-key=$blob/account-key"
+	vroot="$SENSITIVE_DIR/s3/versity-root"
+	(umask 077 && mkdir -p "$vroot")
+	printf '%s' "$VERSITY_ROOT_USER" >"$vroot/access-key-id"
+	gen_secret_file "$vroot/secret-access-key" 32
+	apply_secret "$CORE_NS" "$VERSITY_ROOT_SECRET" \
+		"access-key-id=$vroot/access-key-id" "secret-access-key=$vroot/secret-access-key"
+fi
 
 # --- 2. seeds and bootstrap admin -------------------------------------------
 "$here/seeds.sh" "${common[@]}"
@@ -132,7 +172,33 @@ kc -n "$CORE_NS" create configmap "$UAT_CA_CONFIGMAP" --from-file="ca.crt=$OUT_D
 # --- 5. the object store -----------------------------------------------------
 if [[ "$S3_MODE" == rustfs ]]; then
 	"$here/rustfs-setup.sh" "${common[@]}" "$chart_dir/saasapi-recipes.json"
-	"$here/validate-rustfs.sh" "${common[@]}"
+	"$here/validate-object-store.sh" "${common[@]}"
+elif [[ "$S3_MODE" == versity ]]; then
+	# Versity Gateway (HA run): the four users' credentials, generated once
+	# and kept, in the same files rustfs-setup.sh writes (the accounts
+	# reader's at accounts-reader/, for uat/hub/dmz/install.sh
+	# --accounts-reader-dir), as the Secrets the farmer chart names. The
+	# gateway's init container writes them into its IAM file; its
+	# createBuckets Job makes the buckets and the policies that scope each
+	# user (design D22). validate-object-store.sh runs after the chart.
+	s3dir="$SENSITIVE_DIR/s3"
+	(umask 077 && mkdir -p "$s3dir/accounts-reader")
+	printf '%s' "$S3_FARMER_USER" >"$s3dir/farmer-access-key-id"
+	printf '%s' "$S3_SAASAPI_USER" >"$s3dir/saasapi-access-key-id"
+	printf '%s' "$S3_ACCOUNTS_WRITER_USER" >"$s3dir/accounts-writer-access-key-id"
+	printf '%s' "$S3_ACCOUNTS_READER_USER" >"$s3dir/accounts-reader/access-key-id"
+	for f in farmer-secret-access-key saasapi-secret-access-key accounts-writer-secret-access-key accounts-reader/secret-access-key; do
+		gen_secret_file "$s3dir/$f" 24
+	done
+	apply_secret "$CORE_NS" "$S3_FARMER_SECRET" \
+		"access-key-id=$s3dir/farmer-access-key-id" "secret-access-key=$s3dir/farmer-secret-access-key"
+	apply_secret "$CORE_NS" "$S3_SAASAPI_SECRET" \
+		"access-key-id=$s3dir/saasapi-access-key-id" "secret-access-key=$s3dir/saasapi-secret-access-key"
+	apply_secret "$CORE_NS" "$S3_ACCOUNTS_WRITER_SECRET" \
+		"access-key-id=$s3dir/accounts-writer-access-key-id" "secret-access-key=$s3dir/accounts-writer-secret-access-key"
+	apply_secret "$CORE_NS" "$S3_ACCOUNTS_READER_SECRET" \
+		"access-key-id=$s3dir/accounts-reader/access-key-id" "secret-access-key=$s3dir/accounts-reader/secret-access-key"
+	log "Versity Gateway users' Secrets applied; accounts reader credential for the DMZ bus: $s3dir/accounts-reader"
 else
 	# External S3 (object_store.mode external): buckets, users and policies
 	# are the operator's. The credential files below are theirs too; they
@@ -155,7 +221,10 @@ else
 fi
 
 # --- 6. the farmer chart, with OpenBao bootstrapped alongside ----------------
-"$here/gen-values.sh" "$ENDPOINTS" "$OUT_DIR/admin.json" "$release_tag" "$OUT_DIR/$LOADER_PUB_FILE" >"$STATE_DIR/values-run.json"
+gv_args=("$ENDPOINTS" "$OUT_DIR/admin.json" "$release_tag" "$OUT_DIR/$LOADER_PUB_FILE")
+((DMZ_NODE_COUNT > 1)) && gv_args+=("$OUT_DIR/$FENCE_PUB_FILE")
+"$here/gen-values.sh" "${gv_args[@]}" >"$STATE_DIR/values-run.json"
+mapfile -t farmer_values < <(farmer_values_files)
 helm_log="$STATE_DIR/helm-install.log"
 log "installing $CORE_RELEASE from $chart_tgz (timeout $HELM_TIMEOUT; log $helm_log)"
 # No --wait: saasapi starts only once step 7's Secrets exist, and those
@@ -164,7 +233,7 @@ log "installing $CORE_RELEASE from $chart_tgz (timeout $HELM_TIMEOUT; log $helm_
 # is not Ready until the DMZ bus exists, so finish.sh turns it on afterwards.
 hc upgrade --install "$CORE_RELEASE" "$chart_tgz" -n "$CORE_NS" --timeout "$HELM_TIMEOUT" \
 	--set sproutRelease.register=false \
-	-f "$here/values/farmer-uat.yaml" -f "$STATE_DIR/values-run.json" >"$helm_log" 2>&1 &
+	"${farmer_values[@]}" -f "$STATE_DIR/values-run.json" >"$helm_log" 2>&1 &
 helm_pid=$!
 trap 'kill "$helm_pid" 2>/dev/null || true' EXIT
 if ! "$here/openbao-bootstrap.sh" "${common[@]}"; then
@@ -195,6 +264,13 @@ if [[ ! -s "$OUT_DIR/nats-trust.json" ]]; then
 fi
 kc -n "$CORE_NS" delete secret "$OPENBAO_ROOT_SECRET" --ignore-not-found >/dev/null
 
+# Versity Gateway's buckets and policies exist now (the createBuckets hook
+# ran with the install): prove each user's reach through the gateway.
+if [[ "$S3_MODE" == versity ]]; then
+	rollout "deployment/$VERSITY_FULLNAME" "$CORE_NS"
+	"$here/validate-object-store.sh" "${common[@]}"
+fi
+
 # --- 7. saasapi's Secrets ----------------------------------------------------
 "$here/saasapi-secrets.sh" "${common[@]}"
 
@@ -203,7 +279,7 @@ wait_for 600 "OpenBao ($OPENBAO_STS) Ready (unsealed)" sts_ready "$OPENBAO_STS" 
 wait_for 900 "PXC cluster $PXC_CLUSTER ready" pxc_ready "$PXC_CLUSTER" "$CORE_NS"
 wait_for 300 "PXC statefulset $PXC_CLUSTER-pxc" sts_ready "$PXC_CLUSTER-pxc" "$CORE_NS"
 wait_for 300 "HAProxy statefulset $PXC_CLUSTER-haproxy" sts_ready "$PXC_CLUSTER-haproxy" "$CORE_NS"
-rollout "deployment/$VALKEY_DEPLOY" "$CORE_NS"
+wait_for 600 "Valkey ($VALKEY_NAME) Ready" valkey_ready
 # farmer and saasapi are waited for in finish.sh, after the DMZ install.
 [[ "$S3_MODE" == rustfs ]] && rollout "deployment/$RUSTFS_SVC" "$UAT_NS"
 rollout "deployment/$KEYCLOAK_DEPLOY" "$UAT_NS"
@@ -221,9 +297,16 @@ jq -n --arg tag "$release_tag" --arg version "$version" --arg ns "$CORE_NS" --ar
 	--arg cpn "$CORE_PRIVATE_FQDN" --arg dpn "$DMZ_PRIVATE_FQDN" \
 	--arg sens "$SENSITIVE_DIR" --arg bus "$SPROUT_BUS_URL" --argjson tenants "$prev_tenants" \
 	--argjson scratch "$prev_scratch" --arg dispatch "$dispatch_flags" \
+	--argjson cn "$CORE_NODE_COUNT" --argjson dn "$DMZ_NODE_COUNT" --arg s3 "$S3_MODE" \
+	--arg caddr "$CORE_ADDR" --arg daddr "$DMZ_ADDR" --argjson ha "$HA_CORE" --arg valkey "$VALKEY_NAME" \
 	--slurpfile admin "$OUT_DIR/admin.json" '{
 	  release_tag: $tag, version: $version, namespace: $ns, release: $rel,
 	  dispatch_flags: $dispatch,
+	  topology: {
+	    ha: $ha, core_nodes: $cn, dmz_nodes: $dn,
+	    core_address: $caddr, dmz_address: $daddr, object_store: $s3,
+	    valkey_primary: (if $ha then ($valkey + "-0") else $valkey end)
+	  },
 	  saasapi_url: $url, internal_auth_header: "X-Internal-Auth", ca_file: $ca,
 	  sprout_bus_url: $bus,
 	  private_names: {core: $cpn, dmz: $dpn},

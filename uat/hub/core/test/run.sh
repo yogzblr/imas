@@ -9,7 +9,8 @@
 #   5. seeds.sh against a stub kubectl (real nk, built from go.mod): the
 #      user seeds SYS_USER and SAASAPI_USER (Secret imas-farmer-nats-seeds),
 #      farmer's NKey (Secret imas-farmer-nkey) and the DMZ bus loader's
-#      seed (a file only) with its public key
+#      seed (a file only) with its public key; with three DMZ nodes also the
+#      clustered bus's fence user seed
 #   6. admin-keys.sh against a stub curl and a fake imas CLI (checksum
 #      check, key reuse, file modes)
 #   7. bind-tenant.sh, token.sh and install.sh argument checks
@@ -17,10 +18,13 @@
 #   8. openbao-bootstrap.sh, saasapi-secrets.sh and the T4 probe
 #      (openbao_t4) against a real local OpenBao server, when a bao binary
 #      is on PATH or in $BAO_BIN (skipped, and said so, otherwise)
+#   8a. openbao-bootstrap.sh on an HA core hub (static seal, three raft
+#      pods) against three real local OpenBao servers, when bao is there
 #   8b. finish.sh and operator-release.sh against stub kubectl, helm and
 #      curl (test/finish_test.sh): a failed registration Job fails it, and
-#      the operator API's answer decides; validate-rustfs.sh against a curl
-#      that answers with the UAT policies (test/rustfs_test.sh)
+#      the operator API's answer decides; validate-object-store.sh against a
+#      curl that answers with the UAT policies, for RustFS and for Versity
+#      Gateway (test/object_store_test.sh)
 #   9. go test ./uat/hub/core/ (helm template and lint of the farmer chart
 #      with values/farmer-uat.yaml, and of chart/)
 # A tool that isn't installed is reported as SKIPPED, never as passed.
@@ -80,7 +84,7 @@ ep2="$core/testdata/endpoints-overrides.json"
 
 # --- 1. shellcheck --------------------------------------------------------------
 if command -v shellcheck >/dev/null; then
-	expect "shellcheck" bash -c 'cd "$1" && shellcheck -x ./*.sh lib/common.sh test/*.sh test/stubs/* test/finish-stubs/* test/rustfs-stubs/*' _ "$core"
+	expect "shellcheck" bash -c 'cd "$1" && shellcheck -x ./*.sh lib/common.sh test/*.sh test/stubs/* test/finish-stubs/* test/object-store-stubs/*' _ "$core"
 else
 	skip "shellcheck (not installed)"
 fi
@@ -88,11 +92,17 @@ fi
 # --- 2. yamllint ----------------------------------------------------------------
 if command -v yamllint >/dev/null; then
 	expect "yamllint values and chart metadata" yamllint -c "$here/yamllint.yaml" \
-		"$core/values/farmer-uat.yaml" "$core/chart/Chart.yaml" "$core/chart/values.yaml"
+		"$core/values/farmer-uat.yaml" "$core/values/values-ha.yaml" "$core/chart/Chart.yaml" "$core/chart/values.yaml"
 	if command -v helm >/dev/null; then
 		helm template imas-uat-core "$core/chart" -n imas-uat --kube-version 1.31.0 >"$tmp/extras.yaml" 2>"$tmp/out" &&
 			expect "yamllint rendered UAT chart" yamllint -c "$here/yamllint.yaml" "$tmp/extras.yaml" ||
 			bad "helm template chart/"
+		# The HA render (one edge per node, the accounts store through the
+		# edge to Versity Gateway), with lib/common.sh's flags for it.
+		mapfile -t ha_set < <(bash -c '. "$1/lib/common.sh"; ENDPOINTS="$2"; load_endpoints; extras_set_args' _ "$core" "$repo/uat/k0s/testdata/expected/endpoints-ha.json")
+		helm template imas-uat-core "$core/chart" -n imas-uat --kube-version 1.31.0 "${ha_set[@]}" >"$tmp/extras-ha.yaml" 2>"$tmp/out" &&
+			expect "yamllint rendered UAT chart (HA)" yamllint -c "$here/yamllint.yaml" "$tmp/extras-ha.yaml" ||
+			bad "helm template chart/ (HA)"
 	fi
 else
 	skip "yamllint (not installed)"
@@ -284,7 +294,7 @@ if command -v go >/dev/null; then
 		[[ ! -e "$sd/bus-loader-user.nk" ]] && ok "seeds: no new loader seed written" || bad "seeds: a new loader seed was written"
 		"$state/core/bin/nk" -gen user | tr -d '\n' >"$sd/bus-loader-user.nk"
 		chmod 600 "$sd/bus-loader-user.nk"
-		refuse "seeds.sh refuses a loader seed for another key than the trust's" "refusing a loader seed the bus would not accept" seeds
+		refuse "seeds.sh refuses a loader seed for another key than the trust's" "refusing a seed the bus would not accept" seeds
 		cp "$tmp/loader.nk" "$sd/bus-loader-user.nk"
 		expect "seeds.sh with the restored loader seed" seeds
 		rm "$STUB_STATE/imas-core/ConfigMap/imas-nats-trust.json"
@@ -298,6 +308,30 @@ if command -v go >/dev/null; then
 			ok "seeds: UAT_SEEDS_DIR seeds are reused, missing ones generated"
 		else
 			bad "seeds: UAT_SEEDS_DIR reuse"
+		fi
+		[[ ! -e "$state/core/out/bus-fence-user.pub" && ! -e "$sd/bus-fence-user.nk" ]] &&
+			ok "seeds: one DMZ node, no fence user seed" || bad "seeds: a fence user seed for a single-node bus"
+		# Three DMZ nodes (uat/k0s's HA endpoints): a clustered bus's fence
+		# user, a file only, its public key next to the loader's.
+		rm -rf "$STUB_STATE/imas-core"
+		state3="$tmp/state3"
+		if PATH="$stubs:$PATH" "$core/seeds.sh" "$kubeconfig" "$repo/uat/k0s/testdata/expected/endpoints-ha.json" "$state3" >"$tmp/out" 2>&1; then
+			sd3="$state3/core/sensitive/seeds"
+			fpub="$state3/core/out/bus-fence-user.pub"
+			[[ -s "$sd3/bus-fence-user.nk" && "$(stat -c %a "$sd3/bus-fence-user.nk")" == 600 &&
+				"$(cat "$fpub")" == "$("$state3/core/bin/nk" -inkey "$sd3/bus-fence-user.nk" -pubout)" &&
+				"$(cat "$fpub")" != "$(cat "$state3/core/out/bus-loader-user.pub")" ]] &&
+				ok "seeds: three DMZ nodes, a fence user seed (0600) and its own public key" || bad "seeds: fence user seed"
+			! grep -rqF "$(base64 -w0 <"$sd3/bus-fence-user.nk")" "$STUB_STATE/imas-core" &&
+				ok "seeds: the fence seed is in no core Secret (it goes to the DMZ)" || bad "seeds: the fence seed reached a core Secret"
+			IMAS_FENCE_PUB=$(cat "$fpub")
+			"$core/gen-values.sh" "$repo/uat/k0s/testdata/expected/endpoints-ha.json" "$admin" v0.1.0 \
+				"$state3/core/out/bus-loader-user.pub" "$fpub" 2>/dev/null |
+				jq -e --arg f "$IMAS_FENCE_PUB" '.natsTrust.busFenceUserPub == $f and .bus.expectedNodes == 3' >/dev/null &&
+				ok "gen-values.sh (HA): the fence user's key and three expected bus nodes" || bad "gen-values.sh (HA) with seeds.sh's keys"
+		else
+			bad "seeds.sh with three DMZ nodes"
+			sed 's/^/      /' "$tmp/out" | tail -n 10
 		fi
 	else
 		bad "seeds.sh generates the user seeds with nk"
@@ -620,9 +654,104 @@ else
 	skip "openbao-bootstrap.sh and saasapi-secrets.sh against a real OpenBao (no bao binary in BAO_BIN or PATH, or 127.0.0.1:8200 is taken)"
 fi
 
+# --- 8a. OpenBao on an HA core hub ---------------------------------------------------
+# Three local raft servers with the static seal of values/values-ha.yaml
+# (retry_join, a seal key file) stand in for imas-core-openbao-0 to -2
+# (STUB_BAO_PORTS); the endpoints file is uat/k0s's HA output (3 + 3 nodes).
+ep_ha="$repo/uat/k0s/testdata/expected/endpoints-ha.json"
+if [[ -n "$bao_bin" && -x "$bao_bin" ]] && ! (exec 3<>/dev/tcp/127.0.0.1/8300) 2>/dev/null &&
+	! (exec 3<>/dev/tcp/127.0.0.1/8310) 2>/dev/null && ! (exec 3<>/dev/tcp/127.0.0.1/8320) 2>/dev/null; then
+	mkdir -p "$tmp/baobin"
+	[[ -e "$tmp/baobin/bao" ]] || ln -s "$bao_bin" "$tmp/baobin/bao"
+	(umask 077 && openssl rand 32 >"$tmp/seal.key")
+	ha_pids=()
+	start_ha() { # <index>
+		local i=$1
+		mkdir -p "$tmp/ha$i"
+		cat >"$tmp/ha$i.hcl" <<-EOF
+			storage "raft" {
+			  path    = "$tmp/ha$i"
+			  node_id = "imas-core-openbao-$i"
+			  retry_join { leader_api_addr = "http://127.0.0.1:8300" }
+			  retry_join { leader_api_addr = "http://127.0.0.1:8310" }
+			  retry_join { leader_api_addr = "http://127.0.0.1:8320" }
+			}
+			seal "static" {
+			  current_key_id = "imas-uat-1"
+			  current_key    = "file://$tmp/seal.key"
+			}
+			listener "tcp" {
+			  address         = "127.0.0.1:83${i}0"
+			  cluster_address = "127.0.0.1:83${i}1"
+			  tls_disable     = 1
+			}
+			api_addr      = "http://127.0.0.1:83${i}0"
+			cluster_addr  = "http://127.0.0.1:83${i}1"
+			disable_mlock = true
+		EOF
+		"$bao_bin" server -config="$tmp/ha$i.hcl" >>"$tmp/ha$i.log" 2>&1 &
+		ha_pids[i]=$!
+	}
+	stop_ha() { kill "${ha_pids[$1]}" && wait "${ha_pids[$1]}" 2>/dev/null || true; }
+	for i in 0 1 2; do start_ha "$i"; done
+	export STUB_BAO_PORTS="imas-core-openbao-0=8300 imas-core-openbao-1=8310 imas-core-openbao-2=8320"
+	rm -rf "$STUB_STATE/imas-core"
+	mkdir -p "$STUB_STATE/imas-core/StatefulSet" "$STUB_STATE/imas-core/Secret"
+	echo '{"kind":"StatefulSet","metadata":{"name":"imas-core-openbao"},"spec":{"replicas":3}}' >"$STUB_STATE/imas-core/StatefulSet/imas-core-openbao.json"
+	hstate="$tmp/hstate"
+	hbao() { PATH="$stubs:$tmp/baobin:$PATH" "$core/openbao-bootstrap.sh" "$kubeconfig" "$ep_ha" "$hstate"; }
+	refuse "openbao-bootstrap.sh (HA) refuses to start without the seal key Secret" "imas-uat-openbao-seal.*missing" hbao
+	echo '{"kind":"Secret","metadata":{"name":"imas-uat-openbao-seal"},"data":{}}' >"$STUB_STATE/imas-core/Secret/imas-uat-openbao-seal.json"
+	if hbao >"$tmp/out" 2>&1; then
+		ok "openbao-bootstrap.sh (HA): initialise pod 0, three pods unseal themselves and join, Transit, gateway key"
+		hs="$hstate/core/sensitive"
+		jq -e '(.recovery_keys_b64 | length) == 3 and .recovery_keys_threshold == 2 and ((.unseal_keys_b64 // []) | length) == 0' "$hs/openbao-init.json" >/dev/null &&
+			ok "openbao (HA): 3 recovery key shares, threshold 2, no unseal keys (static seal)" || bad "openbao (HA): init file"
+		hroot=$(cat "$hs/openbao-root-token")
+		peers=$(BAO_ADDR=http://127.0.0.1:8310 BAO_TOKEN="$hroot" "$bao_bin" operator raft list-peers -format=json 2>/dev/null || echo '{}')
+		jq -e '[.data.config.servers[] | select(.voter)] | length == 3' <<<"$peers" >/dev/null &&
+			ok "openbao (HA): three raft voters" || bad "openbao (HA): raft peers ($peers)"
+		for p in 8300 8310 8320; do
+			[[ "$(BAO_ADDR=http://127.0.0.1:$p BAO_TOKEN="$hroot" "$bao_bin" read -field=type transit/keys/imas-gateway-jwt 2>/dev/null)" == ed25519 ]] ||
+				{ bad "openbao (HA): transit/keys/imas-gateway-jwt through 127.0.0.1:$p"; continue; }
+		done
+		ok "openbao (HA): the gateway key is ed25519, read through every pod"
+		jq -e --arg t "$(printf '%s' "$hroot" | base64 -w0)" '(.data["recovery-keys.json"] | @base64d | fromjson | (.keys | length) == 3 and .threshold == 2) and .data["root-token"] == $t and (.data | has("unseal-keys.json") | not)' \
+			"$STUB_STATE/imas-core/Secret/imas-uat-openbao-unseal.json" >/dev/null &&
+			ok "openbao (HA): UAT ONLY recovery keys and root token in Secret imas-uat-openbao-unseal" || bad "openbao (HA): unseal Secret"
+		hboot=$(jq -r '.data.token | @base64d' "$STUB_STATE/imas-core/Secret/imas-uat-openbao-root.json")
+		[[ -n "$hboot" && "$hboot" != "$hroot" ]] && ok "openbao (HA): the chart's Job gets a bootstrap token, not the root token" || bad "openbao (HA): bootstrap token"
+		! grep -qF "$hroot" "$STUB_STATE/calls.log" "$tmp/out" && ! grep -qF "$hboot" "$STUB_STATE/calls.log" "$tmp/out" &&
+			ok "openbao (HA): no token in argv or output" || bad "openbao (HA): a token leaked"
+		expect "openbao-bootstrap.sh (HA) again changes nothing" hbao
+		# A pod restart: it unseals itself (no script) and rejoins.
+		stop_ha 0
+		start_ha 0
+		up=""
+		for _ in $(seq 1 50); do
+			if BAO_ADDR=http://127.0.0.1:8300 "$bao_bin" status >/dev/null 2>&1; then up=1 && break; fi
+			sleep 0.3
+		done
+		[[ -n "$up" ]] && ok "openbao (HA): a restarted pod unseals itself (static seal)" || bad "openbao (HA): pod 0 still sealed after a restart"
+		expect "openbao-bootstrap.sh (HA) after a pod restart" hbao
+		# From a runner that never saw the init: the Secret has them.
+		mv "$hs/openbao-init.json" "$tmp/hinit.json"
+		rm -f "$hs/openbao-root-token" "$hs/openbao-recovery-keys.json"
+		expect "openbao-bootstrap.sh (HA) restores the root token from the cluster Secret" hbao
+		[[ "$(cat "$hs/openbao-root-token")" == "$hroot" ]] && ok "openbao (HA): root token restored" || bad "openbao (HA): root token not restored"
+	else
+		bad "openbao-bootstrap.sh (HA): initialise pod 0, three pods unseal themselves and join, Transit, gateway key"
+		sed 's/^/      /' "$tmp/out" | tail -n 15
+	fi
+	for i in 0 1 2; do stop_ha "$i"; done
+	unset STUB_BAO_PORTS
+else
+	skip "openbao-bootstrap.sh on an HA core hub against three real OpenBao servers (no bao binary, or 127.0.0.1:8300, 8310 or 8320 is taken)"
+fi
+
 # --- 8b. finish.sh ------------------------------------------------------------------
 expect "finish.sh and operator-release.sh (test/finish_test.sh)" bash "$here/finish_test.sh"
-expect "validate-rustfs.sh (test/rustfs_test.sh)" bash "$here/rustfs_test.sh"
+expect "validate-object-store.sh (test/object_store_test.sh)" bash "$here/object_store_test.sh"
 
 # --- 9. go test ---------------------------------------------------------------------
 if command -v go >/dev/null; then

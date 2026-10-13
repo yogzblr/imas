@@ -27,7 +27,13 @@ clusterDomain: cluster.local
 # The core hub, from the endpoints file.
 core:
   fqdn: core.uat.invalid
+  # The hub's private address: the node's own on a single node, the
+  # internal load balancer's on an HA hub (uat/tofu api_address), which
+  # core.<zone> resolves to and the DMZ dials.
   privateIP: 10.60.2.4
+  # Every core node's private address (empty: privateIP, one node). On
+  # farmer's certificate with privateIP.
+  nodeIPs: []
   # The private name (UAT.1's Private DNS zone), on farmer's certificate:
   # the DMZ's Envoy may dial farmer by it.
   privateFQDN: core.uat.imas.internal
@@ -35,15 +41,24 @@ core:
   # the core node port range is 30000-32767).
   httpsPort: 443
   farmerAPIPort: 5405
+  # The accounts store's port on the hub's private address (uat/tofu
+  # accounts_store_port): RustFS's hostPort, or with versity.enabled the
+  # edge's TCP passthrough to Versity Gateway.
+  accountsStorePort: 9000
 
 # The DMZ hub, from the endpoints file.
 dmz:
+  # The DMZ hub's private address (the node's, or its internal load
+  # balancer's on an HA hub): where farmer and saasapi send bus traffic.
   privateIP: 10.60.1.4
+  # Every DMZ node's private address: where the DMZ's traffic comes from
+  # (its pods leave through their node). Empty: privateIP, one node.
+  nodeIPs: []
   # The private name farmer and saasapi reach the bus by (UAT.1's Private
   # DNS zone): farmer's bus.host, set by gen-values.sh from the same value.
   privateFQDN: dmz.uat.imas.internal
   # Extra sources allowed to reach farmer's API through the edge proxy
-  # (CIDRs). Empty: the DMZ private IP only.
+  # (CIDRs). Empty: the DMZ's nodes only.
   extraFarmerAPISources: []
 
 # The DMZ bus is dialled by its private name (dmz.privateFQDN), which the
@@ -67,16 +82,28 @@ rustfs:
   # The digest is the one that pulled on the rig; it wins over the tag.
   image: docker.io/rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
   rootSecret: imas-uat-rustfs-root
-  # The node port the DMZ bus's account loader reads the accounts bucket on
-  # (<core private IP>:9000, uat/hub/dmz dmz.account_store.endpoint's
-  # default; uat/tofu accounts_store_port). A hostPort, as the edge's
-  # (owner decision 2026-10-06: the core node port range is 30000-32767).
-  hostPort: 9000
   storage: 5Gi
   storageClassName: ""
   resources:
     requests: { cpu: 50m, memory: 256Mi }
     limits: { memory: 1Gi }
+
+# Versity Gateway (the farmer chart's versity.enabled, the HA run's object
+# store): the DMZ bus's account loader reads the accounts bucket through the
+# edge, which passes core.accountsStorePort through to the gateway's Service
+# (plain HTTP, as farmer's own clients use it). Exclusive with rustfs.
+versity:
+  enabled: false
+  # <release>-farmer-versity and versity.port, the farmer chart's.
+  serviceName: imas-core-farmer-versity
+  port: 7070
+
+# An HA core hub sits behind Azure load balancers, whose health probes come
+# from one fixed address and must reach every load-balanced port a pod
+# listens on (farmer's API and the accounts store here; 443 is open to all).
+loadBalancerProbe:
+  enabled: false
+  cidr: 168.63.129.16/32
 
 keycloak:
   # Apache-2.0. Pinned by tag and digest (P13); never latest. Docker Hub's
@@ -99,6 +126,10 @@ keycloak:
     limits: { memory: 1536Mi }
 
 edge:
+  # One per core node (install.sh: the endpoints file's node count), spread
+  # one per node: each takes the same hostPorts, so the internal and public
+  # load balancers of an HA hub find one on every node.
+  replicas: 1
   # Apache-2.0; the same version as the nats chart's Envoy (docs/INSTALL.md),
   # pinned by digest too (P13): the image index of v1.35.3 on Docker Hub,
   # read 2026-10-13; uat/hub/dmz/values-uat.yaml pins the DMZ's Envoy to it.

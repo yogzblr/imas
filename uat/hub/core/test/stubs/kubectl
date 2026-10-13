@@ -3,6 +3,10 @@
 # ConfigMaps as JSON files under $STUB_STATE/<ns>/<kind>/<name>.json, and runs
 # `exec ... -- <command>` on this machine (a local OpenBao server stands in
 # for the pod). Every call is appended to $STUB_STATE/calls.log.
+# STUB_BAO_PORTS ("<pod>=<port> ...") stands in for several OpenBao pods:
+# an exec in a pod it names talks to 127.0.0.1:<port> instead of :8200.
+# StatefulSets are JSON files too (get statefulset, -o json or
+# -o jsonpath={.spec.replicas}).
 set -euo pipefail
 : "${STUB_STATE:?}"
 mkdir -p "$STUB_STATE"
@@ -75,6 +79,7 @@ get)
 	case "$kind" in
 	secret) kind=Secret ;;
 	configmap) kind=ConfigMap ;;
+	statefulset) kind=StatefulSet ;;
 	clusterissuer) exit 0 ;;
 	*) echo "stub kubectl: get $kind unsupported" >&2; exit 2 ;;
 	esac
@@ -85,13 +90,36 @@ get)
 	"-o json") cat "$f" ;;
 	"-o jsonpath={.data.root}") jq -j '.data.root' "$f" ;;
 	"-o jsonpath={.data.ca\.crt}") jq -j '.data["ca.crt"]' "$f" ;;
+	"-o jsonpath={.spec.replicas}") jq -j '.spec.replicas' "$f" ;;
+	"") cat "$f" >/dev/null ;;
 	*) echo "stub kubectl: get output $* unsupported" >&2; exit 2 ;;
 	esac
 	;;
+port-forward)
+	# Stands in for the tunnel kubectl opens on a port it picks: says where,
+	# then stays up until it is killed.
+	echo "Forwarding from 127.0.0.1:${STUB_PF_PORT:-17070} -> ${3##*:}"
+	exec sleep 600
+	;;
 exec)
 	shift
-	while [[ $# -gt 0 && "$1" != -- ]]; do shift; done
+	pod=""
+	while [[ $# -gt 0 && "$1" != -- ]]; do
+		case "$1" in
+		-c) shift ;;
+		-*) ;;
+		*) [[ -n "$pod" ]] || pod="$1" ;;
+		esac
+		shift
+	done
 	shift
+	port=""
+	for m in ${STUB_BAO_PORTS:-}; do
+		[[ "${m%%=*}" == "$pod" ]] && port="${m#*=}"
+	done
+	if [[ -n "$port" ]]; then
+		set -- "${@//127.0.0.1:8200/127.0.0.1:$port}"
+	fi
 	exec "$@"
 	;;
 *) echo "stub kubectl: $* unsupported" >&2; exit 2 ;;
