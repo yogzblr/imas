@@ -124,8 +124,9 @@ openbao:
       - name: seal
         secret:
           secretName: imas-uat-openbao-seal
-          # Readable by the pod's group (fsGroup), not world.
-          defaultMode: 0440
+          # 0440 (decimal, so no YAML parser reads it differently):
+          # readable by the pod's group (fsGroup), not world.
+          defaultMode: 288
     volumeMounts:
       - name: seal
         mountPath: /openbao/seal
