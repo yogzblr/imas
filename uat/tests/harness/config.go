@@ -55,14 +55,64 @@ const (
 	FamilyWindows = "windows"
 )
 
-// Host is a hub VM (dmz or core) in uat.json.
+// Host is a hub (dmz or core) in uat.json. Name, ID and PrivateIP are its
+// first node (its only node in the single-node run); PublicIP and FQDN what
+// the runner reaches (the node, or an HA hub's public load balancer). P24
+// adds every node, in node order, and the hub's private address
+// (APIAddress: the node's own, or the internal load balancer's on an HA
+// hub, which <hub>.<private_dns_zone> resolves to).
 type Host struct {
-	Name      string `json:"name"`
-	ID        string `json:"id"`
-	PrivateIP string `json:"private_ip"`
-	PublicIP  string `json:"public_ip"`
-	FQDN      string `json:"fqdn"`
-	AdminUser string `json:"admin_user"`
+	Name           string   `json:"name"`
+	ID             string   `json:"id"`
+	PrivateIP      string   `json:"private_ip"`
+	PublicIP       string   `json:"public_ip"`
+	FQDN           string   `json:"fqdn"`
+	AdminUser      string   `json:"admin_user"`
+	NodeNames      []string `json:"node_names,omitempty"`
+	NodeIDs        []string `json:"node_ids,omitempty"`
+	NodePrivateIPs []string `json:"node_private_ips,omitempty"`
+	APIAddress     string   `json:"api_address,omitempty"`
+	APIFQDN        string   `json:"api_fqdn,omitempty"`
+}
+
+// HubNode is one VM of a hub.
+type HubNode struct {
+	Name      string
+	ID        string
+	PrivateIP string
+}
+
+// Nodes lists the hub's VMs in node order: node_names with their IDs and
+// addresses, or the one node of a uat.json written before P24.
+func (h Host) Nodes() []HubNode {
+	if len(h.NodeNames) == 0 {
+		if h.Name == "" {
+			return nil
+		}
+		return []HubNode{{Name: h.Name, ID: h.ID, PrivateIP: h.PrivateIP}}
+	}
+	out := make([]HubNode, len(h.NodeNames))
+	for i, n := range h.NodeNames {
+		out[i].Name = n
+		if i < len(h.NodeIDs) {
+			out[i].ID = h.NodeIDs[i]
+		}
+		if i < len(h.NodePrivateIPs) {
+			out[i].PrivateIP = h.NodePrivateIPs[i]
+		}
+	}
+	return out
+}
+
+// HA reports whether the hub runs on several nodes (the HA run, P24).
+func (h Host) HA() bool { return len(h.Nodes()) > 1 }
+
+// Address is the hub's private address: APIAddress, or the first node's.
+func (h Host) Address() string {
+	if h.APIAddress != "" {
+		return h.APIAddress
+	}
+	return h.PrivateIP
 }
 
 // SproutVM is one entry of uat.json's sprouts map (keyed by VM name).

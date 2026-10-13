@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -342,5 +343,24 @@ printf '{"username":"%s","tenant_id":"%s","role":"%s","password_file":"%s"}\n' "
 	u, err := f.ScratchUser(ctx(t), "t_jjjjjjjjjjjjjjjj")
 	if err != nil || u.User.Password != "pw-from-file" || !strings.HasPrefix(u.User.Username, "scratch-") {
 		t.Errorf("%+v %v", u, err)
+	}
+}
+
+// TestCoreTopology: core.json's topology (P24) decodes; a core.json from
+// before it has none.
+func TestCoreTopology(t *testing.T) {
+	var c CoreJSON
+	if err := json.Unmarshal([]byte(`{"topology": {"ha": true, "core_nodes": 3, "dmz_nodes": 3, "core_address": "10.60.2.250",
+		"dmz_address": "10.60.1.250", "object_store": "versity", "valkey_primary": "imas-core-valkey-0"}}`), &c); err != nil {
+		t.Fatal(err)
+	}
+	want := CoreTopology{HA: true, CoreNodes: 3, DMZNodes: 3, CoreAddress: "10.60.2.250", DMZAddress: "10.60.1.250",
+		ObjectStore: "versity", ValkeyPrimary: "imas-core-valkey-0"}
+	if c.Topology == nil || *c.Topology != want {
+		t.Errorf("topology %+v", c.Topology)
+	}
+	var old CoreJSON
+	if err := json.Unmarshal([]byte(`{"saasapi_url": "https://x"}`), &old); err != nil || old.Topology != nil {
+		t.Errorf("a core.json without topology: %+v %v", old.Topology, err)
 	}
 }

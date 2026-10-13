@@ -221,3 +221,45 @@ func TestSproutHelpers(t *testing.T) {
 		t.Error("DefaultAssetID")
 	}
 }
+
+// TestHubNodes: uat.json's hubs list every node (P24). The HA sample is
+// uat/access/testdata/uat-ha.json, whose shape tofu test keeps equal to
+// the real output; a hub of one node (or a uat.json from before P24) is one
+// node at its private_ip.
+func TestHubNodes(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "access", "testdata", "uat-ha.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := ParseUAT(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for hub, h := range map[string]Host{"core": u.Core, "dmz": u.DMZ} {
+		nodes := h.Nodes()
+		if len(nodes) != 3 || !h.HA() {
+			t.Fatalf("%s: nodes %+v", hub, nodes)
+		}
+		for i, n := range nodes {
+			if n.Name != h.NodeNames[i] || n.ID != h.NodeIDs[i] || n.PrivateIP != h.NodePrivateIPs[i] || n.Name == "" || n.PrivateIP == "" {
+				t.Errorf("%s node %d: %+v", hub, i, n)
+			}
+		}
+		if h.Address() != h.APIAddress || h.Address() == h.PrivateIP {
+			t.Errorf("%s: address %q, want the internal load balancer %q", hub, h.Address(), h.APIAddress)
+		}
+	}
+	single, err := ParseUAT([]byte(sampleUAT))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := single.Core.Nodes(); len(n) != 1 || n[0].Name != single.Core.Name || n[0].PrivateIP != "10.60.2.4" || single.Core.HA() {
+		t.Errorf("single node: %+v", n)
+	}
+	if single.DMZ.Address() != single.DMZ.PrivateIP {
+		t.Errorf("single node: address %q, want private_ip", single.DMZ.Address())
+	}
+	if (Host{}).Nodes() != nil {
+		t.Error("an empty hub has nodes")
+	}
+}

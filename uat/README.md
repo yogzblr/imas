@@ -173,9 +173,12 @@ names the piece):
    and the vCPUs needed, in use and the limit to request, when the region's
    quota cannot hold the run; the apply applies exactly that checked plan
    (a retry plans and checks again). The per-run SSH key and Windows password go to
-   0600 files on the runner, masked in the log; `uat.json` and
-   `ha_node_names.json` (the VMs the HA tests stop) go to the run's state
-   directory.
+   0600 files on the runner, masked in the log; `uat.json`,
+   `ha_node_names.json` (the VMs the HA tests stop) and `object_store.json`
+   (the HA run's Azure Blob account, `null` otherwise) go to the run's state
+   directory. On the HA run the account's name and key (masked) go to
+   `<state>/hub/core/sensitive/azure-blob/`, which the core install turns into
+   Versity Gateway's credential Secret.
 5. **Bastion tunnels** (`uat/access/tunnels.sh open`, after `az extension add`
    for `bastion` and `ssh`): SSH and the Kubernetes API on every hub node, and
    on an HA run also each hub's API address (`dmz-api`, `core-api`).
@@ -184,20 +187,22 @@ names the piece):
    per hub on etcd, waiting for every node Ready and every etcd member joined.
 7. **Core hub** (`uat/hub/core/install.sh`: the release's published chart,
    checked to carry the stamped sprout release; the operator plane on; the
-   dispatch flags as asked; `validate-rustfs.sh` proves each scoped RustFS
-   credential),
+   dispatch flags as asked; `validate-object-store.sh` proves each scoped
+   credential on RustFS; on the HA run the overlay `values/values-ha.yaml`
+   and Versity Gateway instead, see [HA run](#ha-run)),
    then the **DMZ hub** (`uat/hub/dmz/install.sh`: core's public NATS trust
    copied from its ConfigMap; the bus loader's seed and the read-only
    accounts credential from core's state directory, `--loader-seed` and
-   `--accounts-reader-dir`), then **core's second half** (`uat/hub/core/finish.sh`: farmer and
+   `--accounts-reader-dir`; on the HA run also the fence user's seed,
+   `--fence-seed`, and its own `values-ha.yaml`), then **core's second half** (`uat/hub/core/finish.sh`: farmer and
    saasapi need the DMZ bus, so it waits for them, registers the sprout
    release (the hook Job must complete, and saasapi's operator API must then
    hold `release_tag` with its GPG-signed `checksums.txt` and signature, or
    the step fails) and runs core's `check.sh`) and the **DMZ check** (`check.sh`, before enrolment because it
    empties and then waits out Envoy's enrolment rate limit). Core comes first
    because the bus needs core's trust (with the loader's JWT), the loader's
-   seed and the accounts bucket (on core's RustFS, which the DMZ reads on
-   port 9000) when it starts.
+   seed and the accounts bucket (on core's object store, which the DMZ reads
+   on port 9000) when it starts.
 8. **Tenants and enrolment** (`uat/enroll/enroll.sh`).
 9. **Test material** (`uat/scripts/material.sh`) and a second Azure login,
    then **the tests** (`uat/tests/run.sh <tier> [ids]`).
@@ -223,7 +228,7 @@ no silent green rule). Use `smoke`, `core` or `resilience` until then.
 | Artifact | Contents |
 |---|---|
 | `uat-report-<run_id>` | `summary.txt` (one line per scenario, OS and tenant), `junit.xml`, `events.json` (`go test -json`), `build.log` |
-| `uat-outputs-<run_id>` | `run.json` (this run's inputs), `uat.json` (tofu output, no credentials), `ha_node_names.json` (tofu output), `k0s/endpoints.json`, the UAT CA certificate, the rendered k0sctl files, `hub/core/out/core.json` and `admin.json` (public keys), `hub/harness.json`, `dmz/dmz.json`, `enroll/{run,tenants,keys,sprouts,sprouts-detail}.json` |
+| `uat-outputs-<run_id>` | `run.json` (this run's inputs), `uat.json` (tofu output, no credentials), `ha_node_names.json` and `object_store.json` (tofu outputs, no key), `k0s/endpoints.json`, the UAT CA certificate, the rendered k0sctl files, `hub/core/out/core.json` and `admin.json` (public keys), `hub/harness.json`, `dmz/dmz.json`, `enroll/{run,tenants,keys,sprouts,sprouts-detail}.json` |
 
 Never uploaded: the SSH key, the WinRM password, the kubeconfigs, OpenBao's
 unseal keys and root token, the NKey seeds, the bootstrap admin's private
@@ -234,6 +239,72 @@ passwords, secrets, tokens or unseal keys; a match is removed and fails the
 step. (`uat/hub/core/README.md` mentions keeping `openbao-init.json` as a
 sensitive artifact; the gate does not upload it at all. A kept environment
 keeps its unseal keys in the cluster Secret `imas-uat-openbao-unseal`.)
+
+## HA run
+
+`hub_nodes` 3 (Run 3; brief `docs/briefs/H-azure-next-runs.md`, H1 to H5)
+builds three controller+worker k0s nodes per hub (`uat/tofu`, `uat/k0s`)
+and installs both hubs with an HA overlay on top of their UAT values,
+chosen by the node count in the endpoints file (no input of its own):
+
+| Hub | Overlay | What changes |
+|---|---|---|
+| core | `uat/hub/core/values/values-ha.yaml` | farmer, saasapi and Versity Gateway 3 replicas each, spread one per node (`topologySpreadConstraints` over `kubernetes.io/hostname`, maxSkew 1, `DoNotSchedule`) with PodDisruptionBudgets; PXC 3 nodes and 3 HAProxy (no `unsafeFlags`); OpenBao 3-node raft (`retry_join` between the pods, the static seal below); Valkey a primary and 2 replicas (the chart's replicated mode); the object store Versity Gateway over the run's Azure Blob account instead of RustFS. The UAT-only chart runs one edge proxy per node. |
+| DMZ | `uat/hub/dmz/values-ha.yaml` | the bus a 3-node NATS cluster (fence user, route password, every pod on the bus certificate) and Envoy 3 replicas, spread one per node with PodDisruptionBudgets. |
+
+Neither farmer, saasapi, Versity Gateway, the bus nor Envoy carries a
+volume: the bus's resolver directory is an `emptyDir`, rebuilt by its loader
+from the accounts bucket at every start.
+
+**Local volumes.** The stateful services (PXC, OpenBao, Valkey) keep their
+data on the nodes' local volumes (StorageClass `local-path`, `uat/k0s`):
+each replica's volume lives on its own node (owner, 2026-10-11) and they
+replicate among themselves. So **a stateful pod on a stopped node stays
+unavailable until that node returns**: its volume cannot follow it to
+another node, and Kubernetes does not reschedule it. Meanwhile the
+replicas on the other nodes serve: PXC and OpenBao keep a quorum with two
+of three, and the HA tests (`ha` tier) assume exactly that. When the node
+returns its pods start on their own volumes and rejoin (OpenBao unseals
+itself, below; a PXC node resyncs from the others). Two single points are
+known and are not stopped by the node-stop test, which stops a node hosting
+a farmer pod, a bus pod and a *replica* of each stateful service:
+
+- **Valkey's primary** is pod 0 (`core.json` `topology.valkey_primary`): the
+  valkey-io chart 0.12.0 has no Sentinel or cluster mode, so the replicas
+  serve reads while the primary's node is down but nothing takes its
+  writes until it returns.
+- **Keycloak** (UAT only, `uat/hub/core/chart`) is one pod on an H2 file
+  volume: tokens for the tests come from it.
+
+**OpenBao's seal.** The single-node run unseals OpenBao with Shamir keys,
+by script (`openbao-bootstrap.sh`), which a pod restarted by a test would
+not get. The HA run uses OpenBao's static seal instead: a 32-byte key
+`install.sh` generates once (`<state>/core/sensitive/openbao-seal.key`) in
+Secret `imas-uat-openbao-seal`, which every OpenBao pod mounts, so each pod
+unseals itself on every start and rejoins raft. `openbao-bootstrap.sh`
+initialises pod 0 once with recovery keys (kept like the unseal keys of the
+single-node run) and waits for three unsealed voters. **UAT only:** anyone
+who reads the seal Secret and a raft volume reads OpenBao
+(`docs/design/imas-openbao-signing-design.md`, "Static seal (test)").
+
+**Object store.** `uat/tofu` creates the run's storage account
+(`imasuat<run_id>`, `object_store` output) when core has several nodes; the
+workflow writes its name and key (masked) to
+`<state>/hub/core/sensitive/azure-blob/`, and `install.sh` makes Versity
+Gateway's Secrets from them, its root credential and the four users' pairs
+(the accounts reader's goes to the DMZ as before). The chart's
+`createBuckets` Job makes the buckets (containers) and their policies;
+`validate-object-store.sh` then proves each user's reach through the
+gateway. The DMZ's bus loader reads the accounts bucket on core's private
+address, port 9000, where the core edge proxy passes it to the gateway.
+
+**Load balancers.** Each HA hub's private address is its internal load
+balancer (`api_address`), so the other hub and the sprouts keep one address
+while a node is stopped. The NetworkPolicies admit the other hub's traffic
+from its nodes' addresses and the Azure health probe's source
+(168.63.129.16) on the load-balanced ports, or a node would drop out of the
+balancer's rule. `uat/hub/dmz/check.sh`'s enrolment burst scales with the
+Envoys (each has its own bucket of 20 per 60 s).
 
 ## Keeping an environment for debugging
 
@@ -420,7 +491,8 @@ OpenTofu and the azurerm, random and tls providers (MPL-2.0), the Azure CLI
 and its extensions (MIT), k0s, k0sctl, kubectl, cert-manager,
 local-path-provisioner, Helm and Keycloak (Apache-2.0), Ansible (GPL-3.0,
 controller tooling), pywinrm (MIT), and in the environment PXC (GPLv2) and
-OpenBao (MPL-2.0) (recorded exceptions), RustFS (Apache-2.0, the UAT object store) and
+OpenBao (MPL-2.0) (recorded exceptions), RustFS (Apache-2.0, the single-node
+run's object store), Versity Gateway (Apache-2.0, the HA run's, design D18) and
 busybox (GPL-2.0, UAT only, pending owner confirmation). The workflows use the
 GitHub actions `actions/*`, `azure/login`, `azure/setup-helm` and
 `opentofu/setup-opentofu`, which run on the runner only (their licences were
