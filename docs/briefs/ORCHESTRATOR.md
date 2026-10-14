@@ -53,6 +53,8 @@ A unit may start only when every unit in "Needs" is merged to main.
 | H4 | `H-azure-next-runs.md` H4 | H2, H3 |
 | H5 | `H-azure-next-runs.md` H5 | R1, H4 |
 | H6 | `H-azure-next-runs.md` H6 | R1, H1, H2, H3, H4, H5 |
+| S1 | `S-hardening.md` S1 | none |
+| S2 | `S-hardening.md` S2 | none |
 
 First wave of the original build (no needs): A1, B1, C1, D1, D2. Units A to D are all merged (C2 last, as PR 229; its leftovers are E6); the follow-up units E1 to E5 and Z are launched in the same way, E6 first by rule 10 (E3 waits for it). Why the order: P22 first (design D13);
 A2 and the P21 slice 1 chart work both edit the farmer bootstrap Job and policies, so
@@ -208,3 +210,5 @@ Paste this into a Claude Code session started in the yogzblr/imas repo on main.
 | H4 | P24: HA hub values and scripts | H-azure-next-runs.md | H4 |
 | H5 | P23, P24: the ha test tier | H-azure-next-runs.md | H5 |
 | H6 | Final gate for the next runs, runbook | H-azure-next-runs.md | H6 |
+| S1 | P3 3.3: loader mounts the CA from a ConfigMap | S-hardening.md | S1 |
+| S2 | P3 3.3: no secrets or passwords in the audit log | S-hardening.md | S2 |
