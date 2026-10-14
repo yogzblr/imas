@@ -73,8 +73,11 @@ takes with it:
 
 - **Soft delete and purge protection on.** A deleted key or vault is
   recoverable only while purge protection holds it.
-- One key reserved for OpenBao, `key_ops` limited to what the OpenBao Azure
-  Key Vault seal documentation lists (wrap and unwrap).
+- One key reserved for OpenBao. Its identity needs `get`, `wrapKey` and
+  `unwrapKey` on that key and nothing else (with Azure RBAC, a role that
+  allows them, such as Key Vault Crypto Service Encryption User, scoped to the
+  key). OpenBao's seal page lists the settings; check it for the pinned
+  version.
 - Access from OpenBao's pods by workload identity, scoped to that key only;
   no client secret in the chart values.
 - The vault is in the same region as the cluster, with a documented
@@ -255,14 +258,32 @@ purge protection and the retired-version rule.
 ## 7. Seal change or migration
 
 Moving between seals (for example the static seal used in UAT to Azure Key
-Vault, or Key Vault to another provider) is a documented OpenBao
-procedure ("seal migration"): the old seal is kept in the configuration with
-`disabled = "true"` while the new one is added, the pods restart, and the
-cluster migrates. Take a snapshot first, do one node at a time exactly as the
-migration page for the pinned version says, and only remove the old seal
-configuration after all peers have migrated and a fresh snapshot exists under
-the new seal. Keep the old seal key until the retention rule in section 3
-allows its removal.
+Vault, or Key Vault to another provider) is the documented OpenBao "seal
+migration" (the seal concepts page for the pinned version). It is a
+**planned-downtime** operation: both the old and the new seal must be
+reachable throughout, and one combination is not supported (the docs say AWS
+KMS to AWS KMS cannot be migrated; read the page for your pair of seals
+first).
+
+1. Take a snapshot (section 4) and note its name in the change record.
+2. Take one **standby** down. In its configuration keep the old seal block
+   with `disabled = "true"` and add the new seal block. Restart it.
+3. Run `bao operator unseal -migrate` once per recovery-key share, one share
+   per invocation, until the threshold (2) is met. Check the node is
+   unsealed and has rejoined (`bao operator raft list-peers`), then do the
+   next standby the same way. Never have two nodes down at once: Raft needs
+   its quorum.
+4. When every standby has migrated, run `bao operator step-down` on the
+   active node and **verify** that a standby became active and that Raft
+   quorum holds (`bao operator raft list-peers`). The same node can win the
+   lock again; if it did, repeat the step-down.
+5. Watch the new active node's log for the migration to complete and allow
+   time for the migration information to replicate. Then take the former
+   active node down, update its seal configuration, and restart it.
+6. Remove the old seal block from every node's configuration only after all
+   peers have migrated, and take a fresh snapshot under the new seal.
+   Keep the old seal key until the retention rule in section 3 allows its
+   removal.
 
 ## 8. The restore drill (launch gate)
 
@@ -270,15 +291,23 @@ Run it before production launch, then every quarter and after any seal,
 version or topology change. A drill that has not been run is not a backup.
 
 1. In a scratch namespace or cluster, start an OpenBao with the same image
-   and a seal pointing to the same Azure Key Vault key (read access only to
-   the version needed).
-2. Restore the newest production snapshot (section 6.2 steps 2).
+   and a seal pointing to the same Azure Key Vault key. The drill's identity
+   needs the same key permissions as production: `get`, `wrapKey` and
+   `unwrapKey` (with Azure RBAC, a role that allows them such as Key Vault
+   Crypto Service Encryption User, scoped to that one key). Metadata read
+   access alone cannot unseal. That identity can decrypt production data, so
+   it is time-limited, held by the drill's owner only, and removed when the
+   drill ends.
+2. Confirm the scratch cluster auto-unseals, then restore the newest
+   production snapshot (section 6.2 step 2).
 3. With a root token regenerated from two recovery-key holders (this also
    proves custody), check: the three platform keys exist and are not
    exportable (`bao read transit/keys/nats-operator`); each reports the same
    public key as the trust ConfigMap in production; one tenant key signs
-   (`bao write transit/sign/nats-tsign-<tenant>` on a test input) and the
-   public key matches the tenant's Account JWT; the KV tenant keypairs list;
+   and verifies a fixed, non-secret test input (`in=$(printf 'imas-restore-drill' | base64)`,
+   `bao write transit/sign/nats-tsign-<tenant> input="$in"`, then
+   `bao write transit/verify/nats-tsign-<tenant> input="$in" signature=<the signature returned>`
+   answers `valid: true`) and its public key matches the tenant's Account JWT; the KV tenant keypairs list;
    the audit device and auth mounts are present.
 4. Record the result below and destroy the scratch cluster and its token.
 
@@ -290,7 +319,8 @@ version or topology change. A drill that has not been run is not a backup.
 
 ## 9. Checks after any restore, upgrade or seal change
 
-- `bao status`: initialized, unsealed, HA enabled, three Raft peers, one leader.
+- `bao status` on each pod: initialized, unsealed, HA enabled.
+- `bao operator raft list-peers`: three peers, one leader.
 - The three platform Transit keys exist; their public keys equal the NKeys in
   the trust ConfigMap (`natsTrust.configMapName`).
 - `farmer` pods Ready and reading keys through Transit (a new sprout enrols
