@@ -7,11 +7,14 @@ sections 3.3 (items 1 and 6) on 2026-10-14. Decisions below are final.
 
 Owner decisions (2026-10-14):
 
-- **S1.** The bus loader gets the CA certificate from a ConfigMap and never
-  mounts the bus's TLS volume, in every TLS mode. The CA is public data; a
-  ConfigMap is configuration, not pod state, so the loader and the bus stay
-  stateless. The bus keeps issuing its own key in memory (`openbao` mode);
-  no key is stored in a Secret for this.
+- **S1.** The bus loader never mounts the bus's TLS volume or the bus key,
+  in either TLS mode. In `openbao` mode it gets the CA certificate from a
+  ConfigMap (public data; a ConfigMap is configuration, not pod state, so the
+  loader and the bus stay stateless), and the bus keeps issuing its own key
+  in memory. In `secret` mode nothing changes: the loader already mounts only
+  the `ca.crt` item of the customer's TLS Secret, never `tls.key`, and a
+  second ConfigMap there would be one more thing for the customer to supply
+  with no gain in isolation.
 - **S2.** Secrets and passwords must not reach the audit log (stdout, then
   Fluent Bit, kept 30 days). Use the `masq` library where it fits (Apache-2.0,
   allowed by `CLAUDE.md`), and a small in-repo walker where it does not.
@@ -67,10 +70,19 @@ Build:
    changes in the Job's token handling.
 4. **Copy step:** wherever the NATS trust ConfigMap is copied to the bus
    namespace or the DMZ hub (`uat/hub` scripts, `deploy/helm/nats/README.md`,
-   `deploy/helm/farmer/README.md` "NATS trust"), copy `imas-bus-ca` as well
+   `deploy/helm/farmer/README.md` "NATS trust"), copy the CA ConfigMap as well
    when the bus runs in `openbao` mode, with the same wording ("public data
-   only"). The UAT uses `secret` mode today, so only the copy code and its
-   script tests change there; do not switch the UAT's mode.
+   only"). The two names are two values that default to the same string
+   (`natsTrust.busCAConfigMapName` in the farmer chart, the source;
+   `bus.loader.caConfigMap` in the nats chart, the destination). The copy
+   reads the **source** name from the farmer release's value and writes
+   under the **destination** name from the nats release's value, so an
+   override of either is delivered (a different destination name is a
+   rename). The UAT script takes both names as variables
+   (`DMZ_BUS_CA_SRC_CONFIGMAP`, `DMZ_BUS_CA_CONFIGMAP`, next to
+   `DMZ_TRUST_CONFIGMAP`), both defaulting to `imas-bus-ca`, and its script
+   test covers an override. The UAT uses `secret` mode today, so only the
+   copy code and its script tests change there; do not switch the UAT's mode.
 5. **Docs:** the nats README describes the loader's mounts exactly (CA
    ConfigMap, SYS user seed, accounts-reader credential, trust ConfigMap; no
    bus key in either mode) and says a CA rotation is a ConfigMap update with
@@ -96,6 +108,7 @@ Tests (the repo's chart test pattern):
 
 Search gate: `loader-ca`, `tls-rootca.pem`, `IMAS_LOADER_CA_FILE`,
 `imas-nats-trust`, `DMZ_TRUST_CONFIGMAP`, `busCAConfigMapName`,
+`DMZ_BUS_CA_SRC_CONFIGMAP`, `DMZ_BUS_CA_CONFIGMAP`,
 `caConfigMap` across `deploy/`, `uat/`, `docs/`, `.github/`.
 
 ## S2: no secrets or passwords in the audit log
