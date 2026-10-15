@@ -14,7 +14,7 @@ below, plus the precise anchor text to paste it near in your actual repo.
 > infinite 250ms polling loop if `entropy_avail < 256`. On KVM guests running
 > kernels older than 5.6 without `virtio-rng`, this is a **permanent
 > deadlock**, not a slow start — the process hangs forever waiting for
-> entropy that never arrives. Given CloudXP's BFSI/government customer base
+> entropy that never arrives. Given the cloud platform's BFSI/government customer base
 > plausibly includes on-prem KVM stacks and older hardware, this is a real
 > field risk, not a theoretical one — precisely the kind of failure that
 > won't show up in dev/test on modern cloud infra and will only surface on a

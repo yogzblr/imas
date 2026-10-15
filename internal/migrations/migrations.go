@@ -1,6 +1,6 @@
 // Package migrations holds the versioned schema migrations for imas's two
 // PXC schemas, farmer and saas, and the checks around them (design doc
-// docs/design/cloudxp-machine-manager-api-design.md §4.1a). cmd/migrate
+// docs/design/imas-machine-manager-api-design.md §4.1a). cmd/migrate
 // is the only thing that applies them: each set as its own schema's
 // owner, so single writer per schema (§4.1) holds for DDL too. cmd/farmer
 // and cmd/saasapi only read the version (WaitForSchema) and never change

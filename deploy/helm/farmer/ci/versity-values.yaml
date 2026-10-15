@@ -23,8 +23,8 @@ versity:
     credentialsSecret: imas-bus-accounts-reader
 saasapi:
   jwt:
-    keycloakJWKSURL: https://keycloak.example.com/realms/cloudxp/protocol/openid-connect/certs
-    issuer: https://keycloak.example.com/realms/cloudxp
+    keycloakJWKSURL: https://keycloak.example.com/realms/imas/protocol/openid-connect/certs
+    issuer: https://keycloak.example.com/realms/imas
     audience: imas-saasapi
   recipes:
     enabled: true

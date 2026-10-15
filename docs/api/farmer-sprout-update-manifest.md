@@ -5,7 +5,7 @@ the same HTTPS listener as the sprout recipe download (`GET /files/`),
 registered in [`internal/api/routers.go`](../../internal/api/routers.go),
 handled by `GetSproutUpdateManifest` in
 [`internal/api/handlers/update_manifest.go`](../../internal/api/handlers/update_manifest.go).
-Design: [API design §2.6](../design/cloudxp-machine-manager-api-design.md#26-update-manifest-endpoint),
+Design: [API design §2.6](../design/imas-machine-manager-api-design.md#26-update-manifest-endpoint),
 with the release trust in §2.5 and the
 [signing design](../design/imas-openbao-signing-design.md) §4.1 (D9, D20).
 

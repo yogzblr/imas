@@ -62,5 +62,5 @@ This page is a map, not the full rationale. For *why* the platform is built
 this way, see, in `docs/design/` on GitHub:
 
 - [`imas-master-plan.md`](https://github.com/yogzblr/imas/blob/main/docs/design/imas-master-plan.md) — the phase-wise build plan and the "settled architecture" decisions it works from
-- [`imas-fork-roadmap.md`](https://github.com/yogzblr/imas/blob/main/docs/design/imas-fork-roadmap.md) — per-workstream detail on what changed from the original grlx fork
-- [`cloudxp-machine-manager-api-design.md`](https://github.com/yogzblr/imas/blob/main/docs/design/cloudxp-machine-manager-api-design.md) — the SaaS API's design (the [reference](./api-reference.md) here follows the shipped code where they differ)
+- [`imas-fork-roadmap.md`](https://github.com/yogzblr/imas/blob/main/docs/design/imas-fork-roadmap.md) — per-workstream detail on what was built, workstream by workstream
+- [`imas-machine-manager-api-design.md`](https://github.com/yogzblr/imas/blob/main/docs/design/imas-machine-manager-api-design.md) — the SaaS API's design (the [reference](./api-reference.md) here follows the shipped code where they differ)

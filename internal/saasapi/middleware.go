@@ -59,7 +59,7 @@ func Logger(inner http.Handler, name string) http.Handler {
 //
 // For any route with a {tenant_id} path parameter, the verified JWT's
 // "organization" claim is parsed (see Organization) and organization.id
-// — CloudXP's "customer_id", the same concept as tenant_id everywhere
+// — the cloud platform's "customer_id", the same concept as tenant_id everywhere
 // else in this codebase — is compared against the path's {tenant_id}.
 // This claim is confirmed always present on a correctly-configured
 // Keycloak realm, so an absent or unparseable claim here is treated as a

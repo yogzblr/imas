@@ -1,7 +1,7 @@
 // Command migrate owns the schemas of imas's PXC cluster: it creates the
 // farmer and saas schemas and their users, applies their grants, and runs
 // each schema's versioned migrations (internal/migrations) as that
-// schema's own user. See docs/design/cloudxp-machine-manager-api-design.md
+// schema's own user. See docs/design/imas-machine-manager-api-design.md
 // §4.1 (grants) and §4.1a (migrations).
 //
 //	migrate up      root step, both migration sets, then farmer's

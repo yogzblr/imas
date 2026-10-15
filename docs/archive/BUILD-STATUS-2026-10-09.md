@@ -195,12 +195,12 @@ beyond unit tests (real Envoy, Molecule containers, real OpenBao).
 | 21 | Licensing | **Amber** | Built, **BSD/ISC/0BSD not recorded** | Apache/MIT default; PXC and MPL-2.0 exceptions recorded; goose (MIT) added. LIC.1 (PR #73) fixed the `go-licenses` workflow: pinned to v2.0.1, whose classifier identifies `modernc.org/mathutil`'s LICENSE as the BSD-3-Clause it is (v1.6.0, what `@latest` gave, could not); the check now also fails on an unidentified licence and runs on pull requests; `dependencies/` is regenerated for Linux, the Windows sprout and the darwin CLI. Both jobs have passed on every `main` push that ran them since (`7fb527a` included). `DEPENDENCIES.md` lists every module that is not Apache-2.0 or MIT and which binaries link it. BSD-2-Clause, BSD-3-Clause, ISC and 0BSD (Go's own `x/*` modules among them) are not yet recorded under item 21. Open question from PR #73: the MPL-2.0 OpenBao client is linked into the imas CLI too. |
 
 **Repository-history note, read before trusting a PR number below:** this
-repo (`yogzblr/imas`) was created by detaching from `yogzblr/grlx` while
-keeping full commit history (see the `Rebrand: grlx -> imas` commit,
+repo (`yogzblr/imas`) was created by detaching from its predecessor repo while
+keeping full commit history (see the `Rebrand to imas` commit,
 `b4a0195`, 2026-09-26). GitHub PR numbers are per-repo counters, so every PR
 number cited for work merged **before** `b4a0195` (all of Wave 0, Wave 1,
 Wave 2, and the ongoing ingredient batch below) refers to a PR on the old,
-superseded `yogzblr/grlx` repo — those numbers do not resolve on
+superseded predecessor repo — those numbers do not resolve on
 `yogzblr/imas` and may collide with an unrelated, real PR number here (e.g.
 old "#20"/"#21"/"#22" below are different PRs from the current, real
 `yogzblr/imas` #20/#21/#22 in the Workstream M section). The commit hashes
@@ -442,14 +442,14 @@ status this table originally recorded was stale.
 
 ## Post-rebrand work (not part of the original Wave 0–2 plan)
 
-Everything below merged to `main` after `b4a0195` (the `grlx` → `imas`
+Everything below merged to `main` after `b4a0195` (the rename to `imas`
 rebrand), on real, current `yogzblr/imas` PR numbers. None of it was
 dispatched from `claude-code-parallel-build-plan.md` — it was tracked
 directly in this session instead.
 
 | Item | Description | Status |
 |---|---|---|
-| Rebrand + CI setup | `Rebrand: grlx -> imas` (`b4a0195`); added `build.yml` (Linux/Windows cross-compile + farmer Docker); made `snapshot.yml`/`release.yml` manual-only until publish secrets exist on the new repo; `govulncheck`/`go-licenses` CI fixes | merged (`b4a0195`, `e7c8860`, `65e59e1`, `0d1b975`) |
+| Rebrand + CI setup | `Rebrand to imas` (`b4a0195`); added `build.yml` (Linux/Windows cross-compile + farmer Docker); made `snapshot.yml`/`release.yml` manual-only until publish secrets exist on the new repo; `govulncheck`/`go-licenses` CI fixes | merged (`b4a0195`, `e7c8860`, `65e59e1`, `0d1b975`) |
 | Helm charts | Chart for farmer (core) and saasapi, with optional PXC/OpenBao/Valkey subcharts | merged — PR #17 (`b5a418d`) |
 | Farmer bus/CLI separation | Separated farmer's bus address from its API interface address (`farmerinterface`); `imas` CLI now reads `farmerbusurl` and verifies the bus via `BusTLSServerName` instead of assuming they're the same host | merged — PR #18 (`f30b9dd`), PR #19 (`01b4013`) |
 | **Workstream M.1** — Windows SCM service wrapper for the sprout binary | `golang.org/x/sys/windows/svc` lifecycle hooks so `imas-sprout.exe` itself runs under the Windows SCM (install/uninstall/start/stop/status via `svc/mgr`, no SIGINT/SIGTERM handling under the SCM, rotating file log) — distinct from G.1's *ingredient* for managing other Windows services | merged — PR #22 (`cfdb73f`, `54d70f4`, `f2fa7fa`, `8b9b388`, `718928e`) |
@@ -458,7 +458,7 @@ directly in this session instead.
 | **Workstream M.4** — customer-run Ansible playbooks | `ansible/roles/imas_sprout` (adds the Buildkite apt/yum/zypper repo or does `win_package`, merges enrollment settings into the sprout's existing config file via drift-detection rather than overwriting it — the sprout itself writes back `sproutid` and empties `jointoken` post-enroll — `no_log` + mode `0600` on the join token) + `ansible/roles/imas_verify` (polls a custom `imas_sprout_bus_status` module for connected state, fails clearly on timeout). Molecule scenario (`ansible/molecule/default/`, a stub farmer + Rocky/Debian/openSUSE Leap 15.6 containers) wired into CI (`.github/workflows/molecule.yml`: `ansible-lint`, `pytest`, `molecule test`). Along the way, caught and fixed two real packaging bugs found while building the playbooks: `packaging/etc/imas-sprout.conf` had `farmerapiport` misspelled `farmeripoprt` (silently ignored, masked by the value matching the default), and `packaging/etc/imas-farmer.conf` had a tab-indented `pubkeys` list (invalid YAML, `LoadConfig` would panic) plus a stale `organization:` key (farmer reads `farmerorganization`) — a new regression test, `internal/config/config_files_test.go`, now statically checks every packaged/testing config's keys against what the code actually reads via `jety`. | **merged** — PR #24 (`0ea6384`), PR #25 (`7377ba9`, `ef36998`, `6c630b7`, `7d3a70e`, `930f191`, `7356668`), PR #26 (`edca7ac`), PR #28 |
 | **Azure UAT gate** (was: Terraform UAT gate) | Superseded the Terraform brief of §4a (item 5): plan section 4h, owner decisions of 2026-10-06 (Azure, OpenTofu, two k0s hubs and six tenant VMs, Bastion-only management). A tagged release's published charts, images and Buildkite packages, installed through the M.4 playbooks, with the acceptance suite (enrolment, isolation, auth, recipes, reboots; ingredients and the package upgrade with UAT.7). | **built in parts, never run**: UAT.1 to UAT.5 merged, UAT.6 (workflow, janitor, `uat/README.md`) ready for review, UAT.7 and UAT.8 not merged at the time of UAT.6. The first release it needs exists (`v0.1.0-rc.4`). It is the main remaining delivery item (Open item 1) |
 | J follow-up: per-tenant tenant keypairs, tenant key rotation with authenticated re-pin, `cmd.run` sealed end to end, box key submissions sealed | See "J follow-up" under Wave 2. FLAG FOR SECURITY REVIEW | merged — PR #30 (`60c39a2`); still flagged for security review |
-| Docs refresh (architecture diagram, SaaS API reference, `INSTALL.md`, this file, `packaging/systemd/*.service` vs `docs/*.service` dedup) | Done on branch `claude/sweet-sagan-yklpu8`: `docs/diagrams/imas-architecture.svg` replaces `grlx-arch-light.png`; `docs/api/saasapi.md` + `docs/api/saasapi-openapi.yaml` (all 18 `NewRouter` routes, the 2 dispatch routes marked off by default); `INSTALL.md` rewritten for tenants, enrollment keys, the SaaS API and Envoy; `docs/imas-{farmer,sprout}.service` removed in favour of `packaging/systemd/` | merged — PR #23 |
+| Docs refresh (architecture diagram, SaaS API reference, `INSTALL.md`, this file, `packaging/systemd/*.service` vs `docs/*.service` dedup) | Done on branch `claude/sweet-sagan-yklpu8`: `docs/diagrams/imas-architecture.svg` replaces `the previous architecture image`; `docs/api/saasapi.md` + `docs/api/saasapi-openapi.yaml` (all 18 `NewRouter` routes, the 2 dispatch routes marked off by default); `INSTALL.md` rewritten for tenants, enrollment keys, the SaaS API and Envoy; `docs/imas-{farmer,sprout}.service` removed in favour of `packaging/systemd/` | merged — PR #23 |
 | J: seal `cook` dispatch and resync nudge end to end | See "As built (J follow-up)" under Wave 2. Closes the highest-priority item on the "still plaintext" list: a compromised bus can no longer inject either a command (`cmd.run`) or a recipe (`cook`) onto a box-ready sprout. Also moved farmer's job-creation recording off the (now sealed) plaintext dispatch onto an explicit hook (`cook.SetDispatchRecorder`). FLAG FOR SECURITY REVIEW | merged — PR #32 (`d2692c8`, `6f1ac36`, `bf5956c`) |
 | H: sprout outbound proxy support for the bus connection (requirements.md item 8) | New sprout config key `busproxyurl` (`http://` HTTP CONNECT or `socks5://`); `pki.LoadSproutBus` wires it as nats.go's `CustomDialer`, covering `wss://`, `tls://` and `nats://` alike, with `nats.SkipHostLookup` so the proxy resolves the bus host. The sprout's HTTP clients already covered this via `ProxyFromEnvironment`; this closes the one real gap (the bus connection itself) | merged — PR #33 (`924e9dc`, `ac523c1`) |
 | J: sprout side of farmer-triggered box key rotation (requirements.md item 15) | Closes "sprout-initiated box key rotation has a farmer side but no sprout side." Farmer-triggered only, no sprout-side scheduling. New key held `pending` until confirmed by the first farmer payload that opens under it; replaced key kept `previous` for `sproutboxkeyprevgrace` (default 15m, floored at `2×DefaultMaxSkew`). Along the way, found and fixed a real gap: `sproutPermissions` never granted the `boxkey.pub` publish subject at all, so every submission was refused as a Permissions Violation until this PR added it (existing sprouts pick it up via JWT re-mint on next refresh). See `docs/design/imas-payload-encryption-design.md`'s "Sprout-side rotation, farmer-triggered only." FLAG FOR SECURITY REVIEW | merged — PR #34 (`8eb23da`, `8384084`, `7b9d80d`) |
@@ -467,7 +467,7 @@ directly in this session instead.
 ## Fleet updates and DB migrations (Wave 4, merged 2026-10-01 to 2026-10-02) and the Wave 5 clean-ups (merged 2026-10-03)
 
 Decisions recorded in `docs/design/requirements.md` (items 20, 21) and
-`docs/design/cloudxp-machine-manager-api-design.md` (§1.8, §2.2, §2.3,
+`docs/design/imas-machine-manager-api-design.md` (§1.8, §2.2, §2.3,
 §2.5, §2.6, §4.1a). Sprout updates install from the repository configured
 **in the sprout**, the same per-OS repos the Ansible role `imas_sprout` sets
 up; imas controls only a signed manifest (version, OS/arch, file name,
@@ -786,7 +786,7 @@ row starts with its brief ID ("docs" for a docs-only PR).
   Envoy/EdDSA verification gap noted under Wave 1 is now closed (see
   there). "Merged" isn't "complete" for J, though: see its open gaps
   under Wave 2.
-- **2026-09-27 refresh:** this file had drifted since the `grlx` → `imas`
+- **2026-09-27 refresh:** this file had drifted since the rename to `imas`
   rebrand (`b4a0195`) — it hadn't been touched since the ongoing batch was
   *dispatched*, and never recorded that batch actually landing, nor any of
   the post-rebrand work (CI setup, Helm charts, the farmer bus/CLI split,
@@ -794,7 +794,7 @@ row starts with its brief ID ("docs" for a docs-only PR).
   ongoing-batch items against `go.mod` and `internal/ingredients/` and
   flipped them from "dispatched" to "merged"; (2) added the
   repository-history note at the top, since PR numbers before the rebrand
-  are on the old, superseded `yogzblr/grlx` repo and can numerically collide
+  are on the old, superseded predecessor repo and can numerically collide
   with real, current `yogzblr/imas` PR numbers; (3) added the "Post-rebrand
   work" section above documenting the rebrand/CI setup, the Helm charts, the
   farmer bus/CLI split, and workstream M (M.1–M.3 merged, M.4 and the new
@@ -1433,7 +1433,7 @@ Known accepted gaps, not re-checked in this pass: JWT permission re-mint
 reaches an already-enrolled sprout only when a sync runs and the sprout
 restarts (Open item 10, "Enrollment and the stale grant"; harmless
 pre-production), and `internal/natsapi/router.go`'s tenant-facing subjects do
-not validate `msg.Reply` (inherited from upstream grlx).
+not validate `msg.Reply` (inherited from upstream).
 
 ## Re-evaluation, 2026-10-03
 

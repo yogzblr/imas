@@ -501,7 +501,7 @@ func TenantBoxKeys(tenantID string) ([]TenantBoxKey, error) {
 
 // GetTenantX25519PublicKey returns tenantID's current NaCl box public
 // key, standard-base64-encoded, for the enrollment and refresh responses
-// (cloudxp-machine-manager-api-design.md §3.2).
+// (imas-machine-manager-api-design.md §3.2).
 func GetTenantX25519PublicKey(tenantID string) (string, error) {
 	set, err := loadTenantKeySet(tenantID)
 	if err != nil {

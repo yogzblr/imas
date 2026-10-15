@@ -261,8 +261,8 @@ the abstract, and closed as a deliberate non-issue:
 
 - Farmer's entire NATS API surface is called exclusively by the SaaS
   API's own privileged service credential
-  (`cloudxp-machine-manager-api-design.md`'s "Internal API — Farmer (SaaS
-  API only)"). A tenant, a human, or CloudXP itself never calls farmer
+  (`imas-machine-manager-api-design.md`'s "Internal API — Farmer (SaaS
+  API only)"). A tenant, a human, or the cloud platform itself never calls farmer
   directly.
 - `cmd/imas`, the only other code path that authenticates to farmer's bus
   independently of the SaaS API, is never issued to anyone — confirmed,

@@ -17,11 +17,11 @@ openapi: 3.1.0
 info:
   title: imas SaaS API
   version: "v1 (main, 2026-09-27)"
-  summary: Tenant, enrollment-key, asset-link, batch-action and fleet-update API for CloudXP's BFF.
+  summary: Tenant, enrollment-key, asset-link, batch-action and fleet-update API for the cloud platform's BFF.
   description: |
     The customer-facing API served by `cmd/saasapi`. It owns the `saas`
     schema in the shared PXC cluster, reads `farmer.*`, and reaches farmer
-    only over the NATS bus. Its one intended caller is CloudXP's BFF.
+    only over the NATS bus. Its one intended caller is the cloud platform's BFF.
 
     **Auth.** Every route requires both the `X-Internal-Auth` shared secret
     and a Keycloak-issued user JWT in `Authorization: Bearer`. On a route
@@ -56,7 +56,7 @@ tags:
   - name: enrollment-keys
     description: Join tokens for `POST /v1/enroll` on farmer (§1.2, §3.1).
   - name: asset-links
-    description: Linking CloudXP asset_ids to sprouts, and resolving them (§1.3, §1.4).
+    description: Linking cloud platform asset_ids to sprouts, and resolving them (§1.3, §1.4).
   - name: sprout-actions
     description: Batch `cmd.run` and `cook` against a tenant's sprouts by asset_id (§1.5).
   - name: fleet-updates
@@ -305,7 +305,7 @@ paths:
     post:
       tags: [asset-links]
       operationId: LinkAsset
-      summary: Link a CloudXP asset_id to one of the tenant's sprouts
+      summary: Link a cloud platform asset_id to one of the tenant's sprouts
       description: |
         The sprout must exist under this tenant in `farmer.pki_nkeys`, in
         any key state. A sprout carries at most one asset_id, and an
@@ -503,7 +503,7 @@ paths:
     get:
       tags: [fleet-updates]
       operationId: ListFleetVersions
-      summary: List CloudXP's registered sprout releases
+      summary: List the cloud platform's registered sprout releases
       description: |
         One entry per version, OS and arch, newest first, not paginated.
         The same catalog for every tenant, so there is no organization

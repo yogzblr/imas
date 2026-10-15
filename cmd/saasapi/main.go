@@ -1,5 +1,5 @@
-// Command saasapi runs the external, customer/CloudXP-facing SaaS API
-// service described in docs/design/cloudxp-machine-manager-api-design.md.
+// Command saasapi runs the external, customer/cloud-platform-facing SaaS API
+// service described in docs/design/imas-machine-manager-api-design.md.
 // It is a separate binary from farmer/sprout/imas: it owns the `saas`
 // schema in the shared PXC cluster and talks to farmer only over
 // privileged internal NATS subjects (§2.2), as its own narrowly-scoped
@@ -131,7 +131,7 @@ func main() {
 
 	// Plain HTTP: TLS termination is assumed to happen at the gateway
 	// (Envoy, workstream H) in front of this service, consistent with the
-	// design doc's architecture diagram (§0) showing CloudXP/tenants
+	// design doc's architecture diagram (§0) showing cloud platforms/tenants
 	// reaching the SaaS API over REST without this binary owning certs.
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,

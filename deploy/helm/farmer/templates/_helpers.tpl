@@ -841,7 +841,7 @@ explanation rather than deploying something that silently can't work.
 */}}
 {{- define "imas-farmer.validate" -}}
 {{- if hasKey .Values "postgresql" -}}
-{{- fail "postgresql.* is not a value of this chart: imas's farmer and saas schemas live in one PXC (Percona XtraDB Cluster), not Postgres (docs/design/cloudxp-machine-manager-api-design.md). The bundled database toggle is pxc.enabled; an external one is database.host/existingSecret." -}}
+{{- fail "postgresql.* is not a value of this chart: imas's farmer and saas schemas live in one PXC (Percona XtraDB Cluster), not Postgres (docs/design/imas-machine-manager-api-design.md). The bundled database toggle is pxc.enabled; an external one is database.host/existingSecret." -}}
 {{- end -}}
 {{- if not (regexMatch "^[0-9A-Za-z_-]{1,191}$" (toString .Values.organization)) -}}
 {{- fail (printf "organization %q is not a valid tenant ID (^[0-9A-Za-z_-]{1,191}$, internal/pki IsValidTenantID); it is farmerorganization and must equal the nats chart's bus.organization" .Values.organization) -}}
@@ -975,7 +975,7 @@ explanation rather than deploying something that silently can't work.
 {{- fail "database.host is required when pxc.enabled=false" -}}
 {{- end -}}
 {{- if hasKey .Values.database "bootstrap" -}}
-{{- fail "database.bootstrap.* was replaced by database.migrate.* (the cmd/migrate hook Job, docs/design/cloudxp-machine-manager-api-design.md §4.1a): rootPasswordSecret, rootPasswordKey, activeDeadlineSeconds and resources moved there. There is no enabled toggle: farmer and saasapi no longer migrate their own schemas." -}}
+{{- fail "database.bootstrap.* was replaced by database.migrate.* (the cmd/migrate hook Job, docs/design/imas-machine-manager-api-design.md §4.1a): rootPasswordSecret, rootPasswordKey, activeDeadlineSeconds and resources moved there. There is no enabled toggle: farmer and saasapi no longer migrate their own schemas." -}}
 {{- end -}}
 {{- $mig := .Values.database.migrate -}}
 {{- if not (regexMatch "^[1-9][0-9]*(s|m|h)$" (toString $mig.wait)) -}}

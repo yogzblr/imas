@@ -50,8 +50,8 @@ networkPolicy:
 saasapi:
   replicaCount: 3
   jwt:
-    keycloakJWKSURL: https://keycloak.example.com/realms/cloudxp/protocol/openid-connect/certs
-    issuer: https://keycloak.example.com/realms/cloudxp
+    keycloakJWKSURL: https://keycloak.example.com/realms/imas/protocol/openid-connect/certs
+    issuer: https://keycloak.example.com/realms/imas
     audience: imas-saasapi
 # The bootstrap admin is required (FIX.3). These are PLACEHOLDERS that can
 # never be used: the box key is all zeros, which farmer refuses to import

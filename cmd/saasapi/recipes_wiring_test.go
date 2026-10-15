@@ -24,7 +24,7 @@ import (
 
 const (
 	wiringSecret   = "wiring-test-internal-secret"
-	wiringIssuer   = "https://keycloak.test/realms/cloudxp"
+	wiringIssuer   = "https://keycloak.test/realms/imas"
 	wiringAudience = "saasapi"
 	wiringTenant   = "t_acme"
 )

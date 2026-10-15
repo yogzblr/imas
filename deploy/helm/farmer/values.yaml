@@ -177,7 +177,7 @@ openbaoTools:
 
 # ---------------------------------------------------------------------------
 # PXC. farmer owns the farmer schema, saasapi the saas schema; each reads
-# the other's (docs/design/cloudxp-machine-manager-api-design.md §5.1).
+# the other's (docs/design/imas-machine-manager-api-design.md §5.1).
 # ---------------------------------------------------------------------------
 database:
   # Empty with pxc.enabled: this release's HAProxy Service. Required

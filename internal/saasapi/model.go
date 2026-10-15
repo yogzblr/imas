@@ -100,7 +100,7 @@ type EnrollmentKey struct {
 func (EnrollmentKey) TableName() string { return "enrollment_keys" }
 
 // AssetLink is the `saas.asset_links` table (design doc §4.2, §1.3): the
-// only place CloudXP's asset_id enters the system.
+// only place the cloud platform's asset_id enters the system.
 //
 // Uniqueness:
 //   - (tenant_id, sprout_id) is UNIQUE — one sprout carries at most one
@@ -108,7 +108,7 @@ func (EnrollmentKey) TableName() string { return "enrollment_keys" }
 //     because farmer's pki_nkeys only keys a sprout_id per tenant: two
 //     tenants may each have a sprout named "web-01", and both must be
 //     able to link it.
-//   - asset_id is globally UNIQUE — CloudXP generates it externally and
+//   - asset_id is globally UNIQUE — the cloud platform generates it externally and
 //     it identifies one VM across all tenants, so it resolves to at most
 //     one sprout anywhere.
 //
@@ -126,10 +126,10 @@ type AssetLink struct {
 func (AssetLink) TableName() string { return "asset_links" }
 
 // FleetVersion is the `saas.fleet_versions` table (design doc §4.3,
-// §1.8, §2.5): CloudXP's own catalog of sprout releases, one row per
+// §1.8, §2.5): the cloud platform's own catalog of sprout releases, one row per
 // version, OS, arch and package type. It is deliberately not upstream
 // imas's GitHub release feed — a version only becomes approvable by a
-// tenant once CloudXP has registered it here.
+// tenant once the cloud platform has registered it here.
 //
 // The catalog is global, not per tenant: every tenant chooses from the
 // same list, and tenant_update_policy records which version each tenant

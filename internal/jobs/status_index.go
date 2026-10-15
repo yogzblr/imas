@@ -4,7 +4,7 @@ package jobs
 // each cook job's aggregate status, keyed by (tenant_id, sprout_id, jid).
 // It exists so the SaaS API can poll a §1.5 batch's cook items with one
 // local, tenant-scoped SQL read
-// (docs/design/cloudxp-machine-manager-api-design.md §1.5), rather than
+// (docs/design/imas-machine-manager-api-design.md §1.5), rather than
 // reading farmer's job object store, which the SaaS API has no access to.
 // Both are keyed the same way: the object store's keys start
 // jobs/<tenant_id>/<sprout_id>/<jid>/ (store.go).

@@ -431,7 +431,7 @@ var (
 	// by Envoy's jwt_authn-gated route — see
 	// docs/design/imas-envoy-enrollment-design.md) an enrolling sprout is
 	// told to connect to, returned as nats_urls in the enrollment response
-	// (cloudxp-machine-manager-api-design.md §3.2). Comma-separated in
+	// (imas-machine-manager-api-design.md §3.2). Comma-separated in
 	// config/env; empty by default, in which case the enrollment handler
 	// falls back to deriving a single-node URL from
 	// FarmerInterface/FarmerWSPort for local/dev use.

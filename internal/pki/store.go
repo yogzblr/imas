@@ -330,7 +330,7 @@ func NKeyExistsInTenant(tenantID, id, nkey string) (registered bool, matches boo
 
 // VerifySproutInTenant is farmer's point-of-effect tenant check for
 // control-plane actions dispatched on a caller's say-so
-// (internal.sprout.action, cloudxp-machine-manager-api-design.md §2.2):
+// (internal.sprout.action, imas-machine-manager-api-design.md §2.2):
 // it returns nil only if sproutID is an *accepted* sprout whose own stored
 // tenant_id is tenantID, and tenantID is a live tenant (the legacy
 // current-tenant seam, or a non-deleted pki_tenants row). FLAG FOR

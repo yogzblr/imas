@@ -1,7 +1,7 @@
 package natsapi
 
 // Farmer's half of internal.sprout.action
-// (cloudxp-machine-manager-api-design.md §2.2): the SaaS API asks farmer
+// (imas-machine-manager-api-design.md §2.2): the SaaS API asks farmer
 // to run one cmd.run or cook on one already-resolved sprout, and farmer
 // replies on the request's inbox.
 //

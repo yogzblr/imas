@@ -1,6 +1,6 @@
 # The SaaS API's NATS identity: which Account, which permissions
 
-Follow-up to `cloudxp-machine-manager-api-design.md` §2 ("Internal API —
+Follow-up to `imas-machine-manager-api-design.md` §2 ("Internal API —
 Farmer (SaaS API only)"), which says the SaaS API talks to farmer over
 privileged internal NATS subjects "authenticated via a privileged internal
 NATS identity (system-account-scoped user or mTLS), distinct from any
