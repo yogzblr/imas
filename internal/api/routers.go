@@ -28,7 +28,7 @@ import (
 //     removed once J.3 left them nothing to accept (CL.4).
 //   - Sprout update manifest (GET /v1/sprout/update-manifest): the
 //     signed fleetsign.Manifest of the caller's tenant's approved sprout
-//     version for one OS/arch (cloudxp-machine-manager-api-design.md
+//     version for one OS/arch (imas-machine-manager-api-design.md
 //     §2.6). Gateway JWT only; the tenant is the token's, never a
 //     parameter. See handlers.GetSproutUpdateManifest.
 //   - Health checks: unauthenticated /health (liveness) and /ready
@@ -43,7 +43,7 @@ func NewRouter(certificate string) *http.ServeMux {
 	mux.Handle("PUT /pki/putnkey", Logger(http.HandlerFunc(handlers.PutNKey), "PutNKey"))
 
 	// Sprout enrollment (docs/design/imas-envoy-enrollment-design.md,
-	// cloudxp-machine-manager-api-design.md §3.2) — also no auth required,
+	// imas-machine-manager-api-design.md §3.2) — also no auth required,
 	// for the same reason as the PKI bootstrap routes above: a sprout
 	// calling this has no JWT yet. Authorization here is the join token
 	// itself, validated inside handlers.Enroll/pki.Enroll.

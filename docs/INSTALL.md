@@ -357,7 +357,7 @@ percent jitter), logs `server busy (lease held), retrying in Ns`, and tries
 again, up to 5 times per request.
 
 **Link it to your asset.** To address the sprout through the SaaS API, link
-it to your CloudXP asset id:
+it to your cloud platform's asset id:
 
 ```bash
 curl -s "${H[@]}" -X POST \
@@ -404,7 +404,7 @@ Full reference: [`api/saasapi.md`](api/saasapi.md#recipes).
 - Your Keycloak user needs the `imas-recipes-write` role to upload or
   delete, and `imas-recipes-read` (or the write role) to list and read.
   Without it the answer is `403`.
-- Requests normally go through CloudXP's BFF, which adds `X-Internal-Auth`.
+- Requests normally go through the cloud platform's BFF, which adds `X-Internal-Auth`.
   The examples below call saasapi directly with the same headers as
   [above](#create-a-tenant-and-an-enrollment-key).
 

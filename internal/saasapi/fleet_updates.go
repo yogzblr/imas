@@ -21,10 +21,10 @@ import (
 // until sprout has a real signed self-update path (§1.8's blocking
 // dependency, §6).
 //
-// The catalog is CloudXP's own, not upstream imas's release feed. Upstream
+// The catalog is the cloud platform's own, not upstream imas's release feed. Upstream
 // has each sprout poll <UpdateURL>/latest with no tenant concept, so every
 // tenant would land on whatever upstream ships, whenever it ships it.
-// Here, a version exists for a tenant only once CloudXP has registered it
+// Here, a version exists for a tenant only once the cloud platform has registered it
 // in saas.fleet_versions (the operator plane, fleet_releases.go), and a
 // tenant's sprouts are eligible for it only once that tenant has approved
 // it in saas.tenant_update_policy.
@@ -50,14 +50,14 @@ type fleetVersionItem struct {
 	Notes            string    `json:"notes,omitempty"`
 }
 
-// ListFleetVersions handles GET /versions (design doc §1.8): CloudXP's
+// ListFleetVersions handles GET /versions (design doc §1.8): the cloud platform's
 // registered sprout release catalog, one entry per version, OS and arch,
 // newest first. Revoked versions are listed, marked revoked, so a tenant
 // can see why one is no longer approvable.
 //
 // The route has no {tenant_id}, so Auth skips its organization check (see
 // middleware.go): the catalog is the same for every tenant. Not
-// paginated: the catalog grows by a few rows per CloudXP release, not with
+// paginated: the catalog grows by a few rows per cloud platform release, not with
 // any tenant's fleet.
 func ListFleetVersions(w http.ResponseWriter, r *http.Request) {
 	var versions []FleetVersion
@@ -162,7 +162,7 @@ func GetUpdatePolicy(w http.ResponseWriter, r *http.Request) {
 // body are left as they are.
 //
 // Rules, checked against the policy as it will be after this PATCH:
-//   - approved_version must be in CloudXP's catalog (saas.fleet_versions);
+//   - approved_version must be in the cloud platform's catalog (saas.fleet_versions);
 //     anything else is 400 unknown_version. A revoked version is 409
 //     version_revoked: it can't be newly approved (a tenant that already
 //     approved it keeps the row, but no rollout of it is created).

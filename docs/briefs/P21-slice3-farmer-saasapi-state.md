@@ -2,7 +2,6 @@
 
 Repo: /home/claude/yogzblr/imas (module github.com/yogzblr/imas). Spec only; nothing in the repo was changed.
 Source design: docs/design/imas-openbao-signing-design.md (D1-D21, section 9.2 state inventory, 9.1 loader, 11 tests) and docs/design/imas-nats-jwt-auth-design.md.
-Note: the brief calls the docs "grlx-*"; the real files are "imas-*".
 Items marked CONFIRM could not be verified from the sources available (Go module cache and nats-io/jwt source are absent in this sandbox).
 
 ## 0. Binding decisions and dependencies

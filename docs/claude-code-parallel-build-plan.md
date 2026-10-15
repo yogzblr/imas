@@ -1,6 +1,6 @@
 # imas SaaS Machine Manager — Claude Code Parallel Build Plan
 
-This is a working playbook for building the CloudXP machine-manager fork of
+This is a working playbook for building the cloud-platform machine-manager fork of
 `yogzblr/imas` using Claude Code cloud agents (`claude --cloud`), running
 workstreams in parallel where the roadmap allows it and gating the rest on
 the dependencies already identified in the design docs.
@@ -24,7 +24,7 @@ the dependencies already identified in the design docs.
    - `imas-windows-parity-addendum.md`
    - `imas-linux-parity-addendum.md`
    - `imas-tls-entropy-caution.md`
-   - `cloudxp-machine-manager-api-design.md`
+   - `imas-machine-manager-api-design.md`
    - `requirements.md` (the original numbered requirements list)
 3. **Add a root `CLAUDE.md`** (template below) so every cloud session
    inherits the same ground rules without you repeating them in every
@@ -33,7 +33,7 @@ the dependencies already identified in the design docs.
    (Owner sets this at claude.ai/admin-settings/claude-code).
 5. Decide now whether this repo runs on Anthropic-hosted cloud sessions or
    a self-hosted environment — revisit if CERT-In/DPDP scope ever pulls
-   this fork inside CloudXP proper rather than staying upstream OSS.
+   this fork inside a cloud platform proper rather than staying upstream OSS.
 
 ### Root `CLAUDE.md` template
 
@@ -194,7 +194,7 @@ Write tests with a mocked OpenBao client at minimum."
 **9. SaaS API scaffold — tenants, enrollment-keys, schema**
 ```
 claude --cloud "Scaffold the new SaaS API service described in
-docs/design/cloudxp-machine-manager-api-design.md, sections 1.1, 1.2,
+docs/design/imas-machine-manager-api-design.md, sections 1.1, 1.2,
 and 5. Standard Go REST service with GORM against the 'saas' schema in
 the shared PXC cluster (do not touch the 'farmer' schema). Implement:
 POST/GET/PATCH/DELETE /tenants and GET /tenants/{tenant_id}/status
@@ -252,7 +252,7 @@ NATS's websocket listener validating each sprout's JWT via a jwt_authn
 filter against JWKS before the connection reaches nats-server, plus a
 second Envoy route proxying authenticated recipe-download requests to
 non-DMZ. Build the enrollment endpoint per section 3 of
-cloudxp-machine-manager-api-design.md: token format {key_id}.{secret},
+imas-machine-manager-api-design.md: token format {key_id}.{secret},
 constant-time hash comparison against saas.enrollment_keys, atomic
 redemption via the UPDATE ... WHERE used_count < max_uses guard shown in
 that doc, idempotency check on nkey_pub first, generic
@@ -459,7 +459,7 @@ claude --cloud "Implement M.4 from docs/design/imas-fork-roadmap.md and
 imas-windows-parity-addendum.md: Ansible playbooks a customer runs to
 bootstrap a host onto imas, consuming workstream H's one-time enrollment
 key ({key_id}.{secret}, per docs/design/imas-envoy-enrollment-design.md
-§3 and cloudxp-machine-manager-api-design.md §3.1).
+§3 and imas-machine-manager-api-design.md §3.1).
 
 Add under ansible/ (new top-level dir, alongside deploy/):
 - roles/imas_sprout: installs the imas-sprout package for the target OS
@@ -494,7 +494,7 @@ Add under ansible/ (new top-level dir, alongside deploy/):
   never committed).
 - A README under ansible/ walking a customer through: get an enrollment
   key from the SaaS API (POST /tenants/{tenant_id}/enrollment-keys, per
-  cloudxp-machine-manager-api-design.md §1.2), put it in inventory
+  imas-machine-manager-api-design.md §1.2), put it in inventory
   (vaulted), run the playbook.
 
 Test what you can with Molecule against Docker for the Linux path (a
@@ -588,7 +588,7 @@ FU.4 are one brief, FU.34, because they share one signing contract).
 **DB.1 — goose migrations (Go side)**
 ```
 claude --cloud "Implement DB.1 from docs/BUILD-STATUS.md ('Fleet updates and
-DB migrations') per docs/design/cloudxp-machine-manager-api-design.md §4.1a.
+DB migrations') per docs/design/imas-machine-manager-api-design.md §4.1a.
 Add cmd/migrate: a CGO-free binary using pressly/goose (MIT) as a library
 with embedded SQL (embed.FS), one migration set for the farmer schema and
 one for the saas schema, each run with that schema owner's own DSN (single
@@ -876,7 +876,7 @@ claude --cloud "Implement CL.1 from docs/BUILD-STATUS.md ('Open items',
 item 5, first clean-up). FLAG FOR SECURITY REVIEW.
 Background: since FU.2 the sprout verifies fleet manifests against the
 keyring shipped in its package (internal/fleetsign keyring, packaging/etc/
-fleet-signing-keys.json). The design (docs/design/cloudxp-machine-manager-
+fleet-signing-keys.json). The design (docs/design/imas-machine-manager-
 api-design.md section 2.5, Key rotation) drops the live key-set fetch on
 imas.sprouts.<id>.fleetsigningkeys and the enrollment-time pin. The code
 was never removed. Verified on main: nothing outside tests calls
@@ -1300,7 +1300,7 @@ read-only prefix, never under another tenant's. Check how recipes are staged for
 sprouts and served at /files/ (internal/api/handlers/recipes.go, internal/cook/store.go,
 internal/objectstore, deploy/envoy; the old internal/natsapi/recipes.go no longer exists) and make sure a sprout of tenant A can never fetch tenant B's
 staged or source recipe, with a test through the real handler. Do NOT build the
-upload endpoints here: in docs/design/cloudxp-machine-manager-api-design.md
+upload endpoints here: in docs/design/imas-machine-manager-api-design.md
 section 1.6 write down what they need (PUT and DELETE on
 tenants/{tenant_id}/recipes/{name}, size and count limits, validation on upload,
 RBAC, audit) so the follow-up brief can be written.
@@ -1311,7 +1311,7 @@ layer.
 Scope: internal/facts, internal/natsapi (props.go), internal/api/handlers (recipes.go),
 internal/objectstore, internal/cook (store.go, farmercook.go, helpers.go), internal/saasapi/fleet_sprout_facts.go,
 internal/api, deploy/envoy (only if a route needs it),
-docs/design/cloudxp-machine-manager-api-design.md, docs/BUILD-STATUS.md (Open
+docs/design/imas-machine-manager-api-design.md, docs/BUILD-STATUS.md (Open
 items 10 and the requirement 9 row only). Tests: go test ./... must pass. PR:
 state what you built, what you deferred, and any open question."
 ```
@@ -1405,7 +1405,7 @@ internal/cook/store.go and internal/api/handlers/recipes.go. Recipe templates ar
 untrusted input. FLAG FOR SECURITY REVIEW.
 Read first: docs/security-review-2026-10.md (M8, H2), the SEC.4 PR (the per-tenant
 key prefix, the restricted template function map, the section 1.6 notes in
-docs/design/cloudxp-machine-manager-api-design.md) and internal/objectstore. Use
+docs/design/imas-machine-manager-api-design.md) and internal/objectstore. Use
 the key layout SEC.4 merged; if it did not settle one, use
 tenants/<tenant_id>/recipes/<name> and say so.
 Build: (1) Routes in internal/saasapi, in the section 1.6 style, every one behind
@@ -1434,7 +1434,7 @@ write and delete with the tenant, caller, name, sha256 and size, never the conte
 (6) Freshness: confirm that farmer and the sprout pick up an uploaded recipe on the
 next cook without a restart or a cache to clear (internal/cook/store.go,
 the staged recipe path); if there is a cache, add an invalidation or a short TTL and
-test it. (7) Update docs/design/cloudxp-machine-manager-api-design.md section 1.6
+test it. (7) Update docs/design/imas-machine-manager-api-design.md section 1.6
 (replace the stale text that says these proxy farmer recipes.* subjects, which no
 longer exist), add the routes to docs/api, and write a short tenant-facing howto for
 uploading a recipe with curl in docs/INSTALL.md or a new docs page.
@@ -1447,7 +1447,7 @@ farmer and an in-memory or MinIO test store as the existing tests do); audit row
 carry no content.
 Scope: internal/saasapi, internal/objectstore (only if a conditional put or a paged
 list is missing), internal/cook (store.go, only for the freshness fix),
-deploy/helm (saasapi values, secret and env), docs/design/cloudxp-machine-manager-api-design.md,
+deploy/helm (saasapi values, secret and env), docs/design/imas-machine-manager-api-design.md,
 docs/api, docs/INSTALL.md, docs/BUILD-STATUS.md (Open items 1 and 10 only). Needs SEC.4
 merged. Tests: go test ./... must pass. PR: state what you built, what you deferred,
 and any open question."
@@ -1789,7 +1789,7 @@ internal/audit/middleware.go) and anything that only fed it; audit entries must
 keep the verified user from the sealed router. (3) imas serve: add boxpub to
 POST /api/v1/auth/users in internal/serve/openapi.yaml and in whatever
 internal/serve forwards, so it matches farmer's auth.users.add. The web UI
-source is the grlx-web-ui git submodule (github.com/gogrlx/grlx-web-ui),
+source is the web UI git submodule (`grlx-web-ui`),
 outside this repo, and internal/serve/dist is its built bundle: do not edit the
 bundle by hand and do not add a Node toolchain. Write in the PR exactly what the
 UI's add-user form must change so the owner can raise it there.

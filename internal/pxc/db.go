@@ -1,6 +1,6 @@
 // Package pxc opens the shared GORM handle farmer's PKI, props/facts, and
 // RBAC stores use against the `farmer` schema in the Percona XtraDB
-// Cluster (see docs/design/cloudxp-machine-manager-api-design.md §5.1:
+// Cluster (see docs/design/imas-machine-manager-api-design.md §5.1:
 // farmer owns farmer.* with ALL grants). cmd/farmer/main.go calls OpenDB
 // once at startup and hands the resulting *gorm.DB to each owning
 // package's own SetDB (props.SetDB, pki.SetDB, rbac.SetDB) — mirroring

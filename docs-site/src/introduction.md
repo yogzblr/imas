@@ -2,9 +2,7 @@
 
 **imas** is a SaaS-based machine manager: it executes commands and applies
 configuration automation across virtual machines and bare-metal hosts, on
-multiple clouds and on-premise. It began as a fork of
-[gogrlx/grlx](https://github.com/gogrlx/grlx) (a Go/NATS fleet configuration
-tool) and has since diverged into its own project, renamed **imas**.
+multiple clouds and on-premise.
 
 A managed host is called a **sprout**. Sprouts connect over NATS to
 **farmer**, the core service, which dispatches **recipes** — YAML documents

@@ -1,7 +1,7 @@
 package natsapi
 
 // Farmer's half of the SaaS API's tenant-provisioning bridge
-// (cloudxp-machine-manager-api-design.md §2.2): internal.tenant.provision
+// (imas-machine-manager-api-design.md §2.2): internal.tenant.provision
 // and internal.tenant.deprovision in, internal.tenant.provisioned.{job_id}
 // and internal.tenant.deprovisioned.{job_id} out.
 //

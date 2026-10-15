@@ -1,7 +1,7 @@
 package pki
 
 // Sprout enrollment: docs/design/imas-envoy-enrollment-design.md and
-// cloudxp-machine-manager-api-design.md §3 ("the one moment in the whole
+// imas-machine-manager-api-design.md §3 ("the one moment in the whole
 // system where a caller has no credential yet").
 //
 // FLAG FOR SECURITY REVIEW per the task brief — this is the literal front
@@ -394,7 +394,7 @@ func verifyTimestampedNKeySig(nkeyPub string, timestamp int64, sigB64 string, pa
 // proof of possession of the NKey, the idempotency check, join-token
 // lookup/validation, atomic redemption, and minting. This repo runs
 // farmer and the bus in one process, so there's no
-// internal.sprout.mint NATS hop here (cloudxp-machine-manager-api-design.md
+// internal.sprout.mint NATS hop here (imas-machine-manager-api-design.md
 // §2.2's subject exists for a split SaaS-API/farmer deployment this repo
 // doesn't have yet) — farmer validates the token against saas schema
 // directly and mints the JWT itself, in one call.

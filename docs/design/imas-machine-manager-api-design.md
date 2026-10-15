@@ -1,14 +1,14 @@
-# CloudXP Machine Manager — API Design
+# imas Machine Manager — API Design
 
 Two codebases, one trust boundary:
 
-- **SaaS API** — external, customer/CloudXP-facing. Standard Go REST service, GORM, `saas` schema.
-- **Farmer** (+ sprout) — internal, data-plane. Existing imas NATS API, `farmer` schema. Its entire API surface is now **privileged and internal-only** — callable exclusively by the SaaS API's service credential, never directly by a tenant, a human user, or CloudXP.
+- **SaaS API** — external, customer/cloud-platform-facing. Standard Go REST service, GORM, `saas` schema.
+- **Farmer** (+ sprout) — internal, data-plane. Existing imas NATS API, `farmer` schema. Its entire API surface is now **privileged and internal-only** — callable exclusively by the SaaS API's service credential, never directly by a tenant, a human user, or a cloud platform.
 
 Both schemas live in one shared PXC cluster. Single-writer-per-schema: farmer writes only `farmer.*`, SaaS API writes only `saas.*`; each has read-only grants into the other's schema for local joins (see §5.1).
 
 ```
-CloudXP / tenant admins / portal
+Cloud platform / tenant admins / portal
         │  REST, bearer token (tenant-scoped claims)
         ▼
    SaaS API  ──── privileged internal calls (mTLS / system NATS user) ────►  Farmer
@@ -68,7 +68,7 @@ Owned entirely by the SaaS API (`saas.enrollment_keys`); farmer validates agains
 
 ### 1.3 Asset linking
 
-The only place `asset_id` (CloudXP's own, stable-for-life VM identifier) enters the system. Purely an external attribute — farmer never sees it.
+The only place `asset_id` (the cloud platform's own, stable-for-life VM identifier) enters the system. Purely an external attribute — farmer never sees it.
 
 | Method | Path | Notes |
 |---|---|---|
@@ -187,7 +187,7 @@ Webhook delivery/retry semantics and billing-system integration remain **not yet
    ```json
    { "organization": { "id": "a1b2c3d4-...", "name": "acme-corp", "attributes": { "tier": "enterprise" } } }
    ```
-   `organization.id` is CloudXP's `customer_id` — the same concept as `tenant_id` everywhere else in this codebase (this section's own `{tenant_id}` path parameter, `internal/pki`'s and `internal/props`'s `tenantID`). There is deliberately no separate `customer_id` field or type: for any route with a `{tenant_id}` path parameter, `organization.id` is compared directly against it (routes without one, e.g. §1.8's fleet-catalog routes, skip this check). Because the claim is confirmed always present on a correctly-configured realm, an absent or unparseable claim on an otherwise-valid, otherwise-verified token is treated as a defensive safety net for misconfiguration, not an expected path — logged as a warning and rejected with 403, not trusted or allowed to panic.
+   `organization.id` is the cloud platform's `customer_id` — the same concept as `tenant_id` everywhere else in this codebase (this section's own `{tenant_id}` path parameter, `internal/pki`'s and `internal/props`'s `tenantID`). There is deliberately no separate `customer_id` field or type: for any route with a `{tenant_id}` path parameter, `organization.id` is compared directly against it (routes without one, e.g. §1.8's fleet-catalog routes, skip this check). Because the claim is confirmed always present on a correctly-configured realm, an absent or unparseable claim on an otherwise-valid, otherwise-verified token is treated as a defensive safety net for misconfiguration, not an expected path — logged as a warning and rejected with 403, not trusted or allowed to panic.
 
 Both layers fail identically from the caller's point of view: a missing/mismatched secret, a missing/malformed bearer token, and a signature/issuer/audience/expiry failure are all `401` with the same generic `unauthorized` body — the real reason is only in the server-side log — matching §3.4's enrollment-endpoint discipline of never handing a caller a diagnostic oracle. A tenant mismatch, or a missing/unparseable `organization` claim, is `403`: a valid caller on both layers asking for the wrong resource. On success, the full parsed organization (id, name, attributes) is attached to the request context for handlers to read, not just the boolean match result.
 
@@ -244,7 +244,7 @@ skeleton is deleted; this is imas's own work (§2.3).
 
 | Method | Path | Notes |
 |---|---|---|
-| `GET` | `/versions` | List registered sprout versions (`saas.fleet_versions`, one row per OS/arch). **CloudXP's own signed catalog**, not upstream's GitHub release feed — see rationale below. |
+| `GET` | `/versions` | List registered sprout versions (`saas.fleet_versions`, one row per OS/arch). **the cloud platform's own signed catalog**, not upstream's GitHub release feed — see rationale below. |
 | `GET` | `/tenants/{tenant_id}/update-policy` | Fetch the tenant's approved version and rollout window. |
 | `PATCH` | `/tenants/{tenant_id}/update-policy` | Set the approved/pinned version and rollout window. No sprout updates automatically without a tenant explicitly approving a version — this is opt-in, not upstream's ambient "check `/latest` every N minutes" model. |
 | `POST` | `/tenants/{tenant_id}/sprouts/updates` | Trigger a staged update batch. Same request/response shape as §1.5's `/sprouts/actions`, with rollout-specific fields (below). |
@@ -279,7 +279,7 @@ smaller and stricter than an ordinary `cmd.run`/`cook` batch (§1.5) — see
 §2.3, Rollout safety, for why a bad update is a worse failure mode than a
 bad recipe step.
 
-**Why CloudXP's own version catalog, not upstream's release feed.**
+**Why the cloud platform's own version catalog, not upstream's release feed.**
 Upstream's skeleton polls `<UpdateURL>/latest` directly from each sprout,
 independent of farmer, with no tenant concept at all — every sprout across
 every tenant would land on whatever upstream ships, whenever upstream ships

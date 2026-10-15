@@ -19,7 +19,7 @@ import (
 const (
 	testInternalAuthSecretCurrent  = "test-internal-secret-current"
 	testInternalAuthSecretPrevious = "test-internal-secret-previous"
-	testJWTIssuer                  = "https://keycloak.test/realms/cloudxp"
+	testJWTIssuer                  = "https://keycloak.test/realms/imas"
 	testJWTAudience                = "saasapi"
 )
 

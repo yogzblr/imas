@@ -1,6 +1,6 @@
 // Package controlplane is the wire contract for the platform-level
 // internal.* NATS subjects between the SaaS API (internal/saasapi) and
-// farmer (internal/natsapi) — cloudxp-machine-manager-api-design.md §2.2.
+// farmer (internal/natsapi) — imas-machine-manager-api-design.md §2.2.
 // It holds only subject names, message shapes, and validation, and has no
 // dependencies of its own, so that both sides — and internal/pki, which
 // scopes the SaaS API's NATS User permissions to exactly these subjects —

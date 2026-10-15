@@ -3,7 +3,7 @@
 {{- $r := .Values.sproutRelease -}}
 {{- $o := .Values.saasapi.operator -}}
 {{- /*
-Sprout release registration (docs/design/cloudxp-machine-manager-api-design.md
+Sprout release registration (docs/design/imas-machine-manager-api-design.md
 §2.5, FU.5): `farmer register-sprout-release` (internal/sproutrelease), in
 farmer's own image, POSTs files/sprout-release.json (version and
 min_sprout_version stamped at release time, and the release's GPG-signed

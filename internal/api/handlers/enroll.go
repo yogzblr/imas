@@ -1,7 +1,7 @@
 package handlers
 
 // POST /v1/enroll: design doc §3.2
-// (docs/design/cloudxp-machine-manager-api-design.md,
+// (docs/design/imas-machine-manager-api-design.md,
 // docs/design/imas-envoy-enrollment-design.md). FLAG FOR SECURITY REVIEW
 // per the task brief — see internal/pki/enroll.go's doc comment for why
 // every failure here, at every layer, collapses to the same generic

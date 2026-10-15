@@ -93,7 +93,7 @@ type sproutsByAssetResponse struct {
 // sprout_id uniqueness is per tenant, so only the asset_id collision can
 // involve another tenant's row; a 409 for an asset_id the caller can't
 // see via §1.4 does imply another tenant holds it. That's accepted:
-// asset_ids are CloudXP-generated and globally unique by design, so one
+// asset_ids are platform-generated and globally unique by design, so one
 // VM's asset_id legitimately can't be claimed by two tenants.
 //
 // Not rate-limited: a tenant can create at most one link per sprout it

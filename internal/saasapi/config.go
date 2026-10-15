@@ -1,5 +1,5 @@
-// Package saasapi implements the external, customer/CloudXP-facing SaaS
-// API service described in docs/design/cloudxp-machine-manager-api-design.md.
+// Package saasapi implements the external, customer/cloud-platform-facing SaaS
+// API service described in docs/design/imas-machine-manager-api-design.md.
 // It owns the `saas` schema in the shared PXC cluster and never writes to
 // the `farmer` schema (see the design doc's §5.1 grants).
 package saasapi
@@ -186,7 +186,7 @@ type Config struct {
 	InternalAuthSecretPrevious string
 
 	// KeycloakJWKSURL is the Keycloak realm's JWKS endpoint, e.g.
-	// "https://keycloak.example.com/realms/cloudxp/protocol/openid-connect/certs".
+	// "https://keycloak.example.com/realms/imas/protocol/openid-connect/certs".
 	KeycloakJWKSURL string
 	// JWTIssuer is the expected "iss" claim on end-user JWTs.
 	JWTIssuer string

@@ -49,7 +49,7 @@ It deploys imas's non-DMZ core:
   | `valkey.enabled` | `valkey-io/valkey-helm` 0.12.0 | Heartbeats, the replay cache and the rate limit |
 
 The database is **PXC, not Postgres**. farmer and saasapi share one PXC
-cluster with one schema each (`docs/design/cloudxp-machine-manager-api-design.md`
+cluster with one schema each (`docs/design/imas-machine-manager-api-design.md`
 §5.1), so the toggle is `pxc.enabled`. A values file carrying
 `postgresql.*` fails the render and says so.
 
@@ -704,7 +704,7 @@ Schema changes are versioned goose migrations compiled into `cmd/migrate`
 (image `ghcr.io/yogzblr/imas-migrate`, tag defaulting to the chart's
 `appVersion`), run by Helm hook Jobs. farmer and saasapi no longer
 migrate on startup; each waits until the schema version it needs is
-there (`docs/design/cloudxp-machine-manager-api-design.md` §4.1a).
+there (`docs/design/imas-machine-manager-api-design.md` §4.1a).
 
 | Job | Hooks | Runs | Root password |
 |---|---|---|---|

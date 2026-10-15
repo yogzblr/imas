@@ -12,7 +12,7 @@ import (
 
 // Organization is the confirmed shape of a Keycloak-issued end-user JWT's
 // "organization" claim (see NewAuthConfig's doc comment). organization.id
-// is CloudXP's "customer_id" — the same concept as tenant_id everywhere
+// is the cloud platform's "customer_id" — the same concept as tenant_id everywhere
 // else in this codebase (the {tenant_id} path parameter, internal/pki's
 // and internal/props's tenantID variables). There is deliberately no
 // separate CustomerID field: match the path's {tenant_id} directly

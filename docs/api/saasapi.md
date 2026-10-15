@@ -1,9 +1,9 @@
 # SaaS API reference
 
 The SaaS API (`cmd/saasapi`, package `internal/saasapi`) is the service
-CloudXP's BFF calls to manage tenants and their fleets. This page describes
+The cloud platform's BFF calls to manage tenants and their fleets. This page describes
 what is merged on `main`. The design it implements is
-[`cloudxp-machine-manager-api-design.md`](../design/cloudxp-machine-manager-api-design.md);
+[`imas-machine-manager-api-design.md`](../design/imas-machine-manager-api-design.md);
 where the two differ, the code wins, and this page follows the code.
 
 - **Machine-readable spec:** [`saasapi-openapi.yaml`](saasapi-openapi.yaml)
@@ -166,7 +166,7 @@ across pods through Valkey when `SAASAPI_VALKEY_ADDRS` is set
 
 ### Asset links and lookup
 
-CloudXP identifies machines by its own `asset_id`. `POST
+The cloud platform identifies machines by its own `asset_id`. `POST
 .../sprouts/{sprout_id}/asset-link` with `{"asset_id": "..."}` attaches one to
 a sprout that already exists in the tenant (any key state). A sprout has at
 most one asset_id, and an asset_id is globally unique. Creating a new link is
@@ -277,7 +277,7 @@ codes a live one would.
 
 ### Fleet versions and update policy
 
-`GET /v1/versions` lists CloudXP's registered sprout releases, one entry per
+`GET /v1/versions` lists the cloud platform's registered sprout releases, one entry per
 version, OS and arch, newest first: `version`, `os`, `arch`,
 `package_type`, `file_name`, `checksum_sha256`, `min_sprout_version`,
 `revoked`, `released_at`, `notes`. There is no URL: a sprout downloads
@@ -311,7 +311,7 @@ cooks `name` for one of the tenant's sprouts, it looks there first, then in
 the platform tree, and never in another tenant's prefix. So an upload
 shadows a platform recipe of the same name for this tenant only, and the
 next cook uses it, with no restart and no cache to clear. Design:
-[§1.6](../design/cloudxp-machine-manager-api-design.md#16-recipes-jobs-audit).
+[§1.6](../design/imas-machine-manager-api-design.md#16-recipes-jobs-audit).
 How-to: [`INSTALL.md`](../INSTALL.md#upload-a-recipe).
 
 **Off unless configured.** Without `SAASAPI_RECIPES_S3_ENDPOINT` every recipe

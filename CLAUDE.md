@@ -1,7 +1,6 @@
 # imas — Infrastructure Management At Scale — repo conventions
 
-imas began as a fork of gogrlx/grlx (github.com/gogrlx/grlx) and has since
-diverged into its own project. See docs/design/ for the full architecture —
+See docs/design/ for the full architecture —
 read imas-master-plan.md and imas-fork-roadmap.md first, then the specific
 design doc named in your task.
 
@@ -25,7 +24,7 @@ design doc named in your task.
 - `sprout_id` is unique per tenant only, never globally: always key
   tables, indexes, caches and maps on `(tenant_id, sprout_id)` — keying on
   `sprout_id` alone is a cross-tenant collision bug. See §4 "Tenant
-  safety" in docs/design/cloudxp-machine-manager-api-design.md.
+  safety" in docs/design/imas-machine-manager-api-design.md.
 
 ## Workflow
 - Work only within the file scope stated in your task brief. If you need

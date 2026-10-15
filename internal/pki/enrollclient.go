@@ -2,7 +2,7 @@ package pki
 
 // Sprout-side client for POST /v1/enroll
 // (docs/design/imas-envoy-enrollment-design.md,
-// cloudxp-machine-manager-api-design.md §3), and for refreshing the
+// imas-machine-manager-api-design.md §3), and for refreshing the
 // short-lived gateway JWT through POST /v1/refresh.
 //
 // FLAG FOR SECURITY REVIEW. This is the sprout's half of the front door of

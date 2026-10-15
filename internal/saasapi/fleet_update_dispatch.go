@@ -24,7 +24,7 @@
 // all for rollout safety (§2.3):
 //
 //   - The caller names a target_version, not action params. The version
-//     must be in CloudXP's own catalog (saas.fleet_versions) and not
+//     must be in the cloud platform's own catalog (saas.fleet_versions) and not
 //     revoked. The farmer params carry only the version: each sprout
 //     resolves and verifies its own OS/arch manifest (§2.3, §2.6). The
 //     caller can't supply a URL, file name or checksum.

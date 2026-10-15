@@ -2,7 +2,7 @@
 {{- $m := .Values.database.migrate -}}
 {{- $root := include "imas-farmer.migrate.rootSecret" . -}}
 {{- /*
-cmd/migrate as Helm hooks (docs/design/cloudxp-machine-manager-api-design.md
+cmd/migrate as Helm hooks (docs/design/imas-machine-manager-api-design.md
 §4.1a). One pod per run: it waits for PXC; as PXC root creates both
 schemas and users and applies §4.1's grants; migrates `farmer` as farmer's
 user and `saas` as saasapi's; then grants farmer UPDATE (used_count,
