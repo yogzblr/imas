@@ -31,7 +31,9 @@
 //     through the environment's proxy, with the optional repo token and
 //     without the sprout JWT;
 //  6. checks the file's SHA-256 against the signed checksum (for an MSI,
-//     the MSI inside the NuGet package) before anything else touches it;
+//     the MSI inside the NuGet package) before anything else touches it,
+//     having staged it in a fresh private directory (stageDir) and with
+//     every read from the repository bounded (limits.go);
 //  7. reads the package's own metadata and requires it to name
 //     imas-sprout at exactly the target version (pkgmeta.go): a signed
 //     checksum alone can name an older genuine package (security review
@@ -45,7 +47,11 @@
 // whose SHA-256 is on the line for the sprout's own expected file name in
 // a checksums.txt a key in the shipped keyring signed, for a version farmer
 // serves this sprout's tenant (that tenant approved it), from the
-// repository the sprout's own administrator configured.
+// repository the sprout's own administrator configured. The keyring and
+// the staging directories must be the sprout user's own and private
+// (fleetsign.ErrUnsafePath, refusal code unsafe_path), and the update as
+// a whole has a time budget (sproutupdatebudget) after which it fails and
+// releases the update lock.
 package selfupdate
 
 import (
@@ -109,6 +115,9 @@ var (
 	// ErrUpdateInProgress: another self_update is running, or one has
 	// installed and the service hasn't restarted onto it yet.
 	ErrUpdateInProgress = errors.New("selfupdate: another update is in progress or awaiting restart")
+	// ErrBudgetExceeded: the update did not reach the installer within
+	// its time budget (limits.budget, sproutupdatebudget).
+	ErrBudgetExceeded = errors.New("selfupdate: the update ran out of its time budget (sproutupdatebudget)")
 )
 
 var applyProps = ingredients.MethodPropsSet{
@@ -116,7 +125,8 @@ var applyProps = ingredients.MethodPropsSet{
 }
 
 // stageDirName is the directory under config.CacheDir that holds
-// downloads; it is emptied at the start of every update.
+// downloads; it is removed and created again at the start of every
+// update (stageDir).
 const stageDirName = "selfupdate"
 
 var (
@@ -263,6 +273,68 @@ func verifyRelease(keyring fleetsign.ArmoredKeyring, m fleetsign.Manifest, p pla
 	return release{Version: m.Version, FileName: name, ChecksumSHA256: sum, MinSproutVersion: m.MinSproutVersion}, nil
 }
 
+// withBudget returns ctx bounded by the update's time budget, and a func
+// that turns an error into ErrBudgetExceeded once the budget has run out.
+func withBudget(ctx context.Context, budget time.Duration) (context.Context, context.CancelFunc, func(error) error) {
+	bctx, cancel := context.WithTimeout(ctx, budget)
+	wrap := func(err error) error {
+		if err != nil && !errors.Is(err, ErrBudgetExceeded) && errors.Is(bctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			return fmt.Errorf("%w (%s): %w", ErrBudgetExceeded, budget, err)
+		}
+		return err
+	}
+	return bctx, cancel, wrap
+}
+
+// stageDir creates a fresh, private staging directory for one update
+// (security review 2026-10, L3) and returns its path. The cache directory
+// must be the sprout user's and not writable by others; the staging root
+// below it is removed and made again (never reused, whoever owns what is
+// there) and, like the per-update directory made in it, must be the
+// sprout user's own, mode 0700, and not a symlink. Anything else is
+// fleetsign.ErrUnsafePath, before anything is downloaded.
+func stageDir() (string, error) {
+	if err := os.MkdirAll(config.CacheDir, 0o700); err != nil {
+		return "", fmt.Errorf("selfupdate: creating %s: %w", config.CacheDir, err)
+	}
+	if err := fleetsign.CheckNotWritableByOthers(config.CacheDir); err != nil {
+		return "", fmt.Errorf("selfupdate: cache directory: %w", err)
+	}
+	stageRoot := filepath.Join(config.CacheDir, stageDirName)
+	if err := os.RemoveAll(stageRoot); err != nil {
+		return "", fmt.Errorf("selfupdate: clearing %s: %w", stageRoot, err)
+	}
+	// Mkdir, not MkdirAll: if anything appeared at stageRoot since it
+	// was removed, refuse rather than use it.
+	if err := os.Mkdir(stageRoot, 0o700); err != nil {
+		return "", fmt.Errorf("selfupdate: creating %s: %w", stageRoot, err)
+	}
+	if err := fleetsign.CheckPrivateDir(stageRoot); err != nil {
+		return "", fmt.Errorf("selfupdate: staging directory: %w", err)
+	}
+	stage, err := os.MkdirTemp(stageRoot, "update-")
+	if err != nil {
+		return "", fmt.Errorf("selfupdate: creating a staging directory: %w", err)
+	}
+	if err := checkStage(stage); err != nil {
+		os.RemoveAll(stage)
+		return "", err
+	}
+	return stage, nil
+}
+
+// checkStage checks the per-update staging directory and its parent, the
+// staging root, again: right after they are made, and before the
+// installer reads the package from them.
+func checkStage(stage string) error {
+	for _, dir := range []string{filepath.Dir(stage), stage} {
+		if err := fleetsign.CheckPrivateDir(dir); err != nil {
+			return fmt.Errorf("selfupdate: staging directory: %w", err)
+		}
+	}
+	return nil
+}
+
 func (s SelfUpdate) apply(ctx context.Context) (cook.Result, error) {
 	if !updateMu.TryLock() {
 		return failed(ErrUpdateInProgress)
@@ -272,9 +344,16 @@ func (s SelfUpdate) apply(ctx context.Context) (cook.Result, error) {
 		return failed(ErrUpdateInProgress)
 	}
 
-	pl, err := s.prepare(ctx)
+	// Everything up to the installer runs within the update's budget;
+	// when it runs out, this returns and updateMu is released. The
+	// installer has its own timeout (installTimeout) and is never cut
+	// off part way by the budget.
+	bctx, cancel, overBudget := withBudget(ctx, currentLimits().budget)
+	defer cancel()
+
+	pl, err := s.prepare(bctx)
 	if err != nil {
-		return failed(err)
+		return failed(overBudget(err))
 	}
 	if pl.upToDate {
 		return cook.Result{Succeeded: true, Notes: []fmt.Stringer{cook.Snprintf("already running %s", pl.running)}}, nil
@@ -284,31 +363,30 @@ func (s SelfUpdate) apply(ctx context.Context) (cook.Result, error) {
 
 	// A fresh, private directory per update: nothing left from an earlier
 	// attempt, and nobody else can have placed a file in it.
-	stageRoot := filepath.Join(config.CacheDir, stageDirName)
-	if err := os.RemoveAll(stageRoot); err != nil {
-		return failed(fmt.Errorf("selfupdate: clearing %s: %w", stageRoot, err), verified)
-	}
-	if err := os.MkdirAll(stageRoot, 0o700); err != nil {
-		return failed(fmt.Errorf("selfupdate: creating %s: %w", stageRoot, err), verified)
-	}
-	stage, err := os.MkdirTemp(stageRoot, "update-")
+	stage, err := stageDir()
 	if err != nil {
-		return failed(fmt.Errorf("selfupdate: creating a staging directory: %w", err), verified)
+		return failed(err, verified)
 	}
 	// The derived, validated file name: one plain path component.
 	file := filepath.Join(stage, pl.manifest.FileName)
 
-	from, err := pl.repo.fetchPackage(ctx, pl.manifest, stage, file)
+	from, err := pl.repo.fetchPackage(bctx, pl.manifest, stage, file)
 	if err != nil {
 		os.RemoveAll(stage)
-		return failed(err, verified)
+		return failed(overBudget(err), verified)
 	}
 	downloaded := cook.Snprintf("%s downloaded from %s; sha256 %s matches the signed checksums.txt", pl.manifest.FileName, redact(from), pl.manifest.ChecksumSHA256)
 
-	id, bound, err := verifyPackageIdentity(ctx, pl.platform, file, pl.manifest)
+	id, bound, err := verifyPackageIdentity(bctx, pl.platform, file, pl.manifest)
+	if err == nil {
+		err = checkStage(stage)
+	}
+	if err == nil && bctx.Err() != nil {
+		err = overBudget(bctx.Err())
+	}
 	if err != nil {
 		os.RemoveAll(stage)
-		return failed(err, verified, downloaded)
+		return failed(overBudget(err), verified, downloaded)
 	}
 
 	notes, err := installPackage(ctx, pl.platform, file, pl.target, filepath.Join(stage, "msiexec.log"), id)
@@ -335,9 +413,11 @@ func (s SelfUpdate) Test(ctx context.Context) (cook.Result, error) {
 	if s.method != fleetsign.SelfUpdateMethod {
 		return failed(errors.Join(ErrMethodUndefined, fmt.Errorf("method %s undefined", s.method)))
 	}
-	pl, err := s.prepare(ctx)
+	bctx, cancel, overBudget := withBudget(ctx, currentLimits().budget)
+	defer cancel()
+	pl, err := s.prepare(bctx)
 	if err != nil {
-		return failed(err)
+		return failed(overBudget(err))
 	}
 	if pl.upToDate {
 		return cook.Result{Succeeded: true, Notes: []fmt.Stringer{cook.Snprintf("already running %s", pl.running)}}, nil

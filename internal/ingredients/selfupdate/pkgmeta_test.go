@@ -20,6 +20,7 @@ import (
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/fleetsign"
 )
 
 type (
@@ -214,17 +215,73 @@ func TestApply_PrereleaseVersions(t *testing.T) {
 			return map[string]string{"ProductName": msiProductName, "ProductVersion": "2.5.0", "UpgradeCode": strings.ToLower(msiUpgradeCode)}, nil
 		})
 		// A prerelease manifest is refused for an MSI, even though the
-		// MSI's ProductVersion (2.5.0) matches its MAJOR.MINOR.PATCH.
-		if _, _, err := verifyPackageIdentity(context.Background(), p, "x.msi", verifiedRelease("v2.5.0-rc.1")); !errors.Is(err, ErrPrereleaseOnWindows) {
-			t.Errorf("rc manifest, 2.5.0 MSI: %v, want ErrPrereleaseOnWindows", err)
+		// MSI's ProductVersion (2.5.0) matches its MAJOR.MINOR.PATCH and
+		// its file name its full version.
+		if _, _, err := verifyPackageIdentity(context.Background(), p, msiRC, verifiedRelease("v2.5.0-rc.1")); !errors.Is(err, ErrPrereleaseOnWindows) {
+			t.Errorf("rc manifest, rc MSI: %v, want ErrPrereleaseOnWindows", err)
 		}
-		if _, _, err := verifyPackageIdentity(context.Background(), p, "x.msi", verifiedRelease("v2.5.0")); err != nil {
+		if _, _, err := verifyPackageIdentity(context.Background(), p, msiFinal, verifiedRelease("v2.5.0")); err != nil {
 			t.Errorf("v2.5.0 manifest, 2.5.0 MSI: %v", err)
 		}
-		if _, _, err := verifyPackageIdentity(context.Background(), p, "x.msi", verifiedRelease("v2.5.1")); !errors.Is(err, ErrPackageMismatch) {
-			t.Errorf("v2.5.1 manifest, 2.5.0 MSI: %v, want ErrPackageMismatch", err)
+		if _, _, err := verifyPackageIdentity(context.Background(), p, `C:\stage\imas-sprout-2.5.1-windows-x64.msi`, verifiedRelease("v2.5.1")); !errors.Is(err, ErrPackageMismatch) {
+			t.Errorf("v2.5.1 manifest, ProductVersion 2.5.0: %v, want ErrPackageMismatch", err)
 		}
 	})
+}
+
+// The staged MSIs of an rc and the final of one MAJOR.MINOR.PATCH: both
+// MSIs say ProductVersion 2.5.0; only the file name the signed checksum
+// is bound to tells them apart.
+var (
+	msiRC    = filepath.Join("stage", "imas-sprout-2.5.0-rc.1-windows-x64.msi")
+	msiFinal = filepath.Join("stage", "imas-sprout-2.5.0-windows-x64.msi")
+)
+
+// TestVerifyPackageIdentity_MSIFullVersion (security review B8): on
+// Windows the full version, prerelease included, from the MSI's file name
+// must equal the manifest's, so an rc and the final of the same
+// MAJOR.MINOR.PATCH, whose MSIs carry the same ProductVersion, can never
+// stand in for each other.
+func TestVerifyPackageIdentity_MSIFullVersion(t *testing.T) {
+	p := platform{os: "windows", arch: "amd64", pkgType: pkgMSI, installer: installMsiexec}
+	setSeam(t, &msiProperties, func(string, []string) (map[string]string, error) {
+		return map[string]string{"ProductName": msiProductName, "ProductVersion": "2.5.0", "UpgradeCode": msiUpgradeCode}, nil
+	})
+	for _, tc := range []struct {
+		name, file, manifest string
+		want                 error // nil: accepted
+	}{
+		{"final MSI for the final", msiFinal, "v2.5.0", nil},
+		{"rc MSI for the final", msiRC, "v2.5.0", ErrPackageMismatch},
+		{"final MSI for the rc", msiFinal, "v2.5.0-rc.1", ErrPackageMismatch},
+		{"rc.2 MSI for rc.1", filepath.Join("stage", "imas-sprout-2.5.0-rc.2-windows-x64.msi"), "v2.5.0-rc.1", ErrPackageMismatch},
+		{"rc MSI for the rc: still no prerelease on Windows", msiRC, "v2.5.0-rc.1", ErrPrereleaseOnWindows},
+		{"not a release file name", filepath.Join("stage", "setup.msi"), "v2.5.0", ErrPackageMismatch},
+		{"no version in the name", filepath.Join("stage", "imas-sprout--windows-x64.msi"), "v2.5.0", ErrPackageMismatch},
+		{"non-canonical version in the name", filepath.Join("stage", "imas-sprout-2.5-windows-x64.msi"), "v2.5.0", ErrPackageMismatch},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, note, err := verifyPackageIdentity(context.Background(), p, tc.file, verifiedRelease(tc.manifest))
+			if tc.want == nil {
+				if err != nil || note == nil {
+					t.Fatalf("refused: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("got %v, want %v", err, tc.want)
+			}
+		})
+	}
+	// The MSI apply path stages the file under the name the sprout
+	// derived for the manifest's version, so the check passes there.
+	name, err := fleetsign.ExpectedFileName("v2.5.0-rc.1", "windows", "amd64", pkgMSI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, err := msiFileVersion(name); err != nil || v != "v2.5.0-rc.1" {
+		t.Errorf("msiFileVersion(%s) = %q, %v", name, v, err)
+	}
 }
 
 // TestApply_PrereleaseRefusedOnWindows: a prerelease target on a Windows
