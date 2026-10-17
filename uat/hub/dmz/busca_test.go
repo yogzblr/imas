@@ -228,6 +228,7 @@ func TestInstallSecretModeNoBusCA(t *testing.T) {
 	}
 }
 
+// pemCert PEM-encodes a DER certificate.
 func pemCert(der []byte) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }

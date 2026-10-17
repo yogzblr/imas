@@ -613,6 +613,8 @@ func TestRunKVCopy(t *testing.T) {
 	}
 }
 
+// A configuration error exits 2 before any key is created or ConfigMap
+// written, and still removes the token file.
 func TestRunUsageErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name string

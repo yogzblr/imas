@@ -977,6 +977,8 @@ func TestNoPersistentVolumeClaim(t *testing.T) {
 	}
 }
 
+// The loader sidecar: its image, command, env, probes, securityContext and
+// the keys its Secret volumes project. Its mounts are TestLoaderMounts.
 func TestLoaderSidecarRendered(t *testing.T) {
 	sts := find(t, mustRender(t), "StatefulSet", "-bus")
 	if c := container(t, sts); c["name"] != "farmerbus" {

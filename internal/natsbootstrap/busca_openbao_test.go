@@ -26,6 +26,8 @@ import (
 	"github.com/yogzblr/imas/internal/openbao/openbaotest"
 )
 
+// liveOpenBao returns an admin client for the OpenBao the IMAS_TEST_OPENBAO_*
+// variables name, with its address and root token, or skips the test.
 func liveOpenBao(t *testing.T) (*openbaotest.Admin, string, string) {
 	t.Helper()
 	addr, root := os.Getenv("IMAS_TEST_OPENBAO_ADDR"), os.Getenv("IMAS_TEST_OPENBAO_TOKEN")
@@ -35,6 +37,8 @@ func liveOpenBao(t *testing.T) (*openbaotest.Admin, string, string) {
 	return openbaotest.NewAdmin(t, addr, root), addr, root
 }
 
+// randomMount mounts a PKI engine at prefix-<random> and removes it when
+// the test ends.
 func randomMount(t *testing.T, bao *openbaotest.Admin, prefix string) string {
 	t.Helper()
 	b := make([]byte, 4)
@@ -45,6 +49,8 @@ func randomMount(t *testing.T, bao *openbaotest.Admin, prefix string) string {
 	return mount
 }
 
+// dataField returns the string field of an OpenBao response's data,
+// failing the test when it is absent.
 func dataField(t *testing.T, raw []byte, field string) string {
 	t.Helper()
 	var r struct {

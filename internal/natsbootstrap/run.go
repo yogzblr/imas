@@ -245,6 +245,9 @@ func readTokenFile(path string) (string, bool, error) {
 	return tok, true, nil
 }
 
+// bootstrap is the run with a token: it checks every setting, creates the
+// platform Transit keys, writes the trust ConfigMap, then the optional KV
+// copy and, with EnvBusCAConfigMap, the bus CA ConfigMap.
 func bootstrap(ctx context.Context, out io.Writer, kube *kubeClient, cmName string, cfg natskeys.Config, ob *openbao.Client) error {
 	// Settings are checked before anything is created or written.
 	kvCopy := os.Getenv(EnvKVCopy) == "true"

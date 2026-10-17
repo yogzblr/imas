@@ -3572,6 +3572,9 @@ func mountsByName(c obj) map[string]obj { return byName(c["volumeMounts"]) }
 // with Kubernetes API credentials; bootstrap revokes the handoff token by
 // accessor, deletes the ephemeral policy and, outside dev mode, revokes
 // its own token last.
+// The bootstrap Job's containers: which volume (handoff, accessor,
+// kube-api) each mounts, nats-trust's env and image, and the order of the
+// token revocations.
 func TestBootstrapJobStructure(t *testing.T) {
 	job := find(t, mustRender(t), "Job", "t-farmer-openbao-bootstrap")
 	ps := podSpec(job)
