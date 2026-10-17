@@ -1320,7 +1320,7 @@ never contains:
   `otp`, `sdb` or `key_material`, in any case;
 - in any string param, target or the error text: a JWT, a PEM private
   key block, an NATS seed, an AWS access key ID (`AKIA...`), a bearer
-  credential, URL userinfo (`://user:pass@`), or the value of a
+  credential, a `Basic` credential (base64 of `user:pass`), URL userinfo (`://user:pass@`), or the value of a
   `name=value` or `name: value` pair, or of a `--name value` command
   option, whose name contains one of the words above;
 - params that are not JSON or are over 1 MiB (only their size and SHA-256);

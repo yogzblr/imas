@@ -14,7 +14,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/m-mizutani/masq"
 	"github.com/nats-io/nkeys"
 )
 
@@ -74,9 +73,10 @@ func TestMasqReplacesEachStringPattern(t *testing.T) {
 		{"nats seed", "seed is " + seed, seed, 2},
 		{"akia", "aws " + testAKIA + " key", testAKIA, 3},
 		{"bearer", "curl -H 'Authorization: Bearer abc.def-ghi' host", "abc.def-ghi", 4},
-		{"userinfo", "git clone https://bob:hunter2@git.example.com/r", "hunter2", 5},
-		{"name=value", "mysql --password=hunter2 db", "hunter2", 6},
-		{"name: value", "x-api-key: k3y-v4lue", "k3y-v4lue", 6},
+		{"bare basic", "auth failed for Basic dXNlcjpwYXNz", "dXNlcjpwYXNz", 5},
+		{"userinfo", "git clone https://bob:hunter2@git.example.com/r", "hunter2", 6},
+		{"name=value", "mysql --password=hunter2 db", "hunter2", 7},
+		{"name: value", "x-api-key: k3y-v4lue", "k3y-v4lue", 7},
 	}
 	covered := map[int]bool{}
 	for _, l := range leaves {
@@ -87,10 +87,9 @@ func TestMasqReplacesEachStringPattern(t *testing.T) {
 	}
 	for _, l := range leaves {
 		t.Run(l.name, func(t *testing.T) {
-			p := stringPatterns[l.pattern]
-			mask := masq.New(masq.WithRegex(p.re, masq.RedactString(func(s string) string {
-				return p.re.ReplaceAllString(s, p.repl)
-			})))
+			// stringMaskers[i] is masq.New(masq.WithRegex(...)) of
+			// stringPatterns[i].
+			mask := stringMaskers[l.pattern]
 			got, ok := mask(nil, slog.String("v", l.in)).Value.Any().(string)
 			if !ok {
 				t.Fatalf("masq returned %T", mask(nil, slog.String("v", l.in)).Value.Any())
@@ -131,6 +130,8 @@ func TestRedactStringPatterns(t *testing.T) {
 		{"option at start", "--token abc123", []string{"abc123"}, []string{"--token "}},
 		{"option quoted", `cli --db-password "hunter 2"`, []string{"hunter 2"}, []string{"--db-password"}},
 		{"plain text", "systemctl restart nginx", nil, []string{"systemctl restart nginx"}},
+		{"bare basic", "upstream said: basic dXNlcjpwYXNzMQ== rejected", []string{"dXNlcjpwYXNz"}, []string{"upstream said: basic ", " rejected"}},
+		{"basic in prose", "run the basic configuration first", nil, []string{"run the basic configuration first"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -405,6 +406,17 @@ func TestFreeFormUnknownKeyOmitted(t *testing.T) {
 		t.Fatal(err)
 	}
 	if bytes.Contains(buf.Bytes(), []byte("QUIETKEY")) || !bytes.Contains(buf.Bytes(), []byte(`"keys":["name","sprout_id","value"]`)) {
+		t.Errorf("line = %s", buf.Bytes())
+	}
+}
+
+// A bare Basic credential in the error text is masked in the line written.
+func TestLogRedactsBareBasic(t *testing.T) {
+	var buf bytes.Buffer
+	if err := NewLogger(&buf).Log(Entry{Action: "pki.accept", Error: "proxy refused Basic YWRtaW46czNjcjN0"}); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(buf.Bytes(), []byte("YWRtaW46czNjcjN0")) || !bytes.Contains(buf.Bytes(), []byte(`"error":"proxy refused Basic [REDACTED]"`)) {
 		t.Errorf("line = %s", buf.Bytes())
 	}
 }

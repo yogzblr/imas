@@ -187,7 +187,11 @@ Build:
      method to them): any other key name is user text, so it is left out.
      The `name=value` pattern also covers a `-x`/`--x` option followed by
      whitespace (`--password hunter2`). `Entry.Targets` is masked like a
-     string leaf, since `LogAction` takes targets from params.
+     string leaf, since `LogAction` takes targets from params. A bare
+     `Basic <token>` is masked when the token is base64 of `user:pass`
+     (so prose such as "basic setup" is kept). The free-form `sha256` stays
+     an unkeyed SHA-256 of the original bytes, as rule 2 and the owner
+     decision ("its hash is") specify.
 4. **`Entry.Error`.** Apply rule 3's string patterns to it (an error that
    quotes a secret is redacted). Do not change the other fields.
 5. **Dependency.** If masq is kept: `go get` the latest release, record it in

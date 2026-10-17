@@ -8,8 +8,8 @@
 // function every line goes through, so no writer can skip it. An ordinary
 // write method's params are logged with every secret masked: the value of
 // any key naming a secret (password, token, seed, api key, ...) at any
-// depth, and JWTs, PEM private keys, NATS seeds, AWS key IDs, bearer
-// credentials, URL userinfo and name=value or --name value secrets in any
+// depth, and JWTs, PEM private keys, NATS seeds, AWS key IDs, bearer and
+// Basic credentials, URL userinfo and name=value or --name value secrets in any
 // string. A free-form method (command text, recipes, property values,
 // shell requests, public keys; freeFormMethods) never has its params
 // logged: only their size, SHA-256 and the top-level key names its handler

@@ -3,6 +3,7 @@ package audit
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
@@ -51,28 +52,34 @@ var secretKey = regexp.MustCompile(`pass(word|wd|phrase)?|secret|token|api[_-]?k
 const secretKeyWords = `pass(?:word|wd|phrase)?|secret|token|api[_-]?key|private|seed|credential|authorization|bearer|cookie|otp|sdb|key_material`
 
 // stringPatterns are the secrets masked in every string leaf and in
-// Entry.Error, applied in order. repl replaces each match.
+// Entry.Error, applied in order. repl replaces each match; with fn set,
+// fn computes each match's replacement instead.
 var stringPatterns = []struct {
 	re   *regexp.Regexp
 	repl string
+	fn   func(match string) string
 }{
 	// A PEM private key block, to its END line (or the end of the string).
-	{regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)`), Redacted},
+	{regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)`), Redacted, nil},
 	// A JWT: three base64url parts, the first a JSON object ("eyJ").
-	{regexp.MustCompile(`eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`), Redacted},
+	{regexp.MustCompile(`eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`), Redacted, nil},
 	// An NATS seed (user, account, operator, server).
-	{regexp.MustCompile(`S[UAON][A-Z2-7]{55}`), Redacted},
+	{regexp.MustCompile(`S[UAON][A-Z2-7]{55}`), Redacted, nil},
 	// An AWS access key ID.
-	{regexp.MustCompile(`AKIA[0-9A-Z]{16}`), Redacted},
+	{regexp.MustCompile(`AKIA[0-9A-Z]{16}`), Redacted, nil},
 	// A bearer credential.
-	{regexp.MustCompile(`(?i)bearer\s+\S+`), Redacted},
+	{regexp.MustCompile(`(?i)bearer\s+\S+`), Redacted, nil},
+	// A bare Basic credential: "Basic" then base64 of user:pass. Only a
+	// token that decodes to user:pass is masked, so prose ("basic setup")
+	// stays as written.
+	{regexp.MustCompile(`(?i)\bbasic\s+[A-Za-z0-9+/]{4,}={0,2}`), "", maskBasic},
 	// URL userinfo: scheme://user:pass@host keeps the scheme and host.
-	{regexp.MustCompile(`://[^/\s:@]+:[^/\s@]*@`), "://" + Redacted + "@"},
+	{regexp.MustCompile(`://[^/\s:@]+:[^/\s@]*@`), "://" + Redacted + "@", nil},
 	// name=value or name: value where the name holds a key word, or a
 	// command option (-x or --x) holding one followed by whitespace
 	// (--password hunter2); the name stays, the value (with an auth scheme
 	// before it) goes.
-	{regexp.MustCompile(`(?i)([A-Za-z0-9_.-]*(?:` + secretKeyWords + `)[A-Za-z0-9_.-]*"?\s*[=:]\s*|(?:^|\s)--?[A-Za-z0-9_.-]*(?:` + secretKeyWords + `)[A-Za-z0-9_.-]*\s+)(?:(?:basic|digest|bearer)\s+)?("[^"]*"|'[^']*'|[^\s,;&"']+)`), "${1}" + Redacted},
+	{regexp.MustCompile(`(?i)([A-Za-z0-9_.-]*(?:` + secretKeyWords + `)[A-Za-z0-9_.-]*"?\s*[=:]\s*|(?:^|\s)--?[A-Za-z0-9_.-]*(?:` + secretKeyWords + `)[A-Za-z0-9_.-]*\s+)(?:(?:basic|digest|bearer)\s+)?("[^"]*"|'[^']*'|[^\s,;&"']+)`), "${1}" + Redacted, nil},
 }
 
 // stringMaskers are stringPatterns as masq ReplaceAttr functions, one per
@@ -82,11 +89,28 @@ var stringMaskers = func() []func([]string, slog.Attr) slog.Attr {
 	for _, p := range stringPatterns {
 		p := p
 		out = append(out, masq.New(masq.WithRegex(p.re, masq.RedactString(func(s string) string {
+			if p.fn != nil {
+				return p.re.ReplaceAllStringFunc(s, p.fn)
+			}
 			return p.re.ReplaceAllString(s, p.repl)
 		}))))
 	}
 	return out
 }()
+
+// maskBasic masks a "Basic <token>" match whose token is base64 of
+// user:pass, keeping the scheme word; any other match is returned as is.
+func maskBasic(match string) string {
+	i := strings.LastIndexAny(match, " \t\r\n")
+	raw, err := base64.StdEncoding.DecodeString(match[i+1:])
+	if err != nil {
+		raw, err = base64.RawStdEncoding.DecodeString(match[i+1:])
+	}
+	if err != nil || !bytes.Contains(raw, []byte(":")) {
+		return match
+	}
+	return match[:i+1] + Redacted
+}
 
 // RedactString masks every secret stringPatterns finds in s.
 func RedactString(s string) string {
