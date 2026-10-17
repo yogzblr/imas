@@ -173,31 +173,32 @@ func writeConfigFile(path string) error {
 // created it 0644 in a 0755 directory) is fixed the next time the CLI
 // starts, before a private key is put into it. A path or default directory
 // that is a symlink (or not a regular file or directory) is refused, never
-// followed: Chmod would change its target.
+// followed: the mode is set through a handle opened with O_NOFOLLOW and
+// checked on that handle (chmodNoFollow), so not even a symlink swapped in
+// after a check changes its target.
 func restrictConfig(path string) error {
 	if path == "" {
 		return nil
 	}
 	var errs []error
 	if dir := filepath.Dir(path); isDefaultConfigDir(dir) {
-		// Chmod follows a symlink: only a real directory is tightened.
-		if st, err := os.Lstat(dir); err == nil && !st.IsDir() {
-			errs = append(errs, fmt.Errorf("%s is not a directory (%v): not restricting it", dir, st.Mode().Type()))
-		} else if err == nil {
-			if err := os.Chmod(dir, cliConfigDirMode); err != nil {
-				errs = append(errs, fmt.Errorf("restricting %s to mode %o: %w", dir, cliConfigDirMode, err))
-			}
+		if err := chmodNoFollow(dir, cliConfigDirMode, true); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
 		}
 	}
-	// Likewise only a regular file: a symlink's target is never changed.
-	if st, err := os.Lstat(path); err == nil && !st.Mode().IsRegular() {
-		errs = append(errs, fmt.Errorf("%s is not a regular file (%v): not restricting it", path, st.Mode().Type()))
-	} else if err == nil {
-		if err := chmod(path, cliConfigFileMode); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			errs = append(errs, fmt.Errorf("restricting %s to mode %o: %w", path, cliConfigFileMode, err))
-		}
+	if err := chmod(path, cliConfigFileMode); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+// notTypeError is chmodNoFollow's refusal of a path that is not a
+// directory (dir) or not a regular file: a symlink, a device, a FIFO.
+func notTypeError(path string, dir bool) error {
+	if dir {
+		return fmt.Errorf("%s is not a directory: not restricting it", path)
+	}
+	return fmt.Errorf("%s is not a regular file: not restricting it", path)
 }
 
 // isDefaultConfigDir reports whether dir is <something>/.config/imas.
@@ -205,8 +206,9 @@ func isDefaultConfigDir(dir string) bool {
 	return filepath.Base(dir) == "imas" && filepath.Base(filepath.Dir(dir)) == ".config"
 }
 
-// chmod is os.Chmod; tests replace it to stand in for a Chmod that fails.
-var chmod = os.Chmod
+// chmod restricts the config file without following a symlink; tests
+// replace it to stand in for a Chmod that fails.
+var chmod = func(path string, mode fs.FileMode) error { return chmodNoFollow(path, mode, false) }
 
 // requirePrivateConfig fails unless path, the config file about to receive
 // the private key, is a regular file that only its owner can read or write

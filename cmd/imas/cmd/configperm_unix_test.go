@@ -3,6 +3,7 @@
 package cmd
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -281,9 +282,10 @@ func TestCreatePrivkeyRefusesALooseConfig(t *testing.T) {
 	t.Cleanup(func() { jety.SetConfigFile(old) })
 	jety.SetConfigFile(path)
 
+	saved := chmod
 	chmod = func(string, fs.FileMode) error { return nil }
 	err := createPrivkey()
-	chmod = os.Chmod
+	chmod = saved
 	if err == nil || !strings.Contains(err.Error(), "refusing to write the private key") {
 		t.Fatalf("createPrivkey on a 0644 file it cannot tighten: %v, want a refusal", err)
 	}
@@ -343,5 +345,77 @@ func TestCreatePrivkeyRefusesALooseConfig(t *testing.T) {
 	}
 	if err := requirePrivateConfig(""); err == nil {
 		t.Error("an empty config path was accepted")
+	}
+}
+
+// chmodNoFollow changes the mode only of the object it opened and checked:
+// a symlink (to a file or a directory) is refused without touching its
+// target, a FIFO is refused without blocking, and a real file or directory
+// gets the mode.
+func TestChmodNoFollow(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(file, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fileLink, dirLink := filepath.Join(dir, "filelink"), filepath.Join(dir, "dirlink")
+	if err := os.Symlink(file, fileLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(sub, dirLink); err != nil {
+		t.Fatal(err)
+	}
+	fifo := filepath.Join(dir, "fifo")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		path string
+		dir  bool
+		want string
+	}{
+		{fileLink, false, "not a regular file"},
+		{dirLink, true, "not a directory"},
+		{dirLink, false, "not a regular file"},
+		{file, true, "not a directory"},
+		{sub, false, "not a regular file"},
+		{fifo, false, "not a regular file"},
+	} {
+		if err := chmodNoFollow(tc.path, 0o600, tc.dir); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("chmodNoFollow(%s, dir=%v) = %v, want %q", filepath.Base(tc.path), tc.dir, err, tc.want)
+		}
+	}
+	if st, _ := os.Stat(file); st.Mode().Perm() != 0o644 {
+		t.Errorf("a refused call changed %s to %v", file, st.Mode().Perm())
+	}
+	if st, _ := os.Stat(sub); st.Mode().Perm() != 0o755 {
+		t.Errorf("a refused call changed %s to %v", sub, st.Mode().Perm())
+	}
+
+	if err := chmodNoFollow(file, 0o600, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := chmodNoFollow(sub, 0o700, true); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := os.Stat(file); st.Mode().Perm() != 0o600 {
+		t.Errorf("file mode %v, want 0600", st.Mode().Perm())
+	}
+	if st, _ := os.Stat(sub); st.Mode().Perm() != 0o700 {
+		t.Errorf("directory mode %v, want 0700", st.Mode().Perm())
+	}
+	if err := chmodNoFollow(filepath.Join(dir, "missing"), 0o600, false); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a missing path: %v, want ErrNotExist", err)
 	}
 }
