@@ -33,7 +33,7 @@ func TestSproutHeartbeatSubject(t *testing.T) {
 // different sprout's permissions neither contain it nor carry a heartbeat
 // grant that could cover it.
 func TestSproutPermissions_HeartbeatGrantIsPerSprout(t *testing.T) {
-	a, b := sproutPermissions("sprout01"), sproutPermissions("sprout02")
+	a, b := SproutPermissions("sprout01"), SproutPermissions("sprout02")
 	subjA, subjB := SproutHeartbeatSubject("sprout01"), SproutHeartbeatSubject("sprout02")
 
 	if !a.Pub.Allow.Contains(subjA) {
@@ -74,7 +74,7 @@ func TestMintOrReuseUserJWT_AddsHeartbeatGrant(t *testing.T) {
 		return uc.Pub.Allow.Contains(subj)
 	}
 
-	old := sproutPermissions("sprout01")
+	old := SproutPermissions("sprout01")
 	old.Pub.Allow.Remove(subj)
 	if _, err := mintOrReuseUserJWTFile(path, upub, "sprout01", old, mat.tenantPub, mat.tenantSigningKP); err != nil {
 		t.Fatalf("mintOrReuseUserJWT (old permissions) failed: %v", err)
@@ -82,7 +82,7 @@ func TestMintOrReuseUserJWT_AddsHeartbeatGrant(t *testing.T) {
 	if grants() {
 		t.Fatal("JWT minted without the heartbeat grant has it")
 	}
-	minted, err := mintOrReuseUserJWTFile(path, upub, "sprout01", sproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
+	minted, err := mintOrReuseUserJWTFile(path, upub, "sprout01", SproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
 	if err != nil {
 		t.Fatalf("mintOrReuseUserJWT (current permissions) failed: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestMintOrReuseUserJWT_AddsHeartbeatGrant(t *testing.T) {
 		t.Fatalf("re-mint = %v; the heartbeat grant must be added", minted)
 	}
 	// And once current, it is reused, not re-signed on every sync.
-	if minted, err = mintOrReuseUserJWTFile(path, upub, "sprout01", sproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP); err != nil || minted {
+	if minted, err = mintOrReuseUserJWTFile(path, upub, "sprout01", SproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP); err != nil || minted {
 		t.Fatalf("second mint = %v, %v; want a reuse", minted, err)
 	}
 }

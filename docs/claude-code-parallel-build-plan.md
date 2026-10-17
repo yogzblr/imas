@@ -1592,7 +1592,7 @@ flag; Windows sprouts keep refusing shell (ConPTY needs Server 2019 and the
 supported floor is Server 2016); no transcripts in v1, only audit entries when a
 session opens and ends (ask the owner in the PR whether CERT-In or DPDP need
 recording); no browser or SaaS API shell. FLAG FOR SECURITY REVIEW.
-Also fix what the design found: sproutPermissions grants no imas.shell.> subject,
+Also fix what the design found: SproutPermissions grants no imas.shell.> subject,
 so shell does not work for a per-sprout JWT today.
 Build: the payloadbox stream codec (HKDF from ephemeral X25519, ChaCha20-Poly1305
 with the sequence number as nonce, fail closed on replay, reorder or gap, flow

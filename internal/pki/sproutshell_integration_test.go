@@ -138,7 +138,7 @@ func TestMintOrReuseUserJWT_AddsShellGrant(t *testing.T) {
 		}
 		return uc.Pub.Allow.Contains(grant)
 	}
-	old := sproutPermissions("sprout01")
+	old := SproutPermissions("sprout01")
 	old.Pub.Allow.Remove(grant)
 	if _, err := mintOrReuseUserJWTFile(path, upub, "sprout01", old, mat.tenantPub, mat.tenantSigningKP); err != nil {
 		t.Fatal(err)
@@ -146,7 +146,7 @@ func TestMintOrReuseUserJWT_AddsShellGrant(t *testing.T) {
 	if grants() {
 		t.Fatal("JWT minted without the shell grant has it")
 	}
-	minted, err := mintOrReuseUserJWTFile(path, upub, "sprout01", sproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
+	minted, err := mintOrReuseUserJWTFile(path, upub, "sprout01", SproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
 	if err != nil {
 		t.Fatal(err)
 	}

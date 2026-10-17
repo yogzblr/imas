@@ -4,7 +4,7 @@ package pki
 // subjects: sprout01 is refused, with a Permissions Violation, when it
 // publishes to or subscribes on sprout02's imas.sprouts.<id>.> subtree,
 // and nothing it sends there is delivered. Asserting on
-// sproutPermissions' fields alone wouldn't show nats-server enforces it;
+// SproutPermissions' fields alone wouldn't show nats-server enforces it;
 // this does.
 //
 // It also pins that the retired imas.sprouts.<id>.fleetsigningkeys

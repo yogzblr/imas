@@ -12,10 +12,10 @@ package main
 //     delegates User issuance to its own signing key (tenant.go's
 //     ensureTenantAccountMaterial);
 //   - each sprout User JWT is signed by that signing key, names the
-//     Account as its issuer and carries sproutPermissions (jwtusers.go's
-//     MintOrReuseUserJWT);
+//     Account as its issuer and carries pki.SproutPermissions, the one
+//     definition MintOrReuseUserJWT mints from (jwtusers.go);
 //   - the requester that plays core gets core's per-tenant "farmer" User
-//     shape, allowAllPermissions;
+//     shape, pki.AllowAllPermissions;
 //   - the Account reaches the bus the way core pushes it, a request to
 //     $SYS.REQ.CLAIMS.UPDATE as a SYS account user (resolver.go).
 //
@@ -24,10 +24,9 @@ package main
 // permissions) as for an enrolled sprout. What this path skips is listed
 // in docs/loadtest.md, "What the harness does not test".
 //
-// sproutPermissions and corePermissions are copies: internal/pki keeps
-// its own unexported. TestSproutPermissionsMatchPKI pins the copy to the
-// grants internal/pki's exported helpers name, but a new grant added there
-// has to be added here by hand.
+// The grants are internal/pki's own, not copies: a grant added to
+// pki.SproutPermissions reaches the simulated sprouts with no change here
+// (TestSproutJWTShape checks the minted JWTs against it).
 
 import (
 	"context"
@@ -178,7 +177,7 @@ func (tr *trust) newTenant(name string) (*tenantFixture, error) {
 	if tf.accountJWT, err = ac.Encode(tr.operatorSigning); err != nil {
 		return nil, err
 	}
-	if tf.coreJWT, tf.coreSeed, err = tf.mintUser("farmer", corePermissions()); err != nil {
+	if tf.coreJWT, tf.coreSeed, err = tf.mintUser("farmer", pki.AllowAllPermissions()); err != nil {
 		return nil, err
 	}
 	return tf, nil
@@ -225,7 +224,7 @@ func (tf *tenantFixture) mintSprouts(prefix string, n int) ([]sproutCred, error)
 			defer wg.Done()
 			for i := w; i < n; i += workers {
 				id := sproutID(prefix, i)
-				j, s, err := tf.mintUser(id, sproutPermissions(id))
+				j, s, err := tf.mintUser(id, pki.SproutPermissions(id))
 				if err != nil {
 					errs <- err
 					return
@@ -240,32 +239,6 @@ func (tf *tenantFixture) mintSprouts(prefix string, n int) ([]sproutCred, error)
 		return nil, err
 	}
 	return creds, nil
-}
-
-// sproutPermissions copies internal/pki/jwtusers.go's sproutPermissions.
-func sproutPermissions(id string) jwt.Permissions {
-	return jwt.Permissions{
-		Pub: jwt.Permission{Allow: jwt.StringList{
-			"imas.sprouts.announce." + id,
-			"_INBOX.>",
-			"imas.cook." + id + ".>",
-			"imas.sprouts." + id + ".facts",
-			pki.SproutBoxKeySubmitSubject(id),
-			pki.SproutLogSubjectPrefix(id) + ".>",
-		}},
-		Sub: jwt.Permission{Allow: jwt.StringList{
-			"imas.sprouts." + id + ".>",
-		}},
-	}
-}
-
-// corePermissions copies internal/pki/jwtusers.go's allowAllPermissions,
-// what core's per-tenant connection is granted.
-func corePermissions() jwt.Permissions {
-	return jwt.Permissions{
-		Pub: jwt.Permission{Allow: jwt.StringList{"imas.>", "_INBOX.>"}},
-		Sub: jwt.Permission{Allow: jwt.StringList{"imas.>", "_INBOX.>"}},
-	}
 }
 
 // pushAccount sends accountJWT to every server in servers, one connection
