@@ -277,6 +277,16 @@ spec:
               value: {{ . | toString | quote }}
             {{- end }}
             {{- end }}
+            {{- with $s.tenantPurge }}
+            {{- if not (kindIs "invalid" .enabled) }}
+            - name: SAASAPI_TENANT_PURGE_ENABLED
+              value: {{ .enabled | toString | quote }}
+            {{- end }}
+            {{- if not (kindIs "invalid" .after) }}
+            - name: SAASAPI_TENANT_PURGE_AFTER
+              value: {{ .after | toString | quote }}
+            {{- end }}
+            {{- end }}
             {{- /* Recipe template render limits: the same values farmer
             renders under, so an upload is validated as it will be cooked,
             and the include cap an upload's own include list is checked

@@ -570,7 +570,7 @@ files/objectstore-policies/saasapi-recipes.json, the same reviewed policy.
   (dict "sid" "FarmerObjects" "user" "farmer" "actions" $rw "resources" (list (printf "arn:aws:s3:::%s/*" $os.jobBucket))))) -}}
 {{- $buckets = append $buckets (dict "name" $os.sproutJWTBucket "statements" (list
   (dict "sid" "FarmerBucket" "user" "farmer" "actions" $listS "resources" (list (printf "arn:aws:s3:::%s" $os.sproutJWTBucket)))
-  (dict "sid" "FarmerSproutJWTs" "user" "farmer" "actions" (list "s3:GetObject" "s3:PutObject") "resources" (list (printf "arn:aws:s3:::%s/*" $os.sproutJWTBucket))))) -}}
+  (dict "sid" "FarmerSproutJWTs" "user" "farmer" "actions" $rw "resources" (list (printf "arn:aws:s3:::%s/*" $os.sproutJWTBucket))))) -}}
 {{- end -}}
 {{- if include "imas-farmer.accountsUseVersity" . -}}
 {{- $b := .Values.accountStore.bucket -}}
@@ -1123,6 +1123,14 @@ refuses to render. */}}
 {{- end -}}
 {{- if lt (int $s.replicaCount) 1 -}}
 {{- fail "saasapi.replicaCount must be at least 1" -}}
+{{- end -}}
+{{- with $s.tenantPurge -}}
+{{- if not (or (kindIs "invalid" .enabled) (kindIs "bool" .enabled)) -}}
+{{- fail (printf "saasapi.tenantPurge.enabled must be true, false or null, got %v" .enabled) -}}
+{{- end -}}
+{{- if not (or (kindIs "invalid" .after) (and (kindIs "string" .after) (regexMatch `^([0-9]+(\.[0-9]+)?(h|m|s|ms|us|ns))+$` .after))) -}}
+{{- fail (printf "saasapi.tenantPurge.after must be a Go duration such as 720h, or null, got %v (saasapi refuses one outside 1h..8760h at startup)" .after) -}}
+{{- end -}}
 {{- end -}}
 {{- include "imas-farmer.saasapi.recipes.validate" . -}}
 {{- if $s.operator.enabled -}}

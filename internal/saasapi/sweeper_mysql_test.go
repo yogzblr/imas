@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -272,5 +273,62 @@ func TestMySQLClaimRolloutTakeover(t *testing.T) {
 	var p TenantUpdatePolicy
 	if err := g2.First(&p, "tenant_id = ?", "t_mysql").Error; err != nil || p.RolloutClaimedAt == nil || !p.RolloutClaimedAt.After(prev) {
 		t.Fatalf("rollout claim after the takeover: %+v, %v", p.RolloutClaimedAt, err)
+	}
+}
+
+// Purge starts on MySQL (S6): of many concurrent starts for one offboarded
+// tenant, from two replicas, exactly one inserts a purge job; the others
+// see it pending or lose the purge_claimed_at claim. Once it has failed, a
+// sweeper start within a day is refused and an operator's is not.
+func TestMySQLStartPurgeOnePending(t *testing.T) {
+	g1, g2 := newMySQLSaasSchema(t)
+	now := dbTime(time.Now())
+	at := now.Add(-1000 * time.Hour)
+	if err := g1.Create(&Tenant{ID: "t_mysql_purge", Name: "P", Status: TenantStatusOffboarded, OffboardedAt: &at}).Error; err != nil {
+		t.Fatal(err)
+	}
+	var (
+		mu   sync.Mutex
+		wg   sync.WaitGroup
+		won  []*ProvisioningJob
+		lost int
+	)
+	for i := range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			g := g1
+			if i%2 == 1 {
+				g = g2
+			}
+			job, err := startPurge(g, "t_mysql_purge", controlplane.PurgeTriggerRetention, now, i%4 == 0)
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil {
+				won = append(won, job)
+			} else {
+				lost++
+			}
+		}()
+	}
+	wg.Wait()
+	var jobs []ProvisioningJob
+	if err := g1.Where("tenant_id = ? AND type = ?", "t_mysql_purge", ProvisioningJobPurge).Find(&jobs).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(won) != 1 || len(jobs) != 1 || jobs[0].ID != won[0].ID || lost != 15 {
+		t.Fatalf("%d starts won, %d jobs, %d lost; want exactly one", len(won), len(jobs), lost)
+	}
+	if err := g1.Model(&ProvisioningJob{}).Where("id = ?", jobs[0].ID).Update("status", ProvisioningJobFailed).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := startPurge(g2, "t_mysql_purge", controlplane.PurgeTriggerRetention, now.Add(time.Hour), false); !errors.Is(err, errPurgeRecent) {
+		t.Fatalf("a sweeper start within a day of the last: %v, want errPurgeRecent", err)
+	}
+	if _, err := startPurge(g2, "t_mysql_purge", controlplane.PurgeTriggerOperator, now.Add(time.Hour), true); err != nil {
+		t.Fatalf("an operator start after a failure: %v", err)
+	}
+	if _, err := startPurge(g1, "t_mysql_purge", controlplane.PurgeTriggerRetention, now.Add(48*time.Hour), false); !errors.Is(err, errPurgeInProgress) {
+		t.Fatalf("a start while one is pending: %v, want errPurgeInProgress", err)
 	}
 }

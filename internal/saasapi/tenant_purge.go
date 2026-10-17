@@ -184,7 +184,9 @@ func enqueuePurgeJob(tx *gorm.DB, tenantID, trigger string) (*ProvisioningJob, e
 	if err != nil {
 		return nil, err
 	}
-	job := &ProvisioningJob{ID: id, TenantID: tenantID, Type: ProvisioningJobPurge, Status: ProvisioningJobPending, PurgeTrigger: trigger}
+	// Dated on the outbox clock, which the sweeper's backoff reads.
+	job := &ProvisioningJob{ID: id, TenantID: tenantID, Type: ProvisioningJobPurge, Status: ProvisioningJobPending, PurgeTrigger: trigger,
+		CreatedAt: dbTime(outboxNow())}
 	if err := tx.Create(job).Error; err != nil {
 		return nil, err
 	}

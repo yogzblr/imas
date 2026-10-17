@@ -25,6 +25,13 @@ import (
 func newPurgeTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	gdb := newTestDB(t)
+	// One connection: SQLite's shared-cache mode locks whole tables, so
+	// concurrent sweepers would deadlock each other here. On MySQL they
+	// run concurrently: TestMySQLStartPurgeOnePending.
+	if sqlDB, err := gdb.DB(); err == nil {
+		sqlDB.SetMaxOpenConns(1)
+		t.Cleanup(func() { sqlDB.SetMaxOpenConns(0) })
+	}
 	empty := func() {
 		clearOutbox(t, gdb)
 		for _, m := range []any{&Tenant{}, &EnrollmentKey{}, &AssetLink{}, &TenantUpdatePolicy{}} {

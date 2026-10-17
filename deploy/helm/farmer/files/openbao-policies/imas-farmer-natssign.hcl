@@ -81,7 +81,7 @@ path "transit/keys/+/soft-delete" {
 }
 
 path "transit/keys/+/config" {
-  capabilities       = ["update"]
+  capabilities = ["update"]
   allowed_parameters = {
     "deletion_allowed" = ["true"]
   }

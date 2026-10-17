@@ -782,6 +782,22 @@ saasapi:
     # SAASAPI_OUTBOX_LEASE_TTL: how soon a dead pod's batch or rollout is
     # taken over. Default 2m, 15s..1h.
     leaseTTL: ""
+  # Erasing an offboarded tenant's data (internal/saasapi tenant_purge.go,
+  # S6). Offboarding locks a tenant out at once; its data (recipes, job
+  # output, sprout and property rows, sprout JWTs, box keys, Transit keys,
+  # its saas rows) is erased once it has been offboarded for `after`, by a
+  # purge job the outbox sweeper starts. Only a tombstone stays (README,
+  # "Erasing an offboarded tenant's data"). An operator can purge sooner:
+  # POST /v1/operator/tenants/{tenant_id}/purge on the operator plane.
+  # null keeps saasapi's default and emits no env var.
+  # FLAG FOR SECURITY REVIEW: a purge cannot be undone.
+  tenantPurge:
+    # SAASAPI_TENANT_PURGE_ENABLED: default true. false: the sweeper
+    # purges nothing; the operator route still does.
+    enabled: null
+    # SAASAPI_TENANT_PURGE_AFTER: the retention delay, a Go duration.
+    # Default 720h (30 days), 1h..8760h.
+    after: null
   # The operator plane (internal/saasapi NewOperatorServer, API design
   # §2.5): sprout release registration and revoke, on its own HTTPS
   # listener and its own Service (<release>-saasapi-operator), never the

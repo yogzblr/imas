@@ -3,7 +3,7 @@
 #
 # Inside the UAT RustFS object store (Apache-2.0): the recipe, job and
 # sprout JWT buckets (objectStore.bucket, .jobBucket, .sproutJWTBucket), a
-# user for farmer (recipes and jobs, and get and put on the sprout JWT
+# user for farmer (recipes and jobs, and get, put and delete on the sprout JWT
 # bucket) and a user for saasapi, each with its own policy, and the two
 # Kubernetes Secrets the farmer chart names (objectStore.credentialsSecret,
 # saasapi.recipes.credentialsSecret).
