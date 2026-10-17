@@ -701,7 +701,7 @@ func TestValidationFailures(t *testing.T) {
 
 		// The bootstrap writes reviewed policies verbatim; values that
 		// would point a client outside them are refused.
-		{"bootstrap non-dev without token", "openbaoBootstrap.tokenSecretName is required", []string{"--set", "openbao.server.dev.enabled=false"}},
+		{"bootstrap non-dev without token", "openbaoBootstrap.tokenSecretName is required", []string{"--set", "openbao.server.dev.enabled=false", "--set", "openbaoClient.allowInsecure=true"}},
 		{"bootstrap moved publisher path", "Keep credentialPublisher.kvMount=secret", []string{"--set", "credentialPublisher.kvPath=other/path"}},
 		{"bootstrap farmerbus without SA", "farmerbus.serviceAccountName is required", []string{"--set", "openbaoBootstrap.farmerbus.enabled=true"}},
 	}
@@ -3762,7 +3762,7 @@ func TestBootstrapJobStructure(t *testing.T) {
 
 	// Outside dev mode (an operator-supplied root token): revoked last,
 	// unless revokeToken is off.
-	prod := []string{"--set", "openbao.server.dev.enabled=false", "--set", "openbaoBootstrap.tokenSecretName=imas-openbao-root"}
+	prod := []string{"--set", "openbao.server.dev.enabled=false", "--set", "openbaoBootstrap.tokenSecretName=imas-openbao-root", "--set", "openbaoClient.allowInsecure=true"}
 	bs = get(container(t, find(t, mustRender(t, prod...), "Job", "t-farmer-openbao-bootstrap"), "bootstrap"), "args", 0).(string)
 	if i := strings.Index(bs, "bao token revoke -self"); i < 0 || i < strings.Index(bs, "bao policy delete imas-nats-bootstrap") {
 		t.Errorf("bootstrap doesn't revoke its own token last:\n%s", bs)

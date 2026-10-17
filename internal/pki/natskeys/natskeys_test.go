@@ -686,6 +686,8 @@ func TestConfigFromEnv(t *testing.T) {
 		K8sMount:   "IMAS_NATSSIGN_OPENBAO_K8S_MOUNT",
 		K8sJWTPath: "IMAS_NATSSIGN_OPENBAO_K8S_JWT_PATH",
 		Namespace:  "IMAS_NATSSIGN_OPENBAO_NAMESPACE",
+
+		AllowInsecure: "IMAS_NATSSIGN_OPENBAO_ALLOW_INSECURE",
 	}
 	if cfg.OpenBao != wantEnv {
 		t.Errorf("OpenBao env names = %+v", cfg.OpenBao)
