@@ -235,11 +235,16 @@ func requirePrivateConfig(path string) error {
 	return nil
 }
 
-// createPrivkey creates the CLI's NKey private key (auth.CreatePrivkey)
-// only once the config file it is written to is private.
+// createPrivkey creates the CLI's NKey private key only once the config
+// file it is written to is private, and writes it atomically through a new
+// 0600 file (writeConfigFile).
 func createPrivkey() error {
-	if err := requirePrivateConfig(jety.ConfigFileUsed()); err != nil {
+	path := jety.ConfigFileUsed()
+	if err := requirePrivateConfig(path); err != nil {
 		return err
 	}
-	return auth.CreatePrivkey()
+	// Written through writeConfigFile: a new 0600 file renamed over path,
+	// so even a path swapped for a symlink after the check is replaced,
+	// never followed.
+	return auth.CreatePrivkeyWith(func() error { return writeConfigFile(path) })
 }

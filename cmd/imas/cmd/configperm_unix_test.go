@@ -419,3 +419,67 @@ func TestChmodNoFollow(t *testing.T) {
 		t.Errorf("a missing path: %v, want ErrNotExist", err)
 	}
 }
+
+// The private key is written through writeConfigFile: a path swapped for a
+// symlink after requirePrivateConfig's check (here from the step hook,
+// once the temporary file exists) is replaced by the new 0600 file, and the
+// symlink's target never receives the key.
+func TestCreatePrivkeyNeverFollowsASwappedSymlink(t *testing.T) {
+	permissiveUmask(t)
+	dir := filepath.Join(t.TempDir(), ".config", "imas")
+	path := filepath.Join(dir, "imas")
+	if err := ensureConfigFile(path); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("untouched\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldFile, oldKey := jety.ConfigFileUsed(), jety.GetString("privkey")
+	t.Cleanup(func() {
+		jety.SetConfigFile(oldFile)
+		jety.Set("privkey", oldKey)
+	})
+	if err := jety.SetConfigType("yaml"); err != nil {
+		t.Fatal(err)
+	}
+	jety.SetConfigFile(path)
+	jety.Set("privkey", "")
+
+	swapped := false
+	configStep = func(step, _ string) {
+		if step != "temp" {
+			return
+		}
+		swapped = true
+		if err := os.Remove(path); err != nil {
+			t.Error(err)
+		}
+		if err := os.Symlink(victim, path); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { configStep = nil })
+
+	if err := createPrivkey(); err != nil {
+		t.Fatal(err)
+	}
+	if !swapped {
+		t.Fatal("the key was not written through writeConfigFile")
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "untouched\n" {
+		t.Errorf("the key went through the swapped symlink: victim is %q", b)
+	}
+	st, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Mode().IsRegular() || st.Mode().Perm() != cliConfigFileMode {
+		t.Fatalf("config is %v, want a regular 0600 file", st.Mode())
+	}
+	if b, _ := os.ReadFile(path); !strings.Contains(string(b), "privkey") {
+		t.Errorf("config %q holds no private key", b)
+	}
+	noTempFiles(t, dir)
+}
