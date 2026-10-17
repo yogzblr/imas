@@ -2404,6 +2404,18 @@ func TestContractWithNatsChart(t *testing.T) {
 	if cm := get(busVols["nats-trust"], "configMap", "name"); cm == nil || cm != get(farmerVols["nats-trust"], "configMap", "name") || cm != bootEnv["IMAS_NATSBOOT_TRUST_CONFIGMAP"] {
 		t.Errorf("trust ConfigMap: bus %v, farmer %v, bootstrap writes %v", cm, get(farmerVols["nats-trust"], "configMap", "name"), bootEnv["IMAS_NATSBOOT_TRUST_CONFIGMAP"])
 	}
+	// The bus CA (unit S1): the loader's loader-ca ConfigMap has the name
+	// the bootstrap writes (a copy of it), read from the PKI mount the bus
+	// role issues from; the loader mounts no tls volume.
+	if cm := get(busVols["loader-ca"], "configMap", "name"); cm == nil || cm != bootEnv["IMAS_NATSBOOT_BUS_CA_CONFIGMAP"] {
+		t.Errorf("bus CA ConfigMap: the loader reads %v, the bootstrap writes %v", cm, bootEnv["IMAS_NATSBOOT_BUS_CA_CONFIGMAP"])
+	}
+	if busPKI := envValues(container(t, bus, "farmerbus"))["IMAS_CERTS_OPENBAO_PKI_MOUNT"]; busPKI == "" || busPKI != bootEnv["IMAS_NATSBOOT_BUS_CA_PKI_MOUNT"] {
+		t.Errorf("PKI mount: the bus issues from %q, the bootstrap reads its CA from %q", busPKI, bootEnv["IMAS_NATSBOOT_BUS_CA_PKI_MOUNT"])
+	}
+	if _, ok := mountsByName(container(t, bus, "loader"))["tls"]; ok {
+		t.Error("the loader mounts the bus tls volume")
+	}
 	busEnv, farmerEnv := envValues(container(t, bus, "farmerbus")), envValues(container(t, farmer, "farmer"))
 	if busEnv["IMAS_NATS_TRUST_DIR"] == "" || busEnv["IMAS_NATS_TRUST_DIR"] != farmerEnv["IMAS_NATS_TRUST_DIR"] {
 		t.Errorf("IMAS_NATS_TRUST_DIR: bus %q, farmer %q", busEnv["IMAS_NATS_TRUST_DIR"], farmerEnv["IMAS_NATS_TRUST_DIR"])
@@ -3691,6 +3703,64 @@ func TestBootstrapJobStructure(t *testing.T) {
 	}
 }
 
+// The bus CA step (unit S1): with OpenBao PKI in use (tls.mode=openbao,
+// the default, or the nats chart's bus role) nats-trust writes
+// natsTrust.busCAConfigMapName from the PKI mount the bus role issues
+// from; with PKI off the step is absent. Its token handling is unchanged:
+// the step reads an unauthenticated path with the handoff token.
+func TestBootstrapBusCAStep(t *testing.T) {
+	jobEnv := func(args ...string) map[string]string {
+		t.Helper()
+		return envValues(initContainer(t, find(t, mustRender(t, args...), "Job", "t-farmer-openbao-bootstrap"), "nats-trust"))
+	}
+	secretTLS := []string{"--set", "tls.mode=secret"}
+	for _, c := range []struct {
+		name, cm, mount string
+		args            []string
+	}{
+		{"farmer tls from openbao", "imas-bus-ca", "pki", nil},
+		{"bus role only", "imas-bus-ca", "pki", append(slices.Clone(secretTLS),
+			"--set", "openbaoBootstrap.farmerbus.enabled=true", "--set", "openbaoBootstrap.farmerbus.serviceAccountName=imas-dmz-nats-bus", "--set", "bus.namespace=imas-dmz")},
+		{"renamed, another mount", "core-bus-ca", "pki-int", []string{"--set", "natsTrust.busCAConfigMapName=core-bus-ca", "--set", "tls.openbao.pkiMount=pki-int"}},
+		{"pki off", "", "", secretTLS},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			env := jobEnv(c.args...)
+			cm, okCM := env["IMAS_NATSBOOT_BUS_CA_CONFIGMAP"]
+			mount, okMount := env["IMAS_NATSBOOT_BUS_CA_PKI_MOUNT"]
+			if c.cm == "" {
+				if okCM || okMount {
+					t.Errorf("PKI off, yet the bus CA step is configured: %q %q", cm, mount)
+				}
+				return
+			}
+			if cm != c.cm || mount != c.mount {
+				t.Errorf("bus CA step writes %q from %q, want %q from %q", cm, mount, c.cm, c.mount)
+			}
+			if env["IMAS_NATSBOOT_OPENBAO_TOKEN_FILE"] != "/handoff/token" || env["IMAS_NATSBOOT_OPENBAO_AUTH_METHOD"] != "token" {
+				t.Errorf("nats-trust token handling changed: %v", env)
+			}
+		})
+	}
+	// The policy the handoff token carries is not widened for it.
+	polBytes, err := os.ReadFile(filepath.Join(chartDir(t), "files", "openbao-policies", "imas-nats-bootstrap.hcl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol := string(polBytes)
+	if strings.Contains(pol, "pki") || strings.Contains(pol, "cert/ca") {
+		t.Errorf("imas-nats-bootstrap.hcl grants PKI paths; cert/ca is unauthenticated:\n%s", pol)
+	}
+	for _, c := range []struct{ name, want string }{
+		{"Bad_Name", "natsTrust.busCAConfigMapName \"Bad_Name\" is not a valid ConfigMap name"},
+		{"imas-nats-trust", "natsTrust.busCAConfigMapName and natsTrust.configMapName must differ"},
+	} {
+		if _, err := render(t, "--set", "natsTrust.busCAConfigMapName="+c.name); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("busCAConfigMapName=%s: %v, want %q", c.name, err, c.want)
+		}
+	}
+}
+
 func anyStrings(v any) []string {
 	var out []string
 	l, _ := v.([]any)
@@ -3701,10 +3771,11 @@ func anyStrings(v any) []string {
 }
 
 // The bootstrap Job's Kubernetes identity: configmaps create, and
-// get/update/patch on the trust ConfigMap only; nothing else, no cluster
-// scope, and no other workload bound to it.
+// get/update/patch on the trust ConfigMap and, with OpenBao PKI, the bus
+// CA ConfigMap only; nothing else, no cluster scope, and no other
+// workload bound to it.
 func TestNatsTrustRBAC(t *testing.T) {
-	docs := mustRender(t, "--set", "natsTrust.configMapName=core-trust")
+	docs := mustRender(t, "--set", "natsTrust.configMapName=core-trust", "--set", "natsTrust.busCAConfigMapName=core-bus-ca")
 	sa := find(t, docs, "ServiceAccount", "t-farmer-openbao-bootstrap")
 	if sa["automountServiceAccountToken"] != false {
 		t.Error("bootstrap ServiceAccount automounts its token")
@@ -3720,6 +3791,7 @@ func TestNatsTrustRBAC(t *testing.T) {
     - ""
   resourceNames:
     - core-trust
+    - core-bus-ca
   resources:
     - configmaps
   verbs:
@@ -3729,6 +3801,11 @@ func TestNatsTrustRBAC(t *testing.T) {
 `
 	if got := yamlString(t, role["rules"]); got != want {
 		t.Errorf("Role rules:\n%s\nwant:\n%s", got, want)
+	}
+	// With OpenBao PKI off there is no bus CA step, and no grant for it.
+	noPKI := find(t, mustRender(t, "--set", "natsTrust.configMapName=core-trust", "--set", "tls.mode=secret"), "Role", "t-farmer-openbao-bootstrap")
+	if got, want := yamlString(t, noPKI["rules"]), strings.Replace(want, "    - core-bus-ca\n", "", 1); got != want {
+		t.Errorf("Role rules without PKI:\n%s\nwant:\n%s", got, want)
 	}
 	rb := find(t, docs, "RoleBinding", "t-farmer-openbao-bootstrap")
 	if get(rb, "roleRef", "name") != "t-farmer-openbao-bootstrap" || len(get(rb, "subjects").([]any)) != 1 ||

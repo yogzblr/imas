@@ -177,6 +177,12 @@ kubectl -n imas-core get configmap imas-nats-trust -o json \
   | kubectl -n imas-dmz apply -f -
 ```
 
+With the bus in `bus.tls.mode=openbao` (its certificate from this chart's
+OpenBao PKI), copy the bus CA ConfigMap as well, public data only: from
+this release's `natsTrust.busCAConfigMapName` to the nats release's
+`loader.caConfigMap` (both default `imas-bus-ca`; see
+[NATS trust](#nats-trust)).
+
 Then, because the eval install has no ESO, deliver saasapi's credential by
 hand. The publish Job has already written the JWT to OpenBao:
 
@@ -233,7 +239,8 @@ What to expect on first install:
   platform keys it would create no longer match the trust ConfigMap: the
   bootstrap refuses to replace a trust anchor (`ErrTrustWouldChange`).
   Delete the `imas-nats-trust` ConfigMap (and its DMZ copy) and every
-  tenant's provisioning to start over.
+  tenant's provisioning to start over. The bootstrap rewrites the bus CA
+  ConfigMap (`imas-bus-ca`) with the new CA; copy it to the DMZ again.
 
 ### Production (everything external)
 
@@ -381,10 +388,17 @@ and the public trust on every install and upgrade, idempotently:
    `natsTrust.busFenceUserPub`, the bus fence user JWT, and writes them
    with the three public keys to the ConfigMap `natsTrust.configMapName`
    (default `imas-nats-trust`). It never replaces an existing anchor, and
-   revokes its token before it exits. Its ServiceAccount
+   revokes its token before it exits. When the Job sets up OpenBao PKI
+   (`tls.mode=openbao` or `openbaoBootstrap.farmerbus.enabled`) it also
+   writes the bus CA ConfigMap `natsTrust.busCAConfigMapName` (default
+   `imas-bus-ca`): key `ca.crt`, the PEM of `<tls.openbao.pkiMount>/cert/ca`,
+   which is the `issuing_ca` of every certificate the bus role issues (a
+   root or an intermediate issuer alike). It creates it when absent and
+   updates it when the PEM changed. `cert/ca` is unauthenticated, so the
+   handoff token's policy has no PKI grant. Its ServiceAccount
    (`<release>-farmer-openbao-bootstrap`, `templates/nats-trust-rbac.yaml`)
-   may create ConfigMaps and get, update and patch only the trust one; its
-   token is mounted in this container alone.
+   may create ConfigMaps and get, update and patch only the trust one and,
+   with PKI, the bus CA one; its token is mounted in this container alone.
 3. `bootstrap` (`bao`) writes the roles, revokes the handoff token by
    accessor, deletes `imas-nats-bootstrap`, and last revokes its own token
    ([OpenBao bootstrap token](#openbao-bootstrap-token)).
@@ -399,6 +413,15 @@ bus needs a copy in its namespace**, made by hand or by your pipeline
 `deploy/helm/nats/README.md`, "NATS trust". Copy it again after adding a
 fence user. `natsTrust.kvCopy.enabled` also copies it to OpenBao KV v2 at
 `secret/data/platform/imas/nats-trust`, for a pipeline to read.
+
+**The bus CA ConfigMap** holds public data only (`ca.crt`). A bus in
+`bus.tls.mode=openbao` needs a copy in its namespace, made the same way
+(by hand or by your pipeline), under the nats chart's
+`loader.caConfigMap`: its loader verifies its node with it and never
+mounts the bus's TLS volume (unit S1). The copy reads the source name from
+this release and writes the destination name from the nats release; see
+`deploy/helm/nats/README.md`, "The bus CA". Copy it again after a CA
+rotation (`docs/OPENBAO-RUNBOOK.md`, section 6.6).
 
 **A clustered bus** needs a fence user: generate a user seed for the nats
 chart (`BUS_FENCE_USER`), set its public key here as
@@ -1407,6 +1430,7 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `natsSeeds.extraSeeds` | `{}` | More user-kind seeds. |
 | `farmer.nkeySecret.secretName` / `key` / `mountPath` | `imas-farmer-nkey` / `farmer.nk` / `/var/run/secrets/imas/farmer-nkey` | farmer's NKey seed, shared by every replica (`IMAS_FARMER_NKEY_SEED_FILE`). Required; a Secret of its own. With ESO: property `farmer_nkey` of `externalSecrets.seedPath`. See [Seeds](#seeds). |
 | `natsTrust.configMapName` | `imas-nats-trust` | The trust ConfigMap the bootstrap writes and farmer and the publish Job mount. |
+| `natsTrust.busCAConfigMapName` | `imas-bus-ca` | The bus CA ConfigMap (`ca.crt`, from `<tls.openbao.pkiMount>/cert/ca`) the bootstrap writes when it sets up OpenBao PKI; copied to the nats chart's `loader.caConfigMap`. Must differ from `configMapName`. |
 | `natsTrust.busFenceUserPub` | `""` | The nats chart's fence user public key (`U...`); set, the bootstrap mints `bus-fence-user.jwt`. |
 | `natsTrust.busLoaderUserPub` | `""` | The nats chart's account loader user public key (`U...`, the public half of its `loader.sysUserSecret` seed); set, the bootstrap mints `bus-loader-user.jwt`, which every bus pod's loader needs. Must differ from `busFenceUserPub`. |
 | `natsTrust.kvCopy.enabled` | `false` | Also copy the trust to `secret/data/platform/imas/nats-trust`. |

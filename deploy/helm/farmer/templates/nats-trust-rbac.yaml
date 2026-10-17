@@ -4,12 +4,14 @@
 {{- /*
 The OpenBao bootstrap Job's Kubernetes identity (P21 slice 1 brief §4.4):
 its nats-trust container (`farmer bootstrap-nats-trust`) reads and writes
-the public trust ConfigMap natsTrust.configMapName in this namespace, and
-nothing else. "create" can't be limited by resourceNames (the object has
-no name until it exists), so it covers any ConfigMap in the namespace;
-get, update and patch are limited to the trust ConfigMap. No Secrets, no
-other kinds, no cluster scope. The token is projected into nats-trust
-alone (openbao-bootstrap-job.yaml, kube-api volume).
+the public trust ConfigMap natsTrust.configMapName in this namespace and,
+when the Job sets up PKI, the public bus CA ConfigMap
+natsTrust.busCAConfigMapName (unit S1), and nothing else. "create" can't
+be limited by resourceNames (the object has no name until it exists), so
+it covers any ConfigMap in the namespace; get, update and patch are
+limited to those ConfigMaps. No Secrets, no other kinds, no cluster
+scope. The token is projected into nats-trust alone
+(openbao-bootstrap-job.yaml, kube-api volume).
 FLAG FOR SECURITY REVIEW.
 */}}
 apiVersion: v1
@@ -36,7 +38,11 @@ rules:
     verbs: ["create"]
   - apiGroups: [""]
     resources: ["configmaps"]
-    resourceNames: [{{ .Values.natsTrust.configMapName | quote }}]
+    resourceNames:
+      - {{ .Values.natsTrust.configMapName | quote }}
+      {{- if include "imas-farmer.bootstrap.needPKI" . }}
+      - {{ .Values.natsTrust.busCAConfigMapName | quote }}
+      {{- end }}
     verbs: ["get", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
