@@ -7,9 +7,12 @@ package main
 // options (TLS-only listener, operator trust and a full resolver seeded
 // with nothing but the SYS Account, both from the public trust directory
 // newLocalTrust writes), the same logger with debug and
-// trace on, and a graceful Shutdown on SIGTERM. The cluster code and its
-// fence live in cmd/farmerbus's main package and are not reused here;
-// clustered runs go against deployed nodes (-servers).
+// trace off unless -bus-trace (farmerbus's default IMAS_BUS_LOG_LEVEL,
+// info), and a graceful Shutdown on SIGTERM. The cluster code, its fence
+// and the single-node SYS gate (which waits for an account loader this
+// harness has no use for: it pushes its accounts itself) live in
+// cmd/farmerbus's main package and are not reused here; clustered runs go
+// against deployed nodes (-servers).
 
 import (
 	"bufio"

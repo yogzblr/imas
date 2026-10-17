@@ -171,8 +171,10 @@ with which probe ran.
 
 Without `-servers` the harness generates a throwaway trust chain and starts
 a one-node bus as its own child process, built the way `cmd/farmerbus`
-builds a single node (`pki.ConfigureBusNats`, the same logger with NATS
-debug and trace on). The child is a separate process so that restarting it
+builds a single node (`pki.ConfigureBusNats`, the same logger, NATS
+debug and trace off as at farmerbus's default `IMAS_BUS_LOG_LEVEL`), but
+without farmerbus's single-node SYS gate: there is no account loader, and
+the harness pushes its accounts itself. The child is a separate process so that restarting it
 disconnects every sprout and so that varz reports the bus's memory and CPU,
 not the generator's. Its log is `bus.log` in `-workdir`.
 
