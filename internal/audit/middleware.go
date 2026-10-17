@@ -125,10 +125,10 @@ func LogAction(action string, params json.RawMessage, result any, err error) err
 		entry.Error = err.Error()
 	}
 
-	// For write actions, include the params for forensic value.
+	// For write actions, include the params for forensic value; Log
+	// masks any secret in them.
 	if !IsReadOnly(action) && len(params) > 0 {
-		// Never store a token, should params carry one.
-		entry.Parameters = redactToken(params)
+		entry.Parameters = params
 	}
 
 	// Extract targets from params if present.
@@ -176,25 +176,4 @@ func extractTargets(params json.RawMessage) []string {
 	}
 
 	return nil
-}
-
-// redactToken removes the "token" field from params to avoid storing
-// sensitive credentials in the audit log.
-func redactToken(params json.RawMessage) json.RawMessage {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(params, &m); err != nil {
-		return params
-	}
-	if _, hasToken := m["token"]; !hasToken {
-		return params
-	}
-	delete(m, "token")
-	if len(m) == 0 {
-		return nil
-	}
-	redacted, err := json.Marshal(m)
-	if err != nil {
-		return params
-	}
-	return redacted
 }

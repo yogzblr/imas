@@ -130,6 +130,15 @@ Facts on main (2026-10-14), verify first:
   and add every other method whose params are free-form.
 - `audit.Entry` has `Error`, which can quote a value. `Logger.Log` is the one
   function every audit line goes through.
+- **Correction (S2 build, 2026-10-17):** `deploy.app`, `deploy.recipe`,
+  `multi.recipe`, `test.recipe`, `test.sls`, `nginx.harden` and
+  `webserver.nginx` are not router methods on main (they are recipe names in
+  tests and docs, and SaaS API action types); `freeFormMethods` holds router
+  methods only. The router check adds `auth.rotatekey` (the caller's new CLI
+  box public key). The full set is `cmd.run`, `cook`, `props.set`,
+  `shell.open`, `auth.users.add`, `auth.users.resetkey`, `auth.rotatekey`.
+  `shell.go` already writes fixed fields only (session, sprout, tenant,
+  shell path, code, counters); it goes through `Log`, so it needs no change.
 
 Build:
 
@@ -166,6 +175,13 @@ Build:
      and say so in the PR; do not leave both in.
    - Parameters that do not parse as JSON, or that exceed 1 MiB, are not
      logged: `{"redacted":"unparseable","bytes":N,"sha256":"..."}`.
+   - **As built (2026-10-17):** masq replaces every pattern (test
+     `TestMasqReplacesEachStringPattern`), so it is kept and `regexp` is not
+     used on its own. Each masker uses `masq.RedactString` so only the match
+     is replaced: URL userinfo keeps `://` and `@host`, and `name=value`
+     keeps the name. `redactToken` is removed: a `token` key is now kept
+     with the value `[REDACTED]`, like every key word. `auditCall` no longer
+     drops params that are not JSON; `Log` writes their unparseable shape.
 4. **`Entry.Error`.** Apply rule 3's string patterns to it (an error that
    quotes a secret is redacted). Do not change the other fields.
 5. **Dependency.** If masq is kept: `go get` the latest release, record it in

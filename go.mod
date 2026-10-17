@@ -27,6 +27,7 @@ require (
 	github.com/hectane/go-acl v1.0.0
 	github.com/klauspost/compress v1.19.2
 	github.com/lestrrat-go/jwx/v2 v2.1.7
+	github.com/m-mizutani/masq v0.2.3
 	github.com/minio/minio-go/v7 v7.3.0
 	github.com/nats-io/jwt/v2 v2.8.2
 	github.com/nats-io/nats-server/v2 v2.14.5

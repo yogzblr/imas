@@ -4,6 +4,18 @@
 // etc.) is recorded as one JSON line with the user's identity, timestamp,
 // action type, and relevant targets.
 //
+// What a line holds of a write's params is decided in Logger.Log, the one
+// function every line goes through, so no writer can skip it. An ordinary
+// write method's params are logged with every secret masked: the value of
+// any key naming a secret (password, token, seed, api key, ...) at any
+// depth, and JWTs, PEM private keys, NATS seeds, AWS key IDs, bearer
+// credentials, URL userinfo and name=value secrets in any string. A
+// free-form method (command text, recipes, property values, shell
+// requests, public keys; freeFormMethods) never has its params logged:
+// only their size, SHA-256 and top-level key names. Params that are not
+// JSON, or over 1 MiB, are logged as size and hash only. The error text is
+// masked like a string param.
+//
 // Records go to stdout, never to a file: farmer runs with a read-only root
 // filesystem and no volume of its own. The log shipper (Fluent Bit) picks
 // the lines up from the container's stdout, and audit is queried in the log
@@ -57,9 +69,11 @@ func NewLogger(w io.Writer) *Logger {
 	return &Logger{w: w}
 }
 
-// Log writes entry as one JSON line. Lines are written whole: concurrent
-// calls never interleave.
+// Log writes entry as one JSON line, with its params and error redacted
+// (see the package doc; callers do not redact). Lines are written whole:
+// concurrent calls never interleave.
 func (l *Logger) Log(entry Entry) error {
+	entry = redactEntry(entry)
 	if entry.Timestamp.IsZero() {
 		entry.Timestamp = time.Now().UTC()
 	}

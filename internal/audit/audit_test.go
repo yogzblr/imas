@@ -124,8 +124,8 @@ func TestLogWithErrorAndParams(t *testing.T) {
 		Username:   "bob",
 		Pubkey:     "UBOB",
 		RoleName:   "viewer",
-		Action:     "cook",
-		Parameters: json.RawMessage(`{"recipe":"web"}`),
+		Action:     "pki.accept",
+		Parameters: json.RawMessage(`{"sprout_id":"web-1"}`),
 		Error:      "permission denied",
 	})
 	if err != nil {
@@ -139,7 +139,7 @@ func TestLogWithErrorAndParams(t *testing.T) {
 	if got.Success || got.Error != "permission denied" || got.Username != "bob" {
 		t.Errorf("entry = %+v", got)
 	}
-	if string(got.Parameters) != `{"recipe":"web"}` {
+	if string(got.Parameters) != `{"sprout_id":"web-1"}` {
 		t.Errorf("params = %s", got.Parameters)
 	}
 }
