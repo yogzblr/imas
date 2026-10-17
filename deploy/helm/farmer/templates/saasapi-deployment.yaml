@@ -276,7 +276,9 @@ spec:
             {{- end }}
             {{- end }}
             {{- /* Recipe template render limits: the same values farmer
-            renders under, so an upload is validated as it will be cooked.
+            renders under, so an upload is validated as it will be cooked,
+            and the include cap an upload's own include list is checked
+            against. Not the per-cook budget (cook*): saasapi never cooks.
             Types checked in validate, ranges by saasapi at startup. */}}
             {{- with .Values.farmer.recipes.templateLimits }}
             - name: IMAS_RECIPE_MAX_SOURCE_BYTES
@@ -289,6 +291,8 @@ spec:
               value: {{ .renderTimeout | quote }}
             - name: IMAS_RECIPE_MAX_RANGE_ITERATIONS
               value: {{ .maxRangeIterations | int64 | toString | quote }}
+            - name: IMAS_RECIPE_MAX_INCLUDES
+              value: {{ .maxIncludes | int64 | toString | quote }}
             {{- end }}
             {{- with $s.recipes }}
             - name: SAASAPI_RECIPES_READ_ROLE

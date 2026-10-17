@@ -36,7 +36,7 @@ func TestNoStore_FailsClearly(t *testing.T) {
 			return err
 		},
 		"collectAllIncludes": func() error {
-			_, err := collectAllIncludes(ctx, testPropsTenantID, "no-store-sprout", getBasePath(), "dev")
+			_, err := collectAllIncludes(ctx, newCookBudget(), testPropsTenantID, "no-store-sprout", getBasePath(), "dev")
 			return err
 		},
 		"resolveRecipeSteps": func() error {

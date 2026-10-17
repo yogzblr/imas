@@ -115,6 +115,17 @@ func WithStageGuard(check func() error) CookOption {
 // checking the clock, and RecipeRenderTimeout bounds the whole render,
 // includes excepted (each included recipe is a render of its own).
 //
+// A cook renders many recipes: the one it names and up to maxRecipeIncludes
+// distinct includes, each twice (once to find its includes, once to build
+// its steps). So a cook also has a budget of its own (cookBudget, security
+// review B4), created by resolveRecipeSteps and charged by every render of
+// both phases: total time inside executeRecipeTemplate
+// (cookRenderTimeout), total rendered bytes (cookMaxRenderedBytes) and
+// total range iterations (cookMaxRangeIterations). Each render stays
+// inside its own limits as well; whichever runs out first stops it. A cook
+// that runs out of budget fails with ErrCookRenderBudget before anything
+// is staged or dispatched.
+//
 // # Template values
 //
 // props, hostname and sproutID return a templateValue, not a string, and
@@ -145,6 +156,19 @@ var (
 	// maxRangeIterations caps the total iterations of every range in one
 	// render.
 	maxRangeIterations = DefaultMaxRangeIterations
+	// cookRenderTimeout caps the time every render of one cook spends in
+	// executeRecipeTemplate, together.
+	cookRenderTimeout = DefaultCookRenderTimeout
+	// cookMaxRenderedBytes caps the output of every render of one cook,
+	// together.
+	cookMaxRenderedBytes = DefaultCookMaxRenderedBytes
+	// cookMaxRangeIterations caps the range iterations of every render of
+	// one cook, together.
+	cookMaxRangeIterations = DefaultCookMaxRangeIterations
+	// maxRecipeIncludes caps the distinct recipes one cook may include
+	// (the recipe it names is not counted); at most
+	// maxSettableRecipeIncludes.
+	maxRecipeIncludes = DefaultMaxRecipeIncludes
 )
 
 // Default render limits.
@@ -154,25 +178,39 @@ const (
 	DefaultMaxTemplateValueBytes  = 256 << 10
 	DefaultRecipeRenderTimeout    = 2 * time.Second
 	DefaultMaxRangeIterations     = 10000
+	DefaultCookRenderTimeout      = 10 * time.Second
+	DefaultCookMaxRenderedBytes   = 8 << 20
+	DefaultCookMaxRangeIterations = 100000
+	DefaultMaxRecipeIncludes      = 64
 )
 
 // Upper bounds SetRenderLimits accepts. They are far above any recipe's
 // needs and exist so a typo in a Helm value (a missing unit, an extra
 // digit) cannot quietly remove a limit.
 const (
-	maxSettableBytes      = 64 << 20
-	maxSettableTimeout    = time.Minute
-	maxSettableIterations = 10_000_000
+	maxSettableBytes          = 64 << 20
+	maxSettableTimeout        = time.Minute
+	maxSettableIterations     = 10_000_000
+	maxSettableCookBytes      = 256 << 20
+	maxSettableCookTimeout    = 5 * time.Minute
+	maxSettableCookIterations = 100_000_000
+	maxSettableRecipeIncludes = 256
 )
 
 // RenderLimits are the settable render limits. A zero field keeps the
-// current value.
+// current value. The first five bound one render; the Cook* fields bound
+// every render of one cook together (cookBudget), and MaxIncludes the
+// distinct recipes one cook may include.
 type RenderLimits struct {
-	MaxSourceBytes     int
-	MaxRenderedBytes   int
-	MaxValueBytes      int
-	RenderTimeout      time.Duration
-	MaxRangeIterations int
+	MaxSourceBytes         int
+	MaxRenderedBytes       int
+	MaxValueBytes          int
+	RenderTimeout          time.Duration
+	MaxRangeIterations     int
+	CookRenderTimeout      time.Duration
+	CookMaxRenderedBytes   int
+	CookMaxRangeIterations int
+	MaxIncludes            int
 }
 
 // ErrRenderLimits is returned by SetRenderLimits for a limit out of range.
@@ -181,19 +219,25 @@ var ErrRenderLimits = errors.New("recipe template render limit out of range")
 // CurrentRenderLimits returns the render limits in force.
 func CurrentRenderLimits() RenderLimits {
 	return RenderLimits{
-		MaxSourceBytes:     MaxRecipeSourceBytes,
-		MaxRenderedBytes:   MaxRenderedRecipeBytes,
-		MaxValueBytes:      maxTemplateValueBytes,
-		RenderTimeout:      RecipeRenderTimeout,
-		MaxRangeIterations: maxRangeIterations,
+		MaxSourceBytes:         MaxRecipeSourceBytes,
+		MaxRenderedBytes:       MaxRenderedRecipeBytes,
+		MaxValueBytes:          maxTemplateValueBytes,
+		RenderTimeout:          RecipeRenderTimeout,
+		MaxRangeIterations:     maxRangeIterations,
+		CookRenderTimeout:      cookRenderTimeout,
+		CookMaxRenderedBytes:   cookMaxRenderedBytes,
+		CookMaxRangeIterations: cookMaxRangeIterations,
+		MaxIncludes:            maxRecipeIncludes,
 	}
 }
 
 // SetRenderLimits installs l's non-zero fields as the render limits, after
 // checking every field: each must be positive and at most 64 MiB (sizes),
 // one minute (time) or 10,000,000 (iterations), and a single value may not
-// exceed the rendered output cap. On error nothing is changed. Call once at
-// startup, before any cook.
+// exceed the rendered output cap. A per-cook limit must be at least its
+// per-render limit and at most 256 MiB (bytes), five minutes (time) or
+// 100,000,000 (iterations); the include cap is 1 to 256. On error nothing
+// is changed. Call once at startup, before any cook.
 func SetRenderLimits(l RenderLimits) error {
 	next := CurrentRenderLimits()
 	if l.MaxSourceBytes != 0 {
@@ -210,6 +254,18 @@ func SetRenderLimits(l RenderLimits) error {
 	}
 	if l.MaxRangeIterations != 0 {
 		next.MaxRangeIterations = l.MaxRangeIterations
+	}
+	if l.CookRenderTimeout != 0 {
+		next.CookRenderTimeout = l.CookRenderTimeout
+	}
+	if l.CookMaxRenderedBytes != 0 {
+		next.CookMaxRenderedBytes = l.CookMaxRenderedBytes
+	}
+	if l.CookMaxRangeIterations != 0 {
+		next.CookMaxRangeIterations = l.CookMaxRangeIterations
+	}
+	if l.MaxIncludes != 0 {
+		next.MaxIncludes = l.MaxIncludes
 	}
 	for name, v := range map[string]int{
 		"source size":          next.MaxSourceBytes,
@@ -229,11 +285,27 @@ func SetRenderLimits(l RenderLimits) error {
 	if next.MaxRangeIterations <= 0 || next.MaxRangeIterations > maxSettableIterations {
 		return fmt.Errorf("%w: range iterations %d must be between 1 and %d", ErrRenderLimits, next.MaxRangeIterations, maxSettableIterations)
 	}
+	if next.CookRenderTimeout < next.RenderTimeout || next.CookRenderTimeout > maxSettableCookTimeout {
+		return fmt.Errorf("%w: cook render timeout %s must be at least the render timeout %s and at most %s", ErrRenderLimits, next.CookRenderTimeout, next.RenderTimeout, maxSettableCookTimeout)
+	}
+	if next.CookMaxRenderedBytes < next.MaxRenderedBytes || next.CookMaxRenderedBytes > maxSettableCookBytes {
+		return fmt.Errorf("%w: cook rendered output size %d must be between the rendered output size %d and %d bytes", ErrRenderLimits, next.CookMaxRenderedBytes, next.MaxRenderedBytes, maxSettableCookBytes)
+	}
+	if next.CookMaxRangeIterations < next.MaxRangeIterations || next.CookMaxRangeIterations > maxSettableCookIterations {
+		return fmt.Errorf("%w: cook range iterations %d must be between the range iterations %d and %d", ErrRenderLimits, next.CookMaxRangeIterations, next.MaxRangeIterations, maxSettableCookIterations)
+	}
+	if next.MaxIncludes <= 0 || next.MaxIncludes > maxSettableRecipeIncludes {
+		return fmt.Errorf("%w: includes %d must be between 1 and %d", ErrRenderLimits, next.MaxIncludes, maxSettableRecipeIncludes)
+	}
 	MaxRecipeSourceBytes = next.MaxSourceBytes
 	MaxRenderedRecipeBytes = next.MaxRenderedBytes
 	maxTemplateValueBytes = next.MaxValueBytes
 	RecipeRenderTimeout = next.RenderTimeout
 	maxRangeIterations = next.MaxRangeIterations
+	cookRenderTimeout = next.CookRenderTimeout
+	cookMaxRenderedBytes = next.CookMaxRenderedBytes
+	cookMaxRangeIterations = next.CookMaxRangeIterations
+	maxRecipeIncludes = next.MaxIncludes
 	return nil
 }
 
@@ -251,7 +323,82 @@ var (
 	ErrRecipeTooLarge        = errors.New("recipe source exceeds its size limit")
 	ErrTemplateArgument      = errors.New("invalid template function argument")
 	ErrTemplateValueEncoding = errors.New("recipe template value is not valid UTF-8")
+	// ErrCookRenderBudget is a cook whose renders together ran out of
+	// its budget (cookBudget). It is always returned as a
+	// *CookBudgetError naming the counter.
+	ErrCookRenderBudget = errors.New("cook exceeded its render budget")
+	// ErrTooManyIncludes is a cook, or an uploaded recipe's own include
+	// list, over the include cap (IMAS_RECIPE_MAX_INCLUDES). It comes
+	// joined with ErrInvalidFormat.
+	ErrTooManyIncludes = errors.New("recipe includes too many recipes")
 )
+
+// The counters of a cook's render budget, as CookBudgetError.Counter.
+const (
+	CookBudgetTime       = "time"
+	CookBudgetBytes      = "bytes"
+	CookBudgetIterations = "iterations"
+)
+
+// CookBudgetError is ErrCookRenderBudget for one counter: Counter is
+// CookBudgetTime, CookBudgetBytes or CookBudgetIterations and Limit the
+// limit it ran out of, as text ("10s", "8388608").
+type CookBudgetError struct {
+	Counter string
+	Limit   string
+}
+
+func (e *CookBudgetError) Error() string {
+	return fmt.Sprintf("%s: %s", ErrCookRenderBudget, e.Exceeded())
+}
+
+// Exceeded names the counter and its limit, as "total render time over
+// 10s".
+func (e *CookBudgetError) Exceeded() string {
+	what := map[string]string{
+		CookBudgetTime:       "total render time",
+		CookBudgetBytes:      "total rendered bytes",
+		CookBudgetIterations: "total range iterations",
+	}[e.Counter]
+	return what + " over " + e.Limit
+}
+
+func (e *CookBudgetError) Unwrap() error { return ErrCookRenderBudget }
+
+// cookBudget is one cook's render budget (see "Bounded work"): its
+// limits, taken from the limits in force when the cook starts, and what
+// every render of the cook has used so far. A cook renders its recipes one
+// after another, so a budget is never shared between goroutines; each cook
+// makes its own (newCookBudget).
+type cookBudget struct {
+	timeLimit  time.Duration
+	bytesLimit int
+	rangeLimit int
+
+	timeUsed  time.Duration
+	bytesUsed int
+	rangeUsed int
+}
+
+func newCookBudget() *cookBudget {
+	return &cookBudget{
+		timeLimit:  cookRenderTimeout,
+		bytesLimit: cookMaxRenderedBytes,
+		rangeLimit: cookMaxRangeIterations,
+	}
+}
+
+// exhausted is the error for counter running out.
+func (b *cookBudget) exhausted(counter string) error {
+	limit := b.timeLimit.String()
+	switch counter {
+	case CookBudgetBytes:
+		limit = strconv.Itoa(b.bytesLimit)
+	case CookBudgetIterations:
+		limit = strconv.Itoa(b.rangeLimit)
+	}
+	return &CookBudgetError{Counter: counter, Limit: limit}
+}
 
 // removedTemplateFuncs are refused wherever they appear in a recipe.
 var removedTemplateFuncs = []string{"env", "call", "html", "js"}
@@ -272,28 +419,46 @@ type templateValue string
 // never v itself.
 func (v templateValue) String() string { return encodeTemplatePlaceholder(string(v)) }
 
-// renderState is one render's deadline, budgets and props.
+// renderState is one render's deadline, budgets and props, and the
+// budget of the cook the render is part of.
 type renderState struct {
 	tenantID  string
 	sproutID  string
 	deadline  time.Time
 	rangeLeft int
 
+	// cook is the cook's budget; cookDeadline is when the cook's time
+	// runs out if this render keeps going.
+	cook         *cookBudget
+	cookDeadline time.Time
+
 	propsLoaded bool
 	props       map[string]string
 }
 
-func newRenderState(tenantID, sproutID string) *renderState {
+// newRenderState starts one render charged to cook, a cook's budget.
+// Every render has one: there is no render outside a budget.
+func newRenderState(cook *cookBudget, tenantID, sproutID string) *renderState {
+	now := time.Now()
 	return &renderState{
-		tenantID:  tenantID,
-		sproutID:  sproutID,
-		deadline:  time.Now().Add(RecipeRenderTimeout),
-		rangeLeft: maxRangeIterations,
+		tenantID:     tenantID,
+		sproutID:     sproutID,
+		deadline:     now.Add(RecipeRenderTimeout),
+		rangeLeft:    maxRangeIterations,
+		cook:         cook,
+		cookDeadline: now.Add(cook.timeLimit - cook.timeUsed),
 	}
 }
 
+// check fails a render past its own deadline (ErrTemplateTimeout) or past
+// its cook's (ErrCookRenderBudget), whichever is earlier; at the same
+// moment, its own.
 func (rs *renderState) check() error {
-	if time.Now().After(rs.deadline) {
+	now := time.Now()
+	if rs.cookDeadline.Before(rs.deadline) && now.After(rs.cookDeadline) {
+		return rs.cook.exhausted(CookBudgetTime)
+	}
+	if now.After(rs.deadline) {
 		return ErrTemplateTimeout
 	}
 	return nil
@@ -644,7 +809,11 @@ func populateFuncMap(rs *renderState) template.FuncMap {
 		if rv.Len() > rs.rangeLeft {
 			return nil, ErrTemplateRangeTooLong
 		}
+		if rv.Len() > rs.cook.rangeLimit-rs.cook.rangeUsed {
+			return nil, rs.cook.exhausted(CookBudgetIterations)
+		}
 		rs.rangeLeft -= rv.Len()
+		rs.cook.rangeUsed += rv.Len()
 		return val, nil
 	}
 	v[rangeTickFunc] = func() (string, error) { return "", rs.check() }
@@ -653,7 +822,9 @@ func populateFuncMap(rs *renderState) template.FuncMap {
 }
 
 // renderLimitWriter is the template's output: it refuses to grow past
-// MaxRenderedRecipeBytes or to write after the deadline.
+// MaxRenderedRecipeBytes or what is left of the cook's byte budget, or to
+// write after the deadline. Written bytes are charged to the cook as they
+// are written.
 type renderLimitWriter struct {
 	rs  *renderState
 	buf bytes.Buffer
@@ -666,14 +837,25 @@ func (w *renderLimitWriter) Write(p []byte) (int, error) {
 	if w.buf.Len()+len(p) > MaxRenderedRecipeBytes {
 		return 0, ErrTemplateOutputTooBig
 	}
+	cook := w.rs.cook
+	if len(p) > cook.bytesLimit-cook.bytesUsed {
+		return 0, cook.exhausted(CookBudgetBytes)
+	}
+	cook.bytesUsed += len(p)
 	return w.buf.Write(p)
 }
 
 // executeRecipeTemplate parses file as a recipe template under the
 // restrictions above and executes it for rs's sprout. The output still
 // holds template-value placeholders; substituteTemplateValues resolves
-// them.
+// them. The time it takes, from the first check to the return, is charged
+// to rs's cook.
 func executeRecipeTemplate(rs *renderState, recipeName string, file []byte) ([]byte, error) {
+	start := time.Now()
+	defer func() { rs.cook.timeUsed += time.Since(start) }()
+	if rs.cook.timeUsed >= rs.cook.timeLimit {
+		return nil, rs.cook.exhausted(CookBudgetTime)
+	}
 	if len(file) > MaxRecipeSourceBytes {
 		return nil, ErrRecipeTooLarge
 	}
@@ -701,6 +883,9 @@ func executeRecipeTemplate(rs *renderState, recipeName string, file []byte) ([]b
 			if errors.Is(err, limit) {
 				return nil, limit
 			}
+		}
+		if budgetErr, ok := errors.AsType[*CookBudgetError](err); ok {
+			return nil, budgetErr
 		}
 		return nil, err
 	}
@@ -797,11 +982,15 @@ func identCommand(name string, pos parse.Pos) *parse.CommandNode {
 
 // ValidateRecipeSource renders src as a recipe template the way a cook
 // would, for a sprout with no props, under the same function map and
-// limits, and parses the result as YAML. It is for checking a recipe
-// before it is stored (the SaaS API upload, REC.1); it reads no props and
-// resolves no includes.
+// limits (in a budget of its own, as a cook of this one recipe), and
+// parses the result as YAML. It is for checking a recipe before it is
+// stored (the SaaS API upload, REC.1); it reads no props. It refuses a
+// recipe whose own rendered include list has more entries than the include
+// cap (ErrTooManyIncludes), but resolves no includes: a recipe may include
+// one uploaded later, so the cook-time budget and include cap
+// (resolveRecipeSteps) are the enforcement.
 func ValidateRecipeSource(name string, src []byte) error {
-	rs := newRenderState("", "validation-sprout")
+	rs := newRenderState(newCookBudget(), "", "validation-sprout")
 	rs.propsLoaded = true
 	rs.props = map[string]string{}
 	out, err := executeRecipeTemplate(rs, name, src)
@@ -812,10 +1001,22 @@ func ValidateRecipeSource(name string, src []byte) error {
 	if err != nil {
 		return err
 	}
-	if _, err := unmarshalRecipe(b); err != nil {
+	recipe, err := unmarshalRecipe(b)
+	if err != nil {
 		return err
 	}
+	// A malformed include list is left to the cook, as before S4; only
+	// its length is checked here.
+	if includes, err := includesFromMap(recipe); err == nil && len(includes) > maxRecipeIncludes {
+		return tooManyIncludes()
+	}
 	return nil
+}
+
+// tooManyIncludes is the error for a cook, or an uploaded recipe, over
+// the include cap.
+func tooManyIncludes() error {
+	return fmt.Errorf("%w: %w: more than %d recipes included", ErrInvalidFormat, ErrTooManyIncludes, maxRecipeIncludes)
 }
 
 // SendCookEvent triggers a recipe cook on sproutID, over tenantID's
@@ -946,9 +1147,15 @@ func sendEnvelope(tenantID, sproutID string, rEnvelope RecipeEnvelope) error {
 // the validated step list a cook dispatch is built from. Every byte comes
 // from the shared bucket (see store.go), never replica-local disk, so any
 // farmer replica resolves the same recipe to the same steps.
+//
+// Every render of both phases, finding the includes and building the
+// steps, is charged to one budget made here (cookBudget, "Bounded work");
+// when it runs out the cook fails with ErrCookRenderBudget, before
+// anything is staged or dispatched.
 func resolveRecipeSteps(ctx context.Context, tenantID, sproutID string, recipeID RecipeName) ([]Step, error) {
 	basepath := getBasePath()
-	includes, err := collectAllIncludes(ctx, tenantID, sproutID, basepath, recipeID)
+	budget := newCookBudget()
+	includes, err := collectAllIncludes(ctx, budget, tenantID, sproutID, basepath, recipeID)
 	if err != nil {
 		return nil, err
 	}
@@ -967,7 +1174,7 @@ func resolveRecipeSteps(ctx context.Context, tenantID, sproutID string, recipeID
 		if fpErr != nil {
 			return nil, fpErr
 		}
-		b, renderErr := renderRecipeTemplate(tenantID, sproutID, fp, f)
+		b, renderErr := renderRecipeTemplate(budget, tenantID, sproutID, fp, f)
 		if renderErr != nil {
 			return nil, renderErr
 		}

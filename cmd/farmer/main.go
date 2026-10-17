@@ -386,19 +386,28 @@ func storageModels() []any { return pxc.Models() }
 // farmer chart's farmer.recipes.templateLimits (config.RecipeLimits, the
 // IMAS_RECIPE_* variables), stopping farmer if one is out of range.
 func initRecipeLimits() {
-	l := config.RecipeLimits
-	if err := cook.SetRenderLimits(cook.RenderLimits{
-		MaxSourceBytes:     l.MaxSourceBytes,
-		MaxRenderedBytes:   l.MaxRenderedBytes,
-		MaxValueBytes:      l.MaxValueBytes,
-		RenderTimeout:      l.RenderTimeout,
-		MaxRangeIterations: l.MaxRangeIterations,
-	}); err != nil {
+	if err := installRecipeLimits(config.RecipeLimits); err != nil {
 		log.Fatalf("recipe template limits (IMAS_RECIPE_*): %v", err)
 	}
 	cur := cook.CurrentRenderLimits()
-	log.Noticef("recipes: templates limited to %d source bytes, %d rendered bytes, %d bytes per value, %s, %d range iterations",
-		cur.MaxSourceBytes, cur.MaxRenderedBytes, cur.MaxValueBytes, cur.RenderTimeout, cur.MaxRangeIterations)
+	log.Noticef("recipes: templates limited to %d source bytes, %d rendered bytes, %d bytes per value, %s, %d range iterations per render; %s, %d rendered bytes, %d range iterations and %d includes per cook",
+		cur.MaxSourceBytes, cur.MaxRenderedBytes, cur.MaxValueBytes, cur.RenderTimeout, cur.MaxRangeIterations,
+		cur.CookRenderTimeout, cur.CookMaxRenderedBytes, cur.CookMaxRangeIterations, cur.MaxIncludes)
+}
+
+// installRecipeLimits hands l to cook.SetRenderLimits.
+func installRecipeLimits(l config.RecipeTemplateLimits) error {
+	return cook.SetRenderLimits(cook.RenderLimits{
+		MaxSourceBytes:         l.MaxSourceBytes,
+		MaxRenderedBytes:       l.MaxRenderedBytes,
+		MaxValueBytes:          l.MaxValueBytes,
+		RenderTimeout:          l.RenderTimeout,
+		MaxRangeIterations:     l.MaxRangeIterations,
+		CookRenderTimeout:      l.CookRenderTimeout,
+		CookMaxRenderedBytes:   l.CookMaxRenderedBytes,
+		CookMaxRangeIterations: l.CookMaxRangeIterations,
+		MaxIncludes:            l.MaxIncludes,
+	})
 }
 
 // installStorage hands the farmer-schema handle to every package

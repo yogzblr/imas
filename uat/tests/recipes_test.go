@@ -135,6 +135,8 @@ func TestCoreR1_RecipeLifecycle(t *testing.T) {
 		{name + "x", "", "", http.StatusUnprocessableEntity, "recipe_empty"},
 		{name + "x", "steps: {{ env \"HOME\" }}\n", "", http.StatusUnprocessableEntity, "recipe_template_forbidden"},
 		{name + "x", "- a\n- b\n", "", http.StatusUnprocessableEntity, "recipe_yaml_invalid"},
+		// 65 includes, over the chart's default cap of 64 (S4); none exists.
+		{name + "x", "include:\n" + strings.Repeat("  - uat.later\n", 65), "", http.StatusUnprocessableEntity, "recipe_too_many_includes"},
 		{name + "x", v1, "text/html", http.StatusUnsupportedMediaType, "unsupported_media_type"},
 	} {
 		r, err := write(ctx, func() (*harness.Response, error) {

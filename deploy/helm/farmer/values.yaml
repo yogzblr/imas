@@ -526,12 +526,16 @@ farmer:
     heartbeatWindow: "15m"
   # Recipe template render limits (IMAS_RECIPE_*; internal/cook's
   # "Bounded work"). Recipes are tenant-written, untrusted input, so every
-  # render is capped. All five are required: sizes and iterations are
-  # positive whole numbers, renderTimeout a quoted Go duration. Farmer
-  # refuses to start if one is out of range (sizes up to 64 MiB, time up
-  # to 1m, iterations up to 10000000, maxValueBytes <= maxRenderedBytes).
-  # saasapi validates recipe uploads under these same values (owner
-  # decision, 2026-10-04: one set of limits, no saasapi override).
+  # render is capped, and every cook as a whole (security review B4). All
+  # nine are required: sizes, iterations and maxIncludes are positive
+  # whole numbers, the timeouts quoted Go durations. Farmer refuses to
+  # start if one is out of range (per render: sizes up to 64 MiB, time up
+  # to 1m, iterations up to 10000000, maxValueBytes <= maxRenderedBytes;
+  # per cook: each at least its per-render value and at most 256 MiB, 5m
+  # or 100000000; maxIncludes 1 to 256). saasapi validates recipe uploads
+  # under these same per-render values and maxIncludes (owner decision,
+  # 2026-10-04: one set of limits, no saasapi override); it never cooks,
+  # so it gets no cook* value.
   recipes:
     templateLimits:
       # A recipe's source, checked on read and before parsing.
@@ -544,6 +548,18 @@ farmer:
       renderTimeout: "2s"
       # Total iterations of every range in one render.
       maxRangeIterations: 10000
+      # One cook's budget, shared by every render of the cook: finding
+      # the includes and building the steps, for the recipe it names and
+      # every recipe it includes. Total time inside the renders.
+      cookRenderTimeout: "10s"
+      # Total output of every render of one cook (8 MiB).
+      cookMaxRenderedBytes: 8388608
+      # Total range iterations of every render of one cook.
+      cookMaxRangeIterations: 100000
+      # Distinct recipes one cook may include (the recipe it names is not
+      # counted); at most 256. saasapi also refuses an upload whose own
+      # include list is longer.
+      maxIncludes: 64
   # IMAS_SELF_UPDATE_ENABLED: farmer's own switch for self_update on
   # internal.sprout.action (security review 2026-10, L1), independent of
   # saasapi.fleetUpdateDispatch.enabled. Off, farmer refuses every

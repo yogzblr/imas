@@ -1028,7 +1028,7 @@ explanation rather than deploying something that silently can't work.
 {{- end -}}
 {{- end -}}
 {{- $tl := .Values.farmer.recipes.templateLimits -}}
-{{- range $k := list "maxSourceBytes" "maxRenderedBytes" "maxValueBytes" "maxRangeIterations" -}}
+{{- range $k := list "maxSourceBytes" "maxRenderedBytes" "maxValueBytes" "maxRangeIterations" "cookMaxRenderedBytes" "cookMaxRangeIterations" "maxIncludes" -}}
 {{- $v := get $tl $k -}}
 {{- if not (or (kindIs "float64" $v) (kindIs "int64" $v) (kindIs "int" $v)) -}}
 {{- fail (printf "farmer.recipes.templateLimits.%s must be a positive whole number, got %v" $k $v) -}}
@@ -1037,8 +1037,11 @@ explanation rather than deploying something that silently can't work.
 {{- fail (printf "farmer.recipes.templateLimits.%s must be a positive whole number, got %v" $k $v) -}}
 {{- end -}}
 {{- end -}}
-{{- if not (and (kindIs "string" $tl.renderTimeout) (regexMatch "^[0-9]+(\\.[0-9]+)?(ms|s|m)$" (toString $tl.renderTimeout))) -}}
-{{- fail (printf "farmer.recipes.templateLimits.renderTimeout must be a quoted duration such as \"2s\", got %v" $tl.renderTimeout) -}}
+{{- range $k, $eg := dict "renderTimeout" "2s" "cookRenderTimeout" "10s" -}}
+{{- $v := get $tl $k -}}
+{{- if not (and (kindIs "string" $v) (regexMatch "^[0-9]+(\\.[0-9]+)?(ms|s|m)$" (toString $v))) -}}
+{{- fail (printf "farmer.recipes.templateLimits.%s must be a quoted duration such as \"%s\", got %v" $k $eg $v) -}}
+{{- end -}}
 {{- end -}}
 {{- include "imas-farmer.accountStore.validate" . -}}
 {{- if .Values.versity.enabled -}}

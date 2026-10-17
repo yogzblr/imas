@@ -498,6 +498,44 @@ Tests:
 - Nothing in the cook path calls the old no-budget render (assert by test or
   by the search gate).
 
+Brief corrections (applied by S4, 2026-10-17, decided by the code on main):
+
+- **The named recipe was rendered three times, not twice.** `collectAllIncludes`
+  rendered it (through `extractIncludes`) and then put it in the include set
+  as not done, so `collectIncludesRecurse` rendered it again. S4 marks it
+  done, so every recipe of a cook is rendered once per phase, as the brief
+  says; `TestCookBudget_BothPhases` pins the discovery cost.
+- **The old cap counted the named recipe.** `len(starter) > maxRecipeIncludes`
+  included the recipe the cook names, so 256 meant 255 includes. The setting
+  counts distinct includes only ("distinct recipes one cook may include"), so
+  64 includes pass and 65 fail.
+- **The budget is an explicit parameter** (`*cookBudget`), first argument of
+  `collectAllIncludes`, `collectIncludesRecurse`, `extractIncludes`,
+  `renderRecipeTemplate` and `newRenderState`; the no-budget signatures are
+  gone, and `TestNoRenderOutsideACookBudget` pins the callers.
+  `ValidateRecipeSource` renders in a budget of its own (one recipe, so its
+  per-render limits always stop it first).
+- **saasapi and the "at least the per-render value" bounds.** saasapi is not
+  given the `IMAS_RECIPE_COOK_*` budget, so a per-render limit set above the
+  default budget (with farmer's budget raised to match) would have stopped
+  saasapi in `cook.SetRenderLimits`. `ConfigureRecipes` raises saasapi's
+  budget to its per-render limits (`withCookBudgetAtLeastRender`); it never
+  cooks.
+- **How the error reaches callers.** A cook's errors are only logged on main
+  (`internal/natsapi/cook.go` dispatches in the background), with
+  `ErrTemplateTimeout` mapped to a response only in saasapi's
+  `classifyRecipeError`. `ErrCookRenderBudget` is a `*CookBudgetError`
+  naming the counter (`time`, `bytes`, `iterations`) and its limit, logged
+  the same way, and mapped in `classifyRecipeError` to
+  `422 recipe_template_limit` with `details.limit` `cook_render_time`,
+  `cook_render_bytes` or `cook_render_iterations`.
+- **The upload refusal has its own code**, `422 recipe_too_many_includes`
+  ("the recipe includes more than 64 recipes", `details.limit`), from
+  `cook.ErrTooManyIncludes`, which the cook-time cap also returns, joined
+  with `ErrInvalidFormat`.
+- No `uat/` values set these keys; the UAT recipe test gains a 65-include
+  refusal.
+
 Search gate: `maxRecipeIncludes`, `newRenderState`, `renderRecipeTemplate`,
 `extractIncludes`, `collectAllIncludes`, `RecipeRenderTimeout`,
 `SetRenderLimits`, `RenderLimits`, `RecipeLimits`, `IMAS_RECIPE_`,

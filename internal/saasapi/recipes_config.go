@@ -72,6 +72,10 @@ import (
 //     same variables (and Helm values, farmer.recipes.templateLimits)
 //     farmer renders under, so an upload is validated exactly as farmer
 //     will cook it. The source limit is also the upload body limit.
+//   - IMAS_RECIPE_MAX_INCLUDES: the include cap farmer cooks under; an
+//     upload whose own include list is longer is refused. Of the per-cook
+//     limits (S4) saasapi gets only this one: it never cooks, so it has no
+//     use for the IMAS_RECIPE_COOK_* budget.
 type RecipeSettings struct {
 	Endpoint            string
 	Bucket              string
@@ -216,6 +220,7 @@ func recipeRenderLimitsFromEnv() (cook.RenderLimits, error) {
 		{config.EnvRecipeMaxRenderedBytes, &l.MaxRenderedBytes},
 		{config.EnvRecipeMaxValueBytes, &l.MaxValueBytes},
 		{config.EnvRecipeMaxRangeIterations, &l.MaxRangeIterations},
+		{config.EnvRecipeMaxIncludes, &l.MaxIncludes},
 	} {
 		v := os.Getenv(f.env)
 		if v == "" {
@@ -235,6 +240,21 @@ func recipeRenderLimitsFromEnv() (cook.RenderLimits, error) {
 		l.RenderTimeout = d
 	}
 	return l, nil
+}
+
+// withCookBudgetAtLeastRender returns l with each per-cook budget limit
+// raised to at least its per-render limit. saasapi never cooks and is not
+// given the IMAS_RECIPE_COOK_* budget, but cook.SetRenderLimits refuses a
+// budget below a per-render limit, so a per-render limit set above cook's
+// default budget (farmer then has a budget set to match) must not stop
+// saasapi. Validation renders one recipe, which its per-render limits
+// bound alone.
+func withCookBudgetAtLeastRender(l cook.RenderLimits) cook.RenderLimits {
+	cur := cook.CurrentRenderLimits()
+	l.CookRenderTimeout = max(cur.CookRenderTimeout, l.RenderTimeout)
+	l.CookMaxRenderedBytes = max(cur.CookMaxRenderedBytes, l.MaxRenderedBytes)
+	l.CookMaxRangeIterations = max(cur.CookMaxRangeIterations, l.MaxRangeIterations)
+	return l
 }
 
 // validate checks the settings that don't need a file or a connection.
@@ -324,7 +344,7 @@ func ConfigureRecipes(s RecipeSettings, vc valkey.Client) error {
 	if err := s.validate(); err != nil {
 		return err
 	}
-	if err := cook.SetRenderLimits(s.RenderLimits); err != nil {
+	if err := cook.SetRenderLimits(withCookBudgetAtLeastRender(s.RenderLimits)); err != nil {
 		return fmt.Errorf("saasapi: recipe template limits (IMAS_RECIPE_*): %w", err)
 	}
 	var store *objectstore.Store

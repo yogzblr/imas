@@ -408,7 +408,8 @@ echoing the body:
 | 422 | `recipe_empty`, `recipe_not_utf8`, `recipe_not_text` | empty, not UTF-8, control characters |
 | 422 | `recipe_template_invalid` | the template doesn't parse, or calls an unknown function (`details.line`) |
 | 422 | `recipe_template_forbidden` | `env`, `call`, `html`, `js`, `template`, `define`, `block`, or a `range` over a number |
-| 422 | `recipe_template_limit` | a render limit (`details.limit`: `render_timeout`, `rendered_bytes`, `value_bytes`, `range_iterations`) |
+| 422 | `recipe_template_limit` | a render limit (`details.limit`: `render_timeout`, `rendered_bytes`, `value_bytes`, `range_iterations`; `cook_render_time`, `cook_render_bytes` or `cook_render_iterations` for the per-cook budget, which one recipe's per-render limits reach first) |
+| 422 | `recipe_too_many_includes` | the recipe's own `include` list has more entries than farmer's include cap, `IMAS_RECIPE_MAX_INCLUDES` (64 by default; `details.limit`). Includes are not resolved here, since one may be uploaded later: farmer's per-cook render budget and include cap, checked at every cook, are the enforcement |
 | 422 | `recipe_template_failed` | the template fails when run against empty placeholder props (`details.line`) |
 | 422 | `recipe_yaml_invalid` | the rendered recipe isn't a YAML mapping (`details.line`) |
 | 428 | `precondition_required` | neither `If-Match` nor `If-None-Match` |
@@ -739,6 +740,7 @@ error, never a silent default.
 | `SAASAPI_RECIPES_MAX_COUNT` / `_MAX_TOTAL_BYTES` | `500` / `20971520` | per-tenant caps; `1`–`100000` / up to 1 GiB |
 | `SAASAPI_RECIPES_WRITE_RATE_LIMIT` / `_BURST` | `1` / `10` | per-tenant limit on recipe PUT and DELETE together |
 | `IMAS_RECIPE_MAX_SOURCE_BYTES`, `_MAX_RENDERED_BYTES`, `_MAX_VALUE_BYTES`, `_RENDER_TIMEOUT`, `_MAX_RANGE_ITERATIONS` | cook's defaults | the render limits uploads are validated under: set them to farmer's (the chart does) |
+| `IMAS_RECIPE_MAX_INCLUDES` | `64` | farmer's include cap (1 to 256): an upload whose own `include` list is longer is refused. saasapi never cooks, so it takes none of farmer's per-cook budget (`IMAS_RECIPE_COOK_*`) |
 
 saasapi exits at startup if it can't connect to the bus or, when configured,
 to Valkey. The Helm chart in [`deploy/helm/farmer`](../../deploy/helm/farmer/README.md)

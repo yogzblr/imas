@@ -57,7 +57,7 @@ Line numbers are at `f645a93`.
 | B1 | High | J.2 / recipes | The sprout decodes and cooks a staged recipe pulled over `/files/` with no proof farmer produced it; Envoy (DMZ) terminates that TLS, so whoever answers the pull chooses the steps that run as root | CONFIRMED (throwaway test); **addressed by SEC.7a** (merged, PR #107; ready for review) |
 | B2 | High | J.1 / enrollment | An accepted sprout with no active box key (pre-J, mid-enrollment, or post-revocation) accepts an attacker-chosen box key proven under the attacker's own private half, and is handed a gateway JWT — the enrollment PoP binds the key to itself, not to the sprout | CONFIRMED code path (throwaway test); the compromised-bus race to win step 2 is UNCONFIRMED. **Addressed by SEC.7b** (merged, PR #108; ready for review) |
 | B3 | High (incomplete fix) | CL.1 / J (H1 residue) | H1 revokes the NATS User JWT and box keys of a deleted or replaced host, but not its **gateway JWT**; that credential reads `/files/` for up to its TTL (default 24h), and on the replace path it is scoped to the reused `(tenant_id, sprout_id)`, so the old host reads the **new** host's staged recipe | CONFIRMED (throwaway test); **addressed by SEC.7c** (merged, PR #104; ready for review) |
-| B4 | Medium | SEC.3b / recipes | A hostile tenant's recipe render cost scales with its own include count (up to 256), each include rendered under its own `RecipeRenderTimeout`; one cook can burn many CPU-seconds, and tenants now upload recipes | CONFIRMED (throwaway probe); absolute impact not load-measured |
+| B4 | Medium | SEC.3b / recipes | A hostile tenant's recipe render cost scales with its own include count (up to 256), each include rendered under its own `RecipeRenderTimeout`; one cook can burn many CPU-seconds, and tenants now upload recipes | CONFIRMED (throwaway probe); **fixed by S4** (per-cook render budget and a 64-include cap; ready for review) |
 | B5 | Medium | M6, carried | Same-second Account-JWT `iat` tie in the bus fence is unchanged (`fence.go:484`), as planned (deferred past the UAT gate); with SCALE.2's single-node push it can still turn a missed revocation into a permanent cluster-wide revert | CONFIRMED in code; upstream `jti` sharing per repo comments |
 | B6 | Medium | J.4 | Forged "no responders" on `internal.sprout.action` still lets one action run up to `SAASAPI_OUTBOX_MAX_ATTEMPTS` times (owner-accepted residual, unchanged by J.4) | CONFIRMED; accepted |
 | B7 | Low | J.5 | The built-in `operator` role still grants `shell` on every sprout (`rbac/config.go:100`), contrary to the agreed default; deferred to a follow-up PR | CONFIRMED; fixed in SH.1 (PR #102) |
@@ -277,6 +277,22 @@ enrollment PoP), so they weaken the same boundary the J work strengthened.
   includes at upload too, so the cost is visible before cook time.
 - **Mark:** CONFIRMED the cost scales; absolute DoS impact on a real deployment
   not load-measured (UNCONFIRMED).
+- **Fixed by S4** (owner decision 2026-10-17, `docs/briefs/S-hardening.md` S4;
+  ready for review). A cook has one render budget (`cookBudget`,
+  `internal/cook/farmercook.go`), made by `resolveRecipeSteps` and charged by
+  every render of both phases, include discovery and step building, for the
+  recipe it names and every recipe it includes: total render time
+  (`IMAS_RECIPE_COOK_RENDER_TIMEOUT`, 10s), total rendered bytes
+  (`IMAS_RECIPE_COOK_MAX_RENDERED_BYTES`, 8 MiB) and total range iterations
+  (`IMAS_RECIPE_COOK_MAX_RANGE_ITERATIONS`, 100,000), Helm values under
+  `farmer.recipes.templateLimits`. A cook over it fails with
+  `ErrCookRenderBudget` naming the counter, before anything is staged or
+  dispatched. The include cap is now a setting, `IMAS_RECIPE_MAX_INCLUDES`
+  (default 64, at most 256), and an upload whose own include list is longer is
+  refused (`422 recipe_too_many_includes`). Includes are still not resolved at
+  upload, since a recipe may include one uploaded later; the cook-time budget
+  is the enforcement. Discovery no longer renders the named recipe a second
+  time, so each recipe of a cook is rendered once per phase.
 
 ### B5. Same-second Account-JWT `iat` tie, unchanged (M6, carried)
 
@@ -445,6 +461,7 @@ enrollment PoP), so they weaken the same boundary the J work strengthened.
    accepted-but-keyless sprout be a closed state rather than a standing window?
    *Since built* that way (SEC.7b, PR #108, merged; waits on this review).
 3. **Per-cook render budget (B4).** Now that tenants upload recipes, is a total
-   per-cook render budget wanted before dispatch is enabled?
+   per-cook render budget wanted before dispatch is enabled? *Decided* yes
+   (owner, 2026-10-17) and built as S4 (waits on this review).
 4. **M6 (B5), no-responders (B6).** Confirm these deferrals are still intended
    for after the UAT gate. (B7, `operator` and `shell`, was fixed in SH.1, PR #102.)

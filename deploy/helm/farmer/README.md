@@ -1085,7 +1085,10 @@ the secret key only as a file. It validates uploads under
 `farmer.recipes.templateLimits`, which it receives as the same
 `IMAS_RECIPE_*` variables farmer gets, so a recipe that uploads is a recipe
 farmer will render. That one set of limits for both is an owner decision
-(2026-10-04): there is no separate saasapi value to override it. Reading needs `saasapi.recipes.readRole` or `writeRole`
+(2026-10-04): there is no separate saasapi value to override it. saasapi also
+gets `maxIncludes` (`IMAS_RECIPE_MAX_INCLUDES`) and refuses an upload whose own
+`include` list is longer; it does not get the per-cook budget (`cook*`), since
+it never cooks. Reading needs `saasapi.recipes.readRole` or `writeRole`
 (Keycloak realm roles, or client roles of `saasapi.jwt.audience`), and
 writing needs `writeRole`. With `saasapi.recipes.enabled`, saasapi's
 NetworkPolicy opens egress on `objectStore.endpoint`'s port (443 or 80 by
@@ -1093,6 +1096,30 @@ NetworkPolicy opens egress on `objectStore.endpoint`'s port (443 or 80 by
 any destination, on that port only). That rule is separate from
 `saasapiExtraEgress`, so narrowing that to your Keycloak doesn't break
 uploads.
+
+### Per-cook render budget
+
+A cook renders the recipe it names and every recipe it includes, each twice:
+once to find the includes and once to build the steps. Every render is
+bounded by the per-render limits above, and the cook as a whole by a budget
+of its own (security review B4, S4), shared by every render of both phases:
+
+| Value | Default | Bounds |
+|---|---|---|
+| `cookRenderTimeout` (`IMAS_RECIPE_COOK_RENDER_TIMEOUT`) | `"10s"` | at least `renderTimeout`, at most `5m` |
+| `cookMaxRenderedBytes` (`IMAS_RECIPE_COOK_MAX_RENDERED_BYTES`) | `8388608` (8 MiB) | at least `maxRenderedBytes`, at most 256 MiB |
+| `cookMaxRangeIterations` (`IMAS_RECIPE_COOK_MAX_RANGE_ITERATIONS`) | `100000` | at least `maxRangeIterations`, at most 100000000 |
+| `maxIncludes` (`IMAS_RECIPE_MAX_INCLUDES`) | `64` | 1 to 256 |
+
+All four are under `farmer.recipes.templateLimits`, and farmer refuses to
+start if one is out of range. A cook that runs out of its budget fails
+before anything is staged or dispatched; farmer logs the counter that ran
+out and its limit (`cook exceeded its render budget: total render time over
+10s`). A cook including more than `maxIncludes` distinct recipes fails the
+same way (`more than 64 recipes included`). saasapi gets only `maxIncludes`:
+it refuses an upload whose own `include` list is longer, but it does not
+resolve includes, because a recipe may include one uploaded later, so the
+cook-time budget is the enforcement.
 
 ## Versity Gateway
 
@@ -1500,7 +1527,11 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `farmer.recipes.templateLimits.maxRenderedBytes` | `1048576` | `IMAS_RECIPE_MAX_RENDERED_BYTES`: largest output of one recipe render. |
 | `farmer.recipes.templateLimits.maxValueBytes` | `262144` | `IMAS_RECIPE_MAX_VALUE_BYTES`: largest string one template function returns; at most `maxRenderedBytes`. |
 | `farmer.recipes.templateLimits.renderTimeout` | `"2s"` | `IMAS_RECIPE_RENDER_TIMEOUT`: time limit of one recipe render, a quoted Go duration up to `1m`. |
-| `farmer.recipes.templateLimits.maxRangeIterations` | `10000` | `IMAS_RECIPE_MAX_RANGE_ITERATIONS`: total `range` iterations in one render. Recipes are tenant-written (untrusted); all five are required, and farmer refuses to start if one is out of range (sizes up to 64 MiB, iterations up to 10000000). |
+| `farmer.recipes.templateLimits.maxRangeIterations` | `10000` | `IMAS_RECIPE_MAX_RANGE_ITERATIONS`: total `range` iterations in one render. Recipes are tenant-written (untrusted); all nine `templateLimits` are required, and farmer refuses to start if one is out of range (sizes up to 64 MiB, iterations up to 10000000). |
+| `farmer.recipes.templateLimits.cookRenderTimeout` | `"10s"` | `IMAS_RECIPE_COOK_RENDER_TIMEOUT`: total render time of one cook, a quoted Go duration from `renderTimeout` up to `5m`. See [Per-cook render budget](#per-cook-render-budget). |
+| `farmer.recipes.templateLimits.cookMaxRenderedBytes` | `8388608` | `IMAS_RECIPE_COOK_MAX_RENDERED_BYTES`: total rendered output of one cook, from `maxRenderedBytes` up to 268435456 (256 MiB). |
+| `farmer.recipes.templateLimits.cookMaxRangeIterations` | `100000` | `IMAS_RECIPE_COOK_MAX_RANGE_ITERATIONS`: total `range` iterations of one cook, from `maxRangeIterations` up to 100000000. |
+| `farmer.recipes.templateLimits.maxIncludes` | `64` | `IMAS_RECIPE_MAX_INCLUDES`: distinct recipes one cook may include (the recipe it names is not counted), 1 to 256. saasapi gets it too and refuses an upload whose own include list is longer. |
 | `farmer.selfUpdate.enabled` | `false` | `IMAS_SELF_UPDATE_ENABLED`: farmer's own switch for `self_update` (security review L1). Off, farmer refuses every update whatever saasapi sends. A rollout needs this and `saasapi.fleetUpdateDispatch.enabled`. |
 | `farmer.sproutActions.{concurrency,selfUpdateConcurrency,tenantConcurrency}` | `256`, `16`, `32` | `IMAS_SPROUT_ACTION_CONCURRENCY`, `IMAS_SELF_UPDATE_CONCURRENCY`, `IMAS_SPROUT_ACTION_TENANT_CONCURRENCY`: per replica, the cmd.run/cook pool, the pool reserved for `self_update`, and one tenant's cap in each (security review M5). A request that doesn't fit is refused at once (`farmer_busy`) and saasapi sends it again. Null emits no env var. |
 | `farmer.openbao.{gateway,tenantBox}.*` | see values.yaml | Mount, key or path, role, and token key per client. |

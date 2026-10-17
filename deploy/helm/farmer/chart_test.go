@@ -661,6 +661,11 @@ func TestValidationFailures(t *testing.T) {
 		{"null range limit", "maxRangeIterations must be a positive whole number", []string{"--set", "farmer.recipes.templateLimits.maxRangeIterations=null"}},
 		{"bare number timeout", "renderTimeout must be a quoted duration", []string{"--set", "farmer.recipes.templateLimits.renderTimeout=2"}},
 		{"unitless timeout", "renderTimeout must be a quoted duration", []string{"--set-string", "farmer.recipes.templateLimits.renderTimeout=2"}},
+		{"bare number cook timeout", "cookRenderTimeout must be a quoted duration such as \"10s\"", []string{"--set", "farmer.recipes.templateLimits.cookRenderTimeout=10"}},
+		{"null cook timeout", "cookRenderTimeout must be a quoted duration", []string{"--set", "farmer.recipes.templateLimits.cookRenderTimeout=null"}},
+		{"zero cook output limit", "cookMaxRenderedBytes must be a positive whole number", []string{"--set", "farmer.recipes.templateLimits.cookMaxRenderedBytes=0"}},
+		{"string cook range limit", "cookMaxRangeIterations must be a positive whole number", []string{"--set-string", "farmer.recipes.templateLimits.cookMaxRangeIterations=100k"}},
+		{"fractional include cap", "maxIncludes must be a positive whole number", []string{"--set", "farmer.recipes.templateLimits.maxIncludes=1.5"}},
 		{"fractional burst", "burst must be a whole number", []string{"--set", "saasapi.enrollmentKeys.rateLimit.burst=2.5"}},
 		// Recipe upload (REC.1): saasapi's own, separate credential.
 		{"recipes without credential", "saasapi.recipes.credentialsSecret is required", []string{"--set", "saasapi.recipes.enabled=true", "--set", "objectStore.endpoint=minio:9000", "--set", "objectStore.bucket=recipes"}},
@@ -1431,11 +1436,15 @@ func TestRecipeTemplateLimitsEnv(t *testing.T) {
 		want map[string]string
 	}{
 		{nil, map[string]string{
-			"IMAS_RECIPE_MAX_SOURCE_BYTES":     "262144",
-			"IMAS_RECIPE_MAX_RENDERED_BYTES":   "1048576",
-			"IMAS_RECIPE_MAX_VALUE_BYTES":      "262144",
-			"IMAS_RECIPE_RENDER_TIMEOUT":       "2s",
-			"IMAS_RECIPE_MAX_RANGE_ITERATIONS": "10000",
+			"IMAS_RECIPE_MAX_SOURCE_BYTES":          "262144",
+			"IMAS_RECIPE_MAX_RENDERED_BYTES":        "1048576",
+			"IMAS_RECIPE_MAX_VALUE_BYTES":           "262144",
+			"IMAS_RECIPE_RENDER_TIMEOUT":            "2s",
+			"IMAS_RECIPE_MAX_RANGE_ITERATIONS":      "10000",
+			"IMAS_RECIPE_COOK_RENDER_TIMEOUT":       "10s",
+			"IMAS_RECIPE_COOK_MAX_RENDERED_BYTES":   "8388608",
+			"IMAS_RECIPE_COOK_MAX_RANGE_ITERATIONS": "100000",
+			"IMAS_RECIPE_MAX_INCLUDES":              "64",
 		}},
 		{[]string{
 			"--set", "farmer.recipes.templateLimits.maxSourceBytes=131072",
@@ -1443,12 +1452,20 @@ func TestRecipeTemplateLimitsEnv(t *testing.T) {
 			"--set", "farmer.recipes.templateLimits.maxValueBytes=65536",
 			"--set-string", "farmer.recipes.templateLimits.renderTimeout=500ms",
 			"--set", "farmer.recipes.templateLimits.maxRangeIterations=2000",
+			"--set-string", "farmer.recipes.templateLimits.cookRenderTimeout=1m",
+			"--set", "farmer.recipes.templateLimits.cookMaxRenderedBytes=268435456",
+			"--set", "farmer.recipes.templateLimits.cookMaxRangeIterations=100000000",
+			"--set", "farmer.recipes.templateLimits.maxIncludes=256",
 		}, map[string]string{
-			"IMAS_RECIPE_MAX_SOURCE_BYTES":     "131072",
-			"IMAS_RECIPE_MAX_RENDERED_BYTES":   "4194304",
-			"IMAS_RECIPE_MAX_VALUE_BYTES":      "65536",
-			"IMAS_RECIPE_RENDER_TIMEOUT":       "500ms",
-			"IMAS_RECIPE_MAX_RANGE_ITERATIONS": "2000",
+			"IMAS_RECIPE_MAX_SOURCE_BYTES":          "131072",
+			"IMAS_RECIPE_MAX_RENDERED_BYTES":        "4194304",
+			"IMAS_RECIPE_MAX_VALUE_BYTES":           "65536",
+			"IMAS_RECIPE_RENDER_TIMEOUT":            "500ms",
+			"IMAS_RECIPE_MAX_RANGE_ITERATIONS":      "2000",
+			"IMAS_RECIPE_COOK_RENDER_TIMEOUT":       "1m",
+			"IMAS_RECIPE_COOK_MAX_RENDERED_BYTES":   "268435456",
+			"IMAS_RECIPE_COOK_MAX_RANGE_ITERATIONS": "100000000",
+			"IMAS_RECIPE_MAX_INCLUDES":              "256",
 		}},
 	} {
 		env := envValues(container(t, farmerDeploy(t, mustRender(t, tc.args...)), "farmer"))
@@ -1465,7 +1482,9 @@ func TestRecipeTemplateLimitsEnv(t *testing.T) {
 // (never farmer's), the secret key as a file only.
 func TestSaasapiRecipesEnv(t *testing.T) {
 	limits := []string{"IMAS_RECIPE_MAX_SOURCE_BYTES", "IMAS_RECIPE_MAX_RENDERED_BYTES", "IMAS_RECIPE_MAX_VALUE_BYTES",
-		"IMAS_RECIPE_RENDER_TIMEOUT", "IMAS_RECIPE_MAX_RANGE_ITERATIONS"}
+		"IMAS_RECIPE_RENDER_TIMEOUT", "IMAS_RECIPE_MAX_RANGE_ITERATIONS", "IMAS_RECIPE_MAX_INCLUDES"}
+	// The per-cook budget is farmer's alone: saasapi never cooks (S4).
+	cookOnly := []string{"IMAS_RECIPE_COOK_RENDER_TIMEOUT", "IMAS_RECIPE_COOK_MAX_RENDERED_BYTES", "IMAS_RECIPE_COOK_MAX_RANGE_ITERATIONS"}
 
 	// One set of limits for both (owner decision, 2026-10-04): saasapi's
 	// upload validator gets exactly farmer's farmer.recipes.templateLimits,
@@ -1478,15 +1497,17 @@ func TestSaasapiRecipesEnv(t *testing.T) {
 		"--set", "farmer.recipes.templateLimits.maxValueBytes=65536",
 		"--set-string", "farmer.recipes.templateLimits.renderTimeout=500ms",
 		"--set", "farmer.recipes.templateLimits.maxRangeIterations=2000",
+		"--set", "farmer.recipes.templateLimits.maxIncludes=12",
+		"--set-string", "farmer.recipes.templateLimits.cookRenderTimeout=30s",
 	}
 	for _, tc := range []struct {
 		args []string
 		want []string // in the order of limits
 	}{
-		{nil, []string{"262144", "1048576", "262144", "2s", "10000"}},
-		{overridden, []string{"131072", "4194304", "65536", "500ms", "2000"}},
+		{nil, []string{"262144", "1048576", "262144", "2s", "10000", "64"}},
+		{overridden, []string{"131072", "4194304", "65536", "500ms", "2000", "12"}},
 		{append(slices.Clone(overridden), "--set", "saasapi.recipes.templateLimits.maxSourceBytes=1"),
-			[]string{"131072", "4194304", "65536", "500ms", "2000"}},
+			[]string{"131072", "4194304", "65536", "500ms", "2000", "12"}},
 	} {
 		docs := mustRender(t, tc.args...)
 		s := envValues(container(t, find(t, docs, "Deployment", "t-farmer-saasapi"), "saasapi"))
@@ -1494,6 +1515,14 @@ func TestSaasapiRecipesEnv(t *testing.T) {
 		for i, name := range limits {
 			if s[name] != tc.want[i] || f[name] != tc.want[i] {
 				t.Errorf("%v: %s: saasapi %q, farmer %q; want both %q", tc.args, name, s[name], f[name], tc.want[i])
+			}
+		}
+		for _, name := range cookOnly {
+			if v, ok := s[name]; ok {
+				t.Errorf("%v: saasapi gets %s=%q; the per-cook budget is farmer's only", tc.args, name, v)
+			}
+			if f[name] == "" {
+				t.Errorf("%v: farmer has no %s", tc.args, name)
 			}
 		}
 	}

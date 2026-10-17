@@ -503,9 +503,12 @@ var (
 // empty, UTF-8 text without control characters (other than tab, LF and
 // CR), and a template that parses and executes under farmer's restricted
 // function map and render limits against placeholder props, to YAML that
-// parses (cook.ValidateRecipeSource). Includes are not resolved. A
-// refusal names the rule broken and, at most, a line number; never any of
-// the body.
+// parses (cook.ValidateRecipeSource), with an include list no longer than
+// farmer's include cap (IMAS_RECIPE_MAX_INCLUDES). Includes are not
+// resolved: a recipe may include one uploaded later, so farmer's per-cook
+// render budget and include cap, checked at every cook, are the
+// enforcement. A refusal names the rule broken and, at most, a line
+// number; never any of the body.
 func validateRecipeBody(ctx context.Context, body []byte) *recipeProblem {
 	invalid := func(code, msg string, details map[string]any) *recipeProblem {
 		return &recipeProblem{status: http.StatusUnprocessableEntity, code: code, message: msg, details: details}
@@ -557,6 +560,19 @@ func classifyRecipeError(err error) *recipeProblem {
 		limit("value_bytes")
 	case errors.Is(err, cook.ErrTemplateRangeTooLong):
 		limit("range_iterations")
+	case errors.Is(err, cook.ErrCookRenderBudget):
+		// Validation renders one recipe in a budget of its own, which its
+		// per-render limits stop first; mapped like them all the same.
+		p.code, p.message = "recipe_template_limit", "the template exceeded the per-cook render budget"
+		p.details = map[string]any{"limit": "cook_render_budget"}
+		if be, ok := errors.AsType[*cook.CookBudgetError](err); ok {
+			p.message += ": " + be.Exceeded()
+			p.details["limit"] = "cook_render_" + be.Counter
+		}
+	case errors.Is(err, cook.ErrTooManyIncludes):
+		n := cook.CurrentRenderLimits().MaxIncludes
+		p.code, p.message = "recipe_too_many_includes", fmt.Sprintf("the recipe includes more than %d recipes", n)
+		p.details = map[string]any{"limit": n}
 	case errors.Is(err, cook.ErrTemplateArgument), errors.Is(err, cook.ErrTemplateValueEncoding):
 		p.code, p.message = "recipe_template_failed", "the template passed an invalid argument to a function"
 	default:

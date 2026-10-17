@@ -11,6 +11,7 @@ import (
 var recipeLimitEnvs = []string{
 	EnvRecipeMaxSourceBytes, EnvRecipeMaxRenderedBytes, EnvRecipeMaxValueBytes,
 	EnvRecipeRenderTimeout, EnvRecipeMaxRangeIterations,
+	EnvRecipeCookRenderTimeout, EnvRecipeCookMaxRenderedBytes, EnvRecipeCookMaxRangeIterations, EnvRecipeMaxIncludes,
 }
 
 // RecipeLimits come from the IMAS_RECIPE_* variables the farmer chart's
@@ -31,8 +32,12 @@ func TestLoadConfig_FarmerRecipeLimits(t *testing.T) {
 		t.Setenv(EnvRecipeMaxValueBytes, "2000")
 		t.Setenv(EnvRecipeRenderTimeout, "500ms")
 		t.Setenv(EnvRecipeMaxRangeIterations, "7")
+		t.Setenv(EnvRecipeCookRenderTimeout, "3s")
+		t.Setenv(EnvRecipeCookMaxRenderedBytes, "9000")
+		t.Setenv(EnvRecipeCookMaxRangeIterations, "70")
+		t.Setenv(EnvRecipeMaxIncludes, "12")
 		loadFarmerWithConfig(t, "")
-		want := RecipeTemplateLimits{1000, 4000, 2000, 500 * time.Millisecond, 7}
+		want := RecipeTemplateLimits{1000, 4000, 2000, 500 * time.Millisecond, 7, 3 * time.Second, 9000, 70, 12}
 		if RecipeLimits != want {
 			t.Errorf("RecipeLimits = %+v, want %+v", RecipeLimits, want)
 		}
@@ -41,11 +46,15 @@ func TestLoadConfig_FarmerRecipeLimits(t *testing.T) {
 
 func TestRecipeTemplateLimitsFromEnv_Invalid(t *testing.T) {
 	for env, bad := range map[string]string{
-		EnvRecipeMaxSourceBytes:     "256Ki",
-		EnvRecipeMaxRenderedBytes:   "0",
-		EnvRecipeMaxValueBytes:      "-1",
-		EnvRecipeRenderTimeout:      "2",
-		EnvRecipeMaxRangeIterations: "1.5",
+		EnvRecipeMaxSourceBytes:         "256Ki",
+		EnvRecipeMaxRenderedBytes:       "0",
+		EnvRecipeMaxValueBytes:          "-1",
+		EnvRecipeRenderTimeout:          "2",
+		EnvRecipeMaxRangeIterations:     "1.5",
+		EnvRecipeCookRenderTimeout:      "10",
+		EnvRecipeCookMaxRenderedBytes:   "8Mi",
+		EnvRecipeCookMaxRangeIterations: "0",
+		EnvRecipeMaxIncludes:            "-64",
 	} {
 		for _, e := range recipeLimitEnvs {
 			t.Setenv(e, "")
@@ -58,6 +67,11 @@ func TestRecipeTemplateLimitsFromEnv_Invalid(t *testing.T) {
 	t.Setenv(EnvRecipeRenderTimeout, "-2s")
 	if _, err := recipeTemplateLimitsFromEnv(); err == nil {
 		t.Error("negative timeout accepted")
+	}
+	t.Setenv(EnvRecipeRenderTimeout, "")
+	t.Setenv(EnvRecipeCookRenderTimeout, "-10s")
+	if _, err := recipeTemplateLimitsFromEnv(); err == nil {
+		t.Error("negative cook timeout accepted")
 	}
 }
 

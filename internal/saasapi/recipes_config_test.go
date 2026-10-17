@@ -21,7 +21,8 @@ func clearRecipeEnv(t *testing.T) {
 		"SAASAPI_RECIPES_WRITE_RATE_LIMIT", "SAASAPI_RECIPES_WRITE_RATE_BURST", "SAASAPI_RECIPES_CREDENTIAL_CHECK",
 		"SAASAPI_RECIPES_JOB_BUCKET", "SAASAPI_RECIPES_PLATFORM_RECIPE_DIR",
 		"IMAS_RECIPE_MAX_SOURCE_BYTES", "IMAS_RECIPE_MAX_RENDERED_BYTES", "IMAS_RECIPE_MAX_VALUE_BYTES",
-		"IMAS_RECIPE_RENDER_TIMEOUT", "IMAS_RECIPE_MAX_RANGE_ITERATIONS",
+		"IMAS_RECIPE_RENDER_TIMEOUT", "IMAS_RECIPE_MAX_RANGE_ITERATIONS", "IMAS_RECIPE_MAX_INCLUDES",
+		"IMAS_RECIPE_COOK_RENDER_TIMEOUT", "IMAS_RECIPE_COOK_MAX_RENDERED_BYTES", "IMAS_RECIPE_COOK_MAX_RANGE_ITERATIONS",
 	} {
 		t.Setenv(k, "")
 	}
@@ -59,6 +60,12 @@ func TestLoadRecipeSettingsFromEnv(t *testing.T) {
 		"SAASAPI_RECIPES_WRITE_RATE_BURST":          "3",
 		"IMAS_RECIPE_MAX_SOURCE_BYTES":              "1024",
 		"IMAS_RECIPE_RENDER_TIMEOUT":                "500ms",
+		"IMAS_RECIPE_MAX_INCLUDES":                  "12",
+		// saasapi never cooks: the per-cook budget is not its setting
+		// (the chart does not set these on it), and is not read.
+		"IMAS_RECIPE_COOK_RENDER_TIMEOUT":       "1m",
+		"IMAS_RECIPE_COOK_MAX_RENDERED_BYTES":   "not read",
+		"IMAS_RECIPE_COOK_MAX_RANGE_ITERATIONS": "7",
 	} {
 		t.Setenv(k, v)
 	}
@@ -68,7 +75,7 @@ func TestLoadRecipeSettingsFromEnv(t *testing.T) {
 	}
 	want := RecipeSettings{Endpoint: "minio:9000", Bucket: "recipes", AccessKeyID: "saasapi", SecretAccessKeyFile: "/var/run/secrets/key",
 		CredentialCheck: false, JobBucket: "jobs", PlatformRecipeDir: "/srv/recipes", ReadRole: "r", WriteRole: "w", MaxCount: 10, MaxTotalBytes: 1000, WriteRateLimit: 0.5, WriteRateBurst: 3,
-		RenderLimits: cook.RenderLimits{MaxSourceBytes: 1024, RenderTimeout: 500 * time.Millisecond}}
+		RenderLimits: cook.RenderLimits{MaxSourceBytes: 1024, RenderTimeout: 500 * time.Millisecond, MaxIncludes: 12}}
 	if s != want {
 		t.Fatalf("got %+v\nwant %+v", s, want)
 	}
@@ -88,6 +95,8 @@ func TestLoadRecipeSettingsRejects(t *testing.T) {
 		{"SAASAPI_RECIPES_S3_ENDPOINT", "minio:9000", "SAASAPI_RECIPES_S3_"},
 		{"IMAS_RECIPE_MAX_SOURCE_BYTES", "-5", "IMAS_RECIPE_MAX_SOURCE_BYTES"},
 		{"IMAS_RECIPE_RENDER_TIMEOUT", "soon", "IMAS_RECIPE_RENDER_TIMEOUT"},
+		{"IMAS_RECIPE_MAX_INCLUDES", "0", "IMAS_RECIPE_MAX_INCLUDES"},
+		{"IMAS_RECIPE_MAX_INCLUDES", "64 recipes", "IMAS_RECIPE_MAX_INCLUDES"},
 	} {
 		t.Run(tc.env+"="+tc.val, func(t *testing.T) {
 			clearRecipeEnv(t)
@@ -194,6 +203,18 @@ func TestConfigureRecipes(t *testing.T) {
 		t.Fatalf("not configured: %+v", recipeSvc)
 	}
 
+	// Per-render limits above cook's default per-cook budget start
+	// saasapi, which is not given the budget (S4): it is raised to them.
+	high := s
+	high.RenderLimits = cook.RenderLimits{RenderTimeout: 30 * time.Second, MaxRenderedBytes: 32 << 20, MaxRangeIterations: 5_000_000, MaxIncludes: 256}
+	if err := ConfigureRecipes(high, nil); err != nil {
+		t.Fatalf("per-render limits above the default budget: %v", err)
+	}
+	if l := cook.CurrentRenderLimits(); l.RenderTimeout != 30*time.Second || l.CookRenderTimeout != 30*time.Second ||
+		l.CookMaxRenderedBytes != 32<<20 || l.CookMaxRangeIterations != 5_000_000 || l.MaxIncludes != 256 {
+		t.Fatalf("limits %+v", l)
+	}
+
 	// Refused: a missing or empty key file, limits out of range.
 	for name, mutate := range map[string]func(*RecipeSettings){
 		"missing key file": func(s *RecipeSettings) { s.SecretAccessKeyFile = filepath.Join(dir, "nope") },
@@ -203,6 +224,7 @@ func TestConfigureRecipes(t *testing.T) {
 			s.SecretAccessKeyFile = p
 		},
 		"limit out of range": func(s *RecipeSettings) { s.RenderLimits = cook.RenderLimits{MaxSourceBytes: 1 << 40} },
+		"257 includes":       func(s *RecipeSettings) { s.RenderLimits = cook.RenderLimits{MaxIncludes: 257} },
 		"same roles":         func(s *RecipeSettings) { s.WriteRole = s.ReadRole },
 	} {
 		bad := s

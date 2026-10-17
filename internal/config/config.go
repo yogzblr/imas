@@ -41,25 +41,37 @@ const EnvFarmerNKeySeedFile = "IMAS_FARMER_NKEY_SEED_FILE"
 
 // Recipe template render limits on farmer (RecipeTemplateLimits), set by
 // the Helm chart's farmer.recipes.templateLimits. Unset or empty keeps
-// internal/cook's default.
+// internal/cook's default. The IMAS_RECIPE_COOK_* limits and
+// IMAS_RECIPE_MAX_INCLUDES bound one cook as a whole (internal/cook's
+// per-cook budget, security review B4).
 const (
-	EnvRecipeMaxSourceBytes     = "IMAS_RECIPE_MAX_SOURCE_BYTES"
-	EnvRecipeMaxRenderedBytes   = "IMAS_RECIPE_MAX_RENDERED_BYTES"
-	EnvRecipeMaxValueBytes      = "IMAS_RECIPE_MAX_VALUE_BYTES"
-	EnvRecipeRenderTimeout      = "IMAS_RECIPE_RENDER_TIMEOUT"
-	EnvRecipeMaxRangeIterations = "IMAS_RECIPE_MAX_RANGE_ITERATIONS"
+	EnvRecipeMaxSourceBytes         = "IMAS_RECIPE_MAX_SOURCE_BYTES"
+	EnvRecipeMaxRenderedBytes       = "IMAS_RECIPE_MAX_RENDERED_BYTES"
+	EnvRecipeMaxValueBytes          = "IMAS_RECIPE_MAX_VALUE_BYTES"
+	EnvRecipeRenderTimeout          = "IMAS_RECIPE_RENDER_TIMEOUT"
+	EnvRecipeMaxRangeIterations     = "IMAS_RECIPE_MAX_RANGE_ITERATIONS"
+	EnvRecipeCookRenderTimeout      = "IMAS_RECIPE_COOK_RENDER_TIMEOUT"
+	EnvRecipeCookMaxRenderedBytes   = "IMAS_RECIPE_COOK_MAX_RENDERED_BYTES"
+	EnvRecipeCookMaxRangeIterations = "IMAS_RECIPE_COOK_MAX_RANGE_ITERATIONS"
+	EnvRecipeMaxIncludes            = "IMAS_RECIPE_MAX_INCLUDES"
 )
 
 // RecipeTemplateLimits are the limits farmer renders recipe templates
-// under (internal/cook's "Bounded work"). A zero field keeps cook's
+// under (internal/cook's "Bounded work"): the first five per render, the
+// Cook* ones for every render of one cook together, and MaxIncludes the
+// distinct recipes one cook may include. A zero field keeps cook's
 // default. cmd/farmer hands them to cook.SetRenderLimits, which checks
 // their ranges and stops startup if one is out of range.
 type RecipeTemplateLimits struct {
-	MaxSourceBytes     int
-	MaxRenderedBytes   int
-	MaxValueBytes      int
-	RenderTimeout      time.Duration
-	MaxRangeIterations int
+	MaxSourceBytes         int
+	MaxRenderedBytes       int
+	MaxValueBytes          int
+	RenderTimeout          time.Duration
+	MaxRangeIterations     int
+	CookRenderTimeout      time.Duration
+	CookMaxRenderedBytes   int
+	CookMaxRangeIterations int
+	MaxIncludes            int
 }
 
 // Sprout setting defaults; see GatewayJWTRefreshMargin,
@@ -1142,6 +1154,9 @@ func recipeTemplateLimitsFromEnv() (RecipeTemplateLimits, error) {
 		{EnvRecipeMaxRenderedBytes, &l.MaxRenderedBytes},
 		{EnvRecipeMaxValueBytes, &l.MaxValueBytes},
 		{EnvRecipeMaxRangeIterations, &l.MaxRangeIterations},
+		{EnvRecipeCookMaxRenderedBytes, &l.CookMaxRenderedBytes},
+		{EnvRecipeCookMaxRangeIterations, &l.CookMaxRangeIterations},
+		{EnvRecipeMaxIncludes, &l.MaxIncludes},
 	} {
 		v := os.Getenv(f.env)
 		if v == "" {
@@ -1153,12 +1168,23 @@ func recipeTemplateLimitsFromEnv() (RecipeTemplateLimits, error) {
 		}
 		*f.dst = n
 	}
-	if v := os.Getenv(EnvRecipeRenderTimeout); v != "" {
+	for _, f := range []struct {
+		env     string
+		dst     *time.Duration
+		example string
+	}{
+		{EnvRecipeRenderTimeout, &l.RenderTimeout, "2s"},
+		{EnvRecipeCookRenderTimeout, &l.CookRenderTimeout, "10s"},
+	} {
+		v := os.Getenv(f.env)
+		if v == "" {
+			continue
+		}
 		d, err := time.ParseDuration(v)
 		if err != nil || d <= 0 {
-			return RecipeTemplateLimits{}, fmt.Errorf("%s=%q: want a positive duration such as 2s", EnvRecipeRenderTimeout, v)
+			return RecipeTemplateLimits{}, fmt.Errorf("%s=%q: want a positive duration such as %s", f.env, v, f.example)
 		}
-		l.RenderTimeout = d
+		*f.dst = d
 	}
 	return l, nil
 }
