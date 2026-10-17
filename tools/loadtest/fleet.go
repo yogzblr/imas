@@ -322,7 +322,7 @@ const heartbeatTick = 100 * time.Millisecond
 
 // startHeartbeats publishes every connected sprout's heartbeat once per
 // HeartbeatInterval until ctx is done, spread evenly over the interval
-// (each tick takes the next share of the fleet, round robin), so the bus
+// (each tick takes the heartbeats now due, round robin), so the bus
 // sees the steady rate a fleet that connected over time produces, not a
 // burst per interval. One goroutine for the fleet, not one per sprout,
 // for the reason the subscriptions share a channel. A sprout that is
@@ -333,18 +333,25 @@ func (f *fleet) startHeartbeats(ctx context.Context) {
 		return
 	}
 	tick := min(heartbeatTick, f.opts.HeartbeatInterval)
-	per := max(1, int((int64(len(f.creds))*int64(tick)+int64(f.opts.HeartbeatInterval)-1)/int64(f.opts.HeartbeatInterval)))
+	// The fleet's heartbeats per nanosecond: each sprout once per interval.
+	rate := float64(len(f.creds)) / float64(f.opts.HeartbeatInterval)
 	go func() {
 		t := time.NewTicker(tick)
 		defer t.Stop()
+		start := time.Now()
 		next := 0
+		var sent int64
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
 			}
-			for range per {
+			// Publish what is due since start and not yet sent, so the
+			// rate holds whatever the fleet size (no per-tick minimum)
+			// and a tick the ticker dropped is made up on the next.
+			due := int64(rate * float64(time.Since(start)))
+			for ; sent < due; sent++ {
 				i := next
 				next = (next + 1) % len(f.creds)
 				if !f.live[i].Load() {

@@ -250,6 +250,36 @@ func TestFleetSproutsSendHeartbeats(t *testing.T) {
 	}
 }
 
+// The fleet's heartbeat rate is one per sprout per interval whatever the
+// fleet size: a fleet smaller than the ticks in an interval must not send
+// one per tick.
+func TestFleetHeartbeatRate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts a bus process")
+	}
+	bus, tlsCfg, _, tf := startTestBus(t)
+	creds, err := tf.mintSprouts("rate", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const interval = 2 * time.Second
+	fl := newFleet(creds, fleetOptions{Servers: []string{bus.URL()}, TLS: tlsCfg, ConnectTimeout: 5 * time.Second, HeartbeatInterval: interval})
+	defer fl.Close()
+	if res := fl.connectAll(context.Background(), 0, 1, 0); res.Connected != 5 {
+		t.Fatalf("connected %d of 5 (reasons %v)", res.Connected, res.Reasons)
+	}
+	before := fl.heartbeats.Load() // one per sprout at connect
+	ctx, cancel := context.WithCancel(context.Background())
+	fl.startHeartbeats(ctx)
+	time.Sleep(2 * interval)
+	cancel()
+	// Two intervals: 10 heartbeats for 5 sprouts. A per-tick minimum would
+	// send about 40.
+	if n := fl.heartbeats.Load() - before; n < 8 || n > 11 {
+		t.Fatalf("%d heartbeats from 5 sprouts in two %s intervals, want about 10", n, interval)
+	}
+}
+
 func TestRunLocalEndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("starts a bus process and runs for several seconds")
