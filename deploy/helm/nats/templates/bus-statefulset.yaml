@@ -127,6 +127,13 @@ spec:
             {{- end }}
             - name: IMAS_BUS_HEALTH_PORT
               value: {{ .Values.bus.ports.health | quote }}
+            {{- if not $clustered }}
+            # A single node serves no client but its loader until the
+            # loader has loaded the SYS account (cmd/farmerbus sysgate.go):
+            # the loader's /readyz, over the pod's loopback.
+            - name: IMAS_BUS_LOADER_READY_URL
+              value: {{ printf "http://127.0.0.1:%d/readyz" (int .Values.loader.healthPort) | quote }}
+            {{- end }}
             {{- if $clustered }}
             # Routes (cmd/farmerbus/cluster.go): mutual TLS with the node
             # cert against the same root CA as the client port, plus the

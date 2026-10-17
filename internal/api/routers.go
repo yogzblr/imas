@@ -4,12 +4,16 @@ import (
 	"net/http"
 
 	"github.com/yogzblr/imas/internal/api/handlers"
+	"github.com/yogzblr/imas/internal/config"
 )
 
 // NewRouter creates an http.ServeMux for the farmer's HTTPS server.
 // This server handles:
 //   - PKI bootstrap: sprouts without NATS credentials fetch the CA
-//     certificate and register their NKey here.
+//     certificate here. Only with enrolment off (config.EnrollmentDisabled,
+//     a standalone install) do they also register their NKey here, with
+//     proof of possession (PUT /pki/putnkey after GET /pki/nkeynonce);
+//     POST /v1/enroll is then not served.
 //   - Enrollment (POST /v1/enroll): the join-token-based path that mints a
 //     sprout's JWT/NKey identity in one round trip — see
 //     docs/design/imas-envoy-enrollment-design.md.
@@ -38,16 +42,26 @@ func NewRouter(certificate string) *http.ServeMux {
 	_ = certificate // reserved for future TLS configuration
 	mux := http.NewServeMux()
 
-	// PKI bootstrap routes (no auth required — pre-enrollment sprouts use these)
+	// PKI bootstrap route (no auth required — pre-enrollment sprouts
+	// fetch the root CA here, trust on first use).
 	mux.Handle("GET /auth/cert/", Logger(http.HandlerFunc(handlers.GetCertificate), "GetCertificate"))
-	mux.Handle("PUT /pki/putnkey", Logger(http.HandlerFunc(handlers.PutNKey), "PutNKey"))
 
-	// Sprout enrollment (docs/design/imas-envoy-enrollment-design.md,
-	// imas-machine-manager-api-design.md §3.2) — also no auth required,
-	// for the same reason as the PKI bootstrap routes above: a sprout
-	// calling this has no JWT yet. Authorization here is the join token
-	// itself, validated inside handlers.Enroll/pki.Enroll.
-	mux.Handle("POST /v1/enroll", Logger(http.HandlerFunc(handlers.Enroll), "Enroll"))
+	if config.EnrollmentDisabled {
+		// Legacy NKey registration, only with enrolment off (a
+		// standalone install, "enrollment: false"): no auth, but the
+		// submission must prove possession of the NKey by signing a
+		// nonce from GET /pki/nkeynonce (security review 2026-10, L12).
+		mux.Handle("GET /pki/nkeynonce", Logger(http.HandlerFunc(handlers.GetNKeyNonce), "GetNKeyNonce"))
+		mux.Handle("PUT /pki/putnkey", Logger(http.HandlerFunc(handlers.PutNKey), "PutNKey"))
+	} else {
+		// Sprout enrollment (docs/design/imas-envoy-enrollment-design.md,
+		// imas-machine-manager-api-design.md §3.2), the default and the
+		// Helm chart's — also no auth required: a sprout calling this has
+		// no JWT yet. Authorization here is the join token itself,
+		// validated inside handlers.Enroll/pki.Enroll. PUT /pki/putnkey is
+		// not registered alongside it.
+		mux.Handle("POST /v1/enroll", Logger(http.HandlerFunc(handlers.Enroll), "Enroll"))
+	}
 
 	// Gateway JWT refresh for enrolled sprouts — no auth required here
 	// either: the sprout's gateway JWT may already have expired, so the

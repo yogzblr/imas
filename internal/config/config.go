@@ -196,6 +196,14 @@ var (
 	// client) and fall back to 0. Raising it needs the memory and file
 	// descriptors to match: see deploy/helm/nats/README.md.
 	BusMaxConnections int
+	// EnrollmentDisabled is farmer's "enrollment: false" (default true):
+	// a standalone install that registers sprouts through the legacy
+	// PUT /pki/putnkey (with proof of possession, internal/pki's
+	// nkeynonce.go) instead of POST /v1/enroll. With enrolment on, the
+	// Helm chart's setting and the default, PUT /pki/putnkey is not
+	// registered (security review 2026-10, L12); with it off, POST
+	// /v1/enroll is not. The zero value is enrolment on.
+	EnrollmentDisabled bool
 	// FarmerInterface ("farmerinterface") is, on farmer and farmerbus,
 	// the address their listeners bind: farmer's HTTPS API
 	// (cmd/farmer's StartAPIServer) and the bus's NATS and websocket
@@ -641,6 +649,8 @@ func LoadConfig(binary string) {
 			jety.SetDefault("gatewaytransitkeyname", "imas-gateway-jwt")
 			jety.SetDefault("boxkeygraceduration", 24*time.Hour)
 			jety.SetDefault("s3usessl", true)
+			jety.SetDefault("enrollment", true)
+			EnrollmentDisabled = !jety.GetBool("enrollment")
 			JobLogDir = jety.GetString("joblogdir")
 			JobLogTTL = jety.GetDuration("joblogttl")
 			PropsDir = jety.GetString("propsdir")

@@ -752,7 +752,7 @@ error, never a silent default.
 | `INTERNAL_AUTH_SECRET_CURRENT` / `_PREVIOUS` | — / empty | BFF shared secret(s); `_CURRENT` is required |
 | `SAASAPI_KEYCLOAK_JWKS_URL`, `SAASAPI_JWT_ISSUER`, `SAASAPI_JWT_AUDIENCE` | — | Keycloak realm for user JWTs |
 | `SAASAPI_NATS_URL`, `SAASAPI_NATS_CA_FILE` | — | farmerbus TLS URL (`:5406`) and the CA that signed it |
-| `SAASAPI_NATS_NKEY_SEED_FILE`, `SAASAPI_NATS_USER_JWT` | — | saasapi's SYS-Account NATS User; the seed only as a file path |
+| `SAASAPI_NATS_NKEY_SEED_FILE`, `SAASAPI_NATS_USER_JWT_FILE` (or `SAASAPI_NATS_USER_JWT`) | — | saasapi's SYS-Account NATS User; the seed only as a file path. The JWT expires (24h by default, re-published by the farmer chart's credential refresh CronJob): from `SAASAPI_NATS_USER_JWT_FILE`, which the chart sets, it is re-read at every reconnect and watched, and a new valid JWT makes saasapi reconnect with it; `SAASAPI_NATS_USER_JWT` is read once. saasapi refuses to start with an expired one |
 | `SAASAPI_BOX_PRIV_FILE` | — | path to saasapi's X25519 box private key (standard base64, `priv` of `<base>/saasapi-box` in OpenBao, written by farmer's control-plane keygen Job); every `internal.*` request is sealed with it. Required: without it saasapi doesn't start |
 | `SAASAPI_PLATFORM_BOX_PUB` | — | the platform public key saasapi pins (`platform_pub` of `<base>/controlplane-pub`); comma-separated for two across a platform key rotation. Required |
 | `SAASAPI_VALKEY_ADDRS` | empty | Valkey farmer writes heartbeats to; also shares the key rate limit across pods |

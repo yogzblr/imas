@@ -171,8 +171,10 @@ with which probe ran.
 
 Without `-servers` the harness generates a throwaway trust chain and starts
 a one-node bus as its own child process, built the way `cmd/farmerbus`
-builds a single node (`pki.ConfigureBusNats`, the same logger with NATS
-debug and trace on). The child is a separate process so that restarting it
+builds a single node (`pki.ConfigureBusNats`, the same logger, NATS
+debug and trace off as at farmerbus's default `IMAS_BUS_LOG_LEVEL`), but
+without farmerbus's single-node SYS gate: there is no account loader, and
+the harness pushes its accounts itself. The child is a separate process so that restarting it
 disconnects every sprout and so that varz reports the bus's memory and CPU,
 not the generator's. Its log is `bus.log` in `-workdir`.
 
@@ -187,10 +189,10 @@ The local bus does not have the clustered bus's routes or fence
 (`cmd/farmerbus/cluster.go`, `fence.go`); for those, run against deployed
 nodes.
 
-`-bus-trace=false` starts the local bus with NATS debug and trace off, to
-measure what they cost: `cmd/farmerbus` always turns them on, and although
-the internal logger drops them at the default level, nats-server still
-builds a trace line for every message before handing it over.
+`-bus-trace` starts the local bus with NATS debug and trace on, to
+measure what they cost. Off by default, as in `cmd/farmerbus`, which turns
+them on only with `IMAS_BUS_LOG_LEVEL=debug` or `trace`: with trace on,
+nats-server builds a trace line, payload included, for every message.
 
 ## Running against a deployed bus
 

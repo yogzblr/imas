@@ -210,7 +210,14 @@ openssl, go (to build `nk`), tar, sha256sum, and this repository checked out.
    `valkey_password` of `secret/platform/imas/nats-seeds`, which the
    chart's bootstrap Job generated; Valkey, farmer and saasapi wait for it.
    The value goes from OpenBao to a private temporary file and the Secret,
-   never to a command line or the log.
+   never to a command line or the log. The published JWT expires 24 hours
+   after the publish Job minted it (`credentialPublisher.userJWTTTL`); the
+   chart's refresh CronJob writes the next one to OpenBao at its first run
+   after only a third of that is left (16 to 20 hours after minting, with
+   the defaults). With no ESO here, a run that lasts longer re-runs this
+   script (safe to re-run) after that refresh run and before the old JWT
+   expires; saasapi re-reads the mounted JWT file and reconnects with it,
+   no restart needed. Run earlier, it only copies the old JWT again.
 9. Waits for OpenBao (Ready means unsealed), the PXC cluster, its pxc and
    haproxy StatefulSets, Valkey, RustFS, Keycloak and the edge; writes the
    outputs. It does not wait for farmer or saasapi, and installs the chart

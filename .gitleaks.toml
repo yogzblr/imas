@@ -42,4 +42,8 @@ regexes = [
   '''eyJhbGciOiJlZDI1NTE5LW5rZXkiLCJ0eXAiOiJKV1QifQ\.eyJzdWIiOiJVQUJDIiwibmFtZSI6ImFsaWNlIn0\.c2lnbmF0dXJlLWJ5dGVzLWhlcmU''',
   '''curl -H 'Authorization: Bearer abc\.def-ghi'''',
   '''-----BEGIN RSA PRIVATE KEY-----\\nMIIEow\\n-----END RSA PRIVATE KEY-----''',
+  # The signature domain of the legacy NKey registration's proof of
+  # possession (T6, internal/pki/nkeynonce.go): a fixed protocol label
+  # like enrollSigDomain, not a credential.
+  '''nkeySubmissionDomain\s*=\s*"imas-putnkey-v1"''',
 ]
