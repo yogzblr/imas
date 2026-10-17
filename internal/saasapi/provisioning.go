@@ -57,14 +57,19 @@ func dispatchDeprovisioning(_ context.Context, job *ProvisioningJob) {
 }
 
 func publishProvisioningJob(job *ProvisioningJob, subject string, payload any) {
-	nc := bus
+	publishProvisioningJobOn(bus, db, job, subject, payload)
+}
+
+// publishProvisioningJobOn is publishProvisioningJob on nc, counting the
+// attempt in d: the outbox sweeper's own connection and database.
+func publishProvisioningJobOn(nc *nats.Conn, d *gorm.DB, job *ProvisioningJob, subject string, payload any) {
 	if nc == nil {
 		log.Errorf("saasapi: not connected to the NATS bus; job %s (tenant %s, %s) left pending", job.ID, job.TenantID, job.Type)
 		return
 	}
 	// The attempt and its time are recorded before the publish, so the
 	// sweeper's backoff counts from no later than the request.
-	if err := db.Model(&ProvisioningJob{}).Where("id = ? AND tenant_id = ?", job.ID, job.TenantID).
+	if err := d.Model(&ProvisioningJob{}).Where("id = ? AND tenant_id = ?", job.ID, job.TenantID).
 		UpdateColumns(map[string]any{
 			"attempts":           gorm.Expr("attempts + 1"),
 			"last_dispatched_at": dbTime(outboxNow()),
@@ -95,8 +100,11 @@ func sendProvisioningJob(nc *nats.Conn, job *ProvisioningJob, subject string, pa
 // provisioningRequest is job's farmer request: its subject and payload.
 // tenantName is only used for a provision job.
 func provisioningRequest(job *ProvisioningJob, tenantName string) (string, any) {
-	if job.Type == ProvisioningJobDeprovision {
+	switch job.Type {
+	case ProvisioningJobDeprovision:
 		return controlplane.SubjectTenantDeprovision, controlplane.TenantDeprovisionRequest{JobID: job.ID, TenantID: job.TenantID}
+	case ProvisioningJobPurge:
+		return controlplane.SubjectTenantPurge, controlplane.TenantPurgeRequest{JobID: job.ID, TenantID: job.TenantID, Trigger: job.PurgeTrigger}
 	}
 	return controlplane.SubjectTenantProvision, controlplane.TenantProvisionRequest{JobID: job.ID, TenantID: job.TenantID, Name: tenantName}
 }
@@ -115,8 +123,10 @@ const provisioningNoResultMessage = "no result was received for this request aft
 // sides (checked for CL.3, see docs/design/imas-internal-api-account.md):
 // farmer's ProvisionTenant re-confirms an existing Account and re-pushes
 // it, DeprovisionTenant finds the tenant already deleted and reports
-// offboarded, and applyProvisioningResult applies the first result of a
-// job and ignores the rest. A late copy of a provision request still
+// offboarded, a purge deletes only what is left (and a copy arriving while
+// another farmer replica still runs the purge is dropped unanswered), and
+// applyProvisioningResult applies the first result of a job and ignores
+// the rest. A late copy of a provision request still
 // running on farmer when the tenant is offboarded is handled by farmer
 // (internal/pki re-checks the tenant after its push and locks it out again;
 // a tenant deprovisioned before any row existed gets a deleted tombstone),
@@ -184,7 +194,8 @@ func (sw *sweeper) republishProvisioningJob(job *ProvisioningJob, now time.Time)
 // and waited out its last backoff with no result, as a farmer failure
 // would (applyProvisioningResult): a provision job's tenant moves from
 // pending to failed, so it can be deleted; a deprovision job's tenant
-// stays offboarding, and GET .../status shows the job's error. The update
+// stays offboarding and a purge job's offboarded, and GET .../status
+// shows the job's error. The update
 // is conditional on the job being unchanged and unleased since it was
 // read. A result that arrives afterwards is ignored like any duplicate.
 func (sw *sweeper) failStaleProvisioningJob(job *ProvisioningJob, now time.Time) {
@@ -214,9 +225,10 @@ func (sw *sweeper) failStaleProvisioningJob(job *ProvisioningJob, now time.Time)
 }
 
 // StartProvisioningResultListener queue-subscribes nc to farmer's
-// internal.tenant.provisioned.* and internal.tenant.deprovisioned.* result
-// subjects and applies each result to the saas schema — the other half of
-// design doc §4's async pattern. Call once at startup, after ConnectBus.
+// internal.tenant.provisioned.*, internal.tenant.deprovisioned.* and
+// internal.tenant.purged.* result subjects and applies each result to the
+// saas schema — the other half of design doc §4's async pattern. Call
+// once at startup, after ConnectBus.
 func StartProvisioningResultListener(nc *nats.Conn) error {
 	subs := []struct {
 		wildcard, prefix string
@@ -224,6 +236,7 @@ func StartProvisioningResultListener(nc *nats.Conn) error {
 	}{
 		{controlplane.SubjectTenantProvisionedWildcard, controlplane.SubjectTenantProvisionedPrefix, ProvisioningJobProvision},
 		{controlplane.SubjectTenantDeprovisionedWildcard, controlplane.SubjectTenantDeprovisionedPrefix, ProvisioningJobDeprovision},
+		{controlplane.SubjectTenantPurgedWildcard, controlplane.SubjectTenantPurgedPrefix, ProvisioningJobPurge},
 	}
 	for _, s := range subs {
 		prefix, jobType := s.prefix, s.jobType
@@ -282,8 +295,15 @@ func publicJobError(jobID string, code controlplane.ErrorCode) string {
 //   - provision failed:      tenant pending -> failed (job.last_error set
 //     to a fixed public message, see publicJobError)
 //   - deprovision succeeded: tenant offboarding -> offboarded (with
-//     job.warning set if farmer had nothing to tear down)
+//     job.warning set if farmer had nothing to tear down), and
+//     offboarded_at set: the retention delay starts
 //   - deprovision failed:    tenant stays offboarding; GetTenantStatus
+//     surfaces the failed job's last_error
+//   - purge succeeded:       the tenant's saas-schema rows are deleted
+//     first (purgeSaasRows, outside the transaction: a failure leaves the
+//     job pending), then tenant offboarded -> purged with its name and
+//     plan cleared
+//   - purge failed:          tenant stays offboarded; GetTenantStatus
 //     surfaces the failed job's last_error
 //
 // Both updates are conditional on the row's current status, so a duplicate
@@ -297,10 +317,17 @@ func applyProvisioningResult(jobType ProvisioningJobType, res controlplane.Tenan
 	case res.Status == controlplane.StatusFailed:
 		succeeded = false
 	case jobType == ProvisioningJobProvision && res.Status == controlplane.StatusActive,
-		jobType == ProvisioningJobDeprovision && res.Status == controlplane.StatusOffboarded:
+		jobType == ProvisioningJobDeprovision && res.Status == controlplane.StatusOffboarded,
+		jobType == ProvisioningJobPurge && res.Status == controlplane.StatusPurged:
 		succeeded = true
 	default:
 		return fmt.Errorf("%w: status %q for a %s job", errUnexpectedResult, res.Status, jobType)
+	}
+
+	if jobType == ProvisioningJobPurge && succeeded {
+		if err := purgeSaasRowsForResult(res); err != nil {
+			return err
+		}
 	}
 
 	return db.Transaction(func(tx *gorm.DB) error {
@@ -333,18 +360,30 @@ func applyProvisioningResult(jobType ProvisioningJobType, res controlplane.Tenan
 		}
 
 		var from, to TenantStatus
+		update := map[string]any{}
 		switch {
 		case jobType == ProvisioningJobProvision && succeeded:
 			from, to = TenantStatusPending, TenantStatusActive
 		case jobType == ProvisioningJobProvision:
 			from, to = TenantStatusPending, TenantStatusFailed
-		case succeeded:
+		case jobType == ProvisioningJobDeprovision && succeeded:
 			from, to = TenantStatusOffboarding, TenantStatusOffboarded
+			update["offboarded_at"] = dbTime(outboxNow())
+		case jobType == ProvisioningJobPurge && succeeded:
+			// The tombstone keeps the ID and the status, nothing the
+			// tenant chose.
+			from, to = TenantStatusOffboarded, TenantStatusPurged
+			update["name"], update["plan_id"] = "", ""
+			log.Infof("saasapi: tenant %s purged by farmer (job %s): %v", job.TenantID, job.ID, purgeCounts(res.Counts))
+		case jobType == ProvisioningJobPurge:
+			log.Warnf("saasapi: purging tenant %s failed (job %s): %s at step %q; the tenant stays offboarded", job.TenantID, job.ID, res.ErrorCode, safeStep(res.FailedStep))
+			return nil
 		default:
 			log.Warnf("saasapi: deprovisioning tenant %s failed (job %s): %s", job.TenantID, job.ID, res.ErrorCode)
 			return nil
 		}
-		if err := tx.Model(&Tenant{}).Where("id = ? AND status = ?", job.TenantID, from).Update("status", to).Error; err != nil {
+		update["status"] = to
+		if err := tx.Model(&Tenant{}).Where("id = ? AND status = ?", job.TenantID, from).Updates(update).Error; err != nil {
 			return err
 		}
 		log.Infof("saasapi: job %s (%s) -> %s; tenant %s -> %s", job.ID, jobType, jobUpdate["status"], job.TenantID, to)

@@ -4,6 +4,13 @@ package saasapi
 //
 //	POST /v1/operator/fleet-releases                   register a release
 //	POST /v1/operator/fleet-releases/{version}/revoke  withdraw a version
+//	POST /v1/operator/tenants/{tenant_id}/purge        erase an offboarded
+//	                                                   tenant's data now (S6,
+//	                                                   tenant_purge.go)
+//
+// Every operator route is rate limited per route (operatorPlane.limiter),
+// after the token check, so a caller without the token can't spend the
+// operator's budget.
 //
 // Not tenant-facing. These routes are served only by the operator
 // listener (NewOperatorServer, SAASAPI_OPERATOR_LISTEN_ADDR), never by
@@ -47,6 +54,7 @@ import (
 	"unicode"
 
 	"golang.org/x/mod/semver"
+	"golang.org/x/time/rate"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
@@ -82,7 +90,18 @@ type operatorPlane struct {
 	// tokens are the operator bearer tokens accepted: the current one and,
 	// during a rotation, the previous one.
 	tokens [][]byte
+	// limiter rate-limits each route; router installs a fresh one
+	// (operatorRouteRate, operatorRouteBurst) when it is nil.
+	limiter callerLimiter
 }
+
+// The operator routes' rate limit, per route and per saasapi pod: one
+// request a second sustained, bursts of operatorRouteBurst. The operator
+// plane's callers are a Helm hook Job and an operator at a terminal.
+const (
+	operatorRouteRate  rate.Limit = 1
+	operatorRouteBurst            = 10
+)
 
 // NewOperatorServer builds the operator-plane HTTPS server from cfg
 // (Config's SAASAPI_OPERATOR_* settings): it reads the operator tokens
@@ -150,14 +169,30 @@ func (p *operatorPlane) handler() http.Handler {
 // tenant routes is reachable on the operator listener, and none of these
 // is on the tenant API.
 func (p *operatorPlane) router() *http.ServeMux {
+	if p.limiter == nil {
+		p.limiter = NewPerCallerLimiter(operatorRouteRate, operatorRouteBurst)
+	}
 	mux := http.NewServeMux()
 	p.route(mux, "POST /v1/operator/fleet-releases", p.registerFleetRelease, "RegisterFleetRelease")
 	p.route(mux, "POST /v1/operator/fleet-releases/{version}/revoke", p.revokeFleetRelease, "RevokeFleetRelease")
+	p.route(mux, "POST /v1/operator/tenants/{tenant_id}/purge", p.purgeTenant, "PurgeTenant")
 	return mux
 }
 
 func (p *operatorPlane) route(mux *http.ServeMux, pattern string, h http.HandlerFunc, name string) {
-	mux.Handle(pattern, Logger(p.auth(h, name), name))
+	mux.Handle(pattern, Logger(p.auth(p.rateLimit(h, name), name), name))
+}
+
+// rateLimit admits a request only while route name's bucket has a token:
+// 429 rate_limited otherwise.
+func (p *operatorPlane) rateLimit(inner http.Handler, name string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !p.limiter.allow(r.Context(), name) {
+			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests, slow down and retry later")
+			return
+		}
+		inner.ServeHTTP(w, r)
+	})
 }
 
 // auth admits a request only with "Authorization: Bearer <t>" where t is

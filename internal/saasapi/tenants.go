@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -21,6 +22,12 @@ type tenantStatusResponse struct {
 	// Warning is set when the most recent job succeeded with a warning —
 	// e.g. offboarding a tenant that was never provisioned on farmer.
 	Warning string `json:"warning,omitempty"`
+	// PurgeAfter is when an offboarded tenant's data is erased
+	// automatically (SAASAPI_TENANT_PURGE_AFTER after offboarding), in
+	// RFC 3339; omitted for any other status and with automatic purge off.
+	// A purge that failed is retried at most daily, so the time can pass
+	// with the tenant still offboarded; last_error says why.
+	PurgeAfter *time.Time `json:"purge_after,omitempty"`
 }
 
 // CreateTenant handles POST /tenants (design doc §1.1). It's async: the
@@ -97,6 +104,10 @@ func PatchTenant(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if tenant.Status == TenantStatusPurged {
+		writeError(w, http.StatusConflict, "tenant_purged", "the tenant's data has been erased; its record cannot be changed")
+		return
+	}
 
 	var req patchTenantRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -163,8 +174,8 @@ func DeleteTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch tenant.Status {
-	case TenantStatusOffboarding, TenantStatusOffboarded:
-		writeError(w, http.StatusConflict, "offboarding_in_progress", "tenant is already offboarding or offboarded")
+	case TenantStatusOffboarding, TenantStatusOffboarded, TenantStatusPurged:
+		writeError(w, http.StatusConflict, "offboarding_in_progress", "tenant is already offboarding, offboarded or purged")
 		return
 	case TenantStatusPending:
 		writeError(w, http.StatusConflict, "provisioning_in_progress", "tenant provisioning is still in progress; retry once it has completed")
@@ -214,21 +225,24 @@ func DeleteTenant(w http.ResponseWriter, r *http.Request) {
 
 // GetTenantStatus handles GET /tenants/{tenant_id}/status (design doc
 // §1.1) — a lightweight status-only poll, including the last provisioning
-// error if the most recent outbox job for this tenant failed, or its
-// warning if it succeeded with one (both fixed, caller-safe messages —
-// see provisioning.go's publicJobError and controlplane.PublicWarningMessage).
+// error if the most recent outbox job for this tenant failed (a failed
+// purge of an offboarded tenant included), or its warning if it succeeded
+// with one (both fixed, caller-safe messages — see provisioning.go's
+// publicJobError and controlplane.PublicWarningMessage), and, for an
+// offboarded tenant, when its data is purged (purge_after).
 func GetTenantStatus(w http.ResponseWriter, r *http.Request) {
 	tenant, ok := lookupTenant(w, r)
 	if !ok {
 		return
 	}
 
-	resp := tenantStatusResponse{TenantID: tenant.ID, Status: tenant.Status}
+	resp := tenantStatusResponse{TenantID: tenant.ID, Status: tenant.Status, PurgeAfter: purgeAfter(tenant, tenantPurgeSettings)}
 	var job ProvisioningJob
 	if err := db.Where("tenant_id = ?", tenant.ID).Order("created_at DESC").First(&job).Error; err == nil {
 		switch {
 		case job.Status == ProvisioningJobFailed &&
-			(tenant.Status == TenantStatusFailed || tenant.Status == TenantStatusOffboarding):
+			(tenant.Status == TenantStatusFailed || tenant.Status == TenantStatusOffboarding ||
+				(tenant.Status == TenantStatusOffboarded && job.Type == ProvisioningJobPurge)):
 			resp.LastError = job.LastError
 		case job.Status == ProvisioningJobSucceeded:
 			resp.Warning = job.Warning

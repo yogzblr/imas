@@ -187,9 +187,12 @@ func enrollmentKeyState(k EnrollmentKey, now time.Time) string {
 	}
 }
 
+// tenantExists reports whether tenantID is a tenant this route may read or
+// write data of, answering 404 tenant_not_found if not. A purged tenant
+// counts as gone (S6): its data is erased, and no route may store more.
 func tenantExists(w http.ResponseWriter, tenantID string) bool {
 	var count int64
-	if err := db.Model(&Tenant{}).Where("id = ?", tenantID).Count(&count).Error; err != nil {
+	if err := db.Model(&Tenant{}).Where("id = ? AND status <> ?", tenantID, TenantStatusPurged).Count(&count).Error; err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to look up tenant")
 		return false
 	}

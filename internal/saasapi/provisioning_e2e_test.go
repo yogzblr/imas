@@ -71,6 +71,7 @@ type e2eEnv struct {
 	farmerSYS  *nats.Conn
 	farmerSeed []byte
 	transit    *pkitest.Transit
+	farmerDB   *gorm.DB
 }
 
 func newE2EEnv(t *testing.T) *e2eEnv {
@@ -100,6 +101,7 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 	}
 	pki.SetDB(pkiDB)
 	t.Cleanup(func() { pki.SetDB(nil) })
+	env.farmerDB = pkiDB
 
 	// Farmer's TLS material and NKey — the config values
 	// pki.ConfigureNats/ProvisionTenant/ConnectSystemAccount read. Farmer

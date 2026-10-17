@@ -20,6 +20,9 @@
 //   - self_update rollouts whose process died: resumed, wave by wave,
 //     after the batch's lease has lapsed, only while fleet update dispatch
 //     is enabled. See sweepRollouts and rollout_resume.go.
+//   - tenants offboarded for SAASAPI_TENANT_PURGE_AFTER: a purge job is
+//     started (S6), at most one pending per tenant and a new one at most
+//     daily after a failure. See sweepTenantPurges (tenant_purge.go).
 //
 // Every item and job is still claimed by the same conditional UPDATE the
 // original dispatch uses, so a sweeper and a live dispatcher, or two
@@ -223,6 +226,7 @@ func (sw *sweeper) sweep() {
 		return
 	}
 	sw.sweepProvisioningJobs()
+	sw.sweepTenantPurges()
 	sw.sweepActionBatches()
 	sw.sweepRollouts()
 }

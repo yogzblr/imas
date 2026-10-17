@@ -135,6 +135,17 @@ import (
 //     soon a dead process's batch or rollout is taken over; default 2m,
 //     15s..1h.
 //
+// Erasing an offboarded tenant's data (tenant_purge.go, S6). The outbox
+// sweeper starts a purge job for a tenant offboarded for at least the
+// delay; an operator can start one sooner (POST
+// /v1/operator/tenants/{tenant_id}/purge). An invalid or out-of-range
+// value is a startup error:
+//
+//   - SAASAPI_TENANT_PURGE_ENABLED: default true. Off, the sweeper purges
+//     nothing; the operator route still works.
+//   - SAASAPI_TENANT_PURGE_AFTER: how long a tenant stays offboarded
+//     before it is purged, default 720h (30 days), 1h..8760h.
+//
 // Dispatch concurrency (dispatch_limits.go; security review M5). Per
 // process; an invalid or out-of-range value is a startup error:
 //
@@ -252,6 +263,10 @@ type Config struct {
 	// dispatcher takes, passed to SetOutboxSweeperSettings before NewRouter.
 	OutboxSweeper OutboxSweeperSettings
 
+	// TenantPurge configures the automatic purge of offboarded tenants,
+	// passed to SetTenantPurgeSettings before NewRouter.
+	TenantPurge TenantPurgeSettings
+
 	// OperatorListenAddr enables the operator plane (NewOperatorServer)
 	// on this address. Empty means it is off.
 	OperatorListenAddr        string
@@ -274,7 +289,8 @@ const valkeyEnvPrefix = "SAASAPI"
 // variables, applying sane defaults where possible. It returns an error
 // only for a value that is set but invalid (the Valkey password and TLS
 // settings, the enrollment-key rate-limit settings, the fleet update
-// dispatch flag and clock-skew margin, the outbox sweeper's settings, the recipe upload settings, and the operator
+// dispatch flag and clock-skew margin, the outbox sweeper's settings, the
+// tenant purge settings, the recipe upload settings, and the operator
 // plane's settings).
 func LoadConfig() (Config, error) {
 	cfg := Config{
@@ -307,6 +323,8 @@ func LoadConfig() (Config, error) {
 		FleetUpdateClockSkew: defaultRolloutClockSkew,
 
 		OutboxSweeper: DefaultOutboxSweeperSettings(),
+
+		TenantPurge: DefaultTenantPurgeSettings(),
 
 		OperatorListenAddr:        os.Getenv("SAASAPI_OPERATOR_LISTEN_ADDR"),
 		OperatorTLSCertFile:       os.Getenv("SAASAPI_OPERATOR_TLS_CERT_FILE"),
@@ -355,6 +373,9 @@ func LoadConfig() (Config, error) {
 		cfg.FleetUpdateClockSkew = d
 	}
 	if err := loadOutboxSweeperSettings(&cfg.OutboxSweeper); err != nil {
+		return Config{}, err
+	}
+	if err := loadTenantPurgeSettings(&cfg.TenantPurge); err != nil {
 		return Config{}, err
 	}
 	if err := loadRecipeSettings(&cfg.Recipes); err != nil {

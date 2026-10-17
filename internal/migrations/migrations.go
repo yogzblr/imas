@@ -74,6 +74,12 @@ var saasFS embed.FS
 // saas 00009 (S3) left the saas floor alone too: it only adds an index
 // (idx_asset_action_items_tenant_status), which no older saasapi names and
 // which changes no column it reads or writes.
+//
+// saas 00010 (S6) leaves it alone as well: it adds nullable or defaulted
+// columns (tenants.offboarded_at, tenants.purge_claimed_at,
+// provisioning_jobs.purge_trigger), which an older saasapi neither reads
+// nor names in its inserts, and backfills offboarded_at, which it never
+// reads.
 const (
 	farmerCompatibleFrom = 2
 	saasCompatibleFrom   = 1

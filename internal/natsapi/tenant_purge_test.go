@@ -500,7 +500,9 @@ func stubPurge(t *testing.T) *atomic.Int32 {
 		objects:   count,
 		kv:        count,
 		transit:   count,
-		runLeased: func(ctx context.Context, _ string, fn func(context.Context) error) (bool, error) { return true, fn(ctx) },
+		runLeased: func(ctx context.Context, _ string, fn func(context.Context) error) (bool, error) {
+			return true, fn(ctx)
+		},
 	}
 	return &calls
 }
