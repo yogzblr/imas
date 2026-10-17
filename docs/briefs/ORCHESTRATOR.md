@@ -58,6 +58,7 @@ A unit may start only when every unit in "Needs" is merged to main.
 | S3 | `S-hardening.md` S3 | none |
 | S4 | `S-hardening.md` S4 | S3 |
 | S5 | `S5-valkey-hardening.md` (whole file) | S4 |
+| S6 | `S6-tenant-erasure.md` (whole file) | S5 |
 
 First wave of the original build (no needs): A1, B1, C1, D1, D2. Units A to D are all merged (C2 last, as PR 229; its leftovers are E6); the follow-up units E1 to E5 and Z are launched in the same way, E6 first by rule 10 (E3 waits for it). Why the order: P22 first (design D13);
 A2 and the P21 slice 1 chart work both edit the farmer bootstrap Job and policies, so
@@ -218,3 +219,4 @@ Paste this into a Claude Code session started in the yogzblr/imas repo on main.
 | S3 | P3 3.4: action backlog defaults and a refusal when full | S-hardening.md | S3 |
 | S4 | P3 3.4: per-cook render budget (B4) | S-hardening.md | S4 |
 | S5 | P3 3.5: Valkey password, TLS in clients, no eviction | S5-valkey-hardening.md | S5 |
+| S6 | P3 3.6: erase a tenant's data after offboarding | S6-tenant-erasure.md | S6 |
