@@ -517,6 +517,58 @@ func TestRecipeRenderLimits(t *testing.T) {
 	}
 }
 
+// TestRecipeIncludeCap: an upload whose own include list is longer than
+// farmer's include cap (IMAS_RECIPE_MAX_INCLUDES, 64 by default) is
+// refused and stores nothing; at the cap it is accepted. The includes are
+// not resolved: none of them exists.
+func TestRecipeIncludeCap(t *testing.T) {
+	body := func(n int) string {
+		var b strings.Builder
+		b.WriteString(recipeBody("s"))
+		b.WriteString("include:\n")
+		for i := range n {
+			fmt.Fprintf(&b, "  - later.uploaded%d\n", i)
+		}
+		return b.String()
+	}
+	e := newRecipeEnv(t, nil)
+	w := e.put(e.tA, "over", body(65), "")
+	wantStatus(t, w, http.StatusUnprocessableEntity, "recipe_too_many_includes")
+	resp := decode[errorResponse](t, w)
+	if resp.Message != "the recipe includes more than 64 recipes" || resp.Details["limit"] != float64(64) {
+		t.Errorf("refusal %+v", resp)
+	}
+	for _, k := range e.srv.Keys() {
+		t.Errorf("a refused upload stored %s", k)
+	}
+	wantStatus(t, e.put(e.tA, "at", body(64), ""), http.StatusCreated, "")
+
+	// The cap in force is the one used.
+	prev := cook.CurrentRenderLimits()
+	if err := cook.SetRenderLimits(cook.RenderLimits{MaxIncludes: 3}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cook.SetRenderLimits(prev) })
+	w = e.put(e.tA, "four", body(4), "")
+	wantStatus(t, w, http.StatusUnprocessableEntity, "recipe_too_many_includes")
+	if m := decode[errorResponse](t, w).Message; m != "the recipe includes more than 3 recipes" {
+		t.Errorf("message %q", m)
+	}
+}
+
+// classifyRecipeError maps a per-cook budget error like the per-render
+// limits, naming the counter and its limit.
+func TestClassifyRecipeErrorCookBudget(t *testing.T) {
+	for _, counter := range []string{cook.CookBudgetTime, cook.CookBudgetBytes, cook.CookBudgetIterations} {
+		be := &cook.CookBudgetError{Counter: counter, Limit: "10"}
+		p := classifyRecipeError(fmt.Errorf("render: %w", be))
+		if p.status != http.StatusUnprocessableEntity || p.code != "recipe_template_limit" ||
+			p.details["limit"] != "cook_render_"+counter || !strings.HasSuffix(p.message, be.Exceeded()) {
+			t.Errorf("%s: %+v", counter, p)
+		}
+	}
+}
+
 func TestRecipeQuota(t *testing.T) {
 	e := newRecipeEnv(t, func(s *RecipeSettings) { s.MaxCount = 2 })
 	wantStatus(t, e.put(e.tA, "a", recipeBody("a"), ""), http.StatusCreated, "")

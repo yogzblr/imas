@@ -38,7 +38,7 @@ func TestPropsInFileBasedRecipe(t *testing.T) {
 	writeRecipe(t, recipeFile, recipeContent)
 
 	// Collect includes (which also renders templates).
-	includes, err := collectAllIncludes(context.Background(), testPropsTenantID, "file-sprout", recipeDir, "deploy")
+	includes, err := collectAllIncludes(context.Background(), newCookBudget(), testPropsTenantID, "file-sprout", recipeDir, "deploy")
 	if err != nil {
 		t.Fatalf("collectAllIncludes: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestPropsInFileBasedRecipe(t *testing.T) {
 	// Read and render the recipe.
 	f := mustReadRecipe(t, recipeFile)
 
-	rendered, err := renderRecipeTemplate(testPropsTenantID, "file-sprout", recipeFile, f)
+	rendered, err := renderRecipeTemplate(newCookBudget(), testPropsTenantID, "file-sprout", recipeFile, f)
 	if err != nil {
 		t.Fatalf("renderRecipeTemplate: %v", err)
 	}
@@ -116,7 +116,7 @@ steps:
 	mainFile := filepath.Join(recipeDir, "main.imas")
 	writeRecipe(t, mainFile, mainContent)
 
-	includes, err := collectAllIncludes(context.Background(), testPropsTenantID, "include-sprout", recipeDir, "main")
+	includes, err := collectAllIncludes(context.Background(), newCookBudget(), testPropsTenantID, "include-sprout", recipeDir, "main")
 	if err != nil {
 		t.Fatalf("collectAllIncludes: %v", err)
 	}
@@ -128,7 +128,7 @@ steps:
 
 	// Render main recipe and verify props resolved.
 	f := mustReadRecipe(t, mainFile)
-	rendered, err := renderRecipeTemplate(testPropsTenantID, "include-sprout", mainFile, f)
+	rendered, err := renderRecipeTemplate(newCookBudget(), testPropsTenantID, "include-sprout", mainFile, f)
 	if err != nil {
 		t.Fatalf("renderRecipeTemplate: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestStaticPropsInFileBasedRecipe(t *testing.T) {
 	writeRecipe(t, recipeFile, recipeContent)
 
 	f := mustReadRecipe(t, recipeFile)
-	rendered, err := renderRecipeTemplate(testPropsTenantID, "static-file-sprout", recipeFile, f)
+	rendered, err := renderRecipeTemplate(newCookBudget(), testPropsTenantID, "static-file-sprout", recipeFile, f)
 	if err != nil {
 		t.Fatalf("renderRecipeTemplate: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestPropsWithHostnameAndSproutIDInFile(t *testing.T) {
 	writeRecipe(t, recipeFile, recipeContent)
 
 	f := mustReadRecipe(t, recipeFile)
-	rendered, err := renderRecipeTemplate(testPropsTenantID, "banner-sprout-42", recipeFile, f)
+	rendered, err := renderRecipeTemplate(newCookBudget(), testPropsTenantID, "banner-sprout-42", recipeFile, f)
 	if err != nil {
 		t.Fatalf("renderRecipeTemplate: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestPropsWithConditionalInclude(t *testing.T) {
 
 	// Without the prop — only 1 step.
 	f := mustReadRecipe(t, recipeFile)
-	rendered, err := renderRecipeTemplate(testPropsTenantID, "cond-sprout-off", recipeFile, f)
+	rendered, err := renderRecipeTemplate(newCookBudget(), testPropsTenantID, "cond-sprout-off", recipeFile, f)
 	if err != nil {
 		t.Fatalf("render (off): %v", err)
 	}
@@ -256,7 +256,7 @@ func TestPropsWithConditionalInclude(t *testing.T) {
 
 	// With the prop — 2 steps.
 	props.SetProp("cond-sprout-on", "enable_monitoring", "true")
-	rendered, err = renderRecipeTemplate(testPropsTenantID, "cond-sprout-on", recipeFile, f)
+	rendered, err = renderRecipeTemplate(newCookBudget(), testPropsTenantID, "cond-sprout-on", recipeFile, f)
 	if err != nil {
 		t.Fatalf("render (on): %v", err)
 	}
@@ -284,7 +284,7 @@ func TestPropsWithDefaultFallbackInFile(t *testing.T) {
 	writeRecipe(t, recipeFile, recipeContent)
 
 	f := mustReadRecipe(t, recipeFile)
-	rendered, err := renderRecipeTemplate(testPropsTenantID, "default-sprout", recipeFile, f)
+	rendered, err := renderRecipeTemplate(newCookBudget(), testPropsTenantID, "default-sprout", recipeFile, f)
 	if err != nil {
 		t.Fatalf("renderRecipeTemplate: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestMultiSproutSameRecipeFile(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.sproutID, func(t *testing.T) {
-			rendered, err := renderRecipeTemplate(testPropsTenantID, tc.sproutID, recipeFile, f)
+			rendered, err := renderRecipeTemplate(newCookBudget(), testPropsTenantID, tc.sproutID, recipeFile, f)
 			if err != nil {
 				t.Fatalf("render: %v", err)
 			}

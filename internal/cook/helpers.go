@@ -121,10 +121,11 @@ func recipeToStep(id string, recipe map[string]interface{}) (Step, error) {
 	return Step{}, errors.New("error: recipe must have exactly one key")
 }
 
-// maxRecipeIncludes caps the distinct recipes one cook may include.
-const maxRecipeIncludes = 256
-
-func collectAllIncludes(ctx context.Context, tenantID, sproutID, basepath string, recipeID RecipeName) ([]RecipeName, error) {
+// collectAllIncludes returns recipeID and every recipe it includes,
+// transitively, each once, rendering each under budget, the cook's. More
+// than maxRecipeIncludes distinct includes (recipeID not counted) is
+// ErrTooManyIncludes.
+func collectAllIncludes(ctx context.Context, budget *cookBudget, tenantID, sproutID, basepath string, recipeID RecipeName) ([]RecipeName, error) {
 	// pass in an ID to a Recipe
 	recipeFilePath, err := ResolveRecipeFilePath(ctx, tenantID, basepath, recipeID)
 	if err != nil {
@@ -135,7 +136,7 @@ func collectAllIncludes(ctx context.Context, tenantID, sproutID, basepath string
 		return []RecipeName{}, err
 	}
 	// parse file imports
-	starterIncludes, err := extractIncludes(ctx, tenantID, sproutID, basepath, string(recipeID), f)
+	starterIncludes, err := extractIncludes(ctx, budget, tenantID, sproutID, basepath, string(recipeID), f)
 	if err != nil {
 		return []RecipeName{}, err
 	}
@@ -144,7 +145,10 @@ func collectAllIncludes(ctx context.Context, tenantID, sproutID, basepath string
 	for _, si := range starterIncludes {
 		includeSet[si] = false
 	}
-	includeSet, err = collectIncludesRecurse(ctx, tenantID, sproutID, basepath, includeSet)
+	// recipeID's includes are known already: rendering it again here
+	// would charge the cook's budget twice in this phase.
+	includeSet[recipeID] = true
+	includeSet, err = collectIncludesRecurse(ctx, budget, tenantID, sproutID, basepath, recipeID, includeSet)
 	if err != nil {
 		return []RecipeName{}, err
 	}
@@ -404,8 +408,8 @@ func getBasePath() string {
 	return config.RecipeDir
 }
 
-func extractIncludes(ctx context.Context, tenantID, sproutID, basepath, recipePath string, file []byte) ([]RecipeName, error) {
-	recipeBytes, err := renderRecipeTemplate(tenantID, sproutID, recipePath, file)
+func extractIncludes(ctx context.Context, budget *cookBudget, tenantID, sproutID, basepath, recipePath string, file []byte) ([]RecipeName, error) {
+	recipeBytes, err := renderRecipeTemplate(budget, tenantID, sproutID, recipePath, file)
 	if err != nil {
 		return []RecipeName{}, err
 	}
@@ -438,9 +442,10 @@ func extractIncludes(ctx context.Context, tenantID, sproutID, basepath, recipePa
 // farmercook.go: the template runs with placeholders standing in for those
 // values, the YAML is parsed, and substituteTemplateValues replaces them
 // in the parsed scalars and encodes the result again. A template that
-// printed no such value is returned exactly as it rendered.
-func renderRecipeTemplate(tenantID, sproutID, recipeName string, file []byte) ([]byte, error) {
-	out, err := executeRecipeTemplate(newRenderState(tenantID, sproutID), recipeName, file)
+// printed no such value is returned exactly as it rendered. The render is
+// charged to budget, the cook's (cookBudget).
+func renderRecipeTemplate(budget *cookBudget, tenantID, sproutID, recipeName string, file []byte) ([]byte, error) {
+	out, err := executeRecipeTemplate(newRenderState(budget, tenantID, sproutID), recipeName, file)
 	if err != nil {
 		return []byte{}, err
 	}
@@ -569,7 +574,10 @@ func unmarshalRecipe(recipe []byte) (map[string]interface{}, error) {
 	return rmap, err
 }
 
-func collectIncludesRecurse(ctx context.Context, tenantID, sproutID, basepath string, starter map[RecipeName]bool) (map[RecipeName]bool, error) {
+// collectIncludesRecurse renders every recipe of starter not yet done,
+// adding the recipes each includes, until all are done. top is the recipe
+// the cook names, which the include cap does not count.
+func collectIncludesRecurse(ctx context.Context, budget *cookBudget, tenantID, sproutID, basepath string, top RecipeName, starter map[RecipeName]bool) (map[RecipeName]bool, error) {
 	allIncluded := false
 	for !allIncluded {
 		allIncluded = true
@@ -577,8 +585,12 @@ func collectIncludesRecurse(ctx context.Context, tenantID, sproutID, basepath st
 			if !done {
 				allIncluded = false
 				starter[inc] = true
-				if len(starter) > maxRecipeIncludes {
-					return starter, fmt.Errorf("%w: more than %d recipes included", ErrInvalidFormat, maxRecipeIncludes)
+				included := len(starter)
+				if _, ok := starter[top]; ok {
+					included--
+				}
+				if included > maxRecipeIncludes {
+					return starter, tooManyIncludes()
 				}
 				recipeFilePath, err := ResolveRecipeFilePath(ctx, tenantID, basepath, inc)
 				if err != nil {
@@ -589,7 +601,7 @@ func collectIncludesRecurse(ctx context.Context, tenantID, sproutID, basepath st
 					return starter, err
 				}
 				// parse file imports
-				eIncludes, err := extractIncludes(ctx, tenantID, sproutID, basepath, string(inc), f)
+				eIncludes, err := extractIncludes(ctx, budget, tenantID, sproutID, basepath, string(inc), f)
 				if err != nil {
 					return starter, err
 				}
@@ -599,7 +611,7 @@ func collectIncludesRecurse(ctx context.Context, tenantID, sproutID, basepath st
 					}
 				}
 
-				newIncludes, err := collectIncludesRecurse(ctx, tenantID, sproutID, basepath, starter)
+				newIncludes, err := collectIncludesRecurse(ctx, budget, tenantID, sproutID, basepath, top, starter)
 				if err != nil {
 					return newIncludes, err
 				}

@@ -9,13 +9,13 @@ import (
 	"testing"
 )
 
-// func collectIncludesRecurse(sproutID, basepath string, starter map[RecipeName]bool) (map[RecipeName]bool, error) {
+// func collectIncludesRecurse(ctx context.Context, budget *cookBudget, tenantID, sproutID, basepath string, top RecipeName, starter map[RecipeName]bool) (map[RecipeName]bool, error) {
 // func getRecipeTree(recipes []*Step) ([]*Step, error) {
 // func includesFromMap(recipe map[string]interface{}) ([]RecipeName, error) {
 // func makeRecipeSteps(recipes map[string]interface{}) ([]*Step, error) {
 // func pathToRecipeName(path string) (RecipeName, error) {
 // func recipeToStep(id string, recipe map[string]interface{}) (Step, error) {
-// func renderRecipeTemplate(sproutID, recipeName string, file []byte) ([]byte, error) {
+// func renderRecipeTemplate(budget *cookBudget, tenantID, sproutID, recipeName string, file []byte) ([]byte, error) {
 // func resolveRelativeFilePath(relatedRecipePath string, recipeID RecipeName) (string, error) {
 // func stepsFromMap(recipe map[string]interface{}) (map[string]interface{}, error) {
 // func unmarshalRecipe(recipe []byte) (map[string]interface{}, error) {
@@ -157,7 +157,7 @@ func TestExtractIncludes(t *testing.T) {
 				t.Error(err)
 			}
 			f := mustReadRecipe(t, fp)
-			r, err := extractIncludes(context.Background(), testPropsTenantID, tc.sprout, tc.basepath, string(tc.recipe), f)
+			r, err := extractIncludes(context.Background(), newCookBudget(), testPropsTenantID, tc.sprout, tc.basepath, string(tc.recipe), f)
 			if err != nil {
 				t.Error(err)
 			}
@@ -200,7 +200,7 @@ func TestCollectAllIncludes(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.id, func(t *testing.T) {
-			recipes, err := collectAllIncludes(context.Background(), testPropsTenantID, tc.sprout, getBasePath(), tc.recipe)
+			recipes, err := collectAllIncludes(context.Background(), newCookBudget(), testPropsTenantID, tc.sprout, getBasePath(), tc.recipe)
 			if err != nil {
 				t.Fatalf("collectAllIncludes(%q): %v", tc.recipe, err)
 			}

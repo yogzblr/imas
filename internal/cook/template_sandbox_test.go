@@ -124,7 +124,7 @@ func TestHostnameFactWithNewlineStaysOneValue(t *testing.T) {
 }
 
 func TestHostnameFallsBackToSproutID(t *testing.T) {
-	out, err := renderRecipeTemplate(testPropsTenantID, "no-hostname-sprout", "h", []byte(`h: {{ hostname }}`))
+	out, err := renderRecipeTemplate(newCookBudget(), testPropsTenantID, "no-hostname-sprout", "h", []byte(`h: {{ hostname }}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestRemovedTemplateFuncsFailToRender(t *testing.T) {
 		`v: {{ with $f := "x" }}{{ js $f }}{{ end }}`,
 	} {
 		t.Run(tmpl, func(t *testing.T) {
-			_, err := renderRecipeTemplate(testPropsTenantID, "removed-sprout", "removed", []byte(tmpl))
+			_, err := renderRecipeTemplate(newCookBudget(), testPropsTenantID, "removed-sprout", "removed", []byte(tmpl))
 			if !errors.Is(err, ErrTemplateFuncRemoved) {
 				t.Fatalf("got %v, want ErrTemplateFuncRemoved", err)
 			}
@@ -229,7 +229,7 @@ func TestTemplateRecursionRefused(t *testing.T) {
 		`{{ block "a" . }}x{{ end }}`,
 		`{{ template "missing" }}`,
 	} {
-		if _, err := renderRecipeTemplate(testPropsTenantID, "rec-sprout", "rec", []byte(tmpl)); !errors.Is(err, ErrTemplateConstruct) {
+		if _, err := renderRecipeTemplate(newCookBudget(), testPropsTenantID, "rec-sprout", "rec", []byte(tmpl)); !errors.Is(err, ErrTemplateConstruct) {
 			t.Errorf("%s: got %v, want ErrTemplateConstruct", tmpl, err)
 		}
 	}
@@ -238,15 +238,15 @@ func TestTemplateRecursionRefused(t *testing.T) {
 // TestRangeLimits: range over an integer is refused, and the total
 // iterations of every range in a render are capped.
 func TestRangeLimits(t *testing.T) {
-	if _, err := renderRecipeTemplate(testPropsTenantID, "range-sprout", "r", []byte(`{{ range 1000000000 }}{{ end }}`)); !errors.Is(err, ErrTemplateConstruct) {
+	if _, err := renderRecipeTemplate(newCookBudget(), testPropsTenantID, "range-sprout", "r", []byte(`{{ range 1000000000 }}{{ end }}`)); !errors.Is(err, ErrTemplateConstruct) {
 		t.Errorf("range over int: got %v, want ErrTemplateConstruct", err)
 	}
 	nested := `{{ range split (printf "%0999d" 0) "" }}{{ range split (printf "%0999d" 0) "" }}{{ end }}{{ end }}`
-	if _, err := renderRecipeTemplate(testPropsTenantID, "range-sprout", "r", []byte(nested)); !errors.Is(err, ErrTemplateRangeTooLong) {
+	if _, err := renderRecipeTemplate(newCookBudget(), testPropsTenantID, "range-sprout", "r", []byte(nested)); !errors.Is(err, ErrTemplateRangeTooLong) {
 		t.Errorf("nested ranges: got %v, want ErrTemplateRangeTooLong", err)
 	}
 	ok := `l:{{ range split "a,b,c" "," }} {{ . }}{{ end }}`
-	out, err := renderRecipeTemplate(testPropsTenantID, "range-sprout", "r", []byte(ok))
+	out, err := renderRecipeTemplate(newCookBudget(), testPropsTenantID, "range-sprout", "r", []byte(ok))
 	if err != nil || strings.TrimSpace(string(out)) != "l: a b c" {
 		t.Errorf("small range: got %q, %v", out, err)
 	}
@@ -256,9 +256,11 @@ func TestRangeLimits(t *testing.T) {
 // RecipeRenderTimeout stops with ErrTemplateTimeout, promptly, whether its
 // loops call functions or are empty.
 func TestTemplateTimeLimit(t *testing.T) {
-	origTimeout, origRange := RecipeRenderTimeout, maxRangeIterations
-	RecipeRenderTimeout, maxRangeIterations = 100*time.Millisecond, 1<<40
-	t.Cleanup(func() { RecipeRenderTimeout, maxRangeIterations = origTimeout, origRange })
+	origTimeout, origRange, origCookRange := RecipeRenderTimeout, maxRangeIterations, cookMaxRangeIterations
+	RecipeRenderTimeout, maxRangeIterations, cookMaxRangeIterations = 100*time.Millisecond, 1<<40, 1<<40
+	t.Cleanup(func() {
+		RecipeRenderTimeout, maxRangeIterations, cookMaxRangeIterations = origTimeout, origRange, origCookRange
+	})
 
 	list := `(split (printf "%0999d" 0) "")`
 	for name, tmpl := range map[string]string{
@@ -267,7 +269,7 @@ func TestTemplateTimeLimit(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			start := time.Now()
-			_, err := renderRecipeTemplate(testPropsTenantID, "time-sprout", "t", []byte(tmpl))
+			_, err := renderRecipeTemplate(newCookBudget(), testPropsTenantID, "time-sprout", "t", []byte(tmpl))
 			if !errors.Is(err, ErrTemplateTimeout) {
 				t.Fatalf("got %v, want ErrTemplateTimeout", err)
 			}
@@ -286,25 +288,25 @@ func TestTemplateSizeLimits(t *testing.T) {
 	t.Cleanup(func() { MaxRenderedRecipeBytes = origOut })
 
 	big := `{{ range split (printf "%0999d" 0) "" }}{{ printf "%0999d" 0 }}{{ end }}`
-	if _, err := renderRecipeTemplate(testPropsTenantID, "size-sprout", "s", []byte(big)); !errors.Is(err, ErrTemplateOutputTooBig) {
+	if _, err := renderRecipeTemplate(newCookBudget(), testPropsTenantID, "size-sprout", "s", []byte(big)); !errors.Is(err, ErrTemplateOutputTooBig) {
 		t.Errorf("output: got %v, want ErrTemplateOutputTooBig", err)
 	}
 	// Doubling a variable stops at maxTemplateValueBytes, before output.
 	doubling := `{{ $s := printf "%0999d" 0 }}{{ range split (printf "%0999d" 0) "" }}{{ $s = printf "%s%s" $s $s }}{{ end }}`
-	if _, err := renderRecipeTemplate(testPropsTenantID, "size-sprout", "s", []byte(doubling)); !errors.Is(err, ErrTemplateValueTooBig) {
+	if _, err := renderRecipeTemplate(newCookBudget(), testPropsTenantID, "size-sprout", "s", []byte(doubling)); !errors.Is(err, ErrTemplateValueTooBig) {
 		t.Errorf("doubling: got %v, want ErrTemplateValueTooBig", err)
 	}
 	blowup := `{{ replace (printf "%0999d" 0) "" (printf "%0999d" 0) }}`
-	if _, err := renderRecipeTemplate(testPropsTenantID, "size-sprout", "s", []byte(blowup)); !errors.Is(err, ErrTemplateValueTooBig) {
+	if _, err := renderRecipeTemplate(newCookBudget(), testPropsTenantID, "size-sprout", "s", []byte(blowup)); !errors.Is(err, ErrTemplateValueTooBig) {
 		t.Errorf("replace: got %v, want ErrTemplateValueTooBig", err)
 	}
 	for _, f := range []string{`{{ printf "%01000000d" 0 }}`, `{{ printf "%*d" 1000000 0 }}`, `{{ printf "%.5000f" 1.0 }}`, `{{ printf "%[1]d" 1 }}`} {
-		if _, err := renderRecipeTemplate(testPropsTenantID, "size-sprout", "s", []byte(f)); !errors.Is(err, ErrTemplateArgument) {
+		if _, err := renderRecipeTemplate(newCookBudget(), testPropsTenantID, "size-sprout", "s", []byte(f)); !errors.Is(err, ErrTemplateArgument) {
 			t.Errorf("%s: got %v, want ErrTemplateArgument", f, err)
 		}
 	}
 	source := []byte("a: " + strings.Repeat("x", MaxRecipeSourceBytes))
-	if _, err := renderRecipeTemplate(testPropsTenantID, "size-sprout", "s", source); !errors.Is(err, ErrRecipeTooLarge) {
+	if _, err := renderRecipeTemplate(newCookBudget(), testPropsTenantID, "size-sprout", "s", source); !errors.Is(err, ErrRecipeTooLarge) {
 		t.Errorf("source: got %v, want ErrRecipeTooLarge", err)
 	}
 }
@@ -348,19 +350,25 @@ func TestSetRenderLimits(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if orig != (RenderLimits{DefaultMaxRecipeSourceBytes, DefaultMaxRenderedRecipeBytes, DefaultMaxTemplateValueBytes, DefaultRecipeRenderTimeout, DefaultMaxRangeIterations}) {
+	if orig != (RenderLimits{
+		DefaultMaxRecipeSourceBytes, DefaultMaxRenderedRecipeBytes, DefaultMaxTemplateValueBytes, DefaultRecipeRenderTimeout, DefaultMaxRangeIterations,
+		10 * time.Second, 8388608, 100000, 64,
+	}) {
 		t.Fatalf("defaults = %+v", orig)
 	}
 	// Zero fields keep the current value.
 	if err := SetRenderLimits(RenderLimits{}); err != nil || CurrentRenderLimits() != orig {
 		t.Fatalf("empty limits: %v, %+v", err, CurrentRenderLimits())
 	}
-	want := RenderLimits{MaxSourceBytes: 1000, MaxRenderedBytes: 4000, MaxValueBytes: 2000, RenderTimeout: time.Second, MaxRangeIterations: 5}
+	want := RenderLimits{
+		MaxSourceBytes: 1000, MaxRenderedBytes: 4000, MaxValueBytes: 2000, RenderTimeout: time.Second, MaxRangeIterations: 5,
+		CookRenderTimeout: 3 * time.Second, CookMaxRenderedBytes: 9000, CookMaxRangeIterations: 12, MaxIncludes: 7,
+	}
 	if err := SetRenderLimits(want); err != nil || CurrentRenderLimits() != want {
 		t.Fatalf("set: %v, %+v", err, CurrentRenderLimits())
 	}
 	// The new limits are the ones a render uses.
-	if _, err := renderRecipeTemplate(testPropsTenantID, "limits-sprout", "l", []byte(`{{ range split "a,b,c,d,e,f" "," }}{{ end }}`)); !errors.Is(err, ErrTemplateRangeTooLong) {
+	if _, err := renderRecipeTemplate(newCookBudget(), testPropsTenantID, "limits-sprout", "l", []byte(`{{ range split "a,b,c,d,e,f" "," }}{{ end }}`)); !errors.Is(err, ErrTemplateRangeTooLong) {
 		t.Errorf("range over 6 with a budget of 5: got %v", err)
 	}
 	for name, bad := range map[string]RenderLimits{
@@ -371,6 +379,22 @@ func TestSetRenderLimits(t *testing.T) {
 		"long timeout":        {RenderTimeout: time.Hour},
 		"negative iterations": {MaxRangeIterations: -5},
 		"too many iterations": {MaxRangeIterations: 1 << 30},
+		// Per-cook limits: at least the per-render value, at most the
+		// hard maximum.
+		"cook timeout below render timeout": {CookRenderTimeout: 999 * time.Millisecond},
+		"cook timeout above 5m":             {CookRenderTimeout: 5*time.Minute + time.Second},
+		"render timeout above cook timeout": {RenderTimeout: 4 * time.Second},
+		"negative cook timeout":             {CookRenderTimeout: -time.Second},
+		"cook bytes below rendered bytes":   {CookMaxRenderedBytes: 3999},
+		"cook bytes above 256 MiB":          {CookMaxRenderedBytes: 256<<20 + 1},
+		"rendered bytes above cook bytes":   {MaxRenderedBytes: 9001},
+		"negative cook bytes":               {CookMaxRenderedBytes: -1},
+		"cook iterations below iterations":  {CookMaxRangeIterations: 4},
+		"cook iterations above 100,000,000": {CookMaxRangeIterations: 100_000_001},
+		"iterations above cook iterations":  {MaxRangeIterations: 13},
+		"negative cook iterations":          {CookMaxRangeIterations: -1},
+		"includes above 256":                {MaxIncludes: 257},
+		"negative includes":                 {MaxIncludes: -1},
 	} {
 		if err := SetRenderLimits(bad); !errors.Is(err, ErrRenderLimits) {
 			t.Errorf("%s: got %v, want ErrRenderLimits", name, err)
@@ -378,5 +402,22 @@ func TestSetRenderLimits(t *testing.T) {
 		if CurrentRenderLimits() != want {
 			t.Errorf("%s: limits changed on error: %+v", name, CurrentRenderLimits())
 		}
+	}
+	// The bounds themselves are accepted: each per-cook limit equal to
+	// its per-render one, and the hard maxima.
+	for name, ok := range map[string]RenderLimits{
+		"cook limits at the per-render limits": {CookRenderTimeout: time.Second, CookMaxRenderedBytes: 4000, CookMaxRangeIterations: 5, MaxIncludes: 1},
+		"hard maxima":                          {CookRenderTimeout: 5 * time.Minute, CookMaxRenderedBytes: 256 << 20, CookMaxRangeIterations: 100_000_000, MaxIncludes: 256},
+	} {
+		if err := SetRenderLimits(ok); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// The messages name the limit and the bound.
+	if err := SetRenderLimits(RenderLimits{MaxIncludes: 257}); err == nil || !strings.Contains(err.Error(), "includes 257 must be between 1 and 256") {
+		t.Errorf("includes 257: %v", err)
+	}
+	if err := SetRenderLimits(RenderLimits{CookRenderTimeout: 6 * time.Minute}); err == nil || !strings.Contains(err.Error(), "cook render timeout 6m0s must be at least") {
+		t.Errorf("cook timeout 6m: %v", err)
 	}
 }
