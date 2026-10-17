@@ -1270,8 +1270,14 @@ refuses to render. */}}
 {{- $ttlMinutes = add $ttlMinutes (atoi (trimSuffix "m" $part)) -}}
 {{- end -}}
 {{- end -}}
-{{- if le (int $ttlMinutes) (mul $every 180) -}}
-{{- fail (printf "credentialPublisher.userJWTTTL %s must be more than 3 x credentialPublisher.refresh.everyHours (%dh): a JWT is renewed by the first run after only a third of its lifetime is left, so a longer gap between runs lets it expire" (toString $p.userJWTTTL) (mul $every 3)) -}}
+{{- /* The run that renews a JWT starts at most everyHours after two
+thirds of its lifetime, may start up to startingDeadlineSeconds late and
+may take up to activeDeadlineSeconds: all of that must fit in the last
+third. */ -}}
+{{- $slackMinutes := add (div (add (int $p.refresh.startingDeadlineSeconds) 59) 60) (div (add (int $p.activeDeadlineSeconds) 59) 60) -}}
+{{- $minTTL := mul 3 (add (mul $every 60) $slackMinutes) -}}
+{{- if le (int $ttlMinutes) (int $minTTL) -}}
+{{- fail (printf "credentialPublisher.userJWTTTL %s must be more than %dm, 3 x (credentialPublisher.refresh.everyHours %dh + refresh.startingDeadlineSeconds + activeDeadlineSeconds): a JWT is renewed by the first run after only a third of its lifetime is left, and that run may start late and take time to publish, so a shorter lifetime can expire first" (toString $p.userJWTTTL) (int $minTTL) $every) -}}
 {{- end -}}
 {{- end }}
 

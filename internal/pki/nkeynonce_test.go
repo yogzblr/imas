@@ -3,6 +3,7 @@ package pki
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -111,14 +112,25 @@ func TestNKeyNonceStateless(t *testing.T) {
 		t.Fatalf("an altered nonce: %v", err)
 	}
 
-	// Spent entries go once their nonce would have expired.
+	// Spent entries are swept at most once per TTL (no scan per
+	// submission), and go once their nonce has expired.
+	for i := range 3 {
+		n, _ = IssueNKeyNonce()
+		if err := VerifyNKeySubmission(signedKeySubmission(t, kp, n, fmt.Sprintf("web-1%d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := len(nkeyNonces.spent); got != 4 {
+		t.Fatalf("%d spent entries, want 4", got)
+	}
+	swept := nkeyNonces.swept
 	now = now.Add(nkeyNonceTTL)
 	n, _ = IssueNKeyNonce()
 	if err := VerifyNKeySubmission(signedKeySubmission(t, kp, n, "web-02")); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(nkeyNonces.spent); got != 1 {
-		t.Fatalf("%d spent entries after the first expired, want 1", got)
+	if got := len(nkeyNonces.spent); got != 1 || !nkeyNonces.swept.After(swept) {
+		t.Fatalf("%d spent entries after the sweep, want 1", got)
 	}
 }
 

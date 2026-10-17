@@ -957,10 +957,12 @@ credentialPublisher:
   # before it expires without a deployment. It runs every everyHours hours
   # (1, 2, 3, 4, 6, 8 or 12, so the runs are evenly spaced) at minute
   # minute, schedule "<minute> */<everyHours> * * *". A JWT is renewed by
-  # the first run after only a third of userJWTTTL is left, so the render
-  # fails unless userJWTTTL is more than 3 x everyHours (the default: 24h
-  # against 12h). A run with nothing due is one KV read and one Transit
-  # signature and writes nothing.
+  # the first run after only a third of userJWTTTL is left, and that run
+  # may start up to startingDeadlineSeconds late and run for up to
+  # activeDeadlineSeconds, so the render fails unless userJWTTTL is more
+  # than 3 x (everyHours + those two) (the default: 24h against 12h45m). A
+  # run with nothing due is one KV read and one Transit signature and
+  # writes nothing.
   refresh:
     everyHours: 4
     minute: 17

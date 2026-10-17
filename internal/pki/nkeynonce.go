@@ -58,6 +58,10 @@ type nkeyNonceStore struct {
 	now   func() time.Time
 	mu    sync.Mutex
 	spent map[string]time.Time // nonce -> when it expires
+	// swept is when spent was last cleared of expired entries: at most
+	// once per nkeyNonceTTL, so a submission costs no scan of the map
+	// and an entry outlives its nonce by at most one more TTL.
+	swept time.Time
 }
 
 func newNKeyNonceStore(now func() time.Time) *nkeyNonceStore {
@@ -106,15 +110,18 @@ func (s *nkeyNonceStore) valid(nonce string) (time.Time, bool) {
 }
 
 // spend records nonce as spent until exp and reports whether it was not
-// spent already. Expired entries are dropped on the way.
+// spent already. Expired entries are dropped once per nkeyNonceTTL; one
+// not yet dropped is only a nonce that valid refuses anyway.
 func (s *nkeyNonceStore) spend(nonce string, exp time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := s.now()
-	for n, at := range s.spent {
-		if !now.Before(at) {
-			delete(s.spent, n)
+	if now := s.now(); now.Sub(s.swept) >= nkeyNonceTTL {
+		for n, at := range s.spent {
+			if !now.Before(at) {
+				delete(s.spent, n)
+			}
 		}
+		s.swept = now
 	}
 	if _, ok := s.spent[nonce]; ok {
 		return false

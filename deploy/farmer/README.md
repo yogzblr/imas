@@ -271,11 +271,13 @@ writes nothing. So the same subcommand also runs on a schedule:
 way any other does: ESO syncs it and Reloader rolls saasapi, about once a
 day at the default TTL.
 
-Keep the interval between runs below a third of the TTL (the chart's
-render fails otherwise): a JWT is renewed by the first run after only a
-third of its lifetime is left, so with a longer gap it can expire before
-the next run. Alert on a
-failed run: if every run fails for longer than the remaining two thirds,
+Keep the interval between runs, plus the CronJob's
+`startingDeadlineSeconds` and the Job's `activeDeadlineSeconds`, below a
+third of the TTL (the chart's render fails otherwise): a JWT is renewed by
+the first run after only a third of its lifetime is left, that run may
+start late and take time to publish, and with less margin the JWT can
+expire first. Alert on a failed run: if every run fails for longer than
+the remaining third,
 saasapi's connection is closed when the JWT expires, and saasapi refuses to
 start with an expired JWT until a run succeeds.
 

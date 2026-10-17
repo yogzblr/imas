@@ -699,9 +699,13 @@ func TestValidationFailures(t *testing.T) {
 		{"publisher refresh not evenly spaced", "credentialPublisher.refresh.everyHours 5", []string{"--set", "credentialPublisher.refresh.everyHours=5"}},
 		{"publisher refresh minute out of range", "credentialPublisher.refresh.minute 60", []string{"--set", "credentialPublisher.refresh.minute=60"}},
 		// A 12h JWT minted just after a run is not due at the next run 4h
-		// later (more than 4h left) and expires before the one after.
-		{"publisher JWT ttl not above 3 x refresh", "must be more than 3 x credentialPublisher.refresh.everyHours (12h)", []string{"--set", "credentialPublisher.userJWTTTL=12h"}},
-		{"publisher JWT ttl in minutes too short", "must be more than 3 x credentialPublisher.refresh.everyHours (3h)", []string{"--set", "credentialPublisher.userJWTTTL=2h59m", "--set", "credentialPublisher.refresh.everyHours=1"}},
+		// later (more than 4h left) and expires before the one after. The
+		// floor is 3 x (4h + 10m start delay + 5m run) = 765m.
+		{"publisher JWT ttl not above 3 x refresh", "must be more than 765m", []string{"--set", "credentialPublisher.userJWTTTL=12h"}},
+		{"publisher JWT ttl at the floor", "must be more than 765m", []string{"--set", "credentialPublisher.userJWTTTL=12h45m"}},
+		// 3h1m clears 3 x 1h but not the late start and run time:
+		// 3 x (60 + 10 + 5) = 225m.
+		{"publisher JWT ttl leaves no time for a late run", "must be more than 225m", []string{"--set", "credentialPublisher.userJWTTTL=3h1m", "--set", "credentialPublisher.refresh.everyHours=1"}},
 		{"publisher runs as farmer", "must not be farmer's ServiceAccount", []string{"--set", "credentialPublisher.serviceAccountName=t-farmer"}},
 		{"publisher runs as saasapi", "must not be saasapi's ServiceAccount", []string{"--set", "credentialPublisher.serviceAccountName=t-farmer-saasapi"}},
 		{"publisher role is farmer's", "is also one of farmer's OpenBao roles", []string{"--set", "credentialPublisher.k8sRole=imas-farmer-gateway"}},
@@ -873,9 +877,9 @@ func TestPublishJobMatchesReference(t *testing.T) {
 	if envValues(c)["IMAS_SAASAPI_USER_JWT_TTL"] != "24h" {
 		t.Errorf("IMAS_SAASAPI_USER_JWT_TTL = %q, want 24h", envValues(c)["IMAS_SAASAPI_USER_JWT_TTL"])
 	}
-	moved := mustRender(t, "--set", "credentialPublisher.userJWTTTL=4h", "--set", "credentialPublisher.refresh.everyHours=1", "--set", "credentialPublisher.refresh.minute=5")
-	if v := envValues(container(t, find(t, moved, "Job", "t-farmer-saasapi-credential-publish"), "publish"))["IMAS_SAASAPI_USER_JWT_TTL"]; v != "4h" {
-		t.Errorf("userJWTTTL 4h: env = %q", v)
+	moved := mustRender(t, "--set", "credentialPublisher.userJWTTTL=3h46m", "--set", "credentialPublisher.refresh.everyHours=1", "--set", "credentialPublisher.refresh.minute=5")
+	if v := envValues(container(t, find(t, moved, "Job", "t-farmer-saasapi-credential-publish"), "publish"))["IMAS_SAASAPI_USER_JWT_TTL"]; v != "3h46m" {
+		t.Errorf("userJWTTTL 3h46m (just above the 225m floor): env = %q", v)
 	}
 	if v := get(find(t, moved, "CronJob", "t-farmer-saasapi-credential-refresh"), "spec", "schedule"); v != "5 */1 * * *" {
 		t.Errorf("refresh.everyHours 1, minute 5: schedule %v", v)
