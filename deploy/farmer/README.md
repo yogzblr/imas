@@ -212,10 +212,12 @@ Don't make it manual-only.
 
 Reasoning:
 
-- **Two things change the JWT.**
+- **Three things change the JWT.**
   - (a) A change to `saasAPIUserPermissions`. This is already planned for
     `internal.sprout.*`, and it only ever ships with a farmer deployment.
   - (b) A rotation of the SaaS API seed.
+  - (c) Its expiry. The refresh CronJob covers it (see "Refreshing the
+    JWT before it expires" below), not the deploy hook.
 
   A manual-only-on-rotation policy misses (a). saasapi would keep a JWT
   without the new subjects until someone remembered, and a deploy that
@@ -253,6 +255,26 @@ A failed Job, for example because OpenBao is unreachable, fails the
 Helm/Argo sync. That's intentional: saasapi might be on a stale JWT. With
 `helm upgrade --atomic` it would also roll farmer back, so don't combine
 the hook with `--atomic` unless that's what you want.
+
+### Refreshing the JWT before it expires
+
+The SaaS API User JWT expires (security review 2026-10, L14):
+`IMAS_SAASAPI_USER_JWT_TTL`, default `24h` (1h to 720h), after it is
+minted. A run of the publisher writes a new JWT only when the published
+one has a third of that or less left, has no `exp`, or outlives a JWT
+minted now (a TTL that was shortened); otherwise it is one KV read and
+writes nothing. So the same subcommand also runs on a schedule:
+`saasapi-credential-publish-job.yaml` carries a CronJob,
+`imas-saasapi-credential-refresh`, with the Job's pod, every 4 hours
+(`17 */4 * * *`), and the chart renders it
+(`credentialPublisher.refresh.schedule`). A new JWT reaches saasapi the
+way any other does: ESO syncs it and Reloader rolls saasapi, about once a
+day at the default TTL.
+
+Keep the schedule more frequent than a third of the TTL, and alert on a
+failed run: if every run fails for longer than the remaining two thirds,
+saasapi's connection is closed when the JWT expires, and saasapi refuses to
+start with an expired JWT until a run succeeds.
 
 ## Job reconcile window (`IMAS_JOB_RECONCILE_WINDOW`)
 

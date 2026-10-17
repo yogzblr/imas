@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	jwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
@@ -176,7 +177,7 @@ func TestPublishSaaSAPICredential_RewritesStaleOrForged(t *testing.T) {
 				t.Fatalf("expected a rewrite, got res=%+v writes=%d", res, store.writes)
 			}
 			uc, err := jwt.DecodeUserClaims(store.data[SaaSAPICredentialJWTField])
-			if err != nil || !saasAPIUserJWTIsCurrent(uc, pub, mat.sysAccountPub) {
+			if err != nil || !saasAPIUserJWTIsCurrent(uc, pub, mat.sysAccountPub, saasAPINow(), DefaultSaaSAPIUserJWTTTL) {
 				t.Fatalf("rewritten JWT isn't current: %v", err)
 			}
 		})
@@ -254,5 +255,108 @@ func TestPublishSaaSAPICredential_PublishesDespitePushFailure(t *testing.T) {
 	}
 	if !res.Written || store.data[SaaSAPICredentialPublicKeyField] != newPub {
 		t.Fatalf("expected the rotated-in credential to be published anyway, got res=%+v data=%v", res, store.data)
+	}
+}
+
+// TestPublishSaaSAPICredential_ExpiresAndIsRefreshed (security review
+// 2026-10, L14): the published JWT expires DefaultSaaSAPIUserJWTTTL after
+// it is minted; a run while more than a third of that is left writes
+// nothing; a run after that writes a fresh one, as does a run on a JWT
+// without exp (one published before the expiry existed).
+func TestPublishSaaSAPICredential_ExpiresAndIsRefreshed(t *testing.T) {
+	setupTestPKI(t)
+	clearExternalSeedEnv(t)
+	t.Setenv(EnvSaaSAPIUserJWTTTL, "")
+	mat, err := ensureNatsAuth()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _ := useExternalSaaSAPISeed(t)
+	start := time.Now()
+	now := start
+	saasAPINow = func() time.Time { return now }
+	t.Cleanup(func() { saasAPINow = time.Now })
+	expOf := func(store *fakeCredStore) time.Time {
+		t.Helper()
+		uc, err := jwt.DecodeUserClaims(store.data[SaaSAPICredentialJWTField])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return time.Unix(uc.Expires, 0)
+	}
+
+	store := &fakeCredStore{}
+	ctx := context.Background()
+	if _, err := PublishSaaSAPICredential(ctx, store); err != nil {
+		t.Fatal(err)
+	}
+	first := expOf(store)
+	if d := first.Sub(start); d < DefaultSaaSAPIUserJWTTTL-time.Second || d > DefaultSaaSAPIUserJWTTTL+time.Second {
+		t.Fatalf("exp is %v after minting, want %v", d, DefaultSaaSAPIUserJWTTTL)
+	}
+
+	// 15h in: 9h of 24h left, more than a third. Nothing written.
+	now = start.Add(15 * time.Hour)
+	if res, err := PublishSaaSAPICredential(ctx, store); err != nil || res.Written {
+		t.Fatalf("15h in: res=%+v err=%v, want no write", res, err)
+	}
+	// 17h in: 7h left, less than a third. A fresh JWT, exp 24h from now.
+	now = start.Add(17 * time.Hour)
+	res, err := PublishSaaSAPICredential(ctx, store)
+	if err != nil || !res.Written || store.writes != 2 {
+		t.Fatalf("17h in: res=%+v err=%v writes=%d, want a rewrite", res, err, store.writes)
+	}
+	if got := expOf(store).Sub(now); got < DefaultSaaSAPIUserJWTTTL-time.Second || got > DefaultSaaSAPIUserJWTTTL+time.Second {
+		t.Fatalf("refreshed exp is %v from now, want %v", got, DefaultSaaSAPIUserJWTTTL)
+	}
+
+	// A JWT with the right claims but no exp is replaced.
+	noExp := jwt.NewUserClaims(pub)
+	noExp.Name = saasAPIUserName
+	noExp.Permissions = saasAPIUserPermissions()
+	noExp.AllowedConnectionTypes = saasAPIUserConnectionTypes()
+	noExpJWT, err := noExp.Encode(mat.sysAccountKP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store = &fakeCredStore{data: map[string]string{SaaSAPICredentialJWTField: noExpJWT, SaaSAPICredentialPublicKeyField: pub}}
+	if res, err := PublishSaaSAPICredential(ctx, store); err != nil || !res.Written {
+		t.Fatalf("no exp: res=%+v err=%v, want a rewrite", res, err)
+	}
+
+	// A shorter TTL replaces a JWT that outlives one minted now.
+	t.Setenv(EnvSaaSAPIUserJWTTTL, "2h")
+	if res, err := PublishSaaSAPICredential(ctx, store); err != nil || !res.Written {
+		t.Fatalf("shortened ttl: res=%+v err=%v, want a rewrite", res, err)
+	}
+	if got := expOf(store).Sub(now); got > 2*time.Hour+time.Second {
+		t.Fatalf("exp is %v from now with a 2h ttl", got)
+	}
+}
+
+func TestSaaSAPIUserJWTTTL(t *testing.T) {
+	for v, want := range map[string]time.Duration{"": DefaultSaaSAPIUserJWTTTL, "1h": time.Hour, "720h": MaxSaaSAPIUserJWTTTL, "36h": 36 * time.Hour} {
+		t.Setenv(EnvSaaSAPIUserJWTTTL, v)
+		if got, err := saasAPIUserJWTTTL(); err != nil || got != want {
+			t.Errorf("%q: %v, %v; want %v", v, got, err, want)
+		}
+	}
+	for _, v := range []string{"59m", "721h", "0", "-1h", "1d", "soon"} {
+		t.Setenv(EnvSaaSAPIUserJWTTTL, v)
+		if _, err := saasAPIUserJWTTTL(); err == nil {
+			t.Errorf("%q accepted", v)
+		}
+	}
+	// A bad TTL fails the mint, so no JWT is published with a wrong exp.
+	setupTestPKI(t)
+	clearExternalSeedEnv(t)
+	if _, err := ensureNatsAuth(); err != nil {
+		t.Fatal(err)
+	}
+	useExternalSaaSAPISeed(t)
+	t.Setenv(EnvSaaSAPIUserJWTTTL, "soon")
+	store := &fakeCredStore{}
+	if _, err := PublishSaaSAPICredential(context.Background(), store); err == nil || store.writes != 0 {
+		t.Fatalf("bad ttl: err=%v writes=%d, want an error and no write", err, store.writes)
 	}
 }

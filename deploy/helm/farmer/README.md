@@ -202,6 +202,13 @@ kubectl -n imas-core create secret generic imas-saasapi-nats \
   --from-file=SAASAPI_NATS_USER_JWT=jwt
 ```
 
+That JWT expires after `credentialPublisher.userJWTTTL` (24h). The refresh
+CronJob writes a new one to OpenBao once a third of that is left; without
+ESO, copy it again within the day (the same two commands, with
+`kubectl create secret ... --dry-run=client -o yaml | kubectl apply -f -`)
+and restart saasapi (`kubectl -n imas-core rollout restart deployment
+imas-core-farmer-saasapi`).
+
 And saasapi's control-plane box key (J.4, [Control-plane box keys](#control-plane-box-keys)):
 its private key and the platform public key, both written by the keygen
 Job. Only these two fields, and never `.../platform`:
@@ -1722,7 +1729,10 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `saasapi.recipes.writeRateLimit.*` | `1` / `10` | `SAASAPI_RECIPES_WRITE_RATE_LIMIT` / `_BURST`: PUT and DELETE per tenant. |
 | `saasapi.recipes.credentialCheck` | `true` | `SAASAPI_RECIPES_CREDENTIAL_CHECK`: saasapi refuses to start unless the object store denies its recipe credential outside `tenants/`, on `sprouts/`, creating and deleting under the platform recipe prefix (farmer's `recipedir`, default `/srv/imas/recipes/prod/`), and put, get, delete and list (of `jobs/` and of the bucket root) in the job bucket. Requires `objectStore.jobBucket`, passed as `SAASAPI_RECIPES_JOB_BUCKET`; the chart refuses to render without it while this is on. `false` turns it off; NOTES warns. See [Tenant recipe upload](#tenant-recipe-upload). |
 | `saasapi.extraEnv` | `[]` | Extra env vars for saasapi, e.g. `HTTPS_PROXY`/`NO_PROXY`. |
-| `credentialPublisher.*` | enabled, `platform/imas/saasapi-nats-user` | The publish Job. |
+| `credentialPublisher.*` | enabled, `platform/imas/saasapi-nats-user` | The publish Job, and its refresh CronJob. |
+| `credentialPublisher.userJWTTTL` | `24h` | `IMAS_SAASAPI_USER_JWT_TTL`: the SaaS API User JWT's lifetime (its `exp`), hours and minutes, 1h to 720h. A run writes a new JWT once a third of it is left. |
+| `credentialPublisher.refresh.schedule` | `17 */4 * * *` | The refresh CronJob (`<release>-farmer-saasapi-credential-refresh`): the publish run on a schedule, so the JWT is renewed before it expires. Keep it more frequent than a third of `userJWTTTL`. |
+| `credentialPublisher.refresh.startingDeadlineSeconds` | `600` | How late a missed run may still start. |
 | `sproutRelease.register` | `true` | Register `files/sprout-release.json` when the chart has it and the operator plane is on. |
 | `sproutRelease.channel` | `stable` | Sent with the release. `min_sprout_version` is not a value: it is stamped at release time from `packaging/helm/min-sprout-version`. |
 | `sproutRelease.serviceAccountName` | `imas-sprout-release-registrar` | The hook Job's own ServiceAccount. It runs `farmer register-sprout-release` in `farmer.image`. |

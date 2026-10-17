@@ -92,7 +92,7 @@ func TestEnsureSaaSAPICredential_MintsScopedSYSUserAndIsIdempotent(t *testing.T)
 	if string(seedAgain) != string(seed) {
 		t.Fatal("expected a second call to reuse the same seed")
 	}
-	if uc, err := jwt.DecodeUserClaims(again); err != nil || !saasAPIUserJWTIsCurrent(uc, pub, mat.sysAccountPub) {
+	if uc, err := jwt.DecodeUserClaims(again); err != nil || !saasAPIUserJWTIsCurrent(uc, pub, mat.sysAccountPub, saasAPINow(), DefaultSaaSAPIUserJWTTTL) {
 		t.Fatalf("expected a second call to mint an equivalent JWT: %v", err)
 	}
 	// No User JWT file: setupTestPKI's requireNoFarmerPKIWrites.

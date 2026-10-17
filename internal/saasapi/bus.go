@@ -67,6 +67,14 @@ func validateBusCredential(seed, userJWT string) error {
 	if uc.Subject != pub {
 		return fmt.Errorf("saasapi: SAASAPI_NATS_USER_JWT was issued to %s, but the seed in SAASAPI_NATS_NKEY_SEED_FILE is %s — the seed and JWT are from different credentials", uc.Subject, pub)
 	}
+	// The JWT expires (pki.EnvSaaSAPIUserJWTTTL, default 24h); the
+	// publisher's refresh CronJob writes a new one well before that, and
+	// ESO plus Reloader restart this service with it. An expired one
+	// means that chain is broken: say so rather than let the bus refuse
+	// it with a generic authorization error.
+	if uc.Expires != 0 && !time.Now().Before(time.Unix(uc.Expires, 0)) {
+		return fmt.Errorf("saasapi: SAASAPI_NATS_USER_JWT expired at %s: the SaaS API credential publisher (its refresh CronJob) renews it, and ESO delivers it", time.Unix(uc.Expires, 0).UTC().Format(time.RFC3339))
+	}
 	return nil
 }
 

@@ -1251,6 +1251,12 @@ refuses to render. */}}
 {{- fail (printf "credentialPublisher.k8sRole %q or credentialPublisher.natsSign.k8sRole %q is also one of farmer's OpenBao roles: the publisher's roles must never be ones farmer can log in with" $p.k8sRole $p.natsSign.k8sRole) -}}
 {{- end -}}
 {{- end -}}
+{{- if not (regexMatch "^([0-9]+(h|m))+$" (toString $p.userJWTTTL)) -}}
+{{- fail (printf "credentialPublisher.userJWTTTL %q must be a duration in hours and minutes, such as 24h (IMAS_SAASAPI_USER_JWT_TTL, 1h to 720h)" (toString $p.userJWTTTL)) -}}
+{{- end -}}
+{{- if not $p.refresh.schedule -}}
+{{- fail "credentialPublisher.refresh.schedule is required: the SaaS API User JWT expires, and the refresh CronJob renews it" -}}
+{{- end -}}
 {{- end }}
 
 {{/*

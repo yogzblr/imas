@@ -243,7 +243,18 @@ User JWT is delivered." Two findings qualify that wording:
   public key to the SYS Account JWT, re-signs it, and sends it through the
   same `pushAccountUpdate` → `$SYS.REQ.CLAIMS.UPDATE` path every tenant
   Account update uses. Without this, rotating the seed would leave the old
-  credential valid forever, because the User JWT carries no expiry.
+  credential valid until its User JWT expires.
+- **The User JWT expires** (security review 2026-10, L14): its `exp` is
+  `IMAS_SAASAPI_USER_JWT_TTL` (default 24h, Helm
+  `credentialPublisher.userJWTTTL`) after it is minted. So a rotated-out
+  key also stops working on its own, even on a bus node that has not yet
+  received the SYS Account JWT revoking it. It is renewed by the path that
+  publishes it: the publisher writes a new JWT once a third of its
+  lifetime is left (the two-thirds rule the gateway JWT's refresh uses),
+  and the chart runs the publisher on a schedule as well as after each
+  deployment (the refresh CronJob, `credentialPublisher.refresh.schedule`,
+  every 4 hours by default). saasapi refuses to start with an expired
+  JWT.
 
 ### Getting the credential to the saasapi Deployment
 
@@ -281,7 +292,9 @@ still an operator choice. The intended production flow is:
    with the seed. `farmer publish-saasapi-credential`, run as a
    Kubernetes Job with farmer's own image, writes it to a dedicated KV v2
    path. ESO syncs it to saasapi as `SAASAPI_NATS_USER_JWT`, and
-   Reloader restarts saasapi. See "JWT -> OpenBao hand-off" below.
+   Reloader restarts saasapi. See "JWT -> OpenBao hand-off" below. The
+   same subcommand runs as a CronJob and writes a new JWT before the
+   current one expires; the hand-off is the same.
 
 Farmer holding the SaaS API's seed (step 2) grants farmer nothing new:
 farmer can already sign with the SYS Account key, which can mint any SYS

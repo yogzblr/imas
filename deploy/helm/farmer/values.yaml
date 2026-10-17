@@ -949,6 +949,17 @@ credentialPublisher:
     k8sRole: imas-natssign-publisher
     # token auth: key in tokenSecretName (empty: openbaoClient's).
     tokenSecretKey: natssign-publisher-token
+  # IMAS_SAASAPI_USER_JWT_TTL: the SaaS API User JWT's lifetime (its exp;
+  # security review 2026-10, L14), a Go duration from 1h to 720h. A run
+  # writes a new JWT once a third of it is left.
+  userJWTTTL: 24h
+  # The refresh CronJob: the same run on a schedule, so the JWT is renewed
+  # before it expires without a deployment. Run it more often than a third
+  # of userJWTTTL (the default: every 4 hours against 8). A run with nothing
+  # due is one KV read and one Transit signature and writes nothing.
+  refresh:
+    schedule: "17 */4 * * *"
+    startingDeadlineSeconds: 600
   # Emit the Argo CD hook annotations too.
   argoCDHooks: true
   backoffLimit: 3
