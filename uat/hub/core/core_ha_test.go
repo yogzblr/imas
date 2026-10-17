@@ -258,6 +258,15 @@ func TestFarmerChartRenderHA(t *testing.T) {
 		t.Error("Valkey is still a Deployment too")
 	}
 	get(t, objs, "PodDisruptionBudget/"+lib["VALKEY_NAME"])
+	// Unit S5: every replica authenticates to the primary with the password
+	// from Secret imas-valkey-auth, as user default.
+	vinit := str(get(t, objs, "ConfigMap/"+lib["VALKEY_NAME"]+"-init-scripts"), "data", "init.sh")
+	if !strings.Contains(vinit, `REPL_PASSWORD=$(get_user_password "default" "`+lib["VALKEY_AUTH_KEY"]+`")`) || !strings.Contains(vinit, `echo "masteruser default"`) {
+		t.Error("Valkey replicas don't authenticate to the primary")
+	}
+	if !strings.Contains(mustJSON(t, vk), `"secretName":"`+lib["VALKEY_AUTH_SECRET"]+`"`) {
+		t.Errorf("Valkey doesn't read Secret %s", lib["VALKEY_AUTH_SECRET"])
+	}
 
 	// Versity Gateway: on, its Secrets the ones install.sh makes, and the S3
 	// endpoint of farmer and saasapi.

@@ -84,6 +84,10 @@ const (
 	PXCCluster         = "imas-core-pxc"
 	PXCRootSecret      = "imas-core-pxc-secrets"
 	ValkeyName         = "imas-core-valkey"
+	// ValkeyAuthSecret holds Valkey's password, key ValkeyAuthKey
+	// (the farmer chart's valkey.auth.secretName and key).
+	ValkeyAuthSecret   = "imas-valkey-auth"
+	ValkeyAuthKey      = "password"
 	KeycloakDeployment = "imas-uat-keycloak"
 	EdgeDeployment     = "imas-uat-edge"
 
@@ -434,15 +438,23 @@ func (h *HA) CheckStateful(ctx context.Context, skipNode string, want int) (Stat
 	if err != nil {
 		return rep, err
 	}
+	// Valkey's password (unit S5) goes on stdin into VALKEYCLI_AUTH, never
+	// on a command line; -e makes an error reply (NOAUTH) fail the call.
+	vpw, err := h.Core.SecretValue(ctx, CoreNamespace, ValkeyAuthSecret, ValkeyAuthKey)
+	if err != nil {
+		return rep, err
+	}
+	valkeyCLI := func(pod, cmd string) ([]byte, error) {
+		return h.Core.ExecIn(ctx, CoreNamespace, pod, "", append(vpw, '\n'), "/bin/sh", "-ec",
+			`IFS= read -r VALKEY_PASSWORD || [ -n "$VALKEY_PASSWORD" ]; VALKEYCLI_AUTH="$VALKEY_PASSWORD" valkey-cli -e `+cmd)
+	}
 	for _, p := range vk {
-		out, err := h.Core.ExecIn(ctx, CoreNamespace, p.Name, "", nil, "/bin/sh", "-c",
-			`valkey-cli ${VALKEY_PASSWORD:+-a "$VALKEY_PASSWORD" --no-auth-warning} ping`)
+		out, err := valkeyCLI(p.Name, "ping")
 		if err != nil || strings.TrimSpace(string(out)) != "PONG" {
 			errs = append(errs, fmt.Sprintf("Valkey %s does not answer PING: %v %s", p.Name, err, strings.TrimSpace(string(out))))
 		}
 		if p.Name == ValkeyName+"-0" {
-			out, err := h.Core.ExecIn(ctx, CoreNamespace, p.Name, "", nil, "/bin/sh", "-c",
-				`valkey-cli ${VALKEY_PASSWORD:+-a "$VALKEY_PASSWORD" --no-auth-warning} info replication`)
+			out, err := valkeyCLI(p.Name, "info replication")
 			info := parseColon(out)
 			if err != nil || info["role"] != "master" || info["connected_slaves"] != strconv.Itoa(want-1) {
 				errs = append(errs, fmt.Sprintf("Valkey primary %s: role %q, connected_slaves %q (want master, %d): %v", p.Name, info["role"], info["connected_slaves"], want-1, err))

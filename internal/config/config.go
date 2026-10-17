@@ -15,6 +15,7 @@ import (
 	"github.com/taigrr/jety"
 	"github.com/yogzblr/imas/internal/log"
 	"github.com/yogzblr/imas/internal/natsretry"
+	"github.com/yogzblr/imas/internal/valkeyconn"
 )
 
 const ImasExt = "imas"
@@ -38,6 +39,12 @@ const EnvJobReconcileWindow = "IMAS_JOB_RECONCILE_WINDOW"
 // farmer.nkeySecret). It sets NKeyFarmerPrivFile on farmer; there is no
 // default, and farmer never generates the key (certs.LoadFarmerNKey).
 const EnvFarmerNKeySeedFile = "IMAS_FARMER_NKEY_SEED_FILE"
+
+// EnvValkeyPrefix is the prefix of farmer's Valkey password and TLS
+// variables: IMAS_VALKEY_PASSWORD_FILE, IMAS_VALKEY_TLS,
+// IMAS_VALKEY_TLS_CA_FILE and IMAS_VALKEY_TLS_SERVER_NAME
+// (internal/valkeyconn; the farmer chart's valkey.auth and valkey.tls).
+const EnvValkeyPrefix = "IMAS"
 
 // Recipe template render limits on farmer (RecipeTemplateLimits), set by
 // the Helm chart's farmer.recipes.templateLimits. Unset or empty keeps
@@ -462,6 +469,13 @@ var (
 	// internal/pki/replaycache.go).
 	ValkeyAddrs string
 
+	// ValkeyOptions are farmer's Valkey password and TLS settings, from
+	// IMAS_VALKEY_PASSWORD_FILE, IMAS_VALKEY_TLS, IMAS_VALKEY_TLS_CA_FILE
+	// and IMAS_VALKEY_TLS_SERVER_NAME (see internal/valkeyconn). Read from
+	// the environment only, never through the config file; LoadConfig
+	// stops farmer when one is set but unusable.
+	ValkeyOptions valkeyconn.Options
+
 	// S3Endpoint/S3AccessKeyID/S3SecretAccessKey/S3UseSSL/S3Bucket
 	// configure the object-storage backend recipes are read from (see
 	// internal/objectstore, internal/cook/store.go).
@@ -676,6 +690,13 @@ func LoadConfig(binary string) {
 					jety.Set("s3jobbucket", v)
 				}
 			}
+			// The password file and the TLS CA are read here, once: set
+			// but unreadable, empty or not PEM stops farmer.
+			vo, err := valkeyconn.Load(EnvValkeyPrefix, os.Getenv)
+			if err != nil {
+				log.Fatalf("%v", err)
+			}
+			ValkeyOptions = vo
 			acc, expected, err := accountStoreFromEnv(jety.GetString("s3endpoint"), jety.GetBool("s3usessl"))
 			if err != nil {
 				log.Fatalf("%v", err)

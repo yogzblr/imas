@@ -24,6 +24,7 @@ repository.
 | Per-tenant signing and account keys (`nats-tsign-<tenant>`, `nats-tacct-<tenant>`) | Transit | The tenant cannot mint or revoke; offboard and re-provision |
 | Gateway JWT key (`imas-gateway-jwt`) | Transit | Gateway JWTs cannot be issued or verified; sprouts re-enrol |
 | Per-tenant payload-encryption keypairs | KV v2 `secret/imas/tenant-x25519/tenants/<tenant>` | Sealed payloads to and from that tenant's sprouts cannot be opened; re-enrol |
+| Valkey's password (`valkey_password`) | KV v2 `secret/platform/imas/nats-seeds`, next to the ops-written NATS seeds | Generate a new one and restart Valkey, farmer and saasapi (5.6); Valkey's data is only claims and heartbeats, which refill |
 | API certificate and bus certificates | PKI mount | Reissue (the CA is regenerated, every client pins the new root) |
 | Roles, policies | Auth and ACL | Rewritten by the bootstrap Job |
 
@@ -190,6 +191,46 @@ Snapshot first. Upgrade standbys one at a time and the active node last,
 following OpenBao's upgrade documentation for the version step. Do not skip
 versions that the documentation says must be taken in order. After the
 upgrade run the checks in section 9.
+
+### 5.6 Valkey's password
+
+farmer and saasapi authenticate to Valkey as its `default` user (unit S5;
+`deploy/helm/farmer/README.md`, "Valkey"). The password is property
+`valkey_password` of the KV v2 path the NATS seeds live in,
+`secret/platform/imas/nats-seeds` (`externalSecrets.seedMount` and
+`externalSecrets.seedPath`). ESO copies it into Secret `imas-valkey-auth`
+(key `password`), which farmer, saasapi and the bundled Valkey mount as a
+file; it is never an environment variable, a Helm value or a ConfigMap.
+
+- **Who generates it.** The core chart's OpenBao bootstrap Job, on every
+  install and upgrade: 32 random bytes, base64 without padding, written only
+  when the property is absent, with check-and-set (`kv put -cas=0` for a new
+  path, `kv patch -cas=<current version>` next to the seeds), so it never
+  overwrites a password or touches a seed. The Job runs only with the
+  bundled OpenBao and a bootstrap token. With an external OpenBao, ops
+  writes it once, the same way:
+
+  ```bash
+  head -c 32 /dev/urandom | base64 | tr -d '=\n' |
+    bao kv patch secret/platform/imas/nats-seeds valkey_password=-
+  ```
+
+  (`bao kv put -cas=0 ...` instead if the path does not exist yet.) The
+  value goes on stdin, never on the command line.
+- **Who reads it.** ESO's read-only SecretStore role, which already reads
+  this path for the seeds; nothing else in imas has a policy on it.
+- **Rotation.** Write a new value (the command above with `kv patch`, no
+  `-cas`), wait for ESO to sync `imas-valkey-auth` (or force it:
+  `kubectl annotate externalsecret imas-valkey-auth force-sync=$(date +%s) --overwrite`),
+  then restart Valkey, farmer and saasapi
+  (`kubectl rollout restart deployment/<release>-valkey deployment/<release>-farmer deployment/<release>-farmer-saasapi`,
+  or the Valkey StatefulSet in the replicated mode). The processes read the
+  password once at start; until all three have restarted, the ones on the
+  old password cannot reach Valkey, so enrolment and refresh fail closed
+  for that window. An external Valkey's password is changed there first.
+- **Lost.** Generate a new one as above and restart all three: Valkey's
+  data (replay claims, heartbeats, rate-limit state) is short-lived and
+  refills.
 
 ## 6. Disaster recovery
 

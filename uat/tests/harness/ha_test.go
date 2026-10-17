@@ -43,6 +43,7 @@ func TestHANamesMatchTheHubScripts(t *testing.T) {
 		"CORE_NS": CoreNamespace, "CORE_RELEASE": CoreRelease, "UAT_NS": UATNamespace,
 		"FARMER_FULLNAME": FarmerDeployment, "SAASAPI_FULLNAME": SaaSAPIDeployment, "OPENBAO_STS": OpenBaoStatefulSet,
 		"PXC_CLUSTER": PXCCluster, "PXC_ROOT_SECRET": PXCRootSecret, "VALKEY_NAME": ValkeyName,
+		"VALKEY_AUTH_SECRET": ValkeyAuthSecret, "VALKEY_AUTH_KEY": ValkeyAuthKey,
 		"KEYCLOAK_DEPLOY": KeycloakDeployment, "EDGE_DEPLOY": EdgeDeployment,
 		"DMZ_NAMESPACE": DMZNamespace, "DMZ_RELEASE": DMZRelease, "DMZ_BUS_NAME": BusStatefulSet, "DMZ_ENVOY_NAME": EnvoyDeployment,
 	} {
@@ -194,6 +195,8 @@ func TestCheckStateful(t *testing.T) {
 	sealed := "false"
 	core, calls := fakeKube("core", func(args string, stdin []byte) (string, error) {
 		switch {
+		case strings.HasPrefix(args, "get secret") && strings.Contains(args, ValkeyAuthSecret):
+			return `{"data":{"password":"dmFsa2V5cHc="}}`, nil
 		case strings.HasPrefix(args, "get secret"):
 			return `{"data":{"root":"cm9vdHB3"}}`, nil
 		case strings.Contains(args, "component=pxc"):
@@ -212,9 +215,11 @@ func TestCheckStateful(t *testing.T) {
 		case strings.HasPrefix(args, "exec") && strings.Contains(args, "bao status"):
 			self := strings.Contains(args, OpenBaoStatefulSet+"-1 ")
 			return `{"sealed":` + sealed + `,"is_self":` + strconv.FormatBool(self) + `}`, nil
-		case strings.HasPrefix(args, "exec") && strings.Contains(args, "info replication"):
+		case strings.HasPrefix(args, "exec") && strings.Contains(args, "valkey-cli") && string(stdin) != "valkeypw\n":
+			return "", errors.New("the Valkey password must come on stdin")
+		case strings.HasPrefix(args, "exec") && strings.Contains(args, "valkey-cli -e info replication"):
 			return "# Replication\r\nrole:master\r\nconnected_slaves:1\r\n", nil
-		case strings.HasPrefix(args, "exec"):
+		case strings.HasPrefix(args, "exec") && strings.Contains(args, "valkey-cli -e ping"):
 			return "PONG\n", nil
 		}
 		return "", errors.New("unexpected " + args)
@@ -228,7 +233,7 @@ func TestCheckStateful(t *testing.T) {
 		t.Errorf("%+v", rep)
 	}
 	for _, c := range *calls {
-		if strings.Contains(c, "rootpw") {
+		if strings.Contains(c, "rootpw") || strings.Contains(c, "valkeypw") {
 			t.Errorf("the password reached a command line: %s", c)
 		}
 	}

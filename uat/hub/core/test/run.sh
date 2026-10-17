@@ -15,7 +15,8 @@
 #      check, key reuse, file modes)
 #   7. bind-tenant.sh, token.sh and install.sh argument checks
 #      (7c: helm_pull_chart, the oci:// chart pull, against a stub helm)
-#   8. openbao-bootstrap.sh, saasapi-secrets.sh and the T4 probe
+#   8. openbao-bootstrap.sh, saasapi-secrets.sh (with Valkey's password)
+#      and the T4 probe
 #      (openbao_t4) against a real local OpenBao server, when a bao binary
 #      is on PATH or in $BAO_BIN (skipped, and said so, otherwise)
 #   8a. openbao-bootstrap.sh on an HA core hub (static seal, three raft
@@ -615,6 +616,8 @@ if [[ -n "$bao_bin" && -x "$bao_bin" ]] && ! (exec 3<>/dev/tcp/127.0.0.1/8200) 2
 		b kv put secret/imas/tenant-x25519/saasapi-box pub=PUB priv=PRIVBOX
 		b kv put secret/imas/tenant-x25519/controlplane-pub platform_pub=PLATPUB saasapi_box_pub=PUB
 		b kv put secret/imas/tenant-x25519/platform pub=P priv=PLATFORM_PRIVATE origin=x
+		# Valkey's password next to a seed, as the bootstrap Job leaves it.
+		b kv put secret/platform/imas/nats-seeds valkey_password=VALKEYPW sys_user=SUSYSUSERSEEDNEVERREAD
 		mkdir -p "$ostate/core/sensitive/seeds"
 		printf 'SUFAKESAASAPIUSERSEED' >"$ostate/core/sensitive/seeds/saasapi-user.nk"
 		if PATH="$stubs:$tmp/baobin:$PATH" "$core/saasapi-secrets.sh" "$kubeconfig" "$ep" "$ostate" >"$tmp/out" 2>&1; then
@@ -626,6 +629,11 @@ if [[ -n "$bao_bin" && -x "$bao_bin" ]] && ! (exec 3<>/dev/tcp/127.0.0.1/8200) 2
 			jq -e '(.data | keys | sort) == ["SAASAPI_PLATFORM_BOX_PUB", "saasapi-box.key"] and (.data["saasapi-box.key"] | @base64d) == "PRIVBOX" and (.data.SAASAPI_PLATFORM_BOX_PUB | @base64d) == "PLATPUB"' "$box" >/dev/null &&
 				ok "saasapi-secrets: imas-saasapi-box has exactly priv and platform_pub" || bad "saasapi-secrets: imas-saasapi-box"
 			! grep -rq PLATFORM_PRIVATE "$STUB_STATE" "$ostate" && ok "saasapi-secrets: the platform private key is never read" || bad "saasapi-secrets: platform key read"
+			jq -e '(.data | keys) == ["password"] and (.data.password | @base64d) == "VALKEYPW"' "$STUB_STATE/imas-core/Secret/imas-valkey-auth.json" >/dev/null &&
+				! grep -rq SUSYSUSERSEEDNEVERREAD "$STUB_STATE" "$ostate" &&
+				ok "saasapi-secrets: imas-valkey-auth has exactly the password, and no seed is read" || bad "saasapi-secrets: imas-valkey-auth"
+			! grep -q VALKEYPW "$STUB_STATE/calls.log" "$tmp/out" && ok "saasapi-secrets: Valkey's password is never on a command line or printed" ||
+				bad "saasapi-secrets: Valkey's password leaked"
 			[[ -z "$(find "$ostate/core/sensitive" -name 'saasapi-secrets.*')" ]] && ok "saasapi-secrets: temporary files removed" || bad "saasapi-secrets: temporary files left"
 			opt="$ostate/core/sensitive/saasapi-operator-token"
 			optok="$STUB_STATE/imas-core/Secret/imas-saasapi-operator-token.json"

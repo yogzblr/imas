@@ -66,9 +66,9 @@ var errSignatureReplayed = errors.New("signed request already used")
 // verification accepts only one byte form: a non-canonical scalar or
 // point encoding fails). It covers the signature and not only the payload
 // because a refresh payload is predictable (a domain tag, a timestamp and
-// a public nkey_pub), and farmer's Valkey connection has no auth yet:
-// anyone able to write to Valkey could otherwise claim a sprout's future
-// payloads in advance and lock it out of refreshing. The signature can
+// a public nkey_pub): anyone able to write to Valkey (since unit S5 that
+// needs its password, internal/valkeyconn) could otherwise claim a
+// sprout's future payloads in advance and lock it out of refreshing. The signature can
 // only be computed with the NKey seed. The signature is a fixed 64 bytes,
 // so putting it first keeps the hashed input unambiguous.
 //

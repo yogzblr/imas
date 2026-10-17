@@ -110,9 +110,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "imas-farmer.dbSecretName" . }}
                   key: {{ .Values.database.existingSecretKeys.farmerDSN }}
-            {{- with include "imas-farmer.valkeyAddrs" . }}
+            {{- if include "imas-farmer.valkeyAddrs" . }}
             - name: IMAS_VALKEY_ADDRS
-              value: {{ . | quote }}
+              value: {{ include "imas-farmer.valkeyAddrs" . | quote }}
+            # Valkey's password (a file, never a value) and TLS (unit S5).
+            {{- include "imas-farmer.valkey.env" (dict "root" . "prefix" "IMAS") | nindent 12 }}
             {{- end }}
             {{- /* objectStore.endpoint, or the Versity Gateway's Service
             (versity.enabled), which the accounts bucket falls back to
@@ -317,6 +319,9 @@ spec:
               mountPath: {{ .Values.farmer.nkeySecret.mountPath }}
               readOnly: true
             {{- include "imas-farmer.natsTrustVolumeMount" . | nindent 12 }}
+            {{- if include "imas-farmer.valkeyAddrs" . }}
+            {{- include "imas-farmer.valkey.volumeMounts" . | nindent 12 }}
+            {{- end }}
             - name: tls
               mountPath: {{ $tlsDir }}
               {{- if eq .Values.tls.mode "secret" }}
@@ -353,6 +358,9 @@ spec:
                 path: {{ .Values.farmer.nkeySecret.key | quote }}
         # Public trust only; written by the bootstrap Job.
         {{- include "imas-farmer.natsTrustVolume" . | nindent 8 }}
+        {{- if include "imas-farmer.valkeyAddrs" . }}
+        {{- include "imas-farmer.valkey.volumes" . | nindent 8 }}
+        {{- end }}
         {{- if eq .Values.tls.mode "secret" }}
         - name: tls
           secret:

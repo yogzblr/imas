@@ -137,3 +137,44 @@ Search gate: `IMAS_VALKEY_ADDRS`, `SAASAPI_VALKEY_ADDRS`, `valkey.NewClient`,
 `ClientOption`, `VALKEY_PASSWORD`, `valkey-cli`, `valkey.enabled`, `valkey.addrs`,
 `SetReplayCacheClient`, `SetReadinessValkey`, `heartbeat.SetClient`, `no auth or
 TLS`, `Neither client` across `cmd/`, `internal/`, `deploy/`, `uat/`, `docs/`.
+
+## Brief corrections (build, 2026-10-17)
+
+Decided by the order in `ORCHESTRATOR.md` rule 6; none conflicts with a
+numbered owner decision.
+
+1. **Bundled Valkey and TLS.** The subchart (`valkey-io/valkey-helm`
+   0.12.0) supports TLS (`tls.enabled`, `tls.existingSecret` with
+   `server.crt`, `server.key`, `ca.crt`; it then serves TLS on 6379), so by
+   decision 4 the bundled Valkey gets TLS. The chart does not refuse
+   `valkey.enabled` with `valkey.tls.enabled`; it refuses it without
+   `valkey.tls.existingSecret`, with a message that also points to an
+   external Valkey. The test "bundled Valkey with TLS on fails with the
+   message" is that test. The port stays 6379, so the NetworkPolicies and
+   `valkeyPort` don't change.
+2. **Where the bundled Valkey reads the password.** The subchart's own
+   authentication takes it by reference (`auth.usersExistingSecret`,
+   templated to `valkey.auth.secretName`, user `default`, `passwordKey`
+   `valkey.auth.key`): its init step mounts the Secret at
+   `/valkey-users-secret` and writes the password's SHA-256 into the ACL
+   file, and replicas get `masteruser default`/`masterauth` from it. It is
+   not mounted at `/var/run/secrets/imas/valkey/password` in Valkey's pods;
+   that path is farmer's and saasapi's.
+3. **The KV mount.** The seed path had no mount in values; the bootstrap
+   Job writes `valkey_password` to the new `externalSecrets.seedMount`
+   (default `secret`, the KV v2 mount the SecretStore reads). The Job runs
+   only with the bundled OpenBao; with an external OpenBao, ops writes the
+   property (`docs/OPENBAO-RUNBOOK.md` 5.6). The write is a check-and-set
+   `kv patch` (or `kv put -cas=0` for a new path), so the seeds in the same
+   path are kept.
+4. **The harness did not pass a password.** `uat/tests/harness/ha.go` used
+   `VALKEY_PASSWORD` from the Valkey pod's environment, which nothing sets.
+   It now reads Secret `imas-valkey-auth` and passes the password on stdin
+   into `VALKEYCLI_AUTH`, with `valkey-cli -e`, never on a command line.
+5. **The UAT has no ESO.** `uat/hub/core/saasapi-secrets.sh` delivers
+   `imas-valkey-auth` from the bootstrap Job's `valkey_password` (as it
+   does saasapi's Secrets), and `check.sh` checks that Valkey refuses a
+   client without the password.
+6. **The subchart's metrics exporter** takes the password as an env var
+   (`REDIS_PASSWORD`), which the owner decision forbids, so the chart
+   refuses `valkey.metrics.enabled` with `valkey.auth.enabled`.

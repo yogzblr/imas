@@ -6,7 +6,11 @@
 # install"): imas-saasapi-nats (saasapi's NATS seed and the User JWT the
 # publish Job wrote to OpenBao) and imas-saasapi-box (saasapi's box
 # private key and the platform public key the keygen Job wrote). Exactly
-# the fields the README names, and never <base>/platform. And the operator
+# the fields the README names, and never <base>/platform. And Valkey's
+# password (unit S5): Secret imas-valkey-auth, key password, from property
+# valkey_password of secret/platform/imas/nats-seeds, which the chart's
+# OpenBao bootstrap Job generates; Valkey, farmer and saasapi all wait for
+# it (the chart's ExternalSecret imas-valkey-auth, by hand). And the operator
 # plane's bearer token (saasapi.operator.token, P20 option C): a random
 # 64-character token, generated once per run into
 # <state>/core/sensitive/saasapi-operator-token and kept on re-runs, in
@@ -44,11 +48,13 @@ trap 'rm -rf "$tmp"' EXIT
 kv_field "secret/platform/imas/saasapi-nats-user" jwt "$tmp/jwt"
 kv_field "secret/imas/tenant-x25519/saasapi-box" priv "$tmp/box.key"
 kv_field "secret/imas/tenant-x25519/controlplane-pub" platform_pub "$tmp/platform.pub"
+kv_field "secret/platform/imas/nats-seeds" valkey_password "$tmp/valkey-password"
 
 apply_secret "$CORE_NS" "$SAASAPI_NATS_SECRET" \
 	"nats-user.nk=$SEEDS_DIR/saasapi-user.nk" "SAASAPI_NATS_USER_JWT=$tmp/jwt"
 apply_secret "$CORE_NS" "$SAASAPI_BOX_SECRET" \
 	"saasapi-box.key=$tmp/box.key" "SAASAPI_PLATFORM_BOX_PUB=$tmp/platform.pub"
+apply_secret "$CORE_NS" "$VALKEY_AUTH_SECRET" "$VALKEY_AUTH_KEY=$tmp/valkey-password"
 
 # saasapi refuses an operator token equal to the BFF's secret; two random
 # draws never are, but a hand-edited state directory could be.

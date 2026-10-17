@@ -17,6 +17,9 @@ valkey:
   # addrs:
   #   - valkey-0.valkey:6379
   #   - valkey-1.valkey:6379
+  # The password (SAASAPI_VALKEY_PASSWORD_FILE) and TLS
+  # (SAASAPI_VALKEY_TLS*) are deploy/helm/farmer's valkey.auth and
+  # valkey.tls, shared with farmer; see README.md.
 
 enrollmentKeys:
   rateLimit:

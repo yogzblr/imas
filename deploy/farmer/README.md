@@ -29,7 +29,7 @@ chart can still apply these by hand, as before.
 |---|---|
 | `farmer-deployment-nats-seeds.patch.yaml` | Volume, mount, and env vars for farmer's Deployment (part 1) |
 | `saasapi-credential-publish-job.yaml` | The Job, its ServiceAccount, and its NetworkPolicy (part 2) |
-| `externalsecrets.yaml` | ESO wiring for the seeds, farmer's NKey and the published JWT |
+| `externalsecrets.yaml` | ESO wiring for the seeds, farmer's NKey, Valkey's password and the published JWT |
 | `values.job-reconcile.yaml` | Values block for the job reconcile window (see the last section) |
 | `deployment.env.job-reconcile.yaml` | Template fragment to paste under the farmer container's `env:` list |
 
@@ -58,6 +58,9 @@ exact patch is in `farmer-deployment-nats-seeds.patch.yaml`;
 | Mount | `/var/run/secrets/imas/farmer-nkey`, `readOnly: true` |
 | Env var | `IMAS_FARMER_NKEY_SEED_FILE=/var/run/secrets/imas/farmer-nkey/farmer.nk` (required, never generated) |
 | Secret source | ESO `ExternalSecret` `imas-farmer-nkey`, from the same seed path, property `farmer_nkey`; a Secret of its own, which saasapi and the Jobs never mount |
+| Volume and mount | `valkey-auth`: `secret.secretName: imas-valkey-auth`, `items`: `password`, `defaultMode: 0440`, at `/var/run/secrets/imas/valkey`, `readOnly: true` (unit S5; saasapi mounts the same) |
+| Env var | `IMAS_VALKEY_PASSWORD_FILE=/var/run/secrets/imas/valkey/password` (the password is never an env var; `SAASAPI_VALKEY_PASSWORD_FILE` in saasapi) |
+| Secret source | ESO `ExternalSecret` `imas-valkey-auth`, from the same seed path, property `valkey_password`, which the OpenBao bootstrap Job generates when absent and never overwrites (`deploy/helm/farmer` README, "Valkey") |
 
 The old `operator`, `operator_signing`, `sys_account`, `tenant` and
 `tenant_signing` seeds are not read by anything; delete them from the

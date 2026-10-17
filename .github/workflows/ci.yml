@@ -37,8 +37,9 @@ jobs:
           --health-timeout 5s
           --health-retries 60
       # Valkey, the image version the farmer chart's valkey subchart
-      # (0.12.0) runs, for TestValkeyLimiterRealServer
-      # (SAASAPI_TEST_VALKEY_ADDR, internal/saasapi).
+      # (0.12.0) runs, for TestValkeyLimiterRealServer (internal/saasapi)
+      # and TestCheckEvictionRealServer (internal/valkeyconn), both through
+      # SAASAPI_TEST_VALKEY_ADDR.
       valkey:
         image: valkey/valkey:9.1.2
         ports:
@@ -104,7 +105,8 @@ jobs:
 
       # The real-OpenBao tests (internal/certs, internal/gatewayjwt,
       # internal/pki, internal/pki/natskeys, the farmer chart's Transit
-      # policy tests, internal/ingredients/sdb/openbao) against OpenBao
+      # policy tests and its Valkey password step,
+      # internal/ingredients/sdb/openbao) against OpenBao
       # 2.7.1 dev servers, the version the charts pin: one on plain HTTP and
       # one on TLS for sdb. Without their addresses they skip. The tokens are
       # throwaways for this job's servers.
@@ -121,6 +123,9 @@ jobs:
           echo "${OPENBAO_SHA256}  ${tarball}" | sha256sum --check --strict
           mkdir -p bin bao-tls
           tar -xzf "$tarball" -C bin bao
+          # The bao CLI on PATH too: the farmer chart's
+          # TestOpenBaoValkeyPassword runs the bootstrap Job's script with it.
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
           token="$(openssl rand -hex 24)"
           sdb_token="$(openssl rand -hex 24)"
           echo "::add-mask::$token"
@@ -155,7 +160,8 @@ jobs:
       # pass without having rendered the charts. IMAS_TEST_MYSQL_ROOT_DSN
       # runs the MySQL tests against the pxc service; set, they fail rather
       # than skip if it does not answer. SAASAPI_TEST_VALKEY_ADDR runs the
-      # Valkey rate limiter test against the valkey service.
+      # Valkey rate limiter test and the INFO memory check against the
+      # valkey service.
       - name: Test with race detection and coverage
         env:
           IMAS_REQUIRE_HELM: "1"

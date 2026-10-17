@@ -72,7 +72,7 @@ The core needs these before farmer can enroll a single sprout:
 |---|---|---|
 | **PXC** (Percona XtraDB Cluster / MySQL 8) with a `farmer` and a `saas` schema | farmer (`IMAS_PXC_DSN`), saasapi (`SAASAPI_DSN`) | farmer exits at startup without it. The grants are design doc §5.1; see [`deploy/helm/farmer/README.md`](../deploy/helm/farmer/README.md), "PXC". |
 | **OpenBao** | farmer: PKI (API certificate), Transit `imas-gateway-jwt` (gateway JWTs), KV v2 `secret/imas/tenant-x25519/tenants/<tenant>` (one payload-encryption keypair per tenant, generated fresh; nothing is read at `secret/imas/tenant-x25519` itself) | farmer starts without the Transit key, but `POST /v1/enroll` fails closed until it is configured. Without OpenBao PKI you must place farmer's certificate and key yourself. |
-| **Valkey** | farmer (heartbeats, enrollment replay cache), saasapi (rate limits, `connected`) | `/v1/enroll` and `/v1/refresh` fail closed without it. Give farmer and saasapi the same address list. |
+| **Valkey** | farmer (heartbeats, enrollment replay cache), saasapi (rate limits, `connected`) | `/v1/enroll` and `/v1/refresh` fail closed without it. Give farmer and saasapi the same address list. Both authenticate with a password (a file from Secret `imas-valkey-auth`, generated into OpenBao by the core chart's bootstrap Job), can use TLS (`valkey.tls.*`, expected for a production Valkey), and warn if Valkey may evict keys: run it with `maxmemory-policy noeviction`. See [`deploy/helm/farmer/README.md`](../deploy/helm/farmer/README.md), "Valkey". |
 | **S3-compatible object storage** | farmer: recipes and job logs, in two different buckets; saasapi: tenant recipe uploads, with its own credential | recipe and job requests fail until it's configured. The Helm chart opens farmer's egress to `objectStore.endpoint`'s port by itself. For Azure Blob, the core chart can run Versity Gateway in front of it (`versity.enabled`), which then is the S3 endpoint and creates the buckets and their users. |
 | **Keycloak** | saasapi verifies the end-user JWTs the BFF forwards | saasapi won't authenticate anything without it. |
 
@@ -191,6 +191,14 @@ sproutbusurls:                         # nats_urls handed to sprouts at enrollme
 
 Each of those keys can also be set from the environment (`IMAS_PXC_DSN`,
 `IMAS_VALKEY_ADDRS`, `IMAS_S3_*`, `IMAS_SPROUT_BUS_URLS`, `FARMERBUSURL`).
+Valkey's password and TLS come from the environment only: put the password
+in a file readable by `farmer` alone and set `IMAS_VALKEY_PASSWORD_FILE` to
+it (never the password itself), and for TLS `IMAS_VALKEY_TLS=true`,
+`IMAS_VALKEY_TLS_CA_FILE` (the PEM CA, required) and optionally
+`IMAS_VALKEY_TLS_SERVER_NAME`. A password file that is missing or empty, or
+TLS without a usable CA, stops farmer at startup. Restart farmer to rotate
+the password. Set Valkey's `maxmemory-policy` to `noeviction`: farmer warns
+at startup otherwise.
 The OpenBao clients are configured only from the environment. Put them in a
 drop-in (`systemctl edit imas-farmer`), and use a token that carries only
 that client's policy:

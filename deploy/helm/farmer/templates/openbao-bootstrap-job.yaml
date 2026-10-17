@@ -23,6 +23,10 @@ silently editing a reviewed policy.
 {{- if .Values.natsTrust.kvCopy.enabled -}}
 {{- $kvMounts = append $kvMounts "secret" -}}
 {{- end -}}
+{{- $es := .Values.externalSecrets -}}
+{{- if .Values.valkey.auth.enabled -}}
+{{- $kvMounts = append $kvMounts $es.seedMount -}}
+{{- end -}}
 {{- $kvMounts = uniq $kvMounts -}}
 {{- $jobName := printf "%s-openbao-bootstrap" (include "imas-farmer.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- $busNames := $bs.farmerbus.allowedNames -}}
@@ -121,7 +125,8 @@ spec:
               umask 077
               # Idempotent: every step checks before it creates, so each
               # run re-applies policies and roles. Never writes NATS
-              # seeds: there are none to write.
+              # seeds: there are none to write (only Valkey's password,
+              # next to them, when absent; below).
               until bao status >/dev/null 2>&1; do echo "waiting for OpenBao at $BAO_ADDR"; sleep 3; done
               if ! bao token lookup >/dev/null 2>&1; then
                 echo "the bootstrap token in Secret {{ default $jobName $bs.tokenSecretName }} is not valid (revoked by an earlier run?): delete the Secret, or put a fresh root token from the recovery quorum in it (README.md, \"OpenBao bootstrap token\")" >&2
@@ -136,6 +141,36 @@ spec:
                 || bao write -f transit/keys/{{ $ob.gateway.keyName }} type=ed25519
               {{- range $kvMounts }}
               has_mount {{ . }} || bao secrets enable -path={{ . }} -version=2 kv
+              {{- end }}
+              {{- if .Values.valkey.auth.enabled }}
+
+              # valkey-password: begin
+              # Valkey's password (unit S5): property valkey_password of the
+              # seed path, 32 random bytes, base64 without padding. Generated
+              # only when absent and never overwritten: a patch (or a first
+              # put) with check-and-set, so the seeds in the same path are
+              # kept and a concurrent writer wins. The value goes over stdin
+              # and is never printed. ESO (or the operator) copies it into
+              # Secret {{ .Values.valkey.auth.secretName }}.
+              vkv={{ printf "%s/%s" $es.seedMount (trimAll "/" $es.seedPath) | quote }}
+              vmeta={{ printf "%s/metadata/%s" $es.seedMount (trimAll "/" $es.seedPath) | quote }}
+              if bao kv get -field=valkey_password "$vkv" >/dev/null 2>&1; then
+                echo "valkey_password exists in $vkv: kept"
+              else
+                if vver="$(bao read -field=current_version "$vmeta" 2>/dev/null)"; then
+                  vop="patch -cas=$vver"
+                else
+                  vop="put -cas=0"
+                fi
+                # $vop is two words on purpose.
+                # shellcheck disable=SC2086
+                if ! head -c 32 /dev/urandom | base64 | tr -d '=\n' | bao kv $vop "$vkv" valkey_password=- >/dev/null; then
+                  echo "could not add valkey_password to $vkv (another writer, or its latest version deleted?): nothing was overwritten; see docs/OPENBAO-RUNBOOK.md, 5.6" >&2
+                  exit 1
+                fi
+                echo "valkey_password generated in $vkv"
+              fi
+              # valkey-password: end
               {{- end }}
               {{- if $needPKI }}
 

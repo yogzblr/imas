@@ -49,6 +49,7 @@ import (
 	"github.com/yogzblr/imas/internal/rbac"
 	"github.com/yogzblr/imas/internal/saasapicred"
 	"github.com/yogzblr/imas/internal/tenantconn"
+	"github.com/yogzblr/imas/internal/valkeyconn"
 
 	nats "github.com/nats-io/nats.go"
 	valkey "github.com/valkey-io/valkey-go"
@@ -592,14 +593,19 @@ func initGatewaySigner() {
 // listener itself is registered separately, by initSystemAccountListeners,
 // once the bus is reachable. Not fatal if Valkey is unreachable, but
 // POST /v1/enroll and /v1/refresh fail closed without it, and /health
-// reports the missing client.
+// reports the missing client. It authenticates with the password from
+// IMAS_VALKEY_PASSWORD_FILE and uses TLS with IMAS_VALKEY_TLS
+// (config.ValkeyOptions; LoadConfig already refused unusable settings),
+// then warns if Valkey may evict keys (valkeyconn.CheckEviction).
 func initValkeyClient() {
 	addrs := strings.Split(config.ValkeyAddrs, ",")
-	client, err := valkey.NewClient(valkey.ClientOption{InitAddress: addrs})
+	client, err := valkey.NewClient(config.ValkeyOptions.ClientOption(addrs))
 	if err != nil {
-		log.Errorf("failed to connect to Valkey at %v (POST /v1/enroll and /v1/refresh will fail until it is reachable): %v", addrs, err)
+		log.Errorf("failed to connect to Valkey at %v (%v; POST /v1/enroll and /v1/refresh will fail until it is reachable): %v", addrs, config.ValkeyOptions, err)
 		return
 	}
+	log.Infof("Valkey client connected to %v (%v)", addrs, config.ValkeyOptions)
+	valkeyconn.CheckEviction(context.Background(), client, log.Warnf)
 	heartbeat.SetClient(client)
 	// A sprout that is denied, rejected, unaccepted or deleted loses its
 	// Valkey acceptance marker and presence key at once, on every replica.
