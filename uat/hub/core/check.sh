@@ -5,6 +5,9 @@
 #   - farmer, saasapi, PXC (cluster, pxc and haproxy), Valkey and OpenBao
 #     (initialised, unsealed, the ed25519 gateway key) are Ready, and so
 #     are RustFS, Keycloak and the edge proxy;
+#   - Valkey (unit S5) refuses a client without the password, answers one
+#     with the password from Secret imas-valkey-auth, and runs with
+#     maxmemory-policy noeviction;
 #   - on an HA core hub (several core nodes; values/values-ha.yaml): farmer,
 #     saasapi and Versity Gateway run 3 replicas on 3 different nodes, the
 #     edge one per node, PXC 3 nodes and 3 HAProxy, Valkey a primary and 2
@@ -110,9 +113,36 @@ if [[ $HA_CORE == true ]]; then
 		check "HA: OpenBao $OPENBAO_STS-$i unsealed by the static seal" jq -e '.initialized == true and .sealed == false and .type == "static"' <<<"${st:-{\}}"
 	done
 fi
-for s in "$SAASAPI_NATS_SECRET" "$SAASAPI_BOX_SECRET" "$SEEDS_SECRET" "$FARMER_NKEY_SECRET" "$INTERNAL_AUTH_SECRET" "$OPERATOR_TLS_SECRET" "$OPERATOR_TOKEN_SECRET"; do
+for s in "$SAASAPI_NATS_SECRET" "$SAASAPI_BOX_SECRET" "$SEEDS_SECRET" "$FARMER_NKEY_SECRET" "$INTERNAL_AUTH_SECRET" "$OPERATOR_TLS_SECRET" "$OPERATOR_TOKEN_SECRET" "$VALKEY_AUTH_SECRET"; do
 	check "Secret $CORE_NS/$s exists" kc -n "$CORE_NS" get secret "$s"
 done
+
+# --- Valkey: password and no eviction (unit S5) -------------------------------
+# valkey_cli <auth|noauth> <args...>: valkey-cli -e (an error reply fails it)
+# in Valkey's primary. With auth, the password goes from the Secret over
+# stdin into VALKEYCLI_AUTH, never onto a command line.
+valkey_cli() {
+	local mode=$1 target="deploy/$VALKEY_NAME"
+	shift
+	[[ $HA_CORE == true ]] && target="$VALKEY_NAME-0"
+	if [[ $mode == auth ]]; then
+		kc -n "$CORE_NS" get secret "$VALKEY_AUTH_SECRET" -o json | jq -je --arg k "$VALKEY_AUTH_KEY" '.data[$k] | @base64d' |
+			kc -n "$CORE_NS" exec -i "$target" -- /bin/sh -ec \
+				'IFS= read -r VALKEY_PASSWORD || [ -n "$VALKEY_PASSWORD" ]; VALKEYCLI_AUTH="$VALKEY_PASSWORD" valkey-cli -e "$@"' _ "$@"
+	else
+		kc -n "$CORE_NS" exec "$target" -- valkey-cli -e "$@"
+	fi
+}
+valkey_refuses_without_password() {
+	local out
+	if out=$(valkey_cli noauth ping 2>&1); then return 1; fi
+	[[ $out == *NOAUTH* ]]
+}
+valkey_answers_with_password() { [[ "$(valkey_cli auth ping)" == PONG ]]; }
+valkey_noeviction() { valkey_cli auth config get maxmemory-policy | grep -qx noeviction; }
+check "Valkey refuses a client without the password" valkey_refuses_without_password
+check "Valkey answers with the password ($VALKEY_AUTH_SECRET)" valkey_answers_with_password
+check "Valkey maxmemory-policy is noeviction" valkey_noeviction
 
 bao_st=$(kc -n "$CORE_NS" exec "$OPENBAO_POD" -c openbao -- env BAO_ADDR=http://127.0.0.1:8200 bao status -format=json 2>/dev/null || true)
 [[ -n "$bao_st" ]] || bao_st='{}'

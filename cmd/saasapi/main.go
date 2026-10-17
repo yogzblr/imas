@@ -26,6 +26,7 @@ import (
 	"github.com/yogzblr/imas/internal/migrations"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/saasapi"
+	"github.com/yogzblr/imas/internal/valkeyconn"
 )
 
 func main() {
@@ -58,13 +59,20 @@ func main() {
 	// error on an individual request falls back to this pod's own limit
 	// instead (see saasapi.NewValkeyLimiter). Client-side caching is off:
 	// neither the limiter nor heartbeat.IsOnline reads a cacheable value.
+	// The password and TLS come from SAASAPI_VALKEY_PASSWORD_FILE and
+	// SAASAPI_VALKEY_TLS* (cfg.Valkey; LoadConfig already refused unusable
+	// settings).
 	var vc valkey.Client
 	if len(cfg.ValkeyAddrs) > 0 {
-		vc, err = valkey.NewClient(valkey.ClientOption{InitAddress: cfg.ValkeyAddrs, DisableCache: true})
+		opt := cfg.Valkey.ClientOption(cfg.ValkeyAddrs)
+		opt.DisableCache = true
+		vc, err = valkey.NewClient(opt)
 		if err != nil {
-			log.Fatalf("saasapi: failed to connect to Valkey at %v: %v", cfg.ValkeyAddrs, err)
+			log.Fatalf("saasapi: failed to connect to Valkey at %v (%v): %v", cfg.ValkeyAddrs, cfg.Valkey, err)
 		}
 		defer vc.Close()
+		log.Infof("saasapi: Valkey client connected to %v (%v)", cfg.ValkeyAddrs, cfg.Valkey)
+		valkeyconn.CheckEviction(context.Background(), vc, log.Warnf)
 	}
 	initHeartbeatClient(vc)
 

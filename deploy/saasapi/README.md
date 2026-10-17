@@ -24,6 +24,10 @@ all read once at startup by `saasapi.LoadConfig`:
 | `SAASAPI_ENROLLMENT_KEY_RATE_LIMIT` | `enrollmentKeys.rateLimit.perSecond` | `1` | decimal > 0 (`0.5` = one every 2 s) |
 | `SAASAPI_ENROLLMENT_KEY_RATE_BURST` | `enrollmentKeys.rateLimit.burst` | `5` | integer >= 1 |
 | `SAASAPI_VALKEY_ADDRS` | `valkey.addrs` (list) | unset | comma-separated `host:port` |
+| `SAASAPI_VALKEY_PASSWORD_FILE` | `valkey.auth.*` (the file `/var/run/secrets/imas/valkey/password`) | set by the chart | path of the password file (Secret `imas-valkey-auth`) |
+| `SAASAPI_VALKEY_TLS` | `valkey.tls.enabled` | `false` | `true` or `false` |
+| `SAASAPI_VALKEY_TLS_CA_FILE` | `valkey.tls.caConfigMap` / `caKey` | unset | path of a PEM CA bundle; required with TLS |
+| `SAASAPI_VALKEY_TLS_SERVER_NAME` | `valkey.tls.serverName` | unset | name to verify the certificate against |
 
 A tenant that exceeds the limit gets `429` with error code `rate_limited`.
 
@@ -50,9 +54,17 @@ any deployment with more than one replica (or an HPA).
   request is decided by the pod's own in-memory limiter, at the same rate
   and burst, and a warning is logged. Issuance stays available and stays
   bounded, but only per pod (see below) until Valkey is back.
-- **No auth or TLS** on the connection yet, matching farmer's Valkey
-  client. Restrict network access to Valkey (e.g. a NetworkPolicy)
-  accordingly.
+- **Password and TLS:** saasapi authenticates as Valkey user `default`
+  with the password read once at startup from
+  `SAASAPI_VALKEY_PASSWORD_FILE` (a Secret mounted as a file; never an env
+  var), and with `SAASAPI_VALKEY_TLS=true` connects with TLS 1.2 or
+  later, verifying the server against `SAASAPI_VALKEY_TLS_CA_FILE` only.
+  A password file that is missing or empty, or TLS without a usable CA,
+  stops it at startup. Rotation is a pod restart. Same settings as
+  farmer's `IMAS_VALKEY_*` (`internal/valkeyconn`; `deploy/helm/farmer`
+  README, "Valkey"). After connecting it reads `INFO memory` and warns if
+  Valkey may evict keys. Restrict network access to Valkey (e.g. a
+  NetworkPolicy) all the same.
 
 ## Without Valkey the limit is per pod
 

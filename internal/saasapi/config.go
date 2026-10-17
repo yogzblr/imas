@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/yogzblr/imas/internal/valkeyconn"
 )
 
 // Config holds the saasapi service's runtime configuration. Unlike
@@ -87,6 +89,12 @@ import (
 //     and saasapi refuses to start if it can't reach Valkey. When unset,
 //     each pod enforces it on its own, so N pods allow up to N times as
 //     much.
+//   - SAASAPI_VALKEY_PASSWORD_FILE, SAASAPI_VALKEY_TLS,
+//     SAASAPI_VALKEY_TLS_CA_FILE, SAASAPI_VALKEY_TLS_SERVER_NAME: the
+//     password and TLS settings of that Valkey, the same as farmer's
+//     IMAS_VALKEY_* ones (internal/valkeyconn). The password file and the
+//     CA are read once here: set but unreadable, empty or not PEM is a
+//     startup error. Rotation is a pod restart.
 //
 // The fleet update dispatch feature flag (see fleet_update_dispatch.go):
 //
@@ -230,6 +238,8 @@ type Config struct {
 	// ValkeyAddrs are the Valkey nodes holding the shared rate-limit
 	// state. Empty means per-pod limiting only.
 	ValkeyAddrs []string
+	// Valkey are the password and TLS settings for ValkeyAddrs.
+	Valkey valkeyconn.Options
 
 	// FleetUpdateDispatchEnabled is the fleet update dispatch feature
 	// flag, passed to SetFleetUpdateDispatchEnabled before NewRouter.
@@ -256,11 +266,15 @@ type Config struct {
 	Recipes RecipeSettings
 }
 
+// valkeyEnvPrefix is the prefix of the SAASAPI_VALKEY_PASSWORD_FILE and
+// SAASAPI_VALKEY_TLS* variables (internal/valkeyconn).
+const valkeyEnvPrefix = "SAASAPI"
+
 // LoadConfig reads the saasapi service's configuration from environment
 // variables, applying sane defaults where possible. It returns an error
-// only for a value that is set but invalid (the enrollment-key rate-limit
-// settings, the fleet update dispatch flag and clock-skew margin, the
-// outbox sweeper's settings, the recipe upload settings, and the operator
+// only for a value that is set but invalid (the Valkey password and TLS
+// settings, the enrollment-key rate-limit settings, the fleet update
+// dispatch flag and clock-skew margin, the outbox sweeper's settings, the recipe upload settings, and the operator
 // plane's settings).
 func LoadConfig() (Config, error) {
 	cfg := Config{
@@ -302,6 +316,12 @@ func LoadConfig() (Config, error) {
 
 		Recipes: DefaultRecipeSettings(),
 	}
+
+	vo, err := valkeyconn.Load(valkeyEnvPrefix, os.Getenv)
+	if err != nil {
+		return Config{}, fmt.Errorf("saasapi: %w", err)
+	}
+	cfg.Valkey = vo
 
 	if v := os.Getenv("SAASAPI_ENROLLMENT_KEY_RATE_LIMIT"); v != "" {
 		f, err := strconv.ParseFloat(v, 64)

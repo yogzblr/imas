@@ -209,9 +209,11 @@ spec:
             0.5). SAASAPI_VALKEY_ADDRS names the same Valkey farmer writes
             heartbeats to: saasapi reads them for `connected`.
             */}}
-            {{- with include "imas-farmer.valkeyAddrs" . }}
+            {{- if include "imas-farmer.valkeyAddrs" . }}
             - name: SAASAPI_VALKEY_ADDRS
-              value: {{ . | quote }}
+              value: {{ include "imas-farmer.valkeyAddrs" . | quote }}
+            # Valkey's password (a file, never a value) and TLS (unit S5).
+            {{- include "imas-farmer.valkey.env" (dict "root" . "prefix" "SAASAPI") | nindent 12 }}
             {{- end }}
             {{- with $s.enrollmentKeys.rateLimit }}
             {{- if not (kindIs "invalid" .perSecond) }}
@@ -384,6 +386,9 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            {{- if include "imas-farmer.valkeyAddrs" . }}
+            {{- include "imas-farmer.valkey.volumeMounts" . | nindent 12 }}
+            {{- end }}
             {{- if $s.recipes.enabled }}
             - name: recipes-s3
               mountPath: /var/run/secrets/imas/recipes-s3
@@ -423,6 +428,9 @@ spec:
             items:
               - key: {{ $s.controlPlaneBox.privKey | quote }}
                 path: {{ $s.controlPlaneBox.privKey | quote }}
+        {{- if include "imas-farmer.valkeyAddrs" . }}
+        {{- include "imas-farmer.valkey.volumes" . | nindent 8 }}
+        {{- end }}
         - name: bus-ca
           {{- if .Values.bus.ca.secretName }}
           secret:

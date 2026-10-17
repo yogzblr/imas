@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/taigrr/jety"
 	"github.com/yogzblr/imas/internal/log"
 	"github.com/yogzblr/imas/internal/natsretry"
+	"github.com/yogzblr/imas/internal/valkeyconn"
 )
 
 // resetForTest resets the sync.Once so LoadConfig can be called again,
@@ -1728,6 +1730,77 @@ func TestAccountStoreFromEnv(t *testing.T) {
 			t.Setenv(bad.env, bad.val)
 			if _, _, err := accountStoreFromEnv("", true); err == nil || !strings.Contains(err.Error(), bad.env) {
 				t.Fatalf("want an error naming %s, got %v", bad.env, err)
+			}
+		})
+	}
+}
+
+// farmer reads its Valkey password and TLS settings from the IMAS_VALKEY_*
+// environment (internal/valkeyconn) when it loads its config.
+func TestLoadConfig_FarmerValkeyOptions(t *testing.T) {
+	dir := t.TempDir()
+	pw := filepath.Join(dir, "password")
+	if err := os.WriteFile(pw, []byte("from-the-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { resetJety(t); ValkeyOptions = valkeyconn.Options{} })
+	t.Setenv("IMAS_VALKEY_PASSWORD_FILE", pw)
+	t.Setenv("IMAS_VALKEY_TLS", "")
+	t.Setenv("IMAS_VALKEY_TLS_CA_FILE", "")
+	t.Setenv("IMAS_VALKEY_TLS_SERVER_NAME", "")
+	t.Setenv("IMAS_VALKEY_ADDRS", "valkey:6379")
+	resetForBinaryTest(t, t.TempDir())
+	LoadConfig("farmer")
+	if ValkeyOptions.Password != "from-the-secret" || ValkeyOptions.TLS != nil {
+		t.Errorf("ValkeyOptions = %v (password %q)", ValkeyOptions, ValkeyOptions.Password)
+	}
+	if ValkeyAddrs != "valkey:6379" {
+		t.Errorf("ValkeyAddrs = %q", ValkeyAddrs)
+	}
+}
+
+// valkeyRefusalEnv marks the child process TestLoadConfig_FarmerValkeyRefusesStartup
+// starts: it loads farmer's config, which must exit.
+const valkeyRefusalEnv = "IMAS_TEST_VALKEY_REFUSAL_CHILD"
+
+// A password file that is set but missing or empty, and TLS without a CA
+// file or with a CA that isn't PEM, stop farmer at startup.
+func TestLoadConfig_FarmerValkeyRefusesStartup(t *testing.T) {
+	if os.Getenv(valkeyRefusalEnv) == "1" {
+		resetForBinaryTest(t, t.TempDir())
+		LoadConfig("farmer")
+		// Reaching here means LoadConfig accepted the settings.
+		os.Exit(0)
+	}
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty")
+	notPEM := filepath.Join(dir, "ca.crt")
+	for _, f := range []struct{ path, content string }{{empty, ""}, {notPEM, "not a certificate"}} {
+		if err := os.WriteFile(f.path, []byte(f.content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{"missing password file", []string{"IMAS_VALKEY_PASSWORD_FILE=" + filepath.Join(dir, "nope")}, "IMAS_VALKEY_PASSWORD_FILE"},
+		{"empty password file", []string{"IMAS_VALKEY_PASSWORD_FILE=" + empty}, "empty"},
+		{"TLS without a CA", []string{"IMAS_VALKEY_TLS=true"}, "IMAS_VALKEY_TLS_CA_FILE"},
+		{"bad PEM", []string{"IMAS_VALKEY_TLS=true", "IMAS_VALKEY_TLS_CA_FILE=" + notPEM}, "no PEM certificate"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestLoadConfig_FarmerValkeyRefusesStartup$")
+			cmd.Env = append(os.Environ(), valkeyRefusalEnv+"=1", "XDG_CONFIG_HOME="+t.TempDir())
+			cmd.Env = append(cmd.Env, tc.env...)
+			out, err := cmd.CombinedOutput()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() == 0 {
+				t.Fatalf("farmer started (err %v):\n%s", err, out)
+			}
+			if !strings.Contains(string(out), tc.want) {
+				t.Errorf("output does not name %q:\n%s", tc.want, out)
 			}
 		})
 	}

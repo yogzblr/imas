@@ -37,8 +37,9 @@ jobs:
           --health-timeout 5s
           --health-retries 60
       # Valkey, the image version the farmer chart's valkey subchart
-      # (0.12.0) runs, for TestValkeyLimiterRealServer
-      # (SAASAPI_TEST_VALKEY_ADDR, internal/saasapi).
+      # (0.12.0) runs, for TestValkeyLimiterRealServer (internal/saasapi)
+      # and TestCheckEvictionRealServer (internal/valkeyconn), both through
+      # SAASAPI_TEST_VALKEY_ADDR.
       valkey:
         image: valkey/valkey:9.1.2
         ports:
@@ -155,7 +156,8 @@ jobs:
       # pass without having rendered the charts. IMAS_TEST_MYSQL_ROOT_DSN
       # runs the MySQL tests against the pxc service; set, they fail rather
       # than skip if it does not answer. SAASAPI_TEST_VALKEY_ADDR runs the
-      # Valkey rate limiter test against the valkey service.
+      # Valkey rate limiter test and the INFO memory check against the
+      # valkey service.
       - name: Test with race detection and coverage
         env:
           IMAS_REQUIRE_HELM: "1"

@@ -24,6 +24,11 @@ valkey:
   addrs:
     - valkey-0.valkey.valkey.svc.cluster.local:6379
     - valkey-1.valkey.valkey.svc.cluster.local:6379
+  # The external Valkey serves TLS; its CA is public data in a ConfigMap.
+  # Auth stays on (the default): Secret imas-valkey-auth, synced by ESO.
+  tls:
+    enabled: true
+    caConfigMap: valkey-ca
 objectStore:
   endpoint: s3.example.com
   bucket: imas-recipes

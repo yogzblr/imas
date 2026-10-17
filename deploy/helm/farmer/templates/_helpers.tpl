@@ -1044,6 +1044,7 @@ explanation rather than deploying something that silently can't work.
 {{- end -}}
 {{- end -}}
 {{- include "imas-farmer.accountStore.validate" . -}}
+{{- include "imas-farmer.valkey.validate" . -}}
 {{- if .Values.versity.enabled -}}
 {{- include "imas-farmer.versity.validate" . -}}
 {{- end -}}
@@ -1438,4 +1439,120 @@ openbaoBootstrap.revokeToken, never in dev mode. */}}
 {{- define "imas-farmer.bootstrap.revokesToken" -}}
 {{- $dev := and .Values.openbao.server .Values.openbao.server.dev .Values.openbao.server.dev.enabled -}}
 {{- if and .Values.openbaoBootstrap.revokeToken (not $dev) -}}true{{- end -}}
+{{- end }}
+
+{{/*
+Valkey authentication and TLS (unit S5). Auth is on unless explicitly
+switched off for a throwaway install; the bundled subchart takes the
+password from the same Secret (its auth.usersExistingSecret, user
+"default", passwordKey valkey.auth.key) and authenticates its replicas to
+the primary with it. TLS needs the CA clients verify with, and for the
+bundled Valkey its server certificate Secret.
+*/}}
+{{- define "imas-farmer.valkey.validate" -}}
+{{- $v := .Values.valkey -}}
+{{- $auth := default dict $v.auth -}}
+{{- $tls := default dict $v.tls -}}
+{{- if and (not $auth.enabled) (not $auth.allowInsecure) -}}
+{{- fail "valkey.auth.enabled=false needs valkey.auth.allowInsecure=true: without a password anyone who reaches Valkey can delete replay claims (a replay) or pre-claim keys (locking a sprout out). Only for a throwaway install." -}}
+{{- end -}}
+{{- if $auth.enabled -}}
+{{- if not (and $auth.secretName $auth.key) -}}
+{{- fail "valkey.auth.secretName and valkey.auth.key are required with valkey.auth.enabled: the Secret (synced from OpenBao, property valkey_password) the password file comes from" -}}
+{{- end -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" (toString $auth.secretName)) -}}
+{{- fail (printf "valkey.auth.secretName %q is not a valid Secret name" (toString $auth.secretName)) -}}
+{{- end -}}
+{{- if $v.enabled -}}
+{{- $users := default dict $auth.aclUsers -}}
+{{- $default := default dict (get $users "default") -}}
+{{- if or (ne (len $users) 1) (ne (toString $default.passwordKey) (toString $auth.key)) $default.password -}}
+{{- fail (printf "valkey.auth.aclUsers must hold the \"default\" user only, with passwordKey %q (valkey.auth.key) and no inline password: the bundled Valkey reads the password from Secret valkey.auth.secretName, which farmer and saasapi read too" (toString $auth.key)) -}}
+{{- end -}}
+{{- if ne (toString $auth.usersExistingSecret) "{{ .Values.auth.secretName }}" -}}
+{{- fail "valkey.auth.usersExistingSecret must stay \"{{ .Values.auth.secretName }}\": the bundled Valkey reads its password from the same Secret as farmer and saasapi (valkey.auth.secretName)" -}}
+{{- end -}}
+{{- if $auth.aclConfig -}}
+{{- fail "valkey.auth.aclConfig is not supported: it goes into a Secret rendered from values, and the password must never be a Helm value" -}}
+{{- end -}}
+{{- if dig "metrics" "enabled" false $v -}}
+{{- fail "valkey.metrics.enabled is not supported with valkey.auth.enabled: the subchart's exporter takes the password as an environment variable (REDIS_PASSWORD), and the password is a file only" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $tls.enabled -}}
+{{- if not $tls.caConfigMap -}}
+{{- fail "valkey.tls.caConfigMap is required with valkey.tls.enabled: the ConfigMap holding the CA (key valkey.tls.caKey) that farmer and saasapi verify Valkey's certificate with; the system roots are never used" -}}
+{{- end -}}
+{{- if not $tls.caKey -}}
+{{- fail "valkey.tls.caKey is required with valkey.tls.enabled (default ca.crt)" -}}
+{{- end -}}
+{{- if and $v.enabled (not $tls.existingSecret) -}}
+{{- fail "valkey.tls.existingSecret is required with valkey.enabled and valkey.tls.enabled: the bundled Valkey's server certificate Secret (keys server.crt, server.key and ca.crt; the valkey-io chart's tls.*). Or point valkey.addrs at an external Valkey that serves TLS." -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/* Where farmer and saasapi read Valkey's password and CA. */}}
+{{- define "imas-farmer.valkey.passwordDir" -}}/var/run/secrets/imas/valkey{{- end }}
+{{- define "imas-farmer.valkey.caDir" -}}/var/run/secrets/imas/valkey-ca{{- end }}
+
+{{/*
+The <prefix>_VALKEY_PASSWORD_FILE and <prefix>_VALKEY_TLS* env entries
+(internal/valkeyconn). Call with (dict "root" $ "prefix" "IMAS"|"SAASAPI").
+The password is a file only, never an env value.
+*/}}
+{{- define "imas-farmer.valkey.env" -}}
+{{- $v := .root.Values.valkey -}}
+{{- if $v.auth.enabled }}
+- name: {{ .prefix }}_VALKEY_PASSWORD_FILE
+  value: {{ printf "%s/password" (include "imas-farmer.valkey.passwordDir" .root) | quote }}
+{{- end }}
+{{- if $v.tls.enabled }}
+- name: {{ .prefix }}_VALKEY_TLS
+  value: "true"
+- name: {{ .prefix }}_VALKEY_TLS_CA_FILE
+  value: {{ printf "%s/%s" (include "imas-farmer.valkey.caDir" .root) $v.tls.caKey | quote }}
+{{- with $v.tls.serverName }}
+- name: {{ $.prefix }}_VALKEY_TLS_SERVER_NAME
+  value: {{ . | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{- define "imas-farmer.valkey.volumeMounts" -}}
+{{- $v := .Values.valkey -}}
+{{- if $v.auth.enabled }}
+- name: valkey-auth
+  mountPath: {{ include "imas-farmer.valkey.passwordDir" . }}
+  readOnly: true
+{{- end }}
+{{- if $v.tls.enabled }}
+- name: valkey-ca
+  mountPath: {{ include "imas-farmer.valkey.caDir" . }}
+  readOnly: true
+{{- end }}
+{{- end }}
+
+{{- define "imas-farmer.valkey.volumes" -}}
+{{- $v := .Values.valkey -}}
+{{- if $v.auth.enabled }}
+# Valkey's password (valkey.auth): only its key, as file "password".
+- name: valkey-auth
+  secret:
+    secretName: {{ $v.auth.secretName }}
+    defaultMode: 0440
+    items:
+      - key: {{ $v.auth.key | quote }}
+        path: password
+{{- end }}
+{{- if $v.tls.enabled }}
+# Valkey's CA (valkey.tls; public).
+- name: valkey-ca
+  configMap:
+    name: {{ $v.tls.caConfigMap }}
+    items:
+      - key: {{ $v.tls.caKey | quote }}
+        path: {{ $v.tls.caKey | quote }}
+{{- end }}
 {{- end }}

@@ -23,7 +23,8 @@
 #       public NATS trust (ConfigMap imas-nats-trust, which the DMZ copies)
 #       and revokes the token it was handed, whose Secret then goes
 #    7. saasapi's hand-made Secrets (saasapi-secrets.sh), the operator
-#       token's among them
+#       token's and Valkey's password (imas-valkey-auth, which Valkey,
+#       farmer and saasapi wait for) among them
 #    8. waits for the workloads core owns and writes the outputs
 # HA core hub (the endpoints file lists several core nodes; the workflow's
 # hub_nodes 3; brief H4): the farmer chart also gets values/values-ha.yaml
@@ -271,7 +272,7 @@ if [[ "$S3_MODE" == versity ]]; then
 	"$here/validate-object-store.sh" "${common[@]}"
 fi
 
-# --- 7. saasapi's Secrets ----------------------------------------------------
+# --- 7. saasapi's Secrets, and Valkey's password ----------------------------
 "$here/saasapi-secrets.sh" "${common[@]}"
 
 # --- 8. wait for every workload ---------------------------------------------

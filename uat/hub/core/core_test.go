@@ -228,6 +228,8 @@ func TestValuesMatchLib(t *testing.T) {
 		"farmer.nkeySecret.key":          "FARMER_NKEY_KEY",
 		"accountStore.bucket":            "ACCOUNTS_BUCKET",
 		"accountStore.credentialsSecret": "S3_ACCOUNTS_WRITER_SECRET",
+		"valkey.auth.secretName":         "VALKEY_AUTH_SECRET",
+		"valkey.auth.key":                "VALKEY_AUTH_KEY",
 	} {
 		if got := str(v, strings.Split(path, ".")...); got != "" {
 			t.Errorf("values/farmer-uat.yaml sets %s = %q: the UAT uses the chart default", path, got)
@@ -267,6 +269,10 @@ func TestValuesMatchLib(t *testing.T) {
 	}
 	if lib["SPROUT_RELEASE_CONFIGMAP"] != lib["FARMER_FULLNAME"]+"-sprout-release" {
 		t.Errorf("SPROUT_RELEASE_CONFIGMAP %q, want %q (sprout-release-register-job.yaml)", lib["SPROUT_RELEASE_CONFIGMAP"], lib["FARMER_FULLNAME"]+"-sprout-release")
+	}
+	// Unit S5: the UAT runs Valkey with a password, like production.
+	if dig(v, "valkey", "auth", "enabled") != true || dig(v, "valkey", "auth", "allowInsecure") != nil {
+		t.Error("values/farmer-uat.yaml must keep valkey.auth.enabled true (and not set allowInsecure): the UAT follows the production path")
 	}
 	if dig(v, "openbao", "server", "dev", "enabled") != false {
 		t.Error("openbao.server.dev.enabled must be false: the UAT OpenBao is initialised and unsealed for real")
@@ -575,9 +581,20 @@ func TestFarmerChartRender(t *testing.T) {
 		"IMAS_ACCOUNTS_S3_BUCKET":        "imas-accounts",
 		"IMAS_ACCOUNTS_S3_ACCESS_KEY_ID": "secret:imas-farmer-accounts-writer/access-key-id",
 		"IMAS_FARMER_NKEY_SEED_FILE":     "/var/run/secrets/imas/farmer-nkey/farmer.nk",
+		"IMAS_VALKEY_PASSWORD_FILE":      "/var/run/secrets/imas/valkey/password",
 	} {
 		if fe[k] != want {
 			t.Errorf("farmer %s = %q, want %q", k, fe[k], want)
+		}
+	}
+	// Unit S5: both Valkey clients read the password from Secret
+	// imas-valkey-auth (saasapi-secrets.sh), as a file.
+	if se["SAASAPI_VALKEY_PASSWORD_FILE"] != "/var/run/secrets/imas/valkey/password" {
+		t.Errorf("saasapi SAASAPI_VALKEY_PASSWORD_FILE = %q", se["SAASAPI_VALKEY_PASSWORD_FILE"])
+	}
+	for name, d := range map[string]map[string]any{"farmer": farmer, "saasapi": saasapi} {
+		if !strings.Contains(mustJSON(t, d), `"secretName":"`+libConstants(t)["VALKEY_AUTH_SECRET"]+`"`) {
+			t.Errorf("%s doesn't mount Secret %s", name, libConstants(t)["VALKEY_AUTH_SECRET"])
 		}
 	}
 	// farmer's NKey: Secret imas-farmer-nkey, key farmer.nk, which seeds.sh
@@ -715,8 +732,17 @@ func TestFarmerChartRender(t *testing.T) {
 	if dig(pxc, "spec", "pxc", "size") != 1 || dig(pxc, "spec", "haproxy", "size") != 1 {
 		t.Errorf("PXC sizes: pxc %v haproxy %v, want 1 and 1", dig(pxc, "spec", "pxc", "size"), dig(pxc, "spec", "haproxy", "size"))
 	}
-	if r := dig(get(t, objs, "Deployment/imas-core-valkey"), "spec", "replicas"); r != 1 {
+	vk := get(t, objs, "Deployment/imas-core-valkey")
+	if r := dig(vk, "spec", "replicas"); r != 1 {
 		t.Errorf("Valkey replicas %v", r)
+	}
+	// Unit S5: the bundled Valkey takes its password from the same Secret
+	// and never evicts.
+	if !strings.Contains(mustJSON(t, vk), `"secretName":"`+libConstants(t)["VALKEY_AUTH_SECRET"]+`"`) {
+		t.Errorf("Valkey doesn't read Secret %s", libConstants(t)["VALKEY_AUTH_SECRET"])
+	}
+	if c := str(get(t, objs, "ConfigMap/imas-core-valkey-config"), "data", "valkey.conf"); !strings.Contains(c, "maxmemory-policy noeviction") {
+		t.Errorf("Valkey config %q lacks maxmemory-policy noeviction", c)
 	}
 }
 

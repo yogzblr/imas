@@ -183,8 +183,17 @@ this release's `natsTrust.busCAConfigMapName` to the nats release's
 `loader.caConfigMap` (both default `imas-bus-ca`; see
 [NATS trust](#nats-trust)).
 
-Then, because the eval install has no ESO, deliver saasapi's credential by
-hand. The publish Job has already written the JWT to OpenBao:
+Then, because the eval install has no ESO, deliver Valkey's password by
+hand: the bootstrap Job generated it into OpenBao (see [Valkey](#valkey)).
+Valkey, farmer and saasapi wait for this Secret:
+
+```sh
+kubectl -n imas-core create secret generic imas-valkey-auth \
+  --from-file=password=<(kubectl -n imas-core exec imas-core-openbao-0 -- env BAO_TOKEN=root bao kv get -field=valkey_password secret/platform/imas/nats-seeds)
+```
+
+And saasapi's credential. The publish Job has already written the JWT to
+OpenBao:
 
 ```sh
 kubectl -n imas-core exec imas-core-openbao-0 -- env BAO_TOKEN=root bao kv get -field=jwt secret/platform/imas/saasapi-nats-user > jwt
@@ -224,6 +233,9 @@ What to expect on first install:
   place, or it times out. farmer waits (`ContainerCreating`) until the
   bootstrap Job has written the trust ConfigMap, then checks it against
   Transit at start.
+- Valkey, farmer and saasapi wait (`ContainerCreating`) until
+  `imas-valkey-auth` exists; the bootstrap Job writes the password it is
+  made from.
 - saasapi's pods wait (`ContainerCreating`, or `CreateContainerConfigError`
   in their events) until both `imas-saasapi-nats` and `imas-saasapi-box`
   exist. That is expected: they don't crash-loop, and they start once the
@@ -250,7 +262,8 @@ What to expect on first install:
 - `pxc.enabled=false`, `database.host` and `database.existingSecret` (both
   full DSNs). The migrate Job runs at pre-install; see
   [Migrations](#migrations) for who creates the users and grants;
-- `valkey.enabled=false` and `valkey.addrs`;
+- `valkey.enabled=false` and `valkey.addrs`, with `valkey.tls.enabled`
+  and `valkey.tls.caConfigMap` (see [Valkey](#valkey));
 - `tls.mode=secret` (e.g. cert-manager);
 - `externalSecrets.enabled=true`.
 
@@ -358,8 +371,10 @@ stop being read).
 `externalSecrets.enabled` renders `deploy/farmer/externalsecrets.yaml`:
 each seed's property is its name in lowercase, `sys_user` and
 `saasapi_user`. It also renders `farmer.nkeySecret.secretName` from the
-same seed path, property `farmer_nkey`, and `imas-saasapi-nats`: saasapi's seed from
-the seed path, and the published JWT from `credentialPublisher.kvPath`.
+same seed path, property `farmer_nkey`, `valkey.auth.secretName` from
+property `valkey_password` (see [Valkey](#valkey)), and `imas-saasapi-nats`:
+saasapi's seed from the seed path, and the published JWT from
+`credentialPublisher.kvPath`.
 
 ## NATS trust
 
@@ -626,7 +641,9 @@ Each OpenBao client runs under its own role and gets exactly one policy.
   - creates the roles above.
 
   Each role gets `token_no_default_policy=true`, and the publisher's TTLs
-  are 5m. The bootstrap never writes NATS seeds.
+  are 5m. The bootstrap never writes NATS seeds. With `valkey.auth.enabled`
+  it generates Valkey's password, property `valkey_password` of the seed
+  path, only when absent and with check-and-set (see [Valkey](#valkey)).
 - **The tenant-key policy shape** (FLAG FOR SECURITY REVIEW). Creating a
   Transit key needs `update` on `transit/keys/<name>`, and `update` on a
   `transit/keys/nats-tsign-*` glob also reaches `<name>/rotate` and
@@ -1289,8 +1306,96 @@ writes, and enforces the enrollment-key rate limit across pods
 - **External:** `valkey.addrs`, the same key as
   `deploy/saasapi/values.rate-limit.yaml`, so that block merges as is.
 
-Neither client does auth or TLS yet, so the bundled Valkey has neither.
-Restrict network access to it.
+Valkey holds security state: the replay cache (`internal/pki/replaycache.go`,
+`sealedclaim.go`) that makes enrolment, refresh and sealed messages
+single-use, and the heartbeat keys that say which sprouts are online. So
+both clients authenticate, can use TLS, and the bundled Valkey never evicts
+(unit S5).
+
+### Password
+
+- farmer and saasapi authenticate as ACL user `default` with the password
+  in Secret `valkey.auth.secretName` (`imas-valkey-auth`), key
+  `valkey.auth.key` (`password`). It is mounted, that key only, as the file
+  `/var/run/secrets/imas/valkey/password` in farmer's and saasapi's pods
+  (`IMAS_VALKEY_PASSWORD_FILE`, `SAASAPI_VALKEY_PASSWORD_FILE`). It is
+  never an environment variable, a Helm value or a ConfigMap. Each process
+  reads it once at startup, trailing newline trimmed; set but missing or
+  empty, the process refuses to start.
+- The password is property `valkey_password` of the seed path in OpenBao
+  (`externalSecrets.seedMount`/`externalSecrets.seedPath`,
+  `secret/platform/imas/nats-seeds`). The OpenBao bootstrap Job generates
+  it, 32 random bytes in base64 without padding, when it is absent, and
+  never overwrites it (a KV patch with check-and-set, so the seeds in the
+  same path are untouched). With an external OpenBao (no bootstrap Job)
+  ops writes it; see `docs/OPENBAO-RUNBOOK.md`. With
+  `externalSecrets.enabled`, the ExternalSecret `imas-valkey-auth` syncs it
+  into the Secret. Without ESO, create the Secret from the property, as in
+  the eval install above.
+- **Bundled Valkey:** the subchart's own authentication
+  (`valkey.auth.enabled`, `usersExistingSecret`, `aclUsers.default`). Its
+  init step reads the password from the same Secret, which the subchart
+  mounts in that step only (at `/valkey-users-secret`), and writes its
+  SHA-256 into the ACL file; the password is never in values or an
+  environment variable. In the replicated mode (`valkey.replica.enabled`)
+  every replica authenticates to the primary as `default` with the same
+  password (`masteruser`/`masterauth`): the subchart writes `masterauth`
+  into the replica's generated `valkey.conf` on its data volume. The
+  chart refuses `aclUsers` other than `default` with `passwordKey`
+  `valkey.auth.key`, inline passwords and `aclConfig` (which would put a
+  password in values). The subchart's health probes (`valkey-cli ping`)
+  stay as they are: a `NOAUTH` answer still proves the server is up.
+- **Rotation** is a restart: write a new `valkey_password`, let ESO sync
+  the Secret (or update it by hand), then restart Valkey, farmer and
+  saasapi (`kubectl rollout restart`). Until all three have restarted,
+  the ones still on the old password can't reach Valkey.
+- **Upgrading from a release without a password:** the bootstrap Job
+  (post-upgrade) writes `valkey_password`; with an external OpenBao write
+  it first (`docs/OPENBAO-RUNBOOK.md` 5.6). Until ESO (or you) creates
+  `imas-valkey-auth`, the new Valkey, farmer and saasapi pods wait in
+  `ContainerCreating` while the old ones keep serving; once it exists the
+  rollout completes with every client on the password.
+- `valkey.auth.enabled=false` renders only with
+  `valkey.auth.allowInsecure=true`, and NOTES warns. It is for a
+  throwaway install only.
+
+### TLS
+
+- `valkey.tls.enabled=true` makes farmer and saasapi connect with TLS 1.2
+  or later (`IMAS_VALKEY_TLS`, `SAASAPI_VALKEY_TLS`), verifying the server
+  against the CA in ConfigMap `valkey.tls.caConfigMap` (key
+  `valkey.tls.caKey`, default `ca.crt`; public data, mounted as a file at
+  `/var/run/secrets/imas/valkey-ca/`, `*_VALKEY_TLS_CA_FILE`) and never the
+  system roots, and against `valkey.tls.serverName` when set (default: the
+  host dialled). A CA that isn't PEM, or TLS without one, stops the
+  process. Certificates are never skipped.
+- The production Valkey is external and is expected to serve TLS.
+- The bundled Valkey supports TLS too (the subchart's `tls.*`): set
+  `valkey.tls.existingSecret` to its server certificate Secret
+  (`server.crt`, `server.key`, `ca.crt`); the chart refuses
+  `valkey.enabled` with `valkey.tls.enabled` without it. It then serves
+  TLS on the same port, 6379, so the NetworkPolicies don't change.
+
+### No eviction
+
+- The bundled Valkey runs with `maxmemory-policy noeviction`
+  (`valkey.valkeyConfig`, the subchart's config hook): a write that would
+  exceed `maxmemory` fails instead of evicting a key.
+- Both clients read `INFO memory` after connecting. When `maxmemory` is
+  above 0 and `maxmemory_policy` is not `noeviction` they log one warning
+  that names the replay cache and the heartbeats as security state. Only
+  a warning: a managed Valkey may not let the policy be changed. An `INFO`
+  that fails is only logged too.
+
+### Accepted residual: failover
+
+Valkey replication is asynchronous, so a failover (or the loss of the
+primary in the bundled replicated mode) can lose the most recent claims.
+The impact is bounded to the 6-minute claim window and to the replay path:
+no gateway JWT is issued without a separately claimed box-key proof
+(`docs/security-review-pack.md`, item 3.5.3).
+
+Restrict network access to Valkey all the same.
 
 ## Farmer is stateless
 
@@ -1504,6 +1609,13 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `database.migrate.rootPasswordSecret` / `rootPasswordKey` / `rootUser` | `""` / `root` / `root` | PXC root, for the root step. Empty: the operator's Secret with `pxc.enabled`, `--skip-root` otherwise. |
 | `database.migrate.wait` / `backoffLimit` / `activeDeadlineSeconds` | `15m` / `2` / `1800` | How long to wait for PXC; the Job's retry and time budget. |
 | `database.migrate.argoCDHooks` | `true` | Argo CD hook annotations. See [Migrations](#migrations). |
+| `valkey.enabled` / `valkey.addrs` | `true` / `[]` | The bundled Valkey, or an external one's `host:port` list (`IMAS_VALKEY_ADDRS`, `SAASAPI_VALKEY_ADDRS`). See [Valkey](#valkey). |
+| `valkey.auth.enabled` / `allowInsecure` | `true` / `false` | Valkey's password (`*_VALKEY_PASSWORD_FILE`). `false` renders only with `allowInsecure` (a throwaway install). |
+| `valkey.auth.secretName` / `key` | `imas-valkey-auth` / `password` | The Secret (ESO: property `valkey_password` of `externalSecrets.seedPath`) mounted as `/var/run/secrets/imas/valkey/password`. The bundled Valkey reads it too (`usersExistingSecret`, `aclUsers.default.passwordKey`, which must stay as they are). |
+| `valkey.tls.enabled` / `caConfigMap` / `caKey` / `serverName` | `false` / `""` / `ca.crt` / `""` | TLS from farmer and saasapi (`*_VALKEY_TLS`, `*_VALKEY_TLS_CA_FILE`, `*_VALKEY_TLS_SERVER_NAME`): the CA ConfigMap is required. |
+| `valkey.tls.existingSecret` | `""` | The bundled Valkey's server certificate Secret; required with `valkey.enabled` and `valkey.tls.enabled`. |
+| `valkey.valkeyConfig` | `maxmemory-policy noeviction` | The bundled Valkey's extra config. Keep `noeviction`. |
+| `externalSecrets.seedPath` / `seedMount` | `platform/imas/nats-seeds` / `secret` | The ops seed path and its KV v2 mount; the bootstrap Job writes `valkey_password` there. |
 | `objectStore.*` | empty | `IMAS_S3_*`. `jobBucket` must differ from `bucket`. |
 | `accountStore.bucket` / `endpoint` / `useSSL` | `imas-accounts` / `""` / `null` | `IMAS_ACCOUNTS_S3_*`: the accounts bucket the bus loaders read (see [Farmer is stateless](#farmer-is-stateless)). Required: the chart fails to render without `bucket` and an endpoint (`endpoint`, else `objectStore.endpoint`), and farmer refuses to start without them. `endpoint` and `useSSL` default to `objectStore`'s. Must differ from every `objectStore` bucket. |
 | `accountStore.credentialsSecret` / `accessKeyIdKey` / `secretAccessKeyKey` | `imas-farmer-accounts-writer` / `access-key-id` / `secret-access-key` | farmer's own write credential for the accounts bucket (get, put, list; no delete). Required. Must not be `objectStore.credentialsSecret`. |

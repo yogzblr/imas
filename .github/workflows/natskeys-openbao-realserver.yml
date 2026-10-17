@@ -4,7 +4,8 @@ name: natskeys OpenBao real server
 # (openbao_integration_test.go: Transit-backed NATS signing, the P21
 # policies, soft delete) and of deploy/helm/farmer
 # (openbao_policy_test.go: the chart's P21 policy files, owner decisions
-# of issue #197) against a real OpenBao dev server. The tests
+# of issue #197; valkey_test.go: the bootstrap Job's Valkey password step,
+# unit S5, with the bao CLI) against a real OpenBao dev server. The tests
 # skip themselves unless IMAS_TEST_OPENBAO_ADDR and _TOKEN are set, so
 # the plain `go test ./...` in ci.yml never runs them.
 #
@@ -23,6 +24,8 @@ on:
       - "internal/openbao/**"
       - "deploy/helm/farmer/files/openbao-policies/**"
       - "deploy/helm/farmer/openbao_policy_test.go"
+      - "deploy/helm/farmer/valkey_test.go"
+      - "deploy/helm/farmer/templates/openbao-bootstrap-job.yaml"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/natskeys-openbao-realserver.yml"
@@ -33,6 +36,8 @@ on:
       - "internal/openbao/**"
       - "deploy/helm/farmer/files/openbao-policies/**"
       - "deploy/helm/farmer/openbao_policy_test.go"
+      - "deploy/helm/farmer/valkey_test.go"
+      - "deploy/helm/farmer/templates/openbao-bootstrap-job.yaml"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/natskeys-openbao-realserver.yml"
@@ -61,6 +66,13 @@ jobs:
         with:
           go-version: 1.26.x
           check-latest: true
+
+      # TestOpenBaoValkeyPassword renders the farmer chart (no subcharts)
+      # to get the bootstrap Job's script. Same pin as ci.yml.
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v4.3.0
 
       - name: Install OpenBao ${{ env.OPENBAO_VERSION }}
         run: |
@@ -115,7 +127,7 @@ jobs:
           set -euo pipefail
           go test -count=1 -v -run '^TestOpenBao' ./deploy/helm/farmer \
             | tee "$RUNNER_TEMP/chart-test.log"
-          for t in TestOpenBaoBootstrapPolicy TestOpenBaoFarmerPolicy TestOpenBaoFarmerPolicyKeySet TestOpenBaoSysSignerPolicy; do
+          for t in TestOpenBaoBootstrapPolicy TestOpenBaoFarmerPolicy TestOpenBaoFarmerPolicyKeySet TestOpenBaoSysSignerPolicy TestOpenBaoValkeyPassword; do
             grep -q -- "--- PASS: $t " "$RUNNER_TEMP/chart-test.log"
           done
 

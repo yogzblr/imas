@@ -152,7 +152,25 @@ Accepted, Fix needed (with a note) or Not applicable.
 2. A gateway JWT of a deleted or replaced host is refused (B3, SEC.7c).
 3. Proof of possession signatures are single-use (Valkey replay cache). Check
    the cache TTL covers the signature validity and that a Valkey failover
-   fails closed.
+   fails closed. Owner decision 2026-10-17, fixed by unit S5: the clients
+   connected with no password and no TLS, so anyone who could reach Valkey
+   could delete claims (a replay) or pre-claim keys (lock a sprout out).
+   Now farmer and saasapi authenticate as Valkey's `default` user with a
+   password the OpenBao bootstrap Job generates (`valkey_password` of the
+   seed path; generated once, never overwritten), delivered by ESO as
+   Secret `imas-valkey-auth` and mounted as a file only, never an
+   environment variable, Helm value or ConfigMap; the bundled Valkey and
+   its replicas use the same password; `valkey.auth.enabled=false` renders
+   only with `valkey.auth.allowInsecure=true`. The clients can use TLS
+   (1.2 or later, a CA from a ConfigMap, never the system roots or
+   `InsecureSkipVerify`), expected of the production Valkey, which is
+   external. The bundled Valkey runs `maxmemory-policy noeviction`, and
+   both clients warn at startup if Valkey may evict (`internal/valkeyconn`;
+   `deploy/helm/farmer/README.md`, "Valkey"; `valkey_test.go`). Accepted
+   residual: Valkey replication is asynchronous, so a failover can lose the
+   most recent claims. The impact is bounded to the 6-minute claim window
+   and to the replay path: no gateway JWT is issued without a separately
+   claimed box-key proof. Confirm the residual is still accepted.
 4. The box-key write retry (PR #171, decided 2026-10-09: whole-transaction
    retry, six attempts, check the error number, release the enroll binding on
    final failure). Still open from #171: the gap-locking revoke and the same
