@@ -1,7 +1,7 @@
 # Hardening units from the P3 review walkthrough (S1, S2, S3)
 
 Read `docs/briefs/ORCHESTRATOR.md` first: its session prompt (zero open items,
-repo-wide search, brief errors decided by a fixed order) applies to all$
+repo-wide search, brief errors decided by a fixed order) applies to all
 units. S1 and S2 come from the owner's walkthrough of `docs/security-review-pack.md`
 sections 3.3 (items 1 and 6) on 2026-10-14. Decisions below are final.
 
