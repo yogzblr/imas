@@ -52,7 +52,10 @@ var initCmd = &cobra.Command{
 			if fBusPort != "" {
 				jety.Set("farmerbusport", fBusPort)
 			}
-			jety.WriteConfig()
+			if err := writeConfigFile(jety.ConfigFileUsed()); err != nil {
+				log.Println("Error: writing the config: " + err.Error())
+				os.Exit(1)
+			}
 			if err := restrictConfig(jety.ConfigFileUsed()); err != nil {
 				log.Println("Warning: " + err.Error())
 			}
