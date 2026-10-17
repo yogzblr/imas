@@ -58,6 +58,8 @@ const (
 	EnvCPBoxOpenBaoK8sMount   = "IMAS_CPBOX_OPENBAO_K8S_MOUNT"
 	EnvCPBoxOpenBaoK8sJWTPath = "IMAS_CPBOX_OPENBAO_K8S_JWT_PATH"
 	EnvCPBoxOpenBaoNamespace  = "IMAS_CPBOX_OPENBAO_NAMESPACE"
+	// EnvCPBoxOpenBaoAllowInsecure set to true accepts an http:// address.
+	EnvCPBoxOpenBaoAllowInsecure = "IMAS_CPBOX_OPENBAO_ALLOW_INSECURE"
 )
 
 var cpBoxOpenBaoEnv = openbao.Env{
@@ -69,6 +71,8 @@ var cpBoxOpenBaoEnv = openbao.Env{
 	K8sMount:   EnvCPBoxOpenBaoK8sMount,
 	K8sJWTPath: EnvCPBoxOpenBaoK8sJWTPath,
 	Namespace:  EnvCPBoxOpenBaoNamespace,
+
+	AllowInsecure: EnvCPBoxOpenBaoAllowInsecure,
 }
 
 // ErrCPBoxNotConfigured: the Job's OpenBao identity isn't configured.

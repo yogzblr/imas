@@ -219,12 +219,21 @@ outside farmer `IMAS_SAASAPI_CRED_`) takes the same `<prefix>OPENBAO_*` set: `AD
 (required); `AUTH_METHOD`, `token` (default, with `TOKEN`) or `kubernetes`
 (with `K8S_ROLE`, and optionally `K8S_MOUNT`, default `kubernetes`, and
 `K8S_JWT_PATH`, default the pod's service account token); `CACERT`, a PEM
-bundle to verify OpenBao's TLS; and `NAMESPACE`, which sends
-`X-Vault-Namespace` on every request when set. A kubernetes login is
-repeated once 80% of its lease has passed. Requests time out after 30
-seconds and are not retried. The clients are built on the official OpenBao
-Go client (`internal/openbao`) and read nothing else: `BAO_*` and `VAULT_*`
-variables, `BAO_SKIP_VERIFY` included, are ignored.
+bundle to verify OpenBao's TLS; `NAMESPACE`, which sends
+`X-Vault-Namespace` on every request when set; and `ALLOW_INSECURE`. `ADDR`
+must be `https://`: an `http://` address is refused at startup unless
+`ALLOW_INSECURE=true` (a throwaway install only: tokens, login JWTs and
+tenant box keys would cross the network unencrypted), and the refusal
+names the variable. A kubernetes login is repeated once 80% of its lease
+has passed. Requests time out after 30 seconds and are not retried. A
+client talks to the host in `ADDR` only: it follows at most one redirect,
+and only to the same scheme, host and port; a redirect anywhere else is
+refused before anything is sent. Only a 2xx answer is success (an
+unfollowed 3xx is an error). The clients are built on the official
+OpenBao Go client (`internal/openbao`) and read nothing else: `BAO_*` and
+`VAULT_*` variables, `BAO_SKIP_VERIFY` and `BAO_NAMESPACE` included, are
+ignored by the request and the kubernetes login client alike, and a
+malformed one does not stop startup.
 
 The policies to create are in
 [`deploy/helm/farmer/README.md`](../deploy/helm/farmer/README.md), "OpenBao".
@@ -583,6 +592,13 @@ Environment=HTTPS_PROXY=http://proxy.example.com:3128
 Environment=NO_PROXY=vault.corp.example.com
 Environment=IMAS_SDB_OPENBAO_ADDR=https://vault.corp.example.com:8200
 ```
+
+The address must be `https://`. `IMAS_SDB_OPENBAO_ALLOW_INSECURE=true`
+accepts `http://` (tests only: the login token and the secrets would cross
+the network unencrypted); without it the provider is not registered and
+the sprout logs why. The provider talks to that host only: a redirect to
+another scheme, host or port is refused, so the login, the token and the
+client certificate never reach it.
 
 The provider ignores `VAULT_*` and `BAO_*` variables, so a
 `VAULT_HTTP_PROXY` or `BAO_HTTP_PROXY` set for other tools has no effect on

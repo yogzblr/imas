@@ -5,18 +5,34 @@
 // Requests go through the official OpenBao Go client,
 // github.com/openbao/openbao/api/v2 (MPL-2.0, used unmodified; accepted by
 // docs/design/requirements.md item 21), which speaks the same HTTP API as
-// HashiCorp Vault. It does not use internal/openbao, the server-side
-// wrapper: that package configures an identity from an
+// HashiCorp Vault. It does not use internal/openbao's client, the
+// server-side wrapper: that package configures an identity from an
 // IMAS_<NAME>_OPENBAO_* block and authenticates with a static token or
 // kubernetes auth, while this provider runs on customer sprouts against
-// the customer's own server with a client certificate. What it keeps from
-// before the migration:
+// the customer's own server with a client certificate. It does share
+// internal/openbao's guards (CheckAddr, PinTransport, ValidateMountPath),
+// so both sides refuse the same addresses, redirects and paths:
+//
+//   - https:// only: an http:// address is refused unless
+//     IMAS_SDB_OPENBAO_ALLOW_INSECURE is true;
+//   - the configured host only: a redirect to another scheme, host or
+//     port is refused before anything is sent, so the login token, a
+//     request body and the client certificate never reach it; the
+//     official client follows at most one redirect on the same host;
+//   - only a 2xx is success: an unfollowed 3xx is an error;
+//   - a ref's path is checked segment by segment (no ".", "..", empty
+//     segment or leading auth/sys/identity, percent-encoded or not)
+//     before anything is sent.
+//
+// What it keeps from before the migration:
 //
 //   - the client certificate is presented through an sdb.CertWatcher, and
 //     keep-alives are off, so a rotated certificate is used from the next
 //     request on without a sprout restart;
 //   - the cert-auth login token is cached in an sdb.TokenCache until 90%
-//     of its lease has passed;
+//     of its lease has passed, and dropped when the client certificate
+//     reloads, so a rotation takes effect at once and not when the old
+//     login's lease runs out;
 //   - no BAO_* or VAULT_* variable is read (api.NewConfig, never
 //     api.DefaultConfig), so a customer's VAULT_TOKEN, VAULT_SKIP_VERIFY or
 //     VAULT_NAMESPACE meant for other tools never reaches this provider;
@@ -43,6 +59,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,6 +67,7 @@ import (
 
 	"github.com/yogzblr/imas/internal/ingredients/sdb"
 	"github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/openbao"
 )
 
 const backendName = "openbao"
@@ -66,6 +84,10 @@ const (
 	EnvCACert     = "IMAS_SDB_OPENBAO_CACERT"
 	EnvAuthMount  = "IMAS_SDB_OPENBAO_AUTH_MOUNT" // default "cert"
 	EnvAuthRole   = "IMAS_SDB_OPENBAO_ROLE"       // optional cert auth role name
+	// EnvAllowInsecure set to true accepts an http:// EnvAddr (tests
+	// only: the login token and secrets would cross the network in
+	// clear).
+	EnvAllowInsecure = "IMAS_SDB_OPENBAO_ALLOW_INSECURE"
 )
 
 var (
@@ -84,6 +106,9 @@ type Provider struct {
 	client  *api.Client // never holds a token: each request carries its own
 	tokens  sdb.TokenCache
 	watcher *sdb.CertWatcher // nil when built with newWithTransport
+	// base is the transport under the host pin, for tests; nil when
+	// built with newWithTransport.
+	base *http.Transport
 }
 
 // Compile-time interface check.
@@ -92,16 +117,25 @@ var _ sdb.SecretProvider = (*Provider)(nil)
 // New builds a Provider that authenticates with the given client
 // certificate/key (hot-reloaded via an sdb.CertWatcher so a rotated cert
 // is picked up without a restart) and, optionally, verifies the server
-// against caCertFile instead of the system trust store.
+// against caCertFile instead of the system trust store. addr must be
+// https://; FromEnv also accepts http:// with EnvAllowInsecure.
 func New(addr, certFile, keyFile, caCertFile, authMount, authRole string) (*Provider, error) {
-	return newWithCertWatch(addr, certFile, keyFile, caCertFile, authMount, authRole, 0)
+	return newProvider(addr, certFile, keyFile, caCertFile, authMount, authRole, false, 0)
 }
 
 // newWithCertWatch is New with the CertWatcher's polling interval (0 for
 // sdb.DefaultCertWatchInterval), so tests can rotate a cert quickly.
 func newWithCertWatch(addr, certFile, keyFile, caCertFile, authMount, authRole string, interval time.Duration) (*Provider, error) {
+	return newProvider(addr, certFile, keyFile, caCertFile, authMount, authRole, false, interval)
+}
+
+func newProvider(addr, certFile, keyFile, caCertFile, authMount, authRole string, allowInsecure bool, interval time.Duration) (*Provider, error) {
 	if addr == "" || certFile == "" || keyFile == "" {
 		return nil, ErrNotConfigured
+	}
+	addr = strings.TrimRight(addr, "/")
+	if err := openbao.CheckAddr(addr, EnvAddr, EnvAllowInsecure, allowInsecure); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrNotConfigured, err)
 	}
 	var pool *x509.CertPool
 	if caCertFile != "" {
@@ -144,12 +178,17 @@ func newWithCertWatch(addr, certFile, keyFile, caCertFile, authMount, authRole s
 		return nil, err
 	}
 	p.watcher = watcher
+	p.base = transport
+	// A login token is not bound to the certificate that obtained it:
+	// without this, a rotation meant to drop a distrusted identity would
+	// keep using its token until 90% of the lease had passed.
+	watcher.OnReload(p.tokens.Invalidate)
 	return p, nil
 }
 
 // newWithTransport builds a Provider whose requests go through transport
 // instead of a client-certificate one, for tests against a plain
-// httptest server.
+// httptest server (so http:// is accepted). The host pin still applies.
 func newWithTransport(addr, authMount, authRole string, transport http.RoundTripper) *Provider {
 	cfg := api.NewConfig()
 	cfg.HttpClient.Transport = transport
@@ -165,6 +204,11 @@ func newWithConfig(addr, authMount, authRole string, cfg *api.Config) (*Provider
 		authMount = "cert"
 	}
 	addr = strings.TrimRight(addr, "/")
+	pinned, err := openbao.PinTransport(cfg.HttpClient.Transport, addr)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", ErrNotConfigured, EnvAddr, err)
+	}
+	cfg.HttpClient.Transport = pinned
 	cfg.Address = addr
 	cfg.Timeout = requestTimeout
 	cfg.HttpClient.Timeout = requestTimeout
@@ -207,7 +251,15 @@ func FromEnv() (*Provider, error) {
 	if addr == "" && cert == "" && key == "" {
 		return nil, nil
 	}
-	return New(addr, cert, key, os.Getenv(EnvCACert), os.Getenv(EnvAuthMount), os.Getenv(EnvAuthRole))
+	allowInsecure := false
+	if v := os.Getenv(EnvAllowInsecure); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s=%q is not true or false", ErrNotConfigured, EnvAllowInsecure, v)
+		}
+		allowInsecure = b
+	}
+	return newProvider(addr, cert, key, os.Getenv(EnvCACert), os.Getenv(EnvAuthMount), os.Getenv(EnvAuthRole), allowInsecure, 0)
 }
 
 func init() {
@@ -273,10 +325,19 @@ func (p *Provider) Get(ctx context.Context, ref string) (string, error) {
 	return sdb.SelectField(fields, u.Fragment)
 }
 
+// splitMountAndPath splits a ref's path into its mount and the secret
+// path under it, after checking every segment with
+// openbao.ValidateMountPath: the official client builds the URL with
+// path.Join, so a ".." would otherwise climb out of the mount
+// (sdb://openbao/secret/a/../../auth/token/lookup-self on the KV v1
+// fallback is /v1/auth/token/lookup-self).
 func splitMountAndPath(uriPath string) (mount, secretPath string, err error) {
-	trimmed := strings.Trim(uriPath, "/")
+	trimmed := strings.TrimPrefix(uriPath, "/")
+	if err := openbao.ValidateMountPath(trimmed); err != nil {
+		return "", "", fmt.Errorf("%w: %w", sdb.ErrInvalidRef, err)
+	}
 	parts := strings.SplitN(trimmed, "/", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	if len(parts) != 2 {
 		return "", "", fmt.Errorf("%w: expected sdb://openbao/<mount>/<path>, got path %q", sdb.ErrInvalidRef, uriPath)
 	}
 	return parts[0], parts[1], nil

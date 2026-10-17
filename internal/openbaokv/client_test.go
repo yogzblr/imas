@@ -109,6 +109,7 @@ func (m *mockKV) snapshot() []mockRequest {
 func setupTokenEnv(t *testing.T, addr, mount string) {
 	t.Helper()
 	t.Setenv(EnvOpenBaoAddr, addr)
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoKVMount, mount)
 	t.Setenv(EnvOpenBaoAuthMethod, AuthMethodToken)
 	t.Setenv(EnvOpenBaoToken, testToken)
@@ -200,6 +201,7 @@ func TestCustomMount(t *testing.T) {
 
 func TestDefaultMountIsSecret(t *testing.T) {
 	t.Setenv(EnvOpenBaoAddr, "http://127.0.0.1:1")
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoKVMount, "")
 	t.Setenv(EnvOpenBaoAuthMethod, "")
 	t.Setenv(EnvOpenBaoToken, "x")
@@ -233,7 +235,7 @@ func TestWrongTokenRejected(t *testing.T) {
 func TestInvalidPathsRejectedBeforeAnyRequest(t *testing.T) {
 	m := newMockKV("secret")
 	c := newTestClient(t, m)
-	for _, p := range []string{"", "/", "a//b", "a/../b", "./a", "a/.."} {
+	for _, p := range []string{"", "/", "a//b", "a/../b", "./a", "a/..", "a/%2e%2e/b", "a/%252E%252E/b", "%2e", "a%2fb"} {
 		if _, err := c.Write(context.Background(), p, map[string]string{"k": "v"}); !errors.Is(err, ErrInvalidPath) {
 			t.Errorf("Write(%q): expected ErrInvalidPath, got %v", p, err)
 		}
@@ -307,6 +309,7 @@ func TestNewClientFromEnv_MissingAddr(t *testing.T) {
 
 func TestNewClientFromEnv_MissingToken(t *testing.T) {
 	t.Setenv(EnvOpenBaoAddr, "http://127.0.0.1:1")
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoAuthMethod, AuthMethodToken)
 	t.Setenv(EnvOpenBaoToken, "")
 	if _, err := NewClientFromEnv(); !errors.Is(err, ErrNotConfigured) {
@@ -316,6 +319,7 @@ func TestNewClientFromEnv_MissingToken(t *testing.T) {
 
 func TestNewClientFromEnv_MissingK8sRole(t *testing.T) {
 	t.Setenv(EnvOpenBaoAddr, "http://127.0.0.1:1")
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoAuthMethod, AuthMethodKubernetes)
 	t.Setenv(EnvOpenBaoK8sRole, "")
 	if _, err := NewClientFromEnv(); !errors.Is(err, ErrNotConfigured) {
@@ -325,6 +329,7 @@ func TestNewClientFromEnv_MissingK8sRole(t *testing.T) {
 
 func TestNewClientFromEnv_UnknownAuthMethod(t *testing.T) {
 	t.Setenv(EnvOpenBaoAddr, "http://127.0.0.1:1")
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoAuthMethod, "carrier-pigeon")
 	_, err := NewClientFromEnv()
 	if !errors.Is(err, ErrNotConfigured) || !strings.Contains(err.Error(), "carrier-pigeon") {
@@ -334,6 +339,7 @@ func TestNewClientFromEnv_UnknownAuthMethod(t *testing.T) {
 
 func TestNewClientFromEnv_InvalidMount(t *testing.T) {
 	t.Setenv(EnvOpenBaoAddr, "http://127.0.0.1:1")
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoKVMount, "a/../b")
 	t.Setenv(EnvOpenBaoToken, "x")
 	if _, err := NewClientFromEnv(); !errors.Is(err, ErrNotConfigured) {
@@ -341,8 +347,40 @@ func TestNewClientFromEnv_InvalidMount(t *testing.T) {
 	}
 }
 
+// TestNewClientFromEnv_ReservedMount: the KV mount can't be one of the
+// API trees a secret must never reach (auth, sys, identity), encoded or
+// not.
+func TestNewClientFromEnv_ReservedMount(t *testing.T) {
+	t.Setenv(EnvOpenBaoAddr, "http://127.0.0.1:1")
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
+	t.Setenv(EnvOpenBaoToken, "x")
+	for _, m := range []string{"sys", "auth", "identity", "%73ys", "Auth/token"} {
+		t.Setenv(EnvOpenBaoKVMount, m)
+		if _, err := NewClientFromEnv(); !errors.Is(err, ErrNotConfigured) || !errors.Is(err, ErrInvalidPath) {
+			t.Errorf("mount %q: expected ErrNotConfigured and ErrInvalidPath, got %v", m, err)
+		}
+	}
+}
+
+// TestNewClientFromEnv_InsecureAddr (I2): http:// only with
+// IMAS_SAASAPI_CRED_OPENBAO_ALLOW_INSECURE=true, and the refusal names it.
+func TestNewClientFromEnv_InsecureAddr(t *testing.T) {
+	t.Setenv(EnvOpenBaoAddr, "http://127.0.0.1:1")
+	t.Setenv(EnvOpenBaoAllowInsecure, "")
+	t.Setenv(EnvOpenBaoToken, "x")
+	_, err := NewClientFromEnv()
+	if !errors.Is(err, ErrNotConfigured) || !strings.Contains(err.Error(), EnvOpenBaoAllowInsecure+"=true") {
+		t.Fatalf("expected ErrNotConfigured naming %s, got %v", EnvOpenBaoAllowInsecure, err)
+	}
+	t.Setenv(EnvOpenBaoAddr, "https://127.0.0.1:1")
+	if _, err := NewClientFromEnv(); err != nil {
+		t.Fatalf("https: %v", err)
+	}
+}
+
 func TestNewClientFromEnv_BadCACert(t *testing.T) {
 	t.Setenv(EnvOpenBaoAddr, "http://127.0.0.1:1")
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoToken, "x")
 	t.Setenv(EnvOpenBaoCACert, filepath.Join(t.TempDir(), "missing.pem"))
 	if _, err := NewClientFromEnv(); err == nil {
@@ -372,6 +410,7 @@ func writeK8sJWT(t *testing.T, contents string) string {
 func setupK8sEnv(t *testing.T, addr, jwtPath string) {
 	t.Helper()
 	t.Setenv(EnvOpenBaoAddr, addr)
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoKVMount, "secret")
 	t.Setenv(EnvOpenBaoAuthMethod, AuthMethodKubernetes)
 	t.Setenv(EnvOpenBaoK8sRole, "imas-saasapi-cred-publisher")

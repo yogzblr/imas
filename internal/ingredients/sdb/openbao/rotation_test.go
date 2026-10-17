@@ -110,6 +110,7 @@ type mtlsVault struct {
 	seenCNs   []string
 	protos    []int
 	logins    int
+	tokens    []string // X-Vault-Token of each secret read
 }
 
 func (m *mtlsVault) allow(cn string) {
@@ -144,6 +145,9 @@ func (m *mtlsVault) handler(w http.ResponseWriter, r *http.Request) {
 			"auth": map[string]any{"client_token": "tok-" + cn, "lease_duration": 3600},
 		})
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/secret/data/app/db":
+		m.mu.Lock()
+		m.tokens = append(m.tokens, r.Header.Get("X-Vault-Token"))
+		m.mu.Unlock()
 		if r.Header.Get("X-Vault-Token") == "" {
 			w.WriteHeader(http.StatusForbidden)
 			_ = json.NewEncoder(w).Encode(map[string]any{"errors": []string{"missing client token"}})
@@ -171,7 +175,10 @@ func (m *mtlsVault) lastCN() string {
 // a running provider and checks that the next requests present the new
 // certificate, with no new Provider and no restart, over HTTP/1.1 and
 // HTTP/2 (a customer's OpenBao or Vault negotiates HTTP/2 by default, and
-// a reused HTTP/2 connection would keep presenting the old certificate).
+// a reused HTTP/2 connection would keep presenting the old certificate),
+// and that the login token the old certificate obtained is dropped on
+// the reload (L20): the next read logs in with the new certificate and
+// carries its token, not the old one until 90% of its lease.
 func TestCertRotationWhileRunning(t *testing.T) {
 	for _, h2 := range []bool{false, true} {
 		name := "http1"
@@ -211,28 +218,32 @@ func TestCertRotationWhileRunning(t *testing.T) {
 				t.Fatalf("server saw %q before rotation", cn)
 			}
 
+			// Hooks run in the order registered: once this one has run,
+			// the provider's (registered by New) has dropped the token.
+			reloaded := make(chan struct{}, 1)
+			p.watcher.OnReload(func() { reloaded <- struct{}{} })
+
 			// The customer rotates the certificate and their server stops
-			// accepting the old one.
+			// accepting the old one. The old login's token stays valid on
+			// the server (OpenBao doesn't bind a token to the certificate
+			// that logged in), so only the reload hook makes the provider
+			// log in again.
 			writeClientCert(t, clientCA, certPath, keyPath, "sprout-cert-2")
 			vault.allow("sprout-cert-2")
-			// The cached token stays valid (OpenBao doesn't bind a token
-			// to the certificate that logged in); drop it so the rotated
-			// certificate has to log in too.
-			p.tokens.Invalidate()
+			select {
+			case <-reloaded:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the certificate watcher did not reload within 5s")
+			}
 
-			deadline := time.Now().Add(5 * time.Second)
-			for {
-				got, err := p.Get(t.Context(), ref)
-				if err == nil {
-					if got != "s3cret" {
-						t.Fatalf("Get after rotation = %q", got)
-					}
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatalf("Get still failing 5s after rotation: %v", err)
-				}
-				time.Sleep(20 * time.Millisecond)
+			if got, err := p.Get(t.Context(), ref); err != nil || got != "s3cret" {
+				t.Fatalf("Get after rotation = %q, %v", got, err)
+			}
+			vault.mu.Lock()
+			lastToken := vault.tokens[len(vault.tokens)-1]
+			vault.mu.Unlock()
+			if lastToken != "tok-sprout-cert-2" {
+				t.Fatalf("read after rotation carried %q, want the rotated certificate's login token", lastToken)
 			}
 			if cn := vault.lastCN(); cn != "sprout-cert-2" {
 				t.Fatalf("server saw %q after rotation, want the rotated certificate", cn)

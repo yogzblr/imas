@@ -95,6 +95,7 @@ func (s *policyServer) store(token string) *natskeys.TransitKeyStore {
 	}
 	p := natskeys.EnvPrefixSign
 	s.t.Setenv(p+natskeys.EnvOpenBaoAddr, s.addr)
+	s.t.Setenv(p+natskeys.EnvOpenBaoAllowInsecure, "true") // CI's dev server is plain http
 	s.t.Setenv(p+natskeys.EnvOpenBaoAuthMethod, openbao.AuthMethodToken)
 	s.t.Setenv(p+natskeys.EnvOpenBaoToken, token)
 	s.t.Setenv(p+natskeys.EnvOpenBaoTransitMount, s.mount)
@@ -501,6 +502,7 @@ func TestOpenBaoFarmerTenantBoxPolicy(t *testing.T) {
 
 	base := "imas/tenant-x25519"
 	t.Setenv(pki.EnvTenantBoxOpenBaoAddr, addr)
+	t.Setenv(pki.EnvTenantBoxOpenBaoAllowInsecure, "true") // CI's dev server is plain http
 	t.Setenv(pki.EnvTenantBoxOpenBaoKVMount, mount)
 	t.Setenv(pki.EnvTenantBoxOpenBaoKVPath, base)
 	t.Setenv(pki.EnvTenantBoxOpenBaoAuthMethod, pki.TenantBoxAuthMethodToken)

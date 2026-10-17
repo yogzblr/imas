@@ -143,3 +143,53 @@ func TestCertWatcher_MissingFiles(t *testing.T) {
 		t.Fatal("expected an error for missing cert/key files")
 	}
 }
+
+// TestCertWatcher_OnReload: a registered hook runs after a rotated
+// certificate is loaded (and GetClientCertificate already returns the new
+// one), not for the initial load and not for a rotation that fails to
+// load.
+func TestCertWatcher_OnReload(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "client.crt")
+	keyPath := filepath.Join(dir, "client.key")
+	genCert(t, certPath, keyPath, "initial")
+
+	w, err := NewCertWatcher(certPath, keyPath, 10*time.Millisecond)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer w.Close()
+	before, _ := w.GetClientCertificate(nil)
+
+	fired := make(chan []byte, 4)
+	w.OnReload(func() {
+		c, _ := w.GetClientCertificate(nil)
+		fired <- c.Certificate[0]
+	})
+
+	// A broken rotation: the watcher keeps the old certificate and runs
+	// no hook.
+	if err := os.WriteFile(certPath, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	broken := time.Now().Add(time.Second)
+	_ = os.Chtimes(certPath, broken, broken)
+	select {
+	case <-fired:
+		t.Fatal("hook ran for a rotation that failed to load")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	genCert(t, certPath, keyPath, "rotated")
+	future := time.Now().Add(2 * time.Second)
+	_ = os.Chtimes(certPath, future, future)
+	_ = os.Chtimes(keyPath, future, future)
+	select {
+	case got := <-fired:
+		if string(got) == string(before.Certificate[0]) {
+			t.Fatal("hook ran before the rotated certificate was in place")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("hook did not run after the rotation")
+	}
+}

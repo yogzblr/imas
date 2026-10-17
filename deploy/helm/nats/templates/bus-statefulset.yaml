@@ -167,6 +167,10 @@ spec:
               value: {{ $ob.role | quote }}
             - name: IMAS_CERTS_OPENBAO_AUTH_METHOD
               value: {{ $ob.authMethod | quote }}
+            {{- if $ob.allowInsecure }}
+            - name: IMAS_CERTS_OPENBAO_ALLOW_INSECURE
+              value: "true"
+            {{- end }}
             {{- if $ob.caConfigMap }}
             - name: IMAS_CERTS_OPENBAO_CACERT
               value: /var/run/secrets/openbao-ca/ca.crt

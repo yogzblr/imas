@@ -69,6 +69,7 @@ func serveRealTransitKeys(t *testing.T) *GatewaySigner {
 	}))
 	t.Cleanup(ts.Close)
 	t.Setenv(EnvOpenBaoAddr, ts.URL)
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoTransitMount, "transit")
 	t.Setenv(EnvOpenBaoAuthMethod, AuthMethodToken)
 	t.Setenv(EnvOpenBaoToken, "root")
@@ -208,6 +209,7 @@ func TestOpenBaoLive_JWKSServesMintedTokenKey(t *testing.T) {
 	admin(http.MethodPost, mount+"/keys/"+keyName+"/rotate", nil)
 
 	t.Setenv(EnvOpenBaoAddr, addr)
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoTransitMount, mount)
 	t.Setenv(EnvOpenBaoAuthMethod, AuthMethodToken)
 	t.Setenv(EnvOpenBaoToken, rootToken)

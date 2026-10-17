@@ -18,8 +18,14 @@
 //   - the optional CA bundle that verifies OpenBao's own TLS;
 //   - a 30 second timeout and no retries, as before the migration;
 //   - the X-Vault-Namespace header, when <prefix>NAMESPACE is set;
-//   - errors: a non-2xx answer becomes a *StatusError reading
-//     "status <code>: <OpenBao's errors>".
+//   - the configured host only: every request, a followed redirect
+//     included, goes to the scheme, host and port of <prefix>ADDR or is
+//     refused before anything is sent (pinnedTransport), and the
+//     official client follows at most one redirect;
+//   - https only: an http:// address is refused unless
+//     <prefix>ALLOW_INSECURE is true;
+//   - errors: any answer outside 200 to 299 (an unfollowed 3xx included)
+//     becomes a *StatusError reading "status <code>: <OpenBao's errors>".
 //
 // It starts no goroutines. A Client used for one operation should be
 // closed (Close) to release its idle connections.
@@ -43,6 +49,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -82,8 +89,9 @@ var (
 
 // Env names one identity's environment variables, by convention
 // <prefix>ADDR, CACERT, AUTH_METHOD, TOKEN, K8S_ROLE, K8S_MOUNT,
-// K8S_JWT_PATH and NAMESPACE (e.g. IMAS_CERTS_OPENBAO_ADDR). Each caller
-// spells its names out so a search for one finds where it is read.
+// K8S_JWT_PATH, NAMESPACE and ALLOW_INSECURE (e.g.
+// IMAS_CERTS_OPENBAO_ADDR). Each caller spells its names out so a search
+// for one finds where it is read.
 type Env struct {
 	Addr       string // required
 	CACert     string // optional PEM bundle verifying OpenBao's TLS
@@ -93,6 +101,9 @@ type Env struct {
 	K8sMount   string // default DefaultK8sMount
 	K8sJWTPath string // default DefaultK8sJWTPath
 	Namespace  string // optional; sets X-Vault-Namespace on every request
+	// AllowInsecure names the variable that, set to true, lets Addr be
+	// http://. Unset or false: only https:// is accepted.
+	AllowInsecure string
 }
 
 // Errors are the sentinels a caller's errors wrap, so each package keeps
@@ -184,16 +195,22 @@ func NewFromEnv(env Env, errs Errors) (*Client, error) {
 			errs.NotConfigured, env.AuthMethod, authMethod, AuthMethodToken, AuthMethodKubernetes)
 	}
 
+	addr = strings.TrimRight(addr, "/")
+	allowInsecure, err := parseAllowInsecure(env.AllowInsecure)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errs.NotConfigured, err)
+	}
+	if err := CheckAddr(addr, env.Addr, env.AllowInsecure, allowInsecure); err != nil {
+		return nil, fmt.Errorf("%w: %w", errs.NotConfigured, err)
+	}
+
 	// api.NewConfig, never api.DefaultConfig: the latter reads BAO_*/VAULT_*
 	// variables, including BAO_SKIP_VERIFY and BAO_TOKEN.
 	cfg := api.NewConfig()
 	if cfg.Error != nil {
 		return nil, fmt.Errorf("%w: %w", errs.NotConfigured, cfg.Error)
 	}
-	cfg.Address = strings.TrimRight(addr, "/")
-	cfg.Timeout = requestTimeout
 	cfg.HttpClient.Timeout = requestTimeout
-	cfg.MaxRetries = 0
 	if caFile := os.Getenv(env.CACert); caFile != "" {
 		pemBytes, err := os.ReadFile(caFile)
 		if err != nil {
@@ -207,28 +224,72 @@ func NewFromEnv(env Env, errs Errors) (*Client, error) {
 		// TLS 1.2 and the HTTP/2 ALPN protocols.
 		cfg.HttpClient.Transport.(*http.Transport).TLSClientConfig.RootCAs = pool
 	}
-
-	client, err := api.NewClient(cfg)
+	pinned, err := PinTransport(cfg.HttpClient.Transport, addr)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s: %w", errs.NotConfigured, env.Addr, err)
 	}
-	// NewClient reads no environment with DisableEnvironment set; clear
-	// anyway, so nothing but this identity's own token is ever sent.
-	client.ClearToken()
-	client.ClearNamespace()
+	cfg.HttpClient.Transport = pinned
+
+	client, err := newAPIClient(cfg, addr)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", errs.NotConfigured, env.Addr, err)
+	}
 	if ns := strings.Trim(os.Getenv(env.Namespace), "/"); ns != "" {
 		client.SetNamespace(ns)
 	}
-	login, err := client.Clone() // shares the transport; CloneToken is off
+	// The login client is built the same way, never with client.Clone():
+	// Clone drops DisableEnvironment, so the clone re-reads BAO_*/VAULT_*
+	// (BAO_NAMESPACE, BAO_TOKEN, and a malformed BAO_MAX_RETRIES that
+	// fails the build). It shares the pinned HTTP client.
+	loginCfg := api.NewConfig()
+	if loginCfg.Error != nil {
+		return nil, fmt.Errorf("%w: %w", errs.NotConfigured, loginCfg.Error)
+	}
+	loginCfg.HttpClient = cfg.HttpClient
+	login, err := newAPIClient(loginCfg, addr)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errs.NotConfigured, err)
 	}
-	login.ClearToken()
 	if ns := client.Namespace(); ns != "" {
 		login.SetNamespace(ns)
 	}
 	c.api, c.login, c.httpClient = client, login, cfg.HttpClient
 	return c, nil
+}
+
+// newAPIClient builds an official client on cfg (from api.NewConfig, so
+// with DisableEnvironment) for addr: the 30 second timeout, no retries,
+// and no token or namespace but what the caller sets.
+func newAPIClient(cfg *api.Config, addr string) (*api.Client, error) {
+	cfg.Address = addr
+	cfg.Timeout = requestTimeout
+	cfg.MaxRetries = 0
+	client, err := api.NewClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	// NewClient reads no environment with DisableEnvironment set; clear
+	// anyway, so nothing but this identity's own token is ever sent.
+	client.ClearToken()
+	client.ClearNamespace()
+	return client, nil
+}
+
+// parseAllowInsecure reads the variable name names: unset is false, and
+// a value strconv.ParseBool does not accept is an error naming it.
+func parseAllowInsecure(name string) (bool, error) {
+	if name == "" {
+		return false, nil
+	}
+	v := os.Getenv(name)
+	if v == "" {
+		return false, nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("%s=%q is not true or false", name, v)
+	}
+	return b, nil
 }
 
 // Close releases the client's idle connections. For a Client built for
@@ -378,6 +439,14 @@ func send(ctx context.Context, client *api.Client, token, method, path string, q
 		}
 		return nil, statusError(err)
 	}
+	// The official client counts 200 to 399 as success, so a 3xx it did
+	// not follow (a 308, or a second redirect) would read as an empty
+	// success: a write that never happened would report written. Only a
+	// 2xx is; the body of anything else is not OpenBao's and is dropped.
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		resp.Body.Close()
+		return nil, &StatusError{StatusCode: resp.StatusCode}
+	}
 	return resp, nil
 }
 
@@ -394,7 +463,7 @@ func do(ctx context.Context, client *api.Client, token, method, path string, que
 	return secret, nil
 }
 
-// StatusError is a non-2xx answer from OpenBao.
+// StatusError is an answer from OpenBao outside 200 to 299.
 type StatusError struct {
 	StatusCode int
 	// Errors is OpenBao's "errors" array. It is empty when the body
@@ -411,7 +480,14 @@ func (e *StatusError) Error() string {
 	return fmt.Sprintf("status %d: %s", e.StatusCode, strings.Join(e.Errors, "; "))
 }
 
-func (e *StatusError) Unwrap() error { return e.err }
+// Unwrap returns the official client's *api.ResponseError (its raw body
+// cleared), or nil for a status the client counted as success (a 3xx).
+func (e *StatusError) Unwrap() error {
+	if e.err == nil {
+		return nil
+	}
+	return e.err
+}
 
 // statusError turns the official client's *api.ResponseError into a
 // *StatusError. When the body wasn't JSON (RawError), the client copies
