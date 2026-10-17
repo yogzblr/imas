@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    paths-ignore:
+      - "docs/briefs/**"
+      - "docs/status/**"
+      - "docs/design/**"
+      - "docs/security-review*.md"
 
 permissions:
   contents: read

@@ -1,7 +1,7 @@
 name: Gitleaks
 on:
   pull_request:
-    types: [opened, reopened, review_requested]
+    types: [opened, reopened, synchronize, review_requested]
   push:
     branches: [ main ]
   workflow_dispatch:

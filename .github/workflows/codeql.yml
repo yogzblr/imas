@@ -16,6 +16,11 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+    paths-ignore:
+      - "docs/briefs/**"
+      - "docs/status/**"
+      - "docs/design/**"
+      - "docs/security-review*.md"
   schedule:
     - cron: '19 19 * * 0'
 
