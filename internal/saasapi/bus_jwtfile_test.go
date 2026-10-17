@@ -47,6 +47,8 @@ func TestConnectBus_ReloadsTheJWTFile(t *testing.T) {
 	if cfg.NATSUserJWT != first {
 		t.Fatal("LoadConfig did not read the JWT from SAASAPI_NATS_USER_JWT_FILE")
 	}
+	// A Config built directly with only the file works too.
+	cfg.NATSUserJWT = ""
 	nc, err := ConnectBus(cfg)
 	if err != nil {
 		t.Fatalf("ConnectBus: %v", err)
@@ -79,5 +81,23 @@ func TestConnectBus_ReloadsTheJWTFile(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if r := nc.Stats().Reconnects; r != 1 {
 		t.Fatalf("%d reconnects for one refreshed JWT, want 1", r)
+	}
+}
+
+// The watcher ends as soon as the connection is closed, not at its next
+// tick.
+func TestBusCredentialWatchEndsOnClose(t *testing.T) {
+	c := &busCredential{}
+	closed := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		c.watch(nil, closed, time.Hour)
+		close(done)
+	}()
+	close(closed)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the watcher outlived its closed connection")
 	}
 }

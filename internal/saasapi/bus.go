@@ -96,6 +96,13 @@ func validateBusCredential(seed, userJWT string) error {
 // (sealedbus.go, J.4), so a connection without them could do nothing but
 // fail. Missing or unreadable keys are a startup error.
 func ConnectBus(cfg Config) (*nats.Conn, error) {
+	if cfg.NATSUserJWT == "" && cfg.NATSUserJWTFile != "" {
+		b, err := os.ReadFile(cfg.NATSUserJWTFile)
+		if err != nil {
+			return nil, fmt.Errorf("saasapi: reading SAASAPI_NATS_USER_JWT_FILE: %w", err)
+		}
+		cfg.NATSUserJWT = strings.TrimSpace(string(b))
+	}
 	if cfg.NATSURL == "" || cfg.NATSCAFile == "" || cfg.NATSNKeySeedFile == "" || cfg.NATSUserJWT == "" {
 		return nil, fmt.Errorf("%w: SAASAPI_NATS_URL, SAASAPI_NATS_CA_FILE, SAASAPI_NATS_NKEY_SEED_FILE and SAASAPI_NATS_USER_JWT (or SAASAPI_NATS_USER_JWT_FILE) are all required", ErrBusNotConfigured)
 	}
@@ -123,6 +130,7 @@ func ConnectBus(cfg Config) (*nats.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	closed := make(chan struct{})
 	nc, err := nats.Connect(cfg.NATSURL,
 		nats.Name("imas-saasapi"),
 		// Request-reply (internal.sprout.action) replies arrive on this
@@ -144,6 +152,8 @@ func ConnectBus(cfg Config) (*nats.Conn, error) {
 		nats.ReconnectHandler(func(nc *nats.Conn) {
 			log.Infof("saasapi: reconnected to NATS bus at %s", nc.ConnectedUrl())
 		}),
+		// Ends the JWT file watcher with the connection.
+		nats.ClosedHandler(func(*nats.Conn) { close(closed) }),
 		nats.ErrorHandler(func(_ *nats.Conn, sub *nats.Subscription, err error) {
 			subject := ""
 			if sub != nil {
@@ -157,7 +167,7 @@ func ConnectBus(cfg Config) (*nats.Conn, error) {
 	}
 	SetControlPlaneBox(box)
 	if cfg.NATSUserJWTFile != "" {
-		go creds.watch(nc, busJWTWatchInterval)
+		go creds.watch(nc, closed, busJWTWatchInterval)
 	}
 	return nc, nil
 }
@@ -229,13 +239,16 @@ func (c *busCredential) sign(nonce []byte) ([]byte, error) { return c.kp.Sign(no
 
 // watch checks the JWT file every interval and, when it holds a valid JWT
 // other than the one the connection presented, reconnects so the new one
-// is used before the old one expires. It ends when nc is closed.
-func (c *busCredential) watch(nc *nats.Conn, interval time.Duration) {
+// is used before the old one expires. It ends as soon as closed is
+// closed (nc's ClosedHandler).
+func (c *busCredential) watch(nc *nats.Conn, closed <-chan struct{}, interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
-	for range t.C {
-		if nc.IsClosed() {
+	for {
+		select {
+		case <-closed:
 			return
+		case <-t.C:
 		}
 		next := c.load()
 		c.mu.Lock()
