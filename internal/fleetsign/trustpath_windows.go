@@ -14,7 +14,7 @@ import (
 // Windows equivalent of the Unix owner and mode check. Mode bits mean
 // nothing on Windows, so maxPerm is not used.
 func checkOwnerAndMode(path string, _ os.FileInfo, _ os.FileMode, _ bool) error {
-	acl, err := readWindowsACL(path)
+	acl, err := readACL(path)
 	if err != nil {
 		return fmt.Errorf("%w: %s: reading its security descriptor: %v", ErrUnsafePath, path, err)
 	}
@@ -23,6 +23,10 @@ func checkOwnerAndMode(path string, _ os.FileInfo, _ os.FileMode, _ bool) error 
 	}
 	return nil
 }
+
+// readACL is readWindowsACL; a variable so tests can give their temp
+// files the ACL an installed keyring has (trustpath_windows_test.go).
+var readACL = readWindowsACL
 
 // readWindowsACL reads path's owner and DACL, without following a
 // reparse point (the caller has refused those already with Lstat).

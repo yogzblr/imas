@@ -199,6 +199,7 @@ func TestParseArmoredKeyring(t *testing.T) {
 }
 
 func TestLoadArmoredKeyring_FileChecks(t *testing.T) {
+	trustTempACLs(t)
 	data := armoredPublic(t, newEntity(t, time.Now(), 0))
 	dir := t.TempDir()
 	good := filepath.Join(dir, "fleet-signing-keys.asc")

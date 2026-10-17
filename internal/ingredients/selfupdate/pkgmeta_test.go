@@ -223,8 +223,11 @@ func TestApply_PrereleaseVersions(t *testing.T) {
 		if _, _, err := verifyPackageIdentity(context.Background(), p, msiFinal, verifiedRelease("v2.5.0")); err != nil {
 			t.Errorf("v2.5.0 manifest, 2.5.0 MSI: %v", err)
 		}
-		if _, _, err := verifyPackageIdentity(context.Background(), p, `C:\stage\imas-sprout-2.5.1-windows-x64.msi`, verifiedRelease("v2.5.1")); !errors.Is(err, ErrPackageMismatch) {
-			t.Errorf("v2.5.1 manifest, ProductVersion 2.5.0: %v, want ErrPackageMismatch", err)
+		// The file name says 2.5.1, as the manifest does, so the refusal
+		// must come from the ProductVersion (2.5.0).
+		_, _, err := verifyPackageIdentity(context.Background(), p, filepath.Join("stage", "imas-sprout-2.5.1-windows-x64.msi"), verifiedRelease("v2.5.1"))
+		if !errors.Is(err, ErrPackageMismatch) || !strings.Contains(err.Error(), "imas-sprout 2.5.0 (v2.5.0), but the verified release is v2.5.1") {
+			t.Errorf("v2.5.1 manifest, ProductVersion 2.5.0: %v, want ErrPackageMismatch naming the ProductVersion", err)
 		}
 	})
 }

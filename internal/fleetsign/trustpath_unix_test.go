@@ -9,6 +9,11 @@ import (
 	"testing"
 )
 
+// trustTempACLs is a no-op on Unix-like systems, where a test's temp
+// files are checked by their real owner and mode (trustpath_windows_test.go
+// has the Windows version).
+func trustTempACLs(*testing.T) {}
+
 // otherOwner makes every path look owned by another uid for the rest of
 // the test.
 func otherOwner(t *testing.T) {
