@@ -17,6 +17,11 @@ on:
   pull_request:
     # The branches below must be a subset of the branches above
     branches: [ main ]
+    paths-ignore:
+      - "docs/briefs/**"
+      - "docs/status/**"
+      - "docs/design/**"
+      - "docs/security-review*.md"
   schedule:
     - cron: '38 17 * * 1'
 
