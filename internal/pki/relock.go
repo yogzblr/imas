@@ -382,7 +382,8 @@ func accountIsLockedOut(ac *jwt.AccountClaims) bool {
 // busAccountView reads the Account JWTs the bus nodes hold.
 type busAccountView interface {
 	// lookup returns every bus node's Account JWT for accountPub; a node
-	// that holds none answers "", which is dropped.
+	// that holds none answers "", which is dropped. Fewer answers than
+	// the bus has nodes is an error.
 	lookup(accountPub string) ([]string, error)
 	close()
 }
@@ -437,8 +438,10 @@ func (v *natsBusAccountView) lookup(accountPub string) ([]string, error) {
 			out = append(out, string(msg.Data))
 		}
 	}
-	if answers == 0 {
-		return nil, errors.New("no bus node answered the claims lookup")
+	// A node that didn't answer may hold a live copy: the lookup is
+	// incomplete, which the sweep takes as live (fail closed).
+	if answers < v.want {
+		return nil, fmt.Errorf("only %d of %d bus nodes answered the claims lookup", answers, v.want)
 	}
 	return out, nil
 }

@@ -135,8 +135,17 @@ func TestNKeyLookupInTenant(t *testing.T) {
 	if err := upsertNKeyRow(nkeyRow{TenantID: "t_b", SproutID: "db-01", NKey: nkey, State: stateUnaccepted}); err != nil {
 		t.Fatalf("the same NKey in another tenant: %v", err)
 	}
-	if err := upsertNKeyRow(nkeyRow{TenantID: "t_a", SproutID: "web-02", NKey: nkey, State: stateRejected}); err == nil {
-		t.Error("a second sprout ID for an NKey in one tenant was stored")
+	if err := upsertNKeyRow(nkeyRow{TenantID: "t_a", SproutID: "web-02", NKey: nkey, State: stateRejected}); !errors.Is(err, errNKeyAmbiguous) {
+		t.Errorf("a second sprout ID for an NKey in one tenant: %v, want errNKeyAmbiguous", err)
+	}
+	if row, err := findNKeyRowInTenant("t_a", "web-01"); err != nil || row.State != stateAccepted || row.NKey != nkey {
+		t.Errorf("the refused write changed web-01: %+v, %v", row, err)
+	}
+	if err := upsertNKeyRow(nkeyRow{TenantID: "t_a", SproutID: "web-01", NKey: nkey, State: stateDenied}); err != nil {
+		t.Errorf("updating web-01's own row: %v", err)
+	}
+	if err := upsertNKeyRow(nkeyRow{TenantID: "t_a", SproutID: "web-01", NKey: nkey, State: stateAccepted}); err != nil {
+		t.Errorf("updating web-01's own row back: %v", err)
 	}
 	if id, err := SproutIDForNKey("t_a", nkey); err != nil || id != "web-01" {
 		t.Errorf("SproutIDForNKey(t_a) = %q, %v", id, err)

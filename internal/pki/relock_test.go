@@ -392,3 +392,28 @@ func TestStartTenantRelocker_Stops(t *testing.T) {
 		t.Fatal("the relocker did not stop")
 	}
 }
+
+// A claims lookup that fewer bus nodes answer than the bus has is an
+// error, which the sweep takes as live and pushes (fail closed): a node
+// that stayed silent may hold a live copy.
+func TestBusAccountView_IncompleteLookupIsAnError(t *testing.T) {
+	startRaceBus(t)
+	rt := setupRaceTenant(t, "t_lookup")
+	row, err := getTenantRow(rt.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := dialBusAccountView()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer view.close()
+	got, err := view.lookup(row.AccountPub)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("one-node bus, one expected: %d answers, %v", len(got), err)
+	}
+	view.(*natsBusAccountView).want = 2
+	if _, err := view.lookup(row.AccountPub); err == nil {
+		t.Fatal("a lookup one of two nodes answered returned no error")
+	}
+}

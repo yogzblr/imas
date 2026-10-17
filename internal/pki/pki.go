@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 
 	log "github.com/yogzblr/imas/internal/log"
 
@@ -207,10 +206,7 @@ func AcceptNKey(tenantID, id string) error {
 		if err := tx.Where("tenant_id = ? AND sprout_id = ?", tenantID, id).Delete(&nkeyRow{}).Error; err != nil {
 			return err
 		}
-		return tx.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "tenant_id"}, {Name: "sprout_id"}},
-			DoUpdates: clause.AssignmentColumns([]string{"nkey", "state"}),
-		}).Create(&nkeyRow{TenantID: tenantID, SproutID: base, NKey: row.NKey, State: stateAccepted}).Error
+		return upsertNKeyRowTx(tx, nkeyRow{TenantID: tenantID, SproutID: base, NKey: row.NKey, State: stateAccepted})
 	})
 }
 

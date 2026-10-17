@@ -14,9 +14,13 @@ import (
 	"testing"
 
 	"github.com/pressly/goose/v3"
+	gormmysql "gorm.io/driver/mysql"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/yogzblr/imas/internal/migrations"
 	"github.com/yogzblr/imas/internal/migrations/mysqltest"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 const tenantNKeyUniqueFile = "00006_pki_nkeys_tenant_nkey_unique.sql"
@@ -152,4 +156,37 @@ func TestMySQLTenantNKeyUnique(t *testing.T) {
 		t.Fatalf("re-run: %+v, %v", res, err)
 	}
 	check("after a re-run")
+
+	// internal/pki's writes through GORM on MySQL: a second sprout ID for
+	// an NKey the tenant holds is refused and leaves the holder's row as
+	// it was. (An INSERT ... ON DUPLICATE KEY UPDATE, which MySQL applies
+	// on any unique key, would have rewritten db-01's state.)
+	g, err := gorm.Open(gormmysql.Open(cfg.FormatDSN()), &gorm.Config{Logger: gormlogger.Default.LogMode(gormlogger.Silent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pki.SetDB(g)
+	t.Cleanup(func() { pki.SetDB(nil) })
+	for name, write := range map[string]func() error{
+		"RejectNKey":   func() error { return pki.RejectNKey("t_a", "web-05", "UONEKEY") },
+		"UnacceptNKey": func() error { return pki.UnacceptNKey("t_a", "web-06", "UONEKEY") },
+	} {
+		if err := write(); err == nil {
+			t.Errorf("%s of another sprout ID with db-01's NKey: no error", name)
+		}
+	}
+	var sprout, state string
+	if err := db.QueryRowContext(ctx, "SELECT sprout_id, state FROM pki_nkeys WHERE tenant_id = 't_a' AND nkey = 'UONEKEY'").Scan(&sprout, &state); err != nil || sprout != "db-01" || state != "accepted" {
+		t.Errorf("db-01's row after the refused writes: %s %s %v; want db-01 accepted", sprout, state, err)
+	}
+	var n int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM pki_nkeys WHERE tenant_id = 't_a' AND sprout_id IN ('web-05', 'web-06')").Scan(&n); err != nil || n != 0 {
+		t.Errorf("%d rows written for the refused sprout IDs, %v", n, err)
+	}
+	if err := pki.UnacceptNKey("t_a", "web-07", "UNEWKEY"); err != nil {
+		t.Errorf("a new sprout with a new NKey: %v", err)
+	}
+	if err := pki.RejectNKey("t_a", "web-07", ""); err != nil {
+		t.Errorf("rejecting web-07's own row: %v", err)
+	}
 }

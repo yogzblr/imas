@@ -174,12 +174,38 @@ func CurrentTenantID() string { return tenantID() }
 func currentTenantID() string { return tenantID() }
 
 // upsertNKeyRow inserts a new sprout NKey row, or updates its nkey/state in
-// place if a row for (tenant, sproutID) already exists.
+// place if a row for (tenant, sproutID) already exists (upsertNKeyRowTx).
 func upsertNKeyRow(row nkeyRow) error {
-	return db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "tenant_id"}, {Name: "sprout_id"}},
-		DoUpdates: clause.AssignmentColumns([]string{"nkey", "state"}),
-	}).Create(&row).Error
+	return db.Transaction(func(tx *gorm.DB) error { return upsertNKeyRowTx(tx, row) })
+}
+
+// upsertNKeyRowTx is upsertNKeyRow inside tx. It never writes over another
+// sprout's row: an NKey the tenant already holds under another sprout ID
+// is refused (errNKeyAmbiguous), as is any write the (tenant_id, nkey)
+// index refuses. It is not an INSERT ... ON DUPLICATE KEY UPDATE: MySQL
+// applies that update on a conflict with any unique key, so a second
+// sprout ID for an NKey would have rewritten the first sprout's row.
+func upsertNKeyRowTx(tx *gorm.DB, row nkeyRow) error {
+	var held []nkeyRow
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("tenant_id = ? AND (sprout_id = ? OR nkey = ?)", row.TenantID, row.SproutID, row.NKey).
+		Find(&held).Error; err != nil {
+		return err
+	}
+	exists := false
+	for _, h := range held {
+		switch {
+		case h.SproutID == row.SproutID:
+			exists = true
+		case h.NKey == row.NKey:
+			return fmt.Errorf("pki: tenant %q sprout %q: %w (sprout %q)", row.TenantID, row.SproutID, errNKeyAmbiguous, h.SproutID)
+		}
+	}
+	if exists {
+		return tx.Model(&nkeyRow{}).Where("tenant_id = ? AND sprout_id = ?", row.TenantID, row.SproutID).
+			Updates(map[string]any{"nkey": row.NKey, "state": row.State}).Error
+	}
+	return tx.Create(&row).Error
 }
 
 // retireSproutTx ends sprout id's credentials in tenantID inside tx, for
