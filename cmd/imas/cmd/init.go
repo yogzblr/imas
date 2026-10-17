@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -31,7 +32,10 @@ var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Get started with a new imas installation",
 	Run: func(cmd *cobra.Command, _ []string) {
-		auth.CreatePrivkey()
+		if err := createPrivkey(); err != nil && !errors.Is(err, auth.ErrPrivkeyExists) {
+			log.Println("Error: " + err.Error())
+			os.Exit(1)
+		}
 		pubKey, err := auth.GetPubkey()
 		if err != nil {
 			log.Println("Error: " + err.Error())

@@ -264,3 +264,49 @@ func TestCreatePrivateTempSkipsTakenName(t *testing.T) {
 		}
 	}
 }
+
+// The private key is only written to a config file that is private: one
+// that restrictConfig cannot tighten (a Chmod that fails, here a no-op) or
+// that is not a regular file is refused, and nothing is written to it.
+func TestCreatePrivkeyRefusesALooseConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "imas")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := jety.ConfigFileUsed()
+	t.Cleanup(func() { jety.SetConfigFile(old) })
+	jety.SetConfigFile(path)
+
+	chmod = func(string, fs.FileMode) error { return nil }
+	err := createPrivkey()
+	chmod = os.Chmod
+	if err == nil || !strings.Contains(err.Error(), "refusing to write the private key") {
+		t.Fatalf("createPrivkey on a 0644 file it cannot tighten: %v, want a refusal", err)
+	}
+	if b, _ := os.ReadFile(path); len(b) != 0 {
+		t.Fatalf("the private key went into the loose file: %q", b)
+	}
+
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := requirePrivateConfig(link); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Errorf("a symlinked config: %v, want a refusal", err)
+	}
+
+	// With a working Chmod the same file is tightened and accepted.
+	if err := requirePrivateConfig(path); err != nil {
+		t.Fatalf("requirePrivateConfig after tightening: %v", err)
+	}
+	if st, _ := os.Stat(path); st.Mode().Perm() != cliConfigFileMode {
+		t.Errorf("mode %v, want 0600", st.Mode().Perm())
+	}
+	if err := requirePrivateConfig(""); err == nil {
+		t.Error("an empty config path was accepted")
+	}
+}

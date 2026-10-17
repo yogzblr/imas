@@ -6,8 +6,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/taigrr/jety"
+
+	"github.com/yogzblr/imas/internal/auth"
 )
 
 const (
@@ -179,7 +182,7 @@ func restrictConfig(path string) error {
 			errs = append(errs, fmt.Errorf("restricting %s to mode %o: %w", dir, cliConfigDirMode, err))
 		}
 	}
-	if err := os.Chmod(path, cliConfigFileMode); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := chmod(path, cliConfigFileMode); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		errs = append(errs, fmt.Errorf("restricting %s to mode %o: %w", path, cliConfigFileMode, err))
 	}
 	return errors.Join(errs...)
@@ -188,4 +191,41 @@ func restrictConfig(path string) error {
 // isDefaultConfigDir reports whether dir is <something>/.config/imas.
 func isDefaultConfigDir(dir string) bool {
 	return filepath.Base(dir) == "imas" && filepath.Base(filepath.Dir(dir)) == ".config"
+}
+
+// chmod is os.Chmod; tests replace it to stand in for a Chmod that fails.
+var chmod = os.Chmod
+
+// requirePrivateConfig fails unless path, the config file about to receive
+// the private key, is a regular file that only its owner can read or write
+// (on Windows, where modes do not apply, that it is a regular file). It
+// tightens it first (restrictConfig), so only a file that cannot be
+// tightened is refused.
+func requirePrivateConfig(path string) error {
+	if path == "" {
+		return errors.New("no config file")
+	}
+	if err := restrictConfig(path); err != nil {
+		return err
+	}
+	st, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !st.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file (%v): refusing to write the private key to it", path, st.Mode().Type())
+	}
+	if runtime.GOOS != "windows" && st.Mode().Perm()&^cliConfigFileMode != 0 {
+		return fmt.Errorf("%s has mode %o, not %o: refusing to write the private key to it", path, st.Mode().Perm(), cliConfigFileMode)
+	}
+	return nil
+}
+
+// createPrivkey creates the CLI's NKey private key (auth.CreatePrivkey)
+// only once the config file it is written to is private.
+func createPrivkey() error {
+	if err := requirePrivateConfig(jety.ConfigFileUsed()); err != nil {
+		return err
+	}
+	return auth.CreatePrivkey()
 }
