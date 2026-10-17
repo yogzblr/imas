@@ -59,6 +59,12 @@ A unit may start only when every unit in "Needs" is merged to main.
 | S4 | `S-hardening.md` S4 | S3 |
 | S5 | `S5-valkey-hardening.md` (whole file) | S4 |
 | S6 | `S6-tenant-erasure.md` (whole file) | S5 |
+| T1 | `T-pre-azure.md` T1 | none |
+| T2 | `T-pre-azure.md` T2 | none |
+| T3 | `T-pre-azure.md` T3 | none |
+| T4 | `T-pre-azure.md` T4 | none |
+| T5 | `T-pre-azure.md` T5 | none |
+| T6 | `T-pre-azure.md` T6 | none |
 
 First wave of the original build (no needs): A1, B1, C1, D1, D2. Units A to D are all merged (C2 last, as PR 229; its leftovers are E6); the follow-up units E1 to E5 and Z are launched in the same way, E6 first by rule 10 (E3 waits for it). Why the order: P22 first (design D13);
 A2 and the P21 slice 1 chart work both edit the farmer bootstrap Job and policies, so
@@ -220,3 +226,9 @@ Paste this into a Claude Code session started in the yogzblr/imas repo on main.
 | S4 | P3 3.4: per-cook render budget (B4) | S-hardening.md | S4 |
 | S5 | P3 3.5: Valkey password, TLS in clients, no eviction | S5-valkey-hardening.md | S5 |
 | S6 | P3 3.6: erase a tenant's data after offboarding | S6-tenant-erasure.md | S6 |
+| T1 | P18, P4: sprout update safety (L3, L5, L6, L7, I4, I5, B8) | T-pre-azure.md | T1 |
+| T2 | P14, P17, P8: #139, test gaps, licence record | T-pre-azure.md | T2 |
+| T3 | P12: heartbeat presence race, Valkey cluster test | T-pre-azure.md | T3 |
+| T4 | P3: deprovision and identity (L10, L11, I7) | T-pre-azure.md | T4 |
+| T5 | P3: OpenBao client (L17 to L21, I2) | T-pre-azure.md | T5 |
+| T6 | P3: bus logging and legacy endpoints (L12, L13, L14) | T-pre-azure.md | T6 |
