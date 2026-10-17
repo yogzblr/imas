@@ -805,15 +805,15 @@ func TestBusCAConflictRetry(t *testing.T) {
 	e := setup(t)
 	t.Setenv(EnvBusCAConfigMap, "imas-bus-ca")
 	t.Setenv(EnvBusCAPKIMount, "pki")
-	ca := newCAPEM(t, "imas root CA")
-	e.front.setCA(ca)
+	e.front.setCA(newCAPEM(t, "imas root CA"))
 	e.writeToken(t)
 	mustRun(t) // the trust and the CA exist now
-	e.front.setCA(newCAPEM(t, "imas root CA 2"))
+	ca2 := newCAPEM(t, "imas root CA 2")
+	e.front.setCA(ca2)
 	e.kube.conflicts = conflictRetries
 	e.writeToken(t)
 	mustRun(t)
-	if got := e.kube.data("imas-bus-ca")[BusCAKey]; got == ca {
+	if got := e.kube.data("imas-bus-ca")[BusCAKey]; got != ca2 {
 		t.Error("the CA update was lost to conflicts within the retry budget")
 	}
 }
