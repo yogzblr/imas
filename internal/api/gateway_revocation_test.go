@@ -6,6 +6,7 @@ package api
 
 import (
 	"crypto/ed25519"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -321,5 +322,51 @@ func TestUpdateManifestRoute_RevokedOrSupersededGatewayJWTRefused(t *testing.T) 
 	sqlDB.Close()
 	if code, _ := f.get(t, replacement, "linux", "amd64", "v2.4.1"); code != http.StatusForbidden {
 		t.Errorf("database error: got %d, want 403", code)
+	}
+}
+
+// A deprovisioned tenant's gateway JWT is refused on /files/ and on the
+// update manifest (security review 2026-10, L10), and so is any token
+// when the tenant check alone can't read the database: it fails closed.
+// FLAG FOR SECURITY REVIEW.
+func TestGatewayJWT_DeprovisionedTenantRefused(t *testing.T) {
+	f := newManifestFixture(t)
+	gdb := useRealGatewaySubjectCheck(t)
+	base := newRevocationTestServer(t)
+
+	nkey := acceptSprout(t, "t_acme", "web-01")
+	token := mintAs(t, f.gw.priv, nkey, "t_acme", "web-01")
+	if code, _ := get(t, base+"/files/"+stagedRecipeFile, token); code != http.StatusOK {
+		t.Fatalf("live tenant's file: got %d, want 200", code)
+	}
+	if code, body := f.get(t, token, "linux", "amd64", "v2.4.1"); code != http.StatusOK {
+		t.Fatalf("live tenant's manifest: got %d %s, want 200", code, body)
+	}
+	if err := pki.VerifyGatewaySubject("t_acme", "web-01", nkey); err != nil {
+		t.Fatalf("VerifyGatewaySubject on a live tenant: %v", err)
+	}
+
+	exec(t, gdb, `UPDATE pki_tenants SET deleted = ? WHERE id = ?`, true, "t_acme")
+	if code, _ := get(t, base+"/files/"+stagedRecipeFile, token); code != http.StatusForbidden {
+		t.Errorf("deprovisioned tenant's file: got %d, want 403", code)
+	}
+	if code, _ := f.get(t, token, "linux", "amd64", "v2.4.1"); code != http.StatusForbidden {
+		t.Errorf("deprovisioned tenant's manifest: got %d, want 403", code)
+	}
+	if err := pki.VerifyGatewaySubject("t_acme", "web-01", nkey); !errors.Is(err, pki.ErrTenantDeprovisioned) {
+		t.Errorf("VerifyGatewaySubject on a deprovisioned tenant = %v, want ErrTenantDeprovisioned", err)
+	}
+
+	// Only the tenant table fails: the sprout's own rows still read.
+	exec(t, gdb, `UPDATE pki_tenants SET deleted = ? WHERE id = ?`, false, "t_acme")
+	exec(t, gdb, `DROP TABLE pki_tenants`)
+	if code, _ := get(t, base+"/files/"+stagedRecipeFile, token); code != http.StatusForbidden {
+		t.Errorf("tenant check failing: file got %d, want 403", code)
+	}
+	if code, _ := f.get(t, token, "linux", "amd64", "v2.4.1"); code != http.StatusForbidden {
+		t.Errorf("tenant check failing: manifest got %d, want 403", code)
+	}
+	if err := pki.VerifyGatewaySubject("t_acme", "web-01", nkey); err == nil || errors.Is(err, pki.ErrTenantDeprovisioned) {
+		t.Errorf("VerifyGatewaySubject with the tenant table gone = %v, want a database error", err)
 	}
 }

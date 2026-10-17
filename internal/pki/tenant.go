@@ -186,6 +186,13 @@ func ensureTenantAccount(tenantID, nameHint string, createKeys bool) (mat *natsA
 	}
 	tam, provisioned, err = ensureTenantAccountLocked(mat, tenantID, nameHint, createKeys)
 	if err != nil {
+		// A deleted tenant seen on the enrollment or resync path gets a
+		// fresh lock-out pushed (L11), outside tenantAuthMu and rate
+		// limited (noteDeprovisionedTenant). ProvisionTenant always pushes
+		// its own.
+		if errors.Is(err, ErrTenantDeprovisioned) && !createKeys {
+			noteDeprovisionedTenant(tenantID)
+		}
 		return nil, nil, false, err
 	}
 	// Notify cmd/farmer/main.go's ConnectFarmer that this tenant is newly
@@ -300,9 +307,18 @@ func ensureTenantAccountLocked(mat *natsAuthMaterial, tenantID, nameHint string,
 // and, if the deprovision won, pushes the locked-out JWT again and returns
 // an error wrapping ErrTenantDeprovisioned (see pushLiveTenantAccount for
 // the ordering this gives). A tenant already deleted when the call starts
-// is refused before anything is pushed (ensureTenantAccountLocked).
+// is refused before any live JWT is pushed (ensureTenantAccountLocked),
+// and a fresh lock-out is pushed instead (L11): a copy redelivered after
+// an earlier copy's re-check failed may be the only thing that would
+// still see the bus live, so every copy that finds the tenant deleted
+// locks it out again.
 func ProvisionTenant(tenantID, name string) error {
 	mat, tam, _, err := ensureTenantAccount(tenantID, name, true)
+	if errors.Is(err, ErrTenantDeprovisioned) {
+		if _, rerr := relockDeprovisionedTenant(tenantID); rerr != nil {
+			err = errors.Join(err, rerr)
+		}
+	}
 	if err != nil {
 		log.Errorf("failed to provision tenant %q: %v", tenantID, err)
 		return err
@@ -569,9 +585,11 @@ func relockIfDeletedLocked(mat *natsAuthMaterial, tenantID string) (signedJWT st
 // agree to within the time between the two signings.
 //
 // The re-check runs even when the push failed: a request that timed out
-// may still have been applied. If the re-check itself can't read the
-// database, the error is returned and the bus state is unknown; a retried
-// DeprovisionTenant repairs it.
+// may still have been applied. It is retried (recheckTenantDeleted: 3
+// attempts, jittered backoff, L11). If no attempt can read the database,
+// the error is returned and the bus state is unknown; a redelivered
+// provision (ProvisionTenant), a retried DeprovisionTenant and the
+// periodic relock (StartTenantRelocker) each repair it.
 func pushLiveTenantAccount(mat *natsAuthMaterial, tenantID, accountJWT string) error {
 	if testHookBeforeLivePush != nil {
 		testHookBeforeLivePush(tenantID)
@@ -580,9 +598,9 @@ func pushLiveTenantAccount(mat *natsAuthMaterial, tenantID, accountJWT string) e
 	if testHookAfterLivePush != nil {
 		testHookAfterLivePush(tenantID)
 	}
-	signed, deleted, err := relockIfDeletedLocked(mat, tenantID)
+	signed, deleted, err := recheckTenantDeleted(mat, tenantID)
 	if err != nil {
-		return fmt.Errorf("pki: re-checking tenant %q after pushing its Account JWT (bus state unconfirmed): %w", tenantID, errors.Join(err, pushErr))
+		return fmt.Errorf("pki: %w: tenant %q (bus state unconfirmed): %w", errTenantRecheckFailed, tenantID, errors.Join(err, pushErr))
 	}
 	if !deleted {
 		return pushErr

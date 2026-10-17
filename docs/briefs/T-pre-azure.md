@@ -139,6 +139,42 @@ provisioning, docs.
   allows (check for duplicates first and fail the migration loudly with a message
   that names them if there are any).
 
+Brief corrections (found while building T4; decided by the order in
+`ORCHESTRATOR.md` rule 6):
+
+- The `/files/` middleware already refused a deprovisioned tenant on main
+  (SEC.7c, `pki.VerifyGatewaySubject`, which the update manifest shares).
+  Kept; it now uses the same check and error as the other paths
+  (`ErrTenantDeprovisioned`, where it returned `ErrTenantNotFound`), and a
+  router test pins both routes.
+- "The same error" is the internal one, `ErrTenantDeprovisioned`. On the
+  wire nothing changes: `/v1/enroll` and `/v1/refresh` keep their one
+  generic refusal and the gateway routes their `403` (design §3.4, no
+  oracle).
+- `acceptEnrolledNKey` no longer calls `ReloadNKeysForTenant` on main (P21
+  slice 3 replaced it with `grantEnrolledSprout`). What it swallowed was
+  `errAccountPushFailed`, which also covered a failed re-check after the
+  push. It now returns that re-check failure (`errTenantRecheckFailed`) and a
+  deprovisioned tenant. A plain push failure after a re-check that found the
+  tenant live is still logged and not returned: returning it strands the
+  host (its NKey is accepted with no box key, which the replay path refuses
+  for good), and with the accounts bucket installed a bus that only missed
+  the push is no error anyway.
+- I7: neither caller of `SproutIDAndTenantForNKey` knows the tenant (the
+  enrollment replay and the sealed refresh carry only `nkey_pub`), so it stays
+  the one cross-tenant lookup and refuses more than one accepted match. The
+  lookups where the tenant is known are `SproutIDForNKey` and the new
+  `findNKeyRowByNKeyInTenant` (used by `resolveEnrollSproutID`). The unique
+  index is `(tenant_id, nkey)`, never `nkey` alone (CLAUDE.md, tenant
+  safety); the duplicate check that names them is a preflight in `migrate up`
+  (`internal/migrations/preflight.go`), since a MySQL migration file cannot
+  raise an error that long.
+- L11: "still has a live Account on the bus" is read from every bus node
+  (`CLAIMS.LOOKUP`) and from the accounts bucket the bus loaders apply.
+- Files outside the stated scope that the unit needed: `cmd/farmer`
+  (starting the relocker), `deploy/helm/farmer` (`farmer.tenantRelockInterval`),
+  `internal/migrations` (migration farmer 00006 and its preflight).
+
 ## T5: OpenBao client (L17 to L21, I2)
 
 Scope: `internal/openbao`, `internal/openbaokv`, `internal/ingredients/sdb`

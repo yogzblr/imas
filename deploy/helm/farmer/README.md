@@ -1486,6 +1486,16 @@ which is local to one PXC node):
   `farmer.tenantConnections.idleTTL` (10m) and its tenant has had no sprout
   heartbeat for `farmer.tenantConnections.heartbeatWindow` (15m), so a tenant
   with online sprouts stays subscribed on every replica.
+- **Relock of deprovisioned tenants**: every
+  `farmer.tenantRelockInterval` (`IMAS_TENANT_RELOCK_INTERVAL`, default
+  10m, farmer accepts 1m to 24h) one replica, under the `tenant_relock` row
+  of `farmer.job_leases`, looks up each deprovisioned tenant's Account on
+  every bus node (`CLAIMS.LOOKUP`) and in the accounts bucket, and pushes a
+  fresh lock-out for each one still live there, at most 10 a second. Any
+  request that finds a tenant deprovisioned (an enrollment replay, a
+  refresh, a gateway JWT on `/files/` or the update manifest, a redelivered
+  provision) is refused and has a lock-out pushed too (security review
+  2026-10, L10 and L11).
 
 The pod's root filesystem is read-only. Its only writable volumes are the
 `tmp` emptyDir (the process's temp directory) and the TLS directory.
@@ -1685,6 +1695,7 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `farmer.jobs.reconcileWindow` | `"2h"` | `IMAS_JOB_RECONCILE_WINDOW` (`deploy/farmer/values.job-reconcile.yaml`). |
 | `farmer.jobs.leaseTTL` | `""` | `IMAS_JOB_LEASE_TTL`: lease TTL of the hourly jobs, a quoted Go duration. Empty: farmer's 120s. |
 | `farmer.tenantConnections.idleTTL` / `heartbeatWindow` | `"10m"` / `"15m"` | `IMAS_TENANT_CONN_IDLE_TTL` / `IMAS_TENANT_CONN_HEARTBEAT_WINDOW`: a tenant bus connection is closed once unused this long and with no sprout heartbeat in the window. Quoted Go durations. |
+| `farmer.tenantRelockInterval` | `"10m"` | `IMAS_TENANT_RELOCK_INTERVAL`: how often a fresh lock-out is pushed for every deprovisioned tenant still live on the bus or in the accounts bucket. A quoted Go duration from `"1m"` to `"24h"`; farmer refuses to start outside that range. Empty: farmer's 10m. |
 | `farmer.recipes.templateLimits.maxSourceBytes` | `262144` | `IMAS_RECIPE_MAX_SOURCE_BYTES`: largest recipe source farmer reads or renders. |
 | `farmer.recipes.templateLimits.maxRenderedBytes` | `1048576` | `IMAS_RECIPE_MAX_RENDERED_BYTES`: largest output of one recipe render. |
 | `farmer.recipes.templateLimits.maxValueBytes` | `262144` | `IMAS_RECIPE_MAX_VALUE_BYTES`: largest string one template function returns; at most `maxRenderedBytes`. |

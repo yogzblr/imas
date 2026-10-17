@@ -546,8 +546,22 @@ lockout, with no assumption about clocks. Its assumptions:
   farmer's disk at bus start; a clustered bus, not built), the lockout must
   also carry the later `iat`. Marking before signing gives that when replica
   clocks agree to within the time between the two signings.
-- If the re-check itself can't read the database, `ProvisionTenant` returns
-  the error and the bus state is unknown until a deprovision runs again.
+- If the re-check itself can't read the database, it is retried (3
+  attempts, jittered doubling backoff from 250ms). If every attempt fails,
+  `ProvisionTenant` (or the enrollment) returns the error and the bus state
+  is unknown; three things then repair it (security review 2026-10, L11;
+  T4): a redelivered provision copy finds the tenant deleted and pushes a
+  fresh lockout before it returns `ErrTenantDeprovisioned`; any request that
+  sees the tenant deleted (an enrollment replay, a refresh, a gateway JWT on
+  `/files/` or the update manifest, a sprout action) is refused and pushes
+  one, at most once a minute per tenant and one at a time per replica; and
+  farmer's periodic relock (`IMAS_TENANT_RELOCK_INTERVAL`, default 10m, 1m
+  to 24h, one replica per interval under the `tenant_relock` job lease)
+  looks up every deleted tenant's Account on each bus node
+  (`CLAIMS.LOOKUP`) and in the accounts bucket and pushes a lockout for each
+  one still live, in batches of 100 rows and at most 10 pushes a second.
+  The enrollment never issues an identity on such a push: a failed re-check
+  fails it (`acceptEnrolledNKey`), as a deprovisioned tenant does.
 
 Tests (`internal/pki/tenant_race_test.go`, run with `-race`): every
 interleaving of a provision and a deprovision, paused with hooks rather
@@ -562,7 +576,15 @@ and the bus, with one PKI directory and with a copy each. Removing the
 re-check's lockout push leaves the bus live in the in-process and the
 two-process tests; restoring the old early return on an already deleted
 row fails both retry tests. `TestResolverPush_LastArrivalWins` pins the
-nats-server behaviour the guarantee relies on.
+nats-server behaviour the guarantee relies on. The failed re-check
+(`internal/pki/relock_test.go`): `TestPushLiveTenantAccount_RecheckRetried`,
+`TestProvisionTenant_RedeliveredAfterFailedRecheckLocksOut` and
+`TestRelockDeprovisionedTenants_LocksOutLiveBus` drive the live push after a
+lockout with every re-check failing, against the real bus, and check that
+the redelivered copy and the periodic relock each leave it locked out;
+`TestRelockDeprovisionedTenants_NoPushStorm` runs the relock over 1000
+deleted tenants (none pushed when all are locked out; each once, 100ms
+apart, when all are live).
 
 With the race closed in farmer, saasapi's mitigation was removed: `DELETE
 /tenants/{id}` no longer returns `409 provisioning_in_progress` for

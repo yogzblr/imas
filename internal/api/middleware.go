@@ -91,7 +91,9 @@ var gatewaySubjectCheck = pki.VerifyGatewaySubject
 // holds that identity: a deleted host's token, or the replaced host's
 // after pki.accept hands its ID to a new NKey, is refused from the
 // moment the change commits, not when the token expires
-// (config.GatewayJWTTTL).
+// (config.GatewayJWTTTL). A deprovisioned tenant's token is refused the
+// same way (security review 2026-10, L10), and the refusal has a fresh
+// lock-out of the tenant's Account pushed to the bus.
 //
 // It fails closed: a database error refuses exactly as a revoked NKey
 // does. route names the caller in log lines.
