@@ -191,9 +191,12 @@ Corrections from the T6 build (2026-10-17):
   `farmer.extraConfig` cannot override). With it on, `PUT /pki/putnkey` is
   not registered; with it off (standalone), `POST /v1/enroll` is not, and
   `PUT /pki/putnkey` needs a signature over a nonce from the new
-  `GET /pki/nkeynonce`. The test that pinned the old behaviour was
-  `internal/api/handlers/pki_test.go` (and `internal/api/routers_test.go`),
-  not `internal/pki/pki_test.go`. The rebuild in `syncTenantSprouts`
+  `GET /pki/nkeynonce`. The tests that pinned the old behaviour were the
+  sprout client's in `internal/pki/pki_test.go`, as the brief says, and
+  also the handler's in `internal/api/handlers/pki_test.go` and the
+  router's in `internal/api/routers_test.go`. The sprout client
+  (`pki.PutNKey`) had no caller; it now signs the nonce, so the legacy
+  protocol keeps a client that matches it. The rebuild in `syncTenantSprouts`
   (`internal/pki/tenant.go`) had the same revoke-by-rejection as
   `syncNatsAuth` and is fixed the same way.
 - **L14, single node.** The bus cannot tell "its SYS JWT is loaded" from its
