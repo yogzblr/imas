@@ -2,12 +2,14 @@ package handlers
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -211,10 +213,7 @@ func TestPutNKey_NewSprout(t *testing.T) {
 	// Generate a real NKey user key pair for testing
 	nkey := generateTestUserNKey(t)
 
-	body, _ := json.Marshal(pki.KeySubmission{
-		SproutID: "new-sprout",
-		NKey:     nkey,
-	})
+	body := signedSubmission(t, "new-sprout", nkey)
 	req := httptest.NewRequest(http.MethodPut, "/nkey", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	PutNKey(w, req)
@@ -254,10 +253,7 @@ func TestPutNKey_AlreadyKnownExact(t *testing.T) {
 	nkey := generateTestUserNKey(t)
 	writeSproutKey(t, dir, "accepted", "known-sprout", nkey)
 
-	body, _ := json.Marshal(pki.KeySubmission{
-		SproutID: "known-sprout",
-		NKey:     nkey,
-	})
+	body := signedSubmission(t, "known-sprout", nkey)
 	req := httptest.NewRequest(http.MethodPut, "/nkey", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	PutNKey(w, req)
@@ -280,10 +276,7 @@ func TestPutNKey_SameIDDifferentKey(t *testing.T) {
 	newKey := generateTestUserNKey(t)
 	writeSproutKey(t, "", "accepted", "conflict-sprout", existingKey)
 
-	body, _ := json.Marshal(pki.KeySubmission{
-		SproutID: "conflict-sprout",
-		NKey:     newKey,
-	})
+	body := signedSubmission(t, "conflict-sprout", newKey)
 	req := httptest.NewRequest(http.MethodPut, "/nkey", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	PutNKey(w, req)
@@ -316,10 +309,7 @@ func TestPutNKey_SameIDDifferentKey_MatchInLoop(t *testing.T) {
 	writeSproutKey(t, dir, "rejected", "loop-sprout_1", sameKey)
 
 	// Re-submitting key B should match at _1 and return 200 success
-	body, _ := json.Marshal(pki.KeySubmission{
-		SproutID: "loop-sprout",
-		NKey:     sameKey,
-	})
+	body := signedSubmission(t, "loop-sprout", sameKey)
 	req := httptest.NewRequest(http.MethodPut, "/nkey", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	PutNKey(w, req)
@@ -350,10 +340,7 @@ func TestPutNKey_Over100Keys_ServiceUnavailable(t *testing.T) {
 
 	// Submit a brand new key — should hit the 100-key overflow
 	newKey := generateTestUserNKey(t)
-	body, _ := json.Marshal(pki.KeySubmission{
-		SproutID: "flood-sprout",
-		NKey:     newKey,
-	})
+	body := signedSubmission(t, "flood-sprout", newKey)
 	req := httptest.NewRequest(http.MethodPut, "/nkey", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	PutNKey(w, req)
@@ -385,10 +372,7 @@ func TestPutNKey_EmptySproutID(t *testing.T) {
 	setupPKIDirs(t)
 
 	nkey := generateTestUserNKey(t)
-	body, _ := json.Marshal(pki.KeySubmission{
-		SproutID: "",
-		NKey:     nkey,
-	})
+	body := signedSubmission(t, "", nkey)
 	req := httptest.NewRequest(http.MethodPut, "/nkey", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	PutNKey(w, req)
@@ -510,5 +494,110 @@ func generateTestUserNKey(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("failed to get public key: %v", err)
 	}
+	testNKeys.Store(pub, kp)
 	return pub
+}
+
+// testNKeys holds the seed of every generateTestUserNKey key, so a
+// submission can be signed (signedSubmission).
+var testNKeys sync.Map
+
+// signedSubmission is a PUT /pki/putnkey body for id and nkey (a
+// generateTestUserNKey key) with a fresh nonce and the NKey's signature,
+// as pki.PutNKey sends it.
+func signedSubmission(t *testing.T, id, nkey string) []byte {
+	t.Helper()
+	v, ok := testNKeys.Load(nkey)
+	if !ok {
+		t.Fatalf("no seed for %s", nkey)
+	}
+	nonce, err := pki.IssueNKeyNonce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := v.(nkeys.KeyPair).Sign(pki.NKeySubmissionPayload(nonce, id, nkey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(pki.KeySubmission{SproutID: id, NKey: nkey, Nonce: nonce, Sig: base64.RawURLEncoding.EncodeToString(sig)})
+	return body
+}
+
+// --- PutNKey proof of possession (security review 2026-10, L12) ---
+
+// A submission that does not prove possession of its NKey is refused with
+// 403 and stores nothing: no nonce, a forged or someone else's signature,
+// a signature over another ID, a spent or an expired nonce.
+func TestPutNKey_RefusesWithoutProofOfPossession(t *testing.T) {
+	setupPKIDirs(t)
+	victim := generateTestUserNKey(t)
+	attacker := generateTestUserNKey(t)
+	writeSproutKey(t, "", "accepted", "victim", victim)
+
+	sign := func(kpPub, nonce, id, nkey string) string {
+		v, _ := testNKeys.Load(kpPub)
+		sig, err := v.(nkeys.KeyPair).Sign(pki.NKeySubmissionPayload(nonce, id, nkey))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return base64.RawURLEncoding.EncodeToString(sig)
+	}
+	nonce := func() string {
+		n, err := pki.IssueNKeyNonce()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	spent := signedSubmission(t, "other-id", victim)
+	put := func(body []byte) int {
+		w := httptest.NewRecorder()
+		PutNKey(w, httptest.NewRequest(http.MethodPut, "/pki/putnkey", bytes.NewReader(body)))
+		return w.Code
+	}
+	if code := put(spent); code != http.StatusOK {
+		t.Fatalf("a valid submission: %d", code)
+	}
+	n1, n2, n3 := nonce(), nonce(), nonce()
+	for name, sub := range map[string]pki.KeySubmission{
+		"no nonce":               {SproutID: "victim-x", NKey: victim},
+		"unknown nonce":          {SproutID: "victim-x", NKey: victim, Nonce: "bm90LWEtbm9uY2U", Sig: sign(victim, "bm90LWEtbm9uY2U", "victim-x", victim)},
+		"signed by another key":  {SproutID: "victim-x", NKey: victim, Nonce: n1, Sig: sign(attacker, n1, "victim-x", victim)},
+		"signature for other id": {SproutID: "victim-x", NKey: victim, Nonce: n2, Sig: sign(victim, n2, "victim-y", victim)},
+		"signature not base64":   {SproutID: "victim-x", NKey: victim, Nonce: n3, Sig: "!!"},
+	} {
+		body, _ := json.Marshal(sub)
+		if code := put(body); code != http.StatusForbidden {
+			t.Errorf("%s: %d, want 403", name, code)
+		}
+	}
+	if code := put(spent); code != http.StatusForbidden {
+		t.Errorf("replayed submission (spent nonce): %d, want 403", code)
+	}
+	for _, s := range pki.GetNKeysByType(pki.CurrentTenantID(), "unaccepted").Sprouts {
+		if s.SproutID == "victim-x" {
+			t.Fatal("an unproven submission was stored")
+		}
+	}
+	for _, s := range pki.GetNKeysByType(pki.CurrentTenantID(), "rejected").Sprouts {
+		if s.SproutID == "victim-x" || s.SproutID == "victim_1" {
+			t.Fatal("an unproven submission was stored as rejected")
+		}
+	}
+}
+
+func TestGetNKeyNonce(t *testing.T) {
+	a, b := httptest.NewRecorder(), httptest.NewRecorder()
+	GetNKeyNonce(a, httptest.NewRequest(http.MethodGet, "/pki/nkeynonce", nil))
+	GetNKeyNonce(b, httptest.NewRequest(http.MethodGet, "/pki/nkeynonce", nil))
+	var na, nb pki.NKeyNonce
+	if a.Code != http.StatusOK || json.Unmarshal(a.Body.Bytes(), &na) != nil || len(na.Nonce) < 40 {
+		t.Fatalf("nonce answer %d %q", a.Code, a.Body.String())
+	}
+	if json.Unmarshal(b.Body.Bytes(), &nb) != nil || na.Nonce == nb.Nonce {
+		t.Fatal("two requests got the same nonce")
+	}
+	if a.Header().Get("Cache-Control") != "no-store" {
+		t.Error("nonce answer may be cached")
+	}
 }

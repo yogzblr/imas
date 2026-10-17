@@ -694,12 +694,14 @@ func syncTenantSprouts(mat *natsAuthMaterial, tam *tenantAccountMaterial, tenant
 		return false, err
 	}
 
+	accepted := map[string]string{}
 	for _, s := range getNKeysByTypeForTenant(tenantID, "accepted").Sprouts {
 		row, errGet := findNKeyRowInTenant(tenantID, s.SproutID)
 		if errGet != nil {
 			log.Errorf("failed to get NKey for sprout %s in tenant %s: %v", s.SproutID, tenantID, errGet)
 			continue
 		}
+		accepted[row.NKey] = s.SproutID
 		if _, isRevoked := revoked[row.NKey]; isRevoked {
 			log.Errorf("sprout %s in tenant %s is accepted with a revoked NKey; keeping it revoked", s.SproutID, tenantID)
 			continue
@@ -716,7 +718,7 @@ func syncTenantSprouts(mat *natsAuthMaterial, tam *tenantAccountMaterial, tenant
 				log.Errorf("failed to get NKey for sprout %s in tenant %s: %v", s.SproutID, tenantID, errGet)
 				continue
 			}
-			if ensureUserRevoked(ac, row.NKey) {
+			if revokeUnlessAccepted(ac, tenantID, s.SproutID, state, row.NKey, accepted) {
 				changed = true
 			}
 		}

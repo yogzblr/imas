@@ -16,6 +16,7 @@ and sprout JWT buckets). Its NKey is the farmer.nkeySecret mount
   "gatewayjwtttl" .Values.farmer.gatewayJWTTTL
   "sproutbusurls" .Values.bus.sproutBusURLs
   "s3usessl" (eq (include "imas-farmer.s3UseSSL" .) "true")
+  "enrollment" true
 -}}
 {{- if eq .Values.tls.mode "secret" }}
 {{- $_ := set $managed "certfile" (printf "%s/tls.crt" $tlsDir) }}
@@ -52,6 +53,10 @@ data:
   # read-only on purpose: LoadConfig ends with jety.WriteConfig(), which
   # would otherwise write every environment variable of the process
   # (IMAS_PXC_DSN included) back into this file.
+  #
+  # enrollment is always true here: sprouts enrol through POST /v1/enroll,
+  # and the legacy unauthenticated PUT /pki/putnkey is not registered
+  # (security review 2026-10, L12); farmer.extraConfig cannot turn it off.
   #
   # farmerinterface is only farmer's bind address (0.0.0.0); farmer dials
   # the bus at farmerbusurl and verifies its certificate against

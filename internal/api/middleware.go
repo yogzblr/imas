@@ -26,7 +26,8 @@ func Logger(inner http.Handler, name string) http.Handler {
 // Auth wraps a handler with authentication.
 // The name parameter must match a key from the Routes map.
 //
-// Public routes (GetCertificate, PutNKey) are allowed without a token.
+// Public routes (GetCertificate, GetNKeyNonce, PutNKey) are allowed
+// without a token.
 // There is no development bypass: dangerously_allow_root was removed
 // (owner decision 2026-10-04, PR #95: "remove the HTTP bypass too in PR
 // 95"), and farmer ignores the key.
@@ -42,7 +43,7 @@ func Logger(inner http.Handler, name string) http.Handler {
 func Auth(inner http.Handler, name string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch name {
-		case "GetCertificate", "PutNKey":
+		case "GetCertificate", "GetNKeyNonce", "PutNKey":
 			inner.ServeHTTP(w, r)
 			return
 		case "SproutUpdateManifest":

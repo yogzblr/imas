@@ -162,30 +162,52 @@ func TestNewRouterMethodNotAllowed(t *testing.T) {
 	}
 }
 
+// With enrolment on (the default, and the Helm chart's), the legacy
+// unauthenticated PUT /pki/putnkey and its nonce route are not registered
+// and POST /v1/enroll is (security review 2026-10, L12); with enrolment
+// off (a standalone install) it is the other way round.
 func TestNewRouterPutNKey(t *testing.T) {
 	tmpDir := t.TempDir()
 	origRecipeDir := config.RecipeDir
 	config.RecipeDir = tmpDir
 	t.Cleanup(func() { config.RecipeDir = origRecipeDir })
+	t.Cleanup(func() { config.EnrollmentDisabled = false })
 
-	mux := NewRouter("")
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	status := func(srv *httptest.Server, method, path string) int {
+		t.Helper()
+		req, err := http.NewRequest(method, srv.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
 
-	// PUT /pki/putnkey with no body should return 400 (bad request)
-	// because the handler tries to decode JSON and fails.
-	req, err := http.NewRequest(http.MethodPut, srv.URL+"/pki/putnkey", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("PUT /pki/putnkey: %v", err)
-	}
-	defer resp.Body.Close()
-	// Handler tries to decode JSON from nil body -> 400 Bad Request.
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("PUT /pki/putnkey (empty body) returned %d, want 400", resp.StatusCode)
+	for _, off := range []bool{false, true} {
+		config.EnrollmentDisabled = off
+		srv := httptest.NewServer(NewRouter(""))
+		putnkey, nonce, enroll := status(srv, http.MethodPut, "/pki/putnkey"), status(srv, http.MethodGet, "/pki/nkeynonce"), status(srv, http.MethodPost, "/v1/enroll")
+		srv.Close()
+		if !off {
+			if putnkey != http.StatusNotFound || nonce != http.StatusNotFound {
+				t.Errorf("enrolment on: PUT /pki/putnkey %d, GET /pki/nkeynonce %d, want 404 and 404", putnkey, nonce)
+			}
+			if enroll == http.StatusNotFound {
+				t.Error("enrolment on: POST /v1/enroll is not registered")
+			}
+			continue
+		}
+		// The handler decodes JSON from an empty body -> 400.
+		if putnkey != http.StatusBadRequest || nonce != http.StatusOK {
+			t.Errorf("enrolment off: PUT /pki/putnkey %d, GET /pki/nkeynonce %d, want 400 and 200", putnkey, nonce)
+		}
+		if enroll != http.StatusNotFound {
+			t.Errorf("enrolment off: POST /v1/enroll %d, want 404", enroll)
+		}
 	}
 }
 

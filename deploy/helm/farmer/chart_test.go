@@ -695,6 +695,8 @@ func TestValidationFailures(t *testing.T) {
 		{"publisher path equals seed path", "must be different", []string{"--set", "credentialPublisher.kvPath=platform/imas/nats-seeds"}},
 		{"publisher path under seed path", "must be different", []string{"--set", "externalSecrets.seedPath=platform/imas"}},
 		{"publisher path has no default", "credentialPublisher.kvPath is required", []string{"--set", "credentialPublisher.kvPath="}},
+		{"publisher JWT ttl not a duration", "credentialPublisher.userJWTTTL", []string{"--set", "credentialPublisher.userJWTTTL=1d"}},
+		{"publisher refresh has no schedule", "credentialPublisher.refresh.schedule is required", []string{"--set", "credentialPublisher.refresh.schedule="}},
 		{"publisher runs as farmer", "must not be farmer's ServiceAccount", []string{"--set", "credentialPublisher.serviceAccountName=t-farmer"}},
 		{"publisher runs as saasapi", "must not be saasapi's ServiceAccount", []string{"--set", "credentialPublisher.serviceAccountName=t-farmer-saasapi"}},
 		{"publisher role is farmer's", "is also one of farmer's OpenBao roles", []string{"--set", "credentialPublisher.k8sRole=imas-farmer-gateway"}},
@@ -841,6 +843,37 @@ func TestPublishJobMatchesReference(t *testing.T) {
 	}
 	if yamlString(t, ps["volumes"]) != yamlString(t, rps["volumes"]) {
 		t.Errorf("volumes:\n%s\nreference:\n%s", yamlString(t, ps["volumes"]), yamlString(t, rps["volumes"]))
+	}
+
+	// The refresh CronJob (security review 2026-10, L14) runs the Job's
+	// pod, in the chart and in the reference, on the reference's schedule.
+	cj := find(t, docs, "CronJob", "t-farmer-saasapi-credential-refresh")
+	rcj := refByKind["CronJob"]
+	for _, k := range []string{"schedule", "concurrencyPolicy", "startingDeadlineSeconds", "successfulJobsHistoryLimit", "failedJobsHistoryLimit"} {
+		if get(cj, "spec", k) != get(rcj, "spec", k) {
+			t.Errorf("CronJob spec.%s = %v, reference %v", k, get(cj, "spec", k), get(rcj, "spec", k))
+		}
+	}
+	for _, k := range []string{"backoffLimit", "activeDeadlineSeconds", "ttlSecondsAfterFinished"} {
+		if get(cj, "spec", "jobTemplate", "spec", k) != get(job, "spec", k) {
+			t.Errorf("CronJob job spec.%s = %v, the Job's %v", k, get(cj, "spec", "jobTemplate", "spec", k), get(job, "spec", k))
+		}
+	}
+	if a, b := yamlString(t, get(cj, "spec", "jobTemplate", "spec", "template")), yamlString(t, get(job, "spec", "template")); a != b {
+		t.Errorf("CronJob pod:\n%s\nthe Job's:\n%s", a, b)
+	}
+	if a, b := yamlString(t, get(rcj, "spec", "jobTemplate", "spec", "template")), yamlString(t, get(rj, "spec", "template")); a != b {
+		t.Errorf("reference CronJob pod differs from the reference Job's:\n%s\n%s", a, b)
+	}
+	if envValues(c)["IMAS_SAASAPI_USER_JWT_TTL"] != "24h" {
+		t.Errorf("IMAS_SAASAPI_USER_JWT_TTL = %q, want 24h", envValues(c)["IMAS_SAASAPI_USER_JWT_TTL"])
+	}
+	moved := mustRender(t, "--set", "credentialPublisher.userJWTTTL=36h", "--set", "credentialPublisher.refresh.schedule=5 * * * *")
+	if v := envValues(container(t, find(t, moved, "Job", "t-farmer-saasapi-credential-publish"), "publish"))["IMAS_SAASAPI_USER_JWT_TTL"]; v != "36h" {
+		t.Errorf("userJWTTTL 36h: env = %q", v)
+	}
+	if v := get(find(t, moved, "CronJob", "t-farmer-saasapi-credential-refresh"), "spec", "schedule"); v != "5 * * * *" {
+		t.Errorf("refresh.schedule: %v", v)
 	}
 
 	np := find(t, docs, "NetworkPolicy", "imas-saasapi-cred-publisher")
@@ -1376,10 +1409,15 @@ func TestBusAddress(t *testing.T) {
 
 func TestFarmerConfigFile(t *testing.T) {
 	docs := mustRender(t, append(slices.Clone(skipAdmin), "--set", "farmer.extraConfig.farmerorganization=evil",
-		"--set", "farmer.extraConfig.cohortrefreshinterval=1m")...)
+		"--set", "farmer.extraConfig.cohortrefreshinterval=1m", "--set", "farmer.extraConfig.enrollment=false")...)
 	cfg := farmerConfig(t, docs)
 	if cfg["farmerorganization"] != "imas" {
 		t.Errorf("extraConfig overrode a chart-managed key: %v", cfg["farmerorganization"])
+	}
+	// Enrolment is always on in the chart, so the legacy PUT /pki/putnkey
+	// is never registered (security review 2026-10, L12).
+	if cfg["enrollment"] != true {
+		t.Errorf("enrollment = %v, want true whatever extraConfig says", cfg["enrollment"])
 	}
 	if cfg["cohortrefreshinterval"] != "1m" {
 		t.Error("extraConfig key not merged")
