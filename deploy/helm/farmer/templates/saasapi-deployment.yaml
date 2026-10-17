@@ -242,6 +242,10 @@ spec:
             - name: SAASAPI_ACTION_DISPATCH_TENANT_CONCURRENCY
               value: {{ .tenantConcurrency | int | quote }}
             {{- end }}
+            {{- if not (kindIs "invalid" .maxPendingPerTenant) }}
+            - name: SAASAPI_ACTION_MAX_PENDING_PER_TENANT
+              value: {{ .maxPendingPerTenant | int | quote }}
+            {{- end }}
             {{- end }}
             {{- with $s.outboxSweeper }}
             - name: SAASAPI_OUTBOX_SWEEPER_ENABLED

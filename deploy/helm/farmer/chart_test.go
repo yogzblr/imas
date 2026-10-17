@@ -1739,7 +1739,7 @@ func TestDispatchConcurrencyEnv(t *testing.T) {
 			args []string
 			want []string
 		}{
-			{nil, []string{"64", "16", "8"}},
+			{nil, []string{"256", "16", "32"}},
 			{[]string{"--set", svc.prefix + ".concurrency=128", "--set", svc.prefix + ".selfUpdateConcurrency=32", "--set", svc.prefix + ".tenantConcurrency=4"},
 				[]string{"128", "32", "4"}},
 			{[]string{"--set", svc.prefix + ".concurrency=null", "--set", svc.prefix + ".selfUpdateConcurrency=null", "--set", svc.prefix + ".tenantConcurrency=null"},
@@ -1755,6 +1755,34 @@ func TestDispatchConcurrencyEnv(t *testing.T) {
 					t.Errorf("%s %v: %s = %v, want %s", svc.name, tc.args, name, e, tc.want[i])
 				}
 			}
+		}
+	}
+}
+
+// saasapi.actionDispatch.maxPendingPerTenant (S3): the default 2000 is
+// rendered, an override passes through, null emits nothing; farmer never
+// gets it.
+func TestSaasapiMaxPendingPerTenantEnv(t *testing.T) {
+	const name = "SAASAPI_ACTION_MAX_PENDING_PER_TENANT"
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{nil, "2000"},
+		{[]string{"--set", "saasapi.actionDispatch.maxPendingPerTenant=500"}, "500"},
+		{[]string{"--set", "saasapi.actionDispatch.maxPendingPerTenant=null"}, ""},
+	} {
+		docs := mustRender(t, tc.args...)
+		env := envMap(container(t, find(t, docs, "Deployment", "t-farmer-saasapi"), "saasapi"))
+		e, ok := env[name]
+		if tc.want == "" && ok {
+			t.Errorf("%v: %s rendered for null: %v", tc.args, name, e)
+		}
+		if tc.want != "" && (!ok || e["value"] != tc.want) {
+			t.Errorf("%v: %s = %v, want %s", tc.args, name, e, tc.want)
+		}
+		if _, ok := envMap(container(t, farmerDeploy(t, docs), "farmer"))[name]; ok {
+			t.Errorf("%v: farmer has %s", tc.args, name)
 		}
 	}
 }

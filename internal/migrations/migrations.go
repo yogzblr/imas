@@ -70,6 +70,10 @@ var saasFS embed.FS
 // saas fleet_versions.signature, which saasapi still writes (as an empty string) and so
 // stays until a release stops writing it. TestCompatibleFromReviewed
 // fails on any new migration until its effect on the floor is decided.
+//
+// saas 00009 (S3) left the saas floor alone too: it only adds an index
+// (idx_asset_action_items_tenant_status), which no older saasapi names and
+// which changes no column it reads or writes.
 const (
 	farmerCompatibleFrom = 2
 	saasCompatibleFrom   = 1

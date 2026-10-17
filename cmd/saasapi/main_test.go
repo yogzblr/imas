@@ -148,18 +148,20 @@ func TestNewRouterFleetUpdateClockSkew(t *testing.T) {
 }
 
 // TestNewRouterOutboxSettings: SAASAPI_OUTBOX_* reach the sweeper and the
-// handlers' leases through the same LoadConfig → newRouter path main uses.
+// handlers' leases, and SAASAPI_ACTION_MAX_PENDING_PER_TENANT the actions
+// handler, through the same LoadConfig → newRouter path main uses.
 func TestNewRouterOutboxSettings(t *testing.T) {
 	t.Cleanup(func() { saasapi.SetOutboxSweeperSettings(saasapi.DefaultOutboxSweeperSettings()) })
 	t.Setenv("SAASAPI_OUTBOX_LEASE_TTL", "45s")
 	t.Setenv("SAASAPI_OUTBOX_MAX_ATTEMPTS", "7")
+	t.Setenv("SAASAPI_ACTION_MAX_PENDING_PER_TENANT", "750")
 	cfg, err := saasapi.LoadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
 	newRouter(cfg)
 	got := saasapi.CurrentOutboxSweeperSettings()
-	if got.LeaseTTL != 45*time.Second || got.MaxAttempts != 7 || !got.Enabled {
+	if got.LeaseTTL != 45*time.Second || got.MaxAttempts != 7 || !got.Enabled || got.MaxPendingPerTenant != 750 {
 		t.Fatalf("settings in use = %+v", got)
 	}
 }

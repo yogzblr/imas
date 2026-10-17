@@ -102,6 +102,20 @@ func TestLoadConfigOutboxSweeper(t *testing.T) {
 	if cfg.OutboxSweeper != DefaultOutboxSweeperSettings() || !cfg.OutboxSweeper.Enabled {
 		t.Fatalf("defaults = %+v", cfg.OutboxSweeper)
 	}
+	// S3: the max age default is 30m; its bounds stay 1m to 1h.
+	if got := cfg.OutboxSweeper.ActionMaxAge; got != 30*time.Minute {
+		t.Fatalf("ActionMaxAge default = %s, want 30m", got)
+	}
+	for _, edge := range []string{"1m", "1h"} {
+		t.Setenv("SAASAPI_OUTBOX_ACTION_MAX_AGE", edge)
+		if _, err := LoadConfig(); err != nil {
+			t.Fatalf("SAASAPI_OUTBOX_ACTION_MAX_AGE=%s: %v", edge, err)
+		}
+	}
+	t.Setenv("SAASAPI_OUTBOX_ACTION_MAX_AGE", "59s")
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("SAASAPI_OUTBOX_ACTION_MAX_AGE=59s accepted")
+	}
 
 	t.Setenv("SAASAPI_OUTBOX_SWEEPER_ENABLED", "false")
 	t.Setenv("SAASAPI_OUTBOX_SWEEP_INTERVAL", "10s")
@@ -116,7 +130,7 @@ func TestLoadConfigOutboxSweeper(t *testing.T) {
 	}
 	want := OutboxSweeperSettings{Enabled: false, Interval: 10 * time.Second, ProvisioningStaleAfter: 5 * time.Minute,
 		ActionStaleAfter: 90 * time.Second, ActionMaxAge: 10 * time.Minute, MaxAttempts: 3, LeaseTTL: time.Minute,
-		DispatchConcurrency: 64, SelfUpdateDispatchConcurrency: 16, DispatchTenantConcurrency: 8}
+		DispatchConcurrency: 256, SelfUpdateDispatchConcurrency: 16, DispatchTenantConcurrency: 32, MaxPendingPerTenant: 2000}
 	if cfg.OutboxSweeper != want {
 		t.Fatalf("overrides = %+v, want %+v", cfg.OutboxSweeper, want)
 	}

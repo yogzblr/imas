@@ -331,14 +331,18 @@ func (AssetActionBatch) TableName() string { return "asset_action_batches" }
 // whose sprout already reported the target version when the rollout was
 // planned (planUpdateItems' atTarget): its update job's success is then
 // proof enough (judgeUpdateItem). Both from migration saas/00006.
+//
+// idx_asset_action_items_tenant_status (tenant_id, status), from migration
+// saas/00009, serves the count of a tenant's pending items that
+// POST .../sprouts/actions checks against its backlog cap (backlog.go).
 type AssetActionItem struct {
 	BatchID         string                `gorm:"column:batch_id;primaryKey;size:32"`
 	AssetID         string                `gorm:"column:asset_id;primaryKey;size:191"`
-	TenantID        string                `gorm:"column:tenant_id;size:32;not null"`
+	TenantID        string                `gorm:"column:tenant_id;size:32;not null;index:idx_asset_action_items_tenant_status,priority:1"`
 	Position        int                   `gorm:"column:position;not null"`
 	SproutID        string                `gorm:"column:sprout_id;size:253;not null;default:''"`
 	JID             string                `gorm:"column:jid;size:64;not null;default:''"`
-	Status          AssetActionItemStatus `gorm:"column:status;size:32;not null;index"`
+	Status          AssetActionItemStatus `gorm:"column:status;size:32;not null;index;index:idx_asset_action_items_tenant_status,priority:2"`
 	ErrorCode       string                `gorm:"column:error_code;size:64;not null;default:''"`
 	ExitCode        *int                  `gorm:"column:exit_code"`
 	Attempts        int                   `gorm:"column:attempts;not null;default:0"`

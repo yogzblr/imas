@@ -435,11 +435,19 @@ paths:
         are then dispatched to farmer's `internal.sprout.action` in the
         background. Items for unresolved asset_ids are `unresolved`, and
         sprouts whose key isn't accepted are `failed` with
-        `sprout_not_accepted`; neither is dispatched. Nothing is retried
-        automatically.
+        `sprout_not_accepted`; neither is dispatched. Items still `queued`
+        are re-sent by the outbox sweeper; one not sent within
+        `SAASAPI_OUTBOX_ACTION_MAX_AGE` (30m) of the POST fails as
+        `expired_not_sent` and never ran.
 
         Rate-limited per tenant: 1 request/second, burst 5, per pod (no
         config or Valkey sharing for this limit yet).
+
+        Refused as a whole, nothing written, with 429 `backlog_full` when
+        the tenant's items in status `queued` or `dispatching` plus this
+        request's de-duplicated asset_ids would exceed
+        `SAASAPI_ACTION_MAX_PENDING_PER_TENANT` (default 2000). A soft
+        limit: requests in flight at the same moment may each pass.
       requestBody:
         required: true
         content:
@@ -471,7 +479,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/TenantNotFound" }
         "409": { $ref: "#/components/responses/TenantNotActive" }
-        "429": { $ref: "#/components/responses/RateLimited" }
+        "429": { $ref: "#/components/responses/RateLimitedOrBacklogFull" }
         "500": { $ref: "#/components/responses/InternalError" }
 
   /v1/tenants/{tenant_id}/sprouts/actions/{batch_id}:
@@ -996,6 +1004,30 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
           example: { error: rate_limited, message: "too many requests, slow down and retry later" }
+    RateLimitedOrBacklogFull:
+      description: |
+        `rate_limited`: the tenant's bucket for this route is empty (no
+        `details`, no `Retry-After`). Or `backlog_full`: the tenant has too
+        many items waiting to be sent (see the operation); `details` carries
+        the numbers and `Retry-After` is 60.
+      headers:
+        Retry-After:
+          description: Seconds to wait before sending again; set on `backlog_full` only.
+          schema: { type: integer, example: 60 }
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/RateLimitedError"
+              - $ref: "#/components/schemas/BacklogFullError"
+          examples:
+            rate_limited:
+              value: { error: rate_limited, message: "too many requests, slow down and retry later" }
+            backlog_full:
+              value:
+                error: backlog_full
+                message: "this tenant has too many actions waiting to be sent; wait for some to finish and send again"
+                details: { pending: 1950, limit: 2000, requested: 100, available: 50 }
     InternalError:
       description: "`internal_error`."
       content:
@@ -1074,6 +1106,28 @@ components:
         error: { type: string, description: snake_case error code }
         message: { type: string }
         details: { type: object, additionalProperties: true }
+
+    RateLimitedError:
+      type: object
+      required: [error, message]
+      properties:
+        error: { type: string, enum: [rate_limited] }
+        message: { type: string }
+
+    BacklogFullError:
+      type: object
+      required: [error, message, details]
+      properties:
+        error: { type: string, enum: [backlog_full] }
+        message: { type: string }
+        details:
+          type: object
+          required: [pending, limit, requested, available]
+          properties:
+            pending: { type: integer, minimum: 0, description: "the tenant's items in status queued or dispatching" }
+            limit: { type: integer, minimum: 1, description: SAASAPI_ACTION_MAX_PENDING_PER_TENANT }
+            requested: { type: integer, minimum: 1, description: "this request's de-duplicated asset_ids" }
+            available: { type: integer, minimum: 0, description: "limit - pending, never negative" }
 
     TenantStatus:
       type: string

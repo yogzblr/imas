@@ -11,13 +11,13 @@ package saasapi
 // Now each process has two pools:
 //
 //   - cmd.run and cook items (SAASAPI_ACTION_DISPATCH_CONCURRENCY,
-//     default 64);
+//     default 256);
 //   - self_update items, reserved for rollout waves
 //     (SAASAPI_SELF_UPDATE_DISPATCH_CONCURRENCY, default 16), so no amount
 //     of cmd.run, the same tenant's included, delays a rollout;
 //
 // and within each pool one tenant holds at most
-// SAASAPI_ACTION_DISPATCH_TENANT_CONCURRENCY slots (default 8; at most
+// SAASAPI_ACTION_DISPATCH_TENANT_CONCURRENCY slots (default 32; at most
 // half the cmd.run/cook pool, which LoadConfig enforces). A tenant over
 // its cap waits for its own slots without holding a pool slot, so it
 // delays only itself.
@@ -32,6 +32,15 @@ package saasapi
 // cmd.run/cook pool (pool size / tenant cap of them, 8 by default); the
 // per-tenant rate limit on POST .../sprouts/actions bounds how fast. A
 // rollout is unaffected either way.
+//
+// What a tenant cannot do is pile up an unbounded backlog behind its cap:
+// POST .../sprouts/actions refuses a request (429 backlog_full) when the
+// tenant's queued and dispatching items plus the request's would exceed
+// SAASAPI_ACTION_MAX_PENDING_PER_TENANT (default 2000; backlog.go), so a
+// tenant learns at submit time instead of seeing items expire as
+// expired_not_sent later. The defaults were raised for the same reason
+// (P3 walkthrough 3.4, S3): at 32 slots a tenant's minute-long commands
+// drain at about 32 a minute per process.
 
 import (
 	"sync"
@@ -42,9 +51,9 @@ import (
 
 // Defaults and bounds for the dispatch settings in OutboxSweeperSettings.
 const (
-	defaultActionDispatchConcurrency       = 64
+	defaultActionDispatchConcurrency       = 256
 	defaultSelfUpdateDispatchConcurrency   = 16
-	defaultActionDispatchTenantConcurrency = 8
+	defaultActionDispatchTenantConcurrency = 32
 	maxDispatchConcurrency                 = 1024
 )
 

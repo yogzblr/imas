@@ -592,7 +592,7 @@ sweeper can't both send one item. What is and isn't re-sent:
 - `queued` past `SAASAPI_OUTBOX_MAX_ATTEMPTS`: failed with
   `dispatch_not_delivered`, unsent. `queued` whose tenant is no longer
   `active`: failed with `tenant_not_active`, unsent.
-- `queued` past `SAASAPI_OUTBOX_ACTION_MAX_AGE` (15m) since the POST:
+- `queued` past `SAASAPI_OUTBOX_ACTION_MAX_AGE` (30m; 15m until S3) since the POST:
   failed with `expired_not_sent`, unsent. The original dispatcher applies
   the same limit to an item still waiting for a dispatch slot, so no §1.5
   command is ever sent more than that long after it was accepted. Update
@@ -723,7 +723,10 @@ What changes here:
   never re-sent, and for an update rollout that halts it and frees the
   tenant's slot (job 2 and job 3 above).
 - **Maximum age for queued §1.5 items: decided and built (CL.3).**
-  `SAASAPI_OUTBOX_ACTION_MAX_AGE`, 15 minutes by default (job 2 above).
+  `SAASAPI_OUTBOX_ACTION_MAX_AGE`, 30 minutes by default (job 2 above;
+  15 minutes until S3, which also caps a tenant's queued and dispatching
+  items with `SAASAPI_ACTION_MAX_PENDING_PER_TENANT` and refuses a
+  request past it with `429 backlog_full`, see `docs/api/saasapi.md`).
 - **`internal.sprout.*` permissions.** Added when those handlers land (see
   above). `internal.sprout.mint`, `.revoke`, `.action`, and
   `internal.sprouts.list` are request-reply, so that change also has to

@@ -198,9 +198,9 @@ const (
 // The ceiling keeps a typo from turning into an unbounded goroutine count
 // on a privileged surface.
 const (
-	defaultSproutActionConcurrency       = 64
+	defaultSproutActionConcurrency       = 256
 	defaultSelfUpdateConcurrency         = 16
-	defaultSproutActionTenantConcurrency = 8
+	defaultSproutActionTenantConcurrency = 32
 	maxSproutActionConcurrency           = 1024
 )
 
