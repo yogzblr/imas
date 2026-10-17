@@ -109,6 +109,9 @@ type natsKeyProvider interface {
 	// retireKey soft-deletes the key; a missing or already retired key
 	// is success.
 	retireKey(ctx context.Context, k natsKeyRef) error
+	// destroyKey deletes the key permanently and reports whether it
+	// existed; a missing key is success.
+	destroyKey(ctx context.Context, k natsKeyRef) (bool, error)
 	// store is the underlying key store, for trust verification.
 	store() (natskeys.KeyStore, error)
 }
@@ -244,4 +247,25 @@ func (p *transitNATSKeys) retireKey(ctx context.Context, k natsKeyRef) error {
 		return fmt.Errorf("pki: retiring NATS key %v: %w", k, err)
 	}
 	return nil
+}
+
+func (p *transitNATSKeys) destroyKey(ctx context.Context, k natsKeyRef) (bool, error) {
+	name, err := k.transitName()
+	if err != nil {
+		return false, err
+	}
+	ks, err := p.current()
+	if err != nil {
+		return false, err
+	}
+	p.mu.Lock()
+	if p.ks == ks {
+		delete(p.pairs, name)
+	}
+	p.mu.Unlock()
+	destroyed, err := ks.DestroyKey(ctx, name)
+	if err != nil {
+		return false, fmt.Errorf("pki: destroying NATS key %v: %w", k, err)
+	}
+	return destroyed, nil
 }

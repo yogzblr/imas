@@ -161,3 +161,78 @@ state`, `tenant_id` in `internal/migrations`, `jobKeyPrefix`,
 `tenantRecipeRoot`, `stagedRecipeRoot`, `AccountsPrefix`,
 `IMAS_S3_SPROUT_JWT_BUCKET` across `internal/`, `cmd/`, `deploy/`, `uat/`,
 `docs/`.
+
+## Brief corrections (S6 build, 2026-10-17)
+
+Decided by the order in `docs/briefs/ORCHESTRATOR.md` rule 6 (owner
+decisions, then the code on main, then the smallest change that keeps main
+building, deployable and tested):
+
+1. **"Migration applies and rolls back."** Migrations on main are
+   forward-only, and a test refuses a `-- +goose Down` section
+   (`internal/migrations`). Rolling back means a helm rollback of saasapi
+   onto the new schema: `00010_tenant_purge.sql` is expand-only
+   (`saasCompatibleFrom` stays 1), and `TestMySQLTenantPurge` checks the
+   previous release's models still insert and update on it, and that a
+   re-run is a no-op.
+2. **"Rate-limited like the other operator routes."** The operator routes
+   had no rate limit on main. S6 adds one to every operator route: per
+   route and per pod, one request a second, bursts of 10, checked after the
+   token (`operatorPlane.rateLimit`).
+3. **The saas-schema rows are deleted by saasapi, not farmer.** Farmer's
+   database user has `SELECT` on `saas` only (§4.1 grants). saasapi deletes
+   `tenantpurge.SaasTables` when it applies farmer's successful result,
+   before recording it, so a failure leaves the job pending and the next
+   result finishes it. The order of decision 7 holds for farmer's steps.
+4. **OpenBao KV holds one tenant secret: its payload-encryption keypair.**
+   farmer's tenant box client (`internal/pki` tenantbox.go,
+   `IMAS_TENANTBOX_OPENBAO_*`) keeps one KV v2 secret per tenant at
+   `<kvPath>/tenants/<tenant_id>`. The KV step deletes it whole, every
+   version and its metadata (`pki.PurgeTenantBoxKeys`, one `DELETE` on the
+   metadata path), and farmer's tenantbox policy gains `delete` on
+   `<kvPath>/tenants/+` metadata only. The other KV material is the
+   platform's (the platform keypair and control-plane public keys, the
+   NATS trust copy, the SaaS API credential). `tenantpurge.KVPaths` lists
+   the tenant path, and `TestInventoryKV` fails on a KV user that is not
+   decided.
+5. **Two more columns.** Besides `tenants.offboarded_at`, migration 00010
+   adds `tenants.purge_claimed_at` (claimed in the purge job's transaction,
+   so at most one purge job is pending and the sweeper retries at most
+   daily) and `provisioning_jobs.purge_trigger` (`retention` or
+   `operator`, re-sent with every publish). A tenant offboarded by an older
+   saasapi has no `offboarded_at`; the sweeper reads
+   `COALESCE(offboarded_at, updated_at)`.
+6. **The tombstone holds no more than it needs.** The saas `tenants` row's
+   name and plan are cleared, farmer's `pki_tenants` name becomes the ID,
+   and the Account JWT in the accounts bucket is re-signed locked out from
+   its public key and the ID alone (no signing keys, no per-key
+   revocations: the lock-out revokes every key). Kept as well, in
+   `tenantpurge.KeepTables`: farmer's `job_leases` rows `pushall:<id>`
+   (the lease every replica re-pushes the lock-out under) and `purge:<id>`
+   (one replica purges a tenant at a time). The "sprout User JWT lease
+   table" is `sprout_user_jwt`, which is purged.
+7. **Grants the purge needs.** farmer's object store user lacked delete on
+   the sprout JWT bucket (Versity plan, UAT RustFS policy): added. farmer's
+   Transit policy gains `delete` on `transit/keys/+` and `update` on
+   `transit/keys/+/config` with `allowed_parameters` `deletion_allowed =
+   ["true"]`, with exact rules and denies keeping the platform and gateway
+   keys untouched (checked on OpenBao 2.7.1). This widens the accepted
+   cost of owner decision 2 (#215): another client's key on the mount
+   without exact denies can be destroyed, not only soft-deleted (farmer
+   README, security review pack 3.6.3).
+   `farmer.openbao.natsSign.retiredTenantKeyRetentionDays` (the old manual
+   purge runbook's window) is removed and fails the render; the delay is
+   `saasapi.tenantPurge.after`.
+8. **Valkey keys that expire by themselves** (replay and sealed-message
+   claims, saasapi's rate-limit buckets) are in `tenantpurge.KeepValkeyPrefixes`
+   with their reason.
+9. **Result and refusal codes.** A refusal is `failed` with
+   `purge_refused` (`invalid_tenant_id` for a malformed ID); a step failure
+   is `purge_incomplete` with `failed_step`; counts are a map of fixed
+   category names (`db.<table>`, `objects.<bucket part>`, `valkey.*`,
+   `transit.keys`) to numbers.
+10. **A purged tenant accepts no data.** The routes that store tenant data
+    (enrollment keys, asset links, update policy, recipes) answer
+    `404 tenant_not_found` for it, `PATCH` answers `409 tenant_purged`, and
+    `DELETE` `409 offboarding_in_progress`; `GET` still shows the
+    tombstone.

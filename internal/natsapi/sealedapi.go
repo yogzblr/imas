@@ -42,6 +42,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 
+	"github.com/yogzblr/imas/internal/controlplane"
 	log "github.com/yogzblr/imas/internal/log"
 	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
@@ -284,7 +285,7 @@ func sealCLIReply(req *sealedRequest, result any, handlerErr error) ([]byte, err
 // opened: sealed by the SaaS API's registered box key (current, or the
 // previous one inside a rotation's grace window) to a platform key farmer
 // holds, bound to the subject it arrived on, fresh, and not seen before on
-// this replica or, through the Valkey claim, on any other. All three
+// this replica or, through the Valkey claim, on any other. All four
 // subjects are mutating, so every request is claimed cluster-wide. Errors
 // as openCLIRequest's: ErrSealedStoreUnavailable comes with the opened
 // request, so a request-reply caller can answer it sealed.
@@ -341,13 +342,14 @@ func sealSaaSAPIReply(req *sealedRequest, result any, handlerErr error) ([]byte,
 	return pki.SealReplyToSaaSAPI(r)
 }
 
-// sealSaaSAPIResult seals an asynchronous provisioning result for jobID:
-// f2a.tenant.provisioned on internal.tenant.provisioned.<job_id>, or the
-// deprovisioned pair (pki.TenantResultWire), bound to that subject so it
-// can't be moved to another job's. It returns the subject to publish on
-// and the envelope. Every result is a new message (fresh ID and time).
-func sealSaaSAPIResult(deprovision bool, jobID string, result any) (subject string, data []byte, err error) {
-	w, err := pki.TenantResultWire(deprovision, jobID)
+// sealSaaSAPIResult seals an asynchronous tenant job result of kind for
+// jobID: f2a.tenant.provisioned on internal.tenant.provisioned.<job_id>,
+// the deprovisioned pair or the purged pair (pki.TenantResultWire), bound
+// to that subject so it can't be moved to another job's. It returns the
+// subject to publish on and the envelope. Every result is a new message
+// (fresh ID and time).
+func sealSaaSAPIResult(kind controlplane.TenantJob, jobID string, result any) (subject string, data []byte, err error) {
+	w, err := pki.TenantResultWire(kind, jobID)
 	if err != nil {
 		return "", nil, fmt.Errorf("natsapi: %w", err)
 	}

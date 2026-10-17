@@ -98,8 +98,8 @@ the subject strings come from `internal/controlplane`:
 
 | Direction | Allow (nothing else) |
 |---|---|
-| **pub** | `internal.tenant.provision`, `internal.tenant.deprovision` |
-| **sub** | `internal.tenant.provisioned.*`, `internal.tenant.deprovisioned.*` |
+| **pub** | `internal.tenant.provision`, `internal.tenant.deprovision`, `internal.tenant.purge` (S6), `internal.sprout.action` |
+| **sub** | `internal.tenant.provisioned.*`, `internal.tenant.deprovisioned.*`, `internal.tenant.purged.*` (S6), `_INBOX.saasapi.>` |
 
 Other claims on the same JWT:
 
@@ -485,7 +485,11 @@ it (idempotent by design); `handleTenantDeprovision` calls
 nil, so farmer reports `offboarded` again. Each copy publishes a result on
 `internal.tenant.{de,}provisioned.<job_id>`; `applyProvisioningResult`
 applies the first (conditional on `status = 'pending'`) and ignores the
-rest. A provision request for a tenant already deprovisioned is refused by
+rest. A purge (S6, `internal.tenant.purge`) is the same: each step deletes
+only what is left, so a repeated copy finishes or no-ops, and a copy that
+arrives while another farmer replica still runs the purge finds the
+`purge:<tenant_id>` job lease held and is dropped unanswered (the sweeper
+sends it again later). A provision request for a tenant already deprovisioned is refused by
 `ensureTenantAccountLocked` ("tenant was deprovisioned"), so a late copy
 can't recreate a deleted tenant row. **The one hazard, closed by PKI.1 (FLAG FOR SECURITY REVIEW)**, was a
 late copy of a provision request still *running* on one farmer replica

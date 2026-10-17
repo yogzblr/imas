@@ -1,7 +1,9 @@
 # OpenAPI description of the SaaS API's operator plane: fleet release
-# registration (design doc §2.5), written from the handler code:
+# registration (design doc §2.5) and the early purge of an offboarded
+# tenant's data (S6), written from the handler code:
 #   internal/saasapi/fleet_releases.go (operatorPlane.router: the route
-#   table, auth, both handlers), errors.go
+#   table, auth, the rate limit, both release handlers),
+#   internal/saasapi/tenant_purge.go (purgeTenant), errors.go
 # Narrative and caveats: docs/api/saasapi.md, "Operator plane".
 #
 # Keep this in step with operatorPlane.router. It is a separate listener
@@ -11,8 +13,8 @@
 openapi: 3.1.0
 info:
   title: imas SaaS API — operator plane
-  version: "v1 (FU.3)"
-  summary: Sprout release registration and revocation. Not tenant-facing.
+  version: "v1 (FU.3, S6)"
+  summary: Sprout release registration and revocation, and tenant purge. Not tenant-facing.
   description: |
     Served by saasapi's operator listener only, never by the tenant API.
     The intended caller is the farmer Helm release's post-install and
@@ -27,6 +29,10 @@ info:
     rotation, `SAASAPI_OPERATOR_TOKEN_PREVIOUS_FILE`), compared in
     constant time. The BFF's `X-Internal-Auth` secret and Keycloak JWTs
     are not accepted. Every failure is the same 401.
+
+    **Rate limit.** Each route has its own bucket, per saasapi pod: one
+    request a second sustained, bursts of 10, checked after the token.
+    Past it: 429 `rate_limited`.
 
     **Trust.** saasapi signs nothing and verifies no signature. The
     release's GPG-signed `checksums.txt` is the trust root: the request
@@ -152,6 +158,61 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404":
           description: "`not_found`: no release is registered for this version."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/operator/tenants/{tenant_id}/purge:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema: { type: string, maxLength: 32, examples: [t_mfrggzdfmztwq2lk] }
+    post:
+      operationId: PurgeTenant
+      summary: Erase an offboarded tenant's data now (asynchronous, irreversible)
+      description: |
+        FLAG FOR SECURITY REVIEW. Starts a purge job for an offboarded
+        tenant at once, whatever its retention delay
+        (SAASAPI_TENANT_PURGE_AFTER): a `provisioning_jobs` row of type
+        `purge` with trigger `operator`, published sealed on
+        `internal.tenant.purge`. Farmer erases the tenant's Valkey keys,
+        farmer-schema rows, objects, KV keypair and Transit keys; on its
+        successful
+        result saasapi deletes the tenant's saas rows and sets it
+        `purged`. Only a tombstone stays (docs/api/saasapi.md, "Tenants").
+        No request body. Poll the tenant API's `GET
+        /v1/tenants/{tenant_id}/status` for `purged`, or `last_error`.
+        A purge that failed can be started again at once.
+      responses:
+        "202":
+          description: Accepted; the purge has started.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tenant_id, job_id, status]
+                properties:
+                  tenant_id: { type: string }
+                  job_id: { type: string, examples: [pj_nbswy3dpeb3w64tm] }
+                  status: { type: string, const: offboarded }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: "`tenant_not_found`: no such tenant."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: |
+            `not_offboarded`: the tenant is in another status (a `purged`
+            one included); `purge_in_progress`: a purge job of the tenant
+            is pending.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: "`rate_limited`."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

@@ -70,6 +70,11 @@ type KeyStore interface {
 	// RetireKey soft-deletes (DELETE keys/<name>/soft-delete). 404 and already
 	// soft-deleted are success.
 	RetireKey(ctx context.Context, name string) error
+	// DestroyKey deletes the key permanently: POST keys/<name>/config
+	// deletion_allowed=true, then DELETE keys/<name>. A key that is
+	// already gone is success; destroyed reports whether this call
+	// deleted it.
+	DestroyKey(ctx context.Context, name string) (destroyed bool, err error)
 	Close() error // stops workers; pending signs get ErrClosed
 }
 
@@ -224,6 +229,39 @@ func (s *TransitKeyStore) RetireKey(ctx context.Context, name string) error {
 		return nil
 	}
 	return fmt.Errorf("natskeys: soft-deleting key %s: %w", name, err)
+}
+
+// DestroyKey implements KeyStore. It erases a tenant's key for good once
+// its data is purged (S6): OpenBao Transit deletes a key only once
+// deletion_allowed is set on it, which works on a soft-deleted key too
+// (checked against OpenBao 2.7.1). deletion_allowed is sent as the string
+// "true", the one value the farmer policy's allowed_parameters accepts on
+// keys/+/config. OpenBao answers both calls 400, not 404, for a key that
+// doesn't exist, so the key is read first and after any failure: a key
+// that reads as gone is success, so a repeated or resumed purge is too.
+func (s *TransitKeyStore) DestroyKey(ctx context.Context, name string) (bool, error) {
+	if !keyNameMatcher.MatchString(name) {
+		return false, fmt.Errorf("natskeys: invalid key name %q", name)
+	}
+	if _, err := s.readKey(ctx, name); errors.Is(err, ErrKeyNotFound) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	_, err := s.call(ctx, func(ctx context.Context) error {
+		if _, err := s.ob.Post(ctx, s.mount+"/keys/"+name+"/config", map[string]any{"deletion_allowed": "true"}); err != nil {
+			return err
+		}
+		_, err := s.ob.Delete(ctx, s.mount+"/keys/"+name)
+		return err
+	})
+	if err == nil {
+		return true, nil
+	}
+	if _, readErr := s.readKey(ctx, name); errors.Is(readErr, ErrKeyNotFound) {
+		return true, nil
+	}
+	return false, fmt.Errorf("natskeys: destroying key %s: %w", name, err)
 }
 
 func checkPrefix(p Prefix) error {

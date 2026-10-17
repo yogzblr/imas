@@ -28,8 +28,8 @@ import (
 // the design doc's permission table alongside this test.
 func TestSaaSAPIUserPermissions_ExactAllowLists(t *testing.T) {
 	p := saasAPIUserPermissions()
-	wantPub := jwt.StringList{"internal.tenant.provision", "internal.tenant.deprovision", "internal.sprout.action"}
-	wantSub := jwt.StringList{"internal.tenant.provisioned.*", "internal.tenant.deprovisioned.*", "_INBOX.saasapi.>"}
+	wantPub := jwt.StringList{"internal.tenant.provision", "internal.tenant.deprovision", "internal.tenant.purge", "internal.sprout.action"}
+	wantSub := jwt.StringList{"internal.tenant.provisioned.*", "internal.tenant.deprovisioned.*", "internal.tenant.purged.*", "_INBOX.saasapi.>"}
 	if !reflect.DeepEqual(p.Pub.Allow, wantPub) {
 		t.Fatalf("pub allow = %v, want %v", p.Pub.Allow, wantPub)
 	}

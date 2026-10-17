@@ -7,6 +7,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/yogzblr/imas/internal/controlplane"
 	"github.com/yogzblr/imas/internal/payloadbox"
 )
 
@@ -28,15 +29,25 @@ func TestSaaSAPIWire(t *testing.T) {
 	if w := SproutActionReplyWire(); w.Purpose != payloadbox.PurposeSaaSSproutActionReply || w.Method != "sprout.action" || w.Subject != "internal.sprout.action" {
 		t.Errorf("reply wire %+v", w)
 	}
-	w, err := TenantResultWire(true, "pj_1")
+	w, err := TenantResultWire(controlplane.TenantJobDeprovision, "pj_1")
 	if err != nil || w != (SaaSAPIWire{payloadbox.PurposeSaaSTenantDeprovisioned, "tenant.deprovisioned", "internal.tenant.deprovisioned.pj_1"}) {
 		t.Errorf("deprovisioned wire %+v %v", w, err)
 	}
-	if w, _ := TenantResultWire(false, "pj_1"); w.Method != "tenant.provisioned" || w.Subject != "internal.tenant.provisioned.pj_1" {
+	if w, _ := TenantResultWire(controlplane.TenantJobProvision, "pj_1"); w.Method != "tenant.provisioned" || w.Subject != "internal.tenant.provisioned.pj_1" {
 		t.Errorf("provisioned wire %+v", w)
 	}
+	w, err = TenantResultWire(controlplane.TenantJobPurge, "pj_1")
+	if err != nil || w != (SaaSAPIWire{payloadbox.PurposeSaaSTenantPurged, "tenant.purged", "internal.tenant.purged.pj_1"}) {
+		t.Errorf("purged wire %+v %v", w, err)
+	}
+	if _, err := TenantResultWire("rename", "pj_1"); err == nil {
+		t.Error("an unknown tenant job made a wire")
+	}
+	if w, ok := SaaSAPIRequestWire(controlplane.SubjectTenantPurge); !ok || w != (SaaSAPIWire{payloadbox.PurposeSaaSTenantPurge, "tenant.purge", "internal.tenant.purge"}) {
+		t.Errorf("purge request wire %+v %v", w, ok)
+	}
 	for _, bad := range []string{"", "pj.1", "pj*", "pj 1", "pj>"} {
-		if _, err := TenantResultWire(false, bad); err == nil {
+		if _, err := TenantResultWire(controlplane.TenantJobProvision, bad); err == nil {
 			t.Errorf("job id %q made a subject", bad)
 		}
 	}
@@ -71,21 +82,21 @@ func TestSaaSAPIBoxWireHelpers(t *testing.T) {
 		t.Errorf("own reply: %+v %v", b, err)
 	}
 
-	rw, _ := TenantResultWire(false, "pj_1")
+	rw, _ := TenantResultWire(controlplane.TenantJobProvision, "pj_1")
 	result, _, err := SealResultToSaaSAPI(payloadbox.Call{Purpose: rw.Purpose, Method: rw.Method, Subject: rw.Subject, Params: map[string]string{"job_id": "pj_1"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := saas.OpenTenantResult(false, "pj_2", rw.Subject, result); !errors.Is(err, payloadbox.ErrOpen) {
+	if _, err := saas.OpenTenantResult(controlplane.TenantJobProvision, "pj_2", rw.Subject, result); !errors.Is(err, payloadbox.ErrOpen) {
 		t.Errorf("result for the wrong job id: %v", err)
 	}
-	if _, err := saas.OpenTenantResult(true, "pj_1", rw.Subject, result); !errors.Is(err, payloadbox.ErrOpen) {
+	if _, err := saas.OpenTenantResult(controlplane.TenantJobDeprovision, "pj_1", rw.Subject, result); !errors.Is(err, payloadbox.ErrOpen) {
 		t.Errorf("provisioned result read as deprovisioned: %v", err)
 	}
-	if _, err := saas.OpenTenantResult(false, "pj_1", rw.Subject, result); err != nil {
+	if _, err := saas.OpenTenantResult(controlplane.TenantJobProvision, "pj_1", rw.Subject, result); err != nil {
 		t.Errorf("genuine result: %v", err)
 	}
-	if _, err := saas.OpenTenantResult(false, "pj_1", rw.Subject, result); !errors.Is(err, payloadbox.ErrReplayed) {
+	if _, err := saas.OpenTenantResult(controlplane.TenantJobProvision, "pj_1", rw.Subject, result); !errors.Is(err, payloadbox.ErrReplayed) {
 		t.Errorf("replayed result: %v", err)
 	}
 }

@@ -125,6 +125,8 @@ func (ks localKeyStore) EnsureKeyPair(ctx context.Context, name string, prefix n
 
 func (ks localKeyStore) RetireKey(context.Context, string) error { return nil }
 
+func (ks localKeyStore) DestroyKey(context.Context, string) (bool, error) { return false, nil }
+
 func (ks localKeyStore) Close() error { return nil }
 
 func newTrust(operatorSigning, sysAccount nkeys.KeyPair) (*trust, error) {

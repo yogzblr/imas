@@ -12,27 +12,47 @@ const (
 	TenantStatusFailed      TenantStatus = "failed"
 	TenantStatusOffboarding TenantStatus = "offboarding"
 	TenantStatusOffboarded  TenantStatus = "offboarded"
+	// TenantStatusPurged: the tenant's data is erased (S6). Only the
+	// tombstone is left: this row (name and plan cleared), its
+	// provisioning jobs, and farmer's deleted marker and locked-out
+	// Account JWT. Final.
+	TenantStatusPurged TenantStatus = "purged"
 )
 
 // Tenant is the `saas.tenants` table (design doc §4.2).
+//
+// OffboardedAt is when the tenant's deprovision result was applied, the
+// start of its retention delay (SAASAPI_TENANT_PURGE_AFTER); migration
+// saas/00010 backfilled it from updated_at for tenants already offboarded,
+// and a tenant offboarded by an older release has it NULL, so the sweeper
+// reads COALESCE(offboarded_at, updated_at). PurgeClaimedAt is written
+// when a purge job is started for the tenant, by the sweeper or the
+// operator route, in the same transaction and conditional on the value
+// read, so two starts on different PXC nodes write the same row and
+// Galera certification refuses one; it also spaces the sweeper's
+// retries a day apart. Neither is part of GET /tenants/{id}.
 type Tenant struct {
-	ID        string       `gorm:"column:id;primaryKey;size:32" json:"tenant_id"`
-	Name      string       `gorm:"column:name;size:255;not null" json:"name"`
-	Status    TenantStatus `gorm:"column:status;size:32;not null;index" json:"status"`
-	PlanID    string       `gorm:"column:plan_id;size:64" json:"plan_id,omitempty"`
-	CreatedAt time.Time    `gorm:"column:created_at" json:"created_at"`
-	UpdatedAt time.Time    `gorm:"column:updated_at" json:"updated_at"`
+	ID             string       `gorm:"column:id;primaryKey;size:32" json:"tenant_id"`
+	Name           string       `gorm:"column:name;size:255;not null" json:"name"`
+	Status         TenantStatus `gorm:"column:status;size:32;not null;index" json:"status"`
+	PlanID         string       `gorm:"column:plan_id;size:64" json:"plan_id,omitempty"`
+	CreatedAt      time.Time    `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt      time.Time    `gorm:"column:updated_at" json:"updated_at"`
+	OffboardedAt   *time.Time   `gorm:"column:offboarded_at" json:"-"`
+	PurgeClaimedAt *time.Time   `gorm:"column:purge_claimed_at" json:"-"`
 }
 
 func (Tenant) TableName() string { return "tenants" }
 
-// ProvisioningJobType distinguishes tenant provisioning from deprovisioning
-// (offboarding) outbox rows.
+// ProvisioningJobType distinguishes tenant provisioning, deprovisioning
+// (offboarding) and purge (erasure, S6) outbox rows. Its values are
+// controlplane.TenantJob's.
 type ProvisioningJobType string
 
 const (
 	ProvisioningJobProvision   ProvisioningJobType = "provision"
 	ProvisioningJobDeprovision ProvisioningJobType = "deprovision"
+	ProvisioningJobPurge       ProvisioningJobType = "purge"
 )
 
 // ProvisioningJobStatus is the outbox row's own status, independent of
@@ -74,6 +94,10 @@ type ProvisioningJob struct {
 	LastDispatchedAt *time.Time `gorm:"column:last_dispatched_at" json:"-"`
 	LeaseOwner       string     `gorm:"column:lease_owner;size:64;not null;default:''" json:"-"`
 	LeaseUntil       *time.Time `gorm:"column:lease_until" json:"-"`
+	// PurgeTrigger is a purge job's controlplane.PurgeTrigger* (retention
+	// or operator), sent with every publish of it; '' on other jobs
+	// (migration saas/00010).
+	PurgeTrigger string `gorm:"column:purge_trigger;size:16;not null;default:''" json:"-"`
 }
 
 func (ProvisioningJob) TableName() string { return "provisioning_jobs" }

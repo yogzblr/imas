@@ -45,7 +45,8 @@ const (
 )
 
 // saasAPIUserPermissions is the SaaS API's entire NATS reach: publish the
-// two tenant request subjects and internal.sprout.action; subscribe to the
+// three tenant request subjects (provision, deprovision, purge) and
+// internal.sprout.action; subscribe to the
 // tenant flows' per-job result subjects and to its own reply inboxes.
 //
 // The inbox grant is scoped to controlplane.SaaSAPIInboxWildcard
@@ -66,11 +67,13 @@ func saasAPIUserPermissions() jwt.Permissions {
 		Pub: jwt.Permission{Allow: jwt.StringList{
 			controlplane.SubjectTenantProvision,
 			controlplane.SubjectTenantDeprovision,
+			controlplane.SubjectTenantPurge,
 			controlplane.SubjectSproutAction,
 		}},
 		Sub: jwt.Permission{Allow: jwt.StringList{
 			controlplane.SubjectTenantProvisionedWildcard,
 			controlplane.SubjectTenantDeprovisionedWildcard,
+			controlplane.SubjectTenantPurgedWildcard,
 			controlplane.SaaSAPIInboxWildcard,
 		}},
 	}

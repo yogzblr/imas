@@ -117,7 +117,7 @@ func farmerRespond(msg *nats.Msg, requestID string, result any) error {
 // sealedResultMsg is farmer's sealed result res, for a job of jobType,
 // on its job's subject, under keys k.
 func (k controlKeys) sealedResultMsg(jobType ProvisioningJobType, res controlplane.TenantResult) *nats.Msg {
-	w, err := pki.TenantResultWire(jobType == ProvisioningJobDeprovision, res.JobID)
+	w, err := pki.TenantResultWire(controlplane.TenantJob(jobType), res.JobID)
 	if err != nil {
 		panic(err)
 	}

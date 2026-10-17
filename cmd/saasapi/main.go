@@ -188,11 +188,13 @@ func main() {
 // default off). The wave gate's clock-skew margin is set with it
 // (SAASAPI_FLEET_UPDATE_CLOCK_SKEW, default 30s), and so are the outbox
 // settings whose lease TTL every dispatch the handlers start uses
-// (SAASAPI_OUTBOX_*).
+// (SAASAPI_OUTBOX_*), and the tenant purge settings GET .../status reports
+// and the sweeper applies (SAASAPI_TENANT_PURGE_*).
 func newRouter(cfg saasapi.Config) *http.ServeMux {
 	saasapi.SetFleetUpdateDispatchEnabled(cfg.FleetUpdateDispatchEnabled)
 	saasapi.SetFleetUpdateClockSkew(cfg.FleetUpdateClockSkew)
 	saasapi.SetOutboxSweeperSettings(cfg.OutboxSweeper)
+	saasapi.SetTenantPurgeSettings(cfg.TenantPurge)
 	return saasapi.NewRouter()
 }
 

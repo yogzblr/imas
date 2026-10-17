@@ -126,7 +126,7 @@ func TestRejectUncleanPathsKeepsTenant(t *testing.T) {
 
 func TestOperatorHandlerRejectsUncleanPaths(t *testing.T) {
 	gdb := newFleetTestDB(t)
-	p := &operatorPlane{tokens: [][]byte{[]byte(testOperatorToken)}}
+	p := &operatorPlane{tokens: [][]byte{[]byte(testOperatorToken)}, limiter: unlimited{}}
 	h := p.handler()
 
 	body := releaseBody("v2.4.1", "v2.0.0", debPkg("amd64", sumA))

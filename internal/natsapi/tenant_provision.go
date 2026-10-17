@@ -65,7 +65,8 @@ const (
 )
 
 // RegisterTenantProvisioning queue-subscribes nc — farmer's SYS listener
-// connection — to internal.tenant.provision and internal.tenant.deprovision.
+// connection — to internal.tenant.provision, internal.tenant.deprovision
+// and internal.tenant.purge (tenant_purge.go).
 // It uses the same natsCoreQueueGroup as imas.api.> (workstream D's
 // discipline) so that with several farmer replicas, exactly one processes
 // each request. Call once per process, not once per tenant.
@@ -98,7 +99,16 @@ func registerSaaSAPIHandlers(nc *nats.Conn, s *sealedAPI) error {
 	}); err != nil {
 		return fmt.Errorf("natsapi: failed to subscribe to %s: %w", controlplane.SubjectTenantDeprovision, err)
 	}
-	log.Info("natsapi: registered tenant provisioning handlers (SYS account, sealed)")
+	if _, err := nc.QueueSubscribe(controlplane.SubjectTenantPurge, natsCoreQueueGroup, func(msg *nats.Msg) {
+		if req := s.openSaaSAPIRequestOrRefuse(msg, false); req != nil {
+			// A purge can take minutes; it must not hold up this
+			// subscription's other messages.
+			go handleTenantPurge(nc, req.Params)
+		}
+	}); err != nil {
+		return fmt.Errorf("natsapi: failed to subscribe to %s: %w", controlplane.SubjectTenantPurge, err)
+	}
+	log.Info("natsapi: registered tenant provisioning and purge handlers (SYS account, sealed)")
 	return registerSproutAction(nc, s)
 }
 
@@ -127,7 +137,7 @@ func handleTenantProvision(nc *nats.Conn, data []byte) {
 		res.ErrorCode = tenantErrorCode(err)
 	}
 	auditTenantAction(auditActionTenantProvision, data, res, err)
-	publishTenantResult(nc, false, res)
+	publishTenantResult(nc, controlplane.TenantJobProvision, res)
 }
 
 // handleTenantDeprovision runs data, an opened internal.tenant.deprovision
@@ -162,7 +172,7 @@ func handleTenantDeprovision(nc *nats.Conn, data []byte) {
 		res.ErrorCode = tenantErrorCode(err)
 	}
 	auditTenantAction(auditActionTenantDeprovision, data, res, err)
-	publishTenantResult(nc, true, res)
+	publishTenantResult(nc, controlplane.TenantJobDeprovision, res)
 }
 
 // tenantErrorCode maps a pki provisioning error to the fixed code
@@ -186,8 +196,8 @@ func tenantErrorCode(err error) controlplane.ErrorCode {
 // key unreadable) is logged and not published, never sent in plaintext:
 // the SaaS API's job stays pending, its outbox sweeper sends the request
 // again, and the idempotent handlers answer it then.
-func publishTenantResult(nc *nats.Conn, deprovision bool, res controlplane.TenantResult) {
-	subject, data, err := sealSaaSAPIResult(deprovision, res.JobID, res)
+func publishTenantResult(nc *nats.Conn, kind controlplane.TenantJob, res controlplane.TenantResult) {
+	subject, data, err := sealSaaSAPIResult(kind, res.JobID, res)
 	if err != nil {
 		log.Errorf("natsapi: sealing the result of job %s (tenant %s): %v; not published", res.JobID, res.TenantID, err)
 		return

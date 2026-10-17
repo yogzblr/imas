@@ -1,6 +1,7 @@
 // Package natskeystest is an in-process fake of the OpenBao endpoints
 // internal/pki/natskeys uses: Transit's keys/<name> read and create,
-// keys/<name>/soft-delete, sign/<name> (plain and batch), and the
+// keys/<name>/soft-delete, keys/<name>/config (deletion_allowed only) and
+// the hard delete of keys/<name>, sign/<name> (plain and batch), and the
 // kubernetes auth login. It counts requests, injects faults and rotates
 // keys, for natskeys's own tests and for tests elsewhere that need a
 // KeyStore without OpenBao (design D7: OpenBao itself is tested only by
@@ -39,8 +40,10 @@ const (
 	OpReadKey    Op = "read"
 	OpCreateKey  Op = "create"
 	OpSoftDelete Op = "soft-delete"
-	OpSign       Op = "sign"  // every sign request, plain or batch
-	OpBatch      Op = "batch" // counted in addition to OpSign for batch requests
+	OpConfigKey  Op = "config"      // POST keys/<name>/config
+	OpHardDelete Op = "hard-delete" // DELETE keys/<name>
+	OpSign       Op = "sign"        // every sign request, plain or batch
+	OpBatch      Op = "batch"       // counted in addition to OpSign for batch requests
 	OpLogin      Op = "login"
 )
 
@@ -62,8 +65,9 @@ type KeyOptions struct {
 }
 
 type key struct {
-	opts     KeyOptions
-	versions []ed25519.PrivateKey // index i is version i+1
+	opts            KeyOptions
+	versions        []ed25519.PrivateKey // index i is version i+1
+	deletionAllowed bool
 }
 
 type fault struct {
@@ -274,6 +278,10 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		op, name = OpSign, strings.TrimPrefix(rest, "sign/")
 	case strings.HasPrefix(rest, "keys/") && strings.HasSuffix(rest, "/soft-delete") && r.Method == http.MethodDelete:
 		op, name = OpSoftDelete, strings.TrimSuffix(strings.TrimPrefix(rest, "keys/"), "/soft-delete")
+	case strings.HasPrefix(rest, "keys/") && strings.HasSuffix(rest, "/config") && (r.Method == http.MethodPost || r.Method == http.MethodPut):
+		op, name = OpConfigKey, strings.TrimSuffix(strings.TrimPrefix(rest, "keys/"), "/config")
+	case strings.HasPrefix(rest, "keys/") && r.Method == http.MethodDelete:
+		op, name = OpHardDelete, strings.TrimPrefix(rest, "keys/")
 	case strings.HasPrefix(rest, "keys/") && r.Method == http.MethodGet:
 		op, name = OpReadKey, strings.TrimPrefix(rest, "keys/")
 	case strings.HasPrefix(rest, "keys/") && (r.Method == http.MethodPost || r.Method == http.MethodPut):
@@ -319,6 +327,10 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		f.createKey(w, r, name)
 	case OpSoftDelete:
 		f.softDelete(w, name)
+	case OpConfigKey:
+		f.configKey(w, r, name)
+	case OpHardDelete:
+		f.hardDelete(w, name)
 	case OpSign:
 		f.sign(w, r, name)
 	}
@@ -371,7 +383,7 @@ func (f *Fake) readKey(w http.ResponseWriter, name string) {
 	}
 	data := map[string]any{
 		"auto_rotate_period":     0,
-		"deletion_allowed":       false,
+		"deletion_allowed":       k.deletionAllowed,
 		"keys":                   versions,
 		"latest_version":         len(k.versions),
 		"min_available_version":  0,
@@ -431,6 +443,60 @@ func (f *Fake) softDelete(w http.ResponseWriter, name string) {
 	}
 	k.opts.SoftDeleted = true
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// configKey takes deletion_allowed only, as the string "true" or "false"
+// or a JSON bool (OpenBao accepts both), and refuses every other field,
+// which farmer's policy refuses too. Like OpenBao 2.7.1 it answers 400
+// for a key that doesn't exist.
+func (f *Fake) configKey(w http.ResponseWriter, r *http.Request, name string) {
+	var req map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad body")
+		return
+	}
+	var allowed bool
+	for k, v := range req {
+		if k != "deletion_allowed" {
+			writeErr(w, http.StatusForbidden, "permission denied")
+			return
+		}
+		switch v {
+		case true, "true":
+			allowed = true
+		case false, "false":
+		default:
+			writeErr(w, http.StatusBadRequest, "bad deletion_allowed")
+			return
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := f.keys[name]
+	if k == nil {
+		writeErr(w, http.StatusBadRequest, "no existing key named "+name+" could be found")
+		return
+	}
+	k.deletionAllowed = allowed
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// hardDelete removes a key whose deletion_allowed is set; like OpenBao
+// 2.7.1 it answers 400 for a missing key and for one not allowed to be
+// deleted.
+func (f *Fake) hardDelete(w http.ResponseWriter, name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := f.keys[name]
+	switch {
+	case k == nil:
+		writeErr(w, http.StatusBadRequest, "error deleting policy "+name+": could not delete key; not found")
+	case !k.deletionAllowed:
+		writeErr(w, http.StatusBadRequest, "error deleting policy "+name+": deletion is not allowed for this key")
+	default:
+		delete(f.keys, name)
+		w.WriteHeader(http.StatusNoContent)
+	}
 }
 
 func (f *Fake) sign(w http.ResponseWriter, r *http.Request, name string) {

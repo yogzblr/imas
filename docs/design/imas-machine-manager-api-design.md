@@ -46,7 +46,7 @@ Standard error shape for every endpoint:
 // response 202 Accepted
 { "tenant_id": "t_8f2a", "status": "pending" }
 ```
-Status values: `pending → active`, or `pending → failed` (see `provisioning_jobs`, §5.2). `DELETE` follows the same `offboarding → offboarded`/`failed` shape.
+Status values: `pending → active`, or `pending → failed` (see `provisioning_jobs`, §5.2). `DELETE` follows the same `offboarding → offboarded`/`failed` shape. An offboarded tenant's data is erased after a retention delay (`SAASAPI_TENANT_PURGE_AFTER`, default 720h; `purge_after` in `GET .../status`), or earlier on an operator's request (`POST /v1/operator/tenants/{tenant_id}/purge`, operator plane, §2.5): `offboarded → purged` (S6, `docs/briefs/S6-tenant-erasure.md`). A purged tenant is a tombstone that keeps its ID reserved and the tenant locked out; nothing more can be stored for it.
 
 ### 1.2 Enrollment keys
 
@@ -165,7 +165,7 @@ When farmer cooks a recipe for a sprout, it resolves the name under the sprout's
 - **RBAC.** Keycloak roles, read from `realm_access.roles` and `resource_access.<SAASAPI_JWT_AUDIENCE>.roles` (`internal/saasapi/caller.go`, `RequireRole`). Reading needs `imas-recipes-read` or `imas-recipes-write`. Writing needs `imas-recipes-write` (`SAASAPI_RECIPES_READ_ROLE` / `_WRITE_ROLE`, which must differ). Roles, not scopes: an organization administrator grants a role to a user or group, while a scope is whatever the BFF requests. Writing a recipe means running code as root on every sprout of the tenant that cooks it, so grant the write role like the right to run commands, not like a viewer. The role is checked before the rate limit. PUT and DELETE share one per-tenant budget (`SAASAPI_RECIPES_WRITE_RATE_LIMIT` / `_BURST`, default 1/s with a burst of 10), held in Valkey when it is configured. (§1.5's `POST .../sprouts/actions`, which can start a `cook`, has no role check yet; see the REC.1 PR.)
 - **Audit.** For every PUT and DELETE that gets past `Auth`, the role check and name validation, saasapi writes a record with the tenant, caller (token `sub`), action, name, sha256 and size before and after, outcome (`attempted`, `created`, `replaced`, `deleted`, `rejected`, `failed`) and error code. A record never holds content. A mutation first writes an `attempted` record. If that write fails, nothing changes and the request is `503 audit_unavailable`. The outcome record follows. Records are create-only JSON objects under `tenants/<tenant_id>/recipe-audit/<date>/`, which saasapi's policy lets it add to but never read or delete. They are not in the `saas` schema, because that needs a migration outside REC.1's scope. Each record is also logged.
 - **Freshness.** Confirmed, with no change needed. Farmer resolves and reads a recipe from the bucket on every cook (`cook.resolveRecipeKey` stats the candidate keys, then `readRecipe`) with no cache, and the staged copy is rewritten on every dispatch. The sprout executes the pushed envelope, or pulls the staged copy, never a cached source. `TestRecipeUploadCooksOnSameTenantOnly` uploads, replaces and deletes through the router and checks that each very next cook uses that version, or the platform recipe after the delete. It also checks that another tenant's sprout never gets it.
-- **Deletion and tenants.** Deprovisioning a tenant should delete `tenants/<tenant_id>/recipes/` (and decide the retention of `recipe-audit/`). Nothing does yet.
+- **Deletion and tenants.** Deprovisioning a tenant locks it out and keeps its recipes. Its purge (S6), once it has been offboarded for `SAASAPI_TENANT_PURGE_AFTER` (default 720h) or earlier at an operator's request, deletes everything under `tenants/<tenant_id>/` in the recipe bucket, `recipes/` and `recipe-audit/` alike (the platform's own audit logs are separate and keep their 30-day retention), with the tenant's staged recipes under `sprouts/<tenant_id>/`. Farmer does it (`internal/natsapi` `tenant_purge.go`), with its own credential, which has delete on the whole recipe bucket; saasapi's recipe credential still cannot delete or read the audit records.
 
 ### 1.7 Request auth (decided), plus teams, API keys, webhooks, usage — *(surface only; not detailed yet)*
 
@@ -322,6 +322,8 @@ Transport: NATS subjects under `imas.api.*` (existing) and a new `imas.internal.
 | `internal.tenant.provisioned.{job_id}` | Farmer → SaaS API, published | Completion callback. Farmer has no write access to `saas` schema, so this event is how status gets back. |
 | `internal.tenant.deprovision` | SaaS API → Farmer | Reverse of provision. Same async/callback shape. |
 | `internal.tenant.deprovisioned.{job_id}` | Farmer → SaaS API, published | Deprovision's completion callback, same shape as `provisioned`. |
+| `internal.tenant.purge` | SaaS API → Farmer, fire-and-forget | Erase an offboarded tenant's farmer-side data (S6): Valkey keys, farmer-schema rows, object store prefixes, the payload-encryption keypair in OpenBao KV, Transit keys, leaving the tombstone. Farmer refuses (deleting nothing) a tenant its registry doesn't show deprovisioned, and the legacy current tenant. Same sealing, outbox and retry as deprovision. |
+| `internal.tenant.purged.{job_id}` | Farmer → SaaS API, published | The purge's result: `purged` with counts per category (numbers only), or `failed` with `purge_refused` / `purge_incomplete` and the step it stopped at. On success saasapi deletes the tenant's saas rows and sets it `purged`. |
 | `internal.sprout.mint` | SaaS API → Farmer, request-reply | Mint a User JWT + NKey identity for a newly-enrolled sprout, given `tenant_id` + submitted pubkeys. Called from farmer's own pre-enrollment HTTP path (which validates the registration key against `saas.enrollment_keys` directly, per §1.2) — this subject is the step after that validation succeeds — full sequence in §3. |
 | `internal.sprout.revoke` | SaaS API → Farmer, request-reply | Revoke a sprout's JWT/NKey (backs "unenroll"). |
 | `internal.sprouts.list` | SaaS API → Farmer, request-reply | Tenant-scoped, **paginated** version of `sprouts.list` (the existing subject returns an unbounded list — not viable at 1M sprouts). |
@@ -610,8 +612,10 @@ scheduled deliberately.
 
 ### 4.2 `saas` schema tables (new)
 ```sql
-tenants               (id, name, status, plan_id, created_at, updated_at)
-provisioning_jobs     (id, tenant_id, type, status, attempts, last_error, warning, created_at, updated_at)
+tenants               (id, name, status, plan_id, created_at, updated_at,
+                        offboarded_at, purge_claimed_at)          -- S6, migration 00010
+provisioning_jobs     (id, tenant_id, type, status, attempts, last_error, warning, created_at, updated_at,
+                        purge_trigger)                            -- type provision, deprovision or purge
 enrollment_keys        (id, tenant_id, key_hash, expiry, max_uses, used_count, revoked)
 asset_links           (id, tenant_id, sprout_id, asset_id UNIQUE, linked_at, UNIQUE(tenant_id, sprout_id))
 asset_action_batches  (id, tenant_id, requested_asset_ids, created_at)

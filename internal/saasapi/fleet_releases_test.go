@@ -1,6 +1,7 @@
 package saasapi
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -42,7 +43,7 @@ var (
 func newOperatorTest(t *testing.T) (*gorm.DB, http.Handler) {
 	t.Helper()
 	gdb := newFleetTestDB(t)
-	p := &operatorPlane{tokens: [][]byte{[]byte(testOperatorToken), []byte(testOperatorTokenPrevious)}}
+	p := &operatorPlane{tokens: [][]byte{[]byte(testOperatorToken), []byte(testOperatorTokenPrevious)}, limiter: unlimited{}}
 	return gdb, p.router()
 }
 
@@ -593,7 +594,7 @@ func TestRevokedVersionIsNotApprovableOrDispatched(t *testing.T) {
 	mustPublishVersion(t, gdb, "v2.4.1", time.Now())
 	mustPublishVersion(t, gdb, "v2.4.2", time.Now())
 	mustApprove(t, gdb, tid, "v2.4.2")
-	p := &operatorPlane{tokens: [][]byte{[]byte(testOperatorToken)}}
+	p := &operatorPlane{tokens: [][]byte{[]byte(testOperatorToken)}, limiter: unlimited{}}
 	h := p.router()
 
 	if code, _ := revoke(t, h, "v2.4.1"); code != http.StatusOK {
@@ -789,3 +790,9 @@ func TestLoadConfigOperatorPlane(t *testing.T) {
 		t.Fatalf("operator plane off: %+v, %v", cfg, err)
 	}
 }
+
+// unlimited is a limiter that admits everything, for tests of what the
+// operator routes do rather than how often.
+type unlimited struct{}
+
+func (unlimited) allow(context.Context, string) bool { return true }

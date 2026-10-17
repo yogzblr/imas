@@ -107,6 +107,7 @@ import (
 
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/objectstore"
+	"github.com/yogzblr/imas/internal/tenantpurge"
 )
 
 var (
@@ -132,6 +133,16 @@ var objStore *objectstore.Store
 // Call once at startup, as cmd/farmer/main.go does for cook.SetStore.
 func SetStore(s *objectstore.Store) { objStore = s }
 
+// PurgeTenantObjects deletes every object under jobs/<tenant_id>/, all of
+// tenantID's job output (S6), and returns how many. Only the purge of an
+// offboarded tenant calls it (internal/natsapi tenant_purge.go).
+func PurgeTenantObjects(ctx context.Context, tenantID string, batch int) (int64, error) {
+	if objStore == nil {
+		return 0, ErrJobStoreNotConfigured
+	}
+	return tenantpurge.DeleteObjects(ctx, objStore, jobKeyPrefix+tenantID+"/", tenantID, batch)
+}
+
 // opTimeout bounds each Store method, and each listener write, against
 // the object store.
 const opTimeout = 30 * time.Second
@@ -140,7 +151,7 @@ const opTimeout = 30 * time.Second
 const loadConcurrency = 16
 
 const (
-	jobKeyPrefix  = "jobs/"
+	jobKeyPrefix  = tenantpurge.RootJobs
 	createdObject = "created.jsonl"
 	metaObject    = "meta.json"
 	expiredObject = "expired.json"

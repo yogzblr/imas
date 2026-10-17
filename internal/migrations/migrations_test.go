@@ -243,7 +243,7 @@ func TestCompatibleFromReviewed(t *testing.T) {
 		latest, floor int64
 	}{
 		{Farmer, 5, 2}, // 00004 and 00005 only add tables (P21 slice 3)
-		{Saas, 9, 1},   // 00007 and 00008 only add tables (P22 slice 2, P21 slice 3); 00009 only an index (S3)
+		{Saas, 10, 1},  // 00007 and 00008 only add tables (P22 slice 2, P21 slice 3); 00009 only an index (S3); 00010 only nullable or defaulted columns (S6)
 	} {
 		if c.set.Latest() != c.latest || c.set.compatibleFrom != c.floor {
 			t.Errorf("%s: latest %d, compatibleFrom %d; reviewed at latest %d, compatibleFrom %d: review the new migration's effect on older binaries",

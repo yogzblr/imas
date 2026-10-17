@@ -635,7 +635,7 @@ func TestValidationFailures(t *testing.T) {
 		{"natssign other mount", "farmer.openbao.natsSign.transitMount", []string{"--set", "farmer.openbao.natsSign.transitMount=nats"}},
 		{"natssign bad timeout", "farmer.openbao.natsSign.timeout", []string{"--set", "farmer.openbao.natsSign.timeout=15"}},
 		{"natssign zero workers", "farmer.openbao.natsSign.workers must be a positive whole number", []string{"--set", "farmer.openbao.natsSign.workers=0"}},
-		{"natssign fractional retention", "retiredTenantKeyRetentionDays must be a positive whole number", []string{"--set", "farmer.openbao.natsSign.retiredTenantKeyRetentionDays=1.5"}},
+		{"natssign retention removed", "retiredTenantKeyRetentionDays was removed (S6)", []string{"--set", "farmer.openbao.natsSign.retiredTenantKeyRetentionDays=30"}},
 		{"natssign shares gateway role", "is another of farmer's OpenBao roles", []string{"--set", "farmer.openbao.natsSign.k8sRole=imas-farmer-gateway"}},
 		{"publisher signer is farmer's", "is also one of farmer's OpenBao roles", []string{"--set", "credentialPublisher.natsSign.k8sRole=imas-farmer-natssign"}},
 		{"keygen takes publisher signer", "controlPlaneBoxKeys.k8sRole", []string{"--set", "controlPlaneBoxKeys.k8sRole=imas-natssign-publisher"}},
@@ -952,14 +952,17 @@ func policyStatements(hcl string) string {
 
 // The farmer-only policies: exact paths, no wildcards, nothing on another
 // Transit key's sign path or the publisher's KV path. The exceptions:
-//   - the tenantbox policy's per-tenant path, whose last segment is the
-//     tenant ID: a single "+" (exactly one segment), never "*";
+//   - the tenantbox policy's per-tenant paths, whose last segment is the
+//     tenant ID: a single "+" (exactly one segment), never "*", on the
+//     data path and, delete only (S6), the metadata path;
 //   - imas-farmer-natssign's per-tenant Transit keys (P21 slice 1; owner
 //     choice of 2026-10-12 replacing the glob-plus-deny form of decision
 //     2026-10-11 (2), which OpenBao can't express): a single-segment
-//     keys/+ (update, read) and keys/+/soft-delete (delete), exact
-//     soft-delete denies on the platform and gateway keys, and the one
-//     "*" glob sign/nats-tsign-*. No other wildcard.
+//     keys/+ (update, read, and since S6 delete), keys/+/soft-delete
+//     (delete) and keys/+/config (update, deletion_allowed="true" only;
+//     S6), exact soft-delete and config denies on the platform and
+//     gateway keys, an exact rule keeping the gateway key at create and
+//     read, and the one "*" glob sign/nats-tsign-*. No other wildcard.
 //
 // The P21 policies that are files (imas-nats-sys-signer, the ephemeral
 // imas-nats-bootstrap) are exact paths with no wildcard at all.
@@ -974,6 +977,7 @@ func TestFarmerPoliciesAreExact(t *testing.T) {
 		// public keys (J.1), and never the SaaS API's private key.
 		"imas-farmer-tenantbox.hcl": {
 			`path "secret/data/imas/tenant-x25519/tenants/+"`,
+			`path "secret/metadata/imas/tenant-x25519/tenants/+"`,
 			`path "secret/data/imas/tenant-x25519/platform"`,
 			`path "secret/data/imas/tenant-x25519/controlplane-pub"`,
 		},
@@ -986,7 +990,13 @@ func TestFarmerPoliciesAreExact(t *testing.T) {
 			`path "transit/sign/nats-operator-signing"`,
 			`path "transit/sign/nats-sys-account"`,
 			`path "transit/keys/+"`,
+			`path "transit/keys/imas-gateway-jwt"`,
 			`path "transit/keys/+/soft-delete"`,
+			`path "transit/keys/+/config"`,
+			`path "transit/keys/nats-operator/config"`,
+			`path "transit/keys/nats-operator-signing/config"`,
+			`path "transit/keys/nats-sys-account/config"`,
+			`path "transit/keys/imas-gateway-jwt/config"`,
 			`path "transit/keys/nats-operator/soft-delete"`,
 			`path "transit/keys/nats-operator-signing/soft-delete"`,
 			`path "transit/keys/nats-sys-account/soft-delete"`,
@@ -1027,7 +1037,11 @@ func TestFarmerPoliciesAreExact(t *testing.T) {
 		}
 		stmts := policyStatements(body)
 		if name == "imas-farmer-tenantbox.hcl" {
-			stmts = strings.Replace(stmts, `imas/tenant-x25519/tenants/+"`, `imas/tenant-x25519/tenants/TENANT"`, 1)
+			stmts = strings.Replace(stmts, `imas/tenant-x25519/tenants/+"`, `imas/tenant-x25519/tenants/TENANT"`, 2)
+			blocks := policyBlocks(body)
+			if c := blocks[`"secret/metadata/imas/tenant-x25519/tenants/+"`]; c != `capabilities = ["delete"]` {
+				t.Errorf("tenantbox metadata path: %q, want delete only", c)
+			}
 		}
 		if name == "imas-farmer-natssign.hcl" {
 			stmts = natssignGlobs(t, stmts)
@@ -1045,8 +1059,14 @@ func natssignGlobs(t *testing.T, stmts string) string {
 	t.Helper()
 	blocks := policyBlocks(stmts)
 	want := map[string]string{
-		"transit/keys/+":                                 `["update", "read"]`,
+		"transit/keys/+":                                 `["update", "read", "delete"]`,
 		"transit/keys/+/soft-delete":                     `["delete"]`,
+		"transit/keys/+/config":                          `["update"]`,
+		"transit/keys/nats-operator/config":              `["deny"]`,
+		"transit/keys/nats-operator-signing/config":      `["deny"]`,
+		"transit/keys/nats-sys-account/config":           `["deny"]`,
+		"transit/keys/imas-gateway-jwt/config":           `["deny"]`,
+		"transit/keys/imas-gateway-jwt":                  `["update", "read"]`,
 		"transit/keys/nats-operator/soft-delete":         `["deny"]`,
 		"transit/keys/nats-operator-signing/soft-delete": `["deny"]`,
 		"transit/keys/nats-sys-account/soft-delete":      `["deny"]`,
@@ -1056,6 +1076,13 @@ func natssignGlobs(t *testing.T, stmts string) string {
 		"transit/keys/nats-operator":         `["read"]`,
 		"transit/keys/nats-operator-signing": `["read"]`,
 		"transit/keys/nats-sys-account":      `["read"]`,
+	}
+	// keys/+/config takes deletion_allowed = "true" and nothing else.
+	if !strings.Contains(stmts, "path \"transit/keys/+/config\" {\ncapabilities = [\"update\"]\nallowed_parameters = {\n\"deletion_allowed\" = [\"true\"]\n}\n}") {
+		t.Errorf("imas-farmer-natssign.hcl keys/+/config must allow only deletion_allowed = \"true\"")
+	}
+	if strings.Count(stmts, "allowed_parameters") != 1 {
+		t.Errorf("imas-farmer-natssign.hcl: want exactly one allowed_parameters block")
 	}
 	for path, caps := range want {
 		if got := blocks[`"`+path+`"`]; got != "capabilities = "+caps {
@@ -4015,4 +4042,33 @@ func TestNatssignDeniesGatewayRetire(t *testing.T) {
 	if strings.Count(body, "imas-gateway-jwt/soft-delete") != 1 {
 		t.Error("default gateway key's deny appended twice")
 	}
+}
+
+// saasapi.tenantPurge (S6): null emits no variable, so saasapi's defaults
+// (on, 720h) apply; a set value is emitted as is; a wrong type fails the
+// render.
+func TestSaasapiTenantPurgeEnv(t *testing.T) {
+	for _, tc := range []struct {
+		args           []string
+		enabled, after string
+	}{
+		{nil, "", ""},
+		{[]string{"--set", "saasapi.tenantPurge.enabled=false"}, "false", ""},
+		{[]string{"--set", "saasapi.tenantPurge.enabled=true", "--set", "saasapi.tenantPurge.after=48h"}, "true", "48h"},
+		{[]string{"--set-string", "saasapi.tenantPurge.after=2160h"}, "", "2160h"},
+	} {
+		env := envMap(container(t, find(t, mustRender(t, tc.args...), "Deployment", "t-farmer-saasapi"), "saasapi"))
+		for name, want := range map[string]string{"SAASAPI_TENANT_PURGE_ENABLED": tc.enabled, "SAASAPI_TENANT_PURGE_AFTER": tc.after} {
+			e, ok := env[name]
+			if want == "" && ok {
+				t.Errorf("%v: %s rendered unset: %v", tc.args, name, e)
+			}
+			if want != "" && (!ok || e["value"] != want) {
+				t.Errorf("%v: %s = %v, want %s", tc.args, name, e, want)
+			}
+		}
+	}
+	mustFail(t, "saasapi.tenantPurge.enabled must be true, false or null", "--set-string", "saasapi.tenantPurge.enabled=yes")
+	mustFail(t, "saasapi.tenantPurge.after must be a Go duration", "--set-string", "saasapi.tenantPurge.after=30 days")
+	mustFail(t, "saasapi.tenantPurge.after must be a Go duration", "--set", "saasapi.tenantPurge.after=720")
 }

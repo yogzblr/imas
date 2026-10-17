@@ -71,6 +71,8 @@ type e2eEnv struct {
 	farmerSYS  *nats.Conn
 	farmerSeed []byte
 	transit    *pkitest.Transit
+	farmerDB   *gorm.DB
+	bao        *tenantboxtest.Server
 }
 
 func newE2EEnv(t *testing.T) *e2eEnv {
@@ -100,6 +102,7 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 	}
 	pki.SetDB(pkiDB)
 	t.Cleanup(func() { pki.SetDB(nil) })
+	env.farmerDB = pkiDB
 
 	// Farmer's TLS material and NKey — the config values
 	// pki.ConfigureNats/ProvisionTenant/ConnectSystemAccount read. Farmer
@@ -176,7 +179,7 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 	}
 	t.Setenv("SAASAPI_NATS_NKEY_SEED_FILE", seedFile)
 	t.Setenv("SAASAPI_NATS_USER_JWT", userJWT)
-	setupE2EControlPlaneKeys(t)
+	env.bao = setupE2EControlPlaneKeys(t)
 	cfg, err := LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
@@ -202,7 +205,7 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 // (SAASAPI_BOX_PRIV_FILE, SAASAPI_PLATFORM_BOX_PUB), as its External
 // Secret would deliver them. Farmer's cluster-wide claims go to a Valkey
 // stand-in.
-func setupE2EControlPlaneKeys(t *testing.T) {
+func setupE2EControlPlaneKeys(t *testing.T) *tenantboxtest.Server {
 	t.Helper()
 	bao := tenantboxtest.Start(t)
 	pki.InvalidatePlatformBoxKeys()
@@ -249,6 +252,7 @@ func setupE2EControlPlaneKeys(t *testing.T) {
 	t.Cleanup(vc.Close)
 	pki.SetReplayCacheClient(vc)
 	t.Cleanup(func() { pki.SetReplayCacheClient(nil) })
+	return bao
 }
 
 // observe subscribes farmer's SYS connection (not a queue member, so it
@@ -367,13 +371,16 @@ func e2eOpen(t *testing.T, msg *nats.Msg) json.RawMessage {
 		}
 		return body.Params
 	}
-	deprovision := strings.HasPrefix(msg.Subject, controlplane.SubjectTenantDeprovisionedPrefix)
-	prefix := controlplane.SubjectTenantProvisionedPrefix
-	if deprovision {
-		prefix = controlplane.SubjectTenantDeprovisionedPrefix
+	kind := controlplane.TenantJobProvision
+	switch {
+	case strings.HasPrefix(msg.Subject, controlplane.SubjectTenantDeprovisionedPrefix):
+		kind = controlplane.TenantJobDeprovision
+	case strings.HasPrefix(msg.Subject, controlplane.SubjectTenantPurgedPrefix):
+		kind = controlplane.TenantJobPurge
 	}
+	prefix := kind.ResultPrefix()
 	jobID, _ := controlplane.JobIDFromSubject(msg.Subject, prefix)
-	body, err := e2eKeys.observer.OpenTenantResult(deprovision, jobID, msg.Subject, msg.Data)
+	body, err := e2eKeys.observer.OpenTenantResult(kind, jobID, msg.Subject, msg.Data)
 	if err != nil {
 		t.Fatalf("opening the result on %s as the SaaS API: %v", msg.Subject, err)
 	}

@@ -570,7 +570,7 @@ files/objectstore-policies/saasapi-recipes.json, the same reviewed policy.
   (dict "sid" "FarmerObjects" "user" "farmer" "actions" $rw "resources" (list (printf "arn:aws:s3:::%s/*" $os.jobBucket))))) -}}
 {{- $buckets = append $buckets (dict "name" $os.sproutJWTBucket "statements" (list
   (dict "sid" "FarmerBucket" "user" "farmer" "actions" $listS "resources" (list (printf "arn:aws:s3:::%s" $os.sproutJWTBucket)))
-  (dict "sid" "FarmerSproutJWTs" "user" "farmer" "actions" (list "s3:GetObject" "s3:PutObject") "resources" (list (printf "arn:aws:s3:::%s/*" $os.sproutJWTBucket))))) -}}
+  (dict "sid" "FarmerSproutJWTs" "user" "farmer" "actions" $rw "resources" (list (printf "arn:aws:s3:::%s/*" $os.sproutJWTBucket))))) -}}
 {{- end -}}
 {{- if include "imas-farmer.accountsUseVersity" . -}}
 {{- $b := .Values.accountStore.bucket -}}
@@ -790,9 +790,18 @@ path "{{ .Values.tls.openbao.pkiMount }}/issue/{{ .Values.tls.openbao.role }}" {
 # <kvPath>/tenants/ ("+" matches exactly one path segment: a tenant ID,
 # nothing deeper), and nothing else: no access to <kvPath> itself (the
 # shared legacy keypair and its adoption are gone, security review
-# 2026-10 H3), and no metadata, delete or destroy.
+# 2026-10 H3).
 path "{{ $t.kvMount }}/data/{{ $t.kvPath }}/tenants/+" {
   capabilities = ["create", "update", "read"]
+}
+
+# Erasing an offboarded tenant (S6, internal/pki tenantpurge.go
+# PurgeTenantBoxKeys): delete on a tenant's metadata removes its keypair,
+# every version and the metadata, for good. Only that: no metadata read
+# or list, no soft delete or destroy of single versions, and nothing
+# outside <kvPath>/tenants/ (never the platform keypair).
+path "{{ $t.kvMount }}/metadata/{{ $t.kvPath }}/tenants/+" {
+  capabilities = ["delete"]
 }
 
 # The platform keypair and the control-plane public keys (internal/pki
@@ -1124,6 +1133,14 @@ refuses to render. */}}
 {{- if lt (int $s.replicaCount) 1 -}}
 {{- fail "saasapi.replicaCount must be at least 1" -}}
 {{- end -}}
+{{- with $s.tenantPurge -}}
+{{- if not (or (kindIs "invalid" .enabled) (kindIs "bool" .enabled)) -}}
+{{- fail (printf "saasapi.tenantPurge.enabled must be true, false or null, got %v" .enabled) -}}
+{{- end -}}
+{{- if not (or (kindIs "invalid" .after) (and (kindIs "string" .after) (regexMatch `^([0-9]+(\.[0-9]+)?(h|m|s|ms|us|ns))+$` .after))) -}}
+{{- fail (printf "saasapi.tenantPurge.after must be a Go duration such as 720h, or null, got %v (saasapi refuses one outside 1h..8760h at startup)" .after) -}}
+{{- end -}}
+{{- end -}}
 {{- include "imas-farmer.saasapi.recipes.validate" . -}}
 {{- if $s.operator.enabled -}}
 {{- include "imas-farmer.saasapi.operator.validate" . -}}
@@ -1307,7 +1324,10 @@ silently uncovered. Each signer role is its own.
 {{- if not (regexMatch "^[1-9][0-9]*(ms|s|m)$" (toString $n.timeout)) -}}
 {{- fail (printf "farmer.openbao.natsSign.timeout %q must be a positive whole number of ms, s or m, such as \"15s\" (IMAS_NATSSIGN_TIMEOUT)" (toString $n.timeout)) -}}
 {{- end -}}
-{{- range $k := list "batchMax" "workers" "retiredTenantKeyRetentionDays" -}}
+{{- if hasKey $n "retiredTenantKeyRetentionDays" -}}
+{{- fail "farmer.openbao.natsSign.retiredTenantKeyRetentionDays was removed (S6): farmer destroys an offboarded tenant's Transit keys itself when it purges the tenant's data, after saasapi.tenantPurge.after (default 720h). Set that instead" -}}
+{{- end -}}
+{{- range $k := list "batchMax" "workers" -}}
 {{- $v := get $n $k -}}
 {{- if not (or (kindIs "float64" $v) (kindIs "int64" $v) (kindIs "int" $v)) -}}
 {{- fail (printf "farmer.openbao.natsSign.%s must be a positive whole number, got %v" $k $v) -}}

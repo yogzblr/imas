@@ -333,9 +333,11 @@ func ProvisionTenant(tenantID, name string) error {
 // connections and refuses new ones, effective immediately. Once the
 // lockout is on the bus it retires (soft-deletes) the tenant's two
 // Transit keys, so nothing can sign for the tenant again; an operator can
-// restore them (soft-delete-restore) or purge them after the retention
-// window. It does not delete sprout state or stored JWTs. A failed
-// retire is returned; calling DeprovisionTenant again retries it.
+// restore them (soft-delete-restore) until the tenant's data is purged.
+// The tenant's sprout state, stored JWTs and keys stay until then: the
+// purge (tenantpurge.go, internal.tenant.purge) erases them after the
+// SaaS API's retention delay, or earlier on an operator's request. A
+// failed retire is returned; calling DeprovisionTenant again retries it.
 //
 // It is also the repair for a bus that still holds a live JWT for a
 // deleted tenant (a crash between marking the row and pushing, or a lost

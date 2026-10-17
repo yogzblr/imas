@@ -134,7 +134,8 @@ paths:
       summary: Update a tenant's name or plan
       description: |
         Only `name` and `plan_id` can change; there is no metadata field.
-        At least one must be present. Unknown fields are ignored.
+        At least one must be present. Unknown fields are ignored. A
+        `purged` tenant's record can't be changed (409 `tenant_purged`).
       requestBody:
         required: true
         content:
@@ -150,6 +151,11 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/TenantNotFound" }
+        "409":
+          description: "`tenant_purged`: the tenant's data has been erased; its record is a tombstone."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "500": { $ref: "#/components/responses/InternalError" }
     delete:
       tags: [tenants]
@@ -158,7 +164,9 @@ paths:
       description: |
         Only an `active` or `failed` tenant can be offboarded. Its status
         becomes `offboarding` and `internal.tenant.deprovision` goes to
-        farmer; poll `GET .../status` for `offboarded`.
+        farmer; poll `GET .../status` for `offboarded`. The tenant is locked
+        out at once; its data is erased after the retention delay
+        (`purge_after` in the status), and the tenant becomes `purged`.
       responses:
         "202":
           description: Accepted; offboarding has started.
@@ -171,7 +179,8 @@ paths:
         "404": { $ref: "#/components/responses/TenantNotFound" }
         "409":
           description: |
-            `offboarding_in_progress` (already offboarding or offboarded),
+            `offboarding_in_progress` (already offboarding, offboarded or
+            purged),
             `provisioning_in_progress` (status pending, or a provision job
             still pending; retry once it completes), or
             `tenant_state_changed` (status changed concurrently; retry).
@@ -189,10 +198,14 @@ paths:
       summary: Poll a tenant's lifecycle status
       description: |
         `last_error` is set when the newest provisioning job failed and the
-        tenant is `failed` or `offboarding`. `warning` is set when the
-        newest job succeeded with a warning (for example, offboarding a
-        tenant farmer never provisioned). Both are fixed, caller-safe
-        messages.
+        tenant is `failed` or `offboarding`, or is `offboarded` and the
+        failed job was a purge. `warning` is set when the newest job
+        succeeded with a warning (for example, offboarding a tenant farmer
+        never provisioned). Both are fixed, caller-safe messages.
+        `purge_after` is set for an `offboarded` tenant while automatic
+        purge is on (`SAASAPI_TENANT_PURGE_ENABLED`): when its data is
+        erased, `SAASAPI_TENANT_PURGE_AFTER` (default 720h) after it was
+        offboarded. A `purged` tenant still answers, with no name.
       responses:
         "200":
           description: Current status.
@@ -1136,7 +1149,10 @@ components:
 
     TenantStatus:
       type: string
-      enum: [pending, active, failed, offboarding, offboarded]
+      enum: [pending, active, failed, offboarding, offboarded, purged]
+      description: |
+        `purged`: offboarded, and its data erased (S6); only a tombstone
+        is left, which keeps the ID from being reused. Final.
 
     CreateTenantRequest:
       type: object
@@ -1171,6 +1187,10 @@ components:
         status: { $ref: "#/components/schemas/TenantStatus" }
         last_error: { type: string }
         warning: { type: string }
+        purge_after:
+          type: string
+          format: date-time
+          description: "RFC 3339. Offboarded tenants only, with automatic purge on: when the tenant's data is erased."
 
     CreateEnrollmentKeyRequest:
       type: object

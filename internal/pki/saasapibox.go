@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/yogzblr/imas/internal/controlplane"
 	"github.com/yogzblr/imas/internal/payloadbox"
 )
 
@@ -86,7 +87,7 @@ func (b *SaaSAPIBox) sealPairs() []payloadbox.KeyPair {
 }
 
 // SealRequest seals a Call to farmer (a2f.tenant.provision,
-// a2f.tenant.deprovision or a2f.sprout.action) for method on subject, one
+// a2f.tenant.deprovision, a2f.tenant.purge or a2f.sprout.action) for method on subject, one
 // copy per pinned platform key, and returns its message ID for
 // OpenReply.
 func (b *SaaSAPIBox) SealRequest(purpose, method, subject string, params any) (data []byte, msgID string, err error) {
@@ -106,8 +107,8 @@ func (b *SaaSAPIBox) OpenReply(purpose, method, subject, replyTo string, data []
 	return body, err
 }
 
-// OpenResult opens an asynchronous farmer result (f2a.tenant.provisioned
-// or f2a.tenant.deprovisioned) that arrived on subject, and accepts it
+// OpenResult opens an asynchronous farmer result (f2a.tenant.provisioned,
+// f2a.tenant.deprovisioned or f2a.tenant.purged) that arrived on subject, and accepts it
 // once, within ±payloadbox.DefaultMaxSkew (payloadbox.ErrStale,
 // payloadbox.ErrReplayed otherwise).
 func (b *SaaSAPIBox) OpenResult(purpose, method, subject string, data []byte) (*payloadbox.CallBody, error) {
@@ -154,8 +155,8 @@ func (b *SaaSAPIBox) OpenSproutActionReply(requestID string, data []byte) (*payl
 // result for one job can't be moved onto another's. It is accepted once,
 // within ±payloadbox.DefaultMaxSkew of this clock (payloadbox.ErrStale,
 // payloadbox.ErrReplayed). Every other failure is payloadbox.ErrOpen.
-func (b *SaaSAPIBox) OpenTenantResult(deprovision bool, jobID, subject string, data []byte) (*payloadbox.CallBody, error) {
-	w, err := TenantResultWire(deprovision, jobID)
+func (b *SaaSAPIBox) OpenTenantResult(kind controlplane.TenantJob, jobID, subject string, data []byte) (*payloadbox.CallBody, error) {
+	w, err := TenantResultWire(kind, jobID)
 	if err != nil || w.Subject != subject {
 		return nil, payloadbox.ErrOpen
 	}
