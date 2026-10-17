@@ -14,6 +14,7 @@ func TestNewGatewaySigner_MissingAddr(t *testing.T) {
 
 func TestNewGatewaySigner_MissingToken(t *testing.T) {
 	t.Setenv(EnvOpenBaoAddr, "http://127.0.0.1:1")
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoAuthMethod, AuthMethodToken)
 	t.Setenv(EnvOpenBaoToken, "")
 	if _, err := NewGatewaySigner("imas-gateway-jwt"); !errors.Is(err, ErrNotConfigured) {
@@ -23,6 +24,7 @@ func TestNewGatewaySigner_MissingToken(t *testing.T) {
 
 func TestNewGatewaySigner_UnknownAuthMethod(t *testing.T) {
 	t.Setenv(EnvOpenBaoAddr, "http://127.0.0.1:1")
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoAuthMethod, "carrier-pigeon")
 	if _, err := NewGatewaySigner("imas-gateway-jwt"); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("expected ErrNotConfigured, got %v", err)
@@ -31,6 +33,7 @@ func TestNewGatewaySigner_UnknownAuthMethod(t *testing.T) {
 
 func TestNewGatewaySigner_EmptyKeyName(t *testing.T) {
 	t.Setenv(EnvOpenBaoAddr, "http://127.0.0.1:1")
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoAuthMethod, AuthMethodToken)
 	t.Setenv(EnvOpenBaoToken, "x")
 	if _, err := NewGatewaySigner(""); !errors.Is(err, ErrNotConfigured) {
@@ -43,6 +46,7 @@ func TestGatewaySigner_Sign_WrongTokenRejected(t *testing.T) {
 	ts := srv.start()
 	t.Cleanup(ts.Close)
 	t.Setenv(EnvOpenBaoAddr, ts.URL)
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoTransitMount, srv.mount)
 	t.Setenv(EnvOpenBaoAuthMethod, AuthMethodToken)
 	t.Setenv(EnvOpenBaoToken, "not-the-real-token")

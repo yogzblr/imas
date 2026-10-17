@@ -52,6 +52,10 @@ const (
 
 	// EnvOpenBaoNamespace optionally sets the X-Vault-Namespace header.
 	EnvOpenBaoNamespace = "IMAS_CERTS_OPENBAO_NAMESPACE"
+
+	// EnvOpenBaoAllowInsecure set to true accepts an http:// address
+	// (tests and throwaway installs only).
+	EnvOpenBaoAllowInsecure = "IMAS_CERTS_OPENBAO_ALLOW_INSECURE"
 )
 
 // Recognized values for IMAS_CERTS_OPENBAO_AUTH_METHOD.
@@ -69,6 +73,8 @@ var openBaoEnv = openbao.Env{
 	K8sMount:   EnvOpenBaoK8sMount,
 	K8sJWTPath: EnvOpenBaoK8sJWTPath,
 	Namespace:  EnvOpenBaoNamespace,
+
+	AllowInsecure: EnvOpenBaoAllowInsecure,
 }
 
 var (

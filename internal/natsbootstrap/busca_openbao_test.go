@@ -100,10 +100,11 @@ func readAsStep(t *testing.T, bao *openbaotest.Admin, addr, mount string) string
 		t.Fatalf("creating a token without policies: %v %s", err, raw)
 	}
 	t.Setenv("IMAS_TEST_BUSCA_OPENBAO_ADDR", addr)
+	t.Setenv("IMAS_TEST_BUSCA_OPENBAO_ALLOW_INSECURE", "true")
 	t.Setenv("IMAS_TEST_BUSCA_OPENBAO_TOKEN", r.Auth.ClientToken)
 	ob, err := openbao.NewFromEnv(openbao.Env{
 		Addr: "IMAS_TEST_BUSCA_OPENBAO_ADDR", Token: "IMAS_TEST_BUSCA_OPENBAO_TOKEN",
-		AuthMethod: "IMAS_TEST_BUSCA_OPENBAO_AUTH_METHOD",
+		AuthMethod: "IMAS_TEST_BUSCA_OPENBAO_AUTH_METHOD", AllowInsecure: "IMAS_TEST_BUSCA_OPENBAO_ALLOW_INSECURE",
 	}, openbao.Errors{})
 	if err != nil {
 		t.Fatal(err)

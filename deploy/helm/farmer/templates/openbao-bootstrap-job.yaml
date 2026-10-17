@@ -240,6 +240,10 @@ spec:
               value: {{ include "imas-farmer.openbaoAddr" . | quote }}
             - name: IMAS_NATSBOOT_OPENBAO_AUTH_METHOD
               value: token
+            {{- if include "imas-farmer.openbaoAllowInsecure" . }}
+            - name: IMAS_NATSBOOT_OPENBAO_ALLOW_INSECURE
+              value: "true"
+            {{- end }}
             - name: IMAS_NATSBOOT_OPENBAO_TOKEN_FILE
               value: /handoff/token
             {{- if .Values.openbaoClient.caConfigMap }}

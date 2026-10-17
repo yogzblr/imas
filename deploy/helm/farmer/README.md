@@ -660,8 +660,17 @@ Each OpenBao client runs under its own role and gets exactly one policy.
 | the bootstrap Job's `nats-trust` | `IMAS_NATSBOOT_OPENBAO_*` | none: a 10-minute handoff token | `imas-nats-bootstrap` (file, ephemeral): create and read the three platform keys (exact paths), sign with all three, revoke itself; deleted by the Job |
 | the control-plane keygen Job (`controlPlaneBoxKeys.enabled`, on by default since J.4) | `IMAS_CPBOX_OPENBAO_*` | `imas-controlplane-box-keygen` | `imas-controlplane-box-keygen`: create and read on `.../platform` and `.../saasapi-box`, create, read and update on `.../controlplane-pub` |
 
-- **Shared connection settings.** `openbaoClient.addr`, `caConfigMap` and
-  `authMethod` are shared by all clients. In `authMethod=token`, each
+- **Shared connection settings.** `openbaoClient.addr`, `caConfigMap`,
+  `authMethod` and `allowInsecure` are shared by all clients.
+- **https only.** Every imas OpenBao client refuses an `http://` address
+  unless its `<prefix>OPENBAO_ALLOW_INSECURE` is `true`, which the chart
+  sets only with `openbaoClient.allowInsecure=true` or for the bundled
+  dev-mode OpenBao (`openbao.enabled` with `openbao.server.dev.enabled`
+  and no `openbaoClient.addr`: the eval install, http only). An `http://`
+  `openbaoClient.addr` without it does not render, and NOTES warns
+  whenever plain http is in use. A client also talks to that host only:
+  a redirect to another scheme, host or port is refused before anything
+  is sent, and at most one redirect on the same host is followed. In `authMethod=token`, each
   client reads its own key from `openbaoClient.tokenSecretName`. The
   publisher can use its own Secret (`credentialPublisher.tokenSecretName`),
   and should.
@@ -1649,6 +1658,7 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `tls.certHosts` | `[]` | openbao mode SANs. Empty: the farmer Service's names. |
 | `openbaoClient.addr` | `""` | Empty with `openbao.enabled`: this release's OpenBao. Required otherwise. |
 | `openbaoClient.caConfigMap` / `caKey` | `""` / `ca.crt` | OpenBao's CA (`*_OPENBAO_CACERT`). |
+| `openbaoClient.allowInsecure` | `false` | `true` accepts an `http://` `addr` (`*_OPENBAO_ALLOW_INSECURE=true`; a throwaway install only). Implied for the bundled dev-mode OpenBao. An `http://` `addr` without it does not render. |
 | `openbaoClient.authMethod` | `kubernetes` | Or `token`, which uses `tokenSecretName` with per-client keys. |
 | `openbaoClient.k8sMount` / `k8sAudience` | `kubernetes` / `openbao` | Kubernetes auth mount, and the projected token's audience. |
 | `openbaoTools.image` | `quay.io/openbao/openbao:2.7.1` | The bao CLI, for the bootstrap Job and the CA fetch. |

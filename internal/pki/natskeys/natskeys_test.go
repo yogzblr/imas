@@ -717,6 +717,7 @@ func TestConfigFromEnv(t *testing.T) {
 	// NewTransitKeyStore needs a token for token auth, read by
 	// internal/openbao from the process environment.
 	t.Setenv("IMAS_NATSSIGN_OPENBAO_ADDR", "http://127.0.0.1:1")
+	t.Setenv("IMAS_NATSSIGN_OPENBAO_ALLOW_INSECURE", "true")
 	t.Setenv("IMAS_NATSSIGN_OPENBAO_TOKEN", "")
 	cfg, _ = ConfigFromEnv(EnvPrefixSign, os.Getenv)
 	if _, err := NewTransitKeyStore(cfg); !errors.Is(err, ErrNotConfigured) {

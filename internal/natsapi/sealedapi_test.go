@@ -454,6 +454,7 @@ func TestSealedCLIOverTheBus(t *testing.T) {
 func setupSaaSAPIKeys(t *testing.T, env *sealedEnv) *pki.SaaSAPIBox {
 	t.Helper()
 	t.Setenv(pki.EnvCPBoxOpenBaoAddr, env.bao.URL)
+	t.Setenv(pki.EnvCPBoxOpenBaoAllowInsecure, "true")
 	t.Setenv(pki.EnvCPBoxOpenBaoAuthMethod, "token")
 	t.Setenv(pki.EnvCPBoxOpenBaoToken, tenantboxtest.Token)
 	t.Setenv(pki.EnvCPBoxOpenBaoKVPath, tenantboxtest.BasePath)

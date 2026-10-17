@@ -138,6 +138,7 @@ func newTestGatewaySigner(t *testing.T, srv *mockTransitServer) *GatewaySigner {
 	ts := srv.start()
 	t.Cleanup(ts.Close)
 	t.Setenv(EnvOpenBaoAddr, ts.URL)
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoTransitMount, srv.mount)
 	t.Setenv(EnvOpenBaoAuthMethod, AuthMethodToken)
 	t.Setenv(EnvOpenBaoToken, srv.token)

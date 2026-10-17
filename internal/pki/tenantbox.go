@@ -99,6 +99,10 @@ const (
 	// EnvTenantBoxOpenBaoNamespace optionally sets the X-Vault-Namespace
 	// header.
 	EnvTenantBoxOpenBaoNamespace = "IMAS_TENANTBOX_OPENBAO_NAMESPACE"
+
+	// EnvTenantBoxOpenBaoAllowInsecure set to true accepts an http://
+	// address (tests and throwaway installs only).
+	EnvTenantBoxOpenBaoAllowInsecure = "IMAS_TENANTBOX_OPENBAO_ALLOW_INSECURE"
 )
 
 // Recognized values for IMAS_TENANTBOX_OPENBAO_AUTH_METHOD.
@@ -116,6 +120,8 @@ var tenantBoxOpenBaoEnv = openbao.Env{
 	K8sMount:   EnvTenantBoxOpenBaoK8sMount,
 	K8sJWTPath: EnvTenantBoxOpenBaoK8sJWTPath,
 	Namespace:  EnvTenantBoxOpenBaoNamespace,
+
+	AllowInsecure: EnvTenantBoxOpenBaoAllowInsecure,
 }
 
 // tenantBoxTenantsDir is the path segment under the base path that holds

@@ -211,6 +211,7 @@ func setupE2EControlPlaneKeys(t *testing.T) *tenantboxtest.Server {
 	pki.InvalidatePlatformBoxKeys()
 	t.Cleanup(pki.InvalidatePlatformBoxKeys)
 	t.Setenv(pki.EnvCPBoxOpenBaoAddr, bao.URL)
+	t.Setenv(pki.EnvCPBoxOpenBaoAllowInsecure, "true")
 	t.Setenv(pki.EnvCPBoxOpenBaoAuthMethod, "token")
 	t.Setenv(pki.EnvCPBoxOpenBaoToken, tenantboxtest.Token)
 	t.Setenv(pki.EnvCPBoxOpenBaoKVPath, tenantboxtest.BasePath)

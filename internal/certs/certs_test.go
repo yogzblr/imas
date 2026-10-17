@@ -142,6 +142,7 @@ func setupOpenBaoPKI(t *testing.T) {
 	})
 
 	t.Setenv(EnvOpenBaoAddr, addr)
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoToken, token)
 	t.Setenv(EnvOpenBaoPKIMount, mount)
 	t.Setenv(EnvOpenBaoRole, role)
@@ -342,6 +343,7 @@ func TestObClientKubernetesAuthInvalidRoleOpenBao(t *testing.T) {
 	jwtPath := writeFixtureK8sJWT(t, "default", "imas", "11111111-1111-1111-1111-111111111111")
 
 	t.Setenv(EnvOpenBaoAddr, addr)
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoAuthMethod, AuthMethodKubernetes)
 	t.Setenv(EnvOpenBaoK8sMount, mount)
 	t.Setenv(EnvOpenBaoK8sRole, "does-not-exist")
@@ -385,6 +387,7 @@ func TestObClientKubernetesAuthUnreachableK8sAPIOpenBao(t *testing.T) {
 	jwtPath := writeFixtureK8sJWT(t, "default", "imas", "11111111-1111-1111-1111-111111111111")
 
 	t.Setenv(EnvOpenBaoAddr, addr)
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoAuthMethod, AuthMethodKubernetes)
 	t.Setenv(EnvOpenBaoK8sMount, mount)
 	t.Setenv(EnvOpenBaoK8sRole, "imas-test")
@@ -422,6 +425,7 @@ func TestObClientKubernetesAuthUnreachableK8sAPIOpenBao(t *testing.T) {
 func setupK8sAuthEnv(t *testing.T, addr, jwtPath, role string) {
 	t.Helper()
 	t.Setenv(EnvOpenBaoAddr, addr)
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoAuthMethod, AuthMethodKubernetes)
 	t.Setenv(EnvOpenBaoK8sRole, role)
 	t.Setenv(EnvOpenBaoK8sJWTPath, jwtPath)
@@ -541,6 +545,7 @@ func TestObClientKubernetesLoginMissingToken(t *testing.T) {
 
 func TestNewClientFromEnvMissingK8sRole(t *testing.T) {
 	t.Setenv(EnvOpenBaoAddr, "http://127.0.0.1:8200")
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoAuthMethod, AuthMethodKubernetes)
 	t.Setenv(EnvOpenBaoK8sRole, "")
 	t.Setenv(EnvOpenBaoRole, "pki-role-unused")
@@ -553,6 +558,7 @@ func TestNewClientFromEnvMissingK8sRole(t *testing.T) {
 
 func TestNewClientFromEnvUnknownAuthMethod(t *testing.T) {
 	t.Setenv(EnvOpenBaoAddr, "http://127.0.0.1:8200")
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoAuthMethod, "bogus")
 	t.Setenv(EnvOpenBaoRole, "pki-role-unused")
 
@@ -1019,6 +1025,7 @@ func TestGenCertCAFetchFails(t *testing.T) {
 	defer srv.Close()
 
 	t.Setenv(EnvOpenBaoAddr, srv.URL)
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoToken, "test-token")
 	t.Setenv(EnvOpenBaoPKIMount, "pki")
 	t.Setenv(EnvOpenBaoRole, "test-role")
@@ -1045,6 +1052,7 @@ func TestGenCertIssueFails(t *testing.T) {
 	defer srv.Close()
 
 	t.Setenv(EnvOpenBaoAddr, srv.URL)
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoToken, "test-token")
 	t.Setenv(EnvOpenBaoPKIMount, "pki")
 	t.Setenv(EnvOpenBaoRole, "test-role")
@@ -1075,6 +1083,7 @@ func TestGenCertCertFileUnwritable(t *testing.T) {
 	config.CertFile = filepath.Join(dir, "missing-dir", "cert.pem")
 
 	t.Setenv(EnvOpenBaoAddr, srv.URL)
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoToken, "test-token")
 	t.Setenv(EnvOpenBaoPKIMount, "pki")
 	t.Setenv(EnvOpenBaoRole, "test-role")
@@ -1107,6 +1116,7 @@ func TestGenCertKeyFileUnwritable(t *testing.T) {
 	config.KeyFile = filepath.Join(dir, "missing-dir", "key.pem")
 
 	t.Setenv(EnvOpenBaoAddr, srv.URL)
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoToken, "test-token")
 	t.Setenv(EnvOpenBaoPKIMount, "pki")
 	t.Setenv(EnvOpenBaoRole, "test-role")
@@ -1146,6 +1156,7 @@ func TestRotateTLSCertsLeaseRenewedSkipsReissue(t *testing.T) {
 	defer srv.Close()
 
 	t.Setenv(EnvOpenBaoAddr, srv.URL)
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoToken, "test-token")
 	t.Setenv(EnvOpenBaoPKIMount, "pki")
 	t.Setenv(EnvOpenBaoRole, "test-role")
@@ -1204,6 +1215,7 @@ func TestRotateTLSCertsLeaseRenewalFailsReissues(t *testing.T) {
 	defer srv.Close()
 
 	t.Setenv(EnvOpenBaoAddr, srv.URL)
+	t.Setenv(EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvOpenBaoToken, "test-token")
 	t.Setenv(EnvOpenBaoPKIMount, "pki")
 	t.Setenv(EnvOpenBaoRole, "test-role")

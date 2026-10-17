@@ -196,6 +196,21 @@ nameOverride/fullnameOverride set under the subchart's key.
 {{- end -}}
 {{- end }}
 
+{{/*
+"true" when imas's OpenBao clients may use a plain http:// address
+(*_OPENBAO_ALLOW_INSECURE): openbaoClient.allowInsecure, or this chart's
+own dev-mode OpenBao (openbao.enabled, openbao.server.dev.enabled and no
+openbaoClient.addr), which serves http only and is an eval install.
+Otherwise empty, and the clients refuse http://.
+*/}}
+{{- define "imas-farmer.openbaoAllowInsecure" -}}
+{{- if .Values.openbaoClient.allowInsecure -}}
+true
+{{- else if and (not .Values.openbaoClient.addr) .Values.openbao.enabled (dig "server" "dev" "enabled" false (default dict .Values.openbao)) -}}
+true
+{{- end -}}
+{{- end }}
+
 {{/* PXC host both DSNs use. */}}
 {{- define "imas-farmer.dbHost" -}}
 {{- if .Values.database.host -}}
@@ -256,6 +271,10 @@ gets its own role; the shared parts are address, CA and auth method.
   value: {{ include "imas-farmer.openbaoAddr" .root | quote }}
 - name: {{ .prefix }}_AUTH_METHOD
   value: {{ $c.authMethod | quote }}
+{{- if include "imas-farmer.openbaoAllowInsecure" .root }}
+- name: {{ .prefix }}_ALLOW_INSECURE
+  value: "true"
+{{- end }}
 {{- if $c.caConfigMap }}
 - name: {{ .prefix }}_CACERT
   value: /var/run/secrets/openbao-ca/{{ $c.caKey }}
@@ -972,6 +991,14 @@ explanation rather than deploying something that silently can't work.
 {{- include "imas-farmer.saasapiBox.validate" . -}}
 {{- if not (include "imas-farmer.openbaoAddr" .) -}}
 {{- fail "openbaoClient.addr is required when openbao.enabled=false (farmer's gateway signer, tenant box and the publish Job all need OpenBao)" -}}
+{{- end -}}
+{{- $obAddr := include "imas-farmer.openbaoAddr" . -}}
+{{- if not (or (hasPrefix "https://" (lower $obAddr)) (and (hasPrefix "http://" (lower $obAddr)) (include "imas-farmer.openbaoAllowInsecure" .))) -}}
+{{- if hasPrefix "http://" (lower $obAddr) -}}
+{{- fail (printf "openbaoClient.addr %q is plain http://, which would send OpenBao tokens and tenant keys unencrypted: use https://, or set openbaoClient.allowInsecure=true (a throwaway install only)" $obAddr) -}}
+{{- else -}}
+{{- fail (printf "openbaoClient.addr %q must be an https:// URL" $obAddr) -}}
+{{- end -}}
 {{- end -}}
 {{- if not (has .Values.openbaoClient.authMethod (list "kubernetes" "token")) -}}
 {{- fail "openbaoClient.authMethod must be \"kubernetes\" or \"token\"" -}}

@@ -118,6 +118,7 @@ func New(t testing.TB) *Fake {
 func (f *Fake) SetEnv(t testing.TB, prefix string) {
 	t.Helper()
 	t.Setenv(prefix+"OPENBAO_ADDR", f.URL)
+	t.Setenv(prefix+"OPENBAO_ALLOW_INSECURE", "true")
 	t.Setenv(prefix+"OPENBAO_AUTH_METHOD", "token")
 	t.Setenv(prefix+"OPENBAO_TOKEN", Token)
 	t.Setenv(prefix+"OPENBAO_TRANSIT_MOUNT", "transit")

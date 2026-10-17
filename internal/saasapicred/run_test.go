@@ -124,6 +124,7 @@ func setupJobEnv(t *testing.T, openbaoURL string) jobEnv {
 	t.Setenv("IMAS_NATS_SAASAPI_USER_SEED_FILE", saasFile)
 
 	t.Setenv(openbaokv.EnvOpenBaoAddr, openbaoURL)
+	t.Setenv(openbaokv.EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(openbaokv.EnvOpenBaoKVMount, "")
 	t.Setenv(openbaokv.EnvOpenBaoAuthMethod, openbaokv.AuthMethodToken)
 	t.Setenv(openbaokv.EnvOpenBaoToken, testToken)

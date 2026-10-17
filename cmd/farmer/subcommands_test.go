@@ -59,6 +59,7 @@ func TestRunPreConfigSubcommandControlPlaneBoxKeys(t *testing.T) {
 
 	srv := tenantboxtest.Start(t)
 	t.Setenv(pki.EnvCPBoxOpenBaoAddr, srv.URL)
+	t.Setenv(pki.EnvCPBoxOpenBaoAllowInsecure, "true")
 	t.Setenv(pki.EnvCPBoxOpenBaoAuthMethod, "token")
 	t.Setenv(pki.EnvCPBoxOpenBaoToken, tenantboxtest.Token)
 	t.Setenv(pki.EnvCPBoxOpenBaoKVPath, tenantboxtest.BasePath)

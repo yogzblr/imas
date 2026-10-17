@@ -101,6 +101,13 @@ openbao:
       requests: { cpu: 50m, memory: 128Mi }
       limits: { memory: 512Mi }
 
+# The OpenBao above listens on plain http inside the cluster (tls_disable),
+# so imas's clients must be told to accept it (*_OPENBAO_ALLOW_INSECURE).
+# UAT only: core_test.go checks it is set here and nowhere in the chart
+# defaults.
+openbaoClient:
+  allowInsecure: true
+
 # The token Secret holds a one-hour root-policy token openbao-bootstrap.sh
 # mints for each run, never the root token: the Job revokes it when done
 # (revokeToken, the chart default; owner decision a), and install.sh then

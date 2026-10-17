@@ -277,6 +277,12 @@ func TestValuesMatchLib(t *testing.T) {
 	if dig(v, "openbao", "server", "dev", "enabled") != false {
 		t.Error("openbao.server.dev.enabled must be false: the UAT OpenBao is initialised and unsealed for real")
 	}
+	// Unit T5 (I2): that OpenBao listens on plain http (tls_disable), so
+	// imas's clients refuse it unless told otherwise; the chart default
+	// stays false.
+	if dig(v, "openbaoClient", "allowInsecure") != true {
+		t.Error("values/farmer-uat.yaml must set openbaoClient.allowInsecure: true: its OpenBao is plain http, which farmer's clients refuse otherwise")
+	}
 	if dig(v, "objectStore", "useSSL") != false {
 		t.Error("objectStore.useSSL: RustFS is plain HTTP inside the cluster")
 	}
@@ -682,6 +688,23 @@ func TestFarmerChartRender(t *testing.T) {
 	}
 	if fe["IMAS_NATS_TRUST_DIR"] != "/var/run/imas/nats-trust" || fe["IMAS_NATSSIGN_OPENBAO_ADDR"] == "" {
 		t.Errorf("farmer IMAS_NATS_TRUST_DIR %q, IMAS_NATSSIGN_OPENBAO_ADDR %q", fe["IMAS_NATS_TRUST_DIR"], fe["IMAS_NATSSIGN_OPENBAO_ADDR"])
+	}
+	// Unit T5 (I2): every imas OpenBao client in the release accepts the
+	// UAT's plain-http OpenBao, or farmer, the Jobs and nats-trust stop at
+	// startup.
+	for key, o := range objs {
+		for _, c := range containers(o) {
+			env := envOf(c)
+			for name, addr := range env {
+				prefix, ok := strings.CutSuffix(name, "_OPENBAO_ADDR")
+				if !ok || !strings.HasPrefix(name, "IMAS_") {
+					continue
+				}
+				if env[prefix+"_OPENBAO_ALLOW_INSECURE"] != "true" {
+					t.Errorf("%s container %v: %s=%q without %s_OPENBAO_ALLOW_INSECURE=true", key, c["name"], name, addr, prefix)
+				}
+			}
+		}
 	}
 	if !strings.Contains(mustJSON(t, farmer), `"name":"imas-nats-trust"`) {
 		t.Error("farmer doesn't mount ConfigMap imas-nats-trust")
