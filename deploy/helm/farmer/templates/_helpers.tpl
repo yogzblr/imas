@@ -1315,7 +1315,10 @@ silently uncovered. Each signer role is its own.
 {{- if not (regexMatch "^[1-9][0-9]*(ms|s|m)$" (toString $n.timeout)) -}}
 {{- fail (printf "farmer.openbao.natsSign.timeout %q must be a positive whole number of ms, s or m, such as \"15s\" (IMAS_NATSSIGN_TIMEOUT)" (toString $n.timeout)) -}}
 {{- end -}}
-{{- range $k := list "batchMax" "workers" "retiredTenantKeyRetentionDays" -}}
+{{- if hasKey $n "retiredTenantKeyRetentionDays" -}}
+{{- fail "farmer.openbao.natsSign.retiredTenantKeyRetentionDays was removed (S6): farmer destroys an offboarded tenant's Transit keys itself when it purges the tenant's data, after saasapi.tenantPurge.after (default 720h). Set that instead" -}}
+{{- end -}}
+{{- range $k := list "batchMax" "workers" -}}
 {{- $v := get $n $k -}}
 {{- if not (or (kindIs "float64" $v) (kindIs "int64" $v) (kindIs "int" $v)) -}}
 {{- fail (printf "farmer.openbao.natsSign.%s must be a positive whole number, got %v" $k $v) -}}

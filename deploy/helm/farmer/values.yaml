@@ -600,8 +600,9 @@ farmer:
     # NATS trust chain signer (IMAS_NATSSIGN_*, internal/pki/natskeys):
     # signs every account and user JWT farmer issues with the Transit keys
     # nats-operator-signing, nats-sys-account and nats-tsign-<tenant>,
-    # creates the per-tenant keys at provisioning and soft-deletes them at
-    # offboarding. Policy files/openbao-policies/imas-farmer-natssign.hcl,
+    # creates the per-tenant keys at provisioning, soft-deletes them at
+    # offboarding and destroys them when the tenant's data is purged
+    # (saasapi.tenantPurge). Policy files/openbao-policies/imas-farmer-natssign.hcl,
     # which names the transit mount, so transitMount stays "transit".
     natsSign:
       k8sRole: imas-farmer-natssign
@@ -611,11 +612,6 @@ farmer:
       timeout: 15s
       batchMax: 64
       workers: 4
-      # Offboarded tenants' keys are soft-deleted by farmer and kept this
-      # many days before an operator purges them (README.md, "Purging
-      # retired tenant keys"). Nothing in the chart deletes a key; the
-      # purge runbook reads this value.
-      retiredTenantKeyRetentionDays: 30
   # Extra /etc/imas/farmer keys. Chart-managed keys win.
   extraConfig: {}
   # Never put a raw IMAS_NATS_*_SEED or any IMAS_SAASAPI_CRED_OPENBAO_* here.

@@ -635,7 +635,7 @@ func TestValidationFailures(t *testing.T) {
 		{"natssign other mount", "farmer.openbao.natsSign.transitMount", []string{"--set", "farmer.openbao.natsSign.transitMount=nats"}},
 		{"natssign bad timeout", "farmer.openbao.natsSign.timeout", []string{"--set", "farmer.openbao.natsSign.timeout=15"}},
 		{"natssign zero workers", "farmer.openbao.natsSign.workers must be a positive whole number", []string{"--set", "farmer.openbao.natsSign.workers=0"}},
-		{"natssign fractional retention", "retiredTenantKeyRetentionDays must be a positive whole number", []string{"--set", "farmer.openbao.natsSign.retiredTenantKeyRetentionDays=1.5"}},
+		{"natssign retention removed", "retiredTenantKeyRetentionDays was removed (S6)", []string{"--set", "farmer.openbao.natsSign.retiredTenantKeyRetentionDays=30"}},
 		{"natssign shares gateway role", "is another of farmer's OpenBao roles", []string{"--set", "farmer.openbao.natsSign.k8sRole=imas-farmer-gateway"}},
 		{"publisher signer is farmer's", "is also one of farmer's OpenBao roles", []string{"--set", "credentialPublisher.natsSign.k8sRole=imas-farmer-natssign"}},
 		{"keygen takes publisher signer", "controlPlaneBoxKeys.k8sRole", []string{"--set", "controlPlaneBoxKeys.k8sRole=imas-natssign-publisher"}},

@@ -418,7 +418,7 @@ func TestVersityCreateBucketsJob(t *testing.T) {
 			"farmer":          {"s3:DeleteObject", "s3:GetBucketLocation", "s3:GetObject", "s3:ListBucket", "s3:PutObject"},
 			"saasapi-recipes": {"s3:DeleteObject", "s3:GetBucketLocation", "s3:GetObject", "s3:ListBucket", "s3:PutObject"},
 		},
-		"imas-jobs":        {"farmer": {"s3:DeleteObject", "s3:GetBucketLocation", "s3:GetObject", "s3:ListBucket", "s3:PutObject"}},
+		"imas-jobs": {"farmer": {"s3:DeleteObject", "s3:GetBucketLocation", "s3:GetObject", "s3:ListBucket", "s3:PutObject"}},
 		// Delete since S6: a purge erases the tenant's sprout JWTs.
 		"imas-sprout-jwts": {"farmer": {"s3:DeleteObject", "s3:GetBucketLocation", "s3:GetObject", "s3:ListBucket", "s3:PutObject"}},
 		"imas-accounts": {

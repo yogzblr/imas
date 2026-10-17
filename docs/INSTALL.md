@@ -24,10 +24,12 @@ If you have questions, [open an issue](https://github.com/yogzblr/imas/issues/ne
 5. [Create a tenant and an enrollment key](#create-a-tenant-and-an-enrollment-key)
 6. [Install and enroll a sprout](#install-and-enroll-a-sprout)
 7. [Upload a recipe](#upload-a-recipe)
-8. [Proxies and `NO_PROXY`](#proxies-and-no_proxy)
-9. [The imas CLI](#the-imas-cli)
-10. [Ports](#ports)
-11. [Coming from the single-tenant install](#coming-from-the-single-tenant-install)
+8. [Offboard a tenant and erase its data](#offboard-a-tenant-and-erase-its-data)
+9. [Update sprouts](#update-sprouts)
+10. [Proxies and `NO_PROXY`](#proxies-and-no_proxy)
+11. [The imas CLI](#the-imas-cli)
+12. [Ports](#ports)
+13. [Coming from the single-tenant install](#coming-from-the-single-tenant-install)
 
 ## Components
 
@@ -226,6 +228,11 @@ variables, `BAO_SKIP_VERIFY` included, are ignored.
 
 The policies to create are in
 [`deploy/helm/farmer/README.md`](../deploy/helm/farmer/README.md), "OpenBao".
+farmer's Transit policy must let it destroy an offboarded tenant's two keys
+when it purges the tenant's data (config `deletion_allowed="true"`, then
+delete), and farmer's object store credential needs delete on the sprout JWT
+bucket as well as the recipe and job buckets; see
+[Offboard a tenant and erase its data](#offboard-a-tenant-and-erase-its-data).
 The Transit key setup is in [`deploy/envoy/README.md`](../deploy/envoy/README.md).
 Without `IMAS_CERTS_OPENBAO_*`, place `tls-cert.pem`, `tls-key.pem` and
 `tls-rootca.pem` in `/etc/imas/pki/farmer/` yourself: farmer no longer
@@ -486,6 +493,41 @@ and an error names the rule broken without repeating your recipe back:
 Includes are not checked until the recipe cooks. Uploads and deletes are
 rate-limited per tenant (`429`) and audited (who, what name, which sha256,
 never the content).
+
+## Offboard a tenant and erase its data
+
+```bash
+# With H=(...) as in "Create a tenant and an enrollment key".
+# 1. Offboard: 202, the tenant is locked out of the bus at once.
+curl -s "${H[@]}" -X DELETE https://saasapi.example.internal/v1/tenants/t_mfrggzdfmztwq2lk
+# 2. Poll until "offboarded". purge_after says when its data is erased.
+curl -s "${H[@]}" https://saasapi.example.internal/v1/tenants/t_mfrggzdfmztwq2lk/status
+# {"tenant_id":"t_mfrggzdfmztwq2lk","status":"offboarded","purge_after":"2026-11-16T10:00:00Z"}
+```
+
+After `SAASAPI_TENANT_PURGE_AFTER` (default `720h`, 30 days; Helm
+`saasapi.tenantPurge.after`) saasapi purges the tenant: farmer deletes its
+Valkey keys, its farmer-schema rows, its objects (recipes, recipe audit,
+staged recipes, job output, sprout JWTs) and destroys its OpenBao Transit
+keys; saasapi deletes its enrollment keys, asset links, action batches and
+update policy, and the status becomes `purged`. What stays is a tombstone
+that keeps the tenant ID from being reused and the tenant locked out. A
+purge that fails leaves the tenant `offboarded` with `last_error`, and is
+retried at most daily. A purge cannot be undone.
+
+To erase sooner, an operator calls saasapi's operator plane (Helm
+`saasapi.operator.enabled`) with the operator token:
+
+```bash
+curl -s --cacert ca.crt -H "Authorization: Bearer $OPERATOR_TOKEN" \
+  -X POST https://imas-core-saasapi-operator.imas-core.svc:8443/v1/operator/tenants/t_mfrggzdfmztwq2lk/purge
+# {"tenant_id":"t_mfrggzdfmztwq2lk","job_id":"pj_…","status":"offboarded"}   (202)
+```
+
+`SAASAPI_TENANT_PURGE_ENABLED=false` (Helm `saasapi.tenantPurge.enabled`)
+stops automatic purges; the operator route still works. Details:
+[`api/saasapi.md`](api/saasapi.md#tenants), and the OpenBao side in
+[`OPENBAO-RUNBOOK.md`](OPENBAO-RUNBOOK.md) section 5.3.
 
 ## Update sprouts
 

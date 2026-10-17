@@ -459,28 +459,59 @@ generated from the recovery quorum. With `openbaoBootstrap.revokeToken`
 
 Dev mode (`openbao.server.dev.enabled`) never revokes the dev root token.
 
-### Purging retired tenant keys
+### Erasing an offboarded tenant's data
 
-Offboarding (`DeprovisionTenant`) soft-deletes the tenant's two Transit
-keys after the lock-out push: they can no longer sign, but stay readable
-and restorable (owner decision 2026-10-11 (b)). farmer never hard-deletes
-a key, and its policy can't. An operator purges them after
-`farmer.openbao.natsSign.retiredTenantKeyRetentionDays` (default 30), with
-an admin token:
+FLAG FOR SECURITY REVIEW (S6). Offboarding a tenant (`DELETE
+/v1/tenants/{tenant_id}`) locks it out at once: farmer's
+`DeprovisionTenant` closes its bus connections, pushes a locked-out
+Account JWT and soft-deletes its two Transit keys. Its data is erased
+later, by a purge:
 
-```sh
-days=$(helm get values imas-core -n imas-core -a -o json | jq '.farmer.openbao.natsSign.retiredTenantKeyRetentionDays')
-# For each offboarded tenant <id> whose offboarding is older than $days
-# (saasapi's tenant records say when):
-for k in nats-tsign-<id> nats-tacct-<id>; do
-  bao read -field=soft_deleted transit/keys/$k   # must print true
-  bao write transit/keys/$k/config deletion_allowed=true
-  bao delete transit/keys/$k
-done
-```
+- **When.** saasapi's outbox sweeper starts a purge for a tenant that has
+  been offboarded for `saasapi.tenantPurge.after` (`SAASAPI_TENANT_PURGE_AFTER`,
+  default `720h`, 30 days; `1h` to `8760h`), unless
+  `saasapi.tenantPurge.enabled` is `false`. `GET
+  /v1/tenants/{tenant_id}/status` shows when (`purge_after`). An operator
+  can purge sooner on the operator plane (`saasapi.operator.enabled`):
 
-Within the window, `bao write -f transit/keys/<name>/soft-delete-restore`
-brings a key back.
+  ```sh
+  curl --cacert ca.crt -H "Authorization: Bearer $OPERATOR_TOKEN" \
+    -X POST https://<release>-saasapi-operator.<ns>.svc:8443/v1/operator/tenants/<tenant_id>/purge
+  ```
+
+  202 with the job ID; 409 `not_offboarded` or `purge_in_progress`; 404
+  for an unknown tenant. Poll the tenant's status for the outcome.
+- **What is erased.** Farmer, on the sealed `internal.tenant.purge`
+  subject, in this order: the tenant's Valkey keys (heartbeats and
+  acceptance markers); its rows in every farmer table with a `tenant_id`
+  (props, sprout NKeys and revocations, box keys, sprout JWT index, users
+  and CLI box keys, roles, user roles, cohorts, job status); its objects
+  (`tenants/<id>/` in the recipe bucket, recipes and recipe audit;
+  `sprouts/<id>/`, staged recipes; `jobs/<id>/` in the job bucket;
+  `<id>/` in the sprout JWT bucket); and last its Transit keys,
+  destroyed (`deletion_allowed`, then delete; see the policy notes
+  above). Then saasapi deletes the tenant's enrollment keys, asset links,
+  action batches and items and update policy. Every step deletes by
+  `tenant_id` equality or the exact tenant prefix, in batches; a step that
+  fails stops the run, the tenant stays offboarded with `last_error` in
+  its status, and the sweeper tries again at most once a day (an operator
+  can at once). Re-running finishes a partial run. Farmer writes one
+  audit entry per run (`internal.tenant.purge`: tenant ID, job ID,
+  trigger, counts per category; never names, keys or content).
+- **What stays (the tombstone).** saasapi's `tenants` row (status
+  `purged`, name and plan cleared) and the tenant's `provisioning_jobs`
+  rows; farmer's `pki_tenants` row (deleted, its name replaced by the
+  ID); the tenant's Account JWT in the accounts bucket, re-signed locked
+  out from nothing but its public key and the ID; and the
+  `pushall:<id>` and `purge:<id>` rows of `farmer.job_leases`. They keep
+  the ID from being reused and the tenant locked out on every replica and
+  on a bus node started empty. A purged tenant accepts no new data:
+  every tenant route but `GET` answers 404 or 409 for it.
+- **Grants.** farmer's object store user has delete on the sprout JWT
+  bucket (Versity plan, UAT RustFS policy); farmer's Transit policy
+  allows the key destruction above. A purge cannot be undone: an OpenBao
+  snapshot taken before it is the only way back for the keys
+  ([`docs/OPENBAO-RUNBOOK.md`](../../../docs/OPENBAO-RUNBOOK.md) §5.3).
 
 ## The SaaS API credential hand-off
 
@@ -618,7 +649,7 @@ Each OpenBao client runs under its own role and gets exactly one policy.
 |---|---|---|---|
 | farmer, API certificate (`tls.mode=openbao`) | `IMAS_CERTS_OPENBAO_*` | `imas-farmer-certs` (`tls.openbao.k8sRole`) | `imas-farmer-certs`: `pki/issue/imas-farmer` |
 | farmer, gateway JWT signer | `IMAS_GATEWAY_OPENBAO_*` | `imas-farmer-gateway` | `imas-farmer-gateway`: sign and read on `transit/*/imas-gateway-jwt` only |
-| farmer, NATS signer (P21 slice 1) | `IMAS_NATSSIGN_OPENBAO_*` | `imas-farmer-natssign` (`farmer.openbao.natsSign.k8sRole`) | `imas-farmer-natssign` (file): read the three platform keys, sign with `nats-operator-signing` and `nats-sys-account`, never `nats-operator`; create and read keys on `transit/keys/+` (one path segment, so never `rotate` or `config`), soft-delete on `transit/keys/+/soft-delete` except the platform and gateway keys, sign with `nats-tsign-*` only |
+| farmer, NATS signer (P21 slice 1) | `IMAS_NATSSIGN_OPENBAO_*` | `imas-farmer-natssign` (`farmer.openbao.natsSign.k8sRole`) | `imas-farmer-natssign` (file): read the three platform keys, sign with `nats-operator-signing` and `nats-sys-account`, never `nats-operator`; create and read keys on `transit/keys/+` (one path segment, so never `rotate`), soft-delete on `transit/keys/+/soft-delete` except the platform and gateway keys, destroy (config `deletion_allowed="true"` only, then delete) one-segment keys except the platform and gateway keys (the purge, S6), sign with `nats-tsign-*` only |
 | farmer, tenant box keypairs | `IMAS_TENANTBOX_OPENBAO_*` | `imas-farmer-tenantbox` | `imas-farmer-tenantbox`: KV v2 read/write on `secret/data/imas/tenant-x25519/tenants/+` (one secret per tenant), and read only on `.../platform` and `.../controlplane-pub` (J.1), nothing else |
 | the publish Job | `IMAS_SAASAPI_CRED_OPENBAO_*` | `imas-saasapi-cred-publisher` | `imas-saasapi-cred-publisher` (reviewed copy) |
 | the publish Job, NATS signer | `IMAS_NATSSIGN_OPENBAO_*` | `imas-natssign-publisher` (`credentialPublisher.natsSign.k8sRole`) | `imas-nats-sys-signer` (file): read the three platform keys, sign with `nats-sys-account` only |
@@ -654,40 +685,55 @@ Each OpenBao client runs under its own role and gets exactly one policy.
   through). So `imas-farmer-natssign` uses `transit/keys/+`, which matches
   one path segment and nothing below it. The cost: farmer can create keys
   of any name on the `transit` mount (it can sign with none outside
-  `nats-tsign-*`), and could soft-delete a key another client later adds
-  to that mount; give such a key an exact deny in the policy, or its own
-  mount.
-- **Accepted: farmer can soft-delete another client's Transit key**
-  (owner decision 2, #215; goes to the security review, P3). What a farmer
-  token may do on the `transit` mount, per key name, as OpenBao's ACL
-  answers it (`TestOpenBaoFarmerPolicyKeySet` asserts exactly this table,
-  through `sys/capabilities-self`, and fails if the policy changes it):
+  `nats-tsign-*`), and could soft-delete or destroy a key another client
+  later adds to that mount; give such a key exact denies in the policy, or
+  its own mount.
+- **The purge's Transit grants** (S6, FLAG FOR SECURITY REVIEW). Farmer
+  destroys an offboarded tenant's two keys when it purges the tenant's
+  data ([Erasing an offboarded tenant's data](#erasing-an-offboarded-tenants-data)):
+  `POST transit/keys/<name>/config` with `deletion_allowed` set, then
+  `DELETE transit/keys/<name>`. So `transit/keys/+` also has `delete`, and
+  `transit/keys/+/config` has `update` with `allowed_parameters`
+  `deletion_allowed = ["true"]`: the one parameter, and the one value,
+  OpenBao accepts there from a farmer token. A config call that sets
+  anything else (exportable, plaintext backup, auto-rotation, minimum
+  versions), or `deletion_allowed` as a JSON boolean, is refused 403
+  (checked against OpenBao 2.7.1 by `TestOpenBaoFarmerPolicy`). Exact
+  rules keep the platform keys read only and the gateway key at create and
+  read, and exact denies refuse config on all four.
+- **Accepted: farmer can soft-delete or destroy another client's Transit
+  key** (owner decision 2, #215, widened by S6's purge; goes to the
+  security review, P3). What a farmer token may do on the `transit`
+  mount, per key name, as OpenBao's ACL answers it
+  (`TestOpenBaoFarmerPolicyKeySet` asserts exactly this table, through
+  `sys/capabilities-self`, and fails if the policy changes it):
 
-  | Key | create | read | sign | soft-delete |
-  |---|---|---|---|---|
-  | `nats-operator` | no | yes | no | no (exact deny) |
-  | `nats-operator-signing`, `nats-sys-account` | no | yes | yes | no (exact deny) |
-  | `imas-gateway-jwt` | yes (an existing key is left unchanged) | yes | no | no (exact deny) |
-  | `nats-tsign-<tenant>` | yes | yes | yes | yes |
-  | `nats-tacct-<tenant>` | yes | yes | no | yes |
-  | any other name | yes | yes | no | **yes** |
+  | Key | create | read | sign | soft-delete | config (`deletion_allowed` only) | hard delete |
+  |---|---|---|---|---|---|---|
+  | `nats-operator` | no | yes | no | no (exact deny) | no (exact deny) | no |
+  | `nats-operator-signing`, `nats-sys-account` | no | yes | yes | no (exact deny) | no (exact deny) | no |
+  | `imas-gateway-jwt` | yes (an existing key is left unchanged) | yes | no | no (exact deny) | no (exact deny) | no |
+  | `nats-tsign-<tenant>` | yes | yes | yes | yes | yes | yes |
+  | `nats-tacct-<tenant>` | yes | yes | no | yes | yes | yes |
+  | any other name | yes | yes | no | **yes** | **yes** | **yes** |
 
-  For every name it is refused rotate, config, trim, hard delete, export,
-  backup, restore and soft-delete-restore. So a key another client keeps
-  on this mount without an exact deny here can be soft-deleted by farmer,
-  and then signs nothing for that client until someone with a token other
-  than farmer's restores it (`soft-delete-restore`, within the retention
-  window). The test does that to a key it creates. Keep other clients'
-  keys off this mount, or add an exact
-  `transit/keys/<name>/soft-delete` deny for each to
-  `imas-farmer-natssign.hcl` and a row to the test.
+  For every name it is refused rotate, trim, export, backup, restore and
+  soft-delete-restore. So a key another client keeps on this mount
+  without exact denies here can be soft-deleted by farmer, and then signs
+  nothing for that client until someone with a token other than farmer's
+  restores it (`soft-delete-restore`), or destroyed for good (a snapshot
+  restore is the only way back). The test does both to a key it creates.
+  Keep other clients' keys off this mount, or add exact
+  `transit/keys/<name>/soft-delete` and `transit/keys/<name>/config`
+  denies for each to `imas-farmer-natssign.hcl` and a row to the test.
 - **The NATS policies are files, checked against a real OpenBao.**
   `openbao_policy_test.go` runs them in
   `.github/workflows/natskeys-openbao-realserver.yml`: the bootstrap
   policy creates and signs with the platform keys and can't rotate or
-  reconfigure them; farmer's creates, signs with and soft-deletes tenant
-  keys and is refused rotate, config, hard delete and restore, and its
-  whole per-key-name capability set is pinned (table above); the publish
+  reconfigure them; farmer's creates, signs with, soft-deletes and
+  destroys tenant keys and is refused rotate, any other config and
+  restore, and its whole per-key-name capability set is pinned (table
+  above); the publish
   Job's signs with the SYS key only. They name the `transit` mount, so
   `farmer.openbao.natsSign.transitMount` other than `transit` is refused.
 - **Sharing a CA with the nats chart.** With
@@ -1205,7 +1251,7 @@ RustFS policies (`uat/hub/core/rustfs-setup.sh`):
 
 | User | Secret (`access-key-id`, `secret-access-key` by default) | Grants |
 |---|---|---|
-| `farmer` | `objectStore.credentialsSecret` | recipe and job buckets: list, get, put, delete; sprout JWT bucket: list, get, put |
+| `farmer` | `objectStore.credentialsSecret` | recipe and job buckets: list, get, put, delete; sprout JWT bucket: list, get, put, delete (the purge, S6) |
 | `saasapi-recipes` (with `saasapi.recipes.enabled`) | `saasapi.recipes.credentialsSecret` | recipe bucket: `files/objectstore-policies/saasapi-recipes.json` (list under `tenants/*/recipes/*`, read and write there, put under `tenants/*/recipe-audit/*`) |
 | `accounts-writer` | `accountStore.credentialsSecret` | accounts bucket: list, get, put (no delete) |
 | `accounts-reader` | `versity.accountsReader.credentialsSecret` | accounts bucket: list, get. The DMZ bus's account loader |
@@ -1591,7 +1637,7 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `natsTrust.busFenceUserPub` | `""` | The nats chart's fence user public key (`U...`); set, the bootstrap mints `bus-fence-user.jwt`. |
 | `natsTrust.busLoaderUserPub` | `""` | The nats chart's account loader user public key (`U...`, the public half of its `loader.sysUserSecret` seed); set, the bootstrap mints `bus-loader-user.jwt`, which every bus pod's loader needs. Must differ from `busFenceUserPub`. |
 | `natsTrust.kvCopy.enabled` | `false` | Also copy the trust to `secret/data/platform/imas/nats-trust`. |
-| `farmer.openbao.natsSign.*` | role `imas-farmer-natssign`, `transit`, `15s`, `64`, `4`, `30` | farmer's NATS signer: `k8sRole`, `tokenSecretKey`, `transitMount` (must be `transit`), `timeout`, `batchMax`, `workers` (`IMAS_NATSSIGN_*`), and `retiredTenantKeyRetentionDays` for the purge runbook. |
+| `farmer.openbao.natsSign.*` | role `imas-farmer-natssign`, `transit`, `15s`, `64`, `4` | farmer's NATS signer: `k8sRole`, `tokenSecretKey`, `transitMount` (must be `transit`), `timeout`, `batchMax`, `workers` (`IMAS_NATSSIGN_*`). `retiredTenantKeyRetentionDays` was removed (S6) and fails the render: the purge's delay is `saasapi.tenantPurge.after`. |
 | `credentialPublisher.natsSign.*` | role `imas-natssign-publisher` | The publish Job's NATS signer role and token key. |
 | `openbaoBootstrap.revokeToken` | `true` | Revoke the bootstrap token when done (never in dev mode). |
 | `networkPolicy.external.kubeApi` | `cidrs: []`, `ports: [443, 6443]` | The bootstrap Job's egress to the Kubernetes API. |
@@ -1661,6 +1707,8 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `saasapi.fleetUpdateDispatch.clockSkew` | `""` (30s) | `SAASAPI_FLEET_UPDATE_CLOCK_SKEW`: clock-skew margin of the rollout wave gate, a Go duration up to `5m`. Empty emits no env var. |
 | `saasapi.outboxSweeper.enabled` | `true` | `SAASAPI_OUTBOX_SWEEPER_ENABLED`: re-dispatch outbox work no live pod is dispatching, under row leases (safe on every replica). |
 | `saasapi.outboxSweeper.{interval,provisioningStaleAfter,actionStaleAfter,actionMaxAge,leaseTTL}` / `maxAttempts` | `""` / `null` (30s, 2m, 2m, 30m, 2m / 5) | `SAASAPI_OUTBOX_SWEEP_INTERVAL`, `_PROVISIONING_STALE_AFTER`, `_ACTION_STALE_AFTER`, `_ACTION_MAX_AGE`, `_LEASE_TTL`, `_MAX_ATTEMPTS`. Empty or null emits no env var. See [`docs/api/saasapi.md`](../../../docs/api/saasapi.md#outbox-sweeper). |
+| `saasapi.tenantPurge.enabled` | `null` (on) | `SAASAPI_TENANT_PURGE_ENABLED`: the sweeper erases an offboarded tenant's data after `after`. `false`: only the operator route purges. null emits no env var. See [Erasing an offboarded tenant's data](#erasing-an-offboarded-tenants-data). |
+| `saasapi.tenantPurge.after` | `null` (`720h`) | `SAASAPI_TENANT_PURGE_AFTER`: the retention delay after offboarding, a Go duration, `1h` to `8760h` (saasapi refuses to start otherwise). null emits no env var. |
 | `saasapi.operator.*` | off, port `8443` | The operator plane: TLS Secret, token Secret. See [saasapi's operator plane](#saasapis-operator-plane). |
 | `saasapi.enrollmentKeys.rateLimit.*` | `1` / `5` | `deploy/saasapi/values.rate-limit.yaml`. `null` emits no env var. |
 | `saasapi.recipes.enabled` | `false` | Tenant recipe upload: `SAASAPI_RECIPES_S3_*` from `objectStore.endpoint`/`bucket`/`useSSL` and saasapi's own credential. Off, the recipe routes answer 503. See [Tenant recipe upload](#tenant-recipe-upload). |
@@ -1817,7 +1865,9 @@ from source and no cluster:
   `StringLike` `s3:prefix` condition included). Then, through
   `internal/objectstore`: farmer's key read, wrote, listed and deleted in
   the recipe and job buckets, read, wrote and listed sprout JWTs, and was
-  refused a sprout JWT delete and the accounts bucket; the accounts writer
+  refused a sprout JWT delete (since S6 farmer's statement grants that
+  delete, for the purge; `TestVersityCreateBucketsJob` pins it) and the
+  accounts bucket; the accounts writer
   wrote and listed but was refused a delete and the recipe bucket; the
   reader read and listed but was refused a write and the sprout JWT
   bucket; saasapi's key wrote, conditionally wrote (`If-None-Match`, then

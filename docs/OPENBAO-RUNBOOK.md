@@ -168,14 +168,44 @@ when done (no standing admin, owner decision (a)).
    (`bao token lookup` with it fails).
 5. If a holder's machine kept the token, revoke it: `bao token revoke -self`.
 
-### 5.3 Purge retired tenant keys
+### 5.3 Tenant keys after offboarding: retirement and destruction
 
-Offboarding soft-deletes a tenant's two Transit keys; they stay restorable
-for `retiredTenantKeyRetentionDays` (30). Purging is the admin step in
-`deploy/helm/farmer/README.md`, "Purging retired tenant keys", and it needs
-the same root-token procedure (5.2). Purge only after the retention window and
-only keys the offboarding record names; a purge cannot be undone and a
-snapshot is the only way back.
+FLAG FOR SECURITY REVIEW (S6). Offboarding soft-deletes a tenant's two
+Transit keys (`nats-tsign-<tenant_id>`, `nats-tacct-<tenant_id>`): they can
+no longer sign, and stay restorable (`soft-delete-restore`, with an admin
+token) until the tenant's data is purged. The purge
+(`deploy/helm/farmer/README.md`, "Erasing an offboarded tenant's data")
+runs automatically once the tenant has been offboarded for
+`saasapi.tenantPurge.after` (default `720h`), or earlier when an operator
+asks for it, and farmer destroys both keys as its last step, with its own
+token, no root token needed. The exact calls, per key, as
+`internal/pki/natskeys` `DestroyKey` makes them:
+
+```sh
+bao read transit/keys/nats-tsign-<tenant_id>                         # 404: already gone, done
+bao write transit/keys/nats-tsign-<tenant_id>/config deletion_allowed=true   # sent as the string "true"
+bao delete transit/keys/nats-tsign-<tenant_id>
+```
+
+OpenBao 2.7.1 takes `deletion_allowed` on a soft-deleted key, and answers
+both calls 400 (not 404) for a key that no longer exists, so farmer reads
+the key first and again after a failed call. farmer's policy allows
+`deletion_allowed = "true"` as the only config parameter and value, and
+never on the platform or gateway keys.
+
+- **Purge early.** `POST /v1/operator/tenants/{tenant_id}/purge` on
+  saasapi's operator plane, with the operator token (202 and the job ID).
+  The tenant must be offboarded. Watch `GET /v1/tenants/{tenant_id}/status`
+  for `purged`, or `last_error`.
+- **Keep keys longer.** Raise `saasapi.tenantPurge.after` (at most
+  `8760h`), or set `saasapi.tenantPurge.enabled=false` to purge only on
+  request. Restoring a retired key is possible only before the purge.
+- **What stays after a purge.** No key of the tenant's in Transit. Its
+  tombstone (saasapi's `tenants` row, status `purged`; farmer's deleted
+  `pki_tenants` row; its locked-out Account JWT in the accounts bucket,
+  signed by the operator signing key) keeps it locked out without them.
+- A destroyed key cannot be recovered. A snapshot taken before the purge is
+  the only way back, and restoring one brings the keys back (section 10).
 
 ### 5.4 A recovery-key holder leaves
 
@@ -407,6 +437,13 @@ object store:
    issuer and payload keypair are gone).
 3. Tenant offboardings after the snapshot time: the soft-delete is not in the
    restored data, so repeat the offboarding of those tenants.
+3a. Tenant purges after the snapshot time (saasapi's tenants in status
+   `purged`): the restore brings their Transit keys back, retired or live.
+   Destroy them again with an admin token, for each such tenant and each of
+   `nats-tsign-<tenant_id>` and `nats-tacct-<tenant_id>`: `bao write -f
+   transit/keys/<name>/soft-delete` if not already soft-deleted, then the
+   two calls of section 5.3. The rest of a purged tenant's data is outside
+   OpenBao and stays erased.
 4. Account JWTs in the accounts bucket newer than the snapshot: farmer
    republishes on its reconcile (section 3.3 of the review pack); check the
    loader's accounts match.

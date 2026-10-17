@@ -187,7 +187,30 @@ Accepted, Fix needed (with a note) or Not applicable.
 2. Tenant recipe upload and read are scoped per tenant; templates are
    sandboxed; paths are refused when unclean (REC.1).
 3. Deleting a tenant or sprout revokes its keys and JWTs; the provision and
-   deprovision race is closed (PKI.1, PKI.2).
+   deprovision race is closed (PKI.1, PKI.2). **Owner decision 2026-10-17
+   (walkthrough 3.6 item 3): an offboarded tenant's data is erased after a
+   retention delay; built by unit S6** (`docs/briefs/S6-tenant-erasure.md`).
+   Offboarding still locks the tenant out at once. After
+   `SAASAPI_TENANT_PURGE_AFTER` (default 720h), or earlier through
+   `POST /v1/operator/tenants/{tenant_id}/purge`, a sealed
+   `internal.tenant.purge` job makes farmer delete the tenant's Valkey keys,
+   farmer-schema rows, objects (recipes and recipe audit, staged recipes,
+   job output, sprout JWTs) and destroy its Transit keys, and saasapi then
+   delete its saas rows. Kept: the tombstone (saas `tenants` row as
+   `purged`, `provisioning_jobs`, farmer's deleted `pki_tenants` row, the
+   locked-out Account JWT). What to check: farmer's guards (a tenant its
+   registry shows deprovisioned, never the legacy tenant) run before any
+   delete; every delete is by `tenant_id` equality or an exact tenant
+   prefix (`internal/tenantpurge`, whose inventory test fails on an
+   undecided table, key root or Valkey prefix); a crash at any step leaves
+   the tenant locked out and the purge re-runnable; the audit entry holds
+   counts only. Widened by it: farmer's Transit policy can now destroy a
+   key on its mount (config `deletion_allowed="true"` only, then delete;
+   never the platform or gateway keys), so another client's key without
+   exact denies could be destroyed, not only soft-deleted
+   (`deploy/helm/farmer/README.md`, "Accepted: farmer can soft-delete or
+   destroy another client's Transit key"); farmer's object store user can
+   delete in the sprout JWT bucket. FLAG FOR SECURITY REVIEW.
 4. The fence in the clustered bus fails closed (SCALE.2).
 
 ### 3.7 UAT and Azure credentials (UAT.1, UAT.6, UAT.12, UAT.13, R1, H1 to H6)
@@ -210,11 +233,13 @@ Accepted, Fix needed (with a note) or Not applicable.
 
 D1 to D22 in `docs/design/imas-openbao-signing-design.md`, and these owner
 decisions (2026-10-09 to 2026-10-12): PR #171 questions 1 to 4; farmer may
-soft-delete any Transit key on its mount (accepted; recorded); bootstrap leaves
+soft-delete any Transit key on its mount (accepted; recorded), and since S6
+destroy one, to erase a purged tenant's keys (owner decision 2026-10-17);
+bootstrap leaves
 no standing admin; audit goes to stdout; idle bus connections close but active
 ones stay; object store outage keeps serving the last state; DMZ and core share
 one object store with scoped users; soft-delete with a purge window for
-tenants. If you reverse one, write it in the sign-off as a required change.
+tenants (the purge is farmer's, S6, after `SAASAPI_TENANT_PURGE_AFTER`). If you reverse one, write it in the sign-off as a required change.
 
 ## 5. Commands that help
 
