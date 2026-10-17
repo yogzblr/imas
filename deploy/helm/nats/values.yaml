@@ -113,6 +113,15 @@ loader:
   sysUserSecret: imas-bus-loader-sys-user
   # -- Key holding the seed in that Secret.
   sysUserSeedKey: user.nk
+  # -- bus.tls.mode=openbao only: the ConfigMap in this namespace whose key
+  # ca.crt is the CA the loader verifies its node with
+  # (IMAS_LOADER_CA_FILE). Public data only. The core chart's bootstrap Job
+  # writes it in the core namespace (natsTrust.busCAConfigMapName there,
+  # default imas-bus-ca); copy it here under this name like the trust
+  # (README.md, "NATS trust"). The bus pods wait for it. The loader never
+  # mounts the bus's tls volume, which holds the bus key. In secret mode the
+  # loader mounts ca.crt alone from bus.tls.secretName and this is unused.
+  caConfigMap: imas-bus-ca
   resources:
     requests:
       cpu: 50m

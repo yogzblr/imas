@@ -286,12 +286,9 @@ spec:
               value: {{ printf "tls://127.0.0.1:%d" (int .Values.bus.ports.client) | quote }}
             - name: IMAS_LOADER_NATS_SERVER_NAME
               value: {{ include "imas-nats.bus.serviceFQDN" . | quote }}
+            # loader-ca: ca.crt alone, in either TLS mode.
             - name: IMAS_LOADER_CA_FILE
-              {{- if eq .Values.bus.tls.mode "secret" }}
               value: /var/run/imas/loader-ca/ca.crt
-              {{- else }}
-              value: {{ printf "%s/tls-rootca.pem" $tlsDir | quote }}
-              {{- end }}
             # The SYS user JWT the core bootstrap mints (bus-loader-user.jwt
             # in the trust); the seed from loader.sysUserSecret.
             - name: IMAS_NATS_TRUST_DIR
@@ -341,18 +338,11 @@ spec:
             - name: accounts-reader
               mountPath: /var/run/secrets/imas/accounts-reader
               readOnly: true
-            {{- if eq .Values.bus.tls.mode "secret" }}
+            # The bus CA alone, never the tls volume (the bus key): a
+            # directory mount, not subPath, so a CA update reaches it.
             - name: loader-ca
               mountPath: /var/run/imas/loader-ca
               readOnly: true
-            {{- else }}
-            # openbao mode: the CA farmerbus fetched at start lives only in
-            # its in-memory tls volume, so the loader reads it there
-            # (read-only). That volume also holds the bus key.
-            - name: tls
-              mountPath: {{ $tlsDir }}
-              readOnly: true
-            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -428,6 +418,15 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 1Mi
+        # The CA the bus certificate is issued from, for the loader: public
+        # data, copied into this namespace from the core release's
+        # natsTrust.busCAConfigMapName (README.md, "NATS trust"); the pod
+        # waits for it. The bus key stays in farmerbus's tls volume.
+        - name: loader-ca
+          configMap:
+            name: {{ $ld.caConfigMap }}
+            items:
+              - { key: ca.crt, path: ca.crt }
         {{- if $ob.caConfigMap }}
         - name: openbao-ca
           configMap:

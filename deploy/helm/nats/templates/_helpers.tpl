@@ -286,6 +286,9 @@ node would start, and stay, with no Account but SYS. */ -}}
 {{- if not (regexMatch "^[-._a-zA-Z0-9]+$" (toString $l.sysUserSeedKey)) -}}
 {{- fail (printf "loader.sysUserSeedKey %q is not a valid Secret key" (toString $l.sysUserSeedKey)) -}}
 {{- end -}}
+{{- if and (eq .Values.bus.tls.mode "openbao") (not (regexMatch "^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$" (toString $l.caConfigMap))) -}}
+{{- fail (printf "loader.caConfigMap %q is not a ConfigMap name: in bus.tls.mode=openbao the loader reads the bus CA (key ca.crt) from that ConfigMap, copied from the core release's natsTrust.busCAConfigMapName (README.md, \"NATS trust\")" (toString $l.caConfigMap)) -}}
+{{- end -}}
 {{- $hp := int $l.healthPort -}}
 {{- if or (lt $hp 1) (gt $hp 65535) -}}
 {{- fail (printf "loader.healthPort must be between 1 and 65535, got %v" $l.healthPort) -}}

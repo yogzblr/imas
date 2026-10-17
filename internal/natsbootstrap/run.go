@@ -3,7 +3,11 @@
 // slice 1, docs/briefs/P21-slice1-transit-signer.md §4.2). It creates the
 // three platform NATS keys in OpenBao Transit, mints the public trust
 // chain from them with pki.BootstrapNATSTrust and writes it to the
-// ConfigMap imas-nats-trust, which farmer and the bus mount.
+// ConfigMap imas-nats-trust, which farmer and the bus mount. With
+// IMAS_NATSBOOT_BUS_CA_CONFIGMAP set it also writes the certificate of
+// the PKI mount's issuer (<mount>/cert/ca, the issuing_ca of every
+// certificate the bus's role issues) to that ConfigMap as ca.crt, the CA
+// the bus's account loader verifies its node with (unit S1).
 //
 // It runs as the identity IMAS_NATSBOOT_OPENBAO_*, with a short-lived
 // token the Job's prepare container minted for the ephemeral policy
@@ -32,6 +36,8 @@ package natsbootstrap
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
@@ -75,7 +81,16 @@ const (
 	EnvKVCopy  = natskeys.EnvPrefixBoot + "KV_COPY"
 	EnvKVMount = natskeys.EnvPrefixBoot + "OPENBAO_KV_MOUNT" // default "secret"
 	EnvKVPath  = natskeys.EnvPrefixBoot + "OPENBAO_KV_PATH"  // default DefaultKVPath
+	// EnvBusCAConfigMap names the ConfigMap, in the pod's namespace, that
+	// gets the bus's CA certificate as BusCAKey. Unset: no such step.
+	EnvBusCAConfigMap = natskeys.EnvPrefixBoot + "BUS_CA_CONFIGMAP"
+	// EnvBusCAPKIMount is the PKI mount the bus's role issues from.
+	// Required with EnvBusCAConfigMap.
+	EnvBusCAPKIMount = natskeys.EnvPrefixBoot + "BUS_CA_PKI_MOUNT"
 )
+
+// BusCAKey is the bus CA ConfigMap's one key the nats chart projects.
+const BusCAKey = "ca.crt"
 
 // Defaults for the variables above.
 const (
@@ -230,6 +245,9 @@ func readTokenFile(path string) (string, bool, error) {
 	return tok, true, nil
 }
 
+// bootstrap is the run with a token: it checks every setting, creates the
+// platform Transit keys, writes the trust ConfigMap, then the optional KV
+// copy and, with EnvBusCAConfigMap, the bus CA ConfigMap.
 func bootstrap(ctx context.Context, out io.Writer, kube *kubeClient, cmName string, cfg natskeys.Config, ob *openbao.Client) error {
 	// Settings are checked before anything is created or written.
 	kvCopy := os.Getenv(EnvKVCopy) == "true"
@@ -258,6 +276,19 @@ func bootstrap(ctx context.Context, out io.Writer, kube *kubeClient, cmName stri
 	operatorName := os.Getenv(EnvOperatorName)
 	if operatorName == "" {
 		operatorName = DefaultOperatorName
+	}
+	busCA := os.Getenv(EnvBusCAConfigMap)
+	pkiMount := strings.Trim(os.Getenv(EnvBusCAPKIMount), "/")
+	if busCA != "" {
+		if !configMapNameMatcher.MatchString(busCA) {
+			return fmt.Errorf("%w: %s=%q is not a valid ConfigMap name", errUsage, EnvBusCAConfigMap, busCA)
+		}
+		if busCA == cmName {
+			return fmt.Errorf("%w: %s and %s must name different ConfigMaps", errUsage, EnvBusCAConfigMap, EnvTrustConfigMap)
+		}
+		if !kvPathMatcher.MatchString(pkiMount) {
+			return fmt.Errorf("%w: %s=%q is not a plain mount path (required with %s)", errUsage, EnvBusCAPKIMount, pkiMount, EnvBusCAConfigMap)
+		}
 	}
 
 	ks, err := natskeys.NewTransitKeyStore(cfg)
@@ -297,7 +328,91 @@ func bootstrap(ctx context.Context, out io.Writer, kube *kubeClient, cmName stri
 			fmt.Fprintf(out, "trust copied to KV %s/data/%s\n", mount, path)
 		}
 	}
+
+	if busCA != "" {
+		caPEM, err := readBusCA(ctx, ob, pkiMount)
+		if err != nil {
+			return err
+		}
+		written, err := writeBusCA(ctx, kube, busCA, caPEM)
+		if err != nil {
+			return err
+		}
+		if written {
+			fmt.Fprintf(out, "bus CA configmap %s/%s written from %s/cert/ca\n", kube.namespace, busCA, pkiMount)
+		} else {
+			fmt.Fprintf(out, "bus CA configmap %s/%s is current; nothing written\n", kube.namespace, busCA)
+		}
+	}
 	return nil
+}
+
+// readBusCA returns the PEM certificate of the PKI mount's default
+// issuer, <mount>/cert/ca: exactly the issuing_ca of a certificate the
+// mount issues, for a root and for an intermediate issuer alike
+// (TestBusCAIsIssuingCAOpenBao). The path is unauthenticated, so the
+// handoff token's policy needs no grant for it. It must be one parsable
+// CA certificate.
+func readBusCA(ctx context.Context, ob *openbao.Client, mount string) (string, error) {
+	secret, err := ob.Read(ctx, mount+"/cert/ca", nil)
+	if err != nil {
+		return "", fmt.Errorf("reading the bus CA from %s/cert/ca: %w", mount, err)
+	}
+	var d struct {
+		Certificate string `json:"certificate"`
+	}
+	if err := openbao.DecodeData(secret, &d); err != nil {
+		return "", fmt.Errorf("reading the bus CA from %s/cert/ca: %w", mount, err)
+	}
+	block, rest := pem.Decode([]byte(d.Certificate))
+	if block == nil || block.Type != "CERTIFICATE" || strings.TrimSpace(string(rest)) != "" {
+		return "", fmt.Errorf("%s/cert/ca is not one PEM certificate: does the mount have an issuer?", mount)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return "", fmt.Errorf("%s/cert/ca: %w", mount, err)
+	}
+	if !cert.IsCA {
+		return "", fmt.Errorf("%s/cert/ca is not a CA certificate", mount)
+	}
+	return d.Certificate, nil
+}
+
+// writeBusCA sets key BusCAKey of ConfigMap name to caPEM, creating it
+// when absent and updating it when the PEM changed; other keys and the
+// metadata are kept. It reports whether it wrote. A write that loses a
+// race is retried from a fresh read.
+func writeBusCA(ctx context.Context, kube *kubeClient, name, caPEM string) (bool, error) {
+	for attempt := 0; ; attempt++ {
+		cm, err := kube.getConfigMap(ctx, name)
+		if err != nil {
+			return false, err
+		}
+		switch {
+		case cm == nil:
+			err = kube.createConfigMap(ctx, &configMap{
+				APIVersion: "v1",
+				Kind:       "ConfigMap",
+				Metadata:   map[string]any{"name": name, "namespace": kube.namespace},
+				Data:       map[string]string{BusCAKey: caPEM},
+			})
+		case cm.Data[BusCAKey] == caPEM:
+			return false, nil
+		default:
+			if cm.Data == nil {
+				cm.Data = map[string]string{}
+			}
+			cm.Data[BusCAKey] = caPEM
+			err = kube.updateConfigMap(ctx, cm)
+		}
+		if errors.Is(err, errConflict) && attempt < conflictRetries {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	}
 }
 
 // writeTrust reads the ConfigMap, bootstraps the trust over its data and

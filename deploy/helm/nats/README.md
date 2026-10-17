@@ -146,6 +146,38 @@ For a bus in another cluster, use the core cluster's kubeconfig for the
 changes once bootstrapped (the bootstrap refuses to replace it), so the
 copy only changes when a fence or loader user is added.
 
+### The bus CA (`bus.tls.mode=openbao`)
+
+In `openbao` mode the loader verifies its node's certificate with the CA
+from a second ConfigMap, `loader.caConfigMap` (default `imas-bus-ca`), key
+`ca.crt`. The core chart's bootstrap Job writes it in the core namespace
+under its `natsTrust.busCAConfigMapName` (default `imas-bus-ca`): the PKI
+mount's issuer certificate (`<pki>/cert/ca`), which is the `issuing_ca` of
+the certificate the bus is issued. It holds public data only. Copy it here
+with the trust, reading the **source** name from the core release and
+writing under the **destination** name from this release, so an override
+of either is delivered (a different destination is a rename):
+
+```sh
+src=$(helm -n imas-core get values imas-core --all -o json | jq -r .natsTrust.busCAConfigMapName)
+dst=$(helm -n imas-dmz get values imas-dmz --all -o json | jq -r .loader.caConfigMap)
+kubectl -n imas-core get configmap "$src" -o json \
+  | jq --arg n "$dst" '{apiVersion, kind, data: {"ca.crt": .data["ca.crt"]}, metadata: {name: $n}}' \
+  | kubectl -n imas-dmz apply -f -
+```
+
+The bus pods wait in `ContainerCreating` until it exists, as for the
+trust. In `secret` mode there is no such ConfigMap: the loader mounts
+`ca.crt` alone from `bus.tls.secretName`.
+
+**A CA rotation** (a new issuer on the PKI mount, a new platform) is a
+ConfigMap update with the new PEM: run the core bootstrap Job (any core
+`helm upgrade` with the bootstrap token), which rewrites
+`natsTrust.busCAConfigMapName` when the PEM changed, copy it here again,
+then restart the bus pods. farmerbus is issued a certificate from the new
+issuer at start, and the loader reads the CA file only at start
+(`docs/OPENBAO-RUNBOOK.md`, section 6.6).
+
 ## Seeds
 
 The bus holds no seed of the NATS trust chain (see
@@ -259,12 +291,20 @@ with `accountStore.useSSL=false`, and the credential is the pair in its
 `versity.accountsReader.credentialsSecret` (deploy/helm/farmer README,
 "Versity Gateway"; the core release's NOTES print the values).
 
-Both Secrets and the bus CA reach the `loader` container only; farmerbus
-mounts neither. In `bus.tls.mode=secret` the loader gets `ca.crt` alone
-from the bus TLS Secret. In `openbao` mode the CA exists only in
-farmerbus's in-memory `tls` volume, which also holds the bus key, so the
-loader mounts that volume read-only (see
-[Security review notes](#security-review-notes)).
+The loader container mounts exactly four volumes, all read-only, and
+farmerbus mounts none of the three that are its own:
+
+| Volume | Mounted at | What |
+|---|---|---|
+| `loader-ca` | `/var/run/imas/loader-ca` (`IMAS_LOADER_CA_FILE` is `ca.crt` there) | the bus CA, key `ca.crt` alone: in `bus.tls.mode=openbao` the ConfigMap `loader.caConfigMap` ([The bus CA](#the-bus-ca-bustlsmodeopenbao)); in `secret` mode the bus TLS Secret's `ca.crt` item, never its `tls.key` |
+| `loader-sys-user` | `/var/run/secrets/imas/loader` | the SYS user seed, key `loader.sysUserSeedKey` alone |
+| `accounts-reader` | `/var/run/secrets/imas/accounts-reader` | the read-only accounts credential, its two keys alone |
+| `nats-trust` | `/var/run/imas/nats-trust` | the public trust ConfigMap, for `bus-loader-user.jwt` and the operator keys |
+
+The bus key is in neither mode in the loader: it never mounts the bus's
+`tls` volume, nor `data` or the seeds. `loader-ca` is a directory mount
+(no `subPath`), so a CA update reaches the file; the loader reads it at
+start.
 
 ## Bus TLS
 
@@ -291,7 +331,10 @@ loader mounts that volume read-only (see
 Nothing in farmerbus rotates a cert while it runs. It only reloads on
 SIGHUP, and nothing here sends one. Roll the pods when the cert changes,
 for example with `bus.podAnnotations: {reloader.stakater.com/auto: "true"}`.
-In openbao mode, a restart is the rotation.
+In openbao mode, a restart is the rotation. In openbao mode the loader
+reads the CA from `loader.caConfigMap`, which you copy from the core
+release ([The bus CA](#the-bus-ca-bustlsmodeopenbao)); farmerbus keeps
+its key in its own in-memory `tls` volume.
 
 ## Connection limit
 
@@ -710,6 +753,7 @@ sees that address rather than the node's.
 | `loader.healthPort` | `8081` | `/healthz`, `/readyz`, `/status`. Must differ from every bus port. |
 | `loader.sysUserSecret` | `imas-bus-loader-sys-user` | Existing Secret with the loader's SYS user seed. Required. |
 | `loader.sysUserSeedKey` | `user.nk` | Key of the seed in that Secret. |
+| `loader.caConfigMap` | `imas-bus-ca` | `bus.tls.mode=openbao` only: the ConfigMap in this namespace whose `ca.crt` is the bus CA the loader verifies its node with, copied from the core release's `natsTrust.busCAConfigMapName`. Required in that mode; the pods wait for it. See [The bus CA](#the-bus-ca-bustlsmodeopenbao). |
 | `loader.resources` | 50m CPU and 64Mi requests, 256Mi limit | Container resources. |
 | `loader.securityContext` | non-root, read-only root, no privilege escalation, drop ALL | Container securityContext. |
 | `loader.readinessProbe` | HTTP `/readyz`, every 5s, 3 failures | Ready once the initial load is complete. |
@@ -967,11 +1011,17 @@ rendered openbao-mode config (that chart's README, "Verification status"):
   repairs the bucket). Its S3 credential must be read-only; it checks
   that at start. The bus's network policy gains S3 egress to that one
   endpoint.
-- **openbao mode exposes the bus key to the loader container.** The CA
-  the loader verifies the node with exists only in farmerbus's in-memory
-  `tls` volume, next to the bus key, and the loader mounts it read-only.
-  Same pod and user, so no new principal, but a compromised loader can
-  read the bus key. Secret mode projects `ca.crt` alone.
+- **The loader never sees the bus key** (unit S1, owner decision
+  2026-10-14). In openbao mode it reads the CA from the public ConfigMap
+  `loader.caConfigMap`, which the core bootstrap Job writes from OpenBao
+  PKI and you copy here; the bus keeps issuing its key into its own
+  in-memory `tls` volume, which the loader does not mount. Secret mode
+  projects `ca.crt` alone from the bus TLS Secret. The CA ConfigMap is
+  configuration, not pod state: the loader and the bus stay stateless.
+  Whoever can write that ConfigMap in this namespace chooses the CA the
+  loader trusts for its own node on 127.0.0.1 (a wrong one leaves the pod
+  not Ready); every JWT the loader pushes is still verified against the
+  trusted operator keys.
 - **Cluster routes** (`replicaCount > 1`) carry every tenant's traffic
   and the SYS account's claims updates. They need mutual TLS, a
   certificate naming a route host, and the route password. They are

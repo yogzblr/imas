@@ -18,7 +18,7 @@ silently editing a reviewed policy.
 {{- $farmerSA := include "imas-farmer.farmer.serviceAccountName" . -}}
 {{- $ob := .Values.farmer.openbao -}}
 {{- $pki := .Values.tls.openbao.pkiMount -}}
-{{- $needPKI := or (eq .Values.tls.mode "openbao") $bs.farmerbus.enabled -}}
+{{- $needPKI := include "imas-farmer.bootstrap.needPKI" . -}}
 {{- $kvMounts := list $ob.tenantBox.kvMount $p.kvMount -}}
 {{- if .Values.natsTrust.kvCopy.enabled -}}
 {{- $kvMounts = append $kvMounts "secret" -}}
@@ -87,8 +87,9 @@ spec:
     spec:
       restartPolicy: Never
       # Its own ServiceAccount (nats-trust-rbac.yaml): configmaps create,
-      # and get/update/patch on the trust ConfigMap only. Its token is
-      # mounted in the nats-trust container alone (kube-api volume).
+      # and get/update/patch on the trust (and with PKI the bus CA)
+      # ConfigMap only. Its token is mounted in the nats-trust container
+      # alone (kube-api volume).
       serviceAccountName: {{ $jobName }}
       automountServiceAccountToken: false
       enableServiceLinks: false
@@ -191,8 +192,9 @@ spec:
             {{- end }}
         # 2. `farmer bootstrap-nats-trust` (internal/natsbootstrap): the
         #    three platform Transit keys and the trust ConfigMap, as the
-        #    handoff token, which it revokes and removes. Without the
-        #    token file it only checks the ConfigMap.
+        #    handoff token, which it revokes and removes; with PKI, the
+        #    bus CA ConfigMap too. Without the token file it only checks
+        #    the trust ConfigMap.
         - name: nats-trust
           # The same image, same tag, as the farmer Deployment.
           image: {{ include "imas-farmer.farmer.image" . | quote }}
@@ -224,6 +226,15 @@ spec:
             {{- if .Values.natsTrust.kvCopy.enabled }}
             - name: IMAS_NATSBOOT_KV_COPY
               value: "true"
+            {{- end }}
+            {{- if $needPKI }}
+            # The bus CA (unit S1): <pki>/cert/ca, the issuing_ca of the
+            # bus certificate, as ca.crt of this public ConfigMap, for the
+            # nats chart's loader (loader.caConfigMap there).
+            - name: IMAS_NATSBOOT_BUS_CA_CONFIGMAP
+              value: {{ .Values.natsTrust.busCAConfigMapName | quote }}
+            - name: IMAS_NATSBOOT_BUS_CA_PKI_MOUNT
+              value: {{ $pki | quote }}
             {{- end }}
           {{- with $bs.resources }}
           resources:

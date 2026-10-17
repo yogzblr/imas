@@ -28,3 +28,9 @@ credential in Secret "{{ .Values.accountStore.credentialsSecret }}", and connect
 as the SYS user whose seed is in Secret "{{ .Values.loader.sysUserSecret }}" (its JWT,
 bus-loader-user.jwt, comes from ConfigMap "{{ .Values.natsTrust.configMapName }}"). A pod is not
 Ready until its node holds every Account in the bucket. The bus has no PVC.
+{{- if eq .Values.bus.tls.mode "openbao" }}
+
+The loader verifies its node with the CA in ConfigMap "{{ .Values.loader.caConfigMap }}" (key ca.crt),
+copied here from the core release's natsTrust.busCAConfigMapName, public data only
+(README.md, "The bus CA"); the bus pods wait for it. It never sees the bus key.
+{{- end }}

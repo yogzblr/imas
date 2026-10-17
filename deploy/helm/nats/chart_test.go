@@ -333,6 +333,8 @@ func TestValidationFailures(t *testing.T) {
 		{"refresh fractional headroom", "refreshRateLimit.headroom must be a whole number", []string{"--set", "envoy.refreshRateLimit.headroom=1.5"}},
 		{"refresh burst below interval", "burstSeconds must be >= fillIntervalSeconds", []string{"--set", "envoy.refreshRateLimit.fillIntervalSeconds=10", "--set", "envoy.refreshRateLimit.burstSeconds=5"}},
 		{"refresh max below per-fill", "maxTokens must be >= tokensPerFill", []string{"--set", "envoy.refreshRateLimit.tokensPerFill=50", "--set", "envoy.refreshRateLimit.maxTokens=10"}},
+		{"openbao without loader CA configmap", "loader.caConfigMap \"\" is not a ConfigMap name", []string{"--set", "bus.tls.mode=openbao", "--set", "loader.caConfigMap="}},
+		{"openbao bad loader CA configmap", "loader.caConfigMap \"Bad_Name\" is not a ConfigMap name", []string{"--set", "bus.tls.mode=openbao", "--set", "loader.caConfigMap=Bad_Name"}},
 		{"loader health port on a bus port", "loader.healthPort 8080 is already a bus port", []string{"--set", "loader.healthPort=8080"}},
 		{"bad reconcile interval", "accountStore.reconcileInterval", []string{"--set", "accountStore.reconcileInterval=often"}},
 		{"bad event subject", "accountStore.eventSubject", []string{"--set", "accountStore.eventSubject=imas.>"}},
@@ -975,6 +977,8 @@ func TestNoPersistentVolumeClaim(t *testing.T) {
 	}
 }
 
+// The loader sidecar: its image, command, env, probes, securityContext and
+// the keys its Secret volumes project. Its mounts are TestLoaderMounts.
 func TestLoaderSidecarRendered(t *testing.T) {
 	sts := find(t, mustRender(t), "StatefulSet", "-bus")
 	if c := container(t, sts); c["name"] != "farmerbus" {
@@ -1031,32 +1035,9 @@ func TestLoaderSidecarRendered(t *testing.T) {
 		get(sc, "allowPrivilegeEscalation") != false || get(sc, "capabilities", "drop", 0) != "ALL" {
 		t.Errorf("loader securityContext = %v", sc)
 	}
-	mounts := map[string]bool{}
-	for _, v := range l["volumeMounts"].([]any) {
-		mounts[v.(obj)["name"].(string)] = true
-		if v.(obj)["readOnly"] != true {
-			t.Errorf("loader mount %v is writable", v)
-		}
-	}
-	for _, want := range []string{"nats-trust", "loader-sys-user", "accounts-reader", "loader-ca"} {
-		if !mounts[want] {
-			t.Errorf("loader does not mount %s: %v", want, mounts)
-		}
-	}
-	if mounts["tls"] || mounts["data"] || mounts["nats-seeds"] {
-		t.Errorf("loader mounts more than it needs: %v", mounts)
-	}
-	// The loader's credentials reach the loader only, and each volume
-	// projects only the keys it names.
-	for name := range mountPaths(container(t, sts)) {
-		if name == "loader-sys-user" || name == "accounts-reader" || name == "loader-ca" {
-			t.Errorf("farmerbus mounts the loader's %s", name)
-		}
-	}
 	for name, want := range map[string][]string{
 		"loader-sys-user": {"user.nk"},
 		"accounts-reader": {"access-key-id", "secret-access-key"},
-		"loader-ca":       {"ca.crt"},
 	} {
 		v := volumeByName(sts, name)
 		var keys []string
@@ -1068,21 +1049,11 @@ func TestLoaderSidecarRendered(t *testing.T) {
 		}
 	}
 	for name, secret := range map[string]string{
-		"loader-sys-user": "imas-bus-loader-sys-user", "accounts-reader": "imas-bus-accounts-reader", "loader-ca": "imas-farmerbus-tls",
+		"loader-sys-user": "imas-bus-loader-sys-user", "accounts-reader": "imas-bus-accounts-reader",
 	} {
 		if got := get(volumeByName(sts, name), "secret", "secretName"); got != secret {
 			t.Errorf("volume %s from Secret %v, want %s", name, got, secret)
 		}
-	}
-
-	// openbao mode: the CA is only in farmerbus's in-memory tls volume.
-	sts = find(t, mustRender(t, "--set", "bus.tls.mode=openbao"), "StatefulSet", "-bus")
-	l = namedContainer(t, sts, "loader")
-	if got := envMap(l)["IMAS_LOADER_CA_FILE"]; got != "/var/run/imas/tls/tls-rootca.pem" {
-		t.Errorf("openbao-mode IMAS_LOADER_CA_FILE = %q", got)
-	}
-	if got := mountPaths(l)["tls"]; got != "/var/run/imas/tls" {
-		t.Errorf("openbao-mode loader tls mount = %q", got)
 	}
 
 	// Overrides: its own image, plain HTTP to the store, another port.
@@ -1093,6 +1064,105 @@ func TestLoaderSidecarRendered(t *testing.T) {
 	if get(l, "image") != "example.com/loader:1.2.3" || env["IMAS_LOADER_S3_USE_SSL"] != "false" ||
 		env["IMAS_LOADER_HEALTH_PORT"] != "9091" || !slices.Contains(containerPorts(l), 9091) {
 		t.Errorf("loader overrides not applied: image %v, env %v", get(l, "image"), env)
+	}
+}
+
+// The loader's mounts, in both TLS modes (unit S1): never the bus's tls
+// volume (the bus key), its data or its seeds; the CA alone as
+// loader-ca, at the same path. In openbao mode that is a ConfigMap
+// volume (loader.caConfigMap), a directory mount so a CA update reaches
+// it; in secret mode ca.crt alone from the bus TLS Secret.
+func TestLoaderMounts(t *testing.T) {
+	for _, c := range []struct {
+		mode string
+		args []string
+	}{
+		{"secret", nil},
+		{"openbao", []string{"--set", "bus.tls.mode=openbao"}},
+		{"openbao clustered", append([]string{"--set", "bus.tls.mode=openbao"}, clusteredArgs...)},
+	} {
+		t.Run(c.mode, func(t *testing.T) {
+			sts := find(t, mustRender(t, c.args...), "StatefulSet", "-bus")
+			l := namedContainer(t, sts, "loader")
+			if got := envMap(l)["IMAS_LOADER_CA_FILE"]; got != "/var/run/imas/loader-ca/ca.crt" {
+				t.Errorf("IMAS_LOADER_CA_FILE = %q, want /var/run/imas/loader-ca/ca.crt", got)
+			}
+			mounts := map[string]obj{}
+			for _, v := range l["volumeMounts"].([]any) {
+				m := v.(obj)
+				mounts[m["name"].(string)] = m
+				if m["readOnly"] != true {
+					t.Errorf("loader mount %v is writable", m)
+				}
+				if _, ok := m["subPath"]; ok {
+					t.Errorf("loader mount %v uses subPath", m)
+				}
+			}
+			for _, want := range []string{"nats-trust", "loader-sys-user", "accounts-reader", "loader-ca"} {
+				if mounts[want] == nil {
+					t.Errorf("loader does not mount %s: %v", want, mounts)
+				}
+			}
+			for _, never := range []string{"tls", "data", "nats-seeds", "route-auth", "openbao-auth", "openbao-ca"} {
+				if mounts[never] != nil {
+					t.Errorf("loader mounts %s", never)
+				}
+			}
+			if len(mounts) != 4 {
+				t.Errorf("loader mounts %d volumes, want exactly 4: %v", len(mounts), mounts)
+			}
+			if got := mounts["loader-ca"]["mountPath"]; got != "/var/run/imas/loader-ca" {
+				t.Errorf("loader-ca mounted at %v", got)
+			}
+			// The loader's volumes reach the loader only.
+			for name := range mountPaths(container(t, sts)) {
+				if name == "loader-sys-user" || name == "accounts-reader" || name == "loader-ca" {
+					t.Errorf("farmerbus mounts the loader's %s", name)
+				}
+			}
+			v := volumeByName(sts, "loader-ca")
+			src := "secret"
+			if c.mode != "secret" {
+				src = "configMap"
+			}
+			if v == nil || v[src] == nil {
+				t.Fatalf("loader-ca volume is not a %s volume: %v", src, v)
+			}
+			if len(v) != 2 {
+				t.Errorf("loader-ca volume has more than one source: %v", v)
+			}
+			var keys []string
+			for _, it := range get(v, src, "items").([]any) {
+				if get(it, "key") != get(it, "path") {
+					t.Errorf("loader-ca item %v renames the key", it)
+				}
+				keys = append(keys, get(it, "key").(string))
+			}
+			if !slices.Equal(keys, []string{"ca.crt"}) {
+				t.Errorf("loader-ca projects %v, want [ca.crt]", keys)
+			}
+			if src == "configMap" {
+				if got := get(v, "configMap", "name"); got != "imas-bus-ca" {
+					t.Errorf("loader-ca from ConfigMap %v, want imas-bus-ca", got)
+				}
+				if get(v, "configMap", "optional") != nil {
+					t.Error("loader-ca is optional: the pod must wait for the ConfigMap")
+				}
+			} else if got := get(v, "secret", "secretName"); got != "imas-farmerbus-tls" {
+				t.Errorf("loader-ca from Secret %v, want imas-farmerbus-tls", got)
+			}
+		})
+	}
+
+	// Another name, and the same mounts.
+	sts := find(t, mustRender(t, "--set", "bus.tls.mode=openbao", "--set", "loader.caConfigMap=dmz-bus-ca"), "StatefulSet", "-bus")
+	if got := get(volumeByName(sts, "loader-ca"), "configMap", "name"); got != "dmz-bus-ca" {
+		t.Errorf("loader.caConfigMap override: loader-ca from %v", got)
+	}
+	// Secret mode does not read loader.caConfigMap at all.
+	sts = find(t, mustRender(t, "--set", "loader.caConfigMap="), "StatefulSet", "-bus")
+	if v := volumeByName(sts, "loader-ca"); get(v, "secret", "secretName") != "imas-farmerbus-tls" {
+		t.Errorf("secret mode with no loader.caConfigMap: loader-ca = %v", v)
 	}
 }
 

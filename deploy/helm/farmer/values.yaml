@@ -106,6 +106,15 @@ natsSeeds:
 # ---------------------------------------------------------------------------
 natsTrust:
   configMapName: imas-nats-trust
+  # The bus CA ConfigMap (unit S1): when the bootstrap Job sets up OpenBao
+  # PKI (tls.mode=openbao or openbaoBootstrap.farmerbus.enabled), its
+  # nats-trust step writes the PKI mount's issuer certificate
+  # (<tls.openbao.pkiMount>/cert/ca, the issuing_ca of the bus certificate)
+  # to this ConfigMap in the release namespace as ca.crt, creating it when
+  # absent and updating it when the PEM changed. Public data only. A bus in
+  # bus.tls.mode=openbao needs a copy under the nats chart's
+  # loader.caConfigMap (README.md, "NATS trust").
+  busCAConfigMapName: imas-bus-ca
   # The nats chart's bus fence user public key (U..., from the
   # BUS_FENCE_USER seed ops created for a clustered bus). Set, the
   # bootstrap also mints bus-fence-user.jwt (IMAS_NATSBOOT_BUS_FENCE_USER_PUB).

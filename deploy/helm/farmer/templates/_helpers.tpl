@@ -1319,6 +1319,12 @@ silently uncovered. Each signer role is its own.
 {{- if not (regexMatch "^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$" (toString $t.configMapName)) -}}
 {{- fail (printf "natsTrust.configMapName %q is not a valid ConfigMap name" (toString $t.configMapName)) -}}
 {{- end -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$" (toString $t.busCAConfigMapName)) -}}
+{{- fail (printf "natsTrust.busCAConfigMapName %q is not a valid ConfigMap name" (toString $t.busCAConfigMapName)) -}}
+{{- end -}}
+{{- if eq (toString $t.busCAConfigMapName) (toString $t.configMapName) -}}
+{{- fail "natsTrust.busCAConfigMapName and natsTrust.configMapName must differ: the bus CA and the NATS trust are separate ConfigMaps" -}}
+{{- end -}}
 {{- with $t.busFenceUserPub -}}
 {{- if not (regexMatch "^U[A-Z2-7]{55}$" (toString .)) -}}
 {{- fail (printf "natsTrust.busFenceUserPub %q is not an NKey user public key (U and 55 more base32 characters): the public half of the nats chart's BUS_FENCE_USER seed" (toString .)) -}}
@@ -1412,6 +1418,16 @@ reference is optional: no Secret, no token, and the Job only checks.
 {{- end }}
 - name: HOME
   value: /tmp
+{{- end }}
+
+{{/*
+The OpenBao bootstrap Job sets up PKI (tls.mode=openbao or the nats
+chart's bus role, openbaoBootstrap.farmerbus.enabled): then its nats-trust
+step also writes the bus CA ConfigMap natsTrust.busCAConfigMapName (unit
+S1). True (non-empty) when it does.
+*/}}
+{{- define "imas-farmer.bootstrap.needPKI" -}}
+{{- if or (eq .Values.tls.mode "openbao") .Values.openbaoBootstrap.farmerbus.enabled -}}true{{- end -}}
 {{- end }}
 
 {{/* True (non-empty) when the bootstrap Job revokes its own token:

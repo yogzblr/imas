@@ -88,8 +88,11 @@ READMEs are the full reference; this is the order to do things in.
    (operator, operator signing, SYS account, tenant keys) are OpenBao
    Transit keys the core chart's bootstrap creates, so no seed exists for
    them. In the DMZ namespace, copy ConfigMap `imas-nats-trust` from core
-   and create the account loader's SYS user Secret (and `BUS_FENCE_USER`
-   for a clustered bus only). See "Seeds" in both chart READMEs.
+   (with the bus in `bus.tls.mode=openbao`, also the bus CA ConfigMap
+   `imas-bus-ca`, which core's bootstrap writes; "The bus CA" in the nats
+   chart README) and create the account loader's SYS user Secret (and
+   `BUS_FENCE_USER` for a clustered bus only). See "Seeds" in both chart
+   READMEs.
 2. **Install the core chart**, `deploy/helm/farmer`. It deploys farmer and
    saasapi, and optionally bundled PXC, OpenBao (dev mode) and Valkey for an
    eval. `ci/default-values.yaml` is the eval example and
@@ -230,8 +233,9 @@ systemctl enable --now imas-farmer
 No package or unit ships for farmerbus. It reads the `farmer` config file
 and holds none of farmer's seeds: it needs core's public NATS trust
 (`imas-nats-trust`), and, when clustered, the `BUS_FENCE_USER` seed; its
-account loader (`farmerbus-loader`) needs its own SYS user seed and a
-read-only credential for the accounts bucket. If you run
+account loader (`farmerbus-loader`) needs its own SYS user seed, a
+read-only credential for the accounts bucket and the CA of the bus
+certificate (`IMAS_LOADER_CA_FILE`; never the bus key). If you run
 it under systemd, base a unit on `packaging/systemd/imas-farmer.service`
 with `ExecStart=` pointed at the farmerbus binary. What it needs is in
 [`deploy/helm/nats/README.md`](../deploy/helm/nats/README.md) ("Seeds",

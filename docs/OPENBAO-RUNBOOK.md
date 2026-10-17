@@ -255,6 +255,30 @@ purge protection and the retired-version rule.
   shares are exposed, treat as a root-token compromise: revoke all tokens,
   rekey, and review the audit log from the time the shares were exposed.
 
+### 6.6 The bus CA changes
+
+The DMZ bus in `bus.tls.mode=openbao` is issued its certificate from the
+core PKI mount (`tls.openbao.pkiMount`) at every start, and its account
+loader verifies it with the CA from a ConfigMap (unit S1), never from the
+bus's own TLS volume. When the mount's issuer changes (a new root or
+intermediate, a new platform after 6.3 or 6.4, a dev-mode OpenBao that lost
+its memory), that CA rotation is a ConfigMap update with the new PEM:
+
+1. Run the core bootstrap Job (a core `helm upgrade` with a bootstrap token,
+   section 5.2). Its `nats-trust` step reads `<pki>/cert/ca` and rewrites
+   ConfigMap `natsTrust.busCAConfigMapName` (default `imas-bus-ca`, key
+   `ca.crt`) in the core namespace when the PEM changed; its log says
+   "bus CA configmap ... written".
+2. Copy it to the bus namespace under the nats chart's `loader.caConfigMap`
+   (`deploy/helm/nats/README.md`, "The bus CA"), as for the NATS trust.
+3. Restart the bus pods (`kubectl rollout restart statefulset/<bus>`): each
+   farmerbus is issued a certificate from the new issuer, and each loader
+   re-reads the CA file at start. A pod is Ready again only once its loader
+   has connected and loaded every account.
+
+A restore from a snapshot (6.2) keeps the issuer, so the ConfigMap stays
+valid; check it with step 1, which writes nothing when it is current.
+
 ## 7. Seal change or migration
 
 Moving between seals (for example the static seal used in UAT to Azure Key
@@ -326,6 +350,9 @@ version or topology change. A drill that has not been run is not a backup.
 - `farmer` pods Ready and reading keys through Transit (a new sprout enrols
   and gets a JWT; a `cmd.run` to an enrolled sprout works).
 - The bus loader pods Ready (`accountloader` has loaded every Account).
+- With the bus in `bus.tls.mode=openbao`: the bus CA ConfigMap
+  (`natsTrust.busCAConfigMapName`, and its copy in the bus namespace) holds
+  the PEM of `<pki>/cert/ca` (section 6.6).
 - The audit device is on and shipping.
 - A new snapshot exists after the change.
 

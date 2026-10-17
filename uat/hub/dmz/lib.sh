@@ -25,6 +25,15 @@ DMZ_BUS_TLS_SECRET=imas-farmerbus-tls
 DMZ_TRUST_CONFIGMAP=imas-nats-trust
 DMZ_TRUST_KEYS=(operator.jwt operator.pub operator-signing.pub sys-account.pub sys-account.jwt)
 DMZ_TRUST_OPTIONAL_KEYS=(bus-fence-user.jwt bus-loader-user.jwt)
+# The bus CA (unit S1), needed only when the bus runs in bus.tls.mode=openbao
+# (the UAT runs secret mode): the ConfigMap core's OpenBao bootstrap Job
+# writes in imas-core (SRC, the farmer chart's natsTrust.busCAConfigMapName)
+# is copied here under DST (the nats chart's loader.caConfigMap, which
+# install.sh sets to it). Key ca.crt only. Public data only. Both default
+# to imas-bus-ca and may be overridden from the environment; a different
+# DST is a rename.
+DMZ_BUS_CA_SRC_CONFIGMAP=${DMZ_BUS_CA_SRC_CONFIGMAP:-imas-bus-ca}
+DMZ_BUS_CA_CONFIGMAP=${DMZ_BUS_CA_CONFIGMAP:-imas-bus-ca}
 # The bus client pod port from values-uat.yaml (NetworkPolicy rules name
 # pod ports), which is also the farmer chart's bus.port.
 DMZ_BUS_CLIENT_POD_PORT=5406
@@ -119,6 +128,38 @@ dmz_trust_problem() {
 		printf 'operator.jwt does not list operator-signing.pub as a signing key'
 	elif [[ $(_dmz_jwt_claim "$dir/sys-account.jwt" .sub) != "$sys" || $(_dmz_jwt_claim "$dir/sys-account.jwt" .iss) != "$opsign" ]]; then
 		printf 'sys-account.jwt is not the JWT of sys-account.pub signed by operator-signing.pub'
+	fi
+}
+
+# dmz_is_configmap_name NAME: a valid ConfigMap name (DNS-1123 subdomain).
+dmz_is_configmap_name() {
+	[[ $1 =~ ^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$ ]]
+}
+
+# dmz_render_bus_ca RENDERED: the ConfigMap the rendered bus's loader reads
+# its CA from (volume loader-ca as a configMap: bus.tls.mode=openbao), or
+# nothing when it reads it from the bus TLS Secret (secret mode).
+dmz_render_bus_ca() {
+	awk '
+		/^[[:space:]]*- name: loader-ca[[:space:]]*$/ { v = 1; next }
+		v == 1 && /^[[:space:]]*configMap:[[:space:]]*$/ { v = 2; next }
+		v == 2 && /^[[:space:]]*name:/ { sub(/^[[:space:]]*name:[[:space:]]*/, ""); gsub(/"/, ""); print; exit }
+		{ v = 0 }
+	' "$1"
+}
+
+# dmz_bus_ca_problem FILE: prints why FILE is not one public PEM CA
+# certificate, or nothing when it is. Needs openssl.
+dmz_bus_ca_problem() {
+	local f=$1
+	if [[ ! -s $f ]]; then
+		printf 'ca.crt is missing or empty'
+	elif grep -q 'PRIVATE KEY' "$f"; then
+		printf 'ca.crt holds a private key: the bus CA is public data only'
+	elif [[ $(grep -c -- '-----BEGIN CERTIFICATE-----' "$f") != 1 ]] || ! openssl x509 -in "$f" -noout 2>/dev/null; then
+		printf 'ca.crt is not one PEM certificate'
+	elif ! openssl x509 -in "$f" -noout -ext basicConstraints 2>/dev/null | grep -q 'CA:TRUE'; then
+		printf 'ca.crt is not a CA certificate'
 	fi
 }
 
@@ -260,6 +301,10 @@ bus:
     # The release under test: chart version and image tag are both the
     # release tag without its leading v. Never latest.
     tag: "${version}"
+loader:
+  # bus.tls.mode=openbao only: the bus CA ConfigMap install.sh copies here
+  # (DMZ_BUS_CA_CONFIGMAP).
+  caConfigMap: "${DMZ_BUS_CA_CONFIGMAP}"
 envoy:
   upstreams:
     # farmer's API on the core hub, reached on the core hub's private

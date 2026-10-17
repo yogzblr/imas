@@ -32,7 +32,15 @@
 #                         predates P21: no seed is copied any more
 #                         With neither, the ConfigMap must already exist
 #                         here. Nothing secret crosses: the bus holds no
-#                         trust chain seed
+#                         trust chain seed. A bus in bus.tls.mode=openbao
+#                         (not the UAT's: it runs secret mode) also needs
+#                         the bus CA: ca.crt of the ConfigMap named by
+#                         DMZ_BUS_CA_SRC_CONFIGMAP there (environment,
+#                         default imas-bus-ca: core's
+#                         natsTrust.busCAConfigMapName) is copied here as
+#                         DMZ_BUS_CA_CONFIGMAP (default imas-bus-ca, set as
+#                         the chart's loader.caConfigMap); without this
+#                         option it must already exist here
 # --accounts-reader-dir   a directory with access-key-id and
 #                         secret-access-key: the read-only accounts bucket
 #                         credential the bus's loader sidecar uses (uat/hub/
@@ -164,6 +172,10 @@ else
 	[[ -z $loader_seed || -r $loader_seed ]] || dmz_die "--loader-seed '$loader_seed' is not readable"
 fi
 
+dmz_is_configmap_name "$DMZ_BUS_CA_SRC_CONFIGMAP" || dmz_die "DMZ_BUS_CA_SRC_CONFIGMAP '$DMZ_BUS_CA_SRC_CONFIGMAP' is not a ConfigMap name"
+dmz_is_configmap_name "$DMZ_BUS_CA_CONFIGMAP" || dmz_die "DMZ_BUS_CA_CONFIGMAP '$DMZ_BUS_CA_CONFIGMAP' is not a ConfigMap name"
+[[ $DMZ_BUS_CA_CONFIGMAP != "$DMZ_TRUST_CONFIGMAP" ]] || dmz_die "DMZ_BUS_CA_CONFIGMAP must not be the trust ConfigMap $DMZ_TRUST_CONFIGMAP"
+
 dmz_need jq helm
 [[ -n $render_only ]] || dmz_need kubectl base64 openssl
 dmz_load_endpoints "$endpoints"
@@ -283,6 +295,11 @@ grep -q "image: \"${DMZ_BUS_IMAGE_REPO}:${version}\"" "$workdir/rendered.yaml" |
 if grep -Eq 'image: "?[^"[:space:]]+:latest"?$' "$workdir/rendered.yaml"; then
 	dmz_die "the render pulls a :latest image"
 fi
+# The bus CA ConfigMap the rendered loader reads: set in bus.tls.mode=openbao
+# only, and then it must be the one step 4a writes.
+bus_ca=$(dmz_render_bus_ca "$workdir/rendered.yaml")
+[[ -z $bus_ca || $bus_ca == "$DMZ_BUS_CA_CONFIGMAP" ]] ||
+	dmz_die "the render's loader reads its CA from ConfigMap '$bus_ca', not DMZ_BUS_CA_CONFIGMAP ($DMZ_BUS_CA_CONFIGMAP)"
 dmz_write_outputs "$workdir/dmz.json" "$version" "$expose"
 
 if [[ -n $render_only ]]; then
@@ -350,6 +367,38 @@ else
 	dmz_log "NATS trust: using the existing ConfigMap $DMZ_NAMESPACE/$DMZ_TRUST_CONFIGMAP"
 fi
 rm -rf "$trust_tmp"
+
+# --- 4a. The bus CA (bus.tls.mode=openbao only) ----------------------------
+# Unit S1: in openbao mode the loader verifies its node with the CA from a
+# ConfigMap, never from the bus's tls volume (which holds the bus key).
+# Core's bootstrap Job writes it (imas-core/$DMZ_BUS_CA_SRC_CONFIGMAP); this
+# copies ca.crt alone, checked to be one public CA certificate, under the
+# name the chart was given (loader.caConfigMap, $DMZ_BUS_CA_CONFIGMAP).
+# Secret mode (the UAT's) has no such ConfigMap: the loader mounts ca.crt of
+# the bus TLS Secret.
+if [[ -n $bus_ca ]]; then
+	ca_tmp=$(mktemp -d "${TMPDIR:-/tmp}/uat-dmz-busca.XXXXXX")
+	cleanup_dirs+=("$ca_tmp")
+	if [[ -n $seeds_kubeconfig ]]; then
+		dmz_log "bus CA: copying ConfigMap $seeds_namespace/$DMZ_BUS_CA_SRC_CONFIGMAP from the core cluster as $DMZ_BUS_CA_CONFIGMAP"
+		cm=$(kubectl --kubeconfig "$seeds_kubeconfig" -n "$seeds_namespace" get configmap "$DMZ_BUS_CA_SRC_CONFIGMAP" -o json) ||
+			dmz_die "could not read ConfigMap $seeds_namespace/$DMZ_BUS_CA_SRC_CONFIGMAP on the core cluster (core's OpenBao bootstrap Job writes it when it sets up PKI)"
+		jq -j '.data["ca.crt"] // empty' <<<"$cm" >"$ca_tmp/ca.crt"
+		problem=$(dmz_bus_ca_problem "$ca_tmp/ca.crt")
+		[[ -z $problem ]] || dmz_die "ConfigMap $seeds_namespace/$DMZ_BUS_CA_SRC_CONFIGMAP on the core cluster: $problem"
+		kc -n "$DMZ_NAMESPACE" create configmap "$DMZ_BUS_CA_CONFIGMAP" "--from-file=ca.crt=$ca_tmp/ca.crt" \
+			--dry-run=client -o yaml | kc apply -f - >/dev/null
+		kc -n "$DMZ_NAMESPACE" label configmap "$DMZ_BUS_CA_CONFIGMAP" imas.io/purpose=imas-uat --overwrite >/dev/null
+	else
+		cm=$(kc -n "$DMZ_NAMESPACE" get configmap "$DMZ_BUS_CA_CONFIGMAP" -o json 2>/dev/null) ||
+			dmz_die "ConfigMap $DMZ_NAMESPACE/$DMZ_BUS_CA_CONFIGMAP not found: the bus runs bus.tls.mode=openbao, so pass --seeds-from-kubeconfig to copy core's $DMZ_BUS_CA_SRC_CONFIGMAP (deploy/helm/nats/README.md, \"NATS trust\")"
+		jq -j '.data["ca.crt"] // empty' <<<"$cm" >"$ca_tmp/ca.crt"
+		problem=$(dmz_bus_ca_problem "$ca_tmp/ca.crt")
+		[[ -z $problem ]] || dmz_die "ConfigMap $DMZ_NAMESPACE/$DMZ_BUS_CA_CONFIGMAP: $problem (copy core's again: --seeds-from-kubeconfig)"
+		dmz_log "bus CA: using the existing ConfigMap $DMZ_NAMESPACE/$DMZ_BUS_CA_CONFIGMAP"
+	fi
+	rm -rf "$ca_tmp"
+fi
 
 # --- 4b. The loader's Secrets ----------------------------------------------
 # apply_loader_secret NAME KEY=FILE...: one Secret from files; contents

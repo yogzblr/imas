@@ -113,8 +113,8 @@ uat/hub/dmz/install.sh --kubeconfig dmz.kubeconfig --endpoints endpoints.json \
    image is the chart's `envoyproxy/envoy:v1.35.3`, not an imas image,
    pinned by digest in `values-uat.yaml` (`envoy.image.digest`).
 2. **Writes the run's values and manifests** into the work directory:
-   `values-run.yaml` (image tag, farmer upstream, NetworkPolicy egress to
-   core), `values-accounts.yaml` (the accounts bucket endpoint and the bus
+   `values-run.yaml` (image tag, the loader's bus CA ConfigMap name,
+   farmer upstream, NetworkPolicy egress to core), `values-accounts.yaml` (the accounts bucket endpoint and the bus
    egress to it), `manifests.yaml` (two Certificates, two Services, one
    NetworkPolicy), then renders the chart offline into `rendered.yaml` and
    refuses a render that runs another farmerbus image or any `:latest`.
@@ -141,6 +141,19 @@ uat/hub/dmz/install.sh --kubeconfig dmz.kubeconfig --endpoints endpoints.json \
    naming `sys-account.pub`, and the SYS account JWT signed by
    `operator-signing.pub`. With neither option the ConfigMap must already
    exist here and pass the same checks.
+   **The bus CA** (unit S1) is copied only when the bus runs in
+   `bus.tls.mode=openbao`, which install.sh reads from its render (the
+   loader's `loader-ca` volume is then a ConfigMap). The UAT runs `secret`
+   mode, so a UAT run copies nothing here; the loader reads `ca.crt` of
+   `imas-farmerbus-tls`. In `openbao` mode, `--seeds-from-kubeconfig`
+   copies key `ca.crt` alone, public data only, from ConfigMap
+   `DMZ_BUS_CA_SRC_CONFIGMAP` in core (core's
+   `natsTrust.busCAConfigMapName`) to `DMZ_BUS_CA_CONFIGMAP` here, after
+   checking it is one CA certificate with no private key; `values-run.yaml`
+   sets the chart's `loader.caConfigMap` to that name. Both variables come
+   from the environment and default to `imas-bus-ca`; a different
+   destination is a rename. Without the option the ConfigMap must already
+   exist here and pass the same check.
    Then **the bus loader's two Secrets** (P21 slice 2; the bus has no PVC):
    `imas-bus-accounts-reader` from `--accounts-reader-dir` (the read-only
    accounts credential `uat/hub/core/rustfs-setup.sh` leaves in

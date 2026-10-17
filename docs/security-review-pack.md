@@ -101,10 +101,13 @@ Accepted, Fix needed (with a note) or Not applicable.
 ### 3.3 Stateless bus and farmer (P21 slices 2 and 3)
 
 1. The DMZ bus loader reads the accounts bucket with a read-only credential
-   (D22) and, in OpenBao TLS mode, can read the bus TLS private key (C6).
+   (D22). In OpenBao TLS mode it could read the bus TLS private key (C6);
+   owner decision 2026-10-14: not accepted, fixed by unit S1, where the
+   loader reads the CA from a public ConfigMap (`loader.caConfigMap`,
+   written by the core bootstrap Job) and never mounts the bus TLS volume
+   in either mode (`deploy/helm/nats/chart_test.go`, `TestLoaderMounts`).
    Confirm the credential cannot list or read any other bucket
-   (`validate-object-store.sh`) and decide if reading the bus TLS key is
-   acceptable for a component in the DMZ.
+   (`validate-object-store.sh`).
 2. A compromised bus node cannot publish an Account JWT: accounts are
    verified against the operator key before use and the rank rule
    (`internal/accountrank`) refuses an older JWT. A forged "newer" JWT must

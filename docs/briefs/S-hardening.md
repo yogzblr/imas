@@ -43,8 +43,11 @@ Facts on main (2026-10-14), verify first:
   (`IMAS_LOADER_CA_FILE=/var/run/imas/loader-ca/ca.crt`). In `openbao` mode it
   mounts the whole in-memory `tls` volume (`$tlsDir`) read-only, which holds the
   bus key, and reads `$tlsDir/tls-rootca.pem`.
-- In `openbao` mode the bus writes the issuing CA of the certificate OpenBao
-  issued (`internal/certs/tls.go`, `issuing_ca`) to `tls-rootca.pem`.
+- In `openbao` mode the bus writes the PKI mount's CA certificate
+  (`internal/certs/tls.go` `fetchCACertPEM`, `<mount>/ca/pem`) to
+  `tls-rootca.pem`; it is the same certificate as the `issuing_ca` of the
+  certificate OpenBao issues it (pinned by
+  `internal/natsbootstrap/busca_openbao_test.go`).
 - The core bootstrap Job writes the public trust ConfigMap
   (`natsTrust.configMapName`, default `imas-nats-trust`); its RBAC
   (`deploy/helm/farmer/templates/nats-trust-rbac.yaml`) allows `create` on
@@ -54,36 +57,43 @@ Facts on main (2026-10-14), verify first:
 
 Build:
 
-1. **New value** `bus.loader.caConfigMap` (nats chart), default `imas-bus-ca`:
+1. **New value** `loader.caConfigMap` (nats chart; the loader's values are
+   the top-level `loader` block on main), default `imas-bus-ca`:
    the ConfigMap, in the bus's namespace, with key `ca.crt`. Used only in
    `openbao` mode. In `secret` mode nothing changes: the loader already
    mounts only `ca.crt` of the TLS Secret.
 2. **nats chart, `openbao` mode:** the loader's `loader-ca` volume is a
-   `configMap` volume of `bus.loader.caConfigMap`, projecting only `ca.crt`,
+   `configMap` volume of `loader.caConfigMap`, projecting only `ca.crt`,
    mounted read-only as a directory (never `subPath`, which would not receive
    a CA rotation) at `/var/run/imas/loader-ca`; `IMAS_LOADER_CA_FILE` is
    `/var/run/imas/loader-ca/ca.crt` in both modes. The loader container no
    longer mounts `tls`. The bus pod waits for the ConfigMap the way it waits
-   for `nats-trust` (same init pattern; the message names the ConfigMap).
+   for `nats-trust`: a non-optional `configMap` volume, so the kubelet holds
+   the pod in `ContainerCreating` with an event naming the ConfigMap (main
+   has no init container for this).
 3. **farmer chart, bootstrap Job:** when OpenBao PKI is in use
-   (`openbao.enabled` and the PKI mount the bus role issues from), the Job
-   writes the ConfigMap named by a new value `natsTrust.busCAConfigMapName`
-   (default `imas-bus-ca`) in the core namespace, with `ca.crt` set to the PEM
-   OpenBao returns as `issuing_ca` for the bus role's issuer (read the
-   issuer certificate from `pki/cert/ca`, or `pki/cert/ca_chain` when the
-   mount's issuer is an intermediate; the test below pins which bytes equal
-   what an issued certificate's `issuing_ca` carries; if they differ, use the
-   one that equals it). The Job creates it when absent and updates it when
-   the PEM changed. Add `resourceNames` for the new name to the trust RBAC
-   (`get`, `update`, `patch`); `create` is already allowed. Nothing else
-   changes in the Job's token handling.
+   (`openbao.enabled` and the Job sets up the PKI mount the bus role issues
+   from: `tls.mode=openbao` or `openbaoBootstrap.farmerbus.enabled`), the
+   Job's `nats-trust` step (`farmer bootstrap-nats-trust`,
+   `internal/natsbootstrap`, the Job's only container with Kubernetes API
+   credentials) writes the ConfigMap named by a new value
+   `natsTrust.busCAConfigMapName` (default `imas-bus-ca`) in the core
+   namespace, with `ca.crt` set to the PEM of `<pki>/cert/ca`, which equals
+   the `issuing_ca` of a certificate the mount issues for a root and for an
+   intermediate issuer alike (`cert/ca_chain` adds the root for an
+   intermediate and differs; the test below pins this). `cert/ca` is
+   unauthenticated, so the handoff token's policy gains nothing. The step
+   creates the ConfigMap when absent and updates it when the PEM changed.
+   Add `resourceNames` for the new name to the trust RBAC (`get`, `update`,
+   `patch`), only when the step is rendered; `create` is already allowed.
+   Nothing else changes in the Job's token handling.
 4. **Copy step:** wherever the NATS trust ConfigMap is copied to the bus
    namespace or the DMZ hub (`uat/hub` scripts, `deploy/helm/nats/README.md`,
    `deploy/helm/farmer/README.md` "NATS trust"), copy the CA ConfigMap as well
    when the bus runs in `openbao` mode, with the same wording ("public data
    only"). The two names are two values that default to the same string
    (`natsTrust.busCAConfigMapName` in the farmer chart, the source;
-   `bus.loader.caConfigMap` in the nats chart, the destination). The copy
+   `loader.caConfigMap` in the nats chart, the destination). The copy
    reads the **source** name from the farmer release's value and writes
    under the **destination** name from the nats release's value, so an
    override of either is delivered (a different destination name is a
@@ -108,12 +118,32 @@ Tests (the repo's chart test pattern):
   covers `secret` mode so that `openbao` mode is no longer untested.
 - farmer chart: the bootstrap Job renders the ConfigMap step and the RBAC rule
   with the new name; with OpenBao PKI off the step is absent.
-- A Job-script test (the repo's script-test pattern, fake `bao` and `kubectl`)
+- A step test with a fake OpenBao and a fake Kubernetes API (the pattern of
+  `internal/natsbootstrap/run_test.go`, since the step is Go, not a script)
   that the step writes the PEM, updates on change, and does nothing on no
   change.
 - A Go test that the PEM the step reads equals the `issuing_ca` a certificate
   issued from the same mount carries (use `internal/certs`'s test server or
   `openbaotest`; if neither can answer both calls, extend the fake).
+
+Brief corrections (applied by S1, decided by the code on main):
+
+- The value is `loader.caConfigMap`, not `bus.loader.caConfigMap`: the
+  loader's values are the top-level `loader` block.
+- The bus writes `<mount>/ca/pem` to `tls-rootca.pem`, not `issuing_ca`;
+  the test shows it is the same certificate.
+- No init container waits for `nats-trust` on main; the kubelet does, for a
+  non-optional `configMap` volume, and the CA ConfigMap works the same way.
+- The Job step is Go in `farmer bootstrap-nats-trust`, not a shell step with
+  `bao` and `kubectl`: the Job's `bao` image has no `kubectl`, and its
+  Kubernetes token is mounted in `nats-trust` alone, which this unit must
+  not change. Its test therefore uses the Go fakes, not fake binaries.
+- `<pki>/cert/ca` is always the right read; `cert/ca_chain` never equals
+  `issuing_ca` for an intermediate whose chain was imported.
+- The UAT script learns the bus's TLS mode from its own render (the
+  loader's `loader-ca` volume is a ConfigMap only in `openbao` mode) and
+  passes `DMZ_BUS_CA_CONFIGMAP` to the chart as `loader.caConfigMap`.
+- `docs/OPENBAO-RUNBOOK.md` section 6 had no CA entry; S1 adds 6.6.
 
 Search gate: `loader-ca`, `tls-rootca.pem`, `IMAS_LOADER_CA_FILE`,
 `imas-nats-trust`, `DMZ_TRUST_CONFIGMAP`, `busCAConfigMapName`,

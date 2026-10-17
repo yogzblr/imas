@@ -2,10 +2,16 @@ package natsbootstrap
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
 	"io"
 	"maps"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -16,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
@@ -140,6 +147,15 @@ type openBaoFront struct {
 	revoked  []string // tokens revoked
 	kv       map[string]map[string]any
 	kvWrites int
+	caPEM    string // what pki/cert/ca answers; "" is a 404
+	caReads  int
+}
+
+// setCA sets the PEM pki/cert/ca serves.
+func (o *openBaoFront) setCA(pemText string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.caPEM = pemText
 }
 
 func (o *openBaoFront) handler(transit *natskeystest.Fake) http.Handler {
@@ -152,6 +168,20 @@ func (o *openBaoFront) handler(transit *natskeystest.Fake) http.Handler {
 			o.revoked = append(o.revoked, tok)
 			o.mu.Unlock()
 			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		// The PKI mount's issuer certificate, unauthenticated as in
+		// OpenBao: any token, or none, reads it.
+		if r.URL.Path == "/v1/pki/cert/ca" && r.Method == http.MethodGet {
+			o.mu.Lock()
+			defer o.mu.Unlock()
+			o.caReads++
+			if o.caPEM == "" {
+				w.WriteHeader(http.StatusNotFound)
+				io.WriteString(w, `{"errors":[]}`)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"certificate": o.caPEM}})
 			return
 		}
 		if p, ok := strings.CutPrefix(r.URL.Path, "/v1/secret/data/"); ok {
@@ -242,7 +272,7 @@ func setup(t *testing.T) *env {
 	t.Setenv(p+natskeys.EnvOpenBaoTransitMount, "transit")
 	e.tokenFile = filepath.Join(dir, "handoff-token")
 	t.Setenv(EnvTokenFile, e.tokenFile)
-	for _, v := range []string{EnvTrustConfigMap, EnvOperatorName, EnvBusFenceUserPub, EnvBusLoaderUserPub, EnvKVCopy, EnvKVMount, EnvKVPath} {
+	for _, v := range []string{EnvTrustConfigMap, EnvOperatorName, EnvBusFenceUserPub, EnvBusLoaderUserPub, EnvKVCopy, EnvKVMount, EnvKVPath, EnvBusCAConfigMap, EnvBusCAPKIMount} {
 		t.Setenv(v, "")
 	}
 	return e
@@ -583,6 +613,8 @@ func TestRunKVCopy(t *testing.T) {
 	}
 }
 
+// A configuration error exits 2 before any key is created or ConfigMap
+// written, and still removes the token file.
 func TestRunUsageErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -597,6 +629,10 @@ func TestRunUsageErrors(t *testing.T) {
 		{"bad loader user", map[string]string{EnvBusLoaderUserPub: "not-a-key"}, nil},
 		{"loader user is the fence user", map[string]string{EnvBusFenceUserPub: sharedUserPub, EnvBusLoaderUserPub: sharedUserPub}, nil},
 		{"no openbao address", map[string]string{natskeys.EnvPrefixBoot + natskeys.EnvOpenBaoAddr: ""}, nil},
+		{"bus CA without a PKI mount", map[string]string{EnvBusCAConfigMap: "imas-bus-ca"}, nil},
+		{"bad bus CA configmap name", map[string]string{EnvBusCAConfigMap: "../ca", EnvBusCAPKIMount: "pki"}, nil},
+		{"bad bus CA PKI mount", map[string]string{EnvBusCAConfigMap: "imas-bus-ca", EnvBusCAPKIMount: "pki/../sys"}, nil},
+		{"bus CA in the trust configmap", map[string]string{EnvBusCAConfigMap: DefaultTrustConfigMap, EnvBusCAPKIMount: "pki"}, nil},
 		{"extra argument", nil, []string{"extra"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -625,5 +661,159 @@ func TestRunEmptyTokenFileFails(t *testing.T) {
 	}
 	if code, out := runCmd(t); code != 1 || !strings.Contains(out, "empty") {
 		t.Errorf("exit %d, want 1; output:\n%s", code, out)
+	}
+}
+
+// newCAPEM is a fresh self-signed CA certificate, PEM-encoded as OpenBao
+// returns it (no trailing newline).
+func newCAPEM(t *testing.T, cn string) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: cn},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})))
+}
+
+// The bus CA step (unit S1): the PKI mount's issuer certificate lands in
+// its own ConfigMap as ca.crt, byte for byte; a re-run with the same CA
+// writes nothing; a changed CA is an update that keeps the ConfigMap's
+// other keys and metadata.
+func TestRunWritesBusCA(t *testing.T) {
+	e := setup(t)
+	t.Setenv(EnvBusCAConfigMap, "imas-bus-ca")
+	t.Setenv(EnvBusCAPKIMount, "/pki/")
+	ca1 := newCAPEM(t, "imas root CA 1")
+	e.front.setCA(ca1)
+	e.writeToken(t)
+	out := mustRun(t)
+	if got := e.kube.data("imas-bus-ca"); !maps.Equal(got, map[string]string{BusCAKey: ca1}) {
+		t.Fatalf("bus CA configmap = %v, want only %s with the PEM", got, BusCAKey)
+	}
+	if !strings.Contains(out, "bus CA configmap imas/imas-bus-ca written from pki/cert/ca") {
+		t.Errorf("output does not report the write:\n%s", out)
+	}
+	if strings.Contains(e.kube.data(DefaultTrustConfigMap)[BusCAKey], "CERTIFICATE") {
+		t.Error("the CA reached the trust configmap")
+	}
+	writes := e.kube.writeCount()
+
+	// The same CA: nothing written.
+	e.writeToken(t)
+	out = mustRun(t)
+	if n := e.kube.writeCount(); n != writes {
+		t.Errorf("%d writes on an unchanged CA, want none", n-writes)
+	}
+	if !strings.Contains(out, "bus CA configmap imas/imas-bus-ca is current; nothing written") {
+		t.Errorf("output does not report the no-op:\n%s", out)
+	}
+
+	// A new CA (a rotation): updated in place; other keys and labels kept.
+	e.kube.mu.Lock()
+	e.kube.cms["imas-bus-ca"].Data["note"] = "kept"
+	e.kube.cms["imas-bus-ca"].Metadata["labels"] = map[string]any{"team": "ops"}
+	e.kube.mu.Unlock()
+	ca2 := newCAPEM(t, "imas root CA 2")
+	e.front.setCA(ca2)
+	e.writeToken(t)
+	mustRun(t)
+	if got := e.kube.data("imas-bus-ca"); !maps.Equal(got, map[string]string{BusCAKey: ca2, "note": "kept"}) {
+		t.Errorf("after a CA change the configmap is %v", got)
+	}
+	e.kube.mu.Lock()
+	labels := e.kube.cms["imas-bus-ca"].Metadata["labels"]
+	e.kube.mu.Unlock()
+	if get, _ := labels.(map[string]any); get["team"] != "ops" {
+		t.Errorf("labels lost on update: %v", labels)
+	}
+	if n := e.kube.writeCount(); n != writes+1 {
+		t.Errorf("%d writes for one CA change, want 1", n-writes)
+	}
+}
+
+// Without the setting there is no step: OpenBao's PKI is not read and no
+// ConfigMap but the trust is written. Nor does a run without a token
+// (check mode) read or write it.
+func TestRunBusCAOff(t *testing.T) {
+	e := setup(t)
+	e.front.setCA(newCAPEM(t, "unused"))
+	e.writeToken(t)
+	mustRun(t)
+	if e.front.caReads != 0 || e.kube.data("imas-bus-ca") != nil || len(e.kube.cms) != 1 {
+		t.Errorf("bus CA step ran without %s: %d reads, configmaps %v", EnvBusCAConfigMap, e.front.caReads, e.kube.cms)
+	}
+
+	t.Setenv(EnvBusCAConfigMap, "imas-bus-ca")
+	t.Setenv(EnvBusCAPKIMount, "pki")
+	mustRun(t) // no token file: check mode
+	if e.front.caReads != 0 || e.kube.data("imas-bus-ca") != nil {
+		t.Error("check mode read or wrote the bus CA")
+	}
+}
+
+// A mount that answers no CA certificate, or something else, fails the
+// run and writes no bus CA ConfigMap; the token is still revoked.
+func TestRunBusCAUnusable(t *testing.T) {
+	leafPEM := func() string {
+		key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		tmpl := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "leaf"},
+			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+		der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+		return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	}()
+	for _, c := range []struct{ name, pem, want string }{
+		{"no issuer", "", "reading the bus CA from pki/cert/ca"},
+		{"not PEM", "garbage", "is not one PEM certificate"},
+		{"two certificates", newCAPEM(t, "a") + "\n" + newCAPEM(t, "b"), "is not one PEM certificate"},
+		{"not a CA", leafPEM, "is not a CA certificate"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := setup(t)
+			t.Setenv(EnvBusCAConfigMap, "imas-bus-ca")
+			t.Setenv(EnvBusCAPKIMount, "pki")
+			e.front.setCA(c.pem)
+			e.writeToken(t)
+			code, out := runCmd(t)
+			if code != 1 || !strings.Contains(out, c.want) {
+				t.Errorf("exit %d, want 1 mentioning %q; output:\n%s", code, c.want, out)
+			}
+			if e.kube.data("imas-bus-ca") != nil {
+				t.Error("bus CA configmap written from an unusable answer")
+			}
+			if len(e.front.revokedTokens()) != 1 {
+				t.Error("bootstrap token not revoked after the failure")
+			}
+		})
+	}
+}
+
+// A write that loses a race is retried from a fresh read.
+func TestBusCAConflictRetry(t *testing.T) {
+	e := setup(t)
+	t.Setenv(EnvBusCAConfigMap, "imas-bus-ca")
+	t.Setenv(EnvBusCAPKIMount, "pki")
+	e.front.setCA(newCAPEM(t, "imas root CA"))
+	e.writeToken(t)
+	mustRun(t) // the trust and the CA exist now
+	ca2 := newCAPEM(t, "imas root CA 2")
+	e.front.setCA(ca2)
+	e.kube.conflicts = conflictRetries
+	e.writeToken(t)
+	mustRun(t)
+	if got := e.kube.data("imas-bus-ca")[BusCAKey]; got != ca2 {
+		t.Error("the CA update was lost to conflicts within the retry budget")
 	}
 }
