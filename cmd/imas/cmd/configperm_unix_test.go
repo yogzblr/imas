@@ -124,6 +124,41 @@ func TestEnsureConfigFileKeepsAFileCreatedMeanwhile(t *testing.T) {
 	noTempFiles(t, dir)
 }
 
+// Without hard links the file is created in place, exclusively and 0600,
+// so a file created meanwhile is still kept.
+func TestEnsureConfigFileWithoutHardLinks(t *testing.T) {
+	permissiveUmask(t)
+	linkFile = func(string, string) error { return &os.LinkError{Op: "link", Err: syscall.EPERM} }
+	t.Cleanup(func() { linkFile = os.Link })
+
+	recordSteps(t)
+	dir := filepath.Join(t.TempDir(), ".config", "imas")
+	path := filepath.Join(dir, "imas")
+	if err := ensureConfigFile(path); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(path); err != nil || st.Mode().Perm() != cliConfigFileMode || st.Size() != 0 {
+		t.Fatalf("config file %v, %v: want empty and 0600", st, err)
+	}
+	noTempFiles(t, dir)
+
+	path2 := filepath.Join(t.TempDir(), ".config", "imas", "imas")
+	configStep = func(step, _ string) {
+		if step == "temp" {
+			if err := os.WriteFile(path2, []byte("privkey: SAAother\n"), 0o600); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	if err := ensureConfigFile(path2); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path2); string(b) != "privkey: SAAother\n" {
+		t.Errorf("the file created meanwhile was replaced: %q", b)
+	}
+	noTempFiles(t, filepath.Dir(path2))
+}
+
 // An existing default directory that is too wide is tightened before the
 // file is made in it.
 func TestEnsureConfigFileTightensExistingDefaultDir(t *testing.T) {

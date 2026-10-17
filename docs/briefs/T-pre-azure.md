@@ -101,7 +101,8 @@ Brief corrections (applied by T2, 2026-10-17, decided by the code on main):
   (an open handle blocks the rename below on Windows). The CLI
   creates the file 0600 (in a 0700 directory) before the loader runs
   (`ensureConfigFile`, `cmd/imas/cmd/configperm.go`; installed with a hard
-  link, so a file another process created meanwhile is kept), so the loader only
+  link, or created in place with O_EXCL where hard links are missing, so a
+  file another process created meanwhile is kept), so the loader only
   ever finds the file and truncating it keeps 0600; `imas init` writes the
   config through a 0600 temporary file renamed into place
   (`writeConfigFile`). The private key itself is written by

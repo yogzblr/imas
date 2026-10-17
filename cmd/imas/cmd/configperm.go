@@ -45,8 +45,10 @@ func cliConfigPath() (string, error) {
 // directory is created 0700 (its parent 0755), the file is opened under a
 // temporary name in that directory with O_CREATE|O_EXCL and mode 0600, and
 // put in place with a hard link, which fails rather than replace a file
-// another process created meanwhile (a filesystem without hard links gets
-// a rename instead). The loader then finds an empty file and keeps it:
+// another process created meanwhile. On a filesystem without hard links the
+// file is created in place with O_CREATE|O_EXCL and 0600 instead, which
+// never replaces one either: it is empty, so a reader can never see it
+// half-written. The loader then finds an empty file and keeps it:
 // truncating an existing file keeps its mode. An existing file is left
 // alone (restrictConfig tightens it).
 func ensureConfigFile(path string) error {
@@ -74,20 +76,34 @@ func ensureConfigFile(path string) error {
 	}
 	stepDone("temp", tmp)
 	defer os.Remove(tmp)
-	switch err := os.Link(tmp, path); {
+	switch err := linkFile(tmp, path); {
 	case err == nil:
 	case errors.Is(err, fs.ErrExist):
 		return nil // created meanwhile: keep it
 	default:
-		// No hard links on this filesystem: rename, which may replace a
-		// file created in the moments since the Lstat above.
-		if err := os.Rename(tmp, path); err != nil {
+		// No hard links on this filesystem.
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, cliConfigFileMode)
+		if errors.Is(err, fs.ErrExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err := f.Chmod(cliConfigFileMode); err != nil {
+			f.Close()
+			return err
+		}
+		if err := f.Close(); err != nil {
 			return err
 		}
 	}
 	stepDone("rename", path)
 	return nil
 }
+
+// linkFile is os.Link; tests replace it to stand in for a filesystem
+// without hard links.
+var linkFile = os.Link
 
 // createPrivateTemp creates an empty file named .<base>.tmp-<n> in dir with
 // O_CREATE|O_EXCL and mode 0600, set again with Chmod so that a umask
