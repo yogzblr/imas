@@ -1016,7 +1016,7 @@ explanation rather than deploying something that silently can't work.
 {{- fail (printf "farmer.jobs.reconcileWindow must be a quoted duration such as \"2h\", got %v" .) -}}
 {{- end -}}
 {{- end -}}
-{{- $durations := dict "farmer.jobs.leaseTTL" .Values.farmer.jobs.leaseTTL -}}
+{{- $durations := dict "farmer.jobs.leaseTTL" .Values.farmer.jobs.leaseTTL "farmer.tenantRelockInterval" .Values.farmer.tenantRelockInterval -}}
 {{- with .Values.farmer.tenantConnections -}}
 {{- $_ := set $durations "farmer.tenantConnections.idleTTL" .idleTTL -}}
 {{- $_ := set $durations "farmer.tenantConnections.heartbeatWindow" .heartbeatWindow -}}

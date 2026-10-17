@@ -283,6 +283,12 @@ func main() {
 	// ReloadNKeysForTenant's lazy provisioning path).
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// The periodic relock of deprovisioned tenants (L11): a bad interval
+	// stops farmer rather than run without it.
+	relockInterval, err := pki.TenantRelockInterval()
+	if err != nil {
+		log.Fatalf("tenant relock: %v", err)
+	}
 	tenantRegistry = newTenantRegistry(ctx)
 	installConnGetter(tenantRegistry)
 	if recipeStore != nil {
@@ -307,6 +313,7 @@ func main() {
 
 	StartAPIServer()
 	natsapi.StartCohortRefresher(ctx, config.CohortRefreshInterval)
+	pki.StartTenantRelocker(ctx, relockInterval)
 	farmerDone := make(chan struct{})
 	sighupDone := make(chan struct{})
 	go ConnectFarmer(ctx, farmerDone)

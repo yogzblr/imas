@@ -209,6 +209,12 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             {{- end }}
+            # Periodic relock of deprovisioned tenants still live on the bus
+            # (docs/briefs/T-pre-azure.md T4, L11); farmer accepts 1m to 24h.
+            {{- with .Values.farmer.tenantRelockInterval }}
+            - name: IMAS_TENANT_RELOCK_INTERVAL
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.farmer.logFormat }}
             - name: IMAS_LOG_FORMAT
               value: {{ . | quote }}

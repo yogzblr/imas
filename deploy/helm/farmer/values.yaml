@@ -524,6 +524,12 @@ farmer:
     idleTTL: "10m"
     # IMAS_TENANT_CONN_HEARTBEAT_WINDOW
     heartbeatWindow: "15m"
+  # IMAS_TENANT_RELOCK_INTERVAL: how often farmer pushes a fresh lock-out
+  # for every deprovisioned tenant whose Account is still live on the bus
+  # or in the accounts bucket (security review 2026-10, L11). A quoted Go
+  # duration from "1m" to "24h"; farmer refuses to start outside that
+  # range. Empty: farmer's default, 10m.
+  tenantRelockInterval: "10m"
   # Recipe template render limits (IMAS_RECIPE_*; internal/cook's
   # "Bounded work"). Recipes are tenant-written, untrusted input, so every
   # render is capped, and every cook as a whole (security review B4). All
