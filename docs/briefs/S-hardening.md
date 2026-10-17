@@ -1,11 +1,11 @@
-# Hardening units from the P3 review walkthrough (S1, S2, S3)
+# Hardening units from the P3 review walkthrough (S1, S2, S3, S4)
 
 Read `docs/briefs/ORCHESTRATOR.md` first: its session prompt (zero open items,
 repo-wide search, brief errors decided by a fixed order) applies to all
 units. S1 and S2 come from the owner's walkthrough of `docs/security-review-pack.md`
 sections 3.3 (items 1 and 6) on 2026-10-14. Decisions below are final.
 
-Owner decisions (2026-10-14; S3: 2026-10-17):
+Owner decisions (2026-10-14; S3 and S4: 2026-10-17):
 
 - **S1.** The bus loader never mounts the bus's TLS volume or the bus key,
   in either TLS mode. In `openbao` mode it gets the CA certificate from a
@@ -25,6 +25,10 @@ Owner decisions (2026-10-14; S3: 2026-10-17):
   a clear refusal at submit time, not failed items later. The dispatch caps
   stay (they are the fairness control from review finding M5), with higher
   defaults. Decided numbers are in the S3 section.
+- **S4.** A cook has a render budget of its own: total time, total rendered
+  bytes and total range iterations across all the recipes it includes, and a
+  lower include cap. Numbers are in the S4 section. This is review finding B4,
+  decided before dispatch is enabled.
 
 ## S1: the loader mounts the CA from a ConfigMap, never the bus TLS volume
 
@@ -308,3 +312,108 @@ Search gate: `defaultActionDispatchConcurrency`,
 `ACTION_DISPATCH_TENANT_CONCURRENCY`, `SPROUT_ACTION_TENANT_CONCURRENCY`,
 `ACTION_MAX_AGE`, `tenantConcurrency`, `actionMaxAge`, `rate_limited`,
 `sproutActionRate` across `internal/`, `cmd/`, `deploy/`, `uat/`, `docs/`.
+
+## S4: a per-cook render budget (review finding B4)
+
+Source: `docs/security-review-2026-10-b.md` B4 and P3 walkthrough 3.4 item 6,
+owner decision 2026-10-17. Needs: S3 (both edit `deploy/helm/farmer` values,
+README and `chart_test.go`; S4 starts after S3 is merged to avoid conflicts).
+
+Today every limit applies to one render. A cook of a recipe that includes up to
+256 others costs the sum of all their renders, and each recipe is rendered
+twice per cook: once to find the includes (`collectAllIncludes`, through
+`extractIncludes`) and once to build the steps (`resolveRecipeSteps`). A tenant
+can upload such recipes, so one cook can take many CPU-seconds on a farmer
+replica shared with other tenants.
+
+Scope: `internal/cook` (`farmercook.go`, `helpers.go`), `internal/config`
+(`RecipeLimits`), `cmd/farmer/main.go`, `internal/saasapi` (`recipes.go`,
+`recipes_config.go`), `deploy/helm/farmer` (templates, values, README,
+`chart_test.go`), `docs/`.
+
+Facts on main (2026-10-17), verify first:
+
+- `newRenderState` gives each render its own deadline
+  (`RecipeRenderTimeout`, 2s) and range budget (`maxRangeIterations`, 10000);
+  `renderRecipeTemplate` and `ValidateRecipeSource` call it.
+- `maxRecipeIncludes = 256` (`helpers.go`), enforced in
+  `collectIncludesRecurse`.
+- Limits come from `config.RecipeLimits` (variables `IMAS_RECIPE_*`), are
+  installed by `initRecipeLimits` in `cmd/farmer/main.go` through
+  `cook.SetRenderLimits`, and are validated there. saasapi validates uploads
+  under the same values (`internal/saasapi/recipes_config.go`).
+- `ValidateRecipeSource` renders the top recipe only; it does not resolve
+  includes.
+- A time-limit failure surfaces to the caller as `cook.ErrTemplateTimeout`
+  (see `internal/saasapi/recipes.go` for how it is reported).
+
+Decisions (final):
+
+1. **One budget per cook**, created at the start of `resolveRecipeSteps` and
+   shared by both phases (include discovery and step building) and every
+   recipe in them. It has three counters, each charged by every render of the
+   cook: wall time spent inside `executeRecipeTemplate`, rendered output bytes,
+   and range iterations. Thread it through `collectAllIncludes`,
+   `collectIncludesRecurse`, `extractIncludes` and `renderRecipeTemplate` (a
+   context value or an explicit parameter; the session chooses, and removes the
+   old no-budget call paths so none is left). A render also stays inside its
+   own existing per-render limits.
+2. **Defaults and bounds**, set from the Helm chart like the existing limits:
+
+   | Setting | Env | Helm key under `farmer.recipes.templateLimits` | Default | Bounds |
+   |---|---|---|---|---|
+   | total render time per cook | `IMAS_RECIPE_COOK_RENDER_TIMEOUT` | `cookRenderTimeout` | 10s | at least `renderTimeout`, at most 5m |
+   | total rendered bytes per cook | `IMAS_RECIPE_COOK_MAX_RENDERED_BYTES` | `cookMaxRenderedBytes` | 8388608 | at least `maxRenderedBytes`, at most 256 MiB |
+   | total range iterations per cook | `IMAS_RECIPE_COOK_MAX_RANGE_ITERATIONS` | `cookMaxRangeIterations` | 100000 | at least `maxRangeIterations`, at most 100,000,000 |
+   | distinct recipes one cook may include | `IMAS_RECIPE_MAX_INCLUDES` | `maxIncludes` | 64 | 1 to 256 |
+
+   Extend `config.RecipeLimits`, `cook.RenderLimits`, `SetRenderLimits` (with
+   the same refuse-at-startup style and error messages as today), and the
+   startup log line. `maxRecipeIncludes` becomes the settable limit with 256 as
+   its hard maximum. farmer sets all four; saasapi gets only
+   `IMAS_RECIPE_MAX_INCLUDES` (it never cooks), in the saasapi Deployment
+   template as well.
+3. **When the budget runs out**, the cook fails with a new error
+   `ErrCookRenderBudget` (wrapping which counter ran out: time, bytes or
+   iterations), before anything is dispatched, and nothing is staged. The
+   caller sees it as the same kind of failure as `ErrTemplateTimeout` today
+   (follow how that is mapped to a response in every caller, including
+   saasapi's recipe routes, and map the new error the same way, with its own
+   message naming the counter and the limit).
+4. **At upload** (the saasapi recipe routes, REC.1): refuse a recipe whose own
+   rendered `include` list has more entries than `IMAS_RECIPE_MAX_INCLUDES`,
+   with the same message style as other upload validation failures. Includes
+   are not resolved at upload, because a recipe may include one uploaded later;
+   the cook-time budget is the enforcement. Say this in the code comment and in
+   the docs.
+5. **Docs**: describe the four settings, the defaults and that the budget covers
+   include discovery and step building together, in the farmer chart README,
+   the recipe documentation, and `docs/security-review-2026-10-b.md` (mark B4
+   fixed, naming this unit).
+
+Tests:
+
+- A cook whose recipes together exceed each counter fails with
+  `ErrCookRenderBudget` naming that counter; the same recipes under the limits
+  succeed. Use lowered limits in the test, as the existing render tests do.
+- The budget is shared: N recipes each at 60 percent of a counter fail on the
+  second, with no single render over its own limit.
+- Both phases are charged: a recipe set that fits one phase's cost but not
+  twice that fails.
+- Two concurrent cooks do not share a budget.
+- Include cap: 64 includes pass, 65 fail with the existing
+  `ErrInvalidFormat` wrapping and the configured number in the message; the
+  hard maximum 256 is accepted as a setting and 257 is refused at startup.
+- `SetRenderLimits`: every new bound (below the per-render value, above the
+  maximum, zero keeps the current value).
+- Upload: a recipe listing 65 includes is refused, 64 accepted, nothing stored.
+- Helm: both new value blocks render with and without overrides in
+  `chart_test.go`; saasapi gets only `IMAS_RECIPE_MAX_INCLUDES`.
+- Nothing in the cook path calls the old no-budget render (assert by test or
+  by the search gate).
+
+Search gate: `maxRecipeIncludes`, `newRenderState`, `renderRecipeTemplate`,
+`extractIncludes`, `collectAllIncludes`, `RecipeRenderTimeout`,
+`SetRenderLimits`, `RenderLimits`, `RecipeLimits`, `IMAS_RECIPE_`,
+`templateLimits`, `ErrTemplateTimeout` across `internal/`, `cmd/`, `deploy/`,
+`uat/`, `docs/`.
