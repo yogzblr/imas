@@ -298,6 +298,41 @@ func TestCreatePrivkeyRefusesALooseConfig(t *testing.T) {
 	if err := requirePrivateConfig(link); err == nil || !strings.Contains(err.Error(), "not a regular file") {
 		t.Errorf("a symlinked config: %v, want a refusal", err)
 	}
+	if st, _ := os.Stat(path); st.Mode().Perm() != 0o644 {
+		t.Errorf("the symlink's target was changed to %v; it must be left alone", st.Mode().Perm())
+	}
+	// A symlink to a directory: the directory's mode is never touched.
+	target := filepath.Join(dir, "elsewhere")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dirLink := filepath.Join(dir, "dirlink")
+	if err := os.Symlink(target, dirLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := restrictConfig(dirLink); err == nil {
+		t.Error("restrictConfig accepted a symlink to a directory")
+	}
+	if st, _ := os.Stat(target); st.Mode().Perm() != 0o755 {
+		t.Errorf("the linked directory's mode changed to %v", st.Mode().Perm())
+	}
+	// A default directory that is a symlink is not followed either.
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(home, ".config", "imas")); err != nil {
+		t.Fatal(err)
+	}
+	if err := restrictConfig(filepath.Join(home, ".config", "imas", "imas")); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("a symlinked default directory: %v, want a refusal", err)
+	}
+	if st, _ := os.Stat(target); st.Mode().Perm() != 0o755 {
+		t.Errorf("the directory behind the symlinked default directory changed to %v", st.Mode().Perm())
+	}
 
 	// With a working Chmod the same file is tightened and accepted.
 	if err := requirePrivateConfig(path); err != nil {

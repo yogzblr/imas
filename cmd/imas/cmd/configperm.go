@@ -171,19 +171,31 @@ func writeConfigFile(path string) error {
 // rewrites it 0600; restrictConfig runs after the config is loaded and
 // after it is written, so a file written by an earlier version (which
 // created it 0644 in a 0755 directory) is fixed the next time the CLI
-// starts, before a private key is put into it.
+// starts, before a private key is put into it. A path or default directory
+// that is a symlink (or not a regular file or directory) is refused, never
+// followed: Chmod would change its target.
 func restrictConfig(path string) error {
 	if path == "" {
 		return nil
 	}
 	var errs []error
 	if dir := filepath.Dir(path); isDefaultConfigDir(dir) {
-		if err := os.Chmod(dir, cliConfigDirMode); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			errs = append(errs, fmt.Errorf("restricting %s to mode %o: %w", dir, cliConfigDirMode, err))
+		// Chmod follows a symlink: only a real directory is tightened.
+		if st, err := os.Lstat(dir); err == nil && !st.IsDir() {
+			errs = append(errs, fmt.Errorf("%s is not a directory (%v): not restricting it", dir, st.Mode().Type()))
+		} else if err == nil {
+			if err := os.Chmod(dir, cliConfigDirMode); err != nil {
+				errs = append(errs, fmt.Errorf("restricting %s to mode %o: %w", dir, cliConfigDirMode, err))
+			}
 		}
 	}
-	if err := chmod(path, cliConfigFileMode); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		errs = append(errs, fmt.Errorf("restricting %s to mode %o: %w", path, cliConfigFileMode, err))
+	// Likewise only a regular file: a symlink's target is never changed.
+	if st, err := os.Lstat(path); err == nil && !st.Mode().IsRegular() {
+		errs = append(errs, fmt.Errorf("%s is not a regular file (%v): not restricting it", path, st.Mode().Type()))
+	} else if err == nil {
+		if err := chmod(path, cliConfigFileMode); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("restricting %s to mode %o: %w", path, cliConfigFileMode, err))
+		}
 	}
 	return errors.Join(errs...)
 }
