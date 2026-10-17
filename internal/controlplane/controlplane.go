@@ -148,7 +148,9 @@ const (
 	// or farmer's own registry doesn't show it deprovisioned.
 	ErrorPurgeRefused ErrorCode = "purge_refused"
 	// ErrorPurgeIncomplete: an erasure step failed; the steps before it
-	// are done, the rest are not. Running the purge again finishes it.
+	// are done, the rest are not. Running the purge again finishes it:
+	// the sweeper does at most daily while automatic purge is on, an
+	// operator can at any time.
 	ErrorPurgeIncomplete ErrorCode = "purge_incomplete"
 
 	// internal.sprout.action only:
@@ -175,7 +177,7 @@ var publicErrorMessages = map[ErrorCode]string{
 	ErrorTenantNotFound:  "the tenant is not known to the provisioning service",
 	ErrorInternal:        "an internal error occurred during provisioning; retry or contact support",
 	ErrorPurgeRefused:    "the provisioning service refused to erase this tenant's data; contact support",
-	ErrorPurgeIncomplete: "erasing this tenant's data did not finish; it is retried automatically, or contact support",
+	ErrorPurgeIncomplete: "erasing this tenant's data did not finish; it can be started again, or contact support",
 
 	ErrorInvalidRequest:    "the action request was rejected as malformed",
 	ErrorUnsupportedAction: "the action type is not supported",

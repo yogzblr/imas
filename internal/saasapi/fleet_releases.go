@@ -100,7 +100,7 @@ type operatorPlane struct {
 // plane's callers are a Helm hook Job and an operator at a terminal.
 const (
 	operatorRouteRate  rate.Limit = 1
-	operatorRouteBurst            = 10
+	operatorRouteBurst int        = 10
 )
 
 // NewOperatorServer builds the operator-plane HTTPS server from cfg
