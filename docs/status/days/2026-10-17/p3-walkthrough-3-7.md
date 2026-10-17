@@ -1,0 +1,4 @@
+change: P3 section 3.7 (UAT and Azure credentials) walked through with the owner; all seven sections are now walked. The owner confirmed the GitHub environment settings, the dedicated UAT subscription and that the production Key Vault is outside it. A separate janitor identity was considered and declined (one-person project for now).
+item: P3
+action: update
+next-append: **Walkthrough (2026-10-17, owner):** 3.7 confirmed: OIDC only, update flags default off in the chart, NSG rules scoped to the documented ports, the accounts reader policy is list and get only. Accepted residuals: the shared `uat` and `uat-janitor` Azure identity (Contributor on a UAT-only subscription), and `_INBOX.>` publish for sprouts inside their own tenant. Sections 3.1 to 3.7 are walked; the sign-off waits for S1 to S6 to merge.
