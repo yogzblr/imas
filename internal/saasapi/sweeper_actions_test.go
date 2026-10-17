@@ -636,8 +636,9 @@ func TestItemErrorCodesDocumented(t *testing.T) {
 	} else {
 		t.Fatal(`docs/api/saasapi.md has no "Item error codes" section`)
 	}
-	if i := strings.Index(section, "\n### "); i >= 0 {
-		section = section[:i]
+	// The section ends at the next heading of its level or higher.
+	if loc := regexp.MustCompile(`\n#{1,4} `).FindStringIndex(section); loc != nil {
+		section = section[:loc[0]]
 	}
 	documented := map[string]bool{}
 	for _, m := range regexp.MustCompile("`([a-z][a-z0-9_]*)`").FindAllStringSubmatch(section, -1) {

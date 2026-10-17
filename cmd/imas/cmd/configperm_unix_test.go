@@ -100,6 +100,30 @@ func TestEnsureConfigFileIsPrivateFromTheStart(t *testing.T) {
 	}
 }
 
+// A file another process creates between the check and the install (here
+// from the step hook, once the temporary file exists) is kept: the install
+// is a hard link, which never replaces it, and the temporary file goes.
+func TestEnsureConfigFileKeepsAFileCreatedMeanwhile(t *testing.T) {
+	permissiveUmask(t)
+	dir := filepath.Join(t.TempDir(), ".config", "imas")
+	path := filepath.Join(dir, "imas")
+	configStep = func(step, _ string) {
+		if step == "temp" {
+			if err := os.WriteFile(path, []byte("privkey: SAAother\n"), 0o600); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	t.Cleanup(func() { configStep = nil })
+	if err := ensureConfigFile(path); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "privkey: SAAother\n" {
+		t.Errorf("the file created meanwhile was replaced: %q", b)
+	}
+	noTempFiles(t, dir)
+}
+
 // An existing default directory that is too wide is tightened before the
 // file is made in it.
 func TestEnsureConfigFileTightensExistingDefaultDir(t *testing.T) {

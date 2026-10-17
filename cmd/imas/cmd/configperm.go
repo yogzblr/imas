@@ -44,7 +44,9 @@ func cliConfigPath() (string, error) {
 // exist, so that it is mode 0600 from the first byte (issue #139): the
 // directory is created 0700 (its parent 0755), the file is opened under a
 // temporary name in that directory with O_CREATE|O_EXCL and mode 0600, and
-// renamed into place. The loader then finds an empty file and keeps it:
+// put in place with a hard link, which fails rather than replace a file
+// another process created meanwhile (a filesystem without hard links gets
+// a rename instead). The loader then finds an empty file and keeps it:
 // truncating an existing file keeps its mode. An existing file is left
 // alone (restrictConfig tightens it).
 func ensureConfigFile(path string) error {
@@ -71,9 +73,17 @@ func ensureConfigFile(path string) error {
 		return err
 	}
 	stepDone("temp", tmp)
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
+	defer os.Remove(tmp)
+	switch err := os.Link(tmp, path); {
+	case err == nil:
+	case errors.Is(err, fs.ErrExist):
+		return nil // created meanwhile: keep it
+	default:
+		// No hard links on this filesystem: rename, which may replace a
+		// file created in the moments since the Lstat above.
+		if err := os.Rename(tmp, path); err != nil {
+			return err
+		}
 	}
 	stepDone("rename", path)
 	return nil

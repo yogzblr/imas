@@ -97,9 +97,11 @@ Scope: `cmd/imas`, `internal/saasapi/sweeper_actions_test.go`, `packaging/test`,
 Brief corrections (applied by T2, 2026-10-17, decided by the code on main):
 
 - **#139.** The loader (`config.LoadConfig`, `internal/config`) still
-  creates a missing file with `os.Create`; T2 does not change it. The CLI
+  creates a missing file with `os.Create`; T2 only makes it close that file
+  (an open handle blocks the rename below on Windows). The CLI
   creates the file 0600 (in a 0700 directory) before the loader runs
-  (`ensureConfigFile`, `cmd/imas/cmd/configperm.go`), so the loader only
+  (`ensureConfigFile`, `cmd/imas/cmd/configperm.go`; installed with a hard
+  link, so a file another process created meanwhile is kept), so the loader only
   ever finds the file and truncating it keeps 0600; `imas init` writes the
   config through a 0600 temporary file renamed into place
   (`writeConfigFile`). The private key itself is written by
