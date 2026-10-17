@@ -11,13 +11,21 @@ package pki
 // the nonce, its sprout ID and the NKey. Without the signature anyone who
 // knew a public NKey could file it under any ID.
 //
-// Nonces are random, single-use, held in this process's memory for
-// nkeyNonceTTL and capped at maxNKeyNonces outstanding: a standalone
-// install runs one farmer process, which serves both requests.
+// A nonce holds no state until it is spent: it is a timestamp and random
+// bytes, authenticated with an HMAC under a key this process draws at
+// start, so a flood of nonce requests fills nothing and cannot lock
+// legitimate registrations out. It is spendable for nkeyNonceTTL, by
+// this farmer process only (a standalone install runs one, which serves
+// both requests). A nonce is recorded as spent only once a submission
+// over it verifies, and kept until it would have expired, so a captured
+// submission cannot be replayed.
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"strings"
 	"sync"
@@ -32,62 +40,87 @@ const (
 	nkeySubmissionDomain = "imas-putnkey-v1"
 	// nkeyNonceTTL is how long a nonce may be spent.
 	nkeyNonceTTL = 2 * time.Minute
-	// maxNKeyNonces caps the outstanding nonces; beyond it a request
-	// for one fails (ErrNKeyNoncesExhausted) until some expire.
-	maxNKeyNonces = 10000
-	// nkeyNonceBytes is the nonce's entropy.
-	nkeyNonceBytes = 32
+	// nkeyNonceRandBytes and nkeyNonceMACBytes size a nonce: 8 bytes of
+	// Unix nanoseconds, the random bytes, then the truncated HMAC.
+	nkeyNonceRandBytes = 16
+	nkeyNonceMACBytes  = 16
+	nkeyNonceLen       = 8 + nkeyNonceRandBytes + nkeyNonceMACBytes
 )
 
-var (
-	// ErrNKeyNoncesExhausted: too many nonces outstanding. Retryable.
-	ErrNKeyNoncesExhausted = errors.New("pki: too many outstanding NKey registration nonces; retry later")
-	// ErrNKeySubmissionUnproven: the nonce is unknown, spent or expired,
-	// or the signature does not verify against the submitted NKey.
-	ErrNKeySubmissionUnproven = errors.New("pki: the NKey submission does not prove possession of the NKey")
-)
+// ErrNKeySubmissionUnproven: the nonce is not one this process issued, is
+// expired or spent, or the signature does not verify against the
+// submitted NKey.
+var ErrNKeySubmissionUnproven = errors.New("pki: the NKey submission does not prove possession of the NKey")
 
-// nkeyNonceStore is the outstanding nonce set.
+// nkeyNonceStore issues nonces and remembers the spent ones.
 type nkeyNonceStore struct {
-	mu  sync.Mutex
-	now func() time.Time
-	exp map[string]time.Time
+	key   []byte
+	now   func() time.Time
+	mu    sync.Mutex
+	spent map[string]time.Time // nonce -> when it expires
 }
 
-var nkeyNonces = &nkeyNonceStore{now: time.Now, exp: map[string]time.Time{}}
+func newNKeyNonceStore(now func() time.Time) *nkeyNonceStore {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		panic("pki: no randomness for the NKey nonce key: " + err.Error())
+	}
+	return &nkeyNonceStore{key: key, now: now, spent: map[string]time.Time{}}
+}
 
-// issue returns a fresh nonce, unpadded base64url.
+var nkeyNonces = newNKeyNonceStore(time.Now)
+
+func (s *nkeyNonceStore) mac(body []byte) []byte {
+	m := hmac.New(sha256.New, s.key)
+	m.Write(body)
+	return m.Sum(nil)[:nkeyNonceMACBytes]
+}
+
+// issue returns a fresh nonce, unpadded base64url. It stores nothing.
 func (s *nkeyNonceStore) issue() (string, error) {
-	var b [nkeyNonceBytes]byte
-	if _, err := rand.Read(b[:]); err != nil {
+	b := make([]byte, 8+nkeyNonceRandBytes, nkeyNonceLen)
+	binary.BigEndian.PutUint64(b, uint64(s.now().UnixNano()))
+	if _, err := rand.Read(b[8:]); err != nil {
 		return "", err
 	}
-	nonce := base64.RawURLEncoding.EncodeToString(b[:])
+	return base64.RawURLEncoding.EncodeToString(append(b, s.mac(b)...)), nil
+}
+
+// valid reports whether nonce is one this store issued and has not yet
+// expired, without spending it.
+func (s *nkeyNonceStore) valid(nonce string) (time.Time, bool) {
+	b, err := base64.RawURLEncoding.DecodeString(nonce)
+	if err != nil || len(b) != nkeyNonceLen {
+		return time.Time{}, false
+	}
+	body := b[:8+nkeyNonceRandBytes]
+	if !hmac.Equal(b[8+nkeyNonceRandBytes:], s.mac(body)) {
+		return time.Time{}, false
+	}
+	exp := time.Unix(0, int64(binary.BigEndian.Uint64(body))).Add(nkeyNonceTTL)
+	now := s.now()
+	if !now.Before(exp) || exp.Sub(now) > nkeyNonceTTL {
+		return time.Time{}, false
+	}
+	return exp, true
+}
+
+// spend records nonce as spent until exp and reports whether it was not
+// spent already. Expired entries are dropped on the way.
+func (s *nkeyNonceStore) spend(nonce string, exp time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	if len(s.exp) >= maxNKeyNonces {
-		for n, at := range s.exp {
-			if !now.Before(at) {
-				delete(s.exp, n)
-			}
-		}
-		if len(s.exp) >= maxNKeyNonces {
-			return "", ErrNKeyNoncesExhausted
+	for n, at := range s.spent {
+		if !now.Before(at) {
+			delete(s.spent, n)
 		}
 	}
-	s.exp[nonce] = now.Add(nkeyNonceTTL)
-	return nonce, nil
-}
-
-// spend removes nonce and reports whether it was outstanding and not
-// expired. A nonce is spent by any attempt, valid signature or not.
-func (s *nkeyNonceStore) spend(nonce string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	at, ok := s.exp[nonce]
-	delete(s.exp, nonce)
-	return ok && s.now().Before(at)
+	if _, ok := s.spent[nonce]; ok {
+		return false
+	}
+	s.spent[nonce] = exp
+	return true
 }
 
 // IssueNKeyNonce returns a single-use nonce for one NKey submission.
@@ -99,12 +132,15 @@ func NKeySubmissionPayload(nonce, sproutID, nkey string) []byte {
 	return []byte(strings.Join([]string{nkeySubmissionDomain, nonce, sproutID, nkey}, "\n"))
 }
 
-// VerifyNKeySubmission spends sub.Nonce and checks sub.Sig (unpadded
-// base64url) against sub.NKey over NKeySubmissionPayload. Any failure is
+// VerifyNKeySubmission checks that sub.Nonce is one this process issued
+// and has not expired, checks sub.Sig (unpadded base64url) against
+// sub.NKey over NKeySubmissionPayload, and only then spends the nonce. Any
+// failure, a nonce already spent included, is
 // ErrNKeySubmissionUnproven. sub.NKey and sub.SproutID must already be
 // valid (the handler checks them first).
 func VerifyNKeySubmission(sub KeySubmission) error {
-	if sub.Nonce == "" || !nkeyNonces.spend(sub.Nonce) {
+	exp, ok := nkeyNonces.valid(sub.Nonce)
+	if !ok {
 		return ErrNKeySubmissionUnproven
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(sub.Sig)
@@ -116,6 +152,9 @@ func VerifyNKeySubmission(sub KeySubmission) error {
 		return ErrNKeySubmissionUnproven
 	}
 	if kp.Verify(NKeySubmissionPayload(sub.Nonce, sub.SproutID, sub.NKey), sig) != nil {
+		return ErrNKeySubmissionUnproven
+	}
+	if !nkeyNonces.spend(sub.Nonce, exp) {
 		return ErrNKeySubmissionUnproven
 	}
 	return nil

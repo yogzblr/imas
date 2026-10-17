@@ -252,7 +252,7 @@ User JWT is delivered." Two findings qualify that wording:
   publishes it: the publisher writes a new JWT once a third of its
   lifetime is left (the two-thirds rule the gateway JWT's refresh uses),
   and the chart runs the publisher on a schedule as well as after each
-  deployment (the refresh CronJob, `credentialPublisher.refresh.schedule`,
+  deployment (the refresh CronJob, `credentialPublisher.refresh.everyHours`,
   every 4 hours by default). saasapi refuses to start with an expired
   JWT.
 

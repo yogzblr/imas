@@ -1254,8 +1254,24 @@ refuses to render. */}}
 {{- if not (regexMatch "^([0-9]+(h|m))+$" (toString $p.userJWTTTL)) -}}
 {{- fail (printf "credentialPublisher.userJWTTTL %q must be a duration in hours and minutes, such as 24h (IMAS_SAASAPI_USER_JWT_TTL, 1h to 720h)" (toString $p.userJWTTTL)) -}}
 {{- end -}}
-{{- if not $p.refresh.schedule -}}
-{{- fail "credentialPublisher.refresh.schedule is required: the SaaS API User JWT expires, and the refresh CronJob renews it" -}}
+{{- $every := int $p.refresh.everyHours -}}
+{{- if not (has $every (list 1 2 3 4 6 8 12)) -}}
+{{- fail (printf "credentialPublisher.refresh.everyHours %v must be 1, 2, 3, 4, 6, 8 or 12, so the refresh runs are evenly spaced" $p.refresh.everyHours) -}}
+{{- end -}}
+{{- $minute := int $p.refresh.minute -}}
+{{- if or (lt $minute 0) (gt $minute 59) -}}
+{{- fail (printf "credentialPublisher.refresh.minute %v must be 0 to 59" $p.refresh.minute) -}}
+{{- end -}}
+{{- $ttlMinutes := 0 -}}
+{{- range $part := regexFindAll "[0-9]+[hm]" (toString $p.userJWTTTL) -1 -}}
+{{- if hasSuffix "h" $part -}}
+{{- $ttlMinutes = add $ttlMinutes (mul (atoi (trimSuffix "h" $part)) 60) -}}
+{{- else -}}
+{{- $ttlMinutes = add $ttlMinutes (atoi (trimSuffix "m" $part)) -}}
+{{- end -}}
+{{- end -}}
+{{- if le (int $ttlMinutes) (mul $every 180) -}}
+{{- fail (printf "credentialPublisher.userJWTTTL %s must be more than 3 x credentialPublisher.refresh.everyHours (%dh): a JWT is renewed by the first run after only a third of its lifetime is left, so a longer gap between runs lets it expire" (toString $p.userJWTTTL) (mul $every 3)) -}}
 {{- end -}}
 {{- end }}
 

@@ -954,11 +954,16 @@ credentialPublisher:
   # writes a new JWT once a third of it is left.
   userJWTTTL: 24h
   # The refresh CronJob: the same run on a schedule, so the JWT is renewed
-  # before it expires without a deployment. Run it more often than a third
-  # of userJWTTTL (the default: every 4 hours against 8). A run with nothing
-  # due is one KV read and one Transit signature and writes nothing.
+  # before it expires without a deployment. It runs every everyHours hours
+  # (1, 2, 3, 4, 6, 8 or 12, so the runs are evenly spaced) at minute
+  # minute, schedule "<minute> */<everyHours> * * *". A JWT is renewed by
+  # the first run after only a third of userJWTTTL is left, so the render
+  # fails unless userJWTTTL is more than 3 x everyHours (the default: 24h
+  # against 12h). A run with nothing due is one KV read and one Transit
+  # signature and writes nothing.
   refresh:
-    schedule: "17 */4 * * *"
+    everyHours: 4
+    minute: 17
     startingDeadlineSeconds: 600
   # Emit the Argo CD hook annotations too.
   argoCDHooks: true

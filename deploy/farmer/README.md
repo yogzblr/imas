@@ -266,12 +266,15 @@ minted now (a TTL that was shortened); otherwise it is one KV read and
 writes nothing. So the same subcommand also runs on a schedule:
 `saasapi-credential-publish-job.yaml` carries a CronJob,
 `imas-saasapi-credential-refresh`, with the Job's pod, every 4 hours
-(`17 */4 * * *`), and the chart renders it
-(`credentialPublisher.refresh.schedule`). A new JWT reaches saasapi the
+(`17 */4 * * *`), and the chart renders it (`credentialPublisher.refresh`:
+`everyHours`, default 4, and `minute`). A new JWT reaches saasapi the
 way any other does: ESO syncs it and Reloader rolls saasapi, about once a
 day at the default TTL.
 
-Keep the schedule more frequent than a third of the TTL, and alert on a
+Keep the interval between runs below a third of the TTL (the chart's
+render fails otherwise): a JWT is renewed by the first run after only a
+third of its lifetime is left, so with a longer gap it can expire before
+the next run. Alert on a
 failed run: if every run fails for longer than the remaining two thirds,
 saasapi's connection is closed when the JWT expires, and saasapi refuses to
 start with an expired JWT until a run succeeds.

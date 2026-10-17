@@ -209,7 +209,7 @@ Corrections from the T6 build (2026-10-17):
   and reports not ready.
 - **L14, SaaS API JWT.** No scheduled path re-published it: the publisher
   ran only as a post-deploy hook. The refresh path is that publisher, now
-  also a CronJob (`credentialPublisher.refresh.schedule`, every 4 hours);
+  also a CronJob (`credentialPublisher.refresh.everyHours`, every 4 hours);
   it writes a new JWT once a third of the lifetime
   (`IMAS_SAASAPI_USER_JWT_TTL`, `credentialPublisher.userJWTTTL`, 24h) is
   left, the gateway JWT's two-thirds rule.

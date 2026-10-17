@@ -26,7 +26,7 @@ func signedKeySubmission(t *testing.T, kp nkeys.KeyPair, nonce, id string) KeySu
 func TestVerifyNKeySubmission(t *testing.T) {
 	now := time.Now()
 	old := nkeyNonces
-	nkeyNonces = &nkeyNonceStore{now: func() time.Time { return now }, exp: map[string]time.Time{}}
+	nkeyNonces = newNKeyNonceStore(func() time.Time { return now })
 	t.Cleanup(func() { nkeyNonces = old })
 	kp, _ := nkeys.CreateUser()
 	other, _ := nkeys.CreateUser()
@@ -68,26 +68,57 @@ func TestVerifyNKeySubmission(t *testing.T) {
 	}
 }
 
-// The nonce set is capped; expired nonces make room again.
-func TestNKeyNonceCap(t *testing.T) {
+// Issuing a nonce stores nothing, so a flood of GET /pki/nkeynonce can't
+// crowd out a legitimate registration (CodeRabbit on PR 277); a nonce that
+// another process issued, or one altered, is refused; and a submission
+// whose signature fails does not spend its nonce.
+func TestNKeyNonceStateless(t *testing.T) {
 	now := time.Now()
 	old := nkeyNonces
-	nkeyNonces = &nkeyNonceStore{now: func() time.Time { return now }, exp: map[string]time.Time{}}
+	nkeyNonces = newNKeyNonceStore(func() time.Time { return now })
 	t.Cleanup(func() { nkeyNonces = old })
-	for range maxNKeyNonces {
+	for range 50000 {
 		if _, err := IssueNKeyNonce(); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := IssueNKeyNonce(); !errors.Is(err, ErrNKeyNoncesExhausted) {
-		t.Fatalf("past the cap: err = %v", err)
+	if n := len(nkeyNonces.spent); n != 0 {
+		t.Fatalf("issuing nonces stored %d entries", n)
 	}
+	kp, _ := nkeys.CreateUser()
+	other, _ := nkeys.CreateUser()
+
+	n, _ := IssueNKeyNonce()
+	bad := signedKeySubmission(t, other, n, "web-01")
+	bad.NKey = signedKeySubmission(t, kp, n, "web-01").NKey
+	if err := VerifyNKeySubmission(bad); !errors.Is(err, ErrNKeySubmissionUnproven) {
+		t.Fatalf("a forged signature: %v", err)
+	}
+	if err := VerifyNKeySubmission(signedKeySubmission(t, kp, n, "web-01")); err != nil {
+		t.Fatalf("a failed attempt spent the nonce: %v", err)
+	}
+
+	foreign := newNKeyNonceStore(func() time.Time { return now })
+	fn, _ := foreign.issue()
+	if err := VerifyNKeySubmission(signedKeySubmission(t, kp, fn, "web-01")); !errors.Is(err, ErrNKeySubmissionUnproven) {
+		t.Fatalf("another process's nonce: %v", err)
+	}
+	n, _ = IssueNKeyNonce()
+	raw, _ := base64.RawURLEncoding.DecodeString(n)
+	raw[9] ^= 1
+	altered := base64.RawURLEncoding.EncodeToString(raw)
+	if err := VerifyNKeySubmission(signedKeySubmission(t, kp, altered, "web-01")); !errors.Is(err, ErrNKeySubmissionUnproven) {
+		t.Fatalf("an altered nonce: %v", err)
+	}
+
+	// Spent entries go once their nonce would have expired.
 	now = now.Add(nkeyNonceTTL)
-	if _, err := IssueNKeyNonce(); err != nil {
-		t.Fatalf("after the nonces expired: %v", err)
+	n, _ = IssueNKeyNonce()
+	if err := VerifyNKeySubmission(signedKeySubmission(t, kp, n, "web-02")); err != nil {
+		t.Fatal(err)
 	}
-	if len(nkeyNonces.exp) != 1 {
-		t.Fatalf("%d nonces held after the sweep, want 1", len(nkeyNonces.exp))
+	if got := len(nkeyNonces.spent); got != 1 {
+		t.Fatalf("%d spent entries after the first expired, want 1", got)
 	}
 }
 

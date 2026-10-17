@@ -212,10 +212,13 @@ openssl, go (to build `nk`), tar, sha256sum, and this repository checked out.
    The value goes from OpenBao to a private temporary file and the Secret,
    never to a command line or the log. The published JWT expires 24 hours
    after the publish Job minted it (`credentialPublisher.userJWTTTL`); the
-   chart's refresh CronJob writes the next one to OpenBao, and with no ESO
-   here a run that lasts longer re-runs this script (safe to re-run) and
-   then restarts saasapi (`kubectl rollout restart` of its Deployment) to
-   pick the new JWT up.
+   chart's refresh CronJob writes the next one to OpenBao at its first run
+   after only a third of that is left (16 to 20 hours after minting, with
+   the defaults). With no ESO here, a run that lasts longer re-runs this
+   script (safe to re-run) after that refresh run and before the old JWT
+   expires, then restarts saasapi (`kubectl rollout restart` of its
+   Deployment) to pick the new JWT up. Run earlier, it only copies the old
+   JWT again.
 9. Waits for OpenBao (Ready means unsealed), the PXC cluster, its pxc and
    haproxy StatefulSets, Valkey, RustFS, Keycloak and the edge; writes the
    outputs. It does not wait for farmer or saasapi, and installs the chart
