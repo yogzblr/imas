@@ -24,6 +24,7 @@ const (
 	testAKIA = "AKIAIOSFODNN7EXAMPLE"
 )
 
+// testSeed is a fresh NATS user seed.
 func testSeed(t *testing.T) string {
 	t.Helper()
 	kp, err := nkeys.CreateUser()
@@ -37,6 +38,7 @@ func testSeed(t *testing.T) string {
 	return string(seed)
 }
 
+// testPEM is a fresh ed25519 private key as a PKCS#8 PEM block.
 func testPEM(t *testing.T) string {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -124,6 +126,10 @@ func TestRedactStringPatterns(t *testing.T) {
 		{"token query", "https://x/y?token=abc123&z=1", []string{"abc123"}, []string{"&z=1"}},
 		{"X-Api-Key header", "curl -H 'X-Api-Key: zz9' u", []string{"zz9"}, []string{"X-Api-Key"}},
 		{"secret=", "client_secret=s3", []string{"=s3"}, []string{"client_secret="}},
+		{"--password value", "mysql -u root --password hunter2 db", []string{"hunter2"}, []string{"mysql -u root --password ", " db"}},
+		{"-p-style option", "tool --api-key\tk-77 --verbose", []string{"k-77"}, []string{"--api-key", "--verbose"}},
+		{"option at start", "--token abc123", []string{"abc123"}, []string{"--token "}},
+		{"option quoted", `cli --db-password "hunter 2"`, []string{"hunter 2"}, []string{"--db-password"}},
 		{"plain text", "systemctl restart nginx", nil, []string{"systemctl restart nginx"}},
 	}
 	for _, tt := range tests {
@@ -227,7 +233,7 @@ func TestFreeFormMethodsLogShapeOnly(t *testing.T) {
 		"shell.open":          `{"sprout_id":"web-1","shell":"/bin/QUIETSHELL","cli_eph_pub":"UVVJRVRFUEg="}`,
 		"auth.users.add":      `{"pubkey":"UQUIETUSER","role":"admin","username":"QUIETNAME","boxpub":"QUIETBOXPUB"}`,
 		"auth.users.resetkey": `{"pubkey":"UQUIETUSER","boxpub":"QUIETBOXPUB"}`,
-		"auth.rotatekey":      `{"box_pub":"QUIETBOXPUB","seed":"` + seed + `"}`,
+		"auth.rotatekey":      `{"pub":"QUIETBOXPUB","seed":"` + seed + `"}`,
 	}
 	if len(content) != len(freeFormMethods) {
 		t.Fatalf("%d fixtures for %d free-form methods", len(content), len(freeFormMethods))
@@ -254,13 +260,20 @@ func TestFreeFormMethodsLogShapeOnly(t *testing.T) {
 			if err := json.Unmarshal(raw, &line); err != nil {
 				t.Fatal(err)
 			}
+			// Only the method's schema keys are listed (rotatekey's "seed"
+			// is not one).
 			var m map[string]json.RawMessage
 			_ = json.Unmarshal([]byte(params), &m)
-			keys := make([]string, 0, len(m))
-			for k := range m {
-				keys = append(keys, k)
+			keys := []string{}
+			for _, k := range freeFormMethods[method] {
+				if _, ok := m[k]; ok {
+					keys = append(keys, k)
+				}
 			}
 			sort.Strings(keys)
+			if len(keys) == 0 {
+				t.Fatalf("fixture %s has none of %s's keys", params, method)
+			}
 			sum := sha256.Sum256([]byte(params))
 			want, _ := json.Marshal(map[string]any{"redacted": "free-form", "bytes": len(params), "sha256": hex.EncodeToString(sum[:]), "keys": keys})
 			if !jsonEqual(t, line.Params, want) {
@@ -277,7 +290,7 @@ func TestFreeFormMethodsLogShapeOnly(t *testing.T) {
 // log shape only, with no keys.
 func TestFreeFormNotObject(t *testing.T) {
 	for _, in := range []string{`["QUIET"]`, `{"QUIET"`, `"QUIET"`} {
-		out := freeFormShape(json.RawMessage(in))
+		out := freeFormShape(json.RawMessage(in), freeFormMethods["cmd.run"])
 		var got map[string]any
 		if err := json.Unmarshal(out, &got); err != nil {
 			t.Fatal(err)
@@ -288,6 +301,7 @@ func TestFreeFormNotObject(t *testing.T) {
 	}
 }
 
+// jsonEqual reports whether a and b hold the same JSON value.
 func jsonEqual(t *testing.T, a, b []byte) bool {
 	t.Helper()
 	var x, y any
@@ -367,5 +381,30 @@ func TestLogOrdinaryWriteMasked(t *testing.T) {
 	}
 	if !bytes.Contains(buf.Bytes(), []byte(`"sprout_id":"web-1"`)) {
 		t.Errorf("line lost sprout_id: %s", buf.Bytes())
+	}
+}
+
+// Targets can come from params (LogAction's extractTargets): they are
+// masked like any string.
+func TestLogRedactsTargets(t *testing.T) {
+	var buf bytes.Buffer
+	if err := NewLogger(&buf).Log(Entry{Action: "pki.accept", Targets: []string{"web-1", "password=hunter2"}}); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(buf.Bytes(), []byte("hunter2")) || !bytes.Contains(buf.Bytes(), []byte(`"targets":["web-1","password=[REDACTED]"]`)) {
+		t.Errorf("line = %s", buf.Bytes())
+	}
+}
+
+// A free-form method's unknown top-level key is user text: it is not
+// listed, whatever it holds.
+func TestFreeFormUnknownKeyOmitted(t *testing.T) {
+	var buf bytes.Buffer
+	params := `{"sprout_id":"web-1","name":"n","value":"v","QUIETKEY-hunter2":1}`
+	if err := NewLogger(&buf).Log(Entry{Action: "props.set", Parameters: json.RawMessage(params)}); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(buf.Bytes(), []byte("QUIETKEY")) || !bytes.Contains(buf.Bytes(), []byte(`"keys":["name","sprout_id","value"]`)) {
+		t.Errorf("line = %s", buf.Bytes())
 	}
 }

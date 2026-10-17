@@ -18,6 +18,7 @@ type auditSecrets struct {
 	password, apiKey, seed, jwt string
 }
 
+// newAuditSecrets is the fixture, with a fresh NATS seed.
 func newAuditSecrets(t *testing.T) auditSecrets {
 	t.Helper()
 	kp, err := nkeys.CreateUser()
@@ -56,6 +57,7 @@ func (s auditSecrets) params(t *testing.T, extra map[string]any) json.RawMessage
 	return data
 }
 
+// assertAbsent fails t if written is empty or holds any of the secrets.
 func (s auditSecrets) assertAbsent(t *testing.T, written string) {
 	t.Helper()
 	if written == "" {
@@ -68,6 +70,8 @@ func (s auditSecrets) assertAbsent(t *testing.T, written string) {
 	}
 }
 
+// withAuditBuffer sets a global audit logger writing to a new buffer for
+// the test.
 func withAuditBuffer(t *testing.T) *auditBuffer {
 	t.Helper()
 	buf := &auditBuffer{}

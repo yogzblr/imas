@@ -182,6 +182,12 @@ Build:
      keeps the name. `redactToken` is removed: a `token` key is now kept
      with the value `[REDACTED]`, like every key word. `auditCall` no longer
      drops params that are not JSON; `Log` writes their unparseable shape.
+   - **From review (2026-10-17):** a free-form method's `keys` lists only
+     the top-level keys its handler reads (`freeFormMethods` maps each
+     method to them): any other key name is user text, so it is left out.
+     The `name=value` pattern also covers a `-x`/`--x` option followed by
+     whitespace (`--password hunter2`). `Entry.Targets` is masked like a
+     string leaf, since `LogAction` takes targets from params.
 4. **`Entry.Error`.** Apply rule 3's string patterns to it (an error that
    quotes a secret is redacted). Do not change the other fields.
 5. **Dependency.** If masq is kept: `go get` the latest release, record it in

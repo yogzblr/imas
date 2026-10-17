@@ -1307,8 +1307,8 @@ manifest limiter) allow N times the configured rate with N replicas.
 Every audit line goes through one function (`audit.Logger.Log`), which
 redacts before it writes, so no caller can skip it. An ordinary write
 method's params are logged with secrets masked as `[REDACTED]`; a
-free-form method's params are logged only as their size, SHA-256 and
-top-level key names. The log (stdout, then the log platform, 30 days)
+free-form method's params are logged only as their size, SHA-256 and the
+top-level key names its handler reads (any other key name is left out). The log (stdout, then the log platform, 30 days)
 never contains:
 
 - the params of `cmd.run`, `cook`, `props.set`, `shell.open`,
@@ -1318,11 +1318,11 @@ never contains:
   `password`, `passwd`, `passphrase`, `secret`, `token`, `apikey`/`api_key`/`api-key`,
   `private`, `seed`, `credential`, `authorization`, `bearer`, `cookie`,
   `otp`, `sdb` or `key_material`, in any case;
-- in any string param or in the error text: a JWT, a PEM private key
-  block, an NATS seed, an AWS access key ID (`AKIA...`), a bearer
+- in any string param, target or the error text: a JWT, a PEM private
+  key block, an NATS seed, an AWS access key ID (`AKIA...`), a bearer
   credential, URL userinfo (`://user:pass@`), or the value of a
-  `name=value` or `name: value` pair whose name contains one of the words
-  above;
+  `name=value` or `name: value` pair, or of a `--name value` command
+  option, whose name contains one of the words above;
 - params that are not JSON or are over 1 MiB (only their size and SHA-256);
 - anything typed or printed in a shell session.
 

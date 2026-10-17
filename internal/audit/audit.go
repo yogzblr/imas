@@ -9,12 +9,13 @@
 // write method's params are logged with every secret masked: the value of
 // any key naming a secret (password, token, seed, api key, ...) at any
 // depth, and JWTs, PEM private keys, NATS seeds, AWS key IDs, bearer
-// credentials, URL userinfo and name=value secrets in any string. A
-// free-form method (command text, recipes, property values, shell
-// requests, public keys; freeFormMethods) never has its params logged:
-// only their size, SHA-256 and top-level key names. Params that are not
-// JSON, or over 1 MiB, are logged as size and hash only. The error text is
-// masked like a string param.
+// credentials, URL userinfo and name=value or --name value secrets in any
+// string. A free-form method (command text, recipes, property values,
+// shell requests, public keys; freeFormMethods) never has its params
+// logged: only their size, SHA-256 and the top-level key names its handler
+// reads. Params that are not JSON, or over 1 MiB, are logged as size and
+// hash only. The error text and the targets are masked like a string
+// param.
 //
 // Records go to stdout, never to a file: farmer runs with a read-only root
 // filesystem and no volume of its own. The log shipper (Fluent Bit) picks
