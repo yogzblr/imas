@@ -1,11 +1,11 @@
-# Hardening units from the P3 review walkthrough (S1, S2)
+# Hardening units from the P3 review walkthrough (S1, S2, S3, S4)
 
 Read `docs/briefs/ORCHESTRATOR.md` first: its session prompt (zero open items,
-repo-wide search, brief errors decided by a fixed order) applies to both
-units. Both come from the owner's walkthrough of `docs/security-review-pack.md`
+repo-wide search, brief errors decided by a fixed order) applies to all
+units. S1 and S2 come from the owner's walkthrough of `docs/security-review-pack.md`
 sections 3.3 (items 1 and 6) on 2026-10-14. Decisions below are final.
 
-Owner decisions (2026-10-14):
+Owner decisions (2026-10-14; S3 and S4: 2026-10-17):
 
 - **S1.** The bus loader never mounts the bus's TLS volume or the bus key,
   in either TLS mode. In `openbao` mode it gets the CA certificate from a
@@ -20,6 +20,15 @@ Owner decisions (2026-10-14):
   allowed by `CLAUDE.md`), and a small in-repo walker where it does not.
   Free-form content (command text, recipes, property values) is not logged;
   its hash is.
+
+- **S3.** A tenant may always submit, until its backlog is full; then it gets
+  a clear refusal at submit time, not failed items later. The dispatch caps
+  stay (they are the fairness control from review finding M5), with higher
+  defaults. Decided numbers are in the S3 section.
+- **S4.** A cook has a render budget of its own: total time, total rendered
+  bytes and total range iterations across all the recipes it includes, and a
+  lower include cap. Numbers are in the S4 section. This is review finding B4,
+  decided before dispatch is enabled.
 
 ## S1: the loader mounts the CA from a ConfigMap, never the bus TLS volume
 
@@ -194,3 +203,217 @@ Tests:
 
 Search gate: `audit.Entry{`, `Parameters`, `redactToken`, `LogAction`,
 `readOnlyActions` across `internal/`, `cmd/`, `docs/`.
+
+## S3: action backlog: higher dispatch defaults and a refusal when a tenant's backlog is full
+
+Source: P3 walkthrough 3.4 item 5, owner decision 2026-10-17. Today a tenant
+can submit batches (100 `asset_ids` per request, 1 request a second, burst 5)
+and every one is accepted with a 202, but items are sent at most
+`tenantConcurrency` (8) at a time per process, and an item still queued
+`SAASAPI_OUTBOX_ACTION_MAX_AGE` (15m) after acceptance fails as
+`expired_not_sent`. A tenant sending a batch for 1,000 sprouts with minute-long
+commands sees most items expire, with no error at submit time. The backlog is
+durable (`asset_action_items` in the saas schema) and survives a pod restart;
+that does not change.
+
+Scope: `internal/saasapi` (`sprout_actions.go`, `config.go`, `sweeper.go`,
+`dispatch_limits.go`, `errors.go`), `internal/natsapi/sprout_action.go`,
+`internal/migrations/saas` (one new migration), `deploy/helm/farmer`
+(templates, values, README, `chart_test.go`), `docs/api/saasapi.md`,
+`docs/api/saasapi-openapi.yaml`, `uat/` values if they set these keys, docs.
+
+Facts on main (2026-10-17), verify first:
+
+- `CreateSproutActionBatch` (`sprout_actions.go`) validates, resolves the
+  `asset_ids`, calls `createActionBatch`, which calls `createBatch` with a
+  `claim func(tx *gorm.DB) error` hook that runs first inside the transaction
+  and rolls everything back on error. Update rollouts also call `createBatch`.
+- Defaults: `defaultActionDispatchConcurrency` 64,
+  `defaultSelfUpdateDispatchConcurrency` 16,
+  `defaultActionDispatchTenantConcurrency` 8 (`dispatch_limits.go`);
+  `defaultActionMaxAge` 15m, bounds 1m to 1h (`sweeper.go`); farmer has the
+  same pool defaults (`IMAS_SPROUT_ACTION_CONCURRENCY`,
+  `IMAS_SELF_UPDATE_CONCURRENCY`, `IMAS_SPROUT_ACTION_TENANT_CONCURRENCY` in
+  `internal/natsapi/sprout_action.go`).
+- `LoadConfig` requires the tenant cap times 2 to be at most the cmd.run/cook
+  pool.
+- `asset_action_items` has primary key `(batch_id, asset_id)` and no index on
+  `tenant_id` and `status`.
+- Error responses use `writeErrorDetails` (`errors.go`); the per-tenant rate
+  limit answers 429 `rate_limited`.
+
+Decisions (final):
+
+1. **New defaults**, in code, in `deploy/helm/farmer/values.yaml` for both
+   `farmer.sproutActions` and `saasapi.actionDispatch`, and in the READMEs:
+   cmd.run/cook pool 256 (was 64); tenant cap 32 (was 8); self_update pool
+   stays 16. Farmer and saasapi change together, because saasapi's values must
+   stay at or below farmer's value times its replicas (existing README rule).
+   The half-of-the-pool rule stays and is satisfied (32 times 2 is at most
+   256). `SAASAPI_OUTBOX_ACTION_MAX_AGE` default becomes 30m; its bounds stay
+   1m to 1h. Update every test that asserts an old default.
+2. **A cap on a tenant's pending items.** New setting
+   `SAASAPI_ACTION_MAX_PENDING_PER_TENANT`: default 2000, an integer from 1 to
+   100000, refused at startup outside that range, same style as the other
+   dispatch settings. Helm key `saasapi.actionDispatch.maxPendingPerTenant`
+   (null emits no env var). "Pending" is a tenant's items in status `queued`
+   or `dispatching`; `running` items hold a dispatch slot and are not counted.
+3. **Where it is checked.** Only in `CreateSproutActionBatch`, never for update
+   rollouts (a rollout wave must not be blocked by a tenant's own backlog).
+   Use the `claim` hook of `createBatch`: inside the transaction, before the
+   batch row is written, count the tenant's pending items; if the count plus
+   the number of deduplicated `asset_ids` in this request exceeds the setting,
+   return a typed error that the handler turns into the refusal below. Nothing
+   is written on refusal and the request is refused as a whole, never
+   partially accepted. The count is a soft limit: two requests on different
+   replicas at the same moment may both pass, so the backlog can exceed the
+   setting by at most the items of the requests in flight (each at most 100,
+   and one request a second per tenant per pod). Say this in the code comment
+   and the docs.
+4. **The refusal.** HTTP 429, code `backlog_full`, message "this tenant has too
+   many actions waiting to be sent; wait for some to finish and send again",
+   `details` with integers `pending`, `limit`, `requested` and `available`
+   (`limit - pending`, never negative), and a `Retry-After: 60` header. A
+   `rate_limited` response is unchanged. Add `backlog_full` to the error list in
+   `docs/api/saasapi.md` and to `docs/api/saasapi-openapi.yaml` for the
+   endpoint, with a 429 response schema that carries `details`.
+5. **Index.** One new goose migration after the latest in
+   `internal/migrations/saas` (use the next number; read the directory, do not
+   guess) adds `idx_asset_action_items_tenant_status` on
+   `asset_action_items (tenant_id, status)`. Follow the style of the existing
+   migrations including the Down section, and add the migration test that the
+   neighbouring migrations have. Keep the gorm model tags consistent with it.
+6. **Docs.** In `docs/api/saasapi.md`, under the actions endpoint, say in
+   plain words: items are stored durably and sent in the background; at most
+   the tenant cap run at once per process; an item not sent within the max age
+   fails as `expired_not_sent` and never ran; the pending cap and the
+   `backlog_full` response; the throughput rule of thumb (cap divided by the
+   command's duration, per process). State the defaults.
+
+Tests:
+
+- Boundary: pending plus requested equal to the limit is accepted, one more
+  is refused; the refusal writes no batch or item rows; the details numbers are
+  right; `Retry-After` is set.
+- Another tenant with the same number of pending items is not affected.
+- `running`, `succeeded` and `failed` items are not counted; `queued` and
+  `dispatching` are.
+- An update rollout batch is accepted when the tenant is over the cap.
+- Config: the new setting's default, range, and a bad value refuses startup;
+  new defaults of the pools, tenant cap and max age; the half-of-the-pool rule
+  still enforced.
+- Farmer's new defaults (`internal/natsapi`) and the Helm render of both values
+  blocks, with and without `maxPendingPerTenant`, in `chart_test.go`.
+- The migration applies, and rolls back, on the test database used by the
+  neighbouring migration tests.
+
+Search gate: `defaultActionDispatchConcurrency`,
+`defaultActionDispatchTenantConcurrency`, `defaultActionMaxAge`,
+`ACTION_DISPATCH_TENANT_CONCURRENCY`, `SPROUT_ACTION_TENANT_CONCURRENCY`,
+`ACTION_MAX_AGE`, `tenantConcurrency`, `actionMaxAge`, `rate_limited`,
+`sproutActionRate` across `internal/`, `cmd/`, `deploy/`, `uat/`, `docs/`.
+
+## S4: a per-cook render budget (review finding B4)
+
+Source: `docs/security-review-2026-10-b.md` B4 and P3 walkthrough 3.4 item 6,
+owner decision 2026-10-17. Needs: S3 (both edit `deploy/helm/farmer` values,
+README and `chart_test.go`; S4 starts after S3 is merged to avoid conflicts).
+
+Today every limit applies to one render. A cook of a recipe that includes up to
+256 others costs the sum of all their renders, and each recipe is rendered
+twice per cook: once to find the includes (`collectAllIncludes`, through
+`extractIncludes`) and once to build the steps (`resolveRecipeSteps`). A tenant
+can upload such recipes, so one cook can take many CPU-seconds on a farmer
+replica shared with other tenants.
+
+Scope: `internal/cook` (`farmercook.go`, `helpers.go`), `internal/config`
+(`RecipeLimits`), `cmd/farmer/main.go`, `internal/saasapi` (`recipes.go`,
+`recipes_config.go`), `deploy/helm/farmer` (templates, values, README,
+`chart_test.go`), `docs/`.
+
+Facts on main (2026-10-17), verify first:
+
+- `newRenderState` gives each render its own deadline
+  (`RecipeRenderTimeout`, 2s) and range budget (`maxRangeIterations`, 10000);
+  `renderRecipeTemplate` and `ValidateRecipeSource` call it.
+- `maxRecipeIncludes = 256` (`helpers.go`), enforced in
+  `collectIncludesRecurse`.
+- Limits come from `config.RecipeLimits` (variables `IMAS_RECIPE_*`), are
+  installed by `initRecipeLimits` in `cmd/farmer/main.go` through
+  `cook.SetRenderLimits`, and are validated there. saasapi validates uploads
+  under the same values (`internal/saasapi/recipes_config.go`).
+- `ValidateRecipeSource` renders the top recipe only; it does not resolve
+  includes.
+- A time-limit failure surfaces to the caller as `cook.ErrTemplateTimeout`
+  (see `internal/saasapi/recipes.go` for how it is reported).
+
+Decisions (final):
+
+1. **One budget per cook**, created at the start of `resolveRecipeSteps` and
+   shared by both phases (include discovery and step building) and every
+   recipe in them. It has three counters, each charged by every render of the
+   cook: wall time spent inside `executeRecipeTemplate`, rendered output bytes,
+   and range iterations. Thread it through `collectAllIncludes`,
+   `collectIncludesRecurse`, `extractIncludes` and `renderRecipeTemplate` (a
+   context value or an explicit parameter; the session chooses, and removes the
+   old no-budget call paths so none is left). A render also stays inside its
+   own existing per-render limits.
+2. **Defaults and bounds**, set from the Helm chart like the existing limits:
+
+   | Setting | Env | Helm key under `farmer.recipes.templateLimits` | Default | Bounds |
+   |---|---|---|---|---|
+   | total render time per cook | `IMAS_RECIPE_COOK_RENDER_TIMEOUT` | `cookRenderTimeout` | 10s | at least `renderTimeout`, at most 5m |
+   | total rendered bytes per cook | `IMAS_RECIPE_COOK_MAX_RENDERED_BYTES` | `cookMaxRenderedBytes` | 8388608 | at least `maxRenderedBytes`, at most 256 MiB |
+   | total range iterations per cook | `IMAS_RECIPE_COOK_MAX_RANGE_ITERATIONS` | `cookMaxRangeIterations` | 100000 | at least `maxRangeIterations`, at most 100,000,000 |
+   | distinct recipes one cook may include | `IMAS_RECIPE_MAX_INCLUDES` | `maxIncludes` | 64 | 1 to 256 |
+
+   Extend `config.RecipeLimits`, `cook.RenderLimits`, `SetRenderLimits` (with
+   the same refuse-at-startup style and error messages as today), and the
+   startup log line. `maxRecipeIncludes` becomes the settable limit with 256 as
+   its hard maximum. farmer sets all four; saasapi gets only
+   `IMAS_RECIPE_MAX_INCLUDES` (it never cooks), in the saasapi Deployment
+   template as well.
+3. **When the budget runs out**, the cook fails with a new error
+   `ErrCookRenderBudget` (wrapping which counter ran out: time, bytes or
+   iterations), before anything is dispatched, and nothing is staged. The
+   caller sees it as the same kind of failure as `ErrTemplateTimeout` today
+   (follow how that is mapped to a response in every caller, including
+   saasapi's recipe routes, and map the new error the same way, with its own
+   message naming the counter and the limit).
+4. **At upload** (the saasapi recipe routes, REC.1): refuse a recipe whose own
+   rendered `include` list has more entries than `IMAS_RECIPE_MAX_INCLUDES`,
+   with the same message style as other upload validation failures. Includes
+   are not resolved at upload, because a recipe may include one uploaded later;
+   the cook-time budget is the enforcement. Say this in the code comment and in
+   the docs.
+5. **Docs**: describe the four settings, the defaults and that the budget covers
+   include discovery and step building together, in the farmer chart README,
+   the recipe documentation, and `docs/security-review-2026-10-b.md` (mark B4
+   fixed, naming this unit).
+
+Tests:
+
+- A cook whose recipes together exceed each counter fails with
+  `ErrCookRenderBudget` naming that counter; the same recipes under the limits
+  succeed. Use lowered limits in the test, as the existing render tests do.
+- The budget is shared: N recipes each at 60 percent of a counter fail on the
+  second, with no single render over its own limit.
+- Both phases are charged: a recipe set that fits one phase's cost but not
+  twice that fails.
+- Two concurrent cooks do not share a budget.
+- Include cap: 64 includes pass, 65 fail with the existing
+  `ErrInvalidFormat` wrapping and the configured number in the message; the
+  hard maximum 256 is accepted as a setting and 257 is refused at startup.
+- `SetRenderLimits`: every new bound (below the per-render value, above the
+  maximum, zero keeps the current value).
+- Upload: a recipe listing 65 includes is refused, 64 accepted, nothing stored.
+- Helm: both new value blocks render with and without overrides in
+  `chart_test.go`; saasapi gets only `IMAS_RECIPE_MAX_INCLUDES`.
+- Nothing in the cook path calls the old no-budget render (assert by test or
+  by the search gate).
+
+Search gate: `maxRecipeIncludes`, `newRenderState`, `renderRecipeTemplate`,
+`extractIncludes`, `collectAllIncludes`, `RecipeRenderTimeout`,
+`SetRenderLimits`, `RenderLimits`, `RecipeLimits`, `IMAS_RECIPE_`,
+`templateLimits`, `ErrTemplateTimeout` across `internal/`, `cmd/`, `deploy/`,
+`uat/`, `docs/`.
