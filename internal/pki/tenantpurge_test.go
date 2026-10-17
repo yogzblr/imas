@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
+
 	jwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
 
@@ -239,5 +241,47 @@ func TestPurgeTenant_ErasesOneTenantOnly(t *testing.T) {
 		if n != 0 {
 			t.Errorf("second purge deleted %d in %s", n, k)
 		}
+	}
+}
+
+// The tenant's box keypair, every version, leaves OpenBao KV; another
+// tenant's stays; a second purge finds nothing; a failed delete is
+// returned and the retry finishes it.
+func TestPurgeTenantBoxKeys(t *testing.T) {
+	kv := tenantboxtest.Start(t)
+	resetTenantX25519KeypairCache()
+	t.Cleanup(resetTenantX25519KeypairCache)
+	kv.SeedKeypair(t, tenantboxtest.TenantPath("t_a"), nil)
+	kv.SeedKeypair(t, tenantboxtest.TenantPath("t_a"), map[string]string{"origin": "rotated"})
+	kv.SeedKeypair(t, tenantboxtest.TenantPath("t_ab"), nil)
+	ctx := context.Background()
+	n, err := PurgeTenantBoxKeys(ctx, "t_a")
+	if err != nil || n != 1 {
+		t.Fatalf("PurgeTenantBoxKeys = %d, %v; want 1", n, err)
+	}
+	if kv.Has(tenantboxtest.TenantPath("t_a")) {
+		t.Error("t_a's keypair (or a version of it) is still in KV")
+	}
+	if !kv.Has(tenantboxtest.TenantPath("t_ab")) {
+		t.Error("t_ab's keypair was deleted")
+	}
+	if n, err := PurgeTenantBoxKeys(ctx, "t_a"); err != nil || n != 0 {
+		t.Fatalf("second purge = %d, %v", n, err)
+	}
+	kv.FailMetadataDeletes = 1
+	kv.SeedKeypair(t, tenantboxtest.TenantPath("t_c"), nil)
+	if _, err := PurgeTenantBoxKeys(ctx, "t_c"); err == nil {
+		t.Error("a failed delete reported success")
+	}
+	if n, err := PurgeTenantBoxKeys(ctx, "t_c"); err != nil || n != 1 || kv.Has(tenantboxtest.TenantPath("t_c")) {
+		t.Errorf("retried purge = %d, %v", n, err)
+	}
+	// A keypair that no longer parses is deleted all the same.
+	kv.Put(tenantboxtest.TenantPath("t_d"), map[string]string{"pub": "not base64", "priv": "-"})
+	if n, err := PurgeTenantBoxKeys(ctx, "t_d"); err != nil || n != 1 || kv.Has(tenantboxtest.TenantPath("t_d")) {
+		t.Errorf("purge of a malformed keypair = %d, %v", n, err)
+	}
+	if _, err := PurgeTenantBoxKeys(ctx, "t c"); err == nil {
+		t.Error("an invalid tenant ID was accepted")
 	}
 }

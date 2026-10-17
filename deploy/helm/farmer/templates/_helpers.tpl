@@ -790,9 +790,18 @@ path "{{ .Values.tls.openbao.pkiMount }}/issue/{{ .Values.tls.openbao.role }}" {
 # <kvPath>/tenants/ ("+" matches exactly one path segment: a tenant ID,
 # nothing deeper), and nothing else: no access to <kvPath> itself (the
 # shared legacy keypair and its adoption are gone, security review
-# 2026-10 H3), and no metadata, delete or destroy.
+# 2026-10 H3).
 path "{{ $t.kvMount }}/data/{{ $t.kvPath }}/tenants/+" {
   capabilities = ["create", "update", "read"]
+}
+
+# Erasing an offboarded tenant (S6, internal/pki tenantpurge.go
+# PurgeTenantBoxKeys): delete on a tenant's metadata removes its keypair,
+# every version and the metadata, for good. Only that: no metadata read
+# or list, no soft delete or destroy of single versions, and nothing
+# outside <kvPath>/tenants/ (never the platform keypair).
+path "{{ $t.kvMount }}/metadata/{{ $t.kvPath }}/tenants/+" {
+  capabilities = ["delete"]
 }
 
 # The platform keypair and the control-plane public keys (internal/pki

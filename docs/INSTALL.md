@@ -508,8 +508,8 @@ curl -s "${H[@]}" https://saasapi.example.internal/v1/tenants/t_mfrggzdfmztwq2lk
 After `SAASAPI_TENANT_PURGE_AFTER` (default `720h`, 30 days; Helm
 `saasapi.tenantPurge.after`) saasapi purges the tenant: farmer deletes its
 Valkey keys, its farmer-schema rows, its objects (recipes, recipe audit,
-staged recipes, job output, sprout JWTs) and destroys its OpenBao Transit
-keys; saasapi deletes its enrollment keys, asset links, action batches and
+staged recipes, job output, sprout JWTs), its payload-encryption keypair
+in OpenBao KV, and destroys its OpenBao Transit keys; saasapi deletes its enrollment keys, asset links, action batches and
 update policy, and the status becomes `purged`. What stays is a tombstone
 that keeps the tenant ID from being reused and the tenant locked out. A
 purge that fails leaves the tenant `offboarded` with `last_error`, and is

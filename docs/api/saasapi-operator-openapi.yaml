@@ -178,7 +178,8 @@ paths:
         (SAASAPI_TENANT_PURGE_AFTER): a `provisioning_jobs` row of type
         `purge` with trigger `operator`, published sealed on
         `internal.tenant.purge`. Farmer erases the tenant's Valkey keys,
-        farmer-schema rows, objects and Transit keys; on its successful
+        farmer-schema rows, objects, KV keypair and Transit keys; on its
+        successful
         result saasapi deletes the tenant's saas rows and sets it
         `purged`. Only a tombstone stays (docs/api/saasapi.md, "Tenants").
         No request body. Poll the tenant API's `GET

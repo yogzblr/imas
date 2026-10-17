@@ -42,6 +42,7 @@ import (
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/pki/natskeys"
 	"github.com/yogzblr/imas/internal/pki/pkitest"
+	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 	"github.com/yogzblr/imas/internal/props"
 	"github.com/yogzblr/imas/internal/rbac"
 	"github.com/yogzblr/imas/internal/tenantpurge"
@@ -73,6 +74,7 @@ type purgeEnv struct {
 	recipes, jobs, sproutJs *objectstoretest.Server
 	mr                      *miniredis.Miniredis
 	transit                 *pkitest.Transit
+	bao                     *tenantboxtest.Server
 	publisher               *fakeAccountPublisher
 	accountPub              map[string]string
 }
@@ -101,6 +103,7 @@ func setupPurgeEnv(t *testing.T) *purgeEnv {
 	})
 	config.FarmerOrganization = "imas-test"
 	e.transit = pkitest.Farmer(t)
+	e.bao = tenantboxtest.Start(t)
 	e.publisher = &fakeAccountPublisher{jwts: map[string]string{}}
 	pki.SetAccountPublisher(e.publisher)
 	t.Cleanup(func() { pki.SetAccountPublisher(nil) })
@@ -197,6 +200,7 @@ func (e *purgeEnv) seed(t *testing.T, tenant string) {
 	e.mr.Set("imas:accepted:{"+tenant+":web-01}", "1")
 	e.transit.Fake.NewKey(natskeys.TenantSigningKey(tenant))
 	e.transit.Fake.NewKey(natskeys.TenantAccountKey(tenant))
+	e.bao.SeedKeypair(t, tenantboxtest.TenantPath(tenant), nil)
 }
 
 // offboard marks tenant deprovisioned in pki_tenants and soft-deletes its
@@ -244,6 +248,9 @@ func (e *purgeEnv) state(t *testing.T, tenant string) []string {
 		if e.transit.Fake.Has(name) {
 			out = append(out, "transit "+name)
 		}
+	}
+	if e.bao.Has(tenantboxtest.TenantPath(tenant)) {
+		out = append(out, "kv "+tenantboxtest.TenantPath(tenant))
 	}
 	if j := e.publisher.jwts[e.accountPub[tenant]]; j != "" {
 		ac, err := jwt.DecodeAccountClaims(j)
@@ -305,6 +312,9 @@ func TestTenantPurge_ErasesOnlyItsTenant(t *testing.T) {
 	if res.Counts["transit.keys"] != 2 {
 		t.Errorf("transit.keys = %d", res.Counts["transit.keys"])
 	}
+	if res.Counts["kv.tenant_box_keys"] != 1 {
+		t.Errorf("kv.tenant_box_keys = %d", res.Counts["kv.tenant_box_keys"])
+	}
 	if got, want := e.state(t, "t_a"), e.tombstone("t_a"); !slices.Equal(got, want) {
 		t.Errorf("t_a after the purge:\n%s\nwant only the tombstone:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
@@ -332,7 +342,7 @@ func TestTenantPurge_ErasesOnlyItsTenant(t *testing.T) {
 		t.Fatal(err)
 	}
 	if entry.Action != "internal.tenant.purge" || !entry.Success || entry.Params.TenantID != "t_a" || entry.Params.JobID != "pj_purge_t_a" ||
-		entry.Params.Trigger != "retention" || entry.Params.Counts["objects.recipes"] != 2 || entry.Params.Status != "purged" {
+		entry.Params.Trigger != "retention" || entry.Params.Counts["objects.recipes"] != 2 || entry.Params.Counts["kv.tenant_box_keys"] != 1 || entry.Params.Status != "purged" {
 		t.Errorf("audit entry %+v", entry)
 	}
 	for _, leak := range []string{"secret-recipe-name", "secret-prop", "web-01", "content of", "Customer", "UOLD", "box-t_a", "cli-t_a", "tenants/", e.accountPub["t_a"]} {
@@ -574,16 +584,28 @@ func TestTenantPurge_SealedWire(t *testing.T) {
 	expectNoMsg(t, results, "a malformed purge request")
 }
 
-// The KV step deletes nothing while no KV path holds tenant material,
-// and refuses to pretend otherwise if one is ever listed.
+// The KV step deletes the tenant's keypair, every version, and nothing
+// of another tenant's; a failed delete fails the step, and running it
+// again finishes it.
 func TestPurgeTenantKV(t *testing.T) {
-	if counts, err := purgeTenantKV(context.Background(), "t_a"); err != nil || len(counts) != 0 {
+	e := setupPurgeEnv(t)
+	e.bao.FailMetadataDeletes = 1
+	if _, err := purgeTenantKV(context.Background(), "t_a"); err == nil {
+		t.Fatal("a failed KV delete was reported a success")
+	}
+	if !e.bao.Has(tenantboxtest.TenantPath("t_a")) {
+		t.Fatal("the keypair went although the delete failed")
+	}
+	counts, err := purgeTenantKV(context.Background(), "t_a")
+	if err != nil || counts["kv.tenant_box_keys"] != 1 {
 		t.Fatalf("purgeTenantKV = %v, %v", counts, err)
 	}
-	orig := tenantpurge.KVPaths
-	tenantpurge.KVPaths = []string{"secret/tenants/t_a"}
-	t.Cleanup(func() { tenantpurge.KVPaths = orig })
-	if _, err := purgeTenantKV(context.Background(), "t_a"); err == nil {
-		t.Error("a listed KV path was silently left")
+	for tenant, want := range map[string]bool{"t_a": false, "t_ab": true, "t_b": true} {
+		if got := e.bao.Has(tenantboxtest.TenantPath(tenant)); got != want {
+			t.Errorf("%s keypair present = %v, want %v", tenant, got, want)
+		}
+	}
+	if counts, err := purgeTenantKV(context.Background(), "t_a"); err != nil || counts["kv.tenant_box_keys"] != 0 {
+		t.Errorf("purgeTenantKV again = %v, %v", counts, err)
 	}
 }

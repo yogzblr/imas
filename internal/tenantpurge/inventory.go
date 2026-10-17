@@ -135,11 +135,15 @@ func ValkeyPattern(prefix, tenantID string) string {
 	return prefix + "{" + tenantID + ":*"
 }
 
-// KVPaths are the OpenBao KV paths holding a tenant's material: none.
-// farmer's long-running process has no KV credential at all
-// (internal/openbaokv); the KV material in OpenBao (NATS seeds, the
-// Valkey password, the SaaS API credential) belongs to the platform.
-var KVPaths = []string{}
+// KVPaths are the OpenBao KV v2 secrets holding a tenant's material,
+// <tenant_id> standing for the tenant: its payload-encryption keypair
+// (internal/pki tenantbox.go, farmer's IMAS_TENANTBOX_OPENBAO_* client),
+// one secret per tenant under farmer.openbao.tenantBox.kvMount and
+// kvPath. The purge's KV step deletes it whole, every version and its
+// metadata (internal/pki PurgeTenantBoxKeys).
+var KVPaths = []string{
+	"<kvMount>/data/<kvPath>/tenants/<tenant_id>",
+}
 
 // Transit: a tenant's two keys, nats-tsign-<tenant_id> and
 // nats-tacct-<tenant_id> (internal/pki/natskeys TenantSigningKey and

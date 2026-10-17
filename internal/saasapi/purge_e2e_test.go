@@ -5,8 +5,9 @@ package saasapi
 // offboarded, then purged on an operator's request. The SaaS API seals
 // internal.tenant.purge, farmer's real handler runs the real erasure
 // (Valkey, the farmer schema, the tombstone's lock-out pushed to the real
-// bus, the buckets, the Transit keys) and answers sealed, and saasapi
-// deletes its own rows and records the tenant purged.
+// bus, the buckets, the tenant's KV keypair, the Transit keys) and
+// answers sealed, and saasapi deletes its own rows and records the
+// tenant purged.
 
 import (
 	"context"
@@ -27,6 +28,7 @@ import (
 	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/pki/natskeys"
+	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 	"github.com/yogzblr/imas/internal/props"
 	"github.com/yogzblr/imas/internal/rbac"
 	"github.com/yogzblr/imas/internal/tenantpurge"
@@ -91,6 +93,7 @@ func TestProvisioningBridge_EndToEnd_OffboardedToPurged(t *testing.T) {
 		}
 	}
 	mr.Set("imas:heartbeat:{"+tenantID+":web-01}", "1")
+	env.bao.SeedKeypair(t, tenantboxtest.TenantPath(tenantID), nil)
 	seedSaasRows(t, env.saasDB, tenantID)
 
 	if w := env.do(t, "DELETE", "/v1/tenants/"+tenantID, tenantID, ""); w.Code != http.StatusAccepted {
@@ -139,6 +142,9 @@ func TestProvisioningBridge_EndToEnd_OffboardedToPurged(t *testing.T) {
 		if env.transit.Fake.Has(name) {
 			t.Errorf("Transit key %s not destroyed", name)
 		}
+	}
+	if env.bao.Has(tenantboxtest.TenantPath(tenantID)) {
+		t.Error("the tenant's keypair is still in OpenBao KV")
 	}
 	for table, n := range saasRowCounts(t, env.saasDB, tenantID) {
 		if n != 0 {

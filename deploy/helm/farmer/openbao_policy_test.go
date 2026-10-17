@@ -34,6 +34,7 @@ import (
 
 	"github.com/yogzblr/imas/internal/openbao"
 	"github.com/yogzblr/imas/internal/openbao/openbaotest"
+	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/pki/natskeys"
 )
 
@@ -460,5 +461,88 @@ func TestOpenBaoFarmerPolicyKeySet(t *testing.T) {
 	}
 	if status, body := s.admin.Call(token, http.MethodDelete, s.mount+"/keys/other-client-key", nil); status/100 != 2 {
 		t.Fatalf("farmer destroying another client's key: %d %s; the accepted cost in the README no longer holds, update it", status, body)
+	}
+}
+
+// TestOpenBaoFarmerTenantBoxPolicy: the rendered imas-farmer-tenantbox
+// policy, on a fresh KV v2 mount, lets farmer create a tenant's keypair
+// and, at a purge (S6), delete it whole through internal/pki's own client
+// (every version and the metadata); it refuses a metadata read or list,
+// a soft delete or destroy of single versions, and any delete outside
+// <kvPath>/tenants/.
+func TestOpenBaoFarmerTenantBoxPolicy(t *testing.T) {
+	addr, rootToken := os.Getenv("IMAS_TEST_OPENBAO_ADDR"), os.Getenv("IMAS_TEST_OPENBAO_TOKEN")
+	if addr == "" || rootToken == "" {
+		t.Skip("IMAS_TEST_OPENBAO_ADDR and IMAS_TEST_OPENBAO_TOKEN not set; this test needs a real OpenBao")
+	}
+	b := make([]byte, 4)
+	rand.Read(b)
+	suffix := hex.EncodeToString(b)
+	mount := "tenantboxpolicytest-" + suffix
+	admin := openbaotest.NewAdmin(t, addr, rootToken)
+	admin.Must(http.MethodPost, "sys/mounts/"+mount, map[string]any{"type": "kv", "options": map[string]string{"version": "2"}})
+	t.Cleanup(func() { admin.Delete("sys/mounts/" + mount) })
+
+	cm := find(t, mustRender(t), "ConfigMap", "t-farmer-openbao-policies")
+	hcl := strings.ReplaceAll(get(cm, "data", "imas-farmer-tenantbox.hcl").(string), `"secret/`, `"`+mount+`/`)
+	name := "imas-farmer-tenantbox-" + suffix
+	admin.Must(http.MethodPut, "sys/policies/acl/"+name, map[string]any{"policy": hcl})
+	t.Cleanup(func() { admin.Delete("sys/policies/acl/" + name) })
+	var tok struct {
+		Auth struct {
+			ClientToken string `json:"client_token"`
+		} `json:"auth"`
+	}
+	if err := json.Unmarshal(admin.Must(http.MethodPost, "auth/token/create",
+		map[string]any{"policies": []string{name}, "ttl": "10m"}), &tok); err != nil || tok.Auth.ClientToken == "" {
+		t.Fatalf("creating token: %v", err)
+	}
+	token := tok.Auth.ClientToken
+
+	base := "imas/tenant-x25519"
+	t.Setenv(pki.EnvTenantBoxOpenBaoAddr, addr)
+	t.Setenv(pki.EnvTenantBoxOpenBaoKVMount, mount)
+	t.Setenv(pki.EnvTenantBoxOpenBaoKVPath, base)
+	t.Setenv(pki.EnvTenantBoxOpenBaoAuthMethod, pki.TenantBoxAuthMethodToken)
+	t.Setenv(pki.EnvTenantBoxOpenBaoToken, token)
+	for _, tenant := range []string{"acme", "acme2"} {
+		pki.InvalidateTenantBoxKeys(tenant)
+		t.Cleanup(func() { pki.InvalidateTenantBoxKeys(tenant) })
+		if _, err := pki.GetTenantX25519PublicKey(tenant); err != nil {
+			t.Fatalf("farmer creating %s's keypair: %v", tenant, err)
+		}
+	}
+	// A second version, as a rotation leaves it.
+	admin.Must(http.MethodPost, mount+"/data/"+base+"/tenants/acme", map[string]any{"data": map[string]string{"pub": "x", "priv": "y"}})
+	admin.Must(http.MethodPost, mount+"/data/"+base+"/platform", map[string]any{"data": map[string]string{"pub": "p", "priv": "q"}})
+
+	for _, c := range []refusedCall{
+		{http.MethodGet, "/metadata/" + base + "/tenants/acme", nil},
+		{"LIST", "/metadata/" + base + "/tenants", nil},
+		{http.MethodDelete, "/data/" + base + "/tenants/acme", nil},
+		{http.MethodPost, "/delete/" + base + "/tenants/acme", map[string]any{"versions": []int{1}}},
+		{http.MethodPost, "/destroy/" + base + "/tenants/acme", map[string]any{"versions": []int{1}}},
+		{http.MethodDelete, "/metadata/" + base + "/platform", nil},
+		{http.MethodDelete, "/metadata/" + base + "/tenants/acme/deeper", nil},
+		{http.MethodDelete, "/metadata/" + base, nil},
+	} {
+		if status, body := admin.Call(token, c.method, mount+c.path, c.body); status != http.StatusForbidden {
+			t.Errorf("farmer %s %s: status %d (%s), want 403", c.method, c.path, status, strings.TrimSpace(string(body)))
+		}
+	}
+
+	if n, err := pki.PurgeTenantBoxKeys(t.Context(), "acme"); err != nil || n != 1 {
+		t.Fatalf("farmer purging acme's keypair: %d, %v", n, err)
+	}
+	if status, _ := admin.Call("", http.MethodGet, mount+"/metadata/"+base+"/tenants/acme", nil); status != http.StatusNotFound {
+		t.Errorf("acme's metadata after the purge: status %d, want 404", status)
+	}
+	for _, p := range []string{"/tenants/acme2", "/platform"} {
+		if status, _ := admin.Call("", http.MethodGet, mount+"/data/"+base+p, nil); status != http.StatusOK {
+			t.Errorf("%s after acme's purge: status %d, want 200", p, status)
+		}
+	}
+	if n, err := pki.PurgeTenantBoxKeys(t.Context(), "acme"); err != nil || n != 0 {
+		t.Errorf("purging acme again: %d, %v; want 0 and no error", n, err)
 	}
 }

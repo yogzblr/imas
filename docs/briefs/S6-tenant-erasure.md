@@ -184,12 +184,17 @@ building, deployable and tested):
    `tenantpurge.SaasTables` when it applies farmer's successful result,
    before recording it, so a failure leaves the job pending and the next
    result finishes it. The order of decision 7 holds for farmer's steps.
-4. **OpenBao KV holds no tenant material.** farmer's long-running process
-   has no KV credential (`internal/openbaokv`); the KV paths are the
-   platform's (NATS seeds, the Valkey password, the SaaS API credential).
-   The KV step stays in the order and deletes nothing;
-   `tenantpurge.KVPaths` is empty and `TestInventoryKV` fails if a new KV
-   user appears.
+4. **OpenBao KV holds one tenant secret: its payload-encryption keypair.**
+   farmer's tenant box client (`internal/pki` tenantbox.go,
+   `IMAS_TENANTBOX_OPENBAO_*`) keeps one KV v2 secret per tenant at
+   `<kvPath>/tenants/<tenant_id>`. The KV step deletes it whole, every
+   version and its metadata (`pki.PurgeTenantBoxKeys`, one `DELETE` on the
+   metadata path), and farmer's tenantbox policy gains `delete` on
+   `<kvPath>/tenants/+` metadata only. The other KV material is the
+   platform's (the platform keypair and control-plane public keys, the
+   NATS trust copy, the SaaS API credential). `tenantpurge.KVPaths` lists
+   the tenant path, and `TestInventoryKV` fails on a KV user that is not
+   decided.
 5. **Two more columns.** Besides `tenants.offboarded_at`, migration 00010
    adds `tenants.purge_claimed_at` (claimed in the purge job's transaction,
    so at most one purge job is pending and the sweeper retries at most

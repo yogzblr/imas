@@ -2,9 +2,10 @@ package pki
 
 // Erasing an offboarded tenant's farmer-side data (S6,
 // docs/briefs/S6-tenant-erasure.md): the guards, the farmer-schema rows,
-// the sprout JWT bucket prefix, the tombstone's own data and, last, the
-// tenant's Transit keys. internal/natsapi's tenant_purge.go runs these in
-// order for internal.tenant.purge. FLAG FOR SECURITY REVIEW: these delete
+// the sprout JWT bucket prefix, the tombstone's own data, the tenant's
+// box keypair in OpenBao KV and, last, the tenant's Transit keys.
+// internal/natsapi's tenant_purge.go runs these in order for
+// internal.tenant.purge. FLAG FOR SECURITY REVIEW: these delete
 // a tenant's trust material and state for good.
 //
 // What stays is the tombstone: the pki_tenants row, deleted, with its
@@ -23,6 +24,7 @@ import (
 	jwt "github.com/nats-io/jwt/v2"
 
 	log "github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/openbao"
 	"github.com/yogzblr/imas/internal/tenantpurge"
 )
 
@@ -167,6 +169,42 @@ func scrubTombstoneLocked(ctx context.Context, mat *natsAuthMaterial, tenantID s
 		return "", err
 	}
 	return signed, nil
+}
+
+// PurgeTenantBoxKeys deletes tenantID's payload-encryption keypair from
+// OpenBao KV v2 (tenantbox.go): every version of its one secret and the
+// secret's metadata, with DELETE <mount>/metadata/<base>/tenants/<tenant>
+// (`bao kv metadata delete`), which OpenBao 2.7.1 answers 204 whether or
+// not the secret exists. It drops this replica's cached copy too; other
+// replicas' caches go within tenantBoxStaleLimit. It returns 1 if the
+// secret had a current version, else 0. Idempotent. The private
+// half of this keypair opens the tenant's sealed payloads, so it is
+// tenant material a purge must not leave behind.
+func PurgeTenantBoxKeys(ctx context.Context, tenantID string) (int64, error) {
+	if !IsValidTenantID(tenantID) {
+		return 0, ErrTenantIDInvalid
+	}
+	c, err := newTenantBoxClientFromEnv()
+	if err != nil {
+		return 0, err
+	}
+	defer c.Close()
+	path := c.tenantPath(tenantID)
+	// Only whether a current version exists, for the count: never parsed,
+	// so a malformed keypair can't keep the purge from deleting it.
+	secret, err := c.ob.Read(ctx, c.mount+"/data/"+path, nil)
+	if err != nil && !openbao.IsNotFound(err) {
+		return 0, fmt.Errorf("%w: tenant %q: %w", ErrTenantBoxReadFailed, tenantID, err)
+	}
+	found := err == nil && secret != nil && secret.Data["data"] != nil
+	if _, err := c.ob.Delete(ctx, c.mount+"/metadata/"+path); err != nil {
+		return 0, fmt.Errorf("%w: deleting tenant %q's keypair: %w", ErrTenantBoxWriteFailed, tenantID, err)
+	}
+	InvalidateTenantBoxKeys(tenantID)
+	if found {
+		return 1, nil
+	}
+	return 0, nil
 }
 
 // DestroyTenantKeys permanently deletes tenantID's two Transit keys

@@ -488,9 +488,11 @@ later, by a purge:
   and CLI box keys, roles, user roles, cohorts, job status); its objects
   (`tenants/<id>/` in the recipe bucket, recipes and recipe audit;
   `sprouts/<id>/`, staged recipes; `jobs/<id>/` in the job bucket;
-  `<id>/` in the sprout JWT bucket); and last its Transit keys,
-  destroyed (`deletion_allowed`, then delete; see the policy notes
-  above). Then saasapi deletes the tenant's enrollment keys, asset links,
+  `<id>/` in the sprout JWT bucket); its payload-encryption keypair in
+  OpenBao KV (`<kvPath>/tenants/<id>` under `farmer.openbao.tenantBox`,
+  every version and the metadata, by one delete on its metadata); and
+  last its Transit keys, destroyed (`deletion_allowed`, then delete; see
+  the policy notes above). Then saasapi deletes the tenant's enrollment keys, asset links,
   action batches and items and update policy. Every step deletes by
   `tenant_id` equality or the exact tenant prefix, in batches; a step that
   fails stops the run, the tenant stays offboarded with `last_error` in
@@ -508,9 +510,11 @@ later, by a purge:
   on a bus node started empty. A purged tenant accepts no new data:
   every tenant route but `GET` answers 404 or 409 for it.
 - **Grants.** farmer's object store user has delete on the sprout JWT
-  bucket (Versity plan, UAT RustFS policy); farmer's Transit policy
-  allows the key destruction above. A purge cannot be undone: an OpenBao
-  snapshot taken before it is the only way back for the keys
+  bucket (Versity plan, UAT RustFS policy); farmer's tenantbox policy
+  has `delete` on `<kvPath>/tenants/+` metadata, nothing else there;
+  farmer's Transit policy allows the key destruction above. A purge
+  cannot be undone: an OpenBao snapshot taken before it is the only way
+  back for the keys
   ([`docs/OPENBAO-RUNBOOK.md`](../../../docs/OPENBAO-RUNBOOK.md) §5.3).
 
 ## The SaaS API credential hand-off
@@ -650,7 +654,7 @@ Each OpenBao client runs under its own role and gets exactly one policy.
 | farmer, API certificate (`tls.mode=openbao`) | `IMAS_CERTS_OPENBAO_*` | `imas-farmer-certs` (`tls.openbao.k8sRole`) | `imas-farmer-certs`: `pki/issue/imas-farmer` |
 | farmer, gateway JWT signer | `IMAS_GATEWAY_OPENBAO_*` | `imas-farmer-gateway` | `imas-farmer-gateway`: sign and read on `transit/*/imas-gateway-jwt` only |
 | farmer, NATS signer (P21 slice 1) | `IMAS_NATSSIGN_OPENBAO_*` | `imas-farmer-natssign` (`farmer.openbao.natsSign.k8sRole`) | `imas-farmer-natssign` (file): read the three platform keys, sign with `nats-operator-signing` and `nats-sys-account`, never `nats-operator`; create and read keys on `transit/keys/+` (one path segment, so never `rotate`), soft-delete on `transit/keys/+/soft-delete` except the platform and gateway keys, destroy (config `deletion_allowed="true"` only, then delete) one-segment keys except the platform and gateway keys (the purge, S6), sign with `nats-tsign-*` only |
-| farmer, tenant box keypairs | `IMAS_TENANTBOX_OPENBAO_*` | `imas-farmer-tenantbox` | `imas-farmer-tenantbox`: KV v2 read/write on `secret/data/imas/tenant-x25519/tenants/+` (one secret per tenant), and read only on `.../platform` and `.../controlplane-pub` (J.1), nothing else |
+| farmer, tenant box keypairs | `IMAS_TENANTBOX_OPENBAO_*` | `imas-farmer-tenantbox` | `imas-farmer-tenantbox`: KV v2 read/write on `secret/data/imas/tenant-x25519/tenants/+` (one secret per tenant), delete only on `secret/metadata/imas/tenant-x25519/tenants/+` (a tenant purge, S6), and read only on `.../platform` and `.../controlplane-pub` (J.1), nothing else |
 | the publish Job | `IMAS_SAASAPI_CRED_OPENBAO_*` | `imas-saasapi-cred-publisher` | `imas-saasapi-cred-publisher` (reviewed copy) |
 | the publish Job, NATS signer | `IMAS_NATSSIGN_OPENBAO_*` | `imas-natssign-publisher` (`credentialPublisher.natsSign.k8sRole`) | `imas-nats-sys-signer` (file): read the three platform keys, sign with `nats-sys-account` only |
 | the bootstrap Job's `nats-trust` | `IMAS_NATSBOOT_OPENBAO_*` | none: a 10-minute handoff token | `imas-nats-bootstrap` (file, ephemeral): create and read the three platform keys (exact paths), sign with all three, revoke itself; deleted by the Job |

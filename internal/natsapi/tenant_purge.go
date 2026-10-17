@@ -14,11 +14,11 @@ package natsapi
 // Then the steps, in an order that leaves the tenant locked out and the
 // rest re-runnable if the process dies part way (S6 decision 7): live
 // caches (Valkey), farmer-schema rows, the tombstone's own data, object
-// store prefixes, OpenBao KV (none: tenantpurge.KVPaths), and the
-// tenant's Transit keys last. Each step deletes by tenant_id equality or
-// an exact tenant prefix, in bounded batches, under its own timeout. A
-// step that fails stops the run: the result is purge_incomplete, naming
-// the step, with the counts so far. Running the purge again (the SaaS
+// store prefixes, OpenBao KV (the tenant's keypair, tenantpurge.KVPaths),
+// and the tenant's Transit keys last. Each step deletes by tenant_id
+// equality or an exact tenant prefix, in bounded batches, under its own
+// timeout. A step that fails stops the run: the result is
+// purge_incomplete, naming the step, with the counts so far. Running the purge again (the SaaS
 // API's sweeper does, at most daily, or an operator at once) finishes it;
 // a purge of a tenant already purged deletes nothing and succeeds.
 //
@@ -124,15 +124,13 @@ func purgeTenantObjects(ctx context.Context, tenantID string) (map[string]int64,
 	return counts, err
 }
 
-// purgeTenantKV is the OpenBao KV step. No KV path holds a tenant's
-// material (tenantpurge.KVPaths is empty, and farmer's process has no KV
-// credential), so it deletes nothing; it stays a step so the order of
-// decision 7 holds if that ever changes.
-func purgeTenantKV(context.Context, string) (map[string]int64, error) {
-	if len(tenantpurge.KVPaths) != 0 {
-		return nil, errors.New("natsapi: tenant KV paths are listed but nothing deletes them")
-	}
-	return map[string]int64{}, nil
+// purgeTenantKV is the OpenBao KV step: the tenant's payload-encryption
+// keypair (tenantpurge.KVPaths), every version and its metadata. Without
+// a tenant box OpenBao client the step fails rather than report the
+// keypair gone.
+func purgeTenantKV(ctx context.Context, tenantID string) (map[string]int64, error) {
+	n, err := pki.PurgeTenantBoxKeys(ctx, tenantID)
+	return map[string]int64{"kv.tenant_box_keys": n}, err
 }
 
 // purgeAudit is the purge's audit entry params: identifiers, the

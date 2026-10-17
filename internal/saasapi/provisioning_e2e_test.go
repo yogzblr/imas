@@ -72,6 +72,7 @@ type e2eEnv struct {
 	farmerSeed []byte
 	transit    *pkitest.Transit
 	farmerDB   *gorm.DB
+	bao        *tenantboxtest.Server
 }
 
 func newE2EEnv(t *testing.T) *e2eEnv {
@@ -178,7 +179,7 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 	}
 	t.Setenv("SAASAPI_NATS_NKEY_SEED_FILE", seedFile)
 	t.Setenv("SAASAPI_NATS_USER_JWT", userJWT)
-	setupE2EControlPlaneKeys(t)
+	env.bao = setupE2EControlPlaneKeys(t)
 	cfg, err := LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
@@ -204,7 +205,7 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 // (SAASAPI_BOX_PRIV_FILE, SAASAPI_PLATFORM_BOX_PUB), as its External
 // Secret would deliver them. Farmer's cluster-wide claims go to a Valkey
 // stand-in.
-func setupE2EControlPlaneKeys(t *testing.T) {
+func setupE2EControlPlaneKeys(t *testing.T) *tenantboxtest.Server {
 	t.Helper()
 	bao := tenantboxtest.Start(t)
 	pki.InvalidatePlatformBoxKeys()
@@ -251,6 +252,7 @@ func setupE2EControlPlaneKeys(t *testing.T) {
 	t.Cleanup(vc.Close)
 	pki.SetReplayCacheClient(vc)
 	t.Cleanup(func() { pki.SetReplayCacheClient(nil) })
+	return bao
 }
 
 // observe subscribes farmer's SYS connection (not a queue member, so it

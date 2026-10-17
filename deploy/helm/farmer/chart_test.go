@@ -952,8 +952,9 @@ func policyStatements(hcl string) string {
 
 // The farmer-only policies: exact paths, no wildcards, nothing on another
 // Transit key's sign path or the publisher's KV path. The exceptions:
-//   - the tenantbox policy's per-tenant path, whose last segment is the
-//     tenant ID: a single "+" (exactly one segment), never "*";
+//   - the tenantbox policy's per-tenant paths, whose last segment is the
+//     tenant ID: a single "+" (exactly one segment), never "*", on the
+//     data path and, delete only (S6), the metadata path;
 //   - imas-farmer-natssign's per-tenant Transit keys (P21 slice 1; owner
 //     choice of 2026-10-12 replacing the glob-plus-deny form of decision
 //     2026-10-11 (2), which OpenBao can't express): a single-segment
@@ -976,6 +977,7 @@ func TestFarmerPoliciesAreExact(t *testing.T) {
 		// public keys (J.1), and never the SaaS API's private key.
 		"imas-farmer-tenantbox.hcl": {
 			`path "secret/data/imas/tenant-x25519/tenants/+"`,
+			`path "secret/metadata/imas/tenant-x25519/tenants/+"`,
 			`path "secret/data/imas/tenant-x25519/platform"`,
 			`path "secret/data/imas/tenant-x25519/controlplane-pub"`,
 		},
@@ -1035,7 +1037,11 @@ func TestFarmerPoliciesAreExact(t *testing.T) {
 		}
 		stmts := policyStatements(body)
 		if name == "imas-farmer-tenantbox.hcl" {
-			stmts = strings.Replace(stmts, `imas/tenant-x25519/tenants/+"`, `imas/tenant-x25519/tenants/TENANT"`, 1)
+			stmts = strings.Replace(stmts, `imas/tenant-x25519/tenants/+"`, `imas/tenant-x25519/tenants/TENANT"`, 2)
+			blocks := policyBlocks(body)
+			if c := blocks[`"secret/metadata/imas/tenant-x25519/tenants/+"`]; c != `capabilities = ["delete"]` {
+				t.Errorf("tenantbox metadata path: %q, want delete only", c)
+			}
 		}
 		if name == "imas-farmer-natssign.hcl" {
 			stmts = natssignGlobs(t, stmts)

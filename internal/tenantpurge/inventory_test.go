@@ -276,25 +276,86 @@ func TestInventoryCoversValkeyPrefixes(t *testing.T) {
 	}
 }
 
-// No tenant KV material: the only KV client (internal/openbaokv) is used
-// by the SaaS API credential hand-off Job alone (internal/saasapicred),
-// which writes the platform's credential; farmer's process holds no KV
-// credential. A new KV user may hold tenant material: decide it.
+// kvUsers are the Go files that read or write OpenBao KV v2 (a "/data/"
+// path, or the internal/openbaokv client), each with what it holds and
+// whether a purge erases it. TestInventoryKV fails on a KV user missing
+// here: a new one may hold a tenant's material.
+var kvUsers = map[string]string{
+	"internal/pki/tenantbox.go":                    "purged: one payload-encryption keypair per tenant (KVPaths)",
+	"internal/pki/tenantpurge.go":                  "purged: deletes tenantbox.go's per-tenant keypair at a purge (KVPaths)",
+	"internal/pki/platformbox.go":                  "kept: the platform keypair and the control-plane public keys, no tenant's",
+	"internal/natsbootstrap/run.go":                "kept: the platform's public NATS trust copy",
+	"internal/openbaokv/client.go":                 "the KV client library; its only user is internal/saasapicred",
+	"internal/saasapicred/run.go":                  "kept: the SaaS API's NATS User JWT, the platform's credential",
+	"internal/ingredients/sdb/openbao/provider.go": "not the platform's OpenBao: a sprout ingredient reading the customer's own vault",
+}
+
+// Every file that reads or writes OpenBao KV v2 (a "/data/" literal, the
+// data endpoint, or an import of the internal/openbaokv client) is decided in
+// kvUsers, and every kvUsers entry still is one. Exactly one of them is
+// purged, and it is KVPaths' tenant keypair. A new KV user may hold
+// tenant material: decide it.
 func TestInventoryKV(t *testing.T) {
-	if len(tenantpurge.KVPaths) != 0 {
-		t.Fatalf("KVPaths = %v: the purge's KV step must delete them", tenantpurge.KVPaths)
-	}
-	users := 0
+	root := filepath.Join("..", "..")
+	found := map[string]bool{}
 	for _, path := range goFiles(t) {
-		if filepath.Base(filepath.Dir(path)) == "tenantpurge" || literalsOf(t, path, "github.com/yogzblr/imas/internal/openbaokv") == nil {
+		if filepath.Base(filepath.Dir(path)) == "tenantpurge" {
 			continue
 		}
-		users++
-		if filepath.Base(filepath.Dir(path)) != "saasapicred" {
-			t.Errorf("%s uses OpenBao KV: decide whether a tenant's material is kept there (tenantpurge.KVPaths)", path)
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rel = filepath.ToSlash(rel)
+		uses := literalsOf(t, path, "github.com/yogzblr/imas/internal/openbaokv") != nil
+		for _, lit := range literalsAll(t, path) {
+			if strings.Contains(lit, "/data/") {
+				uses = true
+			}
+		}
+		if !uses {
+			continue
+		}
+		found[rel] = true
+		if _, ok := kvUsers[rel]; !ok {
+			t.Errorf("%s uses OpenBao KV: decide whether it holds a tenant's material (kvUsers, tenantpurge.KVPaths)", rel)
 		}
 	}
-	if users == 0 {
-		t.Error("no OpenBao KV user found: the scan is broken")
+	purged := 0
+	for rel, why := range kvUsers {
+		if !found[rel] {
+			t.Errorf("kvUsers lists %s, which no longer uses OpenBao KV", rel)
+		}
+		if strings.HasPrefix(why, "purged") && rel != "internal/pki/tenantpurge.go" {
+			purged++
+		}
 	}
+	if purged != len(tenantpurge.KVPaths) || len(tenantpurge.KVPaths) != 1 || !strings.HasSuffix(tenantpurge.KVPaths[0], "/tenants/<tenant_id>") {
+		t.Errorf("KVPaths %v and the purged KV users (%d) disagree", tenantpurge.KVPaths, purged)
+	}
+	if !found["internal/pki/tenantbox.go"] {
+		t.Error("the tenant keypair's KV user was not found: the scan is broken")
+	}
+}
+
+// literalsAll is every string literal of a file, import paths aside.
+func literalsAll(t *testing.T, path string) []string {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lits []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		if _, ok := n.(*ast.ImportSpec); ok {
+			return false
+		}
+		if bl, ok := n.(*ast.BasicLit); ok && bl.Kind == token.STRING {
+			if s, err := strconv.Unquote(bl.Value); err == nil {
+				lits = append(lits, s)
+			}
+		}
+		return true
+	})
+	return lits
 }

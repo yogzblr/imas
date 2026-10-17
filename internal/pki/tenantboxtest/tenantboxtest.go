@@ -50,6 +50,10 @@ type Server struct {
 	Reads, Writes int
 	// CASRejects counts writes rejected by the check-and-set guard.
 	CASRejects int
+	// MetadataDeletes counts DELETE <mount>/metadata/<path> requests (a
+	// tenant purge); FailMetadataDeletes makes that many of the next ones
+	// answer 500.
+	MetadataDeletes, FailMetadataDeletes int
 }
 
 // Start starts a mock and points the IMAS_TENANTBOX_OPENBAO_* variables
@@ -113,6 +117,30 @@ func (s *Server) SetCreated(path string, version int, created time.Time) {
 	s.paths[path][version-1].Created = created
 }
 
+// Has reports whether path has any version (deleted ones included), i.e.
+// whether its metadata exists.
+func (s *Server) Has(path string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.paths[path]) > 0
+}
+
+// deleteMetadata removes path and every version of it, as KV v2's
+// DELETE <mount>/metadata/<path> does: 204 whether or not it existed
+// (checked on OpenBao 2.7.1).
+func (s *Server) deleteMetadata(w http.ResponseWriter, path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.MetadataDeletes++
+	if s.FailMetadataDeletes > 0 {
+		s.FailMetadataDeletes--
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	delete(s.paths, path)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // Delete soft-deletes one version of path, as `bao kv delete -versions`.
 func (s *Server) Delete(path string, version int) {
 	s.mu.Lock()
@@ -123,6 +151,10 @@ func (s *Server) Delete(path string, version int) {
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("X-Vault-Token") != Token {
 		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	if path, ok := strings.CutPrefix(r.URL.Path, "/v1/"+Mount+"/metadata/"); ok && r.Method == http.MethodDelete {
+		s.deleteMetadata(w, path)
 		return
 	}
 	path, ok := strings.CutPrefix(r.URL.Path, "/v1/"+Mount+"/data/")

@@ -195,7 +195,8 @@ Accepted, Fix needed (with a note) or Not applicable.
    `POST /v1/operator/tenants/{tenant_id}/purge`, a sealed
    `internal.tenant.purge` job makes farmer delete the tenant's Valkey keys,
    farmer-schema rows, objects (recipes and recipe audit, staged recipes,
-   job output, sprout JWTs) and destroy its Transit keys, and saasapi then
+   job output, sprout JWTs), delete its payload-encryption keypair in
+   OpenBao KV and destroy its Transit keys, and saasapi then
    delete its saas rows. Kept: the tombstone (saas `tenants` row as
    `purged`, `provisioning_jobs`, farmer's deleted `pki_tenants` row, the
    locked-out Account JWT). What to check: farmer's guards (a tenant its
@@ -210,7 +211,9 @@ Accepted, Fix needed (with a note) or Not applicable.
    exact denies could be destroyed, not only soft-deleted
    (`deploy/helm/farmer/README.md`, "Accepted: farmer can soft-delete or
    destroy another client's Transit key"); farmer's object store user can
-   delete in the sprout JWT bucket. FLAG FOR SECURITY REVIEW.
+   delete in the sprout JWT bucket; farmer's tenantbox policy can delete a
+   tenant's KV keypair whole (`delete` on `<kvPath>/tenants/+` metadata
+   only, never the platform keypair). FLAG FOR SECURITY REVIEW.
 4. The fence in the clustered bus fails closed (SCALE.2).
 
 ### 3.7 UAT and Azure credentials (UAT.1, UAT.6, UAT.12, UAT.13, R1, H1 to H6)

@@ -147,8 +147,9 @@ purge job (a `provisioning_jobs` row of type `purge`), published sealed on
 `internal.tenant.purge` like a deprovision; an operator can start one at
 once ([operator plane](#operator-plane-fleet-release-registration-and-tenant-purge)).
 Farmer erases the tenant's Valkey keys, its farmer-schema rows, its
-objects (recipes, recipe audit, staged recipes, job output, sprout JWTs)
-and destroys its Transit keys; on farmer's successful result saasapi
+objects (recipes, recipe audit, staged recipes, job output, sprout JWTs),
+its payload-encryption keypair in OpenBao KV, and destroys its Transit
+keys; on farmer's successful result saasapi
 deletes the tenant's enrollment keys, asset links, action batches and items
 and update policy, clears its name and plan, and sets it `purged`. A purge
 that fails leaves the tenant `offboarded`, with `last_error` naming the
