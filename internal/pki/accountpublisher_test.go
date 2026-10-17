@@ -781,6 +781,29 @@ func TestEveryResignAdvancesIat(t *testing.T) {
 			t.Fatalf("second lock-out at iat %d, not after %d", iatIn(t, again), iatIn(t, locked))
 		}
 	})
+
+	// The purge's minimal lock-out is minted from fresh claims, which
+	// TestEveryAccountResignWaitsPastIssuedAt excepts, but it replaces the
+	// lock-out just pushed: it must still be issued after it, and so must
+	// a second scrub (it is idempotent and pushes a newer copy).
+	t.Run("scrubTombstoneLocked (tenantpurge.go)", func(t *testing.T) {
+		row, err := getTenantRow("t_iat") // its keys are soft-deleted now
+		if err != nil || row.AccountPub == "" {
+			t.Fatalf("tenant row %+v, %v", row, err)
+		}
+		pub := row.AccountPub
+		prev := iatIn(t, rec.last(t, pub))
+		for i := range 2 {
+			if err := ScrubTenantTombstone(context.Background(), "t_iat"); err != nil {
+				t.Fatal(err)
+			}
+			got := iatIn(t, rec.last(t, pub))
+			if got <= prev {
+				t.Fatalf("scrub %d pushed iat %d, not after %d", i+1, got, prev)
+			}
+			prev = got
+		}
+	})
 }
 
 // pushAccountUpdate, the choke point every push goes through: an older
