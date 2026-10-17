@@ -105,7 +105,8 @@ func TestLoad(t *testing.T) {
 	}{
 		{name: "nothing set"},
 		{name: "password, newline trimmed", env: map[string]string{"IMAS_VALKEY_PASSWORD_FILE": pwFile}, wantPW: "s3cret"},
-		{name: "CRLF trimmed", env: map[string]string{"SAASAPI_VALKEY_PASSWORD_FILE": writeFile(t, "pw", "abc\r\n")}, wantPW: "abc"},
+		{name: "CR kept, as the chart's $(cat) keeps it", env: map[string]string{"SAASAPI_VALKEY_PASSWORD_FILE": writeFile(t, "pw", "abc\r\n")}, wantPW: "abc\r"},
+		{name: "every trailing LF trimmed", env: map[string]string{"IMAS_VALKEY_PASSWORD_FILE": writeFile(t, "pw", "abc\n\n")}, wantPW: "abc"},
 		{name: "inner spaces kept", env: map[string]string{"IMAS_VALKEY_PASSWORD_FILE": writeFile(t, "pw", " a b\n")}, wantPW: " a b"},
 		{name: "missing password file", env: map[string]string{"IMAS_VALKEY_PASSWORD_FILE": filepath.Join(t.TempDir(), "nope")}, wantErr: "IMAS_VALKEY_PASSWORD_FILE"},
 		{name: "empty password file", env: map[string]string{"IMAS_VALKEY_PASSWORD_FILE": writeFile(t, "pw", "")}, wantErr: "empty"},

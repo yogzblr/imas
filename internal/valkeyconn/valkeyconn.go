@@ -130,14 +130,16 @@ func Load(prefix string, getenv func(string) string) (Options, error) {
 	return o, nil
 }
 
-// readPassword reads a password file: trailing CR/LF trimmed, and empty
-// is an error.
+// readPassword reads a password file: trailing LFs trimmed, and empty
+// is an error. Only LF, like the shell's $(cat) the bundled Valkey's init
+// step reads the same Secret with: a CR stays part of the password on
+// both sides.
 func readPassword(path string) (string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
-	pw := strings.TrimRight(string(b), "\r\n")
+	pw := strings.TrimRight(string(b), "\n")
 	if pw == "" {
 		return "", errors.New("the password file is empty")
 	}
