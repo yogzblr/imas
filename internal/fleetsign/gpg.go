@@ -59,8 +59,10 @@ type ArmoredKeyring struct {
 func (k ArmoredKeyring) Len() int { return len(k.entities) }
 
 // LoadArmoredKeyring reads and parses the keyring file at path. Besides
-// ParseArmoredKeyring's checks it refuses anything but a regular file
-// and, on Unix-like systems, a file that is group- or world-writable.
+// ParseArmoredKeyring's checks it refuses, with ErrUnsafePath, anything
+// but a regular file owned by the effective user and no looser than 0600
+// (on Windows: owned by SYSTEM or Administrators, with no write for anyone
+// else), and a symlink (readTrustFile, CheckPrivateFile).
 func LoadArmoredKeyring(path string) (ArmoredKeyring, error) {
 	data, err := readTrustFile(path, maxArmoredKeyring)
 	if err != nil {
