@@ -28,7 +28,7 @@
       loop:
         - out: imas-sprout
           pkg: ./cmd/sprout
-          flags: -tags no_self_update -ldflags "-X main.Tag=v{{ imas_pkg_version }}"
+          flags: -ldflags "-X main.Tag=v{{ imas_pkg_version }}"
         - out: stubfarmer
           pkg: ./ansible/molecule/stubfarmer
           flags: ""

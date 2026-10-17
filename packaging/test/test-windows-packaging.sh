@@ -40,7 +40,7 @@ done
 
 # --- MSI -------------------------------------------------------------------
 echo "# building imas-sprout.exe (windows/amd64, CGO off)"
-(cd "$repo" && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -tags no_self_update -o "$work/imas-sprout.exe" ./cmd/sprout)
+(cd "$repo" && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o "$work/imas-sprout.exe" ./cmd/sprout)
 
 bm="$repo/packaging/windows/build-msi.sh"
 msi="$work/msi/imas-sprout-1.2.3-rc.1-windows-x64.msi"

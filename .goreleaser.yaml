@@ -17,11 +17,17 @@ snapshot:
   name_template: "{{ incpatch .Version }}-next"
 
 builds:
-  # Package manager builds (no self-update). The binary name is deliberately
-  # unversioned: nfpm installs it under bindir as-is, and the systemd units,
-  # OpenRC init scripts and docs all expect /usr/bin/imas-sprout,
-  # /usr/bin/imas-farmer and /usr/bin/imas. (Each build writes into its own
-  # dist/<id>_<os>_<arch> directory, so the names do not collide.)
+  # Builds for the OS packages (nfpm, below) and the container images. The
+  # binary name is deliberately unversioned: nfpm installs it under bindir
+  # as-is, and the systemd units, OpenRC init scripts and docs all expect
+  # /usr/bin/imas-sprout, /usr/bin/imas-farmer and /usr/bin/imas. (Each
+  # build writes into its own dist/<id>_<os>_<arch> directory, so the names
+  # do not collide.) No build takes a build tag: every sprout binary links
+  # the selfupdate ingredient (cmd/sprout/include.go), and a packaged
+  # sprout does self-update, by installing its next package from the
+  # repository configured in it (requirement 20). The ingredient only runs
+  # when farmer dispatches a self_update, which needs farmer's own switch
+  # (IMAS_SELF_UPDATE_ENABLED) and saasapi's dispatch flag.
   - main: ./cmd/sprout/
     id: "sprout-pkg"
     binary: "{{.ProjectName}}-sprout"
@@ -37,8 +43,6 @@ builds:
       - CGO_ENABLED=0
     ldflags:
       - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
-    tags:
-      - no_self_update
   - main: ./cmd/farmer/
     id: "farmer-pkg"
     binary: "{{.ProjectName}}-farmer"
@@ -54,8 +58,6 @@ builds:
       - CGO_ENABLED=0
     ldflags:
       - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
-    tags:
-      - no_self_update
   - main: ./cmd/imas/
     id: "imas-pkg"
     binary: "{{.ProjectName}}"
@@ -69,10 +71,9 @@ builds:
       - arm
     ldflags:
       - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
-    tags:
-      - no_self_update
   # Windows sprout, packaged as an MSI that installs the imas-sprout Windows
-  # service. Package-managed like the -pkg builds above, so no self-update.
+  # service. Like the -pkg builds above, it self-updates by installing the
+  # next MSI (from the NuGet feed configured in it) with msiexec.
   # The post hook builds dist/imas-sprout-<Version>-windows-x64.msi from
   # packaging/windows/imas-sprout.wxs with msitools' wixl (install wixl +
   # msitools on the runner), then fixes it up with msi-postprocess.sh for
@@ -93,14 +94,12 @@ builds:
       - amd64
     ldflags:
       - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
-    tags:
-      - no_self_update
     hooks:
       post:
         - cmd: ./packaging/windows/build-msi.sh --binary "{{ .Path }}" --version "{{ .Version }}" --out dist --timestamp "{{ .CommitTimestamp }}"
           output: true
 
-  # Standalone builds (with self-update)
+  # Standalone binaries, for the release archives (archives.cli below)
   - main: ./cmd/sprout/
     id: "sprout"
     binary: "{{.ProjectName}}-sprout-{{.Version}}-{{.Os}}-{{.Arch}}"
@@ -116,8 +115,6 @@ builds:
       - CGO_ENABLED=0
     ldflags:
       - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
-    tags:
-      - self_update
   - main: ./cmd/farmer/
     id: "farmer"
     binary: "{{.ProjectName}}-farmer-{{.Version}}-{{.Os}}-{{.Arch}}"
@@ -133,8 +130,6 @@ builds:
       - CGO_ENABLED=0
     ldflags:
       - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
-    tags:
-      - self_update
   - main: ./cmd/imas/
     id: "imas"
     binary: "{{.ProjectName}}-{{.Version}}-{{.Os}}-{{.Arch}}"
@@ -148,8 +143,6 @@ builds:
       - arm
     ldflags:
       - -X main.GitCommit={{.ShortCommit}} -X main.Tag=v{{.Version}}
-    tags:
-      - self_update
 
   # Service binary: container image + release archive
   - main: ./cmd/saasapi/
@@ -215,7 +208,7 @@ universal_binaries:
     name_template: "{{.ProjectName}}-{{.Version}}-darwin-universal"
     replace: true
 
-# generates archives for the CLI (standalone binaries with self-update)
+# generates archives for the CLI (the standalone binaries)
 archives:
   - id: cli
     formats: [tar.gz]
@@ -245,7 +238,7 @@ archives:
 nfpms:
   - id: imas
     package_name: imas
-    builds: [imas-pkg] # Use package manager build without self-update
+    builds: [imas-pkg] # the unversioned binary name nfpm installs
     formats: [apk, deb, rpm]
     bindir: /usr/bin
     description: "Effective fleet configuration management"
@@ -257,7 +250,7 @@ nfpms:
 
   - id: imas-farmer
     package_name: imas-farmer
-    builds: [farmer-pkg] # Use package manager build without self-update
+    builds: [farmer-pkg] # the unversioned binary name nfpm installs
     formats: [apk, deb, rpm]
     bindir: /usr/bin
     description: "IMAS control plane"
@@ -355,7 +348,7 @@ nfpms:
 
   - id: imas-sprout
     package_name: imas-sprout
-    builds: [sprout-pkg] # Use package manager build without self-update
+    builds: [sprout-pkg] # the unversioned binary name nfpm installs
     formats: [apk, deb, rpm]
     bindir: /usr/bin
     description: "IMAS remote control agent"
@@ -384,11 +377,12 @@ nfpms:
               mode: 0644
           # The self_update trust root (packaging/etc/fleet-signing-keys.md).
           # Deliberately not a config file: every upgrade replaces it, which is
-          # how a signing key rotation reaches the fleet.
+          # how a signing key rotation reaches the fleet. Mode 0600, root's:
+          # the sprout refuses a keyring that is looser or not its own (L3).
           - src: ./gpg-public-key.asc
             dst: /etc/imas/fleet-signing-keys.asc
             file_info:
-              mode: 0644
+              mode: 0600
           - dst: /var/cache/imas/sprout
             type: dir
             file_info:
@@ -411,11 +405,12 @@ nfpms:
               mode: 0644
           # The self_update trust root (packaging/etc/fleet-signing-keys.md).
           # Deliberately not a config file: every upgrade replaces it, which is
-          # how a signing key rotation reaches the fleet.
+          # how a signing key rotation reaches the fleet. Mode 0600, root's:
+          # the sprout refuses a keyring that is looser or not its own (L3).
           - src: ./gpg-public-key.asc
             dst: /etc/imas/fleet-signing-keys.asc
             file_info:
-              mode: 0644
+              mode: 0600
           - dst: /var/cache/imas/sprout
             type: dir
             file_info:
@@ -441,11 +436,12 @@ nfpms:
               mode: 0644
           # The self_update trust root (packaging/etc/fleet-signing-keys.md).
           # Deliberately not a config file: every upgrade replaces it, which is
-          # how a signing key rotation reaches the fleet.
+          # how a signing key rotation reaches the fleet. Mode 0600, root's:
+          # the sprout refuses a keyring that is looser or not its own (L3).
           - src: ./gpg-public-key.asc
             dst: /etc/imas/fleet-signing-keys.asc
             file_info:
-              mode: 0644
+              mode: 0600
           - dst: /var/cache/imas/sprout
             type: dir
             file_info:
@@ -461,8 +457,10 @@ nfpms:
 
 # Container images: GHCR only, linux/amd64 + linux/arm64, one multi-arch
 # manifest per image, signed keyless with cosign (docker_signs below).
-# Images use the package-managed (no_self_update) builds: a container is
-# replaced, never self-updated. saasapi, farmerbus and migrate have
+# Images use the -pkg builds (unversioned binary names). A container is
+# replaced, never self-updated: the sprout image runs no systemd, so the
+# selfupdate ingredient's preflight refuses to run in it
+# (ErrUnsupportedPlatform). saasapi, farmerbus and migrate have
 # their own builds above.
 dockers:
   - id: farmer-amd64
