@@ -1018,7 +1018,7 @@ components:
         application/json:
           schema:
             oneOf:
-              - $ref: "#/components/schemas/Error"
+              - $ref: "#/components/schemas/RateLimitedError"
               - $ref: "#/components/schemas/BacklogFullError"
           examples:
             rate_limited:
@@ -1106,6 +1106,13 @@ components:
         error: { type: string, description: snake_case error code }
         message: { type: string }
         details: { type: object, additionalProperties: true }
+
+    RateLimitedError:
+      type: object
+      required: [error, message]
+      properties:
+        error: { type: string, enum: [rate_limited] }
+        message: { type: string }
 
     BacklogFullError:
       type: object

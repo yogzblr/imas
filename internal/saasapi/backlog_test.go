@@ -235,7 +235,7 @@ func TestBacklogFullDocumented(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"backlog_full", "Retry-After", "BacklogFullError", "RateLimitedOrBacklogFull",
+	for _, want := range []string{"backlog_full", "Retry-After", "BacklogFullError", "RateLimitedError", "RateLimitedOrBacklogFull", "enum: [rate_limited]", "enum: [backlog_full]",
 		"SAASAPI_ACTION_MAX_PENDING_PER_TENANT", "required: [pending, limit, requested, available]"} {
 		if !strings.Contains(string(spec), want) {
 			t.Errorf("the OpenAPI spec lacks %q", want)

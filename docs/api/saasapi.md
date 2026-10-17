@@ -220,8 +220,8 @@ about 960 such items per process.
 So that a tenant learns at submit time rather than from expired items, a
 POST is refused as a whole, nothing written, when the tenant's **pending**
 items (status `queued` or `dispatching`, every batch of the tenant,
-including update rollouts' items; `running` items already hold a slot and
-are not counted) plus the request's deduplicated `asset_ids` would exceed
+including update rollouts' items; a `running` item is a cook farmer has
+already started, no longer waiting to be sent, and is not counted) plus the request's deduplicated `asset_ids` would exceed
 `SAASAPI_ACTION_MAX_PENDING_PER_TENANT` (default 2000):
 
 ```http

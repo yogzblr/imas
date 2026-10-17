@@ -314,6 +314,9 @@ Decisions (final):
    dispatch settings. Helm key `saasapi.actionDispatch.maxPendingPerTenant`
    (null emits no env var). "Pending" is a tenant's items in status `queued`
    or `dispatching`; `running` items hold a dispatch slot and are not counted.
+   (Correction, S3 review: a `running` item is a cook farmer already
+   started; its dispatch slot was released when farmer replied. It is not
+   counted because it is no longer waiting to be sent.)
 3. **Where it is checked.** Only in `CreateSproutActionBatch`, never for update
    rollouts (a rollout wave must not be blocked by a tenant's own backlog).
    Use the `claim` hook of `createBatch`: inside the transaction, before the

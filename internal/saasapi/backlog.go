@@ -8,8 +8,9 @@ package saasapi
 // SAASAPI_OUTBOX_ACTION_MAX_AGE after the POST fails as expired_not_sent.
 // Without a cap a tenant could keep submitting and only learn later that
 // most items never ran. With it, a request that would take the tenant's
-// pending items (queued or dispatching; running items hold a dispatch
-// slot and are not counted) past SAASAPI_ACTION_MAX_PENDING_PER_TENANT is
+// pending items (queued or dispatching; a running item is a cook farmer
+// already started, so it is no longer waiting to be sent and is not
+// counted) past SAASAPI_ACTION_MAX_PENDING_PER_TENANT is
 // refused as a whole, at submit time, with 429 backlog_full.
 //
 // Only §1.5 action batches are checked. An update rollout (§1.8) is never
