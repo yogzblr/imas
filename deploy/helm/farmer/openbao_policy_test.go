@@ -142,13 +142,24 @@ func (s *policyServer) keyState(name string) (int, bool) {
 
 // mutations are the calls that would change an existing key: rotate
 // (with and without a body) and config (deletion_allowed, which opens a
-// hard delete; exportable).
+// hard delete, as a bool and as the string natskeys sends; exportable).
 func mutations(name string) []refusedCall {
+	return append(tenantKeyMutations(name),
+		refusedCall{http.MethodPost, "/keys/" + name + "/config", map[string]any{"deletion_allowed": "true"}})
+}
+
+// tenantKeyMutations are the mutations farmer is refused even on a tenant
+// key, whose deletion_allowed it may set to the string "true" (S6): rotate,
+// and config with any other parameter or value.
+func tenantKeyMutations(name string) []refusedCall {
 	return []refusedCall{
 		{http.MethodPost, "/keys/" + name + "/rotate", nil},
 		{http.MethodPost, "/keys/" + name + "/rotate", map[string]any{"type": "ed25519"}},
 		{http.MethodPost, "/keys/" + name + "/config", map[string]any{"deletion_allowed": true}},
+		{http.MethodPost, "/keys/" + name + "/config", map[string]any{"deletion_allowed": "false"}},
 		{http.MethodPost, "/keys/" + name + "/config", map[string]any{"exportable": true}},
+		{http.MethodPost, "/keys/" + name + "/config", map[string]any{"deletion_allowed": "true", "exportable": true}},
+		{http.MethodPost, "/keys/" + name + "/config", map[string]any{"auto_rotate_period": "1h"}},
 	}
 }
 
@@ -189,9 +200,10 @@ func TestOpenBaoBootstrapPolicy(t *testing.T) {
 
 // TestOpenBaoFarmerPolicy: imas-farmer-natssign (owner decision 2, in the
 // single-segment form chosen on 2026-10-12) lets farmer create a tenant
-// key, sign with it (tenant signing only) and soft-delete it, and refuses
-// rotate and config on it; on the platform keys it reads, signs with
-// operator-signing and SYS only, and changes nothing.
+// key, sign with it (tenant signing only), soft-delete it and, at a purge
+// (S6), destroy it; it refuses rotate on it and every config but
+// deletion_allowed="true"; on the platform keys and the gateway key it
+// reads, signs with operator-signing and SYS only, and changes nothing.
 func TestOpenBaoFarmerPolicy(t *testing.T) {
 	s := newPolicyServer(t)
 	ctx := t.Context()
@@ -221,9 +233,10 @@ func TestOpenBaoFarmerPolicy(t *testing.T) {
 		t.Errorf("farmer sign with %s: %v, want 403", tacctName, err)
 	}
 
-	// Rotate and config on a tenant key are refused, and change nothing.
+	// Rotate, and config other than deletion_allowed="true", on a tenant
+	// key are refused, and change nothing.
 	for _, name := range []string{tsignName, tacctName} {
-		s.refused("farmer", token, mutations(name))
+		s.refused("farmer", token, tenantKeyMutations(name))
 		if v, del := s.keyState(name); v != 1 || del {
 			t.Errorf("%s after the refused calls: version %d, deletion_allowed %v", name, v, del)
 		}
@@ -246,13 +259,17 @@ func TestOpenBaoFarmerPolicy(t *testing.T) {
 		}
 		s.refused("farmer", token, append(mutations(name),
 			refusedCall{http.MethodPost, "/keys/" + name, map[string]any{"type": "ed25519"}},
-			refusedCall{http.MethodDelete, "/keys/" + name + "/soft-delete", nil}))
+			refusedCall{http.MethodDelete, "/keys/" + name + "/soft-delete", nil},
+			refusedCall{http.MethodDelete, "/keys/" + name, nil}))
+		if v, del := s.keyState(name); v != 1 || del {
+			t.Errorf("%s after the refused calls: version %d, deletion_allowed %v", name, v, del)
+		}
 	}
 
 	// keys/+ lets farmer create a key of any name (the accepted cost, see
-	// the policy file), but it signs with none outside nats-tsign-*, and
-	// retires no other client's key. No key material out, no hard delete,
-	// no restore.
+	// the policy file), but it signs with none outside nats-tsign-*. No
+	// key material out, no restore, and the gateway key can be neither
+	// retired, reconfigured nor deleted.
 	other, err := farmer.EnsureKeyPair(ctx, "other-key", nkeys.PrefixByteAccount)
 	if err != nil {
 		t.Fatalf("farmer creating other-key: %v", err)
@@ -264,12 +281,16 @@ func TestOpenBaoFarmerPolicy(t *testing.T) {
 	s.refused("farmer", token, []refusedCall{
 		{http.MethodGet, "/export/signing-key/" + tsignName, nil},
 		{http.MethodGet, "/backup/" + tsignName, nil},
-		{http.MethodDelete, "/keys/" + tsignName, nil},
 		{http.MethodPost, "/keys/" + tsignName + "/soft-delete-restore", nil},
 		{http.MethodPost, "/keys/" + tsignName + "/trim", map[string]any{"min_available_version": 1}},
 		{http.MethodDelete, "/keys/imas-gateway-jwt/soft-delete", nil},
 		{http.MethodPost, "/keys/imas-gateway-jwt/rotate", nil},
+		{http.MethodPost, "/keys/imas-gateway-jwt/config", map[string]any{"deletion_allowed": "true"}},
+		{http.MethodDelete, "/keys/imas-gateway-jwt", nil},
 	})
+	if v, del := s.keyState("imas-gateway-jwt"); v != 1 || del {
+		t.Errorf("imas-gateway-jwt after the refused calls: version %d, deletion_allowed %v", v, del)
+	}
 
 	// Offboarding: soft delete, after which the key can't sign.
 	if err := farmer.RetireKey(ctx, tsignName); err != nil {
@@ -277,6 +298,17 @@ func TestOpenBaoFarmerPolicy(t *testing.T) {
 	}
 	if _, err := tsign.Sign([]byte("after retire")); err == nil {
 		t.Error("retired tenant signing key still signs")
+	}
+
+	// Purge (S6): farmer destroys both tenant keys, retired or not, the
+	// way natskeys does it (config deletion_allowed="true", then delete).
+	for _, name := range []string{tsignName, tacctName} {
+		if destroyed, err := farmer.DestroyKey(ctx, name); err != nil || !destroyed {
+			t.Fatalf("farmer destroying %s: %v, %v", name, destroyed, err)
+		}
+		if status, _ := s.admin.Call("", http.MethodGet, s.mount+"/keys/"+name, nil); status != http.StatusNotFound {
+			t.Errorf("%s after farmer's DestroyKey: read status %d, want 404", name, status)
+		}
 	}
 }
 
@@ -351,21 +383,24 @@ func TestOpenBaoFarmerPolicyKeySet(t *testing.T) {
 		natskeys.OperatorKey():        {"read"},
 		natskeys.OperatorSigningKey(): {"read", "sign"},
 		natskeys.SysAccountKey():      {"read", "sign"},
-		// The gateway key: keys/+ reaches it (create on an existing key
-		// changes nothing, checked below); the exact deny keeps it from
-		// being soft-deleted.
+		// The gateway key: its exact rule allows create (on an existing
+		// key it changes nothing, checked below) and read; exact denies
+		// keep it from being soft-deleted or reconfigured, and with no
+		// delete it can't be destroyed.
 		"imas-gateway-jwt": {"create", "read"},
 		// Tenant keys: created at provisioning, soft-deleted at
-		// offboarding; only the signing key signs.
-		tsign: {"create", "read", "sign", "soft-delete"},
-		tacct: {"create", "read", "soft-delete"},
-		// Any other name (the accepted cost): create, read and soft
-		// delete, never sign.
-		"other-client-key": {"create", "read", "soft-delete"},
-		"nats-tsignx":      {"create", "read", "soft-delete"},
+		// offboarding, destroyed at a purge (config is deletion_allowed
+		// only: allowed_parameters, which capabilities-self doesn't show;
+		// TestOpenBaoFarmerPolicy checks it); only the signing key signs.
+		tsign: {"create", "read", "sign", "soft-delete", "config", "hard-delete"},
+		tacct: {"create", "read", "soft-delete", "config", "hard-delete"},
+		// Any other name (the accepted cost): create, read, soft delete
+		// and destroy, never sign.
+		"other-client-key": {"create", "read", "soft-delete", "config", "hard-delete"},
+		"nats-tsignx":      {"create", "read", "soft-delete", "config", "hard-delete"},
 	}
-	// Never, for any name: rotate, config, trim, hard delete, export,
-	// backup, restore, soft-delete-restore.
+	// Never, for any name: rotate, trim, export, backup, restore,
+	// soft-delete-restore.
 	for name, ops := range want {
 		paths := make([]string, 0, len(farmerKeyOps))
 		for _, o := range farmerKeyOps {
@@ -418,4 +453,12 @@ func TestOpenBaoFarmerPolicyKeySet(t *testing.T) {
 		t.Error("a soft-deleted key still signs")
 	}
 	s.refused("farmer", token, []refusedCall{{http.MethodPost, "/keys/other-client-key/soft-delete-restore", nil}})
+
+	// And, since S6, destroys it for good.
+	if status, body := s.admin.Call(token, http.MethodPost, s.mount+"/keys/other-client-key/config", map[string]any{"deletion_allowed": "true"}); status/100 != 2 {
+		t.Fatalf("farmer allowing deletion of another client's key: %d %s; the accepted cost in the README no longer holds, update it", status, body)
+	}
+	if status, body := s.admin.Call(token, http.MethodDelete, s.mount+"/keys/other-client-key", nil); status/100 != 2 {
+		t.Fatalf("farmer destroying another client's key: %d %s; the accepted cost in the README no longer holds, update it", status, body)
+	}
 }

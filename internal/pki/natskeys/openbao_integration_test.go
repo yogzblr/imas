@@ -394,3 +394,39 @@ func TestOpenBaoSoftDeleteBlocksSigning(t *testing.T) {
 		t.Errorf("RetireKey of a missing key: %v", err)
 	}
 }
+
+// TestOpenBaoDestroyKey checks DestroyKey against a real server (S6): a
+// soft-deleted key takes deletion_allowed (sent as the string "true")
+// and is then deleted, so it no longer reads; destroying it again, or a
+// key that never existed, is success although OpenBao answers both
+// calls 400 for a missing key.
+func TestOpenBaoDestroyKey(t *testing.T) {
+	r := newRealServer(t)
+	s := r.store("")
+	name := TenantSigningKey("destroy")
+	if _, err := s.EnsureKeyPair(t.Context(), name, nkeys.PrefixByteAccount); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RetireKey(t.Context(), name); err != nil {
+		t.Fatalf("RetireKey: %v", err)
+	}
+	if destroyed, err := s.DestroyKey(t.Context(), name); err != nil || !destroyed {
+		t.Fatalf("DestroyKey of a soft-deleted key: %v, %v", destroyed, err)
+	}
+	if _, err := s.KeyPair(t.Context(), name, nkeys.PrefixByteAccount); !errors.Is(err, ErrKeyNotFound) {
+		t.Errorf("KeyPair after DestroyKey: %v, want ErrKeyNotFound", err)
+	}
+	if destroyed, err := s.DestroyKey(t.Context(), name); err != nil || destroyed {
+		t.Errorf("second DestroyKey: %v, %v", destroyed, err)
+	}
+	if destroyed, err := s.DestroyKey(t.Context(), TenantAccountKey("never-existed")); err != nil || destroyed {
+		t.Errorf("DestroyKey of a missing key: %v, %v", destroyed, err)
+	}
+	live := TenantAccountKey("live-destroy")
+	if _, err := s.EnsureKeyPair(t.Context(), live, nkeys.PrefixByteAccount); err != nil {
+		t.Fatal(err)
+	}
+	if destroyed, err := s.DestroyKey(t.Context(), live); err != nil || !destroyed {
+		t.Errorf("DestroyKey of a live key: %v", err)
+	}
+}

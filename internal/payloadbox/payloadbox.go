@@ -159,16 +159,20 @@ const (
 	PurposeCLIUserKeySubmit = "c2f.userkey.pub"
 
 	// The SaaS API's requests on internal.tenant.provision,
-	// internal.tenant.deprovision and internal.sprout.action.
+	// internal.tenant.deprovision, internal.tenant.purge and
+	// internal.sprout.action.
 	PurposeSaaSTenantProvision   = "a2f.tenant.provision"
 	PurposeSaaSTenantDeprovision = "a2f.tenant.deprovision"
+	PurposeSaaSTenantPurge       = "a2f.tenant.purge"
 	PurposeSaaSSproutAction      = "a2f.sprout.action"
-	// Farmer's results: the asynchronous provisioning results published
-	// on internal.tenant.(de)provisioned.<job_id>, and the reply to
+	// Farmer's results: the asynchronous tenant job results published
+	// on internal.tenant.(de)provisioned.<job_id> and
+	// internal.tenant.purged.<job_id>, and the reply to
 	// internal.sprout.action. A result is sealed as a Call (bound to its
 	// subject, which names the job), the reply as a Reply.
 	PurposeSaaSTenantProvisioned   = "f2a.tenant.provisioned"
 	PurposeSaaSTenantDeprovisioned = "f2a.tenant.deprovisioned"
+	PurposeSaaSTenantPurged        = "f2a.tenant.purged"
 	PurposeSaaSSproutActionReply   = "f2a.sprout.action"
 
 	// PurposeRefresh is a box-ready sprout's sealed proof on POST

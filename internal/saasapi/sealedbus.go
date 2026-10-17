@@ -10,7 +10,8 @@ package saasapi
 // run a command on any sprout, and forge the results. Now:
 //
 //   - Every request this service sends (internal.tenant.provision,
-//     internal.tenant.deprovision, internal.sprout.action) is a payloadbox
+//     internal.tenant.deprovision, internal.tenant.purge,
+//     internal.sprout.action) is a payloadbox
 //     Call sealed with its box key to the platform key(s) it pins, bound to
 //     the request's purpose, method and subject (pki.SaaSAPIRequestWire),
 //     with the tenant inside the box. Each send seals a new message: a new
@@ -130,8 +131,8 @@ func openSproutActionReply(requestID string, msg *nats.Msg) (json.RawMessage, er
 	return body.Result, nil
 }
 
-// openTenantResult opens msg, a provisioning result that arrived on its
-// subject for jobID, and returns the result. A plaintext result, one that
+// openTenantResult opens msg, a tenant job result (provision, deprovision
+// or purge) that arrived on its subject for jobID, and returns the result. A plaintext result, one that
 // doesn't open, one sealed for another job's subject, a stale one and a
 // replayed one are all errors: nothing is applied.
 func openTenantResult(jobType ProvisioningJobType, jobID string, msg *nats.Msg) (controlplane.TenantResult, error) {
@@ -143,7 +144,7 @@ func openTenantResult(jobType ProvisioningJobType, jobID string, msg *nats.Msg) 
 	if b == nil {
 		return res, errNoControlBox
 	}
-	body, err := b.OpenTenantResult(jobType == ProvisioningJobDeprovision, jobID, msg.Subject, msg.Data)
+	body, err := b.OpenTenantResult(controlplane.TenantJob(jobType), jobID, msg.Subject, msg.Data)
 	if err != nil {
 		return res, fmt.Errorf("sealed result refused: %w", err)
 	}

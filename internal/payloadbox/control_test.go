@@ -26,9 +26,11 @@ var controlCases = []controlCase{
 	{"cli user key", PurposeCLIUserKeySubmit, PurposeCLIReply, testTenant, "UALICE", "auth.rotatekey", "imas.api.auth.rotatekey"},
 	{"saas provision", PurposeSaaSTenantProvision, "", PlatformTenantID, PrincipalSaaSAPI, "tenant.provision", "internal.tenant.provision"},
 	{"saas deprovision", PurposeSaaSTenantDeprovision, "", PlatformTenantID, PrincipalSaaSAPI, "tenant.deprovision", "internal.tenant.deprovision"},
+	{"saas purge", PurposeSaaSTenantPurge, "", PlatformTenantID, PrincipalSaaSAPI, "tenant.purge", "internal.tenant.purge"},
 	{"saas sprout action", PurposeSaaSSproutAction, PurposeSaaSSproutActionReply, PlatformTenantID, PrincipalSaaSAPI, "sprout.action", "internal.sprout.action"},
 	{"provisioned result", PurposeSaaSTenantProvisioned, "", PlatformTenantID, PrincipalSaaSAPI, "tenant.provisioned", "internal.tenant.provisioned.job-1"},
 	{"deprovisioned result", PurposeSaaSTenantDeprovisioned, "", PlatformTenantID, PrincipalSaaSAPI, "tenant.deprovisioned", "internal.tenant.deprovisioned.job-1"},
+	{"purged result", PurposeSaaSTenantPurged, "", PlatformTenantID, PrincipalSaaSAPI, "tenant.purged", "internal.tenant.purged.job-1"},
 }
 
 func expectFor(c controlCase) CallExpect {
@@ -211,8 +213,8 @@ func TestControlPurposesAreDistinctAndDirected(t *testing.T) {
 		PurposeCookNudgeRequest, PurposeCookNudgeResponse, PurposeStagedRecipe, PurposeBoxKeySubmit, PurposeTenantKeyContinuity,
 		PurposeEnrollProof,
 		PurposeCLIRequest, PurposeCLIReply, PurposeCLIUserKeySubmit,
-		PurposeSaaSTenantProvision, PurposeSaaSTenantDeprovision, PurposeSaaSSproutAction,
-		PurposeSaaSTenantProvisioned, PurposeSaaSTenantDeprovisioned, PurposeSaaSSproutActionReply,
+		PurposeSaaSTenantProvision, PurposeSaaSTenantDeprovision, PurposeSaaSTenantPurge, PurposeSaaSSproutAction,
+		PurposeSaaSTenantProvisioned, PurposeSaaSTenantDeprovisioned, PurposeSaaSTenantPurged, PurposeSaaSSproutActionReply,
 		PurposeRefresh, PurposeRefreshReply,
 	}
 	seen := map[string]bool{}

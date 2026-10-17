@@ -367,13 +367,16 @@ func e2eOpen(t *testing.T, msg *nats.Msg) json.RawMessage {
 		}
 		return body.Params
 	}
-	deprovision := strings.HasPrefix(msg.Subject, controlplane.SubjectTenantDeprovisionedPrefix)
-	prefix := controlplane.SubjectTenantProvisionedPrefix
-	if deprovision {
-		prefix = controlplane.SubjectTenantDeprovisionedPrefix
+	kind := controlplane.TenantJobProvision
+	switch {
+	case strings.HasPrefix(msg.Subject, controlplane.SubjectTenantDeprovisionedPrefix):
+		kind = controlplane.TenantJobDeprovision
+	case strings.HasPrefix(msg.Subject, controlplane.SubjectTenantPurgedPrefix):
+		kind = controlplane.TenantJobPurge
 	}
+	prefix := kind.ResultPrefix()
 	jobID, _ := controlplane.JobIDFromSubject(msg.Subject, prefix)
-	body, err := e2eKeys.observer.OpenTenantResult(deprovision, jobID, msg.Subject, msg.Data)
+	body, err := e2eKeys.observer.OpenTenantResult(kind, jobID, msg.Subject, msg.Data)
 	if err != nil {
 		t.Fatalf("opening the result on %s as the SaaS API: %v", msg.Subject, err)
 	}

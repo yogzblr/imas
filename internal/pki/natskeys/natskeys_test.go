@@ -842,3 +842,55 @@ func TestAbandonedGroupFreesWorker(t *testing.T) {
 		t.Fatalf("sign after an abandoned one: %v", err)
 	}
 }
+
+func TestDestroyKey(t *testing.T) {
+	f := natskeystest.New(t)
+	s := newStore(t, f, nil)
+	name := TenantSigningKey("purged")
+	f.NewKey(name)
+	// A retired (soft-deleted) key is destroyed too, as at a purge after
+	// offboarding.
+	if err := s.RetireKey(t.Context(), name); err != nil {
+		t.Fatal(err)
+	}
+	if destroyed, err := s.DestroyKey(t.Context(), name); err != nil || !destroyed {
+		t.Fatalf("DestroyKey: %v, %v", destroyed, err)
+	}
+	if f.Has(name) {
+		t.Fatal("key still exists after DestroyKey")
+	}
+	if f.Count(natskeystest.OpConfigKey) != 1 || f.Count(natskeystest.OpHardDelete) != 1 {
+		t.Errorf("config %d, delete %d requests, want 1 each", f.Count(natskeystest.OpConfigKey), f.Count(natskeystest.OpHardDelete))
+	}
+	// Again, and for a key that never existed: success, no config or
+	// delete sent (OpenBao answers both 400 for a missing key).
+	f.ResetCounts()
+	for _, n := range []string{name, TenantAccountKey("never")} {
+		if destroyed, err := s.DestroyKey(t.Context(), n); err != nil || destroyed {
+			t.Errorf("DestroyKey(%s) of a missing key: %v, %v", n, destroyed, err)
+		}
+	}
+	if f.Count(natskeystest.OpConfigKey)+f.Count(natskeystest.OpHardDelete) != 0 {
+		t.Error("config or delete sent for a missing key")
+	}
+	// A refused config leaves a live key and is an error.
+	live := TenantAccountKey("live")
+	f.NewKey(live)
+	f.FailNext(natskeystest.OpConfigKey, 403, 1)
+	if _, err := s.DestroyKey(t.Context(), live); err == nil || openbao.StatusCode(err) != 403 || !f.Has(live) {
+		t.Errorf("refused config: err %v, key present %v", err, f.Has(live))
+	}
+	// A delete that failed although the key went (a lost answer) is
+	// success: the read after it finds no key.
+	f.FailNext(natskeystest.OpHardDelete, 400, 1)
+	if _, err := s.DestroyKey(t.Context(), live); err == nil {
+		t.Error("refused delete of a still-present key: want an error")
+	}
+	f.Delete(live)
+	if _, err := s.DestroyKey(t.Context(), live); err != nil {
+		t.Errorf("DestroyKey after the key went: %v", err)
+	}
+	if _, err := s.DestroyKey(t.Context(), "bad/name"); err == nil {
+		t.Error("DestroyKey of an invalid name: want an error")
+	}
+}

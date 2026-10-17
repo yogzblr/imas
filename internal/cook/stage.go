@@ -9,6 +9,7 @@ import (
 	"github.com/yogzblr/imas/internal/log"
 	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/tenantpurge"
 )
 
 // Staged recipes: a sealed copy of the rendered, sprout-specific
@@ -69,7 +70,7 @@ import (
 
 // stagedRecipeRoot is the top-level key prefix under which each sprout's
 // staged files live. It must match handlers.sproutFileRoot.
-const stagedRecipeRoot = "sprouts/"
+const stagedRecipeRoot = tenantpurge.RootSprouts
 
 // StagedRecipeName is the fixed object name, under a sprout's prefix,
 // of its latest dispatched recipe.

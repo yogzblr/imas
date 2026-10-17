@@ -27,6 +27,10 @@ import (
 const (
 	SubjectTenantProvision   = "internal.tenant.provision"
 	SubjectTenantDeprovision = "internal.tenant.deprovision"
+	// SubjectTenantPurge erases an offboarded tenant's data (S6,
+	// TenantPurgeRequest); its result is a TenantResult on
+	// internal.tenant.purged.{job_id}.
+	SubjectTenantPurge = "internal.tenant.purge"
 )
 
 // SubjectSproutAction is the one request-reply subject in this package
@@ -55,14 +59,58 @@ const (
 const (
 	SubjectTenantProvisionedPrefix   = "internal.tenant.provisioned."
 	SubjectTenantDeprovisionedPrefix = "internal.tenant.deprovisioned."
+	SubjectTenantPurgedPrefix        = "internal.tenant.purged."
 
 	SubjectTenantProvisionedWildcard   = SubjectTenantProvisionedPrefix + "*"
 	SubjectTenantDeprovisionedWildcard = SubjectTenantDeprovisionedPrefix + "*"
+	SubjectTenantPurgedWildcard        = SubjectTenantPurgedPrefix + "*"
 )
 
+// TenantJob names one of the three asynchronous tenant operations: the
+// request subject the SaaS API publishes and the result subject farmer
+// answers on. Its values are the SaaS API's provisioning_jobs.type.
+type TenantJob string
+
+const (
+	TenantJobProvision   TenantJob = "provision"
+	TenantJobDeprovision TenantJob = "deprovision"
+	TenantJobPurge       TenantJob = "purge"
+)
+
+// RequestSubject is j's request subject, "" for an unknown job.
+func (j TenantJob) RequestSubject() string {
+	switch j {
+	case TenantJobProvision:
+		return SubjectTenantProvision
+	case TenantJobDeprovision:
+		return SubjectTenantDeprovision
+	case TenantJobPurge:
+		return SubjectTenantPurge
+	}
+	return ""
+}
+
+// ResultPrefix is j's result subject prefix (the job ID follows it), ""
+// for an unknown job.
+func (j TenantJob) ResultPrefix() string {
+	switch j {
+	case TenantJobProvision:
+		return SubjectTenantProvisionedPrefix
+	case TenantJobDeprovision:
+		return SubjectTenantDeprovisionedPrefix
+	case TenantJobPurge:
+		return SubjectTenantPurgedPrefix
+	}
+	return ""
+}
+
+// ResultSubject returns j's result subject for jobID, which must already
+// satisfy ValidJobID.
+func (j TenantJob) ResultSubject(jobID string) string { return j.ResultPrefix() + jobID }
+
 // Result statuses farmer reports. A provision succeeds as StatusActive; a
-// deprovision succeeds as StatusOffboarded; either can fail as
-// StatusFailed with Error set.
+// deprovision succeeds as StatusOffboarded; a purge as StatusPurged; any
+// of them can fail as StatusFailed with ErrorCode set.
 //
 // internal.sprout.action replies use StatusCompleted (a cmd.run the sprout
 // ran and answered — which says nothing about the command's own exit code,
@@ -71,6 +119,7 @@ const (
 const (
 	StatusActive     = "active"
 	StatusOffboarded = "offboarded"
+	StatusPurged     = "purged"
 	StatusFailed     = "failed"
 
 	StatusCompleted  = "completed"
@@ -94,6 +143,13 @@ const (
 	ErrorTenantNotFound ErrorCode = "tenant_not_found"
 	// ErrorInternal: anything else. The detail stays in farmer's logs.
 	ErrorInternal ErrorCode = "internal_error"
+	// ErrorPurgeRefused: farmer refused to erase the tenant's data
+	// before deleting anything: the tenant is the legacy current tenant,
+	// or farmer's own registry doesn't show it deprovisioned.
+	ErrorPurgeRefused ErrorCode = "purge_refused"
+	// ErrorPurgeIncomplete: an erasure step failed; the steps before it
+	// are done, the rest are not. Running the purge again finishes it.
+	ErrorPurgeIncomplete ErrorCode = "purge_incomplete"
 
 	// internal.sprout.action only:
 
@@ -118,6 +174,8 @@ var publicErrorMessages = map[ErrorCode]string{
 	ErrorInvalidTenantID: "the tenant ID was rejected by the provisioning service",
 	ErrorTenantNotFound:  "the tenant is not known to the provisioning service",
 	ErrorInternal:        "an internal error occurred during provisioning; retry or contact support",
+	ErrorPurgeRefused:    "the provisioning service refused to erase this tenant's data; contact support",
+	ErrorPurgeIncomplete: "erasing this tenant's data did not finish; it is retried automatically, or contact support",
 
 	ErrorInvalidRequest:    "the action request was rejected as malformed",
 	ErrorUnsupportedAction: "the action type is not supported",
@@ -179,16 +237,90 @@ type TenantDeprovisionRequest struct {
 	TenantID string `json:"tenant_id"`
 }
 
-// TenantResult is the payload of both internal.tenant.provisioned.{job_id}
-// and internal.tenant.deprovisioned.{job_id}. A failure carries only an
-// ErrorCode and a qualified success only a WarningCode — never text; see
-// ErrorCode.
+// Purge triggers: what started a purge (TenantPurgeRequest.Trigger).
+const (
+	// PurgeTriggerRetention: the SaaS API's outbox sweeper, once the
+	// tenant had been offboarded for SAASAPI_TENANT_PURGE_AFTER.
+	PurgeTriggerRetention = "retention"
+	// PurgeTriggerOperator: POST /v1/operator/tenants/{tenant_id}/purge.
+	PurgeTriggerOperator = "operator"
+)
+
+// ValidPurgeTrigger reports whether t is one of the purge triggers.
+func ValidPurgeTrigger(t string) bool {
+	return t == PurgeTriggerRetention || t == PurgeTriggerOperator
+}
+
+// TenantPurgeRequest is the internal.tenant.purge payload.
+type TenantPurgeRequest struct {
+	JobID    string `json:"job_id"`
+	TenantID string `json:"tenant_id"`
+	Trigger  string `json:"trigger"`
+}
+
+// Purge steps, in the order farmer runs them (S6 decision 7): live
+// caches, database rows, the tombstone's own data, object store
+// prefixes, OpenBao KV, and the tenant's Transit keys last. A failed
+// purge names the step it stopped at (TenantResult.FailedStep).
+const (
+	PurgeStepValkey    = "valkey"
+	PurgeStepDB        = "db"
+	PurgeStepTombstone = "tombstone"
+	PurgeStepObjects   = "objects"
+	PurgeStepKV        = "kv"
+	PurgeStepTransit   = "transit"
+)
+
+// PurgeSteps lists the purge steps in order.
+var PurgeSteps = []string{PurgeStepValkey, PurgeStepDB, PurgeStepTombstone, PurgeStepObjects, PurgeStepKV, PurgeStepTransit}
+
+// ValidPurgeStep reports whether s is one of PurgeSteps.
+func ValidPurgeStep(s string) bool {
+	for _, p := range PurgeSteps {
+		if s == p {
+			return true
+		}
+	}
+	return false
+}
+
+// MaxPurgeCategories bounds TenantResult.Counts: the SaaS API ignores a
+// result with more.
+const MaxPurgeCategories = 64
+
+// ValidPurgeCategory reports whether name is safe as a purge count key:
+// a fixed category name such as "db.props" or "objects.jobs", lower case
+// letters, digits, '_' and '.', at most 64 bytes. Category names are
+// farmer's constants, never a tenant's table rows, keys or content.
+func ValidPurgeCategory(name string) bool {
+	if name == "" || len(name) > 64 {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// TenantResult is the payload of internal.tenant.provisioned.{job_id},
+// internal.tenant.deprovisioned.{job_id} and internal.tenant.purged.{job_id}.
+// A failure carries only an ErrorCode and a qualified success only a
+// WarningCode — never text; see ErrorCode. A purge result also carries
+// how many items of each category it deleted (Counts: numbers only, keyed
+// by fixed category names) and, when it failed part way, the step it
+// stopped at (FailedStep, one of PurgeSteps).
 type TenantResult struct {
-	JobID       string      `json:"job_id"`
-	TenantID    string      `json:"tenant_id"`
-	Status      string      `json:"status"`
-	ErrorCode   ErrorCode   `json:"error_code,omitempty"`
-	WarningCode WarningCode `json:"warning_code,omitempty"`
+	JobID       string           `json:"job_id"`
+	TenantID    string           `json:"tenant_id"`
+	Status      string           `json:"status"`
+	ErrorCode   ErrorCode        `json:"error_code,omitempty"`
+	WarningCode WarningCode      `json:"warning_code,omitempty"`
+	Counts      map[string]int64 `json:"counts,omitempty"`
+	FailedStep  string           `json:"failed_step,omitempty"`
 }
 
 // Action types for SproutActionRequest.Action.Type. ActionSelfUpdate's
@@ -325,6 +457,10 @@ func ProvisionedSubject(jobID string) string { return SubjectTenantProvisionedPr
 // DeprovisionedSubject returns the result subject for a deprovision job.
 // jobID must already satisfy ValidJobID.
 func DeprovisionedSubject(jobID string) string { return SubjectTenantDeprovisionedPrefix + jobID }
+
+// PurgedSubject returns the result subject for a purge job. jobID must
+// already satisfy ValidJobID.
+func PurgedSubject(jobID string) string { return SubjectTenantPurgedPrefix + jobID }
 
 // JobIDFromSubject extracts the trailing job-ID token from a result
 // subject received on one of the wildcards above, reporting false if the

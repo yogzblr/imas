@@ -41,16 +41,13 @@ func nextResult(t *testing.T, c *saasClient, sub *nats.Subscription) controlplan
 	if err != nil {
 		t.Fatalf("waiting for result: %v", err)
 	}
-	deprovision := strings.HasPrefix(msg.Subject, controlplane.SubjectTenantDeprovisionedPrefix)
-	prefix := controlplane.SubjectTenantProvisionedPrefix
-	if deprovision {
-		prefix = controlplane.SubjectTenantDeprovisionedPrefix
-	}
+	kind := resultKind(msg.Subject)
+	prefix := kind.ResultPrefix()
 	jobID, ok := controlplane.JobIDFromSubject(msg.Subject, prefix)
 	if !ok {
 		t.Fatalf("result on unexpected subject %q", msg.Subject)
 	}
-	res, err := c.openTenantResult(deprovision, jobID, msg)
+	res, err := c.openTenantResult(kind, jobID, msg)
 	if err != nil {
 		t.Fatalf("opening result on %s: %v", msg.Subject, err)
 	}
@@ -125,7 +122,7 @@ func TestTenantProvision_FailurePublishesFailedWithError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("waiting for result: %v", err)
 	}
-	res, err := saas.openTenantResult(false, "pj_bad", msg)
+	res, err := saas.openTenantResult(controlplane.TenantJobProvision, "pj_bad", msg)
 	if err != nil {
 		t.Fatalf("opening result: %v", err)
 	}
@@ -439,10 +436,10 @@ func TestTenantProvisioning_ResultsAreSealed(t *testing.T) {
 		t.Fatalf("result headers %v", msg.Header)
 	}
 	// It opens only on its own job's subject.
-	if _, err := saas.box.OpenTenantResult(false, "pj_other", controlplane.ProvisionedSubject("pj_other"), msg.Data); err == nil {
+	if _, err := saas.box.OpenTenantResult(controlplane.TenantJobProvision, "pj_other", controlplane.ProvisionedSubject("pj_other"), msg.Data); err == nil {
 		t.Fatal("a result opened as another job's")
 	}
-	if _, err := saas.openTenantResult(false, "pj_seal", msg); err != nil {
+	if _, err := saas.openTenantResult(controlplane.TenantJobProvision, "pj_seal", msg); err != nil {
 		t.Fatal(err)
 	}
 }

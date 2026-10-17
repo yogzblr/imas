@@ -511,15 +511,19 @@ func TestSealedSaaSAPIRequests(t *testing.T) {
 			t.Fatalf("reply %+v, %v", body, err)
 		}
 	}
-	for _, deprovision := range []bool{false, true} {
-		subject, data, err := sealSaaSAPIResult(deprovision, "job-42", map[string]string{"job_id": "job-42", "tenant_id": "t_1"})
+	for _, c := range []struct {
+		kind            controlplane.TenantJob
+		purpose, method string
+	}{
+		{controlplane.TenantJobProvision, payloadbox.PurposeSaaSTenantProvisioned, "tenant.provisioned"},
+		{controlplane.TenantJobDeprovision, payloadbox.PurposeSaaSTenantDeprovisioned, "tenant.deprovisioned"},
+		{controlplane.TenantJobPurge, payloadbox.PurposeSaaSTenantPurged, "tenant.purged"},
+	} {
+		subject, data, err := sealSaaSAPIResult(c.kind, "job-42", map[string]string{"job_id": "job-42", "tenant_id": "t_1"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		purpose, method := payloadbox.PurposeSaaSTenantProvisioned, "tenant.provisioned"
-		if deprovision {
-			purpose, method = payloadbox.PurposeSaaSTenantDeprovisioned, "tenant.deprovisioned"
-		}
+		purpose, method := c.purpose, c.method
 		if subject != "internal."+method+".job-42" {
 			t.Fatalf("subject %s", subject)
 		}
@@ -527,7 +531,7 @@ func TestSealedSaaSAPIRequests(t *testing.T) {
 			t.Fatalf("%s: OpenResult: %v", subject, err)
 		}
 	}
-	if _, _, err := sealSaaSAPIResult(false, "job.42", nil); err == nil {
+	if _, _, err := sealSaaSAPIResult(controlplane.TenantJobProvision, "job.42", nil); err == nil {
 		t.Error("a job id with a dot made a subject")
 	}
 }

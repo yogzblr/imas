@@ -39,6 +39,7 @@ type SaaSAPIWire struct {
 var saasapiRequestPurposes = map[string]string{
 	controlplane.SubjectTenantProvision:   payloadbox.PurposeSaaSTenantProvision,
 	controlplane.SubjectTenantDeprovision: payloadbox.PurposeSaaSTenantDeprovision,
+	controlplane.SubjectTenantPurge:       payloadbox.PurposeSaaSTenantPurge,
 	controlplane.SubjectSproutAction:      payloadbox.PurposeSaaSSproutAction,
 }
 
@@ -63,20 +64,29 @@ func SproutActionReplyWire() SaaSAPIWire {
 	}
 }
 
-// TenantResultWire is the wire of farmer's asynchronous provisioning
-// result for jobID: f2a.tenant.provisioned on
-// internal.tenant.provisioned.<job_id>, or the deprovisioned pair. The
-// subject names the job, so a result sealed for one job doesn't open on
-// another's subject. jobID must be a valid job ID
-// (controlplane.ValidJobID): it becomes a subject token.
-func TenantResultWire(deprovision bool, jobID string) (SaaSAPIWire, error) {
+// tenantResultPurposes maps each tenant job to its result's purpose.
+var tenantResultPurposes = map[controlplane.TenantJob]string{
+	controlplane.TenantJobProvision:   payloadbox.PurposeSaaSTenantProvisioned,
+	controlplane.TenantJobDeprovision: payloadbox.PurposeSaaSTenantDeprovisioned,
+	controlplane.TenantJobPurge:       payloadbox.PurposeSaaSTenantPurged,
+}
+
+// TenantResultWire is the wire of farmer's asynchronous result of the
+// tenant job kind for jobID: f2a.tenant.provisioned on
+// internal.tenant.provisioned.<job_id>, the deprovisioned pair, or
+// f2a.tenant.purged on internal.tenant.purged.<job_id>. The subject names
+// the job, so a result sealed for one job doesn't open on another's
+// subject. jobID must be a valid job ID (controlplane.ValidJobID): it
+// becomes a subject token.
+func TenantResultWire(kind controlplane.TenantJob, jobID string) (SaaSAPIWire, error) {
 	if !controlplane.ValidJobID(jobID) {
 		return SaaSAPIWire{}, fmt.Errorf("pki: invalid job id %q", jobID)
 	}
-	purpose, prefix := payloadbox.PurposeSaaSTenantProvisioned, controlplane.SubjectTenantProvisionedPrefix
-	if deprovision {
-		purpose, prefix = payloadbox.PurposeSaaSTenantDeprovisioned, controlplane.SubjectTenantDeprovisionedPrefix
+	purpose, ok := tenantResultPurposes[kind]
+	if !ok {
+		return SaaSAPIWire{}, fmt.Errorf("pki: unknown tenant job %q", kind)
 	}
+	prefix := kind.ResultPrefix()
 	return SaaSAPIWire{
 		Purpose: purpose,
 		Method:  strings.TrimSuffix(strings.TrimPrefix(prefix, SaaSAPISubjectPrefix), "."),

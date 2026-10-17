@@ -148,3 +148,66 @@ func TestDecodeSelfUpdateParams(t *testing.T) {
 		t.Errorf("encodes as %s", b)
 	}
 }
+
+func TestTenantJobSubjects(t *testing.T) {
+	for _, c := range []struct {
+		job             TenantJob
+		request, result string
+	}{
+		{TenantJobProvision, "internal.tenant.provision", "internal.tenant.provisioned.pj_1"},
+		{TenantJobDeprovision, "internal.tenant.deprovision", "internal.tenant.deprovisioned.pj_1"},
+		{TenantJobPurge, "internal.tenant.purge", "internal.tenant.purged.pj_1"},
+	} {
+		if got := c.job.RequestSubject(); got != c.request {
+			t.Errorf("%s request subject %q, want %q", c.job, got, c.request)
+		}
+		if got := c.job.ResultSubject("pj_1"); got != c.result {
+			t.Errorf("%s result subject %q, want %q", c.job, got, c.result)
+		}
+	}
+	if TenantJob("rename").RequestSubject() != "" || TenantJob("rename").ResultPrefix() != "" {
+		t.Error("an unknown tenant job has subjects")
+	}
+	if PurgedSubject("pj_1") != TenantJobPurge.ResultSubject("pj_1") || SubjectTenantPurgedWildcard != "internal.tenant.purged.*" {
+		t.Error("purged subject helpers disagree")
+	}
+	if id, ok := JobIDFromSubject("internal.tenant.purged.pj_9", SubjectTenantPurgedPrefix); !ok || id != "pj_9" {
+		t.Errorf("JobIDFromSubject on a purged subject: %q %v", id, ok)
+	}
+}
+
+func TestPurgeValidators(t *testing.T) {
+	for _, tr := range []string{PurgeTriggerRetention, PurgeTriggerOperator} {
+		if !ValidPurgeTrigger(tr) {
+			t.Errorf("trigger %q refused", tr)
+		}
+	}
+	for _, tr := range []string{"", "Retention", "manual"} {
+		if ValidPurgeTrigger(tr) {
+			t.Errorf("trigger %q accepted", tr)
+		}
+	}
+	for _, s := range PurgeSteps {
+		if !ValidPurgeStep(s) {
+			t.Errorf("step %q refused", s)
+		}
+	}
+	if ValidPurgeStep("bucket") || ValidPurgeStep("") {
+		t.Error("an unknown step accepted")
+	}
+	for _, c := range []string{"db.props", "objects.sprout_jwts", "valkey.heartbeat", "transit.keys"} {
+		if !ValidPurgeCategory(c) {
+			t.Errorf("category %q refused", c)
+		}
+	}
+	for _, c := range []string{"", "db.Props", "tenants/t_1/recipes/x", "a b", "db-props", string(make([]byte, 65))} {
+		if ValidPurgeCategory(c) {
+			t.Errorf("category %q accepted", c)
+		}
+	}
+	for _, code := range []ErrorCode{ErrorPurgeRefused, ErrorPurgeIncomplete} {
+		if PublicErrorMessage(code) == PublicErrorMessage(ErrorInternal) {
+			t.Errorf("%s has no public message of its own", code)
+		}
+	}
+}

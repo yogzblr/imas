@@ -11,6 +11,7 @@ import (
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/objectstore"
+	"github.com/yogzblr/imas/internal/tenantpurge"
 )
 
 // store is the object-storage backend recipes are read from — see
@@ -25,6 +26,31 @@ var store *objectstore.Store
 // recipes from. Call once at startup, mirroring RegisterNatsConn's
 // injection pattern.
 func SetStore(s *objectstore.Store) { store = s }
+
+// PurgeTenantObjects deletes every object of tenantID's in the recipe
+// bucket (S6): its recipes, its recipe audit records and anything else
+// under tenants/<tenant_id>/, and its sprouts' staged recipes under
+// sprouts/<tenant_id>/. It returns how many of each it deleted
+// ("objects.recipes", "objects.staged_recipes"), and stops at the first
+// failure. Only the purge of an offboarded tenant calls it
+// (internal/natsapi tenant_purge.go).
+func PurgeTenantObjects(ctx context.Context, tenantID string, batch int) (map[string]int64, error) {
+	counts := map[string]int64{}
+	if store == nil {
+		return counts, errors.New("recipe store not configured")
+	}
+	for _, p := range tenantpurge.ObjectPrefixes(tenantID) {
+		if p.Bucket != tenantpurge.BucketRecipes {
+			continue
+		}
+		n, err := tenantpurge.DeleteObjects(ctx, store, p.Prefix, tenantID, batch)
+		counts[p.Category] = n
+		if err != nil {
+			return counts, err
+		}
+	}
+	return counts, nil
+}
 
 // readRecipe returns the content of the recipe object at key. It mirrors
 // internal/api/handlers/recipes.go's GetFile: no store is a distinct,
@@ -88,7 +114,7 @@ func recipeExists(ctx context.Context, key string) (bool, error) {
 // tenants/<tenant_id>/recipes/.
 
 // tenantRecipeRoot is the top-level prefix of every tenant's own recipes.
-const tenantRecipeRoot = "tenants/"
+const tenantRecipeRoot = tenantpurge.RootTenants
 
 // reservedRecipeRoots are top-level key prefixes the platform recipe tree
 // may not sit under.

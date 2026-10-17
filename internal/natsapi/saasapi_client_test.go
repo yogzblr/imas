@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,14 +124,26 @@ func requestSproutAction(t *testing.T, c *saasClient, req controlplane.SproutAct
 	return reply
 }
 
-// openTenantResult is how the SaaS API reads a provisioning result that
+// openTenantResult is how the SaaS API reads a tenant job result that
 // arrived on msg.Subject for jobID.
-func (c *saasClient) openTenantResult(deprovision bool, jobID string, msg *nats.Msg) (controlplane.TenantResult, error) {
+
+// resultKind is the tenant job whose result subject subject is.
+func resultKind(subject string) controlplane.TenantJob {
+	switch {
+	case strings.HasPrefix(subject, controlplane.SubjectTenantDeprovisionedPrefix):
+		return controlplane.TenantJobDeprovision
+	case strings.HasPrefix(subject, controlplane.SubjectTenantPurgedPrefix):
+		return controlplane.TenantJobPurge
+	}
+	return controlplane.TenantJobProvision
+}
+
+func (c *saasClient) openTenantResult(kind controlplane.TenantJob, jobID string, msg *nats.Msg) (controlplane.TenantResult, error) {
 	var res controlplane.TenantResult
 	if msg.Header.Get(payloadbox.Header) != payloadbox.HeaderBox1 {
 		return res, fmt.Errorf("plaintext result: %s", msg.Data)
 	}
-	body, err := c.box.OpenTenantResult(deprovision, jobID, msg.Subject, msg.Data)
+	body, err := c.box.OpenTenantResult(kind, jobID, msg.Subject, msg.Data)
 	if err != nil {
 		return res, err
 	}

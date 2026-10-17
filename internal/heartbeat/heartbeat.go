@@ -70,6 +70,7 @@ import (
 
 	log "github.com/yogzblr/imas/internal/log"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/tenantpurge"
 )
 
 // TTL is how long a heartbeat key survives without being refreshed. It is
@@ -88,10 +89,12 @@ const Interval = TTL / 5
 // code never assigns it.
 var ttl = TTL
 
-const keyPrefix = "imas:heartbeat:"
+// keyPrefix names the presence keys. internal/tenantpurge's inventory
+// owns the name, so a purge deletes exactly these keys.
+const keyPrefix = tenantpurge.ValkeyHeartbeatPrefix
 
 // acceptedPrefix names the acceptance markers.
-const acceptedPrefix = "imas:accepted:"
+const acceptedPrefix = tenantpurge.ValkeyAcceptedPrefix
 
 // acceptedKeyFor is the acceptance marker for sproutID within tenant:
 // "farmer has verified, against the database, that this sprout is accepted
@@ -427,4 +430,29 @@ func RunSprout(ctx context.Context, nc busConn, sproutID string, interval time.D
 			beat()
 		}
 	}
+}
+
+// PurgeTenant deletes every presence key and acceptance marker of
+// tenantID's sprouts (S6: a purged tenant's live cache), on every Valkey
+// node, and returns how many keys of each kind it deleted
+// ("valkey.heartbeat", "valkey.accepted"). The keys are found by the
+// tenant part of their hash tag, {<tenant_id>:, which ends at a ':' no
+// tenant ID contains, so no other tenant's key, even one for a sprout of
+// the same ID, matches.
+func PurgeTenant(ctx context.Context, tenantID string, batch int) (map[string]int64, error) {
+	counts := map[string]int64{}
+	if !tenantpurge.ValidTenantID(tenantID) {
+		return counts, tenantpurge.ErrInvalidTenantID
+	}
+	if client == nil {
+		return counts, errors.New("heartbeat: no Valkey client")
+	}
+	for _, prefix := range tenantpurge.PurgeValkeyPrefixes {
+		n, err := tenantpurge.DeleteValkeyKeys(ctx, client, tenantpurge.ValkeyPattern(prefix, tenantID), batch)
+		counts[tenantpurge.ValkeyCategory(prefix)] = n
+		if err != nil {
+			return counts, err
+		}
+	}
+	return counts, nil
 }
