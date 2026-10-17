@@ -1270,6 +1270,9 @@ refuses to render. */}}
 {{- $ttlMinutes = add $ttlMinutes (atoi (trimSuffix "m" $part)) -}}
 {{- end -}}
 {{- end -}}
+{{- if gt (int $ttlMinutes) 43200 -}}
+{{- fail (printf "credentialPublisher.userJWTTTL %s must not exceed 720h: the publisher refuses a longer IMAS_SAASAPI_USER_JWT_TTL, so no JWT would be renewed" (toString $p.userJWTTTL)) -}}
+{{- end -}}
 {{- /* The run that renews a JWT starts at most everyHours after two
 thirds of its lifetime, may start up to startingDeadlineSeconds late and
 may take up to activeDeadlineSeconds: all of that must fit in the last

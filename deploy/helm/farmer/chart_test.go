@@ -705,6 +705,8 @@ func TestValidationFailures(t *testing.T) {
 		{"publisher JWT ttl at the floor", "must be more than 765m", []string{"--set", "credentialPublisher.userJWTTTL=12h45m"}},
 		// 3h1m clears 3 x 1h but not the late start and run time:
 		// 3 x (60 + 10 + 5) = 225m.
+		{"publisher JWT ttl above the publisher's 720h", "must not exceed 720h", []string{"--set", "credentialPublisher.userJWTTTL=721h"}},
+		{"publisher JWT ttl above 720h in minutes", "must not exceed 720h", []string{"--set", "credentialPublisher.userJWTTTL=719h61m"}},
 		{"publisher JWT ttl leaves no time for a late run", "must be more than 225m", []string{"--set", "credentialPublisher.userJWTTTL=3h1m", "--set", "credentialPublisher.refresh.everyHours=1"}},
 		{"publisher runs as farmer", "must not be farmer's ServiceAccount", []string{"--set", "credentialPublisher.serviceAccountName=t-farmer"}},
 		{"publisher runs as saasapi", "must not be saasapi's ServiceAccount", []string{"--set", "credentialPublisher.serviceAccountName=t-farmer-saasapi"}},
