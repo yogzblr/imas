@@ -22,41 +22,6 @@ func TestIsReadOnly(t *testing.T) {
 	}
 }
 
-func TestRedactToken(t *testing.T) {
-	input := `{"token":"secret123","sprout_id":"web-1"}`
-	result := redactToken(json.RawMessage(input))
-
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(result, &m); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
-	}
-	if _, hasToken := m["token"]; hasToken {
-		t.Error("token field should be redacted")
-	}
-	if _, hasSprout := m["sprout_id"]; !hasSprout {
-		t.Error("sprout_id field should be preserved")
-	}
-}
-
-func TestRedactTokenEmpty(t *testing.T) {
-	// No token field — should return unchanged
-	input := `{"sprout_id":"web-1"}`
-	result := redactToken(json.RawMessage(input))
-
-	if string(result) != input {
-		t.Errorf("expected unchanged input, got %s", string(result))
-	}
-}
-
-func TestRedactTokenOnlyToken(t *testing.T) {
-	input := `{"token":"secret123"}`
-	result := redactToken(json.RawMessage(input))
-
-	if result != nil {
-		t.Errorf("expected nil for token-only params, got %s", string(result))
-	}
-}
-
 func TestExtractTargets(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -111,7 +76,7 @@ func TestExtractTargets(t *testing.T) {
 }
 
 // LogAction records the action, its targets and its params, but no user:
-// a token in params is neither resolved nor stored. A user's request is
+// a token in params is neither resolved nor stored (Log masks it). A user's request is
 // audited by the sealed router with the user it verified (see
 // TestSealedRouterAudit in internal/natsapi).
 func TestLogActionWithGlobal(t *testing.T) {
@@ -146,8 +111,8 @@ func TestLogActionWithGlobal(t *testing.T) {
 	if err := json.Unmarshal(got.Parameters, &pm); err != nil {
 		t.Fatalf("parameters %s: %v", got.Parameters, err)
 	}
-	if _, hasToken := pm["token"]; hasToken {
-		t.Error("token should be redacted from params")
+	if string(pm["token"]) != `"[REDACTED]"` || bytes.Contains(buf.Bytes(), []byte("test-token")) {
+		t.Errorf("parameters = %s, want token redacted", got.Parameters)
 	}
 	if string(pm["sprout_id"]) != `"web-1"` {
 		t.Errorf("parameters = %s, want sprout_id kept", got.Parameters)

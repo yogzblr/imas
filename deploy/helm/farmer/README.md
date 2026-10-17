@@ -1297,7 +1297,8 @@ which is local to one PXC node):
   tenant): one replica at a time under a `farmer.job_leases` row
   (`farmer.jobs.leaseTTL`, `IMAS_JOB_LEASE_TTL`, default 120s).
 - **Job logs**: the job bucket. **Audit**: JSON lines on stdout, whatever
-  `farmer.logFormat` says, shipped by the node's log agent.
+  `farmer.logFormat` says, shipped by the node's log agent (see
+  [What the audit log never contains](#what-the-audit-log-never-contains)).
 - **Per-tenant bus connections**: opened on first use on each replica,
   reconnecting without limit. One is closed once it has been unused for
   `farmer.tenantConnections.idleTTL` (10m) and its tenant has had no sprout
@@ -1323,6 +1324,30 @@ no `farmer.affinity` set, a preferred pod anti-affinity on
 
 Rate limits that are kept per replica (saasapi's rate limiter, the update
 manifest limiter) allow N times the configured rate with N replicas.
+
+### What the audit log never contains
+
+Every audit line goes through one function (`audit.Logger.Log`), which
+redacts before it writes, so no caller can skip it. An ordinary write
+method's params are logged with secrets masked as `[REDACTED]`; a
+free-form method's params are logged only as their size, SHA-256 and the
+top-level key names its handler reads (any other key name is left out). The log (stdout, then the log platform, 30 days)
+never contains:
+
+- the params of `cmd.run`, `cook`, `props.set`, `shell.open`,
+  `auth.users.add`, `auth.users.resetkey` or `auth.rotatekey`: no command
+  text, recipe, property value, shell request or public key;
+- the value of any key, at any depth, whose name contains `pass`,
+  `password`, `passwd`, `passphrase`, `secret`, `token`, `apikey`/`api_key`/`api-key`,
+  `private`, `seed`, `credential`, `authorization`, `bearer`, `cookie`,
+  `otp`, `sdb` or `key_material`, in any case;
+- in any string param, target or the error text: a JWT, a PEM private
+  key block, an NATS seed, an AWS access key ID (`AKIA...`), a bearer
+  credential, a `Basic` credential (base64 of `user:pass`), URL userinfo (`://user:pass@`), or the value of a
+  `name=value` or `name: value` pair, or of a `--name value` command
+  option, whose name contains one of the words above;
+- params that are not JSON or are over 1 MiB (only their size and SHA-256);
+- anything typed or printed in a shell session.
 
 ### Account publisher log fields
 

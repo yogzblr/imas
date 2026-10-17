@@ -26,6 +26,15 @@ that only a test helper imports (the `modernc.org` SQLite stack below), not
 only what the shipped binaries link. Test-only imports (`_test.go`) are not
 included.
 
+## Recorded Apache-2.0 and MIT additions
+
+Modules added under the Apache-2.0/MIT default that a design brief named,
+recorded here with their licence as the brief asked:
+
+| Module | Licence | Linked by | Why |
+|---|---|---|---|
+| `github.com/m-mizutani/masq` v0.2.3 | Apache-2.0 (its own tree has no other licence; its one requirement, `github.com/m-mizutani/gt`, Apache-2.0, is used by its tests only and not linked) | farmer | Masks secrets in string params of the audit log (`internal/audit`, `docs/briefs/S-hardening.md` S2). Standard library only, no CGO. |
+
 ## Licences outside the Apache-2.0/MIT default
 
 Dependencies are Apache-2.0 or MIT by default (`CLAUDE.md`). The recorded

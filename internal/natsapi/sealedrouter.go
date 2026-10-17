@@ -160,8 +160,9 @@ func logCLIPin(tenantID string) {
 }
 
 // auditCall records method as called by c, the verified user, at the
-// configured audit level. For a write, params are recorded too (they hold
-// no credential: there is none to redact any more).
+// configured audit level. For a write, params are recorded too; the audit
+// logger masks their secrets, or logs only the shape and hash of a
+// free-form method's params (audit.Logger.Log), so nothing is redacted here.
 func auditCall(c apiCaller, method string, params json.RawMessage, result any, err error) {
 	if !audit.ShouldLog(method) {
 		return
@@ -187,7 +188,7 @@ func auditCall(c apiCaller, method string, params json.RawMessage, result any, e
 			entry.Targets = ids
 		}
 	}
-	if !audit.IsReadOnly(method) && len(params) > 0 && json.Valid(params) {
+	if !audit.IsReadOnly(method) && len(params) > 0 {
 		entry.Parameters = params
 	}
 	if lerr := logger.Log(entry); lerr != nil {
