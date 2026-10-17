@@ -187,10 +187,10 @@ The local bus does not have the clustered bus's routes or fence
 (`cmd/farmerbus/cluster.go`, `fence.go`); for those, run against deployed
 nodes.
 
-`-bus-trace=false` starts the local bus with NATS debug and trace off, to
-measure what they cost: `cmd/farmerbus` always turns them on, and although
-the internal logger drops them at the default level, nats-server still
-builds a trace line for every message before handing it over.
+`-bus-trace` starts the local bus with NATS debug and trace on, to
+measure what they cost. Off by default, as in `cmd/farmerbus`, which turns
+them on only with `IMAS_BUS_LOG_LEVEL=debug` or `trace`: with trace on,
+nats-server builds a trace line, payload included, for every message.
 
 ## Running against a deployed bus
 

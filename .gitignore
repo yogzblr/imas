@@ -27,3 +27,4 @@ docs-site/book/
 
 # written at release time by packaging/helm/stamp-sprout-release.sh
 deploy/helm/farmer/files/sprout-release.json
+/farmerbus

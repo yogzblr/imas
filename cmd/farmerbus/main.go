@@ -111,14 +111,28 @@ func main() {
 // connection connects or reconnects and pushes each change as it happens,
 // over the network to $SYS.REQ.CLAIMS.UPDATE, and a clustered node also
 // pulls them from its peers (fence.go). No restart or local reload is needed on this side for an
-// ACL change.
+// ACL change. A single node refuses every client but its account loader
+// until the loader has loaded the SYS account (sysgate.go). nats-server's
+// own log level is IMAS_BUS_LOG_LEVEL, info unless set (loglevel.go).
 func RunNATSServer() {
+	level, err := parseBusLogLevel(os.Getenv(envBusLogLevel))
+	if err != nil {
+		log.Fatalf("invalid bus log level: %v", err)
+	}
+	log.SetLogLevel(level.terminalLevel(config.LogLevel))
 	opts, sysUser := pki.ConfigureBusNats()
 	cl, err := clusterConfigFromEnv(os.Getenv, os.ReadFile)
 	if err != nil {
 		log.Fatalf("invalid bus cluster configuration: %v", err)
 	}
-	node, err := startBus(opts, sysUser, cl, defaultFenceTiming)
+	setup := busSetup{SysUser: sysUser, Cluster: cl, Timing: defaultFenceTiming, LogLevel: level}
+	if cl == nil {
+		// A single node waits for its account loader (sysgate.go).
+		if setup.SysReady, err = loaderReadyProbe(os.Getenv(envLoaderReadyURL)); err != nil {
+			log.Fatalf("invalid bus configuration: %v", err)
+		}
+	}
+	node, err := startBus(opts, setup)
 	if err != nil {
 		log.Panicf("Unable to start NATS Server: %v", err)
 	}
@@ -126,19 +140,21 @@ func RunNATSServer() {
 	setBusNode(node)
 	pki.SetNATSServer(node.srv)
 	if cl != nil {
-		log.Infof("NATS bus started as node %q of cluster %q (%d nodes); clients are refused until the fence lifts", cl.ServerName, cl.Name, cl.Size())
+		log.Infof("NATS bus started as node %q of cluster %q (%d nodes), nats-server log level %s; clients are refused until the fence lifts", cl.ServerName, cl.Name, cl.Size(), level)
 	} else {
-		log.Info("NATS bus started")
+		log.Infof("NATS bus started, nats-server log level %s; clients other than the account loader are refused until it has loaded the SYS account", level)
 	}
 }
 
 // errNoFenceUser is a clustered bus started without a fence user.
 var errNoFenceUser = errors.New("farmerbus: a clustered bus needs a fence user: set IMAS_NATS_BUS_FENCE_USER_SEED_FILE (Secret key BUS_FENCE_USER) and bus-fence-user.jwt in the NATS trust")
 
-// busNode is one running bus: the server and, when clustered, its fence.
+// busNode is one running bus: the server and, when clustered, its fence;
+// when not, its SYS gate (sysgate.go).
 type busNode struct {
 	srv   *nats_server.Server
 	fence *fence
+	gate  *sysGate
 }
 
 // Ready reports whether the node should receive client traffic.
@@ -146,13 +162,19 @@ func (n *busNode) Ready() bool {
 	if n == nil || n.srv == nil || !n.srv.Running() {
 		return false
 	}
+	if n.gate != nil && !n.gate.Open() {
+		return false
+	}
 	return n.fence == nil || !n.fence.Fenced()
 }
 
-// Shutdown stops the fence, then the server.
+// Shutdown stops the fence or the gate, then the server.
 func (n *busNode) Shutdown() {
 	if n.fence != nil {
 		n.fence.stop()
+	}
+	if n.gate != nil {
+		n.gate.stop()
 	}
 	n.srv.Shutdown()
 }
@@ -165,34 +187,65 @@ var (
 func setBusNode(n *busNode) { nodeMu.Lock(); curNode = n; nodeMu.Unlock() }
 func getBusNode() *busNode  { nodeMu.Lock(); defer nodeMu.Unlock(); return curNode }
 
+// busSetup is how startBus runs a node.
+type busSetup struct {
+	// SysUser is the fence user; a clustered node needs one.
+	SysUser pki.BusSysUser
+	// Cluster is nil for a single node.
+	Cluster *clusterConfig
+	Timing  fenceTiming
+	// LogLevel is nats-server's own (IMAS_BUS_LOG_LEVEL, loglevel.go).
+	LogLevel busLogLevel
+	// SysReady reports whether the account loader has loaded the SYS
+	// account (loaderReadyProbe). A single node needs it; a clustered
+	// node ignores it (its fence holds it back instead).
+	SysReady func() bool
+	// IsLocal decides which peers the closed SYS gate still admits; nil
+	// is the loopback address (tests replace it).
+	IsLocal func(net.Addr) bool
+}
+
 // startBus starts the embedded server from opts (pki.ConfigureBusNats's
-// output). With cl non-nil it adds authenticated routes (cluster.go) and a
-// fence (fence.go) that keeps clients out until this node has quorum and
-// has synced its resolver from its peers; the fence connects as sysUser,
-// so a clustered bus without a fence user is refused. The fence's cluster
-// size follows IMAS_BUS_CLUSTER_SIZE_FILE when set (clusterSize), never
-// below the number of routes.
-func startBus(opts nats_server.Options, sysUser pki.BusSysUser, cl *clusterConfig, timing fenceTiming) (*busNode, error) {
+// output). With setup.Cluster non-nil it adds authenticated routes
+// (cluster.go) and a fence (fence.go) that keeps clients out until this
+// node has quorum and has synced its resolver from its peers; the fence
+// connects as setup.SysUser, so a clustered bus without a fence user is
+// refused. The fence's cluster size follows IMAS_BUS_CLUSTER_SIZE_FILE
+// when set (clusterSize), never below the number of routes. A single node
+// instead gets the SYS gate (sysgate.go), so one without setup.SysReady is
+// refused. nats-server logs at setup.LogLevel (loglevel.go), whatever
+// opts says.
+func startBus(opts nats_server.Options, setup busSetup) (*busNode, error) {
 	var f *fence
-	if cl != nil {
-		if !sysUser.Configured() {
+	var g *sysGate
+	if cl := setup.Cluster; cl != nil {
+		if !setup.SysUser.Configured() {
 			return nil, errNoFenceUser
 		}
 		if err := applyCluster(&opts, cl); err != nil {
 			return nil, err
 		}
 		size := newClusterSize(cl.Size(), os.Getenv(envClusterSizeFile), os.ReadFile)
-		f = newFence(size.get, timing)
+		f = newFence(size.get, setup.Timing)
 		if err := f.install(&opts); err != nil {
 			return nil, err
 		}
+	} else {
+		if setup.SysReady == nil {
+			return nil, errNoSysReady
+		}
+		g = newSysGate(setup.SysReady, setup.IsLocal, setup.Timing.Interval)
+		if err := g.install(&opts); err != nil {
+			return nil, err
+		}
 	}
+	setup.LogLevel.apply(&opts)
 	srv, err := nats_server.NewServer(&opts)
 	if err != nil || srv == nil {
 		return nil, fmt.Errorf("no NATS Server object returned: %v", err)
 	}
 	var natsLogger log.Logger
-	srv.SetLogger(natsLogger, true, true)
+	srv.SetLogger(natsLogger, opts.Debug, opts.Trace)
 	go srv.Start()
 	// Wait for accept loop(s) to be started
 	if !srv.ReadyForConnections(10 * time.Second) {
@@ -200,12 +253,15 @@ func startBus(opts nats_server.Options, sysUser pki.BusSysUser, cl *clusterConfi
 		return nil, errors.New("NATS server did not start listening")
 	}
 	if f != nil {
-		if err := f.start(srv, sysUser); err != nil {
+		if err := f.start(srv, setup.SysUser); err != nil {
 			srv.Shutdown()
 			return nil, err
 		}
 	}
-	return &busNode{srv: srv, fence: f}, nil
+	if g != nil {
+		g.start()
+	}
+	return &busNode{srv: srv, fence: f, gate: g}, nil
 }
 
 // handleSIGHUP reloads the NATS server's configuration (picking up rotated

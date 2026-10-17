@@ -61,12 +61,15 @@ func baseNatsOptions() nats_server.Options {
 		NoSigs:                true,
 		MaxControlLine:        4096,
 		DisableShortFirstPing: true,
-		Trace:                 true,
-		Debug:                 true,
-		TLS:                   true,
-		AllowNonTLS:           false,
-		LogFile:               "nats.log",
-		AuthTimeout:           10,
+		// No debug or trace: nats-server's trace log carries every
+		// payload (security review 2026-10, L13). cmd/farmerbus turns
+		// them on only when IMAS_BUS_LOG_LEVEL says so.
+		Trace:       false,
+		Debug:       false,
+		TLS:         true,
+		AllowNonTLS: false,
+		LogFile:     "nats.log",
+		AuthTimeout: 10,
 	}
 	// 0 leaves nats-server's default (65,536). A negative MaxConn would
 	// refuse every client, so only a positive value is passed through;

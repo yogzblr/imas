@@ -49,7 +49,7 @@ const (
 	envBusDir  = "IMAS_LOADTEST_BUS_DIR"
 	envBusHost = "IMAS_LOADTEST_BUS_HOST"
 	envBusPort = "IMAS_LOADTEST_BUS_PORT"
-	// envBusTrace "off" turns NATS debug and trace logging off.
+	// envBusTrace "on" turns NATS debug and trace logging on.
 	envBusTrace = "IMAS_LOADTEST_BUS_TRACE"
 	// envBusMaxConn is the bus's busmaxconnections.
 	envBusMaxConn = "IMAS_LOADTEST_BUS_MAX_CONNECTIONS"
@@ -187,8 +187,8 @@ func (b *localBus) Start(ctx context.Context) error {
 		envBusHost+"="+b.host,
 		envBusPort+"="+strconv.Itoa(b.port),
 	)
-	if !b.trace {
-		cmd.Env = append(cmd.Env, envBusTrace+"=off")
+	if b.trace {
+		cmd.Env = append(cmd.Env, envBusTrace+"=on")
 	}
 	if b.maxConn != 0 {
 		cmd.Env = append(cmd.Env, envBusMaxConn+"="+strconv.Itoa(b.maxConn))
@@ -291,14 +291,15 @@ func runBusNode() error {
 	// A fixed name, so the node reads as one bus across restarts in the
 	// varz samples. A single farmerbus node leaves it unset (its ID).
 	opts.ServerName = "loadtest-bus"
-	trace := os.Getenv(envBusTrace) != "off"
+	trace := os.Getenv(envBusTrace) == "on"
 	opts.Trace, opts.Debug = trace, trace
 	srv, err := nats_server.NewServer(&opts)
 	if err != nil {
 		return err
 	}
 	// As cmd/farmerbus's startBus: the internal logger, debug and trace
-	// on (unless -bus-trace=false, to measure what they cost).
+	// off as at farmerbus's default IMAS_BUS_LOG_LEVEL=info (on with
+	// -bus-trace, to measure what they cost).
 	var natsLogger log.Logger
 	srv.SetLogger(natsLogger, trace, trace)
 	go srv.Start()

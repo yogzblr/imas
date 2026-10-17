@@ -260,6 +260,16 @@ becomes Ready and a rollout halts while the other pods keep serving. A
 loader that has loaded once stays Ready through an object store outage
 and keeps the JWTs it holds (owner decision D-2 (a)).
 
+A single node (`bus.replicaCount: 1`) also holds itself back: until its
+loader's `/readyz` answers 200 (`IMAS_BUS_LOADER_READY_URL`, which the
+chart sets to `http://127.0.0.1:<loader.healthPort>/readyz`), farmerbus
+refuses every TLS handshake on the client port that does not come from
+the pod's loopback address, which only the loader uses, and every
+websocket handshake, and its own `/readyz` is 503. So a node on an empty
+volume never serves with the trust's bootstrap SYS Account JWT, which
+lacks the revocations core has put on the SYS account since (security
+review 2026-10, L14). A clustered node is held back by its fence instead.
+
 Before you install, create two Secrets in this namespace (the chart never
 creates either):
 
@@ -775,11 +785,11 @@ sees that address rather than the node's.
 | `bus.replicaCount` | `1` | Bus nodes: 1, or an odd number of 3 or more. See [Clustering](#clustering). |
 | `bus.podManagementPolicy` | `Parallel` | StatefulSet pod management. |
 | `bus.updateStrategy` | `{type: RollingUpdate}` | StatefulSet update strategy. |
-| `bus.logLevel` | `info` | `loglevel` in `/etc/imas/farmer`. |
+| `bus.logLevel` | `info` | `loglevel` in `/etc/imas/farmer`: what farmerbus's own log lines reach the log. It does not turn on nats-server's debug or trace log: that is `IMAS_BUS_LOG_LEVEL` (`info`, the default; `debug` or `trace`), which the chart never sets. Trace logs every payload, for every tenant; set it through `bus.extraEnv` only to debug, and remove it after. |
 | `bus.organization` | `imas` | `farmerorganization`, the legacy tenant ID. Must match core and `^[0-9A-Za-z_-]{1,191}$`. farmer's built-in default `"imas farmer"` is not a valid tenant ID. |
 | `bus.ports.client` | `5406` | TCP NATS listener (`farmerbusport`), used by core. |
 | `bus.ports.websocket` | `5407` | NATS websocket listener (`farmerwsport`), used by Envoy. |
-| `bus.ports.health` | `8080` | Probe listener (`IMAS_BUS_HEALTH_PORT`): `/healthz`, and `/readyz` (503 while fenced). |
+| `bus.ports.health` | `8080` | Probe listener (`IMAS_BUS_HEALTH_PORT`): `/healthz`, and `/readyz` (503 while fenced, or, on a single node, until the loader has loaded the SYS account). |
 | `bus.maxConnections` | `65536` | Most client connections per node (`busmaxconnections`, nats-server's `max_connections`). A whole number of 1 or more; raise `bus.resources` with it. See [Connection limit](#connection-limit). |
 | `bus.cluster.name` | `imas-bus` | `IMAS_BUS_CLUSTER_NAME` when clustered. |
 | `bus.cluster.port` | `6222` | Route port when clustered. |

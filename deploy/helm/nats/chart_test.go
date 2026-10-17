@@ -628,6 +628,30 @@ func TestBusHealthProbe(t *testing.T) {
 	}
 }
 
+// A single node waits for its loader's /readyz over loopback before it
+// serves (cmd/farmerbus sysgate.go); a clustered node has its fence
+// instead. The chart never turns nats-server's debug or trace log on
+// (IMAS_BUS_LOG_LEVEL, security review 2026-10 L13).
+func TestBusSysGateAndLogLevel(t *testing.T) {
+	single := envMap(container(t, find(t, mustRender(t), "StatefulSet", "-bus")))
+	if got := single["IMAS_BUS_LOADER_READY_URL"]; got != "http://127.0.0.1:8081/readyz" {
+		t.Errorf("single node IMAS_BUS_LOADER_READY_URL = %q", got)
+	}
+	moved := envMap(container(t, find(t, mustRender(t, "--set", "loader.healthPort=9091"), "StatefulSet", "-bus")))
+	if got := moved["IMAS_BUS_LOADER_READY_URL"]; got != "http://127.0.0.1:9091/readyz" {
+		t.Errorf("IMAS_BUS_LOADER_READY_URL = %q with loader.healthPort 9091", got)
+	}
+	clustered := envMap(container(t, find(t, mustRender(t, clusteredArgs...), "StatefulSet", "-bus")))
+	if _, ok := clustered["IMAS_BUS_LOADER_READY_URL"]; ok {
+		t.Error("a clustered node got IMAS_BUS_LOADER_READY_URL")
+	}
+	for _, env := range []map[string]string{single, clustered} {
+		if v, ok := env["IMAS_BUS_LOG_LEVEL"]; ok {
+			t.Errorf("the chart sets IMAS_BUS_LOG_LEVEL=%q", v)
+		}
+	}
+}
+
 func policyPorts(np obj, direction string) []int {
 	var ports []int
 	for _, r := range get(np, "spec", direction).([]any) {
