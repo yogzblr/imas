@@ -94,6 +94,39 @@ Scope: `cmd/imas`, `internal/saasapi/sweeper_actions_test.go`, `packaging/test`,
 - **P4.** Recheck B4, B5/M6, B6 (accepted) and B8 (T1) on main and update the
   P4 text through the status fragment: what is closed, with the commit.
 
+Brief corrections (applied by T2, 2026-10-17, decided by the code on main):
+
+- **#139.** The loader (`config.LoadConfig`, `internal/config`) still
+  creates a missing file with `os.Create`; T2 only makes it close that file
+  (an open handle blocks the rename below on Windows). The CLI
+  creates the file 0600 (in a 0700 directory) before the loader runs
+  (`ensureConfigFile`, `cmd/imas/cmd/configperm.go`; installed with a hard
+  link, or created in place with O_EXCL where hard links are missing, so a
+  file another process created meanwhile is kept), so the loader only
+  ever finds the file and truncating it keeps 0600; `imas init` writes the
+  config through a 0600 temporary file renamed into place
+  (`writeConfigFile`). The private key itself is written by
+  `internal/auth` with jety's in-place write, into that 0600 file.
+- **P17, re-signs.** B5/M6 is already closed on main: every Account re-sign
+  waits for a strictly newer `iat` (`waitPastIssuedAt`, C2 `5f4858b` and E6
+  `aa1dd69`), with a source guard
+  (`TestEveryAccountResignWaitsPastIssuedAt`) and a behaviour test
+  (`TestEveryResignAdvancesIat`). The one re-sign the guard excepts, the
+  purge's minimal lock-out (`scrubTombstoneLocked`, S6, minted from fresh
+  claims), had no behaviour test; T2 adds it as a subtest. The tests are in
+  `internal/pki`, not in the scope list.
+- **P17, redial.** Farmer's redial lives in `cmd/farmer`
+  (`newTenantRegistry`, `connectTenantWithRetry`), not in the scope list;
+  the test is `cmd/farmer/tenantredial_test.go`, and `newTenantRegistry`
+  takes its dialer as an argument so the test can pass one.
+- **`internal/cook` and `packaging/test`.** Nothing is left for T2 there:
+  `maxRecipeIncludes` is tested since S4 (`cook_budget_test.go`), and the
+  packaged keyring check (L5) and `-tags no_self_update` (I5) are T1's.
+- **P8.** No module has a licence outside Apache-2.0, MIT, BSD-2-Clause,
+  BSD-3-Clause, ISC, 0BSD and MPL-2.0 (`go-licenses report`, v2.0.1, for the
+  three targets of `.github/workflows/go-licenses.yml`), so nothing is
+  flagged; the module list in `DEPENDENCIES.md` matches the report.
+
 ## T3: heartbeat presence (P12)
 
 Scope: `internal/heartbeat`, `tools/loadtest`, `uat` heartbeat checks, CI

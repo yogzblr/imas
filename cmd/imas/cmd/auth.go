@@ -278,7 +278,7 @@ var authPrivKeyCmd = &cobra.Command{
 	Short: "Create a private key for the imas CLI",
 	Args:  cobra.NoArgs,
 	Run: func(cmd *cobra.Command, _ []string) {
-		err := auth.CreatePrivkey()
+		err := createPrivkey()
 
 		switch outputMode {
 		case "json":
