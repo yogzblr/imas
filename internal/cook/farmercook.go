@@ -428,9 +428,12 @@ type renderState struct {
 	rangeLeft int
 
 	// cook is the cook's budget; cookDeadline is when the cook's time
-	// runs out if this render keeps going.
+	// runs out if this render keeps going. start is when the render
+	// began: its time is charged to cook from there, so a render stopped
+	// at cookDeadline is charged the whole of what was left.
 	cook         *cookBudget
 	cookDeadline time.Time
+	start        time.Time
 
 	propsLoaded bool
 	props       map[string]string
@@ -447,6 +450,7 @@ func newRenderState(cook *cookBudget, tenantID, sproutID string) *renderState {
 		rangeLeft:    maxRangeIterations,
 		cook:         cook,
 		cookDeadline: now.Add(cook.timeLimit - cook.timeUsed),
+		start:        now,
 	}
 }
 
@@ -848,11 +852,9 @@ func (w *renderLimitWriter) Write(p []byte) (int, error) {
 // executeRecipeTemplate parses file as a recipe template under the
 // restrictions above and executes it for rs's sprout. The output still
 // holds template-value placeholders; substituteTemplateValues resolves
-// them. The time it takes, from the first check to the return, is charged
-// to rs's cook.
+// them. The time from rs's start to the return is charged to rs's cook.
 func executeRecipeTemplate(rs *renderState, recipeName string, file []byte) ([]byte, error) {
-	start := time.Now()
-	defer func() { rs.cook.timeUsed += time.Since(start) }()
+	defer func() { rs.cook.timeUsed += time.Since(rs.start) }()
 	if rs.cook.timeUsed >= rs.cook.timeLimit {
 		return nil, rs.cook.exhausted(CookBudgetTime)
 	}
