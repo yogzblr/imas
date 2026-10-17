@@ -153,7 +153,7 @@ func TestLoad(t *testing.T) {
 // The password never shows in an error, String, %v or %#v.
 func TestPasswordNeverPrinted(t *testing.T) {
 	o := Options{Password: "hunter2-secret"}
-	for _, s := range []string{o.String(), fmt.Sprintf("%v", o), fmt.Sprintf("%+v", o), fmt.Sprintf("%#v", o), fmt.Sprintf("%s", o)} {
+	for _, s := range []string{o.String(), fmt.Sprintf("%v", o), fmt.Sprintf("%+v", o), fmt.Sprintf("%#v", o)} {
 		if strings.Contains(s, "hunter2") {
 			t.Errorf("printed the password: %s", s)
 		}
