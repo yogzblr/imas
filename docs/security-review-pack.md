@@ -90,8 +90,8 @@ Accepted, Fix needed (with a note) or Not applicable.
    admin (D22) and the operator/account public keys land in the trust
    ConfigMap only. Check the Job's RBAC.
 4. Recovery keys: 3 shares, threshold 2, held by people (D2). Confirm the
-   operator runbook exists and a real custody plan is assigned. This is a
-   process item, not a code item.
+   operator runbook (`docs/OPENBAO-RUNBOOK.md`) exists and a real custody plan
+   is assigned. This is a process item, not a code item.
 5. Seals: Azure Key Vault in production (D17); the image also carries AWS KMS,
    GCP KMS and KMIP (D14). Confirm unused seals cannot be enabled by a values
    file without review.
