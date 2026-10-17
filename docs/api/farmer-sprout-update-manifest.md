@@ -120,12 +120,18 @@ Both are in farmer's memory, per replica.
   spends `web-01`'s budget in another. A burst of 5, then one request per
   12 seconds. Every authenticated request counts, malformed ones
   included. Buckets idle for 10 minutes are dropped.
-- **Cache:** the answer for (`tenant_id`, `os`, `arch`, `version`), so a
-  rollout wave of many sprouts in one tenant costs one PXC read per
-  replica rather than one per sprout. A served manifest is cached for 30
-  seconds and a 404 for 10 seconds; failures (503) are not cached. So an
-  approval change or a revoke reaches every replica within 30 seconds.
-  Never shared between tenants. Bounded at 4096 entries.
+- **Cache:** a served manifest for (`tenant_id`, `os`, `arch`,
+  `package_type`, `version`), so a rollout wave of many sprouts in one
+  tenant costs one PXC read per replica rather than one per sprout. It is
+  cached for 30 seconds, so an approval change or a revoke reaches every
+  replica within 30 seconds. A 404 is never cached (security review L6):
+  it is read again every time, so a new approval is served at once, and a
+  sprout asking for versions that don't exist takes no cache space.
+  Failures (503) are not cached. Never shared between tenants. Bounded at
+  256 entries per tenant and 4096 in all: a tenant at its 256 evicts only
+  its own entries (expired first, then the one closest to expiry), and
+  when the cache is full of other tenants' live entries a new entry is not
+  cached rather than evicting theirs, so no tenant can empty another's.
 
 ## Deployment notes
 
