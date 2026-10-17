@@ -199,10 +199,11 @@ func TestParseArmoredKeyring(t *testing.T) {
 }
 
 func TestLoadArmoredKeyring_FileChecks(t *testing.T) {
+	trustTempACLs(t)
 	data := armoredPublic(t, newEntity(t, time.Now(), 0))
 	dir := t.TempDir()
 	good := filepath.Join(dir, "fleet-signing-keys.asc")
-	if err := os.WriteFile(good, data, 0o644); err != nil {
+	if err := os.WriteFile(good, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if k, err := LoadArmoredKeyring(good); err != nil || k.Len() != 1 {
@@ -211,38 +212,39 @@ func TestLoadArmoredKeyring_FileChecks(t *testing.T) {
 	if _, err := LoadArmoredKeyring(filepath.Join(dir, "missing.asc")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("missing file = %v", err)
 	}
-	if _, err := LoadArmoredKeyring(dir); err == nil {
-		t.Error("a directory loaded as a keyring")
+	if _, err := LoadArmoredKeyring(dir); !errors.Is(err, ErrUnsafePath) {
+		t.Errorf("a directory as the keyring = %v, want ErrUnsafePath", err)
 	}
-	if runtime.GOOS != "windows" {
-		writable := filepath.Join(dir, "writable.asc")
-		if err := os.WriteFile(writable, data, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(writable, 0o666); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := LoadArmoredKeyring(writable); err == nil {
-			t.Error("a world-writable keyring loaded")
-		}
-	}
-}
-
-// TestRepoReleaseKeyring: the repo's gpg-public-key.asc, which the
-// packages ship as /etc/imas/fleet-signing-keys.asc (D21), parses and
-// holds at least one usable key, so a bad key change fails here and not on
-// the fleet.
-func TestRepoReleaseKeyring(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "gpg-public-key.asc"))
-	if err != nil {
+	link := filepath.Join(dir, "link.asc")
+	if err := os.Symlink(good, link); err != nil {
 		t.Fatal(err)
 	}
-	k, err := ParseArmoredKeyring(data)
-	if err != nil {
-		t.Fatalf("gpg-public-key.asc: %v", err)
+	if _, err := LoadArmoredKeyring(link); !errors.Is(err, ErrUnsafePath) {
+		t.Errorf("a symlink to a good keyring = %v, want ErrUnsafePath", err)
 	}
-	if k.Len() < 1 {
-		t.Fatal("gpg-public-key.asc holds no key")
+	if runtime.GOOS == "windows" {
+		return
+	}
+	// L3: no looser than 0600, whatever the bits.
+	for _, mode := range []os.FileMode{0o644, 0o640, 0o604, 0o666, 0o700, 0o620} {
+		loose := filepath.Join(dir, "loose.asc")
+		if err := os.WriteFile(loose, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(loose, mode); err != nil {
+			t.Fatal(err)
+		}
+		_, err := LoadArmoredKeyring(loose)
+		if !errors.Is(err, ErrUnsafePath) || !strings.Contains(err.Error(), "unsafe_path") {
+			t.Errorf("mode %04o: %v, want ErrUnsafePath (code unsafe_path)", mode, err)
+		}
+		os.Remove(loose)
+	}
+	if err := os.Chmod(good, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadArmoredKeyring(good); err != nil {
+		t.Errorf("mode 0400 = %v, want it loaded", err)
 	}
 }
 

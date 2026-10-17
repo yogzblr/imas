@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -303,33 +304,130 @@ func TestUpdateManifest_CachesPerTenant(t *testing.T) {
 	}
 }
 
-func TestManifestCache_ExpiryAndBound(t *testing.T) {
+func TestManifestCache_Expiry(t *testing.T) {
 	c := &manifestCache{}
 	now := time.Now()
 	k := manifestCacheKey{tenantID: "t_acme", os: "linux", arch: "amd64", version: "v2.4.1"}
 	m := fleetsign.Manifest{Version: "v2.4.1"}
 
-	c.put(k, m, true, now)
+	c.put(k, m, now)
 	if _, found, ok := c.get(k, now.Add(manifestCacheTTL-time.Second)); !ok || !found {
-		t.Error("positive entry should be served before its TTL")
+		t.Error("entry should be served before its TTL")
 	}
 	if _, _, ok := c.get(k, now.Add(manifestCacheTTL)); ok {
-		t.Error("positive entry served at its TTL")
+		t.Error("entry served at its TTL")
 	}
-	c.put(k, fleetsign.Manifest{}, false, now)
-	if _, _, ok := c.get(k, now.Add(manifestNegativeCacheTTL)); ok {
-		t.Error("negative entry served at its TTL")
+	c.put(k, m, now)
+	if total, own := c.size("t_acme"); total != 1 || own != 1 {
+		t.Errorf("replacing an entry: %d total, %d for the tenant; want 1, 1", total, own)
 	}
+}
 
-	orig := manifestCacheMaxEntries
-	manifestCacheMaxEntries = 3
-	t.Cleanup(func() { manifestCacheMaxEntries = orig })
-	c.reset()
+func cacheKey(tenant string, i int) manifestCacheKey {
+	return manifestCacheKey{tenantID: tenant, os: "linux", arch: "amd64", packageType: "deb", version: fmt.Sprintf("v1.0.%d", i)}
+}
+
+func setCacheBounds(t *testing.T, perTenant, total int) {
+	t.Helper()
+	origPer, origTotal := manifestCacheMaxPerTenant, manifestCacheMaxEntries
+	manifestCacheMaxPerTenant, manifestCacheMaxEntries = perTenant, total
+	t.Cleanup(func() { manifestCacheMaxPerTenant, manifestCacheMaxEntries = origPer, origTotal })
+}
+
+// TestManifestCache_PerTenantShare (security review L6): one tenant
+// filling its share, again and again, evicts only its own entries; the
+// other tenant's are all still served.
+func TestManifestCache_PerTenantShare(t *testing.T) {
+	if manifestCacheMaxPerTenant != 256 || manifestCacheMaxEntries != 4096 {
+		t.Fatalf("bounds = %d per tenant, %d in total; want 256, 4096", manifestCacheMaxPerTenant, manifestCacheMaxEntries)
+	}
+	c := &manifestCache{}
+	now := time.Now()
+	m := fleetsign.Manifest{Version: "v1"}
 	for i := 0; i < 10; i++ {
-		c.put(manifestCacheKey{tenantID: "t", os: "linux", arch: "amd64", version: "v1.0." + string(rune('0'+i))}, m, true, now)
-		if n := len(c.entries); n > manifestCacheMaxEntries {
-			t.Fatalf("cache grew to %d entries, bound %d", n, manifestCacheMaxEntries)
+		c.put(cacheKey("t_quiet", i), m, now)
+	}
+	for i := 0; i < 50*manifestCacheMaxPerTenant; i++ {
+		c.put(cacheKey("t_noisy", i), m, now.Add(time.Duration(i)*time.Millisecond))
+		if total, own := c.size("t_noisy"); own > manifestCacheMaxPerTenant || total > manifestCacheMaxEntries {
+			t.Fatalf("after %d puts: %d for t_noisy, %d in total", i+1, own, total)
 		}
+	}
+	for i := 0; i < 10; i++ {
+		if _, found, ok := c.get(cacheKey("t_quiet", i), now.Add(time.Second)); !ok || !found {
+			t.Fatalf("t_quiet's entry %d was evicted by t_noisy", i)
+		}
+	}
+	if total, own := c.size("t_noisy"); own != manifestCacheMaxPerTenant || total != manifestCacheMaxPerTenant+10 {
+		t.Errorf("t_noisy holds %d, total %d; want %d and %d", own, total, manifestCacheMaxPerTenant, manifestCacheMaxPerTenant+10)
+	}
+	// t_noisy's newest entry is kept; the one closest to expiry went.
+	last := 50*manifestCacheMaxPerTenant - 1
+	if _, found, _ := c.get(cacheKey("t_noisy", last), now.Add(time.Second)); !found {
+		t.Error("t_noisy's newest entry was evicted")
+	}
+	if _, found, _ := c.get(cacheKey("t_noisy", 0), now.Add(time.Second)); found {
+		t.Error("t_noisy's oldest entry survived its tenant's eviction")
+	}
+}
+
+// TestManifestCache_TotalBound: with the total cap reached by other
+// tenants' live entries, a new tenant's entry is not cached rather than
+// evicting theirs; expired entries make room.
+func TestManifestCache_TotalBound(t *testing.T) {
+	setCacheBounds(t, 3, 6)
+	c := &manifestCache{}
+	now := time.Now()
+	m := fleetsign.Manifest{Version: "v1"}
+	for _, tenant := range []string{"t_a", "t_b"} {
+		for i := 0; i < 5; i++ {
+			c.put(cacheKey(tenant, i), m, now)
+		}
+	}
+	if total, own := c.size("t_a"); total != 6 || own != 3 {
+		t.Fatalf("%d total, %d for t_a; want 6, 3", total, own)
+	}
+	c.put(cacheKey("t_c", 0), m, now)
+	if _, found, _ := c.get(cacheKey("t_c", 0), now); found {
+		t.Error("cached over the total bound")
+	}
+	if total, _ := c.size("t_c"); total != 6 {
+		t.Errorf("total %d, want 6: nobody else's entry evicted", total)
+	}
+	later := now.Add(manifestCacheTTL)
+	c.put(cacheKey("t_c", 0), m, later)
+	if _, found, _ := c.get(cacheKey("t_c", 0), later); !found {
+		t.Error("not cached once the other entries expired")
+	}
+	if total, own := c.size("t_c"); total != 1 || own != 1 {
+		t.Errorf("%d total, %d for t_c; want 1, 1 (expired entries dropped)", total, own)
+	}
+}
+
+// TestUpdateManifest_NotFoundNotCached (security review L6): a 404 is
+// read from the store every time, so a new approval is served at once,
+// and a tenant's misses take no cache space.
+func TestUpdateManifest_NotFoundNotCached(t *testing.T) {
+	row := wireManifest(t, "v2.4.1", "linux", "amd64")
+	store := &fakeManifestStore{
+		approved: map[string]string{},
+		rows:     map[[4]string]fleetsign.Manifest{{"v2.4.1", "linux", "amd64", "deb"}: row},
+	}
+	installStore(t, store)
+	for i, sprout := range []string{"web-01", "web-02"} {
+		id := SproutIdentity{TenantID: "t_acme", SproutID: sprout}
+		assertGenericNotFound(t, manifestRequest(t, &id, acmeQuery))
+		if store.calls != i+1 {
+			t.Fatalf("store read %d times after %d misses", store.calls, i+1)
+		}
+	}
+	if total, own := updateManifests.size("t_acme"); total != 0 || own != 0 {
+		t.Errorf("misses cached: %d entries", total)
+	}
+	store.approved["t_acme"] = "v2.4.1"
+	id := SproutIdentity{TenantID: "t_acme", SproutID: "web-03"}
+	if rec := manifestRequest(t, &id, acmeQuery); rec.Code != http.StatusOK {
+		t.Fatalf("after approval: got %d, want 200 at once", rec.Code)
 	}
 }
 

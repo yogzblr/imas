@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/klauspost/compress/zstd"
@@ -31,10 +32,11 @@ import (
 //
 //   - apt: dists/<suite>/<component>/binary-<arch>/Packages(.gz), the
 //     stanza whose SHA256 is the checksum; its Filename, under the
-//     repository URL.
+//     repository URL, at most its Size bytes.
 //   - rpm: repodata/repomd.xml's primary index (gzip, bzip2, zstd or
 //     uncompressed), the package whose sha256
-//     checksum is the checksum; its location href, under the baseurl.
+//     checksum is the checksum; its location href, under the baseurl, at
+//     most its size package bytes.
 //   - nuget: the service index's PackageBaseAddress (flat container),
 //     <id>/<version>/<id>.<version>.nupkg, which holds the MSI at its root
 //     under the signed file name (build-winget-nupkg.sh).
@@ -54,11 +56,12 @@ var nativeRepoFormat = map[string]string{pkgDeb: repoApt, pkgRPM: repoRPM, pkgMS
 const (
 	defaultAptDist        = "any main"
 	defaultNuGetPackageID = "imas.sprout.windows.msi"
-	// maxIndexBytes caps a repository index, compressed or not.
-	maxIndexBytes = 256 << 20
 	// maxZstdWindow caps a zstd frame's window size (zstd's own default
-	// limit is 512 MiB). createrepo_c writes 8 MiB windows or smaller.
+	// limit is 512 MiB), and the index limit lowers it further.
+	// createrepo_c writes 8 MiB windows or smaller.
 	maxZstdWindow = 64 << 20
+	// minZstdWindow is zstd's smallest window (zstd.MinWindowSize).
+	minZstdWindow = 1 << 10
 )
 
 var (
@@ -87,6 +90,7 @@ type repo struct {
 	suite, component string
 	packageID        string
 	debArch, rpmArch string
+	limits           limits
 	client           *http.Client
 }
 
@@ -94,7 +98,7 @@ type repo struct {
 // makes no request.
 func configuredRepo(p platform) (repo, error) {
 	r := repo{format: config.SproutUpdateRepoFormat, token: config.SproutUpdateRepoToken,
-		debArch: debArch[p.arch], rpmArch: rpmArch[p.arch]}
+		debArch: debArch[p.arch], rpmArch: rpmArch[p.arch], limits: currentLimits()}
 	if r.format == "" {
 		r.format = nativeRepoFormat[p.pkgType]
 	}
@@ -158,7 +162,7 @@ func configuredRepo(p platform) (repo, error) {
 			return r, fmt.Errorf("%w: sproutupdaterepopackageid %q is not a NuGet package id", ErrRepoNotConfigured, r.packageID)
 		}
 	}
-	r.client = newRepoClient()
+	r.client = newRepoClient(r.limits.request)
 	return r, nil
 }
 
@@ -176,19 +180,25 @@ func (r repo) fetchPackage(ctx context.Context, m release, dir, dest string) (*u
 		if err != nil {
 			return nil, err
 		}
-		return u, r.download(ctx, u, dest, m.ChecksumSHA256)
+		return u, r.download(ctx, u, dest, m.ChecksumSHA256, r.limits.packageBytes)
 	case repoApt:
-		u, err := r.locateApt(ctx, m.ChecksumSHA256)
+		u, size, err := r.locateApt(ctx, m.ChecksumSHA256)
 		if err != nil {
 			return nil, err
 		}
-		return u, r.download(ctx, u, dest, m.ChecksumSHA256)
+		if err := r.checkDeclared(u, size); err != nil {
+			return nil, err
+		}
+		return u, r.download(ctx, u, dest, m.ChecksumSHA256, r.limits.declaredCap(size))
 	case repoRPM:
-		u, err := r.locateRPM(ctx, m.ChecksumSHA256)
+		u, size, err := r.locateRPM(ctx, m.ChecksumSHA256)
 		if err != nil {
 			return nil, err
 		}
-		return u, r.download(ctx, u, dest, m.ChecksumSHA256)
+		if err := r.checkDeclared(u, size); err != nil {
+			return nil, err
+		}
+		return u, r.download(ctx, u, dest, m.ChecksumSHA256, r.limits.declaredCap(size))
 	case repoNuGet:
 		u, err := r.locateNuGet(ctx, m.Version)
 		if err != nil {
@@ -197,6 +207,15 @@ func (r repo) fetchPackage(ctx context.Context, m release, dir, dest string) (*u
 		return u, r.downloadFromNupkg(ctx, u, dir, m.FileName, dest, m.ChecksumSHA256)
 	}
 	return nil, fmt.Errorf("%w: format %q", ErrRepoNotConfigured, r.format)
+}
+
+// checkDeclared refuses, before anything is downloaded, a package whose
+// index entry declares more than the package limit.
+func (r repo) checkDeclared(u *url.URL, declared int64) error {
+	if declared > r.limits.packageBytes {
+		return fmt.Errorf("%w: the index declares %s as %d bytes, over the %d byte limit", ErrTooLarge, redact(u), declared, r.limits.packageBytes)
+	}
+	return nil
 }
 
 // resolveRef resolves ref, a path or URL an index gave, against base. The
@@ -217,17 +236,21 @@ func resolveRef(base *url.URL, ref string) (*url.URL, error) {
 }
 
 // fetchIndex GETs base/rel and returns its body, decompressed by rel's
-// extension (.gz or .bz2), capped at maxIndexBytes. The caller closes it.
+// extension (.gz, .bz2 or .zst), capped at r.limits.indexBytes both as
+// downloaded and as decompressed: reading past either cap is an
+// ErrTooLarge error, never a silently truncated index. The caller closes
+// it.
 func (r repo) fetchIndex(ctx context.Context, base *url.URL, rel string) (io.ReadCloser, error) {
 	u, err := resolveRef(base, rel)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := r.get(ctx, u)
+	maxBytes := r.limits.indexBytes
+	resp, err := r.get(ctx, u, maxBytes)
 	if err != nil {
 		return nil, err
 	}
-	body := io.Reader(io.LimitReader(resp.Body, maxIndexBytes))
+	body := io.Reader(&cappedReader{r: resp.Body, left: maxBytes, limit: maxBytes, what: redact(u)})
 	closer := io.Closer(resp.Body)
 	switch path.Ext(u.Path) {
 	case ".gz":
@@ -241,24 +264,64 @@ func (r repo) fetchIndex(ctx context.Context, base *url.URL, rel string) (io.Rea
 		body = bzip2.NewReader(body)
 	case ".zst":
 		// createrepo_c's default for repodata since 1.0. One goroutine,
-		// and a window and memory bound well under maxIndexBytes, so a
+		// and a window and memory bounded by the index limit, so a
 		// hostile frame header can't make the decoder allocate more.
+		window := uint64(min(maxZstdWindow, maxBytes))
 		zr, err := zstd.NewReader(body,
 			zstd.WithDecoderConcurrency(1),
-			zstd.WithDecoderMaxWindow(maxZstdWindow),
-			zstd.WithDecoderMaxMemory(maxIndexBytes))
+			zstd.WithDecoderMaxWindow(max(window, minZstdWindow)),
+			zstd.WithDecoderMaxMemory(uint64(maxBytes)))
 		if err != nil {
 			resp.Body.Close()
 			return nil, fmt.Errorf("selfupdate: %s: %w", redact(u), err)
 		}
-		body = zr
+		body = zstdLimitErrors{zr}
 		closer = closers{zr.IOReadCloser(), resp.Body}
 	case ".xml", ".json", "":
 	default:
 		resp.Body.Close()
 		return nil, fmt.Errorf("selfupdate: %s: unsupported index compression %s (gzip, bzip2, zstd or none)", redact(u), path.Ext(u.Path))
 	}
-	return readCloser{io.LimitReader(body, maxIndexBytes), closer}, nil
+	return readCloser{&cappedReader{r: body, left: maxBytes, limit: maxBytes, what: redact(u) + " (decompressed)"}, closer}, nil
+}
+
+// zstdLimitErrors reports the zstd decoder's own memory and window
+// refusals as ErrTooLarge, like every other index limit.
+type zstdLimitErrors struct{ r io.Reader }
+
+func (z zstdLimitErrors) Read(p []byte) (int, error) {
+	n, err := z.r.Read(p)
+	if errors.Is(err, zstd.ErrDecoderSizeExceeded) || errors.Is(err, zstd.ErrWindowSizeExceeded) {
+		err = fmt.Errorf("%w: %w", ErrTooLarge, err)
+	}
+	return n, err
+}
+
+// cappedReader reads at most left bytes from r and then fails with
+// ErrTooLarge if r has more: an index cut off at the cap would otherwise
+// read as a shorter, valid one.
+type cappedReader struct {
+	r           io.Reader
+	left, limit int64
+	what        string
+}
+
+func (c *cappedReader) Read(p []byte) (int, error) {
+	if c.left <= 0 {
+		var one [1]byte
+		if n, err := c.r.Read(one[:]); n > 0 {
+			return 0, fmt.Errorf("%w: %s is over the %d byte index limit (sproutupdatemaxindexbytes)", ErrTooLarge, c.what, c.limit)
+		} else if err != nil {
+			return 0, err
+		}
+		return 0, nil
+	}
+	if int64(len(p)) > c.left {
+		p = p[:c.left]
+	}
+	n, err := c.r.Read(p)
+	c.left -= int64(n)
+	return n, err
 }
 
 type readCloser struct {
@@ -278,8 +341,9 @@ func (c closers) Close() error {
 }
 
 // locateApt reads the repository's Packages index for this sprout's
-// architecture and returns the URL of the entry whose SHA256 is sum.
-func (r repo) locateApt(ctx context.Context, sum string) (*url.URL, error) {
+// architecture and returns the URL of the entry whose SHA256 is sum, and
+// the Size it declares (0 if none).
+func (r repo) locateApt(ctx context.Context, sum string) (*url.URL, int64, error) {
 	dir := "dists/" + r.suite + "/" + r.component + "/binary-" + r.debArch + "/"
 	var lastErr error
 	for _, name := range []string{"Packages.gz", "Packages"} {
@@ -290,39 +354,43 @@ func (r repo) locateApt(ctx context.Context, sum string) (*url.URL, error) {
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		filename, err := aptFilenameFor(body, sum)
+		filename, size, err := aptFilenameFor(body, sum)
 		body.Close()
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if filename == "" {
-			return nil, fmt.Errorf("%w: no entry with sha256 %s in %s%s", ErrNotInRepo, sum, redact(r.base), dir+name)
+			return nil, 0, fmt.Errorf("%w: no entry with sha256 %s in %s%s", ErrNotInRepo, sum, redact(r.base), dir+name)
 		}
-		return resolveRef(r.base, filename)
+		u, err := resolveRef(r.base, filename)
+		return u, size, err
 	}
-	return nil, lastErr
+	return nil, 0, lastErr
 }
 
 // aptFilenameFor returns the Filename of the stanza in a Packages index
-// whose SHA256 field is sum, or "" if there is none.
-func aptFilenameFor(index io.Reader, sum string) (string, error) {
+// whose SHA256 field is sum, or "" if there is none, and the Size that
+// stanza declares (0 if it has none). A Size that is not a positive
+// number is an error.
+func aptFilenameFor(index io.Reader, sum string) (string, int64, error) {
 	sc := bufio.NewScanner(index)
 	sc.Buffer(make([]byte, 64<<10), 4<<20)
-	var filename, sha string
-	flush := func() string {
-		defer func() { filename, sha = "", "" }()
-		if sha == sum && filename != "" {
-			return filename
+	var filename, sha, size string
+	flush := func() (string, int64, error) {
+		defer func() { filename, sha, size = "", "", "" }()
+		if sha != sum || filename == "" {
+			return "", 0, nil
 		}
-		return ""
+		n, err := declaredSize(size)
+		return filename, n, err
 	}
 	for sc.Scan() {
 		line := sc.Text()
 		if strings.TrimSpace(line) == "" {
-			if f := flush(); f != "" {
-				return f, nil
+			if f, n, err := flush(); f != "" || err != nil {
+				return f, n, err
 			}
 			continue
 		}
@@ -338,20 +406,36 @@ func aptFilenameFor(index io.Reader, sum string) (string, error) {
 			filename = strings.TrimSpace(v)
 		case "SHA256":
 			sha = strings.ToLower(strings.TrimSpace(v))
+		case "Size":
+			size = strings.TrimSpace(v)
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return "", fmt.Errorf("selfupdate: reading the apt Packages index: %w", err)
+		return "", 0, fmt.Errorf("selfupdate: reading the apt Packages index: %w", err)
 	}
-	return flush(), nil
+	return flush()
+}
+
+// declaredSize parses a package size an index declares: "" is 0 (none
+// declared), anything else must be a positive decimal number.
+func declaredSize(s string) (int64, error) {
+	if s == "" {
+		return 0, nil
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("selfupdate: the repository index declares the package size %q, not a positive number", s)
+	}
+	return n, nil
 }
 
 // locateRPM reads the repository's primary index and returns the URL of
-// the package whose sha256 checksum is sum.
-func (r repo) locateRPM(ctx context.Context, sum string) (*url.URL, error) {
+// the package whose sha256 checksum is sum, and the size it declares (0
+// if none).
+func (r repo) locateRPM(ctx context.Context, sum string) (*url.URL, int64, error) {
 	body, err := r.fetchIndex(ctx, r.base, "repodata/repomd.xml")
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	var repomd struct {
 		Data []struct {
@@ -364,7 +448,7 @@ func (r repo) locateRPM(ctx context.Context, sum string) (*url.URL, error) {
 	err = xml.NewDecoder(body).Decode(&repomd)
 	body.Close()
 	if err != nil {
-		return nil, fmt.Errorf("selfupdate: parsing repomd.xml: %w", err)
+		return nil, 0, fmt.Errorf("selfupdate: parsing repomd.xml: %w", err)
 	}
 	primary := ""
 	for _, d := range repomd.Data {
@@ -373,44 +457,46 @@ func (r repo) locateRPM(ctx context.Context, sum string) (*url.URL, error) {
 		}
 	}
 	if primary == "" {
-		return nil, errors.New("selfupdate: repomd.xml lists no primary index")
+		return nil, 0, errors.New("selfupdate: repomd.xml lists no primary index")
 	}
 	body, err = r.fetchIndex(ctx, r.base, primary)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer body.Close()
-	href, base, err := rpmLocationFor(body, sum)
+	href, base, size, err := rpmLocationFor(body, sum)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if href == "" {
-		return nil, fmt.Errorf("%w: no package with sha256 %s in %s", ErrNotInRepo, sum, redact(r.base))
+		return nil, 0, fmt.Errorf("%w: no package with sha256 %s in %s", ErrNotInRepo, sum, redact(r.base))
 	}
 	against := r.base
 	if base != "" {
 		if against, err = resolveRef(r.base, base); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if !strings.HasSuffix(against.Path, "/") {
 			against.Path += "/"
 		}
 	}
-	return resolveRef(against, href)
+	u, err := resolveRef(against, href)
+	return u, size, err
 }
 
 // rpmLocationFor streams a primary.xml index and returns the location
 // href (and xml:base, if any) of the package whose sha256 checksum is
-// sum, or "" if there is none.
-func rpmLocationFor(index io.Reader, sum string) (href, base string, err error) {
+// sum, or "" if there is none, and the size package the entry declares
+// (0 if none).
+func rpmLocationFor(index io.Reader, sum string) (href, base string, size int64, err error) {
 	dec := xml.NewDecoder(index)
 	for {
 		tok, err := dec.Token()
 		if err == io.EOF {
-			return "", "", nil
+			return "", "", 0, nil
 		}
 		if err != nil {
-			return "", "", fmt.Errorf("selfupdate: parsing the rpm primary index: %w", err)
+			return "", "", 0, fmt.Errorf("selfupdate: parsing the rpm primary index: %w", err)
 		}
 		se, ok := tok.(xml.StartElement)
 		if !ok || se.Name.Local != "package" {
@@ -425,12 +511,16 @@ func rpmLocationFor(index io.Reader, sum string) (href, base string, err error) 
 				Href string `xml:"href,attr"`
 				Base string `xml:"http://www.w3.org/XML/1998/namespace base,attr"`
 			} `xml:"location"`
+			Size struct {
+				Package string `xml:"package,attr"`
+			} `xml:"size"`
 		}
 		if err := dec.DecodeElement(&pkg, &se); err != nil {
-			return "", "", fmt.Errorf("selfupdate: parsing the rpm primary index: %w", err)
+			return "", "", 0, fmt.Errorf("selfupdate: parsing the rpm primary index: %w", err)
 		}
 		if pkg.Checksum.Type == "sha256" && strings.ToLower(strings.TrimSpace(pkg.Checksum.Value)) == sum {
-			return pkg.Location.Href, pkg.Location.Base, nil
+			n, err := declaredSize(strings.TrimSpace(pkg.Size.Package))
+			return pkg.Location.Href, pkg.Location.Base, n, err
 		}
 	}
 }

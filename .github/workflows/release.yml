@@ -18,6 +18,14 @@ name: Release
 # publish-packages.yml only accepts refs/tags/v*. "Check the ref" refuses
 # anything else before anything is built.
 #
+# The sprout's update trust root is gated twice (security review L5,
+# docs/RELEASING.md "Fleet signing keyring"), with the sprout's own parse and
+# verify code (internal/fleetsign, run through packaging/test): before
+# anything is built, the keyring the packages ship (gpg-public-key.asc) must
+# hold a release key; after GoReleaser, dist/checksums.txt.sig must verify
+# against it as a sprout verifies it. A failure fails the run, and the draft
+# release it made must not be published.
+#
 # This creates a draft GitHub release (archives, rpm/deb/apk, the MSI,
 # checksums.txt with its GPG .sig and cosign .sigstore.json) and pushes the
 # signed multi-arch images to GHCR
@@ -63,6 +71,14 @@ jobs:
             refs/tags/v[0-9]*) ;;
             *) echo "::error::run Release on a vX.Y.Z tag (Use workflow from: tag), not $GITHUB_REF"; exit 1 ;;
           esac
+
+      # L5: a release may not ship a keyring with no key (the development
+      # tree may, until the release GPG public key is added: owner decision
+      # T1). Also checks every package installs it, mode 0600.
+      - name: Check the fleet signing keyring
+        env:
+          IMAS_RELEASE: "1"
+        run: go test -count=1 -run 'TestPackagedKeyring|TestPackagingInstallsTheKeyring' ./packaging/test
 
       # Every secret this workflow uses, checked up front so a missing one
       # fails here with its name instead of halfway through a publish.
@@ -123,3 +139,11 @@ jobs:
           # in git's version sort, which puts v0.1.0-rc.1 before v0.1.0: a
           # final tagged on the rc's commit would be built as the rc.
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+
+      # L5: the signature every sprout verifies before it installs this
+      # release, checked as the sprout checks it (fleetsign.VerifyChecksums
+      # and ParseChecksums) against the keyring the packages ship.
+      - name: Verify checksums.txt.sig against the packaged keyring
+        env:
+          IMAS_RELEASE_DIST: dist
+        run: go test -count=1 -v -run TestReleaseChecksums ./packaging/test

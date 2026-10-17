@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -61,14 +62,21 @@ import (
 //
 // An MSI ProductVersion is numeric only: the prerelease is dropped when
 // the MSI is built, so an MSI of v2.5.0-rc.1 and one of v2.5.0 both say
-// 2.5.0, and an MSI's metadata can't bind it to a prerelease version. So
-// a prerelease is never installed on Windows (owner's decision on PR #86,
-// 2026-10-04): prepare refuses a prerelease target on an MSI platform
-// before anything is fetched (ErrPrereleaseOnWindows), and
+// 2.5.0, and an MSI's metadata can't bind it to a prerelease version
+// (security review 2026-10-b, B8). What does carry the full version is
+// the MSI's file name, imas-sprout-<version>-windows-<arch>.msi, and that
+// name is what the signed checksums.txt line binds the SHA-256 to. So on
+// Windows verifyPackageIdentity takes the full version (prerelease
+// included) from the staged file's name (msiFileVersion) and refuses the
+// package unless it equals the manifest's version exactly: an rc's MSI
+// can't stand in for the final of the same MAJOR.MINOR.PATCH, nor the
+// other way round. The ProductVersion must then equal MAJOR.MINOR.PATCH.
+// A prerelease is still never installed on Windows (owner's decision on
+// PR #86, 2026-10-04): prepare refuses a prerelease target on an MSI
+// platform before anything is fetched (ErrPrereleaseOnWindows), and
 // verifyPackageIdentity refuses an MSI for a prerelease manifest again.
-// For a release version, MAJOR.MINOR.PATCH is the whole version, so the
-// MSI's ProductVersion must equal it. Linux packages are unaffected:
-// their metadata carries the prerelease, which is compared in full.
+// Linux packages are unaffected: their metadata carries the prerelease,
+// which is compared in full.
 
 const (
 	// sproutPackageName is the deb Package and rpm NAME of every sprout
@@ -313,6 +321,26 @@ func packageSemver(pkgType string, id pkgIdentity) (string, error) {
 	return v, nil
 }
 
+// msiFileVersion returns the canonical version ("v2.5.0-rc.1") an MSI's
+// release file name carries, imas-sprout-<version without v>-windows-
+// <winarch>.msi (fleetsign.ExpectedFileName), or an error for any other
+// name.
+func msiFileVersion(name string) (string, error) {
+	rest, ok := strings.CutPrefix(name, "imas-sprout-")
+	if ok {
+		rest, ok = strings.CutSuffix(rest, ".msi")
+	}
+	i := strings.LastIndex(rest, "-windows-")
+	if !ok || i <= 0 {
+		return "", fmt.Errorf("%w: %q is not an imas-sprout MSI file name", ErrPackageMismatch, name)
+	}
+	v := "v" + rest[:i]
+	if !semver.IsValid(v) || semver.Canonical(v) != v {
+		return "", fmt.Errorf("%w: the MSI file name %q carries no canonical version", ErrPackageMismatch, name)
+	}
+	return v, nil
+}
+
 // manifestComparable is the part of the manifest's version a package of
 // pkgType can state: all of it, except for an MSI (MAJOR.MINOR.PATCH).
 func manifestComparable(pkgType, version string) string {
@@ -338,8 +366,20 @@ func verifyPackageIdentity(ctx context.Context, p platform, file string, m relea
 	if id.name != sproutPackageName {
 		return id, nil, fmt.Errorf("%w: the package is %q, not %s", ErrPackageMismatch, id.name, sproutPackageName)
 	}
-	if p.pkgType == pkgMSI && semver.Prerelease(m.Version) != "" {
-		return id, nil, fmt.Errorf("%w: %s", ErrPrereleaseOnWindows, m.Version)
+	if p.pkgType == pkgMSI {
+		// B8: the full version, prerelease included, from the file name
+		// the signed checksum is bound to.
+		fv, err := msiFileVersion(filepath.Base(file))
+		if err != nil {
+			return id, nil, err
+		}
+		if fv != m.Version {
+			return id, nil, fmt.Errorf("%w: the MSI's file name %s is version %s, but the verified release is %s",
+				ErrPackageMismatch, filepath.Base(file), fv, m.Version)
+		}
+		if semver.Prerelease(m.Version) != "" {
+			return id, nil, fmt.Errorf("%w: %s", ErrPrereleaseOnWindows, m.Version)
+		}
 	}
 	v, err := packageSemver(p.pkgType, id)
 	if err != nil {

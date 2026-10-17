@@ -159,7 +159,12 @@ func GetSproutUpdateManifest(w http.ResponseWriter, r *http.Request) {
 			writeManifestError(w, http.StatusServiceUnavailable, "manifest_unavailable")
 			return
 		}
-		updateManifests.put(key, m, found, time.Now())
+		if found {
+			// "Not found" is never cached (security review L6): a 404
+			// costs a read, which the per-sprout limit bounds, and can't
+			// take cache space from anyone.
+			updateManifests.put(key, m, time.Now())
+		}
 	}
 	if !found {
 		writeManifestError(w, http.StatusNotFound, "not_found")
@@ -250,17 +255,25 @@ func writeManifestError(w http.ResponseWriter, status int, code string) {
 
 // --- cache ---
 
-// Cache lifetimes. A served manifest can lag an approval change or a
-// revoke by at most manifestCacheTTL on each farmer replica; a 404 can
-// lag a new approval by at most manifestNegativeCacheTTL. The cache is
-// what keeps a fleet-wide rollout wave from turning into one PXC read per
-// sprout.
+// Cache lifetime and bounds. A served manifest can lag an approval change
+// or a revoke by at most manifestCacheTTL on each farmer replica. The
+// cache is what keeps a fleet-wide rollout wave from turning into one PXC
+// read per sprout. Only served manifests are cached: a "not found" is
+// read again every time, so a new approval is seen at once and a sprout
+// asking for versions that don't exist can't fill the cache (security
+// review 2026-10, L6).
+//
+// Keys are chosen by authenticated sprouts, so memory is bounded per
+// tenant and in total. A tenant at its share evicts only its own entries
+// (expired first, then the one closest to expiry); with the whole cache
+// full of other tenants' live entries, a new entry is not cached at all
+// rather than evicting someone else's. No tenant can empty or take over
+// another tenant's share.
 var (
-	manifestCacheTTL         = 30 * time.Second
-	manifestNegativeCacheTTL = 10 * time.Second
-	// manifestCacheMaxEntries bounds memory. Keys are chosen by
-	// authenticated sprouts (any well-formed os/arch/version), so the
-	// cache is emptied rather than allowed to grow without bound.
+	manifestCacheTTL = 30 * time.Second
+	// manifestCacheMaxPerTenant bounds one tenant's entries.
+	manifestCacheMaxPerTenant = 256
+	// manifestCacheMaxEntries bounds all tenants' entries together.
 	manifestCacheMaxEntries = 4096
 )
 
@@ -273,54 +286,106 @@ type manifestCacheKey struct {
 
 type manifestCacheEntry struct {
 	m       fleetsign.Manifest
-	found   bool
 	expires time.Time
 }
 
+// manifestCache holds served manifests, one map per tenant (keyed on
+// tenant_id; the entry key repeats it).
 type manifestCache struct {
 	mu      sync.Mutex
-	entries map[manifestCacheKey]manifestCacheEntry
+	tenants map[string]map[manifestCacheKey]manifestCacheEntry
+	total   int
 }
 
 var updateManifests = &manifestCache{}
 
-// get returns key's cached answer; ok is false on a miss or expiry.
+// get returns key's cached manifest; found is false on a miss or expiry,
+// and the caller reads the store.
 func (c *manifestCache) get(key manifestCacheKey, now time.Time) (m fleetsign.Manifest, found, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	e, hit := c.entries[key]
+	e, hit := c.tenants[key.tenantID][key]
 	if !hit || !now.Before(e.expires) {
 		return fleetsign.Manifest{}, false, false
 	}
-	return e.m, e.found, true
+	return e.m, true, true
 }
 
-func (c *manifestCache) put(key manifestCacheKey, m fleetsign.Manifest, found bool, now time.Time) {
-	ttl := manifestNegativeCacheTTL
-	if found {
-		ttl = manifestCacheTTL
-	}
+// put caches m, a served manifest, for key: within the key's tenant's
+// share and the total, evicting only that tenant's entries.
+func (c *manifestCache) put(key manifestCacheKey, m fleetsign.Manifest, now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.entries == nil {
-		c.entries = make(map[manifestCacheKey]manifestCacheEntry)
+	if c.tenants == nil {
+		c.tenants = make(map[string]map[manifestCacheKey]manifestCacheEntry)
 	}
-	if len(c.entries) >= manifestCacheMaxEntries {
-		for k, e := range c.entries {
-			if !now.Before(e.expires) {
-				delete(c.entries, k)
+	if _, replace := c.tenants[key.tenantID][key]; !replace {
+		if len(c.tenants[key.tenantID]) >= manifestCacheMaxPerTenant {
+			c.dropExpired(key.tenantID, now)
+			if len(c.tenants[key.tenantID]) >= manifestCacheMaxPerTenant {
+				c.evictSoonest(key.tenantID)
 			}
 		}
-		if len(c.entries) >= manifestCacheMaxEntries {
-			clear(c.entries)
+		if c.total >= manifestCacheMaxEntries {
+			for tenant := range c.tenants {
+				c.dropExpired(tenant, now)
+			}
+		}
+		if c.total >= manifestCacheMaxEntries {
+			return
+		}
+		c.total++
+	}
+	own := c.tenants[key.tenantID]
+	if own == nil {
+		own = make(map[manifestCacheKey]manifestCacheEntry)
+		c.tenants[key.tenantID] = own
+	}
+	own[key] = manifestCacheEntry{m: m, expires: now.Add(manifestCacheTTL)}
+}
+
+// dropExpired removes tenant's expired entries. c.mu is held.
+func (c *manifestCache) dropExpired(tenant string, now time.Time) {
+	own := c.tenants[tenant]
+	for k, e := range own {
+		if !now.Before(e.expires) {
+			delete(own, k)
+			c.total--
 		}
 	}
-	c.entries[key] = manifestCacheEntry{m: m, found: found, expires: now.Add(ttl)}
+	if len(own) == 0 {
+		delete(c.tenants, tenant)
+	}
+}
+
+// evictSoonest removes tenant's entry closest to expiry. c.mu is held.
+func (c *manifestCache) evictSoonest(tenant string) {
+	own := c.tenants[tenant]
+	var victim manifestCacheKey
+	var soonest time.Time
+	first := true
+	for k, e := range own {
+		if first || e.expires.Before(soonest) {
+			victim, soonest, first = k, e.expires, false
+		}
+	}
+	if !first {
+		delete(own, victim)
+		c.total--
+	}
+}
+
+// size is the number of entries, in total and for tenant.
+func (c *manifestCache) size(tenant string) (total, own int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.total, len(c.tenants[tenant])
 }
 
 func (c *manifestCache) reset() {
 	c.mu.Lock()
-	c.entries = nil
+	c.tenants = nil
+	c.total = 0
 	c.mu.Unlock()
 }
 
