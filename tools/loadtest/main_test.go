@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	nats "github.com/nats-io/nats.go"
+
+	"github.com/yogzblr/imas/internal/heartbeat"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // TestMain lets the test binary be the local bus's child process, as the
@@ -44,8 +48,8 @@ func TestParseOptionsDefaultsAndErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if o.Restart != "local" || o.MaxP99 != requirement10 {
-		t.Errorf("local bus defaults: restart %q, max-p99 %s", o.Restart, o.MaxP99)
+	if o.Restart != "local" || o.MaxP99 != requirement10 || o.Heartbeat != heartbeat.Interval {
+		t.Errorf("local bus defaults: restart %q, max-p99 %s, heartbeat-interval %s", o.Restart, o.MaxP99, o.Heartbeat)
 	}
 	for _, args := range [][]string{
 		{"-servers", "tls://bus:4222"}, // no CA, tenant, SaaS API or farmer
@@ -68,6 +72,7 @@ func TestParseOptionsDefaultsAndErrors(t *testing.T) {
 		{"-id-prefix", "a.b"},
 		{"-sprouts", "0"},
 		{"-bus-max-connections", "-1"},
+		{"-heartbeat-interval", "-1s"},
 		{"-proc", "core"},
 		{"stray"},
 	} {
@@ -183,6 +188,68 @@ func TestFixtureSproutIsConfinedToItsSubjects(t *testing.T) {
 	}
 }
 
+// Load-test sprouts send heartbeats as a sprout does: once at connect and
+// then every interval, on their own subject with the connection's ID as
+// the body, and the bus lets them (the grant is pki.SproutPermissions').
+func TestFleetSproutsSendHeartbeats(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts a bus process")
+	}
+	bus, tlsCfg, _, tf := startTestBus(t)
+	creds, err := tf.mintSprouts("hb", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	core, err := nats.Connect(bus.URL(), nats.Secure(tlsCfg), nats.UserJWTAndSeed(tf.coreJWT, tf.coreSeed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer core.Close()
+	beats, err := core.SubscribeSync(pki.SproutHeartbeatSubjectPattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := core.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	fl := newFleet(creds, fleetOptions{Servers: []string{bus.URL()}, TLS: tlsCfg, ConnectTimeout: 5 * time.Second, HeartbeatInterval: 300 * time.Millisecond})
+	defer fl.Close()
+	if res := fl.connectAll(context.Background(), 0, 1, 0); res.Connected != 3 {
+		t.Fatalf("connected %d of 3 (reasons %v)", res.Connected, res.Reasons)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fl.startHeartbeats(ctx)
+
+	got := map[string]int{}
+	deadline := time.Now().Add(10 * time.Second)
+	for len(got) < 3 || got[creds[0].ID] < 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("heartbeats per sprout %v; want every sprout, the first at least 3 times", got)
+		}
+		m, err := beats.NextMsg(time.Second)
+		if err != nil {
+			continue
+		}
+		id := strings.TrimPrefix(m.Subject, pki.SproutHeartbeatSubjectPrefix)
+		nc := fl.conn(slices.IndexFunc(creds, func(c sproutCred) bool { return c.ID == id }))
+		cid, _ := nc.GetClientID()
+		if want := heartbeat.ConnID(nc.ConnectedServerId(), cid); want == "" || string(m.Data) != want {
+			t.Fatalf("heartbeat of %s has body %q, want its connection ID %q", id, m.Data, want)
+		}
+		got[id]++
+	}
+	if fl.heartbeatErrors.Load() != 0 {
+		t.Fatalf("%d heartbeat publishes failed", fl.heartbeatErrors.Load())
+	}
+	for i := range creds {
+		if err := fl.conn(i).LastError(); err != nil {
+			t.Fatalf("sprout %s: %v", creds[i].ID, err)
+		}
+	}
+}
+
 func TestRunLocalEndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("starts a bus process and runs for several seconds")
@@ -219,6 +286,9 @@ func TestRunLocalEndToEnd(t *testing.T) {
 	}
 	if len(res.Bus) != 1 || res.Bus[0].Name != "loadtest-bus" || res.Bus[0].ConnectionsMax < 30 {
 		t.Errorf("bus varz: %+v", res.Bus)
+	}
+	if res.HeartbeatInterval != heartbeat.Interval.String() || res.SproutHeartbeats < 30 || res.SproutHeartbeatErrors != 0 {
+		t.Errorf("heartbeats: interval %q, %d sent, %d failed; want %s and at least one per sprout", res.HeartbeatInterval, res.SproutHeartbeats, res.SproutHeartbeatErrors, heartbeat.Interval)
 	}
 	if res.SproutHandledPings < res.Hold.OK {
 		t.Errorf("sprouts answered %d pings, requester counted %d", res.SproutHandledPings, res.Hold.OK)

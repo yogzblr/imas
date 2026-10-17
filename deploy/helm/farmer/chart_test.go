@@ -3796,7 +3796,9 @@ func TestBootstrapJobStructure(t *testing.T) {
 // from; with PKI off the step is absent. Its token handling is unchanged:
 // the step reads an unauthenticated path with the handoff token.
 func TestBootstrapBusCAStep(t *testing.T) {
-	jobEnv := func(args ...string) map[string]string {
+	// Takes the subtest's t: mustRender skips (or, with IMAS_REQUIRE_HELM,
+	// fails) the test it is given, which must not be the parent.
+	jobEnv := func(t *testing.T, args ...string) map[string]string {
 		t.Helper()
 		return envValues(initContainer(t, find(t, mustRender(t, args...), "Job", "t-farmer-openbao-bootstrap"), "nats-trust"))
 	}
@@ -3812,7 +3814,7 @@ func TestBootstrapBusCAStep(t *testing.T) {
 		{"pki off", "", "", secretTLS},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			env := jobEnv(c.args...)
+			env := jobEnv(t, c.args...)
 			cm, okCM := env["IMAS_NATSBOOT_BUS_CA_CONFIGMAP"]
 			mount, okMount := env["IMAS_NATSBOOT_BUS_CA_PKI_MOUNT"]
 			if c.cm == "" {

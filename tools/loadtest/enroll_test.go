@@ -198,7 +198,7 @@ func (f *fakeFarmer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	uc := jwt.NewUserClaims(req.NKeyPub)
 	uc.Name = id
 	uc.IssuerAccount = f.tf.accountPub
-	uc.Permissions = sproutPermissions(id)
+	uc.Permissions = pki.SproutPermissions(id)
 	userJWT, err := uc.Encode(f.tf.signing)
 	if err != nil {
 		fail()

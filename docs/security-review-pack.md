@@ -223,7 +223,12 @@ Accepted, Fix needed (with a note) or Not applicable.
    delete resources tagged for the UAT.
 2. The sprout publish permission (UAT.12) and the startup path that refreshes
    a stale User JWT (UAT.13): what can a sprout publish, and can it publish
-   for another tenant?
+   for another tenant? Since T3 the startup refresh compares the whole grant
+   (`pki.SproutUserJWTHasFullGrant`), the sprout reconnects with a User JWT
+   a later refresh wrote at its next heartbeat (`cmd/sprout`'s
+   `heartbeatGate`), and the heartbeat body carries the sending
+   connection's ID, which farmer uses only as the owner of a presence key
+   it creates (`internal/heartbeat`).
 3. The UAT core RustFS is reachable from the DMZ private address on 9000 for
    the loader's read-only credential (E1); the loader seed is in the run's
    sensitive state and is copied to the DMZ only.

@@ -9,6 +9,7 @@ package heartbeat
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -141,7 +142,7 @@ func TestHeartbeat_ConnectedSproutStaysOnlinePastTTL_ThenExpires(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunSprout(ctx, sprout, "web-01", 20*time.Millisecond)
+		RunSprout(ctx, sprout, "web-01", 20*time.Millisecond, nil)
 	}()
 
 	// No CONNECT event is involved at all: the first heartbeat alone sets it.
@@ -199,7 +200,9 @@ func TestHeartbeat_DisconnectAndConnectOnlySprout(t *testing.T) {
 		t.Fatal("a CONNECT-only key outlived its TTL")
 	}
 
-	handleHeartbeat(tenant, pki.SproutHeartbeatSubject("web-01"))
+	// A heartbeat that finds no key writes one owned by the connection
+	// its body names, so that connection's DISCONNECT ends it.
+	handleHeartbeat(tenant, pki.SproutHeartbeatSubject("web-01"), []byte(testServerID+"/1"))
 	if !IsOnline(ctx, tenant, "web-01") {
 		t.Fatal("heartbeat did not set the key")
 	}
@@ -241,7 +244,7 @@ func TestHeartbeat_IgnoresUnacceptedOtherTenantAndInvalid(t *testing.T) {
 	// Not matched by the single-token wildcard, so never delivered; calling
 	// the handler directly shows it would be refused if it were.
 	for _, subj := range []string{"imas.heartbeat.sprout.a.b", "imas.heartbeat.sprout.", "imas.heartbeat.sprout.*"} {
-		handleHeartbeat(tenant, subj)
+		handleHeartbeat(tenant, subj, nil)
 	}
 	// The body is never trusted: a body naming another sprout changes nothing.
 	if err := sprout.Publish(pki.SproutHeartbeatSubject("web-02"), []byte(`{"sprout_id":"web-01","tenant":"t_b"}`)); err != nil {
@@ -284,7 +287,7 @@ func TestRunSprout_SkipsWhileDisconnectedAndStopsOnCancel(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunSprout(ctx, sprout, "web-01", 10*time.Millisecond)
+		RunSprout(ctx, sprout, "web-01", 10*time.Millisecond, nil)
 	}()
 	for i := 0; i < 3; i++ { // once at start, then on every tick
 		select {
@@ -305,7 +308,7 @@ func TestRunSprout_SkipsWhileDisconnectedAndStopsOnCancel(t *testing.T) {
 	done2 := make(chan struct{})
 	go func() {
 		defer close(done2)
-		RunSprout(ctx2, &c, "web-01", 5*time.Millisecond)
+		RunSprout(ctx2, &c, "web-01", 5*time.Millisecond, nil)
 	}()
 	time.Sleep(50 * time.Millisecond)
 	cancel2()
@@ -319,4 +322,88 @@ type fakeConn struct{ n int }
 
 func (f *fakeConn) Publish(string, []byte) error { f.n++; return nil }
 func (f *fakeConn) IsConnected() bool            { return false }
+func (f *fakeConn) ConnectedServerId() string    { return "" }
+func (f *fakeConn) GetClientID() (uint64, error) { return 0, nats.ErrDisconnected }
 func (f *fakeConn) published() int               { return f.n }
+
+// The heartbeat body is the sending connection's ID, the one the bus
+// names in that connection's CONNECT/DISCONNECT events: the bus node's
+// server ID and the client ID it gave the connection.
+func TestRunSprout_BodyIsTheConnectionID(t *testing.T) {
+	ns := startTestBus(t)
+	farmer, sprout := dialTestBus(t, ns), dialTestBus(t, ns)
+	got := make(chan []byte, 4)
+	if _, err := farmer.Subscribe(pki.SproutHeartbeatSubject("web-01"), func(m *nats.Msg) { got <- m.Data }); err != nil {
+		t.Fatal(err)
+	}
+	if err := farmer.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	cid, err := sprout.GetClientID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ConnID(ns.ID(), cid)
+	if want == "" || connIDFromBody([]byte(want)) != want {
+		t.Fatalf("ConnID(%q, %d) = %q, not a well-formed body", ns.ID(), cid, want)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go RunSprout(ctx, sprout, "web-01", time.Hour, nil)
+	select {
+	case body := <-got:
+		if string(body) != want {
+			t.Fatalf("heartbeat body %q, want the connection ID %q", body, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no heartbeat")
+	}
+}
+
+// before runs at the start of every tick, and a tick publishes only when
+// it returns true.
+func TestRunSprout_BeforeGatesEachTick(t *testing.T) {
+	ns := startTestBus(t)
+	farmer, sprout := dialTestBus(t, ns), dialTestBus(t, ns)
+	got := make(chan struct{}, 64)
+	if _, err := farmer.Subscribe(pki.SproutHeartbeatSubject("web-01"), func(*nats.Msg) { got <- struct{}{} }); err != nil {
+		t.Fatal(err)
+	}
+	if err := farmer.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int64
+	allow := make(chan bool, 1)
+	allow <- false
+	before := func() bool {
+		calls.Add(1)
+		select {
+		case a := <-allow:
+			allow <- a
+			return a
+		default:
+			return false
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go RunSprout(ctx, sprout, "web-01", 5*time.Millisecond, before)
+	eventually(t, "before runs on every tick", func() bool { return calls.Load() >= 5 })
+	if err := sprout.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := farmer.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(got); n != 0 {
+		t.Fatalf("%d heartbeats published while before returned false", n)
+	}
+	<-allow
+	allow <- true
+	select {
+	case <-got:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no heartbeat once before returned true")
+	}
+}

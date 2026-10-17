@@ -138,7 +138,8 @@ func TestEvaluate(t *testing.T) {
 	}
 	th := thresholds{MaxP99: 300 * time.Millisecond, MaxPingFailRatio: 0.01, MaxFullReconnect: time.Minute}
 	r := &result{Connect: connectResult{Target: 10, Connected: 10}, Hold: lat("hold", 12, 1000, 5),
-		Restart: &restartResult{Disconnected: 10, FullReconnectSeconds: 30}}
+		Restart:           &restartResult{Disconnected: 10, FullReconnectSeconds: 30},
+		HeartbeatInterval: "1m0s", SproutHeartbeats: 10}
 	r.evaluate(th)
 	if !r.passed() {
 		t.Fatalf("should pass: %+v", r.Checks)
@@ -153,6 +154,7 @@ func TestEvaluate(t *testing.T) {
 		"never full":       func(r *result) { r.Restart.FullReconnectSeconds = 0 },
 		"no disconnect":    func(r *result) { r.Restart.Disconnected = 0 },
 		"after-window p99": func(r *result) { r.After = lat("after restart", 400, 10, 0) },
+		"no heartbeats":    func(r *result) { r.SproutHeartbeats = 0 },
 	} {
 		c := *r
 		h, rr := *r.Hold, *r.Restart
@@ -189,6 +191,8 @@ func TestMergeResults(t *testing.T) {
 	}
 	a := mk("gen-a", 1000, base.Add(10*time.Second), base.Add(40*time.Second), 2*time.Millisecond)
 	b := mk("gen-bb", 3000, base.Add(9*time.Second), base.Add(45*time.Second), 20*time.Millisecond)
+	a.HeartbeatInterval, a.SproutHeartbeats, a.SproutHeartbeatErrors = "1m0s", 1000, 1
+	b.HeartbeatInterval, b.SproutHeartbeats = "1m0s", 3000
 	b.Restart.Mode = "cmd"
 	m := mergeResults([]*result{a, b})
 	if m.Sprouts != 4000 || m.Connect.Connected != 4000 || m.Connect.RatePerSec != 400 || m.Connect.PeakPerSec != 4000 {
@@ -199,6 +203,9 @@ func TestMergeResults(t *testing.T) {
 	}
 	if m.Restart.Mode != "cmd" || m.Restart.FullReconnectSeconds != 36 || m.Restart.PeakReconnectPerSec != 3000 || m.Restart.LiveBefore != 4000 {
 		t.Errorf("restart: %+v", m.Restart)
+	}
+	if m.HeartbeatInterval != "1m0s" || m.SproutHeartbeats != 4000 || m.SproutHeartbeatErrors != 1 {
+		t.Errorf("heartbeats: interval %q, %d sent, %d failed", m.HeartbeatInterval, m.SproutHeartbeats, m.SproutHeartbeatErrors)
 	}
 	if len(m.Bus) != 1 || len(m.Bus[0].Samples) != len("gen-bb") {
 		t.Errorf("bus: kept %+v", m.Bus)

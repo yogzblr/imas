@@ -68,7 +68,7 @@ func TestHandleHeartbeat_MarkerHitSkipsDatabaseAndRefreshes(t *testing.T) {
 	subj := pki.SproutHeartbeatSubject("web-01")
 	pk, mk := keyFor(tenant, "web-01"), acceptedKeyFor(tenant, "web-01")
 
-	handleHeartbeat(tenant, subj)
+	handleHeartbeat(tenant, subj, nil)
 	if calls.Load() != 1 {
 		t.Fatalf("DB calls after the first heartbeat = %d, want 1", calls.Load())
 	}
@@ -87,7 +87,7 @@ func TestHandleHeartbeat_MarkerHitSkipsDatabaseAndRefreshes(t *testing.T) {
 	if mr.Exists(pk) {
 		t.Fatal("presence key should have lapsed")
 	}
-	handleHeartbeat(tenant, subj)
+	handleHeartbeat(tenant, subj, nil)
 	if calls.Load() != 1 {
 		t.Fatalf("DB calls = %d after a marker hit, want still 1", calls.Load())
 	}
@@ -109,11 +109,11 @@ func TestHandleHeartbeat_MarkerIsNotSliding(t *testing.T) {
 	subj := pki.SproutHeartbeatSubject("web-01")
 	mk := acceptedKeyFor(tenant, "web-01")
 
-	handleHeartbeat(tenant, subj)
+	handleHeartbeat(tenant, subj, nil)
 	for i := 0; i < 10; i++ { // ten heartbeats an hour apart
 		mr.FastForward(time.Hour)
 		if i < 3 {
-			handleHeartbeat(tenant, subj)
+			handleHeartbeat(tenant, subj, nil)
 			want := AcceptedTTL - time.Duration(i+1)*time.Hour
 			if got := mr.TTL(mk); got != want {
 				t.Fatalf("after %d hours the marker TTL is %s, want %s (a heartbeat extended it)", i+1, got, want)
@@ -126,7 +126,7 @@ func TestHandleHeartbeat_MarkerIsNotSliding(t *testing.T) {
 	if mr.Exists(mk) {
 		t.Fatal("marker outlived AcceptedTTL")
 	}
-	handleHeartbeat(tenant, subj)
+	handleHeartbeat(tenant, subj, nil)
 	if calls.Load() != 2 || !mr.Exists(mk) {
 		t.Fatalf("after the marker lapsed: DB calls=%d marker=%v; want a re-check and a new marker", calls.Load(), mr.Exists(mk))
 	}
@@ -145,7 +145,7 @@ func TestHandleHeartbeat_FailedCheckSetsNothing(t *testing.T) {
 	}
 	subj := pki.SproutHeartbeatSubject("web-02")
 	for i := 0; i < 3; i++ {
-		handleHeartbeat(tenant, subj)
+		handleHeartbeat(tenant, subj, nil)
 	}
 	if len(mr.Keys()) != 0 || calls.Load() != 3 {
 		t.Fatalf("keys=%v calls=%d; want no keys and 3 checks", mr.Keys(), calls.Load())
@@ -153,14 +153,14 @@ func TestHandleHeartbeat_FailedCheckSetsNothing(t *testing.T) {
 	if err := pki.AcceptNKey(tenant, "web-02"); err != nil {
 		t.Fatal(err)
 	}
-	handleHeartbeat(tenant, subj)
+	handleHeartbeat(tenant, subj, nil)
 	if !IsOnline(context.Background(), tenant, "web-02") {
 		t.Fatal("a newly accepted sprout was not picked up at once")
 	}
 	// A database error is a failed check too.
 	verifySprout = func(string, string) error { return errors.New("db down") }
 	mr.FlushAll()
-	handleHeartbeat(tenant, subj)
+	handleHeartbeat(tenant, subj, nil)
 	if len(mr.Keys()) != 0 {
 		t.Fatalf("keys after a DB error: %v", mr.Keys())
 	}
@@ -178,7 +178,7 @@ func TestHandleHeartbeat_ValkeyErrorFallsBackToDatabase(t *testing.T) {
 	tenant := pki.CurrentTenantID()
 	acceptSprout(t, tenant, "web-01", "UHBWEB01")
 
-	handleHeartbeat(tenant, pki.SproutHeartbeatSubject("web-01"))
+	handleHeartbeat(tenant, pki.SproutHeartbeatSubject("web-01"), nil)
 	if calls.Load() != 1 {
 		t.Fatalf("DB calls = %d, want 1 (fallback)", calls.Load())
 	}
@@ -206,7 +206,7 @@ func TestInvalidate_OnLeavingAccepted(t *testing.T) {
 			t.Cleanup(func() { pki.OnSproutLeftAccepted(nil) })
 			tenant := pki.CurrentTenantID()
 			acceptSprout(t, tenant, "web-01", "UHBWEB01")
-			handleHeartbeat(tenant, pki.SproutHeartbeatSubject("web-01"))
+			handleHeartbeat(tenant, pki.SproutHeartbeatSubject("web-01"), nil)
 			if len(mr.Keys()) != 2 {
 				t.Fatalf("keys before = %v", mr.Keys())
 			}
@@ -216,7 +216,7 @@ func TestInvalidate_OnLeavingAccepted(t *testing.T) {
 			if len(mr.Keys()) != 0 {
 				t.Fatalf("keys after %s = %v; want none", op.name, mr.Keys())
 			}
-			handleHeartbeat(tenant, pki.SproutHeartbeatSubject("web-01"))
+			handleHeartbeat(tenant, pki.SproutHeartbeatSubject("web-01"), nil)
 			if len(mr.Keys()) != 0 {
 				t.Fatalf("a heartbeat after %s re-created keys: %v", op.name, mr.Keys())
 			}
@@ -246,13 +246,13 @@ func TestAcceptedMarkers_SameSproutIDInTwoTenantsIndependent(t *testing.T) {
 	subj := pki.SproutHeartbeatSubject("web-01")
 
 	// Not accepted in B yet: A's marker must not vouch for it.
-	handleHeartbeat(tenantA, subj)
-	handleHeartbeat(tenantB, subj)
+	handleHeartbeat(tenantA, subj, nil)
+	handleHeartbeat(tenantB, subj, nil)
 	if !mr.Exists(acceptedKeyFor(tenantA, "web-01")) || mr.Exists(acceptedKeyFor(tenantB, "web-01")) || mr.Exists(keyFor(tenantB, "web-01")) {
 		t.Fatalf("keys = %v; want only tenant A's", mr.Keys())
 	}
 	acceptedInB.Store(true)
-	handleHeartbeat(tenantB, subj)
+	handleHeartbeat(tenantB, subj, nil)
 	if len(mr.Keys()) != 4 {
 		t.Fatalf("keys = %v; want presence and marker for both tenants", mr.Keys())
 	}

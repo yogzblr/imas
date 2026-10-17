@@ -178,7 +178,7 @@ func SproutInSubject(sproutID, sessionID string) string {
 
 // SproutOutSubjectPrefix is the prefix of every s2f subject sproutID
 // publishes on: its User JWT's publish grant is this plus ".>"
-// (internal/pki's sproutPermissions). Outside imas.sprouts.<id>.>, so the
+// (internal/pki's SproutPermissions). Outside imas.sprouts.<id>.>, so the
 // sprout never receives its own frames.
 func SproutOutSubjectPrefix(sproutID string) string {
 	return "imas.shell.sprout." + sproutID

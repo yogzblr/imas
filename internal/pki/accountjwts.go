@@ -210,8 +210,8 @@ func issuedBy(issuerPub string) func(*jwt.AccountClaims) bool {
 // mintOrReuseUserJWT returns existing when it is a User JWT for pubkey
 // under the Account issuerAccountPub carrying exactly perms, and
 // otherwise a fresh one signed with signingKP; minted reports which.
-// Comparing the permissions is what makes a change to allowAllPermissions
-// or sproutPermissions reach a JWT minted before it. It reads and writes
+// Comparing the permissions is what makes a change to AllowAllPermissions
+// or SproutPermissions reach a JWT minted before it. It reads and writes
 // nothing: the caller holds or stores the result.
 func mintOrReuseUserJWT(existing, pubkey, name string, perms jwt.Permissions, issuerAccountPub string, signingKP nkeys.KeyPair) (signed string, minted bool, err error) {
 	if existing != "" {
@@ -242,7 +242,7 @@ func farmerUserJWT(accountPub string, signingKP nkeys.KeyPair) (string, error) {
 	heldMu.Lock()
 	held := heldFarmerUsers[accountPub]
 	heldMu.Unlock()
-	signed, minted, err := mintOrReuseUserJWT(held, farmerKey, "farmer", allowAllPermissions(), accountPub, signingKP)
+	signed, minted, err := mintOrReuseUserJWT(held, farmerKey, "farmer", AllowAllPermissions(), accountPub, signingKP)
 	if err != nil || !minted {
 		return signed, err
 	}

@@ -47,6 +47,12 @@ type result struct {
 
 	SproutHandledPings int64 `json:"sprout_handled_pings"`
 	SlowConsumers      int64 `json:"client_slow_consumers"`
+	// HeartbeatInterval is the sprouts' heartbeat interval, empty when
+	// they sent none; SproutHeartbeats and SproutHeartbeatErrors count
+	// the heartbeats published and the publishes that failed.
+	HeartbeatInterval     string `json:"heartbeat_interval,omitempty"`
+	SproutHeartbeats      int64  `json:"sprout_heartbeats"`
+	SproutHeartbeatErrors int64  `json:"sprout_heartbeat_errors"`
 
 	Checks []check `json:"checks"`
 }
@@ -136,6 +142,9 @@ func (r *result) evaluate(th thresholds) {
 			add(l.Label+": pings unanswered", fmt.Sprintf("<= %.2f%%", th.MaxPingFailRatio*100),
 				fmt.Sprintf("%.2f%% (%d of %d)", ratio*100, l.failed(), l.Sent), ratio <= th.MaxPingFailRatio)
 		}
+	}
+	if r.HeartbeatInterval != "" && r.Connect.Connected > 0 {
+		add("sprout heartbeats sent", "> 0", fmt.Sprintf("%d (%d failed)", r.SproutHeartbeats, r.SproutHeartbeatErrors), r.SproutHeartbeats > 0)
 	}
 	if rr := r.Restart; rr != nil {
 		add("restart: sprouts not reconnected", fmt.Sprintf("<= %d", th.MaxNotReconnected), fmt.Sprint(rr.NotReconnected),
@@ -366,6 +375,11 @@ func mergeResults(rs []*result) *result {
 		out.HoldDrops += r.HoldDrops
 		out.SproutHandledPings += r.SproutHandledPings
 		out.SlowConsumers += r.SlowConsumers
+		if out.HeartbeatInterval == "" {
+			out.HeartbeatInterval = r.HeartbeatInterval
+		}
+		out.SproutHeartbeats += r.SproutHeartbeats
+		out.SproutHeartbeatErrors += r.SproutHeartbeatErrors
 		hold = mergeLatency(hold, r.Hold, holdH)
 		after = mergeLatency(after, r.After, afterH)
 		if r.Restart != nil {

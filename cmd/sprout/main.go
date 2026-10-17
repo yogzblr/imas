@@ -314,25 +314,7 @@ func ConnectSprout(ctx context.Context, done chan<- struct{}) {
 	}
 	log.Debugf("Successfully connected to the Farmer")
 
-	// Ship logs over this same authenticated connection: a separate dial to
-	// FarmerBusURL has neither the User JWT nor the enrolled addresses.
-	if !pki.SproutUserJWTGrantsLogs(bus.UserJWT, sproutID) {
-		log.Warnf("not shipping logs to the bus: this sprout's User JWT has no grant for %s.>; farmer re-mints it, and it takes effect after the next refresh and restart", pki.SproutLogSubjectPrefix(sproutID))
-	} else if err := log.UseNATSConn(nc, pki.SproutLogSubjectPrefix(sproutID)); err != nil {
-		log.Errorf("Failed to attach log-nats backend to the bus connection: %v", err)
-	}
-	// A User JWT minted before sproutPermissions carried the grant: until
-	// then nats-server drops the submission, and a rotation farmer
-	// triggers never completes (harmlessly; see boxkey.go).
-	if submit := pki.SproutBoxKeySubmitSubject(sproutID); bus.UserJWT != "" && !userJWTGrantsPub(bus.UserJWT, submit) {
-		log.Warnf("farmer-triggered payload-encryption key rotation can't complete: this sprout's User JWT has no publish grant for %s; farmer re-mints it, and it takes effect after the next refresh and restart", submit)
-	}
-
-	// Sealed shell's s2f frames need this grant (J.5); a JWT minted
-	// before it can't publish them until a refresh and restart.
-	if grant := shell.SproutOutSubjectPrefix(sproutID) + ".>"; bus.UserJWT != "" && !userJWTGrantsPub(bus.UserJWT, grant) {
-		log.Warnf("shell sessions to this sprout can't work yet: its User JWT has no publish grant for %s.>; farmer re-mints it, and it takes effect after the next refresh and restart", shell.SproutOutSubjectPrefix(sproutID))
-	}
+	applyGrants(nc, bus.UserJWT())
 	pol := shellPolicyFromConfig()
 	shell.SetSproutPolicy(pol)
 	if pol.Disabled {
@@ -350,8 +332,9 @@ func ConnectSprout(ctx context.Context, done chan<- struct{}) {
 	// is seen and wins over it.
 	go syncStagedRecipe(ctx, cook.SyncOnStartup)
 	// Keeps farmer's "connected" key for this sprout fresh while the
-	// connection stays up (internal/heartbeat); stops with ctx.
-	startHeartbeat(ctx, nc, bus.UserJWT)
+	// connection stays up (internal/heartbeat), and reconnects with a User
+	// JWT a refresh has changed; stops with ctx.
+	startHeartbeat(ctx, nc, bus)
 	// Expire old local job logs written by cook runs on this sprout.
 	jobs.StartSproutReaper(ctx, jobLogDir, jobLogTTL)
 	<-ctx.Done()

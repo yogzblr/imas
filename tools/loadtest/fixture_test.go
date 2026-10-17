@@ -62,7 +62,7 @@ func TestTenantAccountShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if core.Issuer != tf.signingPub || core.IssuerAccount != tf.accountPub || !reflect.DeepEqual(core.Permissions, corePermissions()) {
+	if core.Issuer != tf.signingPub || core.IssuerAccount != tf.accountPub || !reflect.DeepEqual(core.Permissions, pki.AllowAllPermissions()) {
 		t.Errorf("core user: issuer %s account %s perms %+v", core.Issuer, core.IssuerAccount, core.Permissions)
 	}
 	if _, err := tr.newTenant("bad/name"); err == nil {
@@ -96,18 +96,19 @@ func TestSproutJWTShape(t *testing.T) {
 		if uc.Name != c.ID || uc.Issuer != tf.signingPub || uc.IssuerAccount != tf.accountPub {
 			t.Fatalf("sprout %s: name %s issuer %s account %s", c.ID, uc.Name, uc.Issuer, uc.IssuerAccount)
 		}
-		if !reflect.DeepEqual(uc.Permissions, sproutPermissions(c.ID)) {
-			t.Fatalf("sprout %s: permissions %+v", c.ID, uc.Permissions)
+		// The one shared definition: any difference between the grant
+		// the simulated sprouts carry and the real one fails here.
+		if !reflect.DeepEqual(uc.Permissions, pki.SproutPermissions(c.ID)) || !pki.SproutUserJWTHasFullGrant(c.JWT, c.ID) {
+			t.Fatalf("sprout %s: permissions %+v, want pki.SproutPermissions", c.ID, uc.Permissions)
 		}
 		if err := pkiSanity(c); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// The grants internal/pki names through exported helpers, and the
-	// ones the sprout's natsInit and log shipping need.
+	// The grants the sprout's natsInit, log shipping and heartbeat need.
 	id := creds[0].ID
-	p := sproutPermissions(id)
-	for _, want := range []string{"imas.sprouts.announce." + id, "_INBOX.>", "imas.sprouts." + id + ".facts", pki.SproutBoxKeySubmitSubject(id)} {
+	p := pki.SproutPermissions(id)
+	for _, want := range []string{"imas.sprouts.announce." + id, "_INBOX.>", "imas.sprouts." + id + ".facts", pki.SproutBoxKeySubmitSubject(id), pki.SproutHeartbeatSubject(id)} {
 		if !p.Pub.Allow.Contains(want) {
 			t.Errorf("publish grant %q missing", want)
 		}

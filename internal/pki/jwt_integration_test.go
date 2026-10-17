@@ -191,7 +191,7 @@ func TestJWTLifecycle_AcceptGrantsDenyRevokesReacceptRestores(t *testing.T) {
 	}
 
 	// Permission check: the sprout can talk on its own subject tree. Its
-	// permission template (sproutPermissions in jwtusers.go, unchanged from
+	// permission template (SproutPermissions in jwtusers.go, unchanged from
 	// the original NKey allow-list) only grants Publish on a few specific
 	// subjects, of which "facts" is the one usable for a round trip here;
 	// Subscribe is allowed on the whole "imas.sprouts.<id>.>" subtree.
