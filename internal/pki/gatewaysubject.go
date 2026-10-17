@@ -23,18 +23,19 @@ var errNoStore = errors.New("pki: no farmer database configured")
 // It returns nil only if all of these hold, every lookup keyed on
 // tenantID together with nkey or sproutID:
 //   - nkey is not on tenantID's revoked list (pki_revoked_nkeys);
-//   - tenantID is live: the legacy current-tenant seam, or a
-//     non-deleted pki_tenants row;
+//   - tenantID is live: not deprovisioned (refuseDeprovisionedTenant,
+//     which also has a fresh lock-out pushed), and either the legacy
+//     current-tenant seam or a pki_tenants row;
 //   - (tenantID, sproutID) is an accepted pki_nkeys row whose NKey is
 //     exactly nkey. After a replace that row holds the new host's NKey,
 //     so the old host's token, with the old NKey as sub, fails here even
 //     before its revocation is consulted.
 //
-// Every "no" is ErrNKeyRevoked, ErrSproutIDNotFound or ErrTenantNotFound
-// (or the ID validation errors). A database error, or no database at
-// all, is returned wrapped and never disguised as not-found, so a caller
-// can log "couldn't check" apart from "refused" — and must refuse either
-// way.
+// Every "no" is ErrNKeyRevoked, ErrSproutIDNotFound, ErrTenantNotFound or
+// ErrTenantDeprovisioned (or the ID validation errors). A database error,
+// or no database at all, is returned wrapped and never disguised as
+// not-found, so a caller can log "couldn't check" apart from "refused" —
+// and must refuse either way.
 //
 // The row comparisons after each query are deliberate, as in
 // VerifySproutInTenant: PXC's default collations compare strings
@@ -62,15 +63,13 @@ func VerifyGatewaySubject(tenantID, sproutID, nkey string) error {
 	}
 
 	// The legacy tenant has no pki_tenants row (see
-	// ListProvisionedTenantIDs); every other tenant must have a live one.
-	if tenantID != currentTenantID() {
-		trow, err := getTenantRow(tenantID)
-		if err != nil {
-			return err
-		}
-		if trow.Deleted || trow.ID != tenantID {
-			return ErrTenantNotFound
-		}
+	// ListProvisionedTenantIDs); every other tenant must have one.
+	trow, err := liveTenantRow(tenantID)
+	if err != nil {
+		return err
+	}
+	if (trow == nil && tenantID != currentTenantID()) || (trow != nil && trow.ID != tenantID) {
+		return ErrTenantNotFound
 	}
 
 	var row nkeyRow

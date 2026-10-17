@@ -446,7 +446,18 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 	// decoding the join token below), but nkey_pub alone already
 	// unambiguously identifies both the sprout and its tenant if it's been
 	// accepted before.
-	if replayTenantID, sproutID, err := SproutIDAndTenantForNKey(nkeyPub); err == nil {
+	//
+	// Only "no accepted sprout holds this NKey" goes on to the join token
+	// (L10, I7): a database error, an NKey accepted in more than one
+	// tenant, or a deprovisioned tenant's NKey is refused here, before the
+	// token is looked at, so none of them spends a use of it, and a
+	// deprovisioned tenant's host can't move its NKey into another tenant.
+	replayTenantID, sproutID, err := SproutIDAndTenantForNKey(nkeyPub)
+	if err != nil && !errors.Is(err, ErrSproutIDNotFound) {
+		log.Warnf("enroll: refused nkey_pub %s: its accepted sprout could not be looked up, or its tenant is deprovisioned: %v", nkeyPub, err)
+		return nil, ErrEnrollmentFailed
+	}
+	if err == nil {
 		if err := claimSignedPayload(ctx, signedPayload, sig, req.Timestamp); err != nil {
 			log.Warnf("enroll: rejected resubmitted or unrecordable signed request for nkey_pub %s: %v", nkeyPub, err)
 			return nil, ErrEnrollmentFailed
@@ -532,7 +543,7 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 	// Scoped to row.TenantID (the enrollment key's own tenant, not any
 	// global default) so a hostname collision is only ever checked against
 	// that tenant's own sprouts — see resolveEnrollSproutID.
-	sproutID, err := resolveEnrollSproutID(row.TenantID, hostname, nkeyPub)
+	sproutID, err = resolveEnrollSproutID(row.TenantID, hostname, nkeyPub)
 	if err != nil {
 		log.Errorf("enroll: resolving sprout id for hostname %q: %v", hostname, err)
 		return nil, ErrEnrollmentFailed
@@ -543,6 +554,13 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 	// redeeming, like the ID above.
 	if revoked, err := isNKeyRevoked(row.TenantID, nkeyPub); err != nil || revoked {
 		log.Warnf("enroll: nkey_pub %s is revoked in tenant %s, or the check failed (%v)", nkeyPub, row.TenantID, err)
+		return nil, ErrEnrollmentFailed
+	}
+	// A deprovisioned tenant's join token enrols nothing (L10), checked
+	// before redeeming like the two above. A tenant with no row yet is
+	// provisioned lazily by this enrollment (grantEnrolledSprout).
+	if err := refuseDeprovisionedTenant(row.TenantID); err != nil {
+		log.Warnf("enroll: key_id %s: %v", keyID, err)
 		return nil, ErrEnrollmentFailed
 	}
 
@@ -830,7 +848,15 @@ func enrollJWTError(err error) error {
 // first, and pass withGateway only for a request that proved possession
 // of the sprout's box key (a sprout_pub_proof or a sealed refresh): an
 // NKey signature alone is not enough, since the bus can obtain one.
+//
+// A deprovisioned tenant gets nothing (L10): refuseDeprovisionedTenant is
+// checked before anything is minted or read, and a failed check refuses
+// too.
 func reissueExistingIdentity(ctx context.Context, tenantID, sproutID, nkeyPub string, withGateway bool) (*EnrollResult, error) {
+	if err := refuseDeprovisionedTenant(tenantID); err != nil {
+		log.Warnf("enroll: refused to reissue the identity of sprout %s in tenant %s: %v", sproutID, tenantID, err)
+		return nil, ErrEnrollmentFailed
+	}
 	existingJWT, err := MintOrReuseUserJWT(ctx, tenantID, sproutID, nkeyPub)
 	if err != nil {
 		log.Errorf("enroll: sprout %s has an accepted nkey but its User JWT could not be minted or read: %v", sproutID, err)
@@ -925,10 +951,20 @@ func hashSecret(secret string) string {
 // An ID freed by DeleteNKey is handed out again: the new host enrols
 // under it with its own NKey and box key, and the old host's NKey and box
 // keys stay revoked.
+//
+// An NKey the tenant already holds under some sprout ID (in any state)
+// keeps that ID, whatever the hostname: (tenant_id, nkey) is unique (I7),
+// so the NKey never gets a second row. A failed lookup is an error.
 func resolveEnrollSproutID(tenantID, hostname, nkeyPub string) (string, error) {
 	base := NormalizeSproutID(hostname)
 	if !IsValidSproutID(base) {
 		return "", ErrSproutIDInvalid
+	}
+	switch row, err := findNKeyRowByNKeyInTenant(tenantID, nkeyPub); {
+	case err == nil:
+		return row.SproutID, nil
+	case !errors.Is(err, ErrSproutIDNotFound):
+		return "", err
 	}
 	if registered, matches := NKeyExistsInTenant(tenantID, base, nkeyPub); !registered || matches {
 		return base, nil
@@ -950,6 +986,17 @@ func resolveEnrollSproutID(tenantID, hostname, nkeyPub string) (string, error) {
 // grants just this sprout's NKey on the tenant's Account
 // (grantEnrolledSprout), not a re-sync of every sprout of the tenant; the
 // sprout's User JWT is minted by Enroll (MintOrReuseUserJWT).
+//
+// Every grant error is returned but one (L10): a push that failed after
+// the re-check behind it (pushLiveTenantAccount) read the tenant's row
+// and found it live. That Account JWT is signed and held, the bus catches
+// up on the next push, and failing the enrollment there would strand the
+// host: its NKey is accepted with no box key, which the replay path
+// refuses for good. It used to swallow every push error, a failed
+// re-check among them, so a tenant deprovisioned during the enrollment
+// could still be issued an identity when the database failed at that
+// moment; a failed re-check (errTenantRecheckFailed) and a deprovisioned
+// tenant are returned now.
 func acceptEnrolledNKey(tenantID, id, nkey string) error {
 	if err := upsertNKeyRow(nkeyRow{TenantID: tenantID, SproutID: id, NKey: nkey, State: stateAccepted}); err != nil {
 		return err
@@ -958,23 +1005,24 @@ func acceptEnrolledNKey(tenantID, id, nkey string) error {
 		if !errors.Is(err, errAccountPushFailed) {
 			return fmt.Errorf("granting enrolled sprout %s on tenant %s's Account: %w", id, tenantID, err)
 		}
-		// The Account JWT is signed and stored; only the push failed.
-		// The bus catches up on the next push, as before.
-		log.Errorf("failed to push tenant %s's Account after granting enrolled sprout %s: %v", tenantID, id, err)
+		log.Errorf("failed to push tenant %s's Account after granting enrolled sprout %s (the tenant is live; the next push carries it): %v", tenantID, id, err)
 	}
 	return nil
 }
 
 // errAccountPushFailed marks a grantEnrolledSprout error that happened
-// only in the bus push, after the Account JWT was signed and stored.
+// only in the bus push, after the Account JWT was signed and held and
+// the re-check after the push found the tenant live.
 var errAccountPushFailed = errors.New("pushing the tenant Account JWT failed")
 
-// pushGranted pushes a granted Account JWT, marking a plain push failure
-// with errAccountPushFailed. A tenant deprovisioned meanwhile is returned
-// as is: enrolment must fail then.
+// pushGranted pushes a granted Account JWT (pushLiveTenantAccount),
+// marking a plain push failure with errAccountPushFailed. A tenant
+// deprovisioned meanwhile, and a re-check that could not read the
+// database (errTenantRecheckFailed), are returned as they are: enrolment
+// must fail then.
 func pushGranted(mat *natsAuthMaterial, tenantID, accountJWT string) error {
 	err := pushLiveTenantAccount(mat, tenantID, accountJWT)
-	if err == nil || errors.Is(err, ErrTenantDeprovisioned) {
+	if err == nil || errors.Is(err, ErrTenantDeprovisioned) || errors.Is(err, errTenantRecheckFailed) {
 		return err
 	}
 	return fmt.Errorf("%w: %w", errAccountPushFailed, err)
@@ -987,10 +1035,11 @@ func pushGranted(mat *natsAuthMaterial, tenantID, accountJWT string) error {
 // farmer's own User JWT for it. Otherwise only this NKey is granted
 // (its revocation cleared) and the tenant's revoked list (PXC) applied,
 // so a replaced key stays revoked; enrolment no longer re-syncs every
-// sprout of the tenant (P21 slice 3 §4.2). Any error but a failed push
-// (errAccountPushFailed) means the NKey may not be granted, so enrolment
-// fails. FLAG FOR SECURITY REVIEW: this is what lets the sprout's User
-// JWT authenticate.
+// sprout of the tenant (P21 slice 3 §4.2). Any error but a plain failed
+// push (errAccountPushFailed) means the NKey may not be granted or the
+// tenant may be deprovisioned, so enrolment fails (acceptEnrolledNKey).
+// FLAG FOR SECURITY REVIEW: this is what lets the sprout's User JWT
+// authenticate.
 func grantEnrolledSprout(tenantID, nkey string) error {
 	mat, tam, provisioned, err := ensureTenantAccount(tenantID, "", false)
 	if err != nil {

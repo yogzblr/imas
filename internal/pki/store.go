@@ -22,6 +22,7 @@ package pki
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -37,10 +38,16 @@ import (
 // exactly one lifecycle state at a time per tenant — the file-based store
 // only enforced that by convention (each Accept/Deny/Reject/Unaccept call
 // only ever wrote to one state directory), this makes it structural.
+//
+// An NKey is held by at most one sprout ID per tenant: (tenant_id, nkey)
+// is unique (idx_pki_nkeys_tenant_nkey, migration farmer 00006; security
+// review 2026-10, I7), so a lookup by NKey within a tenant has one
+// answer. The nkey index alone (idx_pki_nkeys_n_key) serves the one
+// lookup that searches every tenant (SproutIDAndTenantForNKey).
 type nkeyRow struct {
-	TenantID string `gorm:"column:tenant_id;primaryKey;size:191"`
+	TenantID string `gorm:"column:tenant_id;primaryKey;size:191;uniqueIndex:idx_pki_nkeys_tenant_nkey,priority:1"`
 	SproutID string `gorm:"column:sprout_id;primaryKey;size:253"`
-	NKey     string `gorm:"column:nkey;size:191;not null;index"`
+	NKey     string `gorm:"column:nkey;size:191;not null;index;uniqueIndex:idx_pki_nkeys_tenant_nkey,priority:2"`
 	State    string `gorm:"column:state;size:32;not null;index"`
 }
 
@@ -274,14 +281,46 @@ func notifySproutLeftAccepted(tenantID, sproutID string) {
 // authenticated pubkey (see $SYS.ACCOUNT.*.CONNECT/DISCONNECT's
 // ClientInfo.User) back to a sprout ID, once the event's own ClientInfo.Account
 // has been reverse-mapped to a real tenantID via TenantIDForAccountPub.
+//
+// A database error is returned wrapped, never disguised as
+// ErrSproutIDNotFound (I7).
 func SproutIDForNKey(tenantID, nkey string) (string, error) {
-	var row nkeyRow
-	err := db.Where("tenant_id = ? AND nkey = ? AND state = ?", tenantID, nkey, stateAccepted).First(&row).Error
+	row, err := findNKeyRowByNKeyInTenant(tenantID, nkey)
 	if err != nil {
+		return "", err
+	}
+	if row.State != stateAccepted {
 		return "", ErrSproutIDNotFound
 	}
 	return row.SproutID, nil
 }
+
+// findNKeyRowByNKeyInTenant returns tenantID's pki_nkeys row for nkey, in
+// whatever state, keyed on (tenant_id, nkey) (unique: see nkeyRow). No row
+// is ErrSproutIDNotFound; a database error is returned wrapped. The
+// comparison after the query is deliberate, as in VerifySproutInTenant:
+// PXC's default collations compare strings case-insensitively.
+func findNKeyRowByNKeyInTenant(tenantID, nkey string) (*nkeyRow, error) {
+	if db == nil {
+		return nil, errNoStore
+	}
+	var rows []nkeyRow
+	if err := db.Where("tenant_id = ? AND nkey = ?", tenantID, nkey).Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("pki: looking up an NKey in tenant %q: %w", tenantID, err)
+	}
+	rows = slices.DeleteFunc(rows, func(r nkeyRow) bool { return r.TenantID != tenantID || r.NKey != nkey })
+	switch len(rows) {
+	case 0:
+		return nil, ErrSproutIDNotFound
+	case 1:
+		return &rows[0], nil
+	}
+	return nil, fmt.Errorf("pki: tenant %q: %w", tenantID, errNKeyAmbiguous)
+}
+
+// errNKeyAmbiguous is a lookup by NKey that matched more than one row. It
+// is refused, never resolved by picking one.
+var errNKeyAmbiguous = errors.New("pki: the NKey is held by more than one sprout")
 
 // SproutIDAndTenantForNKey looks up the accepted sprout ID and its owning
 // tenant for nkey, searching across every tenant rather than just the
@@ -293,14 +332,39 @@ func SproutIDForNKey(tenantID, nkey string) (string, error) {
 // tenant regardless of which tenant issued the join token this replay is
 // skipping. FLAG FOR SECURITY REVIEW: this is the one nkey lookup in this
 // package that's deliberately NOT tenant-scoped — see enroll.go for why
-// that's required here rather than a gap.
+// that's required here rather than a gap. Its callers (the enrollment
+// replay and the sealed refresh) have only the NKey: no tenant is known
+// before this answers. Where a tenant is known, the lookup is keyed on
+// (tenant_id, nkey) instead (findNKeyRowByNKeyInTenant).
+//
+// It fails closed (security review 2026-10, L10 and I7):
+//   - no accepted row is ErrSproutIDNotFound, and only that;
+//   - a database error is returned wrapped, never as not-found, so the
+//     enrollment path doesn't go on to spend a join-token use;
+//   - accepted rows in more than one tenant are refused (errNKeyAmbiguous),
+//     never resolved by picking one;
+//   - a deprovisioned tenant is ErrTenantDeprovisioned
+//     (refuseDeprovisionedTenant), as is a failed check of it.
 func SproutIDAndTenantForNKey(nkey string) (tenantID, sproutID string, err error) {
-	var row nkeyRow
-	dbErr := db.Where("nkey = ? AND state = ?", nkey, stateAccepted).First(&row).Error
-	if dbErr != nil {
-		return "", "", ErrSproutIDNotFound
+	if db == nil {
+		return "", "", errNoStore
 	}
-	return row.TenantID, row.SproutID, nil
+	var rows []nkeyRow
+	if err := db.Where("nkey = ? AND state = ?", nkey, stateAccepted).Find(&rows).Error; err != nil {
+		return "", "", fmt.Errorf("pki: looking up the accepted sprout of an NKey: %w", err)
+	}
+	rows = slices.DeleteFunc(rows, func(r nkeyRow) bool { return r.NKey != nkey || r.State != stateAccepted })
+	switch len(rows) {
+	case 0:
+		return "", "", ErrSproutIDNotFound
+	case 1:
+	default:
+		return "", "", errNKeyAmbiguous
+	}
+	if err := refuseDeprovisionedTenant(rows[0].TenantID); err != nil {
+		return "", "", err
+	}
+	return rows[0].TenantID, rows[0].SproutID, nil
 }
 
 // findNKeyRowInTenant is findNKeyRow parameterized by an explicit tenant
@@ -363,6 +427,9 @@ func VerifySproutInTenant(tenantID, sproutID string) error {
 		trow, err := getTenantRow(tenantID)
 		if err != nil {
 			return err
+		}
+		if trow.Deleted && trow.ID == tenantID {
+			noteDeprovisionedTenant(tenantID) // L11: a fresh lock-out
 		}
 		if trow.Deleted || trow.ID != tenantID {
 			return ErrTenantNotFound

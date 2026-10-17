@@ -30,6 +30,9 @@ import (
 
 const (
 	claimsUpdateSubject = "$SYS.REQ.CLAIMS.UPDATE"
+	// claimsLookupSubject is answered by every bus node's full resolver
+	// with the Account JWT it holds, empty when it holds none.
+	claimsLookupSubject = "$SYS.REQ.ACCOUNT.%s.CLAIMS.LOOKUP"
 	serverPingSubject   = "$SYS.REQ.SERVER.PING"
 	pushTimeout         = 10 * time.Second
 )
