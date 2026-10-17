@@ -1289,11 +1289,22 @@ func TestSeedsAreReferencesOnly(t *testing.T) {
 			}
 		}
 	}
-	// saasapi mounts only its own seed.
-	sv := byName(podSpec(find(t, docs, "Deployment", "t-farmer-saasapi"))["volumes"])
+	// saasapi mounts only its own seed and JWT, the JWT as a file it
+	// re-reads (SAASAPI_NATS_USER_JWT_FILE), never an env var read once:
+	// the JWT expires and is refreshed in place.
+	saasapi := find(t, docs, "Deployment", "t-farmer-saasapi")
+	sv := byName(podSpec(saasapi)["volumes"])
 	items := get(sv["nats-credentials"], "secret", "items").([]any)
-	if get(sv["nats-credentials"], "secret", "secretName") != "imas-saasapi-nats" || len(items) != 1 || get(items[0], "key") != "nats-user.nk" {
+	if get(sv["nats-credentials"], "secret", "secretName") != "imas-saasapi-nats" || len(items) != 2 ||
+		get(items[0], "key") != "nats-user.nk" || get(items[1], "key") != "SAASAPI_NATS_USER_JWT" {
 		t.Errorf("saasapi credential volume: %v", sv["nats-credentials"])
+	}
+	se := envValues(container(t, saasapi, "saasapi"))
+	if se["SAASAPI_NATS_USER_JWT_FILE"] != "/var/run/secrets/imas/nats/SAASAPI_NATS_USER_JWT" {
+		t.Errorf("SAASAPI_NATS_USER_JWT_FILE = %q", se["SAASAPI_NATS_USER_JWT_FILE"])
+	}
+	if _, ok := se["SAASAPI_NATS_USER_JWT"]; ok {
+		t.Error("saasapi still gets its JWT as an env var read once at startup")
 	}
 	for _, v := range sv {
 		if get(v, "secret", "secretName") == "imas-farmer-nats-seeds" {

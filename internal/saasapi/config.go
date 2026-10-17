@@ -41,7 +41,10 @@ import (
 //     Account, minted by farmer (pki.EnsureSaaSAPICredential). Same
 //     operational model as INTERNAL_AUTH_SECRET_*: a Kubernetes Secret
 //     kept in sync with OpenBao by External Secrets Operator, Reloader
-//     rolling the Deployment on rotation, read once at startup. The seed
+//     rolling the Deployment on rotation, read once at startup. The JWT
+//     expires, so it is better taken as SAASAPI_NATS_USER_JWT_FILE, which
+//     is re-read at every reconnect and watched (ConnectBus), so a
+//     refreshed JWT is used without a restart. The seed
 //     is the secret half, so it's taken only as a *path* to a file — the
 //     Secret mounted as a volume — never as a raw env var: a mounted
 //     Secret isn't inherited by child processes or captured in crash
@@ -225,8 +228,16 @@ type Config struct {
 	// User NKey seed ("SU..."). The seed itself is read by ConnectBus and
 	// never held in Config.
 	NATSNKeySeedFile string
-	// NATSUserJWT is this service's signed NATS User JWT.
+	// NATSUserJWT is this service's signed NATS User JWT, as read at
+	// startup (from NATSUserJWTFile when that is set).
 	NATSUserJWT string
+	// NATSUserJWTFile (SAASAPI_NATS_USER_JWT_FILE), when set, is a file
+	// holding the JWT, preferred to SAASAPI_NATS_USER_JWT. The JWT
+	// expires (pki.EnvSaaSAPIUserJWTTTL), so ConnectBus re-reads the file
+	// at every (re)connect and reconnects when it changes: the Secret
+	// mounted as a volume, which the kubelet updates in place, carries a
+	// refreshed JWT to the running process with no restart.
+	NATSUserJWTFile string
 
 	// BoxPrivFile is the path to a file holding this service's X25519
 	// box private key (standard base64), the SaaS API box key every
@@ -311,6 +322,7 @@ func LoadConfig() (Config, error) {
 		NATSCAFile:       os.Getenv("SAASAPI_NATS_CA_FILE"),
 		NATSNKeySeedFile: os.Getenv("SAASAPI_NATS_NKEY_SEED_FILE"),
 		NATSUserJWT:      os.Getenv("SAASAPI_NATS_USER_JWT"),
+		NATSUserJWTFile:  os.Getenv("SAASAPI_NATS_USER_JWT_FILE"),
 
 		BoxPrivFile:     os.Getenv("SAASAPI_BOX_PRIV_FILE"),
 		PlatformBoxPubs: splitAddrs(os.Getenv("SAASAPI_PLATFORM_BOX_PUB")),
@@ -385,6 +397,13 @@ func LoadConfig() (Config, error) {
 		if err := cfg.validateOperator(); err != nil {
 			return Config{}, err
 		}
+	}
+	if cfg.NATSUserJWTFile != "" {
+		b, err := os.ReadFile(cfg.NATSUserJWTFile)
+		if err != nil {
+			return Config{}, fmt.Errorf("saasapi: reading SAASAPI_NATS_USER_JWT_FILE: %w", err)
+		}
+		cfg.NATSUserJWT = strings.TrimSpace(string(b))
 	}
 	return cfg, nil
 }

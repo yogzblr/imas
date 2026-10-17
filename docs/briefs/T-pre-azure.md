@@ -212,7 +212,10 @@ Corrections from the T6 build (2026-10-17):
   also a CronJob (`credentialPublisher.refresh.everyHours`, every 4 hours);
   it writes a new JWT once a third of the lifetime
   (`IMAS_SAASAPI_USER_JWT_TTL`, `credentialPublisher.userJWTTTL`, 24h) is
-  left, the gateway JWT's two-thirds rule.
+  left, the gateway JWT's two-thirds rule. saasapi read its JWT once from an
+  env var, so a refreshed JWT would reach it only through Reloader; it now
+  takes `SAASAPI_NATS_USER_JWT_FILE` (the chart mounts the JWT), re-reads
+  it at every reconnect and reconnects when it changes.
 - **L13.** The chart never set debug or trace; a chart test now pins that
   it does not. `tools/loadtest`'s `-bus-trace` said it matched
   `cmd/farmerbus`'s always-on trace; it now defaults to off, as farmerbus.

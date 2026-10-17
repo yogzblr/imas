@@ -270,8 +270,12 @@ is mounted as a volume and `SAASAPI_NATS_NKEY_SEED_FILE` names the path.
 There is no raw-seed environment variable. A mounted Secret isn't
 inherited by child processes or captured in crash dumps or `env` output
 the way an environment variable is. This matches `jwtauth.go`'s preference
-for the `IMAS_NATS_*_SEED_FILE` form. The JWT isn't secret and stays an
-environment variable.
+for the `IMAS_NATS_*_SEED_FILE` form. The JWT isn't secret, but it expires
+(security review 2026-10, L14), so it is mounted too and named by
+`SAASAPI_NATS_USER_JWT_FILE`: saasapi re-reads it at every reconnect and
+watches it, reconnecting when it holds a new valid JWT, so a refresh
+reaches a running pod without a restart (`SAASAPI_NATS_USER_JWT`, read
+once, stays for setups without a mounted file).
 
 **Deployment:** `deploy/helm/farmer` deploys farmer and saasapi with this
 design's pieces: the seed mounts, the publish Job, the `ExternalSecret`
@@ -291,8 +295,8 @@ still an operator choice. The intended production flow is:
 4. The JWT gets into OpenBao KV. It's not secret, but it has to travel
    with the seed. `farmer publish-saasapi-credential`, run as a
    Kubernetes Job with farmer's own image, writes it to a dedicated KV v2
-   path. ESO syncs it to saasapi as `SAASAPI_NATS_USER_JWT`, and
-   Reloader restarts saasapi. See "JWT -> OpenBao hand-off" below. The
+   path. ESO syncs it to saasapi's Secret, mounted as the file
+   `SAASAPI_NATS_USER_JWT_FILE` names, and saasapi reconnects with it. See "JWT -> OpenBao hand-off" below. The
    same subcommand runs as a CronJob and writes a new JWT before the
    current one expires; the hand-off is the same.
 

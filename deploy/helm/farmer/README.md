@@ -209,10 +209,10 @@ one was minted). Without ESO, copy it again after that run has written the
 new JWT and before the old one expires: once the remaining third of
 `userJWTTTL` begins, wait at most `credentialPublisher.refresh.everyHours`
 (the same two commands, with
-`kubectl create secret ... --dry-run=client -o yaml | kubectl apply -f -`),
-then restart saasapi (`kubectl -n imas-core rollout restart deployment
-imas-core-farmer-saasapi`). A copy made before the refresh run only copies
-the old JWT again.
+`kubectl create secret ... --dry-run=client -o yaml | kubectl apply -f -`).
+saasapi mounts the Secret and re-reads the JWT file, so it reconnects with
+the new JWT within about a minute of the update, with no restart. A copy
+made before the refresh run only copies the old JWT again.
 
 And saasapi's control-plane box key (J.4, [Control-plane box keys](#control-plane-box-keys)):
 its private key and the platform public key, both written by the keygen

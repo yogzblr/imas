@@ -900,7 +900,8 @@ saasapi:
   livenessProbe:
     tcpSocket: { port: http }
     periodSeconds: 20
-  # Reloader rolls saasapi when its NATS credential or auth secret changes.
+  # Reloader rolls saasapi when its NATS seed or auth secret changes. A
+  # refreshed NATS JWT needs no roll: saasapi re-reads its mounted file.
   podAnnotations:
     reloader.stakater.com/auto: "true"
   podLabels: {}

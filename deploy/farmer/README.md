@@ -268,8 +268,10 @@ writes nothing. So the same subcommand also runs on a schedule:
 `imas-saasapi-credential-refresh`, with the Job's pod, every 4 hours
 (`17 */4 * * *`), and the chart renders it (`credentialPublisher.refresh`:
 `everyHours`, default 4, and `minute`). A new JWT reaches saasapi the
-way any other does: ESO syncs it and Reloader rolls saasapi, about once a
-day at the default TTL.
+way any other does: ESO syncs it into the mounted Secret, and saasapi,
+which re-reads `SAASAPI_NATS_USER_JWT_FILE` at every reconnect and watches
+it, reconnects with the new JWT without a restart (Reloader not needed for
+it), about once a day at the default TTL.
 
 Keep the interval between runs, plus the CronJob's
 `startingDeadlineSeconds` and the Job's `activeDeadlineSeconds`, below a
