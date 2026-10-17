@@ -31,4 +31,15 @@ regexes = [
   # first committed (490868b); generated per run since, but that commit
   # stays in history. A stub's value, never a credential anywhere.
   '''FS_TOKEN=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef''',
+  # Dummy secrets of S2's audit redaction tests (internal/audit
+  # redact_test.go, internal/natsapi audit_redact_test.go): each exists to
+  # prove the audit log masks it. The JWTs' payloads are {"sub":"UABC",...}
+  # and {"sub":"UFIXTURE"} with the signature "signature-bytes-here" and
+  # "fixture-signature" in base64; the PEM blocks hold no key.
+  '''password:\s*"hunter2-pw-fixture"''',
+  '''apiKey:\s*"apikey-fixture-0042"''',
+  '''eyJhbGciOiJlZDI1NTE5LW5rZXkifQ\.eyJzdWIiOiJVRklYVFVSRSJ9\.Zml4dHVyZS1zaWduYXR1cmU''',
+  '''eyJhbGciOiJlZDI1NTE5LW5rZXkiLCJ0eXAiOiJKV1QifQ\.eyJzdWIiOiJVQUJDIiwibmFtZSI6ImFsaWNlIn0\.c2lnbmF0dXJlLWJ5dGVzLWhlcmU''',
+  '''curl -H 'Authorization: Bearer abc\.def-ghi'''',
+  '''-----BEGIN RSA PRIVATE KEY-----\\nMIIEow\\n-----END RSA PRIVATE KEY-----''',
 ]
