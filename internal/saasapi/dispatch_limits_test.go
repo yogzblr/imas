@@ -33,8 +33,13 @@ func TestLoadConfigDispatchConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s := cfg.OutboxSweeper; s.DispatchConcurrency != 64 || s.SelfUpdateDispatchConcurrency != 16 || s.DispatchTenantConcurrency != 8 {
+	// S3 defaults: pool 256, self_update 16, tenant cap 32 (32*2 <= 256).
+	if s := cfg.OutboxSweeper; s.DispatchConcurrency != 256 || s.SelfUpdateDispatchConcurrency != 16 || s.DispatchTenantConcurrency != 32 ||
+		s.MaxPendingPerTenant != 2000 {
 		t.Fatalf("defaults = %+v", s)
+	}
+	if defaultActionDispatchTenantConcurrency*2 > defaultActionDispatchConcurrency {
+		t.Fatalf("default tenant cap %d is over half the default pool %d", defaultActionDispatchTenantConcurrency, defaultActionDispatchConcurrency)
 	}
 	t.Setenv("SAASAPI_ACTION_DISPATCH_CONCURRENCY", "100")
 	t.Setenv("SAASAPI_SELF_UPDATE_DISPATCH_CONCURRENCY", "20")
@@ -55,6 +60,8 @@ func TestLoadConfigDispatchConcurrency(t *testing.T) {
 		// One tenant may hold at most half the pool.
 		{"SAASAPI_ACTION_DISPATCH_TENANT_CONCURRENCY": "51"},
 		{"SAASAPI_ACTION_DISPATCH_CONCURRENCY": "8", "SAASAPI_ACTION_DISPATCH_TENANT_CONCURRENCY": "8"},
+		// The default tenant cap (32) needs a pool of at least 64.
+		{"SAASAPI_ACTION_DISPATCH_CONCURRENCY": "63"},
 	} {
 		t.Run(fmt.Sprint(bad), func(t *testing.T) {
 			for k, v := range bad {
@@ -81,8 +88,39 @@ func TestSetOutboxSweeperSettingsInstallsDispatchLimits(t *testing.T) {
 	// Settings written before these fields existed (zero) take the defaults.
 	SetOutboxSweeperSettings(OutboxSweeperSettings{LeaseTTL: time.Minute})
 	l = dispatchLimits.Load()
-	if l.pools[false].size != 64 || l.pools[true].size != 16 || l.tenantCap != 8 {
+	if l.pools[false].size != 256 || l.pools[true].size != 16 || l.tenantCap != 32 {
 		t.Fatalf("zero settings: general %d, self_update %d, tenant %d", l.pools[false].size, l.pools[true].size, l.tenantCap)
+	}
+}
+
+// SAASAPI_ACTION_MAX_PENDING_PER_TENANT: default 2000, an integer from 1
+// to 100000; anything else refuses startup.
+func TestLoadConfigMaxPendingPerTenant(t *testing.T) {
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.OutboxSweeper.MaxPendingPerTenant; got != 2000 {
+		t.Fatalf("default = %d, want 2000", got)
+	}
+	for _, ok := range []struct {
+		v    string
+		want int
+	}{{"1", 1}, {"500", 500}, {"100000", 100000}} {
+		t.Setenv("SAASAPI_ACTION_MAX_PENDING_PER_TENANT", ok.v)
+		cfg, err := LoadConfig()
+		if err != nil || cfg.OutboxSweeper.MaxPendingPerTenant != ok.want {
+			t.Fatalf("%s: %d, %v", ok.v, cfg.OutboxSweeper.MaxPendingPerTenant, err)
+		}
+	}
+	for _, bad := range []string{"0", "-1", "100001", "lots", "2.5", " 10"} {
+		t.Run(bad, func(t *testing.T) {
+			t.Setenv("SAASAPI_ACTION_MAX_PENDING_PER_TENANT", bad)
+			if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "SAASAPI_ACTION_MAX_PENDING_PER_TENANT") ||
+				!strings.Contains(err.Error(), "from 1 to 100000") {
+				t.Errorf("%q: %v", bad, err)
+			}
+		})
 	}
 }
 

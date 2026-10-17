@@ -98,7 +98,9 @@ for a known path with the wrong method.
 
 Codes used across routes: `invalid_request` (400), `unauthorized` (401),
 `forbidden` (403), `tenant_not_found` (404), `rate_limited` (429),
-`internal_error` (500). Route-specific codes are listed in the spec.
+`internal_error` (500). Route-specific codes are listed in the spec, among
+them `backlog_full` (429, with `details` and `Retry-After`) on
+[batch actions](#batch-actions).
 
 ## Resources
 
@@ -199,7 +201,45 @@ saasapi has no Valkey configured.
 - `cook` params: `recipe`, and optionally `test`.
 - The body is decoded strictly (unknown fields are 400) and capped at 64 KiB.
 - The tenant must be `active`; otherwise the response is `409 tenant_not_active`.
-- Rate-limited per tenant at 1 request/second, burst 5, per pod.
+- Rate-limited per tenant at 1 request/second, burst 5, per pod
+  (`429 rate_limited`).
+- Refused when the tenant's backlog is full (`429 backlog_full`, below).
+
+**How a batch is sent, and the backlog cap.** Accepted items are stored
+durably (`asset_action_items`, which survives a pod restart) and sent to
+farmer in the background. At most `SAASAPI_ACTION_DISPATCH_TENANT_CONCURRENCY`
+(default 32) of one tenant's items are sent and awaited at once per saasapi
+process, out of `SAASAPI_ACTION_DISPATCH_CONCURRENCY` (default 256) for all
+tenants; farmer has the same limits per replica. An item not sent within
+`SAASAPI_OUTBOX_ACTION_MAX_AGE` (default 30 minutes) of the POST fails as
+`expired_not_sent` and never ran. As a rule of thumb, one process drains a
+tenant's items at the tenant cap divided by the command's duration: 32
+items a minute for one-minute commands, so a 30-minute max age covers
+about 960 such items per process.
+
+So that a tenant learns at submit time rather than from expired items, a
+POST is refused as a whole, nothing written, when the tenant's **pending**
+items (status `queued` or `dispatching`, every batch of the tenant,
+including update rollouts' items; `running` items already hold a slot and
+are not counted) plus the request's deduplicated `asset_ids` would exceed
+`SAASAPI_ACTION_MAX_PENDING_PER_TENANT` (default 2000):
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 60
+
+{ "error": "backlog_full",
+  "message": "this tenant has too many actions waiting to be sent; wait for some to finish and send again",
+  "details": { "pending": 1950, "limit": 2000, "requested": 100, "available": 50 } }
+```
+
+`available` is `limit - pending`, never negative: a request of at most that
+many `asset_ids` fits now. The cap is a soft limit: it is counted inside the
+request's transaction without a lock, so requests in flight at the same
+moment (on other replicas, or on one) may each pass, and the backlog can
+exceed the setting by at most their items (each request at most 100, one a
+second per tenant per pod). An update rollout (`POST .../sprouts/updates`)
+is never refused by it. `rate_limited` is unchanged and comes first.
 
 The response is **202** `{"batch_id": "b_…"}`. Items are dispatched to
 farmer's `internal.sprout.action` in the background, each as a sealed
@@ -221,7 +261,7 @@ batch's lease has lapsed, from the batch's stored params. An item still
 listening each time) fails with `dispatch_not_delivered`, and one whose
 tenant is no longer `active` by then fails with `tenant_not_active`; neither
 ran. A queued item that couldn't be sent within
-`SAASAPI_OUTBOX_ACTION_MAX_AGE` (15 minutes) of the POST fails with
+`SAASAPI_OUTBOX_ACTION_MAX_AGE` (30 minutes) of the POST fails with
 `expired_not_sent` instead of being sent late, by whichever process reaches
 it; it never ran. Nothing downstream would refuse a late command: the
 sealed envelopes' ±5 minute windows are measured from when saasapi seals
@@ -542,7 +582,7 @@ dispatching, every `SAASAPI_OUTBOX_SWEEP_INTERVAL` (30 seconds):
 | Row | Re-sent when | Re-sent how | Never |
 |---|---|---|---|
 | provisioning job `pending` | 2 minutes after its last publish (or creation), doubling per attempt | the same request, same `job_id`; farmer handles a repeated `job_id` idempotently and saasapi applies one result per job | past 5 publishes: failed |
-| action item `queued` | the batch's lease has lapsed, and 2 minutes after the item's last change, doubling per attempt | from the batch's stored params, through the same `queued` → `dispatching` claim | past 5 attempts: `dispatch_not_delivered`; 15 minutes after the POST: `expired_not_sent` |
+| action item `queued` | the batch's lease has lapsed, and 2 minutes after the item's last change, doubling per attempt | from the batch's stored params, through the same `queued` → `dispatching` claim | past 5 attempts: `dispatch_not_delivered`; 30 minutes after the POST: `expired_not_sent` |
 | action item `dispatching` whose pod died | never re-sent | — | failed with `dispatch_outcome_unknown` once its pod would have given up on the reply |
 | update rollout with `queued`, `dispatching` or `running` items | the batch's lease has lapsed, and only with `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=true` | resumed as described under [fleet update dispatch](#fleet-update-dispatch-not-generally-available) | an item in `dispatching`: failed as above, halting the rollout and freeing the tenant's slot |
 
@@ -678,8 +718,12 @@ error, never a silent default.
 | `SAASAPI_OUTBOX_SWEEP_INTERVAL` | `30s` | time between sweeps, `1s`–`1h` |
 | `SAASAPI_OUTBOX_PROVISIONING_STALE_AFTER` | `2m` | a pending provisioning job is published again this long after its last publish, doubling per attempt; `10s`–`24h` |
 | `SAASAPI_OUTBOX_ACTION_STALE_AFTER` | `2m` | the same for a queued action item, from its last change; `10s`–`24h` |
-| `SAASAPI_OUTBOX_ACTION_MAX_AGE` | `15m` | a queued action item not sent this long after its POST fails with `expired_not_sent`, never sent; `1m`–`1h` |
+| `SAASAPI_OUTBOX_ACTION_MAX_AGE` | `30m` | a queued action item not sent this long after its POST fails with `expired_not_sent`, never sent; `1m`–`1h` |
 | `SAASAPI_OUTBOX_MAX_ATTEMPTS` | `5` | publishes of a job, or dispatches of an item, before it is failed; `1`–`50` |
+| `SAASAPI_ACTION_DISPATCH_CONCURRENCY` | `256` | per process, how many cmd.run and cook items are sent and awaited at once, all tenants together; `1`–`1024` |
+| `SAASAPI_SELF_UPDATE_DISPATCH_CONCURRENCY` | `16` | the same for `self_update` items, a pool reserved for rollout waves; `1`–`1024` |
+| `SAASAPI_ACTION_DISPATCH_TENANT_CONCURRENCY` | `32` | one tenant's cap in each pool; `1`–`1024` and at most half of `SAASAPI_ACTION_DISPATCH_CONCURRENCY` |
+| `SAASAPI_ACTION_MAX_PENDING_PER_TENANT` | `2000` | a POST to [batch actions](#batch-actions) is refused with `429 backlog_full` when the tenant's `queued` and `dispatching` items plus its `asset_ids` would exceed this (a soft limit); `1`–`100000` |
 | `SAASAPI_OUTBOX_LEASE_TTL` | `2m` | how long a lease lasts unrenewed: how soon a dead pod's batch or rollout is taken over; `15s`–`1h` |
 | `SAASAPI_OPERATOR_LISTEN_ADDR` | empty (off) | operator plane HTTPS listener; with it set, the certificate, key and `SAASAPI_OPERATOR_TOKEN_FILE` are required |
 | `SAASAPI_OPERATOR_TLS_CERT_FILE` / `_KEY_FILE` | — | the operator listener's certificate and key |

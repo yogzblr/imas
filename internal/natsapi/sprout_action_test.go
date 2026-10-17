@@ -470,3 +470,25 @@ func TestSproutActionConcurrency_FromEnv(t *testing.T) {
 		}
 	}
 }
+
+// Farmer's defaults (S3) match saasapi's: the cmd.run/cook pool 256, the
+// self_update pool 16, a tenant's cap 32, so one saasapi replica alone
+// never sends more than one farmer replica admits.
+func TestSproutActionConcurrency_Defaults(t *testing.T) {
+	if defaultSproutActionConcurrency != 256 || defaultSelfUpdateConcurrency != 16 || defaultSproutActionTenantConcurrency != 32 {
+		t.Fatalf("defaults = %d, %d, %d; want 256, 16, 32",
+			defaultSproutActionConcurrency, defaultSelfUpdateConcurrency, defaultSproutActionTenantConcurrency)
+	}
+	for _, env := range []string{EnvSproutActionConcurrency, EnvSelfUpdateConcurrency, EnvSproutActionTenantConcurrency} {
+		t.Setenv(env, "")
+	}
+	if got := sproutActionConcurrency(); got != 256 {
+		t.Errorf("unset %s: %d, want 256", EnvSproutActionConcurrency, got)
+	}
+	if got := envConcurrency(EnvSelfUpdateConcurrency, defaultSelfUpdateConcurrency); got != 16 {
+		t.Errorf("unset %s: %d, want 16", EnvSelfUpdateConcurrency, got)
+	}
+	if got := envConcurrency(EnvSproutActionTenantConcurrency, defaultSproutActionTenantConcurrency); got != 32 {
+		t.Errorf("unset %s: %d, want 32", EnvSproutActionTenantConcurrency, got)
+	}
+}

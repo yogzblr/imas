@@ -363,6 +363,33 @@ Tests:
 - The migration applies, and rolls back, on the test database used by the
   neighbouring migration tests.
 
+Brief corrections (applied by S3, 2026-10-17, decided by the code on main):
+
+- **No Down section.** Migrations are forward-only on main
+  (`internal/migrations`: `TestMigrationsAreForwardOnly` fails on any
+  `+goose Down`), so `00009_asset_action_items_tenant_status.sql` has none,
+  like its neighbours. "Rolls back" is tested the way 00006 is: a re-run
+  after goose's record is lost is a no-op, and the previous release's item
+  model inserts, updates and is read on the new schema (a `helm rollback`
+  of saasapi leaves the index, which it ignores). The migration only adds
+  an index, so `saasCompatibleFrom` stays 1 (`TestCompatibleFromReviewed`
+  now pins saas latest 9, floor 1). The MySQL tests also check that the
+  pending count uses the new index (`EXPLAIN`).
+- The next saas migration is `00009` (main's latest is `00008`).
+- `MaxPendingPerTenant` lives in `OutboxSweeperSettings` with the other
+  dispatch settings (`LoadConfig` reads `SAASAPI_ACTION_MAX_PENDING_PER_TENANT`
+  there); zero takes the default, as for the dispatch pools. The cap, its
+  claim hook and the refusal are in a new file, `internal/saasapi/backlog.go`;
+  `errors.go` needs no change (`writeErrorDetails` is reused, `Retry-After`
+  set before it).
+- "Pending" counts every `queued` or `dispatching` item of the tenant, an
+  update rollout's included (decision 2 names no exception, and the index is
+  `(tenant_id, status)`); a rollout is never refused by the cap (decision 3).
+  The docs say so.
+- No `uat/` values set these keys; nothing there changes.
+- `docs/api/saasapi.md`'s configuration table had none of the dispatch
+  settings; S3 adds the three pools and the new cap.
+
 Search gate: `defaultActionDispatchConcurrency`,
 `defaultActionDispatchTenantConcurrency`, `defaultActionMaxAge`,
 `ACTION_DISPATCH_TENANT_CONCURRENCY`, `SPROUT_ACTION_TENANT_CONCURRENCY`,

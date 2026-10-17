@@ -77,14 +77,20 @@ type OutboxSweeperSettings struct {
 	// the sweeper's and the handlers' alike. Zero takes the default.
 	//
 	// DispatchConcurrency is the cmd.run/cook pool
-	// (SAASAPI_ACTION_DISPATCH_CONCURRENCY, default 64).
+	// (SAASAPI_ACTION_DISPATCH_CONCURRENCY, default 256).
 	DispatchConcurrency int
 	// SelfUpdateDispatchConcurrency is the pool reserved for rollout waves
 	// (SAASAPI_SELF_UPDATE_DISPATCH_CONCURRENCY, default 16).
 	SelfUpdateDispatchConcurrency int
 	// DispatchTenantConcurrency is one tenant's cap in each pool
-	// (SAASAPI_ACTION_DISPATCH_TENANT_CONCURRENCY, default 8).
+	// (SAASAPI_ACTION_DISPATCH_TENANT_CONCURRENCY, default 32).
 	DispatchTenantConcurrency int
+	// MaxPendingPerTenant is how many items in status queued or
+	// dispatching one tenant may have before POST .../sprouts/actions
+	// refuses more with backlog_full (SAASAPI_ACTION_MAX_PENDING_PER_TENANT,
+	// default 2000, 1 to 100000; backlog.go). Update rollouts are never
+	// refused by it. Zero takes the default.
+	MaxPendingPerTenant int
 }
 
 // Defaults and bounds for OutboxSweeperSettings. LoadConfig refuses a
@@ -93,7 +99,7 @@ const (
 	defaultOutboxSweepInterval    = 30 * time.Second
 	defaultProvisioningStaleAfter = 2 * time.Minute
 	defaultActionStaleAfter       = 2 * time.Minute
-	defaultActionMaxAge           = 15 * time.Minute
+	defaultActionMaxAge           = 30 * time.Minute
 	defaultOutboxMaxAttempts      = 5
 	defaultOutboxLeaseTTL         = 2 * time.Minute
 
@@ -131,6 +137,7 @@ func DefaultOutboxSweeperSettings() OutboxSweeperSettings {
 		DispatchConcurrency:           defaultActionDispatchConcurrency,
 		SelfUpdateDispatchConcurrency: defaultSelfUpdateDispatchConcurrency,
 		DispatchTenantConcurrency:     defaultActionDispatchTenantConcurrency,
+		MaxPendingPerTenant:           defaultMaxPendingPerTenant,
 	}
 }
 
@@ -142,6 +149,9 @@ var outboxSettings = DefaultOutboxSweeperSettings()
 // with s.LeaseTTL and slots from s's dispatch pools. LoadConfig has already
 // validated s.
 func SetOutboxSweeperSettings(s OutboxSweeperSettings) {
+	if s.MaxPendingPerTenant < 1 {
+		s.MaxPendingPerTenant = defaultMaxPendingPerTenant
+	}
 	outboxSettings = s
 	setDispatchLimits(s.DispatchConcurrency, s.SelfUpdateDispatchConcurrency, s.DispatchTenantConcurrency)
 }

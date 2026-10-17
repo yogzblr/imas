@@ -118,7 +118,7 @@ import (
 //     item, from its last change; default 2m, 10s..24h.
 //   - SAASAPI_OUTBOX_ACTION_MAX_AGE: how long after it was accepted a
 //     queued action item may still be sent; past it the item fails with
-//     expired_not_sent, never sent. Default 15m, 1m..1h. The only age
+//     expired_not_sent, never sent. Default 30m, 1m..1h. The only age
 //     limit on the path: farmer and the sprout never reject a command on
 //     its acceptance time.
 //   - SAASAPI_OUTBOX_MAX_ATTEMPTS: dispatches of one job or item, the first
@@ -131,13 +131,17 @@ import (
 // process; an invalid or out-of-range value is a startup error:
 //
 //   - SAASAPI_ACTION_DISPATCH_CONCURRENCY: cmd.run and cook items in
-//     flight to farmer at once, all tenants together. Default 64, 1..1024.
+//     flight to farmer at once, all tenants together. Default 256, 1..1024.
 //   - SAASAPI_SELF_UPDATE_DISPATCH_CONCURRENCY: self_update items in
 //     flight at once, a pool of its own so rollout waves are never
 //     starved by cmd.run or cook. Default 16, 1..1024.
 //   - SAASAPI_ACTION_DISPATCH_TENANT_CONCURRENCY: one tenant's cap in each
-//     of those pools. Default 8, 1..1024, and at most half of
+//     of those pools. Default 32, 1..1024, and at most half of
 //     SAASAPI_ACTION_DISPATCH_CONCURRENCY.
+//   - SAASAPI_ACTION_MAX_PENDING_PER_TENANT: how many of one tenant's
+//     items may be queued or dispatching before POST .../sprouts/actions
+//     refuses more with 429 backlog_full (backlog.go; never an update
+//     rollout). Default 2000, 1..100000.
 //
 // Keep them at or below farmer's IMAS_SPROUT_ACTION_CONCURRENCY,
 // IMAS_SELF_UPDATE_CONCURRENCY and IMAS_SPROUT_ACTION_TENANT_CONCURRENCY
@@ -400,6 +404,13 @@ func loadOutboxSweeperSettings(s *OutboxSweeperSettings) error {
 			return fmt.Errorf("saasapi: %s=%q: want an integer from 1 to %d", c.name, v, maxDispatchConcurrency)
 		}
 		*c.dst = n
+	}
+	if v := os.Getenv("SAASAPI_ACTION_MAX_PENDING_PER_TENANT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > maxMaxPendingPerTenant {
+			return fmt.Errorf("saasapi: SAASAPI_ACTION_MAX_PENDING_PER_TENANT=%q: want an integer from 1 to %d", v, maxMaxPendingPerTenant)
+		}
+		s.MaxPendingPerTenant = n
 	}
 	// "Well below the pool size" (security review M5): one tenant may
 	// never hold more than half the cmd.run/cook pool.

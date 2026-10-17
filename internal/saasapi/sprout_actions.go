@@ -323,7 +323,10 @@ type actionItemResponse struct {
 // replica re-dispatches the items still queued (sweepActionBatches).
 //
 // Rate-limited per tenant (see router.go): every call can trigger up to
-// maxAssetIDsPerLookup executions and writes as many rows.
+// maxAssetIDsPerLookup executions and writes as many rows. And refused as
+// a whole with 429 backlog_full, nothing written, when the tenant's
+// pending items plus this request's asset_ids would exceed
+// SAASAPI_ACTION_MAX_PENDING_PER_TENANT (backlog.go).
 func CreateSproutActionBatch(w http.ResponseWriter, r *http.Request) {
 	tenantID := r.PathValue("tenant_id")
 	if !tenantActive(w, tenantID) {
@@ -354,6 +357,12 @@ func CreateSproutActionBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	batch, queued, err := createActionBatch(tenantID, assetIDs, action, rows)
+	var full *errBacklogFull
+	if errors.As(err, &full) {
+		log.Infof("saasapi: action batch for tenant %s refused: %v", tenantID, err)
+		writeBacklogFull(w, full)
+		return
+	}
 	if err != nil {
 		log.Errorf("saasapi: creating action batch for tenant %s: %v", tenantID, err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to create action batch")
@@ -628,13 +637,16 @@ func translateCook(p cookInput) (farmerCook, string) {
 }
 
 // createActionBatch writes a §1.5 batch and its items in one transaction
-// and returns the items that need dispatching.
+// and returns the items that need dispatching. It refuses with
+// *errBacklogFull, writing nothing, when the tenant's pending items plus
+// len(assetIDs) (already deduplicated) exceed
+// outboxSettings.MaxPendingPerTenant.
 func createActionBatch(tenantID string, assetIDs []string, action controlplane.SproutAction, resolved []sproutByAssetItem) (AssetActionBatch, []AssetActionItem, error) {
 	return createBatch(AssetActionBatch{
 		TenantID:     tenantID,
 		ActionType:   action.Type,
 		ActionParams: string(action.Params),
-	}, assetIDs, resolved, nil, nil, nil)
+	}, assetIDs, resolved, nil, nil, backlogClaim(tenantID, len(assetIDs), outboxSettings.MaxPendingPerTenant))
 }
 
 // createBatch writes batch (its ID, RequestedAssetIDs and lease are filled
