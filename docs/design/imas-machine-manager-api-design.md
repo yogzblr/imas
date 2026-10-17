@@ -450,7 +450,15 @@ signature with the keyring shipped in its package
 - **`min_sprout_version` and the approved version are unsigned farmer
   policy** (D19). A compromised farmer can choose which signed release a
   sprout may take, never an unsigned one; the sprout keeps its downgrade
-  refusal.
+  refusal. So can a compromised saasapi, which writes the approval
+  (`tenant_update_policy`) itself: tenant approval is the tenant's change
+  control, not a barrier against saasapi (security review L7).
+- **The sprout guards its own trust paths** (security review L3, I4): the
+  keyring, the cache directory and the staging directories must be the
+  sprout user's own, private and not symlinks (`unsafe_path`), and every
+  read from the repository is bounded (index 16 MiB, package 512 MiB or
+  the size its index declares, 2 minutes per request, 10 minutes per
+  update; sprout config). See `packaging/etc/fleet-signing-keys.md`.
 - **Strict validation, never normalization.** A value is never rewritten
   to make it pass (an uppercase checksum is refused, not lowercased).
 

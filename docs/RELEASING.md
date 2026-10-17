@@ -123,8 +123,16 @@ What a release carries, for version `X.Y.Z` (tag `vX.Y.Z`):
    tags` trigger in `release.yml` is re-enabled, pushing the tag does this.)
    This builds everything, pushes and cosign-signs the images, and creates a
    **draft** GitHub release with the archives, packages, `checksums.txt`, its
-   GPG signature and its `.sigstore.json` bundle.
-4. Review the draft (changelog, assets, the five images on GHCR).
+   GPG signature and its `.sigstore.json` bundle. Two steps gate the sprout's
+   update trust root (see [Fleet signing keyring](#fleet-signing-keyring)):
+   *Check the fleet signing keyring* fails the run before anything is built
+   if `gpg-public-key.asc` holds no release key, and *Verify
+   checksums.txt.sig against the packaged keyring* fails it afterwards if the
+   release's signature does not verify against that keyring the way a sprout
+   verifies it. A run that failed either step leaves a draft that must not
+   be published: delete it, fix the keyring by PR, tag again.
+4. Review the draft (changelog, assets, the five images on GHCR) and that
+   the Release run is green, both keyring steps included.
 5. **Publish the release.** `publish-packages.yml` then verifies the cosign
    signatures and `checksums.txt.sig` (with `gpg`, against the repo's
    `gpg-public-key.asc`, before `sha256sum --check`), uploads rpm/deb/winget
@@ -148,6 +156,44 @@ Helm step failed, tick **only_helm** so those are not uploaded again (Buildkite
 rejects a version it already holds). **only_helm** keeps its meaning: it skips
 the rpm, deb, NuGet and winget uploads and publishes only the charts, now to
 GHCR.
+
+## Fleet signing keyring
+
+Every sprout package installs the repo's `gpg-public-key.asc` as its update
+trust root, `/etc/imas/fleet-signing-keys.asc` (mode 0600, root's; on
+Windows `%ProgramData%\imas\fleet-signing-keys.asc`), and a sprout installs
+an update only if the release's `checksums.txt.sig` verifies against it
+(`packaging/etc/fleet-signing-keys.md`). A package with an empty keyring
+would leave its fleet unable to self-update until every host is reinstalled
+(security review L5), so a release may not ship one. The development tree
+may hold an empty placeholder (`{}`, or no key) until the key is added
+(owner decision T1, 2026-10-17); the release is what refuses it.
+
+**Owner step, once, before the first release that self-updates: put the
+release GPG public key in the file.** Export the public half of the key in
+the `goreleaser` environment's `GPG_PRIVATE_KEY`:
+
+```sh
+gpg --armor --export <fingerprint> > gpg-public-key.asc
+gpg --show-keys gpg-public-key.asc      # the fingerprint SECURITY.md gives
+go test ./packaging/test                # parses as the sprout parses it
+IMAS_RELEASE=1 go test -run TestPackagedKeyring ./packaging/test   # holds a key
+```
+
+and commit it by PR, reviewed like any trust-root change. Key rotation
+follows `packaging/etc/fleet-signing-keys.md` ("Rotating the release key").
+
+The Release workflow runs the same checks with the sprout's own code
+(`internal/fleetsign`, through `packaging/test`):
+
+| Step | Command | Fails when |
+|---|---|---|
+| Check the fleet signing keyring (before the build) | `IMAS_RELEASE=1 go test -run 'TestPackagedKeyring\|TestPackagingInstallsTheKeyring' ./packaging/test` | the keyring holds no key that can sign, does not parse, or a package does not install it mode 0600 |
+| Verify checksums.txt.sig against the packaged keyring (after GoReleaser) | `IMAS_RELEASE_DIST=dist go test -run TestReleaseChecksums ./packaging/test` | `dist/checksums.txt.sig` does not verify over `dist/checksums.txt` against the keyring as a sprout verifies it, or `checksums.txt` does not parse as a sprout parses it |
+
+To check a published release by hand, download its `checksums.txt` and
+`checksums.txt.sig` into a directory and run the second command with
+`IMAS_RELEASE_DIST` set to that directory.
 
 ## Helm charts on GHCR
 
