@@ -13,7 +13,9 @@ Erasing a tenant: everything listed here that belongs to a tenant is also
 erased when the tenant is purged, `saasapi.tenantPurge.after` after it was
 offboarded (`internal/tenantpurge`, farmer README "Erasing an offboarded
 tenant's data"). The rows below say how long data is kept while the tenant
-exists.
+exists. The shipped logs are the platform's, not a tenant's: the purge
+leaves them, and they go after their own 30 days (S6 decision 1;
+`internal/tenantpurge` `KeepRoots`).
 
 ## Time-based retention
 
