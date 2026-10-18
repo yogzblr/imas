@@ -28,7 +28,7 @@ type sealedFacts struct {
 // usePKIDB gives pki an in-memory store of its own for t.
 func usePKIDB(t *testing.T) {
 	t.Helper()
-	gdb, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s-pki?mode=memory&cache=shared", t.Name())), &gorm.Config{})
+	gdb, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s-pki-%d?mode=memory&cache=shared", t.Name(), memDBSeq.Add(1))), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}

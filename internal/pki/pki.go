@@ -220,7 +220,9 @@ func AcceptNKey(tenantID, id string) error {
 // list, which every Account rebuild applies (applyRevokedNKeys), and every
 // one of its box keys is revoked. The deferred reload then pushes the
 // Account JWT carrying the revocation, which closes a live connection and
-// refuses the JWT on reconnect.
+// refuses the JWT on reconnect. Once the transaction commits, the stored
+// User JWT (its sprout_user_jwt row and bucket object) is removed too,
+// best effort (forgetSproutUserJWT).
 //
 // The sprout ID itself is free again: a host can enrol under it, but only
 // with an NKey that isn't revoked, and it gets a fresh box key.
@@ -245,6 +247,9 @@ func DeleteNKey(tenantID, id string) error {
 	})
 	if err == nil {
 		notifySproutLeftAccepted(tenantID, id)
+		// After the commit: with the pki_nkeys row gone no mint can
+		// recreate the stored JWT (checkEligible).
+		forgetSproutUserJWT(context.Background(), tenantID, id)
 	}
 	return err
 }

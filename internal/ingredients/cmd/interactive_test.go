@@ -10,14 +10,6 @@ import (
 	"github.com/yogzblr/imas/internal/pki"
 )
 
-func TestRegisterNatsConn(t *testing.T) {
-	// RegisterNatsConn with nil should not panic
-	RegisterNatsConn(nil)
-	if nc != nil {
-		t.Error("expected nc to be nil")
-	}
-}
-
 func TestSRunSimpleCommand(t *testing.T) {
 	cmd := apitypes.CmdRun{
 		Command: "echo",
@@ -152,10 +144,8 @@ func TestSRunNonexistentRunas(t *testing.T) {
 
 func TestSRunWithStreamTopic(t *testing.T) {
 	// StreamTopic is ignored since FIX.1 removed plaintext output
-	// streaming: nothing is published, even with a connection registered.
+	// streaming: nothing is published on it.
 	url := startTestNATS(t)
-	RegisterNatsConn(connect(t, url))
-	t.Cleanup(func() { RegisterNatsConn(nil) })
 	spy := connect(t, url)
 	published := make(chan *nats.Msg, 4)
 	if _, err := spy.ChanSubscribe("imas.test.output", published); err != nil {

@@ -18,9 +18,7 @@ import (
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/facts"
 	"github.com/yogzblr/imas/internal/ingredients"
-	"github.com/yogzblr/imas/internal/ingredients/cmd"
 	"github.com/yogzblr/imas/internal/ingredients/selfupdate"
-	"github.com/yogzblr/imas/internal/ingredients/test"
 	"github.com/yogzblr/imas/internal/jobs"
 	"github.com/yogzblr/imas/internal/natsretry"
 	"github.com/yogzblr/imas/internal/pki"
@@ -321,8 +319,6 @@ func ConnectSprout(ctx context.Context, done chan<- struct{}) {
 		log.Noticef("interactive shell is disabled on this sprout (disableshell)")
 	}
 
-	test.RegisterNatsConn(nc)
-	cmd.RegisterNatsConn(nc)
 	cook.RegisterNatsConn(nc)
 	err = natsInit(ctx, nc)
 	if err != nil {

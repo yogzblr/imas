@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"maps"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -203,7 +204,7 @@ func TestHandleFactsMsg_ForgedFactMovesNoSproutIntoACohort(t *testing.T) {
 	keys := newSealedFacts(t, tenant)
 	keys.enroll(tenant, "lin-01")
 	keys.enroll(tenant, "win-01")
-	gdb, err := gorm.Open(sqlite.Open("file:"+t.Name()+"-rbac?mode=memory&cache=shared"), &gorm.Config{})
+	gdb, err := gorm.Open(sqlite.Open("file:"+t.Name()+"-rbac-"+strconv.FormatInt(memDBSeq.Add(1), 10)+"?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,12 +24,16 @@ import (
 	"github.com/yogzblr/imas/internal/tenantconn/tenantconntest"
 )
 
+// memDBSeq numbers this package's in-memory sqlite test databases, so
+// a DSN never repeats across `go test -count=N` runs of the same test.
+var memDBSeq atomic.Int64
+
 // newStorageTestDB migrates and installs the farmer schema the way
 // initStorage does (storageModels, then installStorage), against in-memory
 // sqlite rather than PXC.
 func newStorageTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	gdb, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s?mode=memory&cache=shared", t.Name())), &gorm.Config{})
+	gdb, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s-%d?mode=memory&cache=shared", t.Name(), memDBSeq.Add(1))), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("opening test db: %v", err)
 	}

@@ -800,6 +800,11 @@ func (s *sproutJWTStore) mintLeased(ctx context.Context, tenantID, sproutID, pub
 	// else is not trusted to point at something deletable.
 	var prev sproutUserJWTRow
 	if err := s.db.WithContext(ctx).Where("tenant_id = ? AND sprout_id = ?", tenantID, sproutID).Take(&prev).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// The sprout was deleted and forget removed the row (and the
+			// lease on it): nothing will name the object just PUT.
+			s.dropUnnamedObject(context.WithoutCancel(ctx), tenantID, sproutID, objKey)
+		}
 		return "", fmt.Errorf("pki: reading sprout JWT row: %w", err)
 	}
 	r := s.db.WithContext(ctx).Model(&sproutUserJWTRow{}).
@@ -815,11 +820,14 @@ func (s *sproutJWTStore) mintLeased(ctx context.Context, tenantID, sproutID, pub
 		return "", fmt.Errorf("pki: recording sprout JWT: %w", r.Error)
 	}
 	if r.RowsAffected != 1 {
-		// The lease lapsed and another replica took it: its row wins.
+		// The lease lapsed and another replica took it: its row wins. Or
+		// the sprout was deleted and forget removed the row: then the
+		// object just PUT is named by nothing, so drop it unless a row
+		// names it (another mint can sign the same JWT in the same second).
+		s.dropUnnamedObject(context.WithoutCancel(ctx), tenantID, sproutID, objKey)
 		return "", fmt.Errorf("sprout %s in tenant %s: lease lost while minting: %w", sproutID, tenantID, ErrSproutJWTBusy)
 	}
-	if old := prev.ObjectKey; old != nil && *old != objKey && strings.HasPrefix(*old, tenantID+"/"+sproutID+"/") &&
-		!strings.Contains(strings.TrimPrefix(*old, tenantID+"/"+sproutID+"/"), "/") {
+	if old := prev.ObjectKey; old != nil && *old != objKey && ownSproutJWTObject(tenantID, sproutID, *old) {
 		if err := s.objects.Delete(ctx, *old); err != nil {
 			log.Warnf("pki: deleting sprout %s's superseded JWT object in tenant %s: %v", sproutID, tenantID, err)
 		}
@@ -833,9 +841,91 @@ func (s *sproutJWTStore) mintLeased(ctx context.Context, tenantID, sproutID, pub
 	// minted could be handed one issued after its revocation. The stored
 	// object is never served: every caller checks eligibility first.
 	if err := s.checkEligible(tenantID, sproutID, pubkey); err != nil {
+		// A sprout deleted mid-mint may have had its row forgotten before
+		// this mint recreated it (the INSERT IGNORE above): forget it again
+		// so DeleteNKey leaves no row or object behind.
+		if errors.Is(err, ErrSproutIDNotFound) {
+			s.forget(context.WithoutCancel(ctx), tenantID, sproutID)
+		}
 		return "", fmt.Errorf("pki: sprout %s in tenant %s changed state while its JWT was minted: %w", sproutID, tenantID, err)
 	}
 	return signed, nil
+}
+
+// ownSproutJWTObject reports whether key is in tenantID/sproutID's own
+// object layout (sproutJWTObjectKey): a row naming anything else is not
+// trusted to point at something deletable.
+func ownSproutJWTObject(tenantID, sproutID, key string) bool {
+	prefix := tenantID + "/" + sproutID + "/"
+	return strings.HasPrefix(key, prefix) && !strings.Contains(strings.TrimPrefix(key, prefix), "/")
+}
+
+// dropUnnamedObject deletes objKey, a JWT object this call PUT, unless
+// tenantID/sproutID's row names it. Best effort: errors are logged.
+func (s *sproutJWTStore) dropUnnamedObject(ctx context.Context, tenantID, sproutID, objKey string) {
+	var cur sproutUserJWTRow
+	err := s.db.WithContext(ctx).Where("tenant_id = ? AND sprout_id = ?", tenantID, sproutID).Take(&cur).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		log.Warnf("pki: reading sprout %s's JWT row in tenant %s: %v", sproutID, tenantID, err)
+		return
+	}
+	if err == nil && cur.ObjectKey != nil && *cur.ObjectKey == objKey {
+		return
+	}
+	if err := s.objects.Delete(ctx, objKey); err != nil {
+		log.Warnf("pki: deleting sprout %s's unrecorded JWT object in tenant %s: %v", sproutID, tenantID, err)
+	}
+}
+
+// forgetSproutUserJWT removes a deleted sprout's stored User JWT: its
+// sprout_user_jwt row and the object the row names. DeleteNKey calls it
+// once the pki_nkeys row is gone, so no new mint can pass checkEligible.
+// Best effort: errors are logged, not returned, since the sprout is
+// already deleted and the JWT is revoked on the Account.
+func forgetSproutUserJWT(ctx context.Context, tenantID, sproutID string) {
+	s, err := defaultSproutJWTStore()
+	if err != nil {
+		log.Debugf("pki: not forgetting sprout %s's JWT in tenant %s: %v", sproutID, tenantID, err)
+		return
+	}
+	s.forget(ctx, tenantID, sproutID)
+}
+
+// forget is forgetSproutUserJWT on this replica's store. The row is
+// deleted only while it still names the object read, then that object
+// is: a mint that re-points the row in between finds the sprout gone on
+// its own last check and forgets again.
+func (s *sproutJWTStore) forget(ctx context.Context, tenantID, sproutID string) {
+	var row sproutUserJWTRow
+	err := s.db.WithContext(ctx).Where("tenant_id = ? AND sprout_id = ?", tenantID, sproutID).Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return
+	}
+	if err != nil {
+		log.Warnf("pki: reading deleted sprout %s's JWT row in tenant %s: %v", sproutID, tenantID, err)
+		return
+	}
+	q := s.db.WithContext(ctx).Where("tenant_id = ? AND sprout_id = ?", tenantID, sproutID)
+	if row.ObjectKey == nil {
+		q = q.Where("object_key IS NULL")
+	} else {
+		q = q.Where("object_key = ?", *row.ObjectKey)
+	}
+	r := q.Delete(&sproutUserJWTRow{})
+	if r.Error != nil {
+		log.Warnf("pki: deleting deleted sprout %s's JWT row in tenant %s: %v", sproutID, tenantID, r.Error)
+		return
+	}
+	if r.RowsAffected == 0 {
+		log.Debugf("pki: deleted sprout %s's JWT row in tenant %s changed while being forgotten", sproutID, tenantID)
+		return
+	}
+	if row.ObjectKey == nil || !ownSproutJWTObject(tenantID, sproutID, *row.ObjectKey) {
+		return
+	}
+	if err := s.objects.Delete(ctx, *row.ObjectKey); err != nil {
+		log.Warnf("pki: deleting deleted sprout %s's JWT object in tenant %s: %v", sproutID, tenantID, err)
+	}
 }
 
 // reuse returns the stored JWT if the row says it was minted for pubkey,

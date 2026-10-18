@@ -30,6 +30,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -46,6 +47,10 @@ import (
 	"github.com/yogzblr/imas/internal/props"
 )
 
+// memDBSeq numbers this package's in-memory sqlite test databases, so
+// a DSN never repeats across `go test -count=N` runs of the same test.
+var memDBSeq atomic.Int64
+
 // setupTenantIsolationPKI wires up an in-memory pki store plus the TLS/NKey
 // scaffolding a real NATS bus and tenant Account provisioning need, using
 // only pki's exported surface (SetDB/Models) — see
@@ -53,7 +58,7 @@ import (
 // cannot call directly since it lives in a different package.
 func setupTenantIsolationPKI(t *testing.T) {
 	t.Helper()
-	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", t.Name())
+	dsn := fmt.Sprintf("file:%s-%d?mode=memory&cache=shared", t.Name(), memDBSeq.Add(1))
 	gdb, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("opening pki test db: %v", err)

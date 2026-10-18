@@ -10,24 +10,12 @@ import (
 	"sync"
 	"time"
 
-	nats "github.com/nats-io/nats.go"
 	"github.com/yogzblr/imas/internal/log"
 
 	apitypes "github.com/yogzblr/imas/internal/api/types"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/tenantconn"
 )
-
-// nc is the single connection a sprout process registers via
-// RegisterNatsConn. Nothing reads it any more: SRun used it to stream a
-// running command's output over the bus in plaintext, which FIX.1
-// removed. The registration stays only because its caller
-// (cmd/sprout/main.go) was outside FIX.1's scope; remove both together.
-var nc *nats.Conn
-
-func RegisterNatsConn(conn *nats.Conn) {
-	nc = conn
-}
 
 // farmerBus is where FRun (farmer's outbound leg) gets a tenant's NATS
 // connection: farmer's tenantconn.Registry, installed by cmd/farmer

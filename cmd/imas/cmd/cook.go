@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -92,6 +93,7 @@ var cmdCook = &cobra.Command{
 		localTimeout := time.After(time.Duration(cookTimeout) * time.Second)
 		dripTimeout := time.After(120 * time.Second)
 		concurrent := 0
+		timedOut := false
 		defer nc.Flush()
 	waitLoop:
 		for {
@@ -125,6 +127,7 @@ var cmdCook = &cobra.Command{
 				break waitLoop
 			case <-localTimeout:
 				color.Red(fmt.Sprintf("Cooking timed out after %d seconds.", cookTimeout))
+				timedOut = true
 				finished <- struct{}{}
 				break waitLoop
 			}
@@ -172,7 +175,46 @@ var cmdCook = &cobra.Command{
 				}
 			}
 		}
+		if cookFailed(jid, targetedSprouts, completionSteps, timedOut) {
+			// Run the deferred flush and stop now: os.Exit skips defers.
+			stream.Stop()
+			nc.Flush()
+			cookExit(1)
+		}
 	},
+}
+
+// cookExit ends `imas cook` with a status; tests replace it.
+var cookExit = os.Exit
+
+// cookFailed reports whether cook job jid failed: some step on some
+// sprout failed or carries an error, the local timeout fired (timedOut),
+// or a sprout in targeted never reported its completed-<jid> step.
+func cookFailed(jid string, targeted []string, steps map[string][]cook.StepCompletion, timedOut bool) bool {
+	if timedOut {
+		return true
+	}
+	completedID := cook.StepID(fmt.Sprintf("completed-%s", jid))
+	for _, sproutSteps := range steps {
+		for _, step := range sproutSteps {
+			if step.CompletionStatus == cook.StepFailed || step.Error != nil {
+				return true
+			}
+		}
+	}
+	for _, sproutID := range targeted {
+		done := false
+		for _, step := range steps[sproutID] {
+			if step.ID == completedID {
+				done = true
+				break
+			}
+		}
+		if !done {
+			return true
+		}
+	}
+	return false
 }
 
 // printCookStep prints one step event of job jid on sproutID, in text
