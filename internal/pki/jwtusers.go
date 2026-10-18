@@ -200,6 +200,24 @@ func ensureUserRevoked(ac *jwt.AccountClaims, pubkey string) bool {
 	return true
 }
 
+// revokeUnlessAccepted revokes key, filed under sproutID in state
+// (unaccepted, denied or rejected), on ac, unless another row of the same
+// tenant has it accepted (accepted maps each accepted row's NKey to its
+// sprout ID). Then it changes nothing and logs: a second row naming an
+// accepted NKey, for example one a legacy PUT /pki/putnkey filed as
+// rejected under another ID, must never revoke the sprout that row
+// accepted (security review 2026-10, L12). A deleted or replaced sprout's
+// NKey is still revoked through the tenant's revoked list
+// (applyRevokedNKeys), which this does not touch. It reports whether it
+// changed ac.
+func revokeUnlessAccepted(ac *jwt.AccountClaims, tenantID, sproutID, state, key string, accepted map[string]string) bool {
+	if owner, ok := accepted[key]; ok {
+		log.Warnf("sprout %s in tenant %s is %s with the NKey sprout %s is accepted with; not revoking it", sproutID, tenantID, state, owner)
+		return false
+	}
+	return ensureUserRevoked(ac, key)
+}
+
 // applyRevokedNKeys puts every NKey on tenantID's revoked list
 // (pki_revoked_nkeys, filled by DeleteNKey and AcceptNKey's replace path)
 // into ac's revocations, at its recorded time or later, and reports
@@ -270,6 +288,7 @@ func syncNatsAuth(mat *natsAuthMaterial) (bool, error) {
 		return false, err
 	}
 
+	accepted := map[string]string{}
 	for _, s := range GetNKeysByType(currentTenantID(), "accepted").Sprouts {
 		log.Tracef("Syncing accepted sprout `%s` onto the tenant Account JWT", s.SproutID)
 		key, errGet := GetNKey(currentTenantID(), s.SproutID)
@@ -277,6 +296,7 @@ func syncNatsAuth(mat *natsAuthMaterial) (bool, error) {
 			log.Errorf("failed to get NKey for sprout %s: %v", s.SproutID, errGet)
 			continue
 		}
+		accepted[key] = s.SproutID
 		if _, isRevoked := revoked[key]; isRevoked {
 			log.Errorf("sprout %s is accepted with a revoked NKey; keeping it revoked", s.SproutID)
 			continue
@@ -295,7 +315,7 @@ func syncNatsAuth(mat *natsAuthMaterial) (bool, error) {
 				log.Errorf("failed to get NKey for sprout %s: %v", s.SproutID, errGet)
 				continue
 			}
-			if ensureUserRevoked(ac, key) {
+			if revokeUnlessAccepted(ac, currentTenantID(), s.SproutID, state, key, accepted) {
 				changed = true
 			}
 		}

@@ -311,3 +311,40 @@ Scope: `internal/pki/nats.go`, `cmd/farmerbus`, `internal/api` (`routers.go`,
   reports not ready and refuses clients); the SaaS API user JWT gets an `exp`
   (default 24h, refreshed before it runs out by the same path as other JWTs; test the
   refresh).
+
+Corrections from the T6 build (2026-10-17):
+
+- **L12.** No enrolment setting existed: `POST /v1/enroll` and
+  `PUT /pki/putnkey` were both always registered. Farmer now has
+  `enrollment` (default `true`; the Helm chart always renders `true`, which
+  `farmer.extraConfig` cannot override). With it on, `PUT /pki/putnkey` is
+  not registered; with it off (standalone), `POST /v1/enroll` is not, and
+  `PUT /pki/putnkey` needs a signature over a nonce from the new
+  `GET /pki/nkeynonce`. The tests that pinned the old behaviour were the
+  sprout client's in `internal/pki/pki_test.go`, as the brief says, and
+  also the handler's in `internal/api/handlers/pki_test.go` and the
+  router's in `internal/api/routers_test.go`. The sprout client
+  (`pki.PutNKey`) had no caller; it now signs the nonce, so the legacy
+  protocol keeps a client that matches it. The rebuild in `syncTenantSprouts`
+  (`internal/pki/tenant.go`) had the same revoke-by-rejection as
+  `syncNatsAuth` and is fixed the same way.
+- **L14, single node.** The bus cannot tell "its SYS JWT is loaded" from its
+  own resolver: when core has never re-signed the SYS account, the loaded
+  JWT is the bootstrap one. The signal is the account loader's readiness
+  (it is ready only once the node holds the bucket's SYS account):
+  `IMAS_BUS_LOADER_READY_URL`, set by the nats chart for a single node.
+  Until it answers 200 the node refuses every client handshake not from
+  the pod's loopback address (the loader's), every websocket handshake,
+  and reports not ready.
+- **L14, SaaS API JWT.** No scheduled path re-published it: the publisher
+  ran only as a post-deploy hook. The refresh path is that publisher, now
+  also a CronJob (`credentialPublisher.refresh.everyHours`, every 4 hours);
+  it writes a new JWT once a third of the lifetime
+  (`IMAS_SAASAPI_USER_JWT_TTL`, `credentialPublisher.userJWTTTL`, 24h) is
+  left, the gateway JWT's two-thirds rule. saasapi read its JWT once from an
+  env var, so a refreshed JWT would reach it only through Reloader; it now
+  takes `SAASAPI_NATS_USER_JWT_FILE` (the chart mounts the JWT), re-reads
+  it at every reconnect and reconnects when it changes.
+- **L13.** The chart never set debug or trace; a chart test now pins that
+  it does not. `tools/loadtest`'s `-bus-trace` said it matched
+  `cmd/farmerbus`'s always-on trace; it now defaults to off, as farmerbus.

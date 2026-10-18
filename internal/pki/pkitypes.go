@@ -3,9 +3,18 @@ package pki
 import "errors"
 
 type (
+	// KeySubmission is PUT /pki/putnkey's body: the NKey, the sprout ID
+	// it is filed under, the server nonce from GET /pki/nkeynonce and
+	// the NKey's signature over NKeySubmissionPayload (nkeynonce.go).
 	KeySubmission struct {
 		NKey     string `json:"nkey"`
 		SproutID string `json:"id"`
+		Nonce    string `json:"nonce"`
+		Sig      string `json:"sig"`
+	}
+	// NKeyNonce is GET /pki/nkeynonce's answer.
+	NKeyNonce struct {
+		Nonce string `json:"nonce"`
 	}
 	KeyManager struct {
 		SproutID string `json:"id"`

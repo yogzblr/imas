@@ -181,15 +181,16 @@ spec:
             - name: SAASAPI_NATS_CA_FILE
               value: /var/run/imas/bus-ca/ca.crt
             # Its NATS identity (deploy/farmer/externalsecrets.yaml,
-            # imas-saasapi-nats): the seed as a file only, the JWT (not
-            # secret, but it travels with the seed) as a value.
+            # imas-saasapi-nats): the seed and the JWT both as files from
+            # the same mounted Secret. The JWT expires
+            # (credentialPublisher.userJWTTTL): saasapi re-reads its file
+            # at every reconnect and reconnects when it changes, so a
+            # refreshed JWT reaches the running pods when the kubelet
+            # updates the mount, with or without Reloader.
             - name: SAASAPI_NATS_NKEY_SEED_FILE
               value: /var/run/secrets/imas/nats/{{ $s.natsCredentials.seedKey }}
-            - name: SAASAPI_NATS_USER_JWT
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $s.natsCredentials.secretName }}
-                  key: {{ $s.natsCredentials.jwtKey }}
+            - name: SAASAPI_NATS_USER_JWT_FILE
+              value: /var/run/secrets/imas/nats/{{ $s.natsCredentials.jwtKey }}
             # Sealed internal.* (J.4): its box private key as a file only,
             # and the platform public key it pins (not secret) as a value,
             # both from saasapi.controlPlaneBox's Secret. No fallback:
@@ -416,7 +417,8 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
       volumes:
-        # Only the seed: the JWT arrives as an env var from the same Secret.
+        # The seed and the JWT. No subPath, so the kubelet updates the JWT
+        # file in place when ESO changes the Secret.
         - name: nats-credentials
           secret:
             secretName: {{ $s.natsCredentials.secretName }}
@@ -424,6 +426,8 @@ spec:
             items:
               - key: {{ $s.natsCredentials.seedKey | quote }}
                 path: {{ $s.natsCredentials.seedKey | quote }}
+              - key: {{ $s.natsCredentials.jwtKey | quote }}
+                path: {{ $s.natsCredentials.jwtKey | quote }}
         # Only the box private key, as the nats seed: owner root, group the
         # pod's fsGroup (saasapi's), 0440, nothing for others; mounted by
         # the saasapi container alone, never by the init container. The

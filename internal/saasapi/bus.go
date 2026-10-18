@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	jwt "github.com/nats-io/jwt/v2"
@@ -67,6 +68,14 @@ func validateBusCredential(seed, userJWT string) error {
 	if uc.Subject != pub {
 		return fmt.Errorf("saasapi: SAASAPI_NATS_USER_JWT was issued to %s, but the seed in SAASAPI_NATS_NKEY_SEED_FILE is %s — the seed and JWT are from different credentials", uc.Subject, pub)
 	}
+	// The JWT expires (pki.EnvSaaSAPIUserJWTTTL, default 24h); the
+	// publisher's refresh CronJob writes a new one well before that, and
+	// ESO plus Reloader restart this service with it. An expired one
+	// means that chain is broken: say so rather than let the bus refuse
+	// it with a generic authorization error.
+	if uc.Expires != 0 && !time.Now().Before(time.Unix(uc.Expires, 0)) {
+		return fmt.Errorf("saasapi: SAASAPI_NATS_USER_JWT expired at %s: the SaaS API credential publisher (its refresh CronJob) renews it, and ESO delivers it", time.Unix(uc.Expires, 0).UTC().Format(time.RFC3339))
+	}
 	return nil
 }
 
@@ -87,8 +96,15 @@ func validateBusCredential(seed, userJWT string) error {
 // (sealedbus.go, J.4), so a connection without them could do nothing but
 // fail. Missing or unreadable keys are a startup error.
 func ConnectBus(cfg Config) (*nats.Conn, error) {
+	if cfg.NATSUserJWT == "" && cfg.NATSUserJWTFile != "" {
+		b, err := os.ReadFile(cfg.NATSUserJWTFile)
+		if err != nil {
+			return nil, fmt.Errorf("saasapi: reading SAASAPI_NATS_USER_JWT_FILE: %w", err)
+		}
+		cfg.NATSUserJWT = strings.TrimSpace(string(b))
+	}
 	if cfg.NATSURL == "" || cfg.NATSCAFile == "" || cfg.NATSNKeySeedFile == "" || cfg.NATSUserJWT == "" {
-		return nil, fmt.Errorf("%w: SAASAPI_NATS_URL, SAASAPI_NATS_CA_FILE, SAASAPI_NATS_NKEY_SEED_FILE and SAASAPI_NATS_USER_JWT are all required", ErrBusNotConfigured)
+		return nil, fmt.Errorf("%w: SAASAPI_NATS_URL, SAASAPI_NATS_CA_FILE, SAASAPI_NATS_NKEY_SEED_FILE and SAASAPI_NATS_USER_JWT (or SAASAPI_NATS_USER_JWT_FILE) are all required", ErrBusNotConfigured)
 	}
 	seedBytes, err := os.ReadFile(cfg.NATSNKeySeedFile)
 	if err != nil {
@@ -110,6 +126,11 @@ func ConnectBus(cfg Config) (*nats.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	creds, err := newBusCredential(seed, cfg.NATSUserJWT, cfg.NATSUserJWTFile)
+	if err != nil {
+		return nil, err
+	}
+	closed := make(chan struct{})
 	nc, err := nats.Connect(cfg.NATSURL,
 		nats.Name("imas-saasapi"),
 		// Request-reply (internal.sprout.action) replies arrive on this
@@ -118,7 +139,7 @@ func ConnectBus(cfg Config) (*nats.Conn, error) {
 		// (controlplane.SaaSAPIInboxPrefix).
 		nats.CustomInboxPrefix(controlplane.SaaSAPIInboxPrefix),
 		nats.Secure(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}),
-		nats.UserJWTAndSeed(strings.TrimSpace(cfg.NATSUserJWT), seed),
+		nats.UserJWT(creds.userJWT, creds.sign),
 		nats.Timeout(10*time.Second),
 		nats.RetryOnFailedConnect(false),
 		nats.MaxReconnects(-1),
@@ -131,6 +152,8 @@ func ConnectBus(cfg Config) (*nats.Conn, error) {
 		nats.ReconnectHandler(func(nc *nats.Conn) {
 			log.Infof("saasapi: reconnected to NATS bus at %s", nc.ConnectedUrl())
 		}),
+		// Ends the JWT file watcher with the connection.
+		nats.ClosedHandler(func(*nats.Conn) { close(closed) }),
 		nats.ErrorHandler(func(_ *nats.Conn, sub *nats.Subscription, err error) {
 			subject := ""
 			if sub != nil {
@@ -143,5 +166,100 @@ func ConnectBus(cfg Config) (*nats.Conn, error) {
 		return nil, fmt.Errorf("saasapi: connecting to NATS bus %s: %w", cfg.NATSURL, err)
 	}
 	SetControlPlaneBox(box)
+	if cfg.NATSUserJWTFile != "" {
+		go creds.watch(nc, closed, busJWTWatchInterval)
+	}
 	return nc, nil
+}
+
+// busJWTWatchInterval is how often a SAASAPI_NATS_USER_JWT_FILE is checked
+// for a refreshed JWT. The kubelet updates a mounted Secret within about a
+// minute of ESO changing it; the refresh lands a third of the JWT's
+// lifetime before it expires.
+var busJWTWatchInterval = 30 * time.Second
+
+// busCredential is this service's NATS User credential: the seed, and the
+// JWT, re-read from its file (when one is configured) at every
+// (re)connect, so an expiring JWT is replaced without a restart.
+type busCredential struct {
+	kp   nkeys.KeyPair
+	seed string
+	file string
+
+	mu   sync.Mutex
+	good string // the last JWT that validated
+	used string // the JWT the current connection presented
+}
+
+func newBusCredential(seed, initial, file string) (*busCredential, error) {
+	kp, err := nkeys.FromSeed([]byte(seed))
+	if err != nil {
+		return nil, fmt.Errorf("saasapi: SAASAPI_NATS_NKEY_SEED_FILE does not hold a valid NKey seed: %w", err)
+	}
+	return &busCredential{kp: kp, seed: seed, file: file, good: strings.TrimSpace(initial)}, nil
+}
+
+// load re-reads the JWT file and returns the JWT to present: the file's
+// when it validates against the seed (validateBusCredential), otherwise
+// the last good one, so a half-written or mismatched file never breaks a
+// connection that still has a valid JWT.
+func (c *busCredential) load() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.file == "" {
+		return c.good
+	}
+	b, err := os.ReadFile(c.file)
+	if err != nil {
+		log.Warnf("saasapi: reading SAASAPI_NATS_USER_JWT_FILE, keeping the JWT in use: %v", err)
+		return c.good
+	}
+	next := strings.TrimSpace(string(b))
+	if next == c.good {
+		return c.good
+	}
+	if err := validateBusCredential(c.seed, next); err != nil {
+		log.Warnf("saasapi: SAASAPI_NATS_USER_JWT_FILE holds an unusable JWT, keeping the one in use: %v", err)
+		return c.good
+	}
+	c.good = next
+	return c.good
+}
+
+// userJWT is the nats.UserJWTHandler: called at every (re)connect.
+func (c *busCredential) userJWT() (string, error) {
+	j := c.load()
+	c.mu.Lock()
+	c.used = j
+	c.mu.Unlock()
+	return j, nil
+}
+
+func (c *busCredential) sign(nonce []byte) ([]byte, error) { return c.kp.Sign(nonce) }
+
+// watch checks the JWT file every interval and, when it holds a valid JWT
+// other than the one the connection presented, reconnects so the new one
+// is used before the old one expires. It ends as soon as closed is
+// closed (nc's ClosedHandler).
+func (c *busCredential) watch(nc *nats.Conn, closed <-chan struct{}, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-closed:
+			return
+		case <-t.C:
+		}
+		next := c.load()
+		c.mu.Lock()
+		changed := next != c.used
+		c.mu.Unlock()
+		if !changed {
+			continue
+		}
+		log.Infof("saasapi: SAASAPI_NATS_USER_JWT_FILE holds a new JWT; reconnecting to the bus with it")
+		if err := nc.ForceReconnect(); err != nil {
+			log.Warnf("saasapi: reconnecting with the refreshed NATS JWT: %v", err)
+		}
+	}
 }

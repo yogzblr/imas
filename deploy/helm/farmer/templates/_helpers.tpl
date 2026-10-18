@@ -1278,6 +1278,37 @@ refuses to render. */}}
 {{- fail (printf "credentialPublisher.k8sRole %q or credentialPublisher.natsSign.k8sRole %q is also one of farmer's OpenBao roles: the publisher's roles must never be ones farmer can log in with" $p.k8sRole $p.natsSign.k8sRole) -}}
 {{- end -}}
 {{- end -}}
+{{- if not (regexMatch "^([0-9]+(h|m))+$" (toString $p.userJWTTTL)) -}}
+{{- fail (printf "credentialPublisher.userJWTTTL %q must be a duration in hours and minutes, such as 24h (IMAS_SAASAPI_USER_JWT_TTL, 1h to 720h)" (toString $p.userJWTTTL)) -}}
+{{- end -}}
+{{- $every := int $p.refresh.everyHours -}}
+{{- if not (has $every (list 1 2 3 4 6 8 12)) -}}
+{{- fail (printf "credentialPublisher.refresh.everyHours %v must be 1, 2, 3, 4, 6, 8 or 12, so the refresh runs are evenly spaced" $p.refresh.everyHours) -}}
+{{- end -}}
+{{- $minute := int $p.refresh.minute -}}
+{{- if or (lt $minute 0) (gt $minute 59) -}}
+{{- fail (printf "credentialPublisher.refresh.minute %v must be 0 to 59" $p.refresh.minute) -}}
+{{- end -}}
+{{- $ttlMinutes := 0 -}}
+{{- range $part := regexFindAll "[0-9]+[hm]" (toString $p.userJWTTTL) -1 -}}
+{{- if hasSuffix "h" $part -}}
+{{- $ttlMinutes = add $ttlMinutes (mul (atoi (trimSuffix "h" $part)) 60) -}}
+{{- else -}}
+{{- $ttlMinutes = add $ttlMinutes (atoi (trimSuffix "m" $part)) -}}
+{{- end -}}
+{{- end -}}
+{{- if gt (int $ttlMinutes) 43200 -}}
+{{- fail (printf "credentialPublisher.userJWTTTL %s must not exceed 720h: the publisher refuses a longer IMAS_SAASAPI_USER_JWT_TTL, so no JWT would be renewed" (toString $p.userJWTTTL)) -}}
+{{- end -}}
+{{- /* The run that renews a JWT starts at most everyHours after two
+thirds of its lifetime, may start up to startingDeadlineSeconds late and
+may take up to activeDeadlineSeconds: all of that must fit in the last
+third. */ -}}
+{{- $slackMinutes := add (div (add (int $p.refresh.startingDeadlineSeconds) 59) 60) (div (add (int $p.activeDeadlineSeconds) 59) 60) -}}
+{{- $minTTL := mul 3 (add (mul $every 60) $slackMinutes) -}}
+{{- if le (int $ttlMinutes) (int $minTTL) -}}
+{{- fail (printf "credentialPublisher.userJWTTTL %s must be more than %dm, 3 x (credentialPublisher.refresh.everyHours %dh + refresh.startingDeadlineSeconds + activeDeadlineSeconds): a JWT is renewed by the first run after only a third of its lifetime is left, and that run may start late and take time to publish, so a shorter lifetime can expire first" (toString $p.userJWTTTL) (int $minTTL) $every) -}}
+{{- end -}}
 {{- end }}
 
 {{/*

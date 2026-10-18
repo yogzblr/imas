@@ -394,7 +394,7 @@ func (c *testCluster) start(i int) {
 		}
 		cl.Routes = append(cl.Routes, u)
 	}
-	nd, err := startBus(opts, sysUser, cl, testTiming)
+	nd, err := startBus(opts, busSetup{SysUser: sysUser, Cluster: cl, Timing: testTiming})
 	if err != nil {
 		c.t.Fatalf("starting node %d: %v", i, err)
 	}
@@ -475,14 +475,14 @@ func TestBusFenceUserRequiredWhenClustered(t *testing.T) {
 		t.Fatal("a fence user was configured without its seed")
 	}
 	cl := &clusterConfig{Name: "imas-bus", Port: -1, User: defaultRouteUser, Password: testRoutePassword, ServerName: "bus-0"}
-	if nd, err := startBus(opts, sysUser, cl, testTiming); !errors.Is(err, errNoFenceUser) {
+	if nd, err := startBus(opts, busSetup{SysUser: sysUser, Cluster: cl, Timing: testTiming}); !errors.Is(err, errNoFenceUser) {
 		if nd != nil {
 			nd.Shutdown()
 		}
 		t.Fatalf("startBus: err = %v, want errNoFenceUser", err)
 	}
 	// A single node needs none.
-	nd, err := startBus(opts, sysUser, nil, testTiming)
+	nd, err := startBus(opts, busSetup{SysUser: sysUser, Timing: testTiming, SysReady: func() bool { return true }})
 	if err != nil {
 		t.Fatalf("single node without a fence user: %v", err)
 	}

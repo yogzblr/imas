@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -549,16 +550,20 @@ func LoadRootCA(binary string) error {
 	return nil
 }
 
+// PutNKey registers the sprout's NKey under id through the legacy
+// PUT /pki/putnkey, which farmer serves only where enrolment is off (a
+// standalone install). It first fetches a server nonce
+// (GET /pki/nkeynonce) and signs NKeySubmissionPayload with the NKey's
+// seed, the proof of possession farmer checks (nkeynonce.go). Any answer
+// but 200 is an error.
 func PutNKey(id string) error {
-	nkey, err := GetPubNKey(SproutPubNKey)
+	kp, err := loadSproutNKey()
 	if err != nil {
 		return err
 	}
-	keySub := KeySubmission{NKey: nkey, SproutID: id}
-
-	jw, err := json.Marshal(keySub)
+	nkey, err := kp.PublicKey()
 	if err != nil {
-		return fmt.Errorf("failed to marshal key submission: %w", err)
+		return err
 	}
 	nkeyClientMu.RLock()
 	client := nkeyClient
@@ -568,8 +573,31 @@ func PutNKey(id string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
 	defer cancel()
-	url := config.FarmerURL + "/pki/putnkey"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewBuffer(jw))
+
+	nreq, err := http.NewRequestWithContext(ctx, http.MethodGet, config.FarmerURL+"/pki/nkeynonce", nil)
+	if err != nil {
+		return fmt.Errorf("failed to build NKey nonce request: %w", err)
+	}
+	nresp, err := client.Do(nreq)
+	if err != nil {
+		return fmt.Errorf("failed to fetch an NKey nonce: %w", err)
+	}
+	var n NKeyNonce
+	derr := json.NewDecoder(io.LimitReader(nresp.Body, 4096)).Decode(&n)
+	nresp.Body.Close()
+	if nresp.StatusCode != http.StatusOK || derr != nil || n.Nonce == "" {
+		return fmt.Errorf("failed to fetch an NKey nonce: status %d", nresp.StatusCode)
+	}
+	sig, err := kp.Sign(NKeySubmissionPayload(n.Nonce, id, nkey))
+	if err != nil {
+		return fmt.Errorf("failed to sign the NKey submission: %w", err)
+	}
+	keySub := KeySubmission{NKey: nkey, SproutID: id, Nonce: n.Nonce, Sig: base64.RawURLEncoding.EncodeToString(sig)}
+	jw, err := json.Marshal(keySub)
+	if err != nil {
+		return fmt.Errorf("failed to marshal key submission: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, config.FarmerURL+"/pki/putnkey", bytes.NewBuffer(jw))
 	if err != nil {
 		return fmt.Errorf("failed to build NKey submission request: %w", err)
 	}
@@ -578,6 +606,9 @@ func PutNKey(id string) error {
 		return fmt.Errorf("failed to submit NKey: %w", err)
 	}
 	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to submit NKey: status %d", resp.StatusCode)
+	}
 	return nil
 }
 

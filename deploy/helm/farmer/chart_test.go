@@ -699,6 +699,19 @@ func TestValidationFailures(t *testing.T) {
 		{"publisher path equals seed path", "must be different", []string{"--set", "credentialPublisher.kvPath=platform/imas/nats-seeds"}},
 		{"publisher path under seed path", "must be different", []string{"--set", "externalSecrets.seedPath=platform/imas"}},
 		{"publisher path has no default", "credentialPublisher.kvPath is required", []string{"--set", "credentialPublisher.kvPath="}},
+		{"publisher JWT ttl not a duration", "credentialPublisher.userJWTTTL", []string{"--set", "credentialPublisher.userJWTTTL=1d"}},
+		{"publisher refresh not evenly spaced", "credentialPublisher.refresh.everyHours 5", []string{"--set", "credentialPublisher.refresh.everyHours=5"}},
+		{"publisher refresh minute out of range", "credentialPublisher.refresh.minute 60", []string{"--set", "credentialPublisher.refresh.minute=60"}},
+		// A 12h JWT minted just after a run is not due at the next run 4h
+		// later (more than 4h left) and expires before the one after. The
+		// floor is 3 x (4h + 10m start delay + 5m run) = 765m.
+		{"publisher JWT ttl not above 3 x refresh", "must be more than 765m", []string{"--set", "credentialPublisher.userJWTTTL=12h"}},
+		{"publisher JWT ttl at the floor", "must be more than 765m", []string{"--set", "credentialPublisher.userJWTTTL=12h45m"}},
+		// 3h1m clears 3 x 1h but not the late start and run time:
+		// 3 x (60 + 10 + 5) = 225m.
+		{"publisher JWT ttl above the publisher's 720h", "must not exceed 720h", []string{"--set", "credentialPublisher.userJWTTTL=721h"}},
+		{"publisher JWT ttl above 720h in minutes", "must not exceed 720h", []string{"--set", "credentialPublisher.userJWTTTL=719h61m"}},
+		{"publisher JWT ttl leaves no time for a late run", "must be more than 225m", []string{"--set", "credentialPublisher.userJWTTTL=3h1m", "--set", "credentialPublisher.refresh.everyHours=1"}},
 		{"publisher runs as farmer", "must not be farmer's ServiceAccount", []string{"--set", "credentialPublisher.serviceAccountName=t-farmer"}},
 		{"publisher runs as saasapi", "must not be saasapi's ServiceAccount", []string{"--set", "credentialPublisher.serviceAccountName=t-farmer-saasapi"}},
 		{"publisher role is farmer's", "is also one of farmer's OpenBao roles", []string{"--set", "credentialPublisher.k8sRole=imas-farmer-gateway"}},
@@ -845,6 +858,37 @@ func TestPublishJobMatchesReference(t *testing.T) {
 	}
 	if yamlString(t, ps["volumes"]) != yamlString(t, rps["volumes"]) {
 		t.Errorf("volumes:\n%s\nreference:\n%s", yamlString(t, ps["volumes"]), yamlString(t, rps["volumes"]))
+	}
+
+	// The refresh CronJob (security review 2026-10, L14) runs the Job's
+	// pod, in the chart and in the reference, on the reference's schedule.
+	cj := find(t, docs, "CronJob", "t-farmer-saasapi-credential-refresh")
+	rcj := refByKind["CronJob"]
+	for _, k := range []string{"schedule", "concurrencyPolicy", "startingDeadlineSeconds", "successfulJobsHistoryLimit", "failedJobsHistoryLimit"} {
+		if get(cj, "spec", k) != get(rcj, "spec", k) {
+			t.Errorf("CronJob spec.%s = %v, reference %v", k, get(cj, "spec", k), get(rcj, "spec", k))
+		}
+	}
+	for _, k := range []string{"backoffLimit", "activeDeadlineSeconds", "ttlSecondsAfterFinished"} {
+		if get(cj, "spec", "jobTemplate", "spec", k) != get(job, "spec", k) {
+			t.Errorf("CronJob job spec.%s = %v, the Job's %v", k, get(cj, "spec", "jobTemplate", "spec", k), get(job, "spec", k))
+		}
+	}
+	if a, b := yamlString(t, get(cj, "spec", "jobTemplate", "spec", "template")), yamlString(t, get(job, "spec", "template")); a != b {
+		t.Errorf("CronJob pod:\n%s\nthe Job's:\n%s", a, b)
+	}
+	if a, b := yamlString(t, get(rcj, "spec", "jobTemplate", "spec", "template")), yamlString(t, get(rj, "spec", "template")); a != b {
+		t.Errorf("reference CronJob pod differs from the reference Job's:\n%s\n%s", a, b)
+	}
+	if envValues(c)["IMAS_SAASAPI_USER_JWT_TTL"] != "24h" {
+		t.Errorf("IMAS_SAASAPI_USER_JWT_TTL = %q, want 24h", envValues(c)["IMAS_SAASAPI_USER_JWT_TTL"])
+	}
+	moved := mustRender(t, "--set", "credentialPublisher.userJWTTTL=3h46m", "--set", "credentialPublisher.refresh.everyHours=1", "--set", "credentialPublisher.refresh.minute=5")
+	if v := envValues(container(t, find(t, moved, "Job", "t-farmer-saasapi-credential-publish"), "publish"))["IMAS_SAASAPI_USER_JWT_TTL"]; v != "3h46m" {
+		t.Errorf("userJWTTTL 3h46m (just above the 225m floor): env = %q", v)
+	}
+	if v := get(find(t, moved, "CronJob", "t-farmer-saasapi-credential-refresh"), "spec", "schedule"); v != "5 */1 * * *" {
+		t.Errorf("refresh.everyHours 1, minute 5: schedule %v", v)
 	}
 
 	np := find(t, docs, "NetworkPolicy", "imas-saasapi-cred-publisher")
@@ -1251,11 +1295,22 @@ func TestSeedsAreReferencesOnly(t *testing.T) {
 			}
 		}
 	}
-	// saasapi mounts only its own seed.
-	sv := byName(podSpec(find(t, docs, "Deployment", "t-farmer-saasapi"))["volumes"])
+	// saasapi mounts only its own seed and JWT, the JWT as a file it
+	// re-reads (SAASAPI_NATS_USER_JWT_FILE), never an env var read once:
+	// the JWT expires and is refreshed in place.
+	saasapi := find(t, docs, "Deployment", "t-farmer-saasapi")
+	sv := byName(podSpec(saasapi)["volumes"])
 	items := get(sv["nats-credentials"], "secret", "items").([]any)
-	if get(sv["nats-credentials"], "secret", "secretName") != "imas-saasapi-nats" || len(items) != 1 || get(items[0], "key") != "nats-user.nk" {
+	if get(sv["nats-credentials"], "secret", "secretName") != "imas-saasapi-nats" || len(items) != 2 ||
+		get(items[0], "key") != "nats-user.nk" || get(items[1], "key") != "SAASAPI_NATS_USER_JWT" {
 		t.Errorf("saasapi credential volume: %v", sv["nats-credentials"])
+	}
+	se := envValues(container(t, saasapi, "saasapi"))
+	if se["SAASAPI_NATS_USER_JWT_FILE"] != "/var/run/secrets/imas/nats/SAASAPI_NATS_USER_JWT" {
+		t.Errorf("SAASAPI_NATS_USER_JWT_FILE = %q", se["SAASAPI_NATS_USER_JWT_FILE"])
+	}
+	if _, ok := se["SAASAPI_NATS_USER_JWT"]; ok {
+		t.Error("saasapi still gets its JWT as an env var read once at startup")
 	}
 	for _, v := range sv {
 		if get(v, "secret", "secretName") == "imas-farmer-nats-seeds" {
@@ -1380,10 +1435,15 @@ func TestBusAddress(t *testing.T) {
 
 func TestFarmerConfigFile(t *testing.T) {
 	docs := mustRender(t, append(slices.Clone(skipAdmin), "--set", "farmer.extraConfig.farmerorganization=evil",
-		"--set", "farmer.extraConfig.cohortrefreshinterval=1m")...)
+		"--set", "farmer.extraConfig.cohortrefreshinterval=1m", "--set", "farmer.extraConfig.enrollment=false")...)
 	cfg := farmerConfig(t, docs)
 	if cfg["farmerorganization"] != "imas" {
 		t.Errorf("extraConfig overrode a chart-managed key: %v", cfg["farmerorganization"])
+	}
+	// Enrolment is always on in the chart, so the legacy PUT /pki/putnkey
+	// is never registered (security review 2026-10, L12).
+	if cfg["enrollment"] != true {
+		t.Errorf("enrollment = %v, want true whatever extraConfig says", cfg["enrollment"])
 	}
 	if cfg["cohortrefreshinterval"] != "1m" {
 		t.Error("extraConfig key not merged")

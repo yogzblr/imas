@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	jwt "github.com/nats-io/jwt/v2"
 )
@@ -50,7 +51,8 @@ type PublishResult struct {
 	PublicKey string
 	// Written is false when the store already held a JWT equivalent to
 	// the current one (same key, issuer, permissions and connection
-	// types), in which case nothing was written.
+	// types) with more than a third of its lifetime left, in which case
+	// nothing was written.
 	Written bool
 }
 
@@ -112,7 +114,11 @@ func PublishSaaSAPICredential(ctx context.Context, store SaaSAPICredentialStore)
 	if err != nil {
 		return res, fmt.Errorf("reading the published SaaS API credential: %w", err)
 	}
-	if publishedSaaSAPICredentialIsCurrent(existing, uc.Subject, uc.Issuer) {
+	ttl, err := saasAPIUserJWTTTL()
+	if err != nil {
+		return res, err
+	}
+	if publishedSaaSAPICredentialIsCurrent(existing, uc.Subject, uc.Issuer, saasAPINow(), ttl) {
 		return res, ensureErr
 	}
 
@@ -128,8 +134,9 @@ func PublishSaaSAPICredential(ctx context.Context, store SaaSAPICredentialStore)
 
 // publishedSaaSAPICredentialIsCurrent reports whether an already-published
 // secret carries a JWT that verifies (DecodeUserClaims checks the
-// signature against its issuer) and matches what would be minted now.
-func publishedSaaSAPICredentialIsCurrent(existing map[string]string, pub, sysAccountPub string) bool {
+// signature against its issuer), matches what would be minted now and is
+// not yet due for renewal (a third of ttl left).
+func publishedSaaSAPICredentialIsCurrent(existing map[string]string, pub, sysAccountPub string, now time.Time, ttl time.Duration) bool {
 	if existing == nil || existing[SaaSAPICredentialPublicKeyField] != pub {
 		return false
 	}
@@ -137,5 +144,5 @@ func publishedSaaSAPICredentialIsCurrent(existing map[string]string, pub, sysAcc
 	if err != nil {
 		return false
 	}
-	return saasAPIUserJWTIsCurrent(uc, pub, sysAccountPub)
+	return saasAPIUserJWTIsCurrent(uc, pub, sysAccountPub, now, ttl)
 }

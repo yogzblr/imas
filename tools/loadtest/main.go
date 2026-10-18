@@ -197,7 +197,7 @@ func defineFlags(fs *flag.FlagSet, o *options) {
 	fs.StringVar(&o.BusHost, "bus-host", "127.0.0.1", "local bus listen address")
 	fs.IntVar(&o.BusPort, "bus-port", 0, "local bus port; 0 picks a free one")
 	fs.IntVar(&o.BusMaxConn, "bus-max-connections", 0, "local bus: its busmaxconnections (0 for nats-server's default of 65,536)")
-	fs.BoolVar(&o.BusTrace, "bus-trace", true, "local bus: NATS debug and trace logging on, as cmd/farmerbus sets it; false to measure what it costs")
+	fs.BoolVar(&o.BusTrace, "bus-trace", false, "local bus: NATS debug and trace logging on, as cmd/farmerbus runs with IMAS_BUS_LOG_LEVEL=trace, to measure what it costs (off by default, as cmd/farmerbus)")
 	fs.DurationVar(&o.Deadline, "deadline", 0, "abort the whole run after this long; 0 for none")
 
 	fs.DurationVar(&o.MaxP99, "max-p99", requirement10, "fail if a window's test.ping p99 is above this (requirement 10); 0 to report only")

@@ -913,7 +913,8 @@ saasapi:
   livenessProbe:
     tcpSocket: { port: http }
     periodSeconds: 20
-  # Reloader rolls saasapi when its NATS credential or auth secret changes.
+  # Reloader rolls saasapi when its NATS seed or auth secret changes. A
+  # refreshed NATS JWT needs no roll: saasapi re-reads its mounted file.
   podAnnotations:
     reloader.stakater.com/auto: "true"
   podLabels: {}
@@ -962,6 +963,24 @@ credentialPublisher:
     k8sRole: imas-natssign-publisher
     # token auth: key in tokenSecretName (empty: openbaoClient's).
     tokenSecretKey: natssign-publisher-token
+  # IMAS_SAASAPI_USER_JWT_TTL: the SaaS API User JWT's lifetime (its exp;
+  # security review 2026-10, L14), a Go duration from 1h to 720h. A run
+  # writes a new JWT once a third of it is left.
+  userJWTTTL: 24h
+  # The refresh CronJob: the same run on a schedule, so the JWT is renewed
+  # before it expires without a deployment. It runs every everyHours hours
+  # (1, 2, 3, 4, 6, 8 or 12, so the runs are evenly spaced) at minute
+  # minute, schedule "<minute> */<everyHours> * * *". A JWT is renewed by
+  # the first run after only a third of userJWTTTL is left, and that run
+  # may start up to startingDeadlineSeconds late and run for up to
+  # activeDeadlineSeconds, so the render fails unless userJWTTTL is more
+  # than 3 x (everyHours + those two) (the default: 24h against 12h45m). A
+  # run with nothing due is one KV read and one Transit signature and
+  # writes nothing.
+  refresh:
+    everyHours: 4
+    minute: 17
+    startingDeadlineSeconds: 600
   # Emit the Argo CD hook annotations too.
   argoCDHooks: true
   backoffLimit: 3

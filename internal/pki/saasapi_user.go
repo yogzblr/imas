@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
 	"time"
 
@@ -42,7 +43,49 @@ const (
 	// IMAS_NATS_SAASAPI_USER_SEED_FILE / IMAS_NATS_SAASAPI_USER_SEED
 	// supply the seed (OpenBao via ESO); farmer never generates one.
 	saasAPIUserSeedName = "SAASAPI_USER"
+
+	// EnvSaaSAPIUserJWTTTL is how long a minted SaaS API User JWT is
+	// valid (its exp), a Go duration from MinSaaSAPIUserJWTTTL to
+	// MaxSaaSAPIUserJWTTTL; DefaultSaaSAPIUserJWTTTL when unset.
+	EnvSaaSAPIUserJWTTTL = "IMAS_SAASAPI_USER_JWT_TTL"
+	// DefaultSaaSAPIUserJWTTTL is the SaaS API User JWT's lifetime.
+	DefaultSaaSAPIUserJWTTTL = 24 * time.Hour
+	// MinSaaSAPIUserJWTTTL and MaxSaaSAPIUserJWTTTL bound
+	// EnvSaaSAPIUserJWTTTL. The refresh CronJob must run more often
+	// than a third of it.
+	MinSaaSAPIUserJWTTTL = time.Hour
+	MaxSaaSAPIUserJWTTTL = 30 * 24 * time.Hour
 )
+
+// saasAPINow is the clock the SaaS API User JWT's exp and its renewal
+// are read from; tests move it.
+var saasAPINow = time.Now
+
+// saasAPIUserJWTTTL reads EnvSaaSAPIUserJWTTTL.
+func saasAPIUserJWTTTL() (time.Duration, error) {
+	v := os.Getenv(EnvSaaSAPIUserJWTTTL)
+	if v == "" {
+		return DefaultSaaSAPIUserJWTTTL, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < MinSaaSAPIUserJWTTTL || d > MaxSaaSAPIUserJWTTTL {
+		return 0, fmt.Errorf("%s=%q: want a Go duration from %v to %v", EnvSaaSAPIUserJWTTTL, v, MinSaaSAPIUserJWTTTL, MaxSaaSAPIUserJWTTTL)
+	}
+	return d, nil
+}
+
+// saasAPIUserJWTFresh reports whether a JWT expiring at exp (Unix
+// seconds) needs no renewal at now under a ttl lifetime: it has an exp,
+// more than a third of ttl is left, and it does not outlive a JWT minted
+// now (a ttl that was shortened since). The same two-thirds rule as the
+// gateway JWT's refresh (enrollclient.go).
+func saasAPIUserJWTFresh(exp int64, now time.Time, ttl time.Duration) bool {
+	if exp == 0 {
+		return false
+	}
+	left := time.Unix(exp, 0).Sub(now)
+	return left > ttl/3 && left <= ttl+time.Minute
+}
 
 // saasAPIUserPermissions is the SaaS API's entire NATS reach: publish the
 // three tenant request subjects (provision, deprovision, purge) and
@@ -89,12 +132,17 @@ func saasAPIUserConnectionTypes() jwt.StringList {
 
 // saasAPIUserJWTIsCurrent reports whether an already-minted User JWT
 // still matches what EnsureSaaSAPICredential would mint now: same subject
-// key, issued by the SYS Account's own key, and the exact same
-// permissions/connection types. PublishSaaSAPICredential compares the
-// published JWT with it, so a change to saasAPIUserPermissions is
-// published on the next run rather than shadowed by a stale JWT.
-func saasAPIUserJWTIsCurrent(uc *jwt.UserClaims, pub, sysAccountPub string) bool {
+// key, issued by the SYS Account's own key, the exact same
+// permissions/connection types, and not due for renewal at now under a
+// ttl lifetime (saasAPIUserJWTFresh). PublishSaaSAPICredential compares
+// the published JWT with it, so a change to saasAPIUserPermissions is
+// published on the next run rather than shadowed by a stale JWT, and a
+// JWT is replaced before it expires.
+func saasAPIUserJWTIsCurrent(uc *jwt.UserClaims, pub, sysAccountPub string, now time.Time, ttl time.Duration) bool {
 	if uc.Subject != pub || uc.Issuer != sysAccountPub || uc.IssuerAccount != "" {
+		return false
+	}
+	if !saasAPIUserJWTFresh(uc.Expires, now, ttl) {
 		return false
 	}
 	want := saasAPIUserPermissions()
@@ -110,6 +158,14 @@ func saasAPIUserJWTIsCurrent(uc *jwt.UserClaims, pub, sysAccountPub string) bool
 // file: the JWT reaches saasapi through PublishSaaSAPICredential, which
 // compares claims, not bytes. Idempotent: call at every farmer boot.
 //
+// The JWT expires (security review 2026-10, L14): exp is
+// EnvSaaSAPIUserJWTTTL (default 24h) after it is minted, so a rotated-out
+// key also stops working on its own, even on a bus that has not yet
+// received the SYS Account JWT that revokes it. It is renewed by the same
+// path that publishes it: the publisher (the Helm post-deploy Job, and
+// its refresh CronJob on a schedule) writes a new one once a third of the
+// lifetime is left, and ESO plus Reloader hand it to saasapi.
+//
 // The User is signed directly by the SYS Account's identity key, exactly
 // like imas-farmer-sys-push (jwtauth.go) — no Account JWT change, and so
 // no resolver push, is needed for the bus to accept it; the SYS Account
@@ -122,7 +178,7 @@ func saasAPIUserJWTIsCurrent(uc *jwt.UserClaims, pub, sysAccountPub string) bool
 // the SYS Account JWT's revocation list, which is re-signed, held in
 // memory, and pushed to the bus resolver over the same pushAccountUpdate path
 // every tenant Account update uses — otherwise the old credential would
-// stay valid forever, since the User JWT carries no expiry. Whenever the
+// stay valid until the User JWT's exp. Whenever the
 // SYS Account JWT carries any revocation, it is (re-)pushed on every
 // call, so a push that failed at one boot is retried at the next rather
 // than leaving a rotated-out key live on the bus. Without a database (the
@@ -222,7 +278,12 @@ func ensureSaaSAPICredentialLocked(mat *natsAuthMaterial, state *SaaSAPICredenti
 		sysChanged = true
 	}
 
+	ttl, err := saasAPIUserJWTTTL()
+	if err != nil {
+		return "", nil, "", false, err
+	}
 	uc := jwt.NewUserClaims(pub)
+	uc.Expires = saasAPINow().Add(ttl).Unix()
 	uc.Name = saasAPIUserName
 	uc.Permissions = saasAPIUserPermissions()
 	uc.AllowedConnectionTypes = saasAPIUserConnectionTypes()

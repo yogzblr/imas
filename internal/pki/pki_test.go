@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/glebarez/sqlite"
+	"github.com/nats-io/nkeys"
 	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/config"
@@ -962,64 +963,105 @@ func TestLoadRootCA_MissingFile(t *testing.T) {
 	}
 }
 
-func TestPutNKey_Success(t *testing.T) {
-	// Set up a sprout pub key file.
-	tmpDir := t.TempDir()
-	pubFile := filepath.Join(tmpDir, "sprout.pub")
-	if err := os.WriteFile(pubFile, []byte("UTEST_SPROUT_KEY"), 0o600); err != nil {
+// writeSproutSeed writes a fresh sprout NKey seed where PutNKey reads it
+// (config.NKeySproutPrivFile) and returns its public key.
+func writeSproutSeed(t *testing.T) string {
+	t.Helper()
+	kp, _ := nkeys.CreateUser()
+	seed, _ := kp.Seed()
+	pub, _ := kp.PublicKey()
+	f := filepath.Join(t.TempDir(), "sprout.nk")
+	if err := os.WriteFile(f, seed, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	config.NKeySproutPubFile = pubFile
+	old := config.NKeySproutPrivFile
+	config.NKeySproutPrivFile = f
+	t.Cleanup(func() { config.NKeySproutPrivFile = old })
+	return pub
+}
 
-	// Set up a test HTTP server to receive the PUT request.
+// PutNKey fetches a nonce, then submits its NKey with the seed's
+// signature over that nonce (security review 2026-10, L12), which the
+// server side's VerifyNKeySubmission accepts.
+func TestPutNKey_Success(t *testing.T) {
+	pub := writeSproutSeed(t)
+
 	var receivedSubmission KeySubmission
+	var verifyErr error
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPut {
-			t.Errorf("expected PUT, got %s", r.Method)
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/pki/nkeynonce":
+			nonce, err := IssueNKeyNonce()
+			if err != nil {
+				t.Error(err)
+			}
+			_ = json.NewEncoder(w).Encode(NKeyNonce{Nonce: nonce})
+		case r.Method == http.MethodPut && r.URL.Path == "/pki/putnkey":
+			if err := json.NewDecoder(r.Body).Decode(&receivedSubmission); err != nil {
+				t.Errorf("failed to decode body: %v", err)
+			}
+			verifyErr = VerifyNKeySubmission(receivedSubmission)
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
 		}
-		if r.URL.Path != "/pki/putnkey" {
-			t.Errorf("expected /pki/putnkey, got %s", r.URL.Path)
-		}
-		if err := json.NewDecoder(r.Body).Decode(&receivedSubmission); err != nil {
-			t.Errorf("failed to decode body: %v", err)
-		}
-		w.WriteHeader(http.StatusOK)
 	}))
 	defer ts.Close()
 
 	config.FarmerURL = ts.URL
 	nkeyClient = ts.Client()
 
-	err := PutNKey("test-sprout")
-	if err != nil {
+	if err := PutNKey("test-sprout"); err != nil {
 		t.Fatalf("PutNKey failed: %v", err)
 	}
-
-	if receivedSubmission.NKey != "UTEST_SPROUT_KEY" {
-		t.Errorf("expected NKey %q, got %q", "UTEST_SPROUT_KEY", receivedSubmission.NKey)
+	if receivedSubmission.NKey != pub || receivedSubmission.SproutID != "test-sprout" {
+		t.Errorf("submitted %q for %q, want %q for test-sprout", receivedSubmission.NKey, receivedSubmission.SproutID, pub)
 	}
-	if receivedSubmission.SproutID != "test-sprout" {
-		t.Errorf("expected SproutID %q, got %q", "test-sprout", receivedSubmission.SproutID)
+	if verifyErr != nil {
+		t.Errorf("the submission does not prove possession: %v", verifyErr)
 	}
 }
 
-func TestPutNKey_MissingPubKey(t *testing.T) {
-	config.NKeySproutPubFile = "/nonexistent/sprout.pub"
+// A refusal (403, 404 where enrolment is on) is an error, not success.
+func TestPutNKey_Refused(t *testing.T) {
+	writeSproutSeed(t)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(NKeyNonce{Nonce: "bm9uY2U"})
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer ts.Close()
+	config.FarmerURL = ts.URL
+	nkeyClient = ts.Client()
+	if err := PutNKey("test-sprout"); err == nil {
+		t.Fatal("a 403 was reported as success")
+	}
+	nonceless := httptest.NewServer(http.NotFoundHandler())
+	defer nonceless.Close()
+	config.FarmerURL = nonceless.URL
+	nkeyClient = nonceless.Client()
+	if err := PutNKey("test-sprout"); err == nil {
+		t.Fatal("no nonce route (enrolment on) was reported as success")
+	}
+}
+
+func TestPutNKey_MissingSeed(t *testing.T) {
+	old := config.NKeySproutPrivFile
+	config.NKeySproutPrivFile = "/nonexistent/sprout.nk"
+	t.Cleanup(func() { config.NKeySproutPrivFile = old })
 	nkeyClient = &http.Client{}
 
 	err := PutNKey("test-sprout")
 	if err == nil {
-		t.Error("expected error when sprout pub key file is missing")
+		t.Error("expected error when the sprout NKey seed file is missing")
 	}
 }
 
 func TestPutNKey_ServerError(t *testing.T) {
-	tmpDir := t.TempDir()
-	pubFile := filepath.Join(tmpDir, "sprout.pub")
-	if err := os.WriteFile(pubFile, []byte("UTEST_KEY"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	config.NKeySproutPubFile = pubFile
+	writeSproutSeed(t)
 
 	// Use a URL that won't connect.
 	config.FarmerURL = "http://127.0.0.1:1"

@@ -14,11 +14,33 @@ import (
 	"github.com/yogzblr/imas/internal/pki"
 )
 
-// PutNKey handles NKey registration from sprouts during PKI bootstrap.
-// Sprouts that have not yet been enrolled call this endpoint over HTTPS
-// to submit their public NKey. The farmer stores the key in the
-// appropriate PKI directory (unaccepted for new sprouts, rejected for
-// sprouts presenting a different key than the one already on file).
+// GetNKeyNonce hands out the single-use server nonce a PutNKey
+// submission signs (pki.IssueNKeyNonce). Registered only with PutNKey.
+func GetNKeyNonce(w http.ResponseWriter, r *http.Request) {
+	nonce, err := pki.IssueNKeyNonce()
+	if err != nil {
+		log.Warnf("NKey registration nonce: %v", err)
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	jw, _ := json.Marshal(pki.NKeyNonce{Nonce: nonce})
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	w.Write(jw)
+}
+
+// PutNKey handles NKey registration from sprouts during PKI bootstrap, on
+// a standalone install with enrolment off (config "enrollment: false";
+// with enrolment on, the Helm default, the route is not registered:
+// security review 2026-10, L12). A sprout submits its public NKey over
+// HTTPS with a signature, made with that NKey's seed, over a server nonce
+// from GET /pki/nkeynonce (pki.VerifyNKeySubmission); a submission
+// without one is refused with 403 before anything is stored. The farmer
+// then stores the key in the appropriate state (unaccepted for new
+// sprouts, rejected for sprouts presenting a different key than the one
+// already on file).
 //
 // This is one of the few remaining HTTP endpoints — it cannot move to
 // NATS because sprouts need to register before they have NATS credentials.
@@ -42,6 +64,12 @@ func PutNKey(w http.ResponseWriter, r *http.Request) {
 	if !nkeys.IsValidPublicUserKey(submission.NKey) {
 		log.Trace("An invalid NKey was submitted. Ignoring.")
 		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	// and that the submitter holds its seed
+	if err := pki.VerifyNKeySubmission(submission); err != nil {
+		log.Warnf("An NKey submission for sprout %s did not prove possession of the NKey. Refusing.", submission.SproutID)
+		w.WriteHeader(http.StatusForbidden)
 		return
 	}
 	// save it to the pki folder
