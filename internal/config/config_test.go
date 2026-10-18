@@ -1805,3 +1805,32 @@ func TestLoadConfig_FarmerValkeyRefusesStartup(t *testing.T) {
 		})
 	}
 }
+
+// LoadConfig("imas") closes the empty config file it creates, so that the
+// CLI can rename a new file over it (imas init's atomic write), which an
+// open handle blocks on Windows.
+func TestLoadConfig_ImasClosesCreatedFile(t *testing.T) {
+	tmpHome := t.TempDir()
+	cfgFile := filepath.Join(tmpHome, ".config", "imas", "imas")
+	t.Setenv("HOME", tmpHome)
+	configLoaded = sync.Once{}
+	LoadConfig("imas")
+	if runtime.GOOS == "linux" {
+		fds, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, fd := range fds {
+			if target, _ := os.Readlink(filepath.Join("/proc/self/fd", fd.Name())); target == cfgFile {
+				t.Fatalf("LoadConfig left %s open (fd %s)", cfgFile, fd.Name())
+			}
+		}
+	}
+	next := cfgFile + ".next"
+	if err := os.WriteFile(next, []byte("farmerinterface: x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(next, cfgFile); err != nil {
+		t.Fatalf("renaming over the created config file: %v", err)
+	}
+}

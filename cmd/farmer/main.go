@@ -137,9 +137,11 @@ func durationEnv(name string, def time.Duration) (time.Duration, error) {
 }
 
 // newTenantRegistry builds farmer's tenant connection registry from the
-// IMAS_TENANT_CONN_* settings, stopping farmer if one is invalid. A
-// connection that closes on its own is redialled at once (until ctx ends).
-func newTenantRegistry(ctx context.Context) *tenantconn.Registry {
+// IMAS_TENANT_CONN_* settings, stopping farmer if one is invalid, with dial
+// (dialTenant; tests pass their own) as its dialer. A connection that
+// closes on its own, including one the NATS client gave up on, is
+// redialled at once by connectTenantWithRetry (until ctx ends).
+func newTenantRegistry(ctx context.Context, dial tenantconn.Dialer) *tenantconn.Registry {
 	idleTTL, err := durationEnv(envTenantConnIdleTTL, defaultTenantConnIdleTTL)
 	if err != nil {
 		log.Fatalf("tenant bus idle TTL: %v", err)
@@ -151,7 +153,7 @@ func newTenantRegistry(ctx context.Context) *tenantconn.Registry {
 	log.Noticef("tenant buses: connect on first use, close after %s unused with no sprout heartbeat for %s (%s, %s)",
 		idleTTL, window, envTenantConnIdleTTL, envTenantConnHeartbeatWindow)
 	return tenantconn.New(tenantconn.Config{
-		Dial:            dialTenant,
+		Dial:            dial,
 		IdleTTL:         idleTTL,
 		HeartbeatWindow: window,
 		OnClosed: func(tenantID string) {
@@ -283,7 +285,7 @@ func main() {
 	// ReloadNKeysForTenant's lazy provisioning path).
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	tenantRegistry = newTenantRegistry(ctx)
+	tenantRegistry = newTenantRegistry(ctx, dialTenant)
 	installConnGetter(tenantRegistry)
 	if recipeStore != nil {
 		go waitForObjectStore(ctx, recipeStore, "recipe", config.S3Bucket)

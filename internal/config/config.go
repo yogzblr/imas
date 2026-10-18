@@ -574,8 +574,13 @@ func LoadConfig(binary string) {
 					log.Fatal(mkErr)
 				}
 				cfgFile := filepath.Join(cfgPath, "imas")
-				_, err = os.Create(cfgFile)
+				f, err := os.Create(cfgFile)
 				if err != nil {
+					log.Fatal(err)
+				}
+				// Close it: on Windows an open handle blocks the CLI's
+				// atomic rewrite (imas init renames a new file over it).
+				if err := f.Close(); err != nil {
 					log.Fatal(err)
 				}
 			case "farmer":

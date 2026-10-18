@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -640,7 +641,7 @@ func TestCreatePrivateSeed(t *testing.T) {
 	setupJetyForTest(t)
 	defer clearJetyKeys(t)
 
-	seed, err := createPrivateSeed()
+	seed, err := createPrivateSeed(jety.WriteConfig)
 	if err != nil {
 		t.Fatalf("createPrivateSeed failed: %v", err)
 	}
@@ -658,6 +659,30 @@ func TestCreatePrivateSeed(t *testing.T) {
 	}
 	if !nkeys.IsValidPublicAccountKey(pk) {
 		t.Error("pubkey from seed is not valid account key")
+	}
+}
+
+// CreatePrivkeyWith writes through the writer it is given and returns its
+// error: a key that could not be saved is never reported as created.
+func TestCreatePrivkeyWithReturnsWriteError(t *testing.T) {
+	setupJetyForTest(t)
+	defer clearJetyKeys(t)
+
+	calls := 0
+	boom := errors.New("disk full")
+	if err := CreatePrivkeyWith(func() error { calls++; return boom }); !errors.Is(err, boom) {
+		t.Fatalf("CreatePrivkeyWith with a failing writer: %v, want %v", err, boom)
+	}
+	if calls != 1 {
+		t.Fatalf("writer called %d times, want 1", calls)
+	}
+	jety.Set("privkey", "")
+	calls = 0
+	if err := CreatePrivkeyWith(func() error { calls++; return nil }); err != nil || calls != 1 {
+		t.Fatalf("CreatePrivkeyWith = %v with %d writes, want nil and 1", err, calls)
+	}
+	if err := CreatePrivkeyWith(func() error { t.Error("writer called for an existing key"); return nil }); !errors.Is(err, ErrPrivkeyExists) {
+		t.Fatalf("second CreatePrivkeyWith: %v, want ErrPrivkeyExists", err)
 	}
 }
 

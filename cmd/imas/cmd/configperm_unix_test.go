@@ -1,0 +1,485 @@
+//go:build !windows
+
+package cmd
+
+import (
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+
+	"github.com/taigrr/jety"
+)
+
+// permissiveUmask sets the umask to 0 for the test, so that a mode the code
+// passes (or forgets to pass) is the mode the file gets.
+func permissiveUmask(t *testing.T) {
+	t.Helper()
+	old := syscall.Umask(0)
+	t.Cleanup(func() { syscall.Umask(old) })
+}
+
+// recordSteps sets configStep for the test and checks, at every step, that
+// the path it names has the mode it must have: 0700 for the directory,
+// 0600 for every file. It returns the steps seen.
+func recordSteps(t *testing.T) *[]string {
+	t.Helper()
+	var steps []string
+	configStep = func(step, path string) {
+		steps = append(steps, step)
+		st, err := os.Lstat(path)
+		if err != nil {
+			t.Errorf("step %s: %v", step, err)
+			return
+		}
+		want := cliConfigFileMode
+		if st.IsDir() {
+			want = cliConfigDirMode
+		}
+		if st.Mode().Perm() != want {
+			t.Errorf("step %s: %s has mode %v, want %v", step, path, st.Mode().Perm(), want)
+		}
+		if !st.IsDir() && !st.Mode().IsRegular() {
+			t.Errorf("step %s: %s is not a regular file (%v)", step, path, st.Mode())
+		}
+	}
+	t.Cleanup(func() { configStep = nil })
+	return &steps
+}
+
+func noTempFiles(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp-") {
+			t.Errorf("temporary file %s left behind", e.Name())
+		}
+	}
+}
+
+// The config file is 0600 in a 0700 directory from the first byte, even
+// under umask 0 (issue #139), and the loader's truncation of the empty file
+// keeps that mode.
+func TestEnsureConfigFileIsPrivateFromTheStart(t *testing.T) {
+	permissiveUmask(t)
+	steps := recordSteps(t)
+	home := t.TempDir()
+	path := filepath.Join(home, ".config", "imas", "imas")
+	if err := ensureConfigFile(path); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(*steps, ","); got != "dir,temp,rename" {
+		t.Errorf("steps %q, want dir,temp,rename", got)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != cliConfigFileMode || st.Size() != 0 {
+		t.Errorf("config file mode %v size %d, want 0600 and empty", st.Mode().Perm(), st.Size())
+	}
+	if st, _ := os.Stat(filepath.Join(home, ".config")); st.Mode().Perm() != 0o755 {
+		t.Errorf(".config mode %v, want 0755", st.Mode().Perm())
+	}
+	noTempFiles(t, filepath.Dir(path))
+
+	// What config.LoadConfig does with an empty file: os.Create truncates
+	// it and keeps its mode.
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if st, _ := os.Stat(path); st.Mode().Perm() != cliConfigFileMode {
+		t.Errorf("after the loader's create, mode %v, want 0600", st.Mode().Perm())
+	}
+}
+
+// A file another process creates between the check and the install (here
+// from the step hook, once the temporary file exists) is kept: the install
+// is a hard link, which never replaces it, and the temporary file goes.
+func TestEnsureConfigFileKeepsAFileCreatedMeanwhile(t *testing.T) {
+	permissiveUmask(t)
+	dir := filepath.Join(t.TempDir(), ".config", "imas")
+	path := filepath.Join(dir, "imas")
+	configStep = func(step, _ string) {
+		if step == "temp" {
+			if err := os.WriteFile(path, []byte("privkey: SAAother\n"), 0o600); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	t.Cleanup(func() { configStep = nil })
+	if err := ensureConfigFile(path); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "privkey: SAAother\n" {
+		t.Errorf("the file created meanwhile was replaced: %q", b)
+	}
+	noTempFiles(t, dir)
+}
+
+// Without hard links the file is created in place, exclusively and 0600,
+// so a file created meanwhile is still kept.
+func TestEnsureConfigFileWithoutHardLinks(t *testing.T) {
+	permissiveUmask(t)
+	linkFile = func(string, string) error { return &os.LinkError{Op: "link", Err: syscall.EPERM} }
+	t.Cleanup(func() { linkFile = os.Link })
+
+	recordSteps(t)
+	dir := filepath.Join(t.TempDir(), ".config", "imas")
+	path := filepath.Join(dir, "imas")
+	if err := ensureConfigFile(path); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(path); err != nil || st.Mode().Perm() != cliConfigFileMode || st.Size() != 0 {
+		t.Fatalf("config file %v, %v: want empty and 0600", st, err)
+	}
+	noTempFiles(t, dir)
+
+	path2 := filepath.Join(t.TempDir(), ".config", "imas", "imas")
+	configStep = func(step, _ string) {
+		if step == "temp" {
+			if err := os.WriteFile(path2, []byte("privkey: SAAother\n"), 0o600); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	if err := ensureConfigFile(path2); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path2); string(b) != "privkey: SAAother\n" {
+		t.Errorf("the file created meanwhile was replaced: %q", b)
+	}
+	noTempFiles(t, filepath.Dir(path2))
+}
+
+// An existing default directory that is too wide is tightened before the
+// file is made in it.
+func TestEnsureConfigFileTightensExistingDefaultDir(t *testing.T) {
+	permissiveUmask(t)
+	recordSteps(t)
+	dir := filepath.Join(t.TempDir(), ".config", "imas")
+	if err := os.MkdirAll(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureConfigFile(filepath.Join(dir, "imas")); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := os.Stat(dir); st.Mode().Perm() != cliConfigDirMode {
+		t.Errorf("directory mode %v, want 0700", st.Mode().Perm())
+	}
+}
+
+// An existing file is never replaced: it may hold the private key.
+func TestEnsureConfigFileKeepsAnExistingFile(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), ".config", "imas")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "imas")
+	if err := os.WriteFile(path, []byte("privkey: SAAxxxx\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	steps := recordSteps(t)
+	if err := ensureConfigFile(path); err != nil {
+		t.Fatal(err)
+	}
+	if len(*steps) != 0 {
+		t.Errorf("steps %v for an existing file, want none", *steps)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "privkey: SAAxxxx\n" {
+		t.Errorf("existing file changed to %q", b)
+	}
+}
+
+// A rewrite goes through a 0600 temporary file renamed into place, under
+// umask 0, and leaves no temporary file.
+func TestWriteConfigFileIsPrivateAndAtomic(t *testing.T) {
+	permissiveUmask(t)
+	steps := recordSteps(t)
+	old := jety.ConfigFileUsed()
+	t.Cleanup(func() { jety.SetConfigFile(old) })
+	if err := jety.SetConfigType("yaml"); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), ".config", "imas")
+	path := filepath.Join(dir, "imas")
+	if err := ensureConfigFile(path); err != nil {
+		t.Fatal(err)
+	}
+	*steps = nil
+	jety.SetConfigFile(path)
+	jety.Set("farmerinterface", "farmer.example.test")
+	if err := writeConfigFile(path); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(*steps, ","); got != "temp,written,rename" {
+		t.Errorf("steps %q, want temp,written,rename", got)
+	}
+	if jety.ConfigFileUsed() != path {
+		t.Errorf("ConfigFileUsed %q after the write, want %q", jety.ConfigFileUsed(), path)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "farmer.example.test") {
+		t.Errorf("config file %q lacks the value written", b)
+	}
+	if st, _ := os.Stat(path); st.Mode().Perm() != cliConfigFileMode {
+		t.Errorf("config file mode %v, want 0600", st.Mode().Perm())
+	}
+	noTempFiles(t, dir)
+}
+
+// A temporary file name already taken (by another process, or a leftover)
+// is skipped, never opened.
+func TestCreatePrivateTempSkipsTakenName(t *testing.T) {
+	permissiveUmask(t)
+	dir := t.TempDir()
+	first, err := createPrivateTemp(dir, "imas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := createPrivateTemp(dir, "imas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatalf("both temporary files are %s", first)
+	}
+	for _, p := range []string{first, second} {
+		st, err := os.Lstat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Mode().Perm() != fs.FileMode(0o600) {
+			t.Errorf("%s mode %v, want 0600", p, st.Mode().Perm())
+		}
+	}
+}
+
+// The private key is only written to a config file that is private: one
+// that restrictConfig cannot tighten (a Chmod that fails, here a no-op) or
+// that is not a regular file is refused, and nothing is written to it.
+func TestCreatePrivkeyRefusesALooseConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "imas")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := jety.ConfigFileUsed()
+	t.Cleanup(func() { jety.SetConfigFile(old) })
+	jety.SetConfigFile(path)
+
+	saved := chmod
+	chmod = func(string, fs.FileMode) error { return nil }
+	err := createPrivkey()
+	chmod = saved
+	if err == nil || !strings.Contains(err.Error(), "refusing to write the private key") {
+		t.Fatalf("createPrivkey on a 0644 file it cannot tighten: %v, want a refusal", err)
+	}
+	if b, _ := os.ReadFile(path); len(b) != 0 {
+		t.Fatalf("the private key went into the loose file: %q", b)
+	}
+
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := requirePrivateConfig(link); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Errorf("a symlinked config: %v, want a refusal", err)
+	}
+	if st, _ := os.Stat(path); st.Mode().Perm() != 0o644 {
+		t.Errorf("the symlink's target was changed to %v; it must be left alone", st.Mode().Perm())
+	}
+	// A symlink to a directory: the directory's mode is never touched.
+	target := filepath.Join(dir, "elsewhere")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dirLink := filepath.Join(dir, "dirlink")
+	if err := os.Symlink(target, dirLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := restrictConfig(dirLink); err == nil {
+		t.Error("restrictConfig accepted a symlink to a directory")
+	}
+	if st, _ := os.Stat(target); st.Mode().Perm() != 0o755 {
+		t.Errorf("the linked directory's mode changed to %v", st.Mode().Perm())
+	}
+	// A default directory that is a symlink is not followed either.
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(home, ".config", "imas")); err != nil {
+		t.Fatal(err)
+	}
+	if err := restrictConfig(filepath.Join(home, ".config", "imas", "imas")); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("a symlinked default directory: %v, want a refusal", err)
+	}
+	if st, _ := os.Stat(target); st.Mode().Perm() != 0o755 {
+		t.Errorf("the directory behind the symlinked default directory changed to %v", st.Mode().Perm())
+	}
+
+	// With a working Chmod the same file is tightened and accepted.
+	if err := requirePrivateConfig(path); err != nil {
+		t.Fatalf("requirePrivateConfig after tightening: %v", err)
+	}
+	if st, _ := os.Stat(path); st.Mode().Perm() != cliConfigFileMode {
+		t.Errorf("mode %v, want 0600", st.Mode().Perm())
+	}
+	if err := requirePrivateConfig(""); err == nil {
+		t.Error("an empty config path was accepted")
+	}
+}
+
+// chmodNoFollow changes the mode only of the object it opened and checked:
+// a symlink (to a file or a directory) is refused without touching its
+// target, a FIFO is refused without blocking, and a real file or directory
+// gets the mode.
+func TestChmodNoFollow(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(file, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fileLink, dirLink := filepath.Join(dir, "filelink"), filepath.Join(dir, "dirlink")
+	if err := os.Symlink(file, fileLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(sub, dirLink); err != nil {
+		t.Fatal(err)
+	}
+	fifo := filepath.Join(dir, "fifo")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		path string
+		dir  bool
+		want string
+	}{
+		{fileLink, false, "not a regular file"},
+		{dirLink, true, "not a directory"},
+		{dirLink, false, "not a regular file"},
+		{file, true, "not a directory"},
+		{sub, false, "not a regular file"},
+		{fifo, false, "not a regular file"},
+	} {
+		if err := chmodNoFollow(tc.path, 0o600, tc.dir); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("chmodNoFollow(%s, dir=%v) = %v, want %q", filepath.Base(tc.path), tc.dir, err, tc.want)
+		}
+	}
+	if st, _ := os.Stat(file); st.Mode().Perm() != 0o644 {
+		t.Errorf("a refused call changed %s to %v", file, st.Mode().Perm())
+	}
+	if st, _ := os.Stat(sub); st.Mode().Perm() != 0o755 {
+		t.Errorf("a refused call changed %s to %v", sub, st.Mode().Perm())
+	}
+
+	if err := chmodNoFollow(file, 0o600, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := chmodNoFollow(sub, 0o700, true); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := os.Stat(file); st.Mode().Perm() != 0o600 {
+		t.Errorf("file mode %v, want 0600", st.Mode().Perm())
+	}
+	if st, _ := os.Stat(sub); st.Mode().Perm() != 0o700 {
+		t.Errorf("directory mode %v, want 0700", st.Mode().Perm())
+	}
+	if err := chmodNoFollow(filepath.Join(dir, "missing"), 0o600, false); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a missing path: %v, want ErrNotExist", err)
+	}
+}
+
+// The private key is written through writeConfigFile: a path swapped for a
+// symlink after requirePrivateConfig's check (here from the step hook,
+// once the temporary file exists) is replaced by the new 0600 file, and the
+// symlink's target never receives the key.
+func TestCreatePrivkeyNeverFollowsASwappedSymlink(t *testing.T) {
+	permissiveUmask(t)
+	dir := filepath.Join(t.TempDir(), ".config", "imas")
+	path := filepath.Join(dir, "imas")
+	if err := ensureConfigFile(path); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("untouched\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldFile, oldKey := jety.ConfigFileUsed(), jety.GetString("privkey")
+	t.Cleanup(func() {
+		jety.SetConfigFile(oldFile)
+		jety.Set("privkey", oldKey)
+	})
+	if err := jety.SetConfigType("yaml"); err != nil {
+		t.Fatal(err)
+	}
+	jety.SetConfigFile(path)
+	jety.Set("privkey", "")
+
+	swapped := false
+	configStep = func(step, _ string) {
+		if step != "temp" {
+			return
+		}
+		swapped = true
+		if err := os.Remove(path); err != nil {
+			t.Error(err)
+		}
+		if err := os.Symlink(victim, path); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { configStep = nil })
+
+	if err := createPrivkey(); err != nil {
+		t.Fatal(err)
+	}
+	if !swapped {
+		t.Fatal("the key was not written through writeConfigFile")
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "untouched\n" {
+		t.Errorf("the key went through the swapped symlink: victim is %q", b)
+	}
+	st, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Mode().IsRegular() || st.Mode().Perm() != cliConfigFileMode {
+		t.Fatalf("config is %v, want a regular 0600 file", st.Mode())
+	}
+	if b, _ := os.ReadFile(path); !strings.Contains(string(b), "privkey") {
+		t.Errorf("config %q holds no private key", b)
+	}
+	noTempFiles(t, dir)
+}

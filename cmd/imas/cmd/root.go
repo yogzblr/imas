@@ -120,10 +120,17 @@ func init() {
 
 // initConfig reads in config file and ENV variables if set.
 func initConfig() {
+	// The config file holds the NKey private key: create it 0600 in a 0700
+	// directory before the loader runs, so the loader never creates it with
+	// its own (wider) mode.
+	if path, err := cliConfigPath(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	} else if err := ensureConfigFile(path); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: creating %s: %v\n", path, err)
+	}
 	config.LoadConfig("imas")
-	// The config file holds the NKey private key: LoadConfig creates it
-	// 0644 in a 0755 directory, so tighten both before a key is written
-	// (and on every start, for files written by earlier versions).
+	// Tighten a file and directory written by an earlier version, on every
+	// start, before a key is written.
 	if err := restrictConfig(jety.ConfigFileUsed()); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 	}

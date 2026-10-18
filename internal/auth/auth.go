@@ -199,11 +199,18 @@ func GetPubkey() (string, error) {
 }
 
 func CreatePrivkey() error {
+	return CreatePrivkeyWith(jety.WriteConfig)
+}
+
+// CreatePrivkeyWith is CreatePrivkey with the config written by write
+// instead of jety.WriteConfig: the imas CLI passes its atomic 0600 writer,
+// so the seed never goes through a write that follows a symlink.
+func CreatePrivkeyWith(write func() error) error {
 	_, err := getPrivateSeed()
 	if !errors.Is(err, ErrNoPrivkey) {
 		return ErrPrivkeyExists
 	}
-	_, err = createPrivateSeed()
+	_, err = createPrivateSeed(write)
 	return err
 }
 
@@ -646,7 +653,7 @@ func containsKey(slice []string, key string) bool {
 	return false
 }
 
-func createPrivateSeed() (string, error) {
+func createPrivateSeed(write func() error) (string, error) {
 	kp, err := nkeys.CreateAccount()
 	if err != nil {
 		return "", err
@@ -656,6 +663,8 @@ func createPrivateSeed() (string, error) {
 		return "", err
 	}
 	jety.Set("privkey", string(seed))
-	jety.WriteConfig()
+	if err := write(); err != nil {
+		return "", fmt.Errorf("writing the private key to the config: %w", err)
+	}
 	return string(seed), nil
 }
